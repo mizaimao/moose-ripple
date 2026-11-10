@@ -22,8 +22,10 @@
 #include "virgl/ripple/ripple_gpu_uapi.h"
 
 #include "cgl/cgl_context.h"
+#include "cgl/cgl_drawable.h"
 #include "cgl/cgl_device.h"
 #include "cgl/cgl_takeover.h"
+#include "gld_window.h"
 
 /* The gld* functions are entry points Apple's OpenGL finds by name; no header declares them. */
 #pragma clang diagnostic ignored "-Wmissing-prototypes"
@@ -317,7 +319,22 @@ struct gld_context {
    struct gld_context *next_member;
    void *gc;                             /* GLEngine's context, for the takeover */
    bool taken_over, takeover_failed;
+   struct gld_window *win;               /* attached window, if any */
+   struct ripple_cgl_drawable *drawable; /* its render targets */
+   int swap_interval;                    /* kCGLCPSwapInterval: 1 = wait for vblank */
 };
+
+static void
+detach(struct gld_context *c)
+{
+   if (c->drawable) {
+      ripple_cgl_context_set_drawable(c->mesa, NULL);
+      ripple_cgl_drawable_destroy(c->drawable);
+      c->drawable = NULL;
+   }
+   gld_window_release(c->win);
+   c->win = NULL;
+}
 
 void ripple_gld_fill_config(void *cfg, const struct gld_pixel_format *pf);   /* gld_config.c */
 
@@ -380,6 +397,7 @@ gldDestroyContext(struct gld_context *c)
       }
       simple_mtx_unlock(&c->shared->lock);
    }
+   detach(c);
    ripple_cgl_context_destroy(c->mesa);
    c->magic = 0;
    free(c);
@@ -396,6 +414,10 @@ GLD_EXPORT int
 gldSetInteger(struct gld_context *c, int pname, const int *value)
 {
    DBG("gldSetInteger(%p, 0x%x)\n", (void *)c, pname);
+   if (c && c->magic == GLD_CONTEXT_MAGIC && pname == 222 /* kCGLCPSwapInterval */ && value) {
+      c->swap_interval = *value;
+      gld_window_set_vsync(c->win, c->swap_interval != 0);
+   }
    /* OpenGL sends 0x2bd at the very end of CGLCreateContext: the dispatch table is final
     * now, so this is where the context moves to Mesa. */
    if (c && c->magic == GLD_CONTEXT_MAGIC && !c->taken_over && !c->takeover_failed) {
@@ -425,11 +447,55 @@ gldGetError(struct gld_context *c)
 GLD_EXPORT int gldFlush(struct gld_context *c) { return 0; }
 GLD_EXPORT int gldFinish(struct gld_context *c) { return 0; }
 
+/* Drawable kinds (CGLSetSurface and friends; docs/re/gl-plugin-interface.md). */
+#define GLD_DRAWABLE_NONE     0x00
+#define GLD_DRAWABLE_WINDOW   0x50      /* data: u32 {connection, window, surface} */
+#define GLD_DRAWABLE_NO_DRAW  0x5b      /* GLEngine's own: FBOs only */
+#define GLD_DRAWABLE_PROBE    0x5c      /* fallback probe */
+#define GLD_ATTACH_CHANGED    2
+#define GLD_ATTACH_DETACHED   1
+
 GLD_EXPORT int
 gldAttachDrawable(struct gld_context *c, int type, void *data, void *opts)
 {
-   /* Window and surface drawables come with presentation, later in M4. */
-   return 0;
+   DBG("gldAttachDrawable(%p, 0x%x, %p)\n", (void *)c, type, data);
+   if (!c || c->magic != GLD_CONTEXT_MAGIC)
+      return 0;
+   switch (type) {
+   case GLD_DRAWABLE_NONE:
+      detach(c);
+      return GLD_ATTACH_DETACHED;
+   case GLD_DRAWABLE_WINDOW: {
+      bool changed;
+      struct gld_window *w = gld_window_attach(data, c->win, &changed);
+      if (!w)
+         return kCGLBadDrawable;
+      if (w != c->win) {
+         gld_window_release(c->win);
+         c->win = w;
+      }
+      gld_window_set_vsync(w, c->swap_interval != 0);
+      if (!c->drawable) {
+         c->drawable = ripple_cgl_drawable_create(c->mesa);
+         if (!c->drawable)
+            return kCGLBadAlloc;
+         changed = true;
+      }
+      unsigned width, height;
+      gld_window_size(w, &width, &height);
+      ripple_cgl_drawable_set_present(c->drawable, gld_window_present, w);
+      ripple_cgl_drawable_set_size(c->drawable, width, height);
+      ripple_cgl_context_set_drawable(c->mesa, c->drawable);
+      DBG("  window %ux%u%s\n", width, height, changed ? " (new or resized)" : "");
+      return changed ? GLD_ATTACH_CHANGED : 0;
+   }
+   case GLD_DRAWABLE_NO_DRAW:
+   case GLD_DRAWABLE_PROBE:
+      return 0;
+   default:
+      /* Off-screen memory, pbuffers, IOSurfaces, full screen: not yet. */
+      return kCGLBadDrawable;
+   }
 }
 
 static int

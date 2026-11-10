@@ -289,3 +289,22 @@ and AppleIntelGMA950GLDriver; runtime confirmation pending. C = read from code, 
 - **Config record contents:** `gldriver/mesa/overlay/src/gallium/targets/ripple-gl/gld_config.c`
   writes what GLRendererFloat's `_gldSetConfigData` writes (constants plus pixel format sizes;
   no pointers, nothing from runtime queries).
+
+## Window drawables and presenting (static disassembly, 10K549, x86_64)
+
+- `CGLSetSurface(ctx, cid, wid, sid)` (what NSOpenGLContext's setView reaches, inferred) makes
+  GLEngine call `gldAttachDrawable(drvctx, 0x50, data, 0)` with `data` = u32 {connection,
+  window, surface}. The size isn't in `data`: `CGSGetSurfaceBounds(cid, wid, sid, &CGRect)`.
+  `CGLUpdateContext` (resize) attaches again with the same data. Other kinds: 0 detach (data
+  NULL), 0x35 off-screen memory {w, h, rowBytes, base}, 0x36 full screen, 0x5a/0x5d pbuffer and
+  IOSurface, 0x5b GLEngine's FBO-only case, 0x5c fallback probe. Returns: 0-3 OK
+  (GLRendererFloat: 2 new or resized, 0 unchanged, 1 detached), 0x2720 asks for the fallback.
+  After attaching, OpenGL calls `disp.viewport` and `disp.scissor` with the new size.
+- GLRendererFloat presents without kernel help: per surface it makes a private window
+  (`CGSNewWindow(cid, 2, 0, 0, region, &priv)`, depth 4 = 32 bpp), binds the app's surface to
+  it (`CGSBindSurface(cid, wid, sid, 1, 0, priv)`) and keeps its bits locked
+  (`CGSLockWindowBits`). A frame is copied into the bits (B, G, R, A, top row first), then
+  `CGSUnlockWindowBits`, `CGSFlushSurfaceWithOptions(cid, wid, sid, NULL, vsync)`, lock again.
+- `CGLFlushDrawable` calls `disp.swap_APPLE` only for double-buffered contexts; single-buffered
+  windows show their front buffer on `glFlush`. Swap interval: `gldSetInteger` pname 222.
+- Implemented in `gldriver/mesa/overlay/src/gallium/targets/ripple-gl/gld_window.c`.
