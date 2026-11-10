@@ -72,3 +72,27 @@ Then 10 cold boots of 10 with the kext, `vga: virtio-gl`, boot-args from OpenCor
 (`nvram -d boot-args` first): RippleFramebuffer registered every time, 64-bit kernel, TSC 3.6
 GHz, no panics, power-off 3-4 s. `shutdown -r` works. Cmd+S in the OpenCore menu
 (`qm sendkey 212 meta_l-s`) gives single-user mode. Snapshot `opencore-final`.
+
+## 2026-11-10: 9600 GT passthrough with the same image (stopped: rig crash)
+
+The owner's decision: one OpenCore image for virtio-gpu, 9600 GT passthrough and later Apple
+silicon. VM 212 got `hostpci0: 0000:01:00,pcie=1,x-vga=1,romfile=9600gt-tpu.bin` (as VM 211),
+no emulated VGA, OVMF kept. Snapshot `pre-gpu` first.
+
+- The ROM file (`/usr/share/kvm/9600gt-tpu.bin`, 62976 bytes, SHA-256 `4c4e2165…d331`) has
+  one image only, code type 0 (x86 legacy): no UEFI driver. OVMF can't light the card, so the
+  OpenCore menu and the boot are invisible on the monitor; the first picture is macOS's.
+- OVMF + OpenCore, 17:11:42: boots (ssh after 22 s, `npci=0x2000`), NVDAResman, nv50hal and
+  GeForce 6.3.6 load, but the card gets IONDRVFramebuffer, not NVIDIA's framebuffer, and
+  System Profiler shows no model name, no VRAM and no display.
+- Same VM on SeaBIOS + Chameleon (as VM 211), 17:12:56: "GeForce 9600 GT", 1024 MB, two
+  connectors, the monitor found. So Chameleon injects the NVIDIA properties (`@0,compatible`,
+  NVCAP, `VRAM,totalsize` ...) that OpenCore would have to supply as DeviceProperties. The
+  dump of Chameleon's `device-properties` didn't finish.
+- About 60 s after that start, with VM 210 running virgl on the UHD 630, the rig stalled
+  (pve-firewall/pvestatd updates 21-34 s from ~17:14:00, NMI handler 1.5 s at 17:14:36,
+  soft lockups at 17:14:53 in e1000e register reads and the CMOS clock port write) and
+  rebooted at 17:15:02. No vfio, AER or DMAR messages. Cause UNVERIFIED; leading idea: legacy
+  VGA routing for `x-vga=1` against i915, which was busy with 210's virgl. Earlier 9600 GT runs
+  had either 210 stopped (VM 211) or i915 not loaded (VMs 200/201, before the iGPU was on).
+- VM 212 rolled back to `pre-gpu` (no card). No VM with the 9600 GT until the owner decides.
