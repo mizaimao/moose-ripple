@@ -309,3 +309,11 @@ The owner: two squashed pointers side by side, and clicks land left of the point
    `IONDRVFramebuffer`, 1024x768): 8192 -> 210.8, 16384 -> 512.0, 24576 -> 813.2: the same
    1.176x. So it's how 10.6's HID stack handles QEMU's `usb-tablet` (`HIDPointerConvertAbsolute`
    = 0). Root cause not yet found.
+
+## 2026-11-10: resolution switching
+
+New `tools/setmode` (CoreGraphics display configuration, as the Displays pane uses): lists
+16 modes from our framebuffer (1024x768 up to 2560x1600; refresh shows as 0 Hz) and switches
+permanently. 1280x800 -> 1920x1200 -> 1024x768 -> 1280x800 all OK; the host display follows
+each time, and `RippleFramebuffer: mode WxH set` is logged.
+[img at 1920x1200](img/2026-11-10-framebuffer-1920x1200.png)
