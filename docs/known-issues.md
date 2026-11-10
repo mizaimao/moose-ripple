@@ -68,3 +68,11 @@ display). Keep every BAR below 4 GB: `-fw_cfg name=opt/ovmf/X-PciMmio64Mb,string
 the boot flag `npci=0x2000` for 10.6. SeaBIOS places them below 4 GB already. Since
 2026-11-10 RippleVirtioGPU refuses a BAR above 4 GB with a log line instead of hanging, so the
 boot framebuffer keeps the display.
+
+## configd's PowerManagement plugin crashes at boot (VM 210)
+
+`configd` crashes with `EXC_BAD_ACCESS` in `PowerSourcesHaveChanged` (PowerManagement
+plugin, `CFGetTypeID` on a bad object), usually a few times per boot; launchd restarts it and
+nothing visible breaks. Seen in `/Library/Logs/DiagnosticReports` since VM 210's first boot
+(2026-11-10 12:34) under both Chameleon and OpenCore, so it has nothing to do with our kexts.
+Likely the VM's missing or odd power-source (battery/UPS) information. Not investigated.
