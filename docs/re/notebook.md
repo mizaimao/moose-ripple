@@ -336,3 +336,38 @@ IOFramebuffer draws the pointer into the framebuffer and the damage tracker send
 software mode draws the arrow at the injected position in a `screendump`; `ripple_hwcursor=1`
 gives `RippleCursor = hardware` and the 32x32 cursor image again. Settings:
 `kext/virtiogpu/README.md`.
+
+## 2026-11-10: 2560x1600, one unexplained panic, display lag
+
+**2560x1600.** VM 210 now has `-global virtio-vga.xres=2560 -global virtio-vga.yres=1600`; the
+driver reads 2560x1600 from GET_DISPLAY_INFO, makes it the preferred mode and starts in it.
+WindowServer then restores the resolution last chosen for the display (1280x800), as a Mac does;
+`setmode 2560x1600` switches fine ([img](img/2026-11-10-framebuffer-desktop-1280x800.png) is the
+1280x800 one; 2560x1600 checked by `screendump` size and a screenshot).
+
+**Panic (unexplained, not reproduced).** Shortly after the first switch to 2560x1600 (uptime
+43.6 s) the guest panicked; with our driver the panic text never reaches the screen (the refresh
+timer stops), so it was read from guest memory with lldb (`p (char *)panicstr`,
+`p (char *)&debug_buf`): "TLB invalidation IPI timeout: CPU(s) failed to respond to interrupts"
+(xnu `osfmk/x86_64/pmap.c`), CPU 0 unresponsive while in `AppleUSBEHCI` 4.2.4 timer code
+(RIP 0xffffff7f80abf56d, interrupts enabled). xnu-1504.15.3 waits `LockTimeOut` = 250 ms
+(`osfmk/i386/machine_routines.c`, boot flag `slto_us` changes it). So vCPU 0 didn't run for over
+250 ms, most likely stuck in a QEMU exit for the emulated EHCI controller. Repeating the same
+sequence with `scripts/qmp-heartbeat.sh` (QMP probe every 20 ms) and the driver's new
+slowest-command counters: QEMU's main loop never stalled more than 14 ms, the slowest virtio
+command was 10.7 ms (SET_SCANOUT), none over 100 ms, and no panic. Nothing else ran on the rig.
+Open: watch for a repeat (the deferred overnight run); don't raise `slto_us` without evidence.
+Also open: make panics visible with our driver.
+
+**Display lag** (`scripts/lag.sh`: move the pointer by QMP, `screendump` until the image changes;
+software cursor; to QEMU's display surface, VNC consoles add their own delay; each figure includes
+one screendump, about 11 ms at 1280x800 and 35 ms at 2560x1600, so 2560x1600 numbers are coarse):
+
+| Mode | Moves back to back | After 2 s idle |
+|---|---|---|
+| 1280x800 | 21, 21, 21, 21, 21, 37, 39, 39 ms | 22-61 ms (median about 47) |
+| 2560x1600 | 66-99 ms | 66-100 ms |
+
+Reading: while the screen is busy a move reaches QEMU's display within one 16 ms refresh tick plus
+the copy; after idle the 50 ms idle tick adds up to 50 ms. Per decision 0004 these are reported,
+not acceptance criteria.

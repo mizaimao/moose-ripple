@@ -27,6 +27,9 @@ public:
     uint32_t numScanouts() const { return fNumScanouts; }
     uint32_t numCapsets() const { return fNumCapsets; }
 
+    // Slowest control command since the last call (for diagnostics), in microseconds.
+    void takeSlowest(uint32_t *us, uint32_t *type, uint32_t *over100ms);
+
     void reset();                  // device reset: drops all host resources
 
     // Control queue commands. Each returns true on an OK response.
@@ -63,6 +66,8 @@ private:
     volatile uint8_t *fCommon, *fNotify, *fISR, *fDevCfg;
     uint32_t fNotifyMult;
     uint32_t fFeatures, fNumScanouts, fNumCapsets;
+    uint64_t fSlowestAbs;               // slowest command (absolute time) and its type
+    uint32_t fSlowestType, fOver100ms;
     Queue fQueue[2];               // 0 control, 1 cursor
 
     IOLock *fCmdLock, *fCursorLock;

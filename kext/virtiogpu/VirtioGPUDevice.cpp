@@ -5,6 +5,7 @@
 #include "VirtioGPUDevice.h"
 
 #include <IOKit/IOLib.h>
+#include <kern/clock.h>
 
 #include <linux/virtio_config.h>
 #include <linux/virtio_pci.h>
@@ -250,12 +251,21 @@ uint32_t VirtioGPUDevice::command(const void *req, uint32_t reqLen, void *resp, 
     Queue &q = fQueue[0];
     uint32_t type = 0;
     if (ripple_vq_add(&q.vq, pa, len, nout, 1) >= 0) {
+        uint64_t t0 = mach_absolute_time();
         *q.notify = q.index;
         for (int i = 0; i < 200000; i++) {      // up to about 2 s
             if (ripple_vq_get_used(&q.vq, NULL, NULL)) {
                 memcpy(resp, buf + kRespOffset, respLen);
                 (void)rd8(fISR, 0);             // reading the ISR acknowledges (deasserts) the interrupt
                 type = ((struct virtio_gpu_ctrl_hdr *)resp)->type;
+                uint64_t dt = mach_absolute_time() - t0, ns;
+                if (dt > fSlowestAbs) {
+                    fSlowestAbs = dt;
+                    fSlowestType = ((const struct virtio_gpu_ctrl_hdr *)req)->type;
+                }
+                absolutetime_to_nanoseconds(dt, &ns);
+                if (ns > 100000000ULL)
+                    fOver100ms++;
                 break;
             }
             IODelay(10);
@@ -453,4 +463,17 @@ bool VirtioGPUDevice::moveCursor(uint32_t scanout, int32_t x, int32_t y)
     c.pos.x = (uint32_t)x;
     c.pos.y = (uint32_t)y;
     return cursorCommand(&c, sizeof(c));
+}
+
+void VirtioGPUDevice::takeSlowest(uint32_t *us, uint32_t *type, uint32_t *over100ms)
+{
+    IOLockLock(fCmdLock);
+    uint64_t ns;
+    absolutetime_to_nanoseconds(fSlowestAbs, &ns);
+    *us = (uint32_t)(ns / 1000);
+    *type = fSlowestType;
+    *over100ms = fOver100ms;
+    fSlowestAbs = 0;
+    fSlowestType = 0;
+    IOLockUnlock(fCmdLock);
 }
