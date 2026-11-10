@@ -87,3 +87,16 @@ hung (no WindowServer, no ssh). With Chameleon (3 boots) it came only at shutdow
 NVIDIA driver runs, the card uses MSI and the shared line no longer matters. The owner's decision
 (2026-11-10): accepted as a known issue, no host setting changes; a hung 9600 GT VM is simply
 restarted.
+
+## Live snapshots can panic the guest ("TLB invalidation IPI timeout")
+
+Seen on VM 210 on 2026-11-10, right after `qm snapshot` paused the running VM (a disk-only
+snapshot pauses the vCPUs briefly). The panic: `TLB invalidation IPI timeout: CPU(s) failed to
+respond to interrupts` (pmap.c:2741, CPU 1 in AppleUSBEHCI). A CPU waiting for another CPU's
+acknowledgement when the pause starts sees the whole pause as waiting time after the resume,
+and 10.6 gives up after its spin limit, `LockTimeOut`, 250 ms by default. The same panic once
+followed a 2560x1600 mode switch in M2; a long host-side stall would cause it the same way.
+
+**Workaround:** the guest boot flag `slto_us=4000000` raises the limit to 4 s (the value is
+kept in 32 bits of nanoseconds, so about 4.29 s is the most it can hold). VM 210 has it in its
+NVRAM flags since 2026-11-10 (`scripts/bootargs.sh`). Snapshots of a stopped VM are always safe.
