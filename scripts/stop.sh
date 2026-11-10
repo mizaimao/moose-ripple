@@ -1,8 +1,8 @@
 #!/bin/sh
 # Shut the dev VM down cleanly (`shutdown -h now` in the guest), and power it off from
 # Proxmox only if the guest doesn't stop within 60 s or can't be reached.
-# (Clean shutdowns used to panic in AppleSMC; fixed 2026-11-10 by removing QEMU's
-# isa-applesmc, so FakeSMC is the only SMC. docs/decisions/0002-dev-vm.md.)
+# (Clean shutdowns used to panic in AppleSMC with two SMCs; fixed 2026-11-10 by keeping one:
+# docs/decisions/0002-dev-vm.md.)
 set -eu
 . "$(dirname "$0")/lib.sh"
 
