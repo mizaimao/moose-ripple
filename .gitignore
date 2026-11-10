@@ -8,6 +8,12 @@
 Xcode*/
 *osk*
 .secrets/
+# GPU firmware (Apple/NVIDIA/AMD ROMs and EFI drivers): never in git (2026-11-10)
+*.rom
+*.ROM
+*.efi
+*.vbios
+*.bin
 
 # Build output and scratch
 build/
