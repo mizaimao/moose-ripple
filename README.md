@@ -8,6 +8,7 @@ Dashboard ripple, the classic sign that Quartz Extreme works.
 - **Status:** M0 (build, test and debug loop) and M1 (go/no-go spike, [report](docs/re/m1-report.md)) done
   2026-11-10. Next: M2, the 2D framebuffer kext, once the owner decides on the M1 recommendations.
 - **Visibility:** private until it reaches a meaningful stage; The owner decides when it opens.
+- **Known issues** (useful beyond this project): [docs/known-issues.md](docs/known-issues.md).
 - **Ideas for later:** [docs/future-ideas.md](docs/future-ideas.md) (not scheduled).
 - **Issues:** Linear, project moose-ripple.
 

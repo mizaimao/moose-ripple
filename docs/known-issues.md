@@ -1,0 +1,36 @@
+# Known issues
+
+Things we found that others running Mac OS X 10.6 in QEMU may run into too.
+
+## The pointer doesn't follow QEMU's USB tablet exactly (10.6 + `usb-tablet`)
+
+**Symptom.** With QEMU's virtual USB tablet (`-device usb-tablet`, Proxmox `tablet: 1`), 10.6
+places the pointer about 1.18x too far from the screen centre: the centre is exact, the error
+grows towards the edges, and the pointer clamps at the screen edge early.
+
+**Why it often goes unnoticed.** With the default display (Apple's boot framebuffer, no
+hardware cursor) the guest draws its own pointer into the picture. Clicks always match that
+pointer, so everything looks right; the pointer just doesn't sit under your real mouse and
+runs ahead of it towards the edges. With a driver that has a hardware cursor (ours), a VNC
+console such as Proxmox's draws the pointer under your real mouse, and the guest's error then
+shows up as clicks landing somewhere else (2026-11-10: pointer at the centre, click on
+the left half).
+
+**Measurement** (2026-11-10, 10.6.8 10K549, QEMU 9.2, Proxmox 8.4). Absolute positions were
+injected with QMP `input-send-event` (range 0..32767) and the guest's pointer position read
+with `tools/ptrpos` (`CGEventGetLocation`):
+
+| Injected (x and y) | Expected at 1280x800 | Guest pointer | With Apple's boot framebuffer at 1024x768 |
+|---|---|---|---|
+| 0 | 0, 0 | 0.1, 0.4 | |
+| 4096 | 160, 100 | 75.3, (y alike) | |
+| 8192 | 320, 200 | 263.6, 164.7 | 210.8, 158.1 (expected 256, 192) |
+| 12288 | 480, 300 | 451.8, (y alike) | |
+| 16384 | 640, 400 | 640.0, 400.0 | 512.0, 384.0 |
+| 24576 | 960, 600 | 1016.5, 635.3 | 813.2, 609.9 (expected 768, 576) |
+| 32767 | 1280, 800 | 1279.9, 799.6 | |
+
+That is a linear map stretched by 1.176 (about 1/0.85) around the centre, then clamped. It is
+repeatable and doesn't depend on the previous position, so it isn't pointer acceleration, and
+it is the same with or without our framebuffer, so it comes from 10.6's HID stack, not the
+display. Status: being fixed (see [re/notebook.md](re/notebook.md)).
