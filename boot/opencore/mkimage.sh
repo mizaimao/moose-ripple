@@ -38,7 +38,7 @@ done
 oc=$(ls -d "$work"/x/OpenCore-*-"$variant")
 legacy=$oc/Utilities/LegacyBoot
 
-# 2. ESP contents: OpenCore and the drivers, kexts and ACPI tables the config names.
+# 2. ESP contents: OpenCore and the drivers, kexts, ACPI tables and tools the config names.
 esp=$work/esp
 mkdir -p "$esp/EFI/BOOT" "$esp/EFI/OC/Drivers" "$esp/EFI/OC/Kexts" "$esp/EFI/OC/ACPI" "$esp/EFI/OC/Tools"
 cp "$oc/X64/EFI/BOOT/BOOTx64.efi" "$esp/EFI/BOOT/"
@@ -57,6 +57,9 @@ for k in p["Kernel"]["Add"]:
 for a in p["ACPI"]["Add"]:
     if a.get("Enabled"):
         print("acpi", a["Path"])
+for t in p["Misc"]["Tools"]:
+    if t.get("Enabled"):
+        print("tool", t["Path"])
 EOF
 while read -r kind name; do
     case "$kind" in
@@ -65,6 +68,7 @@ while read -r kind name; do
                 [ -n "$src" ] || { echo "kext not in sources: $name" >&2; exit 1; }
                 cp -R "$src" "$esp/EFI/OC/Kexts/" ;;
         acpi)   cp "$here/acpi/$name" "$esp/EFI/OC/ACPI/" ;;
+        tool)   cp "$oc/X64/EFI/OC/Tools/$name" "$esp/EFI/OC/Tools/" ;;
     esac
 done < "$work/needs"
 
