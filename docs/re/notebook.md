@@ -163,3 +163,28 @@ kernels, dylib runs in 32- and 64-bit processes.
 **KDK.** `hdiutil attach` shows Apple's license first. Accepting it automatically was refused
 by Claude Code's safety check, so it waits for the owner to accept it himself. Debugging also
 needs lldb on dev.lan (its gdb can't read Mach-O: "not in executable format").
+
+## 2026-11-10: kernel debugging with symbols (M0's last item)
+
+**Setup.** KDK `kernel_debug_kit_10-6-8_10k549.dmg` (license accepted by the owner) copied to
+dev.lan `.tools/kdk/10.6.8-10K549`. Its `mach_kernel` and `mach_kernel.dSYM` UUIDs match the
+guest's `/mach_kernel`: x86_64 `90350675-2812-3D2D-9223-BBEDAC4C77C0`, i386
+`C033B86D-01F9-A03D-E20D-AB676392175C` (`dwarfdump --uuid`). The owner installed lldb 19.1.7 on
+dev.lan. `scripts/debug.sh` opens QEMU's gdbstub on the rig's 127.0.0.1:1234 and tunnels it
+to dev.lan through the laptop (dev.lan has no ssh access to the rig).
+
+**Result.**
+- Attach: lldb finds the kernel at 0xffffff8000200000, slide 0 (no KASLR on 10.6), and gives a
+  symbolic backtrace (`machine_idle` < `processor_idle` < `thread_select` ...).
+- Kext breakpoint: hardware breakpoint on `ripple_hello_stop` (kext symbols added with
+  `target modules load --slide <kextstat address>`), then `kextunload` in the guest: hit on
+  thread #3, called from `OSKext::stop() + 316`; detached, the unload finished normally.
+
+**Two traps, both handled in `scripts/debug.sh`.**
+- The first resume after attaching returns at once with a stray SIGTRAP from another vCPU
+  (`legacy_write+18`, every time). The helper `ripple-continue` (`tools/lldb/ripple_lldb.py`)
+  resumes until a real breakpoint stop.
+- lldb in batch mode treated that stray stop as a crash, skipped to the end and quit with a
+  kill; QEMU's gdbstub obeys a kill by exiting, so VM 210 powered off at 13:18:11 ("QEMU:
+  Terminated via GDBstub"). After a reboot `diskutil verifyVolume /` was OK. The script now
+  always ends in `process detach`, also on unexpected stops (`-k`).

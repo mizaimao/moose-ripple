@@ -5,7 +5,7 @@ Core Image through a guest driver for QEMU's virtio-gpu + virglrenderer. Named a
 Dashboard ripple, the classic sign that Quartz Extreme works.
 
 - **The plan:** [HANDOFF.md](HANDOFF.md) (written under the working name "snow-virgl").
-- **Status:** not started. Next is M0, the build and test loop.
+- **Status:** M0 (build, deploy, test and debug loop) done 2026-11-10. Next: M1, the reverse-engineering spike (go/no-go), once the owner says go.
 - **Visibility:** private until it reaches a meaningful stage; The owner decides when it opens.
 - **Issues:** Linear, project moose-ripple.
 
