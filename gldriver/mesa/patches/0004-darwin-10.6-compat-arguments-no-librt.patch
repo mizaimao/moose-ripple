@@ -1,0 +1,25 @@
+--- a/meson.build
++++ b/meson.build
+@@ -19,6 +19,12 @@
+ 
+ if host_machine.system() == 'darwin'
+   add_languages('objc', native : false)
++  # moose-ripple: Mac OS X 10.6 has no thread-local variables (patches 0001, 0002) and lacks
++  # some libc functions (include/ripple_compat.h). Project arguments, so meson's own checks
++  # still see the plain SDK.
++  add_project_arguments('-DRIPPLE_NO_TLS', '-include',
++                        meson.project_source_root() / 'include' / 'ripple_compat.h',
++                        language : ['c', 'cpp'])
+   add_project_arguments('-fobjc-arc', language : 'objc')
+   libname_suffix = 'dylib'
+ elif host_machine.system() == 'windows'
+@@ -1530,7 +1536,8 @@
+ endif
+ 
+ # Determine whether or not the rt library is needed for time functions
+-if host_machine.system() == 'windows' or cc.has_function('clock_gettime')
++if ['windows', 'darwin'].contains(host_machine.system()) or cc.has_function('clock_gettime')
++  # moose-ripple: on darwin clock_gettime comes from include/ripple_compat.h, no librt.
+   dep_clock = null_dep
+ else
+   dep_clock = cc.find_library('rt')

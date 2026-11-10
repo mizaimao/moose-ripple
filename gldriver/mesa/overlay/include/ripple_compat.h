@@ -1,6 +1,6 @@
 /*
  * ripple_compat.h: POSIX functions Mesa uses that Mac OS X 10.6's libc lacks (they arrived in
- * 10.7 to 10.13). Force-included into every Mesa C and C++ file by gldriver/mesa/build.sh.
+ * 10.7 to 10.13). Force-included into every Mesa C and C++ file (patches/0004).
  * Everything is static inline, so nothing here is exported from the GL bundle.
  */
 #ifndef RIPPLE_COMPAT_H
