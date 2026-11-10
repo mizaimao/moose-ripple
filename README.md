@@ -1,5 +1,10 @@
 # moose-ripple
 
+**Aim** (2026-11-10): system-wide acceleration for Mac OS X 10.6.8 guests (any app, Quartz
+Extreme, Core Image) through the standard virtio-gpu/virgl card, GPU-agnostic, on any host that
+runs QEMU with virgl. Primary target: amd64 Linux/KVM; later: Apple silicon through QEMU + virgl on
+macOS ([decision 0008](docs/decisions/0008-aim-and-targets.md); prior art: [docs/re/prior-art.md](docs/re/prior-art.md)).
+
 GPU acceleration for Mac OS X 10.6.8 (Snow Leopard) running in QEMU: Quartz Extreme and
 Core Image through a guest driver for QEMU's virtio-gpu + virglrenderer. Named after the
 Dashboard ripple, the classic sign that Quartz Extreme works.

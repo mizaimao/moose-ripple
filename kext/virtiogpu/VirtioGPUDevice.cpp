@@ -99,6 +99,15 @@ bool VirtioGPUDevice::mapCapabilities()
                     LOG("cannot map BAR %u", bar);
                     return false;
                 }
+                // 10.6.8 can't use a BAR above 4 GB here: the first access faults forever in the
+                // device pager (found under OVMF, decision 0007). Give up cleanly instead, so
+                // the boot framebuffer keeps the display.
+                if (fBarMap[bar]->getPhysicalAddress() + fBarMap[bar]->getLength() > 0x100000000ULL) {
+                    LOG("BAR %u is above 4 GB (0x%llx); 10.6 can't use it. Keep BARs below 4 GB "
+                        "(OVMF: -fw_cfg name=opt/ovmf/X-PciMmio64Mb,string=0, boot flag npci=0x2000)",
+                        bar, (unsigned long long)fBarMap[bar]->getPhysicalAddress());
+                    return false;
+                }
                 volatile uint8_t *base = (volatile uint8_t *)fBarMap[bar]->getVirtualAddress() + off;
                 switch (type) {
                 case VIRTIO_PCI_CAP_COMMON_CFG: if (!fCommon) fCommon = base; break;
