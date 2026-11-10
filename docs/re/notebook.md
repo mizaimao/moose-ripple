@@ -55,3 +55,20 @@ a backtrace of one repeated return address in `com.apple.driver.AppleSMC` 3.1.0d
 Until fixed, power VM 210 off with `qm stop` after the disk is idle.
 
 Also seen: the guest volume has only 5.79 GB free of 64 GB.
+
+## 2026-11-10: root and SSH in VM 210
+
+**Done** (the owner's OK; snapshot `pre-root-setup` first). Booted Chameleon with `-s -v`, ran
+`fsck -fy` and `mount -uw /`, then in VM 210 only:
+- `overrides.plist`: `com.openssh.sshd` Disabled = false (Remote Login on).
+- `/etc/sudoers`: appended `<user> ALL=(ALL) NOPASSWD: ALL`; `visudo -c` parsed OK.
+- the guest user's `~/.ssh/authorized_keys`: the RSA key from the repo's git-ignored `.secrets/`;
+  MD5 fingerprint matched the local copy.
+- `exit` continued to a normal boot (no reboot, so no shutdown panic).
+
+**Result.** `scripts/guest.sh` logs in over SSH (10.6 runs OpenSSH 5.2, so the client needs
+`+ssh-rsa`), and `sudo -n` works. Third-party kexts loaded: `org.netkas.FakeSMC` 2.7.2 and
+`net.osrom.kext.Disabler` 1.0.1. Neither is in `/System/Library/Extensions` and `/Extra` holds
+only Themes, so they most likely come from the Chameleon ISO's `/Extra` (UNVERIFIED). No panic
+report was saved for the shutdown panic. Disk: GPT, `Macintosh HD` is 34.0 GB (5.4 GB free)
+on the 68.7 GB disk, plus an empty `disk0s3`.
