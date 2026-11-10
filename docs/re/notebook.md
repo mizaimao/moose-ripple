@@ -72,3 +72,19 @@ Also seen: the guest volume has only 5.79 GB free of 64 GB.
 only Themes, so they most likely come from the Chameleon ISO's `/Extra` (UNVERIFIED). No panic
 report was saved for the shutdown panic. Disk: GPT, `Macintosh HD` is 34.0 GB (5.4 GB free)
 on the 68.7 GB disk, plus an empty `disk0s3`.
+
+## 2026-11-10: more room in VM 210
+
+**Why.** `Macintosh HD` had 5.8 GB free; Xcode 3.2.6, the KDK and test apps need more.
+`diskutil resizeVolume disk0s2 limits` said max = current: the GPT still ended at the old
+32 GiB mark (last usable LBA 67108830) and held an empty entry 3 ("Untitled", 0 bytes,
+start 67108824), left over from an earlier grow of the image.
+
+**Done** (snapshot `pre-disk-resize` first). Booted the Arch Linux ISO in VM 210 with
+`nomodeset` (with KMS the Linux virtio-gpu driver takes the scanout and `screendump` says
+"no surface"), then `sgdisk -e -d 3 /dev/sda`: last usable LBA 134217694, `sgdisk -v` found
+no problems. Back in 10.6, `diskutil resizeVolume disk0s2 68.3G` grew the volume live, and
+`diskutil verifyVolume /` says OK. RAM raised from 4 to 8 GB (`hw.memsize` 8589934592).
+
+**Result.** 64 GiB volume, 37 GiB free. Snapshot `resized`. New scripts: `boot.sh` (Chameleon
+menu, boot flags, waits for ssh) and `stop.sh` (sync, then `qm stop`).
