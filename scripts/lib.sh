@@ -15,11 +15,19 @@ hmp() {
     printf '%s\n' "$*" | ssh "$RETRO" qm monitor "$VMID"
 }
 
-# Print the guest's IPv4 address: the retro rig's neighbour entry for the VM's MAC.
+# Print the guest's IPv4 address (DHCP): the retro rig's neighbour entry for the VM's MAC.
+# If the entry has expired, ping the subnet once from the rig to refresh it.
 guest_addr() {
     if [ -n "$GUEST" ]; then echo "$GUEST"; return; fi
     ssh "$RETRO" "mac=\$(qm config $VMID | sed -n 's/^net0: [a-z0-9]*=\([^,]*\),.*/\1/p')
-        ip -4 neigh | grep -i \"\$mac\" | awk '{print \$1; exit}'"
+        find() { ip -4 neigh | grep -i \"\$mac\" | grep -v FAILED | awk '{print \$1; exit}'; }
+        a=\$(find)
+        if [ -z \"\$a\" ]; then
+            net=\$(ip -4 -o addr show vmbr0 | awk '{print \$4}' | cut -d. -f1-3)
+            for i in \$(seq 1 254); do ping -c1 -W1 \$net.\$i >/dev/null 2>&1 & done; wait
+            a=\$(find)
+        fi
+        echo \$a"
 }
 
 # ssh to the guest. 10.6 ships OpenSSH 5.2, which only knows ssh-rsa (SHA-1) signatures.
