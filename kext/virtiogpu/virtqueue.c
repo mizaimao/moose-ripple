@@ -27,6 +27,8 @@ void ripple_vq_init(struct ripple_vq *vq, unsigned num, void *mem, uint64_t pa)
     vq->used_pa = pa + ((uintptr_t)vr.used - (uintptr_t)mem);
     for (i = 0; i < num; i++)
         vr.desc[i].next = (uint16_t)(i + 1);
+    /* Polled driver for now: ask the device not to interrupt when it uses buffers. */
+    vr.avail->flags = VRING_AVAIL_F_NO_INTERRUPT;
     vq->free_head = 0;
     vq->num_free = (uint16_t)num;
     vq->last_used = 0;

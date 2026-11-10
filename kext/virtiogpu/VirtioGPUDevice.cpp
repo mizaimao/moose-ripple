@@ -1,21 +1,21 @@
 /*
- * RippleVirtioGPU: see RippleVirtioGPU.h. Protocol definitions come from Linux's BSD-licensed
- * virtio headers in third_party/virtio (virtio 1.0 spec, PCI transport and GPU device).
+ * VirtioGPUDevice: see VirtioGPUDevice.h. Protocol definitions come from Linux's BSD-licensed
+ * virtio headers in third_party/virtio (virtio 1.0 spec: PCI transport, GPU device).
  */
-#include "RippleVirtioGPU.h"
+#include "VirtioGPUDevice.h"
 
 #include <IOKit/IOLib.h>
-#include <libkern/OSByteOrder.h>
-#ifndef offsetof
-#define offsetof(t, m) __builtin_offsetof(t, m)   /* no stddef.h in Kernel.framework */
-#endif
 
 #include <linux/virtio_config.h>
 #include <linux/virtio_pci.h>
 #include <linux/virtio_gpu.h>
 
-#define super IOService
-OSDefineMetaClassAndStructors(RippleVirtioGPU, IOService)
+#ifndef offsetof
+#define offsetof(t, m) __builtin_offsetof(t, m)   /* no stddef.h in Kernel.framework */
+#endif
+
+#define super OSObject
+OSDefineMetaClassAndStructors(VirtioGPUDevice, OSObject)
 
 #define LOG(fmt, ...) IOLog("RippleVirtioGPU: " fmt "\n", ##__VA_ARGS__)
 
@@ -35,18 +35,40 @@ static inline void wr64(volatile uint8_t *b, size_t o, uint64_t v)
 
 #define CC(field) offsetof(struct virtio_pci_common_cfg, field)
 
-// Physical address of the start of a physically contiguous buffer.
-static uint64_t physAddr(IOBufferMemoryDescriptor *md, IOByteCount offset = 0)
+static uint64_t physAddr(IOMemoryDescriptor *md, IOByteCount offset = 0)
 {
     return md->getPhysicalSegment(offset, NULL, kIOMemoryMapperNone);
 }
 
-// ---- Device setup ----------------------------------------------------------------------------
+static IOBufferMemoryDescriptor *contiguous(IOByteCount size, IOOptionBits dir = kIODirectionInOut)
+{
+    IOBufferMemoryDescriptor *md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+        dir | kIOMemoryPhysicallyContiguous, size, 0xFFFFFFFFFFFFF000ULL);
+    if (md && md->prepare() != kIOReturnSuccess) {
+        md->release();
+        md = 0;
+    }
+    if (md)
+        bzero(md->getBytesNoCopy(), size);
+    return md;
+}
 
-uint8_t RippleVirtioGPU::status()            { return rd8(fCommon, CC(device_status)); }
-void    RippleVirtioGPU::setStatus(uint8_t s) { wr8(fCommon, CC(device_status), s); }
+// ---- Setup ----------------------------------------------------------------------------------
 
-void RippleVirtioGPU::resetDevice()
+VirtioGPUDevice *VirtioGPUDevice::withPCIDevice(IOPCIDevice *pci)
+{
+    VirtioGPUDevice *d = new VirtioGPUDevice;
+    if (d && !d->init(pci)) {
+        d->release();
+        d = 0;
+    }
+    return d;
+}
+
+uint8_t VirtioGPUDevice::status()            { return rd8(fCommon, CC(device_status)); }
+void    VirtioGPUDevice::setStatus(uint8_t s) { wr8(fCommon, CC(device_status), s); }
+
+void VirtioGPUDevice::reset()
 {
     if (!fCommon)
         return;
@@ -55,9 +77,8 @@ void RippleVirtioGPU::resetDevice()
         IODelay(100);
 }
 
-bool RippleVirtioGPU::mapCapabilities()
+bool VirtioGPUDevice::mapCapabilities()
 {
-    // Walk the PCI capability list for virtio's vendor-specific capabilities.
     if (!(fPCI->configRead16(kIOPCIConfigStatus) & 0x10)) {
         LOG("no PCI capability list");
         return false;
@@ -66,11 +87,10 @@ bool RippleVirtioGPU::mapCapabilities()
     for (int guard = 0; ptr && guard < 48; guard++) {
         uint8_t id = fPCI->configRead8(ptr + VIRTIO_PCI_CAP_VNDR);
         uint8_t next = fPCI->configRead8(ptr + VIRTIO_PCI_CAP_NEXT) & 0xfc;
-        if (id == 0x09) {
+        if (id == 0x09) {                               // vendor-specific: virtio
             uint8_t type = fPCI->configRead8(ptr + VIRTIO_PCI_CAP_CFG_TYPE);
             uint8_t bar = fPCI->configRead8(ptr + VIRTIO_PCI_CAP_BAR);
             uint32_t off = fPCI->configRead32(ptr + VIRTIO_PCI_CAP_OFFSET);
-            uint32_t len = fPCI->configRead32(ptr + VIRTIO_PCI_CAP_LENGTH);
             if (bar < kNumBars && type >= VIRTIO_PCI_CAP_COMMON_CFG && type <= VIRTIO_PCI_CAP_DEVICE_CFG) {
                 if (!fBarMap[bar])
                     fBarMap[bar] = fPCI->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0 + 4 * bar);
@@ -91,20 +111,18 @@ bool RippleVirtioGPU::mapCapabilities()
                 case VIRTIO_PCI_CAP_ISR_CFG:    if (!fISR) fISR = base; break;
                 case VIRTIO_PCI_CAP_DEVICE_CFG: if (!fDevCfg) fDevCfg = base; break;
                 }
-                LOG("cap type %u: BAR %u offset 0x%x length 0x%x", type, bar, off, len);
             }
         }
         ptr = next;
     }
     if (!fCommon || !fNotify || !fISR || !fDevCfg) {
-        LOG("missing virtio capabilities (common %p notify %p isr %p device %p)",
-            fCommon, fNotify, fISR, fDevCfg);
+        LOG("missing virtio capabilities");
         return false;
     }
     return true;
 }
 
-bool RippleVirtioGPU::setupQueue(unsigned index)
+bool VirtioGPUDevice::setupQueue(unsigned index)
 {
     Queue &q = fQueue[index];
 
@@ -114,33 +132,103 @@ bool RippleVirtioGPU::setupQueue(unsigned index)
         LOG("queue %u not available", index);
         return false;
     }
-    unsigned num = max < kQueueSize ? max : kQueueSize;
+    unsigned num = max < kCtrlQueueSize ? max : kCtrlQueueSize;
     wr16(fCommon, CC(queue_size), (uint16_t)num);
 
-    unsigned bytes = ripple_vq_bytes(num);
-    q.mem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
-                kIODirectionInOut | kIOMemoryPhysicallyContiguous, bytes, 0xFFFFFFFFFFFFF000ULL);
-    if (!q.mem || q.mem->prepare() != kIOReturnSuccess) {
+    q.mem = contiguous(ripple_vq_bytes(num));
+    if (!q.mem) {
         LOG("queue %u: no memory", index);
         return false;
     }
-    bzero(q.mem->getBytesNoCopy(), bytes);
     ripple_vq_init(&q.vq, num, q.mem->getBytesNoCopy(), physAddr(q.mem));
-
     wr64(fCommon, CC(queue_desc_lo), q.vq.desc_pa);
     wr64(fCommon, CC(queue_avail_lo), q.vq.avail_pa);
     wr64(fCommon, CC(queue_used_lo), q.vq.used_pa);
-    uint16_t notifyOff = rd16(fCommon, CC(queue_notify_off));
-    q.notify = (volatile uint16_t *)(fNotify + (uint32_t)notifyOff * fNotifyMult);
+    q.notify = (volatile uint16_t *)(fNotify + (uint32_t)rd16(fCommon, CC(queue_notify_off)) * fNotifyMult);
+    q.index = (uint16_t)index;
     wr16(fCommon, CC(queue_enable), 1);
-    LOG("queue %u: %u entries (device max %u), ring at 0x%llx", index, num, max,
-        (unsigned long long)q.vq.desc_pa);
     return true;
 }
 
-// ---- Commands -------------------------------------------------------------------------------
+bool VirtioGPUDevice::negotiate()
+{
+    // virtio 1.0 initialisation (spec 3.1.1). M2 is 2D only: accept just VERSION_1.
+    reset();
+    setStatus(VIRTIO_CONFIG_S_ACKNOWLEDGE);
+    setStatus(VIRTIO_CONFIG_S_ACKNOWLEDGE | VIRTIO_CONFIG_S_DRIVER);
+    wr32(fCommon, CC(device_feature_select), 0);
+    uint32_t lo = rd32(fCommon, CC(device_feature));
+    wr32(fCommon, CC(device_feature_select), 1);
+    uint32_t hi = rd32(fCommon, CC(device_feature));
+    if (!(hi & (1u << (VIRTIO_F_VERSION_1 - 32)))) {
+        LOG("device lacks VIRTIO_F_VERSION_1");
+        return false;
+    }
+    fFeatures = lo;
+    wr32(fCommon, CC(guest_feature_select), 0);
+    wr32(fCommon, CC(guest_feature), 0);
+    wr32(fCommon, CC(guest_feature_select), 1);
+    wr32(fCommon, CC(guest_feature), 1u << (VIRTIO_F_VERSION_1 - 32));
+    setStatus(status() | VIRTIO_CONFIG_S_FEATURES_OK);
+    if (!(status() & VIRTIO_CONFIG_S_FEATURES_OK)) {
+        LOG("device refused our features");
+        return false;
+    }
+    if (!setupQueue(0) || !setupQueue(1))
+        return false;
+    setStatus(status() | VIRTIO_CONFIG_S_DRIVER_OK);
+    (void)rd8(fISR, 0);                         // clear anything pending
+    fNumScanouts = rd32(fDevCfg, offsetof(struct virtio_gpu_config, num_scanouts));
+    fNumCapsets = rd32(fDevCfg, offsetof(struct virtio_gpu_config, num_capsets));
+    LOG("device ready: features 0x%08x%08x, %u scanouts, %u capsets", hi, lo,
+        fNumScanouts, fNumCapsets);
+    return true;
+}
 
-uint32_t RippleVirtioGPU::command(const void *req, uint32_t reqLen, void *resp, uint32_t respLen,
+bool VirtioGPUDevice::init(IOPCIDevice *pci)
+{
+    if (!super::init() || !pci)
+        return false;
+    fPCI = pci;
+    fPCI->retain();
+    fPCI->setMemoryEnable(true);
+    fPCI->setBusMasterEnable(true);
+
+    fCmdLock = IOLockAlloc();
+    fCursorLock = IOLockAlloc();
+    fCmdBuf = contiguous(kCmdBufSize);
+    fCursorBuf = contiguous(kCursorSlots * sizeof(struct virtio_gpu_update_cursor), kIODirectionOut);
+    if (!fCmdLock || !fCursorLock || !fCmdBuf || !fCursorBuf)
+        return false;
+    fCmdBufPA = physAddr(fCmdBuf);
+    fCursorBufPA = physAddr(fCursorBuf);
+    return mapCapabilities() && negotiate();
+}
+
+void VirtioGPUDevice::free()
+{
+    reset();
+    for (unsigned i = 0; i < 2; i++) {
+        if (fQueue[i].mem) {
+            fQueue[i].mem->complete();
+            fQueue[i].mem->release();
+        }
+    }
+    if (fCmdBuf)    { fCmdBuf->complete();    fCmdBuf->release(); }
+    if (fCursorBuf) { fCursorBuf->complete(); fCursorBuf->release(); }
+    if (fCmdLock)    IOLockFree(fCmdLock);
+    if (fCursorLock) IOLockFree(fCursorLock);
+    for (unsigned i = 0; i < kNumBars; i++)
+        if (fBarMap[i])
+            fBarMap[i]->release();
+    if (fPCI)
+        fPCI->release();
+    super::free();
+}
+
+// ---- Control queue --------------------------------------------------------------------------
+
+uint32_t VirtioGPUDevice::command(const void *req, uint32_t reqLen, void *resp, uint32_t respLen,
                                   uint64_t extraPA, uint32_t extraLen)
 {
     enum { kRespOffset = kCmdBufSize / 2 };
@@ -155,18 +243,18 @@ uint32_t RippleVirtioGPU::command(const void *req, uint32_t reqLen, void *resp, 
     uint64_t pa[3];
     uint32_t len[3];
     unsigned nout = 0;
-    pa[nout] = fCmdBufPA;              len[nout++] = reqLen;
-    if (extraLen) { pa[nout] = extraPA; len[nout++] = extraLen; }
+    pa[nout] = fCmdBufPA;               len[nout++] = reqLen;
+    if (extraLen) { pa[nout] = extraPA;  len[nout++] = extraLen; }
     pa[nout] = fCmdBufPA + kRespOffset; len[nout] = respLen;
 
     Queue &q = fQueue[0];
     uint32_t type = 0;
     if (ripple_vq_add(&q.vq, pa, len, nout, 1) >= 0) {
-        *q.notify = 0;                          // notify queue 0
-        uint16_t head;
-        for (int i = 0; i < 100000; i++) {      // up to about 1 s
-            if (ripple_vq_get_used(&q.vq, &head, NULL)) {
+        *q.notify = q.index;
+        for (int i = 0; i < 200000; i++) {      // up to about 2 s
+            if (ripple_vq_get_used(&q.vq, NULL, NULL)) {
                 memcpy(resp, buf + kRespOffset, respLen);
+                (void)rd8(fISR, 0);             // reading the ISR acknowledges (deasserts) the interrupt
                 type = ((struct virtio_gpu_ctrl_hdr *)resp)->type;
                 break;
             }
@@ -181,242 +269,188 @@ uint32_t RippleVirtioGPU::command(const void *req, uint32_t reqLen, void *resp, 
     return type;
 }
 
-// ---- 2D test pattern ------------------------------------------------------------------------
-
-bool RippleVirtioGPU::drawTestPattern(uint32_t width, uint32_t height)
+bool VirtioGPUDevice::simple(const void *req, uint32_t reqLen, uint64_t extraPA, uint32_t extraLen)
 {
-    const uint32_t resId = 1, bytes = width * height * 4;
-    struct virtio_gpu_ctrl_hdr ok;
-
-    fFB = IOBufferMemoryDescriptor::withOptions(kIODirectionInOut, bytes, PAGE_SIZE);
-    if (!fFB || fFB->prepare() != kIOReturnSuccess)
+    struct virtio_gpu_ctrl_hdr resp;
+    uint32_t type = command(req, reqLen, &resp, sizeof(resp), extraPA, extraLen);
+    if (type != VIRTIO_GPU_RESP_OK_NODATA) {
+        LOG("command 0x%x failed: 0x%x", ((const struct virtio_gpu_ctrl_hdr *)req)->type, type);
         return false;
+    }
+    return true;
+}
 
-    // Fill: eight vertical colour bars with a dark-to-light ramp from top to bottom.
-    static const uint32_t bars[8] = { 0xffffff, 0xffff00, 0x00ffff, 0x00ff00,
-                                      0xff00ff, 0xff0000, 0x0000ff, 0x202020 };
-    uint32_t *px = (uint32_t *)fFB->getBytesNoCopy();
-    for (uint32_t y = 0; y < height; y++) {
-        uint32_t shade = 64 + (191 * y) / height;
-        for (uint32_t x = 0; x < width; x++) {
-            uint32_t c = bars[(x * 8) / width];
-            uint32_t r = ((c >> 16) & 0xff) * shade / 255, g = ((c >> 8) & 0xff) * shade / 255,
-                     b = (c & 0xff) * shade / 255;
-            px[y * width + x] = 0xff000000 | (r << 16) | (g << 8) | b;   // B,G,R,X in memory
+bool VirtioGPUDevice::getDisplayInfo(DisplayInfo *out, unsigned count)
+{
+    struct virtio_gpu_ctrl_hdr req;
+    bzero(&req, sizeof(req));
+    req.type = VIRTIO_GPU_CMD_GET_DISPLAY_INFO;
+    struct virtio_gpu_resp_display_info *info =
+        (struct virtio_gpu_resp_display_info *)IOMalloc(sizeof(*info));
+    if (!info)
+        return false;
+    bool ok = command(&req, sizeof(req), info, sizeof(*info), 0, 0) == VIRTIO_GPU_RESP_OK_DISPLAY_INFO;
+    if (ok) {
+        for (unsigned i = 0; i < count && i < kMaxScanouts; i++) {
+            out[i].r.x = info->pmodes[i].r.x;
+            out[i].r.y = info->pmodes[i].r.y;
+            out[i].r.width = info->pmodes[i].r.width;
+            out[i].r.height = info->pmodes[i].r.height;
+            out[i].enabled = info->pmodes[i].enabled;
         }
     }
+    IOFree(info, sizeof(*info));
+    return ok;
+}
 
-    struct virtio_gpu_resource_create_2d create;
-    bzero(&create, sizeof(create));
-    create.hdr.type = VIRTIO_GPU_CMD_RESOURCE_CREATE_2D;
-    create.resource_id = resId;
-    create.format = VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM;
-    create.width = width;
-    create.height = height;
-    if (command(&create, sizeof(create), &ok, sizeof(ok)) != VIRTIO_GPU_RESP_OK_NODATA) {
-        LOG("RESOURCE_CREATE_2D failed: 0x%x", ok.type);
-        return false;
-    }
+bool VirtioGPUDevice::resourceCreate2D(uint32_t id, uint32_t format, uint32_t width, uint32_t height)
+{
+    struct virtio_gpu_resource_create_2d c;
+    bzero(&c, sizeof(c));
+    c.hdr.type = VIRTIO_GPU_CMD_RESOURCE_CREATE_2D;
+    c.resource_id = id;
+    c.format = format;
+    c.width = width;
+    c.height = height;
+    return simple(&c, sizeof(c));
+}
 
-    // Backing pages: one mem_entry per physically contiguous run.
-    unsigned maxEntries = bytes / PAGE_SIZE + 1;
-    fEntries = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
-                   kIODirectionOut | kIOMemoryPhysicallyContiguous,
-                   maxEntries * sizeof(struct virtio_gpu_mem_entry), 0xFFFFFFFFFFFFF000ULL);
-    if (!fEntries || fEntries->prepare() != kIOReturnSuccess)
+bool VirtioGPUDevice::resourceUnref(uint32_t id)
+{
+    struct virtio_gpu_resource_unref c;
+    bzero(&c, sizeof(c));
+    c.hdr.type = VIRTIO_GPU_CMD_RESOURCE_UNREF;
+    c.resource_id = id;
+    return simple(&c, sizeof(c));
+}
+
+bool VirtioGPUDevice::attachBacking(uint32_t id, IOMemoryDescriptor *md, IOByteCount length)
+{
+    // One mem_entry per physically contiguous run of the descriptor.
+    unsigned maxEntries = (unsigned)(length / PAGE_SIZE) + 2;
+    IOByteCount entBytes = maxEntries * sizeof(struct virtio_gpu_mem_entry);
+    IOBufferMemoryDescriptor *entries = contiguous(entBytes, kIODirectionOut);
+    if (!entries)
         return false;
-    struct virtio_gpu_mem_entry *ent = (struct virtio_gpu_mem_entry *)fEntries->getBytesNoCopy();
+    struct virtio_gpu_mem_entry *ent = (struct virtio_gpu_mem_entry *)entries->getBytesNoCopy();
     unsigned n = 0;
-    for (IOByteCount off = 0; off < bytes; ) {
+    bool ok = true;
+    for (IOByteCount off = 0; off < length && ok; ) {
         IOByteCount segLen = 0;
-        addr64_t seg = fFB->getPhysicalSegment(off, &segLen, kIOMemoryMapperNone);
-        if (!seg || !segLen)
-            return false;
-        if (segLen > bytes - off)
-            segLen = bytes - off;
+        addr64_t seg = md->getPhysicalSegment(off, &segLen, kIOMemoryMapperNone);
+        if (!seg || !segLen) {
+            ok = false;
+            break;
+        }
+        if (segLen > length - off)
+            segLen = length - off;
         if (n && ent[n - 1].addr + ent[n - 1].length == seg) {
             ent[n - 1].length += (uint32_t)segLen;
-        } else {
+        } else if (n < maxEntries) {
             ent[n].addr = seg;
             ent[n].length = (uint32_t)segLen;
-            ent[n].padding = 0;
             n++;
+        } else {
+            ok = false;
         }
         off += segLen;
     }
-
-    struct virtio_gpu_resource_attach_backing attach;
-    bzero(&attach, sizeof(attach));
-    attach.hdr.type = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
-    attach.resource_id = resId;
-    attach.nr_entries = n;
-    if (command(&attach, sizeof(attach), &ok, sizeof(ok), physAddr(fEntries),
-                n * sizeof(struct virtio_gpu_mem_entry)) != VIRTIO_GPU_RESP_OK_NODATA) {
-        LOG("RESOURCE_ATTACH_BACKING failed: 0x%x", ok.type);
-        return false;
+    if (ok) {
+        struct virtio_gpu_resource_attach_backing c;
+        bzero(&c, sizeof(c));
+        c.hdr.type = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
+        c.resource_id = id;
+        c.nr_entries = n;
+        ok = simple(&c, sizeof(c), physAddr(entries), n * sizeof(struct virtio_gpu_mem_entry));
     }
-
-    struct virtio_gpu_set_scanout scanout;
-    bzero(&scanout, sizeof(scanout));
-    scanout.hdr.type = VIRTIO_GPU_CMD_SET_SCANOUT;
-    scanout.r.width = width;
-    scanout.r.height = height;
-    scanout.scanout_id = 0;
-    scanout.resource_id = resId;
-    if (command(&scanout, sizeof(scanout), &ok, sizeof(ok)) != VIRTIO_GPU_RESP_OK_NODATA) {
-        LOG("SET_SCANOUT failed: 0x%x", ok.type);
-        return false;
-    }
-
-    struct virtio_gpu_transfer_to_host_2d xfer;
-    bzero(&xfer, sizeof(xfer));
-    xfer.hdr.type = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
-    xfer.r.width = width;
-    xfer.r.height = height;
-    xfer.offset = 0;
-    xfer.resource_id = resId;
-    if (command(&xfer, sizeof(xfer), &ok, sizeof(ok)) != VIRTIO_GPU_RESP_OK_NODATA) {
-        LOG("TRANSFER_TO_HOST_2D failed: 0x%x", ok.type);
-        return false;
-    }
-
-    struct virtio_gpu_resource_flush flush;
-    bzero(&flush, sizeof(flush));
-    flush.hdr.type = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
-    flush.r.width = width;
-    flush.r.height = height;
-    flush.resource_id = resId;
-    if (command(&flush, sizeof(flush), &ok, sizeof(ok)) != VIRTIO_GPU_RESP_OK_NODATA) {
-        LOG("RESOURCE_FLUSH failed: 0x%x", ok.type);
-        return false;
-    }
-    LOG("test pattern %ux%u on scanout 0 (%u backing entries)", width, height, n);
-    return true;
+    entries->complete();
+    entries->release();
+    return ok;
 }
 
-// ---- IOService ------------------------------------------------------------------------------
-
-bool RippleVirtioGPU::start(IOService *provider)
+bool VirtioGPUDevice::detachBacking(uint32_t id)
 {
-    if (!super::start(provider))
-        return false;
-    fPCI = OSDynamicCast(IOPCIDevice, provider);
-    if (!fPCI)
-        return false;
-    fPCI->retain();
-    fPCI->setMemoryEnable(true);
-    fPCI->setBusMasterEnable(true);
-
-    fCmdLock = IOLockAlloc();
-    fCmdBuf = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
-                  kIODirectionInOut | kIOMemoryPhysicallyContiguous, kCmdBufSize,
-                  0xFFFFFFFFFFFFF000ULL);
-    if (!fCmdLock || !fCmdBuf || fCmdBuf->prepare() != kIOReturnSuccess)
-        goto fail;
-    fCmdBufPA = physAddr(fCmdBuf);
-
-    if (!mapCapabilities())
-        goto fail;
-
-    // virtio 1.0 initialisation (spec 3.1.1).
-    resetDevice();
-    setStatus(VIRTIO_CONFIG_S_ACKNOWLEDGE);
-    setStatus(VIRTIO_CONFIG_S_ACKNOWLEDGE | VIRTIO_CONFIG_S_DRIVER);
-    {
-        wr32(fCommon, CC(device_feature_select), 0);
-        uint32_t lo = rd32(fCommon, CC(device_feature));
-        wr32(fCommon, CC(device_feature_select), 1);
-        uint32_t hi = rd32(fCommon, CC(device_feature));
-        LOG("device features 0x%08x%08x (VIRGL %u, EDID %u, VERSION_1 %u)", hi, lo,
-            !!(lo & (1u << VIRTIO_GPU_F_VIRGL)), !!(lo & (1u << VIRTIO_GPU_F_EDID)),
-            !!(hi & (1u << (VIRTIO_F_VERSION_1 - 32))));
-        if (!(hi & (1u << (VIRTIO_F_VERSION_1 - 32)))) {
-            LOG("device lacks VIRTIO_F_VERSION_1");
-            goto fail;
-        }
-        // M2 is 2D only: accept just VERSION_1.
-        wr32(fCommon, CC(guest_feature_select), 0);
-        wr32(fCommon, CC(guest_feature), 0);
-        wr32(fCommon, CC(guest_feature_select), 1);
-        wr32(fCommon, CC(guest_feature), 1u << (VIRTIO_F_VERSION_1 - 32));
-    }
-    setStatus(status() | VIRTIO_CONFIG_S_FEATURES_OK);
-    if (!(status() & VIRTIO_CONFIG_S_FEATURES_OK)) {
-        LOG("device refused our features");
-        goto fail;
-    }
-    LOG("%u queues", rd16(fCommon, CC(num_queues)));
-    if (!setupQueue(0) || !setupQueue(1))
-        goto fail;
-    setStatus(status() | VIRTIO_CONFIG_S_DRIVER_OK);
-
-    {
-        uint32_t scanouts = rd32(fDevCfg, offsetof(struct virtio_gpu_config, num_scanouts));
-        uint32_t capsets = rd32(fDevCfg, offsetof(struct virtio_gpu_config, num_capsets));
-        LOG("ready: status 0x%x, %u scanouts, %u capsets", status(), scanouts, capsets);
-
-        struct virtio_gpu_ctrl_hdr req;
-        bzero(&req, sizeof(req));
-        req.type = VIRTIO_GPU_CMD_GET_DISPLAY_INFO;
-        struct virtio_gpu_resp_display_info *info =
-            (struct virtio_gpu_resp_display_info *)IOMalloc(sizeof(*info));
-        if (!info)
-            goto fail;
-        uint32_t type = command(&req, sizeof(req), info, sizeof(*info));
-        if (type != VIRTIO_GPU_RESP_OK_DISPLAY_INFO) {
-            LOG("GET_DISPLAY_INFO failed: 0x%x", type);
-            IOFree(info, sizeof(*info));
-            goto fail;
-        }
-        fWidth = 1024;
-        fHeight = 768;
-        for (unsigned i = 0; i < scanouts && i < VIRTIO_GPU_MAX_SCANOUTS; i++) {
-            LOG("scanout %u: %ux%u at %u,%u enabled %u flags 0x%x", i,
-                info->pmodes[i].r.width, info->pmodes[i].r.height, info->pmodes[i].r.x,
-                info->pmodes[i].r.y, info->pmodes[i].enabled, info->pmodes[i].flags);
-            if (i == 0 && info->pmodes[0].enabled && info->pmodes[0].r.width) {
-                fWidth = info->pmodes[0].r.width;
-                fHeight = info->pmodes[0].r.height;
-            }
-        }
-        IOFree(info, sizeof(*info));
-        setProperty("RippleScanout0", (unsigned long long)fWidth << 32 | fHeight, 64);
-    }
-
-    if (!drawTestPattern(fWidth, fHeight))
-        LOG("test pattern failed");
-    registerService();
-    return true;
-
-fail:
-    resetDevice();
-    super::stop(provider);
-    return false;
+    struct virtio_gpu_resource_detach_backing c;
+    bzero(&c, sizeof(c));
+    c.hdr.type = VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING;
+    c.resource_id = id;
+    return simple(&c, sizeof(c));
 }
 
-void RippleVirtioGPU::stop(IOService *provider)
+bool VirtioGPUDevice::setScanout(uint32_t scanout, uint32_t id, const Rect &r)
 {
-    resetDevice();          // the device drops its resources; QEMU shows VGA again
-    LOG("stopped");
-    super::stop(provider);
+    struct virtio_gpu_set_scanout c;
+    bzero(&c, sizeof(c));
+    c.hdr.type = VIRTIO_GPU_CMD_SET_SCANOUT;
+    c.r.x = r.x; c.r.y = r.y; c.r.width = r.width; c.r.height = r.height;
+    c.scanout_id = scanout;
+    c.resource_id = id;
+    return simple(&c, sizeof(c));
 }
 
-void RippleVirtioGPU::free()
+bool VirtioGPUDevice::transferToHost2D(uint32_t id, const Rect &r, uint64_t offset)
 {
-    for (unsigned i = 0; i < 2; i++) {
-        if (fQueue[i].mem) {
-            fQueue[i].mem->complete();
-            fQueue[i].mem->release();
-        }
-    }
-    if (fFB)      { fFB->complete();      fFB->release(); }
-    if (fEntries) { fEntries->complete(); fEntries->release(); }
-    if (fCmdBuf)  { fCmdBuf->complete();  fCmdBuf->release(); }
-    if (fCmdLock) IOLockFree(fCmdLock);
-    for (unsigned i = 0; i < kNumBars; i++)
-        if (fBarMap[i])
-            fBarMap[i]->release();
-    if (fPCI)
-        fPCI->release();
-    super::free();
+    struct virtio_gpu_transfer_to_host_2d c;
+    bzero(&c, sizeof(c));
+    c.hdr.type = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
+    c.r.x = r.x; c.r.y = r.y; c.r.width = r.width; c.r.height = r.height;
+    c.offset = offset;
+    c.resource_id = id;
+    return simple(&c, sizeof(c));
+}
+
+bool VirtioGPUDevice::resourceFlush(uint32_t id, const Rect &r)
+{
+    struct virtio_gpu_resource_flush c;
+    bzero(&c, sizeof(c));
+    c.hdr.type = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
+    c.r.x = r.x; c.r.y = r.y; c.r.width = r.width; c.r.height = r.height;
+    c.resource_id = id;
+    return simple(&c, sizeof(c));
+}
+
+// ---- Cursor queue ---------------------------------------------------------------------------
+
+bool VirtioGPUDevice::cursorCommand(const void *req, uint32_t len)
+{
+    Queue &q = fQueue[1];
+    IOLockLock(fCursorLock);
+    while (ripple_vq_get_used(&q.vq, NULL, NULL))
+        ;                                       // reclaim finished requests
+    unsigned slot = fCursorNext++ % kCursorSlots;
+    uint8_t *buf = (uint8_t *)fCursorBuf->getBytesNoCopy() + slot * sizeof(struct virtio_gpu_update_cursor);
+    memcpy(buf, req, len);
+    uint64_t pa = fCursorBufPA + slot * sizeof(struct virtio_gpu_update_cursor);
+    uint32_t l = len;
+    bool ok = ripple_vq_add(&q.vq, &pa, &l, 1, 0) >= 0;
+    if (ok)
+        *q.notify = q.index;
+    IOLockUnlock(fCursorLock);
+    return ok;
+}
+
+bool VirtioGPUDevice::updateCursor(uint32_t scanout, uint32_t id, int32_t x, int32_t y,
+                                   uint32_t hotX, uint32_t hotY)
+{
+    struct virtio_gpu_update_cursor c;
+    bzero(&c, sizeof(c));
+    c.hdr.type = VIRTIO_GPU_CMD_UPDATE_CURSOR;
+    c.pos.scanout_id = scanout;
+    c.pos.x = (uint32_t)x;
+    c.pos.y = (uint32_t)y;
+    c.resource_id = id;
+    c.hot_x = hotX;
+    c.hot_y = hotY;
+    return cursorCommand(&c, sizeof(c));
+}
+
+bool VirtioGPUDevice::moveCursor(uint32_t scanout, int32_t x, int32_t y)
+{
+    struct virtio_gpu_update_cursor c;
+    bzero(&c, sizeof(c));
+    c.hdr.type = VIRTIO_GPU_CMD_MOVE_CURSOR;
+    c.pos.scanout_id = scanout;
+    c.pos.x = (uint32_t)x;
+    c.pos.y = (uint32_t)y;
+    return cursorCommand(&c, sizeof(c));
 }

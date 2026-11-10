@@ -151,7 +151,8 @@ $(OUT)/RippleGLDriver.bundle: $(OUT)/x86_64/RippleGLDriver gldriver/shim/Info.pl
 
 # --- RippleVirtioGPU (M2) ---------------------------------------------------------------
 VGPU_INC := -Ithird_party/virtio -Ikext/virtiogpu
-VGPU_OBJ  = $(OUT)/x86_64/virtiogpu/RippleVirtioGPU.o $(OUT)/x86_64/virtiogpu/virtqueue.o \
+VGPU_OBJ  = $(OUT)/x86_64/virtiogpu/VirtioGPUDevice.o $(OUT)/x86_64/virtiogpu/RippleFramebuffer.o \
+            $(OUT)/x86_64/virtiogpu/virtqueue.o \
             $(OUT)/x86_64/virtiogpu/info.o
 $(OUT)/x86_64/virtiogpu/%.o: kext/virtiogpu/%.cpp kext/virtiogpu/*.h
 	@mkdir -p $(dir $@)

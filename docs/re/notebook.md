@@ -259,3 +259,35 @@ boot `IONDRVFramebuffer`). Protocol definitions: Linux v6.12's BSD-licensed virt
 - Display note: with `vga: virtio-gl` (egl-headless), QEMU's `screendump` says "no surface"
   once the guest scans out through virtio. M2 (2D) is developed on `vga: virtio`; VM 210 is
   switched back to `virtio-gl` for M3.
+
+## 2026-11-10: M2 step 2: RippleFramebuffer drives the desktop
+
+`kext/virtiogpu` is now a boot-time kext (`scripts/install-kext.sh`): `VirtioGPUDevice` (transport,
+queues, commands) plus `RippleFramebuffer` (`IOFramebuffer`, `IOMatchCategory` IOFramebuffer,
+`IOProbeScore` 30000, which beats `IONDRVFramebuffer`'s 20000 on the same PCI device).
+
+- Works: WindowServer runs on it at the host's preferred 1280x800 (was 1024x768 VESA);
+  System Profiler shows 32 MB VRAM, 1280 x 800, 32-bit. [img](img/2026-11-10-framebuffer-desktop-1280x800.png)
+  16 modes offered (host size + standard sizes up to 2560x1600). Hardware cursor via the
+  cursor queue (`convertCursorImage` to a 64x64 B8G8R8A8 resource); not yet seen on screen,
+  since `screendump` doesn't include QEMU's cursor.
+- The first screenshot after boot was black only because WindowServer hadn't drawn yet.
+- `CurrentPowerState` = 0 on the framebuffer and `AppleDisplay` turned out to be harmless.
+
+**Host CPU, idle desktop** (QEMU process on the retro rig):
+| Change | Host QEMU | Guest |
+|---|---|---|
+| Full 1280x800 transfer at 60 Hz | 96% | idle |
+| Damage tracking (shadow frame, send only the changed box) | 113% | 1% sys, but vCPU 0 at 92% on the host |
+| Device interrupts suppressed while polling (`VRING_AVAIL_F_NO_INTERRUPT`), ISR read | 58-65% | 89% idle; refresh() 11-13 ms |
+| 8-byte compare instead of the kernel's byte-wise `memcmp` | 29% | 94.75% idle; refresh() 1.3 ms |
+| Adaptive refresh: 60 Hz while changing, 20 Hz after 30 still frames | 21% | 98.3% idle |
+
+Causes found: (1) the device kept its legacy INTx asserted because the polled driver never
+read the ISR, so vCPU 0 serviced interrupts constantly (invisible to the guest's `top`);
+(2) the 10.6.8 kernel's `memcmp` is a byte loop (`_memcmp` at 0xffffff800022ac6c, KDK
+10K549). The VRAM is also handed out as RAM (`IOSubMemoryDescriptor` of the buffer) rather
+than `IODeviceMemory`, which would map it uncached when the guest's cache attributes are
+honoured (KVM with a passed-through device).
+
+Statistics are published as `RippleRefresh*` registry properties, not logged.
