@@ -1,0 +1,65 @@
+diff -ru a/src/util/u_call_once.c b/src/util/u_call_once.c
+--- a/src/util/u_call_once.c
++++ b/src/util/u_call_once.c
+@@ -11,6 +11,37 @@
+    util_call_once_data_func func;
+ };
+ 
++#ifdef RIPPLE_NO_TLS
++/* moose-ripple: no thread-local variables on Mac OS X 10.6: the context goes through a
++ * pthread key (made when the library loads), saved and restored around the call. */
++#include <pthread.h>
++
++static pthread_key_t call_once_key;
++
++__attribute__((constructor)) static void
++util_call_once_make_key(void)
++{
++   pthread_key_create(&call_once_key, NULL);
++}
++
++static void
++util_call_once_data_slow_once(void)
++{
++   struct util_call_once_context_t *once_context = pthread_getspecific(call_once_key);
++   once_context->func(once_context->data);
++}
++
++void
++util_call_once_data_slow(once_flag *once, util_call_once_data_func func, const void *data)
++{
++   struct util_call_once_context_t once_context = { data, func };
++   void *prev = pthread_getspecific(call_once_key);
++
++   pthread_setspecific(call_once_key, &once_context);
++   call_once(once, util_call_once_data_slow_once);
++   pthread_setspecific(call_once_key, prev);
++}
++#else
+ static thread_local struct util_call_once_context_t call_once_context;
+ 
+ static void
+@@ -28,3 +59,4 @@
+    once_context->func = func;
+    call_once(once, util_call_once_data_slow_once);
+ }
++#endif
+diff -ru a/src/util/u_qsort.cpp b/src/util/u_qsort.cpp
+--- a/src/util/u_qsort.cpp
++++ b/src/util/u_qsort.cpp
+@@ -22,6 +22,10 @@
+  */
+ 
+ #include "u_qsort.h"
++
++/* moose-ripple: Mac OS X 10.6 has BSD qsort_r and no thread-local variables (nor C++11
++ * <thread>), so this fallback is left out there. */
++#ifndef RIPPLE_NO_TLS
+ #include <thread>
+ 
+ thread_local int (*tl_qsort_r_compar)(const void *, const void *, void *);
+@@ -50,3 +54,4 @@
+       reinterpret_cast<util_qsort_adapter_data*>(ctx);
+    return data->compar(elem1, elem2, data->args);
+ }
++#endif

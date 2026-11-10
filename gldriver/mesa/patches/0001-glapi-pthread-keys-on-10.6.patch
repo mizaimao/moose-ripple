@@ -1,0 +1,100 @@
+diff -ru a/src/mapi/glapi/glapi.h b/src/mapi/glapi/glapi.h
+--- a/src/mapi/glapi/glapi.h
++++ b/src/mapi/glapi/glapi.h
+@@ -77,7 +77,10 @@
+ 
+ struct _glapi_table;
+ 
+-#if DETECT_OS_WINDOWS
++#if defined(RIPPLE_NO_TLS)
++/* moose-ripple: Mac OS X 10.6 has no thread-local variables (dyld has them from 10.7); the
++ * current context and dispatch live in pthread keys, reached through function calls. */
++#elif DETECT_OS_WINDOWS
+ extern __THREAD_INITIAL_EXEC struct _glapi_table * _glapi_tls_Dispatch;
+ extern __THREAD_INITIAL_EXEC void * _glapi_tls_Context;
+ #else
+@@ -88,7 +91,7 @@
+ _GLAPI_EXPORT extern const struct _glapi_table *_glapi_Dispatch;
+ _GLAPI_EXPORT extern const void *_glapi_Context;
+ 
+-#if DETECT_OS_WINDOWS && !defined(MAPI_MODE_UTIL) && !defined(MAPI_MODE_GLAPI)
++#if defined(RIPPLE_NO_TLS) || (DETECT_OS_WINDOWS && !defined(MAPI_MODE_UTIL) && !defined(MAPI_MODE_GLAPI))
+ # define GET_DISPATCH() _glapi_get_dispatch()
+ # define GET_CURRENT_CONTEXT(C)  struct gl_context *C = (struct gl_context *) _glapi_get_context()
+ #else
+diff -ru a/src/mapi/u_current.c b/src/mapi/u_current.c
+--- a/src/mapi/u_current.c
++++ b/src/mapi/u_current.c
+@@ -86,10 +86,24 @@
+  */
+ /*@{*/
+ 
++#ifdef RIPPLE_NO_TLS
++/* moose-ripple: no thread-local variables on Mac OS X 10.6; see glapi.h. The keys are made
++ * when the library loads, so the getters stay a plain pthread_getspecific. */
++#include <pthread.h>
++static pthread_key_t ripple_context_key, ripple_dispatch_key;
++
++__attribute__((constructor)) static void
++ripple_make_keys(void)
++{
++   pthread_key_create(&ripple_context_key, NULL);
++   pthread_key_create(&ripple_dispatch_key, NULL);
++}
++#else
+ __THREAD_INITIAL_EXEC struct _glapi_table *_glapi_tls_Dispatch
+    = (struct _glapi_table *) table_noop_array;
+ 
+ __THREAD_INITIAL_EXEC void *_glapi_tls_Context;
++#endif
+ 
+ /* not used, but defined for compatibility */
+ const struct _glapi_table *_glapi_Dispatch;
+@@ -117,7 +131,11 @@
+ void
+ _glapi_set_context(void *ptr)
+ {
++#ifdef RIPPLE_NO_TLS
++   pthread_setspecific(ripple_context_key, ptr);
++#else
+    _glapi_tls_Context = ptr;
++#endif
+ }
+ 
+ /**
+@@ -128,7 +146,11 @@
+ void *
+ _glapi_get_context(void)
+ {
++#ifdef RIPPLE_NO_TLS
++   return pthread_getspecific(ripple_context_key);
++#else
+    return _glapi_tls_Context;
++#endif
+ }
+ 
+ /**
+@@ -144,7 +166,11 @@
+    if (!tbl)
+       tbl = (struct _glapi_table *) table_noop_array;
+ 
++#ifdef RIPPLE_NO_TLS
++   pthread_setspecific(ripple_dispatch_key, tbl);
++#else
+    _glapi_tls_Dispatch = tbl;
++#endif
+ }
+ 
+ /**
+@@ -153,5 +179,11 @@
+ struct _glapi_table *
+ _glapi_get_dispatch(void)
+ {
++#ifdef RIPPLE_NO_TLS
++   struct _glapi_table *tbl = pthread_getspecific(ripple_dispatch_key);
++
++   return tbl ? tbl : (struct _glapi_table *) table_noop_array;
++#else
+    return _glapi_tls_Dispatch;
++#endif
+ }
