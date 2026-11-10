@@ -7,7 +7,7 @@
  * which libGL passes as the first argument of every call.
  *
  * GLEngine never hands the driver the CGL object, so we find it through GLEngine's own
- * context. The offsets are those of 10.6.8 (10K549), x86_64; every step checks magic values
+ * context. The offsets are those of 10.6.8 (10K549), x86_64 and i386; every step checks magic values
  * and refuses (leaving the context to GLEngine) if anything doesn't match.
  */
 #include <dlfcn.h>
@@ -29,8 +29,15 @@
 #define GC_FRONT_DISPATCH      0x6550        /* holds &cgl->disp */
 #define GC_FROM_CREATE_ARG5    0x8b0         /* gldCreateContext's 5th argument is gc + this */
 #define HAVE_TAKEOVER_LAYOUT   1
+#elif defined(__i386__)
+#define CGL_MAGIC_OFFSET       0xc60
+#define CGL_MAGIC              0x1b7f1843u
+#define GC_MAGIC_OFFSET        0x5844
+#define GC_MAGIC               0x3463a223u
+#define GC_FRONT_DISPATCH      0x5820
+#define GC_FROM_CREATE_ARG5    0x890
+#define HAVE_TAKEOVER_LAYOUT   1
 #else
-/* i386: offsets not read yet. Contexts in 32-bit processes stay with GLEngine for now. */
 #define HAVE_TAKEOVER_LAYOUT   0
 #endif
 

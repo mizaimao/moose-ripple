@@ -221,3 +221,9 @@ Offsets are for this build only; the bundle must check the magic values before u
 magic values, `ctx->rend == gc` and an all-zero back table, then `CGLSelectDispatch(ctx,
 our_table)` and set `ctx->rend` to our context. Check at runtime with a dtrace probe on
 `gldSetInteger` (0x2bd) once VM 210 is free.
+
+**i386 (same build, same method):** CGL magic at ctx+0xc60 (`rend` +0, `disp` +4, 764 slots
+of 4 bytes, `priv` +0xbf4); gc magic at gc+0x5844, `&ctx->disp` at gc+0x5820, back pointer at
+gc+0x5824; `gldCreateContext`'s 5th argument is gc+0x890. `gldSetInteger(0x2bd)` and the
+exported `CGLSelectDispatch`/`CGLBackDispatch`/`CGLFrontDispatch`/`CGLRestoreDispatch` behave
+as on x86_64.
