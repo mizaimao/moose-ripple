@@ -43,6 +43,7 @@ ripple_cgl_context_create(const struct ripple_cgl_pixel_format *pf,
    ctx = CALLOC_STRUCT(ripple_cgl_context);
    if (!ctx)
       return NULL;
+   ctx->magic = RIPPLE_CGL_MAGIC;
    ctx->pf = *pf;
 
    /* Mac OS X 10.6 has only legacy (compatibility) contexts, GL 2.1 at most for apps, but
@@ -79,6 +80,7 @@ ripple_cgl_context_destroy(struct ripple_cgl_context *ctx)
    if (_glapi_get_context() == ctx->glctx)
       st_api_make_current(NULL, NULL, NULL);
    st_destroy_context(ctx->st);
+   ctx->magic = 0;
    FREE(ctx);
 }
 
@@ -89,8 +91,23 @@ ripple_cgl_context_make_current(struct ripple_cgl_context *ctx)
    return st_api_make_current(ctx ? ctx->st : NULL, NULL, NULL);
 }
 
+/* From OpenGL.framework (CGLCurrent.h); declared here to keep Apple's GL headers out. */
+extern void *CGLGetCurrentContext(void);
+
 void
 ripple_cgl_make_current_slow(void *rend)
 {
-   ripple_cgl_context_make_current((struct ripple_cgl_context *)rend);
+   struct ripple_cgl_context *ctx = rend;
+
+   /* GLEngine itself calls a few entries with its own context (get_integerv under
+    * kCGLCEStateValidation): fall back to the current CGL context if that is ours. */
+   if (!ctx || ctx->magic != RIPPLE_CGL_MAGIC) {
+      void **cur = CGLGetCurrentContext();
+      ctx = cur ? cur[0] : NULL;
+      if (!ctx || ctx->magic != RIPPLE_CGL_MAGIC)
+         return;              /* nothing of ours current: Mesa's no-op dispatch answers */
+      if (_glapi_get_context() == ctx->glctx)
+         return;
+   }
+   ripple_cgl_context_make_current(ctx);
 }

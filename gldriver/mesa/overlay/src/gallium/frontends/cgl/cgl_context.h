@@ -19,8 +19,11 @@ struct ripple_cgl_pixel_format {
    bool double_buffer;
 };
 
+#define RIPPLE_CGL_MAGIC 0x52434758u   /* "RCGX" */
+
 struct ripple_cgl_context {
    struct gl_context *glctx;     /* first: struct ripple_cgl_rend in cgl_dispatch.h */
+   unsigned magic;               /* RIPPLE_CGL_MAGIC: thunks can be handed a foreign rend */
    struct st_context *st;
    struct ripple_cgl_pixel_format pf;
    unsigned next_fence;          /* GL_APPLE_fence names (cgl_apple.c) */

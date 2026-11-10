@@ -11,7 +11,7 @@ ripple_gl = shared_module(
   link_whole : [libcgl_st, libglapi_static],
   link_with : [libmesa, libgallium],
   link_args : ['-Wl,-exported_symbols_list,' + (meson.current_source_dir() / 'ripple-gl.exports'),
-               '-Wl,-undefined,error'],
+               '-Wl,-undefined,error', '-framework', 'OpenGL'],
   link_depends : files('ripple-gl.exports'),
   dependencies : [driver_virgl, dep_libvirglripple, idep_mesautil, idep_nir, dep_thread],
 )
