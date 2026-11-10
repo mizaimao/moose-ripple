@@ -8,6 +8,7 @@
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOSubMemoryDescriptor.h>
 #include <kern/clock.h>
+#include <pexpert/pexpert.h>
 #include <linux/virtio_gpu.h>
 
 #define super IOFramebuffer
@@ -90,6 +91,18 @@ bool RippleFramebuffer::start(IOService *provider)
     }
     if (!buildModes(prefW, prefH))
         goto fail;
+    // Cursor: software by default, so the guest draws Snow Leopard's pointer into the picture
+    // and VNC consoles show it at the guest's scale (2026-11-10). The hardware cursor
+    // (virtio cursor queue; QEMU or the VNC client draws it, no lag) is kept as an option:
+    // personality property RippleHardwareCursor, overridden by the boot flag ripple_hwcursor=0|1.
+    {
+        OSBoolean *hw = OSDynamicCast(OSBoolean, getProperty("RippleHardwareCursor"));
+        fHWCursor = hw && hw->isTrue();
+        int arg;
+        if (PE_parse_boot_argn("ripple_hwcursor", &arg, sizeof(arg)))
+            fHWCursor = arg != 0;
+        setProperty("RippleCursor", fHWCursor ? "hardware" : "software");
+    }
     fCurMode = fStartupMode = fPreferred + 1;
     fNextRes = 1;
 
@@ -130,12 +143,14 @@ IOReturn RippleFramebuffer::enableController(void)
     if (fEnabled)
         return kIOReturnSuccess;
 
-    // Cursor resource: 64x64 with alpha.
-    fCursorRes = fNextRes++;
-    if (!fDev->resourceCreate2D(fCursorRes, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM, kCursorSize, kCursorSize) ||
-        !fDev->attachBacking(fCursorRes, fCursorMem, kCursorSize * kCursorSize * 4)) {
-        LOG("cursor resource failed");
-        fCursorRes = 0;
+    // Cursor resource: 64x64 with alpha (hardware cursor only).
+    if (fHWCursor) {
+        fCursorRes = fNextRes++;
+        if (!fDev->resourceCreate2D(fCursorRes, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM, kCursorSize, kCursorSize) ||
+            !fDev->attachBacking(fCursorRes, fCursorMem, kCursorSize * kCursorSize * 4)) {
+            LOG("cursor resource failed; using the software cursor");
+            fCursorRes = 0;
+        }
     }
 
     if (!applyMode(fCurMode))
@@ -407,7 +422,7 @@ IOReturn RippleFramebuffer::getAttribute(IOSelect attribute, uintptr_t *value)
 {
     if (attribute == kIOHardwareCursorAttribute) {
         if (value)
-            *value = fCursorRes ? 1 : 0;
+            *value = (fHWCursor && fCursorRes) ? 1 : 0;   // 0: IOFramebuffer draws the cursor
         return kIOReturnSuccess;
     }
     IOReturn r = super::getAttribute(attribute, value);

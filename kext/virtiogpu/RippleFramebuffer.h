@@ -44,6 +44,7 @@ class RippleFramebuffer : public IOFramebuffer
     uint32_t                  fUnchanged;                // consecutive frames with no damage
     uint64_t                  fStatPixels, fStatTime;
 
+    bool                      fHWCursor;     // hardware cursor (else IOFramebuffer draws it)
     IOBufferMemoryDescriptor *fCursorMem;
     uint32_t fCursorRes;
     bool     fCursorVisible, fCursorShown;

@@ -325,3 +325,14 @@ of absolute axes (IOHIDFamily-315.7.16 source, tarball SHA-256
 `cb033840edb81a07694793242ebe1a356fb7da205079a861b09457e58df92d2f`, matches the guest's 1.6.6).
 `kext/qemutablet` sets `AbsoluteAxisBoundsRemovalPercentage` = 0 for QEMU's tablet only;
 injected positions now land exactly. Installed in VM 210.
+
+## 2026-11-10: software cursor by default, hardware cursor kept as an option
+
+The owner saw the hardware cursor in the Proxmox console at his Mac's pointer size: VNC clients draw
+a hardware cursor themselves. He prefers Snow Leopard's own pointer, drawn exactly as on the Mac.
+Now `getAttribute(kIOHardwareCursorAttribute)` returns 0 unless `RippleHardwareCursor` (Info.plist,
+default false) or the boot flag `ripple_hwcursor=1` asks for the hardware cursor; with 0,
+IOFramebuffer draws the pointer into the framebuffer and the damage tracker sends it. Checked:
+software mode draws the arrow at the injected position in a `screendump`; `ripple_hwcursor=1`
+gives `RippleCursor = hardware` and the 32x32 cursor image again. Settings:
+`kext/virtiogpu/README.md`.

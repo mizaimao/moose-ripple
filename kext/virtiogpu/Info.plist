@@ -36,6 +36,8 @@
 			<string>IOFramebuffer</string>
 			<key>IOProbeScore</key>
 			<integer>30000</integer>
+			<key>RippleHardwareCursor</key>
+			<false/>
 		</dict>
 	</dict>
 	<key>OSBundleLibraries</key>
