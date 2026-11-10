@@ -48,7 +48,7 @@ fallback but the build no longer uses them.
 
 ## Open
 
-- C++ IOKit kexts (`-fapple-kext`, `libkmodc++.a`, OSObject vtables) are untested; M2 needs them.
+- C++ IOKit kexts: x86_64 works, i386 doesn't yet (next section).
 - No compiler runtime (`libcc_kext.a`) in the link yet: 64-bit division in i386 code will need it.
 
 ## C++ kexts (added 2026-11-10)
