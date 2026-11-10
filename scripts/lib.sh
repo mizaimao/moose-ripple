@@ -19,7 +19,7 @@ hmp() {
 # If the entry has expired, ping the subnet once from the rig to refresh it.
 guest_addr() {
     if [ -n "$GUEST" ]; then echo "$GUEST"; return; fi
-    ssh "$RETRO" "mac=\$(qm config $VMID | sed -n 's/^net0: [a-z0-9]*=\([^,]*\),.*/\1/p')
+    ssh -n "$RETRO" "mac=\$(qm config $VMID | sed -n 's/^net0: [a-z0-9]*=\([^,]*\),.*/\1/p')
         find() { ip -4 neigh | grep -i \"\$mac\" | grep -v FAILED | awk '{print \$1; exit}'; }
         a=\$(find)
         if [ -z \"\$a\" ]; then
