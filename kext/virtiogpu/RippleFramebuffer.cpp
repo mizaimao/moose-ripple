@@ -89,6 +89,8 @@ bool RippleFramebuffer::start(IOService *provider)
         prefW = info[0].r.width;
         prefH = info[0].r.height;
     }
+    if (fDev->hasVirgl())
+        publishCapsets();
     if (!buildModes(prefW, prefH))
         goto fail;
     // Cursor: software by default, so the guest draws Snow Leopard's pointer into the picture
@@ -557,4 +559,30 @@ IOReturn RippleFramebuffer::setCursorState(SInt32 x, SInt32 y, bool visible)
         fCursorShown = false;
     }
     return kIOReturnSuccess;
+}
+
+// ---- Diagnostics ----------------------------------------------------------------------------
+
+// Publish the host's capability sets as RippleCapset<id> data properties, so they can be read
+// with ioreg before the 3D path exists (M3; virgl: id 1 = v1, id 2 = v2).
+void RippleFramebuffer::publishCapsets()
+{
+    for (uint32_t i = 0; i < fDev->numCapsets(); i++) {
+        uint32_t id, maxVer, maxSize;
+        if (!fDev->getCapsetInfo(i, &id, &maxVer, &maxSize)) {
+            LOG("capset %u: GET_CAPSET_INFO failed", i);
+            continue;
+        }
+        void *buf = IOMalloc(maxSize);
+        if (!buf)
+            continue;
+        uint32_t got = fDev->getCapset(id, maxVer, buf, maxSize);
+        LOG("capset %u: id %u, max version %u, max size %u, got %u bytes", i, id, maxVer, maxSize, got);
+        if (got) {
+            char key[32];
+            snprintf(key, sizeof(key), "RippleCapset%u", id);
+            setProperty(key, buf, got);
+        }
+        IOFree(buf, maxSize);
+    }
 }

@@ -59,6 +59,7 @@ class RippleFramebuffer : public IOFramebuffer
     bool  refresh();             // send what changed since the last frame; false if nothing
     static void refreshAction(OSObject *owner, IOTimerEventSource *sender);
     void  showCursor();
+    void  publishCapsets();     // host GPU capability sets into the registry (diagnostics)
 
 public:
     virtual bool start(IOService *provider);

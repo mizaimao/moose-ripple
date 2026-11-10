@@ -28,6 +28,11 @@ public:
     uint32_t features() const { return fFeatures; }
     uint32_t numScanouts() const { return fNumScanouts; }
     uint32_t numCapsets() const { return fNumCapsets; }
+    bool hasVirgl() const { return fVirgl; }
+
+    // Capability sets (virgl: id 1 and 2). getCapset fills up to `size` bytes, returns the length.
+    bool getCapsetInfo(uint32_t index, uint32_t *id, uint32_t *maxVersion, uint32_t *maxSize);
+    uint32_t getCapset(uint32_t id, uint32_t version, void *buf, uint32_t size);
 
     // Slowest control command since the last call (for diagnostics), in microseconds.
     void takeSlowest(uint32_t *us, uint32_t *type, uint32_t *over100ms);
@@ -72,6 +77,7 @@ private:
     volatile uint8_t *fCommon, *fNotify, *fISR, *fDevCfg;
     uint32_t fNotifyMult;
     uint32_t fFeatures, fNumScanouts, fNumCapsets;
+    bool     fVirgl;                      // VIRTIO_GPU_F_VIRGL negotiated
     uint64_t fSlowestAbs;               // slowest command (absolute time) and its type
     uint32_t fSlowestType, fOver100ms;
     Queue fQueue[2];               // 0 control, 1 cursor

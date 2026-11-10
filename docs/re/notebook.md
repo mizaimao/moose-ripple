@@ -384,3 +384,18 @@ slot is retired, never reused. Result after a boot and a mode switch: 28 interru
 completions by interrupt, 0 by polling (`RippleInterrupts`, `RippleCompletedByInterrupt`,
 `RippleCompletedByPolling` in the registry); guest 98% idle; slowest command 8 ms
 (TRANSFER_TO_HOST_2D).
+
+## 2026-11-10: M3 step 2: VIRGL negotiated, host capability sets
+
+VM 210 back on `vga: virtio-gl` (UHD 630 through virglrenderer 0.10.4 / iris). The driver now
+accepts `VIRTIO_GPU_F_VIRGL` when offered (features 0x0000010130000003) and reads the capability
+sets: index 0 = virgl v1 (id 1, 308 bytes), index 1 = virgl v2 (id 2, max version 2, 1376 bytes),
+published as `RippleCapset1`/`RippleCapset2` data properties. Decoded with the layout from
+virglrenderer 0.10.4 `src/virgl_hw.h` (MIT, SHA-256 `a88d23c3...640c`, reading copy in
+`.tools/src/virglrenderer-0.10.4`): glsl_level 460, max_render_targets 8, max_samples 16,
+max_texture_2d_size 16384, 3D 2048, cube 16384, max_texture_array_layers 2048,
+max_uniform_blocks 15, max_vertex_attribs 16, max_viewports 16, bset 0xffe1fd7f,
+capability_bits 0xdff7ffff. Far beyond 10.6's needs (GL 2.1, GLSL 1.20), so the handoff's M6
+risk "Core Image needs features virgl can't provide" looks small on this host. The 2D
+framebuffer keeps working on the virgl device (desktop at 1280x800; `screendump` can't see GL
+scanouts, so visual checks are in-guest or via the Proxmox console).

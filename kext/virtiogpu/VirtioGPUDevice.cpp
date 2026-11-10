@@ -153,7 +153,7 @@ bool VirtioGPUDevice::setupQueue(unsigned index)
 
 bool VirtioGPUDevice::negotiate()
 {
-    // virtio 1.0 initialisation (spec 3.1.1). M2 is 2D only: accept just VERSION_1.
+    // virtio 1.0 initialisation (spec 3.1.1). Accept VERSION_1, plus VIRGL when offered (3D).
     reset();
     setStatus(VIRTIO_CONFIG_S_ACKNOWLEDGE);
     setStatus(VIRTIO_CONFIG_S_ACKNOWLEDGE | VIRTIO_CONFIG_S_DRIVER);
@@ -166,8 +166,9 @@ bool VirtioGPUDevice::negotiate()
         return false;
     }
     fFeatures = lo;
+    fVirgl = (lo & (1u << VIRTIO_GPU_F_VIRGL)) != 0;
     wr32(fCommon, CC(guest_feature_select), 0);
-    wr32(fCommon, CC(guest_feature), 0);
+    wr32(fCommon, CC(guest_feature), fVirgl ? (1u << VIRTIO_GPU_F_VIRGL) : 0);
     wr32(fCommon, CC(guest_feature_select), 1);
     wr32(fCommon, CC(guest_feature), 1u << (VIRTIO_F_VERSION_1 - 32));
     setStatus(status() | VIRTIO_CONFIG_S_FEATURES_OK);
@@ -589,4 +590,43 @@ void VirtioGPUDevice::interruptAction(OSObject *owner, IOInterruptEventSource *,
     while (ripple_vq_get_used(&d->fQueue[1].vq, NULL, NULL))
         ;
     IOLockUnlock(d->fCursorLock);
+}
+
+// ---- Capability sets ------------------------------------------------------------------------
+
+bool VirtioGPUDevice::getCapsetInfo(uint32_t index, uint32_t *id, uint32_t *maxVersion, uint32_t *maxSize)
+{
+    struct virtio_gpu_get_capset_info req;
+    struct virtio_gpu_resp_capset_info resp;
+    bzero(&req, sizeof(req));
+    req.hdr.type = VIRTIO_GPU_CMD_GET_CAPSET_INFO;
+    req.capset_index = index;
+    if (command(&req, sizeof(req), &resp, sizeof(resp), 0, 0) != VIRTIO_GPU_RESP_OK_CAPSET_INFO)
+        return false;
+    *id = resp.capset_id;
+    *maxVersion = resp.capset_max_version;
+    *maxSize = resp.capset_max_size;
+    return true;
+}
+
+uint32_t VirtioGPUDevice::getCapset(uint32_t id, uint32_t version, void *buf, uint32_t size)
+{
+    const uint32_t hdr = sizeof(struct virtio_gpu_ctrl_hdr);
+    if (size + hdr > kSlotResp)
+        size = kSlotResp - hdr;
+    struct virtio_gpu_get_capset req;
+    bzero(&req, sizeof(req));
+    req.hdr.type = VIRTIO_GPU_CMD_GET_CAPSET;
+    req.capset_id = id;
+    req.capset_version = version;
+    uint8_t *resp = (uint8_t *)IOMalloc(hdr + size);
+    if (!resp)
+        return 0;
+    uint32_t got = 0;
+    if (command(&req, sizeof(req), resp, hdr + size, 0, 0) == VIRTIO_GPU_RESP_OK_CAPSET) {
+        memcpy(buf, resp + hdr, size);
+        got = size;
+    }
+    IOFree(resp, hdr + size);
+    return got;
 }
