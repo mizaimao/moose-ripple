@@ -29,6 +29,18 @@ void ripple_cgl_unsupported(const char *name);
          ripple_cgl_make_current_slow(rend);                                          \
    } while (0)
 
+/* Apple-only entries the frontend implements (cgl_apple.c); gen_dispatch.py puts them in
+ * the table. */
+void GLAPIENTRY ripple_cgl_gen_fences(void *rend, GLsizei n, GLuint *fences);
+void GLAPIENTRY ripple_cgl_delete_fences(void *rend, GLsizei n, const GLuint *fences);
+void GLAPIENTRY ripple_cgl_set_fence(void *rend, GLuint fence);
+GLboolean GLAPIENTRY ripple_cgl_is_fence(void *rend, GLuint fence);
+GLboolean GLAPIENTRY ripple_cgl_test_fence(void *rend, GLuint fence);
+void GLAPIENTRY ripple_cgl_finish_fence(void *rend, GLuint fence);
+GLboolean GLAPIENTRY ripple_cgl_test_object(void *rend, GLenum object, GLuint name);
+void GLAPIENTRY ripple_cgl_finish_object(void *rend, GLenum object, GLuint name);
+void GLAPIENTRY ripple_cgl_swap(void *rend);
+
 /* Generated: the number of entries and the filler for a GLIFunctionDispatch table. */
 extern const unsigned ripple_cgl_dispatch_count;
 void ripple_cgl_fill_dispatch(void **table);

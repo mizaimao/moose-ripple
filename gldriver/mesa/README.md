@@ -8,6 +8,6 @@ Mesa's GL implementation and its virgl Gallium driver, cross-built for Mac OS X 
 - `patches/`: the few changes to Mesa's own files (no thread-local variables on 10.6, build hooks).
 - `overlay/`: our files inside Mesa's tree. `src/gallium/winsys/virgl/ripple/` is the winsys
   that drives the virgl driver through our kext's user client (`docs/kext-uapi.md`).
-- `compat/ripple_compat.h`: libc functions 10.6 lacks, force-included into Mesa.
+- `overlay/include/ripple_compat.h`: libc functions 10.6 lacks, force-included into Mesa (patch 0004).
 
 The meson venv lives in the repo's `.venv` on dev.lan (meson, mako, pyyaml, packaging).

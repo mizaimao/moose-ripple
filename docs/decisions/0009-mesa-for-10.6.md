@@ -19,7 +19,8 @@ Date: 2026-11-10. Status: in progress (M4). Routine technical choice, made by ri
    thread-locals in `util/` (`patches/0002`). Mesa's GL entry points then reach the context
    through `_glapi_get_context()`, as on Windows.
 4. **Missing libc functions** (`clock_gettime`, `strnlen`, `strndup`, `memmem`,
-   `open_memstream`) come from `gldriver/mesa/compat/ripple_compat.h`, force-included and all
+   `open_memstream`) come from `gldriver/mesa/overlay/include/ripple_compat.h`, force-included
+   (patch 0004, as project arguments so meson's own checks see the plain SDK) and all
    `static inline`, so the bundle exports nothing extra.
 5. **Our code lives beside Mesa, not in a fork:** `gldriver/mesa/overlay/` is copied over the
    unpacked tree (the winsys in `src/gallium/winsys/virgl/ripple`, later the CGL frontend and
@@ -27,9 +28,9 @@ Date: 2026-11-10. Status: in progress (M4). Routine technical choice, made by ri
    architecture at a time with clang, the 10.6 SDK and cctools-port ld64; the two are joined
    with lipo.
 
-## Open
+## Build notes
 
-- Building Mesa runs Mesa's own build scripts (meson, Python/mako generators) on dev.lan, and
-  it needs flex and bison there. Claude Code's safety check refused building flex/bison from
-  source (2026-11-10); asked the owner in testing.
-- Everything above except the C++ check is untested until the first full build.
+- flex and bison come from Debian on dev.lan (installed by the owner, 2026-11-10, after Claude
+  Code's safety check refused building them from source).
+- clang gets target, SDK and ld64 from a config file: meson's checks fail on
+  unused-argument errors when `--ld-path` is on the command line of a compile-only run.

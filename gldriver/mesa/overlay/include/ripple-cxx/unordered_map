@@ -1,0 +1,11 @@
+/* moose-ripple: the 10.6 SDK ships libstdc++ 4.2 (no C++11 library). This header gives the
+ * little of it Mesa uses; it is found only because nothing in the SDK has this name
+ * (-idirafter, patches/0004). */
+#ifndef RIPPLE_CXX_UNORDERED_MAP
+#define RIPPLE_CXX_UNORDERED_MAP
+/* Mesa only uses find, end and operator[]; an ordered map serves. */
+#include <map>
+namespace std {
+template <class K, class V> using unordered_map = map<K, V>;
+}
+#endif

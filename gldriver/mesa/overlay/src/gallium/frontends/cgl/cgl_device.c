@@ -3,6 +3,7 @@
  * user client and one gallium screen per process, made on first use. GPU-neutral apart from
  * choosing the winsys by the backend the kernel reports (docs/kext-uapi.md, decision 0005).
  */
+#include <stdbool.h>
 #include <IOKit/IOKitLib.h>
 #include <mach/mach.h>
 #include <string.h>

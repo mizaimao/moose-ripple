@@ -67,6 +67,8 @@ depth_bits(uint32_t mode)
    return mode & 0x1000 ? 32 : mode & 0x800 ? 24 : mode & 0x400 ? 16 : mode & 0x80 ? 8 : 0;
 }
 
+void ripple_gld_fill_config(void *cfg, const struct gld_pixel_format *pf_opaque);
+
 void
 ripple_gld_fill_config(void *cfg, const struct gld_pixel_format *pf_opaque)
 {

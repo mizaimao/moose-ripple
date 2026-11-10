@@ -9,6 +9,7 @@
 #if defined(__APPLE__) && !defined(__ASSEMBLER__)
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,8 +18,25 @@
 #include <time.h>
 #include <mach/mach_time.h>
 
+/* O_CLOEXEC (10.7): without it descriptors simply stay open across exec. */
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
+
+/* C11 static_assert: the 10.6 SDK's assert.h predates it. */
+#if !defined(__cplusplus) && !defined(static_assert)
+#define static_assert _Static_assert
+#endif
+
 #ifdef __cplusplus
 extern "C" {
+#endif
+
+/* llrint/llrintf exist in 10.6's libm, but the i386 math.h hides them from strict C++ (it wants
+ * C99 or GNU mode). */
+#if defined(__cplusplus) && defined(__i386__)
+long long llrint(double);
+long long llrintf(float);
 #endif
 
 /* clock_gettime (10.12). Clock ids as in later SDKs. */

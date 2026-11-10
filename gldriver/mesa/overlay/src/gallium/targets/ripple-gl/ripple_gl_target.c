@@ -25,6 +25,9 @@
 #include "cgl/cgl_device.h"
 #include "cgl/cgl_takeover.h"
 
+/* The gld* functions are entry points Apple's OpenGL finds by name; no header declares them. */
+#pragma clang diagnostic ignored "-Wmissing-prototypes"
+
 #define GLD_EXPORT __attribute__((visibility("default")))
 
 /* Our renderer ID: unused by Apple's drivers, (id & 0xffff00ff) == 0, not the float

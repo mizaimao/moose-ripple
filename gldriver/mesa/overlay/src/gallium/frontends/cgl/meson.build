@@ -8,9 +8,9 @@ cgl_dispatch_c = custom_target(
   'cgl_dispatch.c',
   input : ['gen_dispatch.py',
            ripple_sdk / 'System/Library/Frameworks/OpenGL.framework/Headers/gliDispatch.h',
-           files('../../../mapi/glapi/gen/gl_and_es_API.xml')],
+           files('../../../mapi/glapi/gen/gl_and_es_API.xml'), main_dispatch_h],
   output : 'cgl_dispatch.c',
-  command : [prog_python, '@INPUT0@', '@INPUT1@', '@INPUT2@', '@OUTPUT@'],
+  command : [prog_python, '@INPUT0@', '@INPUT1@', '@INPUT2@', '@OUTPUT@', '@INPUT3@'],
 )
 
 libcgl_st = static_library(

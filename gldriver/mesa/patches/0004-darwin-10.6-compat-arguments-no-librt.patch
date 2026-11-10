@@ -1,19 +1,23 @@
 --- a/meson.build
 +++ b/meson.build
-@@ -19,6 +19,12 @@
+@@ -19,6 +19,16 @@
  
  if host_machine.system() == 'darwin'
    add_languages('objc', native : false)
-+  # moose-ripple: Mac OS X 10.6 has no thread-local variables (patches 0001, 0002) and lacks
-+  # some libc functions (include/ripple_compat.h). Project arguments, so meson's own checks
-+  # still see the plain SDK.
++  # moose-ripple: Mac OS X 10.6 has no thread-local variables (patches 0001, 0002), lacks
++  # some libc functions (include/ripple_compat.h) and its libstdc++ 4.2 has no C++11 headers
++  # (include/ripple-cxx). Without libdrm, src/util (libsync.h) comes last in the search.
++  # Project arguments, so meson's own checks still see the plain SDK.
 +  add_project_arguments('-DRIPPLE_NO_TLS', '-include',
 +                        meson.project_source_root() / 'include' / 'ripple_compat.h',
++                        '-idirafter', meson.project_source_root() / 'src' / 'util',
 +                        language : ['c', 'cpp'])
++  add_project_arguments('-idirafter', meson.project_source_root() / 'include' / 'ripple-cxx',
++                        language : 'cpp')
    add_project_arguments('-fobjc-arc', language : 'objc')
    libname_suffix = 'dylib'
  elif host_machine.system() == 'windows'
-@@ -1530,7 +1536,8 @@
+@@ -1530,7 +1540,8 @@
  endif
  
  # Determine whether or not the rt library is needed for time functions

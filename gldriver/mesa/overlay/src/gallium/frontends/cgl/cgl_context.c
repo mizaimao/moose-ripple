@@ -4,6 +4,7 @@
  * framebuffer objects (no window drawable yet): the first M4 target is a program that
  * draws into an FBO and reads the pixels back.
  */
+#include <stdbool.h>
 #include <string.h>
 
 #include "frontend/api.h"

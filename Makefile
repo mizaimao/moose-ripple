@@ -152,7 +152,7 @@ $(OUT)/shim/RippleGLDriver.bundle: $(OUT)/x86_64/RippleGLDriver gldriver/shim/In
 # --- RippleGLDriver (M4): Mesa + virgl behind Apple's OpenGL ------------------------------
 # gldriver/mesa/build.sh cross-builds Mesa per architecture (decision 0009); here the two
 # binaries lose the load commands 10.6's tools don't know and are joined into the bundle.
-MESA_BIN := src/gallium/targets/ripple-gl/RippleGLDriver
+MESA_BIN := src/gallium/targets/ripple-gl/RippleGLDriver.dylib
 .PHONY: glbundle
 glbundle:
 	gldriver/mesa/build.sh x86_64 $(MESA_BIN)

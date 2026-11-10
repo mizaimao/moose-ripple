@@ -53,13 +53,16 @@ diff -ru a/src/util/u_qsort.cpp b/src/util/u_qsort.cpp
  #include "u_qsort.h"
 +
 +/* moose-ripple: Mac OS X 10.6 has BSD qsort_r and no thread-local variables (nor C++11
-+ * <thread>), so this fallback is left out there. */
++ * <thread>), so this fallback is left out there; the BSD adapter below stays. */
 +#ifndef RIPPLE_NO_TLS
  #include <thread>
  
  thread_local int (*tl_qsort_r_compar)(const void *, const void *, void *);
-@@ -50,3 +54,4 @@
-       reinterpret_cast<util_qsort_adapter_data*>(ctx);
-    return data->compar(elem1, elem2, data->args);
+@@ -42,6 +46,7 @@
+    tl_qsort_r_arg = arg;
+    return qsort(base, nmemb, size, qsort_r_compar);
  }
 +#endif
+ 
+ int
+ util_qsort_adapter(void *ctx, const void *elem1, const void *elem2)

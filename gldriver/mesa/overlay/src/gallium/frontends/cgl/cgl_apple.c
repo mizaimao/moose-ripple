@@ -84,7 +84,7 @@ ripple_cgl_test_object(void *rend, GLenum object, GLuint name)
 }
 
 void GLAPIENTRY
-ripple_cgl_finish_object(void *rend, GLenum object, GLint name)
+ripple_cgl_finish_object(void *rend, GLenum object, GLuint name)
 {
    RIPPLE_CGL_ENTER(rend);
    CALL_Finish(GET_DISPATCH(), ());
