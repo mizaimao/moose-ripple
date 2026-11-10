@@ -47,8 +47,9 @@ void RippleGPUClient::destroyBuffer(Buffer &b)
 
 void RippleGPUClient::destroyAll()
 {
-    for (int i = 0; i < kMaxBuffers; i++)
+    for (uint32_t i = 0; i < fBufferCap; i++)
         destroyBuffer(fBuffer[i]);
+    fBufferCount = 0;
     for (int i = 0; i < kMaxContexts; i++) {
         if (fContext[i]) {
             fDev->ctxDestroy(fContext[i]);
@@ -74,6 +75,12 @@ IOReturn RippleGPUClient::clientDied(void)
 
 void RippleGPUClient::free(void)
 {
+    if (fBuffer)
+        IOFree(fBuffer, fBufferCap * sizeof(Buffer));
+    if (fCmd) {
+        fCmd->complete();
+        fCmd->release();
+    }
     if (fLock)
         IOLockFree(fLock);
     super::free();
@@ -91,14 +98,73 @@ int RippleGPUClient::contextSlot(uint32_t ctx) const
     return -1;
 }
 
+static inline uint32_t homeSlot(uint32_t handle, uint32_t mask)
+{
+    uint32_t h = handle * 2654435761u;
+    return (h ^ (h >> 16)) & mask;
+}
+
 RippleGPUClient::Buffer *RippleGPUClient::findBuffer(uint32_t handle)
 {
-    if (!handle)
+    if (!handle || !fBufferCap)
         return 0;
-    for (int i = 0; i < kMaxBuffers; i++)
+    uint32_t mask = fBufferCap - 1;
+    for (uint32_t i = homeSlot(handle, mask); fBuffer[i].handle; i = (i + 1) & mask)
         if (fBuffer[i].handle == handle)
             return &fBuffer[i];
     return 0;
+}
+
+// Make room for one more buffer: the table stays at most half full.
+bool RippleGPUClient::growBuffers()
+{
+    if ((fBufferCount + 1) * 2 <= fBufferCap)
+        return true;
+    uint32_t oldCap = fBufferCap, cap = oldCap ? oldCap * 2 : 256;
+    Buffer *old = fBuffer, *table = (Buffer *)IOMalloc(cap * sizeof(Buffer));
+    if (!table)
+        return false;
+    bzero(table, cap * sizeof(Buffer));
+    fBuffer = table;
+    fBufferCap = cap;
+    fBufferCount = 0;
+    for (uint32_t i = 0; i < oldCap; i++)
+        if (old[i].handle)
+            *insertBuffer(old[i].handle) = old[i];
+    if (old)
+        IOFree(old, oldCap * sizeof(Buffer));
+    return true;
+}
+
+// Insert an empty entry for `handle`; growBuffers() must have made room.
+RippleGPUClient::Buffer *RippleGPUClient::insertBuffer(uint32_t handle)
+{
+    uint32_t mask = fBufferCap - 1, i = homeSlot(handle, mask);
+    while (fBuffer[i].handle)
+        i = (i + 1) & mask;
+    bzero(&fBuffer[i], sizeof(Buffer));
+    fBuffer[i].handle = handle;
+    fBufferCount++;
+    return &fBuffer[i];
+}
+
+// Remove an entry, shifting later entries of its probe run back (no tombstones).
+void RippleGPUClient::removeBuffer(Buffer *b)
+{
+    uint32_t mask = fBufferCap - 1, i = (uint32_t)(b - fBuffer), j = i;
+    for (;;) {
+        j = (j + 1) & mask;
+        if (!fBuffer[j].handle)
+            break;
+        uint32_t k = homeSlot(fBuffer[j].handle, mask);
+        bool stays = i <= j ? (i < k && k <= j) : (i < k || k <= j);
+        if (!stays) {
+            fBuffer[i] = fBuffer[j];
+            i = j;
+        }
+    }
+    bzero(&fBuffer[i], sizeof(Buffer));
+    fBufferCount--;
 }
 
 // ---- Methods --------------------------------------------------------------------------------
@@ -141,7 +207,7 @@ IOReturn RippleGPUClient::contextDestroy(uint32_t ctx)
     int slot = contextSlot(ctx);
     if (slot < 0)
         return kIOReturnBadArgument;
-    for (int i = 0; i < kMaxBuffers; i++)
+    for (uint32_t i = 0; i < fBufferCap; i++)
         fBuffer[i].attached &= ~(1u << slot);
     fDev->ctxDestroy(ctx);
     fContext[slot] = 0;
@@ -154,11 +220,7 @@ IOReturn RippleGPUClient::bufferCreate(const struct ripple_gpu_buffer_create *in
     if (in->flags || in->params_size != sizeof(struct ripple_virgl_buffer_params) ||
         !in->size || in->size > kMaxBufferBytes)
         return kIOReturnBadArgument;
-    Buffer *b = findBuffer(0);
-    for (int i = 0; i < kMaxBuffers && !b; i++)
-        if (!fBuffer[i].handle)
-            b = &fBuffer[i];
-    if (!b)
+    if (fBufferCount >= kMaxBuffers || !growBuffers())
         return kIOReturnNoResources;
 
     const struct ripple_virgl_buffer_params *p = (const struct ripple_virgl_buffer_params *)in->params;
@@ -186,10 +248,9 @@ IOReturn RippleGPUClient::bufferCreate(const struct ripple_gpu_buffer_create *in
         mem->release();
         return kIOReturnError;
     }
-    b->handle = id;
+    Buffer *b = insertBuffer(id);
     b->mem = mem;
     b->size = bytes;
-    b->attached = 0;
     *handle = id;
     *size = bytes;
     return kIOReturnSuccess;
@@ -201,47 +262,80 @@ IOReturn RippleGPUClient::bufferDestroy(uint32_t handle)
     if (!b)
         return kIOReturnBadArgument;
     destroyBuffer(*b);
+    removeBuffer(b);
     return kIOReturnSuccess;
 }
 
-IOReturn RippleGPUClient::submit(const uint8_t *in, uint32_t inSize, uint64_t *fence)
+// Copy part of the structure input: inline bytes (up to 4 KB) or, for larger inputs, the
+// prepared memory descriptor IOKit passes instead.
+IOReturn RippleGPUClient::readInput(IOExternalMethodArguments *a, uint32_t offset, void *dst,
+                                    uint32_t len)
 {
-    if (inSize < sizeof(struct ripple_gpu_submit))
+    if (a->structureInputDescriptor)
+        return a->structureInputDescriptor->readBytes(offset, dst, len) == len
+            ? kIOReturnSuccess : kIOReturnBadArgument;
+    if ((uint64_t)offset + len > a->structureInputSize)
         return kIOReturnBadArgument;
-    const struct ripple_gpu_submit *s = (const struct ripple_gpu_submit *)in;
-    uint64_t need = sizeof(*s) + (uint64_t)s->num_handles * 4 + s->cmd_size;
-    int slot = contextSlot(s->context);
-    if (slot < 0 || s->flags || s->num_handles > kMaxHandles || !s->cmd_size ||
-        s->cmd_size > kMaxCommandBytes || (s->cmd_size & 3) || need != inSize)
+    memcpy(dst, (const uint8_t *)a->structureInput + offset, len);
+    return kIOReturnSuccess;
+}
+
+IOReturn RippleGPUClient::submit(IOExternalMethodArguments *a, uint64_t *fence)
+{
+    uint64_t inSize = a->structureInputDescriptor ? a->structureInputDescriptor->getLength()
+                                                  : a->structureInputSize;
+    struct ripple_gpu_submit s;
+    if (inSize < sizeof(s) || readInput(a, 0, &s, sizeof(s)) != kIOReturnSuccess)
+        return kIOReturnBadArgument;
+    uint64_t need = sizeof(s) + (uint64_t)s.num_handles * 4 + s.cmd_size;
+    int slot = contextSlot(s.context);
+    if (slot < 0 || s.flags || s.num_handles > kMaxHandles || !s.cmd_size ||
+        s.cmd_size > kMaxCommandBytes || (s.cmd_size & 3) || need != inSize)
         return kIOReturnBadArgument;
 
     // Make the buffers the commands use visible to the context.
-    const uint32_t *handles = (const uint32_t *)(in + sizeof(*s));
-    for (uint32_t i = 0; i < s->num_handles; i++) {
-        Buffer *b = findBuffer(handles[i]);
-        if (!b)
-            return kIOReturnBadArgument;
-        if (!(b->attached & (1u << slot))) {
-            if (!fDev->ctxAttachResource(s->context, b->handle))
-                return kIOReturnError;
-            b->attached |= 1u << slot;
+    if (s.num_handles) {
+        uint32_t bytes = s.num_handles * 4;
+        uint32_t *handles = (uint32_t *)IOMalloc(bytes);
+        if (!handles)
+            return kIOReturnNoMemory;
+        IOReturn r = readInput(a, sizeof(s), handles, bytes);
+        for (uint32_t i = 0; r == kIOReturnSuccess && i < s.num_handles; i++) {
+            Buffer *b = findBuffer(handles[i]);
+            if (!b)
+                r = kIOReturnBadArgument;
+            else if (!(b->attached & (1u << slot))) {
+                if (fDev->ctxAttachResource(s.context, b->handle))
+                    b->attached |= 1u << slot;
+                else
+                    r = kIOReturnError;
+            }
         }
+        IOFree(handles, bytes);
+        if (r != kIOReturnSuccess)
+            return r;
     }
 
-    // The device reads commands from guest memory: copy them to a contiguous buffer.
-    IOBufferMemoryDescriptor *cmd = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
-        kIODirectionOut | kIOMemoryPhysicallyContiguous, s->cmd_size, 0xFFFFFFFFFFFFF000ULL);
-    if (!cmd || cmd->prepare() != kIOReturnSuccess) {
-        if (cmd)
+    // The device reads commands from guest memory: copy them to this connection's
+    // contiguous command buffer (made once, at the first submit).
+    if (!fCmd) {
+        IOBufferMemoryDescriptor *cmd = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+            kernel_task, kIODirectionOut | kIOMemoryPhysicallyContiguous, kMaxCommandBytes,
+            0xFFFFFFFFFFFFF000ULL);
+        if (!cmd)
+            return kIOReturnNoMemory;
+        if (cmd->prepare() != kIOReturnSuccess) {
             cmd->release();
-        return kIOReturnNoMemory;
+            return kIOReturnNoMemory;
+        }
+        fCmd = cmd;
+        fCmdPA = cmd->getPhysicalSegment(0, NULL, kIOMemoryMapperNone);
     }
-    memcpy(cmd->getBytesNoCopy(), in + sizeof(*s) + s->num_handles * 4, s->cmd_size);
-    bool ok = fDev->submit3D(s->context, cmd->getPhysicalSegment(0, NULL, kIOMemoryMapperNone),
-                             s->cmd_size, fence);
-    cmd->complete();
-    cmd->release();
-    return ok ? kIOReturnSuccess : kIOReturnError;
+    if (readInput(a, sizeof(s) + s.num_handles * 4, fCmd->getBytesNoCopy(), s.cmd_size)
+        != kIOReturnSuccess)
+        return kIOReturnBadArgument;
+    return fDev->submit3D(s.context, fCmdPA, s.cmd_size, fence) ? kIOReturnSuccess
+                                                                 : kIOReturnError;
 }
 
 IOReturn RippleGPUClient::transfer(const struct ripple_gpu_transfer *t, uint64_t *fence)
@@ -286,25 +380,14 @@ IOReturn RippleGPUClient::sMethod(OSObject *target, void *reference, IOExternalM
     uint32_t selector = (uint32_t)(uintptr_t)reference;
     IOReturn r = kIOReturnUnsupported;
 
-    // Large inputs (over 4 KB) arrive as a memory descriptor instead of inline bytes.
-    uint8_t *big = 0;
-    uint32_t inSize = a->structureInputSize;
+    // Inputs over 4 KB arrive as a memory descriptor instead of inline bytes; only SUBMIT's
+    // can be that large, and it reads them with readInput().
+    IOMemoryDescriptor *desc = a->structureInputDescriptor;
+    if (desc && selector != RIPPLE_GPU_SUBMIT)
+        return kIOReturnBadArgument;
+    if (desc && desc->prepare() != kIOReturnSuccess)
+        return kIOReturnVMError;
     const uint8_t *in = (const uint8_t *)a->structureInput;
-    if (a->structureInputDescriptor) {
-        inSize = (uint32_t)a->structureInputDescriptor->getLength();
-        if (inSize > kMaxCommandBytes + 4096)
-            return kIOReturnBadArgument;
-        big = (uint8_t *)IOMalloc(inSize);
-        if (!big)
-            return kIOReturnNoMemory;
-        if (a->structureInputDescriptor->prepare() != kIOReturnSuccess) {
-            IOFree(big, inSize);
-            return kIOReturnVMError;
-        }
-        a->structureInputDescriptor->readBytes(0, big, inSize);
-        a->structureInputDescriptor->complete();
-        in = big;
-    }
 
     IOLockLock(c->fLock);
     switch (selector) {
@@ -333,7 +416,7 @@ IOReturn RippleGPUClient::sMethod(OSObject *target, void *reference, IOExternalM
         r = c->bufferDestroy((uint32_t)a->scalarInput[0]);
         break;
     case RIPPLE_GPU_SUBMIT:
-        r = c->submit(in, inSize, &a->scalarOutput[0]);
+        r = c->submit(a, &a->scalarOutput[0]);
         break;
     case RIPPLE_GPU_TRANSFER:
         r = c->transfer((const struct ripple_gpu_transfer *)in, &a->scalarOutput[0]);
@@ -344,8 +427,8 @@ IOReturn RippleGPUClient::sMethod(OSObject *target, void *reference, IOExternalM
         break;
     }
     IOLockUnlock(c->fLock);
-    if (big)
-        IOFree(big, inSize);
+    if (desc)
+        desc->complete();
     return r;
 }
 

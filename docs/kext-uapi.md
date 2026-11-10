@@ -40,8 +40,11 @@ the caller; `TRANSFER` moves data between that backing and the GPU-side object.
 Version 1 of the virgl backend completes both before returning, so `WAIT` returns at once; the
 API already has the shape for asynchronous submission later.
 
-**Limits** (version 1): commands up to 256 KB per `SUBMIT`, up to 64 buffer handles, buffers up
-to 256 MB, capability blobs up to 4 KB.
+**Limits** (version 1, raised 2026-11-10 for Mesa): commands up to 320 KB per `SUBMIT` (Mesa's
+virgl driver flushes at 260 KB), up to 4096 buffer handles per `SUBMIT`, up to 65536 buffers per
+connection, buffers up to 256 MB each, capability blobs up to 4 KB. Each connection keeps one
+320 KB physically contiguous command buffer in the kernel from its first `SUBMIT` on.
+`tools/gpu-stress` checks these limits.
 
 ## Backend: virgl (`RIPPLE_GPU_BACKEND_VIRGL` = 1)
 

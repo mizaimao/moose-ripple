@@ -19,8 +19,10 @@ class RippleGPUClient : public IOUserClient
 {
     OSDeclareDefaultStructors(RippleGPUClient)
 
-    enum { kMaxContexts = 16, kMaxBuffers = 256, kMaxHandles = 64,
-           kMaxCommandBytes = 256 * 1024, kMaxBufferBytes = 256 * 1024 * 1024 };
+    // Limits: docs/kext-uapi.md. Mesa's virgl driver flushes at 66560 dwords (260 KB) of
+    // commands and keeps hundreds to thousands of resources per process.
+    enum { kMaxContexts = 16, kMaxBuffers = 65536, kMaxHandles = 4096,
+           kMaxCommandBytes = 320 * 1024, kMaxBufferBytes = 256 * 1024 * 1024 };
 
     struct Buffer {
         uint32_t handle;                 // virgl resource id (0 = free slot)
@@ -34,12 +36,22 @@ class RippleGPUClient : public IOUserClient
     VirtioGPUDevice   *fDev;
     IOLock            *fLock;
     uint32_t           fContext[kMaxContexts];   // virgl context ids (0 = free)
-    Buffer             fBuffer[kMaxBuffers];
+    // Buffers: open-addressing hash table on the handle (linear probing, no tombstones).
+    Buffer            *fBuffer;
+    uint32_t           fBufferCap;               // power of two; 0 before the first buffer
+    uint32_t           fBufferCount;
+    // Commands are copied here for the device (physically contiguous, made at first submit).
+    IOBufferMemoryDescriptor *fCmd;
+    uint64_t           fCmdPA;
 
     int  contextSlot(uint32_t ctx) const;
     Buffer *findBuffer(uint32_t handle);
+    Buffer *insertBuffer(uint32_t handle);
+    void removeBuffer(Buffer *b);
+    bool growBuffers();
     void destroyBuffer(Buffer &b);
     void destroyAll();
+    IOReturn readInput(IOExternalMethodArguments *a, uint32_t offset, void *dst, uint32_t len);
 
     // Method implementations (called with fLock held).
     IOReturn getInfo(struct ripple_gpu_info *out);
@@ -48,7 +60,7 @@ class RippleGPUClient : public IOUserClient
     IOReturn contextDestroy(uint32_t ctx);
     IOReturn bufferCreate(const struct ripple_gpu_buffer_create *in, uint64_t *handle, uint64_t *size);
     IOReturn bufferDestroy(uint32_t handle);
-    IOReturn submit(const uint8_t *in, uint32_t inSize, uint64_t *fence);
+    IOReturn submit(IOExternalMethodArguments *a, uint64_t *fence);
     IOReturn transfer(const struct ripple_gpu_transfer *in, uint64_t *fence);
 
     static IOReturn sMethod(OSObject *target, void *reference, IOExternalMethodArguments *args);
