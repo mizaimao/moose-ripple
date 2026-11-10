@@ -45,8 +45,8 @@ strip_vmin  = $(VTOOL) -remove-build-version macos -output $(1) $(1).v && rm -f 
 link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
-.PHONY: all hello hellodylib cglinfo accelprobe glshim clean
-all: hello hellodylib cglinfo accelprobe glshim
+.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu clean
+all: hello hellodylib cglinfo accelprobe glshim virtiogpu
 
 clean:
 	rm -rf $(OUT)
@@ -148,3 +148,19 @@ glshim: $(OUT)/RippleGLDriver.bundle
 $(OUT)/RippleGLDriver.bundle: $(OUT)/x86_64/RippleGLDriver gldriver/shim/Info.plist
 	rm -rf $@ && mkdir -p $@/Contents/MacOS && cp gldriver/shim/Info.plist $@/Contents/Info.plist && \
 	cp $(OUT)/x86_64/RippleGLDriver $@/Contents/MacOS/RippleGLDriver
+
+# --- RippleVirtioGPU (M2) ---------------------------------------------------------------
+VGPU_INC := -Ithird_party/virtio -Ikext/virtiogpu
+VGPU_OBJ  = $(OUT)/x86_64/virtiogpu/RippleVirtioGPU.o $(OUT)/x86_64/virtiogpu/virtqueue.o \
+            $(OUT)/x86_64/virtiogpu/info.o
+$(OUT)/x86_64/virtiogpu/%.o: kext/virtiogpu/%.cpp kext/virtiogpu/*.h
+	@mkdir -p $(dir $@)
+	$(CXX) $(call target,x86_64) $(KCXXFLAGS) $(VGPU_INC) -c $< -o $@
+$(OUT)/x86_64/virtiogpu/%.o: kext/virtiogpu/%.c kext/virtiogpu/*.h
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,x86_64) $(KCFLAGS) $(VGPU_INC) -c $< -o $@
+$(OUT)/x86_64/RippleVirtioGPU: $(VGPU_OBJ)
+	$(call linkxx_x86_64,$@,$^)
+virtiogpu: $(OUT)/RippleVirtioGPU.kext
+$(OUT)/RippleVirtioGPU.kext: $(OUT)/x86_64/RippleVirtioGPU kext/virtiogpu/Info.plist
+	$(call make_kext,RippleVirtioGPU,kext/virtiogpu/Info.plist,x86_64)

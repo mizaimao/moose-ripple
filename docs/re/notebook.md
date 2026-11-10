@@ -240,3 +240,22 @@ and VM 210 also had QEMU's `isa-applesmc`. Removed `isa-applesmc` from VM 210's 
 `sudo shutdown -h now` and System Events "shut down" power off in about 3 s. Same change on
 VM 211. `scripts/stop.sh` now shuts down cleanly and only powers off as a fallback.
 VMs 200/201 (the owner's) have the same pair and most likely the same panic; not changed.
+
+## 2026-11-10: M2 step 1: virtio-gpu transport and a 2D test pattern
+
+`kext/virtiogpu` (`RippleVirtioGPU`, own `IOMatchCategory`, so it loads at runtime next to the
+boot `IONDRVFramebuffer`). Protocol definitions: Linux v6.12's BSD-licensed virtio headers in
+`third_party/virtio`.
+
+- Capabilities all in BAR 2: common 0x1000, ISR 0x1800, device 0x2000, notify 0x3000.
+- Features offered: 0x0000010130000003 on `virtio-gl` (VIRGL, EDID, VERSION_1, ...);
+  0x...0002 on plain `virtio` (no VIRGL). We accept VERSION_1 only.
+- Two queues (control: device max 256, we use 64; cursor: 16). Status 0xf (DRIVER_OK).
+  1 scanout, 2 capsets. `GET_DISPLAY_INFO`: scanout 0 1280x800, enabled.
+- Test pattern: `RESOURCE_CREATE_2D` (B8G8R8X8), `ATTACH_BACKING` (1000 page entries),
+  `SET_SCANOUT`, `TRANSFER_TO_HOST_2D`, `RESOURCE_FLUSH`: all OK; the screen shows the bars
+  ([img](img/2026-11-10-virtiogpu-testpattern.png)), colours right, so B8G8R8X8 matches the
+  Mac's 32-bit pixel layout. Unload resets the device and QEMU shows the VGA desktop again.
+- Display note: with `vga: virtio-gl` (egl-headless), QEMU's `screendump` says "no surface"
+  once the guest scans out through virtio. M2 (2D) is developed on `vga: virtio`; VM 210 is
+  switched back to `virtio-gl` for M3.
