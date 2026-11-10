@@ -145,3 +145,18 @@ The owner saw a kernel panic on the 9600 GT monitor in both card boots after the
   shutdown hung: the known two-SMC problem.)
 - Fixed: exactly one `isa-applesmc` (`grep -o isa-applesmc | wc -l` = 1). One boot without
   the card: fine, AppleACPIPlatformExpert up. So the panics were not the card's or OpenCore's.
+
+## 2026-11-10 18:50-18:53: card window (210 off), 2 boots
+
+1. **Apple EFI test ROM on OVMF** (`romfile=9600gt-macefi-gt120.rom`, no `x-vga`, `vga: none`,
+   OpenCore debug log): OpenCore finds neither GOP nor UGA (`Missing compatible GOP`,
+   `Found 0 handles with UGA draw`), so no UEFI picture. But macOS came up with the card
+   working: QE 1, 1920x1080, `cgl-info` 64 127 191 255. On OVMF with the BIOS-only ROM (17:2x)
+   the card had stayed unstarted (0 0 0 0, black screenshots). So something in Apple's driver
+   most likely started the card without publishing a GOP (UNVERIFIED: no proof yet that OVMF
+   ran the driver). `irq 16: nobody cared` once, at shutdown.
+2. **OpenDuet card boot, corrected settings** (one `isa-applesmc`, release image): fine, QE 1,
+   1920x1080, GL correct. `irq 16: nobody cared` 0 times from start to shutdown, once at
+   shutdown: the same pattern as Chameleon. The start-time messages seen before the clean rig
+   reboot didn't appear (one sample).
+VM 212 left without the card.
