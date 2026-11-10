@@ -76,3 +76,14 @@ plugin, `CFGetTypeID` on a bad object), usually a few times per boot; launchd re
 nothing visible breaks. Seen in `/Library/Logs/DiagnosticReports` since VM 210's first boot
 (2026-11-10 12:34) under both Chameleon and OpenCore, so it has nothing to do with our kexts.
 Likely the VM's missing or odd power-source (battery/UPS) information. Not investigated.
+
+## 9600 GT passthrough VM: occasional hang at boot, host logs `irq 16: nobody cared`
+
+Found while setting up OpenCore (decision 0007). On the retro rig the 9600 GT's legacy
+interrupt shares the host's IRQ 16 with the SMBus controller. With a VM that has the card, the
+host logs `irq 16: nobody cared ... Disabling IRQ #16` at most VM shutdowns, and with the
+OpenCore setup also at most VM starts; twice it came during macOS's boot, and once the VM then
+hung (no WindowServer, no ssh). With Chameleon (3 boots) it came only at shutdown. Once macOS's
+NVIDIA driver runs, the card uses MSI and the shared line no longer matters. The owner's decision
+(2026-11-10): accepted as a known issue, no host setting changes; a hung 9600 GT VM is simply
+restarted.
