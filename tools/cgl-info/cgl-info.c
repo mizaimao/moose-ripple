@@ -62,6 +62,15 @@ int main(int argc, char **argv)
     CGLPixelFormatObj pf;
     GLint npf = 0;
     CHECK(CGLChoosePixelFormat(software ? sw : hw, &pf, &npf));
+    if (pf) {
+        GLint rid = 0, accel = 0;
+        CGLDescribePixelFormat(pf, 0, kCGLPFARendererID, &rid);
+        CGLDescribePixelFormat(pf, 0, kCGLPFAAccelerated, &accel);
+        printf("pixel format: %d virtual screen(s), renderer 0x%08x, accelerated %d\n", npf, rid, accel);
+    } else {
+        printf("pixel format: none matched\n");
+    }
+    fflush(stdout);
     CGLContextObj ctx;
     CHECK(CGLCreateContext(pf, NULL, &ctx));
     CGLDestroyPixelFormat(pf);

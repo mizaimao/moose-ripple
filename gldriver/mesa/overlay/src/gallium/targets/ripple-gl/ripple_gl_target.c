@@ -113,6 +113,9 @@ _Static_assert(offsetof(struct gld_pixel_format, display_mask) == 0x30, "pixel f
 
 /* ---- Library ------------------------------------------------------------------------- */
 
+/* RIPPLE_GL_DEBUG=1: log the management calls to stderr. */
+#define DBG(...) do { if (getenv("RIPPLE_GL_DEBUG")) fprintf(stderr, "RippleGLDriver: " __VA_ARGS__); } while (0)
+
 static simple_mtx_t lib_lock = SIMPLE_MTX_INITIALIZER;
 static uint32_t lib_display_mask;
 
@@ -132,11 +135,15 @@ gldInitializeLibrary(const io_service_t *accel, const uint8_t *accel_index,
    simple_mtx_lock(&lib_lock);
    lib_display_mask = offer ? display_mask : 0;
    simple_mtx_unlock(&lib_lock);
+   DBG("gldInitializeLibrary(accel %p [0x%x], index %p, mask 0x%x, %p, %p, flags 0x%x) in %s: %s\n",
+       (void *)accel, accel ? accel[0] : 0, (void *)accel_index, display_mask, io_flush,
+       io_bind_surface, flags, getprogname(), offer ? "offered" : "not offered");
 }
 
 GLD_EXPORT void
 gldTerminateLibrary(void)
 {
+   DBG("gldTerminateLibrary\n");
    simple_mtx_lock(&lib_lock);
    lib_display_mask = 0;
    simple_mtx_unlock(&lib_lock);
@@ -145,6 +152,7 @@ gldTerminateLibrary(void)
 GLD_EXPORT int
 gldGetVersion(int *major, int *minor, int *rev, uint32_t *renderer_id)
 {
+   DBG("gldGetVersion -> %d\n", lib_display_mask != 0);
    *major = 3;
    *minor = 1;
    *rev = 0;
@@ -164,6 +172,8 @@ mask_ok(uint32_t mask)
 GLD_EXPORT int
 gldGetRendererInfo(struct gld_renderer_info *rec, uint32_t display_mask)
 {
+   DBG("gldGetRendererInfo(%p, mask 0x%x), library mask 0x%x\n", (void *)rec, display_mask,
+       lib_display_mask);
    if (!mask_ok(display_mask))
       return kCGLBadDisplay;
    memset(rec, 0, sizeof(*rec));
@@ -203,6 +213,12 @@ gldChoosePixelFormat(struct gld_pixel_format **out, const uint32_t *attrs)
    uint32_t buffer_mode = 0, depth = 0, stencil = 0, mask = lib_display_mask;
    bool minimum = false, ok = true;
 
+   if (getenv("RIPPLE_GL_DEBUG")) {
+      fprintf(stderr, "RippleGLDriver: gldChoosePixelFormat attrs:");
+      for (const uint32_t *a = attrs; a && *a; a++)
+         fprintf(stderr, " %u", *a);
+      fprintf(stderr, "\n");
+   }
    *out = NULL;
    for (const uint32_t *a = attrs; a && *a && ok; a++) {
       switch (*a) {
@@ -233,6 +249,7 @@ gldChoosePixelFormat(struct gld_pixel_format **out, const uint32_t *attrs)
          break;                         /* flags we don't know: ignore */
       }
    }
+   DBG("gldChoosePixelFormat: %s (mask 0x%x)\n", ok && mask ? "match" : "no match", mask);
    if (!ok || !mask)
       return 0;                         /* no match: not an error */
 
@@ -333,10 +350,12 @@ gldCreateContext(struct gld_context **out, const struct gld_pixel_format *pf,
       simple_mtx_unlock(&shared->lock);
    if (!c->mesa) {
       free(c);
+      DBG("gldCreateContext: no Mesa context\n");
       return kCGLBadAlloc;
    }
    c->magic = GLD_CONTEXT_MAGIC;
    c->gc = ripple_cgl_gc_from_create_arg(gl_state);
+   DBG("gldCreateContext: mesa %p, gc %p, shared %p\n", (void *)c->mesa, c->gc, (void *)shared);
    ripple_gld_fill_config(cfg, pf);
    *out = c;
    return 0;
@@ -372,10 +391,12 @@ gldReclaimContext(struct gld_context *c)
 GLD_EXPORT int
 gldSetInteger(struct gld_context *c, int pname, const int *value)
 {
+   DBG("gldSetInteger(%p, 0x%x)\n", (void *)c, pname);
    /* OpenGL sends 0x2bd at the very end of CGLCreateContext: the dispatch table is final
     * now, so this is where the context moves to Mesa. */
    if (c && c->magic == GLD_CONTEXT_MAGIC && !c->taken_over && !c->takeover_failed) {
       c->taken_over = ripple_cgl_take_over(c->gc, c->mesa);
+      DBG("takeover: %s\n", c->taken_over ? "done" : "FAILED");
       if (!c->taken_over) {
          c->takeover_failed = true;
          fprintf(stderr, "RippleGLDriver: could not take over the GL context; it stays "
