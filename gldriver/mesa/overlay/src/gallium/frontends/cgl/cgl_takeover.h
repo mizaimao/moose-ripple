@@ -8,7 +8,7 @@
 
 struct ripple_cgl_context;
 
-/* GLEngine's context from gldCreateContext's 5th argument; NULL if it doesn't check out. */
+/* GLEngine's context from gldCreateContext's 5th argument (unchecked until the takeover). */
 void *ripple_cgl_gc_from_create_arg(void *arg5);
 
 /* Point the CGL context that belongs to GLEngine context `gc` at Mesa (our dispatch table,

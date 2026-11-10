@@ -70,9 +70,10 @@ void *
 ripple_cgl_gc_from_create_arg(void *arg5)
 {
 #if HAVE_TAKEOVER_LAYOUT
-   uint8_t *gc = (uint8_t *)arg5 - GC_FROM_CREATE_ARG5;
-   if (arg5 && *(uint32_t *)(gc + GC_MAGIC_OFFSET) == GC_MAGIC)
-      return gc;
+   /* GLEngine writes its magic only after the renderers' contexts exist, so it is checked
+    * at takeover time, not here. */
+   if (arg5)
+      return (uint8_t *)arg5 - GC_FROM_CREATE_ARG5;
 #endif
    return NULL;
 }

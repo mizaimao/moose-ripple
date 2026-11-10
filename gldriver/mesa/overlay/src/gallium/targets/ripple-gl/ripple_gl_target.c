@@ -250,6 +250,10 @@ gldChoosePixelFormat(struct gld_pixel_format **out, const uint32_t *attrs)
       }
    }
    DBG("gldChoosePixelFormat: %s (mask 0x%x)\n", ok && mask ? "match" : "no match", mask);
+   /* Window-capable unless off-screen was asked for, as GLRendererFloat does: OpenGL requires
+    * the Window bit whenever an app names none of Window, FullScreen, OffScreen, PBuffer. */
+   if (!(flags & GLD_FLAG_OFFSCREEN))
+      flags |= GLD_FLAG_WINDOW;
    if (!ok || !mask)
       return 0;                         /* no match: not an error */
 
