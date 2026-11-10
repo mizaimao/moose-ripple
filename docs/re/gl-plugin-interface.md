@@ -145,3 +145,39 @@ Readings (UNVERIFIED until disassembly confirms them):
   10006 (invalid display): a bare forward to the software renderer doesn't describe a
   renderer for the accelerated display. Expected; `gldGetRendererInfo` is M4 work.
 - Unloading the kext removed the properties and restored the normal state.
+
+## First decoded signatures (GLRendererFloat 1.6.13, x86_64 disassembly, 2026-11-10)
+
+Read from the code; still UNVERIFIED against a second driver unless noted.
+- `int gldGetVersion(int *a, int *b, int *c, int *d)`: if initialized, writes 3, 1, 0, 0x400 and
+  returns 1 (GeForceGLDriver also returned 1 in Trace 2).
+- `int gldGetRendererInfo(void *info, uint32_t displayMask, ...)`: returns 10006
+  (`kCGLBadDisplay`, "invalid display") unless `displayMask` is within the mask the driver was
+  initialized with; otherwise fills a 0x88-byte record and returns 0. GLRendererFloat writes
+  0x01000400 at +0x08 (renderer ID; CGL reported 0x01020400), the display mask at +0x24, and
+  other flags/mode fields at +0x0c..+0x30; memory sizes are 0. Field meanings: to map by
+  dumping NVIDIA's record next to CGL's renderer properties.
+- `const char *gldGetString(uint32_t displayMask?, GLenum name)`: 0x1f00 vendor, 0x1f01
+  renderer, 0x1f02 version, plus driver name and compute-device strings for 0x1f04/0x1f05.
+- `gldInitDispatch(gldContext *ctx, void *renderOps, void *limits)`: fills a driver table of
+  about 33 render operations (`gldAccum`, `gldClear`, `gldReadPixels`, `gldDrawPixels`, ...,
+  table size 0x108, which matches the gap between the two pointers in Trace 2) and a limits
+  record. It does **not** touch the public GL dispatch table.
+- So under Apple's GLEngine a driver renders through those ~33 operations and reads the GL
+  state from GLEngine's private context structures (e.g. GLRendererFloat's `gldUpdateDispatch`
+  follows pointers at context offsets 0x740, 0x748, 0x778). Those structures are undocumented
+  and large: this is the main reverse-engineering risk of a "native" driver.
+
+## The public dispatch table (SDK headers)
+
+- `OpenGL.framework/Headers/CGLContext.h`: `struct _CGLContextObject { GLIContext rend;
+  GLIFunctionDispatch disp; CGLPrivateObj priv; void *stak; }`.
+- `gliDispatch.h`: `GLIFunctionDispatch`, 764 function pointers, each taking the `GLIContext`
+  first.
+- `libGL.dylib` (10K549) uses it for every call: `glClear` loads the current context from
+  `%gs:0x150`, passes `ctx->rend`, and jumps through `ctx + 0x58` (`disp.clear`);
+  `glDrawArrays` through `ctx + 0x210` (`disp.draw_arrays`). Both offsets match the header.
+- Consequence: a driver that, once its context exists, points `rend` and `disp` at its own
+  GL implementation (Mesa) receives every GL call through a documented ABI, and needs from
+  GLEngine only the `gld*` management calls (renderer info, pixel formats, context and drawable
+  lifecycle, flush). See [m1-report.md](m1-report.md).
