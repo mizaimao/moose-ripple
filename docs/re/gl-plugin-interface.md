@@ -276,3 +276,10 @@ and AppleIntelGMA950GLDriver; runtime confirmation pending. C = read from code, 
   `gldUnbind*(ctx, obj)`); dummy handles are fine.
 - If no chosen pixel format node has flag bit 7 and recovery is allowed, OGL adds
   GLRendererFloat as a second virtual screen: `cgl-info` asks for `kCGLPFANoRecovery`.
+- **i386 layouts (C):** renderer info record 0x84 bytes and pixel format node 0x34 bytes, every
+  field 4 bytes lower than on x86_64 (natural C layout with a 4-byte `next`). The config
+  record has the same offsets up to 0x17f; its extension words sit at 0x188 (x86_64: 0x198).
+  renderOps slots are 4 bytes; GLRendererFloat leaves slots 16-19 and 25-29 NULL on both.
+- **Config record contents:** `gldriver/mesa/overlay/src/gallium/targets/ripple-gl/gld_config.c`
+  writes what GLRendererFloat's `_gldSetConfigData` writes (constants plus pixel format sizes;
+  no pointers, nothing from runtime queries).

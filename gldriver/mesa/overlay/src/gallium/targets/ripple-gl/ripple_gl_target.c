@@ -33,7 +33,7 @@
 #define RIPPLE_RENDERER_ID_FULL (0x01000000u | RIPPLE_RENDERER_ID)
 #define RIPPLE_VRAM_MB          512
 
-/* gldGetRendererInfo's record (0x88 bytes on x86_64). */
+/* gldGetRendererInfo's record (0x88 bytes on x86_64, 0x84 on i386). */
 struct gld_renderer_info {
    void *next;                   /* set by GLEngine */
    uint32_t renderer_id;
@@ -57,7 +57,7 @@ struct gld_renderer_info {
    uint8_t unused58[0x88 - 0x58];
 };
 
-/* gldChoosePixelFormat's nodes (0x38 bytes on x86_64). */
+/* gldChoosePixelFormat's nodes (0x38 bytes on x86_64, 0x34 on i386). */
 struct gld_pixel_format {
    struct gld_pixel_format *next;
    uint32_t renderer_id;
@@ -82,6 +82,11 @@ _Static_assert(sizeof(struct gld_renderer_info) == 0x88, "renderer info layout")
 _Static_assert(offsetof(struct gld_renderer_info, video_memory_mb) == 0x4c, "renderer info layout");
 _Static_assert(sizeof(struct gld_pixel_format) == 0x38, "pixel format layout");
 _Static_assert(offsetof(struct gld_pixel_format, display_mask) == 0x34, "pixel format layout");
+#elif defined(__i386__)
+_Static_assert(sizeof(struct gld_renderer_info) == 0x84, "renderer info layout");
+_Static_assert(offsetof(struct gld_renderer_info, video_memory_mb) == 0x48, "renderer info layout");
+_Static_assert(sizeof(struct gld_pixel_format) == 0x34, "pixel format layout");
+_Static_assert(offsetof(struct gld_pixel_format, display_mask) == 0x30, "pixel format layout");
 #endif
 
 /* Flag bits shared by renderer info and pixel formats. */
@@ -401,7 +406,9 @@ GLD_EXPORT int
 gldInitDispatch(struct gld_context *c, void **render_ops, uint32_t *limits)
 {
    for (unsigned i = 0; i < GLD_RENDER_OPS; i++) {
-      bool keep_null = (i >= 16 && i <= 19) || i == 25 || i == 26;
+      /* GLRendererFloat leaves slots 16-19 and 25-29 empty (byte offsets 0x80-0x98 and
+       * 0xc8-0xe8 on x86_64, half that on i386). */
+      bool keep_null = (i >= 16 && i <= 19) || (i >= 25 && i <= 29);
       render_ops[i] = keep_null ? NULL : (void *)render_op_noop;
    }
    limits[0] = 0x4000;
