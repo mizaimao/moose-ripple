@@ -40,4 +40,14 @@ Apple-licensed is needed to build, and no Apple binary goes in the repo.
 
 - C++ IOKit kexts (`-fapple-kext`, `libkmodc++`, OSObject vtables) are untested; M2 needs them.
 - No compiler runtime (`libcc_kext.a`): 64-bit division in i386 code will need care.
-- Userspace (dylibs, the GL bundle) needs SDK headers and libSystem stubs.
+- Userspace has no SDK headers yet: sources declare the few libSystem functions they use.
+
+## Userspace stopgap (until the 10.6 SDK arrives)
+
+Dylibs link with `-syslibroot .tools/guest-root` against the guest's own libSystem, copied
+from VM 210 on 2026-11-10 (the owner's OK). These are Apple binaries: they stay in `.tools/` on
+dev.lan and are never committed.
+- `/usr/lib/libSystem.B.dylib` (i386, x86_64, ppc7400; current version 125.2.11), SHA-256
+  `c5f4b97cbc9340795608ae0f78b399ecdadee64c63ec38b69ba15233f87b597c`
+- `/usr/lib/system/libmathCommon.A.dylib`, SHA-256
+  `288d8f7e86217faf16ce44eb44b1ec0064ce8db90214b6825c8c42900c905cd2`

@@ -109,3 +109,16 @@ the kernel log.
 **Next.** M0 still lacks the hello-world dylib (needs SDK headers or libSystem stubs) and
 kernel debugging with symbols (needs the 10.6.8 KDK, and lldb or a Mach-O-capable gdb on
 dev.lan).
+
+## 2026-11-10: hello-world dylib runs in 32- and 64-bit processes
+
+**Done.** `tools/hello-dylib`: a universal i386 + x86_64 dylib that prints from a constructor,
+linked against the guest's libSystem (`docs/decisions/0001-toolchain.md`, userspace stopgap).
+Test: `DYLD_INSERT_LIBRARIES=/tmp/ripple/hello.dylib arch -x86_64 /usr/bin/true`, then
+`arch -i386`.
+
+**Result.** "hello.dylib: loaded in pid 297, 64-bit process" and "... pid 298, 32-bit
+process", both exit 0.
+
+**Next.** The last M0 item is kernel debugging with symbols: waiting for the 10.6.8 KDK
+(build 10K549) from the owner.

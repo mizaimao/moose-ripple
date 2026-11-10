@@ -31,8 +31,8 @@ link_x86_64 = $(LD) -arch x86_64 -kext -macosx_version_min 10.6 -o $(1) $(2)
 link_i386   = $(LD) -arch i386 -r -no_data_in_code_info -o $(1).r $(2) && \
               $(VTOOL) -remove-build-version macos -output $(1) $(1).r && rm -f $(1).r
 
-.PHONY: all hello clean
-all: hello
+.PHONY: all hello hellodylib clean
+all: hello hellodylib
 
 clean:
 	rm -rf $(OUT)
@@ -58,6 +58,24 @@ $(OUT)/i386/RippleHello: $(call HELLO_OBJ,i386)
 	$(call link_i386,$@,$^)
 $(OUT)/x86_64/RippleHello: $(call HELLO_OBJ,x86_64)
 	$(call link_x86_64,$@,$^)
+
+# --- hello.dylib (userspace) --------------------------------------------------------------
+# Until the 10.6 SDK arrives, userspace links against the guest's own libSystem, copied into
+# .tools/guest-root (never committed; SHA-256 in docs/decisions/0001-toolchain.md).
+GUESTROOT ?= $(TOOLS)/guest-root
+UCFLAGS   := -mmacosx-version-min=10.6 -O2 -Wall -fno-stack-protector
+link_dylib = $(LD) -arch $(1) -dylib -macosx_version_min 10.6 -syslibroot $(GUESTROOT) \
+             -install_name /tmp/ripple/$(notdir $(2)) -o $(2) $(3) -lSystem
+
+$(OUT)/%/hello-dylib/hello.o: tools/hello-dylib/hello.c
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,$*) $(UCFLAGS) -c $< -o $@
+$(OUT)/%/hello.dylib: $(OUT)/%/hello-dylib/hello.o
+	$(call link_dylib,$*,$@,$^)
+
+hellodylib: $(OUT)/hello.dylib
+$(OUT)/hello.dylib: $(OUT)/i386/hello.dylib $(OUT)/x86_64/hello.dylib
+	$(LIPO) -create $^ -output $@
 
 hello: $(OUT)/RippleHello.kext
 $(OUT)/RippleHello.kext: $(OUT)/i386/RippleHello $(OUT)/x86_64/RippleHello kext/hello/Info.plist
