@@ -116,10 +116,14 @@ softdog reboot. Not reproduced since; all later card runs were with 210 stopped.
 9600 GT VM while a virgl VM runs.
 
 Open:
-- `irq 16: nobody cared` on most starts and stops of a VM with the card (IRQ 16 is shared
-  with the host's SMBus controller; the card's own interrupts go through MSI once macOS's
-  driver runs). Not seen in the boot before the crash, which included VM 211's runs. Possible
-  fixes are host changes (for example vfio-pci's `nointxmask`), so the owner's call.
+- `irq 16: nobody cared` (IRQ 16 is shared with the host's SMBus controller; the card's own
+  interrupts go through MSI once macOS's driver runs). Comparison on VM 212, same host boot:
+  OpenCore/OpenDuet, about 12 boots: at most VM starts and shutdowns, twice during macOS's boot
+  (one of those boots hung). Chameleon (VM 211's setup), 3 boots: only at each shutdown, none
+  at start or during the boot. Not seen at all in the host boot before the 17:15 crash, which
+  included VM 211's runs. **The owner's decision (2026-11-10): accepted as a known issue
+  (docs/known-issues.md), no host setting changes; a hung 9600 GT VM is restarted.** After a
+  clean rig reboot, at most 3 card boots check whether it persists.
 - NVCAP is Chameleon's default, not computed from this card's output table; both outputs and
   the monitor are found, so left as is.
 

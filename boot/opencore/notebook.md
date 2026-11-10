@@ -115,3 +115,17 @@ no emulated VGA, OVMF kept. Snapshot `pre-gpu` first.
    most VM starts and stops with the card since the 17:15 reboot (17:30:00, 17:36:55, ...).
 5. Same image back on the virtio VM with OVMF: 3 of 3, RippleFramebuffer registered.
 6. VM 212 left without the card, stopped; snapshot `one-image`.
+
+## 2026-11-10 18:05-18:25: Chameleon vs OpenCore, IRQ 16 messages
+
+VM 212 set up as VM 211 (SeaBIOS, Chameleon on ide0, the card with `x-vga=1`, FakeSMC, no
+`isa-applesmc`, OpenCore disk detached). Note: my first 4 Chameleon boots were reported as
+failures by my own test script (it used the wrong ssh key path) and were hard-stopped; the
+guests had in fact booted (checked by hand on the 4th: Disabler and FakeSMC loaded, up).
+With the script fixed, 3 boots: QE 1, 1920x1080, `cgl-info` 64 127 191 255, power-off 2-3 s;
+`irq 16: nobody cared` 0 times from start to shutdown, 1 time at each shutdown.
+With OpenCore/OpenDuet earlier (same host boot): at most starts (during QEMU's start, before
+the firmware runs) and shutdowns, twice during macOS's boot (17:37:28 hang, 17:46:53 no harm).
+The owner stopped the series here: accepted as a known issue, no host changes, at most 3 VM boots
+per check from now on. The rig gets one clean reboot (by the coordinator), then at most 3
+card boots check whether the messages persist.
