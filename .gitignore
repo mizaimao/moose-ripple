@@ -1,0 +1,18 @@
+# Never commit Apple software or keys (HANDOFF.md, rule 6)
+*.dmg
+*.iso
+*.img
+*.pkg
+*.sdk/
+*.kdk/
+Xcode*/
+*osk*
+.secrets/
+
+# Build output and scratch
+build/
+*.o
+*.dSYM/
+tmp-*/
+.venv/
+.DS_Store
