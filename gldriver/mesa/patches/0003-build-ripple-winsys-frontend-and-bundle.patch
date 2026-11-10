@@ -1,0 +1,41 @@
+diff -ru a/src/gallium/drivers/virgl/meson.build b/src/gallium/drivers/virgl/meson.build
+--- a/src/gallium/drivers/virgl/meson.build
++++ b/src/gallium/drivers/virgl/meson.build
+@@ -25,7 +25,9 @@
+ )
+ 
+ virgl_deps = [libvirgl]
+-if not with_platform_windows
++if host_machine.system() == 'darwin'
++  virgl_deps += libvirglripple   # moose-ripple
++elif not with_platform_windows
+   virgl_deps += libvirgldrm
+   virgl_deps += libvirglvtest
+ endif
+diff -ru a/src/gallium/meson.build b/src/gallium/meson.build
+--- a/src/gallium/meson.build
++++ b/src/gallium/meson.build
+@@ -164,7 +164,10 @@
+ endif
+ if with_gallium_virgl
+   subdir('winsys/virgl/common')
+-  if not with_platform_windows
++  if host_machine.system() == 'darwin'
++    # moose-ripple: virgl through the moose-ripple GPU kext on Mac OS X.
++    subdir('winsys/virgl/ripple')
++  elif not with_platform_windows
+     subdir('winsys/virgl/drm')
+     subdir('winsys/virgl/vtest')
+   endif
+@@ -226,6 +229,11 @@
+   subdir('frontends/osmesa')
+   subdir('targets/osmesa')
+ endif
++if with_gallium_virgl and host_machine.system() == 'darwin'
++  # moose-ripple: the CGL frontend and the OpenGL driver bundle for Mac OS X 10.6.
++  subdir('frontends/cgl')
++  subdir('targets/ripple-gl')
++endif
+ if with_gallium_xa
+   subdir('frontends/xa')
+   subdir('targets/xa')
