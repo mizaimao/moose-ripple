@@ -14,5 +14,8 @@ Date: 2026-11-10. Status: in use.
   from the Chameleon ISO) next to QEMU's `isa-applesmc`; `scripts/stop.sh` syncs and powers
   off instead. Worth fixing before M2's 24-hour runs.
 - **Input:** `usb-kbd` on `ehci.0` port 4: 10.6 has no PS/2 driver.
+- **Reference VM 211 (`ripple-ref`):** full clone of VM 210 with the 9600 GT passed through
+  (as VM 201). The real card drives the screen, so screenshots come from `screencapture` in
+  the guest. Run it with `VMID=211 scripts/...`; only one of 210/211 at a time.
 - **Access:** SSH key from the repo's ignored `.secrets/`, passwordless sudo for the guest user, set
   up in single-user mode (the owner's OK). Guest address found from the VM's MAC (`scripts/lib.sh`).

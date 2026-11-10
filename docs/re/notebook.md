@@ -188,3 +188,23 @@ to dev.lan through the laptop (dev.lan has no ssh access to the rig).
   kill; QEMU's gdbstub obeys a kill by exiting, so VM 210 powered off at 13:18:11 ("QEMU:
   Terminated via GDBstub"). After a reboot `diskutil verifyVolume /` was OK. The script now
   always ends in `process detach`, also on unexpected stops (`-k`).
+
+## 2026-11-10: M1 starts; reference VM 211 with the 9600 GT
+
+**Done** (the owner's go for M1). VM 210 stopped; `qm clone 210 211 --full` (`ripple-ref`), then
+`hostpci0: 0000:01:00,pcie=1,x-vga=1,romfile=9600gt-tpu.bin` (as VM 201) and no emulated VGA.
+Snapshot `base`. Only one of 210/211 runs at a time (shared card, 16 GB host).
+
+**Result.** Boots through Chameleon (keys sent blind; the display is the real card). System
+Profiler: GeForce 9600 GT, 1024 MB, device 0x0622, driving the owner's VS2247 at 1920x1080.
+Kexts: `com.apple.GeForce` 6.3.6, `NVDAResman` 6.3.6, `nv50hal` 6.3.6, `IOGraphicsFamily` 2.2.
+`screencapture` over ssh works (`scripts/screen.sh -g`): full Quartz Extreme desktop.
+
+**First static pass.** 43 Apple binaries copied to dev.lan `.tools/re/10K549`
+([binaries.md](binaries.md)). Findings in [gl-plugin-interface.md](gl-plugin-interface.md) and
+[ioaccelerator-interface.md](ioaccelerator-interface.md): 78 shared `gld*` entry points; the
+surface user client is in the SDK's own headers; VMsvga2 r166 fetched for reading (not
+copying; its own code is all-rights-reserved).
+
+**Next.** dtrace on VM 211: what WindowServer opens and calls on the accelerator, and how a GL
+program finds and drives `GeForceGLDriver`.
