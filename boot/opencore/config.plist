@@ -91,7 +91,39 @@
 	<key>DeviceProperties</key>
 	<dict>
 		<key>Add</key>
-		<dict/>
+		<dict>
+			<key>PciRoot(0x0)/Pci(0x1C,0x0)/Pci(0x0,0x0)</key>
+			<dict>
+				<key>@0,compatible</key>
+				<data>TlZEQSxOVk1hYwA=</data>
+				<key>@0,device_type</key>
+				<data>ZGlzcGxheQA=</data>
+				<key>@0,display-cfg</key>
+				<data>AwEDAA==</data>
+				<key>@0,name</key>
+				<data>TlZEQSxEaXNwbGF5LUEA</data>
+				<key>@1,compatible</key>
+				<data>TlZEQSxOVk1hYwA=</data>
+				<key>@1,device_type</key>
+				<data>ZGlzcGxheQA=</data>
+				<key>@1,display-cfg</key>
+				<data>//8AAQ==</data>
+				<key>@1,name</key>
+				<data>TlZEQSxEaXNwbGF5LUIA</data>
+				<key>NVCAP</key>
+				<data>BAAAAAAAAwAMAAAAAAAABwAAAAA=</data>
+				<key>NVPM</key>
+				<data>AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==</data>
+				<key>VRAM,totalsize</key>
+				<data>AAAAQA==</data>
+				<key>device_type</key>
+				<data>TlZEQSxQYXJlbnQA</data>
+				<key>model</key>
+				<data>R2VGb3JjZSA5NjAwIEdUAA==</data>
+				<key>rom-revision</key>
+				<data>NjIuOTQuMTEuMDAuMDMA</data>
+			</dict>
+		</dict>
 		<key>Delete</key>
 		<dict/>
 	</dict>

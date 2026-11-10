@@ -96,3 +96,22 @@ no emulated VGA, OVMF kept. Snapshot `pre-gpu` first.
   VGA routing for `x-vga=1` against i915, which was busy with 210's virgl. Earlier 9600 GT runs
   had either 210 stopped (VM 211) or i915 not loaded (VMs 200/201, before the iGPU was on).
 - VM 212 rolled back to `pre-gpu` (no card). No VM with the 9600 GT until the owner decides.
+
+## 2026-11-10 evening: 9600 GT under OpenCore (KI-4), VM 210 stopped
+
+1. OVMF, no `x-vga`, `vga: none`, NVIDIA properties added to `config.plist` (values from
+   Chameleon's `nvidia.c`, ROM version string from the ROM): GeForce 6.3.6 attaches, System
+   Profiler shows the card, 1024 MB and the VS2247 at 1920x1080, Quartz Extreme reported on,
+   but `cgl-info` reads 0 0 0 0 and `screencapture` is all black: the card was never started
+   (its ROM is BIOS-only). No host messages.
+2. OpenDuet again, now the `bootX64-blockio` build, virtio VM on SeaBIOS: 3 of 3 boots fine
+   (the default build had panicked 3 of 3).
+3. SeaBIOS + OpenDuet + card (`x-vga=1`, as VM 211): desktop on the 9600 GT at 1920x1080,
+   QE 1, `cgl-info` 64 127 191 255, Core Image on the GL path. Debug build: OpenCore finds
+   OpenDuet's GOP on the card (6 modes) and sets 1024x768, so the menu shows on the monitor.
+4. Cold boots with the card: 5 + 5, plus 2 single boots: 11 fine, 1 hung (boot 1 of the
+   first series: no WindowServer, ssh died, no power-off; the rig logged `irq 16: nobody
+   cared` at 17:37:28, 8 s after the guest kernel started). `irq 16: nobody cared` appears at
+   most VM starts and stops with the card since the 17:15 reboot (17:30:00, 17:36:55, ...).
+5. Same image back on the virtio VM with OVMF: 3 of 3, RippleFramebuffer registered.
+6. VM 212 left without the card, stopped; snapshot `one-image`.

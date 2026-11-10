@@ -69,6 +69,60 @@ ISO passed the same one).
 - `arch=i386` in boot-args still booted the 64-bit kernel, with `KernelArch` both `x86_64`
   and `Auto`. Not pursued: decision 0003 says 64-bit kernel only.
 
+## Update 2026-11-10 evening: the 9600 GT passthrough VM (KI-4)
+
+The owner's decision: one OpenCore image for every VM type (virtio-gpu, 9600 GT passthrough,
+later QEMU/UTM on Apple silicon); per-machine differences go in the VM settings. Tested on
+VM 212 with VM 210 stopped.
+
+**Result: the same image boots the 9600 GT VM, through OpenDuet on SeaBIOS.**
+- Picture: SeaBIOS starts the card from its ROM; OpenDuet draws through the card's VESA modes,
+  so the OpenCore menu and the verbose boot show on the monitor at 1024x768 (OpenCore debug
+  log: `GOP exists on ConsoleOutHandle and has 6 modes`, FB at 0xF9000000, mode 1024x768 set).
+- macOS: GeForce 6.3.6, NVDAResman, nv50hal; System Profiler "GeForce 9600 GT", 1024 MB, the
+  VS2247 at 1920x1080@60. Quartz Extreme on (`CGDisplayUsesOpenGLAcceleration` = 1), OpenGL
+  "NVIDIA GeForce 9600 GT OpenGL Engine" 2.1 NVIDIA-1.6.36, accelerated, and the repo's
+  `cgl-info` clear test reads back 64 127 191 255 (correct). Core Image renders through the GL
+  context (`CI_PRINT_TREE`: `fe-context-gls`). The Dashboard ripple itself wasn't watched
+  (that needs someone at the monitor).
+- 11 of 12 boots with the card fine (shutdown 3-4 s each). One hung early in boot (ssh died,
+  no WindowServer); at that moment the rig logged `irq 16: nobody cared ... Disabling IRQ #16`.
+- The same image still boots the virtio VM on OVMF (3 of 3 cold boots, RippleFramebuffer up),
+  and the virtio VM also boots on SeaBIOS + OpenDuet (3 of 3).
+
+What it took:
+- **OpenDuet's BIOS-disk build (`bootX64-blockio`) instead of the default `bootX64`.** With the
+  default build 10.6 panicked every boot (zeroed memory at 4 GB, above); with the block-I/O
+  build, which reads disks through the BIOS instead of its own drivers, 0 panics in 15 boots.
+  So the corruption most likely came from one of OpenDuet's own disk drivers leaving the
+  controller running after the hand-over to macOS (UNVERIFIED which one).
+- **The card's device properties in `config.plist`**, as Chameleon's GraphicsEnabler adds them
+  (Chameleon source, `i386/libsaio/nvidia.c`): `@0/@1,compatible` NVDA,NVMac,
+  `@0/@1,device_type` display, `@0/@1,name` NVDA,Display-A/B, `@0/@1,display-cfg`, NVCAP
+  (Chameleon's default), NVPM, `VRAM,totalsize` 1 GB, `device_type` NVDA,Parent, `model`,
+  `rom-revision` 62.94.11.00.03. Without them NVIDIA's driver loads but the card gets Apple's
+  generic framebuffer and no display. Keyed to `PciRoot(0x0)/Pci(0x1C,0x0)/Pci(0x0,0x0)`
+  (Proxmox `hostpci0`, `pcie=1`); on the virtio VMs nothing sits there.
+
+Why not OVMF for the card: all three ROM files on the rig for it are BIOS-only (no UEFI
+driver), so nothing starts the card. With the properties, macOS on OVMF did report the card
+and the monitor at 1920x1080, but the card wasn't initialised: `cgl-info` read back
+0 0 0 0 and screenshots were black. (Without `x-vga=1` on OVMF; that run caused no host
+messages.)
+
+The rig crash at 17:15 came about 60 s into a SeaBIOS + Chameleon run with the card
+(`x-vga=1`) while VM 210 ran virgl on the UHD 630: soft lockups in host register accesses,
+softdog reboot. Not reproduced since; all later card runs were with 210 stopped. Rule: no
+9600 GT VM while a virgl VM runs.
+
+Open:
+- `irq 16: nobody cared` on most starts and stops of a VM with the card (IRQ 16 is shared
+  with the host's SMBus controller; the card's own interrupts go through MSI once macOS's
+  driver runs). Not seen in the boot before the crash, which included VM 211's runs. Possible
+  fixes are host changes (for example vfio-pci's `nointxmask`), so the owner's call.
+- NVCAP is Chameleon's default, not computed from this card's output table; both outputs and
+  the monitor are found, so left as is.
+
 ## Not done / open
 
 - VMs 200/201 (the owner's) still have FakeSMC (via their boot loaders) plus `isa-applesmc`;

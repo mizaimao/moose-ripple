@@ -1,18 +1,25 @@
 # OpenCore boot disk for Mac OS X 10.6.8 in QEMU
 
-Boots the Snow Leopard dev VMs through OpenCore 1.0.8 on UEFI firmware (Proxmox's OVMF),
-replacing the Chameleon 2.1 ISO. Why and what was tried: [decision 0007](../../docs/decisions/0007-opencore.md).
+One image boots Mac OS X 10.6.8 through OpenCore 1.0.8 in every VM type tested, replacing the
+Chameleon 2.1 ISO:
+- **virtio-gpu VMs** (VM 210): UEFI firmware (Proxmox's OVMF).
+- **9600 GT passthrough VMs** (VM 211's setup): SeaBIOS, which starts the card from its BIOS
+  ROM, then OpenDuet (OpenCore's UEFI layer for BIOS machines, on the same disk).
+
+Why and what was tried: [decision 0007](../../docs/decisions/0007-opencore.md).
 
 ## Files
 
-- `config.plist`: the OpenCore configuration (no kexts, no ACPI tables, MacPro3,1 SMBIOS).
+- `config.plist`: the OpenCore configuration (no kexts, no ACPI tables, MacPro3,1 SMBIOS, the
+  9600 GT's device properties).
 - `sources.txt`: pinned OpenCore releases with SHA-256. Nothing downloaded is committed.
-- `mkimage.sh`: builds the disk image (runs as root on the retro rig).
+- `mkimage.sh`: builds the disk image (runs as root on the retro rig): a FAT32 EFI partition
+  with OpenCore, plus OpenDuet's boot sectors and its BIOS-disk build (`bootX64-blockio`).
 - `build.sh`: validates `config.plist` with `ocvalidate` on dev.lan, builds the image on the
   rig, and with `-w VMID` writes it to that VM's OpenCore disk.
 - `coldboot-test.sh`: N cold boots with clean shutdowns, one line per boot.
 
-## VM settings it needs
+## VM settings: virtio-gpu VMs
 
 Compared with the Chameleon setup (VM 210 on 2026-11-10):
 
@@ -36,6 +43,28 @@ Everything else stays as it is (q35 7.2, Penryn args, `usb-kbd`, e1000, `vga`).
 
 Details and evidence: [decision 0007](../../docs/decisions/0007-opencore.md).
 
+## VM settings: 9600 GT passthrough VMs
+
+Same as VM 211 except the boot disk and the SMC, tested on VM 212:
+
+| Setting | Value |
+|---|---|
+| Firmware | `bios: seabios` (OVMF can't start this card: its ROM has no UEFI driver) |
+| Boot disk | `ide0: local:VMID/vm-VMID-opencore.qcow2`, boot order `ide0;sata0` |
+| Card | `hostpci0: 0000:01:00,pcie=1,x-vga=1,romfile=9600gt-tpu.bin`, no emulated VGA |
+| SMC | `-device isa-applesmc,osk="..."` in `args`, as for the virtio VMs |
+| CPU timing | `,vmware-cpuid-freq=off`, as for the virtio VMs |
+
+- The card's device properties (model, VRAM, NVCAP, display names, as Chameleon injected them)
+  are in `config.plist` for the device path `PciRoot(0x0)/Pci(0x1C,0x0)/Pci(0x0,0x0)`, which
+  is where Proxmox puts `hostpci0` with `pcie=1`. Pass the card as `hostpci0`.
+- NVRAM isn't kept under OpenDuet: boot flags always come from `config.plist`.
+- **Never run a 9600 GT VM while a virgl VM (`vga: virtio-gl`) runs**: the rig crashed once
+  that way (2026-11-10 17:15).
+- Open: the rig logs `irq 16: nobody cared ... Disabling IRQ #16` at most starts and stops
+  of a VM with the card (IRQ 16 is shared with the host's SMBus). One boot in 12 hung while
+  it happened. See decision 0007.
+
 ## Build and install
 
 From the laptop (it only runs ssh/scp):
@@ -43,6 +72,7 @@ From the laptop (it only runs ssh/scp):
     boot/opencore/build.sh                 # validate and build only
     boot/opencore/build.sh -w 212          # ... and write to VM 212's OpenCore disk (VM stopped)
     OC_VARIANT=DEBUG boot/opencore/build.sh -w 212    # debug build of OpenCore
+    OC_DUET=none boot/opencore/build.sh    # without OpenDuet (bootX64 = OpenDuet's own disk drivers)
 
 The first `-w` creates `local:VMID/vm-VMID-opencore.qcow2` and sets it as `ide0`, boot order
 `ide0;sata0`. Later runs overwrite its contents; Proxmox snapshots keep older versions.

@@ -33,7 +33,7 @@ z = zipfile.ZipFile(sys.argv[1]); z.extract(\"Utilities/ocvalidate/ocvalidate.li
 ssh "$RETRO" 'mkdir -p /tmp/opencore-build/src'
 scp -q "$here/mkimage.sh" "$here/sources.txt" "$here/config.plist" "$RETRO:/tmp/opencore-build/src/"
 [ -d "$here/acpi" ] && scp -qr "$here/acpi" "$RETRO:/tmp/opencore-build/src/"
-ssh "$RETRO" "OC_VARIANT=$variant bash /tmp/opencore-build/src/mkimage.sh /tmp/opencore-build/src/config.plist /tmp/opencore-build/opencore.img"
+ssh "$RETRO" "OC_VARIANT=$variant OC_DUET=${OC_DUET:-bootX64-blockio} bash /tmp/opencore-build/src/mkimage.sh /tmp/opencore-build/src/config.plist /tmp/opencore-build/opencore.img"
 
 [ -n "$vmid" ] || exit 0
 
