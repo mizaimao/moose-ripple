@@ -45,8 +45,8 @@ strip_vmin  = $(VTOOL) -remove-build-version macos -output $(1) $(1).v && rm -f 
 link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
-.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe clean
-all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe
+.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears clean
+all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears
 
 clean:
 	rm -rf $(OUT)
@@ -236,4 +236,14 @@ $(OUT)/%/takeover-probe/takeover-probe: $(OUT)/%/takeover-probe/takeover-probe.o
 	$(call link_tool,$*,$@,$^,-framework OpenGL)
 takeoverprobe: $(OUT)/takeover-probe
 $(OUT)/takeover-probe: $(OUT)/i386/takeover-probe/takeover-probe $(OUT)/x86_64/takeover-probe/takeover-probe
+	$(LIPO) -create $^ -output $@
+
+# --- gl-gears (M4 window test: NSOpenGLView, double-buffered, accelerated) ----------------
+$(OUT)/%/gl-gears/gl-gears.o: tools/gl-gears/gl-gears.m
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,$*) $(UCFLAGS) -x objective-c -c $< -o $@
+$(OUT)/%/gl-gears/gl-gears: $(OUT)/%/gl-gears/gl-gears.o
+	$(call link_tool,$*,$@,$^,-framework Cocoa -framework OpenGL -lobjc)
+glgears: $(OUT)/gl-gears
+$(OUT)/gl-gears: $(OUT)/i386/gl-gears/gl-gears $(OUT)/x86_64/gl-gears/gl-gears
 	$(LIPO) -create $^ -output $@
