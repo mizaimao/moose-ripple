@@ -81,6 +81,8 @@ cpp_link_args = ['-Wl,-no_function_starts', '-Wl,-no_data_in_code_info']
 
 [properties]
 needs_exe_wrapper = true
+# The 10.6 SDK, for Apple's gliDispatch.h (frontends/cgl/gen_dispatch.py).
+ripple_sdk = '$SDK'
 
 [host_machine]
 system = 'darwin'
