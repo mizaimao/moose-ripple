@@ -4,10 +4,11 @@
 
 ripple_gl = shared_module(
   'RippleGLDriver',
-  'ripple_gl_target.c',
+  ['ripple_gl_target.c', 'gld_config.c'],
   name_prefix : '',
   name_suffix : [],
-  include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux],
+  include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux,
+                         inc_gallium_winsys, include_directories('../../frontends')],
   link_whole : [libcgl_st, libglapi_static],
   link_with : [libmesa, libgallium],
   link_args : ['-Wl,-exported_symbols_list,' + (meson.current_source_dir() / 'ripple-gl.exports'),
