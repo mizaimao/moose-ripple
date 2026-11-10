@@ -39,3 +39,19 @@ Dated entries: hypothesis, what was done, result, next step (HANDOFF.md rule 4).
 
 **Next.** Remote Login and root access for the scripts (needs the owner), then Mesa on the host
 (needs the owner) and switch VM 210 to `vga: virtio-gl`.
+
+## 2026-11-10: virtio-gl on the UHD 630; shutdown panic
+
+**Host.** the owner installed `libgl1 libegl1` (Mesa 22.3.6-1+deb12u2, `iris_dri.so`). VM 210 set to
+`vga: virtio-gl`: Proxmox runs `-device virtio-vga-gl -display egl-headless,gl=core`. QEMU holds
+`/dev/dri/renderD128` (the UHD 630), maps `iris_dri.so` and `libvirglrenderer.so.1.7.7`, and
+`info virtio-status` offers `VIRTIO_GPU_F_VIRGL` and `VIRTIO_GPU_F_EDID`. The guest boots to the
+desktop as before (VESA framebuffer, 1024x768; no driver yet).
+
+**Shutdown panic.** `osascript ... to shut down` in the guest panicked the kernel (launchd thread):
+a backtrace of one repeated return address in `com.apple.driver.AppleSMC` 3.1.0d5, with
+`org.netkas.FakeSMC` 2.7.2 also loaded. The install has FakeSMC while the VM also has QEMU's
+`isa-applesmc`; the two SMCs are the likely cause (UNVERIFIED). Same disk and args as VMs 200/201.
+Until fixed, power VM 210 off with `qm stop` after the disk is idle.
+
+Also seen: the guest volume has only 5.79 GB free of 64 GB.
