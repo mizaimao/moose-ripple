@@ -33,6 +33,8 @@ Compared with the Chameleon setup (VM 210 on 2026-11-10):
 | Boot flags | `npci=0x2000` from Chameleon's ISO | `npci=0x2000` in the default boot-args (config.plist) |
 
 Everything else stays as it is (q35 7.2, Penryn args, `usb-kbd`, e1000, `vga`).
+Check that `args` holds exactly one SMC device: `qm config VMID | grep -o isa-applesmc | wc -l`
+must print 1. Two of them make 10.6 panic at once (`AppleACPIPlatformExpert::start failed`).
 
 - `vmware-cpuid-freq=off`: otherwise OpenCore takes QEMU's 1 GHz APIC bus clock for the FSB
   and 10.6 sets the TSC to 4.0 GHz instead of 3.6 GHz; the guest clock runs 10% slow.

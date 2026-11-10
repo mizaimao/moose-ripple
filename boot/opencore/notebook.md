@@ -129,3 +129,19 @@ the firmware runs) and shutdowns, twice during macOS's boot (17:37:28 hang, 17:4
 The owner stopped the series here: accepted as a known issue, no host changes, at most 3 VM boots
 per check from now on. The rig gets one clean reboot (by the coordinator), then at most 3
 card boots check whether the messages persist.
+
+## 2026-11-10 18:32-18:50: the two card-boot panics after the rig reboot: my config error
+
+The owner saw a kernel panic on the 9600 GT monitor in both card boots after the clean rig reboot
+(18:32:56 and the next one). Diagnosed without the card (VM 212 on virtio):
+- OpenCore/OVMF without the card panicked too, 0.18 s into the kernel:
+  `AppleACPIPlatformExpert::start failed`, `Unable to find driver for this platform: "ACPI"`.
+  Chameleon still booted the same disk.
+- Cause: VM 212's `args` held **two** `-device isa-applesmc` entries. When I put the SMC back
+  for the card test, a command of mine that had been interrupted had already added one, and
+  my check (`grep -c applesmc`) counted lines, not devices. Two SMC devices in QEMU's ACPI
+  tables make 10.6's ACPI platform driver fail. The card boots at 18:32 ran with this config.
+  (The Chameleon boot at 18:41 then had one `isa-applesmc` plus FakeSMC, which is why its
+  shutdown hung: the known two-SMC problem.)
+- Fixed: exactly one `isa-applesmc` (`grep -o isa-applesmc | wc -l` = 1). One boot without
+  the card: fine, AppleACPIPlatformExpert up. So the panics were not the card's or OpenCore's.
