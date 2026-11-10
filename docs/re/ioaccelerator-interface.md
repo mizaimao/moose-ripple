@@ -64,15 +64,15 @@ User clients WindowServer holds (`ioreg`, `IOUserClientCreator` = "pid 69, Windo
 
 | Connection | Selector | Called from | Count | Reading |
 |---|---|---|---|---|
-| 0xb207 | 9 | `IOKit`IOAccelSetSurfaceFramebufferShape` | 188 | surface `kIOAccelSurfaceSetShape` (SDK enum index 9) |
-| 0xb123 | 17 | `IOKit`IOAccelSetSurfaceFramebufferShapeWithBackingAndLength` | 39 | surface `kIOAccelSurfaceSetShapeBackingAndLength` (index 17) |
-| 0x5733 | 11 | `GeForceGLDriver`gldAttachDrawable` | 164 | GL context client |
-| 0x5733 | 16 | `GeForceGLDriver`gldUpdateDispatch` | 165 | GL context client |
-| 0x5733 | 25, 30 | `GeForceGLDriver`gldFinish` | 4 each | GL context client |
-| 0x562f | 5 | `GeForceGLDriver`gldModifyTexture` | 21 | probably the device/shared client (UNVERIFIED) |
-| 0x562f | 6 | `GeForceGLDriver`gldReclaimTexture` | 10 | same |
-| 0x371f | 18 | `GeForceGA`_NVGetSurfaceInfo(...)` | 39 | 2D context client (GA plugin) |
-| 0x3403 | 1, 12 | `IOKit`_IOFBGetPixelInformation`, `IOFBSetCursorVisible` | 265, 2 | framebuffer client |
+| 0xb207 | 9 | `IOKit: IOAccelSetSurfaceFramebufferShape` | 188 | surface `kIOAccelSurfaceSetShape` (SDK enum index 9) |
+| 0xb123 | 17 | `IOKit: IOAccelSetSurfaceFramebufferShapeWithBackingAndLength` | 39 | surface `kIOAccelSurfaceSetShapeBackingAndLength` (index 17) |
+| 0x5733 | 11 | `GeForceGLDriver: gldAttachDrawable` | 164 | GL context client |
+| 0x5733 | 16 | `GeForceGLDriver: gldUpdateDispatch` | 165 | GL context client |
+| 0x5733 | 25, 30 | `GeForceGLDriver: gldFinish` | 4 each | GL context client |
+| 0x562f | 5 | `GeForceGLDriver: gldModifyTexture` | 21 | probably the device/shared client (UNVERIFIED) |
+| 0x562f | 6 | `GeForceGLDriver: gldReclaimTexture` | 10 | same |
+| 0x371f | 18 | `GeForceGA: _NVGetSurfaceInfo(...)` | 39 | 2D context client (GA plugin) |
+| 0x3403 | 1, 12 | `IOKit: _IOFBGetPixelInformation`, `IOKit: IOFBSetCursorVisible` | 265, 2 | framebuffer client |
 
 No `IOServiceOpen` during the window's life, and no surface for the TextEdit window itself.
 
