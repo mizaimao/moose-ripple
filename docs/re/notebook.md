@@ -418,3 +418,21 @@ scanouts, so visual checks are in-guest or via the Proxmox console).
   process (so the API's structures match for i386 and x86_64).
 - One "Couldn't alloc class RippleAccelerator" line: logged in the old system after the new
   kext's personalities reached the catalogue but before the reboot loaded its code. Harmless.
+
+## 2026-11-10: VM 210 switched to OpenCore (decision 0007)
+
+the OpenCore 1.0.8 setup, applied to VM 210 after snapshot `pre-opencore`:
+`boot/opencore/build.sh -w 210` (OpenCore disk as `ide0`), `bios: ovmf` + `efidisk0`, and in
+`args` QEMU's `isa-applesmc` (key copied from VM 200's config on the rig, not in the repo),
+`vmware-cpuid-freq=off`, `-fw_cfg name=opt/ovmf/X-PciMmio64Mb,string=0`; the unused
+`virtio-vga.xres/yres` globals removed. Result: boots by itself, boot-args `-v npci=0x2000` from
+NVRAM, TSC 3599984722 Hz, guest clock matches the rig, AppleSMC on QEMU's SMC (FakeSMC gone),
+RippleVirtioGPU + RippleAccelerator start, `virgl-clear` PASS, clean shutdown and reboot.
+Scripts: `boot.sh` knows OpenCore (no Chameleon keys), `bootargs.sh` sets NVRAM flags and refuses
+to drop `npci=0x2000`, `panic.sh` reads a panic message from guest memory, and `stop.sh` saves it
+before powering off a guest that doesn't answer ssh.
+
+Before the switch VM 210 had stopped answering ssh after about an hour idle (VM 212 ran a GL
+test on the same GPU meanwhile); it was powered off before its state could be read. Cause
+unknown; `stop.sh` now captures a panic message first. RippleVirtioGPU also refuses PCI BARs
+above 4 GB now (known-issues.md).

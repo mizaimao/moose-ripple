@@ -7,7 +7,9 @@ Date: 2026-11-10. Status: in use.
 - **Machine:** the same as VM 201, which already boots this install: `pc-q35-7.2`, SeaBIOS,
   Penryn CPU flags in `args` (QEMU's `isa-applesmc` removed, see below; the OSK never goes in
   the repo), e1000 NIC. 8 GB RAM, 4 cores. No GPU passthrough. `vga: virtio-gl`.
-- **Bootloader: Chameleon 2.1 r2069** (the ISO VM 201 uses). It boots this install as is,
+- **Bootloader: OpenCore 1.0.8 on OVMF since 2026-11-10** (decision 0007, built from
+  `boot/opencore/`; boot flags in NVRAM via `scripts/bootargs.sh`, keep `npci=0x2000`). Snapshot
+  `pre-opencore` holds the Chameleon setup. Before that: **Chameleon 2.1 r2069** (the ISO VM 201 uses). It boots this install as is,
   takes boot flags at its prompt (`scripts/boot.sh` types them), and draws through
   virtio-vga's VGA BIOS. Not tried: iBoot (VM 200) and OpenCore (an image is on the rig).
   FakeSMC 2.7.2 and Disabler 1.0.1 come from the ISO's `Extra/Preboot.dmg` ramdisk.

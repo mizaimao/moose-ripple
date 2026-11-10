@@ -17,7 +17,11 @@ if gssh 'sudo -n shutdown -h now' >/dev/null 2>&1; then
     done
     echo "VM $VMID still running after 60 s; powering off" >&2
 else
-    echo "no ssh to VM $VMID; powering off" >&2
+    echo "no ssh to VM $VMID; checking for a kernel panic before powering off" >&2
+    log=/tmp/ripple-panic-$VMID-$(date +%Y%m%d-%H%M%S).txt
+    "$(dirname "$0")/panic.sh" > "$log" 2>&1 || true
+    grep -q "panicstr = 0x0\|(char \*) 0x0000000000000000" "$log" && echo "no panic recorded" >&2 ||
+        { echo "panic text saved in $log:" >&2; sed -n 1,6p "$log" >&2; }
 fi
 ssh "$RETRO" qm stop "$VMID"
 echo "VM $VMID stopped"
