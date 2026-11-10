@@ -5,14 +5,15 @@ Date: 2026-11-10. Status: in use.
 - **Disk:** a qcow2 copy of the owner's Snow Leopard install (VM 200's `slhdd.raw`), so Proxmox
   snapshots work and VMs 200/201 stay untouched. Volume grown to 64 GiB.
 - **Machine:** the same as VM 201, which already boots this install: `pc-q35-7.2`, SeaBIOS,
-  Penryn CPU flags in `args`, `isa-applesmc` with the OSK from the host's VM config (never in
+  Penryn CPU flags in `args` (QEMU's `isa-applesmc` removed, see below; the OSK never goes in
   the repo), e1000 NIC. 8 GB RAM, 4 cores. No GPU passthrough. `vga: virtio-gl`.
 - **Bootloader: Chameleon 2.1 r2069** (the ISO VM 201 uses). It boots this install as is,
   takes boot flags at its prompt (`scripts/boot.sh` types them), and draws through
   virtio-vga's VGA BIOS. Not tried: iBoot (VM 200) and OpenCore (an image is on the rig).
-  Known issue: a clean shutdown panics in AppleSMC with FakeSMC 2.7.2 loaded (most likely
-  from the Chameleon ISO) next to QEMU's `isa-applesmc`; `scripts/stop.sh` syncs and powers
-  off instead. Worth fixing before M2's 24-hour runs.
+  FakeSMC 2.7.2 and Disabler 1.0.1 come from the ISO's `Extra/Preboot.dmg` ramdisk.
+- **One SMC only:** QEMU's `isa-applesmc` is removed from VMs 210 and 211, so FakeSMC is the
+  only SMC. With both, every clean shutdown panicked in AppleSMC (recursion); with FakeSMC
+  alone, `shutdown -h now` and the GUI shut-down both power off in about 3 s (2026-11-10).
 - **Input:** `usb-kbd` on `ehci.0` port 4: 10.6 has no PS/2 driver.
 - **Reference VM 211 (`ripple-ref`):** full clone of VM 210 with the 9600 GT passed through
   (as VM 201). The real card drives the screen, so screenshots come from `screencapture` in

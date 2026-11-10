@@ -231,3 +231,12 @@ headers; keep global destructors out of `__cxa_atexit`). On VM 210 it pointed th
 framebuffer at itself, and OpenGL `dlopen`ed `RippleGLDriver.bundle` in a new process.
 Renderer queries then failed (expected for a bare pass-through). Kext unloaded cleanly.
 Also: the gld* count is 80, not 78 (earlier hand count was wrong; corrected).
+
+## 2026-11-10: shutdown panic fixed
+
+FakeSMC 2.7.2 (and Disabler 1.0.1) load from the Chameleon ISO's `Extra/Preboot.dmg` ramdisk,
+and VM 210 also had QEMU's `isa-applesmc`. Removed `isa-applesmc` from VM 210's `args`
+(snapshot `pre-smc-fix` first): boots fine, AppleSMC 3.1.0d5 attaches to FakeSMC, and both
+`sudo shutdown -h now` and System Events "shut down" power off in about 3 s. Same change on
+VM 211. `scripts/stop.sh` now shuts down cleanly and only powers off as a fallback.
+VMs 200/201 (the owner's) have the same pair and most likely the same panic; not changed.
