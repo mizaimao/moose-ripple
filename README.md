@@ -5,8 +5,9 @@ Core Image through a guest driver for QEMU's virtio-gpu + virglrenderer. Named a
 Dashboard ripple, the classic sign that Quartz Extreme works.
 
 - **The plan:** [HANDOFF.md](HANDOFF.md) (written under the working name "snow-virgl").
-- **Status:** M0 (build, test and debug loop) and M1 (go/no-go spike, [report](docs/re/m1-report.md)) done
-  2026-11-10. Next: M2, the 2D framebuffer kext, once the owner decides on the M1 recommendations.
+- **Status:** M0 (build, test and debug loop), M1 (go/no-go spike, [report](docs/re/m1-report.md)), M2 (2D
+  display driver, [report](docs/re/m2-report.md)) and M3 (3D transport, [report](docs/re/m3-report.md)) done
+  2026-11-10. Next: M4, the GL bundle, once the owner says go.
 - **Visibility:** private until it reaches a meaningful stage; The owner decides when it opens.
 - **Known issues** (useful beyond this project): [docs/known-issues.md](docs/known-issues.md).
 - **Ideas for later:** [docs/future-ideas.md](docs/future-ideas.md) (not scheduled).
