@@ -45,6 +45,8 @@ static bool cgs_ok;
 
 #define CGS_DEPTH_32 4         /* CGSSetWindowDepth / CGSLockWindowBits format code */
 
+#define DBG(...) do { if (getenv("RIPPLE_GL_DEBUG")) fprintf(stderr, "RippleGLDriver: " __VA_ARGS__); } while (0)
+
 __attribute__((constructor)) static void
 gld_window_init(void)
 {
@@ -105,7 +107,10 @@ setup(struct gld_window *w, bool fresh, bool *changed)
 {
    cg_rect bounds;
 
-   if (cgs.GetSurfaceBounds(w->cid, w->wid, w->sid, &bounds))
+   int e = cgs.GetSurfaceBounds(w->cid, w->wid, w->sid, &bounds);
+   DBG("CGSGetSurfaceBounds(%u, %u, %u) = %d: %g %g %g %g\n", w->cid, w->wid, w->sid, e,
+       (double)bounds.x, (double)bounds.y, (double)bounds.w, (double)bounds.h);
+   if (e)
       return -1;
    unsigned width = bounds.w > 0 ? (unsigned)bounds.w : 0;
    unsigned height = bounds.h > 0 ? (unsigned)bounds.h : 0;
@@ -117,9 +122,11 @@ setup(struct gld_window *w, bool fresh, bool *changed)
       w->base = NULL;
    }
    if (fresh) {
-      if (cgs.NewRegionWithRect(&shape, &w->rgn) ||
-          cgs.NewWindow(w->cid, 2, 0, 0, w->rgn, &w->priv) ||
-          cgs.SetWindowDepth(w->cid, w->priv, CGS_DEPTH_32))
+      int e1 = cgs.NewRegionWithRect(&shape, &w->rgn);
+      int e2 = e1 ? -1 : cgs.NewWindow(w->cid, 2, 0, 0, w->rgn, &w->priv);
+      int e3 = e2 ? -1 : cgs.SetWindowDepth(w->cid, w->priv, CGS_DEPTH_32);
+      DBG("region %d, CGSNewWindow %d -> %d, depth %d\n", e1, e2, w->priv, e3);
+      if (e1 || e2 || e3)
          return -1;
    } else if (*changed) {
       cgs.ReleaseRegion(w->rgn);
@@ -128,8 +135,11 @@ setup(struct gld_window *w, bool fresh, bool *changed)
           cgs.SetWindowShape(w->cid, w->priv, 0, 0, w->rgn))
          return -1;
    }
-   if (cgs.BindSurface(w->cid, w->wid, w->sid, 1, 0, w->priv) || !lock_bits(w))
+   e = cgs.BindSurface(w->cid, w->wid, w->sid, 1, 0, w->priv);
+   DBG("CGSBindSurface = %d\n", e);
+   if (e || !lock_bits(w))
       return -1;
+   DBG("bits %p, row bytes %d\n", w->base, w->row_bytes);
    w->width = width;
    w->height = height;
    return 0;
@@ -215,6 +225,11 @@ gld_window_present(void *data, const uint8_t *pixels, unsigned stride, unsigned 
    struct gld_window *w = data;
 
    simple_mtx_lock(&windows_lock);
+   static int presents;
+   if (presents++ < 3)
+      DBG("present %ux%u into %p (%ux%u, row bytes %d), first pixel %02x %02x %02x %02x\n",
+          width, height, w->base, w->width, w->height, w->row_bytes, pixels[0], pixels[1],
+          pixels[2], pixels[3]);
    if (w->base) {
       unsigned rows = height < w->height ? height : w->height;
       unsigned bytes = (width < w->width ? width : w->width) * 4;
@@ -223,7 +238,9 @@ gld_window_present(void *data, const uint8_t *pixels, unsigned stride, unsigned 
                 bytes);
       cgs.UnlockWindowBits(w->cid, w->priv, NULL);
       w->base = NULL;
-      cgs.FlushSurfaceWithOptions(w->cid, w->wid, w->sid, NULL, w->vsync);
+      int fe = cgs.FlushSurfaceWithOptions(w->cid, w->wid, w->sid, NULL, w->vsync);
+      if (presents < 4)
+         DBG("CGSFlushSurfaceWithOptions = %d\n", fe);
       lock_bits(w);
    }
    simple_mtx_unlock(&windows_lock);

@@ -45,8 +45,8 @@ strip_vmin  = $(VTOOL) -remove-build-version macos -output $(1) $(1).v && rm -f 
 link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
-.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears clean
-all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears
+.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab clean
+all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab
 
 clean:
 	rm -rf $(OUT)
@@ -247,3 +247,11 @@ $(OUT)/%/gl-gears/gl-gears: $(OUT)/%/gl-gears/gl-gears.o
 glgears: $(OUT)/gl-gears
 $(OUT)/gl-gears: $(OUT)/i386/gl-gears/gl-gears $(OUT)/x86_64/gl-gears/gl-gears
 	$(LIPO) -create $^ -output $@
+
+# --- grab (save the guest's main display as PNG; works over ssh) --------------------------
+$(OUT)/x86_64/grab/grab.o: tools/grab/grab.c
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,x86_64) $(UCFLAGS) -c $< -o $@
+$(OUT)/grab: $(OUT)/x86_64/grab/grab.o
+	$(call link_tool,x86_64,$@,$^,-framework ApplicationServices -framework CoreFoundation)
+grab: $(OUT)/grab
