@@ -45,8 +45,8 @@ strip_vmin  = $(VTOOL) -remove-build-version macos -output $(1) $(1).v && rm -f 
 link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
-.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode clean
-all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode
+.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet clean
+all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet
 
 clean:
 	rm -rf $(OUT)
@@ -185,3 +185,8 @@ $(OUT)/%/setmode/setmode: $(OUT)/%/setmode/setmode.o
 setmode: $(OUT)/setmode
 $(OUT)/setmode: $(OUT)/i386/setmode/setmode $(OUT)/x86_64/setmode/setmode
 	$(LIPO) -create $^ -output $@
+
+# --- RippleQEMUTablet (codeless kext: Info.plist only) -----------------------------------
+qemutablet: $(OUT)/RippleQEMUTablet.kext
+$(OUT)/RippleQEMUTablet.kext: kext/qemutablet/Info.plist
+	rm -rf $@ && mkdir -p $@/Contents && cp $< $@/Contents/Info.plist

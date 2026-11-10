@@ -33,4 +33,28 @@ with `tools/ptrpos` (`CGEventGetLocation`):
 That is a linear map stretched by 1.176 (about 1/0.85) around the centre, then clamped. It is
 repeatable and doesn't depend on the previous position, so it isn't pointer acceleration, and
 it is the same with or without our framebuffer, so it comes from 10.6's HID stack, not the
-display. Status: being fixed (see [re/notebook.md](re/notebook.md)).
+display.
+
+**Cause.** Apple's `IOHIDEventDriver` (IOHIDFamily 1.6.6, open source as IOHIDFamily-315.7.16)
+trims 15% off the range of every absolute pointing device, half at each end
+(`IOHIDEventDriver.cpp`: `absoluteAxisRemovalPercentage = 15`), then scales the remaining 85%
+to the screen: 1/0.85 = 1.176. The driver reads an override from its own property
+`AbsoluteAxisBoundsRemovalPercentage`.
+
+**Fix.** [`kext/qemutablet`](../kext/qemutablet/Info.plist), a codeless kext (only an
+Info.plist): a personality that has Apple's `IOHIDEventDriver` drive QEMU's tablet (vendor
+0x0627, product 1, Generic Desktop / Mouse) with `AbsoluteAxisBoundsRemovalPercentage` = 0.
+Its vendor/product keys outscore Apple's generic personality (7200 vs 1200). After installing
+it in `/System/Library/Extensions` and rebuilding the kext cache:
+
+| Injected | Guest pointer at 1280x800 |
+|---|---|
+| 0 | 0, 0 |
+| 4096 | 160, 100 |
+| 8192 | 320, 200 |
+| 16384 | 640, 400 |
+| 24576 | 960, 600 |
+| 32767 | 1279, 799 |
+
+It works with any display driver, not only ours, so it is useful on its own for 10.6 in QEMU
+(and likely 10.5, which has the same HID code; untested).

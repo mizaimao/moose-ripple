@@ -317,3 +317,11 @@ New `tools/setmode` (CoreGraphics display configuration, as the Displays pane us
 permanently. 1280x800 -> 1920x1200 -> 1024x768 -> 1280x800 all OK; the host display follows
 each time, and `RippleFramebuffer: mode WxH set` is logged.
 [img at 1920x1200](img/2026-11-10-framebuffer-1920x1200.png)
+
+## 2026-11-10: tablet offset fixed (codeless kext)
+
+Cause and fix in [../known-issues.md](../known-issues.md): IOHIDEventDriver's default 15% trim
+of absolute axes (IOHIDFamily-315.7.16 source, tarball SHA-256
+`cb033840edb81a07694793242ebe1a356fb7da205079a861b09457e58df92d2f`, matches the guest's 1.6.6).
+`kext/qemutablet` sets `AbsoluteAxisBoundsRemovalPercentage` = 0 for QEMU's tablet only;
+injected positions now land exactly. Installed in VM 210.
