@@ -45,8 +45,8 @@ strip_vmin  = $(VTOOL) -remove-build-version macos -output $(1) $(1).v && rm -f 
 link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
-.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet clean
-all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet
+.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear clean
+all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear
 
 clean:
 	rm -rf $(OUT)
@@ -150,8 +150,9 @@ $(OUT)/RippleGLDriver.bundle: $(OUT)/x86_64/RippleGLDriver gldriver/shim/Info.pl
 	cp $(OUT)/x86_64/RippleGLDriver $@/Contents/MacOS/RippleGLDriver
 
 # --- RippleVirtioGPU (M2) ---------------------------------------------------------------
-VGPU_INC := -Ithird_party/virtio -Ikext/virtiogpu
+VGPU_INC := -Ithird_party/virtio -Ikext/virtiogpu -Iinclude
 VGPU_OBJ  = $(OUT)/x86_64/virtiogpu/VirtioGPUDevice.o $(OUT)/x86_64/virtiogpu/RippleFramebuffer.o \
+            $(OUT)/x86_64/virtiogpu/RippleAccelerator.o $(OUT)/x86_64/virtiogpu/RippleGPUClient.o \
             $(OUT)/x86_64/virtiogpu/virtqueue.o \
             $(OUT)/x86_64/virtiogpu/info.o
 $(OUT)/x86_64/virtiogpu/%.o: kext/virtiogpu/%.cpp kext/virtiogpu/*.h
@@ -190,3 +191,13 @@ $(OUT)/setmode: $(OUT)/i386/setmode/setmode $(OUT)/x86_64/setmode/setmode
 qemutablet: $(OUT)/RippleQEMUTablet.kext
 $(OUT)/RippleQEMUTablet.kext: kext/qemutablet/Info.plist
 	rm -rf $@ && mkdir -p $@/Contents && cp $< $@/Contents/Info.plist
+
+# --- virgl-clear (M3 acceptance test) ----------------------------------------------------
+$(OUT)/%/virgl-clear/virgl-clear.o: tools/virgl-clear/virgl-clear.c include/ripple_gpu_uapi.h
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,$*) $(UCFLAGS) -Iinclude -Ithird_party/virgl -c $< -o $@
+$(OUT)/%/virgl-clear/virgl-clear: $(OUT)/%/virgl-clear/virgl-clear.o
+	$(call link_tool,$*,$@,$^,-framework IOKit -framework CoreFoundation)
+virglclear: $(OUT)/virgl-clear
+$(OUT)/virgl-clear: $(OUT)/i386/virgl-clear/virgl-clear $(OUT)/x86_64/virgl-clear/virgl-clear
+	$(LIPO) -create $^ -output $@

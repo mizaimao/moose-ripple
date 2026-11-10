@@ -7,6 +7,7 @@
 #define RIPPLE_VIRTIO_GPU_DEVICE_H
 
 #include <libkern/c++/OSObject.h>
+#include <libkern/OSAtomic.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/pci/IOPCIDevice.h>
@@ -52,6 +53,23 @@ public:
     bool transferToHost2D(uint32_t id, const Rect &r, uint64_t offset);
     bool resourceFlush(uint32_t id, const Rect &r);
 
+    // Device-wide ids (resources are shared by the framebuffer and 3D clients).
+    uint32_t allocResourceId() { return (uint32_t)OSIncrementAtomic(&fNextResource) + 1; }
+    uint32_t allocContextId()  { return (uint32_t)OSIncrementAtomic(&fNextContext) + 1; }
+
+    // 3D (virgl). Fenced commands complete only when the host has finished the work, so a
+    // true return means the work is done; *fence gets the fence id used.
+    bool ctxCreate(uint32_t ctx, const char *name);
+    bool ctxDestroy(uint32_t ctx);
+    bool ctxAttachResource(uint32_t ctx, uint32_t id);
+    bool ctxDetachResource(uint32_t ctx, uint32_t id);
+    bool resourceCreate3D(uint32_t id, uint32_t target, uint32_t format, uint32_t bind,
+                          uint32_t width, uint32_t height, uint32_t depth, uint32_t arraySize,
+                          uint32_t lastLevel, uint32_t nrSamples, uint32_t flags);
+    bool submit3D(uint32_t ctx, uint64_t pa, uint32_t size, uint64_t *fence);
+    bool transfer3D(bool toHost, uint32_t ctx, uint32_t id, uint32_t level, const uint32_t box[6],
+                    uint32_t stride, uint32_t layerStride, uint64_t offset, uint64_t *fence);
+
     // Cursor queue: no response; the request buffer is reclaimed later.
     bool updateCursor(uint32_t scanout, uint32_t id, int32_t x, int32_t y,
                       uint32_t hotX, uint32_t hotY);
@@ -78,6 +96,8 @@ private:
     uint32_t fNotifyMult;
     uint32_t fFeatures, fNumScanouts, fNumCapsets;
     bool     fVirgl;                      // VIRTIO_GPU_F_VIRGL negotiated
+    volatile SInt32 fNextResource, fNextContext;
+    volatile SInt64 fNextFence;
     uint64_t fSlowestAbs;               // slowest command (absolute time) and its type
     uint32_t fSlowestType, fOver100ms;
     Queue fQueue[2];               // 0 control, 1 cursor

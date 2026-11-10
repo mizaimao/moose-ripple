@@ -399,3 +399,22 @@ capability_bits 0xdff7ffff. Far beyond 10.6's needs (GL 2.1, GLSL 1.20), so the 
 risk "Core Image needs features virgl can't provide" looks small on this host. The 2D
 framebuffer keeps working on the virgl device (desktop at 1280x800; `screendump` can't see GL
 scanouts, so visual checks are in-guest or via the Proxmox console).
+
+## 2026-11-10: M3 step 3: user-client API and virgl clear test pass
+
+- API: [../kext-uapi.md](../kext-uapi.md), header `include/ripple_gpu_uapi.h` (GPU-neutral, decision
+  0005; virgl appears only as backend 1's command stream, capability blobs and buffer params).
+- Kernel: `RippleAccelerator` (an `IOAccelerator`, matched on `RippleFramebuffer`, starts only with
+  VIRGL) and `RippleGPUClient` (`IOServiceOpen` type 'RPG1'): contexts = virgl contexts, buffers =
+  `RESOURCE_CREATE_3D` + guest backing (mappable with `IOConnectMapMemory64`), submit = attach
+  referenced buffers to the context, copy commands to contiguous memory, fenced `SUBMIT_3D`;
+  transfers = fenced `TRANSFER_TO/FROM_HOST_3D`. Fenced commands complete only when the host is
+  done, so v1 is synchronous. Resource and context ids are now device-wide (framebuffer and
+  clients share them). virgl protocol headers vendored from virglrenderer 0.10.4 (MIT) into
+  `third_party/virgl`.
+- Test `tools/virgl-clear`: CREATE_OBJECT(surface) + SET_FRAMEBUFFER_STATE + CLEAR to
+  (0.25, 0.5, 0.75, 1.0) on a 64x64 B8G8R8A8 render target, transfer back, map, check:
+  B 191 G 128 R 64 A 255 at (32,32), 0 of 4096 pixels wrong, PASS in a 64-bit and a 32-bit
+  process (so the API's structures match for i386 and x86_64).
+- One "Couldn't alloc class RippleAccelerator" line: logged in the old system after the new
+  kext's personalities reached the catalogue but before the reboot loaded its code. Harmless.

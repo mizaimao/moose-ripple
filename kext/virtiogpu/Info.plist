@@ -39,6 +39,17 @@
 			<key>RippleHardwareCursor</key>
 			<false/>
 		</dict>
+		<key>RippleAccelerator</key>
+		<dict>
+			<key>CFBundleIdentifier</key>
+			<string>com.mooseman.ripple.VirtioGPU</string>
+			<key>IOClass</key>
+			<string>RippleAccelerator</string>
+			<key>IOProviderClass</key>
+			<string>RippleFramebuffer</string>
+			<key>IOMatchCategory</key>
+			<string>RippleAccelerator</string>
+		</dict>
 	</dict>
 	<key>OSBundleLibraries</key>
 	<dict>

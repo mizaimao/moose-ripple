@@ -630,3 +630,104 @@ uint32_t VirtioGPUDevice::getCapset(uint32_t id, uint32_t version, void *buf, ui
     IOFree(resp, hdr + size);
     return got;
 }
+
+// ---- 3D (virgl) -----------------------------------------------------------------------------
+
+bool VirtioGPUDevice::ctxCreate(uint32_t ctx, const char *name)
+{
+    struct virtio_gpu_ctx_create c;
+    bzero(&c, sizeof(c));
+    c.hdr.type = VIRTIO_GPU_CMD_CTX_CREATE;
+    c.hdr.ctx_id = ctx;
+    strlcpy(c.debug_name, name ? name : "ripple", sizeof(c.debug_name));
+    c.nlen = (uint32_t)strlen(c.debug_name);
+    c.context_init = 0;                 // virgl
+    return simple(&c, sizeof(c));
+}
+
+bool VirtioGPUDevice::ctxDestroy(uint32_t ctx)
+{
+    struct virtio_gpu_ctx_destroy c;
+    bzero(&c, sizeof(c));
+    c.hdr.type = VIRTIO_GPU_CMD_CTX_DESTROY;
+    c.hdr.ctx_id = ctx;
+    return simple(&c, sizeof(c));
+}
+
+bool VirtioGPUDevice::ctxAttachResource(uint32_t ctx, uint32_t id)
+{
+    struct virtio_gpu_ctx_resource c;
+    bzero(&c, sizeof(c));
+    c.hdr.type = VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE;
+    c.hdr.ctx_id = ctx;
+    c.resource_id = id;
+    return simple(&c, sizeof(c));
+}
+
+bool VirtioGPUDevice::ctxDetachResource(uint32_t ctx, uint32_t id)
+{
+    struct virtio_gpu_ctx_resource c;
+    bzero(&c, sizeof(c));
+    c.hdr.type = VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE;
+    c.hdr.ctx_id = ctx;
+    c.resource_id = id;
+    return simple(&c, sizeof(c));
+}
+
+bool VirtioGPUDevice::resourceCreate3D(uint32_t id, uint32_t target, uint32_t format, uint32_t bind,
+                                       uint32_t width, uint32_t height, uint32_t depth,
+                                       uint32_t arraySize, uint32_t lastLevel, uint32_t nrSamples,
+                                       uint32_t flags)
+{
+    struct virtio_gpu_resource_create_3d c;
+    bzero(&c, sizeof(c));
+    c.hdr.type = VIRTIO_GPU_CMD_RESOURCE_CREATE_3D;
+    c.resource_id = id;
+    c.target = target;
+    c.format = format;
+    c.bind = bind;
+    c.width = width;
+    c.height = height;
+    c.depth = depth;
+    c.array_size = arraySize;
+    c.last_level = lastLevel;
+    c.nr_samples = nrSamples;
+    c.flags = flags;
+    return simple(&c, sizeof(c));
+}
+
+bool VirtioGPUDevice::submit3D(uint32_t ctx, uint64_t pa, uint32_t size, uint64_t *fence)
+{
+    struct virtio_gpu_cmd_submit c;
+    bzero(&c, sizeof(c));
+    c.hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    c.hdr.flags = VIRTIO_GPU_FLAG_FENCE;
+    c.hdr.fence_id = (uint64_t)OSIncrementAtomic64(&fNextFence) + 1;
+    c.hdr.ctx_id = ctx;
+    c.size = size;
+    if (fence)
+        *fence = c.hdr.fence_id;
+    return simple(&c, sizeof(c), pa, size);
+}
+
+bool VirtioGPUDevice::transfer3D(bool toHost, uint32_t ctx, uint32_t id, uint32_t level,
+                                 const uint32_t box[6], uint32_t stride, uint32_t layerStride,
+                                 uint64_t offset, uint64_t *fence)
+{
+    struct virtio_gpu_transfer_host_3d c;
+    bzero(&c, sizeof(c));
+    c.hdr.type = toHost ? VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D : VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D;
+    c.hdr.flags = VIRTIO_GPU_FLAG_FENCE;
+    c.hdr.fence_id = (uint64_t)OSIncrementAtomic64(&fNextFence) + 1;
+    c.hdr.ctx_id = ctx;
+    c.box.x = box[0]; c.box.y = box[1]; c.box.z = box[2];
+    c.box.w = box[3]; c.box.h = box[4]; c.box.d = box[5];
+    c.offset = offset;
+    c.resource_id = id;
+    c.level = level;
+    c.stride = stride;
+    c.layer_stride = layerStride;
+    if (fence)
+        *fence = c.hdr.fence_id;
+    return simple(&c, sizeof(c));
+}

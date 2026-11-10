@@ -33,7 +33,7 @@ class RippleFramebuffer : public IOFramebuffer
     unsigned        fModeCount;
     unsigned        fPreferred;          // index into fModes
     IODisplayModeID fCurMode, fStartupMode;
-    uint32_t        fScanoutRes, fNextRes;
+    uint32_t        fScanoutRes;
 
     IOTimerEventSource *fRefresh;
     bool                fEnabled;
@@ -62,6 +62,8 @@ class RippleFramebuffer : public IOFramebuffer
     void  publishCapsets();     // host GPU capability sets into the registry (diagnostics)
 
 public:
+    VirtioGPUDevice *device() const { return fDev; }   // for RippleAccelerator
+
     virtual bool start(IOService *provider);
     virtual void stop(IOService *provider);
     virtual void free();

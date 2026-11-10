@@ -106,7 +106,6 @@ bool RippleFramebuffer::start(IOService *provider)
         setProperty("RippleCursor", fHWCursor ? "hardware" : "software");
     }
     fCurMode = fStartupMode = fPreferred + 1;
-    fNextRes = 1;
 
     fVRAM = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
                 kIODirectionInOut | kIOMemoryPhysicallyContiguous | kIOMemoryKernelUserShared,
@@ -147,7 +146,7 @@ IOReturn RippleFramebuffer::enableController(void)
 
     // Cursor resource: 64x64 with alpha (hardware cursor only).
     if (fHWCursor) {
-        fCursorRes = fNextRes++;
+        fCursorRes = fDev->allocResourceId();
         if (!fDev->resourceCreate2D(fCursorRes, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM, kCursorSize, kCursorSize) ||
             !fDev->attachBacking(fCursorRes, fCursorMem, kCursorSize * kCursorSize * 4)) {
             LOG("cursor resource failed; using the software cursor");
@@ -180,7 +179,7 @@ bool RippleFramebuffer::applyMode(IODisplayModeID m)
         fDev->resourceUnref(fScanoutRes);
         fScanoutRes = 0;
     }
-    uint32_t id = fNextRes++;
+    uint32_t id = fDev->allocResourceId();
     if (!fDev->resourceCreate2D(id, VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM, md.width, md.height) ||
         !fDev->attachBacking(id, fVRAM, frameBytes(md.width, md.height)) ||
         !fDev->setScanout(0, id, full)) {
