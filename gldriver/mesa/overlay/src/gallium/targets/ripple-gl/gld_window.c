@@ -35,7 +35,9 @@ static struct {
    int (*NewWindow)(cgs_conn, int, cg_float, cg_float, cgs_region, cgs_window *);
    int (*SetWindowDepth)(cgs_conn, cgs_window, int);
    int (*BindSurface)(cgs_conn, cgs_window, cgs_surface, int, int, cgs_window);
-   int (*LockWindowBits)(cgs_conn, cgs_window, cg_rect *, int *, void **, int *);
+   /* The last two point to small structs: {void *base; ...} (16 bytes on x86_64) and
+    * {int32 rowBytes; int32 ...}; lock_bits() passes roomy buffers. */
+   int (*LockWindowBits)(cgs_conn, cgs_window, cg_rect *, int *, void *, void *);
    int (*UnlockWindowBits)(cgs_conn, cgs_window, cgs_region);
    int (*FlushSurfaceWithOptions)(cgs_conn, cgs_window, cgs_surface, cgs_region, int);
    int (*SetWindowShape)(cgs_conn, cgs_window, cg_float, cg_float, cgs_region);
@@ -78,10 +80,16 @@ lock_bits(struct gld_window *w)
 {
    cg_rect r;
    int fmt = 0;
+   union { void *base; uint64_t raw[4]; } bits;
+   union { int32_t row_bytes; uint64_t raw[2]; } row;
 
+   memset(&bits, 0, sizeof(bits));
+   memset(&row, 0, sizeof(row));
    w->base = NULL;
-   if (cgs.LockWindowBits(w->cid, w->priv, &r, &fmt, &w->base, &w->row_bytes) || !w->base ||
-       fmt != CGS_DEPTH_32) {
+   int e = cgs.LockWindowBits(w->cid, w->priv, &r, &fmt, &bits, &row);
+   w->base = bits.base;
+   w->row_bytes = row.row_bytes;
+   if (e || !w->base || w->row_bytes <= 0 || fmt != CGS_DEPTH_32) {
       fprintf(stderr, "RippleGLDriver: CGSLockWindowBits failed (format %d)\n", fmt);
       w->base = NULL;
       return false;
