@@ -291,3 +291,21 @@ than `IODeviceMemory`, which would map it uncached when the guest's cache attrib
 honoured (KVM with a passed-through device).
 
 Statistics are published as `RippleRefresh*` registry properties, not logged.
+
+## 2026-11-10: pointer bugs (the owner's report from the Proxmox console)
+
+The owner: two squashed pointers side by side, and clicks land left of the pointer.
+
+1. **Cursor image: our bug, fixed.** `convertCursorImage` writes the image packed at its own
+   width (logged: 8x8 and 32x32, hot spot 4,4), not at the descriptor's 64. Now converted into
+   a scratch buffer and re-strided; UPDATE_CURSOR gets the real hot spot and the pointer
+   position (top-left + hot spot).
+2. **Click offset: not our driver.** New tool `tools/ptrpos` prints the guest's pointer
+   position; positions were injected from the rig with QMP `input-send-event` (abs, 0..32767).
+   With our framebuffer (1280x800): 0 -> 0, 4096 -> 75.3, 8192 -> 263.6, 12288 -> 451.8,
+   16384 -> 640.0, 24576 -> 1016.5, 32767 -> 1279.9 (y the same way). That is a linear map
+   stretched 1.176x (about 1/0.85) around the screen centre and clamped at the edges, and
+   repeatable (no history, so not acceleration). With our kext removed (Apple's
+   `IONDRVFramebuffer`, 1024x768): 8192 -> 210.8, 16384 -> 512.0, 24576 -> 813.2: the same
+   1.176x. So it's how 10.6's HID stack handles QEMU's `usb-tablet` (`HIDPointerConvertAbsolute`
+   = 0). Root cause not yet found.

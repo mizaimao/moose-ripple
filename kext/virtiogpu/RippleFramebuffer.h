@@ -48,7 +48,8 @@ class RippleFramebuffer : public IOFramebuffer
     uint32_t fCursorRes;
     bool     fCursorVisible, fCursorShown;
     SInt32   fCursorX, fCursorY;
-    uint32_t fCursorHotX, fCursorHotY;
+    uint32_t fCursorHotX, fCursorHotY;   // hot spot of the current image
+    uint32_t fCursorLogs;
 
     bool  buildModes(uint32_t prefW, uint32_t prefH);
     bool  validMode(IODisplayModeID m) const { return m >= 1 && m <= (IODisplayModeID)fModeCount; }

@@ -45,8 +45,8 @@ strip_vmin  = $(VTOOL) -remove-build-version macos -output $(1) $(1).v && rm -f 
 link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
-.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu clean
-all: hello hellodylib cglinfo accelprobe glshim virtiogpu
+.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos clean
+all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos
 
 clean:
 	rm -rf $(OUT)
@@ -165,3 +165,13 @@ $(OUT)/x86_64/RippleVirtioGPU: $(VGPU_OBJ)
 virtiogpu: $(OUT)/RippleVirtioGPU.kext
 $(OUT)/RippleVirtioGPU.kext: $(OUT)/x86_64/RippleVirtioGPU kext/virtiogpu/Info.plist
 	$(call make_kext,RippleVirtioGPU,kext/virtiogpu/Info.plist,x86_64)
+
+# --- ptrpos (userspace tool) -------------------------------------------------------------
+$(OUT)/%/ptrpos/ptrpos.o: tools/ptrpos/ptrpos.c
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,$*) $(UCFLAGS) -c $< -o $@
+$(OUT)/%/ptrpos/ptrpos: $(OUT)/%/ptrpos/ptrpos.o
+	$(call link_tool,$*,$@,$^,-framework ApplicationServices -framework CoreFoundation)
+ptrpos: $(OUT)/ptrpos
+$(OUT)/ptrpos: $(OUT)/i386/ptrpos/ptrpos $(OUT)/x86_64/ptrpos/ptrpos
+	$(LIPO) -create $^ -output $@

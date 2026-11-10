@@ -468,11 +468,32 @@ IOReturn RippleFramebuffer::setCursorImage(void *cursorImage)
     bzero(&info, sizeof(info));
     info.majorVersion = kHardwareCursorInfoMajorVersion;
     info.minorVersion = kHardwareCursorInfoMinorVersion;
-    info.hardwareCursorData = (UInt8 *)fCursorMem->getBytesNoCopy();
-    bzero(info.hardwareCursorData, kCursorSize * kCursorSize * 4);
-
-    if (!convertCursorImage(cursorImage, &desc, &info))
+    // convertCursorImage writes the image packed at its own width (cursorWidth pixels per row),
+    // not at the descriptor's width: a 32-pixel cursor read as 64 wide showed two squashed
+    // copies side by side (2026-11-10). Convert into a scratch buffer, then re-stride.
+    const IOByteCount bytes = kCursorSize * kCursorSize * 4;
+    UInt8 *tmp = (UInt8 *)IOMalloc(bytes);
+    if (!tmp)
+        return kIOReturnNoMemory;
+    bzero(tmp, bytes);
+    info.hardwareCursorData = tmp;
+    if (!convertCursorImage(cursorImage, &desc, &info) ||
+        info.cursorWidth > kCursorSize || info.cursorHeight > kCursorSize) {
+        IOFree(tmp, bytes);
         return kIOReturnUnsupported;
+    }
+    UInt8 *dst = (UInt8 *)fCursorMem->getBytesNoCopy();
+    bzero(dst, bytes);
+    for (UInt32 y = 0; y < info.cursorHeight; y++)
+        memcpy(dst + y * kCursorSize * 4, tmp + y * info.cursorWidth * 4, info.cursorWidth * 4);
+    IOFree(tmp, bytes);
+    if (fCursorLogs < 3) {
+        fCursorLogs++;
+        LOG("cursor image %ux%u, hot spot %u,%u", info.cursorWidth, info.cursorHeight,
+            info.cursorHotSpotX, info.cursorHotSpotY);
+    }
+    fCursorHotX = info.cursorHotSpotX;
+    fCursorHotY = info.cursorHotSpotY;
 
     VirtioGPUDevice::Rect r = { 0, 0, kCursorSize, kCursorSize };
     fDev->transferToHost2D(fCursorRes, r, 0);
@@ -484,15 +505,13 @@ IOReturn RippleFramebuffer::setCursorImage(void *cursorImage)
 
 void RippleFramebuffer::showCursor()
 {
-    // IOFramebuffer gives the image's top-left corner; virtio wants a non-negative position,
-    // so a partly off-screen cursor is expressed through the hot spot instead.
-    uint32_t hx = fCursorX < 0 ? (uint32_t)-fCursorX : 0;
-    uint32_t hy = fCursorY < 0 ? (uint32_t)-fCursorY : 0;
-    int32_t x = fCursorX + (int32_t)hx, y = fCursorY + (int32_t)hy;
-    if (!fCursorShown || hx != fCursorHotX || hy != fCursorHotY) {
-        fDev->updateCursor(0, fCursorRes, x, y, hx, hy);
-        fCursorHotX = hx;
-        fCursorHotY = hy;
+    // IOFramebuffer gives the image's top-left corner; virtio wants the pointer position (the
+    // hot spot), which is what QEMU and VNC clients draw around.
+    int32_t x = fCursorX + (int32_t)fCursorHotX, y = fCursorY + (int32_t)fCursorHotY;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (!fCursorShown) {
+        fDev->updateCursor(0, fCursorRes, x, y, fCursorHotX, fCursorHotY);
         fCursorShown = true;
     } else {
         fDev->moveCursor(0, x, y);
