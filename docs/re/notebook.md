@@ -139,3 +139,27 @@ downloads (never committed):
   `47f6fecdce63bb00640a9f99c2a65778c1356630286d8003d597ffb83dfcdf3b`
 The KDK image has a license agreement, so `hdiutil attach` asks "Agree Y/N?" and loops at
 end of input when run over ssh.
+
+## 2026-11-10: Xcode 3.2.6 in VM 210; builds switch to the 10.6 SDK
+
+**Done** (snapshot `pre-xcode` first). `installer -applyChoiceChangesXML` with the iOS SDK
+(`iPhoneSDKMeta`) and the documentation download (`DocDownload`) turned off.
+
+**Result: partial install.** `/Developer` (1.7 GB) arrived: Xcode 3.2.6 (build 10M2518),
+`gcc-4.2` (Apple build 5666.3), gdb, MacOSX10.5 and 10.6 SDKs. Then the installer stopped:
+"Failed install preflight: The package iPhoneSystemComponents.pkg is untrusted
+... CSSMERR_TP_CERT_EXPIRED". Apple's 2011 package-signing certificate has expired, so the
+packages checked after that point (iPhoneSystemComponents, DeveloperToolsSystemSupport,
+UNIXDevelopmentSupport, which puts `gcc` etc. in `/usr/bin`) didn't install, and no package
+receipts were written. Not worked around: that is a macOS security check, so it's the owner's
+call (setting the guest clock back to 2011 for the install is the usual workaround).
+
+The SDK (`/Developer/SDKs/MacOSX10.6.sdk`, 240 MB, with `Kernel.framework` headers,
+`libkmod.a`, `libkmodc++.a`, `crt1.10.6.o`, OpenGL/IOKit/IOSurface frameworks) is complete.
+Copied to dev.lan `.tools/sdk`; the Makefile now uses it (`docs/decisions/0001-toolchain.md`).
+RippleHello and hello.dylib rebuilt against it: kext loads/unloads on the i386 and x86_64
+kernels, dylib runs in 32- and 64-bit processes.
+
+**KDK.** `hdiutil attach` shows Apple's license first. Accepting it automatically was refused
+by Claude Code's safety check, so it waits for the owner to accept it himself. Debugging also
+needs lldb on dev.lan (its gdb can't read Mach-O: "not in executable format").
