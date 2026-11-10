@@ -1,0 +1,19 @@
+
+== calls: function, connection, selector, caller, count
+IOConnectCallMethod 0x3403 12 IOKit`IOFBSetCursorVisible 2
+IOConnectCallMethod 0x5733 25 GeForceGLDriver`gldFinish 4
+IOConnectCallMethod 0x5733 30 GeForceGLDriver`gldFinish 4
+IOConnectCallMethod 0x562f 6 GeForceGLDriver`gldReclaimTexture 10
+IOConnectCallMethod 0x562f 5 GeForceGLDriver`gldModifyTexture 21
+IOConnectCallMethod 0x371f 18 GeForceGA`_NVGetSurfaceInfo(GeForceGA*, NvHwSurfaceDescRec*, NvHwSurfaceDescRec*, __GLNVhwSurfaceRec*, __GLNVhwSurfaceRec*) 39
+IOConnectCallMethod 0xb123 17 IOKit`IOAccelSetSurfaceFramebufferShapeWithBackingAndLength 39
+IOConnectCallMethod 0x5733 11 GeForceGLDriver`gldAttachDrawable 164
+IOConnectCallMethod 0x5733 16 GeForceGLDriver`gldUpdateDispatch 165
+IOConnectCallMethod 0xb207 9 IOKit`IOAccelSetSurfaceFramebufferShape 188
+IOConnectCallMethod 0x3403 1 IOKit`_IOFBGetPixelInformation 265
+
+== maps: connection, memory type, caller, count
+0x3403 110 CoreGraphics`MPMapFramebuffer 3
+
+== AddClient: connection, other connection, caller, count
+

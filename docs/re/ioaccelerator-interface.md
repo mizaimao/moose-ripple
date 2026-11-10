@@ -53,3 +53,32 @@ reverse-engineered. Still to confirm with traces: argument shapes per selector a
    `IOServiceOpen` types and `IOConnectCallMethod` selectors from WindowServer on the
    reference VM.
 3. Possibly a GA plugin, if WindowServer requires one for Quartz Extreme.
+
+## Trace 1: WindowServer while a TextEdit window opens and closes (2026-11-10)
+
+Reference VM 211 (9600 GT, GeForce 6.3.6). `tools/re/iokit-calls.d` on WindowServer (pid 69)
+for 15 s; raw output in [traces/2026-11-10-windowserver-textedit.txt](traces/2026-11-10-windowserver-textedit.txt).
+User clients WindowServer holds (`ioreg`, `IOUserClientCreator` = "pid 69, WindowServer"):
+5 `nvTeslaSurface`, 2 `nvTeslaGLContext`, 2 `NV2DContext`, 1 `nvDevice`,
+1 `IOAccelerationUserClient`, 2 `IOFramebufferUserClient`.
+
+| Connection | Selector | Called from | Count | Reading |
+|---|---|---|---|---|
+| 0xb207 | 9 | `IOKit`IOAccelSetSurfaceFramebufferShape` | 188 | surface `kIOAccelSurfaceSetShape` (SDK enum index 9) |
+| 0xb123 | 17 | `IOKit`IOAccelSetSurfaceFramebufferShapeWithBackingAndLength` | 39 | surface `kIOAccelSurfaceSetShapeBackingAndLength` (index 17) |
+| 0x5733 | 11 | `GeForceGLDriver`gldAttachDrawable` | 164 | GL context client |
+| 0x5733 | 16 | `GeForceGLDriver`gldUpdateDispatch` | 165 | GL context client |
+| 0x5733 | 25, 30 | `GeForceGLDriver`gldFinish` | 4 each | GL context client |
+| 0x562f | 5 | `GeForceGLDriver`gldModifyTexture` | 21 | probably the device/shared client (UNVERIFIED) |
+| 0x562f | 6 | `GeForceGLDriver`gldReclaimTexture` | 10 | same |
+| 0x371f | 18 | `GeForceGA`_NVGetSurfaceInfo(...)` | 39 | 2D context client (GA plugin) |
+| 0x3403 | 1, 12 | `IOKit`_IOFBGetPixelInformation`, `IOFBSetCursorVisible` | 265, 2 | framebuffer client |
+
+No `IOServiceOpen` during the window's life, and no surface for the TextEdit window itself.
+
+Reading (to confirm with more traces): with Quartz Extreme, WindowServer composites with
+plain OpenGL through the GL driver plugin (`gldAttachDrawable` to the display surface every
+frame, window contents as textures via `gldModifyTexture`), and uses the standard surface
+client only for the display ("framebuffer") surfaces. The two surface selectors seen match the
+SDK header's numbering exactly. Implication: Quartz Extreme needs a working GL driver (M4) plus
+the surface client for framebuffer surfaces and whatever the GA plugin's 2D client is used for.
