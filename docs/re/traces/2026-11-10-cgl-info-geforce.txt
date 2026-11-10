@@ -1,0 +1,276 @@
+renderers: 2
+  [0] id 0x0102260b accelerated 1 online 1 window 1 offscreen 0 displaymask 0x3 vram 1024 MB texmem 1003 MB
+  [1] id 0x01020400 accelerated 0 online 1 window 1 offscreen 1 displaymask 0x3 vram 0 MB texmem 0 MB
+GL_VENDOR   NVIDIA Corporation
+GL_RENDERER NVIDIA GeForce 9600 GT OpenGL Engine
+GL_VERSION  2.1 NVIDIA-1.6.36
+GLSL        1.20
+fbo status 0x8cd5, pixel 64 127 191 255 (expect about 64 128 191 255), glGetError 0x0
+
+--- trace (sorted by time)
+   1 gldInitializeLibrary(0x7fff70001004, 0x7fff70001084, 0x3, 0x7fff88c4df56, 0x7fff88c4dec1, 0x0)
+       IOServiceOpen type 4 -> conn 0x2703 (from GeForceGLDriver`gldInitializeLibrary+0x22e)
+       IOConnectCallMethod conn 0x2703 sel 1, 0 scalars in, 0 bytes in (from GeForceGLDriver`gldInitializeLibrary+0x187)
+       IOConnectMapMemory conn 0x2703 type 1 (from GeForceGLDriver`glrCompExecuteKernel+0x58480)
+       IOConnectCallMethod conn 0x2703 sel 13, 0 scalars in, 2048 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x5b4c8)
+       IOConnectCallMethod conn 0x2703 sel 11, 0 scalars in, 2048 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x5b80b)
+       IOConnectCallMethod conn 0x2703 sel 10, 0 scalars in, 20 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x5b685)
+       IOConnectCallMethod conn 0x2703 sel 10, 0 scalars in, 20 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x5b685)
+       IOConnectCallMethod conn 0x2703 sel 10, 0 scalars in, 20 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x5b685)
+       IOConnectCallMethod conn 0x2703 sel 13, 0 scalars in, 2048 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x5b4c8)
+       IOConnectCallMethod conn 0x2703 sel 10, 0 scalars in, 20 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x5b685)
+       IOConnectCallMethod conn 0x2703 sel 10, 0 scalars in, 20 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x5b685)
+       IOConnectCallMethod conn 0x2703 sel 11, 0 scalars in, 2048 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x5b80b)
+       IOConnectCallMethod conn 0x2703 sel 11, 0 scalars in, 2048 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x5b80b)
+       IOConnectCallMethod conn 0x2703 sel 10, 0 scalars in, 20 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x5b685)
+       IOConnectMapMemory conn 0x2703 type 1 (from GeForceGLDriver`glrCompExecuteKernel+0x58480)
+       IOConnectCallMethod conn 0x2703 sel 3, 0 scalars in, 0 bytes in (from GeForceGLDriver`gldBufferSubData+0x2cb3)
+       gldInitializeLibrary -> 0x0
+   2 gldGetVersion(0x7fff5fbff43c, 0x7fff5fbff438, 0x7fff5fbff434, 0x7fff5fbff428, 0x7fff710507e8, 0x200b6ea08)
+       gldGetVersion -> 0x1
+   3 gldGetRendererInfo(0x112600ea0, 0x3, 0x112600ea0, 0x1b, 0x1126fc0a0, 0x1126fc0a4)
+       gldGetRendererInfo -> 0x0
+   4 gldChoosePixelFormat(0x7fff5fbff808, 0x7fff5fbff970, 0x0, 0xe, 0x7fff70000f88, 0x0)
+       gldCreateFence -> 0x3ffff
+       gldCreateFence -> 0x3ffff
+       gldCreateFence -> 0x3fffc000
+       gldCreateFence -> 0xbffffffc
+       gldFinish -> 0x0
+       gldFinish -> 0x0
+       gldFinish -> 0x0
+       gldFinish -> 0x3
+       gldChoosePixelFormat -> 0x0
+   5 gldDestroyPixelFormat(0x112600f00, 0x112601190, 0x271f, 0x18, 0x1126fc0a0, 0x1126fc0a4)
+       gldDestroyPixelFormat -> 0x0
+   6 gldCreateShared(0x112601538, 0x3, 0x4, 0x10050d8b0, 0x1126fc0a0, 0x1126fc0a4)
+       IOServiceOpen type 4 -> conn 0x2c03 (from GeForceGLDriver`gldCreateShared+0x9d)
+       IOConnectCallMethod conn 0x2c03 sel 0, 0 scalars in, 0 bytes in (from GeForceGLDriver`gldCreateShared+0xe4)
+       IOConnectCallMethod conn 0x2c03 sel 8, 0 scalars in, 0 bytes in (from GeForceGLDriver`gldCreateShared+0x138)
+       gldCreateShared -> 0x0
+   7 gldCreateContext(0x11280ffc8, 0x112600fb8, 0x112805000, 0x11280ffd8, 0x112808ed0, 0x1128101a8)
+       gldFinish -> 0x0
+       IOServiceOpen type 1 -> conn 0x2d03 (from GeForceGLDriver`gldCreateContext+0xed)
+       IOConnectCallMethod conn 0x2d03 sel 16, 1 scalars in, 0 bytes in (from GeForceGLDriver`gldCreateContext+0x162)
+       IOConnectMapMemory conn 0x2d03 type 3 (from GeForceGLDriver`gldCreateContext+0x1d2)
+       IOConnectMapMemory conn 0x2d03 type 4 (from GeForceGLDriver`gldCreateContext+0x20b)
+       IOConnectAddClient conn 0x2d03 + 0x2c03 (from GeForceGLDriver`gldCreateContext+0x22f)
+       IOConnectCallMethod conn 0x2d03 sel 29, 0 scalars in, 0 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x95ff6)
+       gldCreateShared -> 0x8
+       gldCreateShared -> 0x1
+       gldCreateShared -> 0x0
+       gldCreateShared -> 0x0
+       gldCreateShared -> 0x0
+       gldCreateContext -> 0x0
+   8 gldCreateTexture(0x112805000, 0x11283ac20, 0x11283ac70, 0xb40, 0xb40, 0x6)
+       gldCreateTexture -> 0x0
+   9 gldCreateTexture(0x112805000, 0x1126052c0, 0x112605310, 0x1e0, 0x1e0, 0x1)
+       gldCreateTexture -> 0x0
+  10 gldCreateTexture(0x112805000, 0x1126055e0, 0x112605630, 0x1e0, 0x1e0, 0x1)
+       gldCreateTexture -> 0x0
+  11 gldCreateTexture(0x112805000, 0x112605900, 0x112605950, 0x1e0, 0x1e0, 0x1)
+       gldCreateTexture -> 0x0
+  12 gldCreateTexture(0x112805000, 0x112605c20, 0x112605c70, 0x1e0, 0x1e0, 0x1)
+       gldCreateTexture -> 0x0
+  13 gldCreateTexture(0x112805000, 0x112605f40, 0x112605f90, 0x1e0, 0x1e0, 0x1)
+       gldCreateTexture -> 0x0
+  14 gldCreateTexture(0x112805000, 0x112606260, 0x1126062b0, 0x1e0, 0x1e0, 0x1)
+       gldCreateTexture -> 0x0
+  15 gldCreateTexture(0x112805000, 0x112606580, 0x1126065d0, 0x112606580, 0x0, 0x0)
+       gldCreateTexture -> 0x0
+  16 gldCreateTexture(0x112805000, 0x1126066c0, 0x112606710, 0x1126066c0, 0x0, 0x0)
+       gldCreateTexture -> 0x0
+  17 gldCreateTexture(0x112805000, 0x112606800, 0x112606850, 0x112606800, 0x0, 0x0)
+       gldCreateTexture -> 0x0
+  18 gldCreateVertexArray(0x112805000, 0x112840a20, 0x112840a60, 0x112840fa8, 0x10050d8b0, 0xffffffff)
+       gldCreateVertexArray -> 0x0
+  19 gldCreatePipelineProgram(0x112805000, 0x112841820, 0x1128427e0, 0x0, 0x100001000, 0xffffffff)
+       gldCreatePipelineProgram -> 0x0
+  20 gldCreatePipelineProgram(0x112805000, 0x112843420, 0x1128443e0, 0x0, 0x100001000, 0xffffffff)
+       gldCreatePipelineProgram -> 0x0
+  21 gldCreatePipelineProgram(0x112805000, 0x112845000, 0x112845fc0, 0x0, 0x100001000, 0xffffffff)
+       gldCreatePipelineProgram -> 0x0
+  22 gldCreatePipelineProgram(0x112805000, 0x112846a00, 0x1128479c0, 0x0, 0x100001000, 0xffffffff)
+       gldCreatePipelineProgram -> 0x0
+  23 gldSetInteger(0x11258e000, 0x2bd, 0x7fff5fbffb24, 0x1128031f8, 0x7fff70000f88, 0x0)
+       gldSetInteger -> 0x0
+  24 gldGetString(0x3, 0x1f00, 0x7fff7104ccc0, 0x0, 0x7fff70000f88, 0x0)
+       gldGetString -> 0x0
+  25 gldGetString(0x3, 0x1f01, 0x2000d10d4, 0x0, 0xfffffffc, 0x0)
+       gldGetString -> 0x0
+  26 gldGetString(0x3, 0x1f02, 0x2000d10d4, 0x3, 0xfffffffc, 0x0)
+       gldGetString -> 0x0
+  27 gldCreateFramebuffer(0x112805000, 0x1126072c0, 0x112607300, 0x1126073d8, 0x10050d8b0, 0x1126fc0a4)
+       gldCreateFramebuffer -> 0x0
+  28 gldAttachDrawable(0x11258e000, 0x5b, 0x112848400, 0x0, 0x200011630, 0xffffffff)
+       gldAttachDrawable -> 0x0
+  29 gldInitDispatch(0x11258e000, 0x11280ebe8, 0x11280ecf0, 0x0, 0x0, 0x0)
+       gldCreateContext -> 0x2000d6930
+       IOConnectCallMethod conn 0x2c03 sel 5, 0 scalars in, 88 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x578b0)
+       IOConnectCallMethod conn 0x2c03 sel 5, 0 scalars in, 88 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x578b0)
+       IOConnectCallMethod conn 0x2c03 sel 5, 0 scalars in, 88 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x578b0)
+       IOConnectCallMethod conn 0x2c03 sel 5, 0 scalars in, 88 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x578b0)
+       IOConnectCallMethod conn 0x2c03 sel 5, 0 scalars in, 88 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x578b0)
+       IOConnectCallMethod conn 0x2c03 sel 5, 0 scalars in, 88 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x578b0)
+       IOConnectCallMethod conn 0x2c03 sel 5, 0 scalars in, 88 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x578b0)
+       IOConnectCallMethod conn 0x2c03 sel 5, 0 scalars in, 88 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x578b0)
+       gldInitDispatch -> 0x5
+  30 gldCreateTexture(0x112805000, 0x11284ba20, 0x11284ba70, 0x1e0, 0x1e0, 0x1)
+       gldCreateTexture -> 0x0
+  31 gldFlushObject(0x11258e000, 0x1, 0x1, 0x11285c200, 0x10050d8b0, 0x1)
+       gldFlushObject -> 0x0
+  32 gldModifyTexture(0x112805000, 0x11285c200, 0x87, 0x0, 0x0, 0x0)
+       gldModifyTexture -> 0x0
+  33 gldModifyPipelineProgram(0x112805000, 0x112847a00, 0x1, 0x17, 0x1, 0x112617e20)
+       gldModifyPipelineProgram -> 0x0
+  34 gldModifyPipelineProgram(0x112805000, 0x112846000, 0x1, 0x7fff71040650, 0x1, 0x112617eb0)
+       gldModifyPipelineProgram -> 0x0
+  35 gldCreatePipelineProgram(0x112805000, 0x1128a0000, 0x1128a0fc0, 0x0, 0x100001000, 0x112617eb0)
+       gldCreatePipelineProgram -> 0x0
+  36 gldCreatePipelineProgram(0x112805000, 0x11287e000, 0x11287efc0, 0x0, 0x100001000, 0x112617eb0)
+       gldCreatePipelineProgram -> 0x0
+  37 gldUpdateDispatch(0x11258e000, 0x11280ebe8, 0x112808cf0, 0x1000000, 0x1128450f0, 0x18)
+       gldModifyQuery -> 0x4
+       gldFinish -> 0x0
+       gldIsTextureResident -> 0x0
+       IOConnectCallMethod conn 0x2c03 sel 5, 0 scalars in, 88 bytes in (from GeForceGLDriver`gldModifyTexture+0x102e)
+       gldModifyTexture -> 0x1
+       IOConnectCallMethod conn 0x2d03 sel 30, 1 scalars in, 0 bytes in (from GeForceGLDriver`gldFinish+0x27d9c)
+       gldFinish -> 0x1
+       gldDiscardFramebuffer -> 0x200
+       gldFinish -> 0x1125d1000
+       gldFinish -> 0x0
+       gldDiscardFramebuffer -> 0x0
+       gldFinish -> 0x1125d1000
+       gldFinish -> 0x1125ed448
+       gldCreateContext -> 0x2000d6930
+       gldCreateProgram -> 0x1128c2200
+       gldUnbindPipelineProgram -> 0x1128b1000
+       gldUnbindPipelineProgram -> 0x0
+       gldLoadTexture -> 0x0
+       gldLoadTexture -> 0x112808ed0
+       IOConnectCallMethod conn 0x2d03 sel 25, 1 scalars in, 0 bytes in (from GeForceGLDriver`glrCompExecuteKernel+0x5b0ac)
+       gldUpdateDispatch -> 0x7
+  38 gldUpdateDispatch(0x11258e000, 0x11280ebe8, 0x112808cf0, 0x1000000, 0x0, 0x1)
+       gldUpdateDispatch -> 0x5
+       gldBufferSubData -> 0x0
+       gldObjectPurgeable -> 0x4
+       gldObjectPurgeable -> 0x4
+       gldObjectPurgeable -> 0x4
+       gldObjectPurgeable -> 0x0
+       gldUpdateDispatch -> 0x1
+       gldObjectPurgeable -> 0x1
+       gldGetError -> 0x1
+  39 gldFlush(0x11258e000, 0x1000fc700, 0x0, 0x8, 0x8d, 0x7fff5fbff30c)
+       gldFlush -> 0x1007c4080
+       IOConnectCallMethod conn 0x2d03 sel 16, 1 scalars in, 0 bytes in (from GeForceGLDriver`gldUpdateDispatch+0x3601)
+       IOConnectCallMethod conn 0x2c03 sel 14, 0 scalars in, 32 bytes in (from GeForceGLDriver`gldFinish+0x2befc)
+       gldObjectPurgeable -> 0x4
+       gldObjectPurgeable -> 0x4
+  40 gldGetError(0x11258e000, 0x1127f1804, 0x10050d8b0, 0x1, 0x4, 0x7fff5fbff2e4)
+       gldGetError -> 0x0
+  41 gldAttachDrawable(0x11258e000, 0x0, 0x0, 0x0, 0x10050d8b0, 0x112600e20)
+       gldCreateContext -> 0x112808620
+       IOConnectCallMethod conn 0x2d03 sel 0, 4 scalars in, 0 bytes in (from GeForceGLDriver`gldAttachDrawable+0x31e)
+       gldAttachDrawable -> 0x1
+  42 gldDestroyVertexArray(0x112805000, 0x112807400, 0x0, 0x7fff71040650, 0x1, 0x112606da0)
+  43 gldReclaimVertexArray(0x112805000, 0x112807400, 0x0, 0x7fff71040650, 0x1, 0x112606da0)
+       gldReclaimVertexArray -> 0x10050d8b0
+       gldDestroyVertexArray -> 0x0
+  44 gldUnbindPipelineProgram(0x11258e000, 0x112846000, 0x0, 0x7fff71040650, 0x1, 0x112618790)
+       gldUnbindPipelineProgram -> 0x0
+  45 gldDestroyPipelineProgram(0x112805000, 0x112846000, 0x0, 0x0, 0x0, 0x9)
+       gldDestroyPipelineProgram -> 0x0
+  46 gldUnbindPipelineProgram(0x11258e000, 0x11286d000, 0x0, 0x7fff71040650, 0x1, 0x112618190)
+       gldUnbindPipelineProgram -> 0x10050d8b0
+  47 gldDestroyPipelineProgram(0x112805000, 0x11286d000, 0x0, 0x7fff71040650, 0x1, 0x112618190)
+       gldDestroyPipelineProgram -> 0x0
+  48 gldUnbindPipelineProgram(0x11258e000, 0x112842a00, 0x0, 0x7fff71040650, 0x1, 0x112606920)
+       gldUnbindPipelineProgram -> 0x10050d8b0
+  49 gldDestroyPipelineProgram(0x112805000, 0x112842a00, 0x0, 0x7fff71040650, 0x1, 0x112606920)
+       gldDestroyPipelineProgram -> 0x0
+  50 gldUnbindPipelineProgram(0x11258e000, 0x112847a00, 0x0, 0x7fff71040650, 0x1, 0x112618440)
+       gldUnbindPipelineProgram -> 0x2
+  51 gldDestroyPipelineProgram(0x112805000, 0x112847a00, 0x0, 0x0, 0x0, 0x9)
+       gldDestroyPipelineProgram -> 0x0
+  52 gldUnbindPipelineProgram(0x11258e000, 0x11288f000, 0x0, 0x7fff71040650, 0x1, 0x112617e20)
+       gldUnbindPipelineProgram -> 0x10050d8b0
+  53 gldDestroyPipelineProgram(0x112805000, 0x11288f000, 0x0, 0x7fff71040650, 0x1, 0x112617e20)
+       gldDestroyPipelineProgram -> 0x0
+  54 gldUnbindPipelineProgram(0x11258e000, 0x112844600, 0x0, 0x7fff71040650, 0x1, 0x112606da0)
+       gldUnbindPipelineProgram -> 0x10050d8b0
+  55 gldDestroyPipelineProgram(0x112805000, 0x112844600, 0x0, 0x7fff71040650, 0x1, 0x112606da0)
+       gldDestroyPipelineProgram -> 0x0
+  56 gldUnbindTexture(0x11258e000, 0x11283f200, 0x0, 0xad000, 0x1e, 0x112844600)
+       gldUnbindTexture -> 0x10050d8b0
+  57 gldDestroyTexture(0x112805000, 0x11283f200, 0x0, 0xad000, 0x1e, 0x112844600)
+  58 gldReclaimTexture(0x112805000, 0x11283f200, 0x0, 0xad000, 0x1e, 0x112844600)
+       gldReclaimTexture -> 0x10050d8b0
+       gldDestroyTexture -> 0x10050d8b0
+  59 gldUnbindTexture(0x11258e000, 0x11283fa00, 0x0, 0x7fff71040650, 0x1, 0x112606560)
+       gldUnbindTexture -> 0x10050d8b0
+  60 gldDestroyTexture(0x112805000, 0x11283fa00, 0x0, 0x7fff71040650, 0x1, 0x112606560)
+  61 gldReclaimTexture(0x112805000, 0x11283fa00, 0x0, 0x7fff71040650, 0x1, 0x112606560)
+       gldReclaimTexture -> 0x10050d8b0
+       gldDestroyTexture -> 0x10050d8b0
+  62 gldUnbindTexture(0x11258e000, 0x112840200, 0x0, 0x7fff71040650, 0x1, 0x112606560)
+       gldUnbindTexture -> 0x10050d8b0
+  63 gldDestroyTexture(0x112805000, 0x112840200, 0x0, 0x7fff71040650, 0x1, 0x112606560)
+  64 gldReclaimTexture(0x112805000, 0x112840200, 0x0, 0x7fff71040650, 0x1, 0x112606560)
+       gldReclaimTexture -> 0x10050d8b0
+       gldDestroyTexture -> 0x10050d8b0
+  65 gldUnbindTexture(0x11258e000, 0x11283ba00, 0x0, 0x7fff71040650, 0x1, 0x112606920)
+       gldUnbindTexture -> 0x10050d8b0
+  66 gldDestroyTexture(0x112805000, 0x11283ba00, 0x0, 0x7fff71040650, 0x1, 0x112606920)
+  67 gldReclaimTexture(0x112805000, 0x11283ba00, 0x0, 0x7fff71040650, 0x1, 0x112606920)
+       gldReclaimTexture -> 0x10050d8b0
+       gldDestroyTexture -> 0x10050d8b0
+  68 gldUnbindTexture(0x11258e000, 0x11283c200, 0x0, 0xa9e00, 0x3, 0x11283ba00)
+       gldUnbindTexture -> 0x10050d8b0
+  69 gldDestroyTexture(0x112805000, 0x11283c200, 0x0, 0xa9e00, 0x3, 0x11283ba00)
+  70 gldReclaimTexture(0x112805000, 0x11283c200, 0x0, 0xa9e00, 0x3, 0x11283ba00)
+       gldReclaimTexture -> 0x10050d8b0
+       gldDestroyTexture -> 0x10050d8b0
+  71 gldUnbindTexture(0x11258e000, 0x11283ca00, 0x0, 0x7fff71040650, 0x1, 0x1126052a0)
+       gldUnbindTexture -> 0x10050d8b0
+  72 gldDestroyTexture(0x112805000, 0x11283ca00, 0x0, 0x7fff71040650, 0x1, 0x1126052a0)
+  73 gldReclaimTexture(0x112805000, 0x11283ca00, 0x0, 0x7fff71040650, 0x1, 0x1126052a0)
+       gldReclaimTexture -> 0x10050d8b0
+       gldDestroyTexture -> 0x10050d8b0
+  74 gldUnbindTexture(0x11258e000, 0x11283d200, 0x0, 0x7fff71040650, 0x1, 0x1126052a0)
+       gldUnbindTexture -> 0x10050d8b0
+  75 gldDestroyTexture(0x112805000, 0x11283d200, 0x0, 0x7fff71040650, 0x1, 0x1126052a0)
+  76 gldReclaimTexture(0x112805000, 0x11283d200, 0x0, 0x7fff71040650, 0x1, 0x1126052a0)
+       gldReclaimTexture -> 0x10050d8b0
+       gldDestroyTexture -> 0x10050d8b0
+  77 gldUnbindTexture(0x11258e000, 0x11283da00, 0x0, 0x7fff71040650, 0x1, 0x1126052a0)
+       gldUnbindTexture -> 0x10050d8b0
+  78 gldDestroyTexture(0x112805000, 0x11283da00, 0x0, 0x7fff71040650, 0x1, 0x1126052a0)
+  79 gldReclaimTexture(0x112805000, 0x11283da00, 0x0, 0x7fff71040650, 0x1, 0x1126052a0)
+       gldReclaimTexture -> 0x10050d8b0
+       gldDestroyTexture -> 0x10050d8b0
+  80 gldUnbindTexture(0x11258e000, 0x11283e200, 0x0, 0x7fff71040650, 0x1, 0x1126052a0)
+       gldUnbindTexture -> 0x10050d8b0
+  81 gldDestroyTexture(0x112805000, 0x11283e200, 0x0, 0x7fff71040650, 0x1, 0x1126052a0)
+  82 gldReclaimTexture(0x112805000, 0x11283e200, 0x0, 0x7fff71040650, 0x1, 0x1126052a0)
+       gldReclaimTexture -> 0x10050d8b0
+       gldDestroyTexture -> 0x10050d8b0
+  83 gldUnbindTexture(0x11258e000, 0x11283ea00, 0x0, 0x7fff71040650, 0x1, 0x1126052a0)
+       gldUnbindTexture -> 0x10050d8b0
+  84 gldDestroyTexture(0x112805000, 0x11283ea00, 0x0, 0x7fff71040650, 0x1, 0x1126052a0)
+  85 gldReclaimTexture(0x112805000, 0x11283ea00, 0x0, 0x7fff71040650, 0x1, 0x1126052a0)
+       gldReclaimTexture -> 0x10050d8b0
+       gldDestroyTexture -> 0x10050d8b0
+  86 gldDestroyContext(0x11258e000, 0x7fff71040650, 0x7f8000, 0xa6000, 0xb, 0x11283ac00)
+       gldCreateContext -> 0x10050d8b0
+       IOConnectCallMethod conn 0x2c03 sel 6, 1 scalars in, 0 bytes in (from GeForceGLDriver`0x200000e43)
+       IOConnectCallMethod conn 0x2c03 sel 6, 1 scalars in, 0 bytes in (from GeForceGLDriver`0x200000e43)
+       gldDestroyContext -> 0x0
+  87 gldDestroyFramebuffer(0x112805000, 0x112848400, 0x0, 0x40, 0x1126014e8, 0x0)
+       gldDestroyFramebuffer -> 0x0
+  88 gldDestroyTexture(0x112805000, 0x11285c200, 0x0, 0x7fff71040650, 0x1, 0x112617d90)
+  89 gldReclaimTexture(0x112805000, 0x11285c200, 0x0, 0x7fff71040650, 0x1, 0x112617d90)
+       gldDestroyFence -> 0x8
+       gldReclaimTexture -> 0x2
+       gldDestroyTexture -> 0x2
+  90 gldDestroyShared(0x112805000, 0x112600000, 0xfc080, 0x7fff71040650, 0x1, 0x112602560)
+       gldDestroyShared -> 0x0

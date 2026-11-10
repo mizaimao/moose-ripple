@@ -208,3 +208,17 @@ copying; its own code is all-rights-reserved).
 
 **Next.** dtrace on VM 211: what WindowServer opens and calls on the accelerator, and how a GL
 program finds and drives `GeForceGLDriver`.
+
+## 2026-11-10: dtrace traces of WindowServer and of a GL program
+
+- `tools/re/iokit-calls.d` on WindowServer while TextEdit opened and closed a window:
+  Quartz Extreme composites through the GL driver plugin; the standard surface selectors
+  (9, 17) are used for display surfaces. Details: [ioaccelerator-interface.md](ioaccelerator-interface.md).
+- New `tools/cgl-info`: lists renderers, makes a context, clears an FBO, reads a pixel. Works
+  on VM 211 in 64- and 32-bit processes and with the software renderer.
+- 10.6's dtrace could not see our binaries' modules at first. Userspace links now leave out
+  LC_FUNCTION_STARTS, LC_DATA_IN_CODE and LC_VERSION_MIN_MACOSX like Apple's 10.6 programs
+  (Makefile `ULD`/`strip_vmin`). The remaining blocker was attaching with `-p` after loading the
+  driver; `dtrace -Z -c` works.
+- `tools/re/gld-calls.d` on `cgl-info`: full ordered `gld*` sequence with the driver's own
+  IOKit calls. Details: [gl-plugin-interface.md](gl-plugin-interface.md), Trace 2.

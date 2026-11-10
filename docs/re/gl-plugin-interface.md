@@ -86,3 +86,33 @@ Read-only reference: its own code is "Copyright 2009-2011 Zenith432. All rights 
 3. Whether a driver can present GL output the way `GLRendererFloat` does (CGS window
    surfaces) while rendering through virgl, which would avoid the private per-vendor kernel
    protocol for M4.
+
+## Trace 2: `cgl-info` on the NVIDIA driver (2026-11-10)
+
+`tools/cgl-info` (our CGL test program) on reference VM 211, traced with
+`sudo dtrace -q -Z -c ./cgl-info -s tools/re/gld-calls.d GeForceGLDriver`; raw, time-sorted
+output in [traces/2026-11-10-cgl-info-geforce.txt](traces/2026-11-10-cgl-info-geforce.txt).
+`cgl-info` saw two renderers: `0x0102260b` (NVIDIA, accelerated, display mask 0x3, 1024 MB)
+and `0x01020400` (Apple software). GL 2.1, GLSL 1.20; the FBO clear read back 64 127 191 255.
+
+Order of driver calls for "query renderers, make a context, clear an FBO, read a pixel":
+1. `gldInitializeLibrary` once: opens an accelerator client (`IOServiceOpen` type 4), maps
+   memory type 1, several calls (selectors 1, 3, 10, 11, 13).
+2. `gldGetVersion` (4 pointer arguments, returns 1), `gldGetRendererInfo` (2nd argument 0x3 =
+   the display mask), `gldChoosePixelFormat`, `gldDestroyPixelFormat`.
+3. `gldCreateShared` (args include 0x3 and 0x4): another type-4 client, selectors 0 and 8.
+4. `gldCreateContext`: a type-1 client (GL context), `IOConnectMapMemory` types 3 and 4, then
+   `IOConnectAddClient(context, shared)`.
+5. Many `gldCreateTexture`/`gldCreatePipelineProgram`/`gldCreateVertexArray` (GLEngine's own
+   default objects), `gldGetString(0x3, 0x1f00/0x1f01/0x1f02)` for vendor/renderer/version,
+   `gldCreateFramebuffer`, `gldAttachDrawable(ctx, 0x5b, ...)`, `gldInitDispatch`,
+   `gldUpdateDispatch`, `gldFlush`, `gldGetError`, then teardown.
+
+Readings (UNVERIFIED until disassembly confirms them):
+- Client types used by the GL driver: 1 = GL context, 4 = device/shared. With
+  `IOAccelClientConnect.h`'s type 0 = surface, that leaves 2 (2D) and 3 for WindowServer's
+  other clients, matching the order of VMsvga2's user clients.
+- The driver, not GLEngine, supplies `GL_VENDOR`/`GL_RENDERER`/`GL_VERSION` through
+  `gldGetString`, keyed by the display mask.
+- dtrace note: pid probes only worked with `-Z -c`. Attaching with `-p` to a process that
+  had `dlopen`ed the driver itself matched no probes in any module.

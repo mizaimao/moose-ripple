@@ -34,13 +34,19 @@ link_x86_64 = $(LD) -arch x86_64 -kext -macosx_version_min 10.6 -o $(1) $(2) $(K
 link_i386   = $(LD) -arch i386 -r -no_data_in_code_info -o $(1).r $(2) $(KLIBS) && \
               $(VTOOL) -remove-build-version macos -output $(1) $(1).r && rm -f $(1).r
 
-# Userspace: compile and link against the SDK.
+# Userspace: compile and link against the SDK. Like the i386 kexts, userspace binaries leave
+# out the load commands 10.6 predates (LC_FUNCTION_STARTS, LC_DATA_IN_CODE,
+# LC_VERSION_MIN_MACOSX): Apple's own 10.6 programs have none, and 10.6's dtrace could not
+# see any module of a program that had them (pid probes matched nothing; 2026-11-10).
 UCFLAGS    := -mmacosx-version-min=10.6 -isysroot $(SDK) -O2 -Wall
-link_dylib  = $(LD) -arch $(1) -dylib -macosx_version_min 10.6 -syslibroot $(SDK) \
-              -install_name /tmp/ripple/$(notdir $(2)) -o $(2) $(3) -lSystem
+ULD         = $(LD) -arch $(1) -macosx_version_min 10.6 -syslibroot $(SDK) \
+              -no_function_starts -no_data_in_code_info
+strip_vmin  = $(VTOOL) -remove-build-version macos -output $(1) $(1).v && rm -f $(1).v
+link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
+              -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
-.PHONY: all hello hellodylib clean
-all: hello hellodylib
+.PHONY: all hello hellodylib cglinfo clean
+all: hello hellodylib cglinfo
 
 clean:
 	rm -rf $(OUT)
@@ -76,4 +82,18 @@ $(OUT)/%/hello.dylib: $(OUT)/%/hello-dylib/hello.o
 
 hellodylib: $(OUT)/hello.dylib
 $(OUT)/hello.dylib: $(OUT)/i386/hello.dylib $(OUT)/x86_64/hello.dylib
+	$(LIPO) -create $^ -output $@
+
+# --- cgl-info (userspace tool) -----------------------------------------------------------
+link_tool = $(call ULD,$(1)) -o $(2).v $(SDK)/usr/lib/crt1.10.6.o $(3) $(4) -lSystem && \
+            $(call strip_vmin,$(2))
+
+$(OUT)/%/cgl-info/cgl-info.o: tools/cgl-info/cgl-info.c
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,$*) $(UCFLAGS) -c $< -o $@
+$(OUT)/%/cgl-info/cgl-info: $(OUT)/%/cgl-info/cgl-info.o
+	$(call link_tool,$*,$@,$^,-framework OpenGL)
+
+cglinfo: $(OUT)/cgl-info
+$(OUT)/cgl-info: $(OUT)/i386/cgl-info/cgl-info $(OUT)/x86_64/cgl-info/cgl-info
 	$(LIPO) -create $^ -output $@
