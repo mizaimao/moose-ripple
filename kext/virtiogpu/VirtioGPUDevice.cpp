@@ -197,13 +197,19 @@ bool VirtioGPUDevice::init(IOPCIDevice *pci)
 
     fCmdLock = IOLockAlloc();
     fCursorLock = IOLockAlloc();
-    fCmdBuf = contiguous(kCmdBufSize);
+    fSlotMem = contiguous(kSlots * (kSlotReq + kSlotResp));
+    for (int i = 0; i < kCtrlQueueSize; i++)
+        fHeadSlot[i] = -1;
     fCursorBuf = contiguous(kCursorSlots * sizeof(struct virtio_gpu_update_cursor), kIODirectionOut);
-    if (!fCmdLock || !fCursorLock || !fCmdBuf || !fCursorBuf)
+    if (!fCmdLock || !fCursorLock || !fSlotMem || !fCursorBuf)
         return false;
-    fCmdBufPA = physAddr(fCmdBuf);
+    fSlotPA = physAddr(fSlotMem);
     fCursorBufPA = physAddr(fCursorBuf);
-    return mapCapabilities() && negotiate();
+    if (!mapCapabilities() || !negotiate())
+        return false;
+    if (!setupInterrupts())
+        LOG("no interrupt; completing commands by polling");
+    return true;
 }
 
 void VirtioGPUDevice::free()
@@ -215,7 +221,14 @@ void VirtioGPUDevice::free()
             fQueue[i].mem->release();
         }
     }
-    if (fCmdBuf)    { fCmdBuf->complete();    fCmdBuf->release(); }
+    if (fIntSrc) {
+        fIntSrc->disable();
+        if (fWorkLoop)
+            fWorkLoop->removeEventSource(fIntSrc);
+        fIntSrc->release();
+    }
+    if (fWorkLoop)  fWorkLoop->release();
+    if (fSlotMem)   { fSlotMem->complete();   fSlotMem->release(); }
     if (fCursorBuf) { fCursorBuf->complete(); fCursorBuf->release(); }
     if (fCmdLock)    IOLockFree(fCmdLock);
     if (fCursorLock) IOLockFree(fCursorLock);
@@ -232,51 +245,101 @@ void VirtioGPUDevice::free()
 uint32_t VirtioGPUDevice::command(const void *req, uint32_t reqLen, void *resp, uint32_t respLen,
                                   uint64_t extraPA, uint32_t extraLen)
 {
-    enum { kRespOffset = kCmdBufSize / 2 };
-    if (reqLen > kRespOffset || respLen > kCmdBufSize - kRespOffset)
+    if (reqLen > kSlotReq || respLen > kSlotResp)
         return 0;
+    const uint32_t cmdType = ((const struct virtio_gpu_ctrl_hdr *)req)->type;
 
     IOLockLock(fCmdLock);
-    uint8_t *buf = (uint8_t *)fCmdBuf->getBytesNoCopy();
-    memcpy(buf, req, reqLen);
-    bzero(buf + kRespOffset, respLen);
+    // A free slot (up to kSlots commands in flight; callers queue here otherwise).
+    int s = -1;
+    for (;;) {
+        for (int i = 0; i < kSlots; i++)
+            if (!fSlot[i].busy) { s = i; break; }
+        if (s >= 0)
+            break;
+        IOLockSleep(fCmdLock, fSlot, THREAD_UNINT);
+    }
+    fSlot[s].busy = true;
+    fSlot[s].done = false;
+    uint8_t *reqBuf = (uint8_t *)fSlotMem->getBytesNoCopy() + s * (kSlotReq + kSlotResp);
+    uint8_t *respBuf = reqBuf + kSlotReq;
+    uint64_t reqPA = fSlotPA + s * (kSlotReq + kSlotResp), respPA = reqPA + kSlotReq;
+    memcpy(reqBuf, req, reqLen);
+    bzero(respBuf, respLen);
 
     uint64_t pa[3];
     uint32_t len[3];
     unsigned nout = 0;
-    pa[nout] = fCmdBufPA;               len[nout++] = reqLen;
-    if (extraLen) { pa[nout] = extraPA;  len[nout++] = extraLen; }
-    pa[nout] = fCmdBufPA + kRespOffset; len[nout] = respLen;
+    pa[nout] = reqPA;                  len[nout++] = reqLen;
+    if (extraLen) { pa[nout] = extraPA; len[nout++] = extraLen; }
+    pa[nout] = respPA;                 len[nout] = respLen;
 
     Queue &q = fQueue[0];
     uint32_t type = 0;
-    if (ripple_vq_add(&q.vq, pa, len, nout, 1) >= 0) {
-        uint64_t t0 = mach_absolute_time();
-        *q.notify = q.index;
-        for (int i = 0; i < 200000; i++) {      // up to about 2 s
-            if (ripple_vq_get_used(&q.vq, NULL, NULL)) {
-                memcpy(resp, buf + kRespOffset, respLen);
-                (void)rd8(fISR, 0);             // reading the ISR acknowledges (deasserts) the interrupt
-                type = ((struct virtio_gpu_ctrl_hdr *)resp)->type;
-                uint64_t dt = mach_absolute_time() - t0, ns;
-                if (dt > fSlowestAbs) {
-                    fSlowestAbs = dt;
-                    fSlowestType = ((const struct virtio_gpu_ctrl_hdr *)req)->type;
-                }
-                absolutetime_to_nanoseconds(dt, &ns);
-                if (ns > 100000000ULL)
-                    fOver100ms++;
-                break;
-            }
-            IODelay(10);
-        }
-        if (!type)
-            LOG("command 0x%x timed out", ((const struct virtio_gpu_ctrl_hdr *)req)->type);
-    } else {
+    int head = ripple_vq_add(&q.vq, pa, len, nout, 1);
+    if (head < 0) {
         LOG("control queue full");
+        fSlot[s].busy = false;
+        IOLockWakeup(fCmdLock, fSlot, false);
+        IOLockUnlock(fCmdLock);
+        return 0;
     }
+    fHeadSlot[head] = (int8_t)s;
+    uint64_t t0 = mach_absolute_time(), timeout;
+    nanoseconds_to_absolutetime(5000000000ULL, &timeout);
+    *q.notify = q.index;
+
+    while (!fSlot[s].done) {
+        drainControlLocked(false);              // polling fallback
+        if (fSlot[s].done)
+            break;
+        if (mach_absolute_time() - t0 > timeout)
+            break;
+        uint64_t deadline;
+        clock_interval_to_deadline(fIntEnabled ? 20 : 1, kMillisecondScale, &deadline);
+        IOLockSleepDeadline(fCmdLock, &fSlot[s], deadline, THREAD_UNINT);
+    }
+
+    if (fSlot[s].done) {
+        memcpy(resp, respBuf, respLen);
+        type = ((struct virtio_gpu_ctrl_hdr *)resp)->type;
+        uint64_t dt = mach_absolute_time() - t0, ns;
+        if (dt > fSlowestAbs) {
+            fSlowestAbs = dt;
+            fSlowestType = cmdType;
+        }
+        absolutetime_to_nanoseconds(dt, &ns);
+        if (ns > 100000000ULL)
+            fOver100ms++;
+        fSlot[s].busy = false;
+    } else {
+        // The device still owns the buffers: never reuse this slot.
+        LOG("command 0x%x timed out; slot %d retired", cmdType, s);
+        fSlot[s].lost = true;
+    }
+    IOLockWakeup(fCmdLock, fSlot, false);       // anyone waiting for a free slot
     IOLockUnlock(fCmdLock);
     return type;
+}
+
+// Take completed chains off the control queue and wake their waiters. Hold fCmdLock.
+void VirtioGPUDevice::drainControlLocked(bool fromInterrupt)
+{
+    uint16_t head;
+    while (ripple_vq_get_used(&fQueue[0].vq, &head, NULL)) {
+        int s = head < kCtrlQueueSize ? fHeadSlot[head] : -1;
+        if (s < 0 || s >= kSlots)
+            continue;
+        fHeadSlot[head] = -1;
+        if (fSlot[s].lost) {                    // finished after we gave up on it
+            fSlot[s].lost = false;
+            fSlot[s].busy = false;
+            continue;
+        }
+        fSlot[s].done = true;
+        if (fromInterrupt) fIntDone++; else fPollDone++;
+        IOLockWakeup(fCmdLock, &fSlot[s], false);
+    }
 }
 
 bool VirtioGPUDevice::simple(const void *req, uint32_t reqLen, uint64_t extraPA, uint32_t extraLen)
@@ -476,4 +539,54 @@ void VirtioGPUDevice::takeSlowest(uint32_t *us, uint32_t *type, uint32_t *over10
     fSlowestAbs = 0;
     fSlowestType = 0;
     IOLockUnlock(fCmdLock);
+}
+
+// ---- Interrupts -----------------------------------------------------------------------------
+
+bool VirtioGPUDevice::setupInterrupts()
+{
+    // Legacy INTx (index 0). MSI-X stays off, so the ISR register reports and acknowledges
+    // (virtio 1.0, 4.1.4.5). Bit 16 of the type marks a message-signalled interrupt
+    // (kIOInterruptTypePCIMessaged in later SDKs; not defined in 10.6's).
+    int type = 0;
+    if (fPCI->getInterruptType(0, &type) != kIOReturnSuccess || (type & 0x10000))
+        return false;
+    fWorkLoop = IOWorkLoop::workLoop();
+    if (!fWorkLoop)
+        return false;
+    fIntSrc = IOFilterInterruptEventSource::filterInterruptEventSource(this, interruptAction,
+                                                                      interruptFilter, fPCI, 0);
+    if (!fIntSrc || fWorkLoop->addEventSource(fIntSrc) != kIOReturnSuccess)
+        return false;
+    fIntSrc->enable();
+    ripple_vq_set_interrupts(&fQueue[0].vq, 1);
+    ripple_vq_set_interrupts(&fQueue[1].vq, 1);
+    fIntEnabled = true;
+    LOG("interrupts on (legacy INTx, type %d)", type);
+    return true;
+}
+
+// Primary interrupt context: reading the ISR acknowledges our interrupt; 0 means not ours
+// (the line may be shared).
+bool VirtioGPUDevice::interruptFilter(OSObject *owner, IOFilterInterruptEventSource *)
+{
+    VirtioGPUDevice *d = (VirtioGPUDevice *)owner;
+    uint8_t isr = rd8(d->fISR, 0);
+    if (!isr)
+        return false;
+    d->fIntCount++;
+    return (isr & 1) != 0;          // bit 0: a queue was used; bit 1: config change (ignored)
+}
+
+// Our work loop's thread: finish completed commands.
+void VirtioGPUDevice::interruptAction(OSObject *owner, IOInterruptEventSource *, int)
+{
+    VirtioGPUDevice *d = (VirtioGPUDevice *)owner;
+    IOLockLock(d->fCmdLock);
+    d->drainControlLocked(true);
+    IOLockUnlock(d->fCmdLock);
+    IOLockLock(d->fCursorLock);
+    while (ripple_vq_get_used(&d->fQueue[1].vq, NULL, NULL))
+        ;
+    IOLockUnlock(d->fCursorLock);
 }

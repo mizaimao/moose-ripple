@@ -91,3 +91,10 @@ int ripple_vq_get_used(struct ripple_vq *vq, uint16_t *head, uint32_t *written)
         *head = id;
     return 1;
 }
+
+void ripple_vq_set_interrupts(struct ripple_vq *vq, int enable)
+{
+    struct vring_avail *avail = vq->avail;
+    avail->flags = enable ? 0 : VRING_AVAIL_F_NO_INTERRUPT;
+    vq_mb();
+}

@@ -10,6 +10,8 @@
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/pci/IOPCIDevice.h>
+#include <IOKit/IOWorkLoop.h>
+#include <IOKit/IOFilterInterruptEventSource.h>
 #include "virtqueue.h"
 
 class VirtioGPUDevice : public OSObject
@@ -29,6 +31,9 @@ public:
 
     // Slowest control command since the last call (for diagnostics), in microseconds.
     void takeSlowest(uint32_t *us, uint32_t *type, uint32_t *over100ms);
+    // Completion counts: interrupts taken, commands completed from the interrupt, by polling.
+    void interruptStats(uint32_t *ints, uint32_t *byInt, uint32_t *byPoll) const
+        { *ints = fIntCount; *byInt = fIntDone; *byPoll = fPollDone; }
 
     void reset();                  // device reset: drops all host resources
 
@@ -52,7 +57,8 @@ protected:
     virtual void free();
 
 private:
-    enum { kNumBars = 6, kCtrlQueueSize = 64, kCmdBufSize = 8192, kCursorSlots = 16 };
+    enum { kNumBars = 6, kCtrlQueueSize = 64, kCursorSlots = 16,
+           kSlots = 16, kSlotReq = 4096, kSlotResp = 4096 };   // in-flight control commands
 
     struct Queue {
         ripple_vq                 vq;
@@ -70,9 +76,19 @@ private:
     uint32_t fSlowestType, fOver100ms;
     Queue fQueue[2];               // 0 control, 1 cursor
 
-    IOLock *fCmdLock, *fCursorLock;
-    IOBufferMemoryDescriptor *fCmdBuf;     // request | response for one control command
-    uint64_t fCmdBufPA;
+    IOLock *fCmdLock, *fCursorLock;        // fCmdLock: control ring and slots
+    IOBufferMemoryDescriptor *fSlotMem;    // kSlots x (request | response)
+    uint64_t fSlotPA;
+    struct Slot { bool busy; bool done; bool lost; } fSlot[kSlots];
+    int8_t   fHeadSlot[kCtrlQueueSize];   // descriptor chain head -> slot
+
+    // Interrupts: a filter on the PCI interrupt reads the ISR; completions are drained on our
+    // own work loop (not the framebuffer's, whose timer waits for commands). Waiters also
+    // poll, so a missing interrupt only costs latency.
+    IOWorkLoop                    *fWorkLoop;
+    IOFilterInterruptEventSource  *fIntSrc;
+    bool                           fIntEnabled;
+    uint32_t                       fIntCount, fIntDone, fPollDone;
     IOBufferMemoryDescriptor *fCursorBuf;  // kCursorSlots cursor requests
     uint64_t fCursorBufPA;
     unsigned fCursorNext;
@@ -87,6 +103,10 @@ private:
     uint32_t command(const void *req, uint32_t reqLen, void *resp, uint32_t respLen,
                      uint64_t extraPA, uint32_t extraLen);
     bool cursorCommand(const void *req, uint32_t len);
+    void drainControlLocked(bool fromInterrupt);
+    bool setupInterrupts();
+    static bool interruptFilter(OSObject *owner, IOFilterInterruptEventSource *src);
+    static void interruptAction(OSObject *owner, IOInterruptEventSource *src, int count);
 };
 
 #endif

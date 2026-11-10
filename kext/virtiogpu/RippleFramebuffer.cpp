@@ -265,6 +265,11 @@ void RippleFramebuffer::refreshAction(OSObject *owner, IOTimerEventSource *sende
         fb->setProperty("RippleSlowestCommandMicroseconds", slowUs, 32);
         fb->setProperty("RippleSlowestCommandType", slowType, 32);
         fb->setProperty("RippleCommandsOver100ms", over, 32);
+        uint32_t ints, byInt, byPoll;
+        fb->fDev->interruptStats(&ints, &byInt, &byPoll);
+        fb->setProperty("RippleInterrupts", ints, 32);
+        fb->setProperty("RippleCompletedByInterrupt", byInt, 32);
+        fb->setProperty("RippleCompletedByPolling", byPoll, 32);
         fb->fStatFrames = 0;
         fb->fStatPixels = 0;
         fb->fStatTime = 0;

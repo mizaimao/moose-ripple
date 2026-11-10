@@ -26,6 +26,8 @@ void ripple_vq_init(struct ripple_vq *vq, unsigned num, void *mem, uint64_t pa);
  * Returns the head descriptor index, or -1 if there aren't enough free descriptors. */
 int ripple_vq_add(struct ripple_vq *vq, const uint64_t *pa, const uint32_t *len,
                   unsigned nout, unsigned nin);
+/* Ask the device to interrupt (1) or not (0) when it uses buffers. */
+void ripple_vq_set_interrupts(struct ripple_vq *vq, int enable);
 /* Take one completed chain off the used ring and free its descriptors.
  * Returns 1 and sets *head and *written if there was one, else 0. */
 int ripple_vq_get_used(struct ripple_vq *vq, uint16_t *head, uint32_t *written);

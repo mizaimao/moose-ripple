@@ -371,3 +371,16 @@ one screendump, about 11 ms at 1280x800 and 35 ms at 2560x1600, so 2560x1600 num
 Reading: while the screen is busy a move reaches QEMU's display within one 16 ms refresh tick plus
 the copy; after idle the 50 ms idle tick adds up to 50 ms. Per decision 0004 these are reported,
 not acceptance criteria.
+
+## 2026-11-10: M3 step 1: interrupt-driven command completion
+
+`VirtioGPUDevice` now keeps up to 16 control commands in flight (slots with their own request
+and response buffers, head-to-slot map), and completes them from a filter interrupt on the PCI
+device's legacy INTx (index 0, type 1 = level): the filter reads the ISR (acknowledge, and 0 =
+not ours on a shared line), the action drains the used ring on the device's own work loop
+(not the framebuffer's, whose refresh timer waits for commands) and wakes the waiter
+(`IOLockSleepDeadline`/`IOLockWakeup`). Waiters still poll as a fallback; a timed-out command's
+slot is retired, never reused. Result after a boot and a mode switch: 28 interrupts, 28
+completions by interrupt, 0 by polling (`RippleInterrupts`, `RippleCompletedByInterrupt`,
+`RippleCompletedByPolling` in the registry); guest 98% idle; slowest command 8 ms
+(TRANSFER_TO_HOST_2D).
