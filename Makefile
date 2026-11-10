@@ -144,10 +144,26 @@ $(SHIM)/shim.o: gldriver/shim/shim.c $(SHIM)/gld-names.h
 	$(CC) $(call target,x86_64) $(UCFLAGS) -I$(SHIM) -c $< -o $@
 $(OUT)/x86_64/RippleGLDriver: $(SHIM)/shim.o $(SHIM)/trampolines.o
 	$(call ULD,x86_64) -bundle -o $@.v $^ -lSystem && $(call strip_vmin,$@)
-glshim: $(OUT)/RippleGLDriver.bundle
-$(OUT)/RippleGLDriver.bundle: $(OUT)/x86_64/RippleGLDriver gldriver/shim/Info.plist
+glshim: $(OUT)/shim/RippleGLDriver.bundle
+$(OUT)/shim/RippleGLDriver.bundle: $(OUT)/x86_64/RippleGLDriver gldriver/shim/Info.plist
 	rm -rf $@ && mkdir -p $@/Contents/MacOS && cp gldriver/shim/Info.plist $@/Contents/Info.plist && \
 	cp $(OUT)/x86_64/RippleGLDriver $@/Contents/MacOS/RippleGLDriver
+
+# --- RippleGLDriver (M4): Mesa + virgl behind Apple's OpenGL ------------------------------
+# gldriver/mesa/build.sh cross-builds Mesa per architecture (decision 0009); here the two
+# binaries lose the load commands 10.6's tools don't know and are joined into the bundle.
+MESA_BIN := src/gallium/targets/ripple-gl/RippleGLDriver
+.PHONY: glbundle
+glbundle:
+	gldriver/mesa/build.sh x86_64 $(MESA_BIN)
+	gldriver/mesa/build.sh i386 $(MESA_BIN)
+	@mkdir -p $(OUT)/x86_64/gl $(OUT)/i386/gl
+	$(VTOOL) -remove-build-version macos -output $(OUT)/x86_64/gl/RippleGLDriver $(TOOLS)/mesa/build-x86_64/$(MESA_BIN)
+	$(VTOOL) -remove-build-version macos -output $(OUT)/i386/gl/RippleGLDriver $(TOOLS)/mesa/build-i386/$(MESA_BIN)
+	rm -rf $(OUT)/RippleGLDriver.bundle && mkdir -p $(OUT)/RippleGLDriver.bundle/Contents/MacOS
+	cp gldriver/mesa/Info.plist $(OUT)/RippleGLDriver.bundle/Contents/Info.plist
+	$(LIPO) -create $(OUT)/i386/gl/RippleGLDriver $(OUT)/x86_64/gl/RippleGLDriver \
+	    -output $(OUT)/RippleGLDriver.bundle/Contents/MacOS/RippleGLDriver
 
 # --- RippleVirtioGPU (M2) ---------------------------------------------------------------
 VGPU_INC := -Ithird_party/virtio -Ikext/virtiogpu -Iinclude
