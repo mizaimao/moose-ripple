@@ -227,3 +227,52 @@ of 4 bytes, `priv` +0xbf4); gc magic at gc+0x5844, `&ctx->disp` at gc+0x5820, ba
 gc+0x5824; `gldCreateContext`'s 5th argument is gc+0x890. `gldSetInteger(0x2bd)` and the
 exported `CGLSelectDispatch`/`CGLBackDispatch`/`CGLFrontDispatch`/`CGLRestoreDispatch` behave
 as on x86_64.
+
+## The management calls a takeover driver must answer (static disassembly, 10K549 x86_64)
+
+Read by a helper agent from libGFXShared (gfx), GLEngine (GLE), OpenGL (OGL), GLRendererFloat
+and AppleIntelGMA950GLDriver; runtime confirmation pending. C = read from code, I = inferred.
+
+- **Why the M1 forward-everything shim failed (C):** gfx calls `gldInitializeLibrary` then
+  `gldGetVersion` per plugin, accelerator bundles first. The shim reported the float renderer's
+  ID 0x400, so the real GLRendererFloat was disconnected as a duplicate; its
+  `gldTerminateLibrary` zeroed the shared image's display mask, hence 10006 afterwards.
+- `void gldInitializeLibrary(io_service_t accel[32], uint8 accelIndex[32], uint32 displayMask,
+  void *ioFlush, void *ioBindSurface, uint32 flags)`: once per bundle, arrays indexed by display
+  bit. `int gldGetVersion(int *major, int *minor, int *rev, uint32 *id)`: return nonzero with
+  3, 1, 0 and a renderer ID with `(id & 0xffff00ff) == 0`, unique, `(id & 0x7f00) != 0x400`.
+  We use **0x5000** (Apple uses 0x02/04/06, 0x10-0x1a, 0x20-0x26, 0x30, 0x40/0x42).
+- `int gldGetRendererInfo(void *rec, uint32 displayMask)`: 0x88-byte record. +0x08 renderer ID
+  (`0x01000000 | id`; GLE adds 0x20000), +0x0c flags (bit 0 Window, 1 FullScreen, 2 OffScreen,
+  3 BackingStore, 6 Robust, 7 can-be-fallback (I), 8 Accelerated, 9 MultiScreen, 10 Compliant,
+  13 PBuffer, 14 GPU vertex, 15 GPU fragment, 16 accelerated compute), +0x10 buffer modes,
+  +0x14 color, +0x18 accum, +0x1c depth, +0x20 stencil, +0x24 display mask, +0x28/2a/2c s16 aux
+  buffers, sample buffers, samples, +0x2e u8 sample alpha, +0x30 sample modes, +0x4c video and
+  +0x54 texture memory in MB; the rest zero. Return 10006 unless `mask & init` is nonzero and
+  `mask & ~init` zero.
+- `int gldChoosePixelFormat(void **out, const uint32 *attrs)`: OGL strips the renderer-selection
+  attributes (it filters on them itself) and appends attribute 4. Return 0 with `*out = NULL` if
+  nothing matches (nonzero aborts the choice for all renderers). Otherwise one malloc'd list of
+  0x38-byte nodes: +0 next, +8 renderer ID, +0xc flags, +0x10 buffer mode (0 or 8 = double,
+  must equal the request), +0x14 one color-mode bit (0x8000 = ARGB8888), +0x18 accum, +0x1c
+  depth, +0x20 stencil, +0x26 u16 aux, +0x28 u16 sample buffers, +0x2a u16 samples, +0x2c sample
+  mode, +0x30 u8 sample alpha, +0x34 display mask. OGL copies the nodes and calls
+  `gldDestroyPixelFormat(node)` at once: free our block, don't walk `next`.
+- `int gldCreateShared(void **out, uint32 displayMask, int)`, `gldDestroyShared(shared)`.
+- `int gldCreateContext(void **out, pfNode, shared, cfg, glState, aux)`: `cfg` (~0x1d0 bytes) is
+  the one thing GLE needs filled: limits and capability bits, as GLRendererFloat's
+  `_gldSetConfigData` writes them. GLE treats driver contexts, shared state and object handles
+  as opaque (I: no dereference found; GLRendererFloat even stores placeholders like 4 and 0x123).
+- `int gldInitDispatch(ctx, renderOps, limits)` / `gldUpdateDispatch(ctx, renderOps, dirty)`:
+  return bit 0x4 = no fallback (GLRendererFloat and GMA return 4, NVIDIA 5; 0x1 = driver does
+  vertex processing). 33 renderOps slots: fill all except byte offsets 0x80-0x98, 0xc8, 0xd0;
+  limits = {drawable width, height, 0, 0, 0, 0}. Only called once a drawable is attached.
+- `gldSetInteger(ctx, pname, const int *)` / `gldGetInteger(ctx, pname, int *)`: return 0 for
+  unknown pnames. `const char *gldGetString(uint32 displayMask, GLenum)`: 0x1f00-0x1f02, 0x1f04
+  driver name, else NULL. `gldGetError` returns and clears. `gldFlush`/`gldFinish`: return
+  unused. `int gldAttachDrawable(ctx, type, data, opts)`: 0-3 OK, 0x2720 asks for the float
+  fallback; types 0 detach, 0x35 offscreen, 0x36 fullscreen, 0x5b, 0x5c fallback probe.
+- Object calls take `shared` first (`gldCreateTexture(shared, void **out, glTex)`, ...;
+  `gldUnbind*(ctx, obj)`); dummy handles are fine.
+- If no chosen pixel format node has flag bit 7 and recovery is allowed, OGL adds
+  GLRendererFloat as a second virtual screen: `cgl-info` asks for `kCGLPFANoRecovery`.
