@@ -122,3 +122,20 @@ process", both exit 0.
 
 **Next.** The last M0 item is kernel debugging with symbols: waiting for the 10.6.8 KDK
 (build 10K549) from the owner.
+
+## 2026-11-10: retro rig CPU governor (fan noise)
+
+The owner: the CPU fan was loud. The rig was 99.7% idle but every core sat at ~4975 MHz under
+Proxmox's default `performance` governor, and VM 210's small, constant activity kept it at
+full turbo. With the owner's OK, switched all 16 CPUs to `powersave` (intel_pstate, EPP
+`balance_performance`), live only; a reboot reverts it. Idle: 800 MHz, package 52°C -> 48°C.
+Persistent setting: pending the owner's verdict on the noise.
+
+Also: copied into VM 210's `/Users/Shared/ripple-media/` from the owner's Macintosh Repository
+downloads (never committed):
+- `kernel_debug_kit_10-6-8_10k549.dmg`, 93429770 bytes, SHA-256
+  `8dc391def99bc69700bdc1a5e91d4e88451f60c16241ce1940954fb22e018f0a`
+- `xcode_3.2.6_and_ios_sdk_4.3.dmg`, 4443150993 bytes, SHA-256
+  `47f6fecdce63bb00640a9f99c2a65778c1356630286d8003d597ffb83dfcdf3b`
+The KDK image has a license agreement, so `hdiutil attach` asks "Agree Y/N?" and loops at
+end of input when run over ssh.
