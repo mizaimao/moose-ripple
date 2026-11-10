@@ -6,8 +6,11 @@
 
 #include <stdbool.h>
 
+#include "frontend/api.h"
+
 struct gl_context;
 struct st_context;
+struct ripple_cgl_drawable;
 
 /* What a pixel format asks for (filled from Apple's pixel format attributes). */
 struct ripple_cgl_pixel_format {
@@ -26,6 +29,8 @@ struct ripple_cgl_context {
    unsigned magic;               /* RIPPLE_CGL_MAGIC: thunks can be handed a foreign rend */
    struct st_context *st;
    struct ripple_cgl_pixel_format pf;
+   struct st_visual visual;      /* what its drawables are made of */
+   struct ripple_cgl_drawable *draw;   /* window drawable, or NULL (FBOs only) */
    unsigned next_fence;          /* GL_APPLE_fence names (cgl_apple.c) */
 };
 
@@ -36,5 +41,9 @@ void ripple_cgl_context_destroy(struct ripple_cgl_context *ctx);
 
 /* Make `ctx` (or nothing) current for Mesa on the calling thread. */
 bool ripple_cgl_context_make_current(struct ripple_cgl_context *ctx);
+
+/* Render into `d` from now on (NULL: no drawable). Rebinds if `ctx` is current here. */
+void ripple_cgl_context_set_drawable(struct ripple_cgl_context *ctx,
+                                     struct ripple_cgl_drawable *d);
 
 #endif

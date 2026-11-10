@@ -15,6 +15,7 @@
 #include "cgl_context.h"
 #include "cgl_device.h"
 #include "cgl_dispatch.h"
+#include "cgl_drawable.h"
 
 static enum pipe_format
 depth_stencil_format(const struct ripple_cgl_pixel_format *pf)
@@ -63,6 +64,7 @@ ripple_cgl_context_create(const struct ripple_cgl_pixel_format *pf,
       (attribs.visual.depth_stencil_format ? ST_ATTACHMENT_DEPTH_STENCIL_MASK : 0) |
       (pf->accum_bits ? ST_ATTACHMENT_ACCUM_MASK : 0);
 
+   ctx->visual = attribs.visual;
    ctx->st = st_api_create_context(fscreen, &attribs, &error, share ? share->st : NULL);
    if (!ctx->st) {
       FREE(ctx);
@@ -88,12 +90,23 @@ ripple_cgl_context_destroy(struct ripple_cgl_context *ctx)
 bool
 ripple_cgl_context_make_current(struct ripple_cgl_context *ctx)
 {
-   /* No drawables yet: a surfaceless context renders into FBOs only. */
-   return st_api_make_current(ctx ? ctx->st : NULL, NULL, NULL);
+   /* Without a drawable the context is surfaceless and renders into FBOs only. */
+   struct pipe_frontend_drawable *d = ctx && ctx->draw ? &ctx->draw->base : NULL;
+   return st_api_make_current(ctx ? ctx->st : NULL, d, d);
 }
 
 /* From OpenGL.framework (CGLCurrent.h); declared here to keep Apple's GL headers out. */
 extern void *CGLGetCurrentContext(void);
+
+void
+ripple_cgl_context_set_drawable(struct ripple_cgl_context *ctx, struct ripple_cgl_drawable *d)
+{
+   bool current = _glapi_get_context() == ctx->glctx;
+
+   ctx->draw = d;
+   if (current)
+      ripple_cgl_context_make_current(ctx);
+}
 
 void
 ripple_cgl_make_current_slow(void *rend)

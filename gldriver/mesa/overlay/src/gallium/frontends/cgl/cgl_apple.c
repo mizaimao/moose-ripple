@@ -11,6 +11,7 @@
 
 #include "cgl_context.h"
 #include "cgl_dispatch.h"
+#include "cgl_drawable.h"
 
 void
 ripple_cgl_unsupported(const char *name)
@@ -93,7 +94,7 @@ ripple_cgl_finish_object(void *rend, GLenum object, GLuint name)
 void GLAPIENTRY
 ripple_cgl_swap(void *rend)
 {
-   /* Window presentation comes later in M4; until then a swap is a flush. */
+   /* CGLFlushDrawable on a double-buffered context: present the back buffer. */
    RIPPLE_CGL_ENTER(rend);
-   CALL_Flush(GET_DISPATCH(), ());
+   ripple_cgl_context_swap(rend);
 }

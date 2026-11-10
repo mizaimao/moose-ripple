@@ -15,7 +15,7 @@ cgl_dispatch_c = custom_target(
 
 libcgl_st = static_library(
   'cgl_st',
-  ['cgl_device.c', 'cgl_context.c', 'cgl_apple.c', 'cgl_takeover.c', cgl_dispatch_c,
+  ['cgl_device.c', 'cgl_context.c', 'cgl_drawable.c', 'cgl_apple.c', 'cgl_takeover.c', cgl_dispatch_c,
    main_dispatch_h],
   include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux,
                          inc_gallium_winsys],
