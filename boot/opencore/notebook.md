@@ -160,3 +160,13 @@ The owner saw a kernel panic on the 9600 GT monitor in both card boots after the
    shutdown: the same pattern as Chameleon. The start-time messages seen before the clean rig
    reboot didn't appear (one sample).
 VM 212 left without the card.
+
+## 2026-11-10 18:57: UEFI shell with the Apple-EFI ROM (one card boot, 210 off)
+
+OVMF, `vga: std` next to the card (console visible), `romfile=9600gt-macefi-gt120.rom`, the
+UEFI shell from the OpenCore menu. `drivers`: "NVIDIA GPU Driver" (0xD3A, image
+`Offset(0xF600,0x269FF)`, i.e. from the option ROM) is loaded but manages nothing.
+`connect -r`, then `connect A2 B9` (GPU handle, driver): "Result Not Found". GOP only on the
+emulated VGA. So Apple's GT 120 driver doesn't take the 9600 GT. The working card in macOS at
+18:50 (OVMF) was then most likely the card's state left from the SeaBIOS boots before it, not
+Apple's driver: corrects the 18:50 entry. `irq 16: nobody cared` at 18:58:27 (VM stop).
