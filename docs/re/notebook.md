@@ -88,3 +88,24 @@ no problems. Back in 10.6, `diskutil resizeVolume disk0s2 68.3G` grew the volume
 
 **Result.** 64 GiB volume, 37 GiB free. Snapshot `resized`. New scripts: `boot.sh` (Chameleon
 menu, boot flags, waits for ssh) and `stop.sh` (sync, then `qm stop`).
+
+## 2026-11-10: hello-world kext loads on both kernels
+
+**Hypothesis.** clang 19 + cctools-port ld64-609 + the open-source xnu-1504.15.3 headers make
+a universal kext that 10.6.8 loads. Toolchain details: `docs/decisions/0001-toolchain.md`.
+
+**Done.** `kext/hello` (C kmod, logs on start/stop). `scripts/loop.sh RippleHello` builds on
+dev.lan, copies to VM 210, takes the rolling snapshot `pre-load`, runs `kextutil`, and shows
+the kernel log.
+
+**Result.**
+- x86_64 kernel: loads (`kextstat` index 82, 0xffffff7f8098c000), logs "64-bit kernel",
+  unloads.
+- i386 kernel (`arch=i386`): first attempt failed in kxld, "Invalid segment type in MH_OBJECT
+  kext: 36" (LC_VERSION_MIN_MACOSX in the `ld -r` output). After stripping it (and
+  LC_DATA_IN_CODE): loads at 0x7a19f000, logs "32-bit kernel", unloads.
+- The whole loop takes 6 s (M0 target: under a minute).
+
+**Next.** M0 still lacks the hello-world dylib (needs SDK headers or libSystem stubs) and
+kernel debugging with symbols (needs the 10.6.8 KDK, and lldb or a Mach-O-capable gdb on
+dev.lan).
