@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <IOKit/IOKitLib.h>
 #include <mach/mach.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "frontend/api.h"
@@ -87,6 +88,11 @@ ripple_cgl_device_fscreen(void)
 
    simple_mtx_lock(&device_lock);
    if (!device_fscreen && !device_failed) {
+      /* Report OpenGL 2.1 and GLSL 1.20, as Apple's 10.6 drivers do (HANDOFF M4); Mesa's
+       * extensions stay available. Read once by Mesa, before the first context; a value the
+       * user set wins. */
+      setenv("MESA_GL_VERSION_OVERRIDE", "2.1", 0);
+      setenv("MESA_GLSL_VERSION_OVERRIDE", "120", 0);
       struct pipe_screen *screen = ripple_cgl_create_screen();
       if (screen) {
          device_fscreen = CALLOC_STRUCT(pipe_frontend_screen);
