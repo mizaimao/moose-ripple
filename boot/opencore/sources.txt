@@ -1,0 +1,5 @@
+# Pinned upstream releases for the OpenCore boot disk. One per line: file, SHA-256, URL.
+# The SHA-256 values match the digests GitHub publishes for each release asset (checked
+# 2026-11-10). mkimage.sh refuses any file that doesn't match.
+OpenCore-1.0.8-RELEASE.zip 2011e8b7216ecb2645d97ea710df965947edd406846e92050b9bc4190be6d27b https://github.com/acidanthera/OpenCorePkg/releases/download/1.0.8/OpenCore-1.0.8-RELEASE.zip
+OpenCore-1.0.8-DEBUG.zip 3f5f42b85703cf2c08e8dcd9245a52fb4326c9f4ef335c75b49f516cbbe131c6 https://github.com/acidanthera/OpenCorePkg/releases/download/1.0.8/OpenCore-1.0.8-DEBUG.zip
