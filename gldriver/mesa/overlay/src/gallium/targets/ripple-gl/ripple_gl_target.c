@@ -122,10 +122,15 @@ gldInitializeLibrary(const io_service_t *accel, const uint8_t *accel_index,
                      uint32_t flags)
 {
    struct ripple_gpu_info info;
+   bool offer;
 
-   /* Offer the renderer only if our GPU client is there and answers. */
+   /* Offer the renderer only if our GPU client is there and answers. Until GL output reaches
+    * windows, only to processes started with RIPPLE_GL=1 (test programs), never to
+    * WindowServer: the Dock, WindowServer and other apps keep Apple's path meanwhile. */
+   offer = getenv("RIPPLE_GL") && strcmp(getprogname(), "WindowServer") != 0 &&
+           ripple_cgl_device_info(&info);
    simple_mtx_lock(&lib_lock);
-   lib_display_mask = ripple_cgl_device_info(&info) ? display_mask : 0;
+   lib_display_mask = offer ? display_mask : 0;
    simple_mtx_unlock(&lib_lock);
 }
 
@@ -144,7 +149,10 @@ gldGetVersion(int *major, int *minor, int *rev, uint32_t *renderer_id)
    *minor = 1;
    *rev = 0;
    *renderer_id = RIPPLE_RENDERER_ID;
-   return 1;
+   /* 0 makes libGFXShared drop this plugin for the process (gldTerminateLibrary, dlclose):
+    * the clean way out when we don't offer the renderer. An error from gldGetRendererInfo
+    * instead would abort renderer queries for every renderer. */
+   return lib_display_mask != 0;
 }
 
 static bool
