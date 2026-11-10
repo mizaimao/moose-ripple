@@ -181,3 +181,43 @@ Read from the code; still UNVERIFIED against a second driver unless noted.
   GL implementation (Mesa) receives every GL call through a documented ABI, and needs from
   GLEngine only the `gld*` management calls (renderer info, pixel formats, context and drawable
   lifecycle, flush). See [m1-report.md](m1-report.md).
+
+## Where the takeover hooks in (static disassembly, 10K549 x86_64, 2026-11-10)
+
+From a read of OpenGL.framework and GLEngine (by a helper agent; not yet confirmed at runtime).
+Offsets are for this build only; the bundle must check the magic values before using them.
+
+- **`CGLCreateContext`** (OpenGL 0x15ad) mallocs one block: the public `CGLContextObject` at
+  offset 0 (`rend` +0, `disp` +8, 764 slots; `priv` +0x17e8; magic 0x1b7f1843 at +0x18a0),
+  then one 0x17f8-byte record per GL engine plugin, each with the plugin's `GLIContext` (+0),
+  its `gli*` table (+0x10) and a second 764-slot "back" dispatch table (+0x18).
+- It calls GLEngine's `gliCreateContext(&rec->rend, renderers, share, &ctx->disp, &rec->disp,
+  flags)`. GLEngine keeps `&ctx->disp` at gc+0x6550 and `&rec->disp` at gc+0x6558 (gc =
+  GLEngine's context, magic 0x3463a223 at gc+0x6588), calls `gldCreateContext` per renderer and
+  fills the table. Every GLEngine slot write goes to back if back[i] != 0, else to front;
+  OpenGL then copies back to front, zeroes back and sets `ctx->rend = gc`.
+- At the end of `CGLCreateContext`, OpenGL always sends `gliSetInteger(0x2bd)`, which GLEngine
+  forwards as `gldSetInteger(drvctx, 0x2bd, &v)` to every renderer: the first moment the
+  table is final and the driver runs.
+- **No `gld*` call receives the CGL object.** The way back: `gldCreateContext`'s 5th argument
+  is gc+0x8b0, and `ctx = *(gc+0x6550) - 8`.
+- **GLEngine rewrites the table later**: the whole table on `CGLEnable(kCGLCEMPEngine)`, draw
+  slots on drawable attach, renderer switch, fallback and `CGLCopyContext`. A plain overwrite of
+  `ctx->disp` would be undone.
+- **`CGLSelectDispatch(ctx, table)`** (exported by OpenGL, not in the SDK headers; used by
+  `GLProfilerFBDisp`) copies the live table to back and installs `table` in front. From then
+  on GLEngine's writes land in back, so the takeover sticks. Only `CGLRestoreDispatch` undoes it.
+- **Calls through the table with `ctx->rend`**: `CGLFlushDrawable` calls
+  `disp.swap_APPLE(ctx->rend)` (double-buffered only); `CGLSetSurface`/`CGLSetOffScreen`/
+  `CGLSetPBuffer` call `disp.scissor` and `disp.viewport`. Two calls pass GLEngine's gc
+  instead: `flush_render_APPLE(gc)` from drawable attach (goes through back after the takeover),
+  and `get_integerv(rec->rend)` through front when `kCGLCEStateValidation` is on, so our
+  thunks must tolerate a `rend` that isn't ours.
+- **`CGLSetCurrentContext`** is libGL's: `pthread_setspecific(0x1e, ctx)`, nothing else.
+- `gldInitDispatch(drvctx, renderOps, limits)` runs only from `gliUpdateDispatchState` (drawable
+  attach, `kCGLCERasterization`, fallback), never inside `CGLCreateContext`.
+
+**Plan:** in the first `gldSetInteger` on a context of ours, find `ctx` through gc, check both
+magic values, `ctx->rend == gc` and an all-zero back table, then `CGLSelectDispatch(ctx,
+our_table)` and set `ctx->rend` to our context. Check at runtime with a dtrace probe on
+`gldSetInteger` (0x2bd) once VM 210 is free.
