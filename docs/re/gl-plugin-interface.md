@@ -217,6 +217,12 @@ Offsets are for this build only; the bundle must check the magic values before u
 - `gldInitDispatch(drvctx, renderOps, limits)` runs only from `gliUpdateDispatchState` (drawable
   attach, `kCGLCERasterization`, fallback), never inside `CGLCreateContext`.
 
+**Confirmed at runtime (2026-11-10, VM 210, x86_64 and i386):** `tools/takeover-probe` on the
+software renderer finds both magic values, gc pointing at `&ctx->disp`, an empty back table after
+`CGLCreateContext`; after `CGLSelectDispatch` libGL calls reach our table with `rend` as first
+argument, GLEngine's 764 entries sit in back, and our table survives `CGLEnable(kCGLCEMPEngine)`.
+Not checked at runtime: the `gldCreateContext` argument offset (only a driver sees it).
+
 **Plan:** in the first `gldSetInteger` on a context of ours, find `ctx` through gc, check both
 magic values, `ctx->rend == gc` and an all-zero back table, then `CGLSelectDispatch(ctx,
 our_table)` and set `ctx->rend` to our context. Check at runtime with a dtrace probe on

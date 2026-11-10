@@ -45,8 +45,8 @@ strip_vmin  = $(VTOOL) -remove-build-version macos -output $(1) $(1).v && rm -f 
 link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
-.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress clean
-all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress
+.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe clean
+all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe
 
 clean:
 	rm -rf $(OUT)
@@ -226,4 +226,14 @@ $(OUT)/%/gpu-stress/gpu-stress: $(OUT)/%/gpu-stress/gpu-stress.o
 	$(call link_tool,$*,$@,$^,-framework IOKit -framework CoreFoundation)
 gpustress: $(OUT)/gpu-stress
 $(OUT)/gpu-stress: $(OUT)/i386/gpu-stress/gpu-stress $(OUT)/x86_64/gpu-stress/gpu-stress
+	$(LIPO) -create $^ -output $@
+
+# --- takeover-probe (M4: checks the dispatch takeover facts on the software renderer) -------
+$(OUT)/%/takeover-probe/takeover-probe.o: tools/takeover-probe/takeover-probe.c
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,$*) $(UCFLAGS) -c $< -o $@
+$(OUT)/%/takeover-probe/takeover-probe: $(OUT)/%/takeover-probe/takeover-probe.o
+	$(call link_tool,$*,$@,$^,-framework OpenGL)
+takeoverprobe: $(OUT)/takeover-probe
+$(OUT)/takeover-probe: $(OUT)/i386/takeover-probe/takeover-probe $(OUT)/x86_64/takeover-probe/takeover-probe
 	$(LIPO) -create $^ -output $@
