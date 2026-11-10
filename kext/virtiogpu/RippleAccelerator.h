@@ -20,6 +20,7 @@ class RippleAccelerator : public IOAccelerator
     RippleFramebuffer *fFB;
     VirtioGPUDevice   *fDev;
     struct ripple_gpu_info fInfo;
+    bool               fGL;          // GL bundle published (RippleGLBundle / ripple_gl)
 
 public:
     VirtioGPUDevice *device() const { return fDev; }

@@ -6,6 +6,7 @@
 #include "RippleGPUClient.h"
 
 #include <IOKit/IOLib.h>
+#include <pexpert/pexpert.h>
 
 #define super IOAccelerator
 OSDefineMetaClassAndStructors(RippleAccelerator, IOAccelerator)
@@ -36,6 +37,30 @@ bool RippleAccelerator::start(IOService *provider)
     }
     setProperty("RippleGPUAPIVersion", RIPPLE_GPU_API_VERSION, 32);
     setProperty("RippleGPUBackend", "virgl");
+
+    // OpenGL loads the driver bundle named by IOGLBundleName for displays whose framebuffer
+    // points here (IOAccelTypes = our registry path; docs/re/gl-plugin-interface.md).
+    // WindowServer uses OpenGL too, so this stays opt-in until window presentation works:
+    // personality property RippleGLBundle (default false), boot flag ripple_gl=0|1.
+    OSBoolean *gl = OSDynamicCast(OSBoolean, getProperty("RippleGLBundle"));
+    fGL = gl && gl->isTrue();
+    int arg;
+    if (PE_parse_boot_argn("ripple_gl", &arg, sizeof(arg)))
+        fGL = arg != 0;
+    if (fGL) {
+        char path[512];
+        int len = sizeof(path);
+        if (getPath(path, &len, gIOServicePlane)) {
+            setProperty("IOGLBundleName", "RippleGLDriver");
+            fFB->setProperty("IOAccelTypes", path);
+            fFB->setProperty("IOAccelIndex", 0ULL, 32);
+            fFB->setProperty("IOAccelRevision", 2ULL, 32);
+        } else {
+            LOG("no registry path; GL bundle not published");
+            fGL = false;
+        }
+    }
+    setProperty("RippleGL", fGL ? "on" : "off");
     registerService();
     LOG("started: backend virgl, %u capability blobs", fInfo.num_caps);
     return true;
@@ -43,6 +68,13 @@ bool RippleAccelerator::start(IOService *provider)
 
 void RippleAccelerator::stop(IOService *provider)
 {
+    if (fGL && fFB) {
+        fFB->removeProperty("IOAccelTypes");
+        fFB->removeProperty("IOAccelIndex");
+        fFB->removeProperty("IOAccelRevision");
+        removeProperty("IOGLBundleName");
+        fGL = false;
+    }
     if (fDev) {
         fDev->release();
         fDev = 0;

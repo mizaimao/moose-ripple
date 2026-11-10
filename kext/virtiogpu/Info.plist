@@ -49,6 +49,8 @@
 			<string>RippleFramebuffer</string>
 			<key>IOMatchCategory</key>
 			<string>RippleAccelerator</string>
+			<key>RippleGLBundle</key>
+			<false/>
 		</dict>
 	</dict>
 	<key>OSBundleLibraries</key>
