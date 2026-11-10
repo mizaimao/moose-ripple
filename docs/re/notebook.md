@@ -202,7 +202,7 @@ Kexts: `com.apple.GeForce` 6.3.6, `NVDAResman` 6.3.6, `nv50hal` 6.3.6, `IOGraphi
 
 **First static pass.** 43 Apple binaries copied to dev.lan `.tools/re/10K549`
 ([binaries.md](binaries.md)). Findings in [gl-plugin-interface.md](gl-plugin-interface.md) and
-[ioaccelerator-interface.md](ioaccelerator-interface.md): 78 shared `gld*` entry points; the
+[ioaccelerator-interface.md](ioaccelerator-interface.md): 80 shared `gld*` entry points; the
 surface user client is in the SDK's own headers; VMsvga2 r166 fetched for reading (not
 copying; its own code is all-rights-reserved).
 
@@ -222,3 +222,12 @@ program finds and drives `GeForceGLDriver`.
   driver; `dtrace -Z -c` works.
 - `tools/re/gld-calls.d` on `cgl-info`: full ordered `gld*` sequence with the driver's own
   IOKit calls. Details: [gl-plugin-interface.md](gl-plugin-interface.md), Trace 2.
+
+## 2026-11-10: loader experiment: OpenGL loads our GL bundle
+
+See [gl-plugin-interface.md](gl-plugin-interface.md), "The lookup chain" and "Experiment".
+First C++ kext (`RippleAccelProbe`) built with clang 19 after two fixes (C++98 for the SDK
+headers; keep global destructors out of `__cxa_atexit`). On VM 210 it pointed the boot
+framebuffer at itself, and OpenGL `dlopen`ed `RippleGLDriver.bundle` in a new process.
+Renderer queries then failed (expected for a bare pass-through). Kext unloaded cleanly.
+Also: the gld* count is 80, not 78 (earlier hand count was wrong; corrected).

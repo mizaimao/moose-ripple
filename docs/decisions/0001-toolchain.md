@@ -50,3 +50,14 @@ fallback but the build no longer uses them.
 
 - C++ IOKit kexts (`-fapple-kext`, `libkmodc++.a`, OSObject vtables) are untested; M2 needs them.
 - No compiler runtime (`libcc_kext.a`) in the link yet: 64-bit division in i386 code will need it.
+
+## C++ kexts (added 2026-11-10)
+
+- x86_64 works with clang 19: `-std=gnu++98 -fapple-kext -fno-rtti -fno-exceptions
+  -fcheck-new -fno-use-cxa-atexit -mllvm -disable-atexit-based-global-dtor-lowering`, linked
+  with the SDK's `libkmodc++.a` and `libkmod.a`. Without the `-mllvm` switch LLVM turns global
+  destructors into `__cxa_atexit` calls, which the 10.6 kernel doesn't export; with it they go
+  in `__mod_term_func`. `RippleAccelProbe` loads, runs and unloads cleanly.
+- i386 doesn't: clang refuses `-fapple-kext` for C++ on Darwin/i386. An i386 slice for C++
+  kexts would have to come from Xcode 3.2.6's gcc-4.2 in the guest. Open question for the M1
+  report: support the 32-bit kernel at all, or require `arch=x86_64`.

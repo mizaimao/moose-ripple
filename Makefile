@@ -45,8 +45,8 @@ strip_vmin  = $(VTOOL) -remove-build-version macos -output $(1) $(1).v && rm -f 
 link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
-.PHONY: all hello hellodylib cglinfo clean
-all: hello hellodylib cglinfo
+.PHONY: all hello hellodylib cglinfo accelprobe glshim clean
+all: hello hellodylib cglinfo accelprobe glshim
 
 clean:
 	rm -rf $(OUT)
@@ -97,3 +97,54 @@ $(OUT)/%/cgl-info/cgl-info: $(OUT)/%/cgl-info/cgl-info.o
 cglinfo: $(OUT)/cgl-info
 $(OUT)/cgl-info: $(OUT)/i386/cgl-info/cgl-info $(OUT)/x86_64/cgl-info/cgl-info
 	$(LIPO) -create $^ -output $@
+
+# --- C++ kexts ---------------------------------------------------------------------------
+# xnu-1504.15.3 makedefs/MakeInc.def CXXFLAGS_GEN; libkmodc++.a's _start runs the C++ runtime
+# setup (OSRuntimeInitializeCPP, xnu libkern/kmod/cplus_start.c).
+CXX       := clang++
+# -std=gnu++98: the SDK headers are C++98 (kern/queue.h uses `register`). Modern clang refuses
+# -fapple-kext for i386 ("not supported for C++ on Darwin/i386"), so C++ kexts are x86_64-only
+# here; an i386 slice would need Xcode 3.2.6's gcc-4.2 (docs/decisions/0001-toolchain.md).
+# Global destructors must go in __mod_term_func: the 10.6 kernel has no __cxa_atexit, and
+# LLVM lowers them to __cxa_atexit calls on Mach-O unless told not to.
+KCXXFLAGS := $(filter-out -Wno-deprecated-non-prototype,$(KCFLAGS)) -std=gnu++98 \
+             -fapple-kext -fno-rtti -fno-exceptions -fcheck-new -fno-use-cxa-atexit \
+             -mllvm -disable-atexit-based-global-dtor-lowering \
+             -Wno-mismatched-tags -Wno-overloaded-virtual
+KLIBSXX   := -L$(SDK)/usr/lib -lkmodc++ -lkmod
+linkxx_x86_64 = $(LD) -arch x86_64 -kext -macosx_version_min 10.6 -o $(1) $(2) $(KLIBSXX)
+linkxx_i386   = $(LD) -arch i386 -r -no_data_in_code_info -o $(1).r $(2) $(KLIBSXX) && \
+                $(VTOOL) -remove-build-version macos -output $(1) $(1).r && rm -f $(1).r
+# make_kext NAME PLIST ARCHS: kext bundle from $(OUT)/<arch>/NAME for each arch in ARCHS
+make_kext = rm -rf $@ && mkdir -p $@/Contents/MacOS && cp $(2) $@/Contents/Info.plist && \
+            $(LIPO) -create $(foreach a,$(3),$(OUT)/$(a)/$(1)) -output $@/Contents/MacOS/$(1)
+
+# --- RippleAccelProbe (M1 loader experiment) ---------------------------------------------
+PROBE_OBJ = $(OUT)/$(1)/accelprobe/RippleAccelProbe.o $(OUT)/$(1)/accelprobe/info.o
+$(OUT)/%/accelprobe/RippleAccelProbe.o: kext/accelprobe/RippleAccelProbe.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(call target,$*) $(KCXXFLAGS) -c $< -o $@
+$(OUT)/%/accelprobe/info.o: kext/accelprobe/info.c
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,$*) $(KCFLAGS) -c $< -o $@
+$(OUT)/x86_64/RippleAccelProbe: $(call PROBE_OBJ,x86_64)
+	$(call linkxx_x86_64,$@,$^)
+accelprobe: $(OUT)/RippleAccelProbe.kext
+$(OUT)/RippleAccelProbe.kext: $(OUT)/x86_64/RippleAccelProbe kext/accelprobe/Info.plist
+	$(call make_kext,RippleAccelProbe,kext/accelprobe/Info.plist,x86_64)
+
+# --- RippleGLDriver shim (M1 loader experiment, x86_64 only) -----------------------------
+SHIM := $(OUT)/x86_64/shim
+$(SHIM)/trampolines.s $(SHIM)/gld-names.h: gldriver/shim/gld-entry-points.txt tools/gen-gld-trampolines.sh
+	@mkdir -p $(SHIM)
+	sh tools/gen-gld-trampolines.sh $< $(SHIM)/trampolines.s $(SHIM)/gld-names.h
+$(SHIM)/trampolines.o: $(SHIM)/trampolines.s
+	$(CC) $(call target,x86_64) -c $< -o $@
+$(SHIM)/shim.o: gldriver/shim/shim.c $(SHIM)/gld-names.h
+	$(CC) $(call target,x86_64) $(UCFLAGS) -I$(SHIM) -c $< -o $@
+$(OUT)/x86_64/RippleGLDriver: $(SHIM)/shim.o $(SHIM)/trampolines.o
+	$(call ULD,x86_64) -bundle -o $@.v $^ -lSystem && $(call strip_vmin,$@)
+glshim: $(OUT)/RippleGLDriver.bundle
+$(OUT)/RippleGLDriver.bundle: $(OUT)/x86_64/RippleGLDriver gldriver/shim/Info.plist
+	rm -rf $@ && mkdir -p $@/Contents/MacOS && cp gldriver/shim/Info.plist $@/Contents/Info.plist && \
+	cp $(OUT)/x86_64/RippleGLDriver $@/Contents/MacOS/RippleGLDriver

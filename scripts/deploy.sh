@@ -20,7 +20,7 @@ done
 name=${1:?usage: deploy.sh [-n] [-u] KEXT-NAME}
 kext=$ROOT/build/$name.kext
 [ "$unload_only" = 1 ] || [ -d "$kext" ] || die "$kext not found; run scripts/build.sh"
-id=$(sed -n '/CFBundleIdentifier/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' "$ROOT/build/$name.kext/Contents/Info.plist" 2>/dev/null ||
+id=$(sed -n '/CFBundleIdentifier/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' "$ROOT/build/$name.kext/Contents/Info.plist" 2>/dev/null | head -1 ||
      true)
 [ -n "$id" ] || die "no CFBundleIdentifier for $name"
 

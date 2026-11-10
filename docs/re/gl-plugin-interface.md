@@ -22,7 +22,7 @@ are in [binaries.md](binaries.md); everything here refers to the x86_64 slice un
 
 ## The plugin ABI: `gld*` entry points
 
-All three GL drivers examined export the same 78 C functions, and nothing else of note:
+All three GL drivers examined export the same 80 C functions, and nothing else of note:
 `GLRendererFloat` 1.6.13 (software), `GeForceGLDriver` 6.3.6, `AppleIntelGMA950GLDriver`.
 
 `gldAttachDrawable gldBufferSubData gldChoosePixelFormat gldCopyTexSubImage gldCreateBuffer
@@ -46,7 +46,7 @@ gldUnbindVertexArray gldUpdateDispatch gldWaitObject`
 The two hardware drivers also export 28 `glrComp*` functions (OpenCL compute; out of scope).
 
 Reading: the GL state machine lives in Apple's `GLEngine.bundle`; a driver plugs in below it
-through these 78 calls, and `gldInitDispatch`/`gldUpdateDispatch` let it install its own fast
+through these 80 calls, and `gldInitDispatch`/`gldUpdateDispatch` let it install its own fast
 paths. The argument lists and structures are not in any SDK header. UNVERIFIED until
 disassembled or traced.
 
@@ -116,3 +116,32 @@ Readings (UNVERIFIED until disassembly confirms them):
   `gldGetString`, keyed by the display mask.
 - dtrace note: pid probes only worked with `-Z -c`. Attaching with `-p` to a process that
   had `dlopen`ed the driver itself matched no probes in any module.
+
+## The lookup chain, from disassembly (2026-11-10)
+
+1. `OpenGL` (x86_64, around 0x4dc3): for each display from `CGSGetDisplayList`, it takes the
+   OpenGL display mask (`CGSGetDisplayOpenGLDisplayMask`) and the framebuffer service
+   (`CGSServiceForDisplayNumber`), then calls `IOAccelFindAccelerator(framebuffer, &accel,
+   &index)` and stores the accelerator per mask bit. Without a WindowServer connection it
+   walks `IOServiceMatching("IOFramebuffer")` instead.
+2. `IOKit` `IOAccelFindAccelerator` (0xef03): reads the framebuffer's `IOAccelTypes` (a
+   registry path string), `IORegistryEntryFromPath`, requires `IOObjectConformsTo(...,
+   "IOAccelerator")`, then reads the framebuffer's `IOAccelIndex`. Nothing else.
+3. `libGFXShared` `gfxPluginConnectAll` (0xe7b): for each accelerator it reads
+   `IOGLBundleName` and `dlopen`s `/System/Library/Extensions/<name>.bundle/Contents/MacOS/<name>`.
+   The software renderer is added from `OpenGL.framework/Resources` (or `$GL_RESOURCES`).
+
+## Experiment: OpenGL loads our bundle (2026-11-10, VM 210)
+
+- `kext/accelprobe` (`RippleAccelProbe`, C++, x86_64): an `IOAccelerator` on the virtio-gpu
+  PCI device (`IOPCIMatch` 0x10501af4, `IOMatchCategory` `IOAccelerator`, `IOGLBundleName` =
+  `RippleGLDriver`); on start it sets `IOAccelTypes`/`IOAccelIndex`/`IOAccelRevision` on the
+  `IONDRVFramebuffer` (`.Display_boot`) attached to the same device.
+- `gldriver/shim` (`RippleGLDriver.bundle`, x86_64): all 80 `gld*` entry points as trampolines
+  into `GLRendererFloat`, installed in `/System/Library/Extensions` of VM 210.
+- Result: with the kext loaded, `cgl-info` logged "RippleGLDriver: loaded in pid 221,
+  forwarding 80 gld entry points to GLRendererFloat (0 missing)". So OpenGL followed
+  framebuffer -> our accelerator -> our bundle. `CGLQueryRendererInfo` then failed with
+  10006 (invalid display): a bare forward to the software renderer doesn't describe a
+  renderer for the accelerated display. Expected; `gldGetRendererInfo` is M4 work.
+- Unloading the kext removed the properties and restored the normal state.
