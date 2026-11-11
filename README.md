@@ -19,6 +19,10 @@ moose-ripple brings it back. It's a guest driver for QEMU's standard **virtio-gp
 card, OpenGL renders on the host GPU, and WindowServer composites the desktop on it. No period
 hardware, no GPU passthrough.
 
+![Snow Leopard's Dashboard with widgets, composited on the host GPU by moose-ripple, in Proxmox's VNC console](media/dashboard-vnc.png)
+
+*Snow Leopard's Dashboard on moose-ripple, seen through Proxmox's VNC console.*
+
 moose-ripple is alpha software. Everything under "What you get" works on our test machine, but
 expect glitches: install it on a copy of your VM, or take a snapshot first.
 
@@ -41,6 +45,11 @@ expect glitches: install it on a copy of your VM, or take a snapshot first.
   `virgl (Mesa Intel(R) UHD Graphics 630 (CFL GT2))` on our host. Quartz Composer, Front Row,
   the Flurry screen saver and games such as Angry Birds Rio run on it.
 - Core Image on the GPU: its filters and Photo Booth's effects.
+
+![The menu bar with Apple's software rendering (top) and with moose-ripple (bottom)](media/menubar-compare.png)
+
+*Top: Apple's software rendering, an opaque white menu bar. Bottom: moose-ripple, the
+translucent menu bar with the desktop showing through. Both from the same VM.*
 
 ### Measured
 

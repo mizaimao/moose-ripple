@@ -1,9 +1,15 @@
 # media
 
-Images for the project README. Empty for now: the guest desktop gets cleaned up before
-anything is captured. The README has a commented-out spot for each one.
+Images for the project README.
 
-Plan (2026-11-11):
+In the README now (2026-11-11), both from the M5 paired captures:
+
+| File | Shows |
+|---|---|
+| `dashboard-vnc.png` | The Dashboard with widgets on moose-ripple, in Proxmox's VNC console. The README's first picture. |
+| `menubar-compare.png` | The menu bar twice: Apple's software rendering above, moose-ripple's translucent one below. |
+
+Still planned, each with a commented-out spot in the README:
 
 | File | Shows |
 |---|---|
