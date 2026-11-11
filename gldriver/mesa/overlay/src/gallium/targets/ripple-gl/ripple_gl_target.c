@@ -742,6 +742,21 @@ attach_pbuffer(struct gld_context *c, const uint32_t *w)
    struct gld_pbuffer *e = NULL, *spare = NULL;
    bool changed = false;
 
+   /* Public CGL pbuffers (CGLCreatePBuffer: Quartz Composer, M6) keep the size in words 6 and
+    * 7, repeated in 14 and 15: {0, 0, ID, target, format, 0, width, height, 1, 0, ...,
+    * width, height, target}. WindowServer's cgls ones have it in words 9 and 10. */
+   if (w[6] && w[7] && w[6] == w[14] && w[7] == w[15]) {
+      width = w[6];
+      height = w[7];
+   }
+   static unsigned dumped;
+   if (dumped < 4 && ripple_gld_dbg_file()) {
+      dumped++;
+      DBG("  pbuffer attach data:");
+      for (unsigned i = 0; i < 18; i++)
+         fprintf(ripple_gld_dbg_file(), " %08x", w[i]);
+      fprintf(ripple_gld_dbg_file(), "\n");
+   }
    if (!id || !width || !height || width > 16384 || height > 16384) {
       DBG("  pbuffer %u: %ux%u refused\n", id, width, height);
       return kCGLBadDrawable;

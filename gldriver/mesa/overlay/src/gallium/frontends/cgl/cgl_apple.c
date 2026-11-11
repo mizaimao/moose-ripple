@@ -1196,3 +1196,27 @@ ripple_cgl_pop_attrib(void *rend)
    if (restored && (ctx->win_surface || ctx->surf_h))
       apply_viewport_scissor(ctx, offset_ctx(rend, false) != NULL);
 }
+
+/* GL_APPLE_object_purgeable. Quartz Composer marks its cached image textures purgeable and
+ * asks for them back (M6, 2026-11-11); Mesa has no implementation, so each call raised
+ * GL_INVALID_OPERATION. The data is never discarded here: an object made purgeable reports the
+ * state asked for, and comes back retained. */
+GLenum GLAPIENTRY
+ripple_cgl_object_purgeable(void *rend, GLenum objectType, GLuint name, GLenum option)
+{
+   return option == GL_RELEASED_APPLE ? GL_RELEASED_APPLE : GL_VOLATILE_APPLE;
+}
+
+GLenum GLAPIENTRY
+ripple_cgl_object_unpurgeable(void *rend, GLenum objectType, GLuint name, GLenum option)
+{
+   return GL_RETAINED_APPLE;
+}
+
+void GLAPIENTRY
+ripple_cgl_get_object_parameteriv(void *rend, GLenum objectType, GLuint name, GLenum pname,
+                                  GLint *params)
+{
+   if (params && pname == GL_PURGEABLE_APPLE)
+      *params = GL_FALSE;
+}

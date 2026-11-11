@@ -69,6 +69,10 @@ CUSTOM = {
     'get_string': 'ripple_cgl_get_string',
     # Vertex-program limits Core Image reads that Mesa only answers for fragment programs.
     'get_programiv_ARB': 'ripple_cgl_get_programiv',
+    # GL_APPLE_object_purgeable: Mesa has none (no-op entry, an error per call; M6).
+    'object_purgeable_APPLE': 'ripple_cgl_object_purgeable',
+    'object_unpurgeable_APPLE': 'ripple_cgl_object_unpurgeable',
+    'get_object_parameteriv_APPLE': 'ripple_cgl_get_object_parameteriv',
     # Window offset for drawing into the screen through a rectangle (cgl_apple.c).
     'viewport': 'ripple_cgl_viewport',
     'bind_framebuffer_EXT': 'ripple_cgl_bind_framebuffer',
