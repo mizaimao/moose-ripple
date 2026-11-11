@@ -850,7 +850,14 @@ attach_pbuffer(struct gld_context *c, const uint32_t *w)
 GLD_EXPORT int
 gldAttachDrawable(struct gld_context *c, int type, void *data, void *opts)
 {
-   DBG("gldAttachDrawable(%p, 0x%x, %p)\n", (void *)c, type, data);
+   /* The first attaches only: WindowServer attaches several times a frame, and its log grew by
+    * 100 MB in a night (2026-11-11). */
+   static unsigned logged_attaches;
+   bool log = logged_attaches < 300;
+   if (log) {
+      logged_attaches++;
+      DBG("gldAttachDrawable(%p, 0x%x, %p)\n", (void *)c, type, data);
+   }
    if (!c || c->magic != GLD_CONTEXT_MAGIC)
       return 0;
    try_takeover(c, "gldAttachDrawable");
@@ -861,8 +868,9 @@ gldAttachDrawable(struct gld_context *c, int type, void *data, void *opts)
    case GLD_DRAWABLE_WINDOW: {
       bool changed;
       const uint32_t *ids = data;
-      DBG("  surface: connection %u, window %u, surface %u\n", ids ? ids[0] : 0, ids ? ids[1] : 0,
-          ids ? ids[2] : 0);
+      if (log)
+         DBG("  surface: connection %u, window %u, surface %u\n", ids ? ids[0] : 0,
+             ids ? ids[1] : 0, ids ? ids[2] : 0);
       if (ids && !ids[0] && !ids[1] && ids[2])
          return attach_surface(c, ids[2]);
       unbind_surface(c);
@@ -888,7 +896,8 @@ gldAttachDrawable(struct gld_context *c, int type, void *data, void *opts)
       ripple_cgl_drawable_set_present(c->drawable, gld_window_present, w);
       ripple_cgl_drawable_set_size(c->drawable, width, height);
       ripple_cgl_context_set_drawable(c->mesa, c->drawable);
-      DBG("  window %ux%u%s\n", width, height, changed ? " (new or resized)" : "");
+      if (log || changed)
+         DBG("  window %ux%u%s\n", width, height, changed ? " (new or resized)" : "");
       return changed ? GLD_ATTACH_CHANGED : 0;
    }
    case GLD_DRAWABLE_NO_DRAW:

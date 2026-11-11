@@ -201,3 +201,41 @@ Results now:
 - The game's element-buffer binds are its own context's, not Core Animation's.
 Next: replay that frame's calls in-process from the window context (a debug switch that redoes
 the draw with a known texture), to tell the program, the vertex data and the target apart.
+
+## Dashboard: a widget being added flickered (2026-11-11 morning; fixed, 4292cff)
+
+The owner saw it live: a widget being added flickers and can go missing for a few frames. A burst
+of display frames during the ripple (`scripts/screen-vnc.sh -n 30`, tiled with
+`tools/vncgrab/sheet.py`) showed it: frames with the ripple but no widget, and frames with
+no ripple at all, between right ones (3 of 16 ripple frames without the widget).
+
+Cause: WindowServer's display surface is single-buffered, and our driver put the screen on
+the display at every flush of its context. dtrace on `ripple_cgl_device_display` in
+WindowServer during one ripple (94 frames):
+
+| Caller | Display updates |
+|---|---|
+| Core Image, `fe_gl_flush` / `fe_gl_unbind_texture_object` (glFlushRenderAPPLE, mid-frame) | 138 |
+| `_CGXGLCompositeLayers` (glFlushRenderAPPLE, after the layers) | 94 |
+| `CGXGLAccelFinish` (glFlush, the end of the frame) | 94 |
+
+- `glFlushRenderAPPLE` was mapped to Mesa's `glFlush`. Apple defines it (GL_APPLE_flush_render)
+  as a flush that does not show a single-buffered drawable.
+- With that fixed, 56 updates still came from Mesa's own flush when another context becomes
+  current (`_mesa_make_current`): WindowServer changes to Core Image's context mid-frame.
+- The GL_APPLE_fence calls were done with `glFlush`/`glFinish` and showed the drawable too.
+
+Now a single-buffered drawable is shown only by the program's `glFlush`, `glFinish` or a swap
+(`present_ok` in the context, checked in `drawable_flush_front`); `glFlushRenderAPPLE`,
+`glFinishRenderAPPLE` and the fence calls flush without showing. One display update per frame.
+
+Checked on VM 210: the widget is in all 48 ripple frames of three runs (a pixel inside it,
+`pngpix.py`). Desktop, File menu, Exposé, Dashboard, Front Row (menu, navigation, back),
+gl-gears and `window-check` look as before. Not slower: Dashboard 71-74 / 37-44 frames/s and
+29-31 / 13.4-17.1 screens/s (64-67 / 31-35 and 24.7-30.5 / 11-15.3 before), Exposé screens/s
+21-28 / 8.6-13.4 over five runs (18-27 / 9.3-15.2), gl-gears 45-52 frames/s (40-45). Measured
+while files were being copied on the rig at idle priority.
+
+The first try crashed WindowServer at start: for WindowServer's own contexts the entry points
+get GLEngine's context pointer, not ours (`ripple_cgl_context_for` maps it). `gen_fences` and
+`swap_APPLE` had the same mistake and are fixed with it.

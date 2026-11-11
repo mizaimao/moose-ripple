@@ -191,3 +191,17 @@ The owner). Same boot and scene, bundle 6554a67:
 
 The GPU still sleeps in RC6 most of the time; when it wakes it now runs at full clock, so
 QEMU's read-out of the screen finishes about three times sooner. Kept live.
+
+## One display update per frame (2026-11-11 11:20, with the widget flicker fix 4292cff)
+
+The display was updated at every flush of WindowServer's context, three to four times a frame
+during Dashboard effects (see m6-notes, "a widget being added flickered"). Now once, at the
+frame's end. Same scene, 1200 MHz, frame meter peak / mean, two Dashboard and five Exposé runs
+(files were being copied on the rig at idle priority meanwhile):
+
+| | before (bundle 6554a67) | now (4292cff) |
+|---|---|---|
+| Dashboard frames/s | 64-67 / 31-35 | 71-74 / 37-44 |
+| Dashboard screens/s | 24.7-30.5 / 11-15.3 | 29-31 / 13.4-17.1 |
+| Exposé screens/s | 18-27 / 9.3-15.2 | 21-28 / 8.6-13.4 |
+| gl-gears in a window, frames/s | 40-45 | 45-52 |
