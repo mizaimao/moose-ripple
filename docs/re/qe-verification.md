@@ -75,6 +75,40 @@ captures, before the multi-frame mode existed):
 
 The Dictionary widget is still on 210's Dashboard from this test.
 
+## Display lag under QE (decision 0004: measured, not a gate)
+
+`scripts/lag.sh` can't run on 210: QEMU's screendump fails on virtio-gl, and with
+`ripple_hwcursor=1` the pointer isn't in the picture. `scripts/vnc-lag.sh` measures through
+VNC instead. It presses F9 (Exposé) or F12 (Dashboard) on the VNC connection itself, then asks
+for frames back to back until the picture changes, so the press and the frames share one clock
+(dev.lan). Each press opens or closes the effect.
+
+```
+VMID=210 scripts/vnc-lag.sh 10 f12 2 strip       # 8 rows at mid-height, about 30 ms a frame
+VMID=210 scripts/vnc-lag.sh 10 f9 2 strip:250    # a row the effect changes (here the window)
+VMID=210 scripts/vnc-lag.sh 10 f9 2 full         # whole frames, about 90 ms each at 1280x800
+```
+
+210, 2026-11-10 21:30 to 21:33, one WindowServer run (pid 2398), `ripple_qe=2`, 1280x800, 10
+presses each (5 open, 5 close):
+
+| What | VNC frame | First changed frame after the press |
+|---|---|---|
+| Exposé (F9), strip at y 250 | median 30 ms (21 to 31) | median 215 ms, 136 to 253 ms |
+| Dashboard (F12), strip at mid-height | median 29 ms (25 to 37) | median 246 ms, 173 to 395 ms |
+| Exposé (F9), whole frames | median 91 ms (73 to 176) | median 227 ms, 179 to 639 ms (the 639 ms press spanned a WindowServer restart) |
+
+Reading: subtract about one strip frame (30 ms), so roughly 185 ms (Exposé) and 215 ms
+(Dashboard) from the key reaching QEMU to the first changed pixel in QEMU's VNC copy of the
+display. That covers the keyboard path (VNC, usb-kbd, HID, WindowServer, Dock), the effect
+starting in the Dock, the GL composition, the scanout and QEMU's readback into its VNC
+picture. QEMU answers VNC requests on its 30 ms refresh tick, so the numbers have about 30 ms
+steps. In whole frames the first change covers the whole screen.
+
+Open: a run at 21:27, on the WindowServer before a restart, saw the first change in the first
+whole frame (about 100 ms) on 9 of 10 presses. It wasn't reproduced after the restart. There is
+no baseline without QE yet; VM 212 (virtio, software) could give one.
+
 ## Pitfalls
 
 - `screencapture` writes nothing over ssh on VM 210 (QEMU's `screendump` says "no surface" once

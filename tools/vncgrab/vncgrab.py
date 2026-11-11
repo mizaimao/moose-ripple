@@ -126,10 +126,11 @@ def handshake(c, password):
     return w, h
 
 
-def frame(c, w, h):
-    """Ask for the whole screen (non-incremental, so the server answers at once) and return
-    (w, h, BGRX bytes). A DesktopSize rectangle means the mode changed: ask again."""
-    c.write(struct.pack(">BBHHHH", 3, 0, 0, 0, w, h))
+def frame(c, w, h, y0=0, rows=0):
+    """Ask for the whole screen, or only ROWS rows from Y0 (non-incremental, so the server
+    answers at once), and return (w, h, BGRX bytes of the whole screen; rows not asked for stay
+    zero). A DesktopSize rectangle means the mode changed: ask again."""
+    c.write(struct.pack(">BBHHHH", 3, 0, 0, y0, w, rows or h))
     fb = bytearray(w * h * 4)
     while True:
         t = c.read(1)[0]
@@ -178,7 +179,97 @@ def png(w, h, bgrx):
             + chunk(b"IDAT", zlib.compress(bytes(raw), 6)) + chunk(b"IEND", b""))
 
 
+KEYSYMS = {"f9": 0xFFC6, "f10": 0xFFC7, "f11": 0xFFC8, "f12": 0xFFC9}
+
+
+def lag(c, w, h, rounds, key, idle, strip):
+    """Display lag through VNC: press KEY on this same connection (QEMU injects it like any VNC
+    input), then ask for frames back to back until one differs from the steady picture before
+    the press. One clock (this machine) for the press and the frames. STRIP (a row, or -1 for
+    mid-height): ask only for 8 rows across the screen there, about 30 ms a frame instead of
+    about 85 (QEMU answers on its 30 ms VNC refresh tick), so a finer result; the effect must
+    change those rows. STRIP None: whole frames without the menu bar (its clock). Each press
+    toggles the effect (Exposé,
+    Dashboard), so ROUNDS presses alternate open and close; use an even count to leave the
+    screen as it was. Prints to stderr: stdout carries RFB."""
+    def log(*a):
+        print(*a, file=sys.stderr, flush=True)
+
+    def grab():
+        nonlocal w, h
+        t = time.monotonic()
+        y0, rows = ((h // 2 if strip < 0 else strip) - 4, 8) if strip is not None else (22, h - 22)
+        w, h, fb = frame(c, w, h, y0, rows)
+        grab.fb = fb
+        return time.monotonic(), time.monotonic() - t, zlib.crc32(memoryview(fb)[y0 * w * 4:(y0 + rows) * w * 4])
+
+    def changed_box(a, b):
+        """Bounding box (x0, x1, y0, y1) of the pixels that differ between two frames."""
+        stride = w * 4
+        ys = [y for y in range(h) if a[y * stride:(y + 1) * stride] != b[y * stride:(y + 1) * stride]]
+        if not ys:
+            return None
+        xs = [x for y in ys for x in range(w)
+              if a[y * stride + 4 * x:y * stride + 4 * x + 3] != b[y * stride + 4 * x:y * stride + 4 * x + 3]]
+        return min(xs), max(xs), ys[0], ys[-1]
+
+    def press(sym):
+        c.write(struct.pack(">BBxxI", 4, 1, sym) + struct.pack(">BBxxI", 4, 0, sym))
+
+    ftimes = [grab()[1] for _ in range(10)]
+    log("VNC frame (%s, request to last byte): median %.1f ms, %.1f to %.1f ms"
+        % ("8-row strip around y %d" % (h // 2 if strip < 0 else strip) if strip is not None
+           else "%dx%d raw without the menu bar" % (w, h),
+           1000 * sorted(ftimes)[5], 1000 * min(ftimes), 1000 * max(ftimes)))
+    lags, during = [], []
+    for r in range(rounds):
+        time.sleep(idle)
+        base = grab()[2]
+        for _ in range(50):                      # wait for a steady picture
+            s = grab()[2]
+            if s == base:
+                break
+            base = s
+        basefb = grab.fb
+        t0 = time.monotonic()
+        press(KEYSYMS[key])
+        n = 0
+        while True:
+            done, ft, s = grab()
+            during.append(ft)
+            n += 1
+            if s != base:
+                lags.append(done - t0)
+                # With a strip, QEMU still sends every other dirty area, so a box is only
+                # meaningful for whole frames.
+                box = "" if strip is not None else ", changed area x %d..%d y %d..%d" % changed_box(basefb, grab.fb)
+                log("press %2d (%s): first changed frame %.0f ms after the press (frame %d)%s"
+                    % (r + 1, "open" if r % 2 == 0 else "close", 1000 * (done - t0), n, box))
+                break
+            if done - t0 > 5:
+                log("press %2d: no change within 5 s" % (r + 1))
+                break
+    if lags:
+        s = sorted(lags)
+        log("lag: median %.0f ms, %.0f to %.0f ms over %d presses; frames during: median %.0f ms"
+            % (1000 * s[len(s) // 2], 1000 * s[0], 1000 * s[-1], len(s),
+               1000 * sorted(during)[len(during) // 2]))
+
+
 if __name__ == "__main__":
+    if len(sys.argv) >= 2 and sys.argv[1] == "--lag":
+        # vncgrab.py --lag ROUNDS KEY IDLE-SECONDS full|strip|strip:Y
+        area = sys.argv[5] if len(sys.argv) == 6 else ""
+        if (len(sys.argv) != 6 or sys.argv[3] not in KEYSYMS or "VNC_PASSWORD" not in os.environ
+                or not (area in ("full", "strip") or area.startswith("strip:") and area[6:].isdigit())):
+            sys.exit("usage: VNC_PASSWORD=<pw> vncgrab.py --lag ROUNDS f9|f12 IDLE-SECONDS "
+                     "full|strip|strip:Y")
+        conn = Conn(sys.stdin.buffer, sys.stdout.buffer)
+        width, height = handshake(conn, os.environ["VNC_PASSWORD"])
+        lag(conn, width, height, int(sys.argv[2]), sys.argv[3], float(sys.argv[4]),
+            None if area == "full" else -1 if area == "strip" else int(area[6:]))
+        sys.stdout.close()
+        sys.exit(0)
     if len(sys.argv) == 2 and sys.argv[1] == "--selftest":
         # FIPS 46 example: key 133457799BBCDFF1, plaintext 0123456789ABCDEF -> 85E813540F0AB405
         got = des_encrypt(bytes.fromhex("133457799BBCDFF1"), bytes.fromhex("0123456789ABCDEF")).hex()
