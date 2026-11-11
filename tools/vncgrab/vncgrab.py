@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # Save what a Proxmox VM's display shows (QEMU's VNC server, so also a virtio-gl scanout that
-# QEMU's screendump can't see: "no surface") as a PNG on stdout. Python 3 standard library
-# only; runs on the Proxmox host through `qm vncproxy` (the same path the web console uses).
-#   LC_PVE_TICKET=<one-off password> python3 -I vncgrab.py VMID > screen.png
-# `qm vncproxy` sets that password on the VM's VNC server for 30 seconds and connects us.
-# Driven from the laptop by scripts/screen-vnc.sh. RFB 3.8, VNC authentication, raw encoding.
+# QEMU's screendump can't see: "no surface") as a PNG. Python 3 standard library only.
+#   VNC_PASSWORD=<pw> .venv/bin/python -I vncgrab.py OUT.png   speaks RFB on stdin/stdout
+# Runs on dev.lan in the repo's .venv; scripts/screen-vnc.sh connects its stdin/stdout to
+# `qm vncproxy` on the rig (the web console's path), which sets that one-off password on the
+# VM's VNC server for 30 seconds. RFB 3.8, VNC authentication, raw encoding.
 import os
 import struct
-import subprocess
 import sys
 import zlib
 
@@ -83,8 +82,8 @@ def vnc_response(password, challenge):
 
 # ---- RFB client -------------------------------------------------------------------------
 class Conn:
-    def __init__(self, proc):
-        self.r, self.w = proc.stdout, proc.stdin
+    def __init__(self, r, w):
+        self.r, self.w = r, w
 
     def read(self, n):
         buf = b""
@@ -100,65 +99,58 @@ class Conn:
         self.w.flush()
 
 
-def grab(vmid, password):
-    proc = subprocess.Popen(["qm", "vncproxy", str(vmid)], stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, env=dict(os.environ, LC_PVE_TICKET=password))
-    c = Conn(proc)
-    try:
-        c.read(12)                                   # "RFB 003.008\n"
-        c.write(b"RFB 003.008\n")
-        n = c.read(1)[0]
-        if n == 0:
-            raise RuntimeError("server refused: " + c.read(struct.unpack(">I", c.read(4))[0]).decode())
-        types = c.read(n)
-        if 2 not in types:
-            raise RuntimeError("no VNC authentication offered: %r" % list(types))
-        c.write(b"\x02")
-        c.write(vnc_response(password, c.read(16)))
-        if struct.unpack(">I", c.read(4))[0] != 0:
-            raise RuntimeError("VNC authentication failed")
-        c.write(b"\x01")                              # ClientInit, shared
-        w, h = struct.unpack(">HH", c.read(4))
-        c.read(16)                                    # server pixel format
-        c.read(struct.unpack(">I", c.read(4))[0])     # desktop name
-        # SetPixelFormat: 32 bpp, depth 24, little-endian, true colour, R/G/B at 16/8/0.
-        c.write(struct.pack(">BxxxBBBBHHHBBBxxx", 0, 32, 24, 0, 1, 255, 255, 255, 16, 8, 0))
-        c.write(struct.pack(">BxHii", 2, 2, 0, -223))  # encodings: Raw, DesktopSize
-        c.write(struct.pack(">BBHHHH", 3, 0, 0, 0, w, h))
-        fb = None
-        while True:
-            t = c.read(1)[0]
-            if t == 0:
-                nrect = struct.unpack(">xH", c.read(3))[0]
-                for _ in range(nrect):
-                    x, y, rw, rh, enc = struct.unpack(">HHHHi", c.read(12))
-                    if enc == -223:                   # desktop resized: ask again
-                        w, h = rw, rh
-                        fb = None
-                        continue
-                    if enc != 0:
-                        raise RuntimeError("unexpected encoding %d" % enc)
-                    if fb is None:
-                        fb = bytearray(w * h * 4)
-                    data = c.read(rw * rh * 4)
-                    for row in range(rh):
-                        o = ((y + row) * w + x) * 4
-                        fb[o:o + rw * 4] = data[row * rw * 4:(row + 1) * rw * 4]
-                if fb is not None:
-                    return w, h, fb
-                c.write(struct.pack(">BBHHHH", 3, 0, 0, 0, w, h))
-            elif t == 1:                              # SetColourMapEntries
-                ncol = struct.unpack(">xHH", c.read(5))[1]
-                c.read(ncol * 6)
-            elif t == 2:                              # Bell
-                pass
-            elif t == 3:                              # ServerCutText
-                c.read(struct.unpack(">xxxI", c.read(7))[0])
-            else:
-                raise RuntimeError("unknown server message %d" % t)
-    finally:
-        proc.kill()
-        proc.wait()
+def grab(c, password):
+    c.read(12)                                   # "RFB 003.008\n"
+    c.write(b"RFB 003.008\n")
+    n = c.read(1)[0]
+    if n == 0:
+        raise RuntimeError("server refused: " + c.read(struct.unpack(">I", c.read(4))[0]).decode())
+    types = c.read(n)
+    if 2 not in types:
+        raise RuntimeError("no VNC authentication offered: %r" % list(types))
+    c.write(b"\x02")
+    c.write(vnc_response(password, c.read(16)))
+    if struct.unpack(">I", c.read(4))[0] != 0:
+        raise RuntimeError("VNC authentication failed")
+    c.write(b"\x01")                              # ClientInit, shared
+    w, h = struct.unpack(">HH", c.read(4))
+    c.read(16)                                    # server pixel format
+    c.read(struct.unpack(">I", c.read(4))[0])     # desktop name
+    # SetPixelFormat: 32 bpp, depth 24, little-endian, true colour, R/G/B at 16/8/0.
+    c.write(struct.pack(">BxxxBBBBHHHBBBxxx", 0, 32, 24, 0, 1, 255, 255, 255, 16, 8, 0))
+    c.write(struct.pack(">BxHii", 2, 2, 0, -223))  # encodings: Raw, DesktopSize
+    c.write(struct.pack(">BBHHHH", 3, 0, 0, 0, w, h))
+    fb = None
+    while True:
+        t = c.read(1)[0]
+        if t == 0:
+            nrect = struct.unpack(">xH", c.read(3))[0]
+            for _ in range(nrect):
+                x, y, rw, rh, enc = struct.unpack(">HHHHi", c.read(12))
+                if enc == -223:                   # desktop resized: ask again
+                    w, h = rw, rh
+                    fb = None
+                    continue
+                if enc != 0:
+                    raise RuntimeError("unexpected encoding %d" % enc)
+                if fb is None:
+                    fb = bytearray(w * h * 4)
+                data = c.read(rw * rh * 4)
+                for row in range(rh):
+                    o = ((y + row) * w + x) * 4
+                    fb[o:o + rw * 4] = data[row * rw * 4:(row + 1) * rw * 4]
+            if fb is not None:
+                return w, h, fb
+            c.write(struct.pack(">BBHHHH", 3, 0, 0, 0, w, h))
+        elif t == 1:                              # SetColourMapEntries
+            ncol = struct.unpack(">xHH", c.read(5))[1]
+            c.read(ncol * 6)
+        elif t == 2:                              # Bell
+            pass
+        elif t == 3:                              # ServerCutText
+            c.read(struct.unpack(">xxxI", c.read(7))[0])
+        else:
+            raise RuntimeError("unknown server message %d" % t)
 
 
 def png(w, h, bgrx):
@@ -182,7 +174,9 @@ if __name__ == "__main__":
         # FIPS 46 example: key 133457799BBCDFF1, plaintext 0123456789ABCDEF -> 85E813540F0AB405
         got = des_encrypt(bytes.fromhex("133457799BBCDFF1"), bytes.fromhex("0123456789ABCDEF")).hex()
         sys.exit(0 if got == "85e813540f0ab405" else "DES self-test failed: " + got)
-    if len(sys.argv) != 2 or "LC_PVE_TICKET" not in os.environ:
-        sys.exit("usage: LC_PVE_TICKET=<password> vncgrab.py VMID > out.png")
-    width, height, pixels = grab(sys.argv[1], os.environ["LC_PVE_TICKET"])
-    sys.stdout.buffer.write(png(width, height, pixels))
+    if len(sys.argv) != 2 or "VNC_PASSWORD" not in os.environ:
+        sys.exit("usage: VNC_PASSWORD=<pw> vncgrab.py OUT.png  (RFB on stdin/stdout)")
+    width, height, pixels = grab(Conn(sys.stdin.buffer, sys.stdout.buffer), os.environ["VNC_PASSWORD"])
+    with open(sys.argv[1], "wb") as f:
+        f.write(png(width, height, pixels))
+    sys.stdout.close()
