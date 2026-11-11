@@ -468,7 +468,8 @@ client_storage_quiet(void)
 {
    static int quiet = -1;
    if (quiet < 0)
-      quiet = strcmp(getprogname(), "WindowServer") != 0;
+      quiet = strcmp(getprogname(), "WindowServer") != 0 &&
+              access("/Library/Logs/RippleGL/cs-error", F_OK) != 0;   /* debug switch */
    return quiet;
 }
 

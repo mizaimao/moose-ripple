@@ -124,3 +124,16 @@ there (1 frame/s, 100% CPU afterwards), C&C 3 needs its disc.
   too, and the window shows it.
 So the remaining difference is in Core Video's or Core Animation's own objects (the CVOpenGL
 buffer pool's pbuffers, the CARenderer context), not in the GL path as such. Parked.
+
+## Front Row (05:40)
+
+Works on the current build (kext and bundle of 2085cab plus the cs-error switch): menu,
+reflections, navigation ([capture](img/m6-qe-frontrow.png)). It has to be started with
+Cmd+Esc (`qm sendkey 210 meta_l-esc` after a click on the desktop); `open -a "Front Row"`
+starts the process but it never takes the screen, on any build (bisected through the M5-era
+kext and bundle before that was clear). Desktop, menu, Dashboard re-captured: unchanged.
+Frame meter (rig alone): Exposé 26-28 / 9-15 screens/s peak / mean, Dashboard 23-26 / 13.
+
+Build note: after building an older commit from a git worktree, `scripts/build.sh` in the main
+tree didn't rebuild (rsync -a gave dev.lan the older source mtimes, older than the objects).
+Touch the sources, or build old commits elsewhere.
