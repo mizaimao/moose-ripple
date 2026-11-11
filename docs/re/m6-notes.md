@@ -16,7 +16,8 @@ may look worse than the reference (paired captures), and the performance numbers
 | Real Racing 2 intro movie | plays (1 frame/s of GL flushes; Core Animation) | black |
 | Real Racing 2 after the intro | black, 1 frame/s, 100% CPU | 3D menu renders, garbled (five side-by-side copies, interlaced lines), 23-30 frames/s |
 | Command & Conquer 3 launcher | right | same as software |
-| Command & Conquer 3 game (Cider, 32-bit) | not tried yet | context made, no drawable attached, process idles; "invalid context" from CoreGraphics |
+| Command & Conquer 3 game (Cider, 32-bit) | "Cannot locate the DVD-ROM" (needs its disc) | the same dialog behind the launcher (needs its disc) |
+| Flurry screen saver (OpenGL, 1280x800) | 29 frames/s (its cap), ScreenSaverEngine 66% CPU | 27 frames/s, ScreenSaverEngine 4% CPU, WindowServer 9% |
 | Front Row | (M5) | works (M5) |
 | iMovie | not installed (no iLife on VM 210) | - |
 | Photo Booth effects | no camera in the VM | - |
@@ -73,7 +74,36 @@ Captures (git-ignored, `img/`): `m6-{qe,sw}-*.png` copied from the runs above.
   matrix work in `gl-feature-check`; not found yet.
 - **Core Image Fun House:** Core Image issues no GL calls for drawImage into the view; the same
   on software (white). Not a regression; not understood.
-- **C&C 3 game:** check on software first.
+- **C&C 3 game:** needs its DVD on either renderer (a disc image from the owner would do).
 - **App GL windows are read back** (the window path): every frame goes host -> guest -> window
   backing -> WindowServer upload. Angry Birds at 1280x800: about 20-30 ms per present. Sharing
   the app's GL surface with WindowServer on the GPU is the fix (a later performance item).
+
+## Real Racing 2's intro, what was ruled out (04:30-05:20)
+
+All in one thread. Per frame: Core Video's context A uploads the IOSurface frame (now works),
+attaches a new rectangle pbuffer, converts with the ARB program (now parses), flushes, ties
+texture N to the pbuffer; Core Animation's window context B binds N (the GL trace prints a
+call before the context marker of its context), draws the quad with its GLSL program and the
+3D colour table, and swaps. With `swapdebug`: B's swaps read back the centre of its back
+buffer as 0,0,0,0 (after three opaque black ones at the start), viewport 1280x800, the
+window framebuffer, no GL error. Ruled out by `gl-feature-check` (same contexts, pbuffer,
+tie, exact program and vertex layout, into an FBO and into a context's own drawable: right
+pixel), by the swap rectangle (always the full window; now honoured anyway), a copy instead
+of the tie (also black), threads (one), viewport, culling, stencil, element buffers, blend.
+Next idea: dump B's whole GL state at its draw (texture units, sampler state, program
+uniforms as Mesa holds them) and compare with `gl-feature-check`'s.
+
+## Game and app numbers against the software renderer (M6 acceptance)
+
+Of the period OpenGL titles on VM 210, only Flurry runs on both renderers; Quartz Composer
+and Angry Birds Rio refuse Apple's software renderer, Real Racing 2 shows only its intro
+there (1 frame/s, 100% CPU afterwards), C&C 3 needs its disc.
+
+| | software | ours |
+|---|---|---|
+| Flurry, frames/s (glFlush) | 29 | 27 |
+| Flurry, ScreenSaverEngine CPU | 66% | 4% |
+| Angry Birds Rio title screen, frames/s | refuses to start | 59 |
+| Quartz Composer Arabesque, frames/s | refuses to start | 60 |
+| Real Racing 2 menu, frames/s | 1 (black) | 23-30 (garbled) |
