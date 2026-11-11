@@ -102,8 +102,10 @@ ripple_cgl_swap(void *rend)
 /* ---- Debug trace of GL calls (gen_dispatch.py emits the calls) ------------------------- *
  * On when /Library/Logs/RippleGL/trace exists when the bundle loads: the first calls of each
  * entry with their arguments, and every 10 s the call counts, into
- * /Library/Logs/RippleGL/trace-PROGRAM-PID.log. */
+ * /Library/Logs/RippleGL/trace-PROGRAM-PID.log. A file /Library/Logs/RippleGL/burst logs the
+ * following calls in full (see ripple_cgl_trace). */
 #include <stdarg.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -112,6 +114,9 @@ static FILE *trace_file;
 static unsigned long trace_counts[1024];
 static const char *trace_names[1024];
 static time_t trace_last_dump;
+static time_t trace_last_burst_check;
+static time_t trace_burst_mtime;
+static unsigned long trace_burst_left;     /* calls still to log in full (burst mode) */
 static simple_mtx_t trace_lock = SIMPLE_MTX_INITIALIZER;
 
 __attribute__((constructor)) static void
@@ -139,14 +144,36 @@ ripple_cgl_trace(unsigned index, const char *fmt, ...)
    unsigned long n = ++trace_counts[index];
    if (!trace_names[index])
       trace_names[index] = fmt;
-   if (n <= 6) {
+   time_t now = time(NULL);
+   /* Burst: writing /Library/Logs/RippleGL/burst logs the next calls in full (the file may
+    * hold their number; default 40000). Each new modification time starts one burst
+    * (WindowServer runs as _windowserver and can't remove the file). */
+   if (now != trace_last_burst_check) {
+      trace_last_burst_check = now;
+      struct stat st;
+      if (stat("/Library/Logs/RippleGL/burst", &st) == 0 &&
+          st.st_mtime != trace_burst_mtime) {
+         trace_burst_mtime = st.st_mtime;
+         unsigned long want = 0;
+         FILE *b = fopen("/Library/Logs/RippleGL/burst", "r");
+         if (b) {
+            if (fscanf(b, "%lu", &want) != 1)
+               want = 0;
+            fclose(b);
+         }
+         trace_burst_left = want ? want : 40000;
+         fprintf(trace_file, "---- burst %lu ----\n", trace_burst_left);
+      }
+   }
+   if (n <= 6 || trace_burst_left) {
       va_list ap;
       va_start(ap, fmt);
       vfprintf(trace_file, fmt, ap);
       va_end(ap);
       fputc('\n', trace_file);
+      if (trace_burst_left && --trace_burst_left == 0)
+         fprintf(trace_file, "---- burst end ----\n");
    }
-   time_t now = time(NULL);
    if (now - trace_last_dump >= 10) {
       trace_last_dump = now;
       fprintf(trace_file, "---- counts ----\n");
