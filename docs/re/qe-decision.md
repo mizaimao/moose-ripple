@@ -100,8 +100,8 @@ the defaults are 32-bit depth, 16 MB and `IOAGPDevice` only (C, `_CGXCoreGraphic
 
 ## What this means for the driver
 
-- With `ripple_qe=1`, the kext and GL bundle as of ce279dc meet every row on paper, and ripple
-  saw `CGDisplayUsesOpenGLAcceleration` = 1 on VM 210 (f98c322). If it ever drops back to 0,
+- With `ripple_qe=1`, the kext and GL bundle as of ce279dc meet every row on paper, and
+  `CGDisplayUsesOpenGLAcceleration` was 1 on VM 210 (f98c322). If it ever drops back to 0,
   check row 8 (`gldCreateContext` or the first attach failing for WindowServer) and row 7 first.
 - Keep the framebuffer's `getVRAMRange()` at 32 MB or more, and the renderer's video memory
   below 4096 MB (row 4's 32-bit shift).
