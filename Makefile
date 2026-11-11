@@ -45,8 +45,8 @@ strip_vmin  = $(VTOOL) -remove-build-version macos -output $(1) $(1).v && rm -f 
 link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
-.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin clean
-all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin
+.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck clean
+all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck
 
 clean:
 	rm -rf $(OUT)
@@ -258,6 +258,16 @@ $(OUT)/%/gl-gears/gl-gears: $(OUT)/%/gl-gears/gl-gears.o
 	$(call link_tool,$*,$@,$^,-framework Cocoa -framework OpenGL -lobjc)
 glgears: $(OUT)/gl-gears
 $(OUT)/gl-gears: $(OUT)/i386/gl-gears/gl-gears $(OUT)/x86_64/gl-gears/gl-gears
+	$(LIPO) -create $^ -output $@
+
+# --- gl-check (M5: offscreen rendering checks for what WindowServer draws with) -----------
+$(OUT)/%/gl-check/gl-check.o: tools/gl-check/gl-check.c
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,$*) $(UCFLAGS) -c $< -o $@
+$(OUT)/%/gl-check/gl-check: $(OUT)/%/gl-check/gl-check.o
+	$(call link_tool,$*,$@,$^,-framework OpenGL)
+glcheck: $(OUT)/gl-check
+$(OUT)/gl-check: $(OUT)/i386/gl-check/gl-check $(OUT)/x86_64/gl-check/gl-check
 	$(LIPO) -create $^ -output $@
 
 # --- grab (save the guest's main display as PNG; works over ssh) --------------------------
