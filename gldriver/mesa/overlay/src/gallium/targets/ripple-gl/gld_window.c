@@ -15,6 +15,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <CoreFoundation/CoreFoundation.h>
+
 #include "util/simple_mtx.h"
 
 #include "gld_window.h"
@@ -42,7 +44,10 @@ static struct {
    int (*FlushSurfaceWithOptions)(cgs_conn, cgs_window, cgs_surface, cgs_region, int);
    int (*SetWindowShape)(cgs_conn, cgs_window, cg_float, cg_float, cgs_region);
    int (*ReleaseWindow)(cgs_conn, cgs_window);
-   int (*SetWindowOpacity)(cgs_conn, cgs_window, int);    /* optional */
+   /* Optional (attaching works without them). The colour space is a CGColorSpaceRef. */
+   int (*SetWindowOpacity)(cgs_conn, cgs_window, int);
+   int (*CopySurfaceColorSpace)(cgs_conn, cgs_window, cgs_surface, void **);
+   int (*SetWindowColorSpace)(cgs_conn, cgs_window, void *);
 } cgs;
 static bool cgs_ok;
 
@@ -60,6 +65,8 @@ gld_window_init(void)
             LOOK(LockWindowBits) && LOOK(UnlockWindowBits) &&
             LOOK(FlushSurfaceWithOptions) && LOOK(SetWindowShape) && LOOK(ReleaseWindow);
    LOOK(SetWindowOpacity);
+   LOOK(CopySurfaceColorSpace);
+   LOOK(SetWindowColorSpace);
 #undef LOOK
 }
 
@@ -72,10 +79,18 @@ struct gld_window {
    unsigned width, height;
    int refs;
    bool vsync;
+   bool translucent;           /* the surface is not opaque, and our window was told so */
    bool swap_rect_on;          /* kCGLCESwapRectangle: only swap_rect reaches the window */
    int swap_rect[4];           /* x, y (GL: from the bottom), width, height */
+   void *user;                 /* the caller's per-surface data (its render targets) */
+   void (*user_free)(void *);
+   unsigned long last_use;     /* for dropping idle records, oldest first */
    struct gld_window *next;
 };
+
+/* Records no context is attached to are kept (see gld_window_release), up to this many. */
+#define GLD_MAX_IDLE_WINDOWS 32
+static unsigned long window_clock;
 
 static simple_mtx_t windows_lock = SIMPLE_MTX_INITIALIZER;
 static struct gld_window *windows;
@@ -102,9 +117,46 @@ lock_bits(struct gld_window *w)
    return true;
 }
 
+/* Our private window is what WindowServer composites for the surface, and a new window is
+ * opaque: a surface the app made non-opaque (Core Animation does, for a layer-backed view
+ * with transparent parts) was drawn without blending, its transparent parts black. The
+ * Finder's toolbar animation showed a black frame around the window, and Photo Booth's round
+ * shutter button a black square (2026-11-11). So the window follows the surface
+ * (gld_opacity.c knows which surfaces are non-opaque). With the window non-opaque
+ * WindowServer goes by the surface's own setting, but it costs a third of gl-gears' frame
+ * rate, so it is only done for surfaces that need it.
+ *
+ * A non-opaque window's pixels are colour-matched from the window's own colour space, and a
+ * new window's default is not the display's (pure green came out as 46 255 4), so it also
+ * gets the surface's colour space (AppKit gives a view's surface the window's).
+ *
+ * Call with the bits unlocked: the window-server calls wait for them. */
+static void
+sync_opacity(struct gld_window *w)
+{
+   bool translucent = gld_surface_translucent(w->cid, w->wid, w->sid);
+
+   if (translucent == w->translucent || !cgs.SetWindowOpacity || !w->priv)
+      return;
+   if (cgs.SetWindowOpacity(w->cid, w->priv, !translucent))
+      return;
+   w->translucent = translucent;
+   DBG("surface %u of window %u is %s: private window %d set to match\n", w->sid, w->wid,
+       translucent ? "not opaque" : "opaque", w->priv);
+   if (translucent && cgs.CopySurfaceColorSpace && cgs.SetWindowColorSpace) {
+      void *space = NULL;
+      if (cgs.CopySurfaceColorSpace(w->cid, w->wid, w->sid, &space) == 0 && space) {
+         cgs.SetWindowColorSpace(w->cid, w->priv, space);
+         CFRelease(space);
+      }
+   }
+}
+
 static void
 destroy(struct gld_window *w)
 {
+   if (w->user && w->user_free)
+      w->user_free(w->user);
    if (w->base)
       cgs.UnlockWindowBits(w->cid, w->priv, NULL);
    if (w->rgn)
@@ -141,15 +193,6 @@ setup(struct gld_window *w, bool fresh, bool *changed)
       DBG("region %d, CGSNewWindow %d -> %d, depth %d\n", e1, e2, w->priv, e3);
       if (e1 || e2 || e3)
          return -1;
-      /* Not opaque: WindowServer composites our private window for the surface, and a new
-       * window is opaque. A surface the app made non-opaque (Core Animation does, for a
-       * layer-backed overlay with transparent parts) was then drawn without blending, its
-       * transparent parts black: the Finder's toolbar animation showed a black frame around
-       * the window (2026-11-11). With the window non-opaque WindowServer goes by the
-       * surface's own setting, so an opaque surface still hides what is behind it whatever
-       * its alpha (gl-gears -a). Set before the bits are locked: the call waits for them. */
-      if (cgs.SetWindowOpacity)
-         cgs.SetWindowOpacity(w->cid, w->priv, 0);
    } else if (*changed) {
       cgs.ReleaseRegion(w->rgn);
       w->rgn = NULL;
@@ -161,12 +204,57 @@ setup(struct gld_window *w, bool fresh, bool *changed)
    DBG("CGSBindSurface = %d\n", e);
    if (e)
       return -1;
+   sync_opacity(w);                /* while the bits are not locked: it waits for them */
    if (!lock_bits(w))
       return -1;
    DBG("bits %p, row bytes %d\n", w->base, w->row_bytes);
    w->width = width;
    w->height = height;
    return 0;
+}
+
+static void
+unlink_window(struct gld_window *w)
+{
+   for (struct gld_window **p = &windows; *p; p = &(*p)->next) {
+      if (*p == w) {
+         *p = w->next;
+         break;
+      }
+   }
+}
+
+/* Drop idle records whose surface is gone, and the oldest ones beyond the limit. Hold
+ * windows_lock. */
+static void
+sweep_idle(void)
+{
+   unsigned idle = 0;
+   struct gld_window *next;
+
+   for (struct gld_window *w = windows; w; w = next) {
+      cg_rect r;
+      next = w->next;
+      if (w->refs)
+         continue;
+      if (cgs.GetSurfaceBounds(w->cid, w->wid, w->sid, &r)) {
+         unlink_window(w);
+         destroy(w);
+      } else {
+         idle++;
+      }
+   }
+   while (idle > GLD_MAX_IDLE_WINDOWS) {
+      struct gld_window *oldest = NULL;
+      for (struct gld_window *w = windows; w; w = w->next)
+         if (!w->refs && (!oldest || w->last_use < oldest->last_use))
+            oldest = w;
+      if (!oldest)
+         break;
+      unlink_window(oldest);
+      destroy(oldest);
+      idle--;
+   }
 }
 
 struct gld_window *
@@ -184,17 +272,20 @@ gld_window_attach(const uint32_t ids[3], struct gld_window *current, bool *chang
    if (w) {
       if (w != current)
          w->refs++;
+      w->last_use = ++window_clock;
       if (setup(w, false, changed)) {
          fprintf(stderr, "RippleGLDriver: re-attaching window %u failed\n", ids[1]);
          w->base = NULL;
       }
    } else {
+      sweep_idle();
       w = calloc(1, sizeof(*w));
       if (w) {
          w->cid = ids[0];
          w->wid = ids[1];
          w->sid = ids[2];
          w->refs = 1;
+         w->last_use = ++window_clock;
          if (setup(w, true, changed)) {
             fprintf(stderr, "RippleGLDriver: attaching window %u failed\n", ids[1]);
             destroy(w);
@@ -216,15 +307,33 @@ gld_window_release(struct gld_window *w)
       return;
    simple_mtx_lock(&windows_lock);
    if (--w->refs == 0) {
-      for (struct gld_window **p = &windows; *p; p = &(*p)->next) {
-         if (*p == w) {
-            *p = w->next;
-            break;
-         }
+      /* Kept: our private window holds what the surface shows. Core Animation draws all of
+       * an app's layer-backed views with one context, attached to each view's surface in
+       * turn; when the record went with the context, every surface but the last attached lost
+       * its picture (Photo Booth: the camera view, the shutter button and the photo strip all
+       * white; The owner, 2026-11-11). The record goes when its surface does (sweep_idle). */
+      if (w->base) {
+         cgs.UnlockWindowBits(w->cid, w->priv, NULL);
+         w->base = NULL;
       }
-      destroy(w);
+      w->last_use = ++window_clock;
    }
    simple_mtx_unlock(&windows_lock);
+}
+
+void *
+gld_window_user(const struct gld_window *w)
+{
+   return w ? w->user : NULL;
+}
+
+void
+gld_window_set_user(struct gld_window *w, void *user, void (*user_free)(void *))
+{
+   if (!w)
+      return;
+   w->user = user;
+   w->user_free = user_free;
 }
 
 void
@@ -250,7 +359,7 @@ gld_window_set_swap_rect(struct gld_window *w, bool on, const int rect[4])
    memcpy(w->swap_rect, rect, sizeof(w->swap_rect));
 }
 
-/* ripple_cgl_present_fn: pixels are BGRA8, top row first. */
+/* ripple_cgl_present_fn: pixels are BGRA8, bottom row first (see below). */
 void
 gld_window_present(void *data, const uint8_t *pixels, unsigned stride, unsigned width,
                    unsigned height)
@@ -279,27 +388,34 @@ gld_window_present(void *data, const uint8_t *pixels, unsigned stride, unsigned 
    }
    presents++;
    if (w->base) {
-      /* WindowServer reads a GL surface's memory bottom row first (GL's order): M4 and M5
-       * showed every GL window upside down until 2026-11-10 (gl-gears' blue gear at the
-       * bottom, Front Row's menu mirrored). `pixels` is top row first. */
+      /* `pixels` arrives bottom row first (Mesa keeps a window's rows top first and
+       * present_resource turns them over; its "top row first" is not what it does), and the
+       * window's memory wants the top row first, so memory row y is pixels row height-1-y.
+       * Getting this wrong showed every GL window upside down until 2026-11-10. */
       unsigned rows = height < w->height ? height : w->height;
       unsigned cols = width < w->width ? width : w->width;
-      /* Memory row y is GL row y (bottom first); with a swap rectangle only its rows and
-       * columns are written. */
       unsigned y0 = 0, y1 = rows, x0 = 0, x1 = cols;
       if (w->swap_rect_on && (w->swap_rect[2] || w->swap_rect[3] || w->swap_rect[0] || w->swap_rect[1])) {
-         int rx = w->swap_rect[0], ry = w->swap_rect[1];
-         int rw = w->swap_rect[2], rh = w->swap_rect[3];
-         x0 = rx < 0 ? 0 : (unsigned)rx > cols ? cols : (unsigned)rx;
-         y0 = ry < 0 ? 0 : (unsigned)ry > rows ? rows : (unsigned)ry;
-         x1 = rw <= 0 ? x0 : (unsigned)(rx + rw) > cols ? cols : (unsigned)(rx + rw);
-         y1 = rh <= 0 ? y0 : (unsigned)(ry + rh) > rows ? rows : (unsigned)(ry + rh);
+         /* The swap rectangle is in GL window coordinates, y from the bottom; memory rows
+          * count from the top. Until 2026-11-11 the mirrored band was written: a partial
+          * update by Core Animation went to the wrong rows (swaprect-check against Apple's
+          * software renderer). */
+         long rx = w->swap_rect[0], ry = w->swap_rect[1];
+         long rw = w->swap_rect[2] > 0 ? w->swap_rect[2] : 0;
+         long rh = w->swap_rect[3] > 0 ? w->swap_rect[3] : 0;
+         long left = rx, right = rx + rw;
+         long top = (long)height - (ry + rh), bottom = (long)height - ry;
+         x0 = left < 0 ? 0 : left > (long)cols ? cols : (unsigned)left;
+         x1 = right < (long)x0 ? x0 : right > (long)cols ? cols : (unsigned)right;
+         y0 = top < 0 ? 0 : top > (long)rows ? rows : (unsigned)top;
+         y1 = bottom < (long)y0 ? y0 : bottom > (long)rows ? rows : (unsigned)bottom;
       }
       for (unsigned y = y0; y < y1 && x1 > x0; y++)
          memcpy((uint8_t *)w->base + (size_t)y * w->row_bytes + x0 * 4,
                 pixels + (size_t)(height - 1 - y) * stride + x0 * 4, (x1 - x0) * 4);
       cgs.UnlockWindowBits(w->cid, w->priv, NULL);
       w->base = NULL;
+      sync_opacity(w);
       int fe = cgs.FlushSurfaceWithOptions(w->cid, w->wid, w->sid, NULL, w->vsync);
       if (presents < 4)
          DBG("CGSFlushSurfaceWithOptions = %d\n", fe);

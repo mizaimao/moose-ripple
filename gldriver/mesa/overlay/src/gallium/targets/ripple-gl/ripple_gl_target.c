@@ -393,8 +393,8 @@ struct gld_context {
    void *gc;                             /* GLEngine's context, for the takeover */
    bool taken_over, takeover_failed;
    unsigned takeover_tries;
-   struct gld_window *win;               /* attached window, if any */
-   struct ripple_cgl_drawable *drawable; /* its render targets */
+   struct gld_window *win;               /* attached window surface, if any; its render
+                                          * targets belong to the surface (window_drawable) */
    int swap_interval;                    /* kCGLCPSwapInterval: 1 = wait for vblank */
    bool swap_rect_on;                    /* kCGLCESwapRectangle */
    int swap_rect[4];                     /* kCGLCPSwapRectangle: x, y, width, height */
@@ -437,6 +437,21 @@ ripple_gld_pbuffer_lookup(uint32_t id, unsigned *width, unsigned *height)
    return d;
 }
 
+/* A window surface's render targets: one drawable per surface, kept with its window record
+ * (gld_window.c), so a context that goes round several surfaces finds each one's buffers as
+ * it left them. */
+static struct ripple_cgl_drawable *
+window_drawable(const struct gld_context *c)
+{
+   return c->win ? gld_window_user(c->win) : NULL;
+}
+
+static void
+window_drawable_free(void *d)
+{
+   ripple_cgl_drawable_destroy(d);
+}
+
 static void
 unbind_pbuffer(struct gld_context *c)
 {
@@ -466,18 +481,16 @@ unbind_surface(struct gld_context *c)
    c->mesa->win_surface = 0;
    c->mesa->attached_surface = 0;
    c->mesa->surf_h = 0;
-   ripple_cgl_context_set_drawable(c->mesa, c->drawable);
+   ripple_cgl_context_set_drawable(c->mesa, window_drawable(c));
 }
 
 static void
 detach(struct gld_context *c)
 {
    unbind_surface(c);
-   if (c->drawable) {
-      ripple_cgl_context_set_drawable(c->mesa, NULL);
-      ripple_cgl_drawable_destroy(c->drawable);
-      c->drawable = NULL;
-   }
+   /* Always: a context that only ever had a pbuffer would stay bound to that drawable, which
+    * the pbuffer table frees later. */
+   ripple_cgl_context_set_drawable(c->mesa, NULL);
    gld_window_release(c->win);
    c->win = NULL;
 }
@@ -885,17 +898,19 @@ gldAttachDrawable(struct gld_context *c, int type, void *data, void *opts)
       }
       gld_window_set_vsync(w, c->swap_interval != 0);
       gld_window_set_swap_rect(w, c->swap_rect_on, c->swap_rect);
-      if (!c->drawable) {
-         c->drawable = ripple_cgl_drawable_create(c->mesa);
-         if (!c->drawable)
+      struct ripple_cgl_drawable *d = window_drawable(c);
+      if (!d) {
+         d = ripple_cgl_drawable_create(c->mesa);
+         if (!d)
             return kCGLBadAlloc;
+         gld_window_set_user(w, d, window_drawable_free);
          changed = true;
       }
       unsigned width, height;
       gld_window_size(w, &width, &height);
-      ripple_cgl_drawable_set_present(c->drawable, gld_window_present, w);
-      ripple_cgl_drawable_set_size(c->drawable, width, height);
-      ripple_cgl_context_set_drawable(c->mesa, c->drawable);
+      ripple_cgl_drawable_set_present(d, gld_window_present, w);
+      ripple_cgl_drawable_set_size(d, width, height);
+      ripple_cgl_context_set_drawable(c->mesa, d);
       if (log || changed)
          DBG("  window %ux%u%s\n", width, height, changed ? " (new or resized)" : "");
       return changed ? GLD_ATTACH_CHANGED : 0;

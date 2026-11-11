@@ -4,7 +4,7 @@
 
 ripple_gl = shared_module(
   'RippleGLDriver',
-  ['ripple_gl_target.c', 'gld_config.c', 'gld_window.c'],
+  ['ripple_gl_target.c', 'gld_config.c', 'gld_window.c', 'gld_opacity.c'],
   name_prefix : '',
   name_suffix : 'dylib',   # renamed when the Makefile packs the bundle
   include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux,

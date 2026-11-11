@@ -14,7 +14,12 @@ struct gld_window;
  * one, if any) or NULL. *changed: new, or a new size. */
 struct gld_window *gld_window_attach(const uint32_t ids[3], struct gld_window *current,
                                      bool *changed);
+/* The context leaves the surface. The record stays (it holds what the surface shows) until
+ * the surface itself is gone. */
 void gld_window_release(struct gld_window *w);
+/* Data the caller keeps with the surface (its render targets), freed with the record. */
+void *gld_window_user(const struct gld_window *w);
+void gld_window_set_user(struct gld_window *w, void *user, void (*user_free)(void *));
 void gld_window_size(const struct gld_window *w, unsigned *width, unsigned *height);
 void gld_window_set_vsync(struct gld_window *w, bool vsync);
 /* kCGLCESwapRectangle and kCGLCPSwapRectangle: with `on`, a present updates only `rect` of the
@@ -25,5 +30,8 @@ void gld_window_set_swap_rect(struct gld_window *w, bool on, const int rect[4]);
 /* A ripple_cgl_present_fn for drawables shown in `data` (a struct gld_window). */
 void gld_window_present(void *data, const uint8_t *pixels, unsigned stride, unsigned width,
                         unsigned height);
+
+/* gld_opacity.c: has the app made this surface non-opaque (CGSSetSurfaceOpacity)? */
+bool gld_surface_translucent(uint32_t cid, uint32_t wid, uint32_t sid);
 
 #endif
