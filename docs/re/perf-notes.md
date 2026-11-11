@@ -75,3 +75,19 @@ squeezed and misplaced (the Edit menu's area showed the window behind it, shrunk
 the menu stayed elsewhere on screen). Push/pop now save and restore that copy too
 (`ripple_cgl_push_attrib`/`pop_attrib`). Moving across File, Edit, View, Go: every menu right
 ([Edit menu](img/perf-menu-edit-fixed.png)).
+
+## WindowServer's own frame rate, ours against Apple's software compositor (01:45-01:55)
+
+`tools/frame-meter` reads `CGSGetPerformanceData` (Quartz Debug's frame meter) during
+`scripts/frame-meter-run.sh` (6 s each: F9 x4, F12 x4, menu bar by keyboard), same VM, one
+Finder window open. Frames composited per second, peak / mean:
+
+| Scenario | Ours (kext 89f1356, two runs) | Software (210 without our driver) |
+|---|---|---|
+| Exposé | 108-131 / 44-47 | 110 / 55 |
+| Dashboard | 35-81 / 21-34 | 133 / 58 |
+| menus (keyboard) | 19 / 12-14 | 22 / 14 |
+
+Exposé and menus are on a par with software now; Dashboard (Core Animation widgets, dimming)
+composites about half as many frames. Suspect: client-storage textures are uploaded again at
+their first use in every frame (the emulation), and Dashboard has many.
