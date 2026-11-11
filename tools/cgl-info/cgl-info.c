@@ -80,6 +80,8 @@ int main(int argc, char **argv)
            glGetString(GL_RENDERER), glGetString(GL_VERSION));
     const char *glsl = (const char *)glGetString(GL_SHADING_LANGUAGE_VERSION);
     printf("GLSL        %s\n", glsl ? glsl : "(none)");
+    if (getenv("CGL_INFO_EXTENSIONS"))
+        printf("GL_EXTENSIONS %s\n", glGetString(GL_EXTENSIONS));
 
     GLuint fbo, rb;
     glGenFramebuffersEXT(1, &fbo);

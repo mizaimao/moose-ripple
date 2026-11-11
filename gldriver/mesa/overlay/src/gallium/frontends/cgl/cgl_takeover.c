@@ -11,6 +11,7 @@
  * and refuses (leaving the context to GLEngine) if anything doesn't match.
  */
 #include <dlfcn.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -60,17 +61,25 @@ static cgl_back_dispatch_fn back_dispatch;
 /* Contexts taken over, by the GLEngine context pointer callers might pass as `rend` (CoreGraphics'
  * own contexts in WindowServer may): ripple_cgl_rend_for() maps it back. */
 #define MAX_TAKEN 64
-static struct { void *gc; struct ripple_cgl_context *ctx; } taken[MAX_TAKEN];
+static struct {
+   void *gc;
+   struct ripple_cgl_context *ctx;
+   void **shadow, **old_back;     /* CoreGraphics contexts: our back table, GLEngine's */
+} taken[MAX_TAKEN];
+static void *volatile last_gc;
+static struct ripple_cgl_context *volatile last_ctx;
 static simple_mtx_t taken_lock = SIMPLE_MTX_INITIALIZER;
 
 static void
-remember(void *gc, struct ripple_cgl_context *ctx)
+remember(void *gc, struct ripple_cgl_context *ctx, void **shadow, void **old_back)
 {
    simple_mtx_lock(&taken_lock);
    for (unsigned i = 0; i < MAX_TAKEN; i++) {
       if (!taken[i].gc || taken[i].gc == gc) {
          taken[i].gc = gc;
          taken[i].ctx = ctx;
+         taken[i].shadow = shadow;
+         taken[i].old_back = old_back;
          break;
       }
    }
@@ -80,11 +89,18 @@ remember(void *gc, struct ripple_cgl_context *ctx)
 struct ripple_cgl_context *
 ripple_cgl_rend_for(void *rend)
 {
+   /* Every GL call of a CoreGraphics context comes here: try the last hit first. */
+   if (rend == last_gc)
+      return last_ctx;
    struct ripple_cgl_context *ctx = NULL;
    simple_mtx_lock(&taken_lock);
    for (unsigned i = 0; i < MAX_TAKEN && !ctx; i++)
       if (taken[i].gc == rend)
          ctx = taken[i].ctx;
+   if (ctx) {
+      last_ctx = ctx;
+      last_gc = rend;
+   }
    simple_mtx_unlock(&taken_lock);
    return ctx;
 }
@@ -93,10 +109,25 @@ void
 ripple_cgl_forget(struct ripple_cgl_context *ctx)
 {
    simple_mtx_lock(&taken_lock);
-   for (unsigned i = 0; i < MAX_TAKEN; i++)
-      if (taken[i].ctx == ctx)
-         taken[i].gc = NULL, taken[i].ctx = NULL;
+   last_gc = NULL;
+   last_ctx = NULL;
+   for (unsigned i = 0; i < MAX_TAKEN; i++) {
+      if (taken[i].ctx != ctx)
+         continue;
+      if (taken[i].shadow) {
+         /* GLEngine destroys its context after ours: hand it its own back pointer again. */
+         *(void ***)((uint8_t *)taken[i].gc + GC_BACK_DISPATCH) = taken[i].old_back;
+         free(taken[i].shadow);
+      }
+      memset(&taken[i], 0, sizeof(taken[i]));
+   }
    simple_mtx_unlock(&taken_lock);
+}
+
+static int
+dispatch_noop(void)
+{
+   return 0;
 }
 
 __attribute__((constructor)) static void
@@ -137,25 +168,32 @@ ripple_cgl_take_over(void *gc, struct ripple_cgl_context *ctx)
       return -3;
    struct cgl_object_head *cgl = (struct cgl_object_head *)((uint8_t *)front - sizeof(void *));
    if (*(uint32_t *)((uint8_t *)cgl + CGL_MAGIC_OFFSET) != CGL_MAGIC) {
-      /* Not a CGL context: CoreGraphics makes WindowServer's contexts through GLEngine itself.
-       * Same head ({rend, disp[764]}) and a back table at gc + GC_BACK_DISPATCH: do what
-       * CGLSelectDispatch does by hand. GLEngine writes go wherever back[i] is set. */
+      /* Not a CGL context: CoreGraphics' private "cgls" copy of CGL makes WindowServer's
+       * contexts (docs/re/qe-decision.md, gl-plugin-interface.md). Its block is {gc, front
+       * table, private data}; the back table it hands GLEngine is a shared all-zero constant,
+       * so GLEngine writes every update into the front table, and CoreGraphics calls
+       * front[n](gc, ...). Give GLEngine a writable back table of its own (its updates land
+       * there), put ours in front, and leave the first word gc: cgls passes it to GLEngine. */
       void **back = *(void ***)((uint8_t *)gc + GC_BACK_DISPATCH);
+      Dl_info dli;
       if (cgl->rend != gc)
          return -4;
       if (!back)
          return -10;
-      /* 2026-11-10: in WindowServer the front table is read-only (in CoreGraphics' image):
-       * writing it crashed. Off until we know which table CoreGraphics calls through. */
-      if (1)
-         return -11;
       for (unsigned i = 0; i < GLI_DISPATCH_ENTRIES; i++)
-         if (!back[i])
-            back[i] = front[i];
+         if (back[i])
+            return -11;
+      if (!dladdr(back, &dli) || !dli.dli_fname || !strstr(dli.dli_fname, "CoreGraphics"))
+         return -12;
+      void **shadow = malloc(GLI_DISPATCH_ENTRIES * sizeof(void *));
+      if (!shadow)
+         return -13;
+      for (unsigned i = 0; i < GLI_DISPATCH_ENTRIES; i++)
+         shadow[i] = front[i] ? front[i] : (void *)dispatch_noop;
+      *(void ***)((uint8_t *)gc + GC_BACK_DISPATCH) = shadow;
       for (unsigned i = 0; i < GLI_DISPATCH_ENTRIES; i++)
          front[i] = dispatch_table[i];
-      cgl->rend = ctx;
-      remember(gc, ctx);
+      remember(gc, ctx, shadow, back);
       return 1;
    }
    if (cgl->rend != gc)
@@ -174,7 +212,7 @@ ripple_cgl_take_over(void *gc, struct ripple_cgl_context *ctx)
    if (cgl->disp[0] != dispatch_table[0])
       return -8;
    cgl->rend = ctx;
-   remember(gc, ctx);
+   remember(gc, ctx, NULL, NULL);
    return 0;
 #else
    return -9;
