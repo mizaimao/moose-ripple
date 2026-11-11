@@ -1,12 +1,14 @@
 /*
  * Apple-only dispatch entries the CGL frontend implements itself (moose-ripple, M4), and the
- * report for entries nothing implements. GL_APPLE_fence is done with Flush/Finish: correct,
- * if slower than real fences.
+ * report for entries nothing implements. GL_APPLE_fence is done with a flush or a finish
+ * (flush_render): correct, if slower than real fences.
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "main/mtypes.h"
+#include "state_tracker/st_context.h"
 #include "util/simple_mtx.h"
 #include "util/u_debug.h"
 
@@ -38,10 +40,12 @@ ripple_cgl_unsupported(const char *name)
 void GLAPIENTRY
 ripple_cgl_gen_fences(void *rend, GLsizei n, GLuint *fences)
 {
-   struct ripple_cgl_context *ctx = rend;
+   /* `rend` can be GLEngine's context for one taken over: never write through it unmapped. */
+   struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
+   static unsigned foreign;
 
    for (GLsizei i = 0; i < n; i++)
-      fences[i] = ++ctx->next_fence;
+      fences[i] = ctx ? ++ctx->next_fence : ++foreign;
 }
 
 void GLAPIENTRY
@@ -49,11 +53,44 @@ ripple_cgl_delete_fences(void *rend, GLsizei n, const GLuint *fences)
 {
 }
 
+/* The context's commands go to the GPU, and with `wait` the GPU finishes them, but a
+ * single-buffered drawable is not shown: GL_APPLE_flush_render (glFlushRenderAPPLE,
+ * glFinishRenderAPPLE) and the flushes behind GL_APPLE_fence. Mesa's own glFlush and glFinish
+ * also present the front buffer. Core Image and WindowServer's compositor call
+ * glFlushRenderAPPLE several times inside one frame, so unfinished frames reached the screen:
+ * the Dashboard ripple flickered and a new widget went missing for a few frames (the owner,
+ * 2026-11-11). */
+static void
+flush_render(bool wait)
+{
+   /* Mesa's current context, which RIPPLE_CGL_ENTER has just made the caller's: `rend` itself
+    * can be GLEngine's context for one taken over (WindowServer's own contexts). */
+   struct gl_context *gl = _glapi_get_context();
+   struct pipe_fence_handle *fence = NULL;
+
+   if (gl && gl->st)
+      st_context_flush(gl->st, wait ? ST_FLUSH_WAIT : 0, wait ? &fence : NULL, NULL, NULL);
+}
+
+void GLAPIENTRY
+ripple_cgl_flush_render(void *rend)
+{
+   RIPPLE_CGL_ENTER(rend);
+   flush_render(false);
+}
+
+void GLAPIENTRY
+ripple_cgl_finish_render(void *rend)
+{
+   RIPPLE_CGL_ENTER(rend);
+   flush_render(true);
+}
+
 void GLAPIENTRY
 ripple_cgl_set_fence(void *rend, GLuint fence)
 {
    RIPPLE_CGL_ENTER(rend);
-   CALL_Flush(GET_DISPATCH(), ());
+   flush_render(false);
 }
 
 GLboolean GLAPIENTRY
@@ -66,7 +103,7 @@ GLboolean GLAPIENTRY
 ripple_cgl_test_fence(void *rend, GLuint fence)
 {
    RIPPLE_CGL_ENTER(rend);
-   CALL_Finish(GET_DISPATCH(), ());
+   flush_render(true);
    return GL_TRUE;
 }
 
@@ -74,14 +111,14 @@ void GLAPIENTRY
 ripple_cgl_finish_fence(void *rend, GLuint fence)
 {
    RIPPLE_CGL_ENTER(rend);
-   CALL_Finish(GET_DISPATCH(), ());
+   flush_render(true);
 }
 
 GLboolean GLAPIENTRY
 ripple_cgl_test_object(void *rend, GLenum object, GLuint name)
 {
    RIPPLE_CGL_ENTER(rend);
-   CALL_Finish(GET_DISPATCH(), ());
+   flush_render(true);
    return GL_TRUE;
 }
 
@@ -89,16 +126,19 @@ void GLAPIENTRY
 ripple_cgl_finish_object(void *rend, GLenum object, GLuint name)
 {
    RIPPLE_CGL_ENTER(rend);
-   CALL_Finish(GET_DISPATCH(), ());
+   flush_render(true);
 }
 
 void GLAPIENTRY
 ripple_cgl_swap(void *rend)
 {
    /* CGLFlushDrawable on a double-buffered context: present the back buffer. */
+   struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
+
    RIPPLE_CGL_ENTER(rend);
    ripple_cgl_client_storage_frame();
-   ripple_cgl_context_swap(rend);
+   if (ctx)
+      ripple_cgl_context_swap(ctx);
 }
 
 /* ---- Debug trace of GL calls (gen_dispatch.py emits the calls) ------------------------- *
@@ -1193,12 +1233,41 @@ ripple_cgl_client_storage_frame(void)
    p_atomic_inc(&cs_gen);              /* a frame ends: client memory is read again */
 }
 
+/* glFlush and glFinish: on a single-buffered drawable they also show it (Apple's GL; the
+ * display surface WindowServer composites into is one, and its frame ends with glFlush). The
+ * context is Mesa's current one, which RIPPLE_CGL_ENTER has just made the caller's (`rend`
+ * can be GLEngine's context for one taken over). */
+static struct ripple_cgl_context *
+entered_context(void)
+{
+   struct gl_context *gl = _glapi_get_context();
+
+   return gl && gl->st ? gl->st->frontend_context : NULL;
+}
+
 void GLAPIENTRY
 ripple_cgl_flush(void *rend)
 {
    RIPPLE_CGL_ENTER(rend);
+   struct ripple_cgl_context *ctx = entered_context();
    ripple_cgl_client_storage_frame();
+   if (ctx)
+      ctx->present_ok = true;
    CALL_Flush(GET_DISPATCH(), ());
+   if (ctx)
+      ctx->present_ok = false;
+}
+
+void GLAPIENTRY
+ripple_cgl_finish(void *rend)
+{
+   RIPPLE_CGL_ENTER(rend);
+   struct ripple_cgl_context *ctx = entered_context();
+   if (ctx)
+      ctx->present_ok = true;
+   CALL_Finish(GET_DISPATCH(), ());
+   if (ctx)
+      ctx->present_ok = false;
 }
 
 /* ---- GL_APPLE_float_pixels -------------------------------------------------------------- *

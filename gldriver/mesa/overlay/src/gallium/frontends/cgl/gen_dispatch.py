@@ -30,9 +30,6 @@ SPECIAL = {
     'bind_vertex_array_EXT': 'BindVertexArray',
     'delete_vertex_arrays_EXT': 'DeleteVertexArrays',
     'is_vertex_array_EXT': 'IsVertexArray',
-    # GL_APPLE_flush_render
-    'flush_render_APPLE': 'Flush',
-    'finish_render_APPLE': 'Finish',
 }
 
 # Entries implemented by the CGL frontend itself (cgl_dispatch.h declares them with the
@@ -47,6 +44,10 @@ CUSTOM = {
     'test_object_APPLE': 'ripple_cgl_test_object',
     'finish_object_APPLE': 'ripple_cgl_finish_object',
     'swap_APPLE': 'ripple_cgl_swap',
+    # GL_APPLE_flush_render: flush or finish without showing a single-buffered drawable
+    # (Mesa's Flush and Finish present the front buffer).
+    'flush_render_APPLE': 'ripple_cgl_flush_render',
+    'finish_render_APPLE': 'ripple_cgl_finish_render',
     # Apple-only hint values Mesa would refuse with GL_INVALID_ENUM: filtered, the rest
     # forwarded (cgl_apple.c). Not GL_UNPACK_CLIENT_STORAGE_APPLE: accepting that tells
     # WindowServer the GL reads its texture memory at draw time, and it then reuses buffers
@@ -65,6 +66,7 @@ CUSTOM = {
     'bind_texture': 'ripple_cgl_bind_texture',
     'delete_textures': 'ripple_cgl_delete_textures',
     'flush': 'ripple_cgl_flush',
+    'finish': 'ripple_cgl_finish',
     # GL_APPLE_float_pixels in the extension string (WindowServer's float-capable check).
     'get_string': 'ripple_cgl_get_string',
     # Vertex-program limits Core Image reads that Mesa only answers for fragment programs.

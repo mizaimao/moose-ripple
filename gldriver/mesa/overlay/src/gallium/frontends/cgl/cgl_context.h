@@ -32,6 +32,10 @@ struct ripple_cgl_context {
    struct st_visual visual;      /* what its drawables are made of */
    struct ripple_cgl_drawable *draw;   /* window drawable, or NULL (FBOs only) */
    unsigned next_fence;          /* GL_APPLE_fence names (cgl_apple.c) */
+   /* The program's own glFlush, glFinish or swap is running: the only moments a single-buffered
+    * drawable is shown (cgl_drawable.c, drawable_flush_front). `presented` is set when that
+    * showed it. */
+   bool present_ok, presented;
    /* Taken over from GLEngine after its first GL calls (cgl_takeover.c): GLEngine's context and
     * table, to copy its bindings into Mesa on the next call. */
    void *sync_gc;

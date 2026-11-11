@@ -191,16 +191,26 @@ present_resource(struct st_context *st, struct ripple_cgl_drawable *d,
    present_stats("window (read back)", t0);
 }
 
-/* Single-buffered drawing: Mesa calls this on glFlush/glFinish when the front buffer changed. */
+/* Single-buffered drawing: Mesa calls this whenever it flushes a context whose front buffer
+ * changed. That is the program's glFlush and glFinish, which show the drawable as on Apple's GL,
+ * but also Mesa's own flush when another context becomes current, which must not: WindowServer
+ * changes contexts in the middle of a frame (Core Image's), and each change put the half-drawn
+ * screen on the display, so a widget being added flickered and went missing for a few frames
+ * (2026-11-11). Only the entry points that mean "show it" set present_ok (cgl_apple.c,
+ * ripple_cgl_context_swap); refused here, the buffer stays marked as changed for the next one. */
 static bool
 drawable_flush_front(struct st_context *st, struct pipe_frontend_drawable *base,
                      enum st_attachment_type statt)
 {
    struct ripple_cgl_drawable *d = drawable(base);
+   struct ripple_cgl_context *ctx = st->frontend_context;
 
    if (statt != ST_ATTACHMENT_FRONT_LEFT || !d->textures[statt])
       return false;
+   if (!ctx || !ctx->present_ok)
+      return false;
    present_resource(st, d, d->textures[statt]);
+   ctx->presented = true;
    return true;
 }
 
@@ -381,11 +391,15 @@ ripple_cgl_context_swap(struct ripple_cgl_context *ctx)
    if (_glapi_get_context() != ctx->glctx)
       ripple_cgl_context_make_current(ctx);
    swap_debug(ctx);
+   ctx->present_ok = true;
+   ctx->presented = false;
    st_context_flush(ctx->st, ST_FLUSH_FRONT, NULL, NULL, NULL);
+   ctx->present_ok = false;
    struct pipe_resource *res = d->textures[ST_ATTACHMENT_BACK_LEFT];
    if (!res)
       res = d->textures[ST_ATTACHMENT_FRONT_LEFT];
-   if (res)
+   /* Not a second time if the flush has just shown that same front buffer (single-buffered). */
+   if (res && !(ctx->presented && res == d->textures[ST_ATTACHMENT_FRONT_LEFT]))
       present_resource(ctx->st, d, res);
    /* Showing the back buffer itself: flip, so the next frame isn't drawn into the texture on
     * screen. Mesa picks up the swapped textures through the stamp. */
