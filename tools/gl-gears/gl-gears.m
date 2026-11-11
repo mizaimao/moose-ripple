@@ -3,7 +3,7 @@
  * three spinning gears with plain OpenGL 1.x/2.1 calls, double-buffered, and prints the
  * renderer and the frame rate. It asks for an accelerated renderer without recovery, so it
  * runs on our driver (start it with RIPPLE_GL=1) or fails if there is none.
- *   gl-gears [SECONDS]     quit after SECONDS (default 10)
+ *   gl-gears [-r] [SECONDS]   quit after SECONDS (default 10); -r: resize to 640x480 after 3 s
  * Written for moose-ripple; geometry is our own (a disc of teeth, extruded).
  * Built without ARC (10.6): manual retain/release.
  */
@@ -12,8 +12,10 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static double run_seconds = 10;
+static int resize_test;        /* -r: grow the window to 640x480 after 3 s */
 
 /* One gear: `teeth` teeth between radius r0 (hub hole) and r1/r2 (root/tip), width w. */
 static GLuint make_gear(float r0, float r1, float r2, float w, int teeth, const GLfloat *color)
@@ -115,6 +117,14 @@ static GLuint make_gear(float r0, float r1, float r2, float w, int teeth, const 
 - (void)tick:(NSTimer *)t
 {
     double now = [NSDate timeIntervalSinceReferenceDate];
+    if (resize_test == 1 && now - start > 3) {
+        resize_test = 2;
+        NSWindow *w = [self window];
+        NSRect f = [w frameRectForContentRect:NSMakeRect(100, 100, 640, 480)];
+        [w setFrame:f display:YES];
+        printf("resized to 640x480\n");
+        fflush(stdout);
+    }
     if (now - start > run_seconds)
         [NSApp terminate:nil];
     [self setNeedsDisplay:YES];
@@ -163,8 +173,12 @@ static GLuint make_gear(float r0, float r1, float r2, float w, int teeth, const 
 int main(int argc, char **argv)
 {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-    if (argc > 1)
-        run_seconds = atof(argv[1]);
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "-r"))
+            resize_test = 1;
+        else
+            run_seconds = atof(argv[i]);
+    }
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
