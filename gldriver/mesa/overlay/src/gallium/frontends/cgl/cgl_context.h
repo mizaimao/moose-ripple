@@ -36,6 +36,9 @@ struct ripple_cgl_context {
     * of it (WindowServer's display surface), window coordinates are shifted by (win_ox,
     * win_oy), the rectangle's GL bottom-left on the screen. */
    uint32_t win_surface;         /* the screen-region surface, or 0 */
+   uint32_t attached_surface;    /* the accelerator surface it draws into (any kind), or 0 */
+   unsigned surf_h;              /* that surface's height if it isn't the screen region: its
+                                  * window coordinates start at the top left (cgl_apple.c) */
    int win_ox, win_oy;
    unsigned win_w, win_h;
    /* Viewport and scissor as the program set them; Mesa holds them shifted while the window's

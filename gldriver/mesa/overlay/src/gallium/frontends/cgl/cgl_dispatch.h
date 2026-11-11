@@ -24,7 +24,11 @@ void ripple_cgl_make_current_slow(void *rend);
 
 /* Debug trace of GL calls (cgl_apple.c): on when /Library/Logs/RippleGL/trace exists at load. */
 extern int ripple_cgl_tracing;
-void ripple_cgl_trace(unsigned index, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+/* Returns whether the call was logged; the data loggers below follow a logged call. */
+int ripple_cgl_trace(unsigned index, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+void ripple_cgl_trace_text(const char *what, const void *text, int len);
+void ripple_cgl_trace_pixels(GLsizei w, GLsizei h, GLenum format, GLenum type,
+                             const void *pixels);
 void ripple_cgl_unsupported(const char *name);
 
 #define RIPPLE_CGL_ENTER(rend)                                                        \
@@ -89,6 +93,9 @@ void GLAPIENTRY ripple_cgl_copy_tex_sub_image3D(void *rend, GLenum target, GLint
                                                 GLint y, GLsizei w, GLsizei h);
 struct ripple_cgl_context;
 void ripple_cgl_refresh_window_offset(struct ripple_cgl_context *ctx);
+/* GLI parameters 997-999 (a surface as the bound texture's image), cgl_apple.c. */
+int ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum target,
+                               GLenum ifmt, GLsizei w, GLsizei h);
 
 /* Generated: the number of entries and the filler for a GLIFunctionDispatch table. */
 extern const unsigned ripple_cgl_dispatch_count;

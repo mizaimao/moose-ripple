@@ -137,11 +137,12 @@ ripple_cgl_trace_init(void)
    }
 }
 
-void
+int
 ripple_cgl_trace(unsigned index, const char *fmt, ...)
 {
+   int logged = 0;
    if (index >= 1024)
-      return;
+      return 0;
    simple_mtx_lock(&trace_lock);
    unsigned long n = ++trace_counts[index];
    if (!trace_names[index])
@@ -175,6 +176,7 @@ ripple_cgl_trace(unsigned index, const char *fmt, ...)
       fputc('\n', trace_file);
       if (trace_burst_left && --trace_burst_left == 0)
          fprintf(trace_file, "---- burst end ----\n");
+      logged = 1;
    }
    if (now - trace_last_dump >= 10) {
       trace_last_dump = now;
@@ -186,6 +188,68 @@ ripple_cgl_trace(unsigned index, const char *fmt, ...)
                     paren ? (int)(paren - trace_names[i]) : 40, trace_names[i]);
          }
       }
+   }
+   simple_mtx_unlock(&trace_lock);
+   return logged;
+}
+
+/* Text passed to the GL (ARB programs, GLSL), logged after its call line. */
+void
+ripple_cgl_trace_text(const char *what, const void *text, int len)
+{
+   if (!text)
+      return;
+   if (len < 0)
+      len = (int)strlen(text);
+   simple_mtx_lock(&trace_lock);
+   fprintf(trace_file, "  ---- %s, %d bytes ----\n%.*s\n  ---- end ----\n", what, len,
+           len > 16384 ? 16384 : len, (const char *)text);
+   simple_mtx_unlock(&trace_lock);
+}
+
+static bool cs_readable(const void *p, size_t len);
+
+/* Small one- and two-channel images (lookup tables): their first rows, logged after the call
+ * line. Tightly packed rows are assumed (enough for a look). */
+void
+ripple_cgl_trace_pixels(GLsizei w, GLsizei h, GLenum format, GLenum type, const void *pixels)
+{
+   if (!pixels || w <= 0 || h <= 0 || w > 4096)
+      return;
+   if (format == GL_BGRA && (type == GL_UNSIGNED_INT_8_8_8_8_REV || type == GL_UNSIGNED_BYTE)) {
+      /* 32-bit images: eight samples of the first row (as 0xAARRGGBB). */
+      if (!cs_readable(pixels, (size_t)w * 4))
+         return;
+      simple_mtx_lock(&trace_lock);
+      fprintf(trace_file, "  row 0 samples:");
+      for (int i = 0; i < 8; i++)
+         fprintf(trace_file, " %08x", ((const uint32_t *)pixels)[(size_t)w * i / 8]);
+      fputc('\n', trace_file);
+      simple_mtx_unlock(&trace_lock);
+      return;
+   }
+   if (format != GL_LUMINANCE && format != GL_ALPHA && format != GL_LUMINANCE_ALPHA &&
+       format != GL_RED)
+      return;
+   unsigned comps = format == GL_LUMINANCE_ALPHA ? 2 : 1;
+   unsigned size = type == GL_UNSIGNED_SHORT ? 2 : type == GL_UNSIGNED_BYTE ? 1 :
+                   type == GL_FLOAT ? 4 : 0;
+   int rows = h < 4 ? h : 4;
+   if (!size || !cs_readable(pixels, (size_t)w * comps * size * rows))
+      return;
+   simple_mtx_lock(&trace_lock);
+   for (int y = 0; y < rows; y++) {
+      fprintf(trace_file, "  row %d:", y);
+      for (unsigned i = 0; i < w * comps; i++) {
+         const char *p = (const char *)pixels + ((size_t)y * w * comps + i) * size;
+         if (size == 2)
+            fprintf(trace_file, " %u", *(const uint16_t *)p);
+         else if (size == 1)
+            fprintf(trace_file, " %u", *(const uint8_t *)p);
+         else
+            fprintf(trace_file, " %g", *(const float *)p);
+      }
+      fputc('\n', trace_file);
    }
    simple_mtx_unlock(&trace_lock);
 }
@@ -276,21 +340,41 @@ static struct ripple_cgl_context *
 offset_ctx(void *rend, bool read)
 {
    struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
-   if (!ctx || !ctx->win_surface)
+   if (!ctx || (!ctx->win_surface && !ctx->surf_h))
       return NULL;
    struct gl_framebuffer *fb = read ? ctx->glctx->ReadBuffer : ctx->glctx->DrawBuffer;
    return fb && _mesa_is_winsys_fbo(fb) ? ctx : NULL;
 }
 
-/* Put the program's viewport and scissor into Mesa, shifted if drawing into the window. */
-static void
-apply_viewport_scissor(struct ripple_cgl_context *ctx, bool shift)
+/* Where a rectangle in the program's window coordinates lands in the drawable. The screen
+ * region: shifted to its place on the screen. Another accelerator surface: Apple's have the
+ * GL origin at their top left, Mesa's drawables at the bottom left (WindowServer draws the
+ * menu bar's 22 rows at y 0 of its 28-row background surface and means the top rows; at the
+ * bottom they came out 6 rows low, VM 210 2026-11-10). For the screen region both agree as
+ * long as the viewport is the region, which is how WindowServer draws. */
+static inline int
+win_x(const struct ripple_cgl_context *ctx, int x)
 {
-   int ox = shift ? ctx->win_ox : 0, oy = shift ? ctx->win_oy : 0;
+   return ctx->win_surface ? x + ctx->win_ox : x;
+}
+
+static inline int
+win_y(const struct ripple_cgl_context *ctx, int y, int h)
+{
+   return ctx->win_surface ? y + ctx->win_oy : (int)ctx->surf_h - y - h;
+}
+
+/* Put the program's viewport and scissor into Mesa, mapped if drawing into the window. */
+static void
+apply_viewport_scissor(struct ripple_cgl_context *ctx, bool map)
+{
+   const int *v = ctx->lv, *s = ctx->ls;
    if (ctx->lv_set)
-      CALL_Viewport(GET_DISPATCH(), (ctx->lv[0] + ox, ctx->lv[1] + oy, ctx->lv[2], ctx->lv[3]));
+      CALL_Viewport(GET_DISPATCH(), (map ? win_x(ctx, v[0]) : v[0],
+                                     map ? win_y(ctx, v[1], v[3]) : v[1], v[2], v[3]));
    if (ctx->ls_set)
-      CALL_Scissor(GET_DISPATCH(), (ctx->ls[0] + ox, ctx->ls[1] + oy, ctx->ls[2], ctx->ls[3]));
+      CALL_Scissor(GET_DISPATCH(), (map ? win_x(ctx, s[0]) : s[0],
+                                    map ? win_y(ctx, s[1], s[3]) : s[1], s[2], s[3]));
 }
 
 void GLAPIENTRY
@@ -302,9 +386,11 @@ ripple_cgl_viewport(void *rend, GLint x, GLint y, GLsizei w, GLsizei h)
       ctx->lv[0] = x, ctx->lv[1] = y, ctx->lv[2] = w, ctx->lv[3] = h;
       ctx->lv_set = true;
       if (offset_ctx(rend, false)) {
-         ripple_cgl_refresh_window_offset(ctx);    /* a frame starts: the rectangle may be new */
-         x += ctx->win_ox;
-         y += ctx->win_oy;
+         if (ctx->win_surface)
+            ripple_cgl_refresh_window_offset(ctx);   /* a frame starts: the rectangle may be new */
+         int my = win_y(ctx, y, h);
+         x = win_x(ctx, x);
+         y = my;
       }
    }
    CALL_Viewport(GET_DISPATCH(), (x, y, w, h));
@@ -319,8 +405,9 @@ ripple_cgl_scissor(void *rend, GLint x, GLint y, GLsizei w, GLsizei h)
       ctx->ls[0] = x, ctx->ls[1] = y, ctx->ls[2] = w, ctx->ls[3] = h;
       ctx->ls_set = true;
       if (offset_ctx(rend, false)) {
-         x += ctx->win_ox;
-         y += ctx->win_oy;
+         int my = win_y(ctx, y, h);
+         x = win_x(ctx, x);
+         y = my;
       }
    }
    CALL_Scissor(GET_DISPATCH(), (x, y, w, h));
@@ -333,7 +420,7 @@ ripple_cgl_bind_framebuffer(void *rend, GLenum target, GLuint framebuffer)
    RIPPLE_CGL_ENTER(rend);
    bool before = ctx && offset_ctx(rend, false);
    CALL_BindFramebufferEXT(GET_DISPATCH(), (target, framebuffer));
-   if (!ctx || !ctx->win_surface)
+   if (!ctx || (!ctx->win_surface && !ctx->surf_h))
       return;
    bool after = offset_ctx(rend, false) != NULL;
    if (before != after)
@@ -345,7 +432,7 @@ ripple_cgl_clear(void *rend, GLbitfield mask)
 {
    struct ripple_cgl_context *ctx = offset_ctx(rend, false);
    RIPPLE_CGL_ENTER(rend);
-   struct gl_context *gl = ctx ? ctx->glctx : NULL;
+   struct gl_context *gl = ctx && ctx->win_surface ? ctx->glctx : NULL;
    if (gl && !(gl->Scissor.EnableFlags & 1)) {
       /* Clearing "the window" means the rectangle, not the screen. */
       struct gl_scissor_rect saved = gl->Scissor.ScissorArray[0];
@@ -368,7 +455,7 @@ ripple_cgl_get_integerv(void *rend, GLenum pname, GLint *params)
     * value) made WindowServer drop the menu bar (VM 210, 2026-11-10); the error is part of
     * what keeps WindowServer off its client-storage paths. */
    CALL_GetIntegerv(GET_DISPATCH(), (pname, params));
-   if (!ctx || !ctx->win_surface || !params)
+   if (!ctx || (!ctx->win_surface && !ctx->surf_h) || !params)
       return;
    if (pname == GL_VIEWPORT && ctx->lv_set)
       memcpy(params, ctx->lv, sizeof(ctx->lv));
@@ -376,13 +463,13 @@ ripple_cgl_get_integerv(void *rend, GLenum pname, GLint *params)
       memcpy(params, ctx->ls, sizeof(ctx->ls));
 }
 
-/* Reads and copies from the window: shift the source rectangle. */
-#define READ_OFFSET(rend, x, y)                                                          \
+/* Reads and copies from the window: map the source rectangle (height h). */
+#define READ_OFFSET(rend, x, y, h)                                                       \
    do {                                                                                  \
       struct ripple_cgl_context *rctx_ = offset_ctx(rend, true);                         \
       if (rctx_) {                                                                       \
-         (x) += rctx_->win_ox;                                                           \
-         (y) += rctx_->win_oy;                                                           \
+         (y) = win_y(rctx_, (y), (h));                                                   \
+         (x) = win_x(rctx_, (x));                                                        \
       }                                                                                  \
    } while (0)
 
@@ -391,7 +478,7 @@ ripple_cgl_read_pixels(void *rend, GLint x, GLint y, GLsizei w, GLsizei h, GLenu
                        GLenum type, GLvoid *pixels)
 {
    RIPPLE_CGL_ENTER(rend);
-   READ_OFFSET(rend, x, y);
+   READ_OFFSET(rend, x, y, h);
    CALL_ReadPixels(GET_DISPATCH(), (x, y, w, h, format, type, pixels));
 }
 
@@ -399,7 +486,7 @@ void GLAPIENTRY
 ripple_cgl_copy_pixels(void *rend, GLint x, GLint y, GLsizei w, GLsizei h, GLenum type)
 {
    RIPPLE_CGL_ENTER(rend);
-   READ_OFFSET(rend, x, y);   /* the destination (raster position) is already shifted */
+   READ_OFFSET(rend, x, y, h);   /* the destination (raster position) is already shifted */
    CALL_CopyPixels(GET_DISPATCH(), (x, y, w, h, type));
 }
 
@@ -408,7 +495,7 @@ ripple_cgl_copy_tex_image1D(void *rend, GLenum target, GLint level, GLenum ifmt,
                             GLint y, GLsizei w, GLint border)
 {
    RIPPLE_CGL_ENTER(rend);
-   READ_OFFSET(rend, x, y);
+   READ_OFFSET(rend, x, y, 1);
    CALL_CopyTexImage1D(GET_DISPATCH(), (target, level, ifmt, x, y, w, border));
 }
 
@@ -417,7 +504,7 @@ ripple_cgl_copy_tex_image2D(void *rend, GLenum target, GLint level, GLenum ifmt,
                             GLint y, GLsizei w, GLsizei h, GLint border)
 {
    RIPPLE_CGL_ENTER(rend);
-   READ_OFFSET(rend, x, y);
+   READ_OFFSET(rend, x, y, h);
    CALL_CopyTexImage2D(GET_DISPATCH(), (target, level, ifmt, x, y, w, h, border));
 }
 
@@ -426,7 +513,7 @@ ripple_cgl_copy_tex_sub_image1D(void *rend, GLenum target, GLint level, GLint xo
                                 GLint y, GLsizei w)
 {
    RIPPLE_CGL_ENTER(rend);
-   READ_OFFSET(rend, x, y);
+   READ_OFFSET(rend, x, y, 1);
    CALL_CopyTexSubImage1D(GET_DISPATCH(), (target, level, xoff, x, y, w));
 }
 
@@ -435,7 +522,7 @@ ripple_cgl_copy_tex_sub_image2D(void *rend, GLenum target, GLint level, GLint xo
                                 GLint x, GLint y, GLsizei w, GLsizei h)
 {
    RIPPLE_CGL_ENTER(rend);
-   READ_OFFSET(rend, x, y);
+   READ_OFFSET(rend, x, y, h);
    CALL_CopyTexSubImage2D(GET_DISPATCH(), (target, level, xoff, yoff, x, y, w, h));
 }
 
@@ -444,8 +531,123 @@ ripple_cgl_copy_tex_sub_image3D(void *rend, GLenum target, GLint level, GLint xo
                                 GLint zoff, GLint x, GLint y, GLsizei w, GLsizei h)
 {
    RIPPLE_CGL_ENTER(rend);
-   READ_OFFSET(rend, x, y);
+   READ_OFFSET(rend, x, y, h);
    CALL_CopyTexSubImage3D(GET_DISPATCH(), (target, level, xoff, yoff, zoff, x, y, w, h));
+}
+
+/* ---- Surface textures (GLI parameters 997-999) ------------------------------------------- *
+ * WindowServer's compositor gets what is behind a window for its background effects (the
+ * translucent menu bar, menus, the Dashboard ripple) by binding a surface to the current
+ * texture: cglsSetInteger(999, {surface, target, internal format, width, height}), straight to
+ * GLEngine (cgl_takeover.c hooks it). GLEngine refuses it for us with kCGLBadState (its own
+ * texture bindings never see ours), which left the texture without an image: drawn as plain
+ * white (fixed function samples nothing and keeps the white vertex colour). Here the
+ * surface's current pixels are copied into the bound texture: the screen region this context
+ * composites from its window framebuffer, any other surface from its memory. */
+static bool cs_readable(const void *p, size_t len);
+static unsigned surface_texture_logs;
+
+int
+ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum target,
+                           GLenum ifmt, GLsizei w, GLsizei h)
+{
+   extern FILE *ripple_gld_dbg_file(void);
+   FILE *log = surface_texture_logs < 300 ? ripple_gld_dbg_file() : NULL;
+   struct ripple_gpu_surface_info si;
+   const char *how = "unknown surface";
+   int ret = 10008;                     /* kCGLBadValue */
+
+   if (unlikely(ripple_cgl_tracing))      /* in the GL trace too (index past the table's) */
+      ripple_cgl_trace(1000, "surface_texture(%u, %#x, %#x, %d, %d)", sid, target, ifmt, w, h);
+   RIPPLE_CGL_ENTER(ctx);
+   struct gl_context *gl = ctx->glctx;
+   GLenum error = gl->ErrorValue;
+   gl->ErrorValue = GL_NO_ERROR;
+   if (w <= 0 || h <= 0 || !ripple_cgl_device_surface_info(sid, &si)) {
+      /* nothing to read */
+   } else if (sid == ctx->attached_surface) {
+      /* The surface this context draws into: what has been drawn there so far, read from the
+       * window framebuffer, from the buffer WindowServer draws into. For the screen region
+       * being composited (the drawable is the whole screen) at the region's place. Its memory,
+       * if it has any, is only written at the next present. */
+      GLuint read_fb = gl->ReadBuffer ? gl->ReadBuffer->Name : 0;
+      CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT, 0));
+      GLenum saved_read = gl->ReadBuffer->ColorReadBuffer;
+      GLenum draw_buf = gl->WinSysDrawBuffer ? gl->WinSysDrawBuffer->ColorDrawBuffer[0] : GL_NONE;
+      if (draw_buf != GL_NONE)
+         CALL_ReadBuffer(GET_DISPATCH(), (draw_buf));
+      if (sid == ctx->win_surface)
+         ripple_cgl_refresh_window_offset(ctx);
+      int x = win_x(ctx, 0), y = win_y(ctx, 0, h);   /* the surface's top-left rows */
+      /* GL's row order (bottom row first), as WindowServer expects of a surface texture: it
+       * flips its own transform before drawing one. */
+      CALL_CopyTexImage2D(GET_DISPATCH(), (target, 0, ifmt, x, y, w, h, 0));
+      if (draw_buf != GL_NONE)
+         CALL_ReadBuffer(GET_DISPATCH(), (saved_read));
+      CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT, read_fb));
+      how = sid == ctx->win_surface ? "the window region" : "the drawable";
+      ret = 0;
+      if (sid != ctx->win_surface && si.backing_address) {
+         /* A surface with memory: WindowServer works on that memory with the CPU next (the
+          * translucent menu bar: Core Image over what was drawn here), so bring it up to date
+          * now, not at the next present. */
+         ripple_cgl_context_swap(ctx);
+         how = "the drawable, memory updated";
+      }
+   } else if (si.backing_address && si.row_bytes >= (uint32_t)w * 4 && (uint32_t)h <= si.height &&
+              cs_readable((const void *)(uintptr_t)si.backing_address,
+                          (size_t)si.row_bytes * (h - 1) + (size_t)w * 4)) {
+      /* A surface with memory in this process: its rows as they are. Surface memory is in
+       * GL's row order, bottom row first (presents write it that way, ripple_gl_target.c),
+       * which is what a surface texture is: WindowServer flips its own transform before
+       * drawing one. */
+      struct gl_pixelstore_attrib saved = gl->Unpack;
+      memset(&gl->Unpack, 0, sizeof(gl->Unpack));
+      gl->Unpack.Alignment = 4;
+      gl->Unpack.RowLength = si.row_bytes / 4;
+      CALL_TexImage2D(GET_DISPATCH(), (target, 0, ifmt, w, h, 0, GL_BGRA,
+                                       GL_UNSIGNED_INT_8_8_8_8_REV,
+                                       (const void *)(uintptr_t)si.backing_address));
+      gl->Unpack = saved;
+      how = "its memory";
+      ret = 0;
+      if (log && w >= 42) {
+         /* A picture of the left end (x 14-41), one character per pixel, memory row 0 first:
+          * # dark, + mid, . light, space transparent. */
+         const uint8_t *m = (const uint8_t *)(uintptr_t)si.backing_address;
+         for (GLsizei r = 0; r < h; r++) {
+            char line[29];
+            for (int x = 14; x < 42; x++) {
+               uint32_t p = *(const uint32_t *)(m + (size_t)si.row_bytes * r + 4 * x);
+               unsigned v = (p >> 8) & 0xff, a = p >> 24;
+               line[x - 14] = a < 0x20 ? ' ' : v < 100 ? '#' : v < 200 ? '+' : '.';
+            }
+            line[28] = 0;
+            fprintf(log, "RippleGLDriver:   row %2d |%s|\n", r, line);
+         }
+      }
+      if (log) {
+         const uint8_t *m = (const uint8_t *)(uintptr_t)si.backing_address;
+         fprintf(log, "RippleGLDriver: surface %u memory: row 1 %08x %08x, middle row %08x %08x, "
+                 "last row %08x\n", sid, *(const uint32_t *)(m + si.row_bytes + 4 * (w / 3)),
+                 *(const uint32_t *)(m + si.row_bytes + 4 * (w / 2)),
+                 *(const uint32_t *)(m + (size_t)si.row_bytes * (h / 2) + 4 * (w / 3)),
+                 *(const uint32_t *)(m + (size_t)si.row_bytes * (h / 2) + 4 * (w / 2)),
+                 *(const uint32_t *)(m + (size_t)si.row_bytes * (h - 1) + 4 * (w / 3)));
+      }
+   } else {
+      how = "no readable pixels";
+   }
+   GLenum ours = gl->ErrorValue;
+   gl->ErrorValue = error;              /* the program never sees our calls */
+   if (log) {
+      surface_texture_logs++;
+      fprintf(log, "RippleGLDriver: surface texture: surface %u (%ux%u at %d,%d, flags 0x%x, "
+              "memory 0x%llx row bytes %u) -> target 0x%x format 0x%x %dx%d from %s, GL error "
+              "0x%x\n", sid, si.width, si.height, si.x, si.y, si.flags,
+              (unsigned long long)si.backing_address, si.row_bytes, target, ifmt, w, h, how, ours);
+   }
+   return ret;
 }
 
 /* ---- Client storage (GL_APPLE_client_storage), emulated ---------------------------------- *

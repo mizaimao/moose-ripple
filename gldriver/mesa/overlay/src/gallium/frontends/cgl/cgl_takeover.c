@@ -130,6 +130,77 @@ dispatch_noop(void)
    return 0;
 }
 
+/* ---- CoreGraphics' gliSetInteger calls ---------------------------------------------------- *
+ * cglsSetInteger(cgls, pname, values) jumps to GLEngine's gliSetInteger through a function
+ * table whose pointer sits right after the cgls block's dispatch table (CoreGraphics 10.6.8,
+ * x86_64: table + 0x58). WindowServer binds surfaces to textures that way (997-999, see
+ * ripple_cgl_surface_texture); GLEngine can't do that for our contexts. The table entry is
+ * replaced once (it is shared by CoreGraphics' contexts); everything we don't handle goes on
+ * to GLEngine. */
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+
+#if defined(__x86_64__)
+#define CGLS_GLI_TABLE_AT      (sizeof(void *) * (1 + GLI_DISPATCH_ENTRIES))
+#define GLI_SET_INTEGER_SLOT   (0x58 / sizeof(void *))
+#endif
+
+typedef int (*gli_set_integer_fn)(void *gc, int pname, const int *values);
+static gli_set_integer_fn gli_set_integer;
+
+static int
+hook_gli_set_integer(void *gc, int pname, const int *values)
+{
+   if (pname >= 997 && pname <= 999 && values) {
+      struct ripple_cgl_context *ctx = ripple_cgl_rend_for(gc);
+      if (ctx)
+         return ripple_cgl_surface_texture(ctx, (uint32_t)values[0], (GLenum)values[1],
+                                           (GLenum)values[2], values[3], values[4]);
+   }
+   return gli_set_integer ? gli_set_integer(gc, pname, values) : 10004;   /* kCGLBadContext */
+}
+
+/* The page holding `p` is mapped readable and writable in this task. */
+static bool
+writable(const void *p)
+{
+   mach_vm_address_t a = (mach_vm_address_t)(uintptr_t)p;
+   mach_vm_size_t size = 0;
+   vm_region_basic_info_data_64_t info;
+   mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+   mach_port_t object = MACH_PORT_NULL;
+   return mach_vm_region(mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64,
+                         (vm_region_info_t)&info, &count, &object) == KERN_SUCCESS &&
+          a <= (mach_vm_address_t)(uintptr_t)p &&
+          (info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE);
+}
+
+static void
+hook_cgls_set_integer(void *cgls)
+{
+#if defined(__x86_64__)
+   extern FILE *ripple_gld_dbg_file(void);
+   void **slot = (void **)((uint8_t *)cgls + CGLS_GLI_TABLE_AT);
+   void **table = writable(slot) ? *slot : NULL;
+   void *fn = table && writable(&table[GLI_SET_INTEGER_SLOT]) ? table[GLI_SET_INTEGER_SLOT] : NULL;
+   Dl_info dli;
+   if (fn == (void *)hook_gli_set_integer)
+      return;
+   if (!fn || !dladdr(fn, &dli) || !dli.dli_sname || strcmp(dli.dli_sname, "gliSetInteger") != 0 ||
+       (gli_set_integer && fn != (void *)gli_set_integer)) {
+      if (ripple_gld_dbg_file())
+         fprintf(ripple_gld_dbg_file(), "RippleGLDriver: cgls gliSetInteger not found (table %p, "
+                 "entry %p): surface textures stay GLEngine's\n", (void *)table, fn);
+      return;
+   }
+   gli_set_integer = (gli_set_integer_fn)fn;
+   table[GLI_SET_INTEGER_SLOT] = (void *)hook_gli_set_integer;
+   if (ripple_gld_dbg_file())
+      fprintf(ripple_gld_dbg_file(), "RippleGLDriver: cgls gliSetInteger hooked (table %p)\n",
+              (void *)table);
+#endif
+}
+
 __attribute__((constructor)) static void
 ripple_cgl_takeover_init(void)
 {
@@ -194,6 +265,7 @@ ripple_cgl_take_over(void *gc, struct ripple_cgl_context *ctx)
       for (unsigned i = 0; i < GLI_DISPATCH_ENTRIES; i++)
          front[i] = dispatch_table[i];
       remember(gc, ctx, shadow, back);
+      hook_cgls_set_integer(cgl);
       return 1;
    }
    if (cgl->rend != gc)

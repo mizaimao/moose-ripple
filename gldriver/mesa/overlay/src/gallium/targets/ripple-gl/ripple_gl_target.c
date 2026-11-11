@@ -409,6 +409,8 @@ unbind_surface(struct gld_context *c)
    simple_mtx_unlock(&surfaces_lock);
    c->cur_surface = NULL;
    c->mesa->win_surface = 0;
+   c->mesa->attached_surface = 0;
+   c->mesa->surf_h = 0;
    ripple_cgl_context_set_drawable(c->mesa, c->drawable);
 }
 
@@ -558,7 +560,11 @@ GLD_EXPORT int gldFinish(struct gld_context *c) { return 0; }
 #define GLD_ATTACH_CHANGED    2
 #define GLD_ATTACH_DETACHED   1
 
-/* Frames for an accelerator surface with CPU backing (in this process): copy them in. */
+/* Frames for an accelerator surface with CPU backing (in this process): copy them in, bottom
+ * row first. WindowServer treats accelerator surface memory in GL's row order, like GL window
+ * memory (gld_window.c): it draws into these surfaces with GL and binds them as textures
+ * without flipping (the menu bar's background, with the Apple menu's logo, came out upside
+ * down with the top row first, VM 210 2026-11-10). `pixels` come top row first. */
 static void
 backing_present(void *data, const uint8_t *pixels, unsigned stride, unsigned width,
                 unsigned height)
@@ -568,10 +574,11 @@ backing_present(void *data, const uint8_t *pixels, unsigned stride, unsigned wid
    unsigned rows = height < e->info.height ? height : e->info.height;
    unsigned bytes = (width < e->info.width ? width : e->info.width) * 4;
 
-   if (!dst)
+   if (!dst || !height)
       return;
    for (unsigned y = 0; y < rows; y++)
-      memcpy(dst + (size_t)y * e->info.row_bytes, pixels + (size_t)y * stride, bytes);
+      memcpy(dst + (size_t)y * e->info.row_bytes, pixels + (size_t)(height - 1 - y) * stride,
+             bytes);
 }
 
 /* A window-server surface given as {0, 0, accelerator surface id}: what WindowServer's own
@@ -658,6 +665,7 @@ attach_surface(struct gld_context *c, uint32_t sid)
       ripple_cgl_drawable_set_gpu_display(e->d, true);
       ripple_cgl_drawable_set_size(e->d, si.screen_width, si.screen_height);
       c->mesa->win_surface = sid;
+      c->mesa->surf_h = 0;
       ripple_cgl_refresh_window_offset(c->mesa);
    } else {
       ripple_cgl_drawable_set_gpu_display(e->d, false);
@@ -665,7 +673,9 @@ attach_surface(struct gld_context *c, uint32_t sid)
       ripple_cgl_drawable_set_present(e->d, backing_present, e);
       ripple_cgl_drawable_set_size(e->d, si.width, si.height);
       c->mesa->win_surface = 0;
+      c->mesa->surf_h = si.height;
    }
+   c->mesa->attached_surface = sid;
    ripple_cgl_context_set_drawable(c->mesa, e->d);
    if (changed)
       DBG("  accelerator surface %u: %ux%u at %d,%d, %s\n", sid, si.width, si.height, si.x, si.y,

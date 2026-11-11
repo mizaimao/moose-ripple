@@ -138,6 +138,17 @@ def parse_api(path):
 
 FLOATS = ('GLfloat', 'GLclampf', 'GLdouble', 'GLclampd')
 
+# Entries whose data the debug trace also logs (program and shader text, small images),
+# after the call line. C statements; the parameters are in scope.
+TRACE_DATA = {
+    'program_string_ARB': 'ripple_cgl_trace_text("program", string, len);',
+    'shader_source_ARB': 'for (GLsizei i = 0; string && i < count; i++)\n'
+                         '         ripple_cgl_trace_text("shader", string[i], '
+                         'length && length[i] >= 0 ? length[i] : -1);',
+    'tex_image2D': 'ripple_cgl_trace_pixels(width, height, format, type, pixels);',
+    'tex_sub_image2D': 'ripple_cgl_trace_pixels(width, height, format, type, pixels);',
+}
+
 
 def trace_call(index, name, params):
     """A ripple_cgl_trace() call for the debug trace: integers in hex, floats, pointers."""
@@ -154,8 +165,11 @@ def trace_call(index, name, params):
             fmts.append('%#llx')
             args.append('(unsigned long long)' + pname)
     fmt = '%s(%s)' % (name, ', '.join(fmts))
-    return ('   if (unlikely(ripple_cgl_tracing))\n      ripple_cgl_trace(%d, "%s"%s);\n'
-            % (index, fmt, ''.join(', ' + a for a in args)))
+    call = 'ripple_cgl_trace(%d, "%s"%s);' % (index, fmt, ''.join(', ' + a for a in args))
+    if name in TRACE_DATA:
+        return ('   if (unlikely(ripple_cgl_tracing) && %s) {\n      %s\n   }\n'
+                % (call[:-1], TRACE_DATA[name]))
+    return '   if (unlikely(ripple_cgl_tracing))\n      %s\n' % call
 
 
 def gl_name(apple):
