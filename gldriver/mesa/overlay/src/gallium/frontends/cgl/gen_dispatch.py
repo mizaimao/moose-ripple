@@ -73,6 +73,11 @@ CUSTOM = {
     'object_purgeable_APPLE': 'ripple_cgl_object_purgeable',
     'object_unpurgeable_APPLE': 'ripple_cgl_object_unpurgeable',
     'get_object_parameteriv_APPLE': 'ripple_cgl_get_object_parameteriv',
+    # Shader compile and link: failures logged with their info log (debug log on; M6).
+    'compile_shader_ARB': 'ripple_cgl_compile_shader',
+    'link_program_ARB': 'ripple_cgl_link_program',
+    # ARB programs: Apple's ALIAS of a binding rewritten for Mesa's parser (M6).
+    'program_string_ARB': 'ripple_cgl_program_string',
     # Window offset for drawing into the screen through a rectangle (cgl_apple.c).
     'viewport': 'ripple_cgl_viewport',
     'bind_framebuffer_EXT': 'ripple_cgl_bind_framebuffer',

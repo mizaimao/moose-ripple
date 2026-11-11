@@ -32,6 +32,10 @@ struct ripple_cgl_context {
    struct st_visual visual;      /* what its drawables are made of */
    struct ripple_cgl_drawable *draw;   /* window drawable, or NULL (FBOs only) */
    unsigned next_fence;          /* GL_APPLE_fence names (cgl_apple.c) */
+   /* Taken over from GLEngine after its first GL calls (cgl_takeover.c): GLEngine's context and
+    * table, to copy its bindings into Mesa on the next call. */
+   void *sync_gc;
+   void **sync_table;
    /* Window offset (Quartz Extreme, cgl_apple.c): drawing into the screen through a rectangle
     * of it (WindowServer's display surface), window coordinates are shifted by (win_ox,
     * win_oy), the rectangle's GL bottom-left on the screen. */

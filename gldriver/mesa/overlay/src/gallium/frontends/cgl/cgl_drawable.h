@@ -37,6 +37,9 @@ void ripple_cgl_drawable_set_present(struct ripple_cgl_drawable *d, ripple_cgl_p
 /* Present by showing the colour texture itself on the display (zero copy; for the display
  * surface WindowServer composites into) instead of reading it back. */
 void ripple_cgl_drawable_set_gpu_display(struct ripple_cgl_drawable *d, bool on);
+/* The drawable's color buffer for GL_FRONT or GL_BACK (the other if it has only one), or NULL
+ * before its first use. */
+struct pipe_resource *ripple_cgl_drawable_color(struct ripple_cgl_drawable *d, unsigned source);
 /* Quartz Extreme: the drawable holds a rectangle of the screen, accelerator surface `surface`
  * (drawn at the drawable's bottom-left). Presenting reads the surface's current rectangle (it is
  * reshaped more often than re-attached), puts the drawing there in the screen texture and shows

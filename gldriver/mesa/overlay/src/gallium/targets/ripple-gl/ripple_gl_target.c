@@ -335,9 +335,11 @@ gldDestroyPixelFormat(struct gld_pixel_format *pf)
 /* ---- Shared state (one per CGL share group) ------------------------------------------ */
 
 struct gld_shared {
+   uint32_t magic;                       /* GLD_SHARED_MAGIC while alive */
    simple_mtx_t lock;
    struct gld_context *members;          /* contexts of this share group */
 };
+#define GLD_SHARED_MAGIC 0x52474c53u     /* "RGLS" */
 
 GLD_EXPORT int
 gldCreateShared(struct gld_shared **out, uint32_t display_mask, int unknown)
@@ -346,6 +348,7 @@ gldCreateShared(struct gld_shared **out, uint32_t display_mask, int unknown)
    if (!s)
       return kCGLBadAlloc;
    simple_mtx_init(&s->lock, mtx_plain);
+   s->magic = GLD_SHARED_MAGIC;
    *out = s;
    return 0;
 }
@@ -354,6 +357,7 @@ GLD_EXPORT int
 gldDestroyShared(struct gld_shared *s)
 {
    if (s) {
+      s->magic = 0;
       simple_mtx_destroy(&s->lock);
       free(s);
    }
@@ -554,11 +558,13 @@ gldReclaimContext(struct gld_context *c)
  * with gldSetInteger 0x2bd; WindowServer's contexts never send it, so attach and dispatch
  * calls try too. Every attempt checks Apple's magic values and the empty back table first. */
 static void
-try_takeover(struct gld_context *c, const char *from)
+try_takeover_ex(struct gld_context *c, const char *from, bool cgls_only)
 {
    if (!c || c->magic != GLD_CONTEXT_MAGIC || c->taken_over || c->takeover_failed)
       return;
-   int r = ripple_cgl_take_over(c->gc, c->mesa);
+   int r = ripple_cgl_take_over(c->gc, c->mesa, cgls_only);
+   if (r == -14)
+      return;                            /* a CGL context: its 0x2bd comes */
    c->taken_over = r >= 0;
    if (c->takeover_tries < 3 || (c->takeover_tries % 100) == 0)
       DBG("takeover from %s: %d\n", from, r);
@@ -570,6 +576,12 @@ try_takeover(struct gld_context *c, const char *from)
                       "with GLEngine and renders nothing\n");
       DBG("takeover: FAILED\n");
    }
+}
+
+static void
+try_takeover(struct gld_context *c, const char *from)
+{
+   try_takeover_ex(c, from, false);
 }
 
 GLD_EXPORT int
@@ -918,6 +930,25 @@ gldUpdateDispatch(struct gld_context *c, void **render_ops, void *dirty)
 
 #define GLD_PLACEHOLDER ((void *)(uintptr_t)0x52)
 
+/* Contexts CoreGraphics makes ("cgls": Core Image's own in apps, M6) never send the 0x2bd that
+ * ends CGLCreateContext, and their first drawable attach can come after GL work: Core Image
+ * made a texture and framebuffer in GLEngine, was taken over at the framebuffer's attach, and
+ * Mesa never knew either (Core Image Fun House stayed black). GLEngine creates the context's
+ * default vertex array right after the context, before any GL call: object calls try to take
+ * over the share group's contexts that aren't yet. `shared` is checked before use. */
+static void
+takeover_share_group(void *shared, const char *from)
+{
+   struct gld_shared *s = shared;
+   if (!s || (uintptr_t)s < 4096 || s->magic != GLD_SHARED_MAGIC)
+      return;
+   simple_mtx_lock(&s->lock);
+   for (struct gld_context *c = s->members; c; c = c->next_member)
+      if (!c->taken_over && !c->takeover_failed)
+         try_takeover_ex(c, from, true);
+   simple_mtx_unlock(&s->lock);
+}
+
 /* With the debug log on, the first calls of each are logged: GLEngine-side object work (e.g.
  * textures CoreGraphics makes through CGL calls outside the dispatch table) never reaches Mesa. */
 #define GLD_SEEN(name)                                                        \
@@ -931,6 +962,7 @@ gldUpdateDispatch(struct gld_context *c, void **render_ops, void *dirty)
    GLD_EXPORT int name(void *shared, void **out)                             \
    {                                                                         \
       GLD_SEEN(name);                                                        \
+      takeover_share_group(shared, #name);                                   \
       if (out)                                                               \
          *out = GLD_PLACEHOLDER;                                             \
       return 0;                                                              \

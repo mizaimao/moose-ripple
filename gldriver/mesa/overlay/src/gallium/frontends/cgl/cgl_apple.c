@@ -446,14 +446,30 @@ ripple_cgl_clear(void *rend, GLbitfield mask)
    CALL_Clear(GET_DISPATCH(), (mask));
 }
 
+/* GL_UNPACK_CLIENT_STORAGE_APPLE without the error, everywhere but in WindowServer (M6): Core
+ * Animation counts any GL error as a failed frame ("rendering error 500") and drew nothing in
+ * Real Racing 2. The emulation (textures read from their memory again) works either way. */
+static bool
+client_storage_quiet(void)
+{
+   static int quiet = -1;
+   if (quiet < 0)
+      quiet = strcmp(getprogname(), "WindowServer") != 0;
+   return quiet;
+}
+
 void GLAPIENTRY
 ripple_cgl_get_integerv(void *rend, GLenum pname, GLint *params)
 {
    struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
    RIPPLE_CGL_ENTER(rend);
-   /* GL_UNPACK_CLIENT_STORAGE_APPLE stays an error here too: answering it (with the tracked
-    * value) made WindowServer drop the menu bar (VM 210, 2026-11-10); the error is part of
-    * what keeps WindowServer off its client-storage paths. */
+   /* GL_UNPACK_CLIENT_STORAGE_APPLE stays an error in WindowServer: answering it (with the
+    * tracked value) made WindowServer drop the menu bar (VM 210, 2026-11-10); the error is part
+    * of what keeps WindowServer off its client-storage paths. */
+   if (pname == GL_UNPACK_CLIENT_STORAGE_APPLE && ctx && params && client_storage_quiet()) {
+      *params = ctx->client_storage;
+      return;
+   }
    CALL_GetIntegerv(GET_DISPATCH(), (pname, params));
    if (!ctx || (!ctx->win_surface && !ctx->surf_h) || !params)
       return;
@@ -548,6 +564,7 @@ static bool cs_readable(const void *p, size_t len);
 static unsigned surface_texture_logs;
 
 #include "main/texobj.h"
+#include "state_tracker/st_context.h"
 
 /* Copy the window framebuffer's rectangle (x, y, w, h) into the texture bound to `target`, top
  * row first: a surface texture has the surface's rows in memory order, like the memory path
@@ -588,7 +605,7 @@ copy_top_first(struct ripple_cgl_context *ctx, GLenum target, GLenum ifmt, int x
 
 int
 ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum target,
-                           GLenum ifmt, GLsizei w, GLsizei h)
+                           GLenum ifmt, GLsizei w, GLsizei h, bool bind, GLenum source)
 {
    extern FILE *ripple_gld_dbg_file(void);
    FILE *log = surface_texture_logs < 300 ? ripple_gld_dbg_file() : NULL;
@@ -608,19 +625,42 @@ ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum 
    bool have_si = !pb && ripple_cgl_device_surface_info(sid, &si);
    if (w <= 0 || h <= 0 || (!pb && !have_si)) {
       /* nothing to read */
-   } else if (pb && sid != ctx->attached_surface) {
-      /* A pbuffer (cglsTexImagePBuffer, 998): rendered by another context, usually Core
-       * Image's. Read from it for the copy, through the window-system read framebuffer. */
+   } else if (pb && bind && ripple_cgl_drawable_color(pb, source)) {
+      /* CGLTexImagePBuffer (997): the texture stays tied to the pbuffer, and what is drawn
+       * into the pbuffer later shows in it (Real Racing 2 ties each pbuffer once and renders
+       * into it every frame, M6). Share the pbuffer's color buffer. */
+      struct pipe_resource *res = ripple_cgl_drawable_color(pb, source);
+      st_context_teximage(ctx->st, target, 0, res->format, res, false);
+      si.width = res->width0;
+      si.height = res->height0;
+      how = sid == ctx->attached_surface ? "tied to its own pbuffer" : "tied to a pbuffer";
+      ret = 0;
+   } else if (pb) {
+      /* A pbuffer (cglsTexImagePBuffer 998, CGLTexImagePBuffer 997): usually rendered by
+       * another context (Core Image's in WindowServer); read from it for the copy, through the
+       * window-system read framebuffer. A GL drawable, rows bottom first like the texture: no
+       * flip. If it is this context's own drawable (Real Racing 2's Core Animation layers, M6),
+       * read it as it is, from the buffer drawn into. */
+      bool own = sid == ctx->attached_surface;
       GLuint read_fb = gl->ReadBuffer ? gl->ReadBuffer->Name : 0;
-      ripple_cgl_context_set_read_drawable(ctx, pb);
+      if (!own)
+         ripple_cgl_context_set_read_drawable(ctx, pb);
       CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT, 0));
+      GLenum saved_read = gl->ReadBuffer ? gl->ReadBuffer->ColorReadBuffer : GL_NONE;
+      GLenum draw_buf = own && gl->WinSysDrawBuffer ? gl->WinSysDrawBuffer->ColorDrawBuffer[0]
+                                                   : GL_NONE;
+      if (draw_buf != GL_NONE)
+         CALL_ReadBuffer(GET_DISPATCH(), (draw_buf));
       CALL_CopyTexImage2D(GET_DISPATCH(), (target, 0, ifmt, 0, 0, MIN2((unsigned)w, pw),
                                            MIN2((unsigned)h, ph), 0));
+      if (draw_buf != GL_NONE)
+         CALL_ReadBuffer(GET_DISPATCH(), (saved_read));
       CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT, read_fb));
-      ripple_cgl_context_set_read_drawable(ctx, NULL);
+      if (!own)
+         ripple_cgl_context_set_read_drawable(ctx, NULL);
       si.width = pw;
       si.height = ph;
-      how = "a pbuffer";
+      how = own ? "its own pbuffer" : "a pbuffer";
       ret = 0;
    } else if (sid == ctx->attached_surface) {
       /* The surface this context draws into: what has been drawn there so far, read from the
@@ -724,6 +764,7 @@ ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum 
 #include "main/image.h"
 #include "main/teximage.h"
 #include "main/texobj.h"
+#include "state_tracker/st_context.h"
 
 #define CS_MAX 2048
 
@@ -845,8 +886,10 @@ ripple_cgl_pixel_storei(void *rend, GLenum pname, GLint param)
       struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
       if (ctx)
          ctx->client_storage = param != 0;
+      if (client_storage_quiet())
+         return;
    }
-   CALL_PixelStorei(GET_DISPATCH(), (pname, param));   /* client storage: still refused */
+   CALL_PixelStorei(GET_DISPATCH(), (pname, param));   /* WindowServer: still refused */
 }
 
 void GLAPIENTRY
@@ -857,6 +900,8 @@ ripple_cgl_pixel_storef(void *rend, GLenum pname, GLfloat param)
       struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
       if (ctx)
          ctx->client_storage = param != 0.0f;
+      if (client_storage_quiet())
+         return;
    }
    CALL_PixelStoref(GET_DISPATCH(), (pname, param));
 }
@@ -1219,4 +1264,130 @@ ripple_cgl_get_object_parameteriv(void *rend, GLenum objectType, GLuint name, GL
 {
    if (params && pname == GL_PURGEABLE_APPLE)
       *params = GL_FALSE;
+}
+
+/* Shader compile and program link failures, with Mesa's info log, in the debug log (once per
+ * object name; M6: a game's draws failed with GL_INVALID_OPERATION and nothing said why). */
+static void
+log_glsl_failure(const char *what, GLuint name, bool program)
+{
+   extern FILE *ripple_gld_dbg_file(void);
+   FILE *f = ripple_gld_dbg_file();
+   if (!f)
+      return;
+   GLint ok = GL_TRUE;
+   if (program)
+      CALL_GetProgramiv(GET_DISPATCH(), (name, GL_LINK_STATUS, &ok));
+   else
+      CALL_GetShaderiv(GET_DISPATCH(), (name, GL_COMPILE_STATUS, &ok));
+   if (ok)
+      return;
+   static unsigned logged;
+   if (logged++ >= 40)
+      return;
+   char buf[2048];
+   GLsizei len = 0;
+   buf[0] = 0;
+   if (program)
+      CALL_GetProgramInfoLog(GET_DISPATCH(), (name, sizeof(buf) - 1, &len, buf));
+   else
+      CALL_GetShaderInfoLog(GET_DISPATCH(), (name, sizeof(buf) - 1, &len, buf));
+   buf[len > 0 && len < (GLsizei)sizeof(buf) ? len : 0] = 0;
+   fprintf(f, "RippleGLDriver: %s %u failed: %s\n", what, name, buf);
+}
+
+void GLAPIENTRY
+ripple_cgl_compile_shader(void *rend, GLhandleARB shader)
+{
+   RIPPLE_CGL_ENTER(rend);
+   CALL_CompileShader(GET_DISPATCH(), ((GLuint)(uintptr_t)shader));
+   log_glsl_failure("compile of shader", (GLuint)(uintptr_t)shader, false);
+}
+
+void GLAPIENTRY
+ripple_cgl_link_program(void *rend, GLhandleARB program)
+{
+   RIPPLE_CGL_ENTER(rend);
+   CALL_LinkProgram(GET_DISPATCH(), ((GLuint)(uintptr_t)program));
+   log_glsl_failure("link of program", (GLuint)(uintptr_t)program, true);
+}
+
+/* ARB programs. Apple's parser takes "ALIAS name = fragment.texcoord[5];", an alias of a
+ * binding; the ARB specs (and Mesa) only alias a declared name, so Mesa refused the program
+ * and every draw with it failed (Core Animation's YUV video programs, Real Racing 2's intro,
+ * M6). Such an ALIAS is the same as ATTRIB (fragment.*, vertex.*) or PARAM (program.*,
+ * state.*, a constant {...}): rewritten to that before Mesa parses the text. NULL if nothing changed. */
+static bool
+arb_word_at(const char *s, GLsizei len, GLsizei i, const char *word)
+{
+   size_t n = strlen(word);
+   return i + (GLsizei)n <= len && !memcmp(s + i, word, n);
+}
+
+static char *
+arb_fix_alias(const char *s, GLsizei len, GLsizei *out_len)
+{
+   char *out = NULL;
+   GLsizei o = 0;
+   bool start = true;                   /* at the start of a statement */
+   for (GLsizei i = 0; i < len; i++) {
+      if (start && arb_word_at(s, len, i, "ALIAS") && i + 5 < len &&
+          (s[i + 5] == ' ' || s[i + 5] == '\t')) {
+         GLsizei j = i + 5;
+         while (j < len && s[j] != '=' && s[j] != ';')
+            j++;
+         if (j < len && s[j] == '=') {
+            j++;
+            while (j < len && (s[j] == ' ' || s[j] == '\t'))
+               j++;
+            const char *with = NULL;
+            if (arb_word_at(s, len, j, "fragment.") || arb_word_at(s, len, j, "vertex."))
+               with = "ATTRIB";
+            else if (arb_word_at(s, len, j, "program.") || arb_word_at(s, len, j, "state.") ||
+                     arb_word_at(s, len, j, "{"))
+               with = "PARAM";
+            if (with) {
+               if (!out) {
+                  out = malloc((size_t)len * 2 + 16);
+                  if (!out)
+                     return NULL;
+                  memcpy(out, s, i);
+                  o = i;
+               }
+               memcpy(out + o, with, strlen(with));
+               o += strlen(with);
+               i += 4;                  /* past "ALIAS" */
+               start = false;
+               continue;
+            }
+         }
+      }
+      char c = s[i];
+      if (out)
+         out[o++] = c;
+      if (c == ';' || c == '\n')
+         start = true;
+      else if (c != ' ' && c != '\t' && c != '\r')
+         start = false;
+   }
+   if (out)
+      *out_len = o;
+   return out;
+}
+
+void GLAPIENTRY
+ripple_cgl_program_string(void *rend, GLenum target, GLenum format, GLsizei len,
+                          const GLvoid *string)
+{
+   RIPPLE_CGL_ENTER(rend);
+   char *fixed = NULL;
+   GLsizei fixed_len = len;
+   bool alias = false;               /* no memmem on 10.6 */
+   for (GLsizei i = 0; string && i + 5 <= len && !alias; i++)
+      alias = arb_word_at(string, len, i, "ALIAS");
+   if (alias)
+      fixed = arb_fix_alias(string, len, &fixed_len);
+   CALL_ProgramStringARB(GET_DISPATCH(), (target, format, fixed ? fixed_len : len,
+                                          fixed ? fixed : string));
+   free(fixed);
 }

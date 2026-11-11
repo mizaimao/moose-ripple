@@ -94,7 +94,10 @@ ripple_cgl_context_make_current(struct ripple_cgl_context *ctx)
 {
    /* Without a drawable the context is surfaceless and renders into FBOs only. */
    struct pipe_frontend_drawable *d = ctx && ctx->draw ? &ctx->draw->base : NULL;
-   return st_api_make_current(ctx ? ctx->st : NULL, d, d);
+   bool ok = st_api_make_current(ctx ? ctx->st : NULL, d, d);
+   if (ok && ctx && unlikely(ctx->sync_gc))
+      ripple_cgl_sync_from_glengine(ctx);
+   return ok;
 }
 
 /* Read from `read` for a moment (a pbuffer used as a texture, cgl_apple.c); NULL reads from the

@@ -155,7 +155,8 @@ hook_gli_set_integer(void *gc, int pname, const int *values)
       struct ripple_cgl_context *ctx = ripple_cgl_rend_for(gc);
       if (ctx)
          return ripple_cgl_surface_texture(ctx, (uint32_t)values[0], (GLenum)values[1],
-                                           (GLenum)values[2], values[3], values[4]);
+                                           (GLenum)values[2], values[3], values[4],
+                                           pname == 997, (GLenum)values[6]);
    }
    return gli_set_integer ? gli_set_integer(gc, pname, values) : 10004;   /* kCGLBadContext */
 }
@@ -175,29 +176,53 @@ writable(const void *p)
           (info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE);
 }
 
+/* Put hook_gli_set_integer in `table` at `index` if GLEngine's gliSetInteger is there. */
 static void
-hook_cgls_set_integer(void *cgls)
+hook_set_integer_in(void **table, unsigned index, const char *what)
 {
-#if defined(__x86_64__)
    extern FILE *ripple_gld_dbg_file(void);
-   void **slot = (void **)((uint8_t *)cgls + CGLS_GLI_TABLE_AT);
-   void **table = writable(slot) ? *slot : NULL;
-   void *fn = table && writable(&table[GLI_SET_INTEGER_SLOT]) ? table[GLI_SET_INTEGER_SLOT] : NULL;
+   void *fn = table && writable(&table[index]) ? table[index] : NULL;
    Dl_info dli;
    if (fn == (void *)hook_gli_set_integer)
       return;
    if (!fn || !dladdr(fn, &dli) || !dli.dli_sname || strcmp(dli.dli_sname, "gliSetInteger") != 0 ||
        (gli_set_integer && fn != (void *)gli_set_integer)) {
       if (ripple_gld_dbg_file())
-         fprintf(ripple_gld_dbg_file(), "RippleGLDriver: cgls gliSetInteger not found (table %p, "
-                 "entry %p): surface textures stay GLEngine's\n", (void *)table, fn);
+         fprintf(ripple_gld_dbg_file(), "RippleGLDriver: %s gliSetInteger not found (table %p, "
+                 "entry %p): surface textures stay GLEngine's\n", what, (void *)table, fn);
       return;
    }
    gli_set_integer = (gli_set_integer_fn)fn;
-   table[GLI_SET_INTEGER_SLOT] = (void *)hook_gli_set_integer;
+   table[index] = (void *)hook_gli_set_integer;
    if (ripple_gld_dbg_file())
-      fprintf(ripple_gld_dbg_file(), "RippleGLDriver: cgls gliSetInteger hooked (table %p)\n",
+      fprintf(ripple_gld_dbg_file(), "RippleGLDriver: %s gliSetInteger hooked (table %p)\n", what,
               (void *)table);
+}
+
+static void
+hook_cgls_set_integer(void *cgls)
+{
+#if defined(__x86_64__)
+   void **slot = (void **)((uint8_t *)cgls + CGLS_GLI_TABLE_AT);
+   hook_set_integer_in(writable(slot) ? *slot : NULL, GLI_SET_INTEGER_SLOT, "cgls");
+#endif
+}
+
+/* Public CGL contexts reach GLEngine's gliSetInteger through the plugin record's own function
+ * table: CGLTexImagePBuffer sends gliSetInteger(997, {ID, target, format, width, height,
+ * 0x8367, source, levels}) there (OpenGL 10K549, x86_64: ctx+0x17e8 private block, +0x78 the
+ * records, record +0x10 the gli table, gliSetInteger at +0x48). Real Racing 2's Core Animation
+ * layers, M6. */
+static void
+hook_cgl_set_integer(void *cgl)
+{
+#if defined(__x86_64__)
+   void **priv = (void **)((uint8_t *)cgl + 0x17e8);
+   uint8_t *p = writable(priv) ? *priv : NULL;
+   void **recs = p && writable(p + 0x78) ? *(void **)(p + 0x78) : NULL;
+   void **table = recs && writable((uint8_t *)recs + 0x10) ? *(void ***)((uint8_t *)recs + 0x10)
+                                                          : NULL;
+   hook_set_integer_in(table, 0x48 / sizeof(void *), "CGL");
 #endif
 }
 
@@ -227,7 +252,7 @@ ripple_cgl_gc_from_create_arg(void *arg5)
 }
 
 int
-ripple_cgl_take_over(void *gc, struct ripple_cgl_context *ctx)
+ripple_cgl_take_over(void *gc, struct ripple_cgl_context *ctx, bool cgls_only)
 {
 #if HAVE_TAKEOVER_LAYOUT
    if (!gc || !select_dispatch || !back_dispatch || !dispatch_table[0])
@@ -238,6 +263,8 @@ ripple_cgl_take_over(void *gc, struct ripple_cgl_context *ctx)
    if (!front)
       return -3;
    struct cgl_object_head *cgl = (struct cgl_object_head *)((uint8_t *)front - sizeof(void *));
+   if (cgls_only && *(uint32_t *)((uint8_t *)cgl + CGL_MAGIC_OFFSET) == CGL_MAGIC)
+      return -14;
    if (*(uint32_t *)((uint8_t *)cgl + CGL_MAGIC_OFFSET) != CGL_MAGIC) {
       /* Not a CGL context: CoreGraphics' private "cgls" copy of CGL makes WindowServer's
        * contexts (docs/re/qe-decision.md, gl-plugin-interface.md). Its block is {gc, front
@@ -265,6 +292,10 @@ ripple_cgl_take_over(void *gc, struct ripple_cgl_context *ctx)
       for (unsigned i = 0; i < GLI_DISPATCH_ENTRIES; i++)
          front[i] = dispatch_table[i];
       remember(gc, ctx, shadow, back);
+      if (cgls_only) {                    /* from an object call: GLEngine had the first calls */
+         ctx->sync_table = shadow;
+         ctx->sync_gc = gc;
+      }
       hook_cgls_set_integer(cgl);
       return 1;
    }
@@ -285,8 +316,55 @@ ripple_cgl_take_over(void *gc, struct ripple_cgl_context *ctx)
       return -8;
    cgl->rend = ctx;
    remember(gc, ctx, NULL, NULL);
+   hook_cgl_set_integer(cgl);
    return 0;
 #else
    return -9;
 #endif
+}
+
+/* GLEngine's dispatch slots used to read its state (gliDispatch.h order). */
+#define GLI_SLOT_GET_INTEGERV  104
+
+void
+ripple_cgl_sync_from_glengine(struct ripple_cgl_context *ctx)
+{
+   typedef void (*get_integerv_fn)(void *gc, GLenum pname, GLint *params);
+   void *gc = ctx->sync_gc;
+   void **table = ctx->sync_table;
+   ctx->sync_gc = NULL;
+   ctx->sync_table = NULL;
+   if (!gc || !table || table[GLI_SLOT_GET_INTEGERV] == (void *)dispatch_noop)
+      return;
+   get_integerv_fn get = (get_integerv_fn)table[GLI_SLOT_GET_INTEGERV];
+   static const GLenum bindings[][2] = {
+      { GL_TEXTURE_1D, GL_TEXTURE_BINDING_1D },
+      { GL_TEXTURE_2D, GL_TEXTURE_BINDING_2D },
+      { GL_TEXTURE_3D, GL_TEXTURE_BINDING_3D },
+      { GL_TEXTURE_CUBE_MAP, GL_TEXTURE_BINDING_CUBE_MAP },
+      { GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_BINDING_RECTANGLE_ARB },
+   };
+   GLint active = GL_TEXTURE0, fb = 0, rb = 0, names[5] = { 0 };
+   get(gc, GL_ACTIVE_TEXTURE, &active);
+   for (unsigned i = 0; i < 5; i++)
+      get(gc, bindings[i][1], &names[i]);
+   get(gc, GL_FRAMEBUFFER_BINDING_EXT, &fb);
+   get(gc, GL_RENDERBUFFER_BINDING_EXT, &rb);
+
+   /* Names GLEngine generated are unknown to Mesa; binding one creates it (compatibility). */
+   if (active >= GL_TEXTURE0 && active < GL_TEXTURE0 + 32)
+      CALL_ActiveTexture(GET_DISPATCH(), ((GLenum)active));
+   for (unsigned i = 0; i < 5; i++)
+      if (names[i] > 0)
+         CALL_BindTexture(GET_DISPATCH(), (bindings[i][0], (GLuint)names[i]));
+   if (fb > 0)
+      CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_FRAMEBUFFER_EXT, (GLuint)fb));
+   if (rb > 0)
+      CALL_BindRenderbufferEXT(GET_DISPATCH(), (GL_RENDERBUFFER_EXT, (GLuint)rb));
+
+   extern FILE *ripple_gld_dbg_file(void);
+   if (ripple_gld_dbg_file())
+      fprintf(ripple_gld_dbg_file(), "RippleGLDriver: took GLEngine's bindings over: unit 0x%x, "
+              "textures 1D %d 2D %d 3D %d cube %d rect %d, framebuffer %d, renderbuffer %d\n",
+              active, names[0], names[1], names[2], names[3], names[4], fb, rb);
 }

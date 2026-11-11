@@ -291,3 +291,13 @@ ripple_cgl_context_swap(struct ripple_cgl_context *ctx)
       p_atomic_inc(&d->base.stamp);
    }
 }
+
+struct pipe_resource *
+ripple_cgl_drawable_color(struct ripple_cgl_drawable *d, unsigned source)
+{
+   struct pipe_resource *front = d->textures[ST_ATTACHMENT_FRONT_LEFT];
+   struct pipe_resource *back = d->textures[ST_ATTACHMENT_BACK_LEFT];
+   if (source == 0x0404 /* GL_FRONT */ || source == 0x0400 /* GL_FRONT_LEFT */)
+      return front ? front : back;
+   return back ? back : front;
+}

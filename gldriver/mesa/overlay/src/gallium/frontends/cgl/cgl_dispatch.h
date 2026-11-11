@@ -71,6 +71,11 @@ GLenum GLAPIENTRY ripple_cgl_object_purgeable(void *rend, GLenum objectType, GLu
 GLenum GLAPIENTRY ripple_cgl_object_unpurgeable(void *rend, GLenum objectType, GLuint name, GLenum option);
 void GLAPIENTRY ripple_cgl_get_object_parameteriv(void *rend, GLenum objectType, GLuint name,
                                                   GLenum pname, GLint *params);
+/* Compile and link, with failures written to the debug log (cgl_apple.c). */
+void GLAPIENTRY ripple_cgl_compile_shader(void *rend, GLhandleARB shader);
+void GLAPIENTRY ripple_cgl_link_program(void *rend, GLhandleARB program);
+void GLAPIENTRY ripple_cgl_program_string(void *rend, GLenum target, GLenum format, GLsizei len,
+                                          const GLvoid *string);
 void GLAPIENTRY ripple_cgl_tex_parameteri(void *rend, GLenum target, GLenum pname, GLint param);
 void GLAPIENTRY ripple_cgl_tex_parameterf(void *rend, GLenum target, GLenum pname, GLfloat param);
 void GLAPIENTRY ripple_cgl_tex_parameteriv(void *rend, GLenum target, GLenum pname, const GLint *params);
@@ -101,9 +106,11 @@ void GLAPIENTRY ripple_cgl_copy_tex_sub_image3D(void *rend, GLenum target, GLint
                                                 GLint y, GLsizei w, GLsizei h);
 struct ripple_cgl_context;
 void ripple_cgl_refresh_window_offset(struct ripple_cgl_context *ctx);
-/* GLI parameters 997-999 (a surface as the bound texture's image), cgl_apple.c. */
+/* GLI parameters 997-999 (a surface as the bound texture's image), cgl_apple.c. `bind`: the
+ * texture shares the pbuffer's buffer (CGLTexImagePBuffer, 997) instead of a copy; `source` is
+ * the pbuffer's GL_FRONT or GL_BACK. */
 int ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum target,
-                               GLenum ifmt, GLsizei w, GLsizei h);
+                               GLenum ifmt, GLsizei w, GLsizei h, bool bind, GLenum source);
 
 /* Generated: the number of entries and the filler for a GLIFunctionDispatch table. */
 extern const unsigned ripple_cgl_dispatch_count;
