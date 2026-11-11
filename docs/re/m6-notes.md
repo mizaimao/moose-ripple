@@ -174,8 +174,9 @@ It found three bugs, fixed:
   texture). Sharing is behind a debug switch (`pbuffer-tie`).
 
 Results now:
-- Filters: 21 of 24 within 1-2 levels of the software renderer; CIZoomBlur (1.1% of pixels),
-  CIEdges (3.9%) and CIComicEffect (17.6%) differ in detail (edge thresholds), the same picture.
+- Filters: 23 of 24 within 1-2 levels of the software renderer or under 1% of pixels;
+  CIEdges differs on 3.9% (edge thresholds, the same picture). (Before the copy change,
+  CIComicEffect differed on 17.6% and CIZoomBlur on 1.1%.)
   Our GPU takes 2-90 ms per 480x300 frame here against software's 1-5 ms: each render is a
   round trip through QEMU (later performance pass).
 - Photo Booth effects: 55 of 61 match (within 1-2 levels or under 1% of pixels). Differ:
