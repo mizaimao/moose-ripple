@@ -126,7 +126,7 @@ With the script fixed, 3 boots: QE 1, 1920x1080, `cgl-info` 64 127 191 255, powe
 `irq 16: nobody cared` 0 times from start to shutdown, 1 time at each shutdown.
 With OpenCore/OpenDuet earlier (same host boot): at most starts (during QEMU's start, before
 the firmware runs) and shutdowns, twice during macOS's boot (17:37:28 hang, 17:46:53 no harm).
-The series stopped here: accepted as a known issue, no host changes, at most 3 VM boots
+The series stopped here: accepted as a known issue (KI-4), no host changes, at most 3 VM boots
 per check from now on. The rig gets one clean reboot, then at most 3
 card boots check whether the messages persist.
 

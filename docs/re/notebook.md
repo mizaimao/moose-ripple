@@ -320,7 +320,7 @@ each time, and `RippleFramebuffer: mode WxH set` is logged.
 
 ## 2026-11-10: tablet offset fixed (codeless kext)
 
-Cause and fix in [../known-issues.md](../known-issues.md): IOHIDEventDriver's default 15% trim
+Cause and fix in [KI-1](../known-issues.md): IOHIDEventDriver's default 15% trim
 of absolute axes (IOHIDFamily-315.7.16 source, tarball SHA-256
 `cb033840edb81a07694793242ebe1a356fb7da205079a861b09457e58df92d2f`, matches the guest's 1.6.6).
 `kext/qemutablet` sets `AbsoluteAxisBoundsRemovalPercentage` = 0 for QEMU's tablet only;
@@ -435,4 +435,4 @@ before powering off a guest that doesn't answer ssh.
 Before the switch VM 210 had stopped answering ssh after about an hour idle (VM 212 ran a GL
 test on the same GPU meanwhile); it was powered off before its state could be read. Cause
 unknown; `stop.sh` now captures a panic message first. RippleVirtioGPU also refuses PCI BARs
-above 4 GB now (known-issues.md).
+above 4 GB now (KI-2 in known-issues.md).

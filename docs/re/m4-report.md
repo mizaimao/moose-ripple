@@ -50,7 +50,7 @@ double-buffered) on VM 210:
   (shared contexts across share groups, many contexts, multithreaded engine with real apps) are
   not exercised yet.
 - **Guest boot flag `slto_us=4000000`:** live snapshots could panic the guest
-  ([known-issues.md](../known-issues.md)); VM 210 carries the fix.
+  ([KI-5](../known-issues.md)); VM 210 carries the fix.
 
 ## Next
 

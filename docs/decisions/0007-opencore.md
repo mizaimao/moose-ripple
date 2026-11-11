@@ -1,6 +1,6 @@
 # 0007: OpenCore on OVMF boots the 10.6.8 VMs (replacing Chameleon 2.1)
 
-Date: 2026-11-10. Status: tested on VM 212 ; the driver work switches
+Date: 2026-11-10. Status: tested on VM 212; the driver work switches
 VM 210. Asked for because Chameleon was unstable.
 
 ## Decision
@@ -122,7 +122,7 @@ Open:
   (one of those boots hung). Chameleon (VM 211's setup), 3 boots: only at each shutdown, none
   at start or during the boot. Not seen at all in the host boot before the 17:15 crash, which
   included VM 211's runs. **Decided (2026-11-10): accepted as a known issue
-  (docs/known-issues.md), no host setting changes; a hung 9600 GT VM is restarted.** After a
+  (KI-4 in docs/known-issues.md), no host setting changes; a hung 9600 GT VM is restarted.** After a
   clean rig reboot, at most 3 card boots check whether it persists.
 - NVCAP is Chameleon's default, not computed from this card's output table; both outputs and
   the monitor are found, so left as is.

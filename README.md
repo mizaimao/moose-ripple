@@ -88,7 +88,8 @@ Details: [docs/re/perf-notes.md](docs/re/perf-notes.md) and [docs/re/m6-notes.md
   also runs on AMD and NVIDIA host GPUs, but we haven't tried them.
 
 Problems of 10.6 in QEMU that show up without moose-ripple too (a panic when the guest goes to
-sleep, live snapshots that panic it, the pointer drifting from QEMU's USB tablet) are in
+sleep (KI-6), live snapshots that panic it (KI-5), the pointer drifting from QEMU's USB tablet
+(KI-1)) are in
 [docs/known-issues.md](docs/known-issues.md), with workarounds.
 
 ## Status
@@ -246,7 +247,7 @@ Leave `RippleQEMUTablet.kext` out of `F` if you don't want it. The boot flags:
 | `ripple_gl=1` | OpenGL through moose-ripple. Without it the kext only drives the display (any resolution, no 3D). |
 | `ripple_qe=1` | Quartz Extreme. Needs `ripple_gl=1`. |
 | `-v` | text instead of the grey Apple screen while booting. Optional. |
-| `slto_us=4000000` | optional: add it if you take snapshots of the running VM ([known issue](docs/known-issues.md)). |
+| `slto_us=4000000` | optional: add it if you take snapshots of the running VM ([KI-5](docs/known-issues.md)). |
 | `ripple_hwcursor=1` | optional: the pointer as a hardware cursor. QEMU's own window then draws it without lag; VNC consoles draw their own. |
 
 The flags are kept in the VM's UEFI variables (Proxmox's efidisk, or the VARS file with plain

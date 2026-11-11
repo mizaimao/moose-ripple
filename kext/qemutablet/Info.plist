@@ -5,7 +5,7 @@
   every absolute pointing device's range by default (IOHIDFamily 1.6.6 / 315.7.16,
   IOHIDEventDriver.cpp: absoluteAxisRemovalPercentage = 15, overridable through the
   "AbsoluteAxisBoundsRemovalPercentage" property), which makes QEMU's USB tablet place the pointer
-  1.176x too far from the screen centre (docs/known-issues.md). This personality has Apple's
+  1.176x too far from the screen centre (KI-1 in docs/known-issues.md). This personality has Apple's
   IOHIDEventDriver drive the QEMU tablet (vendor 0x0627, product 1, Generic Desktop / Mouse;
   QEMU's keyboard shares the IDs but is usage 6) with the trim set to 0. The vendor and
   product keys outscore Apple's generic personality (IOHIDFamilyPrivate.cpp MatchPropertyTable).

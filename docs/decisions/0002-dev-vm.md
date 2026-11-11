@@ -6,7 +6,7 @@ Date: 2026-11-10. Status: in use.
   snapshots work and VMs 200/201 stay untouched. Volume grown to 64 GiB.
 - **Machine:** `pc-q35-7.2`, Penryn CPU flags in `args` (the SMC OSK never goes in the repo), e1000
   NIC, 8 GB RAM, 4 cores, no GPU passthrough, `vga: virtio-gl`. Firmware: **OVMF** since
-  2026-11-10 (with `-fw_cfg name=opt/ovmf/X-PciMmio64Mb,string=0`, see `docs/known-issues.md`);
+  2026-11-10 (with `-fw_cfg name=opt/ovmf/X-PciMmio64Mb,string=0`, see KI-2 in `docs/known-issues.md`);
   SeaBIOS before that, as VM 201, which boots the same install.
 - **Bootloader: OpenCore 1.0.8 on OVMF since 2026-11-10** (decision 0007, built from
   `boot/opencore/`; boot flags in NVRAM via `scripts/bootargs.sh`, keep `npci=0x2000`). Snapshot

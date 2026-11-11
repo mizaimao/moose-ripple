@@ -17,7 +17,7 @@ Date: 2026-11-10. Details: [notebook.md](notebook.md), driver docs in
 - **Cursor.** Software cursor by default (Snow Leopard's own pointer, by choice); hardware
   cursor through the virtio cursor queue as an option (`RippleHardwareCursor`, `ripple_hwcursor=1`).
 - **Pointer accuracy.** Fixed a 10.6 bug outside the display driver: `kext/qemutablet`, a codeless
-  kext, removes IOHIDEventDriver's 15% trim of QEMU's tablet range ([known-issues](../known-issues.md)).
+  kext, removes IOHIDEventDriver's 15% trim of QEMU's tablet range ([KI-1](../known-issues.md)).
 - **Cost.** Damage tracking (shadow frame, only the changed box sent), adaptive refresh (60 Hz
   while changing, 20 Hz when still): idle host CPU for the VM went from 96% to about 21%.
 - **Clean shutdown.** The earlier shutdown panic (two SMCs) is fixed.
