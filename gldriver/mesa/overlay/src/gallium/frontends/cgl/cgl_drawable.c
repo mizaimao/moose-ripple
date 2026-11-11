@@ -290,8 +290,11 @@ swap_debug(struct ripple_cgl_context *ctx)
    /* /Library/Logs/RippleGL/swapdump: the draw buffer as a PPM (top row first) at the next
     * swap, once per creation of that file; for looking at a frame before it is presented. */
    struct stat dst;
-   static time_t dump_done;
-   if (stat("/Library/Logs/RippleGL/swapdump", &dst) == 0 && dst.st_mtime != dump_done) {
+   static time_t dump_done, dump_checked;
+   time_t now = time(NULL);
+   bool check = now != dump_checked;          /* at most once a second */
+   dump_checked = now;
+   if (check && stat("/Library/Logs/RippleGL/swapdump", &dst) == 0 && dst.st_mtime != dump_done) {
       dump_done = dst.st_mtime;
       struct gl_context *g = ctx->glctx;
       unsigned w = g->DrawBuffer ? g->DrawBuffer->Width : 0, h = g->DrawBuffer ? g->DrawBuffer->Height : 0;
