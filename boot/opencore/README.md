@@ -13,10 +13,13 @@ Why and what was tried: [decision 0007](../../docs/decisions/0007-opencore.md).
 - `config.plist`: the OpenCore configuration (no kexts, no ACPI tables, MacPro3,1 SMBIOS, the
   9600 GT's device properties).
 - `sources.txt`: pinned OpenCore releases with SHA-256. Nothing downloaded is committed.
-- `mkimage.sh`: builds the disk image (runs as root on the retro rig): a FAT32 EFI partition
-  with OpenCore, plus OpenDuet's boot sectors and its BIOS-disk build (`bootX64-blockio`).
-- `build.sh`: validates `config.plist` with `ocvalidate` on dev.lan, builds the image on the
-  rig, and with `-w VMID` writes it to that VM's OpenCore disk.
+- `stage.py`: runs on dev.lan in the repo's `.venv` (Python only from there):
+  fetches the releases by SHA-256, runs `ocvalidate`, collects the files the config names and
+  OpenDuet's loader (`bootX64-blockio`), and streams them as tar.
+- `mkimage.sh`: builds the disk image from that stream, as root on the retro rig, with shell
+  tools only: a FAT32 EFI partition with OpenCore plus OpenDuet's boot sectors.
+- `build.sh`: runs both (the tar stream passes through the laptop's ssh) and with `-w VMID`
+  writes the image to that VM's OpenCore disk.
 - `coldboot-test.sh`: N cold boots with clean shutdowns, one line per boot.
 
 ## VM settings: virtio-gpu VMs
