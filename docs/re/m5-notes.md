@@ -152,20 +152,26 @@ With 1-3, Core Image runs on our GPU in `ci-check` (ARB programs, framebuffer ob
 first asks for a 64-bit float pixel format, which we refuse, and uses a 32-bit one. Results
 not checked against the software renderer yet.
 
-In WindowServer: the renderer name alone changes nothing visible. With the two extensions
-added too, the menu bar disappeared (Core Image on the GPU, empty output); with float pixels
-on as well, the screen went blue and lime green, and after the next WindowServer restart the
-guest stopped answering ssh (reset at 00:22). Switches for these experiments, all off by
-default: files `extensions` (names to add) and `renderer` (a GL_RENDERER override) in the
-debug folder, or `RIPPLE_GL_EXTENSIONS` / `RIPPLE_GL_RENDERER`.
+In WindowServer Core Image renders into CoreGraphics' "cgls" pbuffers, which we refused:
+attach as drawable kind 0x5a (`{0, 0, ID, target, format, ..., width (word 9), height
+(word 10)}`) returned kCGLBadDrawable and `cglsTexImagePBuffer` (`gliSetInteger(998, {ID,
+target, format, width, height, type, source, levels})`) kCGLBadValue, about 80 times a
+second. With the two extensions and the renderer name but no pbuffers the menu bar vanished;
+with float pixels on too the screen went blue and lime green and the guest wedged (reset
+00:22). Now (2026-11-11 00:35): pbuffers are offscreen Mesa drawables keyed by their ID
+(`attach_pbuffer`), and 998 copies one into the bound texture by reading it through the
+context's read drawable. With that, the defaults are: `GL_APPLE_client_storage` and
+`GL_APPLE_texture_range` in the extension string, GL_RENDERER in Apple's style from the host
+GPU's name ("Intel UHD Graphics 630 OpenGL Engine"). The menu bar is translucent and tinted
+like the 9600 GT's (x 1000: 255,216,253 at the top to 182,156,182, last row the wallpaper
+darkened, 44,11,43). Overrides: files `extensions` and `renderer` in the debug folder, or
+`RIPPLE_GL_EXTENSIONS` / `RIPPLE_GL_RENDERER`. Float pixels stay off.
 
 ## Open problems
 
-- **Menu bar lower edge:** the fade and dark line come from WindowServer's `CIMenuGenerator`
-  (`_CGXUpdateMagicMenuBar`), which runs on the CPU only for unaccelerated backing stores;
-  for an accelerated one WindowServer expects to apply it on the GPU while compositing
-  (layer filter, `sCGXEnableServerCI`), and that path doesn't run yet. Core Image on the GPU
-  in WindowServer (M6 territory).
+- **Menu bar:** fixed 2026-11-11 00:35 (Core Image on our GPU, see above); the QE captures
+  in the table were retaken then. Not yet re-checked: Front Row, gl-gears, the Dashboard
+  ripple (the add-widget click missed in the one try).
 - **Dashboard ripple backdrop white:** while a new widget ripples (about 1 s), the 522x598
   rectangle around it is white apart from the rippling widget
   ([frame](img/m5-dashboard-ripple-white.png)); the screen is right again afterwards. Core
