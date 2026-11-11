@@ -38,6 +38,8 @@ require QE launch, and how QE status was verified is written down.
 - **R3, tooling:** `tools/qe-check` (QE on or off for each display, with a way to trigger and
   screenshot Exposé and Dashboard ripple from ssh), checked on the NVIDIA VM (QE on) and VM 210
   (QE off). Document the method in `docs/re/qe-verification.md`.
+  Also a way to capture what VM 210's display really shows (the virtio scanout): QEMU's
+  screendump says "no surface" with `virtio-gl` once the guest scans out.
 
 **Driver work (VM 210, kext and GL bundle):**
 - **K1:** the surface user client (type 0) in the kext, following the SDK header; surfaces backed by
