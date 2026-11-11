@@ -10,6 +10,7 @@
  *
  * Apple's structures are declared here from those notes (they are in no SDK header).
  */
+#include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <OpenGL/CGLTypes.h>
 #include <stddef.h>
@@ -103,6 +104,7 @@ _Static_assert(offsetof(struct gld_pixel_format, display_mask) == 0x30, "pixel f
 #define GLD_FLAG_FALLBACK       (1u << 7)    /* inferred: can stand in as fallback renderer */
 #define GLD_FLAG_ACCELERATED    (1u << 8)
 #define GLD_FLAG_COMPLIANT      (1u << 10)
+#define GLD_FLAG_QUARTZ_EXTREME (1u << 12)    /* Apple's drivers set it; documented by VMsvga2 */
 #define GLD_FLAG_PBUFFER        (1u << 13)
 #define GLD_FLAG_GPU_VERTEX     (1u << 14)
 #define GLD_FLAG_GPU_FRAGMENT   (1u << 15)
@@ -120,6 +122,26 @@ _Static_assert(offsetof(struct gld_pixel_format, display_mask) == 0x30, "pixel f
 
 static simple_mtx_t lib_lock = SIMPLE_MTX_INITIALIZER;
 static uint32_t lib_display_mask;
+static bool lib_qe;     /* the kext runs Quartz Extreme work (RippleQE = on, boot flag ripple_qe=1) */
+
+/* Does the accelerator say Quartz Extreme work is on (M5)? */
+static bool
+accelerator_qe(const io_service_t *accel)
+{
+   bool on = false;
+   for (unsigned i = 0; accel && i < 32 && !on; i++) {
+      if (!accel[i])
+         continue;
+      CFTypeRef v = IORegistryEntryCreateCFProperty(accel[i], CFSTR("RippleQE"),
+                                                    kCFAllocatorDefault, 0);
+      if (v) {
+         on = CFGetTypeID(v) == CFStringGetTypeID() &&
+              CFStringCompare(v, CFSTR("on"), 0) == kCFCompareEqualTo;
+         CFRelease(v);
+      }
+   }
+   return on;
+}
 
 GLD_EXPORT void
 gldInitializeLibrary(const io_service_t *accel, const uint8_t *accel_index,
@@ -129,11 +151,13 @@ gldInitializeLibrary(const io_service_t *accel, const uint8_t *accel_index,
    struct ripple_gpu_info info;
    bool offer;
 
-   /* Offer the renderer only if our GPU client is there and answers. Until GL output reaches
-    * windows, only to processes started with RIPPLE_GL=1 (test programs), never to
-    * WindowServer: the Dock, WindowServer and other apps keep Apple's path meanwhile. */
-   offer = getenv("RIPPLE_GL") && strcmp(getprogname(), "WindowServer") != 0 &&
+   /* Offer the renderer only if our GPU client is there and answers. With Quartz Extreme work
+    * on in the kext (M5), to every process, WindowServer included; otherwise (M4) only to
+    * processes started with RIPPLE_GL=1, never to WindowServer. */
+   bool qe = accelerator_qe(accel);
+   offer = (qe || (getenv("RIPPLE_GL") && strcmp(getprogname(), "WindowServer") != 0)) &&
            ripple_cgl_device_info(&info);
+   lib_qe = qe;
    simple_mtx_lock(&lib_lock);
    lib_display_mask = offer ? display_mask : 0;
    simple_mtx_unlock(&lib_lock);
@@ -183,6 +207,8 @@ gldGetRendererInfo(struct gld_renderer_info *rec, uint32_t display_mask)
    rec->flags = GLD_FLAG_WINDOW | GLD_FLAG_OFFSCREEN | GLD_FLAG_BACKING_STORE |
                 GLD_FLAG_ROBUST | GLD_FLAG_FALLBACK | GLD_FLAG_ACCELERATED |
                 GLD_FLAG_COMPLIANT | GLD_FLAG_GPU_VERTEX | GLD_FLAG_GPU_FRAGMENT;
+   if (lib_qe)
+      rec->flags |= GLD_FLAG_QUARTZ_EXTREME;
    rec->buffer_modes = kCGLMonoscopicBit | kCGLSingleBufferBit | kCGLDoubleBufferBit;
    rec->color_modes = kCGLARGB8888Bit;
    rec->depth_modes = kCGL0Bit | kCGL16Bit | kCGL24Bit;
