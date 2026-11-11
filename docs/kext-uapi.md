@@ -32,6 +32,12 @@ and buffers belong to the connection and are destroyed when it closes or its tas
 | 6 | `SUBMIT` | struct `ripple_gpu_submit`, then `num_handles` uint32 buffer handles, then `cmd_size` bytes of commands | scalar: fence |
 | 7 | `TRANSFER` | struct `ripple_gpu_transfer`: buffer, direction, level, box, layout in the backing | scalar: fence |
 | 8 | `WAIT` | scalars: fence, timeout (ms) | scalar: 1 signalled, 0 timed out |
+| 9 | `DISPLAY` | scalars: buffer handle, x, y, width, height | (none): shows that region of the buffer on the display instead of the console framebuffer, or presents it again; handle 0 gives the display back |
+
+**Display.** `DISPLAY` (added for M5) puts a GPU buffer on the screen instead of the console
+framebuffer, and each further call with the same buffer presents its current contents. The
+display goes back to the console framebuffer with handle 0, when the buffer is destroyed, when
+the connection closes, or on a mode change.
 
 `IOConnectMapMemory64(connection, buffer handle, ...)` maps a buffer's backing memory into
 the caller; `TRANSFER` moves data between that backing and the GPU-side object.

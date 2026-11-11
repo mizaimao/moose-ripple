@@ -43,6 +43,7 @@ class RippleGPUClient : public IOUserClient
     // Commands are copied here for the device (physically contiguous, made at first submit).
     IOBufferMemoryDescriptor *fCmd;
     uint64_t           fCmdPA;
+    uint32_t           fShown;                   // buffer this connection shows on the display
 
     int  contextSlot(uint32_t ctx) const;
     Buffer *findBuffer(uint32_t handle);
@@ -62,6 +63,7 @@ class RippleGPUClient : public IOUserClient
     IOReturn bufferDestroy(uint32_t handle);
     IOReturn submit(IOExternalMethodArguments *a, uint64_t *fence);
     IOReturn transfer(const struct ripple_gpu_transfer *in, uint64_t *fence);
+    IOReturn display(uint32_t handle, uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 
     static IOReturn sMethod(OSObject *target, void *reference, IOExternalMethodArguments *args);
 

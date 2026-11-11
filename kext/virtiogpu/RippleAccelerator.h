@@ -25,6 +25,7 @@ class RippleAccelerator : public IOAccelerator
 public:
     VirtioGPUDevice *device() const { return fDev; }
     const struct ripple_gpu_info &info() const { return fInfo; }
+    RippleFramebuffer *framebuffer() const { return fFB; }
 
     virtual bool start(IOService *provider);
     virtual void stop(IOService *provider);

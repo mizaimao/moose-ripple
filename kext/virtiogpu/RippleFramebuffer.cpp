@@ -173,6 +173,7 @@ bool RippleFramebuffer::applyMode(IODisplayModeID m)
     const Mode &md = mode(m);
     VirtioGPUDevice::Rect none = { 0, 0, 0, 0 }, full = { 0, 0, md.width, md.height };
 
+    fShownRes = 0;                            // a mode change gives the display back
     if (fScanoutRes) {
         fDev->setScanout(0, 0, none);
         fDev->detachBacking(fScanoutRes);
@@ -205,8 +206,8 @@ bool RippleFramebuffer::applyMode(IODisplayModeID m)
 
 bool RippleFramebuffer::refresh()
 {
-    if (!fScanoutRes || !fShadow)
-        return false;
+    if (!fScanoutRes || !fShadow || fShownRes)
+        return false;                         // a GPU buffer is on the display
     const Mode &md = mode(fCurMode);
     const uint32_t stride = md.width * 4;
     const uint8_t *vram = (const uint8_t *)fVRAM->getBytesNoCopy();
@@ -584,4 +585,46 @@ void RippleFramebuffer::publishCapsets()
         }
         IOFree(buf, maxSize);
     }
+}
+
+// ---- A GPU buffer on the display (uapi DISPLAY) ---------------------------------------------
+
+IOReturn RippleFramebuffer::showAction(OSObject *owner, void *idp, void *rectp, void *, void *)
+{
+    RippleFramebuffer *fb = (RippleFramebuffer *)owner;
+    uint32_t id = (uint32_t)(uintptr_t)idp;
+    const VirtioGPUDevice::Rect *r = (const VirtioGPUDevice::Rect *)rectp;
+
+    if (!id) {                                // back to the framebuffer
+        if (!fb->fShownRes)
+            return kIOReturnSuccess;
+        fb->fShownRes = 0;
+        const Mode &md = fb->mode(fb->fCurMode);
+        VirtioGPUDevice::Rect full = { 0, 0, md.width, md.height };
+        if (fb->fScanoutRes)
+            fb->fDev->setScanout(0, fb->fScanoutRes, full);
+        fb->fFullRefresh = true;
+        fb->refresh();
+        return kIOReturnSuccess;
+    }
+    if (fb->fShownRes != id) {
+        if (!fb->fDev->setScanout(0, id, *r))
+            return kIOReturnError;
+        fb->fShownRes = id;
+    }
+    return fb->fDev->resourceFlush(id, *r) ? kIOReturnSuccess : kIOReturnError;
+}
+
+bool RippleFramebuffer::showResource(uint32_t id, uint32_t x, uint32_t y, uint32_t width,
+                                     uint32_t height)
+{
+    VirtioGPUDevice::Rect r = { x, y, width, height };
+    return getWorkLoop()->runAction(&RippleFramebuffer::showAction, this, (void *)(uintptr_t)id,
+                                    &r) == kIOReturnSuccess;
+}
+
+void RippleFramebuffer::releaseResource(uint32_t id)
+{
+    if (id && fShownRes == id)
+        getWorkLoop()->runAction(&RippleFramebuffer::showAction, this, 0, 0);
 }

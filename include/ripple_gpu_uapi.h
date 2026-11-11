@@ -34,6 +34,7 @@ enum ripple_gpu_method {
     RIPPLE_GPU_SUBMIT          = 6, /* in struct: ripple_gpu_submit + handles + commands; out scalar: fence */
     RIPPLE_GPU_TRANSFER        = 7, /* in struct: ripple_gpu_transfer; out scalar: fence */
     RIPPLE_GPU_WAIT            = 8, /* in scalars: fence, timeout ms; out scalar: 1 signalled, 0 not */
+    RIPPLE_GPU_DISPLAY         = 9, /* in scalars: buffer (0 = back to the console), x, y, w, h */
     RIPPLE_GPU_METHOD_COUNT
 };
 

@@ -45,8 +45,8 @@ strip_vmin  = $(VTOOL) -remove-build-version macos -output $(1) $(1).v && rm -f 
 link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
-.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab clean
-all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab
+.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab scanouttest clean
+all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab scanouttest
 
 clean:
 	rm -rf $(OUT)
@@ -255,3 +255,13 @@ $(OUT)/x86_64/grab/grab.o: tools/grab/grab.c
 $(OUT)/grab: $(OUT)/x86_64/grab/grab.o
 	$(call link_tool,x86_64,$@,$^,-framework ApplicationServices -framework CoreFoundation)
 grab: $(OUT)/grab
+
+# --- scanout-test (M5 K2: a GPU buffer on the display through DISPLAY) --------------------
+$(OUT)/%/scanout-test/scanout-test.o: tools/scanout-test/scanout-test.c include/ripple_gpu_uapi.h
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,$*) $(UCFLAGS) -Iinclude -Ithird_party/virgl -c $< -o $@
+$(OUT)/%/scanout-test/scanout-test: $(OUT)/%/scanout-test/scanout-test.o
+	$(call link_tool,$*,$@,$^,-framework IOKit -framework CoreFoundation -framework ApplicationServices)
+scanouttest: $(OUT)/scanout-test
+$(OUT)/scanout-test: $(OUT)/i386/scanout-test/scanout-test $(OUT)/x86_64/scanout-test/scanout-test
+	$(LIPO) -create $^ -output $@

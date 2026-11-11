@@ -34,6 +34,7 @@ class RippleFramebuffer : public IOFramebuffer
     unsigned        fPreferred;          // index into fModes
     IODisplayModeID fCurMode, fStartupMode;
     uint32_t        fScanoutRes;
+    uint32_t        fShownRes;       // a GPU buffer on the display instead of the VRAM (0: none)
 
     IOTimerEventSource *fRefresh;
     bool                fEnabled;
@@ -58,11 +59,19 @@ class RippleFramebuffer : public IOFramebuffer
     bool  applyMode(IODisplayModeID m);
     bool  refresh();             // send what changed since the last frame; false if nothing
     static void refreshAction(OSObject *owner, IOTimerEventSource *sender);
+    static IOReturn showAction(OSObject *owner, void *id, void *rect, void *, void *);
     void  showCursor();
     void  publishCapsets();     // host GPU capability sets into the registry (diagnostics)
 
 public:
     VirtioGPUDevice *device() const { return fDev; }   // for RippleAccelerator
+
+    // Show GPU resource `id` (region r of it) on the display instead of the framebuffer, or
+    // present it again if it is already shown; id 0 gives the display back to the framebuffer.
+    // For the GPU client (uapi DISPLAY); serialized with the refresh timer.
+    bool showResource(uint32_t id, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
+    // The client is going away or destroying `id`: give the display back if it shows `id`.
+    void releaseResource(uint32_t id);
 
     virtual bool start(IOService *provider);
     virtual void stop(IOService *provider);

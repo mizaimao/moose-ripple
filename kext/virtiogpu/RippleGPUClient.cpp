@@ -3,6 +3,7 @@
  */
 #include "RippleGPUClient.h"
 #include "RippleAccelerator.h"
+#include "RippleFramebuffer.h"
 #include "VirtioGPUDevice.h"
 
 #include <IOKit/IOLib.h>
@@ -47,6 +48,10 @@ void RippleGPUClient::destroyBuffer(Buffer &b)
 
 void RippleGPUClient::destroyAll()
 {
+    if (fShown) {
+        fAccel->framebuffer()->releaseResource(fShown);
+        fShown = 0;
+    }
     for (uint32_t i = 0; i < fBufferCap; i++)
         destroyBuffer(fBuffer[i]);
     fBufferCount = 0;
@@ -261,6 +266,10 @@ IOReturn RippleGPUClient::bufferDestroy(uint32_t handle)
     Buffer *b = findBuffer(handle);
     if (!b)
         return kIOReturnBadArgument;
+    if (fShown == handle) {
+        fAccel->framebuffer()->releaseResource(handle);
+        fShown = 0;
+    }
     destroyBuffer(*b);
     removeBuffer(b);
     return kIOReturnSuccess;
@@ -350,6 +359,25 @@ IOReturn RippleGPUClient::transfer(const struct ripple_gpu_transfer *t, uint64_t
     return ok ? kIOReturnSuccess : kIOReturnError;
 }
 
+IOReturn RippleGPUClient::display(uint32_t handle, uint32_t x, uint32_t y, uint32_t w, uint32_t h)
+{
+    RippleFramebuffer *fb = fAccel->framebuffer();
+    if (!handle) {
+        if (fShown)
+            fb->releaseResource(fShown);
+        fShown = 0;
+        return kIOReturnSuccess;
+    }
+    if (!findBuffer(handle) || !w || !h)
+        return kIOReturnBadArgument;
+    if (fShown && fShown != handle)
+        fb->releaseResource(fShown);
+    if (!fb->showResource(handle, x, y, w, h))
+        return kIOReturnError;
+    fShown = handle;
+    return kIOReturnSuccess;
+}
+
 // ---- Dispatch -------------------------------------------------------------------------------
 
 static const IOExternalMethodDispatch sDispatch[RIPPLE_GPU_METHOD_COUNT] = {
@@ -362,6 +390,7 @@ static const IOExternalMethodDispatch sDispatch[RIPPLE_GPU_METHOD_COUNT] = {
     /* SUBMIT */          { 0, 0, kIOUCVariableStructureSize, 1, 0 },
     /* TRANSFER */        { 0, 0, sizeof(struct ripple_gpu_transfer), 1, 0 },
     /* WAIT */            { 0, 2, 0, 1, 0 },
+    /* DISPLAY */         { 0, 5, 0, 0, 0 },
 };
 
 IOReturn RippleGPUClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
@@ -420,6 +449,11 @@ IOReturn RippleGPUClient::sMethod(OSObject *target, void *reference, IOExternalM
         break;
     case RIPPLE_GPU_TRANSFER:
         r = c->transfer((const struct ripple_gpu_transfer *)in, &a->scalarOutput[0]);
+        break;
+    case RIPPLE_GPU_DISPLAY:
+        r = c->display((uint32_t)a->scalarInput[0], (uint32_t)a->scalarInput[1],
+                       (uint32_t)a->scalarInput[2], (uint32_t)a->scalarInput[3],
+                       (uint32_t)a->scalarInput[4]);
         break;
     case RIPPLE_GPU_WAIT:
         a->scalarOutput[0] = 1;             // version 1: fenced work is complete on return
