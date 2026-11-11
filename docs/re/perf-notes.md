@@ -174,3 +174,20 @@ smoother (software's scaled text is jagged). Moving File -> Edit -> View: each m
 - Dashboard composites fewer, larger frames than software (more pixels per second, fewer
   frames); WindowServer spends the rest of each frame waiting for its next update.
 - CPU colour conversion on uploads: not worth it now (WindowServer's CPU is about 5%).
+
+## Host GPU minimum clock (02:40, the owner's decision: live test only)
+
+The rig's i915 minimum clock raised from 350 to 1200 MHz (`/sys/class/drm/card0/gt_min_freq_mhz`,
+live, back to 350 at the next host reboot; making it permanent is a separate host change for
+The owner). Same boot and scene, bundle 6554a67:
+
+| | 350 MHz (before) | 1200 MHz |
+|---|---|---|
+| real screen flush (Dashboard, dtrace on `ripple_cgl_device_display`) | 7.2-7.3 ms | 2.5-2.6 ms |
+| Dashboard frames/s peak / mean | 48-64 / 25-26 | 64-67 / 31-35 |
+| Dashboard screens/s peak / mean | 21-23.8 / 8.2-9.5 | 24.7-30.5 / 11-15.3 |
+| Exposé screens/s peak / mean | 18.6-21 / 9.5-10.2 | 18-27 / 9.3-15.2 |
+| host GPU render busy, RC6 | 8%, 90% | 3%, 93% |
+
+The GPU still sleeps in RC6 most of the time; when it wakes it now runs at full clock, so
+QEMU's read-out of the screen finishes about three times sooner. Kept live.
