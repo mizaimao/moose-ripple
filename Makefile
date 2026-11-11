@@ -46,7 +46,7 @@ link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
 .PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter clean
-all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter
+all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter winlist
 
 clean:
 	rm -rf $(OUT)
@@ -293,6 +293,14 @@ $(OUT)/x86_64/frame-meter/frame-meter.o: tools/frame-meter/frame-meter.c
 $(OUT)/frame-meter: $(OUT)/x86_64/frame-meter/frame-meter.o
 	$(call link_tool,x86_64,$@,$^,-framework ApplicationServices -framework CoreFoundation)
 framemeter: $(OUT)/frame-meter
+
+# --- winlist (windows on screen with their bounds, for driving apps in the guest; M6) -------
+$(OUT)/x86_64/winlist/winlist.o: tools/winlist/winlist.c
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,x86_64) $(UCFLAGS) -c $< -o $@
+$(OUT)/winlist: $(OUT)/x86_64/winlist/winlist.o
+	$(call link_tool,x86_64,$@,$^,-framework ApplicationServices -framework CoreFoundation)
+winlist: $(OUT)/winlist
 
 # --- grab (save the guest's main display as PNG; works over ssh) --------------------------
 $(OUT)/x86_64/grab/grab.o: tools/grab/grab.c
