@@ -33,6 +33,7 @@ and buffers belong to the connection and are destroyed when it closes or its tas
 | 7 | `TRANSFER` | struct `ripple_gpu_transfer`: buffer, direction, level, box, layout in the backing | scalar: fence |
 | 8 | `WAIT` | scalars: fence, timeout (ms) | scalar: 1 signalled, 0 timed out |
 | 9 | `DISPLAY` | scalars: buffer handle, x, y, width, height | (none): shows that region of the buffer on the display instead of the console framebuffer, or presents it again; handle 0 gives the display back |
+| 10 | `SURFACE_INFO` | scalar: accelerator surface id | struct `ripple_gpu_surface_info`: size, row bytes, screen position, screen size, flags (has CPU backing, is a region of the screen), and the backing's address for the surface's own task |
 
 **Display.** `DISPLAY` (added for M5) puts a GPU buffer on the screen instead of the console
 framebuffer, and each further call with the same buffer presents its current contents. The
@@ -41,6 +42,13 @@ the connection closes, or on a mode change.
 
 `IOConnectMapMemory64(connection, buffer handle, ...)` maps a buffer's backing memory into
 the caller; `TRANSFER` moves data between that backing and the GPU-side object.
+Type `RIPPLE_GPU_MEMORY_FRAMEBUFFER` (0x80000000; buffer handles stay below it) maps the console
+framebuffer's pixels instead, for 2D blitters that work on the frame directly (`RippleGA.plugin`).
+
+**Surfaces.** `SURFACE_INFO` (added for M5) describes one of the standard IOAccelerator surfaces
+(the type 0 client WindowServer and GL apps open): what a GL driver needs to render for it.
+A surface shaped without backing is a region of the screen (`RIPPLE_GPU_SURFACE_SCREEN`); one
+with CPU backing (`RIPPLE_GPU_SURFACE_BACKING`) gives its address only to the task that owns it.
 
 **Fences.** `SUBMIT` and `TRANSFER` return a fence; `WAIT` blocks until it has signalled.
 Since 2026-11-11 (performance stage) `SUBMIT` returns once the device has taken the commands,

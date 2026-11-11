@@ -30,16 +30,16 @@ fifo=$(mktemp -u "/tmp/$tag.XXXXXX")
 mkfifo "$fifo"
 trap 'rm -f "$fifo"' EXIT
 
-scp -q "$ROOT/tools/vncgrab/vncgrab.py" "$DEV:/tmp/$tag.py"
+scp -q $SSH_OPTS "$ROOT/tools/vncgrab/vncgrab.py" "$DEV:/tmp/$tag.py"
 ssh "$RETRO" "LC_PVE_TICKET=$pw qm vncproxy $VMID" <"$fifo" |
-    ssh "$DEV" "mkdir -p /tmp/$tag.d && VNC_PASSWORD=$pw ~/Projects/moose-ripple/.venv/bin/python -I /tmp/$tag.py -n $n -i $i /tmp/$tag.d/f.png" >"$fifo"
+    ssh $SSH_OPTS "$DEV" "mkdir -p /tmp/$tag.d && VNC_PASSWORD=$pw ~/Projects/moose-ripple/.venv/bin/python -I /tmp/$tag.py -n $n -i $i /tmp/$tag.d/f.png" >"$fifo"
 if [ "$n" = 1 ]; then
-    ssh "$DEV" "cat /tmp/$tag.d/f.png; rm -rf /tmp/$tag.d /tmp/$tag.py" >"$out.tmp"
+    ssh $SSH_OPTS "$DEV" "cat /tmp/$tag.d/f.png; rm -rf /tmp/$tag.d /tmp/$tag.py" >"$out.tmp"
     mv "$out.tmp" "$out"
     echo "$out"
 else
     stem=${out%.png}
-    ssh "$DEV" "cd /tmp/$tag.d && tar cf - f-*.png; rm -rf /tmp/$tag.d /tmp/$tag.py" |
+    ssh $SSH_OPTS "$DEV" "cd /tmp/$tag.d && tar cf - f-*.png; rm -rf /tmp/$tag.d /tmp/$tag.py" |
         tar xf - -C "$(dirname "$stem")" -s "|^f-|$(basename "$stem")-|"
     k=0; while [ $k -lt "$n" ]; do printf "%s-%02d.png\n" "$stem" $k; k=$((k + 1)); done
 fi

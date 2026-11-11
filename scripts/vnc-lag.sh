@@ -19,8 +19,8 @@ pw=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 8)
 tag=ripple-vnclag-$$
 fifo=$(mktemp -u "/tmp/$tag.XXXXXX")
 mkfifo "$fifo"
-trap 'rm -f "$fifo"; ssh "$DEV" "rm -f /tmp/$tag.py"' EXIT
+trap 'rm -f "$fifo"; ssh $SSH_OPTS "$DEV" "rm -f /tmp/$tag.py"' EXIT
 
-scp -q "$ROOT/tools/vncgrab/vncgrab.py" "$DEV:/tmp/$tag.py"
+scp -q $SSH_OPTS "$ROOT/tools/vncgrab/vncgrab.py" "$DEV:/tmp/$tag.py"
 ssh "$RETRO" "LC_PVE_TICKET=$pw qm vncproxy $VMID" <"$fifo" |
-    ssh "$DEV" "VNC_PASSWORD=$pw ~/Projects/moose-ripple/.venv/bin/python -I /tmp/$tag.py --lag $presses $key $idle $area" >"$fifo"
+    ssh $SSH_OPTS "$DEV" "VNC_PASSWORD=$pw ~/Projects/moose-ripple/.venv/bin/python -I /tmp/$tag.py --lag $presses $key $idle $area" >"$fifo"

@@ -40,3 +40,10 @@ gssh() {
         -o UserKnownHostsFile="$ROOT/.secrets/known_hosts" -o StrictHostKeyChecking=accept-new \
         -o ConnectTimeout=10 "$GUEST_USER@$addr" "$@"
 }
+
+# A connect timeout on every ssh, scp and rsync to the build host: no script should hang on an
+# unreachable host. It is also needed on the owner's laptop since 2026-11-11: Apple's ssh 10.5
+# without one connects by host name through another code path, which fails there ("connect to
+# host dev.lan port 22: Undefined error: 0"); with one it resolves the name itself and works.
+SSH_OPTS="-o ConnectTimeout=15"
+export RSYNC_RSH="ssh $SSH_OPTS"

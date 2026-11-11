@@ -8,7 +8,7 @@ set -eu
 
 status=$(ssh "$RETRO" qm status "$VMID")
 [ "$status" = "status: stopped" ] && { echo "VM $VMID already stopped"; exit 0; }
-if gssh 'sudo -n shutdown -h now' >/dev/null 2>&1; then
+if (gssh 'sudo -n shutdown -h now') >/dev/null 2>&1; then    # subshell: gssh exits when the guest has no address
     i=0
     while [ "$i" -lt 20 ]; do
         sleep 3

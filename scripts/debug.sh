@@ -21,8 +21,8 @@ start)
     hmp "gdbserver tcp:127.0.0.1:1234" | grep -v '^qm>' || true
     pkill -f "127.0.0.1:$HERE_PORT:127.0.0.1:1234" 2>/dev/null || true
     pkill -f "127.0.0.1:1234:127.0.0.1:$HERE_PORT" 2>/dev/null || true
-    ssh -f -N -o ExitOnForwardFailure=yes -L "127.0.0.1:$HERE_PORT:127.0.0.1:1234" "$RETRO"
-    ssh -f -N -o ExitOnForwardFailure=yes -R "127.0.0.1:1234:127.0.0.1:$HERE_PORT" "$DEV"
+    ssh $SSH_OPTS -f -N -o ExitOnForwardFailure=yes -L "127.0.0.1:$HERE_PORT:127.0.0.1:1234" "$RETRO"
+    ssh $SSH_OPTS -f -N -o ExitOnForwardFailure=yes -R "127.0.0.1:1234:127.0.0.1:$HERE_PORT" "$DEV"
     echo "gdbstub open; dev.lan 127.0.0.1:1234 reaches VM $VMID"
     ;;
 lldb)
@@ -34,7 +34,7 @@ lldb)
     # Never let lldb end the session with a kill: QEMU's gdbstub obeys it by exiting, which
     # powers the VM off (happened 2026-11-10). In batch mode an unexpected stop skips the
     # remaining -o commands and runs the -k ones, so both paths end in a detach.
-    ssh "$DEV" "cd ~/Projects/moose-ripple && lldb --batch \
+    ssh $SSH_OPTS "$DEV" "cd ~/Projects/moose-ripple && lldb --batch \
         -o 'target create --arch $ARCH $KDK/mach_kernel' \
         -o 'command script import tools/lldb/ripple_lldb.py' \
         -o 'gdb-remote 127.0.0.1:1234' $opts -o 'process detach' \
