@@ -797,6 +797,12 @@ ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum 
       CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT, read_fb));
       if (!own)
          ripple_cgl_context_set_read_drawable(ctx, NULL);
+      /* Send the copy now: the texture is usually drawn by another context next (Core Video
+       * fills it, Core Animation's window context draws it), whose commands reach the GPU in
+       * their own order; unsent, the copy arrived a frame late and the texture was black
+       * (Real Racing 2's intro, M6). Apple's GL flushes here too. */
+      if (bind)
+         st_context_flush(ctx->st, 0, NULL, NULL, NULL);
       si.width = pw;
       si.height = ph;
       how = own ? "its own pbuffer" : "a pbuffer";

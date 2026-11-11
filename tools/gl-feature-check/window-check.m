@@ -29,6 +29,7 @@ int main(int argc, char **argv)
 {
     NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
     bool copy = argc > 1 && !strcmp(argv[1], "copy");
+    bool zero_scissor = getenv("WC_ZERO_SCISSOR") != NULL;   /* Core Animation's glScissor(0,0,0,0), test off */
     double seconds = argc > 2 ? atof(argv[2]) : 6;
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
@@ -123,6 +124,11 @@ int main(int argc, char **argv)
         [bctx makeCurrentContext];
         glClearColor(0, 0, 1, 0);
         glClear(GL_COLOR_BUFFER_BIT);
+        if (zero_scissor) {
+            glDisable(GL_SCISSOR_TEST);
+            glScissor(0, 0, 0, 0);
+            glDisable(GL_DITHER);
+        }
         glUseProgram(p);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_3D, lt);

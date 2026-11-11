@@ -186,3 +186,18 @@ Results now:
 - Contact sheets: [Photo Booth page 1](img/m6-booth-1.png), [filters page 3](img/m6-ci-filters-3.png).
 - Re-checked after the change: desktop, menus, Dashboard, Quartz Composer (Arabesque 60 fps),
   Front Row. Frame meter: Dashboard 28 / 16.5 screens/s peak / mean, Exposé 21 / 7.4.
+
+## Real Racing 2 intro, more ruled out (06:20-06:40)
+
+- CGLTexImagePBuffer's copy is now sent at once (a flush after the copy): unsent, it reached the
+  GPU after the next context's draw. Correct on its own; the intro stays black.
+- At the window context's swaps (`swapdebug` now prints the raster state): scissor test,
+  stencil, depth, alpha test, blend, logic op all off, colour mask full, draw buffer GL_BACK,
+  the window framebuffer. Its frame (one full frame, attributed per context) is: clear 1280x720
+  at y 40, glScissor(0,0,0,0) with the test off, bind the video texture (rectangle, unit 0) and
+  the 3D table (unit 1), program 5, five interleaved attributes (double position), one
+  GL_QUADS from client indices, unbind, swap. Nothing it draws reaches the back buffer.
+- `window-check` with glScissor(0,0,0,0) too (WC_ZERO_SCISSOR=1): right.
+- The game's element-buffer binds are its own context's, not Core Animation's.
+Next: replay that frame's calls in-process from the window context (a debug switch that redoes
+the draw with a known texture), to tell the program, the vertex data and the target apart.

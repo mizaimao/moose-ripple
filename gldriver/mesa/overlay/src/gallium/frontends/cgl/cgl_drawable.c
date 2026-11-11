@@ -360,6 +360,15 @@ swap_debug(struct ripple_cgl_context *ctx)
            gl->ViewportArray[0].Width, gl->ViewportArray[0].Height,
            gl->Shader.ActiveProgram ? gl->Shader.ActiveProgram->Name : 0, px[0], px[1], px[2],
            px[3], gl->ErrorValue);
+   fprintf(ripple_gld_dbg_file(), "RippleGLDriver:   state: scissor %d (%d,%d %dx%d), stencil %d, "
+           "depth %d, alpha test %d (func 0x%x ref %g), blend %d, colour mask 0x%x, cull %d, "
+           "draw buffer 0x%x, polygon offset %d, logic op %d\n",
+           gl->Scissor.EnableFlags & 1, gl->Scissor.ScissorArray[0].X, gl->Scissor.ScissorArray[0].Y,
+           gl->Scissor.ScissorArray[0].Width, gl->Scissor.ScissorArray[0].Height,
+           gl->Stencil.Enabled, gl->Depth.Test, gl->Color.AlphaEnabled, gl->Color.AlphaFunc,
+           gl->Color.AlphaRefUnclamped, gl->Color.BlendEnabled & 1, gl->Color.ColorMask & 0xf,
+           gl->Polygon.CullFlag, gl->DrawBuffer ? gl->DrawBuffer->ColorDrawBuffer[0] : 0,
+           gl->Polygon.OffsetFill, gl->Color.ColorLogicOpEnabled);
 }
 
 void
