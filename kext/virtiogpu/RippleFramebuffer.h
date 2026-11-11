@@ -67,6 +67,7 @@ class RippleFramebuffer : public IOFramebuffer
 
 public:
     VirtioGPUDevice *device() const { return fDev; }   // for RippleAccelerator
+    IOMemoryDescriptor *vram() const { return fVRAM; }   // for 2D blitters (uapi)
 
     // Show GPU resource `id` (region r of it) on the display instead of the framebuffer, or
     // present it again if it is already shown; id 0 gives the display back to the framebuffer.

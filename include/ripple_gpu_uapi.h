@@ -48,6 +48,11 @@ struct ripple_gpu_info {
     char     name[48];              /* human-readable device name */
 };
 
+/* IOConnectMapMemory type for the console framebuffer's pixels (32-bit, rows of
+ * RippleRowBytes; for 2D blitters that work on the frame directly). Buffer handles stay below
+ * this. */
+#define RIPPLE_GPU_MEMORY_FRAMEBUFFER 0x80000000u
+
 /* Buffer: GPU-side object with a guest-memory backing the client can map with
  * IOConnectMapMemory(connection, handle, ...). `params` are backend-defined. */
 struct ripple_gpu_buffer_create {

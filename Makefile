@@ -45,8 +45,8 @@ strip_vmin  = $(VTOOL) -remove-build-version macos -output $(1) $(1).v && rm -f 
 link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
-.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest clean
-all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest
+.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin clean
+all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin
 
 clean:
 	rm -rf $(OUT)
@@ -164,6 +164,17 @@ glbundle:
 	cp gldriver/mesa/Info.plist $(OUT)/RippleGLDriver.bundle/Contents/Info.plist
 	$(LIPO) -create $(OUT)/i386/gl/RippleGLDriver $(OUT)/x86_64/gl/RippleGLDriver \
 	    -output $(OUT)/RippleGLDriver.bundle/Contents/MacOS/RippleGLDriver
+
+# --- RippleGA.plugin (M5: 2D blitter plugin WindowServer needs for GL compositing) ---------
+$(OUT)/%/ga/RippleGA.o: gldriver/ga/RippleGA.c
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,$*) $(UCFLAGS) -Iinclude -c $< -o $@
+$(OUT)/%/ga/RippleGA: $(OUT)/%/ga/RippleGA.o
+	$(call ULD,$*) -bundle -o $@.v $^ -framework IOKit -framework CoreFoundation -lSystem && $(call strip_vmin,$@)
+gaplugin: $(OUT)/RippleGA.plugin
+$(OUT)/RippleGA.plugin: $(OUT)/i386/ga/RippleGA $(OUT)/x86_64/ga/RippleGA gldriver/ga/Info.plist
+	rm -rf $@ && mkdir -p $@/Contents/MacOS && cp gldriver/ga/Info.plist $@/Contents/Info.plist && \
+	$(LIPO) -create $(OUT)/i386/ga/RippleGA $(OUT)/x86_64/ga/RippleGA -output $@/Contents/MacOS/RippleGA
 
 # --- RippleVirtioGPU (M2) ---------------------------------------------------------------
 VGPU_INC := -Ithird_party/virtio -Ikext/virtiogpu -Iinclude

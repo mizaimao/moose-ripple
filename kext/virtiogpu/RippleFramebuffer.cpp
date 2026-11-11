@@ -188,6 +188,10 @@ bool RippleFramebuffer::applyMode(IODisplayModeID m)
         return false;
     }
     fScanoutRes = id;
+    // For the 2D plugin (gldriver/ga), which blits in the VRAM itself.
+    setProperty("RippleScreenWidth", md.width, 32);
+    setProperty("RippleScreenHeight", md.height, 32);
+    setProperty("RippleRowBytes", md.width * 4, 32);
 
     // Shadow copy of the last frame sent, for damage tracking; start with a full refresh.
     if (fShadow) {

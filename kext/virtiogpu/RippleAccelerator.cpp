@@ -80,6 +80,18 @@ bool RippleAccelerator::start(IOService *provider)
         // VMsvga2 sets only with its QE option: candidates for WindowServer's QE check (R1).
         setProperty("AccelCaps", 3ULL, 32);
         setProperty("IOAccelRevision", 2ULL, 32);
+        // WindowServer composites the display with GL only if the framebuffer names a 2D plugin
+        // that gives it copy and fill blitters (docs/re/qe-display-surface.md).
+        OSDictionary *plugins = OSDictionary::withCapacity(1);
+        if (plugins) {
+            OSString *name = OSString::withCString("RippleGA.plugin");
+            if (name) {
+                plugins->setObject("ACCF0000-0000-0000-0000-000a2789904e", name);
+                name->release();
+            }
+            fFB->setProperty("IOCFPlugInTypes", plugins);
+            plugins->release();
+        }
     }
     registerService();
     LOG("started: backend virgl, %u capability blobs", fInfo.num_caps);
@@ -100,6 +112,7 @@ void RippleAccelerator::stop(IOService *provider)
         fFB->removeProperty("IOAccelTypes");
         fFB->removeProperty("IOAccelIndex");
         fFB->removeProperty("IOAccelRevision");
+        fFB->removeProperty("IOCFPlugInTypes");
         removeProperty("IOGLBundleName");
         fGL = false;
     }

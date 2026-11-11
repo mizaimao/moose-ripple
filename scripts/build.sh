@@ -12,5 +12,5 @@ rsync -a --delete --exclude .git --exclude .secrets --exclude .tools --exclude .
     ./ "$DEV:Projects/moose-ripple/"
 ssh "$DEV" "cd ~/Projects/moose-ripple && make -j4 $*"
 mkdir -p build
-rsync -a --delete --include '*.kext/***' --include '*.bundle/***' --exclude '*/' --include '*' "$DEV:Projects/moose-ripple/build/" build/
+rsync -a --delete --include '*.kext/***' --include '*.bundle/***' --include '*.plugin/***' --exclude '*/' --include '*' "$DEV:Projects/moose-ripple/build/" build/
 ls -d build/*

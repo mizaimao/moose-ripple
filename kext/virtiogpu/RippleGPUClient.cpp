@@ -475,6 +475,15 @@ IOReturn RippleGPUClient::sMethod(OSObject *target, void *reference, IOExternalM
 IOReturn RippleGPUClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
                                               IOMemoryDescriptor **memory)
 {
+    if (type == RIPPLE_GPU_MEMORY_FRAMEBUFFER) {
+        IOMemoryDescriptor *v = fAccel->framebuffer()->vram();
+        if (!v)
+            return kIOReturnNotReady;
+        v->retain();
+        *memory = v;
+        *options = 0;
+        return kIOReturnSuccess;
+    }
     IOLockLock(fLock);
     Buffer *b = findBuffer(type);
     if (b && b->mem) {
