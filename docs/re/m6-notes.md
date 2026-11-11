@@ -137,3 +137,15 @@ Frame meter (rig alone): Exposé 26-28 / 9-15 screens/s peak / mean, Dashboard 2
 Build note: after building an older commit from a git worktree, `scripts/build.sh` in the main
 tree didn't rebuild (rsync -a gave dev.lan the older source mtimes, older than the objects).
 Touch the sources, or build old commits elsewhere.
+
+## Real Racing 2's menu, ruled out (05:45-06:00)
+
+The garbling is in the GPU framebuffer itself: a dump of the game's back buffer at its swap
+(`swapdump` switch: `/Library/Logs/RippleGL/swap-PID.ppm`) shows the same five side-by-side
+copies with interlaced rows, so it isn't the window present path. Hiding S3TC
+(`MESA_EXTENSION_OVERRIDE=-GL_EXT_texture_compression_s3tc`, game started from ssh) changes
+the screen shown (the UI panels, top half only) but not the pattern. Each feature the menu
+uses works on its own in `gl-feature-check` (ours and software agree): DXT1 uploads (`dxt`),
+RGBA uploaded as GL_COMPRESSED_RGBA 2048x2048 with mipmaps (`generic`; we pick DXT5, Apple
+DXT3), GL_SHORT attributes from a buffer object at stride 24 (`vbo`), GL_SHORT client arrays
+with a texture matrix, a strip drawn from vertex 32. Colour buffers are always 32-bit. Open.

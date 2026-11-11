@@ -278,12 +278,50 @@ ripple_cgl_drawable_destroy(struct ripple_cgl_drawable *d)
 #include "main/glthread.h"
 #include "main/dispatch.h"
 #include <unistd.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <time.h>
 static void
 swap_debug(struct ripple_cgl_context *ctx)
 {
    static int enabled = -1;
    static struct { void *ctx; unsigned n; } seen[8];
    extern FILE *ripple_gld_dbg_file(void);
+   /* /Library/Logs/RippleGL/swapdump: the draw buffer as a PPM (top row first) at the next
+    * swap, once per creation of that file; for looking at a frame before it is presented. */
+   struct stat dst;
+   static time_t dump_done;
+   if (stat("/Library/Logs/RippleGL/swapdump", &dst) == 0 && dst.st_mtime != dump_done) {
+      dump_done = dst.st_mtime;
+      struct gl_context *g = ctx->glctx;
+      unsigned w = g->DrawBuffer ? g->DrawBuffer->Width : 0, h = g->DrawBuffer ? g->DrawBuffer->Height : 0;
+      uint8_t *px = w && h ? malloc((size_t)w * h * 4) : NULL;
+      if (px) {
+         struct gl_pixelstore_attrib saved = g->Pack;
+         memset(&g->Pack, 0, sizeof(g->Pack));
+         g->Pack.Alignment = 1;
+         GLuint rfb = g->ReadBuffer ? g->ReadBuffer->Name : 0;
+         GLenum rb = g->ReadBuffer ? g->ReadBuffer->ColorReadBuffer : GL_BACK;
+         CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT,
+                                                  g->DrawBuffer ? g->DrawBuffer->Name : 0));
+         CALL_ReadBuffer(GET_DISPATCH(), (g->DrawBuffer->ColorDrawBuffer[0]));
+         CALL_ReadPixels(GET_DISPATCH(), (0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px));
+         CALL_ReadBuffer(GET_DISPATCH(), (rb));
+         CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT, rfb));
+         g->Pack = saved;
+         char path[128];
+         snprintf(path, sizeof(path), "/Library/Logs/RippleGL/swap-%d.ppm", (int)getpid());
+         FILE *f = fopen(path, "wb");
+         if (f) {
+            fprintf(f, "P6\n%u %u\n255\n", w, h);
+            for (unsigned y = 0; y < h; y++)
+               for (unsigned x = 0; x < w; x++)
+                  fwrite(px + ((size_t)(h - 1 - y) * w + x) * 4, 1, 3, f);
+            fclose(f);
+         }
+         free(px);
+      }
+   }
    if (enabled < 0)
       enabled = access("/Library/Logs/RippleGL/swapdebug", F_OK) == 0;
    if (!enabled || !ripple_gld_dbg_file())
