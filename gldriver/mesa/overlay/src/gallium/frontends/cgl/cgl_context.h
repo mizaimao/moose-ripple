@@ -39,6 +39,7 @@ struct ripple_cgl_context {
    uint32_t attached_surface;    /* the accelerator surface it draws into (any kind), or 0 */
    unsigned surf_h;              /* that surface's height if it isn't the screen region: its
                                   * window coordinates start at the top left (cgl_apple.c) */
+   unsigned flip_fbo;            /* scratch framebuffer object for surface textures */
    int win_ox, win_oy;
    unsigned win_w, win_h;
    /* Viewport and scissor as the program set them; Mesa holds them shifted while the window's

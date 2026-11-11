@@ -547,6 +547,45 @@ ripple_cgl_copy_tex_sub_image3D(void *rend, GLenum target, GLint level, GLint xo
 static bool cs_readable(const void *p, size_t len);
 static unsigned surface_texture_logs;
 
+#include "main/texobj.h"
+
+/* Copy the window framebuffer's rectangle (x, y, w, h) into the texture bound to `target`, top
+ * row first: a surface texture has the surface's rows in memory order, like the memory path
+ * below (the Dashboard ripple showed the desktop upside down with GL's order, VM 210
+ * 2026-11-11). One blit through a scratch framebuffer object, rows reversed; the read
+ * framebuffer is the window's. */
+static void
+copy_top_first(struct ripple_cgl_context *ctx, GLenum target, GLenum ifmt, int x, int y,
+               int w, int h)
+{
+   struct gl_context *gl = ctx->glctx;
+   struct gl_texture_object *tex = _mesa_get_current_tex_object(gl, target);
+   if (!tex || !tex->Name)
+      return;
+   struct gl_pixelstore_attrib saved = gl->Unpack;
+   memset(&gl->Unpack, 0, sizeof(gl->Unpack));
+   gl->Unpack.Alignment = 4;
+   CALL_TexImage2D(GET_DISPATCH(), (target, 0, ifmt, w, h, 0, GL_BGRA,
+                                    GL_UNSIGNED_INT_8_8_8_8_REV, NULL));
+   gl->Unpack = saved;
+   if (!ctx->flip_fbo)
+      CALL_GenFramebuffers(GET_DISPATCH(), (1, &ctx->flip_fbo));
+   GLuint draw_fb = gl->DrawBuffer ? gl->DrawBuffer->Name : 0;
+   bool scissor = gl->Scissor.EnableFlags & 1;
+   CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_DRAW_FRAMEBUFFER_EXT, ctx->flip_fbo));
+   CALL_FramebufferTexture2D(GET_DISPATCH(), (GL_DRAW_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT,
+                                              target, tex->Name, 0));
+   if (scissor)
+      CALL_Disable(GET_DISPATCH(), (GL_SCISSOR_TEST));
+   CALL_BlitFramebuffer(GET_DISPATCH(), (x, y, x + w, y + h, 0, h, w, 0, GL_COLOR_BUFFER_BIT,
+                                         GL_NEAREST));
+   if (scissor)
+      CALL_Enable(GET_DISPATCH(), (GL_SCISSOR_TEST));
+   CALL_FramebufferTexture2D(GET_DISPATCH(), (GL_DRAW_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT,
+                                              target, 0, 0));
+   CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_DRAW_FRAMEBUFFER_EXT, draw_fb));
+}
+
 int
 ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum target,
                            GLenum ifmt, GLsizei w, GLsizei h)
@@ -597,9 +636,7 @@ ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum 
       if (sid == ctx->win_surface)
          ripple_cgl_refresh_window_offset(ctx);
       int x = win_x(ctx, 0), y = win_y(ctx, 0, h);   /* the surface's top-left rows */
-      /* GL's row order (bottom row first), as WindowServer expects of a surface texture: it
-       * flips its own transform before drawing one. */
-      CALL_CopyTexImage2D(GET_DISPATCH(), (target, 0, ifmt, x, y, w, h, 0));
+      copy_top_first(ctx, target, ifmt, x, y, w, h);
       if (draw_buf != GL_NONE)
          CALL_ReadBuffer(GET_DISPATCH(), (saved_read));
       CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT, read_fb));
