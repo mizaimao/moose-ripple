@@ -1,0 +1,23 @@
+  5744 ms client ffffff800de66500 is IOFramebufferUserClient
+  5744 ms call: client ffffff800de66500 sel 12 scalars 1 [1 0 0 0] struct-in 0 ool-in 0
+  5745 ms client ffffff804dac2000 is nvTeslaGLContext
+  5745 ms call: client ffffff804dac2000 sel 11 scalars 0 [0 0 0 0] struct-in 40 ool-in 0
+  5746 ms call: client ffffff804dac2000 sel 16 scalars 1 [0 0 0 0] struct-in 0 ool-in 0
+  5746 ms client ffffff804dc1d000 is nvTeslaSurface
+  5746 ms call: client ffffff804dc1d000 sel 9 scalars 2 [d 1 0 0] struct-in 20 ool-in 0
+  5748 ms client ffffff800fadb000 is nvDevice
+  5748 ms call: client ffffff800fadb000 sel 5 scalars 0 [0 0 0 0] struct-in 88 ool-in 0
+  5773 ms call: client ffffff804dac2000 sel 25 scalars 1 [19c 0 0 0] struct-in 0 ool-in 0
+
+== method calls: client, selector, scalars, struct-in bytes, ool-in bytes, count
+ffffff800de66500 12 1 0 0 1
+ffffff804dac2000 25 1 0 0 3
+ffffff800fadb000 5 0 88 0 54
+ffffff804dac2000 11 0 40 0 199
+ffffff804dac2000 16 1 0 0 199
+ffffff804dc1d000 9 2 20 0 324
+
+== older/async entry points: function, client, selector, count
+
+== memory maps: client, memory type, count
+

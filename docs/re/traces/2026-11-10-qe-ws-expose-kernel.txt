@@ -1,0 +1,42 @@
+     8 ms client ffffff804dc1d000 is nvTeslaSurface
+     8 ms call: client ffffff804dc1d000 sel 9 scalars 2 [d 1 0 0] struct-in 20 ool-in 0
+     8 ms client ffffff804dac2000 is nvTeslaGLContext
+     8 ms call: client ffffff804dac2000 sel 11 scalars 0 [0 0 0 0] struct-in 40 ool-in 0
+     8 ms call: client ffffff804dac2000 sel 16 scalars 1 [0 0 0 0] struct-in 0 ool-in 0
+  4763 ms client ffffff800de66500 is IOFramebufferUserClient
+  4763 ms call: client ffffff800de66500 sel 12 scalars 1 [1 0 0 0] struct-in 0 ool-in 0
+  4778 ms call: client ffffff800fadb000 sel 6 scalars 1 [8f 0 0 0] struct-in 0 ool-in 0
+  4778 ms call: client ffffff800fadb000 sel 4 scalars 1 [66bc 0 0 0] struct-in 0 ool-in 0
+  4937 ms call: client ffffff804dc1d000 sel 9 scalars 2 [d 1 0 0] struct-in 196 ool-in 0
+  4822 ms call: client ffffff804dac2000 sel 25 scalars 1 [19c 0 0 0] struct-in 0 ool-in 0
+  4760 ms client ffffff80101ec700 is IOAccelerationUserClient
+  4760 ms call: client ffffff80101ec700 sel 0 scalars 2 [0 7fff 0 0] struct-in 0 ool-in 0
+  4768 ms client ffffff800fadb000 is nvDevice
+  4768 ms call: client ffffff800fadb000 sel 5 scalars 0 [0 0 0 0] struct-in 88 ool-in 0
+  4768 ms call: client ffffff804dac2000 sel 30 scalars 1 [8f 0 0 0] struct-in 0 ool-in 0
+  9542 ms call: client ffffff80101ec700 sel 1 scalars 2 [0 165bc314 0 0] struct-in 0 ool-in 0
+  9560 ms call: client ffffff804dc1d000 sel 9 scalars 2 [d 1 0 0] struct-in 76 ool-in 0
+  9376 ms call: client ffffff804dc1d000 sel 9 scalars 2 [d 1 0 0] struct-in 292 ool-in 0
+  9493 ms call: client ffffff804dc1d000 sel 9 scalars 2 [d 1 0 0] struct-in 188 ool-in 0
+
+== method calls: client, selector, scalars, struct-in bytes, ool-in bytes, count
+ffffff80101ec700 0 2 0 0 1
+ffffff80101ec700 1 2 0 0 1
+ffffff804dc1d000 9 2 76 0 1
+ffffff804dc1d000 9 2 292 0 1
+ffffff800de66500 12 1 0 0 2
+ffffff800fadb000 4 1 0 0 2
+ffffff800fadb000 6 1 0 0 2
+ffffff804dac2000 30 1 0 0 2
+ffffff804dc1d000 9 2 188 0 2
+ffffff804dc1d000 9 2 196 0 2
+ffffff804dac2000 25 1 0 0 3
+ffffff800fadb000 5 0 88 0 52
+ffffff804dac2000 11 0 40 0 408
+ffffff804dac2000 16 1 0 0 426
+ffffff804dc1d000 9 2 20 0 740
+
+== older/async entry points: function, client, selector, count
+
+== memory maps: client, memory type, count
+

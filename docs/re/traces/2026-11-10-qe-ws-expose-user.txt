@@ -1,0 +1,49 @@
+     0 ms first GeForceGLDriver:gldTestObject(112447000, 1, 10083a200, 1006050d0) from GLEngine`gleTestObject+0xfe
+     0 ms first IOKit:IOAccelSetSurfaceFramebufferShape(604b, 112640a38, d, 1) from CoreGraphics`CGXAcquireDisplayDeviceSurface+0xb2d
+     0 ms first GeForceGLDriver:gldAttachDrawable(112447000, 50, 7fff5fbee100, 0) from GLEngine`gliAttachDrawableWithOptions+0x146
+     1 ms first GeForceGLDriver:gldUnbindPipelineProgram(112447000, 101050000, 0, 0) from GLEngine`gleBindPipelineProgram+0x427
+     1 ms first GeForceGLDriver:gldGetError(112447000, 0, 1006050d0, 0) from GLEngine`glGetError_Exec+0x62
+     1 ms first GeForceGLDriver:gldUpdateDispatch(112447000, 10101abe8, 101014cf0, 100001a) from GLEngine`gleDoDrawDispatchCore+0x103
+     1 ms first GeForceGLDriver:gldModifyTexture(101012000, 10083a200, 4, 0) from libGFXShared.dylib`gfxModifyPluginTextureLevel+0x97
+     1 ms first GeForceGLDriver:gldWaitObject(101012000, 1, 10083a200, 10060df90) from libGFXShared.dylib`gfxWaitPluginTexture+0x37
+  7038 ms first GeForceGLDriver:gldObjectUnpurgeable(112447000, 1, 11292cc00, 8a1c) from GLEngine`gleObjectUnpurgeable+0xe2
+  7038 ms first GeForceGLDriver:gldFlush(112447000, 11292cc00, 0, 0) from GeForceGLDriver`gldIsTextureResident+0x1c9
+  7039 ms first GeForceGLDriver:gldUnbindFramebuffer(112447000, 112983800, 0, 1) from GLEngine`gleUnbindFramebufferObject+0x35
+  7039 ms first GeForceGLDriver:gldDestroyFramebuffer(101012000, 112983800, 0, 1) from GLEngine`gleFreeFramebufferObject+0x35
+  7016 ms first IOKit:IOAccelCreateAccelID(0, 7fff5fbef1ac, e0, 0) from CoreGraphics`CGXCreateSurfaceID+0x13
+  7022 ms first GeForceGLDriver:gldInitDispatch(112447000, 10101abe8, 10101acf0, 1) from GLEngine`gliUpdateDispatchState+0xfe
+  7024 ms first GeForceGLDriver:gldModifyPipelineProgram(101012000, 101068800, 2, 1006050d0) from GLEngine`setUniform+0xb88
+  7024 ms first GeForceGLDriver:gldObjectPurgeable(112447000, 1, 11297ca00, 8a19) from GLEngine`gleObjectPurgeable+0x18a
+  7024 ms first GeForceGLDriver:gldUnbindTexture(112447000, 11297ca00, 0, 5c) from GLEngine`gleUnbindTextureObject+0x32
+  7024 ms first GeForceGLDriver:gldDestroyTexture(101012000, 11297ca00, 0, 5c) from libGFXShared.dylib`gfxDestroyPluginTexture+0x32
+  7024 ms first GeForceGLDriver:gldReclaimTexture(101012000, 11297ca00, 0, 5c) from GeForceGLDriver`gldDestroyTexture+0x1b
+  7025 ms first GeForceGLDriver:gldCreateTexture(101012000, 112056720, 112056770, 1e0) from libGFXShared.dylib`gfxCreatePluginTexture+0x3e
+  7025 ms first GeForceGLDriver:gldFlushObject(112447000, 1, 1, 11289ec00) from GLEngine`gleEvaluateTextureImageChange+0x13e
+  7026 ms first GeForceGLDriver:gldCreateFramebuffer(101012000, 112057230, 112057270, 112057348) from GLEngine`gleBindFramebuffer+0x2c2
+ 11805 ms first IOKit:IOAccelDestroyAccelID(0, 15491815, 101, 7fff7084a3c8) from CoreGraphics`CGXRemoveAllSurfaces+0xde
+
+== counts: module, function, calls
+IOKit IOAccelCreateAccelID 1
+IOKit IOAccelDestroyAccelID 1
+GeForceGLDriver gldCreateFramebuffer 2
+GeForceGLDriver gldDestroyFramebuffer 2
+GeForceGLDriver gldUnbindFramebuffer 2
+GeForceGLDriver gldFlush 15
+GeForceGLDriver gldObjectUnpurgeable 15
+GeForceGLDriver gldCreateTexture 52
+GeForceGLDriver gldDestroyTexture 52
+GeForceGLDriver gldReclaimTexture 52
+GeForceGLDriver gldUnbindTexture 52
+GeForceGLDriver gldObjectPurgeable 67
+GeForceGLDriver gldInitDispatch 73
+GeForceGLDriver gldFlushObject 102
+GeForceGLDriver gldTestObject 309
+GeForceGLDriver gldWaitObject 355
+GeForceGLDriver gldModifyPipelineProgram 370
+GeForceGLDriver gldAttachDrawable 454
+IOKit IOAccelSetSurfaceFramebufferShape 662
+GeForceGLDriver gldModifyTexture 785
+GeForceGLDriver gldGetError 4720
+GeForceGLDriver gldUnbindPipelineProgram 11332
+GeForceGLDriver gldUpdateDispatch 14755
+

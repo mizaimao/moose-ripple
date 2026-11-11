@@ -1,0 +1,37 @@
+  3268 ms first IOKit:IOAccelSetSurfaceFramebufferShape(604b, 100631118, d, 1) from CoreGraphics`CGXAcquireDisplayDeviceSurface+0xb2d
+  3268 ms first GeForceGLDriver:gldAttachDrawable(112447000, 50, 7fff5fbee100, 0) from GLEngine`gliAttachDrawableWithOptions+0x146
+  3268 ms first GeForceGLDriver:gldInitDispatch(112447000, 10101abe8, 10101acf0, 1) from GLEngine`gliUpdateDispatchState+0xfe
+  3268 ms first GeForceGLDriver:gldUnbindPipelineProgram(112447000, 101050000, 0, 0) from GLEngine`gleBindPipelineProgram+0x427
+  3268 ms first GeForceGLDriver:gldGetError(112447000, 0, 1006050d0, 0) from GLEngine`glGetError_Exec+0x62
+  3268 ms first GeForceGLDriver:gldUpdateDispatch(112447000, 10101abe8, 101014cf0, 100001a) from GLEngine`gleDoDrawDispatchCore+0x103
+  3268 ms first GeForceGLDriver:gldModifyTexture(101012000, 1141f8800, 4, 0) from libGFXShared.dylib`gfxModifyPluginTextureLevel+0x97
+  3268 ms first GeForceGLDriver:gldWaitObject(101012000, 1, 1141f8800, 10060df90) from libGFXShared.dylib`gfxWaitPluginTexture+0x37
+  8788 ms first GeForceGLDriver:gldModifyPipelineProgram(101012000, 101068800, 2, 1006050d0) from GLEngine`setUniform+0xb88
+  8789 ms first GeForceGLDriver:gldObjectPurgeable(112447000, 1, 11292b600, 8a19) from GLEngine`gleObjectPurgeable+0x18a
+  8789 ms first GeForceGLDriver:gldUnbindTexture(112447000, 11292b600, 0, 5c) from GLEngine`gleUnbindTextureObject+0x32
+  8789 ms first GeForceGLDriver:gldDestroyTexture(101012000, 11292b600, 0, 5c) from libGFXShared.dylib`gfxDestroyPluginTexture+0x32
+  8789 ms first GeForceGLDriver:gldReclaimTexture(101012000, 11292b600, 0, 5c) from GeForceGLDriver`gldDestroyTexture+0x1b
+  8792 ms first GeForceGLDriver:gldCreateTexture(101012000, 1126389d0, 112638a20, 1e0) from libGFXShared.dylib`gfxCreatePluginTexture+0x3e
+  8792 ms first GeForceGLDriver:gldFlushObject(112447000, 1, 1, 11424f000) from GLEngine`gleEvaluateTextureImageChange+0x13e
+  8797 ms first GeForceGLDriver:gldCreatePipelineProgram(101012000, 114284c20, 114285be0, 0) from GLEngine`gleBindPipelineProgram+0xb1
+  9164 ms first GeForceGLDriver:gldTestObject(112447000, 1, 114284400, 1006050d0) from GLEngine`gleTestObject+0xfe
+
+== counts: module, function, calls
+GeForceGLDriver gldCreatePipelineProgram 1
+GeForceGLDriver gldDestroyTexture 54
+GeForceGLDriver gldObjectPurgeable 54
+GeForceGLDriver gldReclaimTexture 54
+GeForceGLDriver gldUnbindTexture 54
+GeForceGLDriver gldCreateTexture 59
+GeForceGLDriver gldFlushObject 113
+GeForceGLDriver gldTestObject 118
+GeForceGLDriver gldInitDispatch 119
+GeForceGLDriver gldModifyPipelineProgram 166
+GeForceGLDriver gldWaitObject 171
+GeForceGLDriver gldAttachDrawable 193
+IOKit IOAccelSetSurfaceFramebufferShape 320
+GeForceGLDriver gldModifyTexture 481
+GeForceGLDriver gldGetError 7933
+GeForceGLDriver gldUpdateDispatch 10323
+GeForceGLDriver gldUnbindPipelineProgram 13375
+

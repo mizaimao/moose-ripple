@@ -1,0 +1,345 @@
+  4228 ms open: type 0, service ffffff800e6d5400 IOHIDSystem
+  4302 ms open: type 3, service ffffff800e6d5400 IOHIDSystem
+  4318 ms call: client ffffff8011391c00 sel 18 scalars 1 [77737570 0 0 0] struct-in 0 ool-in 0
+  4230 ms client ffffff8010f2ed00 is IOHIDUserClient
+  4230 ms call: client ffffff8010f2ed00 sel 0 scalars 1 [3 0 0 0] struct-in 0 ool-in 0
+  4231 ms open: type 1, service ffffff800e6d5400 IOHIDSystem
+  4232 ms open: type 0, service ffffff800e6bd800 NVDA(framebuffer)
+  4232 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  4232 ms client ffffff8011391c00 is IOFramebufferUserClient
+  4232 ms call: client ffffff8011391c00 sel 0 scalars 3 [100003 40 40 0] struct-in 0 ool-in 0
+  4232 ms call: client ffffff8011391c00 sel 15 scalars 1 [3 0 0 0] struct-in 1280 ool-in 0
+  4232 ms call: client ffffff8011391c00 sel 15 scalars 1 [2 0 0 0] struct-in 1024 ool-in 0
+  4232 ms call: client ffffff8011391c00 sel 15 scalars 1 [0 0 0 0] struct-in 16 ool-in 0
+  4232 ms call: client ffffff8011391c00 sel 15 scalars 1 [1 0 0 0] struct-in 32 ool-in 0
+  4234 ms open: type 2, service ffffff804da27000 NVKernel(accelerator)
+  4234 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  4234 ms client ffffff80118f9800 is NV2DContext
+  4234 ms call: client ffffff80118f9800 sel 1 scalars 0 [0 0 0 0] struct-in 0 ool-in 0
+  4234 ms call: client ffffff80118f9800 sel 16 scalars 0 [0 0 0 0] struct-in 4 ool-in 0
+  4234 ms call: client ffffff80118f9800 sel 0 scalars 2 [0 0 0 0] struct-in 0 ool-in 0
+  4234 ms call: client ffffff80118f9800 sel 17 scalars 0 [0 0 0 0] struct-in 8 ool-in 0
+  4234 ms open: type 0, service ffffff800e6b4000 NVDA(framebuffer)
+  4234 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  4234 ms client ffffff80116e2c00 is IOFramebufferUserClient
+  4234 ms call: client ffffff80116e2c00 sel 18 scalars 1 [6d726466 0 0 0] struct-in 0 ool-in 0
+  4235 ms call: client ffffff80116e2c00 sel 1 scalars 3 [ffffffff80001000 0 0 0] struct-in 0 ool-in 0
+  4236 ms call: client ffffff80116e2c00 sel 2 scalars 0 [0 0 0 0] struct-in 0 ool-in 0
+  4236 ms call: client ffffff80116e2c00 sel 4 scalars 2 [0 2 0 0] struct-in 0 ool-in 0
+  4298 ms call: client ffffff80116e2c00 sel 0 scalars 3 [100003 40 40 0] struct-in 0 ool-in 0
+  4298 ms call: client ffffff80116e2c00 sel 8 scalars 1 [0 0 0 0] struct-in 0 ool-in 0
+  4298 ms call: client ffffff80116e2c00 sel 15 scalars 1 [3 0 0 0] struct-in 1280 ool-in 0
+  4298 ms call: client ffffff80116e2c00 sel 15 scalars 1 [2 0 0 0] struct-in 1024 ool-in 0
+  4298 ms call: client ffffff80116e2c00 sel 15 scalars 1 [0 0 0 0] struct-in 16 ool-in 0
+  4298 ms call: client ffffff80116e2c00 sel 15 scalars 1 [1 0 0 0] struct-in 32 ool-in 0
+  4299 ms open: type 2, service ffffff804da27000 NVKernel(accelerator)
+  4299 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  4299 ms client ffffff800f0be000 is NV2DContext
+  4299 ms call: client ffffff800f0be000 sel 1 scalars 0 [0 0 0 0] struct-in 0 ool-in 0
+  4299 ms call: client ffffff800f0be000 sel 16 scalars 0 [0 0 0 0] struct-in 4 ool-in 0
+  4299 ms call: client ffffff800f0be000 sel 0 scalars 2 [1 0 0 0] struct-in 0 ool-in 0
+  4299 ms call: client ffffff800f0be000 sel 17 scalars 0 [0 0 0 0] struct-in 8 ool-in 0
+  4300 ms call: client ffffff8011391c00 sel 9 scalars 0 [0 0 0 0] struct-in 8 ool-in 0
+  4300 ms call: client ffffff80116e2c00 sel 9 scalars 0 [0 0 0 0] struct-in 8 ool-in 0
+  4301 ms open: type 0, service ffffff800e2d3200 IOPMrootDomain
+  4301 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  4301 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjPP12IOUserClient
+  4301 ms call: client ffffff8010f2ed00 sel 1 scalars 1 [1 0 0 0] struct-in 0 ool-in 0
+  4301 ms call: client ffffff8010f2ed00 sel 2 scalars 1 [1 0 0 0] struct-in 0 ool-in 0
+  4301 ms call: client ffffff8010f2ed00 sel 4 scalars 0 [0 0 0 0] struct-in 8 ool-in 0
+  4301 ms open: type 1, service ffffff800e6d5400 IOHIDSystem
+  4305 ms open: type 4, service ffffff804da27000 NVKernel(accelerator)
+  4305 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  4305 ms client ffffff800f9cda00 is nvDevice
+  4305 ms call: client ffffff800f9cda00 sel 1 scalars 0 [0 0 0 0] struct-in 0 ool-in 0
+  4305 ms call: client ffffff800f9cda00 sel 13 scalars 0 [0 0 0 0] struct-in 2048 ool-in 0
+  4307 ms call: client ffffff800f9cda00 sel 11 scalars 0 [0 0 0 0] struct-in 2048 ool-in 0
+  4307 ms call: client ffffff800f9cda00 sel 10 scalars 0 [0 0 0 0] struct-in 20 ool-in 0
+  4307 ms call: client ffffff800f9cda00 sel 3 scalars 0 [0 0 0 0] struct-in 0 ool-in 0
+  4307 ms open: type 4, service ffffff804da27000 NVKernel(accelerator)
+  4307 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  4307 ms client ffffff8011b43600 is nvDevice
+  4307 ms call: client ffffff8011b43600 sel 0 scalars 0 [0 0 0 0] struct-in 0 ool-in 0
+  4307 ms call: client ffffff8011b43600 sel 8 scalars 0 [0 0 0 0] struct-in 0 ool-in 0
+  4307 ms open: type 1, service ffffff804da27000 NVKernel(accelerator)
+  4307 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  4312 ms client ffffff804daac000 is nvTeslaGLContext
+  4312 ms call: client ffffff804daac000 sel 16 scalars 1 [0 0 0 0] struct-in 0 ool-in 0
+  4312 ms call: client ffffff804daac000 sel 29 scalars 0 [0 0 0 0] struct-in 0 ool-in 0
+  4312 ms call: client ffffff804daac000 sel 0 scalars 4 [0 0 0 0] struct-in 0 ool-in 0
+  4313 ms call: client ffffff800f0be000 sel 7 scalars 1 [1 0 0 0] struct-in 0 ool-in 0
+  4315 ms call: client ffffff80116e2c00 sel 19 scalars 2 [6d697272 0 0 0] struct-in 0 ool-in 0
+  4315 ms call: client ffffff8010f2ed00 sel 6 scalars 0 [0 0 0 0] struct-in 8 ool-in 0
+  4315 ms call: client ffffff80118f9800 sel 7 scalars 1 [1 0 0 0] struct-in 0 ool-in 0
+  4316 ms call: client ffffff80116e2c00 sel 11 scalars 3 [3 100 10 0] struct-in 1536 ool-in 0
+  5493 ms open: type 1, service ffffff800e6d5400 IOHIDSystem
+  5819 ms call: client ffffff804daac000 sel 11 scalars 0 [0 0 0 0] struct-in 40 ool-in 0
+  5819 ms call: client ffffff8011b43600 sel 5 scalars 0 [0 0 0 0] struct-in 88 ool-in 0
+  5820 ms call: client ffffff804daac000 sel 25 scalars 1 [1c 0 0 0] struct-in 0 ool-in 0
+  5824 ms open: type 1, service ffffff804da27000 NVKernel(accelerator)
+  5824 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5828 ms client ffffff804db2a000 is nvTeslaGLContext
+  5828 ms call: client ffffff804db2a000 sel 16 scalars 1 [0 0 0 0] struct-in 0 ool-in 0
+  5828 ms call: client ffffff804db2a000 sel 29 scalars 0 [0 0 0 0] struct-in 0 ool-in 0
+  5828 ms call: client ffffff804db2a000 sel 0 scalars 4 [0 0 0 0] struct-in 0 ool-in 0
+  5831 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5831 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5831 ms client ffffff804dc70000 is nvTeslaSurface
+  5831 ms call: client ffffff804dc70000 sel 7 scalars 2 [1142ca9b 2c 0 0] struct-in 0 ool-in 0
+  5831 ms call: client ffffff804dc70000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5831 ms call: client ffffff804db2a000 sel 11 scalars 0 [0 0 0 0] struct-in 40 ool-in 0
+  5831 ms call: client ffffff804db2a000 sel 4 scalars 1 [1142ca9b 0 0 0] struct-in 0 ool-in 0
+  5831 ms call: client ffffff804db2a000 sel 25 scalars 1 [1c 0 0 0] struct-in 0 ool-in 0
+  5833 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5833 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5833 ms client ffffff804dca8000 is nvTeslaSurface
+  5833 ms call: client ffffff804dca8000 sel 7 scalars 2 [f0c9f5c 2c 0 0] struct-in 0 ool-in 0
+  5833 ms call: client ffffff804dca8000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5833 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5833 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5833 ms client ffffff804dd98000 is nvTeslaSurface
+  5833 ms call: client ffffff804dd98000 sel 7 scalars 2 [e6be75d 24 0 0] struct-in 0 ool-in 0
+  5833 ms call: client ffffff804dd98000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5834 ms call: client ffffff800f9cda00 sel 2 scalars 1 [14b4e11a 0 0 0] struct-in 0 ool-in 0
+  5835 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5835 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5835 ms client ffffff804ddec000 is nvTeslaSurface
+  5835 ms call: client ffffff804ddec000 sel 7 scalars 2 [f13c09e 24 0 0] struct-in 0 ool-in 0
+  5835 ms call: client ffffff804ddec000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5835 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5835 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5835 ms client ffffff804ddf7000 is nvTeslaSurface
+  5835 ms call: client ffffff804ddf7000 sel 7 scalars 2 [f14809f 24 0 0] struct-in 0 ool-in 0
+  5835 ms call: client ffffff804ddf7000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5837 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5837 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5837 ms client ffffff804de5c000 is nvTeslaSurface
+  5837 ms call: client ffffff804de5c000 sel 7 scalars 2 [f0bdb80 24 0 0] struct-in 0 ool-in 0
+  5837 ms call: client ffffff804de5c000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5838 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5838 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5838 ms client ffffff804de67000 is nvTeslaSurface
+  5838 ms call: client ffffff804de67000 sel 7 scalars 2 [f1487c1 24 0 0] struct-in 0 ool-in 0
+  5838 ms call: client ffffff804de67000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5839 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5839 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5839 ms client ffffff804ded6000 is nvTeslaSurface
+  5839 ms call: client ffffff804ded6000 sel 7 scalars 2 [f0fea02 24 0 0] struct-in 0 ool-in 0
+  5839 ms call: client ffffff804ded6000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5840 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5840 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5840 ms client ffffff804dee1000 is nvTeslaSurface
+  5840 ms call: client ffffff804dee1000 sel 7 scalars 2 [f0d4203 24 0 0] struct-in 0 ool-in 0
+  5840 ms call: client ffffff804dee1000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5842 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5842 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5842 ms client ffffff804deec000 is nvTeslaSurface
+  5842 ms call: client ffffff804deec000 sel 7 scalars 2 [f0c9384 24 0 0] struct-in 0 ool-in 0
+  5842 ms call: client ffffff804deec000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5843 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5843 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5843 ms client ffffff804df36000 is nvTeslaSurface
+  5843 ms call: client ffffff804df36000 sel 7 scalars 2 [f0d42c5 24 0 0] struct-in 0 ool-in 0
+  5843 ms call: client ffffff804df36000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5845 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5845 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5845 ms client ffffff804df41000 is nvTeslaSurface
+  5845 ms call: client ffffff804df41000 sel 7 scalars 2 [f14cf06 24 0 0] struct-in 0 ool-in 0
+  5845 ms call: client ffffff804df41000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5846 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5846 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5846 ms client ffffff804df4c000 is nvTeslaSurface
+  5846 ms call: client ffffff804df4c000 sel 7 scalars 2 [116d7187 24 0 0] struct-in 0 ool-in 0
+  5846 ms call: client ffffff804df4c000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5847 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5847 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5847 ms client ffffff804df7a000 is nvTeslaSurface
+  5847 ms call: client ffffff804df7a000 sel 7 scalars 2 [116d7088 24 0 0] struct-in 0 ool-in 0
+  5847 ms call: client ffffff804df7a000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5849 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5849 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5850 ms client ffffff804df85000 is nvTeslaSurface
+  5850 ms call: client ffffff804df85000 sel 7 scalars 2 [1122cf89 24 0 0] struct-in 0 ool-in 0
+  5850 ms call: client ffffff804df85000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5850 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5850 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5850 ms client ffffff804df90000 is nvTeslaSurface
+  5850 ms call: client ffffff804df90000 sel 7 scalars 2 [f09caca 24 0 0] struct-in 0 ool-in 0
+  5850 ms call: client ffffff804df90000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5850 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5850 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5850 ms client ffffff804df9b000 is nvTeslaSurface
+  5850 ms call: client ffffff804df9b000 sel 7 scalars 2 [10f3fa0b 24 0 0] struct-in 0 ool-in 0
+  5850 ms call: client ffffff804df9b000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5850 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5850 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5850 ms client ffffff804dfa6000 is nvTeslaSurface
+  5850 ms call: client ffffff804dfa6000 sel 7 scalars 2 [1d8a598c 24 0 0] struct-in 0 ool-in 0
+  5850 ms call: client ffffff804dfa6000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5850 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5850 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5850 ms client ffffff804dfb1000 is nvTeslaSurface
+  5850 ms call: client ffffff804dfb1000 sel 7 scalars 2 [f182d8d 24 0 0] struct-in 0 ool-in 0
+  5850 ms call: client ffffff804dfb1000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5850 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5850 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5850 ms client ffffff804dfde000 is nvTeslaSurface
+  5850 ms call: client ffffff804dfde000 sel 7 scalars 2 [f0f190e 2c 0 0] struct-in 0 ool-in 0
+  5850 ms call: client ffffff804dfde000 sel 9 scalars 2 [1 0 0 0] struct-in 20 ool-in 0
+  5853 ms call: client ffffff8011b43600 sel 6 scalars 1 [2b 0 0 0] struct-in 0 ool-in 0
+  5853 ms call: client ffffff80114aa500 sel 1 scalars 2 [0 e6be75d 0 0] struct-in 0 ool-in 0
+  5550 ms call: client ffffff80116e2c00 sel 12 scalars 1 [0 0 0 0] struct-in 0 ool-in 0
+  5815 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  5815 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5815 ms client ffffff804dc1d000 is nvTeslaSurface
+  5815 ms call: client ffffff804dc1d000 sel 7 scalars 2 [14b4e11a 24 0 0] struct-in 0 ool-in 0
+  5815 ms call: client ffffff804dc1d000 sel 17 scalars 5 [7 0 1b0a27000 1e00] struct-in 20 ool-in 0
+  5815 ms call: client ffffff804dc1d000 sel 16 scalars 2 [5 1 0 0] struct-in 0 ool-in 0
+  5303 ms call: client ffffff80116e2c00 sel 10 scalars 3 [0 0 0 0] struct-in 0 ool-in 0
+  5610 ms open: type 0, service ffffff800e4ed800 IODisplayWrangler
+  5610 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  5610 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjPP12IOUserClient
+  5610 ms client ffffff80114aa500 is IOAccelerationUserClient
+  5610 ms call: client ffffff80114aa500 sel 0 scalars 2 [0 7fff 0 0] struct-in 0 ool-in 0
+  6396 ms call: client ffffff804dca8000 sel 9 scalars 2 [d 1 0 0] struct-in 196 ool-in 0
+  6401 ms call: client ffffff804dca8000 sel 9 scalars 2 [d 1 0 0] struct-in 132 ool-in 0
+  6417 ms call: client ffffff804dca8000 sel 9 scalars 2 [d 1 0 0] struct-in 28 ool-in 0
+  6225 ms call: client ffffff800f0be000 sel 18 scalars 0 [0 0 0 0] struct-in 192 ool-in 0
+  6217 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  6217 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  6217 ms call: client ffffff804dc70000 sel 17 scalars 5 [7 0 1b0a65000 1940] struct-in 20 ool-in 0
+  6217 ms call: client ffffff804dc70000 sel 16 scalars 2 [5 1 0 0] struct-in 0 ool-in 0
+  6362 ms open: type 0, service ffffff804da27000 NVKernel(accelerator)
+  6362 ms   newUserClient: mach_kernel:_ZN9IOService13newUserClientEP4taskPvjP12OSDictionaryPP12IOUserClient
+  6968 ms call: client ffffff804dca8000 sel 9 scalars 2 [d 1 0 0] struct-in 44 ool-in 0
+
+== method calls: client, selector, scalars, struct-in bytes, ool-in bytes, count
+ffffff800f0be000 1 0 0 0 1
+ffffff800f0be000 16 0 4 0 1
+ffffff800f9cda00 1 0 0 0 1
+ffffff800f9cda00 3 0 0 0 1
+ffffff8010f2ed00 0 1 0 0 1
+ffffff8010f2ed00 1 1 0 0 1
+ffffff8010f2ed00 4 0 8 0 1
+ffffff8010f2ed00 6 0 8 0 1
+ffffff8011391c00 0 3 0 0 1
+ffffff8011391c00 15 1 16 0 1
+ffffff8011391c00 15 1 32 0 1
+ffffff8011391c00 15 1 1024 0 1
+ffffff8011391c00 15 1 1280 0 1
+ffffff8011391c00 18 1 0 0 1
+ffffff80116e2c00 0 3 0 0 1
+ffffff80116e2c00 4 2 0 0 1
+ffffff80116e2c00 15 1 16 0 1
+ffffff80116e2c00 15 1 32 0 1
+ffffff80116e2c00 15 1 1024 0 1
+ffffff80116e2c00 15 1 1280 0 1
+ffffff80118f9800 1 0 0 0 1
+ffffff80118f9800 16 0 4 0 1
+ffffff8011b43600 0 0 0 0 1
+ffffff8011b43600 8 0 0 0 1
+ffffff804daac000 0 4 0 0 1
+ffffff804daac000 29 0 0 0 1
+ffffff804db2a000 25 1 0 0 1
+ffffff804db2a000 29 0 0 0 1
+ffffff804dc1d000 7 2 0 0 1
+ffffff804dc1d000 16 2 0 0 1
+ffffff804dc1d000 17 5 20 0 1
+ffffff804dc70000 9 2 20 0 1
+ffffff804dc70000 16 2 0 0 1
+ffffff804dca8000 9 2 44 0 1
+ffffff804dca8000 9 2 196 0 1
+ffffff804dd98000 7 2 0 0 1
+ffffff804dd98000 9 2 20 0 1
+ffffff804ddec000 7 2 0 0 1
+ffffff804ddec000 9 2 20 0 1
+ffffff804ddf7000 7 2 0 0 1
+ffffff804ddf7000 9 2 20 0 1
+ffffff804de5c000 7 2 0 0 1
+ffffff804de5c000 9 2 20 0 1
+ffffff804de67000 7 2 0 0 1
+ffffff804de67000 9 2 20 0 1
+ffffff804ded6000 7 2 0 0 1
+ffffff804ded6000 9 2 20 0 1
+ffffff804dee1000 7 2 0 0 1
+ffffff804dee1000 9 2 20 0 1
+ffffff804deec000 7 2 0 0 1
+ffffff804deec000 9 2 20 0 1
+ffffff804df36000 7 2 0 0 1
+ffffff804df36000 9 2 20 0 1
+ffffff804df41000 7 2 0 0 1
+ffffff804df41000 9 2 20 0 1
+ffffff804df4c000 7 2 0 0 1
+ffffff804df4c000 9 2 20 0 1
+ffffff804df7a000 7 2 0 0 1
+ffffff804df7a000 9 2 20 0 1
+ffffff804df85000 7 2 0 0 1
+ffffff804df85000 9 2 20 0 1
+ffffff804df90000 7 2 0 0 1
+ffffff804df90000 9 2 20 0 1
+ffffff804df9b000 7 2 0 0 1
+ffffff804df9b000 9 2 20 0 1
+ffffff804dfa6000 7 2 0 0 1
+ffffff804dfa6000 9 2 20 0 1
+ffffff804dfb1000 7 2 0 0 1
+ffffff804dfb1000 9 2 20 0 1
+ffffff804dfde000 7 2 0 0 1
+ffffff804dfde000 9 2 20 0 1
+ffffff800f9cda00 13 0 2048 0 2
+ffffff8011391c00 9 0 8 0 2
+ffffff80116e2c00 8 1 0 0 2
+ffffff80116e2c00 9 0 8 0 2
+ffffff80118f9800 7 1 0 0 2
+ffffff804dc70000 7 2 0 0 2
+ffffff804dca8000 7 2 0 0 2
+ffffff804dca8000 9 2 132 0 2
+ffffff800f9cda00 11 0 2048 0 3
+ffffff80116e2c00 2 0 0 0 3
+ffffff80116e2c00 19 2 0 0 3
+ffffff80118f9800 0 2 0 0 3
+ffffff80118f9800 17 0 8 0 3
+ffffff80116e2c00 10 3 0 0 4
+ffffff804daac000 25 1 0 0 4
+ffffff800f0be000 0 2 0 0 5
+ffffff8010f2ed00 2 1 0 0 5
+ffffff80116e2c00 18 1 0 0 5
+ffffff800f9cda00 10 0 20 0 6
+ffffff80116e2c00 12 1 0 0 6
+ffffff804dca8000 9 2 28 0 6
+ffffff800f0be000 7 1 0 0 8
+ffffff80114aa500 1 2 0 0 18
+ffffff800f0be000 18 0 192 0 19
+ffffff8011b43600 6 1 0 0 19
+ffffff804dc70000 17 5 20 0 20
+ffffff804dca8000 9 2 20 0 23
+ffffff804db2a000 16 1 0 0 24
+ffffff80114aa500 0 2 0 0 26
+ffffff80116e2c00 11 3 1536 0 27
+ffffff804db2a000 4 1 0 0 27
+ffffff804daac000 11 0 40 0 28
+ffffff804db2a000 0 4 0 0 34
+ffffff804daac000 16 1 0 0 36
+ffffff800f0be000 17 0 8 0 37
+ffffff800f9cda00 2 1 0 0 50
+ffffff804db2a000 11 0 40 0 60
+ffffff8011b43600 5 0 88 0 221
+ffffff80116e2c00 1 3 0 0 779
+
+== older/async entry points: function, client, selector, count
+
+== memory maps: client, memory type, count
+ffffff8010f2ed00 0 1
+ffffff8011391c00 100 1
+ffffff8011391c00 110 1
+ffffff80116e2c00 100 1
+ffffff804daac000 4 1
+ffffff804db2a000 3 1
+ffffff804db2a000 4 1
+ffffff800f0be000 1 2
+ffffff800f9cda00 1 2
+ffffff80118f9800 0 2
+ffffff80118f9800 1 2
+ffffff804daac000 3 2
+ffffff80116e2c00 110 17
+ffffff800f0be000 0 21
+
