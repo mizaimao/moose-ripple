@@ -1,0 +1,16 @@
+--- a/src/gallium/drivers/virgl/virgl_screen.c
++++ b/src/gallium/drivers/virgl/virgl_screen.c
+@@ -795,6 +795,13 @@
+ 
+    format_desc = util_format_description(format);
+ 
++   /* moose-ripple: alpha-only formats on rectangle textures sample wrong through
++    * virglrenderer 0.10.4 on Intel (alpha read as 0 or 1, depending on state), which
++    * leaves Quartz window shadows missing or opaque black. Refusing them makes the
++    * frontend store GL_ALPHA rectangles as RGBA, which samples correctly. */
++   if (target == PIPE_TEXTURE_RECT && util_format_is_alpha(format))
++      return false;
++
+    if (util_format_is_intensity(format))
+       return false;
+ 
