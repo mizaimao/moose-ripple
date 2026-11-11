@@ -169,6 +169,7 @@ TRACE_DATA = {
     'get_uniform_location_ARB': 'ripple_cgl_trace_text("uniform", name, -1);',
     'uniform_matrix4fv_ARB': 'ripple_cgl_trace_floats(value, count > 0 && count < 4 ? count * 16 : 16);',
     'vertex_attrib_pointer_ARB': 'ripple_cgl_trace_vertices(size, type, stride, pointer);',
+    'tex_parameterfv': 'ripple_cgl_trace_floats(params, 4);',
 }
 
 

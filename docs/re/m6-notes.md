@@ -294,3 +294,23 @@ in the game's own process:
   working copy (`window-check` already draws the same quad right, so the difference is
   small). The shear needs the game's frame path traced once from its render target to the
   screen; the tools for both exist now (`trace` with vertex data, `swapdump`, `presentdump`).
+
+## Concert effect, narrowed down (2026-11-11 afternoon)
+
+Still washed out on ours, but now located: it is the composition's image accumulator
+(`QCImageAccumulator`), the only one among the 61 effects.
+- `CI_EFFECTS_FRAMES=n` renders n frames before the compared one: with 0 ours matches the
+  software renderer (largest difference 5), with 1 it is 1.8% of pixels off, with 2 94%, with
+  6 or 12 99.6%. Each frame adds brightness that the software renderer does not add.
+- Per frame the trace shows a texture tied twice to the output pbuffer itself (the previous
+  picture fed back), blur passes in framebuffer objects cleared to 0.25 or 0.258 on all four
+  channels, the same value as the textures' border colour with `GL_CLAMP_TO_BORDER` (Core
+  Image's fill outside an image), and source-over blending into the pbuffer.
+- Not the cause: sharing the pbuffer's buffer instead of copying it (`pbuffer-tie`: the same
+  result), `glPushClientAttrib` (never called here).
+- Mesa reports one `GL_INVALID_FRAMEBUFFER_OPERATION in glBegin` in the run: a draw into an
+  incomplete framebuffer, not yet tied to a pass.
+- Next: find which pass differs by reading back each pass's target on ours for frames 0 and
+  1 (the first frame where the feedback counts), starting with the two feedback textures'
+  alpha: a fill of 0.25 alpha blended over itself each frame converges to white unless
+  something limits it, which is what the picture looks like.

@@ -239,7 +239,10 @@ static bool render_composition(QCComposition *comp, CGLPixelFormatAttribute rend
         return false;
     [r setValue:src forInputKey:QCCompositionInputImageKey];
     double total = 0;
-    for (int i = 0; i < 6; i++) {
+    /* CI_EFFECTS_FRAMES=n: n frames before the one that is compared (default 6; effects with
+     * an accumulator differ with the number). */
+    int frames = getenv("CI_EFFECTS_FRAMES") ? atoi(getenv("CI_EFFECTS_FRAMES")) : 6;
+    for (int i = 0; i < frames; i++) {
         uint64_t t0 = mach_absolute_time();
         [r renderAtTime:1.0 + i / 30.0 arguments:nil];
         glFinish();
