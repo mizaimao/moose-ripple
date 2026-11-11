@@ -235,16 +235,23 @@ gld_window_present(void *data, const uint8_t *pixels, unsigned stride, unsigned 
 
    simple_mtx_lock(&windows_lock);
    static int presents;
-   if (presents++ < 3)
-      DBG("present %ux%u into %p (%ux%u, row bytes %d), first pixel %02x %02x %02x %02x\n",
-          width, height, w->base, w->width, w->height, w->row_bytes, pixels[0], pixels[1],
-          pixels[2], pixels[3]);
+   if (presents < 3 || presents % 120 == 0) {
+      const uint8_t *mid = pixels + (size_t)(height / 2) * stride + (width / 2) * 4;
+      DBG("present %d: %ux%u into %p (%ux%u, row bytes %d), first pixel %02x %02x %02x %02x, "
+          "centre %02x %02x %02x %02x (BGRA)\n", presents, width, height, w->base, w->width,
+          w->height, w->row_bytes, pixels[0], pixels[1], pixels[2], pixels[3], mid[0], mid[1],
+          mid[2], mid[3]);
+   }
+   presents++;
    if (w->base) {
+      /* WindowServer reads a GL surface's memory bottom row first (GL's order): M4 and M5
+       * showed every GL window upside down until 2026-11-10 (gl-gears' blue gear at the
+       * bottom, Front Row's menu mirrored). `pixels` is top row first. */
       unsigned rows = height < w->height ? height : w->height;
       unsigned bytes = (width < w->width ? width : w->width) * 4;
       for (unsigned y = 0; y < rows; y++)
-         memcpy((uint8_t *)w->base + (size_t)y * w->row_bytes, pixels + (size_t)y * stride,
-                bytes);
+         memcpy((uint8_t *)w->base + (size_t)y * w->row_bytes,
+                pixels + (size_t)(height - 1 - y) * stride, bytes);
       cgs.UnlockWindowBits(w->cid, w->priv, NULL);
       w->base = NULL;
       int fe = cgs.FlushSurfaceWithOptions(w->cid, w->wid, w->sid, NULL, w->vsync);
