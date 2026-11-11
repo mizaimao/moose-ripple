@@ -170,3 +170,12 @@ UEFI shell from the OpenCore menu. `drivers`: "NVIDIA GPU Driver" (0xD3A, image
 emulated VGA. So Apple's GT 120 driver doesn't take the 9600 GT. The working card in macOS at
 18:50 (OVMF) was then most likely the card's state left from the SeaBIOS boots before it, not
 Apple's driver: corrects the 18:50 entry. `irq 16: nobody cared` at 18:58:27 (VM stop).
+
+## 2026-11-10 19:01: patched Apple driver (one card boot, 210 off)
+
+`9600gt-macefi-gt120-mode0.rom` (Apple's card whitelist switched off, see
+`boot/gpu-rom/README.md`), OVMF, `vga: std` next to the card. The emulated screen stayed
+black and QEMU reported `internal-error`: RIP 0x30000 (all 0xFF there), return address in the
+driver's per-output loop (`call [rax+0xb0]`). So the driver now binds and runs, then calls
+through a bad object pointer. Host fine apart from `irq 16: nobody cared` at VM start. Card
+taken off 212 again.
