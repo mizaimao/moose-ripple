@@ -207,6 +207,20 @@ ripple_cgl_trace_text(const char *what, const void *text, int len)
    simple_mtx_unlock(&trace_lock);
 }
 
+/* Float arrays (uniform matrices), logged after the call line. */
+void
+ripple_cgl_trace_floats(const GLfloat *v, int n)
+{
+   if (!v || n <= 0)
+      return;
+   simple_mtx_lock(&trace_lock);
+   fprintf(trace_file, "  values:");
+   for (int i = 0; i < n && i < 64; i++)
+      fprintf(trace_file, " %g", (double)v[i]);
+   fputc('\n', trace_file);
+   simple_mtx_unlock(&trace_lock);
+}
+
 static bool cs_readable(const void *p, size_t len);
 
 /* Small one- and two-channel images (lookup tables): their first rows, logged after the call
@@ -1390,4 +1404,75 @@ ripple_cgl_program_string(void *rend, GLenum target, GLenum format, GLsizei len,
    CALL_ProgramStringARB(GET_DISPATCH(), (target, format, fixed ? fixed_len : len,
                                           fixed ? fixed : string));
    free(fixed);
+}
+
+/* CGLTexImageIOSurface2D: gliSetInteger(910, {IOSurface ID, target, internal format, width,
+ * height, format, type, plane}) (OpenGL 10K549). Core Video hands video frames to GL this way
+ * (Real Racing 2's intro: 640x720 BGRA holding 1280x720 2vuy, converted by Core Animation's ARB
+ * programs, M6); the call went to GLEngine and the textures stayed empty. The surface's pixels
+ * are copied into the bound texture now: Core Video makes a texture per frame. The IOSurface
+ * calls are looked up at run time (OpenGL.framework loads IOSurface.framework). */
+#include <dlfcn.h>
+#include "main/image.h"
+
+typedef void *ripple_iosurface_ref;
+int
+ripple_cgl_iosurface_texture(struct ripple_cgl_context *ctx, const uint32_t *v)
+{
+   static ripple_iosurface_ref (*lookup)(uint32_t);
+   static int (*lock)(ripple_iosurface_ref, uint32_t, uint32_t *);
+   static int (*unlock)(ripple_iosurface_ref, uint32_t, uint32_t *);
+   static size_t (*plane_count)(ripple_iosurface_ref);
+   static void *(*base)(ripple_iosurface_ref);
+   static void *(*plane_base)(ripple_iosurface_ref, size_t);
+   static size_t (*row_bytes)(ripple_iosurface_ref);
+   static size_t (*plane_row_bytes)(ripple_iosurface_ref, size_t);
+   static void (*release)(const void *);
+   if (!lookup) {
+      lookup = dlsym(RTLD_DEFAULT, "IOSurfaceLookup");
+      lock = dlsym(RTLD_DEFAULT, "IOSurfaceLock");
+      unlock = dlsym(RTLD_DEFAULT, "IOSurfaceUnlock");
+      plane_count = dlsym(RTLD_DEFAULT, "IOSurfaceGetPlaneCount");
+      base = dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddress");
+      plane_base = dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddressOfPlane");
+      row_bytes = dlsym(RTLD_DEFAULT, "IOSurfaceGetBytesPerRow");
+      plane_row_bytes = dlsym(RTLD_DEFAULT, "IOSurfaceGetBytesPerRowOfPlane");
+      release = dlsym(RTLD_DEFAULT, "CFRelease");
+   }
+   if (!lookup || !lock || !unlock || !plane_count || !base || !plane_base || !row_bytes ||
+       !plane_row_bytes || !release)
+      return 10008;                          /* kCGLBadValue */
+   uint32_t id = v[0], plane = v[7];
+   GLenum target = v[1], ifmt = v[2], format = v[5], type = v[6];
+   GLsizei w = (GLsizei)v[3], h = (GLsizei)v[4];
+   ripple_iosurface_ref s = lookup(id);
+   if (!s)
+      return 10008;
+   RIPPLE_CGL_ENTER(ctx);
+   struct gl_context *gl = ctx->glctx;
+   bool planar = plane_count(s) > 0;
+   int ret = 10008;
+   if (lock(s, 1 /* kIOSurfaceLockReadOnly */, NULL) == 0) {
+      const void *pixels = planar ? plane_base(s, plane) : base(s);
+      size_t rb = planar ? plane_row_bytes(s, plane) : row_bytes(s);
+      GLint bpp = _mesa_bytes_per_pixel(format, type);
+      if (pixels && bpp > 0 && rb % bpp == 0 && rb / bpp >= (size_t)w) {
+         struct gl_pixelstore_attrib saved = gl->Unpack;
+         memset(&gl->Unpack, 0, sizeof(gl->Unpack));
+         gl->Unpack.Alignment = 1;
+         gl->Unpack.RowLength = rb / bpp;
+         CALL_TexImage2D(GET_DISPATCH(), (target, 0, ifmt, w, h, 0, format, type, pixels));
+         gl->Unpack = saved;
+         ret = 0;
+      }
+      unlock(s, 1, NULL);
+   }
+   release(s);
+   static unsigned logged;
+   extern FILE *ripple_gld_dbg_file(void);
+   if (ripple_gld_dbg_file() && logged++ < 20)
+      fprintf(ripple_gld_dbg_file(), "RippleGLDriver: IOSurface %u texture: target 0x%x format "
+              "0x%x/0x%x/0x%x %dx%d plane %u: %s\n", id, target, ifmt, format, type, w, h, plane,
+              ret ? "refused" : "copied");
+   return ret;
 }

@@ -158,6 +158,11 @@ hook_gli_set_integer(void *gc, int pname, const int *values)
                                            (GLenum)values[2], values[3], values[4],
                                            pname == 997, (GLenum)values[6]);
    }
+   if (pname == 910 && values) {               /* CGLTexImageIOSurface2D */
+      struct ripple_cgl_context *ctx = ripple_cgl_rend_for(gc);
+      if (ctx)
+         return ripple_cgl_iosurface_texture(ctx, (const uint32_t *)values);
+   }
    return gli_set_integer ? gli_set_integer(gc, pname, values) : 10004;   /* kCGLBadContext */
 }
 

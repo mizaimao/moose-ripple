@@ -818,6 +818,7 @@ attach_pbuffer(struct gld_context *c, const uint32_t *w)
    ripple_cgl_drawable_set_screen_region(e->d, 0);
    ripple_cgl_drawable_set_present(e->d, NULL, NULL);
    ripple_cgl_drawable_set_size(e->d, width, height);
+   ripple_cgl_drawable_set_rect(e->d, w[3] == 0x84F5 /* GL_TEXTURE_RECTANGLE_ARB */);
    c->mesa->win_surface = 0;
    c->mesa->surf_h = 0;                  /* a GL drawable: origin bottom left */
    c->mesa->attached_surface = id;

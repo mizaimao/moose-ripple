@@ -56,10 +56,15 @@ drawable_validate(struct st_context *st, struct pipe_frontend_drawable *base,
       enum st_attachment_type a = statts[i];
       struct pipe_resource *res = d->textures[a];
 
-      if (res && res->width0 == templat.width0 && res->height0 == templat.height0) {
+      enum pipe_texture_target target = d->rect && (a == ST_ATTACHMENT_FRONT_LEFT ||
+                                                    a == ST_ATTACHMENT_BACK_LEFT)
+                                           ? PIPE_TEXTURE_RECT : PIPE_TEXTURE_2D;
+      if (res && res->width0 == templat.width0 && res->height0 == templat.height0 &&
+          res->target == target) {
          pipe_resource_reference(&out[i], res);
          continue;
       }
+      templat.target = target;
       switch (a) {
       case ST_ATTACHMENT_FRONT_LEFT:
       case ST_ATTACHMENT_BACK_LEFT:
@@ -300,4 +305,13 @@ ripple_cgl_drawable_color(struct ripple_cgl_drawable *d, unsigned source)
    if (source == 0x0404 /* GL_FRONT */ || source == 0x0400 /* GL_FRONT_LEFT */)
       return front ? front : back;
    return back ? back : front;
+}
+
+void
+ripple_cgl_drawable_set_rect(struct ripple_cgl_drawable *d, bool rect)
+{
+   if (d->rect == rect)
+      return;
+   d->rect = rect;
+   p_atomic_inc(&d->base.stamp);     /* Mesa revalidates: buffers of the new kind */
 }

@@ -27,6 +27,7 @@ extern int ripple_cgl_tracing;
 /* Returns whether the call was logged; the data loggers below follow a logged call. */
 int ripple_cgl_trace(unsigned index, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 void ripple_cgl_trace_text(const char *what, const void *text, int len);
+void ripple_cgl_trace_floats(const GLfloat *v, int n);
 void ripple_cgl_trace_pixels(GLsizei w, GLsizei h, GLenum format, GLenum type,
                              const void *pixels);
 void ripple_cgl_unsupported(const char *name);
@@ -111,6 +112,8 @@ void ripple_cgl_refresh_window_offset(struct ripple_cgl_context *ctx);
  * the pbuffer's GL_FRONT or GL_BACK. */
 int ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum target,
                                GLenum ifmt, GLsizei w, GLsizei h, bool bind, GLenum source);
+/* GLI parameter 910 (CGLTexImageIOSurface2D): an IOSurface's pixels into the bound texture. */
+int ripple_cgl_iosurface_texture(struct ripple_cgl_context *ctx, const uint32_t *values);
 
 /* Generated: the number of entries and the filler for a GLIFunctionDispatch table. */
 extern const unsigned ripple_cgl_dispatch_count;

@@ -705,6 +705,25 @@ static struct virgl_winsys *ripple_winsys_create(io_connect_t conn,
    return &ws->base;
 }
 
+/* 64-bit float vertex formats (GL_DOUBLE through glVertexAttribPointer: Core Animation sends
+ * its positions that way) are taken as-is by the virgl driver for any plain format, and the
+ * host drew nothing with them (Real Racing 2's intro video, M6). Reported unsupported, so
+ * u_vbuf converts them to 32-bit floats before they go out. */
+static bool (*virgl_is_format_supported)(struct pipe_screen *, enum pipe_format,
+                                         enum pipe_texture_target, unsigned, unsigned, unsigned);
+
+static bool
+ripple_is_format_supported(struct pipe_screen *screen, enum pipe_format format,
+                           enum pipe_texture_target target, unsigned samples,
+                           unsigned storage_samples, unsigned bind)
+{
+   if ((bind & PIPE_BIND_VERTEX_BUFFER) &&
+       (format == PIPE_FORMAT_R64_FLOAT || format == PIPE_FORMAT_R64G64_FLOAT ||
+        format == PIPE_FORMAT_R64G64B64_FLOAT || format == PIPE_FORMAT_R64G64B64A64_FLOAT))
+      return false;
+   return virgl_is_format_supported(screen, format, target, samples, storage_samples, bind);
+}
+
 struct pipe_screen *ripple_virgl_screen_create(io_connect_t conn,
                                                const struct ripple_gpu_info *info,
                                                const struct pipe_screen_config *config)
@@ -717,8 +736,12 @@ struct pipe_screen *ripple_virgl_screen_create(io_connect_t conn,
       return NULL;
    }
    screen = virgl_create_screen(vws, config);
-   if (!screen)
+   if (!screen) {
       vws->destroy(vws);
+      return NULL;
+   }
+   virgl_is_format_supported = screen->is_format_supported;
+   screen->is_format_supported = ripple_is_format_supported;
    return screen;
 }
 

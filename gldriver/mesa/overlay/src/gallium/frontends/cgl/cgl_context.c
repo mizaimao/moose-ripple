@@ -141,6 +141,8 @@ ripple_cgl_make_current_slow(void *rend)
       if (_glapi_get_context() == ctx->glctx)
          return;
    }
+   if (unlikely(ripple_cgl_tracing))      /* which context the next calls belong to */
+      ripple_cgl_trace(1001, "---- context %p ----", (void *)ctx);
    ripple_cgl_context_make_current(ctx);
 }
 

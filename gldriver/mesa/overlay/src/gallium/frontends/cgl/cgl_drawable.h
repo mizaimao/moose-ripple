@@ -25,6 +25,7 @@ struct ripple_cgl_drawable {
    bool gpu_display;                        /* present by putting the texture on the display */
    bool screen_region;                      /* present into the screen texture at region */
    uint32_t region_surface;                 /* its accelerator surface: region read at present */
+   bool rect;                               /* colour buffers are rectangle textures (pbuffers) */
    uint8_t *pixels;                         /* readback buffer */
    size_t pixels_size;
 };
@@ -40,6 +41,9 @@ void ripple_cgl_drawable_set_gpu_display(struct ripple_cgl_drawable *d, bool on)
 /* The drawable's color buffer for GL_FRONT or GL_BACK (the other if it has only one), or NULL
  * before its first use. */
 struct pipe_resource *ripple_cgl_drawable_color(struct ripple_cgl_drawable *d, unsigned source);
+/* Colour buffers as rectangle textures (a pbuffer made for GL_TEXTURE_RECTANGLE: textures tied to
+ * it sample its buffer as a rectangle; a 2D buffer gave the host an invalid view, M6). */
+void ripple_cgl_drawable_set_rect(struct ripple_cgl_drawable *d, bool rect);
 /* Quartz Extreme: the drawable holds a rectangle of the screen, accelerator surface `surface`
  * (drawn at the drawable's bottom-left). Presenting reads the surface's current rectangle (it is
  * reshaped more often than re-attached), puts the drawing there in the screen texture and shows
