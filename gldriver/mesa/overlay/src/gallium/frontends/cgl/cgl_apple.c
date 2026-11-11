@@ -735,7 +735,13 @@ struct cs_tex {
    struct gl_pixelstore_attrib unpack;   /* BufferObj always NULL */
    unsigned gen;                         /* frame of the last upload */
    bool explicit_update;                 /* the program updates it: leave it alone */
+   uint8_t *shadow;                      /* the memory as last uploaded (rows packed), or NULL */
+   size_t shadow_size;
 };
+/* Shadow copies in all: unchanged memory isn't uploaded again (Dashboard re-uploaded about 40
+ * unchanged textures a frame, each a round trip through QEMU; performance stage 2026-11-11). */
+#define CS_SHADOW_MAX (128u << 20)
+static size_t cs_shadow_bytes;
 
 static struct cs_tex cs_texs[CS_MAX];
 static unsigned cs_used;                 /* slots in use are below this */
@@ -757,6 +763,10 @@ cs_forget(const struct gl_texture_object *obj)
    struct cs_tex *t = obj ? cs_find(obj) : NULL;
    if (t) {
       t->obj = NULL;
+      free(t->shadow);
+      cs_shadow_bytes -= t->shadow_size;
+      t->shadow = NULL;
+      t->shadow_size = 0;
       while (cs_used && !cs_texs[cs_used - 1].obj)
          cs_used--;
    }
@@ -793,6 +803,24 @@ cs_refresh(struct gl_context *glctx, struct cs_tex *t)
    if (!first || stride <= 0 || bpp <= 0 ||
        !cs_readable(first, (size_t)stride * (t->height - 1) + (size_t)bpp * t->width))
       return false;
+   /* Unchanged since the last upload: nothing to do. */
+   size_t row = (size_t)bpp * t->width, size = row * t->height;
+   if (t->shadow && t->shadow_size == size) {
+      GLsizei y = 0;
+      while (y < t->height && !memcmp(first + (size_t)stride * y, t->shadow + row * y, row))
+         y++;
+      if (y == t->height)
+         return true;
+   } else if (!t->shadow && cs_shadow_bytes + size <= CS_SHADOW_MAX) {
+      t->shadow = malloc(size);
+      if (t->shadow) {
+         t->shadow_size = size;
+         cs_shadow_bytes += size;
+      }
+   }
+   if (t->shadow && t->shadow_size == size)
+      for (GLsizei y = 0; y < t->height; y++)
+         memcpy(t->shadow + row * y, first + (size_t)stride * y, row);
    struct gl_pixelstore_attrib saved = glctx->Unpack;
    GLenum error = glctx->ErrorValue;
    glctx->Unpack = t->unpack;

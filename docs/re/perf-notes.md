@@ -99,3 +99,20 @@ its frame counts are lower while its pixel rate is higher: screens/s peak 17 (Ex
 1.02 Mpixels (10-15 Mpixels/s) and software's 9-19 (9-19 Mpixels/s). Frame counts aren't
 comparable across these three; what the eye sees is smoothness at the display, which for ours
 also goes through QEMU's display path.
+
+## Client-storage uploads only when the memory changed (01:50)
+
+dtrace during Dashboard: 5663 client-storage refreshes for 136 frames (about 40 per frame),
+each a TRANSFER round trip through QEMU, plus CPU format conversion (the largest on-CPU item in
+WindowServer). The emulation now keeps a copy of each texture's memory as last uploaded and
+uploads only when it differs (memcmp, row by row; at most 128 MB of copies).
+
+| Frame meter, peak / mean | Exposé | Dashboard | menus |
+|---|---|---|---|
+| ours before | 108-131 / 44-47 | 35-81 / 21-34 | 19 / 12-14 |
+| ours now (two runs) | 138-146 / 52-73 | 66-85 / 37-40 | 15-19 / 10-12 |
+| software | 110 / 55 | 133 / 58 | 22 / 14 |
+
+Dashboard's pixel rate is now above software's (screens/s peak 19-22 against 18.8), its
+frame count still lower. gl-gears 53-54 frames/s and animating on screen (pixels change
+between captures), so changes still get through.
