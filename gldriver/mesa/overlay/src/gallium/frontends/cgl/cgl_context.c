@@ -97,6 +97,17 @@ ripple_cgl_context_make_current(struct ripple_cgl_context *ctx)
    return st_api_make_current(ctx ? ctx->st : NULL, d, d);
 }
 
+/* Read from `read` for a moment (a pbuffer used as a texture, cgl_apple.c); NULL reads from the
+ * context's own drawable again. A context without a drawable draws into `read` meanwhile. */
+void
+ripple_cgl_context_set_read_drawable(struct ripple_cgl_context *ctx,
+                                     struct ripple_cgl_drawable *read)
+{
+   struct pipe_frontend_drawable *d = ctx->draw ? &ctx->draw->base : NULL;
+   struct pipe_frontend_drawable *r = read ? &read->base : d;
+   st_api_make_current(ctx->st, d ? d : r, r);
+}
+
 /* From OpenGL.framework (CGLCurrent.h); declared here to keep Apple's GL headers out. */
 extern void *CGLGetCurrentContext(void);
 

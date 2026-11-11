@@ -89,14 +89,37 @@ int main(int argc, char **argv)
     [blur setValue:[NSNumber numberWithFloat:4.0f] forKey:@"inputRadius"];
     img = [blur valueForKey:kCIOutputImageKey];
 
+    /* The same image through Core Image's software renderer, as the reference. Bounds across
+     * a stripe/checker edge (generators centre at 150,150, 80 wide). */
     enum { W = 64, H = 64 };
-    static uint32_t px[W * H];
-    [ci render:img toBitmap:px rowBytes:W * 4 bounds:CGRectMake(0, 0, W, H)
-        format:kCIFormatARGB8 colorSpace:NULL];
-    printf("%s + CIGaussianBlur, 64x64 ARGB8 samples:", name);
+    static uint32_t px[W * H], ref[W * H];
+    CGRect bounds = CGRectMake(160, 160, W, H);
+    NSDictionary *sw = [NSDictionary dictionaryWithObject:[NSNumber numberWithBool:YES]
+                                                   forKey:kCIContextUseSoftwareRenderer];
+    CIContext *cisw = [CIContext contextWithCGLContext:gl pixelFormat:pf options:sw];
+    [ci render:img toBitmap:px rowBytes:W * 4 bounds:bounds format:kCIFormatARGB8 colorSpace:NULL];
+    [cisw render:img toBitmap:ref rowBytes:W * 4 bounds:bounds format:kCIFormatARGB8
+      colorSpace:NULL];
+    int maxdiff = 0, bad = 0;
+    for (int i = 0; i < W * H; i++) {
+        for (int c = 0; c < 32; c += 8) {
+            int d = abs((int)((px[i] >> c) & 0xff) - (int)((ref[i] >> c) & 0xff));
+            if (d > maxdiff)
+                maxdiff = d;
+            if (d > 8) {
+                bad++;
+                break;
+            }
+        }
+    }
+    printf("%s + CIGaussianBlur at 160,160 64x64, ARGB8 (bytes A R G B):\n  context  :", name);
     for (int i = 0; i < 8; i++)
         printf(" %08x", px[(i * 8 + 4) * W + i * 8 + 4]);
-    printf("\n");
+    printf("\n  software :");
+    for (int i = 0; i < 8; i++)
+        printf(" %08x", ref[(i * 8 + 4) * W + i * 8 + 4]);
+    printf("\n  max difference %d, %d of %d pixels off by more than 8: %s\n", maxdiff, bad,
+           W * H, bad ? "DIFFERENT" : "same");
     CGLSetCurrentContext(NULL);
     CGLDestroyContext(gl);
     CGLDestroyPixelFormat(pf);

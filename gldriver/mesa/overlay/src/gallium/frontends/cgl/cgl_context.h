@@ -63,5 +63,13 @@ struct ripple_cgl_context *ripple_cgl_context_for(void *rend);
 /* Render into `d` from now on (NULL: no drawable). Rebinds if `ctx` is current here. */
 void ripple_cgl_context_set_drawable(struct ripple_cgl_context *ctx,
                                      struct ripple_cgl_drawable *d);
+/* Read from `read` until called again with NULL (`ctx` must be current). */
+void ripple_cgl_context_set_read_drawable(struct ripple_cgl_context *ctx,
+                                          struct ripple_cgl_drawable *read);
+
+/* Pbuffers (CoreGraphics' "cgls" ones, which Core Image renders into in WindowServer), kept by
+ * the GL plugin (ripple_gl_target.c): the drawable for an accelerator ID, or NULL. */
+struct ripple_cgl_drawable *ripple_gld_pbuffer_lookup(uint32_t id, unsigned *width,
+                                                      unsigned *height);
 
 #endif

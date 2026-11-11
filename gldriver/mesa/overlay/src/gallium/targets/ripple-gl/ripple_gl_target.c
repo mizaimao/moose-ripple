@@ -393,11 +393,60 @@ struct gld_context {
    struct ripple_cgl_drawable *drawable; /* its render targets */
    int swap_interval;                    /* kCGLCPSwapInterval: 1 = wait for vblank */
    struct gld_surface *cur_surface;      /* accelerator surface drawn into (WindowServer) */
+   struct gld_pbuffer *cur_pbuffer;      /* pbuffer drawn into (Core Image in WindowServer) */
 };
+
+/* Pbuffers. CoreGraphics' cgls pbuffers (Core Image's intermediate images in WindowServer) are
+ * attached as drawable kind 0x5a: {0, 0, accelerator ID, target, internal format, ...,
+ * width (word 9), height (word 10), ...}, and used as textures with gliSetInteger(998, {ID,
+ * target, format, width, height, ...}) (cgl_apple.c). Each ID gets an offscreen drawable,
+ * kept until the table is full (the least recently used unbound one goes). */
+#define GLD_DRAWABLE_PBUFFER  0x5a
+#define GLD_MAX_PBUFFERS      64
+struct gld_pbuffer {
+   uint32_t id;
+   unsigned width, height;
+   struct ripple_cgl_drawable *d;
+   unsigned long last_use;
+   unsigned binds;
+};
+static struct gld_pbuffer pbuffers[GLD_MAX_PBUFFERS];
+
+struct ripple_cgl_drawable *
+ripple_gld_pbuffer_lookup(uint32_t id, unsigned *width, unsigned *height)
+{
+   struct ripple_cgl_drawable *d = NULL;
+   if (!id)
+      return NULL;
+   simple_mtx_lock(&surfaces_lock);
+   for (unsigned i = 0; i < GLD_MAX_PBUFFERS && !d; i++) {
+      if (pbuffers[i].d && pbuffers[i].id == id) {
+         d = pbuffers[i].d;
+         *width = pbuffers[i].width;
+         *height = pbuffers[i].height;
+         pbuffers[i].last_use = ++surface_clock;
+      }
+   }
+   simple_mtx_unlock(&surfaces_lock);
+   return d;
+}
+
+static void
+unbind_pbuffer(struct gld_context *c)
+{
+   if (!c->cur_pbuffer)
+      return;
+   simple_mtx_lock(&surfaces_lock);
+   c->cur_pbuffer->binds--;
+   simple_mtx_unlock(&surfaces_lock);
+   c->cur_pbuffer = NULL;
+   c->mesa->attached_surface = 0;
+}
 
 static void
 unbind_surface(struct gld_context *c)
 {
+   unbind_pbuffer(c);
    if (!c->cur_surface)
       return;
    /* Present what was drawn into a screen region before leaving it: WindowServer may switch to
@@ -591,6 +640,7 @@ attach_surface(struct gld_context *c, uint32_t sid)
    struct gld_surface *e = NULL, *spare = NULL;
    bool changed = false;
 
+   unbind_pbuffer(c);
    if (!ripple_cgl_device_surface_info(sid, &si)) {
       DBG("  accelerator surface %u: unknown\n", sid);
       return kCGLBadDrawable;
@@ -683,6 +733,74 @@ attach_surface(struct gld_context *c, uint32_t sid)
    return changed ? GLD_ATTACH_CHANGED : 0;
 }
 
+/* A cgls pbuffer: an offscreen drawable of its size, the same one each time its ID comes. */
+static int
+attach_pbuffer(struct gld_context *c, const uint32_t *w)
+{
+   uint32_t id = w[2];
+   unsigned width = w[9], height = w[10];
+   struct gld_pbuffer *e = NULL, *spare = NULL;
+   bool changed = false;
+
+   if (!id || !width || !height || width > 16384 || height > 16384) {
+      DBG("  pbuffer %u: %ux%u refused\n", id, width, height);
+      return kCGLBadDrawable;
+   }
+   unbind_surface(c);                    /* also leaves any pbuffer */
+   if (c->win) {
+      gld_window_release(c->win);
+      c->win = NULL;
+   }
+   simple_mtx_lock(&surfaces_lock);
+   for (unsigned i = 0; i < GLD_MAX_PBUFFERS && !e; i++) {
+      if (pbuffers[i].d && pbuffers[i].id == id)
+         e = &pbuffers[i];
+      else if (!pbuffers[i].d && !spare)
+         spare = &pbuffers[i];
+   }
+   if (!e) {
+      if (!spare) {
+         for (unsigned i = 0; i < GLD_MAX_PBUFFERS; i++)
+            if (!pbuffers[i].binds && (!spare || pbuffers[i].last_use < spare->last_use))
+               spare = &pbuffers[i];
+         if (spare) {
+            ripple_cgl_drawable_destroy(spare->d);
+            memset(spare, 0, sizeof(*spare));
+         }
+      }
+      if (spare)
+         spare->d = ripple_cgl_drawable_create(c->mesa);
+      if (!spare || !spare->d) {
+         simple_mtx_unlock(&surfaces_lock);
+         return kCGLBadAlloc;
+      }
+      e = spare;
+      e->id = id;
+      changed = true;
+   }
+   if (e->width != width || e->height != height)
+      changed = true;
+   e->width = width;
+   e->height = height;
+   e->last_use = ++surface_clock;
+   e->binds++;
+   c->cur_pbuffer = e;
+   simple_mtx_unlock(&surfaces_lock);
+
+   ripple_cgl_drawable_set_gpu_display(e->d, false);
+   ripple_cgl_drawable_set_screen_region(e->d, 0);
+   ripple_cgl_drawable_set_present(e->d, NULL, NULL);
+   ripple_cgl_drawable_set_size(e->d, width, height);
+   c->mesa->win_surface = 0;
+   c->mesa->surf_h = 0;                  /* a GL drawable: origin bottom left */
+   c->mesa->attached_surface = id;
+   ripple_cgl_context_set_drawable(c->mesa, e->d);
+   static unsigned logged;
+   if (changed && logged++ < 50)
+      DBG("  pbuffer %u: %ux%u (target 0x%x, format 0x%x)\n", id, width, height, w[3], w[4]);
+   return changed ? GLD_ATTACH_CHANGED : 0;
+}
+
 GLD_EXPORT int
 gldAttachDrawable(struct gld_context *c, int type, void *data, void *opts)
 {
@@ -729,9 +847,23 @@ gldAttachDrawable(struct gld_context *c, int type, void *data, void *opts)
    case GLD_DRAWABLE_NO_DRAW:
    case GLD_DRAWABLE_PROBE:
       return 0;
-   default:
-      /* Off-screen memory, pbuffers, IOSurfaces, full screen: not yet. */
+   case GLD_DRAWABLE_PBUFFER:
+      return data ? attach_pbuffer(c, data) : kCGLBadDrawable;
+   default: {
+      /* Off-screen memory, pbuffers, IOSurfaces, full screen: not yet. The first words of the
+       * description, once per kind, to learn their layout. */
+      static uint32_t logged[8];
+      unsigned slot = (unsigned)type & 7;
+      if (data && logged[slot] != (uint32_t)type + 1 && ripple_gld_dbg_file()) {
+         const uint32_t *w = data;
+         logged[slot] = (uint32_t)type + 1;
+         DBG("  drawable kind 0x%x refused; data:", type);
+         for (unsigned i = 0; i < 16; i++)
+            fprintf(ripple_gld_dbg_file(), " %08x", w[i]);
+         fprintf(ripple_gld_dbg_file(), "\n");
+      }
       return kCGLBadDrawable;
+   }
    }
 }
 

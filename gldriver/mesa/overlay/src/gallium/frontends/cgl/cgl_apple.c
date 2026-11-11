@@ -556,6 +556,7 @@ ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum 
    struct ripple_gpu_surface_info si;
    const char *how = "unknown surface";
    int ret = 10008;                     /* kCGLBadValue */
+   unsigned pw = 0, ph = 0;
 
    if (unlikely(ripple_cgl_tracing))      /* in the GL trace too (index past the table's) */
       ripple_cgl_trace(1000, "surface_texture(%u, %#x, %#x, %d, %d)", sid, target, ifmt, w, h);
@@ -563,8 +564,25 @@ ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum 
    struct gl_context *gl = ctx->glctx;
    GLenum error = gl->ErrorValue;
    gl->ErrorValue = GL_NO_ERROR;
-   if (w <= 0 || h <= 0 || !ripple_cgl_device_surface_info(sid, &si)) {
+   memset(&si, 0, sizeof(si));
+   struct ripple_cgl_drawable *pb = ripple_gld_pbuffer_lookup(sid, &pw, &ph);
+   bool have_si = !pb && ripple_cgl_device_surface_info(sid, &si);
+   if (w <= 0 || h <= 0 || (!pb && !have_si)) {
       /* nothing to read */
+   } else if (pb && sid != ctx->attached_surface) {
+      /* A pbuffer (cglsTexImagePBuffer, 998): rendered by another context, usually Core
+       * Image's. Read from it for the copy, through the window-system read framebuffer. */
+      GLuint read_fb = gl->ReadBuffer ? gl->ReadBuffer->Name : 0;
+      ripple_cgl_context_set_read_drawable(ctx, pb);
+      CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT, 0));
+      CALL_CopyTexImage2D(GET_DISPATCH(), (target, 0, ifmt, 0, 0, MIN2((unsigned)w, pw),
+                                           MIN2((unsigned)h, ph), 0));
+      CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT, read_fb));
+      ripple_cgl_context_set_read_drawable(ctx, NULL);
+      si.width = pw;
+      si.height = ph;
+      how = "a pbuffer";
+      ret = 0;
    } else if (sid == ctx->attached_surface) {
       /* The surface this context draws into: what has been drawn there so far, read from the
        * window framebuffer, from the buffer WindowServer draws into. For the screen region
@@ -587,14 +605,15 @@ ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum 
       CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT, read_fb));
       how = sid == ctx->win_surface ? "the window region" : "the drawable";
       ret = 0;
-      if (sid != ctx->win_surface && si.backing_address) {
+      if (have_si && sid != ctx->win_surface && si.backing_address) {
          /* A surface with memory: WindowServer works on that memory with the CPU next (the
           * translucent menu bar: Core Image over what was drawn here), so bring it up to date
           * now, not at the next present. */
          ripple_cgl_context_swap(ctx);
          how = "the drawable, memory updated";
       }
-   } else if (si.backing_address && si.row_bytes >= (uint32_t)w * 4 && (uint32_t)h <= si.height &&
+   } else if (have_si && si.backing_address && si.row_bytes >= (uint32_t)w * 4 &&
+              (uint32_t)h <= si.height &&
               cs_readable((const void *)(uintptr_t)si.backing_address,
                           (size_t)si.row_bytes * (h - 1) + (size_t)w * 4)) {
       /* A surface with memory in this process: its rows as they are. Surface memory is in
@@ -915,9 +934,16 @@ ripple_cgl_get_string(void *rend, GLenum name)
 
    RIPPLE_CGL_ENTER(rend);
    const GLubyte *s = CALL_GetString(GET_DISPATCH(), (name));
-   if (name == GL_RENDERER) {                /* experiments: RIPPLE_GL_RENDERER or a file */
+   if (name == GL_RENDERER && s) {
+      /* Apple style, "<GPU> OpenGL Engine", from the host GPU's name in Mesa's string ("virgl
+       * (Mesa Intel(R) UHD Graphics 630 (CFL GT2))" gives "Intel UHD Graphics 630 OpenGL
+       * Engine"). Core Image picks its GPU tier by such names ("Intel ", "ATI Radeon HD",
+       * "NVIDIA GeForce GT ", ...) and renders on the CPU for names it doesn't know, where it
+       * can't read WindowServer's textures (the menu bar's tint and the Dashboard ripple).
+       * Override: RIPPLE_GL_RENDERER or the file /Library/Logs/RippleGL/renderer. */
       static char renderer[128];
       static int renderer_read;
+      simple_mtx_lock(&lock);
       if (!renderer_read) {
          renderer_read = 1;
          const char *env = getenv("RIPPLE_GL_RENDERER");
@@ -928,13 +954,40 @@ ripple_cgl_get_string(void *rend, GLenum name)
             renderer[strcspn(renderer, "\n")] = 0;
          if (f)
             fclose(f);
+         if (!renderer[0]) {
+            const char *p = (const char *)s;
+            char gpu[96];
+            size_t n = 0;
+            if (!strncmp(p, "virgl (", 7))
+               p += 7;
+            if (!strncmp(p, "Mesa ", 5))
+               p += 5;
+            for (; *p && *p != ')' && n < sizeof(gpu) - 1; p++) {
+               if (!strncmp(p, "(R)", 3) || !strncmp(p, "(TM)", 4)) {
+                  p = strchr(p, ')');
+                  continue;
+               }
+               if (*p == '(')
+                  break;                    /* " (CFL GT2)": the code name */
+               gpu[n++] = *p;
+            }
+            while (n && gpu[n - 1] == ' ')
+               n--;
+            gpu[n] = 0;
+            if (n)
+               snprintf(renderer, sizeof(renderer), "%s OpenGL Engine", gpu);
+         }
       }
+      simple_mtx_unlock(&lock);
       if (renderer[0])
          return (const GLubyte *)renderer;
+      return s;
    }
    if (name != GL_EXTENSIONS || !s)
       return s;
-   /* What is added: GL_APPLE_float_pixels (above), and for experiments the names in
+   /* What is added: GL_APPLE_client_storage (emulated, see "Client storage" above) and
+    * GL_APPLE_texture_range (accepted, no effect), which Core Image requires before it uses the
+    * GPU; GL_APPLE_float_pixels (opt-in, above); and for experiments the names in
     * RIPPLE_GL_EXTENSIONS or the file /Library/Logs/RippleGL/extensions (read once). */
    static char extra[512];
    static int extra_read;
@@ -942,6 +995,10 @@ ripple_cgl_get_string(void *rend, GLenum name)
    if (!extra_read) {
       extra_read = 1;
       GET_CURRENT_CONTEXT(glctx);
+      if (!strstr((const char *)s, "GL_APPLE_client_storage"))
+         strcat(extra, " GL_APPLE_client_storage");
+      if (!strstr((const char *)s, "GL_APPLE_texture_range"))
+         strcat(extra, " GL_APPLE_texture_range");
       if (float_pixels_wanted() && glctx->Extensions.ARB_texture_float)
          strcat(extra, " GL_APPLE_float_pixels");
       const char *env = getenv("RIPPLE_GL_EXTENSIONS");
