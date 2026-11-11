@@ -8,9 +8,10 @@ set -eu
 
 DEV=${DEV:-dev.lan}
 cd "$ROOT"
-rsync -a --delete --exclude .git --exclude .secrets --exclude .tools --exclude .venv --exclude build \
+rsync -a --delete --exclude .git --exclude .secrets --exclude .tools --exclude .venv --exclude build --exclude 'tmp-*' \
     ./ "$DEV:Projects/moose-ripple/"
 ssh "$DEV" "cd ~/Projects/moose-ripple && make -j4 $*"
 mkdir -p build
-rsync -a --delete --include '*.kext/***' --include '*.bundle/***' --include '*.plugin/***' --exclude '*/' --include '*' "$DEV:Projects/moose-ripple/build/" build/
+# No --delete here: build/ keeps what other targets (and other agents) built.
+rsync -a --include '*.kext/***' --include '*.bundle/***' --include '*.plugin/***' --exclude '*/' --include '*' "$DEV:Projects/moose-ripple/build/" build/
 ls -d build/*
