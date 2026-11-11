@@ -42,6 +42,7 @@ static struct {
    int (*FlushSurfaceWithOptions)(cgs_conn, cgs_window, cgs_surface, cgs_region, int);
    int (*SetWindowShape)(cgs_conn, cgs_window, cg_float, cg_float, cgs_region);
    int (*ReleaseWindow)(cgs_conn, cgs_window);
+   int (*SetWindowOpacity)(cgs_conn, cgs_window, int);    /* optional */
 } cgs;
 static bool cgs_ok;
 
@@ -58,6 +59,7 @@ gld_window_init(void)
             LOOK(NewWindow) && LOOK(SetWindowDepth) && LOOK(BindSurface) &&
             LOOK(LockWindowBits) && LOOK(UnlockWindowBits) &&
             LOOK(FlushSurfaceWithOptions) && LOOK(SetWindowShape) && LOOK(ReleaseWindow);
+   LOOK(SetWindowOpacity);
 #undef LOOK
 }
 
@@ -139,6 +141,15 @@ setup(struct gld_window *w, bool fresh, bool *changed)
       DBG("region %d, CGSNewWindow %d -> %d, depth %d\n", e1, e2, w->priv, e3);
       if (e1 || e2 || e3)
          return -1;
+      /* Not opaque: WindowServer composites our private window for the surface, and a new
+       * window is opaque. A surface the app made non-opaque (Core Animation does, for a
+       * layer-backed overlay with transparent parts) was then drawn without blending, its
+       * transparent parts black: the Finder's toolbar animation showed a black frame around
+       * the window (2026-11-11). With the window non-opaque WindowServer goes by the
+       * surface's own setting, so an opaque surface still hides what is behind it whatever
+       * its alpha (gl-gears -a). Set before the bits are locked: the call waits for them. */
+      if (cgs.SetWindowOpacity)
+         cgs.SetWindowOpacity(w->cid, w->priv, 0);
    } else if (*changed) {
       cgs.ReleaseRegion(w->rgn);
       w->rgn = NULL;
@@ -148,7 +159,9 @@ setup(struct gld_window *w, bool fresh, bool *changed)
    }
    e = cgs.BindSurface(w->cid, w->wid, w->sid, 1, 0, w->priv);
    DBG("CGSBindSurface = %d\n", e);
-   if (e || !lock_bits(w))
+   if (e)
+      return -1;
+   if (!lock_bits(w))
       return -1;
    DBG("bits %p, row bytes %d\n", w->base, w->row_bytes);
    w->width = width;
