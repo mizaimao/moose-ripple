@@ -38,6 +38,10 @@ struct ripple_cgl_context {
    uint32_t win_surface;         /* the screen-region surface, or 0 */
    int win_ox, win_oy;
    unsigned win_w, win_h;
+   /* Viewport and scissor as the program set them; Mesa holds them shifted while the window's
+    * own framebuffer is bound, unshifted while a framebuffer object is. */
+   int lv[4], ls[4];
+   bool lv_set, ls_set;
    /* GL_UNPACK_CLIENT_STORAGE_APPLE as last set (refused, but emulated: cgl_apple.c). */
    bool client_storage;
 };

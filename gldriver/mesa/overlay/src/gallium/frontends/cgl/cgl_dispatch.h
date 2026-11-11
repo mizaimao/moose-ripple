@@ -65,6 +65,7 @@ void GLAPIENTRY ripple_cgl_tex_parameteriv(void *rend, GLenum target, GLenum pna
 void GLAPIENTRY ripple_cgl_tex_parameterfv(void *rend, GLenum target, GLenum pname, const GLfloat *params);
 void GLAPIENTRY ripple_cgl_hint(void *rend, GLenum target, GLenum mode);
 void GLAPIENTRY ripple_cgl_viewport(void *rend, GLint x, GLint y, GLsizei w, GLsizei h);
+void GLAPIENTRY ripple_cgl_bind_framebuffer(void *rend, GLenum target, GLuint framebuffer);
 void GLAPIENTRY ripple_cgl_scissor(void *rend, GLint x, GLint y, GLsizei w, GLsizei h);
 void GLAPIENTRY ripple_cgl_clear(void *rend, GLbitfield mask);
 void GLAPIENTRY ripple_cgl_get_integerv(void *rend, GLenum pname, GLint *params);

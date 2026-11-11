@@ -247,17 +247,15 @@ ripple_cgl_hint(void *rend, GLenum target, GLenum mode)
  * WindowServer composites each frame into its display surface shaped to the dirty rectangle,
  * in window coordinates relative to that rectangle; the drawable is the whole screen (it
  * reads it back for thumbnails). So window coordinates are shifted by the rectangle's GL
- * bottom-left on the screen, and the viewport and scissor queries shifted back. */
+ * bottom-left on the screen, and the viewport and scissor queries give back what was set.
+ * Only the window's own framebuffer is shifted: Core Image (the Dashboard ripple) renders
+ * through framebuffer objects in their own coordinates, so binding one applies the viewport
+ * and scissor unshifted, and binding the window again shifts them again. Reads and copies
+ * are shifted only when they read the window. */
 #include "main/mtypes.h"
+#include "main/fbobject.h"
 #include "cgl_device.h"
 #include "virgl/ripple/ripple_gpu_uapi.h"
-
-static struct ripple_cgl_context *
-offset_ctx(void *rend)
-{
-   struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
-   return ctx && ctx->win_surface ? ctx : NULL;
-}
 
 void
 ripple_cgl_refresh_window_offset(struct ripple_cgl_context *ctx)
@@ -271,15 +269,42 @@ ripple_cgl_refresh_window_offset(struct ripple_cgl_context *ctx)
    ctx->win_h = si.height;
 }
 
+/* The context if the window offset applies to the framebuffer it draws into (read: reads
+ * from), else NULL. */
+static struct ripple_cgl_context *
+offset_ctx(void *rend, bool read)
+{
+   struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
+   if (!ctx || !ctx->win_surface)
+      return NULL;
+   struct gl_framebuffer *fb = read ? ctx->glctx->ReadBuffer : ctx->glctx->DrawBuffer;
+   return fb && _mesa_is_winsys_fbo(fb) ? ctx : NULL;
+}
+
+/* Put the program's viewport and scissor into Mesa, shifted if drawing into the window. */
+static void
+apply_viewport_scissor(struct ripple_cgl_context *ctx, bool shift)
+{
+   int ox = shift ? ctx->win_ox : 0, oy = shift ? ctx->win_oy : 0;
+   if (ctx->lv_set)
+      CALL_Viewport(GET_DISPATCH(), (ctx->lv[0] + ox, ctx->lv[1] + oy, ctx->lv[2], ctx->lv[3]));
+   if (ctx->ls_set)
+      CALL_Scissor(GET_DISPATCH(), (ctx->ls[0] + ox, ctx->ls[1] + oy, ctx->ls[2], ctx->ls[3]));
+}
+
 void GLAPIENTRY
 ripple_cgl_viewport(void *rend, GLint x, GLint y, GLsizei w, GLsizei h)
 {
-   struct ripple_cgl_context *ctx = offset_ctx(rend);
+   struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
    RIPPLE_CGL_ENTER(rend);
-   if (ctx) {
-      ripple_cgl_refresh_window_offset(ctx);    /* a frame starts: the rectangle may be new */
-      x += ctx->win_ox;
-      y += ctx->win_oy;
+   if (ctx && w >= 0 && h >= 0) {
+      ctx->lv[0] = x, ctx->lv[1] = y, ctx->lv[2] = w, ctx->lv[3] = h;
+      ctx->lv_set = true;
+      if (offset_ctx(rend, false)) {
+         ripple_cgl_refresh_window_offset(ctx);    /* a frame starts: the rectangle may be new */
+         x += ctx->win_ox;
+         y += ctx->win_oy;
+      }
    }
    CALL_Viewport(GET_DISPATCH(), (x, y, w, h));
 }
@@ -287,19 +312,37 @@ ripple_cgl_viewport(void *rend, GLint x, GLint y, GLsizei w, GLsizei h)
 void GLAPIENTRY
 ripple_cgl_scissor(void *rend, GLint x, GLint y, GLsizei w, GLsizei h)
 {
-   struct ripple_cgl_context *ctx = offset_ctx(rend);
+   struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
    RIPPLE_CGL_ENTER(rend);
-   if (ctx) {
-      x += ctx->win_ox;
-      y += ctx->win_oy;
+   if (ctx && w >= 0 && h >= 0) {
+      ctx->ls[0] = x, ctx->ls[1] = y, ctx->ls[2] = w, ctx->ls[3] = h;
+      ctx->ls_set = true;
+      if (offset_ctx(rend, false)) {
+         x += ctx->win_ox;
+         y += ctx->win_oy;
+      }
    }
    CALL_Scissor(GET_DISPATCH(), (x, y, w, h));
 }
 
 void GLAPIENTRY
+ripple_cgl_bind_framebuffer(void *rend, GLenum target, GLuint framebuffer)
+{
+   struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
+   RIPPLE_CGL_ENTER(rend);
+   bool before = ctx && offset_ctx(rend, false);
+   CALL_BindFramebufferEXT(GET_DISPATCH(), (target, framebuffer));
+   if (!ctx || !ctx->win_surface)
+      return;
+   bool after = offset_ctx(rend, false) != NULL;
+   if (before != after)
+      apply_viewport_scissor(ctx, after);
+}
+
+void GLAPIENTRY
 ripple_cgl_clear(void *rend, GLbitfield mask)
 {
-   struct ripple_cgl_context *ctx = offset_ctx(rend);
+   struct ripple_cgl_context *ctx = offset_ctx(rend, false);
    RIPPLE_CGL_ENTER(rend);
    struct gl_context *gl = ctx ? ctx->glctx : NULL;
    if (gl && !(gl->Scissor.EnableFlags & 1)) {
@@ -318,37 +361,47 @@ ripple_cgl_clear(void *rend, GLbitfield mask)
 void GLAPIENTRY
 ripple_cgl_get_integerv(void *rend, GLenum pname, GLint *params)
 {
-   struct ripple_cgl_context *ctx = offset_ctx(rend);
+   struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
    RIPPLE_CGL_ENTER(rend);
-   CALL_GetIntegerv(GET_DISPATCH(), (pname, params));
-   if (ctx && params && (pname == GL_VIEWPORT || pname == GL_SCISSOR_BOX)) {
-      params[0] -= ctx->win_ox;
-      params[1] -= ctx->win_oy;
+   if (pname == GL_UNPACK_CLIENT_STORAGE_APPLE && ctx && params) {
+      /* Core Image (the Dashboard ripple, in WindowServer) saves the pixel-store state with
+       * this query: answer what was set, without Mesa's GL_INVALID_ENUM. */
+      params[0] = ctx->client_storage;
+      return;
    }
+   CALL_GetIntegerv(GET_DISPATCH(), (pname, params));
+   if (!ctx || !ctx->win_surface || !params)
+      return;
+   if (pname == GL_VIEWPORT && ctx->lv_set)
+      memcpy(params, ctx->lv, sizeof(ctx->lv));
+   else if (pname == GL_SCISSOR_BOX && ctx->ls_set)
+      memcpy(params, ctx->ls, sizeof(ctx->ls));
 }
+
+/* Reads and copies from the window: shift the source rectangle. */
+#define READ_OFFSET(rend, x, y)                                                          \
+   do {                                                                                  \
+      struct ripple_cgl_context *rctx_ = offset_ctx(rend, true);                         \
+      if (rctx_) {                                                                       \
+         (x) += rctx_->win_ox;                                                           \
+         (y) += rctx_->win_oy;                                                           \
+      }                                                                                  \
+   } while (0)
 
 void GLAPIENTRY
 ripple_cgl_read_pixels(void *rend, GLint x, GLint y, GLsizei w, GLsizei h, GLenum format,
                        GLenum type, GLvoid *pixels)
 {
-   struct ripple_cgl_context *ctx = offset_ctx(rend);
    RIPPLE_CGL_ENTER(rend);
-   if (ctx) {
-      x += ctx->win_ox;
-      y += ctx->win_oy;
-   }
+   READ_OFFSET(rend, x, y);
    CALL_ReadPixels(GET_DISPATCH(), (x, y, w, h, format, type, pixels));
 }
 
 void GLAPIENTRY
 ripple_cgl_copy_pixels(void *rend, GLint x, GLint y, GLsizei w, GLsizei h, GLenum type)
 {
-   struct ripple_cgl_context *ctx = offset_ctx(rend);
    RIPPLE_CGL_ENTER(rend);
-   if (ctx) {
-      x += ctx->win_ox;
-      y += ctx->win_oy;
-   }
+   READ_OFFSET(rend, x, y);   /* the destination (raster position) is already shifted */
    CALL_CopyPixels(GET_DISPATCH(), (x, y, w, h, type));
 }
 
@@ -356,12 +409,8 @@ void GLAPIENTRY
 ripple_cgl_copy_tex_image1D(void *rend, GLenum target, GLint level, GLenum ifmt, GLint x,
                             GLint y, GLsizei w, GLint border)
 {
-   struct ripple_cgl_context *ctx = offset_ctx(rend);
    RIPPLE_CGL_ENTER(rend);
-   if (ctx) {
-      x += ctx->win_ox;
-      y += ctx->win_oy;
-   }
+   READ_OFFSET(rend, x, y);
    CALL_CopyTexImage1D(GET_DISPATCH(), (target, level, ifmt, x, y, w, border));
 }
 
@@ -369,12 +418,8 @@ void GLAPIENTRY
 ripple_cgl_copy_tex_image2D(void *rend, GLenum target, GLint level, GLenum ifmt, GLint x,
                             GLint y, GLsizei w, GLsizei h, GLint border)
 {
-   struct ripple_cgl_context *ctx = offset_ctx(rend);
    RIPPLE_CGL_ENTER(rend);
-   if (ctx) {
-      x += ctx->win_ox;
-      y += ctx->win_oy;
-   }
+   READ_OFFSET(rend, x, y);
    CALL_CopyTexImage2D(GET_DISPATCH(), (target, level, ifmt, x, y, w, h, border));
 }
 
@@ -382,12 +427,8 @@ void GLAPIENTRY
 ripple_cgl_copy_tex_sub_image1D(void *rend, GLenum target, GLint level, GLint xoff, GLint x,
                                 GLint y, GLsizei w)
 {
-   struct ripple_cgl_context *ctx = offset_ctx(rend);
    RIPPLE_CGL_ENTER(rend);
-   if (ctx) {
-      x += ctx->win_ox;
-      y += ctx->win_oy;
-   }
+   READ_OFFSET(rend, x, y);
    CALL_CopyTexSubImage1D(GET_DISPATCH(), (target, level, xoff, x, y, w));
 }
 
@@ -395,12 +436,8 @@ void GLAPIENTRY
 ripple_cgl_copy_tex_sub_image2D(void *rend, GLenum target, GLint level, GLint xoff, GLint yoff,
                                 GLint x, GLint y, GLsizei w, GLsizei h)
 {
-   struct ripple_cgl_context *ctx = offset_ctx(rend);
    RIPPLE_CGL_ENTER(rend);
-   if (ctx) {
-      x += ctx->win_ox;
-      y += ctx->win_oy;
-   }
+   READ_OFFSET(rend, x, y);
    CALL_CopyTexSubImage2D(GET_DISPATCH(), (target, level, xoff, yoff, x, y, w, h));
 }
 
@@ -408,12 +445,8 @@ void GLAPIENTRY
 ripple_cgl_copy_tex_sub_image3D(void *rend, GLenum target, GLint level, GLint xoff, GLint yoff,
                                 GLint zoff, GLint x, GLint y, GLsizei w, GLsizei h)
 {
-   struct ripple_cgl_context *ctx = offset_ctx(rend);
    RIPPLE_CGL_ENTER(rend);
-   if (ctx) {
-      x += ctx->win_ox;
-      y += ctx->win_oy;
-   }
+   READ_OFFSET(rend, x, y);
    CALL_CopyTexSubImage3D(GET_DISPATCH(), (target, level, xoff, yoff, zoff, x, y, w, h));
 }
 

@@ -67,6 +67,7 @@ CUSTOM = {
     'flush': 'ripple_cgl_flush',
     # Window offset for drawing into the screen through a rectangle (cgl_apple.c).
     'viewport': 'ripple_cgl_viewport',
+    'bind_framebuffer_EXT': 'ripple_cgl_bind_framebuffer',
     'scissor': 'ripple_cgl_scissor',
     'clear': 'ripple_cgl_clear',
     'get_integerv': 'ripple_cgl_get_integerv',
@@ -180,8 +181,12 @@ def main():
         target = api.get(gl_name(name))
         fn = 'ripple_gl_' + name
         if name in CUSTOM:
-            fn = CUSTOM[name]
-            lines.append('%s GLAPIENTRY %s(%s);   /* in the frontend */\n' % (ret, fn, decl))
+            # A thunk here too, so the debug trace sees the frontend's own entries.
+            lines.append('%s GLAPIENTRY %s(%s);   /* in the frontend */\n' % (ret, CUSTOM[name], decl))
+            lines.append('static %s GLAPIENTRY %s(%s)\n{\n%s   %s%s(%s);\n}\n'
+                         % (ret, fn, decl, trace_call(index, name, params),
+                            '' if ret == 'void' else 'return ', CUSTOM[name],
+                            ', '.join(['rend'] + [p[1] for p in params])))
         elif target:
             lines.append('static %s GLAPIENTRY %s(%s)\n{\n%s   RIPPLE_CGL_ENTER(rend);\n'
                          '   %sCALL_%s(GET_DISPATCH(), (%s));\n}\n'
