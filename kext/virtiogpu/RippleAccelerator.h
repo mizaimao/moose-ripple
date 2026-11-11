@@ -22,11 +22,13 @@ class RippleAccelerator : public IOAccelerator
     struct ripple_gpu_info fInfo;
     bool               fGL;          // GL bundle published (RippleGLBundle / ripple_gl)
     bool               fQE;          // surface clients for WindowServer (ripple_qe, M5)
+    bool               fQEDebug;     // ripple_qe=2: log every surface call
 
 public:
     VirtioGPUDevice *device() const { return fDev; }
     const struct ripple_gpu_info &info() const { return fInfo; }
     RippleFramebuffer *framebuffer() const { return fFB; }
+    bool qeDebug() const { return fQEDebug; }
 
     virtual bool start(IOService *provider);
     virtual void stop(IOService *provider);

@@ -343,6 +343,10 @@ IOReturn RippleSurfaceClient::externalMethod(uint32_t selector, IOExternalMethod
         r = kIOReturnUnsupported;
         break;
     }
+    if (fAccel->qeDebug())
+        LOG("surface %u (pid task %p) selector %u in %u: 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx, struct %u -> 0x%x",
+            fID, fTask, selector, nin, nin > 0 ? in[0] : 0, nin > 1 ? in[1] : 0, nin > 2 ? in[2] : 0,
+            nin > 3 ? in[3] : 0, nin > 4 ? in[4] : 0, a->structureInputSize, r);
     IOLockUnlock(fLock);
     return r;
 }

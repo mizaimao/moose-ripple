@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "util/simple_mtx.h"
 #include "virgl/ripple/ripple_gpu_uapi.h"
@@ -117,8 +118,31 @@ _Static_assert(offsetof(struct gld_pixel_format, display_mask) == 0x30, "pixel f
 
 /* ---- Library ------------------------------------------------------------------------- */
 
-/* RIPPLE_GL_DEBUG=1: log the management calls to stderr. */
-#define DBG(...) do { if (getenv("RIPPLE_GL_DEBUG")) fprintf(stderr, "RippleGLDriver: " __VA_ARGS__); } while (0)
+FILE *ripple_gld_dbg_file(void);
+
+/* Debug log of the management calls: RIPPLE_GL_DEBUG=1 sends it to stderr; for processes
+ * started without our environment (WindowServer), the file /tmp/ripple-gl-debug existing
+ * sends it to /tmp/ripple-gl-PROGRAM-PID.log. */
+FILE *
+ripple_gld_dbg_file(void)
+{
+   static FILE *f;
+   static int checked;
+   if (!checked) {
+      checked = 1;
+      if (getenv("RIPPLE_GL_DEBUG")) {
+         f = stderr;
+      } else if (access("/tmp/ripple-gl-debug", F_OK) == 0) {
+         char path[256];
+         snprintf(path, sizeof(path), "/tmp/ripple-gl-%s-%d.log", getprogname(), (int)getpid());
+         f = fopen(path, "a");
+         if (f)
+            setvbuf(f, NULL, _IOLBF, 0);
+      }
+   }
+   return f;
+}
+#define DBG(...) do { FILE *df_ = ripple_gld_dbg_file(); if (df_) fprintf(df_, "RippleGLDriver: " __VA_ARGS__); } while (0)
 
 static simple_mtx_t lib_lock = SIMPLE_MTX_INITIALIZER;
 static uint32_t lib_display_mask;
@@ -241,11 +265,11 @@ gldChoosePixelFormat(struct gld_pixel_format **out, const uint32_t *attrs)
    uint32_t buffer_mode = 0, depth = 0, stencil = 0, mask = lib_display_mask;
    bool minimum = false, ok = true;
 
-   if (getenv("RIPPLE_GL_DEBUG")) {
-      fprintf(stderr, "RippleGLDriver: gldChoosePixelFormat attrs:");
+   if (ripple_gld_dbg_file()) {
+      fprintf(ripple_gld_dbg_file(), "RippleGLDriver: gldChoosePixelFormat attrs:");
       for (const uint32_t *a = attrs; a && *a; a++)
-         fprintf(stderr, " %u", *a);
-      fprintf(stderr, "\n");
+         fprintf(ripple_gld_dbg_file(), " %u", *a);
+      fprintf(ripple_gld_dbg_file(), "\n");
    }
    *out = NULL;
    for (const uint32_t *a = attrs; a && *a && ok; a++) {

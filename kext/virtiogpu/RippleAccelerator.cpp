@@ -69,6 +69,7 @@ bool RippleAccelerator::start(IOService *provider)
     fQE = fGL && qe && qe->isTrue();
     if (PE_parse_boot_argn("ripple_qe", &arg, sizeof(arg)))
         fQE = fGL && arg != 0;
+    fQEDebug = fQE && PE_parse_boot_argn("ripple_qe", &arg, sizeof(arg)) && arg >= 2;
     setProperty("RippleQE", fQE ? "on" : "off");
     registerService();
     LOG("started: backend virgl, %u capability blobs", fInfo.num_caps);

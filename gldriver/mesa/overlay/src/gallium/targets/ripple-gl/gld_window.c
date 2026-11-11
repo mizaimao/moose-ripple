@@ -47,7 +47,8 @@ static bool cgs_ok;
 
 #define CGS_DEPTH_32 4         /* CGSSetWindowDepth / CGSLockWindowBits format code */
 
-#define DBG(...) do { if (getenv("RIPPLE_GL_DEBUG")) fprintf(stderr, "RippleGLDriver: " __VA_ARGS__); } while (0)
+FILE *ripple_gld_dbg_file(void);   /* ripple_gl_target.c */
+#define DBG(...) do { FILE *df_ = ripple_gld_dbg_file(); if (df_) fprintf(df_, "RippleGLDriver: " __VA_ARGS__); } while (0)
 
 __attribute__((constructor)) static void
 gld_window_init(void)
