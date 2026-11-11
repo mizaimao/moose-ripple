@@ -1,9 +1,12 @@
 # Known issues
 
 Things we found that others running Mac OS X 10.6 in QEMU may run into too. Each entry has a
-number (KI-1, KI-2, ...) that the other documents refer to.
+number (KI-1, KI-2, ...) that the other documents refer to, and a GitHub issue with the same
+number where it is followed up.
 
 ## KI-1: The pointer doesn't follow QEMU's USB tablet exactly (10.6 + `usb-tablet`)
+
+GitHub issue: [#1](https://github.com/mizaimao/moose-ripple/issues/1)
 
 **Symptom.** With QEMU's virtual USB tablet (`-device usb-tablet`, Proxmox `tablet: 1`), 10.6
 places the pointer about 1.18x too far from the screen centre: the centre is exact, the error
@@ -62,6 +65,8 @@ It works with any display driver, not only ours, so it is useful on its own for 
 
 ## KI-2: 10.6.8 can't use a PCI BAR above 4 GB (OVMF)
 
+GitHub issue: [#2](https://github.com/mizaimao/moose-ripple/issues/2)
+
 Found while setting up OpenCore (decision 0007). Under OVMF, QEMU's virtio-gpu 64-bit BAR 2 can
 land above 4 GB (0x800100000 from OVMF, or 0xff10100000 after 10.6 moves it), and the first access
 to it from a driver never completes (`vm_fault` again and again, kernel_task at 100%, no
@@ -72,6 +77,8 @@ boot framebuffer keeps the display.
 
 ## KI-3: configd's PowerManagement plugin crashes at boot (VM 210)
 
+GitHub issue: [#3](https://github.com/mizaimao/moose-ripple/issues/3)
+
 `configd` crashes with `EXC_BAD_ACCESS` in `PowerSourcesHaveChanged` (PowerManagement
 plugin, `CFGetTypeID` on a bad object), usually a few times per boot; launchd restarts it and
 nothing visible breaks. Seen in `/Library/Logs/DiagnosticReports` since VM 210's first boot
@@ -79,6 +86,8 @@ nothing visible breaks. Seen in `/Library/Logs/DiagnosticReports` since VM 210's
 Likely the VM's missing or odd power-source (battery/UPS) information. Not investigated.
 
 ## KI-4: 9600 GT passthrough VM: occasional hang at boot, host logs `irq 16: nobody cared`
+
+GitHub issue: [#4](https://github.com/mizaimao/moose-ripple/issues/4)
 
 Found while setting up OpenCore (decision 0007). On the retro rig the 9600 GT's legacy
 interrupt shares the host's IRQ 16 with the SMBus controller. With a VM that has the card, the
@@ -90,6 +99,8 @@ NVIDIA driver runs, the card uses MSI and the shared line no longer matters. Dec
 restarted.
 
 ## KI-5: Live snapshots can panic the guest ("TLB invalidation IPI timeout")
+
+GitHub issue: [#5](https://github.com/mizaimao/moose-ripple/issues/5)
 
 Seen on VM 210 on 2026-11-10, right after `qm snapshot` paused the running VM (a disk-only
 snapshot pauses the vCPUs briefly). The panic: `TLB invalidation IPI timeout: CPU(s) failed to
@@ -104,6 +115,8 @@ NVRAM flags since 2026-11-10 (`scripts/bootargs.sh`). Snapshots of a stopped VM 
 
 ## KI-6: The guest panics when it goes to sleep (10.6.8 in QEMU, more than one CPU)
 
+GitHub issue: [#6](https://github.com/mizaimao/moose-ripple/issues/6)
+
 **Symptom.** After 10 minutes without input (Energy Saver's default), the VM stops answering:
 the screen keeps its last picture, ssh and ping are dead, QEMU spins on all CPUs. The kernel has
 panicked: `"Error 4 trying to transition CPU 1 to OFF"` at `osfmk/i386/acpi.c:182`, with
@@ -115,6 +128,8 @@ AppleACPIPlatform in the backtrace (`scripts/panic.sh` reads it from guest memor
 sleep.
 
 ## KI-7: configd crashes twice at every boot (VM 210)
+
+GitHub issue: [#7](https://github.com/mizaimao/moose-ripple/issues/7)
 
 `configd` dies in its PowerManagement plugin (`PowerSourcesHaveChanged`, a NULL CFType) twice
 within ten seconds of booting, and `loginwindow` sometimes follows (a NULL run loop source).
