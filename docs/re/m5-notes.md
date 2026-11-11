@@ -1,8 +1,10 @@
 # M5 working notes: Quartz Extreme on virgl
 
-Date: 2026-11-10 (night). Status: QE on and the whole screen GL-composited on VM 210; desktop,
-window shadows, Exposé, Dashboard and Front Row look right. Open: the Dashboard ripple's
-backdrop is white while the ripple runs (about 1 s).
+Date: 2026-11-10 (night). Status: QE on and the whole screen GL-composited on VM 210. Not
+accepted yet (22:40: "not displaying normally"). After the 23:30 fixes the desktop,
+menus, Exposé and Dashboard match Apple's software renderer on the same VM (paired captures
+below) except the menu bar's lower edge. Open: that edge, the Dashboard ripple (not re-tested
+since the fixes).
 Plan: [m5-plan.md](m5-plan.md); research: [qe-decision.md](qe-decision.md) (R1),
 [qe-windowserver-trace.md](qe-windowserver-trace.md) (R2), [qe-verification.md](qe-verification.md)
 (R3, also how to check QE), [qe-display-surface.md](qe-display-surface.md) (R4); design notes
@@ -19,7 +21,8 @@ from VMsvga2: [vmsvga2-qe-design.md](vmsvga2-qe-design.md).
 - Debug switches, all under `/Library/Logs/RippleGL` (world-writable; its existence turns on
   the bundle's per-process log):
   - `trace` present when a process starts: GL call trace, first 6 calls per entry plus call
-    counts every 10 s, in `trace-PROGRAM-PID.log`.
+    counts every 10 s, in `trace-PROGRAM-PID.log`. Logged calls also show ARB program and
+    GLSL text, samples of 32-bit and lookup-table images, and `surface_texture(...)`.
   - `burst` (write a number into it; each new modification time counts): the next N calls in
     full. Written before a WindowServer restart it traces the start.
   - Mesa's own errors ("GL_INVALID_VALUE in glOrtho") go to `mesa-PROGRAM-PID.log`, or to
@@ -65,6 +68,23 @@ from VMsvga2: [vmsvga2-qe-design.md](vmsvga2-qe-design.md).
    desktop and opaque black in Exposé (`gl-check` shows it; 2D alpha textures were fine).
 10. GL windows are written bottom row first (GL's order) into their window memory: every GL
    window was upside down since M4 (gl-gears' blue gear at the bottom).
+11. Surface textures. WindowServer gets what is behind a window (menu bar background, menu
+   blur, the Dock's shelf) by binding a surface to the current texture:
+   `cglsSetInteger(999, {surface, target, format, width, height})` (also 997, 998), straight
+   to GLEngine's `gliSetInteger`. GLEngine refused it with kCGLBadState (its texture
+   bindings never see ours), so those textures had no image and fixed function drew them in
+   the plain white vertex colour. `cgl_takeover.c` now replaces the `gliSetInteger` entry of
+   CoreGraphics' GLI table (after the cgls block's dispatch table, +0x58) and
+   `ripple_cgl_surface_texture` fills the bound texture: from the window framebuffer for the
+   surface the context draws into, from memory for other surfaces. Fixed: the missing Apple
+   menu logo, black bars under menu titles after a menu closed, the dark block top left
+   (the owner's 22:52 screenshot).
+12. Accelerator surfaces other than the screen region (menu bar background 1280x28, Dock
+   1248x44) have the GL origin at the top left, like the screen region: WindowServer draws
+   the menu bar's 22 rows with `glViewport(0, 0, 1280, 22)` and means the top rows. Viewport,
+   scissor and reads map `y` to `height - y - h` there (`win_y`), and their memory is written
+   in Mesa's resource order. Before, the menu bar strip with the Apple logo came out upside
+   down, then 6 rows low (23:2x).
 
 ## Results (VM 210, 2026-11-10)
 
@@ -90,8 +110,32 @@ from VMsvga2: [vmsvga2-qe-design.md](vmsvga2-qe-design.md).
   Steps are QEMU's 30 ms VNC tick. Exposé starts about 2.5 times sooner under QE; Dashboard's
   first change comes about 130 ms later.
 
+## Paired captures, QE against software (VM 210, 2026-11-10 23:17-23:30)
+
+Same VM, same session state; software = booted without `ripple_gl`/`ripple_qe` (Apple's
+software compositor), QE = default config (no `float_pixels`).
+
+| Scene | QE | Software |
+|---|---|---|
+| Desktop with a Finder window | [qe](img/m5-qe-desktop.png) | [sw](img/m5-sw-desktop.png) |
+| File menu open | [qe](img/m5-qe-menu-open.png) | [sw](img/m5-sw-menu-open.png) |
+| Exposé | [qe](img/m5-qe-expose.png) | [sw](img/m5-sw-expose.png) |
+| Dashboard | [qe](img/m5-qe-dashboard.png) | [sw](img/m5-sw-dashboard.png) |
+
+By numbers (`tools/vncgrab/pngpix.py`): desktop identical; Dock within 2-7 levels; Apple
+logo rows identical. Differences: the menu bar's lower edge (software fades to 234 and 214 in
+rows 16-20 with a dark line of 76 in row 21; QE stays 255 with a line of 150), and menus blur
+what is behind them under QE (WindowServer's own GL background blur; software shows it sharp
+through the translucent menu). The software menu bar is opaque on this VM too, so
+"translucent" isn't the software look.
+
 ## Open problems
 
+- **Menu bar lower edge:** the fade and dark line come from WindowServer's `CIMenuGenerator`
+  (`_CGXUpdateMagicMenuBar`), which runs on the CPU only for unaccelerated backing stores;
+  for an accelerated one WindowServer expects to apply it on the GPU while compositing
+  (layer filter, `sCGXEnableServerCI`), and that path doesn't run yet. Core Image on the GPU
+  in WindowServer (M6 territory).
 - **Dashboard ripple backdrop white:** while a new widget ripples (about 1 s), the 522x598
   rectangle around it is white apart from the rippling widget
   ([frame](img/m5-dashboard-ripple-white.png)); the screen is right again afterwards. Core
