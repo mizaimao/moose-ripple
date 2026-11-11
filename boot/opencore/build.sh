@@ -22,13 +22,14 @@ duet=${OC_DUET:-bootX64-blockio}
 # 1. Stage on dev.lan in the repo's .venv (Python only from a venv in the repo):
 #    fetch by SHA-256, ocvalidate, collect the files. 2. Build the image on the rig with shell
 #    tools only; the staged files travel as a tar stream through this machine.
-work=Projects/moose-ripple/tmp-opencore
-ssh "$DEV" "mkdir -p ~/$work"
+# dev.lan scratch lives in /tmp: scripts/build.sh mirrors the repo there with rsync --delete.
+work=/tmp/ripple-opencore
+ssh "$DEV" "mkdir -p $work"
 scp -q "$here/stage.py" "$here/config.plist" "$here/sources.txt" "$DEV:$work/"
 [ -d "$here/acpi" ] && scp -qr "$here/acpi" "$DEV:$work/"
 ssh "$RETRO" 'mkdir -p /tmp/opencore-build'
 scp -q "$here/mkimage.sh" "$RETRO:/tmp/opencore-build/mkimage.sh"
-ssh "$DEV" "cd ~/Projects/moose-ripple && .venv/bin/python -I tmp-opencore/stage.py tmp-opencore $variant $duet" |
+ssh "$DEV" "~/Projects/moose-ripple/.venv/bin/python -I $work/stage.py $work $variant $duet" |
     ssh "$RETRO" "bash /tmp/opencore-build/mkimage.sh /tmp/opencore-build/opencore.img" || die "build failed"
 
 [ -n "$vmid" ] || exit 0
