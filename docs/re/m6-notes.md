@@ -314,3 +314,12 @@ Still washed out on ours, but now located: it is the composition's image accumul
   1 (the first frame where the feedback counts), starting with the two feedback textures'
   alpha: a fill of 0.25 alpha blended over itself each frame converges to white unless
   something limits it, which is what the picture looks like.
+
+## Real Racing 2 intro: where it stands (paused 2026-11-11 for the release)
+
+Core Animation's window context in the game draws into a window framebuffer that Mesa reports
+incomplete and 0x0 (status 0x8CD7), although its drawable holds a 1280x800 back texture: its
+clears and the video quad are dropped, so its frames are empty. The game's own context on the
+same window has a complete 1280x800 framebuffer. `swapdebug` now logs the framebuffer status and
+the drawable behind each swap. Next step when resumed: why that framebuffer is never validated
+to the drawable's size.

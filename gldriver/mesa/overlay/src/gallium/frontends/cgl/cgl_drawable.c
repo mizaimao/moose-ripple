@@ -287,6 +287,7 @@ ripple_cgl_drawable_destroy(struct ripple_cgl_drawable *d)
  * Core Animation context swapped empty frames). */
 #include "main/glthread.h"
 #include "main/dispatch.h"
+#include "main/fbobject.h"
 #include <unistd.h>
 #include <stdlib.h>
 #include <sys/stat.h>
@@ -379,6 +380,37 @@ swap_debug(struct ripple_cgl_context *ctx)
            gl->Color.AlphaRefUnclamped, gl->Color.BlendEnabled & 1, gl->Color.ColorMask & 0xf,
            gl->Polygon.CullFlag, gl->DrawBuffer ? gl->DrawBuffer->ColorDrawBuffer[0] : 0,
            gl->Polygon.OffsetFill, gl->Color.ColorLogicOpEnabled);
+   /* Whether the draw framebuffer is complete (an incomplete one turns clears and draws into
+    * no-ops with only a GL error), and what each attachment is. */
+   if (gl->DrawBuffer) {
+      struct gl_framebuffer *fbo = gl->DrawBuffer;
+      _mesa_test_framebuffer_completeness(gl, fbo);
+      fprintf(ripple_gld_dbg_file(), "RippleGLDriver:   framebuffer %u status 0x%x %ux%u, visual "
+              "depth %d stencil %d samples %d:", fbo->Name, fbo->_Status, fbo->Width, fbo->Height,
+              fbo->Visual.depthBits, fbo->Visual.stencilBits, fbo->Visual.samples);
+      for (unsigned b = 0; b < BUFFER_COUNT; b++) {
+         struct gl_renderbuffer *rb = fbo->Attachment[b].Renderbuffer;
+         if (rb)
+            fprintf(ripple_gld_dbg_file(), " [%u: %ux%u fmt %d samples %u]", b, rb->Width,
+                    rb->Height, rb->Format, rb->NumSamples);
+      }
+      fputc('\n', ripple_gld_dbg_file());
+   }
+   struct ripple_cgl_drawable *dd = ctx->draw;
+   if (dd) {
+      fprintf(ripple_gld_dbg_file(), "RippleGLDriver:   drawable %p (id %u, stamp %d) %ux%u rect %d, "
+              "visual buffers 0x%x depth format %d:", (void *)dd, dd->base.ID,
+              p_atomic_read(&dd->base.stamp), dd->width, dd->height, dd->rect,
+              dd->visual.buffer_mask, dd->visual.depth_stencil_format);
+      for (unsigned a = 0; a < ST_ATTACHMENT_COUNT; a++)
+         if (dd->textures[a])
+            fprintf(ripple_gld_dbg_file(), " [%u: %ux%u target %d format %d]", a,
+                    dd->textures[a]->width0, dd->textures[a]->height0, dd->textures[a]->target,
+                    dd->textures[a]->format);
+      fputc('\n', ripple_gld_dbg_file());
+   } else {
+      fprintf(ripple_gld_dbg_file(), "RippleGLDriver:   no drawable\n");
+   }
 }
 
 void
