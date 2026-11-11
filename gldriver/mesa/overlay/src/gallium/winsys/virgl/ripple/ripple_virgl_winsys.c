@@ -40,6 +40,8 @@
 
 #define CACHE_TIMEOUT_USEC      1000000
 
+static unsigned work_count;       /* submits and uploads so far (ripple_virgl_work_count) */
+
 /* GET_CAPS returns its blob inline (IOKit passes up to 4 KB that way). */
 static_assert(sizeof(union virgl_caps) <= 4096, "virgl caps blob too big for GET_CAPS");
 
@@ -343,6 +345,8 @@ static int ripple_transfer(struct virgl_winsys *vws, struct virgl_hw_res *res, u
    uint64_t fence = 0;
    uint32_t out_cnt = 1;
 
+   if (dir == RIPPLE_GPU_TO_DEVICE)
+      p_atomic_inc(&work_count);
    memset(&t, 0, sizeof(t));
    t.context = ws->ctx;
    t.buffer = res->res_handle;
@@ -522,6 +526,12 @@ static bool ripple_res_is_referenced(struct virgl_winsys *vws, struct virgl_cmd_
    return p_atomic_read(&res->num_cs_references) != 0;
 }
 
+unsigned
+ripple_virgl_work_count(void)
+{
+   return p_atomic_read(&work_count);
+}
+
 /* One SUBMIT. `cmds` must have RIPPLE_PREFIX_BYTES of room in front of it. */
 static int ripple_submit(struct ripple_winsys *ws, const uint32_t *handles, unsigned nh,
                          uint32_t *cmds, unsigned ndw, uint64_t *fence)
@@ -530,6 +540,7 @@ static int ripple_submit(struct ripple_winsys *ws, const uint32_t *handles, unsi
    struct ripple_gpu_submit *s = (struct ripple_gpu_submit *)start;
    uint32_t out_cnt = 1;
 
+   p_atomic_inc(&work_count);
    memcpy(start + sizeof(*s), handles, nh * 4);
    s->context = ws->ctx;
    s->num_handles = nh;

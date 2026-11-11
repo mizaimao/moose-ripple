@@ -171,18 +171,43 @@ bool
 ripple_cgl_device_display(struct pipe_resource *res, unsigned x, unsigned y, unsigned w,
                           unsigned h)
 {
+   /* The buffer last shown and the backend's work count then: showing the same buffer again
+    * with nothing sent to the GPU since changes nothing on screen, and costs the host a read-out
+    * of the whole screen. WindowServer does that in most frames: it flushes the screen, then
+    * switches to another surface, which presents the screen again (performance stage,
+    * 2026-11-11). */
+   static simple_mtx_t shown_lock = SIMPLE_MTX_INITIALIZER;
+   static uint32_t shown_handle;
+   static unsigned shown_work, shown_x, shown_y, shown_w, shown_h;
    io_connect_t conn = device_connection();
    uint32_t handle = 0;
+   unsigned work = 0;
+   bool ok;
 
    switch (device_backend) {
    case RIPPLE_GPU_BACKEND_VIRGL:
       handle = res ? ripple_virgl_resource_handle(res) : 0;
+      work = ripple_virgl_work_count();
       break;
    }
    if (!conn || (res && !handle))
       return false;
+   simple_mtx_lock(&shown_lock);
+   if (handle && handle == shown_handle && work == shown_work &&
+       x == shown_x && y == shown_y && w == shown_w && h == shown_h) {
+      simple_mtx_unlock(&shown_lock);
+      return true;
+   }
    uint64_t in[5] = { handle, x, y, w, h };
-   return IOConnectCallScalarMethod(conn, RIPPLE_GPU_DISPLAY, in, 5, NULL, NULL) == KERN_SUCCESS;
+   ok = IOConnectCallScalarMethod(conn, RIPPLE_GPU_DISPLAY, in, 5, NULL, NULL) == KERN_SUCCESS;
+   shown_handle = ok ? handle : 0;
+   shown_work = work;
+   shown_x = x;
+   shown_y = y;
+   shown_w = w;
+   shown_h = h;
+   simple_mtx_unlock(&shown_lock);
+   return ok;
 }
 
 /* ---- The screen texture (Quartz Extreme, M5) -------------------------------------------- *
