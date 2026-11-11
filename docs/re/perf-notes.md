@@ -91,3 +91,11 @@ Finder window open. Frames composited per second, peak / mean:
 Exposé and menus are on a par with software now; Dashboard (Core Animation widgets, dimming)
 composites about half as many frames. Suspect: client-storage textures are uploaded again at
 their first use in every frame (the emulation), and Dashboard has many.
+
+9600 GT (VM 211, Apple's NVIDIA driver, 1920x1080, two runs): Exposé 40-47 / 21-25, Dashboard
+30-97 / 21-31, menus 19-22 / 11-12. It composites full screens at most 60 times a second, so
+its frame counts are lower while its pixel rate is higher: screens/s peak 17 (Exposé) and 24
+(Dashboard) of 2.07 Mpixels, i.e. about 35 and 50 Mpixels/s, against ours 10-15 screens/s of
+1.02 Mpixels (10-15 Mpixels/s) and software's 9-19 (9-19 Mpixels/s). Frame counts aren't
+comparable across these three; what the eye sees is smoothness at the display, which for ours
+also goes through QEMU's display path.
