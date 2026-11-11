@@ -93,6 +93,11 @@ present_resource(struct st_context *st, struct ripple_cgl_drawable *d,
    struct pipe_box box;
    unsigned w = res->width0, h = res->height0, stride = w * 4;
 
+   if (d->gpu_display) {
+      st_context_flush(st, 0, NULL, NULL, NULL);
+      ripple_cgl_device_display(res, 0, 0, w, h);
+      return;
+   }
    if (!d->present || !w || !h)
       return;
    if (d->pixels_size < (size_t)stride * h) {
@@ -168,10 +173,20 @@ ripple_cgl_drawable_set_present(struct ripple_cgl_drawable *d, ripple_cgl_presen
 }
 
 void
+ripple_cgl_drawable_set_gpu_display(struct ripple_cgl_drawable *d, bool on)
+{
+   if (d->gpu_display && !on)
+      ripple_cgl_device_display(NULL, 0, 0, 0, 0);    /* give the display back */
+   d->gpu_display = on;
+}
+
+void
 ripple_cgl_drawable_destroy(struct ripple_cgl_drawable *d)
 {
    if (!d)
       return;
+   if (d->gpu_display)
+      ripple_cgl_device_display(NULL, 0, 0, 0, 0);
    st_api_destroy_drawable(&d->base);
    for (unsigned i = 0; i < ST_ATTACHMENT_COUNT; i++)
       pipe_resource_reference(&d->textures[i], NULL);
@@ -194,4 +209,12 @@ ripple_cgl_context_swap(struct ripple_cgl_context *ctx)
       res = d->textures[ST_ATTACHMENT_FRONT_LEFT];
    if (res)
       present_resource(ctx->st, d, res);
+   /* Showing the back buffer itself: flip, so the next frame isn't drawn into the texture on
+    * screen. Mesa picks up the swapped textures through the stamp. */
+   if (d->gpu_display && d->textures[ST_ATTACHMENT_BACK_LEFT] && d->textures[ST_ATTACHMENT_FRONT_LEFT]) {
+      struct pipe_resource *t = d->textures[ST_ATTACHMENT_BACK_LEFT];
+      d->textures[ST_ATTACHMENT_BACK_LEFT] = d->textures[ST_ATTACHMENT_FRONT_LEFT];
+      d->textures[ST_ATTACHMENT_FRONT_LEFT] = t;
+      p_atomic_inc(&d->base.stamp);
+   }
 }

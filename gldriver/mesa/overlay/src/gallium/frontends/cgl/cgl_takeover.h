@@ -12,8 +12,14 @@ struct ripple_cgl_context;
 void *ripple_cgl_gc_from_create_arg(void *arg5);
 
 /* Point the CGL context that belongs to GLEngine context `gc` at Mesa (our dispatch table,
- * `rend` = ctx). Call once the CGL context is complete (gldSetInteger 0x2bd). False if any
- * check fails; the context then stays with GLEngine. */
-bool ripple_cgl_take_over(void *gc, struct ripple_cgl_context *ctx);
+ * `rend` = ctx). Call once the CGL context is complete (gldSetInteger 0x2bd). 0 on success
+ * (1: a CoreGraphics context, taken over by hand);
+ * a negative number names the check that failed (see cgl_takeover.c), and the context then
+ * stays with GLEngine. */
+int ripple_cgl_take_over(void *gc, struct ripple_cgl_context *ctx);
+
+/* The context taken over for GLEngine context `rend`, if a caller passes that as `rend`. */
+struct ripple_cgl_context *ripple_cgl_rend_for(void *rend);
+void ripple_cgl_forget(struct ripple_cgl_context *ctx);
 
 #endif

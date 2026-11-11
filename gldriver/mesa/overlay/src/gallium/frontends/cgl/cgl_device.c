@@ -23,6 +23,7 @@
 static simple_mtx_t device_lock = SIMPLE_MTX_INITIALIZER;
 static struct pipe_frontend_screen *device_fscreen;
 static bool device_failed;
+static uint32_t device_backend;   /* RIPPLE_GPU_BACKEND_* of the screen */
 
 static int
 ripple_cgl_get_param(struct pipe_frontend_screen *fscreen, enum st_manager_param param)
@@ -73,6 +74,7 @@ ripple_cgl_create_screen(void)
    }
    switch (info.backend) {
    case RIPPLE_GPU_BACKEND_VIRGL:
+      device_backend = info.backend;
       return ripple_virgl_screen_create(conn, &info, NULL);   /* owns conn from here */
    default:
       debug_printf("ripple: unknown GPU backend %u\n", info.backend);
@@ -122,4 +124,49 @@ ripple_cgl_device_release(void)
    }
    device_failed = false;
    simple_mtx_unlock(&device_lock);
+}
+
+/* The screen's own kernel connection (the frontend's calls share it with the winsys). */
+static io_connect_t
+device_connection(void)
+{
+   struct pipe_frontend_screen *fscreen = ripple_cgl_device_fscreen();
+
+   if (!fscreen)
+      return 0;
+   switch (device_backend) {
+   case RIPPLE_GPU_BACKEND_VIRGL:
+      return ripple_virgl_screen_connection(fscreen->screen);
+   default:
+      return 0;
+   }
+}
+
+bool
+ripple_cgl_device_surface_info(uint32_t id, struct ripple_gpu_surface_info *out)
+{
+   io_connect_t conn = device_connection();
+   uint64_t in = id;
+   size_t size = sizeof(*out);
+
+   return conn && IOConnectCallMethod(conn, RIPPLE_GPU_SURFACE_INFO, &in, 1, NULL, 0, NULL, NULL,
+                                      out, &size) == KERN_SUCCESS;
+}
+
+bool
+ripple_cgl_device_display(struct pipe_resource *res, unsigned x, unsigned y, unsigned w,
+                          unsigned h)
+{
+   io_connect_t conn = device_connection();
+   uint32_t handle = 0;
+
+   switch (device_backend) {
+   case RIPPLE_GPU_BACKEND_VIRGL:
+      handle = res ? ripple_virgl_resource_handle(res) : 0;
+      break;
+   }
+   if (!conn || (res && !handle))
+      return false;
+   uint64_t in[5] = { handle, x, y, w, h };
+   return IOConnectCallScalarMethod(conn, RIPPLE_GPU_DISPLAY, in, 5, NULL, NULL) == KERN_SUCCESS;
 }

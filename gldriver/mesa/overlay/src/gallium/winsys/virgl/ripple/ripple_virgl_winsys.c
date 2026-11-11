@@ -710,3 +710,19 @@ struct pipe_screen *ripple_virgl_screen_create(io_connect_t conn,
       vws->destroy(vws);
    return screen;
 }
+
+/* ---- For the CGL frontend: the screen's connection and a resource's buffer handle ------- */
+
+#include "virgl/virgl_resource.h"
+#include "virgl/virgl_screen.h"
+
+io_connect_t ripple_virgl_screen_connection(struct pipe_screen *screen)
+{
+   return ripple_winsys(virgl_screen(screen)->vws)->conn;
+}
+
+uint32_t ripple_virgl_resource_handle(struct pipe_resource *res)
+{
+   struct virgl_resource *vres = virgl_resource(res);
+   return vres && vres->hw_res ? vres->hw_res->res_handle : 0;
+}

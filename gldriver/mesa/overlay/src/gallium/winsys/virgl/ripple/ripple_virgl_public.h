@@ -18,4 +18,10 @@ struct pipe_screen *ripple_virgl_screen_create(io_connect_t conn,
                                                const struct ripple_gpu_info *info,
                                                const struct pipe_screen_config *config);
 
+/* The kernel connection behind a screen made here, for the frontend's own calls (surface
+ * queries, DISPLAY), and the buffer handle of one of its resources. */
+io_connect_t ripple_virgl_screen_connection(struct pipe_screen *screen);
+struct pipe_resource;
+uint32_t ripple_virgl_resource_handle(struct pipe_resource *res);
+
 #endif

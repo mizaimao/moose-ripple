@@ -15,6 +15,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "util/simple_mtx.h"
+
 #include "cgl_context.h"
 #include "cgl_dispatch.h"
 #include "cgl_takeover.h"
@@ -27,6 +29,7 @@
 #define GC_MAGIC_OFFSET        0x6588        /* in GLEngine's context */
 #define GC_MAGIC               0x3463a223u
 #define GC_FRONT_DISPATCH      0x6550        /* holds &cgl->disp */
+#define GC_BACK_DISPATCH       0x6558        /* holds the back table */
 #define GC_FROM_CREATE_ARG5    0x8b0         /* gldCreateContext's 5th argument is gc + this */
 #define HAVE_TAKEOVER_LAYOUT   1
 #elif defined(__i386__)
@@ -35,6 +38,7 @@
 #define GC_MAGIC_OFFSET        0x5844
 #define GC_MAGIC               0x3463a223u
 #define GC_FRONT_DISPATCH      0x5820
+#define GC_BACK_DISPATCH       0x5824
 #define GC_FROM_CREATE_ARG5    0x890
 #define HAVE_TAKEOVER_LAYOUT   1
 #else
@@ -52,6 +56,48 @@ struct cgl_object_head {        /* public part of struct _CGLContextObject (CGLC
 static void *dispatch_table[GLI_DISPATCH_ENTRIES];
 static cgl_select_dispatch_fn select_dispatch;
 static cgl_back_dispatch_fn back_dispatch;
+
+/* Contexts taken over, by the GLEngine context pointer callers might pass as `rend` (CoreGraphics'
+ * own contexts in WindowServer may): ripple_cgl_rend_for() maps it back. */
+#define MAX_TAKEN 64
+static struct { void *gc; struct ripple_cgl_context *ctx; } taken[MAX_TAKEN];
+static simple_mtx_t taken_lock = SIMPLE_MTX_INITIALIZER;
+
+static void
+remember(void *gc, struct ripple_cgl_context *ctx)
+{
+   simple_mtx_lock(&taken_lock);
+   for (unsigned i = 0; i < MAX_TAKEN; i++) {
+      if (!taken[i].gc || taken[i].gc == gc) {
+         taken[i].gc = gc;
+         taken[i].ctx = ctx;
+         break;
+      }
+   }
+   simple_mtx_unlock(&taken_lock);
+}
+
+struct ripple_cgl_context *
+ripple_cgl_rend_for(void *rend)
+{
+   struct ripple_cgl_context *ctx = NULL;
+   simple_mtx_lock(&taken_lock);
+   for (unsigned i = 0; i < MAX_TAKEN && !ctx; i++)
+      if (taken[i].gc == rend)
+         ctx = taken[i].ctx;
+   simple_mtx_unlock(&taken_lock);
+   return ctx;
+}
+
+void
+ripple_cgl_forget(struct ripple_cgl_context *ctx)
+{
+   simple_mtx_lock(&taken_lock);
+   for (unsigned i = 0; i < MAX_TAKEN; i++)
+      if (taken[i].ctx == ctx)
+         taken[i].gc = NULL, taken[i].ctx = NULL;
+   simple_mtx_unlock(&taken_lock);
+}
 
 __attribute__((constructor)) static void
 ripple_cgl_takeover_init(void)
@@ -78,36 +124,59 @@ ripple_cgl_gc_from_create_arg(void *arg5)
    return NULL;
 }
 
-bool
+int
 ripple_cgl_take_over(void *gc, struct ripple_cgl_context *ctx)
 {
 #if HAVE_TAKEOVER_LAYOUT
    if (!gc || !select_dispatch || !back_dispatch || !dispatch_table[0])
-      return false;
+      return -1;
    if (*(uint32_t *)((uint8_t *)gc + GC_MAGIC_OFFSET) != GC_MAGIC)
-      return false;
+      return -2;
    void **front = *(void ***)((uint8_t *)gc + GC_FRONT_DISPATCH);
    if (!front)
-      return false;
+      return -3;
    struct cgl_object_head *cgl = (struct cgl_object_head *)((uint8_t *)front - sizeof(void *));
-   if (*(uint32_t *)((uint8_t *)cgl + CGL_MAGIC_OFFSET) != CGL_MAGIC || cgl->rend != gc)
-      return false;
+   if (*(uint32_t *)((uint8_t *)cgl + CGL_MAGIC_OFFSET) != CGL_MAGIC) {
+      /* Not a CGL context: CoreGraphics makes WindowServer's contexts through GLEngine itself.
+       * Same head ({rend, disp[764]}) and a back table at gc + GC_BACK_DISPATCH: do what
+       * CGLSelectDispatch does by hand. GLEngine writes go wherever back[i] is set. */
+      void **back = *(void ***)((uint8_t *)gc + GC_BACK_DISPATCH);
+      if (cgl->rend != gc)
+         return -4;
+      if (!back)
+         return -10;
+      /* 2026-11-10: in WindowServer the front table is read-only (in CoreGraphics' image):
+       * writing it crashed. Off until we know which table CoreGraphics calls through. */
+      if (1)
+         return -11;
+      for (unsigned i = 0; i < GLI_DISPATCH_ENTRIES; i++)
+         if (!back[i])
+            back[i] = front[i];
+      for (unsigned i = 0; i < GLI_DISPATCH_ENTRIES; i++)
+         front[i] = dispatch_table[i];
+      cgl->rend = ctx;
+      remember(gc, ctx);
+      return 1;
+   }
+   if (cgl->rend != gc)
+      return -5;
 
    /* CGLCreateContext must have finished moving GLEngine's table to the front: the back
     * table is then all zero. */
    void **back = back_dispatch(cgl);
    if (!back)
-      return false;
+      return -6;
    for (unsigned i = 0; i < GLI_DISPATCH_ENTRIES; i++)
       if (back[i])
-         return false;
+         return -7;
 
    select_dispatch(cgl, dispatch_table);
    if (cgl->disp[0] != dispatch_table[0])
-      return false;
+      return -8;
    cgl->rend = ctx;
-   return true;
+   remember(gc, ctx);
+   return 0;
 #else
-   return false;
+   return -9;
 #endif
 }

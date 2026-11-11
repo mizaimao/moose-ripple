@@ -35,6 +35,7 @@ enum ripple_gpu_method {
     RIPPLE_GPU_TRANSFER        = 7, /* in struct: ripple_gpu_transfer; out scalar: fence */
     RIPPLE_GPU_WAIT            = 8, /* in scalars: fence, timeout ms; out scalar: 1 signalled, 0 not */
     RIPPLE_GPU_DISPLAY         = 9, /* in scalars: buffer (0 = back to the console), x, y, w, h */
+    RIPPLE_GPU_SURFACE_INFO    = 10, /* in scalar: surface id; out struct: ripple_gpu_surface_info */
     RIPPLE_GPU_METHOD_COUNT
 };
 
@@ -76,6 +77,22 @@ struct ripple_gpu_transfer {
     uint32_t x, y, z, width, height, depth;
     uint32_t stride, layer_stride;  /* layout in the backing memory; 0 = backend default */
     uint64_t offset;                /* byte offset in the backing memory */
+};
+
+/* An accelerator surface (the standard IOAccelerator surface client, type 0): what a GL
+ * driver needs to render for it. Backing addresses are only given to the task that owns the
+ * surface (its own memory). */
+#define RIPPLE_GPU_SURFACE_BACKING  0x1     /* has CPU backing; backing_address valid for the owner */
+#define RIPPLE_GPU_SURFACE_SCREEN   0x2     /* covers the whole screen at 0,0: a display surface */
+struct ripple_gpu_surface_info {
+    uint32_t id;
+    uint32_t flags;                 /* RIPPLE_GPU_SURFACE_* */
+    uint32_t width, height;         /* buffer size in pixels */
+    uint32_t row_bytes;             /* of the backing */
+    int32_t  x, y;                  /* screen position of buffer pixel (0,0) */
+    uint32_t screen_width, screen_height;
+    uint32_t reserved;
+    uint64_t backing_address;       /* in the owner's address space, or 0 */
 };
 
 /* ---- Backend: virgl ------------------------------------------------------------------------

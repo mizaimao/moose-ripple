@@ -44,7 +44,10 @@ bool RippleSurfaceClient::initWithTask(task_t owningTask, void *securityID, UInt
 bool RippleSurfaceClient::start(IOService *provider)
 {
     fAccel = OSDynamicCast(RippleAccelerator, provider);
-    return fAccel && super::start(provider);
+    if (!fAccel || !super::start(provider))
+        return false;
+    fAccel->addSurface(this);
+    return true;
 }
 
 void RippleSurfaceClient::releaseBacking()
@@ -68,6 +71,8 @@ void RippleSurfaceClient::releaseBacking()
 
 IOReturn RippleSurfaceClient::clientClose(void)
 {
+    if (fAccel)
+        fAccel->removeSurface(this);
     IOLockLock(fLock);
     releaseBacking();
     IOLockUnlock(fLock);
@@ -102,6 +107,9 @@ IOReturn RippleSurfaceClient::setShape(uint32_t options, uint32_t framebuffer,
         IOACCEL_SIZEOF_DEVICE_REGION(rgn) > regionBytes)
         return kIOReturnBadArgument;
     const IOAccelBounds &b = rgn->bounds;
+    if (fAccel->qeDebug())
+        IOLog("RippleSurfaceClient: surface %u mode 0x%x shape: options 0x%x fb %u backing 0x%llx rowbytes %u, bounds %d,%d %dx%d, %u rects\n",
+              fID, fMode, options, framebuffer, backing, rowBytes, b.x, b.y, b.w, b.h, rgn->num_rects);
     if (b.w <= 0 || b.h <= 0)
         return kIOReturnSuccess;        // empty shape: nothing to do
 
@@ -349,4 +357,33 @@ IOReturn RippleSurfaceClient::externalMethod(uint32_t selector, IOExternalMethod
             nin > 3 ? in[3] : 0, nin > 4 ? in[4] : 0, a->structureInputSize, r);
     IOLockUnlock(fLock);
     return r;
+}
+
+// ---- Description for GL drivers (RippleAccelerator::describeSurface) ----------------------
+
+bool RippleSurfaceClient::describe(task_t asker, struct ripple_gpu_surface_info *out)
+{
+    IOLockLock(fLock);
+    bool ok = fID && fBufWidth && fBufHeight;
+    if (ok) {
+        uint32_t sw, sh;
+        fAccel->framebuffer()->screenSize(&sw, &sh);
+        bzero(out, sizeof(*out));
+        out->id = fID;
+        out->width = fBufWidth;
+        out->height = fBufHeight;
+        out->row_bytes = fRowBytes;
+        out->x = fOriginX;
+        out->y = fOriginY;
+        out->screen_width = sw;
+        out->screen_height = sh;
+        if (fClientMem || fOwnMem)
+            out->flags |= RIPPLE_GPU_SURFACE_BACKING;
+        if (asker == fTask)
+            out->backing_address = fClientMem ? fClientAddr : (fOwnMap ? fOwnMap->getAddress() : 0);
+        if (fOriginX == 0 && fOriginY == 0 && fBufWidth == sw && fBufHeight == sh && !fClientMem)
+            out->flags |= RIPPLE_GPU_SURFACE_SCREEN;
+    }
+    IOLockUnlock(fLock);
+    return ok;
 }

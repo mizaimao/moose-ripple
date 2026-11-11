@@ -14,6 +14,7 @@
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/graphics/IOAccelSurfaceConnect.h>
+#include "ripple_gpu_uapi.h"
 
 class RippleAccelerator;
 
@@ -66,6 +67,8 @@ public:
                                     void *reference);
 
     uint32_t surfaceID() const { return fID; }
+    // For RippleAccelerator::describeSurface (called with the accelerator's surface lock held).
+    bool describe(task_t asker, struct ripple_gpu_surface_info *out);
 };
 
 #endif

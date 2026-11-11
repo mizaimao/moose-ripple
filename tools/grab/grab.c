@@ -12,7 +12,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: grab OUT.png\n");
         return 2;
     }
-    fprintf(stderr, "grab: display 0x%x\n", CGMainDisplayID());
+    fprintf(stderr, "grab: display 0x%x, Quartz Extreme (CGDisplayUsesOpenGLAcceleration) %d\n",
+            CGMainDisplayID(), (int)CGDisplayUsesOpenGLAcceleration(CGMainDisplayID()));
     CGImageRef img = CGWindowListCreateImage(CGRectInfinite, kCGWindowListOptionOnScreenOnly,
                                              kCGNullWindowID, kCGWindowImageDefault);
     fprintf(stderr, "grab: image %p\n", (void *)img);

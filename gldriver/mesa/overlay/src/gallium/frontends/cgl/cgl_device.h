@@ -5,6 +5,7 @@
 #define CGL_DEVICE_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 struct pipe_frontend_screen;
 struct ripple_gpu_info;
@@ -15,6 +16,15 @@ bool ripple_cgl_device_info(struct ripple_gpu_info *info);
 
 /* The process's gallium screen, made on first use; NULL if there is no usable GPU. */
 struct pipe_frontend_screen *ripple_cgl_device_fscreen(void);
+
+/* Describe accelerator surface `id` (the kernel's surface clients), for drawables on them. */
+bool ripple_cgl_device_surface_info(uint32_t id, struct ripple_gpu_surface_info *out);
+
+/* Show `res` (region x, y, w, h) on the display, or present it again; NULL gives the display
+ * back to the console framebuffer. */
+struct pipe_resource;
+bool ripple_cgl_device_display(struct pipe_resource *res, unsigned x, unsigned y, unsigned w,
+                               unsigned h);
 
 /* Destroy the screen (library termination). */
 void ripple_cgl_device_release(void);

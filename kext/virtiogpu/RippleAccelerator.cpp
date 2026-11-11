@@ -23,6 +23,10 @@ bool RippleAccelerator::start(IOService *provider)
         return false;
     fDev = fFB->device();
     fDev->retain();
+    fSurfacesLock = IOLockAlloc();
+    fSurfaces = OSArray::withCapacity(8);
+    if (!fSurfacesLock || !fSurfaces)
+        return false;
 
     bzero(&fInfo, sizeof(fInfo));
     fInfo.api_version = RIPPLE_GPU_API_VERSION;
@@ -71,6 +75,12 @@ bool RippleAccelerator::start(IOService *provider)
         fQE = fGL && arg != 0;
     fQEDebug = fQE && PE_parse_boot_argn("ripple_qe", &arg, sizeof(arg)) && arg >= 2;
     setProperty("RippleQE", fQE ? "on" : "off");
+    if (fQE) {
+        // What NVIDIA's accelerator publishes (M1, docs/re/ioaccelerator-interface.md) and
+        // VMsvga2 sets only with its QE option: candidates for WindowServer's QE check (R1).
+        setProperty("AccelCaps", 3ULL, 32);
+        setProperty("IOAccelRevision", 2ULL, 32);
+    }
     registerService();
     LOG("started: backend virgl, %u capability blobs", fInfo.num_caps);
     return true;
@@ -78,6 +88,14 @@ bool RippleAccelerator::start(IOService *provider)
 
 void RippleAccelerator::stop(IOService *provider)
 {
+    if (fSurfaces) {
+        fSurfaces->release();
+        fSurfaces = 0;
+    }
+    if (fSurfacesLock) {
+        IOLockFree(fSurfacesLock);
+        fSurfacesLock = 0;
+    }
     if (fGL && fFB) {
         fFB->removeProperty("IOAccelTypes");
         fFB->removeProperty("IOAccelIndex");
@@ -133,4 +151,38 @@ IOReturn RippleAccelerator::newUserClient(task_t owningTask, void *securityID, U
     }
     *handler = client;
     return kIOReturnSuccess;
+}
+
+// ---- Surfaces (RippleSurfaceClient) ---------------------------------------------------------
+
+void RippleAccelerator::addSurface(OSObject *s)
+{
+    IOLockLock(fSurfacesLock);
+    fSurfaces->setObject(s);
+    IOLockUnlock(fSurfacesLock);
+}
+
+void RippleAccelerator::removeSurface(OSObject *s)
+{
+    IOLockLock(fSurfacesLock);
+    for (unsigned i = 0; i < fSurfaces->getCount(); i++) {
+        if (fSurfaces->getObject(i) == s) {
+            fSurfaces->removeObject(i);
+            break;
+        }
+    }
+    IOLockUnlock(fSurfacesLock);
+}
+
+bool RippleAccelerator::describeSurface(uint32_t id, task_t asker, struct ripple_gpu_surface_info *out)
+{
+    bool found = false;
+    IOLockLock(fSurfacesLock);
+    for (unsigned i = 0; i < fSurfaces->getCount() && !found; i++) {
+        RippleSurfaceClient *sc = (RippleSurfaceClient *)fSurfaces->getObject(i);
+        if (sc->surfaceID() == id)
+            found = sc->describe(asker, out);
+    }
+    IOLockUnlock(fSurfacesLock);
+    return found;
 }

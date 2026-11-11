@@ -16,6 +16,7 @@
 #include "cgl_device.h"
 #include "cgl_dispatch.h"
 #include "cgl_drawable.h"
+#include "cgl_takeover.h"
 
 static enum pipe_format
 depth_stencil_format(const struct ripple_cgl_pixel_format *pf)
@@ -82,6 +83,7 @@ ripple_cgl_context_destroy(struct ripple_cgl_context *ctx)
       return;
    if (_glapi_get_context() == ctx->glctx)
       st_api_make_current(NULL, NULL, NULL);
+   ripple_cgl_forget(ctx);
    st_destroy_context(ctx->st);
    ctx->magic = 0;
    FREE(ctx);
@@ -116,8 +118,10 @@ ripple_cgl_make_current_slow(void *rend)
    /* GLEngine itself calls a few entries with its own context (get_integerv under
     * kCGLCEStateValidation): fall back to the current CGL context if that is ours. */
    if (!ctx || ctx->magic != RIPPLE_CGL_MAGIC) {
-      void **cur = CGLGetCurrentContext();
-      ctx = cur ? cur[0] : NULL;
+      ctx = ripple_cgl_rend_for(rend);   /* GLEngine's context for one we took over */
+      void **cur = ctx ? NULL : CGLGetCurrentContext();
+      if (cur)
+         ctx = cur[0];
       if (!ctx || ctx->magic != RIPPLE_CGL_MAGIC)
          return;              /* nothing of ours current: Mesa's no-op dispatch answers */
       if (_glapi_get_context() == ctx->glctx)

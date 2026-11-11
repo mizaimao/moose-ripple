@@ -23,12 +23,18 @@ class RippleAccelerator : public IOAccelerator
     bool               fGL;          // GL bundle published (RippleGLBundle / ripple_gl)
     bool               fQE;          // surface clients for WindowServer (ripple_qe, M5)
     bool               fQEDebug;     // ripple_qe=2: log every surface call
+    IOLock            *fSurfacesLock;
+    OSArray           *fSurfaces;    // RippleSurfaceClients, for lookups by surface id
 
 public:
     VirtioGPUDevice *device() const { return fDev; }
     const struct ripple_gpu_info &info() const { return fInfo; }
     RippleFramebuffer *framebuffer() const { return fFB; }
     bool qeDebug() const { return fQEDebug; }
+    void addSurface(OSObject *s);
+    void removeSurface(OSObject *s);
+    // Describe surface `id` for task `asker` (backing address only for its owner).
+    bool describeSurface(uint32_t id, task_t asker, struct ripple_gpu_surface_info *out);
 
     virtual bool start(IOService *provider);
     virtual void stop(IOService *provider);

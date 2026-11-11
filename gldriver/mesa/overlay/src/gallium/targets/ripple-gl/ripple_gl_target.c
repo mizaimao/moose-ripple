@@ -24,6 +24,7 @@
 #include "virgl/ripple/ripple_gpu_uapi.h"
 
 #include "cgl/cgl_context.h"
+#include "cgl/cgl_device.h"
 #include "cgl/cgl_drawable.h"
 #include "cgl/cgl_device.h"
 #include "cgl/cgl_takeover.h"
@@ -121,8 +122,8 @@ _Static_assert(offsetof(struct gld_pixel_format, display_mask) == 0x30, "pixel f
 FILE *ripple_gld_dbg_file(void);
 
 /* Debug log of the management calls: RIPPLE_GL_DEBUG=1 sends it to stderr; for processes
- * started without our environment (WindowServer), the file /tmp/ripple-gl-debug existing
- * sends it to /tmp/ripple-gl-PROGRAM-PID.log. */
+ * started without our environment (WindowServer, at boot), the directory /Library/Logs/RippleGL
+ * existing (world-writable) sends it to /Library/Logs/RippleGL/PROGRAM-PID.log. */
 FILE *
 ripple_gld_dbg_file(void)
 {
@@ -132,9 +133,9 @@ ripple_gld_dbg_file(void)
       checked = 1;
       if (getenv("RIPPLE_GL_DEBUG")) {
          f = stderr;
-      } else if (access("/tmp/ripple-gl-debug", F_OK) == 0) {
+      } else if (access("/Library/Logs/RippleGL", W_OK) == 0) {
          char path[256];
-         snprintf(path, sizeof(path), "/tmp/ripple-gl-%s-%d.log", getprogname(), (int)getpid());
+         snprintf(path, sizeof(path), "/Library/Logs/RippleGL/%s-%d.log", getprogname(), (int)getpid());
          f = fopen(path, "a");
          if (f)
             setvbuf(f, NULL, _IOLBF, 0);
@@ -369,14 +370,18 @@ struct gld_context {
    struct gld_context *next_member;
    void *gc;                             /* GLEngine's context, for the takeover */
    bool taken_over, takeover_failed;
+   unsigned takeover_tries;
    struct gld_window *win;               /* attached window, if any */
    struct ripple_cgl_drawable *drawable; /* its render targets */
    int swap_interval;                    /* kCGLCPSwapInterval: 1 = wait for vblank */
+   uint32_t surface_id;                  /* accelerator surface drawn into (WindowServer), or 0 */
+   struct ripple_gpu_surface_info surface;
 };
 
 static void
 detach(struct gld_context *c)
 {
+   c->surface_id = 0;
    if (c->drawable) {
       ripple_cgl_context_set_drawable(c->mesa, NULL);
       ripple_cgl_drawable_destroy(c->drawable);
@@ -460,6 +465,28 @@ gldReclaimContext(struct gld_context *c)
    return 0;
 }
 
+/* Move the context to Mesa as soon as its CGL object is complete. Apps' CGLCreateContext ends
+ * with gldSetInteger 0x2bd; WindowServer's contexts never send it, so attach and dispatch
+ * calls try too. Every attempt checks Apple's magic values and the empty back table first. */
+static void
+try_takeover(struct gld_context *c, const char *from)
+{
+   if (!c || c->magic != GLD_CONTEXT_MAGIC || c->taken_over || c->takeover_failed)
+      return;
+   int r = ripple_cgl_take_over(c->gc, c->mesa);
+   c->taken_over = r >= 0;
+   if (c->takeover_tries < 3 || (c->takeover_tries % 100) == 0)
+      DBG("takeover from %s: %d\n", from, r);
+   if (c->taken_over) {
+      DBG("takeover: done (from %s, try %u)\n", from, c->takeover_tries + 1);
+   } else if (++c->takeover_tries >= 1000) {
+      c->takeover_failed = true;
+      fprintf(stderr, "RippleGLDriver: could not take over the GL context; it stays "
+                      "with GLEngine and renders nothing\n");
+      DBG("takeover: FAILED\n");
+   }
+}
+
 GLD_EXPORT int
 gldSetInteger(struct gld_context *c, int pname, const int *value)
 {
@@ -470,15 +497,7 @@ gldSetInteger(struct gld_context *c, int pname, const int *value)
    }
    /* OpenGL sends 0x2bd at the very end of CGLCreateContext: the dispatch table is final
     * now, so this is where the context moves to Mesa. */
-   if (c && c->magic == GLD_CONTEXT_MAGIC && !c->taken_over && !c->takeover_failed) {
-      c->taken_over = ripple_cgl_take_over(c->gc, c->mesa);
-      DBG("takeover: %s\n", c->taken_over ? "done" : "FAILED");
-      if (!c->taken_over) {
-         c->takeover_failed = true;
-         fprintf(stderr, "RippleGLDriver: could not take over the GL context; it stays "
-                         "with GLEngine and renders nothing\n");
-      }
-   }
+   try_takeover(c, "gldSetInteger");
    return 0;
 }
 
@@ -505,21 +524,98 @@ GLD_EXPORT int gldFinish(struct gld_context *c) { return 0; }
 #define GLD_ATTACH_CHANGED    2
 #define GLD_ATTACH_DETACHED   1
 
+/* Frames for an accelerator surface with CPU backing (in this process): copy them in. */
+static void
+backing_present(void *data, const uint8_t *pixels, unsigned stride, unsigned width,
+                unsigned height)
+{
+   struct gld_context *c = data;
+   uint8_t *dst = (uint8_t *)(uintptr_t)c->surface.backing_address;
+   unsigned rows = height < c->surface.height ? height : c->surface.height;
+   unsigned bytes = (width < c->surface.width ? width : c->surface.width) * 4;
+
+   if (!dst)
+      return;
+   for (unsigned y = 0; y < rows; y++)
+      memcpy(dst + (size_t)y * c->surface.row_bytes, pixels + (size_t)y * stride, bytes);
+}
+
+/* A window-server surface given as {0, 0, accelerator surface id}: what WindowServer's own
+ * compositor attaches to under Quartz Extreme (M5). The display surface is shown straight from
+ * the GPU; a surface with CPU backing gets each frame copied into it. */
+static int
+attach_surface(struct gld_context *c, uint32_t sid)
+{
+   struct ripple_gpu_surface_info si;
+   bool changed = false;
+
+   if (!ripple_cgl_device_surface_info(sid, &si)) {
+      DBG("  accelerator surface %u: unknown\n", sid);
+      return kCGLBadDrawable;
+   }
+   if (c->win) {
+      gld_window_release(c->win);
+      c->win = NULL;
+      changed = true;
+   }
+   if (!c->drawable) {
+      c->drawable = ripple_cgl_drawable_create(c->mesa);
+      if (!c->drawable)
+         return kCGLBadAlloc;
+      changed = true;
+   }
+   if (c->surface_id != sid)
+      changed = true;
+   c->surface_id = sid;
+   c->surface = si;
+   if (si.flags & RIPPLE_GPU_SURFACE_SCREEN) {
+      ripple_cgl_drawable_set_present(c->drawable, NULL, NULL);
+      ripple_cgl_drawable_set_gpu_display(c->drawable, true);
+   } else if (si.backing_address) {
+      ripple_cgl_drawable_set_gpu_display(c->drawable, false);
+      ripple_cgl_drawable_set_present(c->drawable, backing_present, c);
+   } else {
+      DBG("  accelerator surface %u: neither the screen nor backed (flags 0x%x)\n", sid, si.flags);
+      return kCGLBadDrawable;
+   }
+   if (c->drawable->width != si.width || c->drawable->height != si.height)
+      changed = true;
+   ripple_cgl_drawable_set_size(c->drawable, si.width, si.height);
+   ripple_cgl_context_set_drawable(c->mesa, c->drawable);
+   if (changed)
+      DBG("  accelerator surface %u: %ux%u at %d,%d, %s\n", sid, si.width, si.height, si.x, si.y,
+          (si.flags & RIPPLE_GPU_SURFACE_SCREEN) ? "the display" : "backed");
+   return changed ? GLD_ATTACH_CHANGED : 0;
+}
+
 GLD_EXPORT int
 gldAttachDrawable(struct gld_context *c, int type, void *data, void *opts)
 {
    DBG("gldAttachDrawable(%p, 0x%x, %p)\n", (void *)c, type, data);
    if (!c || c->magic != GLD_CONTEXT_MAGIC)
       return 0;
+   try_takeover(c, "gldAttachDrawable");
    switch (type) {
    case GLD_DRAWABLE_NONE:
       detach(c);
       return GLD_ATTACH_DETACHED;
    case GLD_DRAWABLE_WINDOW: {
       bool changed;
+      const uint32_t *ids = data;
+      DBG("  surface: connection %u, window %u, surface %u\n", ids ? ids[0] : 0, ids ? ids[1] : 0,
+          ids ? ids[2] : 0);
+      if (ids && !ids[0] && !ids[1] && ids[2])
+         return attach_surface(c, ids[2]);
+      if (c->surface_id) {
+         c->surface_id = 0;
+         if (c->drawable)
+            ripple_cgl_drawable_set_gpu_display(c->drawable, false);
+      }
       struct gld_window *w = gld_window_attach(data, c->win, &changed);
-      if (!w)
+      if (!w) {
+         DBG("  attach failed\n");
          return kCGLBadDrawable;
+      }
       if (w != c->win) {
          gld_window_release(c->win);
          c->win = w;
@@ -557,10 +653,12 @@ render_op_noop(void)
 GLD_EXPORT int
 gldInitDispatch(struct gld_context *c, void **render_ops, uint32_t *limits)
 {
+   try_takeover(c, "gldInitDispatch");
    for (unsigned i = 0; i < GLD_RENDER_OPS; i++) {
-      /* GLRendererFloat leaves slots 16-19 and 25-29 empty (byte offsets 0x80-0x98 and
-       * 0xc8-0xe8 on x86_64, half that on i386). */
-      bool keep_null = (i >= 16 && i <= 19) || (i >= 25 && i <= 29);
+      /* Empty like Apple's GMA 950 driver: slots 16-19, 25, 26. Slots 27-29 (flush and swap)
+       * must not be: GLEngine calls them once a window is attached (GLRendererFloat fills
+       * them at attach time), and a context GLEngine still drives would jump to 0. */
+      bool keep_null = (i >= 16 && i <= 19) || i == 25 || i == 26;
       render_ops[i] = keep_null ? NULL : (void *)render_op_noop;
    }
    limits[0] = 0x4000;
@@ -572,6 +670,7 @@ gldInitDispatch(struct gld_context *c, void **render_ops, uint32_t *limits)
 GLD_EXPORT int
 gldUpdateDispatch(struct gld_context *c, void **render_ops, void *dirty)
 {
+   try_takeover(c, "gldUpdateDispatch");
    return GLD_DISPATCH_NO_FALLBACK;
 }
 

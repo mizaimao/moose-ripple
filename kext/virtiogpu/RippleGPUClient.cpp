@@ -391,6 +391,7 @@ static const IOExternalMethodDispatch sDispatch[RIPPLE_GPU_METHOD_COUNT] = {
     /* TRANSFER */        { 0, 0, sizeof(struct ripple_gpu_transfer), 1, 0 },
     /* WAIT */            { 0, 2, 0, 1, 0 },
     /* DISPLAY */         { 0, 5, 0, 0, 0 },
+    /* SURFACE_INFO */    { 0, 1, 0, 0, sizeof(struct ripple_gpu_surface_info) },
 };
 
 IOReturn RippleGPUClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
@@ -449,6 +450,11 @@ IOReturn RippleGPUClient::sMethod(OSObject *target, void *reference, IOExternalM
         break;
     case RIPPLE_GPU_TRANSFER:
         r = c->transfer((const struct ripple_gpu_transfer *)in, &a->scalarOutput[0]);
+        break;
+    case RIPPLE_GPU_SURFACE_INFO:
+        r = c->fAccel->describeSurface((uint32_t)a->scalarInput[0], c->fTask,
+                                       (struct ripple_gpu_surface_info *)a->structureOutput)
+            ? kIOReturnSuccess : kIOReturnNotFound;
         break;
     case RIPPLE_GPU_DISPLAY:
         r = c->display((uint32_t)a->scalarInput[0], (uint32_t)a->scalarInput[1],
