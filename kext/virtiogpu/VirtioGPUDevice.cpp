@@ -253,7 +253,7 @@ void VirtioGPUDevice::free()
 // ---- Control queue --------------------------------------------------------------------------
 
 uint32_t VirtioGPUDevice::command(const void *req, uint32_t reqLen, void *resp, uint32_t respLen,
-                                  uint64_t extraPA, uint32_t extraLen, uint64_t *fence)
+                                  uint64_t extraPA, uint32_t extraLen, uint64_t *fence, bool async)
 {
     if (reqLen > kSlotReq || respLen > kSlotResp)
         return 0;
@@ -302,6 +302,15 @@ uint32_t VirtioGPUDevice::command(const void *req, uint32_t reqLen, void *resp, 
     fHeadSlot[head] = (int8_t)s;
     uint64_t t0 = mach_absolute_time(), timeout;
     nanoseconds_to_absolutetime(5000000000ULL, &timeout);
+    if (async) {
+        // Nobody waits: the drain frees the slot when the reply comes (and, for a fenced
+        // command, passes its fence then).
+        fSlot[s].async = true;
+        fSlot[s].fence = fence ? *fence : 0;
+        *q.notify = q.index;
+        IOLockUnlock(fCmdLock);
+        return VIRTIO_GPU_RESP_OK_NODATA;
+    }
     *q.notify = q.index;
 
     while (!fSlot[s].done) {
@@ -349,6 +358,18 @@ void VirtioGPUDevice::drainControlLocked(bool fromInterrupt)
         if (fSlot[s].lost) {                    // finished after we gave up on it
             fSlot[s].lost = false;
             fSlot[s].busy = false;
+            continue;
+        }
+        if (fSlot[s].async) {                   // syncAsync(): its fence has retired
+            for (;;) {
+                SInt64 old = fSignalled;
+                if (old >= (SInt64)fSlot[s].fence ||
+                    OSCompareAndSwap64((UInt64)old, fSlot[s].fence, (volatile UInt64 *)&fSignalled))
+                    break;
+            }
+            fSlot[s].async = false;
+            fSlot[s].busy = false;
+            IOLockWakeup(fCmdLock, fSlot, false);   // anyone waiting for a free slot
             continue;
         }
         fSlot[s].done = true;
@@ -724,6 +745,24 @@ bool VirtioGPUDevice::submit3D(uint32_t ctx, uint64_t pa, uint32_t size, uint64_
     if (fence)
         *fence = id;
     return ok;
+}
+
+// Like sync(), but return once queued. QEMU still handles the fenced empty submit before any
+// later command (creating the fence pushes the host GPU's queued work out), and its reply,
+// when the GPU is done, passes the fence in the drain (interrupt or the next waiter's poll).
+bool VirtioGPUDevice::syncAsync(uint32_t ctx)
+{
+    struct virtio_gpu_cmd_submit c;
+    bzero(&c, sizeof(c));
+    c.hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    c.hdr.flags = VIRTIO_GPU_FLAG_FENCE;
+    c.hdr.ctx_id = ctx ? ctx : fLastCtx;
+    c.size = 0;
+    if (!c.hdr.ctx_id)
+        return true;
+    uint64_t id = 0;
+    struct virtio_gpu_ctrl_hdr resp;
+    return command(&c, sizeof(c), &resp, sizeof(resp), 0, 0, &id, true) == VIRTIO_GPU_RESP_OK_NODATA;
 }
 
 // Wait until the host GPU has finished everything queued so far. QEMU holds the reply to a

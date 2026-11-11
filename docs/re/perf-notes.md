@@ -46,3 +46,21 @@ pass when an empty fenced SUBMIT (`VirtioGPUDevice::sync`) returns; `WAIT` with 
 such a sync if needed; `DISPLAY` syncs once before showing a frame (docs/kext-uapi.md). The
 remaining gap to the experiment is that per-frame sync; next: make it not block (queue the
 fenced empty submit before the scanout flush without waiting for its reply).
+
+## Second fix: the per-frame wait without blocking (01:35)
+
+`DISPLAY` now queues the fenced empty submit (`VirtioGPUDevice::syncAsync`) ahead of the
+scanout flush and doesn't wait for its reply: QEMU handles it before the flush (making the
+fence pushes the host GPU's queued work out), and the reply passes the fence later in the
+interrupt's drain, which also lets resource fences pass without anyone waiting.
+
+| Kext | gl-gears | Exposé | Dashboard | menus | per present (guest CPU) |
+|---|---|---|---|---|---|
+| fenced (before) | 25/s | 46/s | 41/s | 48/s | 3.8-6.5 ms |
+| one blocking sync per frame | 34-39/s | 43-60/s | 58-63/s | about 58/s | 6.6-11.7 ms |
+| one non-blocking sync per frame (now) | 43-56/s | 55-75/s | 86/s | 70/s | 4.2-5.6 ms |
+
+Screens checked (desktop, Exposé with a window, menus): nothing new wrong. The menu glitch
+reported in testing shows in [this capture](img/perf-menu-glitch-edit.png) while moving
+from File to Edit: the Edit menu's area shows the window behind it without the menu items,
+and shrunken copies of a menu appear further down. It predates these kext changes.

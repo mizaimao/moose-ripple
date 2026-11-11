@@ -73,6 +73,7 @@ public:
     bool transfer3D(bool toHost, uint32_t ctx, uint32_t id, uint32_t level, const uint32_t box[6],
                     uint32_t stride, uint32_t layerStride, uint64_t offset, uint64_t *fence);
     bool sync(uint32_t ctx);              // ctx 0: the context of the last submit
+    bool syncAsync(uint32_t ctx);         // the same, without waiting for the reply
     uint64_t signalled() const { return (uint64_t)fSignalled; }
 
     // Cursor queue: no response; the request buffer is reclaimed later.
@@ -112,7 +113,7 @@ private:
     IOLock *fCmdLock, *fCursorLock;        // fCmdLock: control ring and slots
     IOBufferMemoryDescriptor *fSlotMem;    // kSlots x (request | response)
     uint64_t fSlotPA;
-    struct Slot { bool busy; bool done; bool lost; } fSlot[kSlots];
+    struct Slot { bool busy; bool done; bool lost; bool async; uint64_t fence; } fSlot[kSlots];
     int8_t   fHeadSlot[kCtrlQueueSize];   // descriptor chain head -> slot
 
     // Interrupts: a filter on the PCI interrupt reads the ISR; completions are drained on our
@@ -135,7 +136,8 @@ private:
                 uint64_t extraPA = 0, uint32_t extraLen = 0, uint64_t *fence = 0);
     // fence: give the request the next fence number as it is queued (queue order = number order)
     uint32_t command(const void *req, uint32_t reqLen, void *resp, uint32_t respLen,
-                     uint64_t extraPA, uint32_t extraLen, uint64_t *fence = 0);
+                     uint64_t extraPA, uint32_t extraLen, uint64_t *fence = 0,
+                     bool async = false);   // async: queue and return; the drain frees it
     bool cursorCommand(const void *req, uint32_t len);
     void drainControlLocked(bool fromInterrupt);
     bool setupInterrupts();

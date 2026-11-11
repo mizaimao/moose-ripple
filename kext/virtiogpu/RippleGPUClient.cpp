@@ -378,9 +378,10 @@ IOReturn RippleGPUClient::display(uint32_t handle, uint32_t x, uint32_t y, uint3
     }
     if (!findBuffer(handle) || !w || !h)
         return kIOReturnBadArgument;
-    // Show a finished frame: submits don't wait for the GPU any more, so wait here, once per
-    // frame (the display reads the resource on the host outside the guest's contexts).
-    fDev->sync(firstContext());
+    // Show a finished frame: submits don't push the host's GPU work out by themselves; a
+    // fenced empty submit ahead of the scanout flush does (QEMU handles commands in order),
+    // without waiting for its reply.
+    fDev->syncAsync(firstContext());
     if (fShown && fShown != handle)
         fb->releaseResource(fShown);
     if (!fb->showResource(handle, x, y, w, h))
