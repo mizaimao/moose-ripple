@@ -30,7 +30,7 @@ Xcode 3.2.6 is also installed in VM 210 (`/Developer`) as the reference toolchai
   LC_SYMTAB, and that loads and unloads.
 - `ld -r` does pull `__start`/`__stop` out of the SDK's `libkmod.a` for i386.
 
-## Media (from the owner's Macintosh Repository downloads, 2026-11-10)
+## Media (the owner's own copies, 2026-11-10)
 
 - `xcode_3.2.6_and_ios_sdk_4.3.dmg`, 4443150993 bytes, SHA-256
   `47f6fecdce63bb00640a9f99c2a65778c1356630286d8003d597ffb83dfcdf3b` (Xcode 3.2.6, build 10M2518)

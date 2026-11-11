@@ -184,15 +184,14 @@ taken off 212 again.
 
 VM 213 `ripple-osx`: same settings as 212 (OVMF, one `isa-applesmc`, Penryn args,
 `vmware-cpuid-freq=off`, `X-PciMmio64Mb=0`) but `vga: std`, no GPU, 4 GB; one disk per OS X
-version. Installers from the owner's NAS (`the NAS's OS X folder`):
-- `mac-os-x-lion-10.7.5/Mac OS X Lion 10.7.5.iso` is **truncated**: its Apple partition map
+version. Installers from the owner's own collection:
+- a "Lion 10.7.5" ISO there is **truncated**: its Apple partition map
   (2048-byte blocks) describes 4134440 blocks (8.5 GB), the file holds 2513816 (5.1 GB), so the
   HFS+ partition runs past the end and no partition driver offers it. Not used.
-- `Install_Mac_OS_X_Lion_10.7.0_Lion.iso` (already on the rig; also on the NAS as
-  `Install Mac OS X Lion 10.7.0 Lion.iso`): a 5 GiB disk image, Apple partition map with
+- a Lion 10.7.0 installer image (already on the rig): a 5 GiB disk image, Apple partition map with
   512-byte blocks, "Mac OS X Base System" (Lion's BaseSystem with the installer app). Copied to
   a qcow2 and attached as a disk (`sata4`), so the ISO in the store stays untouched.
-- `InstallESD_10_8_5.img`: Mountain Lion 10.8.5 InstallESD as a CD image (Apple partition map,
+- a Mountain Lion 10.8.5 InstallESD as a CD image (Apple partition map,
   2048-byte blocks, "Mac OS X Install ESD"); attached as the CD (`ide2`).
 
 What it took in OpenCore:
@@ -238,13 +237,13 @@ shutdown. VM 213 back to OVMF, `vga: std`, no card.
   4720237409 bytes). Inside: `InstallMacOSX.pkg/InstallESD.dmg`, 10.7.5 build 11G63, which
   boots by itself (boot.efi, kernelcache, BaseSystem.dmg). Unpacked with 7-Zip on dev.lan into
   a raw disk image (the dmg's partitions in order, Apple partition map with 2048-byte blocks),
-  on the rig as `local:iso/Mac_OS_X_Lion_10.7.5_InstallESD.iso`. The truncated NAS "10.7.5 ISO" is
+  on the rig as `local:iso/Mac_OS_X_Lion_10.7.5_InstallESD.iso`. The truncated "10.7.5 ISO" is
   exactly as long as this HFS+ partition (5148295168 bytes) but carries a different partition
   map; not looked into further. Deleted the rig copy of that ISO.
-- Mavericks: the NAS's `Install OS X Mavericks.app` holds 10.9.5 (13F34). Its InstallESD.dmg
+- Mavericks: the collection's `Install OS X Mavericks.app` holds 10.9.5 (13F34). Its InstallESD.dmg
   has only BaseSystem.dmg and the packages (no boot files), unpacked the same way to
   `local:iso/OS_X_Mavericks_InstallESD.iso`.
-- Mountain Lion: `InstallESD_10_8_5.img` from the NAS as it is (boots by itself).
+- Mountain Lion: the collection's 10.8.5 InstallESD image as it is (boots by itself).
 
 ## 2026-11-10 23:53: 10.6.8 on the new image (VM 212, no card)
 
@@ -271,7 +270,7 @@ the rig, described by its `README.txt`:
   10.13.6 (17G66), 10.14.6 (18G103), 10.15.7 (19H15) from Apple's software-update catalog
   (`swscan.apple.com` merged catalog; the catalog's `Digest` is the SHA-1 of each package's
   xar table of contents, not of the file; checked with the xar checksums and Apple's
-  chunklists); 10.9.5 (13F34) and 10.6.3 retail + 10.6.8 combo from the owner's NAS (Apple's
+  chunklists); 10.9.5 (13F34) and 10.6.3 retail + 10.6.8 combo from the owner's collection (Apple's
   10.6.8 combo link now redirects to a docs page). Every version read from SystemVersion.plist.
 - `firstboot/`: `osx-10.7.5-11G63` and `osx-10.8.5-12F45` (compressed qcow2, `qemu-img
   compare` identical to the installed disk before its first boot), plus a screenshot of each
@@ -295,8 +294,8 @@ Next (when the owner picks it up):
    BaseSystem.dmg, copy Packages) in that environment.
 2. Clean 10.6.8: install 10.6.3 from the retail image, apply the 10.6.8 combo update to the
    target before the first boot, archive.
-3. The owner's NAS collection: propose a cleanup against `installers/` (proposal only; nothing on
-   the NAS is changed by agents).
+3. The owner's own installer collection: propose a cleanup against `installers/` (proposal
+   only; agents change nothing there).
 4. Later, the owner's call: 10.5 (MacPro3,1 shipped with 10.5; needs a Leopard build that knows the
    model), 10.4 (needs 32-bit firmware), 10.10-10.15 disks (10.12+ needs a newer SMBIOS model
    and, from 10.13, APFS in OpenCore), and VM 211 moving from Chameleon to OpenCore.

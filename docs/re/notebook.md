@@ -34,7 +34,7 @@ Dated entries: hypothesis, what was done, result, next step (HANDOFF.md rule 4).
 - System Profiler, Graphics/Displays: Type GPU, Bus PCI, VRAM 3 MB, Vendor ID 0x1af4,
   Device ID 0x1050, Revision 0x0001, "No Kext Loaded", 1024 x 768, 32-bit ARGB8888.
   This confirms the modern virtio-gpu PCI ID from the handoff on this QEMU.
-- Guest IP 192.0.2.10 (DHCP). No `/Developer`, so no Xcode in this install.
+- Guest IP from DHCP. No `/Developer`, so no Xcode in this install.
   Remote Login is off; `sudo` asks for a password.
 
 **Next.** Remote Login and root access for the scripts (needs the owner), then Mesa on the host
@@ -61,7 +61,7 @@ Also seen: the guest volume has only 5.79 GB free of 64 GB.
 **Done** (the owner's OK; snapshot `pre-root-setup` first). Booted Chameleon with `-s -v`, ran
 `fsck -fy` and `mount -uw /`, then in VM 210 only:
 - `overrides.plist`: `com.openssh.sshd` Disabled = false (Remote Login on).
-- `/etc/sudoers`: appended `<user> ALL=(ALL) NOPASSWD: ALL`; `visudo -c` parsed OK.
+- `/etc/sudoers`: appended `<user> ALL=(ALL) NOPASSWD: ALL` for the guest user; `visudo -c` parsed OK.
 - the guest user's `~/.ssh/authorized_keys`: the RSA key from the repo's git-ignored `.secrets/`;
   MD5 fingerprint matched the local copy.
 - `exit` continued to a normal boot (no reboot, so no shutdown panic).
@@ -131,8 +131,8 @@ full turbo. With the owner's OK, switched all 16 CPUs to `powersave` (intel_psta
 `balance_performance`), live only; a reboot reverts it. Idle: 800 MHz, package 52°C -> 48°C.
 Persistent setting: pending the owner's verdict on the noise.
 
-Also: copied into VM 210's `/Users/Shared/ripple-media/` from the owner's Macintosh Repository
-downloads (never committed):
+Also: copied into VM 210's `/Users/Shared/ripple-media/` from the owner's own copies
+(never committed):
 - `kernel_debug_kit_10-6-8_10k549.dmg`, 93429770 bytes, SHA-256
   `8dc391def99bc69700bdc1a5e91d4e88451f60c16241ce1940954fb22e018f0a`
 - `xcode_3.2.6_and_ios_sdk_4.3.dmg`, 4443150993 bytes, SHA-256

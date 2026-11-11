@@ -1,7 +1,7 @@
 # Reference copies (read-only)
 
-Other projects' source kept for reading, never committed. They live on dev.lan in
-`~/Projects/moose-ripple/.tools/src/` (git-ignored with `.tools/`). Copy no code from projects whose
+Other projects' source kept for reading, never committed. They live in the build
+host's copy of the repo under `.tools/src/` (git-ignored). Copy no code from projects whose
 license doesn't allow it; cite file and line in `docs/re/` instead.
 
 | Copy | What | Version | License note |
