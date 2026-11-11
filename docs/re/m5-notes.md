@@ -2,7 +2,7 @@
 
 Date: 2026-11-10 (night). Status: QE on and the whole screen GL-composited on VM 210; desktop,
 window shadows, Exposé, Dashboard and Front Row look right. Open: the Dashboard ripple's
-backdrop is white while the ripple runs (about 1 s), and display lag isn't measured yet.
+backdrop is white while the ripple runs (about 1 s).
 Plan: [m5-plan.md](m5-plan.md); research: [qe-decision.md](qe-decision.md) (R1),
 [qe-windowserver-trace.md](qe-windowserver-trace.md) (R2), [qe-verification.md](qe-verification.md)
 (R3, also how to check QE), [qe-display-surface.md](qe-display-surface.md) (R4); design notes
@@ -51,9 +51,10 @@ from VMsvga2: [vmsvga2-qe-design.md](vmsvga2-qe-design.md).
    and Core Image use framebuffer objects in their own coordinates). Exposé reads the screen
    back for its thumbnails, which needs the whole screen in the drawable.
 7. Apple hint enums (`GL_TEXTURE_STORAGE_HINT_APPLE`, `GL_TRANSFORM_HINT_APPLE`) accepted as
-   no-ops. `GL_UNPACK_CLIENT_STORAGE_APPLE` keeps failing (accepting it made WindowServer
-   reuse texture memory: wrong contents everywhere), but `glGetIntegerv` answers it (Core
-   Image saves pixel-store state with it).
+   no-ops. `GL_UNPACK_CLIENT_STORAGE_APPLE` keeps failing, set or queried (accepting it made
+   WindowServer reuse texture memory, answering the query made it drop the menu bar).
+   `GL_APPLE_float_pixels` can be advertised (opt-in, M6: `RIPPLE_FLOAT_PIXELS=1`, or the
+   file `float_pixels` in the debug folder for WindowServer).
 8. Client storage emulated: WindowServer makes tiles of an app GL surface's shared memory once
    and never uploads them again (Apple's GL reads that memory when it draws). Textures made
    with client storage are uploaded again from their memory at the first bind of each frame,
@@ -82,6 +83,12 @@ from VMsvga2: [vmsvga2-qe-design.md](vmsvga2-qe-design.md).
 - Compositor: about 28 presents/s even idle (the dialog's pulsing default button), 31-37
   frames/s during Exposé and Dashboard, 5-9 ms of CPU per present (flush and `DISPLAY`);
   WindowServer at 5-20% CPU.
+- Display lag (`scripts/vnc-lag.sh`, method in
+  [qe-verification.md](qe-verification.md)): key press to the first changed pixel, medians of
+  5, QE on 210 against software on 212 (2560x1600, not like for like): Exposé open 234 ms
+  against 585, close 180 against 601; Dashboard open 246 against 113, close 258 against 339.
+  Steps are QEMU's 30 ms VNC tick. Exposé starts about 2.5 times sooner under QE; Dashboard's
+  first change comes about 130 ms later.
 
 ## Open problems
 
@@ -90,13 +97,14 @@ from VMsvga2: [vmsvga2-qe-design.md](vmsvga2-qe-design.md).
   ([frame](img/m5-dashboard-ripple-white.png)); the screen is right again afterwards. Core
   Image renders the ripple on the CPU inside WindowServer and uploads the result each frame
   (texture 522x598, drawn opaque at 379,101), so its backdrop input is white. Ruled out: GL
-  errors (none after the `glGetIntegerv` fix), the framebuffer memory (filled red with
-  `fb-dump`: still white), the window offset (framebuffer objects unshifted: still white).
-  Next: find where WindowServer's CPU path gets "what is behind" under QE (probably a copy of
-  the window backings, where Core Animation's GL-drawn Dashboard layer has none), e.g. by
-  breaking on `CGSCaptureWindowsContentsToRect`-like calls with lldb on 210.
-- Display lag under QE: `scripts/lag.sh` needs QEMU's screendump and the software cursor,
-  neither works here; measuring through VNC instead (2026-11-10).
+  errors, the framebuffer memory (filled red with `fb-dump`: still white), the window offset
+  (framebuffer objects unshifted: still white), WindowServer's software copy of the screen
+  (`grab` with Dashboard open is right), and `GL_APPLE_float_pixels` (extensions 0xf like the
+  9600 GT, desktop unchanged, ripple still white). Next: find where WindowServer's CPU path
+  gets "what is behind" under QE, e.g. with lldb on WindowServer on 210 around the ripple's
+  `tex_sub_image2D` source buffer.
+- Don't answer `glGetIntegerv(GL_UNPACK_CLIENT_STORAGE_APPLE)`: with an answer (even the
+  tracked value) WindowServer dropped the menu bar. Mesa's `GL_INVALID_ENUM` stays.
 - The framebuffer memory stays black under QE (the display shows a GPU texture). Anything
   reading the screen through it (old screen-capture tools) gets black.
 - `texture_range_APPLE` is unsupported (ignored); harmless so far.
