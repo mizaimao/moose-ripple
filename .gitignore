@@ -23,3 +23,8 @@ tmp-*/
 .venv/
 .DS_Store
 .tools/
+
+# Local only, never published (2026-11-11): screenshots and agent instructions
+docs/re/img/
+CLAUDE.local.md
+AGENTS.md
