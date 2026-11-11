@@ -259,3 +259,46 @@ Chameleon boot2's real-mode BIOS calls, no network. The owner saw the monitor: C
 waiting for a key, as it always does on 211 (`scripts/boot.sh` presses Right, then Return).
 211 had been started with a plain `qm start`, and my single Return picked the CD entry. Not a
 card problem. Lesson: check the project's boot script before calling a VM hung.
+
+## 2026-11-11 00:00-00:55: installers 10.6.8-10.15.7 and never-booted disks (paused here)
+
+The owner's request: the no-GPU OpenCore image, one installed disk per OS X version that has never
+been booted (first start = Welcome screen; The owner does the setup himself), and clean installers
+for 10.6.8 to 10.15.7, all in a folder on the rig. Everything is in **`/var/lib/vz/osx/`** on
+the rig, described by its `README.txt`:
+- `installers/`: Apple's installers, latest release each (57 GB, `SHA256SUMS`). 10.7.5,
+  10.8.5, 10.10.5, 10.11.6, 10.12.6 from Apple's support page (still online, free);
+  10.13.6 (17G66), 10.14.6 (18G103), 10.15.7 (19H15) from Apple's software-update catalog
+  (`swscan.apple.com` merged catalog; the catalog's `Digest` is the SHA-1 of each package's
+  xar table of contents, not of the file; checked with the xar checksums and Apple's
+  chunklists); 10.9.5 (13F34) and 10.6.3 retail + 10.6.8 combo from the owner's NAS (Apple's
+  10.6.8 combo link now redirects to a docs page). Every version read from SystemVersion.plist.
+- `firstboot/`: `osx-10.7.5-11G63` and `osx-10.8.5-12F45` (compressed qcow2, `qemu-img
+  compare` identical to the installed disk before its first boot), plus a screenshot of each
+  at the Welcome screen from one check boot of the working copy.
+- `opencore/opencore-1.0.8-nogpu-4f67ffe.qcow2`: the boot disk (commit 4f67ffe).
+
+How the installs were done (VM 213, one target disk attached at a time): boot the installer
+image through OpenCore, Utilities > Terminal, `diskutil partitionDisk disk0 1 GPTFormat JHFS+
+"Macintosh HD" 100%`, `installer -pkg /System/Installation/Packages/OSInstall.mpkg -target
+"/Volumes/Macintosh HD"` (about 10 minutes), check `SystemVersion.plist` and that there's no
+user and no `.AppleSetupDone`, `shutdown -h now`, then on the rig `qemu-img convert -c` +
+`qemu-img compare`. Installer images for QEMU are the dmg's partitions unpacked in order with
+7-Zip on dev.lan (`7z x -tdmg`), kept in the rig's ISO store (`local:iso/*InstallESD.iso`).
+Mountain Lion's installer blanked the screen white after a while; a key wakes it but the
+first few keys are lost.
+
+Next (when the owner picks it up):
+1. Mavericks 10.9.5: its InstallESD has no boot files. Try `installer -pkg "/Volumes/OS X
+   Install ESD/Packages/OSInstall.mpkg"` from the Mountain Lion installer with the Mavericks
+   image as a second CD (`ide3`); if that's refused, build a bootable installer (asr restore
+   BaseSystem.dmg, copy Packages) in that environment.
+2. Clean 10.6.8: install 10.6.3 from the retail image, apply the 10.6.8 combo update to the
+   target before the first boot, archive.
+3. The owner's NAS collection: propose a cleanup against `installers/` (proposal only; nothing on
+   the NAS is changed by agents).
+4. Later, the owner's call: 10.5 (MacPro3,1 shipped with 10.5; needs a Leopard build that knows the
+   model), 10.4 (needs 32-bit firmware), 10.10-10.15 disks (10.12+ needs a newer SMBIOS model
+   and, from 10.13, APFS in OpenCore), and VM 211 moving from Chameleon to OpenCore.
+VM 213 is stopped: OpenCore disk on `ide0`, Mountain Lion's working copy (booted once) on
+`sata0`. dev.lan keeps only the helper scripts (`tmp-installers/.tools`).

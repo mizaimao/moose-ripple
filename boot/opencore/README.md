@@ -1,8 +1,8 @@
 # OpenCore boot disk for Mac OS X 10.6.8 to 10.9.5 in QEMU
 
 One image boots Mac OS X 10.6.8 through OpenCore 1.0.8 in every VM type tested, replacing the
-Chameleon 2.1 ISO. Work in progress: the same image for OS X 10.7 to 10.9 and their installers
-(VM 213; status in the notebook):
+Chameleon 2.1 ISO. The same image boots OS X 10.7.5 and 10.8.5 and their installers (VM 213); installers
+and never-booted disks are in `/var/lib/vz/osx/` on the rig (status in the notebook):
 - **virtio-gpu VMs** (VM 210): UEFI firmware (Proxmox's OVMF).
 - **9600 GT passthrough VMs** (VM 211's setup): SeaBIOS, which starts the card from its BIOS
   ROM, then OpenDuet (OpenCore's UEFI layer for BIOS machines, on the same disk).
