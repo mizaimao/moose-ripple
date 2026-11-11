@@ -460,6 +460,58 @@ ripple_cgl_clear(void *rend, GLbitfield mask)
    CALL_Clear(GET_DISPATCH(), (mask));
 }
 
+#include "main/glformats.h"
+/* ---- GL_APPLE_row_bytes -------------------------------------------------------------------- *
+ * Apple's GL takes the row stride of client images in bytes too: GL_PACK_ROW_BYTES_APPLE and
+ * GL_UNPACK_ROW_BYTES_APPLE, which override the row length when nonzero. Mesa doesn't know them
+ * (GL_INVALID_ENUM, and the stride was ignored: Core Image's and Quartz Composer's uploads and
+ * readbacks of images with padded rows came out wrong or empty, M6). Kept per context and turned
+ * into a row length and alignment around uploads and readbacks. WindowServer keeps the old
+ * behaviour (its paths were tuned with the error). */
+#ifndef GL_PACK_ROW_BYTES_APPLE
+#define GL_PACK_ROW_BYTES_APPLE   0x8A15
+#define GL_UNPACK_ROW_BYTES_APPLE 0x8A16
+#endif
+static bool
+row_bytes_wanted(void)
+{
+   static int on = -1;
+   if (on < 0)
+      on = strcmp(getprogname(), "WindowServer") != 0;
+   return on;
+}
+
+struct row_bytes_saved {
+   bool active;
+   GLint row_length, alignment;
+};
+
+static void
+row_bytes_apply(struct gl_pixelstore_attrib *ps, int row_bytes, GLenum format, GLenum type,
+                struct row_bytes_saved *s)
+{
+   s->active = false;
+   if (row_bytes <= 0)
+      return;
+   GLint bpp = _mesa_bytes_per_pixel(format, type);
+   if (bpp <= 0)
+      return;
+   s->active = true;
+   s->row_length = ps->RowLength;
+   s->alignment = ps->Alignment;
+   ps->RowLength = row_bytes / bpp;
+   ps->Alignment = row_bytes % 8 == 0 ? 8 : row_bytes % 4 == 0 ? 4 : row_bytes % 2 == 0 ? 2 : 1;
+}
+
+static void
+row_bytes_restore(struct gl_pixelstore_attrib *ps, const struct row_bytes_saved *s)
+{
+   if (!s->active)
+      return;
+   ps->RowLength = s->row_length;
+   ps->Alignment = s->alignment;
+}
+
 /* GL_UNPACK_CLIENT_STORAGE_APPLE without the error, everywhere but in WindowServer (M6): Core
  * Animation counts any GL error as a failed frame ("rendering error 500") and drew nothing in
  * Real Racing 2. The emulation (textures read from their memory again) works either way. */
@@ -483,6 +535,11 @@ ripple_cgl_get_integerv(void *rend, GLenum pname, GLint *params)
     * of what keeps WindowServer off its client-storage paths. */
    if (pname == GL_UNPACK_CLIENT_STORAGE_APPLE && ctx && params && client_storage_quiet()) {
       *params = ctx->client_storage;
+      return;
+   }
+   if ((pname == GL_PACK_ROW_BYTES_APPLE || pname == GL_UNPACK_ROW_BYTES_APPLE) && ctx && params &&
+       row_bytes_wanted()) {
+      *params = pname == GL_PACK_ROW_BYTES_APPLE ? ctx->pack_row_bytes : ctx->unpack_row_bytes;
       return;
    }
    CALL_GetIntegerv(GET_DISPATCH(), (pname, params));
@@ -510,7 +567,14 @@ ripple_cgl_read_pixels(void *rend, GLint x, GLint y, GLsizei w, GLsizei h, GLenu
 {
    RIPPLE_CGL_ENTER(rend);
    READ_OFFSET(rend, x, y, h);
+   struct ripple_cgl_context *rctx = ripple_cgl_context_for(rend);
+   GET_CURRENT_CONTEXT(gl);
+   struct row_bytes_saved rbs = { false };
+   if (rctx && gl)
+      row_bytes_apply(&gl->Pack, rctx->pack_row_bytes, format, type, &rbs);
    CALL_ReadPixels(GET_DISPATCH(), (x, y, w, h, format, type, pixels));
+   if (gl)
+      row_bytes_restore(&gl->Pack, &rbs);
 }
 
 void GLAPIENTRY
@@ -622,13 +686,16 @@ copy_top_first(struct ripple_cgl_context *ctx, GLenum target, GLenum ifmt, int x
    CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_DRAW_FRAMEBUFFER_EXT, draw_fb));
 }
 
-/* Debug: /Library/Logs/RippleGL/pbuffer-copy makes CGLTexImagePBuffer copy instead of sharing. */
+/* Debug: /Library/Logs/RippleGL/pbuffer-tie makes CGLTexImagePBuffer share the pbuffer's colour
+ * buffer instead of copying it. Off: a window-system drawable's buffer is stored upside down
+ * relative to a texture, so shared it showed Photo Booth's Black & White, X-Ray and Line Screen
+ * effects upside down (M6, ci-effects); the copy goes through GL and comes out right. */
 static bool
-pbuffer_copy_debug(void)
+pbuffer_tie_debug(void)
 {
    static int on = -1;
    if (on < 0)
-      on = access("/Library/Logs/RippleGL/pbuffer-copy", F_OK) == 0;
+      on = access("/Library/Logs/RippleGL/pbuffer-tie", F_OK) == 0;
    return on;
 }
 
@@ -654,10 +721,10 @@ ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum 
    bool have_si = !pb && ripple_cgl_device_surface_info(sid, &si);
    if (w <= 0 || h <= 0 || (!pb && !have_si)) {
       /* nothing to read */
-   } else if (pb && bind && ripple_cgl_drawable_color(pb, source) && !pbuffer_copy_debug()) {
-      /* CGLTexImagePBuffer (997): the texture stays tied to the pbuffer, and what is drawn
-       * into the pbuffer later shows in it (Real Racing 2 ties each pbuffer once and renders
-       * into it every frame, M6). Share the pbuffer's color buffer. */
+   } else if (pb && bind && ripple_cgl_drawable_color(pb, source) && pbuffer_tie_debug()) {
+      /* CGLTexImagePBuffer (997) with the pbuffer-tie switch: the texture shares the pbuffer's
+       * colour buffer, so what is drawn into the pbuffer later shows in it, but upside down
+       * (see pbuffer_tie_debug). Apps seen so far (Core Image, Core Video) tie after drawing. */
       struct pipe_resource *res = ripple_cgl_drawable_color(pb, source);
       st_context_teximage(ctx->st, target, 0, res->format, res, false);
       static int tie_finish = -1;
@@ -958,6 +1025,12 @@ void GLAPIENTRY
 ripple_cgl_pixel_storei(void *rend, GLenum pname, GLint param)
 {
    RIPPLE_CGL_ENTER(rend);
+   if ((pname == GL_PACK_ROW_BYTES_APPLE || pname == GL_UNPACK_ROW_BYTES_APPLE) && row_bytes_wanted()) {
+      struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
+      if (ctx && param >= 0)
+         *(pname == GL_PACK_ROW_BYTES_APPLE ? &ctx->pack_row_bytes : &ctx->unpack_row_bytes) = param;
+      return;
+   }
    if (pname == GL_UNPACK_CLIENT_STORAGE_APPLE) {
       struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
       if (ctx)
@@ -972,6 +1045,10 @@ void GLAPIENTRY
 ripple_cgl_pixel_storef(void *rend, GLenum pname, GLfloat param)
 {
    RIPPLE_CGL_ENTER(rend);
+   if ((pname == GL_PACK_ROW_BYTES_APPLE || pname == GL_UNPACK_ROW_BYTES_APPLE) && row_bytes_wanted()) {
+      ripple_cgl_pixel_storei(rend, pname, (GLint)param);
+      return;
+   }
    if (pname == GL_UNPACK_CLIENT_STORAGE_APPLE) {
       struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
       if (ctx)
@@ -982,6 +1059,10 @@ ripple_cgl_pixel_storef(void *rend, GLenum pname, GLfloat param)
    CALL_PixelStoref(GET_DISPATCH(), (pname, param));
 }
 
+static void tex_image2D_body(struct ripple_cgl_context *ctx, struct gl_context *glctx, GLenum target,
+                             GLint level, GLenum internalformat, GLsizei width, GLsizei height,
+                             GLint border, GLenum format, GLenum type, const GLvoid *pixels);
+
 void GLAPIENTRY
 ripple_cgl_tex_image2D(void *rend, GLenum target, GLint level, GLenum internalformat,
                        GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type,
@@ -989,11 +1070,27 @@ ripple_cgl_tex_image2D(void *rend, GLenum target, GLint level, GLenum internalfo
 {
    struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
    RIPPLE_CGL_ENTER(rend);
+   GET_CURRENT_CONTEXT(glctx);
+   struct row_bytes_saved rbs = { false };
+   if (ctx && glctx)
+      row_bytes_apply(&glctx->Unpack, ctx->unpack_row_bytes, format, type, &rbs);
+   tex_image2D_body(ctx, glctx, target, level, internalformat, width, height, border, format,
+                    type, pixels);
+   if (glctx)
+      row_bytes_restore(&glctx->Unpack, &rbs);
+}
+
+static void
+tex_image2D_body(struct ripple_cgl_context *ctx, struct gl_context *glctx, GLenum target,
+                 GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border,
+                 GLenum format, GLenum type, const GLvoid *pixels)
+{
    CALL_TexImage2D(GET_DISPATCH(), (target, level, internalformat, width, height, border,
                                     format, type, pixels));
    if (level != 0 || !cs_target(target))
       return;
-   GET_CURRENT_CONTEXT(glctx);
+   if (!glctx)
+      return;
    struct gl_texture_object *obj = _mesa_get_current_tex_object(glctx, target);
    if (!obj)
       return;
@@ -1039,8 +1136,15 @@ ripple_cgl_tex_sub_image2D(void *rend, GLenum target, GLint level, GLint xoffset
          t->explicit_update = true;
       simple_mtx_unlock(&cs_lock);
    }
+   struct ripple_cgl_context *rctx = ripple_cgl_context_for(rend);
+   GET_CURRENT_CONTEXT(gl);
+   struct row_bytes_saved rbs = { false };
+   if (rctx && gl)
+      row_bytes_apply(&gl->Unpack, rctx->unpack_row_bytes, format, type, &rbs);
    CALL_TexSubImage2D(GET_DISPATCH(), (target, level, xoffset, yoffset, width, height, format,
                                        type, pixels));
+   if (gl)
+      row_bytes_restore(&gl->Unpack, &rbs);
 }
 
 void GLAPIENTRY
@@ -1466,6 +1570,23 @@ ripple_cgl_program_string(void *rend, GLenum target, GLenum format, GLsizei len,
    CALL_ProgramStringARB(GET_DISPATCH(), (target, format, fixed ? fixed_len : len,
                                           fixed ? fixed : string));
    free(fixed);
+   /* Debug log: a sampler the program uses without a texture target recorded for its unit
+    * (Mesa then indexes CurrentTex[-1] at the next draw; Core Image crashed so, M6). */
+   extern FILE *ripple_gld_dbg_file(void);
+   GET_CURRENT_CONTEXT(gl);
+   struct gl_program *prog = !gl ? NULL : target == GL_FRAGMENT_PROGRAM_ARB ?
+      gl->FragmentProgram.Current : target == GL_VERTEX_PROGRAM_ARB ? gl->VertexProgram.Current : NULL;
+   if (prog && ripple_gld_dbg_file()) {
+      GLbitfield used = prog->SamplersUsed;
+      while (used) {
+         unsigned s = u_bit_scan(&used);
+         unsigned unit = prog->SamplerUnits[s];
+         if (!prog->TexturesUsed[unit])
+            fprintf(ripple_gld_dbg_file(), "RippleGLDriver: program %u (target 0x%x) uses sampler "
+                    "%u, unit %u, with no texture target (SamplersUsed 0x%x)\n", prog->Id, target,
+                    s, unit, prog->SamplersUsed);
+      }
+   }
 }
 
 /* CGLTexImageIOSurface2D: gliSetInteger(910, {IOSurface ID, target, internal format, width,

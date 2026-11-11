@@ -60,6 +60,9 @@ struct ripple_cgl_context {
    unsigned attrib_depth;
    /* GL_UNPACK_CLIENT_STORAGE_APPLE as last set (refused, but emulated: cgl_apple.c). */
    bool client_storage;
+   /* GL_APPLE_row_bytes (pack, unpack): rows that far apart in bytes, 0 = GL's own row length
+    * (applied around uploads and readbacks, cgl_apple.c). */
+   int pack_row_bytes, unpack_row_bytes;
 };
 
 struct ripple_cgl_context *
