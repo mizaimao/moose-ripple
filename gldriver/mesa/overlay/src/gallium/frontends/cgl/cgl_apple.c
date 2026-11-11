@@ -1113,3 +1113,58 @@ ripple_cgl_get_programiv(void *rend, GLenum target, GLenum pname, GLint *params)
    if (params && limit && *params > 65535)
       *params = 16384;
 }
+
+/* ---- glPushAttrib / glPopAttrib and the window offset ------------------------------------ *
+ * Mesa restores the viewport and scissor on glPopAttrib, but the program's own values (lv,
+ * ls) that the window offset is applied to are kept here: WindowServer blurs a menu's
+ * background through a framebuffer object between glPushAttrib(GL_VIEWPORT_BIT) and
+ * glPopAttrib, and with the stale viewport the menu was drawn squeezed and misplaced when it
+ * went back to the screen (VM 210, 2026-11-11). So the values are saved and restored here too,
+ * and re-applied for the framebuffer bound after the pop. */
+
+void GLAPIENTRY
+ripple_cgl_push_attrib(void *rend, GLbitfield mask)
+{
+   struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
+   RIPPLE_CGL_ENTER(rend);
+   CALL_PushAttrib(GET_DISPATCH(), (mask));
+   if (!ctx)
+      return;
+   if (ctx->attrib_depth < RIPPLE_CGL_ATTRIB_DEPTH) {
+      ctx->attrib[ctx->attrib_depth].mask = mask;
+      memcpy(ctx->attrib[ctx->attrib_depth].lv, ctx->lv, sizeof(ctx->lv));
+      memcpy(ctx->attrib[ctx->attrib_depth].ls, ctx->ls, sizeof(ctx->ls));
+      ctx->attrib[ctx->attrib_depth].lv_set = ctx->lv_set;
+      ctx->attrib[ctx->attrib_depth].ls_set = ctx->ls_set;
+   }
+   ctx->attrib_depth++;
+}
+
+void GLAPIENTRY
+ripple_cgl_pop_attrib(void *rend)
+{
+   struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
+   RIPPLE_CGL_ENTER(rend);
+   CALL_PopAttrib(GET_DISPATCH(), ());
+   if (!ctx || !ctx->attrib_depth)
+      return;
+   ctx->attrib_depth--;
+   if (ctx->attrib_depth >= RIPPLE_CGL_ATTRIB_DEPTH)
+      return;
+   GLbitfield mask = ctx->attrib[ctx->attrib_depth].mask;
+   bool restored = false;
+   if (mask & GL_VIEWPORT_BIT) {
+      memcpy(ctx->lv, ctx->attrib[ctx->attrib_depth].lv, sizeof(ctx->lv));
+      ctx->lv_set = ctx->attrib[ctx->attrib_depth].lv_set;
+      restored = true;
+   }
+   if (mask & GL_SCISSOR_BIT) {
+      memcpy(ctx->ls, ctx->attrib[ctx->attrib_depth].ls, sizeof(ctx->ls));
+      ctx->ls_set = ctx->attrib[ctx->attrib_depth].ls_set;
+      restored = true;
+   }
+   /* Mesa put back whatever it had then (shifted or not, for the framebuffer bound at the
+    * push); put the program's values in again for the framebuffer bound now. */
+   if (restored && (ctx->win_surface || ctx->surf_h))
+      apply_viewport_scissor(ctx, offset_ctx(rend, false) != NULL);
+}

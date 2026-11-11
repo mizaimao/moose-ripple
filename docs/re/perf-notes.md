@@ -64,3 +64,14 @@ Screens checked (desktop, Exposé with a window, menus): nothing new wrong. The 
 reported in testing shows in [this capture](img/perf-menu-glitch-edit.png) while moving
 from File to Edit: the Edit menu's area shows the window behind it without the menu items,
 and shrunken copies of a menu appear further down. It predates these kext changes.
+
+## Menu glitch fixed (01:37)
+
+Cause (GL trace of a File -> Edit switch): WindowServer blurs a menu's background through a
+framebuffer object between `glPushAttrib(GL_VIEWPORT_BIT)` and `glPopAttrib()`, then binds the
+screen again. Mesa restored the viewport on the pop, but our window offset keeps the program's
+viewport itself and re-applied the blur pass's 193x196 one on the bind: the menu was drawn
+squeezed and misplaced (the Edit menu's area showed the window behind it, shrunken copies of
+the menu stayed elsewhere on screen). Push/pop now save and restore that copy too
+(`ripple_cgl_push_attrib`/`pop_attrib`). Moving across File, Edit, View, Go: every menu right
+([Edit menu](img/perf-menu-edit-fixed.png)).

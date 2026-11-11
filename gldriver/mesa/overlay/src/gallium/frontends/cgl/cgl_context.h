@@ -46,6 +46,14 @@ struct ripple_cgl_context {
     * own framebuffer is bound, unshifted while a framebuffer object is. */
    int lv[4], ls[4];
    bool lv_set, ls_set;
+   /* Those values saved by glPushAttrib, restored by glPopAttrib (cgl_apple.c). */
+#define RIPPLE_CGL_ATTRIB_DEPTH 32
+   struct {
+      unsigned mask;
+      int lv[4], ls[4];
+      bool lv_set, ls_set;
+   } attrib[RIPPLE_CGL_ATTRIB_DEPTH];
+   unsigned attrib_depth;
    /* GL_UNPACK_CLIENT_STORAGE_APPLE as last set (refused, but emulated: cgl_apple.c). */
    bool client_storage;
 };

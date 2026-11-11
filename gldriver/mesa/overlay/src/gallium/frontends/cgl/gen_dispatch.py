@@ -72,6 +72,8 @@ CUSTOM = {
     # Window offset for drawing into the screen through a rectangle (cgl_apple.c).
     'viewport': 'ripple_cgl_viewport',
     'bind_framebuffer_EXT': 'ripple_cgl_bind_framebuffer',
+    'push_attrib': 'ripple_cgl_push_attrib',
+    'pop_attrib': 'ripple_cgl_pop_attrib',
     'scissor': 'ripple_cgl_scissor',
     'clear': 'ripple_cgl_clear',
     'get_integerv': 'ripple_cgl_get_integerv',
