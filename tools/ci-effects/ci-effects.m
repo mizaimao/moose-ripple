@@ -270,6 +270,10 @@ static int run_booth(CIImage *src, const char *out)
         if (![[f pathExtension] isEqualToString:@"qtz"])
             continue;
         QCComposition *c = [QCComposition compositionWithFile:[dir stringByAppendingPathComponent:f]];
+        /* CI_EFFECTS_ONLY=Name: just the compositions whose file name contains Name. */
+        const char *only = getenv("CI_EFFECTS_ONLY");
+        if (only && !strstr([f UTF8String], only))
+            continue;
         if (c && [[c inputKeys] containsObject:QCCompositionInputImageKey] &&
             [[c protocols] containsObject:QCCompositionProtocolImageFilter])
             [effects addObject:f];

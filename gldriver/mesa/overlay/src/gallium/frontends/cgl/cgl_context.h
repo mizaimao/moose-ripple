@@ -67,6 +67,15 @@ struct ripple_cgl_context {
    /* GL_APPLE_row_bytes (pack, unpack): rows that far apart in bytes, 0 = GL's own row length
     * (applied around uploads and readbacks, cgl_apple.c). */
    int pack_row_bytes, unpack_row_bytes;
+   /* Those three as saved by glPushClientAttrib(GL_CLIENT_PIXEL_STORE_BIT): Mesa restores its
+    * own pixel store on the pop, and these have to go back with it (cgl_apple.c). */
+#define RIPPLE_CGL_CLIENT_ATTRIB_DEPTH 16
+   struct {
+      unsigned mask;
+      bool client_storage;
+      int pack_row_bytes, unpack_row_bytes;
+   } client_attrib[RIPPLE_CGL_CLIENT_ATTRIB_DEPTH];
+   unsigned client_attrib_depth;
 };
 
 struct ripple_cgl_context *

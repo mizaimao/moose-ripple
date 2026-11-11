@@ -86,6 +86,8 @@ CUSTOM = {
     'viewport': 'ripple_cgl_viewport',
     'bind_framebuffer_EXT': 'ripple_cgl_bind_framebuffer',
     'push_attrib': 'ripple_cgl_push_attrib',
+    'push_client_attrib': 'ripple_cgl_push_client_attrib',
+    'pop_client_attrib': 'ripple_cgl_pop_client_attrib',
     'pop_attrib': 'ripple_cgl_pop_attrib',
     'scissor': 'ripple_cgl_scissor',
     'clear': 'ripple_cgl_clear',

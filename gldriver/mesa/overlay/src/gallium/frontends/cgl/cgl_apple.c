@@ -1593,6 +1593,47 @@ ripple_cgl_get_programiv(void *rend, GLenum target, GLenum pname, GLint *params)
  * went back to the screen (VM 210, 2026-11-11). So the values are saved and restored here too,
  * and re-applied for the framebuffer bound after the pop. */
 
+/* glPushClientAttrib / glPopClientAttrib: the pixel store state the frontend keeps itself
+ * (client storage, row bytes) is saved and restored with Mesa's. Left as set, a program that
+ * pushes, sets row bytes for one upload and pops had every later upload read with that row
+ * length (audit 2026-11-11). */
+void GLAPIENTRY
+ripple_cgl_push_client_attrib(void *rend, GLbitfield mask)
+{
+   struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
+   RIPPLE_CGL_ENTER(rend);
+   CALL_PushClientAttrib(GET_DISPATCH(), (mask));
+   if (!ctx)
+      return;
+   if (ctx->client_attrib_depth < RIPPLE_CGL_CLIENT_ATTRIB_DEPTH) {
+      unsigned i = ctx->client_attrib_depth;
+      ctx->client_attrib[i].mask = mask;
+      ctx->client_attrib[i].client_storage = ctx->client_storage;
+      ctx->client_attrib[i].pack_row_bytes = ctx->pack_row_bytes;
+      ctx->client_attrib[i].unpack_row_bytes = ctx->unpack_row_bytes;
+   }
+   ctx->client_attrib_depth++;
+}
+
+void GLAPIENTRY
+ripple_cgl_pop_client_attrib(void *rend)
+{
+   struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
+   RIPPLE_CGL_ENTER(rend);
+   CALL_PopClientAttrib(GET_DISPATCH(), ());
+   if (!ctx || !ctx->client_attrib_depth)
+      return;
+   ctx->client_attrib_depth--;
+   if (ctx->client_attrib_depth >= RIPPLE_CGL_CLIENT_ATTRIB_DEPTH)
+      return;
+   unsigned i = ctx->client_attrib_depth;
+   if (ctx->client_attrib[i].mask & GL_CLIENT_PIXEL_STORE_BIT) {
+      ctx->client_storage = ctx->client_attrib[i].client_storage;
+      ctx->pack_row_bytes = ctx->client_attrib[i].pack_row_bytes;
+      ctx->unpack_row_bytes = ctx->client_attrib[i].unpack_row_bytes;
+   }
+}
+
 void GLAPIENTRY
 ripple_cgl_push_attrib(void *rend, GLbitfield mask)
 {
