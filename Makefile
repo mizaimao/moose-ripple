@@ -45,8 +45,8 @@ strip_vmin  = $(VTOOL) -remove-build-version macos -output $(1) $(1).v && rm -f 
 link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
-.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab scanouttest clean
-all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab scanouttest
+.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest clean
+all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest
 
 clean:
 	rm -rf $(OUT)
@@ -256,6 +256,14 @@ $(OUT)/x86_64/grab/grab.o: tools/grab/grab.c
 $(OUT)/grab: $(OUT)/x86_64/grab/grab.o
 	$(call link_tool,x86_64,$@,$^,-framework ApplicationServices -framework CoreFoundation)
 grab: $(OUT)/grab
+
+# --- qe-check (Quartz Extreme on or off per display, and what WindowServer's check reads) ----
+$(OUT)/x86_64/qe-check/qe-check.o: tools/qe-check/qe-check.c
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,x86_64) $(UCFLAGS) -c $< -o $@
+$(OUT)/qe-check: $(OUT)/x86_64/qe-check/qe-check.o
+	$(call link_tool,x86_64,$@,$^,-framework ApplicationServices -framework CoreFoundation -framework IOKit -framework OpenGL)
+qecheck: $(OUT)/qe-check
 
 # --- scanout-test (M5 K2: a GPU buffer on the display through DISPLAY) --------------------
 $(OUT)/%/scanout-test/scanout-test.o: tools/scanout-test/scanout-test.c include/ripple_gpu_uapi.h
