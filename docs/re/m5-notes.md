@@ -169,22 +169,17 @@ darkened, 44,11,43). Overrides: files `extensions` and `renderer` in the debug f
 
 ## Open problems
 
-- **Menu bar:** fixed 2026-11-11 00:35 (Core Image on our GPU, see above); the QE captures
-  in the table were retaken then. Not yet re-checked: Front Row, gl-gears, the Dashboard
-  ripple (the add-widget click missed in the one try).
-- **Dashboard ripple backdrop white:** while a new widget ripples (about 1 s), the 522x598
-  rectangle around it is white apart from the rippling widget
-  ([frame](img/m5-dashboard-ripple-white.png)); the screen is right again afterwards. Core
-  Image renders the ripple on the CPU inside WindowServer and uploads the result each frame
-  (texture 522x598, drawn opaque at 379,101), so its backdrop input is white. Ruled out: GL
-  errors, the framebuffer memory (filled red with `fb-dump`: still white), the window offset
-  (framebuffer objects unshifted: still white), WindowServer's software copy of the screen
-  (`grab` with Dashboard open is right), and `GL_APPLE_float_pixels` (extensions 0xf like the
-  9600 GT, desktop unchanged, ripple still white). Next: find where WindowServer's CPU path
-  gets "what is behind" under QE, e.g. with lldb on WindowServer on 210 around the ripple's
-  `tex_sub_image2D` source buffer.
+- **Menu bar and Dashboard ripple:** fixed 2026-11-11 (Core Image on our GPU, see above).
+  The ripple's backdrop was white (CPU Core Image), then upside down once Core Image ran on
+  the GPU: copies of the screen region for surface textures are now made top row first
+  (`copy_top_first`, one flipped blit), like surfaces read from memory. Now the ripple
+  distorts the real desktop and widgets ([frame](img/m5-qe-dashboard-ripple.png)), and menus
+  show what is behind them blurred in place. Front Row re-checked on this build (menu,
+  reflections, navigation, back to the desktop). Not re-checked: gl-gears (needs a GUI launch).
 - Don't answer `glGetIntegerv(GL_UNPACK_CLIENT_STORAGE_APPLE)`: with an answer (even the
-  tracked value) WindowServer dropped the menu bar. Mesa's `GL_INVALID_ENUM` stays.
+  tracked value) WindowServer dropped the menu bar. Mesa's `GL_INVALID_ENUM` stays. (That
+  observation predates the finding that after a WindowServer restart the menu bar stays away
+  until an app is activated; it may deserve a second look.)
 - The framebuffer memory stays black under QE (the display shows a GPU texture). Anything
   reading the screen through it (old screen-capture tools) gets black.
 - `texture_range_APPLE` is unsupported (ignored); harmless so far.
