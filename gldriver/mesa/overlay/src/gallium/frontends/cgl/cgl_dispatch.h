@@ -28,6 +28,7 @@ extern int ripple_cgl_tracing;
 int ripple_cgl_trace(unsigned index, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 void ripple_cgl_trace_text(const char *what, const void *text, int len);
 void ripple_cgl_trace_floats(const GLfloat *v, int n);
+void ripple_cgl_trace_vertices(GLint size, GLenum type, GLsizei stride, const void *pointer);
 void ripple_cgl_trace_pixels(GLsizei w, GLsizei h, GLenum format, GLenum type,
                              const void *pixels);
 void ripple_cgl_unsupported(const char *name);

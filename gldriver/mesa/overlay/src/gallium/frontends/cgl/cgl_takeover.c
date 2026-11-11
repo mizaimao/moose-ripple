@@ -66,8 +66,9 @@ static struct {
    struct ripple_cgl_context *ctx;
    void **shadow, **old_back;     /* CoreGraphics contexts: our back table, GLEngine's */
 } taken[MAX_TAKEN];
-static void *volatile last_gc;
-static struct ripple_cgl_context *volatile last_ctx;
+/* The slot of the last hit: one word, so a reader never pairs one context's pointer with
+ * another's (two separate words did, with two threads on two contexts; audit 2026-11-11). */
+static volatile int last_slot = -1;
 static simple_mtx_t taken_lock = SIMPLE_MTX_INITIALIZER;
 
 static void
@@ -89,17 +90,18 @@ remember(void *gc, struct ripple_cgl_context *ctx, void **shadow, void **old_bac
 struct ripple_cgl_context *
 ripple_cgl_rend_for(void *rend)
 {
-   /* Every GL call of a CoreGraphics context comes here: try the last hit first. */
-   if (rend == last_gc)
-      return last_ctx;
+   /* Every GL call of a CoreGraphics context comes here: try the last hit first. A live
+    * context's slot does not change under it, so the unlocked look is safe for `rend`'s own. */
+   int slot = last_slot;
+   if (rend && slot >= 0 && taken[slot].gc == rend)
+      return taken[slot].ctx;
    struct ripple_cgl_context *ctx = NULL;
    simple_mtx_lock(&taken_lock);
-   for (unsigned i = 0; i < MAX_TAKEN && !ctx; i++)
-      if (taken[i].gc == rend)
+   for (unsigned i = 0; i < MAX_TAKEN && !ctx; i++) {
+      if (rend && taken[i].gc == rend) {
          ctx = taken[i].ctx;
-   if (ctx) {
-      last_ctx = ctx;
-      last_gc = rend;
+         last_slot = (int)i;
+      }
    }
    simple_mtx_unlock(&taken_lock);
    return ctx;
@@ -109,8 +111,7 @@ void
 ripple_cgl_forget(struct ripple_cgl_context *ctx)
 {
    simple_mtx_lock(&taken_lock);
-   last_gc = NULL;
-   last_ctx = NULL;
+   last_slot = -1;
    for (unsigned i = 0; i < MAX_TAKEN; i++) {
       if (taken[i].ctx != ctx)
          continue;

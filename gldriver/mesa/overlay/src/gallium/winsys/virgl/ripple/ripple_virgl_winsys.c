@@ -16,6 +16,7 @@
 #include <mach/mach.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "util/os_time.h"
 #include "util/simple_mtx.h"
@@ -133,9 +134,17 @@ static bool ripple_fence_done(struct ripple_winsys *ws, uint64_t id, uint32_t ti
 
 static void ripple_fence_wait_forever(struct ripple_winsys *ws, uint64_t id)
 {
-   while (!ripple_fence_done(ws, id, 1000))
-      debug_printf("ripple: fence %llu not done after 1 s, still waiting\n",
-                   (unsigned long long)id);
+   /* Not for ever after all: when the device has stopped answering, WAIT fails at once and
+    * this was a tight loop of system calls with no way out (audit 2026-11-11). Give up after
+    * a minute's worth of tries, as Mesa's own winsys does. */
+   for (unsigned tries = 0; !ripple_fence_done(ws, id, 1000); tries++) {
+      if (tries >= 60) {
+         debug_printf("ripple: fence %llu never signalled; going on without it\n",
+                      (unsigned long long)id);
+         return;
+      }
+      usleep(10000);
+   }
 }
 
 static struct pipe_fence_handle *ripple_fence_create(uint64_t id)
@@ -345,8 +354,6 @@ static int ripple_transfer(struct virgl_winsys *vws, struct virgl_hw_res *res, u
    uint64_t fence = 0;
    uint32_t out_cnt = 1;
 
-   if (dir == RIPPLE_GPU_TO_DEVICE)
-      p_atomic_inc(&work_count);
    memset(&t, 0, sizeof(t));
    t.context = ws->ctx;
    t.buffer = res->res_handle;
@@ -364,6 +371,11 @@ static int ripple_transfer(struct virgl_winsys *vws, struct virgl_hw_res *res, u
    if (IOConnectCallMethod(ws->conn, RIPPLE_GPU_TRANSFER, NULL, 0, &t, sizeof(t), &fence,
                            &out_cnt, NULL, NULL) != KERN_SUCCESS)
       return -1;
+   /* Counted once the kernel has it, not before: another thread could show the screen in
+    * between and remember a count this work had not reached the GPU for, and the display
+    * that follows the work would then be skipped (audit 2026-11-11). */
+   if (dir == RIPPLE_GPU_TO_DEVICE)
+      p_atomic_inc(&work_count);
    p_atomic_set(&res->fence, fence);
    return 0;
 }
@@ -540,15 +552,16 @@ static int ripple_submit(struct ripple_winsys *ws, const uint32_t *handles, unsi
    struct ripple_gpu_submit *s = (struct ripple_gpu_submit *)start;
    uint32_t out_cnt = 1;
 
-   p_atomic_inc(&work_count);
    memcpy(start + sizeof(*s), handles, nh * 4);
    s->context = ws->ctx;
    s->num_handles = nh;
    s->cmd_size = ndw * 4;
    s->flags = 0;
-   return IOConnectCallMethod(ws->conn, RIPPLE_GPU_SUBMIT, NULL, 0, start,
-                              sizeof(*s) + nh * 4 + ndw * 4, fence, &out_cnt, NULL, NULL)
-          == KERN_SUCCESS ? 0 : -1;
+   kern_return_t kr = IOConnectCallMethod(ws->conn, RIPPLE_GPU_SUBMIT, NULL, 0, start,
+                                          sizeof(*s) + nh * 4 + ndw * 4, fence, &out_cnt, NULL,
+                                          NULL);
+   p_atomic_inc(&work_count);          /* after the call: see ripple_transfer */
+   return kr == KERN_SUCCESS ? 0 : -1;
 }
 
 static int ripple_submit_cmd(struct virgl_winsys *vws, struct virgl_cmd_buf *_cbuf,

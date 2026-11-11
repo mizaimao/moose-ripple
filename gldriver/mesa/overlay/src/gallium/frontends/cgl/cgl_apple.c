@@ -263,6 +263,40 @@ ripple_cgl_trace_floats(const GLfloat *v, int n)
 
 static bool cs_readable(const void *p, size_t len);
 
+/* Client vertex arrays of floats or doubles: the first four vertices, logged after the call
+ * line (a pointer that is an offset into a buffer object is not readable and is skipped). */
+void
+ripple_cgl_trace_vertices(GLint size, GLenum type, GLsizei stride, const void *pointer)
+{
+   size_t elem = type == GL_DOUBLE ? 8 : type == GL_FLOAT ? 4 : 0;
+   if (!elem || size < 1 || size > 4 || !pointer)
+      return;
+   size_t step = stride ? (size_t)stride : elem * size;
+   if (!cs_readable(pointer, step * 3 + elem * size))
+      return;
+   simple_mtx_lock(&trace_lock);
+   fprintf(trace_file, "  vertices:");
+   for (int v = 0; v < 4; v++) {
+      const char *p = (const char *)pointer + step * v;
+      fputc(' ', trace_file);
+      fputc('(', trace_file);
+      for (int c = 0; c < size; c++) {
+         double d;
+         if (type == GL_DOUBLE) {
+            memcpy(&d, p + 8 * c, 8);
+         } else {
+            float f;
+            memcpy(&f, p + 4 * c, 4);
+            d = f;
+         }
+         fprintf(trace_file, c ? ", %g" : "%g", d);
+      }
+      fputc(')', trace_file);
+   }
+   fputc('\n', trace_file);
+   simple_mtx_unlock(&trace_lock);
+}
+
 /* Small one- and two-channel images (lookup tables): their first rows, logged after the call
  * line. Tightly packed rows are assumed (enough for a look). */
 void
