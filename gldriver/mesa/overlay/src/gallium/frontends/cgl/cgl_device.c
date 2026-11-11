@@ -7,7 +7,9 @@
 #include <IOKit/IOKitLib.h>
 #include <mach/mach.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "frontend/api.h"
 #include "state_tracker/st_context.h"
@@ -95,6 +97,18 @@ ripple_cgl_device_fscreen(void)
        * user set wins. */
       setenv("MESA_GL_VERSION_OVERRIDE", "2.1", 0);
       setenv("MESA_GLSL_VERSION_OVERRIDE", "120", 0);
+      /* Debug runs (the bundle's log directory exists): Mesa's own messages, e.g. "User
+       * error: GL_INVALID_VALUE in glTexImage2D(...)", which name the call behind an app's
+       * "rendering error 501", go to /Library/Logs/RippleGL/mesa-PROGRAM-PID.log (opened at
+       * the first message). Mesa ignores MESA_LOG_FILE in set-user-id processes such as
+       * WindowServer, whose messages then go to its stderr. */
+      if (!getenv("MESA_DEBUG") && access("/Library/Logs/RippleGL", W_OK) == 0) {
+         char path[256];
+         snprintf(path, sizeof(path), "/Library/Logs/RippleGL/mesa-%s-%d.log", getprogname(),
+                  (int)getpid());
+         setenv("MESA_DEBUG", "ripple", 0);
+         setenv("MESA_LOG_FILE", path, 0);
+      }
       struct pipe_screen *screen = ripple_cgl_create_screen();
       if (screen) {
          device_fscreen = CALLOC_STRUCT(pipe_frontend_screen);
