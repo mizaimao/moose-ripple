@@ -46,7 +46,7 @@ link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
 .PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter clean
-all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter winlist glfeaturecheck
+all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter winlist glfeaturecheck cieffects
 
 clean:
 	rm -rf $(OUT)
@@ -309,6 +309,14 @@ $(OUT)/x86_64/gl-feature-check/gl-feature-check.o: tools/gl-feature-check/gl-fea
 $(OUT)/gl-feature-check: $(OUT)/x86_64/gl-feature-check/gl-feature-check.o
 	$(call link_tool,x86_64,$@,$^,-framework OpenGL)
 glfeaturecheck: $(OUT)/gl-feature-check
+
+# --- ci-effects (Core Image filters and Photo Booth compositions, ours vs software; M6) ------
+$(OUT)/x86_64/ci-effects/ci-effects.o: tools/ci-effects/ci-effects.m
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,x86_64) $(UCFLAGS) -x objective-c -c $< -o $@
+$(OUT)/ci-effects: $(OUT)/x86_64/ci-effects/ci-effects.o
+	$(call link_tool,x86_64,$@,$^,-framework Foundation -framework QuartzCore -framework Quartz -framework OpenGL -framework ApplicationServices -lobjc)
+cieffects: $(OUT)/ci-effects
 $(OUT)/x86_64/gl-feature-check/window-check.o: tools/gl-feature-check/window-check.m
 	@mkdir -p $(dir $@)
 	$(CC) $(call target,x86_64) $(UCFLAGS) -x objective-c -c $< -o $@
