@@ -67,6 +67,8 @@ CUSTOM = {
     'flush': 'ripple_cgl_flush',
     # GL_APPLE_float_pixels in the extension string (WindowServer's float-capable check).
     'get_string': 'ripple_cgl_get_string',
+    # Vertex-program limits Core Image reads that Mesa only answers for fragment programs.
+    'get_programiv_ARB': 'ripple_cgl_get_programiv',
     # Window offset for drawing into the screen through a rectangle (cgl_apple.c).
     'viewport': 'ripple_cgl_viewport',
     'bind_framebuffer_EXT': 'ripple_cgl_bind_framebuffer',

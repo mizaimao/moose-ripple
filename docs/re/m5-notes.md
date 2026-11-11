@@ -133,6 +133,32 @@ what is behind them under QE (WindowServer's own GL background blur; software sh
 through the translucent menu). The software menu bar is opaque on this VM too, so
 "translucent" isn't the software look.
 
+## Core Image on our GPU (2026-11-11, 00:00-00:25)
+
+Under QE WindowServer's Core Image renders the menu bar tint (`CIMenuGenerator`) and the
+Dashboard ripple with its CPU renderer, whose texture input (WindowServer's GL texture of the
+backdrop) it can't read: plain white. Found with `tools/ci-check` (Core Image on a CGL context
+of the default renderer, traced with `dtrace -c`), why it refuses our GPU, in order:
+1. `check_extension` needs `GL_APPLE_client_storage` and `GL_APPLE_texture_range` in the
+   extension string (we leave both out).
+2. Vertex-program limits: Mesa raised `GL_INVALID_ENUM` for the fragment-only ALU/TEX limits
+   and says INT_MAX for native limits; now answered and clamped to 16384
+   (`ripple_cgl_get_programiv`).
+3. `fe_accel_new` picks a GPU tier from the renderer ID (Apple's ATI/NVIDIA/Intel IDs) or a
+   GL_RENDERER prefix ("NVIDIA GeForce GT ", "ATI Radeon HD", "Intel ", ...); ours matches
+   none, tier 0 = no GPU. With GL_RENDERER "Intel UHD Graphics 630 OpenGL Engine" (the host
+   GPU's name) it's tier 7.
+With 1-3, Core Image runs on our GPU in `ci-check` (ARB programs, framebuffer objects); it
+first asks for a 64-bit float pixel format, which we refuse, and uses a 32-bit one. Results
+not checked against the software renderer yet.
+
+In WindowServer: the renderer name alone changes nothing visible. With the two extensions
+added too, the menu bar disappeared (Core Image on the GPU, empty output); with float pixels
+on as well, the screen went blue and lime green, and after the next WindowServer restart the
+guest stopped answering ssh (reset at 00:22). Switches for these experiments, all off by
+default: files `extensions` (names to add) and `renderer` (a GL_RENDERER override) in the
+debug folder, or `RIPPLE_GL_EXTENSIONS` / `RIPPLE_GL_RENDERER`.
+
 ## Open problems
 
 - **Menu bar lower edge:** the fade and dark line come from WindowServer's `CIMenuGenerator`

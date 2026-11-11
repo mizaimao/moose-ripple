@@ -45,8 +45,8 @@ strip_vmin  = $(VTOOL) -remove-build-version macos -output $(1) $(1).v && rm -f 
 link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
-.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump clean
-all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump
+.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck clean
+all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck
 
 clean:
 	rm -rf $(OUT)
@@ -277,6 +277,14 @@ $(OUT)/x86_64/fb-dump/fb-dump.o: tools/fb-dump/fb-dump.c include/ripple_gpu_uapi
 $(OUT)/fb-dump: $(OUT)/x86_64/fb-dump/fb-dump.o
 	$(call link_tool,x86_64,$@,$^,-framework ApplicationServices -framework CoreFoundation -framework IOKit)
 fbdump: $(OUT)/fb-dump
+
+# --- ci-check (M5/M6: does Core Image run on our renderer's GPU or its software path) ------
+$(OUT)/x86_64/ci-check/ci-check.o: tools/ci-check/ci-check.m
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,x86_64) $(UCFLAGS) -x objective-c -c $< -o $@
+$(OUT)/ci-check: $(OUT)/x86_64/ci-check/ci-check.o
+	$(call link_tool,x86_64,$@,$^,-framework Foundation -framework QuartzCore -framework OpenGL -framework ApplicationServices -lobjc)
+cicheck: $(OUT)/ci-check
 
 # --- grab (save the guest's main display as PNG; works over ssh) --------------------------
 $(OUT)/x86_64/grab/grab.o: tools/grab/grab.c

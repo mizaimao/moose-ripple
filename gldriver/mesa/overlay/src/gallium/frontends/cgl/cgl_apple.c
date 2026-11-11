@@ -915,25 +915,67 @@ ripple_cgl_get_string(void *rend, GLenum name)
 
    RIPPLE_CGL_ENTER(rend);
    const GLubyte *s = CALL_GetString(GET_DISPATCH(), (name));
-   if (name != GL_EXTENSIONS || !s || !float_pixels_wanted())
+   if (name == GL_RENDERER) {                /* experiments: RIPPLE_GL_RENDERER or a file */
+      static char renderer[128];
+      static int renderer_read;
+      if (!renderer_read) {
+         renderer_read = 1;
+         const char *env = getenv("RIPPLE_GL_RENDERER");
+         FILE *f = env ? NULL : fopen("/Library/Logs/RippleGL/renderer", "r");
+         if (env)
+            snprintf(renderer, sizeof(renderer), "%s", env);
+         else if (f && fgets(renderer, sizeof(renderer), f))
+            renderer[strcspn(renderer, "\n")] = 0;
+         if (f)
+            fclose(f);
+      }
+      if (renderer[0])
+         return (const GLubyte *)renderer;
+   }
+   if (name != GL_EXTENSIONS || !s)
       return s;
-   GET_CURRENT_CONTEXT(glctx);
-   if (!glctx->Extensions.ARB_texture_float)
-      return s;
-   const GLubyte *r = s;
+   /* What is added: GL_APPLE_float_pixels (above), and for experiments the names in
+    * RIPPLE_GL_EXTENSIONS or the file /Library/Logs/RippleGL/extensions (read once). */
+   static char extra[512];
+   static int extra_read;
    simple_mtx_lock(&lock);
-   for (unsigned i = 0; i < 16; i++) {
+   if (!extra_read) {
+      extra_read = 1;
+      GET_CURRENT_CONTEXT(glctx);
+      if (float_pixels_wanted() && glctx->Extensions.ARB_texture_float)
+         strcat(extra, " GL_APPLE_float_pixels");
+      const char *env = getenv("RIPPLE_GL_EXTENSIONS");
+      char file[256] = "";
+      FILE *f = env ? NULL : fopen("/Library/Logs/RippleGL/extensions", "r");
+      if (f) {
+         size_t n = fread(file, 1, sizeof(file) - 1, f);
+         file[n] = 0;
+         fclose(f);
+      }
+      const char *more = env ? env : file;
+      for (const char *p = more; *p;) {
+         while (*p == ' ' || *p == '\n' || *p == '\t')
+            p++;
+         size_t n = strcspn(p, " \n\t");
+         if (n && strlen(extra) + n + 2 < sizeof(extra)) {
+            strcat(extra, " ");
+            strncat(extra, p, n);
+         }
+         p += n;
+      }
+   }
+   const GLubyte *r = s;
+   for (unsigned i = 0; extra[0] && i < 16; i++) {
       if (cache[i].mesa == s) {
          r = (const GLubyte *)cache[i].ext;
          break;
       }
       if (!cache[i].mesa) {
-         static const char add[] = " GL_APPLE_float_pixels";
-         size_t n = strlen((const char *)s);
-         char *e = malloc(n + sizeof(add));
+         size_t n = strlen((const char *)s), m = strlen(extra);
+         char *e = malloc(n + m + 1);
          if (e) {
             memcpy(e, s, n);
-            memcpy(e + n, add, sizeof(add));
+            memcpy(e + n, extra, m + 1);
             cache[i].mesa = s;
             cache[i].ext = e;
             r = (const GLubyte *)e;
@@ -943,4 +985,37 @@ ripple_cgl_get_string(void *rend, GLenum name)
    }
    simple_mtx_unlock(&lock);
    return r;
+}
+
+/* ---- Program limits ---------------------------------------------------------------------- *
+ * Core Image reads the same limits for vertex and fragment programs before it uses the GPU,
+ * including the ALU/TEX/indirection ones ARB_fragment_program defines only for fragment
+ * programs. Apple's GL answers them for vertex programs; Mesa raises GL_INVALID_ENUM, and Core
+ * Image then renders on the CPU (where it can't read WindowServer's textures: the menu bar's
+ * tint came out plain white, VM 210 2026-11-11). Vertex programs get the instruction limit
+ * as their ALU limit and no texture instructions. */
+void GLAPIENTRY
+ripple_cgl_get_programiv(void *rend, GLenum target, GLenum pname, GLint *params)
+{
+   RIPPLE_CGL_ENTER(rend);
+   if (target == GL_VERTEX_PROGRAM_ARB && params &&
+       pname >= GL_MAX_PROGRAM_ALU_INSTRUCTIONS_ARB &&
+       pname <= GL_MAX_PROGRAM_NATIVE_TEX_INDIRECTIONS_ARB) {
+      if (pname == GL_MAX_PROGRAM_ALU_INSTRUCTIONS_ARB)
+         CALL_GetProgramivARB(GET_DISPATCH(), (target, GL_MAX_PROGRAM_INSTRUCTIONS_ARB, params));
+      else if (pname == GL_MAX_PROGRAM_NATIVE_ALU_INSTRUCTIONS_ARB)
+         CALL_GetProgramivARB(GET_DISPATCH(),
+                              (target, GL_MAX_PROGRAM_NATIVE_INSTRUCTIONS_ARB, params));
+      else
+         *params = 0;
+   } else {
+      CALL_GetProgramivARB(GET_DISPATCH(), (target, pname, params));
+   }
+   /* Mesa says "unlimited" (INT_MAX) for the native instruction limits; Apple's drivers give
+    * real numbers, and Core Image's arithmetic on INT_MAX goes wrong. */
+   bool limit = (pname >= GL_MAX_PROGRAM_ALU_INSTRUCTIONS_ARB &&
+                 pname <= GL_MAX_PROGRAM_NATIVE_TEX_INDIRECTIONS_ARB) ||
+                (pname >= GL_MAX_PROGRAM_INSTRUCTIONS_ARB && pname <= GL_MAX_PROGRAM_ENV_PARAMETERS_ARB);
+   if (params && limit && *params > 65535)
+      *params = 16384;
 }
