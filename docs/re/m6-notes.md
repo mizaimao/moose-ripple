@@ -149,3 +149,39 @@ uses works on its own in `gl-feature-check` (ours and software agree): DXT1 uplo
 RGBA uploaded as GL_COMPRESSED_RGBA 2048x2048 with mipmaps (`generic`; we pick DXT5, Apple
 DXT3), GL_SHORT attributes from a buffer object at stride 24 (`vbo`), GL_SHORT client arrays
 with a texture matrix, a strip drawn from vertex 32. Colour buffers are always 32-bit. Open.
+
+## Core Image filters and Photo Booth effects (06:00-06:20)
+
+No iMovie (no iLife media on the NAS) and no camera, so (coordinator, 05:10) Core Image is
+covered with `tools/ci-effects` instead: a photo (Clown Fish.jpg, 480x300) through
+1. 24 Core Image filters on our GPU context against Core Image's own software renderer, and
+2. all 61 image-filter compositions in /System/Library/Compositions (Photo Booth's effects,
+   the photo standing in for the camera) through QCRenderer, our renderer against Apple's
+   software renderer.
+
+It found three bugs, fixed:
+- **Crash in Core Image** (`update_single_program_texture`, CurrentTex[-1]): Mesa's ARB parser
+  kept the previous text's samplers in SamplersUsed when a program object got new text. Mesa
+  patch 0006.
+- **Abort in Core Image** (double free in `st_program_string_notify`): a vertex program
+  re-specified twice freed base_serialized_nir again. Mesa patch 0007. Both still in upstream
+  Mesa main (2026-11-11): candidates for an upstream report, the owner's call.
+- **GL_APPLE_row_bytes** (pack and unpack row stride in bytes) was refused: now kept per
+  context and applied as row length around uploads and readbacks (not in WindowServer).
+  ASCII Art came out empty before.
+- **CGLTexImagePBuffer** copies again by default: sharing the pbuffer's buffer showed Black &
+  White, X-Ray and Line Screen upside down (a window-system buffer is stored flipped against a
+  texture). Sharing is behind a debug switch (`pbuffer-tie`).
+
+Results now:
+- Filters: 21 of 24 within 1-2 levels of the software renderer; CIZoomBlur (1.1% of pixels),
+  CIEdges (3.9%) and CIComicEffect (17.6%) differ in detail (edge thresholds), the same picture.
+  Our GPU takes 2-90 ms per 480x300 frame here against software's 1-5 ms: each render is a
+  round trip through QEMU (later performance pass).
+- Photo Booth effects: 55 of 61 match (within 1-2 levels or under 1% of pixels). Differ:
+  Concert (ours washed out: a blend or accumulator), Neon (17%, glow detail), Blue Print (4%),
+  Comic Book (3%), Pointillize (2%, random dots), Pinch (5%, sub-pixel sampling; looks the
+  same). Ours 0.4-0.8 ms per frame for most, software 2-3 ms.
+- Contact sheets: [Photo Booth page 1](img/m6-booth-1.png), [filters page 3](img/m6-ci-filters-3.png).
+- Re-checked after the change: desktop, menus, Dashboard, Quartz Composer (Arabesque 60 fps),
+  Front Row. Frame meter: Dashboard 28 / 16.5 screens/s peak / mean, Exposé 21 / 7.4.
