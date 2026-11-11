@@ -65,6 +65,8 @@ CUSTOM = {
     'bind_texture': 'ripple_cgl_bind_texture',
     'delete_textures': 'ripple_cgl_delete_textures',
     'flush': 'ripple_cgl_flush',
+    # GL_APPLE_float_pixels in the extension string (WindowServer's float-capable check).
+    'get_string': 'ripple_cgl_get_string',
     # Window offset for drawing into the screen through a rectangle (cgl_apple.c).
     'viewport': 'ripple_cgl_viewport',
     'bind_framebuffer_EXT': 'ripple_cgl_bind_framebuffer',

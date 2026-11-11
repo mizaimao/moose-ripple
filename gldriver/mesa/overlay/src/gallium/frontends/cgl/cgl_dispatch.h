@@ -59,6 +59,8 @@ void GLAPIENTRY ripple_cgl_bind_texture(void *rend, GLenum target, GLuint textur
 void GLAPIENTRY ripple_cgl_delete_textures(void *rend, GLsizei n, const GLuint *textures);
 void GLAPIENTRY ripple_cgl_flush(void *rend);
 void ripple_cgl_client_storage_frame(void);
+/* GL_APPLE_float_pixels added to the extension string (cgl_apple.c). */
+const GLubyte *GLAPIENTRY ripple_cgl_get_string(void *rend, GLenum name);
 void GLAPIENTRY ripple_cgl_tex_parameteri(void *rend, GLenum target, GLenum pname, GLint param);
 void GLAPIENTRY ripple_cgl_tex_parameterf(void *rend, GLenum target, GLenum pname, GLfloat param);
 void GLAPIENTRY ripple_cgl_tex_parameteriv(void *rend, GLenum target, GLenum pname, const GLint *params);

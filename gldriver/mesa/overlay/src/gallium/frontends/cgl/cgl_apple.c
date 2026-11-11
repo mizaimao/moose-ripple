@@ -4,6 +4,7 @@
  * if slower than real fences.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "util/simple_mtx.h"
@@ -363,12 +364,9 @@ ripple_cgl_get_integerv(void *rend, GLenum pname, GLint *params)
 {
    struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
    RIPPLE_CGL_ENTER(rend);
-   if (pname == GL_UNPACK_CLIENT_STORAGE_APPLE && ctx && params) {
-      /* Core Image (the Dashboard ripple, in WindowServer) saves the pixel-store state with
-       * this query: answer what was set, without Mesa's GL_INVALID_ENUM. */
-      params[0] = ctx->client_storage;
-      return;
-   }
+   /* GL_UNPACK_CLIENT_STORAGE_APPLE stays an error here too: answering it (with the tracked
+    * value) made WindowServer drop the menu bar (VM 210, 2026-11-10); the error is part of
+    * what keeps WindowServer off its client-storage paths. */
    CALL_GetIntegerv(GET_DISPATCH(), (pname, params));
    if (!ctx || !ctx->win_surface || !params)
       return;
@@ -684,4 +682,63 @@ ripple_cgl_flush(void *rend)
    RIPPLE_CGL_ENTER(rend);
    ripple_cgl_client_storage_frame();
    CALL_Flush(GET_DISPATCH(), ());
+}
+
+/* ---- GL_APPLE_float_pixels -------------------------------------------------------------- *
+ * WindowServer marks its compositor floating-point capable only if the extension string has
+ * GL_APPLE_float_pixels (docs/re/qe-display-surface.md); its enums are those of
+ * ARB_texture_float and ARB_half_float_pixel, which Mesa implements. So the name can be added
+ * whenever Mesa has ARB_texture_float. Off by default (M6 work): with it WindowServer moves
+ * drawing to Core Image on the GPU and the menu bar came out black (VM 210, 2026-11-10).
+ * Opt in with RIPPLE_FLOAT_PIXELS=1, or for WindowServer the file
+ * /Library/Logs/RippleGL/float_pixels when it starts. */
+#include <unistd.h>
+static bool
+float_pixels_wanted(void)
+{
+   static int wanted = -1;
+   if (wanted < 0) {
+      const char *e = getenv("RIPPLE_FLOAT_PIXELS");
+      wanted = (e && *e == '1') || access("/Library/Logs/RippleGL/float_pixels", F_OK) == 0;
+   }
+   return wanted;
+}
+const GLubyte *GLAPIENTRY
+ripple_cgl_get_string(void *rend, GLenum name)
+{
+   /* Mesa keeps a string per context: one copy per string, kept for the process's life (a
+    * caller may hold on to it). */
+   static simple_mtx_t lock = SIMPLE_MTX_INITIALIZER;
+   static struct { const GLubyte *mesa; char *ext; } cache[16];
+
+   RIPPLE_CGL_ENTER(rend);
+   const GLubyte *s = CALL_GetString(GET_DISPATCH(), (name));
+   if (name != GL_EXTENSIONS || !s || !float_pixels_wanted())
+      return s;
+   GET_CURRENT_CONTEXT(glctx);
+   if (!glctx->Extensions.ARB_texture_float)
+      return s;
+   const GLubyte *r = s;
+   simple_mtx_lock(&lock);
+   for (unsigned i = 0; i < 16; i++) {
+      if (cache[i].mesa == s) {
+         r = (const GLubyte *)cache[i].ext;
+         break;
+      }
+      if (!cache[i].mesa) {
+         static const char add[] = " GL_APPLE_float_pixels";
+         size_t n = strlen((const char *)s);
+         char *e = malloc(n + sizeof(add));
+         if (e) {
+            memcpy(e, s, n);
+            memcpy(e + n, add, sizeof(add));
+            cache[i].mesa = s;
+            cache[i].ext = e;
+            r = (const GLubyte *)e;
+         }
+         break;
+      }
+   }
+   simple_mtx_unlock(&lock);
+   return r;
 }
