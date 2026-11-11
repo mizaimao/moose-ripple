@@ -7,6 +7,7 @@
 #   VARIANT: RELEASE or DEBUG.  DUET: bootX64-blockio, bootX64 or none.
 # Messages go to stderr. Called by build.sh.
 import hashlib
+import io
 import os
 import plistlib
 import shutil
@@ -101,6 +102,14 @@ def main():
     for arc, src in sorted(kexts.items()):
         out.add(src, arcname=arc)
         log("staged", arc)
+    # Hide OpenCore's own disk from its menu (otherwise it is listed, as the default on a fresh
+    # VM, and chain-loads itself). ScanPolicy did this before but also hid the installers'
+    # Apple-partition-map volumes. OpenCore docs, Boot Algorithm: .contentVisibility.
+    hide = b"Disabled"
+    ti = tarfile.TarInfo("esp/EFI/BOOT/.contentVisibility")
+    ti.size, ti.mode = len(hide), 0o644
+    out.addfile(ti, io.BytesIO(hide))
+    log("staged", ti.name)
     out.close()
 
 

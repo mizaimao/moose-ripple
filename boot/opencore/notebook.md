@@ -179,3 +179,83 @@ black and QEMU reported `internal-error`: RIP 0x30000 (all 0xFF there), return a
 driver's per-output loop (`call [rax+0xb0]`). So the driver now binds and runs, then calls
 through a bad object pointer. Host fine apart from `irq 16: nobody cared` at VM start. Card
 taken off 212 again.
+
+## 2026-11-10 23:00: OS X 10.7 to 10.9 (the owner's request), VM 213
+
+VM 213 `ripple-osx`: same settings as 212 (OVMF, one `isa-applesmc`, Penryn args,
+`vmware-cpuid-freq=off`, `X-PciMmio64Mb=0`) but `vga: std`, no GPU, 4 GB; one disk per OS X
+version. Installers from the owner's NAS (`the NAS's OS X folder`):
+- `mac-os-x-lion-10.7.5/Mac OS X Lion 10.7.5.iso` is **truncated**: its Apple partition map
+  (2048-byte blocks) describes 4134440 blocks (8.5 GB), the file holds 2513816 (5.1 GB), so the
+  HFS+ partition runs past the end and no partition driver offers it. Not used.
+- `Install_Mac_OS_X_Lion_10.7.0_Lion.iso` (already on the rig; also on the NAS as
+  `Install Mac OS X Lion 10.7.0 Lion.iso`): a 5 GiB disk image, Apple partition map with
+  512-byte blocks, "Mac OS X Base System" (Lion's BaseSystem with the installer app). Copied to
+  a qcow2 and attached as a disk (`sata4`), so the ISO in the store stays untouched.
+- `InstallESD_10_8_5.img`: Mountain Lion 10.8.5 InstallESD as a CD image (Apple partition map,
+  2048-byte blocks, "Mac OS X Install ESD"); attached as the CD (`ide2`).
+
+What it took in OpenCore:
+- **`OpenPartitionDxe.efi`**: OVMF reads only GPT and MBR. Without it the UEFI shell shows the
+  installer disks but no partitions on them.
+- **`ScanPolicy` 0 instead of 513**: with 513 (file-system lock, HFS allowed) the shell had the
+  installers' HFS+ file systems mounted, but OpenCore's menu listed nothing besides its tools.
+  Most likely OpenCore decides the file-system type from a GPT partition type and an Apple
+  partition map has none (UNVERIFIED; the docs don't say how the type is detected). With 0
+  both installers appear.
+- 513 used to keep OpenCore's own disk out of the menu (under OpenDuet it was the default entry
+  and chain-loaded itself). Now `EFI/BOOT/.contentVisibility` with `Disabled` does that
+  (staged by `stage.py`; OpenCore docs, Boot Algorithm). With it the menu lists only the two
+  installers and starts the first by itself.
+- Result: the Lion installer ("Mac OS X Base System") booted by itself through OpenCore on OVMF:
+  64-bit kernel, installer GUI at 1024x768 (`vga: std`). QEMU's USB tablet works in Lion
+  without a driver, but the pointer lands on a 1204x900 grid offset by (-91, -68) instead of
+  the 1024x768 screen (two-point calibration); `scripts/qmp-input.sh` coordinates have to be
+  corrected for that.
+- Install from the installer's Terminal: `diskutil partitionDisk disk0 1 GPTFormat JHFS+ ...`,
+  then `installer -pkg /System/Installation/Packages/OSInstall.mpkg -target /Volumes/...`
+  (about 10 minutes). The base system has no `tee` and no `dscl`.
+- My mistake, stopped by the owner: I pre-created a user account, skipped the setup assistant and
+  added the guest key and sudo. The owner does the first setup himself; these installs get wiped
+  and redone, and the archived disks stop before the first boot.
+
+## 2026-11-10 23:40: 9600 GT on the new image (one boot, 210 off)
+
+VM 213 switched to the card setup (`bios: seabios`, `vga: none`, `hostpci0` as VM 211), Lion
+10.7 (11A511) on `sata0`, same OpenCore image (OpenDuet on SeaBIOS). The menu started Lion by
+itself (so `.contentVisibility` also hides OpenCore's disk under OpenDuet). Lion: GeForce,
+NVDAResman and nv50hal 7.0.2 loaded, System Profiler "GeForce 9600 GT", 1024 MB, ROM
+62.94.11.00.03; the framebuffer drives the monitor at 1920x1080@60; WindowServer:
+`GLCompositor: GL renderer id 0x0102260b, GL mask 0x00000003, ... caps QEX|QGL|MIPMAP, vram
+1024 MB`, extensions `FPRG|NPOT|GLSL|FLOAT`. So Quartz Extreme is on with the card in 10.7, and
+the 9600 GT's device properties from 10.6 carry over. No `irq 16: nobody cared` from start to
+shutdown. VM 213 back to OVMF, `vga: std`, no card.
+
+## 2026-11-10 23:40: installers for the archived disks
+
+- Lion: Apple still offers 10.7.5 as a free download
+  (`updates.cdn-apple.com/2021/macos/041-7683-20210614-E610947E-C7CE-46EB-8860-D26D71F0D3EA/InstallMacOSX.dmg`,
+  4720237409 bytes). Inside: `InstallMacOSX.pkg/InstallESD.dmg`, 10.7.5 build 11G63, which
+  boots by itself (boot.efi, kernelcache, BaseSystem.dmg). Unpacked with 7-Zip on dev.lan into
+  a raw disk image (the dmg's partitions in order, Apple partition map with 2048-byte blocks),
+  on the rig as `local:iso/Mac_OS_X_Lion_10.7.5_InstallESD.iso`. The truncated NAS "10.7.5 ISO" is
+  exactly as long as this HFS+ partition (5148295168 bytes) but carries a different partition
+  map; not looked into further. Deleted the rig copy of that ISO.
+- Mavericks: the NAS's `Install OS X Mavericks.app` holds 10.9.5 (13F34). Its InstallESD.dmg
+  has only BaseSystem.dmg and the packages (no boot files), unpacked the same way to
+  `local:iso/OS_X_Mavericks_InstallESD.iso`.
+- Mountain Lion: `InstallESD_10_8_5.img` from the NAS as it is (boots by itself).
+
+## 2026-11-10 23:53: 10.6.8 on the new image (VM 212, no card)
+
+Snapshot `pre-oc-osx`, new image written, one cold boot on OVMF: the menu started Macintosh HD
+by itself, 10.6.8 (10K549) x86_64, TSC 3.59998 GHz, `boot-args` from NVRAM kept
+(`-v npci=0x2000`), RippleVirtioGPU loaded; clean power-off in about 4 s.
+
+## 2026-11-10 23:45: VM 211 "hang" was Chameleon's menu
+
+After the Lion card boot, VM 211 (Chameleon) seemed hung twice before macOS: one vCPU busy in
+Chameleon boot2's real-mode BIOS calls, no network. The owner saw the monitor: Chameleon's menu,
+waiting for a key, as it always does on 211 (`scripts/boot.sh` presses Right, then Return).
+211 had been started with a plain `qm start`, and my single Return picked the CD entry. Not a
+card problem. Lesson: check the project's boot script before calling a VM hung.

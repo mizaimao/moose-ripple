@@ -1,7 +1,8 @@
-# OpenCore boot disk for Mac OS X 10.6.8 in QEMU
+# OpenCore boot disk for Mac OS X 10.6.8 to 10.9.5 in QEMU
 
 One image boots Mac OS X 10.6.8 through OpenCore 1.0.8 in every VM type tested, replacing the
-Chameleon 2.1 ISO:
+Chameleon 2.1 ISO. Work in progress: the same image for OS X 10.7 to 10.9 and their installers
+(VM 213; status in the notebook):
 - **virtio-gpu VMs** (VM 210): UEFI firmware (Proxmox's OVMF).
 - **9600 GT passthrough VMs** (VM 211's setup): SeaBIOS, which starts the card from its BIOS
   ROM, then OpenDuet (OpenCore's UEFI layer for BIOS machines, on the same disk).
@@ -11,11 +12,13 @@ Why and what was tried: [decision 0007](../../docs/decisions/0007-opencore.md).
 ## Files
 
 - `config.plist`: the OpenCore configuration (no kexts, no ACPI tables, MacPro3,1 SMBIOS, the
-  9600 GT's device properties).
+  9600 GT's device properties, `OpenPartitionDxe` for the installers' Apple partition maps,
+  `ScanPolicy` 0: with 513 OpenCore didn't list volumes on Apple partition maps).
 - `sources.txt`: pinned OpenCore releases with SHA-256. Nothing downloaded is committed.
 - `stage.py`: runs on dev.lan in the repo's `.venv` (Python only from there):
   fetches the releases by SHA-256, runs `ocvalidate`, collects the files the config names and
-  OpenDuet's loader (`bootX64-blockio`), and streams them as tar.
+  OpenDuet's loader (`bootX64-blockio`), adds `EFI/BOOT/.contentVisibility` (`Disabled`: keeps
+  OpenCore's own disk out of its menu), and streams them as tar.
 - `mkimage.sh`: builds the disk image from that stream, as root on the retro rig, with shell
   tools only: a FAT32 EFI partition with OpenCore plus OpenDuet's boot sectors.
 - `build.sh`: runs both (the tar stream passes through the laptop's ssh) and with `-w VMID`
