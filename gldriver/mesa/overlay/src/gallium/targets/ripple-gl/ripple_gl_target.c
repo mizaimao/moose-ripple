@@ -361,6 +361,23 @@ gldDestroyShared(struct gld_shared *s)
 
 /* ---- Contexts ------------------------------------------------------------------------ */
 
+/* Drawables of accelerator surfaces, one per surface for the whole process: WindowServer
+ * moves its contexts between surfaces every frame and redraws only what changed, so each
+ * surface's render targets must persist (one drawable per context, resized on every switch,
+ * lost the rest: black areas and leftovers). The least recently used unbound one goes when
+ * the table is full. */
+#define GLD_MAX_SURFACES 32
+struct gld_surface {
+   uint32_t sid;
+   struct ripple_cgl_drawable *d;
+   struct ripple_gpu_surface_info info;
+   unsigned long last_use;
+   unsigned binds;                       /* contexts drawing into it now */
+};
+static struct gld_surface surfaces[GLD_MAX_SURFACES];
+static unsigned long surface_clock;
+static simple_mtx_t surfaces_lock = SIMPLE_MTX_INITIALIZER;
+
 #define GLD_CONTEXT_MAGIC 0x52474c44u    /* "RGLD" */
 
 struct gld_context {
@@ -374,14 +391,25 @@ struct gld_context {
    struct gld_window *win;               /* attached window, if any */
    struct ripple_cgl_drawable *drawable; /* its render targets */
    int swap_interval;                    /* kCGLCPSwapInterval: 1 = wait for vblank */
-   uint32_t surface_id;                  /* accelerator surface drawn into (WindowServer), or 0 */
-   struct ripple_gpu_surface_info surface;
+   struct gld_surface *cur_surface;      /* accelerator surface drawn into (WindowServer) */
 };
+
+static void
+unbind_surface(struct gld_context *c)
+{
+   if (!c->cur_surface)
+      return;
+   simple_mtx_lock(&surfaces_lock);
+   c->cur_surface->binds--;
+   simple_mtx_unlock(&surfaces_lock);
+   c->cur_surface = NULL;
+   ripple_cgl_context_set_drawable(c->mesa, c->drawable);
+}
 
 static void
 detach(struct gld_context *c)
 {
-   c->surface_id = 0;
+   unbind_surface(c);
    if (c->drawable) {
       ripple_cgl_context_set_drawable(c->mesa, NULL);
       ripple_cgl_drawable_destroy(c->drawable);
@@ -529,15 +557,15 @@ static void
 backing_present(void *data, const uint8_t *pixels, unsigned stride, unsigned width,
                 unsigned height)
 {
-   struct gld_context *c = data;
-   uint8_t *dst = (uint8_t *)(uintptr_t)c->surface.backing_address;
-   unsigned rows = height < c->surface.height ? height : c->surface.height;
-   unsigned bytes = (width < c->surface.width ? width : c->surface.width) * 4;
+   struct gld_surface *e = data;
+   uint8_t *dst = (uint8_t *)(uintptr_t)e->info.backing_address;
+   unsigned rows = height < e->info.height ? height : e->info.height;
+   unsigned bytes = (width < e->info.width ? width : e->info.width) * 4;
 
    if (!dst)
       return;
    for (unsigned y = 0; y < rows; y++)
-      memcpy(dst + (size_t)y * c->surface.row_bytes, pixels + (size_t)y * stride, bytes);
+      memcpy(dst + (size_t)y * e->info.row_bytes, pixels + (size_t)y * stride, bytes);
 }
 
 /* A window-server surface given as {0, 0, accelerator surface id}: what WindowServer's own
@@ -547,41 +575,71 @@ static int
 attach_surface(struct gld_context *c, uint32_t sid)
 {
    struct ripple_gpu_surface_info si;
+   struct gld_surface *e = NULL, *spare = NULL;
    bool changed = false;
 
    if (!ripple_cgl_device_surface_info(sid, &si)) {
       DBG("  accelerator surface %u: unknown\n", sid);
       return kCGLBadDrawable;
    }
-   if (c->win) {
-      gld_window_release(c->win);
-      c->win = NULL;
-      changed = true;
-   }
-   if (!c->drawable) {
-      c->drawable = ripple_cgl_drawable_create(c->mesa);
-      if (!c->drawable)
-         return kCGLBadAlloc;
-      changed = true;
-   }
-   if (c->surface_id != sid)
-      changed = true;
-   c->surface_id = sid;
-   c->surface = si;
-   if (si.flags & RIPPLE_GPU_SURFACE_SCREEN) {
-      ripple_cgl_drawable_set_present(c->drawable, NULL, NULL);
-      ripple_cgl_drawable_set_gpu_display(c->drawable, true);
-   } else if (si.backing_address) {
-      ripple_cgl_drawable_set_gpu_display(c->drawable, false);
-      ripple_cgl_drawable_set_present(c->drawable, backing_present, c);
-   } else {
+   if (!(si.flags & RIPPLE_GPU_SURFACE_SCREEN) && !si.backing_address) {
       DBG("  accelerator surface %u: neither the screen nor backed (flags 0x%x)\n", sid, si.flags);
       return kCGLBadDrawable;
    }
-   if (c->drawable->width != si.width || c->drawable->height != si.height)
+   if (c->win) {
+      gld_window_release(c->win);
+      c->win = NULL;
+   }
+
+   simple_mtx_lock(&surfaces_lock);
+   for (unsigned i = 0; i < GLD_MAX_SURFACES && !e; i++) {
+      if (surfaces[i].d && surfaces[i].sid == sid)
+         e = &surfaces[i];
+      else if (!surfaces[i].d && !spare)
+         spare = &surfaces[i];
+   }
+   if (!e) {
+      if (!spare) {                     /* full: the least recently used unbound one goes */
+         for (unsigned i = 0; i < GLD_MAX_SURFACES; i++)
+            if (!surfaces[i].binds && (!spare || surfaces[i].last_use < spare->last_use))
+               spare = &surfaces[i];
+         if (spare) {
+            ripple_cgl_drawable_destroy(spare->d);
+            memset(spare, 0, sizeof(*spare));
+         }
+      }
+      if (spare)
+         spare->d = ripple_cgl_drawable_create(c->mesa);
+      if (!spare || !spare->d) {
+         simple_mtx_unlock(&surfaces_lock);
+         return kCGLBadAlloc;
+      }
+      e = spare;
+      e->sid = sid;
       changed = true;
-   ripple_cgl_drawable_set_size(c->drawable, si.width, si.height);
-   ripple_cgl_context_set_drawable(c->mesa, c->drawable);
+   }
+   if (e->info.width != si.width || e->info.height != si.height)
+      changed = true;
+   e->info = si;
+   e->last_use = ++surface_clock;
+   if (c->cur_surface != e) {
+      if (c->cur_surface)
+         c->cur_surface->binds--;
+      e->binds++;
+      c->cur_surface = e;
+      changed = true;
+   }
+   simple_mtx_unlock(&surfaces_lock);
+
+   if (si.flags & RIPPLE_GPU_SURFACE_SCREEN) {
+      ripple_cgl_drawable_set_present(e->d, NULL, NULL);
+      ripple_cgl_drawable_set_gpu_display(e->d, true);
+   } else {
+      ripple_cgl_drawable_set_gpu_display(e->d, false);
+      ripple_cgl_drawable_set_present(e->d, backing_present, e);
+   }
+   ripple_cgl_drawable_set_size(e->d, si.width, si.height);
+   ripple_cgl_context_set_drawable(c->mesa, e->d);
    if (changed)
       DBG("  accelerator surface %u: %ux%u at %d,%d, %s\n", sid, si.width, si.height, si.x, si.y,
           (si.flags & RIPPLE_GPU_SURFACE_SCREEN) ? "the display" : "backed");
@@ -606,11 +664,7 @@ gldAttachDrawable(struct gld_context *c, int type, void *data, void *opts)
           ids ? ids[2] : 0);
       if (ids && !ids[0] && !ids[1] && ids[2])
          return attach_surface(c, ids[2]);
-      if (c->surface_id) {
-         c->surface_id = 0;
-         if (c->drawable)
-            ripple_cgl_drawable_set_gpu_display(c->drawable, false);
-      }
+      unbind_surface(c);
       struct gld_window *w = gld_window_attach(data, c->win, &changed);
       if (!w) {
          DBG("  attach failed\n");
@@ -680,9 +734,19 @@ gldUpdateDispatch(struct gld_context *c, void **render_ops, void *dirty)
 
 #define GLD_PLACEHOLDER ((void *)(uintptr_t)0x52)
 
+/* With the debug log on, the first calls of each are logged: GLEngine-side object work (e.g.
+ * textures CoreGraphics makes through CGL calls outside the dispatch table) never reaches Mesa. */
+#define GLD_SEEN(name)                                                        \
+   do {                                                                      \
+      static unsigned seen_;                                                 \
+      if (seen_ < 3 && ++seen_)                                              \
+         DBG("object call %s (%u)\n", #name, seen_);                         \
+   } while (0)
+
 #define GLD_CREATE(name)                                                     \
    GLD_EXPORT int name(void *shared, void **out)                             \
    {                                                                         \
+      GLD_SEEN(name);                                                        \
       if (out)                                                               \
          *out = GLD_PLACEHOLDER;                                             \
       return 0;                                                              \
@@ -697,7 +761,7 @@ GLD_CREATE(gldCreateFence)
 GLD_CREATE(gldCreateProgram)
 
 /* Everything else: accept and do nothing. */
-#define GLD_NOOP(name) GLD_EXPORT int name(void) { return 0; }
+#define GLD_NOOP(name) GLD_EXPORT int name(void) { GLD_SEEN(name); return 0; }
 GLD_NOOP(gldBufferSubData)
 GLD_NOOP(gldCopyTexSubImage)
 GLD_NOOP(gldCreateComputeContext)
