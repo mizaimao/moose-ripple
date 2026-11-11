@@ -71,6 +71,25 @@ which is per-application Quartz 2D drawing on GL and off by default; it is not Q
 7. **Later changes:** `updateGLVRAMFlag` (row 7) and `CGXGLCompositorSetTileSize` clear byte
    0x117. Mirroring and mux switching read it.
 
+## How CoreGraphics calls GL (for the takeover; C unless marked)
+
+- `cglsInitialize` (0xe0e28) calls `gliInitializeLibrary(services, fbindices, n, 0, 0, 0)` and
+  requires `gliGetVersion` to report 2 and 3. It then asks `gliGetInteger(0, 0xe0, &size)` for
+  the dispatch table size (`__cgls_gli_dispatch_size`; default 0x17e0 if the call fails).
+- `cglsCreateContext` (0xe6bb3) mallocs `size + 0xb0` bytes and calls
+  `gliCreateContext(&ctx[0], pixelFormat, share, &ctx[8], __cgls_dummy_disp, 0)`. The compositor's
+  context pointer is kept in the CoreGraphics global `__cglsContext` (VA 0x7398e0, a local symbol
+  in the nlist table; dlsym can't find it).
+- The block has the same front layout as a `CGLContextObj`: +0 the GLEngine context and +8 the
+  dispatch table GLEngine fills. GL calls are `ctx->disp[n](ctx->rend, ...)`, for example
+  `call *0x348(%r12)` with `(%r12)` as the first argument for `glGetIntegerv`
+  (`__CGXGLDisplayContextInformation`, 0xe7017). The table is in malloc'd memory, so it is
+  writable. After it come 0xb0 bytes of cgls state, starting with the `__cgls_plugin` pointer.
+- The 5th argument is a different, read-only table: `__cgls_dummy_disp_const` (VA 0x666ee0,
+  `__TEXT,__const`) when the size is at most 0x2000, otherwise a calloc'd one. CoreGraphics never
+  calls through it (I: it is GLEngine's stand-in or "front" table). This is probably the
+  read-only table seen in the driver work. The one to patch is `__cglsContext + 8`.
+
 ## Configuration.plist on the guest (10.6.8)
 
 `/System/Library/Frameworks/ApplicationServices.framework/Frameworks/CoreGraphics.framework/Resources/Configuration.plist`
@@ -81,9 +100,9 @@ the defaults are 32-bit depth, 16 MB and `IOAGPDevice` only (C, `_CGXCoreGraphic
 
 ## What this means for the driver
 
-- With `ripple_qe=1`, the kext and GL bundle as of ce279dc meet every row on paper. If QE still
-  stays off on VM 210, the likely causes are `gldCreateContext` or the first
-  `gldAttachDrawable` failing for WindowServer (row 8), or the display flag 0x08 case (row 2).
+- With `ripple_qe=1`, the kext and GL bundle as of ce279dc meet every row on paper, and ripple
+  saw `CGDisplayUsesOpenGLAcceleration` = 1 on VM 210 (f98c322). If it ever drops back to 0,
+  check row 8 (`gldCreateContext` or the first attach failing for WindowServer) and row 7 first.
 - Keep the framebuffer's `getVRAMRange()` at 32 MB or more, and the renderer's video memory
   below 4096 MB (row 4's 32-bit shift).
 - Quick check on the guest: the `GLCompositor:` line above names the renderer ID, the display
