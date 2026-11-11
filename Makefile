@@ -45,8 +45,8 @@ strip_vmin  = $(VTOOL) -remove-build-version macos -output $(1) $(1).v && rm -f 
 link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
-.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck clean
-all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck
+.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump clean
+all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump
 
 clean:
 	rm -rf $(OUT)
@@ -269,6 +269,14 @@ $(OUT)/%/gl-check/gl-check: $(OUT)/%/gl-check/gl-check.o
 glcheck: $(OUT)/gl-check
 $(OUT)/gl-check: $(OUT)/i386/gl-check/gl-check $(OUT)/x86_64/gl-check/gl-check
 	$(LIPO) -create $^ -output $@
+
+# --- fb-dump (M5: the framebuffer memory as PNG, the CPU's view of the screen) -------------
+$(OUT)/x86_64/fb-dump/fb-dump.o: tools/fb-dump/fb-dump.c include/ripple_gpu_uapi.h
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,x86_64) $(UCFLAGS) -Iinclude -c $< -o $@
+$(OUT)/fb-dump: $(OUT)/x86_64/fb-dump/fb-dump.o
+	$(call link_tool,x86_64,$@,$^,-framework ApplicationServices -framework CoreFoundation -framework IOKit)
+fbdump: $(OUT)/fb-dump
 
 # --- grab (save the guest's main display as PNG; works over ssh) --------------------------
 $(OUT)/x86_64/grab/grab.o: tools/grab/grab.c
