@@ -2,11 +2,12 @@
  * fb-dump: save the framebuffer's memory (what the CPU sees as the screen, through our kext's
  * RIPPLE_GPU_MEMORY_FRAMEBUFFER mapping) as a PNG. Under Quartz Extreme the display shows a GPU
  * texture instead, so this tells whether the CPU's view of the screen is current (M5).
- *   fb-dump OUT.png
+ *   fb-dump OUT.png [0xXXRRGGBB]     the colour fills the memory first (experiments)
  */
 #include <ApplicationServices/ApplicationServices.h>
 #include <IOKit/IOKitLib.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "ripple_gpu_uapi.h"
 
@@ -26,8 +27,8 @@ static uint32_t fb_property(io_service_t fb, const char *key)
 
 int main(int argc, char **argv)
 {
-    if (argc != 2) {
-        fprintf(stderr, "usage: fb-dump OUT.png\n");
+    if (argc != 2 && argc != 3) {
+        fprintf(stderr, "usage: fb-dump OUT.png [0xXXRRGGBB to fill first]\n");
         return 2;
     }
     io_service_t fb = IOServiceGetMatchingService(kIOMasterPortDefault,
@@ -52,6 +53,16 @@ int main(int argc, char **argv)
         fprintf(stderr, "fb-dump: map 0x%x, %ux%u row bytes %u, %llu bytes\n", kr, width,
                 height, row_bytes, (unsigned long long)size);
         return 1;
+    }
+    if (argc == 3) {
+        /* fb-dump OUT.png 0xXXRRGGBB: fill the framebuffer memory first (an experiment: does
+         * anything read the screen from it?). Nothing shows it while the GPU display is on. */
+        uint32_t px = (uint32_t)strtoul(argv[2], NULL, 0);
+        for (uint32_t y = 0; y < height; y++) {
+            uint32_t *row = (uint32_t *)(uintptr_t)(vram + (uint64_t)y * row_bytes);
+            for (uint32_t x = 0; x < width; x++)
+                row[x] = px;
+        }
     }
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
     CGDataProviderRef dp = CGDataProviderCreateWithData(NULL, (const void *)(uintptr_t)vram,
