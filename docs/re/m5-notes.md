@@ -115,12 +115,16 @@ from VMsvga2: [vmsvga2-qe-design.md](vmsvga2-qe-design.md).
 Same VM, same session state; software = booted without `ripple_gl`/`ripple_qe` (Apple's
 software compositor), QE = default config (no `float_pixels`).
 
-| Scene | QE | Software |
-|---|---|---|
-| Desktop with a Finder window | [qe](img/m5-qe-desktop.png) | [sw](img/m5-sw-desktop.png) |
-| File menu open | [qe](img/m5-qe-menu-open.png) | [sw](img/m5-sw-menu-open.png) |
-| Exposé | [qe](img/m5-qe-expose.png) | [sw](img/m5-sw-expose.png) |
-| Dashboard | [qe](img/m5-qe-dashboard.png) | [sw](img/m5-sw-dashboard.png) |
+| Scene | QE | Software | 9600 GT (VM 211, 1920x1080, `grab` in the guest) |
+|---|---|---|---|
+| Desktop with a Finder window | [qe](img/m5-qe-desktop.png) | [sw](img/m5-sw-desktop.png) | [9600 GT](img/m5-9600gt-desktop.png) |
+| Menu open | [qe](img/m5-qe-menu-open.png) | [sw](img/m5-sw-menu-open.png) | [9600 GT](img/m5-9600gt-menu.png) (Finder menu) |
+| Exposé | [qe](img/m5-qe-expose.png) | [sw](img/m5-sw-expose.png) | [9600 GT](img/m5-9600gt-expose.png) |
+| Dashboard | [qe](img/m5-qe-dashboard.png) | [sw](img/m5-sw-dashboard.png) | [9600 GT](img/m5-9600gt-dashboard.png) |
+
+The 9600 GT's menu bar is translucent: at x 1300 over the pink wallpaper it runs 255,224,255
+(row 1), 240,195,229 (row 11), 208,167,198 (row 20), and row 21 is the wallpaper darkened
+(80,30,68). That is `CIMenuGenerator` on the GPU; neither our QE nor software has it.
 
 By numbers (`tools/vncgrab/pngpix.py`): desktop identical; Dock within 2-7 levels; Apple
 logo rows identical. Differences: the menu bar's lower edge (software fades to 234 and 214 in
