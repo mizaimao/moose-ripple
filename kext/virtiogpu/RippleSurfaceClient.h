@@ -39,6 +39,8 @@ class RippleSurfaceClient : public IOUserClient
     // Buffer geometry: what a lock hands out.
     uint32_t           fBufWidth, fBufHeight, fRowBytes;
     int32_t            fOriginX, fOriginY;   // screen position of buffer pixel (0,0)
+    bool               fScreenRegion;    // shaped without backing: its contents go on screen
+    uint32_t           fShapeSeq;
 
     // Backing: the client's own memory, or ours mapped into the client.
     IOMemoryDescriptor *fClientMem;

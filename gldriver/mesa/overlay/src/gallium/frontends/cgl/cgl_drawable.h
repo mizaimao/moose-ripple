@@ -23,6 +23,8 @@ struct ripple_cgl_drawable {
    ripple_cgl_present_fn present;
    void *present_data;
    bool gpu_display;                        /* present by putting the texture on the display */
+   bool screen_region;                      /* present into the screen texture at region */
+   uint32_t region_surface;                 /* its accelerator surface: region read at present */
    uint8_t *pixels;                         /* readback buffer */
    size_t pixels_size;
 };
@@ -35,6 +37,11 @@ void ripple_cgl_drawable_set_present(struct ripple_cgl_drawable *d, ripple_cgl_p
 /* Present by showing the colour texture itself on the display (zero copy; for the display
  * surface WindowServer composites into) instead of reading it back. */
 void ripple_cgl_drawable_set_gpu_display(struct ripple_cgl_drawable *d, bool on);
+/* Quartz Extreme: the drawable holds a rectangle of the screen, accelerator surface `surface`
+ * (drawn at the drawable's bottom-left). Presenting reads the surface's current rectangle (it is
+ * reshaped more often than re-attached), puts the drawing there in the screen texture and shows
+ * that (cgl_device.c). surface 0 ends it. */
+void ripple_cgl_drawable_set_screen_region(struct ripple_cgl_drawable *d, uint32_t surface);
 void ripple_cgl_drawable_destroy(struct ripple_cgl_drawable *d);
 
 /* CGLFlushDrawable (swap_APPLE): present the back buffer (or the front, single-buffered). */

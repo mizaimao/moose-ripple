@@ -7,6 +7,7 @@
  * presentation comes with Quartz Extreme (M5).
  */
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "frontend/api.h"
@@ -23,6 +24,7 @@
 #include "cgl_context.h"
 #include "cgl_device.h"
 #include "cgl_drawable.h"
+#include "virgl/ripple/ripple_gpu_uapi.h"
 
 static uint32_t drawable_ids;
 
@@ -93,6 +95,19 @@ present_resource(struct st_context *st, struct ripple_cgl_drawable *d,
    struct pipe_box box;
    unsigned w = res->width0, h = res->height0, stride = w * 4;
 
+   if (d->screen_region) {
+      struct ripple_gpu_surface_info si;
+      extern FILE *ripple_gld_dbg_file(void);
+      static unsigned presents;
+      bool got = ripple_cgl_device_surface_info(d->region_surface, &si);
+      if (got && ripple_gld_dbg_file() && presents++ < 400)
+         fprintf(ripple_gld_dbg_file(), "present: seq %u, %d,%d %ux%u\n", si.shape_seq, si.x, si.y,
+                 si.width, si.height);
+      if (got)
+         ripple_cgl_device_present_region(st, res, si.x, si.y, si.width, si.height,
+                                          si.screen_width, si.screen_height);
+      return;
+   }
    if (d->gpu_display) {
       st_context_flush(st, 0, NULL, NULL, NULL);
       ripple_cgl_device_display(res, 0, 0, w, h);
@@ -170,6 +185,13 @@ ripple_cgl_drawable_set_present(struct ripple_cgl_drawable *d, ripple_cgl_presen
 {
    d->present = fn;
    d->present_data = data;
+}
+
+void
+ripple_cgl_drawable_set_screen_region(struct ripple_cgl_drawable *d, uint32_t surface)
+{
+   d->screen_region = surface != 0;
+   d->region_surface = surface;
 }
 
 void

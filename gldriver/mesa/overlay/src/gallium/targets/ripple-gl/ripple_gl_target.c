@@ -399,6 +399,10 @@ unbind_surface(struct gld_context *c)
 {
    if (!c->cur_surface)
       return;
+   /* Present what was drawn into a screen region before leaving it: WindowServer may switch to
+    * another surface before flushing, and that rectangle would never reach the screen. */
+   if (c->cur_surface->info.flags & RIPPLE_GPU_SURFACE_SCREEN)
+      ripple_cgl_context_swap(c->mesa);
    simple_mtx_lock(&surfaces_lock);
    c->cur_surface->binds--;
    simple_mtx_unlock(&surfaces_lock);
@@ -618,10 +622,17 @@ attach_surface(struct gld_context *c, uint32_t sid)
       e->sid = sid;
       changed = true;
    }
-   if (e->info.width != si.width || e->info.height != si.height)
+   if (!(si.flags & RIPPLE_GPU_SURFACE_SCREEN) &&
+       (e->info.width != si.width || e->info.height != si.height))
       changed = true;
    e->info = si;
    e->last_use = ++surface_clock;
+   if (c->cur_surface && c->cur_surface != e &&
+       (c->cur_surface->info.flags & RIPPLE_GPU_SURFACE_SCREEN)) {
+      simple_mtx_unlock(&surfaces_lock);
+      ripple_cgl_context_swap(c->mesa);   /* see unbind_surface */
+      simple_mtx_lock(&surfaces_lock);
+   }
    if (c->cur_surface != e) {
       if (c->cur_surface)
          c->cur_surface->binds--;
@@ -632,13 +643,24 @@ attach_surface(struct gld_context *c, uint32_t sid)
    simple_mtx_unlock(&surfaces_lock);
 
    if (si.flags & RIPPLE_GPU_SURFACE_SCREEN) {
+      static unsigned attaches;
+      if (attaches++ < 400)
+         DBG("attach: seq %u, %d,%d %ux%u\n", si.shape_seq, si.x, si.y, si.width, si.height);
+   }
+   if (si.flags & RIPPLE_GPU_SURFACE_SCREEN) {
+      /* A screen region (WindowServer's display surface, shaped to each frame's dirty
+       * rectangle): the drawable stays screen-sized, WindowServer draws the rectangle at its
+       * bottom-left, and presenting copies it into place on the screen texture. */
       ripple_cgl_drawable_set_present(e->d, NULL, NULL);
-      ripple_cgl_drawable_set_gpu_display(e->d, true);
+      ripple_cgl_drawable_set_gpu_display(e->d, false);
+      ripple_cgl_drawable_set_screen_region(e->d, sid);
+      ripple_cgl_drawable_set_size(e->d, si.screen_width, si.screen_height);
    } else {
       ripple_cgl_drawable_set_gpu_display(e->d, false);
+      ripple_cgl_drawable_set_screen_region(e->d, 0);
       ripple_cgl_drawable_set_present(e->d, backing_present, e);
+      ripple_cgl_drawable_set_size(e->d, si.width, si.height);
    }
-   ripple_cgl_drawable_set_size(e->d, si.width, si.height);
    ripple_cgl_context_set_drawable(c->mesa, e->d);
    if (changed)
       DBG("  accelerator surface %u: %ux%u at %d,%d, %s\n", sid, si.width, si.height, si.x, si.y,

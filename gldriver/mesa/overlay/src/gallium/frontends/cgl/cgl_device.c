@@ -170,3 +170,66 @@ ripple_cgl_device_display(struct pipe_resource *res, unsigned x, unsigned y, uns
    uint64_t in[5] = { handle, x, y, w, h };
    return IOConnectCallScalarMethod(conn, RIPPLE_GPU_DISPLAY, in, 5, NULL, NULL) == KERN_SUCCESS;
 }
+
+/* ---- The screen texture (Quartz Extreme, M5) -------------------------------------------- *
+ * WindowServer renders each frame's dirty rectangle into its display surface; the frame on
+ * screen is this persistent screen-sized texture, each rectangle copied into its place on the
+ * GPU, then shown with DISPLAY. Rows run bottom-up in both, as GL draws them. */
+#include "pipe/p_context.h"
+#include "pipe/p_state.h"
+#include "util/box.h"
+#include "util/u_inlines.h"
+
+static struct pipe_resource *screen_tex;
+static simple_mtx_t screen_tex_lock = SIMPLE_MTX_INITIALIZER;
+
+bool
+ripple_cgl_device_present_region(struct st_context *st, struct pipe_resource *src,
+                                 int x, int y, unsigned w, unsigned h,
+                                 unsigned screen_w, unsigned screen_h)
+{
+   struct pipe_frontend_screen *fscreen = ripple_cgl_device_fscreen();
+   struct pipe_context *pipe = st->pipe;
+   bool ok;
+
+   if (!fscreen || !src || !screen_w || !screen_h)
+      return false;
+   simple_mtx_lock(&screen_tex_lock);
+   if (screen_tex && (screen_tex->width0 != screen_w || screen_tex->height0 != screen_h))
+      pipe_resource_reference(&screen_tex, NULL);
+   if (!screen_tex) {
+      struct pipe_resource t;
+      memset(&t, 0, sizeof(t));
+      t.target = PIPE_TEXTURE_2D;
+      t.format = PIPE_FORMAT_B8G8R8A8_UNORM;
+      t.width0 = screen_w;
+      t.height0 = screen_h;
+      t.depth0 = 1;
+      t.array_size = 1;
+      t.bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_SCANOUT;
+      screen_tex = fscreen->screen->resource_create(fscreen->screen, &t);
+   }
+   /* Clip the rectangle (screen coordinates, top-left origin) to the screen and to what the
+    * source holds, then place it: GL rows are bottom-up, so its bottom edge is at
+    * screen_h - (y + h). */
+   int x0 = x, y0 = y, x1 = x + (int)w, y1 = y + (int)h;
+   if (x0 < 0) x0 = 0;
+   if (y0 < 0) y0 = 0;
+   if (x1 > (int)screen_w) x1 = screen_w;
+   if (y1 > (int)screen_h) y1 = screen_h;
+   ok = screen_tex != NULL;
+   if (ok && x1 > x0 && y1 > y0) {
+      struct pipe_box box;
+      int sx = x0 - x, sh_ = y1 - y0;
+      int sy = (int)h - (y1 - y);              /* source rows from the bottom */
+      if (sx + (x1 - x0) <= (int)src->width0 && sy >= 0 && sy + sh_ <= (int)src->height0) {
+         u_box_2d(sx, sy, x1 - x0, sh_, &box);
+         pipe->resource_copy_region(pipe, screen_tex, 0, x0, screen_h - y1, 0, src, 0, &box);
+      }
+   }
+   simple_mtx_unlock(&screen_tex_lock);
+   if (!ok)
+      return false;
+   st_context_flush(st, 0, NULL, NULL, NULL);
+   return ripple_cgl_device_display(screen_tex, 0, 0, screen_w, screen_h);
+}

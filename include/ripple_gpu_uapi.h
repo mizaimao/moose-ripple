@@ -88,7 +88,8 @@ struct ripple_gpu_transfer {
  * driver needs to render for it. Backing addresses are only given to the task that owns the
  * surface (its own memory). */
 #define RIPPLE_GPU_SURFACE_BACKING  0x1     /* has CPU backing; backing_address valid for the owner */
-#define RIPPLE_GPU_SURFACE_SCREEN   0x2     /* covers the whole screen at 0,0: a display surface */
+#define RIPPLE_GPU_SURFACE_SCREEN   0x2     /* a region of the screen (shaped without backing): what is
+                                             * drawn goes on the display at x, y */
 struct ripple_gpu_surface_info {
     uint32_t id;
     uint32_t flags;                 /* RIPPLE_GPU_SURFACE_* */
@@ -96,7 +97,7 @@ struct ripple_gpu_surface_info {
     uint32_t row_bytes;             /* of the backing */
     int32_t  x, y;                  /* screen position of buffer pixel (0,0) */
     uint32_t screen_width, screen_height;
-    uint32_t reserved;
+    uint32_t shape_seq;             /* counts shape calls (for debugging the frame order) */
     uint64_t backing_address;       /* in the owner's address space, or 0 */
 };
 

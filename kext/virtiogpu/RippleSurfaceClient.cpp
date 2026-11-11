@@ -113,18 +113,12 @@ IOReturn RippleSurfaceClient::setShape(uint32_t options, uint32_t framebuffer,
     if (b.w <= 0 || b.h <= 0)
         return kIOReturnSuccess;        // empty shape: nothing to do
 
-    // Buffer geometry. The display surface (id 1) is laid out like the whole screen, its
-    // region at screen coordinates; other surfaces are the size of their bounds, or of the
-    // buffer SetScale gave.
-    uint32_t sw, sh;
-    fAccel->framebuffer()->screenSize(&sw, &sh);
+    // Buffer geometry: the size of the bounds (or of the buffer SetScale gave), placed at the
+    // bounds' screen position. WindowServer shapes its display surface (id 1) to each frame's
+    // dirty rectangle and renders just that rectangle (M5, 2026-11-10).
     uint32_t w, h;
     int32_t ox, oy;
-    if (fID == kDisplaySurfaceID) {
-        w = sw;
-        h = sh;
-        ox = oy = 0;
-    } else if (fHasScale && !(options & kIOAccelSurfaceShapeIdentityScaleBit)) {
+    if (fHasScale && !(options & kIOAccelSurfaceShapeIdentityScaleBit)) {
         w = fScale.buffer.w > 0 ? fScale.buffer.w : b.w;
         h = fScale.buffer.h > 0 ? fScale.buffer.h : b.h;
         ox = b.x;
@@ -178,6 +172,8 @@ IOReturn RippleSurfaceClient::setShape(uint32_t options, uint32_t framebuffer,
     fRowBytes = rowBytes;
     fOriginX = ox;
     fOriginY = oy;
+    fScreenRegion = !backing;           // SetShape without backing: a region of the screen
+    fShapeSeq++;
     return kIOReturnSuccess;
 }
 
@@ -377,11 +373,12 @@ bool RippleSurfaceClient::describe(task_t asker, struct ripple_gpu_surface_info 
         out->y = fOriginY;
         out->screen_width = sw;
         out->screen_height = sh;
+        out->shape_seq = fShapeSeq;
         if (fClientMem || fOwnMem)
             out->flags |= RIPPLE_GPU_SURFACE_BACKING;
         if (asker == fTask)
             out->backing_address = fClientMem ? fClientAddr : (fOwnMap ? fOwnMap->getAddress() : 0);
-        if (fOriginX == 0 && fOriginY == 0 && fBufWidth == sw && fBufHeight == sh && !fClientMem)
+        if (fScreenRegion)
             out->flags |= RIPPLE_GPU_SURFACE_SCREEN;
     }
     IOLockUnlock(fLock);
