@@ -100,7 +100,7 @@ bool VirtioGPUDevice::mapCapabilities()
                     return false;
                 }
                 // 10.6.8 can't use a BAR above 4 GB here: the first access faults forever in the
-                // device pager (found under OVMF, decision 0007). Give up cleanly instead, so
+                // device pager (seen under OVMF, decision 0007). Give up cleanly instead, so
                 // the boot framebuffer keeps the display.
                 if (fBarMap[bar]->getPhysicalAddress() + fBarMap[bar]->getLength() > 0x100000000ULL) {
                     LOG("BAR %u is above 4 GB (0x%llx); 10.6 can't use it. Keep BARs below 4 GB "

@@ -1,6 +1,6 @@
 # M5 plan: Quartz Extreme
 
-Date: 2026-11-10. The owner's go: 2026-11-10 (via the coordinator). Handoff acceptance: WindowServer
+Date: 2026-11-10. Go-ahead: 2026-11-10. Handoff acceptance: WindowServer
 composites with the GPU, Exposé and Dashboard ripple work, no cursor tearing, apps that
 require QE launch, and how QE status was verified is written down.
 
@@ -28,7 +28,7 @@ require QE launch, and how QE status was verified is written down.
 
 ## Work split
 
-**OpenCore work (parallel; its own new files, no VM 210):**
+**A second agent (parallel; its own new files, no VM 210):**
 - **R1, static:** the QE decision in CoreGraphics and WindowServer (question 1), from the
   binaries mirrored on dev.lan. Report in `docs/re/qe-decision.md`.
 - **R2, dynamic, on the 9600 GT VM (card windows while 210 is off):** trace WindowServer at

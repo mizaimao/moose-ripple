@@ -1,6 +1,6 @@
 # Why WindowServer composites a display with GL, or not (M5 R4)
 
-Date: 2026-11-10, for a question from the driver work: on VM 210 the compositor context is
+Date: 2026-11-10. The question: on VM 210 the compositor context is
 taken over and `CGDisplayUsesOpenGLAcceleration` = 1, but WindowServer never acquires the
 display surface (no `IOAccelSetSurfaceFramebufferShape`, selector 9) and keeps compositing the
 old way. Static reading of 10K549 x86_64: CoreGraphics and IOKit.framework. C = read from code,

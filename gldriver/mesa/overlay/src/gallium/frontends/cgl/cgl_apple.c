@@ -58,8 +58,8 @@ ripple_cgl_delete_fences(void *rend, GLsizei n, const GLuint *fences)
  * glFinishRenderAPPLE) and the flushes behind GL_APPLE_fence. Mesa's own glFlush and glFinish
  * also present the front buffer. Core Image and WindowServer's compositor call
  * glFlushRenderAPPLE several times inside one frame, so unfinished frames reached the screen:
- * the Dashboard ripple flickered and a new widget went missing for a few frames (the owner,
- * 2026-11-11). */
+ * the Dashboard ripple flickered and a new widget went missing for a few frames (reported in
+ * testing, 2026-11-11). */
 static void
 flush_render(bool wait)
 {

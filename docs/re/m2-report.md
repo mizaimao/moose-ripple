@@ -14,7 +14,7 @@ Date: 2026-11-10. Details: [notebook.md](notebook.md), driver docs in
   restores the user's last choice per display, as on a Mac.
 - **Resolution changes.** 16 modes from 1024x768 to 2560x1600; switching through CoreGraphics (the
   Displays pane's API, `tools/setmode`) works at every size tried, and the host display follows.
-- **Cursor.** Software cursor by default (Snow Leopard's own pointer, the owner's choice); hardware
+- **Cursor.** Software cursor by default (Snow Leopard's own pointer, by choice); hardware
   cursor through the virtio cursor queue as an option (`RippleHardwareCursor`, `ripple_hwcursor=1`).
 - **Pointer accuracy.** Fixed a 10.6 bug outside the display driver: `kext/qemutablet`, a codeless
   kext, removes IOHIDEventDriver's 15% trim of QEMU's tablet range ([known-issues](../known-issues.md)).
@@ -36,7 +36,7 @@ The Proxmox console (VNC) adds its own delay on top; not measured.
 
 ## Not done, and risks
 
-- **Stability run**: deferred by decision 0006 (overnight, when the owner says).
+- **Stability run**: deferred by decision 0006 (overnight, when decided).
 - **Interrupts**: the driver still polls for command completion (device interrupts suppressed).
   Fine for 2D; M3's 3D transport needs real interrupts and fences, so they start M3.
 - **One unexplained panic** right after the first switch to 2560x1600: "TLB invalidation IPI

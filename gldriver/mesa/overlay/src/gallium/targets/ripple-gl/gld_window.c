@@ -315,7 +315,7 @@ gld_window_release(struct gld_window *w)
        * an app's layer-backed views with one context, attached to each view's surface in
        * turn; when the record went with the context, every surface but the last attached lost
        * its picture (Photo Booth: the camera view, the shutter button and the photo strip all
-       * white; The owner, 2026-11-11). The record goes when its surface does (sweep_idle). */
+       * white; 2026-11-11). The record goes when its surface does (sweep_idle). */
       if (w->base) {
          cgs.UnlockWindowBits(w->cid, w->priv, NULL);
          w->base = NULL;

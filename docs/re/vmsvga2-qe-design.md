@@ -3,7 +3,7 @@
 Date: 2026-11-10. Read by a helper agent from VMsvga2 svn r166 (`tags/1.2.5`, `branches/GL`) on
 dev.lan (`.tools/src/vmsvga2-r166`). Behaviour and protocol only; no code copied. Its files say
 "Copyright 2009-2011 Zenith432. All rights reserved." followed by an MIT-style permission
-notice; whether that permits reuse is the owner's call, so we keep treating it as read-only
+notice; whether that permits reuse is undecided, so we keep treating it as read-only
 (HANDOFF rule 7). Caveat: VMsvga2's QE was opt-in and experimental (`-vmw_qe`, `-vmw_gl`), its
 GL context mostly stubs in 1.2.5, and nothing says QE ever worked.
 

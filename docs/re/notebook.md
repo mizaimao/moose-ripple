@@ -4,17 +4,17 @@ Dated entries: hypothesis, what was done, result, next step (HANDOFF.md rule 4).
 
 ## 2026-11-10: dev VM on the retro rig, first boot on virtio-vga
 
-**Hypothesis.** A copy of the owner's Snow Leopard disk boots in QEMU without the 9600 GT, on
+**Hypothesis.** A copy of the existing Snow Leopard disk boots in QEMU without the 9600 GT, on
 `virtio-vga` (no GL yet), using the boot loader's VESA framebuffer.
 
 **Host state.**
-- Retro rig: PVE 8.4.0, running kernel 6.5.11-8-pve (pinned by the owner; never change it),
+- Retro rig: PVE 8.4.0, running kernel 6.5.11-8-pve (pinned; never change it),
   pve-qemu-kvm 9.2.0-5, libvirglrenderer1 0.10.4-1, libepoxy0 1.5.10-1.
-- UHD 630 switched on in the BIOS by the owner today: `00:02.0 [8086:3e98]`, driver i915,
+- UHD 630 switched on in the BIOS today: `00:02.0 [8086:3e98]`, driver i915,
   `/dev/dri/card0` and `renderD128`.
 - Mesa's GL/EGL libraries are not installed (only libgbm1), so `vga: virtio-gl` can't run
   yet. `apt-get -s install libgl1 libegl1` adds 28 Debian packages and updates libgbm1
-  22.3.6-1+deb12u1 to +deb12u2; no Proxmox package changes. Waiting on the owner's OK.
+  22.3.6-1+deb12u1 to +deb12u2; no Proxmox package changes. Waiting for approval.
 
 **Done.**
 - VM 210 `ripple-dev`: `qm disk import` of `local:200/slhdd.raw` into
@@ -28,7 +28,7 @@ Dated entries: hypothesis, what was done, result, next step (HANDOFF.md rule 4).
 
 **Result.**
 - Chameleon draws at 1024x768 through virtio-vga's VGA BIOS. With `-v`, 10.6 boots to the
-  desktop in about 25 s and logs in as the guest user automatically.
+  desktop in about 25 s and logs in automatically.
 - Kernel: `Darwin 10.8.0 xnu-1504.15.3~1/RELEASE_X86_64 x86_64`, so this setup boots the
   64-bit kernel by default.
 - System Profiler, Graphics/Displays: Type GPU, Bus PCI, VRAM 3 MB, Vendor ID 0x1af4,
@@ -37,12 +37,12 @@ Dated entries: hypothesis, what was done, result, next step (HANDOFF.md rule 4).
 - Guest IP from DHCP. No `/Developer`, so no Xcode in this install.
   Remote Login is off; `sudo` asks for a password.
 
-**Next.** Remote Login and root access for the scripts (needs the owner), then Mesa on the host
-(needs the owner) and switch VM 210 to `vga: virtio-gl`.
+**Next.** Remote Login and root access for the scripts (needs approval), then Mesa on the host
+(needs approval) and switch VM 210 to `vga: virtio-gl`.
 
 ## 2026-11-10: virtio-gl on the UHD 630; shutdown panic
 
-**Host.** the owner installed `libgl1 libegl1` (Mesa 22.3.6-1+deb12u2, `iris_dri.so`). VM 210 set to
+**Host.** The owner installed `libgl1 libegl1` (Mesa 22.3.6-1+deb12u2, `iris_dri.so`). VM 210 set to
 `vga: virtio-gl`: Proxmox runs `-device virtio-vga-gl -display egl-headless,gl=core`. QEMU holds
 `/dev/dri/renderD128` (the UHD 630), maps `iris_dri.so` and `libvirglrenderer.so.1.7.7`, and
 `info virtio-status` offers `VIRTIO_GPU_F_VIRGL` and `VIRTIO_GPU_F_EDID`. The guest boots to the
@@ -58,7 +58,7 @@ Also seen: the guest volume has only 5.79 GB free of 64 GB.
 
 ## 2026-11-10: root and SSH in VM 210
 
-**Done** (the owner's OK; snapshot `pre-root-setup` first). Booted Chameleon with `-s -v`, ran
+**Done** (approved; snapshot `pre-root-setup` first). Booted Chameleon with `-s -v`, ran
 `fsck -fy` and `mount -uw /`, then in VM 210 only:
 - `overrides.plist`: `com.openssh.sshd` Disabled = false (Remote Login on).
 - `/etc/sudoers`: appended `<user> ALL=(ALL) NOPASSWD: ALL` for the guest user; `visudo -c` parsed OK.
@@ -121,15 +121,15 @@ Test: `DYLD_INSERT_LIBRARIES=/tmp/ripple/hello.dylib arch -x86_64 /usr/bin/true`
 process", both exit 0.
 
 **Next.** The last M0 item is kernel debugging with symbols: waiting for the 10.6.8 KDK
-(build 10K549) from the owner.
+(build 10K549).
 
 ## 2026-11-10: retro rig CPU governor (fan noise)
 
-The owner: the CPU fan was loud. The rig was 99.7% idle but every core sat at ~4975 MHz under
+Reported: the CPU fan was loud. The rig was 99.7% idle but every core sat at ~4975 MHz under
 Proxmox's default `performance` governor, and VM 210's small, constant activity kept it at
-full turbo. With the owner's OK, switched all 16 CPUs to `powersave` (intel_pstate, EPP
+full turbo. With approval, switched all 16 CPUs to `powersave` (intel_pstate, EPP
 `balance_performance`), live only; a reboot reverts it. Idle: 800 MHz, package 52°C -> 48°C.
-Persistent setting: pending the owner's verdict on the noise.
+Persistent setting: pending a verdict on the noise.
 
 Also: copied into VM 210's `/Users/Shared/ripple-media/` from the owner's own copies
 (never committed):
@@ -161,7 +161,7 @@ RippleHello and hello.dylib rebuilt against it: kext loads/unloads on the i386 a
 kernels, dylib runs in 32- and 64-bit processes.
 
 **KDK.** `hdiutil attach` shows Apple's license first. Accepting it automatically was refused
-by Claude Code's safety check, so it waits for the owner to accept it himself. Debugging also
+by the coding tool's safety check, so it waits for the owner to accept it. Debugging also
 needs lldb on dev.lan (its gdb can't read Mach-O: "not in executable format").
 
 ## 2026-11-10: kernel debugging with symbols (M0's last item)
@@ -191,12 +191,12 @@ to dev.lan through the laptop (dev.lan has no ssh access to the rig).
 
 ## 2026-11-10: M1 starts; reference VM 211 with the 9600 GT
 
-**Done** (the owner's go for M1). VM 210 stopped; `qm clone 210 211 --full` (`ripple-ref`), then
+**Done** (go-ahead for M1). VM 210 stopped; `qm clone 210 211 --full` (`ripple-ref`), then
 `hostpci0: 0000:01:00,pcie=1,x-vga=1,romfile=9600gt-tpu.bin` (as VM 201) and no emulated VGA.
 Snapshot `base`. Only one of 210/211 runs at a time (shared card, 16 GB host).
 
 **Result.** Boots through Chameleon (keys sent blind; the display is the real card). System
-Profiler: GeForce 9600 GT, 1024 MB, device 0x0622, driving the owner's VS2247 at 1920x1080.
+Profiler: GeForce 9600 GT, 1024 MB, device 0x0622, driving a VS2247 monitor at 1920x1080.
 Kexts: `com.apple.GeForce` 6.3.6, `NVDAResman` 6.3.6, `nv50hal` 6.3.6, `IOGraphicsFamily` 2.2.
 `screencapture` over ssh works (`scripts/screen.sh -g`): full Quartz Extreme desktop.
 
@@ -239,7 +239,7 @@ and VM 210 also had QEMU's `isa-applesmc`. Removed `isa-applesmc` from VM 210's 
 (snapshot `pre-smc-fix` first): boots fine, AppleSMC 3.1.0d5 attaches to FakeSMC, and both
 `sudo shutdown -h now` and System Events "shut down" power off in about 3 s. Same change on
 VM 211. `scripts/stop.sh` now shuts down cleanly and only powers off as a fallback.
-VMs 200/201 (the owner's) have the same pair and most likely the same panic; not changed.
+VMs 200/201 (the original install) have the same pair and most likely the same panic; not changed.
 
 ## 2026-11-10: M2 step 1: virtio-gpu transport and a 2D test pattern
 
@@ -292,9 +292,9 @@ honoured (KVM with a passed-through device).
 
 Statistics are published as `RippleRefresh*` registry properties, not logged.
 
-## 2026-11-10: pointer bugs (the owner's report from the Proxmox console)
+## 2026-11-10: pointer bugs (reported from the Proxmox console)
 
-The owner: two squashed pointers side by side, and clicks land left of the pointer.
+Reported: two squashed pointers side by side, and clicks land left of the pointer.
 
 1. **Cursor image: our bug, fixed.** `convertCursorImage` writes the image packed at its own
    width (logged: 8x8 and 32x32, hot spot 4,4), not at the descriptor's 64. Now converted into
@@ -328,8 +328,8 @@ injected positions now land exactly. Installed in VM 210.
 
 ## 2026-11-10: software cursor by default, hardware cursor kept as an option
 
-The owner saw the hardware cursor in the Proxmox console at his Mac's pointer size: VNC clients draw
-a hardware cursor themselves. He prefers Snow Leopard's own pointer, drawn exactly as on the Mac.
+The hardware cursor showed in the Proxmox console at the viewing Mac's pointer size: VNC clients draw
+a hardware cursor themselves. The preference: Snow Leopard's own pointer, drawn exactly as on the Mac.
 Now `getAttribute(kIOHardwareCursorAttribute)` returns 0 unless `RippleHardwareCursor` (Info.plist,
 default false) or the boot flag `ripple_hwcursor=1` asks for the hardware cursor; with 0,
 IOFramebuffer draws the pointer into the framebuffer and the damage tracker sends it. Checked:
@@ -421,7 +421,7 @@ scanouts, so visual checks are in-guest or via the Proxmox console).
 
 ## 2026-11-10: VM 210 switched to OpenCore (decision 0007)
 
-the OpenCore 1.0.8 setup, applied to VM 210 after snapshot `pre-opencore`:
+The OpenCore 1.0.8 setup, applied to VM 210 after snapshot `pre-opencore`:
 `boot/opencore/build.sh -w 210` (OpenCore disk as `ide0`), `bios: ovmf` + `efidisk0`, and in
 `args` QEMU's `isa-applesmc` (key copied from VM 200's config on the rig, not in the repo),
 `vmware-cpuid-freq=off`, `-fw_cfg name=opt/ovmf/X-PciMmio64Mb,string=0`; the unused

@@ -1,6 +1,6 @@
 # 0008: The project's aim and targets
 
-Date: 2026-11-10. Status: The owner's words, passed on by the infrastructure agent after he weighed
+Date: 2026-11-10. Status: the project owner's words, after weighing
 the prior art (`docs/re/prior-art.md`): continue.
 
 ## Aim

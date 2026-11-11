@@ -1,7 +1,7 @@
 # 0007: OpenCore on OVMF boots the 10.6.8 VMs (replacing Chameleon 2.1)
 
-Date: 2026-11-10. Status: tested on VM 212; the driver work switches
-VM 210. The owner asked for it: Chameleon is unstable for him.
+Date: 2026-11-10. Status: tested on VM 212 ; the driver work switches
+VM 210. Asked for because Chameleon was unstable.
 
 ## Decision
 
@@ -71,7 +71,7 @@ ISO passed the same one).
 
 ## Update 2026-11-10 evening: the 9600 GT passthrough VM (KI-4)
 
-The owner's decision: one OpenCore image for every VM type (virtio-gpu, 9600 GT passthrough,
+Decided: one OpenCore image for every VM type (virtio-gpu, 9600 GT passthrough,
 later QEMU/UTM on Apple silicon); per-machine differences go in the VM settings. Tested on
 VM 212 with VM 210 stopped.
 
@@ -121,7 +121,7 @@ Open:
   OpenCore/OpenDuet, about 12 boots: at most VM starts and shutdowns, twice during macOS's boot
   (one of those boots hung). Chameleon (VM 211's setup), 3 boots: only at each shutdown, none
   at start or during the boot. Not seen at all in the host boot before the 17:15 crash, which
-  included VM 211's runs. **The owner's decision (2026-11-10): accepted as a known issue
+  included VM 211's runs. **Decided (2026-11-10): accepted as a known issue
   (docs/known-issues.md), no host setting changes; a hung 9600 GT VM is restarted.** After a
   clean rig reboot, at most 3 card boots check whether it persists.
 - NVCAP is Chameleon's default, not computed from this card's output table; both outputs and
@@ -129,7 +129,7 @@ Open:
 
 ## Not done / open
 
-- VMs 200/201 (the owner's) still have FakeSMC (via their boot loaders) plus `isa-applesmc`;
-  moving them to this setup is the owner's call.
+- VMs 200/201 (the original install) still have FakeSMC (via their boot loaders) plus `isa-applesmc`;
+  moving them to this setup is a separate decision.
 - The OpenDuet memory corruption may be worth an upstream report to acidanthera, once it is
-  narrowed down further. The owner decides (rules: report, draft, review, send).
+  narrowed down further. An upstream report needs the owner's review first.

@@ -1,6 +1,6 @@
 # 0005: A documented, GPU-neutral boundary between the GL bundle and the kernel
 
-Date: 2026-11-10. Status: The owner's decision, passed on by the infrastructure agent. Applies
+Date: 2026-11-10. Status: decided by the project owner. Applies
 from M3 on.
 
 ## Decision
@@ -25,4 +25,4 @@ only a new kext and a Mesa winsys/backend for it, and reuse unchanged:
 ## Limits
 
 This is an interface design rule, not extra scope: it must not slow M2 or add work beyond
-designing the interface. If it would, flag it to the owner.
+designing the interface. If it would, flag it.

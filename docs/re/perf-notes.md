@@ -1,6 +1,6 @@
 # Performance stage (after M5)
 
-Started 2026-11-11 ~01:10 on the owner's decision: measure first, then fix the biggest costs; the
+Started 2026-11-11 ~01:10 by decision: measure first, then fix the biggest costs; the
 visual parity rule still holds. Tool: `scripts/perf-run.sh SCENARIO` (idle, expose, dashboard,
 menu, drag, gears) drives VM 210 through QMP and samples, over the same interval: guest
 WindowServer CPU, our bundle's present stats, QEMU's main thread (virglrenderer runs there)
@@ -175,11 +175,11 @@ smoother (software's scaled text is jagged). Moving File -> Edit -> View: each m
   frames); WindowServer spends the rest of each frame waiting for its next update.
 - CPU colour conversion on uploads: not worth it now (WindowServer's CPU is about 5%).
 
-## Host GPU minimum clock (02:40, the owner's decision: live test only)
+## Host GPU minimum clock (02:40, live test only)
 
 The rig's i915 minimum clock raised from 350 to 1200 MHz (`/sys/class/drm/card0/gt_min_freq_mhz`,
-live, back to 350 at the next host reboot; making it permanent is a separate host change for
-The owner). Same boot and scene, bundle 6554a67:
+live, back to 350 at the next host reboot; making it permanent is a separate host change).
+Same boot and scene, bundle 6554a67:
 
 | | 350 MHz (before) | 1200 MHz |
 |---|---|---|
@@ -197,7 +197,7 @@ QEMU's read-out of the screen finishes about three times sooner. Kept live.
 The display was updated at every flush of WindowServer's context, three to four times a frame
 during Dashboard effects (see m6-notes, "a widget being added flickered"). Now once, at the
 frame's end. Same scene, 1200 MHz, frame meter peak / mean, two Dashboard and five Exposé runs
-(files were being copied on the rig at idle priority meanwhile):
+(another job was copying files on the rig at idle priority meanwhile):
 
 | | before (bundle 6554a67) | now (4292cff) |
 |---|---|---|

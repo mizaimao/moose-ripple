@@ -2,7 +2,7 @@
 
 Date: 2026-11-10. Status: in use.
 
-- **Disk:** a qcow2 copy of the owner's Snow Leopard install (VM 200's `slhdd.raw`), so Proxmox
+- **Disk:** a qcow2 copy of the existing Snow Leopard install (VM 200's `slhdd.raw`), so Proxmox
   snapshots work and VMs 200/201 stay untouched. Volume grown to 64 GiB.
 - **Machine:** `pc-q35-7.2`, Penryn CPU flags in `args` (the SMC OSK never goes in the repo), e1000
   NIC, 8 GB RAM, 4 cores, no GPU passthrough, `vga: virtio-gl`. Firmware: **OVMF** since
@@ -22,4 +22,4 @@ Date: 2026-11-10. Status: in use.
   (as VM 201). The real card drives the screen, so screenshots come from `screencapture` in
   the guest. Run it with `VMID=211 scripts/...`; only one of 210/211 at a time.
 - **Access:** SSH key from the repo's ignored `.secrets/`, passwordless sudo for the guest user, set
-  up in single-user mode (the owner's OK). Guest address found from the VM's MAC (`scripts/lib.sh`).
+  up in single-user mode (approved). Guest address found from the VM's MAC (`scripts/lib.sh`).

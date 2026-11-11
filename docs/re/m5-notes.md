@@ -1,12 +1,12 @@
 # M5 working notes: Quartz Extreme on virgl
 
-Date: 2026-11-10/11 (night). Status: **accepted by the owner 2026-11-11 ~01:00** ("a huge
+Date: 2026-11-10/11 (night). Status: **accepted 2026-11-11 ~01:00** ("a huge
 improvement"; performance and glitches later). QE on, the whole screen GL-composited on VM
 210, WindowServer's Core Image on the GPU: desktop, translucent menu bar, menus, Exposé,
 Dashboard and its ripple, Front Row look like the 9600 GT's (paired captures below). Host GPU
 use measured on the rig: QEMU's i915 client (`/proc/PID/fdinfo`, `drm-engine-render`) gained
 335 ms of render time in 3 s of Exposé, 0 ms in 5 s idle. Left for later: performance, the
-glitches the owner saw, gl-gears re-check, the 21:4x panic report.
+glitches seen in testing, gl-gears re-check, the 21:4x panic report.
 Plan: [m5-plan.md](m5-plan.md); research: [qe-decision.md](qe-decision.md) (R1),
 [qe-windowserver-trace.md](qe-windowserver-trace.md) (R2), [qe-verification.md](qe-verification.md)
 (R3, also how to check QE), [qe-display-surface.md](qe-display-surface.md) (R4); design notes
@@ -80,7 +80,7 @@ from VMsvga2: [vmsvga2-qe-design.md](vmsvga2-qe-design.md).
    `ripple_cgl_surface_texture` fills the bound texture: from the window framebuffer for the
    surface the context draws into, from memory for other surfaces. Fixed: the missing Apple
    menu logo, black bars under menu titles after a menu closed, the dark block top left
-   (the owner's 22:52 screenshot).
+   (a 22:52 screenshot).
 12. Accelerator surfaces other than the screen region (menu bar background 1280x28, Dock
    1248x44) have the GL origin at the top left, like the screen region: WindowServer draws
    the menu bar's 22 rows with `glViewport(0, 0, 1280, 22)` and means the top rows. Viewport,

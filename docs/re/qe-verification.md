@@ -130,4 +130,4 @@ whole frame (about 100 ms) on 9 of 10 presses. It wasn't reproduced after the re
 - `qm sendkey` and the QMP socket: while another QMP client holds `/var/run/qemu-server/VMID.qmp`
   (a `socat` session), `qm sendkey` times out. Send keys through the same session
   (`{"execute":"send-key",...}`) or close it first.
-- `/var/log/windowserver.log` is mode 640 root:admin; the guest user must be an admin (the guest user is).
+- `/var/log/windowserver.log` is mode 640 root:admin; the guest user must be an admin.

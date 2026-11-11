@@ -1,6 +1,6 @@
 # M6: Core Image and real apps (notes)
 
-Started 2026-11-11 about 02:45 on the owner's go. Handoff acceptance: Core Image filters run on the
+Started 2026-11-11 about 02:45. Handoff acceptance: Core Image filters run on the
 GPU (Quartz Composer, Photo Booth effects); iMovie and Front Row launch and work; performance
 numbers for 2-3 period OpenGL games against the software renderer. Standing rules: nothing
 may look worse than the reference (paired captures), and the performance numbers in
@@ -74,7 +74,7 @@ Captures (git-ignored, `img/`): `m6-{qe,sw}-*.png` copied from the runs above.
   matrix work in `gl-feature-check`; not found yet.
 - **Core Image Fun House:** Core Image issues no GL calls for drawImage into the view; the same
   on software (white). Not a regression; not understood.
-- **C&C 3 game:** needs its DVD on either renderer (a disc image from the owner would do).
+- **C&C 3 game:** needs its DVD on either renderer (a disc image would do).
 - **App GL windows are read back** (the window path): every frame goes host -> guest -> window
   backing -> WindowServer upload. Angry Birds at 1280x800: about 20-30 ms per present. Sharing
   the app's GL surface with WindowServer on the GPU is the fix (a later performance item).
@@ -152,7 +152,7 @@ with a texture matrix, a strip drawn from vertex 32. Colour buffers are always 3
 
 ## Core Image filters and Photo Booth effects (06:00-06:20)
 
-No iMovie (no iLife media on the NAS) and no camera, so (coordinator, 05:10) Core Image is
+No iMovie (no iLife media on the NAS) and no camera, so (decided 05:10) Core Image is
 covered with `tools/ci-effects` instead: a photo (Clown Fish.jpg, 480x300) through
 1. 24 Core Image filters on our GPU context against Core Image's own software renderer, and
 2. all 61 image-filter compositions in /System/Library/Compositions (Photo Booth's effects,
@@ -165,7 +165,7 @@ It found three bugs, fixed:
   patch 0006.
 - **Abort in Core Image** (double free in `st_program_string_notify`): a vertex program
   re-specified twice freed base_serialized_nir again. Mesa patch 0007. Both still in upstream
-  Mesa main (2026-11-11): candidates for an upstream report, the owner's call.
+  Mesa main (2026-11-11): candidates for an upstream report.
 - **GL_APPLE_row_bytes** (pack and unpack row stride in bytes) was refused: now kept per
   context and applied as row length around uploads and readbacks (not in WindowServer).
   ASCII Art came out empty before.
@@ -204,7 +204,7 @@ the draw with a known texture), to tell the program, the vertex data and the tar
 
 ## Dashboard: a widget being added flickered (2026-11-11 morning; fixed, 4292cff)
 
-The owner saw it live: a widget being added flickers and can go missing for a few frames. A burst
+Seen live in testing: a widget being added flickers and can go missing for a few frames. A burst
 of display frames during the ripple (`scripts/screen-vnc.sh -n 30`, tiled with
 `tools/vncgrab/sheet.py`) showed it: frames with the ripple but no widget, and frames with
 no ripple at all, between right ones (3 of 16 ripple frames without the widget).
@@ -234,13 +234,13 @@ Checked on VM 210: the widget is in all 48 ripple frames of three runs (a pixel 
 gl-gears and `window-check` look as before. Not slower: Dashboard 71-74 / 37-44 frames/s and
 29-31 / 13.4-17.1 screens/s (64-67 / 31-35 and 24.7-30.5 / 11-15.3 before), Exposé screens/s
 21-28 / 8.6-13.4 over five runs (18-27 / 9.3-15.2), gl-gears 45-52 frames/s (40-45). Measured
-while files were being copied on the rig at idle priority.
+while another job copied files on the rig at idle priority.
 
 The first try crashed WindowServer at start: for WindowServer's own contexts the entry points
 get GLEngine's context pointer, not ours (`ripple_cgl_context_for` maps it). `gen_fences` and
 `swap_APPLE` had the same mistake and are fixed with it.
 
-## the owner's three points of 2026-11-11 noon
+## Three points reported in testing, 2026-11-11 noon
 
 Audit of the same day: [audit-2026-11-11.md](audit-2026-11-11.md).
 

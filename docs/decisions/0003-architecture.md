@@ -1,6 +1,6 @@
 # 0003: Mesa takes over the GL dispatch table; 64-bit kernel only
 
-Date: 2026-11-10. Status: approved by the owner ("Sounds brilliant. Move on"), after the M1 report.
+Date: 2026-11-10. Status: approved ("Sounds brilliant. Move on"), after the M1 report.
 
 ## Decisions
 

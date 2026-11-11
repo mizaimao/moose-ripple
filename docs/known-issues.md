@@ -84,7 +84,7 @@ interrupt shares the host's IRQ 16 with the SMBus controller. With a VM that has
 host logs `irq 16: nobody cared ... Disabling IRQ #16` at most VM shutdowns, and with the
 OpenCore setup also at most VM starts; twice it came during macOS's boot, and once the VM then
 hung (no WindowServer, no ssh). With Chameleon (3 boots) it came only at shutdown. Once macOS's
-NVIDIA driver runs, the card uses MSI and the shared line no longer matters. The owner's decision
+NVIDIA driver runs, the card uses MSI and the shared line no longer matters. Decision
 (2026-11-10): accepted as a known issue, no host setting changes; a hung 9600 GT VM is simply
 restarted.
 

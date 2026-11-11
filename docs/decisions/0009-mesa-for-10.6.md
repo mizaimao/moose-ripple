@@ -30,7 +30,7 @@ Date: 2026-11-10. Status: in progress (M4). Routine technical choice, made by ri
 
 ## Build notes
 
-- flex and bison come from Debian on dev.lan (installed by the owner, 2026-11-10, after Claude
-  Code's safety check refused building them from source).
+- flex and bison come from Debian on dev.lan (installed by the owner, 2026-11-10, after the coding
+  tool's safety check refused building them from source).
 - clang gets target, SDK and ld64 from a config file: meson's checks fail on
   unused-argument errors when `--ld-path` is on the command line of a compile-only run.

@@ -1,6 +1,6 @@
 # Prior art
 
-Recorded 2026-11-10 (via the infrastructure agent). Read-only: copy no code. Reading
+Recorded 2026-11-10. Read-only: copy no code. Reading
 copies, where we have them: [references.md](references.md).
 
 | Project | What it does | Where it differs from moose-ripple |
