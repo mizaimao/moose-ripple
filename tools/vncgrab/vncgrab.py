@@ -2,12 +2,15 @@
 # Save what a Proxmox VM's display shows (QEMU's VNC server, so also a virtio-gl scanout that
 # QEMU's screendump can't see: "no surface") as a PNG. Python 3 standard library only.
 #   VNC_PASSWORD=<pw> .venv/bin/python -I vncgrab.py OUT.png   speaks RFB on stdin/stdout
+#   ... vncgrab.py -n 12 -i 0.15 OUT.png    12 frames on one connection, one every 0.15 s (or as
+#                                           fast as they come), saved as OUT-00.png..OUT-11.png
 # Runs on dev.lan in the repo's .venv; scripts/screen-vnc.sh connects its stdin/stdout to
 # `qm vncproxy` on the rig (the web console's path), which sets that one-off password on the
 # VM's VNC server for 30 seconds. RFB 3.8, VNC authentication, raw encoding.
 import os
 import struct
 import sys
+import time
 import zlib
 
 # ---- DES (FIPS 46-3), only what VNC authentication needs: ECB encryption of 8-byte blocks --
@@ -99,7 +102,8 @@ class Conn:
         self.w.flush()
 
 
-def grab(c, password):
+def handshake(c, password):
+    """RFB 3.8 with VNC authentication; returns the screen size."""
     c.read(12)                                   # "RFB 003.008\n"
     c.write(b"RFB 003.008\n")
     n = c.read(1)[0]
@@ -119,27 +123,32 @@ def grab(c, password):
     # SetPixelFormat: 32 bpp, depth 24, little-endian, true colour, R/G/B at 16/8/0.
     c.write(struct.pack(">BxxxBBBBHHHBBBxxx", 0, 32, 24, 0, 1, 255, 255, 255, 16, 8, 0))
     c.write(struct.pack(">BxHii", 2, 2, 0, -223))  # encodings: Raw, DesktopSize
+    return w, h
+
+
+def frame(c, w, h):
+    """Ask for the whole screen (non-incremental, so the server answers at once) and return
+    (w, h, BGRX bytes). A DesktopSize rectangle means the mode changed: ask again."""
     c.write(struct.pack(">BBHHHH", 3, 0, 0, 0, w, h))
-    fb = None
+    fb = bytearray(w * h * 4)
     while True:
         t = c.read(1)[0]
         if t == 0:
             nrect = struct.unpack(">xH", c.read(3))[0]
+            resized = False
             for _ in range(nrect):
                 x, y, rw, rh, enc = struct.unpack(">HHHHi", c.read(12))
-                if enc == -223:                   # desktop resized: ask again
-                    w, h = rw, rh
-                    fb = None
+                if enc == -223:
+                    w, h, resized = rw, rh, True
+                    fb = bytearray(w * h * 4)
                     continue
                 if enc != 0:
                     raise RuntimeError("unexpected encoding %d" % enc)
-                if fb is None:
-                    fb = bytearray(w * h * 4)
                 data = c.read(rw * rh * 4)
                 for row in range(rh):
                     o = ((y + row) * w + x) * 4
                     fb[o:o + rw * 4] = data[row * rw * 4:(row + 1) * rw * 4]
-            if fb is not None:
+            if not resized:
                 return w, h, fb
             c.write(struct.pack(">BBHHHH", 3, 0, 0, 0, w, h))
         elif t == 1:                              # SetColourMapEntries
@@ -174,9 +183,35 @@ if __name__ == "__main__":
         # FIPS 46 example: key 133457799BBCDFF1, plaintext 0123456789ABCDEF -> 85E813540F0AB405
         got = des_encrypt(bytes.fromhex("133457799BBCDFF1"), bytes.fromhex("0123456789ABCDEF")).hex()
         sys.exit(0 if got == "85e813540f0ab405" else "DES self-test failed: " + got)
-    if len(sys.argv) != 2 or "VNC_PASSWORD" not in os.environ:
-        sys.exit("usage: VNC_PASSWORD=<pw> vncgrab.py OUT.png  (RFB on stdin/stdout)")
-    width, height, pixels = grab(Conn(sys.stdin.buffer, sys.stdout.buffer), os.environ["VNC_PASSWORD"])
-    with open(sys.argv[1], "wb") as f:
-        f.write(png(width, height, pixels))
+    args, count, interval = sys.argv[1:], 1, 0.0
+    try:
+        while len(args) > 1 and args[0] in ("-n", "-i"):
+            if args[0] == "-n":
+                count = int(args[1])
+            else:
+                interval = float(args[1])
+            args = args[2:]
+    except ValueError:
+        args = []
+    if len(args) != 1 or count < 1 or interval < 0 or "VNC_PASSWORD" not in os.environ:
+        sys.exit("usage: VNC_PASSWORD=<pw> vncgrab.py [-n FRAMES] [-i SECONDS] OUT.png  "
+                 "(RFB on stdin/stdout)")
+    out = args[0]
+    conn = Conn(sys.stdin.buffer, sys.stdout.buffer)
+    width, height = handshake(conn, os.environ["VNC_PASSWORD"])
+    # Grab every frame first and encode afterwards: PNG encoding takes longer than a frame.
+    frames, t0 = [], time.monotonic()
+    for i in range(count):
+        if i:
+            time.sleep(max(0.0, t0 + i * interval - time.monotonic()))
+        t = time.monotonic() - t0
+        width, height, pixels = frame(conn, width, height)
+        frames.append((t, width, height, bytes(pixels)))
     sys.stdout.close()
+    stem = out[:-4] if out.endswith(".png") else out
+    for i, (t, w, h, pixels) in enumerate(frames):
+        name = out if count == 1 else "%s-%02d.png" % (stem, i)
+        with open(name, "wb") as f:
+            f.write(png(w, h, pixels))
+        if count > 1:
+            print("%s: requested at +%.3f s" % (os.path.basename(name), t), file=sys.stderr)

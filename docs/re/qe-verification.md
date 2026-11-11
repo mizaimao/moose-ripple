@@ -52,12 +52,20 @@ driver, the click test didn't move the pointer, and the guest hung soon after (3
 spinning, no ping; stopped with `qm stop`). The cause isn't known; don't repeat the test on a VM
 without the tablet driver.
 
-On 210 (with the tablet driver) it worked with `scripts/qmp-input.sh` (one QMP session per call: `send-key` and
-`input-send-event`, nothing else on the socket): F12, click "+" at abs (358, 32193), then click
-a widget in the bar (Dictionary at abs (12467, 30105) on 1280x800). To catch the ripple, start
-`scripts/screen-vnc.sh` about 1 s before the widget click, because the VNC connection takes
-about 1.5 s to set up. 2026-11-10 20:09 on 210, with the GL compositor running through
-RippleGA.plugin:
+On 210 (with the tablet driver) it worked with `scripts/qmp-input.sh` (one QMP session per
+call: `send-key` and `input-send-event`, nothing else on the socket): F12, click "+" at abs
+(358, 32193), then click a widget in the bar (Dictionary at abs (12467, 30105) on 1280x800).
+To catch the ripple (about 1 s), take a burst of frames on one VNC connection and click while
+it runs. The connection takes about 1.5 s to set up, and 1280x800 frames come in under 0.15 s
+each:
+
+```
+VMID=210 scripts/screen-vnc.sh -n 16 -i 0.15 /tmp/ripple.png &   # /tmp/ripple-00.png ..-15.png
+sleep 1.8; VMID=210 scripts/qmp-input.sh "click 12467 30105"; wait
+```
+
+2026-11-10 20:09 on 210, with the GL compositor running through RippleGA.plugin (single
+captures, before the multi-frame mode existed):
 - During the ripple the whole screen was black apart from a white 732x400 rectangle at the bottom
   left holding the new widget ([frame](img/m5-r3-dashboard-ripple-frame.png)).
 - Afterwards only that 732x400 region kept updating and the rest stayed black
