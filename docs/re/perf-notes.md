@@ -116,3 +116,61 @@ uploads only when it differs (memcmp, row by row; at most 128 MB of copies).
 Dashboard's pixel rate is now above software's (screens/s peak 19-22 against 18.8), its
 frame count still lower. gl-gears 53-54 frames/s and animating on screen (pixels change
 between captures), so changes still get through.
+
+## Where a Dashboard frame's time goes (02:00-02:20)
+
+Over the whole run nothing is saturated (`scripts/perf-run.sh dashboard`): QEMU's main thread
+16%, host GPU render busy 7% (RC6 92%), WindowServer on CPU about 5% (dtrace profile; most
+kernel samples are idle). Per animated frame, WindowServer's compositing thread (dtrace on its
+IOKit calls between two presents): about 2.3 ms on the CPU, 1-2 ms in SUBMITs, about 7.4 ms
+in each DISPLAY that reaches the kext (the host reads the whole screen out), and the rest
+waiting in its server loop for the next update.
+
+Correction: the per-selector timings earlier in this section's work counted every
+`IOConnectCallMethod` with selector 9 as DISPLAY, but WindowServer's IOAccelerator surface
+calls (`IOAccelSetSurfaceFramebufferShape`) use selector 9 too, so about two thirds of those
+calls were cheap surface calls. Timings by our own functions instead (`ripple_cgl_device_display`,
+`ripple_submit_cmd`): 184 display requests in 7 s, 694 ms in them.
+
+**Tried and dropped: pipelined flush.** The kext queued RESOURCE_FLUSH and returned, with at
+most one flush in flight. Worse: SUBMIT time went from about 0.2 s to 1 s per 7 s (max 197
+ms) and fence WAITs from 1 ms to 248 ms. With the guest no longer waiting at the flush, Mesa
+waits on fences when it reuses buffers, and QEMU only notices a retired fence at the next
+guest notification or its 10 ms poll. Reverted (not committed).
+
+**Kept: skip repeated displays (6554a67).** WindowServer flushes the screen (display), then
+switches to another surface, which presented the screen again with nothing new drawn: 91 of
+184 display requests. The winsys counts submits and uploads; a display of the buffer already
+shown with the same count is skipped.
+
+Same boot conditions, one Finder window, frame meter peak / mean (frames/s; screens/s):
+
+| | Dashboard frames/s | Dashboard screens/s | Exposé screens/s |
+|---|---|---|---|
+| before (three runs) | 36-71 / 22-33 | 13.6-17.8 / 7.3-8.1 | 12-15 / 4.1-8.5 |
+| skip repeated displays (three runs) | 65-76 / 29-39 | 23-24 / 8.6-12.8 | 14-19 / 5.5-8.0 |
+| Apple's software renderer (two runs) | 90-92 / 38-42 | 18.7-20 / 7.4-7.9 | 10-11 / 3.6-5.3 |
+
+gl-gears in a window: 40-45 frames/s with the change, 39-47 with the bundle before it (A/B on
+the same scene; the 53-54 noted at 01:50 was with a different scene). Animates (18 of 90
+points on the red gear's teeth differ between two captures 0.5 s apart).
+
+## Paired captures after the performance steps (02:05-02:18)
+
+Same scene on both (fresh boot, one Finder window at the same place, the same input script):
+desktop with the menu bar, File menu open, Exposé, Dashboard. Ours (kext 89f1356, bundle
+6554a67) and Apple's software renderer on VM 210 (`img/perf-pair-qe-*.png`,
+`img/perf-pair-sw-*.png`). Nothing looks worse than software: identical layout, translucent
+menu bar and menus with the blurred backdrop on both; in Exposé our scaled windows are
+smoother (software's scaled text is jagged). Moving File -> Edit -> View: each menu right.
+
+## What's left
+
+- Each real display costs about 7.4 ms on the host: QEMU (display `egl-headless` for the
+  Proxmox console) reads the whole 1280x800 screen back after the frame's GPU work, with the
+  GPU mostly in RC6 at a low clock. That is QEMU's display path, the same for any guest
+  driver. Raising the host GPU's minimum clock might shorten it; that is a host change
+  (the owner's call), not tried.
+- Dashboard composites fewer, larger frames than software (more pixels per second, fewer
+  frames); WindowServer spends the rest of each frame waiting for its next update.
+- CPU colour conversion on uploads: not worth it now (WindowServer's CPU is about 5%).
