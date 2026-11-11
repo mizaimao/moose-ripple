@@ -309,6 +309,12 @@ $(OUT)/x86_64/gl-feature-check/gl-feature-check.o: tools/gl-feature-check/gl-fea
 $(OUT)/gl-feature-check: $(OUT)/x86_64/gl-feature-check/gl-feature-check.o
 	$(call link_tool,x86_64,$@,$^,-framework OpenGL)
 glfeaturecheck: $(OUT)/gl-feature-check
+$(OUT)/x86_64/gl-feature-check/window-check.o: tools/gl-feature-check/window-check.m
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,x86_64) $(UCFLAGS) -x objective-c -c $< -o $@
+$(OUT)/window-check: $(OUT)/x86_64/gl-feature-check/window-check.o
+	$(call link_tool,x86_64,$@,$^,-framework Cocoa -framework OpenGL -lobjc)
+glfeaturecheck: $(OUT)/window-check
 
 # --- grab (save the guest's main display as PNG; works over ssh) --------------------------
 $(OUT)/x86_64/grab/grab.o: tools/grab/grab.c

@@ -5,12 +5,14 @@
  * CGLTexImagePBuffer and draws a quad into its own framebuffer object with a GLSL program,
  * positions as floats or doubles, optionally through a 3D lookup texture. Prints the centre
  * pixel of each case; the two renderers should agree.
- *   gl-feature-check
+ *   gl-feature-check            the cases one by one
+ *   gl-feature-check sequence   Real Racing 2's order frame by frame (tie or copy)
  */
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl.h>
 #include <OpenGL/glext.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <string.h>
 
 #define W 64
@@ -327,8 +329,156 @@ static void run(const char *name, CGLPixelFormatAttribute renderer)
     CGLDestroyPixelFormat(pf);
 }
 
-int main(void)
+
+/* Real Racing 2's exact order (M6): window context B with its own drawable and a 3D table made
+ * with client storage; per frame, video context A attaches a new rectangle RGB pbuffer, draws
+ * into it, flushes, ties a new texture to it while still attached (CGLTexImagePBuffer on A),
+ * detaches; B binds that texture and draws Core Animation's program, read from B's back buffer.
+ * Variants: tie (as the game) or copy (glCopyTexImage2D in A instead). */
+static void run_sequence(const char *name, CGLPixelFormatAttribute renderer, bool copy)
 {
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32, kCGLPFADoubleBuffer, kCGLPFAPBuffer,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
+                                        renderer, 0 };
+    if (!renderer)
+        attrs[5] = 0;
+    CGLPixelFormatObj pf;
+    GLint n, screen = 0;
+    if (CGLChoosePixelFormat(attrs, &pf, &n) || !pf)
+        return;
+    CGLContextObj a, b;
+    CGLCreateContext(pf, NULL, &b);
+    CGLCreateContext(pf, b, &a);
+    CGLPBufferObj q;
+    CGLCreatePBuffer(W, H, GL_TEXTURE_2D, GL_RGBA, 0, &q);
+    CGLSetCurrentContext(b);
+    CGLGetVirtualScreen(b, &screen);
+    CGLSetPBuffer(b, q, 0, 0, screen);
+
+    static unsigned char lut[32 * 32 * 32 * 4];
+    for (int z = 0; z < 32; z++)
+        for (int y = 0; y < 32; y++)
+            for (int x = 0; x < 32; x++) {
+                unsigned char *p = &lut[((z * 32 + y) * 32 + x) * 4];
+                p[0] = x * 255 / 31; p[1] = y * 255 / 31; p[2] = z * 255 / 31; p[3] = 255;
+            }
+    GLuint lt;
+    glActiveTexture(GL_TEXTURE1);
+    glGenTextures(1, &lt);
+    glBindTexture(GL_TEXTURE_3D, lt);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glPixelStorei(GL_UNPACK_CLIENT_STORAGE_APPLE, 1);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_STORAGE_HINT_APPLE, GL_STORAGE_SHARED_APPLE);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 32);
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, 32, 32, 32, 0, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, lut);
+    glPixelStorei(GL_UNPACK_CLIENT_STORAGE_APPLE, 0);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glActiveTexture(GL_TEXTURE0);
+
+    GLuint p = glCreateProgram();
+    glAttachShader(p, shader(GL_VERTEX_SHADER,
+        "uniform mat4 vertex_matrix;\nuniform vec2 texscale0;\nattribute vec4 vertex_position;\n"
+        "attribute vec2 vertex_texcoord0;\nvarying vec2 texcoord0;\n"
+        "void main () { gl_Position = vertex_matrix * vertex_position; texcoord0 = vertex_texcoord0 * texscale0; }\n"));
+    glAttachShader(p, shader(GL_FRAGMENT_SHADER,
+        "uniform sampler2DRect texture0;\nuniform sampler3D texture1;\nvarying vec2 texcoord0;\n"
+        "void main (void) { vec4 s0 = texture2DRect (texture0, texcoord0);\n"
+        "  vec3 c = s0.rgb * vec3 (0.96875) + vec3 (0.015625);\n"
+        "  gl_FragColor = vec4 (texture3D (texture1, c).bgr, 1.); }\n"));
+    glBindAttribLocation(p, 0, "vertex_position");
+    glBindAttribLocation(p, 2, "vertex_texcoord0");
+    glLinkProgram(p);
+    glUseProgram(p);
+    glUniform1i(glGetUniformLocation(p, "texture0"), 0);
+    glUniform1i(glGetUniformLocation(p, "texture1"), 1);
+    GLfloat one[2] = { 1, 1 };
+    glUniform2fv(glGetUniformLocation(p, "texscale0"), 1, one);
+    GLfloat m[16] = { 2.0f / W, 0, 0, 0, 0, 2.0f / H, 0, 0, 0, 0, 0, 0, -1, -1, 0, 1 };
+    glUniformMatrix4fv(glGetUniformLocation(p, "vertex_matrix"), 1, GL_FALSE, m);
+    glUseProgram(0);
+
+    for (int frame = 0; frame < 3; frame++) {
+        /* A: new pbuffer, draw a colour into it, tie or copy, detach. */
+        CGLPBufferObj pb;
+        CGLCreatePBuffer(W, H, GL_TEXTURE_RECTANGLE_ARB, GL_RGB, 0, &pb);
+        CGLSetCurrentContext(a);
+        CGLSetPBuffer(a, pb, 0, 0, screen);
+        glViewport(0, 0, W, H);
+        glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, W, 0, H, -1, 1);
+        glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+        glColor4f(1.0f, 0.5f, 0.25f * frame, 1.0f);
+        glBegin(GL_QUADS); glVertex2f(0, 0); glVertex2f(W, 0); glVertex2f(W, H); glVertex2f(0, H); glEnd();
+        glFlush();
+        GLuint tex;
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_RECTANGLE_ARB, tex);
+        if (copy)
+            glCopyTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_RGB, 0, 0, W, H, 0);
+        else
+            CGLTexImagePBuffer(a, pb, GL_FRONT);
+        glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindTexture(GL_TEXTURE_RECTANGLE_ARB, 0);
+        glFlush();
+        CGLClearDrawable(a);
+
+        /* B: draw it through the table into its own drawable. */
+        CGLSetCurrentContext(b);
+        glViewport(0, 0, W, H);
+        glClearColor(0, 0, 1, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glUseProgram(p);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_3D, lt);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_RECTANGLE_ARB, tex);
+        struct { GLdouble pos[4]; GLfloat tc0[2], tc1[2], tc2[2]; GLubyte col[4]; } v[4];
+        memset(v, 0, sizeof(v));
+        const double xy[4][2] = { { 0, 0 }, { W, 0 }, { W, H }, { 0, H } };
+        for (int i = 0; i < 4; i++) {
+            v[i].pos[0] = xy[i][0]; v[i].pos[1] = xy[i][1]; v[i].pos[3] = 1;
+            v[i].tc0[0] = xy[i][0]; v[i].tc0[1] = xy[i][1];
+        }
+        GLushort idx[4] = { 0, 1, 2, 3 };
+        glVertexAttribPointer(0, 4, GL_DOUBLE, GL_FALSE, 64, v[0].pos);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 64, v[0].tc0);
+        glEnableVertexAttribArray(2);
+        glDrawRangeElements(GL_QUADS, 0, 4, 4, GL_UNSIGNED_SHORT, idx);
+        glDisableVertexAttribArray(0);
+        glDisableVertexAttribArray(2);
+        glUseProgram(0);
+        glBindTexture(GL_TEXTURE_RECTANGLE_ARB, 0);
+        unsigned char px[4] = { 0 };
+        glReadBuffer(GL_BACK);
+        glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        printf("  %s, frame %d, %s: B's back buffer centre RGBA %3d %3d %3d %3d (want 255 128 %d), "
+               "GL error 0x%x\n", name, frame, copy ? "copy" : "tie ", px[0], px[1], px[2], px[3],
+               64 * frame > 255 ? 255 : 64 * frame - (frame ? 1 : 0), glGetError());
+        CGLFlushDrawable(b);
+        glDeleteTextures(1, &tex);
+        CGLDestroyPBuffer(pb);
+    }
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(a);
+    CGLDestroyContext(b);
+    CGLDestroyPBuffer(q);
+    CGLDestroyPixelFormat(pf);
+}
+
+int main(int argc, char **argv)
+{
+    if (argc > 1 && !strcmp(argv[1], "sequence")) {
+        run_sequence("ours", 0, false);
+        run_sequence("ours", 0, true);
+        run_sequence("software", (CGLPixelFormatAttribute)0x00020400, false);
+        run_sequence("software", (CGLPixelFormatAttribute)0x00020400, true);
+        return 0;
+    }
     run("ours (accelerated)", 0);
     run("Apple software", (CGLPixelFormatAttribute)0x00020400);   /* kCGLRendererGenericFloatID */
     return 0;

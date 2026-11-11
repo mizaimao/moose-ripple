@@ -107,3 +107,20 @@ there (1 frame/s, 100% CPU afterwards), C&C 3 needs its disc.
 | Angry Birds Rio title screen, frames/s | refuses to start | 59 |
 | Quartz Composer Arabesque, frames/s | refuses to start | 60 |
 | Real Racing 2 menu, frames/s | 1 (black) | 23-30 (garbled) |
+
+## Real Racing 2's intro, more (05:30-06:10)
+
+- The pbuffers Core Video fills do hold the video (debug readback at the tie: brightest
+  channel 190-235 a few seconds in), and Core Animation's quad is right: positions (0,40) to
+  (1280,760), texture coordinates in pixels, texscale (1,1).
+- In the game, with the tie, the window context's composite never lands (its surface stays
+  alpha 0); with a copy instead of the tie (`pbuffer-copy`), it lands but samples black.
+  Waiting for the GPU at the tie (`tie-finish`) changes nothing.
+- `gl-feature-check sequence` repeats the game's order frame by frame (window context with a
+  3D table made with client storage; per frame a new rectangle RGB pbuffer drawn by context
+  A, tied or copied while attached, detached; drawn through the table by the window context):
+  right on ours for both, every frame (Apple's software renderer lags one frame tied).
+  `window-check` does the same into a real window (NSOpenGLContext, swap rectangle on): right
+  too, and the window shows it.
+So the remaining difference is in Core Video's or Core Animation's own objects (the CVOpenGL
+buffer pool's pbuffers, the CARenderer context), not in the GL path as such. Parked.

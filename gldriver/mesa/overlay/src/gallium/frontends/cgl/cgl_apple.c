@@ -579,6 +579,10 @@ static unsigned surface_texture_logs;
 
 #include "main/texobj.h"
 #include "state_tracker/st_context.h"
+#include "pipe/p_context.h"
+#include "pipe/p_screen.h"
+#include "util/os_time.h"
+#include "util/box.h"
 
 /* Copy the window framebuffer's rectangle (x, y, w, h) into the texture bound to `target`, top
  * row first: a surface texture has the surface's rows in memory order, like the memory path
@@ -655,10 +659,53 @@ ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum 
        * into it every frame, M6). Share the pbuffer's color buffer. */
       struct pipe_resource *res = ripple_cgl_drawable_color(pb, source);
       st_context_teximage(ctx->st, target, 0, res->format, res, false);
+      static int tie_finish = -1;
+      if (tie_finish < 0)
+         tie_finish = access("/Library/Logs/RippleGL/tie-finish", F_OK) == 0;
+      if (tie_finish) {
+         /* Debug: wait until the GPU has done this context's work before the texture is
+          * used elsewhere. */
+         struct pipe_fence_handle *fence = NULL;
+         struct pipe_screen *screen = ctx->st->pipe->screen;
+         ctx->st->pipe->flush(ctx->st->pipe, &fence, 0);
+         if (fence) {
+            screen->fence_finish(screen, NULL, fence, OS_TIMEOUT_INFINITE);
+            screen->fence_reference(screen, &fence, NULL);
+         }
+      }
       si.width = res->width0;
       si.height = res->height0;
       how = sid == ctx->attached_surface ? "tied to its own pbuffer" : "tied to a pbuffer";
       ret = 0;
+      static int tie_debug = -1;
+      static unsigned tie_logged;
+      if (tie_debug < 0)
+         tie_debug = access("/Library/Logs/RippleGL/swapdebug", F_OK) == 0;
+      unsigned tn = tie_logged++;
+      if (tie_debug && log && (tn < 3 || (tn % 30 == 0 && tn < 3000))) {
+         /* What the pbuffer holds now: its centre pixel and the brightest of a few. */
+         struct pipe_context *pipe = ctx->st->pipe;
+         st_context_flush(ctx->st, 0, NULL, NULL, NULL);
+         struct pipe_box box;
+         struct pipe_transfer *tr = NULL;
+         u_box_2d(0, 0, res->width0, res->height0, &box);
+         const uint8_t *m = pipe->texture_map(pipe, res, 0, PIPE_MAP_READ, &box, &tr);
+         if (m) {
+            const uint8_t *c = m + (size_t)(res->height0 / 2) * tr->stride + (res->width0 / 2) * 4;
+            unsigned bright = 0;
+            for (unsigned gy = 0; gy < 8; gy++)
+               for (unsigned gx = 0; gx < 8; gx++) {
+                  const uint8_t *p = m + (size_t)(gy * res->height0 / 8) * tr->stride +
+                                     (gx * res->width0 / 8) * 4;
+                  for (int k = 0; k < 3; k++)
+                     bright = p[k] > bright ? p[k] : bright;
+               }
+            fprintf(log, "RippleGLDriver: tie %u: pbuffer %ux%u format %u target %u, centre %02x %02x "
+                    "%02x %02x, brightest %u\n", sid, res->width0, res->height0, res->format,
+                    res->target, c[0], c[1], c[2], c[3], bright);
+            pipe->texture_unmap(pipe, tr);
+         }
+      }
    } else if (pb) {
       /* A pbuffer (cglsTexImagePBuffer 998, CGLTexImagePBuffer 997): usually rendered by
        * another context (Core Image's in WindowServer); read from it for the copy, through the
@@ -789,6 +836,10 @@ ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum 
 #include "main/teximage.h"
 #include "main/texobj.h"
 #include "state_tracker/st_context.h"
+#include "pipe/p_context.h"
+#include "pipe/p_screen.h"
+#include "util/os_time.h"
+#include "util/box.h"
 
 #define CS_MAX 2048
 
