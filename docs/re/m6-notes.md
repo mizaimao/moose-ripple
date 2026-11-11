@@ -284,7 +284,8 @@ in the game's own process:
   the window context (a copy made in another context of the share group).
 - *The game's own picture is sheared:* a 1280-wide image shown as five side-by-side copies,
   each a row lower, squeezed into the top fifth, which is a 1280-pixel row read 256 pixels at
-  a time. It is like that before our present path (`swapdump`). Ruled out: `GL_UNPACK_ROW_LENGTH`
+  a time. This morning it was already like that in the game's draw buffer, before our present
+  path (`swapdump`); not re-checked after today's changes. Ruled out: `GL_UNPACK_ROW_LENGTH`
   (the game sets 0, 32, 640, 1280 only), row bytes and `glPushClientAttrib` (never called),
   the winsys transfer stride.
 - With point 1 fixed the intro no longer shows black but the sheared picture behind it (the
