@@ -51,6 +51,8 @@
 			<string>RippleAccelerator</string>
 			<key>RippleGLBundle</key>
 			<false/>
+			<key>RippleQuartzExtreme</key>
+			<false/>
 		</dict>
 	</dict>
 	<key>OSBundleLibraries</key>

@@ -628,3 +628,60 @@ void RippleFramebuffer::releaseResource(uint32_t id)
     if (id && fShownRes == id)
         getWorkLoop()->runAction(&RippleFramebuffer::showAction, this, 0, 0);
 }
+
+// ---- Surfaces (RippleSurfaceClient) ---------------------------------------------------------
+
+void RippleFramebuffer::screenSize(uint32_t *width, uint32_t *height)
+{
+    const Mode &md = mode(fCurMode);
+    *width = md.width;
+    *height = md.height;
+}
+
+struct CopyArgs {
+    IOMemoryDescriptor *src;
+    uint32_t rowBytes;
+    int32_t ox, oy;
+    const IOAccelBounds *rects;
+    uint32_t count;
+};
+
+IOReturn RippleFramebuffer::copyAction(OSObject *owner, void *argp, void *, void *, void *)
+{
+    RippleFramebuffer *fb = (RippleFramebuffer *)owner;
+    const CopyArgs *a = (const CopyArgs *)argp;
+    const Mode &md = fb->mode(fb->fCurMode);
+    const uint32_t stride = md.width * 4;
+    uint8_t *vram = (uint8_t *)fb->fVRAM->getBytesNoCopy();
+    uint64_t srcLength = a->src->getLength();
+
+    for (uint32_t i = 0; i < a->count; i++) {
+        int32_t x0 = a->rects[i].x, y0 = a->rects[i].y;
+        int32_t x1 = x0 + a->rects[i].w, y1 = y0 + a->rects[i].h;
+        // Clip to the screen and to the part of the screen the backing covers.
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x0 < a->ox) x0 = a->ox;
+        if (y0 < a->oy) y0 = a->oy;
+        if (x1 > (int32_t)md.width) x1 = md.width;
+        if (y1 > (int32_t)md.height) y1 = md.height;
+        if (x1 <= x0 || y1 <= y0)
+            continue;
+        uint32_t bytes = (x1 - x0) * 4;
+        for (int32_t y = y0; y < y1; y++) {
+            uint64_t off = (uint64_t)(y - a->oy) * a->rowBytes + (uint64_t)(x0 - a->ox) * 4;
+            if (off + bytes > srcLength)
+                break;
+            a->src->readBytes(off, vram + (size_t)y * stride + (size_t)x0 * 4, bytes);
+        }
+    }
+    fb->refresh();                      // damage tracking finds what changed
+    return kIOReturnSuccess;
+}
+
+IOReturn RippleFramebuffer::copyToScreen(IOMemoryDescriptor *src, uint32_t rowBytes, int32_t ox,
+                                         int32_t oy, const IOAccelBounds *rects, uint32_t count)
+{
+    CopyArgs a = { src, rowBytes, ox, oy, rects, count };
+    return getWorkLoop()->runAction(&RippleFramebuffer::copyAction, this, &a);
+}

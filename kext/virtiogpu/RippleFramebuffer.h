@@ -10,6 +10,7 @@
 #include <IOKit/graphics/IOFramebuffer.h>
 #include <IOKit/IOTimerEventSource.h>
 #include "VirtioGPUDevice.h"
+#include <IOKit/graphics/IOAccelTypes.h>
 
 class RippleFramebuffer : public IOFramebuffer
 {
@@ -60,6 +61,7 @@ class RippleFramebuffer : public IOFramebuffer
     bool  refresh();             // send what changed since the last frame; false if nothing
     static void refreshAction(OSObject *owner, IOTimerEventSource *sender);
     static IOReturn showAction(OSObject *owner, void *id, void *rect, void *, void *);
+    static IOReturn copyAction(OSObject *owner, void *args, void *, void *, void *);
     void  showCursor();
     void  publishCapsets();     // host GPU capability sets into the registry (diagnostics)
 
@@ -72,6 +74,13 @@ public:
     bool showResource(uint32_t id, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
     // The client is going away or destroying `id`: give the display back if it shows `id`.
     void releaseResource(uint32_t id);
+
+    // Surfaces (RippleSurfaceClient): the current screen size, and copying rectangles of a
+    // surface's backing (32-bit pixels, rowBytes apart, its pixel (0,0) at screen (ox, oy))
+    // into the frame. Serialized with the refresh timer.
+    void screenSize(uint32_t *width, uint32_t *height);
+    IOReturn copyToScreen(IOMemoryDescriptor *src, uint32_t rowBytes, int32_t ox, int32_t oy,
+                          const IOAccelBounds *rects, uint32_t count);
 
     virtual bool start(IOService *provider);
     virtual void stop(IOService *provider);

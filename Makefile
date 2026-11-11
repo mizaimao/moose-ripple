@@ -169,6 +169,7 @@ glbundle:
 VGPU_INC := -Ithird_party/virtio -Ikext/virtiogpu -Iinclude
 VGPU_OBJ  = $(OUT)/x86_64/virtiogpu/VirtioGPUDevice.o $(OUT)/x86_64/virtiogpu/RippleFramebuffer.o \
             $(OUT)/x86_64/virtiogpu/RippleAccelerator.o $(OUT)/x86_64/virtiogpu/RippleGPUClient.o \
+            $(OUT)/x86_64/virtiogpu/RippleSurfaceClient.o \
             $(OUT)/x86_64/virtiogpu/virtqueue.o \
             $(OUT)/x86_64/virtiogpu/info.o
 $(OUT)/x86_64/virtiogpu/%.o: kext/virtiogpu/%.cpp kext/virtiogpu/*.h

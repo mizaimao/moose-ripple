@@ -4,6 +4,7 @@
 #include "RippleAccelerator.h"
 #include "RippleFramebuffer.h"
 #include "RippleGPUClient.h"
+#include "RippleSurfaceClient.h"
 
 #include <IOKit/IOLib.h>
 #include <pexpert/pexpert.h>
@@ -61,6 +62,14 @@ bool RippleAccelerator::start(IOService *provider)
         }
     }
     setProperty("RippleGL", fGL ? "on" : "off");
+
+    // Quartz Extreme work (M5): WindowServer's surface clients (type 0). Opt-in, needs the GL
+    // bundle: personality property RippleQuartzExtreme (default false), boot flag ripple_qe=0|1.
+    OSBoolean *qe = OSDynamicCast(OSBoolean, getProperty("RippleQuartzExtreme"));
+    fQE = fGL && qe && qe->isTrue();
+    if (PE_parse_boot_argn("ripple_qe", &arg, sizeof(arg)))
+        fQE = fGL && arg != 0;
+    setProperty("RippleQE", fQE ? "on" : "off");
     registerService();
     LOG("started: backend virgl, %u capability blobs", fInfo.num_caps);
     return true;
@@ -91,6 +100,22 @@ IOReturn RippleAccelerator::newUserClient(task_t owningTask, void *securityID, U
 IOReturn RippleAccelerator::newUserClient(task_t owningTask, void *securityID, UInt32 type,
                                           IOUserClient **handler)
 {
+    if (type == kIOAccelSurfaceClientType && fQE) {
+        RippleSurfaceClient *sc = new RippleSurfaceClient;
+        if (!sc)
+            return kIOReturnNoMemory;
+        if (!sc->initWithTask(owningTask, securityID, type) || !sc->attach(this)) {
+            sc->release();
+            return kIOReturnError;
+        }
+        if (!sc->start(this)) {
+            sc->detach(this);
+            sc->release();
+            return kIOReturnError;
+        }
+        *handler = sc;
+        return kIOReturnSuccess;
+    }
     if (type != RIPPLE_GPU_CLIENT_TYPE)
         return kIOReturnUnsupported;        // Apple's IOAccelerator client types come with M5
     RippleGPUClient *client = new RippleGPUClient;

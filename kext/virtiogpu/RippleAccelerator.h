@@ -21,6 +21,7 @@ class RippleAccelerator : public IOAccelerator
     VirtioGPUDevice   *fDev;
     struct ripple_gpu_info fInfo;
     bool               fGL;          // GL bundle published (RippleGLBundle / ripple_gl)
+    bool               fQE;          // surface clients for WindowServer (ripple_qe, M5)
 
 public:
     VirtioGPUDevice *device() const { return fDev; }
