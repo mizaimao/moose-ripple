@@ -301,3 +301,52 @@ Next (when the owner picks it up):
    and, from 10.13, APFS in OpenCore), and VM 211 moving from Chameleon to OpenCore.
 VM 213 is stopped: OpenCore disk on `ide0`, Mountain Lion's working copy (booted once) on
 `sata0`. dev.lan keeps only the helper scripts (`tmp-installers/.tools`).
+
+## 2026-11-11 02:35-04:20: Mavericks 10.9.5 and a clean 10.6.8 (overnight, VM 213 next to 210)
+
+The owner: resume the paused work. Both disks are archived next to Lion and Mountain Lion in
+`/var/lib/vz/osx/firstboot/` on the rig, never booted.
+
+Mavericks 10.9.5 (13F34):
+- Booting the InstallESD's BaseSystem.dmg (unpacked to a raw disk: Apple partition map, 512-byte
+  blocks) brings up the Recovery-style "OS X Utilities". From its Terminal, `installer -pkg "/Volumes/OS
+  X Install ESD/Packages/OSInstall.mpkg"` fails after making the recovery partition:
+  `PackageKit: External payload root /Volumes/OS X Base System 1 for package
+  com.apple.pkg.BaseSystemResources ... doesn't exist`. The log says "Dist disk is not root. No
+  imgsrc found, mounting system image for BaseSystem extraction": BaseSystemBinaries and
+  BaseSystemResources take their files from a mounted BaseSystem, and that mount is gone by the time
+  they extract. Mounting BaseSystem.dmg by hand first doesn't help (the installer reuses that mount
+  and ejects it too).
+- What works is the classic installer disk, built in that same environment on a spare 10 GB disk:
+  `asr restore -source BaseSystem.dmg -target <volume> -erase`, then replace
+  `System/Installation/Packages` (a symlink) with the ESD's Packages folder and copy
+  BaseSystem.dmg and BaseSystem.chunklist to its root. OpenCore boots it as "OS X Installer"
+  (the dist disk is now the root), and `installer -pkg /System/Installation/Packages/OSInstall.mpkg
+  -target "/Volumes/Macintosh HD"` succeeds in about 7 minutes. No Recovery HD partition is made
+  this way.
+- Checked: 10.9.5 13F34, users daemon/nobody/root only, no `.AppleSetupDone`, `CDIS.custom`
+  `LANGUAGE=en`. Archived (`qemu-img compare` identical), then one boot of the working copy reached
+  the Welcome screen (country list). The installer disk is kept too, as
+  `installers/10.9.5/Install-OS-X-Mavericks-10.9.5-bootable.qcow2`.
+- Mavericks' USB tablet uses the same 1204x900 grid offset as Lion. Pressing Return on the
+  language list before it is ready picked French once; clicking the arrow is safer.
+
+Snow Leopard 10.6.8 (10K549), from the 10.6.3 retail disc plus the 10.6.8 combo update:
+- Both images unpacked the same way (Apple partition map, 512-byte blocks) and attached as SATA
+  disks; OpenCore starts "Mac OS X Install DVD" by itself.
+- The 10.6.3 installer environment has no `installer` command, its `/` and `/tmp` are read-only,
+  and `tail`, `which` and `clear` are missing.
+- Typing through QEMU's USB keyboard drops keys there, and fast typing left Shift stuck. One key per
+  QMP `send-key` with 0.2 s between keys still drops about one key in 30. So the commands went on a
+  small ISO (built with `genisoimage` on the rig) and only `sh /Volumes/<label>/x.sh` was typed and
+  checked on screen. Snow Leopard doesn't notice a swapped CD until the old one is ejected from
+  inside (`diskutil eject`).
+- The USB tablet works in the 10.6.3 installer without a driver, on the same 1204x900 grid as Lion.
+- Install: the GUI installer with the default choices onto "Macintosh HD", with the VM set to
+  `reboot: 0` (QEMU `-no-reboot`), so the installer's restart at the end powers the VM off instead
+  of booting the new system (about 7 minutes).
+- Combo update: booted the disc again, holding OpenCore's menu with arrow keys (the new system
+  had become the default entry), then ran the target's own `/usr/sbin/installer` (10.6.3, same
+  build as the disc) on `MacOSXUpdCombo10.6.8.pkg` with `-target "/Volumes/Macintosh HD"`.
+  10D575 became 10K549.
+- Checked: 10.6.8 10K549, users daemon/nobody/root only, no `.AppleSetupDone`, `LANGUAGE=en`.
