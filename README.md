@@ -90,14 +90,15 @@ Details: [docs/re/perf-notes.md](docs/re/perf-notes.md) and [docs/re/m6-notes.md
 ### Not working yet
 
 - Real Racing 2: the intro movie draws nothing and the game's own picture is sheared into five
-  side-by-side copies. Being worked on.
+  side-by-side copies ([#8](https://github.com/mizaimao/moose-ripple/issues/8)).
+- Chess: the 3D board stays black ([#9](https://github.com/mizaimao/moose-ripple/issues/9)).
 - Core Image Fun House shows no image (with Apple's software renderer too).
 - iMovie hasn't been tried yet. Photo Booth's live effects need a camera, which our VM doesn't
-  have, so the effects were tested on a still photo.
+  have, so the effects were tested on a still photo ([#11](https://github.com/mizaimao/moose-ripple/issues/11)).
 - The OpenGL windows of apps are copied back through the guest every frame: about 20-30 ms per
-  frame for a 1280x800 window. The next performance pass keeps them on the GPU.
+  frame for a 1280x800 window. The next performance pass keeps them on the GPU ([#10](https://github.com/mizaimao/moose-ripple/issues/10)).
 - From a key press to the first change on screen takes about 0.2 s, measured through QEMU's VNC
-  display.
+  display, and whole-screen animations reach a VNC viewer at 4-20 frames/s ([#10](https://github.com/mizaimao/moose-ripple/issues/10)).
 - `open -a "Front Row"` starts Front Row without showing it. Start it with Cmd+Esc.
 - Only Mac OS X 10.6.8 with the 64-bit kernel. Only tested with an Intel host GPU; virglrenderer
   also runs on AMD and NVIDIA host GPUs, but we haven't tried them.
@@ -105,7 +106,7 @@ Details: [docs/re/perf-notes.md](docs/re/perf-notes.md) and [docs/re/m6-notes.md
 Problems of 10.6 in QEMU that show up without moose-ripple too (a panic when the guest goes to
 sleep (KI-6), live snapshots that panic it (KI-5), the pointer drifting from QEMU's USB tablet
 (KI-1)) are in
-[docs/known-issues.md](docs/known-issues.md), with workarounds.
+[docs/known-issues.md](docs/known-issues.md), with workarounds; each has a GitHub issue.
 
 ## Status
 
@@ -299,6 +300,12 @@ It removes the four bundles, rebuilds the kext cache and takes the `ripple_` fla
 boot flags (`npci=0x2000` stays). If the VM doesn't reach the desktop, go back to the snapshot,
 or start it in single-user mode (Cmd+S in OpenCore's menu) and run `/sbin/mount -uw /`,
 `rm -rf /System/Library/Extensions/Ripple*` and `reboot`.
+
+## Reporting problems
+
+Please open an issue on [GitHub Issues](https://github.com/mizaimao/moose-ripple/issues). Say
+which host you use (QEMU or Proxmox version, host GPU), the guest's boot flags (`nvram
+boot-args`) and what you see. Check [docs/known-issues.md](docs/known-issues.md) first.
 
 ## Building from source
 
