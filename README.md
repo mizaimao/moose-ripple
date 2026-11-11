@@ -139,34 +139,39 @@ virtual machine is subject to Apple's license terms.
 
 ## Install
 
-What's tested: the steps below on Proxmox VE, where our scripts run the same commands. The plain
-QEMU command line is the same VM written out for QEMU without Proxmox; it hasn't been run as such
-yet.
+What's tested: the steps below on Proxmox VE, including `install.sh` and `uninstall.sh` from the
+release zip run from a CD image in a copy of our test VM. The plain QEMU command line is the same
+VM written out for QEMU without Proxmox; it hasn't been run as such yet.
 
 ### 1. Get the files
 
-<!-- DOWNLOAD: no release exists yet. This step describes the planned download; whether to
-     publish ready-built files is still to be decided. Until then, build them (see "Building
-     from source"). -->
+<!-- DOWNLOAD: no release is published yet (going public is on hold). `make release` builds
+     the zip described here; publishing it on GitHub Releases comes with going public. -->
 
-Download `moose-ripple-VERSION.zip` from this repository's Releases page. It holds:
+Download `moose-ripple-VERSION.zip` from the
+[GitHub Releases page](https://github.com/mizaimao/moose-ripple/releases). It holds:
 
-| File | Where it goes | What it is |
-|---|---|---|
-| `RippleVirtioGPU.kext` | guest, `/System/Library/Extensions` | the display and GPU driver (kernel) |
-| `RippleGLDriver.bundle` | guest, `/System/Library/Extensions` | the OpenGL driver: Mesa's virgl driver for 10.6 |
-| `RippleGA.plugin` | guest, `/System/Library/Extensions` | the 2D plugin WindowServer needs before it composites with OpenGL |
-| `RippleQEMUTablet.kext` | guest, `/System/Library/Extensions` | optional: the pointer follows QEMU's USB tablet exactly |
-| `qe-check` | guest, anywhere | prints whether each display has Quartz Extreme |
-| `opencore.qcow2` | host | the OpenCore boot disk, built from [boot/opencore/](boot/opencore/README.md) |
+| File | What it is |
+|---|---|
+| `RippleVirtioGPU.kext` | the display and GPU driver (kernel) |
+| `RippleGLDriver.bundle` | the OpenGL driver: Mesa's virgl driver for 10.6 |
+| `RippleGA.plugin` | the 2D plugin WindowServer needs before it composites with OpenGL |
+| `RippleQEMUTablet.kext` | optional: the pointer follows QEMU's USB tablet exactly |
+| `qe-check` | prints whether each display has Quartz Extreme |
+| `install.sh`, `uninstall.sh` | put the four bundles in place and set the boot flags, or take them out again |
+| `INSTALL` | these steps, short |
+| `LICENSE`, `LICENSE-Mesa.rst` | moose-ripple's license, and Mesa's for the Mesa code in the GL driver |
+| `SHA256SUMS` | checksums of all the files (`install.sh` checks them first) |
 
 Snow Leopard's own browser can't download from GitHub any more (it has no TLS 1.2), so download
-on the host and hand the guest files over as a CD image:
+on the host and hand the files to the guest as a CD image:
 
 ```
-unzip moose-ripple-VERSION.zip -d ripple
-genisoimage -V RIPPLE -r -J -o ripple.iso ripple     # or: xorriso -as mkisofs, same options
+unzip moose-ripple-VERSION.zip
+genisoimage -V RIPPLE -r -J -o ripple.iso moose-ripple-VERSION   # or: xorriso -as mkisofs, same options
 ```
+
+The OpenCore boot disk isn't in the zip: build it with [boot/opencore/](boot/opencore/README.md).
 
 ### 2. Set up the VM
 
@@ -237,18 +242,25 @@ in Terminal:
 
 ```
 cd /Volumes/RIPPLE
-F="RippleVirtioGPU.kext RippleGLDriver.bundle RippleGA.plugin RippleQEMUTablet.kext"
-sudo cp -R $F /System/Library/Extensions/
-cd /System/Library/Extensions
-sudo chown -R root:wheel $F                   # 10.6 refuses kexts owned by anyone else
-sudo chmod -R u=rwX,go=rX $F
-sudo kextutil -n -t RippleVirtioGPU.kext      # should say it "appears to be loadable"
-sudo kextcache -system-mkext                  # rebuild the kext cache
-sudo nvram boot-args="-v npci=0x2000 ripple_gl=1 ripple_qe=1"
+sudo sh install.sh               # or: sudo sh install.sh --no-tablet
 sudo reboot
 ```
 
-Leave `RippleQEMUTablet.kext` out of `F` if you don't want it. The boot flags:
+`install.sh` stops with a message if the guest isn't 10.6.8 on the 64-bit kernel or a checksum
+doesn't match. Otherwise it does what you would do by hand:
+
+1. Copies `RippleVirtioGPU.kext`, `RippleGLDriver.bundle`, `RippleGA.plugin` and
+   `RippleQEMUTablet.kext` into `/System/Library/Extensions`.
+2. Makes them owned by `root:wheel` and read-only for others (`chmod -R u=rwX,go=rX`): 10.6
+   refuses kexts with any other owner.
+3. Checks the kernel driver with `kextutil -n -t RippleVirtioGPU.kext` ("appears to be
+   loadable").
+4. Rebuilds the kext cache with `kextcache -system-mkext`, run from `/` (from a folder on a CD
+   it fails with "Couldn't lock").
+5. Adds `npci=0x2000 ripple_gl=1 ripple_qe=1` to the boot flags with `nvram boot-args`,
+   keeping the flags already there.
+
+The boot flags:
 
 | Flag | Meaning |
 |---|---|
@@ -272,25 +284,27 @@ QEMU), so they survive restarts.
 ### Removing it
 
 ```
-cd /System/Library/Extensions
-sudo rm -rf RippleVirtioGPU.kext RippleGLDriver.bundle RippleGA.plugin RippleQEMUTablet.kext
-sudo kextcache -system-mkext
-sudo nvram boot-args="-v npci=0x2000"
+cd /Volumes/RIPPLE
+sudo sh uninstall.sh
 sudo reboot
 ```
 
-If the VM doesn't reach the desktop, go back to the snapshot. Or start it in single-user mode
-(Cmd+S in OpenCore's menu), run `/sbin/mount -uw /`, then the lines above.
+It removes the four bundles, rebuilds the kext cache and takes the `ripple_` flags out of the
+boot flags (`npci=0x2000` stays). If the VM doesn't reach the desktop, go back to the snapshot,
+or start it in single-user mode (Cmd+S in OpenCore's menu) and run `/sbin/mount -uw /`,
+`rm -rf /System/Library/Extensions/Ripple*` and `reboot`.
 
 ## Building from source
 
 The guest files build on Linux, cross-compiled for Mac OS X 10.6:
 
 ```
-make virtiogpu glbundle gaplugin qemutablet qecheck
+make release                    # build/moose-ripple-VERSION.zip, the download described above
+make release VERSION=0.1.0      # with a chosen version (default: git describe, else the date)
+make virtiogpu glbundle gaplugin qemutablet qecheck     # only the files, in build/
 ```
 
-The results land in `build/`: the four guest files from the table in step 1, and `qe-check`.
+The results land in `build/`.
 What the build needs, under the repository's git-ignored `.tools/` and `.venv/`:
 
 - clang, targeting `i386-apple-darwin10` and `x86_64-apple-darwin10`. Tested: clang 19.1.7 on

@@ -1,0 +1,42 @@
+moose-ripple @VERSION@ for Mac OS X 10.6.8 (alpha)
+====================================================
+
+GPU acceleration for Snow Leopard in QEMU: Quartz Extreme, OpenGL 2.1 and Core Image on the
+host's GPU through virtio-gpu and virgl. Project page and full instructions:
+https://github.com/mizaimao/moose-ripple
+
+Before you start
+- The VM runs Mac OS X 10.6.8 with the 64-bit kernel, booted by OpenCore, with QEMU's
+  virtio-vga-gl card (Proxmox: vga: virtio-gl). The VM settings are in the project's README.
+- Turn sleep off in the guest: sudo pmset -a sleep 0 displaysleep 0 disksleep 0
+- Take a snapshot of the VM.
+
+Install
+1. Get this folder into the guest. Snow Leopard can't download from GitHub, so on the host
+   make a CD image of the unpacked folder and attach it to the VM:
+     genisoimage -V RIPPLE -r -J -o ripple.iso moose-ripple-@VERSION@
+2. In the guest's Terminal:
+     cd /Volumes/RIPPLE
+     sudo sh install.sh                (or: sudo sh install.sh --no-tablet)
+3. Restart: sudo reboot
+
+Check
+- The menu bar is translucent. F12, then drag a widget onto the Dashboard: the water ripples.
+- /Volumes/RIPPLE/qe-check prints "QE on" for each display.
+
+Remove
+     sudo sh uninstall.sh
+     sudo reboot
+
+Files
+  RippleVirtioGPU.kext    display and GPU driver (kernel)
+  RippleGLDriver.bundle   OpenGL driver (Mesa's virgl driver for 10.6)
+  RippleGA.plugin         2D plugin WindowServer needs before it composites with OpenGL
+  RippleQEMUTablet.kext   optional: the pointer follows QEMU's USB tablet exactly
+  qe-check                prints whether each display has Quartz Extreme
+  install.sh, uninstall.sh, INSTALL, LICENSE, LICENSE-Mesa.rst
+  SHA256SUMS              checksums of all the above: shasum -a 256 -c SHA256SUMS
+
+Mac OS X itself is not included and must come from your own copy. moose-ripple is MIT
+licensed (LICENSE). RippleGLDriver.bundle contains Mesa, under Mesa's own licenses
+(LICENSE-Mesa.rst).

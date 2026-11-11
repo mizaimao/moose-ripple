@@ -355,3 +355,11 @@ $(OUT)/%/scanout-test/scanout-test: $(OUT)/%/scanout-test/scanout-test.o
 scanouttest: $(OUT)/scanout-test
 $(OUT)/scanout-test: $(OUT)/i386/scanout-test/scanout-test $(OUT)/x86_64/scanout-test/scanout-test
 	$(LIPO) -create $^ -output $@
+
+# --- Release zip: the guest files with install/uninstall scripts, for users without scripts/ ---
+#   make release                 build/moose-ripple-VERSION.zip
+#   make release VERSION=0.1.0   with a chosen version (default: git describe, else the date)
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || date +%Y%m%d)
+.PHONY: release
+release: virtiogpu glbundle gaplugin qemutablet qecheck
+	release/package.sh $(OUT) $(VERSION) $(TOOLS)
