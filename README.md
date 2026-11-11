@@ -31,10 +31,12 @@ expect glitches: install it on a copy of your VM, or take a snapshot first.
 ![gl-gears on the host GPU under Snow Leopard's translucent menu bar](media/gears-menu-bar.png)
 -->
 
-<!-- PREVIEW (to add): media/dashboard-ripple.png (still frame) and/or media/dashboard-ripple.gif (after the performance work)
-![The Dashboard ripple, rendered through virgl on the host GPU](media/dashboard-ripple.png)
-![The Dashboard ripple in motion](media/dashboard-ripple.gif)
--->
+| moose-ripple | Apple's software rendering |
+|---|---|
+| ![Adding a widget to the Dashboard on moose-ripple: the water ripples](media/dashboard-widget-drop-ours.gif) | ![Adding a widget to the Dashboard with Apple's software rendering: no ripple](media/dashboard-widget-drop-software.gif) |
+
+*Adding a widget to the Dashboard, recorded in real time in the same VM: moose-ripple on the
+left, Apple's software rendering on the right.*
 
 ## What you get
 
@@ -50,6 +52,10 @@ expect glitches: install it on a copy of your VM, or take a snapshot first.
 
 *Top: Apple's software rendering, an opaque white menu bar. Bottom: moose-ripple, the
 translucent menu bar with the desktop showing through. Both from the same VM.*
+
+![Exposé on moose-ripple, composited on the host GPU](media/expose-ours.gif)
+
+*Exposé on moose-ripple, recorded in real time.*
 
 ### Measured
 
