@@ -272,6 +272,55 @@ ripple_cgl_drawable_destroy(struct ripple_cgl_drawable *d)
    FREE(d);
 }
 
+/* With /Library/Logs/RippleGL/swapdebug present: the GL state at a context's first swaps and
+ * the drawable's centre pixel read straight from it, in the debug log (M6: Real Racing 2's
+ * Core Animation context swapped empty frames). */
+#include "main/glthread.h"
+#include "main/dispatch.h"
+#include <unistd.h>
+static void
+swap_debug(struct ripple_cgl_context *ctx)
+{
+   static int enabled = -1;
+   static struct { void *ctx; unsigned n; } seen[8];
+   extern FILE *ripple_gld_dbg_file(void);
+   if (enabled < 0)
+      enabled = access("/Library/Logs/RippleGL/swapdebug", F_OK) == 0;
+   if (!enabled || !ripple_gld_dbg_file())
+      return;
+   unsigned i = 0;
+   while (i < 8 && seen[i].ctx && seen[i].ctx != ctx)
+      i++;
+   if (i == 8)
+      return;
+   seen[i].ctx = ctx;
+   unsigned n = seen[i].n++;
+   if (n >= 6 && (n % 40 || n > 1200))
+      return;
+   struct gl_context *gl = ctx->glctx;
+   GLint fb = gl->DrawBuffer ? (GLint)gl->DrawBuffer->Name : -1;
+   GLint rfb = gl->ReadBuffer ? (GLint)gl->ReadBuffer->Name : -1;
+   GLenum db = gl->DrawBuffer ? gl->DrawBuffer->ColorDrawBuffer[0] : 0;
+   unsigned w = gl->DrawBuffer ? gl->DrawBuffer->Width : 0, h = gl->DrawBuffer ? gl->DrawBuffer->Height : 0;
+   GLubyte px[4] = { 0 };
+   if (fb == 0 && rfb == 0 && w && h) {
+      struct gl_pixelstore_attrib saved = gl->Pack;
+      memset(&gl->Pack, 0, sizeof(gl->Pack));
+      gl->Pack.Alignment = 1;
+      GLenum rb = gl->ReadBuffer->ColorReadBuffer;
+      CALL_ReadBuffer(GET_DISPATCH(), (db));
+      CALL_ReadPixels(GET_DISPATCH(), (w / 2, h / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px));
+      CALL_ReadBuffer(GET_DISPATCH(), (rb));
+      gl->Pack = saved;
+   }
+   fprintf(ripple_gld_dbg_file(), "RippleGLDriver: swap %p: draw fb %d read fb %d buffer 0x%x "
+           "%ux%u, viewport %g,%g %gx%g, program %u, centre RGBA %u %u %u %u, error 0x%x\n",
+           (void *)ctx, fb, rfb, db, w, h, gl->ViewportArray[0].X, gl->ViewportArray[0].Y,
+           gl->ViewportArray[0].Width, gl->ViewportArray[0].Height,
+           gl->Shader.ActiveProgram ? gl->Shader.ActiveProgram->Name : 0, px[0], px[1], px[2],
+           px[3], gl->ErrorValue);
+}
+
 void
 ripple_cgl_context_swap(struct ripple_cgl_context *ctx)
 {
@@ -281,6 +330,7 @@ ripple_cgl_context_swap(struct ripple_cgl_context *ctx)
       return;
    if (_glapi_get_context() != ctx->glctx)
       ripple_cgl_context_make_current(ctx);
+   swap_debug(ctx);
    st_context_flush(ctx->st, ST_FLUSH_FRONT, NULL, NULL, NULL);
    struct pipe_resource *res = d->textures[ST_ATTACHMENT_BACK_LEFT];
    if (!res)

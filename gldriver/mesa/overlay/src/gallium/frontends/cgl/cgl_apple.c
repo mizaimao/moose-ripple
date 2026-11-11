@@ -617,6 +617,16 @@ copy_top_first(struct ripple_cgl_context *ctx, GLenum target, GLenum ifmt, int x
    CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_DRAW_FRAMEBUFFER_EXT, draw_fb));
 }
 
+/* Debug: /Library/Logs/RippleGL/pbuffer-copy makes CGLTexImagePBuffer copy instead of sharing. */
+static bool
+pbuffer_copy_debug(void)
+{
+   static int on = -1;
+   if (on < 0)
+      on = access("/Library/Logs/RippleGL/pbuffer-copy", F_OK) == 0;
+   return on;
+}
+
 int
 ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum target,
                            GLenum ifmt, GLsizei w, GLsizei h, bool bind, GLenum source)
@@ -639,7 +649,7 @@ ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum 
    bool have_si = !pb && ripple_cgl_device_surface_info(sid, &si);
    if (w <= 0 || h <= 0 || (!pb && !have_si)) {
       /* nothing to read */
-   } else if (pb && bind && ripple_cgl_drawable_color(pb, source)) {
+   } else if (pb && bind && ripple_cgl_drawable_color(pb, source) && !pbuffer_copy_debug()) {
       /* CGLTexImagePBuffer (997): the texture stays tied to the pbuffer, and what is drawn
        * into the pbuffer later shows in it (Real Racing 2 ties each pbuffer once and renders
        * into it every frame, M6). Share the pbuffer's color buffer. */

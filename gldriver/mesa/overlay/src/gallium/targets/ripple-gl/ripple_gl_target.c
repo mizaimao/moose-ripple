@@ -396,6 +396,8 @@ struct gld_context {
    struct gld_window *win;               /* attached window, if any */
    struct ripple_cgl_drawable *drawable; /* its render targets */
    int swap_interval;                    /* kCGLCPSwapInterval: 1 = wait for vblank */
+   bool swap_rect_on;                    /* kCGLCESwapRectangle */
+   int swap_rect[4];                     /* kCGLCPSwapRectangle: x, y, width, height */
    struct gld_surface *cur_surface;      /* accelerator surface drawn into (WindowServer) */
    struct gld_pbuffer *cur_pbuffer;      /* pbuffer drawn into (Core Image in WindowServer) */
 };
@@ -520,7 +522,8 @@ gldCreateContext(struct gld_context **out, const struct gld_pixel_format *pf,
    }
    c->magic = GLD_CONTEXT_MAGIC;
    c->gc = ripple_cgl_gc_from_create_arg(gl_state);
-   DBG("gldCreateContext: mesa %p, gc %p, shared %p\n", (void *)c->mesa, c->gc, (void *)shared);
+   DBG("gldCreateContext: %p, mesa %p, gc %p, shared %p\n", (void *)c, (void *)c->mesa, c->gc,
+       (void *)shared);
    ripple_gld_fill_config(cfg, pf);
    *out = c;
    return 0;
@@ -591,6 +594,21 @@ gldSetInteger(struct gld_context *c, int pname, const int *value)
    if (c && c->magic == GLD_CONTEXT_MAGIC && pname == 222 /* kCGLCPSwapInterval */ && value) {
       c->swap_interval = *value;
       gld_window_set_vsync(c->win, c->swap_interval != 0);
+   }
+   /* kCGLCPSwapRectangle (200) and CGLEnable/CGLDisable(kCGLCESwapRectangle) (201). */
+   if (c && c->magic == GLD_CONTEXT_MAGIC && pname == 200 && value) {
+      static unsigned rects;
+      if (rects++ < 12)
+         DBG("  swap rectangle %d,%d %dx%d\n", value[0], value[1], value[2], value[3]);
+      memcpy(c->swap_rect, value, sizeof(c->swap_rect));
+      gld_window_set_swap_rect(c->win, c->swap_rect_on, c->swap_rect);
+   }
+   if (c && c->magic == GLD_CONTEXT_MAGIC && pname == 201 && value) {
+      static unsigned logged;
+      if (logged++ < 4)
+         DBG("  swap rectangle %s\n", *value ? "on" : "off");
+      c->swap_rect_on = *value != 0;
+      gld_window_set_swap_rect(c->win, c->swap_rect_on, c->swap_rect);
    }
    /* OpenGL sends 0x2bd at the very end of CGLCreateContext: the dispatch table is final
     * now, so this is where the context moves to Mesa. */
@@ -858,6 +876,7 @@ gldAttachDrawable(struct gld_context *c, int type, void *data, void *opts)
          c->win = w;
       }
       gld_window_set_vsync(w, c->swap_interval != 0);
+      gld_window_set_swap_rect(w, c->swap_rect_on, c->swap_rect);
       if (!c->drawable) {
          c->drawable = ripple_cgl_drawable_create(c->mesa);
          if (!c->drawable)

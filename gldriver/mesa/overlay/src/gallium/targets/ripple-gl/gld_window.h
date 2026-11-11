@@ -17,6 +17,10 @@ struct gld_window *gld_window_attach(const uint32_t ids[3], struct gld_window *c
 void gld_window_release(struct gld_window *w);
 void gld_window_size(const struct gld_window *w, unsigned *width, unsigned *height);
 void gld_window_set_vsync(struct gld_window *w, bool vsync);
+/* kCGLCESwapRectangle and kCGLCPSwapRectangle: with `on`, a present updates only `rect` of the
+ * window (x, y from the bottom, width, height); the rest keeps what it showed. Core Animation
+ * redraws just the changed area and relies on that (M6, Real Racing 2's intro video). */
+void gld_window_set_swap_rect(struct gld_window *w, bool on, const int rect[4]);
 
 /* A ripple_cgl_present_fn for drawables shown in `data` (a struct gld_window). */
 void gld_window_present(void *data, const uint8_t *pixels, unsigned stride, unsigned width,

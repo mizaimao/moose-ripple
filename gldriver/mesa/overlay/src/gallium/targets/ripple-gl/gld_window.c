@@ -70,6 +70,8 @@ struct gld_window {
    unsigned width, height;
    int refs;
    bool vsync;
+   bool swap_rect_on;          /* kCGLCESwapRectangle: only swap_rect reaches the window */
+   int swap_rect[4];           /* x, y (GL: from the bottom), width, height */
    struct gld_window *next;
 };
 
@@ -226,6 +228,15 @@ gld_window_set_vsync(struct gld_window *w, bool vsync)
       w->vsync = vsync;
 }
 
+void
+gld_window_set_swap_rect(struct gld_window *w, bool on, const int rect[4])
+{
+   if (!w)
+      return;
+   w->swap_rect_on = on;
+   memcpy(w->swap_rect, rect, sizeof(w->swap_rect));
+}
+
 /* ripple_cgl_present_fn: pixels are BGRA8, top row first. */
 void
 gld_window_present(void *data, const uint8_t *pixels, unsigned stride, unsigned width,
@@ -237,10 +248,21 @@ gld_window_present(void *data, const uint8_t *pixels, unsigned stride, unsigned 
    static int presents;
    if (presents < 3 || presents % 120 == 0) {
       const uint8_t *mid = pixels + (size_t)(height / 2) * stride + (width / 2) * 4;
+      /* Over a 16x16 grid: the brightest colour channel and the alpha range (a picture with
+       * alpha 0 shows as nothing; M6). */
+      unsigned cmax = 0, amin = 255, amax = 0;
+      for (unsigned gy = 0; gy < 16 && height; gy++)
+         for (unsigned gx = 0; gx < 16 && width; gx++) {
+            const uint8_t *p = pixels + (size_t)(gy * height / 16) * stride + (gx * width / 16) * 4;
+            for (int c = 0; c < 3; c++)
+               cmax = p[c] > cmax ? p[c] : cmax;
+            amin = p[3] < amin ? p[3] : amin;
+            amax = p[3] > amax ? p[3] : amax;
+         }
       DBG("present %d: %ux%u into %p (%ux%u, row bytes %d), first pixel %02x %02x %02x %02x, "
-          "centre %02x %02x %02x %02x (BGRA)\n", presents, width, height, w->base, w->width,
-          w->height, w->row_bytes, pixels[0], pixels[1], pixels[2], pixels[3], mid[0], mid[1],
-          mid[2], mid[3]);
+          "centre %02x %02x %02x %02x (BGRA); grid: brightest %u, alpha %u-%u\n", presents,
+          width, height, w->base, w->width, w->height, w->row_bytes, pixels[0], pixels[1],
+          pixels[2], pixels[3], mid[0], mid[1], mid[2], mid[3], cmax, amin, amax);
    }
    presents++;
    if (w->base) {
@@ -248,10 +270,21 @@ gld_window_present(void *data, const uint8_t *pixels, unsigned stride, unsigned 
        * showed every GL window upside down until 2026-11-10 (gl-gears' blue gear at the
        * bottom, Front Row's menu mirrored). `pixels` is top row first. */
       unsigned rows = height < w->height ? height : w->height;
-      unsigned bytes = (width < w->width ? width : w->width) * 4;
-      for (unsigned y = 0; y < rows; y++)
-         memcpy((uint8_t *)w->base + (size_t)y * w->row_bytes,
-                pixels + (size_t)(height - 1 - y) * stride, bytes);
+      unsigned cols = width < w->width ? width : w->width;
+      /* Memory row y is GL row y (bottom first); with a swap rectangle only its rows and
+       * columns are written. */
+      unsigned y0 = 0, y1 = rows, x0 = 0, x1 = cols;
+      if (w->swap_rect_on && (w->swap_rect[2] || w->swap_rect[3] || w->swap_rect[0] || w->swap_rect[1])) {
+         int rx = w->swap_rect[0], ry = w->swap_rect[1];
+         int rw = w->swap_rect[2], rh = w->swap_rect[3];
+         x0 = rx < 0 ? 0 : (unsigned)rx > cols ? cols : (unsigned)rx;
+         y0 = ry < 0 ? 0 : (unsigned)ry > rows ? rows : (unsigned)ry;
+         x1 = rw <= 0 ? x0 : (unsigned)(rx + rw) > cols ? cols : (unsigned)(rx + rw);
+         y1 = rh <= 0 ? y0 : (unsigned)(ry + rh) > rows ? rows : (unsigned)(ry + rh);
+      }
+      for (unsigned y = y0; y < y1 && x1 > x0; y++)
+         memcpy((uint8_t *)w->base + (size_t)y * w->row_bytes + x0 * 4,
+                pixels + (size_t)(height - 1 - y) * stride + x0 * 4, (x1 - x0) * 4);
       cgs.UnlockWindowBits(w->cid, w->priv, NULL);
       w->base = NULL;
       int fe = cgs.FlushSurfaceWithOptions(w->cid, w->wid, w->sid, NULL, w->vsync);
