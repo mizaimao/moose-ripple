@@ -105,9 +105,22 @@ starting in the Dock, the GL composition, the scanout and QEMU's readback into i
 picture. QEMU answers VNC requests on its 30 ms refresh tick, so the numbers have about 30 ms
 steps. In whole frames the first change covers the whole screen.
 
+Software baseline: VM 212, 2026-11-10 21:33, virtio-gpu without GL (WindowServer composites in
+software), 2560x1600, 4 GB, same method. Not a like-for-like comparison: twice the pixels each
+way and half the RAM. Medians of 5 presses each, in ms:
+
+| Press | 210, QE (1280x800) | 212, software (2560x1600) |
+|---|---|---|
+| Exposé open | 234 (208 to 253) | 585 (466 to 648) |
+| Exposé close | 180 (136 to 215) | 601 (548 to 760) |
+| Dashboard open | 246 (173 to 395) | 113 (109 to 150) |
+| Dashboard close | 258 (176 to 289) | 339 (290 to 394) |
+
+Strip frames took about 30 ms on both. So under QE, Exposé starts about 2.5 times sooner, but
+Dashboard takes about 130 ms longer to show its first change when opening.
+
 Open: a run at 21:27, on the WindowServer before a restart, saw the first change in the first
-whole frame (about 100 ms) on 9 of 10 presses. It wasn't reproduced after the restart. There is
-no baseline without QE yet; VM 212 (virtio, software) could give one.
+whole frame (about 100 ms) on 9 of 10 presses. It wasn't reproduced after the restart.
 
 ## Pitfalls
 
