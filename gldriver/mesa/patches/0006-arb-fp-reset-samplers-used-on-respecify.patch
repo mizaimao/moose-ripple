@@ -1,0 +1,14 @@
+--- a/src/mesa/program/arbprogparse.c
++++ b/src/mesa/program/arbprogparse.c
+@@ -102,6 +102,11 @@
+    program->info.inputs_read      = prog.info.inputs_read;
+    program->info.outputs_written = prog.info.outputs_written;
+    program->arb.IndirectRegisterFiles = prog.arb.IndirectRegisterFiles;
++   /* moose-ripple: start from no samplers. A program object given new text kept the samplers
++    * of its previous text in SamplersUsed while TexturesUsed[] was replaced, and the next draw
++    * indexed CurrentTex[ffs(0) - 1] = CurrentTex[-1] for them (Core Image reuses program
++    * objects; crash in update_single_program_texture, M6). */
++   program->SamplersUsed = 0;
+    for (i = 0; i < MAX_TEXTURE_IMAGE_UNITS; i++) {
+       program->TexturesUsed[i] = prog.TexturesUsed[i];
+       if (prog.TexturesUsed[i])

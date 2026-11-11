@@ -1,0 +1,11 @@
+--- a/src/mesa/state_tracker/st_program.c
++++ b/src/mesa/state_tracker/st_program.c
+@@ -569,6 +569,8 @@
+       prog->serialized_nir = NULL;
+    }
+    free(prog->base_serialized_nir);
++   prog->base_serialized_nir = NULL;   /* moose-ripple: else the next re-specified text frees it again,
++                                          * and it is never serialized anew (Core Image, M6) */
+ 
+    prog->state.type = PIPE_SHADER_IR_NIR;
+    if (prog->arb.Instructions)
