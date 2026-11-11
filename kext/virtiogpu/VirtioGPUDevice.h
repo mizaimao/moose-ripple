@@ -57,8 +57,11 @@ public:
     uint32_t allocResourceId() { return (uint32_t)OSIncrementAtomic(&fNextResource) + 1; }
     uint32_t allocContextId()  { return (uint32_t)OSIncrementAtomic(&fNextContext) + 1; }
 
-    // 3D (virgl). Fenced commands complete only when the host has finished the work, so a
-    // true return means the work is done; *fence gets the fence id used.
+    // 3D (virgl). Submits and transfers return once QEMU has processed them (decoded and
+    // queued on the host GPU; transfers copied); *fence gets a number, in queue order, that
+    // signalled() passes once the host GPU has finished it. sync() makes that happen: an
+    // empty fenced submit whose reply QEMU holds until the GPU has done everything before it
+    // (performance stage, 2026-11-11: fencing every submit made each flush wait for the GPU).
     bool ctxCreate(uint32_t ctx, const char *name);
     bool ctxDestroy(uint32_t ctx);
     bool ctxAttachResource(uint32_t ctx, uint32_t id);
@@ -69,6 +72,8 @@ public:
     bool submit3D(uint32_t ctx, uint64_t pa, uint32_t size, uint64_t *fence);
     bool transfer3D(bool toHost, uint32_t ctx, uint32_t id, uint32_t level, const uint32_t box[6],
                     uint32_t stride, uint32_t layerStride, uint64_t offset, uint64_t *fence);
+    bool sync(uint32_t ctx);              // ctx 0: the context of the last submit
+    uint64_t signalled() const { return (uint64_t)fSignalled; }
 
     // Cursor queue: no response; the request buffer is reclaimed later.
     bool updateCursor(uint32_t scanout, uint32_t id, int32_t x, int32_t y,
@@ -97,7 +102,9 @@ private:
     uint32_t fFeatures, fNumScanouts, fNumCapsets;
     bool     fVirgl;                      // VIRTIO_GPU_F_VIRGL negotiated
     volatile SInt32 fNextResource, fNextContext;
-    volatile SInt64 fNextFence;
+    volatile SInt64 fNextFence;           // last number handed out (under fCmdLock)
+    volatile SInt64 fSignalled;           // every number up to this one is done on the GPU
+    volatile UInt32 fLastCtx;             // context of the last submit (for sync(0))
     uint64_t fSlowestAbs;               // slowest command (absolute time) and its type
     uint32_t fSlowestType, fOver100ms;
     Queue fQueue[2];               // 0 control, 1 cursor
@@ -125,9 +132,10 @@ private:
     uint8_t status();
     void setStatus(uint8_t s);
     bool simple(const void *req, uint32_t reqLen,
-                uint64_t extraPA = 0, uint32_t extraLen = 0);
+                uint64_t extraPA = 0, uint32_t extraLen = 0, uint64_t *fence = 0);
+    // fence: give the request the next fence number as it is queued (queue order = number order)
     uint32_t command(const void *req, uint32_t reqLen, void *resp, uint32_t respLen,
-                     uint64_t extraPA, uint32_t extraLen);
+                     uint64_t extraPA, uint32_t extraLen, uint64_t *fence = 0);
     bool cursorCommand(const void *req, uint32_t len);
     void drainControlLocked(bool fromInterrupt);
     bool setupInterrupts();

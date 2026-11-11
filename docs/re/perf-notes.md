@@ -25,3 +25,24 @@ a core. So frames wait rather than work: synchronous steps between the guest and
 frames/s at the M5 check (2026-11-10); 25 now.
 
 References (Apple's software renderer on 210, the 9600 GT on 211) still to measure.
+
+## Where the time went, and the first fix (01:20-01:30)
+
+dtrace in the guest (off-CPU time of WindowServer's threads during a window drag): the one
+wait in our code was `ripple_submit_cmd` (the kext's SUBMIT), about 11 ms per frame. The kext
+marked every SUBMIT and TRANSFER with `VIRTIO_GPU_FLAG_FENCE`, and QEMU answers a fenced
+command only once the host GPU has finished everything before it: each `glFlush` and each
+texture upload waited for the GPU to go idle.
+
+| Kext | gl-gears | Exposé | Dashboard | menus | per present (guest CPU) |
+|---|---|---|---|---|---|
+| fenced (before) | 25/s | 46/s | 41/s | 48/s | 3.8-6.5 ms |
+| transfers unfenced only | 25/s | about the same | | | |
+| no fences at all (experiment, unsafe) | 48-55/s | 51-57/s | 85/s | 82/s | 4.3-5.7 ms |
+| submits unfenced, one GPU sync per displayed frame (now) | 34-39/s | 43-60/s | 58-63/s | about 58/s | 6.6-11.7 ms |
+
+Now: SUBMIT returns once QEMU has taken the commands; fences are numbered in queue order and
+pass when an empty fenced SUBMIT (`VirtioGPUDevice::sync`) returns; `WAIT` with a timeout does
+such a sync if needed; `DISPLAY` syncs once before showing a frame (docs/kext-uapi.md). The
+remaining gap to the experiment is that per-frame sync; next: make it not block (queue the
+fenced empty submit before the scanout flush without waiting for its reply).

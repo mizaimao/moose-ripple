@@ -93,6 +93,14 @@ void RippleGPUClient::free(void)
 
 // ---- Helpers --------------------------------------------------------------------------------
 
+uint32_t RippleGPUClient::firstContext() const
+{
+    for (int i = 0; i < kMaxContexts; i++)
+        if (fContext[i])
+            return fContext[i];
+    return 0;                           // sync() then uses the device's last submit context
+}
+
 int RippleGPUClient::contextSlot(uint32_t ctx) const
 {
     if (!ctx)
@@ -370,6 +378,9 @@ IOReturn RippleGPUClient::display(uint32_t handle, uint32_t x, uint32_t y, uint3
     }
     if (!findBuffer(handle) || !w || !h)
         return kIOReturnBadArgument;
+    // Show a finished frame: submits don't wait for the GPU any more, so wait here, once per
+    // frame (the display reads the resource on the host outside the guest's contexts).
+    fDev->sync(firstContext());
     if (fShown && fShown != handle)
         fb->releaseResource(fShown);
     if (!fb->showResource(handle, x, y, w, h))
@@ -461,10 +472,17 @@ IOReturn RippleGPUClient::sMethod(OSObject *target, void *reference, IOExternalM
                        (uint32_t)a->scalarInput[2], (uint32_t)a->scalarInput[3],
                        (uint32_t)a->scalarInput[4]);
         break;
-    case RIPPLE_GPU_WAIT:
-        a->scalarOutput[0] = 1;             // version 1: fenced work is complete on return
+    case RIPPLE_GPU_WAIT: {
+        // Done if the GPU has passed the fence; with a timeout, make it pass (one sync for
+        // everything queued so far). A zero timeout only looks.
+        uint64_t id = a->scalarInput[0];
+        bool done = id <= c->fDev->signalled();
+        if (!done && a->scalarInput[1])
+            done = c->fDev->sync(c->firstContext()) && id <= c->fDev->signalled();
+        a->scalarOutput[0] = done;
         r = kIOReturnSuccess;
         break;
+    }
     }
     IOLockUnlock(c->fLock);
     if (desc)

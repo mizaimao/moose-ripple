@@ -43,8 +43,12 @@ the connection closes, or on a mode change.
 the caller; `TRANSFER` moves data between that backing and the GPU-side object.
 
 **Fences.** `SUBMIT` and `TRANSFER` return a fence; `WAIT` blocks until it has signalled.
-Version 1 of the virgl backend completes both before returning, so `WAIT` returns at once; the
-API already has the shape for asynchronous submission later.
+Since 2026-11-11 (performance stage) `SUBMIT` returns once the device has taken the commands,
+not when the GPU has run them; `TRANSFER` returns when the data has been copied. Fences are
+numbered in submission order. `WAIT` with a timeout of 0 only reports; with a timeout it makes
+the device finish everything submitted so far, then reports. `DISPLAY` shows a finished frame
+(it waits the same way first). Before, every `SUBMIT` waited for the GPU, which cost about
+half of the frame rate.
 
 **Limits** (version 1, raised 2026-11-10 for Mesa): commands up to 320 KB per `SUBMIT` (Mesa's
 virgl driver flushes at 260 KB), up to 4096 buffer handles per `SUBMIT`, up to 65536 buffers per
@@ -64,5 +68,5 @@ These are the only places virgl shows through:
   samples, flags), i.e. a virgl resource.
 
 The kernel side maps the methods to virtio-gpu commands (`CTX_CREATE`, `RESOURCE_CREATE_3D`,
-`RESOURCE_ATTACH_BACKING`, `CTX_ATTACH_RESOURCE`, `SUBMIT_3D`, `TRANSFER_TO/FROM_HOST_3D`,
-fenced). None of that is visible in the API.
+`RESOURCE_ATTACH_BACKING`, `CTX_ATTACH_RESOURCE`, `SUBMIT_3D`, `TRANSFER_TO/FROM_HOST_3D`;
+an empty fenced `SUBMIT_3D` waits for the GPU). None of that is visible in the API.

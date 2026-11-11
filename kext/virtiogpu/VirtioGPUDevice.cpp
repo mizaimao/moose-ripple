@@ -253,7 +253,7 @@ void VirtioGPUDevice::free()
 // ---- Control queue --------------------------------------------------------------------------
 
 uint32_t VirtioGPUDevice::command(const void *req, uint32_t reqLen, void *resp, uint32_t respLen,
-                                  uint64_t extraPA, uint32_t extraLen)
+                                  uint64_t extraPA, uint32_t extraLen, uint64_t *fence)
 {
     if (reqLen > kSlotReq || respLen > kSlotResp)
         return 0;
@@ -276,6 +276,11 @@ uint32_t VirtioGPUDevice::command(const void *req, uint32_t reqLen, void *resp, 
     uint64_t reqPA = fSlotPA + s * (kSlotReq + kSlotResp), respPA = reqPA + kSlotReq;
     memcpy(reqBuf, req, reqLen);
     bzero(respBuf, respLen);
+    if (fence) {                       // numbered here, under the lock: queue order
+        uint64_t id = (uint64_t)++fNextFence;
+        ((struct virtio_gpu_ctrl_hdr *)reqBuf)->fence_id = id;
+        *fence = id;
+    }
 
     uint64_t pa[3];
     uint32_t len[3];
@@ -352,10 +357,11 @@ void VirtioGPUDevice::drainControlLocked(bool fromInterrupt)
     }
 }
 
-bool VirtioGPUDevice::simple(const void *req, uint32_t reqLen, uint64_t extraPA, uint32_t extraLen)
+bool VirtioGPUDevice::simple(const void *req, uint32_t reqLen, uint64_t extraPA, uint32_t extraLen,
+                             uint64_t *fence)
 {
     struct virtio_gpu_ctrl_hdr resp;
-    uint32_t type = command(req, reqLen, &resp, sizeof(resp), extraPA, extraLen);
+    uint32_t type = command(req, reqLen, &resp, sizeof(resp), extraPA, extraLen, fence);
     if (type != VIRTIO_GPU_RESP_OK_NODATA) {
         LOG("command 0x%x failed: 0x%x", ((const struct virtio_gpu_ctrl_hdr *)req)->type, type);
         return false;
@@ -710,13 +716,39 @@ bool VirtioGPUDevice::submit3D(uint32_t ctx, uint64_t pa, uint32_t size, uint64_
     struct virtio_gpu_cmd_submit c;
     bzero(&c, sizeof(c));
     c.hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
-    c.hdr.flags = VIRTIO_GPU_FLAG_FENCE;
-    c.hdr.fence_id = (uint64_t)OSIncrementAtomic64(&fNextFence) + 1;
-    c.hdr.ctx_id = ctx;
+    c.hdr.ctx_id = ctx;                  // not fenced: see sync()
     c.size = size;
+    fLastCtx = ctx;
+    uint64_t id = 0;
+    bool ok = simple(&c, sizeof(c), pa, size, &id);
     if (fence)
-        *fence = c.hdr.fence_id;
-    return simple(&c, sizeof(c), pa, size);
+        *fence = id;
+    return ok;
+}
+
+// Wait until the host GPU has finished everything queued so far. QEMU holds the reply to a
+// fenced command until its fence retires, and a fence retires after all work queued before
+// it (any context); fence numbers follow queue order, so every number up to this one is done.
+bool VirtioGPUDevice::sync(uint32_t ctx)
+{
+    struct virtio_gpu_cmd_submit c;
+    bzero(&c, sizeof(c));
+    c.hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    c.hdr.flags = VIRTIO_GPU_FLAG_FENCE;
+    c.hdr.ctx_id = ctx ? ctx : fLastCtx;
+    c.size = 0;                          // no commands, just the fence
+    if (!c.hdr.ctx_id)
+        return true;                     // nothing was ever submitted
+    uint64_t id = 0;
+    if (!simple(&c, sizeof(c), 0, 0, &id))
+        return false;
+    for (;;) {
+        SInt64 old = fSignalled;
+        if (old >= (SInt64)id ||
+            OSCompareAndSwap64((UInt64)old, id, (volatile UInt64 *)&fSignalled))
+            break;
+    }
+    return true;
 }
 
 bool VirtioGPUDevice::transfer3D(bool toHost, uint32_t ctx, uint32_t id, uint32_t level,
@@ -726,8 +758,10 @@ bool VirtioGPUDevice::transfer3D(bool toHost, uint32_t ctx, uint32_t id, uint32_
     struct virtio_gpu_transfer_host_3d c;
     bzero(&c, sizeof(c));
     c.hdr.type = toHost ? VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D : VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D;
-    c.hdr.flags = VIRTIO_GPU_FLAG_FENCE;
-    c.hdr.fence_id = (uint64_t)OSIncrementAtomic64(&fNextFence) + 1;
+    // No VIRTIO_GPU_FLAG_FENCE: QEMU copies the data while it processes the command (into the
+    // host texture, or out of it into guest memory), so the reply alone means the transfer is
+    // done. A fence made QEMU hold the reply until the host GPU had finished everything queued
+    // before (performance stage, 2026-11-11). It still gets a number, in queue order.
     c.hdr.ctx_id = ctx;
     c.box.x = box[0]; c.box.y = box[1]; c.box.z = box[2];
     c.box.w = box[3]; c.box.h = box[4]; c.box.d = box[5];
@@ -736,7 +770,9 @@ bool VirtioGPUDevice::transfer3D(bool toHost, uint32_t ctx, uint32_t id, uint32_
     c.level = level;
     c.stride = stride;
     c.layer_stride = layerStride;
+    uint64_t n = 0;
+    bool ok = simple(&c, sizeof(c), 0, 0, &n);
     if (fence)
-        *fence = c.hdr.fence_id;
-    return simple(&c, sizeof(c));
+        *fence = n;
+    return ok;
 }

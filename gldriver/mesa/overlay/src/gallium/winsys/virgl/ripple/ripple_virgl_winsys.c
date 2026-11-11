@@ -7,8 +7,8 @@
  *   - the command stream goes to SUBMIT with the handles of the buffers it uses;
  *   - transfers go to TRANSFER, or into the stream as VIRGL_CCMD_TRANSFER3D;
  *   - fences are the kernel's fence numbers, waited for with WAIT.
- * Version 1 of the kernel side completes SUBMIT and TRANSFER before returning; nothing here
- * relies on that, only on fences of one connection signalling in order.
+ * The kernel side returns from SUBMIT before the GPU has run the commands (since 2026-11-11);
+ * this winsys only relies on fences signalling in order and WAIT waiting for them.
  *
  * Copyright 2026 moose-ripple. MIT licence, as the rest of Mesa's virgl code.
  */

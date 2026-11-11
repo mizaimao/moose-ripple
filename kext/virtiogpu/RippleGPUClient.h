@@ -46,6 +46,7 @@ class RippleGPUClient : public IOUserClient
     uint32_t           fShown;                   // buffer this connection shows on the display
 
     int  contextSlot(uint32_t ctx) const;
+    uint32_t firstContext() const;
     Buffer *findBuffer(uint32_t handle);
     Buffer *insertBuffer(uint32_t handle);
     void removeBuffer(Buffer *b);
