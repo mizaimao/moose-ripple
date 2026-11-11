@@ -239,6 +239,29 @@ static void run(const char *name, CGLPixelFormatAttribute renderer)
         glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
         printf("  CA layout and program: centre RGBA %3d %3d %3d %3d, GL error 0x%x\n",
                px[0], px[1], px[2], px[3], glGetError());
+
+        /* The same into B's own drawable (a 2D pbuffer attached to B, double-buffered pixel
+         * format: drawing goes to its back buffer), as Core Animation draws into its window. */
+        CGLPBufferObj q;
+        if (!CGLCreatePBuffer(W, H, GL_TEXTURE_2D, GL_RGBA, 0, &q)) {
+            glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+            CGLSetPBuffer(b, q, 0, 0, screen);
+            glViewport(0, 0, W, H);
+            glClearColor(0, 0, 1, 0);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glDrawRangeElements(GL_QUADS, 0, 4, 4, GL_UNSIGNED_SHORT, idx);
+            glReadBuffer(GL_BACK);
+            glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            printf("  CA program into B's own drawable (back buffer): centre RGBA %3d %3d %3d %3d, "
+                   "GL error 0x%x\n", px[0], px[1], px[2], px[3], glGetError());
+            CGLFlushDrawable(b);
+            glReadBuffer(GL_FRONT);
+            glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            printf("  ... after CGLFlushDrawable, front buffer: centre RGBA %3d %3d %3d %3d\n",
+                   px[0], px[1], px[2], px[3]);
+            CGLClearDrawable(b);
+            CGLDestroyPBuffer(q);
+        }
         for (int i = 0; i < 5; i++)
             glDisableVertexAttribArray(i);
     }
