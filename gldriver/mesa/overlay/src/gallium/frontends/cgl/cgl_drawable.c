@@ -85,11 +85,45 @@ drawable_validate(struct st_context *st, struct pipe_frontend_drawable *base,
    return true;
 }
 
+/* Debug log only (the bundle's log is on): every 5 s, how many frames were presented, the frame
+ * rate while something moves (intervals over 100 ms are idle time and left out) and what a
+ * present costs on the CPU here (flush and DISPLAY, or the read-back and copy). */
+#include "util/os_time.h"
+static void
+present_stats(const char *how, int64_t t0)
+{
+   extern FILE *ripple_gld_dbg_file(void);
+   static int64_t start, last, busy, moving;
+   static unsigned n, intervals;
+   FILE *f = ripple_gld_dbg_file();
+   if (!f)
+      return;
+   int64_t now = os_time_get_nano();
+   if (!start)
+      start = t0;
+   if (last && t0 - last < 100000000) {
+      moving += t0 - last;
+      intervals++;
+   }
+   last = t0;
+   busy += now - t0;
+   n++;
+   if (now - start >= 5000000000LL) {
+      fprintf(f, "stats: %s: %u presents in %.1f s, %.1f frames/s while moving, %.2f ms per "
+              "present\n", how, n, (now - start) / 1e9,
+              intervals && moving ? intervals * 1e9 / moving : 0.0, busy / 1e6 / n);
+      start = now;
+      n = intervals = 0;
+      busy = moving = 0;
+   }
+}
+
 /* Read `res` back into d->pixels (BGRA8, top row first) and present it. */
 static void
 present_resource(struct st_context *st, struct ripple_cgl_drawable *d,
                  struct pipe_resource *res)
 {
+   int64_t t0 = os_time_get_nano();
    struct pipe_context *pipe = st->pipe;
    struct pipe_transfer *transfer = NULL;
    struct pipe_box box;
@@ -126,6 +160,7 @@ present_resource(struct st_context *st, struct ripple_cgl_drawable *d,
    if (d->gpu_display) {
       st_context_flush(st, 0, NULL, NULL, NULL);
       ripple_cgl_device_display(res, 0, 0, w, h);
+      present_stats("display (GPU)", t0);
       return;
    }
    if (!d->present || !w || !h)
@@ -148,6 +183,7 @@ present_resource(struct st_context *st, struct ripple_cgl_drawable *d,
       memcpy(d->pixels + (size_t)(h - 1 - y) * stride, src + (size_t)y * transfer->stride, stride);
    pipe->texture_unmap(pipe, transfer);
    d->present(d->present_data, d->pixels, stride, w, h);
+   present_stats("window (read back)", t0);
 }
 
 /* Single-buffered drawing: Mesa calls this on glFlush/glFinish when the front buffer changed. */
