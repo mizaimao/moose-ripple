@@ -14,6 +14,8 @@ Xcode*/
 *.efi
 *.vbios
 *.bin
+# ROM tools and notes for the 9600 GT: kept local, out of the repository (2026-11-11)
+boot/gpu-rom/
 
 # Build output and scratch
 build/

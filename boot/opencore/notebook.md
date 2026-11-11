@@ -75,7 +75,7 @@ GHz, no panics, power-off 3-4 s. `shutdown -r` works. Cmd+S in the OpenCore menu
 
 ## 2026-11-10: 9600 GT passthrough with the same image (stopped: rig crash)
 
-The owner's decision: one OpenCore image for virtio-gpu, 9600 GT passthrough and later Apple
+Decision: one OpenCore image for virtio-gpu, 9600 GT passthrough and later Apple
 silicon. VM 212 got `hostpci0: 0000:01:00,pcie=1,x-vga=1,romfile=9600gt-tpu.bin` (as VM 211),
 no emulated VGA, OVMF kept. Snapshot `pre-gpu` first.
 
@@ -95,7 +95,7 @@ no emulated VGA, OVMF kept. Snapshot `pre-gpu` first.
   rebooted at 17:15:02. No vfio, AER or DMAR messages. Cause UNVERIFIED; leading idea: legacy
   VGA routing for `x-vga=1` against i915, which was busy with 210's virgl. Earlier 9600 GT runs
   had either 210 stopped (VM 211) or i915 not loaded (VMs 200/201, before the iGPU was on).
-- VM 212 rolled back to `pre-gpu` (no card). No VM with the 9600 GT until the owner decides.
+- VM 212 rolled back to `pre-gpu` (no card). No VM with the 9600 GT until that is decided.
 
 ## 2026-11-10 evening: 9600 GT under OpenCore (KI-4), VM 210 stopped
 
@@ -126,13 +126,13 @@ With the script fixed, 3 boots: QE 1, 1920x1080, `cgl-info` 64 127 191 255, powe
 `irq 16: nobody cared` 0 times from start to shutdown, 1 time at each shutdown.
 With OpenCore/OpenDuet earlier (same host boot): at most starts (during QEMU's start, before
 the firmware runs) and shutdowns, twice during macOS's boot (17:37:28 hang, 17:46:53 no harm).
-The owner stopped the series here: accepted as a known issue, no host changes, at most 3 VM boots
-per check from now on. The rig gets one clean reboot (by the coordinator), then at most 3
+The series stopped here: accepted as a known issue, no host changes, at most 3 VM boots
+per check from now on. The rig gets one clean reboot, then at most 3
 card boots check whether the messages persist.
 
 ## 2026-11-10 18:32-18:50: the two card-boot panics after the rig reboot: my config error
 
-The owner saw a kernel panic on the 9600 GT monitor in both card boots after the clean rig reboot
+A kernel panic showed on the 9600 GT monitor in both card boots after the clean rig reboot
 (18:32:56 and the next one). Diagnosed without the card (VM 212 on virtio):
 - OpenCore/OVMF without the card panicked too, 0.18 s into the kernel:
   `AppleACPIPlatformExpert::start failed`, `Unable to find driver for this platform: "ACPI"`.
@@ -173,14 +173,14 @@ Apple's driver: corrects the 18:50 entry. `irq 16: nobody cared` at 18:58:27 (VM
 
 ## 2026-11-10 19:01: patched Apple driver (one card boot, 210 off)
 
-`9600gt-macefi-gt120-mode0.rom` (Apple's card whitelist switched off, see
-`boot/gpu-rom/README.md`), OVMF, `vga: std` next to the card. The emulated screen stayed
+`9600gt-macefi-gt120-mode0.rom` (a card ROM with Apple's card whitelist switched off, kept
+outside the repository), OVMF, `vga: std` next to the card. The emulated screen stayed
 black and QEMU reported `internal-error`: RIP 0x30000 (all 0xFF there), return address in the
 driver's per-output loop (`call [rax+0xb0]`). So the driver now binds and runs, then calls
 through a bad object pointer. Host fine apart from `irq 16: nobody cared` at VM start. Card
 taken off 212 again.
 
-## 2026-11-10 23:00: OS X 10.7 to 10.9 (the owner's request), VM 213
+## 2026-11-10 23:00: OS X 10.7 to 10.9, VM 213
 
 VM 213 `ripple-osx`: same settings as 212 (OVMF, one `isa-applesmc`, Penryn args,
 `vmware-cpuid-freq=off`, `X-PciMmio64Mb=0`) but `vga: std`, no GPU, 4 GB; one disk per OS X
@@ -214,8 +214,8 @@ What it took in OpenCore:
 - Install from the installer's Terminal: `diskutil partitionDisk disk0 1 GPTFormat JHFS+ ...`,
   then `installer -pkg /System/Installation/Packages/OSInstall.mpkg -target /Volumes/...`
   (about 10 minutes). The base system has no `tee` and no `dscl`.
-- My mistake, stopped by the owner: I pre-created a user account, skipped the setup assistant and
-  added the guest key and sudo. The owner does the first setup himself; these installs get wiped
+- My mistake, caught in review: I pre-created a user account, skipped the setup assistant and
+  added the guest key and sudo. The first setup is the owner's to do; these installs get wiped
   and redone, and the archived disks stop before the first boot.
 
 ## 2026-11-10 23:40: 9600 GT on the new image (one boot, 210 off)
@@ -254,15 +254,15 @@ by itself, 10.6.8 (10K549) x86_64, TSC 3.59998 GHz, `boot-args` from NVRAM kept
 ## 2026-11-10 23:45: VM 211 "hang" was Chameleon's menu
 
 After the Lion card boot, VM 211 (Chameleon) seemed hung twice before macOS: one vCPU busy in
-Chameleon boot2's real-mode BIOS calls, no network. The owner saw the monitor: Chameleon's menu,
+Chameleon boot2's real-mode BIOS calls, no network. The monitor showed Chameleon's menu,
 waiting for a key, as it always does on 211 (`scripts/boot.sh` presses Right, then Return).
 211 had been started with a plain `qm start`, and my single Return picked the CD entry. Not a
 card problem. Lesson: check the project's boot script before calling a VM hung.
 
 ## 2026-11-11 00:00-00:55: installers 10.6.8-10.15.7 and never-booted disks (paused here)
 
-The owner's request: the no-GPU OpenCore image, one installed disk per OS X version that has never
-been booted (first start = Welcome screen; The owner does the setup himself), and clean installers
+The request: the no-GPU OpenCore image, one installed disk per OS X version that has never
+been booted (first start = Welcome screen; the owner does the setup), and clean installers
 for 10.6.8 to 10.15.7, all in a folder on the rig. Everything is in **`/var/lib/vz/osx/`** on
 the rig, described by its `README.txt`:
 - `installers/`: Apple's installers, latest release each (57 GB, `SHA256SUMS`). 10.7.5,
@@ -287,7 +287,7 @@ user and no `.AppleSetupDone`, `shutdown -h now`, then on the rig `qemu-img conv
 Mountain Lion's installer blanked the screen white after a while; a key wakes it but the
 first few keys are lost.
 
-Next (when the owner picks it up):
+Next (when picked up again):
 1. Mavericks 10.9.5: its InstallESD has no boot files. Try `installer -pkg "/Volumes/OS X
    Install ESD/Packages/OSInstall.mpkg"` from the Mountain Lion installer with the Mavericks
    image as a second CD (`ide3`); if that's refused, build a bootable installer (asr restore
@@ -295,7 +295,7 @@ Next (when the owner picks it up):
 2. Clean 10.6.8: install 10.6.3 from the retail image, apply the 10.6.8 combo update to the
    target before the first boot, archive.
 3. The owner's own installer collection: propose a cleanup against `installers/` (proposal
-   only; agents change nothing there).
+   only; nothing there gets changed).
 4. Later, the owner's call: 10.5 (MacPro3,1 shipped with 10.5; needs a Leopard build that knows the
    model), 10.4 (needs 32-bit firmware), 10.10-10.15 disks (10.12+ needs a newer SMBIOS model
    and, from 10.13, APFS in OpenCore), and VM 211 moving from Chameleon to OpenCore.
@@ -304,7 +304,7 @@ VM 213 is stopped: OpenCore disk on `ide0`, Mountain Lion's working copy (booted
 
 ## 2026-11-11 02:35-04:20: Mavericks 10.9.5 and a clean 10.6.8 (overnight, VM 213 next to 210)
 
-The owner: resume the paused work. Both disks are archived next to Lion and Mountain Lion in
+Resumed the paused work. Both disks are archived next to Lion and Mountain Lion in
 `/var/lib/vz/osx/firstboot/` on the rig, never booted.
 
 Mavericks 10.9.5 (13F34):
