@@ -1,0 +1,27 @@
+# Performance stage (after M5)
+
+Started 2026-11-11 ~01:10 on the owner's decision: measure first, then fix the biggest costs; the
+visual parity rule still holds. Tool: `scripts/perf-run.sh SCENARIO` (idle, expose, dashboard,
+menu, drag, gears) drives VM 210 through QMP and samples, over the same interval: guest
+WindowServer CPU, our bundle's present stats, QEMU's main thread (virglrenderer runs there)
+and vCPU threads, the host GPU's render-engine busy time (i915 fdinfo of QEMU's renderD128),
+RC6 residency (GPU idle) and the actual GPU clock.
+
+## First measurements, our stack (VM 210, build 9e55017, 1280x800, 2026-11-11 01:15)
+
+| Scenario (about 6 s) | Frames/s while moving | Guest CPU per frame | WindowServer CPU | QEMU main | vCPUs | Host GPU busy | RC6 | GPU clock |
+|---|---|---|---|---|---|---|---|---|
+| idle | - | - | 0% | 13% | 4% | 0% | 100% | 0 MHz |
+| Exposé (F9 x4) | 46 | 3.8 ms | 7% | 16% | 17% | 4% | 94% | 113 MHz |
+| Dashboard (F12 x4) | 41 | 4.9 ms | 8% | 16% | 15% | 6% | 91% | 113 MHz |
+| menus (File across to Window and back) | 33-48 | 3.9-5.1 ms | 5% | 16% | 12% | 2% | 96% | 84 MHz |
+| window drag (40 moves, 10/s) | 29 | 6.5 ms | 4% | 22% | 20% | 3% | 93% | 308 MHz |
+| gl-gears running | 25 (gl-gears' own count) | - | 15% | 32% | 31% | 12% | 68% | 350 MHz |
+
+CPU columns are percent of one core; the GPU's top clock is 1200 MHz. Nothing is near its
+limit: the GPU idles most of the time at a low clock, QEMU's main thread uses under a third of
+a core. So frames wait rather than work: synchronous steps between the guest and the host
+(GPU readbacks of app GL windows, fences, the present path) are the suspects. gl-gears was 36
+frames/s at the M5 check (2026-11-10); 25 now.
+
+References (Apple's software renderer on 210, the 9600 GT on 211) still to measure.
