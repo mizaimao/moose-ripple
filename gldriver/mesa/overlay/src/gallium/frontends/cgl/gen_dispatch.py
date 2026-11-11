@@ -56,6 +56,18 @@ CUSTOM = {
     'tex_parameteriv': 'ripple_cgl_tex_parameteriv',
     'tex_parameterfv': 'ripple_cgl_tex_parameterfv',
     'hint': 'ripple_cgl_hint',
+    # Window offset for drawing into the screen through a rectangle (cgl_apple.c).
+    'viewport': 'ripple_cgl_viewport',
+    'scissor': 'ripple_cgl_scissor',
+    'clear': 'ripple_cgl_clear',
+    'get_integerv': 'ripple_cgl_get_integerv',
+    'read_pixels': 'ripple_cgl_read_pixels',
+    'copy_pixels': 'ripple_cgl_copy_pixels',
+    'copy_tex_image1D': 'ripple_cgl_copy_tex_image1D',
+    'copy_tex_image2D': 'ripple_cgl_copy_tex_image2D',
+    'copy_tex_sub_image1D': 'ripple_cgl_copy_tex_sub_image1D',
+    'copy_tex_sub_image2D': 'ripple_cgl_copy_tex_sub_image2D',
+    'copy_tex_sub_image3D': 'ripple_cgl_copy_tex_sub_image3D',
 }
 
 

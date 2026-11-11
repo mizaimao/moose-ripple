@@ -27,11 +27,12 @@ struct pipe_resource;
 bool ripple_cgl_device_display(struct pipe_resource *res, unsigned x, unsigned y, unsigned w,
                                unsigned h);
 
-/* Quartz Extreme: put rectangle (x, y, w, h; screen coordinates) of `src` (drawn GL-style at
- * its bottom-left) into the screen texture and show that. */
+/* Quartz Extreme: put screen rectangle (x, y, w, h; top-left origin) into the screen texture
+ * and show that. In `src` the rectangle is drawn GL-style with its bottom-left corner at
+ * (src_x, src_y). */
 struct st_context;
 bool ripple_cgl_device_present_region(struct st_context *st, struct pipe_resource *src,
-                                      int x, int y, unsigned w, unsigned h,
+                                      int src_x, int src_y, int x, int y, unsigned w, unsigned h,
                                       unsigned screen_w, unsigned screen_h);
 
 /* Destroy the screen (library termination). */

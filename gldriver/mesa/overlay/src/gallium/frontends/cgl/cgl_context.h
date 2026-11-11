@@ -32,6 +32,12 @@ struct ripple_cgl_context {
    struct st_visual visual;      /* what its drawables are made of */
    struct ripple_cgl_drawable *draw;   /* window drawable, or NULL (FBOs only) */
    unsigned next_fence;          /* GL_APPLE_fence names (cgl_apple.c) */
+   /* Window offset (Quartz Extreme, cgl_apple.c): drawing into the screen through a rectangle
+    * of it (WindowServer's display surface), window coordinates are shifted by (win_ox,
+    * win_oy), the rectangle's GL bottom-left on the screen. */
+   uint32_t win_surface;         /* the screen-region surface, or 0 */
+   int win_ox, win_oy;
+   unsigned win_w, win_h;
 };
 
 struct ripple_cgl_context *
@@ -41,6 +47,9 @@ void ripple_cgl_context_destroy(struct ripple_cgl_context *ctx);
 
 /* Make `ctx` (or nothing) current for Mesa on the calling thread. */
 bool ripple_cgl_context_make_current(struct ripple_cgl_context *ctx);
+
+/* The context for `rend` as libGL or CoreGraphics passes it (ours or GLEngine's), or NULL. */
+struct ripple_cgl_context *ripple_cgl_context_for(void *rend);
 
 /* Render into `d` from now on (NULL: no drawable). Rebinds if `ctx` is current here. */
 void ripple_cgl_context_set_drawable(struct ripple_cgl_context *ctx,

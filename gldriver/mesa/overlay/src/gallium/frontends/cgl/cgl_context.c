@@ -129,3 +129,12 @@ ripple_cgl_make_current_slow(void *rend)
    }
    ripple_cgl_context_make_current(ctx);
 }
+
+struct ripple_cgl_context *
+ripple_cgl_context_for(void *rend)
+{
+   struct ripple_cgl_context *ctx = rend;
+   if (ctx && ctx->magic == RIPPLE_CGL_MAGIC)
+      return ctx;
+   return ripple_cgl_rend_for(rend);
+}

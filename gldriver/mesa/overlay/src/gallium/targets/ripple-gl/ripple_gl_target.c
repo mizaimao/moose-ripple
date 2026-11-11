@@ -26,6 +26,7 @@
 #include "cgl/cgl_context.h"
 #include "cgl/cgl_device.h"
 #include "cgl/cgl_drawable.h"
+#include "cgl/cgl_dispatch.h"
 #include "cgl/cgl_device.h"
 #include "cgl/cgl_takeover.h"
 #include "gld_window.h"
@@ -407,6 +408,7 @@ unbind_surface(struct gld_context *c)
    c->cur_surface->binds--;
    simple_mtx_unlock(&surfaces_lock);
    c->cur_surface = NULL;
+   c->mesa->win_surface = 0;
    ripple_cgl_context_set_drawable(c->mesa, c->drawable);
 }
 
@@ -652,14 +654,17 @@ attach_surface(struct gld_context *c, uint32_t sid)
        * rectangle): the drawable stays screen-sized, WindowServer draws the rectangle at its
        * bottom-left, and presenting copies it into place on the screen texture. */
       ripple_cgl_drawable_set_present(e->d, NULL, NULL);
-      ripple_cgl_drawable_set_gpu_display(e->d, false);
-      ripple_cgl_drawable_set_screen_region(e->d, sid);
+      ripple_cgl_drawable_set_screen_region(e->d, 0);
+      ripple_cgl_drawable_set_gpu_display(e->d, true);
       ripple_cgl_drawable_set_size(e->d, si.screen_width, si.screen_height);
+      c->mesa->win_surface = sid;
+      ripple_cgl_refresh_window_offset(c->mesa);
    } else {
       ripple_cgl_drawable_set_gpu_display(e->d, false);
       ripple_cgl_drawable_set_screen_region(e->d, 0);
       ripple_cgl_drawable_set_present(e->d, backing_present, e);
       ripple_cgl_drawable_set_size(e->d, si.width, si.height);
+      c->mesa->win_surface = 0;
    }
    ripple_cgl_context_set_drawable(c->mesa, e->d);
    if (changed)

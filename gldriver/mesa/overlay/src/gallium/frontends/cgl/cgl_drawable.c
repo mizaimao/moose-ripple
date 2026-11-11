@@ -99,13 +99,28 @@ present_resource(struct st_context *st, struct ripple_cgl_drawable *d,
       struct ripple_gpu_surface_info si;
       extern FILE *ripple_gld_dbg_file(void);
       static unsigned presents;
-      bool got = ripple_cgl_device_surface_info(d->region_surface, &si);
-      if (got && ripple_gld_dbg_file() && presents++ < 400)
-         fprintf(ripple_gld_dbg_file(), "present: seq %u, %d,%d %ux%u\n", si.shape_seq, si.x, si.y,
-                 si.width, si.height);
-      if (got)
-         ripple_cgl_device_present_region(st, res, si.x, si.y, si.width, si.height,
-                                          si.screen_width, si.screen_height);
+      if (!ripple_cgl_device_surface_info(d->region_surface, &si))
+         return;
+      /* Where the rectangle was drawn: WindowServer usually sets the viewport to its size
+       * (glOrtho over just that rectangle: drawn at the viewport origin); with a full-screen
+       * viewport it is drawn at its own screen position. */
+      const struct gl_viewport_attrib *vp = &st->ctx->ViewportArray[0];
+      int vx = (int)vp->X, vy = (int)vp->Y, vw = (int)vp->Width, vh = (int)vp->Height;
+      int src_x = vx, src_y = vy;
+      const char *how = "at the viewport";
+      if (vw == (int)si.screen_width && vh == (int)si.screen_height &&
+          (vw != (int)si.width || vh != (int)si.height)) {
+         src_x = si.x;
+         src_y = (int)si.screen_height - si.y - (int)si.height;
+         how = "at its screen place";
+      } else if (vw != (int)si.width || vh != (int)si.height) {
+         how = "VIEWPORT MISMATCH";
+      }
+      if (ripple_gld_dbg_file() && (presents++ < 400 || how[0] == 'V'))
+         fprintf(ripple_gld_dbg_file(), "present: seq %u, %d,%d %ux%u, viewport %d,%d %dx%d: %s\n",
+                 si.shape_seq, si.x, si.y, si.width, si.height, vx, vy, vw, vh, how);
+      ripple_cgl_device_present_region(st, res, src_x, src_y, si.x, si.y, si.width, si.height,
+                                       si.screen_width, si.screen_height);
       return;
    }
    if (d->gpu_display) {

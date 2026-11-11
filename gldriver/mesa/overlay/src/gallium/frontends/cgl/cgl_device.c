@@ -185,7 +185,7 @@ static simple_mtx_t screen_tex_lock = SIMPLE_MTX_INITIALIZER;
 
 bool
 ripple_cgl_device_present_region(struct st_context *st, struct pipe_resource *src,
-                                 int x, int y, unsigned w, unsigned h,
+                                 int src_x, int src_y, int x, int y, unsigned w, unsigned h,
                                  unsigned screen_w, unsigned screen_h)
 {
    struct pipe_frontend_screen *fscreen = ripple_cgl_device_fscreen();
@@ -220,8 +220,8 @@ ripple_cgl_device_present_region(struct st_context *st, struct pipe_resource *sr
    ok = screen_tex != NULL;
    if (ok && x1 > x0 && y1 > y0) {
       struct pipe_box box;
-      int sx = x0 - x, sh_ = y1 - y0;
-      int sy = (int)h - (y1 - y);              /* source rows from the bottom */
+      int sx = src_x + (x0 - x), sh_ = y1 - y0;
+      int sy = src_y + (int)h - (y1 - y);      /* source rows from the bottom */
       if (sx + (x1 - x0) <= (int)src->width0 && sy >= 0 && sy + sh_ <= (int)src->height0) {
          u_box_2d(sx, sy, x1 - x0, sh_, &box);
          pipe->resource_copy_region(pipe, screen_tex, 0, x0, screen_h - y1, 0, src, 0, &box);

@@ -51,6 +51,28 @@ void GLAPIENTRY ripple_cgl_tex_parameterf(void *rend, GLenum target, GLenum pnam
 void GLAPIENTRY ripple_cgl_tex_parameteriv(void *rend, GLenum target, GLenum pname, const GLint *params);
 void GLAPIENTRY ripple_cgl_tex_parameterfv(void *rend, GLenum target, GLenum pname, const GLfloat *params);
 void GLAPIENTRY ripple_cgl_hint(void *rend, GLenum target, GLenum mode);
+void GLAPIENTRY ripple_cgl_viewport(void *rend, GLint x, GLint y, GLsizei w, GLsizei h);
+void GLAPIENTRY ripple_cgl_scissor(void *rend, GLint x, GLint y, GLsizei w, GLsizei h);
+void GLAPIENTRY ripple_cgl_clear(void *rend, GLbitfield mask);
+void GLAPIENTRY ripple_cgl_get_integerv(void *rend, GLenum pname, GLint *params);
+void GLAPIENTRY ripple_cgl_read_pixels(void *rend, GLint x, GLint y, GLsizei w, GLsizei h,
+                                       GLenum format, GLenum type, GLvoid *pixels);
+void GLAPIENTRY ripple_cgl_copy_pixels(void *rend, GLint x, GLint y, GLsizei w, GLsizei h,
+                                       GLenum type);
+void GLAPIENTRY ripple_cgl_copy_tex_image1D(void *rend, GLenum target, GLint level, GLenum ifmt,
+                                            GLint x, GLint y, GLsizei w, GLint border);
+void GLAPIENTRY ripple_cgl_copy_tex_image2D(void *rend, GLenum target, GLint level, GLenum ifmt,
+                                            GLint x, GLint y, GLsizei w, GLsizei h, GLint border);
+void GLAPIENTRY ripple_cgl_copy_tex_sub_image1D(void *rend, GLenum target, GLint level,
+                                                GLint xoff, GLint x, GLint y, GLsizei w);
+void GLAPIENTRY ripple_cgl_copy_tex_sub_image2D(void *rend, GLenum target, GLint level,
+                                                GLint xoff, GLint yoff, GLint x, GLint y,
+                                                GLsizei w, GLsizei h);
+void GLAPIENTRY ripple_cgl_copy_tex_sub_image3D(void *rend, GLenum target, GLint level,
+                                                GLint xoff, GLint yoff, GLint zoff, GLint x,
+                                                GLint y, GLsizei w, GLsizei h);
+struct ripple_cgl_context;
+void ripple_cgl_refresh_window_offset(struct ripple_cgl_context *ctx);
 
 /* Generated: the number of entries and the filler for a GLIFunctionDispatch table. */
 extern const unsigned ripple_cgl_dispatch_count;
