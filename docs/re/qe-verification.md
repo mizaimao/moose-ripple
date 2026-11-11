@@ -36,6 +36,7 @@ It prints three things.
 |---|---|---|---|
 | 212, 9600 GT boots (R2, 2026-11-10 18:22 to 19:28) | NVIDIA | (tool not yet run there) | renderer 0x0102260b, mask 0x3, caps 0x3, vram 1024 MB; texture units 8, texture max 8192, viewport {8192, 8192}, extensions 0xf |
 | 212, virtio (OVMF), 2026-11-10 19:52 | `RippleFramebuffer`, no accelerator (no `ripple_gl`) | QE off, renderer 0x01020400 (software), exit 1 | none |
+| 210, `ripple_qe=2`, RippleGA.plugin, 2026-11-10 20:08 | `RippleFramebuffer` 1280x800 | QE on, `RippleAccelerator` `AccelCaps` 3, `RippleGLDriver`, `IOPCIDevice` S08, renderer 0x01025000 (accelerated, 512 MB), exit 0 | renderer 0x01025000, mask 0x1, caps 0x3, vram 512 MB; texture units 8, texture max 16384, viewport {16384, 16384}, extensions 0x7 (no `GL_APPLE_float_pixels`) |
 
 On 212 (virtio), F9 and F12 through `qm sendkey` opened Exposé and Dashboard, and
 `scripts/screen-vnc.sh` captured both at 2560x1600. Exposé works without QE on 10.6, so a
@@ -49,8 +50,22 @@ absolute pointer the guest can use: QMP `input-send-event` (abs, 0..32767; `scri
 shows how) together with `RippleQEMUTablet` on VM 210. On 212, which has no tablet
 driver, the click test didn't move the pointer, and the guest hung soon after (3 vCPUs
 spinning, no ping; stopped with `qm stop`). The cause isn't known; don't repeat the test on a VM
-without the tablet driver. Not automated yet: do it on 210 when VM 210 is free, and capture it
-with `scripts/screen-vnc.sh` while the ripple runs (it lasts about 1 s; take several pictures).
+without the tablet driver.
+
+On 210 (with the tablet driver) it worked with `scripts/qmp-input.sh` (one QMP session per call: `send-key` and
+`input-send-event`, nothing else on the socket): F12, click "+" at abs (358, 32193), then click
+a widget in the bar (Dictionary at abs (12467, 30105) on 1280x800). To catch the ripple, start
+`scripts/screen-vnc.sh` about 1 s before the widget click, because the VNC connection takes
+about 1.5 s to set up. 2026-11-10 20:09 on 210, with the GL compositor running through
+RippleGA.plugin:
+- During the ripple the whole screen was black apart from a white 732x400 rectangle at the bottom
+  left holding the new widget ([frame](img/m5-r3-dashboard-ripple-frame.png)).
+- Afterwards only that 732x400 region kept updating and the rest stayed black
+  ([after](img/m5-r3-after-ripple.png)), until Dashboard was closed. Closing it brought the
+  desktop back.
+- The Dashboard had no dimming layer, and copies of widgets from the fly-in stayed on screen.
+
+The Dictionary widget is still on 210's Dashboard from this test.
 
 ## Pitfalls
 
