@@ -46,7 +46,7 @@ link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
 .PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter clean
-all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter winlist glfeaturecheck cieffects
+all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter winlist glfeaturecheck cieffects ticker
 
 clean:
 	rm -rf $(OUT)
@@ -329,6 +329,22 @@ $(OUT)/x86_64/gl-feature-check/swaprect-check.o: tools/gl-feature-check/swaprect
 $(OUT)/swaprect-check: $(OUT)/x86_64/gl-feature-check/swaprect-check.o
 	$(call link_tool,x86_64,$@,$^,-framework Cocoa -framework OpenGL -lobjc)
 glfeaturecheck: $(OUT)/swaprect-check
+
+# --- gifcheck (decode a GIF with Apple's ImageIO: checks tools/gifmake) ------------------
+$(OUT)/x86_64/gifcheck/gifcheck.o: tools/gifmake/gifcheck.c
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,x86_64) $(UCFLAGS) -c $< -o $@
+$(OUT)/gifcheck: $(OUT)/x86_64/gifcheck/gifcheck.o
+	$(call link_tool,x86_64,$@,$^,-framework ApplicationServices -framework CoreFoundation)
+gifcheck: $(OUT)/gifcheck
+
+# --- ticker (one pixel that keeps changing, for real-time VNC recordings) ---------------
+$(OUT)/x86_64/ticker/ticker.o: tools/ticker/ticker.m
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,x86_64) $(UCFLAGS) -x objective-c -c $< -o $@
+$(OUT)/ticker: $(OUT)/x86_64/ticker/ticker.o
+	$(call link_tool,x86_64,$@,$^,-framework Cocoa -lobjc)
+ticker: $(OUT)/ticker
 
 # --- grab (save the guest's main display as PNG; works over ssh) --------------------------
 $(OUT)/x86_64/grab/grab.o: tools/grab/grab.c
