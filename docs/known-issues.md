@@ -100,3 +100,23 @@ followed a 2560x1600 mode switch in M2; a long host-side stall would cause it th
 **Workaround:** the guest boot flag `slto_us=4000000` raises the limit to 4 s (the value is
 kept in 32 bits of nanoseconds, so about 4.29 s is the most it can hold). VM 210 has it in its
 NVRAM flags since 2026-11-10 (`scripts/bootargs.sh`). Snapshots of a stopped VM are always safe.
+
+## The guest panics when it goes to sleep (10.6.8 in QEMU, more than one CPU)
+
+**Symptom.** After 10 minutes without input (Energy Saver's default), the VM stops answering:
+the screen keeps its last picture, ssh and ping are dead, QEMU spins on all CPUs. The kernel has
+panicked: `"Error 4 trying to transition CPU 1 to OFF"` at `osfmk/i386/acpi.c:182`, with
+AppleACPIPlatform in the backtrace (`scripts/panic.sh` reads it from guest memory; VM 210,
+2026-11-11 12:20).
+
+**Workaround:** turn sleep off in the guest: `sudo pmset -a sleep 0 displaysleep 0 disksleep 0`
+(set on VM 210 on 2026-11-11). Not the GPU driver: the panic is in the CPU power-down for
+sleep.
+
+## configd crashes twice at every boot (VM 210)
+
+`configd` dies in its PowerManagement plugin (`PowerSourcesHaveChanged`, a NULL CFType) twice
+within ten seconds of booting, and `loginwindow` sometimes follows (a NULL run loop source).
+Both restart by themselves; ssh sessions opened in that window can be reset. Seen on every boot
+of VM 210 since at least 2026-11-11 03:41. A power-source (battery/ACPI) matter of the VM, not
+the GPU driver.

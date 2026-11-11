@@ -205,3 +205,19 @@ frame's end. Same scene, 1200 MHz, frame meter peak / mean, two Dashboard and fi
 | Dashboard screens/s | 24.7-30.5 / 11-15.3 | 29-31 / 13.4-17.1 |
 | Exposé screens/s | 18-27 / 9.3-15.2 | 21-28 / 8.6-13.4 |
 | gl-gears in a window, frames/s | 40-45 | 45-52 |
+
+## After the audit and glitch fixes (2026-11-11 13:45, d9e4bd2)
+
+Same scene and method; nothing slower:
+
+| | before (bundle 6554a67) | now (d9e4bd2) |
+|---|---|---|
+| Dashboard frames/s | 64-67 / 31-35 | 80 / 35-38 |
+| Dashboard screens/s | 24.7-30.5 / 11-15.3 | 29-30 / 13.6-14.2 |
+| Exposé screens/s | 18-27 / 9.3-15.2 | 22-24 / 7.8-11.2 |
+| gl-gears in a window, frames/s | 40-45 | 40-50 |
+
+For the second performance pass: a GL window's present spends about 14 ms of its 20 ms in
+three window-server calls (`CGSFlushSurfaceWithOptions` 8 ms, `CGSLockWindowBits` 6-7 ms),
+on top of the read-back. Showing app surfaces through the kernel surface instead of a private
+window would remove both.

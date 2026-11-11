@@ -239,3 +239,57 @@ while files were being copied on the rig at idle priority.
 The first try crashed WindowServer at start: for WindowServer's own contexts the entry points
 get GLEngine's context pointer, not ours (`ripple_cgl_context_for` maps it). `gen_fences` and
 `swap_APPLE` had the same mistake and are fixed with it.
+
+## the owner's three points of 2026-11-11 noon
+
+Audit of the same day: [audit-2026-11-11.md](audit-2026-11-11.md).
+
+**1. Black glitches at the button at the top right of a Finder window (fixed, 3f15659).**
+Clicking it shows or hides the toolbar with an animation. For that AppKit puts an overlay
+window in front, drawn by Core Animation with OpenGL: a snapshot of the window and its shadow
+with transparent margins, on a surface Core Animation marks non-opaque
+(`CGSSetSurfaceOpacity`, straight to the window server, not through CGL). Our driver shows a
+GL surface through a private window bound to it, and that window was opaque: WindowServer
+drew the surface without blending (RGB tiles, blend off), the margins black, for about ten
+frames. Now the private window follows the surface.
+- `CGSGetSurfaceOpacity` can't be used: in 10.6.8 it returns error 1001 for every non-NULL
+  pointer (an inverted check). `gld_opacity.c` watches the setter instead, by pointing every
+  loaded image's symbol pointer for it at a function that notes the setting.
+- A non-opaque private window for every surface also worked, but gl-gears fell from about 48
+  to about 30 frames/s (each present waited about 9 ms longer), so it is only done for
+  surfaces that are non-opaque.
+- A non-opaque window's pixels are colour-matched from the window's own colour space (pure
+  green came out as 46 255 4), so it also gets the surface's colour space.
+- Checked: 56 frames of the animation, both directions, none with black.
+
+**2. Photo Booth (fixed, 3f15659).** Without a camera it should show a black view with "There
+is no connected camera", a round shutter button and the photo strip. All three were white.
+Core Animation draws all of an app's layer-backed views with one GL context and attaches it
+to each view's surface in turn. The driver kept the private window (which holds a surface's
+picture) with the context, so each attach to the next surface destroyed the previous one's.
+The private window and the render targets now belong to the surface.
+Also found there: the swap rectangle (Core Animation's partial updates) was applied upside
+down; `swaprect-check` shows ours now matches Apple's software renderer pixel for pixel.
+Live effects still need a camera to test.
+
+**3. Real Racing 2, probe only (out of this milestone's scope).** Two separate problems, both
+in the game's own process:
+- *Intro video: nothing is drawn.* One cause found and fixed (33a9097): Core Animation's
+  colour table for video is a 32x32x32 texture made with client storage, which the emulation
+  did not cover for 3D textures. The frames Core Animation's context hands over are still
+  empty (all zero, `presentdump`). Ruled out today with the trace: the vertices are right
+  ((0,40) to (1280,760), `vertex_matrix` 2/1280, 2/800), the shaders compile and link (they
+  use `highp`/`lowp`, which Mesa takes), the video texture is the one tied from the pbuffer.
+  Not yet looked at: the uniforms `texscale0..2` and whether the tied texture is complete in
+  the window context (a copy made in another context of the share group).
+- *The game's own picture is sheared:* a 1280-wide image shown as five side-by-side copies,
+  each a row lower, squeezed into the top fifth, which is a 1280-pixel row read 256 pixels at
+  a time. It is like that before our present path (`swapdump`). Ruled out: `GL_UNPACK_ROW_LENGTH`
+  (the game sets 0, 32, 640, 1280 only), row bytes and `glPushClientAttrib` (never called),
+  the winsys transfer stride.
+- With point 1 fixed the intro no longer shows black but the sheared picture behind it (the
+  video layer is transparent and empty).
+- Estimate: one to two days. The intro needs the remaining state of one draw compared with a
+  working copy (`window-check` already draws the same quad right, so the difference is
+  small). The shear needs the game's frame path traced once from its render target to the
+  screen; the tools for both exist now (`trace` with vertex data, `swapdump`, `presentdump`).
