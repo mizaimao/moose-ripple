@@ -1,10 +1,12 @@
 # M5 working notes: Quartz Extreme on virgl
 
-Date: 2026-11-10 (night). Status: QE on and the whole screen GL-composited on VM 210. Not
-accepted yet (22:40: "not displaying normally"). After the 23:30 fixes the desktop,
-menus, Exposé and Dashboard match Apple's software renderer on the same VM (paired captures
-below) except the menu bar's lower edge. Open: that edge, the Dashboard ripple (not re-tested
-since the fixes).
+Date: 2026-11-10/11 (night). Status: **accepted by the owner 2026-11-11 ~01:00** ("a huge
+improvement"; performance and glitches later). QE on, the whole screen GL-composited on VM
+210, WindowServer's Core Image on the GPU: desktop, translucent menu bar, menus, Exposé,
+Dashboard and its ripple, Front Row look like the 9600 GT's (paired captures below). Host GPU
+use measured on the rig: QEMU's i915 client (`/proc/PID/fdinfo`, `drm-engine-render`) gained
+335 ms of render time in 3 s of Exposé, 0 ms in 5 s idle. Left for later: performance, the
+glitches the owner saw, gl-gears re-check, the 21:4x panic report.
 Plan: [m5-plan.md](m5-plan.md); research: [qe-decision.md](qe-decision.md) (R1),
 [qe-windowserver-trace.md](qe-windowserver-trace.md) (R2), [qe-verification.md](qe-verification.md)
 (R3, also how to check QE), [qe-display-surface.md](qe-display-surface.md) (R4); design notes
