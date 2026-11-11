@@ -225,17 +225,17 @@ bool VirtioGPUDevice::init(IOPCIDevice *pci)
 void VirtioGPUDevice::free()
 {
     reset();
+    if (fIntSrc) {                      // before the rings it reads go away
+        fIntSrc->disable();
+        if (fWorkLoop)
+            fWorkLoop->removeEventSource(fIntSrc);
+        fIntSrc->release();
+    }
     for (unsigned i = 0; i < 2; i++) {
         if (fQueue[i].mem) {
             fQueue[i].mem->complete();
             fQueue[i].mem->release();
         }
-    }
-    if (fIntSrc) {
-        fIntSrc->disable();
-        if (fWorkLoop)
-            fWorkLoop->removeEventSource(fIntSrc);
-        fIntSrc->release();
     }
     if (fWorkLoop)  fWorkLoop->release();
     if (fSlotMem)   { fSlotMem->complete();   fSlotMem->release(); }
@@ -267,7 +267,17 @@ uint32_t VirtioGPUDevice::command(const void *req, uint32_t reqLen, void *resp, 
             if (!fSlot[i].busy) { s = i; break; }
         if (s >= 0)
             break;
-        IOLockSleep(fCmdLock, fSlot, THREAD_UNINT);
+        // None free. Slots sent without a waiter (async) or given up on after a timeout (lost)
+        // are only freed by a drain, and with the interrupt off nobody else drains: do it
+        // here, and look again soon rather than sleep until a wakeup that may not come.
+        drainControlLocked(false);
+        for (int i = 0; i < kSlots; i++)
+            if (!fSlot[i].busy) { s = i; break; }
+        if (s >= 0)
+            break;
+        uint64_t deadline;
+        clock_interval_to_deadline(20, kMillisecondScale, &deadline);
+        IOLockSleepDeadline(fCmdLock, fSlot, deadline, THREAD_UNINT);
     }
     fSlot[s].busy = true;
     fSlot[s].done = false;
@@ -358,6 +368,7 @@ void VirtioGPUDevice::drainControlLocked(bool fromInterrupt)
         if (fSlot[s].lost) {                    // finished after we gave up on it
             fSlot[s].lost = false;
             fSlot[s].busy = false;
+            IOLockWakeup(fCmdLock, fSlot, false);   // anyone waiting for a free slot
             continue;
         }
         if (fSlot[s].async) {                   // syncAsync(): its fence has retired

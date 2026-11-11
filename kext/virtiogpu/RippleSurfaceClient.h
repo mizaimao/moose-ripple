@@ -22,7 +22,7 @@ class RippleSurfaceClient : public IOUserClient
 {
     OSDeclareDefaultStructors(RippleSurfaceClient)
 
-    enum { kMaxRegionBytes = 4096, kDisplaySurfaceID = 1 };
+    enum { kMaxRegionBytes = 65536, kDisplaySurfaceID = 1 };   // a shape of up to 4094 rectangles
 
     task_t             fTask;
     RippleAccelerator *fAccel;

@@ -24,6 +24,7 @@
 #include "RippleFramebuffer.h"
 
 #include <IOKit/IOLib.h>
+#include <kern/task.h>
 
 #define super IOUserClient
 OSDefineMetaClassAndStructors(RippleSurfaceClient, IOUserClient)
@@ -36,7 +37,10 @@ bool RippleSurfaceClient::initWithTask(task_t owningTask, void *securityID, UInt
 {
     if (!super::initWithTask(owningTask, securityID, type))
         return false;
+    // The task is used later (its memory is wrapped and mapped into), so hold it: the
+    // connection can outlive the task if its send right was handed to another process.
     fTask = owningTask;
+    task_reference(fTask);
     fLock = IOLockAlloc();
     return fLock != 0;
 }
@@ -92,6 +96,10 @@ void RippleSurfaceClient::free(void)
         IOFree(fRegion, fRegionBytes);
     if (fLock)
         IOLockFree(fLock);
+    if (fTask) {
+        task_deallocate(fTask);
+        fTask = 0;
+    }
     super::free();
 }
 
@@ -265,6 +273,46 @@ IOReturn RippleSurfaceClient::externalMethod(uint32_t selector, IOExternalMethod
 
     if (wantsInfo && (!info || a->structureOutputSize < sizeof(IOAccelSurfaceInformation)))
         return kIOReturnBadArgument;
+    // No dispatch table checks the counts here, and IOKit copies back as much output as the
+    // caller asked for from a reply buffer it does not clear: without this, any selector
+    // returned up to 4 KB of stale kernel memory. Zero the scalars, and return only the
+    // structure a lock fills in.
+    for (uint32_t i = 0; i < a->scalarOutputCount; i++)
+        a->scalarOutput[i] = 0;
+    if (wantsInfo) {
+        bzero(info, sizeof(IOAccelSurfaceInformation));
+        a->structureOutputSize = sizeof(IOAccelSurfaceInformation);
+    } else {
+        a->structureOutputSize = 0;
+    }
+
+    // A shape of more than about 510 rectangles is over 4 KB, and IOKit then passes it as a
+    // memory descriptor instead of inline bytes.
+    const void *sin = a->structureInput;
+    uint32_t sinSize = a->structureInputSize;
+    void *big = 0;
+    uint32_t bigSize = 0;
+    if (a->structureInputDescriptor) {
+        IOMemoryDescriptor *md = a->structureInputDescriptor;
+        uint64_t len = md->getLength();
+        if (len > kMaxRegionBytes)
+            return kIOReturnBadArgument;
+        bigSize = (uint32_t)len;
+        big = IOMalloc(bigSize);
+        if (!big)
+            return kIOReturnNoMemory;
+        bool got = md->prepare() == kIOReturnSuccess;
+        if (got) {
+            got = md->readBytes(0, big, bigSize) == bigSize;
+            md->complete();
+        }
+        if (!got) {
+            IOFree(big, bigSize);
+            return kIOReturnVMError;
+        }
+        sin = big;
+        sinSize = bigSize;
+    }
 
     IOLockLock(fLock);
     switch (selector) {
@@ -308,28 +356,27 @@ IOReturn RippleSurfaceClient::externalMethod(uint32_t selector, IOExternalMethod
         }
         break;
     case kIOAccelSurfaceSetScale:
-        if (a->structureInputSize < sizeof(IOAccelSurfaceScaling))
+        if (sinSize < sizeof(IOAccelSurfaceScaling))
             r = kIOReturnBadArgument;
         else {
-            memcpy(&fScale, a->structureInput, sizeof(fScale));
+            memcpy(&fScale, sin, sizeof(fScale));
             fHasScale = true;
             r = kIOReturnSuccess;
         }
         break;
     case kIOAccelSurfaceSetShape:
         r = nin < 2 ? kIOReturnBadArgument
-                    : setShape((uint32_t)in[0], (uint32_t)in[1], 0, 0, 0, a->structureInput,
-                               a->structureInputSize);
+                    : setShape((uint32_t)in[0], (uint32_t)in[1], 0, 0, 0, sin, sinSize);
         break;
     case kIOAccelSurfaceSetShapeBacking:
         r = nin < 4 ? kIOReturnBadArgument
                     : setShape((uint32_t)in[0], (uint32_t)in[1], in[2], (uint32_t)in[3], 0,
-                               a->structureInput, a->structureInputSize);
+                               sin, sinSize);
         break;
     case kIOAccelSurfaceSetShapeBackingAndLength:
         r = nin < 5 ? kIOReturnBadArgument
                     : setShape((uint32_t)in[0], (uint32_t)in[1], in[2], (uint32_t)in[3], in[4],
-                               a->structureInput, a->structureInputSize);
+                               sin, sinSize);
         break;
     case kIOAccelSurfaceFlush:
         r = flush(nin > 0 ? (uint32_t)in[0] : 1, nin > 1 ? (uint32_t)in[1] : 0);
@@ -350,8 +397,10 @@ IOReturn RippleSurfaceClient::externalMethod(uint32_t selector, IOExternalMethod
     if (fAccel->qeDebug())
         LOG("surface %u (pid task %p) selector %u in %u: 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx, struct %u -> 0x%x",
             fID, fTask, selector, nin, nin > 0 ? in[0] : 0, nin > 1 ? in[1] : 0, nin > 2 ? in[2] : 0,
-            nin > 3 ? in[3] : 0, nin > 4 ? in[4] : 0, a->structureInputSize, r);
+            nin > 3 ? in[3] : 0, nin > 4 ? in[4] : 0, sinSize, r);
     IOLockUnlock(fLock);
+    if (big)
+        IOFree(big, bigSize);
     return r;
 }
 

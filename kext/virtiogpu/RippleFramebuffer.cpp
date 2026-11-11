@@ -185,6 +185,7 @@ bool RippleFramebuffer::applyMode(IODisplayModeID m)
         !fDev->attachBacking(id, fVRAM, frameBytes(md.width, md.height)) ||
         !fDev->setScanout(0, id, full)) {
         LOG("mode %ux%u failed", md.width, md.height);
+        fDev->resourceUnref(id);              // whatever of it the host has made
         return false;
     }
     fScanoutRes = id;
@@ -611,20 +612,28 @@ IOReturn RippleFramebuffer::showAction(OSObject *owner, void *idp, void *rectp, 
         fb->refresh();
         return kIOReturnSuccess;
     }
-    if (fb->fShownRes != id) {
+    // The rectangle has to lie on the screen. The host sizes its console to it without looking
+    // at the buffer, and QEMU aborts on a size it cannot allocate: one DISPLAY with a huge
+    // rectangle from any process would end the VM.
+    const Mode &md = fb->mode(fb->fCurMode);
+    if (!r->width || !r->height || (uint64_t)r->x + r->width > md.width ||
+        (uint64_t)r->y + r->height > md.height)
+        return kIOReturnBadArgument;
+    if (fb->fShownRes != id || memcmp(&fb->fShownRect, r, sizeof(*r)) != 0) {
         if (!fb->fDev->setScanout(0, id, *r))
             return kIOReturnError;
         fb->fShownRes = id;
+        fb->fShownRect = *r;
     }
     return fb->fDev->resourceFlush(id, *r) ? kIOReturnSuccess : kIOReturnError;
 }
 
-bool RippleFramebuffer::showResource(uint32_t id, uint32_t x, uint32_t y, uint32_t width,
-                                     uint32_t height)
+IOReturn RippleFramebuffer::showResource(uint32_t id, uint32_t x, uint32_t y, uint32_t width,
+                                         uint32_t height)
 {
     VirtioGPUDevice::Rect r = { x, y, width, height };
     return getWorkLoop()->runAction(&RippleFramebuffer::showAction, this, (void *)(uintptr_t)id,
-                                    &r) == kIOReturnSuccess;
+                                    &r);
 }
 
 void RippleFramebuffer::releaseResource(uint32_t id)

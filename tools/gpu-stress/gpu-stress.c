@@ -246,6 +246,42 @@ int main(int argc, char **argv)
     snprintf(msg, sizeof(msg), "clear after the big submits: %u of 4096 pixels wrong", bad);
     check(!bad, msg);
 
+    /* DISPLAY with a rectangle beyond the screen must be refused in the kernel: the host sizes
+     * its console to the rectangle without looking at the buffer (audit, 2026-11-11). Only
+     * run against a kext that has the check: without it this request can end the VM. */
+    uint64_t disp[5] = { rt, 0, 0, 0x7fffffff, 0x7fffffff };
+    kr = IOConnectCallScalarMethod(conn, RIPPLE_GPU_DISPLAY, disp, 5, NULL, NULL);
+    snprintf(msg, sizeof(msg), "DISPLAY of a rectangle beyond the screen refused (0x%x)", kr);
+    check(kr == kIOReturnBadArgument, msg);
+
+    /* The surface client (type 0, present with Quartz Extreme on) returns no stale kernel
+     * memory: an unlock asked for 4 KB of structure and 16 scalars gets none of the first and
+     * zeros for the second. */
+    svc = IOServiceGetMatchingService(kIOMasterPortDefault,
+                                      IOServiceMatching(RIPPLE_GPU_SERVICE_CLASS));
+    io_connect_t surf = 0;
+    if (svc && IOServiceOpen(svc, mach_task_self(), 0, &surf) == KERN_SUCCESS) {
+        static uint8_t leak[4096];
+        uint64_t opt = 0, sc[16];
+        uint32_t scCnt = 16;
+        size_t leakSize = sizeof(leak);
+        memset(leak, 0xA5, sizeof(leak));
+        memset(sc, 0xA5, sizeof(sc));
+        kr = IOConnectCallMethod(surf, 1 /* ReadUnlockOptions */, &opt, 1, NULL, 0, sc, &scCnt,
+                                 leak, &leakSize);
+        unsigned nonzero = 0;
+        for (unsigned i = 0; i < scCnt && i < 16; i++)
+            nonzero += sc[i] != 0;
+        snprintf(msg, sizeof(msg), "surface client unlock returns no data (0x%x, %lu structure "
+                 "bytes, %u non-zero scalars)", kr, (unsigned long)leakSize, nonzero);
+        check(kr == KERN_SUCCESS && leakSize == 0 && nonzero == 0, msg);
+        IOServiceClose(surf);
+    } else {
+        printf("skip: no surface client (Quartz Extreme off)\n");
+    }
+    if (svc)
+        IOObjectRelease(svc);
+
     /* Closing the connection frees everything (checked in the kernel log by the caller). */
     IOServiceClose(conn);
     printf("%s (%d-bit process, %u buffers)\n", failures ? "FAIL" : "PASS",

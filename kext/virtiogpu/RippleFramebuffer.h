@@ -36,6 +36,7 @@ class RippleFramebuffer : public IOFramebuffer
     IODisplayModeID fCurMode, fStartupMode;
     uint32_t        fScanoutRes;
     uint32_t        fShownRes;       // a GPU buffer on the display instead of the VRAM (0: none)
+    VirtioGPUDevice::Rect fShownRect; // its rectangle as last set as the scanout
 
     IOTimerEventSource *fRefresh;
     bool                fEnabled;
@@ -72,7 +73,7 @@ public:
     // Show GPU resource `id` (region r of it) on the display instead of the framebuffer, or
     // present it again if it is already shown; id 0 gives the display back to the framebuffer.
     // For the GPU client (uapi DISPLAY); serialized with the refresh timer.
-    bool showResource(uint32_t id, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
+    IOReturn showResource(uint32_t id, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
     // The client is going away or destroying `id`: give the display back if it shows `id`.
     void releaseResource(uint32_t id);
 

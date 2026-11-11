@@ -37,11 +37,21 @@ void RippleGPUClient::destroyBuffer(Buffer &b)
 {
     if (!b.handle)
         return;
-    fDev->detachBacking(b.handle);
-    fDev->resourceUnref(b.handle);          // also drops it from any context
+    // Never leave a buffer that is going away on the display, whatever fShown says.
+    fAccel->framebuffer()->releaseResource(b.handle);
+    bool detached = fDev->detachBacking(b.handle);
+    bool gone = fDev->resourceUnref(b.handle);      // also drops it from any context
     if (b.mem) {
-        b.mem->complete();
-        b.mem->release();
+        if (detached || gone) {
+            b.mem->complete();
+            b.mem->release();
+        } else {
+            // Neither was answered (a stalled host): it runs its queue later, in order, and
+            // an earlier transfer would then write into pages the kernel has reused. Keeping
+            // the memory wired is the safe failure.
+            LOG("buffer %u: the host did not let go of its memory; %llu bytes stay wired",
+                b.handle, (unsigned long long)b.size);
+        }
     }
     bzero(&b, sizeof(b));
 }
@@ -274,11 +284,9 @@ IOReturn RippleGPUClient::bufferDestroy(uint32_t handle)
     Buffer *b = findBuffer(handle);
     if (!b)
         return kIOReturnBadArgument;
-    if (fShown == handle) {
-        fAccel->framebuffer()->releaseResource(handle);
+    if (fShown == handle)
         fShown = 0;
-    }
-    destroyBuffer(*b);
+    destroyBuffer(*b);                      // takes it off the display first
     removeBuffer(b);
     return kIOReturnSuccess;
 }
@@ -382,12 +390,12 @@ IOReturn RippleGPUClient::display(uint32_t handle, uint32_t x, uint32_t y, uint3
     // fenced empty submit ahead of the scanout flush does (QEMU handles commands in order),
     // without waiting for its reply.
     fDev->syncAsync(firstContext());
-    if (fShown && fShown != handle)
-        fb->releaseResource(fShown);
-    if (!fb->showResource(handle, x, y, w, h))
-        return kIOReturnError;
+    // The framebuffer changes over from one shown buffer to the next by itself; giving the
+    // display back to the console in between cost a full-frame upload and flashed the console
+    // frame. Recorded before the call: if only the flush fails, the scanout already is this
+    // buffer.
     fShown = handle;
-    return kIOReturnSuccess;
+    return fb->showResource(handle, x, y, w, h);
 }
 
 // ---- Dispatch -------------------------------------------------------------------------------
