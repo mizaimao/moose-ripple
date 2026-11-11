@@ -1,10 +1,12 @@
 # M5 working notes: Quartz Extreme on virgl
 
-Date: 2026-11-10 (evening). Status: QE on and the desktop GL-composited on VM 210; Exposé and
-Dashboard still show placement errors. Plan: [m5-plan.md](m5-plan.md); research:
-[qe-decision.md](qe-decision.md) (R1), [qe-windowserver-trace.md](qe-windowserver-trace.md)
-(R2), [qe-verification.md](qe-verification.md) (R3), [qe-display-surface.md](qe-display-surface.md)
-(R4); design notes from VMsvga2: [vmsvga2-qe-design.md](vmsvga2-qe-design.md).
+Date: 2026-11-10 (night). Status: QE on and the whole screen GL-composited on VM 210; desktop,
+window shadows, Exposé, Dashboard and Front Row look right. Open: the Dashboard ripple's
+backdrop is white while the ripple runs (about 1 s), and display lag isn't measured yet.
+Plan: [m5-plan.md](m5-plan.md); research: [qe-decision.md](qe-decision.md) (R1),
+[qe-windowserver-trace.md](qe-windowserver-trace.md) (R2), [qe-verification.md](qe-verification.md)
+(R3, also how to check QE), [qe-display-surface.md](qe-display-surface.md) (R4); design notes
+from VMsvga2: [vmsvga2-qe-design.md](vmsvga2-qe-design.md).
 
 ## How to run it (VM 210)
 
@@ -12,11 +14,23 @@ Dashboard still show placement errors. Plan: [m5-plan.md](m5-plan.md); research:
   (`ripple_qe=2` also logs every surface call to the kernel log; `ripple_qe=1` without).
 - Installed: `RippleVirtioGPU.kext` (`scripts/install-kext.sh`), `RippleGLDriver.bundle` and
   `RippleGA.plugin` (`scripts/install-glbundle.sh`; checks: compare `md5` of the installed and
-  built binary, a half-copied bundle crashed WindowServer once).
-- Logs: the directory `/Library/Logs/RippleGL` (world-writable) turns on the bundle's log per
-  process; the file `/Library/Logs/RippleGL/trace` (present when a process starts) adds a GL
-  call trace. Checks: `scripts/qe-check.sh`, `build/grab` (prints
-  `CGDisplayUsesOpenGLAcceleration`), `VMID=210 scripts/screen-vnc.sh` (the real display).
+  built binary, a half-copied bundle crashed WindowServer once). WindowServer loads the bundle
+  at start: `sudo killall -KILL WindowServer` (the session comes back by itself in about 25 s).
+- Debug switches, all under `/Library/Logs/RippleGL` (world-writable; its existence turns on
+  the bundle's per-process log):
+  - `trace` present when a process starts: GL call trace, first 6 calls per entry plus call
+    counts every 10 s, in `trace-PROGRAM-PID.log`.
+  - `burst` (write a number into it; each new modification time counts): the next N calls in
+    full. Written before a WindowServer restart it traces the start.
+  - Mesa's own errors ("GL_INVALID_VALUE in glOrtho") go to `mesa-PROGRAM-PID.log`, or to
+    `/var/log/system.log` for WindowServer (set-user-id: Mesa ignores `MESA_LOG_FILE` there).
+  - `stats:` lines every 5 s in the bundle log: presents, frames/s while something moves, CPU
+    cost per present.
+- Checks: `scripts/qe-check.sh`, `build/grab` (QE on, display captured, and
+  WindowServer's own copy of the screen), `build/gl-check` (offscreen GL checks; `-s` for
+  Apple's software renderer as the reference), `build/fb-dump` (the framebuffer memory),
+  `VMID=210 scripts/screen-vnc.sh [-n N -i S]` (the real display, one or N frames),
+  `tools/vncgrab/pngpix.py` (pixel values across captures, run on dev.lan's `.venv`).
 
 ## What it took (in order)
 
@@ -29,27 +43,62 @@ Dashboard still show placement errors. Plan: [m5-plan.md](m5-plan.md); research:
 4. Render-op slots 27-29 filled (GLEngine calls flush/swap there).
 5. `RippleGA.plugin` (copy and fill blitters): without a GA plugin on the framebuffer,
    WindowServer never composites the display itself with GL (R4).
-6. The display surface (id 1) is shaped to each frame's dirty rectangle; WindowServer renders
-   that rectangle with `glViewport(0, 0, w, h)` and `glOrtho(x, x+w, y+h, y)`. The frontend
-   keeps one persistent screen texture on the GPU, copies each presented rectangle into place
-   and shows it with `DISPLAY`. One drawable per surface for the whole process (persistent).
+6. The display surface (id 1) is shaped to each frame's dirty rectangle and WindowServer draws
+   that rectangle at the window origin (`glViewport(0, 0, w, h)`, `glOrtho(x, x+w, y+h, y)`).
+   The display drawable is the whole screen, persistent, shown with `DISPLAY`; each frame's
+   rectangle is a window into it: viewport, scissor, clears, reads and copies are shifted by
+   the rectangle's position, only while the window's own framebuffer is bound (Core Animation
+   and Core Image use framebuffer objects in their own coordinates). Exposé reads the screen
+   back for its thumbnails, which needs the whole screen in the drawable.
 7. Apple hint enums (`GL_TEXTURE_STORAGE_HINT_APPLE`, `GL_TRANSFORM_HINT_APPLE`) accepted as
-   no-ops. `GL_UNPACK_CLIENT_STORAGE_APPLE` must keep failing until real client storage
-   exists: accepting it made WindowServer reuse texture memory (wrong contents everywhere).
+   no-ops. `GL_UNPACK_CLIENT_STORAGE_APPLE` keeps failing (accepting it made WindowServer
+   reuse texture memory: wrong contents everywhere), but `glGetIntegerv` answers it (Core
+   Image saves pixel-store state with it).
+8. Client storage emulated: WindowServer makes tiles of an app GL surface's shared memory once
+   and never uploads them again (Apple's GL reads that memory when it draws). Textures made
+   with client storage are uploaded again from their memory at the first bind of each frame,
+   until the program updates them itself. Before this, Front Row stayed white and GL windows
+   showed their first frame.
+9. Mesa patch 0005: no alpha-only formats on rectangle textures. `GL_ALPHA` rectangles sampled
+   wrong through virglrenderer 0.10.4 on the UHD 630, so window shadows were missing on the
+   desktop and opaque black in Exposé (`gl-check` shows it; 2D alpha textures were fine).
+10. GL windows are written bottom row first (GL's order) into their window memory: every GL
+   window was upside down since M4 (gl-gears' blue gear at the bottom).
+
+## Results (VM 210, 2026-11-10)
+
+- QE on, renderer ours (`qe-check`, `grab`). Desktop, menus, shadows right
+  ([desktop](img/m5-desktop-gl-composited-3.png)).
+- Exposé right: windows move, the rest dims ([Exposé](img/m5-expose.png)).
+- Dashboard right: uniform dimming (pixel values at 55% everywhere, Dock and icons included),
+  widgets, widget bar sliding the screen up ([widget bar](img/m5-dashboard-widget-bar.png)).
+  Adding a widget leaves the screen right afterwards.
+- Front Row (needs QE) runs: menu, reflections and navigation right
+  ([Front Row](img/m5-front-row.png)). It takes the display (captured) and draws through a
+  full-screen window.
+- gl-gears animates upright at 36 frames/s in a window ([gl-gears](img/m5-gl-gears-upright.png)).
+- Cursor: the virtio hardware cursor (`RippleCursor` = hardware), a plane QEMU draws over the
+  composited screen, so it can't tear with it. VNC captures don't show that plane.
+- Compositor: about 28 presents/s even idle (the dialog's pulsing default button), 31-37
+  frames/s during Exposé and Dashboard, 5-9 ms of CPU per present (flush and `DISPLAY`);
+  WindowServer at 5-20% CPU.
 
 ## Open problems
 
-- **Large rectangles in Exposé:** some frames' content belongs to the screen's top-left
-  instead of the rectangle (screenshot in the session: a 500x278 rectangle at 390,305 showing
-  the dimmed menu bar). Either some frames are drawn in full-screen coordinates while the
-  surface is shaped to a sub-rectangle (the rectangle then clips rather than translates), or
-  a frame is presented with another frame's rectangle. Next: log viewport/ortho per present
-  next to the shape, and handle a full-screen viewport by copying the rectangle from its
-  screen position instead of the drawable's origin.
-- Small leftovers on the desktop: a "Finder" menu-title box at a button-sized rectangle, a black
-  box under the clock, a faint bar next to the dialog.
-- Dashboard: no dimming layer, stale widget copies; the ripple (Dock + Core Image) left a
-  732x400 viewport (R3 run, before the per-surface drawables).
-- WindowServer crashed in `_mesa_init_remap_table` with a half-installed bundle (fixed by
-  reinstalling); keep the md5 check.
-- Performance not measured; per-frame cost is one GPU copy plus a `DISPLAY` flush.
+- **Dashboard ripple backdrop white:** while a new widget ripples (about 1 s), the 522x598
+  rectangle around it is white apart from the rippling widget
+  ([frame](img/m5-dashboard-ripple-white.png)); the screen is right again afterwards. Core
+  Image renders the ripple on the CPU inside WindowServer and uploads the result each frame
+  (texture 522x598, drawn opaque at 379,101), so its backdrop input is white. Ruled out: GL
+  errors (none after the `glGetIntegerv` fix), the framebuffer memory (filled red with
+  `fb-dump`: still white), the window offset (framebuffer objects unshifted: still white).
+  Next: find where WindowServer's CPU path gets "what is behind" under QE (probably a copy of
+  the window backings, where Core Animation's GL-drawn Dashboard layer has none), e.g. by
+  breaking on `CGSCaptureWindowsContentsToRect`-like calls with lldb on 210.
+- Display lag under QE: `scripts/lag.sh` needs QEMU's screendump and the software cursor,
+  neither works here; measuring through VNC instead (2026-11-10).
+- The framebuffer memory stays black under QE (the display shows a GPU texture). Anything
+  reading the screen through it (old screen-capture tools) gets black.
+- `texture_range_APPLE` is unsupported (ignored); harmless so far.
+- WindowServer's Mesa messages for the refused client-storage enum fill `system.log` while the
+  debug folder exists (`GL_INVALID_ENUM in glPixelStore`).
