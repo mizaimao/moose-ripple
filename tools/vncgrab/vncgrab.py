@@ -4,12 +4,14 @@
 #   VNC_PASSWORD=<pw> .venv/bin/python -I vncgrab.py OUT.png   speaks RFB on stdin/stdout
 #   ... vncgrab.py -n 12 -i 0.15 OUT.png    12 frames on one connection, one every 0.15 s (or as
 #                                           fast as they come), saved as OUT-00.png..OUT-11.png
+#   ... vncgrab.py --record 6 0,0,1280,796 DIR   real-time frames of a box for 6 s (see record)
 # Runs on dev.lan in the repo's .venv; scripts/screen-vnc.sh connects its stdin/stdout to
 # `qm vncproxy` on the rig (the web console's path), which sets that one-off password on the
 # VM's VNC server for 30 seconds. RFB 3.8, VNC authentication, raw encoding.
 import os
 import struct
 import sys
+import threading
 import time
 import zlib
 
@@ -182,6 +184,85 @@ def png(w, h, bgrx):
 KEYSYMS = {"f9": 0xFFC6, "f10": 0xFFC7, "f11": 0xFFC8, "f12": 0xFFC9}
 
 
+def record(c, w, h, seconds, box, outdir):
+    """Frames of BOX (x, y, width, height) in real time for SECONDS, for making a GIF that plays
+    at the true speed: incremental updates in zlib encoding (a full 1280x800 raw frame takes
+    0.15 s through the ssh pipes), each update one frame stamped with its arrival time. Writes
+    OUTDIR/frames.bin (BGRX, one box after another) and OUTDIR/times.txt (seconds, one a line).
+    QEMU's VNC server slows its refresh down to once in 3 s while the picture is still, and
+    speeds up only step by step, so keep something on screen changing (tools/ticker) from
+    before the event to be recorded."""
+    x0, y0, bw, bh = box
+    if not bw or not bh:                                   # 0,0,0,0: the whole screen
+        x0, y0, bw, bh = 0, 0, w, h
+    # RECORD_BPP=16: pixels as RGB565, half the bytes (the pipe through the laptop carries about
+    # 65 MB/s, 16 ms of it per 1280x800 frame at 32 bits); gifmake widens them again.
+    # RECORD_ENCODING=zlib: QEMU compresses (level 1); slower than Raw here (QEMU's compression
+    # took about 190 ms for a changed screen).
+    bpp = int(os.environ.get("RECORD_BPP", "32"))
+    if bpp == 16:
+        c.write(struct.pack(">BxxxBBBBHHHBBBxxx", 0, 16, 16, 0, 1, 31, 63, 31, 11, 5, 0))
+    encs = [6, 0, -255, -223] if os.environ.get("RECORD_ENCODING") == "zlib" else [0, -223]
+    c.write(struct.pack(">BxH" + "i" * len(encs), 2, len(encs), *encs))
+    px = bpp // 8
+    z = zlib.decompressobj()                               # one stream for the connection
+    fb = bytearray(bw * bh * px)
+    times, t0 = [], None
+    out = open(os.path.join(outdir, "frames.bin"), "wb")
+    # A still screen sends nothing: at the end, ask for one pixel in full so the loop wakes up.
+    lock = threading.Lock()
+
+    def send(msg):
+        with lock:
+            c.write(msg)
+    timer = threading.Timer(seconds + 0.3, send, [struct.pack(">BBHHHH", 3, 0, x0, y0, 1, 1)])
+    timer.daemon = True
+    send(struct.pack(">BBHHHH", 3, 0, x0, y0, bw, bh))
+    timer.start()
+    while True:
+        t = c.read(1)[0]
+        if t == 0:
+            nrect = struct.unpack(">xH", c.read(3))[0]
+            # Ask for the next one at once, before reading this one: QEMU prepares it while
+            # this one is still on its way, instead of a round trip through two ssh hops later.
+            send(struct.pack(">BBHHHH", 3, 1, x0, y0, bw, bh))
+            for _ in range(nrect):
+                x, y, rw, rh, enc = struct.unpack(">HHHHi", c.read(12))
+                if enc == 6:
+                    data = z.decompress(c.read(struct.unpack(">I", c.read(4))[0]))
+                elif enc == 0:
+                    data = c.read(rw * rh * px)
+                else:
+                    raise RuntimeError("unexpected encoding %d while recording" % enc)
+                xs, xe = max(x, x0), min(x + rw, x0 + bw)
+                if xe <= xs:
+                    continue
+                for row in range(max(y, y0) - y, min(y + rh, y0 + bh) - y):
+                    o = ((y + row - y0) * bw + xs - x0) * px
+                    s = (row * rw + xs - x) * px
+                    fb[o:o + (xe - xs) * px] = data[s:s + (xe - xs) * px]
+            now = time.monotonic()
+            if t0 is None:
+                t0 = now
+            out.write(fb)                                  # written as it comes
+            times.append(now - t0)
+            if times[-1] >= seconds:
+                break
+        elif t == 1:
+            c.read(struct.unpack(">xHH", c.read(5))[1] * 6)
+        elif t == 3:
+            c.read(struct.unpack(">xxxI", c.read(7))[0])
+        elif t != 2:
+            raise RuntimeError("unknown server message %d" % t)
+    out.close()
+    with open(os.path.join(outdir, "times.txt"), "w") as f:
+        f.write("%d %d %d\n" % (bw, bh, bpp))
+        for ts in times:
+            f.write("%.4f\n" % ts)
+    print("recorded %d frames of %dx%d in %.2f s" % (len(times), bw, bh, times[-1]),
+          file=sys.stderr)
+
+
 def lag(c, w, h, rounds, key, idle, strip):
     """Display lag through VNC: press KEY on this same connection (QEMU injects it like any VNC
     input), then ask for frames back to back until one differs from the steady picture before
@@ -269,6 +350,28 @@ if __name__ == "__main__":
         lag(conn, width, height, int(sys.argv[2]), sys.argv[3], float(sys.argv[4]),
             None if area == "full" else -1 if area == "strip" else int(area[6:]))
         sys.stdout.close()
+        sys.exit(0)
+    if len(sys.argv) == 5 and sys.argv[1] == "--record":
+        # vncgrab.py --record SECONDS X,Y,W,H OUTDIR
+        conn = Conn(sys.stdin.buffer, sys.stdout.buffer)
+        width, height = handshake(conn, os.environ["VNC_PASSWORD"])
+        record(conn, width, height, float(sys.argv[2]), tuple(int(v) for v in sys.argv[3].split(",")),
+               sys.argv[4])
+        sys.stdout.close()
+        sys.exit(0)
+    if len(sys.argv) == 5 and sys.argv[1] == "--frame":
+        # vncgrab.py --frame DIR SECONDS OUT.png: the recorded frame shown at that time
+        d = sys.argv[2]
+        lines = open(os.path.join(d, "times.txt")).read().split()
+        bw, bh = int(lines[0]), int(lines[1])
+        ts = [float(v) for v in lines[2:]]
+        k = max([i for i, t in enumerate(ts) if t <= float(sys.argv[3])] or [0])
+        with open(os.path.join(d, "frames.bin"), "rb") as f:
+            f.seek(k * bw * bh * 4)
+            data = f.read(bw * bh * 4)
+        with open(sys.argv[4], "wb") as f:
+            f.write(png(bw, bh, data))
+        print("frame %d at %.3f s" % (k, ts[k]), file=sys.stderr)
         sys.exit(0)
     if len(sys.argv) == 2 and sys.argv[1] == "--selftest":
         # FIPS 46 example: key 133457799BBCDFF1, plaintext 0123456789ABCDEF -> 85E813540F0AB405
