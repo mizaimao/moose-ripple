@@ -96,6 +96,7 @@ ripple_cgl_swap(void *rend)
 {
    /* CGLFlushDrawable on a double-buffered context: present the back buffer. */
    RIPPLE_CGL_ENTER(rend);
+   ripple_cgl_client_storage_frame();
    ripple_cgl_context_swap(rend);
 }
 
@@ -196,24 +197,6 @@ ripple_cgl_trace(unsigned index, const char *fmt, ...)
 #define GL_UNPACK_CLIENT_STORAGE_APPLE   0x85B2
 #define GL_TEXTURE_STORAGE_HINT_APPLE    0x85BC
 #define GL_TRANSFORM_HINT_APPLE          0x85B1
-
-void GLAPIENTRY
-ripple_cgl_pixel_storei(void *rend, GLenum pname, GLint param)
-{
-   if (pname == GL_UNPACK_CLIENT_STORAGE_APPLE)
-      return;
-   RIPPLE_CGL_ENTER(rend);
-   CALL_PixelStorei(GET_DISPATCH(), (pname, param));
-}
-
-void GLAPIENTRY
-ripple_cgl_pixel_storef(void *rend, GLenum pname, GLfloat param)
-{
-   if (pname == GL_UNPACK_CLIENT_STORAGE_APPLE)
-      return;
-   RIPPLE_CGL_ENTER(rend);
-   CALL_PixelStoref(GET_DISPATCH(), (pname, param));
-}
 
 void GLAPIENTRY
 ripple_cgl_tex_parameteri(void *rend, GLenum target, GLenum pname, GLint param)
@@ -432,4 +415,240 @@ ripple_cgl_copy_tex_sub_image3D(void *rend, GLenum target, GLint level, GLint xo
       y += ctx->win_oy;
    }
    CALL_CopyTexSubImage3D(GET_DISPATCH(), (target, level, xoff, yoff, zoff, x, y, w, h));
+}
+
+/* ---- Client storage (GL_APPLE_client_storage), emulated ---------------------------------- *
+ * Apple's GL reads a client-storage texture's memory when it draws. WindowServer relies on that
+ * for app GL surfaces under Quartz Extreme: it makes tiles of the surface's shared memory once
+ * and never uploads them again, so with Mesa's copy at glTexImage2D the window kept whatever
+ * the memory held then (Front Row all white, gl-gears frozen). The enum itself keeps failing
+ * (gen_dispatch.py says why), but 2D and rectangle textures specified while it is set are
+ * remembered with their memory and unpack state. Until the program updates one itself
+ * (glTexSubImage2D, as WindowServer does for ordinary windows), it is uploaded again from that
+ * memory the first time it is bound in each frame (frames end at glFlush and swaps), if the
+ * memory is still mapped and readable; otherwise it is forgotten. */
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include "util/u_atomic.h"
+#include "main/context.h"
+#include "main/glformats.h"
+#include "main/image.h"
+#include "main/teximage.h"
+#include "main/texobj.h"
+
+#define CS_MAX 2048
+
+struct cs_tex {
+   struct gl_texture_object *obj;   /* NULL: free slot */
+   GLenum target, format, type;
+   GLsizei width, height;
+   const GLvoid *pixels;
+   struct gl_pixelstore_attrib unpack;   /* BufferObj always NULL */
+   unsigned gen;                         /* frame of the last upload */
+   bool explicit_update;                 /* the program updates it: leave it alone */
+};
+
+static struct cs_tex cs_texs[CS_MAX];
+static unsigned cs_used;                 /* slots in use are below this */
+static unsigned cs_gen = 1;
+static simple_mtx_t cs_lock = SIMPLE_MTX_INITIALIZER;
+
+static struct cs_tex *
+cs_find(const struct gl_texture_object *obj)
+{
+   for (unsigned i = 0; i < cs_used; i++)
+      if (cs_texs[i].obj == obj)
+         return &cs_texs[i];
+   return NULL;
+}
+
+static void
+cs_forget(const struct gl_texture_object *obj)
+{
+   struct cs_tex *t = obj ? cs_find(obj) : NULL;
+   if (t) {
+      t->obj = NULL;
+      while (cs_used && !cs_texs[cs_used - 1].obj)
+         cs_used--;
+   }
+}
+
+/* The whole range mapped and readable in this task. */
+static bool
+cs_readable(const void *p, size_t len)
+{
+   mach_vm_address_t addr = (mach_vm_address_t)(uintptr_t)p, end = addr + len;
+   while (addr < end) {
+      mach_vm_address_t a = addr;
+      mach_vm_size_t size = 0;
+      vm_region_basic_info_data_64_t info;
+      mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+      mach_port_t object = MACH_PORT_NULL;
+      if (mach_vm_region(mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64,
+                         (vm_region_info_t)&info, &count, &object) != KERN_SUCCESS ||
+          a > addr || !(info.protection & VM_PROT_READ))
+         return false;
+      addr = a + size;
+   }
+   return true;
+}
+
+/* Upload `t` again from its memory; its texture is bound to its target. */
+static bool
+cs_refresh(struct gl_context *glctx, struct cs_tex *t)
+{
+   const GLubyte *first = _mesa_image_address2d(&t->unpack, t->pixels, t->width, t->height,
+                                                t->format, t->type, 0, 0);
+   GLint stride = _mesa_image_row_stride(&t->unpack, t->width, t->format, t->type);
+   GLint bpp = _mesa_bytes_per_pixel(t->format, t->type);
+   if (!first || stride <= 0 || bpp <= 0 ||
+       !cs_readable(first, (size_t)stride * (t->height - 1) + (size_t)bpp * t->width))
+      return false;
+   struct gl_pixelstore_attrib saved = glctx->Unpack;
+   GLenum error = glctx->ErrorValue;
+   glctx->Unpack = t->unpack;
+   CALL_TexSubImage2D(GET_DISPATCH(), (t->target, 0, 0, 0, t->width, t->height, t->format,
+                                       t->type, t->pixels));
+   glctx->Unpack = saved;
+   glctx->ErrorValue = error;          /* the program never sees this upload */
+   return true;
+}
+
+static bool
+cs_target(GLenum target)
+{
+   return target == GL_TEXTURE_2D || target == GL_TEXTURE_RECTANGLE_ARB;
+}
+
+void GLAPIENTRY
+ripple_cgl_pixel_storei(void *rend, GLenum pname, GLint param)
+{
+   RIPPLE_CGL_ENTER(rend);
+   if (pname == GL_UNPACK_CLIENT_STORAGE_APPLE) {
+      struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
+      if (ctx)
+         ctx->client_storage = param != 0;
+   }
+   CALL_PixelStorei(GET_DISPATCH(), (pname, param));   /* client storage: still refused */
+}
+
+void GLAPIENTRY
+ripple_cgl_pixel_storef(void *rend, GLenum pname, GLfloat param)
+{
+   RIPPLE_CGL_ENTER(rend);
+   if (pname == GL_UNPACK_CLIENT_STORAGE_APPLE) {
+      struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
+      if (ctx)
+         ctx->client_storage = param != 0.0f;
+   }
+   CALL_PixelStoref(GET_DISPATCH(), (pname, param));
+}
+
+void GLAPIENTRY
+ripple_cgl_tex_image2D(void *rend, GLenum target, GLint level, GLenum internalformat,
+                       GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type,
+                       const GLvoid *pixels)
+{
+   struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
+   RIPPLE_CGL_ENTER(rend);
+   CALL_TexImage2D(GET_DISPATCH(), (target, level, internalformat, width, height, border,
+                                    format, type, pixels));
+   if (level != 0 || !cs_target(target))
+      return;
+   GET_CURRENT_CONTEXT(glctx);
+   struct gl_texture_object *obj = _mesa_get_current_tex_object(glctx, target);
+   if (!obj)
+      return;
+   simple_mtx_lock(&cs_lock);
+   cs_forget(obj);
+   /* Made as asked (the refused enum leaves an error pending, so ErrorValue can't tell). */
+   const struct gl_texture_image *img = obj->Image[0][0];
+   if (ctx && ctx->client_storage && pixels && width > 0 && height > 0 && obj->Name &&
+       !glctx->Unpack.BufferObj && img && img->Width == (GLuint)width &&
+       img->Height == (GLuint)height) {
+      struct cs_tex *t = cs_find(NULL);
+      if (!t && cs_used < CS_MAX)
+         t = &cs_texs[cs_used++];
+      if (t) {
+         t->obj = obj;
+         t->target = target;
+         t->format = format;
+         t->type = type;
+         t->width = width;
+         t->height = height;
+         t->pixels = pixels;
+         t->unpack = glctx->Unpack;
+         t->unpack.BufferObj = NULL;
+         t->gen = cs_gen;
+         t->explicit_update = false;
+      }
+   }
+   simple_mtx_unlock(&cs_lock);
+}
+
+void GLAPIENTRY
+ripple_cgl_tex_sub_image2D(void *rend, GLenum target, GLint level, GLint xoffset,
+                           GLint yoffset, GLsizei width, GLsizei height, GLenum format,
+                           GLenum type, const GLvoid *pixels)
+{
+   RIPPLE_CGL_ENTER(rend);
+   if (cs_used && cs_target(target)) {
+      GET_CURRENT_CONTEXT(glctx);
+      struct gl_texture_object *obj = _mesa_get_current_tex_object(glctx, target);
+      simple_mtx_lock(&cs_lock);
+      struct cs_tex *t = obj ? cs_find(obj) : NULL;
+      if (t)
+         t->explicit_update = true;
+      simple_mtx_unlock(&cs_lock);
+   }
+   CALL_TexSubImage2D(GET_DISPATCH(), (target, level, xoffset, yoffset, width, height, format,
+                                       type, pixels));
+}
+
+void GLAPIENTRY
+ripple_cgl_bind_texture(void *rend, GLenum target, GLuint texture)
+{
+   RIPPLE_CGL_ENTER(rend);
+   CALL_BindTexture(GET_DISPATCH(), (target, texture));
+   if (!cs_used || !texture || !cs_target(target))
+      return;
+   GET_CURRENT_CONTEXT(glctx);
+   struct gl_texture_object *obj = _mesa_get_current_tex_object(glctx, target);
+   simple_mtx_lock(&cs_lock);
+   struct cs_tex *t = obj ? cs_find(obj) : NULL;
+   if (t && !t->explicit_update && t->gen != cs_gen && !glctx->Unpack.BufferObj) {
+      t->gen = cs_gen;
+      if (!cs_refresh(glctx, t))
+         cs_forget(obj);
+   }
+   simple_mtx_unlock(&cs_lock);
+}
+
+void GLAPIENTRY
+ripple_cgl_delete_textures(void *rend, GLsizei n, const GLuint *textures)
+{
+   RIPPLE_CGL_ENTER(rend);
+   if (cs_used && n > 0 && textures) {
+      GET_CURRENT_CONTEXT(glctx);
+      simple_mtx_lock(&cs_lock);
+      for (GLsizei i = 0; i < n; i++)
+         if (textures[i])
+            cs_forget(_mesa_lookup_texture(glctx, textures[i]));
+      simple_mtx_unlock(&cs_lock);
+   }
+   CALL_DeleteTextures(GET_DISPATCH(), (n, textures));
+}
+
+void
+ripple_cgl_client_storage_frame(void)
+{
+   p_atomic_inc(&cs_gen);              /* a frame ends: client memory is read again */
+}
+
+void GLAPIENTRY
+ripple_cgl_flush(void *rend)
+{
+   RIPPLE_CGL_ENTER(rend);
+   ripple_cgl_client_storage_frame();
+   CALL_Flush(GET_DISPATCH(), ());
 }

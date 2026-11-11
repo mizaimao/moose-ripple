@@ -38,6 +38,8 @@ struct ripple_cgl_context {
    uint32_t win_surface;         /* the screen-region surface, or 0 */
    int win_ox, win_oy;
    unsigned win_w, win_h;
+   /* GL_UNPACK_CLIENT_STORAGE_APPLE as last set (refused, but emulated: cgl_apple.c). */
+   bool client_storage;
 };
 
 struct ripple_cgl_context *

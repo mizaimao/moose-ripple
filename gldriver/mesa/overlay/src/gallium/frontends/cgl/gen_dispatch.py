@@ -56,6 +56,15 @@ CUSTOM = {
     'tex_parameteriv': 'ripple_cgl_tex_parameteriv',
     'tex_parameterfv': 'ripple_cgl_tex_parameterfv',
     'hint': 'ripple_cgl_hint',
+    # Client storage, emulated: the enum is still refused, but textures specified with it are
+    # read from their memory again each frame until the program updates them (cgl_apple.c).
+    'pixel_storei': 'ripple_cgl_pixel_storei',
+    'pixel_storef': 'ripple_cgl_pixel_storef',
+    'tex_image2D': 'ripple_cgl_tex_image2D',
+    'tex_sub_image2D': 'ripple_cgl_tex_sub_image2D',
+    'bind_texture': 'ripple_cgl_bind_texture',
+    'delete_textures': 'ripple_cgl_delete_textures',
+    'flush': 'ripple_cgl_flush',
     # Window offset for drawing into the screen through a rectangle (cgl_apple.c).
     'viewport': 'ripple_cgl_viewport',
     'scissor': 'ripple_cgl_scissor',

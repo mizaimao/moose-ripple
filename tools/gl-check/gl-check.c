@@ -198,6 +198,77 @@ static void check_formats(void)
     }
 }
 
+/* Client storage, the way WindowServer shows an app's GL surface: a rectangle texture made
+ * once from memory with GL_UNPACK_CLIENT_STORAGE_APPLE, the memory changed later, the texture
+ * only bound again in the next frame (after glFlush). Apple's GL draws the new contents. */
+static void check_client_storage(void)
+{
+    enum { TW = 64, TH = 64 };
+    static unsigned mem[TW * TH] __attribute__((aligned(4096)));
+    for (int i = 0; i < TW * TH; i++)
+        mem[i] = 0xffff0000;               /* BGRA 8888_REV: red */
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_RECTANGLE_ARB, tex);
+    glPixelStorei(GL_UNPACK_CLIENT_STORAGE_APPLE, 1);
+    glTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_RGB8, TW, TH, 0, GL_BGRA,
+                 GL_UNSIGNED_INT_8_8_8_8_REV, mem);
+    GLenum err = glGetError();
+    glPixelStorei(GL_UNPACK_CLIENT_STORAGE_APPLE, 0);
+    glGetError();
+    glDisable(GL_BLEND);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    unsigned char px[2][4];
+    for (int frame = 0; frame < 2; frame++) {
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glBindTexture(GL_TEXTURE_RECTANGLE_ARB, tex);
+        glEnable(GL_TEXTURE_RECTANGLE_ARB);
+        quad(TW, TH, TW, TH);
+        glDisable(GL_TEXTURE_RECTANGLE_ARB);
+        glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px[frame]);
+        glFlush();
+        for (int i = 0; i < TW * TH; i++)
+            mem[i] = 0xff00ff00;           /* green, for the next frame */
+    }
+    printf("client storage (setting it: error 0x%x): frame 1 %u %u %u, after the memory "
+           "changed %u %u %u (Apple: 255 0 0, then 0 255 0 on its hardware drivers, which read the memory when drawing; its software renderer keeps 255 0 0)\n", err, px[0][0], px[0][1],
+           px[0][2], px[1][0], px[1][1], px[1][2]);
+    glDeleteTextures(1, &tex);
+}
+
+/* Degenerate projections: Core Animation (Front Row) calls glOrtho(0, 0, 0, 0, -1, 1) before
+ * it knows its size and then checks glGetError. Prints the error and the resulting matrix. */
+static void check_degenerate(void)
+{
+    static const float args[][6] = {
+        { 0, 0, 0, 0, -1, 1 },
+        { 0, 1280, 0, 0, -1, 1 },
+        { 0, 1280, 0, 800, 1, 1 },
+    };
+    glGetError();
+    for (unsigned i = 0; i < sizeof(args) / sizeof(args[0]); i++) {
+        const float *a = args[i];
+        GLfloat m[16];
+        glMatrixMode(GL_PROJECTION);
+        glLoadIdentity();
+        glOrtho(a[0], a[1], a[2], a[3], a[4], a[5]);
+        GLenum err = glGetError();
+        glGetFloatv(GL_PROJECTION_MATRIX, m);
+        printf("glOrtho(%g, %g, %g, %g, %g, %g): error 0x%x, matrix diag %g %g %g %g\n", a[0],
+               a[1], a[2], a[3], a[4], a[5], err, m[0], m[5], m[10], m[15]);
+    }
+    glFrustum(0, 0, 0, 0, 1, 2);
+    printf("glFrustum(0, 0, 0, 0, 1, 2): error 0x%x\n", glGetError());
+    glViewport(0, 0, 0, 0);
+    printf("glViewport(0, 0, 0, 0): error 0x%x\n", glGetError());
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0, W, 0, H, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glViewport(0, 0, W, H);
+}
+
 int main(int argc, char **argv)
 {
     int software = argc > 1 && strcmp(argv[1], "-s") == 0;
@@ -241,6 +312,8 @@ int main(int argc, char **argv)
     check_alpha(GL_TEXTURE_2D, GL_ALPHA, 0, "2D ALPHA (npot)");
     check_rgb8();
     check_formats();
+    check_degenerate();
+    check_client_storage();
 
     CGLSetCurrentContext(NULL);
     CGLDestroyContext(ctx);

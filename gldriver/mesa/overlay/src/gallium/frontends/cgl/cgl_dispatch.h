@@ -46,6 +46,19 @@ void GLAPIENTRY ripple_cgl_finish_object(void *rend, GLenum object, GLuint name)
 void GLAPIENTRY ripple_cgl_swap(void *rend);
 void GLAPIENTRY ripple_cgl_pixel_storei(void *rend, GLenum pname, GLint param);
 void GLAPIENTRY ripple_cgl_pixel_storef(void *rend, GLenum pname, GLfloat param);
+/* Client storage, emulated (cgl_apple.c). */
+void GLAPIENTRY ripple_cgl_tex_image2D(void *rend, GLenum target, GLint level,
+                                       GLenum internalformat, GLsizei width, GLsizei height,
+                                       GLint border, GLenum format, GLenum type,
+                                       const GLvoid *pixels);
+void GLAPIENTRY ripple_cgl_tex_sub_image2D(void *rend, GLenum target, GLint level,
+                                           GLint xoffset, GLint yoffset, GLsizei width,
+                                           GLsizei height, GLenum format, GLenum type,
+                                           const GLvoid *pixels);
+void GLAPIENTRY ripple_cgl_bind_texture(void *rend, GLenum target, GLuint texture);
+void GLAPIENTRY ripple_cgl_delete_textures(void *rend, GLsizei n, const GLuint *textures);
+void GLAPIENTRY ripple_cgl_flush(void *rend);
+void ripple_cgl_client_storage_frame(void);
 void GLAPIENTRY ripple_cgl_tex_parameteri(void *rend, GLenum target, GLenum pname, GLint param);
 void GLAPIENTRY ripple_cgl_tex_parameterf(void *rend, GLenum target, GLenum pname, GLfloat param);
 void GLAPIENTRY ripple_cgl_tex_parameteriv(void *rend, GLenum target, GLenum pname, const GLint *params);
