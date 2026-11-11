@@ -1,14 +1,16 @@
 # media
 
-Images for the project README. Empty until the guest desktop is cleaned up; the README has a
-commented-out spot for each one.
+Images for the project README. Empty for now: the guest desktop gets cleaned up before
+anything is captured. The README has a commented-out spot for each one.
+
+Plan (2026-11-11):
 
 | File | Shows |
 |---|---|
-| `dashboard-ripple.png` | The Dashboard ripple caught mid-wave, full screen (README hero image) |
-| `menu-bar.png` | The translucent menu bar over the default wallpaper |
-| `before-after.png` | The same screen with Apple's software renderer and with moose-ripple, side by side |
-| `dashboard-ripple.gif`, `expose.gif` | Animations, after the performance work (frame rate) |
+| `banner.png` | Banner at the top of the README, made separately (not a capture): Donkey, the project's plush moose, as a flat cartoon with ripples around it, on an original purple aurora-style background. Not Apple's wallpaper. |
+| `gears-menu-bar.png` | One screenshot with the gl-gears window running and the translucent menu bar in the same shot. |
+| `dashboard-ripple.png` | The Dashboard ripple in motion, as a still frame. |
+| `dashboard-ripple.gif` | The same as an animation, after the performance work (frame rate). Either this, the still, or both. |
 
 Capture rules: a clean guest user account (new user, default wallpaper, no network shares, no
 personal files or apps visible). Screenshots of the development VMs stay in the git-ignored

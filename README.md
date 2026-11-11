@@ -1,5 +1,10 @@
 # moose-ripple
 
+<!-- BANNER (to add, made separately): media/banner.png
+     Donkey, the plush moose, as a flat cartoon with ripples, on an original purple aurora background:
+![moose-ripple](media/banner.png)
+-->
+
 **Quartz Extreme and Core Image for Mac OS X 10.6 Snow Leopard in a virtual machine, on whatever
 GPU your host has.**
 
@@ -15,22 +20,13 @@ card, OpenGL renders on the host GPU (Intel, AMD or NVIDIA, whatever the host dr
 WindowServer composites the desktop on it. No period hardware, no GPU passthrough, no
 vendor-specific host setup.
 
-<!-- PREVIEW (still image, to add): media/dashboard-ripple.png
-     The Dashboard ripple caught mid-wave, full screen. Use as the hero image:
+<!-- PREVIEW (to add): media/gears-menu-bar.png
+     gl-gears running with the translucent menu bar in the same shot:
+![gl-gears on the host GPU under Snow Leopard's translucent menu bar](media/gears-menu-bar.png)
+-->
+
+<!-- PREVIEW (to add): media/dashboard-ripple.png (still frame) and/or media/dashboard-ripple.gif (after the performance work)
 ![The Dashboard ripple, rendered through virgl on the host GPU](media/dashboard-ripple.png)
--->
-
-<!-- PREVIEW (still image, to add): media/menu-bar.png
-     The translucent menu bar over the default Snow Leopard wallpaper (Core Image blur on the GPU):
-![Snow Leopard's translucent menu bar](media/menu-bar.png)
--->
-
-<!-- PREVIEW (still image pair, to add): media/before-after.png
-     The same screen with Apple's software renderer (left) and moose-ripple (right):
-![Software rendering on the left, moose-ripple on the right](media/before-after.png)
--->
-
-<!-- PREVIEW (animated GIFs, after the performance work): media/dashboard-ripple.gif, media/expose.gif
 ![The Dashboard ripple in motion](media/dashboard-ripple.gif)
 -->
 
