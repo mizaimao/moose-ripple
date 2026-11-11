@@ -961,6 +961,7 @@ struct cs_tex {
    struct gl_texture_object *obj;   /* NULL: free slot */
    GLenum target, format, type;
    GLsizei width, height;
+   GLsizei depth;                        /* 0 for 2D and rectangle textures */
    const GLvoid *pixels;
    struct gl_pixelstore_attrib unpack;   /* BufferObj always NULL */
    unsigned gen;                         /* frame of the last upload */
@@ -1022,10 +1023,44 @@ cs_readable(const void *p, size_t len)
    return true;
 }
 
+/* The same for a 3D texture (registered only with plain unpack state): the whole image. */
+static bool
+cs_refresh3d(struct gl_context *glctx, struct cs_tex *t)
+{
+   GLint stride = _mesa_image_row_stride(&t->unpack, t->width, t->format, t->type);
+   if (stride <= 0)
+      return false;
+   size_t size = (size_t)stride * t->height * t->depth;
+   if (!cs_readable(t->pixels, size))
+      return false;
+   if (t->shadow && t->shadow_size == size) {
+      if (!memcmp(t->pixels, t->shadow, size))
+         return true;
+   } else if (!t->shadow && cs_shadow_bytes + size <= CS_SHADOW_MAX) {
+      t->shadow = malloc(size);
+      if (t->shadow) {
+         t->shadow_size = size;
+         cs_shadow_bytes += size;
+      }
+   }
+   if (t->shadow && t->shadow_size == size)
+      memcpy(t->shadow, t->pixels, size);
+   struct gl_pixelstore_attrib saved = glctx->Unpack;
+   GLenum error = glctx->ErrorValue;
+   glctx->Unpack = t->unpack;
+   CALL_TexSubImage3D(GET_DISPATCH(), (t->target, 0, 0, 0, 0, t->width, t->height, t->depth,
+                                       t->format, t->type, t->pixels));
+   glctx->Unpack = saved;
+   glctx->ErrorValue = error;
+   return true;
+}
+
 /* Upload `t` again from its memory; its texture is bound to its target. */
 static bool
 cs_refresh(struct gl_context *glctx, struct cs_tex *t)
 {
+   if (t->depth)
+      return cs_refresh3d(glctx, t);
    const GLubyte *first = _mesa_image_address2d(&t->unpack, t->pixels, t->width, t->height,
                                                 t->format, t->type, 0, 0);
    GLint stride = _mesa_image_row_stride(&t->unpack, t->width, t->format, t->type);
@@ -1064,7 +1099,7 @@ cs_refresh(struct gl_context *glctx, struct cs_tex *t)
 static bool
 cs_target(GLenum target)
 {
-   return target == GL_TEXTURE_2D || target == GL_TEXTURE_RECTANGLE_ARB;
+   return target == GL_TEXTURE_2D || target == GL_TEXTURE_RECTANGLE_ARB || target == GL_TEXTURE_3D;
 }
 
 void GLAPIENTRY
@@ -1157,6 +1192,7 @@ tex_image2D_body(struct ripple_cgl_context *ctx, struct gl_context *glctx, GLenu
          t->type = type;
          t->width = width;
          t->height = height;
+         t->depth = 0;
          t->pixels = pixels;
          t->unpack = glctx->Unpack;
          t->unpack.BufferObj = NULL;
@@ -1165,6 +1201,79 @@ tex_image2D_body(struct ripple_cgl_context *ctx, struct gl_context *glctx, GLenu
       }
    }
    simple_mtx_unlock(&cs_lock);
+}
+
+/* 3D textures made with client storage: Core Animation's colour table for video is one, and it
+ * can fill the memory after glTexImage3D (Real Racing 2's intro drew black: every lookup gave
+ * 0; audit 2026-11-11). Level 0 with plain unpack state only. */
+void GLAPIENTRY
+ripple_cgl_tex_image3D(void *rend, GLenum target, GLint level, GLenum internalformat,
+                       GLsizei width, GLsizei height, GLsizei depth, GLint border, GLenum format,
+                       GLenum type, const GLvoid *pixels)
+{
+   struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
+   RIPPLE_CGL_ENTER(rend);
+   CALL_TexImage3D(GET_DISPATCH(), (target, level, internalformat, width, height, depth, border,
+                                    format, type, pixels));
+   GET_CURRENT_CONTEXT(glctx);
+   if (level != 0 || target != GL_TEXTURE_3D || !glctx)
+      return;
+   struct gl_texture_object *obj = _mesa_get_current_tex_object(glctx, target);
+   if (!obj)
+      return;
+   const struct gl_pixelstore_attrib *u = &glctx->Unpack;
+   bool plain = !u->BufferObj && !u->SkipPixels && !u->SkipRows && !u->SkipImages &&
+                (!u->RowLength || u->RowLength == width) &&
+                (!u->ImageHeight || u->ImageHeight == height) && !u->SwapBytes && !u->LsbFirst;
+   simple_mtx_lock(&cs_lock);
+   cs_forget(obj);
+   const struct gl_texture_image *img = obj->Image[0][0];
+   if (ctx && ctx->client_storage && pixels && plain && width > 0 && height > 0 && depth > 0 &&
+       obj->Name && img && img->Width == (GLuint)width && img->Height == (GLuint)height &&
+       img->Depth == (GLuint)depth) {
+      struct cs_tex *t = cs_find(NULL);
+      if (!t && cs_used < CS_MAX)
+         t = &cs_texs[cs_used++];
+      if (t) {
+         t->obj = obj;
+         t->target = target;
+         t->format = format;
+         t->type = type;
+         t->width = width;
+         t->height = height;
+         t->depth = depth;
+         t->pixels = pixels;
+         t->unpack = *u;
+         t->unpack.BufferObj = NULL;
+         t->gen = cs_gen;
+         t->explicit_update = false;
+         static unsigned logged;
+         extern FILE *ripple_gld_dbg_file(void);
+         if (logged++ < 8 && ripple_gld_dbg_file())
+            fprintf(ripple_gld_dbg_file(), "RippleGLDriver: client storage 3D texture %u: %dx%dx%d, "
+                    "read again from %p each frame\n", obj->Name, width, height, depth, pixels);
+      }
+   }
+   simple_mtx_unlock(&cs_lock);
+}
+
+void GLAPIENTRY
+ripple_cgl_tex_sub_image3D(void *rend, GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                           GLint zoffset, GLsizei width, GLsizei height, GLsizei depth,
+                           GLenum format, GLenum type, const GLvoid *pixels)
+{
+   RIPPLE_CGL_ENTER(rend);
+   if (cs_used && target == GL_TEXTURE_3D) {
+      GET_CURRENT_CONTEXT(glctx);
+      struct gl_texture_object *obj = _mesa_get_current_tex_object(glctx, target);
+      simple_mtx_lock(&cs_lock);
+      struct cs_tex *t = obj ? cs_find(obj) : NULL;
+      if (t)
+         t->explicit_update = true;       /* the program updates it itself */
+      simple_mtx_unlock(&cs_lock);
+   }
+   CALL_TexSubImage3D(GET_DISPATCH(), (target, level, xoffset, yoffset, zoffset, width, height,
+                                       depth, format, type, pixels));
 }
 
 void GLAPIENTRY

@@ -14,6 +14,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
 
 #include <CoreFoundation/CoreFoundation.h>
 
@@ -85,6 +88,7 @@ struct gld_window {
    void *user;                 /* the caller's per-surface data (its render targets) */
    void (*user_free)(void *);
    unsigned long last_use;     /* for dropping idle records, oldest first */
+   long dumped;                /* presentdump: that file's time when this surface was last dumped */
    struct gld_window *next;
 };
 
@@ -387,6 +391,36 @@ gld_window_present(void *data, const uint8_t *pixels, unsigned stride, unsigned 
           pixels[2], pixels[3], mid[0], mid[1], mid[2], mid[3], cmax, amin, amax);
    }
    presents++;
+   /* Debug: with /Library/Logs/RippleGL/presentdump, the next frame handed to each surface as
+    * present-PID-SURFACE.ppm (top row first), once per change of that file: what the driver
+    * gives the window, to tell a wrong frame from a wrong showing (M6, Real Racing 2). */
+   {
+      static time_t checked;
+      static long stamp;
+      time_t now = time(NULL);
+      if (now != checked) {
+         struct stat sb;
+         checked = now;
+         stamp = stat("/Library/Logs/RippleGL/presentdump", &sb) == 0 ? (long)sb.st_mtime : 0;
+      }
+      if (stamp && w->dumped != stamp && width && height) {
+         char path[160];
+         w->dumped = stamp;
+         snprintf(path, sizeof(path), "/Library/Logs/RippleGL/present-%d-%u.ppm", (int)getpid(), w->sid);
+         FILE *f = fopen(path, "wb");
+         if (f) {
+            fprintf(f, "P6\n%u %u\n255\n", width, height);
+            for (unsigned y = 0; y < height; y++) {
+               const uint8_t *row = pixels + (size_t)(height - 1 - y) * stride;
+               for (unsigned x = 0; x < width; x++) {
+                  uint8_t rgb[3] = { row[x * 4 + 2], row[x * 4 + 1], row[x * 4] };
+                  fwrite(rgb, 1, 3, f);
+               }
+            }
+            fclose(f);
+         }
+      }
+   }
    if (w->base) {
       /* `pixels` arrives bottom row first (Mesa keeps a window's rows top first and
        * present_resource turns them over; its "top row first" is not what it does), and the

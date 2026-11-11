@@ -63,6 +63,8 @@ CUSTOM = {
     'pixel_storef': 'ripple_cgl_pixel_storef',
     'tex_image2D': 'ripple_cgl_tex_image2D',
     'tex_sub_image2D': 'ripple_cgl_tex_sub_image2D',
+    'tex_image3D': 'ripple_cgl_tex_image3D',
+    'tex_sub_image3D': 'ripple_cgl_tex_sub_image3D',
     'bind_texture': 'ripple_cgl_bind_texture',
     'delete_textures': 'ripple_cgl_delete_textures',
     'flush': 'ripple_cgl_flush',

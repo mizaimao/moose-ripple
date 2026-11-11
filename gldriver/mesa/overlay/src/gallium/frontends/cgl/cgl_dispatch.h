@@ -62,6 +62,14 @@ void GLAPIENTRY ripple_cgl_tex_sub_image2D(void *rend, GLenum target, GLint leve
                                            GLint xoffset, GLint yoffset, GLsizei width,
                                            GLsizei height, GLenum format, GLenum type,
                                            const GLvoid *pixels);
+void GLAPIENTRY ripple_cgl_tex_image3D(void *rend, GLenum target, GLint level,
+                                       GLenum internalformat, GLsizei width, GLsizei height,
+                                       GLsizei depth, GLint border, GLenum format, GLenum type,
+                                       const GLvoid *pixels);
+void GLAPIENTRY ripple_cgl_tex_sub_image3D(void *rend, GLenum target, GLint level,
+                                           GLint xoffset, GLint yoffset, GLint zoffset,
+                                           GLsizei width, GLsizei height, GLsizei depth,
+                                           GLenum format, GLenum type, const GLvoid *pixels);
 void GLAPIENTRY ripple_cgl_bind_texture(void *rend, GLenum target, GLuint texture);
 void GLAPIENTRY ripple_cgl_delete_textures(void *rend, GLsizei n, const GLuint *textures);
 void GLAPIENTRY ripple_cgl_flush(void *rend);
