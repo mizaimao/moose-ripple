@@ -26,6 +26,9 @@ void gld_window_set_vsync(struct gld_window *w, bool vsync);
  * window (x, y from the bottom, width, height); the rest keeps what it showed. Core Animation
  * redraws just the changed area and relies on that (M6, Real Racing 2's intro video). */
 void gld_window_set_swap_rect(struct gld_window *w, bool on, const int rect[4]);
+/* Whether windows can be shown by the kernel at all: the kext runs Quartz Extreme work. Set
+ * once, before the first window (gldInitializeLibrary). */
+void gld_window_set_kernel_shown(bool possible);
 /* The window's accelerator surface ID if the kernel shows its frames itself (the window was
  * bound as accelerated), else 0: then frames go through gld_window_present. */
 uint32_t gld_window_direct_surface(const struct gld_window *w);
