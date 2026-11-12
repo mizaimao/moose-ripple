@@ -148,10 +148,11 @@ sleep (KI-6), live snapshots that panic it (KI-5) and the pointer drifting with 
 - [ ] OVMF, QEMU's UEFI firmware. Tested: edk2 2025.02 (Proxmox's `pve-edk2-firmware`
   4.2025.02-3).
 - [ ] Mac OS X 10.6.8 (build 10K549) installed in the VM, from your own copy, running the 64-bit
-  kernel. OpenCore below starts it that way.
-- [ ] OpenCore as the boot loader: the boot disk from [boot/opencore/](boot/opencore/README.md)
-  (OpenCore 1.0.8). Other boot loaders are untested.
-- [ ] The SMC key of a real Mac, for QEMU's Apple SMC device (`isa-applesmc,osk=...`).
+  kernel. Both boot loaders below start it that way.
+- [ ] A boot loader: OpenCore, the boot disk from [boot/opencore/](boot/opencore/README.md)
+  (OpenCore 1.0.8), or Chameleon 2.1 (r2069) with SeaBIOS and FakeSMC. Others are untested.
+- [ ] With OpenCore, the SMC key of a real Mac, for QEMU's Apple SMC device
+  (`isa-applesmc,osk=...`). Chameleon's FakeSMC takes its place; don't add `isa-applesmc` then.
 
 This repository contains no Apple software, firmware or keys. Mac OS X 10.6 (and, to build from
 source, Xcode 3.2.6 and its SDK) must come from your own legal copies, and running Mac OS X in a
@@ -160,8 +161,11 @@ virtual machine is subject to Apple's license terms.
 ## Install
 
 What's tested: the steps below on Proxmox VE, including `install.sh` and `uninstall.sh` run from
-a CD image in a copy of the test VM. The plain QEMU command line is the same VM written out for
-QEMU without Proxmox; it hasn't been run as such yet.
+a CD image in a copy of the test VM. Also tested under Chameleon 2.1 r2069 (SeaBIOS, FakeSMC,
+`vga: virtio-gl`): the install, Quartz Extreme, the translucent menu bar, the Dashboard ripple,
+gl-gears at 42-47 frames/s, and the uninstall; for its boot flags see the end of step 4. The
+plain QEMU command line is the same VM written out for QEMU without Proxmox; it hasn't been run
+as such yet.
 
 ### 1. Build the files
 
@@ -207,6 +211,11 @@ qm set VMID --args '-device isa-applesmc,osk="YOUR-SMC-KEY" -smbios type=2 -cpu 
 
 `vga: virtio-gl` needs `libgl1` and `libegl1` on the Proxmox host (`apt install libgl1 libegl1`).
 The Proxmox console then shows the guest through VNC.
+
+With Chameleon instead of OpenCore: `--bios seabios`, no efidisk, the Chameleon 2.1 CD as `ide0`
+(`media=cdrom`), and `args` without the `isa-applesmc` device, the `-fw_cfg` option (SeaBIOS
+keeps PCI memory below 4 GB by itself) and `,vmware-cpuid-freq=off` (an OpenCore setting); that is
+how it was tested. `vga: virtio-gl` and the rest stay the same.
 
 #### Plain QEMU (not tested yet)
 
@@ -290,6 +299,19 @@ The boot flags:
 
 The flags are kept in the VM's UEFI variables (Proxmox's efidisk, or the VARS file with plain
 QEMU), so they survive restarts.
+
+With Chameleon there are no UEFI variables, so what `install.sh` sets with `nvram` is gone after
+the restart. Put the flags in the Kernel Flags of `/Extra/org.chameleon.Boot.plist` on the Snow
+Leopard disk instead. Chameleon reads that file even when it starts from its CD, and its Kernel
+Flags take the place of the CD's own (`npci=0x2000 -v`), so keep `npci=0x2000` in it:
+
+```
+sudo /usr/libexec/PlistBuddy -c 'Add :"Kernel Flags" string "npci=0x2000 -v ripple_gl=1 ripple_qe=1"' /Extra/org.chameleon.Boot.plist
+```
+
+(Use `Set` instead of `Add` if the file already has Kernel Flags.) For a single boot, type
+`ripple_gl=1 ripple_qe=1` at Chameleon's boot prompt instead. `uninstall.sh` doesn't change that
+file; take the `ripple_` flags out of it yourself after uninstalling.
 
 ### 5. Check that it works
 
