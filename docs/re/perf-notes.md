@@ -341,3 +341,35 @@ Apple's software renderer. It is specific to the KVM host: the same 60 s count u
 Apple silicon (emulated CPU, no KVM) shows no stall, with either renderer (issue 22). What
 remains on the rig is about one stall in 20 s, in the one fenced command a frame still sends
 (the display path's).
+
+### After the fix: what is left, by measurement (2026-11-12)
+
+Guest side, screen updates per second (`scripts/pace-run.sh`, VM 210): Dashboard 70, Exposé
+74, menus 49, window drag 80, window resize 78, scrolling a long Finder list 70-127 (one
+update per wheel notch), gl-gears 57. All well above what a VNC viewer can get.
+
+What a viewer gets (`PACE_ENCODING=tight` makes the recorder ask for Tight encoding, as a web
+console does; before that it measured Raw, the best case):
+
+| | Raw, viewer on the host | Tight, as a web console asks |
+|---|---|---|
+| Dashboard | 29 frames/s, 114 MB/s | 15 frames/s, gaps of 61 ms, 15 MB/s |
+| Exposé | 24-30 frames/s, 91 MB/s | 16 frames/s, gaps of 61 ms, 15 MB/s |
+| Window drag | 31 frames/s, 42 MB/s | 28 frames/s, 6.5 MB/s |
+| gl-gears (400x400) | 29 frames/s, 4.6 MB/s | 30 frames/s, 0.4 MB/s |
+
+So through a web console a whole-screen effect arrives at about 15 frames a second and needs
+15 MB/s of lossless data, before the console's own relay and the browser: that, not the
+driver, is what limits how smooth the desktop looks there. It is QEMU's VNC server (30 ms
+timer, Tight encoder); a display on the host GPU, or a viewer with a cheaper encoding on a
+fast link, is the way around it.
+
+An app's GL window by size (gl-gears `-w`, frames/s, and the bundle's time per present):
+400x400 59 (8.8 ms), 800x600 50 (17.5 ms), 1280x720 42-57 (21.6 ms). The cost that grows
+with the size is the copy path: the frame is read back from the host, copied twice in the
+app and uploaded again by WindowServer. Keeping it on the GPU is the remaining driver step
+for large windows (issue 10).
+
+Also seen: for a window that reaches the Dock, WindowServer redraws the Dock's mirror in a
+pass of its own, and each pass shows the screen: two or three screen updates (each a whole
+screen read back by QEMU) and submits per app frame instead of one.

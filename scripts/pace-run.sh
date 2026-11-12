@@ -8,12 +8,17 @@
 #   guest   every screen update our GL bundle sends to the kernel (DISPLAY), by dtrace on
 #           WindowServer: the gaps between them and the time each takes. Skipped when the
 #           bundle isn't loaded there (Apple's software renderer) or with PACE_GUEST=0.
-#   scripts/pace-run.sh SCENARIO ...     dashboard | expose | menu | drag | gears
+#   scripts/pace-run.sh SCENARIO ...     dashboard | expose | menu | drag | scroll | resize | gears
 # A frame counts when it changes at least a set share of the screen (per scenario), so the
 # clock and a blinking cursor don't. Gaps are taken inside a burst (frames less than 250 ms
 # apart). Other VNC viewers slow the delivery: close consoles first (the count is printed).
 # Scene: one Finder window with bounds {200, 100, 1000, 600}. drag takes it by its title bar,
-# down-left and back, with a pointer move every 10 ms or so (as a mouse sends them).
+# down-left and back, with a pointer move every 10 ms or so (as a mouse sends them). resize
+# drags its bottom right corner in and out the same way. scroll first shows a long
+# folder (/System/Library/Extensions) as a list in it, then turns the wheel 120 notches down and 120 up, a notch every 10 ms or so.
+# PACE_ENCODING=tight asks the VNC server for Tight encoding, as a web console (noVNC) does,
+# instead of Raw: what the server delivers when it has to compress, and the megabytes a second
+# that takes on the wire.
 # The raw times of the last run stay in tmp-ci/pace/SCENARIO.txt.
 set -eu
 . "$(dirname "$0")/lib.sh"
@@ -25,6 +30,7 @@ LEAD=3                              # seconds of still screen before the first i
 mkdir -p "$ROOT/tmp-ci/pace"
 
 tag=ripple-pace-$$
+rsync -a "$ROOT/tools/vncgrab/vncrec.c" "$DEV:$REPO/tools/vncgrab/"
 ssh $SSH_OPTS "$DEV" "cd ~/$REPO && mkdir -p tmp-ci/rec && cc -O2 -static -o tmp-ci/rec/vncrec tools/vncgrab/vncrec.c && cat tmp-ci/rec/vncrec" |
     ssh "$RETRO" "cat > /tmp/$tag && chmod 700 /tmp/$tag"
 trap 'ssh "$RETRO" "rm -f /tmp/$tag"' EXIT
@@ -51,6 +57,9 @@ for s in "$@"; do
         menu)      acts='click 3300 300;sleep 0.6;move 4400 300;sleep 0.6;move 5600 300;sleep 0.6;move 6600 300;sleep 0.6;move 7700 300;sleep 0.6;move 6600 300;sleep 0.6;move 5600 300;sleep 0.6;move 4400 300;sleep 0.6;move 3300 300;sleep 0.6;key esc;sleep 0.6'
                    secs=6; minl=8000; minf=8000 ;;
         drag)      acts='drag 15359 3563 9000 14000 150 0.008;sleep 0.5'; secs=5; minl=0; minf=50000 ;;
+        scroll)    acts='move 15359 14000;sleep 0.3;wheel down 120 0.004;sleep 0.4;wheel up 120 0.004;sleep 0.5'; secs=5; minl=0; minf=50000
+                   gssh "osascript -e 'tell application \"Finder\" to set target of front window to (POSIX file \"/System/Library/Extensions\" as alias)' -e 'tell application \"Finder\" to set current view of front window to list view' >/dev/null 2>&1" || true ;;
+        resize)    acts='drag 25394 24247 19000 17000 100 0.008;sleep 0.5'; secs=4; minl=0; minf=50000 ;;
         gears)     acts='sleep 6'; secs=6; minl=0; minf=10000 ;;
         *)         die "unknown scenario $s" ;;
     esac
@@ -73,14 +82,14 @@ for s in "$@"; do
     sleep 3                         # dtrace attaches; gl-gears opens its window
 
     pw=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 8)
-    ssh "$RETRO" "VMID=$VMID PW=$pw SECS=$total LEAD=$LEAD TAG=$tag ACTS='$acts' bash -s" > "$raw" <<'EOF'
+    ssh "$RETRO" "VMID=$VMID PW=$pw SECS=$total LEAD=$LEAD TAG=$tag ENC=${PACE_ENCODING:-raw} ACTS='$acts' bash -s" > "$raw" <<'EOF'
 set -eu
 qmp1() { printf '%s\n' '{"execute":"qmp_capabilities"}' "$1" | socat -t 2 - UNIX-CONNECT:/var/run/qemu-server/$VMID.qmp; }
 echo "C $(qmp1 '{"execute":"query-vnc"}' | grep -o '"websocket"' | wc -l)"
 qmp1 "{\"execute\":\"set_password\",\"arguments\":{\"protocol\":\"vnc\",\"password\":\"$PW\"}}" >/dev/null
 qmp1 '{"execute":"expire_password","arguments":{"protocol":"vnc","time":"+120"}}' >/dev/null
 mkdir /tmp/$TAG.d
-VNCREC_TIMES=1 VNC_SOCKET=/var/run/qemu-server/$VMID.vnc VNC_PASSWORD=$PW /tmp/$TAG $SECS /tmp/$TAG.d 2>/tmp/$TAG.d/err &
+VNCREC_TIMES=1 VNCREC_ENCODING=$ENC VNC_SOCKET=/var/run/qemu-server/$VMID.vnc VNC_PASSWORD=$PW /tmp/$TAG $SECS /tmp/$TAG.d 2>/tmp/$TAG.d/err &
 rec=$!
 sleep $LEAD
 
@@ -104,6 +113,10 @@ for a in "${steps[@]}"; do
                    ev "$(abs $(( x + (x2 - x) * i / n )) $(( y + (y2 - y) * i / n )))"; sleep ${step:-0.1}
                done
                btn false ;;
+        wheel) for i in $(seq 1 $y); do
+                   ev "{\"type\":\"btn\",\"data\":{\"down\":true,\"button\":\"wheel-$x\"}}"
+                   ev "{\"type\":\"btn\",\"data\":{\"down\":false,\"button\":\"wheel-$x\"}}"; sleep ${x2:-0.03}
+               done ;;
         sleep) sleep "$x" ;;
     esac
 done
@@ -116,12 +129,12 @@ rm -f /tmp/$TAG.d/times.txt /tmp/$TAG.d/size.txt /tmp/$TAG.d/err
 rmdir /tmp/$TAG.d
 EOF
 
-    awk -v s="$s" -v minl="$minl" -v minf="$minf" '
+    awk -v s="$s" -v minl="$minl" -v minf="$minf" -v enc="${PACE_ENCODING:-raw}" '
         function sortarr(a, n,   i, j, t) { for (i = 2; i <= n; i++) { t = a[i]; for (j = i - 1; j >= 1 && a[j] > t; j--) a[j + 1] = a[j]; a[j + 1] = t } }
         function pct(a, n, p,   i) { if (!n) return 0; i = int(n * p + 0.999999); if (i < 1) i = 1; if (i > n) i = n; return a[i] }
         $1 == "C" { others = $2 }
         $1 == "K" { kt[++nk] = $2 }
-        $1 == "F" { ft[++nf] = $2; fa[nf] = $4 }
+        $1 == "F" { ft[++nf] = $2; fa[nf] = $4; fb[nf] = $5 }
         END {
             # The first update is the whole screen sent at connection: not a frame.
             lat = ""
@@ -135,13 +148,13 @@ EOF
             for (i = 2; i <= nf; i++) {
                 if (fa[i] < minf) continue
                 frames++
-                if (prev && ft[i] - prev < 0.25) { g[++ng] = (ft[i] - prev) * 1000; sum += g[ng]; if (g[ng] > 50) over++ }
+                if (prev && ft[i] - prev < 0.25) { g[++ng] = (ft[i] - prev) * 1000; sum += g[ng]; bytes += fb[i]; if (g[ng] > 50) over++ }
                 prev = ft[i]
             }
             sortarr(g, ng)
             printf "%s, viewer (%d other VNC viewers):", s, others
             if (lat != "") printf " input to screen%s ms;", lat
-            if (ng) printf " %d frames, %.1f frames/s in bursts; gaps median %.0f ms, p95 %.0f, max %.0f; %.0f%% over 50 ms\n", frames, 1000 * ng / sum, pct(g, ng, 0.5), pct(g, ng, 0.95), g[ng], 100 * over / ng
+            if (ng) printf " %d frames, %.1f frames/s in bursts; gaps median %.0f ms, p95 %.0f, max %.0f; %.0f%% over 50 ms; %.1f MB/s (%s)\n", frames, 1000 * ng / sum, pct(g, ng, 0.5), pct(g, ng, 0.95), g[ng], 100 * over / ng, bytes / 1048576 / (sum / 1000), enc
             else printf " %d frames, no bursts\n", frames
         }' "$raw"
     grep '^E ' "$raw" | grep -v 'frames of' | sed -e 's/^E /  recorder: /' || true
