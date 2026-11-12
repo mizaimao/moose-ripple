@@ -1,6 +1,6 @@
 #!/bin/sh
-# Pack the ready-built guest files into OUT/moose-ripple-VERSION.zip (run by `make release`).
-#   release/package.sh OUT VERSION [TOOLS]
+# Pack the built guest files into OUT/moose-ripple-VERSION.zip (run by `make package`).
+#   package/package.sh OUT VERSION [TOOLS]
 # The zip holds the two kexts, the GL bundle, the GA plugin, qe-check, install.sh,
 # uninstall.sh, INSTALL, LICENSE, Mesa's license (from the Mesa source under TOOLS) and
 # SHA256SUMS (one line per file, `shasum -a 256 -c` format).
