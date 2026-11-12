@@ -1,0 +1,16 @@
+--- a/src/gallium/drivers/virgl/virgl_screen.c
++++ b/src/gallium/drivers/virgl/virgl_screen.c
+@@ -105,6 +105,13 @@
+       if (vscreen->caps.caps.v2.max_texture_2d_size)
+          return vscreen->caps.caps.v2.max_texture_2d_size;
+       return 16384;
++   case PIPE_CAP_TEXRECT:
++      /* moose-ripple: an OpenGL ES host (UTM: virglrenderer on ANGLE) has no rectangle
++       * textures, and samples ours with unnormalized coordinates taken as normalized: every
++       * texel past the first clamps to the edge, so WindowServer's windows and wallpaper came
++       * out as a mosaic of flat blocks. Without the cap, Mesa lowers rectangle textures to 2D
++       * ones with normalized coordinates itself (st->lower_rect_tex). */
++      return !(vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_HOST_IS_GLES);
+    case PIPE_CAP_MAX_TEXTURE_3D_LEVELS:
+    case PIPE_CAP_ALPHA_TO_COVERAGE_DITHER_CONTROL:
+    case PIPE_CAP_NO_CLIP_ON_COPY_TEX:
