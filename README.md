@@ -32,8 +32,7 @@ inside the VM.
 |---|---|
 | ![Adding a widget to the Dashboard on moose-ripple: the water ripples](media/dashboard-widget-drop-ours.gif) | ![Adding a widget to the Dashboard with software rendering: no ripple](media/dashboard-widget-drop-software.gif) |
 
-*Adding a widget to the Dashboard, recorded in real time in the same VM: moose-ripple on the
-left, software rendering on the right.*
+*The ripple effect! (Though with a bit of stutter.)*
 
 ## How it works
 
@@ -84,15 +83,15 @@ translucent menu bar with the desktop showing through. Both from the same VM.*
 
 ### Measured
 
+**These numbers don't tell the whole story. Even at the frame rates below, using it can still
+feel stuttery: every frame goes through a translation layer to the host and back, so frames
+arrive unevenly.**
+
 The test machine is a Proxmox VE 8.4 host with an Intel Core i9-9900K and its built-in Intel UHD
 Graphics 630. The guest runs at 1280x800 with 4 virtual CPUs. The software rendering column is
 the same VM booted without moose-ripple. The GeForce 9600 GT column is the same Snow Leopard
 install with a real GeForce 9600 GT passed through to it, running Apple's own NVIDIA driver at
 1920x1080 (its monitor has no 1280x800 mode), so its screens are about twice as many pixels.
-
-These numbers don't tell the whole story. Even at the frame rates below, using it can still feel
-stuttery: every frame goes through a translation layer to the host and back, so frames arrive
-unevenly.
 
 | | Software rendering | moose-ripple | GeForce 9600 GT |
 |---|---|---|---|
