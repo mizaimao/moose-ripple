@@ -27,6 +27,10 @@ bool ripple_cgl_device_surface_info(uint32_t id, struct ripple_gpu_surface_info 
  * picture's top row. */
 struct pipe_resource;
 bool ripple_cgl_device_surface_present(uint32_t surface, struct pipe_resource *res, bool top_first);
+/* For a compositor: `res` becomes the texture of a window's surface whose program presents
+ * that way. The kernel keeps it filled with the surface's latest frame, top row first, until
+ * the resource is destroyed (`keep`), or fills it now only. True if it holds a frame now. */
+bool ripple_cgl_device_surface_texture(uint32_t surface, struct pipe_resource *res, bool keep);
 
 /* Wait until the GPU has finished everything this process has sent it so far. Costs nothing
  * when nothing has been sent since the last wait. */

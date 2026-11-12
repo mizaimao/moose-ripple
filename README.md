@@ -69,6 +69,9 @@ The boundary between the GL bundle and the kernel is small, versioned and GPU-ne
 - OpenGL 2.1 for apps, 32- and 64-bit, through Mesa's virgl driver. Apps see the renderer as
   `virgl (Mesa Intel(R) UHD Graphics 630 (CFL GT2))` on the test host. Quartz Composer, Front Row,
   the Flurry screen saver and games such as Angry Birds Rio run on it.
+- Apps' OpenGL windows stay on the GPU: the kernel driver puts each frame on the screen itself,
+  as Apple's own drivers do, and WindowServer draws such a window only while something is drawn
+  over it (the Dock, another window, Exposé).
 - Core Image on the GPU: its filters and Photo Booth's effects.
 - Sound, with no driver of ours: QEMU's USB audio device and Snow Leopard's own driver (tested
   in UTM; [docs/install.md](docs/install.md#sound-optional)).
@@ -103,12 +106,15 @@ pixels.
 |---|---|---|---|
 | Quartz Composer (Arabesque) | doesn't start | 60 frames/s | 58 frames/s |
 | Angry Birds Rio | doesn't start (needs OpenGL 2.0) | 59 frames/s | 60 frames/s |
-| Flurry screen saver | 29 frames/s, 66% of a CPU | 27 frames/s, 4% of a CPU | 30 frames/s, 2% of a CPU |
+| Flurry screen saver | 29 frames/s, 66% of a CPU | 30 frames/s, 3% of a CPU | 30 frames/s, 2% of a CPU |
 | Dashboard animation, screens per second | 7.4-7.9 | 13.6-14.2 | 10.8-11.9 (1920x1080) |
 | Exposé animation, screens per second | 3.6-5.3 | 7.8-11.2 | 7.4-10.5 (1920x1080) |
 
 - Screens per second is the mean of WindowServer's own frame meter (the one in Quartz Debug),
   counted in full screens' worth of pixels.
+- Showing a frame of an app's OpenGL window takes 4-5 ms at any size up to the full screen
+  (gl-gears: 57 frames/s at 800x600, 55-58 at 1280x720). While something is drawn over the
+  window, WindowServer draws it and a frame costs about 7 ms more.
 - Core Image: 23 of 24 filters give the same picture as software rendering, and 55 of Photo
   Booth's 61 effects do ("the same" means within 1-2 colour levels, or under 1% of the pixels
   different). A single Core Image filter is slower than software rendering for now, because each
@@ -126,11 +132,8 @@ Details: [docs/re/perf-notes.md](docs/re/perf-notes.md) and [docs/re/m6-notes.md
 - Real Racing 2: the intro movie draws nothing and the game's own picture is sheared into five
   side-by-side copies ([#8](https://github.com/mizaimao/moose-ripple/issues/8)).
 - Chess: the 3D board stays black ([#9](https://github.com/mizaimao/moose-ripple/issues/9)).
-- Core Image Fun House shows no image (with software rendering too).
 - iMovie hasn't been tried yet. Photo Booth's live effects need a camera, which the test VM
   doesn't have, so the effects were tested on a still photo ([#11](https://github.com/mizaimao/moose-ripple/issues/11)).
-- The OpenGL windows of apps are copied back through the guest every frame: about 20-30 ms per
-  frame for a 1280x800 window. The next performance pass keeps them on the GPU ([#10](https://github.com/mizaimao/moose-ripple/issues/10)).
 - Through QEMU's VNC display, a key press takes about 0.2 s to show on screen, and every extra
   VNC viewer (another Proxmox console tab, for example) makes the picture less smooth for all
   of them ([#10](https://github.com/mizaimao/moose-ripple/issues/10)).

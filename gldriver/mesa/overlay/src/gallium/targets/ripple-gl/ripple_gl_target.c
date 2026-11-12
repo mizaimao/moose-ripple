@@ -184,6 +184,7 @@ gldInitializeLibrary(const io_service_t *accel, const uint8_t *accel_index,
    offer = (qe || (getenv("RIPPLE_GL") && strcmp(getprogname(), "WindowServer") != 0)) &&
            ripple_cgl_device_info(&info);
    lib_qe = qe;
+   gld_window_set_kernel_shown(qe);
    simple_mtx_lock(&lib_lock);
    lib_display_mask = offer ? display_mask : 0;
    simple_mtx_unlock(&lib_lock);
@@ -610,7 +611,8 @@ gldSetInteger(struct gld_context *c, int pname, const int *value)
       if (gld_window_direct_surface(c->win) && window_drawable(c))
          ripple_cgl_drawable_set_surface_present(window_drawable(c),
                                                  gld_window_direct_surface(c->win),
-                                                 c->swap_interval != 0);
+                                                 c->swap_interval != 0, gld_window_direct_flush,
+                                                 c->win);
    }
    /* kCGLCPSwapRectangle (200) and CGLEnable/CGLDisable(kCGLCESwapRectangle) (201). */
    if (c && c->magic == GLD_CONTEXT_MAGIC && pname == 200 && value) {
@@ -914,7 +916,7 @@ gldAttachDrawable(struct gld_context *c, int type, void *data, void *opts)
       gld_window_size(w, &width, &height);
       ripple_cgl_drawable_set_present(d, gld_window_present, w);
       ripple_cgl_drawable_set_surface_present(d, gld_window_direct_surface(w),
-                                              c->swap_interval != 0);
+                                              c->swap_interval != 0, gld_window_direct_flush, w);
       ripple_cgl_drawable_set_size(d, width, height);
       ripple_cgl_context_set_drawable(c->mesa, d);
       if (log || changed)

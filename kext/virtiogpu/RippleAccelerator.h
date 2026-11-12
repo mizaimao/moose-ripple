@@ -13,6 +13,7 @@
 #include "ripple_gpu_uapi.h"
 
 class RippleFramebuffer;
+class RippleSurfaceClient;
 
 class RippleAccelerator : public IOAccelerator
 {
@@ -26,6 +27,7 @@ class RippleAccelerator : public IOAccelerator
     bool               fQEDebug;     // ripple_qe=2: log every surface call
     IOLock            *fSurfacesLock;
     OSArray           *fSurfaces;    // RippleSurfaceClients, for lookups by surface id
+    RippleSurfaceClient *retainSurface(uint32_t id);    // retained, or 0
 
 public:
     VirtioGPUDevice *device() const { return fDev; }
@@ -36,9 +38,16 @@ public:
     void removeSurface(OSObject *s);
     // Describe surface `id` for task `asker` (backing address only for its owner).
     bool describeSurface(uint32_t id, task_t asker, struct ripple_gpu_surface_info *out);
-    // Surface `id`'s place and visible rectangles on the screen (RippleSurfaceClient::screenShape).
-    bool surfaceScreenShape(uint32_t id, IOAccelBounds *bounds, IOAccelBounds *rects,
-                            uint32_t maxRects, uint32_t *count);
+    // A GPU client's finished frame for surface `id` (RippleSurfaceClient::presentFrame): true
+    // if it went on the screen. And a buffer or context of a GPU client going away: no surface
+    // may keep using it.
+    bool presentSurfaceFrame(uint32_t id, uint32_t handle, uint32_t context, uint32_t format,
+                             uint32_t width, uint32_t height, bool topFirst);
+    void forgetSurfaceFrames(uint32_t handle, uint32_t context);
+    // A compositor's buffer that surface `id` keeps filled with its frames, or fills once
+    // (RippleSurfaceClient::setTexture); false if there is no such surface.
+    bool setSurfaceTexture(uint32_t id, uint32_t handle, uint32_t format, uint32_t width,
+                           uint32_t height, bool once, bool *filled);
 
     virtual bool start(IOService *provider);
     virtual void stop(IOService *provider);
