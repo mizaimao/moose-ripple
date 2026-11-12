@@ -57,6 +57,10 @@ Graphics 630. The guest runs at 1280x800 with 4 virtual CPUs. The software rende
 the same VM booted without moose-ripple. Numbers from a real GeForce 9600 GT passed through to
 the VM will follow, and perhaps a Radeon HD 5870 later.
 
+These numbers don't tell the whole story. Even at the frame rates below, using it can still feel
+stuttery: every frame goes through a translation layer to the host and back, so frames arrive
+unevenly.
+
 | | Software rendering | moose-ripple |
 |---|---|---|
 | Quartz Composer (Arabesque) | doesn't start | 60 frames/s |
