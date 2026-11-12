@@ -24,14 +24,16 @@ moose-ripple is still at an early stage, and it won't replace GPU passthrough. I
 the performance, but translating every call to the host will always leave a gap to a real card
 inside the VM.
 
-![gl-gears on the host GPU under Snow Leopard's translucent menu bar](media/gears-menu-bar.png)
+![gl-gears on the host GPU under Snow Leopard's translucent menu bar](media/gears-menu-bar.webp)
 
-| moose-ripple | Apple's software rendering |
+*gl-gears drawing on the host GPU, under the translucent menu bar.*
+
+| moose-ripple | Software rendering |
 |---|---|
-| ![Adding a widget to the Dashboard on moose-ripple: the water ripples](media/dashboard-widget-drop-ours.gif) | ![Adding a widget to the Dashboard with Apple's software rendering: no ripple](media/dashboard-widget-drop-software.gif) |
+| ![Adding a widget to the Dashboard on moose-ripple: the water ripples](media/dashboard-widget-drop-ours.gif) | ![Adding a widget to the Dashboard with software rendering: no ripple](media/dashboard-widget-drop-software.gif) |
 
 *Adding a widget to the Dashboard, recorded in real time in the same VM: moose-ripple on the
-left, Apple's software rendering on the right.*
+left, software rendering on the right.*
 
 ## What works
 
@@ -43,37 +45,32 @@ left, Apple's software rendering on the right.*
   the Flurry screen saver and games such as Angry Birds Rio run on it.
 - Core Image on the GPU: its filters and Photo Booth's effects.
 
-![The menu bar with Apple's software rendering (top) and with moose-ripple (bottom)](media/menubar-compare.png)
+![The menu bar with software rendering (top) and with moose-ripple (bottom)](media/menubar-compare.webp)
 
-*Top: Apple's software rendering, an opaque white menu bar. Bottom: moose-ripple, the
+*Top: software rendering, an opaque white menu bar. Bottom: moose-ripple, the
 translucent menu bar with the desktop showing through. Both from the same VM.*
 
 ### Measured
 
 The test machine is a Proxmox VE 8.4 host with an Intel Core i9-9900K and its built-in Intel UHD
-Graphics 630. The guest runs at 1280x800 with 4 virtual CPUs. moose-ripple is compared with
-Apple's software renderer in the same VM, booted without moose-ripple. Numbers from a real
-GeForce 9600 GT passed through to the VM are coming, and perhaps a Radeon HD 5870 later.
+Graphics 630. The guest runs at 1280x800 with 4 virtual CPUs. The software rendering column is
+the same VM booted without moose-ripple. Numbers from a real GeForce 9600 GT passed through to
+the VM will follow, and perhaps a Radeon HD 5870 later.
 
-| | Apple's software renderer | moose-ripple |
+| | Software rendering | moose-ripple |
 |---|---|---|
-| Quartz Composer (Arabesque) | refuses to start | 60 frames/s |
-| Angry Birds Rio (32-bit) | refuses to start ("OpenGL 2.0 renderer not supported") | 59 frames/s |
+| Quartz Composer (Arabesque) | doesn't start | 60 frames/s |
+| Angry Birds Rio | doesn't start (needs OpenGL 2.0) | 59 frames/s |
 | Flurry screen saver | 29 frames/s, 66% of a CPU | 27 frames/s, 4% of a CPU |
-| Dashboard, screens composited per second, peak / mean | 18.7-20 / 7.4-7.9 | 29-30 / 13.6-14.2 |
-| Exposé, screens composited per second, peak / mean | 10-11 / 3.6-5.3 | 22-24 / 7.8-11.2 |
-| 24 Core Image filters on a 480x300 photo | reference | 23 match; CIEdges differs on 3.9% of pixels |
-| 61 Photo Booth effects on the same photo | reference | 55 match; Concert, Neon, Blue Print, Comic Book, Pointillize and Pinch differ |
-| Photo Booth effect, time per frame | 2-3 ms | 0.4-0.8 ms for most |
-| Core Image filter, time per frame | 1-5 ms | 2-90 ms |
+| Dashboard animation, screens per second | 7.4-7.9 | 13.6-14.2 |
+| Exposé animation, screens per second | 3.6-5.3 | 7.8-11.2 |
 
-- "Screens composited per second" is WindowServer's own frame meter (the one in Quartz Debug),
-  counted in full screens' worth of pixels. Dashboard composites fewer, larger frames than the
-  software renderer: 80 / 35-38 frames per second against 90-92 / 38-42.
-- "Match" means within 1-2 colour levels of the software renderer, or under 1% of the pixels
-  different.
-- A single Core Image filter is slower than software for now, because each render is a round
-  trip through QEMU. That is on the list for the next performance pass.
+- Screens per second is the mean of WindowServer's own frame meter (the one in Quartz Debug),
+  counted in full screens' worth of pixels.
+- Core Image: 23 of 24 filters give the same picture as software rendering, and 55 of Photo
+  Booth's 61 effects do ("the same" means within 1-2 colour levels, or under 1% of the pixels
+  different). A single Core Image filter is slower than software rendering for now, because each
+  render makes a round trip through QEMU.
 - The host GPU's minimum clock was raised to 1200 MHz for these numbers
   (`/sys/class/drm/card0/gt_min_freq_mhz` on Intel). At the default 350 MHz each screen update
   takes about 5 ms longer.
@@ -85,7 +82,7 @@ Details: [docs/re/perf-notes.md](docs/re/perf-notes.md) and [docs/re/m6-notes.md
 - Real Racing 2: the intro movie draws nothing and the game's own picture is sheared into five
   side-by-side copies ([#8](https://github.com/mizaimao/moose-ripple/issues/8)).
 - Chess: the 3D board stays black ([#9](https://github.com/mizaimao/moose-ripple/issues/9)).
-- Core Image Fun House shows no image (with Apple's software renderer too).
+- Core Image Fun House shows no image (with software rendering too).
 - iMovie hasn't been tried yet. Photo Booth's live effects need a camera, which the test VM
   doesn't have, so the effects were tested on a still photo ([#11](https://github.com/mizaimao/moose-ripple/issues/11)).
 - The OpenGL windows of apps are copied back through the guest every frame: about 20-30 ms per
@@ -99,22 +96,6 @@ Details: [docs/re/perf-notes.md](docs/re/perf-notes.md) and [docs/re/m6-notes.md
 Some problems of 10.6 in QEMU show up without moose-ripple too: a panic when the guest goes to
 sleep (KI-6), live snapshots that panic it (KI-5) and the pointer drifting with QEMU's USB tablet
 (KI-1). They are in [docs/known-issues.md](docs/known-issues.md), with workarounds.
-
-## Status
-
-| Milestone | What it covers | State |
-|---|---|---|
-| M0 | Build, deploy and kernel-debug loop from a Linux build host | done |
-| M1 | Reverse-engineering spike: Apple's OpenGL plugin and accelerator interfaces | done |
-| M2 | Display driver: virtio-gpu framebuffer, any resolution, hardware cursor | done |
-| M3 | 3D transport: virgl contexts, resources and command submission from the guest | done |
-| M4 | OpenGL 2.1 on the host GPU (Mesa's virgl driver, ported to Snow Leopard) | done |
-| M5 | Quartz Extreme: WindowServer composites on the GPU (Exposé, Dashboard ripple, translucent menu bar) | done |
-| M6 | Core Image and real apps: Quartz Composer, Core Image filters, Photo Booth effects and Front Row work; Real Racing 2 and iMovie are open | in progress |
-| Performance, second pass | App OpenGL windows kept on the GPU, fewer round trips for Core Image | after M6 |
-
-Each milestone measures the numbers above again and must not make them slower. Reports for each
-milestone are in [docs/re/](docs/re/).
 
 ## Build environment
 
