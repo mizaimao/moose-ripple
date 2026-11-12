@@ -35,6 +35,38 @@ inside the VM.
 *Adding a widget to the Dashboard, recorded in real time in the same VM: moose-ripple on the
 left, software rendering on the right.*
 
+## How it works
+
+```
+ Guest: Mac OS X 10.6.8
+ ┌───────────────────────────────────────────────────────────────┐
+ │ Apps, WindowServer, Core Image, Core Animation                │
+ │      │ OpenGL / CGL                       │ 2D blits          │
+ │ RippleGLDriver.bundle                RippleGA.plugin          │
+ │  Mesa virgl driver + a CGL front end  (WindowServer's         │
+ │      │ IOKit user client               graphics accelerator)  │
+ ├──────┼────────────────────────────────────────────────────────┤
+ │ RippleVirtioGPU.kext                                          │
+ │  virtio transport, framebuffer and cursor, accelerator        │
+ │  surfaces, virgl contexts, resources and fences               │
+ └──────┬────────────────────────────────────────────────────────┘
+        │ virtio-gpu (virgl)
+ Host:  QEMU (virtio-vga-gl) ─► virglrenderer ─► host OpenGL ─► any GPU
+```
+
+- `RippleVirtioGPU.kext` drives the virtio-gpu card: display modes, scanout, the hardware
+  cursor, and the 3D commands the GL driver sends. To Snow Leopard it looks like a graphics
+  card with an accelerator.
+- `RippleGLDriver.bundle` is an OpenGL renderer plugin, loaded by Apple's OpenGL framework like
+  any vendor driver. Inside is Mesa's virgl Gallium driver, built for 10.6.
+- `RippleGA.plugin` gives WindowServer the 2D blitter it asks for before it will composite the
+  screen with OpenGL.
+- `RippleQEMUTablet.kext` (optional) makes QEMU's USB tablet work as an exact absolute pointer.
+
+The boundary between the GL bundle and the kernel is small, versioned and GPU-neutral:
+[docs/kext-uapi.md](docs/kext-uapi.md). The design and the plan are in
+[HANDOFF.md](HANDOFF.md), the decisions in [docs/decisions/](docs/decisions/).
+
 ## What works
 
 - Quartz Extreme: WindowServer composites the whole screen on the GPU. The menu bar and menus
@@ -304,38 +336,6 @@ Our own development loop is in `scripts/`. It builds on a Linux host over ssh an
 Proxmox VM, taking a snapshot first (`build.sh`, `install-kext.sh`, `install-glbundle.sh`,
 `bootargs.sh`, `qe-check.sh`). Its settings (host, VM ID, guest user and key) are at the top of
 [scripts/lib.sh](scripts/lib.sh).
-
-## How it works
-
-```
- Guest: Mac OS X 10.6.8
- ┌───────────────────────────────────────────────────────────────┐
- │ Apps, WindowServer, Core Image, Core Animation                │
- │      │ OpenGL / CGL                       │ 2D blits          │
- │ RippleGLDriver.bundle                RippleGA.plugin          │
- │  Mesa virgl driver + a CGL front end  (WindowServer's         │
- │      │ IOKit user client               graphics accelerator)  │
- ├──────┼────────────────────────────────────────────────────────┤
- │ RippleVirtioGPU.kext                                          │
- │  virtio transport, framebuffer and cursor, accelerator        │
- │  surfaces, virgl contexts, resources and fences               │
- └──────┬────────────────────────────────────────────────────────┘
-        │ virtio-gpu (virgl)
- Host:  QEMU (virtio-vga-gl) ─► virglrenderer ─► host OpenGL ─► any GPU
-```
-
-- `RippleVirtioGPU.kext` drives the virtio-gpu card: display modes, scanout, the hardware
-  cursor, and the 3D commands the GL driver sends. To Snow Leopard it looks like a graphics
-  card with an accelerator.
-- `RippleGLDriver.bundle` is an OpenGL renderer plugin, loaded by Apple's OpenGL framework like
-  any vendor driver. Inside is Mesa's virgl Gallium driver, built for 10.6.
-- `RippleGA.plugin` gives WindowServer the 2D blitter it asks for before it will composite the
-  screen with OpenGL.
-- `RippleQEMUTablet.kext` (optional) makes QEMU's USB tablet work as an exact absolute pointer.
-
-The boundary between the GL bundle and the kernel is small, versioned and GPU-neutral:
-[docs/kext-uapi.md](docs/kext-uapi.md). The design and the plan are in
-[HANDOFF.md](HANDOFF.md), the decisions in [docs/decisions/](docs/decisions/).
 
 ## Credits
 
