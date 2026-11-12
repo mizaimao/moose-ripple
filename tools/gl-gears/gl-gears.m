@@ -3,8 +3,10 @@
  * three spinning gears with plain OpenGL 1.x/2.1 calls, double-buffered, and prints the
  * renderer and the frame rate. It asks for an accelerated renderer without recovery, so it
  * runs on our driver (start it with RIPPLE_GL=1) or fails if there is none.
- *   gl-gears [-r] [-a] [SECONDS]   quit after SECONDS (default 10); -r: resize to 640x480
- *                                  after 3 s; -a: clear with alpha 0
+ *   gl-gears [-r] [-a] [-s] [SECONDS]   quit after SECONDS (default 10); -r: resize to 640x480
+ *                                  after 3 s; -a: clear with alpha 0; -s: use Apple's software
+ *                                  renderer (a reference). Prints the frame rate and the longest
+ *                                  frame every 2 s.
  * Written for moose-ripple; geometry is our own (a disc of teeth, extruded).
  * Built without ARC (10.6): manual retain/release.
  */
@@ -18,6 +20,7 @@
 static double run_seconds = 10;
 static float clear_alpha = 1;   /* -a: clear with alpha 0 (an opaque surface must still show the background) */
 static int resize_test;        /* -r: grow the window to 640x480 after 3 s */
+static int software;           /* -s: Apple's software renderer instead of an accelerated one */
 
 /* One gear: `teeth` teeth between radius r0 (hub hole) and r1/r2 (root/tip), width w. */
 static GLuint make_gear(float r0, float r1, float r2, float w, int teeth, const GLfloat *color)
@@ -73,7 +76,7 @@ static GLuint make_gear(float r0, float r1, float r2, float w, int teeth, const 
 
 @interface GearsView : NSOpenGLView {
     GLuint gears[3];
-    double start, last_report;
+    double start, last_report, last_frame, longest;
     int frames;
 }
 @end
@@ -162,11 +165,16 @@ static GLuint make_gear(float r0, float r1, float r2, float w, int teeth, const 
     [[self openGLContext] flushBuffer];
 
     frames++;
+    if (last_frame > 0 && now - last_frame > longest)
+        longest = now - last_frame;
+    last_frame = now;
     if (now - last_report >= 2.0) {
-        printf("%d frames in %.1f s: %.1f fps\n", frames, now - last_report,
-               frames / (now - last_report));
+        /* The longest frame shows a stutter that the frame rate averages away. */
+        printf("%d frames in %.1f s: %.1f fps, longest frame %.0f ms\n", frames, now - last_report,
+               frames / (now - last_report), longest * 1000);
         fflush(stdout);
         frames = 0;
+        longest = 0;
         last_report = now;
     }
 }
@@ -180,6 +188,10 @@ int main(int argc, char **argv)
             clear_alpha = 0;
             continue;
         }
+        if (!strcmp(argv[i], "-s")) {
+            software = 1;
+            continue;
+        }
         if (!strcmp(argv[i], "-r"))
             resize_test = 1;
         else
@@ -191,7 +203,11 @@ int main(int argc, char **argv)
     NSOpenGLPixelFormatAttribute attrs[] = { NSOpenGLPFAAccelerated, NSOpenGLPFANoRecovery,
         NSOpenGLPFADoubleBuffer, NSOpenGLPFAColorSize, 24, NSOpenGLPFAAlphaSize, 8,
         NSOpenGLPFADepthSize, 24, 0 };
-    NSOpenGLPixelFormat *pf = [[NSOpenGLPixelFormat alloc] initWithAttributes:attrs];
+    /* -s: Apple's software renderer (kCGLRendererGenericFloatID), as a reference. */
+    NSOpenGLPixelFormatAttribute soft[] = { NSOpenGLPFARendererID, 0x00020400,
+        NSOpenGLPFADoubleBuffer, NSOpenGLPFAColorSize, 24, NSOpenGLPFAAlphaSize, 8,
+        NSOpenGLPFADepthSize, 24, 0 };
+    NSOpenGLPixelFormat *pf = [[NSOpenGLPixelFormat alloc] initWithAttributes:software ? soft : attrs];
     if (!pf) {
         fprintf(stderr, "no accelerated pixel format (start with RIPPLE_GL=1?)\n");
         return 1;

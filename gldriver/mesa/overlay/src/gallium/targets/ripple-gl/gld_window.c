@@ -9,6 +9,7 @@
  * read from 10.6.8's binaries). Missing ones make attaching fail cleanly.
  */
 #include <dlfcn.h>
+#include <mach/mach_time.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -363,6 +364,15 @@ gld_window_set_swap_rect(struct gld_window *w, bool on, const int rect[4])
    memcpy(w->swap_rect, rect, sizeof(w->swap_rect));
 }
 
+static double
+ms_since(uint64_t t0)
+{
+   static mach_timebase_info_data_t tb;
+   if (!tb.denom)
+      mach_timebase_info(&tb);
+   return (double)(mach_absolute_time() - t0) * tb.numer / tb.denom / 1e6;
+}
+
 /* ripple_cgl_present_fn: pixels are BGRA8, bottom row first (see below). */
 void
 gld_window_present(void *data, const uint8_t *pixels, unsigned stride, unsigned width,
@@ -447,13 +457,24 @@ gld_window_present(void *data, const uint8_t *pixels, unsigned stride, unsigned 
       for (unsigned y = y0; y < y1 && x1 > x0; y++)
          memcpy((uint8_t *)w->base + (size_t)y * w->row_bytes + x0 * 4,
                 pixels + (size_t)(height - 1 - y) * stride + x0 * 4, (x1 - x0) * 4);
+      /* The three window-server calls are timed: a present that takes over 60 ms in them is
+       * logged (a frozen GL window; performance pass, 2026-11-12). */
+      uint64_t t0 = mach_absolute_time();
       cgs.UnlockWindowBits(w->cid, w->priv, NULL);
+      double unlock_ms = ms_since(t0);
       w->base = NULL;
       sync_opacity(w);
+      t0 = mach_absolute_time();
       int fe = cgs.FlushSurfaceWithOptions(w->cid, w->wid, w->sid, NULL, w->vsync);
+      double flush_ms = ms_since(t0);
       if (presents < 4)
          DBG("CGSFlushSurfaceWithOptions = %d\n", fe);
+      t0 = mach_absolute_time();
       lock_bits(w);
+      double lock_ms = ms_since(t0);
+      if (unlock_ms + flush_ms + lock_ms > 60)
+         DBG("slow present %d: unlock %.0f ms, flush %.0f ms, lock %.0f ms\n", presents, unlock_ms,
+             flush_ms, lock_ms);
    }
    simple_mtx_unlock(&windows_lock);
 }

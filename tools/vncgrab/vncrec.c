@@ -6,6 +6,9 @@
  * stdout, joined by scripts/vnc-record.sh to `qm vncproxy` on the host. Built static on dev.lan,
  * copied to the host's /tmp for one recording and removed afterwards.
  *   VNC_PASSWORD=<pw> vncrec SECONDS OUTDIR     writes OUTDIR/frames.bin and OUTDIR/times.txt
+ * With VNCREC_TIMES set it keeps no pictures: times.txt gets one line per screen update, "wall
+ * clock time (s), rectangles, pixels changed", for measuring how evenly frames reach a viewer
+ * (scripts/pace-run.sh).
  */
 #include <errno.h>
 #include <poll.h>
@@ -88,6 +91,13 @@ static double now(void)
 {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+static double wall(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
@@ -235,14 +245,16 @@ int main(int argc, char **argv)
 
     char path[1024];
     snprintf(path, sizeof(path), "%s/frames.bin", argv[2]);
-    FILE *frames = fopen(path, "wb");
+    int times_only = getenv("VNCREC_TIMES") != NULL;
+    FILE *frames = times_only ? NULL : fopen(path, "wb");
     snprintf(path, sizeof(path), "%s/times.txt", argv[2]);
     FILE *times = fopen(path, "w");
-    if (!frames || !times) {
+    if ((!frames && !times_only) || !times) {
         fprintf(stderr, "vncrec: can't write to %s\n", argv[2]);
         return 1;
     }
-    setvbuf(frames, NULL, _IOFBF, 8 << 20);
+    if (frames)
+        setvbuf(frames, NULL, _IOFBF, 8 << 20);
     uint8_t *fb = calloc((size_t)w * h, 4);
     double t0 = 0;
     unsigned count = 0;
@@ -256,6 +268,7 @@ int main(int argc, char **argv)
         if (b[0] == 0) {
             get(b, 3);
             unsigned nrect = be16(b + 1);
+            unsigned long area = 0;
             /* Ask for the next one at once: QEMU prepares it while this one arrives. */
             request(1, w, h);
             for (unsigned r = 0; r < nrect; r++) {
@@ -270,6 +283,7 @@ int main(int argc, char **argv)
                     fprintf(stderr, "vncrec: unexpected encoding %d\n", e);
                     return 1;
                 }
+                area += (unsigned long)rw * rh;
                 for (unsigned row = 0; row < rh; row++) {
                     if (y + row < h && x + rw <= w)
                         get(fb + (((size_t)(y + row) * w) + x) * 4, (size_t)rw * 4);
@@ -286,8 +300,12 @@ int main(int argc, char **argv)
             double t = now();
             if (!count)
                 t0 = t;
-            fwrite(fb, 4, (size_t)w * h, frames);
-            fprintf(times, "%.4f\n", t - t0);
+            if (times_only)
+                fprintf(times, "%.6f %u %lu\n", wall(), nrect, area);
+            else {
+                fwrite(fb, 4, (size_t)w * h, frames);
+                fprintf(times, "%.4f\n", t - t0);
+            }
             count++;
             if (t - t0 >= seconds)
                 break;
@@ -312,7 +330,8 @@ int main(int argc, char **argv)
         }
     }
 done:
-    fclose(frames);
+    if (frames)
+        fclose(frames);
     fclose(times);
     /* times.txt gets its header last: the size line first, then the times. */
     snprintf(path, sizeof(path), "%s/size.txt", argv[2]);
