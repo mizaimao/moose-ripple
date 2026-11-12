@@ -9,11 +9,12 @@ Next after M6, guided by what the real apps and games show:
   1280x800 window); keep them on the GPU instead.
 - Each Core Image render is a round trip through QEMU, which makes a single filter slower than
   software rendering; batch or avoid those round trips.
-- Present the screen at most once per display refresh (60 Hz). During Dashboard effects the
-  guest sends 100-300 whole-screen updates a second, and with `egl-headless` QEMU reads the
-  whole screen back from the host GPU for each one. Capping presents at the refresh rate would
-  cut that host work several-fold; likely the biggest single source of stutter after the
-  viewer.
+- Present the screen at most once per display refresh (60 Hz). Measured on 2026-11-12: the
+  guest sends 45-100 whole-screen updates a second during effects, each 2-3 ms, so a cap would
+  save little; low priority.
+- A stall of about 170 ms every few seconds while something animates, below the driver (a
+  runnable thread in the guest is not run): see [re/perf-notes.md](re/perf-notes.md).
+- Fewer kernel round trips per composited frame (5 submits and 4 waits now).
 - Frames reach a VNC viewer unevenly (see [re/perf-notes.md](re/perf-notes.md)). Every open
   VNC viewer (a Proxmox web console, for example) makes QEMU encode each frame again, before the
   next viewer gets it: with one console open, a second viewer got whole-screen frames every

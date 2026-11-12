@@ -57,6 +57,7 @@ struct ripple_winsys {
 
    simple_mtx_t fence_mutex;
    uint64_t signalled;                 /* every fence up to this one has signalled */
+   uint64_t last_fence;                /* the newest fence number the kernel has given us */
 };
 
 struct virgl_hw_res {
@@ -130,6 +131,15 @@ static bool ripple_fence_done(struct ripple_winsys *ws, uint64_t id, uint32_t ti
       ws->signalled = id;
    simple_mtx_unlock(&ws->fence_mutex);
    return true;
+}
+
+/* Every submit and transfer gets a fence number from the kernel, in queue order. */
+static void ripple_note_fence(struct ripple_winsys *ws, uint64_t id)
+{
+   simple_mtx_lock(&ws->fence_mutex);
+   if (id > ws->last_fence)
+      ws->last_fence = id;
+   simple_mtx_unlock(&ws->fence_mutex);
 }
 
 static void ripple_fence_wait_forever(struct ripple_winsys *ws, uint64_t id)
@@ -377,6 +387,7 @@ static int ripple_transfer(struct virgl_winsys *vws, struct virgl_hw_res *res, u
    if (dir == RIPPLE_GPU_TO_DEVICE)
       p_atomic_inc(&work_count);
    p_atomic_set(&res->fence, fence);
+   ripple_note_fence(ws, fence);
    return 0;
 }
 
@@ -561,6 +572,8 @@ static int ripple_submit(struct ripple_winsys *ws, const uint32_t *handles, unsi
                                           sizeof(*s) + nh * 4 + ndw * 4, fence, &out_cnt, NULL,
                                           NULL);
    p_atomic_inc(&work_count);          /* after the call: see ripple_transfer */
+   if (kr == KERN_SUCCESS && fence)
+      ripple_note_fence(ws, *fence);
    return kr == KERN_SUCCESS ? 0 : -1;
 }
 
@@ -766,6 +779,18 @@ struct pipe_screen *ripple_virgl_screen_create(io_connect_t conn,
 io_connect_t ripple_virgl_screen_connection(struct pipe_screen *screen)
 {
    return ripple_winsys(virgl_screen(screen)->vws)->conn;
+}
+
+void ripple_virgl_wait_idle(struct pipe_screen *screen)
+{
+   struct ripple_winsys *ws = ripple_winsys(virgl_screen(screen)->vws);
+   uint64_t id;
+
+   simple_mtx_lock(&ws->fence_mutex);
+   id = ws->last_fence;
+   simple_mtx_unlock(&ws->fence_mutex);
+   if (id)
+      ripple_fence_wait_forever(ws, id);      /* no kernel call if it has signalled already */
 }
 
 uint32_t ripple_virgl_resource_handle(struct pipe_resource *res)

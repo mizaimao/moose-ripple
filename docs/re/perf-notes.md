@@ -221,3 +221,123 @@ For the second performance pass: a GL window's present spends about 14 ms of its
 three window-server calls (`CGSFlushSurfaceWithOptions` 8 ms, `CGSLockWindowBits` 6-7 ms),
 on top of the read-back. Showing app surfaces through the kernel surface instead of a private
 window would remove both.
+
+## Second pass: how evenly frames arrive (2026-11-12)
+
+The numbers above are rates. Stutter is about gaps, so this pass starts with tools for those:
+
+- `scripts/pace-run.sh SCENARIO` gives two views of one run. Viewer: every screen update QEMU's
+  VNC server delivers to a client on the VM host itself (`tools/vncgrab/vncrec.c`, timing only),
+  against the time of each key press. Guest: every screen update the GL bundle sends to the
+  kernel, by dtrace on WindowServer.
+- `gl-gears` prints the longest frame of every 2 s, and `-s` runs it on Apple's software
+  renderer as a reference.
+- The GL bundle logs a present that spends over 60 ms in its three window-server calls
+  ("slow present").
+
+VM 210 had been booted with `ripple_qe=2` since M5, which makes the kext log every surface call
+(hundreds of lines a second). It now runs with `ripple_qe=1`, as an installed system does. The
+frame meter numbers did not change with it (Dashboard 26-55 / 15-32, Exposé 27-28 / 9-15
+screens per second, peak / mean, two runs).
+
+### Baseline (VM 210, 1280x800, one Finder window, no other VNC viewer)
+
+Viewer side, ours against Apple's software renderer in the same VM (two to three runs each):
+
+| | ours | software |
+|---|---|---|
+| Dashboard: key to screen | 45-110 ms | 70-145 ms |
+| Dashboard: frames/s in the animation, longest gap | 29-30, 42-48 ms | 30-31, 41-90 ms |
+| Exposé: key to screen | 40-130 ms | 95-340 ms |
+| Exposé: frames/s, longest gap | 22-31, 48-210 ms | 19-21, 98-126 ms |
+| Menus: click or move to screen | 25-170 ms (first click 100-560) | 40-135 ms (first click 125-340) |
+| Window drag: frames/s, longest gap | 29-31, 37-240 ms | 32, 37-58 ms |
+
+QEMU's VNC server sends a frame every 30 ms at most, so 30 frames a second is the ceiling for
+any viewer, and a viewer on the host gets them evenly. The guest side is faster than that:
+45-100 screen updates a second (Dashboard 52-63, Exposé 40-88, window drag 70-75, gl-gears
+45-55), each taking 2-3 ms in the kernel call. So for the desktop effects the driver is no
+longer what limits smoothness; the viewing path is. (The "100-300 updates a second" in an
+earlier note was WindowServer's update requests, not screen updates.)
+
+### The stall: about 170 ms, every few seconds
+
+What does stand out in the guest is a stall of 140-200 ms, a few times every 10 s while
+something animates. Counted with gl-gears over 60 s (two-second windows with a frame over
+100 ms, of 29):
+
+| WindowServer composites with | gl-gears renders with | windows with a stall |
+|---|---|---|
+| Apple's software compositor | Apple's software renderer | 5 |
+| moose-ripple | Apple's software renderer | 16 |
+| moose-ripple | moose-ripple | 21-24 |
+
+What it is, by measurement:
+- QEMU is not slow. Its own trace (`virtio_gpu_*` trace events, switched on over QMP for 20 s)
+  shows every command answered within a fraction of a millisecond, also the one before each
+  stall; then no command arrives from the guest for 155-180 ms.
+- In the guest, the thread waiting for that answer does not continue. Timed inside the kext's
+  wait (temporary instrumentation, not committed): either its sleep with a 1 ms deadline
+  returns 140-190 ms late, or it wakes at once and then waits that long for the command lock,
+  held by a thread that is itself not being run. The CPUs are mostly idle meanwhile.
+- So a thread that has become runnable is sometimes not run for about 170 ms. That is below
+  the driver, and it shows with Apple's renderer and compositor too (the kext's 2D path is
+  still there), only less often: fewer commands, fewer chances.
+
+Ruled out, each by a run with only that changed:
+- The kext's 20 ms polling fallback: with 1 ms polling the count is the same (21 of 29).
+- The kext's per-call logging (`ripple_qe=2` against `1`) and the GL bundle's log folder.
+- QEMU's synchronous handling of the notify write (`-global virtio-vga-gl.ioeventfd=on`: 13 of
+  29 and 14 of 19).
+- Idle CPUs: boot flag `idlehalt=0` (21 of 29), a 1 kHz timer tick on every CPU (24 of 29),
+  four busy loops (7 of 29, stalls of 147 ms).
+- The host GPU's runtime suspend (it stays active), new shaders or objects (WindowServer
+  creates none in the steady state), disk writes by QEMU (64 KB in 20 s).
+
+Open: what delays the runnable thread. Next checks: the same 60 s `gl-gears -s` count on a VM
+without the kext, with one virtual CPU, and on the other hosts.
+
+### Where a frame's time goes with one GL window animating
+
+Per composited frame WindowServer makes 5 SUBMIT, 4 WAIT, 1 DISPLAY, 3 SURFACE_INFO and 2
+surface-shape kernel calls: about 10 ms in all (SUBMIT 0.9 ms, WAIT 0.8 ms, DISPLAY 2.3 ms on
+average), half of its wall time. gl-gears itself spends about 40% of its time waiting in two
+window-server calls (`CGSLockWindowBits` and `CGSFlushSurfaceWithOptions`). Fewer waits and
+submits per frame, and app windows kept on the GPU, are the driver's next steps.
+
+### Fix: waiting for the GPU without a round trip when nothing was sent (2026-11-12)
+
+Where the per-frame calls came from (dtrace on WindowServer, call sites): four of the five
+submits and all four waits were `glTestObjectAPPLE`. Before WindowServer lets an app touch a
+window's memory (`CGSLockWindowBits`), it tests the window's textures four times, and our
+`glTestObjectAPPLE`, like the fence and finish calls of GL_APPLE_fence and
+GL_APPLE_flush_render, flushed with a Mesa fence and waited on it: a submit even when the
+buffer was empty, then a sync, two round trips to the host each time.
+
+Now the flush sends only what is queued, and the wait is for the newest fence number the
+kernel has given this process, which the winsys remembers as signalled once it has been waited
+for. Repeated tests with nothing new cost no kernel call.
+
+Same scene, VM 210, `ripple_qe=1`:
+
+| | before | after |
+|---|---|---|
+| Kernel calls per composited frame (one GL window animating): submit / wait / display | 5 / 4 / 1 | 1 / 1 (no host round trip) / 1 |
+| Time in them per frame | about 10 ms | about 5.4 ms |
+| gl-gears in a window, 60 s | 44-52 frames/s | 58.5 frames/s |
+| ...two-second windows with a frame over 100 ms | 21-24 of 29 | 3 of 29 |
+| The same with Apple's software renderer drawing the window | 16 of 29, 53 frames/s | 1 of 29, 58.8 frames/s |
+| Core Image filters, time per frame (24 filters) | 2-90 ms | 1.6-13.8 ms (median 2.9; software 2.0) |
+| Dashboard, screens per second, peak / mean (three runs) | 26-55 / 15-32 | 29-36 / 11-16 |
+| Exposé, screens per second, peak / mean | 27-28 / 9-15 | 22-25 / 10-11 |
+
+Pictures unchanged: the same one Core Image filter (CIEdges, 3.9%) and the same six Photo
+Booth effects differ from software rendering as before; desktop, Exposé, Dashboard and
+gl-gears checked by eye.
+
+So the stall above goes with the sync round trips (a fenced empty submit and the wait for its
+reply): with one per frame instead of four it is nearly gone, also for a window drawn by
+Apple's software renderer. It is specific to the KVM host: the same 60 s count under UTM on
+Apple silicon (emulated CPU, no KVM) shows no stall, with either renderer (issue 22). What
+remains on the rig is about one stall in 20 s, in the one fenced command a frame still sends
+(the display path's).
