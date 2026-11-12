@@ -3,7 +3,7 @@
  * every 30 ms (scripts/vnc-record.sh: after a still spell it sends at most every 3 s and speeds
  * up only step by step, so an animation's first second came out as two or three frames). A 1x1
  * window at the top-left corner, above everything (Dashboard included), black, with its red
- * channel flipping between 0 and 1 every 40 ms: invisible, and the corner is black anyway (the
+ * channel flipping between 0 and 1 every 20 ms: invisible, and the corner is black anyway (the
  * menu bar's rounded corner). No Dock icon, no menu bar, doesn't take the focus.
  *   ticker [SECONDS]      default 60
  */
@@ -46,7 +46,7 @@ int main(int argc, char **argv)
     [t->win setCollectionBehavior:NSWindowCollectionBehaviorCanJoinAllSpaces];
     [t->win setBackgroundColor:[NSColor blackColor]];
     [t->win orderFrontRegardless];
-    [NSTimer scheduledTimerWithTimeInterval:0.04 target:t selector:@selector(tick:) userInfo:nil
+    [NSTimer scheduledTimerWithTimeInterval:0.02 target:t selector:@selector(tick:) userInfo:nil
                                     repeats:YES];
     [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:seconds]];
     [pool release];

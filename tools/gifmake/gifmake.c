@@ -4,11 +4,13 @@
  * for the time until the next one arrived. For the README's animations. Plain C, runs where it
  * is built (dev.lan; scripts/vnc-record.sh builds and runs it):
  *   cc -O2 -o gifmake gifmake.c -lm
- *   gifmake [-d DITHER] DIR OUT.gif WIDTH [FROM TO]
+ *   gifmake [-d DITHER] [-l LOSS] DIR OUT.gif WIDTH [FROM TO]
  * DIR holds frames.bin (BGRX frames, one after another) and times.txt ("W H", then the arrival
  * time of each frame in seconds). WIDTH: output width (the height follows), scaled with an area
  * filter. FROM and TO: the part of the recording to keep, in seconds; the last frame stays until
- * TO. DITHER: ordered dithering strength in colour levels (default 6, 0 for none).
+ * TO. DITHER: ordered dithering strength in colour levels (default 6, 0 for none). LOSS: a pixel
+ * whose colour is within LOSS (sum over R, G, B) of what is shown counts as unchanged: smaller
+ * files, still parts stay still.
  *
  * One palette for the whole animation (median cut over every frame, 255 colours; index 255 is
  * transparent), ordered dithering (it gives the same pixels for the same picture, so still parts
@@ -223,6 +225,7 @@ static int nearest(int r, int g, int b)
 
 static const int bayer[4][4] = { { 0, 8, 2, 10 }, { 12, 4, 14, 6 }, { 3, 11, 1, 9 }, { 15, 7, 13, 5 } };
 static double dither = 6;
+static int loss;                    /* -l: a pixel this close to what is shown counts as unchanged */
 
 static void quantize(uint8_t *out)
 {
@@ -333,12 +336,15 @@ static void write_frame(struct pending *p, int delay)
 int main(int argc, char **argv)
 {
     int a = 1;
-    if (a + 1 < argc && !strcmp(argv[a], "-d")) {
-        dither = atof(argv[a + 1]);
+    while (a + 1 < argc && (!strcmp(argv[a], "-d") || !strcmp(argv[a], "-l"))) {
+        if (argv[a][1] == 'd')
+            dither = atof(argv[a + 1]);
+        else
+            loss = atoi(argv[a + 1]);
         a += 2;
     }
     if (argc - a != 3 && argc - a != 5) {
-        fprintf(stderr, "usage: gifmake [-d DITHER] DIR OUT.gif WIDTH [FROM TO]\n");
+        fprintf(stderr, "usage: gifmake [-d DITHER] [-l LOSS] DIR OUT.gif WIDTH [FROM TO]\n");
         return 2;
     }
     const char *dir = argv[a], *out = argv[a + 1];
@@ -430,6 +436,13 @@ int main(int argc, char **argv)
             return 1;
         scale_frame();
         quantize(cur);
+        if (loss && p.have)
+            for (size_t i = 0; i < (size_t)OW * OH; i++) {
+                const uint8_t *c = rgb + i * 3, *s = pal[shown[i]];
+                int d = abs(c[0] - s[0]) + abs(c[1] - s[1]) + abs(c[2] - s[2]);
+                if (d <= loss)
+                    cur[i] = shown[i];             /* close enough: keep what is shown */
+            }
         int x0 = OW, x1 = -1, y0 = OH, y1 = -1;
         if (!p.have) {
             x0 = 0; x1 = OW - 1; y0 = 0; y1 = OH - 1;
