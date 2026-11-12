@@ -362,3 +362,29 @@ from a second thread), which would only help a window that is busy and covered a
 A trap for traces: `dtrace -p` on WindowServer with a script file that does not exist leaves
 WindowServer suspended (dtrace stops the process before it reads the script), and every
 program then hangs at its first window-server call. Check that the file is there first.
+
+## Step 8: real apps with the kernel-shown path switched on (2026-11-12)
+
+VM 210, every app once on the default path and once with the file
+`/Library/Logs/RippleGL/direct` present (the switch for all programs), same steps, captures of
+both, swaps counted with dtrace on `CGLFlushDrawable`, time per present from the bundle's log.
+The pictures were the same in every pair.
+
+| App | default path | kernel-shown path |
+|---|---|---|
+| Angry Birds Rio, title screen (32-bit, full screen) | 32-39 frames/s, WindowServer 17% of a CPU | 58 frames/s, WindowServer 1% |
+| Flurry screen saver, full screen | 30 frames/s (its cap), 22-24 ms a present, WindowServer 32%, ScreenSaverEngine 11% | 30 frames/s, 4.5-5 ms, WindowServer 0%, ScreenSaverEngine 3% |
+| Quartz composition (Arabesque) in a Quick Look window | 25 frames/s, 7-8 ms | 32 frames/s, 4.2 ms |
+| Quartz Composer, viewer behind the editor window | 24 frames/s, 7-8 ms | 23 frames/s, 5.1 ms (WindowServer draws it: covered) |
+| QuickTime Player, a movie playing | 30 frames/s, 12-13 ms, WindowServer 15%, the player 29% | 30 frames/s, 7.5 ms, WindowServer 5%, the player 18% (WindowServer draws it: the surface is not opaque) |
+| Screen saver preview in System Preferences (RSS Visualizer, Flurry) | 30 frames/s, 9-10 ms, WindowServer 6% | 30 frames/s, 4 ms, WindowServer 0% |
+| Real Racing 2 (its intro, black on our driver either way) | 30 frames/s, 9-12 ms | 30 frames/s, 3.1 ms |
+| Front Row, Core Image Fun House with a picture | right | the same |
+| Chess | board black (a known fault) | the same |
+
+Dashboard opened over a running gl-gears window: the window dims under it and keeps turning
+(WindowServer draws it meanwhile), and the kernel shows it again when Dashboard closes.
+
+Not tried: Grapher's 3D examples and Keynote transitions (need a document or menu steps),
+iTunes' visualiser, DVD Player, Photo Booth and video chat (no disc, no camera), the same
+switch on a host without KVM.
