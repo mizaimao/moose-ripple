@@ -13,10 +13,6 @@ real-time recordings of the display:
 | `dashboard-widget-drop-software.gif` | The same with Apple's software rendering. |
 | `gears-menu-bar.webp` | gl-gears running in a window, with the translucent menu bar in the same shot. |
 
-Still planned, each with a commented-out spot in the README:
-
-| File | Shows |
-|---|---|
 
 Capture rules: a clean guest user account (new user, default wallpaper, no network shares, no
 personal files or apps visible). Screenshots of the development VMs stay in the git-ignored
