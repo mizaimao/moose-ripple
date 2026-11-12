@@ -3,7 +3,7 @@
  * three spinning gears with plain OpenGL 1.x/2.1 calls, double-buffered, and prints the
  * renderer and the frame rate. It asks for an accelerated renderer without recovery, so it
  * runs on our driver (start it with RIPPLE_GL=1) or fails if there is none.
- *   gl-gears [-r] [-a] [-s] [SECONDS]   quit after SECONDS (default 10); -r: resize to 640x480
+ *   gl-gears [-r] [-m] [-a] [-s] [SECONDS]   quit after SECONDS (default 10); -r: resize to 640x480
  *                                  after 3 s; -a: clear with alpha 0; -s: use Apple's software
  *                                  renderer (a reference); -w WIDTHxHEIGHT: the size of the
  *                                  drawing area (default 400x400). Prints the frame rate and
@@ -21,6 +21,7 @@
 static double run_seconds = 10;
 static float clear_alpha = 1;   /* -a: clear with alpha 0 (an opaque surface must still show the background) */
 static int resize_test;        /* -r: grow the window to 640x480 after 3 s */
+static int move_test;          /* -m: the window moves by itself from 3 s to about 5 s, then stays */
 static int win_w = 400, win_h = 400;   /* -w WIDTHxHEIGHT */
 static int software;           /* -s: Apple's software renderer instead of an accelerated one */
 
@@ -134,6 +135,21 @@ static GLuint make_gear(float r0, float r1, float r2, float w, int teeth, const 
         printf("resized to 640x480\n");
         fflush(stdout);
     }
+    if (move_test && now - start > 3 && move_test <= 60) {
+        /* 60 steps of 5,2 pixels, about 30 a second: what WindowServer does with a GL
+         * surface while its window moves, without a pointer. */
+        static double last_step;
+        if (now - last_step >= 0.033) {
+            NSWindow *w = [self window];
+            NSPoint o = [w frame].origin;
+            [w setFrameOrigin:NSMakePoint(o.x + 5, o.y - 2)];
+            last_step = now;
+            if (move_test++ == 60) {
+                printf("moved\n");
+                fflush(stdout);
+            }
+        }
+    }
     if (now - start > run_seconds)
         [NSApp terminate:nil];
     [self setNeedsDisplay:YES];
@@ -198,6 +214,10 @@ int main(int argc, char **argv)
         }
         if (!strcmp(argv[i], "-s")) {
             software = 1;
+            continue;
+        }
+        if (!strcmp(argv[i], "-m")) {
+            move_test = 1;
             continue;
         }
         if (!strcmp(argv[i], "-r"))
