@@ -7,7 +7,7 @@ https://github.com/mizaimao/moose-ripple
 
 Before you start
 - The VM runs Mac OS X 10.6.8 with the 64-bit kernel, booted by OpenCore, with QEMU's
-  virtio-vga-gl card (Proxmox: vga: virtio-gl). The VM settings are in the project's README.
+  virtio-vga-gl card (Proxmox: vga: virtio-gl). The VM settings are in the project's docs/install.md.
 - Turn sleep off in the guest: sudo pmset -a sleep 0 displaysleep 0 disksleep 0
 - Take a snapshot of the VM.
 
