@@ -44,6 +44,10 @@ Mac's GPU, for example through UTM. Our guest files are x86 and run inside the e
 unchanged; the CPU emulation makes the system slow, but drawing would no longer run on that
 slow emulated CPU. A later target in decision 0008.
 
+Tested since 2026-11-11 in UTM 5.0.8 on an M1 Max: Quartz Extreme, the translucent menu bar and
+gl-gears at about 55 frames/s work; the pointer is invisible there (KI-8). Setup:
+[install.md](install.md#utm-on-an-apple-silicon-mac).
+
 ## Other Mac OS X versions
 
 10.5, 10.7 and 10.8. The OpenCore boot disk already starts 10.7 to 10.9, but the driver is built
