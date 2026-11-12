@@ -33,8 +33,9 @@ and buffers belong to the connection and are destroyed when it closes or its tas
 | 7 | `TRANSFER` | struct `ripple_gpu_transfer`: buffer, direction, level, box, layout in the backing | scalar: fence |
 | 8 | `WAIT` | scalars: fence, timeout (ms) | scalar: 1 signalled, 0 timed out |
 | 9 | `DISPLAY` | scalars: buffer handle, x, y, width, height | (none): shows that region of the buffer on the display instead of the console framebuffer, or presents it again; handle 0 gives the display back |
-| 10 | `SURFACE_INFO` | scalar: accelerator surface id | struct `ripple_gpu_surface_info`: size, row bytes, screen position, screen size, flags (has CPU backing, is a region of the screen), and the backing's address for the surface's own task |
+| 10 | `SURFACE_INFO` | scalar: accelerator surface id | struct `ripple_gpu_surface_info`: size, row bytes, screen position, screen size, flags (has CPU backing, is a region of the screen, a program presents on it), and the backing's address for the surface's own task |
 | 11 | `SURFACE_PRESENT` | scalars: accelerator surface id, buffer handle, context handle, flags | scalar: 1 the buffer is on the screen now, 0 the surface is not a plain region of the screen at the moment |
+| 12 | `SURFACE_TEXTURE` | scalars: accelerator surface id, buffer handle (one of the caller's; 0 = none), flags | scalar: 1 the buffer holds a frame of the surface now, 0 none has been presented yet |
 
 **Display.** `DISPLAY` (added for M5) puts a GPU buffer on the screen instead of the console
 framebuffer, and each further call with the same buffer presents its current contents. The
@@ -58,6 +59,19 @@ draws. A result of 0 is not an error: the surface is hidden, or WindowServer is 
 window itself just now (while it moves, for example), and the caller shows the frame another
 way. `TRANSFER` now attaches a buffer to the context itself when no `SUBMIT` has named it
 yet.
+
+**A surface as a compositor's texture.** `SURFACE_TEXTURE` (added 2026-11-12) is for the
+process that draws windows itself when the kernel does not show them (WindowServer: a moving
+window, Exposé). It names one of its own buffers as the texture of a surface that a program
+presents on, and from then on the kernel copies every presented frame into that buffer, on
+the GPU, top row first, before `SURFACE_PRESENT` returns; the latest frame is copied in at
+once. The compositor just draws with the buffer whenever the program tells it there is a new
+frame. One buffer per surface: naming another replaces it, 0 or destroying the buffer ends it.
+Flag `RIPPLE_GPU_TEXTURE_ONCE` (1): only copy the latest frame in now. `SURFACE_INFO` reports
+such a surface with `RIPPLE_GPU_SURFACE_FRAMES`. The standard surface client's Flush, which
+WindowServer sends when it wants a surface shown where it has just shaped it, is answered the
+same way as a present: the latest frame is copied to the screen if the surface is a plain
+region of it.
 
 **Surfaces.** `SURFACE_INFO` (added for M5) describes one of the standard IOAccelerator surfaces
 (the type 0 client WindowServer and GL apps open): what a GL driver needs to render for it.

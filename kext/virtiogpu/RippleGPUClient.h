@@ -45,7 +45,6 @@ class RippleGPUClient : public IOUserClient
     IOBufferMemoryDescriptor *fCmd;
     uint64_t           fCmdPA;
     uint32_t           fShown;                   // buffer this connection shows on the display
-    uint32_t           fScreenAttached[kMaxContexts];   // the screen buffer attached to fContext[i]
 
     int  contextSlot(uint32_t ctx) const;
     uint32_t firstContext() const;
@@ -59,6 +58,7 @@ class RippleGPUClient : public IOUserClient
     bool ensureCommandBuffer();
     IOReturn surfacePresent(uint32_t surface, uint32_t handle, uint32_t context, uint32_t flags,
                             uint64_t *shown);
+    IOReturn surfaceTexture(uint32_t surface, uint32_t handle, uint32_t flags, uint64_t *filled);
 
     // Method implementations (called with fLock held).
     IOReturn getInfo(struct ripple_gpu_info *out);

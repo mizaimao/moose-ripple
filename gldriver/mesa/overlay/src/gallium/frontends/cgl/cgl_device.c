@@ -189,6 +189,26 @@ ripple_cgl_device_surface_present(uint32_t surface, struct pipe_resource *res, b
           KERN_SUCCESS && out == 1;
 }
 
+bool
+ripple_cgl_device_surface_texture(uint32_t surface, struct pipe_resource *res, bool keep)
+{
+   io_connect_t conn = device_connection();
+   uint64_t in[3] = { surface, 0, keep ? 0 : RIPPLE_GPU_TEXTURE_ONCE }, out = 0;
+   uint32_t out_cnt = 1;
+
+   if (!conn || !res)
+      return false;
+   switch (device_backend) {
+   case RIPPLE_GPU_BACKEND_VIRGL:
+      in[1] = ripple_virgl_resource_handle(res);
+      break;
+   }
+   if (!in[1])
+      return false;
+   return IOConnectCallScalarMethod(conn, RIPPLE_GPU_SURFACE_TEXTURE, in, 3, &out, &out_cnt) ==
+          KERN_SUCCESS && out == 1;
+}
+
 void
 ripple_cgl_device_wait_idle(void)
 {
