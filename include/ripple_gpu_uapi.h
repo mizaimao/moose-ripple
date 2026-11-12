@@ -39,6 +39,12 @@ enum ripple_gpu_method {
     RIPPLE_GPU_SURFACE_PRESENT = 11, /* in scalars: surface id, buffer, context, RIPPLE_GPU_PRESENT_*;
                                         out scalar: 1 shown, 0 the surface is not a plain region
                                         of the screen now (show it another way) */
+    RIPPLE_GPU_SURFACE_TEXTURE = 12, /* in scalars: surface id, buffer (one of the caller's; 0 = none),
+                                        RIPPLE_GPU_TEXTURE_*. From now on the kernel keeps that
+                                        buffer filled with the surface's latest presented frame,
+                                        top row first (one buffer per surface; with ONCE it only
+                                        copies the frame there now). out scalar: 1 it holds a
+                                        frame now, 0 none presented yet */
     RIPPLE_GPU_METHOD_COUNT
 };
 
@@ -94,9 +100,14 @@ struct ripple_gpu_transfer {
 #define RIPPLE_GPU_PRESENT_TOP_FIRST 0x1    /* the buffer's first row is the picture's top row
                                                (otherwise its bottom row, as OpenGL draws) */
 
+/* SURFACE_TEXTURE flags. */
+#define RIPPLE_GPU_TEXTURE_ONCE     0x1     /* copy the latest frame now, don't keep the buffer */
+
 #define RIPPLE_GPU_SURFACE_BACKING  0x1     /* has CPU backing; backing_address valid for the owner */
 #define RIPPLE_GPU_SURFACE_SCREEN   0x2     /* a region of the screen (shaped without backing): what is
                                              * drawn goes on the display at x, y */
+#define RIPPLE_GPU_SURFACE_FRAMES   0x4     /* a GPU client presents its frames on it (SURFACE_PRESENT):
+                                             * SURFACE_TEXTURE gives them to a compositor */
 struct ripple_gpu_surface_info {
     uint32_t id;
     uint32_t flags;                 /* RIPPLE_GPU_SURFACE_* */

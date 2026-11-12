@@ -221,3 +221,80 @@ Open: what brings a surface back to a plain region after a move on Apple's drive
 stays on the slower path until Exposé or a new attach), the `Flush` call (the kext still
 answers it from the lock memory, the 2D way), minimising, covered windows, a program that
 draws once, surfaces that are not opaque.
+
+## Trace 5: a GL window that moves, on Apple's driver (2026-11-12)
+
+Reference VM 211 (9600 GT), `gl-gears -m` (the window moves itself for two seconds, 60 steps),
+dtrace on WindowServer. The question was how a window gets back to the path where the kernel
+shows its frames, after WindowServer has drawn it itself for a while. It does not get back.
+
+- **Before the move** the surface has a plain shape (options 0) and WindowServer does nothing
+  per frame (trace 3).
+- **The move starts**: `SetShape(options 2, non-simple)` at the old place, then for the first
+  two steps `SetShape(0, the new place)` and `SetShape(2)` again. After that WindowServer makes
+  no more shape calls for the surface, for the other 58 steps and for the six seconds the
+  window then stays where it stopped: the surface is left non-simple, at a place two steps into
+  the move. No `IOAccelFlushSurfaceOnFramebuffers` and no read lock in that time.
+- **From the first step on the program's driver flushes the surface to WindowServer at every
+  swap**: `CGXFlushSurface` arrives 59 times a second, during the move and for as long as the
+  window lives afterwards. So the driver learns at a swap that the kernel did not show the
+  frame and tells WindowServer instead (our `SURFACE_PRESENT` answering 0 is the same thing).
+- **WindowServer draws the window itself for each of those flushes**
+  (`CGXRedrawSpecifiedWindowsToDisplayAndRegion`, 59 a second) with a texture it made of the
+  surface once, when the window appeared: one `IOAccelReadLockSurfaceWithOptions(2)`, which
+  returned an address, 1600 row bytes, 400x400 and pixel format 4, then
+  `CGXGLCreateSurfaceTextureReference`, which calls
+  `cglsSetInteger(997, {surface ID, GL_TEXTURE_RECTANGLE, GL_RGB8, 400, 400,
+  GL_UNSIGNED_INT_8_8_8_8_REV, 0x400, 0})` on its GL context. That is the only read lock and
+  the only 997 in the window's life. `CGXNextSurface` keeps the texture with the surface and
+  takes the read lock only when it has none (`CGXGLGetSurfaceTextureInformation` answers from
+  the texture). The texture's data pointer is a dummy (`0xdeadbeef`): WindowServer never
+  uploads anything into it.
+- The program keeps 58.7 frames/s through all of it.
+
+So on Apple's driver parameter 997 ties the texture to the surface for good: every later frame
+of the program shows through it with no further call. The window never returns to a plain
+shape by itself; the path through WindowServer is simply as cheap as the direct one.
+
+## Step 5: the window's surface as WindowServer's texture, kept live (2026-11-12)
+
+The same run on our kext (VM 210, `RIPPLE_GL_DIRECT=1 gl-gears -m`) showed the same calls from
+WindowServer as trace 5: one read lock and one 997 when the window appears, shapes alternating
+plain and non-simple for the first steps of the move (15 here, 2 there), then non-simple for
+good, a `CGXFlushSurface` from the program for every frame, no kernel flush. But the picture
+stopped: after the move the window showed the frame it had when WindowServer made its texture.
+Our GL bundle answered 997 with a copy of the surface's memory, once. Step 4's check, a drag
+with the pointer, did not catch this.
+
+What the kext and the bundle do now:
+- `SURFACE_TEXTURE` (docs/kext-uapi.md): WindowServer's GL bundle, at 997 for a surface that a
+  program presents on (`RIPPLE_GPU_SURFACE_FRAMES` in `SURFACE_INFO`), gives the bound texture
+  storage of its own and names that buffer to the kext as the surface's texture. The kext
+  copies the latest frame into it at once and every later frame at its present, on the GPU, in
+  the program's context, top row first, in the same submit as the copy to the screen. The link
+  ends when WindowServer deletes the texture (the buffer's destruction) or names another.
+  998 and 999 for such a surface copy the latest frame once.
+- The copies moved into the surface client (`RippleSurfaceClient::pushFrame`); `SURFACE_PRESENT`
+  only hands it the frame.
+- Flush on such a surface is answered the same way as a present: the latest frame is copied to
+  the screen if the surface is a plain region of it now, instead of the old copy from the lock
+  memory. WindowServer did not send one in these runs.
+
+Checked on VM 210 with captures: the gears keep turning after a self-move, during and after a
+drag with the pointer, and in Exposé; a window partly under a dialog is clipped right; resize,
+two windows at once and killing the program in the middle of a move leave the desktop clean.
+Numbers (gl-gears, frames/s and time per present):
+
+| | 400x400 | 1280x686 |
+|---|---|---|
+| kernel shows the frame | 58.7, 4.1 ms | 58.3-58.8, 4.8-5.5 ms |
+| after a move, WindowServer draws it | 58.4, 13.3 ms | 55-58, 12-14 ms |
+
+After a move the frame rate holds, but each present waits for WindowServer's redraw (the
+flush to it is a call that returns when the window is drawn): a program that needs most of a
+frame's time to draw would lose frames there. Apple's driver stays at 58.7 frames/s on that
+path; what its flush costs the program was not measured.
+
+Open: a window whose first frames arrive while WindowServer still has the new surface
+non-simple can start on the slower path and stay there (seen once in five starts of the big
+window); minimising; a program that draws once; surfaces that are not opaque.

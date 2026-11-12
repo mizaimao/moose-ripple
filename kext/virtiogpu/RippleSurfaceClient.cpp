@@ -96,10 +96,10 @@ IOReturn RippleSurfaceClient::clientDied(void)
 void RippleSurfaceClient::free(void)
 {
     releaseBacking();
-    if (fStageCmd) {
-        fStageCmd->complete();
-        fStageCmd->release();
-        fStageCmd = 0;
+    if (fCmd) {
+        fCmd->complete();
+        fCmd->release();
+        fCmd = 0;
     }
     if (fRegion)
         IOFree(fRegion, fRegionBytes);
@@ -257,6 +257,13 @@ IOReturn RippleSurfaceClient::flush(uint32_t framebufferMask, uint32_t options)
 {
     if (!fID || !fRegion)
         return kIOReturnNotReady;
+    // A GPU client's window: its latest frame, copied on the GPU to where the surface is now
+    // (WindowServer asks while a window moves: shape at the new place, flush). Nothing if the
+    // surface is not a plain region of the screen: WindowServer draws the window itself then.
+    if (fFrameHandle) {
+        pushFrame(false, true);
+        return kIOReturnSuccess;
+    }
     IOMemoryDescriptor *src = fClientMem ? fClientMem : (IOMemoryDescriptor *)fOwnMem;
     if (!src)
         return kIOReturnSuccess;        // never drawn into: nothing to show
@@ -428,8 +435,8 @@ IOReturn RippleSurfaceClient::externalMethod(uint32_t selector, IOExternalMethod
 
 // ---- A GPU client's frames --------------------------------------------------------------------
 
-void RippleSurfaceClient::setFrame(uint32_t handle, uint32_t context, uint32_t format,
-                                   uint32_t width, uint32_t height, bool topFirst)
+bool RippleSurfaceClient::presentFrame(uint32_t handle, uint32_t context, uint32_t format,
+                                       uint32_t width, uint32_t height, bool topFirst)
 {
     IOLockLock(fLock);
     fFrameHandle = handle;
@@ -438,7 +445,31 @@ void RippleSurfaceClient::setFrame(uint32_t handle, uint32_t context, uint32_t f
     fFrameWidth = width;
     fFrameHeight = height;
     fFrameTopFirst = topFirst;
+    bool shown = pushFrame(true, true);
     IOLockUnlock(fLock);
+    return shown;
+}
+
+bool RippleSurfaceClient::setTexture(uint32_t handle, uint32_t format, uint32_t width,
+                                     uint32_t height, bool once)
+{
+    uint32_t attached = 0;
+    IOLockLock(fLock);
+    if (!once) {
+        fTexHandle = handle;
+        fTexFormat = format;
+        fTexWidth = width;
+        fTexHeight = height;
+        fTexContext = 0;
+    }
+    bool filled = handle && copyFrame(handle, format, width, height,
+                                      once ? &attached : &fTexContext);
+    if (fAccel->qeDebug())
+        LOG("surface %u texture: buffer %u format %u %ux%u%s, frame buffer %u (context %u): filled %d",
+            fID, handle, format, width, height, once ? " once" : "", fFrameHandle, fFrameContext,
+            filled);
+    IOLockUnlock(fLock);
+    return filled;
 }
 
 void RippleSurfaceClient::forgetFrame(uint32_t handle, uint32_t context)
@@ -448,6 +479,12 @@ void RippleSurfaceClient::forgetFrame(uint32_t handle, uint32_t context)
         fFrameHandle = fFrameContext = 0;
     if (context && fStageContext == context)
         fStageContext = 0;              // the context took its attachments with it
+    if (context && fTexContext == context)
+        fTexContext = 0;
+    if (context && fScreenContext == context)
+        fScreenContext = 0;
+    if (handle && fTexHandle == handle)
+        fTexHandle = fTexContext = 0;   // the compositor's texture is gone
     IOLockUnlock(fLock);
 }
 
@@ -463,9 +500,148 @@ void RippleSurfaceClient::dropStage()
     }
 }
 
+bool RippleSurfaceClient::ensureCommands()
+{
+    if (fCmd)
+        return true;
+    IOBufferMemoryDescriptor *cmd = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+        kernel_task, kIODirectionOut | kIOMemoryPhysicallyContiguous, kCommandBytes,
+        0xFFFFFFFFFFFFF000ULL);
+    if (!cmd)
+        return false;
+    if (cmd->prepare() != kIOReturnSuccess) {
+        cmd->release();
+        return false;
+    }
+    fCmd = cmd;
+    fCmdPA = cmd->getPhysicalSegment(0, NULL, kIOMemoryMapperNone);
+    return true;
+}
+
+// Make `buffer` usable in the frame's context; `*attached` is the context it is known to be
+// attached to.
+bool RippleSurfaceClient::attachTo(uint32_t buffer, uint32_t *attached)
+{
+    if (*attached == fFrameContext)
+        return true;
+    if (!fAccel->framebuffer()->device()->ctxAttachResource(fFrameContext, buffer))
+        return false;
+    *attached = fFrameContext;
+    return true;
+}
+
+// One copy command (virgl: BLIT, 22 dwords): w x h pixels of the frame, from column sx and row
+// `top` counted from the picture's top, to dx, dy of `dst`, where rows count from the top too
+// (found by trying on the buffer on the display: a copy to row 300 landed 300 rows from the
+// top). A frame stored bottom row first is turned over by a negative source height.
+uint32_t RippleSurfaceClient::blitCommand(uint32_t *c, uint32_t dst, uint32_t dstFormat,
+                                          int32_t dx, int32_t dy, int32_t w, int32_t h,
+                                          int32_t sx, int32_t top)
+{
+    bzero(c, kBlitDwords * 4);
+    c[0] = 16 | ((kBlitDwords - 1) << 16);
+    c[1] = 0xf;                         // all channels, nearest, no scissor
+    c[4] = dst;
+    c[6] = dstFormat;
+    c[7] = (uint32_t)dx;
+    c[8] = (uint32_t)dy;
+    c[10] = (uint32_t)w;
+    c[11] = (uint32_t)h;
+    c[12] = 1;
+    c[13] = fFrameHandle;
+    c[15] = fFrameFormat;
+    c[16] = (uint32_t)sx;
+    if (fFrameTopFirst) {
+        c[17] = (uint32_t)top;
+        c[20] = (uint32_t)h;
+    } else {
+        c[17] = fFrameHeight - (uint32_t)top;
+        c[20] = (uint32_t)-h;
+    }
+    c[19] = (uint32_t)w;
+    c[21] = 1;
+    return kBlitDwords;
+}
+
+// The frame to where it is looked at: into the compositor's texture, and onto the screen for
+// each visible rectangle of the surface when it is a plain region of the screen now (not when
+// WindowServer has shaped it non-simple or scaled it: it draws the window itself then). One
+// submit in the client's context, so after everything the client has submitted, then the
+// display is flushed. Returns whether the frame went on the screen. Called with fLock held.
+bool RippleSurfaceClient::pushFrame(bool toTexture, bool toScreen)
+{
+    if (!fFrameHandle || !fFrameContext || !ensureCommands())
+        return false;
+    RippleFramebuffer *fb = fAccel->framebuffer();
+    VirtioGPUDevice *dev = fb->device();
+    uint32_t *cmd = (uint32_t *)fCmd->getBytesNoCopy(), dw = 0;
+
+    if (toTexture && fTexHandle && fTexHandle != fFrameHandle &&
+        attachTo(fTexHandle, &fTexContext)) {
+        uint32_t w = fFrameWidth < fTexWidth ? fFrameWidth : fTexWidth;
+        uint32_t h = fFrameHeight < fTexHeight ? fFrameHeight : fTexHeight;
+        dw += blitCommand(cmd + dw, fTexHandle, fTexFormat, 0, 0, w, h, 0, 0);
+    }
+
+    uint32_t screen = 0, screenFormat = 0, sw = 0, sh = 0, shownFrom = dw;
+    bool plain = toScreen && fID && fScreenRegion && fRegion && fBufWidth && fBufHeight &&
+                 !fHasScale && !(fShapeOptions & kIOAccelSurfaceShapeNonSimpleBit) &&
+                 fRegion->num_rects && fRegion->num_rects <= kMaxShowRects;
+    if (plain) {
+        screen = fb->shownResource(&screenFormat);
+        fb->screenSize(&sw, &sh);
+        // No GPU buffer on the display to copy into: not shown.
+        plain = screen && screen != fFrameHandle && screenFormat;
+    }
+    if (plain && fScreenRes != screen)
+        fScreenContext = 0;
+    if (plain && attachTo(screen, &fScreenContext)) {
+        fScreenRes = screen;
+        int32_t bw = fBufWidth < fFrameWidth ? fBufWidth : fFrameWidth;
+        int32_t bh = fBufHeight < fFrameHeight ? fBufHeight : fFrameHeight;
+        for (uint32_t i = 0; i < fRegion->num_rects; i++) {
+            const IOAccelBounds &r = fRegion->rect[i];
+            int32_t x0 = r.x, y0 = r.y, x1 = x0 + r.w, y1 = y0 + r.h;
+            if (x0 < fOriginX) x0 = fOriginX;
+            if (y0 < fOriginY) y0 = fOriginY;
+            if (x1 > fOriginX + bw) x1 = fOriginX + bw;
+            if (y1 > fOriginY + bh) y1 = fOriginY + bh;
+            if (x0 < 0) x0 = 0;
+            if (y0 < 0) y0 = 0;
+            if (x1 > (int32_t)sw) x1 = (int32_t)sw;
+            if (y1 > (int32_t)sh) y1 = (int32_t)sh;
+            if (x1 <= x0 || y1 <= y0)
+                continue;
+            dw += blitCommand(cmd + dw, screen, screenFormat, x0, y0, x1 - x0, y1 - y0,
+                              x0 - fOriginX, y0 - fOriginY);
+        }
+    }
+    if (!dw || !dev->submit3D(fFrameContext, fCmdPA, dw * 4, NULL))
+        return false;
+    if (dw == shownFrom)
+        return false;                   // nothing of it on the screen
+    dev->syncAsync(fFrameContext);      // push the copy out, as a DISPLAY does
+    return fb->flushShown(screen) == kIOReturnSuccess;
+}
+
+// The client's latest frame into another GPU buffer, top row first, in a submit of its own.
+// Called with fLock held.
+bool RippleSurfaceClient::copyFrame(uint32_t dst, uint32_t dstFormat, uint32_t dstWidth,
+                                    uint32_t dstHeight, uint32_t *attached)
+{
+    if (!fFrameHandle || !fFrameContext || !dst || dst == fFrameHandle || !ensureCommands() ||
+        !attachTo(dst, attached))
+        return false;
+    uint32_t w = fFrameWidth < dstWidth ? fFrameWidth : dstWidth;
+    uint32_t h = fFrameHeight < dstHeight ? fFrameHeight : dstHeight;
+    uint32_t *c = (uint32_t *)fCmd->getBytesNoCopy();
+    uint32_t dw = blitCommand(c, dst, dstFormat, 0, 0, w, h, 0, 0);
+    return fAccel->framebuffer()->device()->submit3D(fFrameContext, fCmdPA, dw * 4, NULL);
+}
+
 // The client's latest frame into the memory a lock hands out (fOwnMem), top row first: a copy on
 // the GPU into our buffer over that memory, then that buffer is read back, which writes the
-// memory. Host commands (virgl): one BLIT. Called with fLock held.
+// memory. Called with fLock held.
 void RippleSurfaceClient::fetchFrame()
 {
     if (!fFrameHandle || !fFrameContext || !fOwnMem || fRowBytes != fBufWidth * 4)
@@ -491,47 +667,7 @@ void RippleSurfaceClient::fetchFrame()
         fStageWidth = fBufWidth;
         fStageHeight = fBufHeight;
     }
-    if (fStageContext != fFrameContext) {
-        if (!dev->ctxAttachResource(fFrameContext, fStage))
-            return;
-        fStageContext = fFrameContext;
-    }
-    if (!fStageCmd) {
-        IOBufferMemoryDescriptor *cmd = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
-            kernel_task, kIODirectionOut | kIOMemoryPhysicallyContiguous, PAGE_SIZE,
-            0xFFFFFFFFFFFFF000ULL);
-        if (!cmd)
-            return;
-        if (cmd->prepare() != kIOReturnSuccess) {
-            cmd->release();
-            return;
-        }
-        fStageCmd = cmd;
-        fStageCmdPA = cmd->getPhysicalSegment(0, NULL, kIOMemoryMapperNone);
-    }
-    uint32_t w = fFrameWidth < fBufWidth ? fFrameWidth : fBufWidth;
-    uint32_t h = fFrameHeight < fBufHeight ? fFrameHeight : fBufHeight;
-    uint32_t *c = (uint32_t *)fStageCmd->getBytesNoCopy();
-    bzero(c, 22 * 4);
-    c[0] = 16 | (21 << 16);             // BLIT
-    c[1] = 0xf;                         // all channels, nearest
-    c[4] = fStage;
-    c[6] = 1;
-    c[10] = w;
-    c[11] = h;
-    c[12] = 1;
-    c[13] = fFrameHandle;
-    c[15] = fFrameFormat;
-    c[19] = w;
-    c[21] = 1;
-    if (fFrameTopFirst) {
-        c[17] = 0;
-        c[20] = h;
-    } else {
-        c[17] = fFrameHeight;           // rows turned over: a negative height
-        c[20] = (uint32_t)-(int32_t)h;
-    }
-    bool sent = dev->submit3D(fFrameContext, fStageCmdPA, 22 * 4, NULL);
+    bool sent = copyFrame(fStage, 1, fBufWidth, fBufHeight, &fStageContext);
     uint32_t box[6] = { 0, 0, 0, fBufWidth, fBufHeight, 1 };
     uint64_t fence = 0;
     bool read = sent && dev->transfer3D(false, fFrameContext, fStage, 0, box, 0, 0, 0, &fence);
@@ -544,29 +680,6 @@ void RippleSurfaceClient::fetchFrame()
 }
 
 // ---- Description for GL drivers (RippleAccelerator::describeSurface) ----------------------
-
-// For showing a client's buffer on the screen (RippleGPUClient::surfacePresent): the surface's
-// place on the screen and the visible rectangles of it, when it is a plain region of the screen
-// now. Not when WindowServer has shaped it non-simple (it draws the window itself then, as
-// while a window moves), scaled it, or given it more rectangles than the caller has room for.
-bool RippleSurfaceClient::screenShape(IOAccelBounds *bounds, IOAccelBounds *rects,
-                                      uint32_t maxRects, uint32_t *count)
-{
-    IOLockLock(fLock);
-    bool ok = fID && fScreenRegion && fRegion && fBufWidth && fBufHeight && !fHasScale &&
-              !(fShapeOptions & kIOAccelSurfaceShapeNonSimpleBit) &&
-              fRegion->num_rects <= maxRects;
-    if (ok) {
-        bounds->x = (SInt16)fOriginX;
-        bounds->y = (SInt16)fOriginY;
-        bounds->w = (SInt16)fBufWidth;
-        bounds->h = (SInt16)fBufHeight;
-        *count = fRegion->num_rects;
-        memcpy(rects, fRegion->rect, fRegion->num_rects * sizeof(IOAccelBounds));
-    }
-    IOLockUnlock(fLock);
-    return ok;
-}
 
 bool RippleSurfaceClient::describe(task_t asker, struct ripple_gpu_surface_info *out)
 {
@@ -591,6 +704,8 @@ bool RippleSurfaceClient::describe(task_t asker, struct ripple_gpu_surface_info 
             out->backing_address = fClientMem ? fClientAddr : (fOwnMap ? fOwnMap->getAddress() : 0);
         if (fScreenRegion)
             out->flags |= RIPPLE_GPU_SURFACE_SCREEN;
+        if (fFrameHandle)
+            out->flags |= RIPPLE_GPU_SURFACE_FRAMES;
     }
     IOLockUnlock(fLock);
     return ok;

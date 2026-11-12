@@ -724,9 +724,12 @@ ripple_cgl_copy_tex_sub_image3D(void *rend, GLenum target, GLint level, GLint xo
  * surface's current pixels are copied into the bound texture: the screen region this context
  * composites from its window framebuffer, any other surface from its memory. */
 static bool cs_readable(const void *p, size_t len);
+static bool surface_frames_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum target,
+                                   GLenum ifmt, GLsizei w, GLsizei h, bool keep);
 static unsigned surface_texture_logs;
 
 #include "main/texobj.h"
+#include "state_tracker/st_cb_texture.h"
 #include "state_tracker/st_context.h"
 #include "pipe/p_context.h"
 #include "pipe/p_screen.h"
@@ -918,6 +921,11 @@ ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum 
          ripple_cgl_context_swap(ctx);
          how = "the drawable, memory updated";
       }
+   } else if (have_si && (si.flags & RIPPLE_GPU_SURFACE_FRAMES) &&
+              surface_frames_texture(ctx, sid, target, ifmt, w, h, bind)) {
+      /* A window whose program presents through the kernel: see surface_frames_texture. */
+      how = bind ? "its frames, kept up to date by the kernel" : "its latest frame";
+      ret = 0;
    } else if (have_si && si.backing_address && si.row_bytes >= (uint32_t)w * 4 &&
               (uint32_t)h <= si.height &&
               cs_readable((const void *)(uintptr_t)si.backing_address,
@@ -1064,6 +1072,45 @@ cs_readable(const void *p, size_t len)
          return false;
       addr = a + size;
    }
+   return true;
+}
+
+/* The surface of a window whose program shows its frames through the kernel
+ * (ripple_cgl_device_surface_present) as the texture bound to `target`. WindowServer attaches
+ * such a surface to a texture once, when it first draws the window itself
+ * (CGXGLCreateSurfaceTextureReference, parameter 997), and from then on only draws with that
+ * texture each time the program flushes the surface: it expects the texture to be the surface,
+ * as it is on Apple's drivers. A copy of the frame made here would stay on screen for good (a
+ * window that had moved showed its last frame from before the move, VM 210 2026-11-12). So the
+ * texture gets storage of its own and the kernel keeps that filled, a copy on the GPU at each
+ * present, until the texture is deleted. Without `keep` (998, 999) the frame is copied once. */
+static bool
+surface_frames_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum target, GLenum ifmt,
+                       GLsizei w, GLsizei h, bool keep)
+{
+   struct gl_context *gl = ctx->glctx;
+   struct gl_texture_object *tex = _mesa_get_current_tex_object(gl, target);
+   if (!tex || !tex->Name)
+      return false;
+   struct gl_pixelstore_attrib saved = gl->Unpack;
+   memset(&gl->Unpack, 0, sizeof(gl->Unpack));
+   gl->Unpack.Alignment = 4;
+   CALL_TexImage2D(GET_DISPATCH(), (target, 0, ifmt, w, h, 0, GL_BGRA,
+                                    GL_UNSIGNED_INT_8_8_8_8_REV, NULL));
+   gl->Unpack = saved;
+   simple_mtx_lock(&cs_lock);
+   cs_forget(tex);                      /* never uploaded from memory again */
+   simple_mtx_unlock(&cs_lock);
+   if (!tex->pt) {
+      _mesa_test_texobj_completeness(gl, tex);
+      st_finalize_texture(gl, ctx->st->pipe, tex, 0);
+   }
+   if (!tex->pt)
+      return false;
+   /* The buffer exists on the GPU from its creation, and nothing of ours is queued for it: the
+    * kernel's copy can go ahead of this context's pending commands. An empty texture (no frame
+    * presented yet) is filled at the first present. */
+   ripple_cgl_device_surface_texture(sid, tex->pt, keep);
    return true;
 }
 
