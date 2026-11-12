@@ -63,11 +63,15 @@ void RippleSurfaceClient::releaseBacking()
     }
     fClientAddr = 0;
     fClientLength = 0;
+    dropStage();                        // it reads into fOwnMem
     if (fOwnMap) {
         fOwnMap->release();             // unmaps from the client
         fOwnMap = 0;
     }
     if (fOwnMem) {
+        if (fOwnWired)
+            fOwnMem->complete();
+        fOwnWired = false;
         fOwnMem->release();
         fOwnMem = 0;
     }
@@ -92,6 +96,11 @@ IOReturn RippleSurfaceClient::clientDied(void)
 void RippleSurfaceClient::free(void)
 {
     releaseBacking();
+    if (fStageCmd) {
+        fStageCmd->complete();
+        fStageCmd->release();
+        fStageCmd = 0;
+    }
     if (fRegion)
         IOFree(fRegion, fRegionBytes);
     if (fLock)
@@ -214,6 +223,8 @@ IOReturn RippleSurfaceClient::lock(bool write, IOAccelSurfaceInformation *info)
             }
         }
         addr = fOwnMap->getAddress();
+        if (!write)
+            fetchFrame();               // a GPU client's window: its latest frame
     }
 
     bzero(info, sizeof(*info));
@@ -222,6 +233,16 @@ IOReturn RippleSurfaceClient::lock(bool write, IOAccelSurfaceInformation *info)
     info->width = fBufWidth;
     info->height = fBufHeight;
     info->pixelFormat = 'BGRA';         // 8888: B, G, R, A in memory
+    // A read lock is how WindowServer takes a window's surface to draw the window itself (a
+    // moving window: CGXNextSurface, then CGXGLCreateSurfaceTextureReference), and that makes
+    // its texture from this structure only if the format is one of its depth codes: 3 (16 bit),
+    // 4 (32 bit, B G R A in memory), 5, 6, or '2vuy'/'yuvs' (CoreGraphics 10.6.8, disassembly).
+    // With 'BGRA' it made none and drew the window blank. It is drawn opaque while the second
+    // address stays 0. Only for a surface a GPU client presents on: the other surfaces'
+    // read locks have always answered 'BGRA', and WindowServer's handling of those is left as
+    // it is.
+    if (!write && fFrameHandle)
+        info->pixelFormat = 4;
     info->colorTemperature[0] = 0x1CCCC;
     if (write)
         fWriteLocked = true;
@@ -403,6 +424,123 @@ IOReturn RippleSurfaceClient::externalMethod(uint32_t selector, IOExternalMethod
     if (big)
         IOFree(big, bigSize);
     return r;
+}
+
+// ---- A GPU client's frames --------------------------------------------------------------------
+
+void RippleSurfaceClient::setFrame(uint32_t handle, uint32_t context, uint32_t format,
+                                   uint32_t width, uint32_t height, bool topFirst)
+{
+    IOLockLock(fLock);
+    fFrameHandle = handle;
+    fFrameContext = context;
+    fFrameFormat = format;
+    fFrameWidth = width;
+    fFrameHeight = height;
+    fFrameTopFirst = topFirst;
+    IOLockUnlock(fLock);
+}
+
+void RippleSurfaceClient::forgetFrame(uint32_t handle, uint32_t context)
+{
+    IOLockLock(fLock);
+    if ((handle && fFrameHandle == handle) || (context && fFrameContext == context))
+        fFrameHandle = fFrameContext = 0;
+    if (context && fStageContext == context)
+        fStageContext = 0;              // the context took its attachments with it
+    IOLockUnlock(fLock);
+}
+
+// Our GPU buffer over the lock memory goes (before that memory does). Called with fLock held.
+void RippleSurfaceClient::dropStage()
+{
+    if (fStage) {
+        VirtioGPUDevice *dev = fAccel->framebuffer()->device();
+        dev->detachBacking(fStage);
+        dev->resourceUnref(fStage);
+        fStage = 0;
+        fStageContext = 0;
+    }
+}
+
+// The client's latest frame into the memory a lock hands out (fOwnMem), top row first: a copy on
+// the GPU into our buffer over that memory, then that buffer is read back, which writes the
+// memory. Host commands (virgl): one BLIT. Called with fLock held.
+void RippleSurfaceClient::fetchFrame()
+{
+    if (!fFrameHandle || !fFrameContext || !fOwnMem || fRowBytes != fBufWidth * 4)
+        return;
+    VirtioGPUDevice *dev = fAccel->framebuffer()->device();
+    if (fStage && (fStageWidth != fBufWidth || fStageHeight != fBufHeight))
+        dropStage();
+    if (!fStage) {
+        if (!fOwnWired) {
+            if (fOwnMem->prepare() != kIOReturnSuccess)
+                return;
+            fOwnWired = true;
+        }
+        uint32_t id = dev->allocResourceId();
+        // A 2D texture, B8G8R8A8, render target and sampler view.
+        if (!dev->resourceCreate3D(id, 2, 1, (1 << 1) | (1 << 3), fBufWidth, fBufHeight, 1, 1, 0, 0, 0))
+            return;
+        if (!dev->attachBacking(id, fOwnMem, (IOByteCount)fRowBytes * fBufHeight)) {
+            dev->resourceUnref(id);
+            return;
+        }
+        fStage = id;
+        fStageWidth = fBufWidth;
+        fStageHeight = fBufHeight;
+    }
+    if (fStageContext != fFrameContext) {
+        if (!dev->ctxAttachResource(fFrameContext, fStage))
+            return;
+        fStageContext = fFrameContext;
+    }
+    if (!fStageCmd) {
+        IOBufferMemoryDescriptor *cmd = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+            kernel_task, kIODirectionOut | kIOMemoryPhysicallyContiguous, PAGE_SIZE,
+            0xFFFFFFFFFFFFF000ULL);
+        if (!cmd)
+            return;
+        if (cmd->prepare() != kIOReturnSuccess) {
+            cmd->release();
+            return;
+        }
+        fStageCmd = cmd;
+        fStageCmdPA = cmd->getPhysicalSegment(0, NULL, kIOMemoryMapperNone);
+    }
+    uint32_t w = fFrameWidth < fBufWidth ? fFrameWidth : fBufWidth;
+    uint32_t h = fFrameHeight < fBufHeight ? fFrameHeight : fBufHeight;
+    uint32_t *c = (uint32_t *)fStageCmd->getBytesNoCopy();
+    bzero(c, 22 * 4);
+    c[0] = 16 | (21 << 16);             // BLIT
+    c[1] = 0xf;                         // all channels, nearest
+    c[4] = fStage;
+    c[6] = 1;
+    c[10] = w;
+    c[11] = h;
+    c[12] = 1;
+    c[13] = fFrameHandle;
+    c[15] = fFrameFormat;
+    c[19] = w;
+    c[21] = 1;
+    if (fFrameTopFirst) {
+        c[17] = 0;
+        c[20] = h;
+    } else {
+        c[17] = fFrameHeight;           // rows turned over: a negative height
+        c[20] = (uint32_t)-(int32_t)h;
+    }
+    bool sent = dev->submit3D(fFrameContext, fStageCmdPA, 22 * 4, NULL);
+    uint32_t box[6] = { 0, 0, 0, fBufWidth, fBufHeight, 1 };
+    uint64_t fence = 0;
+    bool read = sent && dev->transfer3D(false, fFrameContext, fStage, 0, box, 0, 0, 0, &fence);
+    if (fAccel->qeDebug()) {
+        const uint32_t *m = (const uint32_t *)fOwnMem->getBytesNoCopy();
+        LOG("surface %u read lock: frame %ux%u format %u of buffer %u (context %u) into %ux%u via %u: copy %d, read back %d; pixels top left 0x%08x, centre 0x%08x",
+            fID, fFrameWidth, fFrameHeight, fFrameFormat, fFrameHandle, fFrameContext, fBufWidth,
+            fBufHeight, fStage, sent, read, m[0], m[(fBufHeight / 2) * fBufWidth + fBufWidth / 2]);
+    }
 }
 
 // ---- Description for GL drivers (RippleAccelerator::describeSurface) ----------------------

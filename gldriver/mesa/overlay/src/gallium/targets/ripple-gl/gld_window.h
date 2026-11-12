@@ -29,6 +29,8 @@ void gld_window_set_swap_rect(struct gld_window *w, bool on, const int rect[4]);
 /* The window's accelerator surface ID if the kernel shows its frames itself (the window was
  * bound as accelerated), else 0: then frames go through gld_window_present. */
 uint32_t gld_window_direct_surface(const struct gld_window *w);
+/* For such a window, when the kernel kept a frame but did not show it: `data` is the window. */
+void gld_window_direct_flush(void *data);
 
 /* A ripple_cgl_present_fn for drawables shown in `data` (a struct gld_window). */
 void gld_window_present(void *data, const uint8_t *pixels, unsigned stride, unsigned width,

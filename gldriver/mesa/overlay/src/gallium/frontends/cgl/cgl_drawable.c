@@ -181,6 +181,11 @@ present_resource(struct st_context *st, struct ripple_cgl_drawable *d,
       }
       st_context_flush(st, 0, NULL, NULL, NULL);
       bool shown = ripple_cgl_device_surface_present(d->present_surface, res, true);
+      /* Not shown: the surface is not a plain region of the screen just now (the window is
+       * moving, or in Exposé). The kernel has kept the frame for WindowServer, which reads it
+       * when it draws the window: tell it there is something new. */
+      if (!shown && d->present_refused)
+         d->present_refused(d->present_refused_data);
       present_stats(shown ? "window (on the GPU)" : "window (on the GPU, not shown)", t0);
       return;
    }
@@ -271,10 +276,12 @@ ripple_cgl_drawable_set_present(struct ripple_cgl_drawable *d, ripple_cgl_presen
 
 void
 ripple_cgl_drawable_set_surface_present(struct ripple_cgl_drawable *d, uint32_t surface,
-                                        bool vsync)
+                                        bool vsync, void (*refused)(void *data), void *data)
 {
    d->present_surface = surface;
    d->present_vsync = vsync;
+   d->present_refused = refused;
+   d->present_refused_data = data;
 }
 
 void
@@ -458,8 +465,11 @@ ripple_cgl_context_swap(struct ripple_cgl_context *ctx)
    if (res && !(ctx->presented && res == d->textures[ST_ATTACHMENT_FRONT_LEFT]))
       present_resource(ctx->st, d, res);
    /* Showing the back buffer itself: flip, so the next frame isn't drawn into the texture on
-    * screen. Mesa picks up the swapped textures through the stamp. */
-   if (d->gpu_display && d->textures[ST_ATTACHMENT_BACK_LEFT] && d->textures[ST_ATTACHMENT_FRONT_LEFT]) {
+    * screen. Mesa picks up the swapped textures through the stamp. The same for a window the
+    * kernel shows: it keeps the frame for WindowServer to read, which must not catch the next
+    * one half drawn. */
+   if ((d->gpu_display || d->present_surface) && d->textures[ST_ATTACHMENT_BACK_LEFT] &&
+       d->textures[ST_ATTACHMENT_FRONT_LEFT]) {
       struct pipe_resource *t = d->textures[ST_ATTACHMENT_BACK_LEFT];
       d->textures[ST_ATTACHMENT_BACK_LEFT] = d->textures[ST_ATTACHMENT_FRONT_LEFT];
       d->textures[ST_ATTACHMENT_FRONT_LEFT] = t;
