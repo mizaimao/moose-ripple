@@ -123,8 +123,10 @@ Details: [docs/re/perf-notes.md](docs/re/perf-notes.md) and [docs/re/m6-notes.md
   VNC viewer (another Proxmox console tab, for example) makes the picture less smooth for all
   of them ([#10](https://github.com/mizaimao/moose-ripple/issues/10)).
 - `open -a "Front Row"` starts Front Row without showing it. Start it with Cmd+Esc.
-- Only Mac OS X 10.6.8 with the 64-bit kernel. Only tested with an Intel host GPU; virglrenderer
-  also runs on AMD and NVIDIA host GPUs, but those haven't been tried yet.
+- Only Mac OS X 10.6.8 with the 64-bit kernel. Tested with an Intel host GPU (Proxmox) and an
+  NVIDIA GeForce RTX 4090 (Windows 11 through WSL2); AMD host GPUs haven't been tried yet.
+- UTM on Apple-silicon Macs doesn't work yet: its 3D display needs PCI memory above 4 GB, which
+  10.6 can't use ([#18](https://github.com/mizaimao/moose-ripple/issues/18)).
 
 Some problems of 10.6 in QEMU show up without moose-ripple too: a panic when the guest goes to
 sleep (KI-6), live snapshots that panic it (KI-5) and the pointer drifting with QEMU's USB tablet
@@ -132,14 +134,16 @@ sleep (KI-6), live snapshots that panic it (KI-5) and the pointer drifting with 
 
 ## Build environment
 
-- [ ] A Linux x86_64 host with KVM. Tested: Proxmox VE 8.4 (Debian 12.10, kernel 6.5.11).
+- [ ] A Linux x86_64 host with KVM, or Windows 11 with WSL2 (KVM inside WSL). Tested: Proxmox
+  VE 8.4 (Debian 12.10, kernel 6.5.11), and Windows 11 with WSL 3.0.5 and Ubuntu 24.04.
 - [ ] QEMU with virgl: the `virtio-vga-gl` device and a display with OpenGL (`egl-headless`,
-  `gtk,gl=on` or `sdl,gl=on`). Tested: QEMU 9.2.0 (Proxmox's `pve-qemu-kvm` 9.2.0-5).
-- [ ] virglrenderer. Tested: 0.10.4.
-- [ ] A host GPU with an OpenGL driver. Tested: Intel UHD Graphics 630 with Mesa 22.3.6
-  (Debian 12's).
+  `gtk,gl=on` or `sdl,gl=on`). Tested: QEMU 9.2.0 (Proxmox's `pve-qemu-kvm` 9.2.0-5) and 8.2.2
+  (Ubuntu 24.04's).
+- [ ] virglrenderer. Tested: 0.10.4 and 1.0.0.
+- [ ] A host GPU with an OpenGL driver. Tested: Intel UHD Graphics 630 with Mesa 22.3.6 (Debian
+  12's), and an NVIDIA GeForce RTX 4090 through WSL2 with Mesa 25.2's Direct3D 12 driver.
 - [ ] OVMF, QEMU's UEFI firmware. Tested: edk2 2025.02 (Proxmox's `pve-edk2-firmware`
-  4.2025.02-3).
+  4.2025.02-3) and 2024.02 (Ubuntu 24.04's `ovmf`).
 - [ ] Mac OS X 10.6.8 (build 10K549) installed in the VM, from your own copy, running the 64-bit
   kernel. Both boot loaders below start it that way.
 - [ ] A boot loader: OpenCore, the boot disk from [boot/opencore/](boot/opencore/README.md)
@@ -157,8 +161,8 @@ What's tested: the steps below on Proxmox VE, including `install.sh` and `uninst
 a CD image in a copy of the test VM. Also tested under Chameleon 2.1 r2069 (SeaBIOS, FakeSMC,
 `vga: virtio-gl`): the install, Quartz Extreme, the translucent menu bar, the Dashboard ripple,
 gl-gears at 42-47 frames/s, and the uninstall; for its boot flags see the end of step 4. The
-plain QEMU command line is the same VM written out for QEMU without Proxmox; it hasn't been run
-as such yet.
+plain QEMU command line is the same VM written out for QEMU without Proxmox; it was run on
+Windows 11 through WSL2, with the settings in "Windows 11 (WSL2)" below.
 
 ### 1. Build the files
 
@@ -210,7 +214,7 @@ With Chameleon instead of OpenCore: `--bios seabios`, no efidisk, the Chameleon 
 keeps PCI memory below 4 GB by itself) and `,vmware-cpuid-freq=off` (an OpenCore setting); that is
 how it was tested. `vga: virtio-gl` and the rest stay the same.
 
-#### Plain QEMU (not tested yet)
+#### Plain QEMU (tested in WSL2)
 
 ```
 cp /usr/share/OVMF/OVMF_VARS_4M.fd snowleopard-vars.fd    # OVMF's paths differ between distributions
@@ -222,7 +226,7 @@ qemu-system-x86_64 \
   -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
   -drive if=pflash,format=raw,file=snowleopard-vars.fd \
   -fw_cfg name=opt/ovmf/X-PciMmio64Mb,string=0 \
-  -device virtio-vga-gl -display gtk,gl=on \
+  -device virtio-vga-gl -display sdl,gl=on \
   -device ich9-usb-ehci1,id=ehci -device usb-kbd,bus=ehci.0 -device usb-tablet,bus=ehci.0 \
   -drive file=opencore.qcow2,if=none,id=oc,format=qcow2 -device ide-hd,bus=ide.0,drive=oc,bootindex=0 \
   -drive file=snowleopard.qcow2,if=none,id=sl,format=qcow2 -device ide-hd,bus=ide.1,drive=sl \
@@ -230,7 +234,47 @@ qemu-system-x86_64 \
   -netdev user,id=net0 -device e1000,netdev=net0
 ```
 
-Proxmox uses `-display egl-headless,gl=core` with a VNC console instead of `gtk,gl=on`.
+`-display gtk,gl=on` works too, but with display scaling above 100% (WSLg on a 4K screen, for
+example) its pointer lands away from where you click. Proxmox uses `-display egl-headless,gl=core`
+with a VNC console.
+
+#### Windows 11 (WSL2, tested)
+
+QEMU runs inside WSL2's Linux with KVM, and Mesa's Direct3D 12 driver hands the OpenGL work to
+the Windows GPU driver. The VM's window appears on the Windows desktop through WSLg. Once, in an
+administrator terminal, then restart Windows:
+
+```
+wsl --install --no-distribution
+```
+
+Then a Linux for the VM (its disk file goes where `--location` says) and, inside it, QEMU:
+
+```
+wsl --install Ubuntu-24.04 --location D:\moose-ripple\wsl --name moose-ripple
+wsl -d moose-ripple
+sudo apt install qemu-system-x86 qemu-system-gui qemu-utils ovmf genisoimage
+```
+
+Start the VM with the plain QEMU command line above, with these settings first:
+
+```
+export GALLIUM_DRIVER=d3d12                        # without it Mesa draws on the CPU (llvmpipe)
+export MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA      # part of your GPU's name, if there are several
+echo 1 | sudo tee /sys/module/kvm/parameters/ignore_msrs   # used on an AMD CPU; not tried without
+```
+
+- Open the Linux from the Windows desktop (Terminal), not over ssh: a WSL started from an ssh
+  session has no desktop to put the VM's window on.
+- Keep `-display sdl,gl=on`: with Windows display scaling above 100%, the GTK window misplaces
+  the pointer.
+- The guest takes the window's size as its screen size at first; pick a resolution in System
+  Preferences > Displays.
+
+Tested on Windows 11 with a Ryzen 7 9850X3D and a GeForce RTX 4090 (WSL 3.0.5, Ubuntu 24.04,
+QEMU 8.2.2, virglrenderer 1.0.0, Mesa 25.2): the guest boots in about 25 s, Quartz Extreme is on
+with the translucent menu bar and the Dashboard ripple, and gl-gears runs at about 55 frames/s.
+The renderer shows up as `NVIDIA GeForce RTX 4090 OpenGL Engine`.
 
 #### Why these settings
 
