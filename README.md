@@ -84,7 +84,8 @@ The test machine is a Proxmox VE 8.4 host with an Intel Core i9-9900K and its bu
 Graphics 630. The guest runs at 1280x800 with 4 virtual CPUs. The software rendering column is
 the same VM booted without moose-ripple. The GeForce 9600 GT column is the same Snow Leopard
 install with a real GeForce 9600 GT passed through to it, running Apple's own NVIDIA driver at
-1920x1080 (its monitor has no 1280x800 mode), so its screens are about twice as many pixels.
+1920x1080 (its monitor has no 1280x800 mode), so each of its screens has about twice as many
+pixels.
 
 | | Software rendering | moose-ripple | GeForce 9600 GT |
 |---|---|---|---|
@@ -99,11 +100,9 @@ install with a real GeForce 9600 GT passed through to it, running Apple's own NV
 - Core Image: 23 of 24 filters give the same picture as software rendering, and 55 of Photo
   Booth's 61 effects do ("the same" means within 1-2 colour levels, or under 1% of the pixels
   different). A single Core Image filter is slower than software rendering for now, because each
-  render makes a round trip through QEMU. The 9600 GT gives the same picture for 23 of the 24
-  filters and 54 of the 61 effects, and differs from software rendering in nearly the same
-  effects as moose-ripple does (Concert, Neon, Pinch, Blue Print, Comic Book, Pointillize, and
-  City Lights), so most of those differences are how a GPU computes them. On the 9600 GT a
-  filter takes 1-3 ms a frame and most effects 0.2-0.3 ms.
+  render makes a round trip through QEMU. The 9600 GT differs from software rendering in nearly
+  the same effects as moose-ripple does, so most of those differences come from how a GPU
+  computes them.
 - The host GPU's minimum clock was raised to 1200 MHz for these numbers
   (`/sys/class/drm/card0/gt_min_freq_mhz` on Intel). At the default 350 MHz each screen update
   takes about 5 ms longer.
@@ -120,8 +119,9 @@ Details: [docs/re/perf-notes.md](docs/re/perf-notes.md) and [docs/re/m6-notes.md
   doesn't have, so the effects were tested on a still photo ([#11](https://github.com/mizaimao/moose-ripple/issues/11)).
 - The OpenGL windows of apps are copied back through the guest every frame: about 20-30 ms per
   frame for a 1280x800 window. The next performance pass keeps them on the GPU ([#10](https://github.com/mizaimao/moose-ripple/issues/10)).
-- From a key press to the first change on screen takes about 0.2 s, measured through QEMU's VNC
-  display, and whole-screen animations reach a VNC viewer at 4-20 frames/s ([#10](https://github.com/mizaimao/moose-ripple/issues/10)).
+- Through QEMU's VNC display, a key press takes about 0.2 s to show on screen, and every extra
+  VNC viewer (another Proxmox console tab, for example) makes the picture less smooth for all
+  of them ([#10](https://github.com/mizaimao/moose-ripple/issues/10)).
 - `open -a "Front Row"` starts Front Row without showing it. Start it with Cmd+Esc.
 - Only Mac OS X 10.6.8 with the 64-bit kernel. Only tested with an Intel host GPU; virglrenderer
   also runs on AMD and NVIDIA host GPUs, but those haven't been tried yet.
@@ -323,7 +323,7 @@ sudo reboot
 
 It removes the four bundles, rebuilds the kext cache and takes the `ripple_` flags out of the
 boot flags (`npci=0x2000` stays). If the VM doesn't reach the desktop, go back to the snapshot,
-or start it in single-user mode (Cmd+S in OpenCore's menu) and run `/sbin/mount -uw /`,
+or start it in single-user mode (Cmd+S in OpenCore's menu, or `-s` at Chameleon's prompt) and run `/sbin/mount -uw /`,
 `rm -rf /System/Library/Extensions/Ripple*` and `reboot`.
 
 ## Building from source
@@ -360,7 +360,7 @@ Proxmox VM, taking a snapshot first (`build.sh`, `install-kext.sh`, `install-glb
 
 None of these is scheduled. More detail in [docs/future-ideas.md](docs/future-ideas.md).
 
-- A second performance pass: keep apps' OpenGL windows on the GPU, and fewer round trips for
+- A second performance pass: apps' OpenGL windows kept on the GPU, and fewer round trips for
   Core Image.
 - Native context instead of virgl: the guest talks more directly to an AMD or Intel host GPU,
   with less CPU overhead (needs Linux 6.13 or newer on the host).
