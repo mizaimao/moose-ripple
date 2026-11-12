@@ -26,6 +26,9 @@ bool ripple_cgl_device_surface_info(uint32_t id, struct ripple_gpu_surface_info 
 struct pipe_resource;
 bool ripple_cgl_device_display(struct pipe_resource *res, unsigned x, unsigned y, unsigned w,
                                unsigned h);
+struct pipe_context;
+void ripple_cgl_device_display_dump(struct pipe_context *pipe, struct pipe_resource *res,
+                                    bool bottom_up);
 
 /* Quartz Extreme: put screen rectangle (x, y, w, h; top-left origin) into the screen texture
  * and show that. In `src` the rectangle is drawn GL-style with its bottom-left corner at

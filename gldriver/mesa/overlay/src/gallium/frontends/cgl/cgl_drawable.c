@@ -164,6 +164,7 @@ present_resource(struct st_context *st, struct ripple_cgl_drawable *d,
    }
    if (d->gpu_display) {
       st_context_flush(st, 0, NULL, NULL, NULL);
+      ripple_cgl_device_display_dump(pipe, res, false);   /* debug switch, cgl_device.c */
       ripple_cgl_device_display(res, 0, 0, w, h);
       present_stats("display (GPU)", t0);
       return;
