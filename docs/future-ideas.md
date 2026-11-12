@@ -4,17 +4,21 @@ Not scheduled; recorded so they aren't lost. The README's "Ideas for later" list
 
 ## A second performance pass
 
-Next after M6, guided by what the real apps and games show:
-- Apps' OpenGL windows are copied back through the guest every frame (about 20-30 ms for a
-  1280x800 window); keep them on the GPU instead.
+Guided by what the real apps and games show. Done on 2026-11-12: apps' OpenGL windows stay on
+the GPU (showing a frame takes 4-5 ms at any size, where a 1280x800 window took 20-30 ms), and
+a composited frame needs one submit, one wait without a host round trip and one display call
+(it was five, four and one). Left:
+- While something is drawn over an app's OpenGL window (the Dock, another window, Exposé),
+  WindowServer redraws it and the program's flush waits for that, about 7 ms a frame. A flush
+  from a second thread would take the wait off the program.
 - Each Core Image render is a round trip through QEMU, which makes a single filter slower than
   software rendering; batch or avoid those round trips.
 - Present the screen at most once per display refresh (60 Hz). Measured on 2026-11-12: the
   guest sends 45-100 whole-screen updates a second during effects, each 2-3 ms, so a cap would
   save little; low priority.
 - A stall of about 170 ms every few seconds while something animates, below the driver (a
-  runnable thread in the guest is not run): see [re/perf-notes.md](re/perf-notes.md).
-- Fewer kernel round trips per composited frame (5 submits and 4 waits now).
+  runnable thread in the guest is not run), on the KVM host only: see
+  [re/perf-notes.md](re/perf-notes.md).
 - Frames reach a VNC viewer unevenly (see [re/perf-notes.md](re/perf-notes.md)). Every open
   VNC viewer (a Proxmox web console, for example) makes QEMU encode each frame again, before the
   next viewer gets it: with one console open, a second viewer got whole-screen frames every

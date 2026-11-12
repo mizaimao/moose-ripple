@@ -73,11 +73,14 @@ Captures (git-ignored, `img/`): `m6-{qe,sw}-*.png` copied from the runs above.
 - **Real Racing 2 menu garbled.** The game's own context. GL_SHORT vertices with a texture
   matrix work in `gl-feature-check`; not found yet.
 - **Core Image Fun House:** Core Image issues no GL calls for drawImage into the view; the same
-  on software (white). Not a regression; not understood.
+  on software (white). Not a regression; not understood. (2026-11-12: it shows the picture on
+  our driver now, Aqua Blue.jpg, with either way of showing app windows.)
 - **C&C 3 game:** needs its DVD on either renderer (a disc image would do).
 - **App GL windows are read back** (the window path): every frame goes host -> guest -> window
   backing -> WindowServer upload. Angry Birds at 1280x800: about 20-30 ms per present. Sharing
   the app's GL surface with WindowServer on the GPU is the fix (a later performance item).
+  (Done 2026-11-12: the kernel shows app windows itself, ioaccelerator-interface.md steps 1-9;
+  Angry Birds Rio's title screen went from 32-39 to 58 frames/s.)
 
 ## Real Racing 2's intro, what was ruled out (04:30-05:20)
 
