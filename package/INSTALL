@@ -12,8 +12,8 @@ Before you start
 - Take a snapshot of the VM.
 
 Install
-1. Get this folder into the guest. Snow Leopard can't download from GitHub, so on the host
-   make a CD image of the unpacked folder and attach it to the VM:
+1. Get this folder into the guest: on the host, make a CD image of the unpacked folder and
+   attach it to the VM:
      genisoimage -V RIPPLE -r -J -o ripple.iso moose-ripple-@VERSION@
 2. In the guest's Terminal:
      cd /Volumes/RIPPLE

@@ -1,5 +1,5 @@
 #!/bin/sh
-# moose-ripple installer, run inside Mac OS X 10.6.8 from the unpacked release folder:
+# moose-ripple installer, run inside Mac OS X 10.6.8 from the unpacked package folder:
 #   sudo sh install.sh               the drivers, the GL bundle, the GA plugin and the tablet kext
 #   sudo sh install.sh --no-tablet   the same without RippleQEMUTablet.kext
 # Copies the bundles into /System/Library/Extensions (root:wheel, read-only for others), checks
