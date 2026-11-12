@@ -1487,6 +1487,11 @@ ripple_cgl_get_string(void *rend, GLenum name)
             while (n && gpu[n - 1] == ' ')
                n--;
             gpu[n] = 0;
+            /* A host that doesn't name its GPU (UTM's virglrenderer on ANGLE: plain "virgl")
+             * would leave Core Image on the CPU, with an opaque menu bar. Give it the tier the
+             * driver is tested with (#18: menu bar translucent in UTM with this name). */
+            if (!strcmp(gpu, "virgl"))
+               n = (size_t)snprintf(gpu, sizeof(gpu), "Intel virgl");
             if (n)
                snprintf(renderer, sizeof(renderer), "%s OpenGL Engine", gpu);
          }
