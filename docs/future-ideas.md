@@ -9,7 +9,24 @@ Next after M6, guided by what the real apps and games show:
   1280x800 window); keep them on the GPU instead.
 - Each Core Image render is a round trip through QEMU, which makes a single filter slower than
   software rendering; batch or avoid those round trips.
-- Frames reach a VNC viewer unevenly (see [re/perf-notes.md](re/perf-notes.md)).
+- Present the screen at most once per display refresh (60 Hz). During Dashboard effects the
+  guest sends 100-300 whole-screen updates a second, and with `egl-headless` QEMU reads the
+  whole screen back from the host GPU for each one. Capping presents at the refresh rate would
+  cut that host work several-fold; likely the biggest single source of stutter after the
+  viewer.
+- Frames reach a VNC viewer unevenly (see [re/perf-notes.md](re/perf-notes.md)). Every open
+  VNC viewer (a Proxmox web console, for example) makes QEMU encode each frame again, before the
+  next viewer gets it: with one console open, a second viewer got whole-screen frames every
+  65-190 ms instead of every 31 ms.
+
+## Watching on a real monitor instead of VNC
+
+The host GPU that runs the guest's OpenGL can also show it: QEMU's `-display gtk,gl=on` or
+`sdl,gl=on` puts the VM in an OpenGL window on a monitor attached to that GPU (for an Intel host,
+the motherboard's video output), with no VNC encoding in between. A passed-through card such as
+the 9600 GT can't do this: it belongs to its own VM. On a Proxmox host this needs a graphical
+session or SDL on the console, and a QEMU built with GTK or SDL display support (to be checked
+for Proxmox's `pve-qemu-kvm`).
 
 ## Native context instead of virgl
 
