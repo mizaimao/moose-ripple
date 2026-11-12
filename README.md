@@ -76,6 +76,16 @@ The boundary between the GL bundle and the kernel is small, versioned and GPU-ne
 *Top: software rendering, an opaque white menu bar. Bottom: moose-ripple, the
 translucent menu bar with the desktop showing through. Both from the same VM.*
 
+### Tested hosts
+
+| Host | How QEMU runs | Host GPU | What was checked |
+|---|---|---|---|
+| Linux: Proxmox VE 8.4 | with KVM | Intel UHD Graphics 630 | everything in this README, and the numbers below |
+| Windows 11 | with KVM, inside WSL2 | NVIDIA GeForce RTX 4090, through Direct3D 12 | Quartz Extreme, the translucent menu bar, the Dashboard ripple, gl-gears at about 55 frames/s |
+| macOS 26 on Apple silicon | in UTM 5.0.8, x86 emulation | Apple M1 Max, through Metal | Quartz Extreme, the translucent menu bar, gl-gears at about 55 frames/s; the pointer is invisible (KI-8) |
+
+The setup for each is in [Install](#install), step 2.
+
 ### Measured
 
 **It can still stutter at times because of the translation layers, despite what the numbers say.**
@@ -123,12 +133,10 @@ Details: [docs/re/perf-notes.md](docs/re/perf-notes.md) and [docs/re/m6-notes.md
   VNC viewer (another Proxmox console tab, for example) makes the picture less smooth for all
   of them ([#10](https://github.com/mizaimao/moose-ripple/issues/10)).
 - `open -a "Front Row"` starts Front Row without showing it. Start it with Cmd+Esc.
-- Only Mac OS X 10.6.8 with the 64-bit kernel. Tested with an Intel host GPU (Proxmox) and an
-  NVIDIA GeForce RTX 4090 (Windows 11 through WSL2); AMD host GPUs haven't been tried yet.
-- UTM on Apple-silicon Macs: with UTM's 3D display Quartz Extreme comes on and gl-gears runs at
-  about 55 frames/s even under emulation, but the pointer is invisible (it still moves and
-  clicks). UTM doesn't draw it; reported to UTM as UTM issue 8139 (KI-8 in
-  [docs/known-issues.md](docs/known-issues.md), [#18](https://github.com/mizaimao/moose-ripple/issues/18)).
+- Only Mac OS X 10.6.8 with the 64-bit kernel. AMD host GPUs haven't been tried yet.
+- In UTM the pointer is invisible, though it still moves and clicks. UTM doesn't draw it;
+  reported to UTM as UTM issue 8139 (KI-8 in [docs/known-issues.md](docs/known-issues.md),
+  [#18](https://github.com/mizaimao/moose-ripple/issues/18)).
 
 Some problems of 10.6 in QEMU show up without moose-ripple too: a panic when the guest goes to
 sleep (KI-6), live snapshots that panic it (KI-5) and the pointer drifting with QEMU's USB tablet
@@ -136,16 +144,18 @@ sleep (KI-6), live snapshots that panic it (KI-5) and the pointer drifting with 
 
 ## Build environment
 
-- [ ] A Linux x86_64 host with KVM, or Windows 11 with WSL2 (KVM inside WSL). Tested: Proxmox
-  VE 8.4 (Debian 12.10, kernel 6.5.11), and Windows 11 with WSL 3.0.5 and Ubuntu 24.04.
+- [ ] A Linux x86_64 host with KVM, Windows 11 with WSL2 (KVM inside WSL), or an Apple-silicon
+  Mac with UTM (x86 emulation, no KVM). Tested: Proxmox VE 8.4 (Debian 12.10, kernel 6.5.11),
+  Windows 11 with WSL 3.0.5 and Ubuntu 24.04, and macOS 26.7 with UTM 5.0.8.
 - [ ] QEMU with virgl: the `virtio-vga-gl` device and a display with OpenGL (`egl-headless`,
-  `gtk,gl=on` or `sdl,gl=on`). Tested: QEMU 9.2.0 (Proxmox's `pve-qemu-kvm` 9.2.0-5) and 8.2.2
-  (Ubuntu 24.04's).
-- [ ] virglrenderer. Tested: 0.10.4 and 1.0.0.
+  `gtk,gl=on` or `sdl,gl=on`). Tested: QEMU 9.2.0 (Proxmox's `pve-qemu-kvm` 9.2.0-5), 8.2.2
+  (Ubuntu 24.04's) and 10.0.12 (the one inside UTM 5.0.8).
+- [ ] virglrenderer. Tested: 0.10.4, 1.0.0 and UTM's own build.
 - [ ] A host GPU with an OpenGL driver. Tested: Intel UHD Graphics 630 with Mesa 22.3.6 (Debian
-  12's), and an NVIDIA GeForce RTX 4090 through WSL2 with Mesa 25.2's Direct3D 12 driver.
+  12's), an NVIDIA GeForce RTX 4090 through WSL2 with Mesa 25.2's Direct3D 12 driver, and an
+  Apple M1 Max through UTM's ANGLE (OpenGL ES on Metal).
 - [ ] OVMF, QEMU's UEFI firmware. Tested: edk2 2025.02 (Proxmox's `pve-edk2-firmware`
-  4.2025.02-3) and 2024.02 (Ubuntu 24.04's `ovmf`).
+  4.2025.02-3), 2024.02 (Ubuntu 24.04's `ovmf`) and the one inside UTM.
 - [ ] Mac OS X 10.6.8 (build 10K549) installed in the VM, from your own copy, running the 64-bit
   kernel. Both boot loaders below start it that way.
 - [ ] A boot loader: OpenCore, the boot disk from [boot/opencore/](boot/opencore/README.md)
@@ -164,7 +174,8 @@ a CD image in a copy of the test VM. Also tested under Chameleon 2.1 r2069 (SeaB
 `vga: virtio-gl`): the install, Quartz Extreme, the translucent menu bar, the Dashboard ripple,
 gl-gears at 42-47 frames/s, and the uninstall; for its boot flags see the end of step 4. The
 plain QEMU command line is the same VM written out for QEMU without Proxmox; it was run on
-Windows 11 through WSL2, with the settings in "Windows 11 (WSL2)" below.
+Windows 11 through WSL2, with the settings in "Windows 11 (WSL2)" below. In UTM the same disks
+ran with the settings in "UTM on an Apple-silicon Mac".
 
 ### 1. Build the files
 
@@ -277,6 +288,42 @@ Tested on Windows 11 with a Ryzen 7 9850X3D and a GeForce RTX 4090 (WSL 3.0.5, U
 QEMU 8.2.2, virglrenderer 1.0.0, Mesa 25.2): the guest boots in about 25 s, Quartz Extreme is on
 with the translucent menu bar and the Dashboard ripple, and gl-gears runs at about 55 frames/s.
 The renderer shows up as `NVIDIA GeForce RTX 4090 OpenGL Engine`.
+
+#### UTM on an Apple-silicon Mac (tested)
+
+UTM runs the VM under emulation (an x86 guest on an ARM Mac has no KVM), and its 3D display
+hands the OpenGL work to the Mac's GPU through ANGLE, which turns OpenGL ES into Metal. Create a
+VM with Emulate > Other, then set in its settings:
+
+- System: architecture x86_64, system Q35, 4 GB of memory, 4 CPU cores.
+- QEMU: UEFI Boot on.
+- Display: emulated display card `virtio-vga-gl` (GPU Supported).
+- Network: emulated network card `e1000`.
+- Drives: the OpenCore disk, the Snow Leopard disk and `ripple.iso`, all on the IDE interface,
+  the OpenCore disk first.
+- QEMU > Arguments, one row each:
+
+```
+-device isa-applesmc,osk="YOUR-SMC-KEY"
+-smbios type=2
+-cpu Penryn,vendor=GenuineIntel,+sse4.1,+sse4.2,+ssse3,vmware-cpuid-freq=off
+-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off
+-device ich9-usb-ehci1,id=rehci
+-device usb-kbd,bus=rehci.0
+-device usb-tablet,bus=rehci.0
+```
+
+- The keyboard and tablet get their own USB 2.0 controller: UTM's USB bus is USB 3.0, which
+  10.6 has no driver for.
+- No `X-PciMmio64Mb`: UTM's 3D display adds an 8 GB memory region, which only fits above 4 GB.
+  Under emulation 10.6 can use it there; the hang in KI-2 happens only with KVM.
+- The CPU flags that only mean something to KVM (`kvm=on`, `+kvm_pv_*`, `+hypervisor`,
+  `+invtsc`) are left out.
+
+Tested with UTM 5.0.8 (QEMU 10.0.12) on macOS 26.7 with an M1 Max: Quartz Extreme is on with the
+translucent menu bar, and gl-gears runs at about 55 frames/s even under emulation. The renderer
+shows up as `Intel virgl OpenGL Engine`: UTM doesn't pass on the GPU's name, and Core Image only
+uses the GPU for renderer names it knows. The pointer is invisible in UTM (KI-8).
 
 #### Why these settings
 
