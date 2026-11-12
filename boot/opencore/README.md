@@ -74,6 +74,23 @@ Same as VM 211 except the boot disk and the SMC, tested on VM 212:
   of a VM with the card (IRQ 16 is shared with the host's SMBus). One boot in 12 hung while
   it happened. See decision 0007.
 
+## Kernel patches (10.6.8)
+
+`config.plist` patches two comparisons in the 10.6.8 kernel (x86_64, Darwin 10.8.0 only), for
+hosts that emulate the CPU (KI-9 in [docs/known-issues.md](../../docs/known-issues.md)):
+
+- Snow Leopard treats a TSC at or below 1.0000678 GHz as slow. On the 64-bit kernel that is
+  fatal: the commpage has no 64-bit `nanotime` for a slow TSC, so the kernel panics early in
+  the boot with `commpage no match for last, next address ffff1780`, before any driver loads.
+- Under emulation (UTM's x86_64 VMs on Apple silicon, QEMU's TCG) the guest's TSC runs at
+  exactly 1 GHz, from QEMU's nanosecond clock. OpenCore measures it at 1.00005 to 1.00023 GHz,
+  so some boots land below the threshold and panic (seen 2026-11-12: 1,000,058,600 Hz).
+- The patches move the threshold to exactly 1 GHz, both in the real-time clock and in the
+  commpage's capability bits; the two must agree, or the kernel panics with "nanotime trouble
+  3". The fast `nanotime` is correct for any TSC above 1 GHz: its 32-bit scale only overflows
+  at 1 GHz or below.
+- No effect on real CPUs or with KVM, where the TSC runs at several GHz.
+
 ## Build and install
 
 From the laptop (it only runs ssh/scp):
