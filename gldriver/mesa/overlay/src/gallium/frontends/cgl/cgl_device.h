@@ -21,6 +21,10 @@ struct pipe_frontend_screen *ripple_cgl_device_fscreen(void);
 /* Describe accelerator surface `id` (the kernel's surface clients), for drawables on them. */
 bool ripple_cgl_device_surface_info(uint32_t id, struct ripple_gpu_surface_info *out);
 
+/* Wait until the GPU has finished everything this process has sent it so far. Costs nothing
+ * when nothing has been sent since the last wait. */
+void ripple_cgl_device_wait_idle(void);
+
 /* Show `res` (region x, y, w, h) on the display, or present it again; NULL gives the display
  * back to the console framebuffer. */
 struct pipe_resource;

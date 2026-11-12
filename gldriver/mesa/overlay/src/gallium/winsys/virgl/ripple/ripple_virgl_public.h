@@ -29,4 +29,8 @@ uint32_t ripple_virgl_resource_handle(struct pipe_resource *res);
  * that is already on screen. */
 unsigned ripple_virgl_work_count(void);
 
+/* Wait until the GPU has finished everything this process has sent it so far (submits and
+ * uploads of every context). Costs nothing when that is already known. */
+void ripple_virgl_wait_idle(struct pipe_screen *screen);
+
 #endif
