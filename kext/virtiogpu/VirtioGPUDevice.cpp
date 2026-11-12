@@ -565,11 +565,14 @@ bool VirtioGPUDevice::updateCursor(uint32_t scanout, uint32_t id, int32_t x, int
     return cursorCommand(&c, sizeof(c));
 }
 
-bool VirtioGPUDevice::moveCursor(uint32_t scanout, int32_t x, int32_t y)
+bool VirtioGPUDevice::moveCursor(uint32_t scanout, uint32_t id, int32_t x, int32_t y)
 {
     struct virtio_gpu_update_cursor c;
     bzero(&c, sizeof(c));
     c.hdr.type = VIRTIO_GPU_CMD_MOVE_CURSOR;
+    // QEMU takes the pointer's visibility from resource_id on a move too (dpy_mouse_set):
+    // 0 hides it in displays that honour that (SPICE in UTM, SDL). Linux sends it as well.
+    c.resource_id = id;
     c.pos.scanout_id = scanout;
     c.pos.x = (uint32_t)x;
     c.pos.y = (uint32_t)y;

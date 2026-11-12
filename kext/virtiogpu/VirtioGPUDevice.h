@@ -79,7 +79,7 @@ public:
     // Cursor queue: no response; the request buffer is reclaimed later.
     bool updateCursor(uint32_t scanout, uint32_t id, int32_t x, int32_t y,
                       uint32_t hotX, uint32_t hotY);
-    bool moveCursor(uint32_t scanout, int32_t x, int32_t y);
+    bool moveCursor(uint32_t scanout, uint32_t id, int32_t x, int32_t y);
 
 protected:
     virtual bool init(IOPCIDevice *pci);
