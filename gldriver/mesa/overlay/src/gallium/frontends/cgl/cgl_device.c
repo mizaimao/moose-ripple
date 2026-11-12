@@ -222,6 +222,56 @@ ripple_cgl_device_display(struct pipe_resource *res, unsigned x, unsigned y, uns
 static struct pipe_resource *screen_tex;
 static simple_mtx_t screen_tex_lock = SIMPLE_MTX_INITIALIZER;
 
+/* /Library/Logs/RippleGL/displaydump: the whole screen as it goes to the display (the screen
+ * texture, or WindowServer's display buffer), read back from the GPU, as display.ppm (top row
+ * first), at the next present after each new modification time of that file. It shows what the
+ * host gets where no capture on the host is possible (a GL display under WSLg). Called just
+ * before the buffer is shown. */
+#include <sys/stat.h>
+#include <time.h>
+
+void
+ripple_cgl_device_display_dump(struct pipe_context *pipe, struct pipe_resource *res,
+                               bool bottom_up)
+{
+   static time_t done, checked;
+   struct stat st;
+   time_t now = time(NULL);
+
+   if (now == checked)                        /* at most once a second */
+      return;
+   checked = now;
+   if (stat("/Library/Logs/RippleGL/displaydump", &st) != 0 || st.st_mtime == done)
+      return;
+   done = st.st_mtime;
+
+   struct pipe_transfer *xfer = NULL;
+   unsigned w = res->width0, h = res->height0;
+   bool rgba = res->format == PIPE_FORMAT_R8G8B8A8_UNORM ||
+               res->format == PIPE_FORMAT_R8G8B8X8_UNORM;
+   const uint8_t *map = pipe_texture_map(pipe, res, 0, 0, PIPE_MAP_READ, 0, 0, w, h, &xfer);
+   if (!map)
+      return;
+   FILE *f = fopen("/Library/Logs/RippleGL/display.ppm.part", "wb");
+   if (f) {
+      fprintf(f, "P6\n%u %u\n255\n", w, h);
+      uint8_t *line = malloc((size_t)w * 3);
+      for (unsigned y = 0; line && y < h; y++) {
+         const uint8_t *row = map + (size_t)(bottom_up ? h - 1 - y : y) * xfer->stride;
+         for (unsigned x = 0; x < w; x++) {                     /* B G R A, or R G B A */
+            line[3 * x] = row[4 * x + (rgba ? 0 : 2)];
+            line[3 * x + 1] = row[4 * x + 1];
+            line[3 * x + 2] = row[4 * x + (rgba ? 2 : 0)];
+         }
+         fwrite(line, 1, (size_t)w * 3, f);
+      }
+      free(line);
+      fclose(f);
+      rename("/Library/Logs/RippleGL/display.ppm.part", "/Library/Logs/RippleGL/display.ppm");
+   }
+   pipe_texture_unmap(pipe, xfer);
+}
+
 bool
 ripple_cgl_device_present_region(struct st_context *st, struct pipe_resource *src,
                                  int src_x, int src_y, int x, int y, unsigned w, unsigned h,
@@ -266,6 +316,8 @@ ripple_cgl_device_present_region(struct st_context *st, struct pipe_resource *sr
          pipe->resource_copy_region(pipe, screen_tex, 0, x0, screen_h - y1, 0, src, 0, &box);
       }
    }
+   if (ok)
+      ripple_cgl_device_display_dump(pipe, screen_tex, true);   /* rows bottom-up, as GL draws */
    simple_mtx_unlock(&screen_tex_lock);
    if (!ok)
       return false;

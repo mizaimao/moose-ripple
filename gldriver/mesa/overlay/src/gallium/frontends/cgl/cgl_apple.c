@@ -1468,6 +1468,11 @@ ripple_cgl_get_string(void *rend, GLenum name)
             size_t n = 0;
             if (!strncmp(p, "virgl (", 7))
                p += 7;
+            /* A Windows host through WSL2: Mesa's Direct3D 12 driver names itself "D3D12
+             * (<adapter>)"; the adapter is the GPU (#19: "D3D12 OpenGL Engine" sent Core
+             * Image to the CPU). */
+            if (!strncmp(p, "D3D12 (", 7))
+               p += 7;
             if (!strncmp(p, "Mesa ", 5))
                p += 5;
             for (; *p && *p != ')' && n < sizeof(gpu) - 1; p++) {
@@ -1482,6 +1487,11 @@ ripple_cgl_get_string(void *rend, GLenum name)
             while (n && gpu[n - 1] == ' ')
                n--;
             gpu[n] = 0;
+            /* A host that doesn't name its GPU (UTM's virglrenderer on ANGLE: plain "virgl")
+             * would leave Core Image on the CPU, with an opaque menu bar. Give it the tier the
+             * driver is tested with (#18: menu bar translucent in UTM with this name). */
+            if (!strcmp(gpu, "virgl"))
+               n = (size_t)snprintf(gpu, sizeof(gpu), "Intel virgl");
             if (n)
                snprintf(renderer, sizeof(renderer), "%s OpenGL Engine", gpu);
          }
