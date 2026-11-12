@@ -36,13 +36,13 @@ inside the VM.
 *Adding a widget to the Dashboard, recorded in real time in the same VM: moose-ripple on the
 left, Apple's software rendering on the right.*
 
-## What's Working
+## What works
 
 - Quartz Extreme: WindowServer composites the whole screen on the GPU. The menu bar and menus
   are translucent over a blurred backdrop, Exposé and Dashboard animate on the GPU, and adding a
   widget sets off the ripple.
 - OpenGL 2.1 for apps, 32- and 64-bit, through Mesa's virgl driver. Apps see the renderer as
-  `virgl (Mesa Intel(R) UHD Graphics 630 (CFL GT2))` on our host. Quartz Composer, Front Row,
+  `virgl (Mesa Intel(R) UHD Graphics 630 (CFL GT2))` on the test host. Quartz Composer, Front Row,
   the Flurry screen saver and games such as Angry Birds Rio run on it.
 - Core Image on the GPU: its filters and Photo Booth's effects.
 
@@ -89,20 +89,19 @@ Details: [docs/re/perf-notes.md](docs/re/perf-notes.md) and [docs/re/m6-notes.md
   side-by-side copies ([#8](https://github.com/mizaimao/moose-ripple/issues/8)).
 - Chess: the 3D board stays black ([#9](https://github.com/mizaimao/moose-ripple/issues/9)).
 - Core Image Fun House shows no image (with Apple's software renderer too).
-- iMovie hasn't been tried yet. Photo Booth's live effects need a camera, which our VM doesn't
-  have, so the effects were tested on a still photo ([#11](https://github.com/mizaimao/moose-ripple/issues/11)).
+- iMovie hasn't been tried yet. Photo Booth's live effects need a camera, which the test VM
+  doesn't have, so the effects were tested on a still photo ([#11](https://github.com/mizaimao/moose-ripple/issues/11)).
 - The OpenGL windows of apps are copied back through the guest every frame: about 20-30 ms per
   frame for a 1280x800 window. The next performance pass keeps them on the GPU ([#10](https://github.com/mizaimao/moose-ripple/issues/10)).
 - From a key press to the first change on screen takes about 0.2 s, measured through QEMU's VNC
   display, and whole-screen animations reach a VNC viewer at 4-20 frames/s ([#10](https://github.com/mizaimao/moose-ripple/issues/10)).
 - `open -a "Front Row"` starts Front Row without showing it. Start it with Cmd+Esc.
 - Only Mac OS X 10.6.8 with the 64-bit kernel. Only tested with an Intel host GPU; virglrenderer
-  also runs on AMD and NVIDIA host GPUs, but we haven't tried them.
+  also runs on AMD and NVIDIA host GPUs, but those haven't been tried yet.
 
-Problems of 10.6 in QEMU that show up without moose-ripple too (a panic when the guest goes to
-sleep (KI-6), live snapshots that panic it (KI-5), the pointer drifting from QEMU's USB tablet
-(KI-1)) are in
-[docs/known-issues.md](docs/known-issues.md), with workarounds; each has a GitHub issue.
+Some problems of 10.6 in QEMU show up without moose-ripple too: a panic when the guest goes to
+sleep (KI-6), live snapshots that panic it (KI-5) and the pointer drifting with QEMU's USB tablet
+(KI-1). They are in [docs/known-issues.md](docs/known-issues.md), with workarounds.
 
 ## Status
 
@@ -117,7 +116,7 @@ sleep (KI-6), live snapshots that panic it (KI-5), the pointer drifting from QEM
 | M6 | Core Image and real apps: Quartz Composer, Core Image filters, Photo Booth effects and Front Row work; Real Racing 2 and iMovie are open | in progress |
 | Performance, second pass | App OpenGL windows kept on the GPU, fewer round trips for Core Image | after M6 |
 
-Every milestone measures the numbers above again and may not make them slower. Reports for each
+Each milestone measures the numbers above again and must not make them slower. Reports for each
 milestone are in [docs/re/](docs/re/).
 
 ## Build environment
@@ -294,12 +293,6 @@ boot flags (`npci=0x2000` stays). If the VM doesn't reach the desktop, go back t
 or start it in single-user mode (Cmd+S in OpenCore's menu) and run `/sbin/mount -uw /`,
 `rm -rf /System/Library/Extensions/Ripple*` and `reboot`.
 
-## Reporting problems
-
-Please open an issue on [GitHub Issues](https://github.com/mizaimao/moose-ripple/issues). Say
-which host you use (QEMU or Proxmox version, host GPU), the guest's boot flags (`nvram
-boot-args`) and what you see. Check [docs/known-issues.md](docs/known-issues.md) first.
-
 ## Building from source
 
 The guest files build on Linux, cross-compiled for Mac OS X 10.6:
@@ -364,7 +357,7 @@ The boundary between the GL bundle and the kernel is small, versioned and GPU-ne
 
 ## Credits
 
-moose-ripple stands on:
+moose-ripple builds on:
 
 - [Mesa](https://mesa3d.org) and its virgl Gallium driver (MIT), the GL implementation inside
   RippleGLDriver.bundle.
