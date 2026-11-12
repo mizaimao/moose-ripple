@@ -1468,6 +1468,11 @@ ripple_cgl_get_string(void *rend, GLenum name)
             size_t n = 0;
             if (!strncmp(p, "virgl (", 7))
                p += 7;
+            /* A Windows host through WSL2: Mesa's Direct3D 12 driver names itself "D3D12
+             * (<adapter>)"; the adapter is the GPU (#19: "D3D12 OpenGL Engine" sent Core
+             * Image to the CPU). */
+            if (!strncmp(p, "D3D12 (", 7))
+               p += 7;
             if (!strncmp(p, "Mesa ", 5))
                p += 5;
             for (; *p && *p != ')' && n < sizeof(gpu) - 1; p++) {
