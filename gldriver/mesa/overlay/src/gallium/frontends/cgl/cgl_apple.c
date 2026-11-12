@@ -13,6 +13,7 @@
 #include "util/u_debug.h"
 
 #include "cgl_context.h"
+#include "cgl_device.h"
 #include "cgl_dispatch.h"
 #include "cgl_drawable.h"
 
@@ -59,17 +60,26 @@ ripple_cgl_delete_fences(void *rend, GLsizei n, const GLuint *fences)
  * also present the front buffer. Core Image and WindowServer's compositor call
  * glFlushRenderAPPLE several times inside one frame, so unfinished frames reached the screen:
  * the Dashboard ripple flickered and a new widget went missing for a few frames (reported in
- * testing, 2026-11-11). */
+ * testing, 2026-11-11).
+ *
+ * Waiting: the flush sends what is queued (nothing goes out when nothing is), then the device
+ * waits for all it has been sent, which costs nothing if it has waited for that already. A
+ * flush that asks Mesa for a fence instead submits a buffer even when it is empty and then
+ * waits on it, two round trips to the host each time; WindowServer tests its window textures
+ * (glTestObjectAPPLE) four times before it lets an app touch a window's memory, so every
+ * frame of an app drawing into a window paid eight (performance pass, 2026-11-12). */
 static void
 flush_render(bool wait)
 {
    /* Mesa's current context, which RIPPLE_CGL_ENTER has just made the caller's: `rend` itself
     * can be GLEngine's context for one taken over (WindowServer's own contexts). */
    struct gl_context *gl = _glapi_get_context();
-   struct pipe_fence_handle *fence = NULL;
 
-   if (gl && gl->st)
-      st_context_flush(gl->st, wait ? ST_FLUSH_WAIT : 0, wait ? &fence : NULL, NULL, NULL);
+   if (!gl || !gl->st)
+      return;
+   st_context_flush(gl->st, 0, NULL, NULL, NULL);
+   if (wait)
+      ripple_cgl_device_wait_idle();
 }
 
 void GLAPIENTRY

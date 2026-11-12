@@ -304,3 +304,40 @@ surface-shape kernel calls: about 10 ms in all (SUBMIT 0.9 ms, WAIT 0.8 ms, DISP
 average), half of its wall time. gl-gears itself spends about 40% of its time waiting in two
 window-server calls (`CGSLockWindowBits` and `CGSFlushSurfaceWithOptions`). Fewer waits and
 submits per frame, and app windows kept on the GPU, are the driver's next steps.
+
+### Fix: waiting for the GPU without a round trip when nothing was sent (2026-11-12)
+
+Where the per-frame calls came from (dtrace on WindowServer, call sites): four of the five
+submits and all four waits were `glTestObjectAPPLE`. Before WindowServer lets an app touch a
+window's memory (`CGSLockWindowBits`), it tests the window's textures four times, and our
+`glTestObjectAPPLE`, like the fence and finish calls of GL_APPLE_fence and
+GL_APPLE_flush_render, flushed with a Mesa fence and waited on it: a submit even when the
+buffer was empty, then a sync, two round trips to the host each time.
+
+Now the flush sends only what is queued, and the wait is for the newest fence number the
+kernel has given this process, which the winsys remembers as signalled once it has been waited
+for. Repeated tests with nothing new cost no kernel call.
+
+Same scene, VM 210, `ripple_qe=1`:
+
+| | before | after |
+|---|---|---|
+| Kernel calls per composited frame (one GL window animating): submit / wait / display | 5 / 4 / 1 | 1 / 1 (no host round trip) / 1 |
+| Time in them per frame | about 10 ms | about 5.4 ms |
+| gl-gears in a window, 60 s | 44-52 frames/s | 58.5 frames/s |
+| ...two-second windows with a frame over 100 ms | 21-24 of 29 | 3 of 29 |
+| The same with Apple's software renderer drawing the window | 16 of 29, 53 frames/s | 1 of 29, 58.8 frames/s |
+| Core Image filters, time per frame (24 filters) | 2-90 ms | 1.6-13.8 ms (median 2.9; software 2.0) |
+| Dashboard, screens per second, peak / mean (three runs) | 26-55 / 15-32 | 29-36 / 11-16 |
+| Exposé, screens per second, peak / mean | 27-28 / 9-15 | 22-25 / 10-11 |
+
+Pictures unchanged: the same one Core Image filter (CIEdges, 3.9%) and the same six Photo
+Booth effects differ from software rendering as before; desktop, Exposé, Dashboard and
+gl-gears checked by eye.
+
+So the stall above goes with the sync round trips (a fenced empty submit and the wait for its
+reply): with one per frame instead of four it is nearly gone, also for a window drawn by
+Apple's software renderer. It is specific to the KVM host: the same 60 s count under UTM on
+Apple silicon (emulated CPU, no KVM) shows no stall, with either renderer (issue 22). What
+remains on the rig is about one stall in 20 s, in the one fenced command a frame still sends
+(the display path's).

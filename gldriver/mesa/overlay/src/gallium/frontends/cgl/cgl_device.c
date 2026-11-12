@@ -167,6 +167,20 @@ ripple_cgl_device_surface_info(uint32_t id, struct ripple_gpu_surface_info *out)
                                       out, &size) == KERN_SUCCESS;
 }
 
+void
+ripple_cgl_device_wait_idle(void)
+{
+   struct pipe_frontend_screen *fscreen = ripple_cgl_device_fscreen();
+
+   if (!fscreen)
+      return;
+   switch (device_backend) {
+   case RIPPLE_GPU_BACKEND_VIRGL:
+      ripple_virgl_wait_idle(fscreen->screen);
+      break;
+   }
+}
+
 bool
 ripple_cgl_device_display(struct pipe_resource *res, unsigned x, unsigned y, unsigned w,
                           unsigned h)
