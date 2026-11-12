@@ -360,8 +360,9 @@ Proxmox VM, taking a snapshot first (`build.sh`, `install-kext.sh`, `install-glb
 
 None of these is scheduled. More detail in [docs/future-ideas.md](docs/future-ideas.md).
 
-- A second performance pass: apps' OpenGL windows kept on the GPU, and fewer round trips for
-  Core Image.
+- A second performance pass: apps' OpenGL windows kept on the GPU, the screen presented at most
+  once per display refresh, and fewer round trips for Core Image.
+- Watching the VM on a real monitor attached to the host GPU instead of through VNC.
 - Native context instead of virgl: the guest talks more directly to an AMD or Intel host GPU,
   with less CPU overhead (needs Linux 6.13 or newer on the host).
 - Apple silicon hosts: Snow Leopard emulated by QEMU on a Mac, drawing on the Mac's GPU.
