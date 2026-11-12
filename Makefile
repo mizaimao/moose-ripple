@@ -45,7 +45,7 @@ strip_vmin  = $(VTOOL) -remove-build-version macos -output $(1) $(1).v && rm -f 
 link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
-.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter clean
+.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter surfaceprobe clean
 all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter winlist glfeaturecheck cieffects ticker
 
 clean:
@@ -258,6 +258,16 @@ $(OUT)/%/gl-gears/gl-gears: $(OUT)/%/gl-gears/gl-gears.o
 	$(call link_tool,$*,$@,$^,-framework Cocoa -framework OpenGL -lobjc)
 glgears: $(OUT)/gl-gears
 $(OUT)/gl-gears: $(OUT)/i386/gl-gears/gl-gears $(OUT)/x86_64/gl-gears/gl-gears
+	$(LIPO) -create $^ -output $@
+
+# --- surface-probe (binding a window's surface as a hardware GL driver does) -----------------
+$(OUT)/%/surface-probe/surface-probe.o: tools/surface-probe/surface-probe.m include/ripple_gpu_uapi.h
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,$*) $(UCFLAGS) -Iinclude -x objective-c -c $< -o $@
+$(OUT)/%/surface-probe/surface-probe: $(OUT)/%/surface-probe/surface-probe.o
+	$(call link_tool,$*,$@,$^,-framework Cocoa -framework IOKit -framework ApplicationServices -lobjc)
+surfaceprobe: $(OUT)/surface-probe
+$(OUT)/surface-probe: $(OUT)/i386/surface-probe/surface-probe $(OUT)/x86_64/surface-probe/surface-probe
 	$(LIPO) -create $^ -output $@
 
 # --- gl-check (M5: offscreen rendering checks for what WindowServer draws with) -----------
