@@ -145,3 +145,20 @@ within ten seconds of booting, and `loginwindow` sometimes follows (a NULL run l
 Both restart by themselves; ssh sessions opened in that window can be reset. Seen on every boot
 of VM 210 since at least 2026-11-11 03:41. A power-source (battery/ACPI) matter of the VM, not
 the GPU driver.
+
+## KI-8: UTM doesn't draw the pointer (3D display)
+
+GitHub issue: [#18](https://github.com/mizaimao/moose-ripple/issues/18). Reported to UTM as UTM
+issue 8139.
+
+**Symptom.** In UTM 5.0.8 on an Apple-silicon Mac with the 3D display (`virtio-vga-gl`), the
+pointer is invisible. It still moves, and clicks land where they should. This holds with the
+default software pointer and with the hardware cursor (`ripple_hwcursor=1`).
+
+**Cause: UTM, not the driver.** With the hardware cursor, the pointer image reaches UTM's display
+client (its debug log shows a 64x64 cursor arriving each time the guest sets one), but nothing is
+drawn. The same driver's pointer image comes through intact in QEMU 9.2 with virglrenderer
+0.10.4 on Linux, both on desktop OpenGL and on OpenGL ES (read over VNC, 2026-11-11). Handing the
+image over as RGBA instead of BGRA changed nothing in UTM.
+
+**Workaround:** none known yet in UTM.
