@@ -298,3 +298,25 @@ path; what its flush costs the program was not measured.
 Open: a window whose first frames arrive while WindowServer still has the new surface
 non-simple can start on the slower path and stay there (seen once in five starts of the big
 window); minimising; a program that draws once; surfaces that are not opaque.
+
+## Step 6: minimising, a program that draws once, surfaces that are not opaque (2026-11-12)
+
+Checked on VM 210 with the kernel-shown path switched on (`RIPPLE_GL_DIRECT=1`), against
+Apple's software renderer in the same VM (`gl-gears -s`) and our default path, with captures.
+gl-gears got options for it that need no pointer: `-f N` stops drawing after N frames, `-c`
+sends a second window across the GL window, `-z` minimises and restores, `-o` makes the
+surface and the window see-through.
+
+| Case | Result with the kernel-shown path |
+|---|---|
+| Draws 3 frames, then another window crosses it | the picture is clipped right while covered and whole again after |
+| Draws 3 frames, then the window moves | the picture goes along and stays |
+| Minimise and restore, animating | the genie effect carries the gears both ways, the Dock shows the thumbnail, animation resumes (58.8 frames/s) |
+| Draws 3 frames, then minimise and restore | the picture comes back |
+| See-through surface, standing and moving | the desktop shows through around the gears, as on the two references; 49 frames/s while moving against 40-41 on both |
+
+No driver change was needed after step 5: in all of these WindowServer draws the window with
+its texture of the surface, which now always holds the latest frame, and while the surface is
+a plain region of the screen the frame the kernel copied there stays. A see-through surface
+is never shaped plain; WindowServer asks for an RGBA texture for it (it sets the read lock's
+second address itself when the surface is not opaque) and blends.
