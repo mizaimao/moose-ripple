@@ -40,6 +40,7 @@ class RippleSurfaceClient : public IOUserClient
     uint32_t           fBufWidth, fBufHeight, fRowBytes;
     int32_t            fOriginX, fOriginY;   // screen position of buffer pixel (0,0)
     bool               fScreenRegion;    // shaped without backing: its contents go on screen
+    uint32_t           fShapeOptions;    // eIOAccelSurfaceShapeBits of the last shape
     uint32_t           fShapeSeq;
 
     // Backing: the client's own memory, or ours mapped into the client.
@@ -71,6 +72,8 @@ public:
     uint32_t surfaceID() const { return fID; }
     // For RippleAccelerator::describeSurface (called with the accelerator's surface lock held).
     bool describe(task_t asker, struct ripple_gpu_surface_info *out);
+    bool screenShape(IOAccelBounds *bounds, IOAccelBounds *rects, uint32_t maxRects,
+                     uint32_t *count);
 };
 
 #endif
