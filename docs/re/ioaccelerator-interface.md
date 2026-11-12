@@ -82,3 +82,37 @@ frame, window contents as textures via `gldModifyTexture`), and uses the standar
 client only for the display ("framebuffer") surfaces. The two surface selectors seen match the
 SDK header's numbering exactly. Implication: Quartz Extreme needs a working GL driver (M4) plus
 the surface client for framebuffer surfaces and whatever the GA plugin's 2D client is used for.
+
+## Trace 3: an app's GL window on Apple's driver (2026-11-12)
+
+Reference VM 211 (9600 GT), Chess and gl-gears, dtrace on the app and on WindowServer. This is
+how an accelerated window is shown without going through WindowServer for every frame, and
+what our driver would have to do to keep app windows on the GPU (today it shows them like
+Apple's software renderer, through a private window and two copies in memory).
+
+- **Binding.** The app's driver, in `gldAttachDrawable(ctx, 0x50, {cid, wid, sid})`, calls
+  `CGSBindSurface(cid, wid, sid, 2, 0x24, DISPLAY)` through a callback of OpenGL.framework
+  (the software renderer passes 1, 0 and its private window instead). 0x24 is the accelerator
+  surface mode; the last argument looked like a display ID (0x18dba7c1; the main display was
+  0x18db8fc1).
+- **WindowServer then makes the kernel surface.** `_XBindSurface` → `CGXBindSurface` →
+  `IOAccelCreateSurface(accelerator, id = the CGS surface ID, mode 0x24)`, then
+  `_CGXSynchronizeSurfaceVisibility` → `IOAccelSetSurfaceFramebufferShape(conn, region,
+  options 0, framebuffer 0)`: the surface's visible region on screen. The app never calls
+  `IOAccelCreateSurface` itself (only `IOAccelFindAccelerator`).
+- **The app's GL context attaches to that surface by ID**: one call on its GL context client
+  (selector 11, a 40-byte structure) from `gldAttachDrawable`.
+- **Per frame WindowServer does nothing for the window.** With gl-gears animating at 59
+  frames/s, WindowServer made no GL, CGL, accelerator or kernel call for it; the only per-frame
+  call was `CGXGLInvalidateTextureRegion`, from the Dock's mirror update. So the kernel driver
+  puts each swapped frame on screen itself, inside the surface's visible region.
+- **When WindowServer has to draw the window itself** (redraws, the Dock's mirror, and
+  presumably Exposé), it takes the surface as a texture:
+  `_CGXRedrawWindow` → `CGXWindowBackingGet` → `CGXBackingStoreTextureGet` →
+  `CGXGLSetTextureSurface(ctx, surface ID, ...)`.
+
+What that means for a driver of ours: the kext shows a swapped frame itself (a copy on the
+host GPU from the app's buffer into the screen texture, clipped to the surface's region), the
+app's GL bundle binds with kind 2 and attaches its drawable to the kernel surface, and
+WindowServer's GL bundle answers the surface-texture request with the app's buffer. No read
+back, no private window, no upload.
