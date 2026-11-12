@@ -116,3 +116,26 @@ host GPU from the app's buffer into the screen texture, clipped to the surface's
 app's GL bundle binds with kind 2 and attaches its drawable to the kernel surface, and
 WindowServer's GL bundle answers the surface-texture request with the app's buffer. No read
 back, no private window, no upload.
+
+## Trace 4: the same binding on our kext (2026-11-12)
+
+`tools/surface-probe` makes a window, adds a surface and calls
+`CGSBindSurface(cid, wid, sid, 2, 0x24, CGMainDisplayID())`, then asks the kext about that
+surface ID (`RIPPLE_GPU_SURFACE_INFO`). On VM 210, with the kext logging surface calls
+(`ripple_qe=2`):
+
+- Before the bind the kext has no such surface. The bind returns 0, and WindowServer has
+  opened a surface client on our accelerator: `SetIDMode(id = the CGS surface ID, mode 0x24)`,
+  then `SetShape(options 0, framebuffer 0, bounds 300,178 400x300, 1 rectangle)`: the
+  surface's place on the screen (the window's frame, title bar included, for bounds 0,0 in the
+  window). So the main display's ID works as the last argument, and the kext's existing
+  surface client is enough for this part.
+- When the window is moved: `ReadLockOptions(2)` and `ReadUnlock` (WindowServer reads the
+  surface's pixels to draw the moving window itself), then
+  `SetShape(options 2 (non-simple), bounds 0,0 400x300)`: no longer a plain region of the
+  screen. The probe never draws or flushes, so what brings the surface back to a screen
+  region is not seen yet.
+- `CGSRemoveSurface` makes WindowServer close the surface client.
+
+Next: let an app attach a GPU buffer to such a surface and have the kext copy it into the
+screen texture inside the surface's region when the app swaps.
