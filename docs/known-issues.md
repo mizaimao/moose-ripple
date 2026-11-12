@@ -146,22 +146,20 @@ Both restart by themselves; ssh sessions opened in that window can be reset. See
 of VM 210 since at least 2026-11-11 03:41. A power-source (battery/ACPI) matter of the VM, not
 the GPU driver.
 
-## KI-8: UTM doesn't draw the pointer (3D display)
+## KI-8: In UTM the pointer was invisible (fixed)
 
-GitHub issue: [#18](https://github.com/mizaimao/moose-ripple/issues/18). Reported to UTM as UTM
-issue 8139.
+GitHub issue: [#18](https://github.com/mizaimao/moose-ripple/issues/18)
 
-**Symptom.** In UTM 5.0.8 on an Apple-silicon Mac with the 3D display (`virtio-vga-gl`), the
-pointer is invisible. It still moves, and clicks land where they should. This holds with the
-default software pointer and with the hardware cursor (`ripple_hwcursor=1`).
+**Symptom.** In UTM 5.0.8 with the 3D display (`virtio-vga-gl`) and the hardware cursor
+(`ripple_hwcursor=1`), the pointer was invisible. It moved, and clicks landed where they should.
 
-**Cause: UTM, not the driver.** With the hardware cursor, the pointer image reaches UTM's display
-client (its debug log shows a 64x64 cursor arriving each time the guest sets one), but nothing is
-drawn. The same driver's pointer image comes through intact in QEMU 9.2 with virglrenderer
-0.10.4 on Linux, both on desktop OpenGL and on OpenGL ES (read over VNC, 2026-11-11). Handing the
-image over as RGBA instead of BGRA changed nothing in UTM.
+**Cause: our driver.** Its pointer moves (`MOVE_CURSOR`) carried resource id 0. QEMU takes the
+pointer's visibility from that field on a move too, so displays that honour it, such as UTM's
+SPICE, hid the pointer on every move. Proxmox's VNC console ignores the field, which is why it
+never showed there. A first report to UTM (UTM issue 8139) took it for a UTM bug; it was ours.
 
-**Workaround:** none known yet in UTM.
+**Fixed** in 3d4a5c5 (2026-11-12, checked in UTM). In UTM, keep `ripple_hwcursor=1`: with
+Quartz Extreme on, the default software pointer doesn't show there.
 
 ## KI-9: Under emulation (UTM on Apple silicon) 10.6.8 sometimes panics early at boot
 
