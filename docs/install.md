@@ -196,6 +196,27 @@ uses the GPU for renderer names it knows. The pointer is invisible in UTM (KI-8)
 
 More on the boot disk: [boot/opencore/README.md](../boot/opencore/README.md).
 
+### Sound (optional)
+
+Snow Leopard has its own driver for USB audio devices (AppleUSBAudio), and QEMU has a USB audio
+device, so sound needs no moose-ripple driver. Add a USB 1.1 controller with QEMU's audio device
+on it; in UTM, as three more rows in QEMU > Arguments:
+
+```
+-device piix3-usb-uhci,id=ruhci
+-audiodev coreaudio,id=rca
+-device usb-audio,bus=ruhci.0,audiodev=rca
+```
+
+- The audio device is a USB 1.1 device, and the USB controllers above can't take it: the EHCI
+  one is USB 2.0 only, and 10.6 has no driver for UTM's USB 3.0 bus.
+- `coreaudio` plays on the Mac's own output. On other hosts, use their audio backend instead
+  (`pa` or `pipewire` on Linux); those haven't been tried yet.
+
+Tested in UTM 5.0.8 on 2026-11-12: Snow Leopard loads AppleUSBAudio for it, and its system
+sounds play on the Mac. In eleven boots with the device, one panicked early in the boot, too early
+for the panic report to be saved; the cause isn't known, and the ten others were fine.
+
 ## 3. Prepare Snow Leopard
 
 - If 10.6.8 isn't installed yet: start the 10.6.3 retail DVD through OpenCore, install, then

@@ -70,6 +70,8 @@ The boundary between the GL bundle and the kernel is small, versioned and GPU-ne
   `virgl (Mesa Intel(R) UHD Graphics 630 (CFL GT2))` on the test host. Quartz Composer, Front Row,
   the Flurry screen saver and games such as Angry Birds Rio run on it.
 - Core Image on the GPU: its filters and Photo Booth's effects.
+- Sound, with no driver of ours: QEMU's USB audio device and Snow Leopard's own driver (tested
+  in UTM; [docs/install.md](docs/install.md#sound-optional)).
 
 ![The menu bar with software rendering (top) and with moose-ripple (bottom)](media/menubar-compare.webp)
 
