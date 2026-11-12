@@ -323,3 +323,20 @@ clears and the video quad are dropped, so its frames are empty. The game's own c
 same window has a complete 1280x800 framebuffer. `swapdebug` now logs the framebuffer status and
 the drawable behind each swap. Next step when resumed: why that framebuffer is never validated
 to the drawable's size.
+
+## The same measurements on the GeForce 9600 GT (VM 211, 2026-11-11 evening)
+
+Apple's NVIDIA driver at 1920x1080 (the monitor offers 1080p, 720p and TV modes, no 1280x800;
+switching to 1280x720 with `tools/setmode` hung WindowServer until a reboot). One Finder
+window, the same scripts:
+- Frame meter, peak / mean screens per second, three runs: Dashboard 22.1-24.9 / 10.8-11.9,
+  Exposé 15.9-18.0 / 7.4-10.5, menus 1.0 / 0.4.
+- Flurry: 30 frames/s (glFlush), 2.3% of a CPU. Quartz Composer Arabesque: 58 frames/s,
+  47% of a CPU. Angry Birds Rio title screen (full screen): 60 frames/s, 13% of a CPU.
+- `ci-effects`: filters 23 of 24 match software rendering (CIEdges 2.6% of pixels), 1.0-3.2 ms
+  a frame; Photo Booth effects 54 of 61 match, 0.2-0.3 ms for most. The 7 that differ: Blue
+  Print 4.3%, City Lights 4.1%, Comic Book 3.4%, Concert 93.6%, Neon 17.0%, Pinch 78.3%,
+  Pointillize 2.4%. So Concert, Neon, Pinch and the others differ on real hardware too: most of
+  our differences are a GPU's, not our driver's.
+- Calculator's window is silver-grey with light keys here; on our driver its body is black
+  (issue #12).
