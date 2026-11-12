@@ -105,19 +105,31 @@ static simple_mtx_t windows_lock = SIMPLE_MTX_INITIALIZER;
 static struct gld_window *windows;
 
 /* Showing a window the way a hardware driver does (docs/re/ioaccelerator-interface.md, traces
- * 3 and 4, and kext-uapi SURFACE_PRESENT): the surface is bound as accelerated, WindowServer
+ * 3 to 5, and kext-uapi SURFACE_PRESENT): the surface is bound as accelerated, WindowServer
  * makes the kernel surface and keeps its region on the screen up to date, and each frame is
- * copied to the screen on the GPU by the kernel. Being built up step by step, so only on
- * request for now: RIPPLE_GL_DIRECT in the environment, or the file
- * /Library/Logs/RippleGL/direct. Not yet right for windows that are covered, moving or not
- * opaque. */
+ * copied to the screen on the GPU by the kernel, or drawn by WindowServer from its texture of
+ * the surface while something is drawn over the window. Every window is shown this way when
+ * the kext runs Quartz Extreme work (WindowServer is on our accelerator then, which the
+ * kernel surface needs). The older way, a private window that gets every frame read back
+ * into memory, stays for the other case and for comparisons: RIPPLE_GL_DIRECT=0 in the
+ * environment or the file /Library/Logs/RippleGL/no-direct select it. */
+static bool direct_possible;
+
+void
+gld_window_set_kernel_shown(bool possible)
+{
+   direct_possible = possible;
+}
+
 static bool
 direct_wanted(void)
 {
    static int wanted = -1;
-   if (wanted < 0)
-      wanted = main_display_id &&
-               (getenv("RIPPLE_GL_DIRECT") || access("/Library/Logs/RippleGL/direct", F_OK) == 0);
+   if (wanted < 0) {
+      const char *env = getenv("RIPPLE_GL_DIRECT");
+      wanted = main_display_id && direct_possible && !(env && !strcmp(env, "0")) &&
+               access("/Library/Logs/RippleGL/no-direct", F_OK) != 0;
+   }
    return wanted;
 }
 
@@ -382,6 +394,17 @@ uint32_t
 gld_window_direct_surface(const struct gld_window *w)
 {
    return w && w->direct ? w->sid : 0;
+}
+
+/* The kernel has a new frame of the window but did not put it on the screen: WindowServer
+ * draws the window itself at the moment and redraws it for a surface flush. */
+void
+gld_window_direct_flush(void *data)
+{
+   struct gld_window *w = data;
+
+   if (w && w->direct)
+      cgs.FlushSurfaceWithOptions(w->cid, w->wid, w->sid, NULL, w->vsync);
 }
 
 void

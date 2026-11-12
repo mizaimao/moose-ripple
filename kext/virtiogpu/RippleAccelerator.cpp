@@ -187,18 +187,52 @@ void RippleAccelerator::removeSurface(OSObject *s)
     IOLockUnlock(fSurfacesLock);
 }
 
-bool RippleAccelerator::surfaceScreenShape(uint32_t id, IOAccelBounds *bounds, IOAccelBounds *rects,
-                                           uint32_t maxRects, uint32_t *count)
+bool RippleAccelerator::presentSurfaceFrame(uint32_t id, uint32_t handle, uint32_t context,
+                                            uint32_t format, uint32_t width, uint32_t height,
+                                            bool topFirst)
 {
-    bool found = false;
+    // The surface sends host commands for it: not with the list locked.
+    RippleSurfaceClient *sc = retainSurface(id);
+    if (!sc)
+        return false;
+    bool shown = sc->presentFrame(handle, context, format, width, height, topFirst);
+    sc->release();
+    return shown;
+}
+
+bool RippleAccelerator::setSurfaceTexture(uint32_t id, uint32_t handle, uint32_t format,
+                                          uint32_t width, uint32_t height, bool once,
+                                          bool *filled)
+{
+    RippleSurfaceClient *sc = retainSurface(id);
+    if (!sc)
+        return false;
+    *filled = sc->setTexture(handle, format, width, height, once);
+    sc->release();
+    return true;
+}
+
+RippleSurfaceClient *RippleAccelerator::retainSurface(uint32_t id)
+{
+    RippleSurfaceClient *found = 0;
     IOLockLock(fSurfacesLock);
     for (unsigned i = 0; i < fSurfaces->getCount() && !found; i++) {
         RippleSurfaceClient *sc = (RippleSurfaceClient *)fSurfaces->getObject(i);
-        if (sc->surfaceID() == id)
-            found = sc->screenShape(bounds, rects, maxRects, count);
+        if (sc->surfaceID() == id) {
+            sc->retain();
+            found = sc;
+        }
     }
     IOLockUnlock(fSurfacesLock);
     return found;
+}
+
+void RippleAccelerator::forgetSurfaceFrames(uint32_t handle, uint32_t context)
+{
+    IOLockLock(fSurfacesLock);
+    for (unsigned i = 0; i < fSurfaces->getCount(); i++)
+        ((RippleSurfaceClient *)fSurfaces->getObject(i))->forgetFrame(handle, context);
+    IOLockUnlock(fSurfacesLock);
 }
 
 bool RippleAccelerator::describeSurface(uint32_t id, task_t asker, struct ripple_gpu_surface_info *out)

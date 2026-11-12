@@ -29,6 +29,9 @@ struct ripple_cgl_drawable {
                                              * each frame on the screen itself (0: not this way) */
    bool present_vsync;                      /* ...at most one frame per display refresh */
    int64_t last_present;
+   void (*present_refused)(void *data);     /* the kernel did not show a frame: WindowServer is
+                                             * drawing the window itself and has to be told */
+   void *present_refused_data;
    bool rect;                               /* colour buffers are rectangle textures (pbuffers) */
    uint8_t *pixels;                         /* readback buffer */
    size_t pixels_size;
@@ -55,7 +58,8 @@ void ripple_cgl_drawable_set_rect(struct ripple_cgl_drawable *d, bool rect);
 void ripple_cgl_drawable_set_screen_region(struct ripple_cgl_drawable *d, uint32_t surface);
 /* A window whose surface the kernel shows by itself (bound as accelerated; gld_window.c). */
 void ripple_cgl_drawable_set_surface_present(struct ripple_cgl_drawable *d, uint32_t surface,
-                                             bool vsync);
+                                             bool vsync, void (*refused)(void *data),
+                                             void *data);
 void ripple_cgl_drawable_destroy(struct ripple_cgl_drawable *d);
 
 /* CGLFlushDrawable (swap_APPLE): present the back buffer (or the front, single-buffered). */
