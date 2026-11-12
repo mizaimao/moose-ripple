@@ -27,7 +27,7 @@ inside the VM.
 |---|---|
 | ![Adding a widget to the Dashboard on moose-ripple: the water ripples](media/dashboard-widget-drop-ours.gif) | ![Adding a widget to the Dashboard with software rendering: no ripple](media/dashboard-widget-drop-software.gif) |
 
-*The ripple effect! (Though with a bit of stutter.)*
+*The ripple effect!*
 
 ## How it works
 
