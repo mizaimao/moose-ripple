@@ -90,7 +90,7 @@ the device finish everything submitted so far, then reports. `DISPLAY` shows a f
 (it waits the same way first). Before, every `SUBMIT` waited for the GPU, which cost about
 half of the frame rate.
 
-**Limits** (version 1, raised 2026-11-10 for Mesa): commands up to 320 KB per `SUBMIT` (Mesa's
+**Limits** (since version 1, raised 2026-11-10 for Mesa): commands up to 320 KB per `SUBMIT` (Mesa's
 virgl driver flushes at 260 KB), up to 4096 buffer handles per `SUBMIT`, up to 65536 buffers per
 connection, buffers up to 256 MB each, capability blobs up to 4 KB. Each connection keeps one
 320 KB physically contiguous command buffer in the kernel from its first `SUBMIT` on.
