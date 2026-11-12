@@ -7,6 +7,7 @@
 #define RIPPLE_ACCELERATOR_H
 
 #include <IOKit/graphics/IOAccelerator.h>
+#include <IOKit/graphics/IOAccelTypes.h>
 #include <IOKit/IOUserClient.h>
 #include "VirtioGPUDevice.h"
 #include "ripple_gpu_uapi.h"
@@ -35,6 +36,9 @@ public:
     void removeSurface(OSObject *s);
     // Describe surface `id` for task `asker` (backing address only for its owner).
     bool describeSurface(uint32_t id, task_t asker, struct ripple_gpu_surface_info *out);
+    // Surface `id`'s place and visible rectangles on the screen (RippleSurfaceClient::screenShape).
+    bool surfaceScreenShape(uint32_t id, IOAccelBounds *bounds, IOAccelBounds *rects,
+                            uint32_t maxRects, uint32_t *count);
 
     virtual bool start(IOService *provider);
     virtual void stop(IOService *provider);

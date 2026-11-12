@@ -181,6 +181,7 @@ IOReturn RippleSurfaceClient::setShape(uint32_t options, uint32_t framebuffer,
     fOriginX = ox;
     fOriginY = oy;
     fScreenRegion = !backing;           // SetShape without backing: a region of the screen
+    fShapeOptions = options;
     fShapeSeq++;
     return kIOReturnSuccess;
 }
@@ -405,6 +406,29 @@ IOReturn RippleSurfaceClient::externalMethod(uint32_t selector, IOExternalMethod
 }
 
 // ---- Description for GL drivers (RippleAccelerator::describeSurface) ----------------------
+
+// For showing a client's buffer on the screen (RippleGPUClient::surfacePresent): the surface's
+// place on the screen and the visible rectangles of it, when it is a plain region of the screen
+// now. Not when WindowServer has shaped it non-simple (it draws the window itself then, as
+// while a window moves), scaled it, or given it more rectangles than the caller has room for.
+bool RippleSurfaceClient::screenShape(IOAccelBounds *bounds, IOAccelBounds *rects,
+                                      uint32_t maxRects, uint32_t *count)
+{
+    IOLockLock(fLock);
+    bool ok = fID && fScreenRegion && fRegion && fBufWidth && fBufHeight && !fHasScale &&
+              !(fShapeOptions & kIOAccelSurfaceShapeNonSimpleBit) &&
+              fRegion->num_rects <= maxRects;
+    if (ok) {
+        bounds->x = (SInt16)fOriginX;
+        bounds->y = (SInt16)fOriginY;
+        bounds->w = (SInt16)fBufWidth;
+        bounds->h = (SInt16)fBufHeight;
+        *count = fRegion->num_rects;
+        memcpy(rects, fRegion->rect, fRegion->num_rects * sizeof(IOAccelBounds));
+    }
+    IOLockUnlock(fLock);
+    return ok;
+}
 
 bool RippleSurfaceClient::describe(task_t asker, struct ripple_gpu_surface_info *out)
 {

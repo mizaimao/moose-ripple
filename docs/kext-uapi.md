@@ -34,6 +34,7 @@ and buffers belong to the connection and are destroyed when it closes or its tas
 | 8 | `WAIT` | scalars: fence, timeout (ms) | scalar: 1 signalled, 0 timed out |
 | 9 | `DISPLAY` | scalars: buffer handle, x, y, width, height | (none): shows that region of the buffer on the display instead of the console framebuffer, or presents it again; handle 0 gives the display back |
 | 10 | `SURFACE_INFO` | scalar: accelerator surface id | struct `ripple_gpu_surface_info`: size, row bytes, screen position, screen size, flags (has CPU backing, is a region of the screen), and the backing's address for the surface's own task |
+| 11 | `SURFACE_PRESENT` | scalars: accelerator surface id, buffer handle, context handle, flags | scalar: 1 the buffer is on the screen now, 0 the surface is not a plain region of the screen at the moment |
 
 **Display.** `DISPLAY` (added for M5) puts a GPU buffer on the screen instead of the console
 framebuffer, and each further call with the same buffer presents its current contents. The
@@ -44,6 +45,19 @@ the connection closes, or on a mode change.
 the caller; `TRANSFER` moves data between that backing and the GPU-side object.
 Type `RIPPLE_GPU_MEMORY_FRAMEBUFFER` (0x80000000; buffer handles stay below it) maps the console
 framebuffer's pixels instead, for 2D blitters that work on the frame directly (`RippleGA.plugin`).
+
+**Presenting on a surface.** `SURFACE_PRESENT` (added 2026-11-12) puts a finished frame on the
+screen where a window's surface is, with no part for WindowServer: the kernel copies the
+buffer, on the GPU, into the buffer on the display, inside each visible rectangle of the
+surface as WindowServer last shaped it, and flushes the display. The surface is the one
+WindowServer creates when a GL driver binds a window's surface as accelerated
+(docs/re/ioaccelerator-interface.md, traces 3 and 4), named by the same ID. The copy runs in
+the given context, after what that context has submitted. Flag `RIPPLE_GPU_PRESENT_TOP_FIRST`
+(1): the buffer's first row is the picture's top row; without it, its bottom row, as OpenGL
+draws. A result of 0 is not an error: the surface is hidden, or WindowServer is drawing the
+window itself just now (while it moves, for example), and the caller shows the frame another
+way. `TRANSFER` now attaches a buffer to the context itself when no `SUBMIT` has named it
+yet.
 
 **Surfaces.** `SURFACE_INFO` (added for M5) describes one of the standard IOAccelerator surfaces
 (the type 0 client WindowServer and GL apps open): what a GL driver needs to render for it.

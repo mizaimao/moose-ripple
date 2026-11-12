@@ -21,6 +21,13 @@ struct pipe_frontend_screen *ripple_cgl_device_fscreen(void);
 /* Describe accelerator surface `id` (the kernel's surface clients), for drawables on them. */
 bool ripple_cgl_device_surface_info(uint32_t id, struct ripple_gpu_surface_info *out);
 
+/* Put `res` (finished and flushed) on the screen where accelerator surface `surface` is, by a
+ * copy in the kernel's hands (kext-uapi SURFACE_PRESENT): false if the surface is not a plain
+ * region of the screen now, or on an error. `top_first`: the texture's first row is the
+ * picture's top row. */
+struct pipe_resource;
+bool ripple_cgl_device_surface_present(uint32_t surface, struct pipe_resource *res, bool top_first);
+
 /* Wait until the GPU has finished everything this process has sent it so far. Costs nothing
  * when nothing has been sent since the last wait. */
 void ripple_cgl_device_wait_idle(void);

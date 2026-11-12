@@ -546,7 +546,7 @@ void RippleFramebuffer::showCursor()
         fDev->updateCursor(0, fCursorRes, x, y, fCursorHotX, fCursorHotY);
         fCursorShown = true;
     } else {
-        fDev->moveCursor(0, x, y);
+        fDev->moveCursor(0, fCursorRes, x, y);
     }
 }
 
@@ -626,6 +626,22 @@ IOReturn RippleFramebuffer::showAction(OSObject *owner, void *idp, void *rectp, 
         fb->fShownRect = *r;
     }
     return fb->fDev->resourceFlush(id, *r) ? kIOReturnSuccess : kIOReturnError;
+}
+
+// The whole buffer again: QEMU reads the whole screen back at a flush in any case.
+IOReturn RippleFramebuffer::flushAction(OSObject *owner, void *idp, void *, void *, void *)
+{
+    RippleFramebuffer *fb = (RippleFramebuffer *)owner;
+    uint32_t id = (uint32_t)(uintptr_t)idp;
+
+    if (!id || fb->fShownRes != id)
+        return kIOReturnNotReady;
+    return fb->fDev->resourceFlush(id, fb->fShownRect) ? kIOReturnSuccess : kIOReturnError;
+}
+
+IOReturn RippleFramebuffer::flushShown(uint32_t id)
+{
+    return getWorkLoop()->runAction(&RippleFramebuffer::flushAction, this, (void *)(uintptr_t)id);
 }
 
 IOReturn RippleFramebuffer::showResource(uint32_t id, uint32_t x, uint32_t y, uint32_t width,

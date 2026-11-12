@@ -179,7 +179,8 @@ VM with Emulate > Other, then set in its settings:
 Tested with UTM 5.0.8 (QEMU 10.0.12) on macOS 26.7 with an M1 Max: Quartz Extreme is on with the
 translucent menu bar, and gl-gears runs at about 55 frames/s even under emulation. The renderer
 shows up as `Intel virgl OpenGL Engine`: UTM doesn't pass on the GPU's name, and Core Image only
-uses the GPU for renderer names it knows. The pointer is invisible in UTM (KI-8).
+uses the GPU for renderer names it knows. Add `ripple_hwcursor=1` to the boot flags (step 4):
+with Quartz Extreme on, UTM shows the pointer only as a hardware cursor.
 
 ### Why these settings
 
