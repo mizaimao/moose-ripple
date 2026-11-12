@@ -139,3 +139,24 @@ surface ID (`RIPPLE_GPU_SURFACE_INFO`). On VM 210, with the kext logging surface
 
 Next: let an app attach a GPU buffer to such a surface and have the kext copy it into the
 screen texture inside the surface's region when the app swaps.
+
+## Step 2: the kext shows a buffer on such a surface (2026-11-12)
+
+New GPU client call `SURFACE_PRESENT` (docs/kext-uapi.md): a copy on the host GPU from the
+caller's buffer into the buffer on the display, one per visible rectangle of the surface, then
+a flush. `tools/surface-probe -p` binds a window's surface, uploads a test picture into a GPU
+buffer and presents it ten times a second: the picture appears in the window's content area,
+upright and in place, a moving bar in it updates, and nothing of it is left when the program
+ends. WindowServer makes no call for any of these frames.
+
+Found on the way:
+- The host's copy coordinates in the buffer on the display count rows from the top: a copy to
+  row 300 lands 300 rows from the top of the screen.
+- The host drops a transfer for a buffer its context has not seen, without an error. The
+  kext's `TRANSFER` now attaches such a buffer first (`surface-probe -t` checks upload, read
+  back and both kinds of copy in a new context).
+- A boot-time dialog over the window made WindowServer shape the surface non-simple; the kext
+  then answers 0 (not shown), as intended.
+
+Not done yet: what WindowServer paints over the region when it redraws that part of the
+screen, partly covered windows, a moving window, and the GL bundle using any of this.

@@ -36,6 +36,9 @@ enum ripple_gpu_method {
     RIPPLE_GPU_WAIT            = 8, /* in scalars: fence, timeout ms; out scalar: 1 signalled, 0 not */
     RIPPLE_GPU_DISPLAY         = 9, /* in scalars: buffer (0 = back to the console), x, y, w, h */
     RIPPLE_GPU_SURFACE_INFO    = 10, /* in scalar: surface id; out struct: ripple_gpu_surface_info */
+    RIPPLE_GPU_SURFACE_PRESENT = 11, /* in scalars: surface id, buffer, context, RIPPLE_GPU_PRESENT_*;
+                                        out scalar: 1 shown, 0 the surface is not a plain region
+                                        of the screen now (show it another way) */
     RIPPLE_GPU_METHOD_COUNT
 };
 
@@ -87,6 +90,10 @@ struct ripple_gpu_transfer {
 /* An accelerator surface (the standard IOAccelerator surface client, type 0): what a GL
  * driver needs to render for it. Backing addresses are only given to the task that owns the
  * surface (its own memory). */
+/* SURFACE_PRESENT flags. */
+#define RIPPLE_GPU_PRESENT_TOP_FIRST 0x1    /* the buffer's first row is the picture's top row
+                                               (otherwise its bottom row, as OpenGL draws) */
+
 #define RIPPLE_GPU_SURFACE_BACKING  0x1     /* has CPU backing; backing_address valid for the owner */
 #define RIPPLE_GPU_SURFACE_SCREEN   0x2     /* a region of the screen (shaped without backing): what is
                                              * drawn goes on the display at x, y */
