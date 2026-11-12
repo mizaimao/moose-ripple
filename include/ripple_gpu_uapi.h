@@ -17,7 +17,7 @@
  * Apple's graphics stack uses for IOAccelerator clients (surface, GL, 2D, ...). */
 #define RIPPLE_GPU_CLIENT_TYPE      0x52504731u     /* 'RPG1' */
 #define RIPPLE_GPU_SERVICE_CLASS    "RippleAccelerator"
-#define RIPPLE_GPU_API_VERSION      1
+#define RIPPLE_GPU_API_VERSION      2               /* 2: SURFACE_PRESENT, SURFACE_TEXTURE */
 
 /* Backends (ripple_gpu_info.backend). Each defines its command stream, capability blobs
  * and buffer parameters. */

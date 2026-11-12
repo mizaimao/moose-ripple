@@ -184,6 +184,7 @@ gldInitializeLibrary(const io_service_t *accel, const uint8_t *accel_index,
    offer = (qe || (getenv("RIPPLE_GL") && strcmp(getprogname(), "WindowServer") != 0)) &&
            ripple_cgl_device_info(&info);
    lib_qe = qe;
+   gld_window_set_kernel_shown(qe);
    simple_mtx_lock(&lib_lock);
    lib_display_mask = offer ? display_mask : 0;
    simple_mtx_unlock(&lib_lock);

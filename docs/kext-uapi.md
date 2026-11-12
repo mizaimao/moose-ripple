@@ -1,4 +1,4 @@
-# The GPU user-client API (kext uapi), version 1
+# The GPU user-client API (kext uapi), version 2
 
 The interface between user space (the GL bundle's Mesa winsys, test tools) and a moose-ripple
 GPU kext. Header: [`include/ripple_gpu_uapi.h`](../include/ripple_gpu_uapi.h).
@@ -46,6 +46,10 @@ the connection closes, or on a mode change.
 the caller; `TRANSFER` moves data between that backing and the GPU-side object.
 Type `RIPPLE_GPU_MEMORY_FRAMEBUFFER` (0x80000000; buffer handles stay below it) maps the console
 framebuffer's pixels instead, for 2D blitters that work on the frame directly (`RippleGA.plugin`).
+
+**Version.** `GET_INFO` reports the API version; the GL bundle and the kext have to agree on
+it, or the bundle does not offer its renderer. Version 2 (2026-11-12) added `SURFACE_PRESENT`
+and `SURFACE_TEXTURE`, which the bundle now relies on for every window.
 
 **Presenting on a surface.** `SURFACE_PRESENT` (added 2026-11-12) puts a finished frame on the
 screen where a window's surface is, with no part for WindowServer: the kernel copies the

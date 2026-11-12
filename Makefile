@@ -183,10 +183,10 @@ VGPU_OBJ  = $(OUT)/x86_64/virtiogpu/VirtioGPUDevice.o $(OUT)/x86_64/virtiogpu/Ri
             $(OUT)/x86_64/virtiogpu/RippleSurfaceClient.o \
             $(OUT)/x86_64/virtiogpu/virtqueue.o \
             $(OUT)/x86_64/virtiogpu/info.o
-$(OUT)/x86_64/virtiogpu/%.o: kext/virtiogpu/%.cpp kext/virtiogpu/*.h
+$(OUT)/x86_64/virtiogpu/%.o: kext/virtiogpu/%.cpp kext/virtiogpu/*.h include/ripple_gpu_uapi.h
 	@mkdir -p $(dir $@)
 	$(CXX) $(call target,x86_64) $(KCXXFLAGS) $(VGPU_INC) -c $< -o $@
-$(OUT)/x86_64/virtiogpu/%.o: kext/virtiogpu/%.c kext/virtiogpu/*.h
+$(OUT)/x86_64/virtiogpu/%.o: kext/virtiogpu/%.c kext/virtiogpu/*.h include/ripple_gpu_uapi.h
 	@mkdir -p $(dir $@)
 	$(CC) $(call target,x86_64) $(KCFLAGS) $(VGPU_INC) -c $< -o $@
 $(OUT)/x86_64/RippleVirtioGPU: $(VGPU_OBJ)
