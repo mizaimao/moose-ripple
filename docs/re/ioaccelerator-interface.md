@@ -388,3 +388,12 @@ Dashboard opened over a running gl-gears window: the window dims under it and ke
 Not tried: Grapher's 3D examples and Keynote transitions (need a document or menu steps),
 iTunes' visualiser, DVD Player, Photo Booth and video chat (no disc, no camera), the same
 switch on a host without KVM.
+
+## Step 9: the default (2026-11-12, f1e00d8)
+
+The kernel-shown path is now what every window gets when the kext runs Quartz Extreme work
+(`gld_window.c`, `direct_wanted`). The old path stays for the configuration without it and
+behind `RIPPLE_GL_DIRECT=0` or the file `/Library/Logs/RippleGL/no-direct`. The user-client
+API version went to 2 with it, so a bundle never meets a kext without `SURFACE_PRESENT` and
+`SURFACE_TEXTURE`. Numbers and checks: docs/re/perf-notes.md, "App GL windows shown by the
+kernel".

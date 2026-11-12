@@ -373,3 +373,59 @@ for large windows (issue 10).
 Also seen: for a window that reaches the Dock, WindowServer redraws the Dock's mirror in a
 pass of its own, and each pass shows the screen: two or three screen updates (each a whole
 screen read back by QEMU) and submits per app frame instead of one.
+
+## App GL windows shown by the kernel (2026-11-12, f1e00d8)
+
+From this commit every app's GL window is shown the way a hardware driver does it
+(docs/re/ioaccelerator-interface.md, steps 1-9): the frame stays on the GPU, the kernel
+copies it to the screen, and WindowServer draws the window from a texture of its surface only
+while something is drawn over it. `RIPPLE_GL_DIRECT=0` or the file
+`/Library/Logs/RippleGL/no-direct` brings the old path back for a comparison. VM 210,
+1280x800, host GPU minimum clock at 1200 MHz again after a host restart.
+
+gl-gears by window size, frames/s and the bundle's time per present, both paths on the same
+day:
+
+| | old path (read back) | kernel shows the frame |
+|---|---|---|
+| 400x400 | 58.7, 11.7 ms | 58.7, 4.5 ms |
+| 800x600 | 48.1, 18.1 ms | 57.2, 4.7 ms |
+| 1280x720 | 37.6, 24.8 ms | 55-58, 3.7-5.6 ms |
+
+The cost no longer grows with the window. One start of the 1280x720 window in about thirty
+stayed on the path through WindowServer (54 frames/s, 15.5 ms): that window ends a few pixels
+above the Dock.
+
+Real apps, default path against the new one: the table in ioaccelerator-interface.md, step 8
+(Angry Birds Rio 32-39 to 58 frames/s; Flurry at its 30 frames/s cap with WindowServer's share
+of a CPU going from 32% to 0%). Quartz Composer's own readout for Arabesque: 60 frames/s, as
+before.
+
+The numbers that had to hold:
+
+| | before (earlier sections) | now |
+|---|---|---|
+| gl-gears in a window, 60 s | 58.5 frames/s | 57.0-57.6 (old path the same day: 56.9-57.9) |
+| ...two-second windows with a frame over 100 ms | 3 of 29 | 5-8 of 29 (old path the same day: 5-9) |
+| Screen updates per second, guest side: Dashboard | 52-70 | 50-59 |
+| ...Exposé | 40-88 | 79 |
+| ...menus | 49 | 32-56 |
+| ...window drag | 70-80 | 60-84 |
+| ...window resize | 78 | 67-74 |
+| ...scrolling a long list | 70-127 | 39-107 |
+| Each screen update, median | 2-3 ms | 1.9-3.0 ms |
+| Viewer on the host (Raw): Dashboard, Exposé, drag, gl-gears | 29, 24-30, 31, 29 frames/s | 30, 29, 29, 30 |
+| Frame meter, Dashboard, screens/s peak / mean | 29-36 / 11-16 | 23.5-35 / 9.6-14.8 |
+| Frame meter, Exposé | 22-25 / 10-11 | 20-25 / 10.3-14.1 |
+
+Two to three runs each; the guest-side rates swing by a third from run to run (scrolling gave
+39 and 107 on the same build), so the rows overlap with the earlier ones and none of them
+shows a slowdown that repeats. The desktop scenes do not use the new path at all (no app GL
+window in them). The 170 ms stall (issue 22) was more frequent on this day on both paths.
+
+Checks around the change: without Quartz Extreme work (`ripple_qe` off) a program on our
+renderer falls back to the old path by itself; the off switches work; paired captures against
+Apple's software rendering in the same VM (desktop and window shadow, a GL window, Exposé,
+Dashboard, a covered GL window, a minimised one, a movie in QuickTime Player) show nothing
+worse; and with the test switch the same build's path was checked by eye in UTM on Apple
+silicon (no KVM): moving and covered gl-gears windows and a screen saver draw right.

@@ -287,6 +287,12 @@ file; take the `ripple_` flags out of it yourself after uninstalling.
 - `/Volumes/RIPPLE/qe-check` prints `QE on` for each display.
 - `ioreg -l -c RippleAccelerator | grep -E '"Ripple(GL|QE)"'` shows both as `on`.
 
+If one app's OpenGL window looks wrong, start that app from Terminal with
+`RIPPLE_GL_DIRECT=0` in front of its command (for example
+`RIPPLE_GL_DIRECT=0 /Applications/Chess.app/Contents/MacOS/Chess`). Its frames then go through
+WindowServer the older, slower way instead of straight to the screen. If that helps, please
+open an issue.
+
 ## Removing it
 
 ```
