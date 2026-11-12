@@ -63,17 +63,26 @@ it in `/System/Library/Extensions` and rebuilding the kext cache:
 It works with any display driver, not only ours, so it is useful on its own for 10.6 in QEMU
 (and likely 10.5, which has the same HID code; untested).
 
-## KI-2: 10.6.8 can't use a PCI BAR above 4 GB (OVMF)
+## KI-2: A PCI BAR above 4 GB hangs 10.6.8 when the guest's address width exceeds the host CPU's
 
 GitHub issue: [#2](https://github.com/mizaimao/moose-ripple/issues/2)
 
 Found while setting up OpenCore (decision 0007). Under OVMF, QEMU's virtio-gpu 64-bit BAR 2 can
-land above 4 GB (0x800100000 from OVMF, or 0xff10100000 after 10.6 moves it), and the first access
-to it from a driver never completes (`vm_fault` again and again, kernel_task at 100%, no
-display). Keep every BAR below 4 GB: `-fw_cfg name=opt/ovmf/X-PciMmio64Mb,string=0` for OVMF and
-the boot flag `npci=0x2000` for 10.6. SeaBIOS places them below 4 GB already. Since
-2026-11-10 RippleVirtioGPU refuses a BAR above 4 GB with a log line instead of hanging, so the
-boot framebuffer keeps the display.
+land above 4 GB, and 10.6 moves it to the top of the address space the CPU reports. QEMU's
+default for that is 40 bits; on a host CPU with fewer (the Core i9-9900K has 39) 10.6 put the BAR
+at 0xff10100000, beyond what KVM can back, and the first access from a driver never completed
+(`vm_fault` again and again, kernel_task at 100%, no display).
+
+Two ways out, both tested (2026-11-11):
+- Give the guest the host's address width: `-cpu ...,host-phys-bits=on`. 10.6 then puts the BAR
+  at 0x7f10000000 and the driver works with it (Quartz Extreme on). Under emulation (UTM), where
+  there is no host limit, the default width works as is.
+- Keep every BAR below 4 GB: `-fw_cfg name=opt/ovmf/X-PciMmio64Mb,string=0` for OVMF and the boot
+  flag `npci=0x2000` for 10.6. SeaBIOS places them below 4 GB already. This doesn't work when a
+  device needs more than the 32-bit window holds, such as UTM's 3D display with its 8 GB
+  host-memory region (#18).
+
+RippleVirtioGPU logs a BAR above 4 GB and goes on (until 2026-11-11 it refused one).
 
 ## KI-3: configd's PowerManagement plugin crashes at boot (VM 210)
 
