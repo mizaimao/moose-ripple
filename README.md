@@ -78,9 +78,7 @@ translucent menu bar with the desktop showing through. Both from the same VM.*
 
 ### Measured
 
-**These numbers don't tell the whole story. Even at the frame rates below, using it can still
-feel stuttery: every frame goes through a translation layer to the host and back, so frames
-arrive unevenly.**
+**It can still stutter at times because of the translation layers, despite what the numbers say.**
 
 The test machine is a Proxmox VE 8.4 host with an Intel Core i9-9900K and its built-in Intel UHD
 Graphics 630. The guest runs at 1280x800 with 4 virtual CPUs. The software rendering column is
