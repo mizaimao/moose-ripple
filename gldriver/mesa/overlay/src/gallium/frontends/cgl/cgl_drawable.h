@@ -25,6 +25,10 @@ struct ripple_cgl_drawable {
    bool gpu_display;                        /* present by putting the texture on the display */
    bool screen_region;                      /* present into the screen texture at region */
    uint32_t region_surface;                 /* its accelerator surface: region read at present */
+   uint32_t present_surface;                /* a window's accelerator surface: the kernel puts
+                                             * each frame on the screen itself (0: not this way) */
+   bool present_vsync;                      /* ...at most one frame per display refresh */
+   int64_t last_present;
    bool rect;                               /* colour buffers are rectangle textures (pbuffers) */
    uint8_t *pixels;                         /* readback buffer */
    size_t pixels_size;
@@ -49,6 +53,9 @@ void ripple_cgl_drawable_set_rect(struct ripple_cgl_drawable *d, bool rect);
  * reshaped more often than re-attached), puts the drawing there in the screen texture and shows
  * that (cgl_device.c). surface 0 ends it. */
 void ripple_cgl_drawable_set_screen_region(struct ripple_cgl_drawable *d, uint32_t surface);
+/* A window whose surface the kernel shows by itself (bound as accelerated; gld_window.c). */
+void ripple_cgl_drawable_set_surface_present(struct ripple_cgl_drawable *d, uint32_t surface,
+                                             bool vsync);
 void ripple_cgl_drawable_destroy(struct ripple_cgl_drawable *d);
 
 /* CGLFlushDrawable (swap_APPLE): present the back buffer (or the front, single-buffered). */

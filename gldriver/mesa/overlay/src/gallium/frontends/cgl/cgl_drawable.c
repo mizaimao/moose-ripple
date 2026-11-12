@@ -169,6 +169,21 @@ present_resource(struct st_context *st, struct ripple_cgl_drawable *d,
       present_stats("display (GPU)", t0);
       return;
    }
+   if (d->present_surface) {
+      /* The frame stays on the GPU: the kernel copies it into the screen where the window's
+       * surface is, as a hardware driver does at a swap. With a swap interval, not more often
+       * than the display refreshes (nothing else holds the program back on this path). */
+      if (d->present_vsync) {
+         int64_t next = d->last_present + 16666667, now = os_time_get_nano();
+         if (now < next)
+            os_time_sleep((next - now) / 1000);
+         d->last_present = now < next ? next : now;
+      }
+      st_context_flush(st, 0, NULL, NULL, NULL);
+      bool shown = ripple_cgl_device_surface_present(d->present_surface, res, true);
+      present_stats(shown ? "window (on the GPU)" : "window (on the GPU, not shown)", t0);
+      return;
+   }
    if (!d->present || !w || !h)
       return;
    if (d->pixels_size < (size_t)stride * h) {
@@ -252,6 +267,14 @@ ripple_cgl_drawable_set_present(struct ripple_cgl_drawable *d, ripple_cgl_presen
 {
    d->present = fn;
    d->present_data = data;
+}
+
+void
+ripple_cgl_drawable_set_surface_present(struct ripple_cgl_drawable *d, uint32_t surface,
+                                        bool vsync)
+{
+   d->present_surface = surface;
+   d->present_vsync = vsync;
 }
 
 void
