@@ -125,8 +125,9 @@ Details: [docs/re/perf-notes.md](docs/re/perf-notes.md) and [docs/re/m6-notes.md
 - `open -a "Front Row"` starts Front Row without showing it. Start it with Cmd+Esc.
 - Only Mac OS X 10.6.8 with the 64-bit kernel. Tested with an Intel host GPU (Proxmox) and an
   NVIDIA GeForce RTX 4090 (Windows 11 through WSL2); AMD host GPUs haven't been tried yet.
-- UTM on Apple-silicon Macs doesn't work yet: its 3D display needs PCI memory above 4 GB, which
-  10.6 can't use ([#18](https://github.com/mizaimao/moose-ripple/issues/18)).
+- UTM on Apple-silicon Macs: with UTM's 3D display Quartz Extreme comes on and gl-gears runs at
+  about 55 frames/s even under emulation, but WindowServer's large textures are drawn as a mosaic
+  of flat colour blocks ([#18](https://github.com/mizaimao/moose-ripple/issues/18)).
 
 Some problems of 10.6 in QEMU show up without moose-ripple too: a panic when the guest goes to
 sleep (KI-6), live snapshots that panic it (KI-5) and the pointer drifting with QEMU's USB tablet
@@ -280,8 +281,11 @@ The renderer shows up as `NVIDIA GeForce RTX 4090 OpenGL Engine`.
 
 - `vmware-cpuid-freq=off`: without it OpenCore reads the wrong bus clock and the guest's clock
   runs 10% slow.
-- `X-PciMmio64Mb=0`, plus the boot flag `npci=0x2000` in step 4: 10.6 can't reach the GPU's
-  memory when the firmware or the guest places it above 4 GB.
+- `X-PciMmio64Mb=0`, plus the boot flag `npci=0x2000` in step 4: they keep the GPU's registers
+  below 4 GB. Without them 10.6 moves them to the top of the physical address range the CPU
+  reports, and when that is wider than the host CPU's (QEMU's default 40 bits on a 39-bit CPU)
+  KVM can't reach them and the guest hangs at boot (KI-2). `-cpu ...,host-phys-bits=on` instead
+  of the two works too (tested on Proxmox).
 - `usb-kbd`: 10.6 has no PS/2 keyboard driver.
 - Exactly one `isa-applesmc`: two make 10.6 panic at boot.
 - `pc-q35-7.2`: the machine version we tested.
