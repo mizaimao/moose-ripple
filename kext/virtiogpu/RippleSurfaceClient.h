@@ -41,6 +41,19 @@ class RippleSurfaceClient : public IOUserClient
     int32_t            fOriginX, fOriginY;   // screen position of buffer pixel (0,0)
     bool               fScreenRegion;    // shaped without backing: its contents go on screen
     uint32_t           fShapeOptions;    // eIOAccelSurfaceShapeBits of the last shape
+
+    // The frame a GPU client last presented on this surface (RippleGPUClient::surfacePresent):
+    // what a read lock hands out when WindowServer draws the window itself (a moving window,
+    // Exposé). The client's buffer lives on the GPU only, so a read lock copies it, on the GPU,
+    // into a buffer of ours whose backing is the lock memory (fOwnMem), and reads that back.
+    uint32_t           fFrameHandle, fFrameContext, fFrameFormat, fFrameWidth, fFrameHeight;
+    bool               fFrameTopFirst;
+    uint32_t           fStage, fStageWidth, fStageHeight, fStageContext;
+    bool               fOwnWired;        // fOwnMem is prepared (it backs fStage)
+    IOBufferMemoryDescriptor *fStageCmd; // one page for the copy command
+    uint64_t           fStageCmdPA;
+    void dropStage();
+    void fetchFrame();
     uint32_t           fShapeSeq;
 
     // Backing: the client's own memory, or ours mapped into the client.
@@ -74,6 +87,11 @@ public:
     bool describe(task_t asker, struct ripple_gpu_surface_info *out);
     bool screenShape(IOAccelBounds *bounds, IOAccelBounds *rects, uint32_t maxRects,
                      uint32_t *count);
+    // The GPU client's latest frame for this surface, and its buffer or context going away
+    // (0 matches nothing).
+    void setFrame(uint32_t handle, uint32_t context, uint32_t format, uint32_t width,
+                  uint32_t height, bool topFirst);
+    void forgetFrame(uint32_t handle, uint32_t context);
 };
 
 #endif

@@ -384,6 +384,17 @@ gld_window_direct_surface(const struct gld_window *w)
    return w && w->direct ? w->sid : 0;
 }
 
+/* The kernel has a new frame of the window but did not put it on the screen: WindowServer
+ * draws the window itself at the moment and redraws it for a surface flush. */
+void
+gld_window_direct_flush(void *data)
+{
+   struct gld_window *w = data;
+
+   if (w && w->direct)
+      cgs.FlushSurfaceWithOptions(w->cid, w->wid, w->sid, NULL, w->vsync);
+}
+
 void
 gld_window_size(const struct gld_window *w, unsigned *width, unsigned *height)
 {

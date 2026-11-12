@@ -37,8 +37,10 @@ void RippleGPUClient::destroyBuffer(Buffer &b)
 {
     if (!b.handle)
         return;
-    // Never leave a buffer that is going away on the display, whatever fShown says.
+    // Never leave a buffer that is going away on the display, whatever fShown says, nor as a
+    // surface's frame.
     fAccel->framebuffer()->releaseResource(b.handle);
+    fAccel->forgetSurfaceFrames(b.handle, 0);
     bool detached = fDev->detachBacking(b.handle);
     bool gone = fDev->resourceUnref(b.handle);      // also drops it from any context
     if (b.mem) {
@@ -232,6 +234,7 @@ IOReturn RippleGPUClient::contextDestroy(uint32_t ctx)
         return kIOReturnBadArgument;
     for (uint32_t i = 0; i < fBufferCap; i++)
         fBuffer[i].attached &= ~(1u << slot);
+    fAccel->forgetSurfaceFrames(0, ctx);
     fDev->ctxDestroy(ctx);
     fContext[slot] = 0;
     fScreenAttached[slot] = 0;
@@ -432,6 +435,11 @@ IOReturn RippleGPUClient::surfacePresent(uint32_t surface, uint32_t handle, uint
     int slot = contextSlot(context);
     if (!b || slot < 0 || !b->width || !b->height || (flags & ~RIPPLE_GPU_PRESENT_TOP_FIRST))
         return kIOReturnBadArgument;
+
+    // The surface keeps the frame in any case: when WindowServer draws the window itself, it
+    // read-locks the surface and gets this frame's pixels.
+    fAccel->setSurfaceFrame(surface, b->handle, context, b->format, b->width, b->height,
+                            (flags & RIPPLE_GPU_PRESENT_TOP_FIRST) != 0);
 
     IOAccelBounds bounds, rects[kPresentMaxRects];
     uint32_t count = 0, screenFormat = 0, sw = 0, sh = 0;

@@ -186,3 +186,38 @@ Still missing before this can be the default: a window that is covered, moving, 
 shown by Exposé (WindowServer shapes the surface non-simple then and wants its pixels: read
 lock, or the surface as a texture), what WindowServer paints into the region when it redraws
 that part of the screen while the program is not drawing, and surfaces that are not opaque.
+
+## Step 4: WindowServer draws the window itself (a drag, Exposé) (2026-11-12)
+
+While a window moves, WindowServer goes through this for every step (kext log and dtrace,
+gl-gears shown the new way): `SetShape(options 0, the new place)`, `Flush(framebuffer mask 1)`,
+`SetShape(options 2, non-simple)`, then for each of its own redraws of the window
+`ReadLockOptions(2)` / `ReadUnlock` from `_CGXRedrawWindow` → `CGXNextSurface`, with
+`CGXGLCreateSurfaceTextureReference` on what the lock returned. After the drag the surface
+stays non-simple and WindowServer keeps drawing the window from read locks; Exposé shapes it
+plain again while it shows, and non-simple after.
+
+What the kext and the bundle do for it now:
+- `SURFACE_PRESENT` records the client's buffer as the surface's frame even when it answers
+  0. The bundle then flushes the surface to WindowServer (`CGSFlushSurfaceWithOptions`), which
+  redraws the window, and flips its two buffers so the recorded one is not drawn into.
+- A read lock hands out that frame. The client's buffer has no memory in the guest (Mesa
+  gives textures a one-byte backing when the host can copy between buffers), so the kext
+  keeps a GPU buffer of its own over the lock memory, copies the frame into it on the GPU
+  (one BLIT in the client's context) and reads it back, which fills the memory WindowServer
+  has mapped. Top row first.
+- **The pixel format a read lock returns has to be a depth code.**
+  `CGXGLCreateSurfaceTextureReference` (CoreGraphics 10.6.8 at 0x2bce9f) switches on the
+  structure's `pixelFormat`: 3, 4 (32 bit), 5, 6, `'2vuy'`, `'yuvs'`; anything else and it
+  returns nothing, and the window is drawn blank. The kext answered `'BGRA'`. It now answers
+  4 for a read lock of a surface that has a client frame (the others are left as they
+  were). The second address stays 0, which makes the texture opaque (`GL_RGB8`).
+
+Result: gl-gears stays visible and animated while its window is dragged, after the drag and
+in Exposé, at 57-58 frames/s (7-11 ms per present on this path against 4-5 ms when the kernel
+shows the frame itself).
+
+Open: what brings a surface back to a plain region after a move on Apple's driver (ours
+stays on the slower path until Exposé or a new attach), the `Flush` call (the kext still
+answers it from the lock memory, the 2D way), minimising, covered windows, a program that
+draws once, surfaces that are not opaque.

@@ -39,6 +39,11 @@ public:
     // Surface `id`'s place and visible rectangles on the screen (RippleSurfaceClient::screenShape).
     bool surfaceScreenShape(uint32_t id, IOAccelBounds *bounds, IOAccelBounds *rects,
                             uint32_t maxRects, uint32_t *count);
+    // A GPU client's latest frame for surface `id` (RippleSurfaceClient::setFrame), and a buffer
+    // or context of a GPU client going away: no surface may keep using it.
+    void setSurfaceFrame(uint32_t id, uint32_t handle, uint32_t context, uint32_t format,
+                         uint32_t width, uint32_t height, bool topFirst);
+    void forgetSurfaceFrames(uint32_t handle, uint32_t context);
 
     virtual bool start(IOService *provider);
     virtual void stop(IOService *provider);

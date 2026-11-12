@@ -187,6 +187,29 @@ void RippleAccelerator::removeSurface(OSObject *s)
     IOLockUnlock(fSurfacesLock);
 }
 
+void RippleAccelerator::setSurfaceFrame(uint32_t id, uint32_t handle, uint32_t context,
+                                        uint32_t format, uint32_t width, uint32_t height,
+                                        bool topFirst)
+{
+    IOLockLock(fSurfacesLock);
+    for (unsigned i = 0; i < fSurfaces->getCount(); i++) {
+        RippleSurfaceClient *sc = (RippleSurfaceClient *)fSurfaces->getObject(i);
+        if (sc->surfaceID() == id) {
+            sc->setFrame(handle, context, format, width, height, topFirst);
+            break;
+        }
+    }
+    IOLockUnlock(fSurfacesLock);
+}
+
+void RippleAccelerator::forgetSurfaceFrames(uint32_t handle, uint32_t context)
+{
+    IOLockLock(fSurfacesLock);
+    for (unsigned i = 0; i < fSurfaces->getCount(); i++)
+        ((RippleSurfaceClient *)fSurfaces->getObject(i))->forgetFrame(handle, context);
+    IOLockUnlock(fSurfacesLock);
+}
+
 bool RippleAccelerator::surfaceScreenShape(uint32_t id, IOAccelBounds *bounds, IOAccelBounds *rects,
                                            uint32_t maxRects, uint32_t *count)
 {
