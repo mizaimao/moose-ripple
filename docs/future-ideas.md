@@ -1,7 +1,42 @@
 # Future ideas
 
-Not scheduled and not researched; recorded so they aren't lost. The current plan
-(HANDOFF.md milestones, M2 next) comes first.
+Not scheduled; recorded so they aren't lost. The README's "Ideas for later" lists them in short.
+
+## A second performance pass
+
+Next after M6, guided by what the real apps and games show:
+- Apps' OpenGL windows are copied back through the guest every frame (about 20-30 ms for a
+  1280x800 window); keep them on the GPU instead.
+- Each Core Image render is a round trip through QEMU, which makes a single filter slower than
+  software rendering; batch or avoid those round trips.
+- Frames reach a VNC viewer unevenly (see [re/perf-notes.md](re/perf-notes.md)).
+
+## Native context instead of virgl
+
+virglrenderer's native context mode passes the GPU's own command stream between guest and host
+instead of translating OpenGL calls, with much less CPU overhead. It exists for AMD (amdgpu) and
+Intel hosts, needs a host kernel from Linux 6.13 on and a newer Mesa (25.x), and the guest would
+need a Mesa driver for that GPU family built for 10.6. That trades the project's GPU-neutral
+design (decision 0005) for speed on those GPUs, so it would sit next to virgl, not replace it.
+The test rig's kernel is pinned to 6.5, so it can't be tried there as is.
+
+## Apple silicon hosts
+
+Snow Leopard emulated by QEMU (x86 on ARM) on a Mac, with virtio-gpu and virgl drawing on the
+Mac's GPU, for example through UTM. Our guest files are x86 and run inside the emulated machine
+unchanged; the CPU emulation makes the system slow, but drawing would no longer run on that
+slow emulated CPU. A later target in decision 0008.
+
+## Other Mac OS X versions
+
+10.5, 10.7 and 10.8. The OpenCore boot disk already starts 10.7 to 10.9, but the driver is built
+and tested only for 10.6.8: each version changes the OpenGL plugin interface and WindowServer's
+expectations, so each needs its own reverse engineering and testing.
+
+## A software backend
+
+Mesa's llvmpipe (a fast, multi-threaded CPU renderer) behind the same OpenGL plugin, for hosts
+without a usable GPU. It would give Quartz Extreme and Core Image on the CPU, at a cost in speed.
 
 ## Emulate an Intel GMA 950 in QEMU (2026-11-10)
 

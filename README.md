@@ -342,6 +342,19 @@ Proxmox VM, taking a snapshot first (`build.sh`, `install-kext.sh`, `install-glb
 `bootargs.sh`, `qe-check.sh`). Its settings (host, VM ID, guest user and key) are at the top of
 [scripts/lib.sh](scripts/lib.sh).
 
+## Ideas for later
+
+None of these is scheduled. More detail in [docs/future-ideas.md](docs/future-ideas.md).
+
+- A second performance pass: keep apps' OpenGL windows on the GPU, and fewer round trips for
+  Core Image.
+- Native context instead of virgl: the guest talks more directly to an AMD or Intel host GPU,
+  with less CPU overhead (needs Linux 6.13 or newer on the host).
+- Apple silicon hosts: Snow Leopard emulated by QEMU on a Mac, drawing on the Mac's GPU.
+- Other versions: 10.5, 10.7 and 10.8.
+- A software backend (Mesa's llvmpipe) for hosts without a usable GPU.
+- An emulated Intel GMA 950, so Apple's own drivers do the work (a separate project).
+
 ## Credits
 
 moose-ripple builds on:
