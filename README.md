@@ -86,27 +86,32 @@ translucent menu bar with the desktop showing through. Both from the same VM.*
 
 The test machine is a Proxmox VE 8.4 host with an Intel Core i9-9900K and its built-in Intel UHD
 Graphics 630. The guest runs at 1280x800 with 4 virtual CPUs. The software rendering column is
-the same VM booted without moose-ripple. Numbers from a real GeForce 9600 GT passed through to
-the VM will follow, and perhaps a Radeon HD 5870 later.
+the same VM booted without moose-ripple. The GeForce 9600 GT column is the same Snow Leopard
+install with a real GeForce 9600 GT passed through to it, running Apple's own NVIDIA driver at
+1920x1080 (its monitor has no 1280x800 mode), so its screens are about twice as many pixels.
 
 These numbers don't tell the whole story. Even at the frame rates below, using it can still feel
 stuttery: every frame goes through a translation layer to the host and back, so frames arrive
 unevenly.
 
-| | Software rendering | moose-ripple |
-|---|---|---|
-| Quartz Composer (Arabesque) | doesn't start | 60 frames/s |
-| Angry Birds Rio | doesn't start (needs OpenGL 2.0) | 59 frames/s |
-| Flurry screen saver | 29 frames/s, 66% of a CPU | 27 frames/s, 4% of a CPU |
-| Dashboard animation, screens per second | 7.4-7.9 | 13.6-14.2 |
-| Exposé animation, screens per second | 3.6-5.3 | 7.8-11.2 |
+| | Software rendering | moose-ripple | GeForce 9600 GT |
+|---|---|---|---|
+| Quartz Composer (Arabesque) | doesn't start | 60 frames/s | 58 frames/s |
+| Angry Birds Rio | doesn't start (needs OpenGL 2.0) | 59 frames/s | 60 frames/s |
+| Flurry screen saver | 29 frames/s, 66% of a CPU | 27 frames/s, 4% of a CPU | 30 frames/s, 2% of a CPU |
+| Dashboard animation, screens per second | 7.4-7.9 | 13.6-14.2 | 10.8-11.9 (1920x1080) |
+| Exposé animation, screens per second | 3.6-5.3 | 7.8-11.2 | 7.4-10.5 (1920x1080) |
 
 - Screens per second is the mean of WindowServer's own frame meter (the one in Quartz Debug),
   counted in full screens' worth of pixels.
 - Core Image: 23 of 24 filters give the same picture as software rendering, and 55 of Photo
   Booth's 61 effects do ("the same" means within 1-2 colour levels, or under 1% of the pixels
   different). A single Core Image filter is slower than software rendering for now, because each
-  render makes a round trip through QEMU.
+  render makes a round trip through QEMU. The 9600 GT gives the same picture for 23 of the 24
+  filters and 54 of the 61 effects, and differs from software rendering in nearly the same
+  effects as moose-ripple does (Concert, Neon, Pinch, Blue Print, Comic Book, Pointillize, and
+  City Lights), so most of those differences are how a GPU computes them. On the 9600 GT a
+  filter takes 1-3 ms a frame and most effects 0.2-0.3 ms.
 - The host GPU's minimum clock was raised to 1200 MHz for these numbers
   (`/sys/class/drm/card0/gt_min_freq_mhz` on Intel). At the default 350 MHz each screen update
   takes about 5 ms longer.
