@@ -7,11 +7,10 @@ real-time recordings of the display:
 
 | File | Shows |
 |---|---|
-| `dashboard-vnc.png` | The Dashboard with widgets on moose-ripple, in Proxmox's VNC console. The README's first picture. |
+| `dashboard-vnc.webp` | The Dashboard with widgets on moose-ripple, in Proxmox's VNC console (WebP, 1600 px wide). The README's first picture. |
 | `menubar-compare.png` | The menu bar twice: Apple's software rendering above, moose-ripple's translucent one below. |
 | `dashboard-widget-drop-ours.gif` | A widget added to the Dashboard on moose-ripple: the ripple. Next to the software one near the top. |
 | `dashboard-widget-drop-software.gif` | The same with Apple's software rendering. |
-| `expose-ours.gif` | Exposé on moose-ripple, under "What you get". |
 
 Still planned, each with a commented-out spot in the README:
 

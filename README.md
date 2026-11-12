@@ -5,26 +5,24 @@
 ![moose-ripple](media/banner.png)
 -->
 
-**Quartz Extreme and Core Image for Mac OS X 10.6 Snow Leopard in a virtual machine, drawn by
-the host's GPU.**
+**Hardware acceleration for Mac OS X 10.6 Snow Leopard virtual machines, using the host GPU.**
 
-Drop a widget onto the Dashboard and the water ripples. On a 2009 Mac that effect was the
-handshake between Snow Leopard's window server and a real graphics card. In a virtual machine it
-never happens: Snow Leopard has no driver for any virtual GPU, so the window server falls back to
-drawing everything with the CPU. No ripple, no translucent menu bar, no Core Image effects, and
-anything that insists on Quartz Extreme refuses to start.
+Snow Leopard, like Mac OS X in general, has no driver for a virtual GPU, so in a virtual machine
+it can only draw with the software renderer. For years I wanted a portable way to see that
+Dashboard ripple again in a VM, and now it's finally doable.
 
-moose-ripple brings it back. It's a guest driver for QEMU's standard **virtio-gpu** card with
-**virgl**, the paravirtual 3D path that hands OpenGL to the host. Snow Leopard sees a graphics
-card, OpenGL renders on the host GPU, and WindowServer composites the desktop on it. No period
-hardware, no GPU passthrough.
+This project is a guest driver for QEMU's standard **virtio-gpu** card with **virgl**, the
+paravirtual 3D path that hands OpenGL to the host. Snow Leopard sees a graphics card, OpenGL
+renders on the host GPU, and WindowServer composites the desktop on it. No period hardware, no
+GPU passthrough.
 
-![Snow Leopard's Dashboard with widgets, composited on the host GPU by moose-ripple, in Proxmox's VNC console](media/dashboard-vnc.png)
+![Snow Leopard's Dashboard with widgets, composited on the host GPU by moose-ripple, in Proxmox's VNC console](media/dashboard-vnc.webp)
 
 *Snow Leopard's Dashboard on moose-ripple, seen through Proxmox's VNC console.*
 
-moose-ripple is alpha software. Everything under "What you get" works on our test machine, but
-expect glitches: install it on a copy of your VM, or take a snapshot first.
+moose-ripple is still at an early stage, and it won't replace GPU passthrough. I'm working on
+the performance, but translating every call to the host will always leave a gap to a real card
+inside the VM.
 
 <!-- PREVIEW (to add): media/gears-menu-bar.png
      gl-gears running with the translucent menu bar in the same shot:
@@ -38,7 +36,7 @@ expect glitches: install it on a copy of your VM, or take a snapshot first.
 *Adding a widget to the Dashboard, recorded in real time in the same VM: moose-ripple on the
 left, Apple's software rendering on the right.*
 
-## What you get
+## What's Working
 
 - Quartz Extreme: WindowServer composites the whole screen on the GPU. The menu bar and menus
   are translucent over a blurred backdrop, Exposé and Dashboard animate on the GPU, and adding a
@@ -53,14 +51,12 @@ left, Apple's software rendering on the right.*
 *Top: Apple's software rendering, an opaque white menu bar. Bottom: moose-ripple, the
 translucent menu bar with the desktop showing through. Both from the same VM.*
 
-![Exposé on moose-ripple, composited on the host GPU](media/expose-ours.gif)
-
-*Exposé on moose-ripple, recorded in real time.*
-
 ### Measured
 
-On our test machine (Intel UHD Graphics 630 host GPU, guest at 1280x800 with 4 virtual CPUs),
-against Apple's software renderer in the same VM booted without moose-ripple:
+The test machine is a Proxmox VE 8.4 host with an Intel Core i9-9900K and its built-in Intel UHD
+Graphics 630. The guest runs at 1280x800 with 4 virtual CPUs. moose-ripple is compared with
+Apple's software renderer in the same VM, booted without moose-ripple. Numbers from a real
+GeForce 9600 GT passed through to the VM are coming, and perhaps a Radeon HD 5870 later.
 
 | | Apple's software renderer | moose-ripple |
 |---|---|---|
@@ -110,7 +106,7 @@ sleep (KI-6), live snapshots that panic it (KI-5), the pointer drifting from QEM
 
 ## Status
 
-| Milestone | What it gives you | State |
+| Milestone | What it covers | State |
 |---|---|---|
 | M0 | Build, deploy and kernel-debug loop from a Linux build host | done |
 | M1 | Reverse-engineering spike: Apple's OpenGL plugin and accelerator interfaces | done |
@@ -124,7 +120,7 @@ sleep (KI-6), live snapshots that panic it (KI-5), the pointer drifting from QEM
 Every milestone measures the numbers above again and may not make them slower. Reports for each
 milestone are in [docs/re/](docs/re/).
 
-## What you need
+## Build environment
 
 - [ ] A Linux x86_64 host with KVM. Tested: Proxmox VE 8.4 (Debian 12.10, kernel 6.5.11).
 - [ ] QEMU with virgl: the `virtio-vga-gl` device and a display with OpenGL (`egl-headless`,
@@ -146,17 +142,15 @@ virtual machine is subject to Apple's license terms.
 
 ## Install
 
-What's tested: the steps below on Proxmox VE, including `install.sh` and `uninstall.sh` from the
-release zip run from a CD image in a copy of our test VM. The plain QEMU command line is the same
-VM written out for QEMU without Proxmox; it hasn't been run as such yet.
+What's tested: the steps below on Proxmox VE, including `install.sh` and `uninstall.sh` run from
+a CD image in a copy of the test VM. The plain QEMU command line is the same VM written out for
+QEMU without Proxmox; it hasn't been run as such yet.
 
-### 1. Get the files
+### 1. Build the files
 
-<!-- DOWNLOAD: no release is published yet (going public is on hold). `make release` builds
-     the zip described here; publishing it on GitHub Releases comes with going public. -->
-
-Download `moose-ripple-VERSION.zip` from the
-[GitHub Releases page](https://github.com/mizaimao/moose-ripple/releases). It holds:
+There are no ready-built downloads: build the guest files yourself, as described in
+[Building from source](#building-from-source). `make package` puts them in one zip,
+`build/moose-ripple-VERSION.zip`, which holds:
 
 | File | What it is |
 |---|---|
@@ -170,15 +164,14 @@ Download `moose-ripple-VERSION.zip` from the
 | `LICENSE`, `LICENSE-Mesa.rst` | moose-ripple's license, and Mesa's for the Mesa code in the GL driver |
 | `SHA256SUMS` | checksums of all the files (`install.sh` checks them first) |
 
-Snow Leopard's own browser can't download from GitHub any more (it has no TLS 1.2), so download
-on the host and hand the files to the guest as a CD image:
+Hand the files to the guest as a CD image:
 
 ```
 unzip moose-ripple-VERSION.zip
 genisoimage -V RIPPLE -r -J -o ripple.iso moose-ripple-VERSION   # or: xorriso -as mkisofs, same options
 ```
 
-The OpenCore boot disk isn't in the zip: build it with [boot/opencore/](boot/opencore/README.md).
+The OpenCore boot disk has its own build: [boot/opencore/](boot/opencore/README.md).
 
 ### 2. Set up the VM
 
@@ -312,8 +305,7 @@ boot-args`) and what you see. Check [docs/known-issues.md](docs/known-issues.md)
 The guest files build on Linux, cross-compiled for Mac OS X 10.6:
 
 ```
-make release                    # build/moose-ripple-VERSION.zip, the download described above
-make release VERSION=0.1.0      # with a chosen version (default: git describe, else the date)
+make package                    # build/moose-ripple-VERSION.zip, the files for step 1 of Install
 make virtiogpu glbundle gaplugin qemutablet qecheck     # only the files, in build/
 ```
 
