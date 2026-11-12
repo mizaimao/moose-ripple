@@ -162,3 +162,21 @@ drawn. The same driver's pointer image comes through intact in QEMU 9.2 with vir
 image over as RGBA instead of BGRA changed nothing in UTM.
 
 **Workaround:** none known yet in UTM.
+
+## KI-9: Under emulation (UTM on Apple silicon) 10.6.8 sometimes panics early at boot
+
+GitHub issue: [#24](https://github.com/mizaimao/moose-ripple/issues/24)
+
+**Symptom.** The verbose boot stops after `mig_table_max_displ = 73`, and nothing more appears.
+The kernel has panicked with `commpage no match for last, next address ffff1780` (read from
+guest memory: the panic text doesn't reach the screen this early). Not every boot: on one day
+11 boots in a row came up, then 3 in a row stopped here.
+
+**Cause: the emulated TSC runs at exactly 1 GHz.** Under QEMU's TCG on an ARM host the guest's
+TSC comes from QEMU's nanosecond clock. OpenCore measures it at 1.00005 to 1.00023 GHz, and the
+10.6.8 kernel treats a TSC at or below 1.0000678 GHz as slow; the 64-bit commpage has no routine
+for a slow TSC, so the kernel panics. Our drivers aren't loaded yet at that point.
+
+**Fixed** in the OpenCore boot disk: two kernel patches move the threshold to exactly 1 GHz
+([boot/opencore/README.md](../boot/opencore/README.md#kernel-patches-1068)). Rebuild the boot
+disk (`boot/opencore/build.sh`) to get them. Chameleon has no equivalent.
