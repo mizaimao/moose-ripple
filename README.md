@@ -24,10 +24,7 @@ moose-ripple is still at an early stage, and it won't replace GPU passthrough. I
 the performance, but translating every call to the host will always leave a gap to a real card
 inside the VM.
 
-<!-- PREVIEW (to add): media/gears-menu-bar.png
-     gl-gears running with the translucent menu bar in the same shot:
 ![gl-gears on the host GPU under Snow Leopard's translucent menu bar](media/gears-menu-bar.png)
--->
 
 | moose-ripple | Apple's software rendering |
 |---|---|
