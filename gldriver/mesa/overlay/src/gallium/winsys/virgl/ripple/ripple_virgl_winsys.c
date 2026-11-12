@@ -793,6 +793,11 @@ void ripple_virgl_wait_idle(struct pipe_screen *screen)
       ripple_fence_wait_forever(ws, id);      /* no kernel call if it has signalled already */
 }
 
+uint32_t ripple_virgl_screen_context(struct pipe_screen *screen)
+{
+   return ripple_winsys(virgl_screen(screen)->vws)->ctx;
+}
+
 uint32_t ripple_virgl_resource_handle(struct pipe_resource *res)
 {
    struct virgl_resource *vres = virgl_resource(res);

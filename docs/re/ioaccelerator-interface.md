@@ -160,3 +160,29 @@ Found on the way:
 
 Not done yet: what WindowServer paints over the region when it redraws that part of the
 screen, partly covered windows, a moving window, and the GL bundle using any of this.
+
+## Step 3: the GL bundle shows a window this way, on request (2026-11-12)
+
+With `RIPPLE_GL_DIRECT` in the environment (or the file `/Library/Logs/RippleGL/direct`), a
+window's surface is bound as accelerated instead of getting a private window, and each frame
+is handed to the kext with `SURFACE_PRESENT` (`gld_window.c`, `cgl_drawable.c`). Without the
+switch nothing changes.
+
+gl-gears on VM 210, frames/s and the bundle's time per present:
+
+| Window | read back (as before) | on the GPU (the switch) |
+|---|---|---|
+| 400x400 | 59, 8.8 ms | 57-59, 3.9 ms |
+| 800x600 | 53, 16.3 ms | 57, 4.6 ms |
+| 1280x720 | 40, 22.4 ms | 57, 5.5 ms |
+
+gl-gears redraws from a timer through AppKit, which holds it to about 60 frames/s, so the time
+per present is the better measure: a quarter of what it was for a large window, and no longer
+growing much with the size. The picture is upright and in place (the window's texture has its
+top row first), the Dock is drawn over a window that reaches it, and with a swap interval the
+bundle itself keeps presents 1/60 s apart, since nothing else holds the program back here.
+
+Still missing before this can be the default: a window that is covered, moving, minimised or
+shown by Exposé (WindowServer shapes the surface non-simple then and wants its pixels: read
+lock, or the surface as a texture), what WindowServer paints into the region when it redraws
+that part of the screen while the program is not drawing, and surfaces that are not opaque.

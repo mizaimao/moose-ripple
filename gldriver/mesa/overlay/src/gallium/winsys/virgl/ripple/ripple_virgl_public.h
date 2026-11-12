@@ -23,6 +23,8 @@ struct pipe_screen *ripple_virgl_screen_create(io_connect_t conn,
 io_connect_t ripple_virgl_screen_connection(struct pipe_screen *screen);
 struct pipe_resource;
 uint32_t ripple_virgl_resource_handle(struct pipe_resource *res);
+/* The kernel context this screen's commands run in. */
+uint32_t ripple_virgl_screen_context(struct pipe_screen *screen);
 
 /* Counts the work this process has sent towards the GPU (submits, uploads). If the count hasn't
  * changed, nothing on the GPU has changed either: the frontend uses it to skip showing a buffer
