@@ -546,7 +546,7 @@ void RippleFramebuffer::showCursor()
         fDev->updateCursor(0, fCursorRes, x, y, fCursorHotX, fCursorHotY);
         fCursorShown = true;
     } else {
-        fDev->moveCursor(0, x, y);
+        fDev->moveCursor(0, fCursorRes, x, y);
     }
 }
 
