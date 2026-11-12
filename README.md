@@ -126,8 +126,9 @@ Details: [docs/re/perf-notes.md](docs/re/perf-notes.md) and [docs/re/m6-notes.md
 - Only Mac OS X 10.6.8 with the 64-bit kernel. Tested with an Intel host GPU (Proxmox) and an
   NVIDIA GeForce RTX 4090 (Windows 11 through WSL2); AMD host GPUs haven't been tried yet.
 - UTM on Apple-silicon Macs: with UTM's 3D display Quartz Extreme comes on and gl-gears runs at
-  about 55 frames/s even under emulation, but WindowServer's large textures are drawn as a mosaic
-  of flat colour blocks ([#18](https://github.com/mizaimao/moose-ripple/issues/18)).
+  about 55 frames/s even under emulation, but the pointer is invisible (it still moves and
+  clicks). UTM doesn't draw it; reported to UTM as UTM issue 8139 (KI-8 in
+  [docs/known-issues.md](docs/known-issues.md), [#18](https://github.com/mizaimao/moose-ripple/issues/18)).
 
 Some problems of 10.6 in QEMU show up without moose-ripple too: a panic when the guest goes to
 sleep (KI-6), live snapshots that panic it (KI-5) and the pointer drifting with QEMU's USB tablet
