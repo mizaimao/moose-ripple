@@ -84,7 +84,7 @@ translucent menu bar with the desktop showing through. Both from the same VM.*
 |---|---|---|---|
 | Linux: Proxmox VE 8.4 | with KVM | Intel UHD Graphics 630 | everything in this README, and the numbers below |
 | Windows 11 | with KVM, inside WSL2 | NVIDIA GeForce RTX 4090, through Direct3D 12 | Quartz Extreme, the translucent menu bar, the Dashboard ripple, gl-gears at about 55 frames/s |
-| macOS 26 on Apple silicon | in UTM 5.0.8, x86 emulation | Apple M1 Max, through Metal | Quartz Extreme, the translucent menu bar, gl-gears at about 55 frames/s; the pointer is invisible (KI-8) |
+| macOS 26 on Apple silicon | in UTM 5.0.8, x86 emulation | Apple M1 Max, through Metal | Quartz Extreme, the translucent menu bar, gl-gears at about 55 frames/s |
 
 How to set up each: [docs/install.md](docs/install.md#2-set-up-the-vm).
 
@@ -136,9 +136,6 @@ Details: [docs/re/perf-notes.md](docs/re/perf-notes.md) and [docs/re/m6-notes.md
   of them ([#10](https://github.com/mizaimao/moose-ripple/issues/10)).
 - `open -a "Front Row"` starts Front Row without showing it. Start it with Cmd+Esc.
 - Only Mac OS X 10.6.8 with the 64-bit kernel. AMD host GPUs haven't been tried yet.
-- In UTM the pointer is invisible, though it still moves and clicks. UTM doesn't draw it;
-  reported to UTM as UTM issue 8139 (KI-8 in [docs/known-issues.md](docs/known-issues.md),
-  [#18](https://github.com/mizaimao/moose-ripple/issues/18)).
 
 Some problems of 10.6 in QEMU show up without moose-ripple too: a panic when the guest goes to
 sleep (KI-6), live snapshots that panic it (KI-5) and the pointer drifting with QEMU's USB tablet
