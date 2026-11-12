@@ -234,6 +234,7 @@ IOReturn RippleGPUClient::contextDestroy(uint32_t ctx)
         fBuffer[i].attached &= ~(1u << slot);
     fDev->ctxDestroy(ctx);
     fContext[slot] = 0;
+    fScreenAttached[slot] = 0;
     return kIOReturnSuccess;
 }
 
@@ -274,6 +275,9 @@ IOReturn RippleGPUClient::bufferCreate(const struct ripple_gpu_buffer_create *in
     Buffer *b = insertBuffer(id);
     b->mem = mem;
     b->size = bytes;
+    b->format = p->format;
+    b->width = p->width;
+    b->height = p->height;
     *handle = id;
     *size = bytes;
     return kIOReturnSuccess;
@@ -303,6 +307,24 @@ IOReturn RippleGPUClient::readInput(IOExternalMethodArguments *a, uint32_t offse
         return kIOReturnBadArgument;
     memcpy(dst, (const uint8_t *)a->structureInput + offset, len);
     return kIOReturnSuccess;
+}
+
+bool RippleGPUClient::ensureCommandBuffer()
+{
+    if (fCmd)
+        return true;
+    IOBufferMemoryDescriptor *cmd = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+        kernel_task, kIODirectionOut | kIOMemoryPhysicallyContiguous, kMaxCommandBytes,
+        0xFFFFFFFFFFFFF000ULL);
+    if (!cmd)
+        return false;
+    if (cmd->prepare() != kIOReturnSuccess) {
+        cmd->release();
+        return false;
+    }
+    fCmd = cmd;
+    fCmdPA = cmd->getPhysicalSegment(0, NULL, kIOMemoryMapperNone);
+    return true;
 }
 
 IOReturn RippleGPUClient::submit(IOExternalMethodArguments *a, uint64_t *fence)
@@ -343,19 +365,8 @@ IOReturn RippleGPUClient::submit(IOExternalMethodArguments *a, uint64_t *fence)
 
     // The device reads commands from guest memory: copy them to this connection's
     // contiguous command buffer (made once, at the first submit).
-    if (!fCmd) {
-        IOBufferMemoryDescriptor *cmd = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
-            kernel_task, kIODirectionOut | kIOMemoryPhysicallyContiguous, kMaxCommandBytes,
-            0xFFFFFFFFFFFFF000ULL);
-        if (!cmd)
-            return kIOReturnNoMemory;
-        if (cmd->prepare() != kIOReturnSuccess) {
-            cmd->release();
-            return kIOReturnNoMemory;
-        }
-        fCmd = cmd;
-        fCmdPA = cmd->getPhysicalSegment(0, NULL, kIOMemoryMapperNone);
-    }
+    if (!ensureCommandBuffer())
+        return kIOReturnNoMemory;
     if (readInput(a, sizeof(s) + s.num_handles * 4, fCmd->getBytesNoCopy(), s.cmd_size)
         != kIOReturnSuccess)
         return kIOReturnBadArgument;
@@ -366,9 +377,16 @@ IOReturn RippleGPUClient::submit(IOExternalMethodArguments *a, uint64_t *fence)
 IOReturn RippleGPUClient::transfer(const struct ripple_gpu_transfer *t, uint64_t *fence)
 {
     Buffer *b = findBuffer(t->buffer);
-    if (!b || contextSlot(t->context) < 0 || t->direction > RIPPLE_GPU_FROM_DEVICE ||
-        t->offset >= b->size)
+    int slot = contextSlot(t->context);
+    if (!b || slot < 0 || t->direction > RIPPLE_GPU_FROM_DEVICE || t->offset >= b->size)
         return kIOReturnBadArgument;
+    // The host refuses a transfer for a buffer its context has not seen, without saying so: a
+    // buffer that no submit has named yet is attached here.
+    if (!(b->attached & (1u << slot))) {
+        if (!fDev->ctxAttachResource(t->context, b->handle))
+            return kIOReturnError;
+        b->attached |= 1u << slot;
+    }
     uint32_t box[6] = { t->x, t->y, t->z, t->width, t->height, t->depth };
     bool ok = fDev->transfer3D(t->direction == RIPPLE_GPU_TO_DEVICE, t->context, b->handle,
                                t->level, box, t->stride, t->layer_stride, t->offset, fence);
@@ -395,7 +413,107 @@ IOReturn RippleGPUClient::display(uint32_t handle, uint32_t x, uint32_t y, uint3
     // frame. Recorded before the call: if only the flush fails, the scanout already is this
     // buffer.
     fShown = handle;
+    fb->setShownFormat(findBuffer(handle)->format);
     return fb->showResource(handle, x, y, w, h);
+}
+
+// Put a client's finished frame on the screen where its window's surface is: a copy on the host
+// GPU from the buffer into the buffer on the display, for each visible rectangle of the
+// surface, then the display is flushed. This is what a hardware driver does at a swap, with no
+// part for WindowServer (docs/re/ioaccelerator-interface.md, trace 3). The copy runs in the
+// caller's context, after whatever it has submitted. Host commands (virgl): one BLIT each.
+enum { kPresentMaxRects = 64, kVirglBlit = 16, kVirglBlitDwords = 21, kVirglMaskRGBA = 0xf };
+
+IOReturn RippleGPUClient::surfacePresent(uint32_t surface, uint32_t handle, uint32_t context,
+                                         uint32_t flags, uint64_t *shown)
+{
+    *shown = 0;
+    Buffer *b = findBuffer(handle);
+    int slot = contextSlot(context);
+    if (!b || slot < 0 || !b->width || !b->height || (flags & ~RIPPLE_GPU_PRESENT_TOP_FIRST))
+        return kIOReturnBadArgument;
+
+    IOAccelBounds bounds, rects[kPresentMaxRects];
+    uint32_t count = 0, screenFormat = 0, sw = 0, sh = 0;
+    if (!fAccel->surfaceScreenShape(surface, &bounds, rects, kPresentMaxRects, &count) || !count)
+        return kIOReturnSuccess;            // not a plain region of the screen now
+    RippleFramebuffer *fb = fAccel->framebuffer();
+    uint32_t screen = fb->shownResource(&screenFormat);
+    fb->screenSize(&sw, &sh);
+    if (!screen || screen == handle || !screenFormat)
+        return kIOReturnSuccess;            // no GPU buffer on the display to copy into
+
+    if (!(b->attached & (1u << slot))) {
+        if (!fDev->ctxAttachResource(context, b->handle))
+            return kIOReturnError;
+        b->attached |= 1u << slot;
+    }
+    if (fScreenAttached[slot] != screen) {
+        if (!fDev->ctxAttachResource(context, screen))
+            return kIOReturnError;
+        fScreenAttached[slot] = screen;
+    }
+    if (!ensureCommandBuffer())
+        return kIOReturnNoMemory;
+
+    // Screen coordinates have their origin at the top left, and so do the host's copy
+    // coordinates in the buffer on the display (found by trying: a copy to row 300 landed 300
+    // rows from the top). A buffer whose first row is the picture's bottom row is turned over
+    // by a negative source height.
+    uint32_t *cmd = (uint32_t *)fCmd->getBytesNoCopy(), dw = 0;
+    int32_t bw = bounds.w < (int32_t)b->width ? bounds.w : (int32_t)b->width;
+    int32_t bh = bounds.h < (int32_t)b->height ? bounds.h : (int32_t)b->height;
+    for (uint32_t i = 0; i < count; i++) {
+        int32_t x0 = rects[i].x, y0 = rects[i].y, x1 = x0 + rects[i].w, y1 = y0 + rects[i].h;
+        if (x0 < bounds.x) x0 = bounds.x;
+        if (y0 < bounds.y) y0 = bounds.y;
+        if (x1 > bounds.x + bw) x1 = bounds.x + bw;
+        if (y1 > bounds.y + bh) y1 = bounds.y + bh;
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > (int32_t)sw) x1 = (int32_t)sw;
+        if (y1 > (int32_t)sh) y1 = (int32_t)sh;
+        if (x1 <= x0 || y1 <= y0)
+            continue;
+        int32_t w = x1 - x0, h = y1 - y0, sx = x0 - bounds.x, top = y0 - bounds.y;
+        uint32_t *c = cmd + dw;
+        c[0] = kVirglBlit | (kVirglBlitDwords << 16);
+        c[1] = kVirglMaskRGBA;              // nearest, no scissor
+        c[2] = c[3] = 0;
+        c[4] = screen;                      // destination: the buffer on the display
+        c[5] = 0;
+        c[6] = screenFormat;
+        c[7] = (uint32_t)x0;
+        c[8] = (uint32_t)y0;
+        c[9] = 0;
+        c[10] = (uint32_t)w;
+        c[11] = (uint32_t)h;
+        c[12] = 1;
+        c[13] = b->handle;                  // source: the client's buffer
+        c[14] = 0;
+        c[15] = b->format;
+        c[16] = (uint32_t)sx;
+        if (flags & RIPPLE_GPU_PRESENT_TOP_FIRST) {
+            c[17] = (uint32_t)top;
+            c[20] = (uint32_t)h;
+        } else {
+            c[17] = b->height - (uint32_t)top;
+            c[20] = (uint32_t)-h;
+        }
+        c[18] = 0;
+        c[19] = (uint32_t)w;
+        c[21] = 1;
+        dw += kVirglBlitDwords + 1;
+    }
+    if (!dw)
+        return kIOReturnSuccess;            // nothing of it on the screen
+    if (!fDev->submit3D(context, fCmdPA, dw * 4, NULL))
+        return kIOReturnError;
+    fDev->syncAsync(context);              // push the copy out, as display() does
+    IOReturn r = fb->flushShown(screen);
+    if (r == kIOReturnSuccess)
+        *shown = 1;
+    return r == kIOReturnNotReady ? kIOReturnSuccess : r;
 }
 
 // ---- Dispatch -------------------------------------------------------------------------------
@@ -412,6 +530,7 @@ static const IOExternalMethodDispatch sDispatch[RIPPLE_GPU_METHOD_COUNT] = {
     /* WAIT */            { 0, 2, 0, 1, 0 },
     /* DISPLAY */         { 0, 5, 0, 0, 0 },
     /* SURFACE_INFO */    { 0, 1, 0, 0, sizeof(struct ripple_gpu_surface_info) },
+    /* SURFACE_PRESENT */ { 0, 4, 0, 1, 0 },
 };
 
 IOReturn RippleGPUClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
@@ -475,6 +594,11 @@ IOReturn RippleGPUClient::sMethod(OSObject *target, void *reference, IOExternalM
         r = c->fAccel->describeSurface((uint32_t)a->scalarInput[0], c->fTask,
                                        (struct ripple_gpu_surface_info *)a->structureOutput)
             ? kIOReturnSuccess : kIOReturnNotFound;
+        break;
+    case RIPPLE_GPU_SURFACE_PRESENT:
+        r = c->surfacePresent((uint32_t)a->scalarInput[0], (uint32_t)a->scalarInput[1],
+                              (uint32_t)a->scalarInput[2], (uint32_t)a->scalarInput[3],
+                              &a->scalarOutput[0]);
         break;
     case RIPPLE_GPU_DISPLAY:
         r = c->display((uint32_t)a->scalarInput[0], (uint32_t)a->scalarInput[1],

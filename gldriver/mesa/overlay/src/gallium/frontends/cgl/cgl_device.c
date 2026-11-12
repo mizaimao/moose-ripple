@@ -167,6 +167,28 @@ ripple_cgl_device_surface_info(uint32_t id, struct ripple_gpu_surface_info *out)
                                       out, &size) == KERN_SUCCESS;
 }
 
+bool
+ripple_cgl_device_surface_present(uint32_t surface, struct pipe_resource *res, bool top_first)
+{
+   struct pipe_frontend_screen *fscreen = ripple_cgl_device_fscreen();
+   io_connect_t conn = device_connection();
+   uint64_t in[4] = { surface, 0, 0, top_first ? RIPPLE_GPU_PRESENT_TOP_FIRST : 0 }, out = 0;
+   uint32_t out_cnt = 1;
+
+   if (!fscreen || !conn || !res)
+      return false;
+   switch (device_backend) {
+   case RIPPLE_GPU_BACKEND_VIRGL:
+      in[1] = ripple_virgl_resource_handle(res);
+      in[2] = ripple_virgl_screen_context(fscreen->screen);
+      break;
+   }
+   if (!in[1] || !in[2])
+      return false;
+   return IOConnectCallScalarMethod(conn, RIPPLE_GPU_SURFACE_PRESENT, in, 4, &out, &out_cnt) ==
+          KERN_SUCCESS && out == 1;
+}
+
 void
 ripple_cgl_device_wait_idle(void)
 {

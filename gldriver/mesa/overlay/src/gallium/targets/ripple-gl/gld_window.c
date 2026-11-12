@@ -53,6 +53,7 @@ static struct {
    int (*CopySurfaceColorSpace)(cgs_conn, cgs_window, cgs_surface, void **);
    int (*SetWindowColorSpace)(cgs_conn, cgs_window, void *);
 } cgs;
+static uint32_t (*main_display_id)(void);      /* CGMainDisplayID */
 static bool cgs_ok;
 
 #define CGS_DEPTH_32 4         /* CGSSetWindowDepth / CGSLockWindowBits format code */
@@ -72,6 +73,7 @@ gld_window_init(void)
    LOOK(CopySurfaceColorSpace);
    LOOK(SetWindowColorSpace);
 #undef LOOK
+   *(void **)&main_display_id = dlsym(RTLD_DEFAULT, "CGMainDisplayID");
 }
 
 struct gld_window {
@@ -84,6 +86,8 @@ struct gld_window {
    int refs;
    bool vsync;
    bool translucent;           /* the surface is not opaque, and our window was told so */
+   bool direct;                /* bound as accelerated: the kernel shows its frames, there is no
+                                * private window (see direct_wanted) */
    bool swap_rect_on;          /* kCGLCESwapRectangle: only swap_rect reaches the window */
    int swap_rect[4];           /* x, y (GL: from the bottom), width, height */
    void *user;                 /* the caller's per-surface data (its render targets) */
@@ -99,6 +103,23 @@ static unsigned long window_clock;
 
 static simple_mtx_t windows_lock = SIMPLE_MTX_INITIALIZER;
 static struct gld_window *windows;
+
+/* Showing a window the way a hardware driver does (docs/re/ioaccelerator-interface.md, traces
+ * 3 and 4, and kext-uapi SURFACE_PRESENT): the surface is bound as accelerated, WindowServer
+ * makes the kernel surface and keeps its region on the screen up to date, and each frame is
+ * copied to the screen on the GPU by the kernel. Being built up step by step, so only on
+ * request for now: RIPPLE_GL_DIRECT in the environment, or the file
+ * /Library/Logs/RippleGL/direct. Not yet right for windows that are covered, moving or not
+ * opaque. */
+static bool
+direct_wanted(void)
+{
+   static int wanted = -1;
+   if (wanted < 0)
+      wanted = main_display_id &&
+               (getenv("RIPPLE_GL_DIRECT") || access("/Library/Logs/RippleGL/direct", F_OK) == 0);
+   return wanted;
+}
 
 static bool
 lock_bits(struct gld_window *w)
@@ -187,6 +208,22 @@ setup(struct gld_window *w, bool fresh, bool *changed)
    cg_rect shape = { 0, 0, bounds.w, bounds.h };
 
    *changed = fresh || width != w->width || height != w->height;
+   if (fresh)
+      w->direct = direct_wanted();
+   if (w->direct) {
+      /* Kind 2 with the accelerator surface mode (0x24) and the display, as Apple's drivers
+       * pass them; the kernel surface gets the CGS surface's ID. */
+      e = cgs.BindSurface(w->cid, w->wid, w->sid, 2, 0x24, (cgs_window)main_display_id());
+      DBG("CGSBindSurface as accelerated = %d\n", e);
+      if (!e) {
+         w->width = width;
+         w->height = height;
+         return 0;
+      }
+      if (!fresh)
+         return -1;
+      w->direct = false;            /* the usual way, then */
+   }
    if (w->base) {
       cgs.UnlockWindowBits(w->cid, w->priv, NULL);
       w->base = NULL;
@@ -339,6 +376,12 @@ gld_window_set_user(struct gld_window *w, void *user, void (*user_free)(void *))
       return;
    w->user = user;
    w->user_free = user_free;
+}
+
+uint32_t
+gld_window_direct_surface(const struct gld_window *w)
+{
+   return w && w->direct ? w->sid : 0;
 }
 
 void

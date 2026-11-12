@@ -29,6 +29,7 @@ class RippleGPUClient : public IOUserClient
         IOBufferMemoryDescriptor *mem;
         uint64_t size;
         uint32_t attached;               // bit i: attached to fContext[i]
+        uint32_t format, width, height;  // as created (for SURFACE_PRESENT)
     };
 
     task_t             fTask;
@@ -44,6 +45,7 @@ class RippleGPUClient : public IOUserClient
     IOBufferMemoryDescriptor *fCmd;
     uint64_t           fCmdPA;
     uint32_t           fShown;                   // buffer this connection shows on the display
+    uint32_t           fScreenAttached[kMaxContexts];   // the screen buffer attached to fContext[i]
 
     int  contextSlot(uint32_t ctx) const;
     uint32_t firstContext() const;
@@ -54,6 +56,9 @@ class RippleGPUClient : public IOUserClient
     void destroyBuffer(Buffer &b);
     void destroyAll();
     IOReturn readInput(IOExternalMethodArguments *a, uint32_t offset, void *dst, uint32_t len);
+    bool ensureCommandBuffer();
+    IOReturn surfacePresent(uint32_t surface, uint32_t handle, uint32_t context, uint32_t flags,
+                            uint64_t *shown);
 
     // Method implementations (called with fLock held).
     IOReturn getInfo(struct ripple_gpu_info *out);

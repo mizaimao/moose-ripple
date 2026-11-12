@@ -8,7 +8,9 @@
  *   VNC_PASSWORD=<pw> vncrec SECONDS OUTDIR     writes OUTDIR/frames.bin and OUTDIR/times.txt
  * With VNCREC_TIMES set it keeps no pictures: times.txt gets one line per screen update, "wall
  * clock time (s), rectangles, pixels changed", for measuring how evenly frames reach a viewer
- * (scripts/pace-run.sh).
+ * (scripts/pace-run.sh). There VNCREC_ENCODING=tight asks for Tight encoding, as web consoles
+ * (noVNC) do, and skips the data unread: what the server can deliver when it has to compress.
+ * A fourth number on each line is the bytes the update took on the wire.
  */
 #include <errno.h>
 #include <poll.h>
@@ -84,6 +86,7 @@ static uint64_t des_encrypt(uint64_t key, uint64_t block)
 /* ---- Buffered I/O on stdin/stdout ----------------------------------------------------------- */
 static uint8_t ibuf[1 << 20];
 static size_t ipos, ilen;
+static unsigned long long rx_bytes;      /* bytes received so far */
 static double deadline;          /* while waiting for a new message: give up after this */
 static int in_fd = 0, out_fd = 1;  /* stdin/stdout, or QEMU's VNC socket (VNC_SOCKET) */
 
@@ -117,6 +120,7 @@ static int fill(int may_stop)
         if (n > 0) {
             ipos = 0;
             ilen = (size_t)n;
+            rx_bytes += (unsigned long long)n;
             return 1;
         }
         if (n < 0 && errno == EINTR)
@@ -164,6 +168,62 @@ static void request(int incremental, unsigned w, unsigned h)
     uint8_t m[10] = { 3, (uint8_t)incremental, 0, 0, 0, 0, (uint8_t)(w >> 8), (uint8_t)w,
                       (uint8_t)(h >> 8), (uint8_t)h };
     put(m, sizeof(m));
+}
+
+static void skip(size_t n)
+{
+    static uint8_t junk[16384];
+    while (n) {
+        size_t k = n < sizeof(junk) ? n : sizeof(junk);
+        get(junk, k);
+        n -= k;
+    }
+}
+
+static size_t tight_length(void)
+{
+    uint8_t b;
+    size_t len;
+    get(&b, 1);
+    len = b & 0x7f;
+    if (b & 0x80) {
+        get(&b, 1);
+        len |= (size_t)(b & 0x7f) << 7;
+        if (b & 0x80) {
+            get(&b, 1);
+            len |= (size_t)b << 14;
+        }
+    }
+    return len;
+}
+
+/* One Tight rectangle, unread (pixels are 3 bytes each with our pixel format). */
+static void skip_tight(unsigned w, unsigned h)
+{
+    uint8_t ctl, b;
+    get(&ctl, 1);
+    unsigned type = ctl >> 4;
+    if (type == 8) {                              /* fill */
+        skip(3);
+    } else if (type == 9) {                       /* JPEG */
+        skip(tight_length());
+    } else if (type > 9) {
+        fprintf(stderr, "vncrec: unknown Tight rectangle type %u\n", type);
+        exit(1);
+    } else {                                      /* basic, zlib */
+        size_t row = (size_t)w * 3;
+        if (ctl & 0x40) {
+            get(&b, 1);                           /* filter */
+            if (b == 1) {                         /* palette */
+                uint8_t n;
+                get(&n, 1);
+                skip(((size_t)n + 1) * 3);
+                row = n + 1 <= 2 ? ((size_t)w + 7) / 8 : w;
+            }
+        }
+        size_t size = row * h;
+        skip(size < 12 ? size : tight_length());
+    }
 }
 
 int main(int argc, char **argv)
@@ -241,7 +301,15 @@ int main(int argc, char **argv)
     uint8_t pf[20] = { 0, 0, 0, 0, 32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0 };
     put(pf, sizeof(pf));
     uint8_t enc[12] = { 2, 0, 0, 2, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0x21 };   /* Raw, DesktopSize */
-    put(enc, sizeof(enc));
+    /* Tight, DesktopSize, JPEG quality 6 and compression level 2: noVNC's defaults. */
+    uint8_t tight_enc[20] = { 2, 0, 0, 4, 0, 0, 0, 7, 0xff, 0xff, 0xff, 0x21,
+                              0xff, 0xff, 0xff, 0xe6, 0xff, 0xff, 0xff, 0x02 };
+    const char *want = getenv("VNCREC_ENCODING");
+    int tight = want && !strcmp(want, "tight") && getenv("VNCREC_TIMES");
+    if (tight)
+        put(tight_enc, sizeof(tight_enc));
+    else
+        put(enc, sizeof(enc));
 
     char path[1024];
     snprintf(path, sizeof(path), "%s/frames.bin", argv[2]);
@@ -269,6 +337,7 @@ int main(int argc, char **argv)
             get(b, 3);
             unsigned nrect = be16(b + 1);
             unsigned long area = 0;
+            unsigned long long rx0 = rx_bytes - (ilen - ipos) - 4;
             /* Ask for the next one at once: QEMU prepares it while this one arrives. */
             request(1, w, h);
             for (unsigned r = 0; r < nrect; r++) {
@@ -278,6 +347,11 @@ int main(int argc, char **argv)
                 if (e == -223) {
                     fprintf(stderr, "vncrec: the screen size changed; stopping\n");
                     goto done;
+                }
+                if (e == 7 && tight) {
+                    area += (unsigned long)rw * rh;
+                    skip_tight(rw, rh);
+                    continue;
                 }
                 if (e != 0) {
                     fprintf(stderr, "vncrec: unexpected encoding %d\n", e);
@@ -301,7 +375,8 @@ int main(int argc, char **argv)
             if (!count)
                 t0 = t;
             if (times_only)
-                fprintf(times, "%.6f %u %lu\n", wall(), nrect, area);
+                fprintf(times, "%.6f %u %lu %llu\n", wall(), nrect, area,
+                        rx_bytes - (ilen - ipos) - rx0);
             else {
                 fwrite(fb, 4, (size_t)w * h, frames);
                 fprintf(times, "%.4f\n", t - t0);

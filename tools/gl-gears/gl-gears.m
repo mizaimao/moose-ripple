@@ -5,8 +5,9 @@
  * runs on our driver (start it with RIPPLE_GL=1) or fails if there is none.
  *   gl-gears [-r] [-a] [-s] [SECONDS]   quit after SECONDS (default 10); -r: resize to 640x480
  *                                  after 3 s; -a: clear with alpha 0; -s: use Apple's software
- *                                  renderer (a reference). Prints the frame rate and the longest
- *                                  frame every 2 s.
+ *                                  renderer (a reference); -w WIDTHxHEIGHT: the size of the
+ *                                  drawing area (default 400x400). Prints the frame rate and
+ *                                  the longest frame every 2 s.
  * Written for moose-ripple; geometry is our own (a disc of teeth, extruded).
  * Built without ARC (10.6): manual retain/release.
  */
@@ -20,6 +21,7 @@
 static double run_seconds = 10;
 static float clear_alpha = 1;   /* -a: clear with alpha 0 (an opaque surface must still show the background) */
 static int resize_test;        /* -r: grow the window to 640x480 after 3 s */
+static int win_w = 400, win_h = 400;   /* -w WIDTHxHEIGHT */
 static int software;           /* -s: Apple's software renderer instead of an accelerated one */
 
 /* One gear: `teeth` teeth between radius r0 (hub hole) and r1/r2 (root/tip), width w. */
@@ -95,9 +97,11 @@ static GLuint make_gear(float r0, float r1, float r2, float w, int teeth, const 
     glEnable(GL_LIGHT0);
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_NORMALIZE);
-    gears[0] = make_gear(1.0f, 4.0f, 5.0f, 1.0f, 20, red);
-    gears[1] = make_gear(0.5f, 2.0f, 3.0f, 2.0f, 10, green);
-    gears[2] = make_gear(1.3f, 2.0f, 3.0f, 0.5f, 10, blue);
+    /* Pitch radii 4 and 2 with teeth 0.7 deep, so the gears mesh at the positions and phases
+     * used in drawRect (the classic glxgears layout). */
+    gears[0] = make_gear(1.0f, 3.65f, 4.35f, 1.0f, 20, red);
+    gears[1] = make_gear(0.5f, 1.65f, 2.35f, 2.0f, 10, green);
+    gears[2] = make_gear(1.3f, 1.65f, 2.35f, 0.5f, 10, blue);
     printf("GL_RENDERER %s\nGL_VERSION  %s\n", glGetString(GL_RENDERER), glGetString(GL_VERSION));
     fflush(stdout);
     start = last_report = [NSDate timeIntervalSinceReferenceDate];
@@ -188,6 +192,10 @@ int main(int argc, char **argv)
             clear_alpha = 0;
             continue;
         }
+        if (!strcmp(argv[i], "-w") && i + 1 < argc) {
+            sscanf(argv[++i], "%dx%d", &win_w, &win_h);
+            continue;
+        }
         if (!strcmp(argv[i], "-s")) {
             software = 1;
             continue;
@@ -212,7 +220,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "no accelerated pixel format (start with RIPPLE_GL=1?)\n");
         return 1;
     }
-    NSRect frame = NSMakeRect(100, 100, 400, 400);
+    NSRect frame = NSMakeRect(win_w > 800 ? 0 : 100, win_h > 500 ? 40 : 100, win_w, win_h);
     NSWindow *win = [[NSWindow alloc] initWithContentRect:frame
         styleMask:NSTitledWindowMask | NSClosableWindowMask | NSResizableWindowMask
         backing:NSBackingStoreBuffered defer:NO];
