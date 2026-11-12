@@ -222,47 +222,53 @@ stays on the slower path until Exposé or a new attach), the `Flush` call (the k
 answers it from the lock memory, the 2D way), minimising, covered windows, a program that
 draws once, surfaces that are not opaque.
 
-## Trace 5: a GL window that moves, on Apple's driver (2026-11-12)
+## Trace 5: a GL window that moves or is covered, on Apple's driver (2026-11-12)
 
-Reference VM 211 (9600 GT), `gl-gears -m` (the window moves itself for two seconds, 60 steps),
-dtrace on WindowServer. The question was how a window gets back to the path where the kernel
-shows its frames, after WindowServer has drawn it itself for a while. It does not get back.
+Reference VM 211 (9600 GT), gl-gears moving its own window (`-m` up and to the right, `-M`
+down until it lies partly under the Dock) and with a second window crossing it (`-c`), dtrace
+on WindowServer. The question was when a window leaves the path where the kernel shows its
+frames, and how it gets back.
 
-- **Before the move** the surface has a plain shape (options 0) and WindowServer does nothing
-  per frame (trace 3).
-- **The move starts**: `SetShape(options 2, non-simple)` at the old place, then for the first
-  two steps `SetShape(0, the new place)` and `SetShape(2)` again. After that WindowServer makes
-  no more shape calls for the surface, for the other 58 steps and for the six seconds the
-  window then stays where it stopped: the surface is left non-simple, at a place two steps into
-  the move. No `IOAccelFlushSurfaceOnFramebuffers` and no read lock in that time.
-- **From the first step on the program's driver flushes the surface to WindowServer at every
-  swap**: `CGXFlushSurface` arrives 59 times a second, during the move and for as long as the
-  window lives afterwards. So the driver learns at a swap that the kernel did not show the
-  frame and tells WindowServer instead (our `SURFACE_PRESENT` answering 0 is the same thing).
-- **WindowServer draws the window itself for each of those flushes**
-  (`CGXRedrawSpecifiedWindowsToDisplayAndRegion`, 59 a second) with a texture it made of the
-  surface once, when the window appeared: one `IOAccelReadLockSurfaceWithOptions(2)`, which
-  returned an address, 1600 row bytes, 400x400 and pixel format 4, then
-  `CGXGLCreateSurfaceTextureReference`, which calls
+- **Each step of a move**: `SetShape(options 2, non-simple)` at the old place, and about 2 ms
+  later `SetShape(0)` at the new place. The program's driver does not flush to WindowServer
+  during those moments (no `CGXFlushSurface` in a move of 60 steps). After the last step the
+  surface is plain and WindowServer again does nothing per frame.
+- **Under something that is drawn over it** (the Dock with `-M`, another window with `-c`) the
+  surface stays non-simple for as long as that lasts. The program's driver then flushes the
+  surface to WindowServer at every swap (`CGXFlushSurface` 59 times a second), and WindowServer
+  draws the window itself each time (`CGXRedrawSpecifiedWindowsToDisplayAndRegion`). When the
+  other window has left, the surface is shaped plain within the second and the flushes stop.
+  Under the Dock it never ends. (The first version of this trace only had the move under the
+  Dock and concluded that a moved window never returns to the kernel-shown path. Wrong.)
+- **WindowServer draws with a texture it made of the surface once**, when the window appeared:
+  one `IOAccelReadLockSurfaceWithOptions(2)`, which returned an address, 1600 row bytes,
+  400x400 and pixel format 4, then `CGXGLCreateSurfaceTextureReference`, which calls
   `cglsSetInteger(997, {surface ID, GL_TEXTURE_RECTANGLE, GL_RGB8, 400, 400,
   GL_UNSIGNED_INT_8_8_8_8_REV, 0x400, 0})` on its GL context. That is the only read lock and
   the only 997 in the window's life. `CGXNextSurface` keeps the texture with the surface and
   takes the read lock only when it has none (`CGXGLGetSurfaceTextureInformation` answers from
   the texture). The texture's data pointer is a dummy (`0xdeadbeef`): WindowServer never
-  uploads anything into it.
-- The program keeps 58.7 frames/s through all of it.
+  uploads anything into it. No `IOAccelFlushSurfaceOnFramebuffers` in any of these runs.
+- The program keeps 58.7-58.9 frames/s through all of it.
 
-So on Apple's driver parameter 997 ties the texture to the surface for good: every later frame
-of the program shows through it with no further call. The window never returns to a plain
-shape by itself; the path through WindowServer is simply as cheap as the direct one.
+Who decides: WindowServer, in `_CGXActivateSurfaces` (CoreGraphics 10.6.8), run when a window
+or surface is bound, ordered, shaped or moved and at the end of every geometry change. A
+surface is shaped plain only if every visible part of it is unobscured (nothing drawn over it,
+shadows and the Dock included), the window is not transformed, zoomed or translucent, no
+screen watcher is active and its colours need no conversion; otherwise non-simple. While a
+geometry change is under way (`CGXPrepareGeometryChange` → `_CGXSynchronizeSurfaces`) it is
+non-simple too. So parameter 997 ties the texture to the surface for good, and a driver has
+two jobs: show the frame itself while the surface is plain, and tell WindowServer about each
+frame while it is not.
 
 ## Step 5: the window's surface as WindowServer's texture, kept live (2026-11-12)
 
-The same run on our kext (VM 210, `RIPPLE_GL_DIRECT=1 gl-gears -m`) showed the same calls from
+The move under the Dock on our kext (VM 210, `RIPPLE_GL_DIRECT=1`) showed the same calls from
 WindowServer as trace 5: one read lock and one 997 when the window appears, shapes alternating
-plain and non-simple for the first steps of the move (15 here, 2 there), then non-simple for
-good, a `CGXFlushSurface` from the program for every frame, no kernel flush. But the picture
-stopped: after the move the window showed the frame it had when WindowServer made its texture.
+plain and non-simple for the steps of the move until the window reaches the Dock, then
+non-simple, a `CGXFlushSurface` from the program for every frame, no kernel flush. But the
+picture stopped: under the Dock the window showed the frame it had when WindowServer made its
+texture.
 Our GL bundle answered 997 with a copy of the surface's memory, once. Step 4's check, a drag
 with the pointer, did not catch this.
 
@@ -280,20 +286,20 @@ What the kext and the bundle do now:
   the screen if the surface is a plain region of it now, instead of the old copy from the lock
   memory. WindowServer did not send one in these runs.
 
-Checked on VM 210 with captures: the gears keep turning after a self-move, during and after a
-drag with the pointer, and in Exposé; a window partly under a dialog is clipped right; resize,
+Checked on VM 210 with captures: the gears keep turning after a self-move and after a drag
+with the pointer (both ended partly under the Dock), during them, and in Exposé; a window partly under a dialog is clipped right; resize,
 two windows at once and killing the program in the middle of a move leave the desktop clean.
 Numbers (gl-gears, frames/s and time per present):
 
 | | 400x400 | 1280x686 |
 |---|---|---|
 | kernel shows the frame | 58.7, 4.1 ms | 58.3-58.8, 4.8-5.5 ms |
-| after a move, WindowServer draws it | 58.4, 13.3 ms | 55-58, 12-14 ms |
+| under the Dock, WindowServer draws it | 58.4, 13.3 ms | 55-58, 12-14 ms |
 
-After a move the frame rate holds, but each present waits for WindowServer's redraw (the
-flush to it is a call that returns when the window is drawn): a program that needs most of a
-frame's time to draw would lose frames there. Apple's driver stays at 58.7 frames/s on that
-path; what its flush costs the program was not measured.
+While WindowServer draws the window the frame rate holds, but each present waits for its
+redraw (the flush to it is a call that returns when the window is drawn): a program that needs
+most of a frame's time to draw loses frames there (step 7 has numbers). Apple's driver stays
+at 58.7 frames/s on that path; what its flush costs the program was not measured.
 
 Open: a window whose first frames arrive while WindowServer still has the new surface
 non-simple can start on the slower path and stay there (seen once in five starts of the big
@@ -320,3 +326,39 @@ its texture of the surface, which now always holds the latest frame, and while t
 a plain region of the screen the frame the kernel copied there stays. A see-through surface
 is never shaped plain; WindowServer asks for an RGBA texture for it (it sets the read lock's
 second address itself when the surface is not opaque) and blends.
+
+## Step 7: when a window leaves the kernel-shown path, and what the other path costs (2026-11-12)
+
+Two things looked like weaknesses after step 5: a present on the path through WindowServer
+took about 13 ms against 4-5 ms, and one start of a big window had stayed on that path.
+
+- **Ours follows trace 5.** The same three runs on VM 210 (`RIPPLE_GL_DIRECT=1`, clear
+  screen): moving clear of the Dock, no flush from the program during the move and a plain
+  surface after it, 58.8 frames/s; under the Dock, a flush per frame for good; with a window
+  crossing, flushes while it is there and none after. The only difference is one or two flushes
+  when the window appears, where the reference has none.
+- **A window that starts or stays on the other path has something drawn over it.** In these
+  tests that was a dialog left on the screen after a restart, or the Dock: both runs under a
+  dialog stayed non-simple from the first frame to the last. That is WindowServer's rule
+  (trace 5), not a state the driver gets stuck in. The start of the big window that prompted
+  the question (it ends a few pixels above the Dock) did not come back in 22 more starts.
+- **The 13 ms are mostly a wait for WindowServer's next update, not work.** gl-gears with
+  `-l MS` keeps the CPU busy for MS milliseconds in every frame, like a program that needs
+  that long to draw (frames/s, single runs, they vary by a few):
+
+  | busy per frame | default path | kernel shows the frame | WindowServer draws it (under the Dock) |
+  |---|---|---|---|
+  | 0 ms | 57-58 | 58.7 | 58.2-58.4 |
+  | 10 ms | 44-49 | 50-59 | 48-53 |
+  | 13 ms | 45-50 | 59.4 | 42-48 |
+
+  So a program whose window has something drawn over it runs about as fast as on the default
+  path today, and faster when nothing is. The real extra cost while WindowServer draws the
+  window is its redraw, about 7 ms a frame, which the program's flush waits for.
+
+No driver change in this step. Not done: taking that wait off the program's thread (a flush
+from a second thread), which would only help a window that is busy and covered at once.
+
+A trap for traces: `dtrace -p` on WindowServer with a script file that does not exist leaves
+WindowServer suspended (dtrace stops the process before it reads the script), and every
+program then hangs at its first window-server call. Check that the file is there first.
