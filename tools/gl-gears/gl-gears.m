@@ -97,9 +97,11 @@ static GLuint make_gear(float r0, float r1, float r2, float w, int teeth, const 
     glEnable(GL_LIGHT0);
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_NORMALIZE);
-    gears[0] = make_gear(1.0f, 4.0f, 5.0f, 1.0f, 20, red);
-    gears[1] = make_gear(0.5f, 2.0f, 3.0f, 2.0f, 10, green);
-    gears[2] = make_gear(1.3f, 2.0f, 3.0f, 0.5f, 10, blue);
+    /* Pitch radii 4 and 2 with teeth 0.7 deep, so the gears mesh at the positions and phases
+     * used in drawRect (the classic glxgears layout). */
+    gears[0] = make_gear(1.0f, 3.65f, 4.35f, 1.0f, 20, red);
+    gears[1] = make_gear(0.5f, 1.65f, 2.35f, 2.0f, 10, green);
+    gears[2] = make_gear(1.3f, 1.65f, 2.35f, 0.5f, 10, blue);
     printf("GL_RENDERER %s\nGL_VERSION  %s\n", glGetString(GL_RENDERER), glGetString(GL_VERSION));
     fflush(stdout);
     start = last_report = [NSDate timeIntervalSinceReferenceDate];
