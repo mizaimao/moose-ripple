@@ -1,10 +1,5 @@
 # moose-ripple
 
-<!-- BANNER (to add, made separately): media/banner.png
-     Donkey, the plush moose, as a flat cartoon with ripples, on an original purple aurora background:
-![moose-ripple](media/banner.png)
--->
-
 **Hardware acceleration for Mac OS X 10.6 Snow Leopard virtual machines, using the host GPU.**
 
 Snow Leopard, like Mac OS X in general, has no driver for a virtual GPU, so in a virtual machine

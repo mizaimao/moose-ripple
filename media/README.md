@@ -17,7 +17,6 @@ Still planned, each with a commented-out spot in the README:
 
 | File | Shows |
 |---|---|
-| `banner.png` | Banner at the top of the README, made separately (not a capture): Donkey, the project's plush moose, as a flat cartoon with ripples around it, on an original purple aurora-style background. Not Apple's wallpaper. |
 
 Capture rules: a clean guest user account (new user, default wallpaper, no network shares, no
 personal files or apps visible). Screenshots of the development VMs stay in the git-ignored
