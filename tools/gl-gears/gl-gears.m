@@ -10,9 +10,13 @@
  *     -a                clear with alpha 0 (an opaque surface must still show the background)
  *     -o                a surface that is not opaque: the desktop shows through around the gears
  *     -f N              stop drawing after N frames: what stays on screen is up to the system
+ *     -l MS             keep the CPU busy for MS milliseconds in every frame, like a program
+ *                       that needs that long to draw
  *   Things the window does by itself, from 3 s on, the same on any driver:
  *     -r                resize to 640x480
- *     -m                move, 60 steps of 5,2 pixels, about 30 a second, then stay
+ *     -m                move up and to the right, 60 steps of 5,2 pixels, about 30 a second,
+ *                       then stay
+ *     -M                the same but downwards: a default-size window ends partly under the Dock
  *     -c                a second, plain window crosses over it and leaves (covers, uncovers)
  *     -z                minimise, and come back at 6 s
  * Written for moose-ripple; geometry is our own (a disc of teeth, extruded).
@@ -28,12 +32,14 @@
 static double run_seconds = 10;
 static float clear_alpha = 1;   /* -a: clear with alpha 0 (an opaque surface must still show the background) */
 static int resize_test;        /* -r: grow the window to 640x480 after 3 s */
-static int move_test;          /* -m: the window moves by itself from 3 s to about 5 s, then stays */
+static int move_test;          /* -m, -M: the window moves by itself from 3 s to about 5 s, then stays */
+static int move_dy = 2;        /* -M: -2, down towards the Dock */
 static int cover_test;         /* -c: a plain window crosses over the GL window from 3 s on */
 static int mini_test;          /* -z: minimise at 3 s, restore at 6 s */
 static int not_opaque;        /* -o: surface opacity 0 */
 static int max_frames;         /* -f N: stop drawing after N frames */
 static int drawn;              /* frames drawn so far */
+static double load_ms;         /* -l MS: busy time per frame */
 static NSWindow *cover;
 static int win_w = 400, win_h = 400;   /* -w WIDTHxHEIGHT */
 static int software;           /* -s: Apple's software renderer instead of an accelerated one */
@@ -160,12 +166,13 @@ static GLuint make_gear(float r0, float r1, float r2, float w, int teeth, const 
     }
     if (move_test && now - start > 3 && move_test <= 60) {
         /* 60 steps of 5,2 pixels, about 30 a second: what WindowServer does with a GL
-         * surface while its window moves, without a pointer. */
+         * surface while its window moves, without a pointer. Downwards the window ends under
+         * the Dock, which is drawn over it: WindowServer keeps drawing such a window itself. */
         static double last_step;
         if (now - last_step >= 0.033) {
             NSWindow *w = [self window];
             NSPoint o = [w frame].origin;
-            [w setFrameOrigin:NSMakePoint(o.x + 5, o.y - 2)];
+            [w setFrameOrigin:NSMakePoint(o.x + 5, o.y + move_dy)];
             last_step = now;
             if (move_test++ == 60) {
                 printf("moved\n");
@@ -241,6 +248,11 @@ static GLuint make_gear(float r0, float r1, float r2, float w, int teeth, const 
     glCallList(gears[2]);
     glPopMatrix();
     glPopMatrix();
+    if (load_ms > 0) {
+        double until = [NSDate timeIntervalSinceReferenceDate] + load_ms / 1000;
+        while ([NSDate timeIntervalSinceReferenceDate] < until)
+            ;
+    }
     [[self openGLContext] flushBuffer];
 
     frames++;
@@ -275,8 +287,9 @@ int main(int argc, char **argv)
             software = 1;
             continue;
         }
-        if (!strcmp(argv[i], "-m")) {
+        if (!strcmp(argv[i], "-m") || !strcmp(argv[i], "-M")) {
             move_test = 1;
+            move_dy = argv[i][1] == 'M' ? -2 : 2;
             continue;
         }
         if (!strcmp(argv[i], "-c")) {
@@ -290,6 +303,10 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "-o")) {
             not_opaque = 1;
             clear_alpha = 0;
+            continue;
+        }
+        if (!strcmp(argv[i], "-l") && i + 1 < argc) {
+            load_ms = atof(argv[++i]);
             continue;
         }
         if (!strcmp(argv[i], "-f") && i + 1 < argc) {
