@@ -33,11 +33,13 @@ This repository contains no Apple software, firmware or keys. Mac OS X 10.6 (and
 source, Xcode 3.2.6 and its SDK) must come from your own legal copies, and running Mac OS X in a
 virtual machine is subject to Apple's license terms.
 
-## 1. Build the files
+## 1. Get the files
 
-There are no ready-built downloads: build the guest files yourself, as described in
-[Building from source](building.md). `make package` puts them in one zip,
-`build/moose-ripple-VERSION.zip`, which holds:
+Download both from [Releases](https://github.com/mizaimao/moose-ripple/releases):
+
+- `moose-ripple-opencore-VERSION.qcow2`, the OpenCore boot disk. The steps below call it
+  `opencore.qcow2`.
+- `moose-ripple-VERSION.zip`, the guest files. It holds:
 
 | File | What it is |
 |---|---|
@@ -55,10 +57,13 @@ Hand the files to the guest as a CD image:
 
 ```
 unzip moose-ripple-VERSION.zip
-genisoimage -V RIPPLE -r -J -o ripple.iso moose-ripple-VERSION   # or: xorriso -as mkisofs, same options
+genisoimage -V RIPPLE -r -J -o ripple.iso moose-ripple-VERSION   # Linux or WSL; or: xorriso -as mkisofs, same options
+hdiutil makehybrid -iso -joliet -default-volume-name RIPPLE -o ripple.iso moose-ripple-VERSION   # on a Mac
 ```
 
-The OpenCore boot disk has its own build: [boot/opencore/](../boot/opencore/README.md).
+To build both yourself instead (this needs the 10.6 SDK from Xcode 3.2.6): [Building from
+source](building.md) for the zip (`make package`), [boot/opencore/](../boot/opencore/README.md)
+for the boot disk.
 
 ## 2. Set up the VM
 
