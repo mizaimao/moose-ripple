@@ -12,6 +12,7 @@ real-time recordings of the display:
 | `dashboard-widget-drop-ours.gif` | A widget added to the Dashboard on moose-ripple: the ripple. Next to the software one near the top. |
 | `dashboard-widget-drop-software.gif` | The same with Apple's software rendering. |
 | `gears-menu-bar.webp` | gl-gears running in a window, with the translucent menu bar in the same shot. |
+| `real-racing-2-utm.webp` | Real Racing 2 in a race, in the UTM window on an Apple-silicon Mac: a screenshot of the host, cropped to the window (WebP, 1280 px wide, transparent corners). |
 
 
 Capture rules: a clean guest user account (new user, default wallpaper, no network shares, no

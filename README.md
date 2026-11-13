@@ -29,6 +29,11 @@ inside the VM.
 
 *The ripple effect!*
 
+![Real Racing 2 in a race, in Snow Leopard in a UTM window on an Apple-silicon Mac](media/real-racing-2-utm.webp)
+
+*Real Racing 2 in Snow Leopard, in UTM on an Apple M1 Max. The Intel CPU is emulated; the 3D
+runs on the Mac's GPU.*
+
 ## How it works
 
 ```
@@ -68,10 +73,12 @@ The boundary between the GL bundle and the kernel is small, versioned and GPU-ne
   widget sets off the ripple.
 - OpenGL 2.1 for apps, 32- and 64-bit, through Mesa's virgl driver. Apps see the renderer as
   `virgl (Mesa Intel(R) UHD Graphics 630 (CFL GT2))` on the test host. Quartz Composer, Front Row,
-  the Flurry screen saver and games such as Angry Birds Rio run on it.
+  the Flurry screen saver, Chess and games such as Angry Birds Rio and Real Racing 2 run on it.
 - Apps' OpenGL windows stay on the GPU: the kernel driver puts each frame on the screen itself,
   as Apple's own drivers do, and WindowServer draws such a window only while something is drawn
   over it (the Dock, another window, Exposé).
+- On an Apple-silicon Mac too, in UTM, where the Intel CPU is emulated: Quartz Extreme is on,
+  and Real Racing 2 is playable there, at a low frame rate in a race (numbers below).
 - Core Image on the GPU: its filters and Photo Booth's effects.
 - Sound, with no driver of ours: QEMU's USB audio device and Snow Leopard's own driver (tested
   in UTM; [docs/install.md](docs/install.md#sound-optional)).
@@ -87,7 +94,7 @@ translucent menu bar with the desktop showing through. Both from the same VM.*
 |---|---|---|---|
 | Linux: Proxmox VE 8.4 | with KVM | Intel UHD Graphics 630 | everything in this README, and the numbers below |
 | Windows 11 | with KVM, inside WSL2 | NVIDIA GeForce RTX 4090, through Direct3D 12 | Quartz Extreme, the translucent menu bar, the Dashboard ripple, gl-gears at about 55 frames/s |
-| macOS 26 on Apple silicon | in UTM 5.0.8, x86 emulation | Apple M1 Max, through Metal | Quartz Extreme, the translucent menu bar, gl-gears at about 55 frames/s |
+| macOS 26 on Apple silicon | in UTM 5.0.8, x86 emulation | Apple M1 Max, through Metal | Quartz Extreme, the translucent menu bar, gl-gears at about 55 frames/s, Chess, Real Racing 2 (playable: its menu at 57 frames/s, a race at about 12) |
 
 How to set up each: [docs/install.md](docs/install.md#2-set-up-the-vm).
 
@@ -121,6 +128,11 @@ pixels.
   render makes a round trip through QEMU. The 9600 GT differs from software rendering in nearly
   the same effects as moose-ripple does, so most of those differences come from how a GPU
   computes them.
+- In UTM on an Apple M1 Max the guest's Intel CPU is emulated, and that CPU is the
+  limit there: gl-gears runs at about 55 frames/s and Real Racing 2's menu at 57-59, but
+  a race makes about 12 frames/s, with the game's drawing thread using a whole emulated CPU.
+  It is playable at that. The M1's GPU path has no S3TC texture compression, which Mac games
+  take for granted, so such textures are decoded on the CPU when they are loaded.
 - The host GPU's minimum clock was raised to 1200 MHz for these numbers
   (`/sys/class/drm/card0/gt_min_freq_mhz` on Intel). At the default 350 MHz each screen update
   takes about 5 ms longer.
@@ -129,9 +141,6 @@ Details: [docs/re/perf-notes.md](docs/re/perf-notes.md) and [docs/re/m6-notes.md
 
 ### Not working yet
 
-- Real Racing 2: the intro movie draws nothing and the game's own picture is sheared into five
-  side-by-side copies ([#8](https://github.com/mizaimao/moose-ripple/issues/8)).
-- Chess: the 3D board stays black ([#9](https://github.com/mizaimao/moose-ripple/issues/9)).
 - iMovie hasn't been tried yet. Photo Booth's live effects need a camera, which the test VM
   doesn't have, so the effects were tested on a still photo ([#11](https://github.com/mizaimao/moose-ripple/issues/11)).
 - Through QEMU's VNC display, a key press takes about 0.2 s to show on screen, and every extra
