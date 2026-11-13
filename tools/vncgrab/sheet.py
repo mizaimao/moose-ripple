@@ -22,6 +22,12 @@ def paeth(a, b, c):
 def load(path):
     """Rows of RGB bytes. Fast for unfiltered rows (what vncgrab.py writes)."""
     data = open(path, "rb").read()
+    if data[:2] == b"P6":
+        # A binary PPM (the GL bundle's debug dumps): header "P6 W H 255", then RGB rows.
+        parts = data.split(None, 4)
+        w, h = int(parts[1]), int(parts[2])
+        px = parts[4]
+        return w, h, [bytearray(px[y * w * 3:(y + 1) * w * 3]) for y in range(h)]
     pos, idat, w, h, bpp = 8, b"", 0, 0, 3
     while pos < len(data):
         n, kind = struct.unpack(">I4s", data[pos:pos + 8])

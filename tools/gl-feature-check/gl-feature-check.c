@@ -10,10 +10,14 @@
  *   gl-feature-check dxt        a DXT1 (S3TC) texture drawn 1:1
  *   gl-feature-check vbo        GL_SHORT attributes from a buffer object
  *   gl-feature-check generic    RGBA uploaded as GL_COMPRESSED_RGBA (driver picks the format)
+ *   gl-feature-check tex3d      a 32x32x32 3D texture with client storage, every slice checked
+ *   gl-feature-check yuv        Core Video's 2vuy conversion program, whole and in steps
+ *   gl-feature-check stencil    a drawable with depth and stencil buffers, both used
  */
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl.h>
 #include <OpenGL/glext.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -735,8 +739,352 @@ static void run_generic(const char *name, CGLPixelFormatAttribute renderer, int 
     CGLDestroyPixelFormat(pf);
 }
 
+/* A 32x32x32 BGRA 3D texture made with client storage, as Core Animation's colour table for
+ * video (M6, Real Racing 2's intro). The program fills the memory again after glTexImage3D,
+ * with no GL call, and expects the new contents at the next draw. The texel at x, y, z holds
+ * (8x, 8y, 8z) at first and (255-8x, 255-8y, 255-8z) after the refill. A quad samples one
+ * slice at a time (nearest) into a 32x32 framebuffer object and texel 5,9 is read back. */
+#ifndef GL_UNPACK_CLIENT_STORAGE_APPLE
+#define GL_UNPACK_CLIENT_STORAGE_APPLE 0x85B2
+#endif
+static void tex3d_fill(uint32_t *t, int n, int second)
+{
+    for (int z = 0; z < n; z++)
+        for (int y = 0; y < n; y++)
+            for (int x = 0; x < n; x++) {
+                unsigned r = x * 8, g = y * 8, b = z * 8;
+                if (second) { r = 255 - r; g = 255 - g; b = 255 - b; }
+                t[(z * n + y) * n + x] = 0xFF000000u | r << 16 | g << 8 | b;   /* BGRA, 8888 REV */
+            }
+}
+
+static void tex3d_read(const char *what, int n, int second)
+{
+    static const int slices[] = { 0, 1, 15, 16, 31 };
+    printf("  %s:", what);
+    for (unsigned i = 0; i < sizeof(slices) / sizeof(slices[0]); i++) {
+        int z = slices[i];
+        float r = (z + 0.5f) / n;
+        unsigned char px[4] = { 0 };
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glBegin(GL_QUADS);
+        glTexCoord3f(0, 0, r); glVertex2f(0, 0);
+        glTexCoord3f(1, 0, r); glVertex2f(n, 0);
+        glTexCoord3f(1, 1, r); glVertex2f(n, n);
+        glTexCoord3f(0, 1, r); glVertex2f(0, n);
+        glEnd();
+        glReadPixels(5, 9, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        int wr = second ? 255 - 40 : 40, wg = second ? 255 - 72 : 72, wb = second ? 255 - z * 8 : z * 8;
+        printf(" slice %d: %d %d %d %d%s", z, px[0], px[1], px[2], px[3],
+               px[0] == wr && px[1] == wg && px[2] == wb && px[3] == 255 ? "" : " WRONG");
+    }
+    printf("\n");
+}
+
+static void run_tex3d(const char *name, CGLPixelFormatAttribute renderer)
+{
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
+                                        renderer, 0 };
+    if (!renderer)
+        attrs[3] = 0;
+    CGLPixelFormatObj pf;
+    GLint npf;
+    CGLContextObj c;
+    if (CGLChoosePixelFormat(attrs, &pf, &npf) || !pf || CGLCreateContext(pf, NULL, &c))
+        return;
+    CGLSetCurrentContext(c);
+    enum { N = 32 };
+    static uint32_t table[N * N * N];
+    GLuint tex, fbo, rb;
+    glGenFramebuffersEXT(1, &fbo);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+    glGenRenderbuffersEXT(1, &rb);
+    glBindRenderbufferEXT(GL_RENDERBUFFER_EXT, rb);
+    glRenderbufferStorageEXT(GL_RENDERBUFFER_EXT, GL_RGBA8, N, N);
+    glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_RENDERBUFFER_EXT, rb);
+    glViewport(0, 0, N, N);
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, N, 0, N, -1, 1);
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    printf("%s: 3D texture 32x32x32, texel 5,9 of five slices (want 40 72 8z 255, then 215 183 255-8z 255)\n", name);
+    for (int client = 0; client < 2; client++) {
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_3D, tex);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glPixelStorei(GL_UNPACK_CLIENT_STORAGE_APPLE, client);
+        tex3d_fill(table, N, 0);
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, N, N, N, 0, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, table);
+        GLenum err = glGetError();
+        glEnable(GL_TEXTURE_3D);
+        tex3d_read(client ? "client storage, as made (error ignored)" : "plain upload", N, 0);
+        if (client) {
+            /* The memory changes behind GL's back; a new frame, the texture bound again. */
+            tex3d_fill(table, N, 1);
+            glFlush();
+            glBindTexture(GL_TEXTURE_3D, 0);
+            glBindTexture(GL_TEXTURE_3D, tex);
+            tex3d_read("client storage, memory refilled", N, 1);
+        } else {
+            tex3d_fill(table, N, 1);
+            glTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 0, N, N, N, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, table);
+            tex3d_read("glTexSubImage3D, whole", N, 1);
+        }
+        (void)err;
+        glDisable(GL_TEXTURE_3D);
+        glPixelStorei(GL_UNPACK_CLIENT_STORAGE_APPLE, 0);
+        glDeleteTextures(1, &tex);
+    }
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+    CGLDestroyPixelFormat(pf);
+}
+
+/* Core Video's ARB fragment program that turns a '2vuy' video frame (a BGRA rectangle texture
+ * holding U Y0 V Y1 per texel) into RGB, as Real Racing 2's intro runs it every frame (M6):
+ * the real program, and the same program cut down step by step, to find a step our renderer
+ * gets wrong. Every texel is U 126, Y 219/220, V 129, which the real matrix (BT.709, as the game
+ * sets it) turns into about 238 236 232. Fixed-function vertex stage, texture coordinates on
+ * units 0-4 from arrays and 5-7 as current values, as Core Video does. */
+static const char *const yuv_programs[][2] = {
+    { "constant",
+      "!!ARBfp1.0\nMOV result.color, {0.25, 0.5, 0.75, 1.0};\nEND\n" },
+    { "texel, alpha 1",
+      "!!ARBfp1.0\nTEMP s;\nTEX s, fragment.texcoord[0], texture[0], RECT;\n"
+      "MOV result.color, s;\nMOV result.color.a, 1.0;\nEND\n" },
+    { "matrix only",
+      "!!ARBfp1.0\nTEMP s;\nTEX s, fragment.texcoord[0], texture[0], RECT;\n"
+      "MOV s, s.yzxy;\n"
+      "DPH result.color.r, s, program.local[0];\nDPH result.color.g, s, program.local[1];\n"
+      "DPH result.color.b, s, program.local[2];\nMOV result.color.a, 1.0;\nEND\n" },
+    { "side select",
+      "!!ARBfp1.0\nTEMP s, side;\nMUL side, fragment.texcoord[0], {1.0, 0.5, 0.0, 0.0};\n"
+      "FRC side, side;\nSLT side.zw, side.xyxy, 0.5;\nSGE side.xy, side.xyxy, 0.5;\n"
+      "TEX s, fragment.texcoord[0], texture[0], RECT;\n"
+      "LRP s, side.xxxx, s.wwww, s.yyyy;\nMOV result.color, s;\nMOV result.color.a, 1.0;\nEND\n" },
+    { "the real program",
+      "!!ARBfp1.0\n"
+      "TEMP sampleY0, sample00, sample10, sample01, sample11, midSampleT, midSampleB, side, weightLR, weightTB;\n"
+      "ALIAS weights = fragment.texcoord[5];\n"
+      "MUL side, fragment.texcoord[0], {1.0, 0.5, 0.0, 0.0};\n"
+      "FRC side, side;\n"
+      "SLT side.zw, side.xyxy, 0.5;\n"
+      "SGE side.xy, side.xyxy, 0.5;\n"
+      "MUL weightLR, side.z, weights.x;\n"
+      "MUL weightTB, side.w, weights.z;\n"
+      "MAD weightLR, side.x, weights.y, weightLR;\n"
+      "MAD weightTB, side.y, weights.w, weightTB;\n"
+      "TEX sample00, fragment.texcoord[1], texture[0], RECT;\n"
+      "TEX sample10, fragment.texcoord[2], texture[0], RECT;\n"
+      "TEX sampleY0, fragment.texcoord[0], texture[0], RECT;\n"
+      "TEX sample01, fragment.texcoord[3], texture[0], RECT;\n"
+      "TEX sample11, fragment.texcoord[4], texture[0], RECT;\n"
+      "LRP sampleY0, side.xxxx, sampleY0.wwww, sampleY0.yyyy;\n"
+      "LRP midSampleT, weightLR, sample00.zzxx, sample10.zzxx;\n"
+      "LRP midSampleB, weightLR, sample01.zzxx, sample11.zzxx;\n"
+      "LRP sampleY0.yz, weightTB, midSampleT, midSampleB;\n"
+      "DPH result.color.r, sampleY0, program.local[0];\n"
+      "DPH result.color.g, sampleY0, program.local[1];\n"
+      "DPH result.color.b, sampleY0, program.local[2];\n"
+      "MOV result.color.a, 1.0;\n"
+      "END\n" },
+};
+
+static void run_yuv(const char *name, CGLPixelFormatAttribute renderer, bool pbuffer)
+{
+    /* Into a framebuffer object, or as Core Video does into a double-buffered context's
+     * rectangle RGB pbuffer. */
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32, kCGLPFADoubleBuffer, kCGLPFAPBuffer,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
+                                        renderer, 0 };
+    if (!renderer)
+        attrs[5] = 0;
+    CGLPixelFormatObj pf;
+    GLint npf, screen = 0;
+    CGLContextObj c;
+    if (CGLChoosePixelFormat(attrs, &pf, &npf) || !pf || CGLCreateContext(pf, NULL, &c))
+        return;
+    CGLSetCurrentContext(c);
+    enum { TW = 4, TH = 4, FW = 8, FH = 4 };
+    CGLPBufferObj pb = NULL;
+    if (pbuffer) {
+        if (CGLCreatePBuffer(FW, FH, GL_TEXTURE_RECTANGLE_ARB, GL_RGB, 0, &pb)) {
+            printf("%s: no pbuffer\n", name);
+            return;
+        }
+        CGLGetVirtualScreen(c, &screen);
+        CGLSetPBuffer(c, pb, 0, 0, screen);
+    }
+    static uint32_t frame[TW * TH];
+    for (int i = 0; i < TW * TH; i++)
+        frame[i] = 220u << 24 | 129u << 16 | 219u << 8 | 126u;     /* A=Y1 R=V G=Y0 B=U */
+    GLuint tex, fbo, rb;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_RECTANGLE_ARB, tex);
+    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_RECTANGLE_ARB, 0, GL_RGBA8, TW, TH, 0, GL_BGRA,
+                 GL_UNSIGNED_INT_8_8_8_8_REV, frame);
+    if (!pbuffer) {
+        glGenFramebuffersEXT(1, &fbo);
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+        glGenRenderbuffersEXT(1, &rb);
+        glBindRenderbufferEXT(GL_RENDERBUFFER_EXT, rb);
+        glRenderbufferStorageEXT(GL_RENDERBUFFER_EXT, GL_RGBA8, FW, FH);
+        glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT,
+                                     GL_RENDERBUFFER_EXT, rb);
+    }
+    glViewport(0, 0, FW, FH);
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, FW, 0, FH, -1, 1);
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    static const GLfloat pos[8] = { 0, 0, FW, 0, FW, FH, 0, FH };
+    static const GLfloat tc[8] = { 0, 0, TW, 0, TW, TH, 0, TH };
+    static const GLfloat w5[4] = { 0.5f, 0.5f, 0.5f, 0.5f }, w6[4] = { 0, 0, 0, 0 };
+    static const GLdouble locals[3][4] = { { 1.16438, 0, 1.79274, -0.972945 },
+                                           { 1.16438, -0.213249, -0.532909, 0.301483 },
+                                           { 1.16438, 2.1124, 0, -1.1334 } };
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glVertexPointer(2, GL_FLOAT, 0, pos);
+    glMultiTexCoord4fv(GL_TEXTURE5, w5);
+    glMultiTexCoord4fv(GL_TEXTURE6, w6);
+    glMultiTexCoord2f(GL_TEXTURE7, TW - 0.5f, TH);
+    for (int u = 0; u < 5; u++) {
+        glClientActiveTexture(GL_TEXTURE0 + u);
+        glTexCoordPointer(2, GL_FLOAT, 0, tc);
+        glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    }
+    printf("%s, into %s: Core Video's 2vuy program (want about 238 236 232 255 from the last three)\n",
+           name, pbuffer ? "a rectangle pbuffer" : "a framebuffer object");
+    unsigned n = sizeof(yuv_programs) / sizeof(yuv_programs[0]);
+    GLuint progs[8];
+    glGenProgramsARB(n, progs);
+    for (unsigned i = 0; i < n; i++) {
+        unsigned char px[2][4] = { { 0 } };
+        GLint errpos = -1;
+        glBindProgramARB(GL_FRAGMENT_PROGRAM_ARB, progs[i]);
+        glProgramStringARB(GL_FRAGMENT_PROGRAM_ARB, GL_PROGRAM_FORMAT_ASCII_ARB,
+                           (GLsizei)strlen(yuv_programs[i][1]), yuv_programs[i][1]);
+        GLenum err = glGetError();
+        glGetIntegerv(GL_PROGRAM_ERROR_POSITION_ARB, &errpos);
+        glEnable(GL_FRAGMENT_PROGRAM_ARB);
+        for (int k = 0; k < 3; k++)
+            glProgramLocalParameter4dvARB(GL_FRAGMENT_PROGRAM_ARB, k, locals[k]);
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDrawArrays(GL_QUADS, 0, 4);
+        glDisable(GL_FRAGMENT_PROGRAM_ARB);
+        glReadPixels(2, 1, 2, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        printf("  %-18s pixels 2 and 3: %3d %3d %3d %3d / %3d %3d %3d %3d  (string error 0x%x at %d, draw error 0x%x)\n",
+               yuv_programs[i][0], px[0][0], px[0][1], px[0][2], px[0][3], px[1][0], px[1][1],
+               px[1][2], px[1][3], err, errpos, glGetError());
+    }
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+    if (pb)
+        CGLDestroyPBuffer(pb);
+    CGLDestroyPixelFormat(pf);
+}
+
+/* A drawable with a stencil buffer (24-bit depth, 8-bit stencil), as Real Racing 2 and Chess
+ * ask for. Our frontend once gave such drawables a depth buffer format the host could not
+ * make, and everything the context drew after its first use was lost (2026-11-12). The left
+ * half is marked in the stencil buffer, a green quad is drawn where the mark is, and a blue
+ * quad behind a nearer one must lose the depth test: left green, right red (the clear
+ * colour), and the nearer quad's yellow in the bottom quarter. */
+static void run_stencil(const char *name, CGLPixelFormatAttribute renderer)
+{
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32, kCGLPFADepthSize, 24,
+                                        kCGLPFAStencilSize, 8, kCGLPFADoubleBuffer, kCGLPFAPBuffer,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
+                                        renderer, 0 };
+    if (!renderer)
+        attrs[9] = 0;
+    CGLPixelFormatObj pf;
+    GLint npf, screen = 0, sbits = -1, dbits = -1;
+    CGLContextObj c;
+    CGLPBufferObj pb;
+    enum { SW = 64, SH = 64 };
+    if (CGLChoosePixelFormat(attrs, &pf, &npf) || !pf || CGLCreateContext(pf, NULL, &c)) {
+        printf("%s: no pixel format with stencil\n", name);
+        return;
+    }
+    if (CGLCreatePBuffer(SW, SH, GL_TEXTURE_2D, GL_RGBA, 0, &pb))
+        return;
+    CGLSetCurrentContext(c);
+    CGLGetVirtualScreen(c, &screen);
+    CGLSetPBuffer(c, pb, 0, 0, screen);
+    glGetIntegerv(GL_STENCIL_BITS, &sbits);
+    glGetIntegerv(GL_DEPTH_BITS, &dbits);
+    glViewport(0, 0, SW, SH);
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, SW, 0, SH, -1, 1);
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    glClearColor(1, 0, 0, 1);
+    glClearStencil(0);
+    glClearDepth(1);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    /* Mark the left half: stencil 1, no colour. */
+    glEnable(GL_STENCIL_TEST);
+    glStencilFunc(GL_ALWAYS, 1, 0xff);
+    glStencilOp(GL_REPLACE, GL_REPLACE, GL_REPLACE);
+    glColorMask(0, 0, 0, 0);
+    glRectf(0, 0, SW / 2, SH);
+    glColorMask(1, 1, 1, 1);
+    /* Green where the mark is. */
+    glStencilFunc(GL_EQUAL, 1, 0xff);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+    glColor3f(0, 1, 0);
+    glRectf(0, 0, SW, SH);
+    glDisable(GL_STENCIL_TEST);
+    /* Depth: a near yellow quad over the bottom quarter, then a far blue one that must lose. */
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+    glColor3f(1, 1, 0);
+    glBegin(GL_QUADS);
+    glVertex3f(0, 0, 0.5f); glVertex3f(SW, 0, 0.5f); glVertex3f(SW, SH / 4, 0.5f); glVertex3f(0, SH / 4, 0.5f);
+    glEnd();
+    glColor3f(0, 0, 1);
+    glBegin(GL_QUADS);
+    glVertex3f(0, 0, -0.5f); glVertex3f(SW, 0, -0.5f); glVertex3f(SW, SH / 4, -0.5f); glVertex3f(0, SH / 4, -0.5f);
+    glEnd();
+    glDisable(GL_DEPTH_TEST);
+    const int pts[3][2] = { { SW / 4, SH / 2 }, { 3 * SW / 4, SH / 2 }, { SW / 2, SH / 8 } };
+    const char *want[3] = { "green", "red", "yellow" };
+    printf("%s: drawable with %d depth and %d stencil bits (error 0x%x):\n", name, dbits, sbits,
+           glGetError());
+    for (int i = 0; i < 3; i++) {
+        unsigned char px[4] = { 0 };
+        glReadPixels(pts[i][0], pts[i][1], 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        printf("  at %2d,%2d: RGBA %3d %3d %3d %3d (want %s)\n", pts[i][0], pts[i][1], px[0], px[1],
+               px[2], px[3], want[i]);
+    }
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+    CGLDestroyPBuffer(pb);
+    CGLDestroyPixelFormat(pf);
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 1 && !strcmp(argv[1], "stencil")) {
+        run_stencil("ours", 0);
+        run_stencil("software", (CGLPixelFormatAttribute)0x00020400);
+        return 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "yuv")) {
+
+        run_yuv("ours", 0, false);
+        run_yuv("ours", 0, true);
+        run_yuv("software", (CGLPixelFormatAttribute)0x00020400, false);
+        run_yuv("software", (CGLPixelFormatAttribute)0x00020400, true);
+        return 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "tex3d")) {
+
+        run_tex3d("ours", 0);
+        run_tex3d("software", (CGLPixelFormatAttribute)0x00020400);
+        return 0;
+    }
     if (argc > 1 && !strcmp(argv[1], "generic")) {
         run_generic("ours", 0, 2048);
         run_generic("software", (CGLPixelFormatAttribute)0x00020400, 2048);
