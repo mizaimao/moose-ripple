@@ -94,6 +94,10 @@ ripple_cgl_context_create(const struct ripple_cgl_pixel_format *pf,
    attribs.profile = API_OPENGL_COMPAT;
    attribs.major = 1;
    attribs.minor = 0;
+   /* Every Mac GPU of the time has S3TC, so apps upload DXT textures without asking. A host
+    * GPU without it (Apple silicon through ANGLE) gets Mesa's software decoding instead of a
+    * failed upload. */
+   attribs.options.allow_compressed_fallback = true;
    attribs.visual.color_format = PIPE_FORMAT_B8G8R8A8_UNORM;
    attribs.visual.depth_stencil_format = depth_stencil_format(fscreen->screen, pf);
    attribs.visual.accum_format = accum_format(fscreen->screen, pf);

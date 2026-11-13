@@ -87,7 +87,7 @@ translucent menu bar with the desktop showing through. Both from the same VM.*
 |---|---|---|---|
 | Linux: Proxmox VE 8.4 | with KVM | Intel UHD Graphics 630 | everything in this README, and the numbers below |
 | Windows 11 | with KVM, inside WSL2 | NVIDIA GeForce RTX 4090, through Direct3D 12 | Quartz Extreme, the translucent menu bar, the Dashboard ripple, gl-gears at about 55 frames/s |
-| macOS 26 on Apple silicon | in UTM 5.0.8, x86 emulation | Apple M1 Max, through Metal | Quartz Extreme, the translucent menu bar, gl-gears at about 55 frames/s |
+| macOS 26 on Apple silicon | in UTM 5.0.8, x86 emulation | Apple M1 Max, through Metal | Quartz Extreme, the translucent menu bar, gl-gears at about 55 frames/s, Chess, Real Racing 2 (its menu at 57 frames/s; a race at about 12, held back by the emulated CPU) |
 
 How to set up each: [docs/install.md](docs/install.md#2-set-up-the-vm).
 
