@@ -155,7 +155,7 @@ UTM runs the VM under emulation (an x86 guest on an ARM Mac has no KVM), and its
 hands the OpenGL work to the Mac's GPU through ANGLE, which turns OpenGL ES into Metal. Create a
 VM with Emulate > Other, then set in its settings:
 
-- System: architecture x86_64, system Q35, 4 GB of memory, 4 CPU cores.
+- System: architecture x86_64, system Q35, 4 GB of memory, 4 CPU cores, Force Multicore on.
 - QEMU: UEFI Boot on.
 - Display: emulated display card `virtio-vga-gl` (GPU Supported).
 - Network: emulated network card `e1000`.
@@ -180,11 +180,18 @@ VM with Emulate > Other, then set in its settings:
   Under emulation 10.6 can use it there; the hang in KI-2 happens only with KVM.
 - The CPU flags that only mean something to KVM (`kvm=on`, `+kvm_pv_*`, `+hypervisor`,
   `+invtsc`) are left out.
+- Force Multicore: without it UTM runs all four emulated CPUs on one thread of the Mac,
+  and everything that needs the CPU is two to three times slower (Real Racing 2: a race at
+  about 12 frames/s instead of 24-34, its menu reached in twice the time). UTM leaves it off
+  for an Intel guest on an ARM Mac because QEMU does not guarantee correct emulation with
+  it: Intel CPUs promise a stricter order of memory writes between cores than ARM gives. We
+  saw no trouble with it in testing. If a program misbehaves in a way you can't explain,
+  turn it off and try again.
 
 Tested with UTM 5.0.8 (QEMU 10.0.12) on macOS 26.7 with an M1 Max: Quartz Extreme is on with the
 translucent menu bar, and gl-gears runs at about 55 frames/s even under emulation. Chess and Real
-Racing 2 run too: the game is playable, with its menu at 57 frames/s and a race at about 12,
-where the emulated CPU is the limit. This GPU path has no S3TC texture compression, so
+Racing 2 run too: the game is playable, with its menu at 57 frames/s and a race at 24-34
+(Force Multicore on), where the emulated CPU is the limit. This GPU path has no S3TC texture compression, so
 textures in it are decoded on the CPU when an app loads them. The renderer
 shows up as `Intel virgl OpenGL Engine`: UTM doesn't pass on the GPU's name, and Core Image only
 uses the GPU for renderer names it knows. Add `ripple_hwcursor=1` to the boot flags (step 4):
