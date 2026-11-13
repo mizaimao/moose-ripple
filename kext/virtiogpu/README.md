@@ -17,6 +17,7 @@ RippleVirtioGPU` does that on the dev VM.
 | `ripple_hwcursor=0` / `=1` | boot flag (Chameleon prompt or `Kernel Flags`) | not set | Overrides `RippleHardwareCursor` for one boot. |
 | `RippleGLBundle` | `Info.plist`, `RippleAccelerator` personality | `false` | `true`: the accelerator names `RippleGLDriver` as its OpenGL driver (`IOGLBundleName`) and the framebuffer points at it (`IOAccelTypes`), so OpenGL loads `/System/Library/Extensions/RippleGLDriver.bundle`. Off until GL output reaches windows (M4/M5), because WindowServer uses OpenGL too. The registry property `RippleGL` shows `on` or `off`. |
 | `ripple_gl=0` / `=1` | boot flag (`scripts/bootargs.sh`) | not set | Overrides `RippleGLBundle` for one boot. |
+| `ripple_async=1` | boot flag | not set | Experimental. A program's 3D submits and the copies of its frames to the screen are queued for the host and not waited for, so the program draws its next frame while the host runs the last one (never more than one frame ahead). Faster where the host's share of a frame is large, but timer-driven programs and WindowServer's animations then stall more often (`docs/re/perf-notes.md`), so it is off unless asked for. |
 
 The current choice is shown as the registry property `RippleCursor` (`software` or `hardware`):
 `ioreg -c RippleFramebuffer -l | grep RippleCursor`.

@@ -429,3 +429,63 @@ Apple's software rendering in the same VM (desktop and window shadow, a GL windo
 Dashboard, a covered GL window, a minimised one, a movie in QuickTime Player) show nothing
 worse; and with the test switch the same build's path was checked by eye in UTM on Apple
 silicon (no KVM): moving and covered gl-gears windows and a screen saver draw right.
+
+## A game as the test case: Real Racing 2 on three hosts (2026-11-13)
+
+The same scripted run on each host: start the game, wait for its menu, click into a quick
+race on the first track (`tools/guest-input` clicks from inside the guest), then read the 5 s
+windows of the bundle's `stats:` log lines.
+
+| Host | Menu | Race start |
+|---|---|---|
+| Proxmox, KVM, Intel UHD 630 | 55-56 frames/s | 52-58 frames/s, the game at 15-40% of a CPU |
+| UTM on an M1 Max, x86 emulation, one host thread for all four CPUs | 57-59 | about 12 (seen in testing while driving) |
+| the same with UTM's "Force Multicore" on | 58 | 24-34 |
+
+What each host is short of:
+
+- **Proxmox:** nothing much. A profile of the game's own CPU time (dtrace `profile` probe, by
+  program counter): 62% game, 26% driver, 12% system libraries. Its render thread spent 48% of
+  its time waiting: 13% in the submit (the kernel waits for the host to run the commands), 19%
+  in the present (the same, for the copies to the screen) and 16% in the bundle's own wait for
+  the next refresh.
+- **UTM:** the emulated CPU. With the VM's four CPUs on one host thread (UTM's default for an
+  x86 guest on ARM) a race makes about 12 frames/s. "Force Multicore" in the VM's System
+  settings gives each CPU its own host thread: 24-34 frames/s in the same race, the menu
+  reached in half the time, and no trouble in a 25 minute run. UTM's documentation says QEMU
+  does not guarantee correct emulation in this mode (x86 promises a stricter memory order than
+  ARM gives), so it stays a choice.
+- **Windows 11 (WSL2):** not measured yet. One run of the game's menu went from 37 to 11
+  frames/s and then QEMU was gone; nothing in our stack grows per frame in that menu (one
+  submit, one present and no buffer made or destroyed per frame on Proxmox), so the host side
+  is the place to look.
+
+Two savings in the driver's CPU time, from the profiles (worth about a tenth of the frame rate
+where the CPU is the limit, 28 to 31 frames/s in UTM's race start):
+
+- The list of buffers a command buffer uses was looked up through a 512-slot hash that
+  collides all the time in a game with thousands of buffers; each collision walked the list
+  (14% of the driver's time, now 5%). Each buffer now remembers where it was listed last.
+- Mesa's `simple_mtx_init` went through `call_once` (no futexes on 10.6: a `pthread_once` and
+  two `pthread_setspecific` calls), and virgl makes a mutex for every buffer transfer, about
+  90 a frame in the game. Patch 0009 makes the mutex directly.
+
+### Not waiting for the host: works, but off for now (`ripple_async=1`)
+
+A submit used to return when the host had run its commands, and a present when the host had
+copied the frame: the program and the host took turns. With the boot flag `ripple_async=1`
+both are queued and the program goes on (two command buffers per connection, used in turn; a
+present waits only for the previous present's copies, so a program is never more than one
+frame ahead). On Proxmox the game's render thread then waits 17% of the time instead of 48%
+(1% in the submit, 6% in the present, 8% for the next refresh), and its menu runs at 59.4-59.8
+frames/s instead of 55-56.
+
+It is not the default because of the stall this document already describes (a thread that
+should run is not run for about 0.19 s). With the flag on it shows up several times a second
+instead of once every few seconds: gl-gears, which draws from a run loop timer, drops from 58
+to 26-45 frames/s with a 190 ms frame in every 2 s window, and Exposé from about 10 screens/s
+to 5. Samples show the program waiting in its run loop for the timer and WindowServer idle,
+so it is the wake-up that is late, not our code holding anything. The waiting in the old path
+(a kernel sleep with a 20 ms deadline and an interrupt, several times a frame) apparently kept
+the CPUs awake often enough to hide it. Until the stall itself is understood, the flag is for
+experiments, for example on a host where the host's share of a frame is large.
