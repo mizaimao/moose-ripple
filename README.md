@@ -68,7 +68,7 @@ The boundary between the GL bundle and the kernel is small, versioned and GPU-ne
   widget sets off the ripple.
 - OpenGL 2.1 for apps, 32- and 64-bit, through Mesa's virgl driver. Apps see the renderer as
   `virgl (Mesa Intel(R) UHD Graphics 630 (CFL GT2))` on the test host. Quartz Composer, Front Row,
-  the Flurry screen saver and games such as Angry Birds Rio run on it.
+  the Flurry screen saver, Chess and games such as Angry Birds Rio and Real Racing 2 run on it.
 - Apps' OpenGL windows stay on the GPU: the kernel driver puts each frame on the screen itself,
   as Apple's own drivers do, and WindowServer draws such a window only while something is drawn
   over it (the Dock, another window, Exposé).
@@ -129,9 +129,6 @@ Details: [docs/re/perf-notes.md](docs/re/perf-notes.md) and [docs/re/m6-notes.md
 
 ### Not working yet
 
-- Real Racing 2: the intro movie draws nothing and the game's own picture is sheared into five
-  side-by-side copies ([#8](https://github.com/mizaimao/moose-ripple/issues/8)).
-- Chess: the 3D board stays black ([#9](https://github.com/mizaimao/moose-ripple/issues/9)).
 - iMovie hasn't been tried yet. Photo Booth's live effects need a camera, which the test VM
   doesn't have, so the effects were tested on a still photo ([#11](https://github.com/mizaimao/moose-ripple/issues/11)).
 - Through QEMU's VNC display, a key press takes about 0.2 s to show on screen, and every extra

@@ -71,7 +71,8 @@ Captures (git-ignored, `img/`): `m6-{qe,sw}-*.png` copied from the runs above.
   program, the 3D table) and gets the right pixel on ours; the difference left is that the
   game's window context draws into a window drawable and swaps.
 - **Real Racing 2 menu garbled.** The game's own context. GL_SHORT vertices with a texture
-  matrix work in `gl-feature-check`; not found yet.
+  matrix work in `gl-feature-check`; not found yet. (Both Real Racing 2 entries: found and
+  fixed 2026-11-12, see "a depth buffer the host could not make" at the end.)
 - **Core Image Fun House:** Core Image issues no GL calls for drawImage into the view; the same
   on software (white). Not a regression; not understood. (2026-11-12: it shows the picture on
   our driver now, Aqua Blue.jpg, with either way of showing app windows.)
@@ -343,3 +344,37 @@ window, the same scripts:
   our differences are a GPU's, not our driver's.
 - Calculator's window is silver-grey with light keys here; on our driver its body is black
   (issue #12).
+
+## Real Racing 2 and Chess: a depth buffer the host could not make (2026-11-12)
+
+Both faults of Real Racing 2 (black intro, garbled menu) and Chess's black board had one cause.
+The frontend gave every pixel format with a stencil buffer a `Z24_UNORM_S8_UINT` depth buffer
+without asking the screen. virglrenderer has `S8_UINT_Z24_UNORM` but not that one: it logged
+"unknown format is 19" and made nothing, QEMU still answered the creation with success, and
+the first command that used the buffer (CREATE_SURFACE for the depth attachment) failed as
+"Illegal resource". virglrenderer then drops the rest of that command buffer and leaves the
+process's context in error, so later commands, of every GL context in the process, are lost
+more or less at random: the game's own picture came out in pieces, and Core Video's and Core
+Animation's draws for the intro never happened.
+
+Fix: the depth, stencil and accumulation formats of a window or pbuffer are chosen from what
+the screen supports (`cgl_context.c`, `depth_stencil_format`). Real Racing 2 plays its intro
+and draws its 3D menu right, at 56 frames/s; Chess shows its board.
+`gl-feature-check stencil` draws with the stencil and depth buffers of such a drawable and
+reads the result back; `tex3d` and `yuv` (Core Video's real conversion program) came out of
+the search and pass on both renderers.
+
+How it was found, and two traps on the way:
+- **The host says what it refuses.** On a Proxmox host, QEMU's output is in the journal:
+  `journalctl | grep -E 'vrend|unknown format'` showed one "Illegal resource" per start of
+  the game. Look there first when something draws black or in pieces. The new debug switch
+  `/Library/Logs/RippleGL/reslog` logs every buffer a process makes and destroys, to look the
+  number up.
+- **The swap debug log damaged what it inspected.** It called Mesa's completeness test, which
+  is for framebuffer objects, on a window framebuffer; for one without a depth buffer (Core
+  Animation's) that leaves it 0x0 and incomplete. The "incomplete framebuffer" recorded above
+  as where the intro stood was this log's own doing. Fixed.
+- **Read-backs lie once the host context is in error.** A read-back is a command too; when
+  the host drops it, glReadPixels returns whatever the staging memory held, here the video
+  frame uploaded just before. A scratch texture cleared to a known colour read back as video
+  data. So pixel values logged from inside a broken process prove nothing.
