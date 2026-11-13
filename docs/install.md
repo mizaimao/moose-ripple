@@ -173,7 +173,8 @@ VM with Emulate > Other, then set in its settings:
 -device usb-tablet,bus=rehci.0
 ```
 
-- In UTM, write the SMC key without quotes; it has no spaces, so it needs none (tested that way).
+- In UTM, write the SMC key without quotes: UTM keeps quotes as part of the key, which is then
+  wrong (see "Why these settings").
 - The keyboard and tablet get their own USB 2.0 controller: UTM's USB bus is USB 3.0, which
   10.6 has no driver for.
 - No `X-PciMmio64Mb`: UTM's 3D display adds an 8 GB memory region, which only fits above 4 GB.
@@ -209,8 +210,10 @@ with Quartz Extreme on, UTM shows the pointer only as a hardware cursor.
 - `usb-kbd`: 10.6 has no PS/2 keyboard driver.
 - Exactly one `isa-applesmc`: two make 10.6 panic at boot.
 - The SMC key must be exact, in straight quotes or none (curly quotes from a copied web page break
-  it). With a wrong key Snow Leopard can't unlock its protected system files: the boot stops at
-  `Waiting for DSMOS`, just after the network card's messages, and looks like a hang there.
+  it; in UTM, quotes become part of the key). With a wrong key QEMU silently uses its dummy key
+  (`info qtree` in the monitor shows "This is a dummy key"): loginwindow, fontd, mds and configd
+  crash every few seconds, and the verbose boot stops after `Ethernet [Intel8254x]: Link up on
+  en0` with no desktop, which looks like a network hang.
 - `pc-q35-7.2`: the machine version we tested.
 
 More on the boot disk: [boot/opencore/README.md](../boot/opencore/README.md).
