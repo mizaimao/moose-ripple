@@ -99,6 +99,8 @@ From the laptop (it only runs ssh/scp):
     boot/opencore/build.sh -w 212          # ... and write to VM 212's OpenCore disk (VM stopped)
     OC_VARIANT=DEBUG boot/opencore/build.sh -w 212    # debug build of OpenCore
     OC_DUET=none boot/opencore/build.sh    # without OpenDuet (bootX64 = OpenDuet's own disk drivers)
+    boot/opencore/build.sh -p build/moose-ripple-VERSION.zip   # the release disk: adds a FAT32
+                                           # partition "RIPPLE" with the package unpacked
 
 The first `-w` creates `local:VMID/vm-VMID-opencore.qcow2` and sets it as `ide0`, boot order
 `ide0;sata0`. Later runs overwrite its contents; Proxmox snapshots keep older versions.
