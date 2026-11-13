@@ -492,5 +492,49 @@ to 26-45 frames/s with a 190 ms frame in every 2 s window, and Exposé from abou
 to 5. Samples show the program waiting in its run loop for the timer and WindowServer idle,
 so it is the wake-up that is late, not our code holding anything. The waiting in the old path
 (a kernel sleep with a 20 ms deadline and an interrupt, several times a frame) apparently kept
-the CPUs awake often enough to hide it. Until the stall itself is understood, the flag is for
-experiments, for example on a host where the host's share of a frame is large.
+the CPUs awake often enough to hide it. That stall is fixed now (next section); with the fix
+the flag no longer costs anything measured: gl-gears 58.8 frames/s, and 58.6 instead of 54.5 for a
+window WindowServer draws, Exposé and Dashboard in their usual ranges. It stays a flag until
+more programs have run with it.
+
+### The stall, found: an interrupt storm on a mirrored line (2026-11-13)
+
+`tools/timer-late` made it measurable without any drawing of its own: threads that sleep 1 ms
+at a time, and how late each sleep ends. Idle desktop: never more than 1 ms late. With gl-gears
+running: one thread at a time 190-210 ms late, a few times in 20 s, the others on time. The
+CPUs agree on the time (`tools/tsc-skew`), and Apple's CPU power management kext is not
+involved (same stalls with it moved away).
+
+KVM's own trace events on the host (`/sys/kernel/tracing/events/kvm`, nothing to install)
+showed what the first guest CPU does in those 200 ms: it takes about 10000 interrupts on one
+vector, and each time the guest only reads the status of four USB controllers and the disk
+controller and acknowledges. The cause, step by step:
+
+- In QEMU's Q35 machine a PCI device's interrupt line arrives at two inputs of the interrupt
+  controller: its own (21 for the GPU) and one of the old PC interrupts (10 or 11), because the
+  firmware leaves that old routing on. 10.6 uses input 21 for our device, and input 10 for the
+  USB and disk controllers in most boots (in some boots it gives those 16 and 17 instead, and
+  input 10 is off: then there is no stall, which is why some runs were clean).
+- Our interrupt handler was the usual IOKit pair: a filter that says "mine", then an action on
+  a work loop thread. For a level-triggered line IOKit masks the line in between.
+- If the device raised its line again in that gap (the next command finishing), input 21 was
+  masked but input 10 was not: the USB and disk handlers ran, found nothing, acknowledged, and
+  the interrupt came straight back, since only our handler can quiet the device and it was
+  waiting behind the very CPU that was busy with this.
+- After 10000 rounds KVM pauses such an interrupt for 10 ms ("delayed EOI injection", its
+  brake for interrupt storms). In that pause the work loop ran and everything went on. 10000
+  rounds of about 20 microseconds are the 0.2 s.
+
+The fix is in the kext's interrupt filter: it tells the device not to interrupt until the
+action has emptied the queues (the virtio "no interrupt" flag), reads the status register once
+more for a raise that slipped in, schedules the action itself (`signalInterrupt`) and returns
+false, so IOKit never masks our line. Measured in boots with input 10 active, same test (4
+sleepers, gl-gears):
+
+| | line 10 raised longer than 100 ms | KVM's storm brake | sleeps over 20 ms late | gl-gears |
+|---|---|---|---|---|
+| before, 18 s | 2 (201 ms) | 2 | 0-5 in a run | 58.7 frames/s, a 190 ms frame every few seconds |
+| after, 40 s | 0 (longest 4.4 ms) | 0 | 0 | 58.7 frames/s, longest frame 17-19 ms |
+
+Not specific to our device: any driver on that machine type whose handler waits with its line
+masked can be stormed the same way through the mirrored input.

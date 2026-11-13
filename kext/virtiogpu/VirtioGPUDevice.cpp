@@ -647,27 +647,54 @@ bool VirtioGPUDevice::setupInterrupts()
 
 // Primary interrupt context: reading the ISR acknowledges our interrupt; 0 means not ours
 // (the line may be shared).
-bool VirtioGPUDevice::interruptFilter(OSObject *owner, IOFilterInterruptEventSource *)
+// The device's interrupt line is level-triggered, and in QEMU's Q35 machine every PCI interrupt
+// line also drives one of the old PC interrupts (10 or 11), which 10.6 has switched on for
+// other devices (the USB controllers and more). IOKit's usual way with a level interrupt is to
+// mask our line when the filter returns true and unmask it after the action has run on the work
+// loop. If the device raised its line again in between (the next command finishing), our
+// masked line stayed quiet but interrupt 10 fired without end: its handlers found nothing to
+// do, nobody could quiet the device, and the CPU that takes interrupts ran nothing else, some
+// 10000 interrupts in 0.2 s, until KVM held the interrupt back for a moment. That was the
+// "0.17 s stall" (docs/re/perf-notes.md).
+// So our line is never masked: the filter quiets the device itself and schedules the action
+// with signalInterrupt(), which IOKit provides for exactly this, and returns false.
+bool VirtioGPUDevice::interruptFilter(OSObject *owner, IOFilterInterruptEventSource *src)
 {
     VirtioGPUDevice *d = (VirtioGPUDevice *)owner;
-    uint8_t isr = rd8(d->fISR, 0);
+    uint8_t isr = rd8(d->fISR, 0);      // reading it lowers the line
     if (!isr)
         return false;
     d->fIntCount++;
-    return (isr & 1) != 0;          // bit 0: a queue was used; bit 1: config change (ignored)
+    if (!(isr & 1))                 // bit 0: a queue was used; bit 1: config change (ignored)
+        return false;
+    // No more interrupts until the action has drained the queues (it turns them on again);
+    // the second read takes back a raise that slipped in before the device saw that.
+    ripple_vq_set_interrupts(&d->fQueue[0].vq, 0);
+    ripple_vq_set_interrupts(&d->fQueue[1].vq, 0);
+    (void)rd8(d->fISR, 0);
+    src->signalInterrupt();
+    return false;
 }
 
 // Our work loop's thread: finish completed commands.
 void VirtioGPUDevice::interruptAction(OSObject *owner, IOInterruptEventSource *, int)
 {
     VirtioGPUDevice *d = (VirtioGPUDevice *)owner;
-    IOLockLock(d->fCmdLock);
-    d->drainControlLocked(true);
-    IOLockUnlock(d->fCmdLock);
-    IOLockLock(d->fCursorLock);
-    while (ripple_vq_get_used(&d->fQueue[1].vq, NULL, NULL))
-        ;
-    IOLockUnlock(d->fCursorLock);
+    // Twice: the second pass, with the device's interrupts on again, takes what finished
+    // while they were off and so raised none.
+    for (int pass = 0; pass < 2; pass++) {
+        IOLockLock(d->fCmdLock);
+        d->drainControlLocked(true);
+        IOLockUnlock(d->fCmdLock);
+        IOLockLock(d->fCursorLock);
+        while (ripple_vq_get_used(&d->fQueue[1].vq, NULL, NULL))
+            ;
+        IOLockUnlock(d->fCursorLock);
+        if (pass == 0) {
+            ripple_vq_set_interrupts(&d->fQueue[0].vq, 1);
+            ripple_vq_set_interrupts(&d->fQueue[1].vq, 1);
+        }
+    }
 }
 
 // ---- Capability sets ------------------------------------------------------------------------
