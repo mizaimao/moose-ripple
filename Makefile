@@ -45,8 +45,8 @@ strip_vmin  = $(VTOOL) -remove-build-version macos -output $(1) $(1).v && rm -f 
 link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
-.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter surfaceprobe clean
-all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter winlist glfeaturecheck cieffects ticker
+.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter surfaceprobe guestinput clean
+all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter winlist glfeaturecheck cieffects ticker guestinput
 
 clean:
 	rm -rf $(OUT)
@@ -311,6 +311,14 @@ $(OUT)/x86_64/winlist/winlist.o: tools/winlist/winlist.c
 $(OUT)/winlist: $(OUT)/x86_64/winlist/winlist.o
 	$(call link_tool,x86_64,$@,$^,-framework ApplicationServices -framework CoreFoundation)
 winlist: $(OUT)/winlist
+
+# --- guest-input (clicks and key presses from inside the guest, for benchmark runs) ----------
+$(OUT)/x86_64/guest-input/guest-input.o: tools/guest-input/guest-input.c
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,x86_64) $(UCFLAGS) -c $< -o $@
+$(OUT)/guest-input: $(OUT)/x86_64/guest-input/guest-input.o
+	$(call link_tool,x86_64,$@,$^,-framework ApplicationServices -framework CoreFoundation)
+guestinput: $(OUT)/guest-input
 
 # --- gl-feature-check (Core Animation's video path step by step, ours vs software; M6) -------
 $(OUT)/x86_64/gl-feature-check/gl-feature-check.o: tools/gl-feature-check/gl-feature-check.c
