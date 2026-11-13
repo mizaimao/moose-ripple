@@ -71,7 +71,8 @@ Captures (git-ignored, `img/`): `m6-{qe,sw}-*.png` copied from the runs above.
   program, the 3D table) and gets the right pixel on ours; the difference left is that the
   game's window context draws into a window drawable and swaps.
 - **Real Racing 2 menu garbled.** The game's own context. GL_SHORT vertices with a texture
-  matrix work in `gl-feature-check`; not found yet.
+  matrix work in `gl-feature-check`; not found yet. (Both Real Racing 2 entries: found and
+  fixed 2026-11-12, see "a depth buffer the host could not make" at the end.)
 - **Core Image Fun House:** Core Image issues no GL calls for drawImage into the view; the same
   on software (white). Not a regression; not understood. (2026-11-12: it shows the picture on
   our driver now, Aqua Blue.jpg, with either way of showing app windows.)
@@ -343,3 +344,67 @@ window, the same scripts:
   our differences are a GPU's, not our driver's.
 - Calculator's window is silver-grey with light keys here; on our driver its body is black
   (issue #12).
+
+## Real Racing 2 and Chess: a depth buffer the host could not make (2026-11-12)
+
+Both faults of Real Racing 2 (black intro, garbled menu) and Chess's black board had one cause.
+The frontend gave every pixel format with a stencil buffer a `Z24_UNORM_S8_UINT` depth buffer
+without asking the screen. virglrenderer has `S8_UINT_Z24_UNORM` but not that one: it logged
+"unknown format is 19" and made nothing, QEMU still answered the creation with success, and
+the first command that used the buffer (CREATE_SURFACE for the depth attachment) failed as
+"Illegal resource". virglrenderer then drops the rest of that command buffer and leaves the
+process's context in error, so later commands, of every GL context in the process, are lost
+more or less at random: the game's own picture came out in pieces, and Core Video's and Core
+Animation's draws for the intro never happened.
+
+Fix: the depth, stencil and accumulation formats of a window or pbuffer are chosen from what
+the screen supports (`cgl_context.c`, `depth_stencil_format`). Real Racing 2 plays its intro
+and draws its 3D menu right, at 56 frames/s; Chess shows its board.
+`gl-feature-check stencil` draws with the stencil and depth buffers of such a drawable and
+reads the result back; `tex3d` and `yuv` (Core Video's real conversion program) came out of
+the search and pass on both renderers.
+
+How it was found, and two traps on the way:
+- **The host says what it refuses.** On a Proxmox host, QEMU's output is in the journal:
+  `journalctl | grep -E 'vrend|unknown format'` showed one "Illegal resource" per start of
+  the game. Look there first when something draws black or in pieces. The new debug switch
+  `/Library/Logs/RippleGL/reslog` logs every buffer a process makes and destroys, to look the
+  number up.
+- **The swap debug log damaged what it inspected.** It called Mesa's completeness test, which
+  is for framebuffer objects, on a window framebuffer; for one without a depth buffer (Core
+  Animation's) that leaves it 0x0 and incomplete. The "incomplete framebuffer" recorded above
+  as where the intro stood was this log's own doing. Fixed.
+- **Read-backs lie once the host context is in error.** A read-back is a command too; when
+  the host drops it, glReadPixels returns whatever the staging memory held, here the video
+  frame uploaded just before. A scratch texture cleared to a known colour read back as video
+  data. So pixel values logged from inside a broken process prove nothing.
+
+## Real Racing 2 in UTM: a host without S3TC (2026-11-12)
+
+On the Proxmox rig the fix above was enough. In UTM on an Apple-silicon Mac the game's menu
+still came out wrong: the 2D menu right, the car and scenery covered in coloured block noise,
+and nothing in the host's output.
+
+Cause: the host there (ANGLE, OpenGL ES on Metal) offers no S3TC texture compression, so our
+renderer did not list `GL_EXT_texture_compression_s3tc` and refused DXT uploads with
+GL_INVALID_ENUM. Every Mac GPU of the time has S3TC, and the game uploads DXT textures without
+asking. `gl-feature-check dxt` showed it in one run: "upload error 0x500, s3tc NOT listed".
+
+Fix: the CGL frontend sets Mesa's `allow_compressed_fallback` option (`cgl_context.c`), as
+Mesa's own frontends do by default. With it Mesa lists the extension and decodes such textures
+on the CPU when the host cannot take them. A host with S3TC is not affected (the rig still
+gets DXT natively; `dxt` and `generic` give the same results as before). In UTM the menu is
+drawn right at 57 to 59 frames/s, and Chess shows its board.
+
+In a race the game makes about 12 frames/s in UTM. Played in testing the same day: playable
+at that rate. Open, for the performance pass: its render thread uses a whole
+emulated CPU: about a third in the game's own lens flare test
+(`M3GMesh::IntersectsWithLineFast`), about a third in our draw path (sampler state encoding and
+a new transfer for each vertex upload), and four more threads poll with `usleep`.
+
+Looking at a guest's screen without a screenshot from the host: two debug switches write what
+the driver has, as PPM files in `/Library/Logs/RippleGL/` (`scripts/sheet.sh` converts them).
+`touch displaydump` gives the whole screen at WindowServer's next redraw (`display.ppm`);
+while an app's window is shown by the kernel WindowServer does not redraw, and `touch swapdump`
+gives each app's frame at its next swap instead (`swap-PID-CONTEXT.ppm`). The log lines alone
+were not enough here: they showed presents at a good rate while the picture was wrong.
