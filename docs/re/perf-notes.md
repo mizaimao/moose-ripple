@@ -441,6 +441,7 @@ windows of the bundle's `stats:` log lines.
 | Proxmox, KVM, Intel UHD 630 | 55-56 frames/s | 52-58 frames/s, the game at 15-40% of a CPU |
 | UTM on an M1 Max, x86 emulation, one host thread for all four CPUs | 57-59 | about 12 (seen in testing while driving) |
 | the same with UTM's "Force Multicore" on | 58 | 24-34 |
+| Windows 11, WSL2 with KVM, RTX 4090 through Direct3D 12 | 15 | not reached |
 
 What each host is short of:
 
@@ -455,10 +456,14 @@ What each host is short of:
   reached in half the time, and no trouble in a 25 minute run. UTM's documentation says QEMU
   does not guarantee correct emulation in this mode (x86 promises a stricter memory order than
   ARM gives), so it stays a choice.
-- **Windows 11 (WSL2):** not measured yet. One run of the game's menu went from 37 to 11
-  frames/s and then QEMU was gone; nothing in our stack grows per frame in that menu (one
-  submit, one present and no buffer made or destroyed per frame on Proxmox), so the host side
-  is the place to look.
+- **Windows 11 (WSL2):** the host's own CPU work. The game's menu settles at 15 frames/s
+  (57 on Proxmox) while the game uses 7% of a guest CPU. On the host, QEMU's main thread, the
+  one that turns our commands into Direct3D 12 calls through Mesa's d3d12 driver, is busy 76%
+  of the time, nearly all of it in its own code (3.8 s of 5 s in user mode, 0.07 s in the
+  kernel): about 50 ms of host CPU for each frame of that menu. QEMU's memory stayed flat
+  (2.5 GB) over the run, and gl-gears, with a handful of draws a frame, runs at 55 frames/s
+  there, so the cost is per draw or per upload, not per frame shown. What the thread does in
+  those 50 ms needs a profile on the host (Mesa 25.2.8, virglrenderer 1.0.0, QEMU 8.2.2).
 
 Two savings in the driver's CPU time, from the profiles (worth about a tenth of the frame rate
 where the CPU is the limit, 28 to 31 frames/s in UTM's race start):
