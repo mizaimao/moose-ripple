@@ -69,6 +69,8 @@ struct virgl_hw_res {
    void *ptr;                          /* mapping, made on first use */
    uint64_t fence;                     /* last fence that used it */
    int num_cs_references;
+   void *cs;                           /* the command buffer that listed it last, and where: a hint */
+   unsigned cs_index;                  /* that makes the usual lookup one compare (ripple_lookup_res) */
    struct virgl_resource_cache_entry cache_entry;
 };
 
@@ -512,16 +514,32 @@ static void ripple_cmd_buf_destroy(struct virgl_cmd_buf *_cbuf)
 
 static bool ripple_lookup_res(struct ripple_cmd_buf *cbuf, struct virgl_hw_res *res)
 {
+   /* A game lists a few hundred buffers per frame, each many times, and with thousands of
+    * buffers alive the 512 hash slots collide all the time: every collision was a walk
+    * through the whole list (14% of the driver's CPU time in Real Racing 2). The buffer
+    * itself remembers where it was listed last; the list is the judge, so a stale or
+    * half-written hint (a buffer shared by two contexts) only costs the slow path. */
+   unsigned i = res->cs_index;
+   if (res->cs == cbuf && i < cbuf->cres && cbuf->res[i] == res)
+      return true;
+   if (!p_atomic_read(&res->num_cs_references))
+      return false;                    /* in no command buffer's list at all */
+
    unsigned hash = res->res_handle & (sizeof(cbuf->is_added) - 1);
 
    if (!cbuf->is_added[hash])
       return false;
-   unsigned i = cbuf->hash_index[hash];
-   if (i < cbuf->cres && cbuf->res[i] == res)
+   i = cbuf->hash_index[hash];
+   if (i < cbuf->cres && cbuf->res[i] == res) {
+      res->cs = cbuf;
+      res->cs_index = i;
       return true;
+   }
    for (i = 0; i < cbuf->cres; i++) {
       if (cbuf->res[i] == res) {
          cbuf->hash_index[hash] = i;
+         res->cs = cbuf;
+         res->cs_index = i;
          return true;
       }
    }
@@ -550,6 +568,8 @@ static void ripple_add_res(struct ripple_cmd_buf *cbuf, struct virgl_hw_res *res
    cbuf->handles[cbuf->cres] = res->res_handle;
    cbuf->is_added[hash] = true;
    cbuf->hash_index[hash] = cbuf->cres;
+   res->cs = cbuf;
+   res->cs_index = cbuf->cres;
    p_atomic_inc(&res->num_cs_references);
    cbuf->cres++;
 }
