@@ -177,7 +177,10 @@ VM with Emulate > Other, then set in its settings:
   `+invtsc`) are left out.
 
 Tested with UTM 5.0.8 (QEMU 10.0.12) on macOS 26.7 with an M1 Max: Quartz Extreme is on with the
-translucent menu bar, and gl-gears runs at about 55 frames/s even under emulation. The renderer
+translucent menu bar, and gl-gears runs at about 55 frames/s even under emulation. Chess and Real
+Racing 2 run too: the game is playable, with its menu at 57 frames/s and a race at about 12,
+where the emulated CPU is the limit. This GPU path has no S3TC texture compression, so
+textures in it are decoded on the CPU when an app loads them. The renderer
 shows up as `Intel virgl OpenGL Engine`: UTM doesn't pass on the GPU's name, and Core Image only
 uses the GPU for renderer names it knows. Add `ripple_hwcursor=1` to the boot flags (step 4):
 with Quartz Extreme on, UTM shows the pointer only as a hardware cursor.

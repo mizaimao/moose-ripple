@@ -396,11 +396,11 @@ on the CPU when the host cannot take them. A host with S3TC is not affected (the
 gets DXT natively; `dxt` and `generic` give the same results as before). In UTM the menu is
 drawn right at 57 to 59 frames/s, and Chess shows its board.
 
-Open: in a race the game makes about 12 frames/s in UTM. Its render thread uses a whole
+In a race the game makes about 12 frames/s in UTM. Played in testing the same day: playable
+at that rate. Open, for the performance pass: its render thread uses a whole
 emulated CPU: about a third in the game's own lens flare test
 (`M3GMesh::IntersectsWithLineFast`), about a third in our draw path (sampler state encoding and
-a new transfer for each vertex upload), and four more threads poll with `usleep`. For the
-performance pass.
+a new transfer for each vertex upload), and four more threads poll with `usleep`.
 
 Looking at a guest's screen without a screenshot from the host: two debug switches write what
 the driver has, as PPM files in `/Library/Logs/RippleGL/` (`scripts/sheet.sh` converts them).
