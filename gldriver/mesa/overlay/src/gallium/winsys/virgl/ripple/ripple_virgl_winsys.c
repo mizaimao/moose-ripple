@@ -224,8 +224,22 @@ static inline bool can_cache_resource(uint32_t bind)
           bind == 0;
 }
 
+/* Debug (the file /Library/Logs/RippleGL/reslog when the process starts): every buffer made
+ * and destroyed, in the bundle's debug log, to look up a buffer the host complains about. */
+static FILE *res_log(void)
+{
+   extern FILE *ripple_gld_dbg_file(void);
+   static int on = -1;
+   if (on < 0)
+      on = access("/Library/Logs/RippleGL/reslog", F_OK) == 0;
+   return on ? ripple_gld_dbg_file() : NULL;
+}
+
 static void ripple_hw_res_destroy(struct ripple_winsys *ws, struct virgl_hw_res *res)
 {
+   if (res_log())
+      fprintf(res_log(), "RippleGLDriver: buffer %u destroyed (cs references %d)\n",
+              res->res_handle, p_atomic_read(&res->num_cs_references));
    if (res->ptr)
       IOConnectUnmapMemory64(ws->conn, res->res_handle, mach_task_self(),
                              (mach_vm_address_t)(uintptr_t)res->ptr);
@@ -294,12 +308,21 @@ ripple_resource_create_new(struct ripple_winsys *ws, struct virgl_resource_param
 
    if (IOConnectCallMethod(ws->conn, RIPPLE_GPU_BUFFER_CREATE, NULL, 0, &bc, sizeof(bc),
                            out, &out_cnt, NULL, NULL) != KERN_SUCCESS) {
+      if (res_log())
+         fprintf(res_log(), "RippleGLDriver: buffer NOT made: target %d format %d bind 0x%x "
+                 "%ux%ux%u samples %u size %u\n", params.target, params.format, params.bind,
+                 params.width, params.height, params.depth, params.nr_samples, params.size);
       FREE(res);
       return NULL;
    }
    pipe_reference_init(&res->reference, 1);
    res->target = params.target;
    res->res_handle = (uint32_t)out[0];
+   if (res_log())
+      fprintf(res_log(), "RippleGLDriver: buffer %u made: target %d format %d bind 0x%x %ux%ux%u "
+              "array %u levels %u samples %u size %u\n", res->res_handle, params.target,
+              params.format, params.bind, params.width, params.height, params.depth,
+              params.array_size, params.last_level + 1, params.nr_samples, params.size);
    res->bind = params.bind;
    res->size = params.size;
    p_atomic_set(&res->num_cs_references, 0);
@@ -571,6 +594,20 @@ static int ripple_submit(struct ripple_winsys *ws, const uint32_t *handles, unsi
    kern_return_t kr = IOConnectCallMethod(ws->conn, RIPPLE_GPU_SUBMIT, NULL, 0, start,
                                           sizeof(*s) + nh * 4 + ndw * 4, fence, &out_cnt, NULL,
                                           NULL);
+   if (kr != KERN_SUCCESS) {
+      /* The kernel took none of it: everything these commands drew or copied is lost. Worth a
+       * line in the debug log (the first ones). */
+      extern FILE *ripple_gld_dbg_file(void);
+      static unsigned refused;
+      FILE *f = ripple_gld_dbg_file();
+      if (f && refused++ < 40) {
+         fprintf(f, "RippleGLDriver: SUBMIT refused by the kernel: 0x%x (%u buffers, %u command "
+                 "words); buffers:", kr, nh, ndw);
+         for (unsigned i = 0; i < nh && i < 24; i++)
+            fprintf(f, " %u", handles[i]);
+         fputc('\n', f);
+      }
+   }
    p_atomic_inc(&work_count);          /* after the call: see ripple_transfer */
    if (kr == KERN_SUCCESS && fence)
       ripple_note_fence(ws, *fence);
