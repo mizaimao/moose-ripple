@@ -33,11 +33,11 @@ This repository contains no Apple software, firmware or keys. Mac OS X 10.6 (and
 source, Xcode 3.2.6 and its SDK) must come from your own legal copies, and running Mac OS X in a
 virtual machine is subject to Apple's license terms.
 
-## 1. Build the files
+## 1. Get the files
 
-There are no ready-built downloads: build the guest files yourself, as described in
-[Building from source](building.md). `make package` puts them in one zip,
-`build/moose-ripple-VERSION.zip`, which holds:
+Download `moose-ripple-VERSION.qcow2` from [Releases](https://github.com/mizaimao/moose-ripple/releases).
+It is the OpenCore boot disk (the steps below call it `opencore.qcow2`), and its second
+partition, RIPPLE, holds moose-ripple's installer, which Snow Leopard mounts on the desktop:
 
 | File | What it is |
 |---|---|
@@ -51,14 +51,18 @@ There are no ready-built downloads: build the guest files yourself, as described
 | `LICENSE`, `LICENSE-Mesa.rst` | moose-ripple's license, and Mesa's for the Mesa code in the GL driver |
 | `SHA256SUMS` | checksums of all the files (`install.sh` checks them first) |
 
-Hand the files to the guest as a CD image:
+The same files also come as `moose-ripple-VERSION.zip`, for a VM with another boot loader
+(Chameleon). Hand those to the guest as a CD image:
 
 ```
 unzip moose-ripple-VERSION.zip
-genisoimage -V RIPPLE -r -J -o ripple.iso moose-ripple-VERSION   # or: xorriso -as mkisofs, same options
+genisoimage -V RIPPLE -r -J -o ripple.iso moose-ripple-VERSION   # Linux or WSL; or: xorriso -as mkisofs, same options
+hdiutil makehybrid -iso -joliet -default-volume-name RIPPLE -o ripple.iso moose-ripple-VERSION   # on a Mac
 ```
 
-The OpenCore boot disk has its own build: [boot/opencore/](../boot/opencore/README.md).
+To build them yourself instead (this needs the 10.6 SDK from Xcode 3.2.6): [Building from
+source](building.md) for the zip (`make package`), then [boot/opencore/](../boot/opencore/README.md)
+for the disk (`build.sh -p` adds the installer partition).
 
 ## 2. Set up the VM
 
@@ -232,9 +236,10 @@ for the panic report to be saved; the cause isn't known, and the ten others were
 
 ## 4. Install the files in the guest
 
-Attach `ripple.iso` as a CD (on Proxmox: upload it to an ISO storage, then
-`qm set VMID --ide2 local:iso/ripple.iso,media=cdrom`). It appears as `/Volumes/RIPPLE`. Then,
-in Terminal:
+With the release disk the files are already there, on the RIPPLE volume. With the zip, attach
+`ripple.iso` as a CD (on Proxmox: upload it to an ISO storage, then
+`qm set VMID --ide2 local:iso/ripple.iso,media=cdrom`). Either way they appear as
+`/Volumes/RIPPLE`. Then, in Terminal:
 
 ```
 cd /Volumes/RIPPLE
