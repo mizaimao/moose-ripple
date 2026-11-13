@@ -128,6 +128,8 @@ int ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLe
                                GLenum ifmt, GLsizei w, GLsizei h, bool bind, GLenum source);
 /* GLI parameter 910 (CGLTexImageIOSurface2D): an IOSurface's pixels into the bound texture. */
 int ripple_cgl_iosurface_texture(struct ripple_cgl_context *ctx, const uint32_t *values);
+/* Debug log of the 3D client-storage textures (cgl_apple.c), for the swap debug log. */
+void ripple_cgl_cs_debug(struct ripple_cgl_context *ctx, FILE *f);
 
 /* Generated: the number of entries and the filler for a GLIFunctionDispatch table. */
 extern const unsigned ripple_cgl_dispatch_count;

@@ -736,6 +736,46 @@ static unsigned surface_texture_logs;
 #include "util/os_time.h"
 #include "util/box.h"
 
+/* Debug (the file /Library/Logs/RippleGL/swapdebug): one texel of a texture, read through the
+ * scratch framebuffer object. For 3D textures `z` is the slice. */
+static bool
+pixel_debug(void)
+{
+   static int on = -1;
+   if (on < 0)
+      on = access("/Library/Logs/RippleGL/swapdebug", F_OK) == 0;
+   return on;
+}
+
+static void
+debug_texel(struct ripple_cgl_context *ctx, GLenum target, GLuint name, int z, int x, int y,
+            GLubyte px[4])
+{
+   struct gl_context *gl = ctx->glctx;
+   GLuint read_fb = gl->ReadBuffer ? gl->ReadBuffer->Name : 0;
+   GLenum error = gl->ErrorValue;
+   struct gl_pixelstore_attrib saved = gl->Pack;
+
+   memset(px, 0, 4);
+   if (!ctx->flip_fbo)
+      CALL_GenFramebuffers(GET_DISPATCH(), (1, &ctx->flip_fbo));
+   CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT, ctx->flip_fbo));
+   if (target == GL_TEXTURE_3D)
+      CALL_FramebufferTexture3D(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT,
+                                                 target, name, 0, z));
+   else
+      CALL_FramebufferTexture2D(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT,
+                                                 target, name, 0));
+   memset(&gl->Pack, 0, sizeof(gl->Pack));
+   gl->Pack.Alignment = 1;
+   CALL_ReadPixels(GET_DISPATCH(), (x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px));
+   gl->Pack = saved;
+   CALL_FramebufferTexture2D(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT,
+                                              GL_TEXTURE_2D, 0, 0));
+   CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT, read_fb));
+   gl->ErrorValue = error;
+}
+
 /* Copy the window framebuffer's rectangle (x, y, w, h) into the texture bound to `target`, top
  * row first: a surface texture has the surface's rows in memory order, like the memory path
  * below (the Dashboard ripple showed the desktop upside down with GL's order, VM 210
@@ -879,6 +919,23 @@ ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum 
          CALL_ReadBuffer(GET_DISPATCH(), (draw_buf));
       CALL_CopyTexImage2D(GET_DISPATCH(), (target, 0, ifmt, 0, 0, MIN2((unsigned)w, pw),
                                            MIN2((unsigned)h, ph), 0));
+      static unsigned copies;
+      unsigned cn = copies++;
+      if (pixel_debug() && log && (cn < 4 || cn % 60 == 0)) {
+         /* What the pbuffer holds where it is read, and what the texture got. */
+         GLubyte src[4] = { 0 }, dst[4] = { 0 };
+         struct gl_pixelstore_attrib saved_pack = gl->Pack;
+         memset(&gl->Pack, 0, sizeof(gl->Pack));
+         gl->Pack.Alignment = 1;
+         CALL_ReadPixels(GET_DISPATCH(), (pw / 2, ph / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, src));
+         gl->Pack = saved_pack;
+         struct gl_texture_object *to = _mesa_get_current_tex_object(gl, target);
+         if (to && to->Name)
+            debug_texel(ctx, target, to->Name, 0, pw / 2, ph / 2, dst);
+         fprintf(log, "RippleGLDriver: pbuffer copy %u: pbuffer %u centre %u %u %u %u -> texture %u "
+                 "centre %u %u %u %u (read buffer 0x%x, own %d)\n", cn, sid, src[0], src[1], src[2],
+                 src[3], to ? to->Name : 0, dst[0], dst[1], dst[2], dst[3], draw_buf, own);
+      }
       if (draw_buf != GL_NONE)
          CALL_ReadBuffer(GET_DISPATCH(), (saved_read));
       CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT, read_fb));
@@ -1144,6 +1201,40 @@ cs_refresh3d(struct gl_context *glctx, struct cs_tex *t)
    glctx->Unpack = saved;
    glctx->ErrorValue = error;
    return true;
+}
+
+/* Debug (swapdebug): every 3D client-storage texture, its memory and what the texture itself
+ * holds in the middle. */
+void
+ripple_cgl_cs_debug(struct ripple_cgl_context *ctx, FILE *f)
+{
+   simple_mtx_lock(&cs_lock);
+   for (unsigned i = 0; i < cs_used; i++) {
+      struct cs_tex *t = &cs_texs[i];
+      if (!t->obj || !t->depth)
+         continue;
+      size_t size = (size_t)t->width * t->height * t->depth * 4;
+      size_t mid = (((size_t)(t->depth / 2) * t->height + t->height / 2) * t->width +
+                    t->width / 2) * 4;
+      unsigned long nonzero = 0;
+      uint32_t word = 0;
+      bool readable = cs_readable(t->pixels, size);
+      if (readable) {
+         const uint8_t *m = t->pixels;
+         for (size_t k = 0; k < size; k++)
+            nonzero += m[k] != 0;
+         memcpy(&word, m + mid, 4);
+      }
+      GLubyte px[4];
+      debug_texel(ctx, GL_TEXTURE_3D, t->obj->Name, t->depth / 2, t->width / 2, t->height / 2, px);
+      fprintf(f, "RippleGLDriver:   3D client-storage texture %u %dx%dx%d format 0x%x type 0x%x: "
+              "memory %s, %lu of %lu bytes nonzero, middle word 0x%08x; the texture's middle "
+              "texel reads %u %u %u %u; last refresh in frame %u of %u, shadow %s\n", t->obj->Name,
+              t->width, t->height, t->depth, t->format, t->type, readable ? "readable" : "gone",
+              nonzero, (unsigned long)size, word, px[0], px[1], px[2], px[3], t->gen, cs_gen,
+              t->shadow ? "kept" : "none");
+   }
+   simple_mtx_unlock(&cs_lock);
 }
 
 /* Upload `t` again from its memory; its texture is bound to its target. */

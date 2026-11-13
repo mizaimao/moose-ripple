@@ -329,15 +329,21 @@ swap_debug(struct ripple_cgl_context *ctx)
    static int enabled = -1;
    static struct { void *ctx; unsigned n; } seen[8];
    extern FILE *ripple_gld_dbg_file(void);
-   /* /Library/Logs/RippleGL/swapdump: the draw buffer as a PPM (top row first) at the next
-    * swap, once per creation of that file; for looking at a frame before it is presented. */
+   /* /Library/Logs/RippleGL/swapdump: each context's draw buffer as a PPM (top row first) at
+    * its next swap, once per creation of that file (swap-PID-CONTEXT.ppm); for looking at a
+    * frame before it is presented. */
    struct stat dst;
-   static time_t dump_done, dump_checked;
+   static struct { void *ctx; time_t done, checked; } dumps[8];
    time_t now = time(NULL);
-   bool check = now != dump_checked;          /* at most once a second */
-   dump_checked = now;
-   if (check && stat("/Library/Logs/RippleGL/swapdump", &dst) == 0 && dst.st_mtime != dump_done) {
-      dump_done = dst.st_mtime;
+   unsigned di = 0;
+   while (di < 7 && dumps[di].ctx && dumps[di].ctx != ctx)
+      di++;
+   dumps[di].ctx = ctx;
+   bool check = now != dumps[di].checked;     /* at most once a second for each context */
+   dumps[di].checked = now;
+   if (check && stat("/Library/Logs/RippleGL/swapdump", &dst) == 0 &&
+       dst.st_mtime != dumps[di].done) {
+      dumps[di].done = dst.st_mtime;
       struct gl_context *g = ctx->glctx;
       unsigned w = g->DrawBuffer ? g->DrawBuffer->Width : 0, h = g->DrawBuffer ? g->DrawBuffer->Height : 0;
       uint8_t *px = w && h ? malloc((size_t)w * h * 4) : NULL;
@@ -355,7 +361,8 @@ swap_debug(struct ripple_cgl_context *ctx)
          CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT, rfb));
          g->Pack = saved;
          char path[128];
-         snprintf(path, sizeof(path), "/Library/Logs/RippleGL/swap-%d.ppm", (int)getpid());
+         snprintf(path, sizeof(path), "/Library/Logs/RippleGL/swap-%d-%p.ppm", (int)getpid(),
+                  (void *)ctx);
          FILE *f = fopen(path, "wb");
          if (f) {
             fprintf(f, "P6\n%u %u\n255\n", w, h);
@@ -412,10 +419,15 @@ swap_debug(struct ripple_cgl_context *ctx)
            gl->Polygon.CullFlag, gl->DrawBuffer ? gl->DrawBuffer->ColorDrawBuffer[0] : 0,
            gl->Polygon.OffsetFill, gl->Color.ColorLogicOpEnabled);
    /* Whether the draw framebuffer is complete (an incomplete one turns clears and draws into
-    * no-ops with only a GL error), and what each attachment is. */
+    * no-ops with only a GL error), and what each attachment is. The completeness test is for
+    * framebuffer objects only: on a window framebuffer it looks at the object attachment
+    * points, finds none unless there is a depth buffer, and leaves the framebuffer 0x0 and
+    * incomplete. This log did exactly that to Core Animation's depth-less context in Real
+    * Racing 2 and then reported the damage as the fault (2026-11-11). */
    if (gl->DrawBuffer) {
       struct gl_framebuffer *fbo = gl->DrawBuffer;
-      _mesa_test_framebuffer_completeness(gl, fbo);
+      if (_mesa_is_user_fbo(fbo))
+         _mesa_test_framebuffer_completeness(gl, fbo);
       fprintf(ripple_gld_dbg_file(), "RippleGLDriver:   framebuffer %u status 0x%x %ux%u, visual "
               "depth %d stencil %d samples %d:", fbo->Name, fbo->_Status, fbo->Width, fbo->Height,
               fbo->Visual.depthBits, fbo->Visual.stencilBits, fbo->Visual.samples);
@@ -427,6 +439,8 @@ swap_debug(struct ripple_cgl_context *ctx)
       }
       fputc('\n', ripple_gld_dbg_file());
    }
+   extern void ripple_cgl_cs_debug(struct ripple_cgl_context *ctx, FILE *f);   /* cgl_apple.c */
+   ripple_cgl_cs_debug(ctx, ripple_gld_dbg_file());
    struct ripple_cgl_drawable *dd = ctx->draw;
    if (dd) {
       fprintf(ripple_gld_dbg_file(), "RippleGLDriver:   drawable %p (id %u, stamp %d) %ux%u rect %d, "
