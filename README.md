@@ -29,6 +29,11 @@ inside the VM.
 
 *The ripple effect!*
 
+![Real Racing 2 in a race, in Snow Leopard in a UTM window on an Apple-silicon Mac](media/real-racing-2-utm.webp)
+
+*Real Racing 2 in Snow Leopard, in UTM on an Apple M1 Max. The Intel CPU is emulated; the 3D
+runs on the Mac's GPU.*
+
 ## How it works
 
 ```
