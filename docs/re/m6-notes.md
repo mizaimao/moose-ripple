@@ -378,3 +378,33 @@ How it was found, and two traps on the way:
   the host drops it, glReadPixels returns whatever the staging memory held, here the video
   frame uploaded just before. A scratch texture cleared to a known colour read back as video
   data. So pixel values logged from inside a broken process prove nothing.
+
+## Real Racing 2 in UTM: a host without S3TC (2026-11-12)
+
+On the Proxmox rig the fix above was enough. In UTM on an Apple-silicon Mac the game's menu
+still came out wrong: the 2D menu right, the car and scenery covered in coloured block noise,
+and nothing in the host's output.
+
+Cause: the host there (ANGLE, OpenGL ES on Metal) offers no S3TC texture compression, so our
+renderer did not list `GL_EXT_texture_compression_s3tc` and refused DXT uploads with
+GL_INVALID_ENUM. Every Mac GPU of the time has S3TC, and the game uploads DXT textures without
+asking. `gl-feature-check dxt` showed it in one run: "upload error 0x500, s3tc NOT listed".
+
+Fix: the CGL frontend sets Mesa's `allow_compressed_fallback` option (`cgl_context.c`), as
+Mesa's own frontends do by default. With it Mesa lists the extension and decodes such textures
+on the CPU when the host cannot take them. A host with S3TC is not affected (the rig still
+gets DXT natively; `dxt` and `generic` give the same results as before). In UTM the menu is
+drawn right at 57 to 59 frames/s, and Chess shows its board.
+
+Open: in a race the game makes about 12 frames/s in UTM. Its render thread uses a whole
+emulated CPU: about a third in the game's own lens flare test
+(`M3GMesh::IntersectsWithLineFast`), about a third in our draw path (sampler state encoding and
+a new transfer for each vertex upload), and four more threads poll with `usleep`. For the
+performance pass.
+
+Looking at a guest's screen without a screenshot from the host: two debug switches write what
+the driver has, as PPM files in `/Library/Logs/RippleGL/` (`scripts/sheet.sh` converts them).
+`touch displaydump` gives the whole screen at WindowServer's next redraw (`display.ppm`);
+while an app's window is shown by the kernel WindowServer does not redraw, and `touch swapdump`
+gives each app's frame at its next swap instead (`swap-PID-CONTEXT.ppm`). The log lines alone
+were not enough here: they showed presents at a good rate while the picture was wrong.
