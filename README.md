@@ -155,13 +155,16 @@ sleep (KI-6), live snapshots that panic it (KI-5) and the pointer drifting with 
 
 ## Getting started
 
-There are no ready-built downloads, and Mac OS X must come from your own copy.
+Mac OS X must come from your own copy; the rest is one download.
 
-1. Build the guest files on Linux: [docs/building.md](docs/building.md).
+1. Download `moose-ripple-VERSION.qcow2` from
+   [Releases](https://github.com/mizaimao/moose-ripple/releases): the OpenCore boot disk, with
+   moose-ripple's installer on a second partition. To build it yourself instead:
+   [docs/building.md](docs/building.md).
 2. Set up the VM for your host: [Proxmox VE](docs/install.md#proxmox-ve),
    [plain QEMU](docs/install.md#plain-qemu), [Windows 11 through WSL2](docs/install.md#windows-11-wsl2)
    or [UTM on an Apple-silicon Mac](docs/install.md#utm-on-an-apple-silicon-mac).
-3. In Snow Leopard 10.6.8, open the files from a CD image, run `sudo sh install.sh` and restart.
+3. In Snow Leopard 10.6.8, run `sudo sh /Volumes/RIPPLE/install.sh` in Terminal and restart.
 4. Check: the menu bar is translucent, and a widget dragged out of the Dashboard's widget bar
    makes the water ripple.
 
