@@ -6,6 +6,9 @@
 #                                          (VM stopped; creates the disk on first use)
 #   OC_VARIANT=DEBUG boot/opencore/build.sh -w 212    OpenCore's debug build (more logging)
 #   OC_DUET=none boot/opencore/build.sh    without OpenDuet (or bootX64: its own disk drivers)
+#   boot/opencore/build.sh -p build/moose-ripple-VERSION.zip
+#                                          the release disk: 256 MiB, plus a FAT32 partition
+#                                          "RIPPLE" with the package unpacked (install.sh etc.)
 # Nothing runs on the laptop except ssh/scp. See boot/opencore/README.md.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
@@ -14,8 +17,16 @@ DEV=${DEV:-dev.lan}
 variant=${OC_VARIANT:-RELEASE}
 die() { echo "build.sh: $*" >&2; exit 1; }
 
-vmid=
-[ "${1:-}" = -w ] && { vmid=${2:?usage: build.sh [-w VMID]}; }
+vmid= pkg=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -w) vmid=${2:?usage: build.sh [-w VMID] [-p PACKAGE.zip]}; shift 2 ;;
+        -p) pkg=${2:?usage: build.sh [-w VMID] [-p PACKAGE.zip]}; shift 2 ;;
+        *)  die "usage: build.sh [-w VMID] [-p PACKAGE.zip]" ;;
+    esac
+done
+[ -n "$vmid" ] && [ -n "$pkg" ] && die "-p makes the 256 MiB release disk; it is not for -w"
+[ -z "$pkg" ] || [ -f "$pkg" ] || die "no such package: $pkg"
 
 duet=${OC_DUET:-bootX64-blockio}
 
@@ -29,7 +40,15 @@ scp -q -o ConnectTimeout=15 "$here/stage.py" "$here/config.plist" "$here/sources
 [ -d "$here/acpi" ] && scp -qr -o ConnectTimeout=15 "$here/acpi" "$DEV:$work/"
 ssh -o ConnectTimeout=15 "$RETRO" 'mkdir -p /tmp/opencore-build'
 scp -q -o ConnectTimeout=15 "$here/mkimage.sh" "$RETRO:/tmp/opencore-build/mkimage.sh"
-ssh -o ConnectTimeout=15 "$DEV" "~/Projects/moose-ripple/.venv/bin/python -I $work/stage.py $work $variant $duet" |
+stage="~/Projects/moose-ripple/.venv/bin/python -I $work/stage.py $work $variant $duet"
+if [ -n "$pkg" ]; then
+    # The package goes in as ripple/ after the staged OpenCore files (GNU tar appends).
+    scp -q -o ConnectTimeout=15 "$pkg" "$DEV:$work/package.zip"
+    stage="$stage > $work/stage.tar && rm -rf $work/pkg && mkdir $work/pkg &&
+        unzip -q $work/package.zip -d $work/pkg && mv $work/pkg/* $work/pkg/ripple &&
+        tar -C $work/pkg -rf $work/stage.tar ripple && cat $work/stage.tar"
+fi
+ssh -o ConnectTimeout=15 "$DEV" "$stage" |
     ssh -o ConnectTimeout=15 "$RETRO" "bash /tmp/opencore-build/mkimage.sh /tmp/opencore-build/opencore.img" || die "build failed"
 
 [ -n "$vmid" ] || exit 0

@@ -22,10 +22,18 @@ trap cleanup EXIT
 tar -C "$work" -xf -
 [ -f "$work/esp/EFI/OC/OpenCore.efi" ] || { echo "mkimage.sh: nothing staged on stdin" >&2; exit 1; }
 
-# Disk: 200 MiB, GPT, partition 1 = EFI system partition from sector 2048 to the end.
+# Disk: 200 MiB, GPT, partition 1 = EFI system partition from sector 2048 to the end. With a
+# staged ripple/ folder (build.sh -p, the release disk): 256 MiB, the EFI partition 150 MiB and
+# partition 2 = FAT32 "RIPPLE" holding moose-ripple's installer, which Snow Leopard mounts on the
+# desktop, so the one disk both boots the VM and installs the driver.
 rm -f "$out"
-truncate -s 200M "$out"
-sgdisk -o -n 1:2048:0 -t 1:EF00 -c 1:EFI "$out" >/dev/null
+if [ -d "$work/ripple" ]; then
+    truncate -s 256M "$out"
+    sgdisk -o -n 1:2048:+150M -t 1:EF00 -c 1:EFI -n 2:0:0 -t 2:0700 -c 2:RIPPLE "$out" >/dev/null
+else
+    truncate -s 200M "$out"
+    sgdisk -o -n 1:2048:0 -t 1:EF00 -c 1:EFI "$out" >/dev/null
+fi
 start=$(sgdisk -i 1 "$out" | awk '/^First sector/ {print $3}')
 end=$(sgdisk -i 1 "$out" | awk '/^Last sector/ {print $3}')
 loop=$(losetup --show -f -o $((start * 512)) --sizelimit $(((end - start + 1) * 512)) "$out")
@@ -48,6 +56,18 @@ cp -R "$work/esp/." "$work/mnt/"
 sync
 umount "$work/mnt"
 losetup -d "$loop"; loop=
+
+if [ -d "$work/ripple" ]; then
+    start=$(sgdisk -i 2 "$out" | awk '/^First sector/ {print $3}')
+    end=$(sgdisk -i 2 "$out" | awk '/^Last sector/ {print $3}')
+    loop=$(losetup --show -f -o $((start * 512)) --sizelimit $(((end - start + 1) * 512)) "$out")
+    mkfs.vfat -F 32 -n RIPPLE "$loop" >/dev/null
+    mount -t vfat "$loop" "$work/mnt"
+    cp -R "$work/ripple/." "$work/mnt/"
+    sync
+    umount "$work/mnt"
+    losetup -d "$loop"; loop=
+fi
 [ -f "$work/legacy/boot0" ] && dd if="$work/legacy/boot0" of="$out" bs=1 count=446 conv=notrunc status=none
 
 echo "$out: $(sha256sum "$out" | cut -c1-16)…"
