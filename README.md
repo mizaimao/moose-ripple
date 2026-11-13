@@ -155,9 +155,11 @@ sleep (KI-6), live snapshots that panic it (KI-5) and the pointer drifting with 
 
 ## Getting started
 
-There are no ready-built downloads, and Mac OS X must come from your own copy.
+Mac OS X must come from your own copy; the rest is a download.
 
-1. Build the guest files on Linux: [docs/building.md](docs/building.md).
+1. Download `moose-ripple-VERSION.zip` and `moose-ripple-opencore-VERSION.qcow2` from
+   [Releases](https://github.com/mizaimao/moose-ripple/releases). To build them yourself instead:
+   [docs/building.md](docs/building.md).
 2. Set up the VM for your host: [Proxmox VE](docs/install.md#proxmox-ve),
    [plain QEMU](docs/install.md#plain-qemu), [Windows 11 through WSL2](docs/install.md#windows-11-wsl2)
    or [UTM on an Apple-silicon Mac](docs/install.md#utm-on-an-apple-silicon-mac).
