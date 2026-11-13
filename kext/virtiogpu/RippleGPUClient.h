@@ -42,8 +42,14 @@ class RippleGPUClient : public IOUserClient
     uint32_t           fBufferCap;               // power of two; 0 before the first buffer
     uint32_t           fBufferCount;
     // Commands are copied here for the device (physically contiguous, made at first submit).
-    IOBufferMemoryDescriptor *fCmd;
-    uint64_t           fCmdPA;
+    // Submits are queued, not waited for: the device reads a command buffer after submit()
+    // has returned, so there are two, used in turn. fCmdBusy[i] is 1 while the device has
+    // buffer i (cleared when its reply comes).
+    enum { kCmdBuffers = 2 };
+    IOBufferMemoryDescriptor *fCmd[kCmdBuffers];
+    uint64_t           fCmdPA[kCmdBuffers];
+    volatile UInt32    fCmdBusy[kCmdBuffers];
+    unsigned           fCmdNext;
     uint32_t           fShown;                   // buffer this connection shows on the display
 
     int  contextSlot(uint32_t ctx) const;
@@ -55,7 +61,7 @@ class RippleGPUClient : public IOUserClient
     void destroyBuffer(Buffer &b);
     void destroyAll();
     IOReturn readInput(IOExternalMethodArguments *a, uint32_t offset, void *dst, uint32_t len);
-    bool ensureCommandBuffer();
+    bool ensureCommandBuffer(unsigned i);
     IOReturn surfacePresent(uint32_t surface, uint32_t handle, uint32_t context, uint32_t flags,
                             uint64_t *shown);
     IOReturn surfaceTexture(uint32_t surface, uint32_t handle, uint32_t flags, uint64_t *filled);

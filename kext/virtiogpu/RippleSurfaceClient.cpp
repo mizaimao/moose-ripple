@@ -97,8 +97,14 @@ void RippleSurfaceClient::free(void)
 {
     releaseBacking();
     if (fCmd) {
-        fCmd->complete();
-        fCmd->release();
+        // Not while the device may still read it: a buffer it never gave back stays.
+        VirtioGPUDevice *dev = fAccel ? fAccel->framebuffer()->device() : 0;
+        if (!dev || dev->waitRelease(&fCmdBusy)) {
+            fCmd->complete();
+            fCmd->release();
+        } else {
+            dev->abandonRelease(&fCmdBusy);
+        }
         fCmd = 0;
     }
     if (fRegion)
@@ -567,13 +573,19 @@ uint32_t RippleSurfaceClient::blitCommand(uint32_t *c, uint32_t dst, uint32_t ds
 // each visible rectangle of the surface when it is a plain region of the screen now (not when
 // WindowServer has shaped it non-simple or scaled it: it draws the window itself then). One
 // submit in the client's context, so after everything the client has submitted, then the
-// display is flushed. Returns whether the frame went on the screen. Called with fLock held.
+// display is flushed. With ripple_async=1 nothing here waits for the host to do it: the
+// copies and the flush are queued behind the client's own commands, and the client draws
+// its next frame meanwhile. Its next present waits until the host has taken this one's
+// copies (fCmdBusy), so a client never gets more than one frame ahead of the host.
+// Returns whether the frame went on the screen. Called with fLock held.
 bool RippleSurfaceClient::pushFrame(bool toTexture, bool toScreen)
 {
     if (!fFrameHandle || !fFrameContext || !ensureCommands())
         return false;
     RippleFramebuffer *fb = fAccel->framebuffer();
     VirtioGPUDevice *dev = fb->device();
+    if (!dev->waitRelease(&fCmdBusy))
+        return false;
     uint32_t *cmd = (uint32_t *)fCmd->getBytesNoCopy(), dw = 0;
 
     if (toTexture && fTexHandle && fTexHandle != fFrameHandle &&
@@ -616,12 +628,14 @@ bool RippleSurfaceClient::pushFrame(bool toTexture, bool toScreen)
                               x0 - fOriginX, y0 - fOriginY);
         }
     }
-    if (!dw || !dev->submit3D(fFrameContext, fCmdPA, dw * 4, NULL))
+    bool async = dev->asyncSubmits();
+    if (!dw || !(async ? dev->submit3DAsync(fFrameContext, fCmdPA, dw * 4, NULL, &fCmdBusy)
+                       : dev->submit3D(fFrameContext, fCmdPA, dw * 4, NULL)))
         return false;
     if (dw == shownFrom)
         return false;                   // nothing of it on the screen
     dev->syncAsync(fFrameContext);      // push the copy out, as a DISPLAY does
-    return fb->flushShown(screen) == kIOReturnSuccess;
+    return fb->flushShown(screen, !async) == kIOReturnSuccess;
 }
 
 // The client's latest frame into another GPU buffer, top row first, in a submit of its own.
@@ -631,6 +645,8 @@ bool RippleSurfaceClient::copyFrame(uint32_t dst, uint32_t dstFormat, uint32_t d
 {
     if (!fFrameHandle || !fFrameContext || !dst || dst == fFrameHandle || !ensureCommands() ||
         !attachTo(dst, attached))
+        return false;
+    if (!fAccel->framebuffer()->device()->waitRelease(&fCmdBusy))
         return false;
     uint32_t w = fFrameWidth < dstWidth ? fFrameWidth : dstWidth;
     uint32_t h = fFrameHeight < dstHeight ? fFrameHeight : dstHeight;

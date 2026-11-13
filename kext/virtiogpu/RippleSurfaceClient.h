@@ -62,6 +62,7 @@ class RippleSurfaceClient : public IOUserClient
            kMaxShowRects = kCommandBytes / (4 * kBlitDwords) - 2 };
     IOBufferMemoryDescriptor *fCmd;      // for the copy commands
     uint64_t           fCmdPA;
+    volatile UInt32    fCmdBusy;         // 1 while the device still has to read fCmd
     bool ensureCommands();
     bool attachTo(uint32_t buffer, uint32_t *attached);
     uint32_t blitCommand(uint32_t *c, uint32_t dst, uint32_t dstFormat, int32_t dx, int32_t dy,
