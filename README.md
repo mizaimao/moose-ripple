@@ -131,8 +131,8 @@ pixels.
 - In UTM on an Apple M1 Max the guest's Intel CPU is emulated, and that CPU is the
   limit there: gl-gears runs at about 55 frames/s and Real Racing 2's menu at 57-59, but
   a race makes about 25-30 frames/s, with the game's drawing thread using a whole emulated
-  CPU. UTM's Force Multicore setting, which gives each emulated CPU its own thread of the
-  Mac, adds about 15% to that ([install guide](docs/install.md#utm-on-an-apple-silicon-mac)). The M1's GPU path has no S3TC texture compression, which Mac games
+  CPU. UTM's optional Force Multicore setting, which gives each emulated CPU its own thread
+  of the Mac, adds about 15% to that ([install guide](docs/install.md#utm-on-an-apple-silicon-mac)). The M1's GPU path has no S3TC texture compression, which Mac games
   take for granted, so such textures are decoded on the CPU when they are loaded.
 - The host GPU's minimum clock was raised to 1200 MHz for these numbers
   (`/sys/class/drm/card0/gt_min_freq_mhz` on Intel). At the default 350 MHz each screen update
