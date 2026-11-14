@@ -122,6 +122,8 @@ extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_
 
     InitialData.DxgkDdiSetPointerPosition = VioGpu3DSetPointerPosition;
     InitialData.DxgkDdiSetPointerShape = VioGpu3DSetPointerShape;
+    // Windows 7 does not start an adapter whose driver has no DxgkDdiSetPalette, used or not
+    InitialData.DxgkDdiSetPalette = VioGpu3DSetPalette;
     InitialData.DxgkDdiIsSupportedVidPn = VioGpu3DIsSupportedVidPn;
     InitialData.DxgkDdiRecommendFunctionalVidPn = VioGpu3DRecommendFunctionalVidPn;
     InitialData.DxgkDdiEnumVidPnCofuncModality = VioGpu3DEnumVidPnCofuncModality;
@@ -353,6 +355,20 @@ VioGpu3DSetPointerPosition(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_SETPOI
         return STATUS_UNSUCCESSFUL;
     }
     return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS
+APIENTRY
+VioGpu3DSetPalette(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_SETPALETTE *pSetPalette)
+{
+    PAGED_CODE();
+    UNREFERENCED_PARAMETER(hAdapter);
+    UNREFERENCED_PARAMETER(pSetPalette);
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
+
+    // The colours of a 256-colour mode. The driver offers no such mode; the entry point exists
+    // because Windows 7 requires it of every driver (later versions do not).
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS

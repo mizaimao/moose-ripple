@@ -155,6 +155,17 @@ BOOLEAN VioGpuAdapter::CheckHardware()
     }
     DbgPrint(TRACE_LEVEL_INFORMATION,
              ("<--- %s VendorId = 0x%04X DeviceId = 0x%04X\n", __FUNCTION__, Header.VendorID, Header.DeviceID));
+    // Whether Windows takes this for the VGA device depends on more than the class code: the
+    // command register tells which of its decoders the firmware and Windows left switched on.
+    DbgPrint(TRACE_LEVEL_FATAL,
+             ("PCI command 0x%04X (ports %s, memory %s) status 0x%04X class %02X.%02X.%02X\n",
+              Header.Command,
+              (Header.Command & PCI_ENABLE_IO_SPACE) ? "on" : "off",
+              (Header.Command & PCI_ENABLE_MEMORY_SPACE) ? "on" : "off",
+              Header.Status,
+              Header.BaseClass,
+              Header.SubClass,
+              Header.ProgIf));
     if (Header.VendorID == REDHAT_PCI_VENDOR_ID && Header.DeviceID == 0x1050)
     {
         SetVgaDevice(Header.SubClass == PCI_SUBCLASS_VID_VGA_CTLR);
@@ -500,6 +511,10 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 pDriverCaps->SchedulingCaps.MultiEngineAware = 1;
 
                 pDriverCaps->GpuEngineTopology.NbAsymetricProcessingNodes = 1;
+
+                // Windows 7 accepts only this value from a driver of its own interface version, and
+                // refuses the adapter with any other, zero included.
+                pDriverCaps->WDDMVersion = DXGKDDI_WDDMv1;
 
                 // Disable pointer on viogpu3d for now
                 // if (IsPointerEnabled()) {
