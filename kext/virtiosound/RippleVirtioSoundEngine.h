@@ -56,7 +56,10 @@ private:
     UInt32             fRingBytes;
     volatile UInt32    fNextFrame;        // next ring frame to copy into a slot
     bool               fRunning;
-    bool               fWrapped;          // the copy position has left frame 0 once this run
+    bool               fReading;          // past the start burst: slots are filled from the ring
+    bool               fAnchorRead;       // the next read of frame 0 is the one loop 0 was stamped at
+    uint64_t           fLastDone;         // absolute time of the last completion (start burst)
+    uint64_t           fHalfPeriodAbs;
 
     void submit(unsigned slot);
     static IOReturn volumeChanged(OSObject *target, IOAudioControl *control, SInt32 oldValue, SInt32 newValue);
