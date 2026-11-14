@@ -565,3 +565,24 @@ kext. Nothing got slower, and what was held up by waiting got faster; where an a
 runs at the display's 60 frames/s there is nothing to gain on this host. Still to do before it
 becomes the default: the same on the UTM and Windows hosts, where the host's share of a frame
 is larger.
+
+### Where the driver's time per draw goes, and two things that do not help (2026-11-13)
+
+Real Racing 2's race on the Proxmox host, counted with dtrace over 5 s: 96 draws a frame.
+There is no single hot spot (the largest function is 7% of the driver's time). What stands
+out is uploading: of all draws, 80% upload the constant vertex attributes again (the state
+tracker's "current values"), 62% upload vertex arrays the game keeps in its own memory, and
+24% upload index arrays from its memory; each upload maps a piece of an upload buffer anew
+(44 maps a frame) and unmaps it before the draw. The host sees little of it, the transfers
+are merged into about two a frame. Trimming this is worth a few percent of the frame rate
+where the guest's CPU is the limit, not more.
+
+Mesa's threaded mode (glthread), which would move the driver's work off the program's drawing
+thread, is not available: it needs a driver whose buffer maps are safe from a second thread
+(`PIPE_CAP_MAP_UNSYNCHRONIZED_THREAD_SAFE`) and that can draw while buffers are mapped
+(`PIPE_CAP_ALLOW_MAPPED_BUFFERS_DURING_EXECUTION`). virgl has neither, `_mesa_glthread_init`
+returns at once; only iris, radeonsi, zink and asahi have them.
+
+Core Image's single filters at 480x300, re-measured after the stall fix: 1.6-12.8 ms a frame
+against 1.0-5.5 ms for Core Image's software renderer, as before; the picture comparison is
+unchanged (23 of 24 the same).
