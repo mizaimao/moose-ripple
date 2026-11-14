@@ -74,13 +74,19 @@ HKR,,TypesSupported,%REG_DWORD%,7
 HKR,, HWCursor,           %REG_DWORD%, 0
 HKR,, FlexResolution,     %REG_DWORD%, 1
 HKR,, UsePhysicalMemory,  %REG_DWORD%, 0
+; Windows 7's graphics kernel reads these from this key (the driver key, Class\{4d36e968-...}\000N)
+; and refuses the adapter without UserModeDriverName. User-mode drivers: first the Direct3D 9
+; one, then Direct3D 10 (x64 without 32-bit ones). No Direct3D 9 driver exists yet: the
+; Direct3D 10 one in both places for now.
+HKR,, UserModeDriverName,     %REG_MULTI_SZ%, viogpu_d3d10.dll, viogpu_d3d10.dll
+HKR,, InstalledDisplayDrivers, %REG_MULTI_SZ%, viogpu_d3d10, viogpu_d3d10
+HKR,, VgaCompatible,          %REG_DWORD%, 0
 HKLM,"SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Scheduler",EnablePreemption,%REG_DWORD%,0
 HKLM,"SYSTEM\CurrentControlSet\Control\GraphicsDrivers",TdrDebugMode,%REG_DWORD%,1
 
-; Windows 7 reads the display settings from the device's software key (.SoftwareSettings).
+; The same three again for the .SoftwareSettings section, which Windows 7 writes to the driver
+; key's Settings subkey (the old display model's place for them).
 [VioGpu3D_SoftwareDeviceSettings]
-; User-mode drivers: first the Direct3D 9 one, then Direct3D 10 (x64 without 32-bit ones). No
-; Direct3D 9 driver exists yet: the Direct3D 10 one in both places for now.
 HKR,, UserModeDriverName,     %REG_MULTI_SZ%, viogpu_d3d10.dll, viogpu_d3d10.dll
 HKR,, InstalledDisplayDrivers, %REG_MULTI_SZ%, viogpu_d3d10, viogpu_d3d10
 HKR,, VgaCompatible,          %REG_DWORD%, 0
