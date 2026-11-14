@@ -49,16 +49,15 @@ CUSTOM = {
     'flush_render_APPLE': 'ripple_cgl_flush_render',
     'finish_render_APPLE': 'ripple_cgl_finish_render',
     # Apple-only hint values Mesa would refuse with GL_INVALID_ENUM: filtered, the rest
-    # forwarded (cgl_apple.c). Not GL_UNPACK_CLIENT_STORAGE_APPLE: accepting that tells
-    # WindowServer the GL reads its texture memory at draw time, and it then reuses buffers
-    # (Mesa copies once: wrong window contents everywhere, 2026-11-10).
+    # forwarded (cgl_apple.c).
     'tex_parameteri': 'ripple_cgl_tex_parameteri',
     'tex_parameterf': 'ripple_cgl_tex_parameterf',
     'tex_parameteriv': 'ripple_cgl_tex_parameteriv',
     'tex_parameterfv': 'ripple_cgl_tex_parameterfv',
     'hint': 'ripple_cgl_hint',
-    # Client storage, emulated: the enum is still refused, but textures specified with it are
-    # read from their memory again each frame until the program updates them (cgl_apple.c).
+    # Client storage, emulated: Mesa never sees the enum (no GL error), and textures specified
+    # with it are read from their memory again each frame until the program updates them
+    # (cgl_apple.c). Row bytes likewise.
     'pixel_storei': 'ripple_cgl_pixel_storei',
     'pixel_storef': 'ripple_cgl_pixel_storef',
     'tex_image2D': 'ripple_cgl_tex_image2D',

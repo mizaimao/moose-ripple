@@ -673,3 +673,23 @@ to 8: 299 280 301 279 279 290 290 with it, 295 296 293 291 298 299 299 without. 
 run without it dipped to 275-285 later in the race, so the few percent between them are
 within what two runs differ by. No errors in the guest's kernel log. It stays opt-in: it
 helps where the guest's CPU is the limit (UTM), and nowhere else so far.
+
+### The frame meter counted about twice the passes (2026-11-14)
+
+After the fix for GL errors left set in WindowServer (`m6-notes.md`, "GL errors nobody asked
+about"), the frame meter's frames/s reads lower while the work is the same. Same bundle, the
+old errors switched on and off (`cs-error`), `scripts/frame-meter-run.sh expose dashboard`
+with dtrace counting WindowServer's `glFlush` calls and our screen updates over both runs:
+
+| | errors as before | now |
+|---|---|---|
+| passes (`glFlush`) and screen updates | 392 and 392 | 378 and 378 |
+| Exposé frames/s, peak / mean (three runs) | 137-179 / 56-78 | 56-75 / 33-37 |
+| Dashboard frames/s, peak / mean (three runs) | 71-185 / 32-75 | 35-114 / 23-36 |
+| Exposé screens/s, mean | 8.8-10.3 | 8.6-14.6 |
+| Dashboard screens/s, mean | 11.9-18.6 | 13.6-16.8 |
+
+So `CGSGetPerformanceData`'s frame count rose with the dropped programs and not only with the
+passes (how it counts was not looked into). The frames/s figures above this point were taken with the
+errors and are not comparable with later ones; screens/s, the pacing run and counts of
+`glFlush` are. Pacing before and after is in `m6-notes.md`.
