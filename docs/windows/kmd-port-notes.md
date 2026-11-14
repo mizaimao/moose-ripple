@@ -179,3 +179,35 @@ anything:
 
 A failure in there makes Windows stop the device again and show Code 43, with nothing in any
 log. Both gaps are closed (`DxgkDdiSetPalette` does nothing: there is no 256-colour mode).
+
+6. **Both fixes, values still only in `.SoftwareSettings`:** no change, and the registry of
+   the test VM showed why. On Windows 7 the `.SoftwareSettings` section of a display INF lands
+   in a `Settings` subkey of the adapter's driver key
+   (`Control\Class\{4d36e968-...}\000N\Settings`). The required `UserModeDriverName` is read
+   from the driver key itself, where the other vendors' drivers on that machine have it and
+   where a plain `AddReg` of the install section writes. Run 2 had it there (and failed on the
+   missing entry point); runs 3 to 6 failed one step earlier, on the missing value, after it
+   had been moved. The INF has the three display values in both places now.
+7. **The adapter is accepted.** Windows 7 asks for capabilities and segments, maps two
+   ranges of the aperture (without an allocation: its own buffers), reads the EDID and the
+   seven modes, and goes through its mode proposals (`IsSupportedVidPn`,
+   `EnumVidPnCofuncModality`). It creates a device, a context, the surface it draws the
+   desktop into (standard allocation type 2) and the shared primary (type 1), each at
+   1024x768 and again at 640x480, and each time tears everything down right after the
+   primary's `OpenAllocation`, without a failing call on the driver's side and without ever
+   committing a mode. The screen stays off ("Display output is not active"), no crash.
+
+### Tools for looking into Windows
+
+- Disassembly of the Windows 7 display kernel (`dxgkrnl.sys`, `dxgmms1.sys`, `watchdog.sys`
+  copied out of the test VM) with names from Microsoft's public symbol files, which the
+  symbol server hands out for the exact build. Never committed.
+- QEMU's gdb stub on the test VM (`gdbserver` through the VM's QMP socket, bound to the
+  host's loopback), driven by gdb on the build machine. The loaded modules are found from
+  the interrupt table (the kernel's base) and the kernel's debugger data block (the module
+  list).
+- Windows' display kernel writes every internal error to a log in `watchdog.sys`, kept in
+  memory only if `HKLM\SYSTEM\CurrentControlSet\Control\Watchdog\Logging` has values
+  `N-LevelSizeLg2` (N = 1..7, the size of each level's ring as a power of two). Each entry
+  holds the caller's address and up to five values, usually a status code. Read out through
+  the gdb stub, this says which check fired.
