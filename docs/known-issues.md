@@ -178,3 +178,17 @@ for a slow TSC, so the kernel panics. Our drivers aren't loaded yet at that poin
 **Fixed** in the OpenCore boot disk: two kernel patches move the threshold to exactly 1 GHz
 ([boot/opencore/README.md](../boot/opencore/README.md#kernel-patches-1068)). Rebuild the boot
 disk (`boot/opencore/build.sh`) to get them. Chameleon has no equivalent.
+
+## KI-10: A wrong SMC key looks like a network hang
+
+No GitHub issue: a setup pitfall, not a bug.
+
+**Symptom.** The verbose boot stops after `Ethernet [Intel8254x]: Link up on en0` and no desktop
+appears; loginwindow, fontd, mds and configd crash every few seconds. Seen in UTM on 2026-11-13.
+
+**Cause.** QEMU didn't get the real SMC key and silently uses its dummy key (`info qtree` in the
+monitor shows "This is a dummy key"). In UTM this happens when the key is written in quotes: UTM
+keeps the quotes as part of the value. Curly quotes from a copied web page do the same anywhere.
+
+**Fix:** write the key exactly; in UTM without quotes
+([docs/install.md](install.md#utm-on-an-apple-silicon-mac)).

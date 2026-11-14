@@ -45,8 +45,8 @@ strip_vmin  = $(VTOOL) -remove-build-version macos -output $(1) $(1).v && rm -f 
 link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
-.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter surfaceprobe clean
-all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter winlist glfeaturecheck cieffects ticker
+.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter surfaceprobe guestinput tscskew timerlate clean
+all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter winlist glfeaturecheck cieffects ticker guestinput tscskew timerlate
 
 clean:
 	rm -rf $(OUT)
@@ -312,12 +312,36 @@ $(OUT)/winlist: $(OUT)/x86_64/winlist/winlist.o
 	$(call link_tool,x86_64,$@,$^,-framework ApplicationServices -framework CoreFoundation)
 winlist: $(OUT)/winlist
 
+# --- guest-input (clicks and key presses from inside the guest, for benchmark runs) ----------
+$(OUT)/x86_64/guest-input/guest-input.o: tools/guest-input/guest-input.c
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,x86_64) $(UCFLAGS) -c $< -o $@
+$(OUT)/guest-input: $(OUT)/x86_64/guest-input/guest-input.o
+	$(call link_tool,x86_64,$@,$^,-framework ApplicationServices -framework CoreFoundation)
+guestinput: $(OUT)/guest-input
+
+# --- tsc-skew (do the guest's CPUs agree on the time stamp counter?) -------------------------
+$(OUT)/x86_64/tsc-skew/tsc-skew.o: tools/tsc-skew/tsc-skew.c
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,x86_64) $(UCFLAGS) -c $< -o $@
+$(OUT)/tsc-skew: $(OUT)/x86_64/tsc-skew/tsc-skew.o
+	$(call link_tool,x86_64,$@,$^,-framework CoreFoundation)
+tscskew: $(OUT)/tsc-skew
+
+# --- timer-late (how late do short sleeps end?) ----------------------------------------------
+$(OUT)/x86_64/timer-late/timer-late.o: tools/timer-late/timer-late.c
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,x86_64) $(UCFLAGS) -c $< -o $@
+$(OUT)/timer-late: $(OUT)/x86_64/timer-late/timer-late.o
+	$(call link_tool,x86_64,$@,$^,-framework CoreFoundation)
+timerlate: $(OUT)/timer-late
+
 # --- gl-feature-check (Core Animation's video path step by step, ours vs software; M6) -------
 $(OUT)/x86_64/gl-feature-check/gl-feature-check.o: tools/gl-feature-check/gl-feature-check.c
 	@mkdir -p $(dir $@)
 	$(CC) $(call target,x86_64) $(UCFLAGS) -c $< -o $@
 $(OUT)/gl-feature-check: $(OUT)/x86_64/gl-feature-check/gl-feature-check.o
-	$(call link_tool,x86_64,$@,$^,-framework OpenGL)
+	$(call link_tool,x86_64,$@,$^,-framework OpenGL -framework IOSurface -framework CoreFoundation)
 glfeaturecheck: $(OUT)/gl-feature-check
 
 # --- ci-effects (Core Image filters and Photo Booth compositions, ours vs software; M6) ------

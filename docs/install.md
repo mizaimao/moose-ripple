@@ -164,7 +164,7 @@ VM with Emulate > Other, then set in its settings:
 - QEMU > Arguments, one row each:
 
 ```
--device isa-applesmc,osk="YOUR-SMC-KEY"
+-device isa-applesmc,osk=YOUR-SMC-KEY
 -smbios type=2
 -cpu Penryn,vendor=GenuineIntel,+sse4.1,+sse4.2,+ssse3,vmware-cpuid-freq=off
 -global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off
@@ -173,17 +173,26 @@ VM with Emulate > Other, then set in its settings:
 -device usb-tablet,bus=rehci.0
 ```
 
+- In UTM, write the SMC key without quotes: UTM keeps quotes as part of the key, which is then
+  wrong (see "Why these settings").
 - The keyboard and tablet get their own USB 2.0 controller: UTM's USB bus is USB 3.0, which
   10.6 has no driver for.
 - No `X-PciMmio64Mb`: UTM's 3D display adds an 8 GB memory region, which only fits above 4 GB.
   Under emulation 10.6 can use it there; the hang in KI-2 happens only with KVM.
 - The CPU flags that only mean something to KVM (`kvm=on`, `+kvm_pv_*`, `+hypervisor`,
   `+invtsc`) are left out.
+- Optional, System > Force Multicore: UTM normally runs all four emulated CPUs on one
+  thread of the Mac; with this setting each gets its own. In the same scripted run Real
+  Racing 2 reached its menu in 140 s instead of 175 and its race ran at about 31 frames/s
+  instead of 26. UTM leaves it off for an Intel guest on an ARM Mac because QEMU does not
+  guarantee correct emulation with it: Intel CPUs promise a stricter order of memory writes
+  between cores than ARM gives. We saw no trouble with it in testing, but the gain is
+  small, so the numbers in this guide are without it. If you turn it on and a program
+  misbehaves in a way you can't explain, turn it off again.
 
 Tested with UTM 5.0.8 (QEMU 10.0.12) on macOS 26.7 with an M1 Max: Quartz Extreme is on with the
 translucent menu bar, and gl-gears runs at about 55 frames/s even under emulation. Chess and Real
-Racing 2 run too: the game is playable, with its menu at 57 frames/s and a race at about 12,
-where the emulated CPU is the limit. This GPU path has no S3TC texture compression, so
+Racing 2 run too: the game is playable, with its menu at 57 frames/s and a race at about 25-30, where the emulated CPU is the limit. This GPU path has no S3TC texture compression, so
 textures in it are decoded on the CPU when an app loads them. The renderer
 shows up as `Intel virgl OpenGL Engine`: UTM doesn't pass on the GPU's name, and Core Image only
 uses the GPU for renderer names it knows. Add `ripple_hwcursor=1` to the boot flags (step 4):
@@ -200,6 +209,11 @@ with Quartz Extreme on, UTM shows the pointer only as a hardware cursor.
   of the two works too (tested on Proxmox).
 - `usb-kbd`: 10.6 has no PS/2 keyboard driver.
 - Exactly one `isa-applesmc`: two make 10.6 panic at boot.
+- The SMC key must be exact, in straight quotes or none (curly quotes from a copied web page break
+  it; in UTM, quotes become part of the key). With a wrong key QEMU silently uses its dummy key
+  (`info qtree` in the monitor shows "This is a dummy key"): loginwindow, fontd, mds and configd
+  crash every few seconds, and the verbose boot stops after `Ethernet [Intel8254x]: Link up on
+  en0` with no desktop, which looks like a network hang.
 - `pc-q35-7.2`: the machine version we tested.
 
 More on the boot disk: [boot/opencore/README.md](../boot/opencore/README.md).

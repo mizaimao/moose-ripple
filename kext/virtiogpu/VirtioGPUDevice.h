@@ -52,6 +52,7 @@ public:
     bool setScanout(uint32_t scanout, uint32_t id, const Rect &r);
     bool transferToHost2D(uint32_t id, const Rect &r, uint64_t offset);
     bool resourceFlush(uint32_t id, const Rect &r);
+    bool resourceFlushAsync(uint32_t id, const Rect &r);   // queued, not waited for
 
     // Device-wide ids (resources are shared by the framebuffer and 3D clients).
     uint32_t allocResourceId() { return (uint32_t)OSIncrementAtomic(&fNextResource) + 1; }
@@ -70,6 +71,16 @@ public:
                           uint32_t width, uint32_t height, uint32_t depth, uint32_t arraySize,
                           uint32_t lastLevel, uint32_t nrSamples, uint32_t flags);
     bool submit3D(uint32_t ctx, uint64_t pa, uint32_t size, uint64_t *fence);
+    // The same without waiting for the host to run the commands: queued, and `*busy` stays 1
+    // until the host has taken them (the memory at `pa` must not change before that; wait
+    // with waitRelease()). Commands still run in queue order.
+    bool submit3DAsync(uint32_t ctx, uint64_t pa, uint32_t size, uint64_t *fence,
+                       volatile UInt32 *busy);
+    bool waitRelease(volatile UInt32 *busy);     // false: gave up after 5 s, still busy
+    void abandonRelease(volatile UInt32 *busy);  // the flag's memory is going away
+    // Boot flag ripple_async=1: clients queue their submits and frame copies instead of
+    // waiting for the host to run each one. Off unless asked for (kext README).
+    bool asyncSubmits() const { return fAsync; }
     bool transfer3D(bool toHost, uint32_t ctx, uint32_t id, uint32_t level, const uint32_t box[6],
                     uint32_t stride, uint32_t layerStride, uint64_t offset, uint64_t *fence);
     bool sync(uint32_t ctx);              // ctx 0: the context of the last submit
@@ -107,13 +118,17 @@ private:
     volatile SInt64 fSignalled;           // every number up to this one is done on the GPU
     volatile UInt32 fLastCtx;             // context of the last submit (for sync(0))
     uint64_t fSlowestAbs;               // slowest command (absolute time) and its type
-    uint32_t fSlowestType, fOver100ms;
+    uint32_t fSlowestType, fOver100ms, fAsyncFailed;
+    bool     fAsync;
     Queue fQueue[2];               // 0 control, 1 cursor
 
     IOLock *fCmdLock, *fCursorLock;        // fCmdLock: control ring and slots
     IOBufferMemoryDescriptor *fSlotMem;    // kSlots x (request | response)
     uint64_t fSlotPA;
-    struct Slot { bool busy; bool done; bool lost; bool async; uint64_t fence; } fSlot[kSlots];
+    // async: nobody waits for the reply; the drain frees the slot, passes `fence` if set and
+    // clears `*release` (the sender's "my buffer is still with the device" flag).
+    struct Slot { bool busy; bool done; bool lost; bool async; uint64_t fence;
+                  volatile UInt32 *release; } fSlot[kSlots];
     int8_t   fHeadSlot[kCtrlQueueSize];   // descriptor chain head -> slot
 
     // Interrupts: a filter on the PCI interrupt reads the ISR; completions are drained on our
@@ -137,7 +152,10 @@ private:
     // fence: give the request the next fence number as it is queued (queue order = number order)
     uint32_t command(const void *req, uint32_t reqLen, void *resp, uint32_t respLen,
                      uint64_t extraPA, uint32_t extraLen, uint64_t *fence = 0,
-                     bool async = false);   // async: queue and return; the drain frees it
+                     unsigned async = kWait, volatile UInt32 *release = 0);
+    enum { kWait = 0,          // wait for the reply
+           kAsyncFence = 1,    // queue and return; its reply passes its fence (syncAsync)
+           kAsync = 2 };       // queue and return; the reply only frees what it used
     bool cursorCommand(const void *req, uint32_t len);
     void drainControlLocked(bool fromInterrupt);
     bool setupInterrupts();

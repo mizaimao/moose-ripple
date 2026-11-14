@@ -63,7 +63,7 @@ class RippleFramebuffer : public IOFramebuffer
     bool  refresh();             // send what changed since the last frame; false if nothing
     static void refreshAction(OSObject *owner, IOTimerEventSource *sender);
     static IOReturn showAction(OSObject *owner, void *id, void *rect, void *, void *);
-    static IOReturn flushAction(OSObject *owner, void *id, void *, void *, void *);
+    static IOReturn flushAction(OSObject *owner, void *id, void *queued, void *, void *);
     static IOReturn copyAction(OSObject *owner, void *args, void *, void *, void *);
     void  showCursor();
     void  publishCapsets();     // host GPU capability sets into the registry (diagnostics)
@@ -89,7 +89,7 @@ public:
     // is on the display by then.
     uint32_t shownResource(uint32_t *format) const { *format = fShownFormat; return fShownRes; }
     void setShownFormat(uint32_t format) { fShownFormat = format; }
-    IOReturn flushShown(uint32_t id);
+    IOReturn flushShown(uint32_t id, bool wait = true);   // !wait: queued only
     IOReturn copyToScreen(IOMemoryDescriptor *src, uint32_t rowBytes, int32_t ox, int32_t oy,
                           const IOAccelBounds *rects, uint32_t count);
 

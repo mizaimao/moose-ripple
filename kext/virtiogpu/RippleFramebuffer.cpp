@@ -629,19 +629,22 @@ IOReturn RippleFramebuffer::showAction(OSObject *owner, void *idp, void *rectp, 
 }
 
 // The whole buffer again: QEMU reads the whole screen back at a flush in any case.
-IOReturn RippleFramebuffer::flushAction(OSObject *owner, void *idp, void *, void *, void *)
+IOReturn RippleFramebuffer::flushAction(OSObject *owner, void *idp, void *queued, void *, void *)
 {
     RippleFramebuffer *fb = (RippleFramebuffer *)owner;
     uint32_t id = (uint32_t)(uintptr_t)idp;
 
     if (!id || fb->fShownRes != id)
         return kIOReturnNotReady;
-    return fb->fDev->resourceFlush(id, fb->fShownRect) ? kIOReturnSuccess : kIOReturnError;
+    bool ok = queued ? fb->fDev->resourceFlushAsync(id, fb->fShownRect)
+                     : fb->fDev->resourceFlush(id, fb->fShownRect);
+    return ok ? kIOReturnSuccess : kIOReturnError;
 }
 
-IOReturn RippleFramebuffer::flushShown(uint32_t id)
+IOReturn RippleFramebuffer::flushShown(uint32_t id, bool wait)
 {
-    return getWorkLoop()->runAction(&RippleFramebuffer::flushAction, this, (void *)(uintptr_t)id);
+    return getWorkLoop()->runAction(&RippleFramebuffer::flushAction, this, (void *)(uintptr_t)id,
+                                    (void *)(uintptr_t)(wait ? 0 : 1));
 }
 
 IOReturn RippleFramebuffer::showResource(uint32_t id, uint32_t x, uint32_t y, uint32_t width,
