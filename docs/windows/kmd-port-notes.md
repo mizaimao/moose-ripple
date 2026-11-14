@@ -79,3 +79,60 @@ Proposed, to be settled with the toolchain work before anything lands:
     windows/mesa/       patches and build files for Mesa's Windows parts (as gldriver/mesa)
     windows/package/    INF, test-signing and install scripts
     third_party/        upstream notices, as on the Mac side
+
+## The port so far (2026-11-14)
+
+What was changed to get from the Windows 10 driver to one that builds for Windows 7 and can
+be tried, in the order of the commits under `windows/kmd`:
+
+- **Builds on Linux** against the Windows 7 kit (`windows/kmd/build.sh`): clang in cl mode,
+  the newer annotations defined away (`compat/sal2.h`), two newer kernel names mapped
+  (`compat/win7.h`), the port and control-register intrinsics as real functions
+  (`compat/intrinsics.c`).
+- **The PCI glue written anew** (`common/ripple_pci.cpp`): the one file of the import with a
+  GPL header was left out.
+- **The model 1.2 and 1.3 parts removed** as listed above; registers as
+  `DXGKDDI_INTERFACE_VERSION_WIN7`.
+- **Messages on the first serial port** in the default build (`DEBUG`, `LEVEL`), which the
+  test VM writes to a file on its host. No kernel debugger needed so far.
+- **Drawing without the compositor reaches the screen.** The driver showed a surface only at
+  a flip. Windows 7 without its compositor never flips: it draws into a surface of its own
+  and copies the changed pieces to the surface on screen (`DxgkDdiPresent` with `Blt`). Such
+  a copy is now followed by a note of what changed (`VIOGPU_CMD_SCREEN_CHANGED`), and the
+  flip thread has the host show that part (`RESOURCE_FLUSH`). This answers open point 1: the
+  surface Windows draws into is an ordinary allocation whose pages the host reads
+  (`TRANSFER_TO_HOST_3D`) before the copy; the Windows 10 driver had that already.
+- **`DxgkDdiResetDevice` resets the virtio device**, which makes QEMU show the VGA side of
+  the device again, for crash screens.
+- **Both driver threads stop with the device**, also when Windows removes a device without
+  stopping it (it does so when the start fails).
+- **A completion event for user mode** (`VIOGPU_CMD_SIGNAL_EVENT`): the user-mode driver names
+  an event in its command buffer, the kernel driver sets it when the buffer has run on the
+  host. Windows 8 has a system way for that, Windows 7 has not.
+- **Sizes checked in `Render`**: the command buffer and the patch list from user mode were
+  copied without looking at the room; the DMA buffer is 320 KB now, enough for a full
+  user-mode buffer.
+
+Found while reading, not changed yet: the command object is created in `Present` and
+`Render` and found again at `SubmitCommand` through a pointer in the DMA buffer's private
+data. That only holds while every buffer is submitted exactly once, which is why the INF
+turns preemption off. Open point 3 stands.
+
+## Load tests
+
+Test VM, snapshot before each run, driver test-signed, installed over the Standard VGA
+adapter with `devcon update` (the INF needs `FeatureScore`, or Windows 7's display class
+installer refuses it as not for this Windows).
+
+1. **First build:** the driver loads, sets up the virtio queues, reads the host's capability
+   sets (virgl and virgl2 are there), the EDID and the mode list; `DxgkDdiStartDevice`
+   returns success; Windows removes the device at once. Bug check 0xCE a little later: the
+   flip thread was still running in the unloaded driver (fixed, see above).
+2. **Every call logged:** after `DxgkDdiStartDevice` Windows calls
+   `DxgkDdiQueryChildRelations`, then `DxgkDdiStopDevice`, `DxgkDdiRemoveDevice` and unloads
+   the driver. No `DxgkDdiQueryAdapterInfo`, no child status, no power call. So Windows 7
+   gives up between reading the description of the monitor connector and its next question.
+   First suspect: the Windows 10 driver describes the VGA device's output as a built-in
+   panel that is always connected (`HpdAwarenessAlwaysConnected`, `D3DKMDT_VOT_INTERNAL`);
+   the next build describes an ordinary connector that reports plugging
+   (`HpdAwarenessInterruptible`, `D3DKMDT_VOT_HD15`).

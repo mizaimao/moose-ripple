@@ -1,8 +1,11 @@
 # windows/kmd: the kernel driver
 
 The kernel half of the Windows display driver for QEMU's virtio-gpu device (see
-`docs/windows/feasibility.md`, milestone W1). **Not built or working yet.** This folder
-starts as an unchanged copy of other people's work and is changed from there.
+`docs/windows/feasibility.md`, milestone W1). **Not working yet:** it builds for Windows 7 x64
+(`build.sh`, on Linux with clang and the Windows 7 kit's headers), loads and talks to the
+device, and Windows 7 does not keep it started so far (`docs/windows/kmd-port-notes.md`, "Load
+tests"). This folder started as an unchanged copy of other people's work and is changed from
+there.
 
 ## Where the code comes from
 
@@ -22,7 +25,7 @@ Studio project files, the WDF variant of the virtio library, and the helper prog
 One file is left out: `common/viogpu_pci.cpp` (the driver's glue between the virtio library
 and the PCI device). Its header says GPL version 2, also in the upstream project today,
 although that project's licence file is BSD-3-Clause. This repository takes no GPL code, so
-the file is not here and its job is written anew (`common/ripple_pci.cpp`, to come). Every
+the file is not here and its job is written anew (`common/ripple_pci.cpp`). Every
 other file was checked for its licence header: BSD-3-Clause text, or none (covered by the
 licence file).
 
