@@ -195,8 +195,11 @@ translucent menu bar, and gl-gears runs at about 55 frames/s even under emulatio
 Racing 2 run too: the game is playable, with its menu at 57 frames/s and a race at about 25-30, where the emulated CPU is the limit. This GPU path has no S3TC texture compression, so
 textures in it are decoded on the CPU when an app loads them. The renderer
 shows up as `Intel virgl OpenGL Engine`: UTM doesn't pass on the GPU's name, and Core Image only
-uses the GPU for renderer names it knows. Add `ripple_hwcursor=1` to the boot flags (step 4):
+uses the GPU for renderer names it knows. Install with `sudo sh install.sh --hwcursor` (step 4):
 with Quartz Extreme on, UTM shows the pointer only as a hardware cursor.
+
+The first boots are slow under emulation: Spotlight indexes the disk (`mds` and `mdworker`, about
+145% CPU) and the kext cache is rebuilt. In a test VM, `sudo mdutil -a -i off` stops the indexing.
 
 ### Why these settings
 
@@ -244,8 +247,8 @@ for the panic report to be saved; the cause isn't known, and the ten others were
 - If 10.6.8 isn't installed yet: start the 10.6.3 retail DVD through OpenCore, install, then
   apply the 10.6.8 combo update. Until moose-ripple is in, the virgl card works as a plain
   display (Apple's boot framebuffer, no acceleration).
-- Turn sleep off, because 10.6.8 in QEMU panics when it goes to sleep with more than one CPU:
-  `sudo pmset -a sleep 0 displaysleep 0 disksleep 0`.
+- Sleep has to stay off, because 10.6.8 in QEMU panics when it goes to sleep with more than one
+  CPU. `install.sh` turns it off; by hand: `sudo pmset -a sleep 0 displaysleep 0 disksleep 0`.
 - Take a snapshot of the VM.
 
 ## 4. Install the files in the guest
@@ -257,7 +260,7 @@ With the release disk the files are already there, on the RIPPLE volume. With th
 
 ```
 cd /Volumes/RIPPLE
-sudo sh install.sh               # or: sudo sh install.sh --no-tablet
+sudo sh install.sh               # options: --no-tablet, --hwcursor (UTM), --logs
 sudo reboot
 ```
 
@@ -272,8 +275,14 @@ doesn't match. Otherwise it does what you would do by hand:
    loadable").
 4. Rebuilds the kext cache with `kextcache -system-mkext`, run from `/` (from a folder on a CD
    it fails with "Couldn't lock").
-5. Adds `npci=0x2000 ripple_gl=1 ripple_qe=1` to the boot flags with `nvram boot-args`,
-   keeping the flags already there.
+5. Turns sleep off (`pmset -a sleep 0 displaysleep 0 disksleep 0`).
+6. Adds `npci=0x2000 ripple_gl=1 ripple_qe=1` to the boot flags with `nvram boot-args`,
+   keeping the flags already there except `-s` (left over from single-user mode, it would make
+   every boot single-user).
+
+Its options: `--no-tablet` leaves out `RippleQEMUTablet.kext`; `--hwcursor` adds
+`ripple_hwcursor=1`; `--logs` creates `/Library/Logs/RippleGL`, where the GL driver then writes a
+log for every program that uses it (remove the folder to stop them).
 
 The boot flags:
 
@@ -302,6 +311,23 @@ sudo /usr/libexec/PlistBuddy -c 'Add :"Kernel Flags" string "npci=0x2000 -v ripp
 `ripple_gl=1 ripple_qe=1` at Chameleon's boot prompt instead. `uninstall.sh` doesn't change that
 file; take the `ripple_` flags out of it yourself after uninstalling.
 
+### Before the first boot (single-user mode)
+
+To install before Snow Leopard's first start, for example on a freshly installed disk, start it
+in single-user mode (Cmd+S in OpenCore's menu) and mount the RIPPLE volume by hand:
+
+```
+/sbin/mount -uw /
+kextload /System/Library/Extensions/msdosfs.kext
+mkdir -p /Volumes/RIPPLE && mount_msdos /dev/diskNs2 /Volumes/RIPPLE
+sh /Volumes/RIPPLE/install.sh
+reboot
+```
+
+The RIPPLE volume's disk number (`N`) depends on how many drives the VM has; `ls /dev/disk*`
+shows them, and the release disk is the one with two partitions. If `pmset` can't turn sleep
+off in single-user mode, `install.sh` says so; run it again after the first start.
+
 ## 5. Check that it works
 
 - The menu bar is translucent. Press F12 and drag a widget out of the widget bar: the water
@@ -328,3 +354,14 @@ boot flags (`npci=0x2000` stays). If the VM doesn't reach the desktop, go back t
 or start it in single-user mode (Cmd+S in OpenCore's menu, or `-s` at Chameleon's prompt) and run `/sbin/mount -uw /`,
 `rm -rf /System/Library/Extensions/Ripple*` and `reboot`.
 
+## Troubleshooting
+
+- **ssh into the guest:** 10.6 ships OpenSSH 5.2, which knows only SHA-1 RSA signatures. Use an
+  RSA key, and on a current client add `-o PubkeyAcceptedAlgorithms=+ssh-rsa -o
+  HostKeyAlgorithms=+ssh-rsa`.
+- **A serial console in single-user mode:** there is no serial device until
+  `kextload /System/Library/Extensions/Apple16X50Serial.kext/Contents/PlugIns/Apple16X50ACPI.kext`;
+  after that, `command > /dev/cu.serial1` reaches the VM's serial port (in UTM, its serial pty).
+  Don't add `serial=3` to the boot flags under UTM: 10.6.8 then hangs early in the boot.
+- **GL driver logs:** `sudo sh install.sh --logs`, or create `/Library/Logs/RippleGL` (mode 1777)
+  yourself; each program that uses OpenGL then writes `PROGRAM-PID.log` there.

@@ -4,11 +4,12 @@
  *
  * Timing: Core Audio places its writes from the engine's timestamps, one per pass over the
  * ring. The engine reads the ring a period at a time when the device returns a TX slot, and
- * takes the timestamp when that read wraps to frame 0. The first reads of a run come one or
- * more periods after the start timestamp (the device first plays kPrimeSlots periods of
- * silence), so the reads trail Core Audio's idea of the position: the data has been written
- * by the time it's read, and the erase head, which clears frames behind getCurrentSampleFrame(),
- * only clears frames already read.
+ * takes a timestamp each time a read passes frame 0. Loop 0 is stamped at the start, and the
+ * first read (after the device's start burst, see txDone) begins at the frame that matches the
+ * time since then, so the reads follow Core Audio's idea of the position from the first one.
+ * Core Audio writes kPrimeSlots periods ahead of it (setSampleOffset), so the data has been
+ * written by the time it's read, and the erase head, which clears frames behind
+ * getCurrentSampleFrame(), only clears frames already read.
  */
 #include "RippleVirtioSoundEngine.h"
 #include "RippleVirtioSound.h"
@@ -21,6 +22,13 @@
 #include <IOKit/audio/IOAudioDefines.h>
 
 #include <linux/virtio_snd.h>
+
+#include "RippleVirtioSoundTrace.h"
+
+#ifdef RIPPLE_SND_TRACE
+RippleSndEvent  gRippleSndTrace[kRippleSndTraceLen];
+volatile SInt32 gRippleSndTraceN;
+#endif
 
 #define super IOAudioEngine
 OSDefineMetaClassAndStructors(RippleVirtioSoundEngine, IOAudioEngine)
@@ -54,6 +62,7 @@ bool RippleVirtioSoundEngine::initHardware(IOService *provider)
     setSampleOffset(kPrimeSlots * kPeriodFrames);
     setOutputSampleLatency(kPrimeSlots * kPeriodFrames);
     nanoseconds_to_absolutetime(kPeriodFrames * 1000000000ULL / 48000 / 2, &fHalfPeriodAbs);
+    nanoseconds_to_absolutetime(kRingFrames * 1000000000ULL / 48000, &fLoopNominal);
     setDescription("Virtio Sound");
 
     fRingBytes = kRingFrames * kBytesPerFrame;
@@ -127,17 +136,58 @@ IOReturn RippleVirtioSoundEngine::muteChanged(OSObject *target, IOAudioControl *
 // ---- Running ------------------------------------------------------------------------------------
 
 // Copy the next period of the ring into a slot and give it to the device. Work loop thread.
-void RippleVirtioSoundEngine::submit(unsigned slot)
+// A read need not start on a period boundary (see txDone), so it may cross the ring's end.
+// Each pass over the ring gets a timestamp near the time frame 0 is read (smoothed, below),
+// taken once that time has passed.
+void RippleVirtioSoundEngine::submit(unsigned slot, uint64_t now)
 {
-    UInt32 frame = fNextFrame;
-    if (frame == 0) {
-        if (fAnchorRead)
-            fAnchorRead = false;        // the anchoring read itself (loop 0 stamped in txDone)
-        else
-            takeTimeStamp();            // the read is back at the ring's start: one loop done
+    if (fWrapPending && now >= fWrapTime) {
+        fWrapPending = false;
+        takeTimeStamp(true, (AbsoluteTime *)&fWrapTime);
+        fLastStamp = fWrapTime;
+        SND_TRACE(kTrWrap, 0, status ? status->fCurrentLoopCount : 0,
+                  (uint32_t)(int32_t)(fWrapErr / 1000),
+                  (uint32_t)((fWrapTime - fStartTime) / 1000));
     }
-    memcpy(fDevice->txData(slot), fRing + frame * kBytesPerFrame, kPeriodBytes);
-    fNextFrame = (frame + kPeriodFrames) % kRingFrames;
+    UInt32 frame = fNextFrame;
+    UInt32 first = kRingFrames - frame;
+    if (first > kPeriodFrames)
+        first = kPeriodFrames;
+    SND_TRACE(kTrRead, 0, slot, frame, 0);
+    UInt8 *dst = (UInt8 *)fDevice->txData(slot);
+    memcpy(dst, fRing + frame * kBytesPerFrame, first * kBytesPerFrame);
+    if (first < kPeriodFrames)
+        memcpy(dst + first * kBytesPerFrame, fRing, (kPeriodFrames - first) * kBytesPerFrame);
+    UInt32 next = frame + kPeriodFrames;
+    if (next >= kRingFrames) {
+        next -= kRingFrames;
+        // When frame 0 is read, counting from this read's own time. Under emulation that time
+        // jitters by up to about 15 ms (a ring pass measured 143 to 195 ms in UTM, 2026-11-14),
+        // and Core Audio answers a pass that looks several percent long by jumping its timeline,
+        // writing about 11 ms of silence. So the timestamp follows the measured time through a
+        // small phase-locked loop: it moves an eighth of the way from the predicted time to the
+        // measured one, and the predicted pass length an eighth of that. A big error (a stall)
+        // is followed at once.
+        uint64_t d;
+        nanoseconds_to_absolutetime((uint64_t)(kRingFrames - frame) * 1000000000ULL / 48000, &d);
+        uint64_t measured = now + d;
+        uint64_t predicted = fLastStamp + fLoopAbs;
+        int64_t err = (int64_t)(measured - predicted);
+        int64_t limit = (int64_t)(fLoopNominal / 4);
+        if (err > limit || err < -limit) {
+            fWrapTime = measured;
+        } else {
+            fWrapTime = predicted + err / 8;
+            fLoopAbs += err / 64;
+            if (fLoopAbs > fLoopNominal + fLoopNominal / 100)
+                fLoopAbs = fLoopNominal + fLoopNominal / 100;
+            else if (fLoopAbs < fLoopNominal - fLoopNominal / 100)
+                fLoopAbs = fLoopNominal - fLoopNominal / 100;
+        }
+        fWrapErr = err;
+        fWrapPending = true;
+    }
+    fNextFrame = next;
     if (!fDevice->txSubmit(slot, kPeriodBytes))
         LOG("TX submit failed (slot %u)", slot);
 }
@@ -149,27 +199,43 @@ void RippleVirtioSoundEngine::txDone(unsigned slot)
     // At the start QEMU takes several slots at once to fill its own buffer. Reading the ring
     // during that burst would make the first loop look short, and Core Audio would later jump
     // its timeline to correct it (a click, 'clipIfNecessary ... adjusting' in the kernel log).
-    // So the burst gets silence, and the ring is first read, and loop 0 anchored, at the first
-    // completion that comes at the device's own pace.
+    // So the burst gets silence, and the ring is first read at the first completion that comes
+    // at the device's own pace, from the frame that matches the time since the start timestamp.
+    // Loop 0 keeps that start timestamp: moving it to the first read made Core Audio re-sync
+    // and write about 100 frames of silence 10 ms into every sound (measured 2026-11-14).
     uint64_t now = mach_absolute_time();
     if (!fReading) {
         bool paced = fLastDone && now - fLastDone > fHalfPeriodAbs;
         fLastDone = now;
         if (!paced) {
+            SND_TRACE(kTrBurst, 0, slot, 0, 0);
             bzero(fDevice->txData(slot), kPeriodBytes);
             fDevice->txSubmit(slot, kPeriodBytes);
             return;
         }
         fReading = true;
-        fAnchorRead = true;
-        fNextFrame = 0;
-        takeTimeStamp(false, (AbsoluteTime *)&now);
+        uint64_t ns;
+        absolutetime_to_nanoseconds(now - fStartTime, &ns);
+        uint64_t frame = ns * 48000 / 1000000000ULL;
+        if (frame >= kRingFrames) {
+            // The device took longer than a ring to settle: start loop 0 over from here.
+            LOG("first paced completion after %llu us, loop 0 restarted", ns / 1000);
+            takeTimeStamp(false, (AbsoluteTime *)&now);
+            fLastStamp = now;
+            frame = 0;
+        }
+        fNextFrame = (UInt32)frame;
+        SND_TRACE(kTrAnchor, 0, slot, (uint32_t)frame, 0);
     }
-    submit(slot);
+    submit(slot, now);
 }
 
 IOReturn RippleVirtioSoundEngine::performAudioEngineStart()
 {
+#ifdef RIPPLE_SND_TRACE
+    gRippleSndTraceN = 0;
+#endif
+    SND_TRACE(kTrStart, 0, 0, 0, 0);
     fDevice->drainTx();
     if (fDevice->txInFlight())
         LOG("start with %u TX slots still at the device", fDevice->txInFlight());
@@ -181,7 +247,9 @@ IOReturn RippleVirtioSoundEngine::performAudioEngineStart()
     }
     fNextFrame = 0;
     fReading = false;
+    fWrapPending = false;
     fLastDone = 0;
+    bzero(fRing, fRingBytes);        // no samples left over from the last run
     fRunning = true;
     // Silence first: the device always holds kPrimeSlots periods, and every returned slot is
     // refilled from the ring.
@@ -189,12 +257,16 @@ IOReturn RippleVirtioSoundEngine::performAudioEngineStart()
         bzero(fDevice->txData(s), kPeriodBytes);
         fDevice->txSubmit(s, kPeriodBytes);
     }
-    takeTimeStamp(false);
+    fStartTime = mach_absolute_time();
+    takeTimeStamp(false, (AbsoluteTime *)&fStartTime);
+    fLastStamp = fStartTime;
+    fLoopAbs = fLoopNominal;
     if (!fDevice->pcmCommand(VIRTIO_SND_R_PCM_START)) {
         fRunning = false;
         LOG("PCM_START failed");
         return kIOReturnError;
     }
+    SND_TRACE(kTrRun, 0, fDevice->txInFlight(), 0, 0);
     return kIOReturnSuccess;
 }
 
@@ -204,6 +276,17 @@ IOReturn RippleVirtioSoundEngine::performAudioEngineStop()
     fDevice->pcmCommand(VIRTIO_SND_R_PCM_STOP);
     fDevice->pcmCommand(VIRTIO_SND_R_PCM_RELEASE);  // the device hands back what it still holds
     fDevice->drainTx();
+#ifdef RIPPLE_SND_TRACE
+    SND_TRACE(kTrStop, 0, 0, 0, 0);
+    SInt32 n = gRippleSndTraceN;
+    if (n > kRippleSndTraceLen)
+        n = kRippleSndTraceLen;
+    OSData *d = OSData::withBytes(gRippleSndTrace, n * sizeof(RippleSndEvent));
+    if (d) {
+        setProperty("RippleSndTrace", d);
+        d->release();
+    }
+#endif
     return kIOReturnSuccess;
 }
 
