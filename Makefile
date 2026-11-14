@@ -195,6 +195,29 @@ virtiogpu: $(OUT)/RippleVirtioGPU.kext
 $(OUT)/RippleVirtioGPU.kext: $(OUT)/x86_64/RippleVirtioGPU kext/virtiogpu/Info.plist
 	$(call make_kext,RippleVirtioGPU,kext/virtiogpu/Info.plist,x86_64)
 
+# --- RippleVirtioSound (virtio-sound audio driver, #35) ----------------------------------
+# Its own copy of the virtqueue code. The clip routine (float mix to S16) is built without
+# -msoft-float, like the clip routines of Apple's audio drivers; the rest of the kext has no floats.
+.PHONY: virtiosound
+VSND_INC := -Ithird_party/virtio -Ikext/virtiosound
+VSND_OBJ  = $(OUT)/x86_64/virtiosound/RippleVirtioSound.o $(OUT)/x86_64/virtiosound/RippleVirtioSoundEngine.o \
+            $(OUT)/x86_64/virtiosound/RippleVirtioSoundClip.o $(OUT)/x86_64/virtiosound/virtqueue.o \
+            $(OUT)/x86_64/virtiosound/info.o
+$(OUT)/x86_64/virtiosound/RippleVirtioSoundClip.o: kext/virtiosound/RippleVirtioSoundClip.cpp kext/virtiosound/*.h
+	@mkdir -p $(dir $@)
+	$(CXX) $(call target,x86_64) $(filter-out -msoft-float,$(KCXXFLAGS)) $(VSND_INC) -c $< -o $@
+$(OUT)/x86_64/virtiosound/%.o: kext/virtiosound/%.cpp kext/virtiosound/*.h
+	@mkdir -p $(dir $@)
+	$(CXX) $(call target,x86_64) $(KCXXFLAGS) $(VSND_INC) -c $< -o $@
+$(OUT)/x86_64/virtiosound/%.o: kext/virtiosound/%.c kext/virtiosound/*.h
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,x86_64) $(KCFLAGS) $(VSND_INC) -c $< -o $@
+$(OUT)/x86_64/RippleVirtioSound: $(VSND_OBJ)
+	$(call linkxx_x86_64,$@,$^)
+virtiosound: $(OUT)/RippleVirtioSound.kext
+$(OUT)/RippleVirtioSound.kext: $(OUT)/x86_64/RippleVirtioSound kext/virtiosound/Info.plist
+	$(call make_kext,RippleVirtioSound,kext/virtiosound/Info.plist,x86_64)
+
 # --- ptrpos (userspace tool) -------------------------------------------------------------
 $(OUT)/%/ptrpos/ptrpos.o: tools/ptrpos/ptrpos.c
 	@mkdir -p $(dir $@)
