@@ -6,6 +6,7 @@
 
 #include <IOKit/IOLib.h>
 #include <kern/clock.h>
+#include <pexpert/pexpert.h>
 
 #include <linux/virtio_config.h>
 #include <linux/virtio_pci.h>
@@ -206,6 +207,8 @@ bool VirtioGPUDevice::init(IOPCIDevice *pci)
     fPCI->setBusMasterEnable(true);
 
     fCmdLock = IOLockAlloc();
+    uint32_t arg = 0;
+    fAsync = PE_parse_boot_argn("ripple_async", &arg, sizeof(arg)) && arg != 0;
     fCursorLock = IOLockAlloc();
     fSlotMem = contiguous(kSlots * (kSlotReq + kSlotResp));
     for (int i = 0; i < kCtrlQueueSize; i++)
@@ -253,7 +256,8 @@ void VirtioGPUDevice::free()
 // ---- Control queue --------------------------------------------------------------------------
 
 uint32_t VirtioGPUDevice::command(const void *req, uint32_t reqLen, void *resp, uint32_t respLen,
-                                  uint64_t extraPA, uint32_t extraLen, uint64_t *fence, bool async)
+                                  uint64_t extraPA, uint32_t extraLen, uint64_t *fence,
+                                  unsigned async, volatile UInt32 *release)
 {
     if (reqLen > kSlotReq || respLen > kSlotResp)
         return 0;
@@ -316,7 +320,10 @@ uint32_t VirtioGPUDevice::command(const void *req, uint32_t reqLen, void *resp, 
         // Nobody waits: the drain frees the slot when the reply comes (and, for a fenced
         // command, passes its fence then).
         fSlot[s].async = true;
-        fSlot[s].fence = fence ? *fence : 0;
+        fSlot[s].fence = (async == kAsyncFence && fence) ? *fence : 0;
+        fSlot[s].release = release;
+        if (release)
+            *release = 1;
         *q.notify = q.index;
         IOLockUnlock(fCmdLock);
         return VIRTIO_GPU_RESP_OK_NODATA;
@@ -371,8 +378,17 @@ void VirtioGPUDevice::drainControlLocked(bool fromInterrupt)
             IOLockWakeup(fCmdLock, fSlot, false);   // anyone waiting for a free slot
             continue;
         }
-        if (fSlot[s].async) {                   // syncAsync(): its fence has retired
-            for (;;) {
+        if (fSlot[s].async) {                   // nobody waits for this one
+            const struct virtio_gpu_ctrl_hdr *r = (const struct virtio_gpu_ctrl_hdr *)
+                ((uint8_t *)fSlotMem->getBytesNoCopy() + s * (kSlotReq + kSlotResp) + kSlotReq);
+            if (r->type != VIRTIO_GPU_RESP_OK_NODATA && fAsyncFailed++ < 20)
+                LOG("queued command failed: 0x%x", r->type);
+            if (fSlot[s].release) {             // the sender's buffer is its own again
+                *fSlot[s].release = 0;
+                IOLockWakeup(fCmdLock, (void *)fSlot[s].release, false);
+                fSlot[s].release = 0;
+            }
+            for (; fSlot[s].fence;) {           // syncAsync(): its fence has retired
                 SInt64 old = fSignalled;
                 if (old >= (SInt64)fSlot[s].fence ||
                     OSCompareAndSwap64((UInt64)old, fSlot[s].fence, (volatile UInt64 *)&fSignalled))
@@ -530,6 +546,18 @@ bool VirtioGPUDevice::resourceFlush(uint32_t id, const Rect &r)
     return simple(&c, sizeof(c));
 }
 
+bool VirtioGPUDevice::resourceFlushAsync(uint32_t id, const Rect &r)
+{
+    struct virtio_gpu_resource_flush c;
+    struct virtio_gpu_ctrl_hdr resp;
+    bzero(&c, sizeof(c));
+    c.hdr.type = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
+    c.r.x = r.x; c.r.y = r.y; c.r.width = r.width; c.r.height = r.height;
+    c.resource_id = id;
+    return command(&c, sizeof(c), &resp, sizeof(resp), 0, 0, 0, kAsync) ==
+           VIRTIO_GPU_RESP_OK_NODATA;
+}
+
 // ---- Cursor queue ---------------------------------------------------------------------------
 
 bool VirtioGPUDevice::cursorCommand(const void *req, uint32_t len)
@@ -619,27 +647,54 @@ bool VirtioGPUDevice::setupInterrupts()
 
 // Primary interrupt context: reading the ISR acknowledges our interrupt; 0 means not ours
 // (the line may be shared).
-bool VirtioGPUDevice::interruptFilter(OSObject *owner, IOFilterInterruptEventSource *)
+// The device's interrupt line is level-triggered, and in QEMU's Q35 machine every PCI interrupt
+// line also drives one of the old PC interrupts (10 or 11), which 10.6 has switched on for
+// other devices (the USB controllers and more). IOKit's usual way with a level interrupt is to
+// mask our line when the filter returns true and unmask it after the action has run on the work
+// loop. If the device raised its line again in between (the next command finishing), our
+// masked line stayed quiet but interrupt 10 fired without end: its handlers found nothing to
+// do, nobody could quiet the device, and the CPU that takes interrupts ran nothing else, some
+// 10000 interrupts in 0.2 s, until KVM held the interrupt back for a moment. That was the
+// "0.17 s stall" (docs/re/perf-notes.md).
+// So our line is never masked: the filter quiets the device itself and schedules the action
+// with signalInterrupt(), which IOKit provides for exactly this, and returns false.
+bool VirtioGPUDevice::interruptFilter(OSObject *owner, IOFilterInterruptEventSource *src)
 {
     VirtioGPUDevice *d = (VirtioGPUDevice *)owner;
-    uint8_t isr = rd8(d->fISR, 0);
+    uint8_t isr = rd8(d->fISR, 0);      // reading it lowers the line
     if (!isr)
         return false;
     d->fIntCount++;
-    return (isr & 1) != 0;          // bit 0: a queue was used; bit 1: config change (ignored)
+    if (!(isr & 1))                 // bit 0: a queue was used; bit 1: config change (ignored)
+        return false;
+    // No more interrupts until the action has drained the queues (it turns them on again);
+    // the second read takes back a raise that slipped in before the device saw that.
+    ripple_vq_set_interrupts(&d->fQueue[0].vq, 0);
+    ripple_vq_set_interrupts(&d->fQueue[1].vq, 0);
+    (void)rd8(d->fISR, 0);
+    src->signalInterrupt();
+    return false;
 }
 
 // Our work loop's thread: finish completed commands.
 void VirtioGPUDevice::interruptAction(OSObject *owner, IOInterruptEventSource *, int)
 {
     VirtioGPUDevice *d = (VirtioGPUDevice *)owner;
-    IOLockLock(d->fCmdLock);
-    d->drainControlLocked(true);
-    IOLockUnlock(d->fCmdLock);
-    IOLockLock(d->fCursorLock);
-    while (ripple_vq_get_used(&d->fQueue[1].vq, NULL, NULL))
-        ;
-    IOLockUnlock(d->fCursorLock);
+    // Twice: the second pass, with the device's interrupts on again, takes what finished
+    // while they were off and so raised none.
+    for (int pass = 0; pass < 2; pass++) {
+        IOLockLock(d->fCmdLock);
+        d->drainControlLocked(true);
+        IOLockUnlock(d->fCmdLock);
+        IOLockLock(d->fCursorLock);
+        while (ripple_vq_get_used(&d->fQueue[1].vq, NULL, NULL))
+            ;
+        IOLockUnlock(d->fCursorLock);
+        if (pass == 0) {
+            ripple_vq_set_interrupts(&d->fQueue[0].vq, 1);
+            ripple_vq_set_interrupts(&d->fQueue[1].vq, 1);
+        }
+    }
 }
 
 // ---- Capability sets ------------------------------------------------------------------------
@@ -776,7 +831,59 @@ bool VirtioGPUDevice::syncAsync(uint32_t ctx)
         return true;
     uint64_t id = 0;
     struct virtio_gpu_ctrl_hdr resp;
-    return command(&c, sizeof(c), &resp, sizeof(resp), 0, 0, &id, true) == VIRTIO_GPU_RESP_OK_NODATA;
+    return command(&c, sizeof(c), &resp, sizeof(resp), 0, 0, &id, kAsyncFence) ==
+           VIRTIO_GPU_RESP_OK_NODATA;
+}
+
+bool VirtioGPUDevice::submit3DAsync(uint32_t ctx, uint64_t pa, uint32_t size, uint64_t *fence,
+                                    volatile UInt32 *busy)
+{
+    struct virtio_gpu_cmd_submit c;
+    bzero(&c, sizeof(c));
+    c.hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    c.hdr.ctx_id = ctx;
+    c.size = size;
+    fLastCtx = ctx;
+    uint64_t id = 0;
+    struct virtio_gpu_ctrl_hdr resp;
+    bool ok = command(&c, sizeof(c), &resp, sizeof(resp), pa, size, &id, kAsync, busy) ==
+              VIRTIO_GPU_RESP_OK_NODATA;
+    if (fence)
+        *fence = id;
+    return ok;
+}
+
+// Wait until the device has given back what a queued command used. The interrupt's drain
+// wakes us; the polling is for a lost interrupt.
+bool VirtioGPUDevice::waitRelease(volatile UInt32 *busy)
+{
+    if (!*busy)
+        return true;
+    uint64_t t0 = mach_absolute_time(), timeout;
+    nanoseconds_to_absolutetime(5000000000ULL, &timeout);
+    IOLockLock(fCmdLock);
+    while (*busy) {
+        drainControlLocked(false);
+        if (!*busy || mach_absolute_time() - t0 > timeout)
+            break;
+        uint64_t deadline;
+        clock_interval_to_deadline(fIntEnabled ? 20 : 1, kMillisecondScale, &deadline);
+        IOLockSleepDeadline(fCmdLock, (void *)busy, deadline, THREAD_UNINT);
+    }
+    bool released = !*busy;
+    IOLockUnlock(fCmdLock);
+    return released;
+}
+
+// For a flag that is still set when its owner is freed (the host has stopped answering):
+// a late reply must not write to it.
+void VirtioGPUDevice::abandonRelease(volatile UInt32 *busy)
+{
+    IOLockLock(fCmdLock);
+    for (int i = 0; i < kSlots; i++)
+        if (fSlot[i].release == busy)
+            fSlot[i].release = 0;
+    IOLockUnlock(fCmdLock);
 }
 
 // Wait until the host GPU has finished everything queued so far. QEMU holds the reply to a

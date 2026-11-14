@@ -429,3 +429,160 @@ Apple's software rendering in the same VM (desktop and window shadow, a GL windo
 Dashboard, a covered GL window, a minimised one, a movie in QuickTime Player) show nothing
 worse; and with the test switch the same build's path was checked by eye in UTM on Apple
 silicon (no KVM): moving and covered gl-gears windows and a screen saver draw right.
+
+## A game as the test case: Real Racing 2 on three hosts (2026-11-13)
+
+The same scripted run on each host: start the game, wait for its menu, click into a quick
+race on the first track (`tools/guest-input` clicks from inside the guest), then read the 5 s
+windows of the bundle's `stats:` log lines.
+
+| Host | Menu | Race start |
+|---|---|---|
+| Proxmox, KVM, Intel UHD 630 | 55-56 frames/s | 52-58 frames/s, the game at 15-40% of a CPU |
+| UTM on an M1 Max, x86 emulation, one host thread for all four CPUs | 52-53 | 17-38, mean 26 |
+| the same with UTM's "Force Multicore" on | 58 | 24-34, mean 31 |
+| Windows 11, WSL2 with KVM, RTX 4090 through Direct3D 12 | 15 | not reached |
+
+What each host is short of:
+
+- **Proxmox:** nothing much. A profile of the game's own CPU time (dtrace `profile` probe, by
+  program counter): 62% game, 26% driver, 12% system libraries. Its render thread spent 48% of
+  its time waiting: 13% in the submit (the kernel waits for the host to run the commands), 19%
+  in the present (the same, for the copies to the screen) and 16% in the bundle's own wait for
+  the next refresh.
+- **UTM:** the emulated CPU. With the VM's four CPUs on one host thread (UTM's default for an
+  x86 guest on ARM) the scripted race start makes 17-38 frames/s, 26 on average. "Force
+  Multicore" in the VM's System settings gives each CPU its own host thread: 24-34, 31 on
+  average, the menu reached in 140 s instead of 175, and no trouble in a 25 minute run.
+  (An earlier version of this note compared it with about 12 frames/s seen the day before;
+  that was another moment of a longer race on an older build, not a like-for-like run.) UTM's documentation says QEMU
+  does not guarantee correct emulation in this mode (x86 promises a stricter memory order than
+  ARM gives). For about 15% that is not worth making it the documented setting: it is in
+  the install guide as an option.
+- **Windows 11 (WSL2):** the host's own CPU work. The game's menu settles at 15 frames/s
+  (57 on Proxmox) while the game uses 7% of a guest CPU. On the host, QEMU's main thread, the
+  one that turns our commands into Direct3D 12 calls through Mesa's d3d12 driver, is busy 76%
+  of the time, nearly all of it in its own code (3.8 s of 5 s in user mode, 0.07 s in the
+  kernel): about 50 ms of host CPU for each frame of that menu. QEMU's memory stayed flat
+  (2.5 GB) over the run, and gl-gears, with a handful of draws a frame, runs at 55 frames/s
+  there, so the cost is per draw or per upload, not per frame shown. What the thread does in
+  those 50 ms needs a profile on the host (Mesa 25.2.8, virglrenderer 1.0.0, QEMU 8.2.2).
+
+Two savings in the driver's CPU time, from the profiles (worth about a tenth of the frame rate
+where the CPU is the limit, 28 to 31 frames/s in UTM's race start):
+
+- The list of buffers a command buffer uses was looked up through a 512-slot hash that
+  collides all the time in a game with thousands of buffers; each collision walked the list
+  (14% of the driver's time, now 5%). Each buffer now remembers where it was listed last.
+- Mesa's `simple_mtx_init` went through `call_once` (no futexes on 10.6: a `pthread_once` and
+  two `pthread_setspecific` calls), and virgl makes a mutex for every buffer transfer, about
+  90 a frame in the game. Patch 0009 makes the mutex directly.
+
+### Not waiting for the host: works, but off for now (`ripple_async=1`)
+
+A submit used to return when the host had run its commands, and a present when the host had
+copied the frame: the program and the host took turns. With the boot flag `ripple_async=1`
+both are queued and the program goes on (two command buffers per connection, used in turn; a
+present waits only for the previous present's copies, so a program is never more than one
+frame ahead). On Proxmox the game's render thread then waits 17% of the time instead of 48%
+(1% in the submit, 6% in the present, 8% for the next refresh), and its menu runs at 59.4-59.8
+frames/s instead of 55-56.
+
+It is not the default because of the stall this document already describes (a thread that
+should run is not run for about 0.19 s). With the flag on it shows up several times a second
+instead of once every few seconds: gl-gears, which draws from a run loop timer, drops from 58
+to 26-45 frames/s with a 190 ms frame in every 2 s window, and Exposé from about 10 screens/s
+to 5. Samples show the program waiting in its run loop for the timer and WindowServer idle,
+so it is the wake-up that is late, not our code holding anything. The waiting in the old path
+(a kernel sleep with a 20 ms deadline and an interrupt, several times a frame) apparently kept
+the CPUs awake often enough to hide it. That stall is fixed now (next section); with the fix
+the flag no longer costs anything measured: gl-gears 58.8 frames/s, and 58.6 instead of 54.5 for a
+window WindowServer draws, Exposé and Dashboard in their usual ranges. It stays a flag until
+more programs have run with it.
+
+### The stall, found: an interrupt storm on a mirrored line (2026-11-13)
+
+`tools/timer-late` made it measurable without any drawing of its own: threads that sleep 1 ms
+at a time, and how late each sleep ends. Idle desktop: never more than 1 ms late. With gl-gears
+running: one thread at a time 190-210 ms late, a few times in 20 s, the others on time. The
+CPUs agree on the time (`tools/tsc-skew`), and Apple's CPU power management kext is not
+involved (same stalls with it moved away).
+
+KVM's own trace events on the host (`/sys/kernel/tracing/events/kvm`, nothing to install)
+showed what the first guest CPU does in those 200 ms: it takes about 10000 interrupts on one
+vector, and each time the guest only reads the status of four USB controllers and the disk
+controller and acknowledges. The cause, step by step:
+
+- In QEMU's Q35 machine a PCI device's interrupt line arrives at two inputs of the interrupt
+  controller: its own (21 for the GPU) and one of the old PC interrupts (10 or 11), because the
+  firmware leaves that old routing on. 10.6 uses input 21 for our device, and input 10 for the
+  USB and disk controllers in most boots (in some boots it gives those 16 and 17 instead, and
+  input 10 is off: then there is no stall, which is why some runs were clean).
+- Our interrupt handler was the usual IOKit pair: a filter that says "mine", then an action on
+  a work loop thread. For a level-triggered line IOKit masks the line in between.
+- If the device raised its line again in that gap (the next command finishing), input 21 was
+  masked but input 10 was not: the USB and disk handlers ran, found nothing, acknowledged, and
+  the interrupt came straight back, since only our handler can quiet the device and it was
+  waiting behind the very CPU that was busy with this.
+- After 10000 rounds KVM pauses such an interrupt for 10 ms ("delayed EOI injection", its
+  brake for interrupt storms). In that pause the work loop ran and everything went on. 10000
+  rounds of about 20 microseconds are the 0.2 s.
+
+The fix is in the kext's interrupt filter: it tells the device not to interrupt until the
+action has emptied the queues (the virtio "no interrupt" flag), reads the status register once
+more for a raise that slipped in, schedules the action itself (`signalInterrupt`) and returns
+false, so IOKit never masks our line. Measured in boots with input 10 active, same test (4
+sleepers, gl-gears):
+
+| | line 10 raised longer than 100 ms | KVM's storm brake | sleeps over 20 ms late | gl-gears |
+|---|---|---|---|---|
+| before, 18 s | 2 (201 ms) | 2 | 0-5 in a run | 58.7 frames/s, a 190 ms frame every few seconds |
+| after, 40 s | 0 (longest 4.4 ms) | 0 | 0 | 58.7 frames/s, longest frame 17-19 ms |
+
+Not specific to our device: any driver on that machine type whose handler waits with its line
+masked can be stormed the same way through the mirrored input.
+
+### Queued submits with real apps (2026-11-13, after the stall fix)
+
+The same launches with `ripple_async=1` and without, same boot conditions (interrupt input 10
+active), on the Proxmox host:
+
+| | waiting for the host (default) | queued (`ripple_async=1`) |
+|---|---|---|
+| gl-gears 800x600 | 58.7 frames/s | 58.8 |
+| gl-gears 1280x720 (WindowServer draws it: just above the Dock) | 54.5 | 58.6 |
+| Real Racing 2, menu | 55-56 | 58.4-59.7 |
+| Real Racing 2, race | 52-58 at the start | 55.6 mean over 5 minutes (38-60) |
+| Angry Birds Rio | 59.6-59.8 | 59.6-60.0 |
+| Quartz Composer, Arabesque, viewer behind the editor window | 23-36 | 35-38 |
+| Flurry screen saver | 30 (its cap) | 30 |
+| Exposé / Dashboard, screens per second | 8-13 / 11-15 | 9-14 / 11-16 |
+
+Looked at with it on: each of these apps' pictures, gl-gears moving, covered by a floating
+window, minimised and restored, and under the Dock, Dashboard with widgets, a movie in
+QuickTime Player. Five minutes of the race: no error from the host's renderer, none from the
+kext. Nothing got slower, and what was held up by waiting got faster; where an app already
+runs at the display's 60 frames/s there is nothing to gain on this host. Still to do before it
+becomes the default: the same on the UTM and Windows hosts, where the host's share of a frame
+is larger.
+
+### Where the driver's time per draw goes, and two things that do not help (2026-11-13)
+
+Real Racing 2's race on the Proxmox host, counted with dtrace over 5 s: 96 draws a frame.
+There is no single hot spot (the largest function is 7% of the driver's time). What stands
+out is uploading: of all draws, 80% upload the constant vertex attributes again (the state
+tracker's "current values"), 62% upload vertex arrays the game keeps in its own memory, and
+24% upload index arrays from its memory; each upload maps a piece of an upload buffer anew
+(44 maps a frame) and unmaps it before the draw. The host sees little of it, the transfers
+are merged into about two a frame. Trimming this is worth a few percent of the frame rate
+where the guest's CPU is the limit, not more.
+
+Mesa's threaded mode (glthread), which would move the driver's work off the program's drawing
+thread, is not available: it needs a driver whose buffer maps are safe from a second thread
+(`PIPE_CAP_MAP_UNSYNCHRONIZED_THREAD_SAFE`) and that can draw while buffers are mapped
+(`PIPE_CAP_ALLOW_MAPPED_BUFFERS_DURING_EXECUTION`). virgl has neither, `_mesa_glthread_init`
+returns at once; only iris, radeonsi, zink and asahi have them.
+
+Core Image's single filters at 480x300, re-measured after the stall fix: 1.6-12.8 ms a frame
+against 1.0-5.5 ms for Core Image's software renderer, as before; the picture comparison is
+unchanged (23 of 24 the same).

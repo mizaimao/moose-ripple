@@ -94,9 +94,16 @@ void RippleGPUClient::free(void)
 {
     if (fBuffer)
         IOFree(fBuffer, fBufferCap * sizeof(Buffer));
-    if (fCmd) {
-        fCmd->complete();
-        fCmd->release();
+    for (unsigned i = 0; i < kCmdBuffers; i++) {
+        if (!fCmd[i])
+            continue;
+        // Not while the device may still read it: a buffer it never gave back stays.
+        if (fDev && !fDev->waitRelease(&fCmdBusy[i])) {
+            fDev->abandonRelease(&fCmdBusy[i]);
+            continue;
+        }
+        fCmd[i]->complete();
+        fCmd[i]->release();
     }
     if (fLock)
         IOLockFree(fLock);
@@ -311,9 +318,9 @@ IOReturn RippleGPUClient::readInput(IOExternalMethodArguments *a, uint32_t offse
     return kIOReturnSuccess;
 }
 
-bool RippleGPUClient::ensureCommandBuffer()
+bool RippleGPUClient::ensureCommandBuffer(unsigned i)
 {
-    if (fCmd)
+    if (fCmd[i])
         return true;
     IOBufferMemoryDescriptor *cmd = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
         kernel_task, kIODirectionOut | kIOMemoryPhysicallyContiguous, kMaxCommandBytes,
@@ -324,8 +331,8 @@ bool RippleGPUClient::ensureCommandBuffer()
         cmd->release();
         return false;
     }
-    fCmd = cmd;
-    fCmdPA = cmd->getPhysicalSegment(0, NULL, kIOMemoryMapperNone);
+    fCmd[i] = cmd;
+    fCmdPA[i] = cmd->getPhysicalSegment(0, NULL, kIOMemoryMapperNone);
     return true;
 }
 
@@ -365,15 +372,29 @@ IOReturn RippleGPUClient::submit(IOExternalMethodArguments *a, uint64_t *fence)
             return r;
     }
 
-    // The device reads commands from guest memory: copy them to this connection's
-    // contiguous command buffer (made once, at the first submit).
-    if (!ensureCommandBuffer())
-        return kIOReturnNoMemory;
-    if (readInput(a, sizeof(s) + s.num_handles * 4, fCmd->getBytesNoCopy(), s.cmd_size)
+    // The device reads commands from guest memory: copy them to one of this connection's
+    // contiguous command buffers (made at first use). With ripple_async=1 the submit is
+    // queued and not waited for, so the program goes on with its next frame while the host
+    // runs this one; with both buffers at the device, wait here for the older one (the
+    // host is behind). Otherwise one buffer, and the host has run it when this returns.
+    bool async = fDev->asyncSubmits();
+    unsigned i = async ? fCmdNext : 0;
+    if (!ensureCommandBuffer(i)) {
+        i = 0;                          // no memory for a second one: take turns on the first
+        if (!ensureCommandBuffer(i))
+            return kIOReturnNoMemory;
+    }
+    if (!fDev->waitRelease(&fCmdBusy[i]))
+        return kIOReturnTimeout;
+    if (readInput(a, sizeof(s) + s.num_handles * 4, fCmd[i]->getBytesNoCopy(), s.cmd_size)
         != kIOReturnSuccess)
         return kIOReturnBadArgument;
-    return fDev->submit3D(s.context, fCmdPA, s.cmd_size, fence) ? kIOReturnSuccess
-                                                                 : kIOReturnError;
+    if (!async)
+        return fDev->submit3D(s.context, fCmdPA[i], s.cmd_size, fence) ? kIOReturnSuccess
+                                                                        : kIOReturnError;
+    fCmdNext = (i + 1) % kCmdBuffers;
+    return fDev->submit3DAsync(s.context, fCmdPA[i], s.cmd_size, fence, &fCmdBusy[i])
+        ? kIOReturnSuccess : kIOReturnError;
 }
 
 IOReturn RippleGPUClient::transfer(const struct ripple_gpu_transfer *t, uint64_t *fence)

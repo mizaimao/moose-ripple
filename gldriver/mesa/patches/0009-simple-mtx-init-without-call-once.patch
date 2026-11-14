@@ -1,0 +1,15 @@
+--- a/src/util/simple_mtx.c
++++ b/src/util/simple_mtx.c
+@@ -19,7 +19,11 @@
+    const util_once_flag flag = UTIL_ONCE_FLAG_INIT;
+    assert(type == mtx_plain);
+    mtx->flag = flag;
+-   _simple_mtx_init_with_once(mtx);
++   /* moose-ripple: a mutex being initialised has no other user yet, so it needs no call_once
++    * (on 10.6 that is a pthread_once and two pthread_setspecific calls, and virgl makes a
++    * mutex for every buffer transfer: 5% of a game's render thread). */
++   mtx_init(&mtx->mtx, mtx_plain);
++   mtx->flag.called = true;
+ }
+ 
+ void

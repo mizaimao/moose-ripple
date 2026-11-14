@@ -97,8 +97,14 @@ void RippleSurfaceClient::free(void)
 {
     releaseBacking();
     if (fCmd) {
-        fCmd->complete();
-        fCmd->release();
+        // Not while the device may still read it: a buffer it never gave back stays.
+        VirtioGPUDevice *dev = fAccel ? fAccel->framebuffer()->device() : 0;
+        if (!dev || dev->waitRelease(&fCmdBusy)) {
+            fCmd->complete();
+            fCmd->release();
+        } else {
+            dev->abandonRelease(&fCmdBusy);
+        }
         fCmd = 0;
     }
     if (fRegion)
@@ -168,6 +174,7 @@ IOReturn RippleSurfaceClient::setShape(uint32_t options, uint32_t framebuffer,
             fClientMem = md;
             fClientAddr = backing;
             fClientLength = length;
+            fBackingUnfilled = !fEverLocked;
         }
     } else {
         rowBytes = minRow;
@@ -207,6 +214,10 @@ IOReturn RippleSurfaceClient::lock(bool write, IOAccelSurfaceInformation *info)
     mach_vm_address_t addr;
     if (fClientMem) {
         addr = fClientAddr;
+        // The first lock of a new surface that came with a backing: what it covers on the
+        // screen is its contents so far, and the backing must show that (fetchScreen).
+        if (fBackingUnfilled)
+            fetchScreen();
     } else {
         uint64_t bytes = (uint64_t)fRowBytes * fBufHeight;
         if (!fOwnMem) {
@@ -227,6 +238,8 @@ IOReturn RippleSurfaceClient::lock(bool write, IOAccelSurfaceInformation *info)
             fetchFrame();               // a GPU client's window: its latest frame
     }
 
+    fBackingUnfilled = false;
+    fEverLocked = true;
     bzero(info, sizeof(*info));
     info->address[0] = addr;
     info->rowBytes = fRowBytes;
@@ -379,6 +392,8 @@ IOReturn RippleSurfaceClient::externalMethod(uint32_t selector, IOExternalMethod
                   (in[1] & kIOAccelSurfaceModeColorDepthBits) != kIOAccelSurfaceModeColorDepthBGRA32))
             r = kIOReturnUnsupported;   // 32-bit windowed surfaces only, for now
         else {
+            if (fID != (uint32_t)in[0])
+                fEverLocked = false;    // another surface from here on
             fID = (uint32_t)in[0];
             fMode = (uint32_t)in[1];
             r = kIOReturnSuccess;
@@ -567,13 +582,19 @@ uint32_t RippleSurfaceClient::blitCommand(uint32_t *c, uint32_t dst, uint32_t ds
 // each visible rectangle of the surface when it is a plain region of the screen now (not when
 // WindowServer has shaped it non-simple or scaled it: it draws the window itself then). One
 // submit in the client's context, so after everything the client has submitted, then the
-// display is flushed. Returns whether the frame went on the screen. Called with fLock held.
+// display is flushed. With ripple_async=1 nothing here waits for the host to do it: the
+// copies and the flush are queued behind the client's own commands, and the client draws
+// its next frame meanwhile. Its next present waits until the host has taken this one's
+// copies (fCmdBusy), so a client never gets more than one frame ahead of the host.
+// Returns whether the frame went on the screen. Called with fLock held.
 bool RippleSurfaceClient::pushFrame(bool toTexture, bool toScreen)
 {
     if (!fFrameHandle || !fFrameContext || !ensureCommands())
         return false;
     RippleFramebuffer *fb = fAccel->framebuffer();
     VirtioGPUDevice *dev = fb->device();
+    if (!dev->waitRelease(&fCmdBusy))
+        return false;
     uint32_t *cmd = (uint32_t *)fCmd->getBytesNoCopy(), dw = 0;
 
     if (toTexture && fTexHandle && fTexHandle != fFrameHandle &&
@@ -616,12 +637,14 @@ bool RippleSurfaceClient::pushFrame(bool toTexture, bool toScreen)
                               x0 - fOriginX, y0 - fOriginY);
         }
     }
-    if (!dw || !dev->submit3D(fFrameContext, fCmdPA, dw * 4, NULL))
+    bool async = dev->asyncSubmits();
+    if (!dw || !(async ? dev->submit3DAsync(fFrameContext, fCmdPA, dw * 4, NULL, &fCmdBusy)
+                       : dev->submit3D(fFrameContext, fCmdPA, dw * 4, NULL)))
         return false;
     if (dw == shownFrom)
         return false;                   // nothing of it on the screen
     dev->syncAsync(fFrameContext);      // push the copy out, as a DISPLAY does
-    return fb->flushShown(screen) == kIOReturnSuccess;
+    return fb->flushShown(screen, !async) == kIOReturnSuccess;
 }
 
 // The client's latest frame into another GPU buffer, top row first, in a submit of its own.
@@ -631,6 +654,8 @@ bool RippleSurfaceClient::copyFrame(uint32_t dst, uint32_t dstFormat, uint32_t d
 {
     if (!fFrameHandle || !fFrameContext || !dst || dst == fFrameHandle || !ensureCommands() ||
         !attachTo(dst, attached))
+        return false;
+    if (!fAccel->framebuffer()->device()->waitRelease(&fCmdBusy))
         return false;
     uint32_t w = fFrameWidth < dstWidth ? fFrameWidth : dstWidth;
     uint32_t h = fFrameHeight < dstHeight ? fFrameHeight : dstHeight;
@@ -677,6 +702,66 @@ void RippleSurfaceClient::fetchFrame()
             fID, fFrameWidth, fFrameHeight, fFrameFormat, fFrameHandle, fFrameContext, fBufWidth,
             fBufHeight, fStage, sent, read, m[0], m[(fBufHeight / 2) * fBufWidth + fBufWidth / 2]);
     }
+}
+
+// The screen's pixels under this surface into the client's backing, top row first. This is how
+// WindowServer takes a screenshot with Quartz Extreme on (CGXHWCaptureDesktop, CoreGraphics
+// 10.6.8): it makes a surface over the screen with a backing of its own, takes a write lock
+// in the backing, reads the backing and lets the surface go. Apple's drivers hand out the
+// surface's contents with such a lock, and for a surface that has only ever existed on the
+// screen that is what the screen shows there. Ours handed the backing back as it came, and
+// every screenshot was black. The composited screen is a GPU buffer, so: a copy on the GPU
+// into a buffer over the client's memory, then that buffer read back, in the accelerator's own
+// context. Only with a GPU buffer on the display, and only for the first lock of a new surface
+// (a backing that changes later, as in a resize, belongs to a window that draws for itself).
+// Called with fLock held.
+void RippleSurfaceClient::fetchScreen()
+{
+    RippleFramebuffer *fb = fAccel->framebuffer();
+    VirtioGPUDevice *dev = fb->device();
+    uint32_t format = 0, sw = 0, sh = 0;
+    uint32_t screen = fb->shownResource(&format);
+    fb->screenSize(&sw, &sh);
+    if (!screen || !format || !fClientMem || fRowBytes != fBufWidth * 4 || fOriginX < 0 ||
+        fOriginY < 0 || (uint32_t)fOriginX + fBufWidth > sw || (uint32_t)fOriginY + fBufHeight > sh)
+        return;
+    uint32_t ctx = fAccel->kernelContext();
+    if (!ctx || !ensureCommands() || !dev->waitRelease(&fCmdBusy))
+        return;
+    uint32_t id = dev->allocResourceId();
+    // A 2D texture, B8G8R8A8, render target and sampler view.
+    if (!dev->resourceCreate3D(id, 2, 1, (1 << 1) | (1 << 3), fBufWidth, fBufHeight, 1, 1, 0, 0, 0))
+        return;
+    bool copied = false, read = false;
+    if (dev->attachBacking(id, fClientMem, (IOByteCount)fRowBytes * fBufHeight)) {
+        if (dev->ctxAttachResource(ctx, id) && dev->ctxAttachResource(ctx, screen)) {
+            uint32_t *c = (uint32_t *)fCmd->getBytesNoCopy();
+            bzero(c, kBlitDwords * 4);
+            c[0] = 16 | ((kBlitDwords - 1) << 16);
+            c[1] = 0xf;                 // all channels, nearest, no scissor
+            c[4] = id;
+            c[6] = 1;                   // B8G8R8A8
+            c[10] = fBufWidth;
+            c[11] = fBufHeight;
+            c[12] = 1;
+            c[13] = screen;
+            c[15] = format;
+            c[16] = (uint32_t)fOriginX;
+            c[17] = (uint32_t)fOriginY;
+            c[19] = fBufWidth;
+            c[20] = fBufHeight;
+            c[21] = 1;
+            copied = dev->submit3D(ctx, fCmdPA, kBlitDwords * 4, NULL);
+            uint32_t box[6] = { 0, 0, 0, fBufWidth, fBufHeight, 1 };
+            read = copied && dev->transfer3D(false, ctx, id, 0, box, 0, 0, 0, NULL);
+            dev->ctxDetachResource(ctx, screen);
+        }
+        dev->detachBacking(id);
+    }
+    dev->resourceUnref(id);             // also drops it from the context
+    if (fAccel->qeDebug())
+        LOG("surface %u: first lock with a backing, screen %d,%d %ux%u of buffer %u (format %u) into it: copy %d, read back %d",
+            fID, fOriginX, fOriginY, fBufWidth, fBufHeight, screen, format, copied, read);
 }
 
 // ---- Description for GL drivers (RippleAccelerator::describeSurface) ----------------------
