@@ -37,19 +37,17 @@ diff -ru a/src/gallium/frontends/d3d10umd/Resource.cpp b/src/gallium/frontends/d
  
     Resource *pResource = CastResource(hResource);
  
-@@ -304,7 +311,11 @@
-       templat.bind = PIPE_BIND_SAMPLER_VIEW;
-    }
+@@ -306,6 +313,10 @@
     if ((pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED)) {
--      templat.bind |= PIPE_BIND_SHARED;
-+      templat.bind    if (pCreateResource->pPrimaryDesc) {
+       templat.bind |= PIPE_BIND_SHARED;
+    }
++   if (pCreateResource->pPrimaryDesc) {
 +      /* What the display shows; also keeps it out of the winsys's reuse cache. */
 +      templat.bind |= PIPE_BIND_DISPLAY_TARGET;
 +   }
-+|= PIPE_BIND_SHARED;
-    }
  
     if (templat.target != PIPE_BUFFER) {
+       if (!screen->is_format_supported(screen,
 diff -ru a/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c b/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
 --- a/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
 +++ b/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
