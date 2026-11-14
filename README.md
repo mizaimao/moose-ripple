@@ -112,22 +112,22 @@ pixels.
 | | Software rendering | moose-ripple | GeForce 9600 GT |
 |---|---|---|---|
 | Quartz Composer (Arabesque) | doesn't start | 60 frames/s | 58 frames/s |
-| Angry Birds Rio | doesn't start (needs OpenGL 2.0) | 59 frames/s | 60 frames/s |
-| Flurry screen saver | 29 frames/s, 66% of a CPU | 30 frames/s, 3% of a CPU | 30 frames/s, 2% of a CPU |
-| Dashboard animation, screens per second | 7.4-7.9 | 13.6-14.2 | 10.8-11.9 (1920x1080) |
-| Exposé animation, screens per second | 3.6-5.3 | 7.8-11.2 | 7.4-10.5 (1920x1080) |
+| Angry Birds Rio | doesn't start (needs OpenGL 2.0) | 59-60 frames/s | 60 frames/s |
+| Flurry screen saver | 29 frames/s, 66% of a CPU | 30 frames/s, 3-4% of a CPU | 30 frames/s, 2% of a CPU |
+| Dashboard animation, screens per second | 7.4-7.9 | 14.3-16.9 | 10.8-11.9 (1920x1080) |
+| Exposé animation, screens per second | 3.6-5.3 | 8.8-14.7 | 7.4-10.5 (1920x1080) |
 
 - Screens per second is the mean of WindowServer's own frame meter (the one in Quartz Debug),
   counted in full screens' worth of pixels.
 - Showing a frame of an app's OpenGL window takes 4-5 ms at any size up to the full screen
-  (gl-gears: 57 frames/s at 800x600, 55-58 at 1280x720). While something is drawn over the
+  (gl-gears: 59 frames/s at 800x600 and at 1280x720). While something is drawn over the
   window, WindowServer draws it and a frame costs about 7 ms more.
-- Core Image: 23 of 24 filters give the same picture as software rendering, and 55 of Photo
-  Booth's 61 effects do ("the same" means within 1-2 colour levels, or under 1% of the pixels
-  different). A single Core Image filter is slower than software rendering for now, because each
-  render makes a round trip through QEMU. The 9600 GT differs from software rendering in nearly
-  the same effects as moose-ripple does, so most of those differences come from how a GPU
-  computes them.
+- Core Image: all 24 filters tested give the same picture as software rendering, and 57 of
+  Photo Booth's 61 effects do ("the same" means within 1-2 colour levels, or under 1% of the
+  pixels different). A single Core Image filter is slower than software rendering for now,
+  because each render makes a round trip through QEMU. The four effects that differ (Concert,
+  Neon, Pinch, Pointillize) differ on the 9600 GT too, so those differences come from how a
+  GPU computes them.
 - In UTM on an Apple M1 Max the guest's Intel CPU is emulated, and that CPU is the
   limit there: gl-gears runs at about 55 frames/s and Real Racing 2's menu at 57-59, but
   a race makes about 25-30 frames/s, with the game's drawing thread using a whole emulated
@@ -144,7 +144,7 @@ Details: [docs/re/perf-notes.md](docs/re/perf-notes.md) and [docs/re/m6-notes.md
 
 - iMovie hasn't been tried yet. Photo Booth's live effects need a camera, which the test VM
   doesn't have, so the effects were tested on a still photo ([#11](https://github.com/mizaimao/moose-ripple/issues/11)).
-- Through QEMU's VNC display, a key press takes about 0.2 s to show on screen, and every extra
+- Through QEMU's VNC display, a key press takes about 0.1 s to show on screen, and every extra
   VNC viewer (another Proxmox console tab, for example) makes the picture less smooth for all
   of them ([#10](https://github.com/mizaimao/moose-ripple/issues/10)).
 - `open -a "Front Row"` starts Front Row without showing it. Start it with Cmd+Esc.
