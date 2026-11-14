@@ -1,14 +1,16 @@
 #!/bin/sh
 # moose-ripple tools/sl-disk: replaces the 10.6 DVD's rc.install (same byte length, padded) in a
 # copy of the DVD image. It installs Mac OS X unattended onto the empty disk, applies the 10.6.8
-# combo update from the attached update disk, writes the result to the small result disk and
-# powers off. The new system is never booted. The installer environment has no tail or grep:
-# only sh, awk, perl, dd and the like.
+# combo update from the attached update disk, with RIPPLE=yes (make-sl-disk.sh --ripple) installs
+# moose-ripple from the release disk, writes the result to the small result disk and powers off.
+# The new system is never booted. The installer environment has no tail or grep: only sh, awk,
+# perl, dd and the like.
 export DYLD_NO_FIX_PREBINDING=1
 [ -x /System/Installation/CDIS/preheat.sh ] && /System/Installation/CDIS/preheat.sh
 /System/Installation/CDIS/instlogd &
 L() { /usr/bin/logger -t slready -p install.warn "$*"; echo "slready: $*" >/dev/console; echo "$*" >>/var/tmp/sl.log; }
 T="/Volumes/Macintosh HD"
+RIPPLE=no
 V="$T/System/Library/CoreServices/SystemVersion.plist"
 X="/System/Installation/CDIS/Mac OS X Installer.app/Contents/MacOS/Mac OS X Installer"
 ver() { perl -0ne 'print $1 if m|ProductBuildVersion</key>\s*<string>(\w+)|' "$V" 2>/dev/null; }
@@ -50,9 +52,20 @@ touch /var/run/installer
 L "installed: $(ver)"
 [ -f "$V" ] || fin "FAIL install"
 fi
+if [ "$(ver)" != 10K549 ]; then
 C=
 for c in /Volumes/*/MacOSXUpdCombo10.6.8.pkg; do [ -e "$c" ] && C=$c; done
 [ -n "$C" ] || fin "FAIL no combo update"
 L "combo: $C"
 "$T/usr/sbin/installer" -pkg "$C" -target "$T" 2>&1 | while read -r l; do L "$l"; done
+fi
+# make-sl-disk.sh --ripple: moose-ripple from the package on the release disk's RIPPLE volume.
+case "$RIPPLE" in yes*)
+  P=; for p in /Volumes/*/install.sh; do [ -d "${p%/*}/RippleVirtioGPU.kext" ] && P=$p; done
+  [ -n "$P" ] || fin "FAIL no moose-ripple package"
+  L "moose-ripple: $P"
+  sh "$P" --target "$T" ${RIPPLE#yes} >/var/tmp/r.log 2>&1; s=$?
+  while read -r l; do L "$l"; done </var/tmp/r.log
+  [ $s = 0 ] || fin "FAIL moose-ripple"
+esac
 fin "OK $(ver)"
