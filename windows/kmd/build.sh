@@ -18,6 +18,8 @@ ARCHS=${ARCHS:-amd64}
 # DEBUG=1 (the default while the driver is being brought up): the driver's messages go to the
 # first serial port (COM1), which the test VM writes to a file on the host. DEBUG=0: no messages.
 DEBUG=${DEBUG:-1}
+# LEVEL: how much the driver says, 1 (fatal only) to 5 (every call); 3, warnings, by default.
+LEVEL=${LEVEL:-3}
 [ -d "$KIT/inc/ddk" ] || { echo "build.sh: no WDK 7.1 at $KIT (see docs/windows/toolchain.md)" >&2; exit 1; }
 mkdir -p "$OUT"
 ov=$OUT/kit-overlay.yaml
@@ -32,7 +34,7 @@ COMMON="/nologo /c /O2 /W3 /Zp8 /GS- /Gy /kernel /Gz -fms-compatibility-version=
 # (The driver's trace.h turns its own messages on; COM_DEBUG sends them to the serial port
 # instead of the kernel debugger. DBG itself is not defined: the kit's assertions do not
 # compile as C++ with clang.)
-[ "$DEBUG" = 1 ] && COMMON="$COMMON /DCOM_DEBUG"
+[ "$DEBUG" = 1 ] && COMMON="$COMMON /DCOM_DEBUG /DRIPPLE_DEBUG_LEVEL=$LEVEL"
 CXX="/GR- /EHs-c- /std:c++17"
 C_SRC="compat/intrinsics.c VirtIO/VirtIOPCICommon.c VirtIO/VirtIOPCILegacy.c VirtIO/VirtIOPCIModern.c VirtIO/VirtIORing.c VirtIO/VirtIORing-Packed.c"
 CXX_SRC="common/edid.cpp common/viogpu_idr.cpp common/ripple_pci.cpp common/viogpu_queue.cpp common/baseobj.cpp

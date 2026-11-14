@@ -59,7 +59,11 @@ void InitializeDebugPrints(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING Re
     bDebugPrint = 1;
     virtioDebugLevel = 0x5;
     bBreakAlways = 1;
+#ifdef RIPPLE_DEBUG_LEVEL
+    nDebugLevel = RIPPLE_DEBUG_LEVEL;
+#else
     nDebugLevel = TRACE_LEVEL_WARNING;
+#endif
 #if defined(COM_DEBUG)
     VirtioDebugPrintProc = DebugPrintFuncSerial;
 #elif defined(PRINT_DEBUG)
