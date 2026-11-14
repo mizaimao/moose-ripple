@@ -439,8 +439,8 @@ windows of the bundle's `stats:` log lines.
 | Host | Menu | Race start |
 |---|---|---|
 | Proxmox, KVM, Intel UHD 630 | 55-56 frames/s | 52-58 frames/s, the game at 15-40% of a CPU |
-| UTM on an M1 Max, x86 emulation, one host thread for all four CPUs | 52-53 | 17-38, mean 26 |
-| the same with UTM's "Force Multicore" on | 58 | 24-34, mean 31 |
+| UTM on an M1 Max, x86 emulation, one host thread for all four CPUs | 52-53 | 17-38 |
+| the same with UTM's "Force Multicore" on | 58 | 17-34 (no real difference: see the aligned runs further down) |
 | Windows 11, WSL2 with KVM, RTX 4090 through Direct3D 12 | 15 | not reached |
 
 What each host is short of:
@@ -451,14 +451,14 @@ What each host is short of:
   in the present (the same, for the copies to the screen) and 16% in the bundle's own wait for
   the next refresh.
 - **UTM:** the emulated CPU. With the VM's four CPUs on one host thread (UTM's default for an
-  x86 guest on ARM) the scripted race start makes 17-38 frames/s, 26 on average. "Force
-  Multicore" in the VM's System settings gives each CPU its own host thread: 24-34, 31 on
-  average, the menu reached in 140 s instead of 175, and no trouble in a 25 minute run.
+  x86 guest on ARM) the scripted race start makes 17-38 frames/s. "Force Multicore" in the VM's System
+  settings gives each CPU its own host thread, with no trouble in a 25 minute run, and with
+  no gain either once the runs were lined up window by window (below: 29.7 against 28.2
+  frames/s, the menu after 170 s against 175 s).
   (An earlier version of this note compared it with about 12 frames/s seen the day before;
   that was another moment of a longer race on an older build, not a like-for-like run.) UTM's documentation says QEMU
   does not guarantee correct emulation in this mode (x86 promises a stricter memory order than
-  ARM gives). For about 15% that is not worth making it the documented setting: it is in
-  the install guide as an option.
+  ARM gives). It is in the install guide as an option, not as the setting.
 - **Windows 11 (WSL2):** the host's own CPU work. The game's menu settles at 15 frames/s
   (57 on Proxmox) while the game uses 7% of a guest CPU. On the host, QEMU's main thread, the
   one that turns our commands into Direct3D 12 calls through Mesa's d3d12 driver, is busy 76%
@@ -586,3 +586,33 @@ returns at once; only iris, radeonsi, zink and asahi have them.
 Core Image's single filters at 480x300, re-measured after the stall fix: 1.6-12.8 ms a frame
 against 1.0-5.5 ms for Core Image's software renderer, as before; the picture comparison is
 unchanged (23 of 24 the same).
+
+### Two per-draw trims, and the UTM runs lined up (2026-11-13 evening)
+
+Two Mesa patches against what the game does on every draw:
+
+- 0010: the constant vertex attributes ("current values") are put together first and uploaded
+  only if they differ from what was uploaded last; otherwise the draw uses that buffer again.
+- 0011: virgl does not send a sampler state binding that is the one already bound. The state
+  tracker binds the samplers again whenever a texture changes, mostly the same ones.
+
+Counted on the Proxmox host over 10 s of the same race scene (388 draws a frame): buffer maps
+47 560 before, 12 516 after; sampler bindings sent 62 114 before, 12 115 after. The frame rate
+there does not move (43-49 frames/s in that scene: the guest is waiting for the host, not
+short of CPU).
+
+Under UTM the guest's CPU is the limit, and the same scripted race shows it. Each run: the 5 s
+windows from the start of the race, lined up (an earlier comparison in these notes took
+windows from different moments of the race, which made Force Multicore look like a gain):
+
+| Run (UTM, M1 Max) | frames/s in the first eight windows | mean |
+|---|---|---|
+| before the trims, Force Multicore on | 16.8 22.4 17.4 20.4 22.6 28.2 29.8 30.2 | 23.5 |
+| with the trims, Force Multicore on | 17.8 28.6 21.6 26.4 26.0 30.2 45.2 41.8 | 29.7 |
+| the same, interrupt handling from before the stall fix | 17.0 23.6 18.0 22.4 24.1 28.0 47.2 45.8 | 28.3 |
+| with the trims, Force Multicore off | 19.0 26.2 23.6 23.8 25.8 29.2 39.2 38.6 | 28.2 |
+| the same with `ripple_async=1` | 19.4 29.0 23.4 26.2 26.2 31.0 51.8 50.4 | 32.2 |
+
+So: the trims are worth about a quarter there; the stall fix costs nothing; Force Multicore
+makes no real difference (the game's menu after 170 s with it, 175 s without); queued submits
+add about a seventh. Two runs of the same setup differed by a few percent.
