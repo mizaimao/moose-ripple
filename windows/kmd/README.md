@@ -19,11 +19,12 @@ All of it was taken from the pull request's branch,
 <https://github.com/virtio-win/kvm-guest-drivers-windows/pull/943>. Not copied: the Visual
 Studio project files, the WDF variant of the virtio library, and the helper programs.
 
-One file was taken out again: `common/viogpu_pci.cpp` (the driver's glue between the virtio
-library and the PCI device). Its header still says GPL version 2, also in the upstream
-project today, although that project's licence file is BSD-3-Clause. This repository takes
-no GPL code, so the file is not used here and its job is written anew (`common/ripple_pci.cpp`,
-to come).
+One file is left out: `common/viogpu_pci.cpp` (the driver's glue between the virtio library
+and the PCI device). Its header says GPL version 2, also in the upstream project today,
+although that project's licence file is BSD-3-Clause. This repository takes no GPL code, so
+the file is not here and its job is written anew (`common/ripple_pci.cpp`, to come). Every
+other file was checked for its licence header: BSD-3-Clause text, or none (covered by the
+licence file).
 
 The copyright notices in the files and the two licence texts stay as they are. Changes made
 here are under the same licence as the file they are in; files that are new here are MIT
