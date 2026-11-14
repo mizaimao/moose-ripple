@@ -1,0 +1,42 @@
+Windows 7 build: the DDK headers for gdikmt, the virgl Windows winsys and the WGL target
+
+With MSVC the Windows SDK provides d3dkmthk.h; with MinGW it comes from include/winddk (copied
+from WDK 7.1 by windows/mesa/build-win7.sh), which libgallium (gdikmt), libvirglgdi and the WGL
+target (wgl.c includes gdikmt.h) did not have on their include path.
+
+diff -ru a/src/gallium/auxiliary/meson.build b/src/gallium/auxiliary/meson.build
+--- a/src/gallium/auxiliary/meson.build
++++ b/src/gallium/auxiliary/meson.build
+@@ -522,7 +522,8 @@
+   'gallium',
+   [files_libgallium, u_indices_gen_c, u_unfilled_gen_c],
+   include_directories : [
+-    inc_loader, inc_gallium, inc_src, inc_include, include_directories('util')
++    inc_loader, inc_gallium, inc_src, inc_include, include_directories('util'),
++    with_platform_windows ? inc_winddk : [],
+   ],
+   c_args : [c_msvc_compat_args, libgallium_extra_c_args],
+   cpp_args : [cpp_msvc_compat_args],
+diff -ru a/src/gallium/targets/wgl/meson.build b/src/gallium/targets/wgl/meson.build
+--- a/src/gallium/targets/wgl/meson.build
++++ b/src/gallium/targets/wgl/meson.build
+@@ -17,6 +17,7 @@
+   vs_module_defs : wgl_def,
+   include_directories : [
+     inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux, inc_wgl, inc_gallium_winsys, inc_gallium_winsys_sw, inc_gallium_drivers,
++    inc_winddk,
+   ],
+   link_whole : [libwgl],
+   link_with : [
+diff -ru a/src/gallium/winsys/virgl/gdi/meson.build b/src/gallium/winsys/virgl/gdi/meson.build
+--- a/src/gallium/winsys/virgl/gdi/meson.build
++++ b/src/gallium/winsys/virgl/gdi/meson.build
+@@ -21,7 +21,7 @@
+ libvirglgdi = static_library(
+   'virglgdi',
+   'virgl_gdi_winsys.c',
+-  include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux, inc_gallium_drivers, inc_virtio],
++  include_directories : [inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux, inc_gallium_drivers, inc_virtio, inc_winddk],
+   dependencies : [dep_libdrm, dep_libvirglcommon, idep_mesautil, idep_nir_headers],
+   gnu_symbol_visibility : 'hidden',
+ )

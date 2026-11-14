@@ -1,0 +1,17 @@
+Windows build: a 64-bit-clean handle cast in DxgiFns.cpp
+
+The Windows virgl changes (0003) pass the winsys handle, a pointer-sized value, to a 32-bit
+D3DKMT_HANDLE; clang rejects the direct cast in C++ on 64-bit. Cast through uintptr_t.
+
+diff -ru a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -135,7 +135,7 @@
+       return S_OK;
+    };
+ 
+-   device->device.base.setDisplayMode(&device->device.base, (D3DKMT_HANDLE)handle.handle);
++   device->device.base.setDisplayMode(&device->device.base, (D3DKMT_HANDLE)(uintptr_t)handle.handle);
+ 
+    return S_OK;
+ }

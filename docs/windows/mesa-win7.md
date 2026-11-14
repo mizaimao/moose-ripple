@@ -35,8 +35,8 @@ What had to change:
 | Compiler flags | `-Wno-error=incompatible-pointer-types` | clang 23 makes it an error; Mesa's SPIR-V code passes a `jmp_buf` to MinGW's `__builtin_setjmp` |
 | Local copy of `d3d10umddi.h` | `MAKE_##TYPE##(` becomes `MAKE_##TYPE(` | only MSVC accepts the second paste |
 | Local copy of `d3d10umddi.h` | its global `const UINT`/`const INT` constants made `static` | in C files they are duplicate symbols; with MSVC Mesa hides them by including `d3d10_1.h` first |
-| `patches/0002-x86-aligned-matrix-stack.patch` | the GL matrix stacks allocated 16-byte aligned | 32-bit only: `msvcrt.dll` aligns `calloc` to 8 bytes (below) |
-| `patches/0001-win7-wdk71-d3dkmt-and-gdi.patch` | `D3DKMTPresent` takes a const pointer; `KMTQAITYPE_XBOX`, `KMTQAITYPE_PHYSICALADAPTER*` and `D3DKMTSetVidPnSourceOwner1` left out at the Windows 7 interface version; two helpers in `d3d10_gdi.c` made `static` | WDK 7.1's headers are older than the ones Mesa is written against |
+| `patches/0011-x86-aligned-matrix-stack.patch` | the GL matrix stacks allocated 16-byte aligned | 32-bit only: `msvcrt.dll` aligns `calloc` to 8 bytes (below) |
+| `patches/0010-win7-wdk71-d3dkmt-and-gdi.patch` | `D3DKMTPresent` takes a const pointer; `KMTQAITYPE_XBOX`, `KMTQAITYPE_PHYSICALADAPTER*` and `D3DKMTSetVidPnSourceOwner1` left out at the Windows 7 interface version; two helpers in `d3d10_gdi.c` made `static` | WDK 7.1's headers are older than the ones Mesa is written against |
 
 Result, in `.tools/mesa/out-win7-x64`: `opengl32.dll` (199,680 bytes), `libgallium_wgl.dll`
 (16 MB), `libglapi.dll`, `libgallium_d3d10.dll` (8.7 MB). Their imports are only
@@ -74,7 +74,7 @@ programs (WOW64 on Windows 7 x64; there is no 32-bit Windows 7 VM):
 - OpenGL first crashed in `libgallium_wgl.dll` (access violation in `_math_matrix_ctr`, an
   aligned SSE store): the GL matrix stacks come from `calloc`/`realloc`, which `msvcrt.dll`
   aligns to 8 bytes on 32-bit Windows, while `GLmatrix` is `alignas(16)`. Patch
-  `0002-x86-aligned-matrix-stack.patch` allocates them with Mesa's `align_calloc`/
+  `0011-x86-aligned-matrix-stack.patch` allocates them with Mesa's `align_calloc`/
   `align_realloc`/`align_free`; with it the GL test draws (softpipe, OpenGL 3.3, the triangle
   red). Other `alignas(16)` structures on the plain heap could show the same on 32-bit.
 
@@ -89,3 +89,86 @@ WDK 7.1's `d3dkmthk.h` needs SAL annotations the tree no longer defines, and the
 `D3D11_1_DDI_LOGIC_OP_*`, `DXGI_DDI_ARG_PRESENT1`, `BLT1`, `OFFERRESOURCES`,
 `RECLAIMRESOURCES`, the multiplane overlay calls). The Windows side therefore stays on Mesa
 24.3.4; the fork's Direct3D 9 part (MIT) is to be carried back to it.
+
+## The virgl variant: the Mesa side of virtio-win pull request 943
+
+`VARIANT=virgl windows/mesa/build-win7.sh` builds Mesa's virgl driver for Windows 7 x64 as the
+user-mode half of a virtio-gpu display driver: `viogpu_wgl.dll` (OpenGL, through Mesa's own
+`opengl32.dll` or as the display driver's OpenGL client driver) and `viogpu_d3d10.dll`
+(Direct3D 10 and 10.1). It cannot draw until the kernel driver exists; what is checked so far is
+that it builds and loads.
+
+Source (in `windows/mesa/patches-virgl/`, applied only for this variant, in its own source tree
+`.tools/mesa/src-24.3.4-win-virgl`): the five commits by Max R on `viogpu_win` of
+`gitlab.freedesktop.org/max8rr8/mesa`
+(Mesa merge request 24223), on top of upstream 366e7e2ddc7. They apply to 24.3.4 unchanged:
+
+| Patch | What it does | Licence of what it adds |
+|---|---|---|
+| `0001-viogpu-wgl-WGL-GDI-Framebuffer-improvements` | WGL: framebuffer handling for a GDI-presenting driver | changes to MIT files |
+| `0002-viogpu-gdikmt-Introduce-gdikmt` | the build hooks and a new handle type for the kernel bridge, **without the bridge itself** (below) | changes to MIT files |
+| `0003-viogpu-d3d10umd-Viogpu-for-windows-improvements` | the Direct3D 10 driver: talks to a kernel driver through the bridge, formats, DXGI present | changes to MIT files |
+| `0004-viogpu-virgl-gdi-Introduce-virgl-winsys-for-windows` | virgl's winsys for Windows (`winsys/virgl/gdi`), and the private kernel interface header `src/virtio/wddm/viogpu_wddm_driver.h` | winsys: MIT (Red Hat header); interface header: BSD-3-Clause (Red Hat) |
+| `0005-viogpu-targets-Add-virgl-to-wgl-and-d3d10-targets` | virgl in the WGL and Direct3D 10 targets; `dxgi_framebuffer.cpp` | MIT (Microsoft header, from Mesa's d3d12 WGL code) |
+
+Scanned for GPL, LGPL and MPL text: none in any patch. Four files of commit 77e160421bd, the
+kernel bridge `gdikmt` (`auxiliary/gdikmt/gdikmt.h`, `gdikmt_d3dkmt.c`,
+`frontends/d3d10umd/gdikmt_d3dddi.cpp`, `gdikmt_d3dddi.h`), carry no licence header at all.
+Decision (2026-11-14): we write our own bridge; those four files are never committed. Until
+ours exists, the local test build takes them from a patch kept outside the repository in
+`.tools/mesa/patches-local/` (applied after the repository's patches when present).
+
+Our patches on top: `0010` and `0011` as above, `0012` (the DDK headers on the include path of
+the bridge, the virgl winsys and the WGL target: with MinGW, `d3dkmthk.h` comes from
+`include/winddk`), `0013` (a pointer-to-handle cast clang rejects on 64-bit). The build also
+leaves WDK 7.1's `dxgiformat.h` and `dxgitype.h` out of `include/winddk`, so the DXGI framebuffer
+code sees MinGW's newer ones, and has the local `d3dkmthk.h` include Mesa's `winddk_compat.h`
+(empty SAL annotations) itself.
+
+Result: `viogpu_wgl.dll` imports only `GDI32`, `KERNEL32`, `USER32`, `msvcrt` and
+`libglapi.dll`; `viogpu_d3d10.dll` only `KERNEL32` and `msvcrt`. The bridge loads the D3DKMT
+functions from `gdi32.dll` at run time, so nothing Windows 7 lacks is imported. In VM 220 both
+load with all imports resolved (`tools/win7-hello/dllload.c`); `OpenAdapter10`,
+`OpenAdapter10_2`, `DrvCreateContext`, `DrvSetPixelFormat` and `DrvValidateVersion` are there.
+
+Windows 8 and later assumptions found:
+
+- Command completion: after each submission the bridge asks the kernel to signal a CPU event
+  when the GPU is done, through `SignalSynchronizationObject2` with a CPU event (the D3DKMT
+  function from `gdi32` on the OpenGL path, the runtime's callback of the same name on the
+  Direct3D path). Both are WDDM 1.2 (Windows 8). The local test build signals the event at
+  submission instead; our bridge needs a Windows 7 way (for example a fence the kernel driver
+  reports through an escape, or Windows 7's synchronization objects).
+- Nothing else: the Direct3D driver reports the Direct3D 10.0, 10.0.x, 10.0.7 and 10.1 DDI
+  versions only, which Windows 7's runtime has.
+
+The private protocol between these DLLs and the kernel driver (escape packets for resource
+info and busy state, and the per-allocation data exchanged at allocation creation and open) is
+in `viogpu_wddm_driver.h` and must match the kernel driver (`windows/kmd`).
+
+### What the rest expects from the kernel bridge
+
+Described from how the other patches use it, for writing our own (names as the callers use
+them; nothing taken over from the four files):
+
+- A device object standing for one adapter and device in the kernel driver, with a table of
+  operations, and two ways to make one: from a window's device context (`gdikmt_create_from_hdc`,
+  used by the WGL target: open the adapter behind the HDC and create a device on it with the
+  D3DKMT functions), and from the Direct3D runtime (`gdikmt_d3dddi_fill_basefuncs`, used when
+  the Direct3D driver creates its device: the same operations, carried out through the runtime's
+  device callbacks and handle; the Direct3D device keeps this bridge device in its own state as
+  `gdikmt_device_d3dddi`).
+- Device operations the virgl winsys calls: query adapter information (driver-private data),
+  escape (driver-private packets), create allocations for a resource (in: count, per-allocation
+  info, resource-level private data; out: resource handle), destroy them, open shared
+  allocations from a global handle (in: handle, count, per-allocation open info, private data;
+  plus a buffer for all private data), query a shared allocation, lock an allocation for CPU
+  access, create a context, present, destroy; the Direct3D side also uses flush, and set display
+  mode for DXGI's present.
+- A context object holding the current command buffer, allocation list and patch-location list
+  with their sizes, with a submit operation (`gdikmt_render`): command offset and length, the
+  number of allocations and patch locations used, the sizes wanted for the next buffers with
+  flags to grow each, and an optional event to signal on completion. After a submit the context
+  points at the buffers the kernel hands back.
+- Helper entry points with the same shape as the operations: `gdikmt_createallocation`,
+  `gdikmt_openallocation`, `gdikmt_render`.

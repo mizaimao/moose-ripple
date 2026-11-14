@@ -1,0 +1,64 @@
+From 77e160421bd39fbd71f1eb826e1350c2c4b0bf5b Mon Sep 17 00:00:00 2001
+From: Max R <max8rr8@gmail.com>
+Date: Sun, 16 Jul 2023 00:00:00 +0000
+Subject: [PATCH] gdikmt: Introduce gdikmt
+
+Gdikmt is subsystem used by windows mesa usermode drivers
+to communicate with kernel mode drivers.
+This subsystem is required because of differences between
+the way directx and non-directx drivers interact with kernel
+For directx drivers it uses D3DDDI_DEVICECALLBACKS passed in CreateDevice
+For non-directx drivers it uses D3DKMT functions from GDI32.dll
+In future it should be possible to implement gdikmt for WSL.
+---
+ src/gallium/auxiliary/meson.build            | 7 +++++++
+ src/gallium/frontends/d3d10umd/meson.build   | 1 +
+ src/gallium/include/frontend/winsys_handle.h | 2 ++
+ 3 files changed, 10 insertions(+)
+
+diff --git a/src/gallium/auxiliary/meson.build b/src/gallium/auxiliary/meson.build
+index 6b124c08d53..599c67f6347 100644
+--- a/src/gallium/auxiliary/meson.build
++++ b/src/gallium/auxiliary/meson.build
+@@ -290,6 +290,13 @@ files_libgallium = files(
+   'nir/nir_draw_helpers.h',
+ )
+ 
++if with_platform_windows 
++  files_libgallium += files(
++    'gdikmt/gdikmt.h',
++    'gdikmt/gdikmt_d3dkmt.c',
++  )
++endif
++
+ if dep_libdrm.found()
+   files_libgallium += files(
+     'renderonly/renderonly.c',
+diff --git a/src/gallium/frontends/d3d10umd/meson.build b/src/gallium/frontends/d3d10umd/meson.build
+index bcfe8c24fd5..83bc2437043 100644
+--- a/src/gallium/frontends/d3d10umd/meson.build
++++ b/src/gallium/frontends/d3d10umd/meson.build
+@@ -24,6 +24,7 @@ libd3d10umd = static_library(
+     'ShaderParse.c',
+     'ShaderTGSI.c',
+     'D3DKMT.cpp',
++    'gdikmt_d3dddi.cpp'
+   ),
+   c_args : _c_args_d3d10umd,
+   cpp_args : _c_args_d3d10umd,
+diff --git a/src/gallium/include/frontend/winsys_handle.h b/src/gallium/include/frontend/winsys_handle.h
+index 289cb9d08ed..22c3068ba00 100644
+--- a/src/gallium/include/frontend/winsys_handle.h
++++ b/src/gallium/include/frontend/winsys_handle.h
+@@ -19,6 +19,8 @@ extern "C" {
+ #define WINSYS_HANDLE_TYPE_D3D12_RES 4
+ #define WINSYS_HANDLE_TYPE_WIN32_NAME 5
+ #define WINSYS_HANDLE_TYPE_UNBACKED 5
++/* Used in DXGI functions to resolve to d3dkmt allocation handle from resource */
++#define WINSYS_HANDLE_TYPE_D3DKMT_ALLOC 6
+ 
+ /**
+  * For use with pipe_screen::{resource_from_handle|resource_get_handle}.
+-- 
+2.47.3
+
