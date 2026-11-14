@@ -2,7 +2,7 @@
 # Cross-build Mesa 24.3.4 for Windows 7 x64 on Linux (docs/windows/mesa-win7.md): software
 # rendering only (softpipe), Mesa's OpenGL (opengl32.dll + libgallium_wgl.dll) and the
 # Direct3D 10 driver (libgallium_d3d10.dll).
-#   windows/mesa/build-win7.sh [--clean]
+#   windows/mesa/build-win7.sh [--clean]            x64 (ARCH=x86 for 32-bit Windows)
 # Its own source tree and build directory, apart from the Mac side's:
 #   .tools/mesa/src-24.3.4-win   the release tarball, patches/*.patch, WDK 7.1 DDI headers
 #   .tools/mesa/build-win7-x64   the build; .tools/mesa/out-win7-x64 the DLLs
@@ -17,8 +17,14 @@ MESA_VERSION=24.3.4
 MESA_SHA256=e641ae27191d387599219694560d221b7feaa91c900bcec46bf444218ed66025
 TARBALL=$T/src/mesa-dl/mesa-$MESA_VERSION.tar.xz
 SRC=$T/mesa/src-$MESA_VERSION-win
-BUILD=$T/mesa/build-win7-x64
-OUT=$T/mesa/out-win7-x64
+ARCH=${ARCH:-x64}
+case $ARCH in
+    x64) TRIPLE=x86_64-w64-mingw32; CPU_FAMILY=x86_64; CPU=x86_64 ;;
+    x86) TRIPLE=i686-w64-mingw32;   CPU_FAMILY=x86;    CPU=i686 ;;
+    *) echo "build-win7.sh: ARCH is x64 or x86" >&2; exit 1 ;;
+esac
+BUILD=$T/mesa/build-win7-$ARCH
+OUT=$T/mesa/out-win7-$ARCH
 LLVM_MINGW=${LLVM_MINGW:-$T/llvm-mingw/llvm-mingw-20261104-msvcrt-ubuntu-22.04-x86_64}
 KIT=${KIT:-$T/wdk71/kit/WinDDK/7600.16385.win7_wdk.100208-1538}
 export PATH="$LLVM_MINGW/bin:$root/.venv/bin:$T/gnu/bin:$PATH"
@@ -57,20 +63,20 @@ if [ "${1:-}" = --clean ] || [ "$(cat "$SRC/.ripple-win-stamp" 2>/dev/null)" != 
     echo "$stamp" > "$SRC/.ripple-win-stamp"
 fi
 
-cross=$T/mesa/cross-win7-x64.ini
+cross=$T/mesa/cross-win7-$ARCH.ini
 cat > "$cross" <<EOC
 [binaries]
-c = '$LLVM_MINGW/bin/x86_64-w64-mingw32-clang'
-cpp = '$LLVM_MINGW/bin/x86_64-w64-mingw32-clang++'
-ar = '$LLVM_MINGW/bin/x86_64-w64-mingw32-ar'
-strip = '$LLVM_MINGW/bin/x86_64-w64-mingw32-strip'
-windres = '$LLVM_MINGW/bin/x86_64-w64-mingw32-windres'
+c = '$LLVM_MINGW/bin/${TRIPLE}-clang'
+cpp = '$LLVM_MINGW/bin/${TRIPLE}-clang++'
+ar = '$LLVM_MINGW/bin/${TRIPLE}-ar'
+strip = '$LLVM_MINGW/bin/${TRIPLE}-strip'
+windres = '$LLVM_MINGW/bin/${TRIPLE}-windres'
 pkg-config = 'false'
 
 [host_machine]
 system = 'windows'
-cpu_family = 'x86_64'
-cpu = 'x86_64'
+cpu_family = '$CPU_FAMILY'
+cpu = '$CPU'
 endian = 'little'
 EOC
 
