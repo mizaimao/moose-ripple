@@ -15,6 +15,9 @@ MAIN=${MAIN:-$root}
 KIT=${KIT:-$MAIN/.tools/wdk71/kit/WinDDK/7600.16385.win7_wdk.100208-1538}
 OUT=${1:-$MAIN/build/win7-kmd}
 ARCHS=${ARCHS:-amd64}
+# DEBUG=1 (the default while the driver is being brought up): the driver's messages go to the
+# first serial port (COM1), which the test VM writes to a file on the host. DEBUG=0: no messages.
+DEBUG=${DEBUG:-1}
 [ -d "$KIT/inc/ddk" ] || { echo "build.sh: no WDK 7.1 at $KIT (see docs/windows/toolchain.md)" >&2; exit 1; }
 mkdir -p "$OUT"
 ov=$OUT/kit-overlay.yaml
@@ -26,6 +29,10 @@ COMMON="/nologo /c /O2 /W3 /Zp8 /GS- /Gy /kernel /Gz -fms-compatibility-version=
         -Wno-microsoft-anon-tag -Wno-pragma-pack -Wno-ignored-pragma-intrinsic -Wno-ignored-attributes \
         -Wno-nonportable-include-path -Wno-invalid-token-paste -Wno-unknown-pragmas \
         /FI$here/compat/sal2.h /FI$here/compat/win7.h /D_KERNEL_MODE /D_WIN32_WINNT=0x0601 /DWINVER=0x0601 /DNTDDI_VERSION=0x06010000 /DVIOGPU_3D=1"
+# (The driver's trace.h turns its own messages on; COM_DEBUG sends them to the serial port
+# instead of the kernel debugger. DBG itself is not defined: the kit's assertions do not
+# compile as C++ with clang.)
+[ "$DEBUG" = 1 ] && COMMON="$COMMON /DCOM_DEBUG"
 CXX="/GR- /EHs-c- /std:c++17"
 C_SRC="compat/intrinsics.c VirtIO/VirtIOPCICommon.c VirtIO/VirtIOPCILegacy.c VirtIO/VirtIOPCIModern.c VirtIO/VirtIORing.c VirtIO/VirtIORing-Packed.c"
 CXX_SRC="common/edid.cpp common/viogpu_idr.cpp common/ripple_pci.cpp common/viogpu_queue.cpp common/baseobj.cpp

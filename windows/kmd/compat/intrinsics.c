@@ -48,6 +48,12 @@ __outdword(unsigned short port, unsigned long value)
     __asm__ volatile("outl %k0, %w1" : : "a"(value), "Nd"(port));
 }
 
+void
+__outbytestring(unsigned short port, unsigned char *buffer, unsigned long count)
+{
+    __asm__ volatile("rep outsb" : "+S"(buffer), "+c"(count) : "d"(port));
+}
+
 #if defined(_M_AMD64) || defined(__x86_64__)
 /* The interrupt request level lives in CR8 on x64 (KeGetCurrentIrql and friends). */
 unsigned __int64
