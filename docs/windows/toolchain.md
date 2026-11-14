@@ -35,6 +35,7 @@ into `.tools/` at build time and never committed (the owner's rule, 2026-11-14).
 |---|---|---|---|
 | `.tools/wdk71/GRMWDK_EN_7600_1.ISO` | `https://download.microsoft.com/download/4/A/2/4A25C7D5-EFBE-4182-B6A9-AE6850409A78/GRMWDK_EN_7600_1.ISO` | 649,877,504 bytes | `5edc723b50ea28a070cad361dd0927df402b7a861a036bbcf11d27ebba77657d` |
 | `.tools/osslsigncode/osslsigncode-2.10.tar.gz` (built into `.tools/osslsigncode/build/`) | `https://github.com/mtrojnar/osslsigncode/archive/refs/tags/2.10.tar.gz` | | `2a864e6127ee2350fb648070fa0d459c534ac6400ca0048886aeab7afb250f65` |
+| `.tools/llvm-mingw/llvm-mingw-20261104-msvcrt-ubuntu-22.04-x86_64.tar.xz` | `https://github.com/mstorsjo/llvm-mingw/releases/download/20261104/` | 83,338,104 bytes | `6e3342e2e0dfa56e9178f3c34b198f278bd5e603db4a759455d1439cc2230630` |
 
 From the ISO only three packages are unpacked, `WDK/headers.msi`, `WDK/libs_x64fre.msi` and
 `WDK/libs_x86fre.msi`, with Wine's `msiexec /a` (an administrative install only copies files),
@@ -62,10 +63,20 @@ and `lld-link`. Points that needed care:
 Result: `hello.sys` and `hellodll.dll` for x64 and x86, PE images for Windows 6.01 (native
 subsystem for the driver), with a checksum.
 
-Not tried yet: a WDDM miniport against `displib.lib` (that is the kernel-driver work in W1),
-and the user-mode driver. Mesa's user-mode parts are normally built with MinGW-w64; for those
-llvm-mingw (about 180 MB, Apache 2.0 with the LLVM exception, MinGW-w64 runtime in the public
-domain) is the likely compiler, and it is not downloaded yet.
+A skeleton WDDM 1.1 miniport (`tools/win7-hello/miniport.c`: `DriverEntry` fills
+`DRIVER_INITIALIZATION_DATA` at `DXGKDDI_INTERFACE_VERSION_WIN7` with stubs and calls
+`DxgkInitialize`) links for x64 and x86 against `displib.lib`. Structural check with
+`llvm-readobj`: native subsystem 6.01, relocatable (no stripped relocations), a checksum, and
+imports only from `ntoskrnl.exe`: `displib`'s `DxgkInitialize` loads and opens the DirectX
+kernel itself (`ZwLoadDriver`, `IoGetDeviceObjectPointer`, `IoBuildDeviceIoControlRequest`,
+`IofCallDriver`, `KeWaitForSingleObject`; x86 also `KeBugCheckEx`, `RtlUnwind`). It is not
+installed: a display driver that does nothing would take the screen away. `lld-link /driver`
+does not set the WDM-driver flag in the image (MSVC's `/driver:wdm` does); display miniports
+don't need it.
+
+Mesa's user-mode parts are built with llvm-mingw (msvcrt variant, downloaded into
+`.tools/llvm-mingw`; Apache 2.0 with the LLVM exception, MinGW-w64 runtime in the public
+domain): [mesa-win7.md](mesa-win7.md).
 
 ## Signing and loading on Windows 7
 

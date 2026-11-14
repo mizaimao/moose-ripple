@@ -1,5 +1,6 @@
 #!/bin/sh
-# Build the hello kernel driver and DLL for Windows 7 x64 and x86 on Linux, with clang in
+# Build the hello kernel driver, a skeleton WDDM 1.1 miniport and the hello DLL for Windows 7
+# x64 and x86 on Linux, with clang in
 # cl mode and lld-link against WDK 7.1's headers and libraries (docs/windows/toolchain.md).
 #   tools/win7-hello/build.sh [OUT]        default OUT: build/win7-hello
 # KIT: the unpacked WDK 7.1 (default .tools/wdk71/kit/WinDDK/7600.16385.win7_wdk.100208-1538).
@@ -29,9 +30,14 @@ for arch in amd64 i386; do
     lld-link /nologo /machine:$M /driver /subsystem:native,6.01 /release /nodefaultlib \
         /entry:$E /out:"$o/hello.sys" "$o/hello.obj" \
         "$KIT/lib/win7/$arch/ntoskrnl.lib" "$KIT/lib/win7/$arch/hal.lib" "$KIT/lib/win7/$arch/BufferOverflowK.lib"
+    clang --driver-mode=cl --target=$T $COMMON $INC $D /kernel /Gz /D_KERNEL_MODE \
+        "$here/miniport.c" "/Fo$o/miniport.obj"
+    lld-link /nologo /machine:$M /driver /subsystem:native,6.01 /release /nodefaultlib \
+        /entry:$E /out:"$o/miniport.sys" "$o/miniport.obj" "$KIT/lib/win7/$arch/displib.lib" \
+        "$KIT/lib/win7/$arch/ntoskrnl.lib" "$KIT/lib/win7/$arch/hal.lib" "$KIT/lib/win7/$arch/BufferOverflowK.lib"
     clang --driver-mode=cl --target=$T $COMMON $INC $D "$here/hellodll.c" "/Fo$o/hellodll.obj"
     lld-link /nologo /machine:$M /dll /subsystem:windows,6.01 /release /nodefaultlib \
         /entry:$DE /out:"$o/hellodll.dll" "$o/hellodll.obj" \
         "$KIT/lib/win7/$arch/kernel32.lib" "$KIT/lib/win7/$arch/user32.lib"
-    echo "built $o/hello.sys $o/hellodll.dll"
+    echo "built $o/hello.sys $o/miniport.sys $o/hellodll.dll"
 done
