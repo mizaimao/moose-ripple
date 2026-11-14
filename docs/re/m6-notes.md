@@ -464,3 +464,64 @@ window); a capture takes 0.16 s; the software-drawn gl-gears window, whose surfa
 backing too, runs as before (58.8 frames/s). 10.6's `screencapture` has no option for a single
 window or a rectangle from the command line; the interactive selection (Cmd-Shift-4) was not
 tried.
+
+## A software-drawn GL window in two shades: GL errors nobody asked about (2026-11-14, #27)
+
+`gl-gears -s -f 3 -c` (Apple's software renderer, three frames, then a second window crosses
+it) left the band the other window had passed in other colours than the rest: blue
+(48,48,242) became (46,0,242), red (194,24,0) became (192,0,1), green (0,174,43) became
+(27,178,43). The GeForce 9600 GT shows one shade throughout, so it was ours.
+
+What the colours are. The second set is the first converted from sRGB to the display's
+profile; computed with the profile's numbers the three come out as (46,1,242), (192,0,3) and
+(28,178,44). (The display has no EDID, so Mac OS X made a profile with the Generic RGB
+primaries and the sRGB curve.) So the window of Apple's software renderer carries sRGB, and
+WindowServer converts it when it composites: sometimes.
+
+Why only sometimes (GL trace of WindowServer, `trace` and `burst` switches). WindowServer
+draws every layer through an ARB fragment program. Most only copy the texture; a layer with a
+colour space of its own gets one with two rows of a lookup texture and a matrix between them
+(here `{0.974914, 0.0274256, -0.00217372}`, `{-0.0200152, 1.05412, -0.0342239}`,
+`{0.00168316, 0.00158642, 0.996996}`). Around each program it does this:
+
+    glBindProgramARB(GL_FRAGMENT_PROGRAM_ARB, id);
+    glGetError();                       /* an error: no program for this layer */
+    glEnable(GL_FRAGMENT_PROGRAM_ARB);  /* or, for a new one, glProgramStringARB first */
+
+and with an error it draws the layer with fixed-function texturing instead (a new program is
+deleted again). The error it found was not from the program. Our bundle refused two
+Apple-only pixel-store names in WindowServer with `GL_INVALID_ENUM`, on purpose since M5:
+`GL_UNPACK_ROW_BYTES_APPLE`, which WindowServer sets to 0 at the start of every pass, and
+`GL_UNPACK_CLIENT_STORAGE_APPLE`, which it sets before every texture it makes. The error
+stayed set until the next `glGetError`, which is the one after the first program of the pass.
+So the first layer of every pass, and every layer drawn right after an upload of its texture,
+lost its program. For the copying programs that changes nothing to see. For the converted
+window it meant: unconverted when its program flushed a frame (upload, then draw) and when it
+was the lowest layer of a pass (an uncovered strip inside it), converted otherwise. In the
+12 s of the test WindowServer made and deleted 51 programs and drew the window's tiles 17
+times without and 25 times with the conversion.
+
+Fix (`cgl_apple.c`, "Errors nobody asked about"): neither name raises an error any more, in
+any program. Row bytes are kept per context in WindowServer too, as elsewhere. The query of
+the client-storage state still gives WindowServer no answer (the value stays unwritten, as it
+was with the error): answering it made WindowServer drop the menu bar in M5, and that was not
+tried again. `/Library/Logs/RippleGL/cs-error` brings the old errors back for comparisons.
+
+Checked on the dev VM, same bundle with the switch on and off:
+
+| | errors as before | now |
+|---|---|---|
+| gears window after the crossing | two shades | one: red (192,0,1), blue (46,0,242) everywhere |
+| draws of the window's tile with its program | 25 of 42 | 42 of 42 |
+| `glGetError` giving an error (Exposé and Dashboard runs, dtrace) | 1250 of 6091 | 0 of 8065 |
+| programs deleted again | 189 | 0 |
+| passes and screen updates in those runs | 392 and 392 | 378 and 378 |
+
+Desktop, a Finder window with its shadow and an open menu are the same picture pixel for
+pixel before and after, except the Dock's shelf (one level in places) and the clock; Exposé
+and Dashboard look the same. Frame pacing is unchanged (`scripts/pace-run.sh`, two runs each:
+Exposé 78-80 against 78-89 screen updates per second in bursts, Dashboard 66-68 against
+66-67, median gap 10 ms in all of them).
+
+One number did change, and it is not a slowdown: WindowServer's own frame counter (the frame
+meter's frames/s) reads about half of what it did, see `perf-notes.md`.

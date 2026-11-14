@@ -550,20 +550,12 @@ ripple_cgl_clear(void *rend, GLbitfield mask)
  * GL_UNPACK_ROW_BYTES_APPLE, which override the row length when nonzero. Mesa doesn't know them
  * (GL_INVALID_ENUM, and the stride was ignored: Core Image's and Quartz Composer's uploads and
  * readbacks of images with padded rows came out wrong or empty, M6). Kept per context and turned
- * into a row length and alignment around uploads and readbacks. WindowServer keeps the old
- * behaviour (its paths were tuned with the error). */
+ * into a row length and alignment around uploads and readbacks. In WindowServer too since
+ * 2026-11-14 (it only ever sets 0, at the start of each pass; see "Errors nobody asked about"). */
 #ifndef GL_PACK_ROW_BYTES_APPLE
 #define GL_PACK_ROW_BYTES_APPLE   0x8A15
 #define GL_UNPACK_ROW_BYTES_APPLE 0x8A16
 #endif
-static bool
-row_bytes_wanted(void)
-{
-   static int on = -1;
-   if (on < 0)
-      on = strcmp(getprogname(), "WindowServer") != 0;
-   return on;
-}
 
 struct row_bytes_saved {
    bool active;
@@ -596,17 +588,39 @@ row_bytes_restore(struct gl_pixelstore_attrib *ps, const struct row_bytes_saved 
    ps->Alignment = s->alignment;
 }
 
-/* GL_UNPACK_CLIENT_STORAGE_APPLE without the error, everywhere but in WindowServer (M6): Core
- * Animation counts any GL error as a failed frame ("rendering error 500") and drew nothing in
- * Real Racing 2. The emulation (textures read from their memory again) works either way. */
+/* ---- Errors nobody asked about ---------------------------------------------------------- *
+ * A GL error stays set until the program calls glGetError, and programs call it after other
+ * calls and blame those. So the Apple-only pixel-store names never raise one here:
+ * - Core Animation counts any GL error as a failed frame ("rendering error 500") and drew
+ *   nothing in Real Racing 2 (M6).
+ * - WindowServer calls glGetError after it selects a layer's fragment program, and drops the
+ *   program for that layer if it finds an error. It sets the row bytes at the start of every
+ *   pass and client storage before every texture it makes, so the first layer of each pass
+ *   and every layer drawn right after an upload of its texture lost its program. Most of its
+ *   programs only copy the texture, where fixed-function drawing gives the same picture. But a
+ *   window with a colour space of its own (Apple's software renderer's window is sRGB) gets a
+ *   program that converts to the display's colours: it came out unconverted in those draws
+ *   and converted in the others, two shades in one window (seen 2026-11-14).
+ * The emulation (textures read from their memory again) works either way.
+ * /Library/Logs/RippleGL/cs-error brings the errors back as they were, for comparisons (debug
+ * switch, read when the program starts): client storage in every program, row bytes in
+ * WindowServer. */
 static bool
 client_storage_quiet(void)
 {
    static int quiet = -1;
    if (quiet < 0)
-      quiet = strcmp(getprogname(), "WindowServer") != 0 &&
-              access("/Library/Logs/RippleGL/cs-error", F_OK) != 0;   /* debug switch */
+      quiet = access("/Library/Logs/RippleGL/cs-error", F_OK) != 0;
    return quiet;
+}
+
+static bool
+in_window_server(void)
+{
+   static int ws = -1;
+   if (ws < 0)
+      ws = strcmp(getprogname(), "WindowServer") == 0;
+   return ws;
 }
 
 void GLAPIENTRY
@@ -614,15 +628,16 @@ ripple_cgl_get_integerv(void *rend, GLenum pname, GLint *params)
 {
    struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
    RIPPLE_CGL_ENTER(rend);
-   /* GL_UNPACK_CLIENT_STORAGE_APPLE stays an error in WindowServer: answering it (with the
-    * tracked value) made WindowServer drop the menu bar (VM 210, 2026-11-10); the error is part
-    * of what keeps WindowServer off its client-storage paths. */
+   /* GL_UNPACK_CLIENT_STORAGE_APPLE: WindowServer gets no answer, the value stays unwritten as
+    * when Mesa refused the name. Answering it (with the tracked value) made WindowServer drop
+    * the menu bar (VM 210, 2026-11-10): it saves this value around its own uploads, and what
+    * it reads is part of what keeps it off its client-storage paths. */
    if (pname == GL_UNPACK_CLIENT_STORAGE_APPLE && ctx && params && client_storage_quiet()) {
-      *params = ctx->client_storage;
+      if (!in_window_server())
+         *params = ctx->client_storage;
       return;
    }
-   if ((pname == GL_PACK_ROW_BYTES_APPLE || pname == GL_UNPACK_ROW_BYTES_APPLE) && ctx && params &&
-       row_bytes_wanted()) {
+   if ((pname == GL_PACK_ROW_BYTES_APPLE || pname == GL_UNPACK_ROW_BYTES_APPLE) && ctx && params) {
       *params = pname == GL_PACK_ROW_BYTES_APPLE ? ctx->pack_row_bytes : ctx->unpack_row_bytes;
       return;
    }
@@ -1044,8 +1059,8 @@ ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum 
  * Apple's GL reads a client-storage texture's memory when it draws. WindowServer relies on that
  * for app GL surfaces under Quartz Extreme: it makes tiles of the surface's shared memory once
  * and never uploads them again, so with Mesa's copy at glTexImage2D the window kept whatever
- * the memory held then (Front Row all white, gl-gears frozen). The enum itself keeps failing
- * (gen_dispatch.py says why), but 2D and rectangle textures specified while it is set are
+ * the memory held then (Front Row all white, gl-gears frozen). Mesa never sees the enum; 2D
+ * and rectangle textures specified while it is set are
  * remembered with their memory and unpack state. Until the program updates one itself
  * (glTexSubImage2D, as WindowServer does for ordinary windows), it is uploaded again from that
  * memory the first time it is bound in each frame (frames end at glFlush and swaps), if the
@@ -1363,11 +1378,12 @@ void GLAPIENTRY
 ripple_cgl_pixel_storei(void *rend, GLenum pname, GLint param)
 {
    RIPPLE_CGL_ENTER(rend);
-   if ((pname == GL_PACK_ROW_BYTES_APPLE || pname == GL_UNPACK_ROW_BYTES_APPLE) && row_bytes_wanted()) {
+   if (pname == GL_PACK_ROW_BYTES_APPLE || pname == GL_UNPACK_ROW_BYTES_APPLE) {
       struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
       if (ctx && param >= 0)
          *(pname == GL_PACK_ROW_BYTES_APPLE ? &ctx->pack_row_bytes : &ctx->unpack_row_bytes) = param;
-      return;
+      if (client_storage_quiet() || !in_window_server())
+         return;
    }
    if (pname == GL_UNPACK_CLIENT_STORAGE_APPLE) {
       struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
@@ -1376,14 +1392,14 @@ ripple_cgl_pixel_storei(void *rend, GLenum pname, GLint param)
       if (client_storage_quiet())
          return;
    }
-   CALL_PixelStorei(GET_DISPATCH(), (pname, param));   /* WindowServer: still refused */
+   CALL_PixelStorei(GET_DISPATCH(), (pname, param));
 }
 
 void GLAPIENTRY
 ripple_cgl_pixel_storef(void *rend, GLenum pname, GLfloat param)
 {
    RIPPLE_CGL_ENTER(rend);
-   if ((pname == GL_PACK_ROW_BYTES_APPLE || pname == GL_UNPACK_ROW_BYTES_APPLE) && row_bytes_wanted()) {
+   if (pname == GL_PACK_ROW_BYTES_APPLE || pname == GL_UNPACK_ROW_BYTES_APPLE) {
       ripple_cgl_pixel_storei(rend, pname, (GLint)param);
       return;
    }

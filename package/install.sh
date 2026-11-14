@@ -1,8 +1,9 @@
 #!/bin/sh
 # moose-ripple installer, run inside Mac OS X 10.6.8 from the unpacked package folder:
-#   sudo sh install.sh [--no-tablet] [--hwcursor] [--logs]
+#   sudo sh install.sh [--no-tablet] [--sound] [--hwcursor] [--logs]
 #     (no options)  the drivers, the GL bundle, the GA plugin and the tablet kext
 #     --no-tablet   without RippleQEMUTablet.kext
+#     --sound       with RippleVirtioSound.kext, the driver for QEMU's virtio-sound-pci device
 #     --hwcursor    the pointer as a hardware cursor (boot flag ripple_hwcursor=1); UTM shows the
 #                   pointer only that way while Quartz Extreme is on
 #     --logs        per-program logs of the GL driver in /Library/Logs/RippleGL
@@ -15,16 +16,18 @@ EXT=/System/Library/Extensions
 die() { echo "install.sh: $*" >&2; exit 1; }
 
 ITEMS="RippleVirtioGPU.kext RippleGLDriver.bundle RippleGA.plugin"
-TABLET=1 HWCURSOR=0 LOGS=0
+TABLET=1 SOUND=0 HWCURSOR=0 LOGS=0
 for a in "$@"; do
     case "$a" in
         --no-tablet) TABLET=0 ;;
+        --sound)     SOUND=1 ;;
         --hwcursor)  HWCURSOR=1 ;;
         --logs)      LOGS=1 ;;
-        *) die "unknown option $a (options: --no-tablet --hwcursor --logs)" ;;
+        *) die "unknown option $a (options: --no-tablet --sound --hwcursor --logs)" ;;
     esac
 done
 [ "$TABLET" = 0 ] || ITEMS="$ITEMS RippleQEMUTablet.kext"
+[ "$SOUND" = 0 ] || ITEMS="$ITEMS RippleVirtioSound.kext"
 
 [ "$(id -u)" = 0 ] || die "run it as root: sudo sh install.sh"
 v=$(sw_vers -productVersion)
@@ -45,11 +48,15 @@ for i in $ITEMS; do
     echo "installed $EXT/$i"
 done
 
-out=$(kextutil -n -t "$EXT/RippleVirtioGPU.kext" 2>&1 || true)
-case "$out" in
-    *"appears to be loadable"*) echo "RippleVirtioGPU.kext appears to be loadable" ;;
-    *) echo "$out" >&2; die "kextutil doesn't accept RippleVirtioGPU.kext (see above); nothing else changed, run uninstall.sh" ;;
-esac
+KEXTS=RippleVirtioGPU.kext
+[ "$SOUND" = 0 ] || KEXTS="$KEXTS RippleVirtioSound.kext"
+for k in $KEXTS; do
+    out=$(kextutil -n -t "$EXT/$k" 2>&1 || true)
+    case "$out" in
+        *"appears to be loadable"*) echo "$k appears to be loadable" ;;
+        *) echo "$out" >&2; die "kextutil doesn't accept $k (see above); nothing else changed, run uninstall.sh" ;;
+    esac
+done
 echo "Rebuilding the kext cache"
 # Run from /: started from a folder on the CD, kextcache fails ("Couldn't lock ...: Operation
 # not supported by device").

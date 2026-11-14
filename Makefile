@@ -433,5 +433,5 @@ $(OUT)/scanout-test: $(OUT)/i386/scanout-test/scanout-test $(OUT)/x86_64/scanout
 #   make package    build/moose-ripple-VERSION.zip; VERSION defaults to git describe, else the date
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || date +%Y%m%d)
 .PHONY: package
-package: virtiogpu glbundle gaplugin qemutablet qecheck
+package: virtiogpu glbundle gaplugin qemutablet virtiosound qecheck
 	package/package.sh $(OUT) $(VERSION) $(TOOLS)
