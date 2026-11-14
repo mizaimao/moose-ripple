@@ -15,10 +15,15 @@ make-sl-disk.sh --dvd "Mac OS X Install DVD.dmg" --combo MacOSXUpdCombo10.6.8.dm
 - `--osk-file`: a file holding the SMC key of a real Mac on one line.
 - `--work DIR`: scratch folder, about 25 GB (default: `sl-disk-work` next to the output). Deleted
   at the end unless `KEEP_WORK=1`; it also holds a screenshot every 2 minutes, to see a stall.
+- `--ripple`: also install moose-ripple onto the new disk (`install.sh --target`, from the package
+  on the release disk's RIPPLE volume), so its first boot, the Welcome animation included, has it.
+  `--ripple-options "--sound --hwcursor"` passes `install.sh`'s options (`--sound`, `--hwcursor`,
+  `--no-tablet`, `--logs`). Needs a release disk newer than 0.1.0 (its `install.sh` has `--target`).
 
 Needs a Linux host (or WSL2) with KVM, `qemu-system-x86_64`, `qemu-img`, OVMF, 7-Zip (`7z`) and
 perl. No root. Tested on Debian 13 (QEMU 10.0) with the 10.6.3 retail DVD: about 10 minutes,
-and the disk boots to the Welcome screen.
+and the disk boots to the Welcome screen. With `--ripple`, the Welcome movie played smoothly at
+its first start in UTM (Apple's software renderer manages a few frames a second there).
 
 ## How it works
 
@@ -32,6 +37,7 @@ and the disk boots to the Welcome screen.
 3. Pass 2: the DVD boots again (fresh firmware settings, so OpenCore picks the DVD and never the
    new system). Our `rc.install` sees the installed system and applies the combo update with
    that system's own `installer`.
+   With `--ripple`, it then runs the release disk's `install.sh --target` on the new system.
 4. It writes `SLREADY OK 10K549` and the installer's log to a small result disk and powers off;
    the script checks that line and compresses the disk.
 

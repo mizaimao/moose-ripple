@@ -3,7 +3,8 @@
 # installed unattended in a headless QEMU VM and never booted, so it starts at the Setup Assistant.
 #
 #   make-sl-disk.sh --dvd "Mac OS X Install DVD.dmg" --combo MacOSXUpdCombo10.6.8.dmg \
-#                   --opencore moose-ripple-VERSION.qcow2 --osk-file FILE [--work DIR] OUT.qcow2
+#                   --opencore moose-ripple-VERSION.qcow2 --osk-file FILE [--work DIR]
+#                   [--ripple [--ripple-options "--sound --hwcursor"]] OUT.qcow2
 #
 #   --dvd       a Mac OS X 10.6 install DVD as .dmg (or a raw image of the whole disc)
 #   --combo     MacOSXUpdCombo10.6.8.dmg (or a raw image of it)
@@ -11,6 +12,9 @@
 #   --osk-file  a file holding the SMC key of a real Mac on one line (QEMU's isa-applesmc osk=)
 #   --work      scratch folder, about 25 GB (default: sl-disk-work next to OUT); deleted at the
 #               end unless KEEP_WORK=1
+#   --ripple    also install moose-ripple (install.sh --target) from the package on the release
+#               disk's RIPPLE volume, so the first boot already has it; --ripple-options passes
+#               install.sh's --sound, --hwcursor, --no-tablet or --logs
 #
 # Needs: qemu-system-x86_64 with KVM, qemu-img, OVMF, 7z (7-Zip or p7zip) and perl. No root.
 #
@@ -24,7 +28,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 die() { echo "make-sl-disk: $*" >&2; exit 1; }
 say() { echo "make-sl-disk: $*" >&2; }
 
-dvd= combo= oc= osk= work= out=
+dvd= combo= oc= osk= work= out= ripple=no ropts=
 while [ $# -gt 0 ]; do
     case "$1" in
         --dvd) dvd=$2; shift 2 ;;
@@ -32,12 +36,18 @@ while [ $# -gt 0 ]; do
         --opencore) oc=$2; shift 2 ;;
         --osk-file) osk=$2; shift 2 ;;
         --work) work=$2; shift 2 ;;
+        --ripple) ripple=yes; shift ;;
+        --ripple-options) ropts=$2; shift 2 ;;
         -*) die "unknown option $1" ;;
         *) out=$1; shift ;;
     esac
 done
 [ -n "$dvd" ] && [ -n "$combo" ] && [ -n "$oc" ] && [ -n "$osk" ] && [ -n "$out" ] ||
     die "usage: make-sl-disk.sh --dvd DVD --combo COMBO --opencore DISK --osk-file FILE OUT.qcow2"
+for o in $ropts; do
+    case "$o" in --sound|--hwcursor|--no-tablet|--logs) ;; *) die "--ripple-options: unknown option $o" ;; esac
+done
+[ -z "$ropts" ] || [ $ripple = yes ] || die "--ripple-options needs --ripple"
 for f in "$dvd" "$combo" "$oc" "$osk"; do [ -f "$f" ] || die "no such file: $f"; done
 [ -e "$out" ] && die "$out exists"
 SEVENZ=$(command -v 7z || command -v 7zz || true)
@@ -76,6 +86,9 @@ case "$dvd" in
 esac
 rm -rf "$work/parts"
 
+# --ripple: our rc.install with RIPPLE=yes and the options for install.sh.
+sed "s|^RIPPLE=no\$|RIPPLE=\"$ripple $ropts\"|" "$here/rc.install" > "$work/rc.install"
+grep -q "^RIPPLE=\"$ripple " "$work/rc.install" || die "rc.install has no RIPPLE=no line"
 # Write our rc.install over the original's bytes: found once in the image, padded to its length.
 perl -e '
     my ($img, $old, $new) = @ARGV; local $/;
@@ -95,8 +108,8 @@ perl -e '
     @hits == 1 or die "rc.install found " . scalar(@hits) . " times in the image, expected once\n";
     seek($f, $hits[0], 0) or die; print $f $b; close($f) or die "$img: $!\n";
     printf STDERR "make-sl-disk: rc.install replaced at byte %d (%d bytes)\n", $hits[0], length($a);
-' "$work/dvd.img" "$orig" "$here/rc.install"
-rm -rf "$work/rc"
+' "$work/dvd.img" "$orig" "$work/rc.install"
+rm -rf "$work/rc" "$work/rc.install"
 
 say "unpacking the combo update"
 case "$combo" in
