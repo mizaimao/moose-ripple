@@ -78,6 +78,10 @@ void GLAPIENTRY ripple_cgl_push_client_attrib(void *rend, GLbitfield mask);
 void GLAPIENTRY ripple_cgl_pop_client_attrib(void *rend);
 void GLAPIENTRY ripple_cgl_finish(void *rend);
 void ripple_cgl_client_storage_frame(void);
+/* Before a context is destroyed: drop what is remembered about its share group's textures
+ * if this is the group's last context. */
+struct gl_context;
+void ripple_cgl_client_storage_context_gone(struct gl_context *glctx);
 /* GL_APPLE_float_pixels added to the extension string (cgl_apple.c). */
 const GLubyte *GLAPIENTRY ripple_cgl_get_string(void *rend, GLenum name);
 void GLAPIENTRY ripple_cgl_get_programiv(void *rend, GLenum target, GLenum pname, GLint *params);

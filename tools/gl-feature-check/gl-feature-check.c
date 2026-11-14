@@ -13,10 +13,14 @@
  *   gl-feature-check tex3d      a 32x32x32 3D texture with client storage, every slice checked
  *   gl-feature-check yuv        Core Video's 2vuy conversion program, whole and in steps
  *   gl-feature-check stencil    a drawable with depth and stencil buffers, both used
+ *   gl-feature-check iosurface  a texture that is an IOSurface follows the surface's contents
  */
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl.h>
 #include <OpenGL/glext.h>
+#include <OpenGL/CGLIOSurface.h>
+#include <IOSurface/IOSurface.h>
+#include <CoreFoundation/CoreFoundation.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1064,8 +1068,111 @@ static void run_stencil(const char *name, CGLPixelFormatAttribute renderer)
     CGLDestroyPixelFormat(pf);
 }
 
+/* A texture made from an IOSurface is the surface: what is written to the surface afterwards
+ * must show the next time the texture is bound and drawn (Core Video's pool of video frames
+ * works that way; with a single copy a movie repeated its first frames). Two textures on two
+ * surfaces, as a pool would have, each filled, shown, filled again and shown again. */
+static void iosurface_fill(IOSurfaceRef s, uint32_t bgra)
+{
+    IOSurfaceLock(s, 0, NULL);
+    uint32_t *p = IOSurfaceGetBaseAddress(s);
+    size_t rb = IOSurfaceGetBytesPerRow(s), h = IOSurfaceGetHeight(s), w = IOSurfaceGetWidth(s);
+    for (size_t y = 0; y < h; y++)
+        for (size_t x = 0; x < w; x++)
+            ((uint32_t *)((uint8_t *)p + y * rb))[x] = bgra;
+    IOSurfaceUnlock(s, 0, NULL);
+}
+
+static void run_iosurface(const char *name, CGLPixelFormatAttribute renderer)
+{
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32, kCGLPFAPBuffer,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
+                                        renderer, 0 };
+    if (!renderer)
+        attrs[4] = 0;
+    CGLPixelFormatObj pf;
+    GLint npf, screen = 0;
+    CGLContextObj c;
+    CGLPBufferObj pb;
+    enum { SW = 64, SH = 64 };
+    if (CGLChoosePixelFormat(attrs, &pf, &npf) || !pf || CGLCreateContext(pf, NULL, &c)) {
+        printf("%s: no pixel format\n", name);
+        return;
+    }
+    if (CGLCreatePBuffer(SW, SH, GL_TEXTURE_2D, GL_RGBA, 0, &pb))
+        return;
+    CGLSetCurrentContext(c);
+    CGLGetVirtualScreen(c, &screen);
+    CGLSetPBuffer(c, pb, 0, 0, screen);
+    glViewport(0, 0, SW, SH);
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, SW, 0, SH, -1, 1);
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+
+    int w = SW, h = SH, bpe = 4;
+    CFNumberRef nw = CFNumberCreate(NULL, kCFNumberIntType, &w), nh = CFNumberCreate(NULL, kCFNumberIntType, &h),
+                nb = CFNumberCreate(NULL, kCFNumberIntType, &bpe);
+    const void *keys[] = { kIOSurfaceWidth, kIOSurfaceHeight, kIOSurfaceBytesPerElement };
+    const void *vals[] = { nw, nh, nb };
+    CFDictionaryRef props = CFDictionaryCreate(NULL, keys, vals, 3, &kCFTypeDictionaryKeyCallBacks,
+                                               &kCFTypeDictionaryValueCallBacks);
+    IOSurfaceRef surf[2] = { IOSurfaceCreate(props), IOSurfaceCreate(props) };
+    GLuint tex[2];
+    glGenTextures(2, tex);
+    /* BGRA words: red, green, then blue, yellow for the second round. */
+    const uint32_t first[2] = { 0xffff0000, 0xff00ff00 }, second[2] = { 0xff0000ff, 0xffffff00 };
+    const char *want[2][2] = { { "red", "green" }, { "blue", "yellow" } };
+    CGLError err[2] = { 0, 0 };
+    glEnable(GL_TEXTURE_RECTANGLE_ARB);
+    for (int i = 0; i < 2 && surf[0] && surf[1]; i++) {
+        iosurface_fill(surf[i], first[i]);
+        glBindTexture(GL_TEXTURE_RECTANGLE_ARB, tex[i]);
+        err[i] = CGLTexImageIOSurface2D(c, GL_TEXTURE_RECTANGLE_ARB, GL_RGBA, SW, SH, GL_BGRA,
+                                        GL_UNSIGNED_INT_8_8_8_8_REV, surf[i], 0);
+        glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    }
+    printf("%s: two textures on two IOSurfaces (CGLTexImageIOSurface2D %d %d):\n", name, err[0], err[1]);
+    for (int round = 0; round < 2; round++) {
+        if (round)
+            for (int i = 0; i < 2; i++)
+                iosurface_fill(surf[i], second[i]);     /* only the surfaces change */
+        for (int i = 0; i < 2; i++) {
+            glClearColor(0.5f, 0.5f, 0.5f, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glBindTexture(GL_TEXTURE_RECTANGLE_ARB, tex[i]);
+            glColor3f(1, 1, 1);
+            glBegin(GL_QUADS);
+            glTexCoord2f(0, 0); glVertex2f(0, 0);
+            glTexCoord2f(SW, 0); glVertex2f(SW, 0);
+            glTexCoord2f(SW, SH); glVertex2f(SW, SH);
+            glTexCoord2f(0, SH); glVertex2f(0, SH);
+            glEnd();
+            unsigned char px[4] = { 0 };
+            glReadPixels(SW / 2, SH / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            printf("  texture %d, %s: RGBA %3d %3d %3d %3d (want %s)\n", i + 1,
+                   round ? "after the surface changed" : "as made", px[0], px[1], px[2], px[3],
+                   want[round][i]);
+        }
+    }
+    printf("  GL error 0x%x\n", glGetError());
+    glDeleteTextures(2, tex);
+    for (int i = 0; i < 2; i++)
+        if (surf[i])
+            CFRelease(surf[i]);
+    CFRelease(props); CFRelease(nw); CFRelease(nh); CFRelease(nb);
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+    CGLDestroyPBuffer(pb);
+    CGLDestroyPixelFormat(pf);
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 1 && !strcmp(argv[1], "iosurface")) {
+        run_iosurface("ours", 0);
+        run_iosurface("software", (CGLPixelFormatAttribute)0x00020400);
+        return 0;
+    }
     if (argc > 1 && !strcmp(argv[1], "stencil")) {
         run_stencil("ours", 0);
         run_stencil("software", (CGLPixelFormatAttribute)0x00020400);

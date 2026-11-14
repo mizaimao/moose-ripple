@@ -126,6 +126,7 @@ ripple_cgl_context_destroy(struct ripple_cgl_context *ctx)
    if (_glapi_get_context() == ctx->glctx)
       st_api_make_current(NULL, NULL, NULL);
    ripple_cgl_forget(ctx);
+   ripple_cgl_client_storage_context_gone(ctx->glctx);
    st_destroy_context(ctx->st);
    ctx->magic = 0;
    FREE(ctx);

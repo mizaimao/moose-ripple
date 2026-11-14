@@ -1066,8 +1066,47 @@ ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum 
 
 #define CS_MAX 2048
 
+/* IOSurface calls, looked up at run time (OpenGL.framework loads IOSurface.framework). */
+#include <dlfcn.h>
+typedef void *ripple_iosurface_ref;
+static struct {
+   int state;                            /* 0: not looked up yet, 1: all there, -1: not */
+   ripple_iosurface_ref (*lookup)(uint32_t);
+   int (*lock)(ripple_iosurface_ref, uint32_t, uint32_t *);
+   int (*unlock)(ripple_iosurface_ref, uint32_t, uint32_t *);
+   size_t (*plane_count)(ripple_iosurface_ref);
+   void *(*base)(ripple_iosurface_ref);
+   void *(*plane_base)(ripple_iosurface_ref, size_t);
+   size_t (*row_bytes)(ripple_iosurface_ref);
+   size_t (*plane_row_bytes)(ripple_iosurface_ref, size_t);
+   uint32_t (*seed)(ripple_iosurface_ref);
+   void (*release)(const void *);
+} ios;
+
+static bool
+ios_api(void)
+{
+   if (!ios.state) {
+      ios.lookup = dlsym(RTLD_DEFAULT, "IOSurfaceLookup");
+      ios.lock = dlsym(RTLD_DEFAULT, "IOSurfaceLock");
+      ios.unlock = dlsym(RTLD_DEFAULT, "IOSurfaceUnlock");
+      ios.plane_count = dlsym(RTLD_DEFAULT, "IOSurfaceGetPlaneCount");
+      ios.base = dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddress");
+      ios.plane_base = dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddressOfPlane");
+      ios.row_bytes = dlsym(RTLD_DEFAULT, "IOSurfaceGetBytesPerRow");
+      ios.plane_row_bytes = dlsym(RTLD_DEFAULT, "IOSurfaceGetBytesPerRowOfPlane");
+      ios.seed = dlsym(RTLD_DEFAULT, "IOSurfaceGetSeed");
+      ios.release = dlsym(RTLD_DEFAULT, "CFRelease");
+      ios.state = ios.lookup && ios.lock && ios.unlock && ios.plane_count && ios.base &&
+                  ios.plane_base && ios.row_bytes && ios.plane_row_bytes && ios.seed &&
+                  ios.release ? 1 : -1;
+   }
+   return ios.state > 0;
+}
+
 struct cs_tex {
    struct gl_texture_object *obj;   /* NULL: free slot */
+   const struct gl_shared_state *shared; /* the share group `obj` lives in */
    GLenum target, format, type;
    GLsizei width, height;
    GLsizei depth;                        /* 0 for 2D and rectangle textures */
@@ -1077,6 +1116,11 @@ struct cs_tex {
    bool explicit_update;                 /* the program updates it: leave it alone */
    uint8_t *shadow;                      /* the memory as last uploaded (rows packed), or NULL */
    size_t shadow_size;
+   /* A texture that is an IOSurface (CGLTexImageIOSurface2D): `ios` is the surface, kept
+    * until the texture goes; `pixels` is unused. Copied again when the surface's change
+    * counter has moved since the last copy. */
+   ripple_iosurface_ref ios;
+   uint32_t ios_plane, ios_seed;
 };
 /* Shadow copies in all: unchanged memory isn't uploaded again (Dashboard re-uploaded about 40
  * unchanged textures a frame, each a round trip through QEMU; performance stage 2026-11-11). */
@@ -1103,6 +1147,9 @@ cs_forget(const struct gl_texture_object *obj)
    struct cs_tex *t = obj ? cs_find(obj) : NULL;
    if (t) {
       t->obj = NULL;
+      if (t->ios)
+         ios.release(t->ios);
+      t->ios = NULL;
       free(t->shadow);
       cs_shadow_bytes -= t->shadow_size;
       t->shadow = NULL;
@@ -1278,6 +1325,34 @@ cs_refresh(struct gl_context *glctx, struct cs_tex *t)
    return true;
 }
 
+/* The same for a texture that is an IOSurface: copy the surface in again if it has changed.
+ * Its texture is bound to its target. */
+static void
+ios_refresh(struct gl_context *glctx, struct cs_tex *t)
+{
+   uint32_t seed = ios.seed(t->ios);
+   if (seed == t->ios_seed || ios.lock(t->ios, 1 /* kIOSurfaceLockReadOnly */, NULL) != 0)
+      return;
+   const void *pixels = ios.plane_count(t->ios) > 0 ? ios.plane_base(t->ios, t->ios_plane)
+                                                    : ios.base(t->ios);
+   if (pixels) {
+      struct gl_pixelstore_attrib saved = glctx->Unpack;
+      GLenum error = glctx->ErrorValue;
+      glctx->Unpack = t->unpack;
+      CALL_TexSubImage2D(GET_DISPATCH(), (t->target, 0, 0, 0, t->width, t->height, t->format,
+                                          t->type, pixels));
+      glctx->Unpack = saved;
+      glctx->ErrorValue = error;       /* the program never sees this upload */
+      t->ios_seed = seed;
+      static unsigned copies;
+      extern FILE *ripple_gld_dbg_file(void);
+      if (ripple_gld_dbg_file() && (++copies <= 4 || copies % 256 == 0))
+         fprintf(ripple_gld_dbg_file(), "RippleGLDriver: IOSurface texture %u copied again "
+                 "(%u such copies so far)\n", t->obj->Name, copies);
+   }
+   ios.unlock(t->ios, 1, NULL);
+}
+
 static bool
 cs_target(GLenum target)
 {
@@ -1369,6 +1444,7 @@ tex_image2D_body(struct ripple_cgl_context *ctx, struct gl_context *glctx, GLenu
          t = &cs_texs[cs_used++];
       if (t) {
          t->obj = obj;
+         t->shared = glctx->Shared;
          t->target = target;
          t->format = format;
          t->type = type;
@@ -1418,6 +1494,7 @@ ripple_cgl_tex_image3D(void *rend, GLenum target, GLint level, GLenum internalfo
          t = &cs_texs[cs_used++];
       if (t) {
          t->obj = obj;
+         t->shared = glctx->Shared;
          t->target = target;
          t->format = format;
          t->type = type;
@@ -1495,7 +1572,10 @@ ripple_cgl_bind_texture(void *rend, GLenum target, GLuint texture)
    struct gl_texture_object *obj = _mesa_get_current_tex_object(glctx, target);
    simple_mtx_lock(&cs_lock);
    struct cs_tex *t = obj ? cs_find(obj) : NULL;
-   if (t && !t->explicit_update && t->gen != cs_gen && !glctx->Unpack.BufferObj) {
+   if (t && t->ios) {
+      if (!t->explicit_update)
+         ios_refresh(glctx, t);
+   } else if (t && !t->explicit_update && t->gen != cs_gen && !glctx->Unpack.BufferObj) {
       t->gen = cs_gen;
       if (!cs_refresh(glctx, t))
          cs_forget(obj);
@@ -1516,6 +1596,21 @@ ripple_cgl_delete_textures(void *rend, GLsizei n, const GLuint *textures)
       simple_mtx_unlock(&cs_lock);
    }
    CALL_DeleteTextures(GET_DISPATCH(), (n, textures));
+}
+
+/* A context is about to be destroyed: when it is the last of its share group, the group's
+ * textures go with it, deleted or not, and so must what is remembered about them (a later
+ * texture at the same address would be taken for the old one). */
+void
+ripple_cgl_client_storage_context_gone(struct gl_context *glctx)
+{
+   if (!glctx || !glctx->Shared || glctx->Shared->RefCount > 1)
+      return;
+   simple_mtx_lock(&cs_lock);
+   for (unsigned i = cs_used; i-- > 0;)
+      if (cs_texs[i].obj && cs_texs[i].shared == glctx->Shared)
+         cs_forget(cs_texs[i].obj);
+   simple_mtx_unlock(&cs_lock);
 }
 
 void
@@ -2009,70 +2104,89 @@ ripple_cgl_program_string(void *rend, GLenum target, GLenum format, GLsizei len,
 /* CGLTexImageIOSurface2D: gliSetInteger(910, {IOSurface ID, target, internal format, width,
  * height, format, type, plane}) (OpenGL 10K549). Core Video hands video frames to GL this way
  * (Real Racing 2's intro: 640x720 BGRA holding 1280x720 2vuy, converted by Core Animation's ARB
- * programs, M6); the call went to GLEngine and the textures stayed empty. The surface's pixels
- * are copied into the bound texture now: Core Video makes a texture per frame. The IOSurface
- * calls are looked up at run time (OpenGL.framework loads IOSurface.framework). */
-#include <dlfcn.h>
+ * programs, M6); the call went to GLEngine and the textures stayed empty.
+ * On Apple's drivers such a texture is the surface: what is written to the surface later shows
+ * in the texture. Core Video counts on that. It keeps a pool of surfaces (16 for a movie),
+ * makes one texture for each the first time it is shown, and from then on only decodes into
+ * the surfaces and binds the textures. With a single copy here a movie showed its first 16
+ * frames over and over. So the surface is copied into the texture now, and the pair is
+ * remembered like a client-storage texture: at each later bind the surface's change counter
+ * (its seed) says whether to copy again (ios_refresh), until the texture is deleted or given
+ * another image. Not covered: a texture left bound from frame to frame and never bound again. */
 #include "main/image.h"
 
-typedef void *ripple_iosurface_ref;
 int
 ripple_cgl_iosurface_texture(struct ripple_cgl_context *ctx, const uint32_t *v)
 {
-   static ripple_iosurface_ref (*lookup)(uint32_t);
-   static int (*lock)(ripple_iosurface_ref, uint32_t, uint32_t *);
-   static int (*unlock)(ripple_iosurface_ref, uint32_t, uint32_t *);
-   static size_t (*plane_count)(ripple_iosurface_ref);
-   static void *(*base)(ripple_iosurface_ref);
-   static void *(*plane_base)(ripple_iosurface_ref, size_t);
-   static size_t (*row_bytes)(ripple_iosurface_ref);
-   static size_t (*plane_row_bytes)(ripple_iosurface_ref, size_t);
-   static void (*release)(const void *);
-   if (!lookup) {
-      lookup = dlsym(RTLD_DEFAULT, "IOSurfaceLookup");
-      lock = dlsym(RTLD_DEFAULT, "IOSurfaceLock");
-      unlock = dlsym(RTLD_DEFAULT, "IOSurfaceUnlock");
-      plane_count = dlsym(RTLD_DEFAULT, "IOSurfaceGetPlaneCount");
-      base = dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddress");
-      plane_base = dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddressOfPlane");
-      row_bytes = dlsym(RTLD_DEFAULT, "IOSurfaceGetBytesPerRow");
-      plane_row_bytes = dlsym(RTLD_DEFAULT, "IOSurfaceGetBytesPerRowOfPlane");
-      release = dlsym(RTLD_DEFAULT, "CFRelease");
-   }
-   if (!lookup || !lock || !unlock || !plane_count || !base || !plane_base || !row_bytes ||
-       !plane_row_bytes || !release)
+   if (!ios_api())
       return 10008;                          /* kCGLBadValue */
    uint32_t id = v[0], plane = v[7];
    GLenum target = v[1], ifmt = v[2], format = v[5], type = v[6];
    GLsizei w = (GLsizei)v[3], h = (GLsizei)v[4];
-   ripple_iosurface_ref s = lookup(id);
+   ripple_iosurface_ref s = ios.lookup(id);
    if (!s)
       return 10008;
    RIPPLE_CGL_ENTER(ctx);
    struct gl_context *gl = ctx->glctx;
-   bool planar = plane_count(s) > 0;
+   bool planar = ios.plane_count(s) > 0;
    int ret = 10008;
-   if (lock(s, 1 /* kIOSurfaceLockReadOnly */, NULL) == 0) {
-      const void *pixels = planar ? plane_base(s, plane) : base(s);
-      size_t rb = planar ? plane_row_bytes(s, plane) : row_bytes(s);
+   struct gl_pixelstore_attrib unpack;
+   memset(&unpack, 0, sizeof(unpack));
+   uint32_t seed = ios.seed(s);              /* before the copy: a change during it counts */
+   if (ios.lock(s, 1 /* kIOSurfaceLockReadOnly */, NULL) == 0) {
+      const void *pixels = planar ? ios.plane_base(s, plane) : ios.base(s);
+      size_t rb = planar ? ios.plane_row_bytes(s, plane) : ios.row_bytes(s);
       GLint bpp = _mesa_bytes_per_pixel(format, type);
       if (pixels && bpp > 0 && rb % bpp == 0 && rb / bpp >= (size_t)w) {
          struct gl_pixelstore_attrib saved = gl->Unpack;
-         memset(&gl->Unpack, 0, sizeof(gl->Unpack));
-         gl->Unpack.Alignment = 1;
-         gl->Unpack.RowLength = rb / bpp;
+         unpack.Alignment = 1;
+         unpack.RowLength = rb / bpp;
+         gl->Unpack = unpack;
          CALL_TexImage2D(GET_DISPATCH(), (target, 0, ifmt, w, h, 0, format, type, pixels));
          gl->Unpack = saved;
          ret = 0;
       }
-      unlock(s, 1, NULL);
+      ios.unlock(s, 1, NULL);
    }
-   release(s);
+   /* Remember the pair (the reference from the lookup is kept with it). */
+   struct gl_texture_object *obj = cs_target(target) && target != GL_TEXTURE_3D
+      ? _mesa_get_current_tex_object(gl, target) : NULL;
+   const struct gl_texture_image *img = obj ? obj->Image[0][0] : NULL;
+   bool kept = false;
+   simple_mtx_lock(&cs_lock);
+   if (obj)
+      cs_forget(obj);
+   if (ret == 0 && obj && obj->Name && img && img->Width == (GLuint)w && img->Height == (GLuint)h) {
+      struct cs_tex *t = cs_find(NULL);
+      if (!t && cs_used < CS_MAX)
+         t = &cs_texs[cs_used++];
+      if (t) {
+         t->obj = obj;
+         t->shared = gl->Shared;
+         t->target = target;
+         t->format = format;
+         t->type = type;
+         t->width = w;
+         t->height = h;
+         t->depth = 0;
+         t->pixels = NULL;
+         t->unpack = unpack;
+         t->gen = cs_gen;
+         t->explicit_update = false;
+         t->ios = s;
+         t->ios_plane = plane;
+         t->ios_seed = seed;
+         kept = true;
+      }
+   }
+   simple_mtx_unlock(&cs_lock);
+   if (!kept)
+      ios.release(s);
    static unsigned logged;
    extern FILE *ripple_gld_dbg_file(void);
    if (ripple_gld_dbg_file() && logged++ < 20)
       fprintf(ripple_gld_dbg_file(), "RippleGLDriver: IOSurface %u texture: target 0x%x format "
-              "0x%x/0x%x/0x%x %dx%d plane %u: %s\n", id, target, ifmt, format, type, w, h, plane,
-              ret ? "refused" : "copied");
+              "0x%x/0x%x/0x%x %dx%d plane %u: %s%s\n", id, target, ifmt, format, type, w, h, plane,
+              ret ? "refused" : "copied", kept ? ", followed from now on" : "");
    return ret;
 }
