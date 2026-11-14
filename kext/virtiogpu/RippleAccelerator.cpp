@@ -98,6 +98,19 @@ bool RippleAccelerator::start(IOService *provider)
     return true;
 }
 
+uint32_t RippleAccelerator::kernelContext()
+{
+    IOLockLock(fSurfacesLock);
+    if (!fKernelContext) {
+        uint32_t id = fDev->allocContextId();
+        if (fDev->ctxCreate(id, "ripple-kernel"))
+            fKernelContext = id;
+    }
+    uint32_t ctx = fKernelContext;
+    IOLockUnlock(fSurfacesLock);
+    return ctx;
+}
+
 void RippleAccelerator::stop(IOService *provider)
 {
     if (fSurfaces) {

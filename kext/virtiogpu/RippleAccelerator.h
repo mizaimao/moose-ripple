@@ -26,6 +26,7 @@ class RippleAccelerator : public IOAccelerator
     bool               fQE;          // surface clients for WindowServer (ripple_qe, M5)
     bool               fQEDebug;     // ripple_qe=2: log every surface call
     IOLock            *fSurfacesLock;
+    uint32_t           fKernelContext;   // made at first use (kernelContext())
     OSArray           *fSurfaces;    // RippleSurfaceClients, for lookups by surface id
     RippleSurfaceClient *retainSurface(uint32_t id);    // retained, or 0
 
@@ -34,6 +35,9 @@ public:
     const struct ripple_gpu_info &info() const { return fInfo; }
     RippleFramebuffer *framebuffer() const { return fFB; }
     bool qeDebug() const { return fQEDebug; }
+    // A context on the host for copies the kernel makes on its own account (none of a
+    // program's contexts is involved: a screen capture); 0 if it could not be made.
+    uint32_t kernelContext();
     void addSurface(OSObject *s);
     void removeSurface(OSObject *s);
     // Describe surface `id` for task `asker` (backing address only for its owner).
