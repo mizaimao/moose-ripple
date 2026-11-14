@@ -72,6 +72,7 @@ class RippleSurfaceClient : public IOUserClient
                    uint32_t *attached);
     void dropStage();
     void fetchFrame();
+    void fetchScreen();
     uint32_t           fShapeSeq;
 
     // Backing: the client's own memory, or ours mapped into the client.
@@ -82,6 +83,8 @@ class RippleSurfaceClient : public IOUserClient
     IOMemoryMap       *fOwnMap;
 
     bool               fReadLocked, fWriteLocked;
+    bool               fEverLocked;      // since the surface got its id
+    bool               fBackingUnfilled; // a client backing nothing has been put into yet
 
     void releaseBacking();
     IOReturn setShape(uint32_t options, uint32_t framebuffer, mach_vm_address_t backing,

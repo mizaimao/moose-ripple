@@ -436,3 +436,31 @@ Not covered: a texture that stays bound from frame to frame and is never bound a
 Checked on the dev VM: the test gives the 9600 GT's result; the Welcome movie plays through in
 QuickTime Player at its 24 frames/s (the same scenes as on the 9600 GT, in screenshots a second
 apart); Real Racing 2's intro, which goes through QTKit, as before.
+
+## Screenshots inside the guest were black (2026-11-13)
+
+`screencapture`, Cmd-Shift-3 and anything else that asks WindowServer for a picture of the
+screen got a black picture of the right size with Quartz Extreme on, while the display itself
+was right.
+
+How WindowServer takes it, traced with dtrace on its IOKit calls (`CGXHWCaptureDesktop`,
+CoreGraphics 10.6.8): no OpenGL read-back at all. It opens a surface on the accelerator, gives
+it an id (SetIDMode, windowed, 32 bit), a shape over the whole screen together with a backing
+of its own (SetShapeBackingAndLength: options 0x7, row bytes 5120, 4 096 000 bytes for
+1280x800), takes a write lock in the backing (WriteLockOptions 0), unlocks, and reads the
+backing. So a lock on a surface that has only ever existed on the screen is expected to hand
+out what the screen shows there. Our kext handed the backing back as it came: zeroes.
+
+Fix (`RippleSurfaceClient::fetchScreen`): at the first lock of a new surface that came with a
+backing, the screen's pixels under the surface are put into the backing: a copy on the GPU
+from the displayed buffer into a buffer over the client's memory, then that buffer read back,
+in a context the accelerator keeps for its own copies. Only with a GPU buffer on the display,
+and only for the first lock, so a window that draws into its backing itself is left alone
+after that.
+
+Checked on the dev VM: `screencapture -x` and Cmd-Shift-3 give the same picture as the host's
+view of the screen (desktop, Chess, a dialog, a GPU-drawn and a software-drawn gl-gears
+window); a capture takes 0.16 s; the software-drawn gl-gears window, whose surface has a
+backing too, runs as before (58.8 frames/s). 10.6's `screencapture` has no option for a single
+window or a rectangle from the command line; the interactive selection (Cmd-Shift-4) was not
+tried.
