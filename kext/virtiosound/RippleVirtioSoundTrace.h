@@ -24,9 +24,11 @@ enum {
     kTrStart = 1,   // performAudioEngineStart entered
     kTrRun,         // PCM_START sent                     a = TX slots in flight
     kTrBurst,       // completion during the start burst  a = slot
-    kTrAnchor,      // first paced completion: loop 0 stamped here
+    kTrAnchor,      // first paced completion             a = slot, b = frame the reads start at
     kTrRead,        // a period copied from the ring      a = slot, b = first frame
-    kTrWrap,        // takeTimeStamp at the ring's start  a = loop count after it
+    kTrWrap,        // a loop timestamp taken             a = loop count after it,
+                    //   b = measured minus predicted wrap time in us (signed),
+                    //   c = the timestamp, us after the start
     kTrClip,        // Core Audio wrote into the ring     a = first frame, b = frames,
                     //   c = read position then, flag = 1 if the mix had any non-zero sample
     kTrStop         // performAudioEngineStop

@@ -60,6 +60,10 @@ private:
     bool               fWrapPending;      // a read passed frame 0: stamp fWrapTime once it has passed
     uint64_t           fWrapTime;
     uint64_t           fStartTime;        // loop 0's timestamp (absolute time)
+    uint64_t           fLastStamp;        // the last loop timestamp taken
+    uint64_t           fLoopAbs;          // predicted length of a pass over the ring
+    uint64_t           fLoopNominal;      // kRingFrames at 48 kHz
+    int64_t            fWrapErr;          // measured minus predicted, last pass (trace)
     uint64_t           fLastDone;         // absolute time of the last completion (start burst)
     uint64_t           fHalfPeriodAbs;
 
