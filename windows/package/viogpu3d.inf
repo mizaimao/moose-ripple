@@ -1,0 +1,104 @@
+;
+; viogpu3d.inf: Windows 7 x64 test package for the virtio-gpu WDDM 1.1 driver (windows/kmd).
+; Made from virtio-win's viogpu3d.inx (windows/kmd/viogpu3d/viogpu3d.inx, BSD-3-Clause, see
+; windows/kmd/LICENSE) for Windows 7: x64 decoration, user-mode drivers in System32 (Windows 7
+; has no DriverStore directory id 13), no msdv.inf, no PnpLockdown, FeatureScore F8 (WDDM 1.0/1.1), no catalog
+; yet (Windows asks to confirm the unsigned package; the kernel driver itself is test-signed).
+; Only the Direct3D 10 user-mode driver for now: no Direct3D 9 one exists yet, and no OpenGL.
+;
+
+[Version]
+Signature="$Windows NT$"
+Class=Display
+ClassGUID={4d36e968-e325-11ce-bfc1-08002be10318}
+Provider=%Provider%
+DriverVer=11/14/2026,0.0.1.1
+
+[DestinationDirs]
+VioGpu3D_Files.Driver   = 12   ; System32\drivers
+VioGpu3D_Files.Usermode = 11   ; System32
+
+[SourceDisksNames]
+1 = %DiskId1%,,,""
+
+[SourceDisksFiles]
+viogpu3d.sys = 1,,
+viogpu_d3d10.dll = 1,,
+
+[Manufacturer]
+%Provider%=Ripple,NTamd64
+
+[Ripple.NTamd64]
+%VioGpu3D.DeviceDesc% = VioGpu3D_Inst, PCI\VEN_1AF4&DEV_1050&SUBSYS_11001AF4&REV_01
+
+[VioGpu3D_Files.Driver]
+viogpu3d.sys
+
+[VioGpu3D_Files.Usermode]
+viogpu_d3d10.dll
+
+[VioGpu3D_Inst]
+; The display class installer refuses a display INF without FeatureScore ("does not support this
+; version of Windows", 0xE000022D). F8: a WDDM 1.0/1.1 driver.
+FeatureScore=F8
+CopyFiles=VioGpu3D_Files.Driver, VioGpu3D_Files.Usermode
+AddReg=VioGpu3D_DeviceSettings
+
+[VioGpu3D_Inst.SoftwareSettings]
+AddReg = VioGpu3D_SoftwareDeviceSettings
+
+[VioGpu3D_Inst.Services]
+AddService = VioGpu3D,0x00000002,VioGpu3D_Service_Inst,VioGpu3D_EventLog_Inst
+
+[VioGpu3D_Inst.HW]
+AddReg = VioGpu3D_PCI_MSIX
+
+; LoadOrderGroup Video, as Windows 7 display drivers have: the group before "Video Save" (VgaSave,
+; the old-model fallback VGA driver). On its own it does not cure the Code 43 seen so far
+; (docs/windows/kmd-port-notes.md, "Load tests", runs 3 and 4).
+[VioGpu3D_Service_Inst]
+ServiceType    = %SERVICE_KERNEL_DRIVER%
+StartType      = %SERVICE_DEMAND_START%
+ErrorControl   = %SERVICE_ERROR_IGNORE%
+LoadOrderGroup = Video
+ServiceBinary  = %12%\viogpu3d.sys
+
+[VioGpu3D_EventLog_Inst]
+AddReg = VioGpu3D_EventLog_Inst.AddReg
+
+[VioGpu3D_EventLog_Inst.AddReg]
+HKR,,EventMessageFile,%REG_EXPAND_SZ%,"%%SystemRoot%%\System32\IoLogMsg.dll"
+HKR,,TypesSupported,%REG_DWORD%,7
+
+[VioGpu3D_DeviceSettings]
+HKR,, HWCursor,           %REG_DWORD%, 0
+HKR,, FlexResolution,     %REG_DWORD%, 1
+HKR,, UsePhysicalMemory,  %REG_DWORD%, 0
+HKLM,"SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Scheduler",EnablePreemption,%REG_DWORD%,0
+HKLM,"SYSTEM\CurrentControlSet\Control\GraphicsDrivers",TdrDebugMode,%REG_DWORD%,1
+
+; Windows 7 reads the display settings from the device's software key (.SoftwareSettings).
+[VioGpu3D_SoftwareDeviceSettings]
+; User-mode drivers: first the Direct3D 9 one, then Direct3D 10 (x64 without 32-bit ones). No
+; Direct3D 9 driver exists yet: the Direct3D 10 one in both places for now.
+HKR,, UserModeDriverName,     %REG_MULTI_SZ%, viogpu_d3d10.dll, viogpu_d3d10.dll
+HKR,, InstalledDisplayDrivers, %REG_MULTI_SZ%, viogpu_d3d10, viogpu_d3d10
+HKR,, VgaCompatible,          %REG_DWORD%, 0
+
+[VioGpu3D_PCI_MSIX]
+HKR, "Interrupt Management",, 0x00000010
+HKR, "Interrupt Management\MessageSignaledInterruptProperties",, 0x00000010
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", MSISupported, 0x00010001, 0
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", MessageNumberLimit, 0x00010001, 4
+
+[Strings]
+Provider = "moose-ripple"
+DiskId1 = "moose-ripple virtio-gpu test package"
+VioGpu3D.DeviceDesc = "virtio-gpu 3D (moose-ripple test)"
+
+SERVICE_KERNEL_DRIVER = 0x1
+SERVICE_DEMAND_START  = 0x3
+SERVICE_ERROR_IGNORE  = 0x0
+REG_MULTI_SZ  = 0x00010000
+REG_EXPAND_SZ = 0x00020000
+REG_DWORD     = 0x00010001
