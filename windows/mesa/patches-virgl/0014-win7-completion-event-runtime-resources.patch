@@ -1,0 +1,120 @@
+Windows 7: a completion event from the kernel driver, and which allocations belong to the runtime
+
+Three changes that go with our own kernel bridge (windows/mesa/overlay-virgl) and kernel driver
+(windows/kmd):
+
+- The winsys waits for submitted commands with an event. The bridge it was written for had
+  Windows set that event (a synchronization object that signals a CPU event, WDDM 1.2). Windows
+  7 has no such thing, so the winsys now ends the buffer with a command of the kernel driver's
+  private protocol, VIOGPU_CMD_SIGNAL_EVENT, and the kernel driver sets the event when the
+  buffer has run on the host.
+- The winsys refuses a missing bridge device instead of using it.
+- The Direct3D 10 driver ties allocations to the runtime's resource only for primaries and
+  shared resources, where the runtime needs that. All others are the driver's own: the winsys
+  keeps some of them for reuse after the runtime's resource is gone, and would give them back
+  later through a resource handle that no longer exists. A primary also gets the display-target
+  binding, which keeps it out of that reuse cache, and its display source from the runtime.
+
+diff -ru a/src/gallium/frontends/d3d10umd/Resource.cpp b/src/gallium/frontends/d3d10umd/Resource.cpp
+--- a/src/gallium/frontends/d3d10umd/Resource.cpp
++++ b/src/gallium/frontends/d3d10umd/Resource.cpp
+@@ -252,9 +252,16 @@
+    struct pipe_screen *screen = pipe->screen;
+ 
+    mtx_lock(&device->CreateResourceMtx);
+-   device->device.allocationVidPn = 0;
++   /* Allocations belong to the runtime's resource only where the runtime has to find them
++    * through it: primaries and shared resources. The others are the driver's own, which
++    * the winsys may keep and reuse after the runtime's resource is gone.
++    */
++   device->device.allocationVidPn =
++      pCreateResource->pPrimaryDesc ? pCreateResource->pPrimaryDesc->VidPnSourceId : 0;
+    device->device.isPrimary = pCreateResource->pPrimaryDesc != NULL;
+-   device->device.hRTResource = hRTResource.handle;
++   device->device.hRTResource =
++      (pCreateResource->pPrimaryDesc ||
++       (pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED)) ? hRTResource.handle : NULL;
+ 
+    Resource *pResource = CastResource(hResource);
+ 
+@@ -304,7 +311,11 @@
+       templat.bind = PIPE_BIND_SAMPLER_VIEW;
+    }
+    if ((pCreateResource->MiscFlags & D3D10_DDI_RESOURCE_MISC_SHARED)) {
+-      templat.bind |= PIPE_BIND_SHARED;
++      templat.bind    if (pCreateResource->pPrimaryDesc) {
++      /* What the display shows; also keeps it out of the winsys's reuse cache. */
++      templat.bind |= PIPE_BIND_DISPLAY_TARGET;
++   }
++|= PIPE_BIND_SHARED;
+    }
+ 
+    if (templat.target != PIPE_BUFFER) {
+diff -ru a/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c b/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
+--- a/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
++++ b/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
+@@ -729,7 +729,26 @@
+       HANDLE event = CreateEventA(NULL, TRUE, FALSE, NULL);
+       if (event) {
+          *fence = virgl_gdi_fence_create(qws, event, false);
+-         render.CompletionEvent = event;
++
++         /* The kernel driver sets the event when these commands have run on the host,
++          * asked by a command of its own at the end of the buffer: Windows 7 has no
++          * way to have the system do it. Without room for that command the event is
++          * set at submission.
++          */
++         UINT end = render.CommandLength;
++         UINT need = sizeof(VIOGPU_COMMAND_HDR) + sizeof(VIOGPU_SIGNAL_CMD);
++         if (end + need <= cbuf->ctx->CommandBufferSize) {
++            VIOGPU_COMMAND_HDR *hdr =
++               (VIOGPU_COMMAND_HDR *)((uint8_t *)cbuf->ctx->pCommandBuffer + end);
++            VIOGPU_SIGNAL_CMD *signal = (VIOGPU_SIGNAL_CMD *)(hdr + 1);
++
++            hdr->type = VIOGPU_CMD_SIGNAL_EVENT;
++            hdr->size = sizeof(VIOGPU_SIGNAL_CMD);
++            signal->hEvent = (ULONGLONG)(UINT_PTR)event;
++            render.CommandLength += need;
++         } else {
++            render.CompletionEvent = event;
++         }
+       }
+    }
+ 
+@@ -972,6 +991,10 @@
+ 
+    NTSTATUS Status;
+ 
++   /* No WDDM display driver behind the window, or not one that lets us in */
++   if (!device)
++      return NULL;
++
+    struct virgl_gdi_winsys *qdws = CALLOC_STRUCT(virgl_gdi_winsys);
+    if (!qdws)
+       return NULL;
+diff -ru a/src/virtio/wddm/viogpu_wddm_driver.h b/src/virtio/wddm/viogpu_wddm_driver.h
+--- a/src/virtio/wddm/viogpu_wddm_driver.h
++++ b/src/virtio/wddm/viogpu_wddm_driver.h
+@@ -169,6 +169,9 @@
+ #define VIOGPU_CMD_SUBMIT                       0x1 // Submit Command to virgl
+ #define VIOGPU_CMD_TRANSFER_TO_HOST             0x2 // Transfer resource to host
+ #define VIOGPU_CMD_TRANSFER_FROM_HOST           0x3 // Transfer resource to host
++// Set this event of the calling process when the commands of this buffer have run on the host.
++// The body is a VIOGPU_SIGNAL_CMD. (moose-ripple: Windows 7 has nothing of its own for this.)
++#define VIOGPU_CMD_SIGNAL_EVENT                 0x4
+ 
+ #pragma pack(1)
+ typedef struct _VIOGPU_COMMAND_HDR {
+@@ -191,6 +194,12 @@
+ } VIOGPU_TRANSFER_CMD;
+ #pragma pack()
+ 
++#pragma pack(1)
++typedef struct _VIOGPU_SIGNAL_CMD {
++    ULONGLONG hEvent; // an event handle of the calling process
++} VIOGPU_SIGNAL_CMD;
++#pragma pack()
++
+ 
+ 
+ #define BASE_NAMED_OBJECTS    L"\\BaseNamedObjects\\"
