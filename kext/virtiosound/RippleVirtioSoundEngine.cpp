@@ -14,6 +14,7 @@
 #include "RippleVirtioSound.h"
 
 #include <IOKit/IOLib.h>
+#include <kern/clock.h>
 #include <IOKit/audio/IOAudioStream.h>
 #include <IOKit/audio/IOAudioLevelControl.h>
 #include <IOKit/audio/IOAudioToggleControl.h>
@@ -52,6 +53,7 @@ bool RippleVirtioSoundEngine::initHardware(IOService *provider)
     // (zeros, every 10.7 ms, measured 2026-11-13).
     setSampleOffset(kPrimeSlots * kPeriodFrames);
     setOutputSampleLatency(kPrimeSlots * kPeriodFrames);
+    nanoseconds_to_absolutetime(kPeriodFrames * 1000000000ULL / 48000 / 2, &fHalfPeriodAbs);
     setDescription("Virtio Sound");
 
     fRingBytes = kRingFrames * kBytesPerFrame;
@@ -129,9 +131,10 @@ void RippleVirtioSoundEngine::submit(unsigned slot)
 {
     UInt32 frame = fNextFrame;
     if (frame == 0) {
-        if (fWrapped)
+        if (fAnchorRead)
+            fAnchorRead = false;        // the anchoring read itself (loop 0 stamped in txDone)
+        else
             takeTimeStamp();            // the read is back at the ring's start: one loop done
-        fWrapped = true;
     }
     memcpy(fDevice->txData(slot), fRing + frame * kBytesPerFrame, kPeriodBytes);
     fNextFrame = (frame + kPeriodFrames) % kRingFrames;
@@ -141,8 +144,28 @@ void RippleVirtioSoundEngine::submit(unsigned slot)
 
 void RippleVirtioSoundEngine::txDone(unsigned slot)
 {
-    if (fRunning)
-        submit(slot);
+    if (!fRunning)
+        return;
+    // At the start QEMU takes several slots at once to fill its own buffer. Reading the ring
+    // during that burst would make the first loop look short, and Core Audio would later jump
+    // its timeline to correct it (a click, 'clipIfNecessary ... adjusting' in the kernel log).
+    // So the burst gets silence, and the ring is first read, and loop 0 anchored, at the first
+    // completion that comes at the device's own pace.
+    uint64_t now = mach_absolute_time();
+    if (!fReading) {
+        bool paced = fLastDone && now - fLastDone > fHalfPeriodAbs;
+        fLastDone = now;
+        if (!paced) {
+            bzero(fDevice->txData(slot), kPeriodBytes);
+            fDevice->txSubmit(slot, kPeriodBytes);
+            return;
+        }
+        fReading = true;
+        fAnchorRead = true;
+        fNextFrame = 0;
+        takeTimeStamp(false, (AbsoluteTime *)&now);
+    }
+    submit(slot);
 }
 
 IOReturn RippleVirtioSoundEngine::performAudioEngineStart()
@@ -157,7 +180,8 @@ IOReturn RippleVirtioSoundEngine::performAudioEngineStart()
         return kIOReturnError;
     }
     fNextFrame = 0;
-    fWrapped = false;
+    fReading = false;
+    fLastDone = 0;
     fRunning = true;
     // Silence first: the device always holds kPrimeSlots periods, and every returned slot is
     // refilled from the ring.
