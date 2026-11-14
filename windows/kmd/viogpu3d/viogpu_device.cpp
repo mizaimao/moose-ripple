@@ -269,6 +269,7 @@ NTSTATUS VioGpuDevice::Render(DXGKARG_RENDER *pRender)
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 
     char *pDmaBufStart = (char *)pRender->pDmaBuffer;
+    PKEVENT pCompletionEvent = NULL;
 
     __try
     {
@@ -291,6 +292,10 @@ NTSTATUS VioGpuDevice::Render(DXGKARG_RENDER *pRender)
         {
             if (cmdBuf + sizeof(VIOGPU_COMMAND_HDR) > endBuf)
             {
+                if (pCompletionEvent)
+                {
+                    ObDereferenceObject(pCompletionEvent);
+                }
                 return STATUS_INVALID_USER_BUFFER;
             }
 
@@ -301,11 +306,37 @@ NTSTATUS VioGpuDevice::Render(DXGKARG_RENDER *pRender)
 
             if (cmdBuf + cmdHdr->size > endBuf)
             {
+                if (pCompletionEvent)
+                {
+                    ObDereferenceObject(pCompletionEvent);
+                }
                 return STATUS_INVALID_USER_BUFFER;
             }
 
             // Copy command body
             memcpy(dmaBuf, cmdBuf, cmdHdr->size);
+
+            // An event to set when this buffer has run. The handle belongs to the calling process,
+            // which is the one we are in now and not the one the commands run in later, so the
+            // event is looked up here, and the command itself is not passed on.
+            if (cmdHdr->type == VIOGPU_CMD_SIGNAL_EVENT)
+            {
+                if (cmdHdr->size >= sizeof(VIOGPU_SIGNAL_CMD) && pCompletionEvent == NULL)
+                {
+                    HANDLE hEvent = (HANDLE)(ULONG_PTR)((VIOGPU_SIGNAL_CMD *)dmaBuf)->hEvent;
+                    PVOID pEvent = NULL;
+                    if (NT_SUCCESS(ObReferenceObjectByHandle(hEvent,
+                                                             EVENT_MODIFY_STATE,
+                                                             *ExEventObjectType,
+                                                             UserMode,
+                                                             &pEvent,
+                                                             NULL)))
+                    {
+                        pCompletionEvent = (PKEVENT)pEvent;
+                    }
+                }
+                cmdHdr->type = VIOGPU_CMD_NOP;
+            }
             dmaBuf += cmdHdr->size;
             cmdBuf += cmdHdr->size;
         }
@@ -314,6 +345,10 @@ NTSTATUS VioGpuDevice::Render(DXGKARG_RENDER *pRender)
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
         DbgPrint(TRACE_LEVEL_FATAL, ("<---> %s Usermode copy exception", __FUNCTION__));
+        if (pCompletionEvent)
+        {
+            ObDereferenceObject(pCompletionEvent);
+        }
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -324,6 +359,7 @@ NTSTATUS VioGpuDevice::Render(DXGKARG_RENDER *pRender)
         *privateData = cmd;
     }
     cmd->SetDmaBuf(pDmaBufStart);
+    cmd->SetCompletionEvent(pCompletionEvent);
     cmd->AttachAllocations(pRender->pAllocationList, pRender->AllocationListSize);
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));

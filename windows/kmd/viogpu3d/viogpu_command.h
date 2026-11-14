@@ -27,6 +27,12 @@ class VioGpuCommand
 
     void AttachAllocations(DXGK_ALLOCATIONLIST *allocationList, UINT allocationListLength);
 
+    // An event to set when the command has run; the reference to it is given to the command.
+    void SetCompletionEvent(PKEVENT pEvent)
+    {
+        m_pCompletionEvent = pEvent;
+    }
+
     LIST_ENTRY list_entry;
 
   private:
@@ -42,6 +48,8 @@ class VioGpuCommand
 
     VioGpuAllocation **m_allocations;
     UINT m_allocationsLength;
+
+    PKEVENT m_pCompletionEvent;
 };
 
 class VioGpuCommander

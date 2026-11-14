@@ -21,6 +21,7 @@ VioGpuCommand::VioGpuCommand(VioGpuAdapter *adapter)
 
     m_allocations = NULL;
     m_allocationsLength = 0;
+    m_pCompletionEvent = NULL;
 
     list_entry.Blink = NULL;
     list_entry.Flink = NULL;
@@ -115,6 +116,13 @@ void VioGpuCommand::Run()
             }
         }
         delete m_allocations;
+    }
+
+    if (m_pCompletionEvent)
+    {
+        KeSetEvent(m_pCompletionEvent, IO_NO_INCREMENT, FALSE);
+        ObDereferenceObject(m_pCompletionEvent);
+        m_pCompletionEvent = NULL;
     }
 
     DXGKARGCB_NOTIFY_INTERRUPT_DATA interrupt;

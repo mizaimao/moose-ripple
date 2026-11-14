@@ -175,6 +175,10 @@ typedef struct _VIOGPU_CREATE_ALLOCATION_EXCHANGE
 // Written by the kernel driver only, after a copy into a surface: this box of the resource has
 // changed, show it if the resource is the one on screen. The body is a VIOGPU_TRANSFER_CMD.
 #define VIOGPU_CMD_SCREEN_CHANGED     0x100
+// From user mode: set this event of the calling process when the commands of this buffer have run
+// on the host. The body is a VIOGPU_SIGNAL_CMD. Windows 7 has nothing of its own for this; later
+// versions do it with a synchronization object that signals a CPU event.
+#define VIOGPU_CMD_SIGNAL_EVENT       0x4
 
 #pragma pack(1)
 typedef struct _VIOGPU_COMMAND_HDR
@@ -196,6 +200,13 @@ typedef struct _VIOGPU_TRANSFER_CMD
     ULONG stride;
     ULONG layer_stride;
 } VIOGPU_TRANSFER_CMD;
+#pragma pack()
+
+#pragma pack(1)
+typedef struct _VIOGPU_SIGNAL_CMD
+{
+    ULONGLONG hEvent; // an event handle of the calling process
+} VIOGPU_SIGNAL_CMD;
 #pragma pack()
 
 #define BASE_NAMED_OBJECTS    L"\\BaseNamedObjects\\"
