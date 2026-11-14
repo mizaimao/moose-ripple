@@ -1,0 +1,62 @@
+--- a/src/gallium/drivers/virgl/virgl_resource.c
++++ b/src/gallium/drivers/virgl/virgl_resource.c
+@@ -199,6 +199,18 @@
+       wait = false;
+    }
+ 
++   /* moose-ripple: reading a buffer the host has not written (still clean) needs nothing
++    * from the host. The guest's copy is the newest one, and commands not yet sent only read
++    * it. Without this, each draw whose vertex or index buffer Mesa has to read (u_vbuf
++    * converting a vertex format, or looking for the highest index) would submit the command
++    * buffer and wait for it. */
++   if (res->b.target == PIPE_BUFFER && !readback &&
++       !(xfer->base.usage & PIPE_MAP_WRITE) &&
++       likely(!(virgl_debug & VIRGL_DEBUG_XFER))) {
++      flush = false;
++      wait = false;
++   }
++
+    /* When the resource is busy but its content can be discarded, we can
+     * replace its HW resource or use a staging buffer to avoid waiting.
+     */
+--- a/src/gallium/drivers/virgl/virgl_screen.c
++++ b/src/gallium/drivers/virgl/virgl_screen.c
+@@ -719,6 +719,17 @@
+ 
+    if (format_desc->channel[i].type == UTIL_FORMAT_TYPE_FIXED)
+       return false;
++
++   /* moose-ripple: integer attributes read as floats without normalising (GL_SHORT positions
++    * and texture coordinates; Real Racing 2 draws nearly everything with them). Direct3D 12
++    * has no such vertex format, so Mesa's D3D12 driver on the host (QEMU in WSL2) converts
++    * the vertices on its CPU at every draw, out of memory mapped from the GPU: most of a
++    * frame's time in that game. Mesa converts them here instead, before they are sent. */
++   if (vscreen->no_scaled_vertex_formats &&
++       (format_desc->channel[i].type == UTIL_FORMAT_TYPE_SIGNED ||
++        format_desc->channel[i].type == UTIL_FORMAT_TYPE_UNSIGNED) &&
++       !format_desc->channel[i].normalized && !format_desc->channel[i].pure_integer)
++      return false;
+    return true;
+ }
+ 
+@@ -1223,6 +1234,10 @@
+                  &screen->caps.caps.v2.supported_readback_formats);
+    fixup_formats(&screen->caps.caps, &screen->caps.caps.v2.scanout);
+    fixup_renderer(&screen->caps.caps);
++   /* moose-ripple: see virgl_is_vertex_format_supported. RIPPLE_FLOAT_VERTICES=0|1 overrides. */
++   screen->no_scaled_vertex_formats =
++      debug_get_bool_option("RIPPLE_FLOAT_VERTICES",
++                            strstr(screen->caps.caps.v2.renderer, "D3D12") != NULL);
+ 
+    union virgl_caps *caps = &screen->caps.caps;
+    screen->tweak_gles_emulate_bgra &= !virgl_format_check_bitmask(PIPE_FORMAT_B8G8R8A8_SRGB, caps->v1.render.bitmask, false);
+--- a/src/gallium/drivers/virgl/virgl_screen.h
++++ b/src/gallium/drivers/virgl/virgl_screen.h
+@@ -66,6 +66,7 @@
+    bool tweak_l8_srgb_readback;
+    bool no_coherent;
+    bool shader_sync;
++   bool no_scaled_vertex_formats;   /* moose-ripple: the host converts them on its CPU */
+    int32_t tweak_gles_tf3_value;
+ 
+    nir_shader_compiler_options compiler_options;

@@ -8,7 +8,7 @@ https://github.com/mizaimao/moose-ripple
 Before you start
 - The VM runs Mac OS X 10.6.8 with the 64-bit kernel, booted by OpenCore, with QEMU's
   virtio-vga-gl card (Proxmox: vga: virtio-gl). The VM settings are in the project's docs/install.md.
-- Turn sleep off in the guest: sudo pmset -a sleep 0 displaysleep 0 disksleep 0
+- Sleep must stay off in the guest (10.6.8 in QEMU panics when it sleeps); install.sh turns it off.
 - Take a snapshot of the VM.
 
 Install
@@ -17,7 +17,7 @@ Install
      genisoimage -V RIPPLE -r -J -o ripple.iso moose-ripple-@VERSION@
 2. In the guest's Terminal:
      cd /Volumes/RIPPLE
-     sudo sh install.sh                (or: sudo sh install.sh --no-tablet)
+     sudo sh install.sh                (options: --no-tablet, --hwcursor for UTM, --logs)
 3. Restart: sudo reboot
 
 Check
