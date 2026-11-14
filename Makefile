@@ -341,7 +341,7 @@ $(OUT)/x86_64/gl-feature-check/gl-feature-check.o: tools/gl-feature-check/gl-fea
 	@mkdir -p $(dir $@)
 	$(CC) $(call target,x86_64) $(UCFLAGS) -c $< -o $@
 $(OUT)/gl-feature-check: $(OUT)/x86_64/gl-feature-check/gl-feature-check.o
-	$(call link_tool,x86_64,$@,$^,-framework OpenGL)
+	$(call link_tool,x86_64,$@,$^,-framework OpenGL -framework IOSurface -framework CoreFoundation)
 glfeaturecheck: $(OUT)/gl-feature-check
 
 # --- ci-effects (Core Image filters and Photo Booth compositions, ours vs software; M6) ------
