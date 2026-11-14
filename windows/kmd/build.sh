@@ -25,10 +25,10 @@ INC="-vfsoverlay $ov /I$here/common /I$here/shared /I$here/VirtIO /I$here/viogpu
 COMMON="/nologo /c /O2 /W3 /Zp8 /GS- /Gy /kernel /Gz -fms-compatibility-version=15.00 \
         -Wno-microsoft-anon-tag -Wno-pragma-pack -Wno-ignored-pragma-intrinsic -Wno-ignored-attributes \
         -Wno-nonportable-include-path -Wno-invalid-token-paste -Wno-unknown-pragmas \
-        /FI$here/compat/sal2.h /D_KERNEL_MODE /D_WIN32_WINNT=0x0601 /DWINVER=0x0601 /DNTDDI_VERSION=0x06010000 /DVIOGPU_3D=1"
+        /FI$here/compat/sal2.h /FI$here/compat/win7.h /D_KERNEL_MODE /D_WIN32_WINNT=0x0601 /DWINVER=0x0601 /DNTDDI_VERSION=0x06010000 /DVIOGPU_3D=1"
 CXX="/GR- /EHs-c- /std:c++17"
 C_SRC="VirtIO/VirtIOPCICommon.c VirtIO/VirtIOPCILegacy.c VirtIO/VirtIOPCIModern.c VirtIO/VirtIORing.c VirtIO/VirtIORing-Packed.c"
-CXX_SRC="common/edid.cpp common/viogpu_idr.cpp common/viogpu_queue.cpp common/baseobj.cpp
+CXX_SRC="common/edid.cpp common/viogpu_idr.cpp common/ripple_pci.cpp common/viogpu_queue.cpp common/baseobj.cpp
          common/bitops.cpp viogpu3d/driver.cpp viogpu3d/viogpu_command.cpp viogpu3d/viogpu_device.cpp
          viogpu3d/viogpu_allocation.cpp viogpu3d/viogpu_adapter.cpp viogpu3d/viogpu_vidpn.cpp"
 status=0
@@ -41,7 +41,7 @@ for arch in $ARCHS; do
     objs=
     for f in $C_SRC $CXX_SRC; do
         obj=$o/$(basename "${f%.*}").obj
-        case $f in *.cpp) x=$CXX ;; *) x= ;; esac
+        case $f in *.cpp) x=$CXX ;; *) x=-Wno-error=incompatible-function-pointer-types ;; esac
         if clang --driver-mode=cl --target=$T $COMMON $x $INC $D "$here/$f" "/Fo$obj" 2> "$obj.log"; then
             objs="$objs $obj"
         else
