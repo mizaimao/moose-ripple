@@ -1,0 +1,58 @@
+#!/bin/sh
+# moose-ripple tools/sl-disk: replaces the 10.6 DVD's rc.install (same byte length, padded) in a
+# copy of the DVD image. It installs Mac OS X unattended onto the empty disk, applies the 10.6.8
+# combo update from the attached update disk, writes the result to the small result disk and
+# powers off. The new system is never booted. The installer environment has no tail or grep:
+# only sh, awk, perl, dd and the like.
+export DYLD_NO_FIX_PREBINDING=1
+[ -x /System/Installation/CDIS/preheat.sh ] && /System/Installation/CDIS/preheat.sh
+/System/Installation/CDIS/instlogd &
+L() { /usr/bin/logger -t slready -p install.warn "$*"; echo "slready: $*" >/dev/console; echo "$*" >>/var/tmp/sl.log; }
+T="/Volumes/Macintosh HD"
+V="$T/System/Library/CoreServices/SystemVersion.plist"
+X="/System/Installation/CDIS/Mac OS X Installer.app/Contents/MacOS/Mac OS X Installer"
+ver() { perl -0ne 'print $1 if m|ProductBuildVersion</key>\s*<string>(\w+)|' "$V" 2>/dev/null; }
+fin() {
+  L "$1"
+  [ -n "$R" ] && { echo "SLREADY $1"; cat /var/tmp/sl.log; perl -e 'my @l = <>; print @l[($#l > 200 ? $#l - 200 : 0) .. $#l]' /var/log/install.log /var/log/system.log 2>/dev/null; } |
+    dd of=/dev/r$R bs=512 conv=sync 2>/dev/null
+  sync; /sbin/halt; sleep 600
+}
+size() { diskutil info $1 | perl -ne 'print $1 if /\((\d+) Bytes\)/'; }
+sleep 15
+D= R=
+for d in 0 1 2 3 4 5 6 7 8 9 10 11; do
+  diskutil list disk$d >/dev/null 2>&1 || continue
+  diskutil list disk$d | awk '/^ *0: +\*/ {b=1} /^ *[1-9]:/ {p=1} END {exit !(b && !p)}' || continue
+  if [ "$(size disk$d)" -gt 1000000000 ]; then [ -n "$D" ] || D=disk$d; else R=disk$d; fi
+done
+L "target ${D:-none}, result ${R:-none}"
+# Apple's installer restarts the VM when it is done; make-sl-disk.sh then boots the DVD again
+# (pass 2), which finds the system installed and only applies the combo update.
+if [ -f "$V" ]; then L "pass 2: $(ver) installed"; else
+[ -n "$D" ] || fin "FAIL no empty disk"
+diskutil partitionDisk $D 1 GPTFormat JHFS+ "Macintosh HD" 100% 2>&1 | while read -r l; do L "$l"; done
+[ -d "$T" ] || fin "FAIL partitioning"
+cat > /var/tmp/m.xml <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>InstallType</key><string>automated</string>
+<key>Language</key><string>en</string>
+<key>Package</key><string>/System/Installation/Packages/OSInstall.mpkg</string>
+<key>Target</key><string>$T</string>
+<key>NoAutoRestart</key><true/>
+</dict></plist>
+EOF
+L "installing"
+touch /var/run/installer
+"$X" -f /var/tmp/m.xml -AppleLanguages "(English)" -ExternalLog YES -NSDisabledCharacterPaletteMenuItem YES 2>&1 | /usr/bin/logger -t "" -p install.warn
+L "installed: $(ver)"
+[ -f "$V" ] || fin "FAIL install"
+fi
+C=
+for c in /Volumes/*/MacOSXUpdCombo10.6.8.pkg; do [ -e "$c" ] && C=$c; done
+[ -n "$C" ] || fin "FAIL no combo update"
+L "combo: $C"
+"$T/usr/sbin/installer" -pkg "$C" -target "$T" 2>&1 | while read -r l; do L "$l"; done
+fin "OK $(ver)"
