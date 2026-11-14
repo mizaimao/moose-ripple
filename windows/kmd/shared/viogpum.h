@@ -172,6 +172,9 @@ typedef struct _VIOGPU_CREATE_ALLOCATION_EXCHANGE
 #define VIOGPU_CMD_SUBMIT             0x1 // Submit Command to virgl
 #define VIOGPU_CMD_TRANSFER_TO_HOST   0x2 // Transfer resource to host
 #define VIOGPU_CMD_TRANSFER_FROM_HOST 0x3 // Transfer resource to host
+// Written by the kernel driver only, after a copy into a surface: this box of the resource has
+// changed, show it if the resource is the one on screen. The body is a VIOGPU_TRANSFER_CMD.
+#define VIOGPU_CMD_SCREEN_CHANGED     0x100
 
 #pragma pack(1)
 typedef struct _VIOGPU_COMMAND_HDR

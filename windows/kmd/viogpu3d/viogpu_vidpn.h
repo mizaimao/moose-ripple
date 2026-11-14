@@ -87,6 +87,10 @@ class VioGpuVidPN
 
     void Flip();
     static void FlipThread(void *ctx);
+    void StopFlipThread();
+
+    void ScreenChanged(UINT resId, const VIOGPU_BOX *box);
+    BOOLEAN TakeChangedRect(RECT *rect);
 
     NTSTATUS SetVidPnSourceAddress(const DXGKARG_SETVIDPNSOURCEADDRESS *pSetVidPnSourceAddress);
 
@@ -128,4 +132,9 @@ class VioGpuVidPN
 
     PETHREAD m_pFlipThread;
     BOOL m_shouldFlipStop = false;
+
+    // What was copied into the surface on screen since the host was last told to show it
+    KSPIN_LOCK m_changedLock;
+    RECT m_changedRect;
+    BOOLEAN m_changed = FALSE;
 };

@@ -87,6 +87,13 @@ void VioGpuCommand::Run()
                     return;
                 }
 
+            case VIOGPU_CMD_SCREEN_CHANGED:
+                {
+                    VIOGPU_TRANSFER_CMD *changed = (VIOGPU_TRANSFER_CMD *)cmdBody;
+                    m_pAdapter->vidpn.ScreenChanged(changed->res_id, &changed->box);
+                    break;
+                }
+
             case VIOGPU_CMD_NOP:
             default:
                 {

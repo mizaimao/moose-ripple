@@ -39,55 +39,80 @@ NTSTATUS VioGpuDevice::Init(VIOGPU_CTX_INIT_REQ *pOptions)
     return STATUS_SUCCESS;
 }
 
+static UCHAR *PutTransfer(UCHAR *dmaBuf, UINT type, UINT resId, const RECT *rect, INT dx, INT dy)
+{
+    VIOGPU_COMMAND_HDR *cmd_hdr = (VIOGPU_COMMAND_HDR *)dmaBuf;
+    cmd_hdr->type = type;
+    cmd_hdr->size = sizeof(VIOGPU_TRANSFER_CMD);
+    dmaBuf += sizeof(VIOGPU_COMMAND_HDR);
+
+    VIOGPU_TRANSFER_CMD *cmdBody = (VIOGPU_TRANSFER_CMD *)dmaBuf;
+    dmaBuf += sizeof(VIOGPU_TRANSFER_CMD);
+
+    cmdBody->res_id = resId;
+
+    cmdBody->box.x = rect->left + dx;
+    cmdBody->box.y = rect->top + dy;
+    cmdBody->box.z = 0;
+    cmdBody->box.width = rect->right - rect->left;
+    cmdBody->box.height = rect->bottom - rect->top;
+    cmdBody->box.depth = 1;
+
+    cmdBody->layer_stride = 0;
+    cmdBody->stride = 0;
+    cmdBody->level = 0;
+    cmdBody->offset = 0;
+
+    return dmaBuf;
+}
+
 NTSTATUS VioGpuDevice::GenerateBltPresent(DXGKARG_PRESENT *pPresent, VioGpuAllocation *src, VioGpuAllocation *dst)
 {
     UCHAR *dmaBuf = (UCHAR *)pPresent->pDmaBuffer;
 
-    // Calculate rect covering all SubRectx
-    RECT coverRect = pPresent->pDstSubRects[0];
-    for (UINT i = 1; i < pPresent->SubRectCnt; i++)
+    // The pieces to copy, and one rectangle that covers them all
+    const RECT *rects = pPresent->pDstSubRects;
+    UINT rectCnt = pPresent->SubRectCnt;
+    if (rectCnt == 0 || rects == NULL)
     {
-        coverRect.top = min(coverRect.top, pPresent->pDstSubRects[i].top);
-        coverRect.left = min(coverRect.left, pPresent->pDstSubRects[i].left);
-        coverRect.right = min(coverRect.right, pPresent->pDstSubRects[i].right);
-        coverRect.bottom = min(coverRect.bottom, pPresent->pDstSubRects[i].bottom);
+        rects = &pPresent->DstRect;
+        rectCnt = 1;
+    }
+
+    RECT coverRect = rects[0];
+    for (UINT i = 1; i < rectCnt; i++)
+    {
+        coverRect.top = min(coverRect.top, rects[i].top);
+        coverRect.left = min(coverRect.left, rects[i].left);
+        coverRect.right = max(coverRect.right, rects[i].right);
+        coverRect.bottom = max(coverRect.bottom, rects[i].bottom);
     }
 
     INT dx = pPresent->SrcRect.left - pPresent->DstRect.left;
     INT dy = pPresent->SrcRect.top - pPresent->DstRect.top;
 
+    // Everything but the copies: up to two transfers and the note that the screen changed
+    UINT sizeOfOneRect = 4 * (VIRGL_CMD_RESOURCE_COPY_REGION_SIZE + 1);
+    UINT sizeOfRest = 4 * sizeof(VIOGPU_COMMAND_HDR) + 3 * sizeof(VIOGPU_TRANSFER_CMD);
+    if (pPresent->DmaSize < sizeOfRest + sizeOfOneRect)
+    {
+        return STATUS_GRAPHICS_INSUFFICIENT_DMA_BUFFER;
+    }
+
+    // More pieces than the buffer holds: copy the covering rectangle in one piece instead
+    if (rectCnt > (pPresent->DmaSize - sizeOfRest) / sizeOfOneRect)
+    {
+        rects = &coverRect;
+        rectCnt = 1;
+    }
+
     // If source requires coherency (staging or shadow surface) then emit transfer
     if (src->IsCoherent())
     {
-        VIOGPU_COMMAND_HDR *cmd_hdr = (VIOGPU_COMMAND_HDR *)dmaBuf;
-        cmd_hdr->type = VIOGPU_CMD_TRANSFER_TO_HOST;
-        cmd_hdr->size = sizeof(VIOGPU_TRANSFER_CMD);
-        dmaBuf += sizeof(VIOGPU_COMMAND_HDR);
-
-        VIOGPU_TRANSFER_CMD *cmdBody = (VIOGPU_TRANSFER_CMD *)dmaBuf;
-        dmaBuf += sizeof(VIOGPU_TRANSFER_CMD);
-
-        cmdBody->res_id = src->GetId();
-
-        cmdBody->box.x = coverRect.left + dx;
-        cmdBody->box.y = coverRect.top + dy;
-        cmdBody->box.z = 0;
-        cmdBody->box.width = coverRect.right - coverRect.left;
-        cmdBody->box.height = coverRect.bottom - coverRect.top;
-        cmdBody->box.depth = 1;
-
-        cmdBody->layer_stride = 0;
-        cmdBody->stride = 0;
-        cmdBody->level = 0;
-        cmdBody->offset = 0;
+        dmaBuf = PutTransfer(dmaBuf, VIOGPU_CMD_TRANSFER_TO_HOST, src->GetId(), &coverRect, dx, dy);
     }
 
     {
-        UINT sizeOfOneRect = 4 * (VIRGL_CMD_RESOURCE_COPY_REGION_SIZE + 1);
-
-        // TODO: Support MultiPassOffset
-        UINT rectCnt = min(pPresent->SubRectCnt, (pPresent->DmaSize - 0x100) / sizeOfOneRect);
-
         VIOGPU_COMMAND_HDR *cmd_hdr = (VIOGPU_COMMAND_HDR *)dmaBuf;
         cmd_hdr->type = VIOGPU_CMD_SUBMIT;
         cmd_hdr->size = rectCnt * sizeOfOneRect;
@@ -98,7 +123,7 @@ NTSTATUS VioGpuDevice::GenerateBltPresent(DXGKARG_PRESENT *pPresent, VioGpuAlloc
             UINT *cmdBody = (UINT *)dmaBuf;
             dmaBuf += sizeOfOneRect;
 
-            RECT rect = pPresent->pDstSubRects[i];
+            RECT rect = rects[i];
 
             cmdBody[0] = VIRGL_CMD0(VIRGL_CCMD_RESOURCE_COPY_REGION, 0, VIRGL_CMD_RESOURCE_COPY_REGION_SIZE);
             cmdBody[1] = dst->GetId();
@@ -120,28 +145,13 @@ NTSTATUS VioGpuDevice::GenerateBltPresent(DXGKARG_PRESENT *pPresent, VioGpuAlloc
 
     if (dst->IsCoherent())
     {
-        VIOGPU_COMMAND_HDR *cmd_hdr = (VIOGPU_COMMAND_HDR *)dmaBuf;
-        cmd_hdr->type = VIOGPU_CMD_TRANSFER_FROM_HOST;
-        cmd_hdr->size = sizeof(VIOGPU_TRANSFER_CMD);
-        dmaBuf += sizeof(VIOGPU_COMMAND_HDR);
-
-        VIOGPU_TRANSFER_CMD *cmdBody = (VIOGPU_TRANSFER_CMD *)dmaBuf;
-        dmaBuf += sizeof(VIOGPU_TRANSFER_CMD);
-
-        cmdBody->res_id = dst->GetId();
-
-        cmdBody->box.x = coverRect.left;
-        cmdBody->box.y = coverRect.top;
-        cmdBody->box.z = 0;
-        cmdBody->box.width = coverRect.right - coverRect.left;
-        cmdBody->box.height = coverRect.bottom - coverRect.top;
-        cmdBody->box.depth = 1;
-
-        cmdBody->layer_stride = 0;
-        cmdBody->stride = 0;
-        cmdBody->level = 0;
-        cmdBody->offset = 0;
+        dmaBuf = PutTransfer(dmaBuf, VIOGPU_CMD_TRANSFER_FROM_HOST, dst->GetId(), &coverRect, 0, 0);
     }
+
+    // Without a compositor nothing flips: Windows draws into a surface of its own and copies the
+    // changed pieces to the surface on screen. The host shows them only when told to, so the copy
+    // is followed by a note of what changed (VioGpuVidPN::ScreenChanged).
+    dmaBuf = PutTransfer(dmaBuf, VIOGPU_CMD_SCREEN_CHANGED, dst->GetId(), &coverRect, 0, 0);
 
     pPresent->pDmaBuffer = dmaBuf;
 
@@ -154,6 +164,12 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
 
     if (pPresent->Flags.Flip)
     {
+        // Nothing to run for a flip. The private data may still hold the pointer of an earlier
+        // use of this buffer, which SubmitCommand would take for a command.
+        if (pPresent->pDmaBufferPrivateData)
+        {
+            *(VioGpuCommand **)pPresent->pDmaBufferPrivateData = NULL;
+        }
         return STATUS_SUCCESS;
     }
 
@@ -201,7 +217,7 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
         }
     }
 
-    if (dxgk_dst != NULL)
+    if (dxgk_dst->hDeviceSpecificAllocation != NULL)
     {
         dst = reinterpret_cast<VioGpuDeviceAllocation *>(dxgk_dst->hDeviceSpecificAllocation)->GetAllocation();
         if (pPresent->pDmaBuffer)
@@ -221,7 +237,13 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
     {
         if (pPresent->pDmaBuffer && dst && src)
         {
-            GenerateBltPresent(pPresent, src, dst);
+            NTSTATUS Status = GenerateBltPresent(pPresent, src, dst);
+            if (!NT_SUCCESS(Status))
+            {
+                *(VioGpuCommand **)pPresent->pDmaBufferPrivateData = NULL;
+                delete cmd;
+                return Status;
+            }
         }
     }
     else

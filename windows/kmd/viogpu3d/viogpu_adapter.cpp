@@ -233,6 +233,7 @@ NTSTATUS VioGpuAdapter::StartDevice(_In_ DXGK_START_INFO *pDxgkStartInfo,
 NTSTATUS VioGpuAdapter::StopDevice(VOID)
 {
     PAGED_CODE();
+    vidpn.StopFlipThread();
     commander.Stop();
 
     m_Flags.DriverStarted = FALSE;

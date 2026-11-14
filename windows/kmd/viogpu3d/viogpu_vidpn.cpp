@@ -24,6 +24,9 @@ VioGpuVidPN::VioGpuVidPN(VioGpuAdapter *adapter)
     m_pFrameBuf = NULL;
 
     m_SystemDisplaySourceId = D3DDDI_ID_UNINITIALIZED;
+    m_pFlipThread = NULL;
+    KeInitializeSpinLock(&m_changedLock);
+    RtlZeroMemory(&m_changedRect, sizeof(m_changedRect));
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
 }
@@ -112,6 +115,11 @@ NTSTATUS VioGpuVidPN::Start(ULONG *pNumberOfViews, ULONG *pNumberOfChildren)
     HANDLE threadHandle = 0;
     m_shouldFlipStop = false;
     Status = PsCreateSystemThread(&threadHandle, (ACCESS_MASK)0, NULL, (HANDLE)0, NULL, VioGpuVidPN::FlipThread, this);
+    if (!NT_SUCCESS(Status))
+    {
+        DbgPrint(TRACE_LEVEL_FATAL, ("%s failed to create the flip thread, status %x\n", __FUNCTION__, Status));
+        return Status;
+    }
 
     ObReferenceObjectByHandle(threadHandle, THREAD_ALL_ACCESS, NULL, KernelMode, (PVOID *)(&m_pFlipThread), NULL);
 
@@ -126,6 +134,22 @@ NTSTATUS VioGpuVidPN::AcquirePostDisplayOwnership()
     // there is no picture to take over, and the caller falls back to its nominal mode.
     RtlZeroMemory(&m_SystemDisplayInfo, sizeof(m_SystemDisplayInfo));
     return STATUS_SUCCESS;
+}
+
+void VioGpuVidPN::StopFlipThread()
+{
+    PAGED_CODE();
+
+    // The thread uses this object and the queues: it has to be gone before the device stops.
+    if (m_pFlipThread != NULL)
+    {
+        m_shouldFlipStop = true;
+        KeWaitForSingleObject(m_pFlipThread, Executive, KernelMode, FALSE, NULL);
+        ObDereferenceObject(m_pFlipThread);
+        m_pFlipThread = NULL;
+    }
+    m_sourceRes = NULL;
+    m_sourceAddress.QuadPart = 0;
 }
 
 void VioGpuVidPN::Powerdown()
@@ -1921,16 +1945,30 @@ void VioGpuVidPN::Flip()
 {
     PAGED_CODE();
 
+    RECT changed;
+    VioGpuAllocation *sourceRes = m_sourceRes;
+
     if (InterlockedExchange(&m_shouldFlip, 0))
     {
-        if (m_sourceAddress.QuadPart != 0 && m_sourceRes != NULL)
+        // The whole surface goes out, whatever was noted as changed with it
+        TakeChangedRect(&changed);
+        if (m_sourceAddress.QuadPart != 0 && sourceRes != NULL)
         {
-            m_sourceRes->FlushToScreen(0);
+            sourceRes->FlushToScreen(0);
         }
         else
         {
             m_pAdapter->ctrlQueue.SetScanout(0, 0, 0, 0, 0, 0);
         }
+    }
+    else if (sourceRes != NULL && TakeChangedRect(&changed))
+    {
+        // Drawing without a compositor: pieces were copied into the surface on screen
+        m_pAdapter->ctrlQueue.ResFlush(sourceRes->GetId(),
+                                       changed.right - changed.left,
+                                       changed.bottom - changed.top,
+                                       changed.left,
+                                       changed.top);
     }
     DXGKARGCB_NOTIFY_INTERRUPT_DATA interrupt;
     interrupt.InterruptType = DXGK_INTERRUPT_CRTC_VSYNC;
@@ -1975,6 +2013,47 @@ NTSTATUS VioGpuVidPN::SetVidPnSourceAddress(const DXGKARG_SETVIDPNSOURCEADDRESS 
 
     return STATUS_SUCCESS;
 };
+
+// A copy into a surface has finished on the host. If that surface is the one on screen, the flip
+// thread tells the host to show the changed part at its next turn.
+void VioGpuVidPN::ScreenChanged(UINT resId, const VIOGPU_BOX *box)
+{
+    VioGpuAllocation *sourceRes = m_sourceRes;
+    if (sourceRes == NULL || sourceRes->GetId() != resId || box->width == 0 || box->height == 0)
+    {
+        return;
+    }
+
+    KIRQL irql;
+    KeAcquireSpinLock(&m_changedLock, &irql);
+    if (!m_changed)
+    {
+        m_changedRect.left = box->x;
+        m_changedRect.top = box->y;
+        m_changedRect.right = box->x + box->width;
+        m_changedRect.bottom = box->y + box->height;
+        m_changed = TRUE;
+    }
+    else
+    {
+        m_changedRect.left = min(m_changedRect.left, (LONG)box->x);
+        m_changedRect.top = min(m_changedRect.top, (LONG)box->y);
+        m_changedRect.right = max(m_changedRect.right, (LONG)(box->x + box->width));
+        m_changedRect.bottom = max(m_changedRect.bottom, (LONG)(box->y + box->height));
+    }
+    KeReleaseSpinLock(&m_changedLock, irql);
+}
+
+BOOLEAN VioGpuVidPN::TakeChangedRect(RECT *rect)
+{
+    KIRQL irql;
+    KeAcquireSpinLock(&m_changedLock, &irql);
+    BOOLEAN changed = m_changed;
+    *rect = m_changedRect;
+    m_changed = FALSE;
+    KeReleaseSpinLock(&m_changedLock, irql);
+    return changed;
+}
 
 D3DDDI_VIDEO_PRESENT_SOURCE_ID VioGpuVidPN::FindSourceForTarget(D3DDDI_VIDEO_PRESENT_TARGET_ID TargetId,
                                                                 BOOLEAN DefaultToZero)
