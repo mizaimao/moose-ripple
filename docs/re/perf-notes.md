@@ -666,3 +666,10 @@ was not the limit then; what it costs at 60 frames/s is not measured yet.
 On the Proxmox host the default stays off (Intel has the format). Forced on there, the same
 race draws correctly and is a little slower (first eight windows 47.1 against 47.6 frames/s,
 the next eight 43.8 against 51.1), which is why the conversion is tied to the host's renderer.
+
+Queued submits (`ripple_async=1`) on the same host, same script after a restart: no gain to
+see, as the race is at the 60 frames/s limit either way. Presents per 5 s in race windows 2
+to 8: 299 280 301 279 279 290 290 with it, 295 296 293 291 298 299 299 without. A second
+run without it dipped to 275-285 later in the race, so the few percent between them are
+within what two runs differ by. No errors in the guest's kernel log. It stays opt-in: it
+helps where the guest's CPU is the limit (UTM), and nowhere else so far.
