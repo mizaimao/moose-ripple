@@ -241,7 +241,9 @@ as two more rows in QEMU > Arguments:
 
 Tested on 2026-11-14 in UTM on an Apple-silicon Mac (system sounds and the Welcome music played
 smoothly through the Mac's speakers) and under KVM on Proxmox (QEMU's `wav` backend, checked
-for gaps).
+for gaps). In UTM with acceleration on, the whole VM sometimes pauses for 70-190 ms
+while a program starts (QuickTime Player opening a movie, for example), and the sound drops for
+that long; the cause is being looked into.
 
 Without our driver, QEMU's USB audio device works with Snow Leopard's own driver (AppleUSBAudio),
 but it stutters. It needs a USB 1.1 controller (the EHCI one above is USB 2.0 only, and 10.6 has
@@ -296,9 +298,9 @@ doesn't match. Otherwise it does what you would do by hand:
 
 Its options: `--no-tablet` leaves out `RippleQEMUTablet.kext`; `--sound` adds
 `RippleVirtioSound.kext`, the driver for QEMU's virtio-sound-pci device ([Sound](#sound-optional));
-`--hwcursor` adds
-`ripple_hwcursor=1`; `--logs` creates `/Library/Logs/RippleGL`, where the GL driver then writes a
-log for every program that uses it (remove the folder to stop them).
+`--hwcursor` adds `ripple_hwcursor=1`; `--logs` creates `/Library/Logs/RippleGL`, where the GL
+driver then writes a log for every program that uses it (remove the folder to stop them);
+`--target VOLUME` installs onto another disk ([below](#before-the-first-boot-the-welcome-animation)).
 
 The boot flags:
 
@@ -327,10 +329,21 @@ sudo /usr/libexec/PlistBuddy -c 'Add :"Kernel Flags" string "npci=0x2000 -v ripp
 `ripple_gl=1 ripple_qe=1` at Chameleon's boot prompt instead. `uninstall.sh` doesn't change that
 file; take the `ripple_` flags out of it yourself after uninstalling.
 
-### Before the first boot (single-user mode)
+### Before the first boot (the Welcome animation)
 
-To install before Snow Leopard's first start, for example on a freshly installed disk, start it
-in single-user mode (Cmd+S in OpenCore's menu) and mount the RIPPLE volume by hand:
+A new Snow Leopard plays its Welcome animation only on its first start. To see it drawn by
+moose-ripple, install before that start, in one of three ways:
+
+- With a ready disk: [tools/sl-disk](../tools/sl-disk/README.md) with `--ripple` installs
+  moose-ripple during its unattended install.
+- From another Snow Leopard: attach the new disk to a running 10.6 VM and install onto it:
+  `sudo sh install.sh --target "/Volumes/Macintosh HD"` (the same options work). Boot flags belong
+  to the VM and not to the disk, so `--target` switches GL, Quartz Extreme and `--hwcursor` on in
+  the driver's own settings instead; boot flags still override them (`ripple_gl=0`). The VM that
+  then starts the disk needs `npci=0x2000`, which the release disk's OpenCore sets when the
+  firmware has no boot flags yet. With Chameleon these settings also save editing its Kernel Flags.
+- In single-user mode: start the new system with Cmd+S in OpenCore's menu (single-user mode
+  doesn't count as the first start) and mount the RIPPLE volume by hand:
 
 ```
 /sbin/mount -uw /
