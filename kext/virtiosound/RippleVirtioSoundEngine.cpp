@@ -62,6 +62,7 @@ bool RippleVirtioSoundEngine::initHardware(IOService *provider)
     setSampleOffset(kPrimeSlots * kPeriodFrames);
     setOutputSampleLatency(kPrimeSlots * kPeriodFrames);
     nanoseconds_to_absolutetime(kPeriodFrames * 1000000000ULL / 48000 / 2, &fHalfPeriodAbs);
+    nanoseconds_to_absolutetime(kRingFrames * 1000000000ULL / 48000, &fLoopNominal);
     setDescription("Virtio Sound");
 
     fRingBytes = kRingFrames * kBytesPerFrame;
@@ -136,14 +137,17 @@ IOReturn RippleVirtioSoundEngine::muteChanged(OSObject *target, IOAudioControl *
 
 // Copy the next period of the ring into a slot and give it to the device. Work loop thread.
 // A read need not start on a period boundary (see txDone), so it may cross the ring's end.
-// The loop's timestamp is the time frame 0 is read, counting a period's frames as read one
-// after another from the read's own time; it is taken once that time has passed.
+// Each pass over the ring gets a timestamp near the time frame 0 is read (smoothed, below),
+// taken once that time has passed.
 void RippleVirtioSoundEngine::submit(unsigned slot, uint64_t now)
 {
     if (fWrapPending && now >= fWrapTime) {
         fWrapPending = false;
         takeTimeStamp(true, (AbsoluteTime *)&fWrapTime);
-        SND_TRACE(kTrWrap, 0, status ? status->fCurrentLoopCount : 0, 0, 0);
+        fLastStamp = fWrapTime;
+        SND_TRACE(kTrWrap, 0, status ? status->fCurrentLoopCount : 0,
+                  (uint32_t)(int32_t)(fWrapErr / 1000),
+                  (uint32_t)((fWrapTime - fStartTime) / 1000));
     }
     UInt32 frame = fNextFrame;
     UInt32 first = kRingFrames - frame;
@@ -157,9 +161,30 @@ void RippleVirtioSoundEngine::submit(unsigned slot, uint64_t now)
     UInt32 next = frame + kPeriodFrames;
     if (next >= kRingFrames) {
         next -= kRingFrames;
+        // When frame 0 is read, counting from this read's own time. Under emulation that time
+        // jitters by up to about 15 ms (a ring pass measured 143 to 195 ms in UTM, 2026-11-14),
+        // and Core Audio answers a pass that looks several percent long by jumping its timeline,
+        // writing about 11 ms of silence. So the timestamp follows the measured time through a
+        // small phase-locked loop: it moves an eighth of the way from the predicted time to the
+        // measured one, and the predicted pass length an eighth of that. A big error (a stall)
+        // is followed at once.
         uint64_t d;
         nanoseconds_to_absolutetime((uint64_t)(kRingFrames - frame) * 1000000000ULL / 48000, &d);
-        fWrapTime = now + d;
+        uint64_t measured = now + d;
+        uint64_t predicted = fLastStamp + fLoopAbs;
+        int64_t err = (int64_t)(measured - predicted);
+        int64_t limit = (int64_t)(fLoopNominal / 4);
+        if (err > limit || err < -limit) {
+            fWrapTime = measured;
+        } else {
+            fWrapTime = predicted + err / 8;
+            fLoopAbs += err / 64;
+            if (fLoopAbs > fLoopNominal + fLoopNominal / 100)
+                fLoopAbs = fLoopNominal + fLoopNominal / 100;
+            else if (fLoopAbs < fLoopNominal - fLoopNominal / 100)
+                fLoopAbs = fLoopNominal - fLoopNominal / 100;
+        }
+        fWrapErr = err;
         fWrapPending = true;
     }
     fNextFrame = next;
@@ -196,6 +221,7 @@ void RippleVirtioSoundEngine::txDone(unsigned slot)
             // The device took longer than a ring to settle: start loop 0 over from here.
             LOG("first paced completion after %llu us, loop 0 restarted", ns / 1000);
             takeTimeStamp(false, (AbsoluteTime *)&now);
+            fLastStamp = now;
             frame = 0;
         }
         fNextFrame = (UInt32)frame;
@@ -233,6 +259,8 @@ IOReturn RippleVirtioSoundEngine::performAudioEngineStart()
     }
     fStartTime = mach_absolute_time();
     takeTimeStamp(false, (AbsoluteTime *)&fStartTime);
+    fLastStamp = fStartTime;
+    fLoopAbs = fLoopNominal;
     if (!fDevice->pcmCommand(VIRTIO_SND_R_PCM_START)) {
         fRunning = false;
         LOG("PCM_START failed");
