@@ -1,0 +1,81 @@
+# The kernel driver: from the Windows 10 driver to Windows 7
+
+2026-11-14, first reading. Working notes for milestone W1 (`feasibility.md`): what the
+kernel part of virtio-win's unmerged 3D driver does, and what in it Windows 7 does not have.
+Source read: pull request 943's branch at its last rebase (2025-09-05), folders
+`viogpu/viogpu3d` and `viogpu/common`, about 10 800 lines, BSD-3-Clause. Nothing is copied
+into this repository yet.
+
+Points marked **check** are from memory of the driver model and have to be confirmed against
+the kit's `d3dkmddi.h` once the toolchain is up.
+
+## What the driver is
+
+- One C++ kernel driver. `viogpu/common` holds the virtio transport (PCI capabilities,
+  queues, the control and cursor commands); `viogpu3d` holds the WDDM side.
+- **Display:** `viogpu_vidpn.cpp` (2100 lines): modes from the device's EDID or a built-in
+  list, the present network callbacks, a software VSync timer that reports
+  `DXGK_INTERRUPT_CRTC_VSYNC`, flips by pointing the scanout at another resource.
+- **Memory:** one aperture segment, 4 GB, not visible to the CPU. Every allocation is a
+  virtio-gpu resource; mapping it into the aperture attaches guest pages as its backing
+  (`BuildPagingBuffer`, map and unmap only).
+- **Drawing:** the user-mode part writes virgl commands into the command buffer Windows
+  gives it; `Render` copies them into the DMA buffer with the list of allocations; `Patch`
+  and `SubmitCommand` hand that to a worker thread, which sends it on the control queue and
+  reports `DXGK_INTERRUPT_DMA_COMPLETED` when the host has answered.
+- **Escapes:** a private channel from user mode for what does not fit a command buffer
+  (capability sets, resource creation and info, waiting on a resource, context setup).
+- **Presenting:** `Present` builds a small command for a copy between two resources, or
+  takes the flip path.
+- Its INF turns the scheduler's preemption off for the whole system
+  (`Scheduler\EnablePreemption = 0`) and sets `TdrDebugMode`. Both are machine-wide settings.
+
+## What Windows 7 does not have
+
+The driver registers as WDDM 1.3 (Windows 8.1). Windows 7 is 1.1.
+
+| In the Windows 10 driver | Model version | On Windows 7 |
+|---|---|---|
+| `DxgkCbAcquirePostDisplayOwnership`, `DxgkDdiStopDeviceAndReleasePostDisplayOwnership`: taking the firmware's or boot loader's picture over, and handing a picture back | 1.2 | Does not exist. The driver starts from VGA: it sets its own mode at the first commit, and Windows expects the device to be usable as VGA again after `DxgkDdiStopDevice` and for crash screens. `virtio-vga` has the VGA half; the driver has to return the device to it (a device reset does that in QEMU: **check**) |
+| `DxgkDdiSystemDisplayEnable`, `DxgkDdiSystemDisplayWrite`: drawing the crash screen through the driver | 1.2 | Does not exist. Windows 7 draws crash screens through VGA after `DxgkDdiResetDevice`, so that entry point must really put the device back into VGA mode |
+| `DxgkDdiQueryEngineStatus`, `DxgkDdiResetEngine` (stubs) | 1.2 | Drop. Timeouts go through `DxgkDdiResetFromTimeout` and `DxgkDdiRestartFromTimeout`, which the driver also has |
+| `DxgkDdiCancelCommand`, `DxgkDdiGetNodeMetadata` | 1.3 | Drop |
+| `DXGKQAITYPE_QUERYSEGMENT3` with `DXGK_SEGMENTDESCRIPTOR3` | 1.2 | Answer `DXGKQAITYPE_QUERYSEGMENT` with the first descriptor layout instead |
+| `DXGK_DRIVERCAPS`: `WDDMVersion`, `SupportNonVGA`, `SupportSmoothRotation`, `SupportDirectFlip` | 1.2 and 1.3 | The structure is shorter; fill only the Windows 7 fields. `SectionBackedPrimary` should exist from 1.1: **check** |
+| Registered interface version `DXGKDDI_INTERFACE_VERSION_WDDM1_3` | 1.3 | `DXGKDDI_INTERFACE_VERSION_WIN7`, and the driver must be compiled against that version so the structures have the Windows 7 sizes |
+| INF for `NTamd64.10.0`, user-mode driver names listed four times | | Windows 7 sections; the first name is the Direct3D 9 part (the stub in W1), the second the Direct3D 10 part |
+
+Everything else the driver registers exists in WDDM 1.0 already (device and context
+creation, allocations, paging buffer, render, patch, submit, preempt, present, the present
+network callbacks, pointer, power, escape, interrupt and DPC).
+
+## Open points for W1
+
+1. **Who draws the desktop without 3D.** With the compositor off, Windows 7 draws GDI into
+   a shadow and copies to the primary surface, either by locking it or through `Present`
+   from a system-memory surface. The driver must make the primary reachable for that: a
+   section-backed primary or a CPU-visible segment, then `TRANSFER_TO_HOST_2D` and
+   `RESOURCE_FLUSH` for what changed. The Windows 10 driver leans on the compositor always
+   being on. This is the part of W1 with no code to start from.
+2. **The Direct3D 9 stub.** Windows 7 will not start a WDDM driver's device without a
+   user-mode part. The stub opens the adapter, reports no 3D capabilities and implements
+   only what the desktop needs (create, lock and unlock of the primary and of system-memory
+   surfaces, present). Our own code; about the size of one source file.
+3. **Preemption and timeouts.** Whether to keep the machine-wide switch or answer
+   `DxgkDdiPreemptCommand` properly. For W1 (hardly any commands) either does.
+4. **Pointer.** Disabled in the Windows 10 driver ("for now"). The device has a cursor
+   queue; our Mac driver uses it. Software pointer first.
+5. **32-bit.** The driver assumes a 4 GB aperture at `0xC0000000`; a 32-bit Windows 7 needs
+   that looked at. Not in W1.
+6. **Debugging.** A kernel debugger over a virtual serial port on the test VM, and
+   snapshots before every install.
+
+## How it will sit in this repository
+
+Proposed, to be settled with the toolchain work before anything lands:
+
+    windows/kmd/        the kernel driver (from virtio-win, BSD-3-Clause, notices kept)
+    windows/umd9/       the Direct3D 9 part (the stub first)
+    windows/mesa/       patches and build files for Mesa's Windows parts (as gldriver/mesa)
+    windows/package/    INF, test-signing and install scripts
+    third_party/        upstream notices, as on the Mac side
