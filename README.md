@@ -80,8 +80,8 @@ The boundary between the GL bundle and the kernel is small, versioned and GPU-ne
 - On an Apple-silicon Mac too, in UTM, where the Intel CPU is emulated: Quartz Extreme is on,
   and Real Racing 2 is playable there, at a lower frame rate in a race (numbers below).
 - Core Image on the GPU: its filters and Photo Booth's effects.
-- Sound, with no driver of ours: QEMU's USB audio device and Snow Leopard's own driver (tested
-  in UTM; [docs/install.md](docs/install.md#sound-optional)).
+- Sound, optional: a driver for QEMU's virtio-sound device, smooth in UTM and under KVM
+  ([docs/install.md](docs/install.md#sound-optional)).
 
 ![The menu bar with software rendering (top) and with moose-ripple (bottom)](media/menubar-compare.webp)
 
