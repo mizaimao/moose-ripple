@@ -120,6 +120,10 @@ VioGpuAdapter::~VioGpuAdapter(void)
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 
+    // Windows removes a device it could not start without stopping it first
+    vidpn.StopFlipThread();
+    commander.Stop();
+
     CloseResolutionEvent();
     VioGpuAdapterClose();
     HWClose();

@@ -203,6 +203,7 @@ NTSTATUS VioGpuCommander::Start()
 
     HANDLE threadHandle = 0;
 
+    m_bStopWorkThread = FALSE;
     NTSTATUS status = PsCreateSystemThread(&threadHandle,
                                            (ACCESS_MASK)0,
                                            NULL,
@@ -230,17 +231,19 @@ void VioGpuCommander::Stop()
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s", __FUNCTION__));
 
-    LARGE_INTEGER timeout = {0};
-    timeout.QuadPart = Int32x32To64(1000, -10000);
+    // Not started, or stopped already (the device can be removed without having been stopped)
+    if (m_pWorkThread == NULL)
+    {
+        return;
+    }
 
+    // The thread runs driver code: it has to be gone before the driver can be unloaded, however
+    // long that takes.
     m_bStopWorkThread = TRUE;
     KeSetEvent(&m_QueueEvent, IO_NO_INCREMENT, FALSE);
-
-    if (KeWaitForSingleObject(m_pWorkThread, Executive, KernelMode, FALSE, &timeout) == STATUS_TIMEOUT)
-    {
-        DbgPrint(TRACE_LEVEL_FATAL, ("---> Failed to exit the worker thread\n"));
-        VioGpuDbgBreak();
-    }
+    KeWaitForSingleObject(m_pWorkThread, Executive, KernelMode, FALSE, NULL);
+    ObDereferenceObject(m_pWorkThread);
+    m_pWorkThread = NULL;
 }
 
 void VioGpuCommander::ThreadWork(PVOID Context)
