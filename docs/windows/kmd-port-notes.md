@@ -148,3 +148,34 @@ installer refuses it as not for this Windows).
 What the four runs have in common: Device Manager shows Code 43, which is not a failed start.
 Windows started the device and then switched it off on purpose, and it never asked the driver
 for its capabilities. Nothing in the System event log.
+5. **The PCI command register printed:** ports and memory decoding are both on (0x0107), so
+   Windows has no reason to doubt that this is the VGA device. Under the Standard VGA driver
+   the adapter owns the legacy VGA ranges; our driver's resource list has only the three
+   memory ranges of the device, which is normal for a WDDM driver.
+
+### The cause: two requirements of Windows 7 the Windows 10 driver never met
+
+Found by disassembling Windows 7's `dxgkrnl.sys` from the test VM with Microsoft's public
+symbols (kept outside the repository). The start goes `DpiFdoStartAdapter`:
+`DpiDxgkDdiStartDevice`, `DpiFdoEnumChildDevices` (which calls `DxgkDdiQueryChildRelations`),
+then `DxgkAddAdapter`, whose `DXGADAPTER::Initialize` does this before it asks the driver
+anything:
+
+- It reads `UserModeDriverName` from the adapter's registry key as a **required** value
+  (and refuses an empty one). On Windows 7 that key is the one an INF's `.SoftwareSettings`
+  section fills.
+- It checks that 28 driver entry points are there and returns `STATUS_REVISION_MISMATCH`
+  if one is missing. All of them were registered except **`DxgkDdiSetPalette`**. (For the
+  optional ones, overlays, swizzling, `StopCapture`, `RecommendVidPnTopology` and others, it
+  puts in defaults of its own.)
+- It rejects interface version 0x2000 outright and takes 0x2001 and later as Windows 7
+  drivers with the larger capability structure.
+- After `DXGKQAITYPE_DRIVERCAPS` it requires **`WDDMVersion == DXGKDDI_WDDMv1`** (0x1000)
+  from a driver of that version; zero is refused. With that value it also wants
+  `CreateAllocation`, `Patch` and `Render`.
+- More capability rules there: `SupportKernelModeCommandBuffer` needs `DxgkDdiRenderKm`;
+  swizzling ranges need the swizzling entry points; with `MultiEngineAware` the number of
+  processing nodes must not be zero.
+
+A failure in there makes Windows stop the device again and show Code 43, with nothing in any
+log. Both gaps are closed (`DxgkDdiSetPalette` does nothing: there is no 256-colour mode).
