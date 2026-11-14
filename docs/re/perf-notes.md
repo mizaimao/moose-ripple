@@ -467,6 +467,8 @@ What each host is short of:
   (2.5 GB) over the run, and gl-gears, with a handful of draws a frame, runs at 55 frames/s
   there, so the cost is per draw or per upload, not per frame shown. What the thread does in
   those 50 ms needs a profile on the host (Mesa 25.2.8, virglrenderer 1.0.0, QEMU 8.2.2).
+  The profile is further down ("Windows: the host converted the game's vertices on its CPU"):
+  with patch 0012 the menu runs at 59 frames/s there.
 
 Two savings in the driver's CPU time, from the profiles (worth about a tenth of the frame rate
 where the CPU is the limit, 28 to 31 frames/s in UTM's race start):
@@ -616,3 +618,51 @@ windows from different moments of the race, which made Force Multicore look like
 So: the trims are worth about a quarter there; the stall fix costs nothing; Force Multicore
 makes no real difference (the game's menu after 170 s with it, 175 s without); queued submits
 add about a seventh. Two runs of the same setup differed by a few percent.
+
+### Windows: the host converted the game's vertices on its CPU (2026-11-14)
+
+A profile of QEMU on the Windows host while the game's menu ran at 15 frames/s (`perf record
+-e cpu-clock -g` inside WSL2 for 10 s; function names from Ubuntu's debug symbol server, as
+the packages are stripped). QEMU's main thread had 75% of the samples:
+
+| Share of QEMU's samples | Where |
+|---|---|
+| 51% | `u_vbuf_translate_begin`: `util_format_r16g16_sscaled_unpack_rgba_float` and `util_format_r16g16b16_sscaled_unpack_rgba_float` |
+| 11% | `u_vbuf_get_minmax_index_mapped` |
+| 7% | NVIDIA's driver, made to flush by the buffer maps of the same path |
+| 18% | the guest's own CPUs |
+
+All of the first three sit under `vrend_draw_vbo`. The game gives positions and texture
+coordinates as 16-bit integers that the GPU is to read as floats without normalising
+(`GL_SHORT`). Direct3D 12 has no vertex format for that, so Mesa's D3D12 driver leaves it to
+Mesa's fallback: at every draw it looks for the lowest and highest index, then converts that
+range of vertices on the CPU, reading them out of memory mapped from the GPU. Intel's Linux
+driver and ANGLE on Metal take the format as it is, so only this host was slow.
+
+Patch 0012 moves the conversion into the guest: when the host's renderer name says Direct3D
+12, our virgl driver reports these formats as missing and Mesa in the guest writes floats
+before the data is sent (most of the game's vertex data is client arrays, copied for each
+draw anyway). `RIPPLE_FLOAT_VERTICES=0` or `=1` in a program's environment overrides the
+choice. The patch also lets a read of a buffer the host has not written skip the submit and
+the wait: the guest's copy is the current one, and the conversion reads vertex and index
+buffers at every draw.
+
+Same boot and build, the switch off and on (scripted: 120 s to the menu, two clicks into a
+quick race, then the 5 s windows from the start of the race):
+
+| Windows 11, WSL2, RTX 4090 | Menu | Presents in the first eight 5 s windows of the race | Mean |
+|---|---|---|---|
+| `RIPPLE_FLOAT_VERTICES=0` | 15.0 frames/s | 29 28 57 36 34 41 58 120 | 9.9 frames/s |
+| default (conversion on) | 59.4 | 215 295 296 293 291 298 299 299 | 57.2 |
+
+QEMU's main thread went from 76% busy at the menu to 15% in the race, and the conversion
+functions are gone from its profile. The picture is the same (frames dumped with `swapdump`).
+
+These runs had no window: over ssh WSL has no desktop (its display server crashes in a loop
+there), so QEMU ran with `SDL_VIDEODRIVER=offscreen`, which keeps the GPU path and drops only
+the window. The menu made the same 15 frames/s with the window the day before, so the window
+was not the limit then; what it costs at 60 frames/s is not measured yet.
+
+On the Proxmox host the default stays off (Intel has the format). Forced on there, the same
+race draws correctly and is a little slower (first eight windows 47.1 against 47.6 frames/s,
+the next eight 43.8 against 51.1), which is why the conversion is tied to the host's renderer.
