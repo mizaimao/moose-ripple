@@ -8,7 +8,7 @@ EXT=/System/Library/Extensions
 die() { echo "uninstall.sh: $*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || die "run it as root: sudo sh uninstall.sh"
 
-for i in RippleVirtioGPU.kext RippleGLDriver.bundle RippleGA.plugin RippleQEMUTablet.kext; do
+for i in RippleVirtioGPU.kext RippleGLDriver.bundle RippleGA.plugin RippleQEMUTablet.kext RippleVirtioSound.kext; do
     if [ -e "$EXT/$i" ]; then rm -rf "$EXT/$i" && echo "removed $EXT/$i"; fi
 done
 echo "Rebuilding the kext cache"

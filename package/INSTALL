@@ -9,6 +9,7 @@ Before you start
 - The VM runs Mac OS X 10.6.8 with the 64-bit kernel, booted by OpenCore, with QEMU's
   virtio-vga-gl card (Proxmox: vga: virtio-gl). The VM settings are in the project's docs/install.md.
 - Sleep must stay off in the guest (10.6.8 in QEMU panics when it sleeps); install.sh turns it off.
+- Sound (optional): give the VM QEMU's virtio-sound-pci device and install with --sound.
 - Take a snapshot of the VM.
 
 Install
@@ -17,7 +18,7 @@ Install
      genisoimage -V RIPPLE -r -J -o ripple.iso moose-ripple-@VERSION@
 2. In the guest's Terminal:
      cd /Volumes/RIPPLE
-     sudo sh install.sh                (options: --no-tablet, --hwcursor for UTM, --logs)
+     sudo sh install.sh                (options: --no-tablet, --sound, --hwcursor for UTM, --logs)
 3. Restart: sudo reboot
 
 Check
@@ -33,6 +34,7 @@ Files
   RippleGLDriver.bundle   OpenGL driver (Mesa's virgl driver for 10.6)
   RippleGA.plugin         2D plugin WindowServer needs before it composites with OpenGL
   RippleQEMUTablet.kext   optional: the pointer follows QEMU's USB tablet exactly
+  RippleVirtioSound.kext  optional (--sound): sound through QEMU's virtio-sound-pci device
   qe-check                prints whether each display has Quartz Extreme
   install.sh, uninstall.sh, INSTALL, LICENSE, LICENSE-Mesa.rst
   SHA256SUMS              checksums of all the above: shasum -a 256 -c SHA256SUMS

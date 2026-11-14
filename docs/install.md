@@ -223,9 +223,29 @@ More on the boot disk: [boot/opencore/README.md](../boot/opencore/README.md).
 
 ### Sound (optional)
 
-Snow Leopard has its own driver for USB audio devices (AppleUSBAudio), and QEMU has a USB audio
-device, so sound needs no moose-ripple driver. Add a USB 1.1 controller with QEMU's audio device
-on it; in UTM, as three more rows in QEMU > Arguments:
+moose-ripple has a driver for QEMU's virtio-sound device, `RippleVirtioSound.kext`, installed
+with `sudo sh install.sh --sound` (step 4). Give the VM the device and an audio backend; in UTM,
+as two more rows in QEMU > Arguments:
+
+```
+-audiodev coreaudio,id=rca,out.frequency=48000
+-device virtio-sound-pci,audiodev=rca
+```
+
+- It needs QEMU 8.2 or newer (the first with virtio-sound-pci).
+- `coreaudio` plays on the Mac's own output. On a Linux host, use its backend instead (`pa`,
+  `pipewire` or `alsa`); on Proxmox, add both options to the VM's `args:` line.
+- The driver plays 48 kHz, 16-bit stereo; `out.frequency=48000` keeps QEMU from resampling it.
+- The guest shows it as "Virtio Sound" in System Preferences > Sound. Volume and mute work there;
+  a sound starts about 0.1 s after it is played.
+
+Tested on 2026-11-14 in UTM on an Apple-silicon Mac (system sounds and the Welcome music played
+smoothly through the Mac's speakers) and under KVM on Proxmox (QEMU's `wav` backend, checked
+for gaps).
+
+Without our driver, QEMU's USB audio device works with Snow Leopard's own driver (AppleUSBAudio),
+but it stutters. It needs a USB 1.1 controller (the EHCI one above is USB 2.0 only, and 10.6 has
+no driver for UTM's USB 3.0 bus):
 
 ```
 -device piix3-usb-uhci,id=ruhci
@@ -233,14 +253,8 @@ on it; in UTM, as three more rows in QEMU > Arguments:
 -device usb-audio,bus=ruhci.0,audiodev=rca
 ```
 
-- The audio device is a USB 1.1 device, and the USB controllers above can't take it: the EHCI
-  one is USB 2.0 only, and 10.6 has no driver for UTM's USB 3.0 bus.
-- `coreaudio` plays on the Mac's own output. On other hosts, use their audio backend instead
-  (`pa` or `pipewire` on Linux); those haven't been tried yet.
-
-Tested in UTM 5.0.8 on 2026-11-12: Snow Leopard loads AppleUSBAudio for it, and its system
-sounds play on the Mac. In eleven boots with the device, one panicked early in the boot, too early
-for the panic report to be saved; the cause isn't known, and the ten others were fine.
+In eleven UTM boots with the USB audio device, one panicked early in the boot; the cause isn't
+known.
 
 ## 3. Prepare Snow Leopard
 
@@ -260,7 +274,7 @@ With the release disk the files are already there, on the RIPPLE volume. With th
 
 ```
 cd /Volumes/RIPPLE
-sudo sh install.sh               # options: --no-tablet, --hwcursor (UTM), --logs
+sudo sh install.sh               # options: --no-tablet, --sound, --hwcursor (UTM), --logs
 sudo reboot
 ```
 
@@ -268,11 +282,11 @@ sudo reboot
 doesn't match. Otherwise it does what you would do by hand:
 
 1. Copies `RippleVirtioGPU.kext`, `RippleGLDriver.bundle`, `RippleGA.plugin` and
-   `RippleQEMUTablet.kext` into `/System/Library/Extensions`.
+   `RippleQEMUTablet.kext` (and with `--sound`, `RippleVirtioSound.kext`) into
+   `/System/Library/Extensions`.
 2. Makes them owned by `root:wheel` and read-only for others (`chmod -R u=rwX,go=rX`): 10.6
    refuses kexts with any other owner.
-3. Checks the kernel driver with `kextutil -n -t RippleVirtioGPU.kext` ("appears to be
-   loadable").
+3. Checks the kernel drivers with `kextutil -n -t` ("appears to be loadable").
 4. Rebuilds the kext cache with `kextcache -system-mkext`, run from `/` (from a folder on a CD
    it fails with "Couldn't lock").
 5. Turns sleep off (`pmset -a sleep 0 displaysleep 0 disksleep 0`).
@@ -280,7 +294,9 @@ doesn't match. Otherwise it does what you would do by hand:
    keeping the flags already there except `-s` (left over from single-user mode, it would make
    every boot single-user).
 
-Its options: `--no-tablet` leaves out `RippleQEMUTablet.kext`; `--hwcursor` adds
+Its options: `--no-tablet` leaves out `RippleQEMUTablet.kext`; `--sound` adds
+`RippleVirtioSound.kext`, the driver for QEMU's virtio-sound-pci device ([Sound](#sound-optional));
+`--hwcursor` adds
 `ripple_hwcursor=1`; `--logs` creates `/Library/Logs/RippleGL`, where the GL driver then writes a
 log for every program that uses it (remove the folder to stop them).
 
