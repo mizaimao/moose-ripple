@@ -525,3 +525,43 @@ Exposé 78-80 against 78-89 screen updates per second in bursts, Dashboard 66-68
 
 One number did change, and it is not a slowdown: WindowServer's own frame counter (the frame
 meter's frames/s) reads about half of what it did, see `perf-notes.md`.
+
+## The RSS Visualizer seam: a borrowed drawable reset the viewport (2026-11-14, #26)
+
+The RSS Visualizer screen saver showed a soft vertical seam at about 64% of the picture's
+width (first seen in UTM; a GeForce 9600 GT draws it without). It is on the Proxmox host too,
+so not a matter of OpenGL ES hosts: in screenshots of the preview the columns' mean green
+holds still for about 6 pixels and catches up within 3 (about 1.4 levels).
+
+How the saver draws (GL trace, and the new `fbodump` switch, which writes every framebuffer
+object of a context to `fbo-PID-CONTEXT-NAME.ppm` with its alpha as `-alpha.pgm`): a 512x512
+grey cloud image from the composition, which tiles seamlessly (first against last column
+differ by 1.0 on average, neighbours inside by 0.85), goes through Core Image into a 512x512
+texture; Quartz Composer draws that texture twice with `GL_REPEAT` and a moving offset into
+another 512x512 texture, and maps the result onto a sphere. The Core Image texture was the
+wrong one: its first and last columns differed by 17 to 35 levels, its first and last rows by
+39 to 61. Tiled, it showed its joins, and the scrolled copies carried them into the picture.
+
+Why. Core Image works in contexts of its own on 551x551 buffers and draws the result with
+the caller's context: a 512x512 quad, texture coordinates 0 to 512, into the 512x512 texture,
+with the viewport the caller had set (512x512). dtrace on the bundle showed that draw going
+out with a 551x551 viewport, which no call of the program had set in that context: the
+picture came out 551/512 too large, so only 476 of its 512 columns and rows landed in the
+texture. The viewport came from Mesa. A context without a drawable (Quartz Composer's here)
+is made current on Mesa's placeholder framebuffer. When such a context reads from a pbuffer,
+our frontend lends it that pbuffer as its drawable for the moment
+(`ripple_cgl_context_set_read_drawable`), and Mesa, seeing the context on a real drawable
+for the first time, sets "the initial viewport and scissor box" to the drawable's size:
+551x551, over what the program had set.
+
+Fix (`cgl_context.c`): while a context without a drawable borrows one, Mesa is told its
+viewport is initialised already; a context that later gets a window of its own is still
+initialised to that window's size.
+
+Checked on the Proxmox host: the Core Image texture tiles again (first against last column
+0.6 to 1.3, like its neighbours; rows 1.4 to 2.2), the composed picture has no step, and in
+two screenshots of the preview no column step stands out (largest 0.21 against a median of
+0.055, at scattered places; before 0.3 to 0.4 always in the same columns). Desktop, a window,
+a menu, Exposé and Dashboard look as before; `ci-check` gives the same pixels on the GPU as
+in software. Not run again in UTM: the fault and the fix are in the guest's part and the
+same on every host.
