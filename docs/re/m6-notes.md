@@ -408,3 +408,31 @@ the driver has, as PPM files in `/Library/Logs/RippleGL/` (`scripts/sheet.sh` co
 while an app's window is shown by the kernel WindowServer does not redraw, and `touch swapdump`
 gives each app's frame at its next swap instead (`swap-PID-CONTEXT.ppm`). The log lines alone
 were not enough here: they showed presents at a good rate while the picture was wrong.
+
+## Video: a texture made from an IOSurface has to follow the surface (2026-11-13)
+
+Seen in testing in UTM: the Welcome movie, at first boot and again in QuickTime Player, showed
+only its first few frames, over and over. It was the same on the Proxmox host, where earlier
+checks of "a movie in QuickTime Player" had rested on single screenshots, which cannot show
+frames repeating.
+
+Cause: `CGLTexImageIOSurface2D` (GLI parameter 910) copied the surface's pixels into the texture
+once, on the assumption that Core Video makes a texture for every frame. It does not: it keeps
+a pool of IOSurfaces for a movie (16), makes one texture for each the first time it is shown,
+and from then on only decodes into the surfaces and binds the textures. Counted with dtrace
+during 10 s of playback: 18 calls for about 200 frames shown.
+
+What Apple's drivers do, measured with `gl-feature-check iosurface` (two textures on two
+surfaces; the surfaces are refilled, the textures bound and drawn again): on the GeForce 9600 GT
+the textures show the new contents; Apple's software renderer keeps the first ones (Core Video
+must take another path there, movies play on it).
+
+Fix (`cgl_apple.c`): the surface is remembered with its texture, in the table the
+client-storage textures are in, and at a later bind it is copied in again when the surface's
+seed (`IOSurfaceGetSeed`, its change counter) has moved. The texture forgets the surface when it
+is deleted or given another image, and a share group's entries go with its last context.
+Not covered: a texture that stays bound from frame to frame and is never bound again.
+
+Checked on the dev VM: the test gives the 9600 GT's result; the Welcome movie plays through in
+QuickTime Player at its 24 frames/s (the same scenes as on the 9600 GT, in screenshots a second
+apart); Real Racing 2's intro, which goes through QTKit, as before.
