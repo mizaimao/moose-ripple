@@ -241,7 +241,9 @@ as two more rows in QEMU > Arguments:
 
 Tested on 2026-11-14 in UTM on an Apple-silicon Mac (system sounds and the Welcome music played
 smoothly through the Mac's speakers) and under KVM on Proxmox (QEMU's `wav` backend, checked
-for gaps).
+for gaps). In UTM with acceleration on, the whole VM sometimes pauses for 70-190 ms
+while a program starts (QuickTime Player opening a movie, for example), and the sound drops for
+that long; the cause is being looked into.
 
 Without our driver, QEMU's USB audio device works with Snow Leopard's own driver (AppleUSBAudio),
 but it stutters. It needs a USB 1.1 controller (the EHCI one above is USB 2.0 only, and 10.6 has

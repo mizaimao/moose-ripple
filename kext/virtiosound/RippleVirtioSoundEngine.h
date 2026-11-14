@@ -22,7 +22,7 @@ public:
         kChannels     = 2,
         kBytesPerFrame = 4,               // S16 stereo
         kPeriodFrames = 512,              // 10.7 ms at 48 kHz
-        kPeriods      = 16,
+        kPeriods      = 32,               // a 341 ms ring (see the stall note in submit)
         kRingFrames   = kPeriodFrames * kPeriods,
         kPrimeSlots   = 4,                // slots in flight: about 43 ms queued at QEMU
         kVolumeSteps  = 64                // 0.75 dB per step, -48 dB .. 0 dB
