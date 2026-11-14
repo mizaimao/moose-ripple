@@ -5,6 +5,7 @@
  * kext uses floating point.
  */
 #include "RippleVirtioSoundEngine.h"
+#include "RippleVirtioSoundTrace.h"
 
 IOReturn RippleVirtioSoundEngine::clipOutputSamples(const void *mixBuf, void *sampleBuf,
                                                     UInt32 firstSampleFrame, UInt32 numSampleFrames,
@@ -15,6 +16,12 @@ IOReturn RippleVirtioSoundEngine::clipOutputSamples(const void *mixBuf, void *sa
     const float *in = (const float *)mixBuf + firstSampleFrame * channels;
     SInt16 *out = (SInt16 *)sampleBuf + firstSampleFrame * channels;
     UInt32 n = numSampleFrames * channels;
+#ifdef RIPPLE_SND_TRACE
+    uint16_t sound = 0;
+    for (UInt32 i = 0; i < n && !sound; i++)
+        sound = in[i] != 0.0f;
+    SND_TRACE(kTrClip, sound, firstSampleFrame, numSampleFrames, fNextFrame);
+#endif
 
     float gain = 0.0f;
     if (!fMute) {

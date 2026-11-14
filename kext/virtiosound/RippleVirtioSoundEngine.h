@@ -57,11 +57,13 @@ private:
     volatile UInt32    fNextFrame;        // next ring frame to copy into a slot
     bool               fRunning;
     bool               fReading;          // past the start burst: slots are filled from the ring
-    bool               fAnchorRead;       // the next read of frame 0 is the one loop 0 was stamped at
+    bool               fWrapPending;      // a read passed frame 0: stamp fWrapTime once it has passed
+    uint64_t           fWrapTime;
+    uint64_t           fStartTime;        // loop 0's timestamp (absolute time)
     uint64_t           fLastDone;         // absolute time of the last completion (start burst)
     uint64_t           fHalfPeriodAbs;
 
-    void submit(unsigned slot);
+    void submit(unsigned slot, uint64_t now);
     static IOReturn volumeChanged(OSObject *target, IOAudioControl *control, SInt32 oldValue, SInt32 newValue);
     static IOReturn muteChanged(OSObject *target, IOAudioControl *control, SInt32 oldValue, SInt32 newValue);
 };
