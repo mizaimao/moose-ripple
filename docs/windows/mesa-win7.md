@@ -114,16 +114,20 @@ Source (in `windows/mesa/patches-virgl/`, applied only for this variant, in its 
 Scanned for GPL, LGPL and MPL text: none in any patch. Four files of commit 77e160421bd, the
 kernel bridge `gdikmt` (`auxiliary/gdikmt/gdikmt.h`, `gdikmt_d3dkmt.c`,
 `frontends/d3d10umd/gdikmt_d3dddi.cpp`, `gdikmt_d3dddi.h`), carry no licence header at all.
-Decision (2026-11-14): we write our own bridge; those four files are never committed. Until
-ours exists, the local test build takes them from a patch kept outside the repository in
-`.tools/mesa/patches-local/` (applied after the repository's patches when present).
+Decision (2026-11-14): we write our own bridge; those four files are never committed. Ours is
+in `windows/mesa/overlay-virgl/` (MIT, same four file names, written from the description in
+"What the rest expects from the kernel bridge" below): the build copies it over the source
+tree after the patches, and the source tree's stamp covers it, so a change to it unpacks the
+tree again.
 
 Our patches on top: `0010` and `0011` as above, `0012` (the DDK headers on the include path of
 the bridge, the virgl winsys and the WGL target: with MinGW, `d3dkmthk.h` comes from
-`include/winddk`), `0013` (a pointer-to-handle cast clang rejects on 64-bit). The build also
-leaves WDK 7.1's `dxgiformat.h` and `dxgitype.h` out of `include/winddk`, so the DXGI framebuffer
-code sees MinGW's newer ones, and has the local `d3dkmthk.h` include Mesa's `winddk_compat.h`
-(empty SAL annotations) itself.
+`include/winddk`), `0013` (a pointer-to-handle cast clang rejects on 64-bit), `0014` (the
+Windows 7 completion event and which allocations belong to the runtime, below), `0015` (`bool`
+for the `boolean` type Mesa has dropped, which the winsys still used: the original bridge header
+defined it, ours does not). The build also leaves WDK 7.1's `dxgiformat.h` and `dxgitype.h` out
+of `include/winddk`, so the DXGI framebuffer code sees MinGW's newer ones, and has the local
+`d3dkmthk.h` include Mesa's `winddk_compat.h` (empty SAL annotations) itself.
 
 Result: `viogpu_wgl.dll` imports only `GDI32`, `KERNEL32`, `USER32`, `msvcrt` and
 `libglapi.dll`; `viogpu_d3d10.dll` only `KERNEL32` and `msvcrt`. The bridge loads the D3DKMT
@@ -136,9 +140,10 @@ Windows 8 and later assumptions found:
 - Command completion: after each submission the bridge asks the kernel to signal a CPU event
   when the GPU is done, through `SignalSynchronizationObject2` with a CPU event (the D3DKMT
   function from `gdi32` on the OpenGL path, the runtime's callback of the same name on the
-  Direct3D path). Both are WDDM 1.2 (Windows 8). The local test build signals the event at
-  submission instead; our bridge needs a Windows 7 way (for example a fence the kernel driver
-  reports through an escape, or Windows 7's synchronization objects).
+  Direct3D path). Both are WDDM 1.2 (Windows 8). On Windows 7 (`0014`) the winsys ends the
+  command buffer with a command of the kernel driver's private protocol,
+  `VIOGPU_CMD_SIGNAL_EVENT`, and the kernel driver sets the event when the buffer has run on the
+  host; with no room left for that command, the event is set at submission.
 - Nothing else: the Direct3D driver reports the Direct3D 10.0, 10.0.x, 10.0.7 and 10.1 DDI
   versions only, which Windows 7's runtime has.
 

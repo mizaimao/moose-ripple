@@ -1,0 +1,67 @@
+virgl/gdi: bool instead of boolean
+
+The virgl winsys for Windows was written when Mesa still had its own "boolean" type; Mesa has
+since dropped it, and the original gdikmt.h that typedef'd it is not used here (our own bridge
+in overlay-virgl/ uses bool). Plain C bool, as in the rest of Mesa 24.3.
+
+--- a/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
++++ b/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
+@@ -63,7 +63,7 @@
+    (struct virgl_hw_res *)((char *)ptr -                                       \
+                            offsetof(struct virgl_hw_res, cache_entry))
+ 
+-static inline boolean
++static inline bool
+ can_cache_resource(uint32_t bind)
+ {
+    if (bind & VIRGL_BIND_SHARED)
+@@ -144,7 +144,7 @@
+    FREE(res);
+ }
+ 
+-static boolean
++static bool
+ virgl_gdi_resource_is_busy(struct virgl_winsys *vws, struct virgl_hw_res *res)
+ {
+    if (!p_atomic_read(&res->maybe_busy) && !p_atomic_read(&res->shared))
+@@ -508,7 +508,7 @@
+    *dst = src;
+ }
+ 
+-static boolean virgl_gdi_winsys_resource_get_handle(struct virgl_winsys *qws,
++static bool virgl_gdi_winsys_resource_get_handle(struct virgl_winsys *qws,
+                                                     struct virgl_hw_res *res,
+                                                     uint32_t stride,
+                                                     struct winsys_handle
+@@ -588,11 +588,11 @@
+ 
+ static void
+ virgl_gdi_emit_res(struct virgl_winsys *qws, struct virgl_cmd_buf *_cbuf,
+-                   struct virgl_hw_res *res, boolean write_buf)
++                   struct virgl_hw_res *res, bool write_buf)
+ {
+    struct virgl_gdi_winsys *qdws = virgl_gdi_winsys(qws);
+    struct virgl_gdi_cmd_buf *cbuf = virgl_gdi_cmd_buf(_cbuf);
+-   boolean already_in_list = false;
++   bool already_in_list = false;
+    for (int i = 0; i < cbuf->alloc_count; i++) {
+       if (cbuf->ctx->pAllocationList[i].hAllocation == res->hAllocation) {
+          already_in_list = true;
+@@ -625,7 +625,7 @@
+    }
+ }
+ 
+-static boolean
++static bool
+ virgl_gdi_res_is_ref(struct virgl_winsys *qws, struct virgl_cmd_buf *_cbuf,
+                      struct virgl_hw_res *res)
+ {
+@@ -1104,7 +1104,7 @@
+ virgl_gdi_screen_destroy(struct pipe_screen *pscreen)
+ {
+    struct virgl_screen *screen = virgl_screen(pscreen);
+-   boolean destroy;
++   bool destroy;
+ 
+    simple_mtx_lock(&virgl_screen_mutex);
+    destroy = --screen->refcnt == 0;

@@ -7,9 +7,8 @@
 # Its own source tree and build directory, apart from the Mac side's:
 #   .tools/mesa/src-24.3.4-win[-virgl]   the release tarball, the patches, WDK 7.1 DDI headers
 #   .tools/mesa/build-win7-ARCH[-virgl]  the build; .tools/mesa/out-win7-ARCH[-virgl] the DLLs
-# Patches: patches/ for both variants; for virgl also patches-virgl/ and any local-only patches
-# in .tools/mesa/patches-local/ (code whose licence is not settled; never committed). All are
-# applied in file-name order.
+# Patches: patches/ for both variants, for virgl also patches-virgl/, all applied in file-name
+# order; then, for virgl, the files in overlay-virgl/ (our kernel bridge) copied over the tree.
 # Toolchain: llvm-mingw (msvcrt variant, as Windows 7 has no UCRT) in .tools/llvm-mingw. Its
 # clang 23 makes incompatible pointer types an error, which Mesa 24.3's SPIR-V code trips on
 # MinGW (setjmp buffer): kept a warning.
@@ -37,7 +36,8 @@ case $VARIANT in
 esac
 SRC=$T/mesa/src-$MESA_VERSION-win$SUFFIX
 PATCHDIRS="$here/patches"
-[ $VARIANT = sw ] || PATCHDIRS="$PATCHDIRS $here/patches-virgl $T/mesa/patches-local"
+OVERLAY=
+[ $VARIANT = sw ] || { PATCHDIRS="$PATCHDIRS $here/patches-virgl"; OVERLAY=$here/overlay-virgl; }
 BUILD=$T/mesa/build-win7-$ARCH$SUFFIX
 OUT=$T/mesa/out-win7-$ARCH$SUFFIX
 LLVM_MINGW=${LLVM_MINGW:-$T/llvm-mingw/llvm-mingw-20261104-msvcrt-ubuntu-22.04-x86_64}
@@ -53,7 +53,8 @@ fi
 echo "$MESA_SHA256  $TARBALL" | sha256sum -c --quiet
 
 # Source tree: unpacked again when the patches change or with --clean.
-stamp=$( (echo "$MESA_SHA256"; for d in $PATCHDIRS; do cat "$d"/*.patch 2>/dev/null; done) | sha256sum | cut -c1-16)
+stamp=$( (echo "$MESA_SHA256"; for d in $PATCHDIRS; do cat "$d"/*.patch 2>/dev/null; done
+        [ -z "$OVERLAY" ] || (cd "$OVERLAY" && find . -type f | LC_ALL=C sort | xargs cat)) | sha256sum | cut -c1-16)
 if [ "${1:-}" = --clean ] || [ "$(cat "$SRC/.ripple-win-stamp" 2>/dev/null)" != "$stamp" ]; then
     rm -rf "$SRC" "$BUILD"
     mkdir -p "$SRC"
@@ -61,6 +62,8 @@ if [ "${1:-}" = --clean ] || [ "$(cat "$SRC/.ripple-win-stamp" 2>/dev/null)" != 
     for p in $(for d in $PATCHDIRS; do ls "$d"/*.patch 2>/dev/null; done | awk -F/ '{print $NF "\t" $0}' | sort | cut -f2); do
         patch -d "$SRC" -p1 --quiet < "$p"
     done
+    # virgl: our own files (the kernel bridge, windows/mesa/overlay-virgl) copied over the tree.
+    [ -z "$OVERLAY" ] || cp -R "$OVERLAY"/. "$SRC"/
     # The DDI headers Mesa's d3d10umd wants in include/winddk (its README.txt), from WDK 7.1:
     # copied into the build's own tree, never into the repository.
     # Not dxgiformat.h and dxgitype.h: MinGW has newer ones, and WDK 7.1's would hide them from
