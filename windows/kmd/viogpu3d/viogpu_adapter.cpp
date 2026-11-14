@@ -822,7 +822,13 @@ VOID VioGpuAdapter::DpcRoutine(VOID)
 
 VOID VioGpuAdapter::ResetDevice(VOID)
 {
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
+    // Windows 7 calls this before it draws a crash screen or hibernates, at any interrupt level,
+    // and draws through VGA afterwards (the driver model has no other way before version 1.2).
+    // A reset of the virtio device makes the host show the device's VGA side again.
+    if (IsHardwareInit() && IsVgaDevice())
+    {
+        virtio_device_reset(&m_VioDev);
+    }
 }
 
 #pragma code_seg(pop) // End Non-Paged Code
