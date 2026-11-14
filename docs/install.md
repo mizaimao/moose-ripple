@@ -155,7 +155,7 @@ UTM runs the VM under emulation (an x86 guest on an ARM Mac has no KVM), and its
 hands the OpenGL work to the Mac's GPU through ANGLE, which turns OpenGL ES into Metal. Create a
 VM with Emulate > Other, then set in its settings:
 
-- System: architecture x86_64, system Q35, 4 GB of memory, 4 CPU cores, Force Multicore on.
+- System: architecture x86_64, system Q35, 4 GB of memory, 4 CPU cores.
 - QEMU: UEFI Boot on.
 - Display: emulated display card `virtio-vga-gl` (GPU Supported).
 - Network: emulated network card `e1000`.
@@ -181,13 +181,14 @@ VM with Emulate > Other, then set in its settings:
   Under emulation 10.6 can use it there; the hang in KI-2 happens only with KVM.
 - The CPU flags that only mean something to KVM (`kvm=on`, `+kvm_pv_*`, `+hypervisor`,
   `+invtsc`) are left out.
-- Force Multicore: without it UTM runs all four emulated CPUs on one thread of the Mac.
-  With it, in the same scripted run, Real Racing 2 reached its menu in 140 s instead of
-  175 and its race ran at about 31 frames/s instead of 26. UTM leaves it off
-  for an Intel guest on an ARM Mac because QEMU does not guarantee correct emulation with
-  it: Intel CPUs promise a stricter order of memory writes between cores than ARM gives. We
-  saw no trouble with it in testing. If a program misbehaves in a way you can't explain,
-  turn it off and try again.
+- Optional, System > Force Multicore: UTM normally runs all four emulated CPUs on one
+  thread of the Mac; with this setting each gets its own. In the same scripted run Real
+  Racing 2 reached its menu in 140 s instead of 175 and its race ran at about 31 frames/s
+  instead of 26. UTM leaves it off for an Intel guest on an ARM Mac because QEMU does not
+  guarantee correct emulation with it: Intel CPUs promise a stricter order of memory writes
+  between cores than ARM gives. We saw no trouble with it in testing, but the gain is
+  small, so the numbers in this guide are without it. If you turn it on and a program
+  misbehaves in a way you can't explain, turn it off again.
 
 Tested with UTM 5.0.8 (QEMU 10.0.12) on macOS 26.7 with an M1 Max: Quartz Extreme is on with the
 translucent menu bar, and gl-gears runs at about 55 frames/s even under emulation. Chess and Real

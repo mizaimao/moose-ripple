@@ -457,7 +457,8 @@ What each host is short of:
   (An earlier version of this note compared it with about 12 frames/s seen the day before;
   that was another moment of a longer race on an older build, not a like-for-like run.) UTM's documentation says QEMU
   does not guarantee correct emulation in this mode (x86 promises a stricter memory order than
-  ARM gives), so it stays a choice.
+  ARM gives). For about 15% that is not worth making it the documented setting: it is in
+  the install guide as an option.
 - **Windows 11 (WSL2):** the host's own CPU work. The game's menu settles at 15 frames/s
   (57 on Proxmox) while the game uses 7% of a guest CPU. On the host, QEMU's main thread, the
   one that turns our commands into Direct3D 12 calls through Mesa's d3d12 driver, is busy 76%
