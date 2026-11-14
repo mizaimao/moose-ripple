@@ -511,11 +511,104 @@ ripple_cgl_scissor(void *rend, GLint x, GLint y, GLsizei w, GLsizei h)
    CALL_Scissor(GET_DISPATCH(), (x, y, w, h));
 }
 
+/* /Library/Logs/RippleGL/fbodump (debug switch): every complete framebuffer object of a
+ * context as a PPM (top row first, fbo-PID-CONTEXT-NAME.ppm), once per creation of that file,
+ * at the context's next framebuffer bind; for looking at what was drawn off screen. Checked
+ * once a second. */
+#include "main/hash.h"
+struct fbo_dump_list {
+   unsigned n;
+   GLuint names[64];
+};
+
+static void
+fbo_dump_collect(void *data, void *user)
+{
+   struct gl_framebuffer *fb = data;
+   struct fbo_dump_list *list = user;
+   if (fb && fb->Name && list->n < 64)
+      list->names[list->n++] = fb->Name;
+}
+
+static void
+fbo_dump(void *rend)
+{
+   static time_t checked, mtime;
+   static struct { void *ctx; time_t done; } seen[16];
+   GET_CURRENT_CONTEXT(g);
+   if (!g)
+      return;
+   time_t now = time(NULL);
+   if (now != checked) {
+      struct stat st;
+      checked = now;
+      mtime = stat("/Library/Logs/RippleGL/fbodump", &st) == 0 ? st.st_mtime : 0;
+   }
+   if (!mtime)
+      return;
+   unsigned i = 0;
+   while (i < 15 && seen[i].ctx && seen[i].ctx != rend)
+      i++;
+   if (seen[i].ctx == rend && seen[i].done == mtime)
+      return;
+   seen[i].ctx = rend;
+   seen[i].done = mtime;
+
+   struct fbo_dump_list list = { 0 };
+   _mesa_HashWalk(&g->Shared->FrameBuffers, fbo_dump_collect, &list);
+   struct gl_pixelstore_attrib saved = g->Pack;
+   memset(&g->Pack, 0, sizeof(g->Pack));
+   g->Pack.Alignment = 1;
+   GLuint rfb = g->ReadBuffer ? g->ReadBuffer->Name : 0;
+   for (unsigned k = 0; k < list.n; k++) {
+      CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT, list.names[k]));
+      struct gl_framebuffer *fb = g->ReadBuffer;
+      if (!fb || fb->Name != list.names[k] ||
+          _mesa_check_framebuffer_status(g, fb) != GL_FRAMEBUFFER_COMPLETE_EXT)
+         continue;
+      unsigned w = fb->Width, h = fb->Height;
+      uint8_t *px = w && h && w <= 8192 && h <= 8192 ? malloc((size_t)w * h * 4) : NULL;
+      if (!px)
+         continue;
+      GLenum rb = fb->ColorReadBuffer;
+      CALL_ReadBuffer(GET_DISPATCH(), (GL_COLOR_ATTACHMENT0_EXT));
+      CALL_ReadPixels(GET_DISPATCH(), (0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px));
+      CALL_ReadBuffer(GET_DISPATCH(), (rb));
+      char path[160];
+      snprintf(path, sizeof(path), "/Library/Logs/RippleGL/fbo-%d-%p-%u.ppm", (int)getpid(),
+               rend, list.names[k]);
+      FILE *f = fopen(path, "wb");
+      if (f) {
+         fprintf(f, "P6\n%u %u\n255\n", w, h);
+         for (unsigned y = 0; y < h; y++)
+            for (unsigned x = 0; x < w; x++)
+               fwrite(px + ((size_t)(h - 1 - y) * w + x) * 4, 1, 3, f);
+         fclose(f);
+      }
+      /* The alpha channel too, as a grey picture. */
+      snprintf(path, sizeof(path), "/Library/Logs/RippleGL/fbo-%d-%p-%u-alpha.pgm", (int)getpid(),
+               rend, list.names[k]);
+      f = fopen(path, "wb");
+      if (f) {
+         fprintf(f, "P5\n%u %u\n255\n", w, h);
+         for (unsigned y = 0; y < h; y++)
+            for (unsigned x = 0; x < w; x++)
+               fwrite(px + ((size_t)(h - 1 - y) * w + x) * 4 + 3, 1, 1, f);
+         fclose(f);
+      }
+      free(px);
+   }
+   CALL_BindFramebufferEXT(GET_DISPATCH(), (GL_READ_FRAMEBUFFER_EXT, rfb));
+   g->Pack = saved;
+}
+
 void GLAPIENTRY
 ripple_cgl_bind_framebuffer(void *rend, GLenum target, GLuint framebuffer)
 {
    struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
    RIPPLE_CGL_ENTER(rend);
+   if (target != GL_READ_FRAMEBUFFER_EXT)
+      fbo_dump(rend);
    bool before = ctx && offset_ctx(rend, false);
    CALL_BindFramebufferEXT(GET_DISPATCH(), (target, framebuffer));
    if (!ctx || (!ctx->win_surface && !ctx->surf_h))
