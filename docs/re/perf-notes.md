@@ -785,3 +785,8 @@ for something else (a flush of translated code, for one), is not found yet. Two 
 things are mixed in the sound problem: a sound through the USB audio device stalls the guest
 for 40 to 50 ms at its start and end with or without the driver, and a program that starts
 drawing with the driver stalls it for up to 190 ms.
+
+The same start on the Proxmox host (KVM), driver on, two runs: no wake-up over 20 ms late
+(worst 17.9 and 5.2 ms). So the stall belongs to the emulated CPU in UTM, not to the driver's
+work as such: the next place to look is what QEMU's code translator does when a program loads
+the GL bundle (31 MB of code new to it).
