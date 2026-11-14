@@ -136,3 +136,15 @@ installer refuses it as not for this Windows).
    panel that is always connected (`HpdAwarenessAlwaysConnected`, `D3DKMDT_VOT_INTERNAL`);
    the next build describes an ordinary connector that reports plugging
    (`HpdAwarenessInterruptible`, `D3DKMDT_VOT_HD15`).
+3. **An ordinary connector, and the settings where Windows 7 keeps them** (a
+   `.SoftwareSettings` section in the INF for the user-mode driver names): no change, the
+   same three calls and then the stop. The connector description stays as changed (a
+   built-in panel is wrong for a VM anyway).
+4. **`LoadOrderGroup = Video`** for the service, on the idea that Windows 7 starts the device
+   after its old-model fallback driver (VgaSave) otherwise and then refuses a WDDM driver: no
+   change. VgaSave is running after each failed start, with or without the group, which
+   says nothing about the order: it is the fallback.
+
+What the four runs have in common: Device Manager shows Code 43, which is not a failed start.
+Windows started the device and then switched it off on purpose, and it never asked the driver
+for its capabilities. Nothing in the System event log.
