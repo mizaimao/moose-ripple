@@ -693,3 +693,28 @@ So `CGSGetPerformanceData`'s frame count rose with the dropped programs and not 
 passes (how it counts was not looked into). The frames/s figures above this point were taken with the
 errors and are not comparable with later ones; screens/s, the pacing run and counts of
 `glFlush` are. Pacing before and after is in `m6-notes.md`.
+
+### Video: the Welcome movie on both hosts (2026-11-14)
+
+Reported in testing: with UTM's acceleration off the Welcome movie plays choppy. The same
+movie with our driver, on both hosts. Setup Assistant's `intro.mov` (H.264, 1008x630, 800
+frames in 33.3 s: 24 frames/s, no sound track) in QuickTime Player, screen 1280x800, measured
+over 20 s of playback (frame meter, `top`, our bundle's present counts, dtrace on the screen
+updates):
+
+| | UTM (emulated CPU), our driver | same VM, Apple's software drawing | Proxmox (KVM), our driver, two runs |
+|---|---|---|---|
+| frames QuickTime Player presents per second | 23.8-24.1 | not counted | 23.6-25.0 |
+| frame meter, screens/s, mean | 22.9 | 2.4 | 23.9-24.8 |
+| update requests/s, mean | 49 | 11 | 51-53 |
+| CPU, QuickTime Player (percent of one core) | 90-114 | 141-164 | 41-48 |
+| CPU, WindowServer | 30-33 | 40-41 | 12-15 |
+| CPU, kernel_task | 9-15 | 55-57 | 6-8 |
+
+With the driver the movie runs at its own 24 frames/s on both hosts. In UTM no gap between
+screen updates was over 50 ms (953 updates in 20 s), and a frame read back from the display
+shows the right picture. The software column is the same VM booted without `ripple_gl=1
+ripple_qe=1`: about a tenth of the pixels reach the screen, at more CPU. So the macOS host
+(ANGLE on Metal) does not behave differently from Mesa on Linux here; what differs is the
+price of the emulated CPU (QuickTime Player about twice the CPU time, mostly decoding). One
+run each in UTM.
