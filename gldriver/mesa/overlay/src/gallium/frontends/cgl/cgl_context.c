@@ -177,7 +177,19 @@ ripple_cgl_context_set_read_drawable(struct ripple_cgl_context *ctx,
 {
    struct pipe_frontend_drawable *d = ctx->draw ? &ctx->draw->base : NULL;
    struct pipe_frontend_drawable *r = read ? &read->base : d;
+   /* Mesa sets a context's viewport and scissor box to the size of the first drawable it is
+    * made current with. For a context without a drawable that would be this borrowed one,
+    * in the middle of its drawing: the viewport the program had set was replaced by the
+    * borrowed drawable's size. (Core Image, drawing for Quartz Composer into a 512x512
+    * texture after reading a 551x551 buffer, drew its result 551/512 too large; the RSS
+    * Visualizer saver's cloud pattern no longer tiled and showed a seam.) The borrowed
+    * drawable is not the context's own: keep Mesa from taking it for that. */
+   GLboolean initialized = ctx->glctx->ViewportInitialized;
+   if (!d)
+      ctx->glctx->ViewportInitialized = GL_TRUE;
    st_api_make_current(ctx->st, d ? d : r, r);
+   if (!d)
+      ctx->glctx->ViewportInitialized = initialized;
 }
 
 /* From OpenGL.framework (CGLCurrent.h); declared here to keep Apple's GL headers out. */
