@@ -484,27 +484,16 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
 
                 DXGK_DRIVERCAPS *pDriverCaps = (DXGK_DRIVERCAPS *)pQueryAdapterInfo->pOutputData;
                 DbgPrint(TRACE_LEVEL_ERROR,
-                         ("InterruptMessageNumber = %d, WDDMVersion = %d\n",
-                          pDriverCaps->InterruptMessageNumber,
-                          pDriverCaps->WDDMVersion));
+                         ("InterruptMessageNumber = %d\n", pDriverCaps->InterruptMessageNumber));
                 RtlZeroMemory(pDriverCaps, pQueryAdapterInfo->OutputDataSize /*sizeof(DXGK_DRIVERCAPS)*/);
-                pDriverCaps->WDDMVersion = DXGKDDI_WDDMv1_3;
                 pDriverCaps->HighestAcceptableAddress.QuadPart = (ULONG64)-1;
 
                 pDriverCaps->FlipCaps.FlipOnVSyncMmIo = TRUE;
 
                 pDriverCaps->MaxQueuedFlipOnVSync = 1;
-
-                pDriverCaps->MemoryManagementCaps.SectionBackedPrimary = TRUE;
-
-                pDriverCaps->SupportDirectFlip = 1;
                 pDriverCaps->SchedulingCaps.MultiEngineAware = 1;
-                pDriverCaps->SchedulingCaps.PreemptionAware = 1;
 
                 pDriverCaps->GpuEngineTopology.NbAsymetricProcessingNodes = 1;
-
-                pDriverCaps->SupportSmoothRotation = FALSE;
-                pDriverCaps->SupportNonVGA = IsVgaDevice();
 
                 // Disable pointer on viogpu3d for now
                 // if (IsPointerEnabled()) {
@@ -517,9 +506,9 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s Driver caps return\n", __FUNCTION__));
                 return STATUS_SUCCESS;
             }
-        case DXGKQAITYPE_QUERYSEGMENT3:
+        case DXGKQAITYPE_QUERYSEGMENT:
             {
-                if (pQueryAdapterInfo->OutputDataSize < sizeof(DXGK_QUERYSEGMENTOUT3))
+                if (pQueryAdapterInfo->OutputDataSize < sizeof(DXGK_QUERYSEGMENTOUT))
                 {
                     DbgPrint(TRACE_LEVEL_ERROR,
                              ("pQueryAdapterInfo->OutputDataSize (0x%u) is smaller than sizeof(DXGK_QUERYSEGMENTOUT) "
@@ -530,14 +519,14 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 }
 
                 DbgPrint(TRACE_LEVEL_ERROR, ("QUERY SEG\n"));
-                DXGK_QUERYSEGMENTOUT3 *pSegmentInfo = (DXGK_QUERYSEGMENTOUT3 *)pQueryAdapterInfo->pOutputData;
+                DXGK_QUERYSEGMENTOUT *pSegmentInfo = (DXGK_QUERYSEGMENTOUT *)pQueryAdapterInfo->pOutputData;
                 if (!pSegmentInfo[0].pSegmentDescriptor)
                 {
                     pSegmentInfo->NbSegment = 1;
                 }
                 else
                 {
-                    DXGK_SEGMENTDESCRIPTOR3 *pSegmentDesc = pSegmentInfo->pSegmentDescriptor;
+                    DXGK_SEGMENTDESCRIPTOR *pSegmentDesc = pSegmentInfo->pSegmentDescriptor;
                     memset(&pSegmentDesc[0], 0, sizeof(pSegmentDesc[0]));
 
                     pSegmentInfo->PagingBufferPrivateDataSize = 0;
@@ -560,8 +549,6 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                     // pSegmentDesc[0].Flags.DirectFlip = TRUE;
                     pSegmentDesc[0].Size = 256 * 1024 * 4096;
                     pSegmentDesc[0].CommitLimit = 256 * 1024 * 4096;
-
-                    pSegmentDesc[0].Flags.DirectFlip = TRUE;
                 }
                 DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s Requested segments\n", __FUNCTION__));
                 return STATUS_SUCCESS;
@@ -760,21 +747,6 @@ NTSTATUS VioGpuAdapter::QueryInterface(_In_ CONST PQUERY_INTERFACE pQueryInterfa
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s Version = %d\n", __FUNCTION__, pQueryInterface->Version));
 
     return STATUS_NOT_SUPPORTED;
-}
-
-NTSTATUS VioGpuAdapter::StopDeviceAndReleasePostDisplayOwnership(_In_ D3DDDI_VIDEO_PRESENT_TARGET_ID TargetId,
-                                                                 _Out_ DXGK_DISPLAY_INFORMATION *pDisplayInfo)
-{
-    PAGED_CODE();
-
-    VIOGPU_ASSERT(TargetId < MAX_CHILDREN);
-    // FIXME!!!
-    if (m_MonitorPowerState > PowerDeviceD0)
-    {
-        SetPowerState(TargetId, PowerDeviceD0, PowerActionNone);
-    }
-    vidpn.ReleasePostDisplayOwnership(TargetId, pDisplayInfo);
-    return StopDevice();
 }
 
 PAGED_CODE_SEG_END
@@ -1424,69 +1396,6 @@ NTSTATUS VioGpuAdapter::HWClose(void)
     DbgPrint(TRACE_LEVEL_INFORMATION, ("<--- %s\n", __FUNCTION__));
 
     return STATUS_SUCCESS;
-}
-
-BOOLEAN FindUpdateRect(_In_ ULONG NumMoves,
-                       _In_ D3DKMT_MOVE_RECT *pMoves,
-                       _In_ ULONG NumDirtyRects,
-                       _In_ PRECT pDirtyRect,
-                       _In_ D3DKMDT_VIDPN_PRESENT_PATH_ROTATION Rotation,
-                       _Out_ PRECT pUpdateRect)
-{
-    PAGED_CODE();
-
-    UNREFERENCED_PARAMETER(Rotation);
-    BOOLEAN updated = FALSE;
-
-    if (pUpdateRect == NULL)
-    {
-        return FALSE;
-    }
-
-    if (NumMoves == 0 && NumDirtyRects == 0)
-    {
-        pUpdateRect->bottom = 0;
-        pUpdateRect->left = 0;
-        pUpdateRect->right = 0;
-        pUpdateRect->top = 0;
-    }
-
-    for (ULONG i = 0; i < NumMoves; i++)
-    {
-        PRECT pRect = &pMoves[i].DestRect;
-        if (!updated)
-        {
-            *pUpdateRect = *pRect;
-            updated = TRUE;
-        }
-        else
-        {
-            pUpdateRect->bottom = max(pRect->bottom, pUpdateRect->bottom);
-            pUpdateRect->left = min(pRect->left, pUpdateRect->left);
-            pUpdateRect->right = max(pRect->right, pUpdateRect->right);
-            pUpdateRect->top = min(pRect->top, pUpdateRect->top);
-        }
-    }
-    for (ULONG i = 0; i < NumDirtyRects; i++)
-    {
-        PRECT pRect = &pDirtyRect[i];
-        if (!updated)
-        {
-            *pUpdateRect = *pRect;
-            updated = TRUE;
-        }
-        else
-        {
-            pUpdateRect->bottom = max(pRect->bottom, pUpdateRect->bottom);
-            pUpdateRect->left = min(pRect->left, pUpdateRect->left);
-            pUpdateRect->right = max(pRect->right, pUpdateRect->right);
-            pUpdateRect->top = min(pRect->top, pUpdateRect->top);
-        }
-    }
-    if (Rotation == D3DKMDT_VPPR_ROTATE90 || Rotation == D3DKMDT_VPPR_ROTATE270)
-    {
-    }
-    return updated;
 }
 
 NTSTATUS VioGpuAdapter::UpdateChildStatus(BOOLEAN connect)

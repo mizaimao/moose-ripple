@@ -65,6 +65,8 @@ extern "C"
 
 #include <dispmprt.h>
 
+#include "ripple_win7.h"
+
 #include "trace.h"
 }
 

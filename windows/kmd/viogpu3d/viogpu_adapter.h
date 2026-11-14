@@ -180,8 +180,6 @@ class VioGpuAdapter : IVioGpuPCI
     NTSTATUS QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQueryAdapterInfo);
     NTSTATUS Escape(_In_ CONST DXGKARG_ESCAPE *pEscape);
     NTSTATUS QueryInterface(_In_ CONST PQUERY_INTERFACE QueryInterface);
-    NTSTATUS StopDeviceAndReleasePostDisplayOwnership(_In_ D3DDDI_VIDEO_PRESENT_TARGET_ID TargetId,
-                                                      _Out_ DXGK_DISPLAY_INFORMATION *pDisplayInfo);
     PDXGKRNL_INTERFACE GetDxgkInterface(void)
     {
         return &m_DxgkInterface;

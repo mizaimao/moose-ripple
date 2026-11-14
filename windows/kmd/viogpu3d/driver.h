@@ -89,12 +89,6 @@ VioGpu3DQueryAdapterInfo(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_QUERYADA
 
 NTSTATUS
 APIENTRY
-VioGpu3DDdiGetNodeMetadata(_In_ CONST HANDLE hAdapter,
-                           UINT NodeOrdinal,
-                           _Out_ DXGKARG_GETNODEMETADATA *pGetNodeMetadata);
-
-NTSTATUS
-APIENTRY
 VioGpu3DSetPointerPosition(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_SETPOINTERPOSITION *pSetPointerPosition);
 
 NTSTATUS
@@ -223,29 +217,6 @@ VioGpu3DDdiGetScanLine(_In_ CONST HANDLE hAdapter, _Inout_ DXGKARG_GETSCANLINE *
 
 NTSTATUS
 APIENTRY
-VioGpu3DStopDeviceAndReleasePostDisplayOwnership(_In_ VOID *pDeviceContext,
-                                                 _In_ D3DDDI_VIDEO_PRESENT_TARGET_ID TargetId,
-                                                 _Out_ DXGK_DISPLAY_INFORMATION *DisplayInfo);
-
-NTSTATUS
-APIENTRY
-VioGpu3DSystemDisplayEnable(_In_ VOID *pDeviceContext,
-                            _In_ D3DDDI_VIDEO_PRESENT_TARGET_ID TargetId,
-                            _In_ PDXGKARG_SYSTEM_DISPLAY_ENABLE_FLAGS Flags,
-                            _Out_ UINT *Width,
-                            _Out_ UINT *Height,
-                            _Out_ D3DDDIFORMAT *ColorFormat);
-
-VOID APIENTRY VioGpu3DSystemDisplayWrite(_In_ VOID *pDeviceContext,
-                                         _In_ VOID *Source,
-                                         _In_ UINT SourceWidth,
-                                         _In_ UINT SourceHeight,
-                                         _In_ UINT SourceStride,
-                                         _In_ UINT PositionX,
-                                         _In_ UINT PositionY);
-
-NTSTATUS
-APIENTRY
 VioGpu3DDdiPreemptCommand(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_PREEMPTCOMMAND *pPreemptCommand);
 
 NTSTATUS
@@ -254,19 +225,7 @@ VioGpu3DDdiRestartFromTimeout(_In_ CONST HANDLE hAdapter);
 
 NTSTATUS
 APIENTRY
-VioGpu3DDdiCancelCommand(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_CANCELCOMMAND *pCancelCommand);
-
-NTSTATUS
-APIENTRY
 VioGpu3DDdiQueryCurrentFence(_In_ CONST HANDLE hAdapter, _Inout_ DXGKARG_QUERYCURRENTFENCE *pCurrentFence);
-
-NTSTATUS
-APIENTRY
-VioGpu3DDdiResetEngine(_In_ CONST HANDLE hAdapter, _Inout_ DXGKARG_RESETENGINE *pResetEngine);
-
-NTSTATUS
-APIENTRY
-VioGpu3DDdiQueryEngineStatus(_In_ CONST HANDLE hAdapter, _Inout_ DXGKARG_QUERYENGINESTATUS *pQueryEngineStatus);
 
 NTSTATUS
 APIENTRY

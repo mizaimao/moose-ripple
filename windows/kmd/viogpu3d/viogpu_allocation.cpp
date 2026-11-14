@@ -281,7 +281,6 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
     allocationInfo->HintedBank.Value = 0;
     allocationInfo->MaximumRenamingListLength = 0;
     allocationInfo->pAllocationUsageHint = NULL;
-    allocationInfo->PhysicalAdapterIndex = 0;
     allocationInfo->PitchAlignedSize = 0;
 
     allocationInfo->SupportedReadSegmentSet = 0b1;

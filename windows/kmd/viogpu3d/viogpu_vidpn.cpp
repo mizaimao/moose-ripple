@@ -122,52 +122,10 @@ NTSTATUS VioGpuVidPN::Start(ULONG *pNumberOfViews, ULONG *pNumberOfChildren)
 
 NTSTATUS VioGpuVidPN::AcquirePostDisplayOwnership()
 {
-    NTSTATUS Status = m_pDxgkInterface->DxgkCbAcquirePostDisplayOwnership(m_pDxgkInterface->DeviceHandle,
-                                                                          &m_SystemDisplayInfo);
-    if (!NT_SUCCESS(Status))
-    {
-        DbgPrint(TRACE_LEVEL_FATAL,
-                 ("DxgkCbAcquirePostDisplayOwnership failed with status 0x%X Width = %d\n",
-                  Status,
-                  m_SystemDisplayInfo.Width));
-        VioGpuDbgBreak();
-    }
-
-    return Status;
-}
-
-void VioGpuVidPN::ReleasePostDisplayOwnership(D3DDDI_VIDEO_PRESENT_TARGET_ID TargetId,
-                                              DXGK_DISPLAY_INFORMATION *pDisplayInfo)
-{
-    D3DDDI_VIDEO_PRESENT_SOURCE_ID SourceId = FindSourceForTarget(TargetId, TRUE);
-    m_sourceAddress.QuadPart = 0;
-
-    LARGE_INTEGER timeout = {0};
-    timeout.QuadPart = Int32x32To64(1000, -10000);
-
-    m_shouldFlipStop = TRUE;
-
-    if (KeWaitForSingleObject(m_pFlipThread, Executive, KernelMode, FALSE, &timeout) == STATUS_TIMEOUT)
-    {
-        DbgPrint(TRACE_LEVEL_FATAL, ("---> Failed to exit the flip thread\n"));
-        VioGpuDbgBreak();
-    }
-
-    ObDereferenceObject(m_pFlipThread);
-
-    BlackOutScreen(&m_CurrentModes[SourceId]);
-    DestroyFrameBufferObj(TRUE);
-
-    DbgPrint(TRACE_LEVEL_FATAL,
-             ("StopDeviceAndReleasePostDisplayOwnership Width = %d Height = %d Pitch = %d ColorFormat = %dn",
-              m_SystemDisplayInfo.Width,
-              m_SystemDisplayInfo.Height,
-              m_SystemDisplayInfo.Pitch,
-              m_SystemDisplayInfo.ColorFormat));
-
-    *pDisplayInfo = m_SystemDisplayInfo;
-    pDisplayInfo->TargetId = TargetId;
-    pDisplayInfo->AcpiId = m_CurrentModes[0].DispInfo.AcpiId;
+    // Windows 7 has no handover of the boot display (that came with display driver model 1.2):
+    // there is no picture to take over, and the caller falls back to its nominal mode.
+    RtlZeroMemory(&m_SystemDisplayInfo, sizeof(m_SystemDisplayInfo));
+    return STATUS_SUCCESS;
 }
 
 void VioGpuVidPN::Powerdown()
@@ -2031,103 +1989,6 @@ D3DDDI_VIDEO_PRESENT_SOURCE_ID VioGpuVidPN::FindSourceForTarget(D3DDDI_VIDEO_PRE
     }
 
     return DefaultToZero ? 0 : D3DDDI_ID_UNINITIALIZED;
-}
-
-NTSTATUS VioGpuVidPN::SystemDisplayEnable(_In_ D3DDDI_VIDEO_PRESENT_TARGET_ID TargetId,
-                                          _In_ PDXGKARG_SYSTEM_DISPLAY_ENABLE_FLAGS Flags,
-                                          _Out_ UINT *pWidth,
-                                          _Out_ UINT *pHeight,
-                                          _Out_ D3DDDIFORMAT *pColorFormat)
-{
-    UNREFERENCED_PARAMETER(Flags);
-
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
-    m_SystemDisplaySourceId = D3DDDI_ID_UNINITIALIZED;
-
-    VIOGPU_ASSERT((TargetId < MAX_CHILDREN) || (TargetId == D3DDDI_ID_UNINITIALIZED));
-
-    if (TargetId == D3DDDI_ID_UNINITIALIZED)
-    {
-        for (UINT SourceIdx = 0; SourceIdx < MAX_VIEWS; ++SourceIdx)
-        {
-            if (m_CurrentModes[SourceIdx].FrameBuffer.Ptr != NULL)
-            {
-                m_SystemDisplaySourceId = SourceIdx;
-                break;
-            }
-        }
-    }
-    else
-    {
-        m_SystemDisplaySourceId = FindSourceForTarget(TargetId, FALSE);
-    }
-
-    if (m_SystemDisplaySourceId == D3DDDI_ID_UNINITIALIZED)
-    {
-        {
-            return STATUS_UNSUCCESSFUL;
-        }
-    }
-
-    if ((m_CurrentModes[m_SystemDisplaySourceId].Rotation == D3DKMDT_VPPR_ROTATE90) ||
-        (m_CurrentModes[m_SystemDisplaySourceId].Rotation == D3DKMDT_VPPR_ROTATE270))
-    {
-        *pHeight = m_CurrentModes[m_SystemDisplaySourceId].DispInfo.Width;
-        *pWidth = m_CurrentModes[m_SystemDisplaySourceId].DispInfo.Height;
-    }
-    else
-    {
-        *pWidth = m_CurrentModes[m_SystemDisplaySourceId].DispInfo.Width;
-        *pHeight = m_CurrentModes[m_SystemDisplaySourceId].DispInfo.Height;
-    }
-
-    *pColorFormat = m_CurrentModes[m_SystemDisplaySourceId].DispInfo.ColorFormat;
-    DbgPrint(TRACE_LEVEL_INFORMATION,
-             ("<--- %s ColorFormat = %d\n",
-              __FUNCTION__,
-              m_CurrentModes[m_SystemDisplaySourceId].DispInfo.ColorFormat));
-
-    return STATUS_SUCCESS;
-}
-
-VOID VioGpuVidPN::SystemDisplayWrite(_In_reads_bytes_(SourceHeight *SourceStride) VOID *pSource,
-                                     _In_ UINT SourceWidth,
-                                     _In_ UINT SourceHeight,
-                                     _In_ UINT SourceStride,
-                                     _In_ INT PositionX,
-                                     _In_ INT PositionY)
-{
-    UNREFERENCED_PARAMETER(pSource);
-    UNREFERENCED_PARAMETER(SourceStride);
-
-    RECT Rect;
-    Rect.left = PositionX;
-    Rect.top = PositionY;
-    Rect.right = Rect.left + SourceWidth;
-    Rect.bottom = Rect.top + SourceHeight;
-
-    BLT_INFO DstBltInfo;
-    DstBltInfo.pBits = m_CurrentModes[m_SystemDisplaySourceId].FrameBuffer.Ptr;
-    DstBltInfo.Pitch = m_CurrentModes[m_SystemDisplaySourceId].DispInfo.Pitch;
-    DstBltInfo.BitsPerPel = BPPFromPixelFormat(m_CurrentModes[m_SystemDisplaySourceId].DispInfo.ColorFormat);
-    DstBltInfo.Offset.x = 0;
-    DstBltInfo.Offset.y = 0;
-    DstBltInfo.Rotation = m_CurrentModes[m_SystemDisplaySourceId].Rotation;
-    DstBltInfo.Width = m_CurrentModes[m_SystemDisplaySourceId].DispInfo.Width;
-    DstBltInfo.Height = m_CurrentModes[m_SystemDisplaySourceId].DispInfo.Height;
-
-    BLT_INFO SrcBltInfo;
-    SrcBltInfo.pBits = pSource;
-    SrcBltInfo.Pitch = SourceStride;
-    SrcBltInfo.BitsPerPel = 32;
-
-    SrcBltInfo.Offset.x = -PositionX;
-    SrcBltInfo.Offset.y = -PositionY;
-    SrcBltInfo.Rotation = D3DKMDT_VPPR_IDENTITY;
-    SrcBltInfo.Width = SourceWidth;
-    SrcBltInfo.Height = SourceHeight;
-
-    BltBits(&DstBltInfo, &SrcBltInfo, &Rect);
 }
 
 #pragma code_seg(pop) // End Non-Paged Code

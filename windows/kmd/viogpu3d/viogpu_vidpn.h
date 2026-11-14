@@ -41,7 +41,6 @@ class VioGpuVidPN
 
     NTSTATUS Start(ULONG *pNumberOfViews, ULONG *pNumberOfChildren);
     NTSTATUS AcquirePostDisplayOwnership();
-    void ReleasePostDisplayOwnership(D3DDDI_VIDEO_PRESENT_TARGET_ID TargetId, DXGK_DISPLAY_INFORMATION *pDisplayInfo);
     void Powerdown();
 
     NTSTATUS IsVidPnSourceModeFieldsValid(CONST D3DKMDT_VIDPN_SOURCE_MODE *pSourceMode) const;
@@ -85,18 +84,6 @@ class VioGpuVidPN
     NTSTATUS EnumVidPnCofuncModality(_In_ CONST DXGKARG_ENUMVIDPNCOFUNCMODALITY *CONST pEnumCofuncModality);
     NTSTATUS SetVidPnSourceVisibility(_In_ CONST DXGKARG_SETVIDPNSOURCEVISIBILITY *pSetVidPnSourceVisibility);
     NTSTATUS QueryVidPnHWCapability(_Inout_ DXGKARG_QUERYVIDPNHWCAPABILITY *pVidPnHWCaps);
-
-    NTSTATUS SystemDisplayEnable(_In_ D3DDDI_VIDEO_PRESENT_TARGET_ID TargetId,
-                                 _In_ PDXGKARG_SYSTEM_DISPLAY_ENABLE_FLAGS Flags,
-                                 _Out_ UINT *pWidth,
-                                 _Out_ UINT *pHeight,
-                                 _Out_ D3DDDIFORMAT *pColorFormat);
-    VOID SystemDisplayWrite(_In_reads_bytes_(SourceHeight *SourceStride) VOID *pSource,
-                            _In_ UINT SourceWidth,
-                            _In_ UINT SourceHeight,
-                            _In_ UINT SourceStride,
-                            _In_ INT PositionX,
-                            _In_ INT PositionY);
 
     void Flip();
     static void FlipThread(void *ctx);

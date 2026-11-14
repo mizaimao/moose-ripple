@@ -80,7 +80,7 @@ extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_
     DbgPrint(TRACE_LEVEL_FATAL, ("---> VIOGPU FULL build on on %s %s\n", __DATE__, __TIME__));
     DRIVER_INITIALIZATION_DATA InitialData = {0};
 
-    InitialData.Version = DXGKDDI_INTERFACE_VERSION_WDDM1_3;
+    InitialData.Version = DXGKDDI_INTERFACE_VERSION_WIN7;
 
     InitialData.DxgkDdiAddDevice = VioGpu3DAddDevice;
     InitialData.DxgkDdiStartDevice = VioGpu3DStartDevice;
@@ -127,10 +127,7 @@ extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_
     InitialData.DxgkDdiSetVidPnSourceAddress = VioGpu3DSetVidPnSourceAddress;
     InitialData.DxgkDdiRecommendMonitorModes = VioGpu3DRecommendMonitorModes;
     InitialData.DxgkDdiQueryVidPnHWCapability = VioGpu3DQueryVidPnHWCapability;
-    InitialData.DxgkDdiSystemDisplayEnable = VioGpu3DSystemDisplayEnable;
-    InitialData.DxgkDdiSystemDisplayWrite = VioGpu3DSystemDisplayWrite;
 
-    InitialData.DxgkDdiStopDeviceAndReleasePostDisplayOwnership = VioGpu3DStopDeviceAndReleasePostDisplayOwnership;
 
     InitialData.DxgkDdiCreateDevice = VioGpu3DCreateDevice;
     InitialData.DxgkDdiDestroyDevice = VioGpu3DDestroyDevice;
@@ -141,11 +138,7 @@ extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_
     InitialData.DxgkDdiCollectDbgInfo = VioGpu3DDdiCollectDbgInfo;
     InitialData.DxgkDdiQueryCurrentFence = VioGpu3DDdiQueryCurrentFence;
 
-    InitialData.DxgkDdiQueryEngineStatus = VioGpu3DDdiQueryEngineStatus;
-    InitialData.DxgkDdiResetEngine = VioGpu3DDdiResetEngine;
-    InitialData.DxgkDdiCancelCommand = VioGpu3DDdiCancelCommand;
 
-    InitialData.DxgkDdiGetNodeMetadata = VioGpu3DDdiGetNodeMetadata;
     InitialData.DxgkDdiControlInterrupt = VioGpu3DDdiControlInterrupt;
     InitialData.DxgkDdiGetScanLine = VioGpu3DDdiGetScanLine;
 
@@ -338,24 +331,6 @@ VioGpu3DQueryAdapterInfo(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_QUERYADA
     VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(hAdapter);
     return pAdapter->QueryAdapterInfo(pQueryAdapterInfo);
 }
-
-NTSTATUS
-APIENTRY
-VioGpu3DDdiGetNodeMetadata(_In_ CONST HANDLE hAdapter,
-                           UINT NodeOrdinal,
-                           _Out_ DXGKARG_GETNODEMETADATA *pGetNodeMetadata)
-{
-    PAGED_CODE();
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
-
-    UNREFERENCED_PARAMETER(hAdapter);
-    UNREFERENCED_PARAMETER(NodeOrdinal);
-
-    pGetNodeMetadata->EngineType = DXGK_ENGINE_TYPE_3D;
-    pGetNodeMetadata->Flags.Value = 0;
-
-    return STATUS_SUCCESS;
-};
 
 NTSTATUS
 APIENTRY
@@ -660,8 +635,8 @@ VioGpu3DDdiCreateContext(_In_ CONST HANDLE hDevice, _Inout_ DXGKARG_CREATECONTEX
     pCreateContext->ContextInfo.DmaBufferSize = 256 * 1024;
     pCreateContext->ContextInfo.DmaBufferPrivateDataSize = 40;
 
-    pCreateContext->ContextInfo.AllocationListSize = DXGK_ALLOCATION_LIST_SIZE_GDICONTEXT;
-    pCreateContext->ContextInfo.PatchLocationListSize = DXGK_ALLOCATION_LIST_SIZE_GDICONTEXT;
+    pCreateContext->ContextInfo.AllocationListSize = RIPPLE_ALLOCATION_LIST_SIZE;
+    pCreateContext->ContextInfo.PatchLocationListSize = RIPPLE_ALLOCATION_LIST_SIZE;
 
     return STATUS_SUCCESS;
 };
@@ -701,25 +676,6 @@ VioGpu3DRender(_In_ CONST HANDLE hDevice, _Inout_ DXGKARG_RENDER *pRender)
 
     VioGpuDevice *pDxContext = reinterpret_cast<VioGpuDevice *>(hDevice);
     return pDxContext->Render(pRender);
-}
-
-NTSTATUS
-APIENTRY
-VioGpu3DStopDeviceAndReleasePostDisplayOwnership(_In_ VOID *pDeviceContext,
-                                                 _In_ D3DDDI_VIDEO_PRESENT_TARGET_ID TargetId,
-                                                 _Out_ DXGK_DISPLAY_INFORMATION *DisplayInfo)
-{
-    PAGED_CODE();
-    NTSTATUS status = STATUS_SUCCESS;
-    VIOGPU_ASSERT_CHK(pDeviceContext != NULL);
-    DbgPrint(TRACE_LEVEL_INFORMATION, ("<---> %s\n", __FUNCTION__));
-
-    VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(pDeviceContext);
-    if (pAdapter)
-    {
-        status = pAdapter->StopDeviceAndReleasePostDisplayOwnership(TargetId, DisplayInfo);
-    }
-    return status;
 }
 
 NTSTATUS
@@ -964,37 +920,6 @@ VOID VioGpu3DResetDevice(_In_ VOID *pDeviceContext)
 
 NTSTATUS
 APIENTRY
-VioGpu3DSystemDisplayEnable(_In_ VOID *pDeviceContext,
-                            _In_ D3DDDI_VIDEO_PRESENT_TARGET_ID TargetId,
-                            _In_ PDXGKARG_SYSTEM_DISPLAY_ENABLE_FLAGS Flags,
-                            _Out_ UINT *Width,
-                            _Out_ UINT *Height,
-                            _Out_ D3DDDIFORMAT *ColorFormat)
-{
-    VIOGPU_ASSERT_CHK(pDeviceContext != NULL);
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
-
-    VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(pDeviceContext);
-    return pAdapter->vidpn.SystemDisplayEnable(TargetId, Flags, Width, Height, ColorFormat);
-}
-
-VOID APIENTRY VioGpu3DSystemDisplayWrite(_In_ VOID *pDeviceContext,
-                                         _In_ VOID *Source,
-                                         _In_ UINT SourceWidth,
-                                         _In_ UINT SourceHeight,
-                                         _In_ UINT SourceStride,
-                                         _In_ UINT PositionX,
-                                         _In_ UINT PositionY)
-{
-    VIOGPU_ASSERT_CHK(pDeviceContext != NULL);
-    DbgPrint(TRACE_LEVEL_INFORMATION, ("<---> %s\n", __FUNCTION__));
-
-    VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(pDeviceContext);
-    pAdapter->vidpn.SystemDisplayWrite(Source, SourceWidth, SourceHeight, SourceStride, PositionX, PositionY);
-}
-
-NTSTATUS
-APIENTRY
 VioGpu3DDdiPreemptCommand(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_PREEMPTCOMMAND *pPreemptCommand)
 {
     UNREFERENCED_PARAMETER(hAdapter);
@@ -1020,46 +945,10 @@ VioGpu3DDdiRestartFromTimeout(_In_ CONST HANDLE hAdapter)
 
 NTSTATUS
 APIENTRY
-VioGpu3DDdiCancelCommand(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_CANCELCOMMAND *pCancelCommand)
-{
-    UNREFERENCED_PARAMETER(hAdapter);
-    UNREFERENCED_PARAMETER(pCancelCommand);
-
-    DbgPrint(TRACE_LEVEL_ERROR, ("<---> %s UNSUPPORTED PREEMPTION FUNCTION\n", __FUNCTION__));
-
-    return STATUS_SUCCESS;
-};
-
-NTSTATUS
-APIENTRY
 VioGpu3DDdiQueryCurrentFence(_In_ CONST HANDLE hAdapter, _Inout_ DXGKARG_QUERYCURRENTFENCE *pCurrentFence)
 {
     UNREFERENCED_PARAMETER(hAdapter);
     UNREFERENCED_PARAMETER(pCurrentFence);
-
-    DbgPrint(TRACE_LEVEL_ERROR, ("<---> %s UNSUPPORTED PREEMPTION FUNCTION\n", __FUNCTION__));
-
-    return STATUS_SUCCESS;
-};
-
-NTSTATUS
-APIENTRY
-VioGpu3DDdiResetEngine(_In_ CONST HANDLE hAdapter, _Inout_ DXGKARG_RESETENGINE *pResetEngine)
-{
-    UNREFERENCED_PARAMETER(hAdapter);
-    UNREFERENCED_PARAMETER(pResetEngine);
-
-    DbgPrint(TRACE_LEVEL_ERROR, ("<---> %s UNSUPPORTED PREEMPTION FUNCTION\n", __FUNCTION__));
-
-    return STATUS_SUCCESS;
-};
-
-NTSTATUS
-APIENTRY
-VioGpu3DDdiQueryEngineStatus(_In_ CONST HANDLE hAdapter, _Inout_ DXGKARG_QUERYENGINESTATUS *pQueryEngineStatus)
-{
-    UNREFERENCED_PARAMETER(hAdapter);
-    UNREFERENCED_PARAMETER(pQueryEngineStatus);
 
     DbgPrint(TRACE_LEVEL_ERROR, ("<---> %s UNSUPPORTED PREEMPTION FUNCTION\n", __FUNCTION__));
 
