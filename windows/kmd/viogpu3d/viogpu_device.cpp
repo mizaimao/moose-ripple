@@ -271,6 +271,13 @@ NTSTATUS VioGpuDevice::Render(DXGKARG_RENDER *pRender)
     char *pDmaBufStart = (char *)pRender->pDmaBuffer;
     PKEVENT pCompletionEvent = NULL;
 
+    // The commands are copied as they are, and one output patch entry is written per input
+    // entry: neither may be more than Windows gave room for.
+    if (pRender->CommandLength > pRender->DmaSize || pRender->PatchLocationListInSize > pRender->PatchLocationListOutSize)
+    {
+        return STATUS_GRAPHICS_INSUFFICIENT_DMA_BUFFER;
+    }
+
     __try
     {
         pRender->PatchLocationListOutSize = pRender->PatchLocationListInSize;

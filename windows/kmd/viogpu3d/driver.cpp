@@ -636,7 +636,9 @@ VioGpu3DDdiCreateContext(_In_ CONST HANDLE hDevice, _Inout_ DXGKARG_CREATECONTEX
     pCreateContext->hContext = hDevice;
 
     pCreateContext->ContextInfo.DmaBufferSegmentSet = 0;
-    pCreateContext->ContextInfo.DmaBufferSize = 256 * 1024;
+    // Room for the largest buffer the user-mode driver sends: virgl's 64 K words of commands,
+    // our headers around them and the slack it asks for.
+    pCreateContext->ContextInfo.DmaBufferSize = 320 * 1024;
     pCreateContext->ContextInfo.DmaBufferPrivateDataSize = 40;
 
     pCreateContext->ContextInfo.AllocationListSize = RIPPLE_ALLOCATION_LIST_SIZE;
