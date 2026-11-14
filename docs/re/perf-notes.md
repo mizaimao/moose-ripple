@@ -718,3 +718,35 @@ ripple_qe=1`: about a tenth of the pixels reach the screen, at more CPU. So the 
 (ANGLE on Metal) does not behave differently from Mesa on Linux here; what differs is the
 price of the emulated CPU (QuickTime Player about twice the CPU time, mostly decoding). One
 run each in UTM.
+
+### The README's numbers, measured again (2026-11-14, bundle of c4a87cf, kext 30ab66e)
+
+Same methods as when each number was first taken, on the Proxmox host (1280x800, 4 CPUs,
+GPU minimum clock 1200 MHz):
+
+| | in the README | now |
+|---|---|---|
+| Quartz Composer, Arabesque (its own readout) | 60 frames/s | 60.2 |
+| Angry Birds Rio, title screen | 59 frames/s | 59.1-60.0 |
+| Flurry (ScreenSaverEngine) | 30 frames/s, 3% of a CPU | 30.0-30.1, 3.2-4.0% |
+| Dashboard, screens per second, mean (three runs) | 13.6-14.2 | 14.3, 16.9, 15.9 |
+| Exposé, screens per second, mean (three runs) | 7.8-11.2 | 14.7, 8.8, 9.4 |
+| gl-gears, 800x600 | 57 frames/s | 58.7-58.8, 4.5 ms per present |
+| gl-gears, 1280x720 | 55-58 | 58.7-58.9, 4.2 ms per present |
+| the same window partly under the Dock (WindowServer draws it) | about 7 ms more | 11.8 ms against 4.4 |
+| Core Image filters like software (`ci-effects filters`) | 23 of 24 | 24 of 24 |
+| Photo Booth effects like software (`ci-effects booth`) | 55 of 61 | 57 of 61 |
+| key press to the screen through VNC (`pace-run.sh`) | about 0.2 s | 32-167 ms for menus, 46-137 for Exposé and Dashboard |
+
+The README has the new values. What moved and why, as far as known: CIEdges, Blue Print and
+Comic Book now match (not looked into which change did it; the viewport fix of the same day
+touches contexts without a drawable, which these use). The four effects left (Concert 99.6%
+of pixels, Neon 21.5%, Pinch 4.2%, Pointillize 2.4%) differ on the GeForce 9600 GT too. The
+0.2 s for a key press was the interrupt storm fixed in 14f325e. The software and 9600 GT
+columns were not measured again: nothing of ours runs in them.
+
+The UTM row, same day and build (UTM 5.0.8 on an M1 Max, Force Multicore on, 1280x800): gl-gears
+55.6-56.9 frames/s at 400x400 and at 800x600 (README: about 55); Real Racing 2's menu 59.2
+(57-59); its race, eight 5 s windows from the start with nobody driving: 33 36 29 30 30 32 30
+26 frames/s, mean 30.7 (about 25-30). The README now says 56, 59 and about 30. The Windows
+row (gl-gears at about 55) was not measured again: it needs the VM's window on that host.

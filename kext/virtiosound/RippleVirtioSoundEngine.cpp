@@ -166,8 +166,12 @@ void RippleVirtioSoundEngine::submit(unsigned slot, uint64_t now)
         // and Core Audio answers a pass that looks several percent long by jumping its timeline,
         // writing about 11 ms of silence. So the timestamp follows the measured time through a
         // small phase-locked loop: it moves an eighth of the way from the predicted time to the
-        // measured one, and the predicted pass length an eighth of that. A big error (a stall)
-        // is followed at once.
+        // measured one, and the predicted pass length an eighth of that. An error over a quarter
+        // of a pass (a stall) is followed at once, and Core Audio then stops writing for about
+        // 200 ms, a gap in the sound. The ring is long enough that the stalls seen stay under a
+        // quarter pass: in UTM with GL on, the whole guest stops for about 75 ms when a program
+        // first shows video (QEMU busy with the GPU work), more than a quarter of the earlier
+        // 171 ms ring (2026-11-14).
         uint64_t d;
         nanoseconds_to_absolutetime((uint64_t)(kRingFrames - frame) * 1000000000ULL / 48000, &d);
         uint64_t measured = now + d;
