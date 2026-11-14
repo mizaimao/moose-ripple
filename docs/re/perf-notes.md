@@ -750,3 +750,43 @@ The UTM row, same day and build (UTM 5.0.8 on an M1 Max, Force Multicore on, 128
 (57-59); its race, eight 5 s windows from the start with nobody driving: 33 36 29 30 30 32 30
 26 frames/s, mean 30.7 (about 25-30). The README now says 56, 59 and about 30. The Windows
 row (gl-gears at about 55) was not measured again: it needs the VM's window on that host.
+
+### UTM: the whole guest stalls when a program starts with the driver on (2026-11-14, open)
+
+Found while looking for the cause of sound drops at the start of a movie (#35). `tools/timer-late`
+(four threads that sleep 1 ms at a time, and how late each sleep ends) in the UTM guest (UTM
+5.0.8, M1 Max, 4 CPUs, Force Multicore on), no sound device involved:
+
+| | wake-ups over 20 ms late | worst |
+|---|---|---|
+| idle desktop, 8 s | 0 | 12 ms |
+| QuickTime Player starting on the Welcome movie, driver on (6 boots) | 15-24 in each | 186-193 ms |
+| the same with `ripple_async=1` (one of those boots) | 24 | 189 ms |
+| the same without `ripple_gl=1 ripple_qe=1` (software rendering, one boot) | 0 | 18 ms |
+| `afplay` of a system sound, driver on | 8 | 48 ms |
+| `afplay`, without the driver flags | 8 | 50 ms |
+
+With the driver on, all four threads are late together four times within one second, 2 to
+3 s after `open`: 70, 95, 70 and 190 ms. So the whole guest stands still, not one thread. It
+happens at every start of the program, not when the movie is played again in it.
+
+What it is not:
+- Not the waiting for the host: the same with queued submits.
+- Not the interrupt storm on a mirrored line (above, "The stall, found"): in the three boots
+  checked every PCI device was on lines 16 to 23, none on 10 or 11.
+- Not the host's command handling as such: in a profile of QEMU over such a start (`sample`,
+  about 4800 samples in 9 s) virglrenderer's work on the main thread is 71 samples, about
+  130 ms in all.
+
+What the profile shows instead: the main thread waits for QEMU's big lock in about 170 to 200
+samples and each of the four CPU threads in 130 to 470, and the USB controller's periodic
+work (`ehci_work_bh`) takes 90 to 129. Who holds the lock, or whether the CPUs are stopped
+for something else (a flush of translated code, for one), is not found yet. Two separate
+things are mixed in the sound problem: a sound through the USB audio device stalls the guest
+for 40 to 50 ms at its start and end with or without the driver, and a program that starts
+drawing with the driver stalls it for up to 190 ms.
+
+The same start on the Proxmox host (KVM), driver on, two runs: no wake-up over 20 ms late
+(worst 17.9 and 5.2 ms). So the stall belongs to the emulated CPU in UTM, not to the driver's
+work as such: the next place to look is what QEMU's code translator does when a program loads
+the GL bundle (31 MB of code new to it).

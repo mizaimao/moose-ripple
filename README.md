@@ -11,6 +11,8 @@ paravirtual 3D path that hands OpenGL to the host. Snow Leopard sees a graphics 
 renders on the host GPU, and WindowServer composites the desktop on it. No period hardware, no
 GPU passthrough.
 
+Shared as-is: I'm not able to answer issues or review pull requests.
+
 ![Snow Leopard's Dashboard with widgets, composited on the host GPU by moose-ripple, in Proxmox's VNC console](media/dashboard-vnc.webp)
 
 *Snow Leopard's Dashboard on moose-ripple, seen through Proxmox's VNC console.*
@@ -33,6 +35,10 @@ inside the VM.
 
 *Real Racing 2 in Snow Leopard, in UTM on an Apple M1 Max. The Intel CPU is emulated; the 3D
 runs on the Mac's GPU.*
+
+![Adding the Calculator widget to the Dashboard in Snow Leopard, in a UTM window on a Mac: the water ripples](media/dashboard-ripple-utm.gif)
+
+*The Dashboard ripple in Snow Leopard in UTM on the same Mac, recorded from the Mac's screen.*
 
 ## How it works
 

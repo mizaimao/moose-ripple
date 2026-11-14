@@ -7,6 +7,7 @@ real-time recordings of the display:
 
 | File | Shows |
 |---|---|
+| `dashboard-ripple-utm.gif` | The Calculator widget added to the Dashboard on moose-ripple: the ripple, in Snow Leopard in a UTM window on an Apple-silicon Mac, recorded from the Mac's screen (GIF, 880 px wide, 5 s, made with tools/gifmake). Below the Real Racing 2 picture. |
 | `dashboard-vnc.webp` | The Dashboard with widgets on moose-ripple, in Proxmox's VNC console (WebP, 1600 px wide). The README's first picture. |
 | `menubar-compare.webp` | The menu bar twice: Apple's software rendering above, moose-ripple's translucent one below. |
 | `dashboard-widget-drop-ours.gif` | A widget added to the Dashboard on moose-ripple: the ripple. Next to the software one near the top. |
