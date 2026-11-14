@@ -1,0 +1,91 @@
+--- a/src/mesa/state_tracker/st_atom_array.cpp
++++ b/src/mesa/state_tracker/st_atom_array.cpp
+@@ -314,19 +314,15 @@
+       struct u_upload_mgr *uploader = st->can_bind_const_buffer_as_vertex ?
+                                       st->pipe->const_uploader :
+                                       st->pipe->stream_uploader;
+-      uint8_t *ptr = NULL;
+-
+-      u_upload_alloc(uploader, 0, max_size, 16,
+-                     &vbuffer[bufidx].buffer_offset,
+-                     &vbuffer[bufidx].buffer.resource, (void**)&ptr);
++      /* moose-ripple: the values are put together here first. A program that sets its
++       * vertex arrays again for every draw came through here for every draw and uploaded
++       * the same few constants each time (Real Racing 2: four of five draws), on virgl a
++       * new buffer mapping and a transfer to the host each. Unchanged values are drawn
++       * from where they were uploaded last. */
++      uint8_t values[VERT_ATTRIB_MAX * 32];
++      uint8_t *ptr = values;
+       uint8_t *cursor = ptr;
+ 
+-      if (FILL_TC_SET_VB) {
+-         struct pipe_context *pipe = ctx->pipe;
+-         tc_track_vertex_buffer(pipe, bufidx, vbuffer[bufidx].buffer.resource,
+-                                tc_get_next_buffer_list(pipe));
+-      }
+-
+       do {
+          const gl_vert_attrib attr = (gl_vert_attrib)u_bit_scan(&curmask);
+          const struct gl_array_attributes *const attrib
+@@ -353,8 +349,35 @@
+          cursor += size;
+       } while (curmask);
+ 
+-      /* Always unmap. The uploader might use explicit flushes. */
+-      u_upload_unmap(uploader);
++      const unsigned used = cursor - values;
++      if (!FILL_TC_SET_VB && st->current_values_buffer &&
++          st->current_values_size == used &&
++          !memcmp(st->current_values, values, used)) {
++         pipe_resource_reference(&vbuffer[bufidx].buffer.resource,
++                                 st->current_values_buffer);
++         vbuffer[bufidx].buffer_offset = st->current_values_offset;
++      } else {
++         uint8_t *map = NULL;
++         u_upload_alloc(uploader, 0, max_size, 16,
++                        &vbuffer[bufidx].buffer_offset,
++                        &vbuffer[bufidx].buffer.resource, (void**)&map);
++         if (map)
++            memcpy(map, values, used);
++         /* Always unmap. The uploader might use explicit flushes. */
++         u_upload_unmap(uploader);
++         if (FILL_TC_SET_VB) {
++            struct pipe_context *pipe = ctx->pipe;
++            tc_track_vertex_buffer(pipe, bufidx, vbuffer[bufidx].buffer.resource,
++                                   tc_get_next_buffer_list(pipe));
++         }
++         if (!FILL_TC_SET_VB && map) {
++            pipe_resource_reference(&st->current_values_buffer,
++                                    vbuffer[bufidx].buffer.resource);
++            st->current_values_offset = vbuffer[bufidx].buffer_offset;
++            st->current_values_size = used;
++            memcpy(st->current_values, values, used);
++         }
++      }
+    }
+ }
+ 
+--- a/src/mesa/state_tracker/st_context.h
++++ b/src/mesa/state_tracker/st_context.h
+@@ -172,6 +172,11 @@
+    bool has_indep_blend_func;
+    bool can_dither;
+    bool can_bind_const_buffer_as_vertex;
++
++   /* moose-ripple: the constant vertex attributes as uploaded last (st_setup_current) */
++   struct pipe_resource *current_values_buffer;
++   unsigned current_values_offset, current_values_size;
++   uint8_t current_values[VERT_ATTRIB_MAX * 32];
+    bool lower_flatshade;
+    bool lower_alpha_test;
+    bool lower_point_size;
+--- a/src/mesa/state_tracker/st_context.c
++++ b/src/mesa/state_tracker/st_context.c
+@@ -334,6 +334,7 @@
+ static void
+ st_destroy_context_priv(struct st_context *st, bool destroy_pipe)
+ {
++   pipe_resource_reference(&st->current_values_buffer, NULL);   /* moose-ripple */
+    st_destroy_draw(st);
+    st_destroy_clear(st);
+    st_destroy_bitmap(st);
