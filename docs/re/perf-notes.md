@@ -541,3 +541,27 @@ sleepers, gl-gears):
 
 Not specific to our device: any driver on that machine type whose handler waits with its line
 masked can be stormed the same way through the mirrored input.
+
+### Queued submits with real apps (2026-11-13, after the stall fix)
+
+The same launches with `ripple_async=1` and without, same boot conditions (interrupt input 10
+active), on the Proxmox host:
+
+| | waiting for the host (default) | queued (`ripple_async=1`) |
+|---|---|---|
+| gl-gears 800x600 | 58.7 frames/s | 58.8 |
+| gl-gears 1280x720 (WindowServer draws it: just above the Dock) | 54.5 | 58.6 |
+| Real Racing 2, menu | 55-56 | 58.4-59.7 |
+| Real Racing 2, race | 52-58 at the start | 55.6 mean over 5 minutes (38-60) |
+| Angry Birds Rio | 59.6-59.8 | 59.6-60.0 |
+| Quartz Composer, Arabesque, viewer behind the editor window | 23-36 | 35-38 |
+| Flurry screen saver | 30 (its cap) | 30 |
+| Exposé / Dashboard, screens per second | 8-13 / 11-15 | 9-14 / 11-16 |
+
+Looked at with it on: each of these apps' pictures, gl-gears moving, covered by a floating
+window, minimised and restored, and under the Dock, Dashboard with widgets, a movie in
+QuickTime Player. Five minutes of the race: no error from the host's renderer, none from the
+kext. Nothing got slower, and what was held up by waiting got faster; where an app already
+runs at the display's 60 frames/s there is nothing to gain on this host. Still to do before it
+becomes the default: the same on the UTM and Windows hosts, where the host's share of a frame
+is larger.
