@@ -94,7 +94,7 @@ translucent menu bar with the desktop showing through. Both from the same VM.*
 |---|---|---|---|
 | Linux: Proxmox VE 8.4 | with KVM | Intel UHD Graphics 630 | everything in this README, and the numbers below |
 | Windows 11 | with KVM, inside WSL2 | NVIDIA GeForce RTX 4090, through Direct3D 12 | Quartz Extreme, the translucent menu bar, the Dashboard ripple, gl-gears at about 55 frames/s |
-| macOS 26 on Apple silicon | in UTM 5.0.8, x86 emulation | Apple M1 Max, through Metal | Quartz Extreme, the translucent menu bar, gl-gears at about 55 frames/s, Chess, Real Racing 2 (playable: its menu at 57 frames/s, a race at 24-34) |
+| macOS 26 on Apple silicon | in UTM 5.0.8, x86 emulation | Apple M1 Max, through Metal | Quartz Extreme, the translucent menu bar, gl-gears at about 55 frames/s, Chess, Real Racing 2 (playable: its menu at 57 frames/s, a race at about 25-30) |
 
 How to set up each: [docs/install.md](docs/install.md#2-set-up-the-vm).
 
@@ -130,9 +130,9 @@ pixels.
   computes them.
 - In UTM on an Apple M1 Max the guest's Intel CPU is emulated, and that CPU is the
   limit there: gl-gears runs at about 55 frames/s and Real Racing 2's menu at 57-59, but
-  a race makes 24-34 frames/s, with the game's drawing thread using a whole emulated CPU.
-  That is with UTM's Force Multicore setting, which gives each emulated CPU its own thread
-  of the Mac; without it the race makes about 12 ([install guide](docs/install.md#utm-on-an-apple-silicon-mac)). The M1's GPU path has no S3TC texture compression, which Mac games
+  a race makes about 25-30 frames/s, with the game's drawing thread using a whole emulated
+  CPU. UTM's Force Multicore setting, which gives each emulated CPU its own thread of the
+  Mac, adds about 15% to that ([install guide](docs/install.md#utm-on-an-apple-silicon-mac)). The M1's GPU path has no S3TC texture compression, which Mac games
   take for granted, so such textures are decoded on the CPU when they are loaded.
 - The host GPU's minimum clock was raised to 1200 MHz for these numbers
   (`/sys/class/drm/card0/gt_min_freq_mhz` on Intel). At the default 350 MHz each screen update

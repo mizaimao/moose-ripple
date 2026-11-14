@@ -439,8 +439,8 @@ windows of the bundle's `stats:` log lines.
 | Host | Menu | Race start |
 |---|---|---|
 | Proxmox, KVM, Intel UHD 630 | 55-56 frames/s | 52-58 frames/s, the game at 15-40% of a CPU |
-| UTM on an M1 Max, x86 emulation, one host thread for all four CPUs | 57-59 | about 12 (seen in testing while driving) |
-| the same with UTM's "Force Multicore" on | 58 | 24-34 |
+| UTM on an M1 Max, x86 emulation, one host thread for all four CPUs | 52-53 | 17-38, mean 26 |
+| the same with UTM's "Force Multicore" on | 58 | 24-34, mean 31 |
 | Windows 11, WSL2 with KVM, RTX 4090 through Direct3D 12 | 15 | not reached |
 
 What each host is short of:
@@ -451,9 +451,11 @@ What each host is short of:
   in the present (the same, for the copies to the screen) and 16% in the bundle's own wait for
   the next refresh.
 - **UTM:** the emulated CPU. With the VM's four CPUs on one host thread (UTM's default for an
-  x86 guest on ARM) a race makes about 12 frames/s. "Force Multicore" in the VM's System
-  settings gives each CPU its own host thread: 24-34 frames/s in the same race, the menu
-  reached in half the time, and no trouble in a 25 minute run. UTM's documentation says QEMU
+  x86 guest on ARM) the scripted race start makes 17-38 frames/s, 26 on average. "Force
+  Multicore" in the VM's System settings gives each CPU its own host thread: 24-34, 31 on
+  average, the menu reached in 140 s instead of 175, and no trouble in a 25 minute run.
+  (An earlier version of this note compared it with about 12 frames/s seen the day before;
+  that was another moment of a longer race on an older build, not a like-for-like run.) UTM's documentation says QEMU
   does not guarantee correct emulation in this mode (x86 promises a stricter memory order than
   ARM gives), so it stays a choice.
 - **Windows 11 (WSL2):** the host's own CPU work. The game's menu settles at 15 frames/s
