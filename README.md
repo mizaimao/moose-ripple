@@ -11,7 +11,7 @@ paravirtual 3D path that hands OpenGL to the host. Snow Leopard sees a graphics 
 renders on the host GPU, and WindowServer composites the desktop on it. No period hardware, no
 GPU passthrough.
 
-![Adding the Calculator widget to the Dashboard in Snow Leopard, in a UTM window on a Mac: the water ripples](media/dashboard-ripple-utm.webp)
+![Adding the Calculator widget to the Dashboard in Snow Leopard, in a UTM window on a Mac: the water ripples](media/dashboard-ripple-utm.gif)
 
 *The Dashboard ripple in Snow Leopard, in a UTM window on an Apple-silicon Mac, recorded from the
 Mac's screen. The Intel CPU is emulated; the effect runs on the Mac's GPU.*
