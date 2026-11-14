@@ -94,7 +94,7 @@ translucent menu bar with the desktop showing through. Both from the same VM.*
 |---|---|---|---|
 | Linux: Proxmox VE 8.4 | with KVM | Intel UHD Graphics 630 | everything in this README, and the numbers below |
 | Windows 11 | with KVM, inside WSL2 | NVIDIA GeForce RTX 4090, through Direct3D 12 | Quartz Extreme, the translucent menu bar, the Dashboard ripple, gl-gears at about 55 frames/s |
-| macOS 26 on Apple silicon | in UTM 5.0.8, x86 emulation | Apple M1 Max, through Metal | Quartz Extreme, the translucent menu bar, gl-gears at about 55 frames/s, Chess, Real Racing 2 (playable: its menu at 57 frames/s, a race at about 25-30) |
+| macOS 26 on Apple silicon | in UTM 5.0.8, x86 emulation | Apple M1 Max, through Metal | Quartz Extreme, the translucent menu bar, gl-gears at about 56 frames/s, Chess, Real Racing 2 (playable: its menu at 59 frames/s, a race at about 30) |
 
 How to set up each: [docs/install.md](docs/install.md#2-set-up-the-vm).
 
@@ -122,6 +122,10 @@ pixels.
 - Showing a frame of an app's OpenGL window takes 4-5 ms at any size up to the full screen
   (gl-gears: 59 frames/s at 800x600 and at 1280x720). While something is drawn over the
   window, WindowServer draws it and a frame costs about 7 ms more.
+- Video: Snow Leopard's Welcome movie (H.264, 1008x630, 24 frames/s) plays at its full
+  24 frames/s in QuickTime Player with moose-ripple, on the Proxmox host and in UTM. With
+  software rendering the same UTM guest gets about a tenth of the pixels to the screen (2.4
+  against 22.9 screens per second on WindowServer's frame meter) at more CPU.
 - Core Image: all 24 filters tested give the same picture as software rendering, and 57 of
   Photo Booth's 61 effects do ("the same" means within 1-2 colour levels, or under 1% of the
   pixels different). A single Core Image filter is slower than software rendering for now,
@@ -129,8 +133,8 @@ pixels.
   Neon, Pinch, Pointillize) differ on the 9600 GT too, so those differences come from how a
   GPU computes them.
 - In UTM on an Apple M1 Max the guest's Intel CPU is emulated, and that CPU is the
-  limit there: gl-gears runs at about 55 frames/s and Real Racing 2's menu at 57-59, but
-  a race makes about 25-30 frames/s, with the game's drawing thread using a whole emulated
+  limit there: gl-gears runs at about 56 frames/s and Real Racing 2's menu at 59, but
+  a race makes about 30 frames/s, with the game's drawing thread using a whole emulated
   CPU. UTM's Force Multicore setting, which gives each emulated CPU its own thread of the
   Mac, made no difference we could measure ([install guide](docs/install.md#utm-on-an-apple-silicon-mac)). The M1's GPU path has no S3TC texture compression, which Mac games
   take for granted, so such textures are decoded on the CPU when they are loaded.
@@ -174,6 +178,22 @@ All the steps, the boot flags and how to remove it again: [docs/install.md](docs
 This repository contains no Apple software, firmware or keys. Mac OS X 10.6 (and, to build from
 source, Xcode 3.2.6 and its SDK) must come from your own legal copies, and running Mac OS X in a
 virtual machine is subject to Apple's license terms.
+
+### Seeing the Welcome animation
+
+Snow Leopard plays its Welcome animation, the intro movie with its music, only at the first start
+of a new install, before the Setup Assistant. Installed as above, moose-ripple comes in after
+that start, so Apple's software renderer draws the animation. To have moose-ripple draw it,
+install before the first start:
+
+- Make a ready disk with [tools/sl-disk](tools/sl-disk/README.md). It installs Snow Leopard
+  from your own DVD image without anyone at the keyboard, and with `--ripple` it puts
+  moose-ripple on the new system too.
+- Or attach the new, never-started disk to a Snow Leopard VM that is already set up, and install
+  onto it from there: `sudo sh /Volumes/RIPPLE/install.sh --target "/Volumes/Macintosh HD 1"`
+  (use the new disk's volume name).
+
+Details: [docs/install.md](docs/install.md#before-the-first-boot-the-welcome-animation).
 
 ## Ideas for later
 

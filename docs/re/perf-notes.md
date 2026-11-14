@@ -744,3 +744,9 @@ touches contexts without a drawable, which these use). The four effects left (Co
 of pixels, Neon 21.5%, Pinch 4.2%, Pointillize 2.4%) differ on the GeForce 9600 GT too. The
 0.2 s for a key press was the interrupt storm fixed in 14f325e. The software and 9600 GT
 columns were not measured again: nothing of ours runs in them.
+
+The UTM row, same day and build (UTM 5.0.8 on an M1 Max, Force Multicore on, 1280x800): gl-gears
+55.6-56.9 frames/s at 400x400 and at 800x600 (README: about 55); Real Racing 2's menu 59.2
+(57-59); its race, eight 5 s windows from the start with nobody driving: 33 36 29 30 30 32 30
+26 frames/s, mean 30.7 (about 25-30). The README now says 56, 59 and about 30. The Windows
+row (gl-gears at about 55) was not measured again: it needs the VM's window on that host.
