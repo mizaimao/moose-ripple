@@ -47,8 +47,25 @@ display driver changes the mode for it and back). `timedemo` with `demo001`, def
     quake3.exe +set timedemo 1 +set logfile 2 +demo demo001
     (the result is in demoq3\qconsole.log)
 
+**The picture matches the reference.** The same five frames of `demo001`, taken with the
+game's own `screenshot` command once on the host GPU and once with Mesa's software
+renderer (`LIBGL_ALWAYS_SOFTWARE=1`), differ in about 1% of their pixels by more than 8 of
+255, along polygon edges, with a mean difference of 1.0 (`tools/win9x/tgadiff.py`; in
+timedemo mode every frame shows the next recorded game state, so frame N is the same
+picture on a renderer of any speed). Side by side they look the same.
+
+    echo timedemo 1 > demoq3\cmp.cfg          (then: demo demo001, wait 200, and five times
+    ...                                        screenshot and wait, then quit)
+    quake3.exe +set r_fullscreen 0 +set r_mode 3 +exec cmp.cfg
+
+**Windows 98's own OpenGL screen savers** run on the driver through `opengl32.dll`: 3D Pipes
+(drawn straight to the screen, no back buffer), 3D Flower Box and 3D Flying Objects. 3D Text
+makes its context and swaps buffers but shows nothing, with the host GPU and with the software
+renderer alike, so the cause is above the GPU path (its text comes from `wglUseFontOutlines`);
+3D Maze is not checked yet.
+
 Not there yet: a faster way to the screen than the read-back (it is what limits the frame
-rate above), a comparison of the picture against a reference renderer, and more programs.
+rate above), 3D Text, a comparison against a real card of the time, and more programs.
 
 ## How a 2024 Mesa gets onto a 1998 Windows
 
