@@ -1,0 +1,126 @@
+Direct3D 10: bound views follow the swap chain's buffers when they rotate
+
+After a flip the runtime has the driver rotate the swap chain's buffers: the resource a
+program knows as its back buffer becomes the next buffer. Views of it notice that when they
+are bound again. A program may leave its render target bound over the present, though, and go
+on drawing; Windows 7's compositor does. Its drawing then went on into the buffer that had
+just been put on screen, and the next flip showed a buffer without it: rectangles of the
+taskbar and of window frames stayed black or old on the display while the program's own
+picture of the screen was right.
+
+The views bound at the time of the rotation, render targets and shader resources, are now
+moved to the buffers they stand for.
+
+diff -ru a/src/gallium/frontends/d3d10umd/DxgiFns.cpp b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+--- a/src/gallium/frontends/d3d10umd/DxgiFns.cpp
++++ b/src/gallium/frontends/d3d10umd/DxgiFns.cpp
+@@ -46,6 +46,8 @@
+ #include "pipe/p_defines.h"
+ #include "pipe/p_state.h"
+ #include "util/format/u_format.h"
++#include "util/u_inlines.h"
++#include "util/macros.h"
+ 
+ /*
+  * ----------------------------------------------------------------------
+@@ -186,8 +188,12 @@
+  *
+  * _RotateResourceIdentities --
+  *
+- *    Rotate a list of resources by recreating their views with
+- *    the updated rotations.
++ *    Rotate a list of resources: each takes the place of the next. A
++ *    view finds out that its resource changed when it is bound again
++ *    (GetPipeRenderTargetView, GetPipeShaderResourceView). The views
++ *    that are bound right now are moved here: a program may leave its
++ *    render target bound over a present and go on drawing, and has to
++ *    draw into the new back buffer, not into the one just put on screen.
+  *
+  * ----------------------------------------------------------------------
+  */
+@@ -203,6 +209,13 @@
+    UINT NumResources = RotateResourceIdentities->Resources;
+    const DXGI_DDI_HRESOURCE *hResources = RotateResourceIdentities->pResources;
+ 
++   /* What each of them was before, to find the bound views of it afterwards */
++   struct pipe_resource *before[16];
++   const bool track = NumResources <= ARRAY_SIZE(before);
++   for (UINT i = 0; track && i < NumResources; ++i) {
++      before[i] = CastPipeResource(hResources[i]);
++   }
++
+    struct pipe_resource *firstResource = CastPipeResource(hResources[0]);
+ 
+    for (UINT i = 0; i < (NumResources - 1); ++i) {
+@@ -213,6 +226,71 @@
+    Resource *lastResource = CastResource(hResources[NumResources - 1]);
+    lastResource->resource = firstResource;
+ 
++   if (!track) {
++      return S_OK;
++   }
++
++   Device *pDevice = CastDevice(RotateResourceIdentities->hDevice);
++   struct pipe_context *pipe = pDevice->pipe;
++
++   bool fb_changed = false;
++   for (unsigned c = 0; c < pDevice->fb.nr_cbufs; ++c) {
++      struct pipe_surface *surface = pDevice->fb.cbufs[c];
++      if (!surface) {
++         continue;
++      }
++      for (UINT i = 0; i < NumResources; ++i) {
++         if (surface->texture != before[i]) {
++            continue;
++         }
++         struct pipe_resource *now = CastPipeResource(hResources[i]);
++         if (now != surface->texture) {
++            struct pipe_surface *moved = pipe->create_surface(pipe, now, surface);
++            pipe_surface_reference(&pDevice->fb.cbufs[c], moved);
++            pipe_surface_reference(&moved, NULL);
++            fb_changed = true;
++         }
++         break;
++      }
++   }
++   if (fb_changed) {
++      pipe->set_framebuffer_state(pipe, &pDevice->fb);
++   }
++
++   for (unsigned shader = 0; shader < PIPE_SHADER_TYPES; ++shader) {
++      struct pipe_sampler_view **views = pDevice->sampler_views[shader];
++      struct pipe_sampler_view *moved[PIPE_MAX_SHADER_SAMPLER_VIEWS];
++      bool changed = false;
++
++      memset(moved, 0, sizeof moved);
++      for (unsigned s = 0; s < PIPE_MAX_SHADER_SAMPLER_VIEWS; ++s) {
++         struct pipe_sampler_view *view = views[s];
++         if (!view) {
++            continue;
++         }
++         for (UINT i = 0; i < NumResources; ++i) {
++            if (view->texture != before[i]) {
++               continue;
++            }
++            struct pipe_resource *now = CastPipeResource(hResources[i]);
++            if (now != view->texture) {
++               moved[s] = pipe->create_sampler_view(pipe, now, view);
++               views[s] = moved[s];
++               changed = true;
++            }
++            break;
++         }
++      }
++      if (changed) {
++         pipe->set_sampler_views(pipe, (enum pipe_shader_type)shader, 0,
++                                 PIPE_MAX_SHADER_SAMPLER_VIEWS, 0, false, views);
++         /* the context holds them now, as it does the views bound in the usual way */
++         for (unsigned s = 0; s < PIPE_MAX_SHADER_SAMPLER_VIEWS; ++s) {
++            pipe_sampler_view_reference(&moved[s], NULL);
++         }
++      }
++   }
++
+    return S_OK;
+ }
+ 
