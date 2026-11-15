@@ -64,8 +64,13 @@ Everything runs from the repo's `.tools/win9x/` (git-ignored); the kits are unpa
 | 16-bit C compiler (`cl16`, C 8.00c, Win32-hosted) | Server 2003 DDK, 16-bit build environment | runs |
 | 16-bit linker (`link16` 5.60, segmented executables) | same | runs |
 | `mapsym`, `libw.lib` and the 16-bit headers and libraries | 98 DDK, 2003 DDK | runs |
-| 16-bit resource compiler (`rc` for 16-bit `.res`) | 98 DDK | DOS program: needs DOSBox, or a replacement |
+| 16-bit resource compiler (`rc`, with the DOS program `rcpp` inside) | 98 DDK | doesn't run: Wine has no DOS. Our own small tool will write the driver's resources (a display driver has few: three data blocks, version, some icons) |
 | Windows 2000 build environment (`build`, `cl` 13.10) | Server 2003 DDK (builds for 2000) | to check in step 6 |
+
+Proof for the 16-bit side: the 98 DDK's own sample display driver (`framebuf`, 22 assembly files)
+assembles with `ml` and links with `link16` into a 16-bit driver file (`.drv`, an NE-format DLL),
+and `mapsym` makes its symbol file, all under Wine. Only the resource step is missing. The DDK's
+help files unpack to HTML with `7z` (2700 pages on display drivers, VxDs and DirectX drivers).
 
 Kits on hand: Windows 98, ME and 2000 DDKs, the Server 2003 SP1 DDK (3790.1830), the DirectX 7
 DDK (Direct3D 7 HAL; the DirectX 8 and 9 driver interface is in the 2003 DDK's Direct3D
