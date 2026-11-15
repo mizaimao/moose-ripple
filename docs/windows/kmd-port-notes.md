@@ -238,3 +238,11 @@ without a flip. Not yet looked at in this state: the Windows log's complaints ab
 (`STATUS_MONITOR_UNKNOWN_DESCRIPTOR_FORMAT`), mode changes, the pointer, stopping and
 restarting the device, the VGA hand-back at a crash screen, and the two machine-wide
 settings in the INF.
+
+What Windows' log still complains about with the desktop up (run 10), as the next things to
+look at: `DxgkDdiEscape` answers `STATUS_INVALID_BUFFER_SIZE` to escapes without data (39
+times; who sends them is not known yet); `DxgkDdiSetPointerPosition` answers
+`STATUS_NOT_IMPLEMENTED` although Windows calls it without pointer capabilities;
+`DXGADAPTER::DisableAllPrimaries` reports an assertion four times during the mode set; the
+EDID is judged invalid (`DpiIsValidEdid`, `STATUS_MONITOR_UNKNOWN_DESCRIPTOR_FORMAT`), so the
+monitor is a generic one; `IsValidContentScaling` objects to the scaling our paths name.
