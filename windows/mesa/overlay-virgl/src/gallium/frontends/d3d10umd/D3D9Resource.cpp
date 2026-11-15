@@ -4,6 +4,7 @@
  * Copyright 2026 Ake Rehnman
  */
 #include "D3D9Private.h"
+#include "Format.h"
 
 #include "D3D9Host.h"
 
@@ -219,6 +220,13 @@ D3D9FormatToPipe(D3DDDIFORMAT format)
       return PIPE_FORMAT_B5G6R5_UNORM;
    case D3DDDIFMT_A1R5G5B5:
       return PIPE_FORMAT_B5G5R5A1_UNORM;
+   /* moose-ripple: the three 16-bit formats the adapter also lists (D3D9Adapter.cpp) */
+   case D3DDDIFMT_X1R5G5B5:
+      return PIPE_FORMAT_B5G5R5X1_UNORM;
+   case D3DDDIFMT_A4R4G4B4:
+      return PIPE_FORMAT_B4G4R4A4_UNORM;
+   case D3D9_FMT_X4R4G4B4:
+      return PIPE_FORMAT_B4G4R4X4_UNORM;
    case D3DDDIFMT_A2R10G10B10:
       return PIPE_FORMAT_B10G10R10A2_UNORM;
    case D3D9_FMT_A2B10G10R10:
@@ -265,7 +273,8 @@ D3D9FormatToPipe(D3DDDIFORMAT format)
    case D3D9_FMT_DF16:
       return PIPE_FORMAT_Z16_UNORM;
    case D3DDDIFMT_D24S8:
-      return PIPE_FORMAT_Z24_UNORM_S8_UINT;
+      /* moose-ripple: whichever order of the two parts the renderer has (Format.h) */
+      return FormatDepth24Stencil8();
    case D3DDDIFMT_D24X8:
    case D3D9_FMT_DF24:
    case D3D9_FMT_INTZ:
@@ -306,6 +315,7 @@ D3D9PipeToFormat(enum pipe_format format)
    case PIPE_FORMAT_Z24X8_UNORM:
       return D3DDDIFMT_D24X8;
    case PIPE_FORMAT_Z24_UNORM_S8_UINT:
+   case PIPE_FORMAT_S8_UINT_Z24_UNORM:
       return D3DDDIFMT_D24S8;
    default:
       return D3DDDIFMT_UNKNOWN;
@@ -444,7 +454,8 @@ D3D9PipeBind(const D3DDDIARG_CREATERESOURCE *data)
    const enum pipe_format format = D3D9ResourcePipeFormat(data);
    const bool depth = format == PIPE_FORMAT_Z16_UNORM ||
       format == PIPE_FORMAT_Z24X8_UNORM ||
-      format == PIPE_FORMAT_Z24_UNORM_S8_UINT;
+      format == PIPE_FORMAT_Z24_UNORM_S8_UINT ||
+      format == PIPE_FORMAT_S8_UINT_Z24_UNORM;
 
    if (data->Flags.VertexBuffer)
       return PIPE_BIND_VERTEX_BUFFER;
