@@ -132,7 +132,7 @@ void VioGpuCommand::Run()
     interrupt.DmaCompleted.EngineOrdinal = 0;
     m_pAdapter->NotifyInterrupt(&interrupt, true);
 
-    m_pCommander->CommandFinished();
+    m_pCommander->CommandFinished(m_FenceId);
 
     delete this;
 }
@@ -194,6 +194,9 @@ VioGpuCommander::VioGpuCommander(VioGpuAdapter *pAdapter)
     KeInitializeSpinLock(&m_Lock);
 
     m_running = 0;
+    m_lastCompletedFence = 0;
+    m_preemptPending = FALSE;
+    m_preemptFenceId = 0;
 }
 
 NTSTATUS VioGpuCommander::Start()
@@ -295,15 +298,6 @@ void VioGpuCommander::ThreadWorkRoutine(void)
     }
 }
 
-void VioGpuCommander::CommandFinished()
-{
-    PAGED_CODE();
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s", __FUNCTION__));
-
-    m_running--;
-    KeSetEvent(&m_QueueEvent, IO_NO_INCREMENT, FALSE);
-}
-
 NTSTATUS VioGpuCommander::Patch(const DXGKARG_PATCH *pPatch)
 {
     PAGED_CODE();
@@ -319,7 +313,73 @@ PAGED_CODE_SEG_END
 
 #pragma code_seg(push)
 #pragma code_seg()
-NTSTATUS VioGpuCommander::SubmitCommand(const DXGKARG_SUBMITCOMMAND *pSubmitCommand)
+// Under the queue lock: nothing submitted that has not finished
+BOOLEAN VioGpuCommander::IdleLocked()
+{
+    return m_running == 0 && IsListEmpty(&m_SubmittedQueue) && IsListEmpty(&m_RunningQueue);
+}
+
+void VioGpuCommander::ReportPreempted(UINT preemptionFenceId)
+{
+    DXGKARGCB_NOTIFY_INTERRUPT_DATA interrupt;
+    RtlZeroMemory(&interrupt, sizeof(interrupt));
+    interrupt.InterruptType = DXGK_INTERRUPT_DMA_PREEMPTED;
+    interrupt.DmaPreempted.PreemptionFenceId = preemptionFenceId;
+    interrupt.DmaPreempted.LastCompletedFenceId = (UINT)m_lastCompletedFence;
+    interrupt.DmaPreempted.NodeOrdinal = 0;
+    interrupt.DmaPreempted.EngineOrdinal = 0;
+    m_pAdapter->NotifyInterrupt(&interrupt, true);
+}
+
+// Not pageable: it takes the queue's spin lock.
+void VioGpuCommander::CommandFinished(UINT fenceId)
+{
+    KIRQL irql;
+    BOOLEAN report = FALSE;
+    UINT preemptionFenceId = 0;
+
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s fence_id=%u", __FUNCTION__, fenceId));
+
+    LockQueue(&irql);
+    m_running--;
+    InterlockedExchange(&m_lastCompletedFence, (LONG)fenceId);
+    if (m_preemptPending && IdleLocked())
+    {
+        report = TRUE;
+        preemptionFenceId = m_preemptFenceId;
+        m_preemptPending = FALSE;
+    }
+    UnlockQueue(irql);
+
+    if (report)
+    {
+        ReportPreempted(preemptionFenceId);
+    }
+    KeSetEvent(&m_QueueEvent, IO_NO_INCREMENT, FALSE);
+}
+
+void VioGpuCommander::Preempt(UINT preemptionFenceId)
+{
+    KIRQL irql;
+    BOOLEAN now;
+
+    LockQueue(&irql);
+    now = IdleLocked();
+    if (!now)
+    {
+        m_preemptPending = TRUE;
+        m_preemptFenceId = preemptionFenceId;
+    }
+    UnlockQueue(irql);
+
+    if (now)
+    {
+        ReportPreempted(preemptionFenceId);
+    }
+}
+
+NTSTATUS VioGpuCommander::SubmitCommand(
+const DXGKARG_SUBMITCOMMAND *pSubmitCommand)
 {
     VIOGPU_ASSERT(pSubmitCommand != NULL);
 

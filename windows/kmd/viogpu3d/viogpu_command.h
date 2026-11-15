@@ -60,7 +60,17 @@ class VioGpuCommander
     NTSTATUS Start();
     void Stop();
 
-    void CommandFinished();
+    void CommandFinished(UINT fenceId);
+
+    // Preemption as this driver can do it: the host cannot stop a command buffer half way, so
+    // a preemption request is reported done once everything submitted has finished
+    // (DxgkDdiPreemptCommand). And the fence of the last finished buffer
+    // (DxgkDdiQueryCurrentFence).
+    void Preempt(UINT preemptionFenceId);
+    UINT LastCompletedFence()
+    {
+        return (UINT)m_lastCompletedFence;
+    }
 
     NTSTATUS Patch(const DXGKARG_PATCH *pPatch);
     NTSTATUS SubmitCommand(const DXGKARG_SUBMITCOMMAND *pSubmitCommand);
@@ -91,4 +101,10 @@ class VioGpuCommander
     KSPIN_LOCK m_Lock;
 
     UINT m_running;
+
+    BOOLEAN IdleLocked();
+    void ReportPreempted(UINT preemptionFenceId);
+    volatile LONG m_lastCompletedFence;
+    BOOLEAN m_preemptPending;
+    UINT m_preemptFenceId;
 };

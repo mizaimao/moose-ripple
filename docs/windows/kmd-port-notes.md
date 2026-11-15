@@ -429,3 +429,27 @@ the thumbnail, the stacked windows of Flip 3D or the glass outlines of peek; the
 are the mouse pointer (our pictures come from the host's display, which has it) and a
 notification icon that had not appeared yet. The captures are kept out of the repository
 (they show the test account's desktop).
+
+## Preemption, and no machine-wide settings (2026-11-15)
+
+The Windows 10 driver's INF switched GPU preemption off for the whole machine
+(`GraphicsDrivers\Scheduler\EnablePreemption = 0`) and told Windows never to recover from a
+GPU timeout (`TdrDebugMode = 1`), because the driver's preemption entry point did nothing:
+with preemption on, Windows would ask for one and wait forever for the answer.
+
+The driver now answers. The host cannot stop a command buffer half way, so a preemption
+request is reported done (`DXGK_INTERRUPT_DMA_PREEMPTED`) once everything submitted has
+finished, with that last fence as the last completed one; if nothing is pending it is reported
+at once (`VioGpuCommander::Preempt`). `DxgkDdiQueryCurrentFence`, which Windows reads when it
+suspects a hang, returns the last finished fence instead of nothing. Both settings are gone
+from the INF.
+
+Load test 19 (fresh VM, this package): Windows' scheduler key holds neither value; the
+Experience Index runs to the end (4.6, gaming graphics 5.6, frame rates as before); 32-bit and
+64-bit checks, dxdiag and Chess Titans next to the compositor (also inside Flip 3D) right; no
+display timeout or reset event in the System log; nothing in the host's log.
+
+Still a stub: recovery after a real timeout (`DxgkDdiResetFromTimeout`,
+`DxgkDdiRestartFromTimeout`). A command buffer that keeps the host busy for more than two
+seconds would now make Windows reset the driver, and the driver does not yet rebuild its
+state. None was seen in these runs.

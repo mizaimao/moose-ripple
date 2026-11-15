@@ -963,14 +963,10 @@ NTSTATUS
 APIENTRY
 VioGpu3DDdiPreemptCommand(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_PREEMPTCOMMAND *pPreemptCommand)
 {
-    UNREFERENCED_PARAMETER(hAdapter);
-    UNREFERENCED_PARAMETER(pPreemptCommand);
+    VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(hAdapter);
 
-    DbgPrint(TRACE_LEVEL_ERROR,
-             ("<---> %s UNSUPPORTED PREEMPTION FUNCTION fence_id=%d\n",
-              __FUNCTION__,
-              pPreemptCommand->PreemptionFenceId));
-
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s fence_id=%u\n", __FUNCTION__, pPreemptCommand->PreemptionFenceId));
+    pAdapter->commander.Preempt(pPreemptCommand->PreemptionFenceId);
     return STATUS_SUCCESS;
 };
 
@@ -988,11 +984,9 @@ NTSTATUS
 APIENTRY
 VioGpu3DDdiQueryCurrentFence(_In_ CONST HANDLE hAdapter, _Inout_ DXGKARG_QUERYCURRENTFENCE *pCurrentFence)
 {
-    UNREFERENCED_PARAMETER(hAdapter);
-    UNREFERENCED_PARAMETER(pCurrentFence);
+    VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(hAdapter);
 
-    DbgPrint(TRACE_LEVEL_ERROR, ("<---> %s UNSUPPORTED PREEMPTION FUNCTION\n", __FUNCTION__));
-
+    pCurrentFence->CurrentFence = pAdapter->commander.LastCompletedFence();
     return STATUS_SUCCESS;
 };
 
