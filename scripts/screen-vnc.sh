@@ -2,6 +2,8 @@
 # Save a PNG of what a VM's display really shows, read from QEMU's VNC server on the rig.
 # Works where QEMU's screendump can't (vga: virtio-gl once the guest scans out: "no surface").
 #   VMID=210 scripts/screen-vnc.sh [OUT]      OUT defaults to /tmp/ripple-screen-vnc.png
+#   VMID=210 scripts/screen-vnc.sh -c OUT.png      also the pointer image the host draws over the
+#                     picture, if the guest has one (a hardware pointer): OUT-cursor.png
 #   VMID=210 scripts/screen-vnc.sh -n 12 -i 0.15 OUT.png
 #                     12 frames on one connection, one every 0.15 s or as fast as they come
 #                     (raw 1280x800 is 4 MB a frame), saved as OUT-00.png..OUT-11.png. The
@@ -15,9 +17,10 @@ set -eu
 . "$(dirname "$0")/lib.sh"
 
 DEV=${DEV:-dev.lan}
-n=1 i=0
+n=1 i=0 c=
 while [ $# -gt 0 ]; do
     case "$1" in
+        -c) c=-c; shift ;;
         -n) n=$2; shift 2 ;;
         -i) i=$2; shift 2 ;;
         *)  break ;;
@@ -32,8 +35,10 @@ trap 'rm -f "$fifo"' EXIT
 
 scp -q $SSH_OPTS "$ROOT/tools/vncgrab/vncgrab.py" "$DEV:/tmp/$tag.py"
 ssh "$RETRO" "LC_PVE_TICKET=$pw qm vncproxy $VMID" <"$fifo" |
-    ssh $SSH_OPTS "$DEV" "mkdir -p /tmp/$tag.d && VNC_PASSWORD=$pw ~/Projects/moose-ripple/.venv/bin/python -I /tmp/$tag.py -n $n -i $i /tmp/$tag.d/f.png" >"$fifo"
+    ssh $SSH_OPTS "$DEV" "mkdir -p /tmp/$tag.d && VNC_PASSWORD=$pw ~/Projects/moose-ripple/.venv/bin/python -I /tmp/$tag.py $c -n $n -i $i /tmp/$tag.d/f.png" >"$fifo"
 if [ "$n" = 1 ]; then
+    [ -z "$c" ] || ssh $SSH_OPTS "$DEV" "cat /tmp/$tag.d/f-cursor.png 2>/dev/null" >"${out%.png}-cursor.png"
+    [ -s "${out%.png}-cursor.png" ] || rm -f "${out%.png}-cursor.png"
     ssh $SSH_OPTS "$DEV" "cat /tmp/$tag.d/f.png; rm -rf /tmp/$tag.d /tmp/$tag.py" >"$out.tmp"
     mv "$out.tmp" "$out"
     echo "$out"
