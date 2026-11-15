@@ -319,17 +319,73 @@ device fails with `D3DERR_NOTAVAILABLE`, because there is no Direct3D 9 driver b
 Which of the two the compositor's test looks at is to be read out of `dwm.exe` and
 `dwmcore.dll` next.
 
-**Where the refusal comes from** (read out of `dwm.exe` with its public symbols, 2026-11-14):
-the event is raised in `CDwmAppHost::VerifyDisplayModesViaMIL`, which looks at the graphics
-capabilities its composition engine reports: "WDDM is not in use" when the engine's WDDM flag
-is zero, another refusal when the pixel shader version is below 2, another when the screen is
-not 32 bits deep. The engine takes those from Direct3D 9: the capabilities of the hardware
-device, which our adapter cannot give without a Direct3D 9 user-mode driver (the probe's
-`D3DERR_NOTAVAILABLE`). The compositor itself draws with Direct3D 10.1 on Windows 7. So what
-it needs first is a Direct3D 9 driver that answers the capability questions honestly enough
-(pixel shaders 2.0 or better); whether it then also draws anything through Direct3D 9 will
-show when it gets past this test.
+**Where the refusal comes from** (read out of `dwm.exe` and `dwmcore.dll` with their public
+symbols, 2026-11-14 and 15): the event is raised in `CDwmAppHost::VerifyDisplayModesViaMIL`,
+which looks at what its composition engine reports about the display: "WDDM is not in use"
+when the engine's WDDM flag is zero. The engine sets that flag once it has a Direct3D device
+for the adapter (`CDisplay::ReadGraphicsAccelerationCaps`, `CD3DDeviceTable::CreateD3DDevice`),
+and this is how it gets one:
+
+1. It asks the adapter for the Direct3D 10.1 interface, then for the Direct3D 10 one
+   (`IDXGIAdapter::CheckInterfaceSupport`). That gives feature level 10.1 or 10.0, or 9.3 when
+   the driver has neither.
+2. It asks the display kernel which WDDM version the driver is (`D3DKMTQueryAdapterInfo`,
+   `KMTQAITYPE_DRIVERVERSION`). Below WDDM 1.1 (the number 1105) the level drops to 9.3,
+   whatever step 1 said.
+3. It calls `D3D10CreateDevice1` on the adapter at that level and then at each lower one, and
+   takes the first that works. The levels 9.x run on the driver's Direct3D 9 part, through
+   Windows' own layer.
+
+So on a WDDM 1.0 driver the compositor needs a complete Direct3D 9 driver, and on a WDDM 1.1
+driver with a Direct3D 10 part it needs no Direct3D 9 at all. An earlier version of this
+section said the engine takes its capabilities from Direct3D 9; that was a wrong reading.
+`tools/win7-hello/dwmprobe.c` asks the same three things with the same arguments and prints
+the answers.
 
 Tool note: `win32k.sys`, `dwm.exe`, `dwmcore.dll` and `uDWM.dll` were rearranged after
 linking, so their symbols need the address table in the symbol file (`resym.py` applies it
 now); `dxgkrnl.sys` and `dxgmms1.sys` were not.
+
+## Aero (2026-11-15)
+
+**What makes a driver WDDM 1.1 for Windows 7.** Not the interface version given in
+`DriverEntry`, and not `DXGK_DRIVERCAPS.WDDMVersion`. The display kernel (`dxgkrnl.sys`,
+`DxgkQueryAdapterInfo` and `DXGADAPTER::Initialize`) reports 1105 only when the driver has all
+three of `DxgkDdiRenderKm`, `DxgkDdiQueryVidPnHWCapability` and
+`PresentationCaps.SupportKernelModeCommandBuffer`, and 1000 (WDDM 1.0) otherwise. The three
+are GDI hardware acceleration: with them GDI asks the driver for the surfaces of what it draws
+in windows (`D3DKMDT_STANDARDALLOCATION_GDISURFACE`) and sends its drawing as commands through
+`DxgkDdiRenderKm`.
+
+Our driver registers the entry point and sets the capability, and refuses the GDI surface
+type. GDI then keeps its surfaces in system memory, as it does on a WDDM 1.0 driver, and no
+command arrives (none in the tests). Drawing GDI's six operations on the host is left for the
+performance work.
+
+**Result (load test 13).** A fresh test VM, the package installed as the repository has it
+(kernel driver and the Direct3D 10 driver, nothing for Direct3D 9), one reboot: the compositor
+starts by itself. Glass window frames with the blurred desktop behind them, shadows, the
+translucent taskbar and Flip 3D are drawn on the host GPU, still on the stock virglrenderer
+0.10.4. `dwmprobe` there: Direct3D 10 interface present, WDDM version 1105, a device at
+feature level 10.0 made.
+
+Seen wrong so far, to be found: black strips over parts of the taskbar (the Start button, the
+notification area), and for a moment patches of unblurred desktop in a glass frame while the
+window's address bar animates.
+
+**The compositor's own test switch.** `Force10OnWDDM1_0` (a DWORD of 1 under
+`HKCU\Software\Microsoft\Avalon.Graphics`, read by `dwmcore.dll`) makes the compositor use
+Direct3D 10 on a WDDM 1.0 driver. It showed that the Direct3D 10 path works on our driver
+before the kernel driver was changed. It is per user and nothing for a package.
+
+**Direct3D 9's list of checks.** On the way here the Direct3D 9 capability answers were made
+acceptable to Windows 7 (`windows/umd9`, not in the package). Direct3D 9 offers a hardware
+device only if the driver's capabilities pass `IsD3DHALSupported` in `d3d9.dll`; when they do
+not, it silently keeps one display format and reports no hardware device
+(`D3DERR_NOTAVAILABLE` from `GetDeviceCaps`). At shader model 3 the list includes: dynamic
+textures, the scissor test, 1 to 4 render targets (6 user clip planes with more than one),
+all comparison functions, the usual blend factors, textures of 4096 or more with a repeat of
+8192, a guard band of 8192, 256 vertex shader constants, point size in the vertex format,
+stream offsets shared between elements, and anisotropic filtering of 16 samples or more with
+its raster capability and minification filter. The last one was what ours failed.
+`d3d9probe HEX` prints what the Direct3D 9 object kept from the driver.
