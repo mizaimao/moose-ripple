@@ -5,23 +5,29 @@
  * DXBC), copied to a staging texture and read back. Writes d3d10test.txt next to the program
  * and shows a message box.
  *   d3d10test.exe [DRIVER.dll]        default: libgallium_d3d10.dll
+ *   d3d10test.exe hw [quiet]          the display adapter's own driver instead (a hardware
+ *                                     device: Windows loads the driver the adapter names);
+ *                                     quiet: no message box, the text file only
  * MIT licence (LICENSE at the repository root).
  */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d10.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "tri_vs.h"   /* tri.hlsl compiled to DXBC by hlsl2dxbc.c */
 #include "tri_ps.h"
 
 static char msg[2048];
+static int quiet;
 
 static void report(void)
 {
     FILE *f = fopen("d3d10test.txt", "wb");
     if (f) { fputs(msg, f); fclose(f); }
-    MessageBoxA(0, msg, "moose-ripple D3D10 test", MB_OK);
+    if (!quiet)
+        MessageBoxA(0, msg, "moose-ripple D3D10 test", MB_OK);
 }
 
 int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
@@ -40,13 +46,19 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     HRESULT hr;
     (void)inst; (void)prev; (void)show;
 
-    sw = LoadLibraryA(dll);
-    if (!sw) {
-        snprintf(msg, sizeof(msg), "LoadLibrary(%s) failed: error %lu\r\n", dll, GetLastError());
-        report();
-        return 1;
+    if (strncmp(dll, "hw", 2) == 0) {
+        quiet = strstr(dll, "quiet") != NULL;
+        dll = "the adapter's driver";
+        hr = D3D10CreateDevice(NULL, D3D10_DRIVER_TYPE_HARDWARE, NULL, 0, D3D10_SDK_VERSION, &dev);
+    } else {
+        sw = LoadLibraryA(dll);
+        if (!sw) {
+            snprintf(msg, sizeof(msg), "LoadLibrary(%s) failed: error %lu\r\n", dll, GetLastError());
+            report();
+            return 1;
+        }
+        hr = D3D10CreateDevice(NULL, D3D10_DRIVER_TYPE_SOFTWARE, sw, 0, D3D10_SDK_VERSION, &dev);
     }
-    hr = D3D10CreateDevice(NULL, D3D10_DRIVER_TYPE_SOFTWARE, sw, 0, D3D10_SDK_VERSION, &dev);
     if (FAILED(hr)) {
         snprintf(msg, sizeof(msg), "D3D10CreateDevice on %s failed: 0x%08lx\r\n", dll, (unsigned long)hr);
         report();

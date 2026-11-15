@@ -14,7 +14,7 @@ root=$(cd "$here/../.." && pwd)
 N=${1:?run number}
 : "${PKG_URL:?PKG_URL=http://BUILD_HOST:PORT/pkg}"
 SNAP=${SNAP:-pre-kmd}
-FILES=${FILES:-viogpu3d.inf viogpu3d.sys viogpu_d3d10.dll devcon.exe setres.ps1}
+FILES=${FILES:-viogpu3d.inf viogpu3d.sys viogpu_d3d10.dll devcon.exe setres.ps1 d3d10test.exe}
 HWID='PCI\VEN_1AF4&DEV_1050&SUBSYS_11001AF4&REV_01'
 log=/tmp/rb-$VMID-com1-run$N.log
 

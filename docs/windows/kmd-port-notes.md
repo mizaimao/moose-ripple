@@ -246,3 +246,18 @@ times; who sends them is not known yet); `DxgkDdiSetPointerPosition` answers
 `DXGADAPTER::DisableAllPrimaries` reports an assertion four times during the mode set; the
 EDID is judged invalid (`DpiIsValidEdid`, `STATUS_MONITOR_UNKNOWN_DESCRIPTOR_FORMAT`), so the
 monitor is a generic one; `IsValidContentScaling` objects to the scaling our paths name.
+
+### The W1 checks (run 10 and 11, 2026-11-14)
+
+| Check | Result |
+|---|---|
+| Desktop, Start menu, a window | drawn correctly; at 800x600 the same picture as the Standard VGA driver gives |
+| Modes | all seven of the device's list offered (640x480 to 1888x1062); a change to 1280x800 and back to 800x600 through `ChangeDisplaySettings` works |
+| Driver restart (`devcon restart`) | stops, unloads, loads and starts again with the desktop back; no thread left behind |
+| Crash screen | after an NMI Windows resets the device through `DxgkDdiResetDevice` and its "Hardware Malfunction" screen is shown by the VGA side of the device |
+| Pointer | drawn by Windows itself (no hardware pointer yet); `DxgkDdiSetPointerPosition` now answers success |
+| Sleep | **not survived.** Windows offers S3 and goes to sleep; on waking the screen stays off. Two causes: the driver's threads went on using the closed virtio queues (fixed), and QEMU resets every device when it wakes a guest, so all surfaces and contexts on the host are gone and would have to be made anew (not written). Until then the INF switches sleep and hibernation off for the machine |
+
+The Windows log's steady `DxgkDdiEscape` errors come from escapes of 20 bytes or more that
+are not ours: something on the test machine (it has two other vendors' display software
+installed) asks every adapter. They are refused as they should be.
