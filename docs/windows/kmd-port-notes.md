@@ -261,3 +261,39 @@ monitor is a generic one; `IsValidContentScaling` objects to the scaling our pat
 The Windows log's steady `DxgkDdiEscape` errors come from escapes of 20 bytes or more that
 are not ours: something on the test machine (it has two other vendors' display software
 installed) asks every adapter. They are refused as they should be.
+
+## Direct3D on the host GPU: the first test (2026-11-14)
+
+`tools/win7-hello/d3d10test.c` in its `hw` mode asks Windows for a Direct3D 10 device on the
+display adapter's own driver, clears a render target, draws a red triangle from a vertex buffer
+with a vertex and a pixel shader, and reads the picture back. That is the whole chain: the
+Direct3D runtime, Mesa's Direct3D 10 driver with the virgl driver under it, our bridge, our
+kernel driver, QEMU, virglrenderer and the host's GPU.
+
+Result on the test rig (QEMU 9.2, virglrenderer 0.10.4): **the device is created, the shaders
+are accepted, and the pixel inside the triangle reads back red (255 0 0 255).** The pixel
+outside reads 0 0 0 0 instead of the green it was cleared to: clearing a render target that is
+not the bound one is not carried out (see below).
+
+What had to be put right on the way:
+
+- The user-mode driver names its capability set at context creation; the host refused that
+  (no context types there), so every device failed. The kernel driver now asks for a plain
+  context on such a host.
+- Direct3D's "one sample" went to the host as a sample count of one; virglrenderer 0.10 then
+  refuses buffers and makes multisample textures (Mesa patch 0016).
+- The first version of the test made its triangle from `SV_VertexID` without a vertex buffer.
+  The rig's virglrenderer has no base-vertex input for shaders and does not draw without
+  vertex elements. Programs do not draw that way; the test was changed, the limits stand.
+
+Open after this test, in the order they will matter for the compositor:
+
+1. **Clearing a render target that is not bound.** The virgl driver has a host command for it
+   in newer versions; on this host nothing happens. To be done in the guest: bind, clear,
+   bind back.
+2. Which further things Mesa's Direct3D 10 driver sends that virglrenderer 0.10 lacks. The
+   feasibility study expected the host's version to matter here; so far everything could be
+   met in the guest, and the rig was not changed.
+3. A driver update in place: `devcon update` with an unchanged INF version keeps the old
+   file. Replacing the file (rename the loaded one, copy the new one) and `devcon restart`
+   works, also for the user-mode DLL.
