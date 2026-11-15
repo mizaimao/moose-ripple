@@ -901,12 +901,10 @@ APIENTRY
 VioGpu3DDdiGetScanLine(_In_ CONST HANDLE hAdapter, _Inout_ DXGKARG_GETSCANLINE *pGetScanLine)
 {
     PAGED_CODE();
-    UNREFERENCED_PARAMETER(hAdapter);
-    UNREFERENCED_PARAMETER(pGetScanLine);
+    VIOGPU_ASSERT_CHK(hAdapter != NULL);
 
-    DbgBreakPoint();
-    DbgPrint(TRACE_LEVEL_ERROR, ("Not imp %s\n", __FUNCTION__));
-    return STATUS_NO_MEMORY;
+    VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(hAdapter);
+    return pAdapter->vidpn.GetScanLine(pGetScanLine);
 }
 
 // END: Paged Code

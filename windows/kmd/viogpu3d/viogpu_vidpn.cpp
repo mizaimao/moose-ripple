@@ -1995,7 +1995,44 @@ void VioGpuVidPN::Flip()
     interrupt.CrtcVsync.VidPnTargetId = 0;
     interrupt.CrtcVsync.PhysicalAddress = m_sourceAddress;
 
+    InterlockedExchange64(&m_lastVSync, KeQueryPerformanceCounter(NULL).QuadPart);
     m_pAdapter->NotifyInterrupt(&interrupt, true);
+}
+
+// Which line the display is drawing. Nothing draws line by line here: there is only the flip
+// thread, which reports a vertical blank sixty times a second. The answer is worked out from
+// the time since its last report, as if a display were scanning: first the blank (a
+// twenty-fifth of the frame), then the visible lines top to bottom. Programs that pace video
+// by the scan line, Windows' video renderer among them, get a line that moves and wraps as on
+// a real display.
+NTSTATUS VioGpuVidPN::GetScanLine(DXGKARG_GETSCANLINE *pGetScanLine)
+{
+    PAGED_CODE();
+
+    LARGE_INTEGER frequency;
+    LONGLONG now = KeQueryPerformanceCounter(&frequency).QuadPart;
+    LONGLONG since = now - m_lastVSync;
+    LONGLONG frame = frequency.QuadPart / 60;
+    UINT height = m_CurrentModes[0].DispInfo.Height ? m_CurrentModes[0].DispInfo.Height : NOM_HEIGHT_SIZE;
+    UINT blank = height / 25 + 1;
+    UINT line = 0;
+
+    if (frame > 0 && since > 0)
+    {
+        line = (UINT)((since % frame) * (height + blank) / frame);
+    }
+
+    if (line < blank)
+    {
+        pGetScanLine->InVerticalBlank = TRUE;
+        pGetScanLine->ScanLine = 0;
+    }
+    else
+    {
+        pGetScanLine->InVerticalBlank = FALSE;
+        pGetScanLine->ScanLine = line - blank;
+    }
+    return STATUS_SUCCESS;
 }
 
 void VioGpuVidPN::FlipThread(void *ctx)
