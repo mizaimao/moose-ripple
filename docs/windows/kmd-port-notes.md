@@ -211,3 +211,30 @@ log. Both gaps are closed (`DxgkDdiSetPalette` does nothing: there is no 256-col
   `N-LevelSizeLg2` (N = 1..7, the size of each level's ring as a power of two). Each entry
   holds the caller's address and up to five values, usually a status code. Read out through
   the gdb stub, this says which check fired.
+
+8. **Windows' own error log switched on** (the `Watchdog\Logging` values), same driver as run
+   7. Read out through the gdb stub, the log named the check: `VIDMM_GLOBAL::CreateOneAllocation`
+   in `dxgmms1.sys` refuses the shared primary with `STATUS_INVALID_PARAMETER`. A primary may
+   only use segments the CPU can reach, unless the driver's memory management capabilities
+   have the bit for a section-backed primary (bit 3), in which case its segments must be
+   apertures. Windows 7 reads that bit although the Windows 7 kit's header does not name it.
+   The Windows 10 driver sets it; it had gone out with the things the kit lacks.
+9. **With the section-backed primary:** Windows commits a mode, sets the source address and
+   presents. **The first desktop on our driver**, 1024x768, with one fault: icons repeated and
+   the bottom strip showed the top of the picture. Every partial update took its pixels from
+   the surface's top left corner, because the transfer to the host named no offset into the
+   surface's memory.
+10. **With the offset:** the Windows 7 desktop is drawn correctly on the virtio-gpu device by
+    our driver, without the compositor: wallpaper, icons, taskbar, Start menu, a command
+    prompt. Windows reports "Driver is running", 1024x768 in 32-bit colour. `dwm.exe` runs but
+    does not compose (window frames are the basic ones), as expected with no Direct3D yet.
+    Screens were taken through the host's VNC server; QEMU's `screendump` writes nothing while
+    the picture is a host GPU surface.
+
+What the Windows 10 driver needed to show a Windows 7 desktop, in the end: `DxgkDdiSetPalette`,
+`WDDMVersion`, the section-backed primary bit, `UserModeDriverName` in the driver key, the
+offset in partial transfers, and telling the host to show what was copied to the screen
+without a flip. Not yet looked at in this state: the Windows log's complaints about the EDID
+(`STATUS_MONITOR_UNKNOWN_DESCRIPTOR_FORMAT`), mode changes, the pointer, stopping and
+restarting the device, the VGA hand-back at a crash screen, and the two machine-wide
+settings in the INF.
