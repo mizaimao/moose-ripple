@@ -27,4 +27,6 @@ per-process clean-up of contexts and resources, and the screen stays the VGA fra
 (nothing is shown from a host resource directly).
 
 `tools/win9x/rvdtest.c` exercises it: `rvdtest` prints what the VxD and the host report, and
-`rvdtest clear` has the host GPU clear a texture and reads it back.
+`rvdtest clear` has the host GPU clear a texture and reads it back. Checked 2026-11-15 in
+Windows 98 SE on a virgl host (`vga: virtio-gl` on Proxmox VE): "host 3D yes, 2 capability
+sets", and the pixel read back was the colour cleared to.

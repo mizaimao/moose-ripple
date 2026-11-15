@@ -140,7 +140,7 @@ struct vq {
     struct vq_avail *avail;
     volatile struct vq_used *used;
     volatile u16 *notify;
-    u16 index, last_used;
+    u16 index, last_used, size;
 };
 
 /* ---- virtio-gpu (virtio 1.1, 5.7): the few things needed so far ------------------------------ */
@@ -172,18 +172,25 @@ static int setup_queue(struct vq *q, u16 index)
     u8 *mem;
 
     wr16(common, CC_QUEUE_SELECT, index);
-    if (rd16(common, CC_QUEUE_SIZE) < QUEUE_SIZE)
+    q->size = rd16(common, CC_QUEUE_SIZE);      /* the device's largest; ours is the smaller */
+    if (q->size > QUEUE_SIZE)
+        q->size = QUEUE_SIZE;
+    if (q->size < 2) {
+        dbg("rvd: queue "); dbg_hex(index); dbg(" has no room\r\n");
         return 0;
+    }
     mem = (u8 *)vmm_alloc_contig(3, &phys);
-    if (!mem)
+    if (!mem) {
+        dbg("rvd: no memory for queue "); dbg_hex(index); dbg("\r\n");
         return 0;
+    }
     q->index = index;
     q->last_used = 0;
     q->desc  = (struct vq_desc *)mem;
     q->avail = (struct vq_avail *)(mem + 4096);
     q->used  = (volatile struct vq_used *)(mem + 8192);
     q->avail->flags = VQ_AVAIL_NO_INTERRUPT;    /* answers are polled for now */
-    wr16(common, CC_QUEUE_SIZE, QUEUE_SIZE);
+    wr16(common, CC_QUEUE_SIZE, q->size);
     wr32(common, CC_QUEUE_DESC, phys);          wr32(common, CC_QUEUE_DESC + 4, 0);
     wr32(common, CC_QUEUE_DRIVER, phys + 4096); wr32(common, CC_QUEUE_DRIVER + 4, 0);
     wr32(common, CC_QUEUE_DEVICE, phys + 8192); wr32(common, CC_QUEUE_DEVICE + 4, 0);
@@ -205,7 +212,7 @@ static u32 command(u32 req_len, u32 resp_len)
     q->desc[0].len = req_len;             q->desc[0].flags = VQ_DESC_NEXT; q->desc[0].next = 1;
     q->desc[1].addr_lo = resp_phys;       q->desc[1].addr_hi = 0;
     q->desc[1].len = resp_len;            q->desc[1].flags = VQ_DESC_WRITE; q->desc[1].next = 0;
-    q->avail->ring[q->avail->idx % QUEUE_SIZE] = head;
+    q->avail->ring[q->avail->idx % q->size] = head;
     q->avail->idx++;
     *q->notify = q->index;
 
@@ -216,7 +223,7 @@ static u32 command(u32 req_len, u32 resp_len)
     }
     q->last_used++;
     (void)rd8(isr, 0);                          /* reading it takes the interrupt request back */
-    return q->used->ring[(u16)(q->last_used - 1) % QUEUE_SIZE].len;
+    return q->used->ring[(u16)(q->last_used - 1) % q->size].len;
 }
 
 /* virtio 1.0, 3.1.1: reset, announce ourselves, agree on features, set up the queues, go. */
@@ -269,8 +276,9 @@ static int transport_init(void)
     req_buf   = (u8 *)vmm_alloc_contig(REQ_PAGES, &req_phys);
     resp_page = (u8 *)vmm_alloc_contig(1, &resp_phys);
     area      = (u8 *)vmm_alloc_contig(AREA_PAGES, &area_phys);
+    if (!req_buf || !resp_page || !area)
+        dbg("rvd: no contiguous memory for the buffers\r\n");
     if (!req_buf || !resp_page || !area || !setup_queue(&ctrlq, 0) || !setup_queue(&cursorq, 1)) {
-        dbg("rvd: no memory for the queues\r\n");
         wr8(common, CC_DEVICE_STATUS, 0);
         return 0;
     }
