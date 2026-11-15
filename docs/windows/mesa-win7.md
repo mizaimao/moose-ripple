@@ -248,3 +248,24 @@ Tools that came out of it: the driver's own log (`RIPPLE_UMD_LOG=FILE` in the pr
 environment), a trace of every Direct3D 9 call into the driver with its result
 (`RIPPLE_UMD_TRACE=1` for failed calls, `2` for all), `dumpstack.py` for crash dumps and
 for dumps of a waiting program (`tools/win7-hello/dumpproc.c` writes those).
+
+### The Windows Experience Index (load test 16, 2026-11-15)
+
+A fresh test VM, the package as the repository builds it (kernel driver, one user-mode DLL
+with the Direct3D 9 and Direct3D 10 parts), one reboot, then `winsat formal`: it runs to the
+end and Windows shows scores. Before this driver the index could not be computed on the test
+VM at all. Stock virglrenderer 0.10.4 on the host, nothing in its log during the run.
+
+| | Ours | GeForce 9600 GT, same disk (2025) |
+|---|---|---|
+| Graphics (desktop, Aero) | 4.6 | 7.8 |
+| Gaming graphics | 5.6 | 7.8 |
+| Processor, memory, disk | 7.7, 7.9, 7.9 | 7.7, 7.9, 7.9 |
+| Video memory throughput | 4 138 MB/s | 57 925 MB/s |
+
+The assessment's own frame rates, 1280x1024: Direct3D 9 Batch 81, Alpha 80, ALU 55, Texture
+load 52; Direct3D 10 Batch 96, Alpha 95, ALU 60, Texture load 47, Geometry 88 and 29,
+Constant buffer 45; video playback 143 frames with a decode time of 0.66 s. Nothing has been
+done for speed yet: the Direct3D 9 part still creates and destroys its state objects for
+every draw, and both parts seem to stop near 80 to 96 frames a second whatever is drawn,
+which points at a wait per frame. That is for the performance pass.
