@@ -9,17 +9,8 @@ mods = find_modules()
 if not mods:
     print("no module list found")
 else:
-    maps = {}
+    maps = load_maps(RE, ("dxgkrnl.sys", "dxgmms1.sys", "watchdog.sys"))
     for m in ("dxgkrnl.sys", "dxgmms1.sys", "watchdog.sys"):
-        out = []
-        try:
-            for line in open(os.path.join(RE, m + ".map")):
-                a, n = line.rstrip("\n").split(" ", 1)
-                out.append((int(a, 16), n))
-        except IOError:
-            pass
-        out.sort()
-        maps[m] = out
         print("%s base 0x%x" % (m, mods.get(m, (0, 0))[0]))
     for k in sorted(mods):
         if "viogpu" in k or k in ("cdd.dll", "win32k.sys", "vga.sys", "videoprt.sys"):
@@ -36,7 +27,10 @@ else:
                 return "%s+0x%x" % (nm, rva)
         return "0x%x" % addr
     wd = mods["watchdog.sys"][0]
-    root = wd + 0x16120
+    root = None
+    for a, n in maps["watchdog.sys"]:
+        if n == "WdLogRoot":
+            root = wd + a
     entries = []
     for lvl in range(8):
         buf = rq(root + 24 * lvl)

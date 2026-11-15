@@ -14,19 +14,8 @@ if not mods:
     gdb.execute("detach")
     gdb.execute("quit")
 
-maps = {}
-def load_map(mod):
-    out = []
-    try:
-        for line in open(os.path.join(RE, mod + ".map")):
-            a, n = line.rstrip("\n").split(" ", 1)
-            out.append((int(a, 16), n))
-    except IOError:
-        pass
-    out.sort()
-    maps[mod] = out
+maps = load_maps(RE, ("dxgkrnl.sys", "dxgmms1.sys", "watchdog.sys"))
 for m in ("dxgkrnl.sys", "dxgmms1.sys", "watchdog.sys"):
-    load_map(m)
     print("%s base 0x%x" % (m, mods.get(m, (0, 0))[0]))
 
 def sym(addr):

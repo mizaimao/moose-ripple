@@ -76,3 +76,30 @@ def find_modules():
         mods[nm] = (b, sz)
         e = rq(e)
     return mods
+
+def image_base(path):
+    """The preferred base in a module file's header. The .map files made by resym.py hold
+    addresses with that base, as the disassembly shows them; subtract it to get offsets."""
+    d = open(path, "rb").read(0x400)
+    e = struct.unpack_from("<I", d, 0x3C)[0]
+    magic, = struct.unpack_from("<H", d, e + 24)
+    if magic == 0x20B:
+        return struct.unpack_from("<Q", d, e + 24 + 24)[0]
+    return struct.unpack_from("<I", d, e + 24 + 28)[0]
+
+def load_maps(folder, names):
+    """name -> sorted list of (offset in the module, symbol name)"""
+    import os
+    maps = {}
+    for m in names:
+        out = []
+        try:
+            ib = image_base(os.path.join(folder, m))
+            for line in open(os.path.join(folder, m + ".map")):
+                a, n = line.rstrip("\n").split(" ", 1)
+                out.append((int(a, 16) - ib, n))
+        except IOError:
+            pass
+        out.sort()
+        maps[m] = out
+    return maps
