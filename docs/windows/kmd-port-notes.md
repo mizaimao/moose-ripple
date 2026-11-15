@@ -369,9 +369,24 @@ translucent taskbar and Flip 3D are drawn on the host GPU, still on the stock vi
 0.10.4. `dwmprobe` there: Direct3D 10 interface present, WDDM version 1105, a device at
 feature level 10.0 made.
 
-Seen wrong so far, to be found: black strips over parts of the taskbar (the Start button, the
-notification area), and for a moment patches of unblurred desktop in a glass frame while the
-window's address bar animates.
+**Black rectangles on the display, and their cause.** At first parts of the taskbar (half of
+the Start button, an icon, the clock) and patches of window frames stayed black or old on the
+host's picture after they had changed. Three checks found it:
+
+1. `tools/win7-hello/d3d10tex.c` updates a texture the way the compositor uploads what changed
+   in a window (`UpdateSubresource`, rectangle by rectangle) and reads it back: all correct.
+   Not the upload.
+2. A screenshot taken inside the guest was right at the moment the host's picture was wrong.
+   So the compositor's picture was whole and the wrong one was only what the display showed.
+3. The kernel driver built with `TRACE_PRESENT=1` (a line for every present): the compositor
+   flips between two buffers and copies nothing.
+
+After a flip the runtime has the driver rotate the swap chain's buffers, and the Direct3D 10
+driver moved a view to its new buffer only when the view was bound again. The compositor
+leaves its render target bound over the flip, so it went on drawing into the buffer that was
+on screen, and the next flip showed the other one without that drawing. Patch 0018
+(`windows/mesa/patches-virgl`) moves the views that are bound when the buffers rotate. Since
+then the taskbar, window frames, dialogs and Flip 3D are whole on the display.
 
 **The compositor's own test switch.** `Force10OnWDDM1_0` (a DWORD of 1 under
 `HKCU\Software\Microsoft\Avalon.Graphics`, read by `dwmcore.dll`) makes the compositor use
@@ -389,3 +404,21 @@ all comparison functions, the usual blend factors, textures of 4096 or more with
 stream offsets shared between elements, and anisotropic filtering of 16 samples or more with
 its raster capability and minification filter. The last one was what ours failed.
 `d3d9probe HEX` prints what the Direct3D 9 object kept from the driver.
+
+**The W3 checks (load test 14, 2026-11-15).** A fresh test VM, the package with patch 0018,
+one reboot. On the display, with no setting changed by hand:
+
+| Check | Result |
+|---|---|
+| The compositor starts by itself and stays up | yes; no compositor error in the event log |
+| Glass window frames with the blurred desktop behind, shadows | right |
+| Translucent taskbar, Start button, notification area, clock | whole |
+| Live thumbnail over a taskbar button | right |
+| Flip 3D | right |
+| Desktop peek (windows turn to glass outlines) | right |
+| Host's renderer | no error in its log |
+
+Not measured: Windows' own compositor assessment (`winsat dwm`) refuses to run ("no LDDM
+Support"), because it tests through Direct3D 9, which the driver does not have yet. Still to
+do for the milestone: the same screens from the GeForce 9600 GT machine next to ours. The
+captures are kept out of the repository (they show the test account's desktop).
