@@ -1,8 +1,8 @@
 /*
  * A minimal Direct3D 10 check for Windows (docs/windows/mesa-win7.md): a software device on a
  * given driver DLL (D3D10_DRIVER_TYPE_SOFTWARE, as Mesa's targets/d3d10umd/README.md describes),
- * a render target cleared to green, a red triangle drawn with shaders (tri.hlsl, embedded as
- * DXBC), copied to a staging texture and read back. Writes d3d10test.txt next to the program
+ * a render target cleared to green, a red triangle drawn from a vertex buffer with shaders
+ * (tri.hlsl, embedded as DXBC), copied to a staging texture and read back. Writes d3d10test.txt next to the program
  * and shows a message box.
  *   d3d10test.exe [DRIVER.dll]        default: libgallium_d3d10.dll
  *   d3d10test.exe hw [quiet]          the display adapter's own driver instead (a hardware
@@ -40,6 +40,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     ID3D10RenderTargetView *rtv = 0;
     ID3D10VertexShader *vs = 0;
     ID3D10PixelShader *ps = 0;
+    ID3D10InputLayout *layout = 0;
+    ID3D10Buffer *vb = 0;
     HRESULT shaders;
     const float colour[4] = { 0.0f, 1.0f, 0.0f, 1.0f };
     HMODULE sw;
@@ -85,7 +87,29 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     if (SUCCEEDED(hr))
         hr = ID3D10Device_CreatePixelShader(dev, tri_ps, sizeof(tri_ps), &ps);
     if (SUCCEEDED(hr)) {
+        static const D3D10_INPUT_ELEMENT_DESC elements[] = {
+            { "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D10_INPUT_PER_VERTEX_DATA, 0 },
+        };
+        hr = ID3D10Device_CreateInputLayout(dev, elements, 1, tri_vs, sizeof(tri_vs), &layout);
+    }
+    if (SUCCEEDED(hr)) {
+        /* bottom left, top middle, bottom right: clockwise, the front side in Direct3D */
+        static const float corners[3][4] = {
+            { -1.0f, -1.0f, 0.0f, 1.0f }, { 0.0f, 1.0f, 0.0f, 1.0f }, { 1.0f, -1.0f, 0.0f, 1.0f },
+        };
+        D3D10_BUFFER_DESC bd;
+        D3D10_SUBRESOURCE_DATA init;
+        ZeroMemory(&bd, sizeof(bd));
+        bd.ByteWidth = sizeof(corners); bd.Usage = D3D10_USAGE_DEFAULT; bd.BindFlags = D3D10_BIND_VERTEX_BUFFER;
+        ZeroMemory(&init, sizeof(init));
+        init.pSysMem = corners;
+        hr = ID3D10Device_CreateBuffer(dev, &bd, &init, &vb);
+    }
+    if (SUCCEEDED(hr)) {
         D3D10_VIEWPORT vp = { 0, 0, 64, 64, 0.0f, 1.0f };
+        UINT stride = 4 * sizeof(float), offset = 0;
+        ID3D10Device_IASetInputLayout(dev, layout);
+        ID3D10Device_IASetVertexBuffers(dev, 0, 1, &vb, &stride, &offset);
         ID3D10Device_OMSetRenderTargets(dev, 1, &rtv, NULL);
         ID3D10Device_RSSetViewports(dev, 1, &vp);
         ID3D10Device_IASetPrimitiveTopology(dev, D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -110,6 +134,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         snprintf(msg, sizeof(msg), "Map of the staging texture failed: 0x%08lx\r\n", (unsigned long)hr);
     }
     report();
+    if (vb) ID3D10Buffer_Release(vb);
+    if (layout) ID3D10InputLayout_Release(layout);
     if (vs) ID3D10VertexShader_Release(vs);
     if (ps) ID3D10PixelShader_Release(ps);
     ID3D10Texture2D_Release(staging);
