@@ -112,6 +112,13 @@ VioGpuAdapter::VioGpuAdapter(_In_ DEVICE_OBJECT *pPhysicalDeviceObject)
     m_ResolutionEvent = NULL;
     m_ResolutionEventHandle = NULL;
     m_u32NumCapsets = 0;
+    m_pCursorBuf = NULL;
+    m_CursorHotX = 0;
+    m_CursorHotY = 0;
+    m_bCursorHidden = TRUE;
+    m_pCursorImage = NULL;
+    KeInitializeGuardedMutex(&m_CursorMutex);
+    KeInitializeEvent(&m_CursorUploaded, NotificationEvent, FALSE);
     m_u32NumScanouts = 0;
 }
 
@@ -353,6 +360,7 @@ NTSTATUS VioGpuAdapter::SetPowerState(_In_ ULONG HardwareUid,
             // Nothing may touch the queues once they are closed: both threads go first.
             vidpn.StopFlipThread();
             commander.Stop();
+            DestroyCursor();
             vidpn.Powerdown();
             VioGpuAdapterClose();
         }
@@ -534,13 +542,15 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 // The only segment is an aperture the CPU cannot reach; see ripple_win7.h
                 pDriverCaps->MemoryManagementCaps.Value |= RIPPLE_VIDMMCAPS_SECTION_BACKED_PRIMARY;
 
-                // Disable pointer on viogpu3d for now
-                // if (IsPointerEnabled()) {
-                //    pDriverCaps->MaxPointerWidth = POINTER_SIZE;
-                //    pDriverCaps->MaxPointerHeight = POINTER_SIZE;
-                //    pDriverCaps->PointerCaps.Value = 0;
-                //    pDriverCaps->PointerCaps.Color = 1;
-                //}
+                // Colour pointers up to 64x64 drawn by the host (SetPointerShape); Windows draws
+                // any other kind itself, after the driver refuses it.
+                if (IsPointerEnabled())
+                {
+                    pDriverCaps->MaxPointerWidth = POINTER_SIZE;
+                    pDriverCaps->MaxPointerHeight = POINTER_SIZE;
+                    pDriverCaps->PointerCaps.Value = 0;
+                    pDriverCaps->PointerCaps.Color = 1;
+                }
 
                 DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s Driver caps return\n", __FUNCTION__));
                 return STATUS_SUCCESS;
@@ -616,7 +626,9 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
     UINT size = pEscape->PrivateDriverDataSize;
     if (size < sizeof(PVIOGPU_ESCAPE))
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
+        // Windows itself sends empty escapes now and then (a few a minute on the desktop):
+        // not worth an error line each
+        DbgPrint((size == 0 ? TRACE_LEVEL_VERBOSE : TRACE_LEVEL_ERROR),
                  ("%s buffer too small %d, should be at least %d\n",
                   __FUNCTION__,
                   pEscape->PrivateDriverDataSize,
@@ -1413,6 +1425,13 @@ NTSTATUS VioGpuAdapter::HWInit(PCM_RESOURCE_LIST pResList)
         return status;
     }
 
+    // Memory for the pointer's image; without it the pointer stays Windows' own
+    if (IsPointerEnabled() && !m_CursorSegment.Init(POINTER_SIZE * POINTER_SIZE * 4, NULL))
+    {
+        DbgPrint(TRACE_LEVEL_ERROR, ("%s no memory for the pointer image, pointer left to Windows\n", __FUNCTION__));
+        SetPointerEnabled(FALSE);
+    }
+
     return status;
 }
 
@@ -1436,6 +1455,8 @@ NTSTATUS VioGpuAdapter::HWClose(void)
 
     ObDereferenceObject(m_pWorkThread);
 
+    DestroyCursor();
+    m_CursorSegment.Close();
     frameSegment.Close();
 
     DbgPrint(TRACE_LEVEL_INFORMATION, ("<--- %s\n", __FUNCTION__));
@@ -1583,3 +1604,216 @@ VioGpuResource *VioGpuAdapter::ResourceFromHandle(D3DKMT_HANDLE handle)
     getHandleData.Flags.DeviceSpecific = 0;
     return reinterpret_cast<VioGpuResource *>(m_DxgkInterface.DxgkCbGetHandleData(&getHandleData));
 }
+// The hardware pointer. After virtio-win's viogpudo driver (BSD-3-Clause, Red Hat), whose
+// SetPointerShape, SetPointerPosition and cursor resource this follows; adapted to this
+// driver's objects. Only colour pointers (32-bit with alpha) are taken: Windows draws
+// monochrome and masked ones itself after the driver refuses them, which is also what makes
+// their screen-inverting parts right.
+#pragma code_seg(push)
+#pragma code_seg("PAGE")
+
+void VioGpuAdapter::QueueCursorCommand(UINT type, UINT resId, INT x, INT y, UINT hotX, UINT hotY)
+{
+    PAGED_CODE();
+
+    PGPU_VBUFFER vbuf = NULL;
+    PGPU_UPDATE_CURSOR crsr = (PGPU_UPDATE_CURSOR)m_CursorQueue.AllocCursor(&vbuf);
+    if (crsr == NULL)
+    {
+        return;
+    }
+    RtlZeroMemory(crsr, sizeof(*crsr));
+    crsr->hdr.type = type;
+    crsr->resource_id = resId;
+    crsr->pos.scanout_id = 0;
+    crsr->pos.x = x;
+    crsr->pos.y = y;
+    crsr->hot_x = hotX;
+    crsr->hot_y = hotY;
+    m_CursorQueue.QueueCursor(vbuf);
+}
+
+BOOLEAN VioGpuAdapter::CreateCursor(void)
+{
+    PAGED_CODE();
+
+    UINT size = POINTER_SIZE * POINTER_SIZE * 4;
+    if (m_pCursorImage == NULL)
+    {
+        m_pCursorImage = new (NonPagedPoolNx) BYTE[size];
+        if (m_pCursorImage == NULL)
+        {
+            return FALSE;
+        }
+    }
+    UINT resid = resourceIdr.GetId();
+    VioGpuObj *obj = new (NonPagedPoolNx) VioGpuObj();
+
+    if (obj == NULL)
+    {
+        resourceIdr.PutId(resid);
+        return FALSE;
+    }
+    ctrlQueue.CreateResource(resid, ColorFormat(D3DDDIFMT_A8R8G8B8), POINTER_SIZE, POINTER_SIZE);
+    if (!obj->Init(size, &m_CursorSegment) || !vidpn.GpuObjectAttach(resid, obj))
+    {
+        DbgPrint(TRACE_LEVEL_ERROR, ("<--- %s the pointer image could not be set up\n", __FUNCTION__));
+        ctrlQueue.DestroyResource(resid);
+        resourceIdr.PutId(resid);
+        delete obj;
+        return FALSE;
+    }
+    m_pCursorBuf = obj;
+    return TRUE;
+}
+
+void VioGpuAdapter::DestroyCursor(void)
+{
+    PAGED_CODE();
+
+    KeAcquireGuardedMutex(&m_CursorMutex);
+    if (m_pCursorBuf != NULL)
+    {
+        UINT id = (UINT)m_pCursorBuf->GetId();
+        if (IsHardwareInit())
+        {
+            UploadCursor(TRUE);
+            QueueCursorCommand(VIRTIO_GPU_CMD_UPDATE_CURSOR, id, 0, 0, 0, 0);
+            QueueCursorCommand(VIRTIO_GPU_CMD_UPDATE_CURSOR, 0, 0, 0, 0, 0);
+            ctrlQueue.DetachBacking(id);
+            ctrlQueue.DestroyResource(id);
+        }
+        delete m_pCursorBuf;
+        m_pCursorBuf = NULL;
+        resourceIdr.PutId(id);
+    }
+    delete[] m_pCursorImage;
+    m_pCursorImage = NULL;
+    m_bCursorHidden = TRUE;
+    KeReleaseGuardedMutex(&m_CursorMutex);
+}
+
+// Puts the kept shape (or a transparent one) into the host's image and waits until the host has
+// it: QEMU takes the control and pointer queues in no fixed order, so a pointer command sent at
+// once can show the image from before the upload.
+void VioGpuAdapter::UploadCursor(BOOLEAN blank)
+{
+    PAGED_CODE();
+
+    BYTE *dst = (BYTE *)m_pCursorBuf->GetVirtualAddress();
+    if (blank || m_pCursorImage == NULL)
+    {
+        RtlZeroMemory(dst, POINTER_SIZE * POINTER_SIZE * 4);
+    }
+    else
+    {
+        RtlCopyMemory(dst, m_pCursorImage, POINTER_SIZE * POINTER_SIZE * 4);
+    }
+    LARGE_INTEGER timeout;
+    timeout.QuadPart = Int32x32To64(500, -10000);
+    KeClearEvent(&m_CursorUploaded);
+    ctrlQueue.TransferToHost2D(m_pCursorBuf->GetId(), 0, POINTER_SIZE, POINTER_SIZE, 0, 0, &m_CursorUploaded);
+    if (KeWaitForSingleObject(&m_CursorUploaded, Executive, KernelMode, FALSE, &timeout) == STATUS_TIMEOUT)
+    {
+        DbgPrint(TRACE_LEVEL_ERROR, ("<--- %s the host took over half a second\n", __FUNCTION__));
+    }
+}
+
+NTSTATUS VioGpuAdapter::SetPointerShape(_In_ CONST DXGKARG_SETPOINTERSHAPE *pSetPointerShape)
+{
+    PAGED_CODE();
+
+    DbgPrint(TRACE_LEVEL_VERBOSE,
+             ("pointer shape: flags 0x%x, %ux%u, pitch %u, hot %u,%u\n",
+              pSetPointerShape->Flags.Value,
+              pSetPointerShape->Width,
+              pSetPointerShape->Height,
+              pSetPointerShape->Pitch,
+              pSetPointerShape->XHot,
+              pSetPointerShape->YHot));
+    if (!IsPointerEnabled() || !IsHardwareInit() || pSetPointerShape->VidPnSourceId != 0 ||
+        !pSetPointerShape->Flags.Color || pSetPointerShape->Width > POINTER_SIZE ||
+        pSetPointerShape->Height > POINTER_SIZE || pSetPointerShape->pPixels == NULL)
+    {
+        // Windows draws this one itself
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
+    KeAcquireGuardedMutex(&m_CursorMutex);
+    if (m_pCursorBuf != NULL || CreateCursor())
+    {
+        // The image, top left in the 64x64 resource, the rest transparent
+        const BYTE *src = (const BYTE *)pSetPointerShape->pPixels;
+        RtlZeroMemory(m_pCursorImage, POINTER_SIZE * POINTER_SIZE * 4);
+        for (UINT y = 0; y < pSetPointerShape->Height; y++)
+        {
+            RtlCopyMemory(m_pCursorImage + y * POINTER_SIZE * 4,
+                          src + y * pSetPointerShape->Pitch,
+                          pSetPointerShape->Width * 4);
+        }
+        UploadCursor(FALSE);
+
+        // Shown at once; the position follows with SetPointerPosition
+        m_CursorHotX = pSetPointerShape->XHot;
+        m_CursorHotY = pSetPointerShape->YHot;
+        QueueCursorCommand(VIRTIO_GPU_CMD_UPDATE_CURSOR, m_pCursorBuf->GetId(), 0, 0, m_CursorHotX, m_CursorHotY);
+        m_bCursorHidden = FALSE;
+        status = STATUS_SUCCESS;
+    }
+    KeReleaseGuardedMutex(&m_CursorMutex);
+    return status;
+}
+
+NTSTATUS VioGpuAdapter::SetPointerPosition(_In_ CONST DXGKARG_SETPOINTERPOSITION *pSetPointerPosition)
+{
+    PAGED_CODE();
+
+    KeAcquireGuardedMutex(&m_CursorMutex);
+    if (m_pCursorBuf != NULL && IsHardwareInit() && pSetPointerPosition->VidPnSourceId == 0)
+    {
+        if (!pSetPointerPosition->Flags.Visible)
+        {
+            // Hidden with a transparent image. Detaching it (resource 0) is not enough: QEMU's
+            // VNC server ignores that and keeps showing the last image, with the hot spot at 0,0,
+            // next to the pointer Windows now draws itself.
+            if (!m_bCursorHidden)
+            {
+                UploadCursor(TRUE);
+                QueueCursorCommand(VIRTIO_GPU_CMD_UPDATE_CURSOR,
+                                   m_pCursorBuf->GetId(),
+                                   pSetPointerPosition->X,
+                                   pSetPointerPosition->Y,
+                                   0,
+                                   0);
+                m_bCursorHidden = TRUE;
+            }
+        }
+        else if (m_bCursorHidden)
+        {
+            // Back from hidden: the shape again, which the host only takes with an update
+            UploadCursor(FALSE);
+            QueueCursorCommand(VIRTIO_GPU_CMD_UPDATE_CURSOR,
+                               m_pCursorBuf->GetId(),
+                               pSetPointerPosition->X,
+                               pSetPointerPosition->Y,
+                               m_CursorHotX,
+                               m_CursorHotY);
+            m_bCursorHidden = FALSE;
+        }
+        else
+        {
+            QueueCursorCommand(VIRTIO_GPU_CMD_MOVE_CURSOR,
+                               m_pCursorBuf->GetId(),
+                               pSetPointerPosition->X,
+                               pSetPointerPosition->Y,
+                               0,
+                               0);
+        }
+    }
+    KeReleaseGuardedMutex(&m_CursorMutex);
+    // Windows also calls this to hide a pointer it draws itself, and logs anything but success
+    return STATUS_SUCCESS;
+}
+
+#pragma code_seg(pop)

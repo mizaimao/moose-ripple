@@ -346,7 +346,6 @@ VioGpu3DSetPointerPosition(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_SETPOI
 {
     PAGED_CODE();
     VIOGPU_ASSERT_CHK(hAdapter != NULL);
-    UNREFERENCED_PARAMETER(pSetPointerPosition);
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
 
     VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(hAdapter);
@@ -356,9 +355,7 @@ VioGpu3DSetPointerPosition(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_SETPOI
         VioGpuDbgBreak();
         return STATUS_UNSUCCESSFUL;
     }
-    // No hardware pointer yet: Windows draws the pointer itself. It still calls this (to hide a
-    // pointer it never showed) and logs an error for anything but success.
-    return STATUS_SUCCESS;
+    return pAdapter->SetPointerPosition(pSetPointerPosition);
 }
 
 NTSTATUS
@@ -381,7 +378,6 @@ VioGpu3DSetPointerShape(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_SETPOINTE
 {
     PAGED_CODE();
     VIOGPU_ASSERT_CHK(hAdapter != NULL);
-    UNREFERENCED_PARAMETER(pSetPointerShape);
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
 
     VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(hAdapter);
@@ -391,7 +387,7 @@ VioGpu3DSetPointerShape(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_SETPOINTE
                  ("<---> %s VioGpu (%p) is being called when not active!\n", __FUNCTION__, pAdapter));
         return STATUS_UNSUCCESSFUL;
     }
-    return STATUS_NOT_IMPLEMENTED;
+    return pAdapter->SetPointerShape(pSetPointerShape);
 }
 
 NTSTATUS

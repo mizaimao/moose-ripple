@@ -250,7 +250,8 @@ class CtrlQueue : public VioGpuQueue
 
     void SetScanout(UINT scan_id, UINT res_id, UINT width, UINT height, UINT x, UINT y);
     void ResFlush(UINT res_id, UINT width, UINT height, UINT x, UINT y);
-    void TransferToHost2D(UINT res_id, ULONG offset, UINT width, UINT height, UINT x, UINT y);
+    // DONE, if given, is set once the host has done the transfer
+    void TransferToHost2D(UINT res_id, ULONG offset, UINT width, UINT height, UINT x, UINT y, PKEVENT done = NULL);
     void TransferToHost3D(UINT res_id, GPU_BOX *box);
 
     void AttachBacking(UINT res_id, PGPU_MEM_ENTRY ents, UINT nents);

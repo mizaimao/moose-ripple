@@ -64,7 +64,8 @@ network callbacks, pointer, power, escape, interrupt and DPC).
 3. **Preemption and timeouts.** Whether to keep the machine-wide switch or answer
    `DxgkDdiPreemptCommand` properly. For W1 (hardly any commands) either does.
 4. **Pointer.** Disabled in the Windows 10 driver ("for now"). The device has a cursor
-   queue; our Mac driver uses it. Software pointer first.
+   queue; our Mac driver uses it. Software pointer first. (Done 2026-11-15: "The hardware
+   pointer" below.)
 5. **32-bit.** The driver assumes a 4 GB aperture at `0xC0000000`; a 32-bit Windows 7 needs
    that looked at. Not in W1.
 6. **Debugging.** A kernel debugger over a virtual serial port on the test VM, and
@@ -453,3 +454,29 @@ Still a stub: recovery after a real timeout (`DxgkDdiResetFromTimeout`,
 `DxgkDdiRestartFromTimeout`). A command buffer that keeps the host busy for more than two
 seconds would now make Windows reset the driver, and the driver does not yet rebuild its
 state. None was seen in these runs.
+
+## The hardware pointer (2026-11-15)
+
+The pointer is now drawn by the host over the picture, as on a real card, instead of by
+Windows into every frame. The driver offers colour pointers up to 64x64
+(`DXGK_DRIVERCAPS.PointerCaps.Color`; the INF sets `HWCursor` to 1). `DxgkDdiSetPointerShape`
+copies the shape into a 64x64 host image and sends `VIRTIO_GPU_CMD_UPDATE_CURSOR`;
+`DxgkDdiSetPointerPosition` sends `MOVE_CURSOR`. The code follows virtio-win's 2D driver
+(viogpudo, BSD-3-Clause). Monochrome and masked pointers, such as the text I-beam that inverts
+what is under it, are refused, and Windows then draws those itself, exactly as before.
+
+Two things learned on the way:
+
+- Hiding the pointer by detaching its image (resource 0, as the 2D driver does) is not enough
+  for every viewer: QEMU's VNC server ignores the hide and keeps showing the last image, with
+  its hot spot moved to 0,0, next to the I-beam Windows now draws. The driver hides it by
+  showing a transparent image instead, and puts the shape back when Windows shows it again.
+- QEMU takes the control queue (the image upload) and the cursor queue (the switch to the
+  image) in no fixed order, so a pointer command sent straight after the upload can show the
+  previous shape. The driver waits for the upload to finish first (`UploadCursor`).
+
+Checked in load test 21 (fresh VM, this package), with `scripts/screen-vnc.sh -c`, which also
+saves the pointer image the host has: the arrow on the desktop (hot spot 3,3), a transparent
+image while the pointer is over a text field (Windows' own I-beam in the frame), the arrow
+again after, the resize arrow on a window edge (hot spot 14,7), Chess Titans with the pointer
+over the board and none drawn into its frames. Nothing in Windows' System log or the host's.

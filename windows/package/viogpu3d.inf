@@ -78,7 +78,8 @@ HKR,,EventMessageFile,%REG_EXPAND_SZ%,"%%SystemRoot%%\System32\IoLogMsg.dll"
 HKR,,TypesSupported,%REG_DWORD%,7
 
 [VioGpu3D_DeviceSettings]
-HKR,, HWCursor,           %REG_DWORD%, 0
+; The pointer drawn by the host over the picture (colour pointers; others Windows draws itself)
+HKR,, HWCursor,           %REG_DWORD%, 1
 HKR,, FlexResolution,     %REG_DWORD%, 1
 HKR,, UsePhysicalMemory,  %REG_DWORD%, 0
 ; Windows 7's graphics kernel reads these from this key (the driver key, Class\{4d36e968-...}\000N)
