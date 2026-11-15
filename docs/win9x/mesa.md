@@ -33,8 +33,22 @@ with the name `RIPPLEGL`, and the registry value of that name under
 writes it and copies the DLL to `WINDOWS\SYSTEM`). `gltest` alone in a folder then reports
 the same renderer and passes.
 
-Not there yet: a faster way to the screen than the read-back, and real programs (first: the
-Quake III Arena demo).
+**The Quake III Arena demo runs**: installed from id Software's installer, started from its
+Start menu entry or `quake3.exe`, it finds "hardware acceleration", lists our renderer, uses
+multitexture and compiled vertex arrays, and plays its demos in a window and full-screen (the
+display driver changes the mode for it and back). `timedemo` with `demo001`, default settings,
+32-bit colour, guest with one CPU on a Proxmox VE host (i9-9900K, Intel UHD 630):
+
+| Mode | frames a second |
+|---|---|
+| 640x480 in a window | about 300 |
+| 1024x768 full-screen | 155 |
+
+    quake3.exe +set timedemo 1 +set logfile 2 +demo demo001
+    (the result is in demoq3\qconsole.log)
+
+Not there yet: a faster way to the screen than the read-back (it is what limits the frame
+rate above), a comparison of the picture against a reference renderer, and more programs.
 
 ## How a 2024 Mesa gets onto a 1998 Windows
 

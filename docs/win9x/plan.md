@@ -61,8 +61,9 @@ this project: nothing may look worse than without our driver).
    *State 2026-11-15:* Mesa 24.3.4 builds for Windows 98 with a current clang, and its virgl
    driver draws with the host GPU through our VxD: a test program in OpenGL 1.1 style passes
    its pixel checks and shows its picture in a window, also when loaded by Windows' own
-   `opengl32.dll` as its installable client driver ([mesa.md](mesa.md)). Next: the Quake III
-   Arena demo.
+   `opengl32.dll` as its installable client driver, and the Quake III Arena demo plays its
+   demos at about 300 frames a second at 640x480 and 155 at 1024x768 ([mesa.md](mesa.md)).
+   Open: picture comparison against a reference, a faster way to the screen, more programs.
 5. **Direct3D on 98:** the HAL for DirectX 7 (3DMark 99 and 2000), then the DirectX 8 and 9
    command stream (3DMark 2001 SE), translated to Gallium (Mesa's driver interface).
 6. **Windows 2000:** miniport and display driver; the OpenGL and Direct3D parts reused.
