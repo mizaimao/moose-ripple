@@ -1,0 +1,530 @@
+From 62f1e49a1eb3a408f748725326fe53447887f97d Mon Sep 17 00:00:00 2001
+From: Max R <max8rr8@gmail.com>
+Date: Fri, 21 Jul 2023 21:19:34 +0300
+Subject: [PATCH 5/5] targets: Add virgl to wgl and d3d10 targets
+
+On the WGL target virgl is added like other drivers.
+dxgi_framebuffer.cpp is introduced to implement wgl display
+over DXGI swapchain to avoid cpu copy.
+
+On the d3d10 target:
+* Rename to d3d10umd from d3d10sw (as it's not only sw anymore)
+* If DRIVER_VIRGL is defined we use virgl to create display
+* Follow naming defined in gallium-d3d10-dll-name
+---
+ meson.build                                  |  12 +-
+ src/gallium/targets/d3d10umd/d3d10_gdi.c     |  13 +-
+ src/gallium/targets/d3d10umd/meson.build     |   6 +-
+ src/gallium/targets/wgl/dxgi_framebuffer.cpp | 292 +++++++++++++++++++
+ src/gallium/targets/wgl/meson.build          |   4 +-
+ src/gallium/targets/wgl/wgl.c                |  33 +++
+ 6 files changed, 351 insertions(+), 9 deletions(-)
+ create mode 100644 src/gallium/targets/wgl/dxgi_framebuffer.cpp
+
+diff --git a/meson.build b/meson.build
+index 99a771c737d..1b1f5b8aba0 100644
+--- a/meson.build
++++ b/meson.build
+@@ -782,12 +782,20 @@ if with_gallium_st_nine
+     error('Using nine with wine requires dri3')
+   endif
+ endif
++
+ with_gallium_st_d3d10umd =  get_option('gallium-d3d10umd')
+ if with_gallium_st_d3d10umd
+-  if not with_gallium_swrast
+-    error('The d3d10umd state tracker requires gallium softpipe/llvmpipe.')
++  if not [
++           with_gallium_swrast,
++           with_gallium_virgl,
++         ].contains(true)
++    error('The d3d10umd state tracker requires gallium softpipe/llvmpipe or virgl.')
++  endif
++  if with_gallium_softpipe and with_gallium_virgl
++    warning('The d3d10umd state trackes is built with both softpipe/llvmpipe and virgl, only virgl will be used.')
+   endif
+ endif
++
+ _power8 = get_option('power8')
+ if _power8.allowed()
+   if host_machine.cpu_family() == 'ppc64' and host_machine.endian() == 'little'
+diff --git a/src/gallium/targets/d3d10umd/d3d10_gdi.c b/src/gallium/targets/d3d10umd/d3d10_gdi.c
+index 14f1458ba53..b8ab9f5d70a 100644
+--- a/src/gallium/targets/d3d10umd/d3d10_gdi.c
++++ b/src/gallium/targets/d3d10umd/d3d10_gdi.c
+@@ -27,17 +27,19 @@
+  **************************************************************************/
+ 
+ 
++#include "gdikmt/gdikmt.h"
+ #include "util/u_debug.h"
+ #include "target-helpers/inline_debug_helper.h"
+ #include "llvmpipe/lp_public.h"
+ #include "softpipe/sp_public.h"
+ #include "sw/gdi/gdi_sw_winsys.h"
++#include "virgl/gdi/virgl_gdi_public.h"
+ 
+ #include "winddk_compat.h"
+ #include <d3dkmthk.h>
+ 
+ extern struct pipe_screen *
+-d3d10_create_screen(void);
++d3d10_create_screen(struct gdikmt_device* device);
+ 
+ HDC d3d10_gdi_acquire_hdc(void *winsys_drawable_handle) {
+    D3DKMT_PRESENT *pPresentInfo = (D3DKMT_PRESENT *)winsys_drawable_handle;
+@@ -54,13 +56,18 @@ void d3d10_gdi_release_hdc(void *winsys_drawable_handle, HDC hDC) {
+ }
+ 
+ struct pipe_screen *
+-d3d10_create_screen(void)
++d3d10_create_screen(struct gdikmt_device* device)
+ {
+    const char *default_driver;
+    const char *driver;
+    struct pipe_screen *screen = NULL;
+    struct sw_winsys *winsys;
+ 
++#ifdef GALLIUM_VIRGL
++   return virgl_gdi_screen_create(device);
++#endif
++
++
+    winsys = gdi_create_sw_winsys(d3d10_gdi_acquire_hdc, d3d10_gdi_release_hdc);
+    if(!winsys)
+       goto no_winsys;
+@@ -81,9 +88,11 @@ d3d10_create_screen(void)
+    (void)driver;
+ #endif
+ 
++#ifdef GALLIUM_SOFTPIPE
+    if (screen == NULL) {
+       screen = softpipe_create_screen( winsys );
+    }
++#endif
+ 
+    if (screen == NULL)
+       goto no_screen;
+diff --git a/src/gallium/targets/d3d10umd/meson.build b/src/gallium/targets/d3d10umd/meson.build
+index ab1cf053620..686e5f975f8 100644
+--- a/src/gallium/targets/d3d10umd/meson.build
++++ b/src/gallium/targets/d3d10umd/meson.build
+@@ -15,14 +15,14 @@ libgallium_d3d10 = shared_library(
+   ['d3d10_gdi.c'],
+   vs_module_defs : libgallium_d3d10_def,
+   include_directories : [
+-    inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_d3d10umd, inc_gallium_winsys, inc_gallium_winsys_sw, inc_gallium_drivers, inc_winddk
++    inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux, inc_d3d10umd, inc_gallium_winsys, inc_gallium_winsys_sw, inc_gallium_drivers, inc_winddk
+   ],
+   link_whole : [libd3d10umd],
+   link_with : [
+-    libgallium, libwsgdi
++    libgallium, libgalliumvl, libwsgdi
+   ],
+   dependencies : [
+-    dep_ws2_32, idep_nir, driver_swrast, idep_mesautil
++    dep_ws2_32, idep_nir, driver_swrast, driver_virgl, idep_mesautil
+   ],
+   name_prefix: '',
+   install : true,
+diff --git a/src/gallium/targets/wgl/dxgi_framebuffer.cpp b/src/gallium/targets/wgl/dxgi_framebuffer.cpp
+new file mode 100644
+index 00000000000..7a69eabd503
+--- /dev/null
++++ b/src/gallium/targets/wgl/dxgi_framebuffer.cpp
+@@ -0,0 +1,292 @@
++/*
++ * Copyright © Microsoft Corporation
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice (including the next
++ * paragraph) shall be included in all copies or substantial portions of the
++ * Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++/* This file provides driver-agnoistic way to display wgl window over dxgi swapchain. */
++
++#include "pipe/p_screen.h"
++#include "pipe/p_state.h"
++#include "util/format/u_formats.h"
++#include "util/u_debug.h"
++#include "util/u_inlines.h"
++#include "util/u_memory.h"
++
++#include "stw_device.h"
++#include "stw_pixelformat.h"
++#include "stw_winsys.h"
++
++#include "frontend/winsys_handle.h"
++
++#include <d3d11.h>
++#include <dxgi.h>
++#include <dxgiformat.h>
++#include <libloaderapi.h>
++#include <string.h>
++#include <winerror.h>
++#include <dxgi1_4.h>
++
++#include <wrl/client.h>
++
++using Microsoft::WRL::ComPtr;
++
++#define NUM_BUFFERS 2
++
++struct wgl_dxgi_framebuffer {
++   struct stw_winsys_framebuffer base;
++
++   struct pipe_screen *screen;
++   enum pipe_format pformat;
++   HWND window;
++
++   HINSTANCE d3d11;
++   ComPtr<ID3D11Device> device;
++   ComPtr<ID3D11DeviceContext> context;
++   ComPtr<IDXGISwapChain> swapchain;
++
++   D3D11_TEXTURE2D_DESC textureDesc;
++   ComPtr<ID3D11Texture2D> d3d11_textures[NUM_BUFFERS];
++   struct pipe_resource *textures[NUM_BUFFERS];
++};
++
++static struct wgl_dxgi_framebuffer *
++wgl_dxgi_framebuffer(struct stw_winsys_framebuffer *fb)
++{
++   return (struct wgl_dxgi_framebuffer *)fb;
++}
++
++static void
++wgl_dxgi_framebuffer_destroy(struct stw_winsys_framebuffer *_fb,
++                              struct pipe_context *ctx)
++{
++   struct wgl_dxgi_framebuffer *fb = wgl_dxgi_framebuffer(_fb);
++   struct pipe_fence_handle *fence = NULL;
++
++   if (ctx) {
++      /* Ensure all resources are flushed */
++      ctx->flush(ctx, &fence, PIPE_FLUSH_HINT_FINISH);
++      if (fence) {
++         ctx->screen->fence_finish(ctx->screen, ctx, fence,
++                                   OS_TIMEOUT_INFINITE);
++         ctx->screen->fence_reference(ctx->screen, &fence, NULL);
++      }
++   }
++
++   for (int i = 0; i < NUM_BUFFERS; ++i) {
++      if (fb->textures[i]) {
++         pipe_resource_reference(&fb->textures[i], NULL);
++      }
++      if (fb->d3d11_textures[i]) {
++         fb->d3d11_textures[i].Reset();
++      }
++   }
++
++   fb->context.Reset();
++   fb->swapchain.Reset();
++   fb->device.Reset();
++
++   FreeLibrary(fb->d3d11);
++
++   free(fb);
++}
++
++static const GUID IID_D3D11Texture2D = {
++   0x6f15aaf2, 0xd208, 0x4e89, {0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c}};
++
++DXGI_FORMAT
++DxgiFormatFromPipe(enum pipe_format format)
++{
++   switch (format) {
++   case PIPE_FORMAT_R8G8B8A8_UNORM:
++   case PIPE_FORMAT_R8G8B8X8_UNORM:
++      return DXGI_FORMAT_R8G8B8A8_UNORM;
++
++   case PIPE_FORMAT_B8G8R8A8_UNORM:
++   case PIPE_FORMAT_B8G8R8X8_UNORM:
++      return DXGI_FORMAT_B8G8R8A8_UNORM;
++
++   default:
++      _debug_printf("Unsupported dxgi framebuffer format %d\n", format);
++      return DXGI_FORMAT_R8G8B8A8_UNORM;
++   }
++}
++
++static void
++wgl_dxgi_framebuffer_resize(struct stw_winsys_framebuffer *_fb,
++                             struct pipe_context *ctx,
++                             struct pipe_resource *templ)
++{
++   struct wgl_dxgi_framebuffer *fb = wgl_dxgi_framebuffer(_fb);
++   // struct dxgi_dxgi_screen *screen = dxgi_dxgi_screen(framebuffer->screen);
++
++   DXGI_SWAP_CHAIN_DESC desc;
++   ZeroMemory(&desc, sizeof desc);
++   desc.BufferCount = NUM_BUFFERS;
++   desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
++   desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
++   desc.BufferDesc.Format = DxgiFormatFromPipe(templ->format);
++   desc.BufferDesc.Width = templ->width0;
++   desc.BufferDesc.Height = templ->height0;
++   desc.SampleDesc.Count = 1;
++   desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
++   desc.Windowed = true;
++   desc.OutputWindow = fb->window;
++
++   static const D3D_FEATURE_LEVEL FeatureLevels[] = {D3D_FEATURE_LEVEL_10_0};
++
++   fb->pformat = templ->format;
++
++   if (!fb->swapchain) {
++      PFN_D3D11_CREATE_DEVICE_AND_SWAP_CHAIN createDeviceAndSwapchain =
++         (PFN_D3D11_CREATE_DEVICE_AND_SWAP_CHAIN)GetProcAddress(
++            fb->d3d11, "D3D11CreateDeviceAndSwapChain");
++
++      HRESULT hr = createDeviceAndSwapchain(
++         NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, D3D11_CREATE_DEVICE_DEBUG,
++         FeatureLevels, _countof(FeatureLevels), D3D11_SDK_VERSION, &desc,
++         &fb->swapchain, &fb->device, NULL, &fb->context);
++
++      if (FAILED(hr)) {
++         _debug_printf("Failed to create framebuffer dxgi device: %x\n", hr);
++         return;
++      }
++   } else {
++      if (FAILED(fb->swapchain->ResizeBuffers(
++             2, desc.BufferDesc.Width, desc.BufferDesc.Height,
++             desc.BufferDesc.Format, desc.Flags))) {
++         debug_printf("Failed to resize dxgi swapchain\n");
++      }
++   }
++
++   for (int i = 0; i < NUM_BUFFERS; ++i) {
++      pipe_resource_reference(&fb->textures[i], NULL);
++      if (fb->d3d11_textures[i]) {
++         fb->d3d11_textures[i].Reset();
++      }
++   }
++
++   ComPtr<ID3D11Texture2D> swapchainBuffer;
++   fb->swapchain->GetBuffer(0, IID_D3D11Texture2D, &swapchainBuffer);
++   swapchainBuffer->GetDesc(&fb->textureDesc);
++   fb->textureDesc.MiscFlags |= D3D11_RESOURCE_MISC_SHARED;
++}
++
++static bool
++wgl_dxgi_framebuffer_present(struct stw_winsys_framebuffer *_fb, int interval,
++                              struct pipe_resource *res)
++{
++   struct wgl_dxgi_framebuffer *fb = wgl_dxgi_framebuffer(_fb);
++   if (!fb->swapchain) {
++      debug_printf("Cannot present; no swapchain\n");
++      return false;
++   }
++
++   ComPtr<ID3D11Texture2D> buffer;
++   fb->swapchain->GetBuffer(0, IID_D3D11Texture2D, &buffer);
++
++   // Find matching d3d11 texture
++   for (UINT i = 0; i < NUM_BUFFERS; i++) {
++      if (fb->textures[i] != res)
++         continue;
++
++      fb->context->CopyResource(buffer.Get(), fb->d3d11_textures[i].Get());
++   }
++
++   return S_OK == fb->swapchain->Present(
++                     0, interval < 1 ? DXGI_PRESENT_ALLOW_TEARING : 0);
++}
++
++static struct pipe_resource *
++wgl_dxgi_framebuffer_get_resource(struct stw_winsys_framebuffer *pframebuffer,
++                                   enum st_attachment_type statt)
++{
++   struct wgl_dxgi_framebuffer *fb = wgl_dxgi_framebuffer(pframebuffer);
++
++   if (!fb->swapchain)
++      return NULL;
++
++   UINT index = statt;
++   if (fb->textures[index]) {
++      pipe_reference(NULL, &fb->textures[index]->reference);
++      return fb->textures[index];
++   }
++
++   HRESULT hr = fb->device->CreateTexture2D(&fb->textureDesc, 0,
++                                            &fb->d3d11_textures[index]);
++   if (FAILED(hr)) {
++      _debug_printf("Failed to create d3d11 rendering resource\n");
++      return NULL;
++   }
++
++   ComPtr<IDXGIResource> idxgiRes;
++   fb->d3d11_textures[index].As(&idxgiRes);
++   HANDLE handle;
++   hr = idxgiRes->GetSharedHandle(&handle);
++   if (FAILED(hr) || handle == 0) {
++      _debug_printf("Failed to acquire d3d11 handle resource\n");
++      return NULL;
++   }
++
++   struct winsys_handle whandle;
++   memset(&whandle, 0, sizeof(whandle));
++   whandle.type = WINSYS_HANDLE_TYPE_WIN32_HANDLE;
++   whandle.handle = handle;
++
++   struct pipe_resource *texture =
++      fb->screen->resource_from_handle(fb->screen, nullptr, &whandle, 0);
++   fb->textures[index] = texture;
++   return texture;
++}
++
++extern "C" {
++struct stw_winsys_framebuffer *
++wgl_create_dxgi_framebuffer(struct pipe_screen *screen, HWND hWnd,
++                             int iPixelFormat)
++{
++   const struct stw_pixelformat_info *pfi =
++      stw_pixelformat_get_info(iPixelFormat);
++   if (pfi->pfd.dwFlags & PFD_SUPPORT_GDI)
++      return NULL;
++
++   if (pfi->stvis.color_format != PIPE_FORMAT_B8G8R8A8_UNORM &&
++       pfi->stvis.color_format != PIPE_FORMAT_R8G8B8A8_UNORM &&
++       pfi->stvis.color_format != PIPE_FORMAT_B8G8R8X8_UNORM &&
++       pfi->stvis.color_format != PIPE_FORMAT_R8G8B8X8_UNORM &&
++       pfi->stvis.color_format != PIPE_FORMAT_R10G10B10A2_UNORM &&
++       pfi->stvis.color_format != PIPE_FORMAT_R16G16B16A16_FLOAT)
++      return NULL;
++
++   struct wgl_dxgi_framebuffer *fb = CALLOC_STRUCT(wgl_dxgi_framebuffer);
++   if (!fb)
++      return NULL;
++
++   fb->d3d11 = LoadLibraryA("d3d11.dll");
++
++   fb->window = hWnd;
++   fb->screen = screen;
++   fb->base.destroy = wgl_dxgi_framebuffer_destroy;
++   fb->base.resize = wgl_dxgi_framebuffer_resize;
++   fb->base.present = wgl_dxgi_framebuffer_present;
++   fb->base.get_resource = wgl_dxgi_framebuffer_get_resource;
++
++   return &fb->base;
++}
++}
+\ No newline at end of file
+diff --git a/src/gallium/targets/wgl/meson.build b/src/gallium/targets/wgl/meson.build
+index 15092916769..de50809823a 100644
+--- a/src/gallium/targets/wgl/meson.build
++++ b/src/gallium/targets/wgl/meson.build
+@@ -13,7 +13,7 @@ wgl_def = custom_target(
+ gallium_wgl_name = get_option('gallium-wgl-dll-name')
+ libgallium_wgl = shared_library(
+   gallium_wgl_name,
+-  ['wgl.c'],
++  ['wgl.c', 'dxgi_framebuffer.cpp'],
+   vs_module_defs : wgl_def,
+   include_directories : [
+     inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux, inc_wgl, inc_gallium_winsys, inc_gallium_winsys_sw, inc_gallium_drivers,
+@@ -24,7 +24,7 @@ libgallium_wgl = shared_library(
+   ],
+   dependencies : [
+     dep_ws2_32, idep_nir, idep_mesautil, driver_swrast,
+-    driver_d3d12, driver_zink, winsys_d3d12_wgl
++    driver_d3d12, driver_zink, driver_virgl, winsys_d3d12_wgl
+   ],
+   link_args : gallium_wgl_link_args,
+   name_prefix : '',
+diff --git a/src/gallium/targets/wgl/wgl.c b/src/gallium/targets/wgl/wgl.c
+index 75ec547cfd7..f11629ebcb5 100644
+--- a/src/gallium/targets/wgl/wgl.c
++++ b/src/gallium/targets/wgl/wgl.c
+@@ -63,6 +63,12 @@
+ #include "zink/zink_public.h"
+ #endif
+ 
++#ifdef GALLIUM_VIRGL
++#include "virgl/gdi/virgl_gdi_public.h"
++static bool use_virgl = false;
++#endif
++
++
+ #ifdef GALLIUM_LLVMPIPE
+ static bool use_llvmpipe = false;
+ #endif
+@@ -80,6 +86,13 @@ wgl_screen_create_by_name(HDC hDC, const char* driver, struct sw_winsys *winsys)
+ {
+    struct pipe_screen* screen = NULL;
+ 
++#ifdef GALLIUM_VIRGL
++   if (strcmp(driver, "virgl") == 0) {
++      screen = virgl_gdi_screen_create(gdikmt_create_from_hdc(hDC));
++      if (screen)
++         use_virgl = true;
++   }
++#endif
+ #ifdef GALLIUM_LLVMPIPE
+    if (strcmp(driver, "llvmpipe") == 0) {
+       screen = llvmpipe_create_screen(winsys);
+@@ -122,6 +135,9 @@ wgl_screen_create(HDC hDC)
+ 
+    const char *const drivers[] = {
+       debug_get_option("GALLIUM_DRIVER", ""),
++#ifdef GALLIUM_VIRGL
++      sw_only ? "" : "virgl",
++#endif
+ #ifdef GALLIUM_D3D12
+       sw_only ? "" : "d3d12",
+ #endif
+@@ -175,6 +191,13 @@ wgl_present(struct pipe_screen *screen,
+    struct sw_displaytarget *dt = NULL;
+ #endif
+ 
++#ifdef GALLIUM_VIRGL
++   if (use_virgl) {
++      screen->flush_frontbuffer(screen, ctx, res, 0, 0, hDC, 0, NULL);
++      return;
++   }
++#endif
++
+ #ifdef GALLIUM_LLVMPIPE
+    if (use_llvmpipe) {
+       winsys = llvmpipe_screen(screen)->winsys;
+@@ -221,11 +244,21 @@ wgl_get_adapter_luid(struct pipe_screen* screen,
+ #endif
+ 
+ 
++
++struct stw_winsys_framebuffer *
++wgl_create_dxgi_framebuffer(struct pipe_screen *screen, HWND hWnd,
++                             int iPixelFormat);
++
+ static struct stw_winsys_framebuffer *
+ wgl_create_framebuffer(struct pipe_screen *screen,
+                        HWND hWnd,
+                        int iPixelFormat)
+ {
++#ifdef GALLIUM_VIRGL 
++   if(use_virgl) {
++      return wgl_create_dxgi_framebuffer(screen, hWnd, iPixelFormat);
++   }
++#endif
+ #ifdef GALLIUM_D3D12
+    if (use_d3d12)
+       return d3d12_wgl_create_framebuffer(screen, hWnd, iPixelFormat);
+-- 
+2.47.3
+

@@ -1,0 +1,71 @@
+Windows 7 (WDK 7.1 headers): Mesa's D3DKMT stubs and the d3d10 GDI target
+
+Building the d3d10umd frontend against WDK 7.1's DDI headers (docs/windows/mesa-win7.md):
+- D3DKMTPresent takes a const pointer there;
+- the query types XBOX and PHYSICALADAPTER* and D3DKMTSetVidPnSourceOwner1 are Windows 8 and
+  later: left out when the headers are at the Windows 7 interface version;
+- d3d10_gdi.c's two GDI helpers are only used in that file: static, for -Wmissing-prototypes.
+
+diff -ru a/src/gallium/frontends/d3d10umd/D3DKMT.cpp b/src/gallium/frontends/d3d10umd/D3DKMT.cpp
+--- a/src/gallium/frontends/d3d10umd/D3DKMT.cpp
++++ b/src/gallium/frontends/d3d10umd/D3DKMT.cpp
+@@ -244,7 +244,7 @@
+ 
+ 
+ EXTERN_C NTSTATUS APIENTRY
+-D3DKMTPresent(D3DKMT_PRESENT *pData)
++D3DKMTPresent(CONST D3DKMT_PRESENT *pData)
+ {
+    LOG_UNSUPPORTED_ENTRYPOINT();
+    return STATUS_NOT_IMPLEMENTED;
+@@ -317,6 +317,7 @@
+          *pResult = KMT_DRIVERVERSION_WDDM_1_0;
+          return STATUS_SUCCESS;
+       }
++#if DXGKDDI_INTERFACE_VERSION > DXGKDDI_INTERFACE_VERSION_WIN7
+    case KMTQAITYPE_XBOX:
+       {
+          BOOL *pResult = (BOOL *)pData->pPrivateDriverData;
+@@ -332,6 +333,7 @@
+    case KMTQAITYPE_PHYSICALADAPTERDEVICEIDS:
+       ZeroMemory(pData->pPrivateDriverData, pData->PrivateDriverDataSize);
+       return STATUS_SUCCESS;
++#endif
+    default:
+       DebugPrintf("%s: unsupported query type (Type=%u, PrivateDriverDataSize=%u)\n",
+                   __func__, pData->Type, pData->PrivateDriverDataSize);
+@@ -408,12 +410,14 @@
+ }
+ 
+ 
++#if DXGKDDI_INTERFACE_VERSION > DXGKDDI_INTERFACE_VERSION_WIN7
+ EXTERN_C NTSTATUS APIENTRY
+ D3DKMTSetVidPnSourceOwner1(CONST D3DKMT_SETVIDPNSOURCEOWNER1 *pData)
+ {
+    LOG_UNSUPPORTED_ENTRYPOINT();
+    return STATUS_NOT_IMPLEMENTED;
+ }
++#endif
+ 
+ 
+ EXTERN_C NTSTATUS APIENTRY
+diff -ru a/src/gallium/targets/d3d10umd/d3d10_gdi.c b/src/gallium/targets/d3d10umd/d3d10_gdi.c
+--- a/src/gallium/targets/d3d10umd/d3d10_gdi.c
++++ b/src/gallium/targets/d3d10umd/d3d10_gdi.c
+@@ -39,14 +39,14 @@
+ extern struct pipe_screen *
+ d3d10_create_screen(void);
+ 
+-HDC d3d10_gdi_acquire_hdc(void *winsys_drawable_handle) {
++static HDC d3d10_gdi_acquire_hdc(void *winsys_drawable_handle) {
+    D3DKMT_PRESENT *pPresentInfo = (D3DKMT_PRESENT *)winsys_drawable_handle;
+ 
+    HWND hWnd = pPresentInfo->hWindow;
+    return GetDC(hWnd);
+ }
+ 
+-void d3d10_gdi_release_hdc(void *winsys_drawable_handle, HDC hDC) {
++static void d3d10_gdi_release_hdc(void *winsys_drawable_handle, HDC hDC) {
+    D3DKMT_PRESENT *pPresentInfo = (D3DKMT_PRESENT *)winsys_drawable_handle;
+ 
+    HWND hWnd = pPresentInfo->hWindow;

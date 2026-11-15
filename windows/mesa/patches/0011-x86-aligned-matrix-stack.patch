@@ -1,0 +1,49 @@
+32-bit Windows: allocate the GL matrix stack 16-byte aligned
+
+GLmatrix has alignas(16) members, and clang stores to them with aligned SSE moves. The matrix
+stacks came from calloc/realloc, which msvcrt.dll on 32-bit Windows aligns to 8 bytes only, so
+the first glMatrixMode-era setup crashed in _math_matrix_ctr (movaps, access violation) in
+libgallium_wgl.dll on Windows 7 (docs/windows/mesa-win7.md). align_calloc/align_realloc/
+align_free from util/u_memory.h instead. 64-bit Windows aligns to 16 already.
+
+diff -ru a/src/mesa/main/matrix.c b/src/mesa/main/matrix.c
+--- a/src/mesa/main/matrix.c
++++ b/src/mesa/main/matrix.c
+@@ -44,6 +44,7 @@
+ #include "mtypes.h"
+ #include "math/m_matrix.h"
+ #include "util/bitscan.h"
++#include "util/u_memory.h"
+ #include "api_exec_decl.h"
+ 
+ 
+@@ -311,8 +312,9 @@
+    if (stack->Depth + 1 >= stack->StackSize) {
+       unsigned new_stack_size = stack->StackSize * 2;
+       unsigned i;
+-      GLmatrix *new_stack = realloc(stack->Stack,
+-                                    sizeof(*new_stack) * new_stack_size);
++      GLmatrix *new_stack = align_realloc(stack->Stack,
++                                          sizeof(*new_stack) * stack->StackSize,
++                                          sizeof(*new_stack) * new_stack_size, 16);
+ 
+       if (!new_stack) {
+          _mesa_error(ctx, GL_OUT_OF_MEMORY, "%s", func);
+@@ -1008,7 +1010,7 @@
+    stack->MaxDepth = maxDepth;
+    stack->DirtyFlag = dirtyFlag;
+    /* The stack will be dynamically resized at glPushMatrix() time */
+-   stack->Stack = calloc(1, sizeof(GLmatrix));
++   stack->Stack = align_calloc(sizeof(GLmatrix), 16);
+    stack->StackSize = 1;
+    _math_matrix_ctr(&stack->Stack[0]);
+    stack->Top = stack->Stack;
+@@ -1023,7 +1025,7 @@
+ static void
+ free_matrix_stack( struct gl_matrix_stack *stack )
+ {
+-   free(stack->Stack);
++   align_free(stack->Stack);
+    stack->Stack = stack->Top = NULL;
+    stack->StackSize = 0;
+ }

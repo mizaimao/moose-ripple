@@ -1,0 +1,102 @@
+virgl: clear a surface that is not bound on hosts without the command for it
+
+Direct3D clears render target and depth views whether they are bound or not. The virgl
+driver has a host command for that, used when the host's feature level is 21 or more. On an
+older host (virglrenderer 0.10) clearing a render target did nothing, and the depth-stencil
+entry was not set at all, so the Direct3D frontend called a null pointer. Both now bind the
+surface, clear, and bind what was bound before.
+
+diff -ru a/src/gallium/drivers/virgl/virgl_context.c b/src/gallium/drivers/virgl/virgl_context.c
+--- a/src/gallium/drivers/virgl/virgl_context.c
++++ b/src/gallium/drivers/virgl/virgl_context.c
+@@ -37,6 +37,7 @@
+ #include "util/format/u_format.h"
+ #include "indices/u_primconvert.h"
+ #include "util/u_draw.h"
++#include "util/u_framebuffer.h"
+ #include "util/u_inlines.h"
+ #include "util/u_memory.h"
+ #include "util/u_prim.h"
+@@ -955,16 +956,63 @@
+    virgl_resource_dirty(virgl_resource(dst->texture), dst->u.tex.level);
+ }
+ 
+-static void virgl_clear_render_target_stub(struct pipe_context *ctx,
++/* Clearing a surface that is not bound, on a host without the command for it: bind the
++ * surface as the only buffer, clear, and bind what was bound before. The whole surface is
++ * cleared, which is what the Direct3D frontend asks for.
++ */
++static void virgl_clear_surface_by_binding(struct pipe_context *ctx,
+                                            struct pipe_surface *dst,
++                                           unsigned buffers,
+                                            const union pipe_color_union *color,
+-                                           unsigned dstx, unsigned dsty,
+-                                           unsigned width, unsigned height,
+-                                           bool render_condition_enabled)
++                                           double depth, unsigned stencil)
+ {
+-   if (virgl_debug & VIRGL_DEBUG_VERBOSE)
+-         debug_printf("VIRGL: clear depth stencil unsupported.\n");
+-   return;
++   struct virgl_context *vctx = virgl_context(ctx);
++   struct pipe_framebuffer_state saved, fb;
++
++   memset(&saved, 0, sizeof(saved));
++   util_copy_framebuffer_state(&saved, &vctx->framebuffer);
++
++   memset(&fb, 0, sizeof(fb));
++   fb.width = dst->width;
++   fb.height = dst->height;
++   if (buffers & PIPE_CLEAR_COLOR) {
++      fb.nr_cbufs = 1;
++      fb.cbufs[0] = dst;
++   } else {
++      fb.zsbuf = dst;
++   }
++   ctx->set_framebuffer_state(ctx, &fb);
++   ctx->clear(ctx, buffers, NULL, color, depth, stencil);
++   ctx->set_framebuffer_state(ctx, &saved);
++   util_unreference_framebuffer_state(&saved);
++
++   virgl_resource_dirty(virgl_resource(dst->texture), dst->u.tex.level);
++}
++
++static void virgl_clear_render_target_by_binding(struct pipe_context *ctx,
++                                                 struct pipe_surface *dst,
++                                                 const union pipe_color_union *color,
++                                                 unsigned dstx, unsigned dsty,
++                                                 unsigned width, unsigned height,
++                                                 bool render_condition_enabled)
++{
++   virgl_clear_surface_by_binding(ctx, dst, PIPE_CLEAR_COLOR0, color, 0.0, 0);
++}
++
++static void virgl_clear_depth_stencil_by_binding(struct pipe_context *ctx,
++                                                 struct pipe_surface *dst,
++                                                 unsigned clear_flags,
++                                                 double depth,
++                                                 unsigned stencil,
++                                                 unsigned dstx, unsigned dsty,
++                                                 unsigned width, unsigned height,
++                                                 bool render_condition_enabled)
++{
++   /* the encoder reads the colour whatever is cleared */
++   static const union pipe_color_union none;
++
++   virgl_clear_surface_by_binding(ctx, dst, clear_flags & PIPE_CLEAR_DEPTHSTENCIL, &none,
++                                  depth, stencil);
+ }
+ 
+ static void virgl_clear_texture(struct pipe_context *ctx,
+@@ -1749,8 +1797,9 @@
+       vctx->base.clear_render_target = virgl_clear_render_target;
+       vctx->base.clear_depth_stencil = virgl_clear_depth_stencil;
+    } else {
+-      // Stub is required by VL backend
+-      vctx->base.clear_render_target = virgl_clear_render_target_stub;
++      /* An older host: no command to clear a surface that is not bound */
++      vctx->base.clear_render_target = virgl_clear_render_target_by_binding;
++      vctx->base.clear_depth_stencil = virgl_clear_depth_stencil_by_binding;
+    }
+    vctx->base.clear_texture = virgl_clear_texture;
+    vctx->base.draw_vbo = virgl_draw_vbo;
