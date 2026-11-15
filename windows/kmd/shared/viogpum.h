@@ -89,7 +89,13 @@ typedef struct _VIOGPU_CAPSET_REQ
     ULONG CapsetId;
     ULONG Version;
     ULONG Size;
-    UCHAR *Capset;
+    // The caller's buffer, eight bytes in every build: a 32-bit program and a 64-bit kernel
+    // driver have to agree on where it is and on how long the packet is. A 32-bit caller
+    // clears the packet first, so its upper half is zero. (moose-ripple)
+    union {
+        UCHAR *Capset;
+        ULONGLONG Capset64;
+    };
 } VIOGPU_CAPSET_REQ;
 #pragma pack()
 
