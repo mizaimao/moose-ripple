@@ -269,3 +269,37 @@ Constant buffer 45; video playback 143 frames with a decode time of 0.66 s. Noth
 done for speed yet: the Direct3D 9 part still creates and destroys its state objects for
 every draw, and both parts seem to stop near 80 to 96 frames a second whatever is drawn,
 which points at a wait per frame. That is for the performance pass.
+
+### DirectDraw, DirectX 7 and 32-bit programs (2026-11-15)
+
+DirectX's own diagnostics (`dxdiag`) said "Direct3D: Not Available" while Direct3D 9 and 10
+both ran. Three things were behind it:
+
+1. **dxdiag is a 32-bit program, and so are most programs and games for Windows 7.** A 32-bit
+   program needs a 32-bit build of the user-mode driver, in `SysWOW64`, named in the driver
+   key as `UserModeDriverNameWow`. The package had none. `ARCH=x86 windows/mesa/build-win7.sh`
+   builds it; the INF now installs it and names it.
+2. **The 32-bit driver knew nothing of the host.** The request for the host's capability set
+   carries a pointer, so its packet was four bytes shorter in a 32-bit program and the 64-bit
+   kernel driver refused it. With no capabilities every primitive counted as unsupported, and
+   the first draw converted primitives in circles until the stack was full. The field is
+   eight bytes in every build now (patch 0026 and `windows/kmd/shared/viogpum.h`).
+3. **DirectDraw asks the Direct3D 9 driver older questions** (it opens the driver with
+   interface version 7 and asks for the DirectX 3 and DirectX 7 capability blocks). The
+   driver left the DirectX 7 one unanswered, and DirectDraw then runs on software without a
+   word. The answer, and the DirectX 7-era drawing that programs then expect, come from
+   vmlab-win3d (<https://github.com/VMLabDev/vmlab-win3d>, MIT, commit b7e5451): its patches
+   0006 (the Direct3D 9 files' part), 0012, 0013, 0014, 0024, 0035 and 0040 to 0044, merged
+   into our copies of the Direct3D 9 files and adapted to Mesa 24.3 the same way as the files
+   themselves. They bring: the DirectX 7 and 8 capability blocks, write-only locks that keep
+   the surface's contents, DirectDraw surfaces that can be presented, a vertex shader for
+   pre-transformed vertices, colour-key and mirror blits on the GPU, fixed-function fog and
+   points, bump and luminance formats.
+
+After these, in the test VM: 32-bit DirectDraw reports hardware capabilities and lists the
+"Direct3D HAL" and "Direct3D T&L HAL" devices of DirectX 7 (`tools/win7-hello/ddprobe.c`);
+the 32-bit build of `d3d9test` draws and reads back right; dxdiag shows DDI version 10 with
+DirectDraw, Direct3D and AGP texture acceleration enabled and "No problems found"; the Windows
+Experience Index still runs to the end (5.1 on this run).
+
+Not tried yet: an actual DirectX 7 or 8 program. Nothing here has drawn through those paths.
