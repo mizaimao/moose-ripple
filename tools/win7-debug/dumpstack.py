@@ -2,12 +2,15 @@
 addresses into one module and named from that module's own symbol table.
 
     dumpstack.py CRASH.dmp DRIVER.dll [MORE.dll ...]
+    dumpstack.py --threads HANG.dmp DRIVER.dll [MORE.dll ...]
 
 For a user-mode driver that crashes inside a Windows program (docs/windows/test-vms.md,
 "Crash dumps"): Windows writes the dump when asked to (the LocalDumps registry key), and the
 DLLs built here with llvm-mingw keep their symbol table, which `llvm-nm` prints. No debugger is
 needed. Every stack word that points into a named module is listed, so the list holds stale
 words too: read it as the candidates for the call chain, innermost first.
+With --threads, for a dump of a program that hangs or waits (tools/win7-hello/dumpproc.c
+writes one): every thread, where it is and the modules its stack leads through.
 Needs llvm-nm on the PATH.
 """
 import bisect
@@ -55,8 +58,9 @@ def symbols(path):
 
 
 def main():
-    d = open(sys.argv[1], "rb").read()
-    named = {os.path.basename(p).lower(): symbols(p) for p in sys.argv[2:] if not p.startswith("--")}
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    d = open(args[0], "rb").read()
+    named = {os.path.basename(p).lower(): symbols(p) for p in args[1:]}
     s = streams(d)
     mods = modules(d, s[4][0])
 
@@ -71,6 +75,30 @@ def main():
                         return "%s!%s+0x%x" % (name, table[i][1], off - table[i][0]), True
                 return "%s+0x%x" % (name, off), False
         return None, False
+
+    if "--threads" in sys.argv:
+        at = s[3][0]
+        (n,) = struct.unpack_from("<I", d, at)
+        for i in range(n):
+            tid, _susp, _pc, _pr, _teb, start, size, rva, _cs, ctx = struct.unpack_from(
+                "<IIIIQQIIII", d, at + 4 + 48 * i)
+            rsp, rip = struct.unpack_from("<Q", d, ctx + 0x98)[0], struct.unpack_from("<Q", d, ctx + 0xF8)[0]
+            print("thread %d at %s" % (tid, where(rip)[0] or hex(rip)))
+            stack = d[rva:rva + size]
+            last, shown = None, 0
+            for off in range(max(0, rsp - start) & ~7, len(stack) - 7, 8):
+                (word,) = struct.unpack_from("<Q", stack, off)
+                name, known = where(word)
+                if not name:
+                    continue
+                module = name.split("!")[0].split("+")[0]
+                if known or module != last:
+                    print("  [rsp+0x%04x] %s" % (start + off - rsp, name))
+                    shown += 1
+                last = module
+                if shown >= 40:
+                    break
+        return
 
     # The exception: which thread, which code, and the registers at that moment
     at = s[6][0]
