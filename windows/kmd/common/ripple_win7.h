@@ -24,3 +24,12 @@ typedef struct _DXGK_DISPLAY_INFORMATION
 /* Entries in a context's allocation list and patch location list. The Windows 10 driver took
  * a constant of newer kits for both; Windows 7's kit has none, so the size is named here. */
 #define RIPPLE_ALLOCATION_LIST_SIZE 256
+
+/*
+ * DXGK_VIDMMCAPS.SectionBackedPrimary: the primary surface is kept in a memory section that
+ * Windows can map for drawing with the CPU, so it need not sit in a segment the CPU can reach.
+ * Windows 7's memory manager knows the bit (bit 3 of the capability value; without it a primary
+ * may only use CPU-visible segments and ours is refused), but the Windows 7 kit's header
+ * does not name it yet.
+ */
+#define RIPPLE_VIDMMCAPS_SECTION_BACKED_PRIMARY 0x8

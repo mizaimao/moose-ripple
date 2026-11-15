@@ -516,6 +516,9 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 // refuses the adapter with any other, zero included.
                 pDriverCaps->WDDMVersion = DXGKDDI_WDDMv1;
 
+                // The only segment is an aperture the CPU cannot reach; see ripple_win7.h
+                pDriverCaps->MemoryManagementCaps.Value |= RIPPLE_VIDMMCAPS_SECTION_BACKED_PRIMARY;
+
                 // Disable pointer on viogpu3d for now
                 // if (IsPointerEnabled()) {
                 //    pDriverCaps->MaxPointerWidth = POINTER_SIZE;
