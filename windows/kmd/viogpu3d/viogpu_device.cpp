@@ -176,6 +176,9 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
 
     if (pPresent->Flags.Flip)
     {
+#ifdef RIPPLE_TRACE_PRESENT
+        DbgPrint(TRACE_LEVEL_FATAL, ("P flip\n"));
+#endif
         // Nothing to run for a flip. The private data may still hold the pointer of an earlier
         // use of this buffer, which SubmitCommand would take for a command.
         if (pPresent->pDmaBufferPrivateData)
@@ -244,6 +247,26 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
             pPresent->pPatchLocationListOut += 1;
         }
     }
+
+#ifdef RIPPLE_TRACE_PRESENT
+    // One line for every copy to the screen (build.sh, TRACE_PRESENT=1): which surfaces, which
+    // rectangles. For finding out what Windows presents when the picture on the host is wrong.
+    DbgPrint(TRACE_LEVEL_FATAL,
+             ("P %s%s src %u%s dst %u%s S %d,%d,%d,%d D %d,%d,%d,%d n %u",
+              pPresent->Flags.Blt ? "blt" : "", pPresent->Flags.ColorFill ? "fill" : "",
+              src ? src->GetId() : 0, src && src->IsCoherent() ? "c" : "", dst ? dst->GetId() : 0,
+              dst && dst->IsCoherent() ? "c" : "",
+              pPresent->SrcRect.left, pPresent->SrcRect.top, pPresent->SrcRect.right, pPresent->SrcRect.bottom,
+              pPresent->DstRect.left, pPresent->DstRect.top, pPresent->DstRect.right, pPresent->DstRect.bottom,
+              pPresent->SubRectCnt));
+    for (UINT i = 0; i < pPresent->SubRectCnt && i < 6 && pPresent->pDstSubRects; i++)
+    {
+        DbgPrint(TRACE_LEVEL_FATAL,
+                 (" [%d,%d,%d,%d]", pPresent->pDstSubRects[i].left, pPresent->pDstSubRects[i].top,
+                  pPresent->pDstSubRects[i].right, pPresent->pDstSubRects[i].bottom));
+    }
+    DbgPrint(TRACE_LEVEL_FATAL, ("\n"));
+#endif
 
     if (pPresent->Flags.Blt)
     {
