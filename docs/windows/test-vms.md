@@ -153,3 +153,31 @@ HTTP server that writes the request body to a file, run from `REPO/.venv`):
     powershell -command "$w=New-Object Net.WebClient; $r=$w.UploadData('http://BUILD_IP:8766/NAME','PUT',[IO.File]::ReadAllBytes('C:\path\NAME'))"
 
 and `certutil -hashfile C:\path\NAME SHA256` in the guest checks the copy.
+
+## Reference pictures on the GeForce 9600 GT
+
+For the side-by-side pictures of a milestone (first used for Aero, 2026-11-15). VM 220's disk
+still has NVIDIA's driver from the machine it was cloned from, so the reference is VM 220
+itself, started from its snapshot with the card in place of the virtio display. The card and a
+virgl VM never run at the same time, and the host has hung once when a card VM started shortly
+after a virgl VM stopped: stop everything, restart the host first, and keep its kernel log
+streaming to another machine while the card VM starts.
+
+    qm stop 220; reboot                         # the Proxmox host, with no VM running
+    qm rollback 220 pre-kmd
+    qm set 220 --hostpci0 0000:01:00,pcie=1,x-vga=1,romfile=9600gt-tpu.bin --delete vga
+    qm start 220
+
+`qm set` changes only the current settings; the snapshots keep theirs, so `qm rollback 220
+pre-kmd` afterwards brings the virtio display back. QEMU has no picture of this guest (no
+`screendump`, no VNC); keys and the pointer still go in through QMP. Pictures are taken inside
+Windows with `tools/win7-debug/shot.ps1`, which sends them to the receiver described above:
+Win+R, `cmd`, then in `C:\rb\pkg` (fetch `shot.ps1` and `setres.ps1` there with bitsadmin):
+
+    powershell -ExecutionPolicy Bypass -File setres.ps1 1024 768
+    start /min powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File shot.ps1 http://BUILD_IP:8766 desktop 12
+
+Several of these with growing delays, then `exit`, and the scenes are set up from outside in
+the gaps (Win+E for a window, the pointer on a taskbar button for a thumbnail, Ctrl+Win+Tab
+for Flip 3D, the pointer on the right end of the taskbar for desktop peek). Shut Windows down
+from the Run box (`shutdown /s /t 0`), roll back, and run a load test to return to our driver.
