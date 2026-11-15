@@ -65,3 +65,91 @@ Windows 7 Ultimate x64 SP1 (6.1.7601), DirectX 11.
 Screenshots (dxdiag, Device Manager, Personalization, the Experience Index error, the
 resolution list) are kept out of the repository in `docs/re/img/win7-baseline/`, since they
 show the owner's account and desktop.
+
+## Load test, step by step
+
+How the kernel driver load tests on VM 220 were run (docs/windows/kmd-port-notes.md, "Load
+tests"). Three machines: the Linux build host, the Proxmox host that runs VM 220, and the
+workstation the `scripts/` helpers run from (they reach the Proxmox host over ssh, see
+`scripts/lib.sh`). Below, `REPO` is the repository's checkout on the build host and `BUILD_IP`
+the build host's address on the LAN the VM is on.
+
+### 1. The package folder on the build host
+
+The VM fetches everything from one folder over HTTP, `/tmp/rb-pkgw/srv/pkg/` on the build host:
+
+| File | Where it comes from |
+|---|---|
+| `viogpu3d.inf` | `windows/package/viogpu3d.inf`, with Windows line ends: `sed 's/$/\r/' windows/package/viogpu3d.inf > /tmp/rb-pkgw/srv/pkg/viogpu3d.inf` |
+| `viogpu3d.sys` | the kernel driver build (verbose: `REPO/build/win7-kmd-verbose/amd64/viogpu3d.sys`), test-signed (below) |
+| `viogpu_d3d10.dll` | `REPO/.tools/mesa/out-win7-x64-virgl/viogpu_d3d10.dll` (`VARIANT=virgl windows/mesa/build-win7.sh`) |
+| `devcon.exe` | WDK 7.1: `REPO/.tools/wdk71/kit-tools/WinDDK/7600.16385.win7_wdk.100208-1538/tools/devcon/amd64/devcon.exe` |
+
+The HTTP server, started once on the build host from `/tmp/rb-pkgw/srv` (it serves that folder,
+so the files are at `http://BUILD_IP:8765/pkg/NAME`):
+
+    cd /tmp/rb-pkgw/srv && REPO/.venv/bin/python -I -m http.server 8765 --bind 0.0.0.0
+
+Signing: `tools/win7-hello/sign.sh FILE` signs in place with the test certificate in
+`REPO/.tools/win7-testcert/` (never committed). By hand, into the package folder (osslsigncode
+refuses to overwrite its output, so the old file goes first):
+
+    cd REPO; P=/tmp/rb-pkgw/srv/pkg
+    rm -f $P/viogpu3d.sys
+    .tools/osslsigncode/build/osslsigncode sign -certs .tools/win7-testcert/cert.pem \
+        -key .tools/win7-testcert/key.pem -h sha256 -n "moose-ripple test" \
+        -in build/win7-kmd-verbose/amd64/viogpu3d.sys -out $P/viogpu3d.sys
+
+### 2. Fresh VM and the COM1 capture (Proxmox host)
+
+Snapshot `pre-kmd` holds the running guest (memory included), logged on at the desktop, test
+mode on, `C:\rb\pkg` present, COM1 on the socket `/var/run/qemu-server/220.serial0`, automatic
+restart after a bug check off (the blue screen stays). For run N:
+
+    pkill -x socat
+    qm stop 220 && qm rollback 220 pre-kmd && qm start 220
+    sleep 2
+    (nohup socat -u UNIX-CONNECT:/var/run/qemu-server/220.serial0 \
+        OPEN:/tmp/rb-220-com1-runN.log,creat,append >/dev/null 2>&1 &)
+
+The socket exists only while the VM runs, so socat starts again after every `qm start`. It
+stays connected across the guest's own reboots. Use `pkill -x socat`: `pkill -f` with a
+pattern also matches the ssh command that runs it and kills that.
+
+### 3. In the guest (from the workstation)
+
+The screen is 800x600 until our driver takes it; the click positions are absolute QMP
+coordinates (0 to 32767) for that size. After the rollback the first key is sometimes lost:
+take a screenshot and press again.
+
+    export VMID=220
+    scripts/qmp-input.sh "key meta_l" "sleep 2"          # Start menu (check with screen.sh)
+    scripts/type.sh -n 'powershell -command "Start-Process cmd -Verb RunAs"'
+    scripts/screen.sh /tmp/w7.png                        # the UAC prompt takes a few seconds
+    scripts/qmp-input.sh "click 20012 16465"             # UAC: Yes
+    scripts/type.sh -n 'cd /d C:\rb\pkg & for %f in (viogpu3d.inf viogpu3d.sys viogpu_d3d10.dll devcon.exe) do @bitsadmin /transfer rN%f /download /priority foreground http://BUILD_IP:8765/pkg/%f C:\rb\pkg\%f | findstr /i "complete error"'
+    # wait for four "Transfer complete." lines (bitsadmin takes 10 to 30 s; keystrokes typed
+    # meanwhile are lost)
+    scripts/type.sh -n 'devcon update viogpu3d.inf "PCI\VEN_1AF4&DEV_1050&SUBSYS_11001AF4&REV_01"'
+    scripts/qmp-input.sh "click 13943 15700"             # "Install this driver software anyway"
+    # wait for "Drivers installed successfully."
+    scripts/type.sh -n 'shutdown /r /t 0'
+
+`scripts/type.sh -n` types the line and presses Enter. To check that the guest has the new
+driver file: `certutil -hashfile viogpu3d.sys SHA256` against `sha256sum` on the build host.
+
+After the reboot: `wc -l /tmp/rb-220-com1-runN.log` on the Proxmox host shows the driver
+starting within about 40 s. With a desktop, the same elevated cmd gives `devcon status
+"PCI\VEN_1AF4&DEV_1050*"` (problem code), `devcon resources ...`, `sc query VgaSave`, and
+`wevtutil qe System /c:8 /rd:true /f:text` for the event log. When the driver has the screen
+and nothing is drawn, QEMU shows "Display output is not active." and only the COM1 log tells
+what happens.
+
+### Files out of the guest
+
+Windows 7's PowerShell 2.0 can PUT a file to a one-off receiver on the build host (any small
+HTTP server that writes the request body to a file, run from `REPO/.venv`):
+
+    powershell -command "$w=New-Object Net.WebClient; $r=$w.UploadData('http://BUILD_IP:8766/NAME','PUT',[IO.File]::ReadAllBytes('C:\path\NAME'))"
+
+and `certutil -hashfile C:\path\NAME SHA256` in the guest checks the copy.
