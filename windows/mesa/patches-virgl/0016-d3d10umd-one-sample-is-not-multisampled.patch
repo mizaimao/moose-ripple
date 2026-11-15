@@ -1,0 +1,26 @@
+Direct3D 10: one sample means not multisampled
+
+Direct3D gives SampleDesc.Count = 1 for every resource that is not multisampled, buffers
+included, and the driver passed that on as the sample count. Gallium's convention for "not
+multisampled" is zero. With virgl the count goes to the host as it is: virglrenderer 0.10
+makes a multisample texture for a count of one and refuses a buffer with a count
+("Multisample textures not 2D"), so no vertex buffer could be created.
+
+diff -ru a/src/gallium/frontends/d3d10umd/Resource.cpp b/src/gallium/frontends/d3d10umd/Resource.cpp
+--- a/src/gallium/frontends/d3d10umd/Resource.cpp
++++ b/src/gallium/frontends/d3d10umd/Resource.cpp
+@@ -302,8 +302,12 @@
+    templat.depth0     = pCreateResource->pMipInfoList[0].TexelDepth;
+    templat.array_size = pCreateResource->ArraySize;
+    templat.last_level = pCreateResource->MipLevels - 1;
+-   templat.nr_samples = pCreateResource->SampleDesc.Count;
+-   templat.nr_storage_samples = pCreateResource->SampleDesc.Count;
++   /* Direct3D says one sample for anything not multisampled, buffers included. Gallium's
++    * word for that is zero, and a host renderer that is asked for a one-sample resource makes
++    * a multisample texture, or refuses a buffer outright.
++    */
++   templat.nr_samples = pCreateResource->SampleDesc.Count > 1 ? pCreateResource->SampleDesc.Count : 0;
++   templat.nr_storage_samples = templat.nr_samples;
+    templat.bind       = translate_resource_flags(pCreateResource->BindFlags);
+    templat.usage      = translate_resource_usage(pCreateResource->Usage);
+ 
