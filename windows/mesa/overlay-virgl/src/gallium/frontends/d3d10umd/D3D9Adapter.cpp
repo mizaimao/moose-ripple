@@ -5,6 +5,7 @@
  */
 #include "D3D9Private.h"
 #include "Format.h"
+#include "D3D9Trace.h"
 
 #include <stddef.h>
 
@@ -88,8 +89,10 @@ static const FORMATOP g_format_ops[] = {
    { D3D9_FMT_DF16, 0x000410c1, 0, 0, 0 },
    { D3D9_FMT_DF24, 0x000410c1, 0, 0, 0 },
    { D3D9_FMT_INTZ, 0x000410c1, 0, 0, 0 },
-   { D3D9_FMT_AYUV, 0x00005000, 0, 0, 32 },
-   { D3D9_FMT_YUY2, 0x00005000, 0, 0, 16 },
+   /* moose-ripple: AYUV and YUY2 are not listed. The driver cannot make surfaces of them,
+    * let alone convert them; listed, Windows' video renderer chose them and then waited for
+    * pictures that never came. Without them it has the video converted before it arrives.
+    */
    { D3D9_FMT_R8, 0x00c2401f, d3d9_ms_types, 0, 0 },
    { D3D9_FMT_G8R8, 0x00c2401f, d3d9_ms_types, 0, 0 },
 };
@@ -510,6 +513,7 @@ D3D9CreateDevice(HANDLE hAdapter, D3DDDIARG_CREATEDEVICE *data)
    device->zrange.MaxZ = 1.0f;
 
    D3D9FillDeviceFuncs(data->pDeviceFuncs);
+   D3D9TraceDeviceFuncs(data->pDeviceFuncs);
    data->hDevice = device;
    return S_OK;
 }
@@ -587,6 +591,17 @@ D3D9GetCaps(HANDLE hAdapter, const D3DDDIARG_GETCAPS *data)
          return E_INVALIDARG;
       D3D9FillCaps(adapter, (D3DCAPS9 *)data->pData);
       return S_OK;
+   /* moose-ripple: no video decoders, no video processors and no extensions, said as a
+    * count of none. "Not implemented" is taken for a failure: Windows' video renderer then
+    * gives up, where with none it uses its own software processor.
+    */
+   case D3DDDICAPS_GETDECODEGUIDCOUNT:
+   case D3DDDICAPS_GETVIDEOPROCESSORDEVICEGUIDCOUNT:
+   case D3DDDICAPS_GETEXTENSIONGUIDCOUNT:
+      if (FAILED(D3D9ValidateData(data, sizeof(UINT))))
+         return E_INVALIDARG;
+      *(UINT *)data->pData = 0;
+      return S_OK;
    case D3DDDICAPS_GETGAMMARAMPCAPS:
       if (FAILED(D3D9ValidateData(data, sizeof(DDIGAMMACAPS))))
          return E_INVALIDARG;
@@ -620,6 +635,7 @@ OpenAdapter(D3DDDIARG_OPENADAPTER *open_data)
    open_data->pAdapterFuncs->pfnGetCaps = D3D9GetCaps;
    open_data->pAdapterFuncs->pfnCreateDevice = D3D9CreateDevice;
    open_data->pAdapterFuncs->pfnCloseAdapter = D3D9CloseAdapter;
+   D3D9TraceAdapterFuncs(open_data->pAdapterFuncs);
    open_data->DriverVersion = driver_version;
    return S_OK;
 }
