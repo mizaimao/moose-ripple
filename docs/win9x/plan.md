@@ -42,6 +42,10 @@ this project: nothing may look worse than without our driver).
 1. **Groundwork:** toolchain, test VMs, baselines, this plan.
 2. **2D on Windows 98:** display driver and mini VDD for virtio-vga: resolutions up to the host's,
    16- and 32-bit colour, the hardware pointer, DirectDraw basics (flip, blit to the screen).
+   *State 2026-11-15:* the display driver runs the desktop at 8 to 32 bits and up to 1600x1200,
+   changes modes without a restart and survives full-screen DOS sessions
+   ([display-driver.md](display-driver.md)). Open: the mini VDD (a DOS session in a window
+   switches the card to text mode behind the driver), the hardware pointer, DirectDraw.
 3. **The virtio-gpu path on 98:** our VxD: device setup, virtqueues, interrupts, resources, the
    3D commands (virgl) from user mode, fences.
 4. **OpenGL on 98:** Mesa (virgl) built for Windows 98 as the ICD. First target: the Quake III

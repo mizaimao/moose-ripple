@@ -1,0 +1,116 @@
+; moose-ripple display driver for Windows 95/98/ME (2D stage): setup information.
+; Install: Display Properties > Settings > Advanced > Adapter > Change > Have Disk,
+; or point the Add New Hardware wizard at this folder.
+
+[Version]
+Signature="$CHICAGO$"
+Class=Display
+ClassGUID={4D36E968-E325-11CE-BFC1-08002BE10318}
+Provider=%Provider%
+DriverVer=11/15/2026,0.0.1.0
+
+[DestinationDirs]
+DefaultDestDir=11                       ; WINDOWS\SYSTEM
+Ripple.Copy=11
+
+[SourceDisksNames]
+1=%DiskName%,,0
+
+[SourceDisksFiles]
+ripple9x.drv=1
+
+[Manufacturer]
+%Provider%=Ripple.Mfg
+
+[Ripple.Mfg]
+%VirtioVga.Desc%=Ripple.Install,PCI\VEN_1AF4&DEV_1050
+%StdVga.Desc%=Ripple.Install,PCI\VEN_1234&DEV_1111
+
+[Ripple.Install]
+CopyFiles=Ripple.Copy
+DelReg=Ripple.DelReg
+AddReg=Ripple.AddReg
+
+[Ripple.Copy]
+ripple9x.drv
+
+[Ripple.DelReg]
+HKR,,Ver
+HKR,,DevLoader
+HKR,DEFAULT
+HKR,MODES
+HKR,CURRENT
+
+; No mini-VDD yet: the system's VDD handles the card as a VGA for DOS boxes.
+[Ripple.AddReg]
+HKR,,Ver,,4.0
+HKR,,DevLoader,,*vdd
+HKR,DEFAULT,Mode,,"8,640,480"
+HKR,DEFAULT,drv,,ripple9x.drv
+HKR,DEFAULT,vdd,,"*vdd"
+; RefreshRate -1: the VDD passes the monitor's limits on (without the value Windows offers
+; 640x480 only). DDC 1: the VDD asks the video BIOS for the monitor's EDID at start.
+HKR,DEFAULT,RefreshRate,,-1
+HKR,DEFAULT,DDC,,1
+HKR,"MODES\8\640,480"
+HKR,"MODES\8\800,600"
+HKR,"MODES\8\1024,768"
+HKR,"MODES\8\1152,864"
+HKR,"MODES\8\1280,720"
+HKR,"MODES\8\1280,800"
+HKR,"MODES\8\1280,960"
+HKR,"MODES\8\1280,1024"
+HKR,"MODES\8\1440,900"
+HKR,"MODES\8\1600,900"
+HKR,"MODES\8\1600,1200"
+HKR,"MODES\8\1680,1050"
+HKR,"MODES\8\1920,1080"
+HKR,"MODES\8\1920,1200"
+HKR,"MODES\16\640,480"
+HKR,"MODES\16\800,600"
+HKR,"MODES\16\1024,768"
+HKR,"MODES\16\1152,864"
+HKR,"MODES\16\1280,720"
+HKR,"MODES\16\1280,800"
+HKR,"MODES\16\1280,960"
+HKR,"MODES\16\1280,1024"
+HKR,"MODES\16\1440,900"
+HKR,"MODES\16\1600,900"
+HKR,"MODES\16\1600,1200"
+HKR,"MODES\16\1680,1050"
+HKR,"MODES\16\1920,1080"
+HKR,"MODES\16\1920,1200"
+HKR,"MODES\24\640,480"
+HKR,"MODES\24\800,600"
+HKR,"MODES\24\1024,768"
+HKR,"MODES\24\1152,864"
+HKR,"MODES\24\1280,720"
+HKR,"MODES\24\1280,800"
+HKR,"MODES\24\1280,960"
+HKR,"MODES\24\1280,1024"
+HKR,"MODES\24\1440,900"
+HKR,"MODES\24\1600,900"
+HKR,"MODES\24\1600,1200"
+HKR,"MODES\24\1680,1050"
+HKR,"MODES\24\1920,1080"
+HKR,"MODES\24\1920,1200"
+HKR,"MODES\32\640,480"
+HKR,"MODES\32\800,600"
+HKR,"MODES\32\1024,768"
+HKR,"MODES\32\1152,864"
+HKR,"MODES\32\1280,720"
+HKR,"MODES\32\1280,800"
+HKR,"MODES\32\1280,960"
+HKR,"MODES\32\1280,1024"
+HKR,"MODES\32\1440,900"
+HKR,"MODES\32\1600,900"
+HKR,"MODES\32\1600,1200"
+HKR,"MODES\32\1680,1050"
+HKR,"MODES\32\1920,1080"
+HKR,"MODES\32\1920,1200"
+
+[Strings]
+Provider="moose-ripple"
+DiskName="moose-ripple display driver"
+VirtioVga.Desc="moose-ripple virtio-vga (2D)"
+StdVga.Desc="moose-ripple QEMU standard VGA (2D)"
