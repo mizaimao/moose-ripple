@@ -181,3 +181,25 @@ Several of these with growing delays, then `exit`, and the scenes are set up fro
 the gaps (Win+E for a window, the pointer on a taskbar button for a thumbnail, Ctrl+Win+Tab
 for Flip 3D, the pointer on the right end of the taskbar for desktop peek). Shut Windows down
 from the Run box (`shutdown /s /t 0`), roll back, and run a load test to return to our driver.
+
+## Crash dumps
+
+When a Windows program crashes inside our user-mode driver (or inside Direct3D because of
+it), the Application event log names the module and the offset
+(`wevtutil qe Application /c:2 /rd:true /f:text /q:"*[System[(EventID=1000)]]"`), which is
+enough to name the function: the DLLs built here keep their symbol table. For the callers,
+have Windows write a dump. In the guest, elevated:
+
+    reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting" /v DontShowUI /t REG_DWORD /d 1 /f
+    reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps" /v DumpFolder /t REG_EXPAND_SZ /d C:\rb\dumps /f
+    reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps" /v DumpType /t REG_DWORD /d 1 /f
+
+The first keeps the "has stopped working" dialog from waiting for a click. After the crash,
+send the newest file of `C:\rb\dumps` to the build host ("Files out of the guest") and, next to
+a copy of exactly the DLL the guest had:
+
+    PY tools/win7-debug/dumpstack.py crash.dmp viogpu_d3d10.dll
+
+It prints the exception, the registers and every word of the crashed thread's stack that
+points into the DLL, named, innermost first. Stale words are in the list too; the real chain
+is usually plain to see.
