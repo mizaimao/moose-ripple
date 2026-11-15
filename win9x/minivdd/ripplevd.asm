@@ -193,6 +193,8 @@ VxD_LOCKED_CODE_ENDS
 ; ---- Initialisation ---------------------------------------------------------------------------
 VxD_ICODE_SEG
 
+        extrn   _vgpu_init:near                 ; vgpu.c
+
 BeginProc MiniVDD_Dynamic_Init
         push    ebx
         VMMCall Get_Sys_VM_Handle
@@ -240,7 +242,8 @@ di_msg: lodsb
         jz      short di_ok
         out     0E9h, al
         jmp     short di_msg
-di_ok:  clc
+di_ok:  call    _vgpu_init                      ; the virtio side (vgpu.c); it may find nothing
+        clc
         ret
 di_fail:
         stc

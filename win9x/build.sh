@@ -14,7 +14,7 @@ export WINEPREFIX=$T/wine WINEDEBUG=-all
 export WATCOM=$T/openwatcom
 W() { winepath -w "$1"; }
 for f in d16/bin/cl16.exe d16/bin/link16.exe ddk98/ddk/bin/win98/ml.exe ddk98/ddk/lib/win98/dibeng.lib \
-         ddk98/ddk/bin/link.exe ddk98/ddk/inc/win98/vmm.inc \
+         ddk98/ddk/bin/link.exe ddk98/ddk/inc/win98/vmm.inc vc6/VC98/Bin/CL.EXE \
          openwatcom/binl64/wrc; do
     [ -e "$T/$f" ] || { echo "build.sh: $T/$f is missing (see docs/win9x/plan.md)" >&2; exit 1; }
 done
@@ -50,8 +50,11 @@ cp "$here"/minivdd/* "$V/"
 cd "$V"
 WINEPATH="$(W "$T/ddk98/ddk/bin/win98")" wine ml.exe -nologo -coff -DBLD_COFF -DMASM6 -DMINIVDD=1 -W2 -c -Cx \
     "-I$(W "$T/ddk98/ddk/inc/win98")" ripplevd.asm
+# The C part: Visual C++ 6, 32-bit flat, no run-time library, sections named as the VxD wants.
+WINEPATH="$(W "$T/vc6/VC98/Bin");$(W "$T/vc6/Common/MSDev98/Bin")" \
+    wine cl.exe /nologo /c /W3 /WX /O1 /Oy- /Zl /Gs $CDEF vgpu.c
 WINEPATH="$(W "$T/ddk98/ddk/bin")" wine link.exe /NOLOGO /VXD /NOD /IGNORE:4078 /IGNORE:4039 \
-    /OUT:ripplevd.vxd /MAP:ripplevd.map /DEF:ripplevd.def ripplevd.obj > link.log 2>&1 || { cat link.log; exit 1; }
+    /OUT:ripplevd.vxd /MAP:ripplevd.map /DEF:ripplevd.def ripplevd.obj vgpu.obj > link.log 2>&1 || { cat link.log; exit 1; }
 cp ripplevd.vxd "$OUT/"
 cd "$B"
 [ ! -f ripple9x.sym ] || cp ripple9x.sym "$OUT/"

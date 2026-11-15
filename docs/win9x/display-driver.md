@@ -32,6 +32,7 @@ enough for a desktop), DirectDraw and a hardware pointer.
 | `display/r9x.h` | the driver interface's structures and constants, written out from the documentation |
 | `display/ripple9x.def`, `.rc` | exports by ordinal; the resources Windows reads from a display driver (screen metrics, system colours, stock fonts) |
 | `minivdd/ripplevd.asm`, `.def` | the mini-VDD: a VxD (32-bit kernel module) the VDD loads, which owns ports 01CEh and 01CFh |
+| `minivdd/vgpu.c` | the start of the virtio-gpu side, in C inside the same VxD (Visual C++ 6, no run-time library): finds the card and its virtio structures |
 | `inf/ripple9x.inf` | setup information: matches `PCI\VEN_1AF4&DEV_1050` and `PCI\VEN_1234&DEV_1111` |
 | `build.sh` | builds on the Linux build host: `win9x/build.sh`, output in `build/win9x/` |
 
