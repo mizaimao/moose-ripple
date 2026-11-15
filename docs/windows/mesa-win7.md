@@ -177,3 +177,47 @@ them; nothing taken over from the four files):
   points at the buffers the kernel hands back.
 - Helper entry points with the same shape as the operations: `gdikmt_createallocation`,
   `gdikmt_openallocation`, `gdikmt_render`.
+
+## The Direct3D 9 part (2026-11-15)
+
+Windows 7 programs that use Direct3D 9, and Windows' own assessment tool, need a Direct3D 9
+user-mode driver. Ours is the one of the Yttrium project's Mesa fork (its `virtio-win-mesa`
+at commit 76c095b, Mesa 26.1.0; `docs/windows/yttrium-notes.md`): the ten files
+`src/gallium/frontends/d3d10umd/D3D9*`, all MIT, by Ake Rehnman, with the shader translator
+taken from Mesa's "nine" (MIT, Joakim Sindholt and Christoph Bumiller). They are in
+`windows/mesa/overlay-virgl/` with their notices, and are built into the same DLL as the
+Direct3D 10 driver, which then also exports `OpenAdapter` (patch 0019).
+
+What was changed to bring them from that tree to Mesa 24.3.4 on virgl:
+
+- **The renderer underneath.** The files call that project's own renderer in a dozen places
+  and include two of its headers (MPL-2.0, not used here). `D3D9Host.h` and `D3D9Host.cpp`
+  (ours) answer the same calls for virgl: a flush is a flush, the rest has nothing to answer.
+  The multisample counts and the anisotropy limit, which came from that renderer, are fixed
+  for now: no multisampling, 16 samples of anisotropic filtering (Windows 7's Direct3D 9
+  wants that many for a hardware device, `docs/windows/kmd-port-notes.md`).
+- **Mesa 26.1 to 24.3.** Capability lookups by function instead of the screen's tables;
+  one more argument to `set_sampler_views`, `set_constant_buffer` and `ureg_tex_insn`;
+  framebuffer and clear surfaces created as objects instead of held by value; three small
+  helpers that 24.3 lacks (`D3D9Compat.h`, ours).
+- **The kernel bridge** (`gdikmt_d3dddi`, ours) learned what a Direct3D 9 device needs:
+  presents go through the device's own present callback with the destination the runtime
+  names, and an opened resource is described in Direct3D 9's structure.
+- **The kernel driver's allocation data** has no blob memory flag and no stride on Windows 7;
+  the two places that read them use what the format says.
+
+Two faults showed in the host's log at the first test, both for resources Gallium allows and
+virglrenderer 0.10 refuses, and both are put right in the virgl driver (patch 0020): a texture
+without any binding (the Direct3D 9 code reads pictures back through such textures), and a
+sample count of one for "not multisampled" (the same thing patch 0016 met in the Direct3D 10
+driver).
+
+**First test** (`tools/win7-hello/d3d9test.c`, test VM, Aero on): a hardware device with
+vertex processing in the driver is created in a window, the back buffer cleared to green, a
+red triangle drawn from screen-space vertices, the picture read back (right in both colours)
+and presented: the window shows it. Nothing in the host's log.
+
+Not looked at yet: everything beyond that test. The fork's notes say what to expect
+(`docs/windows/yttrium-notes.md`): fixed-function drawing leans on the Direct3D 9 runtime
+turning it into shaders, user clip planes are not switched on, and every draw creates and
+destroys its state objects, which on virgl is a command to the host each.
