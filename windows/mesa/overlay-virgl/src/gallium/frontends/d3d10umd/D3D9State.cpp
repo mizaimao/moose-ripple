@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: MIT
  *
  * Copyright 2026 Ake Rehnman
+ * Copyright 2026 VMLabDev and contributors
  */
 #include "D3D9Private.h"
 #include "D3D9ShaderTranslate.h"
@@ -1371,6 +1372,7 @@ D3D9DestroyDevice(HANDLE hDevice)
    }
 
    D3D9DestroyDrawState(device);
+   D3D9DestroyKeyBlitState(device);
    for (UINT i = 0; i < ARRAYSIZE(device->null_textures); ++i)
       pipe_resource_reference(&device->null_textures[i], NULL);
    if (device->pipe)

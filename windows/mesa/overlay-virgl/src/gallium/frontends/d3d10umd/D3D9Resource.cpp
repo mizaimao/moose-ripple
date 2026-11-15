@@ -2,14 +2,18 @@
  * SPDX-License-Identifier: MIT
  *
  * Copyright 2026 Ake Rehnman
+ * Copyright 2026 VMLabDev and contributors
  */
 #include "D3D9Private.h"
 #include "Format.h"
 
 #include "D3D9Host.h"
 
+#include "tgsi/tgsi_ureg.h"
 #include "util/format/u_format.h"
 #include "util/format_srgb.h"
+#include "util/u_draw.h"
+#include "util/u_sampler.h"
 #include "util/u_math.h"
 #include "util/u_threaded_context.h"
 #include "util/u_upload_mgr.h"
@@ -128,6 +132,7 @@ D3D9FormatBytesPerPixel(D3DDDIFORMAT format)
    case D3D9_FMT_L16:
    case D3D9_FMT_R16F:
    case D3D9_FMT_V8U8:
+   case D3D9_FMT_L6V5U5:
       return 2;
    case D3D9_FMT_R8:
    case D3DDDIFMT_A8:
@@ -251,6 +256,8 @@ D3D9FormatToPipe(D3DDDIFORMAT format)
    case D3D9_FMT_V8U8:
       return PIPE_FORMAT_R8G8_SNORM;
    case D3D9_FMT_Q8W8V8U8:
+   case D3D9_FMT_L6V5U5:
+   case D3D9_FMT_X8L8V8U8:
       return PIPE_FORMAT_R8G8B8A8_SNORM;
    case D3D9_FMT_V16U16:
       return PIPE_FORMAT_R16G16_SNORM;
@@ -272,6 +279,8 @@ D3D9FormatToPipe(D3DDDIFORMAT format)
    case D3D9_FMT_D16_LOCKABLE:
    case D3D9_FMT_DF16:
       return PIPE_FORMAT_Z16_UNORM;
+   case D3D9_FMT_D32F_LOCKABLE:
+      return PIPE_FORMAT_Z32_FLOAT;
    case D3DDDIFMT_D24S8:
       /* moose-ripple: whichever order of the two parts the renderer has (Format.h) */
       return FormatDepth24Stencil8();
@@ -310,8 +319,12 @@ D3D9PipeToFormat(enum pipe_format format)
       return D3DDDIFMT_R5G6B5;
    case PIPE_FORMAT_B5G5R5A1_UNORM:
       return D3DDDIFMT_A1R5G5B5;
+   case PIPE_FORMAT_B4G4R4A4_UNORM:
+      return D3DDDIFMT_A4R4G4B4;
    case PIPE_FORMAT_Z16_UNORM:
       return D3DDDIFMT_D16;
+   case PIPE_FORMAT_Z32_FLOAT:
+      return D3D9_FMT_D32F_LOCKABLE;
    case PIPE_FORMAT_Z24X8_UNORM:
       return D3DDDIFMT_D24X8;
    case PIPE_FORMAT_Z24_UNORM_S8_UINT:
@@ -448,14 +461,28 @@ D3D9ResourceCanBeColorCopyTarget(const D3DDDIARG_CREATERESOURCE *data)
    }
 }
 
+/* DirectDraw presents straight from its own surfaces: a windowed primary
+ * Blt reaches the driver as a Present whose source is the application's
+ * off-screen plain surface (no RenderTarget or Texture flag).  Like a D3D9
+ * swapchain back buffer, that source has to be a display target, or the
+ * KMD present reads an image it cannot see and the window stays empty. */
+static bool
+D3D9ResourceIsDDrawPresentSource(const D3D9Device *device,
+                                 const D3DDDIARG_CREATERESOURCE *data)
+{
+   return device->runtime_interface < 9 &&
+      D3D9PoolNeedsReadback(data->Pool) && !data->MultisampleType &&
+      !(data->Flags.Texture || data->Flags.CubeMap || data->Flags.Volume ||
+        data->Flags.ZBuffer || data->Flags.VertexBuffer ||
+        data->Flags.IndexBuffer) &&
+      D3D9ResourceCanBeColorCopyTarget(data);
+}
+
 static unsigned
 D3D9PipeBind(const D3DDDIARG_CREATERESOURCE *data)
 {
    const enum pipe_format format = D3D9ResourcePipeFormat(data);
-   const bool depth = format == PIPE_FORMAT_Z16_UNORM ||
-      format == PIPE_FORMAT_Z24X8_UNORM ||
-      format == PIPE_FORMAT_Z24_UNORM_S8_UINT ||
-      format == PIPE_FORMAT_S8_UINT_Z24_UNORM;
+   const bool depth = util_format_is_depth_or_stencil(format);
 
    if (data->Flags.VertexBuffer)
       return PIPE_BIND_VERTEX_BUFFER;
@@ -912,6 +939,61 @@ D3D9PipeBoxFromD3DBox(const D3DDDIBOX *src, struct pipe_box *box)
    box->depth = src->Back - src->Front;
 }
 
+/* L6V5U5 and X8L8V8U8 are stored as R8G8B8A8_SNORM (D3D9FormatToPipe):
+ * U and V keep their signed values, scaled to 8 bits, and the unsigned
+ * luminance goes into the positive half of blue. Returns a tight buffer of
+ * width x rows x depth texels, or NULL for other formats. */
+static bool
+D3D9FormatIsConvertedBump(D3DDDIFORMAT format)
+{
+   return format == D3D9_FMT_L6V5U5 || format == D3D9_FMT_X8L8V8U8;
+}
+
+static int8_t
+D3D9Snorm5To8(unsigned v)
+{
+   int s = (int)(v & 31u);
+   if (s >= 16)
+      s -= 32;
+   if (s < -15)
+      s = -15;
+   return (int8_t)((s * 127 + (s < 0 ? -7 : 7)) / 15);
+}
+
+static uint8_t *
+D3D9ConvertBumpTexels(D3DDDIFORMAT format, const void *data, unsigned stride,
+                      uintptr_t layer_stride, UINT width, UINT rows,
+                      UINT depth)
+{
+   if (!D3D9FormatIsConvertedBump(format))
+      return NULL;
+   uint8_t *out = (uint8_t *)malloc((size_t)width * 4 * rows * depth);
+   if (!out)
+      return NULL;
+   uint8_t *dst = out;
+   for (UINT z = 0; z < depth; ++z) {
+      for (UINT y = 0; y < rows; ++y) {
+         const uint8_t *src = (const uint8_t *)data + (size_t)z * layer_stride +
+                              (size_t)y * stride;
+         for (UINT x = 0; x < width; ++x, dst += 4) {
+            if (format == D3D9_FMT_X8L8V8U8) {
+               const uint8_t *t = src + x * 4;
+               dst[0] = t[0] == 0x80 ? 0x81 : t[0];
+               dst[1] = t[1] == 0x80 ? 0x81 : t[1];
+               dst[2] = (uint8_t)((t[2] * 127 + 127) / 255);
+            } else {
+               const unsigned t = src[x * 2] | (unsigned)src[x * 2 + 1] << 8;
+               dst[0] = (uint8_t)D3D9Snorm5To8(t);
+               dst[1] = (uint8_t)D3D9Snorm5To8(t >> 5);
+               dst[2] = (uint8_t)((((t >> 10) & 63u) * 127 + 31) / 63);
+            }
+            dst[3] = 127;
+         }
+      }
+   }
+   return out;
+}
+
 static bool
 D3D9TextureSubdata(D3D9Device *device, D3D9Resource *resource,
                    UINT subresource_index, unsigned usage,
@@ -938,7 +1020,15 @@ D3D9TextureSubdata(D3D9Device *device, D3D9Resource *resource,
    uintptr_t upload_layer_stride = layer_stride;
    uint8_t *tight = NULL;
 
-   if (stride != row_bytes || layer_stride != tight_layer_stride) {
+   if (D3D9FormatIsConvertedBump(resource->format)) {
+      tight = D3D9ConvertBumpTexels(resource->format, data, stride,
+                                    layer_stride, box->width, rows, depth);
+      if (!tight)
+         return false;
+      upload_data = tight;
+      upload_stride = box->width * 4;
+      upload_layer_stride = (uintptr_t)upload_stride * rows;
+   } else if (stride != row_bytes || layer_stride != tight_layer_stride) {
       if (depth > SIZE_MAX / tight_layer_stride)
          return false;
       tight = (uint8_t *)malloc((size_t)tight_layer_stride * depth);
@@ -2814,6 +2904,9 @@ D3D9CreateResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *data)
             templ.nr_samples = 1;
          templ.nr_storage_samples = templ.nr_samples;
          templ.bind = D3D9PipeBind(data);
+         if (D3D9ResourceIsDDrawPresentSource(device, data))
+            templ.bind |= PIPE_BIND_RENDER_TARGET | PIPE_BIND_DISPLAY_TARGET |
+                          PIPE_BIND_SHARED;
          templ.usage = D3D9PipeUsage(data);
          /* Non-texture render-target surfaces can be legacy CPU-blt sources
           * even without DiscardRenderTarget. Keep those conservative until
@@ -3376,10 +3469,19 @@ D3D9Lock(HANDLE hDevice, D3DDDIARG_LOCK *data)
           !D3D9UploadSubResource(device, resource, subresource_index))
          return E_NOTIMPL;
 
-      if ((usage & PIPE_MAP_READ) && D3D9PoolNeedsReadback(resource->pool)) {
+      /* A write-only lock without Discard still has to keep the texels the
+       * caller does not write.  DirectDraw's emulation layer relies on that:
+       * for a colour-key or mirror blit the HAL does not offer, it locks
+       * the whole destination write-only and stores only the blitted
+       * rectangle.  A plain write map of a GPU texture uploads the whole
+       * box from an uninitialised staging copy, so such locks go through
+       * the readback path, which starts from the current contents. */
+      const bool preserve_contents =
+         (usage & PIPE_MAP_READ) || !(usage & PIPE_MAP_DISCARD_RANGE);
+      if (preserve_contents && D3D9PoolNeedsReadback(resource->pool)) {
          map = D3D9ReadbackTextureLock(device, resource, sub,
-                                       subresource_index, usage, &box,
-                                       data);
+                                       subresource_index,
+                                       usage | PIPE_MAP_READ, &box, data);
       } else {
          if (!device->pipe->texture_map)
             return E_NOTIMPL;
@@ -3654,6 +3756,408 @@ D3D9CaptureToSysMem(HANDLE hDevice, const D3DDDIARG_CAPTURETOSYSMEM *data)
    return hr;
 }
 
+/*
+ * DirectDraw source colour-key and mirror blits.  The D3D9 runtime passes
+ * them to pfnBlt for DirectDraw only, and only when the HAL caps report
+ * DDRAW_CAPS_COLORKEY | DDRAW_CKEYCAPS_SRCBLT or DDRAW_FXCAPS_BLTMIRROR*.
+ * They are drawn as one quad: the fragment shader maps each destination
+ * pixel to a source texel the way a nearest stretch does, mirrors the
+ * index, and discards texels equal to the key.  The key is a pixel value
+ * in the source format, so it is compared after unpacking with the same
+ * conversion the sampler uses, within half a step of the widest channel.
+ */
+static void *
+D3D9CreateKeyBlitVs(struct pipe_context *pipe)
+{
+   struct ureg_program *ureg = ureg_create(MESA_SHADER_VERTEX);
+   if (!ureg)
+      return NULL;
+   struct ureg_src pos = ureg_DECL_vs_input(ureg, 0);
+   struct ureg_dst out_pos = ureg_DECL_output(ureg, TGSI_SEMANTIC_POSITION, 0);
+   ureg_MOV(ureg, out_pos, pos);
+   ureg_END(ureg);
+   return ureg_create_shader_and_destroy(ureg, pipe);
+}
+
+/* The source texel for destination pixel k is the one DirectDraw's emulation
+ * layer picks, with s = source / destination size:
+ *   no mirror   source + floor((k + 0.5) * s)
+ *   any mirror  source + floor(k * s) on both axes, with k counted from the
+ *               right (bottom) on a mirrored axis.
+ * Constants: c0.xy offset and c1.zw sign, so frag.xy * c1.zw + c0.xy is
+ * k + 0.5 or k; c0.zw a quarter-step bias against rounding; c1.xy s; c2.xy
+ * the source origin + 0.5, c2.zw 1 / texture size; c3 the key; c4 the
+ * per-channel tolerance (> 1 for channels not compared). */
+static void *
+D3D9CreateKeyBlitFs(struct pipe_context *pipe, bool color_key)
+{
+   struct ureg_program *ureg = ureg_create(MESA_SHADER_FRAGMENT);
+   if (!ureg)
+      return NULL;
+   struct ureg_src frag = ureg_DECL_fs_input(ureg, TGSI_SEMANTIC_POSITION, 0,
+                                             TGSI_INTERPOLATE_LINEAR);
+   struct ureg_src c0 = ureg_DECL_constant(ureg, 0);
+   struct ureg_src c1 = ureg_DECL_constant(ureg, 1);
+   struct ureg_src c2 = ureg_DECL_constant(ureg, 2);
+   struct ureg_src c3 = ureg_DECL_constant(ureg, 3);
+   struct ureg_src c4 = ureg_DECL_constant(ureg, 4);
+   struct ureg_src sampler = ureg_DECL_sampler(ureg, 0);
+   ureg_DECL_sampler_view(ureg, 0, TGSI_TEXTURE_2D, TGSI_RETURN_TYPE_FLOAT,
+                          TGSI_RETURN_TYPE_FLOAT, TGSI_RETURN_TYPE_FLOAT,
+                          TGSI_RETURN_TYPE_FLOAT);
+   struct ureg_dst out = ureg_DECL_output(ureg, TGSI_SEMANTIC_COLOR, 0);
+   struct ureg_dst t = ureg_DECL_temporary(ureg);
+   struct ureg_dst texel = ureg_DECL_temporary(ureg);
+   const unsigned xy = TGSI_WRITEMASK_XY;
+   const struct ureg_src c0_zw = ureg_swizzle(c0, TGSI_SWIZZLE_Z, TGSI_SWIZZLE_W,
+                                              TGSI_SWIZZLE_Z, TGSI_SWIZZLE_W);
+   const struct ureg_src c1_zw = ureg_swizzle(c1, TGSI_SWIZZLE_Z, TGSI_SWIZZLE_W,
+                                              TGSI_SWIZZLE_Z, TGSI_SWIZZLE_W);
+   const struct ureg_src c2_zw = ureg_swizzle(c2, TGSI_SWIZZLE_Z, TGSI_SWIZZLE_W,
+                                              TGSI_SWIZZLE_Z, TGSI_SWIZZLE_W);
+
+   ureg_MAD(ureg, ureg_writemask(t, xy), frag, c1_zw, c0);
+   ureg_MAD(ureg, ureg_writemask(t, xy), ureg_src(t), c1, c0_zw);
+   ureg_FLR(ureg, ureg_writemask(t, xy), ureg_src(t));
+   ureg_ADD(ureg, ureg_writemask(t, xy), ureg_src(t), c2);
+   ureg_MUL(ureg, ureg_writemask(t, xy), ureg_src(t), c2_zw);
+   ureg_MOV(ureg, ureg_writemask(t, TGSI_WRITEMASK_ZW), ureg_imm1f(ureg, 0.0f));
+   ureg_TEX(ureg, texel, TGSI_TEXTURE_2D, ureg_src(t), sampler);
+   if (color_key) {
+      /* Discard when every compared channel is within tolerance. */
+      ureg_ADD(ureg, t, ureg_src(texel), ureg_negate(c3));
+      ureg_SLT(ureg, t, ureg_abs(ureg_src(t)), c4);
+      ureg_MUL(ureg, ureg_writemask(t, TGSI_WRITEMASK_X),
+               ureg_scalar(ureg_src(t), TGSI_SWIZZLE_X),
+               ureg_scalar(ureg_src(t), TGSI_SWIZZLE_Y));
+      ureg_MUL(ureg, ureg_writemask(t, TGSI_WRITEMASK_X),
+               ureg_scalar(ureg_src(t), TGSI_SWIZZLE_X),
+               ureg_scalar(ureg_src(t), TGSI_SWIZZLE_Z));
+      ureg_MUL(ureg, ureg_writemask(t, TGSI_WRITEMASK_X),
+               ureg_scalar(ureg_src(t), TGSI_SWIZZLE_X),
+               ureg_scalar(ureg_src(t), TGSI_SWIZZLE_W));
+      ureg_KILL_IF(ureg, ureg_negate(ureg_scalar(ureg_src(t), TGSI_SWIZZLE_X)));
+   }
+   ureg_MOV(ureg, out, ureg_src(texel));
+   ureg_END(ureg);
+   return ureg_create_shader_and_destroy(ureg, pipe);
+}
+
+static bool
+D3D9InitKeyBlitState(D3D9Device *device)
+{
+   struct pipe_context *pipe = device->pipe;
+   if (device->key_blit.vs)
+      return true;
+
+   struct pipe_sampler_state sampler;
+   memset(&sampler, 0, sizeof(sampler));
+   sampler.wrap_s = PIPE_TEX_WRAP_CLAMP_TO_EDGE;
+   sampler.wrap_t = PIPE_TEX_WRAP_CLAMP_TO_EDGE;
+   sampler.wrap_r = PIPE_TEX_WRAP_CLAMP_TO_EDGE;
+   sampler.min_img_filter = PIPE_TEX_FILTER_NEAREST;
+   sampler.mag_img_filter = PIPE_TEX_FILTER_NEAREST;
+   sampler.min_mip_filter = PIPE_TEX_MIPFILTER_NONE;
+
+   struct pipe_blend_state blend;
+   memset(&blend, 0, sizeof(blend));
+   blend.rt[0].colormask = PIPE_MASK_RGBA;
+
+   struct pipe_rasterizer_state rast;
+   memset(&rast, 0, sizeof(rast));
+   rast.half_pixel_center = 1;
+   rast.clip_halfz = 1;
+   rast.cull_face = PIPE_FACE_NONE;
+   rast.fill_front = PIPE_POLYGON_MODE_FILL;
+   rast.fill_back = PIPE_POLYGON_MODE_FILL;
+   rast.line_width = 1.0f;
+   rast.point_size = 1.0f;
+
+   struct pipe_depth_stencil_alpha_state dsa;
+   memset(&dsa, 0, sizeof(dsa));
+
+   struct pipe_vertex_element element;
+   memset(&element, 0, sizeof(element));
+   element.src_format = PIPE_FORMAT_R32G32_FLOAT;
+   element.src_stride = 2 * sizeof(float);
+
+   device->key_blit.sampler = pipe->create_sampler_state(pipe, &sampler);
+   device->key_blit.blend = pipe->create_blend_state(pipe, &blend);
+   device->key_blit.rasterizer = pipe->create_rasterizer_state(pipe, &rast);
+   device->key_blit.dsa = pipe->create_depth_stencil_alpha_state(pipe, &dsa);
+   device->key_blit.velems =
+      pipe->create_vertex_elements_state(pipe, 1, &element);
+   device->key_blit.vs = D3D9CreateKeyBlitVs(pipe);
+   if (device->key_blit.sampler && device->key_blit.blend &&
+       device->key_blit.rasterizer && device->key_blit.dsa &&
+       device->key_blit.velems && device->key_blit.vs)
+      return true;
+   D3D9DestroyKeyBlitState(device);
+   return false;
+}
+
+void
+D3D9DestroyKeyBlitState(D3D9Device *device)
+{
+   struct pipe_context *pipe = device ? device->pipe : NULL;
+   if (!pipe)
+      return;
+   if (device->key_blit.velems)
+      pipe->delete_vertex_elements_state(pipe, device->key_blit.velems);
+   if (device->key_blit.dsa)
+      pipe->delete_depth_stencil_alpha_state(pipe, device->key_blit.dsa);
+   if (device->key_blit.rasterizer)
+      pipe->delete_rasterizer_state(pipe, device->key_blit.rasterizer);
+   if (device->key_blit.blend)
+      pipe->delete_blend_state(pipe, device->key_blit.blend);
+   if (device->key_blit.sampler)
+      pipe->delete_sampler_state(pipe, device->key_blit.sampler);
+   for (unsigned i = 0; i < ARRAYSIZE(device->key_blit.fs); ++i) {
+      if (device->key_blit.fs[i])
+         pipe->delete_fs_state(pipe, device->key_blit.fs[i]);
+   }
+   if (device->key_blit.vs)
+      pipe->delete_vs_state(pipe, device->key_blit.vs);
+   memset(&device->key_blit, 0, sizeof(device->key_blit));
+}
+
+static bool
+D3D9KeyBlitPipe(D3D9Device *device, const D3DDDIARG_BLT *data)
+{
+   struct pipe_context *pipe = device->pipe;
+   D3D9Resource *dst_resource = D3D9CastResource(data->hDstResource);
+   D3D9Resource *src_resource = D3D9CastResource(data->hSrcResource);
+   D3D9SubResource *dst_sub = D3D9GetSubResource(data->hDstResource,
+                                                 data->DstSubResourceIndex);
+   D3D9SubResource *src_sub = D3D9GetSubResource(data->hSrcResource,
+                                                 data->SrcSubResourceIndex);
+   if (!pipe || !dst_resource || !src_resource || !dst_sub || !src_sub ||
+       !dst_resource->pipe_resource || !src_resource->pipe_resource ||
+       !pipe->create_sampler_view)
+      return false;
+
+   struct pipe_resource *src_tex = src_resource->pipe_resource;
+   struct pipe_resource *dst_tex = dst_resource->pipe_resource;
+   const enum pipe_format src_format = src_tex->format;
+   if (util_format_is_depth_or_stencil(src_format) ||
+       util_format_is_depth_or_stencil(dst_tex->format) ||
+       util_format_is_compressed(src_format) ||
+       src_tex->nr_samples > 1 || dst_tex->nr_samples > 1 ||
+       src_tex->target != PIPE_TEXTURE_2D)
+      return false;
+
+   const RECT src = data->SrcRect;
+   const RECT dst = data->DstRect;
+   const LONG sw = src.right - src.left, sh = src.bottom - src.top;
+   const LONG dw = dst.right - dst.left, dh = dst.bottom - dst.top;
+   if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0)
+      return true;
+   if (src.left < 0 || src.top < 0 || src.right > (LONG)src_sub->width ||
+       src.bottom > (LONG)src_sub->height || dst.left < 0 || dst.top < 0 ||
+       dst.right > (LONG)dst_sub->width || dst.bottom > (LONG)dst_sub->height)
+      return false;
+
+   if (src_sub->cpu_dirty &&
+       !D3D9UploadSubResource(device, src_resource, data->SrcSubResourceIndex))
+      return false;
+   if (dst_sub->cpu_dirty &&
+       !D3D9UploadSubResource(device, dst_resource, data->DstSubResourceIndex))
+      return false;
+
+   const unsigned src_level =
+      D3D9PipeMipLevel(src_resource, data->SrcSubResourceIndex);
+   const unsigned src_layer =
+      D3D9PipeLayer(src_resource, data->SrcSubResourceIndex);
+   const unsigned dst_level =
+      D3D9PipeMipLevel(dst_resource, data->DstSubResourceIndex);
+   const unsigned dst_layer =
+      D3D9PipeLayer(dst_resource, data->DstSubResourceIndex);
+
+   /* A surface cannot be sampled while it is the render target: blit
+    * within one surface from a copy of the source rectangle. */
+   struct pipe_resource *copy = NULL;
+   unsigned view_level = src_level, view_layer = src_layer;
+   LONG src_x = src.left, src_y = src.top;
+   unsigned tex_w = u_minify(src_tex->width0, src_level);
+   unsigned tex_h = u_minify(src_tex->height0, src_level);
+   if (src_tex == dst_tex) {
+      struct pipe_resource templ;
+      memset(&templ, 0, sizeof(templ));
+      templ.target = PIPE_TEXTURE_2D;
+      templ.format = src_format;
+      templ.width0 = (unsigned)sw;
+      templ.height0 = (unsigned)sh;
+      templ.depth0 = 1;
+      templ.array_size = 1;
+      templ.bind = PIPE_BIND_SAMPLER_VIEW;
+      copy = pipe->screen->resource_create(pipe->screen, &templ);
+      if (!copy)
+         return false;
+      struct pipe_box box;
+      u_box_2d_zslice(src.left, src.top, src_layer, sw, sh, &box);
+      pipe->resource_copy_region(pipe, copy, 0, 0, 0, 0, src_tex, src_level,
+                                 &box);
+      src_tex = copy;
+      view_level = view_layer = 0;
+      src_x = src_y = 0;
+      tex_w = (unsigned)sw;
+      tex_h = (unsigned)sh;
+   }
+
+   const bool color_key = data->Flags.SrcColorKey != 0;
+   if (!D3D9InitKeyBlitState(device)) {
+      pipe_resource_reference(&copy, NULL);
+      return false;
+   }
+   void *fs = device->key_blit.fs[color_key ? 1 : 0];
+   if (!fs) {
+      fs = D3D9CreateKeyBlitFs(pipe, color_key);
+      device->key_blit.fs[color_key ? 1 : 0] = fs;
+   }
+
+   struct pipe_sampler_view view_templ;
+   u_sampler_view_default_template(&view_templ, src_tex, src_format);
+   view_templ.u.tex.first_level = view_templ.u.tex.last_level = view_level;
+   view_templ.u.tex.first_layer = view_templ.u.tex.last_layer = view_layer;
+   struct pipe_sampler_view *view =
+      pipe->create_sampler_view(pipe, src_tex, &view_templ);
+
+   /* Yttrium reads vertex data after the draw call returns, so the quad
+    * goes through the stream uploader rather than as a user buffer. */
+   const unsigned fb_w = dst_sub->width, fb_h = dst_sub->height;
+   const float x0 = 2.0f * dst.left / fb_w - 1.0f;
+   const float x1 = 2.0f * dst.right / fb_w - 1.0f;
+   const float y0 = 2.0f * dst.top / fb_h - 1.0f;
+   const float y1 = 2.0f * dst.bottom / fb_h - 1.0f;
+   const float verts[8] = { x0, y0, x1, y0, x0, y1, x1, y1 };
+   struct pipe_vertex_buffer vb;
+   memset(&vb, 0, sizeof(vb));
+   unsigned vb_offset = 0;
+   struct pipe_resource *vb_release = NULL;
+   u_upload_data(pipe->stream_uploader, 0, sizeof(verts), 16, verts,
+                 &vb_offset, &vb.buffer.resource, &vb_release);
+   vb.buffer_offset = vb_offset;
+
+   bool ok = fs && view && vb.buffer.resource;
+   if (ok) {
+      struct pipe_framebuffer_state fb;
+      memset(&fb, 0, sizeof(fb));
+      fb.width = fb_w;
+      fb.height = fb_h;
+      fb.nr_cbufs = 1;
+      {
+         /* moose-ripple: Mesa 24.3 wants the surface as an object */
+         struct pipe_surface templ;
+         memset(&templ, 0, sizeof(templ));
+         templ.format = dst_tex->format;
+         templ.u.tex.level = dst_level;
+         templ.u.tex.first_layer = templ.u.tex.last_layer = dst_layer;
+         fb.cbufs[0] = pipe->create_surface(pipe, dst_tex, &templ);
+      }
+      pipe->set_framebuffer_state(pipe, &fb);
+      pipe_surface_reference(&fb.cbufs[0], NULL);
+
+      struct pipe_viewport_state vp;
+      memset(&vp, 0, sizeof(vp));
+      vp.scale[0] = fb_w * 0.5f;
+      vp.scale[1] = fb_h * 0.5f;
+      vp.scale[2] = 1.0f;
+      vp.translate[0] = fb_w * 0.5f;
+      vp.translate[1] = fb_h * 0.5f;
+      vp.swizzle_x = PIPE_VIEWPORT_SWIZZLE_POSITIVE_X;
+      vp.swizzle_y = PIPE_VIEWPORT_SWIZZLE_POSITIVE_Y;
+      vp.swizzle_z = PIPE_VIEWPORT_SWIZZLE_POSITIVE_Z;
+      vp.swizzle_w = PIPE_VIEWPORT_SWIZZLE_POSITIVE_W;
+      pipe->set_viewport_states(pipe, 0, 1, &vp);
+
+      const bool mirror_x = data->Flags.MirrorLeftRight != 0;
+      const bool mirror_y = data->Flags.MirrorUpDown != 0;
+      const bool mirror = mirror_x || mirror_y;
+      const float centre = mirror ? 0.5f : 0.0f;
+      float constants[20];
+      memset(constants, 0, sizeof(constants));
+      constants[0] = mirror_x ? (float)dst.right - centre : -(float)dst.left - centre;
+      constants[1] = mirror_y ? (float)dst.bottom - centre : -(float)dst.top - centre;
+      constants[2] = 0.25f / (float)dw;
+      constants[3] = 0.25f / (float)dh;
+      constants[4] = (float)sw / (float)dw;
+      constants[5] = (float)sh / (float)dh;
+      constants[6] = mirror_x ? -1.0f : 1.0f;
+      constants[7] = mirror_y ? -1.0f : 1.0f;
+      constants[8] = (float)src_x + 0.5f;
+      constants[9] = (float)src_y + 0.5f;
+      constants[10] = 1.0f / tex_w;
+      constants[11] = 1.0f / tex_h;
+      if (color_key) {
+         uint32_t key = data->ColorKey;
+         util_format_unpack_rgba(src_format, &constants[12], &key, 1);
+         unsigned bits = 0;
+         for (unsigned c = 0; c < 3; ++c)
+            bits = MAX2(bits, util_format_get_component_bits(
+                                 src_format, UTIL_FORMAT_COLORSPACE_RGB, c));
+         const float tolerance = bits ? 0.5f / (float)((1u << MIN2(bits, 24u)) - 1u) :
+            0.5f / 255.0f;
+         /* The emulation layer compares colour only; alpha never keys. */
+         for (unsigned c = 0; c < 3; ++c)
+            constants[16 + c] = tolerance;
+         constants[19] = 2.0f;
+      }
+      struct pipe_constant_buffer cb;
+      memset(&cb, 0, sizeof(cb));
+      cb.user_buffer = constants;
+      cb.buffer_size = sizeof(constants);
+
+      pipe->bind_blend_state(pipe, device->key_blit.blend);
+      pipe->bind_rasterizer_state(pipe, device->key_blit.rasterizer);
+      pipe->bind_depth_stencil_alpha_state(pipe, device->key_blit.dsa);
+      if (pipe->set_sample_mask)
+         pipe->set_sample_mask(pipe, ~0u);
+      pipe->bind_vs_state(pipe, device->key_blit.vs);
+      pipe->bind_gs_state(pipe, NULL);
+      pipe->bind_fs_state(pipe, fs);
+      pipe->set_constant_buffer(pipe, MESA_SHADER_VERTEX, 0, false, NULL);
+      pipe->set_constant_buffer(pipe, MESA_SHADER_FRAGMENT, 0, false, &cb);
+      pipe->bind_sampler_states(pipe, MESA_SHADER_FRAGMENT, 0, 1,
+                                &device->key_blit.sampler);
+      pipe->set_sampler_views(pipe, MESA_SHADER_FRAGMENT, 0, 1, 0, false, &view);
+      pipe->bind_vertex_elements_state(pipe, device->key_blit.velems);
+      {
+         /* moose-ripple: Mesa 24.3's context takes over one reference to the buffer */
+         struct pipe_resource *held = NULL;
+         pipe_resource_reference(&held, vb.buffer.resource);
+      }
+      pipe->set_vertex_buffers(pipe, 1, &vb);
+
+      util_draw_arrays(pipe, MESA_PRIM_TRIANGLE_STRIP, 0, 4);
+
+      pipe->set_vertex_buffers(pipe, 0, NULL);
+      pipe->bind_vertex_elements_state(pipe, NULL);
+      pipe->set_sampler_views(pipe, MESA_SHADER_FRAGMENT, 0, 0, 1, false, NULL);
+      void *null_sampler = NULL;
+      pipe->bind_sampler_states(pipe, MESA_SHADER_FRAGMENT, 0, 1,
+                                &null_sampler);
+      pipe->set_constant_buffer(pipe, MESA_SHADER_FRAGMENT, 0, false, NULL);
+      pipe->bind_vs_state(pipe, NULL);
+      pipe->bind_fs_state(pipe, NULL);
+      pipe->bind_depth_stencil_alpha_state(pipe, NULL);
+      pipe->bind_rasterizer_state(pipe, NULL);
+      pipe->bind_blend_state(pipe, NULL);
+      memset(&fb, 0, sizeof(fb));
+      pipe->set_framebuffer_state(pipe, &fb);
+      ok = !yttrium_gdi_take_draw_failure(pipe);
+      if (ok) {
+         dst_sub->cpu_dirty = false;
+         D3D9MarkAutogenMipmapsDirty(dst_resource, data->DstSubResourceIndex);
+      }
+   }
+
+   pipe_resource_release(pipe, vb_release);
+   if (view)
+      pipe_sampler_view_release(view);
+   pipe_resource_reference(&copy, NULL);
+   return ok;
+}
+
 HRESULT APIENTRY
 D3D9Blt(HANDLE hDevice, const D3DDDIARG_BLT *data)
 {
@@ -3661,18 +4165,25 @@ D3D9Blt(HANDLE hDevice, const D3DDDIARG_BLT *data)
    if (!device || !data)
       return E_INVALIDARG;
 
-   if (data->Flags.SrcColorKey || data->Flags.DstColorKey ||
-       data->Flags.MirrorLeftRight ||
-       data->Flags.MirrorUpDown || data->Flags.LinearToSrgb ||
+   if (data->Flags.DstColorKey || data->Flags.LinearToSrgb ||
        data->Flags.Rotate) {
       static volatile LONG logged;
       D3D9WarnOncef(
          &logged,
          "unsupported D3D9 blit owner=d3d9-blt "
-         "reason=colorkey-transform-not-implemented "
+         "reason=dstkey-srgb-rotate-not-implemented "
          "action=reject flags=0x%08x color_key=0x%08x\n",
          data->Flags.Value, data->ColorKey);
       return E_NOTIMPL;
+   }
+
+   if (data->Flags.SrcColorKey || data->Flags.MirrorLeftRight ||
+       data->Flags.MirrorUpDown) {
+      const HRESULT hr = D3D9KeyBlitPipe(device, data) ? S_OK : E_NOTIMPL;
+      D3D9Tracef("Blt colorkey=%u key=0x%08x mirror=%u%u hr=0x%08lx\n",
+                 data->Flags.SrcColorKey, data->ColorKey,
+                 data->Flags.MirrorLeftRight, data->Flags.MirrorUpDown, hr);
+      return hr;
    }
 
    HRESULT hr = D3D9CopyRectPipe(device, data->hDstResource,

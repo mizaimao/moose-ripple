@@ -1,6 +1,7 @@
 ﻿/*
  * Copyright 2011 Joakim Sindholt <opensource@zhasha.com>
  * Copyright 2013 Christoph Bumiller
+ * Copyright 2026 VMLabDev and contributors
  * SPDX-License-Identifier: MIT
  */
 
@@ -1412,9 +1413,13 @@ _tx_dst_param(struct shader_translator *tx, const struct sm1_dst_param *param)
             dst = tx->regs.oPos;
             break;
         case 1:
+            /* Not clamped here: D3D9 clamps the fog factor after
+             * interpolation (shader_add_ps_fog_stage), so a factor outside
+             * [0, 1] at a vertex still moves the fog edge inside the
+             * primitive. */
             if (ureg_dst_is_undef(tx->regs.oFog))
                 tx->regs.oFog =
-                    ureg_saturate(ureg_DECL_output(tx->ureg, TGSI_SEMANTIC_GENERIC, 16));
+                    ureg_DECL_output(tx->ureg, TGSI_SEMANTIC_GENERIC, 16);
             dst = tx->regs.oFog;
             break;
         case 2:
@@ -4007,7 +4012,7 @@ shader_add_ps_fog_stage(struct shader_translator *tx, struct ureg_dst dst_col, s
         fog_vs = ureg_scalar(ureg_DECL_fs_input(ureg, TGSI_SEMANTIC_GENERIC, 16,
                                             TGSI_INTERPOLATE_PERSPECTIVE),
                                             TGSI_SWIZZLE_X);
-        ureg_MOV(ureg, fog_factor, fog_vs);
+        ureg_MOV(ureg, ureg_saturate(fog_factor), fog_vs);
     }
 
     ureg_LRP(ureg, ureg_writemask(dst_col, TGSI_WRITEMASK_XYZ),

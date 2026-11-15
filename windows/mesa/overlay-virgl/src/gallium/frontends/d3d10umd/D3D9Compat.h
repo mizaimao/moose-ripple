@@ -14,6 +14,9 @@
 #include "util/u_inlines.h"
 #include "util/u_upload_mgr.h"
 
+/* A trace call of the tree the later patches were made against; this one has none */
+#define D3D9Tracef(...) ((void)0)
+
 /* Give up one reference */
 static inline void
 pipe_resource_release(struct pipe_context *pipe, struct pipe_resource *resource)

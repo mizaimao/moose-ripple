@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: MIT
  *
  * Copyright 2026 Ake Rehnman
+ * Copyright 2026 VMLabDev and contributors
  */
 #include "D3D9Private.h"
 #include "D3D9NineShader.h"
@@ -68,11 +69,21 @@ struct D3D9AutoUploadResources
    }
 };
 
+/*
+ * Table fog uses eye-space depth (w) when the projection is perspective and
+ * screen z otherwise.  When the runtime emulates fixed-function vertex
+ * processing with shaders it never calls SetTransform, so the projection
+ * the UMD holds stays the identity.  The runtime still reports the w range
+ * of the projection through UpdateWInfo, and sends WNear == WFar (1.0) for a
+ * projection that is not perspective.
+ */
 static bool
 D3D9ProjectionUsesZFog(const D3D9Device *device)
 {
    const D3DMATRIX &projection = device->transforms[D3DTS_PROJECTION];
 
+   if (device->winfo.WNear != device->winfo.WFar)
+      return false;
    return projection._34 == 0.0f && projection._44 == 1.0f;
 }
 
@@ -189,7 +200,11 @@ D3D9TranslatedPsSamplerTypeOverrides(const D3D9Device *device,
       if (!texture)
          continue;
 
-      *types |= D3D9SmSamplerTypeFromTexture(texture) << (stage * 3);
+      const uint64_t sampler_type = D3D9SmSamplerTypeFromTexture(texture);
+      /* Keep the shader declaration until the texture has a pipe resource. */
+      if (!sampler_type)
+         continue;
+      *types |= sampler_type << (stage * 3);
       *mask |= 1u << stage;
    }
 }
@@ -550,7 +565,7 @@ static bool
 D3D9CanUsePositionTDiffuseFixedFunction(const D3D9Device *device);
 
 static bool
-D3D9InitPositionTTexture0RuntimePsFixedFunctionVsInfo(
+D3D9InitPositionTRuntimePsFixedFunctionVsInfo(
    const D3D9Device *device, const D3D9Object *ps, D3D9Object *vs_shader);
 
 static bool
@@ -889,23 +904,28 @@ D3D9CanUsePositionTDiffuseFixedFunction(const D3D9Device *device)
 }
 
 static bool
-D3D9InitPositionTTexture0RuntimePsFixedFunctionVsInfo(
+D3D9AppendUniqueVsInput(D3D9Object *shader, uint16_t usage);
+
+/*
+ * Pre-transformed (POSITIONT) fixed-function draws reach the UMD with the
+ * runtime's generated fixed-function pixel shader and no vertex shader.  The
+ * generated vertex shader passes POSITIONT through as a clip-space position
+ * and passes every colour and texture-coordinate element of the declaration
+ * through, plus the diffuse colour, which defaults to white.  That pixel
+ * shader is ps_2_0, whose inputs are fixed registers (v0, v1, t0 to t7)
+ * rather than declared usages, so the declaration, not the shader, says
+ * what to feed.  Earlier only POSITIONT+TEXCOORD0 with one 2D texture was
+ * accepted, so the common XYZRHW|DIFFUSE|TEX1 vertex (and any
+ * multi-texture one) failed with E_FAIL.
+ */
+static bool
+D3D9InitPositionTRuntimePsFixedFunctionVsInfo(
    const D3D9Device *device, const D3D9Object *ps, D3D9Object *vs_shader)
 {
-   if (!device || !ps || !vs_shader || !device->pixel_shader ||
-       !device->textures[0])
+   if (!device || !ps || !vs_shader || !device->pixel_shader)
       return false;
    if (ps->kind != D3D9_OBJECT_SHADER || !ps->translated_ps_cso ||
        !D3D9ShaderHasRuntimeFixedFunctionComment(ps))
-      return false;
-
-   for (UINT i = 1; i < ARRAYSIZE(device->textures); ++i) {
-      if (device->textures[i])
-         return false;
-   }
-
-   if ((ps->translated_ps_sampler_mask & 1) == 0 ||
-       ps->translated_ps_sampler_targets[0] != TGSI_TEXTURE_2D)
       return false;
 
    const D3D9Object *decl = (const D3D9Object *)device->vertex_shader_decl;
@@ -915,35 +935,32 @@ D3D9InitPositionTTexture0RuntimePsFixedFunctionVsInfo(
    const D3DDDIVERTEXELEMENT *elements =
       (const D3DDDIVERTEXELEMENT *)decl->data;
    const UINT element_count = (UINT)(decl->size / sizeof(*elements));
-   uint16_t position_usage = NINE_DECLUSAGE_NONE;
-   bool texcoord0 = false;
+   bool position_t = false;
+
+   memset(vs_shader, 0, sizeof(*vs_shader));
+   vs_shader->kind = D3D9_OBJECT_SHADER;
+   if (!D3D9AppendUniqueVsInput(vs_shader, NINE_DECLUSAGE_i(POSITIONT, 0)) ||
+       !D3D9AppendUniqueVsInput(vs_shader, NINE_DECLUSAGE_i(COLOR, 0)))
+      return false;
 
    for (UINT i = 0; i < element_count; ++i) {
       const D3DDDIVERTEXELEMENT *element = &elements[i];
       if (element->Stream == 0xff || element->Type == D3DDECLTYPE_UNUSED)
          break;
-
       const uint16_t usage = D3D9DeclElementUsage(element);
+      const unsigned base = usage % NINE_DECLUSAGE_COUNT;
       if (usage == NINE_DECLUSAGE_i(POSITIONT, 0) &&
-          element->Type == D3DDECLTYPE_FLOAT4) {
-         position_usage = usage;
-      } else if (usage == NINE_DECLUSAGE_i(TEXCOORD, 0) &&
-                 element->Type == D3DDECLTYPE_FLOAT2) {
-         texcoord0 = true;
-      } else {
+          element->Type == D3DDECLTYPE_FLOAT4)
+         position_t = true;
+      else if ((base == NINE_DECLUSAGE_COLOR ||
+                base == NINE_DECLUSAGE_TEXCOORD ||
+                usage == NINE_DECLUSAGE_FOG ||
+                usage == NINE_DECLUSAGE_PSIZE) &&
+               !D3D9AppendUniqueVsInput(vs_shader, usage))
          return false;
-      }
    }
 
-   if (position_usage == NINE_DECLUSAGE_NONE || !texcoord0)
-      return false;
-
-   memset(vs_shader, 0, sizeof(*vs_shader));
-   vs_shader->kind = D3D9_OBJECT_SHADER;
-   vs_shader->translated_vs_num_inputs = 2;
-   vs_shader->translated_vs_input_map[0] = position_usage;
-   vs_shader->translated_vs_input_map[1] = NINE_DECLUSAGE_i(TEXCOORD, 0);
-   return true;
+   return position_t;
 }
 
 static bool
@@ -1094,6 +1111,27 @@ D3D9InitPositionTDiffuseFixedFunctionVsInfo(D3D9Object *shader)
    shader->translated_vs_input_map[1] = NINE_DECLUSAGE_i(COLOR, 0);
 }
 
+static bool
+D3D9ActiveDeclHasUsage(const D3D9Device *device, uint16_t usage)
+{
+   const D3D9Object *decl = (const D3D9Object *)device->vertex_shader_decl;
+   if (!decl || decl->kind != D3D9_OBJECT_VERTEX_DECL)
+      return false;
+
+   const D3DDDIVERTEXELEMENT *elements =
+      (const D3DDDIVERTEXELEMENT *)decl->data;
+   const UINT element_count = (UINT)(decl->size / sizeof(*elements));
+   for (UINT i = 0; i < element_count; ++i) {
+      if (elements[i].Stream == 0xff ||
+          elements[i].Type == D3DDECLTYPE_UNUSED)
+         break;
+      if (D3D9DeclElementUsage(&elements[i]) == usage)
+         return true;
+   }
+
+   return false;
+}
+
 static void *
 D3D9CreatePositionTPsInputFixedFunctionVs(D3D9Device *device,
                                           const D3D9Object *shader)
@@ -1148,9 +1186,43 @@ D3D9CreatePositionTPsInputFixedFunctionVs(D3D9Device *device,
          return NULL;
       }
 
+      /* A PSIZE element goes to the point expansion geometry shader in the
+       * generic slot the Nine vertex shaders use. */
+      if (shader->translated_vs_input_map[input] == NINE_DECLUSAGE_PSIZE) {
+         semantic = TGSI_SEMANTIC_GENERIC;
+         index = D3D9_NINE_POINT_SIZE_GENERIC;
+      }
       struct ureg_dst output =
          ureg_DECL_output(ureg, (enum tgsi_semantic)semantic, index);
-      ureg_MOV(ureg, output, inputs[input]);
+      /* Fixed-function vertex processing gives a vertex without a diffuse
+       * colour opaque white, not the zero default input. */
+      if (shader->translated_vs_input_map[input] ==
+             NINE_DECLUSAGE_i(COLOR, 0) &&
+          !D3D9ActiveDeclHasUsage(device, NINE_DECLUSAGE_i(COLOR, 0)))
+         ureg_MOV(ureg, output, ureg_imm1f(ureg, 1.0f));
+      else
+         ureg_MOV(ureg, output, inputs[input]);
+   }
+
+   /* Vertex fog for pre-transformed vertices.  Vertices the runtime
+    * processed in software carry the fog factor in a FOG element, which the
+    * loop above passed through as GENERIC 16.  Application XYZRHW vertices
+    * carry it in the alpha of the specular colour, and a vertex without one
+    * gets 0 (full fog).  The pixel shader's fog stage reads GENERIC 16 when
+    * no table fog mode is set (shader_add_ps_fog_stage). */
+   bool has_fog_input = false;
+   for (UINT input = 1; input < shader->translated_vs_num_inputs; ++input) {
+      if (shader->translated_vs_input_map[input] == NINE_DECLUSAGE_FOG)
+         has_fog_input = true;
+   }
+   if (device->render_states[D3DRS_FOGENABLE] && !has_fog_input) {
+      struct ureg_dst fog = ureg_DECL_output(ureg, TGSI_SEMANTIC_GENERIC, 16);
+      struct ureg_src fog_src = ureg_imm1f(ureg, 0.0f);
+      for (UINT input = 1; input < shader->translated_vs_num_inputs; ++input) {
+         if (shader->translated_vs_input_map[input] == NINE_DECLUSAGE_i(COLOR, 1))
+            fog_src = ureg_scalar(inputs[input], TGSI_SWIZZLE_W);
+      }
+      ureg_MOV(ureg, ureg_writemask(fog, TGSI_WRITEMASK_X), fog_src);
    }
 
    ureg_release_temporary(ureg, tmp);
@@ -1319,6 +1391,12 @@ D3D9CreatePositionTDiffuseFixedFunctionVs(D3D9Device *device)
             ureg_scalar(ureg_src(tmp), TGSI_SWIZZLE_W));
    ureg_MOV(ureg, out_pos, ureg_src(tmp));
    ureg_MOV(ureg, out_color, color);
+   /* No specular colour, so the vertex fog factor is 0 (full fog), as in
+    * D3D9CreatePositionTPsInputFixedFunctionVs. */
+   if (device->render_states[D3DRS_FOGENABLE]) {
+      struct ureg_dst fog = ureg_DECL_output(ureg, TGSI_SEMANTIC_GENERIC, 16);
+      ureg_MOV(ureg, ureg_writemask(fog, TGSI_WRITEMASK_X), ureg_imm1f(ureg, 0.0f));
+   }
    ureg_release_temporary(ureg, tmp);
    ureg_END(ureg);
 
@@ -1341,13 +1419,32 @@ struct D3D9AutoShaderState
    }
 };
 
+/*
+ * D3D9 points wider than one pixel are expanded to two triangles here.  The
+ * size is in pixels: the vertex shader's point size when it writes one,
+ * otherwise D3DRS_POINTSIZE (x_scale and y_scale then already hold
+ * size / viewport extent).  The offsets are scaled by the clip-space w, so
+ * points keep their pixel size under a perspective projection.
+ *
+ * Every varying a D3D9 pixel shader can read from fixed-function or sm1-3
+ * vertex processing is passed through: COLOR0, COLOR1 (GENERIC 8), the
+ * eight texture coordinate sets and the fog factor (GENERIC 16).  With
+ * D3DRS_POINTSPRITEENABLE the texture coordinates are replaced by the
+ * sprite's (0,0) top-left to (1,1) bottom-right.  Without it each corner
+ * keeps the vertex's coordinates and colours, as D3D9 draws a point of
+ * size > 1 with the vertex's attributes.
+ */
 static void *
-D3D9CreatePointPositionGs(struct pipe_context *pipe, float x_scale,
+D3D9CreatePointPositionGs(D3D9Device *device, float x_scale,
                           float y_scale, bool use_input_point_size,
                           bool use_generic_point_size,
-                          float point_size_min, float point_size_max)
+                          float point_size_min, float point_size_max,
+                          bool sprite)
 {
+   struct pipe_context *pipe = device->pipe;
    struct ureg_program *ureg = ureg_create(MESA_SHADER_GEOMETRY);
+   if (!ureg)
+      return NULL;
    struct ureg_src pos =
       ureg_src_dimension(ureg_DECL_input(ureg, TGSI_SEMANTIC_POSITION, 0,
                                          0, 1), 0);
@@ -1359,70 +1456,81 @@ D3D9CreatePointPositionGs(struct pipe_context *pipe, float x_scale,
                          TGSI_SEMANTIC_PSIZE,
                          use_generic_point_size ?
                          D3D9_NINE_POINT_SIZE_GENERIC : 0, 0, 1), 0) :
-      pos;
+      ureg_imm1f(ureg, 1.0f);
+   struct ureg_dst size = ureg_DECL_temporary(ureg);
    struct ureg_dst delta = ureg_DECL_temporary(ureg);
-   struct ureg_dst clamped_point_size = ureg_dst_undef();
    struct ureg_dst out_pos =
       ureg_DECL_output(ureg, TGSI_SEMANTIC_POSITION, 0);
-   struct ureg_dst out_texcoord0 =
-      ureg_DECL_output(ureg, TGSI_SEMANTIC_GENERIC, 0);
-   struct ureg_dst out_texcoord1 =
-      ureg_DECL_output(ureg, TGSI_SEMANTIC_GENERIC, 1);
+
+   const unsigned texcoord_sn =
+      device->screen->get_param(device->screen, PIPE_CAP_TGSI_TEXCOORD) ?
+      TGSI_SEMANTIC_TEXCOORD : TGSI_SEMANTIC_GENERIC;
+   struct {
+      unsigned semantic, index;
+      bool texcoord;
+   } varyings[11];
+   unsigned varying_count = 0;
+   varyings[varying_count++] = {TGSI_SEMANTIC_COLOR, 0, false};
+   varyings[varying_count++] = {TGSI_SEMANTIC_GENERIC, 8, false};
+   for (unsigned t = 0; t < 8; ++t)
+      varyings[varying_count++] = {texcoord_sn, t, true};
+   varyings[varying_count++] = {TGSI_SEMANTIC_GENERIC, 16, false};
+   struct ureg_src in_varying[ARRAY_SIZE(varyings)];
+   struct ureg_dst out_varying[ARRAY_SIZE(varyings)];
+   for (unsigned v = 0; v < varying_count; ++v) {
+      in_varying[v] = ureg_src_dimension(
+         ureg_DECL_input(ureg, (enum tgsi_semantic)varyings[v].semantic, varyings[v].index, 0, 1),
+         0);
+      out_varying[v] =
+         ureg_DECL_output(ureg, (enum tgsi_semantic)varyings[v].semantic, varyings[v].index);
+   }
 
    ureg_property(ureg, TGSI_PROPERTY_GS_INPUT_PRIM, MESA_PRIM_POINTS);
    ureg_property(ureg, TGSI_PROPERTY_GS_OUTPUT_PRIM,
                  MESA_PRIM_TRIANGLE_STRIP);
-   ureg_property(ureg, TGSI_PROPERTY_GS_MAX_OUTPUT_VERTICES, 6);
+   ureg_property(ureg, TGSI_PROPERTY_GS_MAX_OUTPUT_VERTICES, 4);
    ureg_property(ureg, TGSI_PROPERTY_GS_INVOCATIONS, 1);
 
+   /* size.xy = clamped point size * (x_scale, y_scale) * w */
+   ureg_MOV(ureg, ureg_writemask(size, TGSI_WRITEMASK_X),
+            ureg_scalar(point_size, TGSI_SWIZZLE_X));
    if (use_input_point_size) {
-      clamped_point_size = ureg_DECL_temporary(ureg);
-      ureg_MAX(ureg, ureg_writemask(clamped_point_size, TGSI_WRITEMASK_X),
-               ureg_scalar(point_size, TGSI_SWIZZLE_X),
+      ureg_MAX(ureg, ureg_writemask(size, TGSI_WRITEMASK_X),
+               ureg_scalar(ureg_src(size), TGSI_SWIZZLE_X),
                ureg_imm1f(ureg, point_size_min));
-      ureg_MIN(ureg, ureg_writemask(clamped_point_size, TGSI_WRITEMASK_X),
-               ureg_scalar(ureg_src(clamped_point_size), TGSI_SWIZZLE_X),
+      ureg_MIN(ureg, ureg_writemask(size, TGSI_WRITEMASK_X),
+               ureg_scalar(ureg_src(size), TGSI_SWIZZLE_X),
                ureg_imm1f(ureg, point_size_max));
-      point_size = ureg_src(clamped_point_size);
    }
+   ureg_MUL(ureg, ureg_writemask(size, TGSI_WRITEMASK_X),
+            ureg_scalar(ureg_src(size), TGSI_SWIZZLE_X),
+            ureg_scalar(pos, TGSI_SWIZZLE_W));
+   ureg_MUL(ureg, ureg_writemask(size, TGSI_WRITEMASK_XY),
+            ureg_scalar(ureg_src(size), TGSI_SWIZZLE_X),
+            ureg_imm4f(ureg, x_scale, y_scale, 0.0f, 0.0f));
 
-   const UINT vertex_indices[6] = {0, 1, 2, 2, 1, 3};
-   for (UINT vertex = 0; vertex < 6; ++vertex) {
-      const UINT i = vertex_indices[vertex];
+   for (UINT i = 0; i < 4; ++i) {
       const float x_sign = (i & 1) ? 1.0f : -1.0f;
       const float y_sign = (i & 2) ? -1.0f : 1.0f;
       const float s = (i & 1) ? 1.0f : 0.0f;
       const float t = (i & 2) ? 1.0f : 0.0f;
 
+      ureg_MUL(ureg, ureg_writemask(delta, TGSI_WRITEMASK_XY),
+               ureg_src(size), ureg_imm4f(ureg, x_sign, y_sign, 0.0f, 0.0f));
       ureg_MOV(ureg, out_pos, pos);
-      ureg_MUL(ureg, ureg_writemask(delta, TGSI_WRITEMASK_X),
-               ureg_scalar(point_size, use_input_point_size ?
-                            TGSI_SWIZZLE_X : TGSI_SWIZZLE_W),
-               ureg_imm1f(ureg, x_scale));
-      ureg_MAD(ureg, ureg_writemask(out_pos, TGSI_WRITEMASK_X),
-               ureg_scalar(ureg_src(delta), TGSI_SWIZZLE_X),
-               ureg_imm1f(ureg, x_sign),
-               ureg_scalar(pos, TGSI_SWIZZLE_X));
-      ureg_MUL(ureg, ureg_writemask(delta, TGSI_WRITEMASK_Y),
-               ureg_scalar(point_size, use_input_point_size ?
-                            TGSI_SWIZZLE_X : TGSI_SWIZZLE_W),
-               ureg_imm1f(ureg, y_scale));
-      ureg_MAD(ureg, ureg_writemask(out_pos, TGSI_WRITEMASK_Y),
-               ureg_scalar(ureg_src(delta), TGSI_SWIZZLE_Y),
-               ureg_imm1f(ureg, y_sign),
-               ureg_scalar(pos, TGSI_SWIZZLE_Y));
-      ureg_MOV(ureg, out_texcoord0,
-               ureg_imm4f(ureg, s, t, 0.0f, 0.0f));
-      ureg_MOV(ureg, out_texcoord1,
-               ureg_imm4f(ureg, s, t, 0.0f, 0.0f));
+      ureg_ADD(ureg, ureg_writemask(out_pos, TGSI_WRITEMASK_XY),
+               pos, ureg_src(delta));
+      for (unsigned v = 0; v < varying_count; ++v) {
+         if (sprite && varyings[v].texcoord)
+            ureg_MOV(ureg, out_varying[v], ureg_imm4f(ureg, s, t, 0.0f, 1.0f));
+         else
+            ureg_MOV(ureg, out_varying[v], in_varying[v]);
+      }
       ureg_EMIT(ureg, ureg_imm1u(ureg, 0));
-      if (vertex == 2)
-         ureg_ENDPRIM(ureg, ureg_imm1u(ureg, 0));
    }
    ureg_ENDPRIM(ureg, ureg_imm1u(ureg, 0));
-   if (!ureg_dst_is_undef(clamped_point_size))
-      ureg_release_temporary(ureg, clamped_point_size);
    ureg_release_temporary(ureg, delta);
+   ureg_release_temporary(ureg, size);
    ureg_END(ureg);
    return ureg_create_shader_and_destroy(ureg, pipe);
 }
@@ -1629,6 +1737,12 @@ D3D9CreateRasterizerState(D3D9Device *device, bool depth_clamp,
    }
    state.fill_front = PIPE_POLYGON_MODE_FILL;
    state.fill_back = PIPE_POLYGON_MODE_FILL;
+   state.offset_units =
+      D3D9RenderStateFloat(device->render_states[D3DRS_DEPTHBIAS]);
+   state.offset_scale =
+      D3D9RenderStateFloat(device->render_states[D3DRS_SLOPESCALEDEPTHBIAS]);
+   state.offset_units_unscaled = 1;
+   state.offset_tri = state.offset_units != 0.0f || state.offset_scale != 0.0f;
    state.line_width = 1.0f;
    state.point_size = D3D9PointSize(device);
    state.point_quad_rasterization = !point_position_gs &&
@@ -2312,6 +2426,11 @@ D3D9CreateTextureBinding(D3D9Device *device, UINT stage,
       view.swizzle_b = PIPE_SWIZZLE_X;
       view.swizzle_a = PIPE_SWIZZLE_1;
    }
+   if (texture->format == D3D9_FMT_A8L8) {
+      view.swizzle_g = PIPE_SWIZZLE_X;
+      view.swizzle_b = PIPE_SWIZZLE_X;
+      view.swizzle_a = PIPE_SWIZZLE_Y;
+   }
    if (texture->format == D3D9_FMT_R16F ||
        texture->format == D3D9_FMT_R32F) {
       view.swizzle_g = PIPE_SWIZZLE_1;
@@ -2324,6 +2443,9 @@ D3D9CreateTextureBinding(D3D9Device *device, UINT stage,
       view.swizzle_b = PIPE_SWIZZLE_1;
       view.swizzle_a = PIPE_SWIZZLE_1;
    }
+   if (texture->format == D3D9_FMT_L6V5U5 ||
+       texture->format == D3D9_FMT_X8L8V8U8)
+      view.swizzle_a = PIPE_SWIZZLE_1;
    if (texture->format == D3D9_FMT_V8U8 ||
        texture->format == D3D9_FMT_V16U16) {
       view.swizzle_b = PIPE_SWIZZLE_1;
@@ -2778,10 +2900,10 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       D3D9CanUsePositionTDiffuseFixedFunction(device);
    const D3D9Object *current_ps =
       translated_ps ? (const D3D9Object *)device->pixel_shader : NULL;
-   const bool generate_position_t_texture0_runtime_ps_vs =
+   const bool generate_position_t_runtime_ps_vs =
       !generate_position_t_ps_input_vs && !generate_position_t_diffuse_vs &&
       !device->vertex_shader_func && !translated_vs && translated_ps &&
-      D3D9InitPositionTTexture0RuntimePsFixedFunctionVsInfo(
+      D3D9InitPositionTRuntimePsFixedFunctionVsInfo(
          device, current_ps, &fixed_function_vs_shader);
    /* DrawPrimitive2 can carry runtime-processed SWVP vertices. */
    const bool generate_position_t_runtime_processed_diffuse_vs =
@@ -2791,7 +2913,8 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       D3D9InitPositionTDiffuseFixedFunctionVsInfo(&fixed_function_vs_shader);
    const bool generate_position_t_runtime_processed_vs =
       runtime_transformed_vertices && D3D9ActiveVertexDeclHasPositionT(device) &&
-      !generate_position_t_runtime_processed_diffuse_vs && translated_ps &&
+      !generate_position_t_runtime_processed_diffuse_vs &&
+      !generate_position_t_runtime_ps_vs && translated_ps &&
       D3D9InitPositionTPsInputFixedFunctionVsInfo(&fixed_function_vs_shader,
                                                   current_ps);
    /*
@@ -2802,13 +2925,13 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
     */
    const bool replace_position_t_runtime_ff_vs =
       runtime_fixed_function_pair && D3D9ActiveVertexDeclHasPositionT(device) &&
-      D3D9InitPositionTTexture0RuntimePsFixedFunctionVsInfo(
+      D3D9InitPositionTRuntimePsFixedFunctionVsInfo(
          device, current_ps, &fixed_function_vs_shader);
 
    if (((!translated_vs || replace_position_t_runtime_ff_vs) &&
         !generate_position_t_ps_input_vs &&
         !generate_position_t_diffuse_vs &&
-        !generate_position_t_texture0_runtime_ps_vs &&
+        !generate_position_t_runtime_ps_vs &&
         !generate_position_t_runtime_processed_diffuse_vs &&
         !generate_position_t_runtime_processed_vs &&
         !replace_position_t_runtime_ff_vs) || !translated_ps)
@@ -2828,7 +2951,7 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       translated_ps ? (const D3D9Object *)device->pixel_shader : NULL;
    const D3D9Object *translated_vs_shader =
       (generate_position_t_ps_input_vs || generate_position_t_diffuse_vs ||
-       generate_position_t_texture0_runtime_ps_vs ||
+       generate_position_t_runtime_ps_vs ||
        generate_position_t_runtime_processed_diffuse_vs ||
        generate_position_t_runtime_processed_vs ||
        replace_position_t_runtime_ff_vs) ?
@@ -2901,11 +3024,22 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
           &worker_vertex_uploads))
       return E_FAIL;
 
+   /* The generated POSITIONT vertex shader passes a PSIZE element through
+    * (D3D9InitPositionTRuntimePsFixedFunctionVsInfo). */
+   bool generated_vs_point_size = false;
+   if (translated_vs_shader == &fixed_function_vs_shader) {
+      for (UINT i = 0; i < fixed_function_vs_shader.translated_vs_num_inputs; ++i) {
+         if (fixed_function_vs_shader.translated_vs_input_map[i] ==
+             NINE_DECLUSAGE_PSIZE)
+            generated_vs_point_size = true;
+      }
+   }
    const bool point_position_gs =
       mode == MESA_PRIM_POINTS &&
-      (translated_vs_point_size || D3D9PointSize(device) > 1.0f);
+      (translated_vs_point_size || generated_vs_point_size ||
+       D3D9PointSize(device) > 1.0f);
    if (generate_position_t_ps_input_vs || generate_position_t_diffuse_vs ||
-       generate_position_t_texture0_runtime_ps_vs ||
+       generate_position_t_runtime_ps_vs ||
        generate_position_t_runtime_processed_diffuse_vs ||
        generate_position_t_runtime_processed_vs ||
        replace_position_t_runtime_ff_vs) {
@@ -2913,7 +3047,7 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
          (generate_position_t_ps_input_vs ||
           replace_position_t_runtime_ff_vs ||
           generate_position_t_runtime_processed_vs ||
-          generate_position_t_texture0_runtime_ps_vs) ?
+          generate_position_t_runtime_ps_vs) ?
          D3D9CreatePositionTPsInputFixedFunctionVs(device,
                                                    &fixed_function_vs_shader) :
          D3D9CreatePositionTDiffuseFixedFunctionVs(device);
@@ -2946,13 +3080,15 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       if (point_size_max <= 0.0f)
          point_size_max = 8192.0f;
 
-      point_gs = translated_vs_point_size ?
-         D3D9CreatePointPositionGs(pipe, 1.0f / width, 1.0f / height, true,
-                                   translated_vs_point_size,
-                                   point_size_min, point_size_max) :
-         D3D9CreatePointPositionGs(pipe, point_size / width,
+      const bool sprite =
+         device->render_states[D3DRS_POINTSPRITEENABLE] != 0;
+      point_gs = translated_vs_point_size || generated_vs_point_size ?
+         D3D9CreatePointPositionGs(device, 1.0f / width, 1.0f / height, true,
+                                   true,
+                                   point_size_min, point_size_max, sprite) :
+         D3D9CreatePointPositionGs(device, point_size / width,
                                    point_size / height, false, false,
-                                   point_size_min, point_size_max);
+                                   point_size_min, point_size_max, sprite);
    }
 
    unsigned constants_size = 0;

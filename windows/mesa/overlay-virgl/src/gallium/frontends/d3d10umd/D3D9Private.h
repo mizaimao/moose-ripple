@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: MIT
  *
  * Copyright 2026 Ake Rehnman
+ * Copyright 2026 VMLabDev and contributors
  */
 
 #pragma once
@@ -73,6 +74,9 @@ struct D3D9Resource;
 struct D3D9Device
 {
    HANDLE hRTDevice;
+   /* D3DDDIARG_CREATEDEVICE::Interface: 9 for the D3D9 runtime, lower for
+    * DirectDraw and Direct3D 7 and earlier. */
+   UINT runtime_interface;
    D3DDDI_DEVICECALLBACKS callbacks;
    struct pipe_screen *screen;
    struct pipe_context *pipe;
@@ -103,6 +107,10 @@ struct D3D9Device
    struct pipe_resource *null_textures[4];
    D3D9Resource *last_systemmem_texture;
    D3D9Resource *last_systemmem_buffer;
+   /* D3D9KeyBlitPipe's shaders and state, made on first use. */
+   struct {
+      void *vs, *fs[2], *sampler, *blend, *rasterizer, *dsa, *velems;
+   } key_blit;
    HANDLE render_targets[4];
    UINT render_target_subresources[4];
    HANDLE depth_stencil;
@@ -294,6 +302,8 @@ static constexpr D3DDDIFORMAT D3D9_FMT_R32F = (D3DDDIFORMAT)114;
 static constexpr D3DDDIFORMAT D3D9_FMT_G32R32F = (D3DDDIFORMAT)115;
 static constexpr D3DDDIFORMAT D3D9_FMT_A32B32G32R32F = (D3DDDIFORMAT)116;
 static constexpr D3DDDIFORMAT D3D9_FMT_V8U8 = (D3DDDIFORMAT)60;
+static constexpr D3DDDIFORMAT D3D9_FMT_L6V5U5 = (D3DDDIFORMAT)61;
+static constexpr D3DDDIFORMAT D3D9_FMT_X8L8V8U8 = (D3DDDIFORMAT)62;
 static constexpr D3DDDIFORMAT D3D9_FMT_Q8W8V8U8 = (D3DDDIFORMAT)63;
 static constexpr D3DDDIFORMAT D3D9_FMT_V16U16 = (D3DDDIFORMAT)64;
 static constexpr D3DDDIFORMAT D3D9_FMT_DXT1 = D3D9FourCC('D', 'X', 'T', '1');
@@ -385,3 +395,4 @@ HRESULT APIENTRY D3D9DrawIndexedPrimitive2(
    HANDLE hDevice, const D3DDDIARG_DRAWINDEXEDPRIMITIVE2 *data,
    UINT index_size, const void *indices, const UINT *index_remap);
 void D3D9DestroyDrawState(D3D9Device *device);
+void D3D9DestroyKeyBlitState(D3D9Device *device);
