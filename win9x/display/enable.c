@@ -186,6 +186,20 @@ static void vdd_register(void)
     dbg("r9x: VDD register "); dbg_hex(r); dbg("\r\n");
 }
 
+/* Tell the mini-VDD that the card is in our mode now: from here on it keeps other VMs and the
+   video BIOS away from the mode-setting ports. Without it (not installed) the driver works, but
+   a DOS session in a window can switch the card to text mode. */
+static void minivdd_hires(void)
+{
+    static BYTE said;
+    DWORD r = vdd_call(VDD_REGISTER_DISPLAY_DRIVER_INFO, RVD_HIRES_ON, 0, 0, 0);
+
+    if (!said) {
+        said = 1;
+        dbg(r == RVD_SIGNATURE ? "r9x: mini-VDD present\r\n" : "r9x: no mini-VDD\r\n");
+    }
+}
+
 /* What the user chose in Display Properties, as the VDD read it from the registry. */
 static void read_settings(void)
 {
@@ -230,6 +244,7 @@ static WORD hw_enable(void)
     vdd_call(VDD_PRE_MODE_CHANGE, 0, 0, 0, 0);
     set_mode();
     vdd_register();
+    minivdd_hires();
     vdd_call(VDD_POST_MODE_CHANGE, 0, 0, 0, 0);
     vdd_call(VDD_SAVE_DRIVER_STATE, 0, 0, 0, 0);
     return 1;
@@ -248,6 +263,7 @@ void __cdecl r9x_reset(void)
         set_dac(0, 256, lpColorTable);
     pd->deFlags &= ~BUSY;
     vdd_register();
+    minivdd_hires();
     vdd_call(VDD_SAVE_DRIVER_STATE, 0, 0, 0, 0);
 }
 

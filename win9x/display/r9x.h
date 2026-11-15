@@ -100,12 +100,18 @@ typedef struct {
 #define VDD_DRIVER_REGISTER     0x80
 #define VDD_DRIVER_UNREGISTER   0x81
 #define VDD_SAVE_DRIVER_STATE   0x82
+#define VDD_REGISTER_DISPLAY_DRIVER_INFO 0x83   /* passed on to the mini-VDD */
 #define VDD_GET_DISPLAY_CONFIG  0x85
 #define VDD_PRE_MODE_CHANGE     0x86
 #define VDD_POST_MODE_CHANGE    0x87
 
 #define STOP_IO_TRAP   0x4000       /* int 2Fh: the VDD stops trapping the VGA ports for us */
 #define START_IO_TRAP  0x4007
+
+/* Our mini-VDD (win9x/minivdd): told through VDD_REGISTER_DISPLAY_DRIVER_INFO with ECX 1 when
+   the card is in the driver's mode; it answers "RVD1" in EAX. */
+#define RVD_HIRES_ON   1UL
+#define RVD_SIGNATURE  0x31445652UL
 
 /* ---- ValidateMode --------------------------------------------------------------------------- */
 typedef struct { WORD dvmSize, dvmBpp; SHORT dvmXRes, dvmYRes; } DISPVALMODE;

@@ -17,8 +17,11 @@ this stage uses.
   tells the driver, which sets its mode again and has Windows repaint.
 - The pointer is the DIB engine's software pointer (colour and animated pointers included).
 
+- A DOS session in a window, and installing a monitor, leave the screen alone: the mini-VDD
+  (`win9x/minivdd/`, below) keeps the video BIOS off the card's mode-setting ports.
+
 Not there yet: hardware drawing (everything is the DIB engine in software, which QEMU makes fast
-enough for a desktop), DirectDraw, a hardware pointer, and a mini-VDD (below).
+enough for a desktop), DirectDraw and a hardware pointer.
 
 ## Files
 
@@ -28,6 +31,7 @@ enough for a desktop), DirectDraw, a hardware pointer, and a mini-VDD (below).
 | `display/asm.asm` | library entry, the forwarders to the DIB engine, and what 16-bit C can't do: 32-bit port I/O, the VDD's register calls, DPMI, interrupt hooks |
 | `display/r9x.h` | the driver interface's structures and constants, written out from the documentation |
 | `display/ripple9x.def`, `.rc` | exports by ordinal; the resources Windows reads from a display driver (screen metrics, system colours, stock fonts) |
+| `minivdd/ripplevd.asm`, `.def` | the mini-VDD: a VxD (32-bit kernel module) the VDD loads, which owns ports 01CEh and 01CFh |
 | `inf/ripple9x.inf` | setup information: matches `PCI\VEN_1AF4&DEV_1050` and `PCI\VEN_1234&DEV_1111` |
 | `build.sh` | builds on the Linux build host: `win9x/build.sh`, output in `build/win9x/` |
 
@@ -38,7 +42,7 @@ driver always writes a few lines there (`r9x: ...`); nothing listens on a real P
 ## Install
 
 Display Properties > Settings > Advanced > Adapter > Change > Have Disk, and point it at the
-folder with `ripple9x.inf` and `ripple9x.drv`. Or let the Add New Hardware wizard find the PCI
+folder with `ripple9x.inf`, `ripple9x.drv` and `ripplevd.vxd` (the three files `build.sh` makes). Or let the Add New Hardware wizard find the PCI
 display adapter and give it the same folder. Then pick a monitor type that allows the sizes you
 want (Advanced > Monitor): with "(Unknown Monitor)" Windows offers 640x480 only.
 
@@ -62,8 +66,13 @@ want (Advanced > Monitor): with "(Unknown Monitor)" Windows offers 640x480 only.
   mode-setting ports on every mode set. Windows' VDD traps the standard VGA ports of DOS
   sessions but knows nothing of ports 01CEh/01CFh, so a DOS session *in a window* (its BIOS sets
   text mode when it starts) switches the real card to text mode, and so does a BIOS call Windows
-  makes when a monitor is installed. The fix belongs in a mini-VDD (a small VxD loaded by the
-  VDD) that owns those two ports: next step.
+  makes when a monitor is installed. The mini-VDD takes the two ports over: the VM that has the
+  screen reaches the card (the display driver in protected mode, or a full-screen DOS session),
+  everything else writes to a private copy of the registers. While the VDD itself switches the
+  screen to or from a DOS session (it asks the BIOS for the mode) nothing is held back. The
+  display driver tells the mini-VDD when its mode is set (`VDD_REGISTER_DISPLAY_DRIVER_INFO`).
+- **The card only decodes 16-bit accesses** to those ports, so the trap handles word I/O itself
+  instead of letting VMM split it into bytes.
 
 ## Test VM notes
 

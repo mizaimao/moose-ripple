@@ -18,6 +18,7 @@ Ripple.Copy=11
 
 [SourceDisksFiles]
 ripple9x.drv=1
+ripplevd.vxd=1
 
 [Manufacturer]
 %Provider%=Ripple.Mfg
@@ -33,6 +34,7 @@ AddReg=Ripple.AddReg
 
 [Ripple.Copy]
 ripple9x.drv
+ripplevd.vxd
 
 [Ripple.DelReg]
 HKR,,Ver
@@ -41,13 +43,15 @@ HKR,DEFAULT
 HKR,MODES
 HKR,CURRENT
 
-; No mini-VDD yet: the system's VDD handles the card as a VGA for DOS boxes.
+; minivdd: our small VxD that keeps DOS sessions and the video BIOS off the card's mode-setting
+; ports while Windows has the screen.
 [Ripple.AddReg]
 HKR,,Ver,,4.0
 HKR,,DevLoader,,*vdd
 HKR,DEFAULT,Mode,,"8,640,480"
 HKR,DEFAULT,drv,,ripple9x.drv
 HKR,DEFAULT,vdd,,"*vdd"
+HKR,DEFAULT,minivdd,,ripplevd.vxd
 ; RefreshRate -1: the VDD passes the monitor's limits on (without the value Windows offers
 ; 640x480 only). DDC 1: the VDD asks the video BIOS for the monitor's EDID at start.
 HKR,DEFAULT,RefreshRate,,-1
