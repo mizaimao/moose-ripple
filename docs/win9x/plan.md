@@ -57,6 +57,9 @@ this project: nothing may look worse than without our driver).
    per-process clean-up, then step 4.
 4. **OpenGL on 98:** Mesa (virgl) built for Windows 98 as the ICD. First target: the Quake III
    Arena demo, accelerated.
+   *State 2026-11-15:* Mesa 24.3.4 builds for Windows 98 with a current clang and runs there
+   with its software renderer ([mesa.md](mesa.md)). Next: the virgl driver on our VxD, and
+   loading through Windows' own `opengl32.dll`.
 5. **Direct3D on 98:** the HAL for DirectX 7 (3DMark 99 and 2000), then the DirectX 8 and 9
    command stream (3DMark 2001 SE), translated to Gallium (Mesa's driver interface).
 6. **Windows 2000:** miniport and display driver; the OpenGL and Direct3D parts reused.
