@@ -2,7 +2,9 @@
 # One load test of the kernel driver in the Windows 7 test VM, as in docs/windows/test-vms.md
 # ("Load test, step by step"): roll the VM back to its snapshot, install the package the build
 # host serves, reboot onto our driver.
-#   PKG_URL=http://BUILD_HOST:8765/pkg tools/win7-debug/loadtest.sh N
+#   PKG_URL=http://BUILD_HOST:8765/pkg [PUT_URL=http://BUILD_HOST:8766] tools/win7-debug/loadtest.sh N
+# PUT_URL: a receiver for files out of the guest; with it the guest's helper scripts
+# (tools/win7-debug/guest, copied into the package folder beforehand) know both addresses.
 # N names the run: the guest's COM1 goes to /tmp/rb-$VMID-com1-runN.log on the VM host.
 # Run from the workstation the scripts/ helpers work from. Fixed waits and click positions for
 # an 800x600 guest desktop; look at the screen (scripts/screen.sh, afterwards screen-vnc.sh)
@@ -14,7 +16,7 @@ root=$(cd "$here/../.." && pwd)
 N=${1:?run number}
 : "${PKG_URL:?PKG_URL=http://BUILD_HOST:PORT/pkg}"
 SNAP=${SNAP:-pre-kmd}
-FILES=${FILES:-viogpu3d.inf viogpu3d.sys viogpu_d3d10.dll devcon.exe setres.ps1 d3d10test.exe}
+FILES=${FILES:-viogpu3d.inf viogpu3d.sys viogpu_d3d10.dll devcon.exe setres.ps1 rb.cmd get.cmd put.cmd inst.cmd prep.cmd}
 HWID='PCI\VEN_1AF4&DEV_1050&SUBSYS_11001AF4&REV_01'
 log=/tmp/rb-$VMID-com1-run$N.log
 
@@ -32,6 +34,8 @@ wait_s 8
 key "click 20012 16465" "sleep 3"                       # UAC: Yes
 typ "cd /d C:\\rb\\pkg & for %f in ($FILES) do @bitsadmin /transfer r$N%f /download /priority foreground $PKG_URL/%f C:\\rb\\pkg\\%f | findstr /c:\"Transfer complete\""
 wait_s 60
+typ "setx RB_GET $PKG_URL >nul & setx RB_PUT ${PUT_URL:-none} >nul"
+wait_s 3
 # Windows' own display error log, kept in memory for wddump.py
 typ 'cls & for %n in (1 2 3 4 5 6 7) do @reg add "HKLM\SYSTEM\CurrentControlSet\Control\Watchdog\Logging" /v %n-LevelSizeLg2 /t REG_DWORD /d 10 /f'
 wait_s 4

@@ -203,3 +203,20 @@ a copy of exactly the DLL the guest had:
 It prints the exception, the registers and every word of the crashed thread's stack that
 points into the DLL, named, innermost first. Stale words are in the list too; the real chain
 is usually plain to see.
+
+## Scripts in the guest
+
+Typing long command lines into the guest through QMP is slow and breaks easily. The small
+batch files in `tools/win7-debug/guest/` make one short line enough: copy them into the
+package folder on the build host next to the driver files, and the load test fetches them
+into `C:\rb\pkg` and sets two variables for them in the guest, `RB_GET` (the package folder's
+URL) and `RB_PUT` (the receiver of "Files out of the guest").
+
+- `rb NAME [ARGS]` fetches `NAME.cmd` from the package folder and runs it. A test is then a
+  batch file written on the build host and one line typed in the guest.
+- `get FILE...` and `put FILE...` fetch files and send results back.
+- `inst` replaces the user-mode driver in place (the compositor is stopped around it).
+- `prep` makes a crashing program leave a dump and no dialog ("Crash dumps").
+- `wei` runs Windows' full assessment with the driver's log and sends back the results.
+
+In `cmd`, `for %f in (..) do A & B` repeats B as well; put the loop in parentheses.
