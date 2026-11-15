@@ -337,35 +337,26 @@ NTSTATUS VioGpuAdapter::SetPowerState(_In_ ULONG HardwareUid,
     {
         if (DevicePowerState == PowerDeviceD0)
         {
-            vidpn.AcquirePostDisplayOwnership();
-
-            if (m_AdapterPowerState == PowerDeviceD3)
+            if (m_AdapterPowerState != PowerDeviceD0)
             {
-                DXGKARG_SETVIDPNSOURCEVISIBILITY Visibility;
-                Visibility.VidPnSourceId = D3DDDI_ID_ALL;
-                Visibility.Visible = FALSE;
-                vidpn.SetVidPnSourceVisibility(&Visibility);
+                // Back from sleep. The device is set up again and the threads run again, but
+                // QEMU resets every device when it wakes a guest, so the host has forgotten all
+                // surfaces and contexts; making them anew is not done yet, and the picture
+                // does not come back. Until it is, the INF asks Windows not to sleep.
+                VioGpuAdapterInit();
+                commander.Start();
+                vidpn.StartFlipThread();
             }
-            m_AdapterPowerState = DevicePowerState;
         }
-
-        switch (DevicePowerState)
+        else if (m_AdapterPowerState == PowerDeviceD0)
         {
-            case PowerDeviceUnspecified:
-            case PowerDeviceD0:
-                {
-                    VioGpuAdapterInit();
-                }
-                break;
-            case PowerDeviceD1:
-            case PowerDeviceD2:
-            case PowerDeviceD3:
-                {
-                    vidpn.Powerdown();
-                    VioGpuAdapterClose();
-                }
-                break;
+            // Nothing may touch the queues once they are closed: both threads go first.
+            vidpn.StopFlipThread();
+            commander.Stop();
+            vidpn.Powerdown();
+            VioGpuAdapterClose();
         }
+        m_AdapterPowerState = DevicePowerState;
         return STATUS_SUCCESS;
     }
     return STATUS_SUCCESS;

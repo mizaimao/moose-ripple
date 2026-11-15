@@ -354,7 +354,9 @@ VioGpu3DSetPointerPosition(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_SETPOI
         VioGpuDbgBreak();
         return STATUS_UNSUCCESSFUL;
     }
-    return STATUS_NOT_IMPLEMENTED;
+    // No hardware pointer yet: Windows draws the pointer itself. It still calls this (to hide a
+    // pointer it never showed) and logs an error for anything but success.
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -903,7 +905,7 @@ VOID VioGpu3DDpcRoutine(_In_ VOID *pDeviceContext)
     VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(pDeviceContext);
     if (!pAdapter->IsHardwareInit())
     {
-        DbgPrint(TRACE_LEVEL_FATAL, ("VioGpu (%p) is being called when not active!", pAdapter));
+        // A late one after the device was closed (power down, removal): nothing to do
         return;
     }
     pAdapter->DpcRoutine();

@@ -87,6 +87,7 @@ class VioGpuVidPN
 
     void Flip();
     static void FlipThread(void *ctx);
+    NTSTATUS StartFlipThread();
     void StopFlipThread();
 
     void ScreenChanged(UINT resId, const VIOGPU_BOX *box);

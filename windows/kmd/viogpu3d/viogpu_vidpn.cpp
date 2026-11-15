@@ -112,6 +112,19 @@ NTSTATUS VioGpuVidPN::Start(ULONG *pNumberOfViews, ULONG *pNumberOfChildren)
     DbgPrint(TRACE_LEVEL_INFORMATION,
              ("<--- %s ColorFormat = %d\n", __FUNCTION__, m_CurrentModes[0].DispInfo.ColorFormat));
 
+    return StartFlipThread();
+}
+
+NTSTATUS VioGpuVidPN::StartFlipThread()
+{
+    PAGED_CODE();
+
+    if (m_pFlipThread != NULL)
+    {
+        return STATUS_SUCCESS;
+    }
+
+    NTSTATUS Status;
     HANDLE threadHandle = 0;
     m_shouldFlipStop = false;
     Status = PsCreateSystemThread(&threadHandle, (ACCESS_MASK)0, NULL, (HANDLE)0, NULL, VioGpuVidPN::FlipThread, this);
