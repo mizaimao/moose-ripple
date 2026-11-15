@@ -126,8 +126,11 @@ Both patches match QEMU's DSDT byte for byte; if a QEMU version writes it differ
 don't apply. Tested for that case (the rename switched off): 10.6.8 boots as before, the HPET
 keeps 16, and the line A devices are back on 10. With the fix, gl-gears runs at 59 frames/s
 with its longest frame 17-19 ms, and `tools/timer-late` (4 threads, 24 s) has no sleep over
-20 ms late, as after the fix for #22 (docs/re/perf-notes.md). Untested so far: the SeaBIOS and
-OpenDuet path (9600 GT VMs) and UTM.
+20 ms late, as after the fix for #22 (docs/re/perf-notes.md).
+
+UTM (5.0.8, the release disk with the fix): its VM has no HPET, so lines A and B were on 16 and
+17 already; the SSDT finds no HPET to add to and isn't loaded, and 10.6.8 boots as before (no
+ACPI errors in the kernel log). Untested so far: the SeaBIOS and OpenDuet path (9600 GT VMs).
 
 ## Build and install
 
