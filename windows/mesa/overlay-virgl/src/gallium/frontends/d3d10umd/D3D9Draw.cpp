@@ -3078,6 +3078,14 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       return E_FAIL;
    }
    pipe->bind_vertex_elements_state(pipe, dynamic_vertex_elements);
+   /* moose-ripple: in Mesa 24.3 the context takes over one reference to every buffer
+    * it is given here (in 26.1 it takes none), so one is added for it. */
+   for (unsigned i = 0; i < vbuffer_count; ++i) {
+      if (!vbuffers[i].is_user_buffer && vbuffers[i].buffer.resource) {
+         struct pipe_resource *held = NULL;
+         pipe_resource_reference(&held, vbuffers[i].buffer.resource);
+      }
+   }
    pipe->set_vertex_buffers(pipe, vbuffer_count, vbuffers);
 
    if (indexed) {
