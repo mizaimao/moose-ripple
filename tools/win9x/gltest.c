@@ -10,6 +10,7 @@
  * spins the scene for the given number of seconds (default 3) and prints the frame rate.
  * With "single" as the last word it asks for a pixel format without a back buffer and draws
  * straight to the window (glFlush instead of SwapBuffers), as Windows' OpenGL screen savers do.
+ * With "text" it also draws text through wglUseFontBitmaps and wglUseFontOutlines.
  *
  * Exit status 0 when every pixel check passed. Output goes to standard output; run it as
  *   gltest > out.txt
@@ -127,6 +128,67 @@ static void scene(float angle, GLuint tex)
     glDisable(GL_BLEND);
 }
 
+/* How many pixels of a rectangle are not the clear colour. */
+static int drawn_pixels(int x, int y, int w, int h)
+{
+    static unsigned char buf[320 * 240 * 4];
+    int i, n = 0;
+
+    if (w * h * 4 > (int)sizeof buf)
+        return -1;
+    glReadPixels(x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, buf);
+    for (i = 0; i < w * h; i++) {
+        if (buf[i * 4] > 12 || buf[i * 4 + 1] > 12 || abs(buf[i * 4 + 2] - 102) > 12)
+            n++;
+    }
+    return n;
+}
+
+/* Text through Windows' own helpers, which build display lists in the driver: bitmap glyphs
+   (wglUseFontBitmaps) and glyph outlines as polygons (wglUseFontOutlines, what the 3D Text
+   screen saver draws with). */
+static void text_test(HDC dc, int w, int h)
+{
+    static GLYPHMETRICSFLOAT gmf[96];
+    HFONT font = CreateFont(-28, 0, 0, 0, FW_BOLD, 0, 0, 0, ANSI_CHARSET, OUT_TT_PRECIS,
+                            CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Arial");
+    HGDIOBJ old = SelectObject(dc, font);
+    BOOL bitmaps, outlines;
+    int n;
+
+    SetLastError(0);
+    bitmaps = wglUseFontBitmaps(dc, 32, 96, 1000);
+    printf("wglUseFontBitmaps: %s (error %lu)\n", bitmaps ? "ok" : "FAILED", GetLastError());
+    SetLastError(0);
+    outlines = wglUseFontOutlines(dc, 32, 96, 2000, 0.0f, 0.2f, WGL_FONT_POLYGONS, gmf);
+    printf("wglUseFontOutlines: %s (error %lu), glyph 'g' is %.2f wide\n",
+           outlines ? "ok" : "FAILED", GetLastError(), gmf['g' - 32].gmfCellIncX);
+
+    glClearColor(0.0f, 0.0f, 0.4f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(-1, 1, -1, 1, -1, 1);
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    glColor3f(1, 1, 1);
+    glRasterPos2f(-0.9f, 0.4f);
+    glListBase(1000 - 32);
+    glCallLists(6, GL_UNSIGNED_BYTE, "gltest");
+    glLoadIdentity();
+    glTranslatef(-0.9f, -0.6f, 0);
+    glScalef(0.6f, 0.6f, 0.6f);
+    glColor3f(1, 1, 0);
+    glListBase(2000 - 32);
+    glCallLists(6, GL_UNSIGNED_BYTE, "gltest");
+    glFinish();
+    n = drawn_pixels(0, h / 2, w, h / 2);
+    printf("  bitmap text: %d pixels drawn  %s\n", n, n > 50 ? "ok" : "WRONG");
+    if (n <= 50) failures++;
+    n = drawn_pixels(0, 0, w, h / 2);
+    printf("  outline text: %d pixels drawn  %s\n", n, n > 200 ? "ok" : "WRONG");
+    if (n <= 200) failures++;
+    SelectObject(dc, old);
+    DeleteObject(font);
+}
+
 int main(int argc, char **argv)
 {
     static const unsigned char texels[2 * 2 * 3] = {
@@ -135,8 +197,9 @@ int main(int argc, char **argv)
     };
     /* "nullpfd": SetPixelFormat without a descriptor, as Windows' OpenGL screen savers call it */
     int nullpfd = argc > 1 && !strcmp(argv[argc - 1], "nullpfd");
+    int text = argc > 1 && !strcmp(argv[argc - 1], "text");
     int single = argc > 1 && (nullpfd || !strcmp(argv[argc - 1], "single"));
-    int seconds = argc > 1 && !(single && argc == 2) ? atoi(argv[1]) : 3;
+    int seconds = argc > 1 && !((single || text) && argc == 2) ? atoi(argv[1]) : 3;
     int w = argc > 3 ? atoi(argv[2]) : 320, h = argc > 3 ? atoi(argv[3]) : 240;
     WNDCLASS wc;
     PIXELFORMATDESCRIPTOR pfd;
@@ -225,7 +288,15 @@ int main(int argc, char **argv)
     expect("texture: blue texel", w / 8, h * 3 / 8, 0, 0, 255);
     expect("texture: yellow texel", w * 3 / 8, h * 3 / 8, 255, 255, 0);
     expect("blend: white on blue", w * 3 / 4, h / 4, 128, 128, 179);
-    if (single) glFlush(); else SwapBuffers(dc);
+    if (text && w == 320 && h == 240) {
+        text_test(dc, w, h);
+        SwapBuffers(dc);
+        Sleep(2500);                    /* long enough to look at it */
+        seconds = 0;
+    } else if (single)
+        glFlush();
+    else
+        SwapBuffers(dc);
 
     start = GetTickCount();
     for (;;) {

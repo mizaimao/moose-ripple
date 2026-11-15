@@ -60,12 +60,13 @@ picture on a renderer of any speed). Side by side they look the same.
 
 **Windows 98's own OpenGL screen savers** run on the driver through `opengl32.dll`: 3D Pipes
 (drawn straight to the screen, no back buffer), 3D Flower Box and 3D Flying Objects. 3D Text
-makes its context and swaps buffers but shows nothing, with the host GPU and with the software
-renderer alike, so the cause is above the GPU path (its text comes from `wglUseFontOutlines`);
-3D Maze is not checked yet.
+shows a black screen on the test VM with every renderer, Microsoft's own included, so that
+is not the driver's doing; the Windows helpers it draws with (`wglUseFontOutlines`, and
+`wglUseFontBitmaps`, which many programs use for text) work through the driver: `gltest text`
+checks both. 3D Maze is not checked yet.
 
 Not there yet: a faster way to the screen than the read-back (it is what limits the frame
-rate above), 3D Text, a comparison against a real card of the time, and more programs.
+rate above), a comparison against a real card of the time, and more programs.
 
 ## How a 2024 Mesa gets onto a 1998 Windows
 
