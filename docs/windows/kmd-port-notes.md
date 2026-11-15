@@ -318,3 +318,18 @@ adapter, so Direct3D 9 does take it for a WDDM adapter; `GetDeviceCaps` for the 
 device fails with `D3DERR_NOTAVAILABLE`, because there is no Direct3D 9 driver behind it.
 Which of the two the compositor's test looks at is to be read out of `dwm.exe` and
 `dwmcore.dll` next.
+
+**Where the refusal comes from** (read out of `dwm.exe` with its public symbols, 2026-11-14):
+the event is raised in `CDwmAppHost::VerifyDisplayModesViaMIL`, which looks at the graphics
+capabilities its composition engine reports: "WDDM is not in use" when the engine's WDDM flag
+is zero, another refusal when the pixel shader version is below 2, another when the screen is
+not 32 bits deep. The engine takes those from Direct3D 9: the capabilities of the hardware
+device, which our adapter cannot give without a Direct3D 9 user-mode driver (the probe's
+`D3DERR_NOTAVAILABLE`). The compositor itself draws with Direct3D 10.1 on Windows 7. So what
+it needs first is a Direct3D 9 driver that answers the capability questions honestly enough
+(pixel shaders 2.0 or better); whether it then also draws anything through Direct3D 9 will
+show when it gets past this test.
+
+Tool note: `win32k.sys`, `dwm.exe`, `dwmcore.dll` and `uDWM.dll` were rearranged after
+linking, so their symbols need the address table in the symbol file (`resym.py` applies it
+now); `dxgkrnl.sys` and `dxgmms1.sys` were not.

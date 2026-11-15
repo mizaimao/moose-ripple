@@ -4,7 +4,7 @@
   resym.py map IMAGE PDB          write IMAGE.map (address name), from publics and imports
   resym.py dis IMAGE NAME [N]     disassemble NAME (to the next symbol, or N bytes), calls named
 """
-import struct, subprocess, sys, re, os
+import struct, subprocess, sys, re, os, bisect
 
 def pe(path):
     d = open(path, "rb").read()
@@ -46,9 +46,34 @@ def url(path):
             return
     print("no RSDS record")
 
+def omap(pdb):
+    """For a module whose code was rearranged after linking (most of Windows' big ones): the
+    section starts the symbols refer to, and the table from those addresses to the final ones.
+    None for a module that was left as linked."""
+    txt = subprocess.run(["llvm-pdbutil", "dump", "--streams", pdb], capture_output=True, text=True).stdout
+    idx = {}
+    for line in txt.splitlines():
+        m = re.search(r"Stream\s+(\d+) .*\[(Section Header Original Data|Omap From Source Data)\]", line)
+        if m:
+            idx[m.group(2)] = m.group(1)
+    if len(idx) != 2:
+        return None
+    raw = {}
+    for name, n in idx.items():
+        tmp = pdb + ".stream" + n
+        subprocess.run(["llvm-pdbutil", "export", "--stream=" + n, "--out=" + tmp, pdb], capture_output=True)
+        raw[name] = open(tmp, "rb").read()
+        os.remove(tmp)
+    sh = raw["Section Header Original Data"]
+    orig = [struct.unpack_from("<I", sh, 40 * i + 12)[0] for i in range(len(sh) // 40)]
+    om = raw["Omap From Source Data"]
+    table = [struct.unpack_from("<II", om, 8 * i) for i in range(len(om) // 8)]
+    return orig, [t[0] for t in table], [t[1] for t in table]
+
 def mkmap(path, pdb):
     d, base, ddir, secs, plus = pe(path)
     out = {}
+    moved = omap(pdb)
     txt = subprocess.run(["llvm-pdbutil", "dump", "--publics", pdb], capture_output=True, text=True).stdout
     # lines: "  123 | S_PUB32 [size = 36] `Name`" then "      flags = function, addr = 0001:00012345"
     name = None
@@ -60,7 +85,14 @@ def mkmap(path, pdb):
         m = re.search(r"addr = (\d+):(\d+)", line)
         if m and name:
             seg, off = int(m.group(1)), int(m.group(2))
-            if 1 <= seg <= len(secs):
+            if moved:
+                orig, src, dst = moved
+                if 1 <= seg <= len(orig):
+                    a = orig[seg - 1] + off
+                    i = bisect.bisect_right(src, a) - 1
+                    if i >= 0 and dst[i]:
+                        out[base + dst[i] + (a - src[i])] = name
+            elif 1 <= seg <= len(secs):
                 out[base + secs[seg - 1][1] + off] = name
             name = None
     imp = subprocess.run(["llvm-readobj", "--coff-imports", path], capture_output=True, text=True).stdout
