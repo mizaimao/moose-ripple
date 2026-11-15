@@ -135,7 +135,15 @@ void VioGpuAllocation::FlushToScreen(UINT scan_id)
 NTSTATUS VioGpuAllocation::GetStandardAllocationDriverData(DXGKARG_GETSTANDARDALLOCATIONDRIVERDATA *pStandardAllocation)
 {
     PAGED_CODE();
-    DbgPrint(TRACE_LEVEL_ERROR, ("---> %s type=%d\n", __FUNCTION__, pStandardAllocation->StandardAllocationType));
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s type=%d\n", __FUNCTION__, pStandardAllocation->StandardAllocationType));
+
+    // GDI's own surfaces for what it draws in windows: refused, so GDI keeps those in system
+    // memory and sends no drawing commands (driver.cpp, VioGpu3DRenderKm). Windows asks for
+    // every bitmap GDI makes, so the refusal is not logged.
+    if (pStandardAllocation->StandardAllocationType == D3DKMDT_STANDARDALLOCATION_GDISURFACE)
+    {
+        return STATUS_NOT_SUPPORTED;
+    }
 
     if (!pStandardAllocation->pResourcePrivateDriverData && !pStandardAllocation->pResourcePrivateDriverData)
     {

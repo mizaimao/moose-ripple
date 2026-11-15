@@ -527,6 +527,10 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 // refuses the adapter with any other, zero included.
                 pDriverCaps->WDDMVersion = DXGKDDI_WDDMv1;
 
+                // With DxgkDdiRenderKm, what makes this a WDDM 1.1 driver to Windows 7 (driver.cpp,
+                // VioGpu3DRenderKm)
+                pDriverCaps->PresentationCaps.SupportKernelModeCommandBuffer = 1;
+
                 // The only segment is an aperture the CPU cannot reach; see ripple_win7.h
                 pDriverCaps->MemoryManagementCaps.Value |= RIPPLE_VIDMMCAPS_SECTION_BACKED_PRIMARY;
 

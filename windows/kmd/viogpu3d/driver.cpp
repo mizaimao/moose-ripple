@@ -117,6 +117,8 @@ extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_
 
     InitialData.DxgkDdiPresent = VioGpu3DPresent;
     InitialData.DxgkDdiRender = VioGpu3DRender;
+    // What makes Windows 7 count the driver as WDDM 1.1 (see VioGpu3DRenderKm)
+    InitialData.DxgkDdiRenderKm = VioGpu3DRenderKm;
     InitialData.DxgkDdiPatch = VioGpu3DPatch;
     InitialData.DxgkDdiSubmitCommand = VioGpu3DSubmitCommand;
 
@@ -700,6 +702,23 @@ VioGpu3DRender(_In_ CONST HANDLE hDevice, _Inout_ DXGKARG_RENDER *pRender)
 
     VioGpuDevice *pDxContext = reinterpret_cast<VioGpuDevice *>(hDevice);
     return pDxContext->Render(pRender);
+}
+
+// Windows 7 counts a driver as WDDM 1.1 only if it can take GDI's drawing as commands from the
+// kernel: this entry point, DxgkDdiQueryVidPnHWCapability and SupportKernelModeCommandBuffer in
+// the presentation capabilities. Its compositor draws with Direct3D 10 on a WDDM 1.1 driver and
+// insists on Direct3D 9 on any other. GDI only sends such commands for surfaces it made as
+// D3DKMDT_STANDARDALLOCATION_GDISURFACE, which this driver refuses, so GDI keeps drawing its
+// windows in system memory and nothing arrives here.
+NTSTATUS
+APIENTRY
+VioGpu3DRenderKm(_In_ CONST HANDLE hContext, _Inout_ DXGKARG_RENDER *pRender)
+{
+    PAGED_CODE();
+    UNREFERENCED_PARAMETER(hContext);
+    UNREFERENCED_PARAMETER(pRender);
+    DbgPrint(TRACE_LEVEL_FATAL, ("<---> %s: GDI commands asked for, none are supported\n", __FUNCTION__));
+    return STATUS_NOT_SUPPORTED;
 }
 
 NTSTATUS

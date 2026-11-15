@@ -125,6 +125,10 @@ VioGpu3DDestroyAllocation(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_DESTROY
 
 NTSTATUS
 APIENTRY
+VioGpu3DRenderKm(_In_ CONST HANDLE hContext, _Inout_ DXGKARG_RENDER *pRender);
+
+NTSTATUS
+APIENTRY
 VioGpu3DGetStandardAllocationDriverData(_In_ CONST HANDLE hAdapter,
                                         _Inout_ DXGKARG_GETSTANDARDALLOCATIONDRIVERDATA *pStandardAllocation);
 
