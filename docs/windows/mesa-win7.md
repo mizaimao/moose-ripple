@@ -221,3 +221,30 @@ Not looked at yet: everything beyond that test. The fork's notes say what to exp
 (`docs/windows/yttrium-notes.md`): fixed-function drawing leans on the Direct3D 9 runtime
 turning it into shaders, user clip planes are not switched on, and every draw creates and
 destroys its state objects, which on virgl is a command to the host each.
+
+### What Windows' own assessments found (2026-11-15)
+
+Windows' assessment tool (`winsat`, the Windows Experience Index) was the first real user of
+the Direct3D 9 part, and of more of the Direct3D 10 part than the compositor needs. Each of
+these stopped it; in the order met, with how it was found:
+
+| Seen | Cause | Where it was put right |
+|---|---|---|
+| The tool crashed inside Direct3D 9 when it freed a resource | Every allocation was tied to the runtime's resource; virgl's winsys frees some later, when that resource is gone | Only primaries and shared resources are tied (`D3D9Resource.cpp`, `D3D9Host.cpp`) |
+| It crashed in our winsys during a draw (call chain read from a crash dump, `tools/win7-debug/dumpstack.py`) | Mesa 24.3 takes over a reference to each bound vertex buffer, 26.1 takes none | One reference added per buffer (`D3D9Draw.cpp`) |
+| Texture tests ended at once | Three 16-bit formats listed and not creatable | Mapped (`D3D9Resource.cpp`) |
+| Every Direct3D 10 test: "out of memory" | Direct3D's 24-bit depth with stencil exists on the host only in the other order | The screen is asked which order it has (patch 0022) |
+| A Direct3D 10 test drew nothing and "ran" at 12 000 frames a second | Indexable temporaries of a shader not declared as arrays; the host could not compile it and dropped the context | Declared as arrays (patch 0024) |
+| The same, for any program that cleared its device state | An end of a render condition that was never begun is an error on the host | Not sent (patch 0023) |
+| Video playback never started | The driver listed two video formats it cannot make, and answered "not implemented" to "how many video processors" | Formats not listed; the counts answered with none, so Windows uses its own software processor (`D3D9Adapter.cpp`) |
+| Blue screen when playback did start | The kernel driver's scan-line call was a debugging trap | A scan line worked out from the vertical-blank thread (`windows/kmd`, `GetScanLine`) |
+
+The last three kinds have one thing in common worth remembering: **the host renderer answers
+some mistakes by silently dropping everything a context draws afterwards**, and the guest
+sees no error. Its log (the VM host's journal) is the place to look first when a program runs
+and shows nothing, or runs absurdly fast.
+
+Tools that came out of it: the driver's own log (`RIPPLE_UMD_LOG=FILE` in the program's
+environment), a trace of every Direct3D 9 call into the driver with its result
+(`RIPPLE_UMD_TRACE=1` for failed calls, `2` for all), `dumpstack.py` for crash dumps and
+for dumps of a waiting program (`tools/win7-hello/dumpproc.c` writes those).

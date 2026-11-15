@@ -4,7 +4,7 @@
 ; windows/kmd/LICENSE) for Windows 7: x64 decoration, user-mode drivers in System32 (Windows 7
 ; has no DriverStore directory id 13), no msdv.inf, no PnpLockdown, FeatureScore F8 (WDDM 1.0/1.1), no catalog
 ; yet (Windows asks to confirm the unsigned package; the kernel driver itself is test-signed).
-; Only the Direct3D 10 user-mode driver for now: no Direct3D 9 one exists yet, and no OpenGL.
+; One user-mode driver DLL with both the Direct3D 9 and the Direct3D 10 part; no OpenGL yet.
 ;
 
 [Version]
@@ -76,8 +76,7 @@ HKR,, FlexResolution,     %REG_DWORD%, 1
 HKR,, UsePhysicalMemory,  %REG_DWORD%, 0
 ; Windows 7's graphics kernel reads these from this key (the driver key, Class\{4d36e968-...}\000N)
 ; and refuses the adapter without UserModeDriverName. User-mode drivers: first the Direct3D 9
-; one, then Direct3D 10 (x64 without 32-bit ones). No Direct3D 9 driver exists yet: the
-; Direct3D 10 one in both places for now.
+; one, then Direct3D 10 (x64 without 32-bit ones). Both are in the same DLL.
 HKR,, UserModeDriverName,     %REG_MULTI_SZ%, viogpu_d3d10.dll, viogpu_d3d10.dll
 HKR,, InstalledDisplayDrivers, %REG_MULTI_SZ%, viogpu_d3d10, viogpu_d3d10
 HKR,, VgaCompatible,          %REG_DWORD%, 0
