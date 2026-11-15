@@ -7,28 +7,63 @@ multisample texture and refuses outright on a buffer. The Direct3D 9 part create
 read-back textures have no binding, and it writes one sample everywhere. With these the
 resource was never made on the host, and what was read back from it was black.
 
-Both are now put right where the resource goes to the host.
+Both are put right wherever a resource goes to the host: when it is first created, and when
+a buffer is made anew for a lock that discards its contents (programs that refill a vertex
+buffer every frame, Chess Titans among them, did that hundreds of times).
 
 diff -ru a/src/gallium/drivers/virgl/virgl_resource.c b/src/gallium/drivers/virgl/virgl_resource.c
 --- a/src/gallium/drivers/virgl/virgl_resource.c
 +++ b/src/gallium/drivers/virgl/virgl_resource.c
-@@ -653,6 +653,15 @@
+@@ -436,6 +436,21 @@
+    return map_addr;
+ }
+ 
++/* Two things Gallium allows and the host does not take. A texture with no binding at all (a
++ * staging texture to read back through): the host calls that a buffer and refuses it. And a
++ * sample count of one for "not multisampled": the host makes a multisample texture of any
++ * count above zero, and refuses a buffer with one. Applied wherever a resource goes to the
++ * host, its first creation and its reallocation alike.
++ */
++static void
++virgl_resource_host_params(const struct pipe_resource *templ, unsigned *vbind,
++                           unsigned *samples)
++{
++   if (templ->target != PIPE_BUFFER && *vbind == 0)
++      *vbind = VIRGL_BIND_SAMPLER_VIEW;
++   *samples = templ->nr_samples > 1 ? templ->nr_samples : 0;
++}
++
+ static bool
+ virgl_resource_realloc(struct virgl_context *vctx, struct virgl_resource *res)
+ {
+@@ -446,6 +461,8 @@
+ 
+    vbind = pipe_to_virgl_bind(vs, templ->bind);
+    vflags = pipe_to_virgl_flags(vs, templ->flags);
++   unsigned host_samples;
++   virgl_resource_host_params(templ, &vbind, &host_samples);
+ 
+    int alloc_size = res->use_staging ? 1 : res->metadata.total_size;
+ 
+@@ -459,7 +476,7 @@
+                                      templ->depth0,
+                                      templ->array_size,
+                                      templ->last_level,
+-                                     templ->nr_samples,
++                                     host_samples,
+                                      vflags,
+                                      alloc_size);
+    if (!hw_res)
+@@ -652,6 +669,8 @@
+    vbind = pipe_to_virgl_bind(vs, templ->bind);
     vflags = pipe_to_virgl_flags(vs, templ->flags);
     virgl_resource_layout(&res->b, &res->metadata, 0, 0, 0, 0);
++   unsigned host_samples;
++   virgl_resource_host_params(templ, &vbind, &host_samples);
  
-+   /* Two things Gallium allows and the host does not take. A texture with no binding at all
-+    * (a staging texture to read back through): the host calls that a buffer and refuses it.
-+    * And a sample count of one for "not multisampled": the host makes a multisample texture
-+    * of any count above zero, and refuses a buffer with one.
-+    */
-+   if (templ->target != PIPE_BUFFER && vbind == 0)
-+      vbind = VIRGL_BIND_SAMPLER_VIEW;
-+   const unsigned host_samples = templ->nr_samples > 1 ? templ->nr_samples : 0;
-+
     if ((vs->caps.caps.v2.capability_bits & VIRGL_CAP_APP_TWEAK_SUPPORT) &&
         vs->tweak_gles_emulate_bgra &&
-       (templ->format == PIPE_FORMAT_B8G8R8A8_SRGB ||
-@@ -680,7 +689,7 @@
+@@ -680,7 +699,7 @@
                                            templ->depth0,
                                            templ->array_size,
                                            templ->last_level,
