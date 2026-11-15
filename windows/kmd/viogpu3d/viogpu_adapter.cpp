@@ -443,6 +443,21 @@ NTSTATUS VioGpuAdapter::QueryDeviceDescriptor(_In_ ULONG ChildUid, _Inout_ DXGK_
     {
         ULONG len = min(pDeviceDescriptor->DescriptorLength,
                         (EDID_RAW_BLOCK_SIZE - pDeviceDescriptor->DescriptorOffset));
+        {
+            // What Windows is handed as the monitor's description (it called ours invalid)
+            UCHAR sum = 0;
+            for (ULONG n = 0; n < 128; n++)
+            {
+                sum = (UCHAR)(sum + edid[n]);
+            }
+            DbgPrint(TRACE_LEVEL_ERROR,
+                     ("EDID asked at %u for %u bytes: %02X %02X %02X %02X %02X %02X %02X %02X ... ext %u, sum of 128 = %u\n",
+                      pDeviceDescriptor->DescriptorOffset,
+                      pDeviceDescriptor->DescriptorLength,
+                      edid[0], edid[1], edid[2], edid[3], edid[4], edid[5], edid[6], edid[7],
+                      edid[126],
+                      sum));
+        }
         RtlCopyMemory(pDeviceDescriptor->DescriptorBuffer, (edid + pDeviceDescriptor->DescriptorOffset), len);
         pDeviceDescriptor->DescriptorLength = len;
         return STATUS_SUCCESS;
