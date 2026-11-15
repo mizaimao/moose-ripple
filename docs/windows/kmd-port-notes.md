@@ -312,3 +312,9 @@ driver. The INF names the Direct3D 10 DLL in that place, which has no Direct3D 9
 So the Direct3D 9 part planned as a stub for W1 is needed before the compositor will even
 try: next step, and the first thing to find out is how much of Direct3D 9 it wants (the
 object and its capabilities only, or drawing too).
+
+A probe (`tools/win7-hello/d3d9probe.c`) narrows it: `Direct3DCreate9Ex` succeeds on our
+adapter, so Direct3D 9 does take it for a WDDM adapter; `GetDeviceCaps` for the hardware
+device fails with `D3DERR_NOTAVAILABLE`, because there is no Direct3D 9 driver behind it.
+Which of the two the compositor's test looks at is to be read out of `dwm.exe` and
+`dwmcore.dll` next.
