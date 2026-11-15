@@ -1,0 +1,84 @@
+diff -ruN a/src/gallium/frontends/wgl/stw_pixelformat.c b/src/gallium/frontends/wgl/stw_pixelformat.c
+--- a/src/gallium/frontends/wgl/stw_pixelformat.c	2026-11-15 13:40:54.787711363 -0500
++++ b/src/gallium/frontends/wgl/stw_pixelformat.c	2026-11-15 13:47:01.102112059 -0500
+@@ -70,6 +70,12 @@
+ };
+ 
+ 
++/* moose-ripple, Windows 9x: a short list, as drivers of the time had (a few dozen formats).
++ * Programs of the time keep the list in fixed arrays (Quake III: 256 entries), and Windows'
++ * own OpenGL screen savers find nothing to their liking in a list of over a thousand. Left
++ * out: the byte orders no Windows screen has, 15- and 12-bit and deep colour, duplicate
++ * depth layouts, multisampled formats (unless WGL_FORCE_MSAA asks) and the pbuffer-only
++ * floating-point formats. */
+ /* NOTE: order matters, since in otherwise equal circumstances the first
+  * format listed will get chosen */
+ 
+@@ -77,17 +83,11 @@
+ stw_pf_color[] = {
+    /* no-alpha */
+    { PIPE_FORMAT_B8G8R8X8_UNORM,     { 8,  8,  8,  0}, {16,  8,  0,  0} },
+-   { PIPE_FORMAT_X8R8G8B8_UNORM,     { 8,  8,  8,  0}, { 8, 16, 24,  0} },
+    /* alpha */
+    { PIPE_FORMAT_B8G8R8A8_UNORM,     { 8,  8,  8,  8}, {16,  8,  0, 24} },
+-   { PIPE_FORMAT_A8R8G8B8_UNORM,     { 8,  8,  8,  8}, { 8, 16, 24,  0} },
+-   /* shallow bit depths */
+-   { PIPE_FORMAT_B5G6R5_UNORM,       { 5,  6,  5,  0}, {11,  5,  0,  0} },
+-   { PIPE_FORMAT_B5G5R5A1_UNORM,     { 5,  5,  5,  1}, {10,  5,  0, 15} },
+-   { PIPE_FORMAT_B4G4R4A4_UNORM,     { 4,  4,  4,  4}, {16,  4,  0, 12} },
+-   /* HDR bit depths */
+-   { PIPE_FORMAT_R16G16B16A16_FLOAT, {16, 16, 16, 16}, { 0, 16, 32, 48 }},
+-   { PIPE_FORMAT_R10G10B10A2_UNORM,  {10, 10, 10,  2}, { 0, 10, 20, 30} },
++   /* 16 bits for 16-bit screens: described to programs as 5-6-5, drawn in 32 bits (the host
++    * offers no 16-bit display format, and GDI converts when the frame goes on the screen) */
++   { PIPE_FORMAT_B8G8R8X8_UNORM,     { 5,  6,  5,  0}, {11,  5,  0,  0} },
+ };
+ 
+ static const struct stw_pf_color_info
+@@ -98,13 +98,10 @@
+ static const struct stw_pf_depth_info
+ stw_pf_depth_stencil[] = {
+    /* pure depth */
+-   { PIPE_FORMAT_Z32_UNORM,   {32, 0} },
+-   { PIPE_FORMAT_X8Z24_UNORM, {24, 0} },
+    { PIPE_FORMAT_Z24X8_UNORM, {24, 0} },
+    { PIPE_FORMAT_Z16_UNORM,   {16, 0} },
+    /* combined depth-stencil */
+-   { PIPE_FORMAT_Z24_UNORM_S8_UINT, {24, 8} },
+-   { PIPE_FORMAT_S8_UINT_Z24_UNORM, {24, 8} }
++   { PIPE_FORMAT_Z24_UNORM_S8_UINT, {24, 8} }
+ };
+ 
+ static const stw_pfd_flag
+@@ -174,6 +171,11 @@
+ 
+    pfi->pfd.cColorBits =
+       color->bits.red + color->bits.green + color->bits.blue + color->bits.alpha;
++   /* moose-ripple: a 32-bit format without alpha counts as 32 colour bits, as on the cards of
++    * the time and in Windows' own software OpenGL. Programs compare this number with the
++    * screen's depth (Windows' OpenGL screen savers take no other format). */
++   if (color->bits.red == 8 && color->bits.alpha == 0)
++      pfi->pfd.cColorBits = 32;
+    pfi->pfd.cRedBits = color->bits.red;
+    pfi->pfd.cRedShift = color->shift.red;
+    pfi->pfd.cGreenBits = color->bits.green;
+@@ -272,7 +274,7 @@
+    for (ms = 0; ms < ARRAY_SIZE(stw_pf_multisample); ms++) {
+       unsigned samples = stw_pf_multisample[ms];
+ 
+-      if (force_samples && samples != force_samples)
++      if (samples != force_samples)
+          continue;
+ 
+       for (cfmt = 0; cfmt < num_color_formats; cfmt++) {
+@@ -324,9 +326,7 @@
+                                            ARRAY_SIZE(stw_pf_color), false);
+    assert(num_formats > 0);
+ 
+-   /* extended, pbuffer-only formats */
+-   add_color_format_variants(stw_pf_color_extended,
+-                             ARRAY_SIZE(stw_pf_color_extended), true);
++   /* (the extended, pbuffer-only formats are left out) */
+ 
+    assert(stw_dev->pixelformat_count <=
+           util_dynarray_num_elements(&stw_dev->pixelformats,

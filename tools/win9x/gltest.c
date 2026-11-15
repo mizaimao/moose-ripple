@@ -1,13 +1,15 @@
 /*
  * gltest: a small OpenGL 1.1 check for Windows 98 (and anything later).
  *
- *   gltest [seconds] [width height]
+ *   gltest [seconds] [width height] [single]
  *
  * Opens a window, makes an OpenGL context the way a period game does (ChoosePixelFormat,
  * wglCreateContext), prints who draws (GL_VENDOR, GL_RENDERER, GL_VERSION), then draws a
  * frame with known colours: a clear, a smooth-shaded triangle, a depth-tested pair of quads
  * and a textured quad. It reads pixels back and compares them with what must be there, then
  * spins the scene for the given number of seconds (default 3) and prints the frame rate.
+ * With "single" as the last word it asks for a pixel format without a back buffer and draws
+ * straight to the window (glFlush instead of SwapBuffers), as Windows' OpenGL screen savers do.
  *
  * Exit status 0 when every pixel check passed. Output goes to standard output; run it as
  *   gltest > out.txt
@@ -131,7 +133,10 @@ int main(int argc, char **argv)
         255, 0, 0,     0, 255, 0,           /* bottom row: red, green */
         0, 0, 255,     255, 255, 0,         /* top row: blue, yellow */
     };
-    int seconds = argc > 1 ? atoi(argv[1]) : 3;
+    /* "nullpfd": SetPixelFormat without a descriptor, as Windows' OpenGL screen savers call it */
+    int nullpfd = argc > 1 && !strcmp(argv[argc - 1], "nullpfd");
+    int single = argc > 1 && (nullpfd || !strcmp(argv[argc - 1], "single"));
+    int seconds = argc > 1 && !(single && argc == 2) ? atoi(argv[1]) : 3;
     int w = argc > 3 ? atoi(argv[2]) : 320, h = argc > 3 ? atoi(argv[3]) : 240;
     WNDCLASS wc;
     PIXELFORMATDESCRIPTOR pfd;
@@ -167,12 +172,12 @@ int main(int argc, char **argv)
     memset(&pfd, 0, sizeof pfd);
     pfd.nSize = sizeof pfd;
     pfd.nVersion = 1;
-    pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | (single ? 0 : PFD_DOUBLEBUFFER);
     pfd.iPixelType = PFD_TYPE_RGBA;
     pfd.cColorBits = (BYTE)GetDeviceCaps(dc, BITSPIXEL);
     pfd.cDepthBits = 16;
     format = ChoosePixelFormat(dc, &pfd);
-    if (!format || !SetPixelFormat(dc, format, &pfd)) {
+    if (!format || !SetPixelFormat(dc, format, nullpfd ? NULL : &pfd)) {
         printf("no pixel format (ChoosePixelFormat gave %d), error %lu\n", format, GetLastError());
         return 2;
     }
@@ -182,8 +187,9 @@ int main(int argc, char **argv)
         printf("no OpenGL context, error %lu\n", GetLastError());
         return 2;
     }
-    printf("pixel format %d: %d colour bits, %d depth bits, %d stencil bits%s%s\n", format,
+    printf("pixel format %d: %d colour bits, %d depth bits, %d stencil bits, %s%s%s\n", format,
            pfd.cColorBits, pfd.cDepthBits, pfd.cStencilBits,
+           (pfd.dwFlags & PFD_DOUBLEBUFFER) ? "with a back buffer" : "no back buffer",
            (pfd.dwFlags & PFD_GENERIC_FORMAT) ? ", generic (Microsoft's software OpenGL)" : "",
            (pfd.dwFlags & PFD_GENERIC_ACCELERATED) ? ", MCD" : "");
     printf("GL_VENDOR:   %s\nGL_RENDERER: %s\nGL_VERSION:  %s\n",
@@ -219,7 +225,7 @@ int main(int argc, char **argv)
     expect("texture: blue texel", w / 8, h * 3 / 8, 0, 0, 255);
     expect("texture: yellow texel", w * 3 / 8, h * 3 / 8, 255, 255, 0);
     expect("blend: white on blue", w * 3 / 4, h / 4, 128, 128, 179);
-    SwapBuffers(dc);
+    if (single) glFlush(); else SwapBuffers(dc);
 
     start = GetTickCount();
     for (;;) {
@@ -232,7 +238,7 @@ int main(int argc, char **argv)
         if (now - start >= (DWORD)seconds * 1000)
             break;
         scene((now - start) * 0.09f, tex);
-        SwapBuffers(dc);
+        if (single) glFlush(); else SwapBuffers(dc);
         frames++;
     }
 done:

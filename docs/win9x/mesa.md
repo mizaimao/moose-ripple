@@ -117,6 +117,26 @@ were.
   host put the context in its error state and ignored everything after: the program ran at
   17000 "frames" a second, showed nothing, and after a few such runs Windows 98 itself stopped
   drawing its windows.
+- **Pixel formats the way 1999 expects them.** Mesa offers over a thousand pixel formats on
+  this host (every colour layout, depth layout, sample count, with and without accumulation
+  buffer), and says "24 colour bits" for a 32-bit format without alpha. Windows' own OpenGL
+  screen savers look for a format whose colour bits equal the screen's depth with no alpha,
+  found none, and gave up after five tries with a black screen; Quake III keeps the list in
+  an array of 256. Patch 0003 makes the list short (48 formats: 32-bit with and without
+  alpha and 16-bit, three depth/stencil layouts, with and without back buffer and
+  accumulation buffer), reports 32 colour bits for 32-bit formats as the cards of the time
+  did, and adds 16-bit (5-6-5) formats for 16-bit screens that are drawn in 32 bits and
+  converted by GDI on their way to the screen.
 - **The host's log** is where rendering errors show (`journalctl` on Proxmox VE, lines from
-  `QEMU[pid]`). `RVD_LOG=file` in the environment makes the winsys write its first few
-  thousand requests to a file.
+  `QEMU[pid]`).
+
+## Finding out why a program doesn't work
+
+Environment variables, set before the program starts (in a batch file: `set NAME=value`):
+
+| Variable | What |
+|---|---|
+| `RIPPLE_GL_TRACE=file` | one line for every call Windows' `opengl32.dll` makes into the driver (pixel formats asked for and set, contexts made and made current, buffer swaps, extension functions looked up): shows where a program gives up |
+| `RVD_LOG=file` | the winsys' first few thousand requests to the VxD (buffers made, transfers, submissions, frames presented) |
+| `LIBGL_ALWAYS_SOFTWARE=1` | Mesa's software renderer instead of the host GPU: is the fault in the GPU path? |
+| `MESA_EXTENSION_MAX_YEAR=2000` | hide OpenGL extensions newer than that year, for programs that copy the extension list into a small buffer |
