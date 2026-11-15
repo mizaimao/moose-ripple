@@ -1,0 +1,39 @@
+virgl: a texture without a binding, and a sample count of one
+
+Two things Gallium allows in a resource and the host's renderer (virglrenderer 0.10) refuses:
+a texture with no binding at all, which it takes for a buffer ("Buffer bind flags require the
+buffer target"), and a sample count of one for "not multisampled", which it takes for a
+multisample texture and refuses outright on a buffer. The Direct3D 9 part creates both: its
+read-back textures have no binding, and it writes one sample everywhere. With these the
+resource was never made on the host, and what was read back from it was black.
+
+Both are now put right where the resource goes to the host.
+
+diff -ru a/src/gallium/drivers/virgl/virgl_resource.c b/src/gallium/drivers/virgl/virgl_resource.c
+--- a/src/gallium/drivers/virgl/virgl_resource.c
++++ b/src/gallium/drivers/virgl/virgl_resource.c
+@@ -653,6 +653,15 @@
+    vflags = pipe_to_virgl_flags(vs, templ->flags);
+    virgl_resource_layout(&res->b, &res->metadata, 0, 0, 0, 0);
+ 
++   /* Two things Gallium allows and the host does not take. A texture with no binding at all
++    * (a staging texture to read back through): the host calls that a buffer and refuses it.
++    * And a sample count of one for "not multisampled": the host makes a multisample texture
++    * of any count above zero, and refuses a buffer with one.
++    */
++   if (templ->target != PIPE_BUFFER && vbind == 0)
++      vbind = VIRGL_BIND_SAMPLER_VIEW;
++   const unsigned host_samples = templ->nr_samples > 1 ? templ->nr_samples : 0;
++
+    if ((vs->caps.caps.v2.capability_bits & VIRGL_CAP_APP_TWEAK_SUPPORT) &&
+        vs->tweak_gles_emulate_bgra &&
+       (templ->format == PIPE_FORMAT_B8G8R8A8_SRGB ||
+@@ -680,7 +689,7 @@
+                                           templ->depth0,
+                                           templ->array_size,
+                                           templ->last_level,
+-                                          templ->nr_samples,
++                                          host_samples,
+                                           vflags,
+                                           alloc_size);
+    if (!res->hw_res) {
