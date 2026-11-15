@@ -303,3 +303,26 @@ DirectDraw, Direct3D and AGP texture acceleration enabled and "No problems found
 Experience Index still runs to the end (5.1 on this run).
 
 Not tried yet: an actual DirectX 7 or 8 program. Nothing here has drawn through those paths.
+
+### Windows 7's own games (load test 18, 2026-11-15)
+
+On a fresh install of the package (64-bit and 32-bit driver), with the host's log watched:
+
+| Program | Result |
+|---|---|
+| Chess Titans (Direct3D 9) | Board, pieces, reflections and the camera animation right; moves made and answered |
+| Mahjong Titans | Layout screen right, hover highlights |
+| Purble Place, including the 3D cake factory | Right |
+| DirectX's diagnostics (`dxdiag`, a 32-bit program) | "No problems found"; DirectDraw, Direct3D and AGP texture acceleration enabled; DDI version 10 |
+| `ddprobe` (32-bit DirectDraw and DirectX 7) | Hardware capabilities; "Direct3D HAL" and "Direct3D T&L HAL" listed |
+| `d3d9test`, 64-bit and 32-bit | Right |
+| Windows Experience Index | Runs to the end (4.6 to 5.1 between runs; gaming graphics 5.6) |
+
+Chess Titans first made the host log "Multisample textures not 2D" hundreds of times: it
+refills vertex buffers with locks that discard their contents, and the virgl driver made the
+new buffer with the sample count of one that patch 0020 had only corrected for a first
+creation. Patch 0020 now covers both.
+
+Also seen: after ten idle minutes Windows switched the display off (the kernel driver gets the
+monitor's power state), and the first mouse movement brought it back with the compositor
+running. Sleep and hibernation stay switched off by the INF.
