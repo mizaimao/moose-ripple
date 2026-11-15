@@ -12,9 +12,11 @@ Why and what was tried: [decision 0007](../../docs/decisions/0007-opencore.md).
 
 ## Files
 
-- `config.plist`: the OpenCore configuration (no kexts, no ACPI tables, MacPro3,1 SMBIOS, the
-  9600 GT's device properties, `OpenPartitionDxe` for the installers' Apple partition maps,
+- `config.plist`: the OpenCore configuration (no kexts, one small ACPI table and two DSDT patches
+  for the HPET's interrupts, MacPro3,1 SMBIOS, the 9600 GT's device properties, `OpenPartitionDxe` for the installers' Apple partition maps,
   `ScanPolicy` 0: with 513 OpenCore didn't list volumes on Apple partition maps).
+- `acpi/SSDT-HPET.aml` and `acpi/ssdt-hpet.py`, which writes it: the HPET's resources with the
+  legacy interrupts 0 and 8 (see PCI interrupts below).
 - `sources.txt`: pinned OpenCore releases with SHA-256. Nothing downloaded is committed.
 - `stage.py`: runs on dev.lan in the repo's `.venv` (Python only from there):
   fetches the releases by SHA-256, runs `ocvalidate`, collects the files the config names and
@@ -90,6 +92,45 @@ hosts that emulate the CPU (KI-9 in [docs/known-issues.md](../../docs/known-issu
   3". The fast `nanotime` is correct for any TSC above 1 GHz: its 32-bit scale only overflows
   at 1 GHz or below.
 - No effect on real CPUs or with KVM, where the TSC runs at several GHz.
+
+## PCI interrupts (HPET on IRQ 0 and 8)
+
+In QEMU's Q35 machine each PCI interrupt line reaches the I/O APIC twice: on its own input (16 to
+23, lines A to H) and, because the firmware leaves the old PC routing on, also on PC interrupt 10
+or 11. Mac OS X 10.6.8 should use only the first. It didn't for lines A and B: QEMU's HPET
+lists only its registers, so 10.6 gives the HPET's timers 1 and 2 the inputs 16 and 17
+(edge-triggered, `ioreg -p IOACPIPlane -n HPET` shows `IOInterruptSpecifiers` 2, 16, 17). The PCI
+devices on lines A and B (four USB controllers, the PCIe root ports, SMBus, and more) then fall
+back to the PC interrupt their configuration space names, 10: the mirrored input. A driver
+that waits with its own input masked while its device raises the line gets stormed through
+input 10 (the stall fixed in the GPU driver in #22; issue #37).
+
+`config.plist` gives the HPET the legacy interrupts 0 and 8 instead, as on a Mac:
+
+- an ACPI patch renames the DSDT HPET's `_CRS` to `XCRS`, and `acpi/SSDT-HPET.aml` adds a
+  `_CRS` with its registers plus `IRQNoFlags {0}` and `IRQNoFlags {8}`;
+- another patch takes IRQ 8 out of the RTC's `_CRS` (in place: an empty IRQ mask), so the RTC
+  and the HPET don't both claim it.
+
+Result on VM 212 (OVMF, 2026-11-14), every boot: the HPET on 2 and 8, all eight PCI link devices
+`GSIA` to `GSIH` resolved to 16 to 23, no PCI device on 10 or 11, and input 10 masked in `info pic`.
+Before, in the boot measured, input 10 was live with 11 devices on it (#37 also saw boots with
+16 and 17 for them). Timekeeping unchanged: a 10 s sleep takes 10.000 s, and AppleHPET,
+AppleRTC and the CPU power management load as before.
+
+What didn't work: naming the inputs directly in `_PRT` (instead of the `GSIx` link devices)
+leaves the line A and B devices without any interrupt, since 10.6 has given 16 and 17 to the
+HPET either way.
+
+Both patches match QEMU's DSDT byte for byte; if a QEMU version writes it differently, they
+don't apply. Tested for that case (the rename switched off): 10.6.8 boots as before, the HPET
+keeps 16, and the line A devices are back on 10. With the fix, gl-gears runs at 59 frames/s
+with its longest frame 17-19 ms, and `tools/timer-late` (4 threads, 24 s) has no sleep over
+20 ms late, as after the fix for #22 (docs/re/perf-notes.md).
+
+UTM (5.0.8, the release disk with the fix): its VM has no HPET, so lines A and B were on 16 and
+17 already; the SSDT finds no HPET to add to and isn't loaded, and 10.6.8 boots as before (no
+ACPI errors in the kernel log). Untested so far: the SeaBIOS and OpenDuet path (9600 GT VMs).
 
 ## Build and install
 

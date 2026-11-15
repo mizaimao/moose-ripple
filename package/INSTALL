@@ -26,6 +26,8 @@ Install
 Check
 - The menu bar is translucent. F12, then drag a widget onto the Dashboard: the water ripples.
 - /Volumes/RIPPLE/qe-check prints "QE on" for each display.
+- If something is off: sh /Volumes/RIPPLE/ripple-doctor.sh checks the usual causes in one go
+  (sudo for all accounts' crash reports) and says what to do.
 
 Remove
      sudo sh uninstall.sh
@@ -38,6 +40,7 @@ Files
   RippleQEMUTablet.kext   optional: the pointer follows QEMU's USB tablet exactly
   RippleVirtioSound.kext  optional (--sound): sound through QEMU's virtio-sound-pci device
   qe-check                prints whether each display has Quartz Extreme
+  ripple-doctor.sh        checks the usual causes of trouble and says what to do; changes nothing
   install.sh, uninstall.sh, INSTALL, LICENSE, LICENSE-Mesa.rst
   SHA256SUMS              checksums of all the above: shasum -a 256 -c SHA256SUMS
 
