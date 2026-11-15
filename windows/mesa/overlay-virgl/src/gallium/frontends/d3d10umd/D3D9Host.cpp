@@ -7,6 +7,7 @@
  */
 
 #include "D3D9Host.h"
+#include "RippleLog.h"
 
 #include "pipe/p_context.h"
 #include "pipe/p_state.h"
@@ -84,39 +85,13 @@ yttrium_gdi_debug_get_bool_option(const char *name, bool dfault)
    return debug_get_bool_option(name, dfault);
 }
 
-/* Warnings go to the debugger's output, and to the file RIPPLE_D3D9_LOG names if it is set. */
-static void
-d3d9_host_say(const char *prefix, const char *format, va_list args)
-{
-   char line[1024];
-   int n = snprintf(line, sizeof(line), "%s", prefix);
-
-   vsnprintf(line + n, sizeof(line) - n - 2, format, args);
-   strcat(line, "\n");
-   OutputDebugStringA(line);
-
-   static const char *path;
-   static bool asked;
-   if (!asked) {
-      path = getenv("RIPPLE_D3D9_LOG");
-      asked = true;
-   }
-   if (path) {
-      FILE *f = fopen(path, "a");
-      if (f) {
-         fputs(line, f);
-         fclose(f);
-      }
-   }
-}
-
 void
 yttrium_gdi_trace_warnf(const char *format, ...)
 {
    va_list args;
 
    va_start(args, format);
-   d3d9_host_say("", format, args);
+   ripple_vlogf("", format, args);
    va_end(args);
 }
 

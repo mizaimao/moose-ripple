@@ -1,0 +1,57 @@
+Direct3D 10: say which resource was refused, in the driver's own log
+
+When the renderer has no format for a resource the driver answers "out of memory", as the
+interface wants, and said why only in debug builds. Now it writes a line to the driver's log
+(RippleLog, windows/mesa/overlay-virgl: the debugger's output, and a file when RIPPLE_UMD_LOG
+is set). The test after creating the resource looked at the wrong pointer and never fired; it
+now tests the resource.
+
+35:#include "Format.h"
+diff -ru a/src/gallium/frontends/d3d10umd/meson.build b/src/gallium/frontends/d3d10umd/meson.build
+--- a/src/gallium/frontends/d3d10umd/meson.build
++++ b/src/gallium/frontends/d3d10umd/meson.build
+@@ -27,6 +27,7 @@
+     'Query.cpp',
+     'Rasterizer.cpp',
+     'Resource.cpp',
++    'RippleLog.cpp',
+     'Shader.cpp',
+     'ShaderDump.cpp',
+     'ShaderParse.c',
+diff -ru a/src/gallium/frontends/d3d10umd/Resource.cpp b/src/gallium/frontends/d3d10umd/Resource.cpp
+--- a/src/gallium/frontends/d3d10umd/Resource.cpp
++++ b/src/gallium/frontends/d3d10umd/Resource.cpp
+@@ -33,6 +33,7 @@
+ 
+ #include "Resource.h"
+ #include "Format.h"
++#include "RippleLog.h"
+ #include "State.h"
+ #include "Query.h"
+ 
+@@ -329,16 +330,21 @@
+                                        templat.nr_samples,
+                                        templat.nr_storage_samples,
+                                        templat.bind)) {
+-         debug_printf("%s: unsupported format %s\n",
+-                     __func__, util_format_name(templat.format));
++         ripple_logf("d3d10: resource refused, the renderer has no such format: %s (DXGI %u) "
++                     "target %u, %ux%ux%u, %u levels, %u samples, bind 0x%x",
++                     util_format_name(templat.format), (unsigned)pCreateResource->Format,
++                     (unsigned)templat.target, templat.width0, templat.height0, templat.depth0,
++                     templat.last_level + 1, templat.nr_samples, templat.bind);
+          SetError(hDevice, E_OUTOFMEMORY);
+          goto unlock;
+       }
+    }
+ 
+    pResource->resource = screen->resource_create(screen, &templat);
+-   if (!pResource) {
+-      DebugPrintf("%s: failed to create resource\n", __func__);
++   if (!pResource->resource) {
++      ripple_logf("d3d10: resource not created: %s, target %u, %ux%ux%u, %u samples, bind 0x%x",
++                  util_format_name(templat.format), (unsigned)templat.target, templat.width0,
++                  templat.height0, templat.depth0, templat.nr_samples, templat.bind);
+       SetError(hDevice, E_OUTOFMEMORY);
+       goto unlock;
+    }
