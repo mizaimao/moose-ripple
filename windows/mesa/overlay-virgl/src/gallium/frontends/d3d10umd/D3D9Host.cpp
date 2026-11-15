@@ -9,6 +9,7 @@
 #include "D3D9Host.h"
 
 #include "pipe/p_context.h"
+#include "pipe/p_state.h"
 #include "util/u_debug.h"
 
 #include <stdarg.h>
@@ -49,19 +50,31 @@ yttrium_gdi_resource_set_allocation_ownership(struct pipe_resource *resource, bo
    (void)owned;
 }
 
+/*
+ * Asked when the runtime destroys a resource: may its allocation belong to the runtime's
+ * resource? Then it has to be given back before the call returns. The ones tied to a runtime
+ * resource are primaries and shared resources (D3D9CreateResource), and those carry the
+ * shared binding; so do some others, for which the flush below is only early.
+ */
 bool
 yttrium_gdi_resource_has_runtime_allocation(struct pipe_resource *resource)
 {
-   (void)resource;
-   return false;
+   return resource && (resource->bind & PIPE_BIND_SHARED) != 0;
 }
 
+/*
+ * Called for such a resource: let go of everything that still holds it. On virgl that is the
+ * commands not yet sent to the host; once they are sent, dropping the last reference frees the
+ * allocation at once (the winsys keeps no shared resource for reuse).
+ */
 unsigned
 yttrium_gdi_pipeline_invalidate_resource(struct pipe_context *ctx,
                                          struct pipe_resource *resource)
 {
-   (void)ctx;
    (void)resource;
+
+   if (ctx && ctx->flush)
+      ctx->flush(ctx, NULL, 0);
    return 0;
 }
 

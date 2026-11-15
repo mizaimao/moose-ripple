@@ -99,6 +99,11 @@ d3dddi_destroy_allocation(struct gdikmt_device *dev, HANDLE hResource,
    struct gdikmt_device_d3dddi *ddi = d3dddi_device(dev);
    D3DDDICB_DEALLOCATE arg;
 
+   /* The runtime is destroying the device and takes every allocation with it; its resources,
+    * through which some would be given back, are gone already. */
+   if (dev->runtime_destroying)
+      return 0;
+
    memset(&arg, 0, sizeof(arg));
    if (hResource) {
       arg.hResource = hResource;

@@ -2831,7 +2831,14 @@ D3D9CreateResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *data)
             device->gdi_device.hRTResourceIsD3D9;
          UINT old_allocationVidPn = device->gdi_device.allocationVidPn;
          boolean old_isPrimary = device->gdi_device.isPrimary;
-         device->gdi_device.hRTResource = resource->runtime_handle;
+         /* moose-ripple: allocations belong to the runtime's resource only where the
+          * runtime has to find them through it, primaries and shared resources. The
+          * rest are the driver's own: the virgl winsys keeps some for reuse, and frees
+          * others only when the commands that use them have gone to the host, both
+          * after the runtime's resource is gone. */
+         device->gdi_device.hRTResource =
+            (data->Flags.Primary || data->Flags.SharedResource) ?
+            resource->runtime_handle : NULL;
          device->gdi_device.hRTResourceIsD3D9 = true;
          device->gdi_device.allocationVidPn =
             data->Flags.Primary ? data->VidPnSourceId : 0;
