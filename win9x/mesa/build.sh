@@ -4,7 +4,7 @@
 #   DRIVERS=softpipe win9x/mesa/build.sh     software rendering only (default: virgl,softpipe)
 # Its own source tree and build directory under TOOLS (default .tools, never committed):
 #   mesa/src-24.3.4-win9x     the release tarball, patches/ applied, overlay/ copied over it
-#   mesa/build-win9x          the build;  mesa/out-win9x  the DLLs
+#   mesa/build-win9x          the build;  mesa/out-win9x  the DLLs (ripplegl.dll, opengl32.dll)
 # Toolchain: llvm-mingw, msvcrt variant (clang, lld, compiler-rt, libc++, mingw-w64), the same
 # one the Windows 7 build uses. Three things make its output load on Windows 98:
 #   - everything from the toolchain linked statically, no native thread-local storage
@@ -60,7 +60,11 @@ done
 cmp -s "$here/../minivdd/rvd.h" "$SRC/src/gallium/winsys/virgl/rvd/rvd.h" ||
     cp "$here/../minivdd/rvd.h" "$SRC/src/gallium/winsys/virgl/rvd/rvd.h"
 # A different set of drivers needs a fresh build directory.
-[ "$(cat "$BUILD/.ripple-drivers" 2>/dev/null)" = "$DRIVERS" ] || rm -rf "$BUILD"
+# One DLL, ripplegl.dll: Mesa's OpenGL with the dispatch layer (glapi) inside, the file Windows'
+# opengl32.dll loads as the installable client driver. Mesa's own opengl32.dll is built too:
+# next to a program it takes the place of Windows', for tests.
+NAMES="-Dgallium-wgl-dll-name=ripplegl -Dshared-glapi=disabled"
+[ "$(cat "$BUILD/.ripple-drivers" 2>/dev/null)" = "$DRIVERS $NAMES" ] || rm -rf "$BUILD"
 
 # Pentium II instructions only: the guest CPU model may be an old one, and Windows 98 predates
 # SSE2. No frame-pointer omission games either: plain, debuggable code.
@@ -107,8 +111,8 @@ if [ ! -f "$BUILD/build.ninja" ]; then
         -Dgbm=disabled -Dllvm=disabled -Dzstd=disabled -Dzlib=disabled -Dexpat=disabled \
         -Dvalgrind=disabled -Dlibunwind=disabled -Dlmsensors=disabled -Dbuild-tests=false \
         -Dmicrosoft-clc=disabled -Dspirv-to-dxil=false -Dgallium-va=disabled \
-        -Dvideo-codecs= -Dshared-glapi=enabled
-    echo "$DRIVERS" > "$BUILD/.ripple-drivers"
+        -Dvideo-codecs= $NAMES
+    echo "$DRIVERS $NAMES" > "$BUILD/.ripple-drivers"
 fi
 ninja -C "$BUILD"
 rm -rf "$OUT" && mkdir -p "$OUT"

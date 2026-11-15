@@ -71,7 +71,6 @@ name    endp
 
         FORWARD         BitBlt,                 DIB_BitBlt, 'B'
         FORWARD         ColorInfo,              DIB_ColorInfo, 'C'
-        FORWARD         Control,                DIB_Control, 'c'
         FORWARD         EnumDFonts,             DIB_EnumDFonts, 'F'
         FORWARD_PDEV    EnumObj,                DIB_EnumObjExt, 'E'
         FORWARD         Output,                 DIB_Output, 'O'
@@ -126,6 +125,32 @@ CheckCursor proc far
         jmp     DIB_CheckCursorExt
 cc_out: ret
 CheckCursor endp
+
+; ---- Control: GDI's escapes. Ours are answered in C (control_escape in enable.c), the rest
+; goes to the DIB engine with the caller's parameters still in place.
+        extrn   _control_escape:near    ; enable.c
+        extrn   DIB_Control:far
+        public  Control
+Control proc    far
+        TRACEC  'c'
+        push    bp
+        mov     bp, sp
+        push    ds
+        mov     ax, DGROUP
+        mov     ds, ax
+        push    dword ptr [bp+6]        ; lpOutData
+        push    dword ptr [bp+10]       ; lpInData
+        push    word ptr [bp+14]        ; the escape's number
+        call    _control_escape
+        add     sp, 10
+        pop     ds
+        pop     bp
+        cmp     ax, -1                  ; not one of ours
+        je      short ctl_forward
+        retf    14
+ctl_forward:
+        jmp     DIB_Control
+Control endp
 
 ; ---- ValidateMode: Display Properties asks whether a mode would work -----------------------
 ; The answer (0 for yes) goes back in all of EAX with DX zero: the callers are not all 16-bit.

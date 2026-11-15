@@ -14,8 +14,8 @@ immediate mode), reports
     GL_VERSION:  4.3 (Compatibility Profile) Mesa 24.3.4
 
 in a Windows 98 SE guest on Proxmox VE (`vga: virtio-gl`), and passes its pixel checks (clear,
-smooth shading, depth test, texture, blending) with Mesa's `opengl32.dll`,
-`libgallium_wgl.dll` and `libglapi.dll` next to it. The window shows the picture, clipped by
+smooth shading, depth test, texture, blending) with Mesa's `opengl32.dll` and
+`ripplegl.dll` next to it. The window shows the picture, clipped by
 other windows as it should be. On a host without virgl the same DLLs fall back to Mesa's
 software renderer (softpipe), and with Windows 98's own `opengl32.dll` (Microsoft's software
 OpenGL 1.1) the program passes too, which is the comparison.
@@ -26,9 +26,15 @@ The pieces: Mesa's virgl driver, unchanged; a winsys for it
 OpenGL target. A finished frame is read back from the host into the buffer's guest memory
 and drawn on the window with GDI (`SetDIBitsToDevice`).
 
-Not there yet: loading through Windows' own `opengl32.dll` as an installable client driver
-(so that games find it without DLLs in their folder), a faster way to the screen than the
-read-back, and real programs (first: the Quake III Arena demo).
+**Windows' own `opengl32.dll` loads it** as its installable client driver (ICD), so programs
+need nothing in their own folder: the display driver answers the escape `OPENGL_GETINFO`
+with the name `RIPPLEGL`, and the registry value of that name under
+`HKLM\Software\Microsoft\Windows\CurrentVersion\OpenGLDrivers` is `ripplegl.dll` (the INF
+writes it and copies the DLL to `WINDOWS\SYSTEM`). `gltest` alone in a folder then reports
+the same renderer and passes.
+
+Not there yet: a faster way to the screen than the read-back, and real programs (first: the
+Quake III Arena demo).
 
 ## How a 2024 Mesa gets onto a 1998 Windows
 
@@ -62,11 +68,13 @@ guest CPU model may be an old one).
 
 ## Build and test
 
-    win9x/mesa/build.sh             # .tools/mesa/out-win9x/{opengl32,libgallium_wgl,libglapi}.dll
+    win9x/mesa/build.sh             # .tools/mesa/out-win9x/ripplegl.dll and opengl32.dll
     tools/win9x/build-tools.sh      # build/win9x/tools/gltest.exe (Visual C++ 6)
 
-Copy the three DLLs and `gltest.exe` into one folder in the guest and run
-`gltest > out.txt`. `gltest` alone in a folder uses Windows' own OpenGL.
+`ripplegl.dll` is the driver: Mesa's OpenGL with everything inside. Installed (in
+`WINDOWS\SYSTEM`, with the registry value above) it serves every program through Windows'
+`opengl32.dll`. For a test without installing, copy `ripplegl.dll` and Mesa's `opengl32.dll`
+(a thin front for it) next to `gltest.exe` and run `gltest > out.txt`.
 
 `gltest` spinning its small scene, vertical sync off (frames a second; the scene is trivial, so
 this measures the cost of a frame's way to the screen, not the GPU):
@@ -75,7 +83,8 @@ this measures the cost of a frame's way to the screen, not the GPU):
 |---|---|---|
 | Microsoft's software OpenGL 1.1 (`GDI Generic`), build host | about 4900 | |
 | Mesa softpipe, build host (waits for the display rate) | 33 | |
-| Mesa virgl, Proxmox VE host with Intel UHD 630 | about 1500 | about 680 |
+| Mesa virgl, Proxmox VE host with Intel UHD 630 | 1500 to 1800 | about 680 |
+| the same through Windows' `opengl32.dll` (ICD) | about 1100 | |
 
 `gltest` also prints the free "system resources" (Windows 9x's small fixed heaps for windows
 and drawing objects) and free memory before and after: both must come back to where they

@@ -43,7 +43,8 @@ driver always writes a few lines there (`r9x: ...`); nothing listens on a real P
 ## Install
 
 Display Properties > Settings > Advanced > Adapter > Change > Have Disk, and point it at the
-folder with `ripple9x.inf`, `ripple9x.drv` and `ripplevd.vxd` (the three files `build.sh` makes). Or let the Add New Hardware wizard find the PCI
+folder with `ripple9x.inf`, `ripple9x.drv`, `ripplevd.vxd` (the three files `build.sh` makes)
+and `ripplegl.dll` (the OpenGL driver, from `win9x/mesa/build.sh`). Or let the Add New Hardware wizard find the PCI
 display adapter and give it the same folder. Then pick a monitor type that allows the sizes you
 want (Advanced > Monitor): with "(Unknown Monitor)" Windows offers 640x480 only.
 

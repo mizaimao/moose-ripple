@@ -19,6 +19,7 @@ Ripple.Copy=11
 [SourceDisksFiles]
 ripple9x.drv=1
 ripplevd.vxd=1
+ripplegl.dll=1
 
 [Manufacturer]
 %Provider%=Ripple.Mfg
@@ -35,6 +36,7 @@ AddReg=Ripple.AddReg
 [Ripple.Copy]
 ripple9x.drv
 ripplevd.vxd
+ripplegl.dll
 
 [Ripple.DelReg]
 HKR,,Ver
@@ -46,6 +48,8 @@ HKR,CURRENT
 ; minivdd: our small VxD that keeps DOS sessions and the video BIOS off the card's mode-setting
 ; ports while Windows has the screen.
 [Ripple.AddReg]
+; OpenGL: the name the display driver gives Windows' opengl32.dll, and the DLL behind it.
+HKLM,Software\Microsoft\Windows\CurrentVersion\OpenGLDrivers,RIPPLEGL,,ripplegl.dll
 HKR,,Ver,,4.0
 HKR,,DevLoader,,*vdd
 HKR,DEFAULT,Mode,,"8,640,480"

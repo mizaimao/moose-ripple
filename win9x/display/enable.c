@@ -521,6 +521,37 @@ DWORD DDI SetPalette(WORD start, WORD count, LPVOID lpPalette)
 static WORD validate(DISPVALMODE __far *m);
 
 /* The export ValidateMode is in asm.asm: it returns this in all of EAX. */
+/* ---- Escapes (GDI's Control) -----------------------------------------------------------------
+   OpenGL: Windows' opengl32.dll asks the display driver for the name of its installable client
+   driver (ICD) with the escape OPENGL_GETINFO, after asking QUERYESCSUPPORT whether the driver
+   knows that escape. The name is looked up under
+   HKLM\Software\Microsoft\Windows\CurrentVersion\OpenGLDrivers, where the value of that name is
+   the DLL to load (the INF writes it). The numbers in front of the name are the ICD interface
+   version (2: OpenGL 1.1) and the driver's own version, which goes to its DrvValidateVersion.
+   Returns -1 for escapes that are not ours. */
+#define QUERYESCSUPPORT 8
+#define OPENGL_GETINFO  0x1101
+
+int __cdecl control_escape(WORD function, LPVOID in, LPVOID out)
+{
+    static const char name[] = "RIPPLEGL";
+
+    if (function == QUERYESCSUPPORT && in && *(WORD __far *)in == OPENGL_GETINFO)
+        return 1;
+    if (function == OPENGL_GETINFO && out) {
+        DWORD __far *o = (DWORD __far *)out;
+        char __far *n = (char __far *)(o + 2);
+        WORD i;
+        o[0] = 2;
+        o[1] = 1;
+        for (i = 0; i < sizeof name; i++)
+            n[i] = name[i];
+        dbg("r9x: OpenGL driver name asked for\r\n");
+        return 1;
+    }
+    return -1;
+}
+
 WORD __cdecl validate_mode(DISPVALMODE __far *m)
 {
     WORD r = validate(m);
