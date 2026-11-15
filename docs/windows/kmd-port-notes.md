@@ -298,3 +298,17 @@ Open after this test, in the order they will matter for the compositor:
 3. A driver update in place: `devcon update` with an unchanged INF version keeps the old
    file. Replacing the file (rename the loaded one, copy the new one) and `devcon restart`
    works, also for the user-mode DLL.
+
+## The compositor's first answer (2026-11-14)
+
+With Direct3D 10 working, the Desktop Window Manager was restarted (`net stop uxsms`,
+`net start uxsms`; composition is switched on in the test user's registry). It makes a device
+on our driver, destroys it again and logs event 9007: "The Desktop Window Manager was unable
+to start because WDDM is not in use" (once before that it exited with 0xC00002FE).
+
+The adapter is a WDDM adapter and Direct3D 10 runs on it, so what it misses is most likely the
+usual test for the driver model, a Direct3D 9Ex object, which needs a Direct3D 9 user-mode
+driver. The INF names the Direct3D 10 DLL in that place, which has no Direct3D 9 entry point.
+So the Direct3D 9 part planned as a stub for W1 is needed before the compositor will even
+try: next step, and the first thing to find out is how much of Direct3D 9 it wants (the
+object and its capabilities only, or drawing too).
