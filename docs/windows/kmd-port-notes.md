@@ -289,8 +289,9 @@ What had to be put right on the way:
 Open after this test, in the order they will matter for the compositor:
 
 1. **Clearing a render target that is not bound.** The virgl driver has a host command for it
-   in newer versions; on this host nothing happens. To be done in the guest: bind, clear,
-   bind back.
+   in newer versions; on this host nothing happened, and the depth-stencil clear was a null
+   pointer. Done in the guest now (Mesa patch 0017: bind, clear, bind back), and the test
+   reads back both pixels as expected: 255 0 0 255 inside, 0 255 0 255 outside.
 2. Which further things Mesa's Direct3D 10 driver sends that virglrenderer 0.10 lacks. The
    feasibility study expected the host's version to matter here; so far everything could be
    met in the guest, and the rig was not changed.
