@@ -39,7 +39,11 @@ NTSTATUS VioGpuDevice::Init(VIOGPU_CTX_INIT_REQ *pOptions)
     return STATUS_SUCCESS;
 }
 
-static UCHAR *PutTransfer(UCHAR *dmaBuf, UINT type, UINT resId, const RECT *rect, INT dx, INT dy)
+// A transfer between a surface's own memory and its copy on the host, for one rectangle. The
+// host takes "offset" as the place of the rectangle's first pixel in that memory, so it has to
+// be worked out from the rectangle's position; left at zero, every rectangle was filled with
+// what is in the surface's top left corner.
+static UCHAR *PutTransfer(UCHAR *dmaBuf, UINT type, UINT resId, const RECT *rect, INT dx, INT dy, UINT pitch = 0)
 {
     VIOGPU_COMMAND_HDR *cmd_hdr = (VIOGPU_COMMAND_HDR *)dmaBuf;
     cmd_hdr->type = type;
@@ -59,9 +63,9 @@ static UCHAR *PutTransfer(UCHAR *dmaBuf, UINT type, UINT resId, const RECT *rect
     cmdBody->box.depth = 1;
 
     cmdBody->layer_stride = 0;
-    cmdBody->stride = 0;
+    cmdBody->stride = pitch;
     cmdBody->level = 0;
-    cmdBody->offset = 0;
+    cmdBody->offset = (ULONGLONG)cmdBody->box.y * pitch + (ULONGLONG)cmdBody->box.x * 4;
 
     return dmaBuf;
 }
@@ -109,7 +113,7 @@ NTSTATUS VioGpuDevice::GenerateBltPresent(DXGKARG_PRESENT *pPresent, VioGpuAlloc
     // If source requires coherency (staging or shadow surface) then emit transfer
     if (src->IsCoherent())
     {
-        dmaBuf = PutTransfer(dmaBuf, VIOGPU_CMD_TRANSFER_TO_HOST, src->GetId(), &coverRect, dx, dy);
+        dmaBuf = PutTransfer(dmaBuf, VIOGPU_CMD_TRANSFER_TO_HOST, src->GetId(), &coverRect, dx, dy, src->GetPitch());
     }
 
     {
@@ -145,7 +149,7 @@ NTSTATUS VioGpuDevice::GenerateBltPresent(DXGKARG_PRESENT *pPresent, VioGpuAlloc
 
     if (dst->IsCoherent())
     {
-        dmaBuf = PutTransfer(dmaBuf, VIOGPU_CMD_TRANSFER_FROM_HOST, dst->GetId(), &coverRect, 0, 0);
+        dmaBuf = PutTransfer(dmaBuf, VIOGPU_CMD_TRANSFER_FROM_HOST, dst->GetId(), &coverRect, 0, 0, dst->GetPitch());
     }
 
     // Without a compositor nothing flips: Windows draws into a surface of its own and copies the

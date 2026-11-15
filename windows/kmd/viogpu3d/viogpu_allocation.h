@@ -35,6 +35,13 @@ class VioGpuAllocation
         return m_DxPhysicalAddress;
     };
 
+    // Bytes from one row to the next in the allocation's own memory. The surfaces Windows
+    // draws into with the CPU are all 32 bits a pixel.
+    UINT GetPitch()
+    {
+        return m_options.width * 4;
+    }
+
     BOOL IsCoherent()
     {
         return (m_options.flags & VIRGL_RESOURCE_FLAG_MAP_COHERENT) != 0;
