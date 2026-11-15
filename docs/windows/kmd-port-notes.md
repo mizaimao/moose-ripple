@@ -410,7 +410,7 @@ one reboot. On the display, with no setting changed by hand:
 
 | Check | Result |
 |---|---|
-| The compositor starts by itself and stays up | yes; no compositor error in the event log |
+| The compositor starts by itself and stays up | yes; it also came back by itself after Windows' assessment tool had switched it off for its run (the only compositor events in the log) |
 | Glass window frames with the blurred desktop behind, shadows | right |
 | Translucent taskbar, Start button, notification area, clock | whole |
 | Live thumbnail over a taskbar button | right |
