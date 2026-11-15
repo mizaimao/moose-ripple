@@ -33,6 +33,14 @@ NTSTATUS VioGpuDevice::Init(VIOGPU_CTX_INIT_REQ *pOptions)
 
     context_init |= pOptions->CapsetID;
 
+    // Naming the capability set at context creation is a feature of its own (bit 4). A host
+    // without it refuses such a context outright, and a plain context is a virgl context
+    // anyway, which is what both virgl capability sets describe.
+    if (!virtio_is_feature_enabled(m_pAdapter->m_u64HostFeatures, 4))
+    {
+        context_init = 0;
+    }
+
     m_pAdapter->ctrlQueue.DestroyCtx(m_id); // Destroy old viogpu context
     m_pAdapter->ctrlQueue.CreateCtx(m_id, context_init);
 

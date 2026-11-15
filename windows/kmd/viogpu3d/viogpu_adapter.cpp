@@ -439,6 +439,11 @@ NTSTATUS VioGpuAdapter::QueryDeviceDescriptor(_In_ ULONG ChildUid, _Inout_ DXGK_
     {
         return STATUS_GRAPHICS_CHILD_DESCRIPTOR_NOT_SUPPORTED;
     }
+    else if (pDeviceDescriptor->DescriptorOffset >= EDID_V1_BLOCK_SIZE && edid[126] == 0)
+    {
+        // Only the base block: no extension blocks follow it
+        return STATUS_MONITOR_NO_MORE_DESCRIPTOR_DATA;
+    }
     else if (pDeviceDescriptor->DescriptorOffset < EDID_RAW_BLOCK_SIZE)
     {
         ULONG len = min(pDeviceDescriptor->DescriptorLength,

@@ -24,6 +24,8 @@ VioGpuVidPN::VioGpuVidPN(VioGpuAdapter *adapter)
     m_pFrameBuf = NULL;
 
     m_SystemDisplaySourceId = D3DDDI_ID_UNINITIALIZED;
+    m_bEDID = FALSE;
+    RtlZeroMemory(m_EDIDs, sizeof(m_EDIDs));
     m_pFlipThread = NULL;
     KeInitializeSpinLock(&m_changedLock);
     RtlZeroMemory(&m_changedRect, sizeof(m_changedRect));
@@ -1632,7 +1634,7 @@ PBYTE VioGpuVidPN::GetEdidData(UINT Id)
 {
     PAGED_CODE();
 
-    return m_bEDID ? m_EDIDs[Id] : (PBYTE)(g_gpu_edid);
+    return m_EDIDs[Id];
 }
 
 BOOLEAN VioGpuVidPN::GetDisplayInfo(void)
@@ -1670,7 +1672,7 @@ int VioGpuVidPN::ProcessEdid(void)
     {
         GetEdids();
     }
-    else
+    if (!m_bEDID)
     {
         FixEdid();
     }
@@ -1704,8 +1706,12 @@ void VioGpuVidPN::FixEdid(void)
     PAGED_CODE();
 
     UCHAR Sum = 0;
+    // No description from the host: the built-in one, in the same place as a real one
+    if (!m_bEDID)
+    {
+        RtlCopyMemory(m_EDIDs[0], g_gpu_edid, EDID_V1_BLOCK_SIZE);
+    }
     PUCHAR buf = GetEdidData(0);
-    ;
     PEDID_DATA_V1 pdata = (PEDID_DATA_V1)buf;
     pdata->MaximumHorizontalImageSize[0] = 0;
     pdata->MaximumVerticallImageSize[0] = 0;
