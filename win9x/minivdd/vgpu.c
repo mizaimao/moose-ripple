@@ -1,11 +1,14 @@
 /*
- * moose-ripple mini-VDD: the virtio-gpu side (step 3 of docs/win9x/plan.md, work in progress).
+ * moose-ripple mini-VDD: the virtio-gpu side (step 3 of docs/win9x/plan.md).
  *
  * 32-bit flat C inside the VxD: no C run-time, no Windows headers. What it needs from VMM comes
  * through small assembly helpers in ripplevd.asm.
  *
- * So far: find the card on the PCI bus, bring up the virtio transport (virtio 1.0 over PCI, two
- * queues, answers polled) and ask the host for its display size.
+ * It finds the card on the PCI bus, brings up the virtio transport (virtio 1.0 over PCI, two
+ * queues, answers polled) and gives user-mode drivers what they need to draw with the host's
+ * GPU: contexts, buffers (a host GPU object with guest memory behind it), command submission
+ * and transfers (rvd.h, docs/win9x/vxd-interface.md). It keeps track of who made what, and
+ * removes a program's contexts and buffers when the program closes the device or ends.
  */
 
 /* Everything stays in the VxD's locked code and data: the trap and the interrupt path run at
@@ -13,6 +16,9 @@
 #pragma code_seg("_LTEXT", "LCODE")
 #pragma data_seg("_LDATA", "LCODE")
 #pragma const_seg("_LDATA", "LCODE")
+#pragma bss_seg("_LDATA", "LCODE")
+
+#include "rvd.h"
 
 typedef unsigned char  u8;
 typedef unsigned short u16;
@@ -90,6 +96,9 @@ static struct vgpu gpu = { 0 };
 /* ---- From ripplevd.asm ---------------------------------------------------------------------- */
 extern void *__cdecl vmm_map_phys(u32 phys, u32 bytes);
 extern void *__cdecl vmm_alloc_contig(u32 pages, u32 *phys);
+extern void *__cdecl vmm_alloc_pages(u32 pages, u32 *handle);
+extern void  __cdecl vmm_free_pages(u32 handle);
+extern int   __cdecl vmm_page_table(void *addr, u32 pages, u32 *entries);
 extern u32   __cdecl vmm_time_ms(void);
 
 /* ---- The virtio structures in the card's memory (virtio 1.0, 4.1.4.3) ------------------------ */
@@ -143,27 +152,97 @@ struct vq {
     u16 index, last_used, size;
 };
 
-/* ---- virtio-gpu (virtio 1.1, 5.7): the few things needed so far ------------------------------ */
+/* ---- virtio-gpu (virtio 1.1, 5.7) -------------------------------------------------------------- */
 struct gpu_ctrl_hdr { u32 type, flags, fence_lo, fence_hi, ctx_id, padding; };
-#define GPU_CMD_GET_DISPLAY_INFO   0x0100
-#define GPU_RESP_OK_DISPLAY_INFO   0x1101
+#define GPU_CMD_GET_DISPLAY_INFO        0x0100
+#define GPU_CMD_RESOURCE_UNREF          0x0102
+#define GPU_CMD_RESOURCE_ATTACH_BACKING 0x0106
+#define GPU_CMD_GET_CAPSET_INFO         0x0108
+#define GPU_CMD_GET_CAPSET              0x0109
+#define GPU_CMD_CTX_CREATE              0x0200
+#define GPU_CMD_CTX_DESTROY             0x0201
+#define GPU_CMD_CTX_ATTACH_RESOURCE     0x0202
+#define GPU_CMD_CTX_DETACH_RESOURCE     0x0203
+#define GPU_CMD_RESOURCE_CREATE_3D      0x0204
+#define GPU_CMD_TRANSFER_TO_HOST_3D     0x0205
+#define GPU_CMD_TRANSFER_FROM_HOST_3D   0x0206
+#define GPU_CMD_SUBMIT_3D               0x0207
+#define GPU_RESP_OK_NODATA              0x1100
+#define GPU_RESP_OK_DISPLAY_INFO        0x1101
+#define GPU_RESP_OK_CAPSET_INFO         0x1102
+#define GPU_RESP_OK_CAPSET              0x1103
 struct gpu_display_one { u32 x, y, width, height, enabled, flags; };
+/* One u32 after the header, then padding: UNREF, CTX_ATTACH/DETACH_RESOURCE, GET_CAPSET_INFO */
+struct gpu_one_id { struct gpu_ctrl_hdr hdr; u32 id, padding; };
+struct gpu_ctx_create { struct gpu_ctrl_hdr hdr; u32 name_len, context_init; char name[64]; };
+struct gpu_resource_create_3d {
+    struct gpu_ctrl_hdr hdr;
+    u32 id, target, format, bind, width, height, depth, array_size, last_level, nr_samples,
+        flags, padding;
+};
+struct gpu_attach_backing { struct gpu_ctrl_hdr hdr; u32 id, entries; };
+struct gpu_mem_entry { u32 addr_lo, addr_hi, length, padding; };
+struct gpu_submit { struct gpu_ctrl_hdr hdr; u32 size, padding; };
+struct gpu_transfer_3d {
+    struct gpu_ctrl_hdr hdr;
+    u32 x, y, z, w, h, d;
+    u32 offset_lo, offset_hi, id, level, stride, layer_stride;
+};
+struct gpu_get_capset { struct gpu_ctrl_hdr hdr; u32 id, version; };
+struct gpu_capset_info { struct gpu_ctrl_hdr hdr; u32 id, max_version, max_size, padding; };
 
 static void *common = 0, *isr = 0, *devcfg = 0, *notify_base = 0;
 static struct vq ctrlq = { 0 }, cursorq = { 0 };
-/* Memory the device reads and writes, physically contiguous, allocated once:
-   a request buffer, a page for answers, and a transfer area that user-mode drivers attach to
-   host resources as their guest-side storage. */
-#define REQ_PAGES   16
-#define AREA_PAGES  512
-static u8  *req_buf = 0, *resp_page = 0, *area = 0;
-static u32  req_phys = 0, resp_phys = 0, area_phys = 0;
-static u32  display_w = 0, display_h = 0;
+/* Memory the device reads and writes, physically contiguous, allocated once: one buffer for
+   requests (a command submission is the largest) and one for answers. */
+#define REQ_PAGES   128
+#define RESP_PAGES  4
+#define REQ_BYTES   (REQ_PAGES * 4096UL)
+#define RESP_BYTES  (RESP_PAGES * 4096UL)
+static u8  *req_buf = 0, *resp_buf = 0;
+static u32  req_phys = 0, resp_phys = 0;
 static u32  features = 0;
+static u32  dead = 0;                           /* the device stopped answering */
+static struct rvd_info info = { 0 };
+
+/* Who owns what. A context belongs to the process that made it (DeviceIoControl's
+   device handle value is the same in every process, so it can't tell them apart); a buffer belongs to
+   a context. Context IDs are 1 to MAX_CONTEXTS-1; a buffer's handle (its virgl resource ID) is
+   its index in the table plus one. */
+#define MAX_CONTEXTS     64
+#define MAX_BUFFERS      4096
+#define MAX_BUFFER_PAGES 8192                   /* 32 MB behind one buffer */
+struct buffer { u32 context, mem_handle, pages; u8 *mem; };
+static u32 ctx_owner[MAX_CONTEXTS] = { 0 };
+static struct buffer *buffers = 0;
+static u32 *page_table = 0;                     /* scratch: one entry per page of a new buffer */
+static u32 next_buffer = 0;
 
 int vgpu_has_virgl(void)
 {
     return (features & VIRTIO_GPU_F_VIRGL) != 0;
+}
+
+static void copy(void *dst, const void *src, u32 n)
+{
+    u8 *d = (u8 *)dst;
+    const u8 *s = (const u8 *)src;
+    if ((((u32)d | (u32)s | n) & 3) == 0) {
+        u32 *d4 = (u32 *)d;
+        const u32 *s4 = (const u32 *)s;
+        for (n >>= 2; n; n--)
+            *d4++ = *s4++;
+        return;
+    }
+    while (n--)
+        *d++ = *s++;
+}
+
+static void zero(void *dst, u32 n)
+{
+    u8 *d = (u8 *)dst;
+    while (n--)
+        *d++ = 0;
 }
 
 static int setup_queue(struct vq *q, u16 index)
@@ -200,14 +279,17 @@ static int setup_queue(struct vq *q, u16 index)
     return 1;
 }
 
-/* One request (in req_buf) with its answer (in resp_page); waits, polling, until the device has
-   used the buffers. Returns the number of bytes the device wrote, 0 on a time-out. */
+/* One request (in req_buf) with its answer (in resp_buf); waits, polling, until the device has
+   used the buffers. Returns the number of bytes the device wrote, 0 on a time-out (after which
+   the device counts as dead: its late answer would be taken for the next request's). */
 static u32 command(u32 req_len, u32 resp_len)
 {
     struct vq *q = &ctrlq;
     u32 start, spins = 0;
     u16 head = 0;
 
+    if (dead)
+        return 0;
     q->desc[0].addr_lo = req_phys;        q->desc[0].addr_hi = 0;
     q->desc[0].len = req_len;             q->desc[0].flags = VQ_DESC_NEXT; q->desc[0].next = 1;
     q->desc[1].addr_lo = resp_phys;       q->desc[1].addr_hi = 0;
@@ -218,18 +300,53 @@ static u32 command(u32 req_len, u32 resp_len)
 
     start = vmm_time_ms();
     while (q->used->idx == q->last_used) {
-        if ((++spins & 0xFFF) == 0 && vmm_time_ms() - start > 2000)
+        if ((++spins & 0xFFF) == 0 && vmm_time_ms() - start > 10000) {
+            dbg("rvd: the device did not answer request "); dbg_hex(*(u32 *)req_buf); dbg("\r\n");
+            dead = 1;
             return 0;
+        }
     }
     q->last_used++;
     (void)rd8(isr, 0);                          /* reading it takes the interrupt request back */
     return q->used->ring[(u16)(q->last_used - 1) % q->size].len;
 }
 
+/* Start a request in req_buf: `bytes` zeroed, type and context set. */
+static void *request(u32 type, u32 ctx, u32 bytes)
+{
+    struct gpu_ctrl_hdr *h = (struct gpu_ctrl_hdr *)req_buf;
+    zero(req_buf, bytes);
+    h->type = type;
+    h->ctx_id = ctx;
+    return req_buf;
+}
+
+/* Send a request whose answer is just "ok". */
+static int simple(u32 req_len)
+{
+    struct gpu_ctrl_hdr *resp = (struct gpu_ctrl_hdr *)resp_buf;
+    u32 type = *(u32 *)req_buf;
+
+    if (!command(req_len, sizeof(*resp)))
+        return 0;
+    if (resp->type != GPU_RESP_OK_NODATA) {
+        dbg("rvd: request "); dbg_hex(type); dbg(" answered "); dbg_hex(resp->type); dbg("\r\n");
+        return 0;
+    }
+    return 1;
+}
+
+static int one_id(u32 type, u32 ctx, u32 id)
+{
+    struct gpu_one_id *r = (struct gpu_one_id *)request(type, ctx, sizeof(*r));
+    r->id = id;
+    return simple(sizeof(*r));
+}
+
 /* virtio 1.0, 3.1.1: reset, announce ourselves, agree on features, set up the queues, go. */
 static int transport_init(void)
 {
-    u32 bar_phys, bar_len, hi, i;
+    u32 bar_phys, bar_len, hi, i, handle;
     u8 *bar;
 
     i = gpu.cap[VIRTIO_PCI_CAP_COMMON].bar;
@@ -273,13 +390,16 @@ static int transport_init(void)
         dbg("rvd: the card refused our features\r\n");
         return 0;
     }
-    req_buf   = (u8 *)vmm_alloc_contig(REQ_PAGES, &req_phys);
-    resp_page = (u8 *)vmm_alloc_contig(1, &resp_phys);
-    area      = (u8 *)vmm_alloc_contig(AREA_PAGES, &area_phys);
-    if (!req_buf || !resp_page || !area)
-        dbg("rvd: no contiguous memory for the buffers\r\n");
-    if (!req_buf || !resp_page || !area || !setup_queue(&ctrlq, 0) || !setup_queue(&cursorq, 1)) {
+    req_buf    = (u8 *)vmm_alloc_contig(REQ_PAGES, &req_phys);
+    resp_buf   = (u8 *)vmm_alloc_contig(RESP_PAGES, &resp_phys);
+    buffers    = (struct buffer *)vmm_alloc_pages((MAX_BUFFERS * sizeof(struct buffer) + 4095) >> 12, &handle);
+    page_table = (u32 *)vmm_alloc_pages((MAX_BUFFER_PAGES * 4 + 4095) >> 12, &handle);
+    if (!req_buf || !resp_buf || !buffers || !page_table)
+        dbg("rvd: no memory for the buffers\r\n");
+    if (!req_buf || !resp_buf || !buffers || !page_table ||
+        !setup_queue(&ctrlq, 0) || !setup_queue(&cursorq, 1)) {
         wr8(common, CC_DEVICE_STATUS, 0);
+        common = 0;
         return 0;
     }
     wr8(common, CC_DEVICE_STATUS,
@@ -291,27 +411,40 @@ static int transport_init(void)
     return 1;
 }
 
-/* A first exchange with the host: what does it show? */
-static void show_display_info(void)
+/* What the host offers: its display size and its capability sets. */
+static void read_host_info(void)
 {
-    struct gpu_ctrl_hdr *req = (struct gpu_ctrl_hdr *)req_buf;
-    struct gpu_ctrl_hdr *resp = (struct gpu_ctrl_hdr *)resp_page;
+    struct gpu_ctrl_hdr *resp = (struct gpu_ctrl_hdr *)resp_buf;
     struct gpu_display_one *d = (struct gpu_display_one *)(resp + 1);
-    u32 i, n;
+    struct gpu_capset_info *ci = (struct gpu_capset_info *)resp_buf;
+    u32 i, n, sets;
 
-    for (i = 0; i < sizeof(*req) / 4; i++)
-        ((u32 *)req)[i] = 0;
-    req->type = GPU_CMD_GET_DISPLAY_INFO;
-    n = command(sizeof(*req), sizeof(*resp) + 16 * sizeof(*d));
-    if (!n || resp->type != GPU_RESP_OK_DISPLAY_INFO) {
-        dbg("rvd: no answer to GET_DISPLAY_INFO, bytes "); dbg_hex(n);
-        dbg(", type "); dbg_hex(resp->type); dbg("\r\n");
-        return;
+    info.version = RVD_INTERFACE_VERSION;
+    info.virgl = vgpu_has_virgl();
+    info.max_submit = REQ_BYTES - sizeof(struct gpu_submit);
+    info.max_buffer = MAX_BUFFER_PAGES * 4096UL;
+
+    request(GPU_CMD_GET_DISPLAY_INFO, 0, sizeof(*resp));
+    n = command(sizeof(*resp), sizeof(*resp) + 16 * sizeof(*d));
+    if (n && resp->type == GPU_RESP_OK_DISPLAY_INFO) {
+        info.display_w = d->width;
+        info.display_h = d->height;
     }
-    display_w = d->width;
-    display_h = d->height;
-    dbg("rvd: host display "); dbg_hex(d->width); dbg(" x "); dbg_hex(d->height);
-    dbg(", enabled "); dbg_hex(d->enabled); dbg("\r\n");
+    dbg("rvd: host display "); dbg_hex(info.display_w); dbg(" x "); dbg_hex(info.display_h); dbg("\r\n");
+
+    sets = rd32(devcfg, 12);
+    for (i = 0; i < sets && info.num_caps < RVD_MAX_CAPS; i++) {
+        struct gpu_one_id *r = (struct gpu_one_id *)request(GPU_CMD_GET_CAPSET_INFO, 0, sizeof(*r));
+        r->id = i;
+        if (!command(sizeof(*r), sizeof(*ci)) || ci->hdr.type != GPU_RESP_OK_CAPSET_INFO)
+            continue;
+        info.caps_ids[info.num_caps] = ci->id;
+        info.caps_versions[info.num_caps] = ci->max_version;
+        info.caps_sizes[info.num_caps] = ci->max_size;
+        info.num_caps++;
+        dbg("rvd: capability set "); dbg_hex(ci->id); dbg(", version "); dbg_hex(ci->max_version);
+        dbg(", bytes "); dbg_hex(ci->max_size); dbg("\r\n");
+    }
 }
 
 /* Called once from MiniVDD_Dynamic_Init. Returns 0 if there is no virtio-gpu card (the mini-VDD
@@ -333,7 +466,6 @@ int __cdecl vgpu_init(void)
     for (i = 0; i < 6; i++)
         gpu.bar[i] = pci_read32(bdf, 0x10 + i * 4) & 0xFFFFFFF0UL;
     dbg("rvd: virtio-gpu at device "); dbg_hex(bdf);
-    dbg(", command "); dbg_hex(pci_read32(bdf, 0x04) & 0xFFFF);
     dbg(", interrupt line "); dbg_hex(pci_read8(bdf, 0x3C)); dbg("\r\n");
 
     if (!(pci_read32(bdf, 0x04) & 0x00100000UL))    /* status: capabilities list */
@@ -350,19 +482,135 @@ int __cdecl vgpu_init(void)
         gpu.cap[type].length = pci_read32(bdf, ptr + 12);
         if (type == VIRTIO_PCI_CAP_NOTIFY)
             gpu.notify_multiplier = pci_read32(bdf, ptr + 16);
-        dbg("rvd:   structure "); dbg_hex(type);
-        dbg(" in range "); dbg_hex(gpu.cap[type].bar);
-        dbg(" ("); dbg_hex(gpu.bar[gpu.cap[type].bar]);
-        dbg(") at "); dbg_hex(gpu.cap[type].offset);
-        dbg(", length "); dbg_hex(gpu.cap[type].length); dbg("\r\n");
     }
     if (!gpu.cap[VIRTIO_PCI_CAP_COMMON].length || !transport_init())
         return 0;
-    show_display_info();
+    read_host_info();
     return 1;
 }
 
-/* ---- The interface for user-mode drivers: DeviceIoControl on \\.\RIPPLEVD -------------------- */
+/* ---- Contexts and buffers --------------------------------------------------------------------- */
+#define ERROR_NOT_ENOUGH_MEMORY 8
+#define ERROR_GEN_FAILURE       31
+#define ERROR_NOT_SUPPORTED     50
+#define ERROR_INVALID_PARAMETER 87
+#define ERROR_NO_MORE_ITEMS     259
+
+static int valid_context(u32 ctx)
+{
+    return ctx > 0 && ctx < MAX_CONTEXTS && ctx_owner[ctx] != 0;
+}
+
+static struct buffer *find_buffer(u32 handle)
+{
+    if (handle == 0 || handle > MAX_BUFFERS || buffers[handle - 1].context == 0)
+        return 0;
+    return &buffers[handle - 1];
+}
+
+/* The host forgets the buffer; then its memory is free again. */
+static void buffer_destroy(struct buffer *b, int detach)
+{
+    u32 id = (u32)(b - buffers) + 1;
+
+    if (detach)
+        one_id(GPU_CMD_CTX_DETACH_RESOURCE, b->context, id);
+    one_id(GPU_CMD_RESOURCE_UNREF, 0, id);
+    if (!dead)                                  /* a dead device may still hold the pages */
+        vmm_free_pages(b->mem_handle);
+    b->context = 0;
+    b->mem = 0;
+}
+
+static u32 buffer_create(const struct rvd_buffer_create *c, struct rvd_buffer *out)
+{
+    struct gpu_resource_create_3d *rc;
+    struct gpu_attach_backing *ab;
+    struct gpu_mem_entry *e;
+    struct buffer *b;
+    u32 i, id, pages, n;
+
+    if (!valid_context(c->context))
+        return ERROR_INVALID_PARAMETER;
+    pages = (c->size + 4095) >> 12;
+    if (pages == 0)
+        pages = 1;
+    if (c->size > MAX_BUFFER_PAGES * 4096UL)
+        return ERROR_INVALID_PARAMETER;
+    for (i = 0; i < MAX_BUFFERS; i++) {
+        b = &buffers[(next_buffer + i) % MAX_BUFFERS];
+        if (b->context == 0)
+            break;
+    }
+    if (i == MAX_BUFFERS)
+        return ERROR_NO_MORE_ITEMS;
+    id = (u32)(b - buffers) + 1;
+
+    b->mem = (u8 *)vmm_alloc_pages(pages, &b->mem_handle);
+    if (!b->mem)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    if (!vmm_page_table(b->mem, pages, page_table)) {
+        vmm_free_pages(b->mem_handle);
+        return ERROR_GEN_FAILURE;
+    }
+
+    rc = (struct gpu_resource_create_3d *)request(GPU_CMD_RESOURCE_CREATE_3D, c->context, sizeof(*rc));
+    rc->id = id;
+    rc->target = c->target;         rc->format = c->format;         rc->bind = c->bind;
+    rc->width = c->width;           rc->height = c->height;         rc->depth = c->depth;
+    rc->array_size = c->array_size; rc->last_level = c->last_level; rc->nr_samples = c->nr_samples;
+    rc->flags = c->flags;
+    if (!simple(sizeof(*rc))) {
+        vmm_free_pages(b->mem_handle);
+        return ERROR_GEN_FAILURE;
+    }
+
+    /* The memory behind it: one entry per run of pages that follow each other physically. */
+    ab = (struct gpu_attach_backing *)request(GPU_CMD_RESOURCE_ATTACH_BACKING, 0, sizeof(*ab));
+    ab->id = id;
+    e = (struct gpu_mem_entry *)(ab + 1);
+    for (i = 0, n = 0; i < pages; i++) {
+        u32 phys = page_table[i] & 0xFFFFF000UL;
+        if (n && e[n - 1].addr_lo + e[n - 1].length == phys) {
+            e[n - 1].length += 4096;
+        } else {
+            e[n].addr_lo = phys; e[n].addr_hi = 0; e[n].length = 4096; e[n].padding = 0;
+            n++;
+        }
+    }
+    ab->entries = n;
+    if (!simple(sizeof(*ab) + n * sizeof(*e)) ||
+        !one_id(GPU_CMD_CTX_ATTACH_RESOURCE, c->context, id)) {
+        b->context = c->context;
+        buffer_destroy(b, 0);
+        return ERROR_GEN_FAILURE;
+    }
+    b->context = c->context;
+    b->pages = pages;
+    next_buffer = id % MAX_BUFFERS;
+    out->handle = id;
+    out->size = pages << 12;
+    out->address = b->mem;
+    return 0;
+}
+
+static void context_destroy(u32 ctx)
+{
+    u32 i, n = 0;
+
+    for (i = 0; i < MAX_BUFFERS; i++) {
+        if (buffers[i].context == ctx) {
+            buffer_destroy(&buffers[i], 0);
+            n++;
+        }
+    }
+    dbg("rvd: context "); dbg_hex(ctx); dbg(" ends, buffers left to remove: "); dbg_hex(n); dbg("\r\n");
+    request(GPU_CMD_CTX_DESTROY, ctx, sizeof(struct gpu_ctrl_hdr));
+    simple(sizeof(struct gpu_ctrl_hdr));
+    ctx_owner[ctx] = 0;
+}
+
+/* ---- The interface for user-mode drivers: DeviceIoControl on \\.\RIPPLEVD (rvd.h) ------------- */
 /* What VMM hands over with the W32_DEVICEIOCONTROL message (in ESI). */
 struct dioc {
     u32   internal1, vm, internal2, code;
@@ -375,89 +623,113 @@ struct dioc {
 #define DIOC_OPEN   0UL
 #define DIOC_CLOSE  0xFFFFFFFFUL
 
-/* The private codes. Everything else about virtio-gpu is decided in user mode:
-   RVD_COMMAND carries a complete virtio-gpu control request and returns the device's answer. */
-#define RVD_INFO        1   /* out: struct rvd_info */
-#define RVD_COMMAND     2   /* in: the request; out: the answer */
-#define RVD_AREA_READ   3   /* in: u32 offset; out: bytes from the transfer area */
-#define RVD_AREA_WRITE  4   /* in: u32 offset, then bytes for the transfer area */
-
-struct rvd_info {
-    u32 version;            /* of this interface: 1 */
-    u32 virgl;              /* the host renders 3D */
-    u32 capsets;            /* number of capability sets */
-    u32 display_w, display_h;
-    u32 area_phys, area_bytes;      /* the transfer area, for RESOURCE_ATTACH_BACKING */
-    u32 max_request;
-};
-
-#define ERROR_NOT_SUPPORTED     50
-#define ERROR_INVALID_PARAMETER 87
-#define ERROR_GEN_FAILURE       31
-
-static void copy(void *dst, const void *src, u32 n)
-{
-    u8 *d = (u8 *)dst;
-    const u8 *s = (const u8 *)src;
-    while (n--)
-        *d++ = *s++;
-}
-
 u32 __cdecl vgpu_ioctl(struct dioc *p)
 {
-    u32 n = 0;
+    u32 n = 0, i, err;
 
-    if (p->code == DIOC_OPEN || p->code == DIOC_CLOSE)
+    if (p->code == DIOC_OPEN)
         return 0;
+    if (p->code == DIOC_CLOSE) {                /* the handle is closed, or its program ended */
+        for (i = 1; common && i < MAX_CONTEXTS; i++) {
+            if (ctx_owner[i] == p->process)
+                context_destroy(i);
+        }
+        return 0;
+    }
     if (!common)
         return ERROR_NOT_SUPPORTED;
     switch (p->code) {
-    case RVD_INFO: {
-        struct rvd_info i;
-        if (p->out_len < sizeof(i))
+    case RVD_GET_INFO:
+        if (p->out_len < sizeof(info))
             return ERROR_INVALID_PARAMETER;
-        i.version = 1;
-        i.virgl = vgpu_has_virgl();
-        i.capsets = rd32(devcfg, 12);
-        i.display_w = display_w;
-        i.display_h = display_h;
-        i.area_phys = area_phys;
-        i.area_bytes = AREA_PAGES * 4096UL;
-        i.max_request = REQ_PAGES * 4096UL;
-        copy(p->out, &i, sizeof(i));
-        n = sizeof(i);
+        copy(p->out, &info, sizeof(info));
+        n = sizeof(info);
         break;
-    }
-    case RVD_COMMAND:
-        if (p->in_len < sizeof(struct gpu_ctrl_hdr) || p->in_len > REQ_PAGES * 4096UL ||
-            p->out_len < sizeof(struct gpu_ctrl_hdr) || p->out_len > 4096)
+    case RVD_GET_CAPS: {
+        struct gpu_get_capset *r;
+        u32 got;
+        if (p->in_len < 8)
             return ERROR_INVALID_PARAMETER;
-        copy(req_buf, p->in, p->in_len);
-        n = command(p->in_len, p->out_len);
-        if (!n)
+        r = (struct gpu_get_capset *)request(GPU_CMD_GET_CAPSET, 0, sizeof(*r));
+        r->id = ((u32 *)p->in)[0];
+        r->version = ((u32 *)p->in)[1];
+        got = command(sizeof(*r), RESP_BYTES);
+        if (got <= sizeof(struct gpu_ctrl_hdr) ||
+            ((struct gpu_ctrl_hdr *)resp_buf)->type != GPU_RESP_OK_CAPSET)
             return ERROR_GEN_FAILURE;
-        copy(p->out, resp_page, n);
-        break;
-    case RVD_AREA_READ: {
-        u32 off;
-        if (p->in_len < 4)
-            return ERROR_INVALID_PARAMETER;
-        off = *(u32 *)p->in;
-        if (off > AREA_PAGES * 4096UL || p->out_len > AREA_PAGES * 4096UL - off)
-            return ERROR_INVALID_PARAMETER;
-        copy(p->out, area + off, p->out_len);
-        n = p->out_len;
+        n = got - sizeof(struct gpu_ctrl_hdr);
+        if (n > p->out_len)
+            n = p->out_len;
+        copy(p->out, resp_buf + sizeof(struct gpu_ctrl_hdr), n);
         break;
     }
-    case RVD_AREA_WRITE: {
-        u32 off, len;
-        if (p->in_len < 4)
+    case RVD_CONTEXT_CREATE: {
+        struct gpu_ctx_create *r;
+        if (p->out_len < 4)
             return ERROR_INVALID_PARAMETER;
-        off = *(u32 *)p->in;
-        len = p->in_len - 4;
-        if (off > AREA_PAGES * 4096UL || len > AREA_PAGES * 4096UL - off)
+        for (i = 1; i < MAX_CONTEXTS && ctx_owner[i]; i++)
+            ;
+        if (i == MAX_CONTEXTS)
+            return ERROR_NO_MORE_ITEMS;
+        r = (struct gpu_ctx_create *)request(GPU_CMD_CTX_CREATE, i, sizeof(*r));
+        r->name_len = p->in_len < sizeof(r->name) ? p->in_len : sizeof(r->name) - 1;
+        copy(r->name, p->in, r->name_len);
+        if (!simple(sizeof(*r)))
+            return ERROR_GEN_FAILURE;
+        ctx_owner[i] = p->process;
+        dbg("rvd: context "); dbg_hex(i); dbg(" for process "); dbg_hex(p->process); dbg("\r\n");
+        *(u32 *)p->out = i;
+        n = 4;
+        break;
+    }
+    case RVD_CONTEXT_DESTROY:
+        if (p->in_len < 4 || !valid_context(*(u32 *)p->in))
             return ERROR_INVALID_PARAMETER;
-        copy(area + off, (u8 *)p->in + 4, len);
+        context_destroy(*(u32 *)p->in);
+        break;
+    case RVD_BUFFER_CREATE:
+        if (p->in_len < sizeof(struct rvd_buffer_create) || p->out_len < sizeof(struct rvd_buffer))
+            return ERROR_INVALID_PARAMETER;
+        err = buffer_create((const struct rvd_buffer_create *)p->in, (struct rvd_buffer *)p->out);
+        if (err)
+            return err;
+        n = sizeof(struct rvd_buffer);
+        break;
+    case RVD_BUFFER_DESTROY: {
+        struct buffer *b;
+        if (p->in_len < 4 || !(b = find_buffer(*(u32 *)p->in)))
+            return ERROR_INVALID_PARAMETER;
+        buffer_destroy(b, 1);
+        break;
+    }
+    case RVD_SUBMIT: {
+        const struct rvd_submit *s = (const struct rvd_submit *)p->in;
+        struct gpu_submit *r;
+        if (p->in_len < sizeof(*s) || s->bytes > p->in_len - sizeof(*s) ||
+            s->bytes > info.max_submit || (s->bytes & 3) || !valid_context(s->context))
+            return ERROR_INVALID_PARAMETER;
+        r = (struct gpu_submit *)request(GPU_CMD_SUBMIT_3D, s->context, sizeof(*r));
+        r->size = s->bytes;
+        copy(r + 1, s + 1, s->bytes);
+        if (!simple(sizeof(*r) + s->bytes))
+            return ERROR_GEN_FAILURE;
+        break;
+    }
+    case RVD_TRANSFER: {
+        const struct rvd_transfer *t = (const struct rvd_transfer *)p->in;
+        struct gpu_transfer_3d *r;
+        if (p->in_len < sizeof(*t) || !valid_context(t->context) || !find_buffer(t->buffer))
+            return ERROR_INVALID_PARAMETER;
+        r = (struct gpu_transfer_3d *)request(t->direction == RVD_FROM_HOST ?
+                GPU_CMD_TRANSFER_FROM_HOST_3D : GPU_CMD_TRANSFER_TO_HOST_3D, t->context, sizeof(*r));
+        r->x = t->x; r->y = t->y; r->z = t->z; r->w = t->width; r->h = t->height; r->d = t->depth;
+        r->offset_lo = t->offset;
+        r->id = t->buffer;
+        r->level = t->level;
+        r->stride = t->stride;
+        r->layer_stride = t->layer_stride;
+        if (!simple(sizeof(*r)))
+            return ERROR_GEN_FAILURE;
         break;
     }
     default:

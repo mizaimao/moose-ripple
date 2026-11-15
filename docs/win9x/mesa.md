@@ -5,17 +5,30 @@ Mac OS X and Windows 7 sides use), built on the Linux build host with `win9x/mes
 
 ## State (2026-11-15)
 
-Mesa runs on Windows 98 SE with its software renderer (softpipe): `tools/win9x/gltest.c`, a
-small OpenGL 1.1 program written the way a period game is (ChoosePixelFormat,
-wglCreateContext, immediate mode), reports `Mesa`, `softpipe`, `3.3 (Compatibility Profile)
-Mesa 24.3.4` and passes its pixel checks (clear, smooth shading, depth test, texture,
-blending) with Mesa's `opengl32.dll`, `libgallium_wgl.dll` and `libglapi.dll` next to it.
-With Windows 98's own `opengl32.dll` (Microsoft's software OpenGL 1.1) the same program
-passes too, which is the comparison.
+Mesa runs on Windows 98 SE and draws with the host's GPU. `tools/win9x/gltest.c`, a small
+OpenGL 1.1 program written the way a period game is (ChoosePixelFormat, wglCreateContext,
+immediate mode), reports
 
-Not there yet: the host GPU (the virgl driver with a winsys on our VxD,
-[vxd-interface.md](vxd-interface.md)), and loading through Windows' own `opengl32.dll` as an
-installable client driver.
+    GL_VENDOR:   Mesa
+    GL_RENDERER: virgl (Mesa Intel(R) UHD Graphics 630 (CFL GT2))
+    GL_VERSION:  4.3 (Compatibility Profile) Mesa 24.3.4
+
+in a Windows 98 SE guest on Proxmox VE (`vga: virtio-gl`), and passes its pixel checks (clear,
+smooth shading, depth test, texture, blending) with Mesa's `opengl32.dll`,
+`libgallium_wgl.dll` and `libglapi.dll` next to it. The window shows the picture, clipped by
+other windows as it should be. On a host without virgl the same DLLs fall back to Mesa's
+software renderer (softpipe), and with Windows 98's own `opengl32.dll` (Microsoft's software
+OpenGL 1.1) the program passes too, which is the comparison.
+
+The pieces: Mesa's virgl driver, unchanged; a winsys for it
+(`win9x/mesa/overlay/src/gallium/winsys/virgl/rvd/`) on our VxD's interface
+([vxd-interface.md](vxd-interface.md)); and a small patch that adds both to Mesa's Windows
+OpenGL target. A finished frame is read back from the host into the buffer's guest memory
+and drawn on the window with GDI (`SetDIBitsToDevice`).
+
+Not there yet: loading through Windows' own `opengl32.dll` as an installable client driver
+(so that games find it without DLLs in their folder), a faster way to the screen than the
+read-back, and real programs (first: the Quake III Arena demo).
 
 ## How a 2024 Mesa gets onto a 1998 Windows
 
@@ -55,9 +68,32 @@ guest CPU model may be an old one).
 Copy the three DLLs and `gltest.exe` into one folder in the guest and run
 `gltest > out.txt`. `gltest` alone in a folder uses Windows' own OpenGL.
 
-| Renderer (Windows 98 SE, QEMU/KVM on the build host, 320x240 window) | frames a second |
-|---|---|
-| Microsoft's software OpenGL 1.1 (`GDI Generic`) | about 4900 |
-| Mesa softpipe | 33 |
+`gltest` spinning its small scene, vertical sync off (frames a second; the scene is trivial, so
+this measures the cost of a frame's way to the screen, not the GPU):
 
-softpipe is Mesa's slow reference renderer; it is here to prove the port, not to be used.
+| Renderer (Windows 98 SE guest) | 320x240 | 640x480 |
+|---|---|---|
+| Microsoft's software OpenGL 1.1 (`GDI Generic`), build host | about 4900 | |
+| Mesa softpipe, build host (waits for the display rate) | 33 | |
+| Mesa virgl, Proxmox VE host with Intel UHD 630 | about 1500 | about 680 |
+
+`gltest` also prints the free "system resources" (Windows 9x's small fixed heaps for windows
+and drawing objects) and free memory before and after: both must come back to where they
+were.
+
+## Things learnt the hard way
+
+- **Sample counts.** Mesa's Windows frontend asks for window buffers with a sample count of
+  1; the host takes 1 for "multisampled, one sample" and such a colour buffer doesn't go with
+  a plain depth buffer (`GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE`, nothing drawn). The winsys
+  sends 0 for anything up to 1.
+- **No memory behind textures.** When the host can copy between resources, the virgl driver
+  asks for textures without guest memory and moves texture data through staging buffers. The
+  read-back of a finished frame needs memory behind the window's colour buffer, so the winsys
+  asks for it for display targets. Without it the first read-back failed on the host, the
+  host put the context in its error state and ignored everything after: the program ran at
+  17000 "frames" a second, showed nothing, and after a few such runs Windows 98 itself stopped
+  drawing its windows.
+- **The host's log** is where rendering errors show (`journalctl` on Proxmox VE, lines from
+  `QEMU[pid]`). `RVD_LOG=file` in the environment makes the winsys write its first few
+  thousand requests to a file.

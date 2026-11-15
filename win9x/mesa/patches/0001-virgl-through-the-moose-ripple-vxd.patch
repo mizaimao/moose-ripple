@@ -1,0 +1,90 @@
+diff -ruN a/src/gallium/drivers/virgl/meson.build b/src/gallium/drivers/virgl/meson.build
+--- a/src/gallium/drivers/virgl/meson.build	2025-01-22 13:12:23.000000000 -0500
++++ b/src/gallium/drivers/virgl/meson.build	2026-11-15 11:58:15.582203289 -0500
+@@ -28,6 +28,8 @@
+ if not with_platform_windows
+   virgl_deps += libvirgldrm
+   virgl_deps += libvirglvtest
++else
++  virgl_deps += libvirglrvd       # moose-ripple: Windows 9x
+ endif
+ 
+ driver_virgl = declare_dependency(
+diff -ruN a/src/gallium/meson.build b/src/gallium/meson.build
+--- a/src/gallium/meson.build	2025-01-22 13:12:23.000000000 -0500
++++ b/src/gallium/meson.build	2026-11-15 11:58:15.582203289 -0500
+@@ -167,6 +167,8 @@
+   if not with_platform_windows
+     subdir('winsys/virgl/drm')
+     subdir('winsys/virgl/vtest')
++  else
++    subdir('winsys/virgl/rvd')    # moose-ripple: Windows 9x, through our VxD
+   endif
+   subdir('drivers/virgl')
+ else
+diff -ruN a/src/gallium/targets/wgl/meson.build b/src/gallium/targets/wgl/meson.build
+--- a/src/gallium/targets/wgl/meson.build	2025-01-22 13:12:23.000000000 -0500
++++ b/src/gallium/targets/wgl/meson.build	2026-11-15 11:58:15.582203289 -0500
+@@ -24,7 +24,7 @@
+   ],
+   dependencies : [
+     dep_ws2_32, idep_nir, idep_mesautil, driver_swrast,
+-    driver_d3d12, driver_zink, winsys_d3d12_wgl
++    driver_d3d12, driver_zink, winsys_d3d12_wgl, driver_virgl
+   ],
+   link_args : gallium_wgl_link_args,
+   name_prefix : '',
+diff -ruN a/src/gallium/targets/wgl/wgl.c b/src/gallium/targets/wgl/wgl.c
+--- a/src/gallium/targets/wgl/wgl.c	2025-01-22 13:12:23.000000000 -0500
++++ b/src/gallium/targets/wgl/wgl.c	2026-11-15 11:58:15.582203289 -0500
+@@ -63,6 +63,11 @@
+ #include "zink/zink_public.h"
+ #endif
+ 
++#ifdef GALLIUM_VIRGL
++#include "virgl/rvd/rvd_virgl_public.h"
++static bool use_virgl = false;
++#endif
++
+ #ifdef GALLIUM_LLVMPIPE
+ static bool use_llvmpipe = false;
+ #endif
+@@ -80,6 +85,14 @@
+ {
+    struct pipe_screen* screen = NULL;
+ 
++#ifdef GALLIUM_VIRGL
++   /* moose-ripple: the host GPU through our VxD (Windows 9x). */
++   if (strcmp(driver, "virgl") == 0) {
++      screen = rvd_virgl_screen_create();
++      if (screen)
++         use_virgl = true;
++   }
++#endif
+ #ifdef GALLIUM_LLVMPIPE
+    if (strcmp(driver, "llvmpipe") == 0) {
+       screen = llvmpipe_create_screen(winsys);
+@@ -122,6 +135,9 @@
+ 
+    const char *const drivers[] = {
+       debug_get_option("GALLIUM_DRIVER", ""),
++#ifdef GALLIUM_VIRGL
++      sw_only ? "" : "virgl",
++#endif
+ #ifdef GALLIUM_D3D12
+       sw_only ? "" : "d3d12",
+ #endif
+@@ -196,6 +212,13 @@
+       screen->flush_frontbuffer(screen, ctx, res, 0, 0, hDC, 0, NULL);
+       return;
+    }
++#endif
++
++#ifdef GALLIUM_VIRGL
++   if (use_virgl) {
++      screen->flush_frontbuffer(screen, ctx, res, 0, 0, hDC, 0, NULL);
++      return;
++   }
+ #endif
+ 
+ #ifdef GALLIUM_SOFTPIPE

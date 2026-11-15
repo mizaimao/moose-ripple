@@ -53,13 +53,15 @@ this project: nothing may look worse than without our driver).
    scanout is set. Win32 programs send virtio-gpu requests through it
    ([vxd-interface.md](vxd-interface.md)). First 3D on a host with virgl (Proxmox VE, Intel
    UHD 630): `rvdtest clear` in Windows 98 had the host GPU clear a texture, read it back
-   (the pixel value was right) and painted it on the desktop. Next: interrupts and fences,
-   per-process clean-up, then step 4.
+   (the pixel value was right) and painted it on the desktop. The interface now has contexts,
+   buffers with guest memory, command submission and transfers, and the VxD cleans up after a
+   program that ends. Open: interrupts and fences (requests are polled and synchronous).
 4. **OpenGL on 98:** Mesa (virgl) built for Windows 98 as the ICD. First target: the Quake III
    Arena demo, accelerated.
-   *State 2026-11-15:* Mesa 24.3.4 builds for Windows 98 with a current clang and runs there
-   with its software renderer ([mesa.md](mesa.md)). Next: the virgl driver on our VxD, and
-   loading through Windows' own `opengl32.dll`.
+   *State 2026-11-15:* Mesa 24.3.4 builds for Windows 98 with a current clang, and its virgl
+   driver draws with the host GPU through our VxD: a test program in OpenGL 1.1 style passes
+   its pixel checks and shows its picture in a window ([mesa.md](mesa.md)). Next: loading
+   through Windows' own `opengl32.dll`, then the Quake III Arena demo.
 5. **Direct3D on 98:** the HAL for DirectX 7 (3DMark 99 and 2000), then the DirectX 8 and 9
    command stream (3DMark 2001 SE), translated to Gallium (Mesa's driver interface).
 6. **Windows 2000:** miniport and display driver; the OpenGL and Direct3D parts reused.

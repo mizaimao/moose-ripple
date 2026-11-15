@@ -1,8 +1,7 @@
 #!/bin/sh
 # Cross-build Mesa 24.3.4 for Windows 98 on the Linux build host (docs/win9x/mesa.md).
 #   win9x/mesa/build.sh [--clean]
-#   DRIVERS=softpipe win9x/mesa/build.sh     software rendering only (the default until the
-#                                            virtio-gpu winsys is in)
+#   DRIVERS=softpipe win9x/mesa/build.sh     software rendering only (default: virgl,softpipe)
 # Its own source tree and build directory under TOOLS (default .tools, never committed):
 #   mesa/src-24.3.4-win9x     the release tarball, patches/ applied, overlay/ copied over it
 #   mesa/build-win9x          the build;  mesa/out-win9x  the DLLs
@@ -22,7 +21,7 @@ T=${TOOLS:-$root/.tools}
 MESA_VERSION=24.3.4
 MESA_SHA256=e641ae27191d387599219694560d221b7feaa91c900bcec46bf444218ed66025
 TARBALL=$T/src/mesa-dl/mesa-$MESA_VERSION.tar.xz
-DRIVERS=${DRIVERS:-softpipe}
+DRIVERS=${DRIVERS:-virgl,softpipe}
 SRC=$T/mesa/src-$MESA_VERSION-win9x
 BUILD=$T/mesa/build-win9x
 OUT=${OUT:-$T/mesa/out-win9x}
@@ -41,21 +40,27 @@ if [ ! -f "$TARBALL" ]; then
 fi
 echo "$MESA_SHA256  $TARBALL" | sha256sum -c --quiet
 
-# Source tree: unpacked again when the patches or the overlay change, or with --clean.
-stamp=$( (echo "$MESA_SHA256"; cat "$here"/patches/*.patch 2>/dev/null
-          cd "$here/overlay" && find . -type f | LC_ALL=C sort | xargs cat) | sha256sum | cut -c1-16)
+# Source tree: unpacked again when the patches change, or with --clean. The overlay (our own
+# files) and the VxD's interface header are copied over it on every run, changed files only,
+# so that an edit there costs an incremental build.
+stamp=$( (echo "$MESA_SHA256"; cat "$here"/patches/*.patch 2>/dev/null) | sha256sum | cut -c1-16)
 if [ "${1:-}" = --clean ] || [ "$(cat "$SRC/.ripple-win9x-stamp" 2>/dev/null)" != "$stamp" ]; then
-    rm -rf "$SRC"
-    [ "${1:-}" != --clean ] || rm -rf "$BUILD"
+    rm -rf "$SRC" "$BUILD"
     mkdir -p "$SRC"
     tar xJf "$TARBALL" -C "$SRC" --strip-components=1
     for p in "$here"/patches/*.patch; do
         [ -f "$p" ] || continue
         patch -d "$SRC" -p1 --quiet < "$p"
     done
-    cp -R "$here/overlay"/. "$SRC"/
     echo "$stamp" > "$SRC/.ripple-win9x-stamp"
 fi
+(cd "$here/overlay" && find . -type f) | while read -r f; do
+    cmp -s "$here/overlay/$f" "$SRC/$f" || { mkdir -p "$(dirname "$SRC/$f")"; cp "$here/overlay/$f" "$SRC/$f"; }
+done
+cmp -s "$here/../minivdd/rvd.h" "$SRC/src/gallium/winsys/virgl/rvd/rvd.h" ||
+    cp "$here/../minivdd/rvd.h" "$SRC/src/gallium/winsys/virgl/rvd/rvd.h"
+# A different set of drivers needs a fresh build directory.
+[ "$(cat "$BUILD/.ripple-drivers" 2>/dev/null)" = "$DRIVERS" ] || rm -rf "$BUILD"
 
 # Pentium II instructions only: the guest CPU model may be an old one, and Windows 98 predates
 # SSE2. No frame-pointer omission games either: plain, debuggable code.
@@ -103,6 +108,7 @@ if [ ! -f "$BUILD/build.ninja" ]; then
         -Dvalgrind=disabled -Dlibunwind=disabled -Dlmsensors=disabled -Dbuild-tests=false \
         -Dmicrosoft-clc=disabled -Dspirv-to-dxil=false -Dgallium-va=disabled \
         -Dvideo-codecs= -Dshared-glapi=enabled
+    echo "$DRIVERS" > "$BUILD/.ripple-drivers"
 fi
 ninja -C "$BUILD"
 rm -rf "$OUT" && mkdir -p "$OUT"

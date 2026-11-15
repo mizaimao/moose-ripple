@@ -222,6 +222,35 @@ BeginProc _vmm_alloc_contig
         ret
 EndProc _vmm_alloc_contig
 
+; void *vmm_alloc_pages(u32 pages, u32 *handle): zeroed system pages that are never paged out or
+; moved (so their physical addresses stay); the handle for vmm_free_pages. 0 on failure.
+BeginProc _vmm_alloc_pages
+        mov     ecx, [esp+4]
+        VMMCall _PageAllocate, <ecx, PG_SYS, 0, 0, 0, 0, 0, PAGEZEROINIT+PAGEFIXED>
+        mov     ecx, [esp+8]
+        mov     [ecx], eax
+        mov     eax, edx
+        ret
+EndProc _vmm_alloc_pages
+
+; void vmm_free_pages(u32 handle)
+BeginProc _vmm_free_pages
+        mov     eax, [esp+4]
+        VMMCall _PageFree, <eax, 0>
+        ret
+EndProc _vmm_free_pages
+
+; int vmm_page_table(void *addr, u32 pages, u32 *entries): the page table entries of a range
+; (the physical address of each page is in bits 12 and up). 0 on failure.
+BeginProc _vmm_page_table
+        mov     eax, [esp+4]
+        shr     eax, 12
+        mov     ecx, [esp+8]
+        mov     edx, [esp+12]
+        VMMCall _CopyPageTable, <eax, ecx, edx, 0>
+        ret
+EndProc _vmm_page_table
+
 ; u32 vmm_time_ms(void): milliseconds since Windows started
 BeginProc _vmm_time_ms
         VMMCall Get_System_Time

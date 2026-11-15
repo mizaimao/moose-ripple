@@ -21,6 +21,26 @@
 
 static int failures;
 
+/* Windows 9x keeps its windows and drawing objects in small fixed heaps ("system resources");
+   a driver that loses a little of them every frame takes the whole system down. Windows 98's
+   Resource Meter library tells how much is free (0 system, 1 GDI, 2 USER). */
+static void resources(const char *when)
+{
+    typedef int (WINAPI *free_fn)(int);
+    HMODULE lib = LoadLibrary("rsrc32.dll");
+    free_fn free_resources = lib ? (free_fn)GetProcAddress(lib, "_MyGetFreeSystemResources32@4") : NULL;
+    MEMORYSTATUS ms;
+
+    ms.dwLength = sizeof ms;
+    GlobalMemoryStatus(&ms);
+    printf("%s: ", when);
+    if (free_resources)
+        printf("free resources: system %d%%, GDI %d%%, USER %d%%; ", free_resources(0),
+               free_resources(1), free_resources(2));
+    printf("free memory %lu of %lu MB\n", (unsigned long)(ms.dwAvailPhys >> 20),
+           (unsigned long)(ms.dwTotalPhys >> 20));
+}
+
 static LRESULT CALLBACK wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 {
     if (msg == WM_DESTROY) {
@@ -124,6 +144,7 @@ int main(int argc, char **argv)
     int format, frames = 0;
     MSG msg;
 
+    resources("at the start");
     memset(&wc, 0, sizeof wc);
     wc.style = CS_OWNDC;
     wc.lpfnWndProc = wndproc;
@@ -168,6 +189,15 @@ int main(int argc, char **argv)
     printf("GL_VENDOR:   %s\nGL_RENDERER: %s\nGL_VERSION:  %s\n",
            (const char *)glGetString(GL_VENDOR), (const char *)glGetString(GL_RENDERER),
            (const char *)glGetString(GL_VERSION));
+
+    /* Frames as fast as they come, as games of the time ask for (r_swapInterval 0). */
+    {
+        typedef BOOL (WINAPI *swap_interval_fn)(int);
+        swap_interval_fn swap_interval = (swap_interval_fn)wglGetProcAddress("wglSwapIntervalEXT");
+        if (swap_interval)
+            swap_interval(0);
+        printf("wglSwapIntervalEXT: %s\n", swap_interval ? "set to 0" : "not there");
+    }
 
     glViewport(0, 0, w, h);
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -216,5 +246,6 @@ done:
     wglDeleteContext(rc);
     ReleaseDC(win, dc);
     DestroyWindow(win);
+    resources("at the end");
     return failures ? 1 : 0;
 }
