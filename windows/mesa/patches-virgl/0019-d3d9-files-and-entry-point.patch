@@ -1,0 +1,33 @@
+Direct3D 9: the files of the Direct3D 9 part into the driver, and its entry point exported
+
+The Direct3D 9 part (windows/mesa/overlay-virgl, D3D9*) is built into the same DLL as the
+Direct3D 10 driver, as in the Yttrium project's Mesa fork it comes from, and the DLL exports
+OpenAdapter, the entry point the Direct3D 9 runtime looks for.
+
+diff -ru a/src/gallium/frontends/d3d10umd/meson.build b/src/gallium/frontends/d3d10umd/meson.build
+--- a/src/gallium/frontends/d3d10umd/meson.build
++++ b/src/gallium/frontends/d3d10umd/meson.build
+@@ -9,6 +9,14 @@
+   'd3d10umd',
+   files(
+     'Adapter.cpp',
++    'D3D9Adapter.cpp',
++    'D3D9Common.cpp',
++    'D3D9Draw.cpp',
++    'D3D9Host.cpp',
++    'D3D9NineShader.c',
++    'D3D9Resource.cpp',
++    'D3D9ShaderTranslate.cpp',
++    'D3D9State.cpp',
+     'Debug.cpp',
+     'Device.cpp',
+     'Draw.cpp',
+diff -ru a/src/gallium/targets/d3d10umd/d3d10.def.in b/src/gallium/targets/d3d10umd/d3d10.def.in
+--- a/src/gallium/targets/d3d10umd/d3d10.def.in
++++ b/src/gallium/targets/d3d10umd/d3d10.def.in
+@@ -1,4 +1,5 @@
+ ; stdcall calling convention have @number suffix on 32 bits architecture for gcc
++OpenAdapter@4
+ OpenAdapter10@4
+ OpenAdapter10_2@4
+ D3DKMTAcquireKeyedMutex@4

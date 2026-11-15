@@ -1,0 +1,117 @@
+/*
+ * SPDX-License-Identifier: MIT
+ *
+ * Copyright 2026 the moose-ripple authors
+ *
+ * The answers to D3D9Host.h for virgl.
+ */
+
+#include "D3D9Host.h"
+
+#include "pipe/p_context.h"
+#include "util/u_debug.h"
+
+#include <stdarg.h>
+#include <stdio.h>
+
+#include <windows.h>
+
+extern "C" {
+
+void
+yttrium_gdi_flush_labeled(struct pipe_context *ctx, struct pipe_fence_handle **fence,
+                          unsigned flags, const char *label)
+{
+   (void)label;
+
+   if (ctx && ctx->flush)
+      ctx->flush(ctx, fence, flags);
+}
+
+bool
+yttrium_gdi_flush_handoff(struct pipe_context *ctx, const char *label)
+{
+   yttrium_gdi_flush_labeled(ctx, NULL, 0, label);
+   return true;
+}
+
+bool
+yttrium_gdi_take_draw_failure(struct pipe_context *ctx)
+{
+   (void)ctx;
+   return false;
+}
+
+void
+yttrium_gdi_resource_set_allocation_ownership(struct pipe_resource *resource, bool owned)
+{
+   (void)resource;
+   (void)owned;
+}
+
+bool
+yttrium_gdi_resource_has_runtime_allocation(struct pipe_resource *resource)
+{
+   (void)resource;
+   return false;
+}
+
+unsigned
+yttrium_gdi_pipeline_invalidate_resource(struct pipe_context *ctx,
+                                         struct pipe_resource *resource)
+{
+   (void)ctx;
+   (void)resource;
+   return 0;
+}
+
+bool
+yttrium_gdi_debug_get_bool_option(const char *name, bool dfault)
+{
+   return debug_get_bool_option(name, dfault);
+}
+
+/* Warnings go to the debugger's output, and to the file RIPPLE_D3D9_LOG names if it is set. */
+static void
+d3d9_host_say(const char *prefix, const char *format, va_list args)
+{
+   char line[1024];
+   int n = snprintf(line, sizeof(line), "%s", prefix);
+
+   vsnprintf(line + n, sizeof(line) - n - 2, format, args);
+   strcat(line, "\n");
+   OutputDebugStringA(line);
+
+   static const char *path;
+   static bool asked;
+   if (!asked) {
+      path = getenv("RIPPLE_D3D9_LOG");
+      asked = true;
+   }
+   if (path) {
+      FILE *f = fopen(path, "a");
+      if (f) {
+         fputs(line, f);
+         fclose(f);
+      }
+   }
+}
+
+void
+yttrium_gdi_trace_warnf(const char *format, ...)
+{
+   va_list args;
+
+   va_start(args, format);
+   d3d9_host_say("", format, args);
+   va_end(args);
+}
+
+void
+yttrium_gdi_user_logf(const char *format, ...)
+{
+   /* The same text follows through yttrium_gdi_trace_warnf wherever this is called */
+   (void)format;
+}
+
+}

@@ -127,6 +127,9 @@ struct gdikmt_device {
    NTSTATUS (*setDisplayMode)(struct gdikmt_device *dev, D3DKMT_HANDLE hPrimaryAllocation);
 
    void (*destroy)(struct gdikmt_device *dev);
+
+   /* Set while the runtime destroys the device this one serves (the Direct3D 9 code sets it) */
+   bool runtime_destroying;
 };
 
 /*
