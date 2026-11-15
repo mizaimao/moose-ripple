@@ -419,6 +419,13 @@ one reboot. On the display, with no setting changed by hand:
 | Host's renderer | no error in its log |
 
 Not measured: Windows' own compositor assessment (`winsat dwm`) refuses to run ("no LDDM
-Support"), because it tests through Direct3D 9, which the driver does not have yet. Still to
-do for the milestone: the same screens from the GeForce 9600 GT machine next to ours. The
-captures are kept out of the repository (they show the test account's desktop).
+Support"), because it tests through Direct3D 9, which the driver does not have yet.
+
+**Next to the GeForce 9600 GT.** The same five screens (desktop, a window, a live thumbnail,
+Flip 3D, desktop peek) were taken on the reference: the test VM's base snapshot started with
+the card passed through instead of the virtio display, NVIDIA's driver, 1024x768, pictures
+taken inside Windows. Laid next to ours they show no difference in the glass, the shadows,
+the thumbnail, the stacked windows of Flip 3D or the glass outlines of peek; the only ones
+are the mouse pointer (our pictures come from the host's display, which has it) and a
+notification icon that had not appeared yet. The captures are kept out of the repository
+(they show the test account's desktop).
