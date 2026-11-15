@@ -51,6 +51,7 @@ VxD_LOCKED_CODE_SEG
 Begin_Control_Dispatch RippleVD
         Control_Dispatch Sys_Dynamic_Device_Init, MiniVDD_Dynamic_Init
         Control_Dispatch Device_Init, MiniVDD_Dynamic_Init
+        Control_Dispatch W32_DEVICEIOCONTROL, RippleVD_IoControl
 End_Control_Dispatch RippleVD
 
 ; ---- The trap for ports 01CEh and 01CFh -------------------------------------------------------
@@ -187,6 +188,16 @@ BeginProc MiniVDD_PostModeSwitch       ; POST_HIRES_TO_VGA and POST_VGA_TO_HIRES
         mov     ModeChange, 0
         ret
 EndProc MiniVDD_PostModeSwitch
+
+; ---- DeviceIoControl from Win32 programs (CreateFile on \\.\RIPPLEVD): ESI = the parameters.
+; EAX = 0 for success, or a Win32 error code.
+        extrn   _vgpu_ioctl:near                ; vgpu.c
+BeginProc RippleVD_IoControl
+        push    esi
+        call    _vgpu_ioctl
+        add     esp, 4
+        ret
+EndProc RippleVD_IoControl
 
 ; ---- What vgpu.c needs from VMM: near, C calling convention ----------------------------------
 

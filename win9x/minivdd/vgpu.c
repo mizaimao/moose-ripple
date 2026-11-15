@@ -151,8 +151,14 @@ struct gpu_display_one { u32 x, y, width, height, enabled, flags; };
 
 static void *common = 0, *isr = 0, *devcfg = 0, *notify_base = 0;
 static struct vq ctrlq = { 0 }, cursorq = { 0 };
-static u8  *cmd_page = 0;           /* one page for a request (first half) and its answer */
-static u32  cmd_phys = 0;
+/* Memory the device reads and writes, physically contiguous, allocated once:
+   a request buffer, a page for answers, and a transfer area that user-mode drivers attach to
+   host resources as their guest-side storage. */
+#define REQ_PAGES   16
+#define AREA_PAGES  512
+static u8  *req_buf = 0, *resp_page = 0, *area = 0;
+static u32  req_phys = 0, resp_phys = 0, area_phys = 0;
+static u32  display_w = 0, display_h = 0;
 static u32  features = 0;
 
 int vgpu_has_virgl(void)
@@ -187,7 +193,7 @@ static int setup_queue(struct vq *q, u16 index)
     return 1;
 }
 
-/* One request with its answer, both in the command page; waits (polling) until the device has
+/* One request (in req_buf) with its answer (in resp_page); waits, polling, until the device has
    used the buffers. Returns the number of bytes the device wrote, 0 on a time-out. */
 static u32 command(u32 req_len, u32 resp_len)
 {
@@ -195,9 +201,9 @@ static u32 command(u32 req_len, u32 resp_len)
     u32 start, spins = 0;
     u16 head = 0;
 
-    q->desc[0].addr_lo = cmd_phys;        q->desc[0].addr_hi = 0;
+    q->desc[0].addr_lo = req_phys;        q->desc[0].addr_hi = 0;
     q->desc[0].len = req_len;             q->desc[0].flags = VQ_DESC_NEXT; q->desc[0].next = 1;
-    q->desc[1].addr_lo = cmd_phys + 2048; q->desc[1].addr_hi = 0;
+    q->desc[1].addr_lo = resp_phys;       q->desc[1].addr_hi = 0;
     q->desc[1].len = resp_len;            q->desc[1].flags = VQ_DESC_WRITE; q->desc[1].next = 0;
     q->avail->ring[q->avail->idx % QUEUE_SIZE] = head;
     q->avail->idx++;
@@ -260,8 +266,10 @@ static int transport_init(void)
         dbg("rvd: the card refused our features\r\n");
         return 0;
     }
-    cmd_page = (u8 *)vmm_alloc_contig(1, &cmd_phys);
-    if (!cmd_page || !setup_queue(&ctrlq, 0) || !setup_queue(&cursorq, 1)) {
+    req_buf   = (u8 *)vmm_alloc_contig(REQ_PAGES, &req_phys);
+    resp_page = (u8 *)vmm_alloc_contig(1, &resp_phys);
+    area      = (u8 *)vmm_alloc_contig(AREA_PAGES, &area_phys);
+    if (!req_buf || !resp_page || !area || !setup_queue(&ctrlq, 0) || !setup_queue(&cursorq, 1)) {
         dbg("rvd: no memory for the queues\r\n");
         wr8(common, CC_DEVICE_STATUS, 0);
         return 0;
@@ -278,8 +286,8 @@ static int transport_init(void)
 /* A first exchange with the host: what does it show? */
 static void show_display_info(void)
 {
-    struct gpu_ctrl_hdr *req = (struct gpu_ctrl_hdr *)cmd_page;
-    struct gpu_ctrl_hdr *resp = (struct gpu_ctrl_hdr *)(cmd_page + 2048);
+    struct gpu_ctrl_hdr *req = (struct gpu_ctrl_hdr *)req_buf;
+    struct gpu_ctrl_hdr *resp = (struct gpu_ctrl_hdr *)resp_page;
     struct gpu_display_one *d = (struct gpu_display_one *)(resp + 1);
     u32 i, n;
 
@@ -292,6 +300,8 @@ static void show_display_info(void)
         dbg(", type "); dbg_hex(resp->type); dbg("\r\n");
         return;
     }
+    display_w = d->width;
+    display_h = d->height;
     dbg("rvd: host display "); dbg_hex(d->width); dbg(" x "); dbg_hex(d->height);
     dbg(", enabled "); dbg_hex(d->enabled); dbg("\r\n");
 }
@@ -342,4 +352,110 @@ int __cdecl vgpu_init(void)
         return 0;
     show_display_info();
     return 1;
+}
+
+/* ---- The interface for user-mode drivers: DeviceIoControl on \\.\RIPPLEVD -------------------- */
+/* What VMM hands over with the W32_DEVICEIOCONTROL message (in ESI). */
+struct dioc {
+    u32   internal1, vm, internal2, code;
+    void *in;   u32 in_len;
+    void *out;  u32 out_len;
+    u32  *returned;
+    void *overlapped;
+    u32   device, process;
+};
+#define DIOC_OPEN   0UL
+#define DIOC_CLOSE  0xFFFFFFFFUL
+
+/* The private codes. Everything else about virtio-gpu is decided in user mode:
+   RVD_COMMAND carries a complete virtio-gpu control request and returns the device's answer. */
+#define RVD_INFO        1   /* out: struct rvd_info */
+#define RVD_COMMAND     2   /* in: the request; out: the answer */
+#define RVD_AREA_READ   3   /* in: u32 offset; out: bytes from the transfer area */
+#define RVD_AREA_WRITE  4   /* in: u32 offset, then bytes for the transfer area */
+
+struct rvd_info {
+    u32 version;            /* of this interface: 1 */
+    u32 virgl;              /* the host renders 3D */
+    u32 capsets;            /* number of capability sets */
+    u32 display_w, display_h;
+    u32 area_phys, area_bytes;      /* the transfer area, for RESOURCE_ATTACH_BACKING */
+    u32 max_request;
+};
+
+#define ERROR_NOT_SUPPORTED     50
+#define ERROR_INVALID_PARAMETER 87
+#define ERROR_GEN_FAILURE       31
+
+static void copy(void *dst, const void *src, u32 n)
+{
+    u8 *d = (u8 *)dst;
+    const u8 *s = (const u8 *)src;
+    while (n--)
+        *d++ = *s++;
+}
+
+u32 __cdecl vgpu_ioctl(struct dioc *p)
+{
+    u32 n = 0;
+
+    if (p->code == DIOC_OPEN || p->code == DIOC_CLOSE)
+        return 0;
+    if (!common)
+        return ERROR_NOT_SUPPORTED;
+    switch (p->code) {
+    case RVD_INFO: {
+        struct rvd_info i;
+        if (p->out_len < sizeof(i))
+            return ERROR_INVALID_PARAMETER;
+        i.version = 1;
+        i.virgl = vgpu_has_virgl();
+        i.capsets = rd32(devcfg, 12);
+        i.display_w = display_w;
+        i.display_h = display_h;
+        i.area_phys = area_phys;
+        i.area_bytes = AREA_PAGES * 4096UL;
+        i.max_request = REQ_PAGES * 4096UL;
+        copy(p->out, &i, sizeof(i));
+        n = sizeof(i);
+        break;
+    }
+    case RVD_COMMAND:
+        if (p->in_len < sizeof(struct gpu_ctrl_hdr) || p->in_len > REQ_PAGES * 4096UL ||
+            p->out_len < sizeof(struct gpu_ctrl_hdr) || p->out_len > 4096)
+            return ERROR_INVALID_PARAMETER;
+        copy(req_buf, p->in, p->in_len);
+        n = command(p->in_len, p->out_len);
+        if (!n)
+            return ERROR_GEN_FAILURE;
+        copy(p->out, resp_page, n);
+        break;
+    case RVD_AREA_READ: {
+        u32 off;
+        if (p->in_len < 4)
+            return ERROR_INVALID_PARAMETER;
+        off = *(u32 *)p->in;
+        if (off > AREA_PAGES * 4096UL || p->out_len > AREA_PAGES * 4096UL - off)
+            return ERROR_INVALID_PARAMETER;
+        copy(p->out, area + off, p->out_len);
+        n = p->out_len;
+        break;
+    }
+    case RVD_AREA_WRITE: {
+        u32 off, len;
+        if (p->in_len < 4)
+            return ERROR_INVALID_PARAMETER;
+        off = *(u32 *)p->in;
+        len = p->in_len - 4;
+        if (off > AREA_PAGES * 4096UL || len > AREA_PAGES * 4096UL - off)
+            return ERROR_INVALID_PARAMETER;
+        copy(area + off, (u8 *)p->in + 4, len);
+        break;
+    }
+    default:
+        return ERROR_NOT_SUPPORTED;
+    }
+    if (p->returned)
+        *p->returned = n;
+    return 0;
 }
