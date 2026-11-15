@@ -46,6 +46,7 @@ partition, RIPPLE, holds moose-ripple's installer, which Snow Leopard mounts on 
 | `RippleGA.plugin` | the 2D plugin WindowServer needs before it composites with OpenGL |
 | `RippleQEMUTablet.kext` | optional: the pointer follows QEMU's USB tablet exactly |
 | `qe-check` | prints whether each display has Quartz Extreme |
+| `ripple-doctor.sh` | checks the usual causes of trouble and says what to do (Troubleshooting) |
 | `install.sh`, `uninstall.sh` | put the four bundles in place and set the boot flags, or take them out again |
 | `INSTALL` | these steps, short |
 | `LICENSE`, `LICENSE-Mesa.rst` | moose-ripple's license, and Mesa's for the Mesa code in the GL driver |
@@ -363,6 +364,8 @@ off in single-user mode, `install.sh` says so; run it again after the first star
   ripples.
 - `/Volumes/RIPPLE/qe-check` prints `QE on` for each display.
 - `ioreg -l -c RippleAccelerator | grep -E '"Ripple(GL|QE)"'` shows both as `on`.
+- `sh /Volumes/RIPPLE/ripple-doctor.sh` checks the usual causes of trouble in one go and says
+  what to do about each (see Troubleshooting).
 
 If one app's OpenGL window looks wrong, start that app from Terminal with
 `RIPPLE_GL_DIRECT=0` in front of its command (for example
@@ -385,6 +388,12 @@ or start it in single-user mode (Cmd+S in OpenCore's menu, or `-s` at Chameleon'
 
 ## Troubleshooting
 
+- **First, the check script:** `sudo sh /Volumes/RIPPLE/ripple-doctor.sh` looks at the system
+  version and kernel, the boot flags, the display card, the installed and loaded drivers,
+  OpenGL and Quartz Extreme, crash reports of the last day (crashes of loginwindow, fontd or mds
+  mean a wrong SMC key), sleep and Spotlight. It changes nothing; each `WARN` or `FAIL` line is
+  followed by what to do. Without sudo it skips the other accounts' crash reports. Please add
+  its output to an issue.
 - **ssh into the guest:** 10.6 ships OpenSSH 5.2, which knows only SHA-1 RSA signatures. Use an
   RSA key, and on a current client add `-o PubkeyAcceptedAlgorithms=+ssh-rsa -o
   HostKeyAlgorithms=+ssh-rsa`.
