@@ -188,6 +188,35 @@ BeginProc MiniVDD_PostModeSwitch       ; POST_HIRES_TO_VGA and POST_VGA_TO_HIRES
         ret
 EndProc MiniVDD_PostModeSwitch
 
+; ---- What vgpu.c needs from VMM: near, C calling convention ----------------------------------
+
+; void *vmm_map_phys(u32 phys, u32 bytes): a ring-0 address for device memory, 0 on failure
+BeginProc _vmm_map_phys
+        mov     eax, [esp+4]
+        mov     ecx, [esp+8]
+        VMMCall _MapPhysToLinear, <eax, ecx, 0>
+        cmp     eax, -1
+        jne     short mp_ok
+        xor     eax, eax
+mp_ok:  ret
+EndProc _vmm_map_phys
+
+; void *vmm_alloc_contig(u32 pages, u32 *phys): zeroed, fixed, physically contiguous pages
+; below 4 GB; their physical address through phys. 0 on failure.
+BeginProc _vmm_alloc_contig
+        mov     ecx, [esp+4]
+        mov     edx, [esp+8]
+        VMMCall _PageAllocate, <ecx, PG_SYS, 0, 0, 0, 0FFFFFh, edx, PAGEZEROINIT+PAGEUSEALIGN+PAGECONTIG+PAGEFIXED>
+        mov     eax, edx                ; EDX = the address (EAX is a handle we don't keep)
+        ret
+EndProc _vmm_alloc_contig
+
+; u32 vmm_time_ms(void): milliseconds since Windows started
+BeginProc _vmm_time_ms
+        VMMCall Get_System_Time
+        ret
+EndProc _vmm_time_ms
+
 VxD_LOCKED_CODE_ENDS
 
 ; ---- Initialisation ---------------------------------------------------------------------------

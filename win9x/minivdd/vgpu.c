@@ -4,7 +4,8 @@
  * 32-bit flat C inside the VxD: no C run-time, no Windows headers. What it needs from VMM comes
  * through small assembly helpers in ripplevd.asm.
  *
- * So far: find the card on the PCI bus and read where its virtio structures are.
+ * So far: find the card on the PCI bus, bring up the virtio transport (virtio 1.0 over PCI, two
+ * queues, answers polled) and ask the host for its display size.
  */
 
 /* Everything stays in the VxD's locked code and data: the trap and the interrupt path run at
@@ -86,6 +87,215 @@ struct vgpu {
 
 static struct vgpu gpu = { 0 };
 
+/* ---- From ripplevd.asm ---------------------------------------------------------------------- */
+extern void *__cdecl vmm_map_phys(u32 phys, u32 bytes);
+extern void *__cdecl vmm_alloc_contig(u32 pages, u32 *phys);
+extern u32   __cdecl vmm_time_ms(void);
+
+/* ---- The virtio structures in the card's memory (virtio 1.0, 4.1.4.3) ------------------------ */
+/* common configuration, offsets */
+#define CC_DEVICE_FEATURE_SELECT 0x00
+#define CC_DEVICE_FEATURE        0x04
+#define CC_DRIVER_FEATURE_SELECT 0x08
+#define CC_DRIVER_FEATURE        0x0C
+#define CC_NUM_QUEUES            0x12
+#define CC_DEVICE_STATUS         0x14
+#define CC_QUEUE_SELECT          0x16
+#define CC_QUEUE_SIZE            0x18
+#define CC_QUEUE_ENABLE          0x1C
+#define CC_QUEUE_NOTIFY_OFF      0x1E
+#define CC_QUEUE_DESC            0x20
+#define CC_QUEUE_DRIVER          0x28
+#define CC_QUEUE_DEVICE          0x30
+
+#define STATUS_ACKNOWLEDGE 1
+#define STATUS_DRIVER      2
+#define STATUS_DRIVER_OK   4
+#define STATUS_FEATURES_OK 8
+
+#define VIRTIO_F_VERSION_1_HI   1UL             /* feature bit 32 */
+#define VIRTIO_GPU_F_VIRGL      1UL             /* feature bit 0: the host renders 3D (virgl) */
+
+#define rd8(p, o)      (*(volatile u8  *)((u8 *)(p) + (o)))
+#define rd16(p, o)     (*(volatile u16 *)((u8 *)(p) + (o)))
+#define rd32(p, o)     (*(volatile u32 *)((u8 *)(p) + (o)))
+#define wr8(p, o, v)   (*(volatile u8  *)((u8 *)(p) + (o)) = (u8)(v))
+#define wr16(p, o, v)  (*(volatile u16 *)((u8 *)(p) + (o)) = (u16)(v))
+#define wr32(p, o, v)  (*(volatile u32 *)((u8 *)(p) + (o)) = (u32)(v))
+
+/* ---- A virtqueue (virtio 1.0, 2.4): one page each for the three parts ---------------------- */
+#define QUEUE_SIZE 64
+
+struct vq_desc { u32 addr_lo, addr_hi, len; u16 flags, next; };
+#define VQ_DESC_NEXT  1
+#define VQ_DESC_WRITE 2                         /* the device writes this buffer */
+
+struct vq_avail { u16 flags, idx, ring[QUEUE_SIZE]; };
+#define VQ_AVAIL_NO_INTERRUPT 1
+struct vq_used_elem { u32 id, len; };
+struct vq_used  { u16 flags, idx; struct vq_used_elem ring[QUEUE_SIZE]; };
+
+struct vq {
+    struct vq_desc  *desc;
+    struct vq_avail *avail;
+    volatile struct vq_used *used;
+    volatile u16 *notify;
+    u16 index, last_used;
+};
+
+/* ---- virtio-gpu (virtio 1.1, 5.7): the few things needed so far ------------------------------ */
+struct gpu_ctrl_hdr { u32 type, flags, fence_lo, fence_hi, ctx_id, padding; };
+#define GPU_CMD_GET_DISPLAY_INFO   0x0100
+#define GPU_RESP_OK_DISPLAY_INFO   0x1101
+struct gpu_display_one { u32 x, y, width, height, enabled, flags; };
+
+static void *common = 0, *isr = 0, *devcfg = 0, *notify_base = 0;
+static struct vq ctrlq = { 0 }, cursorq = { 0 };
+static u8  *cmd_page = 0;           /* one page for a request (first half) and its answer */
+static u32  cmd_phys = 0;
+static u32  features = 0;
+
+int vgpu_has_virgl(void)
+{
+    return (features & VIRTIO_GPU_F_VIRGL) != 0;
+}
+
+static int setup_queue(struct vq *q, u16 index)
+{
+    u32 phys;
+    u8 *mem;
+
+    wr16(common, CC_QUEUE_SELECT, index);
+    if (rd16(common, CC_QUEUE_SIZE) < QUEUE_SIZE)
+        return 0;
+    mem = (u8 *)vmm_alloc_contig(3, &phys);
+    if (!mem)
+        return 0;
+    q->index = index;
+    q->last_used = 0;
+    q->desc  = (struct vq_desc *)mem;
+    q->avail = (struct vq_avail *)(mem + 4096);
+    q->used  = (volatile struct vq_used *)(mem + 8192);
+    q->avail->flags = VQ_AVAIL_NO_INTERRUPT;    /* answers are polled for now */
+    wr16(common, CC_QUEUE_SIZE, QUEUE_SIZE);
+    wr32(common, CC_QUEUE_DESC, phys);          wr32(common, CC_QUEUE_DESC + 4, 0);
+    wr32(common, CC_QUEUE_DRIVER, phys + 4096); wr32(common, CC_QUEUE_DRIVER + 4, 0);
+    wr32(common, CC_QUEUE_DEVICE, phys + 8192); wr32(common, CC_QUEUE_DEVICE + 4, 0);
+    q->notify = (volatile u16 *)((u8 *)notify_base +
+                                 rd16(common, CC_QUEUE_NOTIFY_OFF) * gpu.notify_multiplier);
+    wr16(common, CC_QUEUE_ENABLE, 1);
+    return 1;
+}
+
+/* One request with its answer, both in the command page; waits (polling) until the device has
+   used the buffers. Returns the number of bytes the device wrote, 0 on a time-out. */
+static u32 command(u32 req_len, u32 resp_len)
+{
+    struct vq *q = &ctrlq;
+    u32 start, spins = 0;
+    u16 head = 0;
+
+    q->desc[0].addr_lo = cmd_phys;        q->desc[0].addr_hi = 0;
+    q->desc[0].len = req_len;             q->desc[0].flags = VQ_DESC_NEXT; q->desc[0].next = 1;
+    q->desc[1].addr_lo = cmd_phys + 2048; q->desc[1].addr_hi = 0;
+    q->desc[1].len = resp_len;            q->desc[1].flags = VQ_DESC_WRITE; q->desc[1].next = 0;
+    q->avail->ring[q->avail->idx % QUEUE_SIZE] = head;
+    q->avail->idx++;
+    *q->notify = q->index;
+
+    start = vmm_time_ms();
+    while (q->used->idx == q->last_used) {
+        if ((++spins & 0xFFF) == 0 && vmm_time_ms() - start > 2000)
+            return 0;
+    }
+    q->last_used++;
+    (void)rd8(isr, 0);                          /* reading it takes the interrupt request back */
+    return q->used->ring[(u16)(q->last_used - 1) % QUEUE_SIZE].len;
+}
+
+/* virtio 1.0, 3.1.1: reset, announce ourselves, agree on features, set up the queues, go. */
+static int transport_init(void)
+{
+    u32 bar_phys, bar_len, hi, i;
+    u8 *bar;
+
+    i = gpu.cap[VIRTIO_PCI_CAP_COMMON].bar;
+    for (bar_len = 0, hi = 1; hi <= 4; hi++) {       /* all four are in one memory range here */
+        u32 end;
+        if (gpu.cap[hi].bar != i)
+            return 0;
+        end = gpu.cap[hi].offset + gpu.cap[hi].length;
+        if (end > bar_len)
+            bar_len = end;
+    }
+    bar_phys = gpu.bar[i];
+    bar = (u8 *)vmm_map_phys(bar_phys, bar_len);
+    if (!bar)
+        return 0;
+    common      = bar + gpu.cap[VIRTIO_PCI_CAP_COMMON].offset;
+    notify_base = bar + gpu.cap[VIRTIO_PCI_CAP_NOTIFY].offset;
+    isr         = bar + gpu.cap[VIRTIO_PCI_CAP_ISR].offset;
+    devcfg      = bar + gpu.cap[VIRTIO_PCI_CAP_DEVICE].offset;
+
+    wr8(common, CC_DEVICE_STATUS, 0);
+    for (i = 0; i < 100000 && rd8(common, CC_DEVICE_STATUS) != 0; i++)
+        ;
+    wr8(common, CC_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
+    wr8(common, CC_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
+    wr32(common, CC_DEVICE_FEATURE_SELECT, 0);
+    features = rd32(common, CC_DEVICE_FEATURE);
+    wr32(common, CC_DEVICE_FEATURE_SELECT, 1);
+    hi = rd32(common, CC_DEVICE_FEATURE);
+    if (!(hi & VIRTIO_F_VERSION_1_HI)) {
+        dbg("rvd: the card is not a virtio 1.0 device\r\n");
+        return 0;
+    }
+    features &= VIRTIO_GPU_F_VIRGL;
+    wr32(common, CC_DRIVER_FEATURE_SELECT, 0);
+    wr32(common, CC_DRIVER_FEATURE, features);
+    wr32(common, CC_DRIVER_FEATURE_SELECT, 1);
+    wr32(common, CC_DRIVER_FEATURE, VIRTIO_F_VERSION_1_HI);
+    wr8(common, CC_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK);
+    if (!(rd8(common, CC_DEVICE_STATUS) & STATUS_FEATURES_OK)) {
+        dbg("rvd: the card refused our features\r\n");
+        return 0;
+    }
+    cmd_page = (u8 *)vmm_alloc_contig(1, &cmd_phys);
+    if (!cmd_page || !setup_queue(&ctrlq, 0) || !setup_queue(&cursorq, 1)) {
+        dbg("rvd: no memory for the queues\r\n");
+        wr8(common, CC_DEVICE_STATUS, 0);
+        return 0;
+    }
+    wr8(common, CC_DEVICE_STATUS,
+        STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK);
+    (void)rd8(isr, 0);
+    dbg("rvd: virtio-gpu ready, 3D "); dbg(vgpu_has_virgl() ? "yes" : "no");
+    dbg(", scanouts "); dbg_hex(rd32(devcfg, 8));
+    dbg(", capability sets "); dbg_hex(rd32(devcfg, 12)); dbg("\r\n");
+    return 1;
+}
+
+/* A first exchange with the host: what does it show? */
+static void show_display_info(void)
+{
+    struct gpu_ctrl_hdr *req = (struct gpu_ctrl_hdr *)cmd_page;
+    struct gpu_ctrl_hdr *resp = (struct gpu_ctrl_hdr *)(cmd_page + 2048);
+    struct gpu_display_one *d = (struct gpu_display_one *)(resp + 1);
+    u32 i, n;
+
+    for (i = 0; i < sizeof(*req) / 4; i++)
+        ((u32 *)req)[i] = 0;
+    req->type = GPU_CMD_GET_DISPLAY_INFO;
+    n = command(sizeof(*req), sizeof(*resp) + 16 * sizeof(*d));
+    if (!n || resp->type != GPU_RESP_OK_DISPLAY_INFO) {
+        dbg("rvd: no answer to GET_DISPLAY_INFO, bytes "); dbg_hex(n);
+        dbg(", type "); dbg_hex(resp->type); dbg("\r\n");
+        return;
+    }
+    dbg("rvd: host display "); dbg_hex(d->width); dbg(" x "); dbg_hex(d->height);
+    dbg(", enabled "); dbg_hex(d->enabled); dbg("\r\n");
+}
+
 /* Called once from MiniVDD_Dynamic_Init. Returns 0 if there is no virtio-gpu card (the mini-VDD
    still loads: QEMU's standard VGA has the same mode-setting ports and no virtio). */
 int __cdecl vgpu_init(void)
@@ -128,5 +338,8 @@ int __cdecl vgpu_init(void)
         dbg(") at "); dbg_hex(gpu.cap[type].offset);
         dbg(", length "); dbg_hex(gpu.cap[type].length); dbg("\r\n");
     }
-    return gpu.cap[VIRTIO_PCI_CAP_COMMON].length != 0;
+    if (!gpu.cap[VIRTIO_PCI_CAP_COMMON].length || !transport_init())
+        return 0;
+    show_display_info();
+    return 1;
 }

@@ -48,6 +48,10 @@ this project: nothing may look worse than without our driver).
    BIOS calls from switching the card's mode. Open: the hardware pointer, DirectDraw.
 3. **The virtio-gpu path on 98:** our VxD: device setup, virtqueues, interrupts, resources, the
    3D commands (virgl) from user mode, fences.
+   *State 2026-11-15:* the VxD brings the virtio device up (virtio 1.0 over PCI, two queues,
+   answers polled) and gets the host's display size back, with the VGA frame buffer still the
+   screen: QEMU keeps showing it until a scanout is set. Next: 3D contexts and resources, and
+   an interface for user-mode drivers.
 4. **OpenGL on 98:** Mesa (virgl) built for Windows 98 as the ICD. First target: the Quake III
    Arena demo, accelerated.
 5. **Direct3D on 98:** the HAL for DirectX 7 (3DMark 99 and 2000), then the DirectX 8 and 9
