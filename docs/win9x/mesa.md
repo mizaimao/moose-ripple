@@ -89,9 +89,12 @@ The build uses llvm-mingw (clang, lld, compiler-rt, libc++, mingw-w64 with the o
   refuses to load a file that imports a function it doesn't export, so the object defines each
   function and the import pointer for it, and is linked as an object file so that it comes
   before the import library.
-- **C11 threads of our own** (`win9x/mesa/overlay/src/c11/impl/threads_win32.c` replaces
+- **C11 threads for Windows 98** (`win9x/mesa/overlay/src/c11/impl/threads_win32.c` replaces
   Mesa's file): Mesa's version needs Vista's condition variables, and
-  `TryEnterCriticalSection`, which Windows 98 exports but which always fails there.
+  `TryEnterCriticalSection`, which Windows 98 exports but which always fails there. The
+  thread and thread-storage parts are adapted from Mesa's file, so this one keeps its licence
+  (Boost Software License 1.0, the notice in the file); the winsys keeps Red Hat's MIT notice
+  from the DRM winsys it is adapted from.
 
 `tools/win9x/check-imports.py` compares what a built file imports with what Windows 98 SE's own
 system DLLs export (unpacked from the setup cabinets into `.tools/win9x/w98dlls/sys`); the
