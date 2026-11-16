@@ -261,3 +261,13 @@ come out black. UTM's host renderer is virglrenderer over ANGLE on Metal, and it
 1.30 only (`[VREND CAPS] FINAL VALUES: glsl_level=130, max_samples=1` in the VM's debug log):
 no geometry shaders, nothing Direct3D 10 needs, while the compositor still gets a Direct3D 10
 device from us. Being worked on: the driver has to offer less on such a host.
+
+The driver now refuses Direct3D 10 devices on such a host (Mesa patch 0028; virgl still reports
+geometry shaders there, so the check is on the GLSL level). The compositor then does without and
+the desktop comes up plainly (Windows Basic, 1280x1024 by UTM's resizing display). Aero on such a
+host would need the compositor's feature level 9 path, which fails for now (the probe gets "no
+interface" for levels 9.1-9.3).
+
+A trap found on the way: programs started from `C:\rb\pkg` load the user-mode driver from that
+folder (Windows looks in the program's folder first), not the one installed in System32. Run
+test programs from another folder when the package folder holds a different build.
