@@ -10,4 +10,7 @@ Mesa's GL implementation and its virgl Gallium driver, cross-built for Mac OS X 
   that drives the virgl driver through our kext's user client (`docs/kext-uapi.md`).
 - `overlay/include/ripple_compat.h`: libc functions 10.6 lacks, force-included into Mesa (patch 0004).
 
+Files in `overlay/` that are adapted from Mesa keep the notices of the Mesa files they come from
+(MIT, as the winsys's from `virgl_drm_winsys.c`); our own are MIT like the rest of the repository.
+
 The meson venv lives in the repo's `.venv` on dev.lan (meson, mako, pyyaml, packaging).
