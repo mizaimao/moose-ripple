@@ -1,0 +1,220 @@
+d3d10umd: small indexable temp arrays as registers, indexed by selects
+
+virglrenderer writes every indexed store to a temporary array through address register 0
+(get_temp with dimension 0 for destinations, in 0.10.4 and 1.0.0), while the driver hands out
+ADDR[0..2] in turn. A store through ADDR[1] or ADDR[2] landed on the wrong element: the geometry
+shader of WinSAT's second geometry test drew long spikes from wrong vertices, which cost the
+rig's Intel GPU most of a frame. Arrays of up to 16 elements are now plain registers: a read
+gathers the element with compare-and-select before the instruction, a write is scattered to the
+elements after it, so no indexed store reaches the host. The test draws its shapes, at 704
+frames a second on the rig (68 with RIPPLE_INDEXED_TEMPS, which keeps the arrays).
+
+---
+--- a/src/gallium/frontends/d3d10umd/ShaderTGSI.c
++++ b/src/gallium/frontends/d3d10umd/ShaderTGSI.c
+@@ -223,6 +223,20 @@
+    uint addr_cur;
+    uint temp_offset;
+    uint indexable_temp_offsets[SHADER_MAX_INDEXABLE_TEMPS];
++   /* moose-ripple: small indexable temp arrays as plain registers, indexed by selects
++    * (translate_indexable_temp_select) */
++   uint indexable_temp_counts[SHADER_MAX_INDEXABLE_TEMPS];
++   bool indexable_temp_selects[SHADER_MAX_INDEXABLE_TEMPS];
++   struct {
++      struct ureg_dst value;
++      struct ureg_src index;
++      uint offset;
++      uint count;
++      uint writemask;
++   } scatters[2];
++   uint num_scatters;
++   struct ureg_dst insn_temps[16];
++   uint num_insn_temps;
+ 
+    struct {
+       bool declared;
+@@ -662,8 +676,8 @@
+ }
+ 
+ static struct ureg_src
+-translate_relative_operand(struct Shader_xlate *sx,
+-                           const struct Shader_relative_operand *operand)
++relative_value(struct Shader_xlate *sx,
++               const struct Shader_relative_operand *operand)
+ {
+    struct ureg_src reg;
+ 
+@@ -707,8 +721,14 @@
+       reg = ureg_src(ureg_DECL_temporary(sx->ureg));
+    }
+ 
+-   reg = ureg_scalar(reg, operand->comp);
+-   
++   return ureg_scalar(reg, operand->comp);
++}
++
++static struct ureg_src
++translate_relative_operand(struct Shader_xlate *sx,
++                           const struct Shader_relative_operand *operand)
++{
++   struct ureg_src reg = relative_value(sx, operand);
+    struct ureg_dst addr_reg = sx->addrs[sx->addr_cur];
+    ureg_UARL(sx->ureg, addr_reg, reg);
+       
+@@ -792,11 +812,115 @@
+    return reg;
+ }
+ 
++/*
++ * moose-ripple: arrays of temporaries indexed by selects.
++ *
++ * A small indexable temp array (x#[] in Direct3D 10 shaders) is declared as plain registers,
++ * and an access through an index held in a register becomes compare-and-select over its
++ * elements: a read gathers the element into a temporary before the instruction, a write goes
++ * to a temporary that is scattered to the elements after it (translate_flush_scatters). The
++ * host then gets no indexed store, which virglrenderer writes through address register 0
++ * whatever register the shader names: one geometry shader drew from wrong vertices.
++ * RIPPLE_INDEXED_TEMPS (any value) keeps the arrays as before.
++ */
++#define SHADER_SELECT_MAX_ELEMENTS 16
++
++static bool
++select_indexable_temps(void)
++{
++   static int on = -1;
++   if (on < 0)
++      on = getenv("RIPPLE_INDEXED_TEMPS") == NULL;
++   return on;
++}
++
++/* A temporary for one instruction, free again after it */
++static struct ureg_dst
++insn_temp(struct Shader_xlate *sx)
++{
++   struct ureg_dst t = ureg_DECL_temporary(sx->ureg);
++   if (sx->num_insn_temps < ARRAY_SIZE(sx->insn_temps))
++      sx->insn_temps[sx->num_insn_temps++] = t;
++   return t;
++}
++
++/* The element an access names, computed before the instruction, in .x of a temporary */
++static struct ureg_src
++select_element_index(struct Shader_xlate *sx, const struct Shader_index *index)
++{
++   struct ureg_dst i = ureg_writemask(insn_temp(sx), TGSI_WRITEMASK_X);
++   struct ureg_src rel = relative_value(sx, &index->rel);
++   if (index->index_rep == D3D10_SB_OPERAND_INDEX_IMMEDIATE32_PLUS_RELATIVE && index->imm)
++      ureg_UADD(sx->ureg, i, rel, ureg_imm1u(sx->ureg, index->imm));
++   else
++      ureg_MOV(sx->ureg, i, rel);
++   return ureg_scalar(ureg_src(i), TGSI_SWIZZLE_X);
++}
++
++static struct ureg_src
++translate_indexable_temp_select(struct Shader_xlate *sx,
++                                const struct Shader_operand *operand,
++                                bool dst, uint writemask)
++{
++   const uint offset = sx->indexable_temp_offsets[operand->index[0].imm];
++   const uint count = sx->indexable_temp_counts[operand->index[0].imm];
++   struct ureg_src index = select_element_index(sx, &operand->index[1]);
++   struct ureg_dst value = insn_temp(sx);
++
++   if (dst) {
++      if (sx->num_scatters < ARRAY_SIZE(sx->scatters)) {
++         sx->scatters[sx->num_scatters].value = value;
++         sx->scatters[sx->num_scatters].index = index;
++         sx->scatters[sx->num_scatters].offset = offset;
++         sx->scatters[sx->num_scatters].count = count;
++         sx->scatters[sx->num_scatters].writemask = writemask;
++         sx->num_scatters++;
++      } else {
++         LOG_UNSUPPORTED(true);
++      }
++      return ureg_src(value);
++   }
++
++   struct ureg_dst cond = ureg_writemask(insn_temp(sx), TGSI_WRITEMASK_X);
++   ureg_MOV(sx->ureg, value, ureg_src(sx->temps[offset]));
++   for (uint e = 1; e < count; e++) {
++      ureg_USEQ(sx->ureg, cond, index, ureg_imm1u(sx->ureg, e));
++      ureg_UCMP(sx->ureg, value, ureg_scalar(ureg_src(cond), TGSI_SWIZZLE_X),
++                ureg_src(sx->temps[offset + e]), ureg_src(value));
++   }
++   return ureg_src(value);
++}
++
++/* After an instruction: its writes through an index reach the elements, and its temporaries
++ * are free again */
++static void
++translate_flush_scatters(struct Shader_xlate *sx)
++{
++   for (uint s = 0; s < sx->num_scatters; s++) {
++      struct ureg_dst cond = ureg_writemask(ureg_DECL_temporary(sx->ureg), TGSI_WRITEMASK_X);
++      for (uint e = 0; e < sx->scatters[s].count; e++) {
++         struct ureg_dst element = sx->temps[sx->scatters[s].offset + e];
++         ureg_USEQ(sx->ureg, cond, sx->scatters[s].index, ureg_imm1u(sx->ureg, e));
++         ureg_UCMP(sx->ureg, ureg_writemask(element, sx->scatters[s].writemask),
++                   ureg_scalar(ureg_src(cond), TGSI_SWIZZLE_X),
++                   ureg_src(sx->scatters[s].value), ureg_src(element));
++      }
++      ureg_release_temporary(sx->ureg, cond);
++   }
++   sx->num_scatters = 0;
++   for (uint t = 0; t < sx->num_insn_temps; t++)
++      ureg_release_temporary(sx->ureg, sx->insn_temps[t]);
++   sx->num_insn_temps = 0;
++}
++
+ static struct ureg_src
+ translate_indexable_temp(struct Shader_xlate *sx,
+                          const struct Shader_operand *operand)
+ {
+    struct ureg_src reg;
++   if (sx->indexable_temp_selects[operand->index[0].imm] &&
++       operand->index[1].index_rep != D3D10_SB_OPERAND_INDEX_IMMEDIATE32)
++      return translate_indexable_temp_select(sx, operand, false, 0);
+    switch (operand->index[1].index_rep) {
+    case D3D10_SB_OPERAND_INDEX_IMMEDIATE32:
+       reg = ureg_src(
+@@ -848,7 +972,11 @@
+       assert(operand->base.index[0].index_rep == D3D10_SB_OPERAND_INDEX_IMMEDIATE32);
+       assert(operand->base.index[0].imm < SHADER_MAX_INDEXABLE_TEMPS);
+ 
+-      reg = ureg_dst(translate_indexable_temp(sx, &operand->base));
++      if (sx->indexable_temp_selects[operand->base.index[0].imm] &&
++          operand->base.index[1].index_rep != D3D10_SB_OPERAND_INDEX_IMMEDIATE32)
++         reg = ureg_dst(translate_indexable_temp_select(sx, &operand->base, true, writemask));
++      else
++         reg = ureg_dst(translate_indexable_temp(sx, &operand->base));
+       break;
+ 
+    default:
+@@ -2144,8 +2272,17 @@
+ 
+             sx.indexable_temp_offsets[opcode.specific.dcl_indexable_temp.index] =
+                sx.declared_temps;
+-
+-            if (opcode.specific.dcl_indexable_temp.count) {
++            sx.indexable_temp_counts[opcode.specific.dcl_indexable_temp.index] =
++               opcode.specific.dcl_indexable_temp.count;
++            sx.indexable_temp_selects[opcode.specific.dcl_indexable_temp.index] =
++               opcode.specific.dcl_indexable_temp.count &&
++               opcode.specific.dcl_indexable_temp.count <= SHADER_SELECT_MAX_ELEMENTS &&
++               select_indexable_temps();
++
++            if (sx.indexable_temp_selects[opcode.specific.dcl_indexable_temp.index]) {
++               for (i = 0; i < opcode.specific.dcl_indexable_temp.count; i++)
++                  sx.temps[sx.declared_temps + i] = ureg_DECL_temporary(ureg);
++            } else if (opcode.specific.dcl_indexable_temp.count) {
+                struct ureg_dst array =
+                   ureg_DECL_array_temporary(ureg, opcode.specific.dcl_indexable_temp.count, false);
+ 
+@@ -2295,6 +2432,7 @@
+          }
+       }
+ 
++      translate_flush_scatters(&sx);
+       Shader_opcode_free(&opcode);
+    }
+ 

@@ -646,7 +646,8 @@ The second geometry test, 40 frames a second on the rig, runs at 808 here: its s
 rig's GPU (or its driver), not our translation. The other scores are not bound by Hog's GPU,
 which is mostly idle: see the next section.
 
-Found on Hog, open: the host renderer refused one shader program, "Too many vertex uniform
+Found on Hog (fixed 2026-11-16: `docs/windows/mesa-win7.md`, "Shaders that fit the host"; it was
+the constant buffer test): the host renderer refused one shader program, "Too many vertex uniform
 blocks (15/14)". Direct3D 10 has 14 constant buffer slots, and the Direct3D 10 driver binds
 slot n as Gallium's constant buffer n + 1, so a shader using the last slot needs 15 uniform
 blocks on the host; Mesa's Direct3D 12 GL driver offers 14, the rig's Intel driver more. After

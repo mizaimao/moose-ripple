@@ -1,0 +1,21 @@
+virgl: bind sampler views from the start slot
+
+virgl_set_sampler_views gave the encoder the whole binding array, and the encoder writes
+views[0..num_views) at start_slot: views set from a slot other than 0 sent the views of slot 0
+onwards instead, and an unbind of trailing slots sent them again. Callers that start at slot 0,
+as most do, never noticed. Found binding one buffer view at slot 15 (patch 0032).
+
+---
+--- a/src/gallium/drivers/virgl/virgl_context.c
++++ b/src/gallium/drivers/virgl/virgl_context.c
+@@ -1215,8 +1215,9 @@
+       }
+    }
+ 
++   /* the views from start_slot on: the encoder writes views[0..num_views) at start_slot */
+    virgl_encode_set_sampler_views(vctx, shader_type,
+-         start_slot, num_views, (struct virgl_sampler_view **)binding->views);
++         start_slot, num_views, (struct virgl_sampler_view **)binding->views + start_slot);
+    virgl_attach_res_sampler_views(vctx, shader_type);
+ 
+    if (unbind_num_trailing_slots) {
