@@ -15,6 +15,7 @@ VioGpuCommand::VioGpuCommand(VioGpuAdapter *adapter)
     m_pContext = NULL;
 
     m_FenceId = 0;
+    m_epoch = 0;
     m_pDmaBuffer = NULL;
     m_pCommand = NULL;
     m_pEnd = NULL;
@@ -25,6 +26,9 @@ VioGpuCommand::VioGpuCommand(VioGpuAdapter *adapter)
 
     list_entry.Blink = NULL;
     list_entry.Flink = NULL;
+    active_entry.Blink = NULL;
+    active_entry.Flink = NULL;
+    active = FALSE;
 };
 
 void VioGpuCommand::PrepareSubmit(const DXGKARG_SUBMITCOMMAND *pSubmitCommand)
@@ -32,6 +36,7 @@ void VioGpuCommand::PrepareSubmit(const DXGKARG_SUBMITCOMMAND *pSubmitCommand)
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s", __FUNCTION__));
 
     m_FenceId = pSubmitCommand->SubmissionFenceId;
+    m_epoch = m_pCommander->Epoch();
     if (m_pDmaBuffer)
     {
         m_pCommand = (char *)m_pDmaBuffer + pSubmitCommand->DmaBufferSubmissionStartOffset;
@@ -48,6 +53,13 @@ void VioGpuCommand::Run()
 {
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s", __FUNCTION__));
+
+    // Sent before a reset (the host's late answer, or the rest of the buffer): dropped
+    if (m_epoch != m_pCommander->Epoch())
+    {
+        Abandon();
+        return;
+    }
 
     while (m_pCommand < m_pEnd)
     {
@@ -106,35 +118,67 @@ void VioGpuCommand::Run()
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("%s finished fence_id=%d", __FUNCTION__, m_FenceId));
 
-    if (m_allocations)
+#ifdef RIPPLE_TEST_TDR
+    LONG stall = InterlockedExchange(&m_pCommander->m_testStallMs, 0);
+    if (stall > 0)
     {
-        for (UINT i = 0; i < m_allocationsLength; i++)
+        // As a host that is slow with this buffer: it finishes late, at the latest when Windows
+        // has given up on it and reset
+        LARGE_INTEGER delay;
+        delay.QuadPart = Int32x32To64(100, -10000);
+        DbgPrint(TRACE_LEVEL_ERROR, ("%s test: fence_id=%u held back %d ms\n", __FUNCTION__, m_FenceId, stall));
+        for (LONG waited = 0; waited < stall && m_epoch == m_pCommander->Epoch(); waited += 100)
         {
-            if (m_allocations[i])
+            KeDelayExecutionThread(KernelMode, FALSE, &delay);
+        }
+    }
+#endif
+
+    Release();
+    m_pCommander->Finish(this);
+    delete this;
+}
+
+void VioGpuCommand::Abandon()
+{
+    PAGED_CODE();
+    DbgPrint(TRACE_LEVEL_WARNING, ("%s fence_id=%d dropped by a reset\n", __FUNCTION__, m_FenceId));
+    Release();
+    m_pCommander->Retire(this);
+    delete this;
+}
+
+void VioGpuCommand::Release()
+{
+    PAGED_CODE();
+
+    VioGpuCommandHeld held;
+    TakeHeld(&held);
+    ReleaseHeld(&held);
+}
+
+void VioGpuCommand::ReleaseHeld(VioGpuCommandHeld *held)
+{
+    PAGED_CODE();
+
+    if (held->allocations)
+    {
+        for (UINT i = 0; i < held->length; i++)
+        {
+            if (held->allocations[i])
             {
-                m_allocations[i]->UnmarkBusy();
+                held->allocations[i]->UnmarkBusy();
             }
         }
-        delete m_allocations;
+        delete held->allocations;
+        held->allocations = NULL;
     }
-
-    if (m_pCompletionEvent)
+    if (held->event)
     {
-        KeSetEvent(m_pCompletionEvent, IO_NO_INCREMENT, FALSE);
-        ObDereferenceObject(m_pCompletionEvent);
-        m_pCompletionEvent = NULL;
+        KeSetEvent(held->event, IO_NO_INCREMENT, FALSE);
+        ObDereferenceObject(held->event);
+        held->event = NULL;
     }
-
-    DXGKARGCB_NOTIFY_INTERRUPT_DATA interrupt;
-    interrupt.InterruptType = DXGK_INTERRUPT_DMA_COMPLETED;
-    interrupt.DmaCompleted.SubmissionFenceId = m_FenceId;
-    interrupt.DmaCompleted.NodeOrdinal = 0;
-    interrupt.DmaCompleted.EngineOrdinal = 0;
-    m_pAdapter->NotifyInterrupt(&interrupt, true);
-
-    m_pCommander->CommandFinished(m_FenceId);
-
-    delete this;
 }
 
 void VioGpuCommand::AttachAllocations(DXGK_ALLOCATIONLIST *allocationList, UINT allocationListLength)
@@ -164,6 +208,13 @@ PAGED_CODE_SEG_END
 #pragma code_seg(push)
 #pragma code_seg()
 
+void VioGpuCommand::TakeHeld(VioGpuCommandHeld *held)
+{
+    held->length = m_allocationsLength;
+    held->allocations = (VioGpuAllocation **)InterlockedExchangePointer((PVOID volatile *)&m_allocations, NULL);
+    held->event = (PKEVENT)InterlockedExchangePointer((PVOID volatile *)&m_pCompletionEvent, NULL);
+}
+
 void VioGpuCommand::QueueRunning()
 {
     m_pCommander->QueueRunning(this);
@@ -191,10 +242,16 @@ VioGpuCommander::VioGpuCommander(VioGpuAdapter *pAdapter)
 
     InitializeListHead(&m_SubmittedQueue);
     InitializeListHead(&m_RunningQueue);
+    InitializeListHead(&m_ActiveQueue);
     KeInitializeSpinLock(&m_Lock);
 
     m_running = 0;
     m_lastCompletedFence = 0;
+    m_epoch = 0;
+    KeInitializeGuardedMutex(&m_ResetMutex);
+#ifdef RIPPLE_TEST_TDR
+    m_testStallMs = 0;
+#endif
     m_preemptPending = FALSE;
     m_preemptFenceId = 0;
 }
@@ -274,15 +331,14 @@ void VioGpuCommander::ThreadWorkRoutine(void)
             break;
         }
 
-        while (m_running < VIOGPU_MAX_RUNNING)
+        while (true)
         {
-            VioGpuCommand *command = DequeueSubmitted();
+            VioGpuCommand *command = DequeueSubmittedToRun();
             if (command == NULL)
             {
                 break;
             }
             QueueRunning(command);
-            m_running++;
         }
 
         DbgPrint(TRACE_LEVEL_VERBOSE, ("%s Running command\n", __FUNCTION__));
@@ -296,6 +352,96 @@ void VioGpuCommander::ThreadWorkRoutine(void)
             command->Run();
         }
     }
+}
+
+// Under the reset lock, so that a reset cannot come between the check and the report
+void VioGpuCommander::Finish(VioGpuCommand *cmd)
+{
+    PAGED_CODE();
+
+    UINT fenceId = cmd->FenceId();
+    KeAcquireGuardedMutex(&m_ResetMutex);
+    Retire(cmd);
+    if (cmd->Epoch() == m_epoch)
+    {
+        DXGKARGCB_NOTIFY_INTERRUPT_DATA interrupt;
+        RtlZeroMemory(&interrupt, sizeof(interrupt));
+        interrupt.InterruptType = DXGK_INTERRUPT_DMA_COMPLETED;
+        interrupt.DmaCompleted.SubmissionFenceId = fenceId;
+        interrupt.DmaCompleted.NodeOrdinal = 0;
+        interrupt.DmaCompleted.EngineOrdinal = 0;
+        m_pAdapter->NotifyInterrupt(&interrupt, true);
+        CommandFinished(fenceId);
+    }
+    else
+    {
+        DbgPrint(TRACE_LEVEL_WARNING, ("%s fence_id=%u from before a reset, not reported\n", __FUNCTION__, fenceId));
+    }
+    KeReleaseGuardedMutex(&m_ResetMutex);
+}
+
+void VioGpuCommander::Reset()
+{
+    PAGED_CODE();
+
+    LIST_ENTRY dropped;
+    KIRQL irql;
+    UINT count = 0;
+
+    InitializeListHead(&dropped);
+    KeAcquireGuardedMutex(&m_ResetMutex);
+    LockQueue(&irql);
+    InterlockedIncrement(&m_epoch);
+    while (!IsListEmpty(&m_SubmittedQueue))
+    {
+        InsertTailList(&dropped, RemoveHeadList(&m_SubmittedQueue));
+    }
+    while (!IsListEmpty(&m_RunningQueue))
+    {
+        InsertTailList(&dropped, RemoveHeadList(&m_RunningQueue));
+    }
+    // A buffer still with the host no longer counts: its answer will be dropped
+    m_running = 0;
+    m_preemptPending = FALSE;
+    UnlockQueue(irql);
+
+    // What the buffers taken to run hold, a few at a time (the queue lock is a spin lock and
+    // giving them up is pageable)
+    for (;;)
+    {
+        VioGpuCommandHeld held[4];
+        UINT n = 0;
+        LockQueue(&irql);
+        while (n < 4 && !IsListEmpty(&m_ActiveQueue))
+        {
+            VioGpuCommand *cmd = CONTAINING_RECORD(RemoveHeadList(&m_ActiveQueue), VioGpuCommand, active_entry);
+            cmd->active = FALSE;
+            cmd->TakeHeld(&held[n++]);
+        }
+        UnlockQueue(irql);
+        if (n == 0)
+        {
+            break;
+        }
+        for (UINT i = 0; i < n; i++)
+        {
+            VioGpuCommand::ReleaseHeld(&held[i]);
+        }
+    }
+    KeReleaseGuardedMutex(&m_ResetMutex);
+
+    while (!IsListEmpty(&dropped))
+    {
+        CONTAINING_RECORD(RemoveHeadList(&dropped), VioGpuCommand, list_entry)->Abandon();
+        count++;
+    }
+    DbgPrint(TRACE_LEVEL_ERROR, ("%s GPU timeout: reset, %u command buffers dropped\n", __FUNCTION__, count));
+}
+
+void VioGpuCommander::Restart()
+{
+    PAGED_CODE();
+    KeSetEvent(&m_QueueEvent, IO_NO_INCREMENT, FALSE);
 }
 
 NTSTATUS VioGpuCommander::Patch(const DXGKARG_PATCH *pPatch)
@@ -482,6 +628,42 @@ VioGpuCommand *VioGpuCommander::DequeueSubmitted()
     if (!IsListEmpty(&m_SubmittedQueue))
     {
         result = RemoveHeadList(&m_SubmittedQueue);
+    }
+    UnlockQueue(oldIrql);
+    if (!result)
+    {
+        return NULL;
+    }
+    return CONTAINING_RECORD(result, VioGpuCommand, list_entry);
+}
+
+// Out of the list of buffers taken to run, unless a reset took it out already
+void VioGpuCommander::Retire(VioGpuCommand *cmd)
+{
+    KIRQL oldIrql;
+    LockQueue(&oldIrql);
+    if (cmd->active)
+    {
+        RemoveEntryList(&cmd->active_entry);
+        cmd->active = FALSE;
+    }
+    UnlockQueue(oldIrql);
+}
+
+// The next buffer to run, if fewer than the most allowed are running; it counts as running
+// from here, in the same lock as a reset's recount
+VioGpuCommand *VioGpuCommander::DequeueSubmittedToRun()
+{
+    KIRQL oldIrql;
+    LockQueue(&oldIrql);
+    PLIST_ENTRY result = NULL;
+    if (m_running < VIOGPU_MAX_RUNNING && !IsListEmpty(&m_SubmittedQueue))
+    {
+        result = RemoveHeadList(&m_SubmittedQueue);
+        m_running++;
+        VioGpuCommand *cmd = CONTAINING_RECORD(result, VioGpuCommand, list_entry);
+        InsertTailList(&m_ActiveQueue, &cmd->active_entry);
+        cmd->active = TRUE;
     }
     UnlockQueue(oldIrql);
     if (!result)

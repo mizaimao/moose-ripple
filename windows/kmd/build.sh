@@ -37,6 +37,9 @@ COMMON="/nologo /c /O2 /W3 /Zp8 /GS- /Gy /kernel /Gz -fms-compatibility-version=
 [ "$DEBUG" = 1 ] && COMMON="$COMMON /DCOM_DEBUG /DRIPPLE_DEBUG_LEVEL=$LEVEL"
 # TRACE_PRESENT=1: a line for every copy to the screen (surfaces and rectangles), at any LEVEL
 [ -z "${TRACE_PRESENT:-}" ] || COMMON="$COMMON /DRIPPLE_TRACE_PRESENT"
+# TEST_TDR=1: a test build that can hold a command buffer back on request (VIOGPU_TEST_STALL),
+# to bring about a GPU timeout and check the recovery
+[ -z "${TEST_TDR:-}" ] || COMMON="$COMMON /DRIPPLE_TEST_TDR"
 CXX="/GR- /EHs-c- /std:c++17"
 C_SRC="compat/intrinsics.c VirtIO/VirtIOPCICommon.c VirtIO/VirtIOPCILegacy.c VirtIO/VirtIOPCIModern.c VirtIO/VirtIORing.c VirtIO/VirtIORing-Packed.c"
 CXX_SRC="common/edid.cpp common/viogpu_idr.cpp common/ripple_pci.cpp common/viogpu_queue.cpp common/baseobj.cpp

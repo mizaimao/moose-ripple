@@ -580,7 +580,12 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
 
                     pSegmentInfo->PagingBufferPrivateDataSize = 0;
 
-                    pSegmentInfo->PagingBufferSegmentId = 1;
+                    // Paging buffers in system memory, like the command buffers (DmaBufferSegmentSet
+                    // 0): the driver does the paging work on the CPU anyway. With them in the
+                    // aperture segment, Windows 7 bugchecks at a GPU timeout: the report it writes
+                    // (VIDMM_DMA_POOL::WriteDmaHistoryToMinidump) reads every buffer of the
+                    // adapter's history as if it came from the paging pool's segment.
+                    pSegmentInfo->PagingBufferSegmentId = 0;
                     pSegmentInfo->PagingBufferSize = 10 * PAGE_SIZE;
 
                     //
@@ -780,6 +785,13 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 context->Init(&pVioGpuEscape->CtxInit);
                 break;
             }
+
+#ifdef RIPPLE_TEST_TDR
+        case VIOGPU_TEST_STALL:
+            InterlockedExchange(&commander.m_testStallMs, (LONG)pVioGpuEscape->Id);
+            DbgPrint(TRACE_LEVEL_ERROR, ("%s test: the next command buffer is held back %u ms\n", __FUNCTION__, pVioGpuEscape->Id));
+            break;
+#endif
 
         default:
             DbgPrint(TRACE_LEVEL_ERROR, ("%s: invalid Escape type 0x%x\n", __FUNCTION__, pVioGpuEscape->Type));

@@ -450,10 +450,8 @@ Experience Index runs to the end (4.6, gaming graphics 5.6, frame rates as befor
 64-bit checks, dxdiag and Chess Titans next to the compositor (also inside Flip 3D) right; no
 display timeout or reset event in the System log; nothing in the host's log.
 
-Still a stub: recovery after a real timeout (`DxgkDdiResetFromTimeout`,
-`DxgkDdiRestartFromTimeout`). A command buffer that keeps the host busy for more than two
-seconds would now make Windows reset the driver, and the driver does not yet rebuild its
-state. None was seen in these runs.
+Still a stub then: recovery after a real timeout (`DxgkDdiResetFromTimeout`,
+`DxgkDdiRestartFromTimeout`); done the same day, "Recovery after a GPU timeout" below.
 
 ## The hardware pointer (2026-11-15)
 
@@ -480,3 +478,47 @@ saves the pointer image the host has: the arrow on the desktop (hot spot 3,3), a
 image while the pointer is over a text field (Windows' own I-beam in the frame), the arrow
 again after, the resize arrow on a window edge (hot spot 14,7), Chess Titans with the pointer
 over the board and none drawn into its frames. Nothing in Windows' System log or the host's.
+
+## Recovery after a GPU timeout (2026-11-15)
+
+When a command buffer takes the host more than about two seconds, Windows asks the driver to
+preempt it, waits two more seconds, and then resets the driver ("Display driver stopped
+responding and has recovered", event 4101): it collects debug data
+(`DxgkDdiCollectDbgInfo`), calls `DxgkDdiResetFromTimeout`, frees what the lost devices
+held, and calls `DxgkDdiRestartFromTimeout`. Applications get their device back as lost or
+removed; the compositor makes a new one.
+
+The host cannot be stopped half way through a buffer, so the driver's reset forgets instead
+(`VioGpuCommander::Reset`): every buffer not yet sent to the host is dropped; the one the
+host is working on no longer counts, and what it holds (its allocations' busy marks, the event
+someone waits on) is given up at once, because Windows may free those allocations right after
+the reset; and an epoch counter makes sure that the host's late answer for any buffer from
+before the reset is never reported to Windows as finished.
+
+Testing it found a bluescreen that was there before this work, in Windows itself: stop `0x7E`
+(an access violation) in `VIDMM_DMA_POOL::WriteDmaBufferToMinidump`, while Windows writes its
+report of the timeout and before it calls the driver. The report walks the adapter's whole
+history of DMA buffers, but reads each one as if it lived where the pool being written keeps
+its buffers. The driver had paging buffers in its aperture segment (`PagingBufferSegmentId` 1)
+and command buffers in system memory (`DmaBufferSegmentSet` 0), so for a command buffer
+Windows followed the paging pool's segment pointer, which is null there. Paging buffers are now
+in system memory too (`PagingBufferSegmentId` 0); the driver does all paging work on the CPU,
+so nothing else changes. (The dump said which pointer: `tools/win7-debug/kmem.py` reads the
+exception and registers out of `MEMORY.DMP`.)
+
+How it was tested: Windows 7's own way to fake a timeout (`D3DKMTEscape` with
+`D3DKMT_ESCAPE_TDRDBGCTRL`, `tools/win7-hello/forcetdr.c`) answers "not supported" on a retail
+system, and a real one would mean keeping the host GPU busy for seconds. So a test build of
+the driver (`TEST_TDR=1 windows/kmd/build.sh`) takes a private escape that holds the next
+finished buffer back, as a host that is slow with it, for up to the given time or until the
+reset: `forcetdr stall 10000`, then move the pointer so that something is drawn. On the test
+VM with Chess Titans open: the timeout comes about four seconds later, Windows recovers, the
+desktop and Aero come back, Chess Titans plays on, and the System log has event 4101 and
+nothing else; a second timeout a minute later recovers the same way. Nothing in the host's
+log. If the buffer is held back much longer than the reset (ten seconds without ending at the
+reset), Windows times out again during the recovery and stops with `0x116` ("recover from
+timeout failed"), as it does with any GPU that stays hung.
+
+Load test 22 (fresh VM, the regular build with these changes): 32-bit and 64-bit Direct3D 9
+checks right, DirectDraw lists the hardware devices, dxdiag finds no problems, the Experience
+Index as before (4.6, gaming graphics 5.6); nothing new in Windows' System log or the host's.

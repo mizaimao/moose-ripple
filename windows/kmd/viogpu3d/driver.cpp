@@ -970,9 +970,10 @@ NTSTATUS
 APIENTRY
 VioGpu3DDdiRestartFromTimeout(_In_ CONST HANDLE hAdapter)
 {
-    UNREFERENCED_PARAMETER(hAdapter);
-    DbgPrint(TRACE_LEVEL_ERROR, ("<---> %s UNSUPPORTED PREEMPTION FUNCTION\n", __FUNCTION__));
+    VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(hAdapter);
 
+    DbgPrint(TRACE_LEVEL_ERROR, ("<---> %s\n", __FUNCTION__));
+    pAdapter->commander.Restart();
     return STATUS_SUCCESS;
 };
 
@@ -1002,10 +1003,11 @@ NTSTATUS
 APIENTRY
 VioGpu3DDdiResetFromTimeout(_In_ CONST HANDLE hAdapter)
 {
-    UNREFERENCED_PARAMETER(hAdapter);
+    VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(hAdapter);
 
-    DbgPrint(TRACE_LEVEL_ERROR, ("<---> %s UNSUPPORTED PREEMPTION FUNCTION\n", __FUNCTION__));
-
+    // Windows destroys and remakes the devices afterwards; what the driver has to forget
+    // is every command buffer from before (VioGpuCommander::Reset)
+    pAdapter->commander.Reset();
     return STATUS_SUCCESS;
 };
 

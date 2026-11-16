@@ -67,6 +67,10 @@ typedef struct _VIOGPU_ADAPTERINFO
 
 #define VIOGPU_CTX_INIT              0x200
 
+// Test builds only (RIPPLE_TEST_TDR): hold the next finished command buffer back Id ms, so
+// that Windows sees a GPU timeout and the driver's recovery runs
+#define VIOGPU_TEST_STALL            0x300
+
 #pragma pack(1)
 typedef struct _VIOGPU_DISP_MODE
 {

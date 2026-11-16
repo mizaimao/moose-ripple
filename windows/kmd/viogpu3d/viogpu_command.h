@@ -9,6 +9,16 @@ class VioGpuDevice;
 class VioGpuAllocation;
 class VioGpuCommander;
 
+// What a command buffer holds until it has finished: busy marks on its allocations and the
+// event someone may wait on. Taken whole by whoever gives them up first (the command when it
+// finishes, or a reset), so they are given up once.
+struct VioGpuCommandHeld
+{
+    VioGpuAllocation **allocations;
+    UINT length;
+    PKEVENT event;
+};
+
 class VioGpuCommand
 {
   public:
@@ -34,22 +44,42 @@ class VioGpuCommand
     }
 
     LIST_ENTRY list_entry;
+    // In the commander's list of buffers taken to run and not finished (under its lock)
+    LIST_ENTRY active_entry;
+    BOOLEAN active;
+
+    // Dropped by a reset: given up without telling Windows it finished
+    void Abandon();
+
+    UINT FenceId()
+    {
+        return m_FenceId;
+    }
+    LONG Epoch()
+    {
+        return m_epoch;
+    }
+    // Not pageable: a reset takes them under the queue lock
+    void TakeHeld(VioGpuCommandHeld *held);
+    static void ReleaseHeld(VioGpuCommandHeld *held);
 
   private:
+    void Release();
     VioGpuAdapter *m_pAdapter;
     VioGpuCommander *m_pCommander;
     VioGpuDevice *m_pContext;
 
     UINT m_FenceId;
+    LONG m_epoch;
 
     char *m_pDmaBuffer;
     char *m_pCommand;
     char *m_pEnd;
 
-    VioGpuAllocation **m_allocations;
+    VioGpuAllocation **volatile m_allocations;
     UINT m_allocationsLength;
 
-    PKEVENT m_pCompletionEvent;
+    PKEVENT volatile m_pCompletionEvent;
 };
 
 class VioGpuCommander
@@ -60,7 +90,22 @@ class VioGpuCommander
     NTSTATUS Start();
     void Stop();
 
+    // A command buffer has finished: Windows is told, unless a reset came in between
+    void Finish(VioGpuCommand *cmd);
+    // Out of the list of buffers taken to run
+    void Retire(VioGpuCommand *cmd);
     void CommandFinished(UINT fenceId);
+    // Recovery after a GPU timeout (DxgkDdiResetFromTimeout): every command buffer not yet
+    // run is dropped, and answers from the host for buffers sent before it are ignored
+    // (they belong to an older epoch), so Windows never hears of a buffer from before the
+    // reset. The host cannot stop a buffer it is running; what that buffer holds is given up
+    // at once, since Windows may free its allocations right after the reset.
+    void Reset();
+    void Restart();
+    LONG Epoch()
+    {
+        return m_epoch;
+    }
 
     // Preemption as this driver can do it: the host cannot stop a command buffer half way, so
     // a preemption request is reported done once everything submitted has finished
@@ -83,6 +128,7 @@ class VioGpuCommander
     void QueueRunning(VioGpuCommand *cmd);
 
     VioGpuCommand *DequeueSubmitted();
+    VioGpuCommand *DequeueSubmittedToRun();
     void QueueSubmitted(VioGpuCommand *cmd);
 
   private:
@@ -97,6 +143,7 @@ class VioGpuCommander
 
     LIST_ENTRY m_SubmittedQueue;
     LIST_ENTRY m_RunningQueue;
+    LIST_ENTRY m_ActiveQueue;
 
     KSPIN_LOCK m_Lock;
 
@@ -105,6 +152,15 @@ class VioGpuCommander
     BOOLEAN IdleLocked();
     void ReportPreempted(UINT preemptionFenceId);
     volatile LONG m_lastCompletedFence;
+    volatile LONG m_epoch;
+    KGUARDED_MUTEX m_ResetMutex;
+#ifdef RIPPLE_TEST_TDR
+  public:
+    // Test builds: the next finished buffer is held back this long (VIOGPU_TEST_STALL)
+    volatile LONG m_testStallMs;
+
+  private:
+#endif
     BOOLEAN m_preemptPending;
     UINT m_preemptFenceId;
 };
