@@ -29,6 +29,13 @@ typedef unsigned long u32;
 #define PIPE_TEXTURE_2D                   2
 #define PIPE_CLEAR_COLOR0                 4
 
+/* Capability sets 1 and 2 (virtio_gpu.h) hold virgl's union virgl_caps: the first word is
+   max_version. Set 2 is struct virgl_caps_v2, whose max_texture_2d_size lies 484 bytes in: the
+   308-byte struct virgl_caps_v1, then 176 bytes. */
+#define VIRTIO_GPU_CAPSET_VIRGL           1
+#define VIRTIO_GPU_CAPSET_VIRGL2          2
+#define VIRGL_CAPS_V2_MAX_TEXTURE_2D_SIZE 484UL
+
 #define W 64
 #define H 64
 
@@ -137,9 +144,16 @@ int main(int argc, char **argv)
         in[0] = info.caps_ids[i];
         in[1] = info.caps_versions[i];
         DeviceIoControl(dev, RVD_GET_CAPS, in, sizeof in, blob, sizeof blob, &n, NULL);
-        printf("capability set %lu, version %lu, %lu bytes: read %lu, max texture size %lu\n",
-               info.caps_ids[i], info.caps_versions[i], info.caps_sizes[i], n,
-               n >= 4 ? *(u32 *)blob : 0);
+        printf("capability set %lu, version %lu, %lu bytes: read %lu",
+               info.caps_ids[i], info.caps_versions[i], info.caps_sizes[i], n);
+        if ((info.caps_ids[i] == VIRTIO_GPU_CAPSET_VIRGL ||
+             info.caps_ids[i] == VIRTIO_GPU_CAPSET_VIRGL2) && n >= 4)
+            printf(", max version %lu", *(u32 *)blob);
+        if (info.caps_ids[i] == VIRTIO_GPU_CAPSET_VIRGL2 &&
+            n >= VIRGL_CAPS_V2_MAX_TEXTURE_2D_SIZE + 4)
+            printf(", largest 2D texture %lu",
+                   *(u32 *)(blob + VIRGL_CAPS_V2_MAX_TEXTURE_2D_SIZE));
+        printf("\n");
     }
 
     if (argc > 1 && (!strcmp(argv[1], "clear") || !strcmp(argv[1], "leak"))) {

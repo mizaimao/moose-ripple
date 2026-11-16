@@ -1,36 +1,62 @@
 /*
- * dbgrun: run a program under a minimal debugger and keep what it (and the processes it
- * starts) write with OutputDebugString, such as the messages of DirectX's debug runtime.
+ * dbgrun: run a program under a minimal debugger and keep what it writes with
+ * OutputDebugString, such as the messages of DirectX's debug runtime.
  *
  *   dbgrun LOGFILE PROGRAM [ARGUMENTS...]
  *
  * Exceptions, DLL loads and unloads and threads are logged; exceptions are passed on to the
- * program. Built by tools/win9x/build-tools.sh.
+ * program. Only the program itself is debugged: the processes it starts run on their own,
+ * since before Windows XP a debugger can't let go of a process, and one that stays (such as
+ * DirectDraw's helper, DDHELP) must keep running after dbgrun ends. Built by
+ * tools/win9x/build-tools.sh.
  */
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
 
+/* What follows the first n words of a command line; a space or tab outside double quotes ends
+   a word. */
+static char *skip_words(char *s, int n)
+{
+    int quoted = 0;
+
+    while (*s == ' ' || *s == '\t')
+        s++;
+    while (n > 0 && *s) {
+        if (*s == '"') {
+            quoted = !quoted;
+        } else if (!quoted && (*s == ' ' || *s == '\t')) {
+            while (*s == ' ' || *s == '\t')
+                s++;
+            n--;
+            continue;
+        }
+        s++;
+    }
+    return s;
+}
+
 int main(int argc, char **argv)
 {
-    char cmd[1024] = "";
+    char cmd[1024];
+    char *rest;
     STARTUPINFO si;
     PROCESS_INFORMATION pi;
     DEBUG_EVENT ev;
     FILE *log;
-    int i, processes = 0;
 
     if (argc < 3) {
         printf("usage: dbgrun LOGFILE PROGRAM [ARGUMENTS...]\n");
         return 2;
     }
-    for (i = 2; i < argc; i++) {
-        if (strlen(cmd) + strlen(argv[i]) + 2 >= sizeof cmd)
-            break;
-        if (i > 2)
-            strcat(cmd, " ");
-        strcat(cmd, argv[i]);
+    /* The program's command line is the rest of dbgrun's, after its name and LOGFILE, as it
+       was typed: the quotes stay, so a path or an argument with spaces arrives whole. */
+    rest = skip_words(GetCommandLine(), 2);
+    if (strlen(rest) >= sizeof cmd) {
+        printf("dbgrun: the command line is too long\n");
+        return 2;
     }
+    strcpy(cmd, rest);
     log = fopen(argv[1], "w");
     if (!log) {
         printf("can't write %s\n", argv[1]);
@@ -42,8 +68,11 @@ int main(int argc, char **argv)
     si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
     si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-    if (!CreateProcess(NULL, cmd, NULL, NULL, TRUE, DEBUG_PROCESS, NULL, NULL, &si, &pi)) {
-        fprintf(log, "CreateProcess(%s) failed, error %lu\n", cmd, GetLastError());
+    if (!CreateProcess(NULL, cmd, NULL, NULL, TRUE, DEBUG_ONLY_THIS_PROCESS, NULL, NULL, &si,
+                       &pi)) {
+        DWORD err = GetLastError();
+        printf("dbgrun: CreateProcess(%s) failed, error %lu\n", cmd, err);
+        fprintf(log, "CreateProcess(%s) failed, error %lu\n", cmd, err);
         fclose(log);
         return 2;
     }
@@ -54,7 +83,6 @@ int main(int argc, char **argv)
             break;
         switch (ev.dwDebugEventCode) {
         case CREATE_PROCESS_DEBUG_EVENT:
-            processes++;
             fprintf(log, "[process %lx started]\n", ev.dwProcessId);
             if (ev.u.CreateProcessInfo.hFile)
                 CloseHandle(ev.u.CreateProcessInfo.hFile);
@@ -99,6 +127,7 @@ int main(int argc, char **argv)
             char buf[2048];
             DWORD n = ev.u.DebugString.nDebugStringLength, got = 0;
             HANDLE h = OpenProcess(PROCESS_VM_READ, FALSE, ev.dwProcessId);
+            size_t len;
             if (n >= sizeof buf)
                 n = sizeof buf - 1;
             buf[0] = 0;
@@ -107,7 +136,8 @@ int main(int argc, char **argv)
             if (h)
                 CloseHandle(h);
             fputs(buf, log);
-            if (got && buf[strlen(buf) - 1] != '\n')
+            len = strlen(buf);          /* 0 for OutputDebugString("") */
+            if (len && buf[len - 1] != '\n')
                 fputc('\n', log);
             fflush(log);
             break;
@@ -124,7 +154,6 @@ int main(int argc, char **argv)
         case EXIT_PROCESS_DEBUG_EVENT:
             fprintf(log, "[process %lx ended, code %lu]\n", ev.dwProcessId,
                     ev.u.ExitProcess.dwExitCode);
-            processes--;
             break;
         }
         fflush(log);

@@ -8,7 +8,8 @@
  * colours: a clear, a Gouraud-shaded triangle, a pair of z-tested quads and a textured quad. It
  * reads pixels of the back buffer back and compares them with what must be there, then spins
  * the scene for the given time and prints the frame rate. Output on standard output and
- * QEMU's debug port. Exit status 0 when every check passed.
+ * QEMU's debug port. Exit status 0 when every check passed; a texture that can't be made counts
+ * as a failure when the HAL lists its format.
  *
  * Built by tools/win9x/build-tools.sh with the DirectX 7 SDK's headers and libraries (not in
  * this repository).
@@ -51,6 +52,16 @@ static void check(int ok, const char *what)
 {
     printf("  %-52s %s\n", what, ok ? "ok" : "WRONG");
     if (!ok)
+        failures++;
+}
+
+/* A surface that checks need was not made. That is wrong when the HAL offers it (it lists the
+   format, and for a texture in system memory sets D3DDEVCAPS_TEXTURESYSTEMMEMORY); otherwise it
+   is only reported, as cards of the time lack some formats. */
+static void not_made(const char *what, int offered)
+{
+    printf("  %s: not made%s\n", what, offered ? "  WRONG" : ", not offered by the HAL");
+    if (offered)
         failures++;
 }
 
@@ -201,6 +212,27 @@ static const TEXFMT texfmts[] = {
     { "16-bit 4444", 16, 0x0F00, 0x00F0, 0x000F, 0xF000, 0xFF00, 0xF0F0, 0xF00F },
 };
 
+/* Which of texfmts the HAL device lists (IDirect3DDevice7_EnumTextureFormats). */
+static int tex_listed[sizeof texfmts / sizeof texfmts[0]];
+
+static HRESULT CALLBACK enum_texture(LPDDPIXELFORMAT pf, LPVOID ctx)
+{
+    int i;
+
+    printf("texture format: %lu bits, masks %08lx %08lx %08lx %08lx, flags %08lx\n",
+           pf->dwRGBBitCount, pf->dwRBitMask, pf->dwGBitMask, pf->dwBBitMask,
+           pf->dwRGBAlphaBitMask, pf->dwFlags);
+    for (i = 0; i < (int)(sizeof texfmts / sizeof texfmts[0]); i++) {
+        const TEXFMT *f = &texfmts[i];
+        if ((pf->dwFlags & DDPF_RGB) && pf->dwRGBBitCount == (DWORD)f->bits &&
+            pf->dwRBitMask == f->r && pf->dwGBitMask == f->g && pf->dwBBitMask == f->b &&
+            ((pf->dwFlags & DDPF_ALPHAPIXELS) ? pf->dwRGBAlphaBitMask : 0) == f->a)
+            tex_listed[i] = 1;
+    }
+    (*(int *)ctx)++;
+    return D3DENUMRET_OK;
+}
+
 static LPDIRECTDRAWSURFACE7 tex_make(LPDIRECTDRAW7 dd, const TEXFMT *f, DWORD memcaps, DWORD extra)
 {
     LPDIRECTDRAWSURFACE7 t = NULL;
@@ -270,7 +302,7 @@ static void tex_draw(LPDIRECTDRAW7 dd, LPDIRECT3DDEVICE7 dev, LPDIRECTDRAWSURFAC
 }
 
 static void texture_updates(LPDIRECTDRAW7 dd, LPDIRECT3DDEVICE7 dev, LPDIRECTDRAWSURFACE7 back,
-                            int w, int h, int bpp)
+                            int w, int h, int bpp, DWORD devcaps)
 {
     char what[64];
     int i;
@@ -282,7 +314,8 @@ static void texture_updates(LPDIRECTDRAW7 dd, LPDIRECT3DDEVICE7 dev, LPDIRECTDRA
         LPDIRECTDRAWSURFACE7 s;
 
         if (!t) {
-            printf("  %s texture in video memory: not made\n", f->name);
+            sprintf(what, "%s texture in video memory", f->name);
+            not_made(what, tex_listed[i]);
             continue;
         }
         tex_fill(t, f->bits, f->red);
@@ -299,6 +332,9 @@ static void texture_updates(LPDIRECTDRAW7 dd, LPDIRECT3DDEVICE7 dev, LPDIRECTDRA
             sprintf(what, "%s, blitted: blue", f->name);
             tex_draw(dd, dev, back, t, w, h, bpp, what, 0, 0, 255);
             IDirectDrawSurface7_Release(s);
+        } else {
+            sprintf(what, "%s surface in system memory, to blit from", f->name);
+            not_made(what, tex_listed[i]);
         }
         IDirectDrawSurface7_Release(t);
     }
@@ -312,7 +348,8 @@ static void texture_updates(LPDIRECTDRAW7 dd, LPDIRECT3DDEVICE7 dev, LPDIRECTDRA
             tex_draw(dd, dev, back, t, w, h, bpp, "system memory, rewritten: blue", 0, 0, 255);
             IDirectDrawSurface7_Release(t);
         } else {
-            printf("  texture in system memory: not made\n");
+            not_made("texture in system memory",
+                     tex_listed[0] && (devcaps & D3DDEVCAPS_TEXTURESYSTEMMEMORY));
         }
     }
 }
@@ -405,6 +442,7 @@ int main(int argc, char **argv)
     HWND win;
     HRESULT r;
     DWORD start, frames = 0;
+    int formats = 0;
 
     setvbuf(stdout, NULL, _IONBF, 0);
     if (DirectDrawCreateEx(NULL, (void **)&dd, &IID_IDirectDraw7, NULL) != DD_OK) {
@@ -476,6 +514,8 @@ int main(int argc, char **argv)
         vp.dwWidth = w; vp.dwHeight = h;
         IDirect3DDevice7_SetViewport(dev, &vp);
     }
+    IDirect3DDevice7_EnumTextureFormats(dev, enum_texture, &formats);
+    check(formats > 0, "the HAL lists texture formats");
     tex = make_texture(dd, bpp);
 
     scene(dev, tex, w, h, 0.0f);
@@ -489,9 +529,11 @@ int main(int argc, char **argv)
         expect(back, bpp, "texture: green texel", w * 35 / 100, h * 65 / 100, 0, 255, 0);
         expect(back, bpp, "texture: blue texel", w * 15 / 100, h * 85 / 100, 0, 0, 255);
         expect(back, bpp, "texture: yellow texel", w * 35 / 100, h * 85 / 100, 255, 255, 0);
+    } else {
+        not_made("2x2 texture in video memory", tex_listed[0]);    /* 32-bit ARGB */
     }
     expect(back, bpp, "blend: white on blue", w * 3 / 4, h * 3 / 4, 128, 128, 179);
-    texture_updates(dd, dev, back, w, h, bpp);
+    texture_updates(dd, dev, back, w, h, bpp, hal.dwDevCaps);
     cpu_writes(dev, back, w, h, bpp);
     IDirectDrawSurface7_Flip(front, NULL, DDFLIP_WAIT);
 

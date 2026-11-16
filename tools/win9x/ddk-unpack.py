@@ -47,7 +47,8 @@ for inf in sorted(os.listdir(raw)):
         name, value = (s.strip() for s in line.split("=", 1))
         parts = [p.strip().strip('"') for p in value.split(",")]
         sub = parts[1] if len(parts) > 1 else ""
-        dest = os.path.join(out, *[p for p in sub.replace("\\", "/").split("/") if p]).lower()
+        # only the kit's own folders are lower-cased: OUT stays as given (case-sensitive host)
+        dest = os.path.join(out, *[p.lower() for p in sub.replace("\\", "/").split("/") if p])
         for entry in secs.get(name.lower(), []):
             fields = [p.strip() for p in entry.split(",")]
             target = fields[0]

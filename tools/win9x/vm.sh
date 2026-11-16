@@ -21,6 +21,9 @@ root=$(cd "$here/../.." && pwd)
 VMDIR=${VMDIR:-$root/tmp-win9x-vm}
 DISK=${DISK:-w98se-work.qcow2}
 cd "$VMDIR"
+# VMDIR as an absolute path without symlinks: QEMU opens share/ by it after it has moved to /,
+# and running() knows this VM's QEMU by it, so it has to read the same in every call
+VMDIR=$(pwd -P)
 
 # The monitor listens on localhost only (HMP_PORT); the banner, echo and prompt lines are dropped.
 HMP_PORT=${HMP_PORT:-44598}
@@ -28,7 +31,13 @@ hmp() {
     printf '%s\n' "$1" | nc -q 1 127.0.0.1 "$HMP_PORT" | tr -d '\r' |
         sed -e '1d' -e '/^(qemu) /d' -e '/^(qemu)$/d'
 }
-running() { [ -f qemu.pid ] && kill -0 "$(cat qemu.pid)" 2>/dev/null; }
+# QEMU removes qemu.pid when it exits cleanly, but a crash, a kill -9 or a host reboot leaves the
+# file, and its number may since belong to another process. So the pid counts (and is signalled)
+# only while its command line holds this VM's shared folder. Sets pid.
+running() {
+    pid=$(cat qemu.pid 2>/dev/null) || return 1
+    kill -0 "$pid" 2>/dev/null && grep -qaF "fat:rw:$VMDIR/share," "/proc/$pid/cmdline" 2>/dev/null
+}
 
 cmd=${1:-}; [ $# -gt 0 ] && shift
 case "$cmd" in
@@ -50,8 +59,15 @@ start)
     ;;
 stop)
     running || { echo "not running"; exit 0; }
-    hmp quit >/dev/null 2>&1 || kill "$(cat qemu.pid)"
-    for _ in 1 2 3 4 5 6 7 8 9 10; do running || break; sleep 0.5; done
+    # SIGTERM shuts QEMU down the way the monitor's quit does (disks flushed, qemu.pid removed),
+    # and it needs no monitor, which may be busy with another client, or be another VM's when
+    # HMP_PORT differs from the one at start. A hung main loop acts on neither: SIGKILL after 10 s.
+    for sig in TERM KILL; do
+        kill -s "$sig" "$pid" 2>/dev/null || true
+        i=0; while [ $i -lt 20 ] && running; do sleep 0.5; i=$((i + 1)); done
+        running || break
+    done
+    running && { echo "vm.sh: QEMU (pid $pid) did not stop" >&2; exit 1; }
     rm -f qemu.pid; echo stopped
     ;;
 status) if running; then echo running; else echo stopped; fi ;;
@@ -77,9 +93,9 @@ mouse)
     } | nc -q 1 127.0.0.1 "$HMP_PORT" >/dev/null
     ;;
 click)
-    # click [right] [double]
+    # click [right] [double]; HMP's mouse_button takes a bit mask: 1 left, 2 right, 4 middle
     b=1; n=1
-    for a in "$@"; do case "$a" in right) b=4 ;; double) n=2 ;; esac; done
+    for a in "$@"; do case "$a" in right) b=2 ;; double) n=2 ;; esac; done
     { while [ $n -gt 0 ]; do echo "mouse_button $b"; sleep 0.05; echo "mouse_button 0"; sleep 0.08; n=$((n - 1)); done; } |
         nc -q 1 127.0.0.1 "$HMP_PORT" >/dev/null
     ;;
