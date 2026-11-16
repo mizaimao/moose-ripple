@@ -1,0 +1,177 @@
+diff -ruN a/src/gallium/frontends/wgl/stw_context.c b/src/gallium/frontends/wgl/stw_context.c
+--- a/src/gallium/frontends/wgl/stw_context.c	2025-01-22 13:12:23.000000000 -0500
++++ b/src/gallium/frontends/wgl/stw_context.c	2026-11-15 13:37:40.918218714 -0500
+@@ -67,6 +67,7 @@
+ BOOL APIENTRY
+ DrvCopyContext(DHGLRC dhrcSource, DHGLRC dhrcDest, UINT fuMask)
+ {
++   stw_trace("DrvCopyContext");
+    struct stw_context *src;
+    struct stw_context *dst;
+    BOOL ret = false;
+@@ -96,6 +97,7 @@
+ BOOL APIENTRY
+ DrvShareLists(DHGLRC dhglrc1, DHGLRC dhglrc2)
+ {
++   stw_trace("DrvShareLists");
+    struct stw_context *ctx1;
+    struct stw_context *ctx2;
+    BOOL ret = false;
+@@ -123,6 +125,7 @@
+ DHGLRC APIENTRY
+ DrvCreateContext(HDC hdc)
+ {
++   stw_trace("DrvCreateContext dc %p", (void *)hdc);
+    return DrvCreateLayerContext( hdc, 0 );
+ }
+ 
+@@ -130,6 +133,7 @@
+ DHGLRC APIENTRY
+ DrvCreateLayerContext(HDC hdc, INT iLayerPlane)
+ {
++   stw_trace("DrvCreateLayerContext dc %p layer %d", (void *)hdc, iLayerPlane);
+    if (!stw_dev)
+       return 0;
+ 
+@@ -311,6 +315,7 @@
+ BOOL APIENTRY
+ DrvDeleteContext(DHGLRC dhglrc)
+ {
++   stw_trace("DrvDeleteContext %lu", (unsigned long)dhglrc);
+    struct stw_context *ctx ;
+    BOOL ret = false;
+ 
+@@ -358,6 +363,7 @@
+ BOOL APIENTRY
+ DrvReleaseContext(DHGLRC dhglrc)
+ {
++   stw_trace("DrvReleaseContext %lu", (unsigned long)dhglrc);
+    struct stw_context *ctx;
+ 
+    if (!stw_dev)
+@@ -969,6 +975,7 @@
+ PGLCLTPROCTABLE APIENTRY
+ DrvSetContext(HDC hdc, DHGLRC dhglrc, PFN_SETPROCTABLE pfnSetProcTable)
+ {
++   stw_trace("DrvSetContext dc %p context %lu", (void *)hdc, (unsigned long)dhglrc);
+    PGLCLTPROCTABLE r = (PGLCLTPROCTABLE)&cpt;
+ 
+    if (!stw_make_current_by_handles(hdc, hdc, dhglrc))
+diff -ruN a/src/gallium/frontends/wgl/stw_device.c b/src/gallium/frontends/wgl/stw_device.c
+--- a/src/gallium/frontends/wgl/stw_device.c	2025-01-22 13:12:23.000000000 -0500
++++ b/src/gallium/frontends/wgl/stw_device.c	2026-11-15 13:37:57.890699117 -0500
+@@ -28,6 +28,9 @@
+ #include "state_tracker/st_context.h"
+ 
+ #include <windows.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
+ 
+ #include "glapi/glapi.h"
+ #include "util/u_debug.h"
+@@ -271,9 +274,34 @@
+ }
+ 
+ 
++/* moose-ripple: a trace of the calls Windows' opengl32.dll makes into the driver, in the file
++ * the environment variable RIPPLE_GL_TRACE names. One line per call, the first 20000. */
++void
++stw_trace(const char *fmt, ...)
++{
++   static FILE *f;
++   static int tried, lines;
++   va_list ap;
++
++   if (!tried) {
++      const char *name = getenv("RIPPLE_GL_TRACE");
++      tried = 1;
++      if (name && name[0])
++         f = fopen(name, "w");
++   }
++   if (!f || lines++ > 20000)
++      return;
++   va_start(ap, fmt);
++   vfprintf(f, fmt, ap);
++   va_end(ap);
++   fputc('\n', f);
++   fflush(f);
++}
++
+ void APIENTRY
+ DrvSetCallbackProcs(INT nProcs, PROC *pProcs)
+ {
++   stw_trace("DrvSetCallbackProcs %d", nProcs);
+    size_t size;
+ 
+    if (stw_dev == NULL)
+@@ -289,6 +317,7 @@
+ BOOL APIENTRY
+ DrvValidateVersion(ULONG ulVersion)
+ {
++   stw_trace("DrvValidateVersion %lu", ulVersion);
+    /* ulVersion is the version reported by the KMD:
+     * - via D3DKMTQueryAdapterInfo(KMTQAITYPE_UMOPENGLINFO) on WDDM,
+     * - or ExtEscape on XPDM and can be used to ensure the KMD and OpenGL ICD
+diff -ruN a/src/gallium/frontends/wgl/stw_device.h b/src/gallium/frontends/wgl/stw_device.h
+--- a/src/gallium/frontends/wgl/stw_device.h	2025-01-22 13:12:23.000000000 -0500
++++ b/src/gallium/frontends/wgl/stw_device.h	2026-11-15 13:37:57.890699117 -0500
+@@ -99,6 +99,9 @@
+ bool
+ stw_init_screen(HDC hdc);
+ 
++void
++stw_trace(const char *fmt, ...);
++
+ struct stw_device *
+ stw_get_device(void);
+ 
+diff -ruN a/src/gallium/frontends/wgl/stw_framebuffer.c b/src/gallium/frontends/wgl/stw_framebuffer.c
+--- a/src/gallium/frontends/wgl/stw_framebuffer.c	2025-01-22 13:12:23.000000000 -0500
++++ b/src/gallium/frontends/wgl/stw_framebuffer.c	2026-11-15 13:37:40.922218827 -0500
+@@ -521,6 +521,7 @@
+ BOOL APIENTRY
+ DrvSetPixelFormat(HDC hdc, LONG iPixelFormat)
+ {
++   stw_trace("DrvSetPixelFormat dc %p format %ld", (void *)hdc, iPixelFormat);
+    uint count;
+    uint index;
+    struct stw_framebuffer *fb;
+@@ -770,6 +771,7 @@
+ BOOL APIENTRY
+ DrvSwapBuffers(HDC hdc)
+ {
++   stw_trace("DrvSwapBuffers");
+    struct stw_framebuffer *fb;
+ 
+    if (!stw_dev)
+@@ -786,6 +788,7 @@
+ BOOL APIENTRY
+ DrvSwapLayerBuffers(HDC hdc, UINT fuPlanes)
+ {
++   stw_trace("DrvSwapLayerBuffers 0x%x", fuPlanes);
+    if (fuPlanes & WGL_SWAP_MAIN_PLANE)
+       return DrvSwapBuffers(hdc);
+ 
+diff -ruN a/src/gallium/frontends/wgl/stw_getprocaddress.c b/src/gallium/frontends/wgl/stw_getprocaddress.c
+--- a/src/gallium/frontends/wgl/stw_getprocaddress.c	2025-01-22 13:12:23.000000000 -0500
++++ b/src/gallium/frontends/wgl/stw_getprocaddress.c	2026-11-15 13:37:40.926218941 -0500
+@@ -96,6 +96,7 @@
+ DrvGetProcAddress(
+    LPCSTR lpszProc )
+ {
++   stw_trace("DrvGetProcAddress %s", lpszProc);
+    const struct stw_extension_entry *entry;
+    PROC p;
+ 
+diff -ruN a/src/gallium/frontends/wgl/stw_pixelformat.c b/src/gallium/frontends/wgl/stw_pixelformat.c
+--- a/src/gallium/frontends/wgl/stw_pixelformat.c	2025-01-22 13:12:23.000000000 -0500
++++ b/src/gallium/frontends/wgl/stw_pixelformat.c	2026-11-15 13:37:40.926218941 -0500
+@@ -426,6 +426,7 @@
+ DrvDescribePixelFormat(HDC hdc, INT iPixelFormat, ULONG cjpfd,
+                        PIXELFORMATDESCRIPTOR *ppfd)
+ {
++   stw_trace("DrvDescribePixelFormat %d (%lu bytes)", iPixelFormat, cjpfd);
+    uint count;
+    const struct stw_pixelformat_info *pfi;
+ 

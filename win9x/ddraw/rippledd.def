@@ -1,0 +1,16 @@
+; rippledd.dll: the moose-ripple DirectDraw HAL (32-bit half). DirectDraw calls DriverInit.
+; Every section is shared and the base is above 2 GB: Windows 9x then loads the DLL once, into
+; the part of the address space all processes see. DirectDraw calls the HAL's functions from
+; whichever program uses it, so their addresses must be valid everywhere (otherwise: "Invalid
+; 32-bit callback" and no HAL).
+LIBRARY RIPPLEDD
+EXPORTS
+    DriverInit
+SECTIONS
+    .text  READ EXECUTE SHARED
+    .rdata READ SHARED
+    .data  READ WRITE SHARED
+    .bss   READ WRITE SHARED
+    .idata READ WRITE SHARED
+    .edata READ SHARED
+    .rsrc  READ SHARED

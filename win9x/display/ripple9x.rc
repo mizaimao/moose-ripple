@@ -1,0 +1,99 @@
+/*
+ * moose-ripple display driver for Windows 9x: the resources USER reads from the display driver.
+ * Type "oembin", loaded by number through the driver's GetDriverResourceID:
+ *   1     screen metrics and the default system colours
+ *   2     the colour list of the Control Panel
+ *   3     the three stock fonts (OEM fixed, ANSI fixed, ANSI variable); "fonts" is the same
+ *   2003  the stock fonts at 120 dpi
+ * Numbers are 16-bit words. A colour is red, green, blue, 0: written as two words,
+ * red + green * 256 and blue.
+ */
+
+1 oembin PRELOAD
+BEGIN
+    17, 17,             /* scroll bar thumb: height of the vertical, width of the horizontal */
+    2, 2,               /* icon compression, horizontal and vertical */
+    1, 1,               /* cursor compression */
+    0,                  /* Kanji window height */
+    1, 1,               /* border thickness, vertical and horizontal lines */
+    0xC0C0, 0x00C0,     /* scroll bar            192 192 192 */
+    0x8000, 0x0080,     /* desktop                 0 128 128 */
+    0x0000, 0x0080,     /* active caption          0   0 128 */
+    0x8080, 0x0080,     /* inactive caption      128 128 128 */
+    0xC0C0, 0x00C0,     /* menu                  192 192 192 */
+    0xFFFF, 0x00FF,     /* window                255 255 255 */
+    0x0000, 0x0000,     /* window frame            0   0   0 */
+    0x0000, 0x0000,     /* menu text */
+    0x0000, 0x0000,     /* window text */
+    0xFFFF, 0x00FF,     /* caption text */
+    0xC0C0, 0x00C0,     /* active border */
+    0xC0C0, 0x00C0,     /* inactive border */
+    0x8080, 0x0080,     /* application workspace */
+    0x0000, 0x0080,     /* highlight */
+    0xFFFF, 0x00FF,     /* highlight text */
+    0xC0C0, 0x00C0,     /* button face */
+    0x8080, 0x0080,     /* button shadow */
+    0x8080, 0x0080,     /* grey text */
+    0x0000, 0x0000,     /* button text */
+    0, 0
+END
+
+2 oembin
+BEGIN
+    16,
+    0x0000, 0x0000,  0x0080, 0x0000,  0x8000, 0x0000,  0x8080, 0x0000,
+    0x0000, 0x0080,  0x0080, 0x0080,  0x8000, 0x0080,  0xC0C0, 0x00C0,
+    0x8080, 0x0080,  0x00FF, 0x0000,  0xFF00, 0x0000,  0xFFFF, 0x0000,
+    0x0000, 0x00FF,  0x00FF, 0x00FF,  0xFF00, 0x00FF,  0xFFFF, 0x00FF
+END
+
+/* A font: height, width, escapement, orientation, weight (words); italic, underline,
+   strike-out, character set, output precision, clip precision, quality, pitch (bytes, written
+   here as four words, low byte first); the face name with its ending zero. */
+3 oembin PRELOAD
+BEGIN
+    12, 8, 0, 0, 0,  0x0000, 0xFF00, 0x0200, 0x0102,  "Terminal\0",
+    12, 9, 0, 0, 0,  0x0000, 0x0000, 0x0200, 0x0102,  "Courier\0",
+    12, 9, 0, 0, 0,  0x0000, 0x0000, 0x0200, 0x0202,  "Helv\0"
+END
+
+fonts oembin
+BEGIN
+    12, 8, 0, 0, 0,  0x0000, 0xFF00, 0x0200, 0x0102,  "Terminal\0",
+    12, 9, 0, 0, 0,  0x0000, 0x0000, 0x0200, 0x0102,  "Courier\0",
+    12, 9, 0, 0, 0,  0x0000, 0x0000, 0x0200, 0x0202,  "Helv\0"
+END
+
+2003 oembin PRELOAD
+BEGIN
+    15, 12, 0, 0, 0,  0x0000, 0xFF00, 0x0200, 0x0102,  "Terminal\0",
+    15, 12, 0, 0, 0,  0x0000, 0x0000, 0x0200, 0x0102,  "Courier\0",
+    15, 12, 0, 0, 0,  0x0000, 0x0000, 0x0200, 0x0202,  "Helv\0"
+END
+
+1 VERSIONINFO
+FILEVERSION     0, 0, 1, 0
+PRODUCTVERSION  0, 0, 1, 0
+FILEOS          0x00010001L     /* DOS, 16-bit Windows */
+FILETYPE        3L              /* driver */
+FILESUBTYPE     4L              /* display driver */
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904E4"
+        BEGIN
+            VALUE "CompanyName",      "moose-ripple\0"
+            VALUE "FileDescription",  "moose-ripple display driver for Windows 9x\0"
+            VALUE "FileVersion",      "0.0.1\0"
+            VALUE "InternalName",     "DISPLAY\0"
+            VALUE "LegalCopyright",   "MIT License\0"
+            VALUE "OriginalFilename", "RIPPLE9X.DRV\0"
+            VALUE "ProductName",      "moose-ripple\0"
+            VALUE "ProductVersion",   "0.0.1\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 0x04E4
+    END
+END

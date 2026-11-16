@@ -1,0 +1,19 @@
+diff -ruN a/src/gallium/drivers/virgl/virgl_screen.c b/src/gallium/drivers/virgl/virgl_screen.c
+--- a/src/gallium/drivers/virgl/virgl_screen.c
++++ b/src/gallium/drivers/virgl/virgl_screen.c
+@@ -932,9 +932,12 @@
+    struct virgl_context *vctx = virgl_context(ctx);
+ 
+    if (vws->flush_frontbuffer) {
+-      virgl_flush_eq(vctx, vctx, NULL);
+-      vws->flush_frontbuffer(vws, vctx->cbuf, vres->hw_res, level, layer, winsys_drawable_handle,
+-                             nboxes == 1 ? sub_box : NULL);
++      /* moose-ripple: Windows' SwapBuffers can present from a thread with no current context
++       * (wgl_present passes NULL then), and that thread has no commands to flush. */
++      if (vctx)
++         virgl_flush_eq(vctx, vctx, NULL);
++      vws->flush_frontbuffer(vws, vctx ? vctx->cbuf : NULL, vres->hw_res, level, layer,
++                             winsys_drawable_handle, nboxes == 1 ? sub_box : NULL);
+    }
+ }
+ 

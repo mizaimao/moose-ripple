@@ -1,0 +1,50 @@
+; moose-ripple display driver for Windows 9x: module definition.
+; The module must be called DISPLAY; the ordinals are the display driver interface's.
+
+LIBRARY DISPLAY
+
+DESCRIPTION 'DISPLAY : 100, 96, 96 : moose-ripple display driver'
+EXETYPE WINDOWS
+
+CODE PRELOAD FIXED
+DATA PRELOAD FIXED SINGLE
+
+EXPORTS
+    BitBlt              @1
+    ColorInfo           @2
+    Control             @3
+    Disable             @4
+    Enable              @5
+    EnumDFonts          @6
+    EnumObj             @7
+    Output              @8
+    Pixel               @9
+    RealizeObject       @10
+    StrBlt              @11
+    ScanLR              @12
+    DeviceMode          @13
+    ExtTextOut          @14
+    GetCharWidth        @15
+    DeviceBitmap        @16
+    FastBorder          @17
+    SetAttribute        @18
+    DibBlt              @19
+    CreateDIBitmap      @20
+    DibToDevice         @21
+    SetPalette          @22
+    GetPalette          @23
+    SetPaletteTranslate @24
+    GetPaletteTranslate @25
+    UpdateColors        @26
+    StretchBlt          @27
+    StretchDIBits       @28
+    SelectBitmap        @29
+    BitmapBits          @30
+    ReEnable            @31
+    Inquire             @101
+    SetCursor           @102
+    MoveCursor          @103
+    CheckCursor         @104
+    GetDriverResourceID @450
+    UserRepaintDisable  @500
+    ValidateMode        @700

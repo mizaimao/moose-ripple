@@ -1,0 +1,18 @@
+diff -ruN a/src/gallium/frontends/wgl/stw_framebuffer.c b/src/gallium/frontends/wgl/stw_framebuffer.c
+--- a/src/gallium/frontends/wgl/stw_framebuffer.c
++++ b/src/gallium/frontends/wgl/stw_framebuffer.c
+@@ -314,6 +314,14 @@
+ {
+    struct stw_framebuffer *fb;
+ 
++   /* moose-ripple, Windows 9x: the window hook (WM_DESTROY, WM_WINDOWPOSCHANGED) is not made in
++    * DllMain there (see wgl.c). This thread gets its data and hook now, when one of its windows
++    * gets a framebuffer: without the hook a destroyed window's framebuffer would stay, and a
++    * new window with the same handle would be refused a pixel format. Windows of other threads
++    * are left alone. */
++   if (hWnd && GetWindowThreadProcessId(hWnd, NULL) == GetCurrentThreadId())
++      (void) stw_tls_get_data();
++
+    fb = CALLOC_STRUCT( stw_framebuffer );
+    if (fb == NULL)
+       return NULL;

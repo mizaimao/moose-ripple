@@ -1,0 +1,57 @@
+diff -ruN a/src/gallium/frontends/wgl/stw_tls.c b/src/gallium/frontends/wgl/stw_tls.c
+--- a/src/gallium/frontends/wgl/stw_tls.c
++++ b/src/gallium/frontends/wgl/stw_tls.c
+@@ -73,7 +73,9 @@
+     * XXX: Except for the current thread since it there is an explicit
+     * stw_tls_init_thread() call for it later on.
+     */
+-#ifndef _GAMING_XBOX
++   /* moose-ripple, Windows 9x: not here (this runs in DllMain, see wgl.c's DllMain); a
++    * thread gets its data when one of its windows gets a framebuffer. */
++#if 0
+    DWORD dwCurrentProcessId = GetCurrentProcessId();
+    DWORD dwCurrentThreadId = GetCurrentThreadId();
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, dwCurrentProcessId);
+@@ -102,7 +104,7 @@
+       }
+       CloseHandle(hSnapshot);
+    }
+-#endif /* _GAMING_XBOX */
++#endif /* moose-ripple: no thread enumeration */
+ 
+    return true;
+ }
+@@ -286,10 +288,7 @@
+       data = stw_tls_lookup_pending_data(dwCurrentThreadId);
+ 
+       if (!data) {
+-         /*
+-          * This should be impossible now.
+-          */
+-	 assert(!"Failed to find thread data for thread id");
++         /* moose-ripple: the normal case on Windows 9x (no data made in DllMain). */
+ 
+          /*
+           * DllMain is called with DLL_THREAD_ATTACH only by threads created
+diff -ruN a/src/gallium/targets/wgl/wgl.c b/src/gallium/targets/wgl/wgl.c
+--- a/src/gallium/targets/wgl/wgl.c
++++ b/src/gallium/targets/wgl/wgl.c
+@@ -287,13 +287,16 @@
+ DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
+ {
+    switch (fdwReason) {
++   /* moose-ripple, Windows 9x: no per-thread set-up here. It installs a window hook
++    * (SetWindowsHookEx, a USER call that needs Windows' 16-bit lock) while the loader holds
++    * its own lock; a thread holding the 16-bit lock (any program inside a DirectDraw or
++    * Direct3D call) that then needs the loader lock never gets it: the whole system stops.
++    * A thread gets its data and hook when one of its windows gets a framebuffer instead. */
+    case DLL_PROCESS_ATTACH:
+       stw_init(&stw_winsys);
+-      stw_init_thread();
+       break;
+ 
+    case DLL_THREAD_ATTACH:
+-      stw_init_thread();
+       break;
+ 
+    case DLL_THREAD_DETACH:
