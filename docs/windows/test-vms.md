@@ -249,3 +249,15 @@ surface" to dump): after that, pictures come from inside Windows (`shot.ps1`). T
 no socat; the helper uses netcat. The package is installed by hand as `loadtest.sh` does it:
 an elevated prompt, the files fetched with bitsadmin, `devcon update`, "Install this driver
 software anyway", a restart.
+
+## In UTM (2026-11-15, first try)
+
+The same disk as on Hog, in a UTM VM `ripple-win7` on macserver (x86-64 emulated on Apple
+silicon, 4 processors, 4 GB, SeaBIOS, the network card's address and SMBIOS UUID of VM 220, a
+PS/2 keyboard for typed input, QMP at `rb-qmp-w7.sock` in UTM's group container).
+`tools/win7-debug/utm.sh` drives it like `hog.sh`. Windows boots (slowly: emulated) and the
+package installs, but with our driver the screen is violet with garbage and in-guest pictures
+come out black. UTM's host renderer is virglrenderer over ANGLE on Metal, and it reports GLSL
+1.30 only (`[VREND CAPS] FINAL VALUES: glsl_level=130, max_samples=1` in the VM's debug log):
+no geometry shaders, nothing Direct3D 10 needs, while the compositor still gets a Direct3D 10
+device from us. Being worked on: the driver has to offer less on such a host.
