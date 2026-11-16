@@ -631,7 +631,10 @@ void CtrlQueue::SubmitCommand(void *cmdbuf,
                               ULONG ctx_id,
                               void (*complete_cb)(void *),
                               void *complete_ctx,
-                              BOOLEAN fence)
+                              BOOLEAN fence,
+                              BOOLEAN borrowed,
+                              void (*data_free)(void *, void *),
+                              void *data_free_ctx)
 {
     PAGED_CODE();
 
@@ -654,6 +657,9 @@ void CtrlQueue::SubmitCommand(void *cmdbuf,
 
     vbuf->data_buf = cmdbuf;
     vbuf->data_size = size;
+    vbuf->data_borrowed = borrowed ? true : false;
+    vbuf->data_free = data_free;
+    vbuf->data_free_ctx = data_free_ctx;
 
     vbuf->complete_cb = complete_cb;
     vbuf->complete_ctx = complete_ctx;
@@ -831,10 +837,12 @@ UINT CtrlQueue::QueueBuffer(PGPU_VBUFFER buf)
         PVOID data_buf = (PVOID)buf->data_buf;
         while (data_size)
         {
-            if (BuildSGElement(&sg[outcnt + incnt], data_buf, data_size))
+            // Up to the end of this page: the data need not start on a page boundary
+            ULONG chunk = min(data_size, PAGE_SIZE - (ULONG)((ULONG_PTR)data_buf & (PAGE_SIZE - 1)));
+            if (BuildSGElement(&sg[outcnt + incnt], data_buf, chunk))
             {
-                data_buf = (PVOID)((LONG_PTR)(data_buf) + PAGE_SIZE);
-                data_size -= min(data_size, PAGE_SIZE);
+                data_buf = (PVOID)((LONG_PTR)(data_buf) + chunk);
+                data_size -= chunk;
                 outcnt++;
                 sgleft--;
                 if (sgleft == 0)
@@ -865,7 +873,10 @@ UINT CtrlQueue::QueueBuffer(PGPU_VBUFFER buf)
 
     Lock(&SavedIrql);
     ret = AddBuf(&sg[0], outcnt, incnt, buf, NULL, 0);
-    Kick();
+    if (ret != 0 || m_deferKicks == 0)
+    {
+        Kick();
+    }
     Unlock(SavedIrql);
 
     // A full ring: wait for the host to give descriptors back, where waiting is allowed, for up
@@ -985,7 +996,13 @@ void VioGpuBuf::Close(void)
                 pbuf->resp_size = 0;
             }
 
-            if (pbuf->data_buf && pbuf->data_size)
+            if (pbuf->data_buf && pbuf->data_size && pbuf->data_free)
+            {
+                pbuf->data_free(pbuf->data_free_ctx, pbuf->data_buf);
+                pbuf->data_buf = NULL;
+                pbuf->data_size = 0;
+            }
+            if (pbuf->data_buf && pbuf->data_size && !pbuf->data_borrowed)
             {
                 delete[] reinterpret_cast<PBYTE>(pbuf->data_buf);
                 pbuf->data_buf = NULL;
@@ -1108,7 +1125,13 @@ void VioGpuBuf::FreeBuf(_In_ PGPU_VBUFFER pbuf)
         pbuf->resp_size = 0;
     }
 
-    if (pbuf->data_buf && pbuf->data_size)
+    if (pbuf->data_buf && pbuf->data_size && pbuf->data_free)
+    {
+        pbuf->data_free(pbuf->data_free_ctx, pbuf->data_buf);
+        pbuf->data_buf = NULL;
+        pbuf->data_size = 0;
+    }
+    if (pbuf->data_buf && pbuf->data_size && !pbuf->data_borrowed)
     {
         delete[] reinterpret_cast<PBYTE>(pbuf->data_buf);
         pbuf->data_buf = NULL;

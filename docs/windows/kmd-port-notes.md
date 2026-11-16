@@ -643,8 +643,8 @@ graphics. Direct3D 10 frames a second: batch 654, alpha 707, ALU 380, texture 63
 749 and 808, constant buffer 1805; Direct3D 9 batch 769.
 
 The second geometry test, 40 frames a second on the rig, runs at 808 here: its slowness is the
-rig's GPU (or its driver), not our translation. The scores are now bound by the host GPU
-behind virglrenderer.
+rig's GPU (or its driver), not our translation. The other scores are not bound by Hog's GPU,
+which is mostly idle: see the next section.
 
 Found on Hog, open: the host renderer refused one shader program, "Too many vertex uniform
 blocks (15/14)". Direct3D 10 has 14 constant buffer slots, and the Direct3D 10 driver binds
@@ -652,3 +652,48 @@ slot n as Gallium's constant buffer n + 1, so a shader using the last slot needs
 blocks on the host; Mesa's Direct3D 12 GL driver offers 14, the rig's Intel driver more. After
 such an error virglrenderer drops that context's later drawing, so the test it happened in
 (not known yet which) may have counted frames it did not draw.
+
+## Speed, third round: buffers reported once they are with the host (2026-11-16)
+
+On Hog the host GPU is far from busy, yet the Direct3D 10 batch test stayed near 650 frames a
+second. The timing build (`TRACE_TIMING=1`, which now also counts parts, bytes and how many
+buffers are out at once) showed why: Windows' scheduler hands the driver one buffer, at most two,
+and the next only when one is reported done. A buffer waited about 12 ms in the scheduler and
+0.8 ms with the host, so each frame paid a full round trip to the host, which under nested
+virtualization (a VM exit costs tens of microseconds) is long.
+
+Three changes, measured on Hog with the regular build:
+
+- A command buffer's parts are sent from the DMA buffer itself (or a reused copy, below)
+  instead of a fresh copy each time: under nested virtualization each newly touched page of pool
+  memory costs a VM exit, 75-100 µs a frame.
+- The device is notified once a buffer, after all its parts are queued, not once a part.
+  Batch test 642-663 → 714-739.
+- Rendering buffers are reported done to Windows once all of their parts are with the host
+  (the host runs them in order); paging and present buffers still once the host has run them,
+  and reports always go out in submission order. Since Windows may then reuse the DMA buffer,
+  these buffers' parts are copied into reused memory (a lookaside list). Everything that waits
+  for the GPU for real still waits for the host: the completion event of a buffer, the
+  allocations' busy marks (which the user-mode driver's waits use), and now also the
+  destruction of an allocation. Batch test → 882-888.
+
+The first try reported the preemption (Windows asks for one now and then; the driver answers
+when it has nothing left with the host) before the last buffers' completion. Windows takes
+every buffer not reported by then as preempted and submits it again, the same DMA buffer and
+so the same command object, which was then run and freed twice: bugcheck 0xC2
+(`BAD_POOL_CALLER`, 7, a block freed twice), found from QEMU's monitor (the stack of the one
+processor not frozen, the block's pool tag, the driver's base). `build.sh` now writes a link
+map (`viogpu3d.map`) to name addresses in such a dump.
+
+| Hog, Experience Index | before | now |
+|---|---|---|
+| Graphics / gaming graphics | 7.3 / 7.3 | 7.5 / 7.5 |
+| Direct3D 10 batch / alpha (frames a second) | 654 / 707 | 864 / 887 |
+| Direct3D 10 texture / ALU | 637 / 380 | 843 / 596 |
+| Direct3D 10 geometry F4 / V8 | 749 / 808 | 1031 / 940 |
+| Direct3D 10 constant buffer | 1805 | 2150 |
+| Direct3D 9 batch | 769 | 910 |
+
+Chess Titans and the desktop with Aero look as before. Hog's GPU is still mostly idle: the
+frames are still bound by round trips, now those of the present buffers and the programs' own
+waits for the GPU.
