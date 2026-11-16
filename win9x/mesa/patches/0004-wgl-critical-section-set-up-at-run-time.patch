@@ -1,0 +1,31 @@
+diff -ruN a/src/gallium/frontends/wgl/stw_tls.c b/src/gallium/frontends/wgl/stw_tls.c
+--- a/src/gallium/frontends/wgl/stw_tls.c
++++ b/src/gallium/frontends/wgl/stw_tls.c
+@@ -39,9 +39,8 @@
+  * Static mutex to protect the access to g_pendingTlsData global and
+  * stw_tls_data::next member.
+  */
+-static CRITICAL_SECTION g_mutex = {
+-   (PCRITICAL_SECTION_DEBUG)-1, -1, 0, 0, 0, 0
+-};
++static CRITICAL_SECTION g_mutex;   /* set up in stw_tls_init: Windows 9x has no static
++                                      initializer for critical sections */
+ 
+ /**
+  * There is no way to invoke TlsSetValue for a different thread, so we
+@@ -64,6 +63,7 @@
+    if (tlsIndex == TLS_OUT_OF_INDEXES) {
+       return false;
+    }
++   InitializeCriticalSection(&g_mutex);
+ 
+    /*
+     * DllMain is called with DLL_THREAD_ATTACH only for threads created after
+@@ -233,6 +233,7 @@
+ 
+       TlsFree(tlsIndex);
+       tlsIndex = TLS_OUT_OF_INDEXES;
++      DeleteCriticalSection(&g_mutex);
+    }
+ }
+ 
