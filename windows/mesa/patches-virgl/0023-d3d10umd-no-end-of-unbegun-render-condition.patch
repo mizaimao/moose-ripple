@@ -1,0 +1,24 @@
+Direct3D 10: do not end a render condition that was never begun
+
+Direct3D sets "no predicate" whenever it clears the device's state, and the driver passed that
+on each time. On virgl the host answers an end without a begin with an OpenGL error, counts
+it as an error of the context and from then on skips every clear, draw and copy of that
+context without a word: a program that cleared its state once drew nothing afterwards.
+
+diff -ru a/src/gallium/frontends/d3d10umd/Query.cpp b/src/gallium/frontends/d3d10umd/Query.cpp
+--- a/src/gallium/frontends/d3d10umd/Query.cpp
++++ b/src/gallium/frontends/d3d10umd/Query.cpp
+@@ -350,7 +350,12 @@
+    wait = (pQuery && pQuery->Flags & D3D10DDI_QUERY_MISCFLAG_PREDICATEHINT) ?
+              PIPE_RENDER_COND_NO_WAIT : PIPE_RENDER_COND_WAIT;
+ 
+-   pipe->render_condition(pipe, state, PredicateValue, wait);
++   /* Ending a condition that was never begun is not harmless everywhere. Direct3D does it
++    * whenever it clears the device's state; virgl's host makes an OpenGL error of it, and from
++    * then on drops everything the context draws.
++    */
++   if (state || pDevice->pPredicate)
++      pipe->render_condition(pipe, state, PredicateValue, wait);
+ 
+    pDevice->pPredicate = pQuery;
+    pDevice->PredicateValue = PredicateValue;

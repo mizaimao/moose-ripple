@@ -104,7 +104,12 @@ class Conn:
         self.w.flush()
 
 
-def handshake(c, password):
+ALPHA_CURSOR = 0x574D5664   # QEMU's cursor with alpha: hot spot, size, then BGRA pixels
+RICH_CURSOR = -239
+CURSOR = None                 # (hot_x, hot_y, w, h, BGRA bytes) once the server sent one
+
+
+def handshake(c, password, cursor=False):
     """RFB 3.8 with VNC authentication; returns the screen size."""
     c.read(12)                                   # "RFB 003.008\n"
     c.write(b"RFB 003.008\n")
@@ -124,7 +129,10 @@ def handshake(c, password):
     c.read(struct.unpack(">I", c.read(4))[0])     # desktop name
     # SetPixelFormat: 32 bpp, depth 24, little-endian, true colour, R/G/B at 16/8/0.
     c.write(struct.pack(">BxxxBBBBHHHBBBxxx", 0, 32, 24, 0, 1, 255, 255, 255, 16, 8, 0))
-    c.write(struct.pack(">BxHii", 2, 2, 0, -223))  # encodings: Raw, DesktopSize
+    if cursor:   # also the pointer image, which the guest may have the host draw separately
+        c.write(struct.pack(">BxHiiii", 2, 4, 0, -223, ALPHA_CURSOR, RICH_CURSOR))
+    else:
+        c.write(struct.pack(">BxHii", 2, 2, 0, -223))  # encodings: Raw, DesktopSize
     return w, h
 
 
@@ -132,6 +140,7 @@ def frame(c, w, h, y0=0, rows=0):
     """Ask for the whole screen, or only ROWS rows from Y0 (non-incremental, so the server
     answers at once), and return (w, h, BGRX bytes of the whole screen; rows not asked for stay
     zero). A DesktopSize rectangle means the mode changed: ask again."""
+    global CURSOR
     c.write(struct.pack(">BBHHHH", 3, 0, 0, y0, w, rows or h))
     fb = bytearray(w * h * 4)
     while True:
@@ -139,8 +148,24 @@ def frame(c, w, h, y0=0, rows=0):
         if t == 0:
             nrect = struct.unpack(">xH", c.read(3))[0]
             resized = False
+            pixels = False
             for _ in range(nrect):
                 x, y, rw, rh, enc = struct.unpack(">HHHHi", c.read(12))
+                if enc == ALPHA_CURSOR:
+                    c.read(4)                     # the encoding of the pixels: raw
+                    CURSOR = (x, y, rw, rh, c.read(rw * rh * 4))
+                    continue
+                if enc == RICH_CURSOR:
+                    data = c.read(rw * rh * 4)
+                    mask = c.read((rw + 7) // 8 * rh)
+                    out = bytearray(data)
+                    for py in range(rh):
+                        for px in range(rw):
+                            bit = mask[py * ((rw + 7) // 8) + px // 8] >> (7 - px % 8) & 1
+                            out[(py * rw + px) * 4 + 3] = 255 if bit else 0
+                    CURSOR = (x, y, rw, rh, bytes(out))
+                    continue
+                pixels = True
                 if enc == -223:
                     w, h, resized = rw, rh, True
                     fb = bytearray(w * h * 4)
@@ -151,6 +176,8 @@ def frame(c, w, h, y0=0, rows=0):
                 for row in range(rh):
                     o = ((y + row) * w + x) * 4
                     fb[o:o + rw * 4] = data[row * rw * 4:(row + 1) * rw * 4]
+            if not pixels:
+                continue                          # a pointer image only: the frame follows
             if not resized:
                 return w, h, fb
             c.write(struct.pack(">BBHHHH", 3, 0, 0, 0, w, h))
@@ -163,6 +190,22 @@ def frame(c, w, h, y0=0, rows=0):
             c.read(struct.unpack(">xxxI", c.read(7))[0])
         else:
             raise RuntimeError("unknown server message %d" % t)
+
+
+def png_rgba(w, h, bgra):
+    raw = bytearray()
+    for y in range(h):
+        raw.append(0)
+        row = bgra[y * w * 4:(y + 1) * w * 4]
+        for x in range(w):
+            b, g, r, a = row[x * 4:x * 4 + 4]
+            raw += bytes((r, g, b, a))
+
+    def chunk(kind, data):
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(bytes(raw))) + chunk(b"IEND", b""))
 
 
 def png(w, h, bgrx):
@@ -378,6 +421,8 @@ if __name__ == "__main__":
         got = des_encrypt(bytes.fromhex("133457799BBCDFF1"), bytes.fromhex("0123456789ABCDEF")).hex()
         sys.exit(0 if got == "85e813540f0ab405" else "DES self-test failed: " + got)
     args, count, interval = sys.argv[1:], 1, 0.0
+    want_cursor = "-c" in args
+    args = [a for a in args if a != "-c"]
     try:
         while len(args) > 1 and args[0] in ("-n", "-i"):
             if args[0] == "-n":
@@ -388,11 +433,11 @@ if __name__ == "__main__":
     except ValueError:
         args = []
     if len(args) != 1 or count < 1 or interval < 0 or "VNC_PASSWORD" not in os.environ:
-        sys.exit("usage: VNC_PASSWORD=<pw> vncgrab.py [-n FRAMES] [-i SECONDS] OUT.png  "
+        sys.exit("usage: VNC_PASSWORD=<pw> vncgrab.py [-c] [-n FRAMES] [-i SECONDS] OUT.png  "
                  "(RFB on stdin/stdout)")
     out = args[0]
     conn = Conn(sys.stdin.buffer, sys.stdout.buffer)
-    width, height = handshake(conn, os.environ["VNC_PASSWORD"])
+    width, height = handshake(conn, os.environ["VNC_PASSWORD"], want_cursor)
     # Grab every frame first and encode afterwards: PNG encoding takes longer than a frame.
     frames, t0 = [], time.monotonic()
     for i in range(count):
@@ -403,6 +448,14 @@ if __name__ == "__main__":
         frames.append((t, width, height, bytes(pixels)))
     sys.stdout.close()
     stem = out[:-4] if out.endswith(".png") else out
+    if want_cursor:
+        if CURSOR:
+            hx, hy, cw, ch, data = CURSOR
+            with open(stem + "-cursor.png", "wb") as f:
+                f.write(png_rgba(cw, ch, data))
+            print("pointer from the host: %dx%d, hot spot %d,%d" % (cw, ch, hx, hy), file=sys.stderr)
+        else:
+            print("pointer from the host: none sent", file=sys.stderr)
     for i, (t, w, h, pixels) in enumerate(frames):
         name = out if count == 1 else "%s-%02d.png" % (stem, i)
         with open(name, "wb") as f:

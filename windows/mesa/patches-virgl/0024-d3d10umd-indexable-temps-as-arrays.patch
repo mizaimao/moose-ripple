@@ -1,0 +1,40 @@
+Direct3D 10: indexable temporaries declared as arrays
+
+A Direct3D 10 shader's indexable temporaries (x0[6] and the like) were declared one register
+at a time and then indexed with a computed offset. A renderer that interprets the shader does
+not mind. virgl's host turns it into GLSL, where the registers are separate variables: the
+shader did not compile, the host counted that as an error of the context and drew nothing
+more for it (Windows' second geometry assessment, which then "ran" at 12 000 frames a second).
+They are now declared as one array each, which the host translates to a GLSL array.
+
+diff -ru a/src/gallium/frontends/d3d10umd/ShaderTGSI.c b/src/gallium/frontends/d3d10umd/ShaderTGSI.c
+--- a/src/gallium/frontends/d3d10umd/ShaderTGSI.c
++++ b/src/gallium/frontends/d3d10umd/ShaderTGSI.c
+@@ -2129,7 +2129,9 @@
+          {
+             uint i;
+ 
+-            /* XXX: Add true indexable temps to gallium.
++            /* One array of temporaries, declared as an array: a renderer that turns the
++             * shader into source text (virgl's host) can only index what it knows to be
++             * one.
+              */
+ 
+             assert(opcode.specific.dcl_indexable_temp.index <
+@@ -2140,8 +2142,14 @@
+             sx.indexable_temp_offsets[opcode.specific.dcl_indexable_temp.index] =
+                sx.declared_temps;
+ 
+-            for (i = 0; i < opcode.specific.dcl_indexable_temp.count; i++) {
+-               sx.temps[sx.declared_temps + i] = ureg_DECL_temporary(ureg);
++            if (opcode.specific.dcl_indexable_temp.count) {
++               struct ureg_dst array =
++                  ureg_DECL_array_temporary(ureg, opcode.specific.dcl_indexable_temp.count, false);
++
++               for (i = 0; i < opcode.specific.dcl_indexable_temp.count; i++) {
++                  sx.temps[sx.declared_temps + i] = array;
++                  sx.temps[sx.declared_temps + i].Index += i;
++               }
+             }
+             sx.declared_temps += opcode.specific.dcl_indexable_temp.count;
+          }

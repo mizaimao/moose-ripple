@@ -99,6 +99,11 @@ d3dddi_destroy_allocation(struct gdikmt_device *dev, HANDLE hResource,
    struct gdikmt_device_d3dddi *ddi = d3dddi_device(dev);
    D3DDDICB_DEALLOCATE arg;
 
+   /* The runtime is destroying the device and takes every allocation with it; its resources,
+    * through which some would be given back, are gone already. */
+   if (dev->runtime_destroying)
+      return 0;
+
    memset(&arg, 0, sizeof(arg));
    if (hResource) {
       arg.hResource = hResource;
@@ -113,13 +118,48 @@ d3dddi_destroy_allocation(struct gdikmt_device *dev, HANDLE hResource,
  * The runtime has opened a shared resource before it asks the driver to: all there is to do
  * is to hand over what it said, in the two steps the callers expect.
  */
+struct d3dddi_opened {
+   UINT NumAllocations;
+   const D3DDDI_OPENALLOCATIONINFO *pOpenAllocationInfo;
+   D3DKMT_HANDLE hKMResource;
+   const void *pPrivateDriverData;
+   UINT PrivateDriverDataSize;
+};
+
+/* What the runtime said about the resource being opened, Direct3D 10's way or Direct3D 9's */
+static bool
+d3dddi_opened_resource(struct gdikmt_device *dev, struct d3dddi_opened *res)
+{
+   struct gdikmt_device_d3dddi *ddi = d3dddi_device(dev);
+
+   if (ddi->pD3D9OpenResource) {
+      const D3DDDIARG_OPENRESOURCE *in = ddi->pD3D9OpenResource;
+      res->NumAllocations = in->NumAllocations;
+      res->pOpenAllocationInfo = in->pOpenAllocationInfo;
+      res->hKMResource = in->hKMResource;
+      res->pPrivateDriverData = in->pPrivateDriverData;
+      res->PrivateDriverDataSize = in->PrivateDriverDataSize;
+      return true;
+   }
+   if (ddi->pOpenResource) {
+      const D3D10DDIARG_OPENRESOURCE *in = ddi->pOpenResource;
+      res->NumAllocations = in->NumAllocations;
+      res->pOpenAllocationInfo = in->pOpenAllocationInfo;
+      res->hKMResource = in->hKMResource.handle;
+      res->pPrivateDriverData = in->pPrivateDriverData;
+      res->PrivateDriverDataSize = in->PrivateDriverDataSize;
+      return true;
+   }
+   return false;
+}
+
 static NTSTATUS
 d3dddi_query_allocation(struct gdikmt_device *dev, struct gdikmt_openallocation *open)
 {
-   const D3D10DDIARG_OPENRESOURCE *res = d3dddi_device(dev)->pOpenResource;
+   struct d3dddi_opened opened, *res = &opened;
    UINT total = 0;
 
-   if (!res)
+   if (!d3dddi_opened_resource(dev, res))
       return DDI_INVALID_PARAMETER;
 
    for (UINT i = 0; i < res->NumAllocations; i++)
@@ -134,11 +174,11 @@ d3dddi_query_allocation(struct gdikmt_device *dev, struct gdikmt_openallocation 
 static NTSTATUS
 d3dddi_open_allocation(struct gdikmt_device *dev, struct gdikmt_openallocation *open)
 {
-   const D3D10DDIARG_OPENRESOURCE *res = d3dddi_device(dev)->pOpenResource;
+   struct d3dddi_opened opened, *res = &opened;
    char *buffer = static_cast<char *>(open->pTotalBuffer);
    UINT used = 0;
 
-   if (!res)
+   if (!d3dddi_opened_resource(dev, res))
       return DDI_INVALID_PARAMETER;
    if (open->NumAllocations < res->NumAllocations ||
        open->PrivateDriverDataSize < res->PrivateDriverDataSize)
@@ -162,7 +202,7 @@ d3dddi_open_allocation(struct gdikmt_device *dev, struct gdikmt_openallocation *
    if (res->PrivateDriverDataSize)
       memcpy(open->pPrivateDriverData, res->pPrivateDriverData, res->PrivateDriverDataSize);
    open->NumAllocations = res->NumAllocations;
-   open->hResource = reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(res->hKMResource.handle));
+   open->hResource = reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(res->hKMResource));
    return 0;
 }
 
@@ -280,6 +320,24 @@ d3dddi_present(struct gdikmt_context *ctx, D3DKMT_HANDLE hAllocation,
    DXGIDDICB_PRESENT arg;
 
    (void)sub_box;
+
+   /* Direct3D 9: the device's own present callback, with the destination its runtime named */
+   if (ddi->isD3D9) {
+      struct gdikmt_present_info *info =
+         static_cast<struct gdikmt_present_info *>(winsys_drawable_handle);
+      D3DDDICB_PRESENT present;
+      HRESULT hr;
+
+      memset(&present, 0, sizeof(present));
+      present.hSrcAllocation = hAllocation;
+      if (info && info->magic == GDIKMT_PRESENT_INFO_MAGIC)
+         present.hDstAllocation = info->hDstAllocation;
+      present.hContext = d3dddi_context(ctx)->hContext;
+      hr = ddi->KTCallbacks.pfnPresentCb(ddi->hRTDevice, &present);
+      if (info && info->magic == GDIKMT_PRESENT_INFO_MAGIC)
+         info->status = hr;
+      return hr;
+   }
 
    memset(&arg, 0, sizeof(arg));
    arg.hSrcAllocation = hAllocation;

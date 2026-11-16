@@ -43,3 +43,37 @@ Close the stub afterwards (`gdbserver none`).
 guest without the registry values. `guestmods.py` finds the guest's loaded modules for both
 (the kernel's base from the interrupt table, the module list from the kernel's debugger data
 block); it knows Windows 7 x64 only.
+
+## Reading a bluescreen
+
+Windows writes `C:\Windows\MEMORY.DMP` (a kernel memory dump) and a small dump in
+`C:\Windows\Minidump`. For a crash in a system thread (stop `0x7E`) or a page fault, the
+exception record and the registers at the fault sit below the stack the small dump keeps, so
+take `MEMORY.DMP` (copy it to `C:\rb\pkg` in an elevated prompt and send it with `put.cmd`):
+
+    $PY kmem.py MEMORY.DMP crash                 # the exception and the registers at the fault
+    $PY kmem.py MEMORY.DMP q fffffa8004da2100 24 # kernel memory, 64-bit words
+
+The faulting address minus the module base on the bluescreen, plus the image base in the
+module's `.map`, names the function there. `kmem.py` knows Windows 7 x64 kernel memory dumps
+only (4-level page tables, the summary bitmap layout of that version).
+
+## Where a guest spends its time
+
+`rig/` holds scripts for the VM host (copy them to its `/tmp`, run as root):
+
+- `threads.sh VMID SECONDS`: CPU use of each QEMU thread. `CPU_n/KVM` are the guest's processors,
+  `kvm` is QEMU's main thread, where virglrenderer issues the host's GL calls.
+- `gpubusy.sh SECONDS`: how much of the time the host's Intel GPU was awake, and its clock.
+- `i915trace.sh SECONDS`: the Intel GPU driver's requests and waits, counted (tracing is
+  switched off again at the end).
+- `ripsample.sh VMID COUNT`: COUNT samples of every guest processor's instruction pointer,
+  privilege level and page table base, through QEMU's monitor (about 80 a second). The most
+  frequent address is the idle loop.
+- `modbase.sh VMID [ADDRESS]`: where the guest kernel (or the module below ADDRESS) is loaded,
+  for naming kernel samples with the module's `.map`; the HAL sits just below the kernel.
+
+For user-mode samples, run the program with `RIPPLE_UMD_LOG` set: the user-mode driver writes the
+load addresses of the program's main modules when it is loaded (`guest/prof.cmd` does that for
+one assessment test, `guest/dxone.cmd` runs one test alone). Our driver's functions are named
+from its own symbol table (`llvm-nm`), Windows' from the public symbol server (`resym.py`).

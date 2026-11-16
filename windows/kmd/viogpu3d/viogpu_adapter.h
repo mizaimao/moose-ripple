@@ -99,8 +99,19 @@ class VioGpuAdapter : IVioGpuPCI
     PKEVENT m_ResolutionEvent;
     HANDLE m_ResolutionEventHandle;
 
+    // The hardware pointer (the INF's HWCursor): a 64x64 image the host draws over the
+    // picture, so Windows does not draw the pointer into every frame. See SetPointerShape.
     VioGpuObj *m_pCursorBuf;
     VioGpuMemSegment m_CursorSegment;
+    KGUARDED_MUTEX m_CursorMutex;
+    UINT m_CursorHotX;
+    UINT m_CursorHotY;
+    BOOLEAN m_bCursorHidden;
+    BYTE *m_pCursorImage;      // the current shape, kept to show it again after a hide
+    KEVENT m_CursorUploaded;
+    BOOLEAN CreateCursor(void);
+    void UploadCursor(BOOLEAN blank);
+    void QueueCursorCommand(UINT type, UINT resId, INT x, INT y, UINT hotX, UINT hotY);
 
     ULONG m_Id;
     CAPSET_INFO m_capsetInfos[VIRTIO_GPU_MAX_CAPSET_ID + 1];
@@ -202,6 +213,12 @@ class VioGpuAdapter : IVioGpuPCI
     {
         return m_PciResources.GetPciBar(0)->GetPA();
     }
+
+  public:
+    NTSTATUS SetPointerShape(_In_ CONST DXGKARG_SETPOINTERSHAPE *pSetPointerShape);
+    NTSTATUS SetPointerPosition(_In_ CONST DXGKARG_SETPOINTERPOSITION *pSetPointerPosition);
+    // The host forgets the image when the device is reset (power-down): drop it with it
+    void DestroyCursor(void);
 
   private:
     BOOLEAN CheckHardware();

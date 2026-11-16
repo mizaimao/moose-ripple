@@ -532,7 +532,7 @@ void CtrlQueue::ResFlush(UINT res_id, UINT width, UINT height, UINT x, UINT y)
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 }
 
-void CtrlQueue::TransferToHost2D(UINT res_id, ULONG offset, UINT width, UINT height, UINT x, UINT y)
+void CtrlQueue::TransferToHost2D(UINT res_id, ULONG offset, UINT width, UINT height, UINT x, UINT y, PKEVENT done)
 {
     PAGED_CODE();
 
@@ -549,6 +549,11 @@ void CtrlQueue::TransferToHost2D(UINT res_id, ULONG offset, UINT width, UINT hei
     cmd->r.height = height;
     cmd->r.x = x;
     cmd->r.y = y;
+    if (done != NULL)
+    {
+        vbuf->complete_cb = NotifyEventCompleteCB;
+        vbuf->complete_ctx = done;
+    }
 
     QueueBuffer(vbuf);
 
@@ -621,7 +626,12 @@ void CtrlQueue::CtxResource(bool attach, UINT ctx_id, UINT res_id)
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 }
 
-void CtrlQueue::SubmitCommand(void *cmdbuf, ULONG size, ULONG ctx_id, void (*complete_cb)(void *), void *complete_ctx)
+void CtrlQueue::SubmitCommand(void *cmdbuf,
+                              ULONG size,
+                              ULONG ctx_id,
+                              void (*complete_cb)(void *),
+                              void *complete_ctx,
+                              BOOLEAN fence)
 {
     PAGED_CODE();
 
@@ -635,8 +645,11 @@ void CtrlQueue::SubmitCommand(void *cmdbuf, ULONG size, ULONG ctx_id, void (*com
     cmd->hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
     cmd->size = size;
 
-    cmd->hdr.flags |= VIRTIO_GPU_FLAG_FENCE;
-    cmd->hdr.fence_id = InterlockedIncrement(&m_FenceIdr);
+    if (fence)
+    {
+        cmd->hdr.flags |= VIRTIO_GPU_FLAG_FENCE;
+        cmd->hdr.fence_id = InterlockedIncrement(&m_FenceIdr);
+    }
     cmd->hdr.ctx_id = ctx_id;
 
     vbuf->data_buf = cmdbuf;
@@ -654,7 +667,8 @@ void CtrlQueue::TransferHostCmd(bool to_host,
                                 ULONG ctx_id,
                                 VIOGPU_TRANSFER_CMD *options,
                                 void (*complete_cb)(void *),
-                                void *complete_ctx)
+                                void *complete_ctx,
+                                BOOLEAN fence)
 {
     PAGED_CODE();
 
@@ -681,8 +695,11 @@ void CtrlQueue::TransferHostCmd(bool to_host,
     cmd->stride = options->stride;
     cmd->layer_stride = options->layer_stride;
 
-    cmd->hdr.flags |= VIRTIO_GPU_FLAG_FENCE;
-    cmd->hdr.fence_id = InterlockedIncrement(&m_FenceIdr);
+    if (fence)
+    {
+        cmd->hdr.flags |= VIRTIO_GPU_FLAG_FENCE;
+        cmd->hdr.fence_id = InterlockedIncrement(&m_FenceIdr);
+    }
 
     cmd->hdr.ctx_id = ctx_id;
 
@@ -851,6 +868,23 @@ UINT CtrlQueue::QueueBuffer(PGPU_VBUFFER buf)
     Kick();
     Unlock(SavedIrql);
 
+    // A full ring: wait for the host to give descriptors back, where waiting is allowed, for up
+    // to five seconds (a GPU timeout comes first). Several command buffers in flight can fill it.
+    for (UINT tries = 0; ret != 0 && KeGetCurrentIrql() < DISPATCH_LEVEL && tries < 500; tries++)
+    {
+        LARGE_INTEGER timeout;
+        timeout.QuadPart = Int32x32To64(10, -10000);
+        KeWaitForSingleObject(&m_SpaceEvent, Executive, KernelMode, FALSE, &timeout);
+        Lock(&SavedIrql);
+        ret = AddBuf(&sg[0], outcnt, incnt, buf, NULL, 0);
+        Kick();
+        Unlock(SavedIrql);
+    }
+    if (ret != 0)
+    {
+        DbgPrint(TRACE_LEVEL_ERROR, ("<--- %s the ring stayed full, command type %u dropped\n", __FUNCTION__, ((PGPU_CTRL_HDR)buf->buf)->type));
+    }
+
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s ret = %d\n", __FUNCTION__, ret));
 
     return ret;
@@ -868,6 +902,10 @@ PGPU_VBUFFER CtrlQueue::DequeueBuffer(_Out_ UINT *len)
     if (buf == NULL)
     {
         *len = 0;
+    }
+    else
+    {
+        KeSetEvent(&m_SpaceEvent, IO_NO_INCREMENT, FALSE);
     }
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 

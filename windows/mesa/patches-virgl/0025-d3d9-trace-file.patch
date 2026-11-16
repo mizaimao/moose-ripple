@@ -1,0 +1,16 @@
+Direct3D 9: the call trace into the build
+
+D3D9Trace.cpp (windows/mesa/overlay-virgl): an optional trace of what the Direct3D 9 runtime
+asks of the driver, switched on with RIPPLE_UMD_TRACE.
+
+diff -ru a/src/gallium/frontends/d3d10umd/meson.build b/src/gallium/frontends/d3d10umd/meson.build
+--- a/src/gallium/frontends/d3d10umd/meson.build
++++ b/src/gallium/frontends/d3d10umd/meson.build
+@@ -17,6 +17,7 @@
+     'D3D9Resource.cpp',
+     'D3D9ShaderTranslate.cpp',
+     'D3D9State.cpp',
++    'D3D9Trace.cpp',
+     'Debug.cpp',
+     'Device.cpp',
+     'Draw.cpp',

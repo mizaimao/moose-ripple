@@ -1,0 +1,813 @@
+/*
+ * SPDX-License-Identifier: MIT
+ *
+ * Copyright 2026 Ake Rehnman
+ * Copyright 2026 VMLabDev and contributors
+ */
+#include "D3D9Private.h"
+#include "Format.h"
+#include "D3D9Trace.h"
+
+#include <stddef.h>
+
+extern "C" {
+}
+
+static UINT
+D3D9DriverVersion(const D3DDDIARG_OPENADAPTER *open_data)
+{
+   (void)open_data;
+   return D3D_UMD_INTERFACE_VERSION_WIN7;
+}
+
+static float
+D3D9FloatFromBits(uint32_t bits)
+{
+   float value;
+
+   static_assert(sizeof(value) == sizeof(bits));
+   memcpy(&value, &bits, sizeof(value));
+   return value;
+}
+
+/* WARP is the oracle for the D3D9 runtime's adapter validation path.  Mirror
+ * its DDI cap/format/query envelope closely, then layer in the compatibility
+ * bits seen in older virtual WDDM drivers where they help legacy D3D9 apps.
+ *
+ */
+static constexpr UINT d3d9_ms_types =
+   (1u << (D3DDDIMULTISAMPLE_NONMASKABLE - 1)) |
+   (1u << (D3DDDIMULTISAMPLE_2_SAMPLES - 1)) |
+   (1u << (D3DDDIMULTISAMPLE_4_SAMPLES - 1)) |
+   (1u << (D3DDDIMULTISAMPLE_8_SAMPLES - 1));
+
+static const FORMATOP g_format_ops[] = {
+   { D3DDDIFMT_X8R8G8B8, 0x009aec1f & ~FORMATOP_SRGBWRITE,
+     d3d9_ms_types, 0, 0 },
+   { D3DDDIFMT_R5G6B5, 0x008a6c1f, d3d9_ms_types, 0, 0 },
+   { D3DDDIFMT_A8R8G8B8, 0x00dae01f,
+     d3d9_ms_types, d3d9_ms_types, 0 },
+   { D3DDDIFMT_A8B8G8R8, 0x00dae01f, d3d9_ms_types, 0, 0 },
+   { D3DDDIFMT_A1R5G5B5, 0x00ca601f, d3d9_ms_types, 0, 0 },
+   { D3DDDIFMT_X1R5G5B5, 0x00ca601f, d3d9_ms_types, 0, 0 },
+   { D3DDDIFMT_A4R4G4B4, 0x00c2401f, d3d9_ms_types, 0, 0 },
+   { D3D9_FMT_X4R4G4B4, 0x00c2401f, d3d9_ms_types, 0, 0 },
+   { D3D9_FMT_A16B16G16R16, 0x00ca601f, d3d9_ms_types, 0, 0 },
+   { D3D9_FMT_G16R16, 0x00c2401f, d3d9_ms_types, 0, 0 },
+   { D3D9_FMT_A2B10G10R10, 0x00ca601f, d3d9_ms_types, 0, 0 },
+   { D3D9_FMT_A16B16G16R16F, 0x00ca601f, d3d9_ms_types, 0, 0 },
+   { D3D9_FMT_R16F, 0x00c2401f, d3d9_ms_types, 0, 0 },
+   { D3D9_FMT_G16R16F, 0x00c2401f, d3d9_ms_types, 0, 0 },
+   { D3D9_FMT_R32F, 0x00c2401f, d3d9_ms_types, 0, 0 },
+   { D3D9_FMT_G32R32F, 0x00c2401f, d3d9_ms_types, 0, 0 },
+   { D3D9_FMT_A32B32G32R32F, 0x00ca601f, d3d9_ms_types, 0, 0 },
+   { D3D9_FMT_V8U8, 0x0083401f, d3d9_ms_types, 0, 0 },
+   { D3D9_FMT_Q8W8V8U8, 0x0083401f, d3d9_ms_types, 0, 0 },
+   /* Bump maps with luminance, for BUMPENVMAPLUMINANCE. Vulkan has no
+    * mixed signed/unsigned formats; the UMD converts them to R8G8B8A8_SNORM
+    * on upload (D3D9TextureSubdata). */
+   { D3D9_FMT_L6V5U5, 0x00834007, 0, 0, 0 },
+   { D3D9_FMT_X8L8V8U8, 0x00834007, 0, 0, 0 },
+   { D3D9_FMT_V16U16, 0x0083401f, d3d9_ms_types, 0, 0 },
+   { D3D9_FMT_Q16W16V16U16, 0x0083401f, d3d9_ms_types, 0, 0 },
+   { D3D9_FMT_L8, 0x00c2401f, d3d9_ms_types, 0, 0 },
+   { D3D9_FMT_L16, 0x00c2401f, d3d9_ms_types, 0, 0 },
+   { D3DDDIFMT_A8, 0x00c2401f, d3d9_ms_types, 0, 0 },
+   { D3D9_FMT_A8L8, 0x00c2401f, d3d9_ms_types, 0, 0 },
+   { D3DDDIFMT_A2R10G10B10, 0x00ca601f, d3d9_ms_types, 0, 0 },
+   { D3D9_FMT_DXT1, 0x00828007, 0, 0, 0 },
+   { D3D9_FMT_DXT2, 0x00828007, 0, 0, 0 },
+   { D3D9_FMT_DXT3, 0x00828007, 0, 0, 0 },
+   { D3D9_FMT_DXT4, 0x00828007, 0, 0, 0 },
+   { D3D9_FMT_DXT5, 0x00828007, 0, 0, 0 },
+   { D3D9_FMT_ATI1, 0x0082d007, 0, 0, 8 },
+   { D3D9_FMT_P8, 0x00824007, 0, 0, 0 },
+   { D3D9_FMT_A8P8, 0x00820007, 0, 0, 0 },
+   /* Auto depth-stencil creation can validate the blt MSAA mask even for a
+    * fullscreen swapchain.  Both masks describe renderable sample counts;
+    * neither advertises depth/stencil StretchRect support.
+    */
+   { D3DDDIFMT_D24S8, 0x000000c0, d3d9_ms_types, d3d9_ms_types, 0 },
+   { D3DDDIFMT_D24X8, 0x000000c0, 0, 0, 0 },
+   { D3DDDIFMT_D16, 0x000000c0, 0, 0, 0 },
+   { D3D9_FMT_D16_LOCKABLE, 0x000000c0, 0, 0, 0 },
+   { D3D9_FMT_D32F_LOCKABLE, 0x000000c0, 0, 0, 0 },
+   { D3D9_FMT_DF16, 0x000410c1, 0, 0, 0 },
+   { D3D9_FMT_DF24, 0x000410c1, 0, 0, 0 },
+   { D3D9_FMT_INTZ, 0x000410c1, 0, 0, 0 },
+   /* moose-ripple: AYUV and YUY2 are not listed. The driver cannot make surfaces of them,
+    * let alone convert them; listed, Windows' video renderer chose them and then waited for
+    * pictures that never came. Without them it has the video converted before it arrives.
+    */
+   { D3D9_FMT_R8, 0x00c2401f, d3d9_ms_types, 0, 0 },
+   { D3D9_FMT_G8R8, 0x00c2401f, d3d9_ms_types, 0, 0 },
+};
+
+static const D3DDDIQUERYTYPE g_query_types[] = {
+   D3DDDIQUERYTYPE_EVENT,
+   D3DDDIQUERYTYPE_OCCLUSION,
+};
+
+static void
+D3D9FillCaps(const D3D9Adapter *adapter, D3DCAPS9 *caps)
+{
+   /* D3D9 removed the public name for the legacy D3DPTEXTURECAPS bit, but
+    * the DDI caps field retains its numeric layout. */
+   const DWORD texture_transparency_cap = 0x00000008u;
+
+   memset(caps, 0, sizeof(*caps));
+
+   caps->DeviceType = D3DDEVTYPE_HAL;
+   caps->AdapterOrdinal = 0;
+   caps->Caps = 0x00020000;
+   caps->Caps2 = 0xe0020000;
+   caps->Caps3 =
+      0x000003a0 & ~D3DCAPS3_LINEAR_TO_SRGB_PRESENTATION;
+   caps->PresentationIntervals = 0x8000000f;
+   caps->CursorCaps = 0x00000001;
+   caps->DevCaps = 0x061bbff0;
+   /* POSITIONT depth is clamped, not clipped, so do not claim CLIPTLVERTS. */
+   caps->PrimitiveMiscCaps =
+      0x002eeff2 &
+      ~(D3DPMISCCAPS_CLIPTLVERTS |
+        D3DPMISCCAPS_CLIPPLANESCALEDPOINTS);
+   caps->RasterCaps =
+      0x0f732190 &
+      ~D3DPRASTERCAPS_MULTISAMPLE_TOGGLE;
+   caps->ZCmpCaps = 0x000000ff;
+   caps->SrcBlendCaps =
+      0x0000ffff &
+      ~(D3DPBLENDCAPS_SRCCOLOR2 | D3DPBLENDCAPS_INVSRCCOLOR2);
+   caps->DestBlendCaps =
+      0x0000ffff &
+      ~(D3DPBLENDCAPS_SRCCOLOR2 | D3DPBLENDCAPS_INVSRCCOLOR2 |
+        D3DPBLENDCAPS_BOTHSRCALPHA | D3DPBLENDCAPS_BOTHINVSRCALPHA);
+   caps->AlphaCmpCaps = 0x000000ff;
+   caps->ShadeCaps = 0x00084208;
+   caps->TextureCaps =
+      0x0001ecdd & ~texture_transparency_cap;
+   caps->TextureFilterCaps = 0x07030700;
+   caps->CubeTextureFilterCaps = 0x07030700;
+   caps->VolumeTextureFilterCaps = 0x07030700;
+   /* The Windows 10 D3D9 runtime rejects CreateDevice before calling the UMD
+    * when BORDER and MIRRORONCE are removed independently or together.  Keep
+    * the runtime-required pair here.  SetTextureStageState accepts them for
+    * compatibility and loudly records the transparent-black BORDER and
+    * clamp-to-edge MIRRORONCE approximations.
+    */
+   caps->TextureAddressCaps = 0x0000003f;
+   caps->VolumeTextureAddressCaps = 0x0000003f;
+   caps->LineCaps = 0x0000003f & ~D3DLINECAPS_ANTIALIAS;
+   caps->MaxTextureWidth = 0x00004000;
+   caps->MaxTextureHeight = 0x00004000;
+   caps->MaxVolumeExtent = 0x00004000;
+   caps->MaxTextureRepeat = 0x00002000;
+   caps->MaxTextureAspectRatio = 0x00002000;
+   /* Windows 7's Direct3D 9 offers no hardware device at this shader level unless the
+    * driver filters anisotropically, 16 samples or more (docs/windows/kmd-port-notes.md). */
+   (void)adapter;
+   const UINT max_anisotropy = 16;
+   caps->MaxAnisotropy = max_anisotropy;
+   if (max_anisotropy <= 1) {
+      const DWORD anisotropic_filter_caps =
+         D3DPTFILTERCAPS_MINFANISOTROPIC |
+         D3DPTFILTERCAPS_MAGFANISOTROPIC;
+      caps->RasterCaps &= ~D3DPRASTERCAPS_ANISOTROPY;
+      caps->TextureFilterCaps &= ~anisotropic_filter_caps;
+      caps->CubeTextureFilterCaps &= ~anisotropic_filter_caps;
+      caps->VolumeTextureFilterCaps &= ~anisotropic_filter_caps;
+   }
+   caps->MaxVertexW = D3D9FloatFromBits(0x501502f9);
+   caps->GuardBandLeft = D3D9FloatFromBits(0xccbebc20);
+   caps->GuardBandTop = D3D9FloatFromBits(0xccbebc20);
+   caps->GuardBandRight = D3D9FloatFromBits(0x4cbebc20);
+   caps->GuardBandBottom = D3D9FloatFromBits(0x4cbebc20);
+   caps->ExtentsAdjust = 0.0f;
+   caps->StencilCaps = 0x000001ff;
+   caps->FVFCaps = 0x00100008;
+   caps->TextureOpCaps = 0x03ffffff;
+   caps->MaxTextureBlendStages = 0x00000008;
+   caps->MaxSimultaneousTextures = 0x00000008;
+   caps->VertexProcessingCaps = 0x0000017b;
+   caps->MaxActiveLights = 0x00000008;
+   caps->MaxUserClipPlanes = 0x00000008;
+   caps->MaxVertexBlendMatrices = 0x00000004;
+   /* With hardware vertex processing the runtime turns indexed vertex
+    * blending into a vs_2_0 shader that keeps world matrices 0 to 8 in the
+    * constants from c175, 8 registers each, and uploads no higher matrix.
+    * That palette works; 0 told applications there was none, so they fell
+    * back to software vertex processing. Applications that need higher
+    * indices still have to. */
+   caps->MaxVertexBlendMatrixIndex = 8;
+   caps->MaxPointSize = D3D9FloatFromBits(0x46000000);
+   caps->MaxPrimitiveCount = 0x007fffff;
+   caps->MaxVertexIndex = 0x00ffffff;
+   caps->MaxStreams = 0x00000010;
+   caps->MaxStreamStride = 0x000000ff;
+   caps->VertexShaderVersion = 0xfffe0300;
+   caps->MaxVertexShaderConst = 0x00000100;
+   caps->PixelShaderVersion = 0xffff0300;
+   caps->PixelShader1xMaxValue = D3D9FloatFromBits(0x7f7fffff);
+   caps->DevCaps2 =
+      0x0000006f &
+      ~(D3DDEVCAPS2_DMAPNPATCH |
+        D3DDEVCAPS2_ADAPTIVETESSRTPATCH |
+        D3DDEVCAPS2_ADAPTIVETESSNPATCH |
+        D3DDEVCAPS2_PRESAMPLEDDMAPNPATCH);
+   /* Windows validates this as at least 1.0 even when patch caps are absent. */
+   caps->MaxNpatchTessellationLevel = 1.0f;
+   caps->Reserved5 = 0;
+   caps->MasterAdapterOrdinal = 0;
+   caps->AdapterOrdinalInGroup = 0;
+   caps->NumberOfAdaptersInGroup = 0;
+   caps->DeclTypes =
+      0x000003ff & ~(D3DDTCAPS_UDEC3 | D3DDTCAPS_DEC3N);
+   caps->NumSimultaneousRTs = 0x00000004;
+   caps->StretchRectFilterCaps = 0x03000300;
+   caps->VS20Caps.Caps = 0x00000001;
+   caps->VS20Caps.DynamicFlowControlDepth = 0x00000018;
+   caps->VS20Caps.NumTemps = 0x00000020;
+   caps->VS20Caps.StaticFlowControlDepth = 0x00000004;
+   caps->PS20Caps.Caps = 0x0000001f;
+   caps->PS20Caps.DynamicFlowControlDepth = 0x00000018;
+   caps->PS20Caps.NumTemps = 0x00000020;
+   caps->PS20Caps.StaticFlowControlDepth = 0x00000004;
+   caps->PS20Caps.NumInstructionSlots = 0x00000200;
+   caps->VertexTextureFilterCaps = 0x03030300;
+   caps->MaxVShaderInstructionsExecuted = 0xffffffff;
+   caps->MaxPShaderInstructionsExecuted = 0xffffffff;
+   caps->MaxVertexShader30InstructionSlots = 0x00008000;
+   caps->MaxPixelShader30InstructionSlots = 0x00008000;
+
+}
+
+/* D3DDDICAPS_GETD3D3CAPS uses the documented D3DHAL_GLOBALDRIVERDATA
+ * layout.  Keep a private ABI definition here because the legacy d3dhal.h
+ * header conflicts with the D3D9 headers in some supported toolchains.
+ */
+struct D3D9LegacyTransformCaps {
+   DWORD dwSize;
+   DWORD dwCaps;
+};
+
+struct D3D9LegacyLightingCaps {
+   DWORD dwSize;
+   DWORD dwCaps;
+   DWORD dwLightingModel;
+   DWORD dwNumLights;
+};
+
+struct D3D9LegacyPrimitiveCaps {
+   DWORD dwSize;
+   DWORD dwMiscCaps;
+   DWORD dwRasterCaps;
+   DWORD dwZCmpCaps;
+   DWORD dwSrcBlendCaps;
+   DWORD dwDestBlendCaps;
+   DWORD dwAlphaCmpCaps;
+   DWORD dwShadeCaps;
+   DWORD dwTextureCaps;
+   DWORD dwTextureFilterCaps;
+   DWORD dwTextureBlendCaps;
+   DWORD dwTextureAddressCaps;
+   DWORD dwStippleWidth;
+   DWORD dwStippleHeight;
+};
+
+struct D3D9LegacyDeviceDesc {
+   DWORD dwSize;
+   DWORD dwFlags;
+   DWORD dcmColorModel;
+   DWORD dwDevCaps;
+   D3D9LegacyTransformCaps dtcTransformCaps;
+   BOOL bClipping;
+   D3D9LegacyLightingCaps dlcLightingCaps;
+   D3D9LegacyPrimitiveCaps dpcLineCaps;
+   D3D9LegacyPrimitiveCaps dpcTriCaps;
+   DWORD dwDeviceRenderBitDepth;
+   DWORD dwDeviceZBufferBitDepth;
+   DWORD dwMaxBufferSize;
+   DWORD dwMaxVertexCount;
+};
+
+struct D3D9LegacyGlobalDriverData {
+   DWORD dwSize;
+   D3D9LegacyDeviceDesc hwCaps;
+   DWORD dwNumVertices;
+   DWORD dwNumClipVertices;
+   DWORD dwNumTextureFormats;
+   void *lpTextureFormats;
+};
+
+static_assert(sizeof(D3D9LegacyTransformCaps) == 8);
+static_assert(sizeof(D3D9LegacyLightingCaps) == 16);
+static_assert(sizeof(D3D9LegacyPrimitiveCaps) == 56);
+static_assert(sizeof(D3D9LegacyDeviceDesc) == 172);
+static_assert(offsetof(D3D9LegacyGlobalDriverData, dwNumTextureFormats) == 184);
+static_assert(sizeof(D3D9LegacyGlobalDriverData) ==
+              (sizeof(void *) == 8 ? 200 : 192));
+
+static constexpr DWORD d3d9_legacy_valid_color_model = 0x00000001u;
+static constexpr DWORD d3d9_legacy_valid_dev_caps = 0x00000002u;
+static constexpr DWORD d3d9_legacy_valid_render_bit_depth = 0x00000080u;
+static constexpr DWORD d3d9_legacy_valid_z_bit_depth = 0x00000100u;
+static constexpr DWORD d3d9_legacy_color_rgb = 2u;
+static constexpr DWORD d3d9_legacy_depth_16 = 0x00000400u;
+static constexpr DWORD d3d9_legacy_depth_24 = 0x00000200u;
+static constexpr DWORD d3d9_legacy_depth_32 = 0x00000100u;
+
+static constexpr DWORD d3d9_legacy_dev_float_tl_vertex = 0x00000001u;
+static constexpr DWORD d3d9_legacy_dev_execute_system_memory = 0x00000010u;
+static constexpr DWORD d3d9_legacy_dev_execute_video_memory = 0x00000020u;
+static constexpr DWORD d3d9_legacy_dev_tl_vertex_system_memory = 0x00000040u;
+static constexpr DWORD d3d9_legacy_dev_tl_vertex_video_memory = 0x00000080u;
+static constexpr DWORD d3d9_legacy_dev_texture_system_memory = 0x00000100u;
+static constexpr DWORD d3d9_legacy_dev_texture_video_memory = 0x00000200u;
+static constexpr DWORD d3d9_legacy_dev_draw_prim_tl_vertex = 0x00000400u;
+static constexpr DWORD d3d9_legacy_dev_render_after_flip = 0x00000800u;
+static constexpr DWORD d3d9_legacy_dev_texture_nonlocal = 0x00001000u;
+static constexpr DWORD d3d9_legacy_dev_draw_primitives2 = 0x00002000u;
+static constexpr DWORD d3d9_legacy_dev_draw_primitives2_ex = 0x00008000u;
+static constexpr DWORD d3d9_legacy_dev_hw_transform_light = 0x00010000u;
+static constexpr DWORD d3d9_legacy_dev_blit_sys_to_nonlocal = 0x00020000u;
+static constexpr DWORD d3d9_legacy_dev_hw_rasterization = 0x00080000u;
+
+static constexpr DWORD d3d9_legacy_valid_transform_caps = 0x00000004u;
+static constexpr DWORD d3d9_legacy_valid_lighting_caps = 0x00000008u;
+static constexpr DWORD d3d9_legacy_valid_clipping = 0x00000010u;
+static constexpr DWORD d3d9_legacy_valid_line_caps = 0x00000020u;
+static constexpr DWORD d3d9_legacy_valid_tri_caps = 0x00000040u;
+static constexpr DWORD d3d9_legacy_transform_clip = 0x00000001u;
+static constexpr DWORD d3d9_legacy_light_point = 0x00000001u;
+static constexpr DWORD d3d9_legacy_light_spot = 0x00000002u;
+static constexpr DWORD d3d9_legacy_light_directional = 0x00000004u;
+static constexpr DWORD d3d9_legacy_lighting_model_rgb = 0x00000001u;
+
+/* Pre-DX6 texture filter and texture blend caps (D3DPTFILTERCAPS_NEAREST
+ * through LINEARMIPLINEAR, D3DPTBLENDCAPS_DECAL through ADD).  The DX6+
+ * filter bits share the field and keep their D3D9 values. */
+static constexpr DWORD d3d9_legacy_filter_caps = 0x0000003fu;
+static constexpr DWORD d3d9_legacy_texture_blend_caps = 0x000000cfu;
+
+/* D3DPRIMCAPS for the D3D3-D3D7 HAL device.  The legacy runtimes read the
+ * line and triangle caps from here, not from D3DCAPS9; the bit layouts of
+ * the shared fields are the same, so they come straight from the D3D9 caps.
+ */
+static void
+D3D9FillLegacyPrimitiveCaps(const D3DCAPS9 *caps, D3D9LegacyPrimitiveCaps *prim)
+{
+   memset(prim, 0, sizeof(*prim));
+   prim->dwSize = sizeof(*prim);
+   prim->dwMiscCaps = caps->PrimitiveMiscCaps & 0x0000007fu;
+   prim->dwRasterCaps = caps->RasterCaps;
+   prim->dwZCmpCaps = caps->ZCmpCaps;
+   prim->dwSrcBlendCaps = caps->SrcBlendCaps;
+   prim->dwDestBlendCaps = caps->DestBlendCaps;
+   prim->dwAlphaCmpCaps = caps->AlphaCmpCaps;
+   prim->dwShadeCaps = caps->ShadeCaps;
+   prim->dwTextureCaps = caps->TextureCaps;
+   prim->dwTextureFilterCaps =
+      caps->TextureFilterCaps | d3d9_legacy_filter_caps;
+   prim->dwTextureBlendCaps = d3d9_legacy_texture_blend_caps;
+   prim->dwTextureAddressCaps = caps->TextureAddressCaps;
+}
+
+static void
+D3D9FillLegacyCaps(const D3D9Adapter *adapter,
+                   D3D9LegacyGlobalDriverData *caps)
+{
+   D3DCAPS9 d3d9_caps;
+   D3D9FillCaps(adapter, &d3d9_caps);
+
+   memset(caps, 0, sizeof(*caps));
+   caps->dwSize = sizeof(*caps);
+
+   D3D9LegacyDeviceDesc *hw = &caps->hwCaps;
+   hw->dwSize = sizeof(*hw);
+   hw->dwFlags = d3d9_legacy_valid_color_model |
+                 d3d9_legacy_valid_dev_caps |
+                 d3d9_legacy_valid_transform_caps |
+                 d3d9_legacy_valid_lighting_caps |
+                 d3d9_legacy_valid_clipping |
+                 d3d9_legacy_valid_line_caps |
+                 d3d9_legacy_valid_tri_caps |
+                 d3d9_legacy_valid_render_bit_depth |
+                 d3d9_legacy_valid_z_bit_depth;
+   hw->dcmColorModel = d3d9_legacy_color_rgb;
+
+   const DWORD legacy_dev_caps =
+      d3d9_legacy_dev_float_tl_vertex |
+      d3d9_legacy_dev_execute_system_memory |
+      d3d9_legacy_dev_tl_vertex_system_memory |
+      d3d9_legacy_dev_texture_system_memory |
+      d3d9_legacy_dev_texture_video_memory |
+      d3d9_legacy_dev_draw_prim_tl_vertex |
+      d3d9_legacy_dev_render_after_flip |
+      d3d9_legacy_dev_texture_nonlocal |
+      d3d9_legacy_dev_draw_primitives2 |
+      d3d9_legacy_dev_draw_primitives2_ex |
+      d3d9_legacy_dev_hw_transform_light |
+      d3d9_legacy_dev_blit_sys_to_nonlocal |
+      d3d9_legacy_dev_hw_rasterization;
+   hw->dwDevCaps = d3d9_caps.DevCaps & legacy_dev_caps;
+
+   /* These obsolete flags have mandatory values for legacy runtimes. */
+   hw->dwDevCaps |= d3d9_legacy_dev_float_tl_vertex |
+                    d3d9_legacy_dev_execute_system_memory |
+                    d3d9_legacy_dev_tl_vertex_system_memory |
+                    d3d9_legacy_dev_draw_prim_tl_vertex |
+                    d3d9_legacy_dev_render_after_flip;
+   hw->dwDevCaps &= ~(d3d9_legacy_dev_execute_video_memory |
+                      d3d9_legacy_dev_tl_vertex_video_memory);
+
+   hw->dtcTransformCaps.dwSize = sizeof(hw->dtcTransformCaps);
+   hw->dtcTransformCaps.dwCaps = d3d9_legacy_transform_clip;
+   hw->bClipping = TRUE;
+   hw->dlcLightingCaps.dwSize = sizeof(hw->dlcLightingCaps);
+   hw->dlcLightingCaps.dwCaps = d3d9_legacy_light_point |
+                                d3d9_legacy_light_spot |
+                                d3d9_legacy_light_directional;
+   hw->dlcLightingCaps.dwLightingModel = d3d9_legacy_lighting_model_rgb;
+   hw->dlcLightingCaps.dwNumLights = d3d9_caps.MaxActiveLights;
+   D3D9FillLegacyPrimitiveCaps(&d3d9_caps, &hw->dpcLineCaps);
+   D3D9FillLegacyPrimitiveCaps(&d3d9_caps, &hw->dpcTriCaps);
+   hw->dwDeviceRenderBitDepth = d3d9_legacy_depth_16 |
+                                d3d9_legacy_depth_32;
+   hw->dwDeviceZBufferBitDepth = d3d9_legacy_depth_16 |
+                                 d3d9_legacy_depth_24 |
+                                 d3d9_legacy_depth_32;
+}
+
+/* D3DDDICAPS_GETD3D7CAPS returns the documented D3DHAL_D3DEXTENDEDCAPS
+ * (d3dhal.h, see above for why it is mirrored here).  DirectDraw on WDDM asks
+ * for it while it builds its HAL; when the call fails it drops the HAL and
+ * runs on the emulation layer alone (DDCAPS_NOHARDWARE), which dxdiag shows
+ * as DirectDraw and AGP acceleration "Not Available".
+ */
+struct D3D9LegacyExtendedCaps {
+   DWORD dwSize;
+   DWORD dwMinTextureWidth, dwMaxTextureWidth;
+   DWORD dwMinTextureHeight, dwMaxTextureHeight;
+   DWORD dwMinStippleWidth, dwMaxStippleWidth;
+   DWORD dwMinStippleHeight, dwMaxStippleHeight;
+   DWORD dwMaxTextureRepeat;
+   DWORD dwMaxTextureAspectRatio;
+   DWORD dwMaxAnisotropy;
+   float dvGuardBandLeft;
+   float dvGuardBandTop;
+   float dvGuardBandRight;
+   float dvGuardBandBottom;
+   float dvExtentsAdjust;
+   DWORD dwStencilCaps;
+   DWORD dwFVFCaps;
+   DWORD dwTextureOpCaps;
+   WORD wMaxTextureBlendStages;
+   WORD wMaxSimultaneousTextures;
+   DWORD dwMaxActiveLights;
+   float dvMaxVertexW;
+   WORD wMaxUserClipPlanes;
+   WORD wMaxVertexBlendMatrices;
+   DWORD dwVertexProcessingCaps;
+   DWORD dwReserved1;
+   DWORD dwReserved2;
+   DWORD dwReserved3;
+   DWORD dwReserved4;
+};
+
+static_assert(sizeof(D3D9LegacyExtendedCaps) == 116);
+static_assert(offsetof(D3D9LegacyExtendedCaps, wMaxTextureBlendStages) == 80);
+
+static void
+D3D9FillExtendedCaps(const D3D9Adapter *adapter, D3D9LegacyExtendedCaps *ext)
+{
+   D3DCAPS9 caps;
+   D3D9FillCaps(adapter, &caps);
+
+   memset(ext, 0, sizeof(*ext));
+   ext->dwSize = sizeof(*ext);
+   ext->dwMinTextureWidth = 1;
+   ext->dwMaxTextureWidth = caps.MaxTextureWidth;
+   ext->dwMinTextureHeight = 1;
+   ext->dwMaxTextureHeight = caps.MaxTextureHeight;
+   ext->dwMaxTextureRepeat = caps.MaxTextureRepeat;
+   ext->dwMaxTextureAspectRatio = caps.MaxTextureAspectRatio;
+   ext->dwMaxAnisotropy = caps.MaxAnisotropy;
+   ext->dvGuardBandLeft = caps.GuardBandLeft;
+   ext->dvGuardBandTop = caps.GuardBandTop;
+   ext->dvGuardBandRight = caps.GuardBandRight;
+   ext->dvGuardBandBottom = caps.GuardBandBottom;
+   ext->dvExtentsAdjust = caps.ExtentsAdjust;
+   ext->dwStencilCaps = caps.StencilCaps;
+   ext->dwFVFCaps = caps.FVFCaps;
+   ext->dwTextureOpCaps = caps.TextureOpCaps;
+   ext->wMaxTextureBlendStages = (WORD)caps.MaxTextureBlendStages;
+   ext->wMaxSimultaneousTextures = (WORD)caps.MaxSimultaneousTextures;
+   ext->dwMaxActiveLights = caps.MaxActiveLights;
+   ext->dvMaxVertexW = caps.MaxVertexW;
+   ext->wMaxUserClipPlanes = (WORD)caps.MaxUserClipPlanes;
+   ext->wMaxVertexBlendMatrices = (WORD)caps.MaxVertexBlendMatrices;
+   ext->dwVertexProcessingCaps = caps.VertexProcessingCaps;
+}
+
+/* D3DDDICAPS_GETD3D8CAPS returns D3DCAPS8, which is D3DCAPS9 up to and
+ * including MaxPixelShaderValue (PixelShader1xMaxValue in D3DCAPS9).  The
+ * D3D8 shader models top out at vs_1_1 and ps_1_4. */
+static constexpr UINT d3d8_caps_size = offsetof(D3DCAPS9, DevCaps2);
+static_assert(d3d8_caps_size == 212);
+
+static void
+D3D9FillD3D8Caps(const D3D9Adapter *adapter, void *data)
+{
+   D3DCAPS9 caps;
+   D3D9FillCaps(adapter, &caps);
+   caps.VertexShaderVersion = D3DVS_VERSION(1, 1);
+   caps.PixelShaderVersion = D3DPS_VERSION(1, 4);
+   memcpy(data, &caps, d3d8_caps_size);
+}
+
+static HRESULT
+D3D9ValidateData(const D3DDDIARG_GETCAPS *data, UINT size)
+{
+   return data && data->pData && data->DataSize >= size ? S_OK : E_INVALIDARG;
+}
+
+/* No multisampling yet: the sample counts have to come from the host's renderer. */
+static UINT
+D3D9QueryMsaaTypes(D3D9Adapter *adapter)
+{
+   (void)adapter;
+   return 0;
+}
+
+static bool
+D3D9FormatSupportsMultisample(const D3D9Adapter *adapter,
+                              D3DDDIFORMAT format, BOOL flip,
+                              D3DDDIMULTISAMPLE_TYPE ms_type)
+{
+   if (ms_type != D3DDDIMULTISAMPLE_NONE &&
+       (ms_type < D3DDDIMULTISAMPLE_NONMASKABLE ||
+        ms_type > D3DDDIMULTISAMPLE_16_SAMPLES))
+      return false;
+
+   for (UINT i = 0; i < ARRAYSIZE(g_format_ops); ++i) {
+      if (g_format_ops[i].Format != format)
+         continue;
+
+      if (ms_type == D3DDDIMULTISAMPLE_NONE)
+         return true;
+
+      const UINT ms_mask = 1u << (ms_type - 1);
+      const UINT supported =
+         flip ? g_format_ops[i].FlipMsTypes : g_format_ops[i].BltMsTypes;
+      return (supported & adapter->ms_types & ms_mask) != 0;
+   }
+
+   return false;
+}
+
+static HRESULT APIENTRY
+D3D9CloseAdapter(HANDLE hAdapter)
+{
+   D3D9Adapter *adapter = (D3D9Adapter *)hAdapter;
+   free(adapter);
+   return S_OK;
+}
+
+static HRESULT APIENTRY
+D3D9CreateDevice(HANDLE hAdapter, D3DDDIARG_CREATEDEVICE *data)
+{
+
+   if (!hAdapter || !data || !data->pDeviceFuncs)
+      return E_INVALIDARG;
+
+   D3D9Adapter *adapter = (D3D9Adapter *)hAdapter;
+   D3D9Device *device = (D3D9Device *)calloc(1, sizeof(*device));
+   if (!device)
+      return E_OUTOFMEMORY;
+
+   device->hRTDevice = data->hDevice;
+   device->runtime_interface = data->Interface;
+   if (data->pCallbacks)
+      device->callbacks = *data->pCallbacks;
+
+   device->gdi_device.hRTAdapter = adapter->hRTAdapter;
+   device->gdi_device.hRTDevice = device->hRTDevice;
+   device->gdi_device.KTCallbacks = device->callbacks;
+   device->gdi_device.pAdapterCallbacks = &adapter->callbacks;
+   device->gdi_device.isD3D9 = true;
+   gdikmt_d3dddi_fill_basefuncs(&device->gdi_device);
+
+   device->screen = d3d10_create_screen(&device->gdi_device.base);
+   if (device->screen)
+      FormatInitForScreen(device->screen);
+   if (!device->screen) {
+      device->gdi_device.base.destroy(&device->gdi_device.base);
+      free(device);
+      return E_FAIL;
+   }
+
+   device->pipe = device->screen->context_create(device->screen, NULL, 0);
+   if (!device->pipe) {
+      device->screen->destroy(device->screen);
+      device->gdi_device.base.destroy(&device->gdi_device.base);
+      free(device);
+      return E_FAIL;
+   }
+
+   for (UINT i = 0; i < ARRAYSIZE(device->transforms); ++i)
+      D3D9SetIdentityMatrix(&device->transforms[i]);
+   union {
+      float f;
+      UINT u;
+   } default_float = {1.0f};
+   device->render_states[D3DDDIRS_LIGHTING] = TRUE;
+   device->render_states[D3DDDIRS_LOCALVIEWER] = TRUE;
+   device->render_states[D3DRS_FOGDENSITY] = default_float.u;
+   device->render_states[D3DRS_POINTSIZE] = default_float.u;
+   device->render_states[D3DRS_POINTSIZE_MIN] = default_float.u;
+   default_float.f = 8192.0f;
+   device->render_states[D3DRS_POINTSIZE_MAX] = default_float.u;
+   default_float.f = 1.0f;
+   device->render_states[D3DRS_POINTSCALE_A] = default_float.u;
+   device->render_states[D3DRS_LASTPIXEL] = TRUE;
+   device->render_states[D3DRS_MULTISAMPLEANTIALIAS] = TRUE;
+   device->render_states[D3DRS_MULTISAMPLEMASK] = ~0u;
+   device->render_states[D3DRS_BLENDFACTOR] = 0xffffffffu;
+   device->render_states[D3DRS_STENCILMASK] = 0xffffffffu;
+   device->render_states[D3DRS_STENCILWRITEMASK] = 0xffffffffu;
+   device->render_states[D3DRS_FILLMODE] = D3DFILL_SOLID;
+   const UINT default_color_write_mask =
+      D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN |
+      D3DCOLORWRITEENABLE_BLUE | D3DCOLORWRITEENABLE_ALPHA;
+   device->render_states[D3DRS_COLORWRITEENABLE] = default_color_write_mask;
+   device->render_states[D3DRS_COLORWRITEENABLE1] = default_color_write_mask;
+   device->render_states[D3DRS_COLORWRITEENABLE2] = default_color_write_mask;
+   device->render_states[D3DRS_COLORWRITEENABLE3] = default_color_write_mask;
+   for (UINT stage = 0; stage < ARRAYSIZE(device->texture_stage_states);
+        ++stage) {
+      device->texture_stage_states[stage][D3DDDITSS_ADDRESSU] =
+         D3DTADDRESS_WRAP;
+      device->texture_stage_states[stage][D3DDDITSS_ADDRESSV] =
+         D3DTADDRESS_WRAP;
+      device->texture_stage_states[stage][D3DDDITSS_ADDRESSW] =
+         D3DTADDRESS_WRAP;
+      device->texture_stage_states[stage][D3DDDITSS_MINFILTER] =
+         D3DTEXF_POINT;
+      device->texture_stage_states[stage][D3DDDITSS_MAGFILTER] =
+         D3DTEXF_POINT;
+      device->texture_stage_states[stage][D3DDDITSS_MIPFILTER] =
+         D3DTEXF_NONE;
+      device->texture_stage_states[stage][D3DDDITSS_MAXANISOTROPY] = 1;
+      device->texture_stage_states[stage]
+                                  [D3DDDITSS_DISABLETEXTURECOLORKEY] = TRUE;
+   }
+   device->zrange.MinZ = 0.0f;
+   device->zrange.MaxZ = 1.0f;
+
+   D3D9FillDeviceFuncs(data->pDeviceFuncs);
+   D3D9TraceDeviceFuncs(data->pDeviceFuncs);
+   data->hDevice = device;
+   return S_OK;
+}
+
+static HRESULT APIENTRY
+D3D9GetCaps(HANDLE hAdapter, const D3DDDIARG_GETCAPS *data)
+{
+
+   if (!hAdapter || !data)
+      return E_INVALIDARG;
+
+   const D3D9Adapter *adapter = (const D3D9Adapter *)hAdapter;
+
+   switch (data->Type) {
+   case D3DDDICAPS_DDRAW:
+      if (FAILED(D3D9ValidateData(data, sizeof(DDRAW_CAPS))))
+         return E_INVALIDARG;
+      memset(data->pData, 0, data->DataSize);
+      /* Source colour-key and mirror blits are drawn by D3D9KeyBlitPipe. */
+      ((DDRAW_CAPS *)data->pData)->Caps = DDRAW_CAPS_ZBLTS |
+                                          DDRAW_CAPS_COLORKEY |
+                                          DDRAW_CAPS_BLTDEPTHFILL;
+      ((DDRAW_CAPS *)data->pData)->Caps2 = DDRAW_CAPS2_DYNAMICTEXTURES;
+      ((DDRAW_CAPS *)data->pData)->CKeyCaps = DDRAW_CKEYCAPS_SRCBLT;
+      ((DDRAW_CAPS *)data->pData)->FxCaps = DDRAW_FXCAPS_BLTMIRRORLEFTRIGHT |
+                                            DDRAW_FXCAPS_BLTMIRRORUPDOWN;
+      return S_OK;
+   case D3DDDICAPS_DDRAW_MODE_SPECIFIC:
+      if (FAILED(D3D9ValidateData(data, sizeof(DDRAW_MODE_SPECIFIC_CAPS))))
+         return E_INVALIDARG;
+      memset(data->pData, 0, data->DataSize);
+      return S_OK;
+   case D3DDDICAPS_GETFORMATCOUNT:
+      if (FAILED(D3D9ValidateData(data, sizeof(UINT))))
+         return E_INVALIDARG;
+      *(UINT *)data->pData = ARRAYSIZE(g_format_ops);
+      return S_OK;
+   case D3DDDICAPS_GETFORMATDATA:
+      if (FAILED(D3D9ValidateData(data, sizeof(g_format_ops))))
+         return E_INVALIDARG;
+      memcpy(data->pData, g_format_ops, sizeof(g_format_ops));
+      for (UINT i = 0; i < ARRAYSIZE(g_format_ops); ++i) {
+         FORMATOP *format_op = &((FORMATOP *)data->pData)[i];
+         format_op->BltMsTypes &= adapter->ms_types;
+         format_op->FlipMsTypes &= adapter->ms_types;
+      }
+      return S_OK;
+   case D3DDDICAPS_GETMULTISAMPLEQUALITYLEVELS:
+      if (FAILED(D3D9ValidateData(data, sizeof(DDIMULTISAMPLEQUALITYLEVELSDATA))))
+         return E_INVALIDARG;
+      {
+         DDIMULTISAMPLEQUALITYLEVELSDATA *ms =
+            (DDIMULTISAMPLEQUALITYLEVELSDATA *)data->pData;
+         ms->QualityLevels =
+            D3D9FormatSupportsMultisample(adapter, ms->Format, ms->Flip,
+                                          ms->MsType) ? 1 : 0;
+      }
+      return S_OK;
+   case D3DDDICAPS_GETD3DQUERYCOUNT:
+      if (FAILED(D3D9ValidateData(data, sizeof(UINT))))
+         return E_INVALIDARG;
+      *(UINT *)data->pData = ARRAYSIZE(g_query_types);
+      return S_OK;
+   case D3DDDICAPS_GETD3DQUERYDATA:
+      if (FAILED(D3D9ValidateData(data, sizeof(g_query_types))))
+         return E_INVALIDARG;
+      memcpy(data->pData, g_query_types, sizeof(g_query_types));
+      return S_OK;
+   case D3DDDICAPS_GETD3D3CAPS:
+      if (FAILED(D3D9ValidateData(data,
+                                 sizeof(D3D9LegacyGlobalDriverData))))
+         return E_INVALIDARG;
+      D3D9FillLegacyCaps(adapter,
+                         (D3D9LegacyGlobalDriverData *)data->pData);
+      return S_OK;
+   case D3DDDICAPS_GETD3D7CAPS:
+      if (FAILED(D3D9ValidateData(data, sizeof(D3D9LegacyExtendedCaps))))
+         return E_INVALIDARG;
+      D3D9FillExtendedCaps(adapter, (D3D9LegacyExtendedCaps *)data->pData);
+      D3D9Tracef("GetCaps D3D7 size=%u max_tex=%lux%lu stages=%u\n",
+                 data->DataSize,
+                 ((D3D9LegacyExtendedCaps *)data->pData)->dwMaxTextureWidth,
+                 ((D3D9LegacyExtendedCaps *)data->pData)->dwMaxTextureHeight,
+                 ((D3D9LegacyExtendedCaps *)data->pData)
+                    ->wMaxTextureBlendStages);
+      return S_OK;
+   case D3DDDICAPS_GETD3D8CAPS:
+      if (FAILED(D3D9ValidateData(data, d3d8_caps_size)))
+         return E_INVALIDARG;
+      D3D9FillD3D8Caps(adapter, data->pData);
+      D3D9Tracef("GetCaps D3D8 size=%u\n", data->DataSize);
+      return S_OK;
+   case D3DDDICAPS_GETD3D9CAPS:
+      if (FAILED(D3D9ValidateData(data, sizeof(D3DCAPS9))))
+         return E_INVALIDARG;
+      D3D9FillCaps(adapter, (D3DCAPS9 *)data->pData);
+      return S_OK;
+   /* moose-ripple: no video decoders, no video processors and no extensions, said as a
+    * count of none. "Not implemented" is taken for a failure: Windows' video renderer then
+    * gives up, where with none it uses its own software processor.
+    */
+   case D3DDDICAPS_GETDECODEGUIDCOUNT:
+   case D3DDDICAPS_GETVIDEOPROCESSORDEVICEGUIDCOUNT:
+   case D3DDDICAPS_GETEXTENSIONGUIDCOUNT:
+      if (FAILED(D3D9ValidateData(data, sizeof(UINT))))
+         return E_INVALIDARG;
+      *(UINT *)data->pData = 0;
+      return S_OK;
+   case D3DDDICAPS_GETGAMMARAMPCAPS:
+      if (FAILED(D3D9ValidateData(data, sizeof(DDIGAMMACAPS))))
+         return E_INVALIDARG;
+      memset(data->pData, 0, data->DataSize);
+      ((DDIGAMMACAPS *)data->pData)->GammaCaps = GAMMA_CAP_RGB256x3x16;
+      return S_OK;
+   default:
+      return E_NOTIMPL;
+   }
+}
+
+EXTERN_C HRESULT APIENTRY
+OpenAdapter(D3DDDIARG_OPENADAPTER *open_data)
+{
+   const UINT driver_version = D3D9DriverVersion(open_data);
+
+
+   if (!open_data || !open_data->pAdapterFuncs)
+      return E_INVALIDARG;
+
+   D3D9Adapter *adapter = (D3D9Adapter *)calloc(1, sizeof(*adapter));
+   if (!adapter)
+      return E_OUTOFMEMORY;
+
+   adapter->hRTAdapter = open_data->hAdapter;
+   if (open_data->pAdapterCallbacks)
+      adapter->callbacks = *open_data->pAdapterCallbacks;
+   adapter->ms_types = D3D9QueryMsaaTypes(adapter);
+
+   open_data->hAdapter = adapter;
+   open_data->pAdapterFuncs->pfnGetCaps = D3D9GetCaps;
+   open_data->pAdapterFuncs->pfnCreateDevice = D3D9CreateDevice;
+   open_data->pAdapterFuncs->pfnCloseAdapter = D3D9CloseAdapter;
+   D3D9TraceAdapterFuncs(open_data->pAdapterFuncs);
+   open_data->DriverVersion = driver_version;
+   return S_OK;
+}

@@ -346,7 +346,6 @@ VioGpu3DSetPointerPosition(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_SETPOI
 {
     PAGED_CODE();
     VIOGPU_ASSERT_CHK(hAdapter != NULL);
-    UNREFERENCED_PARAMETER(pSetPointerPosition);
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
 
     VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(hAdapter);
@@ -356,9 +355,7 @@ VioGpu3DSetPointerPosition(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_SETPOI
         VioGpuDbgBreak();
         return STATUS_UNSUCCESSFUL;
     }
-    // No hardware pointer yet: Windows draws the pointer itself. It still calls this (to hide a
-    // pointer it never showed) and logs an error for anything but success.
-    return STATUS_SUCCESS;
+    return pAdapter->SetPointerPosition(pSetPointerPosition);
 }
 
 NTSTATUS
@@ -381,7 +378,6 @@ VioGpu3DSetPointerShape(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_SETPOINTE
 {
     PAGED_CODE();
     VIOGPU_ASSERT_CHK(hAdapter != NULL);
-    UNREFERENCED_PARAMETER(pSetPointerShape);
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
 
     VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(hAdapter);
@@ -391,7 +387,7 @@ VioGpu3DSetPointerShape(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_SETPOINTE
                  ("<---> %s VioGpu (%p) is being called when not active!\n", __FUNCTION__, pAdapter));
         return STATUS_UNSUCCESSFUL;
     }
-    return STATUS_NOT_IMPLEMENTED;
+    return pAdapter->SetPointerShape(pSetPointerShape);
 }
 
 NTSTATUS
@@ -901,12 +897,10 @@ APIENTRY
 VioGpu3DDdiGetScanLine(_In_ CONST HANDLE hAdapter, _Inout_ DXGKARG_GETSCANLINE *pGetScanLine)
 {
     PAGED_CODE();
-    UNREFERENCED_PARAMETER(hAdapter);
-    UNREFERENCED_PARAMETER(pGetScanLine);
+    VIOGPU_ASSERT_CHK(hAdapter != NULL);
 
-    DbgBreakPoint();
-    DbgPrint(TRACE_LEVEL_ERROR, ("Not imp %s\n", __FUNCTION__));
-    return STATUS_NO_MEMORY;
+    VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(hAdapter);
+    return pAdapter->vidpn.GetScanLine(pGetScanLine);
 }
 
 // END: Paged Code
@@ -965,14 +959,10 @@ NTSTATUS
 APIENTRY
 VioGpu3DDdiPreemptCommand(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_PREEMPTCOMMAND *pPreemptCommand)
 {
-    UNREFERENCED_PARAMETER(hAdapter);
-    UNREFERENCED_PARAMETER(pPreemptCommand);
+    VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(hAdapter);
 
-    DbgPrint(TRACE_LEVEL_ERROR,
-             ("<---> %s UNSUPPORTED PREEMPTION FUNCTION fence_id=%d\n",
-              __FUNCTION__,
-              pPreemptCommand->PreemptionFenceId));
-
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s fence_id=%u\n", __FUNCTION__, pPreemptCommand->PreemptionFenceId));
+    pAdapter->commander.Preempt(pPreemptCommand->PreemptionFenceId);
     return STATUS_SUCCESS;
 };
 
@@ -980,9 +970,10 @@ NTSTATUS
 APIENTRY
 VioGpu3DDdiRestartFromTimeout(_In_ CONST HANDLE hAdapter)
 {
-    UNREFERENCED_PARAMETER(hAdapter);
-    DbgPrint(TRACE_LEVEL_ERROR, ("<---> %s UNSUPPORTED PREEMPTION FUNCTION\n", __FUNCTION__));
+    VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(hAdapter);
 
+    DbgPrint(TRACE_LEVEL_ERROR, ("<---> %s\n", __FUNCTION__));
+    pAdapter->commander.Restart();
     return STATUS_SUCCESS;
 };
 
@@ -990,11 +981,9 @@ NTSTATUS
 APIENTRY
 VioGpu3DDdiQueryCurrentFence(_In_ CONST HANDLE hAdapter, _Inout_ DXGKARG_QUERYCURRENTFENCE *pCurrentFence)
 {
-    UNREFERENCED_PARAMETER(hAdapter);
-    UNREFERENCED_PARAMETER(pCurrentFence);
+    VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(hAdapter);
 
-    DbgPrint(TRACE_LEVEL_ERROR, ("<---> %s UNSUPPORTED PREEMPTION FUNCTION\n", __FUNCTION__));
-
+    pCurrentFence->CurrentFence = pAdapter->commander.LastCompletedFence();
     return STATUS_SUCCESS;
 };
 
@@ -1014,10 +1003,11 @@ NTSTATUS
 APIENTRY
 VioGpu3DDdiResetFromTimeout(_In_ CONST HANDLE hAdapter)
 {
-    UNREFERENCED_PARAMETER(hAdapter);
+    VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(hAdapter);
 
-    DbgPrint(TRACE_LEVEL_ERROR, ("<---> %s UNSUPPORTED PREEMPTION FUNCTION\n", __FUNCTION__));
-
+    // Windows destroys and remakes the devices afterwards; what the driver has to forget
+    // is every command buffer from before (VioGpuCommander::Reset)
+    pAdapter->commander.Reset();
     return STATUS_SUCCESS;
 };
 

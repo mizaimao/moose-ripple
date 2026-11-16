@@ -1,0 +1,27 @@
+virtio/wddm: the capability request has the same layout in 32-bit and 64-bit programs
+
+The request for the host's capability set carries a pointer to the caller's buffer, so the
+packet was four bytes shorter in a 32-bit program. A 64-bit kernel driver refuses the short
+packet, and a 32-bit user-mode driver on 64-bit Windows then knew nothing of the host: every
+kind of primitive counted as unsupported, and the first draw ran in circles until the stack
+was full. The field is eight bytes in every build now (the kernel driver's copy of the
+header, windows/kmd/shared/viogpum.h, has the same change).
+
+diff -ru a/src/virtio/wddm/viogpu_wddm_driver.h b/src/virtio/wddm/viogpu_wddm_driver.h
+--- a/src/virtio/wddm/viogpu_wddm_driver.h
++++ b/src/virtio/wddm/viogpu_wddm_driver.h
+@@ -87,7 +87,13 @@
+     ULONG CapsetId;
+     ULONG Version;
+     ULONG Size;
+-    UCHAR *Capset;
++    // The caller's buffer, eight bytes in every build: a 32-bit program and a 64-bit kernel
++    // driver have to agree on where it is and on how long the packet is. A 32-bit caller
++    // clears the packet first, so its upper half is zero. (moose-ripple)
++    union {
++        UCHAR *Capset;
++        ULONGLONG Capset64;
++    };
+ }VIOGPU_CAPSET_REQ;
+ #pragma pack()
+ 

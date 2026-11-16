@@ -84,6 +84,7 @@ class VioGpuVidPN
     NTSTATUS EnumVidPnCofuncModality(_In_ CONST DXGKARG_ENUMVIDPNCOFUNCMODALITY *CONST pEnumCofuncModality);
     NTSTATUS SetVidPnSourceVisibility(_In_ CONST DXGKARG_SETVIDPNSOURCEVISIBILITY *pSetVidPnSourceVisibility);
     NTSTATUS QueryVidPnHWCapability(_Inout_ DXGKARG_QUERYVIDPNHWCAPABILITY *pVidPnHWCaps);
+    NTSTATUS GetScanLine(_Inout_ DXGKARG_GETSCANLINE *pGetScanLine);
 
     void Flip();
     static void FlipThread(void *ctx);
@@ -130,6 +131,9 @@ class VioGpuVidPN
     PHYSICAL_ADDRESS m_sourceAddress = {0};
     VioGpuAllocation *m_sourceRes = NULL;
     volatile LONG m_shouldFlip = 0;
+
+    // When the flip thread last reported a vertical blank (performance counter), for GetScanLine
+    volatile LONGLONG m_lastVSync = 0;
 
     PETHREAD m_pFlipThread;
     BOOL m_shouldFlipStop = false;

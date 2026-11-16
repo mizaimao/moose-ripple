@@ -1,0 +1,100 @@
+Direct3D 10: 24-bit depth with stencil in the order the renderer has
+
+Direct3D's D24_UNORM_S8_UINT was always translated to Gallium's Z24_UNORM_S8_UINT. A renderer
+on OpenGL, virgl's host, has only S8_UINT_Z24_UNORM, so every depth buffer of that format was
+refused and the program got "out of memory" (Windows' Direct3D 10 assessments did). The
+driver now looks which of the two the screen has and uses it for resources. The Direct3D 9
+part uses the same answer.
+
+diff -ru a/src/gallium/frontends/d3d10umd/Device.cpp b/src/gallium/frontends/d3d10umd/Device.cpp
+--- a/src/gallium/frontends/d3d10umd/Device.cpp
++++ b/src/gallium/frontends/d3d10umd/Device.cpp
+@@ -149,6 +149,8 @@
+    mtx_init(&pDevice->CreateResourceMtx, mtx_plain);
+ 
+    struct pipe_screen *screen = d3d10_create_screen(&pDevice->device.base);
++   if (screen)
++      FormatInitForScreen(screen);
+    struct pipe_context *pipe = screen->context_create(screen, NULL, 0);
+    pDevice->screen = screen;
+    pDevice->pipe = pipe;
+diff -ru a/src/gallium/frontends/d3d10umd/Format.cpp b/src/gallium/frontends/d3d10umd/Format.cpp
+--- a/src/gallium/frontends/d3d10umd/Format.cpp
++++ b/src/gallium/frontends/d3d10umd/Format.cpp
+@@ -43,6 +43,25 @@
+ #define HAVE_SRGB 1
+ 
+ 
++static enum pipe_format depth24_stencil8 = PIPE_FORMAT_Z24_UNORM_S8_UINT;
++
++void
++FormatInitForScreen(struct pipe_screen *screen)
++{
++   if (!screen->is_format_supported(screen, PIPE_FORMAT_Z24_UNORM_S8_UINT, PIPE_TEXTURE_2D,
++                                    0, 0, PIPE_BIND_DEPTH_STENCIL) &&
++       screen->is_format_supported(screen, PIPE_FORMAT_S8_UINT_Z24_UNORM, PIPE_TEXTURE_2D,
++                                   0, 0, PIPE_BIND_DEPTH_STENCIL)) {
++      depth24_stencil8 = PIPE_FORMAT_S8_UINT_Z24_UNORM;
++   }
++}
++
++enum pipe_format
++FormatDepth24Stencil8(void)
++{
++   return depth24_stencil8;
++}
++
+ enum pipe_format
+ FormatTranslate(DXGI_FORMAT Format, BOOL depth)
+ {
+@@ -102,7 +121,7 @@
+    case DXGI_FORMAT_R32_SINT:
+       return PIPE_FORMAT_R32_SINT;
+    case DXGI_FORMAT_D24_UNORM_S8_UINT:
+-      return PIPE_FORMAT_Z24_UNORM_S8_UINT;
++      return depth24_stencil8;
+    case DXGI_FORMAT_R8G8_UNORM:
+       return PIPE_FORMAT_R8G8_UNORM;
+    case DXGI_FORMAT_R8G8_UINT:
+@@ -192,7 +211,7 @@
+    case DXGI_FORMAT_R32_TYPELESS:
+       return depth ? PIPE_FORMAT_Z32_FLOAT : PIPE_FORMAT_R32_FLOAT;
+    case DXGI_FORMAT_R24G8_TYPELESS:
+-      return PIPE_FORMAT_Z24_UNORM_S8_UINT;
++      return depth24_stencil8;
+    case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
+       return PIPE_FORMAT_Z24X8_UNORM;
+    case DXGI_FORMAT_X24_TYPELESS_G8_UINT:
+@@ -335,6 +354,7 @@
+    case PIPE_FORMAT_R32_SINT:
+       return DXGI_FORMAT_R32_SINT;
+    case PIPE_FORMAT_Z24_UNORM_S8_UINT:
++   case PIPE_FORMAT_S8_UINT_Z24_UNORM:
+       return DXGI_FORMAT_D24_UNORM_S8_UINT;
+    case PIPE_FORMAT_R8G8_UNORM:
+       return DXGI_FORMAT_R8G8_UNORM;
+diff -ru a/src/gallium/frontends/d3d10umd/Format.h b/src/gallium/frontends/d3d10umd/Format.h
+--- a/src/gallium/frontends/d3d10umd/Format.h
++++ b/src/gallium/frontends/d3d10umd/Format.h
+@@ -40,6 +40,21 @@
+ 
+ DXGI_FORMAT FormatDeTranslate(enum pipe_format Format);
+ 
++/*
++ * Direct3D's 24-bit depth with 8-bit stencil is Gallium's Z24_UNORM_S8_UINT. A renderer on
++ * OpenGL has only the other order, S8_UINT_Z24_UNORM (virgl's host). FormatInitForScreen
++ * looks which one the screen has, once a screen exists, and FormatDepth24Stencil8 names it
++ * from then on; FormatTranslate uses it. What differs is the order of the two parts in a
++ * pixel a program maps, which nothing is done about yet.
++ */
++struct pipe_screen;
++
++void
++FormatInitForScreen(struct pipe_screen *screen);
++
++enum pipe_format
++FormatDepth24Stencil8(void);
++
+ const char *
+ FormatToName(DXGI_FORMAT Format);
+ 

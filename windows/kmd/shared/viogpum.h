@@ -67,6 +67,14 @@ typedef struct _VIOGPU_ADAPTERINFO
 
 #define VIOGPU_CTX_INIT              0x200
 
+// Have the device look for finished work now (a notification of the control queue), asked by
+// a program that polls a fence
+#define VIOGPU_NUDGE                 0x301
+
+// Test builds only (RIPPLE_TEST_TDR): hold the next finished command buffer back Id ms, so
+// that Windows sees a GPU timeout and the driver's recovery runs
+#define VIOGPU_TEST_STALL            0x300
+
 #pragma pack(1)
 typedef struct _VIOGPU_DISP_MODE
 {
@@ -89,7 +97,13 @@ typedef struct _VIOGPU_CAPSET_REQ
     ULONG CapsetId;
     ULONG Version;
     ULONG Size;
-    UCHAR *Capset;
+    // The caller's buffer, eight bytes in every build: a 32-bit program and a 64-bit kernel
+    // driver have to agree on where it is and on how long the packet is. A 32-bit caller
+    // clears the packet first, so its upper half is zero. (moose-ripple)
+    union {
+        UCHAR *Capset;
+        ULONGLONG Capset64;
+    };
 } VIOGPU_CAPSET_REQ;
 #pragma pack()
 

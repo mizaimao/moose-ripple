@@ -64,7 +64,8 @@ network callbacks, pointer, power, escape, interrupt and DPC).
 3. **Preemption and timeouts.** Whether to keep the machine-wide switch or answer
    `DxgkDdiPreemptCommand` properly. For W1 (hardly any commands) either does.
 4. **Pointer.** Disabled in the Windows 10 driver ("for now"). The device has a cursor
-   queue; our Mac driver uses it. Software pointer first.
+   queue; our Mac driver uses it. Software pointer first. (Done 2026-11-15: "The hardware
+   pointer" below.)
 5. **32-bit.** The driver assumes a 4 GB aperture at `0xC0000000`; a 32-bit Windows 7 needs
    that looked at. Not in W1.
 6. **Debugging.** A kernel debugger over a virtual serial port on the test VM, and
@@ -419,6 +420,215 @@ one reboot. On the display, with no setting changed by hand:
 | Host's renderer | no error in its log |
 
 Not measured: Windows' own compositor assessment (`winsat dwm`) refuses to run ("no LDDM
-Support"), because it tests through Direct3D 9, which the driver does not have yet. Still to
-do for the milestone: the same screens from the GeForce 9600 GT machine next to ours. The
-captures are kept out of the repository (they show the test account's desktop).
+Support"), because it tests through Direct3D 9, which the driver does not have yet.
+
+**Next to the GeForce 9600 GT.** The same five screens (desktop, a window, a live thumbnail,
+Flip 3D, desktop peek) were taken on the reference: the test VM's base snapshot started with
+the card passed through instead of the virtio display, NVIDIA's driver, 1024x768, pictures
+taken inside Windows. Laid next to ours they show no difference in the glass, the shadows,
+the thumbnail, the stacked windows of Flip 3D or the glass outlines of peek; the only ones
+are the mouse pointer (our pictures come from the host's display, which has it) and a
+notification icon that had not appeared yet. The captures are kept out of the repository
+(they show the test account's desktop).
+
+## Preemption, and no machine-wide settings (2026-11-15)
+
+The Windows 10 driver's INF switched GPU preemption off for the whole machine
+(`GraphicsDrivers\Scheduler\EnablePreemption = 0`) and told Windows never to recover from a
+GPU timeout (`TdrDebugMode = 1`), because the driver's preemption entry point did nothing:
+with preemption on, Windows would ask for one and wait forever for the answer.
+
+The driver now answers. The host cannot stop a command buffer half way, so a preemption
+request is reported done (`DXGK_INTERRUPT_DMA_PREEMPTED`) once everything submitted has
+finished, with that last fence as the last completed one; if nothing is pending it is reported
+at once (`VioGpuCommander::Preempt`). `DxgkDdiQueryCurrentFence`, which Windows reads when it
+suspects a hang, returns the last finished fence instead of nothing. Both settings are gone
+from the INF.
+
+Load test 19 (fresh VM, this package): Windows' scheduler key holds neither value; the
+Experience Index runs to the end (4.6, gaming graphics 5.6, frame rates as before); 32-bit and
+64-bit checks, dxdiag and Chess Titans next to the compositor (also inside Flip 3D) right; no
+display timeout or reset event in the System log; nothing in the host's log.
+
+Still a stub then: recovery after a real timeout (`DxgkDdiResetFromTimeout`,
+`DxgkDdiRestartFromTimeout`); done the same day, "Recovery after a GPU timeout" below.
+
+## The hardware pointer (2026-11-15)
+
+The pointer is now drawn by the host over the picture, as on a real card, instead of by
+Windows into every frame. The driver offers colour pointers up to 64x64
+(`DXGK_DRIVERCAPS.PointerCaps.Color`; the INF sets `HWCursor` to 1). `DxgkDdiSetPointerShape`
+copies the shape into a 64x64 host image and sends `VIRTIO_GPU_CMD_UPDATE_CURSOR`;
+`DxgkDdiSetPointerPosition` sends `MOVE_CURSOR`. The code follows virtio-win's 2D driver
+(viogpudo, BSD-3-Clause). Monochrome and masked pointers, such as the text I-beam that inverts
+what is under it, are refused, and Windows then draws those itself, exactly as before.
+
+Two things learned on the way:
+
+- Hiding the pointer by detaching its image (resource 0, as the 2D driver does) is not enough
+  for every viewer: QEMU's VNC server ignores the hide and keeps showing the last image, with
+  its hot spot moved to 0,0, next to the I-beam Windows now draws. The driver hides it by
+  showing a transparent image instead, and puts the shape back when Windows shows it again.
+- QEMU takes the control queue (the image upload) and the cursor queue (the switch to the
+  image) in no fixed order, so a pointer command sent straight after the upload can show the
+  previous shape. The driver waits for the upload to finish first (`UploadCursor`).
+
+Checked in load test 21 (fresh VM, this package), with `scripts/screen-vnc.sh -c`, which also
+saves the pointer image the host has: the arrow on the desktop (hot spot 3,3), a transparent
+image while the pointer is over a text field (Windows' own I-beam in the frame), the arrow
+again after, the resize arrow on a window edge (hot spot 14,7), Chess Titans with the pointer
+over the board and none drawn into its frames. Nothing in Windows' System log or the host's.
+
+## Recovery after a GPU timeout (2026-11-15)
+
+When a command buffer takes the host more than about two seconds, Windows asks the driver to
+preempt it, waits two more seconds, and then resets the driver ("Display driver stopped
+responding and has recovered", event 4101): it collects debug data
+(`DxgkDdiCollectDbgInfo`), calls `DxgkDdiResetFromTimeout`, frees what the lost devices
+held, and calls `DxgkDdiRestartFromTimeout`. Applications get their device back as lost or
+removed; the compositor makes a new one.
+
+The host cannot be stopped half way through a buffer, so the driver's reset forgets instead
+(`VioGpuCommander::Reset`): every buffer not yet sent to the host is dropped; the one the
+host is working on no longer counts, and what it holds (its allocations' busy marks, the event
+someone waits on) is given up at once, because Windows may free those allocations right after
+the reset; and an epoch counter makes sure that the host's late answer for any buffer from
+before the reset is never reported to Windows as finished.
+
+Testing it found a bluescreen that was there before this work, in Windows itself: stop `0x7E`
+(an access violation) in `VIDMM_DMA_POOL::WriteDmaBufferToMinidump`, while Windows writes its
+report of the timeout and before it calls the driver. The report walks the adapter's whole
+history of DMA buffers, but reads each one as if it lived where the pool being written keeps
+its buffers. The driver had paging buffers in its aperture segment (`PagingBufferSegmentId` 1)
+and command buffers in system memory (`DmaBufferSegmentSet` 0), so for a command buffer
+Windows followed the paging pool's segment pointer, which is null there. Paging buffers are now
+in system memory too (`PagingBufferSegmentId` 0); the driver does all paging work on the CPU,
+so nothing else changes. (The dump said which pointer: `tools/win7-debug/kmem.py` reads the
+exception and registers out of `MEMORY.DMP`.)
+
+How it was tested: Windows 7's own way to fake a timeout (`D3DKMTEscape` with
+`D3DKMT_ESCAPE_TDRDBGCTRL`, `tools/win7-hello/forcetdr.c`) answers "not supported" on a retail
+system, and a real one would mean keeping the host GPU busy for seconds. So a test build of
+the driver (`TEST_TDR=1 windows/kmd/build.sh`) takes a private escape that holds the next
+finished buffer back, as a host that is slow with it, for up to the given time or until the
+reset: `forcetdr stall 10000`, then move the pointer so that something is drawn. On the test
+VM with Chess Titans open: the timeout comes about four seconds later, Windows recovers, the
+desktop and Aero come back, Chess Titans plays on, and the System log has event 4101 and
+nothing else; a second timeout a minute later recovers the same way. Nothing in the host's
+log. If the buffer is held back much longer than the reset (ten seconds without ending at the
+reset), Windows times out again during the recovery and stops with `0x116` ("recover from
+timeout failed"), as it does with any GPU that stays hung.
+
+Load test 22 (fresh VM, the regular build with these changes): 32-bit and 64-bit Direct3D 9
+checks right, DirectDraw lists the hardware devices, dxdiag finds no problems, the Experience
+Index as before (4.6, gaming graphics 5.6); nothing new in Windows' System log or the host's.
+
+## Command buffers in flight (2026-11-15)
+
+Every part of every command buffer (a SUBMIT of Direct3D's commands, a transfer) went to the
+host fenced, and the driver waited for each answer before sending the next part or the next
+buffer. QEMU answers a fenced command only once the host GPU has finished it and everything
+before it, and it notices a finished fence only at the guest's next notification or at its own
+10 ms poll; the Mac side found the same (`docs/re/perf-notes.md`). So the guest sat idle for a
+round trip per part, and anything that waits for the GPU once a frame ran at about 100 frames
+a second at most. The Experience Index's tests sat at 46-97 frames a second.
+
+Now (`VioGpuCommander`, `VioGpuCommand::Run`):
+
+- all parts of a buffer go to the host at once and in order; only the last is fenced and comes
+  back. Up to eight buffers are with the host at a time; the host runs them in queue order.
+- Windows hears of finished buffers strictly in submission order (a buffer without host work
+  finishes at once, but waits for the ones before it).
+- a sender that finds the virtio ring full waits for the host to give descriptors back. Before,
+  the command was dropped without a word; with one buffer at a time that never happened.
+- while buffers are with the host, the driver notifies the queue every millisecond without a
+  new command, so QEMU looks at its fences then and not only every 10 ms. The system timer
+  runs at 1 ms for it while there is work and goes back a second after the last buffer.
+
+The Experience Index's Direct3D tests (frames a second, `dx`, 1280x1024 off screen):
+
+| Test | before | buffers in flight | and the 1 ms notify |
+|---|---|---|---|
+| Direct3D 9 batch | 97 | 132 | 522 |
+| Direct3D 9 alpha blend | 81 | 149 | 455 |
+| Direct3D 9 ALU | 53 | 115 | 294 |
+| Direct3D 9 texture load | 48 | 115 | 264 |
+| Direct3D 10 batch | 96 | 100 | 137 |
+| Direct3D 10 alpha blend | 96 | 100 | 149 |
+| Direct3D 10 ALU | 61 | 64 | 89 |
+| Direct3D 10 texture load | 46 | 51 | 85 |
+| Direct3D 10 geometry (two) | 92, 31 | 100, 30 | 157, 59 |
+| Direct3D 10 constant buffer | 49 | 50 | 84 |
+
+The middle column is the same driver without the notify; both were measured on one VM,
+replacing the driver in place. Direct3D 10's geometry-shader test (the second geometry
+number) raises its load as frames get faster, so it reads 28 to 59 between runs and does not
+compare.
+
+Load test 23 (fresh VM, this package): the checks right (32-bit and 64-bit Direct3D 9,
+DirectDraw's hardware devices, dxdiag), the Experience Index 6.1 for graphics and 6.1 for
+gaming graphics (4.6 and 5.6 before), nothing in the host's log. With the desktop idle QEMU
+uses as much of the host's processor as with the driver before (20-22% of one core over ten
+seconds, both measured on the same VM). The timeout recovery above was run again with
+buffers in flight and works the same.
+
+## Speed, second round: where a frame's time goes (2026-11-15)
+
+The Experience Index stood at 6.1 for graphics and 6.1 for gaming graphics. Its detailed
+results (`C:\Windows\Performance\WinSAT\DataStore`) give a score per test: the Direct3D 9
+tests count only up to 6.0, the gaming score comes from the Direct3D 10 tests, and of those the
+weakest pull it down most. The same disk keeps a 2025 assessment on a passed-through Radeon of
+the HD 5800 series: 7.8 and 7.8, Direct3D 10 batch 1751 frames a second, geometry 1391 and
+2739.
+
+Measured with the tools in `tools/win7-debug/rig/` and `tools/win7-debug/guest/` (described in
+`tools/win7-debug/README.md`), during the Direct3D 10 batch test:
+
+- The guest used one processor fully, but the samples of its instruction pointer showed a
+  program polling: Windows' kernel waiting on an object (`KeWaitForSingleObject`, 27% of the
+  busy samples, with the system call around it about two thirds), and in our driver
+  `QueryGetData` → `virgl_get_query_result` → `virgl_fence_finish`. The assessment waits for an
+  event query every frame.
+- The kernel driver's timing build (`TRACE_TIMING=1 windows/kmd/build.sh`) showed each command
+  buffer 6.2 to 6.7 ms with the host, the rest of its path under 0.1 ms.
+- The host's Intel GPU was awake 94% of the time, but at its lowest clock, 350 of 1200 MHz: the
+  rig's minimum clock had gone back to 350 at a host restart (the raise to 1200 is live only,
+  `docs/re/perf-notes.md`). Raised to 1200 again: the batch test went from 150 to 344 frames a
+  second.
+- With the GPU at full clock, how soon the guest learns that work has finished counted again.
+  QEMU looks at virglrenderer's fences when the guest notifies the device, or at its 10 ms
+  poll. The kernel driver's notification while work is out now comes every 0.5 ms (was 1 ms:
+  268 against 346 frames a second), and a program that polls a fence makes the driver notify
+  at once, at most every 100 µs (`VIOGPU_NUDGE`, patch 0027): 446 frames a second, the GPU now
+  98% busy. Patch 0027 also gives Windows the fence wait's timeout in milliseconds; it was
+  passed in nanoseconds.
+
+Tried and dropped: keeping constant buffers on the CPU and binding each change from a fresh
+range of a stream buffer. Like for like (two runs each, alternating), the batch test 348-355
+against 353-368 and the constant buffer test 248 against 248: no difference.
+
+| Experience Index | before | GPU at 1200 MHz | and the nudges |
+|---|---|---|---|
+| Graphics | 6.1 | 6.5 | 6.7 |
+| Gaming graphics | 6.1 | 6.5 | 6.7 |
+| Direct3D 10 batch / alpha (frames a second) | 140 / 129 | 355 / 358 | 457 / 450 |
+| Direct3D 10 texture / ALU | 89 / 85 | 239 / 237 | 265 / 266 |
+| Direct3D 10 geometry F4 / V8 | 135 / 30 | 287 / 35 | 340 / 40 |
+| Direct3D 10 constant buffer | 84 | 203 | 196 |
+
+What holds the score now:
+
+- The host GPU: in the batch tests it is 96-98% busy. A Direct3D 10 frame of that test is about
+  22 draws with trivial shaders and keeps the GPU busy about 2.2 ms; the Direct3D 9 version of
+  the same test needs about 1.5 ms. Not found yet why; the GPU runs one request a frame from
+  QEMU and QEMU never waits on it.
+- The second geometry test (V8, 5.5): a geometry shader with a three-step loop that writes an
+  indexed temporary array, about 20 ms of GPU time a frame. On real hardware it is the fastest
+  of the tests.
+- The GPU clock: at a host restart the rig's minimum clock goes back to 350 MHz, and the
+  scores with it (6.5 → about 6.1).
+
+Load test 24 (fresh VM, the package built from scratch with patch 0027, host GPU at 1200 MHz):
+the checks right (32-bit and 64-bit Direct3D 9, DirectDraw, dxdiag), Chess Titans right, the
+Experience Index 6.6 and 6.6 (Direct3D 10 batch 455, geometry 312 and 43), nothing in the
+host's log. Between runs on one install the index moves by 0.1.

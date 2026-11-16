@@ -177,3 +177,199 @@ them; nothing taken over from the four files):
   points at the buffers the kernel hands back.
 - Helper entry points with the same shape as the operations: `gdikmt_createallocation`,
   `gdikmt_openallocation`, `gdikmt_render`.
+
+## The Direct3D 9 part (2026-11-15)
+
+Windows 7 programs that use Direct3D 9, and Windows' own assessment tool, need a Direct3D 9
+user-mode driver. Ours is the one of the Yttrium project's Mesa fork (its `virtio-win-mesa`
+at commit 76c095b, Mesa 26.1.0; `docs/windows/yttrium-notes.md`): the ten files
+`src/gallium/frontends/d3d10umd/D3D9*`, all MIT, by Ake Rehnman, with the shader translator
+taken from Mesa's "nine" (MIT, Joakim Sindholt and Christoph Bumiller). They are in
+`windows/mesa/overlay-virgl/` with their notices, and are built into the same DLL as the
+Direct3D 10 driver, which then also exports `OpenAdapter` (patch 0019).
+
+What was changed to bring them from that tree to Mesa 24.3.4 on virgl:
+
+- **The renderer underneath.** The files call that project's own renderer in a dozen places
+  and include two of its headers (MPL-2.0, not used here). `D3D9Host.h` and `D3D9Host.cpp`
+  (ours) answer the same calls for virgl: a flush is a flush, the rest has nothing to answer.
+  The multisample counts and the anisotropy limit, which came from that renderer, are fixed
+  for now: no multisampling, 16 samples of anisotropic filtering (Windows 7's Direct3D 9
+  wants that many for a hardware device, `docs/windows/kmd-port-notes.md`).
+- **Mesa 26.1 to 24.3.** Capability lookups by function instead of the screen's tables;
+  one more argument to `set_sampler_views`, `set_constant_buffer` and `ureg_tex_insn`;
+  framebuffer and clear surfaces created as objects instead of held by value; three small
+  helpers that 24.3 lacks (`D3D9Compat.h`, ours).
+- **The kernel bridge** (`gdikmt_d3dddi`, ours) learned what a Direct3D 9 device needs:
+  presents go through the device's own present callback with the destination the runtime
+  names, and an opened resource is described in Direct3D 9's structure.
+- **The kernel driver's allocation data** has no blob memory flag and no stride on Windows 7;
+  the two places that read them use what the format says.
+
+Two faults showed in the host's log at the first test, both for resources Gallium allows and
+virglrenderer 0.10 refuses, and both are put right in the virgl driver (patch 0020): a texture
+without any binding (the Direct3D 9 code reads pictures back through such textures), and a
+sample count of one for "not multisampled" (the same thing patch 0016 met in the Direct3D 10
+driver).
+
+**First test** (`tools/win7-hello/d3d9test.c`, test VM, Aero on): a hardware device with
+vertex processing in the driver is created in a window, the back buffer cleared to green, a
+red triangle drawn from screen-space vertices, the picture read back (right in both colours)
+and presented: the window shows it. Nothing in the host's log.
+
+Not looked at yet: everything beyond that test. The fork's notes say what to expect
+(`docs/windows/yttrium-notes.md`): fixed-function drawing leans on the Direct3D 9 runtime
+turning it into shaders, user clip planes are not switched on, and every draw creates and
+destroys its state objects, which on virgl is a command to the host each.
+
+### What Windows' own assessments found (2026-11-15)
+
+Windows' assessment tool (`winsat`, the Windows Experience Index) was the first real user of
+the Direct3D 9 part, and of more of the Direct3D 10 part than the compositor needs. Each of
+these stopped it; in the order met, with how it was found:
+
+| Seen | Cause | Where it was put right |
+|---|---|---|
+| The tool crashed inside Direct3D 9 when it freed a resource | Every allocation was tied to the runtime's resource; virgl's winsys frees some later, when that resource is gone | Only primaries and shared resources are tied (`D3D9Resource.cpp`, `D3D9Host.cpp`) |
+| It crashed in our winsys during a draw (call chain read from a crash dump, `tools/win7-debug/dumpstack.py`) | Mesa 24.3 takes over a reference to each bound vertex buffer, 26.1 takes none | One reference added per buffer (`D3D9Draw.cpp`) |
+| Texture tests ended at once | Three 16-bit formats listed and not creatable | Mapped (`D3D9Resource.cpp`) |
+| Every Direct3D 10 test: "out of memory" | Direct3D's 24-bit depth with stencil exists on the host only in the other order | The screen is asked which order it has (patch 0022) |
+| A Direct3D 10 test drew nothing and "ran" at 12 000 frames a second | Indexable temporaries of a shader not declared as arrays; the host could not compile it and dropped the context | Declared as arrays (patch 0024) |
+| The same, for any program that cleared its device state | An end of a render condition that was never begun is an error on the host | Not sent (patch 0023) |
+| Video playback never started | The driver listed two video formats it cannot make, and answered "not implemented" to "how many video processors" | Formats not listed; the counts answered with none, so Windows uses its own software processor (`D3D9Adapter.cpp`) |
+| Blue screen when playback did start | The kernel driver's scan-line call was a debugging trap | A scan line worked out from the vertical-blank thread (`windows/kmd`, `GetScanLine`) |
+
+The last three kinds have one thing in common worth remembering: **the host renderer answers
+some mistakes by silently dropping everything a context draws afterwards**, and the guest
+sees no error. Its log (the VM host's journal) is the place to look first when a program runs
+and shows nothing, or runs absurdly fast.
+
+Tools that came out of it: the driver's own log (`RIPPLE_UMD_LOG=FILE` in the program's
+environment), a trace of every Direct3D 9 call into the driver with its result
+(`RIPPLE_UMD_TRACE=1` for failed calls, `2` for all), `dumpstack.py` for crash dumps and
+for dumps of a waiting program (`tools/win7-hello/dumpproc.c` writes those).
+
+### The Windows Experience Index (load test 16, 2026-11-15)
+
+A fresh test VM, the package as the repository builds it (kernel driver, one user-mode DLL
+with the Direct3D 9 and Direct3D 10 parts), one reboot, then `winsat formal`: it runs to the
+end and Windows shows scores. Before this driver the index could not be computed on the test
+VM at all. Stock virglrenderer 0.10.4 on the host, nothing in its log during the run. (The
+comparison is the assessment the disk kept from 2025, on a passed-through Radeon of the HD 5800
+series; it was first written down here as the GeForce 9600 GT's.)
+
+| | Ours | Radeon HD 5800 series, same disk (2025) |
+|---|---|---|
+| Graphics (desktop, Aero) | 4.6 | 7.8 |
+| Gaming graphics | 5.6 | 7.8 |
+| Processor, memory, disk | 7.7, 7.9, 7.9 | 7.7, 7.9, 7.9 |
+| Video memory throughput | 4 138 MB/s | 57 925 MB/s |
+
+The assessment's own frame rates, 1280x1024: Direct3D 9 Batch 81, Alpha 80, ALU 55, Texture
+load 52; Direct3D 10 Batch 96, Alpha 95, ALU 60, Texture load 47, Geometry 88 and 29,
+Constant buffer 45; video playback 143 frames with a decode time of 0.66 s. Nothing has been
+done for speed yet: the Direct3D 9 part still creates and destroys its state objects for
+every draw, and both parts seem to stop near 80 to 96 frames a second whatever is drawn,
+which points at a wait per frame. That is for the performance pass.
+
+The wait was the kernel driver's: one command buffer at a time, each part waited for. With
+several buffers in flight (load test 23, `docs/windows/kmd-port-notes.md`, "Command buffers
+in flight") the scores are 6.1 for graphics and 6.1 for gaming graphics, and the frame rates
+Direct3D 9 Batch 482, Alpha 502, ALU 280, Texture load 258; Direct3D 10 Batch 140, Alpha
+129, ALU 89, Texture load 85, Geometry 135 and 30, Constant buffer 84.
+
+### DirectDraw, DirectX 7 and 32-bit programs (2026-11-15)
+
+DirectX's own diagnostics (`dxdiag`) said "Direct3D: Not Available" while Direct3D 9 and 10
+both ran. Three things were behind it:
+
+1. **dxdiag is a 32-bit program, and so are most programs and games for Windows 7.** A 32-bit
+   program needs a 32-bit build of the user-mode driver, in `SysWOW64`, named in the driver
+   key as `UserModeDriverNameWow`. The package had none. `ARCH=x86 windows/mesa/build-win7.sh`
+   builds it; the INF now installs it and names it.
+2. **The 32-bit driver knew nothing of the host.** The request for the host's capability set
+   carries a pointer, so its packet was four bytes shorter in a 32-bit program and the 64-bit
+   kernel driver refused it. With no capabilities every primitive counted as unsupported, and
+   the first draw converted primitives in circles until the stack was full. The field is
+   eight bytes in every build now (patch 0026 and `windows/kmd/shared/viogpum.h`).
+3. **DirectDraw asks the Direct3D 9 driver older questions** (it opens the driver with
+   interface version 7 and asks for the DirectX 3 and DirectX 7 capability blocks). The
+   driver left the DirectX 7 one unanswered, and DirectDraw then runs on software without a
+   word. The answer, and the DirectX 7-era drawing that programs then expect, come from
+   vmlab-win3d (<https://github.com/VMLabDev/vmlab-win3d>, MIT, commit b7e5451): its patches
+   0006 (the Direct3D 9 files' part), 0012, 0013, 0014, 0024, 0035 and 0040 to 0044, merged
+   into our copies of the Direct3D 9 files and adapted to Mesa 24.3 the same way as the files
+   themselves. They bring: the DirectX 7 and 8 capability blocks, write-only locks that keep
+   the surface's contents, DirectDraw surfaces that can be presented, a vertex shader for
+   pre-transformed vertices, colour-key and mirror blits on the GPU, fixed-function fog and
+   points, bump and luminance formats.
+
+After these, in the test VM: 32-bit DirectDraw reports hardware capabilities and lists the
+"Direct3D HAL" and "Direct3D T&L HAL" devices of DirectX 7 (`tools/win7-hello/ddprobe.c`);
+the 32-bit build of `d3d9test` draws and reads back right; dxdiag shows DDI version 10 with
+DirectDraw, Direct3D and AGP texture acceleration enabled and "No problems found"; the Windows
+Experience Index still runs to the end (5.1 on this run).
+
+Not tried yet: an actual DirectX 7 or 8 program. Nothing here has drawn through those paths.
+
+### Windows 7's own games (load test 18, 2026-11-15)
+
+On a fresh install of the package (64-bit and 32-bit driver), with the host's log watched:
+
+| Program | Result |
+|---|---|
+| Chess Titans (Direct3D 9) | Board, pieces, reflections and the camera animation right; moves made and answered |
+| Mahjong Titans | Layout screen right, hover highlights |
+| Purble Place, including the 3D cake factory | Right |
+| DirectX's diagnostics (`dxdiag`, a 32-bit program) | "No problems found"; DirectDraw, Direct3D and AGP texture acceleration enabled; DDI version 10 |
+| `ddprobe` (32-bit DirectDraw and DirectX 7) | Hardware capabilities; "Direct3D HAL" and "Direct3D T&L HAL" listed |
+| `d3d9test`, 64-bit and 32-bit | Right |
+| Windows Experience Index | Runs to the end (4.6 to 5.1 between runs; gaming graphics 5.6) |
+
+Chess Titans first made the host log "Multisample textures not 2D" hundreds of times: it
+refills vertex buffers with locks that discard their contents, and the virgl driver made the
+new buffer with the sample count of one that patch 0020 had only corrected for a first
+creation. Patch 0020 now covers both.
+
+Also seen: after ten idle minutes Windows switched the display off (the kernel driver gets the
+monitor's power state), and the first mouse movement brought it back with the compositor
+running. Sleep and hibernation stay switched off by the INF.
+
+### Windows Media Player: the picture stays black (open, 2026-11-15)
+
+The sample video plays (sound, time, controls) but its picture is black. The assessment's
+video test, which counts decoded frames, never showed this. What the Direct3D 9 trace found
+(`RIPPLE_UMD_TRACE=3`, which also writes the arguments of resource creation, locks, blits,
+fills and presents and the middle pixel of surfaces; `tools/win7-debug/guest/wmp.cmd`):
+
+- The video renderer asks for Direct3D 9's progressive video processor by name, even though
+  the driver lists none, for RGB video (1280x720, X8R8G8B8), and gets "not implemented". It
+  then scales frames on the processor into system-memory surfaces and blits those: they hold
+  only zeros, because nothing ever writes the decoded frames into them.
+- A minimal progressive processor in the driver (RGB in, background fill, scaled copy; kept
+  aside as a patch, not in the repository) is taken: every frame goes through
+  `VideoProcessBlt` from the decoder's video-memory surfaces. The picture stays black, and it
+  stays black even when the processor paints its target magenta.
+- So the frames do not reach the screen. Chess Titans presents by blitting its back buffer
+  into the compositor's surface for its window (`Blt` with `BeginPresentToDwm` and
+  `EndPresentToDwm`). The player's presenter calls `Present` with no destination instead; the
+  driver passes that on as a kernel present without a target, the kernel driver never sees a
+  present for it, and the compositor shows nothing.
+
+Windows' Direct3D 9 runtime has a path that binds a swap chain to the compositor
+(`CSwapChain::BindToDwm`) next to the blit path Chess Titans takes: the compositor then takes
+the frames from the shared surfaces itself, and the kernel driver sees no present, which
+matches. With the driver's log switched on for every process (machine-wide `RIPPLE_UMD_LOG`,
+then a reboot, so that the compositor has it too), the compositor's side logged no refused
+resource while the video played.
+
+That path is Direct3D 9Ex's FlipEx swap chain: `BindToDwm` creates the FlipEx semaphore and
+binds through `dwmapi` (ordinal 125), and none of the runtime's FlipEx conditions involve the
+driver. So with the compositor running (since the driver counts as WDDM 1.1) the player's
+presenter uses FlipEx, and the compositor reads the player's shared surfaces itself, through
+our Direct3D 10 driver in its own process.
+
+Next: check that path, the compositor opening a surface the Direct3D 9 driver shared, and
+what it reads (a picture the compositor shows black reads as zeros, so likely another host
+resource than the one the player drew into); then put the processor back and check the
+picture.

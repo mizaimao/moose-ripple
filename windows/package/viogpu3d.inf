@@ -4,7 +4,8 @@
 ; windows/kmd/LICENSE) for Windows 7: x64 decoration, user-mode drivers in System32 (Windows 7
 ; has no DriverStore directory id 13), no msdv.inf, no PnpLockdown, FeatureScore F8 (WDDM 1.0/1.1), no catalog
 ; yet (Windows asks to confirm the unsigned package; the kernel driver itself is test-signed).
-; Only the Direct3D 10 user-mode driver for now: no Direct3D 9 one exists yet, and no OpenGL.
+; One user-mode driver DLL with both the Direct3D 9 and the Direct3D 10 part, in a 64-bit and a
+; 32-bit build; no OpenGL yet.
 ;
 
 [Version]
@@ -12,11 +13,12 @@ Signature="$Windows NT$"
 Class=Display
 ClassGUID={4d36e968-e325-11ce-bfc1-08002be10318}
 Provider=%Provider%
-DriverVer=11/14/2026,0.0.1.1
+DriverVer=11/15/2026,0.0.2.0
 
 [DestinationDirs]
 VioGpu3D_Files.Driver   = 12   ; System32\drivers
 VioGpu3D_Files.Usermode = 11   ; System32
+VioGpu3D_Files.Usermode32 = 10,SysWOW64   ; the same for 32-bit programs
 
 [SourceDisksNames]
 1 = %DiskId1%,,,""
@@ -24,6 +26,7 @@ VioGpu3D_Files.Usermode = 11   ; System32
 [SourceDisksFiles]
 viogpu3d.sys = 1,,
 viogpu_d3d10.dll = 1,,
+viogpu_d3d10.x86.dll = 1,,
 
 [Manufacturer]
 %Provider%=Ripple,NTamd64
@@ -37,11 +40,15 @@ viogpu3d.sys
 [VioGpu3D_Files.Usermode]
 viogpu_d3d10.dll
 
+; The 32-bit build, under the same name in SysWOW64 (destination name, source name)
+[VioGpu3D_Files.Usermode32]
+viogpu_d3d10.dll,viogpu_d3d10.x86.dll
+
 [VioGpu3D_Inst]
 ; The display class installer refuses a display INF without FeatureScore ("does not support this
 ; version of Windows", 0xE000022D). F8: a WDDM 1.0/1.1 driver.
 FeatureScore=F8
-CopyFiles=VioGpu3D_Files.Driver, VioGpu3D_Files.Usermode
+CopyFiles=VioGpu3D_Files.Driver, VioGpu3D_Files.Usermode, VioGpu3D_Files.Usermode32
 AddReg=VioGpu3D_DeviceSettings
 
 [VioGpu3D_Inst.SoftwareSettings]
@@ -71,18 +78,22 @@ HKR,,EventMessageFile,%REG_EXPAND_SZ%,"%%SystemRoot%%\System32\IoLogMsg.dll"
 HKR,,TypesSupported,%REG_DWORD%,7
 
 [VioGpu3D_DeviceSettings]
-HKR,, HWCursor,           %REG_DWORD%, 0
+; The pointer drawn by the host over the picture (colour pointers; others Windows draws itself)
+HKR,, HWCursor,           %REG_DWORD%, 1
 HKR,, FlexResolution,     %REG_DWORD%, 1
 HKR,, UsePhysicalMemory,  %REG_DWORD%, 0
 ; Windows 7's graphics kernel reads these from this key (the driver key, Class\{4d36e968-...}\000N)
 ; and refuses the adapter without UserModeDriverName. User-mode drivers: first the Direct3D 9
-; one, then Direct3D 10 (x64 without 32-bit ones). No Direct3D 9 driver exists yet: the
-; Direct3D 10 one in both places for now.
+; one, then Direct3D 10 (x64 without 32-bit ones). Both are in the same DLL.
 HKR,, UserModeDriverName,     %REG_MULTI_SZ%, viogpu_d3d10.dll, viogpu_d3d10.dll
 HKR,, InstalledDisplayDrivers, %REG_MULTI_SZ%, viogpu_d3d10, viogpu_d3d10
+; The same for 32-bit programs, which most programs and games for Windows 7 are (DirectX's own
+; diagnostics too): without these they get no Direct3D or DirectDraw acceleration at all.
+HKR,, UserModeDriverNameWow,  %REG_MULTI_SZ%, viogpu_d3d10.dll, viogpu_d3d10.dll
+HKR,, InstalledDisplayDriversWow, %REG_MULTI_SZ%, viogpu_d3d10, viogpu_d3d10
 HKR,, VgaCompatible,          %REG_DWORD%, 0
-HKLM,"SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Scheduler",EnablePreemption,%REG_DWORD%,0
-HKLM,"SYSTEM\CurrentControlSet\Control\GraphicsDrivers",TdrDebugMode,%REG_DWORD%,1
+; No machine-wide scheduler or timeout settings: the driver reports preemption itself
+; (VioGpuCommander::Preempt), and Windows' timeout detection stays as it is.
 ; Sleep and hibernation switched off for the whole machine, for now: the driver does not
 ; bring the picture back after them yet (the host forgets every surface when the guest wakes).
 HKLM,"SOFTWARE\Policies\Microsoft\Power\PowerSettings\abfc2519-3608-4c2a-94ea-171b0ed546ab",ACSettingIndex,%REG_DWORD%,0
@@ -94,6 +105,8 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Power",HibernateEnabled,%REG_DWORD%,0
 [VioGpu3D_SoftwareDeviceSettings]
 HKR,, UserModeDriverName,     %REG_MULTI_SZ%, viogpu_d3d10.dll, viogpu_d3d10.dll
 HKR,, InstalledDisplayDrivers, %REG_MULTI_SZ%, viogpu_d3d10, viogpu_d3d10
+HKR,, UserModeDriverNameWow,  %REG_MULTI_SZ%, viogpu_d3d10.dll, viogpu_d3d10.dll
+HKR,, InstalledDisplayDriversWow, %REG_MULTI_SZ%, viogpu_d3d10, viogpu_d3d10
 HKR,, VgaCompatible,          %REG_DWORD%, 0
 
 [VioGpu3D_PCI_MSIX]
