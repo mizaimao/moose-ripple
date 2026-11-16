@@ -271,3 +271,17 @@ interface" for levels 9.1-9.3).
 A trap found on the way: programs started from `C:\rb\pkg` load the user-mode driver from that
 folder (Windows looks in the program's folder first), not the one installed in System32. Run
 test programs from another folder when the package folder holds a different build.
+
+Second try (2026-11-16), with the kernel driver of "Speed, third round"
+(`docs/windows/kmd-port-notes.md`): the desktop comes up in under two minutes from start,
+Windows Basic as before. Chess Titans stopped at "Loading": the host renderer refused its
+textures (`Unknown format is 106` in the VM's debug log, then the context dropped). Format 106 is
+DXT1; ANGLE gives UTM's renderer no S3TC. The Direct3D 9 driver now asks the host for the DXT
+formats when a device is made, and where they are missing keeps DXT textures as R8G8B8A8 and
+decompresses them on upload with Mesa's own decoder (the program still sees DXT). Chess Titans
+then draws right, marble and reflections. Still open there: a DXT texture the program locks
+directly in video memory (rare; textures normally arrive by the runtime's upload) is mapped as
+R8G8B8A8, not converted.
+
+Seeing the guest: QEMU's screendump stays black once the driver draws through the host GPU, so
+pictures come from `C:\rb\pkg\shot.ps1` in the guest (as on Hog).

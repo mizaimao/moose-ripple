@@ -345,6 +345,8 @@ void D3D9SetIdentityMatrix(D3DMATRIX *matrix);
 void D3D9MatrixMultiply(D3DMATRIX *dst, const D3DMATRIX *a,
                         const D3DMATRIX *b);
 void D3D9FillDeviceFuncs(D3DDDI_DEVICEFUNCS *funcs);
+/* moose-ripple: which formats the host renderer lacks (D3D9Resource.cpp) */
+void D3D9InitFormatsForScreen(struct pipe_screen *screen);
 
 HRESULT APIENTRY D3D9SetPriority(HANDLE hDevice,
                                  const D3DDDIARG_SETPRIORITY *data);
