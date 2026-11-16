@@ -632,3 +632,23 @@ Load test 24 (fresh VM, the package built from scratch with patch 0027, host GPU
 the checks right (32-bit and 64-bit Direct3D 9, DirectDraw, dxdiag), Chess Titans right, the
 Experience Index 6.6 and 6.6 (Direct3D 10 batch 455, geometry 312 and 43), nothing in the
 host's log. Between runs on one install the index moves by 0.1.
+
+### The same package on Hog (2026-11-15)
+
+The package of load test 24 on Hog (`docs/windows/test-vms.md`, "On Hog": QEMU 8.2 with KVM in
+WSL2, virglrenderer 1.0 on Mesa's Direct3D 12 driver, a GeForce RTX 4090): the desktop with
+Aero at 1024x768, the 32-bit and 64-bit Direct3D 9 checks right, DirectDraw's hardware devices,
+dxdiag "No problems found", and the Experience Index 7.3 for graphics and 7.3 for gaming
+graphics. Direct3D 10 frames a second: batch 654, alpha 707, ALU 380, texture 637, geometry
+749 and 808, constant buffer 1805; Direct3D 9 batch 769.
+
+The second geometry test, 40 frames a second on the rig, runs at 808 here: its slowness is the
+rig's GPU (or its driver), not our translation. The scores are now bound by the host GPU
+behind virglrenderer.
+
+Found on Hog, open: the host renderer refused one shader program, "Too many vertex uniform
+blocks (15/14)". Direct3D 10 has 14 constant buffer slots, and the Direct3D 10 driver binds
+slot n as Gallium's constant buffer n + 1, so a shader using the last slot needs 15 uniform
+blocks on the host; Mesa's Direct3D 12 GL driver offers 14, the rig's Intel driver more. After
+such an error virglrenderer drops that context's later drawing, so the test it happened in
+(not known yet which) may have counted frames it did not draw.

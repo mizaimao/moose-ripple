@@ -3,6 +3,7 @@
 #   scripts/type.sh 'some text'           types the text
 #   scripts/type.sh -n 'some text'        types the text, then Return
 #   scripts/type.sh -k ret -k meta_l-q    sends named QEMU keys (qcodes)
+# TYPE_PRINT=1: print the monitor commands instead of sending them (for other hosts' VMs).
 # Never pass passwords or keys through this: the text shows up in process lists and logs.
 set -eu
 . "$(dirname "$0")/lib.sh"
@@ -57,6 +58,7 @@ monitor_cmds() {
 # A function, not an inline loop: macOS /bin/sh (bash 3.2) misparses case inside $( ).
 cmds=$(monitor_cmds "$@")
 [ -n "$cmds" ] || die "nothing to type"
+if [ -n "${TYPE_PRINT:-}" ]; then printf '%s\n' "$cmds"; exit 0; fi
 # Send in chunks: the guest's USB keyboard drops keys when they arrive faster than it polls.
 printf '%s\n' "$cmds" | ssh "$RETRO" "d=\$(mktemp -d) && cd \$d && split -l 20 - c. &&
     for f in c.*; do qm monitor $VMID < \$f >/dev/null 2>&1; sleep 0.3; done; rm -rf \$d"

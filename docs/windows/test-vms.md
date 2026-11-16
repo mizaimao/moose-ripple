@@ -231,3 +231,21 @@ URL) and `RB_PUT` (the receiver of "Files out of the guest").
   sends the trace back (`umd-wmp.log`).
 
 In `cmd`, `for %f in (..) do A & B` repeats B as well; put the loop in parentheses.
+
+## On Hog (2026-11-15)
+
+Hog is a Windows PC whose WSL2 distro `moose-ripple` runs QEMU 8.2 with KVM, and
+virglrenderer 1.0 on Mesa's Direct3D 12 driver over the PC's NVIDIA GeForce RTX 4090. The test
+VM there, `/root/win7`, is the rig's VM 220 at its `pre-kmd` snapshot, exported with
+`qemu-img convert -l snapshot.name=pre-kmd -c` (14 GB) and copied through the build host's
+package server. Its `start.sh` lays the machine out like VM 220 (Proxmox's `pve-q35.cfg`, the
+same machine type, CPU, SMBIOS UUID and network card address), so Windows finds the same
+devices and stays activated; the network is QEMU's user network, which reaches the build host.
+
+`tools/win7-debug/hog.sh` drives it from the workstation: `start` (keep it running in the
+background: WSL stops the distro when no session is left), `stop`, `type`, `key`, `click`,
+`mon`, and `shot`, which works only until our driver owns the display (QEMU then has "no
+surface" to dump): after that, pictures come from inside Windows (`shot.ps1`). The distro has
+no socat; the helper uses netcat. The package is installed by hand as `loadtest.sh` does it:
+an elevated prompt, the files fetched with bitsadmin, `devcon update`, "Install this driver
+software anyway", a restart.
