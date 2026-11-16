@@ -373,3 +373,71 @@ Next: check that path, the compositor opening a surface the Direct3D 9 driver sh
 what it reads (a picture the compositor shows black reads as zeros, so likely another host
 resource than the one the player drew into); then put the processor back and check the
 picture.
+
+## Shaders that fit the host (2026-11-16)
+
+Two Direct3D 10 tests of the Experience Index went to the host in a form it handled badly. Patch
+0030 made that visible: with `RIPPLE_UMD_LOG` set, `RIPPLE_DUMP_TGSI` writes every shader the
+driver translates, as TGSI text, to the driver log (release builds have no `ST_DEBUG`).
+
+**The constant buffer test drew nothing on Hog.** Its vertex shader uses all 14 Direct3D 10
+constant buffer slots. The driver binds slot n as Gallium's constant buffer n + 1 (patch 0003),
+so it needs buffer 14. virglrenderer reports `GL_MAX_VERTEX_UNIFORM_BLOCKS + 1 - 1` as the
+limit: one more for the ordinary uniforms (buffer 0), one less for a block of its own
+(`VirglBlock`, which every last vertex stage gets for the y flip). On Hog's Direct3D 12 OpenGL
+(14 blocks) that is 14 buffers, 0 to 13; the shader then needed 15 blocks, failed to link
+("Too many vertex uniform blocks (15/14)"), and virglrenderer dropped the test's draws, which
+it counted at 1700 to 2150 frames a second. The rig's Intel driver has 16 blocks and was not
+affected. Patch 0032: a slot at or past the screen's `PIPE_SHADER_CAP_MAX_CONST_BUFFERS` is
+read as a buffer texture instead, `TXF` from an unsigned view (as the driver's other buffer
+loads on virgl; virglrenderer has no `SAMPLE_I`), and before each draw a view of the buffer
+bound to that slot is bound at the highest sampler views below 16. On Hog that is slot 13
+only. `RIPPLE_CB_LIMIT=N` lowers the limit to try the path anywhere: on the rig, the test with
+slot 13 as a buffer texture draws the same scene as with all 14 as uniform blocks (pictures
+compared during the run), at 303 against 317 frames a second.
+
+On the way, a fault in Mesa's virgl driver (patch 0029, also in Mesa's main branch):
+`virgl_set_sampler_views` gave its encoder the whole binding array, which the encoder writes
+from `start_slot`, so views set from any slot but 0 sent the views of slot 0 onwards instead.
+Callers that start at 0, as almost all do, never noticed; the single view at slot 15 read
+zeros.
+
+**The second geometry test drew the wrong shapes**, which was only noticed as slowness on the rig
+(59 frames a second; about 1000 on Hog, and the fastest test on real hardware). Its geometry
+shader runs a loop of three steps that writes an indexable temp array (`x0[r0.z * 2]`). The
+driver sent that as a TGSI array indexed through an address register, handing out `ADDR[0]`,
+`ADDR[1]` and `ADDR[2]` in turn; virglrenderer writes every indexed store through `addr0`
+whatever register the shader names (`get_temp` with dimension 0 for destinations, in 0.10.4 and
+1.0.0; loads use the named one). Two of the shader's three stores went through `ADDR[2]` and
+landed on the wrong elements, so it extruded triangles from wrong vertices: long spikes across
+the screen, which cost the rig's Intel GPU most of each frame and the RTX 4090 little. Patch
+0031 declares arrays of up to 16 elements as plain registers: a read through an index gathers
+the element with compare-and-select before the instruction, a write is scattered to the
+elements after it, so no indexed store reaches the host. Same install, back to back on the rig:
+68 frames a second with the arrays (`RIPPLE_INDEXED_TEMPS=1`), 704 with the selects, and the
+shapes the test means to draw. (Mesa's `tgsi_to_nir` cannot take geometry shaders, no `EMIT`,
+`ENDPRIM` or `RET`, so this could not go through NIR.)
+
+![The rig, second geometry test, old arrays: spikes from wrong vertices](../../media/win7-geomv8-rig-arrays.webp)
+![The rig, second geometry test, selects: the intended shapes](../../media/win7-geomv8-rig-selects.webp)
+
+Open, found with these (the same address-register habit meeting virglrenderer):
+
+- Arrays of more than 16 elements are still stored through the rotating address register.
+- virglrenderer 0.10.4 (the rig's) also reads constant buffers indexed at run time through
+  `addr0` only; 1.0.0 uses the named register. Programs that index constants dynamically, as
+  skinning does, can read wrong values on the rig.
+- virglrenderer ignores run-time indexing of immediates, so reads of the immediate constant
+  buffer (`icb[r0.x]`) get its first element; and it drops the constant part of a run-time
+  geometry shader input index.
+
+Using `ADDR[0]` for every run-time index, one at a time (as Mesa's own TGSI producer does), would
+avoid all of these.
+
+| Experience Index | Hog before | Hog after | rig before | rig after |
+|---|---|---|---|---|
+| Graphics / gaming graphics | 7.5 / 7.5 | 7.5 / 7.5 | 6.9 / 6.9 | 7.1 / 7.1 |
+| Direct3D 10 geometry F4 / V8 | 1031 / 940 (V8 drawn wrong) | 1077 / 1048 | 639 / 59 (V8 drawn wrong) | 627 / 737 |
+| Direct3D 10 constant buffer | 2150 (not drawn) | 688 | 311 | 312 |
+
+Chess Titans and the desktop with Aero look as before on both.
