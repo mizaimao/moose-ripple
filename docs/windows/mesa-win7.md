@@ -254,9 +254,11 @@ for dumps of a waiting program (`tools/win7-hello/dumpproc.c` writes those).
 A fresh test VM, the package as the repository builds it (kernel driver, one user-mode DLL
 with the Direct3D 9 and Direct3D 10 parts), one reboot, then `winsat formal`: it runs to the
 end and Windows shows scores. Before this driver the index could not be computed on the test
-VM at all. Stock virglrenderer 0.10.4 on the host, nothing in its log during the run.
+VM at all. Stock virglrenderer 0.10.4 on the host, nothing in its log during the run. (The
+comparison is the assessment the disk kept from 2025, on a passed-through Radeon of the HD 5800
+series; it was first written down here as the GeForce 9600 GT's.)
 
-| | Ours | GeForce 9600 GT, same disk (2025) |
+| | Ours | Radeon HD 5800 series, same disk (2025) |
 |---|---|---|
 | Graphics (desktop, Aero) | 4.6 | 7.8 |
 | Gaming graphics | 5.6 | 7.8 |
