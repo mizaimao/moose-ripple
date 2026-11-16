@@ -2,10 +2,11 @@
 
 `win9x/display/` is a display minidriver for Windows 95/98/ME: a 16-bit driver (`ripple9x.drv`)
 that sets a mode on QEMU's card and lets Microsoft's DIB engine (part of Windows) draw. It is
-step 2 of [plan.md](plan.md). No 3D yet, and nothing virtio: QEMU's `virtio-vga` (and its
-standard VGA, `-vga std`) starts out as a VGA card with the Bochs/QEMU mode-setting registers
-(I/O ports 01CEh/01CFh) and a linear frame buffer in its first PCI memory range, and that is all
-this stage uses.
+step 2 of [plan.md](plan.md). For the 2D desktop QEMU's `virtio-vga` (and its standard VGA,
+`-vga std`) is a VGA card with the Bochs/QEMU mode-setting registers (I/O ports 01CEh/01CFh)
+and a linear frame buffer in its first PCI memory range, and that is all this page needs. 3D
+goes through the mini-VDD's virtio-gpu side ([vxd-interface.md](vxd-interface.md)), the OpenGL
+driver ([mesa.md](mesa.md)) and `rippledd.dll` ([directdraw.md](directdraw.md)).
 
 ## What works (Windows 98 SE in QEMU 10.0, `-device virtio-vga`, 2026-11-15)
 
@@ -87,9 +88,9 @@ DirectDraw and Direct3D driver; these four `build.sh` makes, in `build/win9x/`) 
   Windows finds the new PCI display adapter at start-up; give the wizard that folder. It
   copies `ripple9x.drv`, `ripplevd.vxd`, `rippledd.dll` and `ripplegl.dll`, registers the mini-VDD
   and the OpenGL driver, and asks for a restart.
-  Checked 2026-11-15 on a Windows 98 SE install that had run on a Cirrus card: after the
-  restart the desktop runs on our driver and OpenGL programs find `ripplegl.dll` (on a host
-  without 3D, Mesa's software renderer).
+  Checked 2026-11-15 on a Windows 98 SE install that had run on a Cirrus card, before
+  `rippledd.dll` was in the INF: after the restart the desktop runs on our driver and OpenGL
+  programs find `ripplegl.dll` (on a host without 3D, Mesa's software renderer).
 - **Replacing another display driver:** Display Properties > Settings > Advanced > Adapter >
   Change > Have Disk, and the same folder.
 - If Device Manager still lists the old card (with a warning sign), remove that entry: it

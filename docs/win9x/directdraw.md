@@ -18,7 +18,8 @@ its own software emulation (the HEL) on the screen, which is how the driver ran 
 `rippledd.dll` is built with Visual C++ 6 against the Windows Me DDK's DirectDraw headers (not
 in this repository); the build checks that `rdd.h`'s layout matches theirs. The display
 driver's whole video memory is one tall virtual screen, so back buffers below the visible
-part can be shown by moving the display start.
+part can be shown by moving the display start, down to line 12000, the most QEMU's VBE start
+line takes; memory past that (640x480 at 8 bits, say) is a heap for surfaces never shown.
 
 ## How DirectDraw finds the HAL (seen in a Windows 98 SE guest)
 
@@ -62,7 +63,8 @@ on our OpenGL driver and the host GPU: each Direct3D context is an OpenGL contex
 framebuffer object the size of the render target, and the picture is read back into the render
 target's video memory at the end of a scene, or before the surface is locked or flipped.
 Textures are uploaded when first used and again when they were written (through our Lock,
-which DirectDraw's own blits use too, a texture blit, or a changed contents stamp); textures
+which DirectDraw's own blits use too, a texture blit, a changed contents stamp, or a read-back
+of a render target that is also a texture); textures
 in system memory without a stamp are taken again once a scene. A context keeps at most 512
 OpenGL textures and deletes the one used longest ago. Fog is a texture unit of its own after
 Direct3D's stages (a two-texel ramp looked up with the fog factor of each vertex), because the
@@ -98,11 +100,14 @@ environment (the second run of a program failed before that).
 
 3DMark 2000 1.1 runs its default benchmark to the end on Windows 98 SE in VM 230 (DirectX 7,
 256 MB, virgl on the host's Intel UHD 630, guest CPU shown as a 3.6 GHz Pentium III), with the
-game scenes, cockpit displays, fog and lighting as they should look: **11816 3D marks** at
-1024x768, 16-bit colour and textures, 16-bit z, Direct3D's own transform and lighting. The
-first complete run, before the system memory heap below, made 1240.
+game scenes, cockpit displays, fog and lighting as they should look: about **12000 3D marks**
+at 1024x768, 16-bit colour and textures, 16-bit z, Direct3D's own transform and lighting
+(11722 and 12189 with the driver as it is now, see the end of this section). The first
+complete run, before the system memory heap below, made 1240. The table is from the build
+before the review fixes (11816 3D marks); since then the high polygon count tests are about
+20% faster.
 
-| Test | Result | Before the heap |
+| Test | Result (before the review fixes) | Before the heap |
 |---|---|---|
 | Game 1, helicopter: low, medium, high detail | 188.6, 159.9, 110.9 fps | 42.1, 18.7, 14.5 |
 | Game 2, adventure: low, medium, high detail | 207.4, 174.4, 143.4 fps | 10.5, 9.0, 8.5 |

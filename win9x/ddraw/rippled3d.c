@@ -972,8 +972,8 @@ static void enable(GLF *gl, GLenum cap, DWORD on)
         gl->Disable(cap);
 }
 
-/* The depth test: ZENABLE, and only with a z-buffer. A target without one has nothing to test
-   against, while the framebuffer object's depth buffer holds what no clear has set. */
+/* The depth test: ZENABLE, and only with a z-buffer. A target without one has no depth buffer
+   attached (framebuffer), and Direct3D draws untested then. */
 static void apply_depth_test(RCTX *c)
 {
     enable(gl_of(c), GL_DEPTH_TEST, c->z && c->rs[D3DRENDERSTATE_ZENABLE] != D3DZB_FALSE);

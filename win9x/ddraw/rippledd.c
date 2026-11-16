@@ -121,11 +121,12 @@ static void clock_init(void)
     }
     qpc_shift = i;
     frame_ticks = f.LowPart / 60;
-    if (frame_ticks < 20)               /* the blank, a twentieth of a frame, needs a tick */
-        frame_ticks = 20;
+    if (!frame_ticks)
+        frame_ticks = 1;
 }
 
-/* The clock in frame_ticks units since some start. */
+/* The counter's ticks since some start (shifted, see above); frame_ticks of them make a
+   frame. */
 static DWORD now(void)
 {
     LARGE_INTEGER t;
@@ -134,6 +135,13 @@ static DWORD now(void)
         t.HighPart = 0;
     }
     return shifted(t);
+}
+
+/* The blank: the first twentieth of a frame, and at least one tick of the clock. */
+static DWORD blank_ticks(void)
+{
+    DWORD b = frame_ticks / 20;
+    return b ? b : 1;
 }
 
 /* Where in the current 1/60 s the "beam" is, from 0 to period - 1. */
@@ -148,7 +156,7 @@ static DWORD phase(DWORD *period)
    a coarse clock (GetTickCount's steps can be longer than the blank) might never give one. */
 static DWORD WINAPI WaitForVerticalBlank(LPDDHAL_WAITFORVERTICALBLANKDATA d)
 {
-    DWORD t = now(), frame = t / frame_ticks, blank = frame_ticks / 20;
+    DWORD t = now(), frame = t / frame_ticks, blank = blank_ticks();
 
     d->ddRVal = DD_OK;
     switch (d->dwFlags) {
@@ -180,7 +188,7 @@ static DWORD WINAPI WaitForVerticalBlank(LPDDHAL_WAITFORVERTICALBLANKDATA d)
 
 static DWORD WINAPI GetScanLine(LPDDHAL_GETSCANLINEDATA d)
 {
-    DWORD period, p = phase(&period), blank = period / 20;
+    DWORD period, p = phase(&period), blank = blank_ticks();
 
     if (p < blank) {
         d->ddRVal = DDERR_VERTICALBLANKINPROGRESS;
