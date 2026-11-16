@@ -598,8 +598,10 @@ D3D9CreateDevice(HANDLE hAdapter, D3DDDIARG_CREATEDEVICE *data)
    gdikmt_d3dddi_fill_basefuncs(&device->gdi_device);
 
    device->screen = d3d10_create_screen(&device->gdi_device.base);
-   if (device->screen)
+   if (device->screen) {
       FormatInitForScreen(device->screen);
+      D3D9InitFormatsForScreen(device->screen);
+   }
    if (!device->screen) {
       device->gdi_device.base.destroy(&device->gdi_device.base);
       free(device);

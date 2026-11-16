@@ -48,6 +48,11 @@ typedef struct virtio_gpu_vbuffer
 
     void *data_buf;
     u32 data_size;
+    // data_buf belongs to someone else (a DMA buffer) and is not freed with this
+    bool data_borrowed;
+    // If set, how data_buf is given back (instead of delete[])
+    void (*data_free)(void *ctx, void *data);
+    void *data_free_ctx;
 
     char *resp_buf;
     int resp_size;
@@ -182,7 +187,16 @@ class VioGpuQueue
         *len = 0;
         return NULL;
     }
+    // A notification only if the device asked for one: while it works through the queue it
+    // does not, and every notification is a VM exit (dear under nested virtualization)
     void Kick()
+    {
+        if (m_pVirtQueue)
+        {
+            virtqueue_kick(m_pVirtQueue);
+        }
+    }
+    void KickAlways()
     {
         if (m_pVirtQueue)
         {
@@ -229,6 +243,7 @@ class CtrlQueue : public VioGpuQueue
     {
         m_FenceIdr = 0;
         KeInitializeEvent(&m_SpaceEvent, SynchronizationEvent, FALSE);
+        m_deferKicks = 0;
     };
 
     PVOID AllocCmd(PGPU_VBUFFER *buf, int sz);
@@ -242,6 +257,21 @@ class CtrlQueue : public VioGpuQueue
     {
         KIRQL irql;
         Lock(&irql);
+        KickAlways();
+        Unlock(irql);
+    }
+    // Commands queued between DeferKicks(TRUE) and DeferKicks(FALSE) notify the device once, at
+    // the end (all parts of one command buffer)
+    void DeferKicks(BOOLEAN defer)
+    {
+        if (defer)
+        {
+            InterlockedIncrement(&m_deferKicks);
+            return;
+        }
+        KIRQL irql;
+        Lock(&irql);
+        InterlockedDecrement(&m_deferKicks);
         Kick();
         Unlock(irql);
     }
@@ -253,12 +283,16 @@ class CtrlQueue : public VioGpuQueue
 
     // FENCE: the host answers once its GPU has done the command (and everything before it);
     // without, as soon as it has taken it
+    // BORROWED: cmdbuf stays valid until the command has run (a DMA buffer) and is not freed
     void SubmitCommand(void *cmdbuf,
                        ULONG size,
                        ULONG ctx_id,
                        void (*complete_cb)(void *),
                        void *complete_ctx,
-                       BOOLEAN fence = TRUE);
+                       BOOLEAN fence = TRUE,
+                       BOOLEAN borrowed = FALSE,
+                       void (*data_free)(void *, void *) = NULL,
+                       void *data_free_ctx = NULL);
     void TransferHostCmd(bool to_host,
                          ULONG res_id,
                          VIOGPU_TRANSFER_CMD *options,
@@ -289,6 +323,7 @@ class CtrlQueue : public VioGpuQueue
     volatile LONG m_FenceIdr;
     // Set when the host gives descriptors back, for a sender waiting on a full ring
     KEVENT m_SpaceEvent;
+    volatile LONG m_deferKicks;
 };
 
 class CrsrQueue : public VioGpuQueue

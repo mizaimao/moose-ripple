@@ -231,3 +231,57 @@ URL) and `RB_PUT` (the receiver of "Files out of the guest").
   sends the trace back (`umd-wmp.log`).
 
 In `cmd`, `for %f in (..) do A & B` repeats B as well; put the loop in parentheses.
+
+## On Hog (2026-11-15)
+
+Hog is a Windows PC whose WSL2 distro `moose-ripple` runs QEMU 8.2 with KVM, and
+virglrenderer 1.0 on Mesa's Direct3D 12 driver over the PC's NVIDIA GeForce RTX 4090. The test
+VM there, `/root/win7`, is the rig's VM 220 at its `pre-kmd` snapshot, exported with
+`qemu-img convert -l snapshot.name=pre-kmd -c` (14 GB) and copied through the build host's
+package server. Its `start.sh` lays the machine out like VM 220 (Proxmox's `pve-q35.cfg`, the
+same machine type, CPU, SMBIOS UUID and network card address), so Windows finds the same
+devices and stays activated; the network is QEMU's user network, which reaches the build host.
+
+`tools/win7-debug/hog.sh` drives it from the workstation: `start` (keep it running in the
+background: WSL stops the distro when no session is left), `stop`, `type`, `key`, `click`,
+`mon`, and `shot`, which works only until our driver owns the display (QEMU then has "no
+surface" to dump): after that, pictures come from inside Windows (`shot.ps1`). The distro has
+no socat; the helper uses netcat. The package is installed by hand as `loadtest.sh` does it:
+an elevated prompt, the files fetched with bitsadmin, `devcon update`, "Install this driver
+software anyway", a restart.
+
+## In UTM (2026-11-15, first try)
+
+The same disk as on Hog, in a UTM VM `ripple-win7` on macserver (x86-64 emulated on Apple
+silicon, 4 processors, 4 GB, SeaBIOS, the network card's address and SMBIOS UUID of VM 220, a
+PS/2 keyboard for typed input, QMP at `rb-qmp-w7.sock` in UTM's group container).
+`tools/win7-debug/utm.sh` drives it like `hog.sh`. Windows boots (slowly: emulated) and the
+package installs, but with our driver the screen is violet with garbage and in-guest pictures
+come out black. UTM's host renderer is virglrenderer over ANGLE on Metal, and it reports GLSL
+1.30 only (`[VREND CAPS] FINAL VALUES: glsl_level=130, max_samples=1` in the VM's debug log):
+no geometry shaders, nothing Direct3D 10 needs, while the compositor still gets a Direct3D 10
+device from us. Being worked on: the driver has to offer less on such a host.
+
+The driver now refuses Direct3D 10 devices on such a host (Mesa patch 0028; virgl still reports
+geometry shaders there, so the check is on the GLSL level). The compositor then does without and
+the desktop comes up plainly (Windows Basic, 1280x1024 by UTM's resizing display). Aero on such a
+host would need the compositor's feature level 9 path, which fails for now (the probe gets "no
+interface" for levels 9.1-9.3).
+
+A trap found on the way: programs started from `C:\rb\pkg` load the user-mode driver from that
+folder (Windows looks in the program's folder first), not the one installed in System32. Run
+test programs from another folder when the package folder holds a different build.
+
+Second try (2026-11-16), with the kernel driver of "Speed, third round"
+(`docs/windows/kmd-port-notes.md`): the desktop comes up in under two minutes from start,
+Windows Basic as before. Chess Titans stopped at "Loading": the host renderer refused its
+textures (`Unknown format is 106` in the VM's debug log, then the context dropped). Format 106 is
+DXT1; ANGLE gives UTM's renderer no S3TC. The Direct3D 9 driver now asks the host for the DXT
+formats when a device is made, and where they are missing keeps DXT textures as R8G8B8A8 and
+decompresses them on upload with Mesa's own decoder (the program still sees DXT). Chess Titans
+then draws right, marble and reflections. Still open there: a DXT texture the program locks
+directly in video memory (rare; textures normally arrive by the runtime's upload) is mapped as
+R8G8B8A8, not converted.
+
+Seeing the guest: QEMU's screendump stays black once the driver draws through the host GPU, so
+pictures come from `C:\rb\pkg\shot.ps1` in the guest (as on Hog).

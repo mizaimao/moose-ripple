@@ -24,6 +24,7 @@ class VioGpuAllocation
 
     void MarkBusy();
     void UnmarkBusy();
+    void WaitIdle();
 
     void SetDxPhysicalAddress(size_t DxPhysicalAddress)
     {

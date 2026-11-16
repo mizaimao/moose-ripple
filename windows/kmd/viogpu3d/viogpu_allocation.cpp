@@ -30,6 +30,9 @@ VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_RESOURCE_OPTIO
 VioGpuAllocation::~VioGpuAllocation(void)
 {
     DbgPrint(TRACE_LEVEL_INFORMATION, ("---> %s res_id=%d\n", __FUNCTION__, m_Id));
+    // Rendering buffers are reported done to Windows once they are with the host, so Windows may
+    // destroy an allocation the host still works on: its memory stays until the host is done
+    WaitIdle();
     m_adapter->ctrlQueue.DestroyResource(m_Id);
     m_adapter->resourceIdr.PutId(m_Id);
 
@@ -79,6 +82,22 @@ void VioGpuAllocation::MarkBusy()
 
     InterlockedIncrement(&m_busy);
     KeClearEvent(&m_busyNotification);
+}
+
+void VioGpuAllocation::WaitIdle()
+{
+    PAGED_CODE();
+
+    LARGE_INTEGER timeout;
+    timeout.QuadPart = -20000000LL;
+    while (m_busy != 0)
+    {
+        if (KeWaitForSingleObject(&m_busyNotification, Executive, KernelMode, FALSE, &timeout) == STATUS_TIMEOUT)
+        {
+            DbgPrint(TRACE_LEVEL_ERROR, ("%s res_id=%d still busy after 2 s\n", __FUNCTION__, m_Id));
+            break;
+        }
+    }
 }
 
 void VioGpuAllocation::UnmarkBusy()

@@ -50,6 +50,12 @@ class VioGpuCommand
     BOOLEAN active;
     // Finished, waiting for the buffers before it to be reported
     BOOLEAN done;
+    // Reported to Windows as done. A rendering buffer is reported once all of it is with the
+    // host (sent), the others (paging, present) once the host has run them (done); either way
+    // in submission order (VioGpuCommander::ReportReady)
+    BOOLEAN reported;
+    BOOLEAN sent;
+    BOOLEAN earlyOK;
 
     // Dropped by a reset: given up without telling Windows it finished
     void Abandon();
@@ -98,6 +104,7 @@ class VioGpuCommander
 {
   public:
     VioGpuCommander(VioGpuAdapter *pAdapter);
+    ~VioGpuCommander();
 
     NTSTATUS Start();
     void Stop();
@@ -107,7 +114,16 @@ class VioGpuCommander
     void Complete(VioGpuCommand *cmd);
     // Out of the list of buffers taken to run
     void Retire(VioGpuCommand *cmd);
-    void CommandFinished(UINT fenceId);
+    void CommandFinished(void);
+    // A rendering buffer is all with the host
+    void Sent(VioGpuCommand *cmd);
+    void ReportReady(void);
+    // Copies of command data, reused: fresh pool memory costs a VM exit per page first touched
+    // under nested virtualization
+    PVOID AllocCopy(ULONG size);
+    static void FreeCopy(void *ctx, void *data);
+    // From pool: the structure is cache-aligned, more than the class may be
+    PNPAGED_LOOKASIDE_LIST m_copyList;
     // Recovery after a GPU timeout (DxgkDdiResetFromTimeout): every command buffer not yet
     // run is dropped, and answers from the host for buffers sent before it are ignored
     // (they belong to an older epoch), so Windows never hears of a buffer from before the
@@ -170,6 +186,9 @@ class VioGpuCommander
 #ifdef RIPPLE_TRACE_TIMING
   public:
     void Timing(VioGpuCommand *cmd);
+    UINT m_tParts, m_tBytes, m_tTransfers;
+    UINT m_tDepthSum, m_tDepthMax, m_tWaitingMax;
+    LONGLONG m_tCopy, m_tQueue;
 
   private:
     LONGLONG m_tSum[5], m_tMax[5];

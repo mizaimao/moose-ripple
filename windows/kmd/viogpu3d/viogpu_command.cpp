@@ -18,6 +18,9 @@ VioGpuCommand::VioGpuCommand(VioGpuAdapter *adapter)
     m_epoch = 0;
     m_queuedAll = FALSE;
     done = FALSE;
+    reported = FALSE;
+    sent = FALSE;
+    earlyOK = FALSE;
 #ifdef RIPPLE_TRACE_TIMING
     RtlZeroMemory(t, sizeof(t));
     t[0] = KeQueryPerformanceCounter(NULL).QuadPart;
@@ -43,6 +46,10 @@ void VioGpuCommand::PrepareSubmit(const DXGKARG_SUBMITCOMMAND *pSubmitCommand)
 
     m_FenceId = pSubmitCommand->SubmissionFenceId;
     m_epoch = m_pCommander->Epoch();
+    // Paging buffers are not reported early: Windows frees or moves memory once they are
+    // done, and the host may still write into it. Presents neither: Windows times the screen
+    // by them.
+    earlyOK = !pSubmitCommand->Flags.Paging && !pSubmitCommand->Flags.Present && !pSubmitCommand->Flags.Flip;
 #ifdef RIPPLE_TRACE_TIMING
     t[1] = KeQueryPerformanceCounter(NULL).QuadPart;
 #endif
@@ -91,6 +98,7 @@ void VioGpuCommand::Run()
         }
         m_queuedAll = TRUE;
 
+        m_pAdapter->ctrlQueue.DeferKicks(TRUE);
         while (m_pCommand < m_pEnd)
         {
             VIOGPU_COMMAND_HDR *cmdHdr = (VIOGPU_COMMAND_HDR *)m_pCommand;
@@ -106,15 +114,52 @@ void VioGpuCommand::Run()
             {
                 case VIOGPU_CMD_SUBMIT:
                     {
-                        PBYTE submitCmd = new (NonPagedPoolNx) BYTE[cmdHdr->size];
-                        RtlCopyMemory(submitCmd, cmdBody, cmdHdr->size);
+#ifdef RIPPLE_TRACE_TIMING
+                        LONGLONG c0 = KeQueryPerformanceCounter(NULL).QuadPart;
+#endif
+                        // A buffer reported early goes back to Windows before the host has read it,
+                        // so its commands are copied (into reused memory: fresh memory costs a VM
+                        // exit a page under nested virtualization). The others are sent from the
+                        // DMA buffer itself, which Windows keeps until they are reported.
+                        PBYTE submitCmd;
+                        BOOLEAN borrowed = !earlyOK;
+                        if (earlyOK)
+                        {
+                            submitCmd = (PBYTE)m_pCommander->AllocCopy(cmdHdr->size);
+                            if (submitCmd)
+                            {
+                                RtlCopyMemory(submitCmd, cmdBody, cmdHdr->size);
+                            }
+                            else
+                            {
+                                submitCmd = (PBYTE)cmdBody;
+                                borrowed = TRUE;
+                                earlyOK = FALSE;
+                            }
+                        }
+                        else
+                        {
+                            submitCmd = (PBYTE)cmdBody;
+                        }
+#ifdef RIPPLE_TRACE_TIMING
+                        LONGLONG c1 = KeQueryPerformanceCounter(NULL).QuadPart;
+#endif
 
                         m_pAdapter->ctrlQueue.SubmitCommand(submitCmd,
                                                             cmdHdr->size,
                                                             m_pContext->GetId(),
                                                             isLast ? VioGpuCommand::QueueRunningCb : NULL,
                                                             isLast ? this : NULL,
-                                                            isLast);
+                                                            isLast,
+                                                            borrowed,
+                                                            borrowed ? NULL : VioGpuCommander::FreeCopy,
+                                                            m_pCommander);
+#ifdef RIPPLE_TRACE_TIMING
+                        m_pCommander->m_tCopy += c1 - c0;
+                        m_pCommander->m_tQueue += KeQueryPerformanceCounter(NULL).QuadPart - c1;
+                        m_pCommander->m_tParts++;
+                        m_pCommander->m_tBytes += cmdHdr->size;
+#endif
                         break;
                     }
 
@@ -122,6 +167,9 @@ void VioGpuCommand::Run()
                 case VIOGPU_CMD_TRANSFER_FROM_HOST:
                     {
                         VIOGPU_TRANSFER_CMD *transferCmd = (VIOGPU_TRANSFER_CMD *)cmdBody;
+#ifdef RIPPLE_TRACE_TIMING
+                        m_pCommander->m_tTransfers++;
+#endif
 
                         m_pAdapter->ctrlQueue.TransferHostCmd(cmdHdr->type == VIOGPU_CMD_TRANSFER_TO_HOST,
                                                               m_pContext->GetId(),
@@ -149,9 +197,15 @@ void VioGpuCommand::Run()
             }
         }
 
+        m_pAdapter->ctrlQueue.DeferKicks(FALSE);
+        if (earlyOK)
+        {
+            m_pCommander->Sent(this);
+        }
 #ifdef RIPPLE_TRACE_TIMING
         t[3] = t[4] = KeQueryPerformanceCounter(NULL).QuadPart;
 #endif
+
         if (last != NULL)
         {
             // Back here when the host has done the last part
@@ -299,6 +353,11 @@ VioGpuCommander::VioGpuCommander(VioGpuAdapter *pAdapter)
     m_lastCompletedFence = 0;
     m_epoch = 0;
     KeInitializeGuardedMutex(&m_ResetMutex);
+    m_copyList = (PNPAGED_LOOKASIDE_LIST)ExAllocatePoolWithTag(NonPagedPool, sizeof(NPAGED_LOOKASIDE_LIST), 'cGIV');
+    if (m_copyList)
+    {
+        ExInitializeNPagedLookasideList(m_copyList, NULL, NULL, 0, 64 * 1024, 'cGIV', 0);
+    }
 #ifdef RIPPLE_TEST_TDR
     m_testStallMs = 0;
 #endif
@@ -306,9 +365,23 @@ VioGpuCommander::VioGpuCommander(VioGpuAdapter *pAdapter)
     RtlZeroMemory(m_tSum, sizeof(m_tSum));
     RtlZeroMemory(m_tMax, sizeof(m_tMax));
     m_tCount = 0;
+    m_tParts = m_tBytes = m_tTransfers = 0;
+    m_tCopy = m_tQueue = 0;
+    m_tDepthSum = m_tDepthMax = m_tWaitingMax = 0;
 #endif
     m_preemptPending = FALSE;
     m_preemptFenceId = 0;
+}
+
+VioGpuCommander::~VioGpuCommander()
+{
+    PAGED_CODE();
+    if (m_copyList)
+    {
+        ExDeleteNPagedLookasideList(m_copyList);
+        ExFreePoolWithTag(m_copyList, 'cGIV');
+        m_copyList = NULL;
+    }
 }
 
 NTSTATUS VioGpuCommander::Start()
@@ -445,10 +518,9 @@ void VioGpuCommander::ThreadWorkRoutine(void)
     }
 }
 
-// Buffers finish on the host in the order they were sent, but one without host work finishes
-// at once: Windows is told in submission order (the list of buffers taken to run), each when
-// it and all before it are done. Under the reset lock, so that a reset cannot come between the
-// check and the report.
+// A buffer has finished on the host (or never needed it): what it held is given back already
+// (Release); here it counts as done, is reported if not yet, and is deleted once it and all
+// before it are done and reported. Under the reset lock, so that a reset cannot come between.
 void VioGpuCommander::Complete(VioGpuCommand *cmd)
 {
     PAGED_CODE();
@@ -466,6 +538,11 @@ void VioGpuCommander::Complete(VioGpuCommand *cmd)
     LockQueue(&irql);
     cmd->done = TRUE;
     UnlockQueue(irql);
+    // Reported before the count drops: CommandFinished may report a preemption, and Windows takes
+    // every buffer not reported done by then as preempted and submits it again (the same DMA
+    // buffer, so the same command object, run and freed twice)
+    ReportReady();
+    CommandFinished();
 
     for (;;)
     {
@@ -474,7 +551,7 @@ void VioGpuCommander::Complete(VioGpuCommand *cmd)
         if (!IsListEmpty(&m_ActiveQueue))
         {
             head = CONTAINING_RECORD(m_ActiveQueue.Flink, VioGpuCommand, active_entry);
-            if (head->done)
+            if (head->done && head->reported)
             {
                 RemoveEntryList(&head->active_entry);
                 head->active = FALSE;
@@ -489,19 +566,75 @@ void VioGpuCommander::Complete(VioGpuCommand *cmd)
         {
             break;
         }
-
-        UINT fenceId = head->FenceId();
-        DXGKARGCB_NOTIFY_INTERRUPT_DATA interrupt;
-        RtlZeroMemory(&interrupt, sizeof(interrupt));
-        interrupt.InterruptType = DXGK_INTERRUPT_DMA_COMPLETED;
-        interrupt.DmaCompleted.SubmissionFenceId = fenceId;
-        interrupt.DmaCompleted.NodeOrdinal = 0;
-        interrupt.DmaCompleted.EngineOrdinal = 0;
-        m_pAdapter->NotifyInterrupt(&interrupt, true);
-        CommandFinished(fenceId);
         delete head;
     }
     KeReleaseGuardedMutex(&m_ResetMutex);
+}
+
+void VioGpuCommander::Sent(VioGpuCommand *cmd)
+{
+    PAGED_CODE();
+
+    KIRQL irql;
+    KeAcquireGuardedMutex(&m_ResetMutex);
+    if (cmd->Epoch() == m_epoch)
+    {
+        LockQueue(&irql);
+        cmd->sent = TRUE;
+        UnlockQueue(irql);
+        ReportReady();
+    }
+    KeReleaseGuardedMutex(&m_ResetMutex);
+}
+
+// Windows hears of buffers in submission order: each one, once it and all before it are either
+// done on the host or, for rendering buffers, all with the host. A rendering buffer's DMA buffer
+// can then be reused at once and the scheduler hands over the next buffers, instead of two at a
+// time each waiting for a round trip to the host. What Windows and programs wait on for real
+// (completion events, allocations' busy marks) still waits for the host. Under the reset lock.
+void VioGpuCommander::ReportReady(void)
+{
+    PAGED_CODE();
+
+    for (;;)
+    {
+        UINT fences[16];
+        UINT n = 0;
+        KIRQL irql;
+        LockQueue(&irql);
+        for (PLIST_ENTRY e = m_ActiveQueue.Flink; e != &m_ActiveQueue && n < ARRAYSIZE(fences); e = e->Flink)
+        {
+            VioGpuCommand *c = CONTAINING_RECORD(e, VioGpuCommand, active_entry);
+            if (c->reported)
+            {
+                continue;
+            }
+            if (!c->done && !(c->earlyOK && c->sent))
+            {
+                break;
+            }
+            c->reported = TRUE;
+            fences[n++] = c->FenceId();
+        }
+        UnlockQueue(irql);
+        if (n == 0)
+        {
+            break;
+        }
+        for (UINT i = 0; i < n; i++)
+        {
+            DXGKARGCB_NOTIFY_INTERRUPT_DATA interrupt;
+            RtlZeroMemory(&interrupt, sizeof(interrupt));
+            interrupt.InterruptType = DXGK_INTERRUPT_DMA_COMPLETED;
+            interrupt.DmaCompleted.SubmissionFenceId = fences[i];
+            InterlockedExchange(&m_lastCompletedFence, (LONG)fences[i]);
+            m_pAdapter->NotifyInterrupt(&interrupt, true);
+        }
+        if (n < ARRAYSIZE(fences))
+        {
+            break;
+        }
+    }
 }
 
 void VioGpuCommander::Reset()
@@ -589,12 +722,57 @@ void VioGpuCommander::Timing(VioGpuCommand *cmd)
                  ("T us avg/max: render-submit %lld/%lld submit-run %lld/%lld run-sent %lld/%lld host %lld/%lld answer-finish %lld/%lld\n",
                   m_tSum[0] / 2000, m_tMax[0], m_tSum[1] / 2000, m_tMax[1], m_tSum[2] / 2000, m_tMax[2],
                   m_tSum[3] / 2000, m_tMax[3], m_tSum[4] / 2000, m_tMax[4]));
+        DbgPrint(TRACE_LEVEL_FATAL,
+                 ("T per buffer: %u submits (%u bytes), %u transfers; copy %lld us, queue %lld us\n",
+                  m_tParts / 2000, m_tBytes / 2000, m_tTransfers / 2000, m_tCopy * 1000000 / freq.QuadPart / 2000,
+                  m_tQueue * 1000000 / freq.QuadPart / 2000));
+        DbgPrint(TRACE_LEVEL_FATAL,
+                 ("T with the host when one more is taken: avg %u.%02u, max %u; handed over and waiting, max %u\n",
+                  m_tDepthSum / 2000, (m_tDepthSum % 2000) / 20, m_tDepthMax, m_tWaitingMax));
+        m_tDepthSum = m_tDepthMax = m_tWaitingMax = 0;
+        m_tParts = m_tBytes = m_tTransfers = 0;
+        m_tCopy = m_tQueue = 0;
         RtlZeroMemory(m_tSum, sizeof(m_tSum));
         RtlZeroMemory(m_tMax, sizeof(m_tMax));
         m_tCount = 0;
     }
 }
 #endif
+
+
+#pragma code_seg(push)
+#pragma code_seg()
+#define VIOGPU_COPY_SMALL (64 * 1024)
+PVOID VioGpuCommander::AllocCopy(ULONG size)
+{
+    // A header in front says which way it was allocated
+    PULONG p;
+    if (m_copyList && size + 16 <= VIOGPU_COPY_SMALL)
+    {
+        p = (PULONG)ExAllocateFromNPagedLookasideList(m_copyList);
+        if (p)
+        {
+            p[0] = 1;
+            return (PBYTE)p + 16;
+        }
+    }
+    p = (PULONG) new (NonPagedPoolNx) BYTE[size + 16];
+    if (!p)
+        return NULL;
+    p[0] = 0;
+    return (PBYTE)p + 16;
+}
+
+void VioGpuCommander::FreeCopy(void *ctx, void *data)
+{
+    VioGpuCommander *self = (VioGpuCommander *)ctx;
+    PULONG p = (PULONG)((PBYTE)data - 16);
+    if (p[0] == 1)
+        ExFreeToNPagedLookasideList(self->m_copyList, p);
+    else
+        delete[] (PBYTE)p;
+}
+#pragma code_seg(pop)
 
 void VioGpuCommander::Restart()
 {
@@ -636,17 +814,15 @@ void VioGpuCommander::ReportPreempted(UINT preemptionFenceId)
 }
 
 // Not pageable: it takes the queue's spin lock.
-void VioGpuCommander::CommandFinished(UINT fenceId)
+// One buffer fewer with the host
+void VioGpuCommander::CommandFinished(void)
 {
     KIRQL irql;
     BOOLEAN report = FALSE;
     UINT preemptionFenceId = 0;
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s fence_id=%u", __FUNCTION__, fenceId));
-
     LockQueue(&irql);
     m_running--;
-    InterlockedExchange(&m_lastCompletedFence, (LONG)fenceId);
     if (m_preemptPending && IdleLocked())
     {
         report = TRUE;
@@ -819,6 +995,16 @@ VioGpuCommand *VioGpuCommander::DequeueSubmittedToRun()
     {
         result = RemoveHeadList(&m_SubmittedQueue);
         m_running++;
+#ifdef RIPPLE_TRACE_TIMING
+        {
+            UINT waiting = 0;
+            for (PLIST_ENTRY e = m_SubmittedQueue.Flink; e != &m_SubmittedQueue; e = e->Flink)
+                waiting++;
+            m_tDepthSum += m_running;
+            m_tDepthMax = max(m_tDepthMax, m_running);
+            m_tWaitingMax = max(m_tWaitingMax, waiting);
+        }
+#endif
         VioGpuCommand *cmd = CONTAINING_RECORD(result, VioGpuCommand, list_entry);
         InsertTailList(&m_ActiveQueue, &cmd->active_entry);
         cmd->active = TRUE;

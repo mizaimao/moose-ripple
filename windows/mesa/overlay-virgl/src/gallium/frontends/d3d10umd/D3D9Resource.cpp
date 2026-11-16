@@ -8,6 +8,7 @@
 #include "Format.h"
 
 #include "D3D9Host.h"
+#include "RippleLog.h"
 
 #include "tgsi/tgsi_ureg.h"
 #include "util/format/u_format.h"
@@ -209,9 +210,55 @@ D3D9FormatRowCount(D3DDDIFORMAT format, UINT height)
    return height ? height : 1;
 }
 
+/* moose-ripple: a host renderer without S3TC (UTM's, on Apple's GPUs through ANGLE) refuses
+ * DXT textures, and the program's context with them. There they are kept as R8G8B8A8 and
+ * decompressed on upload (D3D9TextureSubdata); the program still sees DXT. */
+static bool d3d9_dxt_emulated;
+
+void
+D3D9InitFormatsForScreen(struct pipe_screen *screen)
+{
+   static const enum pipe_format dxt[] = {
+      PIPE_FORMAT_DXT1_RGBA, PIPE_FORMAT_DXT3_RGBA, PIPE_FORMAT_DXT5_RGBA,
+   };
+   d3d9_dxt_emulated = false;
+   for (unsigned i = 0; i < ARRAY_SIZE(dxt); ++i) {
+      if (!screen->is_format_supported(screen, dxt[i], PIPE_TEXTURE_2D, 0, 0,
+                                       PIPE_BIND_SAMPLER_VIEW))
+         d3d9_dxt_emulated = true;
+   }
+   if (d3d9_dxt_emulated)
+      ripple_logf("d3d9: the host renderer has no S3TC; DXT textures are decompressed on upload");
+}
+
+static enum pipe_format
+D3D9DxtPipeFormat(D3DDDIFORMAT format)
+{
+   switch (format) {
+   case D3D9_FMT_DXT1:
+      return PIPE_FORMAT_DXT1_RGBA;
+   case D3D9_FMT_DXT2:
+   case D3D9_FMT_DXT3:
+      return PIPE_FORMAT_DXT3_RGBA;
+   case D3D9_FMT_DXT4:
+   case D3D9_FMT_DXT5:
+      return PIPE_FORMAT_DXT5_RGBA;
+   default:
+      return PIPE_FORMAT_NONE;
+   }
+}
+
+static bool
+D3D9FormatIsEmulatedDxt(D3DDDIFORMAT format)
+{
+   return d3d9_dxt_emulated && D3D9DxtPipeFormat(format) != PIPE_FORMAT_NONE;
+}
+
 static enum pipe_format
 D3D9FormatToPipe(D3DDDIFORMAT format)
 {
+   if (D3D9FormatIsEmulatedDxt(format))
+      return PIPE_FORMAT_R8G8B8A8_UNORM;
    switch (format) {
    case D3DDDIFMT_A8R8G8B8:
       return PIPE_FORMAT_B8G8R8A8_UNORM;
@@ -1028,6 +1075,22 @@ D3D9TextureSubdata(D3D9Device *device, D3D9Resource *resource,
       upload_data = tight;
       upload_stride = box->width * 4;
       upload_layer_stride = (uintptr_t)upload_stride * rows;
+   } else if (D3D9FormatIsEmulatedDxt(resource->format)) {
+      /* moose-ripple: blocks to R8G8B8A8 texels (d3d9_dxt_emulated); a level smaller than a
+       * block takes the part of the block it covers */
+      const UINT height = box->height ? (UINT)box->height : 1;
+      upload_stride = box->width * 4;
+      upload_layer_stride = (uintptr_t)upload_stride * height;
+      tight = (uint8_t *)malloc((size_t)upload_layer_stride * depth);
+      if (!tight)
+         return false;
+      for (UINT z = 0; z < depth; ++z)
+         util_format_unpack_rgba_8unorm_rect(D3D9DxtPipeFormat(resource->format),
+                                             tight + (size_t)z * upload_layer_stride,
+                                             upload_stride,
+                                             (const uint8_t *)data + (size_t)z * layer_stride,
+                                             stride, box->width, height);
+      upload_data = tight;
    } else if (stride != row_bytes || layer_stride != tight_layer_stride) {
       if (depth > SIZE_MAX / tight_layer_stride)
          return false;

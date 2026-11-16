@@ -68,7 +68,7 @@ for arch in $ARCHS; do
     done
     [ $status = 0 ] || continue
     lld-link /nologo /machine:$M /driver /subsystem:native,6.01 /release /nodefaultlib \
-        /entry:$E /out:"$o/viogpu3d.sys" $objs "$KIT/lib/win7/$arch/displib.lib" \
+        /entry:$E /out:"$o/viogpu3d.sys" /map:"$o/viogpu3d.map" $objs "$KIT/lib/win7/$arch/displib.lib" \
         "$KIT/lib/win7/$arch/ntoskrnl.lib" "$KIT/lib/win7/$arch/hal.lib" "$KIT/lib/win7/$arch/wmilib.lib" \
         "$KIT/lib/win7/$arch/BufferOverflowK.lib"
     ls -l "$o/viogpu3d.sys"
