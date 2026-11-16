@@ -16,6 +16,8 @@ VioGpuCommand::VioGpuCommand(VioGpuAdapter *adapter)
 
     m_FenceId = 0;
     m_epoch = 0;
+    m_queuedAll = FALSE;
+    done = FALSE;
     m_pDmaBuffer = NULL;
     m_pCommand = NULL;
     m_pEnd = NULL;
@@ -61,58 +63,86 @@ void VioGpuCommand::Run()
         return;
     }
 
-    while (m_pCommand < m_pEnd)
+    if (!m_queuedAll)
     {
-
-        VIOGPU_COMMAND_HDR *cmdHdr = (VIOGPU_COMMAND_HDR *)m_pCommand;
-        m_pCommand += sizeof(VIOGPU_COMMAND_HDR);
-
-        void *cmdBody = m_pCommand;
-        m_pCommand += cmdHdr->size;
-
-        DbgPrint(TRACE_LEVEL_VERBOSE, ("%s fence_id=%d running command=%d", __FUNCTION__, m_FenceId, cmdHdr->type));
-
-        switch (cmdHdr->type)
+        // Every part goes to the host at once and in order, the next buffer right after: the host
+        // runs them in queue order. Only the last part sent to the host is fenced and comes back
+        // here, once the host GPU has done it and everything before it. Waiting for each part,
+        // as before, left the guest idle for a host round trip per part, and QEMU notices a
+        // finished fence only at the guest's next notification or its 10 ms poll.
+        char *last = NULL;
+        for (char *p = m_pCommand; p < m_pEnd; p += sizeof(VIOGPU_COMMAND_HDR) + ((VIOGPU_COMMAND_HDR *)p)->size)
         {
-            case VIOGPU_CMD_SUBMIT:
-                {
-                    PBYTE submitCmd = new (NonPagedPoolNx) BYTE[cmdHdr->size];
-                    RtlCopyMemory(submitCmd, cmdBody, cmdHdr->size);
+            UINT type = ((VIOGPU_COMMAND_HDR *)p)->type;
+            if (type == VIOGPU_CMD_SUBMIT || type == VIOGPU_CMD_TRANSFER_TO_HOST || type == VIOGPU_CMD_TRANSFER_FROM_HOST)
+            {
+                last = p;
+            }
+        }
+        m_queuedAll = TRUE;
 
-                    m_pAdapter->ctrlQueue.SubmitCommand(submitCmd,
-                                                        cmdHdr->size,
-                                                        m_pContext->GetId(),
-                                                        VioGpuCommand::QueueRunningCb,
-                                                        this);
-                    return;
-                }
+        while (m_pCommand < m_pEnd)
+        {
+            VIOGPU_COMMAND_HDR *cmdHdr = (VIOGPU_COMMAND_HDR *)m_pCommand;
+            BOOLEAN isLast = (m_pCommand == last);
+            m_pCommand += sizeof(VIOGPU_COMMAND_HDR);
 
-            case VIOGPU_CMD_TRANSFER_TO_HOST:
-            case VIOGPU_CMD_TRANSFER_FROM_HOST:
-                {
-                    VIOGPU_TRANSFER_CMD *transferCmd = (VIOGPU_TRANSFER_CMD *)cmdBody;
+            void *cmdBody = m_pCommand;
+            m_pCommand += cmdHdr->size;
 
-                    m_pAdapter->ctrlQueue.TransferHostCmd(cmdHdr->type == VIOGPU_CMD_TRANSFER_TO_HOST,
-                                                          m_pContext->GetId(),
-                                                          transferCmd,
-                                                          VioGpuCommand::QueueRunningCb,
-                                                          this);
-                    return;
-                }
+            DbgPrint(TRACE_LEVEL_VERBOSE, ("%s fence_id=%d running command=%d", __FUNCTION__, m_FenceId, cmdHdr->type));
 
-            case VIOGPU_CMD_SCREEN_CHANGED:
-                {
-                    VIOGPU_TRANSFER_CMD *changed = (VIOGPU_TRANSFER_CMD *)cmdBody;
-                    m_pAdapter->vidpn.ScreenChanged(changed->res_id, &changed->box);
-                    break;
-                }
+            switch (cmdHdr->type)
+            {
+                case VIOGPU_CMD_SUBMIT:
+                    {
+                        PBYTE submitCmd = new (NonPagedPoolNx) BYTE[cmdHdr->size];
+                        RtlCopyMemory(submitCmd, cmdBody, cmdHdr->size);
 
-            case VIOGPU_CMD_NOP:
-            default:
-                {
-                    // DO NOTHING
-                    break;
-                }
+                        m_pAdapter->ctrlQueue.SubmitCommand(submitCmd,
+                                                            cmdHdr->size,
+                                                            m_pContext->GetId(),
+                                                            isLast ? VioGpuCommand::QueueRunningCb : NULL,
+                                                            isLast ? this : NULL,
+                                                            isLast);
+                        break;
+                    }
+
+                case VIOGPU_CMD_TRANSFER_TO_HOST:
+                case VIOGPU_CMD_TRANSFER_FROM_HOST:
+                    {
+                        VIOGPU_TRANSFER_CMD *transferCmd = (VIOGPU_TRANSFER_CMD *)cmdBody;
+
+                        m_pAdapter->ctrlQueue.TransferHostCmd(cmdHdr->type == VIOGPU_CMD_TRANSFER_TO_HOST,
+                                                              m_pContext->GetId(),
+                                                              transferCmd,
+                                                              isLast ? VioGpuCommand::QueueRunningCb : NULL,
+                                                              isLast ? this : NULL,
+                                                              isLast);
+                        break;
+                    }
+
+                case VIOGPU_CMD_SCREEN_CHANGED:
+                    {
+                        // Only noted here; the flush that shows it is queued after this buffer's parts
+                        VIOGPU_TRANSFER_CMD *changed = (VIOGPU_TRANSFER_CMD *)cmdBody;
+                        m_pAdapter->vidpn.ScreenChanged(changed->res_id, &changed->box);
+                        break;
+                    }
+
+                case VIOGPU_CMD_NOP:
+                default:
+                    {
+                        // DO NOTHING
+                        break;
+                    }
+            }
+        }
+
+        if (last != NULL)
+        {
+            // Back here when the host has done the last part
+            return;
         }
     }
 
@@ -135,8 +165,8 @@ void VioGpuCommand::Run()
 #endif
 
     Release();
-    m_pCommander->Finish(this);
-    delete this;
+    // Reported to Windows in order, which may be later, and deleted then
+    m_pCommander->Complete(this);
 }
 
 void VioGpuCommand::Abandon()
@@ -321,14 +351,48 @@ void VioGpuCommander::ThreadWorkRoutine(void)
 
     KeSetPriorityThread(KeGetCurrentThread(), LOW_REALTIME_PRIORITY);
 
+    // While buffers are with the host, the queue is nudged every millisecond: QEMU notices a
+    // finished fence at the guest's next notification or its own 10 ms poll, so a program that
+    // waits for the GPU every frame was held to about 100 frames a second. The system timer
+    // runs at 1 ms for it while there is work, and goes back a second after the last buffer.
+    BOOLEAN fineTimer = FALSE;
     for (;;)
     {
-        KeWaitForSingleObject(&m_QueueEvent, Executive, KernelMode, FALSE, NULL);
+        LARGE_INTEGER nudge, idle;
+        nudge.QuadPart = Int32x32To64(1, -10000);
+        idle.QuadPart = Int32x32To64(1000, -10000);
+        BOOLEAN busy = m_running > 0;
+        if (busy && !fineTimer)
+        {
+            ExSetTimerResolution(10000, TRUE);
+            fineTimer = TRUE;
+        }
+        NTSTATUS wait = KeWaitForSingleObject(&m_QueueEvent,
+                                              Executive,
+                                              KernelMode,
+                                              FALSE,
+                                              busy ? &nudge : (fineTimer ? &idle : NULL));
 
         if (m_bStopWorkThread)
         {
+            if (fineTimer)
+            {
+                ExSetTimerResolution(0, FALSE);
+            }
             PsTerminateSystemThread(STATUS_SUCCESS);
             break;
+        }
+        if (wait == STATUS_TIMEOUT)
+        {
+            if (busy)
+            {
+                m_pAdapter->ctrlQueue.Nudge();
+            }
+            else if (m_running == 0)
+            {
+                ExSetTimerResolution(0, FALSE);
+                fineTimer = FALSE;
+            }
         }
 
         while (true)
@@ -354,16 +418,52 @@ void VioGpuCommander::ThreadWorkRoutine(void)
     }
 }
 
-// Under the reset lock, so that a reset cannot come between the check and the report
-void VioGpuCommander::Finish(VioGpuCommand *cmd)
+// Buffers finish on the host in the order they were sent, but one without host work finishes
+// at once: Windows is told in submission order (the list of buffers taken to run), each when
+// it and all before it are done. Under the reset lock, so that a reset cannot come between the
+// check and the report.
+void VioGpuCommander::Complete(VioGpuCommand *cmd)
 {
     PAGED_CODE();
 
-    UINT fenceId = cmd->FenceId();
+    KIRQL irql;
     KeAcquireGuardedMutex(&m_ResetMutex);
-    Retire(cmd);
-    if (cmd->Epoch() == m_epoch)
+    if (cmd->Epoch() != m_epoch)
     {
+        DbgPrint(TRACE_LEVEL_WARNING, ("%s fence_id=%u from before a reset, not reported\n", __FUNCTION__, cmd->FenceId()));
+        Retire(cmd);
+        KeReleaseGuardedMutex(&m_ResetMutex);
+        delete cmd;
+        return;
+    }
+    LockQueue(&irql);
+    cmd->done = TRUE;
+    UnlockQueue(irql);
+
+    for (;;)
+    {
+        VioGpuCommand *head = NULL;
+        LockQueue(&irql);
+        if (!IsListEmpty(&m_ActiveQueue))
+        {
+            head = CONTAINING_RECORD(m_ActiveQueue.Flink, VioGpuCommand, active_entry);
+            if (head->done)
+            {
+                RemoveEntryList(&head->active_entry);
+                head->active = FALSE;
+            }
+            else
+            {
+                head = NULL;
+            }
+        }
+        UnlockQueue(irql);
+        if (head == NULL)
+        {
+            break;
+        }
+
+        UINT fenceId = head->FenceId();
         DXGKARGCB_NOTIFY_INTERRUPT_DATA interrupt;
         RtlZeroMemory(&interrupt, sizeof(interrupt));
         interrupt.InterruptType = DXGK_INTERRUPT_DMA_COMPLETED;
@@ -372,10 +472,7 @@ void VioGpuCommander::Finish(VioGpuCommand *cmd)
         interrupt.DmaCompleted.EngineOrdinal = 0;
         m_pAdapter->NotifyInterrupt(&interrupt, true);
         CommandFinished(fenceId);
-    }
-    else
-    {
-        DbgPrint(TRACE_LEVEL_WARNING, ("%s fence_id=%u from before a reset, not reported\n", __FUNCTION__, fenceId));
+        delete head;
     }
     KeReleaseGuardedMutex(&m_ResetMutex);
 }
@@ -410,13 +507,16 @@ void VioGpuCommander::Reset()
     for (;;)
     {
         VioGpuCommandHeld held[4];
+        VioGpuCommand *done[4];
         UINT n = 0;
         LockQueue(&irql);
         while (n < 4 && !IsListEmpty(&m_ActiveQueue))
         {
             VioGpuCommand *cmd = CONTAINING_RECORD(RemoveHeadList(&m_ActiveQueue), VioGpuCommand, active_entry);
             cmd->active = FALSE;
-            cmd->TakeHeld(&held[n++]);
+            cmd->TakeHeld(&held[n]);
+            // Done and only waiting for its turn: nothing else refers to it
+            done[n++] = cmd->done ? cmd : NULL;
         }
         UnlockQueue(irql);
         if (n == 0)
@@ -426,6 +526,7 @@ void VioGpuCommander::Reset()
         for (UINT i = 0; i < n; i++)
         {
             VioGpuCommand::ReleaseHeld(&held[i]);
+            delete done[i];
         }
     }
     KeReleaseGuardedMutex(&m_ResetMutex);

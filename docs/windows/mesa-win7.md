@@ -270,6 +270,12 @@ done for speed yet: the Direct3D 9 part still creates and destroys its state obj
 every draw, and both parts seem to stop near 80 to 96 frames a second whatever is drawn,
 which points at a wait per frame. That is for the performance pass.
 
+The wait was the kernel driver's: one command buffer at a time, each part waited for. With
+several buffers in flight (load test 23, `docs/windows/kmd-port-notes.md`, "Command buffers
+in flight") the scores are 6.1 for graphics and 6.1 for gaming graphics, and the frame rates
+Direct3D 9 Batch 482, Alpha 502, ALU 280, Texture load 258; Direct3D 10 Batch 140, Alpha
+129, ALU 89, Texture load 85, Geometry 135 and 30, Constant buffer 84.
+
 ### DirectDraw, DirectX 7 and 32-bit programs (2026-11-15)
 
 DirectX's own diagnostics (`dxdiag`) said "Direct3D: Not Available" while Direct3D 9 and 10

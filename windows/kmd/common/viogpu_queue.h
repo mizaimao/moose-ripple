@@ -228,6 +228,7 @@ class CtrlQueue : public VioGpuQueue
     CtrlQueue() : VioGpuQueue()
     {
         m_FenceIdr = 0;
+        KeInitializeEvent(&m_SpaceEvent, SynchronizationEvent, FALSE);
     };
 
     PVOID AllocCmd(PGPU_VBUFFER *buf, int sz);
@@ -235,18 +236,35 @@ class CtrlQueue : public VioGpuQueue
 
     UINT QueueBuffer(PGPU_VBUFFER buf);
     PGPU_VBUFFER DequeueBuffer(_Out_ UINT *len);
+    // A notification without a new command: QEMU then also looks for finished fences, which
+    // it otherwise does only every 10 ms
+    void Nudge()
+    {
+        KIRQL irql;
+        Lock(&irql);
+        Kick();
+        Unlock(irql);
+    }
 
     void CreateResource(UINT res_id, UINT format, UINT width, UINT height);
     void CreateResource3D(UINT res_id, VIOGPU_RESOURCE_OPTIONS *options);
     void DestroyResource(UINT id);
     void CtxResource(bool attach, UINT ctx_id, UINT res_id);
 
-    void SubmitCommand(void *cmdbuf, ULONG size, ULONG ctx_id, void (*complete_cb)(void *), void *complete_ctx);
+    // FENCE: the host answers once its GPU has done the command (and everything before it);
+    // without, as soon as it has taken it
+    void SubmitCommand(void *cmdbuf,
+                       ULONG size,
+                       ULONG ctx_id,
+                       void (*complete_cb)(void *),
+                       void *complete_ctx,
+                       BOOLEAN fence = TRUE);
     void TransferHostCmd(bool to_host,
                          ULONG res_id,
                          VIOGPU_TRANSFER_CMD *options,
                          void (*complete_cb)(void *),
-                         void *complete_ctx);
+                         void *complete_ctx,
+                         BOOLEAN fence = TRUE);
 
     void SetScanout(UINT scan_id, UINT res_id, UINT width, UINT height, UINT x, UINT y);
     void ResFlush(UINT res_id, UINT width, UINT height, UINT x, UINT y);
@@ -269,6 +287,8 @@ class CtrlQueue : public VioGpuQueue
 
   private:
     volatile LONG m_FenceIdr;
+    // Set when the host gives descriptors back, for a sender waiting on a full ring
+    KEVENT m_SpaceEvent;
 };
 
 class CrsrQueue : public VioGpuQueue

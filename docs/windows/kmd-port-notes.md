@@ -522,3 +522,52 @@ timeout failed"), as it does with any GPU that stays hung.
 Load test 22 (fresh VM, the regular build with these changes): 32-bit and 64-bit Direct3D 9
 checks right, DirectDraw lists the hardware devices, dxdiag finds no problems, the Experience
 Index as before (4.6, gaming graphics 5.6); nothing new in Windows' System log or the host's.
+
+## Command buffers in flight (2026-11-15)
+
+Every part of every command buffer (a SUBMIT of Direct3D's commands, a transfer) went to the
+host fenced, and the driver waited for each answer before sending the next part or the next
+buffer. QEMU answers a fenced command only once the host GPU has finished it and everything
+before it, and it notices a finished fence only at the guest's next notification or at its own
+10 ms poll; the Mac side found the same (`docs/re/perf-notes.md`). So the guest sat idle for a
+round trip per part, and anything that waits for the GPU once a frame ran at about 100 frames
+a second at most. The Experience Index's tests sat at 46-97 frames a second.
+
+Now (`VioGpuCommander`, `VioGpuCommand::Run`):
+
+- all parts of a buffer go to the host at once and in order; only the last is fenced and comes
+  back. Up to eight buffers are with the host at a time; the host runs them in queue order.
+- Windows hears of finished buffers strictly in submission order (a buffer without host work
+  finishes at once, but waits for the ones before it).
+- a sender that finds the virtio ring full waits for the host to give descriptors back. Before,
+  the command was dropped without a word; with one buffer at a time that never happened.
+- while buffers are with the host, the driver notifies the queue every millisecond without a
+  new command, so QEMU looks at its fences then and not only every 10 ms. The system timer
+  runs at 1 ms for it while there is work and goes back a second after the last buffer.
+
+The Experience Index's Direct3D tests (frames a second, `dx`, 1280x1024 off screen):
+
+| Test | before | buffers in flight | and the 1 ms notify |
+|---|---|---|---|
+| Direct3D 9 batch | 97 | 132 | 522 |
+| Direct3D 9 alpha blend | 81 | 149 | 455 |
+| Direct3D 9 ALU | 53 | 115 | 294 |
+| Direct3D 9 texture load | 48 | 115 | 264 |
+| Direct3D 10 batch | 96 | 100 | 137 |
+| Direct3D 10 alpha blend | 96 | 100 | 149 |
+| Direct3D 10 ALU | 61 | 64 | 89 |
+| Direct3D 10 texture load | 46 | 51 | 85 |
+| Direct3D 10 geometry (two) | 92, 31 | 100, 30 | 157, 59 |
+| Direct3D 10 constant buffer | 49 | 50 | 84 |
+
+The middle column is the same driver without the notify; both were measured on one VM,
+replacing the driver in place. Direct3D 10's geometry-shader test (the second geometry
+number) raises its load as frames get faster, so it reads 28 to 59 between runs and does not
+compare.
+
+Load test 23 (fresh VM, this package): the checks right (32-bit and 64-bit Direct3D 9,
+DirectDraw's hardware devices, dxdiag), the Experience Index 6.1 for graphics and 6.1 for
+gaming graphics (4.6 and 5.6 before), nothing in the host's log. With the desktop idle QEMU
+uses as much of the host's processor as with the driver before (20-22% of one core over ten
+seconds, both measured on the same VM). The timeout recovery above was run again with
+buffers in flight and works the same.

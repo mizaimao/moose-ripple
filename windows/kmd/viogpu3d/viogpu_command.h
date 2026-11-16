@@ -2,7 +2,8 @@
 
 #include "helper.h"
 
-#define VIOGPU_MAX_RUNNING 1
+// Command buffers sent to the host and not yet finished there, at most
+#define VIOGPU_MAX_RUNNING 8
 
 class VioGpuAdapter;
 class VioGpuDevice;
@@ -47,6 +48,8 @@ class VioGpuCommand
     // In the commander's list of buffers taken to run and not finished (under its lock)
     LIST_ENTRY active_entry;
     BOOLEAN active;
+    // Finished, waiting for the buffers before it to be reported
+    BOOLEAN done;
 
     // Dropped by a reset: given up without telling Windows it finished
     void Abandon();
@@ -71,6 +74,7 @@ class VioGpuCommand
 
     UINT m_FenceId;
     LONG m_epoch;
+    BOOLEAN m_queuedAll;
 
     char *m_pDmaBuffer;
     char *m_pCommand;
@@ -90,8 +94,9 @@ class VioGpuCommander
     NTSTATUS Start();
     void Stop();
 
-    // A command buffer has finished: Windows is told, unless a reset came in between
-    void Finish(VioGpuCommand *cmd);
+    // A command buffer has finished: Windows is told, in submission order, unless a reset came
+    // in between; the command is deleted
+    void Complete(VioGpuCommand *cmd);
     // Out of the list of buffers taken to run
     void Retire(VioGpuCommand *cmd);
     void CommandFinished(UINT fenceId);
