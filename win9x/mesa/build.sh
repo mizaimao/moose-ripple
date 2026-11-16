@@ -36,7 +36,9 @@ TRIPLE=i686-w64-mingw32
 [ -x "$LLVM_MINGW/bin/$TRIPLE-clang" ] || { echo "build.sh: no llvm-mingw under $T/llvm-mingw" >&2; exit 1; }
 if [ ! -f "$TARBALL" ]; then
     mkdir -p "$(dirname "$TARBALL")"
-    curl -sfLo "$TARBALL" "https://archive.mesa3d.org/mesa-$MESA_VERSION.tar.xz"
+    # to a temporary name first: an interrupted download must not look like the tarball
+    curl -sfLo "$TARBALL.part" "https://archive.mesa3d.org/mesa-$MESA_VERSION.tar.xz"
+    mv "$TARBALL.part" "$TARBALL"
 fi
 echo "$MESA_SHA256  $TARBALL" | sha256sum -c --quiet
 

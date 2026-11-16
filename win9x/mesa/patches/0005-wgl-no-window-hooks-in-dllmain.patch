@@ -6,8 +6,8 @@ diff -ruN a/src/gallium/frontends/wgl/stw_tls.c b/src/gallium/frontends/wgl/stw_
      * stw_tls_init_thread() call for it later on.
      */
 -#ifndef _GAMING_XBOX
-+   /* moose-ripple, Windows 9x: not here (this runs in DllMain, see wgl.c's DllMain); every
-+    * thread makes its data on its first OpenGL call. */
++   /* moose-ripple, Windows 9x: not here (this runs in DllMain, see wgl.c's DllMain); a
++    * thread gets its data when one of its windows gets a framebuffer. */
 +#if 0
     DWORD dwCurrentProcessId = GetCurrentProcessId();
     DWORD dwCurrentThreadId = GetCurrentThreadId();
@@ -44,7 +44,7 @@ diff -ruN a/src/gallium/targets/wgl/wgl.c b/src/gallium/targets/wgl/wgl.c
 +    * (SetWindowsHookEx, a USER call that needs Windows' 16-bit lock) while the loader holds
 +    * its own lock; a thread holding the 16-bit lock (any program inside a DirectDraw or
 +    * Direct3D call) that then needs the loader lock never gets it: the whole system stops.
-+    * A thread's data is made on its first OpenGL call instead (stw_tls_get_data). */
++    * A thread gets its data and hook when one of its windows gets a framebuffer instead. */
     case DLL_PROCESS_ATTACH:
        stw_init(&stw_winsys);
 -      stw_init_thread();
