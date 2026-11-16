@@ -90,25 +90,40 @@ environment (the second run of a program failed before that).
 ### 3DMark 2000 (2026-11-16)
 
 3DMark 2000 1.1 runs its default benchmark to the end on Windows 98 SE in VM 230 (DirectX 7,
-virgl on the host's Intel UHD 630, guest CPU shown as a 3.6 GHz Pentium III), with the game
-scenes, cockpit displays, fog and lighting as they should look: **1240 3D marks** at 1024x768,
-16-bit colour and textures, 16-bit z, Direct3D's own transform and lighting.
+256 MB, virgl on the host's Intel UHD 630, guest CPU shown as a 3.6 GHz Pentium III), with the
+game scenes, cockpit displays, fog and lighting as they should look: **11816 3D marks** at
+1024x768, 16-bit colour and textures, 16-bit z, Direct3D's own transform and lighting. The
+first complete run, before the system memory heap below, made 1240.
 
-| Test | Result |
-|---|---|
-| Game 1, helicopter: low, medium, high detail | 42.1, 18.7, 14.5 fps |
-| Game 2, adventure: low, medium, high detail | 10.5, 9.0, 8.5 fps |
-| Fill rate, single and multi-texturing | 858.2, 956.3 Mtexels/s |
-| High polygon count, 1, 4, 8 lights | 18309, 17711, 17043 Ktriangles/s |
-| Texture rendering speed, 8, 16, 32, 64 MB | 59.8, 5.1, 2.1, 1.1 fps |
-| Bump mapping, emboss 3, 2, 1 pass | 24.2, 24.2, 296.1 fps |
-| Bump mapping, environment | not supported (not offered) |
-| CPU speed | 30 CPU 3D marks |
+| Test | Result | Before the heap |
+|---|---|---|
+| Game 1, helicopter: low, medium, high detail | 188.6, 159.9, 110.9 fps | 42.1, 18.7, 14.5 |
+| Game 2, adventure: low, medium, high detail | 207.4, 174.4, 143.4 fps | 10.5, 9.0, 8.5 |
+| Fill rate, single and multi-texturing | 881.0, 949.6 Mtexels/s | 858.2, 956.3 |
+| High polygon count, 1, 4, 8 lights | 18305, 17674, 16924 Ktriangles/s | 18309, 17711, 17043 |
+| Texture rendering speed, 8, 16, 32, 64 MB | 292.4, 273.8, 240.9, 198.4 fps | 59.8, 5.1, 2.1, 1.1 |
+| Bump mapping, emboss 3, 2, 1 pass | 261.1, 281.0, 302.5 fps | 24.2, 24.2, 296.1 |
+| Bump mapping, environment | not supported (not offered) | |
+| CPU speed | 938 CPU 3D marks | 30 |
 
-The texture rendering speed shows the main limit: the card's VGA memory is 8 MB (virtio-vga has
-no setting for more), and at 1024x768 with three buffers and a z-buffer about 3 MB are left for
-textures, so DirectX 7's texture manager swaps textures through the same few surfaces many times
-a frame. Next: a large texture heap in system memory that DirectDraw treats as video memory.
+**More memory for surfaces.** The card's VGA memory is 8 MB (virtio-vga has no setting for
+more); at 1024x768 with three buffers and a z-buffer about 3 MB were left for textures, and
+DirectX 7's texture manager swapped textures through the same few surfaces many times a frame.
+Now the mini-VDD gives the DirectDraw DLL one block of system memory (`RVD_HEAP`: 64 MB with
+384 MB of RAM or more, 32 MB from 192 MB, else 16 MB), which the 16-bit driver offers as a second
+heap for every surface that is never shown (textures, z-buffers, off-screen surfaces). Textures
+and z-buffers go there first and use the card's memory only when it is full; the screen's
+flipping chain stays in the card's memory. Direct3D draws on the GPU and reads back, so
+nothing in that heap needs the card.
+
+**A deadlock.** Two runs out of six stopped the whole system at 3DMark's start (all threads
+waiting, CPU idle). Mesa's DLL hooked windows (SetWindowsHookEx, which needs Windows' 16-bit
+lock) in DllMain for every new thread, under the loader's lock, while a thread inside a
+DirectDraw call holds the 16-bit lock and may need the loader's: patch 0005 makes a thread's
+data on its first OpenGL call instead. And the HAL no longer reads its process number from the
+environment in DirectDraw calls (kernel32's lock): DllMain assigns it at process start.
+
+Open: the text on 3DMark's "Now testing" screens between tests doesn't show.
 
 Getting there took four fixes, each found with the driver's trace (`RIPPLE_D3D_TRACE`) or the
 winsys log: Mesa's thread-data lock (an NT-only static initializer, patch 0004) crashed the

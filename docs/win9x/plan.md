@@ -75,9 +75,10 @@ this project: nothing may look worse than without our driver).
    vertical blank), and a Direct3D 7 HAL plays Direct3D's command buffers on OpenGL through our
    OpenGL driver: a test program's frame (shading, depth test, textures, blending) is right on
    the host GPU and runs at about 1,040 frames a second at 640x480 ([directdraw.md](directdraw.md)).
-   3DMark 2000 runs its default benchmark to the end with a correct picture: 1240 3D marks at
-   1024x768 16-bit on the host's Intel UHD 630. Next: more texture memory (a heap in system
-   memory), speed, 3DMark 99. Open: Restart and Shut Down end in a blue screen with this driver
+   3DMark 2000 runs its default benchmark to the end with a correct picture: 11816 3D marks at
+   1024x768 16-bit on the host's Intel UHD 630, with DirectDraw surfaces that are never shown
+   in a system memory heap. Next: 3DMark 99, a comparison against a card of the time, games.
+   Open: Restart and Shut Down end in a blue screen with this driver
    ([display-driver.md](display-driver.md)).
 6. **Windows 2000:** miniport and display driver; the OpenGL and Direct3D parts reused.
 7. Later, maybe: Glide (3dfx games), Windows 95.
