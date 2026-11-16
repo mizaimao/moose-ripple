@@ -332,3 +332,27 @@ creation. Patch 0020 now covers both.
 Also seen: after ten idle minutes Windows switched the display off (the kernel driver gets the
 monitor's power state), and the first mouse movement brought it back with the compositor
 running. Sleep and hibernation stay switched off by the INF.
+
+### Windows Media Player: the picture stays black (open, 2026-11-15)
+
+The sample video plays (sound, time, controls) but its picture is black. The assessment's
+video test, which counts decoded frames, never showed this. What the Direct3D 9 trace found
+(`RIPPLE_UMD_TRACE=3`, which also writes the arguments of resource creation, locks, blits,
+fills and presents and the middle pixel of surfaces; `tools/win7-debug/guest/wmp.cmd`):
+
+- The video renderer asks for Direct3D 9's progressive video processor by name, even though
+  the driver lists none, for RGB video (1280x720, X8R8G8B8), and gets "not implemented". It
+  then scales frames on the processor into system-memory surfaces and blits those: they hold
+  only zeros, because nothing ever writes the decoded frames into them.
+- A minimal progressive processor in the driver (RGB in, background fill, scaled copy; kept
+  aside as a patch, not in the repository) is taken: every frame goes through
+  `VideoProcessBlt` from the decoder's video-memory surfaces. The picture stays black, and it
+  stays black even when the processor paints its target magenta.
+- So the frames do not reach the screen. Chess Titans presents by blitting its back buffer
+  into the compositor's surface for its window (`Blt` with `BeginPresentToDwm` and
+  `EndPresentToDwm`). The player's presenter calls `Present` with no destination instead; the
+  driver passes that on as a kernel present without a target, the kernel driver never sees a
+  present for it, and the compositor shows nothing.
+
+Next: find what Windows 7 expects of a driver for a present with no destination while the
+compositor runs, then put the processor back and check the picture.

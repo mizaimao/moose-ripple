@@ -6,8 +6,9 @@
  * A trace of what the Direct3D 9 runtime asks of the driver, for finding the one answer a
  * program could not take when nothing else says so. Off unless the environment variable
  * RIPPLE_UMD_TRACE is set in the program's environment: 1 writes every call that failed to
- * the driver's log (RippleLog.h), 2 every call. The adapter's capability questions are
- * written with their type either way.
+ * the driver's log (RippleLog.h), 2 every call, 3 also the arguments of the calls that move
+ * pictures (resource creation, lock, blit, fill, present). The adapter's capability questions
+ * are written with their type either way.
  */
 
 #include "D3D9Private.h"
@@ -33,6 +34,109 @@ D3D9TraceResult(const char *name, HRESULT hr)
       ripple_logf("d3d9: %s -> 0x%08lx", name, (unsigned long)hr);
 }
 
+/* Level 3: what a call was about. Any other argument says nothing. */
+template <typename T>
+static void
+D3D9TraceArg(T)
+{
+}
+
+static void
+D3D9TraceArg(D3DDDIARG_CREATERESOURCE *a)
+{
+   const D3DDDI_SURFACEINFO *s = a->SurfCount ? a->pSurfList : NULL;
+   ripple_logf("  resource %p: format %d, pool %d, flags 0x%08x, %ux%u, %u surfaces, %u levels",
+               a->hResource, (int)a->Format, (int)a->Pool, a->Flags.Value, s ? s->Width : 0,
+               s ? s->Height : 0, a->SurfCount, a->MipLevels);
+   D3D9SubResource *sub = a->hResource ? D3D9GetSubResource(a->hResource, 0) : NULL;
+   ripple_logf("    memory from Windows %p pitch %u; the driver's %p pitch %u", s ? s->pSysMem : NULL,
+               s ? s->SysMemPitch : 0, sub ? (void *)sub->data : NULL, sub ? sub->pitch : 0);
+}
+
+static void
+D3D9TraceArg(D3DDDIARG_LOCK *a)
+{
+   D3D9SubResource *sub = D3D9GetSubResource(a->hResource, a->SubResourceIndex);
+   ripple_logf("  lock %p.%u flags 0x%08x pitch %u at %p (memory %p)", a->hResource, a->SubResourceIndex,
+               a->Flags.Value, a->Pitch, a->pSurfData, sub ? (void *)sub->data : NULL);
+}
+
+static void
+D3D9TraceArg(const D3DDDIARG_UNLOCK *a)
+{
+   D3D9SubResource *sub = D3D9GetSubResource(a->hResource, a->SubResourceIndex);
+   if (sub && sub->data && sub->width && sub->height && sub->pitch >= sub->width * 4)
+      ripple_logf("  unlock %p.%u, pixel in the middle 0x%08x", a->hResource, a->SubResourceIndex,
+                  *(const UINT *)(sub->data + (size_t)(sub->height / 2) * sub->pitch + (sub->width / 2) * 4));
+}
+
+static void
+D3D9TraceArg(const D3DDDIARG_BLT *a)
+{
+   ripple_logf("  blt %p.%u (%ld,%ld)-(%ld,%ld) to %p.%u (%ld,%ld)-(%ld,%ld) flags 0x%08x", a->hSrcResource,
+               a->SrcSubResourceIndex, a->SrcRect.left, a->SrcRect.top, a->SrcRect.right, a->SrcRect.bottom,
+               a->hDstResource, a->DstSubResourceIndex, a->DstRect.left, a->DstRect.top, a->DstRect.right,
+               a->DstRect.bottom, a->Flags.Value);
+   /* A copy of the CPU's pixels: the one in the middle, to see whether there is a picture */
+   D3D9SubResource *src = D3D9GetSubResource(a->hSrcResource, a->SrcSubResourceIndex);
+   if (src && src->data && src->width && src->height && src->pitch >= src->width * 4)
+      ripple_logf("    source in memory %ux%u, pixel in the middle 0x%08x", src->width, src->height,
+                  *(const UINT *)(src->data + (size_t)(src->height / 2) * src->pitch + (src->width / 2) * 4));
+}
+
+static void
+D3D9TraceArg(const D3DDDIARG_COLORFILL *a)
+{
+   ripple_logf("  fill %p.%u (%ld,%ld)-(%ld,%ld) with 0x%08x", a->hResource, a->SubResourceIndex, a->DstRect.left,
+               a->DstRect.top, a->DstRect.right, a->DstRect.bottom, (unsigned)a->Color);
+}
+
+static void
+D3D9TraceArg(const D3DDDIARG_PRESENT *a)
+{
+   ripple_logf("  present %p.%u to %p.%u flags 0x%08x", a->hSrcResource, a->SrcSubResourceIndex, a->hDstResource,
+               a->DstSubResourceIndex, a->Flags.Value);
+   D3D9Resource *r = a->hSrcResource ? D3D9CastResource(a->hSrcResource) : NULL;
+   D3D9SubResource *sub = r ? D3D9GetSubResource(a->hSrcResource, a->SrcSubResourceIndex) : NULL;
+   if (r && r->pipe_resource)
+      ripple_logf("    source flags 0x%08x, pipe format %d bind 0x%x samples %u, display copy %p, allocation 0x%lx",
+                  r->flags.Value, (int)r->pipe_resource->format, r->pipe_resource->bind,
+                  r->pipe_resource->nr_samples, (void *)r->display_resource,
+                  sub ? (unsigned long)sub->allocation : 0);
+}
+
+static void
+D3D9TraceArg(const D3DDDIARG_VIDEOPROCESSBLT *a)
+{
+   ripple_logf("  video blt to (%ld,%ld)-(%ld,%ld), %u samples", a->TargetRect.left, a->TargetRect.top,
+               a->TargetRect.right, a->TargetRect.bottom, a->NumSrcSurfaces);
+   for (UINT i = 0; i < a->NumSrcSurfaces && a->pSrcSurfaces; ++i) {
+      const DXVADDI_VIDEOSAMPLE *v = &a->pSrcSurfaces[i];
+      D3D9Resource *r = D3D9CastResource(v->SrcResource);
+      ripple_logf("    sample %p.%u (%ld,%ld)-(%ld,%ld) to (%ld,%ld)-(%ld,%ld), format %d pool %d", v->SrcResource,
+                  v->SrcSubResourceIndex, v->SrcRect.left, v->SrcRect.top, v->SrcRect.right, v->SrcRect.bottom,
+                  v->DstRect.left, v->DstRect.top, v->DstRect.right, v->DstRect.bottom, r ? (int)r->format : -1,
+                  r ? (int)r->pool : -1);
+   }
+}
+
+/* Level 3, before the call: what a mapped surface holds as it is unlocked */
+template <typename T>
+static void
+D3D9TraceBefore(T)
+{
+}
+
+static void
+D3D9TraceBefore(const D3DDDIARG_UNLOCK *a)
+{
+   D3D9SubResource *sub = D3D9GetSubResource(a->hResource, a->SubResourceIndex);
+   if (sub && sub->transfer && sub->transfer_map && sub->width && sub->height)
+      ripple_logf("  unlocking %p.%u, mapped pixel in the middle 0x%08x", a->hResource, a->SubResourceIndex,
+                  *(const UINT *)((const uint8_t *)sub->transfer_map +
+                                  (size_t)(sub->height / 2) * sub->transfer->stride + (sub->width / 2) * 4));
+}
+
 /*
  * One wrapper per entry of the function table, whatever its arguments: the real function and
  * its name are kept per place of use (Id), and the wrapper calls through and writes the result.
@@ -48,8 +152,12 @@ D3D9TraceWrap(HRESULT (APIENTRY *real)(Args...), const char *name)
    struct Thunk {
       static HRESULT APIENTRY call(Args... args)
       {
+         if (d3d9_trace_level >= 3)
+            (D3D9TraceBefore(args), ...);
          HRESULT hr = s_real(args...);
          D3D9TraceResult(s_name, hr);
+         if (d3d9_trace_level >= 3)
+            (D3D9TraceArg(args), ...);
          return hr;
       }
    };
@@ -125,6 +233,12 @@ D3D9TraceDeviceFuncs(D3DDDI_DEVICEFUNCS *funcs)
    TRACE(pfnSetConvolutionKernelMono);
    TRACE(pfnComposeRects);
    TRACE(pfnBlt);
+   TRACE(pfnCreateVideoProcessDevice);
+   TRACE(pfnDestroyVideoProcessDevice);
+   TRACE(pfnVideoProcessBeginFrame);
+   TRACE(pfnVideoProcessEndFrame);
+   TRACE(pfnSetVideoProcessRenderTarget);
+   TRACE(pfnVideoProcessBlt);
    TRACE(pfnColorFill);
    TRACE(pfnDepthFill);
    TRACE(pfnCreateQuery);
@@ -163,6 +277,16 @@ D3D9TraceGetCaps(HANDLE hAdapter, const D3DDDIARG_GETCAPS *data)
 
    ripple_logf("d3d9: GetCaps type %u, %u bytes -> 0x%08lx", data ? (unsigned)data->Type : 0,
                data ? data->DataSize : 0, (unsigned long)hr);
+   /* The video processor questions (24 to 30) name the processor and the video */
+   if (data && data->Type >= D3DDDICAPS_GETVIDEOPROCESSORRTFORMATCOUNT &&
+       data->Type <= D3DDDICAPS_FILTERPROPERTYRANGE && data->pInfo) {
+      const DXVADDI_VIDEOPROCESSORINPUT *in = (const DXVADDI_VIDEOPROCESSORINPUT *)data->pInfo;
+      const GUID *g = in->pVideoProcGuid;
+      ripple_logf("  processor %08lx-%04x-%04x, video %ux%u format 0x%08x, target format %d",
+                  g ? (unsigned long)g->Data1 : 0, g ? g->Data2 : 0, g ? g->Data3 : 0,
+                  in->VideoDesc.SampleWidth, in->VideoDesc.SampleHeight,
+                  (unsigned)in->VideoDesc.Format, (int)in->RenderTargetFormat);
+   }
    return hr;
 }
 

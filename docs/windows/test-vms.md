@@ -225,5 +225,7 @@ URL) and `RB_PUT` (the receiver of "Files out of the guest").
   reboot (in an elevated prompt). Direct3D programs that are open lose their device.
 - `chk` runs the 32-bit and 64-bit checks and dxdiag after a fresh install and sends the
   results back.
+- `wmp` plays the sample video for a few seconds with the Direct3D 9 trace at level 3 and
+  sends the trace back (`umd-wmp.log`).
 
 In `cmd`, `for %f in (..) do A & B` repeats B as well; put the loop in parentheses.
