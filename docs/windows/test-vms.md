@@ -218,5 +218,12 @@ URL) and `RB_PUT` (the receiver of "Files out of the guest").
 - `inst` replaces the user-mode driver in place (the compositor is stopped around it).
 - `prep` makes a crashing program leave a dump and no dialog ("Crash dumps").
 - `wei` runs Windows' full assessment with the driver's log and sends back the results.
+- `dx` runs only the assessment's Direct3D tests, one after the other, into `dx.txt` (about
+  80 seconds; the full assessment also measures the processor and disk again after a driver
+  change).
+- `kinst` replaces the kernel driver in place and restarts the display device, without a
+  reboot (in an elevated prompt). Direct3D programs that are open lose their device.
+- `chk` runs the 32-bit and 64-bit checks and dxdiag after a fresh install and sends the
+  results back.
 
 In `cmd`, `for %f in (..) do A & B` repeats B as well; put the loop in parentheses.
