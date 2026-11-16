@@ -23,6 +23,36 @@ this stage uses.
 Not there yet: hardware drawing (everything is the DIB engine in software, which QEMU makes fast
 enough for a desktop), DirectDraw and a hardware pointer.
 
+## Known problem: Restart and Shut Down end in a blue screen (2026-11-16)
+
+Restarting or shutting down Windows with this driver stops at a text screen that looks like
+noise: it is a blue-screen message ("A fatal exception 06 has occurred at C000:00008008"),
+unreadable because the text font in video memory is gone, waiting for a key. A hard reset gets
+the machine back. Seen in QEMU 10.0 on the build host and in Proxmox's QEMU on the GPU host.
+Windows' own VGA driver on QEMU's Cirrus card restarts cleanly in the same VM.
+
+What happens, found with QEMU's monitor and gdb stub (step by step, so it can be picked up):
+
+1. At shutdown the driver's Disable calls the VDD (VDD_DRIVER_UNREGISTER). The VDD switches the
+   system VM to text mode 3 with the video BIOS (INT 10h). Any later mode switch through the BIOS
+   (the driver's own, or Windows' after Disable) does the same as below.
+2. The BIOS clears the 32 KB text buffer at B800:0000. The first write page-faults into the VDD,
+   whose page initialiser for text mode blank-fills (0720h) 16 pages, 64 KB, from B8000h through
+   its ring-0 alias of physical memory from A0000h. The last 32 KB of that are C0000h-C7FFFh:
+   the video BIOS's own code.
+3. That write sticks because under KVM QEMU does not enforce the chipset's write protection of
+   the BIOS shadow (its memory map shows the range read-only, but the KVM memory slot is
+   writable). On real hardware it would be dropped.
+4. The BIOS returns into the blanks (`20 07` is `and [bx],al`), runs through them to C8000h and
+   meets font data at C8008h: invalid opcode, exception 6, in the system VM: blue screen.
+
+Ruled out: the order of the calls in Disable (now the DDK sample's), leaving out the unregister
+call or the driver's own BIOS call, registering with EDX=-1 (no VGA in a window), and putting
+the VGA memory-map registers back to text values first. The VDD's page initialiser is chosen
+per VM (pointers at the VDD's data, set for text mode); why it grows plane 0 to 64 KB for our
+driver and not for the Cirrus one is the open question. The mini-VDD logs the VDD's calls and
+Windows' exit on QEMU's debug port for this.
+
 ## Files
 
 | File | What |

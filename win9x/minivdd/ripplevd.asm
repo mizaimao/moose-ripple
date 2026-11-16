@@ -44,6 +44,15 @@ VIndex          dw      0               ; the private copy: index register
 VRegs           dw      VBE_REGS dup (0);                   and the registers behind it
 VramBlocks      dw      0               ; the card's memory in 64 KB blocks, read once
 LoadedMsg       db      'rvd: moose-ripple mini-VDD loaded', 13, 10, 0
+; what the VDD tells us, on QEMU's debug port
+MsgRegOn        db      'rvd: display driver in its mode', 13, 10, 0
+MsgRegOff       db      'rvd: display driver out of its mode', 13, 10, 0
+MsgDisabling    db      'rvd: display driver disabling', 13, 10, 0
+MsgToVGA        db      'rvd: screen to a VGA mode', 13, 10, 0
+MsgToHiRes      db      'rvd: screen back to the display driver', 13, 10, 0
+MsgSwitched     db      'rvd: mode switch done', 13, 10, 0
+MsgSysExit      db      'rvd: Windows is ending', 13, 10, 0
+MsgVMEnd        db      'rvd: a VM ends', 13, 10, 0
 VxD_LOCKED_DATA_ENDS
 
 VxD_LOCKED_CODE_SEG
@@ -52,7 +61,46 @@ Begin_Control_Dispatch RippleVD
         Control_Dispatch Sys_Dynamic_Device_Init, MiniVDD_Dynamic_Init
         Control_Dispatch Device_Init, MiniVDD_Dynamic_Init
         Control_Dispatch W32_DEVICEIOCONTROL, RippleVD_IoControl
+        Control_Dispatch System_Exit, RippleVD_SysExit
+        Control_Dispatch Sys_VM_Terminate, RippleVD_VMEnd
 End_Control_Dispatch RippleVD
+
+; Say: ESI = zero-terminated text for QEMU's debug port. Keeps every register and the flags.
+BeginProc RippleVD_Say
+        pushfd
+        push    eax
+        push    esi
+say_next:
+        lodsb
+        test    al, al
+        jz      short say_done
+        out     0E9h, al
+        jmp     short say_next
+say_done:
+        pop     esi
+        pop     eax
+        popfd
+        ret
+EndProc RippleVD_Say
+
+SAY     macro   msg
+        push    esi
+        mov     esi, OFFSET32 msg
+        call    RippleVD_Say
+        pop     esi
+        endm
+
+BeginProc RippleVD_SysExit
+        SAY     MsgSysExit
+        clc
+        ret
+EndProc RippleVD_SysExit
+
+BeginProc RippleVD_VMEnd
+        SAY     MsgVMEnd
+        clc
+        ret
+EndProc RippleVD_VMEnd
 
 ; ---- The trap for ports 01CEh and 01CFh -------------------------------------------------------
 ; VMM calls this for every access from ring 3 or virtual 8086 mode:
@@ -150,12 +198,19 @@ BeginProc MiniVDD_RegisterDisplayDriver
         mov     eax, [ebp.Client_ECX]
         and     eax, 1
         mov     HiRes, eax
+        test    eax, eax
+        jz      short rd_off
+        SAY     MsgRegOn
+        jmp     short rd_said
+rd_off: SAY     MsgRegOff
+rd_said:
         mov     [ebp.Client_EAX], RVD_SIGNATURE
         ret
 EndProc MiniVDD_RegisterDisplayDriver
 
 ; The display driver's Disable (Windows shuts down or leaves the screen to DOS for good).
 BeginProc MiniVDD_DisplayDriverDisabling
+        SAY     MsgDisabling
         mov     HiRes, 0
         ret
 EndProc MiniVDD_DisplayDriverDisabling
@@ -164,6 +219,7 @@ EndProc MiniVDD_DisplayDriverDisabling
 ; set a VGA mode: take the card out of the display driver's mode, and let everything through
 ; until the switch is done.
 BeginProc MiniVDD_PreHiResToVGA
+        SAY     MsgToVGA
         mov     ModeChange, 1
         push    eax
         push    edx
@@ -180,11 +236,13 @@ EndProc MiniVDD_PreHiResToVGA
 
 ; The screen comes back to Windows: the display driver is about to set its mode again.
 BeginProc MiniVDD_PreVGAToHiRes
+        SAY     MsgToHiRes
         mov     ModeChange, 1
         ret
 EndProc MiniVDD_PreVGAToHiRes
 
 BeginProc MiniVDD_PostModeSwitch       ; POST_HIRES_TO_VGA and POST_VGA_TO_HIRES
+        SAY     MsgSwitched
         mov     ModeChange, 0
         ret
 EndProc MiniVDD_PostModeSwitch
@@ -278,7 +336,7 @@ BeginProc MiniVDD_Dynamic_Init
         in      ax, dx
         and     ax, 0FFF0h
         cmp     ax, 0B0C0h
-        jne     short di_fail
+        jne     di_fail
         dec     dx
         mov     ax, VBE_VRAM_64K
         out     dx, ax
@@ -288,7 +346,7 @@ BeginProc MiniVDD_Dynamic_Init
 
         VxDCall VDD_Get_Mini_Dispatch_Table     ; EDI = the VDD's table, ECX = its length
         cmp     ecx, NBR_MINI_VDD_FUNCTIONS
-        jb      short di_fail
+        jb      di_fail
         MiniVDDDispatch REGISTER_DISPLAY_DRIVER, RegisterDisplayDriver
         MiniVDDDispatch DISPLAY_DRIVER_DISABLING, DisplayDriverDisabling
         MiniVDDDispatch PRE_HIRES_TO_VGA, PreHiResToVGA

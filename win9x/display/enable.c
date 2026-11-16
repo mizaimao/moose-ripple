@@ -262,9 +262,10 @@ void __cdecl r9x_reset(void)
 {
     DIBENGINE __far *pd = (DIBENGINE __far *)lpDriverPDevice;
 
+    dbg(wEnabled ? "r9x: the VDD asks for our mode again\r\n" :
+                   "r9x: the VDD asks for our mode again, but the driver is disabled\r\n");
     if (!wEnabled)
         return;
-    dbg("r9x: reset\r\n");
     set_mode();
     if (wBpp == 8 && lpColorTable)
         set_dac(0, 256, lpColorTable);
@@ -502,13 +503,18 @@ WORD DDI Disable(LPVOID lpDevice)
 {
     DIBENGINE __far *pd = (DIBENGINE __far *)lpDevice;
 
+    /* In the order of the DDK's sample drivers: the VDD traps the VGA ports again before it is
+       told, and our int 2Fh handler stays in place until the end. */
+    dbg("r9x: Disable\r\n");
     wEnabled = 0;
     pd->deFlags |= BUSY;
-    unhook_int2f();
     int2f(START_IO_TRAP);
+    dbg("r9x: Disable: I/O trapping on\r\n");
     vdd_call(VDD_DRIVER_UNREGISTER, 0, 0, 0, 0);
+    dbg("r9x: Disable: unregistered from the VDD\r\n");
     vbe_write(VBE_ENABLE, 0);
     bios_textmode();
+    unhook_int2f();
     dbg("r9x: disabled\r\n");
     return 0xFFFF;
 }
