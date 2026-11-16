@@ -607,6 +607,22 @@ typedef struct {
     int dirty;                          /* written since (Lock, texture blit) */
 } TEXTURE;
 
+#define TARGETS  4                      /* colour buffers a context keeps (gpu_buffer) */
+#define ZBUFFERS 4                      /* depth buffers a context keeps */
+
+/* A surface's picture on the GPU: a render target's colour or a z-buffer's depth, kept by the
+   surface's memory, so that switching between targets (every flip of a chain does) needs no
+   copy as long as the GPU's picture is as new as the memory. */
+typedef struct {
+    FLATPTR mem;                        /* the surface's memory (0: not used yet) */
+    DWORD w, h;                         /* the size of rb's storage */
+    DWORD used;                         /* when last attached (RCTX.clock) */
+    GLuint rb;                          /* colour (RGBA8), or depth and stencil */
+    int written;                        /* colour: the memory is newer than rb's picture (the
+                                           program wrote it, or rb is new): it goes to the GPU
+                                           before the next draw (rt_upload) */
+} GPUBUF;
+
 typedef struct {
     RPROC *p;
     HWND wnd;
@@ -614,21 +630,27 @@ typedef struct {
     HGLRC rc;
     LPDDRAWI_DIRECTDRAW_LCL ddl;
     LPDDRAWI_DDRAWSURFACE_LCL rt, z;
-    GLuint fbo, color_rb, depth_rb, white, fog_tex;
+    GLuint fbo, white, fog_tex;
     DWORD fb_w, fb_h;
+    FLATPTR fb_z;                       /* the z-buffer whose depth is attached (0: none) */
+    GPUBUF cb[TARGETS];                 /* the picture of each render target */
+    GPUBUF zb[ZBUFFERS];                /* the depth of each z-buffer */
+    GPUBUF *cur;                        /* the attached colour buffer (NULL: none yet) */
+    DWORD clock;
+    DWORD vp_x, vp_y, vp_w, vp_h;       /* the viewport (0 wide: none given yet) */
     int dirty;                          /* drawn since the last read-back */
     DWORD rs[256];                      /* render states */
     DWORD tss[STAGES][32];              /* texture stage states */
     int stages_dirty;
-    int rt_written;                     /* the program wrote into the render target's memory */
     DWORD scene;                        /* scenes ended so far */
     DWORD bound[STAGES];                /* surface handle of each stage's texture, 0 if none */
     TEXTURE *tex;                       /* by surface handle */
     DWORD ntex;
     DWORD ntextures;                    /* OpenGL textures made (see TEXTURE_BUDGET) */
-    float *pos;                         /* converted positions, 4 floats a vertex */
+    float *pos;                         /* positions, 4 floats a vertex, then fog (convert) */
     DWORD npos;
-    WORD ibuf[3 * 2048];                /* indices of one command, rebased */
+    WORD *ibuf;                         /* indices of one command, rebased; grows as needed */
+    DWORD nibuf;
 } RCTX;
 
 #define MAX_CONTEXTS 64
@@ -683,30 +705,76 @@ static LRESULT CALLBACK hidden_wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp)
     return DefWindowProc(w, m, wp, lp);
 }
 
-/* The OpenGL picture of the render target goes into the surface's memory. */
+/* The memory at mem was written (a write Lock, a read-back): the textures made from it, in
+   every context of this process, are uploaded again before their next use. */
+static void textures_written(FLATPTR mem)
+{
+    OWNER m = me();
+    DWORD i, j;
+
+    for (i = 0; i < MAX_CONTEXTS; i++) {
+        RCTX *c = mine(&contexts[i].o, &m) ? contexts[i].c : NULL;
+        if (!c)
+            continue;
+        for (j = 0; j < c->ntex; j++)
+            if (c->tex[j].name && c->tex[j].mem == mem) {
+                c->tex[j].dirty = 1;
+                c->stages_dirty = 1;
+            }
+    }
+}
+
+/* The memory mem now holds a newer picture than the colour buffers this process's contexts
+   keep of it (a read-back, or the program wrote it): they load it before their next draw into
+   it. keep: the buffer that holds that picture itself (NULL: none). */
+static void targets_written(FLATPTR mem, const GPUBUF *keep)
+{
+    OWNER m = me();
+    DWORD i, j;
+
+    for (i = 0; i < MAX_CONTEXTS; i++) {
+        RCTX *c = mine(&contexts[i].o, &m) ? contexts[i].c : NULL;
+        if (!c)
+            continue;
+        for (j = 0; j < TARGETS; j++)
+            if (c->cb[j].mem == mem && &c->cb[j] != keep)
+                c->cb[j].written = 1;
+    }
+}
+
+/* The OpenGL picture of the render target goes into the memory it was drawn for: the attached
+   colour buffer's (a flip gives the target surface other memory, the picture stays with its
+   memory). The pitch and format are the target's, the same for every surface of a chain. */
 static void read_back(RCTX *c)
 {
     GLF *gl = gl_of(c);
     LPDDRAWI_DDRAWSURFACE_GBL g;
     DDPIXELFORMAT pf;
     PIXFMT f;
+    FLATPTR mem;
 
-    if (!c->dirty || !c->rt)
+    if (!c->dirty || !c->rt || !c->cur)
         return;
     c->dirty = 0;
+    if (c->cur->written)
+        return;                         /* the memory is newer: nothing drawn since it was */
     g = c->rt->lpGbl;
-    tracef("rd3d: read back into %08lx (scene %lu)\r\n", g->fpVidMem, c->scene);
+    mem = c->cur->mem;
+    tracef("rd3d: read back into %08lx (scene %lu)\r\n", mem, c->scene);
     surface_format(c->rt, &pf);
     f = gl_format(&pf);
-    if (!f.bytes || !g->fpVidMem)
+    if (!f.bytes || !mem)
         return;
     make_current(c);
     gl->PixelStorei(GL_PACK_ALIGNMENT, 1);
     gl->PixelStorei(GL_PACK_ROW_LENGTH, g->lPitch / f.bytes);
     gl->ReadPixels(0, 0, c->fb_w < g->wWidth ? c->fb_w : g->wWidth,
                    c->fb_h < g->wHeight ? c->fb_h : g->wHeight, f.format, f.type,
-                   (GLvoid *)g->fpVidMem);
+                   (GLvoid *)mem);
     gl->PixelStorei(GL_PACK_ROW_LENGTH, 0);
+    targets_written(mem, c->cur);       /* another context's picture of it is older now */
+    if (c->rt->ddsCaps.dwCaps & DDSCAPS_TEXTURE)
+        textures_written(mem);          /* a target that is a texture too: its new picture */
 }
 
 void d3d_surface_access(LPDDRAWI_DDRAWSURFACE_LCL s)
@@ -716,37 +784,101 @@ void d3d_surface_access(LPDDRAWI_DDRAWSURFACE_LCL s)
 
     for (i = 0; i < MAX_CONTEXTS; i++) {
         RCTX *c = mine(&contexts[i].o, &m) ? contexts[i].c : NULL;
-        if (c && c->dirty && c->rt && c->rt->lpGbl->fpVidMem == s->lpGbl->fpVidMem)
+        if (c && c->dirty && c->cur && c->cur->mem == s->lpGbl->fpVidMem)
             read_back(c);
     }
 }
 
-/* The framebuffer object the size of the render target. Rows are kept in Direct3D's order
-   (GL row 0 is the top row), so a read-back copies straight into the surface. */
+/* The viewport as OpenGL's scissor. With a guard band (d3d_driver_info) Direct3D clips
+   primitives only to that and leaves clipping to the viewport to the driver: a viewport
+   smaller than the target needs the scissor, one that covers it needs none. Rows are in
+   Direct3D's order (see framebuffer), as in clear. Set when the viewport or the target's size
+   changes and after clear and rt_upload, never for each draw. */
+static void apply_scissor(RCTX *c)
+{
+    GLF *gl = gl_of(c);
+
+    if (!c->vp_w || !c->vp_h ||
+        (!c->vp_x && !c->vp_y && c->vp_w >= c->fb_w && c->vp_h >= c->fb_h)) {
+        gl->Disable(GL_SCISSOR_TEST);
+        return;
+    }
+    gl->Scissor(c->vp_x, c->vp_y, c->vp_w, c->vp_h);
+    gl->Enable(GL_SCISSOR_TEST);
+}
+
+/* The GPU buffer of the surface at memory mem, w x h, from table t of n: a render target's
+   colour or a z-buffer's depth. A few a context; past that, the one attached longest ago is
+   taken over. That one is never newer than its memory: a target's picture is read back before
+   another is attached (set_render_target, Flip), and depth never goes to memory. A buffer that
+   is new, taken over or resized holds nothing defined: written says the memory is the
+   picture. */
+static GPUBUF *gpu_buffer(RCTX *c, GPUBUF *t, DWORD n, FLATPTR mem, DWORD w, DWORD h,
+                          GLenum format)
+{
+    GLF *gl = gl_of(c);
+    GPUBUF *b = &t[0];
+    DWORD i;
+
+    for (i = 0; i < n; i++) {
+        if (t[i].mem == mem) {
+            b = &t[i];
+            break;
+        }
+        if (t[i].used < b->used)
+            b = &t[i];                  /* not used yet, or attached longest ago */
+    }
+    if (b->mem != mem)
+        b->written = 1;
+    if (!b->rb)
+        gl->GenRenderbuffers(1, &b->rb);
+    if (b->w != w || b->h != h) {
+        gl->BindRenderbuffer(GL_RENDERBUFFER, b->rb);
+        gl->RenderbufferStorage(GL_RENDERBUFFER, format, w, h);
+        b->w = w;
+        b->h = h;
+        b->written = 1;
+    }
+    b->mem = mem;
+    b->used = ++c->clock;
+    return b;
+}
+
+/* The framebuffer object for the render target: its colour buffer and the depth buffer of
+   its z-buffer (none without one: the depth test is off then, apply_depth_test). Rows are
+   kept in Direct3D's order (GL row 0 is the top row), so a read-back copies straight into the
+   surface. Called for every command buffer too: a flip gives the target surface other memory
+   without telling the driver, and that memory's own buffer comes in here. */
 static int framebuffer(RCTX *c)
 {
     GLF *gl = gl_of(c);
     DWORD w = c->rt ? c->rt->lpGbl->wWidth : 1, h = c->rt ? c->rt->lpGbl->wHeight : 1;
+    FLATPTR mem = c->rt ? c->rt->lpGbl->fpVidMem : 0;
+    FLATPTR zmem = c->z ? c->z->lpGbl->fpVidMem : 0;
+    GPUBUF *cb;
+    GLuint depth;
 
-    if (c->fbo && w == c->fb_w && h == c->fb_h)
+    if (c->fbo && c->cur && c->cur->mem == mem && c->fb_w == w && c->fb_h == h &&
+        zmem == c->fb_z)
         return 1;
-    if (!c->fbo) {
+    if (c->cur && c->cur->mem != mem)
+        read_back(c);                   /* the old memory's picture, if newer, goes there */
+    if (!c->fbo)
         gl->GenFramebuffers(1, &c->fbo);
-        gl->GenRenderbuffers(1, &c->color_rb);
-        gl->GenRenderbuffers(1, &c->depth_rb);
-    }
     gl->BindFramebuffer(GL_FRAMEBUFFER, c->fbo);
-    gl->BindRenderbuffer(GL_RENDERBUFFER, c->color_rb);
-    gl->RenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, w, h);
-    gl->FramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, c->color_rb);
-    gl->BindRenderbuffer(GL_RENDERBUFFER, c->depth_rb);
-    gl->RenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
-    gl->FramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, c->depth_rb);
-    gl->FramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, c->depth_rb);
+    cb = gpu_buffer(c, c->cb, TARGETS, mem, w, h, GL_RGBA8);
+    gl->FramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, cb->rb);
+    depth = zmem ? gpu_buffer(c, c->zb, ZBUFFERS, zmem, w, h, GL_DEPTH24_STENCIL8)->rb : 0;
+    gl->FramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth);
+    gl->FramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, depth);
+    c->cur = cb;
+    c->fb_z = zmem;
     if (gl->CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         dbg("rd3d: framebuffer incomplete\r\n");
         return 0;
     }
+    if (c->fb_w == w && c->fb_h == h)
+        return 1;                       /* the same size: the view stays */
     c->fb_w = w;
     c->fb_h = h;
     gl->Viewport(0, 0, w, h);
@@ -756,6 +888,7 @@ static int framebuffer(RCTX *c)
     gl->Ortho(-0.5, w - 0.5, -0.5, h - 0.5, 0.0, -1.0);
     gl->MatrixMode(GL_MODELVIEW);
     gl->LoadIdentity();
+    apply_scissor(c);                   /* the viewport may not cover a target of this size */
     return 1;
 }
 
@@ -773,11 +906,14 @@ static void context_free(RCTX *c)
             gl->DeleteTextures(1, &c->white);
         if (c->fog_tex)
             gl->DeleteTextures(1, &c->fog_tex);
-        if (c->fbo) {
+        if (c->fbo)
             gl->DeleteFramebuffers(1, &c->fbo);
-            gl->DeleteRenderbuffers(1, &c->color_rb);
-            gl->DeleteRenderbuffers(1, &c->depth_rb);
-        }
+        for (i = 0; i < TARGETS; i++)
+            if (c->cb[i].rb)
+                gl->DeleteRenderbuffers(1, &c->cb[i].rb);
+        for (i = 0; i < ZBUFFERS; i++)
+            if (c->zb[i].rb)
+                gl->DeleteRenderbuffers(1, &c->zb[i].rb);
         gl->wglMakeCurrent(NULL, NULL);
         gl->wglDeleteContext(c->rc);
     }
@@ -787,6 +923,7 @@ static void context_free(RCTX *c)
         DestroyWindow(c->wnd);
     release(c->tex);
     release(c->pos);
+    release(c->ibuf);
     release(c);
 }
 
@@ -835,6 +972,13 @@ static void enable(GLF *gl, GLenum cap, DWORD on)
         gl->Disable(cap);
 }
 
+/* The depth test: ZENABLE, and only with a z-buffer. A target without one has nothing to test
+   against, while the framebuffer object's depth buffer holds what no clear has set. */
+static void apply_depth_test(RCTX *c)
+{
+    enable(gl_of(c), GL_DEPTH_TEST, c->z && c->rs[D3DRENDERSTATE_ZENABLE] != D3DZB_FALSE);
+}
+
 /* Fog is a texture unit of its own after Direct3D's stages (FOG_UNIT): a two-texel ramp whose
    alpha is the fog factor, looked up with a coordinate per vertex (convert), blends the colour
    towards the fog colour (apply_stages). OpenGL's own fog would need a fog varying, which the
@@ -852,7 +996,7 @@ static void render_state(RCTX *c, DWORD state, DWORD v)
         c->rs[state] = v;
     switch (state) {
     case D3DRENDERSTATE_ZENABLE:
-        enable(gl, GL_DEPTH_TEST, v != D3DZB_FALSE);
+        apply_depth_test(c);
         break;
     case D3DRENDERSTATE_ZWRITEENABLE:
         gl->DepthMask((GLboolean)(v ? GL_TRUE : GL_FALSE));
@@ -1285,28 +1429,19 @@ static void texture_forget(DWORD h)
    are uploaded again before their next use. */
 void d3d_surface_written(LPDDRAWI_DDRAWSURFACE_LCL s)
 {
-    OWNER m = me();
     FLATPTR mem = s->lpGbl->fpVidMem;
-    DWORD i, j;
 
-    for (i = 0; i < MAX_CONTEXTS; i++) {
-        RCTX *c = mine(&contexts[i].o, &m) ? contexts[i].c : NULL;
-        if (!c)
-            continue;
-        if (c->rt && c->rt->lpGbl->fpVidMem == mem)
-            c->rt_written = 1;          /* goes to the GPU before the next 3D draw */
-        for (j = 0; j < c->ntex; j++)
-            if (c->tex[j].name && c->tex[j].mem == mem) {
-                c->tex[j].dirty = 1;
-                c->stages_dirty = 1;
-            }
-    }
+    targets_written(mem, NULL);         /* goes to the GPU before the next 3D draw into it */
+    textures_written(mem);
 }
 
 static void stage_state(RCTX *c, DWORD stage, DWORD state, DWORD v)
 {
-    if (stage < STAGES && state < 32)
+    if (stage < STAGES && state < 32) {
         c->tss[stage][state] = v;
+        if (state == D3DTSS_ADDRESS)    /* U and V at once (DirectX 6) */
+            c->tss[stage][D3DTSS_ADDRESSU] = c->tss[stage][D3DTSS_ADDRESSV] = v;
+    }
     c->stages_dirty = 1;
 }
 
@@ -1385,12 +1520,24 @@ static float fog_factor(RCTX *c, const VERTICES *v, const BYTE *b)
     return f < 0.0f ? 0.0f : f > 1.0f ? 1.0f : f;
 }
 
+/* Direct3D adds the specular colour before fog, OpenGL's colour sum after the texture units
+   and so after FOG_UNIT: fog and specular together draw with the specular colour times the
+   vertex's fog factor f (convert). tex * f + fog * (1 - f) + spec * f is Direct3D's
+   (tex + spec) * f + fog * (1 - f), apart from clamping. */
+static int fogged_specular(RCTX *c, const VERTICES *v)
+{
+    return c->rs[D3DRENDERSTATE_FOGENABLE] && c->rs[D3DRENDERSTATE_SPECULARENABLE] &&
+           v->specular >= 0;
+}
+
 /* Positions as OpenGL wants them for perspective-correct interpolation: x, y, z times w, and
    w, from the screen coordinates and 1/w. With fog, the fog unit's texture coordinates follow
-   (the fog factor f, between the ramp's two texel centres: 0.25 + f / 2). */
+   (the fog factor f, between the ramp's two texel centres: 0.25 + f / 2), and with specular
+   too its red, green and blue times f, as floats (fogged_specular). */
 static float *convert(RCTX *c, const VERTICES *v, DWORD first, DWORD count)
 {
-    DWORD i, need = count * 5;
+    int spec = fogged_specular(c, v);
+    DWORD i, need = count * (spec ? 8 : 5);
     float *p;
     BYTE *b;
 
@@ -1415,9 +1562,20 @@ static float *convert(RCTX *c, const VERTICES *v, DWORD first, DWORD count)
     }
     if (c->rs[D3DRENDERSTATE_FOGENABLE]) {
         float *fog = c->pos + count * 4;     /* after the positions */
+        float *s = fog + count;              /* then the specular colours */
         b = v->base + first * v->stride;
-        for (i = 0; i < count; i++, b += v->stride)
-            fog[i] = 0.25f + 0.5f * fog_factor(c, v, b);
+        for (i = 0; i < count; i++, b += v->stride) {
+            float f = fog_factor(c, v, b);
+            fog[i] = 0.25f + 0.5f * f;
+            if (spec) {
+                const BYTE *bgra = b + v->specular;
+                f /= 255.0f;
+                s[0] = bgra[2] * f;
+                s[1] = bgra[1] * f;
+                s[2] = bgra[0] * f;
+                s += 3;
+            }
+        }
     }
     return c->pos;
 }
@@ -1441,7 +1599,10 @@ static void arrays(RCTX *c, const VERTICES *v, DWORD first, DWORD count)
     }
     if (v->specular >= 0 && gl->SecondaryColorPointer) {
         gl->EnableClientState(GL_SECONDARY_COLOR_ARRAY);
-        gl->SecondaryColorPointer(GL_BGRA, GL_UNSIGNED_BYTE, v->stride, b + v->specular);
+        if (fogged_specular(c, v))      /* times the fog factor, after the fog coordinates */
+            gl->SecondaryColorPointer(3, GL_FLOAT, 0, c->pos + count * 5);
+        else
+            gl->SecondaryColorPointer(GL_BGRA, GL_UNSIGNED_BYTE, v->stride, b + v->specular);
     } else {
         gl->DisableClientState(GL_SECONDARY_COLOR_ARRAY);
     }
@@ -1475,21 +1636,26 @@ static void rt_upload(RCTX *c)
     LPDDRAWI_DDRAWSURFACE_GBL g;
     DDPIXELFORMAT pf;
     PIXFMT f;
+    FLATPTR mem;
     int u;
 
-    c->rt_written = 0;
+    if (!c->cur)
+        return;
+    c->cur->written = 0;
+    mem = c->cur->mem;                  /* the attached buffer's memory, as in read_back */
     if (!c->rt || !gl->WindowPos2i)
         return;
     g = c->rt->lpGbl;
     surface_format(c->rt, &pf);
     f = gl_format(&pf);
-    if (!f.bytes || !g->fpVidMem)
+    if (!f.bytes || !mem)
         return;
-    tracef("rd3d: the program's drawing in %08lx back to the GPU\r\n", g->fpVidMem);
+    tracef("rd3d: the program's drawing in %08lx back to the GPU\r\n", mem);
     gl->Disable(GL_DEPTH_TEST);
     gl->Disable(GL_BLEND);
     gl->Disable(GL_ALPHA_TEST);
     gl->Disable(GL_COLOR_SUM);
+    gl->Disable(GL_SCISSOR_TEST);       /* all of the target, not only the viewport */
     for (u = 0; u <= FOG_UNIT; u++) {
         gl->ActiveTexture(GL_TEXTURE0 + u);
         gl->Disable(GL_TEXTURE_2D);
@@ -1500,12 +1666,13 @@ static void rt_upload(RCTX *c)
     gl->PixelStorei(GL_UNPACK_ROW_LENGTH, g->lPitch / f.bytes);
     gl->DrawPixels(c->fb_w < g->wWidth ? c->fb_w : g->wWidth,
                    c->fb_h < g->wHeight ? c->fb_h : g->wHeight, f.format, f.type,
-                   (const GLvoid *)g->fpVidMem);
+                   (const GLvoid *)mem);
     gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    enable(gl, GL_DEPTH_TEST, c->rs[D3DRENDERSTATE_ZENABLE] != D3DZB_FALSE);
+    apply_depth_test(c);
     enable(gl, GL_BLEND, c->rs[D3DRENDERSTATE_ALPHABLENDENABLE]);
     enable(gl, GL_ALPHA_TEST, c->rs[D3DRENDERSTATE_ALPHATESTENABLE]);
     enable(gl, GL_COLOR_SUM, c->rs[D3DRENDERSTATE_SPECULARENABLE]);
+    apply_scissor(c);
     c->stages_dirty = 1;
     c->dirty = 1;
 }
@@ -1521,7 +1688,7 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
         dbg("rd3d: vertices out of range\r\n");
         return;
     }
-    if (c->rt_written)
+    if (c->cur && c->cur->written)
         rt_upload(c);
     if (c->stages_dirty || textures_changed(c))
         apply_stages(c);
@@ -1539,12 +1706,25 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
     c->dirty = 1;
 }
 
-/* Indices of a command, made relative to their smallest one; the span they cover. */
+/* Indices of a command, made relative to their smallest one, in the context's index buffer
+   (grown as needed: one command may hold any number of them); the span they cover. NULL
+   without memory. */
 static WORD *index_list(RCTX *c, const WORD *src, DWORD n, DWORD step, DWORD keep,
-                        DWORD *lo, DWORD *span, WORD *buf)
+                        DWORD *lo, DWORD *span)
 {
     DWORD i, j, k = 0, mn = 0xFFFF, mx = 0;
+    WORD *buf;
 
+    if (!c->ibuf || n * keep > c->nibuf) {
+        release(c->ibuf);
+        c->nibuf = n * keep + 1024;
+        c->ibuf = (WORD *)alloc(c->nibuf * sizeof(WORD));
+        if (!c->ibuf) {
+            c->nibuf = 0;
+            return NULL;
+        }
+    }
+    buf = c->ibuf;
     for (i = 0; i < n; i++)
         for (j = 0; j < keep; j++) {
             WORD x = src[i * step + j];
@@ -1556,7 +1736,6 @@ static WORD *index_list(RCTX *c, const WORD *src, DWORD n, DWORD step, DWORD kee
             buf[k++] = (WORD)(src[i * step + j] - mn);
     *lo = n ? mn : 0;
     *span = n ? mx - mn + 1 : 0;
-    (void)c;
     return buf;
 }
 
@@ -1568,12 +1747,13 @@ static void clear(RCTX *c, DWORD flags, DWORD color, float depth, DWORD stencil,
     GLbitfield mask = 0;
     DWORD i;
 
-    if (c->rt_written) {
-        /* a clear of the whole picture makes what the program drew moot */
+    if (c->cur && c->cur->written && (flags & D3DCLEAR_TARGET)) {
+        /* a clear of the whole picture makes what the program drew moot (one of the depth
+           only leaves that to the next draw or clear) */
         if ((flags & D3DCLEAR_TARGET) && (!n || (n == 1 && rects[0].left <= 0 &&
             rects[0].top <= 0 && (DWORD)rects[0].right >= c->fb_w &&
             (DWORD)rects[0].bottom >= c->fb_h)))
-            c->rt_written = 0;
+            c->cur->written = 0;
         else
             rt_upload(c);
     }
@@ -1604,11 +1784,15 @@ static void clear(RCTX *c, DWORD flags, DWORD color, float depth, DWORD stencil,
         gl->Disable(GL_SCISSOR_TEST);
         gl->Clear(mask);
     }
-    gl->Disable(GL_SCISSOR_TEST);
+    apply_scissor(c);                   /* the viewport's again */
     gl->DepthMask((GLboolean)(c->rs[D3DRENDERSTATE_ZWRITEENABLE] ? GL_TRUE : GL_FALSE));
 }
 
 /* ---- Render target ------------------------------------------------------------------------------ */
+/* The old target's picture goes into its memory first. The new target gets its own colour
+   buffer (framebuffer, gpu_buffer): the picture it had on the GPU if that is as new as its
+   memory, otherwise the memory goes in before the next draw (a clear of the whole target
+   makes that moot). The depth is the new z-buffer's own. */
 static void set_render_target(RCTX *c, LPDDRAWI_DDRAWSURFACE_LCL rt, LPDDRAWI_DDRAWSURFACE_LCL z)
 {
     read_back(c);
@@ -1618,6 +1802,7 @@ static void set_render_target(RCTX *c, LPDDRAWI_DDRAWSURFACE_LCL rt, LPDDRAWI_DD
     c->rt = rt;
     c->z = z;
     framebuffer(c);
+    apply_depth_test(c);                /* with or without a z-buffer now */
 }
 
 /* ---- The Direct3D callbacks -------------------------------------------------------------------- */
@@ -1856,9 +2041,15 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
     }
     w = r.right - r.left;
     h = r.bottom - r.top;
+    /* A copy in memory, so the source's newest picture must be there first, and the target's
+       too (the part not copied stays); a context's read-back may make another one current. */
+    d3d_surface_access(ss);
+    d3d_surface_access(ds);
+    make_current(c);
     for (y = 0; y < h; y++)
         memcpy((BYTE *)dg->fpVidMem + (b->pDest.y + y) * dg->lPitch + b->pDest.x * bytes,
                (BYTE *)sg->fpVidMem + (r.top + y) * sg->lPitch + r.left * bytes, w * bytes);
+    d3d_surface_written(ds);            /* a render target too: its GPU picture is older now */
     if (b->dwDDDestSurface < c->ntex)
         c->tex[b->dwDDDestSurface].dirty = 1;            /* upload again */
     c->stages_dirty = 1;
@@ -1880,8 +2071,7 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
     }
     gl = gl_of(c);
     make_current(c);
-    if (!c->fbo || c->rt->lpGbl->wWidth != c->fb_w || c->rt->lpGbl->wHeight != c->fb_h)
-        framebuffer(c);
+    framebuffer(c);                     /* a new size, or other memory after a flip */
     memset(&v, 0, sizeof v);
     if (!parse_fvf(d->dwVertexType, &v))
         v.stride = d->dwVertexSize ? d->dwVertexSize : 32;
@@ -1918,9 +2108,20 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
             cmd = data + n * sizeof(D3DHAL_DP2TEXTURESTAGESTATE);
             break;
         }
-        case D3DDP2OP_VIEWPORTINFO:
+        case D3DDP2OP_VIEWPORTINFO: {
+            /* the rectangle to clip to (apply_scissor): the last one counts */
+            const D3DHAL_DP2VIEWPORTINFO *vp = (const D3DHAL_DP2VIEWPORTINFO *)data;
+            if (n) {
+                vp += n - 1;
+                c->vp_x = vp->dwX;
+                c->vp_y = vp->dwY;
+                c->vp_w = vp->dwWidth;
+                c->vp_h = vp->dwHeight;
+                apply_scissor(c);
+            }
             cmd = data + n * sizeof(D3DHAL_DP2VIEWPORTINFO);
             break;
+        }
         case D3DDP2OP_WINFO:
             cmd = data + n * sizeof(D3DHAL_DP2WINFO);
             break;
@@ -1979,7 +2180,7 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
         case D3DDP2OP_INDEXEDTRIANGLEFAN: {
             DWORD base = 0, lo, span, step, keep, count, size;
             GLenum mode;
-            WORD *src;
+            WORD *src, *idx;
             switch (k->bCommand) {
             case D3DDP2OP_INDEXEDLINELIST:      mode = GL_LINES; step = 2; keep = 2; count = n; size = 4; break;
             case D3DDP2OP_INDEXEDTRIANGLELIST:  mode = GL_TRIANGLES; step = 4; keep = 3; count = n; size = 8; break;
@@ -1994,12 +2195,11 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
                 base = ((LPD3DHAL_DP2STARTVERTEX)data)->wVStart;
                 src = (WORD *)(data + sizeof(D3DHAL_DP2STARTVERTEX));
             }
-            if (count * keep <= sizeof c->ibuf / sizeof c->ibuf[0]) {
-                index_list(c, src, count, step, keep, &lo, &span, c->ibuf);
-                draw(c, &v, mode, base + lo, 0, c->ibuf, count * keep, span);
-            } else {
-                dbg("rd3d: too many indices in one command\r\n");
-            }
+            idx = index_list(c, src, count, step, keep, &lo, &span);
+            if (idx)
+                draw(c, &v, mode, base + lo, 0, idx, count * keep, span);
+            else
+                dbg("rd3d: no memory for the indices of a command\r\n");
             cmd = (BYTE *)src + count * size;
             break;
         }

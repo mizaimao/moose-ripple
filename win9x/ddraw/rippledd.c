@@ -121,44 +121,58 @@ static void clock_init(void)
     }
     qpc_shift = i;
     frame_ticks = f.LowPart / 60;
-    if (!frame_ticks)
-        frame_ticks = 1;
+    if (frame_ticks < 20)               /* the blank, a twentieth of a frame, needs a tick */
+        frame_ticks = 20;
 }
 
-/* Where in the current 1/60 s the "beam" is, from 0 to period - 1. */
-static DWORD phase(DWORD *period)
+/* The clock in frame_ticks units since some start. */
+static DWORD now(void)
 {
     LARGE_INTEGER t;
     if (!QueryPerformanceCounter(&t)) {
         t.LowPart = GetTickCount();
         t.HighPart = 0;
     }
-    *period = frame_ticks;
-    return shifted(t) % frame_ticks;
+    return shifted(t);
 }
 
+/* Where in the current 1/60 s the "beam" is, from 0 to period - 1. */
+static DWORD phase(DWORD *period)
+{
+    *period = frame_ticks;
+    return now() % frame_ticks;
+}
+
+/* The blank is the first twentieth of each frame, so the next blank starts when the frame
+   number changes. The waits watch for that change rather than for a reading inside the blank:
+   a coarse clock (GetTickCount's steps can be longer than the blank) might never give one. */
 static DWORD WINAPI WaitForVerticalBlank(LPDDHAL_WAITFORVERTICALBLANKDATA d)
 {
-    DWORD period, p = phase(&period), blank = period / 20;
+    DWORD t = now(), frame = t / frame_ticks, blank = frame_ticks / 20;
 
     d->ddRVal = DD_OK;
     switch (d->dwFlags) {
     case DDWAITVB_I_TESTVB:
-        d->bIsInVB = p < blank;
+        d->bIsInVB = t % frame_ticks < blank;
         break;
     case DDWAITVB_BLOCKBEGIN:           /* the start of the next blank: if one is on now,
                                            it is not the next */
     case DDWAITVB_BLOCKBEGINEVENT:
-        while (phase(&period) < blank)
-            Sleep(0);
-        while (phase(&period) >= blank)
+        while (now() / frame_ticks == frame)
             Sleep(0);
         break;
-    case DDWAITVB_BLOCKEND:             /* the end of the next (or current) blank */
-        while (phase(&period) >= blank)
+    case DDWAITVB_BLOCKEND:             /* the end of the current blank, or of the next one */
+        if (t % frame_ticks >= blank) {
+            while (now() / frame_ticks == frame)
+                Sleep(0);
+            frame = now() / frame_ticks;
+        }
+        for (;;) {
+            t = now();
+            if (t / frame_ticks != frame || t % frame_ticks >= blank)
+                break;
             Sleep(0);
-        while (phase(&period) < blank)
-            Sleep(0);
+        }
         break;
     }
     return DDHAL_DRIVER_HANDLED;
@@ -188,14 +202,17 @@ static DWORD WINAPI CanCreateSurface(LPDDHAL_CANCREATESURFACEDATA d)
 }
 
 /* Show another surface: point the start of the display at it. DirectDraw places back buffers
-   in the heap below the screen at the start of a line, so a line number is all the card needs. */
+   in the heap below the screen at the start of a line, so a line number is all the card needs;
+   QEMU takes none past line RDD_MAX_Y_OFFSET, and the 16-bit driver's heap puts no back
+   buffer below it. */
 static DWORD WINAPI Flip(LPDDHAL_FLIPDATA d)
 {
     DWORD off = d->lpSurfTarg->lpGbl->fpVidMem - shared->lfb;
 
     d3d_trace("flip: from, to", d->lpSurfCurr->lpGbl->fpVidMem, d->lpSurfTarg->lpGbl->fpVidMem);
     d3d_surface_access(d->lpSurfTarg);       /* a 3D picture still on the GPU */
-    if (!shared->pitch || off % shared->pitch || off / shared->pitch + shared->height > shared->lines) {
+    if (!shared->pitch || off % shared->pitch || off / shared->pitch > RDD_MAX_Y_OFFSET ||
+        off / shared->pitch + shared->height > shared->lines) {
         dbg("rdd: can't show a surface at offset "); dbg_hex(off); dbg("\r\n");
         d->ddRVal = DDERR_GENERIC;
         return DDHAL_DRIVER_HANDLED;
