@@ -5,14 +5,16 @@ constant buffer 14, past what virgl's host may take: virglrenderer counts the or
 and a block of its own in PIPE_SHADER_CAP_MAX_CONST_BUFFERS. On a host OpenGL with 14 uniform
 blocks the vertex shader of WinSAT's constant buffer test failed to link and its draws were
 dropped. Slots at or past that limit are now declared as buffer textures and read with TXF from
-an unsigned view (as the driver's other buffer loads on virgl); before each draw a view of the
-buffer bound to such a slot is bound at the highest sampler views below 16. RIPPLE_CB_LIMIT
-lowers the limit, to try the path on any host.
+an unsigned view (as the driver's other buffer loads on virgl). Each gets the highest sampler
+view below 16 that the shader does not declare as a resource or sampler itself; before each
+draw (ResolveState) a view of the buffer bound to such a slot is bound there, and the
+program's own view is put back once no bound shader needs ours. RIPPLE_CB_LIMIT lowers the
+limit, to try the path on any host.
 
 ---
 --- a/src/gallium/frontends/d3d10umd/ShaderTGSI.c
 +++ b/src/gallium/frontends/d3d10umd/ShaderTGSI.c
-@@ -237,6 +237,10 @@
+@@ -237,6 +237,12 @@
     uint num_scatters;
     struct ureg_dst insn_temps[16];
     uint num_insn_temps;
@@ -20,18 +22,56 @@ lowers the limit, to try the path on any host.
 +   struct Shader_cb_views *cb_views;
 +   bool cb_as_view[PIPE_MAX_CONSTANT_BUFFERS];
 +   struct ureg_src cb_sview[PIPE_MAX_CONSTANT_BUFFERS];
++   uint32_t used_view_mask;   /* sampler and resource registers the shader declares */
++   bool cb_views_assigned;
  
     struct {
        bool declared;
-@@ -913,6 +917,33 @@
+@@ -913,6 +919,69 @@
     sx->num_insn_temps = 0;
  }
  
++/* moose-ripple: once the shader's own declarations are in (they all come before the first
++ * instruction), each constant buffer read as a buffer texture gets the highest sampler view
++ * from the caller's base down that the shader does not declare as a resource or sampler */
++static void
++assign_cb_views(struct Shader_xlate *sx)
++{
++   struct Shader_cb_views *views = sx->cb_views;
++   uint32_t taken = sx->used_view_mask;
++   int next = (int)views->view_base;
++
++   sx->cb_views_assigned = true;
++   for (unsigned i = 0; i < views->count; i++) {
++      while (next >= 0 && (taken & (1u << next)))
++         next--;
++      if (next < 0) {
++         LOG_UNSUPPORTED(true);
++         views->count = i;
++         break;
++      }
++      const unsigned slot = views->slot[i];
++      views->view[i] = next;
++      taken |= 1u << next;
++      ureg_DECL_sampler_view(sx->ureg, next, TGSI_TEXTURE_BUFFER,
++                             TGSI_RETURN_TYPE_UINT, TGSI_RETURN_TYPE_UINT,
++                             TGSI_RETURN_TYPE_UINT, TGSI_RETURN_TYPE_UINT);
++      sx->cb_sview[slot] = ureg_DECL_sampler(sx->ureg, next);
++      ripple_logf("d3d10: constant buffer %u read as a buffer texture through view %u "
++                  "(the host takes %u constant buffers)", slot, next, views->max_const_buffers);
++   }
++}
++
 +/* moose-ripple: a read from a constant buffer that is a buffer texture (Shader_cb_views): the
 + * element is fetched into a temporary before the instruction */
 +static struct ureg_src
 +translate_cb_view_read(struct Shader_xlate *sx, const struct Shader_operand *operand)
 +{
++   if (!sx->cb_views_assigned)
++      assign_cb_views(sx);
++   if (ureg_src_is_undef(sx->cb_sview[operand->index[0].imm]))
++      return ureg_imm1u(sx->ureg, 0);
++
 +   const struct Shader_index *index = &operand->index[1];
 +   struct ureg_dst coord = insn_temp(sx);
 +   struct ureg_dst value = insn_temp(sx);
@@ -57,7 +97,7 @@ lowers the limit, to try the path on any host.
  static struct ureg_src
  translate_indexable_temp(struct Shader_xlate *sx,
                           const struct Shader_operand *operand)
-@@ -1137,6 +1168,11 @@
+@@ -1137,6 +1206,11 @@
        assert(operand->base.index[0].index_rep == D3D10_SB_OPERAND_INDEX_IMMEDIATE32);
        assert(operand->base.index[0].imm + 1 < PIPE_MAX_CONSTANT_BUFFERS);
  
@@ -69,7 +109,7 @@ lowers the limit, to try the path on any host.
        switch (operand->base.index[1].index_rep) {
        case D3D10_SB_OPERAND_INDEX_IMMEDIATE32:
           assert(operand->base.index[1].imm < SHADER_MAX_CONSTS);
-@@ -1382,7 +1418,8 @@
+@@ -1382,7 +1456,8 @@
  
  const struct tgsi_token *
  Shader_tgsi_translate(const unsigned *code,
@@ -79,7 +119,7 @@ lowers the limit, to try the path on any host.
  {
     struct Shader_xlate sx;
     struct Shader_parser parser;
-@@ -1395,6 +1432,9 @@
+@@ -1395,6 +1470,9 @@
     uint i, j;
  
     memset(&sx, 0, sizeof sx);
@@ -89,7 +129,16 @@ lowers the limit, to try the path on any host.
  
     Shader_parse_init(&parser, code);
  
-@@ -1989,9 +2029,32 @@
+@@ -1976,6 +2054,8 @@
+ 
+          target = translate_resource_dimension(opcode.specific.dcl_resource_dimension);
+          sx.resources[res_index].target = target;
++         if (res_index < 32)
++            sx.used_view_mask |= 1u << res_index;
+          if (!(use_old_tex_ops || (st_debug & ST_DEBUG_OLD_TEX_OPS))) {
+             sx.sv[res_index] =
+                ureg_DECL_sampler_view(ureg, res_index, target,
+@@ -1989,9 +2069,23 @@
  
        case D3D10_SB_OPCODE_DCL_CONSTANT_BUFFER: {
           unsigned num_constants = opcode.src[0].base.index[1].imm;
@@ -100,20 +149,11 @@ lowers the limit, to try the path on any host.
 +         /* moose-ripple: past the screen's limit, a buffer texture (Shader_cb_views) */
 +         if (sx.cb_views && sx.cb_views->max_const_buffers &&
 +             slot + 1 >= sx.cb_views->max_const_buffers) {
-+            if (sx.cb_views->count < SHADER_MAX_CB_VIEWS &&
-+                sx.cb_views->view_base >= sx.cb_views->count) {
-+               const unsigned view = sx.cb_views->view_base - sx.cb_views->count;
++            /* its view is chosen at the first read (assign_cb_views) */
++            if (sx.cb_views->count < SHADER_MAX_CB_VIEWS) {
 +               sx.cb_views->slot[sx.cb_views->count] = slot;
-+               sx.cb_views->view[sx.cb_views->count] = view;
 +               sx.cb_views->count++;
 +               sx.cb_as_view[slot] = true;
-+               ureg_DECL_sampler_view(ureg, view, TGSI_TEXTURE_BUFFER,
-+                                      TGSI_RETURN_TYPE_UINT, TGSI_RETURN_TYPE_UINT,
-+                                      TGSI_RETURN_TYPE_UINT, TGSI_RETURN_TYPE_UINT);
-+               sx.cb_sview[slot] = ureg_DECL_sampler(ureg, view);
-+               ripple_logf("d3d10: constant buffer %u read as a buffer texture through view %u "
-+                           "(the host takes %u constant buffers)", slot, view,
-+                           sx.cb_views->max_const_buffers);
 +               break;
 +            }
 +            LOG_UNSUPPORTED(true);
@@ -122,6 +162,26 @@ lowers the limit, to try the path on any host.
           if (num_constants == 0) {
              num_constants = SHADER_MAX_CONSTS;
           } else {
+@@ -2012,6 +2106,8 @@
+          sx.samplers[opcode.dst[0].base.index[0].imm] =
+             ureg_DECL_sampler(ureg,
+                               opcode.dst[0].base.index[0].imm);
++         if (opcode.dst[0].base.index[0].imm < 32)
++            sx.used_view_mask |= 1u << opcode.dst[0].base.index[0].imm;
+          break;
+ 
+       case D3D10_SB_OPCODE_DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY:
+@@ -2440,6 +2536,10 @@
+       ureg_ENDSUB(ureg);
+    }
+ 
++   /* moose-ripple: buffer-texture constant buffers the shader never reads need no view */
++   if (sx.cb_views && !sx.cb_views_assigned)
++      sx.cb_views->count = 0;
++
+    ureg_END(ureg);
+ 
+    for (i = 0; i < sx.num_calls; ++i) {
 --- a/src/gallium/frontends/d3d10umd/ShaderParse.h
 +++ b/src/gallium/frontends/d3d10umd/ShaderParse.h
 @@ -168,9 +168,23 @@
@@ -167,7 +227,7 @@ lowers the limit, to try the path on any host.
  };
  
  struct Query;
-@@ -100,6 +102,12 @@
+@@ -100,6 +102,14 @@
     Shader *bound_empty_gs;
     Shader *bound_vs;
  
@@ -176,11 +236,13 @@ lowers the limit, to try the path on any host.
 +   struct pipe_resource *cbs[PIPE_SHADER_TYPES][D3D10_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
 +   Shader *bound_shaders[PIPE_SHADER_TYPES];
 +   struct pipe_sampler_view *cb_sviews[PIPE_SHADER_TYPES][SHADER_MAX_CB_VIEWS];
++   unsigned cb_bound_mask[PIPE_SHADER_TYPES];           /* where ours are bound now */
++   struct pipe_sampler_view *cb_bound[PIPE_SHADER_TYPES][16];
 +
     unsigned max_dual_source_render_targets;
     
     D3D10DDI_HRTCORELAYER  hRTCoreLayer;
-@@ -118,6 +126,9 @@
+@@ -118,6 +128,9 @@
     mtx_t CreateResourceMtx;
  };
  
@@ -192,7 +254,7 @@ lowers the limit, to try the path on any host.
  CastDevice(D3D10DDI_HDEVICE hDevice)
 --- a/src/gallium/frontends/d3d10umd/Shader.cpp
 +++ b/src/gallium/frontends/d3d10umd/Shader.cpp
-@@ -175,6 +175,73 @@
+@@ -175,6 +175,90 @@
   * ----------------------------------------------------------------------
   */
  
@@ -222,7 +284,8 @@ lowers the limit, to try the path on any host.
 +   }
 +}
 +
-+/* Before a draw: each bound shader's buffer views look at the buffers bound to its slots */
++/* Before each draw (ResolveState): each bound shader's buffer views look at the buffers bound
++ * to its slots, and where a view of ours is no longer needed the program's own view is back */
 +void
 +UpdateCbViews(Device *pDevice)
 +{
@@ -230,7 +293,22 @@ lowers the limit, to try the path on any host.
 +
 +   for (unsigned type = 0; type < PIPE_SHADER_TYPES; type++) {
 +      Shader *shader = pDevice->bound_shaders[type];
-+      if (!shader || !shader->cb_views.count)
++      unsigned needed = 0;
++      if (shader) {
++         for (unsigned i = 0; i < shader->cb_views.count; i++)
++            needed |= 1u << shader->cb_views.view[i];
++      }
++
++      unsigned stale = pDevice->cb_bound_mask[type] & ~needed;
++      while (stale) {
++         const unsigned v = u_bit_scan(&stale);
++         pipe->set_sampler_views(pipe, (enum pipe_shader_type)type, v, 1, 0, false,
++                                 &pDevice->sampler_views[type][v]);
++         pDevice->cb_bound_mask[type] &= ~(1u << v);
++         pDevice->cb_bound[type][v] = NULL;
++      }
++
++      if (!needed)
 +         continue;
 +      for (unsigned i = 0; i < shader->cb_views.count; i++) {
 +         struct pipe_resource *buffer = pDevice->cbs[type][shader->cb_views.slot[i]];
@@ -254,11 +332,12 @@ lowers the limit, to try the path on any host.
 +               sv = pipe->create_sampler_view(pipe, buffer, &templ);
 +               pDevice->cb_sviews[type][i] = sv;
 +            }
-+         } else if (pDevice->sampler_views[type][view] == sv) {
-+            continue;
 +         }
-+         pDevice->sampler_views[type][view] = sv;
++         if ((pDevice->cb_bound_mask[type] & (1u << view)) && pDevice->cb_bound[type][view] == sv)
++            continue;
 +         pipe->set_sampler_views(pipe, (enum pipe_shader_type)type, view, 1, 0, false, &sv);
++         pDevice->cb_bound_mask[type] |= 1u << view;
++         pDevice->cb_bound[type][view] = sv;
 +      }
 +   }
 +}
@@ -266,7 +345,7 @@ lowers the limit, to try the path on any host.
  static void
  SetConstantBuffers(enum pipe_shader_type shader_type,    // IN
                     D3D10DDI_HDEVICE hDevice,             // IN
-@@ -191,6 +258,8 @@
+@@ -191,6 +275,8 @@
        cb.buffer = CastPipeResource(phBuffers[i]);
        cb.buffer_offset = 0;
        cb.buffer_size = cb.buffer ? cb.buffer->width0 : 0;
@@ -275,7 +354,17 @@ lowers the limit, to try the path on any host.
        pipe->set_constant_buffer(pipe,
                                  shader_type,
                                  StartBuffer + i + 1,
-@@ -317,6 +386,12 @@
+@@ -272,6 +358,9 @@
+     */
+    pipe->set_sampler_views(pipe, shader_type, 0, PIPE_MAX_SHADER_SAMPLER_VIEWS,
+                            0, false, sampler_views);
++   /* moose-ripple: buffer views of ours there are gone; UpdateCbViews binds them again */
++   pDevice->cb_bound_mask[shader_type] = 0;
++   memset(pDevice->cb_bound[shader_type], 0, sizeof pDevice->cb_bound[shader_type]);
+ }
+ 
+ 
+@@ -317,6 +406,12 @@
  
     struct pipe_context *pipe = CastPipeContext(hDevice);
     Shader *pShader = CastShader(hShader);
@@ -288,7 +377,7 @@ lowers the limit, to try the path on any host.
  
     if (pShader->handle) {
        switch (pShader->type) {
-@@ -568,7 +643,9 @@
+@@ -568,7 +663,9 @@
     pShader->output_resolved = true;
  
     memset(&pShader->state, 0, sizeof pShader->state);
@@ -299,7 +388,7 @@ lowers the limit, to try the path on any host.
  
     pShader->handle = pipe->create_vs_state(pipe, &pShader->state);
  
-@@ -598,6 +675,7 @@
+@@ -598,6 +695,7 @@
     void *state = CastPipeShader(hShader);
  
     pDevice->bound_vs = pShader;
@@ -307,7 +396,7 @@ lowers the limit, to try the path on any host.
     if (!state) {
        state = pDevice->empty_vs;
     }
-@@ -704,7 +782,9 @@
+@@ -704,7 +802,9 @@
     pShader->output_resolved = true;
  
     memset(&pShader->state, 0, sizeof pShader->state);
@@ -318,7 +407,7 @@ lowers the limit, to try the path on any host.
  
     pShader->handle = pipe->create_gs_state(pipe, &pShader->state);
  }
-@@ -734,6 +814,8 @@
+@@ -734,6 +834,8 @@
  
     assert(pipe->bind_gs_state);
  
@@ -327,7 +416,7 @@ lowers the limit, to try the path on any host.
     if (pShader && !pShader->state.tokens) {
        pDevice->bound_empty_gs = pShader;
     } else {
-@@ -867,9 +949,11 @@
+@@ -867,9 +969,11 @@
     pShader->type = PIPE_SHADER_GEOMETRY;
  
     memset(&pShader->state, 0, sizeof pShader->state);
@@ -340,7 +429,7 @@ lowers the limit, to try the path on any host.
     }
     pShader->output_resolved = (pShader->state.tokens != NULL);
  
-@@ -1020,8 +1104,10 @@
+@@ -1020,8 +1124,10 @@
     pShader->output_resolved = true;
  
     memset(&pShader->state, 0, sizeof pShader->state);
@@ -352,7 +441,7 @@ lowers the limit, to try the path on any host.
  
     pShader->handle = pipe->create_fs_state(pipe, &pShader->state);
  
-@@ -1049,6 +1135,7 @@
+@@ -1049,6 +1155,7 @@
     struct pipe_context *pipe = pDevice->pipe;
     void *state = CastPipeShader(hShader);
  
@@ -362,29 +451,16 @@ lowers the limit, to try the path on any host.
     }
 --- a/src/gallium/frontends/d3d10umd/Draw.cpp
 +++ b/src/gallium/frontends/d3d10umd/Draw.cpp
-@@ -212,6 +212,7 @@
-    info.primitive_restart = true;
-    info.restart_index = restart_index;
- 
+@@ -108,6 +108,9 @@
+       cso_set_vertex_buffers(pDevice->cso, PIPE_MAX_ATTRIBS, false, pDevice->vertex_buffers);
+       pDevice->vbuffers_changed = false;
+    }
++
++   /* moose-ripple: constant buffers past the host's limit (Shader_cb_views) */
 +   UpdateCbViews(pDevice);
-    pDevice->pipe->draw_vbo(pDevice->pipe, &info, 0, NULL, &draw, 1);
- 
-    if (null_ib) {
-@@ -315,6 +316,7 @@
-    info.primitive_restart = true;
-    info.restart_index = restart_index;
- 
-+   UpdateCbViews(pDevice);
-    pDevice->pipe->draw_vbo(pDevice->pipe, &info, 0, NULL, &draw, 1);
- 
-    if (null_ib) {
-@@ -362,5 +364,6 @@
-    memset(&indirect, 0, sizeof indirect);
-    indirect.count_from_stream_output = pDevice->draw_so_target;
- 
-+   UpdateCbViews(pDevice);
-    pDevice->pipe->draw_vbo(pDevice->pipe, &info, 0, &indirect, NULL, 1);
  }
+ 
+ 
 --- a/src/gallium/frontends/d3d10umd/Device.cpp
 +++ b/src/gallium/frontends/d3d10umd/Device.cpp
 @@ -361,6 +361,11 @@
