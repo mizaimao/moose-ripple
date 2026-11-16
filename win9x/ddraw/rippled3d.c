@@ -101,6 +101,12 @@ static void tracef(const char *fmt, ...)
     dbg(b);
 }
 
+/* For rippledd.c's callbacks (Lock, Flip): a trace line with two numbers. */
+void d3d_trace(const char *what, DWORD a, DWORD b)
+{
+    tracef("rd3d: %s %08lx %08lx\r\n", what, a, b);
+}
+
 /* A sum of a surface's bytes (for the trace: did the contents change between uploads?). */
 static DWORD sum_rows(const BYTE *p, LONG pitch, DWORD row_bytes, DWORD rows)
 {
@@ -196,6 +202,7 @@ typedef struct {
     void (APIENTRY *PolygonMode)(GLenum, GLenum);
     void (APIENTRY *ColorMask)(GLboolean, GLboolean, GLboolean, GLboolean);
     void (APIENTRY *ReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, GLvoid *);
+    void (APIENTRY *DrawPixels)(GLsizei, GLsizei, GLenum, GLenum, const GLvoid *);
     void (APIENTRY *PixelStorei)(GLenum, GLint);
     void (APIENTRY *Finish)(void);
     void (APIENTRY *GenTextures)(GLsizei, GLuint *);
@@ -239,14 +246,15 @@ typedef struct {
     void (APIENTRY *SecondaryColorPointer)(GLint, GLenum, GLsizei, const GLvoid *);
     void (APIENTRY *FogCoordPointer)(GLenum, GLsizei, const GLvoid *);
     void (APIENTRY *ProvokingVertex)(GLenum);
+    void (APIENTRY *WindowPos2i)(GLint, GLint);
 } GLF;
 
-#define GL_CORE_COUNT 49            /* entries up to wglGetProcAddress */
+#define GL_CORE_COUNT 50            /* entries up to wglGetProcAddress */
 static const char *const gl_names[] = {
     "glEnable", "glDisable", "glClear", "glClearColor", "glClearDepth", "glClearStencil",
     "glScissor", "glViewport", "glMatrixMode", "glLoadIdentity", "glOrtho", "glDepthFunc",
     "glDepthMask", "glBlendFunc", "glAlphaFunc", "glCullFace", "glFrontFace", "glShadeModel",
-    "glPolygonMode", "glColorMask", "glReadPixels", "glPixelStorei", "glFinish",
+    "glPolygonMode", "glColorMask", "glReadPixels", "glDrawPixels", "glPixelStorei", "glFinish",
     "glGenTextures", "glDeleteTextures", "glBindTexture", "glTexImage2D", "glTexSubImage2D",
     "glTexParameteri",
     "glTexParameterfv", "glTexEnvi", "glTexEnvfv", "glEnableClientState",
@@ -259,7 +267,7 @@ static const char *const gl_names[] = {
     "glGenRenderbuffersEXT", "glBindRenderbufferEXT", "glRenderbufferStorageEXT",
     "glCheckFramebufferStatusEXT", "glDeleteFramebuffersEXT", "glDeleteRenderbuffersEXT",
     "glActiveTextureARB", "glClientActiveTextureARB", "glSecondaryColorPointerEXT",
-    "glFogCoordPointerEXT", "glProvokingVertexEXT",
+    "glFogCoordPointerEXT", "glProvokingVertexEXT", "glWindowPos2iARB",
 };
 #define GL_ALL_COUNT (sizeof gl_names / sizeof gl_names[0])
 typedef char c_gl_names[sizeof(GLF) == GL_ALL_COUNT * sizeof(PROC) ? 1 : -1];
@@ -612,6 +620,7 @@ typedef struct {
     DWORD rs[256];                      /* render states */
     DWORD tss[STAGES][32];              /* texture stage states */
     int stages_dirty;
+    int rt_written;                     /* the program wrote into the render target's memory */
     DWORD scene;                        /* scenes ended so far */
     DWORD bound[STAGES];                /* surface handle of each stage's texture, 0 if none */
     TEXTURE *tex;                       /* by surface handle */
@@ -686,6 +695,7 @@ static void read_back(RCTX *c)
         return;
     c->dirty = 0;
     g = c->rt->lpGbl;
+    tracef("rd3d: read back into %08lx (scene %lu)\r\n", g->fpVidMem, c->scene);
     surface_format(c->rt, &pf);
     f = gl_format(&pf);
     if (!f.bytes || !g->fpVidMem)
@@ -1283,6 +1293,8 @@ void d3d_surface_written(LPDDRAWI_DDRAWSURFACE_LCL s)
         RCTX *c = mine(&contexts[i].o, &m) ? contexts[i].c : NULL;
         if (!c)
             continue;
+        if (c->rt && c->rt->lpGbl->fpVidMem == mem)
+            c->rt_written = 1;          /* goes to the GPU before the next 3D draw */
         for (j = 0; j < c->ntex; j++)
             if (c->tex[j].name && c->tex[j].mem == mem) {
                 c->tex[j].dirty = 1;
@@ -1454,6 +1466,50 @@ static void arrays(RCTX *c, const VERTICES *v, DWORD first, DWORD count)
     gl->ClientActiveTexture(GL_TEXTURE0);
 }
 
+/* The render target's memory into the GPU's picture: the program drew into the surface
+   itself (text with GDI, a locked surface) since the last read-back, and the next 3D draw
+   would otherwise be read back over it. A plain copy: no depth test, blending or texturing. */
+static void rt_upload(RCTX *c)
+{
+    GLF *gl = gl_of(c);
+    LPDDRAWI_DDRAWSURFACE_GBL g;
+    DDPIXELFORMAT pf;
+    PIXFMT f;
+    int u;
+
+    c->rt_written = 0;
+    if (!c->rt || !gl->WindowPos2i)
+        return;
+    g = c->rt->lpGbl;
+    surface_format(c->rt, &pf);
+    f = gl_format(&pf);
+    if (!f.bytes || !g->fpVidMem)
+        return;
+    tracef("rd3d: the program's drawing in %08lx back to the GPU\r\n", g->fpVidMem);
+    gl->Disable(GL_DEPTH_TEST);
+    gl->Disable(GL_BLEND);
+    gl->Disable(GL_ALPHA_TEST);
+    gl->Disable(GL_COLOR_SUM);
+    for (u = 0; u <= FOG_UNIT; u++) {
+        gl->ActiveTexture(GL_TEXTURE0 + u);
+        gl->Disable(GL_TEXTURE_2D);
+    }
+    gl->ActiveTexture(GL_TEXTURE0);
+    gl->WindowPos2i(0, 0);              /* row 0 of the memory is the GPU's row 0 (see framebuffer) */
+    gl->PixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    gl->PixelStorei(GL_UNPACK_ROW_LENGTH, g->lPitch / f.bytes);
+    gl->DrawPixels(c->fb_w < g->wWidth ? c->fb_w : g->wWidth,
+                   c->fb_h < g->wHeight ? c->fb_h : g->wHeight, f.format, f.type,
+                   (const GLvoid *)g->fpVidMem);
+    gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    enable(gl, GL_DEPTH_TEST, c->rs[D3DRENDERSTATE_ZENABLE] != D3DZB_FALSE);
+    enable(gl, GL_BLEND, c->rs[D3DRENDERSTATE_ALPHABLENDENABLE]);
+    enable(gl, GL_ALPHA_TEST, c->rs[D3DRENDERSTATE_ALPHATESTENABLE]);
+    enable(gl, GL_COLOR_SUM, c->rs[D3DRENDERSTATE_SPECULARENABLE]);
+    c->stages_dirty = 1;
+    c->dirty = 1;
+}
+
 /* Draw vertices first..first+count (all of them converted), or count indices into them. */
 static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD count,
                  const WORD *idx, DWORD nidx, DWORD span)
@@ -1465,6 +1521,8 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
         dbg("rd3d: vertices out of range\r\n");
         return;
     }
+    if (c->rt_written)
+        rt_upload(c);
     if (c->stages_dirty || textures_changed(c))
         apply_stages(c);
     if (!idx) {
@@ -1510,6 +1568,15 @@ static void clear(RCTX *c, DWORD flags, DWORD color, float depth, DWORD stencil,
     GLbitfield mask = 0;
     DWORD i;
 
+    if (c->rt_written) {
+        /* a clear of the whole picture makes what the program drew moot */
+        if ((flags & D3DCLEAR_TARGET) && (!n || (n == 1 && rects[0].left <= 0 &&
+            rects[0].top <= 0 && (DWORD)rects[0].right >= c->fb_w &&
+            (DWORD)rects[0].bottom >= c->fb_h)))
+            c->rt_written = 0;
+        else
+            rt_upload(c);
+    }
     if (flags & D3DCLEAR_TARGET) {
         mask |= GL_COLOR_BUFFER_BIT;
         gl->ClearColor(((color >> 16) & 255) / 255.0f, ((color >> 8) & 255) / 255.0f,

@@ -193,6 +193,7 @@ static DWORD WINAPI Flip(LPDDHAL_FLIPDATA d)
 {
     DWORD off = d->lpSurfTarg->lpGbl->fpVidMem - shared->lfb;
 
+    d3d_trace("flip: from, to", d->lpSurfCurr->lpGbl->fpVidMem, d->lpSurfTarg->lpGbl->fpVidMem);
     d3d_surface_access(d->lpSurfTarg);       /* a 3D picture still on the GPU */
     if (!shared->pitch || off % shared->pitch || off / shared->pitch + shared->height > shared->lines) {
         dbg("rdd: can't show a surface at offset "); dbg_hex(off); dbg("\r\n");
@@ -219,6 +220,7 @@ static DWORD WINAPI Lock(LPDDHAL_LOCKDATA d)
     LPDDRAWI_DDRAWSURFACE_GBL g = s->lpGbl;
     DWORD p = g->fpVidMem, bits = shared->bpp;
 
+    d3d_trace("lock: memory, flags", g->fpVidMem, d->dwFlags);
     d3d_surface_access(s);              /* a 3D picture still on the GPU goes in first */
     if (!(d->dwFlags & DDLOCK_READONLY))
         d3d_surface_written(s);         /* textures made from it are out of date */

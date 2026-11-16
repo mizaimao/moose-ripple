@@ -317,6 +317,43 @@ static void texture_updates(LPDIRECTDRAW7 dd, LPDIRECT3DDEVICE7 dev, LPDIRECTDRA
     }
 }
 
+/* The program draws into the back buffer itself between scenes (games draw text with GDI or a
+   locked surface): that must survive the next scene's 3D drawing. */
+static void cpu_writes(LPDIRECT3DDEVICE7 dev, LPDIRECTDRAWSURFACE7 back, int w, int h, int bpp)
+{
+    DDSURFACEDESC2 d;
+    TLV v[3];
+    int x, y;
+
+    printf("drawing into the back buffer between scenes:\n");
+    IDirect3DDevice7_Clear(dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0x00000066, 1.0f, 0);
+    IDirect3DDevice7_BeginScene(dev);
+    IDirect3DDevice7_EndScene(dev);
+    memset(&d, 0, sizeof d);
+    d.dwSize = sizeof d;
+    if (IDirectDrawSurface7_Lock(back, NULL, &d, DDLOCK_WAIT | DDLOCK_WRITEONLY, NULL) == DD_OK) {
+        for (y = 16; y < 48; y++)
+            for (x = 16; x < 48; x++) {
+                BYTE *row = (BYTE *)d.lpSurface + y * d.lPitch;
+                if (bpp == 32)
+                    ((DWORD *)row)[x] = 0x00FFFFFF;
+                else
+                    ((WORD *)row)[x] = 0xFFFF;
+            }
+        IDirectDrawSurface7_Unlock(back, NULL);
+    }
+    IDirect3DDevice7_BeginScene(dev);
+    IDirect3DDevice7_SetTexture(dev, 0, NULL);
+    v[0] = tlv(w * 0.5f, h * 0.4f, 0.5f, 0xFFFF0000, 0, 0);
+    v[1] = tlv(w * 0.6f, h * 0.6f, 0.5f, 0xFFFF0000, 0, 0);
+    v[2] = tlv(w * 0.4f, h * 0.6f, 0.5f, 0xFFFF0000, 0, 0);
+    IDirect3DDevice7_DrawPrimitive(dev, D3DPT_TRIANGLELIST, TLV_FVF, v, 3, 0);
+    IDirect3DDevice7_EndScene(dev);
+    expect(back, bpp, "written by the program", 32, 32, 255, 255, 255);
+    expect(back, bpp, "3D drawn after it", w / 2, h / 2 + h / 20, 255, 0, 0);
+    expect(back, bpp, "clear colour around them", w * 3 / 4, h * 3 / 4, 0, 0, 102);
+}
+
 static LPDIRECTDRAWSURFACE7 make_texture(LPDIRECTDRAW7 dd, int bpp)
 {
     static const DWORD texels[4] = { 0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFF00 };
@@ -455,6 +492,7 @@ int main(int argc, char **argv)
     }
     expect(back, bpp, "blend: white on blue", w * 3 / 4, h * 3 / 4, 128, 128, 179);
     texture_updates(dd, dev, back, w, h, bpp);
+    cpu_writes(dev, back, w, h, bpp);
     IDirectDrawSurface7_Flip(front, NULL, DDFLIP_WAIT);
 
     start = GetTickCount();
