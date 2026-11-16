@@ -75,6 +75,14 @@ class VioGpuCommand
     UINT m_FenceId;
     LONG m_epoch;
     BOOLEAN m_queuedAll;
+#ifdef RIPPLE_TRACE_TIMING
+  public:
+    // When the buffer was made (Render), handed over (SubmitCommand), taken to run, sent to
+    // the host, answered by the host (interrupt), and finished
+    LONGLONG t[6];
+
+  private:
+#endif
 
     char *m_pDmaBuffer;
     char *m_pCommand;
@@ -159,6 +167,14 @@ class VioGpuCommander
     volatile LONG m_lastCompletedFence;
     volatile LONG m_epoch;
     KGUARDED_MUTEX m_ResetMutex;
+#ifdef RIPPLE_TRACE_TIMING
+  public:
+    void Timing(VioGpuCommand *cmd);
+
+  private:
+    LONGLONG m_tSum[5], m_tMax[5];
+    UINT m_tCount;
+#endif
 #ifdef RIPPLE_TEST_TDR
   public:
     // Test builds: the next finished buffer is held back this long (VIOGPU_TEST_STALL)

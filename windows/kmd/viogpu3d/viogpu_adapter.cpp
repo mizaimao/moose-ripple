@@ -786,6 +786,10 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
                 break;
             }
 
+        case VIOGPU_NUDGE:
+            ctrlQueue.Nudge();
+            break;
+
 #ifdef RIPPLE_TEST_TDR
         case VIOGPU_TEST_STALL:
             InterlockedExchange(&commander.m_testStallMs, (LONG)pVioGpuEscape->Id);

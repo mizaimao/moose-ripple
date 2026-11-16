@@ -67,6 +67,10 @@ typedef struct _VIOGPU_ADAPTERINFO
 
 #define VIOGPU_CTX_INIT              0x200
 
+// Have the device look for finished work now (a notification of the control queue), asked by
+// a program that polls a fence
+#define VIOGPU_NUDGE                 0x301
+
 // Test builds only (RIPPLE_TEST_TDR): hold the next finished command buffer back Id ms, so
 // that Windows sees a GPU timeout and the driver's recovery runs
 #define VIOGPU_TEST_STALL            0x300

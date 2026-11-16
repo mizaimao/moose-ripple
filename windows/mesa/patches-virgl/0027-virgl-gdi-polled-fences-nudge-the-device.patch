@@ -1,0 +1,80 @@
+virgl gdi: polled fences nudge the device; fence waits in milliseconds
+
+A program polling a fence (an event query) has the kernel driver notify the device at most
+every 100 microseconds (VIOGPU_NUDGE): the host notices a finished fence only when the guest
+notifies it, or at its own 10 ms poll. And the wait's timeout is given to Windows in
+milliseconds, as worked out, not in nanoseconds.
+
+---
+--- a/src/virtio/wddm/viogpu_wddm_driver.h
++++ b/src/virtio/wddm/viogpu_wddm_driver.h
+@@ -65,6 +65,9 @@
+ 
+ #define VIOGPU_CTX_INIT                                   0x200
+ 
++/* Have the device look for finished work now (a notification of the control queue) */
++#define VIOGPU_NUDGE                                      0x301
++
+ 
+ #pragma pack(1)
+ typedef struct _VIOGPU_DISP_MODE {
+--- a/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
++++ b/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
+@@ -473,6 +473,30 @@
+    return (struct pipe_fence_handle *)fence;
+ }
+ 
++/* A program polling a fence (an event query, a map that may not wait) asks the kernel
++ * driver, at most every 100 microseconds, to have the device look for finished work: the host
++ * notices a finished fence only when the guest notifies it, or at its own 10 ms poll.
++ */
++static void
++virgl_gdi_nudge(struct virgl_winsys *vws)
++{
++   static LARGE_INTEGER freq, last;
++   LARGE_INTEGER now;
++
++   if (!freq.QuadPart)
++      QueryPerformanceFrequency(&freq);
++   QueryPerformanceCounter(&now);
++   if (now.QuadPart - last.QuadPart < freq.QuadPart / 10000)
++      return;
++   last = now;
++
++   struct virgl_gdi_winsys *qdws = virgl_gdi_winsys(vws);
++   VIOGPU_ESCAPE escape;
++   memset(&escape, 0, sizeof(escape));
++   escape.Type = VIOGPU_NUDGE;
++   qdws->device->escape(qdws->device, &escape, sizeof(escape));
++}
++
+ static bool
+ virgl_gdi_fence_wait(struct virgl_winsys *vws, struct pipe_fence_handle *_fence,
+                      uint64_t timeout)
+@@ -480,16 +504,20 @@
+    struct virgl_gdi_fence *fence = virgl_gdi_fence(_fence);
+    DWORD timeout_ms;
+ 
+-   if (timeout > INFINITE) {
+-      timeout = INFINITE;
++   /* Nanoseconds to milliseconds, rounded up */
++   if (timeout >= (uint64_t)INFINITE * 1000000) {
++      timeout_ms = INFINITE;
+    } else {
+-      timeout_ms = timeout / 1000000;
+-      /* round up */
+-      if (timeout_ms * 1000000 < timeout)
++      timeout_ms = (DWORD)(timeout / 1000000);
++      if ((uint64_t)timeout_ms * 1000000 < timeout)
+          timeout_ms++;
+    }
+ 
+-   return WaitForSingleObject(fence->handle, timeout) == STATUS_WAIT_0;
++   if (WaitForSingleObject(fence->handle, timeout_ms) == WAIT_OBJECT_0)
++      return true;
++   if (timeout == 0)
++      virgl_gdi_nudge(vws);
++   return false;
+ }
+ 
+ static void

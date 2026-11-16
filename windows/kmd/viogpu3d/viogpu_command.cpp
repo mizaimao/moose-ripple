@@ -18,6 +18,10 @@ VioGpuCommand::VioGpuCommand(VioGpuAdapter *adapter)
     m_epoch = 0;
     m_queuedAll = FALSE;
     done = FALSE;
+#ifdef RIPPLE_TRACE_TIMING
+    RtlZeroMemory(t, sizeof(t));
+    t[0] = KeQueryPerformanceCounter(NULL).QuadPart;
+#endif
     m_pDmaBuffer = NULL;
     m_pCommand = NULL;
     m_pEnd = NULL;
@@ -39,6 +43,9 @@ void VioGpuCommand::PrepareSubmit(const DXGKARG_SUBMITCOMMAND *pSubmitCommand)
 
     m_FenceId = pSubmitCommand->SubmissionFenceId;
     m_epoch = m_pCommander->Epoch();
+#ifdef RIPPLE_TRACE_TIMING
+    t[1] = KeQueryPerformanceCounter(NULL).QuadPart;
+#endif
     if (m_pDmaBuffer)
     {
         m_pCommand = (char *)m_pDmaBuffer + pSubmitCommand->DmaBufferSubmissionStartOffset;
@@ -65,6 +72,9 @@ void VioGpuCommand::Run()
 
     if (!m_queuedAll)
     {
+#ifdef RIPPLE_TRACE_TIMING
+        t[2] = KeQueryPerformanceCounter(NULL).QuadPart;
+#endif
         // Every part goes to the host at once and in order, the next buffer right after: the host
         // runs them in queue order. Only the last part sent to the host is fenced and comes back
         // here, once the host GPU has done it and everything before it. Waiting for each part,
@@ -139,6 +149,9 @@ void VioGpuCommand::Run()
             }
         }
 
+#ifdef RIPPLE_TRACE_TIMING
+        t[3] = t[4] = KeQueryPerformanceCounter(NULL).QuadPart;
+#endif
         if (last != NULL)
         {
             // Back here when the host has done the last part
@@ -164,6 +177,10 @@ void VioGpuCommand::Run()
     }
 #endif
 
+#ifdef RIPPLE_TRACE_TIMING
+    t[5] = KeQueryPerformanceCounter(NULL).QuadPart;
+    m_pCommander->Timing(this);
+#endif
     Release();
     // Reported to Windows in order, which may be later, and deleted then
     m_pCommander->Complete(this);
@@ -252,6 +269,9 @@ void VioGpuCommand::QueueRunning()
 
 void VioGpuCommand::QueueRunningCb(void *cmd)
 {
+#ifdef RIPPLE_TRACE_TIMING
+    ((VioGpuCommand *)cmd)->t[4] = KeQueryPerformanceCounter(NULL).QuadPart;
+#endif
     ((VioGpuCommand *)cmd)->QueueRunning();
 }
 
@@ -281,6 +301,11 @@ VioGpuCommander::VioGpuCommander(VioGpuAdapter *pAdapter)
     KeInitializeGuardedMutex(&m_ResetMutex);
 #ifdef RIPPLE_TEST_TDR
     m_testStallMs = 0;
+#endif
+#ifdef RIPPLE_TRACE_TIMING
+    RtlZeroMemory(m_tSum, sizeof(m_tSum));
+    RtlZeroMemory(m_tMax, sizeof(m_tMax));
+    m_tCount = 0;
 #endif
     m_preemptPending = FALSE;
     m_preemptFenceId = 0;
@@ -351,20 +376,22 @@ void VioGpuCommander::ThreadWorkRoutine(void)
 
     KeSetPriorityThread(KeGetCurrentThread(), LOW_REALTIME_PRIORITY);
 
-    // While buffers are with the host, the queue is nudged every millisecond: QEMU notices a
-    // finished fence at the guest's next notification or its own 10 ms poll, so a program that
-    // waits for the GPU every frame was held to about 100 frames a second. The system timer
-    // runs at 1 ms for it while there is work, and goes back a second after the last buffer.
+    // While buffers are with the host, the queue is nudged every half millisecond (Windows'
+    // finest timer): QEMU notices a finished fence at the guest's next notification or its own
+    // 10 ms poll, so a program that waits for the GPU every frame was held to about 100 frames a
+    // second. The system timer runs that fine only while there is work, and goes back a second
+    // after the last buffer. A program polling a fence also asks for a notification
+    // (VIOGPU_NUDGE).
     BOOLEAN fineTimer = FALSE;
     for (;;)
     {
         LARGE_INTEGER nudge, idle;
-        nudge.QuadPart = Int32x32To64(1, -10000);
+        nudge.QuadPart = -5000;
         idle.QuadPart = Int32x32To64(1000, -10000);
         BOOLEAN busy = m_running > 0;
         if (busy && !fineTimer)
         {
-            ExSetTimerResolution(10000, TRUE);
+            ExSetTimerResolution(5000, TRUE);
             fineTimer = TRUE;
         }
         NTSTATUS wait = KeWaitForSingleObject(&m_QueueEvent,
@@ -538,6 +565,36 @@ void VioGpuCommander::Reset()
     }
     DbgPrint(TRACE_LEVEL_ERROR, ("%s GPU timeout: reset, %u command buffers dropped\n", __FUNCTION__, count));
 }
+
+#ifdef RIPPLE_TRACE_TIMING
+// Test builds (build.sh TRACE_TIMING=1): where a command buffer's time goes, averaged and
+// at most over 2000 buffers, in microseconds
+void VioGpuCommander::Timing(VioGpuCommand *cmd)
+{
+    LARGE_INTEGER freq;
+    KeQueryPerformanceCounter(&freq);
+    for (int i = 0; i < 5; i++)
+    {
+        LONGLONG d = cmd->t[i + 1] - cmd->t[i];
+        if (cmd->t[i] == 0 || cmd->t[i + 1] == 0 || d < 0)
+            d = 0;
+        d = d * 1000000 / freq.QuadPart;
+        m_tSum[i] += d;
+        if (d > m_tMax[i])
+            m_tMax[i] = d;
+    }
+    if (++m_tCount == 2000)
+    {
+        DbgPrint(TRACE_LEVEL_FATAL,
+                 ("T us avg/max: render-submit %lld/%lld submit-run %lld/%lld run-sent %lld/%lld host %lld/%lld answer-finish %lld/%lld\n",
+                  m_tSum[0] / 2000, m_tMax[0], m_tSum[1] / 2000, m_tMax[1], m_tSum[2] / 2000, m_tMax[2],
+                  m_tSum[3] / 2000, m_tMax[3], m_tSum[4] / 2000, m_tMax[4]));
+        RtlZeroMemory(m_tSum, sizeof(m_tSum));
+        RtlZeroMemory(m_tMax, sizeof(m_tMax));
+        m_tCount = 0;
+    }
+}
+#endif
 
 void VioGpuCommander::Restart()
 {

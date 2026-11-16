@@ -571,3 +571,59 @@ gaming graphics (4.6 and 5.6 before), nothing in the host's log. With the deskto
 uses as much of the host's processor as with the driver before (20-22% of one core over ten
 seconds, both measured on the same VM). The timeout recovery above was run again with
 buffers in flight and works the same.
+
+## Speed, second round: where a frame's time goes (2026-11-15)
+
+The Experience Index stood at 6.1 for graphics and 6.1 for gaming graphics. Its detailed
+results (`C:\Windows\Performance\WinSAT\DataStore`) give a score per test: the Direct3D 9
+tests count only up to 6.0, the gaming score comes from the Direct3D 10 tests, and of those the
+weakest pull it down most. The same disk keeps a 2025 assessment on a passed-through Radeon of
+the HD 5800 series: 7.8 and 7.8, Direct3D 10 batch 1751 frames a second, geometry 1391 and
+2739.
+
+Measured with the tools in `tools/win7-debug/rig/` and `tools/win7-debug/guest/` (described in
+`tools/win7-debug/README.md`), during the Direct3D 10 batch test:
+
+- The guest used one processor fully, but the samples of its instruction pointer showed a
+  program polling: Windows' kernel waiting on an object (`KeWaitForSingleObject`, 27% of the
+  busy samples, with the system call around it about two thirds), and in our driver
+  `QueryGetData` → `virgl_get_query_result` → `virgl_fence_finish`. The assessment waits for an
+  event query every frame.
+- The kernel driver's timing build (`TRACE_TIMING=1 windows/kmd/build.sh`) showed each command
+  buffer 6.2 to 6.7 ms with the host, the rest of its path under 0.1 ms.
+- The host's Intel GPU was awake 94% of the time, but at its lowest clock, 350 of 1200 MHz: the
+  rig's minimum clock had gone back to 350 at a host restart (the raise to 1200 is live only,
+  `docs/re/perf-notes.md`). Raised to 1200 again: the batch test went from 150 to 344 frames a
+  second.
+- With the GPU at full clock, how soon the guest learns that work has finished counted again.
+  QEMU looks at virglrenderer's fences when the guest notifies the device, or at its 10 ms
+  poll. The kernel driver's notification while work is out now comes every 0.5 ms (was 1 ms:
+  268 against 346 frames a second), and a program that polls a fence makes the driver notify
+  at once, at most every 100 µs (`VIOGPU_NUDGE`, patch 0027): 446 frames a second, the GPU now
+  98% busy. Patch 0027 also gives Windows the fence wait's timeout in milliseconds; it was
+  passed in nanoseconds.
+
+Tried and dropped: keeping constant buffers on the CPU and binding each change from a fresh
+range of a stream buffer. Like for like (two runs each, alternating), the batch test 348-355
+against 353-368 and the constant buffer test 248 against 248: no difference.
+
+| Experience Index | before | GPU at 1200 MHz | and the nudges |
+|---|---|---|---|
+| Graphics | 6.1 | 6.5 | 6.7 |
+| Gaming graphics | 6.1 | 6.5 | 6.7 |
+| Direct3D 10 batch / alpha (frames a second) | 140 / 129 | 355 / 358 | 457 / 450 |
+| Direct3D 10 texture / ALU | 89 / 85 | 239 / 237 | 265 / 266 |
+| Direct3D 10 geometry F4 / V8 | 135 / 30 | 287 / 35 | 340 / 40 |
+| Direct3D 10 constant buffer | 84 | 203 | 196 |
+
+What holds the score now:
+
+- The host GPU: in the batch tests it is 96-98% busy. A Direct3D 10 frame of that test is about
+  22 draws with trivial shaders and keeps the GPU busy about 2.2 ms; the Direct3D 9 version of
+  the same test needs about 1.5 ms. Not found yet why; the GPU runs one request a frame from
+  QEMU and QEMU never waits on it.
+- The second geometry test (V8, 5.5): a geometry shader with a three-step loop that writes an
+  indexed temporary array, about 20 ms of GPU time a frame. On real hardware it is the fastest
+  of the tests.
+- The GPU clock: at a host restart the rig's minimum clock goes back to 350 MHz, and the
+  scores with it (6.5 → about 6.1).
