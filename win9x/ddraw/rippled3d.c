@@ -243,10 +243,16 @@ typedef struct {
 } RPROC;
 
 /* The tables below are in the DLL's shared data, the same in every process; the records they
-   point to are in one process's heap. The owner's process id is kept next to the pointer, so a
-   pointer is only followed in its own process. */
+   point to are in one process's heap, so a record is only followed in the process that made
+   it. Windows 98 gives a new process the id of one that has just ended, so the id alone can't
+   tell them apart: each process also gets a number of its own (its session), kept in its
+   environment. A record belongs to the current process only if both match. */
+typedef struct { DWORD pid, session; } OWNER;
+
+static LONG sessions;                   /* the last session number given out */
+
 #define MAX_PROCESSES 16
-static struct { DWORD pid; RPROC *p; } processes[MAX_PROCESSES];
+static struct { OWNER o; RPROC *p; } processes[MAX_PROCESSES];
 
 /* Direct3D's parser for commands a driver doesn't know: a function of the Direct3D runtime,
    which is loaded at the same address in every process. */
@@ -265,25 +271,73 @@ static int process_alive(DWORD pid)
     return alive;
 }
 
+static DWORD hex8(const char *s)
+{
+    DWORD v = 0;
+    int i;
+
+    for (i = 0; i < 8; i++)
+        v = v << 4 | (DWORD)(s[i] >= 'a' ? s[i] - 'a' + 10 : s[i] - '0');
+    return v;
+}
+
+static void owner_forget(DWORD pid);
+
+/* The current process. */
+static OWNER me(void)
+{
+    static const char name[] = "RIPPLE_D3D_SESSION";
+    char buf[24];
+    OWNER o;
+    LONG s;
+
+    o.pid = GetCurrentProcessId();
+    if (GetEnvironmentVariable(name, buf, sizeof buf) == 17 && buf[8] == ':' &&
+        hex8(buf) == o.pid) {
+        o.session = hex8(buf + 9);
+        return o;
+    }
+    /* First use in this process (a child process inherits its parent's variable, with the
+       parent's id): a new number. Records left under this id belong to an ended process. */
+    __asm {
+        mov     eax, 1
+        lock xadd sessions, eax
+        inc     eax
+        mov     s, eax
+    }
+    o.session = (DWORD)s;
+    wsprintf(buf, "%08lx:%08lx", o.pid, o.session);
+    SetEnvironmentVariable(name, buf);
+    owner_forget(o.pid);
+    return o;
+}
+
+static int mine(const OWNER *o, const OWNER *m)
+{
+    return o->pid == m->pid && o->session == m->session;
+}
+
 static RPROC *process(void)
 {
-    DWORD pid = GetCurrentProcessId();
+    OWNER m = me();
     int i, free = -1;
 
     for (i = 0; i < MAX_PROCESSES; i++) {
-        if (processes[i].pid == pid)
+        if (mine(&processes[i].o, &m))
             return processes[i].p;
-        if (!processes[i].pid && free < 0)
+        if (!processes[i].o.pid && free < 0)
             free = i;
     }
     /* A slot of a process that has ended may be reused: its memory went with it. */
     for (i = 0; free < 0 && i < MAX_PROCESSES; i++)
-        if (!process_alive(processes[i].pid))
+        if (!process_alive(processes[i].o.pid))
             free = i;
     if (free < 0)
         return NULL;
     processes[free].p = (RPROC *)alloc(sizeof(RPROC));
-    processes[free].pid = processes[free].p ? pid : 0;
+    processes[free].o = m;
+    if (!processes[free].p)
+        processes[free].o.pid = 0;
     return processes[free].p;
 }
 
@@ -330,7 +384,7 @@ static int gl_load_ext(RPROC *p)
 
 /* ---- Surface handles: DirectX 7 names surfaces in the command stream by handle --------------- */
 typedef struct {
-    DWORD pid;
+    OWNER o;
     LPDDRAWI_DIRECTDRAW_LCL lcl;
     LPDDRAWI_DDRAWSURFACE_LCL *surf;    /* by handle; process heap */
     DWORD n;
@@ -341,18 +395,21 @@ static DDLOCAL ddlocals[MAX_DDLOCALS];
 
 static DDLOCAL *ddlocal(LPDDRAWI_DIRECTDRAW_LCL lcl, int create)
 {
-    DWORD pid = GetCurrentProcessId();
+    OWNER m = me();
     int i, free = -1;
 
     for (i = 0; i < MAX_DDLOCALS; i++) {
-        if (ddlocals[i].lcl == lcl && ddlocals[i].pid == pid)
+        if (ddlocals[i].lcl == lcl && mine(&ddlocals[i].o, &m))
             return &ddlocals[i];
         if (!ddlocals[i].lcl && free < 0)
             free = i;
     }
+    for (i = 0; create && free < 0 && i < MAX_DDLOCALS; i++)
+        if (!process_alive(ddlocals[i].o.pid))
+            free = i;                   /* an ended process's: its memory went with it */
     if (!create || free < 0)
         return NULL;
-    ddlocals[free].pid = pid;
+    ddlocals[free].o = m;
     ddlocals[free].lcl = lcl;
     ddlocals[free].surf = NULL;
     ddlocals[free].n = 0;
@@ -467,7 +524,6 @@ typedef struct {
 } TEXTURE;
 
 typedef struct {
-    DWORD pid;
     RPROC *p;
     HWND wnd;
     HDC dc;
@@ -490,14 +546,37 @@ typedef struct {
 
 #define MAX_CONTEXTS 64
 /* Direct3D's context handle is the slot number plus one. */
-static struct { DWORD pid; RCTX *c; } contexts[MAX_CONTEXTS];
+static struct { OWNER o; RCTX *c; } contexts[MAX_CONTEXTS];
 
 static RCTX *context_of(ULONG_PTR handle)
 {
     DWORD i = (DWORD)handle - 1;
-    if (i >= MAX_CONTEXTS || contexts[i].pid != GetCurrentProcessId())
+    OWNER m = me();
+
+    if (i >= MAX_CONTEXTS || !mine(&contexts[i].o, &m))
         return NULL;
     return contexts[i].c;
+}
+
+/* Records under the id of an ended process (a new process has just got the same id): forgotten,
+   not freed, as their memory went with that process. */
+static void owner_forget(DWORD pid)
+{
+    int i;
+
+    for (i = 0; i < MAX_PROCESSES; i++)
+        if (processes[i].o.pid == pid) {
+            processes[i].o.pid = 0;
+            processes[i].p = NULL;
+        }
+    for (i = 0; i < MAX_CONTEXTS; i++)
+        if (contexts[i].o.pid == pid) {
+            contexts[i].o.pid = 0;
+            contexts[i].c = NULL;
+        }
+    for (i = 0; i < MAX_DDLOCALS; i++)
+        if (ddlocals[i].o.pid == pid)
+            memset(&ddlocals[i], 0, sizeof ddlocals[i]);
 }
 
 static GLF *gl_of(RCTX *c)
@@ -544,11 +623,11 @@ static void read_back(RCTX *c)
 
 void d3d_surface_access(LPDDRAWI_DDRAWSURFACE_LCL s)
 {
-    DWORD pid = GetCurrentProcessId();
+    OWNER m = me();
     int i;
 
     for (i = 0; i < MAX_CONTEXTS; i++) {
-        RCTX *c = contexts[i].pid == pid ? contexts[i].c : NULL;
+        RCTX *c = mine(&contexts[i].o, &m) ? contexts[i].c : NULL;
         if (c && c->dirty && c->rt && c->rt->lpGbl->fpVidMem == s->lpGbl->fpVidMem)
             read_back(c);
     }
@@ -1268,17 +1347,16 @@ static DWORD WINAPI ContextCreate(LPD3DHAL_CONTEXTCREATEDATA d)
     if (!p || !gl_load_core(p))
         return DDHAL_DRIVER_HANDLED;
     /* a free slot, or one of a process that has ended */
-    for (i = 0; i < MAX_CONTEXTS && contexts[i].pid; i++)
+    for (i = 0; i < MAX_CONTEXTS && contexts[i].o.pid; i++)
         ;
     for (fmt = 0; i == MAX_CONTEXTS && fmt < MAX_CONTEXTS; fmt++)
-        if (!process_alive(contexts[fmt].pid))
+        if (!process_alive(contexts[fmt].o.pid))
             i = fmt;
     if (i == MAX_CONTEXTS)
         return DDHAL_DRIVER_HANDLED;
     c = (RCTX *)alloc(sizeof(RCTX));
     if (!c)
         return DDHAL_DRIVER_HANDLED;
-    c->pid = GetCurrentProcessId();
     c->p = p;
     if (!p->wndclass) {
         WNDCLASS wc;
@@ -1320,7 +1398,7 @@ static DWORD WINAPI ContextCreate(LPD3DHAL_CONTEXTCREATEDATA d)
         return DDHAL_DRIVER_HANDLED;
     }
     defaults(c);
-    contexts[i].pid = c->pid;
+    contexts[i].o = me();
     contexts[i].c = c;
     dbg("rd3d: context "); dbg_hex((DWORD)c); dbg(" on "); dbg((const char *)p->gl.GetString(GL_RENDERER));
     dbg("\r\n");
@@ -1332,7 +1410,7 @@ static DWORD WINAPI ContextCreate(LPD3DHAL_CONTEXTCREATEDATA d)
 static void context_remove(int i)
 {
     RCTX *c = contexts[i].c;
-    contexts[i].pid = 0;
+    contexts[i].o.pid = 0;
     contexts[i].c = NULL;
     if (c)
         context_free(c);
@@ -1353,8 +1431,9 @@ static DWORD WINAPI ContextDestroyAll(LPD3DHAL_CONTEXTDESTROYALLDATA d)
 {
     int i;
     for (i = 0; i < MAX_CONTEXTS; i++)
-        if (contexts[i].pid && contexts[i].pid == d->dwPID) {
-            if (d->dwPID != GetCurrentProcessId())
+        if (contexts[i].o.pid && contexts[i].o.pid == d->dwPID) {
+            OWNER m = me();
+            if (!mine(&contexts[i].o, &m))
                 contexts[i].c = NULL;   /* its memory went with the process */
             context_remove(i);
         }
