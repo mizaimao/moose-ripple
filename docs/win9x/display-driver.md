@@ -21,7 +21,7 @@ this stage uses.
   (`win9x/minivdd/`, below) keeps the video BIOS off the card's mode-setting ports.
 
 Not there yet: hardware drawing (everything is the DIB engine in software, which QEMU makes fast
-enough for a desktop), DirectDraw and a hardware pointer.
+enough for a desktop) and a hardware pointer. DirectDraw and Direct3D: [directdraw.md](directdraw.md).
 
 ## Restart and Shut Down ended in a blue screen (found and fixed 2026-11-16)
 
@@ -79,12 +79,14 @@ driver always writes a few lines there (`r9x: ...`); nothing listens on a real P
 
 ## Install
 
-One folder holds the driver: `ripple9x.inf`, `ripple9x.drv`, `ripplevd.vxd` (the three files
-`build.sh` makes) and `ripplegl.dll` (the OpenGL driver, from `win9x/mesa/build.sh`).
+One folder holds the driver: `ripple9x.inf`, `ripple9x.drv`, `ripplevd.vxd`, `rippledd.dll` (the
+DirectDraw and Direct3D driver; these four `build.sh` makes, in `build/win9x/`) and `ripplegl.dll`
+(the OpenGL driver, from `win9x/mesa/build.sh`).
 
 - **A new install:** start the VM with QEMU's `virtio-vga` (or `virtio-vga-gl` for 3D).
   Windows finds the new PCI display adapter at start-up; give the wizard that folder. It
-  copies the four files, registers the mini-VDD and the OpenGL driver, and asks for a restart.
+  copies `ripple9x.drv`, `ripplevd.vxd`, `rippledd.dll` and `ripplegl.dll`, registers the mini-VDD
+  and the OpenGL driver, and asks for a restart.
   Checked 2026-11-15 on a Windows 98 SE install that had run on a Cirrus card: after the
   restart the desktop runs on our driver and OpenGL programs find `ripplegl.dll` (on a host
   without 3D, Mesa's software renderer).

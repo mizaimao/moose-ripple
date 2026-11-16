@@ -1,6 +1,7 @@
 #!/bin/sh
 # Build the Windows 9x display driver on the Linux build host (docs/win9x/plan.md, Toolchain).
-#   win9x/build.sh          build/win9x/ripple9x.drv, ripplevd.vxd, ripple9x.sym, ripple9x.inf
+#   win9x/build.sh          build/win9x/ripple9x.drv, ripplevd.vxd, rippledd.dll, ripple9x.sym,
+#                           ripple9x.inf
 #   TRACE=1 win9x/build.sh  the same, with a letter per driver call written to QEMU's debug port
 # Tools, all under .tools/win9x (set up once, never committed):
 #   Microsoft's 16-bit C compiler and linker (Server 2003 DDK) and MASM 6.11d (98 DDK), run

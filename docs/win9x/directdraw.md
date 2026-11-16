@@ -69,11 +69,18 @@ Direct3D's stages (a two-texel ramp looked up with the fog factor of each vertex
 host's virgl renderer can't translate OpenGL's fog varying.
 
 Offered: the HAL device with hardware rasterization, 16- and 32-bit render targets, 16- and
-32-bit z-buffers, textures in five RGB formats up to 2048x2048 in video or system memory, two
-texture stages with the usual operations, alpha blending and alpha test, fog, flat and Gouraud
-shading, every primitive type. Not yet: transform and lighting in the driver (Direct3D does it
-on the CPU), mipmap filtering (level 0 only), colour keys, stencil, palettized textures, state
-blocks recorded by the driver.
+32-bit z-buffers, textures in six RGB formats (32-bit with and without alpha, 565, 1555, X555 and
+4444) up to 2048x2048 in video or system memory, two texture stages with the usual operations,
+alpha blending and alpha test, fog (also with specular lighting), flat and Gouraud shading,
+every primitive type, viewports smaller than the target (clipped with OpenGL's scissor: the HAL
+reports a guard band, so Direct3D leaves that to the driver), render-target changes: each
+target surface keeps its own picture on the GPU and each z-buffer its own depth (up to four of
+each per context, by surface memory), so the flips of a chain, after which Direct3D names the
+next back buffer as the target every frame, cost no copy; a target's memory is loaded only when
+the program wrote it or the GPU has no picture of it yet.
+
+Not yet: transform and lighting in the driver (Direct3D does it on the CPU), mipmap filtering
+(level 0 only), colour keys, stencil, palettized textures, state blocks recorded by the driver.
 
 `tools/win9x/d3dtest.c` checks it the way a game uses it: on Windows 98 SE with DirectX 7 in
 Proxmox (virgl on the host's Intel UHD 630) every pixel check passes (clear, Gouraud triangle,
@@ -119,13 +126,22 @@ nothing in that heap needs the card.
 **A deadlock.** Two runs out of six stopped the whole system at 3DMark's start (all threads
 waiting, CPU idle). Mesa's DLL hooked windows (SetWindowsHookEx, which needs Windows' 16-bit
 lock) in DllMain for every new thread, under the loader's lock, while a thread inside a
-DirectDraw call holds the 16-bit lock and may need the loader's: patch 0005 makes a thread's
-data on its first OpenGL call instead. And the HAL no longer reads its process number from the
+DirectDraw call holds the 16-bit lock and may need the loader's: patch 0005 takes that out of
+DllMain, and patch 0007 hooks a thread when one of its windows gets an OpenGL framebuffer
+(without the hook, a destroyed window's framebuffer stayed and a new window with the same
+handle was refused a pixel format). And the HAL no longer reads its process number from the
 environment in DirectDraw calls (kernel32's lock): DllMain assigns it at process start.
 
 Open: the text on 3DMark's "Now testing" screens between tests doesn't show (3DMark 99 and
 2000 alike). It is not lost to the read-back below: a trace shows the write lock that is
 probably the text on a surface that is shown next, untouched by Direct3D in between.
+
+**After a review of the whole driver (2026-11-16).** Measured old and new build in turn on the
+same host with nothing else running on its GPU: before the fixes 11831 and 11798 3D marks,
+after them 11722 and 12189. The high polygon count tests are about 20% faster (22043, 21383,
+19763 Ktriangles/s): indexed draws with more than 6144 indices were dropped before, each with a
+line on the debug port. Another VM busy on the host's GPU costs a lot: one run beside a
+benchmark in another VM made 8196.
 
 ### 3DMark 99 Max (2026-11-16)
 
