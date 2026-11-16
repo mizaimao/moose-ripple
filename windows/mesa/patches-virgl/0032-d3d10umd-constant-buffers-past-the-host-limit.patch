@@ -1,0 +1,401 @@
+d3d10umd: constant buffers past the host's limit read as buffer textures
+
+Direct3D 10 slot n is gallium constant buffer n + 1, so a shader using all 14 slots needs
+constant buffer 14, past what virgl's host may take: virglrenderer counts the ordinary uniforms
+and a block of its own in PIPE_SHADER_CAP_MAX_CONST_BUFFERS. On a host OpenGL with 14 uniform
+blocks the vertex shader of WinSAT's constant buffer test failed to link and its draws were
+dropped. Slots at or past that limit are now declared as buffer textures and read with TXF from
+an unsigned view (as the driver's other buffer loads on virgl); before each draw a view of the
+buffer bound to such a slot is bound at the highest sampler views below 16. RIPPLE_CB_LIMIT
+lowers the limit, to try the path on any host.
+
+---
+--- a/src/gallium/frontends/d3d10umd/ShaderTGSI.c
++++ b/src/gallium/frontends/d3d10umd/ShaderTGSI.c
+@@ -237,6 +237,10 @@
+    uint num_scatters;
+    struct ureg_dst insn_temps[16];
+    uint num_insn_temps;
++   /* moose-ripple: constant buffers read as buffer textures (Shader_cb_views) */
++   struct Shader_cb_views *cb_views;
++   bool cb_as_view[PIPE_MAX_CONSTANT_BUFFERS];
++   struct ureg_src cb_sview[PIPE_MAX_CONSTANT_BUFFERS];
+ 
+    struct {
+       bool declared;
+@@ -913,6 +917,33 @@
+    sx->num_insn_temps = 0;
+ }
+ 
++/* moose-ripple: a read from a constant buffer that is a buffer texture (Shader_cb_views): the
++ * element is fetched into a temporary before the instruction */
++static struct ureg_src
++translate_cb_view_read(struct Shader_xlate *sx, const struct Shader_operand *operand)
++{
++   const struct Shader_index *index = &operand->index[1];
++   struct ureg_dst coord = insn_temp(sx);
++   struct ureg_dst value = insn_temp(sx);
++   struct ureg_src src[2];
++
++   if (index->index_rep == D3D10_SB_OPERAND_INDEX_IMMEDIATE32)
++      ureg_MOV(sx->ureg, ureg_writemask(coord, TGSI_WRITEMASK_X), ureg_imm1u(sx->ureg, index->imm));
++   else if (index->imm)
++      ureg_UADD(sx->ureg, ureg_writemask(coord, TGSI_WRITEMASK_X), relative_value(sx, &index->rel),
++                ureg_imm1u(sx->ureg, index->imm));
++   else
++      ureg_MOV(sx->ureg, ureg_writemask(coord, TGSI_WRITEMASK_X), relative_value(sx, &index->rel));
++   ureg_MOV(sx->ureg, ureg_writemask(coord, TGSI_WRITEMASK_YZW), ureg_imm1u(sx->ureg, 0));
++
++   /* TXF with a sampler, as the driver's other buffer loads on virgl (use_old_tex_ops): its
++    * host does not know SAMPLE_I. The view's unsigned type makes the fetch exact. */
++   (void)src;
++   ureg_TXF(sx->ureg, value, TGSI_TEXTURE_BUFFER, ureg_src(coord),
++            sx->cb_sview[operand->index[0].imm]);
++   return ureg_src(value);
++}
++
+ static struct ureg_src
+ translate_indexable_temp(struct Shader_xlate *sx,
+                          const struct Shader_operand *operand)
+@@ -1137,6 +1168,11 @@
+       assert(operand->base.index[0].index_rep == D3D10_SB_OPERAND_INDEX_IMMEDIATE32);
+       assert(operand->base.index[0].imm + 1 < PIPE_MAX_CONSTANT_BUFFERS);
+ 
++      if (sx->cb_as_view[operand->base.index[0].imm]) {
++         reg = translate_cb_view_read(sx, &operand->base);
++         break;
++      }
++
+       switch (operand->base.index[1].index_rep) {
+       case D3D10_SB_OPERAND_INDEX_IMMEDIATE32:
+          assert(operand->base.index[1].imm < SHADER_MAX_CONSTS);
+@@ -1382,7 +1418,8 @@
+ 
+ const struct tgsi_token *
+ Shader_tgsi_translate(const unsigned *code,
+-                      unsigned *output_mapping)
++                      unsigned *output_mapping,
++                      struct Shader_cb_views *cb_views)
+ {
+    struct Shader_xlate sx;
+    struct Shader_parser parser;
+@@ -1395,6 +1432,9 @@
+    uint i, j;
+ 
+    memset(&sx, 0, sizeof sx);
++   sx.cb_views = cb_views;
++   if (cb_views)
++      cb_views->count = 0;
+ 
+    Shader_parse_init(&parser, code);
+ 
+@@ -1989,9 +2029,32 @@
+ 
+       case D3D10_SB_OPCODE_DCL_CONSTANT_BUFFER: {
+          unsigned num_constants = opcode.src[0].base.index[1].imm;
++         const unsigned slot = opcode.src[0].base.index[0].imm;
+ 
+          assert(opcode.src[0].base.index[0].imm + 1 < PIPE_MAX_CONSTANT_BUFFERS);
+ 
++         /* moose-ripple: past the screen's limit, a buffer texture (Shader_cb_views) */
++         if (sx.cb_views && sx.cb_views->max_const_buffers &&
++             slot + 1 >= sx.cb_views->max_const_buffers) {
++            if (sx.cb_views->count < SHADER_MAX_CB_VIEWS &&
++                sx.cb_views->view_base >= sx.cb_views->count) {
++               const unsigned view = sx.cb_views->view_base - sx.cb_views->count;
++               sx.cb_views->slot[sx.cb_views->count] = slot;
++               sx.cb_views->view[sx.cb_views->count] = view;
++               sx.cb_views->count++;
++               sx.cb_as_view[slot] = true;
++               ureg_DECL_sampler_view(ureg, view, TGSI_TEXTURE_BUFFER,
++                                      TGSI_RETURN_TYPE_UINT, TGSI_RETURN_TYPE_UINT,
++                                      TGSI_RETURN_TYPE_UINT, TGSI_RETURN_TYPE_UINT);
++               sx.cb_sview[slot] = ureg_DECL_sampler(ureg, view);
++               ripple_logf("d3d10: constant buffer %u read as a buffer texture through view %u "
++                           "(the host takes %u constant buffers)", slot, view,
++                           sx.cb_views->max_const_buffers);
++               break;
++            }
++            LOG_UNSUPPORTED(true);
++         }
++
+          if (num_constants == 0) {
+             num_constants = SHADER_MAX_CONSTS;
+          } else {
+--- a/src/gallium/frontends/d3d10umd/ShaderParse.h
++++ b/src/gallium/frontends/d3d10umd/ShaderParse.h
+@@ -168,9 +168,23 @@
+ Shader_opcode_free(struct Shader_opcode *opcode);
+ 
+ 
++/* moose-ripple: constant buffer slots at or past the screen's constant buffer limit (virgl's
++ * host counts the ordinary uniforms and its own helper block in it) are read as buffer textures.
++ * The caller gives the limit and the sampler view to start at; the translator says which slots
++ * and through which views. */
++#define SHADER_MAX_CB_VIEWS 4
++struct Shader_cb_views {
++   unsigned max_const_buffers;   /* in: PIPE_SHADER_CAP_MAX_CONST_BUFFERS, 0 = no limit */
++   unsigned view_base;           /* in: the first such slot's sampler view; the next count down */
++   unsigned count;               /* out */
++   unsigned slot[SHADER_MAX_CB_VIEWS];
++   unsigned view[SHADER_MAX_CB_VIEWS];
++};
++
+ const struct tgsi_token *
+ Shader_tgsi_translate(const unsigned *code,
+-                      unsigned *output_mapping);
++                      unsigned *output_mapping,
++                      struct Shader_cb_views *cb_views);
+ 
+ 
+ #ifdef __cplusplus
+--- a/src/gallium/frontends/d3d10umd/State.h
++++ b/src/gallium/frontends/d3d10umd/State.h
+@@ -39,6 +39,7 @@
+ 
+ #include <d3dukmdt.h>
+ #include "gdikmt_d3dddi.h"
++#include "ShaderParse.h"
+ 
+ #define SUPPORT_MSAA 0
+ #define SUPPORT_D3D10_1 0
+@@ -66,6 +67,7 @@
+    struct pipe_shader_state state;
+    unsigned output_mapping[PIPE_MAX_SHADER_OUTPUTS];
+    bool output_resolved;
++   struct Shader_cb_views cb_views;
+ };
+ 
+ struct Query;
+@@ -100,6 +102,12 @@
+    Shader *bound_empty_gs;
+    Shader *bound_vs;
+ 
++   /* moose-ripple: constant buffers bound per stage, the shaders bound, and the buffer views
++    * that stand in for constant buffers past the host's limit (Shader_cb_views) */
++   struct pipe_resource *cbs[PIPE_SHADER_TYPES][D3D10_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT];
++   Shader *bound_shaders[PIPE_SHADER_TYPES];
++   struct pipe_sampler_view *cb_sviews[PIPE_SHADER_TYPES][SHADER_MAX_CB_VIEWS];
++
+    unsigned max_dual_source_render_targets;
+    
+    D3D10DDI_HRTCORELAYER  hRTCoreLayer;
+@@ -118,6 +126,9 @@
+    mtx_t CreateResourceMtx;
+ };
+ 
++/* moose-ripple: before each draw (Shader.cpp) */
++void UpdateCbViews(Device *pDevice);
++
+ 
+ static inline Device *
+ CastDevice(D3D10DDI_HDEVICE hDevice)
+--- a/src/gallium/frontends/d3d10umd/Shader.cpp
++++ b/src/gallium/frontends/d3d10umd/Shader.cpp
+@@ -175,6 +175,73 @@
+  * ----------------------------------------------------------------------
+  */
+ 
++/*
++ * moose-ripple: constant buffers past the host's limit (Shader_cb_views).
++ */
++static void
++ShaderInitCbViews(Device *pDevice, enum pipe_shader_type type, struct Shader_cb_views *views)
++{
++   struct pipe_screen *screen = pDevice->screen;
++   memset(views, 0, sizeof *views);
++   int max_cb = screen->get_shader_param(screen, type, PIPE_SHADER_CAP_MAX_CONST_BUFFERS);
++   /* RIPPLE_CB_LIMIT: a lower limit than the host's, to try the buffer texture path anywhere */
++   const char *limit = getenv("RIPPLE_CB_LIMIT");
++   if (limit && atoi(limit) > 0)
++      max_cb = MIN2(max_cb, atoi(limit));
++   int max_views = screen->get_shader_param(screen, type, PIPE_SHADER_CAP_MAX_SAMPLER_VIEWS);
++   if (max_views <= 0)
++      max_views = screen->get_shader_param(screen, type, PIPE_SHADER_CAP_MAX_TEXTURE_SAMPLERS);
++   max_views = MIN2(max_views, PIPE_MAX_SHADER_SAMPLER_VIEWS);
++   /* Direct3D 10 slot n is constant buffer n + 1 */
++   if (max_cb > 0 && max_cb <= D3D10_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT &&
++       max_views > SHADER_MAX_CB_VIEWS) {
++      views->max_const_buffers = max_cb;
++      /* below 16: a host may give a vertex shader fewer texture units than a pixel shader */
++      views->view_base = MIN2(max_views, 16) - 1;
++   }
++}
++
++/* Before a draw: each bound shader's buffer views look at the buffers bound to its slots */
++void
++UpdateCbViews(Device *pDevice)
++{
++   struct pipe_context *pipe = pDevice->pipe;
++
++   for (unsigned type = 0; type < PIPE_SHADER_TYPES; type++) {
++      Shader *shader = pDevice->bound_shaders[type];
++      if (!shader || !shader->cb_views.count)
++         continue;
++      for (unsigned i = 0; i < shader->cb_views.count; i++) {
++         struct pipe_resource *buffer = pDevice->cbs[type][shader->cb_views.slot[i]];
++         const unsigned view = shader->cb_views.view[i];
++         struct pipe_sampler_view *sv = pDevice->cb_sviews[type][i];
++
++         if (!sv || sv->texture != buffer) {
++            pipe_sampler_view_reference(&pDevice->cb_sviews[type][i], NULL);
++            sv = NULL;
++            if (buffer) {
++               struct pipe_sampler_view templ;
++               memset(&templ, 0, sizeof templ);
++               templ.target = PIPE_BUFFER;
++               templ.format = PIPE_FORMAT_R32G32B32A32_UINT;
++               templ.u.buf.offset = 0;
++               templ.u.buf.size = buffer->width0;
++               templ.swizzle_r = PIPE_SWIZZLE_X;
++               templ.swizzle_g = PIPE_SWIZZLE_Y;
++               templ.swizzle_b = PIPE_SWIZZLE_Z;
++               templ.swizzle_a = PIPE_SWIZZLE_W;
++               sv = pipe->create_sampler_view(pipe, buffer, &templ);
++               pDevice->cb_sviews[type][i] = sv;
++            }
++         } else if (pDevice->sampler_views[type][view] == sv) {
++            continue;
++         }
++         pDevice->sampler_views[type][view] = sv;
++         pipe->set_sampler_views(pipe, (enum pipe_shader_type)type, view, 1, 0, false, &sv);
++      }
++   }
++}
++
+ static void
+ SetConstantBuffers(enum pipe_shader_type shader_type,    // IN
+                    D3D10DDI_HDEVICE hDevice,             // IN
+@@ -191,6 +258,8 @@
+       cb.buffer = CastPipeResource(phBuffers[i]);
+       cb.buffer_offset = 0;
+       cb.buffer_size = cb.buffer ? cb.buffer->width0 : 0;
++      if (StartBuffer + i < D3D10_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT)
++         pDevice->cbs[shader_type][StartBuffer + i] = cb.buffer;
+       pipe->set_constant_buffer(pipe,
+                                 shader_type,
+                                 StartBuffer + i + 1,
+@@ -317,6 +386,12 @@
+ 
+    struct pipe_context *pipe = CastPipeContext(hDevice);
+    Shader *pShader = CastShader(hShader);
++   Device *pDevice = CastDevice(hDevice);
++
++   for (unsigned type = 0; type < PIPE_SHADER_TYPES; type++) {
++      if (pDevice->bound_shaders[type] == pShader)
++         pDevice->bound_shaders[type] = NULL;
++   }
+ 
+    if (pShader->handle) {
+       switch (pShader->type) {
+@@ -568,7 +643,9 @@
+    pShader->output_resolved = true;
+ 
+    memset(&pShader->state, 0, sizeof pShader->state);
+-   pShader->state.tokens = Shader_tgsi_translate(pCode, pShader->output_mapping);
++   ShaderInitCbViews(CastDevice(hDevice), PIPE_SHADER_VERTEX, &pShader->cb_views);
++   pShader->state.tokens = Shader_tgsi_translate(pCode, pShader->output_mapping,
++                                                 &pShader->cb_views);
+ 
+    pShader->handle = pipe->create_vs_state(pipe, &pShader->state);
+ 
+@@ -598,6 +675,7 @@
+    void *state = CastPipeShader(hShader);
+ 
+    pDevice->bound_vs = pShader;
++   pDevice->bound_shaders[PIPE_SHADER_VERTEX] = pShader;
+    if (!state) {
+       state = pDevice->empty_vs;
+    }
+@@ -704,7 +782,9 @@
+    pShader->output_resolved = true;
+ 
+    memset(&pShader->state, 0, sizeof pShader->state);
+-   pShader->state.tokens = Shader_tgsi_translate(pShaderCode, pShader->output_mapping);
++   ShaderInitCbViews(CastDevice(hDevice), PIPE_SHADER_GEOMETRY, &pShader->cb_views);
++   pShader->state.tokens = Shader_tgsi_translate(pShaderCode, pShader->output_mapping,
++                                                 &pShader->cb_views);
+ 
+    pShader->handle = pipe->create_gs_state(pipe, &pShader->state);
+ }
+@@ -734,6 +814,8 @@
+ 
+    assert(pipe->bind_gs_state);
+ 
++   pDevice->bound_shaders[PIPE_SHADER_GEOMETRY] =
++      pShader && pShader->state.tokens ? pShader : NULL;
+    if (pShader && !pShader->state.tokens) {
+       pDevice->bound_empty_gs = pShader;
+    } else {
+@@ -867,9 +949,11 @@
+    pShader->type = PIPE_SHADER_GEOMETRY;
+ 
+    memset(&pShader->state, 0, sizeof pShader->state);
++   ShaderInitCbViews(CastDevice(hDevice), PIPE_SHADER_GEOMETRY, &pShader->cb_views);
+    if (pData->pShaderCode) {
+       pShader->state.tokens = Shader_tgsi_translate(pData->pShaderCode,
+-                                                    pShader->output_mapping);
++                                                    pShader->output_mapping,
++                                                    &pShader->cb_views);
+    }
+    pShader->output_resolved = (pShader->state.tokens != NULL);
+ 
+@@ -1020,8 +1104,10 @@
+    pShader->output_resolved = true;
+ 
+    memset(&pShader->state, 0, sizeof pShader->state);
++   ShaderInitCbViews(CastDevice(hDevice), PIPE_SHADER_FRAGMENT, &pShader->cb_views);
+    pShader->state.tokens = Shader_tgsi_translate(pShaderCode,
+-                                                 pShader->output_mapping);
++                                                 pShader->output_mapping,
++                                                 &pShader->cb_views);
+ 
+    pShader->handle = pipe->create_fs_state(pipe, &pShader->state);
+ 
+@@ -1049,6 +1135,7 @@
+    struct pipe_context *pipe = pDevice->pipe;
+    void *state = CastPipeShader(hShader);
+ 
++   pDevice->bound_shaders[PIPE_SHADER_FRAGMENT] = CastShader(hShader);
+    if (!state) {
+       state = pDevice->empty_fs;
+    }
+--- a/src/gallium/frontends/d3d10umd/Draw.cpp
++++ b/src/gallium/frontends/d3d10umd/Draw.cpp
+@@ -212,6 +212,7 @@
+    info.primitive_restart = true;
+    info.restart_index = restart_index;
+ 
++   UpdateCbViews(pDevice);
+    pDevice->pipe->draw_vbo(pDevice->pipe, &info, 0, NULL, &draw, 1);
+ 
+    if (null_ib) {
+@@ -315,6 +316,7 @@
+    info.primitive_restart = true;
+    info.restart_index = restart_index;
+ 
++   UpdateCbViews(pDevice);
+    pDevice->pipe->draw_vbo(pDevice->pipe, &info, 0, NULL, &draw, 1);
+ 
+    if (null_ib) {
+@@ -362,5 +364,6 @@
+    memset(&indirect, 0, sizeof indirect);
+    indirect.count_from_stream_output = pDevice->draw_so_target;
+ 
++   UpdateCbViews(pDevice);
+    pDevice->pipe->draw_vbo(pDevice->pipe, &info, 0, &indirect, NULL, 1);
+ }
+--- a/src/gallium/frontends/d3d10umd/Device.cpp
++++ b/src/gallium/frontends/d3d10umd/Device.cpp
+@@ -361,6 +361,11 @@
+ 
+    pipe->flush(pipe, NULL, 0);
+ 
++   for (unsigned type = 0; type < PIPE_SHADER_TYPES; type++) {
++      for (unsigned v = 0; v < SHADER_MAX_CB_VIEWS; v++)
++         pipe_sampler_view_reference(&pDevice->cb_sviews[type][v], NULL);
++   }
++
+    for (i = 0; i < PIPE_MAX_SO_BUFFERS; ++i) {
+       pipe_so_target_reference(&pDevice->so_targets[i], NULL);
+    }
