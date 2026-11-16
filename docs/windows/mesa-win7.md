@@ -354,5 +354,13 @@ fills and presents and the middle pixel of surfaces; `tools/win7-debug/guest/wmp
   driver passes that on as a kernel present without a target, the kernel driver never sees a
   present for it, and the compositor shows nothing.
 
-Next: find what Windows 7 expects of a driver for a present with no destination while the
-compositor runs, then put the processor back and check the picture.
+Windows' Direct3D 9 runtime has a path that binds a swap chain to the compositor
+(`CSwapChain::BindToDwm`) next to the blit path Chess Titans takes: the compositor then takes
+the frames from the shared surfaces itself, and the kernel driver sees no present, which
+matches. With the driver's log switched on for every process (machine-wide `RIPPLE_UMD_LOG`,
+then a reboot, so that the compositor has it too), the compositor's side logged no refused
+resource while the video played.
+
+Next: find what Windows 7 expects of a driver for such a swap chain (likely something the
+kernel driver reports about presentation, or a present it should see), then put the processor
+back and check the picture.
