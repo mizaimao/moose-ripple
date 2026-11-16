@@ -199,6 +199,34 @@ void dd_mode_set(DWORD lfb, DWORD vram, WORD width, WORD height, WORD bpp, WORD 
 /* ---- The escape ------------------------------------------------------------------------------ */
 static int escape(WORD function, LPVOID in, LPVOID out);
 
+/* DCI 1.0 commands go to the DIB engine, which provides DCI for the screen. With DDTRACE its
+   answer is logged, and for the primary surface what it describes. */
+static int dci_escape(WORD function, LPVOID in, LPVOID out)
+{
+    int r = DIB_Control(lpDriverPDevice, function, in, out);
+#ifdef DDTRACE
+    RDD_DCICMD __far *cmd = (RDD_DCICMD __far *)in;
+    dbg("r9x: DCI "); dbg_hex(cmd ? cmd->dwCommand : 0xFFFF); dbg(" v");
+    dbg_hex(cmd ? cmd->dwVersion : 0); dbg(": DIB engine says "); dbg_hex((DWORD)(long)r);
+    if (out) {
+        DWORD __far *o = (DWORD __far *)out;
+        dbg(", out "); dbg_hex(o[0]);
+        if (r == 0 && o[0]) {
+            FARP f;
+            DWORD __far *s;
+            f.d = o[0];
+            s = (DWORD __far *)f.p;         /* a DCISURFACEINFO */
+            dbg(": size "); dbg_hex(s[0]); dbg(" caps "); dbg_hex(s[1]);
+            dbg(" "); dbg_hex(s[6]); dbg("x"); dbg_hex(s[7]); dbg(" stride "); dbg_hex(s[8]);
+            dbg(" bits "); dbg_hex(s[9]); dbg(" at "); dbg_hex(*(WORD __far *)&s[11]);
+            dbg(":"); dbg_hex(s[10]);
+        }
+    }
+    dbg("\r\n");
+#endif
+    return r;
+}
+
 /* Returns -1 for escapes that are not DirectDraw's. With DDTRACE defined (DDTRACE=1
    win9x/build.sh) every escape and its answer goes to the debug port. */
 int dd_escape(WORD function, LPVOID in, LPVOID out)
@@ -226,13 +254,13 @@ static int escape(WORD function, LPVOID in, LPVOID out)
     RDD_DCICMD __far *cmd = (RDD_DCICMD __far *)in;
 
     if (function == QUERYESCSUPPORT)
-        return (in && *(WORD __far *)in == RDD_DCICOMMAND) ? RDD_DD_HAL_VERSION : -1;
+        return (in && *(WORD __far *)in == RDD_DCICOMMAND) ? RDD_DD_HAL_VERSION : R9X_NOT_OURS;
     if (function != RDD_DCICOMMAND)
-        return -1;
+        return R9X_NOT_OURS;
     /* Other DCI commands (DCI 1.0's, version 0x100: DirectDraw creates the primary surface
-       that way) are the DIB engine's: -1 sends them on to it. */
+       that way) are the DIB engine's. */
     if (!cmd || cmd->dwVersion != RDD_DD_VERSION)
-        return -1;
+        return dci_escape(function, in, out);
     if (!shared.magic) {
         shared.magic = RDD_MAGIC;
         shared.size = sizeof shared;
@@ -280,5 +308,5 @@ static int escape(WORD function, LPVOID in, LPVOID out)
         dbg("r9x: DirectDraw HAL registered\r\n");
         return 1;
     }
-    return -1;
+    return R9X_NOT_OURS;
 }

@@ -144,12 +144,17 @@ static DWORD WINAPI WaitForVerticalBlank(LPDDHAL_WAITFORVERTICALBLANKDATA d)
     case DDWAITVB_I_TESTVB:
         d->bIsInVB = p < blank;
         break;
-    case DDWAITVB_BLOCKBEGIN:
+    case DDWAITVB_BLOCKBEGIN:           /* the start of the next blank: if one is on now,
+                                           it is not the next */
     case DDWAITVB_BLOCKBEGINEVENT:
+        while (phase(&period) < blank)
+            Sleep(0);
         while (phase(&period) >= blank)
             Sleep(0);
         break;
-    case DDWAITVB_BLOCKEND:
+    case DDWAITVB_BLOCKEND:             /* the end of the next (or current) blank */
+        while (phase(&period) >= blank)
+            Sleep(0);
         while (phase(&period) < blank)
             Sleep(0);
         break;
@@ -197,6 +202,23 @@ static DWORD WINAPI Flip(LPDDHAL_FLIPDATA d)
 /* Flips and blits are done as soon as they are asked for. */
 static DWORD WINAPI GetFlipStatus(LPDDHAL_GETFLIPSTATUSDATA d)
 {
+    d->ddRVal = DD_OK;
+    return DDHAL_DRIVER_HANDLED;
+}
+
+/* A surface's memory for the program: the address in video memory (all of it is mapped,
+   linear), moved to the corner of the rectangle asked for. */
+static DWORD WINAPI Lock(LPDDHAL_LOCKDATA d)
+{
+    LPDDRAWI_DDRAWSURFACE_LCL s = d->lpDDSurface;
+    LPDDRAWI_DDRAWSURFACE_GBL g = s->lpGbl;
+    DWORD p = g->fpVidMem, bits = shared->bpp;
+
+    if (s->dwFlags & DDRAWISURF_HASPIXELFORMAT)
+        bits = g->ddpfSurface.dwRGBBitCount;
+    if (d->bHasRect)
+        p += d->rArea.top * g->lPitch + d->rArea.left * (bits / 8);
+    d->lpSurfData = (LPVOID)p;
     d->ddRVal = DD_OK;
     return DDHAL_DRIVER_HANDLED;
 }
@@ -274,8 +296,10 @@ DWORD WINAPI DriverInit(DWORD context)
     scb = (LPDDHAL_DDSURFACECALLBACKS)s->surfcb;
     zero(scb, sizeof *scb);
     scb->dwSize = sizeof *scb;
-    scb->dwFlags = DDHAL_SURFCB32_FLIP | DDHAL_SURFCB32_GETBLTSTATUS | DDHAL_SURFCB32_GETFLIPSTATUS;
+    scb->dwFlags = DDHAL_SURFCB32_FLIP | DDHAL_SURFCB32_LOCK | DDHAL_SURFCB32_GETBLTSTATUS |
+                   DDHAL_SURFCB32_GETFLIPSTATUS;
     scb->Flip = Flip;
+    scb->Lock = Lock;
     scb->GetBltStatus = GetBltStatus;
     scb->GetFlipStatus = GetFlipStatus;
 
@@ -291,7 +315,8 @@ DWORD WINAPI DriverInit(DWORD context)
     s->hal.lpD3DHALCallbacks = 0;
     s->hal.lpDDExeBufCallbacks = 0;
     s->dll_ready = 1;
-    dbg("rdd: DirectDraw HAL DLL ready\r\n");
+    dbg("rdd: DirectDraw HAL DLL ready, loaded at "); dbg_hex((DWORD)dll_instance);
+    dbg(", process "); dbg_hex(GetCurrentProcessId()); dbg("\r\n");
     return (DWORD)s;
 }
 

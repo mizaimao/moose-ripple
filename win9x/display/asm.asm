@@ -145,7 +145,7 @@ Control proc    far
         add     sp, 10
         pop     ds
         pop     bp
-        cmp     ax, -1                  ; not one of ours
+        cmp     ax, 8000h               ; R9X_NOT_OURS: not one of ours
         je      short ctl_forward
         retf    14
 ctl_forward:

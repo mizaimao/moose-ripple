@@ -72,7 +72,7 @@ cd "$D"
     export INCLUDE="$(W "$T/ddkme/ddk/inc/win_me");$(W "$T/vc6/VC98/Include")" LIB="$(W "$T/vc6/VC98/Lib")"
     export WINEPATH="$(W "$T/vc6/VC98/Bin");$(W "$T/vc6/Common/MSDev98/Bin")"
     wine cl.exe /nologo /c /W3 /WX /O1 /Oy- /Zl /Gs /GF rippledd.c
-    wine link.exe /NOLOGO /DLL /NODEFAULTLIB /ENTRY:DllMain /BASE:0xB4000000 /DEF:rippledd.def \
+    wine link.exe /NOLOGO /DLL /NODEFAULTLIB /ENTRY:DllMain /BASE:0xB00B0000 /DEF:rippledd.def \
         /OUT:rippledd.dll /MAP:rippledd.map rippledd.obj kernel32.lib > link.log 2>&1 || { cat link.log; exit 1; }
 )
 cp rippledd.dll "$OUT/"

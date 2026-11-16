@@ -536,7 +536,7 @@ static WORD validate(DISPVALMODE __far *m);
    HKLM\Software\Microsoft\Windows\CurrentVersion\OpenGLDrivers, where the value of that name is
    the DLL to load (the INF writes it). The numbers in front of the name are the ICD interface
    version (2: OpenGL 1.1) and the driver's own version, which goes to its DrvValidateVersion.
-   Returns -1 for escapes that are not ours. */
+   Returns R9X_NOT_OURS for escapes that are not ours: asm.asm passes those to the DIB engine. */
 #define OPENGL_GETINFO  0x1101
 
 int __cdecl control_escape(WORD function, LPVOID in, LPVOID out)
@@ -544,7 +544,7 @@ int __cdecl control_escape(WORD function, LPVOID in, LPVOID out)
     static const char name[] = "RIPPLEGL";
     int r = dd_escape(function, in, out);  /* DirectDraw's, ddraw16.c */
 
-    if (r != -1)
+    if (r != R9X_NOT_OURS)
         return r;
 
     if (function == QUERYESCSUPPORT && in && *(WORD __far *)in == OPENGL_GETINFO)
@@ -560,7 +560,7 @@ int __cdecl control_escape(WORD function, LPVOID in, LPVOID out)
         dbg("r9x: OpenGL driver name asked for\r\n");
         return 1;
     }
-    return -1;
+    return R9X_NOT_OURS;
 }
 
 WORD __cdecl validate_mode(DISPVALMODE __far *m)

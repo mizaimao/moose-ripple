@@ -1,4 +1,4 @@
-# DirectDraw on Windows 98 (work in progress)
+# DirectDraw on Windows 98
 
 DirectDraw is the base Direct3D builds on (step 5 of [plan.md](plan.md)): games get their
 surfaces, page flipping and the screen mode from it. A display driver offers DirectDraw a HAL
@@ -38,10 +38,42 @@ program starts DirectDraw, the escapes come in this order:
 
 After every mode change the driver calls `SetInfo` again with "reset".
 
-## State (2026-11-15)
+## State (2026-11-16)
 
-Steps 1 to 5 go through and `SetInfo` accepts the description, but DirectDraw doesn't use the
-HAL yet: `ddtest` reports no video memory and no flipping from the driver, and the program runs
-on the emulation as before (nothing is worse than without the HAL). The driver answered the DCI
-1.0 commands of step 6 with "failed" instead of passing them to the DIB engine, which may be
-why; that change is made and not yet tested.
+DirectDraw uses the HAL. In Windows 98 SE on QEMU's virtio-vga, `ddtest` passes at 640x480
+(8 and 32 bits), 800x600 (16 bits) and 1024x768 (32 bits): DirectDraw reports 4.5 MB of video
+memory (what the screen leaves of the 8 MB) and page flipping, puts the back buffer in video
+memory, a flip moves the display start to it and back, the screen shows the frame drawn last,
+and 60 waits for the vertical blank take one second. Filling the whole back buffer and flipping
+runs at 3,300 (1024x768x32) to 7,600 (640x480x32) frames a second.
+
+One check failed once, on the first run after a restart: the screen showed white instead of
+the last frame (the desktop repainting after the mode change, probably). Not seen again.
+
+Not there yet: blits and colour fills in the driver (DirectDraw's own software does them, on
+video memory), surfaces in other pixel formats, and Direct3D.
+
+## Things learnt the hard way
+
+- **The DLL must be shared.** DirectDraw calls the HAL's functions from whichever program uses
+  it, and its helper process (DDHELP) is what loads the DLL. Windows 9x puts a DLL into the
+  part of the address space all processes see only if every section is marked shared and the
+  base is above 2 GB (`rippledd.def`, `/BASE:0xB00B0000`, as the DDK's own build does).
+  Without it the function addresses are only valid in DDHELP and DirectDraw silently runs
+  without the HAL ("Invalid 32-bit callback in lpDriverCallbacks").
+- **DCI 1.0 commands belong to the DIB engine.** DirectDraw gets the primary surface through
+  DCI (`DCICOMMAND` with version 0x100); the escape handler passes those on. "Not ours" is a
+  value that can't be a DCI error code (the DCI errors are negative, -1 among them).
+- **A Lock function of our own.** Without one, DirectDraw's own lock path for the back buffer
+  ended the program (inside DirectDraw, with Windows' 16-bit lock held, no exception visible).
+  The HAL's Lock returns the address in the mapped frame buffer.
+- **WaitForVerticalBlank with BLOCKBEGIN** waits for the *next* blank to start, also when one is
+  on: otherwise a loop of waits returns at once.
+- **Finding out why DirectDraw ignores a HAL.** `tools/win9x/ddinfo.c` prints DirectDraw's own
+  record of the driver (flags such as "no hardware", the callbacks and heaps it took). The
+  DirectX 7 SDK's debug runtime (archive.org, `dx7sdk-7001`) says why, but prints with
+  OutputDebugString, and Windows 9x drops those messages while DirectDraw holds the 16-bit
+  lock, where the checks run. A copy of its `ddraw.dll` with the message function sending its
+  text to QEMU's debug port (port 0xE9, a 25-byte patch in the test VM only) showed every
+  message. `tools/win9x/dbgrun.c` (a minimal debugger that keeps OutputDebugString text and
+  exceptions) and `tools/win9x/setini.c` (sets `[DirectDraw] debug=9` in WIN.INI) help there.

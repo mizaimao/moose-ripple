@@ -45,7 +45,9 @@ this project: nothing may look worse than without our driver).
    *State 2026-11-15:* the display driver runs the desktop at 8 to 32 bits and up to 1600x1200,
    changes modes without a restart and survives full-screen DOS sessions
    ([display-driver.md](display-driver.md)), and a mini VDD keeps DOS sessions in a window and
-   BIOS calls from switching the card's mode. Open: the hardware pointer, DirectDraw.
+   BIOS calls from switching the card's mode. *2026-11-16:* DirectDraw uses the driver's HAL:
+   video memory, page flipping, the vertical blank ([directdraw.md](directdraw.md)). Open: the
+   hardware pointer, blits in the driver.
 3. **The virtio-gpu path on 98:** our VxD: device setup, virtqueues, interrupts, resources, the
    3D commands (virgl) from user mode, fences.
    *State 2026-11-15:* the VxD brings the virtio device up (virtio 1.0 over PCI, two queues,

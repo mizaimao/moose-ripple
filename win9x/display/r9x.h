@@ -115,6 +115,7 @@ typedef struct {
 
 /* ---- Escapes -------------------------------------------------------------------------------- */
 #define QUERYESCSUPPORT 8
+#define R9X_NOT_OURS    ((int)0x8000) /* control_escape: let the DIB engine answer (not a DCI code) */
 
 /* ---- ValidateMode --------------------------------------------------------------------------- */
 typedef struct { WORD dvmSize, dvmBpp; SHORT dvmXRes, dvmYRes; } DISPVALMODE;
@@ -125,6 +126,7 @@ typedef struct { WORD dvmSize, dvmBpp; SHORT dvmXRes, dvmYRes; } DISPVALMODE;
 
 /* ---- Imports: the DIB engine (DIBENG.DLL) and KERNEL -------------------------------------- */
 extern WORD  __far __pascal DIB_Enable(LPVOID, WORD, LPVOID, LPVOID, LPVOID);
+extern short __far __pascal DIB_Control(LPVOID pdev, WORD function, LPVOID in, LPVOID out);
 extern WORD  __far __pascal DIB_Disable(LPVOID);
 extern void  __far __pascal DIB_BeginAccess(LPVOID, SHORT, SHORT, SHORT, SHORT, WORD);
 extern void  __far __pascal DIB_EndAccess(LPVOID, WORD);

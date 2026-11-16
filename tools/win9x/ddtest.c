@@ -17,6 +17,32 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Everything printed also goes to QEMU's debug port (0xE9): it survives a crash or a hung
+   screen, and a log file the guest never flushed. */
+#include <stdarg.h>
+static int say(const char *fmt, ...)
+{
+    char buf[512];
+    char *p;
+    va_list ap;
+    int n;
+
+    va_start(ap, fmt);
+    n = _vsnprintf(buf, sizeof buf - 1, fmt, ap);
+    va_end(ap);
+    buf[sizeof buf - 1] = 0;
+    for (p = buf; *p; p++) {                /* the port first: console output can block */
+        char c = *p;
+        __asm {
+            mov al, c
+            out 0E9h, al
+        }
+    }
+    fputs(buf, stdout);
+    return n;
+}
+#define printf say
+
 #ifndef DDFLIP_NOVSYNC                  /* DirectX 6; Visual C++ 6 has DirectX 5's header */
 #define DDFLIP_NOVSYNC 0x00000008L
 #endif
@@ -123,6 +149,7 @@ int main(int argc, char **argv)
     DWORD start, frames = 0, y0, y1, y2, px;
     int i;
 
+    setvbuf(stdout, NULL, _IONBF, 0);       /* everything printed survives a crash */
     if (DirectDrawCreate(NULL, &dd, NULL) != DD_OK) {
         printf("DirectDrawCreate failed\n");
         return 2;
