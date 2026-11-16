@@ -313,15 +313,63 @@ static DWORD hex8(const char *s)
 
 static void owner_forget(DWORD pid);
 
+static DWORD next_session(void)
+{
+    LONG s;
+
+    __asm {
+        mov     eax, 1
+        lock xadd sessions, eax
+        inc     eax
+        mov     s, eax
+    }
+    return (DWORD)s;
+}
+
+/* Process id -> session, kept from DllMain's process attach to its detach. me() reads it
+   without calling kernel32: most callers hold Windows' 16-bit lock (every DirectDraw call
+   does), and kernel32's own lock, which the environment functions take, is held by threads in
+   DllMain that may in turn wait for the 16-bit lock: the system would stop. */
+#define MAX_KNOWN 32
+static struct { DWORD pid, session; } known[MAX_KNOWN];
+
+/* DllMain, process attach (begin) or detach (end). A new process may have the id of one that
+   has just ended: what that one left goes. */
+void d3d_process(int begin)
+{
+    DWORD pid = GetCurrentProcessId();
+    int i, free = -1;
+
+    for (i = 0; i < MAX_KNOWN; i++) {
+        if (known[i].pid == pid)
+            known[i].pid = 0;
+        if (!known[i].pid && free < 0)
+            free = i;
+    }
+    if (!begin)
+        return;
+    owner_forget(pid);
+    if (free >= 0) {
+        known[free].session = next_session();
+        known[free].pid = pid;
+    }
+}
+
 /* The current process. */
 static OWNER me(void)
 {
     static const char name[] = "RIPPLE_D3D_SESSION";
     char buf[24];
     OWNER o;
-    LONG s;
+    int i;
 
     o.pid = GetCurrentProcessId();
+    for (i = 0; i < MAX_KNOWN; i++)
+        if (known[i].pid == o.pid) {
+            o.session = known[i].session;
+            return o;
+        }
+    /* A process DllMain didn't see (or the table was full): its number in its environment. */
     if (GetEnvironmentVariable(name, buf, sizeof buf) == 17 && buf[8] == ':' &&
         hex8(buf) == o.pid) {
         o.session = hex8(buf + 9);
@@ -329,13 +377,7 @@ static OWNER me(void)
     }
     /* First use in this process (a child process inherits its parent's variable, with the
        parent's id): a new number. Records left under this id belong to an ended process. */
-    __asm {
-        mov     eax, 1
-        lock xadd sessions, eax
-        inc     eax
-        mov     s, eax
-    }
-    o.session = (DWORD)s;
+    o.session = next_session();
     wsprintf(buf, "%08lx:%08lx", o.pid, o.session);
     SetEnvironmentVariable(name, buf);
     owner_forget(o.pid);

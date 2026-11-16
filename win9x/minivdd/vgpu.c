@@ -98,6 +98,7 @@ extern void *__cdecl vmm_map_phys(u32 phys, u32 bytes);
 extern void *__cdecl vmm_alloc_contig(u32 pages, u32 *phys);
 extern void *__cdecl vmm_alloc_pages(u32 pages, u32 *handle);
 extern void  __cdecl vmm_free_pages(u32 handle);
+extern void *__cdecl vmm_alloc_pageable(u32 pages);
 extern int   __cdecl vmm_page_table(void *addr, u32 pages, u32 *entries);
 extern u32   __cdecl vmm_time_ms(void);
 
@@ -634,6 +635,24 @@ u32 __cdecl vgpu_ioctl(struct dioc *p)
             if (ctx_owner[i] == p->process)
                 context_destroy(i);
         }
+        return 0;
+    }
+    if (p->code == RVD_HEAP) {                  /* system memory for DirectDraw: no device needed */
+        static struct rvd_heap heap;
+        if (p->out_len < sizeof(heap))
+            return ERROR_INVALID_PARAMETER;
+        if (!heap.address && p->in_len >= 4) {
+            u32 pages = (*(u32 *)p->in + 4095) >> 12;
+            for (; pages >= 256 && !heap.address; pages /= 2) {   /* less if memory is short */
+                heap.address = vmm_alloc_pageable(pages);
+                heap.size = heap.address ? pages << 12 : 0;
+            }
+            dbg("rvd: DirectDraw heap of "); dbg_hex(heap.size); dbg(" bytes at ");
+            dbg_hex((u32)heap.address); dbg("\r\n");
+        }
+        copy(p->out, &heap, sizeof(heap));
+        if (p->returned)
+            *p->returned = sizeof(heap);
         return 0;
     }
     if (!common)

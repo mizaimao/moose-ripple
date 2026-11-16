@@ -23,6 +23,7 @@
 #include "ddrawi.h"
 
 #include "rdd.h"
+#include "rvd.h"
 #include "rippled3d.h"
 
 /* rdd.h's description of DDHALINFO must match the DDK's. */
@@ -269,6 +270,36 @@ static void fill_caps(DDCORECAPS *c)
 }
 
 /* ---- Entry points ---------------------------------------------------------------------------- */
+/* System memory for surfaces that are never shown (the 16-bit side makes it a second heap):
+   the card's VGA memory is 8 MB, which leaves 3D programs little room for textures. The
+   mini-VDD makes the block once, in memory every process sees. Its handle stays open: closing
+   it would end this process's GPU contexts in the VxD. */
+static void sys_heap(RDD_SHARED *s)
+{
+    MEMORYSTATUS ms;
+    struct rvd_heap heap;
+    rvd_u32 want;
+    DWORD got = 0;
+    HANDLE h;
+
+    if (s->sysheap)
+        return;
+    ms.dwLength = sizeof ms;
+    GlobalMemoryStatus(&ms);
+    want = ms.dwTotalPhys >= 384UL << 20 ? 64UL << 20 :
+           ms.dwTotalPhys >= 192UL << 20 ? 32UL << 20 : 16UL << 20;
+    h = CreateFile(RVD_DEVICE_NAME, 0, 0, NULL, 0, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return;
+    if (DeviceIoControl(h, RVD_HEAP, &want, sizeof want, &heap, sizeof heap, &got, NULL) &&
+        got == sizeof heap && heap.address) {
+        s->sysheap_size = heap.size;
+        s->sysheap = (rdd_u32)heap.address;
+        dbg("rdd: surfaces never shown go to system memory at "); dbg_hex(s->sysheap);
+        dbg(", bytes "); dbg_hex(s->sysheap_size); dbg("\r\n");
+    }
+}
+
 typedef LPVOID (WINAPI *MAPSL)(DWORD);
 
 /* DirectDraw calls this once, with the context the 16-bit driver gave it (rdd.h). The answer
@@ -290,6 +321,7 @@ DWORD WINAPI DriverInit(DWORD context)
     }
     shared = s;
     clock_init();
+    sys_heap(s);
 
     cb = (LPDDHAL_DDCALLBACKS)s->ddcb;
     zero(cb, sizeof *cb);
@@ -334,6 +366,9 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
     if (reason == DLL_PROCESS_ATTACH) {
         dll_instance = instance;
         DisableThreadLibraryCalls(instance);
+        d3d_process(1);
+    } else if (reason == DLL_PROCESS_DETACH) {
+        d3d_process(0);
     }
     return TRUE;
 }

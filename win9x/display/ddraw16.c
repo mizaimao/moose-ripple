@@ -93,7 +93,7 @@ static void fill_halinfo(void)
 {
     RDD_HALINFO __near *h = &shared.hal;
     DWORD used = mul32((WORD)shared.pitch, (WORD)shared.height);
-    WORD i, j, cur = 0xFFFF;
+    WORD i, j, cur = 0xFFFF, nheaps;
 
     h->lpDDCallbacks = far16(shared.ddcb);
     h->lpDDSurfaceCallbacks = far16(shared.surfcb);
@@ -124,18 +124,31 @@ static void fill_halinfo(void)
     h->dwOffscreenAlign = h->dwOverlayAlign = h->dwTextureAlign = 8;
     h->dwZBufferAlign = h->dwAlphaAlign = 8;
 
-    /* The rest of video memory, below the screen: one heap of whole lines. */
-    fzero(&shared.heap, sizeof shared.heap);
+    /* The rest of video memory, below the screen: one heap of whole lines. With the system
+       memory heap (the DLL got it from the mini-VDD), textures and z-buffers go there first
+       and only come here when it is full: the card's memory is kept for back buffers. */
+    fzero(shared.heap, sizeof shared.heap);
+    nheaps = 0;
     if (shared.lines > shared.height + 1) {
-        shared.heap.dwFlags = RDD_VIDMEM_ISRECTANGULAR;
-        shared.heap.fpStart = shared.lfb + used;
-        shared.heap.dwWidth = shared.pitch;
-        shared.heap.dwHeight = shared.lines - shared.height;
-        h->dwNumHeaps = 1;
-    } else {
-        h->dwNumHeaps = 0;
+        RDD_VIDMEM __far *v = &shared.heap[nheaps++];
+        v->dwFlags = RDD_VIDMEM_ISRECTANGULAR;
+        v->fpStart = shared.lfb + used;
+        v->dwWidth = shared.pitch;
+        v->dwHeight = shared.lines - shared.height;
+        if (shared.sysheap)
+            v->ddsCaps = RDD_DDSCAPS_TEXTURE | RDD_DDSCAPS_ZBUFFER;
     }
-    h->pvmList = far16(&shared.heap);
+    /* System memory for surfaces that are never shown: textures, z-buffers, off-screen
+       surfaces. 3D drawing happens on the GPU and is read back, so nothing needs the card. */
+    if (shared.sysheap && shared.sysheap_size) {
+        RDD_VIDMEM __far *v = &shared.heap[nheaps++];
+        v->dwFlags = RDD_VIDMEM_ISLINEAR;
+        v->fpStart = shared.sysheap;
+        v->dwWidth = shared.sysheap + shared.sysheap_size - 1;      /* fpEnd: the last byte */
+        v->ddsCaps = v->ddsCapsAlt = RDD_DDSCAPS_SHOWN;
+    }
+    h->dwNumHeaps = nheaps;
+    h->pvmList = far16(&shared.heap[0]);
 
     h->dwMonitorFrequency = 60;
     h->dwNumModes = 0;

@@ -18,6 +18,10 @@ VxD, the test program and the winsys; this is version 2 of the interface.
 | `RVD_BUFFER_DESTROY` | handle | | |
 | `RVD_SUBMIT` | `struct rvd_submit`, commands | | a virgl command stream for a context |
 | `RVD_TRANSFER` | `struct rvd_transfer` | | copy between a buffer's memory and its GPU object, either way |
+| `RVD_HEAP` | bytes wanted | `struct rvd_heap` | one block of system memory for the display driver's DirectDraw surfaces that are never shown (made at the first call, returned again later; valid in every process). No GPU needed |
+
+Closing a handle to the VxD ends the GPU contexts of the process that closes it, so a program
+that opens one for `RVD_HEAP` alone (the DirectDraw DLL) keeps it open.
 
 The interface has the shape of the Mac OS X kernel driver's (`docs/kext-uapi.md`): contexts,
 buffers, submit, transfer. What goes through it (resource parameters, the command stream) is

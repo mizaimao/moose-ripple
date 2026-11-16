@@ -291,6 +291,15 @@ BeginProc _vmm_alloc_pages
         ret
 EndProc _vmm_alloc_pages
 
+; void *vmm_alloc_pageable(u32 pages): zeroed system pages that may be paged out (memory only
+; programs touch, through the same address in every process). 0 on failure. Never freed.
+BeginProc _vmm_alloc_pageable
+        mov     ecx, [esp+4]
+        VMMCall _PageAllocate, <ecx, PG_SYS, 0, 0, 0, 0, 0, PAGEZEROINIT>
+        mov     eax, edx
+        ret
+EndProc _vmm_alloc_pageable
+
 ; void vmm_free_pages(u32 handle)
 BeginProc _vmm_free_pages
         mov     eax, [esp+4]

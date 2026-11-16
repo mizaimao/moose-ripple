@@ -15,6 +15,9 @@ int d3d_driver_info(LPDDHAL_GETDRIVERINFODATA d);
    into its memory first. */
 void d3d_surface_access(LPDDRAWI_DDRAWSURFACE_LCL s);
 
+/* DllMain: a process attaches (1) or detaches (0). */
+void d3d_process(int begin);
+
 /* A surface is locked for writing: textures made from it are uploaded again before use. */
 void d3d_surface_written(LPDDRAWI_DDRAWSURFACE_LCL s);
 

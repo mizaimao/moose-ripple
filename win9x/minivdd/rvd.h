@@ -22,6 +22,7 @@ typedef unsigned long rvd_u32;
 #define RVD_BUFFER_DESTROY      6   /* in: rvd_u32 handle */
 #define RVD_SUBMIT              7   /* in: struct rvd_submit, then the commands */
 #define RVD_TRANSFER            8   /* in: struct rvd_transfer */
+#define RVD_HEAP                9   /* in: rvd_u32 bytes wanted; out: struct rvd_heap */
 
 #define RVD_MAX_CAPS            8
 
@@ -61,6 +62,14 @@ struct rvd_submit {
 #define RVD_TO_HOST     0       /* the buffer's memory -> the GPU object */
 #define RVD_FROM_HOST   1       /* the GPU object -> the buffer's memory */
 
+/* Memory for the display driver's DirectDraw surfaces that are never shown on the screen
+   (textures, z-buffers): one block, made at the first call (the size asked for, or less when
+   memory is short) and returned again by later calls; valid in every process until Windows
+   ends. Not tied to the GPU: no device needed. */
+struct rvd_heap {
+    void   *address;            /* 0: none */
+    rvd_u32 size;               /* bytes */
+};
 struct rvd_transfer {
     rvd_u32 context, buffer;
     rvd_u32 direction;          /* RVD_TO_HOST or RVD_FROM_HOST */

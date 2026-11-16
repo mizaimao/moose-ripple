@@ -78,7 +78,21 @@ typedef struct {
     rdd_u32 ddsCaps, ddsCapsAlt;
     rdd_u32 dwHeight;                   /* lines (lpHeap for a linear heap) */
 } RDD_VIDMEM;
+#define RDD_VIDMEM_ISLINEAR      0x1
 #define RDD_VIDMEM_ISRECTANGULAR 0x2
+
+/* DDSCAPS bits the heaps are described with (ddraw.h's values) */
+#define RDD_DDSCAPS_BACKBUFFER   0x00000004UL
+#define RDD_DDSCAPS_FLIP         0x00000010UL
+#define RDD_DDSCAPS_FRONTBUFFER  0x00000020UL
+#define RDD_DDSCAPS_OVERLAY      0x00000080UL
+#define RDD_DDSCAPS_PRIMARY      0x00000200UL
+#define RDD_DDSCAPS_TEXTURE      0x00001000UL
+#define RDD_DDSCAPS_VISIBLE      0x00008000UL
+#define RDD_DDSCAPS_ZBUFFER      0x00020000UL
+/* Surfaces that may be shown on the screen: only in the card's memory. */
+#define RDD_DDSCAPS_SHOWN (RDD_DDSCAPS_PRIMARY | RDD_DDSCAPS_FRONTBUFFER | RDD_DDSCAPS_BACKBUFFER | \
+                           RDD_DDSCAPS_FLIP | RDD_DDSCAPS_OVERLAY | RDD_DDSCAPS_VISIBLE)
 
 /* DDHALMODEINFO */
 typedef struct {
@@ -97,6 +111,7 @@ typedef struct {
     rdd_u32 runtime;                    /* DirectDraw's version, from DDVERSIONINFO */
     rdd_u32 setinfo16;                  /* DDRAW16's SetInfo, from DDNEWCALLBACKFNS */
     rdd_u32 dll_ready;                  /* DriverInit has filled in its part */
+    rdd_u32 sysheap, sysheap_size;      /* DLL: system memory for surfaces never shown (flat) */
     rdd_u32 mode_serial;                /* counts mode sets, so the DLL can notice them */
     /* the screen mode (16-bit side, at every mode set) */
     rdd_u32 lfb;                        /* flat address of the frame buffer */
@@ -108,7 +123,7 @@ typedef struct {
     rdd_u32      ddcb[12];              /* DDHAL_DDCALLBACKS */
     rdd_u32      surfcb[16];            /* DDHAL_DDSURFACECALLBACKS */
     rdd_u32      palcb[4];              /* DDHAL_DDPALETTECALLBACKS */
-    RDD_VIDMEM   heap;
+    RDD_VIDMEM   heap[2];               /* the card's memory below the screen; sysheap */
     RDD_MODEINFO modes[RDD_MAX_MODES];
 } RDD_SHARED;
 

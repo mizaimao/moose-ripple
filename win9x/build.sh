@@ -67,7 +67,7 @@ ls -l "$OUT"/ripple9x.* "$OUT"/ripplevd.vxd
 # based above 2 GB. Direct3D draws through OpenGL (opengl32.dll, loaded when first needed).
 D=$OUT/obj-ddraw
 rm -rf "$D" && mkdir -p "$D"
-cp "$here"/ddraw/* "$here"/display/rdd.h "$D/"
+cp "$here"/ddraw/* "$here"/display/rdd.h "$here"/minivdd/rvd.h "$D/"
 cd "$D"
 (
     export INCLUDE="$(W "$T/ddkme/ddk/inc/win_me");$(W "$T/vc6/VC98/Include")" LIB="$(W "$T/vc6/VC98/Lib")"
