@@ -43,3 +43,17 @@ Close the stub afterwards (`gdbserver none`).
 guest without the registry values. `guestmods.py` finds the guest's loaded modules for both
 (the kernel's base from the interrupt table, the module list from the kernel's debugger data
 block); it knows Windows 7 x64 only.
+
+## Reading a bluescreen
+
+Windows writes `C:\Windows\MEMORY.DMP` (a kernel memory dump) and a small dump in
+`C:\Windows\Minidump`. For a crash in a system thread (stop `0x7E`) or a page fault, the
+exception record and the registers at the fault sit below the stack the small dump keeps, so
+take `MEMORY.DMP` (copy it to `C:\rb\pkg` in an elevated prompt and send it with `put.cmd`):
+
+    $PY kmem.py MEMORY.DMP crash                 # the exception and the registers at the fault
+    $PY kmem.py MEMORY.DMP q fffffa8004da2100 24 # kernel memory, 64-bit words
+
+The faulting address minus the module base on the bluescreen, plus the image base in the
+module's `.map`, names the function there. `kmem.py` knows Windows 7 x64 kernel memory dumps
+only (4-level page tables, the summary bitmap layout of that version).
