@@ -21,6 +21,7 @@ done
 
 CDEF= ADEF=
 [ -z "${TRACE:-}" ] || { CDEF=/DTRACE; ADEF=-DTRACE; }
+[ -z "${DDTRACE:-}" ] || CDEF="$CDEF /DDDTRACE"      # DirectDraw's escapes on the debug port
 B=$OUT/obj-display
 rm -rf "$B" && mkdir -p "$B"
 cp "$here"/display/*.c "$here"/display/*.h "$here"/display/*.asm "$here"/display/*.def "$here"/display/*.rc "$B/"
@@ -28,11 +29,11 @@ cd "$B"
 
 # C: small model, SS != DS (w), 386 code, no stack probes, byte-packed structures, no library
 # names in the objects. Warnings are errors: a call into the C run-time would not link.
-WINEPATH="$(W "$T/d16/bin")" wine cl16.exe /nologo /c /W3 /WX /G3 /Gs /Zp1 /Zl /ASw /Os $CDEF enable.c
+WINEPATH="$(W "$T/d16/bin")" wine cl16.exe /nologo /c /W3 /WX /G3 /Gs /Zp1 /Zl /ASw /Os $CDEF enable.c ddraw16.c
 WINEPATH="$(W "$T/ddk98/ddk/bin/win98")" wine ml.exe -nologo -c -Cp $ADEF asm.asm
 
 # link16 answers its prompts from this file: objects, output, map, libraries, definitions.
-printf 'enable.obj +\r\nasm.obj\r\nripple9x.drv\r\nripple9x.map\r\nlibw.lib dibeng.lib\r\nripple9x.def\r\n' > link.rsp
+printf 'enable.obj +\r\nddraw16.obj +\r\nasm.obj\r\nripple9x.drv\r\nripple9x.map\r\nlibw.lib dibeng.lib\r\nripple9x.def\r\n' > link.rsp
 LIB="$(W "$T/ddk98/ddk/lib/win98")" WINEPATH="$(W "$T/d16/bin")" \
     wine link16.exe /NOE /NOD /LI /MAP /AL:16 @link.rsp > link.log 2>&1 || { cat link.log; exit 1; }
 grep -i -E "error|warning|unresolved" link.log && { cat link.log; exit 1; }
@@ -60,3 +61,19 @@ cd "$B"
 [ ! -f ripple9x.sym ] || cp ripple9x.sym "$OUT/"
 sed 's/$/\r/' "$here/inf/ripple9x.inf" > "$OUT/ripple9x.inf"
 ls -l "$OUT"/ripple9x.* "$OUT"/ripplevd.vxd
+
+# ---- The DirectDraw HAL's 32-bit DLL: Visual C++ 6 against the Windows Me DDK's DirectDraw
+# headers (ddraw.h, ddrawi.h; not in this repository), no C run-time, based above 2 GB.
+D=$OUT/obj-ddraw
+rm -rf "$D" && mkdir -p "$D"
+cp "$here"/ddraw/* "$here"/display/rdd.h "$D/"
+cd "$D"
+(
+    export INCLUDE="$(W "$T/ddkme/ddk/inc/win_me");$(W "$T/vc6/VC98/Include")" LIB="$(W "$T/vc6/VC98/Lib")"
+    export WINEPATH="$(W "$T/vc6/VC98/Bin");$(W "$T/vc6/Common/MSDev98/Bin")"
+    wine cl.exe /nologo /c /W3 /WX /O1 /Oy- /Zl /Gs /GF rippledd.c
+    wine link.exe /NOLOGO /DLL /NODEFAULTLIB /ENTRY:DllMain /BASE:0xB4000000 /DEF:rippledd.def \
+        /OUT:rippledd.dll /MAP:rippledd.map rippledd.obj kernel32.lib > link.log 2>&1 || { cat link.log; exit 1; }
+)
+cp rippledd.dll "$OUT/"
+ls -l "$OUT"/rippledd.dll

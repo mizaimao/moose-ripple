@@ -485,6 +485,21 @@ _mul32  proc    near
         ret
 _mul32  endp
 
+; DWORD div32(DWORD a, WORD b): a / b (b not 0); 32-bit division without the C run-time
+        public  _div32
+_div32  proc    near
+        push    bp
+        mov     bp, sp
+        mov     eax, [bp+4]
+        movzx   ecx, word ptr [bp+8]
+        xor     edx, edx
+        div     ecx
+        mov     edx, eax
+        shr     edx, 16
+        pop     bp
+        ret
+_div32  endp
+
 ; WORD dib_create(LPVOID lpInfo, LPVOID lpDevice, LPVOID lpBits, WORD flags)
 ; CreateDIBPDevice answers in EAX (the size of the screen in bytes, 0 for failure), which
 ; 16-bit C can't test: a 3 MB screen has a zero low word.

@@ -113,6 +113,9 @@ typedef struct {
 #define RVD_HIRES_ON   1UL
 #define RVD_SIGNATURE  0x31445652UL
 
+/* ---- Escapes -------------------------------------------------------------------------------- */
+#define QUERYESCSUPPORT 8
+
 /* ---- ValidateMode --------------------------------------------------------------------------- */
 typedef struct { WORD dvmSize, dvmBpp; SHORT dvmXRes, dvmYRes; } DISPVALMODE;
 #define VALMODE_YES         0
@@ -149,6 +152,7 @@ extern void  __cdecl hook_int2f(void);                            /* screen swit
 extern void  __cdecl unhook_int2f(void);
 extern WORD  __cdecl muldiv_(WORD a, WORD b, WORD c);             /* a * b / c, rounded */
 extern DWORD __cdecl mul32(WORD a, WORD b);
+extern DWORD __cdecl div32(DWORD a, WORD b);                     /* a / b */
 extern WORD  __cdecl dib_create(LPVOID lpInfo, LPVOID lpDevice, LPVOID lpBits, WORD flags);
 extern DWORD __cdecl sel_limit(WORD sel);
 extern void  __cdecl fb_fill(WORD sel, DWORD offset, DWORD count, BYTE value);
@@ -162,5 +166,9 @@ extern WORD   wEnabled;
 
 void dbg(const char __near *s);
 void dbg_hex(DWORD v);
+
+/* DirectDraw (ddraw16.c) */
+int  dd_escape(WORD function, LPVOID in, LPVOID out);
+void dd_mode_set(DWORD lfb, DWORD vram, WORD width, WORD height, WORD bpp, WORD pitch);
 
 #endif

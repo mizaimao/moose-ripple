@@ -20,6 +20,7 @@ Ripple.Copy=11
 ripple9x.drv=1
 ripplevd.vxd=1
 ripplegl.dll=1
+rippledd.dll=1
 
 [Manufacturer]
 %Provider%=Ripple.Mfg
@@ -37,6 +38,7 @@ AddReg=Ripple.AddReg
 ripple9x.drv
 ripplevd.vxd
 ripplegl.dll
+rippledd.dll
 
 [Ripple.DelReg]
 HKR,,Ver

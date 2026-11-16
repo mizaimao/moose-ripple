@@ -17,6 +17,7 @@ static WORD  wXRes = 640, wYRes = 480, wBpp = 8, wDpi = 96;
 static WORD  wEngineSize;           /* bytes of the PDEVICE that belong to the DIB engine */
 static WORD  wScreenSel;            /* selector covering the frame buffer */
 static DWORD dwVramSize;
+static DWORD dwLinear;              /* flat address of the frame buffer */
 static BYTE  bReEnable;
 static BYTE  bRepaintOff, bRepaintPending;
 static void (__far __pascal *lpRepaint)(void);  /* USER's "repaint the whole screen" */
@@ -116,6 +117,7 @@ static WORD map_card(void)
         dbg("r9x: can't map the frame buffer\r\n");
         return 0;
     }
+    dwLinear = linear;
     /* A copy of our data segment's descriptor (a plain read-write data segment), then moved
        onto the frame buffer. AllocSelector(0) gives an empty descriptor, which is not usable. */
     ours.p = (LPVOID)&dispInfo;
@@ -142,7 +144,12 @@ static void set_mode(void)
     vbe_write(VBE_YRES, wYRes);
     vbe_write(VBE_BPP, wBpp);
     vbe_write(VBE_VIRT_WIDTH, wXRes);
-    vbe_write(VBE_VIRT_HEIGHT, wYRes);
+    /* All of video memory as one tall virtual screen: DirectDraw's back buffers lie below the
+       visible part, and a flip moves the start of the display down to one (VBE_Y_OFFSET). */
+    {
+        DWORD lines = div32(dwVramSize, stride());
+        vbe_write(VBE_VIRT_HEIGHT, (WORD)(lines > 0xFFFF ? 0xFFFF : lines));
+    }
     vbe_write(VBE_X_OFFSET, 0);
     vbe_write(VBE_Y_OFFSET, 0);
     vbe_write(VBE_ENABLE, VBE_ENABLED | VBE_LFB);   /* this also clears the screen */
@@ -465,6 +472,7 @@ WORD DDI Enable(LPVOID lpDevice, WORD style, LPVOID lpDeviceType, LPVOID lpOutpu
             hook_int2f();
         }
         wEnabled = 1;
+        dd_mode_set(dwLinear, dwVramSize, wXRes, wYRes, wBpp, stride());
         dbg("r9x: enabled\r\n");
         return 1;
     }
@@ -529,12 +537,15 @@ static WORD validate(DISPVALMODE __far *m);
    the DLL to load (the INF writes it). The numbers in front of the name are the ICD interface
    version (2: OpenGL 1.1) and the driver's own version, which goes to its DrvValidateVersion.
    Returns -1 for escapes that are not ours. */
-#define QUERYESCSUPPORT 8
 #define OPENGL_GETINFO  0x1101
 
 int __cdecl control_escape(WORD function, LPVOID in, LPVOID out)
 {
     static const char name[] = "RIPPLEGL";
+    int r = dd_escape(function, in, out);  /* DirectDraw's, ddraw16.c */
+
+    if (r != -1)
+        return r;
 
     if (function == QUERYESCSUPPORT && in && *(WORD __far *)in == OPENGL_GETINFO)
         return 1;

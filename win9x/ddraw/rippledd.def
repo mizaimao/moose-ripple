@@ -1,0 +1,4 @@
+; rippledd.dll: the moose-ripple DirectDraw HAL (32-bit half). DirectDraw calls DriverInit.
+LIBRARY RIPPLEDD
+EXPORTS
+    DriverInit
