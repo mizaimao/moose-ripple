@@ -361,6 +361,13 @@ matches. With the driver's log switched on for every process (machine-wide `RIPP
 then a reboot, so that the compositor has it too), the compositor's side logged no refused
 resource while the video played.
 
-Next: find what Windows 7 expects of a driver for such a swap chain (likely something the
-kernel driver reports about presentation, or a present it should see), then put the processor
-back and check the picture.
+That path is Direct3D 9Ex's FlipEx swap chain: `BindToDwm` creates the FlipEx semaphore and
+binds through `dwmapi` (ordinal 125), and none of the runtime's FlipEx conditions involve the
+driver. So with the compositor running (since the driver counts as WDDM 1.1) the player's
+presenter uses FlipEx, and the compositor reads the player's shared surfaces itself, through
+our Direct3D 10 driver in its own process.
+
+Next: check that path, the compositor opening a surface the Direct3D 9 driver shared, and
+what it reads (a picture the compositor shows black reads as zeros, so likely another host
+resource than the one the player drew into); then put the processor back and check the
+picture.
