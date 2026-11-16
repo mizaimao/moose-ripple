@@ -51,7 +51,33 @@ One check failed once, on the first run after a restart: the screen showed white
 the last frame (the desktop repainting after the mode change, probably). Not seen again.
 
 Not there yet: blits and colour fills in the driver (DirectDraw's own software does them, on
-video memory), surfaces in other pixel formats, and Direct3D.
+video memory).
+
+## Direct3D 7 (2026-11-16)
+
+`win9x/ddraw/rippled3d.c` adds a Direct3D 7 HAL to the same DLL. Direct3D hands the driver
+command buffers (DrawPrimitives2): render states, texture stage states, clears and primitives
+of transformed, lit vertices. The DLL plays them on OpenGL through Windows' `opengl32.dll`, so
+on our OpenGL driver and the host GPU: each Direct3D context is an OpenGL context drawing into a
+framebuffer object the size of the render target, and the picture is read back into the render
+target's video memory at the end of a scene, or before the surface is locked or flipped.
+Textures are uploaded when first used and again when DirectDraw says their contents changed.
+
+Offered: the HAL device with hardware rasterization, 16- and 32-bit render targets, 16- and
+32-bit z-buffers, textures in five RGB formats up to 2048x2048 in video or system memory, two
+texture stages with the usual operations, alpha blending and alpha test, fog, flat and Gouraud
+shading, every primitive type. Not yet: transform and lighting in the driver (Direct3D does it
+on the CPU), mipmap filtering (level 0 only), colour keys, stencil, palettized textures, state
+blocks recorded by the driver.
+
+`tools/win9x/d3dtest.c` checks it the way a game uses it: on Windows 98 SE with DirectX 7 in
+Proxmox (virgl on the host's Intel UHD 630) every pixel check passes (clear, Gouraud triangle,
+depth test, texture texels, blending), the screen shows the frame, and the scene runs at about
+1,040 frames a second at 640x480x32 (each frame read back from the GPU and flipped).
+
+Windows 98 gives a new process the id of one that has just ended; the DLL's data is shared by
+all processes, so it tells processes apart by a number of its own kept in each process's
+environment (the second run of a program failed before that).
 
 ## Things learnt the hard way
 

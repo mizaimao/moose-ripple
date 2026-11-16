@@ -71,6 +71,12 @@ this project: nothing may look worse than without our driver).
    against a card of the time, more programs.
 5. **Direct3D on 98:** the HAL for DirectX 7 (3DMark 99 and 2000), then the DirectX 8 and 9
    command stream (3DMark 2001 SE), translated to Gallium (Mesa's driver interface).
+   *State 2026-11-16:* DirectDraw uses the driver's HAL (video memory, page flipping, a 60 Hz
+   vertical blank), and a Direct3D 7 HAL plays Direct3D's command buffers on OpenGL through our
+   OpenGL driver: a test program's frame (shading, depth test, textures, blending) is right on
+   the host GPU and runs at about 1,040 frames a second at 640x480 ([directdraw.md](directdraw.md)).
+   Next: 3DMark 2000 and 99. Open: Restart and Shut Down end in a blue screen with this driver
+   ([display-driver.md](display-driver.md)).
 6. **Windows 2000:** miniport and display driver; the OpenGL and Direct3D parts reused.
 7. Later, maybe: Glide (3dfx games), Windows 95.
 
