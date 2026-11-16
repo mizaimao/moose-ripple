@@ -4,7 +4,8 @@
  *
  *   dbgrun LOGFILE PROGRAM [ARGUMENTS...]
  *
- * Exceptions are logged and passed on to the program. Built by tools/win9x/build-tools.sh.
+ * Exceptions, DLL loads and unloads and threads are logged; exceptions are passed on to the
+ * program. Built by tools/win9x/build-tools.sh.
  */
 #include <windows.h>
 #include <stdio.h>
@@ -58,9 +59,41 @@ int main(int argc, char **argv)
             if (ev.u.CreateProcessInfo.hFile)
                 CloseHandle(ev.u.CreateProcessInfo.hFile);
             break;
-        case LOAD_DLL_DEBUG_EVENT:
+        case LOAD_DLL_DEBUG_EVENT: {
+            /* The name, when the system gives one: a pointer (in the debuggee) to a pointer
+               to the name, which may be Unicode. */
+            char name[MAX_PATH] = "?";
+            DWORD p = 0, got = 0;
+            HANDLE h = OpenProcess(PROCESS_VM_READ, FALSE, ev.dwProcessId);
+            if (h && ev.u.LoadDll.lpImageName &&
+                ReadProcessMemory(h, ev.u.LoadDll.lpImageName, &p, 4, &got) && p) {
+                if (ev.u.LoadDll.fUnicode) {
+                    WCHAR w[MAX_PATH];
+                    if (ReadProcessMemory(h, (LPCVOID)p, w, sizeof w - 2, &got)) {
+                        w[MAX_PATH - 1] = 0;
+                        WideCharToMultiByte(CP_ACP, 0, w, -1, name, sizeof name, NULL, NULL);
+                    }
+                } else if (ReadProcessMemory(h, (LPCVOID)p, name, sizeof name - 1, &got)) {
+                    name[got < sizeof name ? got : sizeof name - 1] = 0;
+                }
+            }
+            if (h)
+                CloseHandle(h);
+            fprintf(log, "[dll %p loaded in process %lx: %s]\n", ev.u.LoadDll.lpBaseOfDll,
+                    ev.dwProcessId, name);
             if (ev.u.LoadDll.hFile)
                 CloseHandle(ev.u.LoadDll.hFile);
+            break;
+        }
+        case UNLOAD_DLL_DEBUG_EVENT:
+            fprintf(log, "[dll %p unloaded in process %lx]\n", ev.u.UnloadDll.lpBaseOfDll,
+                    ev.dwProcessId);
+            break;
+        case CREATE_THREAD_DEBUG_EVENT:
+            fprintf(log, "[thread %lx started in process %lx]\n", ev.dwThreadId, ev.dwProcessId);
+            break;
+        case EXIT_THREAD_DEBUG_EVENT:
+            fprintf(log, "[thread %lx ended in process %lx]\n", ev.dwThreadId, ev.dwProcessId);
             break;
         case OUTPUT_DEBUG_STRING_EVENT: {
             char buf[2048];

@@ -116,11 +116,16 @@ static void scene(LPDIRECT3DDEVICE7 dev, LPDIRECTDRAWSURFACE7 tex, int w, int h,
     v[2] = tlv(w * 0.6f, h * 0.35f, 0.2f, 0xFF00FF00, 0, 0);
     v[3] = tlv(w * 0.9f, h * 0.35f, 0.2f, 0xFF00FF00, 0, 0);
     IDirect3DDevice7_DrawPrimitive(dev, D3DPT_TRIANGLESTRIP, TLV_FVF, v, 4, 0);
-    v[0] = tlv(w * 0.55f, h * 0.1f, 0.8f, 0xFFFF0000, 0, 0);
-    v[1] = tlv(w * 0.95f, h * 0.1f, 0.8f, 0xFFFF0000, 0, 0);
-    v[2] = tlv(w * 0.55f, h * 0.4f, 0.8f, 0xFFFF0000, 0, 0);
-    v[3] = tlv(w * 0.95f, h * 0.4f, 0.8f, 0xFFFF0000, 0, 0);
-    IDirect3DDevice7_DrawPrimitive(dev, D3DPT_TRIANGLESTRIP, TLV_FVF, v, 4, 0);
+    /* (indexed, as games draw most of their geometry: two triangles from four vertices, the
+       vertices not starting at the first) */
+    {
+        static WORD idx[6] = { 2, 3, 4, 4, 3, 5 };
+        v[2] = tlv(w * 0.55f, h * 0.1f, 0.8f, 0xFFFF0000, 0, 0);
+        v[3] = tlv(w * 0.95f, h * 0.1f, 0.8f, 0xFFFF0000, 0, 0);
+        v[4] = tlv(w * 0.55f, h * 0.4f, 0.8f, 0xFFFF0000, 0, 0);
+        v[5] = tlv(w * 0.95f, h * 0.4f, 0.8f, 0xFFFF0000, 0, 0);
+        IDirect3DDevice7_DrawIndexedPrimitive(dev, D3DPT_TRIANGLELIST, TLV_FVF, v, 6, idx, 6, 0);
+    }
 
     /* bottom left: a 2x2 texture over a quad, point-sampled: four flat squares */
     if (tex) {
@@ -183,6 +188,132 @@ static void expect(LPDIRECTDRAWSURFACE7 s, int bpp, const char *what, int x, int
     if (!ok) {
         printf("    expected %d %d %d\n", r, g, b);
         failures++;
+    }
+}
+
+/* ---- Texture updates: a 4x4 texture filled with one texel value, drawn over the middle of the
+   screen; then changed in some way and drawn again. */
+typedef struct { const char *name; int bits; DWORD r, g, b, a; DWORD red, green, blue; } TEXFMT;
+static const TEXFMT texfmts[] = {
+    { "32-bit ARGB", 32, 0xFF0000, 0xFF00, 0xFF, 0xFF000000, 0xFFFF0000, 0xFF00FF00, 0xFF0000FF },
+    { "16-bit 565", 16, 0xF800, 0x07E0, 0x001F, 0, 0xF800, 0x07E0, 0x001F },
+    { "16-bit 1555", 16, 0x7C00, 0x03E0, 0x001F, 0x8000, 0xFC00, 0x83E0, 0x801F },
+    { "16-bit 4444", 16, 0x0F00, 0x00F0, 0x000F, 0xF000, 0xFF00, 0xF0F0, 0xF00F },
+};
+
+static LPDIRECTDRAWSURFACE7 tex_make(LPDIRECTDRAW7 dd, const TEXFMT *f, DWORD memcaps, DWORD extra)
+{
+    LPDIRECTDRAWSURFACE7 t = NULL;
+    DDSURFACEDESC2 d;
+
+    memset(&d, 0, sizeof d);
+    d.dwSize = sizeof d;
+    d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+    d.ddsCaps.dwCaps = extra | memcaps;
+    d.dwWidth = d.dwHeight = 4;
+    d.ddpfPixelFormat.dwSize = sizeof d.ddpfPixelFormat;
+    d.ddpfPixelFormat.dwFlags = DDPF_RGB | (f->a ? DDPF_ALPHAPIXELS : 0);
+    d.ddpfPixelFormat.dwRGBBitCount = f->bits;
+    d.ddpfPixelFormat.dwRBitMask = f->r;
+    d.ddpfPixelFormat.dwGBitMask = f->g;
+    d.ddpfPixelFormat.dwBBitMask = f->b;
+    d.ddpfPixelFormat.dwRGBAlphaBitMask = f->a;
+    if (IDirectDraw7_CreateSurface(dd, &d, &t, NULL) != DD_OK)
+        return NULL;
+    return t;
+}
+
+static void tex_fill(LPDIRECTDRAWSURFACE7 t, int bits, DWORD value)
+{
+    DDSURFACEDESC2 d;
+    int x, y;
+
+    memset(&d, 0, sizeof d);
+    d.dwSize = sizeof d;
+    if (IDirectDrawSurface7_Lock(t, NULL, &d, DDLOCK_WAIT | DDLOCK_WRITEONLY, NULL) != DD_OK)
+        return;
+    for (y = 0; y < 4; y++)
+        for (x = 0; x < 4; x++) {
+            BYTE *row = (BYTE *)d.lpSurface + y * d.lPitch;
+            if (bits == 32)
+                ((DWORD *)row)[x] = value;
+            else
+                ((WORD *)row)[x] = (WORD)value;
+        }
+    IDirectDrawSurface7_Unlock(t, NULL);
+}
+
+/* One scene: clear, the texture over the middle; then the colour in the middle. */
+static void tex_draw(LPDIRECTDRAW7 dd, LPDIRECT3DDEVICE7 dev, LPDIRECTDRAWSURFACE7 back,
+                     LPDIRECTDRAWSURFACE7 tex, int w, int h, int bpp, const char *what,
+                     int r, int g, int b)
+{
+    TLV v[4];
+
+    IDirect3DDevice7_Clear(dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0, 1.0f, 0);
+    IDirect3DDevice7_BeginScene(dev);
+    IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_ZENABLE, FALSE);
+    IDirect3DDevice7_SetTexture(dev, 0, tex);
+    IDirect3DDevice7_SetTextureStageState(dev, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    IDirect3DDevice7_SetTextureStageState(dev, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    v[0] = tlv(w * 0.25f, h * 0.25f, 0.5f, 0xFFFFFFFF, 0, 0);
+    v[1] = tlv(w * 0.75f, h * 0.25f, 0.5f, 0xFFFFFFFF, 1, 0);
+    v[2] = tlv(w * 0.25f, h * 0.75f, 0.5f, 0xFFFFFFFF, 0, 1);
+    v[3] = tlv(w * 0.75f, h * 0.75f, 0.5f, 0xFFFFFFFF, 1, 1);
+    IDirect3DDevice7_DrawPrimitive(dev, D3DPT_TRIANGLESTRIP, TLV_FVF, v, 4, 0);
+    IDirect3DDevice7_SetTexture(dev, 0, NULL);
+    IDirect3DDevice7_SetTextureStageState(dev, 0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_ZENABLE, TRUE);
+    IDirect3DDevice7_EndScene(dev);
+    expect(back, bpp, what, w / 2, h / 2, r, g, b);
+    (void)dd;
+}
+
+static void texture_updates(LPDIRECTDRAW7 dd, LPDIRECT3DDEVICE7 dev, LPDIRECTDRAWSURFACE7 back,
+                            int w, int h, int bpp)
+{
+    char what[64];
+    int i;
+
+    printf("texture updates:\n");
+    for (i = 0; i < (int)(sizeof texfmts / sizeof texfmts[0]); i++) {
+        const TEXFMT *f = &texfmts[i];
+        LPDIRECTDRAWSURFACE7 t = tex_make(dd, f, DDSCAPS_VIDEOMEMORY, DDSCAPS_TEXTURE);
+        LPDIRECTDRAWSURFACE7 s;
+
+        if (!t) {
+            printf("  %s texture in video memory: not made\n", f->name);
+            continue;
+        }
+        tex_fill(t, f->bits, f->red);
+        sprintf(what, "%s, filled red", f->name);
+        tex_draw(dd, dev, back, t, w, h, bpp, what, 255, 0, 0);
+        tex_fill(t, f->bits, f->green);
+        sprintf(what, "%s, locked again: green", f->name);
+        tex_draw(dd, dev, back, t, w, h, bpp, what, 0, 255, 0);
+        /* a blit from a surface in system memory, as DirectX 7's texture manager does */
+        s = tex_make(dd, f, DDSCAPS_SYSTEMMEMORY, DDSCAPS_OFFSCREENPLAIN);
+        if (s) {
+            tex_fill(s, f->bits, f->blue);
+            IDirectDrawSurface7_Blt(t, NULL, s, NULL, DDBLT_WAIT, NULL);
+            sprintf(what, "%s, blitted: blue", f->name);
+            tex_draw(dd, dev, back, t, w, h, bpp, what, 0, 0, 255);
+            IDirectDrawSurface7_Release(s);
+        }
+        IDirectDrawSurface7_Release(t);
+    }
+    /* a texture in system memory, written between scenes */
+    {
+        LPDIRECTDRAWSURFACE7 t = tex_make(dd, &texfmts[0], DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE);
+        if (t) {
+            tex_fill(t, 32, texfmts[0].red);
+            tex_draw(dd, dev, back, t, w, h, bpp, "system memory texture: red", 255, 0, 0);
+            tex_fill(t, 32, texfmts[0].blue);
+            tex_draw(dd, dev, back, t, w, h, bpp, "system memory, rewritten: blue", 0, 0, 255);
+            IDirectDrawSurface7_Release(t);
+        } else {
+            printf("  texture in system memory: not made\n");
+        }
     }
 }
 
@@ -323,6 +454,7 @@ int main(int argc, char **argv)
         expect(back, bpp, "texture: yellow texel", w * 35 / 100, h * 85 / 100, 255, 255, 0);
     }
     expect(back, bpp, "blend: white on blue", w * 3 / 4, h * 3 / 4, 128, 128, 179);
+    texture_updates(dd, dev, back, w, h, bpp);
     IDirectDrawSurface7_Flip(front, NULL, DDFLIP_WAIT);
 
     start = GetTickCount();
