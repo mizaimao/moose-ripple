@@ -174,9 +174,25 @@ static WORD mode_fits(WORD x, WORD y, WORD bpp)
         return 0;
     if (x < 320 || y < 200 || x > 4096 || y > 4096)
         return 0;
-    if ((x * bytes) & 3)                    /* the DIB engine's lines are 4-byte aligned */
+    /* QEMU's VBE rounds the width down to a multiple of 8 pixels, which also keeps the DIB
+       engine's lines 4-byte aligned, as they must be. */
+    if (x & 7)
         return 0;
     return dwVramSize == 0 || mul32(x * bytes, y) <= dwVramSize;
+}
+
+/* Before the card is mapped: are its VBE registers there, and how much memory has it? */
+static WORD probe_card(void)
+{
+    if ((vbe_read(VBE_ID) & 0xFFF0) != 0xB0C0)
+        return 0;
+    if (!dwVramSize) {
+        FARP size;
+        size.w.lo = 0;
+        size.w.hi = vbe_read(VBE_VRAM_64K);
+        dwVramSize = size.d;
+    }
+    return 1;
 }
 
 /* ---- The VDD -------------------------------------------------------------------------------- */
@@ -238,6 +254,13 @@ void __cdecl r9x_init(void)                 /* from LibEntry */
     dbg("r9x: moose-ripple display driver loaded\r\n");
     vdd_init();
     read_settings();
+    /* GDI is told this mode and sizes the PDEVICE for it before Enable sets up the card, so
+       a mode the card can't show (chosen with more video memory, say) is replaced here. */
+    probe_card();
+    if (!mode_fits(wXRes, wYRes, wBpp)) {
+        dbg("r9x: mode doesn't fit, using 640x480 8 bpp\r\n");
+        wXRes = 640; wYRes = 480; wBpp = 8;
+    }
 }
 
 static WORD hw_enable(void)
@@ -334,14 +357,12 @@ static void default_colors(BYTE __far *t)
             t[(246 + i) * 4 + j] = staticHigh[i][j];
 }
 
-/* Bytes that follow the engine's part of the PDEVICE: the screen's bitmap description. */
+/* Bytes that follow the engine's part of the PDEVICE: the screen's bitmap description, then
+   the colour table (8 bpp) or the three colour masks (16 bpp). The same at every depth:
+   ReEnable builds the new mode in the PDEVICE GDI sized from an earlier answer. */
 static WORD info_size(void)
 {
-    if (wBpp == 8)
-        return sizeof(BMIHEADER) + 256 * 4;
-    if (wBpp == 16)
-        return sizeof(BMIHEADER) + 3 * 4;       /* three colour masks */
-    return sizeof(BMIHEADER);
+    return sizeof(BMIHEADER) + 256 * 4;
 }
 
 /* ---- Enable: GDI asks for the device's description, or for the device itself ----------- */
@@ -410,6 +431,7 @@ WORD DDI Enable(LPVOID lpDevice, WORD style, LPVOID lpDeviceType, LPVOID lpOutpu
     {
         DIBENGINE __far *pd = (DIBENGINE __far *)lpDevice;
         BMIHEADER __far *bi;
+        BYTE __far *oldTable = lpColorTable;    /* set if the mode before was 8 bpp */
         FARP  bits;
         WORD  flags = MINIDRIVER | VRAM;
 
@@ -444,7 +466,9 @@ WORD DDI Enable(LPVOID lpDevice, WORD style, LPVOID lpDeviceType, LPVOID lpOutpu
         if (wBpp == 8) {
             flags |= PALETTIZED;
             lpColorTable = (BYTE __far *)(bi + 1);
-            if (!bReEnable)
+            /* Keep the colours only when the mode before was 8 bpp too, in this same PDEVICE:
+               other depths leave their colour masks here, or nothing we wrote. */
+            if (!bReEnable || lpColorTable != oldTable)
                 default_colors(lpColorTable);
         } else if (wBpp == 16) {                /* the card's 16-bit format is 5-6-5 */
             DWORD __far *masks = (DWORD __far *)(bi + 1);
@@ -485,6 +509,12 @@ WORD DDI ReEnable(LPVOID lpPDevice, LPVOID lpGDIInfo)
     WORD ox = wXRes, oy = wYRes, ob = wBpp, ok;
 
     read_settings();
+    if (!mode_fits(wXRes, wYRes, wBpp)) {   /* refused, not replaced: the caller would take
+                                               another mode for the one it asked for */
+        dbg("r9x: mode doesn't fit, keeping the current one\r\n");
+        wXRes = ox; wYRes = oy; wBpp = ob;
+        return 0;
+    }
     bReEnable = 1;
     DIB_BeginAccess(lpPDevice, 0, 0, ox - 1, oy - 1, 8);    /* 8: keep the pointer away */
     ok = Enable(lpPDevice, 0, NULL, NULL, NULL);
@@ -581,17 +611,9 @@ WORD __cdecl validate_mode(DISPVALMODE __far *m)
 
 static WORD validate(DISPVALMODE __far *m)
 {
-    if (!wScreenSel) {
-        /* not enabled yet: answer from the card's memory size alone */
-        if ((vbe_read(VBE_ID) & 0xFFF0) != 0xB0C0)
-            return VALMODE_NO_WRONGDRV;
-        if (!dwVramSize) {
-            FARP size;
-            size.w.lo = 0;
-            size.w.hi = vbe_read(VBE_VRAM_64K);
-            dwVramSize = size.d;
-        }
-    }
+    /* not enabled yet: answer from the card's memory size alone */
+    if (!wScreenSel && !probe_card())
+        return VALMODE_NO_WRONGDRV;
     if (m->dvmBpp != 8 && m->dvmBpp != 16 && m->dvmBpp != 24 && m->dvmBpp != 32)
         return VALMODE_NO_NODAC;
     if (!mode_fits(m->dvmXRes, m->dvmYRes, m->dvmBpp))

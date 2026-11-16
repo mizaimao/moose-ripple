@@ -81,6 +81,10 @@ typedef struct {
 #define RDD_VIDMEM_ISLINEAR      0x1
 #define RDD_VIDMEM_ISRECTANGULAR 0x2
 
+/* The last line the card can start showing the screen at: QEMU's VBE caps its Y offset at
+   12000 (VBE_DISPI_MAX_YRES). A surface that may be shown must start on this line or above. */
+#define RDD_MAX_Y_OFFSET         12000UL
+
 /* DDSCAPS bits the heaps are described with (ddraw.h's values) */
 #define RDD_DDSCAPS_BACKBUFFER   0x00000004UL
 #define RDD_DDSCAPS_FLIP         0x00000010UL
@@ -123,7 +127,8 @@ typedef struct {
     rdd_u32      ddcb[12];              /* DDHAL_DDCALLBACKS */
     rdd_u32      surfcb[16];            /* DDHAL_DDSURFACECALLBACKS */
     rdd_u32      palcb[4];              /* DDHAL_DDPALETTECALLBACKS */
-    RDD_VIDMEM   heap[2];               /* the card's memory below the screen; sysheap */
+    RDD_VIDMEM   heap[3];               /* the card's memory below the screen; sysheap; the
+                                           card's memory past the lines a flip can show */
     RDD_MODEINFO modes[RDD_MAX_MODES];
 } RDD_SHARED;
 

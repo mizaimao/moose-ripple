@@ -126,7 +126,10 @@ static void fill_halinfo(void)
 
     /* The rest of video memory, below the screen: one heap of whole lines. With the system
        memory heap (the DLL got it from the mini-VDD), textures and z-buffers go there first
-       and only come here when it is full: the card's memory is kept for back buffers. */
+       and only come here when it is full: the card's memory is kept for back buffers.
+       A back buffer at the bottom of this heap starts on line dwHeight, and a flip can start
+       the display at line RDD_MAX_Y_OFFSET at most: so the heap is at most that many lines,
+       and the lines past it are a heap of their own for surfaces never shown (the last one). */
     fzero(shared.heap, sizeof shared.heap);
     nheaps = 0;
     if (shared.lines > shared.height + 1) {
@@ -135,6 +138,8 @@ static void fill_halinfo(void)
         v->fpStart = shared.lfb + used;
         v->dwWidth = shared.pitch;
         v->dwHeight = shared.lines - shared.height;
+        if (v->dwHeight > RDD_MAX_Y_OFFSET)
+            v->dwHeight = RDD_MAX_Y_OFFSET;
         if (shared.sysheap)
             v->ddsCaps = RDD_DDSCAPS_TEXTURE | RDD_DDSCAPS_ZBUFFER;
     }
@@ -145,6 +150,19 @@ static void fill_halinfo(void)
         v->dwFlags = RDD_VIDMEM_ISLINEAR;
         v->fpStart = shared.sysheap;
         v->dwWidth = shared.sysheap + shared.sysheap_size - 1;      /* fpEnd: the last byte */
+        v->ddsCaps = v->ddsCapsAlt = RDD_DDSCAPS_SHOWN;
+    }
+    /* The card's memory past the lines a flip can show (low resolutions only), for surfaces
+       never shown. Off-screen surfaces come here after heap 0 and the system heap; textures
+       and z-buffers, which heap 0 refuses in DirectDraw's first pass, come here before heap
+       0, which keeps heap 0 for back buffers. */
+    if (shared.lines > shared.height + RDD_MAX_Y_OFFSET) {
+        RDD_VIDMEM __far *v = &shared.heap[nheaps++];
+        v->dwFlags = RDD_VIDMEM_ISRECTANGULAR;
+        v->fpStart = shared.lfb +
+                     mul32((WORD)shared.pitch, (WORD)(shared.height + RDD_MAX_Y_OFFSET));
+        v->dwWidth = shared.pitch;
+        v->dwHeight = shared.lines - shared.height - RDD_MAX_Y_OFFSET;
         v->ddsCaps = v->ddsCapsAlt = RDD_DDSCAPS_SHOWN;
     }
     h->dwNumHeaps = nheaps;
