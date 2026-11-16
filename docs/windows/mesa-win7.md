@@ -421,18 +421,36 @@ shapes the test means to draw. (Mesa's `tgsi_to_nir` cannot take geometry shader
 ![The rig, second geometry test, old arrays: spikes from wrong vertices](../../media/win7-geomv8-rig-arrays.webp)
 ![The rig, second geometry test, selects: the intended shapes](../../media/win7-geomv8-rig-selects.webp)
 
-Open, found with these (the same address-register habit meeting virglrenderer):
+The same address-register habit met virglrenderer in more places: it also reads indexed
+constants through `addr0` in 0.10.4 (the rig's; 1.0.0 uses the named register), drops the
+constant part of a run-time geometry shader vertex index, and ignores run-time indexing of
+immediates. Patch 0033 takes run-time indexes one at a time, as Mesa's own TGSI producer does:
+each indexed read is a MOV of its own right after the `UARL` that sets `ADDR[0]`, each indexed
+write goes to a temporary stored through `ADDR[0]` after the instruction, a geometry shader's
+vertex index gets its constant part added in and goes through `ADDR[1]`, and the immediate
+constant buffer is read through selects up to 16 entries and through a temporary array copy up
+to 64, with zero past its end (as Direct3D reads past a constant buffer).
 
-- Arrays of more than 16 elements are still stored through the rotating address register.
-- virglrenderer 0.10.4 (the rig's) also reads constant buffers indexed at run time through
-  `addr0` only; 1.0.0 uses the named register. Programs that index constants dynamically, as
-  skinning does, can read wrong values on the rig.
-- virglrenderer ignores run-time indexing of immediates, so reads of the immediate constant
-  buffer (`icb[r0.x]`) get its first element; and it drops the constant part of a run-time
-  geometry shader input index.
+An independent review of the change (three reviewers, each finding checked by another) found three
+more things, fixed in the same patch: a pixel shader's colour output written at a run-time index
+always landed in the first output (virglrenderer ignores the index there; each declared output is
+now written under a compare); the instructions with two results (`sincos`, `udiv`, `imul`, `umul`)
+took the second result's index, and `imul`/`umul` their sources, after the first result was
+written; and an index past the immediate constant buffer read its first entry instead of zero.
+Still open: an immediate constant buffer of more than 64 entries indexed at run time reads its
+first entry (the driver log says so); reading it as a buffer texture, like patch 0032's constant
+buffers, would cover it.
 
-Using `ADDR[0]` for every run-time index, one at a time (as Mesa's own TGSI producer does), would
-avoid all of these.
+That mattered most where nobody had looked: WinSAT's ALU and texture tests build about 4100
+shaders each, every one with run-time constant reads (12288 in all, from the driver log). With
+the address registers in turn, a shader's second read went through `ADDR[1]`, which the rig read
+as `addr0`, so it fetched the first read's element again and the spheres came out dark and flat.
+Their speed did not change measurably (285 to 315 frames a second before, 283 to 301 after,
+runs alternated, with another VM busy on the same GPU). The Experience Index stays at 7.5 on Hog and
+7.1 on the rig.
+
+![The rig, ALU test, address registers in turn: the second constant read repeats the first](../../media/win7-alu-rig-rotating.webp)
+![The rig, ALU test, every index through ADDR[0]](../../media/win7-alu-rig-addr0.webp)
 
 | Experience Index | Hog before | Hog after | rig before | rig after |
 |---|---|---|---|---|
