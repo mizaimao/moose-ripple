@@ -627,3 +627,8 @@ What holds the score now:
   of the tests.
 - The GPU clock: at a host restart the rig's minimum clock goes back to 350 MHz, and the
   scores with it (6.5 → about 6.1).
+
+Load test 24 (fresh VM, the package built from scratch with patch 0027, host GPU at 1200 MHz):
+the checks right (32-bit and 64-bit Direct3D 9, DirectDraw, dxdiag), Chess Titans right, the
+Experience Index 6.6 and 6.6 (Direct3D 10 batch 455, geometry 312 and 43), nothing in the
+host's log. Between runs on one install the index moves by 0.1.
