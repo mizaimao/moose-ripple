@@ -23,15 +23,21 @@ this stage uses.
 Not there yet: hardware drawing (everything is the DIB engine in software, which QEMU makes fast
 enough for a desktop), DirectDraw and a hardware pointer.
 
-## Known problem: Restart and Shut Down end in a blue screen (2026-11-16)
+## Restart and Shut Down ended in a blue screen (found and fixed 2026-11-16)
 
-Restarting or shutting down Windows with this driver stops at a text screen that looks like
-noise: it is a blue-screen message ("A fatal exception 06 has occurred at C000:00008008"),
-unreadable because the text font in video memory is gone, waiting for a key. A hard reset gets
-the machine back. Seen in QEMU 10.0 on the build host and in Proxmox's QEMU on the GPU host.
-Windows' own VGA driver on QEMU's Cirrus card restarts cleanly in the same VM.
+Restarting or shutting down Windows with this driver stopped at a text screen that looked like
+noise: a blue-screen message ("A fatal exception 06 has occurred at C000:00008008"), unreadable
+because the text font in video memory was gone, waiting for a key. Seen in QEMU 10.0 on the
+build host and in Proxmox's QEMU on the GPU host. Windows' own VGA driver on QEMU's Cirrus card
+restarts cleanly in the same VM.
 
-What happens, found with QEMU's monitor and gdb stub (step by step, so it can be picked up):
+**The fix (mini-VDD):** when the display driver is disabling, and before every later video BIOS
+mode set in Windows' VM, the mini-VDD maps the card's VGA window (A0000h-BFFFFh) into that VM
+(`_PhysIntoV86`). The BIOS's writes then go to the card without page faults, so the VDD's
+oversized fill (step 2 below) never runs. Restart and Shut Down from the Start menu work (build
+host, 2026-11-16).
+
+What happened, found with QEMU's monitor and gdb stub:
 
 1. At shutdown the driver's Disable calls the VDD (VDD_DRIVER_UNREGISTER). The VDD switches the
    system VM to text mode 3 with the video BIOS (INT 10h). Any later mode switch through the BIOS
@@ -46,12 +52,13 @@ What happens, found with QEMU's monitor and gdb stub (step by step, so it can be
 4. The BIOS returns into the blanks (`20 07` is `and [bx],al`), runs through them to C8000h and
    meets font data at C8008h: invalid opcode, exception 6, in the system VM: blue screen.
 
-Ruled out: the order of the calls in Disable (now the DDK sample's), leaving out the unregister
-call or the driver's own BIOS call, registering with EDX=-1 (no VGA in a window), and putting
-the VGA memory-map registers back to text values first. The VDD's page initialiser is chosen
-per VM (pointers at the VDD's data, set for text mode); why it grows plane 0 to 64 KB for our
-driver and not for the Cirrus one is the open question. The mini-VDD logs the VDD's calls and
-Windows' exit on QEMU's debug port for this.
+Ruled out on the way: the order of the calls in Disable (now the DDK sample's), leaving out the
+unregister call or the driver's own BIOS call, registering with EDX=-1 (no VGA in a window),
+and putting the VGA memory-map registers back to text values first. Why the VDD grows plane 0
+to 64 KB for our driver and not for the Cirrus one is still not known; the fix makes it moot.
+The mini-VDD logs the VDD's calls and Windows' exit on QEMU's debug port. Note: `rundll32
+shell32.dll,SHExitWindowsEx 2` does not restart (rundll32 passes a window handle as the flags);
+it shuts down.
 
 ## Files
 

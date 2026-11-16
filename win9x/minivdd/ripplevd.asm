@@ -39,6 +39,7 @@ RVD_SIGNATURE   equ     31445652h       ; "RVD1", our answer in EAX
 VxD_LOCKED_DATA_SEG
 WindowsVM       dd      0               ; the system VM's handle
 HiRes           dd      0               ; the display driver has the card in its mode
+Disabled        dd      0               ; the display driver was disabled (Windows ends)
 ModeChange      dd      0               ; the VDD is switching the screen to or from a DOS session
 VIndex          dw      0               ; the private copy: index register
 VRegs           dw      VBE_REGS dup (0);                   and the registers behind it
@@ -200,6 +201,7 @@ BeginProc MiniVDD_RegisterDisplayDriver
         mov     HiRes, eax
         test    eax, eax
         jz      short rd_off
+        mov     Disabled, 0             ; the driver is back (Windows runs on)
         SAY     MsgRegOn
         jmp     short rd_said
 rd_off: SAY     MsgRegOff
@@ -212,8 +214,37 @@ EndProc MiniVDD_RegisterDisplayDriver
 BeginProc MiniVDD_DisplayDriverDisabling
         SAY     MsgDisabling
         mov     HiRes, 0
+        mov     Disabled, 1
+        call    RippleVD_MapVGA
         ret
 EndProc MiniVDD_DisplayDriverDisabling
+
+; The VGA window (A0000h-BFFFFh) of the card itself into Windows' VM. After the display driver
+; is disabled (Windows ends), Windows sets text mode with the video BIOS; the VDD catches the
+; BIOS's first write to the text window as a page fault and fills 64 KB of "text memory" from
+; B8000h through its alias of physical memory: past the window, over the video BIOS at C0000h
+; (QEMU under KVM doesn't write-protect it), and the BIOS dies (exception 6, a blue screen
+; instead of a restart). Mapped, the window takes the BIOS's writes without faults.
+BeginProc RippleVD_MapVGA
+        pushad
+        mov     eax, WindowsVM
+        VMMCall _PhysIntoV86, <0A0h, eax, 0A0h, 20h, 0>
+        popad
+        ret
+EndProc RippleVD_MapVGA
+
+; Before a video BIOS mode set in a VM: Windows' own after its display driver is disabled
+; gets the card's VGA window (see RippleVD_MapVGA).
+BeginProc MiniVDD_PreInt10ModeSet
+        cmp     Disabled, 0
+        je      short pi_done
+        cmp     ebx, WindowsVM
+        jne     short pi_done
+        call    RippleVD_MapVGA
+pi_done:
+        clc
+        ret
+EndProc MiniVDD_PreInt10ModeSet
 
 ; The VDD is about to give the screen to a DOS session (or to its own message screen) and will
 ; set a VGA mode: take the card out of the display driver's mode, and let everything through
@@ -362,6 +393,7 @@ BeginProc MiniVDD_Dynamic_Init
         MiniVDDDispatch POST_HIRES_TO_VGA, PostModeSwitch
         MiniVDDDispatch PRE_VGA_TO_HIRES, PreVGAToHiRes
         MiniVDDDispatch POST_VGA_TO_HIRES, PostModeSwitch
+        MiniVDDDispatch PRE_INT_10_MODE_SET, PreInt10ModeSet
 
         mov     esi, OFFSET32 RippleVD_VbeTrap
         mov     edx, VBE_INDEX
