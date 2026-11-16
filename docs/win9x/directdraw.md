@@ -123,7 +123,22 @@ DirectDraw call holds the 16-bit lock and may need the loader's: patch 0005 make
 data on its first OpenGL call instead. And the HAL no longer reads its process number from the
 environment in DirectDraw calls (kernel32's lock): DllMain assigns it at process start.
 
-Open: the text on 3DMark's "Now testing" screens between tests doesn't show.
+Open: the text on 3DMark's "Now testing" screens between tests doesn't show (3DMark 99 and
+2000 alike). It is not lost to the read-back below: a trace shows the write lock that is
+probably the text on a surface that is shown next, untouched by Direct3D in between.
+
+### 3DMark 99 Max (2026-11-16)
+
+Its default benchmark runs to the end in the same VM: **21969 3DMarks** and 193848 CPU 3DMarks
+at 800x600, 16-bit colour, triple buffering (game 1, the race, about 235 fps).
+
+### What the program draws itself
+
+Games draw into the back buffer with the CPU between scenes (text with GDI, a locked
+surface). The read-back at the end of the next scene copied the GPU's whole picture over that.
+Now a write lock on the render target marks it, and before the next 3D draw the surface's
+memory goes back into the GPU's picture (`glDrawPixels`); a clear of the whole target skips
+the copy. d3dtest checks it (a square written between scenes survives the next scene).
 
 Getting there took four fixes, each found with the driver's trace (`RIPPLE_D3D_TRACE`) or the
 winsys log: Mesa's thread-data lock (an NT-only static initializer, patch 0004) crashed the
