@@ -1,0 +1,38 @@
+d3d10umd: RIPPLE_DUMP_TGSI writes each shader to the driver log
+
+With RIPPLE_UMD_LOG set, RIPPLE_DUMP_TGSI writes every shader the Direct3D 10 driver translates,
+as TGSI text, to the driver log. Release builds have no ST_DEBUG to do it.
+
+---
+--- a/src/gallium/frontends/d3d10umd/ShaderTGSI.c
++++ b/src/gallium/frontends/d3d10umd/ShaderTGSI.c
+@@ -37,6 +37,9 @@
+ #include "pipe/p_state.h"
+ #include "tgsi/tgsi_ureg.h"
+ #include "tgsi/tgsi_dump.h"
++#include "RippleLog.h"
++#include <stdlib.h>
++#include <string.h>
+ #include "util/u_memory.h"
+ 
+ #include "ShaderDump.h"
+@@ -2319,6 +2322,19 @@
+    assert(tokens);
+    ureg_destroy(ureg);
+ 
++   /* moose-ripple: RIPPLE_DUMP_TGSI with RIPPLE_UMD_LOG: each shader as sent, into the driver log */
++   if (getenv("RIPPLE_DUMP_TGSI")) {
++      static unsigned dumped;
++      const size_t size = 256 * 1024;
++      char *text = (char *)malloc(size);
++      if (text && tgsi_dump_str(tokens, 0, text, size)) {
++         ripple_logf("tgsi shader %u:", ++dumped);
++         for (char *line = strtok(text, "\n"); line; line = strtok(NULL, "\n"))
++            ripple_logf("  %s", line);
++      }
++      free(text);
++   }
++
+    if (st_debug & ST_DEBUG_TGSI) {
+       tgsi_dump(tokens, 0);
+    }
