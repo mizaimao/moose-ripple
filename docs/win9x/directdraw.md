@@ -61,7 +61,12 @@ of transformed, lit vertices. The DLL plays them on OpenGL through Windows' `ope
 on our OpenGL driver and the host GPU: each Direct3D context is an OpenGL context drawing into a
 framebuffer object the size of the render target, and the picture is read back into the render
 target's video memory at the end of a scene, or before the surface is locked or flipped.
-Textures are uploaded when first used and again when DirectDraw says their contents changed.
+Textures are uploaded when first used and again when they were written (through our Lock,
+which DirectDraw's own blits use too, a texture blit, or a changed contents stamp); textures
+in system memory without a stamp are taken again once a scene. A context keeps at most 512
+OpenGL textures and deletes the one used longest ago. Fog is a texture unit of its own after
+Direct3D's stages (a two-texel ramp looked up with the fog factor of each vertex), because the
+host's virgl renderer can't translate OpenGL's fog varying.
 
 Offered: the HAL device with hardware rasterization, 16- and 32-bit render targets, 16- and
 32-bit z-buffers, textures in five RGB formats up to 2048x2048 in video or system memory, two
@@ -75,9 +80,42 @@ Proxmox (virgl on the host's Intel UHD 630) every pixel check passes (clear, Gou
 depth test, texture texels, blending), the screen shows the frame, and the scene runs at about
 1,040 frames a second at 640x480x32 (each frame read back from the GPU and flipped).
 
+It also checks indexed drawing and texture updates (32-bit, 565, 1555 and 4444 textures:
+locked again, blitted from system memory, a texture in system memory rewritten).
+
 Windows 98 gives a new process the id of one that has just ended; the DLL's data is shared by
 all processes, so it tells processes apart by a number of its own kept in each process's
 environment (the second run of a program failed before that).
+
+### 3DMark 2000 (2026-11-16)
+
+3DMark 2000 1.1 runs its default benchmark to the end on Windows 98 SE in VM 230 (DirectX 7,
+virgl on the host's Intel UHD 630, guest CPU shown as a 3.6 GHz Pentium III), with the game
+scenes, cockpit displays, fog and lighting as they should look: **1240 3D marks** at 1024x768,
+16-bit colour and textures, 16-bit z, Direct3D's own transform and lighting.
+
+| Test | Result |
+|---|---|
+| Game 1, helicopter: low, medium, high detail | 42.1, 18.7, 14.5 fps |
+| Game 2, adventure: low, medium, high detail | 10.5, 9.0, 8.5 fps |
+| Fill rate, single and multi-texturing | 858.2, 956.3 Mtexels/s |
+| High polygon count, 1, 4, 8 lights | 18309, 17711, 17043 Ktriangles/s |
+| Texture rendering speed, 8, 16, 32, 64 MB | 59.8, 5.1, 2.1, 1.1 fps |
+| Bump mapping, emboss 3, 2, 1 pass | 24.2, 24.2, 296.1 fps |
+| Bump mapping, environment | not supported (not offered) |
+| CPU speed | 30 CPU 3D marks |
+
+The texture rendering speed shows the main limit: the card's VGA memory is 8 MB (virtio-vga has
+no setting for more), and at 1024x768 with three buffers and a z-buffer about 3 MB are left for
+textures, so DirectX 7's texture manager swaps textures through the same few surfaces many times
+a frame. Next: a large texture heap in system memory that DirectDraw treats as video memory.
+
+Getting there took four fixes, each found with the driver's trace (`RIPPLE_D3D_TRACE`) or the
+winsys log: Mesa's thread-data lock (an NT-only static initializer, patch 0004) crashed the
+program when a thread ended; textures were re-created whenever DirectDraw kept no contents
+stamp, until guest memory ran out and draws lost their index buffers; the texture manager's
+thousands of short-lived surfaces each kept an OpenGL texture (the budget above); and OpenGL's
+fog varying made the host's shaders fail.
 
 ## Things learnt the hard way
 
