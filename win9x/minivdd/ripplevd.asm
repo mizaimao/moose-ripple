@@ -355,6 +355,26 @@ BeginProc _vmm_time_ms
         ret
 EndProc _vmm_time_ms
 
+; u32 vmm_mutex_create(void): a VMM mutex (no priority boost, no flags); 0 on failure
+BeginProc _vmm_mutex_create
+        VMMCall _CreateMutex, <0, 0>
+        ret
+EndProc _vmm_mutex_create
+
+; void vmm_mutex_enter(u32 mutex): the thread owns it when this returns, and may block before
+BeginProc _vmm_mutex_enter
+        mov     eax, [esp+4]
+        VMMCall _EnterMutex, <eax, BLOCK_SVC_IF_INTS_LOCKED+BLOCK_ENABLE_INTS>
+        ret
+EndProc _vmm_mutex_enter
+
+; void vmm_mutex_leave(u32 mutex)
+BeginProc _vmm_mutex_leave
+        mov     eax, [esp+4]
+        VMMCall _LeaveMutex, <eax>
+        ret
+EndProc _vmm_mutex_leave
+
 VxD_LOCKED_CODE_ENDS
 
 ; ---- Initialisation ---------------------------------------------------------------------------

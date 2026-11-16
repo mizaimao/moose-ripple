@@ -78,6 +78,12 @@ static u8 pci_read8(u32 bdf, u32 reg)
     return (u8)(pci_read32(bdf, reg) >> ((reg & 3) * 8));
 }
 
+static void pci_write32(u32 bdf, u32 reg, u32 v)
+{
+    outl(0xCF8, 0x80000000UL | (bdf << 8) | (reg & 0xFC));
+    outl(0xCFC, v);
+}
+
 /* ---- virtio over PCI (virtio 1.0, 4.1.4): vendor capabilities name the structures ---------- */
 #define VIRTIO_PCI_CAP_COMMON  1
 #define VIRTIO_PCI_CAP_NOTIFY  2
@@ -101,6 +107,9 @@ extern void  __cdecl vmm_free_pages(u32 handle);
 extern void *__cdecl vmm_alloc_pageable(u32 pages);
 extern int   __cdecl vmm_page_table(void *addr, u32 pages, u32 *entries);
 extern u32   __cdecl vmm_time_ms(void);
+extern u32   __cdecl vmm_mutex_create(void);
+extern void  __cdecl vmm_mutex_enter(u32 mutex);
+extern void  __cdecl vmm_mutex_leave(u32 mutex);
 
 /* ---- The virtio structures in the card's memory (virtio 1.0, 4.1.4.3) ------------------------ */
 /* common configuration, offsets */
@@ -450,6 +459,23 @@ static void read_host_info(void)
 
 /* Called once from MiniVDD_Dynamic_Init. Returns 0 if there is no virtio-gpu card (the mini-VDD
    still loads: QEMU's standard VGA has the same mode-setting ports and no virtio). */
+/* This driver polls and never takes the card's interrupt, and nobody else answers it either: an
+   interrupt the card raises outside a request (a configuration change, say) would hold the line
+   until the next request, and on a line shared with another device that device's handler would
+   run again and again. So the card is told not to raise it at all (PCI command register,
+   interrupt disable). Checked again at every new context, in case Windows' PCI code rewrote the
+   register after start-up. The status half of the register is written as zeroes, which clears
+   nothing. */
+static void quiet_interrupt(void)
+{
+    u32 cmd = pci_read32(gpu.bdf, 0x04);
+
+    if (cmd & 0x400UL)
+        return;
+    pci_write32(gpu.bdf, 0x04, (cmd & 0xFFFFUL) | 0x400UL);
+    dbg("rvd: the card's interrupt switched off\r\n");
+}
+
 int __cdecl vgpu_init(void)
 {
     u32 bdf, id, ptr, i;
@@ -464,6 +490,7 @@ int __cdecl vgpu_init(void)
         return 0;
     }
     gpu.bdf = bdf;
+    quiet_interrupt();
     for (i = 0; i < 6; i++)
         gpu.bar[i] = pci_read32(bdf, 0x10 + i * 4) & 0xFFFFFFF0UL;
     dbg("rvd: virtio-gpu at device "); dbg_hex(bdf);
@@ -624,7 +651,7 @@ struct dioc {
 #define DIOC_OPEN   0UL
 #define DIOC_CLOSE  0xFFFFFFFFUL
 
-u32 __cdecl vgpu_ioctl(struct dioc *p)
+static u32 dispatch(struct dioc *p)
 {
     u32 n = 0, i, err;
 
@@ -686,6 +713,7 @@ u32 __cdecl vgpu_ioctl(struct dioc *p)
         struct gpu_ctx_create *r;
         if (p->out_len < 4)
             return ERROR_INVALID_PARAMETER;
+        quiet_interrupt();
         for (i = 1; i < MAX_CONTEXTS && ctx_owner[i]; i++)
             ;
         if (i == MAX_CONTEXTS)
@@ -757,4 +785,25 @@ u32 __cdecl vgpu_ioctl(struct dioc *p)
     if (p->returned)
         *p->returned = n;
     return 0;
+}
+
+/* One request at a time. The request and answer buffers, the page-table scratch and the tables
+   above are shared by every caller, and a caller can block inside a request (allocating memory
+   may page), which lets another thread in. The mutex is made at the first call, in a thread:
+   nothing between the test and the store can block, so two threads can't both make one. */
+u32 __cdecl vgpu_ioctl(struct dioc *p)
+{
+    static u32 lock = 0;
+    u32 err;
+
+    if (p->code == DIOC_OPEN)
+        return 0;
+    if (!lock)
+        lock = vmm_mutex_create();
+    if (lock)
+        vmm_mutex_enter(lock);
+    err = dispatch(p);
+    if (lock)
+        vmm_mutex_leave(lock);
+    return err;
 }

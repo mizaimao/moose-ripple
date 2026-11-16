@@ -38,8 +38,9 @@ virgl's and is decided in user mode.
 - **Requests are synchronous.** The VxD copies a request into its own physically contiguous
   buffer (512 KB, so a command submission can be that large), puts it on the control queue and
   polls until the device has answered. Nothing is outstanding when `DeviceIoControl` returns,
-  so there are no fences yet: a later read-back sees everything submitted before it. Ring 0
-  code in Windows 9x is not pre-empted by other threads, so requests never interleave.
+  so there are no fences yet: a later read-back sees everything submitted before it. Requests
+  run one at a time under a mutex: ring 0 code in Windows 9x is not pre-empted, but a request
+  that allocates memory can block (paging), and another thread would get in.
 - **Clean-up.** A context belongs to the process that made it, and a buffer to its context.
   When a program closes the device, exits or crashes, Windows sends the VxD a close message
   and the VxD removes that process's contexts and buffers on the host and frees their memory.
