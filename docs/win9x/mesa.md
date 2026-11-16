@@ -43,6 +43,7 @@ display driver changes the mode for it and back). `timedemo` with `demo001`, def
 |---|---|
 | 640x480 in a window | about 300 |
 | 1024x768 full-screen | 155 |
+| 640x480 in a window, 16-bit desktop | about 380 |
 
     quake3.exe +set timedemo 1 +set logfile 2 +demo demo001
     (the result is in demoq3\qconsole.log)
@@ -58,12 +59,14 @@ picture on a renderer of any speed). Side by side they look the same.
     ...                                        screenshot and wait, then quit)
     quake3.exe +set r_fullscreen 0 +set r_mode 3 +exec cmp.cfg
 
-**Windows 98's own OpenGL screen savers** run on the driver through `opengl32.dll`: 3D Pipes
-(drawn straight to the screen, no back buffer), 3D Flower Box and 3D Flying Objects. 3D Text
-shows a black screen on the test VM with every renderer, Microsoft's own included, so that
-is not the driver's doing; the Windows helpers it draws with (`wglUseFontOutlines`, and
-`wglUseFontBitmaps`, which many programs use for text) work through the driver: `gltest text`
-checks both. 3D Maze is not checked yet.
+**Windows 98's own OpenGL screen savers** all run on the driver through `opengl32.dll`: 3D
+Pipes (drawn straight to the screen, no back buffer), 3D Flower Box, 3D Flying Objects, 3D
+Text (glyph outlines from `wglUseFontOutlines`) and 3D Maze (textures; it switches the screen
+to 640x480 for itself). On the long-used test VM 3D Text and 3D Maze show a black screen with
+every renderer, Microsoft's own included; in a fresh install of the same drivers they work,
+on the host GPU's path and on Mesa's software renderer, so that is the old VM's doing.
+`gltest text` checks the font helpers (`wglUseFontBitmaps` too, which many programs use for
+text).
 
 Not there yet: a faster way to the screen than the read-back (it is what limits the frame
 rate above), a comparison against a real card of the time, and more programs.
@@ -114,7 +117,7 @@ this measures the cost of a frame's way to the screen, not the GPU):
 | Renderer (Windows 98 SE guest) | 320x240 | 640x480 |
 |---|---|---|
 | Microsoft's software OpenGL 1.1 (`GDI Generic`), build host | about 4900 | |
-| Mesa softpipe, build host (waits for the display rate) | 33 | |
+| Mesa softpipe, build host | 33 to 500 | |
 | Mesa virgl, Proxmox VE host with Intel UHD 630 | 1500 to 1800 | about 680 |
 | the same through Windows' `opengl32.dll` (ICD) | about 1100 | |
 

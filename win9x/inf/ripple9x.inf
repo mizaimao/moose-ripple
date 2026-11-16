@@ -1,4 +1,4 @@
-; moose-ripple display driver for Windows 95/98/ME (2D stage): setup information.
+; moose-ripple display driver for Windows 95/98/ME: setup information.
 ; Install: Display Properties > Settings > Advanced > Adapter > Change > Have Disk,
 ; or point the Add New Hardware wizard at this folder.
 
@@ -120,5 +120,5 @@ HKR,"MODES\32\1920,1200"
 [Strings]
 Provider="moose-ripple"
 DiskName="moose-ripple display driver"
-VirtioVga.Desc="moose-ripple virtio-vga (2D)"
-StdVga.Desc="moose-ripple QEMU standard VGA (2D)"
+VirtioVga.Desc="moose-ripple virtio-vga"
+StdVga.Desc="moose-ripple QEMU standard VGA (no 3D)"

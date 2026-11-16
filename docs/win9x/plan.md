@@ -64,8 +64,9 @@ this project: nothing may look worse than without our driver).
    `opengl32.dll` as its installable client driver, and the Quake III Arena demo plays its
    demos at about 300 frames a second at 640x480 and 155 at 1024x768, with a picture that
    matches Mesa's software renderer frame for frame ([mesa.md](mesa.md)). Windows 98's own
-   OpenGL screen savers run (3D Pipes, Flower Box, Flying Objects). Open: a faster way to the
-   screen than reading frames back, a comparison against a card of the time, more programs.
+   OpenGL screen savers run, on 16-bit desktops too, and a new install from the INF sets
+   everything up. Open: a faster way to the screen than reading frames back, a comparison
+   against a card of the time, more programs.
 5. **Direct3D on 98:** the HAL for DirectX 7 (3DMark 99 and 2000), then the DirectX 8 and 9
    command stream (3DMark 2001 SE), translated to Gallium (Mesa's driver interface).
 6. **Windows 2000:** miniport and display driver; the OpenGL and Direct3D parts reused.

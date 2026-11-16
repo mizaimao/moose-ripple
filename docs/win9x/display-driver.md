@@ -42,11 +42,24 @@ driver always writes a few lines there (`r9x: ...`); nothing listens on a real P
 
 ## Install
 
-Display Properties > Settings > Advanced > Adapter > Change > Have Disk, and point it at the
-folder with `ripple9x.inf`, `ripple9x.drv`, `ripplevd.vxd` (the three files `build.sh` makes)
-and `ripplegl.dll` (the OpenGL driver, from `win9x/mesa/build.sh`). Or let the Add New Hardware wizard find the PCI
-display adapter and give it the same folder. Then pick a monitor type that allows the sizes you
-want (Advanced > Monitor): with "(Unknown Monitor)" Windows offers 640x480 only.
+One folder holds the driver: `ripple9x.inf`, `ripple9x.drv`, `ripplevd.vxd` (the three files
+`build.sh` makes) and `ripplegl.dll` (the OpenGL driver, from `win9x/mesa/build.sh`).
+
+- **A new install:** start the VM with QEMU's `virtio-vga` (or `virtio-vga-gl` for 3D).
+  Windows finds the new PCI display adapter at start-up; give the wizard that folder. It
+  copies the four files, registers the mini-VDD and the OpenGL driver, and asks for a restart.
+  Checked 2026-11-15 on a Windows 98 SE install that had run on a Cirrus card: after the
+  restart the desktop runs on our driver and OpenGL programs find `ripplegl.dll` (on a host
+  without 3D, Mesa's software renderer).
+- **Replacing another display driver:** Display Properties > Settings > Advanced > Adapter >
+  Change > Have Disk, and the same folder.
+- If Device Manager still lists the old card (with a warning sign), remove that entry: it
+  can hold on to the VGA ports, and our adapter then reports "cannot find any free
+  Input/Output Range" (Code 12).
+
+Then pick a monitor type that allows the sizes you want (Advanced > Monitor): with
+"(Unknown Monitor)" Display Properties offers 640x480 only (programs can still set any mode
+the driver has).
 
 ## Things learnt the hard way
 
@@ -84,7 +97,10 @@ nothing to do with our driver and cost time:
 - Its "Plug and Play BIOS" device had failed, so Windows saw no PCI devices at all and the
   display adapter was a leftover entry. Changing that device's driver to "PCI bus" (Device
   Manager > Update Driver > show all hardware > Standard system devices) made Windows find the
-  PCI devices, the virtio-vga among them, which then matched our INF by its PCI ID.
+  PCI devices, the virtio-vga among them, which then matched our INF by its PCI ID. (Without
+  that, installing the adapter by hand from the Add New Hardware list leaves it "not
+  configured properly".) The test disk keeps a snapshot from before any of this, so a new
+  install can be tried again.
 - Shutting down often hangs at the last screen (with any display driver). The test script resets
   the VM instead; `AutoScan=0` in `C:\MSDOS.SYS` keeps ScanDisk from running at every start.
 
