@@ -1,11 +1,13 @@
 d3d10umd: small indexable temp arrays as registers, indexed by selects
 
-An access to an indexable temp array (x#[] in Direct3D 10 shaders) through an index held in a
-register reached the host as a dynamically indexed array, which a GPU compiler may keep in
-scratch memory. Arrays of up to 16 elements are now plain registers: a read gathers the element
-with compare-and-select before the instruction, a write is scattered to the elements after it.
-The geometry shader of WinSAT's second geometry test ran ten times as fast on an Intel UHD 630
-host (68 to 704 frames a second). RIPPLE_INDEXED_TEMPS keeps the arrays.
+virglrenderer writes every indexed store to a temporary array through address register 0
+(get_temp with dimension 0 for destinations, in 0.10.4 and 1.0.0), while the driver hands out
+ADDR[0..2] in turn. A store through ADDR[1] or ADDR[2] landed on the wrong element: the geometry
+shader of WinSAT's second geometry test drew long spikes from wrong vertices, which cost the
+rig's Intel GPU most of a frame. Arrays of up to 16 elements are now plain registers: a read
+gathers the element with compare-and-select before the instruction, a write is scattered to the
+elements after it, so no indexed store reaches the host. The test draws its shapes, at 704
+frames a second on the rig (68 with RIPPLE_INDEXED_TEMPS, which keeps the arrays).
 
 ---
 --- a/src/gallium/frontends/d3d10umd/ShaderTGSI.c
@@ -70,8 +72,8 @@ host (68 to 704 frames a second). RIPPLE_INDEXED_TEMPS keeps the arrays.
 + * and an access through an index held in a register becomes compare-and-select over its
 + * elements: a read gathers the element into a temporary before the instruction, a write goes
 + * to a temporary that is scattered to the elements after it (translate_flush_scatters). The
-+ * host then gets no dynamically indexed temporaries, which its GPU compiler may keep in
-+ * scratch memory: Intel's took about 20 ms a frame on one such geometry shader.
++ * host then gets no indexed store, which virglrenderer writes through address register 0
++ * whatever register the shader names: one geometry shader drew from wrong vertices.
 + * RIPPLE_INDEXED_TEMPS (any value) keeps the arrays as before.
 + */
 +#define SHADER_SELECT_MAX_ELEMENTS 16
