@@ -1,0 +1,574 @@
+d3d10umd: run-time indexes one at a time, through ADDR[0]
+
+The translator handed out ADDR[0], ADDR[1] and ADDR[2] in turn for run-time indexes, but
+virglrenderer writes every indexed store to a temporary array through addr0, and 0.10.4 also
+reads indexed constants through addr0, whatever register the shader names; it drops the
+constant part of a run-time geometry shader vertex index, ignores a run-time index on a pixel
+shader's colour outputs, and cannot index immediates. In WinSAT's ALU and texture tests (about
+4100 shaders each, with run-time constant reads) the second read of a shader fetched the first
+one's element on the rig.
+
+Now each indexed read is a MOV of its own right after the UARL that sets ADDR[0]; each indexed
+write goes to a temporary that is stored through ADDR[0] after the instruction, or for a
+pixel shader's colour output, under a compare per declared output; a geometry shader's vertex
+index has its constant part added in and goes through ADDR[1]; the immediate constant buffer
+is read through selects up to 16 entries and through a temporary array copy up to 64, with
+zero past its end as Direct3D reads past a constant buffer (beyond 64 entries such reads are
+still wrong, and logged). The instructions with two results (SINCOS, UDIV, IMUL, UMUL) take
+all their operands before writing either result, so neither a source nor a run-time index is
+read after the other result changed it.
+
+---
+--- a/src/gallium/frontends/d3d10umd/ShaderTGSI.c
++++ b/src/gallium/frontends/d3d10umd/ShaderTGSI.c
+@@ -237,6 +237,21 @@
+    uint num_scatters;
+    struct ureg_dst insn_temps[16];
+    uint num_insn_temps;
++   /* moose-ripple: indexed writes waiting for their instruction (store_indirect), and the
++    * immediate constant buffer's size and, when it is indexed past selects, its copy */
++   struct {
++      struct ureg_dst base;
++      struct ureg_dst value;
++      struct ureg_src index;
++      uint writemask;
++      bool color;   /* a pixel shader's colour output: a compare per output */
++   } stores[2];
++   uint num_stores;
++   bool pixel_shader;
++   bool icb_warned;
++   uint icb_count;
++   struct ureg_dst icb_array;
++   bool icb_copied;
+    /* moose-ripple: constant buffers read as buffer textures (Shader_cb_views) */
+    struct Shader_cb_views *cb_views;
+    bool cb_as_view[PIPE_MAX_CONSTANT_BUFFERS];
+@@ -681,6 +696,13 @@
+                   dcl_siv_name);
+ }
+ 
++/* moose-ripple: run-time indexes, defined further down */
++static struct ureg_dst insn_temp(struct Shader_xlate *sx);
++static struct ureg_src indirect_index(struct Shader_xlate *sx, const struct Shader_index *index,
++                                      bool fold);
++static struct ureg_dst store_indirect(struct Shader_xlate *sx, struct ureg_dst base,
++                                      struct ureg_src index, uint writemask, bool color);
++
+ static struct ureg_src
+ relative_value(struct Shader_xlate *sx,
+                const struct Shader_relative_operand *operand)
+@@ -730,19 +752,6 @@
+    return ureg_scalar(reg, operand->comp);
+ }
+ 
+-static struct ureg_src
+-translate_relative_operand(struct Shader_xlate *sx,
+-                           const struct Shader_relative_operand *operand)
+-{
+-   struct ureg_src reg = relative_value(sx, operand);
+-   struct ureg_dst addr_reg = sx->addrs[sx->addr_cur];
+-   ureg_UARL(sx->ureg, addr_reg, reg);
+-      
+-   sx->addr_cur++;
+-   if(sx->addr_cur >= SHADER_MAX_ADDRS) sx->addr_cur = 0;
+-
+-   return ureg_src(addr_reg);
+-}
+ 
+ static struct ureg_dst
+ translate_operand(struct Shader_xlate *sx,
+@@ -778,10 +787,15 @@
+             }
+          }
+       } else {
+-         struct ureg_src addr =
+-            translate_relative_operand(sx, &operand->index[0].rel);
+          assert(operand->index[0].index_rep == D3D10_SB_OPERAND_INDEX_IMMEDIATE32_PLUS_RELATIVE);
+-         reg = ureg_dst_indirect(sx->outputs[operand->index[0].imm].reg[0], addr);
++         /* the host ignores a run-time index on a pixel shader's colour outputs: there each
++          * declared output is written under a compare (translate_flush_scatters) */
++         if (sx->pixel_shader)
++            reg = store_indirect(sx, sx->outputs[0].reg[0],
++                                 indirect_index(sx, &operand->index[0], true), writemask, true);
++         else
++            reg = store_indirect(sx, sx->outputs[operand->index[0].imm].reg[0],
++                                 indirect_index(sx, &operand->index[0], false), writemask, false);
+       }
+       break;
+ 
+@@ -914,11 +928,157 @@
+       ureg_release_temporary(sx->ureg, cond);
+    }
+    sx->num_scatters = 0;
++   for (uint s = 0; s < sx->num_stores; s++) {
++      if (sx->stores[s].color) {
++         struct ureg_dst cond = ureg_writemask(ureg_DECL_temporary(sx->ureg), TGSI_WRITEMASK_X);
++         for (uint o = 0; o < SHADER_MAX_OUTPUTS; o++) {
++            unsigned label = 0;
++            if (sx->outputs[o].reg[0].File != TGSI_FILE_OUTPUT)
++               continue;
++            ureg_USEQ(sx->ureg, cond, sx->stores[s].index, ureg_imm1u(sx->ureg, o));
++            ureg_UIF(sx->ureg, ureg_scalar(ureg_src(cond), TGSI_SWIZZLE_X), &label);
++            ureg_MOV(sx->ureg, ureg_writemask(sx->outputs[o].reg[0], sx->stores[s].writemask),
++                     ureg_src(sx->stores[s].value));
++            ureg_ENDIF(sx->ureg);
++         }
++         ureg_release_temporary(sx->ureg, cond);
++         continue;
++      }
++      ureg_UARL(sx->ureg, sx->addrs[0], sx->stores[s].index);
++      ureg_MOV(sx->ureg,
++               ureg_writemask(ureg_dst_indirect(sx->stores[s].base, ureg_src(sx->addrs[0])),
++                              sx->stores[s].writemask),
++               ureg_src(sx->stores[s].value));
++   }
++   sx->num_stores = 0;
+    for (uint t = 0; t < sx->num_insn_temps; t++)
+       ureg_release_temporary(sx->ureg, sx->insn_temps[t]);
+    sx->num_insn_temps = 0;
+ }
+ 
++/*
++ * moose-ripple: run-time indexes one at a time, through ADDR[0].
++ *
++ * virglrenderer writes every indexed store to a temporary array through addr0, and 0.10.4 also
++ * reads indexed constants through addr0, whatever address register the shader names; it drops
++ * the constant part of a run-time geometry shader vertex index, and it cannot index immediates
++ * at all. So each indexed read is a MOV of its own right after the UARL that sets ADDR[0], into
++ * a temporary the instruction then reads; each indexed write goes to a temporary, stored
++ * through ADDR[0] after the instruction (translate_flush_scatters). Mesa's own TGSI producer
++ * keeps to the same habit.
++ */
++#define SHADER_ICB_COPY_MAX 64
++
++/* The index of an access, in .x of a temporary, computed before the instruction (which may
++ * change the register it comes from); fold: with the immediate part added */
++static struct ureg_src
++indirect_index(struct Shader_xlate *sx, const struct Shader_index *index, bool fold)
++{
++   struct ureg_dst i = ureg_writemask(insn_temp(sx), TGSI_WRITEMASK_X);
++   struct ureg_src rel = relative_value(sx, &index->rel);
++   if (fold && index->index_rep == D3D10_SB_OPERAND_INDEX_IMMEDIATE32_PLUS_RELATIVE && index->imm)
++      ureg_UADD(sx->ureg, i, rel, ureg_imm1u(sx->ureg, index->imm));
++   else
++      ureg_MOV(sx->ureg, i, rel);
++   return ureg_scalar(ureg_src(i), TGSI_SWIZZLE_X);
++}
++
++static struct ureg_src
++fetch_indirect(struct Shader_xlate *sx, struct ureg_src base, struct ureg_src index)
++{
++   struct ureg_dst value = insn_temp(sx);
++   ureg_UARL(sx->ureg, sx->addrs[0], index);
++   ureg_MOV(sx->ureg, value, ureg_src_indirect(base, ureg_src(sx->addrs[0])));
++   return ureg_src(value);
++}
++
++static struct ureg_dst
++store_indirect(struct Shader_xlate *sx, struct ureg_dst base, struct ureg_src index,
++               uint writemask, bool color)
++{
++   struct ureg_dst value = insn_temp(sx);
++   if (sx->num_stores < ARRAY_SIZE(sx->stores)) {
++      sx->stores[sx->num_stores].base = base;
++      sx->stores[sx->num_stores].value = value;
++      sx->stores[sx->num_stores].index = index;
++      sx->stores[sx->num_stores].writemask = writemask;
++      sx->stores[sx->num_stores].color = color;
++      sx->num_stores++;
++   } else {
++      LOG_UNSUPPORTED(true);
++   }
++   return value;
++}
++
++/* A read of the immediate constant buffer at a run-time index: selects over a small one, the
++ * copy (made at its declaration) for a bigger one */
++static struct ureg_src
++translate_icb_indirect(struct Shader_xlate *sx, const struct Shader_index *index)
++{
++   struct ureg_src i = indirect_index(sx, index, true);
++
++   if (sx->icb_copied) {
++      /* the copy has a zero element after the table: an index past it reads zero */
++      struct ureg_dst clamped = ureg_writemask(insn_temp(sx), TGSI_WRITEMASK_X);
++      ureg_UMIN(sx->ureg, clamped, i, ureg_imm1u(sx->ureg, sx->icb_count));
++      return fetch_indirect(sx, ureg_src(sx->icb_array), ureg_scalar(ureg_src(clamped), TGSI_SWIZZLE_X));
++   }
++
++   if (sx->icb_count && sx->icb_count <= SHADER_SELECT_MAX_ELEMENTS) {
++      struct ureg_dst value = insn_temp(sx);
++      struct ureg_dst cond = ureg_writemask(insn_temp(sx), TGSI_WRITEMASK_X);
++      /* zero when the index matches no element, as Direct3D reads past a constant buffer */
++      ureg_MOV(sx->ureg, value, ureg_imm1u(sx->ureg, 0));
++      for (uint e = 0; e < sx->icb_count; e++) {
++         struct ureg_src element = sx->imms;
++         element.Index += e;
++         ureg_USEQ(sx->ureg, cond, i, ureg_imm1u(sx->ureg, e));
++         ureg_UCMP(sx->ureg, value, ureg_scalar(ureg_src(cond), TGSI_SWIZZLE_X), element,
++                   ureg_src(value));
++      }
++      return ureg_src(value);
++   }
++
++   if (!sx->icb_warned) {
++      sx->icb_warned = true;
++      ripple_logf("d3d10: an immediate constant buffer of %u entries is indexed at run time; "
++                  "past %u entries such reads give entry 0", sx->icb_count, SHADER_ICB_COPY_MAX);
++   }
++   LOG_UNSUPPORTED(true);
++   return sx->imms;
++}
++
++/* An input with two indexes (a geometry shader's vertex and register), either at run time */
++static struct ureg_src
++translate_input_2d(struct Shader_xlate *sx, const struct Shader_operand *operand)
++{
++   const struct Shader_index *vertex = &operand->index[0];
++   const struct Shader_index *reg_index = &operand->index[1];
++   const bool rel_vertex = vertex->index_rep != D3D10_SB_OPERAND_INDEX_IMMEDIATE32;
++   const bool rel_reg = reg_index->index_rep != D3D10_SB_OPERAND_INDEX_IMMEDIATE32;
++   struct ureg_src reg = sx->inputs[rel_reg && reg_index->index_rep ==
++                                    D3D10_SB_OPERAND_INDEX_RELATIVE ? 0 : reg_index->imm].reg;
++
++   if (!rel_vertex && !rel_reg)
++      return ureg_src_dimension(reg, vertex->imm);
++
++   /* the host drops the constant part of a run-time vertex index: it goes into the index */
++   struct ureg_src vi = rel_vertex ? indirect_index(sx, vertex, true) : ureg_src_undef();
++   struct ureg_src ri = rel_reg ? indirect_index(sx, reg_index, false) : ureg_src_undef();
++   struct ureg_dst value = insn_temp(sx);
++
++   if (rel_vertex)
++      ureg_UARL(sx->ureg, sx->addrs[1], vi);
++   if (rel_reg) {
++      ureg_UARL(sx->ureg, sx->addrs[0], ri);
++      reg = ureg_src_indirect(reg, ureg_src(sx->addrs[0]));
++   }
++   reg = rel_vertex ? ureg_src_dimension_indirect(reg, ureg_src(sx->addrs[1]), 0)
++                    : ureg_src_dimension(reg, vertex->imm);
++   ureg_MOV(sx->ureg, value, reg);
++   return ureg_src(value);
++}
++
+ /* moose-ripple: once the shader's own declarations are in (they all come before the first
+  * instruction), each constant buffer read as a buffer texture gets the highest sampler view
+  * from the caller's base down that the shader does not declare as a resource or sampler */
+@@ -997,19 +1157,10 @@
+                    operand->index[1].imm]);
+       break;
+    case D3D10_SB_OPERAND_INDEX_RELATIVE:
+-      reg = ureg_src_indirect(
+-         ureg_src(sx->temps[
+-                     sx->indexable_temp_offsets[operand->index[0].imm]]),
+-         translate_relative_operand(sx,
+-                                    &operand->index[1].rel));
+-      break;
+    case D3D10_SB_OPERAND_INDEX_IMMEDIATE32_PLUS_RELATIVE:
+-      reg = ureg_src_indirect(
+-         ureg_src(sx->temps[
+-                     operand->index[1].imm +
+-                     sx->indexable_temp_offsets[operand->index[0].imm]]),
+-         translate_relative_operand(sx,
+-                                    &operand->index[1].rel));
++      reg = fetch_indirect(sx,
++                           ureg_src(sx->temps[sx->indexable_temp_offsets[operand->index[0].imm]]),
++                           indirect_index(sx, &operand->index[1], true));
+       break;
+    default:
+       /* XXX: Other index representations.
+@@ -1044,6 +1195,10 @@
+       if (sx->indexable_temp_selects[operand->base.index[0].imm] &&
+           operand->base.index[1].index_rep != D3D10_SB_OPERAND_INDEX_IMMEDIATE32)
+          reg = ureg_dst(translate_indexable_temp_select(sx, &operand->base, true, writemask));
++      else if (operand->base.index[1].index_rep != D3D10_SB_OPERAND_INDEX_IMMEDIATE32)
++         reg = store_indirect(sx, sx->temps[sx->indexable_temp_offsets[operand->base.index[0].imm]],
++                              indirect_index(sx, &operand->base.index[1], true), writemask,
++                              false);
+       else
+          reg = ureg_dst(translate_indexable_temp(sx, &operand->base));
+       break;
+@@ -1079,17 +1234,13 @@
+             assert(operand->base.index[0].imm < SHADER_MAX_INPUTS);
+             reg = sx->inputs[operand->base.index[0].imm].reg;
+             break;
+-         case D3D10_SB_OPERAND_INDEX_RELATIVE: {
+-            struct ureg_src tmp =
+-               translate_relative_operand(sx, &operand->base.index[0].rel);
+-            reg = ureg_src_indirect(sx->inputs[0].reg, tmp);
+-         }
++         case D3D10_SB_OPERAND_INDEX_RELATIVE:
++            reg = fetch_indirect(sx, sx->inputs[0].reg,
++                                 indirect_index(sx, &operand->base.index[0], false));
+             break;
+-         case D3D10_SB_OPERAND_INDEX_IMMEDIATE32_PLUS_RELATIVE: {
+-            struct ureg_src tmp =
+-               translate_relative_operand(sx, &operand->base.index[0].rel);
+-            reg = ureg_src_indirect(sx->inputs[operand->base.index[0].imm].reg, tmp);
+-         }
++         case D3D10_SB_OPERAND_INDEX_IMMEDIATE32_PLUS_RELATIVE:
++            reg = fetch_indirect(sx, sx->inputs[operand->base.index[0].imm].reg,
++                                 indirect_index(sx, &operand->base.index[0], false));
+             break;
+          default:
+             /* XXX: Other index representations.
+@@ -1100,50 +1251,7 @@
+       } else {
+          assert(operand->base.index_dim == 2);
+          assert(operand->base.index[1].imm < SHADER_MAX_INPUTS);
+-
+-         switch (operand->base.index[1].index_rep) {
+-         case D3D10_SB_OPERAND_INDEX_IMMEDIATE32:
+-            reg = sx->inputs[operand->base.index[1].imm].reg;
+-            break;
+-         case D3D10_SB_OPERAND_INDEX_RELATIVE: {
+-            struct ureg_src tmp =
+-               translate_relative_operand(sx, &operand->base.index[1].rel);
+-            reg = ureg_src_indirect(sx->inputs[0].reg, tmp);
+-         }
+-            break;
+-         case D3D10_SB_OPERAND_INDEX_IMMEDIATE32_PLUS_RELATIVE: {
+-            struct ureg_src tmp =
+-               translate_relative_operand(sx, &operand->base.index[1].rel);
+-            reg = ureg_src_indirect(sx->inputs[operand->base.index[1].imm].reg, tmp);
+-         }
+-            break;
+-         default:
+-            /* XXX: Other index representations.
+-             */
+-            LOG_UNSUPPORTED(true);
+-         }
+-
+-         switch (operand->base.index[0].index_rep) {
+-         case D3D10_SB_OPERAND_INDEX_IMMEDIATE32:
+-            reg = ureg_src_dimension(reg, operand->base.index[0].imm);
+-            break;
+-         case D3D10_SB_OPERAND_INDEX_RELATIVE:{
+-            struct ureg_src tmp =
+-               translate_relative_operand(sx, &operand->base.index[0].rel);
+-            reg = ureg_src_dimension_indirect(reg, tmp, 0);
+-         }
+-            break;
+-         case D3D10_SB_OPERAND_INDEX_IMMEDIATE32_PLUS_RELATIVE: {
+-            struct ureg_src tmp =
+-               translate_relative_operand(sx, &operand->base.index[0].rel);
+-            reg = ureg_src_dimension_indirect(reg, tmp, operand->base.index[0].imm);
+-         }
+-            break;
+-         default:
+-            /* XXX: Other index representations.
+-             */
+-            LOG_UNSUPPORTED(true);
+-         }
++         reg = translate_input_2d(sx, &operand->base);
+       }
+       break;
+ 
+@@ -1220,11 +1328,9 @@
+          break;
+       case D3D10_SB_OPERAND_INDEX_RELATIVE:
+       case D3D10_SB_OPERAND_INDEX_IMMEDIATE32_PLUS_RELATIVE:
+-         reg = ureg_src_register(TGSI_FILE_CONSTANT, operand->base.index[1].imm);
+-         reg = ureg_src_indirect(
+-            reg,
+-            translate_relative_operand(sx, &operand->base.index[1].rel));
++         reg = ureg_src_register(TGSI_FILE_CONSTANT, 0);
+          reg = ureg_src_dimension(reg, operand->base.index[0].imm + 1);
++         reg = fetch_indirect(sx, reg, indirect_index(sx, &operand->base.index[1], true));
+          break;
+       default:
+          /* XXX: Other index representations.
+@@ -1244,11 +1350,7 @@
+          break;
+       case D3D10_SB_OPERAND_INDEX_RELATIVE:
+       case D3D10_SB_OPERAND_INDEX_IMMEDIATE32_PLUS_RELATIVE:
+-         reg = sx->imms;
+-         reg.Index += operand->base.index[0].imm;
+-         reg = ureg_src_indirect(
+-            sx->imms,
+-            translate_relative_operand(sx, &operand->base.index[0].rel));
++         reg = translate_icb_indirect(sx, &operand->base.index[0]);
+          break;
+       default:
+          /* XXX: Other index representations.
+@@ -1494,6 +1596,7 @@
+ 
+ 
+    /* Header. */
++   sx.pixel_shader = parser.header.type == D3D10_SB_PIXEL_SHADER;
+    switch (parser.header.type) {
+    case D3D10_SB_PIXEL_SHADER:
+       ureg = ureg_create(PIPE_SHADER_FRAGMENT);
+@@ -1533,21 +1636,27 @@
+       case D3D10_SB_OPCODE_LOG:
+          expand_unary_to_scalarf(ureg, ureg_LG2, &sx, &opcode);
+          break;
+-      case D3D10_SB_OPCODE_IMUL:
+-         if (opcode.dst[0].base.type != D3D10_SB_OPERAND_TYPE_NULL) {
+-            ureg_IMUL_HI(ureg,
+-                        translate_dst_operand(&sx, &opcode.dst[0], opcode.saturate),
+-                        translate_src_operand(&sx, &opcode.src[0], OF_INT),
+-                        translate_src_operand(&sx, &opcode.src[1], OF_INT));
+-         }
+-
+-         if (opcode.dst[1].base.type != D3D10_SB_OPERAND_TYPE_NULL) {
+-            ureg_UMUL(ureg,
+-                      translate_dst_operand(&sx, &opcode.dst[1], opcode.saturate),
+-                      translate_src_operand(&sx, &opcode.src[0], OF_INT),
+-                      translate_src_operand(&sx, &opcode.src[1], OF_INT));
+-         }
+-
++      case D3D10_SB_OPCODE_IMUL: {
++         /* moose-ripple: every operand is taken before either result is written: a source,
++          * or a destination's run-time index, may be the register the other result goes to */
++         const bool want_hi = opcode.dst[0].base.type != D3D10_SB_OPERAND_TYPE_NULL;
++         const bool want_lo = opcode.dst[1].base.type != D3D10_SB_OPERAND_TYPE_NULL;
++         struct ureg_dst a = ureg_DECL_temporary(ureg);
++         struct ureg_dst b = ureg_DECL_temporary(ureg);
++         struct ureg_dst hi = a, lo = a;
++         ureg_MOV(ureg, a, translate_src_operand(&sx, &opcode.src[0], OF_INT));
++         ureg_MOV(ureg, b, translate_src_operand(&sx, &opcode.src[1], OF_INT));
++         if (want_hi)
++            hi = translate_dst_operand(&sx, &opcode.dst[0], opcode.saturate);
++         if (want_lo)
++            lo = translate_dst_operand(&sx, &opcode.dst[1], opcode.saturate);
++         if (want_hi)
++            ureg_IMUL_HI(ureg, hi, ureg_src(a), ureg_src(b));
++         if (want_lo)
++            ureg_UMUL(ureg, lo, ureg_src(a), ureg_src(b));
++         ureg_release_temporary(ureg, a);
++         ureg_release_temporary(ureg, b);
++      }
+          break;
+ 
+       case D3D10_SB_OPCODE_FTOI: {
+@@ -1652,6 +1761,26 @@
+                ureg_DECL_immediate_block_uint(ureg,
+                                               opcode.customdata.u.constbuf.data,
+                                               opcode.customdata.u.constbuf.count);
++            /* moose-ripple: copied into a temporary array when indexing it at run time
++             * takes more than selects (translate_icb_indirect) */
++            sx.icb_count = (opcode.customdata.u.constbuf.count + 3) / 4;
++            if (sx.icb_count > SHADER_SELECT_MAX_ELEMENTS &&
++                sx.icb_count <= SHADER_ICB_COPY_MAX) {
++               sx.icb_array = ureg_DECL_array_temporary(ureg, sx.icb_count + 1, false);
++               for (unsigned e = 0; e < sx.icb_count; e++) {
++                  struct ureg_dst element = sx.icb_array;
++                  struct ureg_src value = sx.imms;
++                  element.Index += e;
++                  value.Index += e;
++                  ureg_MOV(ureg, element, value);
++               }
++               {
++                  struct ureg_dst pad = sx.icb_array;
++                  pad.Index += sx.icb_count;
++                  ureg_MOV(ureg, pad, ureg_imm1u(ureg, 0));
++               }
++               sx.icb_copied = true;
++            }
+          } else {
+             assert(0);
+          }
+@@ -1976,9 +2105,17 @@
+       case D3D10_SB_OPCODE_SINCOS: {
+          struct ureg_dst src0 = ureg_DECL_temporary(ureg);
+          ureg_MOV(ureg, src0, translate_src_operand(&sx, &opcode.src[0], OF_FLOAT));
+-         if (opcode.dst[0].base.type != D3D10_SB_OPERAND_TYPE_NULL) {
+-            struct ureg_dst dst = translate_dst_operand(&sx, &opcode.dst[0],
+-                                                        opcode.saturate);
++         /* moose-ripple: every operand is taken before either result is written: a source,
++          * or a destination's run-time index, may be the register the other result goes to */
++         const bool want_sin = opcode.dst[0].base.type != D3D10_SB_OPERAND_TYPE_NULL;
++         const bool want_cos = opcode.dst[1].base.type != D3D10_SB_OPERAND_TYPE_NULL;
++         struct ureg_dst sin_dst = src0, cos_dst = src0;
++         if (want_sin)
++            sin_dst = translate_dst_operand(&sx, &opcode.dst[0], opcode.saturate);
++         if (want_cos)
++            cos_dst = translate_dst_operand(&sx, &opcode.dst[1], opcode.saturate);
++         if (want_sin) {
++            struct ureg_dst dst = sin_dst;
+             struct ureg_src src = ureg_src(src0);
+             ureg_SIN(ureg, ureg_writemask(dst, TGSI_WRITEMASK_X),
+                      ureg_scalar(src, TGSI_SWIZZLE_X));
+@@ -1989,9 +2126,8 @@
+             ureg_SIN(ureg, ureg_writemask(dst, TGSI_WRITEMASK_W),
+                      ureg_scalar(src, TGSI_SWIZZLE_W));
+          }
+-         if (opcode.dst[1].base.type != D3D10_SB_OPERAND_TYPE_NULL) {
+-            struct ureg_dst dst = translate_dst_operand(&sx, &opcode.dst[1],
+-                                                        opcode.saturate);
++         if (want_cos) {
++            struct ureg_dst dst = cos_dst;
+             struct ureg_src src = ureg_src(src0);
+             ureg_COS(ureg, ureg_writemask(dst, TGSI_WRITEMASK_X),
+                      ureg_scalar(src, TGSI_SWIZZLE_X));
+@@ -2011,37 +2147,43 @@
+          struct ureg_dst src1 = ureg_DECL_temporary(ureg);
+          ureg_MOV(ureg, src0, translate_src_operand(&sx, &opcode.src[0], OF_UINT));
+          ureg_MOV(ureg, src1, translate_src_operand(&sx, &opcode.src[1], OF_UINT));
+-         if (opcode.dst[0].base.type != D3D10_SB_OPERAND_TYPE_NULL) {
+-            ureg_UDIV(ureg,
+-                      translate_dst_operand(&sx, &opcode.dst[0],
+-                                            opcode.saturate),
+-                      ureg_src(src0), ureg_src(src1));
+-         }
+-         if (opcode.dst[1].base.type != D3D10_SB_OPERAND_TYPE_NULL) {
+-            ureg_UMOD(ureg,
+-                      translate_dst_operand(&sx, &opcode.dst[1],
+-                                            opcode.saturate),
+-                      ureg_src(src0), ureg_src(src1));
+-         }
++         /* moose-ripple: every operand is taken before either result is written: a source,
++          * or a destination's run-time index, may be the register the other result goes to */
++         const bool want_q = opcode.dst[0].base.type != D3D10_SB_OPERAND_TYPE_NULL;
++         const bool want_r = opcode.dst[1].base.type != D3D10_SB_OPERAND_TYPE_NULL;
++         struct ureg_dst q = src0, r = src0;
++         if (want_q)
++            q = translate_dst_operand(&sx, &opcode.dst[0], opcode.saturate);
++         if (want_r)
++            r = translate_dst_operand(&sx, &opcode.dst[1], opcode.saturate);
++         if (want_q)
++            ureg_UDIV(ureg, q, ureg_src(src0), ureg_src(src1));
++         if (want_r)
++            ureg_UMOD(ureg, r, ureg_src(src0), ureg_src(src1));
+          ureg_release_temporary(ureg, src0);
+          ureg_release_temporary(ureg, src1);
+       }
+          break;
+       case D3D10_SB_OPCODE_UMUL: {
+-         if (opcode.dst[0].base.type != D3D10_SB_OPERAND_TYPE_NULL) {
+-            ureg_UMUL_HI(ureg,
+-                         translate_dst_operand(&sx, &opcode.dst[0],
+-                                               opcode.saturate),
+-                         translate_src_operand(&sx, &opcode.src[0], OF_UINT),
+-                         translate_src_operand(&sx, &opcode.src[1], OF_UINT));
+-         }
+-         if (opcode.dst[1].base.type != D3D10_SB_OPERAND_TYPE_NULL) {
+-            ureg_UMUL(ureg,
+-                      translate_dst_operand(&sx, &opcode.dst[1],
+-                                            opcode.saturate),
+-                      translate_src_operand(&sx, &opcode.src[0], OF_UINT),
+-                      translate_src_operand(&sx, &opcode.src[1], OF_UINT));
+-         }
++         /* moose-ripple: every operand is taken before either result is written: a source,
++          * or a destination's run-time index, may be the register the other result goes to */
++         const bool want_hi = opcode.dst[0].base.type != D3D10_SB_OPERAND_TYPE_NULL;
++         const bool want_lo = opcode.dst[1].base.type != D3D10_SB_OPERAND_TYPE_NULL;
++         struct ureg_dst a = ureg_DECL_temporary(ureg);
++         struct ureg_dst b = ureg_DECL_temporary(ureg);
++         struct ureg_dst hi = a, lo = a;
++         ureg_MOV(ureg, a, translate_src_operand(&sx, &opcode.src[0], OF_UINT));
++         ureg_MOV(ureg, b, translate_src_operand(&sx, &opcode.src[1], OF_UINT));
++         if (want_hi)
++            hi = translate_dst_operand(&sx, &opcode.dst[0], opcode.saturate);
++         if (want_lo)
++            lo = translate_dst_operand(&sx, &opcode.dst[1], opcode.saturate);
++         if (want_hi)
++            ureg_UMUL_HI(ureg, hi, ureg_src(a), ureg_src(b));
++         if (want_lo)
++            ureg_UMUL(ureg, lo, ureg_src(a), ureg_src(b));
++         ureg_release_temporary(ureg, a);
++         ureg_release_temporary(ureg, b);
+       }
+          break;
+ 
