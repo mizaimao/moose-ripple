@@ -697,3 +697,8 @@ map (`viogpu3d.map`) to name addresses in such a dump.
 Chess Titans and the desktop with Aero look as before. Hog's GPU is still mostly idle: the
 frames are still bound by round trips, now those of the present buffers and the programs' own
 waits for the GPU.
+
+The same driver on the rig (VM 220, host GPU at 1200 MHz): the Experience Index 6.9 and 6.9 (was
+6.6 to 6.7); Direct3D 10 frames a second: batch 655 (457), alpha 629 (450), ALU 323 (266),
+texture 324 (265), geometry 639 (340) and 59 (43), constant buffer 311 (196). So the rig's Intel
+GPU was not the only limit either. Its weakest test is still the second geometry test.
