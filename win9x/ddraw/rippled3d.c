@@ -84,6 +84,34 @@ static void dbg_hex(DWORD v)
     dbg(s);
 }
 
+/* A trace of textures, texture blits, render targets and surface handles on QEMU's debug
+   port, when the environment variable RIPPLE_D3D_TRACE is set (read at context creation). */
+static int trace_on;
+
+static void tracef(const char *fmt, ...)
+{
+    char b[300];
+    va_list ap;
+
+    if (!trace_on)
+        return;
+    va_start(ap, fmt);
+    wvsprintf(b, fmt, ap);
+    va_end(ap);
+    dbg(b);
+}
+
+/* A sum of a surface's bytes (for the trace: did the contents change between uploads?). */
+static DWORD sum_rows(const BYTE *p, LONG pitch, DWORD row_bytes, DWORD rows)
+{
+    DWORD s = 0, x, y;
+
+    for (y = 0; y < rows; y++, p += pitch)
+        for (x = 0; x < row_bytes; x += 4)
+            s = (s << 1 | s >> 31) ^ *(const DWORD *)(p + x);
+    return s;
+}
+
 static void *alloc(DWORD n)
 {
     return HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, n);
@@ -174,6 +202,7 @@ typedef struct {
     void (APIENTRY *DeleteTextures)(GLsizei, const GLuint *);
     void (APIENTRY *BindTexture)(GLenum, GLuint);
     void (APIENTRY *TexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const GLvoid *);
+    void (APIENTRY *TexSubImage2D)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const GLvoid *);
     void (APIENTRY *TexParameteri)(GLenum, GLenum, GLint);
     void (APIENTRY *TexParameterfv)(GLenum, GLenum, const GLfloat *);
     void (APIENTRY *TexEnvi)(GLenum, GLenum, GLint);
@@ -212,13 +241,14 @@ typedef struct {
     void (APIENTRY *ProvokingVertex)(GLenum);
 } GLF;
 
-#define GL_CORE_COUNT 48            /* entries up to wglGetProcAddress */
+#define GL_CORE_COUNT 49            /* entries up to wglGetProcAddress */
 static const char *const gl_names[] = {
     "glEnable", "glDisable", "glClear", "glClearColor", "glClearDepth", "glClearStencil",
     "glScissor", "glViewport", "glMatrixMode", "glLoadIdentity", "glOrtho", "glDepthFunc",
     "glDepthMask", "glBlendFunc", "glAlphaFunc", "glCullFace", "glFrontFace", "glShadeModel",
     "glPolygonMode", "glColorMask", "glReadPixels", "glPixelStorei", "glFinish",
-    "glGenTextures", "glDeleteTextures", "glBindTexture", "glTexImage2D", "glTexParameteri",
+    "glGenTextures", "glDeleteTextures", "glBindTexture", "glTexImage2D", "glTexSubImage2D",
+    "glTexParameteri",
     "glTexParameterfv", "glTexEnvi", "glTexEnvfv", "glEnableClientState",
     "glDisableClientState", "glVertexPointer", "glColorPointer", "glTexCoordPointer",
     "glDrawArrays", "glDrawElements", "glColor4ub", "glFogi", "glFogf", "glFogfv", "glGetString",
@@ -419,7 +449,7 @@ static DDLOCAL *ddlocal(LPDDRAWI_DIRECTDRAW_LCL lcl, int create)
 static void handle_set(DDLOCAL *d, DWORD h, LPDDRAWI_DDRAWSURFACE_LCL s)
 {
     if (h >= d->n) {
-        DWORD n = h + 64;
+        DWORD n = h + 64 > d->n * 2 ? h + 64 : d->n * 2;     /* handles keep growing */
         LPDDRAWI_DDRAWSURFACE_LCL *a = (LPDDRAWI_DDRAWSURFACE_LCL *)alloc(n * sizeof(*a));
         if (!a)
             return;
@@ -516,11 +546,15 @@ int d3d_surface_format_ok(LPDDSURFACEDESC desc)
 
 /* ---- Contexts ----------------------------------------------------------------------------------- */
 #define STAGES 2
+#define FOG_UNIT STAGES                 /* the OpenGL texture unit that does fog */
 
 typedef struct {
     GLuint name;
-    FLATPTR mem;
-    DWORD stamp, w, h;
+    FLATPTR mem;                        /* what was uploaded: memory, size, format */
+    DWORD w, h, fmt;
+    DWORD stamp;                        /* DirectDraw's contents stamp then (0: none kept) */
+    DWORD scene;                        /* the scene it was uploaded in */
+    int dirty;                          /* written since (Lock, texture blit) */
 } TEXTURE;
 
 typedef struct {
@@ -530,15 +564,17 @@ typedef struct {
     HGLRC rc;
     LPDDRAWI_DIRECTDRAW_LCL ddl;
     LPDDRAWI_DDRAWSURFACE_LCL rt, z;
-    GLuint fbo, color_rb, depth_rb, white;
+    GLuint fbo, color_rb, depth_rb, white, fog_tex;
     DWORD fb_w, fb_h;
     int dirty;                          /* drawn since the last read-back */
     DWORD rs[256];                      /* render states */
     DWORD tss[STAGES][32];              /* texture stage states */
     int stages_dirty;
+    DWORD scene;                        /* scenes ended so far */
     DWORD bound[STAGES];                /* surface handle of each stage's texture, 0 if none */
     TEXTURE *tex;                       /* by surface handle */
     DWORD ntex;
+    DWORD ntextures;                    /* OpenGL textures made (see TEXTURE_BUDGET) */
     float *pos;                         /* converted positions, 4 floats a vertex */
     DWORD npos;
     WORD ibuf[3 * 2048];                /* indices of one command, rebased */
@@ -683,6 +719,8 @@ static void context_free(RCTX *c)
                 gl->DeleteTextures(1, &c->tex[i].name);
         if (c->white)
             gl->DeleteTextures(1, &c->white);
+        if (c->fog_tex)
+            gl->DeleteTextures(1, &c->fog_tex);
         if (c->fbo) {
             gl->DeleteFramebuffers(1, &c->fbo);
             gl->DeleteRenderbuffers(1, &c->color_rb);
@@ -745,36 +783,13 @@ static void enable(GLF *gl, GLenum cap, DWORD on)
         gl->Disable(cap);
 }
 
+/* Fog is a texture unit of its own after Direct3D's stages (FOG_UNIT): a two-texel ramp whose
+   alpha is the fog factor, looked up with a coordinate per vertex (convert), blends the colour
+   towards the fog colour (apply_stages). OpenGL's own fog would need a fog varying, which the
+   host's virgl renderer (0.10) can't translate: those draws came out wrong. */
 static void apply_fog(RCTX *c)
 {
-    GLF *gl = gl_of(c);
-    DWORD col = c->rs[D3DRENDERSTATE_FOGCOLOR], mode = c->rs[D3DRENDERSTATE_FOGTABLEMODE];
-    GLfloat fc[4];
-
-    fc[0] = ((col >> 16) & 255) / 255.0f;
-    fc[1] = ((col >> 8) & 255) / 255.0f;
-    fc[2] = (col & 255) / 255.0f;
-    fc[3] = 1.0f;
-    gl->Fogfv(GL_FOG_COLOR, fc);
-    enable(gl, GL_FOG, c->rs[D3DRENDERSTATE_FOGENABLE]);
-    if (mode == D3DFOG_NONE) {
-        /* vertex fog: the fog factor is the specular colour's alpha (drawing sets the
-           coordinates, 1 - alpha, with a linear ramp from 0 to 1) */
-        gl->Fogi(GL_FOG_MODE, GL_LINEAR);
-        gl->Fogf(GL_FOG_START, 0.0f);
-        gl->Fogf(GL_FOG_END, 1.0f);
-        gl->Fogi(GL_FOG_COORDINATE_SOURCE, GL_FOG_COORDINATE);
-    } else {
-        /* table fog on the depth: our vertices carry depth as eye-space z, 0..1 */
-        float *start = (float *)&c->rs[D3DRENDERSTATE_FOGSTART];
-        float *end = (float *)&c->rs[D3DRENDERSTATE_FOGEND];
-        float *density = (float *)&c->rs[D3DRENDERSTATE_FOGDENSITY];
-        gl->Fogi(GL_FOG_COORDINATE_SOURCE, GL_FRAGMENT_DEPTH);
-        gl->Fogi(GL_FOG_MODE, mode == D3DFOG_EXP ? GL_EXP : mode == D3DFOG_EXP2 ? GL_EXP2 : GL_LINEAR);
-        gl->Fogf(GL_FOG_START, *start);
-        gl->Fogf(GL_FOG_END, *end);
-        gl->Fogf(GL_FOG_DENSITY, *density);
-    }
+    c->stages_dirty = 1;
 }
 
 static void render_state(RCTX *c, DWORD state, DWORD v)
@@ -841,8 +856,10 @@ static void render_state(RCTX *c, DWORD state, DWORD v)
         c->stages_dirty = 1;
         break;
     case D3DRENDERSTATE_SCENECAPTURE:
-        if (!v)                         /* EndScene: the picture into the render target */
+        if (!v) {                       /* EndScene: the picture into the render target */
             read_back(c);
+            c->scene++;
+        }
         break;
     }
 }
@@ -851,7 +868,7 @@ static void render_state(RCTX *c, DWORD state, DWORD v)
 static TEXTURE *texture_slot(RCTX *c, DWORD h)
 {
     if (h >= c->ntex) {
-        DWORD n = h + 64;
+        DWORD n = h + 64 > c->ntex * 2 ? h + 64 : c->ntex * 2;
         TEXTURE *a = (TEXTURE *)alloc(n * sizeof(TEXTURE));
         if (!a)
             return NULL;
@@ -875,6 +892,47 @@ static GLenum gl_address(DWORD a)
     return GL_REPEAT;
 }
 
+/* Has the surface behind a texture been written since it was uploaded? Video memory is only
+   written through our Lock (DirectDraw's own blits lock too) or a texture blit, which mark the
+   texture; DirectDraw's contents stamp says so too when it keeps one. Surfaces in system memory
+   are written without telling the driver: without a stamp they are taken again once a scene. */
+static int texture_changed(RCTX *c, TEXTURE *t, LPDDRAWI_DDRAWSURFACE_LCL s)
+{
+    DWORD stamp = GET_LPDDRAWSURFACE_GBL_MORE(s->lpGbl)->dwContentsStamp;
+
+    if (t->dirty || (stamp && stamp != t->stamp))
+        return 1;
+    return !stamp && (s->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY) && t->scene != c->scene;
+}
+
+/* At most this many OpenGL textures a context. DirectX 7's texture manager makes and drops
+   surfaces all the time (thousands of handles a minute in 3DMark 2000) and tells a driver
+   nothing when they go; past the budget the texture used longest ago is deleted, and made
+   again from its surface should it be wanted. */
+#define TEXTURE_BUDGET 512
+
+static void texture_evict(RCTX *c, DWORD keep)
+{
+    DWORD i, oldest = 0, when = 0xFFFFFFFF;
+    int s;
+
+    for (i = 1; i < c->ntex; i++) {
+        if (!c->tex[i].name || i == keep || c->tex[i].scene >= when)
+            continue;
+        for (s = 0; s < STAGES && c->bound[s] != i; s++)
+            ;
+        if (s < STAGES)
+            continue;                   /* in use right now */
+        oldest = i;
+        when = c->tex[i].scene;
+    }
+    if (!oldest)
+        return;
+    gl_of(c)->DeleteTextures(1, &c->tex[oldest].name);
+    memset(&c->tex[oldest], 0, sizeof c->tex[oldest]);
+    c->ntextures--;
+}
+
 /* Bind the texture behind a surface handle, uploading it if it is new or has changed. 0 if
    there is no usable texture. */
 static int texture_bind(RCTX *c, DWORD h, int stage)
@@ -885,7 +943,7 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
     TEXTURE *t;
     DDPIXELFORMAT pf;
     PIXFMT f;
-    DWORD stamp;
+    DWORD stamp, fmt;
     DWORD *st = c->tss[stage];
     GLfloat border[4];
 
@@ -898,12 +956,17 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
     f = gl_format(&pf);
     if (!f.bytes)
         return 0;
-    if (!t->name)
+    if (!t->name) {
+        if (c->ntextures >= TEXTURE_BUDGET)
+            texture_evict(c, h);
         gl->GenTextures(1, &t->name);
+        c->ntextures++;
+    }
     gl->BindTexture(GL_TEXTURE_2D, t->name);
     stamp = GET_LPDDRAWSURFACE_GBL_MORE(g)->dwContentsStamp;
-    if (t->mem != g->fpVidMem || t->w != g->wWidth || t->h != g->wHeight || !stamp ||
-        stamp != t->stamp) {
+    fmt = f.internal ^ (f.format << 8) ^ (f.type << 16);
+    if (t->mem != g->fpVidMem || t->w != g->wWidth || t->h != g->wHeight || t->fmt != fmt) {
+        /* new: storage and contents */
         gl->PixelStorei(GL_UNPACK_ALIGNMENT, 1);
         gl->PixelStorei(GL_UNPACK_ROW_LENGTH, g->lPitch / f.bytes);
         gl->TexImage2D(GL_TEXTURE_2D, 0, f.internal, g->wWidth, g->wHeight, 0, f.format, f.type,
@@ -912,8 +975,27 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
         t->mem = g->fpVidMem;
         t->w = g->wWidth;
         t->h = g->wHeight;
-        t->stamp = stamp;
+        t->fmt = fmt;
+        tracef("rd3d: texture %lx new: %lux%lu, %lu bits, caps %08lx, memory %08lx, pitch %ld, "
+               "stamp %lx, sum %08lx\r\n", h, (DWORD)g->wWidth, (DWORD)g->wHeight,
+               pf.dwRGBBitCount, s->ddsCaps.dwCaps, g->fpVidMem, g->lPitch, stamp,
+               trace_on ? sum_rows((BYTE *)g->fpVidMem, g->lPitch, g->wWidth * f.bytes,
+                                   g->wHeight) : 0);
+    } else if (texture_changed(c, t, s)) {
+        /* written since: the contents again, into the same storage */
+        tracef("rd3d: texture %lx again: dirty %d, stamp %lx (was %lx), scene %lu (was %lu), "
+               "sum %08lx\r\n", h, t->dirty, stamp, t->stamp, c->scene, t->scene,
+               trace_on ? sum_rows((BYTE *)g->fpVidMem, g->lPitch, g->wWidth * f.bytes,
+                                   g->wHeight) : 0);
+        gl->PixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        gl->PixelStorei(GL_UNPACK_ROW_LENGTH, g->lPitch / f.bytes);
+        gl->TexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, g->wWidth, g->wHeight, f.format, f.type,
+                          (const GLvoid *)g->fpVidMem);
+        gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     }
+    t->stamp = stamp;
+    t->scene = c->scene;
+    t->dirty = 0;
     gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
                       st[D3DTSS_MAGFILTER] == D3DTFG_POINT ? GL_NEAREST : GL_LINEAR);
     gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
@@ -1012,6 +1094,51 @@ static void white_texture(RCTX *c)
     gl->BindTexture(GL_TEXTURE_2D, c->white);
 }
 
+/* The fog unit (see apply_fog): colour = previous * f + fog colour * (1 - f), with f the ramp
+   texture's alpha at the vertex's coordinate; alpha passes through. Off without fog. */
+static void apply_fog_unit(RCTX *c)
+{
+    GLF *gl = gl_of(c);
+    static const DWORD ramp[2] = { 0x00FFFFFF, 0xFFFFFFFF };    /* alpha 0, alpha 1 */
+    DWORD col = c->rs[D3DRENDERSTATE_FOGCOLOR];
+    GLfloat fc[4];
+
+    gl->ActiveTexture(GL_TEXTURE0 + FOG_UNIT);
+    if (!c->rs[D3DRENDERSTATE_FOGENABLE]) {
+        gl->Disable(GL_TEXTURE_2D);
+        return;
+    }
+    if (!c->fog_tex) {
+        gl->GenTextures(1, &c->fog_tex);
+        gl->BindTexture(GL_TEXTURE_2D, c->fog_tex);
+        gl->TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 1, 0, GL_BGRA, GL_UNSIGNED_BYTE, ramp);
+        gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+    gl->BindTexture(GL_TEXTURE_2D, c->fog_tex);
+    gl->Enable(GL_TEXTURE_2D);
+    fc[0] = ((col >> 16) & 255) / 255.0f;
+    fc[1] = ((col >> 8) & 255) / 255.0f;
+    fc[2] = (col & 255) / 255.0f;
+    fc[3] = 1.0f;
+    gl->TexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+    gl->TexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, fc);
+    gl->TexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, GL_INTERPOLATE);
+    gl->TexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_PREVIOUS);
+    gl->TexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_RGB, GL_SRC_COLOR);
+    gl->TexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB + 1, GL_CONSTANT);
+    gl->TexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_RGB + 1, GL_SRC_COLOR);
+    gl->TexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB + 2, GL_TEXTURE);
+    gl->TexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_RGB + 2, GL_SRC_ALPHA);
+    gl->TexEnvi(GL_TEXTURE_ENV, GL_RGB_SCALE, 1);
+    gl->TexEnvi(GL_TEXTURE_ENV, GL_COMBINE_ALPHA, GL_REPLACE);
+    gl->TexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_ALPHA, GL_PREVIOUS);
+    gl->TexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_ALPHA, GL_SRC_ALPHA);
+    gl->TexEnvi(GL_TEXTURE_ENV, GL_ALPHA_SCALE, 1);
+}
+
 /* Set up OpenGL's texture units from the stage states, before drawing. A stage without a
    texture whose operation needs one passes the colour on, as the hardware of the time did. */
 static void apply_stages(RCTX *c)
@@ -1057,6 +1184,7 @@ static void apply_stages(RCTX *c)
         else
             combine(gl, s, 1, aop, st[D3DTSS_ALPHAARG1], st[D3DTSS_ALPHAARG2]);
     }
+    apply_fog_unit(c);
     gl->ActiveTexture(GL_TEXTURE0);
     c->stages_dirty = 0;
 }
@@ -1070,19 +1198,55 @@ static int textures_changed(RCTX *c)
         DWORD h = c->bound[s];
         LPDDRAWI_DDRAWSURFACE_LCL l;
         TEXTURE *t;
-        DWORD stamp;
 
         if (!h || h >= c->ntex)
             continue;
         l = handle_get(c->ddl, h);
         t = &c->tex[h];
-        if (!l || l->lpGbl->fpVidMem != t->mem)
-            return 1;
-        stamp = GET_LPDDRAWSURFACE_GBL_MORE(l->lpGbl)->dwContentsStamp;
-        if (!stamp || stamp != t->stamp)
+        if (!l || l->lpGbl->fpVidMem != t->mem || texture_changed(c, t, l))
             return 1;
     }
     return 0;
+}
+
+/* The OpenGL texture of a surface handle goes, in every context of this process (DirectX 7's
+   texture manager makes and drops thousands of surfaces a minute; their textures must not
+   stay behind on the GPU). */
+static void texture_forget(DWORD h)
+{
+    OWNER m = me();
+    int i;
+
+    for (i = 0; i < MAX_CONTEXTS; i++) {
+        RCTX *c = mine(&contexts[i].o, &m) ? contexts[i].c : NULL;
+        if (!c || h >= c->ntex || !c->tex[h].name)
+            continue;
+        make_current(c);
+        gl_of(c)->DeleteTextures(1, &c->tex[h].name);
+        memset(&c->tex[h], 0, sizeof c->tex[h]);
+        c->ntextures--;
+        c->stages_dirty = 1;
+    }
+}
+
+/* A surface is written by the program (our Lock, not read-only): the textures made from it
+   are uploaded again before their next use. */
+void d3d_surface_written(LPDDRAWI_DDRAWSURFACE_LCL s)
+{
+    OWNER m = me();
+    FLATPTR mem = s->lpGbl->fpVidMem;
+    DWORD i, j;
+
+    for (i = 0; i < MAX_CONTEXTS; i++) {
+        RCTX *c = mine(&contexts[i].o, &m) ? contexts[i].c : NULL;
+        if (!c)
+            continue;
+        for (j = 0; j < c->ntex; j++)
+            if (c->tex[j].name && c->tex[j].mem == mem) {
+                c->tex[j].dirty = 1;
+                c->stages_dirty = 1;
+            }
+    }
 }
 
 static void stage_state(RCTX *c, DWORD stage, DWORD state, DWORD v)
@@ -1130,8 +1294,46 @@ static int parse_fvf(DWORD fvf, VERTICES *v)
     return 1;
 }
 
+/* e to the -x, for x >= 0, without the C run-time: (1 - x/1024) to the 1024th power. Plenty
+   for fog. */
+static float exp_neg(float x)
+{
+    float y;
+    int i;
+
+    if (x <= 0.0f)
+        return 1.0f;
+    y = 1.0f - x / 1024.0f;
+    if (y <= 0.0f)
+        return 0.0f;
+    for (i = 0; i < 10; i++)
+        y *= y;
+    return y;
+}
+
+/* The fog factor of a vertex, 1 for none: the specular colour's alpha for vertex fog (which
+   Direct3D works out), from the depth for table fog (per vertex here). */
+static float fog_factor(RCTX *c, const VERTICES *v, const BYTE *b)
+{
+    DWORD mode = c->rs[D3DRENDERSTATE_FOGTABLEMODE];
+    float f, z = ((const float *)b)[2];
+
+    if (mode == D3DFOG_NONE) {
+        f = v->specular >= 0 ? b[v->specular + 3] / 255.0f : 1.0f;
+    } else if (mode == D3DFOG_LINEAR) {
+        float start = *(float *)&c->rs[D3DRENDERSTATE_FOGSTART];
+        float end = *(float *)&c->rs[D3DRENDERSTATE_FOGEND];
+        f = end != start ? (end - z) / (end - start) : 1.0f;
+    } else {
+        float d = *(float *)&c->rs[D3DRENDERSTATE_FOGDENSITY] * z;
+        f = exp_neg(mode == D3DFOG_EXP2 ? d * d : d);
+    }
+    return f < 0.0f ? 0.0f : f > 1.0f ? 1.0f : f;
+}
+
 /* Positions as OpenGL wants them for perspective-correct interpolation: x, y, z times w, and
-   w, from the screen coordinates and 1/w. Fog coordinates (1 - specular alpha) follow. */
+   w, from the screen coordinates and 1/w. With fog, the fog unit's texture coordinates follow
+   (the fog factor f, between the ramp's two texel centres: 0.25 + f / 2). */
 static float *convert(RCTX *c, const VERTICES *v, DWORD first, DWORD count)
 {
     DWORD i, need = count * 5;
@@ -1157,11 +1359,11 @@ static float *convert(RCTX *c, const VERTICES *v, DWORD first, DWORD count)
         p[2] = f[2] * w;
         p[3] = w;
     }
-    if (v->specular >= 0 && c->rs[D3DRENDERSTATE_FOGENABLE]) {
+    if (c->rs[D3DRENDERSTATE_FOGENABLE]) {
         float *fog = c->pos + count * 4;     /* after the positions */
         b = v->base + first * v->stride;
         for (i = 0; i < count; i++, b += v->stride)
-            fog[i] = 1.0f - b[v->specular + 3] / 255.0f;
+            fog[i] = 0.25f + 0.5f * fog_factor(c, v, b);
     }
     return c->pos;
 }
@@ -1189,11 +1391,12 @@ static void arrays(RCTX *c, const VERTICES *v, DWORD first, DWORD count)
     } else {
         gl->DisableClientState(GL_SECONDARY_COLOR_ARRAY);
     }
-    if (v->specular >= 0 && c->rs[D3DRENDERSTATE_FOGENABLE] && gl->FogCoordPointer) {
-        gl->EnableClientState(GL_FOG_COORDINATE_ARRAY);
-        gl->FogCoordPointer(GL_FLOAT, 0, c->pos + count * 4);
+    gl->ClientActiveTexture(GL_TEXTURE0 + FOG_UNIT);
+    if (c->rs[D3DRENDERSTATE_FOGENABLE]) {
+        gl->EnableClientState(GL_TEXTURE_COORD_ARRAY);
+        gl->TexCoordPointer(1, GL_FLOAT, 0, c->pos + count * 4);
     } else {
-        gl->DisableClientState(GL_FOG_COORDINATE_ARRAY);
+        gl->DisableClientState(GL_TEXTURE_COORD_ARRAY);
     }
     for (s = 0; s < STAGES; s++) {
         DWORD set = c->tss[s][D3DTSS_TEXCOORDINDEX] & 0xFFFF;
@@ -1300,6 +1503,9 @@ static void clear(RCTX *c, DWORD flags, DWORD color, float depth, DWORD stencil,
 static void set_render_target(RCTX *c, LPDDRAWI_DDRAWSURFACE_LCL rt, LPDDRAWI_DDRAWSURFACE_LCL z)
 {
     read_back(c);
+    tracef("rd3d: render target: caps %08lx, memory %08lx, %lux%lu; z-buffer memory %08lx\r\n",
+           rt->ddsCaps.dwCaps, rt->lpGbl->fpVidMem, (DWORD)rt->lpGbl->wWidth,
+           (DWORD)rt->lpGbl->wHeight, z ? z->lpGbl->fpVidMem : 0);
     c->rt = rt;
     c->z = z;
     framebuffer(c);
@@ -1390,6 +1596,10 @@ static DWORD WINAPI ContextCreate(LPD3DHAL_CONTEXTCREATEDATA d)
     }
     if (p->gl.ProvokingVertex)
         p->gl.ProvokingVertex(GL_FIRST_VERTEX_CONVENTION);  /* flat shading: Direct3D's vertex */
+    {
+        char v[8];
+        trace_on = GetEnvironmentVariable("RIPPLE_D3D_TRACE", v, sizeof v) > 0;
+    }
     c->ddl = d->lpDDLcl;
     c->rt = d->lpDDSLcl;
     c->z = d->lpDDSZLcl;
@@ -1464,6 +1674,12 @@ static void surface_handles(DDLOCAL *l, LPDDRAWI_DDRAWSURFACE_LCL root,
     if (!h)
         return;
     handle_set(l, h, s->lpGbl && s->lpGbl->fpVidMem ? s : NULL);
+    if (!s->lpGbl || !s->lpGbl->fpVidMem)
+        texture_forget(h);
+    tracef("rd3d: handle %lx: caps %08lx, caps2 %08lx, memory %08lx, %lux%lu\r\n", h,
+           s->ddsCaps.dwCaps, s->lpSurfMore->ddsCapsEx.dwCaps2,
+           s->lpGbl ? s->lpGbl->fpVidMem : 0, s->lpGbl ? (DWORD)s->lpGbl->wWidth : 0,
+           s->lpGbl ? (DWORD)s->lpGbl->wHeight : 0);
     if ((s->ddsCaps.dwCaps & DDSCAPS_MIPMAP) ||
         (s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_CUBEMAP))
         return;
@@ -1513,6 +1729,9 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
     DWORD bytes, w, h, y;
     RECTL r = b->rSrc;
 
+    tracef("rd3d: texture blit %lx -> %lx, %ld,%ld-%ld,%ld to %ld,%ld, flags %lx%s\r\n",
+           b->dwDDSrcSurface, b->dwDDDestSurface, r.left, r.top, r.right, r.bottom,
+           b->pDest.x, b->pDest.y, b->dwFlags, ds && ss ? "" : " (unknown handle)");
     if (!ds || !ss)
         return;
     dg = ds->lpGbl;
@@ -1532,7 +1751,7 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
         memcpy((BYTE *)dg->fpVidMem + (b->pDest.y + y) * dg->lPitch + b->pDest.x * bytes,
                (BYTE *)sg->fpVidMem + (r.top + y) * sg->lPitch + r.left * bytes, w * bytes);
     if (b->dwDDDestSurface < c->ntex)
-        c->tex[b->dwDDDestSurface].stamp = 0xFFFFFFFF;   /* upload again */
+        c->tex[b->dwDDDestSurface].dirty = 1;            /* upload again */
     c->stages_dirty = 1;
 }
 

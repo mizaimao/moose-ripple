@@ -218,7 +218,9 @@ static DWORD WINAPI Lock(LPDDHAL_LOCKDATA d)
     LPDDRAWI_DDRAWSURFACE_GBL g = s->lpGbl;
     DWORD p = g->fpVidMem, bits = shared->bpp;
 
-    d3d_surface_access(s);
+    d3d_surface_access(s);              /* a 3D picture still on the GPU goes in first */
+    if (!(d->dwFlags & DDLOCK_READONLY))
+        d3d_surface_written(s);         /* textures made from it are out of date */
     if (s->dwFlags & DDRAWISURF_HASPIXELFORMAT)
         bits = g->ddpfSurface.dwRGBBitCount;
     if (d->bHasRect)

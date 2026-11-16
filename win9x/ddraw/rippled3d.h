@@ -15,6 +15,9 @@ int d3d_driver_info(LPDDHAL_GETDRIVERINFODATA d);
    into its memory first. */
 void d3d_surface_access(LPDDRAWI_DDRAWSURFACE_LCL s);
 
+/* A surface is locked for writing: textures made from it are uploaded again before use. */
+void d3d_surface_written(LPDDRAWI_DDRAWSURFACE_LCL s);
+
 /* May a surface in this pixel format go into video memory (textures, z-buffers)? */
 int d3d_surface_format_ok(LPDDSURFACEDESC desc);
 
