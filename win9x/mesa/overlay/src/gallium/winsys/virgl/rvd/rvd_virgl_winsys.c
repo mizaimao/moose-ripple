@@ -86,14 +86,14 @@ static inline struct rvd_cmd_buf *rvd_cmd_buf(struct virgl_cmd_buf *cbuf)
    return (struct rvd_cmd_buf *)cbuf;
 }
 
-/* A log of what goes to the VxD (the first few thousand requests), in the file the environment
- * variable RVD_LOG names. */
-static FILE *rvd_log_file(void)
+/* A log of what goes to the VxD (the first few thousand requests, and every failure), in the
+ * file the environment variable RVD_LOG names. */
+static FILE *rvd_log_file(int always)
 {
    static FILE *f;
    static int tried, lines;
 
-   if (lines++ > 3000)
+   if (!always && lines++ > 3000)
       return NULL;
 
    if (!tried) {
@@ -105,7 +105,8 @@ static FILE *rvd_log_file(void)
    return f;
 }
 
-#define RVD_LOG(...) do { FILE *lf_ = rvd_log_file(); if (lf_) { fprintf(lf_, __VA_ARGS__); fflush(lf_); } } while (0)
+#define RVD_LOG(...) do { FILE *lf_ = rvd_log_file(0); if (lf_) { fprintf(lf_, __VA_ARGS__); fflush(lf_); } } while (0)
+#define RVD_LOG_ALWAYS(...) do { FILE *lf_ = rvd_log_file(1); if (lf_) { fprintf(lf_, __VA_ARGS__); fflush(lf_); } } while (0)
 
 static bool rvd_call(struct rvd_winsys *ws, DWORD code, const void *in, DWORD in_len,
                      void *out, DWORD out_len)
@@ -244,6 +245,9 @@ rvd_resource_create_new(struct rvd_winsys *ws, struct virgl_resource_params para
       debug_printf("rvd: buffer not made (error %lu): target %d format %d bind 0x%x %ux%ux%u "
                    "size %u\n", GetLastError(), params.target, params.format, params.bind,
                    params.width, params.height, params.depth, params.size);
+      RVD_LOG_ALWAYS("create FAILED (error %lu): target %d format %d bind 0x%x %ux%ux%u size %u\n",
+              GetLastError(), params.target, params.format, params.bind, params.width,
+              params.height, params.depth, params.size);
       FREE(res);
       return NULL;
    }
