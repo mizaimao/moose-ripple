@@ -23,6 +23,7 @@
 #include "ddrawi.h"
 
 #include "rdd.h"
+#include "rippled3d.h"
 
 /* rdd.h's description of DDHALINFO must match the DDK's. */
 #define CHECK(name, cond) typedef char name[(cond) ? 1 : -1]
@@ -178,8 +179,10 @@ static DWORD WINAPI GetScanLine(LPDDHAL_GETSCANLINEDATA d)
 /* ---- Surfaces -------------------------------------------------------------------------------- */
 static DWORD WINAPI CanCreateSurface(LPDDHAL_CANCREATESURFACEDATA d)
 {
-    /* Video memory holds surfaces in the screen's own format only (for now). */
-    d->ddRVal = d->bIsDifferentPixelFormat ? DDERR_INVALIDPIXELFORMAT : DD_OK;
+    /* Video memory holds surfaces in the screen's own format, and textures and z-buffers in
+       the formats Direct3D was offered. */
+    d->ddRVal = !d->bIsDifferentPixelFormat || d3d_surface_format_ok(d->lpDDSurfaceDesc) ?
+                DD_OK : DDERR_INVALIDPIXELFORMAT;
     return DDHAL_DRIVER_HANDLED;
 }
 
@@ -189,6 +192,7 @@ static DWORD WINAPI Flip(LPDDHAL_FLIPDATA d)
 {
     DWORD off = d->lpSurfTarg->lpGbl->fpVidMem - shared->lfb;
 
+    d3d_surface_access(d->lpSurfTarg);       /* a 3D picture still on the GPU */
     if (!shared->pitch || off % shared->pitch || off / shared->pitch + shared->height > shared->lines) {
         dbg("rdd: can't show a surface at offset "); dbg_hex(off); dbg("\r\n");
         d->ddRVal = DDERR_GENERIC;
@@ -214,6 +218,7 @@ static DWORD WINAPI Lock(LPDDHAL_LOCKDATA d)
     LPDDRAWI_DDRAWSURFACE_GBL g = s->lpGbl;
     DWORD p = g->fpVidMem, bits = shared->bpp;
 
+    d3d_surface_access(s);
     if (s->dwFlags & DDRAWISURF_HASPIXELFORMAT)
         bits = g->ddpfSurface.dwRGBBitCount;
     if (d->bHasRect)
@@ -240,6 +245,8 @@ static DWORD WINAPI FlipToGDISurface(LPDDHAL_FLIPTOGDISURFACEDATA d)
 /* ---- What DirectDraw asks for by GUID (DirectX 5 and later) --------------------------------- */
 static DWORD WINAPI GetDriverInfo(LPDDHAL_GETDRIVERINFODATA d)
 {
+    if (d3d_driver_info(d))
+        return DDHAL_DRIVER_HANDLED;
     dbg("rdd: GetDriverInfo "); dbg_hex(d->guidInfo.Data1); dbg(" (not offered)\r\n");
     d->dwActualSize = 0;
     d->ddRVal = DDERR_CURRENTLYNOTAVAIL;
@@ -311,9 +318,8 @@ DWORD WINAPI DriverInit(DWORD context)
     fill_caps((DDCORECAPS *)s->hal.ddCaps);
     s->hal.GetDriverInfo = (DWORD)GetDriverInfo;
     s->hal.dwFlags |= RDD_HALINFO_GETDRIVERINFOSET;
-    s->hal.lpD3DGlobalDriverData = 0;
-    s->hal.lpD3DHALCallbacks = 0;
     s->hal.lpDDExeBufCallbacks = 0;
+    d3d_init(s, (DDCORECAPS *)s->hal.ddCaps);
     s->dll_ready = 1;
     dbg("rdd: DirectDraw HAL DLL ready, loaded at "); dbg_hex((DWORD)dll_instance);
     dbg(", process "); dbg_hex(GetCurrentProcessId()); dbg("\r\n");

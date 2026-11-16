@@ -63,7 +63,8 @@ sed 's/$/\r/' "$here/inf/ripple9x.inf" > "$OUT/ripple9x.inf"
 ls -l "$OUT"/ripple9x.* "$OUT"/ripplevd.vxd
 
 # ---- The DirectDraw HAL's 32-bit DLL: Visual C++ 6 against the Windows Me DDK's DirectDraw
-# headers (ddraw.h, ddrawi.h; not in this repository), no C run-time, based above 2 GB.
+# and Direct3D headers (ddraw.h, ddrawi.h, d3dhal.h; not in this repository), no C run-time,
+# based above 2 GB. Direct3D draws through OpenGL (opengl32.dll, loaded when first needed).
 D=$OUT/obj-ddraw
 rm -rf "$D" && mkdir -p "$D"
 cp "$here"/ddraw/* "$here"/display/rdd.h "$D/"
@@ -71,9 +72,10 @@ cd "$D"
 (
     export INCLUDE="$(W "$T/ddkme/ddk/inc/win_me");$(W "$T/vc6/VC98/Include")" LIB="$(W "$T/vc6/VC98/Lib")"
     export WINEPATH="$(W "$T/vc6/VC98/Bin");$(W "$T/vc6/Common/MSDev98/Bin")"
-    wine cl.exe /nologo /c /W3 /WX /O1 /Oy- /Zl /Gs /GF rippledd.c
+    wine cl.exe /nologo /c /W3 /WX /O1 /Oy- /Zl /Gs /GF rippledd.c rippled3d.c
     wine link.exe /NOLOGO /DLL /NODEFAULTLIB /ENTRY:DllMain /BASE:0xB00B0000 /DEF:rippledd.def \
-        /OUT:rippledd.dll /MAP:rippledd.map rippledd.obj kernel32.lib > link.log 2>&1 || { cat link.log; exit 1; }
+        /OUT:rippledd.dll /MAP:rippledd.map rippledd.obj rippled3d.obj \
+        kernel32.lib user32.lib gdi32.lib > link.log 2>&1 || { cat link.log; exit 1; }
 )
 cp rippledd.dll "$OUT/"
 ls -l "$OUT"/rippledd.dll

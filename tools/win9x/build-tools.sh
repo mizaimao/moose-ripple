@@ -26,3 +26,9 @@ cp "$here"/ddinfo.c .
 INCLUDE="$(W "$T/ddkme/ddk/inc/win_me");$INCLUDE" \
     wine cl.exe /nologo /W3 /O2 /MT ddinfo.c /link /SUBSYSTEM:CONSOLE ddraw.lib
 ls -l "$OUT"/ddinfo.exe
+
+# d3dtest uses Direct3D 7: the DirectX 7 SDK's headers and libraries come first.
+cp "$here"/d3dtest.c .
+INCLUDE="$(W "$T/dx7sdk/include");$INCLUDE" LIB="$(W "$T/dx7sdk/lib");$LIB" \
+    wine cl.exe /nologo /W3 /O2 /MT d3dtest.c /link /SUBSYSTEM:CONSOLE ddraw.lib dxguid.lib user32.lib
+ls -l "$OUT"/d3dtest.exe
