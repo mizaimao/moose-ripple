@@ -54,6 +54,12 @@ take `MEMORY.DMP` (copy it to `C:\rb\pkg` in an elevated prompt and send it with
     $PY kmem.py MEMORY.DMP crash                 # the exception and the registers at the fault
     $PY kmem.py MEMORY.DMP q fffffa8004da2100 24 # kernel memory, 64-bit words
 
+    $PY kstack.py MEMORY.DMP fffff880031c1ad8 viogpu3d.sys=viogpu3d.map
+                                                 # the code addresses on the kernel stack below and
+                                                 # around an address, named by module (and by
+                                                 # function where a .map is given): what ran last
+                                                 # on that thread, also after the stack unwound
+
 The faulting address minus the module base on the bluescreen, plus the image base in the
 module's `.map`, names the function there. `kmem.py` knows Windows 7 x64 kernel memory dumps
 only (4-level page tables, the summary bitmap layout of that version).

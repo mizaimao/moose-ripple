@@ -930,3 +930,22 @@ samples of `NtQueryTimerResolution` over ten seconds were under 1 ms
 (`tools/win7-debug/guest/timerres.ps1`). `powercfg -energy` did list a half-millisecond kernel
 request there during its own five seconds; that was not followed up (its progress display in
 the console may be the stream of work).
+
+## A bluescreen on Hog, not explained (2026-11-17)
+
+Once, during a test session on Hog: stop `0x4A` (`IRQL_GT_ZERO_AT_SYSTEM_SERVICE`, parameters
+`7702989A, 2, 0, FFFFF880031C1CA0`): a system call returned to its program with the interrupt
+level still at 2. It happened while a test script was installing a user-mode driver build
+(the file fetched with BITS, the compositor stopped and started).
+
+What the kernel dump says (`tools/win7-debug/kstack.py`, which names the code addresses left
+on a thread's kernel stack, stale ones included): the thread belongs to `svchost.exe`, the
+return address is in `ntdll`, and what ran last on its stack is NTFS (ten addresses) and the
+kernel; nothing of `viogpu3d.sys`, `dxgkrnl.sys`, `dxgmms1.sys` or `win32k.sys`. That fits BITS
+writing the downloaded file. It does not say what raised the level and left it there.
+
+So there is no evidence that it is the display driver's, and none that it is not: code that
+runs on a borrowed thread (an interrupt's deferred work) leaves no trace on that thread's
+stack. Hog runs the guest under nested virtualization, where the interrupt level is one more
+thing emulated. It has not happened on the rig. If it comes back, on either host, the first
+thing to compare is what the display driver was doing at that moment (its serial log).

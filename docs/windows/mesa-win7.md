@@ -476,20 +476,42 @@ current draw has taken; and with each resource the last sampler view and the las
 made of it, used again while the next one asked for is the same. The command buffer of that
 frame is 20 KB with no object made or destroyed in it.
 
-Still sent for every draw: all state bound and unbound again, the framebuffer set and
-cleared, the shaders bound and unbound. Keeping them bound from draw to draw is the next step.
+That left the binding: a draw took everything off the context when it was done (state
+objects, shaders, textures, an empty framebuffer, the viewport's neighbours set again) and the
+next draw put it all back, some twenty commands a draw that changed nothing. Now what a draw
+binds stays bound, the next draw sends only what differs (`D3D9Bind`, `D3D9BindSamplers`, the
+values in `device->bound`), and `D3D9SettleDrawState` takes it all off before anything else
+sets the context's state by hand (the keyed blit) or deletes a shader that may be bound. The
+same frame is 10 KB now, as in Direct3D 10: 6 `BIND_OBJECT` instead of 248, one framebuffer
+change instead of 62, no shader bound twice. Sent for each draw still: its vertex and index
+buffers and its two sets of constants.
 
-Frames a second, the two drivers swapped on one boot, two rounds:
+Not touched: a draw of already transformed vertices still makes its fixed-function vertex
+shader and deletes it afterwards, one shader a draw.
 
-| Direct3D 9 test | Hog before | Hog now | Rig before | Rig now |
+Frames a second, drivers swapped on one boot, two rounds each. First the objects kept, against
+the driver before:
+
+| Direct3D 9 test | Hog before | Hog, objects kept | Rig before | Rig, objects kept |
 |---|---|---|---|---|
 | Batch | 1463, 1490 | 1750, 1624 | 717, 729 | 731, 728 |
 | Texture load | 1073, 1080 | 1193, 1265 | 281, 281 | 282, 294 |
 | ALU | 964, 974 | 977, 1028 | 308, 307 | 309, 310 |
 
-Hog, where the path to the GPU is the limit, gains 9 to 20% in the batch test; the rig is
-bound by its GPU and stays where it was. The drawing test reads its picture back right,
-Chess Titans draws as before (board, pieces, reflections), no renderer errors on either host.
+Then the state left bound as well, against the objects kept (Hog only; the rig is bound by its
+GPU and was not measured again):
+
+| Direct3D 9 test | Hog, objects kept | Hog, state left bound |
+|---|---|---|
+| Batch | 1637, 1638 | 1895, 1899 |
+| Texture load | 1157, 1182 | 1330, 1306 |
+| ALU, three runs a round | 977, 979, 963 and 954, 964, 1000 | 962, 981, 955 and 1002, 958, 998 |
+
+On Hog, where the path to the GPU is the limit, the batch test gains 9 to 20% from the first
+step and 16% more from the second, the texture load test about 13% from each; the ALU test,
+with four textures changing on every draw, stays where it was. The drawing test reads its
+picture back right in 64 and 32 bits, Chess Titans draws as before (board, pieces,
+reflections), no renderer errors.
 
 Where Hog's time goes after the sixth speed round of the kernel driver (the profile of
 `docs/windows/kmd-port-notes.md`, repeated): QEMU's drawing thread is 85% busy at 1620 frames a
