@@ -65,6 +65,8 @@ only (4-level page tables, the summary bitmap layout of that version).
 - `threads.sh VMID SECONDS`: CPU use of each QEMU thread. `CPU_n/KVM` are the guest's processors,
   `kvm` is QEMU's main thread, where virglrenderer issues the host's GL calls.
 - `gpubusy.sh SECONDS`: how much of the time the host's Intel GPU was awake, and its clock.
+- `rcsbusy.sh SECONDS`: the share of time the render engine was executing requests (the i915
+  driver's own counter), which says whether the GPU is the limit; `gpubusy.sh` only says awake.
 - `i915trace.sh SECONDS`: the Intel GPU driver's requests and waits, counted (tracing is
   switched off again at the end).
 - `ripsample.sh VMID COUNT`: COUNT samples of every guest processor's instruction pointer,
