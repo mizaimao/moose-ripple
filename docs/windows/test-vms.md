@@ -283,5 +283,11 @@ then draws right, marble and reflections. Still open there: a DXT texture the pr
 directly in video memory (rare; textures normally arrive by the runtime's upload) is mapped as
 R8G8B8A8, not converted.
 
+Third try (2026-11-17): Aero. The compositor runs on the driver's Direct3D 9 part there, after
+six changes (`mesa-win7.md`, "Aero on a host without Direct3D 10"): glass frames, taskbar and
+shadows, and Chess Titans in a glass frame. The emulated machine is slow to start programs
+(Chess Titans needs more than 12 seconds), and a window opened while the compositor restarts
+can lose the keyboard: click it before typing.
+
 Seeing the guest: QEMU's screendump stays black once the driver draws through the host GPU, so
 pictures come from `C:\rb\pkg\shot.ps1` in the guest (as on Hog).
