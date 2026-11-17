@@ -183,6 +183,23 @@ which allocates some thread-local variables again (not chased further).
   ran on "GDI Generic" without any warning. `tools/win9x/pftest.c` asks `ChoosePixelFormat`
   for what programs of the time request and fails when a request in the screen's colour depth
   gets a software format, or when the driver offers no formats at all.
+- **A sleep before every buffer swap cost Unreal Tournament most of its frame rate.** Mesa's
+  Windows frontend emulates a swap interval (waiting for the screen's refresh) by sleeping
+  before each swap, and its default interval is 1. On Windows 98, `Sleep` wakes only at the
+  next timer tick, 55 ms apart, and the refresh rate Windows reports there is 0 ("the
+  adapter's default"), which Mesa clamped to 30 Hz: a program that never sets the interval
+  waited about 55 ms per frame. Unreal Tournament's OpenGL renderer ran at 57 to 62 ms a
+  frame, Quake III and `gltest` were fast because they set the interval to 0 themselves.
+  Patch 0010 makes 0 the default (as drivers of the time had it), reads 0 and 1 from Windows
+  as 60 Hz, and waits by yielding (`Sleep(0)`) until the period is up instead of sleeping,
+  counting the next period from the end of the wait. The yielding keeps the CPU busy, so it
+  happens only for programs that ask for an interval. `WGL_SWAP_INTERVAL` sets an interval
+  for every program (0 included) and then overrides what a program asks for itself. Unreal
+  Tournament's OpenGL renderer on DM-Turbine, after 20 and 30 seconds of play: 3.0 to 3.3 ms
+  a frame; with `WGL_SWAP_INTERVAL=1`, 16.5 to 16.6 ms, one 60 Hz period (Proxmox VE, Intel
+  UHD 630, no other VM on the host). UT's `stat fps` read much lower in the first seconds of
+  a map than later (2.2 ms against 57 ms in the same view before the fix), so take readings
+  after 20 seconds or more.
 - **The host's log** is where rendering errors show (`journalctl` on Proxmox VE, lines from
   `QEMU[pid]`).
 
