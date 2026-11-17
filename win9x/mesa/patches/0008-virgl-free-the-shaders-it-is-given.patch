@@ -1,0 +1,23 @@
+diff -ruN a/src/gallium/drivers/virgl/virgl_context.c b/src/gallium/drivers/virgl/virgl_context.c
+--- a/src/gallium/drivers/virgl/virgl_context.c
++++ b/src/gallium/drivers/virgl/virgl_context.c
+@@ -725,7 +725,9 @@
+          NIR_PASS_V(shader->ir.nir, nir_lower_tex, &lower_tex_options);
+       }
+ 
+-      nir_shader *s = nir_shader_clone(NULL, shader->ir.nir);
++      /* moose-ripple: Mesa commit 0b1479eb ("virgl: fix memory leak on shader translation"):
++       * the driver owns the NIR it is given, and nir_to_tgsi_options frees it. */
++      nir_shader *s = shader->ir.nir;
+ 
+       /* The host can't handle certain IO slots as separable, because we can't assign
+        * more than 32 IO locations explicitly, and with varyings and patches we already
+@@ -1489,7 +1491,7 @@
+          .unoptimized_ra = true,
+          .lower_fabs = true
+       };
+-      nir_shader *s = nir_shader_clone(NULL, state->prog);
++      nir_shader *s = (void *)state->prog;         /* moose-ripple: as above */
+       ntt_tokens = tokens = nir_to_tgsi_options(s, vctx->base.screen, &options); /* takes ownership */
+    } else {
+       tokens = state->prog;

@@ -1,0 +1,27 @@
+diff -ruN a/src/gallium/targets/wgl/wgl.c b/src/gallium/targets/wgl/wgl.c
+--- a/src/gallium/targets/wgl/wgl.c
++++ b/src/gallium/targets/wgl/wgl.c
+@@ -279,6 +279,14 @@
+ };
+ 
+ 
++/* moose-ripple, Windows 9x: in win9x/compat/k32shim.c, linked into this DLL. It frees what the
++ * toolchain's run-time keeps for a thread (emulated thread-local variables, C++ thread_local
++ * destructors, fiber-local storage); Windows 98 runs no thread-exit callbacks for a DLL
++ * loaded at run time, so this is the only moment. The C11 threads' own callback (thread-
++ * specific storage destructors) runs first: it uses thread-local variables. */
++#include "c11/impl/threads_win32.h"
++void k32shim_thread_exit(void);
++
+ EXTERN_C BOOL WINAPI
+ DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved);
+ 
+@@ -301,6 +309,8 @@
+ 
+    case DLL_THREAD_DETACH:
+       stw_cleanup_thread();
++      __threads_win32_tls_callback();
++      k32shim_thread_exit();
+       break;
+ 
+    case DLL_PROCESS_DETACH:
