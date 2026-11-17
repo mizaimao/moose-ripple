@@ -17,7 +17,7 @@
 
 static int d3d9_trace_level = -1;
 
-static int
+int
 D3D9TraceLevel(void)
 {
    if (d3d9_trace_level < 0) {
@@ -68,6 +68,29 @@ D3D9TraceArg(const D3DDDIARG_UNLOCK *a)
    if (sub && sub->data && sub->width && sub->height && sub->pitch >= sub->width * 4)
       ripple_logf("  unlock %p.%u, pixel in the middle 0x%08x", a->hResource, a->SubResourceIndex,
                   *(const UINT *)(sub->data + (size_t)(sub->height / 2) * sub->pitch + (sub->width / 2) * 4));
+}
+
+static void
+D3D9TraceArg(const D3DDDIARG_RENDERSTATE *a)
+{
+   if (a)
+      ripple_logf("  render state %u = 0x%08x", (unsigned)a->State, (unsigned)a->Value);
+}
+
+static void
+D3D9TraceArg(const D3DDDIARG_TEXTURESTAGESTATE *a)
+{
+   if (a)
+      ripple_logf("  stage %u state %u = 0x%08x", (unsigned)a->Stage, (unsigned)a->State,
+                  (unsigned)a->Value);
+}
+
+static void
+D3D9TraceArg(const D3DDDIARG_DRAWPRIMITIVE *a)
+{
+   if (a)
+      ripple_logf("  primitive type %u, first vertex %u, count %u", (unsigned)a->PrimitiveType,
+                  (unsigned)a->VStart, (unsigned)a->PrimitiveCount);
 }
 
 static void
@@ -156,7 +179,8 @@ D3D9TraceWrap(HRESULT (APIENTRY *real)(Args...), const char *name)
             (D3D9TraceBefore(args), ...);
          HRESULT hr = s_real(args...);
          D3D9TraceResult(s_name, hr);
-         if (d3d9_trace_level >= 3)
+         /* what the call was about: at level 3, and for a call that failed */
+         if (d3d9_trace_level >= 3 || FAILED(hr))
             (D3D9TraceArg(args), ...);
          return hr;
       }
@@ -277,6 +301,14 @@ D3D9TraceGetCaps(HANDLE hAdapter, const D3DDDIARG_GETCAPS *data)
 
    ripple_logf("d3d9: GetCaps type %u, %u bytes -> 0x%08lx", data ? (unsigned)data->Type : 0,
                data ? data->DataSize : 0, (unsigned long)hr);
+   /* The formats and what each can do, one line each: Direct3D 10 Level 9 wants a fixed set
+    * of them with certain operations before it makes a device (docs/windows/mesa-win7.md) */
+   if (data && SUCCEEDED(hr) && data->Type == D3DDDICAPS_GETFORMATDATA && data->pData) {
+      const FORMATOP *ops = (const FORMATOP *)data->pData;
+      for (UINT i = 0; i < data->DataSize / sizeof(FORMATOP); ++i)
+         ripple_logf("  format %u (0x%08x) operations 0x%08x", (unsigned)ops[i].Format,
+                     (unsigned)ops[i].Format, (unsigned)ops[i].Operations);
+   }
    /* The video processor questions (24 to 30) name the processor and the video */
    if (data && data->Type >= D3DDDICAPS_GETVIDEOPROCESSORRTFORMATCOUNT &&
        data->Type <= D3DDDICAPS_FILTERPROPERTYRANGE && data->pInfo) {

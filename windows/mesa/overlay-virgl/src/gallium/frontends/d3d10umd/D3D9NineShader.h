@@ -89,7 +89,9 @@ struct nine_lconstf
 #define NINE_MAX_CONST_SWVP_SPE_OFFSET 3564
 #define NINE_MAX_CONST_VS_SPE_OFFSET \
    (NINE_MAX_CONST_F + (NINE_MAX_CONST_I + NINE_MAX_CONST_B / 4))
-#define NINE_MAX_CONST_VS_SPE 11
+/* 0 to 7 clip planes, 8 point size, 9 and 10 the viewport's inverse scale and translation,
+ * 11 half a pixel in clip space (see the end of nine_translate_shader) */
+#define NINE_MAX_CONST_VS_SPE 12
 #define NINE_MAX_CONST_ALL_VS \
    (NINE_MAX_CONST_VS_SPE_OFFSET + NINE_MAX_CONST_VS_SPE)
 #define NINE_MAX_CONST_PS_SPE_OFFSET \

@@ -60,6 +60,13 @@ take `MEMORY.DMP` (copy it to `C:\rb\pkg` in an elevated prompt and send it with
                                                  # function where a .map is given): what ran last
                                                  # on that thread, also after the stack unwound
 
+`l9req.py d3d10level9.dll ADDR1 ADDR2 ADDR3` prints what Windows 7's Direct3D 10 Level 9 layer
+requires of a Direct3D 9 driver before it makes a device at feature level 9.1, 9.2 and 9.3
+(capability bits, minimum values, formats with their operations), read from the tables
+`MinCapsLevel1` to `3` in a copy of the DLL; the three addresses are those symbols' (from
+`resym.py map` with the DLL's public symbols). The compositor uses that layer on a host that
+cannot carry Direct3D 10 (`docs/windows/mesa-win7.md`).
+
 The faulting address minus the module base on the bluescreen, plus the image base in the
 module's `.map`, names the function there. `kmem.py` knows Windows 7 x64 kernel memory dumps
 only (4-level page tables, the summary bitmap layout of that version).

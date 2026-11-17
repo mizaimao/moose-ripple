@@ -495,8 +495,8 @@ the driver before:
 | Direct3D 9 test | Hog before | Hog, objects kept | Rig before | Rig, objects kept |
 |---|---|---|---|---|
 | Batch | 1463, 1490 | 1750, 1624 | 717, 729 | 731, 728 |
-| Texture load | 1073, 1080 | 1193, 1265 | 281, 281 | 282, 294 |
-| ALU | 964, 974 | 977, 1028 | 308, 307 | 309, 310 |
+| ALU | 1073, 1080 | 1193, 1265 | 281, 281 | 282, 294 |
+| Texture load | 964, 974 | 977, 1028 | 308, 307 | 309, 310 |
 
 Then the state left bound as well, against the objects kept (Hog only; the rig is bound by its
 GPU and was not measured again):
@@ -504,12 +504,13 @@ GPU and was not measured again):
 | Direct3D 9 test | Hog, objects kept | Hog, state left bound |
 |---|---|---|
 | Batch | 1637, 1638 | 1895, 1899 |
-| Texture load | 1157, 1182 | 1330, 1306 |
-| ALU, three runs a round | 977, 979, 963 and 954, 964, 1000 | 962, 981, 955 and 1002, 958, 998 |
+| ALU | 1157, 1182 | 1330, 1306 |
+| Texture load, three runs a round | 977, 979, 963 and 954, 964, 1000 | 962, 981, 955 and 1002, 958, 998 |
 
 On Hog, where the path to the GPU is the limit, the batch test gains 9 to 20% from the first
-step and 16% more from the second, the texture load test about 13% from each; the ALU test,
-with four textures changing on every draw, stays where it was. The drawing test reads its
+step and 16% more from the second, the ALU test about 13% from each; the texture load test,
+with four textures changing on every draw, stays where it was. (Until 2026-11-17 these two
+rows carried each other's names; the numbers are as measured.) The drawing test reads its
 picture back right in 64 and 32 bits, Chess Titans draws as before (board, pieces,
 reflections), no renderer errors.
 
@@ -528,3 +529,81 @@ A trap in the test scripts, found on the way: a guest script that sets `RIPPLE_U
 left it set in the prompt it was run from, and every Direct3D 9 test started there afterwards
 logged each call (the batch test at 95 frames a second instead of 730, Direct3D 10 unharmed).
 The scripts that set driver variables now begin with `setlocal`.
+
+## Aero on a host without Direct3D 10: the compositor's Direct3D 9 path (2026-11-17)
+
+On a host renderer below GLSL 1.50 (UTM on Apple silicon: OpenGL ES 3.0 through ANGLE on
+Metal, reported as GLSL 1.30) the driver makes no Direct3D 10 device, and the desktop was
+Windows Basic. The compositor has a second way: `D3D10CreateDevice1` at feature level 9.3,
+which Windows' own layer (`d3d10level9.dll`) runs on the driver's Direct3D 9 part. Six things
+were in the way, each found behind the one before. The first two keep the compositor from
+trying, the rest spoil what it draws.
+
+**1. The adapter said it had Direct3D 10.** The compositor asks the adapter for the Direct3D
+10 interface and, when it gets it, tries Direct3D 10 only: a failed device there and it stays
+off ("WDDM is not in use"), with not one question to the Direct3D 9 driver. `OpenAdapter10` and
+`OpenAdapter10_2` now fail on a host that cannot carry Direct3D 10 (Mesa patch 0037; the
+host's level is asked once a process through a device of our own, because the runtime has
+none yet at that point). `RIPPLE_NO_D3D10` makes any host answer the same, which is how the
+rest was found on the rig, where the screen can be captured.
+
+**2. Windows' layer refused the Direct3D 9 driver at every feature level** (`E_NOINTERFACE`,
+after asking only for capabilities). What it requires is a table in `d3d10level9.dll`
+(`MinCapsLevel1` to `3`, checked by `ExceedsCapsBits`): capability bits, minimum values, the
+event query, and about thirty formats each with the operations it must support, the sRGB
+forms derived from `FORMATOP_SRGBREAD` and `FORMATOP_SRGBWRITE`. `tools/win7-debug/l9req.py`
+prints the table from a copy of the DLL. Our capabilities passed all of it but one line:
+X8R8G8B8 had `FORMATOP_SRGBWRITE` masked off, and the layer wants B8G8R8X8_SRGB as a render
+target. It is on now; where the host cannot draw to that format the surface takes the form
+with alpha, and failing that the format as it is (`D3D9SrgbTargetFormat`).
+
+**3. Three small refusals of what the layer sets**: fill mode 0 and anisotropy 0 (both mean
+"the default" there) were answered with an error, and a vertex shader whose inputs leave a
+gap had no vertex layout.
+
+**4. Window contents as diagonal stripes.** The compositor hands a window's bitmap over as a
+system-memory surface that is part of a wider one: 657 pixels wide with a pitch of 2708 bytes,
+not 2628. The driver read Windows' memory with the pitch of the width. It takes the pitch
+Windows gives now.
+
+**5. Everything half a pixel off.** Direct3D 9 puts pixel centres at whole window
+coordinates, OpenGL half a pixel further, and the layer (like most Direct3D 9 programs' 2D)
+allows for Direct3D 9's rule. The driver added the half pixel to the viewport's translation,
+and the host, which takes whole numbers for a viewport, dropped it: each texel of the desktop
+landed between two pixels and was read from the wrong one in two of three rows and columns
+(text and thin lines in pieces). The shift is made in the vertex shader instead: translated
+shaders add half a pixel in clip space at their end (special constant 11), the shaders made
+for positions in window coordinates take it off their input. Measured on the rig, the same
+desktop composed on Direct3D 10 and on this path: 0 of 92,800 pixels differ in a strip of the
+wallpaper and icons (before: a mean difference of 7 a channel).
+
+**6. Two things OpenGL ES 3.0 does not take**, each of which made the host refuse one draw
+and then drop everything the context drew (a black desktop with a blinking text cursor):
+
+- Vertex shader inputs with a gap in their numbers. Without explicit locations the host finds
+  inputs by counting (`in_0`, `in_1`); the layer's shaders use v0 and v2. Inputs are numbered
+  in the order they are declared now (`nine_vs_input_slot`).
+- A base vertex on an indexed draw (`DRAW_VBO` answered with error 22, nothing else said).
+  It is folded into where each vertex buffer starts, so the draw has none.
+
+With all six, on UTM: the desktop with glass frames, the taskbar and window shadows, and Chess
+Titans in a glass frame, both seen in the guest's own screenshots and on the UTM window; no
+renderer errors in UTM's log after the last change. On the rig with `RIPPLE_NO_D3D10`: the
+same, and equal to the Direct3D 10 picture as measured above.
+
+Checks with the build that has all of it (64 and 32 bit, built from scratch). Where the host
+carries Direct3D 10 the compositor still takes it; the Direct3D 9 drawing and probe tests pass
+(Hog in 64 and 32 bit, the rig in 64 bit) and Chess Titans is right on Hog and in UTM (on the
+rig it was looked at with the build before the last two changes); the assessment on Hog gives
+7.9 on every line. On the rig the desktop composed on the two
+paths: of 745,472 pixels above the taskbar 403 differ, 24 of them by more than 8 a channel
+(the blinking text cursor), the rest along the glass frame. Direct3D 9 frames a second,
+drivers swapped on one boot, the driver before and this one: on Hog batch 1826 and
+1833, ALU 1327, 1310 and 1319, 1318, texture load 916, 973 and 960, 935; on the rig
+batch 661, 641, 640 and 649, 630, 633 before, 667, 633, 657 after (both below the 730 measured
+earlier on that host; not from this change, and not looked into).
+
+A host that refuses a draw says only "failed to dispatch DRAW_VBO". `RIPPLE_UMD_TRACE=3` now
+writes each draw as the host gets it (mode, start, count, base vertex, vertex layout), a
+refused draw writes the source line of its exit, and `RIPPLE_D3D9_REBIND` makes every draw
+bind all its state again, to tell a fault in the kept state from a fault in the drawing.

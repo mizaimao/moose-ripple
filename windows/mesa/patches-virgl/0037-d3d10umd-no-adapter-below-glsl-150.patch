@@ -1,0 +1,92 @@
+d3d10umd: no Direct3D 10 adapter on a host below GLSL 1.50
+
+CreateDevice refuses a Direct3D 10 device on a host renderer that cannot carry it (GLSL below
+1.50, as UTM's on Apple silicon). That is too late for the compositor: it asks the adapter
+whether it has a Direct3D 10 driver, tries Direct3D 10 only when it does, and stays off when
+that fails. OpenAdapter10 and OpenAdapter10_2 now fail on such a host, so the compositor goes
+on to feature level 9.3, which Windows' own layer runs on the driver's Direct3D 9 part.
+
+The host's level is asked once a process, through a device of our own on the primary
+display: when the adapter is opened there is no device of the runtime's yet.
+RIPPLE_NO_D3D10 (any value) makes a host that can carry Direct3D 10 answer the same, to try
+the compositor's Direct3D 9 path where the screen can be captured.
+
+---
+--- a/src/gallium/frontends/d3d10umd/Adapter.cpp
++++ b/src/gallium/frontends/d3d10umd/Adapter.cpp
+@@ -38,10 +38,65 @@
+ #include "Debug.h"
+ 
+ #include "util/u_memory.h"
++#include "gdikmt/gdikmt.h"
++#include "RippleLog.h"
+ 
+ 
+ static HRESULT APIENTRY CloseAdapter(D3D10DDI_HADAPTER hAdapter);
+ 
++EXTERN_C struct pipe_screen *
++d3d10_create_screen(gdikmt_device *device);
++
++/*
++ * moose-ripple: whether the host renderer can carry Direct3D 10 at all (GLSL 1.50 and
++ * geometry shaders, as CreateDevice checks). Asked once a process, through a device of our own
++ * on the primary display, because this has to be known when the adapter is opened: the
++ * compositor asks the adapter whether it has a Direct3D 10 driver, and if so tries Direct3D
++ * 10 only. An adapter that says yes and then makes no device leaves the desktop without
++ * composition; one that says no gets the compositor's Direct3D 9 path (feature level 9.3
++ * through Windows' own layer), which such a host can carry.
++ */
++static bool
++HostCarriesDirect3D10(void)
++{
++   static int carries = -1;
++
++   if (carries >= 0)
++      return carries != 0;
++   carries = 1;
++
++   /* RIPPLE_NO_D3D10 (any value): as on a host that cannot, to try the compositor's
++    * Direct3D 9 path on a host where Direct3D 10 works */
++   if (getenv("RIPPLE_NO_D3D10")) {
++      carries = 0;
++      ripple_logf("d3d10: no adapter: RIPPLE_NO_D3D10 is set");
++      return false;
++   }
++
++   HDC dc = GetDC(NULL);
++   struct gdikmt_device *device = dc ? gdikmt_create_from_hdc(dc) : NULL;
++   if (device) {
++      struct pipe_screen *screen = d3d10_create_screen(device);
++      if (screen) {
++         const int glsl = screen->get_param(screen, PIPE_CAP_GLSL_FEATURE_LEVEL);
++         if (screen->get_shader_param(screen, PIPE_SHADER_GEOMETRY,
++                                      PIPE_SHADER_CAP_MAX_INSTRUCTIONS) == 0 ||
++             glsl < 150) {
++            carries = 0;
++            ripple_logf("d3d10: no adapter: the host renderer offers GLSL level %d, "
++                        "Direct3D 10 needs 150", glsl);
++         }
++         /* the screen owns the device and takes it along */
++         screen->destroy(screen);
++      } else {
++         device->destroy(device);
++      }
++   }
++   if (dc)
++      ReleaseDC(NULL, dc);
++   return carries != 0;
++}
++
+ static unsigned long numAdapters = 0;
+ #if 0
+ static unsigned long memdbg_no = 0;
+@@ -61,6 +116,9 @@
+ static HRESULT
+ OpenAdapterCommon(__inout D3D10DDIARG_OPENADAPTER *pOpenData)   // IN
+ {
++   if (!HostCarriesDirect3D10())
++      return E_NOINTERFACE;
++
+ #if 0
+    if (numAdapters == 0) {
+       memdbg_no = debug_memory_begin();

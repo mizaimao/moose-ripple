@@ -169,6 +169,10 @@ D3D9SetRenderState(HANDLE hDevice, const D3DDDIARG_RENDERSTATE *data)
          return E_INVALIDARG;
       break;
    case D3DDDIRS_FILLMODE:
+      /* 0 is what Windows' Direct3D 10 Level 9 layer sets when it puts a device's states
+       * back: no fill mode named, taken as the default, solid */
+      if (data->Value == 0)
+         break;
       if (data->Value != D3DFILL_POINT &&
           data->Value != D3DFILL_WIREFRAME &&
           data->Value != D3DFILL_SOLID)
@@ -539,7 +543,9 @@ D3D9SetTextureStageState(HANDLE hDevice,
          return E_INVALIDARG;
       break;
    case D3DDDITSS_MAXANISOTROPY:
-      if (!data->Value || data->Value > 16)
+      /* 0 comes from Windows' Direct3D 10 Level 9 layer for a sampler that does not filter
+       * anisotropically; the sampler setup takes it as 1 */
+      if (data->Value > 16)
          return E_INVALIDARG;
       break;
    case D3DDDITSS_SRGBTEXTURE:
