@@ -1,0 +1,99 @@
+virgl gdi winsys: RIPPLE_CMD_STATS writes what the command streams hold
+
+With RIPPLE_UMD_LOG set, RIPPLE_CMD_STATS writes to the driver log, every 512 submits, how many
+of each virgl command a submit holds and their bytes, and once, forty submits in a row with
+their time, size, draws, clears, framebuffer changes, uploads, copies and queries. That showed
+the empty submit after every frame (patch 0034).
+
+---
+--- a/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
++++ b/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
+@@ -731,6 +731,80 @@
+    FREE(cbuf);
+ }
+ 
++/* moose-ripple: RIPPLE_CMD_STATS with RIPPLE_UMD_LOG: what the command streams are made of, by
++ * virgl command number (virgl_protocol.h), written to the driver log every 512 submits. Not
++ * thread-safe: for looking at one program's drawing thread. */
++static void
++virgl_gdi_cmd_stats(const uint32_t *buf, unsigned cdw)
++{
++   static int on = -1;
++   static struct { uint64_t count, words; } stats[256];
++   static unsigned submits;
++   static uint64_t total_words;
++   static unsigned seen;
++   static char trace[40][96];
++
++   if (on < 0)
++      on = getenv("RIPPLE_CMD_STATS") && getenv("RIPPLE_UMD_LOG");
++   if (!on)
++      return;
++
++   unsigned one[256] = {0}, used = 0;
++   for (unsigned i = 0; i < cdw;) {
++      const uint32_t hdr = buf[i];
++      const unsigned len = hdr >> 16;
++      stats[hdr & 0xff].count++;
++      stats[hdr & 0xff].words += len + 1;
++      one[hdr & 0xff]++;
++      if ((hdr & 0xff) != VIRGL_CCMD_END_TRANSFERS)
++         used += len + 1;
++      i += len + 1;
++   }
++   /* forty submits in a row, once the program is under way: what each one holds */
++   seen++;
++   if (seen > 3000 && seen <= 3040) {
++      LARGE_INTEGER now, freq;
++      QueryPerformanceCounter(&now);
++      QueryPerformanceFrequency(&freq);
++      snprintf(trace[seen - 3001], sizeof(trace[0]),
++               "  %8.3f ms: %5u bytes, draws %u, clears %u, framebuffers %u, copies in %u, "
++               "blits %u, queries %u/%u/%u",
++               (double)(now.QuadPart % (freq.QuadPart * 100)) * 1000.0 / freq.QuadPart, used * 4,
++               one[VIRGL_CCMD_DRAW_VBO], one[VIRGL_CCMD_CLEAR],
++               one[VIRGL_CCMD_SET_FRAMEBUFFER_STATE], one[VIRGL_CCMD_COPY_TRANSFER3D],
++               one[VIRGL_CCMD_BLIT] + one[VIRGL_CCMD_RESOURCE_COPY_REGION],
++               one[VIRGL_CCMD_BEGIN_QUERY], one[VIRGL_CCMD_END_QUERY],
++               one[VIRGL_CCMD_GET_QUERY_RESULT] + one[VIRGL_CCMD_GET_QUERY_RESULT_QBO]);
++      if (seen == 3040) {
++         FILE *t = fopen(getenv("RIPPLE_UMD_LOG"), "a");
++         if (t) {
++            fprintf(t, "forty submits in a row:\n");
++            for (unsigned k = 0; k < 40; k++)
++               fprintf(t, "%s\n", trace[k]);
++            fclose(t);
++         }
++      }
++   }
++   total_words += cdw;
++   if (++submits < 512)
++      return;
++
++   FILE *f = fopen(getenv("RIPPLE_UMD_LOG"), "a");
++   if (f) {
++      fprintf(f, "virgl commands in %u submits, %u bytes a submit:\n", submits,
++              (unsigned)(total_words * 4 / submits));
++      for (unsigned c = 0; c < 256; c++) {
++         if (stats[c].count)
++            fprintf(f, "  command %3u: %7.1f a submit, %6u bytes a submit\n", c,
++                    (double)stats[c].count / submits, (unsigned)(stats[c].words * 4 / submits));
++      }
++      fclose(f);
++   }
++   memset(stats, 0, sizeof(stats));
++   submits = 0;
++   total_words = 0;
++}
++
+ static int
+ virgl_gdi_winsys_submit_cmd(struct virgl_winsys *qws,
+                             struct virgl_cmd_buf *_cbuf,
+@@ -745,6 +819,7 @@
+       VIOGPU_COMMAND_HDR *cmdHdr = cbuf->ctx->pCommandBuffer;
+       cmdHdr->type = VIOGPU_CMD_SUBMIT;
+       cmdHdr->size = cbuf->base.cdw * 4;
++      virgl_gdi_cmd_stats(cbuf->base.buf, cbuf->base.cdw);
+       render.CommandLength = sizeof(VIOGPU_COMMAND_HDR) + cbuf->base.cdw * 4;
+    } else {
+       render.CommandLength = cbuf->driver_length;
