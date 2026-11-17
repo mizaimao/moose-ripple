@@ -1616,6 +1616,194 @@ D3D9SetBlendColor(D3D9Device *device)
    device->pipe->set_blend_color(device->pipe, &state);
 }
 
+/* State objects kept from draw to draw. A draw used to make its blend, rasterizer, depth and
+ * sampler states, its vertex layout, a view of every texture and a surface of every render
+ * target, and delete them all after the one draw: seven objects made and seven destroyed on
+ * the host for each draw of a test with one texture (217 of each a frame for its 31 draws).
+ * Now each description is made once and kept in a small store, where the one used longest
+ * ago gives way to a new one, never one the current draw has taken. */
+enum D3D9KeptKind {
+   D3D9_KEPT_BLEND,
+   D3D9_KEPT_RASTERIZER,
+   D3D9_KEPT_DSA,
+   D3D9_KEPT_SAMPLER,
+   D3D9_KEPT_VERTEX_ELEMENTS,
+   D3D9_KEPT_KINDS
+};
+
+#define D3D9_KEPT_SLOTS 32   /* of each kind; one draw takes at most 20 sampler states */
+#define D3D9_KEPT_KEY \
+   (sizeof(unsigned) + PIPE_MAX_ATTRIBS * sizeof(struct pipe_vertex_element))
+
+struct D3D9KeptObject {
+   void *handle;
+   unsigned serial;   /* the draw that took it last */
+   unsigned size;
+   uint8_t key[D3D9_KEPT_KEY];
+};
+
+static void
+D3D9KeptDelete(D3D9Device *device, enum D3D9KeptKind kind, void *handle)
+{
+   struct pipe_context *pipe = device->pipe;
+
+   switch (kind) {
+   case D3D9_KEPT_BLEND:
+      pipe->delete_blend_state(pipe, handle);
+      break;
+   case D3D9_KEPT_RASTERIZER:
+      pipe->delete_rasterizer_state(pipe, handle);
+      break;
+   case D3D9_KEPT_DSA:
+      pipe->delete_depth_stencil_alpha_state(pipe, handle);
+      break;
+   case D3D9_KEPT_SAMPLER:
+      pipe->delete_sampler_state(pipe, handle);
+      break;
+   case D3D9_KEPT_VERTEX_ELEMENTS:
+      pipe->delete_vertex_elements_state(pipe, handle);
+      break;
+   default:
+      break;
+   }
+}
+
+/* The object KEY describes (a pipe_*_state; for a vertex layout the count, then the
+ * elements), made if the store does not hold it. The store owns it. */
+static void *
+D3D9Kept(D3D9Device *device, enum D3D9KeptKind kind, const void *key,
+         unsigned size)
+{
+   struct pipe_context *pipe = device->pipe;
+
+   if (size > D3D9_KEPT_KEY)
+      return NULL;
+   if (!device->kept) {
+      device->kept = (struct D3D9KeptObject *)
+         calloc(D3D9_KEPT_KINDS * D3D9_KEPT_SLOTS, sizeof(struct D3D9KeptObject));
+      if (!device->kept)
+         return NULL;
+   }
+
+   struct D3D9KeptObject *slots = &device->kept[kind * D3D9_KEPT_SLOTS];
+   struct D3D9KeptObject *victim = NULL;
+   for (unsigned i = 0; i < D3D9_KEPT_SLOTS; ++i) {
+      struct D3D9KeptObject *slot = &slots[i];
+      if (slot->handle && slot->size == size && !memcmp(slot->key, key, size)) {
+         slot->serial = device->kept_serial;
+         return slot->handle;
+      }
+      if (slot->handle && slot->serial == device->kept_serial)
+         continue;
+      /* an empty slot before a used one, then the one taken longest ago */
+      if (!victim ||
+          (victim->handle &&
+           (!slot->handle || (int)(slot->serial - victim->serial) < 0)))
+         victim = slot;
+   }
+   if (!victim)
+      return NULL;
+
+   void *handle = NULL;
+   switch (kind) {
+   case D3D9_KEPT_BLEND:
+      handle = pipe->create_blend_state(pipe, (const struct pipe_blend_state *)key);
+      break;
+   case D3D9_KEPT_RASTERIZER:
+      handle = pipe->create_rasterizer_state(pipe,
+                                             (const struct pipe_rasterizer_state *)key);
+      break;
+   case D3D9_KEPT_DSA:
+      handle = pipe->create_depth_stencil_alpha_state(
+         pipe, (const struct pipe_depth_stencil_alpha_state *)key);
+      break;
+   case D3D9_KEPT_SAMPLER:
+      handle = pipe->create_sampler_state(pipe, (const struct pipe_sampler_state *)key);
+      break;
+   case D3D9_KEPT_VERTEX_ELEMENTS: {
+      unsigned count;
+      memcpy(&count, key, sizeof(count));
+      handle = pipe->create_vertex_elements_state(
+         pipe, count,
+         (const struct pipe_vertex_element *)((const uint8_t *)key + sizeof(count)));
+      break;
+   }
+   default:
+      break;
+   }
+   if (!handle)
+      return NULL;
+
+   if (victim->handle)
+      D3D9KeptDelete(device, kind, victim->handle);
+   victim->handle = handle;
+   victim->serial = device->kept_serial;
+   victim->size = size;
+   memcpy(victim->key, key, size);
+   return handle;
+}
+
+/* Where a draw used to delete what it had made: the store keeps it */
+static inline void
+D3D9KeptRelease(const void *handle)
+{
+   (void)handle;
+}
+
+static void
+D3D9KeptDestroy(D3D9Device *device)
+{
+   if (!device->kept)
+      return;
+   if (device->pipe) {
+      for (unsigned i = 0; i < D3D9_KEPT_KINDS * D3D9_KEPT_SLOTS; ++i) {
+         if (device->kept[i].handle)
+            D3D9KeptDelete(device, (enum D3D9KeptKind)(i / D3D9_KEPT_SLOTS),
+                           device->kept[i].handle);
+      }
+   }
+   free(device->kept);
+   device->kept = NULL;
+}
+
+/* A new reference to a view of TEXTURE's RESOURCE as TEMPL describes it: the one kept from
+ * the last draw while that is the same. */
+static struct pipe_sampler_view *
+D3D9KeptSamplerView(D3D9Device *device, D3D9Resource *texture,
+                    struct pipe_resource *resource,
+                    const struct pipe_sampler_view *templ)
+{
+   if (!texture->kept_view || texture->kept_view->texture != resource ||
+       memcmp(&texture->kept_view_templ, templ, sizeof(*templ))) {
+      pipe_sampler_view_reference(&texture->kept_view, NULL);
+      texture->kept_view =
+         device->pipe->create_sampler_view(device->pipe, resource, templ);
+      texture->kept_view_templ = *templ;
+   }
+
+   struct pipe_sampler_view *view = NULL;
+   pipe_sampler_view_reference(&view, texture->kept_view);
+   return view;
+}
+
+/* The same for a surface of a render target or depth buffer */
+static struct pipe_surface *
+D3D9KeptSurface(D3D9Device *device, D3D9Resource *target,
+                struct pipe_resource *resource, const struct pipe_surface *templ)
+{
+   if (!target->kept_surface || target->kept_surface->texture != resource ||
+       memcmp(&target->kept_surface_templ, templ, sizeof(*templ))) {
+      pipe_surface_reference(&target->kept_surface, NULL);
+      target->kept_surface =
+         device->pipe->create_surface(device->pipe, resource, templ);
+      target->kept_surface_templ = *templ;
+   }
+
+   struct pipe_surface *surface = NULL;
+   pipe_surface_reference(&surface, target->kept_surface);
+   return surface;
+}
+
 static void *
 D3D9CreateBlendState(D3D9Device *device)
 {
@@ -1687,7 +1875,7 @@ D3D9CreateBlendState(D3D9Device *device)
       }
    }
 
-   return device->pipe->create_blend_state(device->pipe, &state);
+   return D3D9Kept(device, D3D9_KEPT_BLEND, &state, sizeof(state));
 }
 
 static void *
@@ -1751,7 +1939,8 @@ D3D9CreateRasterizerState(D3D9Device *device, bool depth_clamp,
    state.sprite_coord_mode = PIPE_SPRITE_COORD_UPPER_LEFT;
    if (!point_position_gs && device->render_states[D3DRS_POINTSPRITEENABLE])
       state.sprite_coord_enable = 0xff;
-   return pipe->create_rasterizer_state(pipe, &state);
+   (void)pipe;
+   return D3D9Kept(device, D3D9_KEPT_RASTERIZER, &state, sizeof(state));
 }
 
 static float
@@ -1849,7 +2038,7 @@ D3D9CreateDepthStencilState(D3D9Device *device)
       }
    }
 
-   return device->pipe->create_depth_stencil_alpha_state(device->pipe, &state);
+   return D3D9Kept(device, D3D9_KEPT_DSA, &state, sizeof(state));
 }
 
 static void
@@ -1927,9 +2116,8 @@ D3D9BindFramebuffer(D3D9Device *device, struct pipe_framebuffer_state *fb)
          D3D9PipeLayer(cbuf_resource,
                        device->render_target_subresources[i]);
       templ.u.tex.last_layer = templ.u.tex.first_layer;
-      fb->cbufs[i] = device->pipe->create_surface(device->pipe,
-                                                  cbuf_resource->pipe_resource,
-                                                  &templ);
+      fb->cbufs[i] = D3D9KeptSurface(device, cbuf_resource,
+                                     cbuf_resource->pipe_resource, &templ);
       if (fb->cbufs[i])
          fb->nr_cbufs = i + 1;
    }
@@ -1941,8 +2129,7 @@ D3D9BindFramebuffer(D3D9Device *device, struct pipe_framebuffer_state *fb)
          struct pipe_surface templ;
          memset(&templ, 0, sizeof(templ));
          templ.format = zs->pipe_resource->format;
-         fb->zsbuf = device->pipe->create_surface(device->pipe,
-                                                  zs->pipe_resource, &templ);
+         fb->zsbuf = D3D9KeptSurface(device, zs, zs->pipe_resource, &templ);
       }
    }
 
@@ -2354,13 +2541,12 @@ D3D9CreateNullTextureBinding(D3D9Device *device, UINT stage,
    if (resource->target == PIPE_TEXTURE_CUBE)
       sampler.seamless_cube_map = true;
 
-   *sampler_state = device->pipe->create_sampler_state(device->pipe,
-                                                       &sampler);
+   *sampler_state = D3D9Kept(device, D3D9_KEPT_SAMPLER, &sampler, sizeof(sampler));
    *sampler_view = device->pipe->create_sampler_view(device->pipe, resource,
                                                      &view);
    if (!*sampler_state || !*sampler_view) {
       if (*sampler_state) {
-         device->pipe->delete_sampler_state(device->pipe, *sampler_state);
+         D3D9KeptRelease(*sampler_state);
          *sampler_state = NULL;
       }
       if (*sampler_view) {
@@ -2463,14 +2649,11 @@ D3D9CreateTextureBinding(D3D9Device *device, UINT stage,
       view.swizzle_a = PIPE_SWIZZLE_X;
    }
 
-   *sampler_state = device->pipe->create_sampler_state(device->pipe,
-                                                       &sampler);
-   *sampler_view = device->pipe->create_sampler_view(device->pipe,
-                                                     view_resource,
-                                                     &view);
+   *sampler_state = D3D9Kept(device, D3D9_KEPT_SAMPLER, &sampler, sizeof(sampler));
+   *sampler_view = D3D9KeptSamplerView(device, texture, view_resource, &view);
    if (!*sampler_state || !*sampler_view) {
       if (*sampler_state) {
-         device->pipe->delete_sampler_state(device->pipe, *sampler_state);
+         D3D9KeptRelease(*sampler_state);
          *sampler_state = NULL;
       }
       if (*sampler_view) {
@@ -2524,8 +2707,7 @@ D3D9BindTranslatedTextures(D3D9Device *device, void **sampler_states,
       if (!ok) {
          for (UINT j = 0; j < ARRAYSIZE(device->textures); ++j) {
             if (sampler_states[j])
-               device->pipe->delete_sampler_state(device->pipe,
-                                                  sampler_states[j]);
+               D3D9KeptRelease(sampler_states[j]);
             if (sampler_views[j]) {
                pipe_sampler_view_release(sampler_views[j]);
                sampler_views[j] = NULL;
@@ -2562,8 +2744,7 @@ D3D9BindTranslatedTextures(D3D9Device *device, void **sampler_states,
       if (!ok) {
          for (UINT j = 0; j < ARRAYSIZE(device->textures); ++j) {
             if (sampler_states[j])
-               device->pipe->delete_sampler_state(device->pipe,
-                                                  sampler_states[j]);
+               D3D9KeptRelease(sampler_states[j]);
             if (sampler_views[j]) {
                pipe_sampler_view_release(sampler_views[j]);
                sampler_views[j] = NULL;
@@ -2615,7 +2796,7 @@ D3D9UnbindTranslatedTextures(D3D9Device *device, void **sampler_states,
    }
    for (UINT i = 0; i < ps_sampler_count; ++i) {
       if (sampler_states[i])
-         device->pipe->delete_sampler_state(device->pipe, sampler_states[i]);
+         D3D9KeptRelease(sampler_states[i]);
       if (sampler_views[i])
          pipe_sampler_view_release(sampler_views[i]);
       sampler_states[i] = NULL;
@@ -2624,8 +2805,7 @@ D3D9UnbindTranslatedTextures(D3D9Device *device, void **sampler_states,
    for (UINT i = 0; i < vs_sampler_count; ++i) {
       const UINT texture_stage = D3DVERTEXTEXTURESAMPLER0 + i;
       if (sampler_states[texture_stage])
-         device->pipe->delete_sampler_state(device->pipe,
-                                            sampler_states[texture_stage]);
+         D3D9KeptRelease(sampler_states[texture_stage]);
       if (sampler_views[texture_stage])
          pipe_sampler_view_release(sampler_views[texture_stage]);
       sampler_states[texture_stage] = NULL;
@@ -2866,6 +3046,9 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
    if (D3D9ConsumeBackendDrawFailure(device))
       return E_FAIL;
 
+   /* what this draw takes from the store is not given up during it */
+   device->kept_serial++;
+
    const enum mesa_prim mode = D3D9PrimitiveToPipe(primitive_type);
    const UINT vertex_count =
       D3D9PrimitiveVertexCount(primitive_type, primitive_count);
@@ -3097,11 +3280,11 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
        (point_position_gs && !point_gs) ||
        (!constants && translated_vs_needs_constants)) {
       if (blend)
-         pipe->delete_blend_state(pipe, blend);
+         D3D9KeptRelease(blend);
       if (rasterizer)
-         pipe->delete_rasterizer_state(pipe, rasterizer);
+         D3D9KeptRelease(rasterizer);
       if (dsa)
-         pipe->delete_depth_stencil_alpha_state(pipe, dsa);
+         D3D9KeptRelease(dsa);
       if (point_gs)
          pipe->delete_gs_state(pipe, point_gs);
       free(constants);
@@ -3126,9 +3309,9 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
                                                   &fs_constants_size);
       }
       if (!fs_constants) {
-         pipe->delete_depth_stencil_alpha_state(pipe, dsa);
-         pipe->delete_rasterizer_state(pipe, rasterizer);
-         pipe->delete_blend_state(pipe, blend);
+         D3D9KeptRelease(dsa);
+         D3D9KeptRelease(rasterizer);
+         D3D9KeptRelease(blend);
          if (point_gs)
             pipe->delete_gs_state(pipe, point_gs);
          free(constants);
@@ -3141,12 +3324,23 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
    fs_cb.user_buffer = fs_constants;
    fs_cb.buffer_size = fs_constants_size;
 
-   void *dynamic_vertex_elements =
-      pipe->create_vertex_elements_state(pipe, element_count, elements);
+   struct {
+      unsigned count;
+      struct pipe_vertex_element elements[PIPE_MAX_ATTRIBS];
+   } layout;
+   void *dynamic_vertex_elements = NULL;
+   if (element_count <= PIPE_MAX_ATTRIBS) {
+      memset(&layout, 0, sizeof(layout));
+      layout.count = element_count;
+      memcpy(layout.elements, elements, element_count * sizeof(elements[0]));
+      dynamic_vertex_elements =
+         D3D9Kept(device, D3D9_KEPT_VERTEX_ELEMENTS, &layout,
+                  sizeof(layout.count) + element_count * sizeof(elements[0]));
+   }
    if (!dynamic_vertex_elements) {
-      pipe->delete_depth_stencil_alpha_state(pipe, dsa);
-      pipe->delete_rasterizer_state(pipe, rasterizer);
-      pipe->delete_blend_state(pipe, blend);
+      D3D9KeptRelease(dsa);
+      D3D9KeptRelease(rasterizer);
+      D3D9KeptRelease(blend);
       free(fs_constants);
       if (point_gs)
          pipe->delete_gs_state(pipe, point_gs);
@@ -3156,10 +3350,10 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
 
    struct pipe_framebuffer_state fb;
    if (!D3D9BindFramebuffer(device, &fb)) {
-      pipe->delete_depth_stencil_alpha_state(pipe, dsa);
-      pipe->delete_rasterizer_state(pipe, rasterizer);
-      pipe->delete_blend_state(pipe, blend);
-      pipe->delete_vertex_elements_state(pipe, dynamic_vertex_elements);
+      D3D9KeptRelease(dsa);
+      D3D9KeptRelease(rasterizer);
+      D3D9KeptRelease(blend);
+      D3D9KeptRelease(dynamic_vertex_elements);
       free(fs_constants);
       if (point_gs)
          pipe->delete_gs_state(pipe, point_gs);
@@ -3197,10 +3391,10 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       if (point_position_gs)
          pipe->bind_gs_state(pipe, NULL);
       pipe->set_framebuffer_state(pipe, &fb);
-      pipe->delete_depth_stencil_alpha_state(pipe, dsa);
-      pipe->delete_rasterizer_state(pipe, rasterizer);
-      pipe->delete_blend_state(pipe, blend);
-      pipe->delete_vertex_elements_state(pipe, dynamic_vertex_elements);
+      D3D9KeptRelease(dsa);
+      D3D9KeptRelease(rasterizer);
+      D3D9KeptRelease(blend);
+      D3D9KeptRelease(dynamic_vertex_elements);
       D3D9UnbindTranslatedTextures(device, translated_texture_samplers,
                                    translated_texture_views,
                                    translated_ps_texture_count,
@@ -3255,7 +3449,7 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
 
    pipe->set_vertex_buffers(pipe, 0, NULL);
    pipe->bind_vertex_elements_state(pipe, NULL);
-   pipe->delete_vertex_elements_state(pipe, dynamic_vertex_elements);
+   D3D9KeptRelease(dynamic_vertex_elements);
    D3D9UnbindTranslatedTextures(device, translated_texture_samplers,
                                 translated_texture_views,
                                 translated_ps_texture_count,
@@ -3271,9 +3465,9 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
    pipe->bind_blend_state(pipe, NULL);
    memset(&fb, 0, sizeof(fb));
    pipe->set_framebuffer_state(pipe, &fb);
-   pipe->delete_depth_stencil_alpha_state(pipe, dsa);
-   pipe->delete_rasterizer_state(pipe, rasterizer);
-   pipe->delete_blend_state(pipe, blend);
+   D3D9KeptRelease(dsa);
+   D3D9KeptRelease(rasterizer);
+   D3D9KeptRelease(blend);
    free(fs_constants);
    if (point_gs)
       pipe->delete_gs_state(pipe, point_gs);
@@ -3363,5 +3557,5 @@ D3D9DrawIndexedPrimitive2(HANDLE hDevice,
 void
 D3D9DestroyDrawState(D3D9Device *device)
 {
-   (void)device;
+   D3D9KeptDestroy(device);
 }

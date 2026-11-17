@@ -2619,6 +2619,7 @@ D3D9FreeResource(D3D9Resource *resource)
          resource->next->previous = resource->previous;
    }
 
+   D3D9ReleaseKept(resource);
    pipe_resource_reference(&resource->pipe_resource, NULL);
    pipe_resource_reference(&resource->display_resource, NULL);
    pipe_resource_reference(&resource->managed_default_pipe_resource, NULL);

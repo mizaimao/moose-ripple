@@ -1366,6 +1366,7 @@ D3D9DestroyDevice(HANDLE hDevice)
    while (device->resources) {
       D3D9Resource *resource = device->resources;
       device->resources = resource->next;
+      D3D9ReleaseKept(resource);
       resource->device = NULL;
       resource->previous = NULL;
       resource->next = NULL;
