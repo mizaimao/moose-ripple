@@ -888,3 +888,38 @@ microsecond on Hog, so they come every 100 µs there again (4 to 6 for each poll
 
 In the UTM VM (emulated x86, 4 processors) the new kernel driver loads and the Direct3D 9 test
 program draws, reads its picture back right and presents; no speed figures were taken there.
+
+## The fine timer only for a stream of work (2026-11-17)
+
+Noticed while another VM was being benchmarked on the same host: the rig's test VM, idle at its
+desktop, kept QEMU's main thread at half a host processor or more. The guest's own counters showed it 100% idle. One second of KVM's trace
+on the host (`kvm_pio` counted by port; the tracer has to be switched on first, `tracing_on` is
+0 there) showed the guest's clock: 2048 reads of the real-time clock's ports a second, each a
+trip to QEMU. `powercfg -energy` in the guest named the cause, "Outstanding Kernel Timer
+Request, Requested Period 5000": ours.
+
+The driver takes Windows' half-millisecond timer while command buffers are with the host (the
+second round's nudges need it) and kept it for a second after the last one. A prompt window
+with a blinking cursor sends two buffers 30 ms apart every half second, so the timer never went
+back. On a VM whose clock is the emulated real-time clock that is 2048 interrupts a second for
+an idle desktop; a VM with Hyper-V's timers (Hog) pays far less.
+
+Now the timer is taken only for a stream of work: buffers with the host at moments spread over
+60 ms or more with no pause over 100 ms (frames at 10 a second or faster, or one long job), and
+it goes back 200 ms after the last buffer. A frame now and then is left to the ordinary timer
+and QEMU's own 10 ms poll.
+
+| Rig VM, idle, prompt window open | before | now |
+|---|---|---|
+| Guest clock interrupts a second | 2048 | 64 |
+| QEMU process, share of one host processor | 66 to 80% | 24% |
+
+No cost where it matters. Batch test, drivers swapped in place: Hog 1577 to 1599 frames a
+second before, 1639 to 1657 after; the rig, four tests in two rounds each, within 3% either
+way (ALU 317 and 324 before, 325 and 319 after; batch 642 and 653 before, 663 and 634 after).
+The rig's Experience Index sits on the line between 7.0 and 7.1: two assessments with this
+driver gave 7.0 and then 7.1 (gaming graphics tests 305 to 320 frames a second in the first,
+320 to 330 in the second).
+
+Hog with this driver: 7.9 on every line as before (two assessments; Direct3D 10 batch 1629 and
+1640 frames a second, constant buffer 1319 and 1324), no renderer errors.
