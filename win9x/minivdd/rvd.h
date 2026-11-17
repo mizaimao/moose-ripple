@@ -23,6 +23,11 @@ typedef unsigned long rvd_u32;
 #define RVD_SUBMIT              7   /* in: struct rvd_submit, then the commands */
 #define RVD_TRANSFER            8   /* in: struct rvd_transfer */
 #define RVD_HEAP                9   /* in: rvd_u32 bytes wanted; out: struct rvd_heap */
+#define RVD_SET_TIMEOUT         10  /* in: rvd_u32 ms a request may take (0: the default, 10 s);
+                                       out (optional): rvd_u32 contexts and buffers held for
+                                       the host. For tests; ends with the program that set it */
+#define RVD_TIMEOUT_AT_ONCE     0xFFFFFFFFUL    /* give up on a request as soon as it is sent,
+                                                   and hold the device stalled until reset */
 
 #define RVD_MAX_CAPS            8
 

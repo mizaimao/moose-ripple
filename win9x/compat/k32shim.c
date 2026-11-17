@@ -150,11 +150,44 @@ SHIM(void, WakeAllConditionVariable, 4, (void *volatile *word))
 }
 
 /* ---- Fiber-local storage: thread-local storage does, as nothing here uses fibers. The
-   callback (run when a thread ends) is not called: what it would free stays allocated. ------ */
-SHIM(DWORD, FlsAlloc, 4, (void *callback))
+   callback (libc++'s thread-specific storage behind std::thread frees its data with one) is
+   kept and run for a thread's values by k32shim_thread_exit (below), which the DLL calls when a
+   thread ends. ------------------------------------------------------------------------------- */
+typedef void (WINAPI *fls_callback)(void *);
+
+#define FLS_CALLBACKS 16
+
+static struct {
+    DWORD index;
+    fls_callback callback;              /* NULL: the entry is free */
+} fls_callbacks[FLS_CALLBACKS];
+static LONG volatile fls_lock;
+
+static void fls_enter(void)
 {
-    (void)callback;
-    return TlsAlloc();
+    unsigned tries = 0;
+    while (InterlockedCompareExchange(&fls_lock, 1, 0) != 0)
+        wait_a_bit(&tries);
+}
+
+SHIM(DWORD, FlsAlloc, 4, (fls_callback callback))
+{
+    DWORD index = TlsAlloc();
+    int i;
+
+    if (index == TLS_OUT_OF_INDEXES || !callback)
+        return index;
+    fls_enter();
+    for (i = 0; i < FLS_CALLBACKS; i++) {
+        if (!fls_callbacks[i].callback) {
+            fls_callbacks[i].index = index;
+            fls_callbacks[i].callback = callback;
+            break;
+        }
+    }
+    InterlockedExchange(&fls_lock, 0);
+    /* With every entry taken, the callback is not kept: what it would free stays allocated. */
+    return index;
 }
 
 SHIM(void *, FlsGetValue, 4, (DWORD index))
@@ -167,9 +200,68 @@ SHIM(BOOL, FlsSetValue, 8, (DWORD index, void *value))
     return TlsSetValue(index, value);
 }
 
+/* Windows runs the callback for every thread's value here; this frees the slot only (no
+   library linked here frees an index with a callback while threads hold values in it). */
 SHIM(BOOL, FlsFree, 4, (DWORD index))
 {
+    int i;
+
+    fls_enter();
+    for (i = 0; i < FLS_CALLBACKS; i++) {
+        if (fls_callbacks[i].callback && fls_callbacks[i].index == index)
+            fls_callbacks[i].callback = NULL;
+    }
+    InterlockedExchange(&fls_lock, 0);
     return TlsFree(index);
+}
+
+static void emutls_thread_exit(void);
+
+/* mingw-w64's list of C++ thread_local destructors (__cxa_thread_atexit), which its DLL start-up
+   code runs after the DLL's own entry point. Weak: only a DLL's start-up code defines it. NULL
+   until a thread_local with a destructor is linked in (none is in Mesa 24.3.4). */
+extern PIMAGE_TLS_CALLBACK __mingw_cxa_tls_callback_ptr __attribute__((weak));
+
+/* The DLL that links this object calls this from its entry point when a thread ends
+   (DLL_THREAD_DETACH), last. It runs the thread's C++ thread_local destructors (here, as they
+   may use thread-local variables; the start-up code's own call afterwards finds none left) and
+   its fiber-local storage callbacks, as Windows does, then frees the thread's emulated
+   thread-local variables. A thread-local variable used after this (by code that runs later in
+   the thread's exit, such as another DLL calling into this one) gets a new copy, which is then
+   not freed. */
+void k32shim_thread_exit(void);
+void k32shim_thread_exit(void)
+{
+    int round, i, ran;
+
+    if (&__mingw_cxa_tls_callback_ptr && __mingw_cxa_tls_callback_ptr)
+        __mingw_cxa_tls_callback_ptr(NULL, DLL_THREAD_DETACH, NULL);
+    /* A callback may set values again: a few rounds, as the C library does for its
+       thread-specific data. */
+    for (round = 0; round < 4; round++) {
+        ran = 0;
+        for (i = 0; i < FLS_CALLBACKS; i++) {
+            fls_callback callback;
+            DWORD index;
+            void *value;
+
+            fls_enter();
+            callback = fls_callbacks[i].callback;
+            index = fls_callbacks[i].index;
+            InterlockedExchange(&fls_lock, 0);
+            if (!callback)
+                continue;
+            value = TlsGetValue(index);
+            if (value) {
+                TlsSetValue(index, NULL);
+                callback(value);
+                ran = 1;
+            }
+        }
+        if (!ran)
+            break;
+    }
+    emutls_thread_exit();
 }
 
 /* ---- Small things ----------------------------------------------------------------------------- */
@@ -344,7 +436,7 @@ SHIM(void *, TlsGetValue, 4, (DWORD index))
    the compiler run-time's own, which checks the last error after TlsGetValue (see above) and
    needs one-time initialisation and aligned allocation from the C run-time; this one needs
    the process heap and one thread-local storage slot per program or DLL.
-   What a thread allocated stays allocated when the thread ends. */
+   k32shim_thread_exit frees what a thread allocated when the thread ends. */
 struct emutls_control {
     size_t size, align;
     uintptr_t index;                    /* 0 until first used, then 1, 2, ... */
@@ -399,10 +491,13 @@ void *__emutls_get_address(struct emutls_control *c)
     }
     p = a->object[index - 1];
     if (!p) {
+        /* The block's own address goes in the word before the variable, for freeing. */
         size_t align = c->align < sizeof(void *) ? sizeof(void *) : c->align;
-        char *raw = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, c->size + align);
+        char *raw = (char *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                                      c->size + align + sizeof(void *));
         size_t i;
-        p = (void *)(((uintptr_t)raw + align - 1) & ~(uintptr_t)(align - 1));
+        p = (void *)(((uintptr_t)raw + sizeof(void *) + align - 1) & ~(uintptr_t)(align - 1));
+        ((void **)p)[-1] = raw;
         if (c->initial) {
             for (i = 0; i < c->size; i++)
                 ((char *)p)[i] = ((const char *)c->initial)[i];
@@ -410,4 +505,23 @@ void *__emutls_get_address(struct emutls_control *c)
         a->object[index - 1] = p;
     }
     return p;
+}
+
+/* Free the calling thread's variables and its array (k32shim_thread_exit). */
+static void emutls_thread_exit(void)
+{
+    struct emutls_array *a;
+    uintptr_t i;
+
+    if (emutls_slot == TLS_OUT_OF_INDEXES || !emutls_get)
+        return;
+    a = (struct emutls_array *)emutls_get(emutls_slot);
+    if (!a)
+        return;
+    TlsSetValue(emutls_slot, NULL);
+    for (i = 0; i < a->count; i++) {
+        if (a->object[i])
+            HeapFree(GetProcessHeap(), 0, ((void **)a->object[i])[-1]);
+    }
+    HeapFree(GetProcessHeap(), 0, a);
 }

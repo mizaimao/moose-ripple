@@ -418,8 +418,10 @@ struct thread_start {
     thrd_t thrd;
 };
 
-/* Called when a thread ends, where the C++ run-time gets to run thread-local destructors
-   (threads_win32_tls_callback.cpp). */
+/* Called when a thread ends. Mesa calls it from a C++ thread_local destructor
+   (threads_win32_tls_callback.cpp), which in this build never runs: the object is never used,
+   so no destructor is registered. The driver's entry point calls it there instead
+   (DLL_THREAD_DETACH, patch 0009). */
 void
 __threads_win32_tls_callback(void)
 {

@@ -81,14 +81,21 @@ The build uses llvm-mingw (clang, lld, compiler-rt, libc++, mingw-w64 with the o
 - **No native thread-local storage** (`-femulated-tls`). Windows before Vista gives a DLL
   loaded at run time no thread-local storage of its own. The emulation's run-time function
   (`__emutls_get_address`) is ours, in `win9x/compat/k32shim.c`: the compiler run-time's own
-  aborts on Windows 98, where `TlsGetValue` leaves the last error untouched.
+  aborts on Windows 98, where `TlsGetValue` leaves the last error untouched. One part of the
+  toolchain still uses native thread-local storage: libc++abi's per-thread exception state.
+  Windows 98 doesn't set that up for a DLL loaded at run time, so a C++ exception thrown inside
+  the driver would read the wrong slot.
 - **`win9x/compat/k32shim.c`**: the kernel32 functions newer than Windows 98 that the
   toolchain's libraries and Mesa call (one-time initialisation, slim locks, condition
   variables, fiber-local storage, `GlobalMemoryStatusEx` and a few more), written with what
   Windows 95 already has, plus `qsort_s`, which Windows 98's `msvcrt.dll` lacks. Windows 98
   refuses to load a file that imports a function it doesn't export, so the object defines each
   function and the import pointer for it, and is linked as an object file so that it comes
-  before the import library.
+  before the import library. A thread's run-time data is freed when the thread ends: its
+  emulated thread-local variables, the destructors of Mesa's C11 thread-specific storage, and
+  (none are linked in today) C++ `thread_local` destructors and fiber-local storage callbacks.
+  Windows 98 runs no thread-exit callbacks for a DLL loaded at run time, so the driver's entry
+  point calls these itself (patch 0009).
 - **C11 threads for Windows 98** (`win9x/mesa/overlay/src/c11/impl/threads_win32.c` replaces
   Mesa's file): Mesa's version needs Vista's condition variables, and
   `TryEnterCriticalSection`, which Windows 98 exports but which always fails there. The
@@ -128,8 +135,25 @@ this measures the cost of a frame's way to the screen, not the GPU):
 and drawing objects) and free memory before and after: both must come back to where they
 were.
 
+`threadtest` (built with the others) checks for memory a long-running program loses: 300
+threads, one after the other, each making a context, drawing a frame, checking a pixel and
+cleaning up. It fails when the program's memory grows by 1 KB or more a thread after the
+first 50. `threadtest 100 same` does the same in one thread (a leak per context rather than
+per thread), and a third argument stops each round early (1: create and delete the context
+only, 2: also make it current), to find the step that leaks; 4 lets each thread end with its
+context still current, as a careless program does. Before the fixes below it lost about
+375 KB a context and 30 KB more a thread; now its memory stays flat (UTM and Proxmox VE,
+2026-11-17). With step 4 about 950 bytes a thread remain, under the 1 KB limit: likely
+Windows' `opengl32.dll` releasing the context after the driver has cleaned up the thread,
+which allocates some thread-local variables again (not chased further).
+
 ## Things learnt the hard way
 
+- **The virgl driver kept a copy of every shader.** It cloned the shader Mesa hands it, and
+  the converter freed only the clone: about 375 KB lost for every context that drew, so a
+  program that makes contexts now and then (a game between levels) grew without limit.
+  Upstream Mesa fixed it in June 2026 (commit 0b1479eb, "virgl: fix memory leak on shader
+  translation"); patch 0008 is that fix for 24.3.4.
 - **Sample counts.** Mesa's Windows frontend asks for window buffers with a sample count of
   1; the host takes 1 for "multisampled, one sample" and such a colour buffer doesn't go with
   a plain depth buffer (`GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE`, nothing drawn). The winsys
