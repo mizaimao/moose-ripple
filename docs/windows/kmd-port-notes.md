@@ -766,3 +766,59 @@ tests are bound by how fast the UHD 630 fills pixels, and what the driver could 
 in the fixed quarter. For scale: on real hardware Intel's HD 4600 (20 execution units) is
 listed at 6.5 to 6.7 for gaming graphics and the Iris Pro 5200 (40) at the top, 7.9; the
 UHD 630 (24) is at 7.1 here.
+
+## Speed, fifth round: nudges only where they are cheap (2026-11-16)
+
+A new line in the driver log (`RIPPLE_CMD_STATS`, Mesa patch 0036) says how the fences a
+program polls went: how many nudges each took, how long after its submit it was found
+signalled, and what a nudge costs. It corrects the fourth round's picture of Hog. WinSAT
+keeps about ten frames in flight on both hosts: the fence it polls was submitted 8 ms earlier
+on Hog (0.8 ms a frame) and 15 ms earlier on the rig (1.5 ms a frame). Neither host waits for
+one frame's trip to the host and back; each is bound by how many frames the host gets through.
+
+On Hog the nudges themselves were in the way. The batch test at 1280x1024, by nudge interval
+(`RIPPLE_NUDGE_US`), one install, runs mixed:
+
+| Interval | 5 µs | 20 µs | 100 µs (as shipped) | 400 µs | 800 µs | 1.6 ms | none |
+|---|---|---|---|---|---|---|---|
+| Frames a second | 1146 | 1088 | 1105 to 1126 | 1184 to 1202 | 1192 | 1227 to 1230 | 1266 to 1315 |
+
+Why: QEMU's virtio-gpu device has `ioeventfd` off by default (`info qtree` on both hosts), so
+a notification is handled by the guest processor that sent it, under QEMU's global lock. The
+thread that draws holds that lock while it works, and the processor waits until it is between
+jobs. Measured from the driver, a nudge takes 500 to 900 µs on Hog, where that thread is the
+limit, and 12 to 100 µs on the rig, where the GPU is.
+
+So the driver times each nudge, and the next one waits the square of what they have been
+taking, in units of 100 µs (at least 100 µs, at most 20 ms): every 100 µs on the rig as
+before, every few milliseconds on Hog, which then runs as without nudges.
+
+| Batch test, frames a second (two rounds) | spaced by cost | every 100 µs | none |
+|---|---|---|---|
+| Hog | 1252, 1241 | 1100, 1125 | 1273, 1250 |
+| Rig | 624, 641 | 633, 652 | 623, 621 |
+
+| Hog, Experience Index | before | now |
+|---|---|---|
+| Graphics / gaming graphics | 7.7 / 7.7 | 7.8 / 7.8 |
+| Direct3D 10 batch / alpha (frames a second) | 1125 / 1224 | 1298 / 1352 |
+| Direct3D 10 texture / ALU | 1031 / 896 | 1195 / 881 |
+| Direct3D 10 geometry F4 / V8 | 1398 / 1398 | 1558 / 1576 |
+| Direct3D 10 constant buffer | 902 | 986 |
+
+The rig stays at 7.1 / 7.1 (batch 643, alpha 622, ALU 325, texture 315, constant buffer 315).
+No new renderer errors on either host.
+
+Tried and dropped, both measured on the same install with runs alternated:
+
+- A first nudge delayed by what earlier fences needed (learned per program): 1103 to 1148 on
+  Hog, no better than every 100 µs. The cost of a nudge is what tells the hosts apart.
+- `UpdateSubresource` of a whole buffer mapped with `PIPE_MAP_DISCARD_WHOLE_RESOURCE`, so virgl
+  takes fresh storage instead of copying on the host (31 copies a frame in the batch test
+  become none): 1128 and 1169 against 1115 and 1150 on Hog, 632 and 635 against 638 and 624 on
+  a quiet rig. No gain, not kept.
+
+For the next round, QEMU's drawing thread on Hog during the batch test (`perf trace -s` on the
+thread, 4 seconds at about 1180 frames a second): 36,743 `ioctl` calls taking 1.0 s (7.8 a
+frame, 28 µs each), then `ppoll`, `futex` and `getpid` at 0.13 to 0.17 s each, and one
+`openat`, `eventfd2` and two `close` for every 1.6 frames.
