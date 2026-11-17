@@ -2713,6 +2713,24 @@ D3D9CopyInitialData(const D3DDDIARG_CREATERESOURCE *data,
       return S_OK;
 
    if (!D3D9PoolNeedsReadback(data->Pool)) {
+      /* Windows' own memory, used where it lies, so with the pitch Windows gives for it. A
+       * surface that is part of a wider bitmap (a window's contents inside its frame, as the
+       * compositor hands them over on its Direct3D 9 path: 657 pixels wide with a pitch of
+       * 2708, not 2628) has rows further apart than its width; read with the pitch of the
+       * width, every row came out shifted and the window was diagonal stripes. The size
+       * ends with the last row: what follows that is not the surface's. */
+      if (src->SysMemPitch && !(data->Flags.VertexBuffer || data->Flags.IndexBuffer)) {
+         const UINT row_bytes = D3D9FormatRowPitch(data->Format, src->Width);
+         const UINT rows = D3D9FormatRowCount(data->Format, src->Height ? src->Height : 1);
+         const UINT depth = src->Depth ? src->Depth : 1;
+         if (rows && src->SysMemPitch >= row_bytes) {
+            dst->pitch = src->SysMemPitch;
+            dst->slice_pitch = src->SysMemSlicePitch ?
+               src->SysMemSlicePitch : dst->pitch * rows;
+            dst->size = (size_t)dst->slice_pitch * (depth - 1) +
+               (size_t)dst->pitch * (rows - 1) + row_bytes;
+         }
+      }
       dst->data = (uint8_t *)(uintptr_t)src->pSysMem;
       dst->data_capacity = dst->size;
       dst->owns_data = false;
