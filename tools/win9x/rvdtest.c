@@ -7,6 +7,11 @@
  *                      buffer's memory and paints it in the top left corner of the screen
  *   rvdtest leak       the same, but leaves the context and buffer for the VxD to clean up
  *                      when the program ends
+ *   rvdtest stall      has a request time out (RVD_SET_TIMEOUT, given up as soon as it is
+ *                      sent: a 16 MB read-back), lets go of its buffer and context while the
+ *                      device is held stalled, checks that requests are refused and both are
+ *                      kept for the host, then lets the VxD find the device back, checks they
+ *                      are gone, and runs the clear test
  *
  * Built with Visual C++ 6 for Windows 95/98 (tools/win9x/build-tools.sh). The virgl numbers
  * below are from virglrenderer's protocol (virgl_protocol.h, virgl_hw.h; MIT).
@@ -121,6 +126,92 @@ static int clear_test(int leak)
     return first == 0xFFFF8000UL;
 }
 
+#ifndef ERROR_TIMEOUT
+#define ERROR_TIMEOUT 1460
+#endif
+#define BIG 2048                                /* a 16 MB texture: its read-back takes a while */
+
+/* Sets the VxD's request time-out; returns how many contexts and buffers it held for the host
+   before the call (~0 if the call failed). */
+static u32 set_timeout(u32 ms)
+{
+    u32 held = ~0UL;
+    call(RVD_SET_TIMEOUT, &ms, sizeof ms, &held, sizeof held, "set timeout");
+    return held;
+}
+
+static int stall_test(void)
+{
+    struct rvd_buffer_create bc;
+    struct rvd_buffer buf;
+    struct rvd_transfer t;
+    u32 ctx = 0, probe, held, refused = 0;
+    DWORD n, err = 0, start;
+
+    if (!call(RVD_CONTEXT_CREATE, "rvdtest", 7, &ctx, sizeof ctx, "context create"))
+        return 0;
+    memset(&bc, 0, sizeof bc);
+    bc.context = ctx;
+    bc.size = BIG * BIG * 4;
+    bc.target = PIPE_TEXTURE_2D;
+    bc.format = VIRGL_FORMAT_B8G8R8A8_UNORM;
+    bc.bind = VIRGL_BIND_RENDER_TARGET;
+    bc.width = BIG; bc.height = BIG; bc.depth = 1; bc.array_size = 1;
+    if (!call(RVD_BUFFER_CREATE, &bc, sizeof bc, &buf, sizeof buf, "buffer create"))
+        return 0;
+    memset(&t, 0, sizeof t);
+    /* A read-back: the host waits for its GPU first. */
+    t.context = ctx; t.buffer = buf.handle; t.direction = RVD_FROM_HOST;
+    t.width = BIG; t.height = BIG; t.depth = 1;
+
+    /* The VxD gives up on the read-back as soon as it is sent and, while this setting lasts,
+       leaves the answer alone: the device stays stalled. */
+    set_timeout(RVD_TIMEOUT_AT_ONCE);
+    err = DeviceIoControl(dev, RVD_TRANSFER, &t, sizeof t, NULL, 0, &n, NULL) ? 0 : GetLastError();
+    if (err != ERROR_TIMEOUT) {
+        set_timeout(0);
+        printf("the read-back gave error %lu, not a time-out\n", err);
+        call(RVD_BUFFER_DESTROY, &buf.handle, sizeof buf.handle, NULL, 0, "buffer destroy");
+        call(RVD_CONTEXT_DESTROY, &ctx, sizeof ctx, NULL, 0, "context destroy");
+        return 0;
+    }
+    printf("the read-back timed out\n");
+
+    /* Stalled: letting go works (the buffer and context become zombies, held for the host);
+       requests that need the device are refused. */
+    if (!call(RVD_BUFFER_DESTROY, &buf.handle, sizeof buf.handle, NULL, 0, "buffer destroy") ||
+        !call(RVD_CONTEXT_DESTROY, &ctx, sizeof ctx, NULL, 0, "context destroy")) {
+        set_timeout(0);
+        return 0;
+    }
+    err = DeviceIoControl(dev, RVD_CONTEXT_CREATE, "probe", 5, &probe, sizeof probe, &n, NULL) ?
+          0 : GetLastError();
+    if (!err)
+        call(RVD_CONTEXT_DESTROY, &probe, sizeof probe, NULL, 0, "context destroy");
+    held = set_timeout(0);                      /* the VxD looks for the answer again */
+    printf("while stalled: a new context %s; held for the host: %lu (2 expected)\n",
+           err == ERROR_TIMEOUT ? "refused" : "NOT refused", held);
+    if (err != ERROR_TIMEOUT || held != 2)
+        return 0;
+
+    for (start = GetTickCount(); GetTickCount() - start < 20000; Sleep(0)) {
+        if (DeviceIoControl(dev, RVD_CONTEXT_CREATE, "probe", 5, &probe, sizeof probe, &n, NULL)) {
+            call(RVD_CONTEXT_DESTROY, &probe, sizeof probe, NULL, 0, "context destroy");
+            held = set_timeout(0);
+            printf("the device is back after %lu ms (%lu requests refused meanwhile); held "
+                   "for the host: %lu (0 expected)\n", GetTickCount() - start, refused, held);
+            return held == 0 && clear_test(0);
+        }
+        if (GetLastError() != ERROR_TIMEOUT) {
+            printf("context create failed, error %lu\n", GetLastError());
+            return 0;
+        }
+        refused++;
+    }
+    printf("the device did not come back in 20 s\n");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     struct rvd_info info;
@@ -166,6 +257,17 @@ int main(int argc, char **argv)
             return 1;
         }
         printf("clear test passed: the host GPU drew for Windows\n");
+    }
+    if (argc > 1 && !strcmp(argv[1], "stall")) {
+        if (!info.virgl) {
+            printf("the host has no 3D (virgl): start QEMU with virtio-vga-gl\n");
+            return 1;
+        }
+        if (!stall_test()) {
+            printf("stall test FAILED\n");
+            return 1;
+        }
+        printf("stall test passed: 3D works again after a request timed out\n");
     }
     CloseHandle(dev);
     return 0;

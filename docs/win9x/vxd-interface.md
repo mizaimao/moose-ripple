@@ -19,6 +19,7 @@ VxD, the test program and the winsys; this is version 2 of the interface.
 | `RVD_SUBMIT` | `struct rvd_submit`, commands | | a virgl command stream for a context |
 | `RVD_TRANSFER` | `struct rvd_transfer` | | copy between a buffer's memory and its GPU object, either way |
 | `RVD_HEAP` | bytes wanted | `struct rvd_heap` | one block of system memory for the display driver's DirectDraw surfaces that are never shown (made at the first call, returned again later; valid in every process). No GPU needed |
+| `RVD_SET_TIMEOUT` | milliseconds (0: the default, 10 s; `RVD_TIMEOUT_AT_ONCE`: give up as soon as a request is sent, and keep the device stalled until set back) | contexts and buffers held for the host (optional) | how long a request may take before it fails with `ERROR_TIMEOUT`; for tests of the recovery, until the program that set it ends |
 
 Closing a handle to the VxD ends the GPU contexts of the process that closes it, so a program
 that opens one for `RVD_HEAP` alone (the DirectDraw DLL) keeps it open.
@@ -49,8 +50,19 @@ virgl's and is decided in user mode.
 - **Errors.** A request the host refuses fails with `ERROR_GEN_FAILURE`, and the VxD writes a
   line on QEMU's debug port. A rendering error inside a command stream is not visible here:
   the host logs it (on Proxmox VE: `journalctl`, lines from `QEMU[pid]`) and from then on
-  ignores that context's commands. If the device doesn't answer for 10 seconds the VxD stops
-  using it.
+  ignores that context's commands.
+- **A request that takes too long.** If the host hasn't answered after 10 seconds, the request
+  fails with `ERROR_TIMEOUT` and the device counts as stalled: its answer may still come, and
+  until it does, the request buffer is the host's and nothing else is sent. Requests are
+  refused at once with `ERROR_TIMEOUT` meanwhile; contexts and buffers can still be let go,
+  and stay reserved (their IDs, and their memory, which the late request may still write)
+  until the host answers. The next request after the answer finds the device back: the VxD
+  has the host forget what was let go meanwhile, and work goes on. The stall covers the whole
+  device: while it lasts, every program's requests fail, so a program may lose commands and
+  draw wrongly until it makes new contexts; work after the answer is not affected. (A host
+  that never answers can't be helped from inside the guest.) Before 2026-11-17 the first
+  time-out ended 3D until Windows restarted. `RVD_SET_TIMEOUT` changes the limit for a test
+  (`rvdtest stall`), until the program that set it ends.
 - **Reaching the card.** Its virtio registers sit in a 64-bit memory range. Where the firmware
   puts that range below 4 GB (QEMU's usual layout, Proxmox), the VxD maps it. UTM gives the
   card an 8 GB host memory range, so the firmware puts all its 64-bit ranges above 4 GB, out

@@ -271,7 +271,15 @@ static struct vq ctrlq = { 0 }, cursorq = { 0 };
 static u8  *req_buf = 0, *resp_buf = 0;
 static u32  req_phys = 0, resp_phys = 0;
 static u32  features = 0;
-static u32  dead = 0;                           /* the device stopped answering */
+/* A request that got no answer in time is still the device's: its late answer must not be taken
+   for the next request's, and the request buffer must not be written until it comes. Until
+   then the interface refuses work (ERROR_TIMEOUT) and keeps what it can't undo yet (zombies,
+   below); device_ready() notices the answer and puts things right. */
+static u32  stalled = 0;
+#define DEFAULT_TIMEOUT_MS 10000
+static u32  timeout_ms = DEFAULT_TIMEOUT_MS;    /* RVD_SET_TIMEOUT changes it, for tests */
+static u32  timeout_owner = 0;                  /* ...from this process, until it ends */
+static u32  info_incomplete = 0;                /* read_host_info() was cut short by a stall */
 static struct rvd_info info = { 0 };
 
 /* Who owns what. A context belongs to the process that made it (DeviceIoControl's
@@ -281,7 +289,11 @@ static struct rvd_info info = { 0 };
 #define MAX_CONTEXTS     64
 #define MAX_BUFFERS      4096
 #define MAX_BUFFER_PAGES 8192                   /* 32 MB behind one buffer */
-struct buffer { u32 context, mem_handle, pages; u8 *mem; };
+/* A buffer or context let go while the device was stalled, or whose making timed out: the
+   host may still have it (and may still write into the buffer's memory). Its ID and memory
+   stay taken until device_ready() has the host forget it. */
+#define ZOMBIE           0xFFFFFFFFUL
+struct buffer { u32 context, mem_handle, pages; u8 *mem; };   /* context: 0 free, or ZOMBIE */
 static u32 ctx_owner[MAX_CONTEXTS] = { 0 };
 static struct buffer *buffers = 0;
 static u32 *page_table = 0;                     /* scratch: one entry per page of a new buffer */
@@ -349,14 +361,14 @@ static int setup_queue(struct vq *q, u16 index)
 
 /* One request (in req_buf) with its answer (in resp_buf); waits, polling, until the device has
    used the buffers. Returns the number of bytes the device wrote, 0 on a time-out (after which
-   the device counts as dead: its late answer would be taken for the next request's). */
+   the device counts as stalled until device_ready() sees the late answer). */
 static u32 command(u32 req_len, u32 resp_len)
 {
     struct vq *q = &ctrlq;
     u32 start, spins = 0;
     u16 head = 0;
 
-    if (dead)
+    if (stalled)
         return 0;
     q->desc[0].addr_lo = req_phys;        q->desc[0].addr_hi = 0;
     q->desc[0].len = req_len;             q->desc[0].flags = VQ_DESC_NEXT; q->desc[0].next = 1;
@@ -368,9 +380,11 @@ static u32 command(u32 req_len, u32 resp_len)
 
     start = vmm_time_ms();
     while (q->used->idx == q->last_used) {
-        if ((++spins & 0xFFF) == 0 && vmm_time_ms() - start > 10000) {
-            dbg("rvd: the device did not answer request "); dbg_hex(*(u32 *)req_buf); dbg("\r\n");
-            dead = 1;
+        if (timeout_ms == RVD_TIMEOUT_AT_ONCE ||
+            ((++spins & 0xFFF) == 0 && vmm_time_ms() - start > timeout_ms)) {
+            dbg("rvd: no answer yet to request "); dbg_hex(*(u32 *)req_buf);
+            dbg(": nothing goes to the device until it comes\r\n");
+            stalled = 1;
             return 0;
         }
     }
@@ -379,7 +393,9 @@ static u32 command(u32 req_len, u32 resp_len)
     return q->used->ring[(u16)(q->last_used - 1) % q->size].len;
 }
 
-/* Start a request in req_buf: `bytes` zeroed, type and context set. */
+/* Start a request in req_buf: `bytes` zeroed, type and context set. Never while stalled: the
+   request that is still out lives there (every caller checks `stalled` first, or runs only
+   after device_ready() said yes and no request since has timed out). */
 static void *request(u32 type, u32 ctx, u32 bytes)
 {
     struct gpu_ctrl_hdr *h = (struct gpu_ctrl_hdr *)req_buf;
@@ -406,7 +422,11 @@ static int simple(u32 req_len)
 
 static int one_id(u32 type, u32 ctx, u32 id)
 {
-    struct gpu_one_id *r = (struct gpu_one_id *)request(type, ctx, sizeof(*r));
+    struct gpu_one_id *r;
+
+    if (stalled)
+        return 0;
+    r = (struct gpu_one_id *)request(type, ctx, sizeof(*r));
     r->id = id;
     return simple(sizeof(*r));
 }
@@ -513,6 +533,7 @@ static void read_host_info(void)
     info.max_submit = REQ_BYTES - sizeof(struct gpu_submit);
     info.max_buffer = MAX_BUFFER_PAGES * 4096UL;
 
+    info_incomplete = 1;
     request(GPU_CMD_GET_DISPLAY_INFO, 0, sizeof(*resp));
     n = command(sizeof(*resp), sizeof(*resp) + 16 * sizeof(*d));
     if (n && resp->type == GPU_RESP_OK_DISPLAY_INFO) {
@@ -522,7 +543,10 @@ static void read_host_info(void)
     dbg("rvd: host display "); dbg_hex(info.display_w); dbg(" x "); dbg_hex(info.display_h); dbg("\r\n");
 
     sets = rd32(devcfg, 12);
-    for (i = 0; i < sets && info.num_caps < RVD_MAX_CAPS; i++) {
+    info.num_caps = 0;
+    /* After a time-out the request buffer is the host's until its answer comes; device_ready()
+       reads the rest then. */
+    for (i = 0; i < sets && info.num_caps < RVD_MAX_CAPS && !stalled; i++) {
         struct gpu_one_id *r = (struct gpu_one_id *)request(GPU_CMD_GET_CAPSET_INFO, 0, sizeof(*r));
         r->id = i;
         if (!command(sizeof(*r), sizeof(*ci)) || ci->hdr.type != GPU_RESP_OK_CAPSET_INFO)
@@ -534,6 +558,7 @@ static void read_host_info(void)
         dbg("rvd: capability set "); dbg_hex(ci->id); dbg(", version "); dbg_hex(ci->max_version);
         dbg(", bytes "); dbg_hex(ci->max_size); dbg("\r\n");
     }
+    info_incomplete = stalled;
 }
 
 /* Called once from MiniVDD_Dynamic_Init. Returns 0 if there is no virtio-gpu card (the mini-VDD
@@ -606,20 +631,29 @@ int __cdecl vgpu_init(void)
 #define ERROR_NOT_SUPPORTED     50
 #define ERROR_INVALID_PARAMETER 87
 #define ERROR_NO_MORE_ITEMS     259
+#define ERROR_TIMEOUT           1460            /* the device is stalled (see `stalled`) */
+
+/* What a failed request tells the caller. */
+static u32 failure(void)
+{
+    return stalled ? ERROR_TIMEOUT : ERROR_GEN_FAILURE;
+}
 
 static int valid_context(u32 ctx)
 {
-    return ctx > 0 && ctx < MAX_CONTEXTS && ctx_owner[ctx] != 0;
+    return ctx > 0 && ctx < MAX_CONTEXTS && ctx_owner[ctx] != 0 && ctx_owner[ctx] != ZOMBIE;
 }
 
 static struct buffer *find_buffer(u32 handle)
 {
-    if (handle == 0 || handle > MAX_BUFFERS || buffers[handle - 1].context == 0)
+    if (handle == 0 || handle > MAX_BUFFERS || buffers[handle - 1].context == 0 ||
+        buffers[handle - 1].context == ZOMBIE)
         return 0;
     return &buffers[handle - 1];
 }
 
-/* The host forgets the buffer; then its memory is free again. */
+/* The host forgets the buffer; then its memory is free again. While the device is stalled the
+   buffer becomes a zombie instead, its memory kept: the request still out may write into it. */
 static void buffer_destroy(struct buffer *b, int detach)
 {
     u32 id = (u32)(b - buffers) + 1;
@@ -627,8 +661,12 @@ static void buffer_destroy(struct buffer *b, int detach)
     if (detach)
         one_id(GPU_CMD_CTX_DETACH_RESOURCE, b->context, id);
     one_id(GPU_CMD_RESOURCE_UNREF, 0, id);
-    if (!dead)                                  /* a dead device may still hold the pages */
-        vmm_free_pages(b->mem_handle);
+    if (stalled) {
+        dbg("rvd: buffer "); dbg_hex(id); dbg(" kept until the device answers again\r\n");
+        b->context = ZOMBIE;
+        return;
+    }
+    vmm_free_pages(b->mem_handle);
     b->context = 0;
     b->mem = 0;
 }
@@ -672,7 +710,12 @@ static u32 buffer_create(const struct rvd_buffer_create *c, struct rvd_buffer *o
     rc->array_size = c->array_size; rc->last_level = c->last_level; rc->nr_samples = c->nr_samples;
     rc->flags = c->flags;
     if (!simple(sizeof(*rc))) {
+        if (stalled) {                          /* the host may make it yet */
+            b->context = ZOMBIE;
+            return ERROR_TIMEOUT;
+        }
         vmm_free_pages(b->mem_handle);
+        b->mem = 0;
         return ERROR_GEN_FAILURE;
     }
 
@@ -694,7 +737,7 @@ static u32 buffer_create(const struct rvd_buffer_create *c, struct rvd_buffer *o
         !one_id(GPU_CMD_CTX_ATTACH_RESOURCE, c->context, id)) {
         b->context = c->context;
         buffer_destroy(b, 0);
-        return ERROR_GEN_FAILURE;
+        return failure();
     }
     b->context = c->context;
     b->pages = pages;
@@ -716,9 +759,73 @@ static void context_destroy(u32 ctx)
         }
     }
     dbg("rvd: context "); dbg_hex(ctx); dbg(" ends, buffers left to remove: "); dbg_hex(n); dbg("\r\n");
-    request(GPU_CMD_CTX_DESTROY, ctx, sizeof(struct gpu_ctrl_hdr));
-    simple(sizeof(struct gpu_ctrl_hdr));
-    ctx_owner[ctx] = 0;
+    if (!stalled) {
+        request(GPU_CMD_CTX_DESTROY, ctx, sizeof(struct gpu_ctrl_hdr));
+        simple(sizeof(struct gpu_ctrl_hdr));
+    }
+    ctx_owner[ctx] = stalled ? ZOMBIE : 0;
+}
+
+/* Have the host forget the zombies, now that it answers again; stops if it stalls again. */
+static void reap(void)
+{
+    u32 i, n = 0;
+
+    for (i = 0; i < MAX_BUFFERS && !stalled; i++) {
+        struct buffer *b = &buffers[i];
+        if (b->context != ZOMBIE)
+            continue;
+        one_id(GPU_CMD_RESOURCE_UNREF, 0, i + 1);   /* an error answer: it was never made */
+        if (stalled)
+            break;
+        vmm_free_pages(b->mem_handle);
+        b->context = 0;
+        b->mem = 0;
+        n++;
+    }
+    for (i = 1; i < MAX_CONTEXTS && !stalled; i++) {
+        if (ctx_owner[i] != ZOMBIE)
+            continue;
+        request(GPU_CMD_CTX_DESTROY, i, sizeof(struct gpu_ctrl_hdr));
+        simple(sizeof(struct gpu_ctrl_hdr));
+        if (stalled)
+            break;
+        ctx_owner[i] = 0;
+        n++;
+    }
+    dbg("rvd: zombies removed: "); dbg_hex(n); dbg("\r\n");
+}
+
+/* Can requests go to the device? After a time-out, only once the late answer has come; the
+   zombies go then too. Looks once, without waiting. With the test setting RVD_TIMEOUT_AT_ONCE
+   the answer is left alone, so a test sees the stalled state for as long as it wants. */
+static int device_ready(void)
+{
+    struct vq *q = &ctrlq;
+
+    if (!stalled)
+        return 1;
+    if (timeout_ms == RVD_TIMEOUT_AT_ONCE || q->used->idx == q->last_used)
+        return 0;
+    q->last_used++;
+    (void)rd8(isr, 0);
+    stalled = 0;
+    dbg("rvd: the late answer came, the device is back\r\n");
+    reap();
+    if (!stalled && info_incomplete)
+        read_host_info();
+    return !stalled;
+}
+
+static u32 count_zombies(void)
+{
+    u32 i, n = 0;
+
+    for (i = 0; buffers && i < MAX_BUFFERS; i++)
+        n += buffers[i].context == ZOMBIE;
+    for (i = 1; i < MAX_CONTEXTS; i++)
+        n += ctx_owner[i] == ZOMBIE;
+    return n;
 }
 
 /* ---- The interface for user-mode drivers: DeviceIoControl on \\.\RIPPLEVD (rvd.h) ------------- */
@@ -741,6 +848,12 @@ static u32 dispatch(struct dioc *p)
     if (p->code == DIOC_OPEN)
         return 0;
     if (p->code == DIOC_CLOSE) {                /* the handle is closed, or its program ended */
+        if (timeout_owner == p->process) {      /* a test setting ends with its program */
+            timeout_ms = DEFAULT_TIMEOUT_MS;
+            timeout_owner = 0;
+        }
+        if (common)
+            device_ready();                     /* stalled or not, its contexts go */
         for (i = 1; common && i < MAX_CONTEXTS; i++) {
             if (ctx_owner[i] == p->process)
                 context_destroy(i);
@@ -767,6 +880,25 @@ static u32 dispatch(struct dioc *p)
     }
     if (!common)
         return ERROR_NOT_SUPPORTED;
+    if (p->code == RVD_SET_TIMEOUT) {           /* for tests; 0 is the default again */
+        if (p->in_len < 4)
+            return ERROR_INVALID_PARAMETER;
+        if (p->out_len >= 4) {                  /* what is held for the host before this call */
+            *(u32 *)p->out = count_zombies();
+            n = 4;
+        }
+        timeout_ms = *(u32 *)p->in ? *(u32 *)p->in : DEFAULT_TIMEOUT_MS;
+        timeout_owner = *(u32 *)p->in ? p->process : 0;
+        if (p->returned)
+            *p->returned = n;
+        return 0;
+    }
+    /* While stalled, requests that need the device are refused straight away; letting go of
+       contexts and buffers still works (they become zombies). */
+    if (!device_ready() && (p->code == RVD_GET_CAPS || p->code == RVD_CONTEXT_CREATE ||
+                            p->code == RVD_BUFFER_CREATE || p->code == RVD_SUBMIT ||
+                            p->code == RVD_TRANSFER))
+        return ERROR_TIMEOUT;
     switch (p->code) {
     case RVD_GET_INFO:
         if (p->out_len < sizeof(info))
@@ -785,7 +917,7 @@ static u32 dispatch(struct dioc *p)
         got = command(sizeof(*r), RESP_BYTES);
         if (got <= sizeof(struct gpu_ctrl_hdr) ||
             ((struct gpu_ctrl_hdr *)resp_buf)->type != GPU_RESP_OK_CAPSET)
-            return ERROR_GEN_FAILURE;
+            return failure();
         n = got - sizeof(struct gpu_ctrl_hdr);
         if (n > p->out_len)
             n = p->out_len;
@@ -804,8 +936,11 @@ static u32 dispatch(struct dioc *p)
         r = (struct gpu_ctx_create *)request(GPU_CMD_CTX_CREATE, i, sizeof(*r));
         r->name_len = p->in_len < sizeof(r->name) ? p->in_len : sizeof(r->name) - 1;
         copy(r->name, p->in, r->name_len);
-        if (!simple(sizeof(*r)))
-            return ERROR_GEN_FAILURE;
+        if (!simple(sizeof(*r))) {
+            if (stalled)                        /* the host may make it yet */
+                ctx_owner[i] = ZOMBIE;
+            return failure();
+        }
         ctx_owner[i] = p->process;
         dbg("rvd: context "); dbg_hex(i); dbg(" for process "); dbg_hex(p->process); dbg("\r\n");
         *(u32 *)p->out = i;
@@ -842,7 +977,7 @@ static u32 dispatch(struct dioc *p)
         r->size = s->bytes;
         copy(r + 1, s + 1, s->bytes);
         if (!simple(sizeof(*r) + s->bytes))
-            return ERROR_GEN_FAILURE;
+            return failure();
         break;
     }
     case RVD_TRANSFER: {
@@ -859,7 +994,7 @@ static u32 dispatch(struct dioc *p)
         r->stride = t->stride;
         r->layer_stride = t->layer_stride;
         if (!simple(sizeof(*r)))
-            return ERROR_GEN_FAILURE;
+            return failure();
         break;
     }
     default:
