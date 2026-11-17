@@ -513,10 +513,54 @@ static void handle_set(DDLOCAL *d, DWORD h, LPDDRAWI_DDRAWSURFACE_LCL s)
     d->surf[h] = s;
 }
 
+/* The surface of s's flipping chain (its attached surfaces, the ring back to root) that carries
+   handle h, or NULL. Only surfaces DirectDraw links to s are looked at, never other entries of
+   the table, which may name surfaces released since. */
+static LPDDRAWI_DDRAWSURFACE_LCL chain_find(LPDDRAWI_DDRAWSURFACE_LCL root,
+                                            LPDDRAWI_DDRAWSURFACE_LCL s, DWORD h, int depth)
+{
+    LPATTACHLIST a;
+    LPDDRAWI_DDRAWSURFACE_LCL r;
+
+    if (!s || depth > 8)
+        return NULL;
+    if (s != root && s->lpSurfMore && s->lpSurfMore->dwSurfaceHandle == h)
+        return s;
+    a = s->lpAttachList;
+    if (!a)
+        return NULL;
+    if (a->lpAttached && a->lpAttached != root &&
+        (r = chain_find(root, a->lpAttached, h, depth + 1)) != NULL)
+        return r;
+    if (a->lpLink && a->lpLink->lpAttached && a->lpLink->lpAttached != root)
+        return chain_find(root, a->lpLink->lpAttached, h, depth + 1);
+    return NULL;
+}
+
+/* The surface that carries handle h now. A flip moves the handles of a flipping chain's
+   surfaces along with their memory (the surface record the program calls the back buffer keeps
+   its role, the handle follows the picture), so the record CreateSurfaceEx gave for h may carry
+   another handle by now: then the one in its chain that carries h is taken, and both records go
+   back into the table under the handles they carry now. Without that, Direct3D drew into the
+   buffer on the screen and every other flip showed the one that never got a picture. */
 static LPDDRAWI_DDRAWSURFACE_LCL handle_get(LPDDRAWI_DIRECTDRAW_LCL lcl, DWORD h)
 {
     DDLOCAL *d = ddlocal(lcl, 0);
-    return (d && h && h < d->n) ? d->surf[h] : NULL;
+    LPDDRAWI_DDRAWSURFACE_LCL s, o;
+    DWORD h2;
+
+    if (!d || !h || h >= d->n || !(s = d->surf[h]))
+        return NULL;
+    if (!s->lpSurfMore || s->lpSurfMore->dwSurfaceHandle == h)
+        return s;
+    o = chain_find(s, s, h, 0);
+    if (!o)
+        return s;
+    d->surf[h] = o;
+    h2 = s->lpSurfMore->dwSurfaceHandle;
+    if (h2 && h2 < d->n)
+        d->surf[h2] = s;
+    return o;
 }
 
 /* ---- Pixel formats ----------------------------------------------------------------------------- */
