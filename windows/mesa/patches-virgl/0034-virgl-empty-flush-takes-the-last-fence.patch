@@ -1,0 +1,94 @@
+virgl: an empty flush takes the last submit's fence
+
+A flush that asks for a fence was sent to the host even when nothing had been encoded since
+the last submit: an empty command buffer with a fence of its own, which costs a guest kick, a
+host flush and a completion interrupt. A Direct3D 10 program that ends two event queries in a
+row (WinSAT, every frame) paid that once a frame. Every submit now keeps its fence in the
+context, and a flush that finds nothing new, and no upload queued, returns that fence. On a
+host where a frame's time is the round trip (an RTX 4090 behind WSL2) WinSAT's Direct3D 10
+batch test, runs alternated on one install: 872 and 895 frames a second with the empty
+submits (RIPPLE_EMPTY_FLUSH, which keeps them, to compare), 1096 and 1114 without. On a host
+bound by its GPU nothing changes.
+
+Also: an event query ended again let go of its previous fence only when destroyed (Direct3D 10
+event queries have no begin), one event handle a frame.
+
+---
+--- a/src/gallium/drivers/virgl/virgl_context.c
++++ b/src/gallium/drivers/virgl/virgl_context.c
+@@ -1116,13 +1116,25 @@
+                     struct pipe_fence_handle **fence)
+ {
+    struct virgl_screen *rs = virgl_screen(ctx->base.screen);
++   const bool empty = ctx->cbuf->cdw == ctx->cbuf_initial_cdw &&
++                      ctx->queue.num_dwords == 0;
+ 
+    /* skip empty cbuf */
+-   if (ctx->cbuf->cdw == ctx->cbuf_initial_cdw &&
+-       ctx->queue.num_dwords == 0 &&
+-       !fence)
++   if (empty && !fence)
+       return;
+ 
++   /* moose-ripple: nothing was encoded since the last submit, so its fence stands for this
++    * flush too. An empty command buffer used to make the whole trip to the host for a fence
++    * of its own: a program that ends two event queries in a row paid that every frame. */
++   static int reuse = -1;   /* RIPPLE_EMPTY_FLUSH (any value): send them as before, to compare */
++   if (reuse < 0)
++      reuse = getenv("RIPPLE_EMPTY_FLUSH") == NULL;
++   if (reuse && empty && ctx->last_fence && list_is_empty(&ctx->queue.transfer_list)) {
++      *fence = NULL;
++      rs->vws->fence_reference(rs->vws, fence, ctx->last_fence);
++      return;
++   }
++
+    if (ctx->num_draws)
+       u_upload_unmap(ctx->uploader);
+ 
+@@ -1131,7 +1143,14 @@
+ 
+    virgl_transfer_queue_clear(&ctx->queue, ctx->cbuf);
+ 
+-   virgl_submit_cmd(rs->vws, ctx->cbuf, fence);
++   /* always with a fence, kept for flushes that find nothing new to send */
++   struct pipe_fence_handle *submitted = NULL;
++   virgl_submit_cmd(rs->vws, ctx->cbuf, &submitted);
++   rs->vws->fence_reference(rs->vws, &ctx->last_fence, submitted);
++   if (fence)
++      *fence = submitted;
++   else
++      rs->vws->fence_reference(rs->vws, &submitted, NULL);
+ 
+    /* Reserve some space for transfers. */
+    if (ctx->encoded_transfers)
+@@ -1649,6 +1668,7 @@
+       pipe_resource_reference(&vctx->atomic_buffers[i].buffer, NULL);
+    }
+ 
++   rs->vws->fence_reference(rs->vws, &vctx->last_fence, NULL);
+    rs->vws->cmd_buf_destroy(vctx->cbuf);
+    if (vctx->uploader)
+       u_upload_destroy(vctx->uploader);
+--- a/src/gallium/drivers/virgl/virgl_context.h
++++ b/src/gallium/drivers/virgl/virgl_context.h
+@@ -69,6 +69,8 @@
+    struct pipe_context base;
+    struct virgl_cmd_buf *cbuf;
+    unsigned cbuf_initial_cdw;
++   /* moose-ripple: the fence of the last command buffer submitted (virgl_flush_eq) */
++   struct pipe_fence_handle *last_fence;
+ 
+    struct virgl_shader_binding_state shader_bindings[PIPE_SHADER_TYPES];
+    struct pipe_shader_buffer atomic_buffers[PIPE_MAX_HW_ATOMIC_BUFFERS];
+--- a/src/gallium/drivers/virgl/virgl_query.c
++++ b/src/gallium/drivers/virgl/virgl_query.c
+@@ -200,6 +200,9 @@
+    struct virgl_host_query_state *host_state;
+ 
+    if (query->type == PIPE_QUERY_GPU_FINISHED) {
++      /* moose-ripple: a query ended again (Direct3D 10 event queries have no begin) let go of
++       * its previous fence only when destroyed: one event handle a frame */
++      ctx->screen->fence_reference(ctx->screen, &query->fence, NULL);
+       ctx->flush(ctx, &query->fence, PIPE_FLUSH_DEFERRED);
+       return true;
+    }
