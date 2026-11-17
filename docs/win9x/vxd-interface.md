@@ -51,6 +51,13 @@ virgl's and is decided in user mode.
   the host logs it (on Proxmox VE: `journalctl`, lines from `QEMU[pid]`) and from then on
   ignores that context's commands. If the device doesn't answer for 10 seconds the VxD stops
   using it.
+- **Reaching the card.** Its virtio registers sit in a 64-bit memory range. Where the firmware
+  puts that range below 4 GB (QEMU's usual layout, Proxmox), the VxD maps it. UTM gives the
+  card an 8 GB host memory range, so the firmware puts all its 64-bit ranges above 4 GB, out
+  of reach of 32-bit Windows; the VxD then reads and writes the registers through the card's
+  PCI configuration window (virtio's configuration access capability), one register at a time.
+  Before 2026-11-16 it mapped the range's lower half there, address 0, and wrote into the
+  real-mode interrupt table: Windows hung at start-up on UTM.
 
 Limits: 63 contexts, 4096 buffers, 32 MB behind one buffer, 511 KB of commands per submission.
 

@@ -93,6 +93,10 @@ DirectDraw and Direct3D driver; these four `build.sh` makes, in `build/win9x/`) 
   programs find `ripplegl.dll` (on a host without 3D, Mesa's software renderer).
 - **Replacing another display driver:** Display Properties > Settings > Advanced > Adapter >
   Change > Have Disk, and the same folder.
+- **Updating ours:** the same way, with the new folder. Windows keeps a copy of the INF from the
+  first install (in `C:\WINDOWS\INF\OTHER`) and uses that copy, not the new one, when the card
+  turns up in another PCI slot (another VM setup). A copy from before 0.1.0.0 has no mini-VDD
+  in it: the desktop then works without 3D, and DOS sessions and Restart misbehave.
 - If Device Manager still lists the old card (with a warning sign), remove that entry: it
   can hold on to the VGA ports, and our adapter then reports "cannot find any free
   Input/Output Range" (Code 12).

@@ -89,6 +89,7 @@ static void pci_write32(u32 bdf, u32 reg, u32 v)
 #define VIRTIO_PCI_CAP_NOTIFY  2
 #define VIRTIO_PCI_CAP_ISR     3
 #define VIRTIO_PCI_CAP_DEVICE  4
+#define VIRTIO_PCI_CAP_PCI_CFG 5
 
 struct vgpu {
     u32 bdf;                    /* bus, device, function: 0 when no card was found */
@@ -135,12 +136,59 @@ extern void  __cdecl vmm_mutex_leave(u32 mutex);
 #define VIRTIO_F_VERSION_1_HI   1UL             /* feature bit 32 */
 #define VIRTIO_GPU_F_VIRGL      1UL             /* feature bit 0: the host renders 3D (virgl) */
 
-#define rd8(p, o)      (*(volatile u8  *)((u8 *)(p) + (o)))
-#define rd16(p, o)     (*(volatile u16 *)((u8 *)(p) + (o)))
-#define rd32(p, o)     (*(volatile u32 *)((u8 *)(p) + (o)))
-#define wr8(p, o, v)   (*(volatile u8  *)((u8 *)(p) + (o)) = (u8)(v))
-#define wr16(p, o, v)  (*(volatile u16 *)((u8 *)(p) + (o)) = (u16)(v))
-#define wr32(p, o, v)  (*(volatile u32 *)((u8 *)(p) + (o)) = (u32)(v))
+/* The card's virtio structures are reached in one of two ways. Normally through their memory
+   range (BAR), mapped: the structure pointers below are addresses. When the firmware put that
+   range above 4 GB, out of reach of a 32-bit Windows (QEMU does with a large host memory range,
+   as UTM sets up), through the PCI configuration access capability (virtio 1.0, 4.1.4.7): a
+   window in the card's configuration space that reads or writes one register of the range at
+   a time. The structure pointers are then their offsets in the range, tagged with WIN_TAG so
+   that none is 0. Slower, but only a few registers are touched per request. */
+#define WIN_TAG 0x80000000UL
+static u32 win_cap = 0;                         /* the capability's offset in configuration
+                                                   space, when the window is in use */
+static u32 win_ptr = 0;                         /* where the card has that capability (0: none) */
+
+static void win_set(u32 off, u32 len)
+{
+    pci_write32(gpu.bdf, win_cap + 8, off & ~WIN_TAG);  /* offset in the range */
+    pci_write32(gpu.bdf, win_cap + 12, len);            /* 1, 2 or 4 bytes */
+}
+
+static u32 reg_read(void *p, u32 o, u32 len)
+{
+    u8 *a = (u8 *)p + o;
+    u32 v;
+
+    if (!win_cap)
+        return len == 1 ? *(volatile u8 *)a : len == 2 ? *(volatile u16 *)a : *(volatile u32 *)a;
+    win_set((u32)a, len);
+    v = pci_read32(gpu.bdf, win_cap + 16);              /* the read happens here */
+    return len == 4 ? v : v & ((1UL << (len * 8)) - 1);
+}
+
+static void reg_write(void *p, u32 o, u32 len, u32 v)
+{
+    u8 *a = (u8 *)p + o;
+
+    if (!win_cap) {
+        if (len == 1)
+            *(volatile u8 *)a = (u8)v;
+        else if (len == 2)
+            *(volatile u16 *)a = (u16)v;
+        else
+            *(volatile u32 *)a = v;
+        return;
+    }
+    win_set((u32)a, len);
+    pci_write32(gpu.bdf, win_cap + 16, v);              /* and the write here */
+}
+
+#define rd8(p, o)      ((u8)reg_read((p), (o), 1))
+#define rd16(p, o)     ((u16)reg_read((p), (o), 2))
+#define rd32(p, o)     reg_read((p), (o), 4)
+#define wr8(p, o, v)   reg_write((p), (o), 1, (u32)(v))
+#define wr16(p, o, v)  reg_write((p), (o), 2, (u32)(v))
+#define wr32(p, o, v)  reg_write((p), (o), 4, (u32)(v))
 
 /* ---- A virtqueue (virtio 1.0, 2.4): one page each for the three parts ---------------------- */
 #define QUEUE_SIZE 64
@@ -158,7 +206,7 @@ struct vq {
     struct vq_desc  *desc;
     struct vq_avail *avail;
     volatile struct vq_used *used;
-    volatile u16 *notify;
+    u8 *notify;                     /* the queue's notify register (see reg_write) */
     u16 index, last_used, size;
 };
 
@@ -283,8 +331,7 @@ static int setup_queue(struct vq *q, u16 index)
     wr32(common, CC_QUEUE_DESC, phys);          wr32(common, CC_QUEUE_DESC + 4, 0);
     wr32(common, CC_QUEUE_DRIVER, phys + 4096); wr32(common, CC_QUEUE_DRIVER + 4, 0);
     wr32(common, CC_QUEUE_DEVICE, phys + 8192); wr32(common, CC_QUEUE_DEVICE + 4, 0);
-    q->notify = (volatile u16 *)((u8 *)notify_base +
-                                 rd16(common, CC_QUEUE_NOTIFY_OFF) * gpu.notify_multiplier);
+    q->notify = (u8 *)notify_base + rd16(common, CC_QUEUE_NOTIFY_OFF) * gpu.notify_multiplier;
     wr16(common, CC_QUEUE_ENABLE, 1);
     return 1;
 }
@@ -306,7 +353,7 @@ static u32 command(u32 req_len, u32 resp_len)
     q->desc[1].len = resp_len;            q->desc[1].flags = VQ_DESC_WRITE; q->desc[1].next = 0;
     q->avail->ring[q->avail->idx % q->size] = head;
     q->avail->idx++;
-    *q->notify = q->index;
+    wr16(q->notify, 0, q->index);
 
     start = vmm_time_ms();
     while (q->used->idx == q->last_used) {
@@ -356,7 +403,7 @@ static int one_id(u32 type, u32 ctx, u32 id)
 /* virtio 1.0, 3.1.1: reset, announce ourselves, agree on features, set up the queues, go. */
 static int transport_init(void)
 {
-    u32 bar_phys, bar_len, hi, i, handle;
+    u32 bar_phys, bar_len, hi, i, handle, raw;
     u8 *bar;
 
     i = gpu.cap[VIRTIO_PCI_CAP_COMMON].bar;
@@ -368,10 +415,27 @@ static int transport_init(void)
         if (end > bar_len)
             bar_len = end;
     }
-    bar_phys = gpu.bar[i];
-    bar = (u8 *)vmm_map_phys(bar_phys, bar_len);
-    if (!bar)
+    if (i > 5)
         return 0;
+    raw = pci_read32(gpu.bdf, 0x10 + i * 4);
+    bar_phys = raw & 0xFFFFFFF0UL;
+    /* A 64-bit range with an upper half, or none assigned: mapping the lower half would hit
+       ordinary memory (address 0 is the real-mode interrupt table). The window instead. */
+    if ((raw & 1) || !bar_phys ||
+        ((raw & 6) == 4 && (i == 5 || pci_read32(gpu.bdf, 0x14 + i * 4) != 0))) {
+        if (!win_ptr) {
+            dbg("rvd: the card's registers are out of reach\r\n");
+            return 0;
+        }
+        win_cap = win_ptr;
+        pci_write32(gpu.bdf, win_cap + 4, i);           /* which range; the rest is read-only */
+        bar = (u8 *)WIN_TAG;
+        dbg("rvd: the card's registers through its configuration window\r\n");
+    } else {
+        bar = (u8 *)vmm_map_phys(bar_phys, bar_len);
+        if (!bar)
+            return 0;
+    }
     common      = bar + gpu.cap[VIRTIO_PCI_CAP_COMMON].offset;
     notify_base = bar + gpu.cap[VIRTIO_PCI_CAP_NOTIFY].offset;
     isr         = bar + gpu.cap[VIRTIO_PCI_CAP_ISR].offset;
@@ -503,6 +567,10 @@ int __cdecl vgpu_init(void)
         if (pci_read8(bdf, ptr) != 0x09)            /* vendor-specific */
             continue;
         type = pci_read8(bdf, ptr + 3);
+        if (type == VIRTIO_PCI_CAP_PCI_CFG) {
+            win_ptr = ptr;                          /* the window (see reg_read) */
+            continue;
+        }
         if (type < 1 || type > 4)
             continue;
         gpu.cap[type].bar    = pci_read8(bdf, ptr + 4);
