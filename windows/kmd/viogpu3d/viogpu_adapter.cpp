@@ -1189,6 +1189,8 @@ NTSTATUS VioGpuAdapter::VioGpuAdapterInit()
             VioGpuDbgBreak();
             break;
         }
+        // Without its thread the queue notifies from the sender, as it did
+        ctrlQueue.StartKicker();
 
         virtio_get_config(&m_VioDev,
                           FIELD_OFFSET(GPU_CONFIG, num_scanouts),
@@ -1221,6 +1223,7 @@ void VioGpuAdapter::VioGpuAdapterClose()
     if (IsHardwareInit())
     {
         SetHardwareInit(FALSE);
+        ctrlQueue.StopKicker();
         ctrlQueue.DisableInterrupt();
         m_CursorQueue.DisableInterrupt();
         virtio_device_reset(&m_VioDev);

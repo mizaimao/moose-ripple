@@ -203,6 +203,20 @@ class VioGpuQueue
             virtqueue_kick_always(m_pVirtQueue);
         }
     }
+    // The two halves of Kick. Whether the device wants a notification for what was added (the
+    // queue locked), and the notification itself: one write to the device, which needs no lock
+    bool KickPrepare()
+    {
+        return m_pVirtQueue ? virtqueue_kick_prepare(m_pVirtQueue) : false;
+    }
+    void Notify()
+    {
+        struct virtqueue *vq = m_pVirtQueue;
+        if (vq)
+        {
+            virtqueue_notify(vq);
+        }
+    }
     bool EnableInterrupt(void)
     {
         return m_pVirtQueue ? virtqueue_enable_cb(m_pVirtQueue) : false;
@@ -244,21 +258,62 @@ class CtrlQueue : public VioGpuQueue
         m_FenceIdr = 0;
         KeInitializeEvent(&m_SpaceEvent, SynchronizationEvent, FALSE);
         m_deferKicks = 0;
+        KeInitializeEvent(&m_kickEvent, SynchronizationEvent, FALSE);
+        m_pKicker = NULL;
+        m_stopKicker = FALSE;
+        m_kickCost = 0;
+        m_kickCount = 0;
+        m_kickByThread = FALSE;
+        m_kickSwitches = 0;
     };
+    ~CtrlQueue()
+    {
+        StopKicker();
+    }
 
     PVOID AllocCmd(PGPU_VBUFFER *buf, int sz);
     PVOID AllocCmdResp(PGPU_VBUFFER *buf, int cmd_sz, PVOID resp_buf, int resp_sz);
 
     UINT QueueBuffer(PGPU_VBUFFER buf);
     PGPU_VBUFFER DequeueBuffer(_Out_ UINT *len);
+    // Where a notification is slow, it goes out from a thread of its own. QEMU handles one on
+    // the guest processor that sent it, under its global lock (unless the device was given
+    // ioeventfd=on), and its drawing thread holds that lock for a whole command buffer: the
+    // sender waits out the frame in progress, 500 to 900 microseconds measured under nested
+    // virtualization. Sent by the thread that queues the command buffers, that made guest and
+    // host take turns, a frame each. With the thread only it waits; the queueing goes on, the
+    // host finds several buffers at a time, and requests made while it waits become one
+    // notification: a quarter more frames a second there.
+    // Where a notification is quick (ioeventfd=on, or a host with time to spare), waking a
+    // thread for it costs more than it saves (a sixth fewer frames in the same test), so the
+    // sender notifies itself. Notifications are timed, and the smoothed figure picks the way:
+    // by thread above 200 microseconds, direct below 100.
+    // StartKicker once the queue is up; StopKicker before the queues are deleted. Without the
+    // thread (one processor, or it could not be created) the sender always notifies itself.
+    NTSTATUS StartKicker();
+    void StopKicker();
+    void RequestKick()
+    {
+        if (m_pKicker && m_kickByThread && KeGetCurrentIrql() <= DISPATCH_LEVEL)
+        {
+            KeSetEvent(&m_kickEvent, IO_NO_INCREMENT, FALSE);
+        }
+        else if (m_pKicker && (InterlockedIncrement(&m_kickCount) & 3) == 0)
+        {
+            // one in four timed: reading the clock can be a trip to the host itself
+            TimedNotify();
+        }
+        else
+        {
+            Notify();
+        }
+    }
+    void TimedNotify();
     // A notification without a new command: QEMU then also looks for finished fences, which
     // it otherwise does only every 10 ms
     void Nudge()
     {
-        KIRQL irql;
-        Lock(&irql);
-        KickAlways();
-        Unlock(irql);
+        RequestKick();
     }
     // Commands queued between DeferKicks(TRUE) and DeferKicks(FALSE) notify the device once, at
     // the end (all parts of one command buffer)
@@ -272,8 +327,12 @@ class CtrlQueue : public VioGpuQueue
         KIRQL irql;
         Lock(&irql);
         InterlockedDecrement(&m_deferKicks);
-        Kick();
+        bool kick = KickPrepare();
         Unlock(irql);
+        if (kick)
+        {
+            RequestKick();
+        }
     }
 
     void CreateResource(UINT res_id, UINT format, UINT width, UINT height);
@@ -324,6 +383,16 @@ class CtrlQueue : public VioGpuQueue
     // Set when the host gives descriptors back, for a sender waiting on a full ring
     KEVENT m_SpaceEvent;
     volatile LONG m_deferKicks;
+    // The notification thread
+    static KSTART_ROUTINE KickerThread;
+    KEVENT m_kickEvent;
+    PKTHREAD m_pKicker;
+    volatile BOOLEAN m_stopKicker;
+    // What a notification has been taking (1/64 microsecond, smoothed), and the way chosen from it
+    volatile LONG m_kickCost;
+    volatile LONG m_kickCount;
+    volatile BOOLEAN m_kickByThread;
+    LONG m_kickSwitches;
 };
 
 class CrsrQueue : public VioGpuQueue

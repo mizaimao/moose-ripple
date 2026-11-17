@@ -766,3 +766,160 @@ tests are bound by how fast the UHD 630 fills pixels, and what the driver could 
 in the fixed quarter. For scale: on real hardware Intel's HD 4600 (20 execution units) is
 listed at 6.5 to 6.7 for gaming graphics and the Iris Pro 5200 (40) at the top, 7.9; the
 UHD 630 (24) is at 7.1 here.
+
+## Speed, fifth round: nudges only where they are cheap (2026-11-16)
+
+A new line in the driver log (`RIPPLE_CMD_STATS`, Mesa patch 0036) says how the fences a
+program polls went: how many nudges each took, how long after its submit it was found
+signalled, and what a nudge costs. It corrects the fourth round's picture of Hog. WinSAT
+keeps about ten frames in flight on both hosts: the fence it polls was submitted 8 ms earlier
+on Hog (0.8 ms a frame) and 15 ms earlier on the rig (1.5 ms a frame). Neither host waits for
+one frame's trip to the host and back. (What bounds Hog instead is in the sixth round: not the
+host's work, as first written here.)
+
+On Hog the nudges themselves were in the way. The batch test at 1280x1024, by nudge interval
+(`RIPPLE_NUDGE_US`), one install, runs mixed:
+
+| Interval | 5 µs | 20 µs | 100 µs (as shipped) | 400 µs | 800 µs | 1.6 ms | none |
+|---|---|---|---|---|---|---|---|
+| Frames a second | 1146 | 1088 | 1105 to 1126 | 1184 to 1202 | 1192 | 1227 to 1230 | 1266 to 1315 |
+
+Why: QEMU's virtio-gpu device has `ioeventfd` off by default (`info qtree` on both hosts), so
+a notification is handled by the guest processor that sent it, under QEMU's global lock. The
+thread that draws holds that lock while it works, and the processor waits until it is between
+jobs. Measured from the driver, a nudge takes 500 to 900 µs on Hog, where that thread is the
+limit, and 12 to 100 µs on the rig, where the GPU is.
+
+So the driver times each nudge, and the next one waits the square of what they have been
+taking, in units of 100 µs (at least 100 µs, at most 20 ms): every 100 µs on the rig as
+before, every few milliseconds on Hog, which then runs as without nudges.
+
+| Batch test, frames a second (two rounds) | spaced by cost | every 100 µs | none |
+|---|---|---|---|
+| Hog | 1252, 1241 | 1100, 1125 | 1273, 1250 |
+| Rig | 624, 641 | 633, 652 | 623, 621 |
+
+| Hog, Experience Index | before | now |
+|---|---|---|
+| Graphics / gaming graphics | 7.7 / 7.7 | 7.8 / 7.8 |
+| Direct3D 10 batch / alpha (frames a second) | 1125 / 1224 | 1298 / 1352 |
+| Direct3D 10 texture / ALU | 1031 / 896 | 1195 / 881 |
+| Direct3D 10 geometry F4 / V8 | 1398 / 1398 | 1558 / 1576 |
+| Direct3D 10 constant buffer | 902 | 986 |
+
+The rig stays at 7.1 / 7.1 (batch 643, alpha 622, ALU 325, texture 315, constant buffer 315).
+No new renderer errors on either host.
+
+Tried and dropped, both measured on the same install with runs alternated:
+
+- A first nudge delayed by what earlier fences needed (learned per program): 1103 to 1148 on
+  Hog, no better than every 100 µs. The cost of a nudge is what tells the hosts apart.
+- `UpdateSubresource` of a whole buffer mapped with `PIPE_MAP_DISCARD_WHOLE_RESOURCE`, so virgl
+  takes fresh storage instead of copying on the host (31 copies a frame in the batch test
+  become none): 1128 and 1169 against 1115 and 1150 on Hog, 632 and 635 against 638 and 624 on
+  a quiet rig. No gain, not kept.
+
+For the next round, QEMU's drawing thread on Hog during the batch test (`perf trace -s` on the
+thread, 4 seconds at about 1180 frames a second): 36,743 `ioctl` calls taking 1.0 s (7.8 a
+frame, 28 µs each), then `ppoll`, `futex` and `getpid` at 0.13 to 0.17 s each, and one
+`openat`, `eventfd2` and two `close` for every 1.6 frames.
+
+## Speed, sixth round: notifications that do not hold up the guest (2026-11-17)
+
+The fifth round's last sentence about Hog was wrong: its host was not working at its limit. A
+profile of QEMU's drawing thread during the batch test (`perf record -e cpu-clock -g -t TID`,
+frame-pointer stacks, call sites named from the libraries' relocations) showed:
+
+- the thread on a processor only two thirds of the time (3.3 s of 5 s);
+- a third of that inside `glFenceSync` (virglrenderer makes one fence a command buffer, and
+  Mesa's Direct3D 12 driver flushes its batch for it), 19% of the thread's time in one
+  three-instruction loop of NVIDIA's driver under that call;
+- 23% in the kernel, a good part of it waking the guest processors that wait for QEMU's
+  global lock.
+
+So the host had time left and the frames did not arrive fast enough. What held them up is the
+notification itself. With `ioeventfd` off (QEMU's default for this device) the guest processor
+that writes the notification waits for QEMU's global lock, and the drawing thread holds that
+lock for a whole command buffer. The kernel driver notified from the thread that queues the
+command buffers: it queued one, then waited out the host's frame in progress, and host and
+guest took turns.
+
+Proof by one setting: the same guest with `-device virtio-vga-gl,...,ioeventfd=on` (the
+notification becomes an event the kernel hands to QEMU, nobody waits) ran the batch test at
+1531 to 1617 frames a second instead of about 1250, and the assessment gave 7.9 on every line.
+
+The driver now gets there without the setting. The control queue has a thread for
+notifications (`CtrlQueue::StartKicker`): the queueing thread asks it and goes on, only the
+new thread waits, the host finds several buffers at a time, and requests made while it waits
+become one notification. Where a notification is quick, waking a thread for it costs more
+than it saves, so notifications are timed (one in four from the sender, all from the thread)
+and the smoothed figure picks the way: by thread above 200 µs, from the sender below 100.
+The figure goes up quickly and down slowly, because the thread's own notifications are a mix
+of long waits and short ones.
+
+Batch test on Hog, frames a second, three runs each (kernel drivers swapped in place with
+`devcon restart`, the VM restarted to change the setting):
+
+| Notifications | `ioeventfd` off (default) | `ioeventfd` on |
+|---|---|---|
+| from the sender (before) | 1274 to 1367 | 1540 to 1654 |
+| always from the thread | 1569 to 1594 | 1312 to 1328 |
+| chosen by their cost (now) | 1655 to 1671 | 1573 to 1626 |
+
+| Hog, Experience Index, default settings | before | now |
+|---|---|---|
+| Graphics / gaming graphics / base score | 7.8 / 7.8 / 7.8 | 7.9 / 7.9 / 7.9 |
+| Direct3D 10 batch / alpha (frames a second) | 1298 / 1352 | 1617 / 1806 |
+| Direct3D 10 texture / ALU | 1195 / 881 | 1486 / 889 |
+| Direct3D 10 geometry F4 / V8 | 1558 / 1576 | 2069 / 2161 |
+| Direct3D 10 constant buffer | 986 | 1313 |
+
+7.9 is where Windows 7's index ends.
+
+The rig is bound by its GPU and does not change: batch 650, 641 and 650 before, 644, 648 and
+646 after, on one boot. Its driver log shows the same choice being made there (notifications
+of 600 µs at times, then back under 100). The full
+assessment there gives 7.1 / 7.1 as before (batch 634, alpha 637, ALU 322, texture 324,
+constant buffer 311), with no renderer errors, and the desktop with Aero looks as it did.
+
+The nudges of the fifth round stay. With the thread a nudge costs the program under a
+microsecond on Hog, so they come every 100 µs there again (4 to 6 for each polled fence), at
+1633 frames a second.
+
+In the UTM VM (emulated x86, 4 processors) the new kernel driver loads and the Direct3D 9 test
+program draws, reads its picture back right and presents; no speed figures were taken there.
+
+## The fine timer only for a stream of work (2026-11-17)
+
+Noticed while another VM was being benchmarked on the same host: the rig's test VM, idle at its
+desktop, kept QEMU's main thread at half a host processor or more. The guest's own counters showed it 100% idle. One second of KVM's trace
+on the host (`kvm_pio` counted by port; the tracer has to be switched on first, `tracing_on` is
+0 there) showed the guest's clock: 2048 reads of the real-time clock's ports a second, each a
+trip to QEMU. `powercfg -energy` in the guest named the cause, "Outstanding Kernel Timer
+Request, Requested Period 5000": ours.
+
+The driver takes Windows' half-millisecond timer while command buffers are with the host (the
+second round's nudges need it) and kept it for a second after the last one. A prompt window
+with a blinking cursor sends two buffers 30 ms apart every half second, so the timer never went
+back. On a VM whose clock is the emulated real-time clock that is 2048 interrupts a second for
+an idle desktop; a VM with Hyper-V's timers (Hog) pays far less.
+
+Now the timer is taken only for a stream of work: buffers with the host at moments spread over
+60 ms or more with no pause over 100 ms (frames at 10 a second or faster, or one long job), and
+it goes back 200 ms after the last buffer. A frame now and then is left to the ordinary timer
+and QEMU's own 10 ms poll.
+
+| Rig VM, idle, prompt window open | before | now |
+|---|---|---|
+| Guest clock interrupts a second | 2048 | 64 |
+| QEMU process, share of one host processor | 66 to 80% | 24% |
+
+No cost where it matters. Batch test, drivers swapped in place: Hog 1577 to 1599 frames a
+second before, 1639 to 1657 after; the rig, four tests in two rounds each, within 3% either
+way (ALU 317 and 324 before, 325 and 319 after; batch 642 and 653 before, 663 and 634 after).
+The rig's Experience Index sits on the line between 7.0 and 7.1: two assessments with this
+driver gave 7.0 and then 7.1 (gaming graphics tests 305 to 320 frames a second in the first,
+320 to 330 in the second).
+
+Hog with this driver: 7.9 on every line as before (two assessments; Direct3D 10 batch 1629 and
+1640 frames a second, constant buffer 1319 and 1324), no renderer errors.

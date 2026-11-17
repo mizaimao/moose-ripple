@@ -1,0 +1,174 @@
+virgl gdi winsys: nudges spaced by what they cost
+
+A program polling a fence nudged the device every 100 microseconds. QEMU handles a
+virtio-gpu notification under its global lock (the device's ioeventfd is off by default;
+"info qtree" shows it), and the thread that draws holds that lock while it works, so the
+nudging processor waits until that thread is between jobs: 12 to 100 microseconds on a host
+whose GPU is the limit, where the nudges help (batch test 633 and 652 frames a second with
+them, 623 and 621 without), and 500 to 900 on a host where that thread is the limit, where
+they hurt (1100 and 1125 with them, 1273 and 1250 without). Each nudge is now timed, and the
+next one waits the square of what they have been taking, in units of 100 microseconds, at
+most 20 ms: 100 microseconds on the first host, a few milliseconds on the second, which then
+runs as without nudges. RIPPLE_NUDGE_US sets a fixed interval, to compare.
+
+With RIPPLE_CMD_STATS the driver log also says, every 2048 polled fences, how many nudges
+each took, how long after its submit a fence was found signalled, and what a nudge costs.
+That showed WinSAT keeping about ten frames in flight: it polls a fence submitted 8 ms
+earlier, at 0.8 ms a frame.
+
+---
+--- a/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
++++ b/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
+@@ -474,27 +474,103 @@
+ }
+ 
+ /* A program polling a fence (an event query, a map that may not wait) asks the kernel
+- * driver, at most every 100 microseconds, to have the device look for finished work: the host
+- * notices a finished fence only when the guest notifies it, or at its own 10 ms poll.
++ * driver to have the device look for finished work: the host notices a finished fence only
++ * when the guest notifies it, or at its own 10 ms poll. The kernel driver notifies it every
++ * half millisecond while work is out; these nudges bring that down for a program that waits
++ * on every frame.
++ *
++ * How often depends on what a nudge costs. QEMU handles a virtio-gpu notification under its
++ * global lock (the device's ioeventfd is off by default), and the thread that draws holds
++ * that lock while it works, so the nudging processor waits until that thread is between
++ * jobs: 12 to 100 microseconds on a host whose GPU is the limit, where a nudge every 100
++ * microseconds made a test 3 to 6% faster than none; 500 to 900 on a host where that thread
++ * is the limit, where the same nudges made it 11 to 13% slower. So each nudge is timed, and
++ * the next waits the square of what they have been taking, in units of 100 microseconds: 100
++ * after nudges of 100, 2.5 ms after nudges of 500, never more than 20 ms.
++ * RIPPLE_NUDGE_US: that fixed interval instead, to compare.
+  */
++static struct {
++   LARGE_INTEGER freq;
++   LONGLONG interval;      /* between two nudges */
++   LONGLONG floor;         /* its least */
++   LONGLONG last;          /* when the last nudge went */
++   LONGLONG cost;          /* what a nudge has been taking, smoothed */
++   bool fixed;
++} nudge;
++
+ static void
+-virgl_gdi_nudge(struct virgl_winsys *vws)
++virgl_gdi_nudge_init(void)
+ {
+-   static LARGE_INTEGER freq, last;
+-   LARGE_INTEGER now;
++   const char *us = getenv("RIPPLE_NUDGE_US");
++   QueryPerformanceFrequency(&nudge.freq);
++   nudge.fixed = us && atoi(us) > 0;
++   nudge.floor = nudge.freq.QuadPart * (nudge.fixed ? atoi(us) : 100) / 1000000;
++   nudge.interval = nudge.floor;
++}
+ 
+-   if (!freq.QuadPart)
+-      QueryPerformanceFrequency(&freq);
++static void
++virgl_gdi_nudge(struct virgl_winsys *vws, struct virgl_gdi_fence *fence)
++{
++   LARGE_INTEGER now, after;
++
++   if (!nudge.freq.QuadPart)
++      virgl_gdi_nudge_init();
+    QueryPerformanceCounter(&now);
+-   if (now.QuadPart - last.QuadPart < freq.QuadPart / 10000)
++   if (now.QuadPart - nudge.last < nudge.interval)
+       return;
+-   last = now;
++   fence->nudges++;
+ 
+    struct virgl_gdi_winsys *qdws = virgl_gdi_winsys(vws);
+    VIOGPU_ESCAPE escape;
+    memset(&escape, 0, sizeof(escape));
+    escape.Type = VIOGPU_NUDGE;
+    qdws->device->escape(qdws->device, &escape, sizeof(escape));
++
++   QueryPerformanceCounter(&after);
++   nudge.last = after.QuadPart;
++   if (!nudge.fixed) {
++      nudge.cost += (after.QuadPart - now.QuadPart - nudge.cost) / 8;
++      nudge.interval = MAX2(nudge.floor,
++                            MIN2(nudge.cost * nudge.cost / nudge.floor, nudge.freq.QuadPart / 50));
++   }
++}
++
++/* With RIPPLE_CMD_STATS: how the polled fences went, every 2048 of them */
++static void
++virgl_gdi_nudge_stats(struct virgl_gdi_fence *fence)
++{
++   static int on = -1;
++   static unsigned fences, nudges;
++   static LONGLONG found;
++   LARGE_INTEGER now;
++
++   if (fence->seen || !fence->created)
++      return;
++   fence->seen = true;
++   if (on < 0)
++      on = getenv("RIPPLE_CMD_STATS") && getenv("RIPPLE_UMD_LOG");
++   if (!on)
++      return;
++   if (!nudge.freq.QuadPart)
++      virgl_gdi_nudge_init();
++
++   QueryPerformanceCounter(&now);
++   fences++;
++   nudges += fence->nudges;
++   found += now.QuadPart - fence->created;
++   if (fences == 2048) {
++      FILE *log = fopen(getenv("RIPPLE_UMD_LOG"), "a");
++      if (log) {
++         fprintf(log, "polled fences: %.2f nudges each, found signalled %u us after submit; "
++                 "a nudge takes %u us, the next waits %u us\n", (double)nudges / fences,
++                 (unsigned)(found * 1000000 / nudge.freq.QuadPart / fences),
++                 (unsigned)(nudge.cost * 1000000 / nudge.freq.QuadPart),
++                 (unsigned)(nudge.interval * 1000000 / nudge.freq.QuadPart));
++         fclose(log);
++      }
++      fences = nudges = 0;
++      found = 0;
++   }
+ }
+ 
+ static bool
+@@ -513,10 +589,12 @@
+          timeout_ms++;
+    }
+ 
+-   if (WaitForSingleObject(fence->handle, timeout_ms) == WAIT_OBJECT_0)
++   if (WaitForSingleObject(fence->handle, timeout_ms) == WAIT_OBJECT_0) {
++      virgl_gdi_nudge_stats(fence);
+       return true;
++   }
+    if (timeout == 0)
+-      virgl_gdi_nudge(vws);
++      virgl_gdi_nudge(vws, fence);
+    return false;
+ }
+ 
+@@ -832,6 +910,11 @@
+       HANDLE event = CreateEventA(NULL, TRUE, FALSE, NULL);
+       if (event) {
+          *fence = virgl_gdi_fence_create(qws, event, false);
++         if (*fence) {
++            LARGE_INTEGER now;
++            QueryPerformanceCounter(&now);
++            virgl_gdi_fence(*fence)->created = now.QuadPart;
++         }
+ 
+          /* The kernel driver sets the event when these commands have run on the host,
+           * asked by a command of its own at the end of the buffer: Windows 7 has no
+--- a/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.h
++++ b/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.h
+@@ -83,6 +83,10 @@
+    struct pipe_reference reference;
+    bool external;
+    HANDLE handle;
++   /* moose-ripple: for the timing of nudges (virgl_gdi_nudge) */
++   LONGLONG created;    /* performance counter when its commands were submitted */
++   unsigned nudges;     /* nudges spent on it so far */
++   bool seen;           /* found signalled once: the estimate has been corrected */
+ };
+ 
+ struct virgl_gdi_cmd_buf {

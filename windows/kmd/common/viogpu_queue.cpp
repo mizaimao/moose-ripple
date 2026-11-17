@@ -871,13 +871,18 @@ UINT CtrlQueue::QueueBuffer(PGPU_VBUFFER buf)
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--> %s sgleft %d\n", __FUNCTION__, sgleft));
 
+    bool kick = false;
     Lock(&SavedIrql);
     ret = AddBuf(&sg[0], outcnt, incnt, buf, NULL, 0);
     if (ret != 0 || m_deferKicks == 0)
     {
-        Kick();
+        kick = KickPrepare();
     }
     Unlock(SavedIrql);
+    if (kick)
+    {
+        RequestKick();
+    }
 
     // A full ring: wait for the host to give descriptors back, where waiting is allowed, for up
     // to five seconds (a GPU timeout comes first). Several command buffers in flight can fill it.
@@ -888,8 +893,12 @@ UINT CtrlQueue::QueueBuffer(PGPU_VBUFFER buf)
         KeWaitForSingleObject(&m_SpaceEvent, Executive, KernelMode, FALSE, &timeout);
         Lock(&SavedIrql);
         ret = AddBuf(&sg[0], outcnt, incnt, buf, NULL, 0);
-        Kick();
+        kick = KickPrepare();
         Unlock(SavedIrql);
+        if (kick)
+        {
+            RequestKick();
+        }
     }
     if (ret != 0)
     {
@@ -899,6 +908,99 @@ UINT CtrlQueue::QueueBuffer(PGPU_VBUFFER buf)
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s ret = %d\n", __FUNCTION__, ret));
 
     return ret;
+}
+
+// A notification, timed. The figures are shared without a lock: they are a smoothed estimate,
+// and the wrong way for a moment costs little.
+void CtrlQueue::TimedNotify()
+{
+    LARGE_INTEGER freq;
+    LARGE_INTEGER before = KeQueryPerformanceCounter(&freq);
+    Notify();
+    LARGE_INTEGER after = KeQueryPerformanceCounter(NULL);
+
+    // In 1/64 microsecond. Up quickly, down slowly: the thread's own notifications are a mix
+    // of long waits and short ones (it often asks just as the host has finished), and an even
+    // average of those kept going under the line and back
+    LONGLONG us = (after.QuadPart - before.QuadPart) * 1000000 / freq.QuadPart;
+    LONG sample = (LONG)min(us, 100000) * 64;
+    LONG cost = m_kickCost;
+    cost += (sample - cost) / (sample > cost ? 4 : 64);
+    m_kickCost = cost;
+
+    BOOLEAN byThread = m_kickByThread;
+    if (cost > 200 * 64)
+    {
+        byThread = TRUE;
+    }
+    else if (cost < 100 * 64)
+    {
+        byThread = FALSE;
+    }
+    if (byThread != m_kickByThread)
+    {
+        m_kickByThread = byThread;
+        // the first few changes only: a host near the line may change often
+        if (InterlockedIncrement(&m_kickSwitches) <= 8)
+        {
+            DbgPrint(TRACE_LEVEL_WARNING, ("notifications %s, they take %d us\n", byThread ? "from their own thread" : "from the sender", cost / 64));
+        }
+    }
+}
+
+void CtrlQueue::KickerThread(PVOID context)
+{
+    CtrlQueue *queue = reinterpret_cast<CtrlQueue *>(context);
+
+    KeSetPriorityThread(KeGetCurrentThread(), LOW_REALTIME_PRIORITY);
+    for (;;)
+    {
+        KeWaitForSingleObject(&queue->m_kickEvent, Executive, KernelMode, FALSE, NULL);
+        if (queue->m_stopKicker)
+        {
+            break;
+        }
+        queue->TimedNotify();
+    }
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+NTSTATUS CtrlQueue::StartKicker()
+{
+    // One processor: the thread would hold up the same processor
+    if (m_pKicker != NULL || KeQueryActiveProcessorCount(NULL) < 2)
+    {
+        return STATUS_SUCCESS;
+    }
+
+    HANDLE handle = 0;
+    m_stopKicker = FALSE;
+    NTSTATUS status = PsCreateSystemThread(&handle, (ACCESS_MASK)0, NULL, (HANDLE)0, NULL, CtrlQueue::KickerThread, this);
+    if (!NT_SUCCESS(status))
+    {
+        DbgPrint(TRACE_LEVEL_ERROR, ("%s no notification thread, status %x: senders notify themselves\n", __FUNCTION__, status));
+        return status;
+    }
+    PKTHREAD thread = NULL;
+    ObReferenceObjectByHandle(handle, THREAD_ALL_ACCESS, NULL, KernelMode, (PVOID *)(&thread), NULL);
+    ZwClose(handle);
+    m_pKicker = thread;
+    return status;
+}
+
+void CtrlQueue::StopKicker()
+{
+    PKTHREAD thread = m_pKicker;
+    if (thread == NULL)
+    {
+        return;
+    }
+    // From here on a request notifies directly; the thread ends at its next wake-up
+    m_pKicker = NULL;
+    m_stopKicker = TRUE;
+    KeSetEvent(&m_kickEvent, IO_NO_INCREMENT, FALSE);
+    KeWaitForSingleObject(thread, Executive, KernelMode, FALSE, NULL);
+    ObDereferenceObject(thread);
 }
 
 PGPU_VBUFFER CtrlQueue::DequeueBuffer(_Out_ UINT *len)
