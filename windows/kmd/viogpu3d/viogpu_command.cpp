@@ -452,20 +452,39 @@ void VioGpuCommander::ThreadWorkRoutine(void)
     // While buffers are with the host, the queue is nudged every half millisecond (Windows'
     // finest timer): QEMU notices a finished fence at the guest's next notification or its own
     // 10 ms poll, so a program that waits for the GPU every frame was held to about 100 frames a
-    // second. The system timer runs that fine only while there is work, and goes back a second
-    // after the last buffer. A program polling a fence also asks for a notification
-    // (VIOGPU_NUDGE).
+    // second. A program polling a fence also asks for a notification (VIOGPU_NUDGE).
+    //
+    // The system timer runs that fine only for a stream of work: buffers with the host at
+    // moments spread over 60 ms or more, with no pause over 100 ms between them (frames at 10
+    // a second or faster, or one long job). It goes back 200 ms after the last buffer. A frame
+    // now and then is left to the ordinary timer and QEMU's poll, 10 ms late at worst: with
+    // the fine timer taken for any buffer and kept for a second, a blinking text cursor (two
+    // buffers 30 ms apart every half second) held the whole guest at 2048 clock interrupts a
+    // second, two thirds of a host processor for an idle desktop.
+    // The times are the interrupt time, which moves in steps of the timer (15.6 ms when
+    // coarse), so the cursor's 30 ms can read as 47: hence 60.
+    const ULONGLONG streamGap = 100 * 10000, streamMin = 60 * 10000;
+    ULONGLONG streamStart = 0, lastWork = 0;
     BOOLEAN fineTimer = FALSE;
     for (;;)
     {
         LARGE_INTEGER nudge, idle;
         nudge.QuadPart = -5000;
-        idle.QuadPart = Int32x32To64(1000, -10000);
+        idle.QuadPart = Int32x32To64(200, -10000);
         BOOLEAN busy = m_running > 0;
-        if (busy && !fineTimer)
+        if (busy)
         {
-            ExSetTimerResolution(5000, TRUE);
-            fineTimer = TRUE;
+            ULONGLONG now = KeQueryInterruptTime();
+            if (now - lastWork > streamGap)
+            {
+                streamStart = now;
+            }
+            lastWork = now;
+            if (!fineTimer && now - streamStart >= streamMin)
+            {
+                ExSetTimerResolution(5000, TRUE);
+                fineTimer = TRUE;
+            }
         }
         NTSTATUS wait = KeWaitForSingleObject(&m_QueueEvent,
                                               Executive,
