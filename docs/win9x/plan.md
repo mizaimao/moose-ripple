@@ -79,7 +79,7 @@ this project: nothing may look worse than without our driver).
    1024x768 16-bit on the host's Intel UHD 630, with DirectDraw surfaces that are never shown
    in a system memory heap; 3DMark 99 Max makes 21969 at 800x600. Restart and Shut Down work
    again ([display-driver.md](display-driver.md)). Next: a comparison against a card of the
-   time, games, the missing status text in 3DMark's screens between tests.
+   time, games.
 6. **Windows 2000:** miniport and display driver; the OpenGL and Direct3D parts reused.
 7. Later, maybe: Glide (3dfx games), Windows 95.
 

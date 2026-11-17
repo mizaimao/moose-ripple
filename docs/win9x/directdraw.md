@@ -137,9 +137,10 @@ DllMain, and patch 0007 hooks a thread when one of its windows gets an OpenGL fr
 handle was refused a pixel format). And the HAL no longer reads its process number from the
 environment in DirectDraw calls (kernel32's lock): DllMain assigns it at process start.
 
-Open: the text on 3DMark's "Now testing" screens between tests doesn't show (3DMark 99 and
-2000 alike). It is not lost to the read-back below: a trace shows the write lock that is
-probably the text on a surface that is shown next, untouched by Direct3D in between.
+The text on 3DMark's "Now testing" screens between tests (3DMark 99 and 2000 alike) was
+missing until 2026-11-17: after a flip the HAL took Direct3D's back-buffer handle for the
+surface on the screen, so the text went into one buffer and another was shown. The handle
+lookup follows the flip now, and the screens show the test, settings, status and time left.
 
 **After a review of the whole driver (2026-11-16).** Measured old and new build in turn on the
 same host with nothing else running on its GPU: before the fixes 11831 and 11798 3D marks,
