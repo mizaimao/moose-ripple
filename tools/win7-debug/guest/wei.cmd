@@ -1,6 +1,9 @@
 @echo off
 rem wei: Windows' full assessment (the Windows Experience Index) with the driver's log, and the
 rem results sent to the build host: winsat-formal.txt, scores.txt, the driver's log, a crash dump if any.
+rem setlocal: the variables set here end with the script (a trace left on in the prompt slows
+rem every later Direct3D 9 test there)
+setlocal
 cd /d C:\rb\pkg
 call prep.cmd
 del /q C:\rb\dumps\*.dmp 2>nul

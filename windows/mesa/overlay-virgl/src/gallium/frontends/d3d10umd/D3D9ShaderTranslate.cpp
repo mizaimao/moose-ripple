@@ -80,8 +80,10 @@ D3D9TranslateVertexShaderForState(D3D9Device *device, D3D9Object *shader,
    if (FAILED(hr))
       return hr;
 
-   if (shader->translated_vs_cso)
+   if (shader->translated_vs_cso) {
+      D3D9SettleDrawState(device);
       device->pipe->delete_vs_state(device->pipe, shader->translated_vs_cso);
+   }
    free(shader->translated_vs_const_ranges);
    free(shader->translated_vs_lconstf_ranges);
    free(shader->translated_vs_lconstf_data);
@@ -164,8 +166,10 @@ D3D9TranslatePixelShaderForState(D3D9Device *device, D3D9Object *shader,
    if (FAILED(hr))
       return hr;
 
-   if (shader->translated_ps_cso)
+   if (shader->translated_ps_cso) {
+      D3D9SettleDrawState(device);
       device->pipe->delete_fs_state(device->pipe, shader->translated_ps_cso);
+   }
    free(shader->translated_ps_const_ranges);
    free(shader->translated_ps_lconstf_ranges);
    free(shader->translated_ps_lconstf_data);

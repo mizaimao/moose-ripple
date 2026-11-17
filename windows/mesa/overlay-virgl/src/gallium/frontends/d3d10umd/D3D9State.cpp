@@ -1307,6 +1307,8 @@ D3D9DeleteShader(HANDLE hDevice, HANDLE shader)
 {
    D3D9Device *device = (D3D9Device *)hDevice;
    D3D9Object *object = (D3D9Object *)shader;
+   if (device && device->pipe && object && object->kind == D3D9_OBJECT_SHADER)
+      D3D9SettleDrawState(device);
    if (device && device->pipe && object &&
        object->kind == D3D9_OBJECT_SHADER && object->translated_vs_cso)
       device->pipe->delete_vs_state(device->pipe, object->translated_vs_cso);
@@ -1366,6 +1368,7 @@ D3D9DestroyDevice(HANDLE hDevice)
    while (device->resources) {
       D3D9Resource *resource = device->resources;
       device->resources = resource->next;
+      D3D9ReleaseKept(resource);
       resource->device = NULL;
       resource->previous = NULL;
       resource->next = NULL;
