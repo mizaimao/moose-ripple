@@ -75,6 +75,10 @@ only (4-level page tables, the summary bitmap layout of that version).
 - `modbase.sh VMID [ADDRESS]`: where the guest kernel (or the module below ADDRESS) is loaded,
   for naming kernel samples with the module's `.map`; the HAL sits just below the kernel.
 
+In the guest, `guest/timerres.ps1 [SECONDS]` samples Windows' timer resolution and says how
+much of the time it ran fine (under 1 ms): the kernel driver takes the half-millisecond timer
+only for a stream of work, and an idle desktop should show 0%.
+
 For user-mode samples, run the program with `RIPPLE_UMD_LOG` set: the user-mode driver writes the
 load addresses of the program's main modules when it is loaded (`guest/prof.cmd` does that for
 one assessment test, `guest/dxone.cmd` runs one test alone). Our driver's functions are named
