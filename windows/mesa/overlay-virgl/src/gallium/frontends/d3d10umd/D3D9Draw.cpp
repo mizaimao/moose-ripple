@@ -18,6 +18,8 @@
 #include "util/u_upload_mgr.h"
 
 #include "D3D9Host.h"
+#include "D3D9Trace.h"
+#include "RippleLog.h"
 
 #include <float.h>
 #include <stdlib.h>
@@ -447,12 +449,25 @@ D3D9StoreNineVsConstantSlot(D3D9Device *device, uint32_t dst[4],
          const float min_z = D3D9RasterDepthRange(device).MinZ;
          const float half_width = width / 2.0f;
          const float half_height = height / 2.0f;
-         const float translate_x = half_width + (float)device->viewport.X;
-         const float translate_y = half_height + (float)device->viewport.Y;
+         /* less half a pixel: positions given in window coordinates have Direct3D 9's pixel
+          * centres, at whole numbers (the end of nine_translate_shader in D3D9NineShader.c) */
+         const float translate_x = half_width + (float)device->viewport.X - 0.5f;
+         const float translate_y = half_height + (float)device->viewport.Y - 0.5f;
 
          D3D9StoreFloat(&dst[0], translate_x);
          D3D9StoreFloat(&dst[1], translate_y);
          D3D9StoreFloat(&dst[2], min_z);
+         D3D9StoreFloat(&dst[3], 0.0f);
+      } else if (special == 11) {
+         /* half a pixel right and down, in clip space */
+         const float width = device->viewport.Width ?
+            (float)device->viewport.Width : 1.0f;
+         const float height = device->viewport.Height ?
+            (float)device->viewport.Height : 1.0f;
+
+         D3D9StoreFloat(&dst[0], 1.0f / width);
+         D3D9StoreFloat(&dst[1], -1.0f / height);
+         D3D9StoreFloat(&dst[2], 0.0f);
          D3D9StoreFloat(&dst[3], 0.0f);
       }
    }
@@ -1157,8 +1172,8 @@ D3D9CreatePositionTPsInputFixedFunctionVs(D3D9Device *device,
    ureg_MOV(ureg, tmp, inputs[0]);
    ureg_ADD(ureg, ureg_writemask(tmp, TGSI_WRITEMASK_XYZ),
             ureg_src(tmp),
-            ureg_imm4f(ureg, -(float)device->viewport.X,
-                       -(float)device->viewport.Y, 0.0f, 0.0f));
+            ureg_imm4f(ureg, 0.5f - (float)device->viewport.X,
+                       0.5f - (float)device->viewport.Y, 0.0f, 0.0f));
    ureg_MUL(ureg, ureg_writemask(tmp, TGSI_WRITEMASK_XYZ),
             ureg_src(tmp),
             ureg_imm4f(ureg, 2.0f / width, 2.0f / height, 1.0f, 0.0f));
@@ -1273,6 +1288,33 @@ D3D9DeclElementMatchesInputUsage(uint16_t element_usage, uint16_t input_usage,
           input_usage == NINE_DECLUSAGE_i(POSITION, 0);
 }
 
+/* Why a vertex declaration and a vertex shader's inputs could not be paired, in the driver's
+ * log: the line of the exit, the shader's inputs and the declaration's elements. */
+static UINT
+D3D9NoVertexElements(int line, const D3D9Device *device, const D3D9Object *shader)
+{
+   const D3D9Object *decl = (const D3D9Object *)device->vertex_shader_decl;
+
+   ripple_logf("d3d9: no vertex elements, D3D9Draw.cpp line %d: shader %s with %u inputs, "
+               "declaration %s", line, shader ? "present" : "missing",
+               shader ? (unsigned)shader->translated_vs_num_inputs : 0,
+               decl && decl->kind == D3D9_OBJECT_VERTEX_DECL ? "present" : "missing");
+   if (shader) {
+      for (UINT i = 0; i < shader->translated_vs_num_inputs && i < 16; ++i)
+         ripple_logf("  shader input %u: usage 0x%04x", i,
+                     (unsigned)shader->translated_vs_input_map[i]);
+   }
+   if (decl && decl->kind == D3D9_OBJECT_VERTEX_DECL) {
+      const D3DDDIVERTEXELEMENT *e = (const D3DDDIVERTEXELEMENT *)decl->data;
+      const UINT n = (UINT)(decl->size / sizeof(*e));
+      for (UINT i = 0; i < n && i < 16; ++i)
+         ripple_logf("  element %u: stream %u offset %u type %u method %u usage %u index %u",
+                     i, (unsigned)e[i].Stream, (unsigned)e[i].Offset, (unsigned)e[i].Type,
+                     (unsigned)e[i].Method, (unsigned)e[i].Usage, (unsigned)e[i].UsageIndex);
+   }
+   return 0;
+}
+
 static UINT
 D3D9FillTranslatedVsVertexElements(const D3D9Device *device,
                                    const D3D9Object *shader,
@@ -1283,26 +1325,33 @@ D3D9FillTranslatedVsVertexElements(const D3D9Device *device,
 {
    const D3D9Object *decl = (const D3D9Object *)device->vertex_shader_decl;
    if (!decl || decl->kind != D3D9_OBJECT_VERTEX_DECL)
-      return 0;
+      return D3D9NoVertexElements(__LINE__, device, shader);
 
    const D3DDDIVERTEXELEMENT *decl_elements =
       (const D3DDDIVERTEXELEMENT *)decl->data;
    const UINT decl_element_count = (UINT)(decl->size / sizeof(*decl_elements));
    UINT count = 0;
+   uint32_t unread = 0;
    const bool position_t = D3D9ActiveVertexDeclHasPositionT(device);
    *stream_mask = 0;
    *uses_default_input = false;
 
    if (!shader || shader->translated_vs_num_inputs > max_elements ||
        D3D9_DEFAULT_VERTEX_INPUT_BUFFER >= PIPE_MAX_ATTRIBS)
-      return 0;
+      return D3D9NoVertexElements(__LINE__, device, shader);
 
    for (UINT input = 0; input < shader->translated_vs_num_inputs; ++input) {
       const uint16_t input_usage = shader->translated_vs_input_map[input];
       const D3DDDIVERTEXELEMENT *element = NULL;
 
-      if (input_usage == NINE_DECLUSAGE_NONE)
-         return 0;
+      /* A register the shader never declares (Windows' Direct3D 10 Level 9 layer leaves gaps:
+       * inputs 0 and 2 of three). Nothing reads it; its slot is filled in after the loop. */
+      if (input_usage == NINE_DECLUSAGE_NONE) {
+         memset(&elements[input], 0, sizeof(elements[input]));
+         unread |= 1u << input;
+         count = input + 1;
+         continue;
+      }
 
       for (UINT i = 0; i < decl_element_count; ++i) {
          const D3DDDIVERTEXELEMENT *candidate = &decl_elements[i];
@@ -1328,11 +1377,11 @@ D3D9FillTranslatedVsVertexElements(const D3D9Device *device,
 
       if (element->Stream >= ARRAYSIZE(device->streams) ||
           element->Method != D3DDECLMETHOD_DEFAULT)
-         return 0;
+         return D3D9NoVertexElements(__LINE__, device, shader);
 
       const enum pipe_format format = D3D9DeclTypeToPipeFormat(element->Type);
       if (format == PIPE_FORMAT_NONE)
-         return 0;
+         return D3D9NoVertexElements(__LINE__, device, shader);
 
       memset(&elements[input], 0, sizeof(elements[input]));
       elements[input].src_offset = element->Offset;
@@ -1345,6 +1394,33 @@ D3D9FillTranslatedVsVertexElements(const D3D9Device *device,
       count = input + 1;
    }
 
+   /* The slots of registers nothing reads: a copy of an element that is read, so that they
+    * name a buffer that is bound (the default input's own buffer is beyond what a host on
+    * OpenGL takes: 16 buffers). */
+   if (unread) {
+      int read = -1;
+      for (UINT i = 0; i < count; ++i) {
+         if (!(unread & (1u << i)) &&
+             elements[i].vertex_buffer_index != D3D9_DEFAULT_VERTEX_INPUT_BUFFER) {
+            read = (int)i;
+            break;
+         }
+      }
+      for (UINT i = 0; i < count; ++i) {
+         if (!(unread & (1u << i)))
+            continue;
+         if (read >= 0) {
+            elements[i] = elements[read];
+         } else {
+            elements[i].vertex_buffer_index = D3D9_DEFAULT_VERTEX_INPUT_BUFFER;
+            elements[i].src_format = PIPE_FORMAT_R32G32B32A32_FLOAT;
+            *uses_default_input = true;
+         }
+      }
+   }
+
+   if (!count)
+      return D3D9NoVertexElements(__LINE__, device, shader);
    return count;
 }
 
@@ -1371,8 +1447,8 @@ D3D9CreatePositionTDiffuseFixedFunctionVs(D3D9Device *device)
    ureg_MOV(ureg, tmp, pos);
    ureg_ADD(ureg, ureg_writemask(tmp, TGSI_WRITEMASK_XYZ),
             ureg_src(tmp),
-            ureg_imm4f(ureg, -(float)device->viewport.X,
-                       -(float)device->viewport.Y, 0.0f, 0.0f));
+            ureg_imm4f(ureg, 0.5f - (float)device->viewport.X,
+                       0.5f - (float)device->viewport.Y, 0.0f, 0.0f));
    ureg_MUL(ureg, ureg_writemask(tmp, TGSI_WRITEMASK_XYZ),
             ureg_src(tmp),
             ureg_imm4f(ureg, 2.0f / width, 2.0f / height, 1.0f, 0.0f));
@@ -2263,9 +2339,12 @@ D3D9BindViewport(D3D9Device *device)
    state.scale[0] = half_width;
    state.scale[1] = -half_height;
    state.scale[2] = max_z - min_z;
-   /* D3D9 defines pixel centers at integer window coordinates. */
-   state.translate[0] = half_width + (float)device->viewport.X + 0.5f;
-   state.translate[1] = half_height + (float)device->viewport.Y + 0.5f;
+   /* Direct3D 9's pixel centres, at whole window coordinates, are not made here: the host
+    * takes whole numbers for a viewport and drops half a pixel. The vertex shaders move the
+    * position instead (the end of nine_translate_shader, and the shaders made in this file
+    * for positions given in window coordinates). */
+   state.translate[0] = half_width + (float)device->viewport.X;
+   state.translate[1] = half_height + (float)device->viewport.Y;
    state.translate[2] = min_z;
    if (device->bound.viewport_valid &&
        !memcmp(&device->bound.viewport, &state, sizeof(state)))
@@ -2274,6 +2353,36 @@ D3D9BindViewport(D3D9Device *device)
    device->bound.viewport = state;
    device->bound.viewport_valid = true;
    device->bound.live = true;
+}
+
+/* The format to draw in sRGB to RESOURCE with: its own sRGB form where the host draws to
+ * that; else, for a format without alpha, the form with alpha (hosts on OpenGL ES draw to
+ * sRGB with alpha only, and what lands in the unused byte does not matter); else the format
+ * as it is, drawn without the conversion. */
+static enum pipe_format
+D3D9SrgbTargetFormat(D3D9Device *device, const struct pipe_resource *resource)
+{
+   struct pipe_screen *screen = device->screen;
+   const enum pipe_format srgb = util_format_srgb(resource->format);
+
+   if (srgb == PIPE_FORMAT_NONE)
+      return resource->format;
+   if (screen->is_format_supported(screen, srgb, resource->target,
+                                   resource->nr_samples, resource->nr_storage_samples,
+                                   PIPE_BIND_RENDER_TARGET))
+      return srgb;
+
+   enum pipe_format with_alpha = PIPE_FORMAT_NONE;
+   if (srgb == PIPE_FORMAT_B8G8R8X8_SRGB)
+      with_alpha = PIPE_FORMAT_B8G8R8A8_SRGB;
+   else if (srgb == PIPE_FORMAT_R8G8B8X8_SRGB)
+      with_alpha = PIPE_FORMAT_R8G8B8A8_SRGB;
+   if (with_alpha != PIPE_FORMAT_NONE &&
+       screen->is_format_supported(screen, with_alpha, resource->target,
+                                   resource->nr_samples, resource->nr_storage_samples,
+                                   PIPE_BIND_RENDER_TARGET))
+      return with_alpha;
+   return resource->format;
 }
 
 static bool
@@ -2313,11 +2422,8 @@ D3D9BindFramebuffer(D3D9Device *device, struct pipe_framebuffer_state *fb)
       struct pipe_surface templ;
       memset(&templ, 0, sizeof(templ));
       templ.format = cbuf_resource->pipe_resource->format;
-      if (device->render_states[D3DDDIRS_SRGBWRITEENABLE]) {
-         const enum pipe_format srgb_format = util_format_srgb(templ.format);
-         if (srgb_format != PIPE_FORMAT_NONE)
-            templ.format = srgb_format;
-      }
+      if (device->render_states[D3DDDIRS_SRGBWRITEENABLE])
+         templ.format = D3D9SrgbTargetFormat(device, cbuf_resource->pipe_resource);
       templ.u.tex.level =
          D3D9PipeMipLevel(cbuf_resource,
                           device->render_target_subresources[i]);
@@ -3210,6 +3316,15 @@ D3D9UploadWorkerUserVertexBuffers(
    return true;
 }
 
+/* A draw that is refused says where, in the driver's log (RIPPLE_UMD_LOG): the line of the
+ * exit taken. A program that gets no picture and no error is hard to read otherwise. */
+static HRESULT
+D3D9DrawRefused(int line, HRESULT hr)
+{
+   ripple_logf("d3d9: draw refused at D3D9Draw.cpp line %d -> 0x%08lx", line, (unsigned long)hr);
+   return hr;
+}
+
 static HRESULT
 D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
                 UINT primitive_count, UINT start_vertex,
@@ -3219,22 +3334,30 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
                 bool runtime_transformed_vertices)
 {
    if (D3D9ConsumeBackendDrawFailure(device))
-      return E_FAIL;
+      return D3D9DrawRefused(__LINE__, E_FAIL);
 
    /* what this draw takes from the store is not given up during it */
    device->kept_serial++;
+
+   /* RIPPLE_D3D9_REBIND (any value): nothing stays bound from the draw before, to tell a
+    * fault in the record of what is bound from a fault in the drawing */
+   static int rebind = -1;
+   if (rebind < 0)
+      rebind = getenv("RIPPLE_D3D9_REBIND") != NULL;
+   if (rebind)
+      D3D9SettleDrawState(device);
 
    const enum mesa_prim mode = D3D9PrimitiveToPipe(primitive_type);
    const UINT vertex_count =
       D3D9PrimitiveVertexCount(primitive_type, primitive_count);
    if (mode == MESA_PRIM_COUNT || !vertex_count)
-      return E_INVALIDARG;
+      return D3D9DrawRefused(__LINE__, E_INVALIDARG);
    if (indexed && index_size != 2 && index_size != 4)
-      return E_INVALIDARG;
+      return D3D9DrawRefused(__LINE__, E_INVALIDARG);
    if (indexed && (int64_t)min_index + index_bias < 0)
-      return E_INVALIDARG;
+      return D3D9DrawRefused(__LINE__, E_INVALIDARG);
    if (indexed && num_vertices && num_vertices - 1 > UINT_MAX - min_index)
-      return E_INVALIDARG;
+      return D3D9DrawRefused(__LINE__, E_INVALIDARG);
 
    D3D9Object fixed_function_vs_shader;
    D3D9AutoShaderState fixed_function_shaders;
@@ -3300,7 +3423,7 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       const D3D9Object *ps = (const D3D9Object *)device->pixel_shader;
       if (!D3D9InitPositionTPsInputFixedFunctionVsInfo(
              &fixed_function_vs_shader, ps))
-         return E_FAIL;
+         return D3D9DrawRefused(__LINE__, E_FAIL);
    } else if (generate_position_t_diffuse_vs ||
               generate_position_t_runtime_processed_diffuse_vs) {
       D3D9InitPositionTDiffuseFixedFunctionVsInfo(&fixed_function_vs_shader);
@@ -3332,7 +3455,7 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
                                          ARRAYSIZE(elements), &stream_mask,
                                          &uses_default_input);
    if (!element_count || (!stream_mask && !uses_default_input))
-      return E_FAIL;
+      return D3D9DrawRefused(__LINE__, E_FAIL);
 
    struct pipe_context *pipe = device->pipe;
    struct pipe_vertex_buffer vbuffers[PIPE_MAX_ATTRIBS];
@@ -3343,7 +3466,7 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
          continue;
       if (!D3D9FillStreamVertexBuffer(device, stream, first_vertex_offset,
                                       &vbuffers[stream]))
-         return E_INVALIDARG;
+         return D3D9DrawRefused(__LINE__, E_INVALIDARG);
       vbuffer_count = stream + 1;
    }
    static const float default_input[4] = {};
@@ -3358,18 +3481,18 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
    if (indexed && !user_indices) {
       index_resource = D3D9CastResource(device->index_buffer);
       if (!index_resource || !index_resource->pipe_resource)
-         return E_INVALIDARG;
+         return D3D9DrawRefused(__LINE__, E_INVALIDARG);
       D3D9SubResource *index_sub =
          D3D9GetLiveCpuBufferSubResource(index_resource);
       if (index_sub) {
          const uint64_t index_offset = (uint64_t)start_index * index_size;
          if (index_offset > index_sub->size)
-            return E_INVALIDARG;
+            return D3D9DrawRefused(__LINE__, E_INVALIDARG);
          cpu_indices = index_sub->data + index_offset;
       } else if (index_resource->surf_count &&
                  index_resource->surfaces[0].cpu_dirty &&
                  !D3D9UploadSubResource(device, index_resource, 0)) {
-         return E_FAIL;
+         return D3D9DrawRefused(__LINE__, E_FAIL);
       }
    }
 
@@ -3381,7 +3504,7 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
           min_index, num_vertices, start_vertex, vertex_count,
           instance_count, vbuffers, vbuffer_count,
           &worker_vertex_uploads))
-      return E_FAIL;
+      return D3D9DrawRefused(__LINE__, E_FAIL);
 
    /* The generated POSITIONT vertex shader passes a PSIZE element through
     * (D3D9InitPositionTRuntimePsFixedFunctionVsInfo). */
@@ -3411,7 +3534,7 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
                                                    &fixed_function_vs_shader) :
          D3D9CreatePositionTDiffuseFixedFunctionVs(device);
       if (!fixed_function_shaders.vs)
-         return E_FAIL;
+         return D3D9DrawRefused(__LINE__, E_FAIL);
       translated_vs = fixed_function_shaders.vs;
       fixed_function_vs_shader.translated_vs_cso = translated_vs;
    }
@@ -3464,7 +3587,7 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       if (point_gs)
          pipe->delete_gs_state(pipe, point_gs);
       free(constants);
-      return E_FAIL;
+      return D3D9DrawRefused(__LINE__, E_FAIL);
    }
 
    struct pipe_constant_buffer cb;
@@ -3491,7 +3614,7 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
          if (point_gs)
             pipe->delete_gs_state(pipe, point_gs);
          free(constants);
-         return E_FAIL;
+         return D3D9DrawRefused(__LINE__, E_FAIL);
       }
    }
 
@@ -3521,7 +3644,7 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       if (point_gs)
          pipe->delete_gs_state(pipe, point_gs);
       free(constants);
-      return E_FAIL;
+      return D3D9DrawRefused(__LINE__, E_FAIL);
    }
 
    struct pipe_framebuffer_state fb;
@@ -3534,7 +3657,7 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       if (point_gs)
          pipe->delete_gs_state(pipe, point_gs);
       free(constants);
-      return E_INVALIDARG;
+      return D3D9DrawRefused(__LINE__, E_INVALIDARG);
    }
    D3D9BindViewport(device);
    D3D9Bind(device, D3D9_BOUND_BLEND, blend);
@@ -3577,7 +3700,7 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       if (point_gs)
          pipe->delete_gs_state(pipe, point_gs);
       free(constants);
-      return E_FAIL;
+      return D3D9DrawRefused(__LINE__, E_FAIL);
    }
    D3D9Bind(device, D3D9_BOUND_VERTEX_ELEMENTS, dynamic_vertex_elements);
    /* moose-ripple: in Mesa 24.3 the context takes over one reference to every buffer
@@ -3588,7 +3711,51 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
          pipe_resource_reference(&held, vbuffers[i].buffer.resource);
       }
    }
+   /* A base vertex is folded into where each vertex buffer starts, so the draw itself has
+    * none: a host renderer on OpenGL ES 3.0 has no draw with a base vertex, refuses the
+    * command, and drops everything the context draws afterwards (the compositor's Direct3D 9
+    * path uses base vertices; its desktop stayed black on such a host). Vertex I of the draw
+    * is then vertex I of each buffer as bound. Streams stepped per instance and the default
+    * input do not move. A fold that would put a buffer's start below zero is not made. */
+   INT draw_index_bias = indexed ? index_bias : 0;
+   if (draw_index_bias) {
+      bool fold = true;
+      for (unsigned i = 0; i < vbuffer_count && i < ARRAYSIZE(device->streams); ++i) {
+         if (!(stream_mask & (1u << i)) || D3D9StreamInstanceDivisor(device, i))
+            continue;
+         if ((int64_t)vbuffers[i].buffer_offset +
+             (int64_t)draw_index_bias * (int64_t)device->streams[i].stride < 0)
+            fold = false;
+      }
+      if (fold) {
+         for (unsigned i = 0; i < vbuffer_count && i < ARRAYSIZE(device->streams); ++i) {
+            if (!(stream_mask & (1u << i)) || D3D9StreamInstanceDivisor(device, i))
+               continue;
+            vbuffers[i].buffer_offset = (unsigned)
+               ((int64_t)vbuffers[i].buffer_offset +
+                (int64_t)draw_index_bias * (int64_t)device->streams[i].stride);
+         }
+         draw_index_bias = 0;
+      }
+   }
+
    pipe->set_vertex_buffers(pipe, vbuffer_count, vbuffers);
+
+   /* At trace level 3, what the draw is, as the host gets it: a host that refuses a draw says
+    * only that it did (docs/windows/mesa-win7.md) */
+   if (D3D9TraceLevel() >= 3) {
+      ripple_logf("  draw: mode %u, %s start %u count %u, index size %u bias %d min %u, "
+                  "instances %u, %u elements, %u buffers%s", (unsigned)mode,
+                  indexed ? "indexed" : "arrays", indexed ? start_index : start_vertex,
+                  vertex_count, indexed ? index_size : 0, draw_index_bias, min_index,
+                  instance_count, element_count, vbuffer_count,
+                  uses_default_input ? ", one of them the default input" : "");
+      for (UINT i = 0; i < element_count; ++i)
+         ripple_logf("    element %u: buffer %u offset %u format %u divisor %u stride %u", i,
+                     (unsigned)elements[i].vertex_buffer_index, (unsigned)elements[i].src_offset,
+                     (unsigned)elements[i].src_format, (unsigned)elements[i].instance_divisor,
+                     (unsigned)elements[i].src_stride);
+   }
 
    if (indexed) {
       struct pipe_draw_info info;
@@ -3613,7 +3780,7 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       memset(&draw, 0, sizeof(draw));
       draw.start = (user_indices || cpu_indices) ? 0 : start_index;
       draw.count = vertex_count;
-      draw.index_bias = index_bias;
+      draw.index_bias = draw_index_bias;
       pipe->draw_vbo(pipe, &info, 0, NULL, &draw, 1);
    } else {
       util_draw_arrays(pipe, mode, start_vertex, vertex_count);

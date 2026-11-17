@@ -42,7 +42,11 @@ static constexpr UINT d3d9_ms_types =
    (1u << (D3DDDIMULTISAMPLE_8_SAMPLES - 1));
 
 static const FORMATOP g_format_ops[] = {
-   { D3DDDIFMT_X8R8G8B8, 0x009aec1f & ~FORMATOP_SRGBWRITE,
+   /* With FORMATOP_SRGBWRITE: Windows' Direct3D 10 Level 9 layer makes no device at any
+    * feature level on a driver whose X8R8G8B8 cannot be drawn to in sRGB (its table of
+    * required formats, docs/windows/mesa-win7.md), and that layer is what the compositor uses
+    * on a host that cannot carry Direct3D 10. D3D9SrgbTargetFormat picks what the host can. */
+   { D3DDDIFMT_X8R8G8B8, 0x009aec1f,
      d3d9_ms_types, 0, 0 },
    { D3DDDIFMT_R5G6B5, 0x008a6c1f, d3d9_ms_types, 0, 0 },
    { D3DDDIFMT_A8R8G8B8, 0x00dae01f,

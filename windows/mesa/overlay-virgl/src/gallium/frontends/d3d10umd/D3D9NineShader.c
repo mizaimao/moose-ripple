@@ -459,6 +459,9 @@ struct shader_translator
     bool mul_zero_wins;
     bool always_output_pointsize;
     bool no_vs_window_space;
+    /* moose-ripple: the input a vertex shader's register v# is, plus one (0: none yet). See
+     * nine_vs_input_slot. */
+    uint8_t vs_input_slot[16];
     bool vs_output_color1;
     bool vs_output_texcoord0;
     unsigned texcoord_sn;
@@ -644,6 +647,30 @@ static struct ureg_src nine_boolean_constant_src(struct shader_translator *tx, i
         tx->info->const_bool_slots = idx + 1;
 
     return src;
+}
+
+/* moose-ripple: a vertex shader's inputs are numbered without gaps, in the order they are
+ * declared, whatever register numbers the shader uses. A host renderer below GLSL 3.30 has no
+ * explicit locations and finds the inputs by counting them (in_0, in_1, ...): with a shader
+ * that uses v0 and v2, as those of Windows' Direct3D 10 Level 9 layer do, it looked for in_1,
+ * did not find it, refused the draw and dropped everything the context drew after that (the
+ * compositor's whole desktop, black). info->input_map follows the same numbering. */
+static unsigned
+nine_vs_input_slot(struct shader_translator *tx, unsigned reg, unsigned usage)
+{
+    if (reg >= ARRAY_SIZE(tx->vs_input_slot))
+        return reg;
+    if (!tx->vs_input_slot[reg]) {
+        const unsigned slot = tx->info->num_inputs;
+
+        if (slot >= ARRAY_SIZE(tx->info->input_map))
+            return reg;
+        tx->info->num_inputs = slot + 1;
+        tx->vs_input_slot[reg] = (uint8_t)(slot + 1);
+        tx->info->input_map[slot] = usage;
+        ureg_DECL_vs_input(tx->ureg, slot);
+    }
+    return tx->vs_input_slot[reg] - 1u;
 }
 
 static struct ureg_src nine_special_constant_src(struct shader_translator *tx, int idx)
@@ -1127,7 +1154,9 @@ tx_src_param(struct shader_translator *tx, const struct sm1_src_param *param)
         break;
     case D3DSPR_INPUT:
         if (IS_VS) {
-            src = ureg_src_register(TGSI_FILE_INPUT, param->idx);
+            /* a register read without a declaration gets an input nothing feeds */
+            src = ureg_src_register(TGSI_FILE_INPUT,
+                                    nine_vs_input_slot(tx, param->idx, NINE_DECLUSAGE_NONE));
         } else {
             if (tx->version.major < 3) {
                 const unsigned semantic = param->idx == 0 ?
@@ -1403,12 +1432,12 @@ _tx_dst_param(struct shader_translator *tx, const struct sm1_dst_param *param)
         switch (param->idx) {
         case 0:
             if (ureg_dst_is_undef(tx->regs.oPos)) {
-                if (tx->info->clip_plane_emulation > 0 ||
-                    (tx->info->position_t && tx->no_vs_window_space)) {
-                    tx->regs.oPos = ureg_DECL_temporary(tx->ureg);
-                } else {
-                    tx->regs.oPos = tx->regs.oPos_out;
-                }
+                /* moose-ripple: always a temporary; the end of the shader reads it to
+                 * write the real output (half-pixel shift). A w the shader does not write
+                 * is 1. */
+                tx->regs.oPos = ureg_DECL_temporary(tx->ureg);
+                ureg_MOV(tx->ureg, tx->regs.oPos,
+                         ureg_imm4f(tx->ureg, 0.0f, 0.0f, 0.0f, 1.0f));
             }
             dst = tx->regs.oPos;
             break;
@@ -1547,7 +1576,9 @@ tx_dst_param_as_src(struct shader_translator *tx, const struct sm1_dst_param *pa
     switch (param->file) {
     case D3DSPR_INPUT:
         if (IS_VS) {
-            src = ureg_src_register(TGSI_FILE_INPUT, param->idx);
+            /* a register read without a declaration gets an input nothing feeds */
+            src = ureg_src_register(TGSI_FILE_INPUT,
+                                    nine_vs_input_slot(tx, param->idx, NINE_DECLUSAGE_NONE));
         } else {
             assert(!param->rel);
             assert(param->idx < ARRAY_SIZE(tx->regs.v));
@@ -2435,11 +2466,8 @@ DECL_SPECIAL(DCL)
     if (IS_VS) {
         if (is_input) {
             /* linkage outside of shader with vertex declaration */
-            ureg_DECL_vs_input(ureg, sem.reg.idx);
             assert(sem.reg.idx < ARRAY_SIZE(tx->info->input_map));
-            tx->info->input_map[sem.reg.idx] = sm1_to_nine_declusage(&sem);
-            tx->info->num_inputs = MAX2(tx->info->num_inputs, sem.reg.idx + 1);
-            /* NOTE: preserving order in case of indirect access */
+            (void)nine_vs_input_slot(tx, sem.reg.idx, sm1_to_nine_declusage(&sem));
         } else
         if (tx->version.major >= 3) {
             /* SM2 output semantic determined by file */
@@ -2455,15 +2483,14 @@ DECL_SPECIAL(DCL)
             tx->regs.o[sem.reg.idx] = ureg_DECL_output_masked(
                 ureg, tgsi.Name, tgsi.Index, sem.reg.mask, 0, 1);
             nine_record_outputs(tx, sem.usage, sem.usage_idx, sem.reg.mask, sem.reg.idx);
-            if ((tx->info->process_vertices ||
-                 tx->info->clip_plane_emulation > 0 ||
-                 (tx->info->position_t && tx->no_vs_window_space)) &&
-                (sem.usage == D3DDECLUSAGE_POSITION ||
+            /* moose-ripple: always, as for the older shader models above */
+            if ((sem.usage == D3DDECLUSAGE_POSITION ||
                  sem.usage == D3DDECLUSAGE_POSITIONT) &&
                 sem.usage_idx == 0) {
                 tx->regs.oPos_out = tx->regs.o[sem.reg.idx]; /* TODO: probably not good declare it twice */
                 tx->regs.o[sem.reg.idx] = ureg_DECL_temporary(ureg);
                 tx->regs.oPos = tx->regs.o[sem.reg.idx];
+                ureg_MOV(ureg, tx->regs.oPos, ureg_imm4f(ureg, 0.0f, 0.0f, 0.0f, 1.0f));
             }
 
             if (tgsi.Name == TGSI_SEMANTIC_PSIZE) {
@@ -4129,6 +4156,10 @@ static void parse_shader(struct shader_translator *tx)
             shader_add_vs_position_t_transform(tx);
         } else {
             ureg_property(tx->ureg, TGSI_PROPERTY_VS_WINDOW_SPACE_POSITION, true);
+            /* window coordinates with Direct3D 9's pixel centres, see below */
+            if (!ureg_dst_is_undef(tx->regs.oPos))
+                ureg_ADD(tx->ureg, tx->regs.oPos_out, ureg_src(tx->regs.oPos),
+                         ureg_imm4f(tx->ureg, 0.5f, 0.5f, 0.0f, 0.0f));
         }
     }
 
@@ -4172,12 +4203,26 @@ static void parse_shader(struct shader_translator *tx)
                 ureg_DP4(tx->ureg, ureg_writemask(clipdist[i>>2], 1 << (i & 0x3)),
                          ureg_src(tx->regs.oPos), nine_special_constant_src(tx, i));
         }
-
-        ureg_MOV(tx->ureg, tx->regs.oPos_out, ureg_src(tx->regs.oPos));
     }
 
-    if (info->process_vertices)
+    if (info->process_vertices) {
         shader_add_vs_viewport_transform(tx);
+    } else if (IS_VS && !info->position_t && !ureg_dst_is_undef(tx->regs.oPos)) {
+        /* moose-ripple: Direct3D 9 puts pixel centres at whole window coordinates, OpenGL
+         * and Direct3D 10 half a pixel further, and programs written for Direct3D 9 allow
+         * for that: Windows' Direct3D 10 Level 9 layer moves everything half a pixel up and
+         * left, most games do it for their 2D. Drawn by the other rule, each texel of a
+         * picture drawn one to one lands between two pixels (the compositor's desktop: text
+         * and thin lines in pieces). The viewport cannot carry the half pixel, the host
+         * takes whole numbers for it; so the position moves here, by half a pixel right and
+         * down in clip space: special constant 11 is (1/width, -1/height) of the viewport. */
+        struct ureg_src pos = ureg_src(tx->regs.oPos);
+
+        ureg_MOV(tx->ureg, ureg_writemask(tx->regs.oPos_out, TGSI_WRITEMASK_ZW), pos);
+        ureg_MAD(tx->ureg, ureg_writemask(tx->regs.oPos_out, TGSI_WRITEMASK_XY),
+                 nine_special_constant_src(tx, 11),
+                 ureg_scalar(pos, TGSI_SWIZZLE_W), pos);
+    }
 
     ureg_END(tx->ureg);
 }
