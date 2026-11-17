@@ -495,8 +495,8 @@ the driver before:
 | Direct3D 9 test | Hog before | Hog, objects kept | Rig before | Rig, objects kept |
 |---|---|---|---|---|
 | Batch | 1463, 1490 | 1750, 1624 | 717, 729 | 731, 728 |
-| Texture load | 1073, 1080 | 1193, 1265 | 281, 281 | 282, 294 |
-| ALU | 964, 974 | 977, 1028 | 308, 307 | 309, 310 |
+| ALU | 1073, 1080 | 1193, 1265 | 281, 281 | 282, 294 |
+| Texture load | 964, 974 | 977, 1028 | 308, 307 | 309, 310 |
 
 Then the state left bound as well, against the objects kept (Hog only; the rig is bound by its
 GPU and was not measured again):
@@ -504,12 +504,13 @@ GPU and was not measured again):
 | Direct3D 9 test | Hog, objects kept | Hog, state left bound |
 |---|---|---|
 | Batch | 1637, 1638 | 1895, 1899 |
-| Texture load | 1157, 1182 | 1330, 1306 |
-| ALU, three runs a round | 977, 979, 963 and 954, 964, 1000 | 962, 981, 955 and 1002, 958, 998 |
+| ALU | 1157, 1182 | 1330, 1306 |
+| Texture load, three runs a round | 977, 979, 963 and 954, 964, 1000 | 962, 981, 955 and 1002, 958, 998 |
 
 On Hog, where the path to the GPU is the limit, the batch test gains 9 to 20% from the first
-step and 16% more from the second, the texture load test about 13% from each; the ALU test,
-with four textures changing on every draw, stays where it was. The drawing test reads its
+step and 16% more from the second, the ALU test about 13% from each; the texture load test,
+with four textures changing on every draw, stays where it was. (Until 2026-11-17 these two
+rows carried each other's names; the numbers are as measured.) The drawing test reads its
 picture back right in 64 and 32 bits, Chess Titans draws as before (board, pieces,
 reflections), no renderer errors.
 
@@ -589,6 +590,17 @@ With all six, on UTM: the desktop with glass frames, the taskbar and window shad
 Titans in a glass frame, both seen in the guest's own screenshots and on the UTM window; no
 renderer errors in UTM's log after the last change. On the rig with `RIPPLE_NO_D3D10`: the
 same, and equal to the Direct3D 10 picture as measured above.
+
+Checks with the build that has all of it (64 and 32 bit, built from scratch). Where the host
+carries Direct3D 10 the compositor still takes it; the Direct3D 9 drawing and probe tests pass
+in 64 and 32 bit and Chess Titans is right (Hog, the rig, UTM); the assessment on
+Hog gives 7.9 on every line. On the rig the desktop composed on the two
+paths: of 745,472 pixels above the taskbar 403 differ, 24 of them by more than 8 a channel
+(the blinking text cursor), the rest along the glass frame. Direct3D 9 frames a second,
+drivers swapped on one boot, the driver before and this one: on Hog batch 1826 and
+1833, ALU 1327, 1310 and 1319, 1318, texture load 916, 973 and 960, 935; on the rig
+batch 661, 641, 640 and 649, 630, 633 before, 667, 633, 657 after (both below the 730 measured
+the day before on that host; not from this change, and not looked into).
 
 A host that refuses a draw says only "failed to dispatch DRAW_VBO". `RIPPLE_UMD_TRACE=3` now
 writes each draw as the host gets it (mode, start, count, base vertex, vertex layout), a
