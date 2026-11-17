@@ -459,3 +459,50 @@ runs alternated, with another VM busy on the same GPU). The Experience Index sta
 | Direct3D 10 constant buffer | 2150 (not drawn) | 688 | 311 | 312 |
 
 Chess Titans and the desktop with Aero look as before on both.
+
+## Direct3D 9: state objects kept from draw to draw (2026-11-17)
+
+`RIPPLE_CMD_STATS` on the Direct3D 9 batch test (31 draws a frame) showed what the Direct3D 9
+part of the driver sent for each frame: 217 `CREATE_OBJECT`, 217 `DESTROY_OBJECT`, 248
+`BIND_OBJECT` and 62 framebuffer changes, 29 KB a command buffer where the Direct3D 10 test
+with the same scene sends 10 KB. `D3D9DrawDiffuse` made everything a draw needs and deleted
+it again after the one draw: blend, rasterizer and depth states, the vertex layout, a
+sampler state and a view for every texture, a surface for every render target.
+
+Now each description is made once and kept (`D3D9Kept` in `D3D9Draw.cpp`): a store of 32
+slots a kind for blend, rasterizer, depth and sampler states and vertex layouts, found by
+comparing the description, where the one used longest ago gives way and never one the
+current draw has taken; and with each resource the last sampler view and the last surface
+made of it, used again while the next one asked for is the same. The command buffer of that
+frame is 20 KB with no object made or destroyed in it.
+
+Still sent for every draw: all state bound and unbound again, the framebuffer set and
+cleared, the shaders bound and unbound. Keeping them bound from draw to draw is the next step.
+
+Frames a second, the two drivers swapped on one boot, two rounds:
+
+| Direct3D 9 test | Hog before | Hog now | Rig before | Rig now |
+|---|---|---|---|---|
+| Batch | 1463, 1490 | 1750, 1624 | 717, 729 | 731, 728 |
+| Texture load | 1073, 1080 | 1193, 1265 | 281, 281 | 282, 294 |
+| ALU | 964, 974 | 977, 1028 | 308, 307 | 309, 310 |
+
+Hog, where the path to the GPU is the limit, gains 9 to 20% in the batch test; the rig is
+bound by its GPU and stays where it was. The drawing test reads its picture back right,
+Chess Titans draws as before (board, pieces, reflections), no renderer errors on either host.
+
+Where Hog's time goes after the sixth speed round of the kernel driver (the profile of
+`docs/windows/kmd-port-notes.md`, repeated): QEMU's drawing thread is 85% busy at 1620 frames a
+second in the Direct3D 10 batch test (66% before), 46% of that inside NVIDIA's Direct3D 12
+driver and 21% in the kernel, a third of it under the one `glFenceSync` a frame.
+
+Tried and not kept: sending the commands of an ended event query only when the program asks
+about it, as Direct3D describes it, instead of at its end. WinSAT still sent one frame a
+command buffer, and the version tried answered a late question with the newest command
+buffer's fence, so WinSAT waited for the frame it had just sent: 628 and 649 frames a second
+against 1655 and 1677.
+
+A trap in the test scripts, found on the way: a guest script that sets `RIPPLE_UMD_TRACE`
+left it set in the prompt it was run from, and every Direct3D 9 test started there afterwards
+logged each call (the batch test at 95 frames a second instead of 730, Direct3D 10 unharmed).
+The scripts that set driver variables now begin with `setlocal`.

@@ -923,3 +923,10 @@ driver gave 7.0 and then 7.1 (gaming graphics tests 305 to 320 frames a second i
 
 Hog with this driver: 7.9 on every line as before (two assessments; Direct3D 10 batch 1629 and
 1640 frames a second, constant buffer 1319 and 1324), no renderer errors.
+
+In the UTM VM the final driver (both changes) loads, the Direct3D 9 test program draws, reads
+its picture back right and presents, and the idle guest keeps the ordinary timer: 0 of 315
+samples of `NtQueryTimerResolution` over ten seconds were under 1 ms
+(`tools/win7-debug/guest/timerres.ps1`). `powercfg -energy` did list a half-millisecond kernel
+request there during its own five seconds; that was not followed up (its progress display in
+the console may be the stream of work).
