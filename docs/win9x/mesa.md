@@ -170,11 +170,19 @@ which allocates some thread-local variables again (not chased further).
   buffer), and says "24 colour bits" for a 32-bit format without alpha. Windows' own OpenGL
   screen savers look for a format whose colour bits equal the screen's depth with no alpha,
   found none, and gave up after five tries with a black screen; Quake III keeps the list in
-  an array of 256. Patch 0003 makes the list short (48 formats: 32-bit with and without
-  alpha and 16-bit, three depth/stencil layouts, with and without back buffer and
-  accumulation buffer), reports 32 colour bits for 32-bit formats as the cards of the time
+  an array of 256. Patch 0003 makes the list short (72 formats: 32-bit with and without
+  alpha and 16-bit; depth 24, depth 16, or depth 24 with 8 stencil bits; with and without
+  back buffer and accumulation buffer), reports 32 colour bits for 32-bit formats as the cards of the time
   did, and adds 16-bit (5-6-5) formats for 16-bit screens that are drawn in 32 bits and
   converted by GDI on their way to the screen.
+- **A program that asks for a stencil buffer got Microsoft's software OpenGL.** Until
+  2026-11-17 the list had no format with a stencil buffer: patch 0003 kept Mesa's
+  `Z24_UNORM_S8_UINT` and left out `S8_UINT_Z24_UNORM` as a duplicate, but virgl hosts have
+  only the second (GL's `DEPTH24_STENCIL8`). Windows' `ChoosePixelFormat` then picked one of
+  its own software formats, which have 8 stencil bits: Unreal Tournament's OpenGL renderer
+  ran on "GDI Generic" without any warning. `tools/win9x/pftest.c` asks `ChoosePixelFormat`
+  for what programs of the time request and fails when a request in the screen's colour depth
+  gets a software format, or when the driver offers no formats at all.
 - **The host's log** is where rendering errors show (`journalctl` on Proxmox VE, lines from
   `QEMU[pid]`).
 
@@ -185,6 +193,6 @@ Environment variables, set before the program starts (in a batch file: `set NAME
 | Variable | What |
 |---|---|
 | `RIPPLE_GL_TRACE=file` | one line for every call Windows' `opengl32.dll` makes into the driver (pixel formats asked for and set, contexts made and made current, buffer swaps, extension functions looked up): shows where a program gives up |
-| `RVD_LOG=file` | the winsys' first few thousand requests to the VxD (buffers made, transfers, submissions, frames presented) |
+| `RVD_LOG=file` | the winsys' first few thousand requests to the VxD (buffers made, transfers, frames presented, and for each submission the virgl commands in it by number and how much its transfers move) |
 | `LIBGL_ALWAYS_SOFTWARE=1` | Mesa's software renderer instead of the host GPU: is the fault in the GPU path? |
 | `MESA_EXTENSION_MAX_YEAR=2000` | hide OpenGL extensions newer than that year, for programs that copy the extension list into a small buffer |

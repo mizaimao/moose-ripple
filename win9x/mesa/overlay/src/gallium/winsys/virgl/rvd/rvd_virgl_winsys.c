@@ -530,7 +530,35 @@ static int rvd_submit_cmd(struct virgl_winsys *vws, struct virgl_cmd_buf *_cbuf,
       return 0;
    s->context = ws->ctx;
    s->bytes = cbuf->base.cdw * 4;
-   RVD_LOG("submit %lu bytes\n", s->bytes);
+   if (rvd_log_file(0)) {
+      /* What the submission holds: commands by number (virgl_protocol.h), and what the transfers
+       * in it move (TRANSFER3D, COPY_TRANSFER3D: box width, height and depth at dwords 9 to 11
+       * of the payload; texels for a texture, bytes for a buffer). */
+      unsigned count[64];
+      unsigned long texels = 0;
+      uint32_t i = 0, n = cbuf->base.cdw;
+      char line[512];
+      int len = 0;
+
+      memset(count, 0, sizeof(count));
+      while (i < n) {
+         uint32_t head = cbuf->base.buf[i], cmd = head & 0xff, size = head >> 16;
+         if (cmd < 64)
+            count[cmd]++;
+         if ((cmd == VIRGL_CCMD_TRANSFER3D || cmd == VIRGL_CCMD_COPY_TRANSFER3D) && size >= 11 &&
+             i + 11 < n)
+            texels += (unsigned long)cbuf->base.buf[i + 9] * cbuf->base.buf[i + 10] *
+                      cbuf->base.buf[i + 11];
+         i += size + 1;
+      }
+      for (i = 0; i < 64 && len < (int)sizeof(line) - 16; i++) {
+         if (count[i])
+            len += snprintf(line + len, sizeof(line) - len, " %u:%u", (unsigned)i, count[i]);
+      }
+      line[len] = 0;
+      RVD_LOG("submit %lu bytes, transfers of %lu texels or bytes; commands%s\n", s->bytes,
+              texels, line);
+   }
    if (!rvd_call(ws, RVD_SUBMIT, s, sizeof(*s) + s->bytes, NULL, 0)) {
       debug_printf("rvd: SUBMIT failed (error %lu) - expect bad rendering\n", GetLastError());
       ret = -1;
