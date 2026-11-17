@@ -750,3 +750,19 @@ count stays at 155 through a run.
 
 The rig stays at 7.1 with the same frame rates, as a GPU-bound host should. Chess Titans and
 the desktop with Aero look as before on Hog.
+
+What the rig's GPU time is spent on, from the same tests at fewer pixels (render engine 96 to
+100% busy each time):
+
+| Frames a second on the rig | 1280x1024 | 640x512 | 320x256 |
+|---|---|---|---|
+| Direct3D 10 batch | 676 | 1656 | 2189 |
+| Direct3D 10 ALU | 315 | 746 | 1054 |
+
+A frame's GPU time is close to a fixed part plus a part per pixel: batch about 0.4 ms and
+0.8 ms a megapixel, ALU about 0.75 ms and 1.9 ms a megapixel. At the assessment's 1280x1024
+about three quarters of the time is pixel work, on a GPU running at its top clock. So these
+tests are bound by how fast the UHD 630 fills pixels, and what the driver could still save is
+in the fixed quarter. For scale: on real hardware Intel's HD 4600 (20 execution units) is
+listed at 6.5 to 6.7 for gaming graphics and the Iris Pro 5200 (40) at the top, 7.9; the
+UHD 630 (24) is at 7.1 here.
