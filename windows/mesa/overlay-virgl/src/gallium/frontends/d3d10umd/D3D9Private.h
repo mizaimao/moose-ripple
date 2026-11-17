@@ -72,6 +72,35 @@ struct D3D9Adapter
 struct D3D9Resource;
 struct D3D9KeptObject;
 
+/* What the draws have left bound in the context (D3D9Draw.cpp, D3D9Bind). The pointers are
+ * only compared: the context holds what is bound. */
+struct D3D9Bound
+{
+   bool live;
+   void *blend;
+   void *rasterizer;
+   void *dsa;
+   void *vertex_elements;
+   void *vs;
+   void *fs;
+   void *gs;
+   bool fb_valid;
+   struct pipe_framebuffer_state fb;
+   /* the values last set, where a draw sets the same again */
+   bool viewport_valid;
+   struct pipe_viewport_state viewport;
+   bool blend_color_valid;
+   struct pipe_blend_color blend_color;
+   bool stencil_ref_valid;
+   unsigned stencil_ref;
+   bool sample_mask_valid;
+   unsigned sample_mask;
+   unsigned ps_count;
+   unsigned vs_count;
+   void *samplers[D3D9_TEXTURE_STAGE_COUNT];
+   struct pipe_sampler_view *views[D3D9_TEXTURE_STAGE_COUNT];
+};
+
 struct D3D9Device
 {
    HANDLE hRTDevice;
@@ -109,6 +138,7 @@ struct D3D9Device
    /* State objects kept from draw to draw (D3D9Draw.cpp, D3D9Kept) */
    struct D3D9KeptObject *kept;
    unsigned kept_serial;
+   struct D3D9Bound bound;
    D3D9Resource *last_systemmem_texture;
    D3D9Resource *last_systemmem_buffer;
    /* D3D9KeyBlitPipe's shaders and state, made on first use. */
@@ -407,6 +437,9 @@ HRESULT APIENTRY D3D9DrawIndexedPrimitive2(
    HANDLE hDevice, const D3DDDIARG_DRAWINDEXEDPRIMITIVE2 *data,
    UINT index_size, const void *indices, const UINT *index_remap);
 void D3D9DestroyDrawState(D3D9Device *device);
+/* Takes off the context what the draws left bound: before setting the context's state by
+ * hand, and before deleting a shader or state object that may be bound */
+void D3D9SettleDrawState(D3D9Device *device);
 
 /* Lets go of a resource's kept view and surface. They belong to the device's context, so
  * this has to happen while that still exists. */

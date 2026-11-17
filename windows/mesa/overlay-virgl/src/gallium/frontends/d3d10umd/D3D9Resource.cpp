@@ -3989,6 +3989,10 @@ static bool
 D3D9KeyBlitPipe(D3D9Device *device, const D3DDDIARG_BLT *data)
 {
    struct pipe_context *pipe = device->pipe;
+
+   /* this sets the context's state itself and leaves it empty */
+   D3D9SettleDrawState(device);
+
    D3D9Resource *dst_resource = D3D9CastResource(data->hDstResource);
    D3D9Resource *src_resource = D3D9CastResource(data->hSrcResource);
    D3D9SubResource *dst_sub = D3D9GetSubResource(data->hDstResource,
