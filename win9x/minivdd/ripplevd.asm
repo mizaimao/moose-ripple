@@ -45,6 +45,10 @@ VIndex          dw      0               ; the private copy: index register
 VRegs           dw      VBE_REGS dup (0);                   and the registers behind it
 VramBlocks      dw      0               ; the card's memory in 64 KB blocks, read once
 LoadedMsg       db      'rvd: moose-ripple mini-VDD loaded', 13, 10, 0
+MsgInit         db      'rvd: mini-VDD starting', 13, 10, 0
+MsgNotCard      db      'rvd: not loading: the card''s ID register is not a VBE one', 13, 10, 0
+MsgNoTable      db      'rvd: not loading: the VDD''s table is too short', 13, 10, 0
+MsgNoTrap       db      'rvd: not loading: the card''s ports are taken', 13, 10, 0
 ; what the VDD tells us, on QEMU's debug port
 MsgRegOn        db      'rvd: display driver in its mode', 13, 10, 0
 MsgRegOff       db      'rvd: display driver out of its mode', 13, 10, 0
@@ -387,6 +391,7 @@ BeginProc MiniVDD_Dynamic_Init
         VMMCall Get_Sys_VM_Handle
         mov     WindowsVM, ebx
         pop     ebx
+        SAY     MsgInit
 
         ; Is this the card? Its ID register reads B0Cxh.
         mov     dx, VBE_INDEX
@@ -396,7 +401,7 @@ BeginProc MiniVDD_Dynamic_Init
         in      ax, dx
         and     ax, 0FFF0h
         cmp     ax, 0B0C0h
-        jne     di_fail
+        jne     di_notcard
         dec     dx
         mov     ax, VBE_VRAM_64K
         out     dx, ax
@@ -406,7 +411,7 @@ BeginProc MiniVDD_Dynamic_Init
 
         VxDCall VDD_Get_Mini_Dispatch_Table     ; EDI = the VDD's table, ECX = its length
         cmp     ecx, NBR_MINI_VDD_FUNCTIONS
-        jb      di_fail
+        jb      di_notable
         MiniVDDDispatch REGISTER_DISPLAY_DRIVER, RegisterDisplayDriver
         MiniVDDDispatch DISPLAY_DRIVER_DISABLING, DisplayDriverDisabling
         MiniVDDDispatch PRE_HIRES_TO_VGA, PreHiResToVGA
@@ -418,11 +423,11 @@ BeginProc MiniVDD_Dynamic_Init
         mov     esi, OFFSET32 RippleVD_VbeTrap
         mov     edx, VBE_INDEX
         VMMCall Install_IO_Handler
-        jc      short di_fail
+        jc      short di_notrap
         mov     esi, OFFSET32 RippleVD_VbeTrap
         mov     edx, VBE_DATA
         VMMCall Install_IO_Handler
-        jc      short di_fail
+        jc      short di_notrap
 
         mov     esi, OFFSET32 LoadedMsg         ; a line on QEMU's debug port
 di_msg: lodsb
@@ -433,7 +438,16 @@ di_msg: lodsb
 di_ok:  call    _vgpu_init                      ; the virtio side (vgpu.c); it may find nothing
         clc
         ret
-di_fail:
+di_notcard:
+        SAY     MsgNotCard
+        stc
+        ret
+di_notable:
+        SAY     MsgNoTable
+        stc
+        ret
+di_notrap:
+        SAY     MsgNoTrap
         stc
         ret
 EndProc MiniVDD_Dynamic_Init

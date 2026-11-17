@@ -93,6 +93,20 @@ DirectDraw and Direct3D driver; these four `build.sh` makes, in `build/win9x/`) 
   programs find `ripplegl.dll` (on a host without 3D, Mesa's software renderer).
 - **Replacing another display driver:** Display Properties > Settings > Advanced > Adapter >
   Change > Have Disk, and the same folder.
+- **UTM (macOS, x86 emulated):** display `virtio-vga-gl`, machine `pc` (i440fx), one CPU, and
+  the CPU without its local APIC (`-cpu pentium3,apic=off` as a QEMU argument, or remove the
+  `apic` flag in the CPU settings). With the APIC, UTM's emulated APIC keeps the PIC's timer
+  interrupt from the CPU after Windows 98 restarts or shuts down (the APIC's LINT0 stays
+  masked), and the BIOS waits for timer ticks forever; Windows 98 has no use for the APIC. Checked
+  2026-11-16 in UTM 5.0.8: start-up in about 15 seconds, Restart, OpenGL, Direct3D and
+  DirectDraw tests. Don't give the VM a QEMU `fat:` folder as a disk: UTM's sandbox refuses its
+  writes, and Windows hangs at start-up.
+- **QEMU in WSL2 on a Windows host:** checked 2026-11-16 with QEMU 8.2 and KVM, virgl on an
+  NVIDIA RTX 4090 through Mesa's d3d12 driver: Restart, OpenGL, Direct3D and DirectDraw tests.
+- **Updating ours:** the same way, with the new folder. Windows keeps a copy of the INF from the
+  first install (in `C:\WINDOWS\INF\OTHER`) and uses that copy, not the new one, when the card
+  turns up in another PCI slot (another VM setup). A copy from before 0.1.0.0 has no mini-VDD
+  in it: the desktop then works without 3D, and DOS sessions and Restart misbehave.
 - If Device Manager still lists the old card (with a warning sign), remove that entry: it
   can hold on to the VGA ports, and our adapter then reports "cannot find any free
   Input/Output Range" (Code 12).
