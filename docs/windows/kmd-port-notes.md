@@ -885,3 +885,6 @@ constant buffer 311), with no renderer errors, and the desktop with Aero looks a
 The nudges of the fifth round stay. With the thread a nudge costs the program under a
 microsecond on Hog, so they come every 100 µs there again (4 to 6 for each polled fence), at
 1633 frames a second.
+
+In the UTM VM (emulated x86, 4 processors) the new kernel driver loads and the Direct3D 9 test
+program draws, reads its picture back right and presents; no speed figures were taken there.
