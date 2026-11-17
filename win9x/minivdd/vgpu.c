@@ -67,10 +67,18 @@ static void dbg_hex(u32 v)
 }
 
 /* ---- PCI configuration space, mechanism 1 ---------------------------------------------------- */
+/* The address and the data port are two steps: interrupts off in between, so that a handler
+   reaching configuration space meanwhile can't move the address. */
 static u32 pci_read32(u32 bdf, u32 reg)
 {
+    u32 v;
+
+    __asm pushfd
+    __asm cli
     outl(0xCF8, 0x80000000UL | (bdf << 8) | (reg & 0xFC));
-    return inl(0xCFC);
+    v = inl(0xCFC);
+    __asm popfd
+    return v;
 }
 
 static u8 pci_read8(u32 bdf, u32 reg)
@@ -80,8 +88,11 @@ static u8 pci_read8(u32 bdf, u32 reg)
 
 static void pci_write32(u32 bdf, u32 reg, u32 v)
 {
+    __asm pushfd
+    __asm cli
     outl(0xCF8, 0x80000000UL | (bdf << 8) | (reg & 0xFC));
     outl(0xCFC, v);
+    __asm popfd
 }
 
 /* ---- virtio over PCI (virtio 1.0, 4.1.4): vendor capabilities name the structures ---------- */
@@ -452,6 +463,8 @@ static int transport_init(void)
     hi = rd32(common, CC_DEVICE_FEATURE);
     if (!(hi & VIRTIO_F_VERSION_1_HI)) {
         dbg("rvd: the card is not a virtio 1.0 device\r\n");
+        wr8(common, CC_DEVICE_STATUS, 0);
+        common = 0;                     /* nothing may use the card now */
         return 0;
     }
     features &= VIRTIO_GPU_F_VIRGL;
@@ -462,6 +475,8 @@ static int transport_init(void)
     wr8(common, CC_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK);
     if (!(rd8(common, CC_DEVICE_STATUS) & STATUS_FEATURES_OK)) {
         dbg("rvd: the card refused our features\r\n");
+        wr8(common, CC_DEVICE_STATUS, 0);
+        common = 0;
         return 0;
     }
     req_buf    = (u8 *)vmm_alloc_contig(REQ_PAGES, &req_phys);
