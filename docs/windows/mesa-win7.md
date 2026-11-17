@@ -593,14 +593,15 @@ same, and equal to the Direct3D 10 picture as measured above.
 
 Checks with the build that has all of it (64 and 32 bit, built from scratch). Where the host
 carries Direct3D 10 the compositor still takes it; the Direct3D 9 drawing and probe tests pass
-in 64 and 32 bit and Chess Titans is right (Hog, the rig, UTM); the assessment on
-Hog gives 7.9 on every line. On the rig the desktop composed on the two
+(Hog in 64 and 32 bit, the rig in 64 bit) and Chess Titans is right on Hog and in UTM (on the
+rig it was looked at with the build before the last two changes); the assessment on Hog gives
+7.9 on every line. On the rig the desktop composed on the two
 paths: of 745,472 pixels above the taskbar 403 differ, 24 of them by more than 8 a channel
 (the blinking text cursor), the rest along the glass frame. Direct3D 9 frames a second,
 drivers swapped on one boot, the driver before and this one: on Hog batch 1826 and
 1833, ALU 1327, 1310 and 1319, 1318, texture load 916, 973 and 960, 935; on the rig
 batch 661, 641, 640 and 649, 630, 633 before, 667, 633, 657 after (both below the 730 measured
-the day before on that host; not from this change, and not looked into).
+earlier on that host; not from this change, and not looked into).
 
 A host that refuses a draw says only "failed to dispatch DRAW_VBO". `RIPPLE_UMD_TRACE=3` now
 writes each draw as the host gets it (mode, start, count, base vertex, vertex layout), a
