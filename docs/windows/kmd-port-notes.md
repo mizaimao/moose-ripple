@@ -703,3 +703,50 @@ The same driver on the rig (VM 220, host GPU at 1200 MHz): the Experience Index 
 6.6 to 6.7); Direct3D 10 frames a second: batch 655 (457), alpha 629 (450), ALU 323 (266),
 texture 324 (265), geometry 639 (340) and 59 (43), constant buffer 311 (196). So the rig's Intel
 GPU was not the only limit either. Its weakest test is still the second geometry test.
+
+## Speed, fourth round: where each host's frame goes (2026-11-16)
+
+Measured again after the third round, with two new tools:
+
+- `tools/win7-debug/rig/rcsbusy.sh SECONDS` on the VM host: the share of time the Intel GPU's
+  render engine was executing requests, from the i915 driver's own counter (the PMU event
+  `i915/rcs0-busy/`, read with `perf_event_open` from perl, so neither perf nor intel_gpu_top
+  is needed). `gpubusy.sh` only says how long the GPU was awake.
+- `RIPPLE_CMD_STATS` with `RIPPLE_UMD_LOG` in the guest (Mesa patch 0035): what the command
+  streams hold, by virgl command, and forty submits in a row with their time and contents.
+
+**The rig is bound by its GPU.** The render engine is 96 to 100% busy in every Direct3D 10 test
+and in the Direct3D 9 ones (batch 659 frames a second, ALU 318, texture 336, constant buffer
+321, second geometry test 809, alpha 639; Direct3D 9 batch 730, ALU 283, texture 303). The host
+submits one GPU job a frame (i915 `request_add`: 646 a second at 642 frames a second) and never
+waits on one. What is left there is how much GPU time a frame's drawing costs, not the path to
+the GPU.
+
+**Hog was bound by the trip to the host, and made it twice a frame.** Its GPU is about 45%
+busy; QEMU's time is mostly the guest's processors, the thread that draws about a fifth of
+one. The submit trace showed every frame followed by a second, empty submit:
+
+    11195.633 ms:  5724 bytes, draws 31, ... copies in 31
+    11195.666 ms:     8 bytes, draws 0
+
+WinSAT ends two event queries a frame. Mesa's virgl driver flushes for each (`end_query` of a
+`GPU_FINISHED` query asks for a fence), and a flush that asks for a fence was sent even with
+nothing encoded since the last one: a second guest kick, host flush and completion interrupt.
+Mesa patch 0034: every submit keeps its fence, and a flush that finds nothing new (and no
+upload queued) returns that fence. An event query ended again also let go of its old fence
+only when destroyed, one event handle a frame; fixed with it.
+
+On one install on Hog, runs alternated (`RIPPLE_EMPTY_FLUSH` keeps the old behaviour): batch
+872 and 895 frames a second with the empty submits, 1096 and 1114 without; the test's handle
+count stays at 155 through a run.
+
+| Hog, Experience Index | before | now |
+|---|---|---|
+| Graphics / gaming graphics | 7.5 / 7.5 | 7.7 / 7.7 |
+| Direct3D 10 batch / alpha (frames a second) | 898 / 965 | 1125 / 1224 |
+| Direct3D 10 texture / ALU | 847 / 656 | 1031 / 896 |
+| Direct3D 10 geometry F4 / V8 | 1052 / 1056 | 1398 / 1398 |
+| Direct3D 10 constant buffer | 721 | 902 |
+
+The rig stays at 7.1 with the same frame rates, as a GPU-bound host should. Chess Titans and
+the desktop with Aero look as before on Hog.
