@@ -774,7 +774,8 @@ program polls went: how many nudges each took, how long after its submit it was 
 signalled, and what a nudge costs. It corrects the fourth round's picture of Hog. WinSAT
 keeps about ten frames in flight on both hosts: the fence it polls was submitted 8 ms earlier
 on Hog (0.8 ms a frame) and 15 ms earlier on the rig (1.5 ms a frame). Neither host waits for
-one frame's trip to the host and back; each is bound by how many frames the host gets through.
+one frame's trip to the host and back. (What bounds Hog instead is in the sixth round: not the
+host's work, as first written here.)
 
 On Hog the nudges themselves were in the way. The batch test at 1280x1024, by nudge interval
 (`RIPPLE_NUDGE_US`), one install, runs mixed:
@@ -822,3 +823,65 @@ For the next round, QEMU's drawing thread on Hog during the batch test (`perf tr
 thread, 4 seconds at about 1180 frames a second): 36,743 `ioctl` calls taking 1.0 s (7.8 a
 frame, 28 µs each), then `ppoll`, `futex` and `getpid` at 0.13 to 0.17 s each, and one
 `openat`, `eventfd2` and two `close` for every 1.6 frames.
+
+## Speed, sixth round: notifications that do not hold up the guest (2026-11-17)
+
+The fifth round's last sentence about Hog was wrong: its host was not working at its limit. A
+profile of QEMU's drawing thread during the batch test (`perf record -e cpu-clock -g -t TID`,
+frame-pointer stacks, call sites named from the libraries' relocations) showed:
+
+- the thread on a processor only two thirds of the time (3.3 s of 5 s);
+- a third of that inside `glFenceSync` (virglrenderer makes one fence a command buffer, and
+  Mesa's Direct3D 12 driver flushes its batch for it), 19% of the thread's time in one
+  three-instruction loop of NVIDIA's driver under that call;
+- 23% in the kernel, a good part of it waking the guest processors that wait for QEMU's
+  global lock.
+
+So the host had time left and the frames did not arrive fast enough. What held them up is the
+notification itself. With `ioeventfd` off (QEMU's default for this device) the guest processor
+that writes the notification waits for QEMU's global lock, and the drawing thread holds that
+lock for a whole command buffer. The kernel driver notified from the thread that queues the
+command buffers: it queued one, then waited out the host's frame in progress, and host and
+guest took turns.
+
+Proof by one setting: the same guest with `-device virtio-vga-gl,...,ioeventfd=on` (the
+notification becomes an event the kernel hands to QEMU, nobody waits) ran the batch test at
+1531 to 1617 frames a second instead of about 1250, and the assessment gave 7.9 on every line.
+
+The driver now gets there without the setting. The control queue has a thread for
+notifications (`CtrlQueue::StartKicker`): the queueing thread asks it and goes on, only the
+new thread waits, the host finds several buffers at a time, and requests made while it waits
+become one notification. Where a notification is quick, waking a thread for it costs more
+than it saves, so notifications are timed (one in four from the sender, all from the thread)
+and the smoothed figure picks the way: by thread above 200 µs, from the sender below 100.
+The figure goes up quickly and down slowly, because the thread's own notifications are a mix
+of long waits and short ones.
+
+Batch test on Hog, frames a second, three runs each (kernel drivers swapped in place with
+`devcon restart`, the VM restarted to change the setting):
+
+| Notifications | `ioeventfd` off (default) | `ioeventfd` on |
+|---|---|---|
+| from the sender (before) | 1274 to 1367 | 1540 to 1654 |
+| always from the thread | 1569 to 1594 | 1312 to 1328 |
+| chosen by their cost (now) | 1655 to 1671 | 1573 to 1626 |
+
+| Hog, Experience Index, default settings | before | now |
+|---|---|---|
+| Graphics / gaming graphics / base score | 7.8 / 7.8 / 7.8 | 7.9 / 7.9 / 7.9 |
+| Direct3D 10 batch / alpha (frames a second) | 1298 / 1352 | 1617 / 1806 |
+| Direct3D 10 texture / ALU | 1195 / 881 | 1486 / 889 |
+| Direct3D 10 geometry F4 / V8 | 1558 / 1576 | 2069 / 2161 |
+| Direct3D 10 constant buffer | 986 | 1313 |
+
+7.9 is where Windows 7's index ends.
+
+The rig is bound by its GPU and does not change: batch 650, 641 and 650 before, 644, 648 and
+646 after, on one boot. Its driver log shows the same choice being made there (notifications
+of 600 µs at times, then back under 100). The full
+assessment there gives 7.1 / 7.1 as before (batch 634, alpha 637, ALU 322, texture 324,
+constant buffer 311), with no renderer errors, and the desktop with Aero looks as it did.
+
+The nudges of the fifth round stay. With the thread a nudge costs the program under a
+microsecond on Hog, so they come every 100 µs there again (4 to 6 for each polled fence), at
+1633 frames a second.
