@@ -28,8 +28,18 @@ typedef unsigned long rvd_u32;
                                        the host. For tests; ends with the program that set it */
 #define RVD_TIMEOUT_AT_ONCE     0xFFFFFFFFUL    /* give up on a request as soon as it is sent,
                                                    and hold the device stalled until reset */
+#define RVD_GET_STATS           11  /* out: struct rvd_stats. No GPU needed */
 
 #define RVD_MAX_CAPS            8
+
+/* What the VxD holds now, for tests that look for memory a long session loses. */
+struct rvd_stats {
+    rvd_u32 contexts;           /* contexts in use */
+    rvd_u32 buffers;            /* buffers in use */
+    rvd_u32 buffer_pages;       /* 4 KB pages of locked memory behind them */
+    rvd_u32 zombies;            /* contexts and buffers held for a host that stopped answering */
+    rvd_u32 heap_bytes;         /* the DirectDraw heap (RVD_HEAP); 0 until it is made */
+};
 
 struct rvd_info {
     rvd_u32 version;            /* RVD_INTERFACE_VERSION */

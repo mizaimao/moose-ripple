@@ -698,6 +698,7 @@ static u32 buffer_create(const struct rvd_buffer_create *c, struct rvd_buffer *o
     b->mem = (u8 *)vmm_alloc_pages(pages, &b->mem_handle);
     if (!b->mem)
         return ERROR_NOT_ENOUGH_MEMORY;
+    b->pages = pages;                           /* counted by RVD_GET_STATS, zombie or not */
     if (!vmm_page_table(b->mem, pages, page_table)) {
         vmm_free_pages(b->mem_handle);
         return ERROR_GEN_FAILURE;
@@ -740,7 +741,6 @@ static u32 buffer_create(const struct rvd_buffer_create *c, struct rvd_buffer *o
         return failure();
     }
     b->context = c->context;
-    b->pages = pages;
     next_buffer = id % MAX_BUFFERS;
     out->handle = id;
     out->size = pages << 12;
@@ -841,6 +841,9 @@ struct dioc {
 #define DIOC_OPEN   0UL
 #define DIOC_CLOSE  0xFFFFFFFFUL
 
+/* The DirectDraw heap (RVD_HEAP): made at the first call, kept until Windows ends. */
+static struct rvd_heap heap = { 0 };
+
 static u32 dispatch(struct dioc *p)
 {
     u32 n = 0, i, err;
@@ -860,8 +863,26 @@ static u32 dispatch(struct dioc *p)
         }
         return 0;
     }
+    if (p->code == RVD_GET_STATS) {             /* what is held now: no device needed */
+        struct rvd_stats st;
+        zero(&st, sizeof(st));
+        for (i = 0; buffers && i < MAX_BUFFERS; i++) {
+            if (buffers[i].context == 0)
+                continue;
+            st.buffers += buffers[i].context != ZOMBIE;
+            st.buffer_pages += buffers[i].pages;
+        }
+        for (i = 1; i < MAX_CONTEXTS; i++)
+            st.contexts += ctx_owner[i] != 0 && ctx_owner[i] != ZOMBIE;
+        st.zombies = count_zombies();
+        st.heap_bytes = heap.size;
+        n = p->out_len < sizeof(st) ? p->out_len : sizeof(st);
+        copy(p->out, &st, n);
+        if (p->returned)
+            *p->returned = n;
+        return 0;
+    }
     if (p->code == RVD_HEAP) {                  /* system memory for DirectDraw: no device needed */
-        static struct rvd_heap heap;
         if (p->out_len < sizeof(heap))
             return ERROR_INVALID_PARAMETER;
         if (!heap.address && p->in_len >= 4) {

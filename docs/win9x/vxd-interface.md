@@ -20,6 +20,7 @@ VxD, the test program and the winsys; this is version 2 of the interface.
 | `RVD_TRANSFER` | `struct rvd_transfer` | | copy between a buffer's memory and its GPU object, either way |
 | `RVD_HEAP` | bytes wanted | `struct rvd_heap` | one block of system memory for the display driver's DirectDraw surfaces that are never shown (made at the first call, returned again later; valid in every process). No GPU needed |
 | `RVD_SET_TIMEOUT` | milliseconds (0: the default, 10 s; `RVD_TIMEOUT_AT_ONCE`: give up as soon as a request is sent, and keep the device stalled until set back) | contexts and buffers held for the host (optional) | how long a request may take before it fails with `ERROR_TIMEOUT`; for tests of the recovery, until the program that set it ends |
+| `RVD_GET_STATS` | | `struct rvd_stats` | what the VxD holds now: contexts and buffers in use, the locked memory behind the buffers, contexts and buffers held for a host that stopped answering, the DirectDraw heap. No GPU needed; for tests that look for memory a long session loses (`tools/win9x/memlog.c`) |
 
 Closing a handle to the VxD ends the GPU contexts of the process that closes it, so a program
 that opens one for `RVD_HEAP` alone (the DirectDraw DLL) keeps it open.
@@ -80,6 +81,9 @@ Limits: 63 contexts, 4096 buffers, 32 MB behind one buffer, 511 KB of commands p
     rvdtest          what the VxD and the host report
     rvdtest clear    context, 64x64 render target, clear to orange on the host, read back, paint
     rvdtest leak     the same, leaving the context and buffer for the VxD's clean-up
+
+`tools/win9x/memlog.c` prints, every few seconds, Windows' memory counters next to what the
+VxD holds (`RVD_GET_STATS`); see [mesa.md](mesa.md#memory-over-a-long-session).
 
 On a host without virgl (`-device virtio-vga` without `-gl`) the VxD still loads and
 `RVD_GET_INFO` answers with `virgl` 0; buffers can't be made.
