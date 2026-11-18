@@ -1,0 +1,18 @@
+virgl: keep staging buffers sized for repeated window bitmap uploads
+
+On Windows 7 in UTM, writing a newly mapped 1.5 MiB staging buffer for
+the first time takes over 30 ms. Small transfers between window updates
+can replace the buffer with the 1 MiB default, so the next bitmap needs a
+larger allocation again. Keep a common allocation size for both. Limit
+growth of the default to 4 MiB per buffer and retain the existing allocation
+and synchronization rules for in-flight transfers.
+
+--- a/src/gallium/drivers/virgl/virgl_staging_mgr.c
++++ b/src/gallium/drivers/virgl/virgl_staging_mgr.c
+@@ -44,3 +44,6 @@ virgl_staging_alloc_buffer(struct virgl_staging_mgr *staging, unsigned min_size)
+    /* Allocate a new one:
+     */
++   if (min_size > staging->default_size && min_size <= 4 * 1024 * 1024)
++      staging->default_size = util_next_power_of_two(min_size);
++
+    size = align(MAX2(staging->default_size, min_size), 4096);
