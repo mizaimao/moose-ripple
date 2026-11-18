@@ -22,8 +22,9 @@ VxD, the test program and the winsys; this is version 2 of the interface.
 | `RVD_SET_TIMEOUT` | milliseconds (0: the default, 10 s; `RVD_TIMEOUT_AT_ONCE`: give up as soon as a request is sent, and keep the device stalled until set back) | contexts and buffers held for the host (optional) | how long a request may take before it fails with `ERROR_TIMEOUT`; for tests of the recovery, until the program that set it ends |
 | `RVD_GET_STATS` | | `struct rvd_stats` | what the VxD holds now: contexts and buffers in use, the locked memory behind the buffers, contexts and buffers held for a host that stopped answering, the DirectDraw heap. No GPU needed; for tests that look for memory a long session loses (`tools/win9x/memlog.c`) |
 
-Closing a handle to the VxD ends the GPU contexts of the process that closes it, so a program
-that opens one for `RVD_HEAP` alone (the DirectDraw DLL) keeps it open.
+The GPU contexts of a process end when it closes its last handle to the VxD (or ends): a
+process can hold several, such as the DirectDraw DLL's for `RVD_HEAP` and Mesa's for OpenGL,
+and closing one must not take the others' contexts away.
 
 The interface has the shape of the Mac OS X kernel driver's (`docs/kext-uapi.md`): contexts,
 buffers, submit, transfer. What goes through it (resource parameters, the command stream) is

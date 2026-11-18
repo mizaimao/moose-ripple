@@ -844,13 +844,41 @@ struct dioc {
 /* The DirectDraw heap (RVD_HEAP): made at the first call, kept until Windows ends. */
 static struct rvd_heap heap = { 0 };
 
+/* Handles open, by process. A process can hold more than one: the DirectDraw DLL keeps one for
+   RVD_HEAP, Mesa's winsys one for OpenGL. Its GPU contexts end when its last one is closed;
+   ending them at the first close took OpenGL's context away from a program that released one
+   DirectDraw object and made another (Tomb Raider: The Last Revelation: every allocation after
+   that failed). Returns the count after the change; a process not found counts as 0. */
+#define MAX_PROCESSES 64
+static struct { u32 process, handles; } openers[MAX_PROCESSES];
+
+static u32 opened(u32 process, int change)
+{
+    u32 i, free_slot = MAX_PROCESSES;
+
+    for (i = 0; i < MAX_PROCESSES; i++) {
+        if (openers[i].handles && openers[i].process == process)
+            break;
+        if (!openers[i].handles && free_slot == MAX_PROCESSES)
+            free_slot = i;
+    }
+    if (i == MAX_PROCESSES) {
+        if (change < 0 || free_slot == MAX_PROCESSES)
+            return 0;                           /* not counted: treat as the last handle */
+        i = free_slot;
+        openers[i].process = process;
+    }
+    openers[i].handles += change;
+    return openers[i].handles;
+}
+
 static u32 dispatch(struct dioc *p)
 {
     u32 n = 0, i, err;
 
-    if (p->code == DIOC_OPEN)
-        return 0;
     if (p->code == DIOC_CLOSE) {                /* the handle is closed, or its program ended */
+        if (opened(p->process, -1) > 0)
+            return 0;                           /* the process has another handle open */
         if (timeout_owner == p->process) {      /* a test setting ends with its program */
             timeout_ms = DEFAULT_TIMEOUT_MS;
             timeout_owner = 0;
@@ -1035,8 +1063,12 @@ u32 __cdecl vgpu_ioctl(struct dioc *p)
     static u32 lock = 0;
     u32 err;
 
-    if (p->code == DIOC_OPEN)
+    if (p->code == DIOC_OPEN) {                /* counted outside the mutex: an open can come
+                                                   where blocking is not allowed, and nothing
+                                                   in opened() blocks or lets another thread in */
+        opened(p->process, 1);
         return 0;
+    }
     if (!lock)
         lock = vmm_mutex_create();
     if (lock)
