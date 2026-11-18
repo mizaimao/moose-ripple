@@ -199,6 +199,32 @@ Use a background that makes the strip distinguishable from the glass.
 The exit status verifies the gesture and observer. The widths report the
 visual outcome.
 
+To time the search field's repaint on the same drag, use
+`explorerrestore.exe 10 searchphase > searchphase.txt`. The probe tracks
+when the search child reaches its final right edge and samples a 26-pixel-wide
+patch around the search icon at its final location. It reads the window's
+backing bitmap through its window DC and the composed desktop through the
+screen DC. Use `searchpaint` in a separate run to omit the slower desktop
+readback. These modes leave the existing `search` strip-width measurement
+available.
+
+For minimize and restore, run `explorerrestore.exe 10 animationpixels >
+animationpixels.txt`. It samples two columns through the dedicated folder
+and its taskbar button during each transition. Use a bottom taskbar with
+the button inside the folder's horizontal span. Measure uninstrumented
+timing separately with `taskbar` and the UTM draw log. Pixel readback
+slows the guest down. On the uninstrumented taskbar trace, run
+`restore-timing.py TRACE.xml` and `restore-timing.py --minimize TRACE.xml`
+to get the first guest motion present and the longest gap for each direction.
+
+Run `python3 tools/win7-debug/explorer-pixels.py FILE` on each sample file.
+The resize bounds run from the beginning of the last mismatching read to
+the end of the first settled read, relative to the observed child move.
+A settled patch has at most 2% of pixels differing from its final state by
+more than eight levels in any RGB channel. The animation count includes
+samples that differ from both endpoints and from the preceding sample by
+at least 2%. It measures observed changes and can miss frames between reads.
+
 For taskbar clicks the analyzer reports when the probe first observed the
 window leave its minimized state and when DWM first presented movement away
 from the button. It looks for a repaint crossing at least 32×32 pixels in the

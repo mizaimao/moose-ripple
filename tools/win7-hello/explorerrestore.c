@@ -9,6 +9,7 @@
 #include <shellapi.h>
 #include <dwmapi.h>
 #include "explorermotion.h"
+#include "explorerpixels.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -116,6 +117,15 @@ static BOOL transition(BOOL restore)
     return IsWindow(target) && !!IsIconic(target) != restore;
 }
 
+static BOOL sample_transition(BOOL restore, int round, RECT patch)
+{
+    struct pixel_run *run = start_pixels(target, NULL, 0, patch, TRUE);
+    if (!run) return FALSE;
+    Sleep(300);
+    BOOL ok = restore ? click_restore() : transition(FALSE);
+    return finish_pixels(run, restore ? "restore" : "minimize", round) && ok;
+}
+
 int main(int argc, char **argv)
 {
     BOOL composition = FALSE;
@@ -126,15 +136,20 @@ int main(int argc, char **argv)
     int rc = 1;
     char *end;
     long rounds = 30;
-    BOOL clicks = argc == 3 && !strcmp(argv[2], "taskbar");
-    BOOL search = argc == 3 && !strcmp(argv[2], "search");
+    BOOL animation_pixels = argc == 3 && !strcmp(argv[2], "animationpixels");
+    BOOL clicks = animation_pixels || (argc == 3 && !strcmp(argv[2], "taskbar"));
+    enum window_gesture gesture = RESIZE_WINDOW;
+    if (argc == 3 && !strcmp(argv[2], "search")) gesture = CHECK_SEARCH_BAND;
+    if (argc == 3 && !strcmp(argv[2], "searchphase")) gesture = TIME_SEARCH_REPAINT;
+    if (argc == 3 && !strcmp(argv[2], "searchpaint")) gesture = TIME_SEARCH_PAINT;
+    BOOL search = gesture != RESIZE_WINDOW;
     BOOL motion = search || (argc == 3 && !strcmp(argv[2], "motion"));
     if (argc >= 2) {
         rounds = strtol(argv[1], &end, 10);
         if (*end) rounds = 0;
     }
     if ((argc > 2 && !clicks && !motion) || rounds < 1 || rounds > 100) {
-        fprintf(stderr, "Usage: explorerrestore.exe [rounds from 1 to 100 [taskbar|motion|search]]\n");
+        fprintf(stderr, "Usage: explorerrestore.exe [1-100 [taskbar|motion|search|searchphase|searchpaint|animationpixels]]\n");
         return 1;
     }
     HWND console = NULL;
@@ -181,25 +196,37 @@ int main(int argc, char **argv)
            GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
     if (motion) printf("explorer_ui_thread=%lu\n", thread);
     Sleep(2000);
+    RECT patch = {0};
     if (clicks) {
         if (!find_button()) {
             fprintf(stderr, "Dedicated folder taskbar button not found.\n");
             goto done;
         }
         printf("taskbar_button=%ld,%ld\n", button.x, button.y);
+        if (animation_pixels) {
+            RECT w, bar;
+            if (!GetWindowRect(target, &w) || !GetWindowRect(taskbar, &bar) ||
+                bar.top <= w.bottom + 32 || button.x <= w.left + 2 || button.x >= w.right - 2) {
+                fprintf(stderr, "Place the taskbar below the folder with its button inside the folder's horizontal span.\n");
+                goto done;
+            }
+            patch = (RECT){button.x, w.top + 8, button.x + 2, bar.top - 16};
+        }
     }
     if (motion && EventWriteString(trace, 4, 0, L"motion-run-start")) goto done;
     for (int i = 0; i < rounds; ++i) {
         if (motion) {
             if ((!search && !measure_window_motion(target, trace, MOVE_WINDOW, i + 1)) ||
-                !measure_window_motion(target, trace, search ? CHECK_SEARCH_BAND : RESIZE_WINDOW, i + 1) ||
+                !measure_window_motion(target, trace, gesture, i + 1) ||
                 FAILED(DwmIsCompositionEnabled(&composition)) || !composition) {
                 fprintf(stderr, "Movement failed at round %d.\n", i + 1);
                 goto done;
             }
             continue;
         }
-        if (!transition(FALSE) || !(clicks ? click_restore() : transition(TRUE)) ||
+        BOOL minimized = animation_pixels ? sample_transition(FALSE, i + 1, patch) : transition(FALSE);
+        if (!minimized || !(animation_pixels ? sample_transition(TRUE, i + 1, patch) :
+                            clicks ? click_restore() : transition(TRUE)) ||
             FAILED(DwmIsCompositionEnabled(&composition)) || !composition) {
             fprintf(stderr, "Transition failed at round %d.\n", i + 1);
             goto done;
