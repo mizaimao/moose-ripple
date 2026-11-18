@@ -518,6 +518,24 @@ static bool rvd_res_is_referenced(struct virgl_winsys *vws, struct virgl_cmd_buf
    return p_atomic_read(&res->num_cs_references) != 0;
 }
 
+/* A buffer is empty when it holds only what Mesa puts in every one: the space kept for
+ * transfers (ended by END_TRANSFERS, whose length covers the unused rest of it) and the choice
+ * of sub-context (SET_SUB_CTX). Every buffer starts with its own SET_SUB_CTX, so leaving one
+ * out changes nothing on the host. */
+static bool rvd_cmd_buf_is_empty(const struct rvd_cmd_buf *cbuf)
+{
+   uint32_t i = 0, n = cbuf->base.cdw;
+
+   while (i < n) {
+      uint32_t head = cbuf->base.buf[i], cmd = head & 0xff;
+      if (cmd != VIRGL_CCMD_NOP && cmd != VIRGL_CCMD_SET_SUB_CTX &&
+          cmd != VIRGL_CCMD_END_TRANSFERS)
+         return false;
+      i += (head >> 16) + 1;
+   }
+   return true;
+}
+
 static int rvd_submit_cmd(struct virgl_winsys *vws, struct virgl_cmd_buf *_cbuf,
                           struct pipe_fence_handle **fence)
 {
@@ -528,6 +546,17 @@ static int rvd_submit_cmd(struct virgl_winsys *vws, struct virgl_cmd_buf *_cbuf,
 
    if (cbuf->base.cdw == 0)
       return 0;
+   if (rvd_cmd_buf_is_empty(cbuf)) {
+      /* Nothing for the host: the frontends flush with a fence after every frame, and Mesa then
+       * submits even an empty buffer. Each submission is a round trip through the host, and the
+       * fences here are complete when they are made, so leave it out. */
+      RVD_LOG("empty submit left out\n");
+      cbuf->base.cdw = 0;
+      if (fence)
+         *fence = rvd_fence_create();
+      rvd_clear_res_list(cbuf);
+      return 0;
+   }
    s->context = ws->ctx;
    s->bytes = cbuf->base.cdw * 4;
    if (rvd_log_file(0)) {
