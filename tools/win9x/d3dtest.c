@@ -79,8 +79,9 @@ static HRESULT CALLBACK enum_z(LPDDPIXELFORMAT pf, LPVOID ctx)
 {
     DDPIXELFORMAT *best = (DDPIXELFORMAT *)ctx;
     printf("z format: %lu bits, flags %08lx\n", pf->dwZBufferBitDepth, pf->dwFlags);
-    if (pf->dwFlags & DDPF_ZBUFFER && pf->dwZBufferBitDepth >= best->dwZBufferBitDepth &&
-        !(pf->dwFlags & DDPF_STENCILBUFFER))
+    /* the deepest, and of those one with a stencil buffer (the stencil check needs it) */
+    if ((pf->dwFlags & DDPF_ZBUFFER) && (pf->dwZBufferBitDepth > best->dwZBufferBitDepth ||
+        (pf->dwZBufferBitDepth == best->dwZBufferBitDepth && (pf->dwFlags & DDPF_STENCILBUFFER))))
         *best = *pf;
     return D3DENUMRET_OK;
 }
@@ -391,6 +392,282 @@ static void cpu_writes(LPDIRECT3DDEVICE7 dev, LPDIRECTDRAWSURFACE7 back, int w, 
     expect(back, bpp, "clear colour around them", w * 3 / 4, h * 3 / 4, 0, 0, 102);
 }
 
+/* ---- Mipmaps: a 64x64 texture whose 7 levels each have a colour of their own; a quad of 8x8
+   pixels must show level 3, one of 64x64 level 0. */
+static const DWORD mip_colours[7] = {
+    0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFF00, 0xFFFF00FF, 0xFF00FFFF, 0xFFFFFFFF
+};
+
+static LPDIRECTDRAWSURFACE7 mip_make(LPDIRECTDRAW7 dd, DWORD caps, DWORD caps2)
+{
+    LPDIRECTDRAWSURFACE7 t = NULL;
+    DDSURFACEDESC2 d;
+
+    memset(&d, 0, sizeof d);
+    d.dwSize = sizeof d;
+    d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT | DDSD_MIPMAPCOUNT;
+    d.ddsCaps.dwCaps = DDSCAPS_TEXTURE | DDSCAPS_MIPMAP | DDSCAPS_COMPLEX | caps;
+    d.ddsCaps.dwCaps2 = caps2;
+    d.dwWidth = d.dwHeight = 64;
+    d.dwMipMapCount = 7;
+    d.ddpfPixelFormat.dwSize = sizeof d.ddpfPixelFormat;
+    d.ddpfPixelFormat.dwFlags = DDPF_RGB | DDPF_ALPHAPIXELS;
+    d.ddpfPixelFormat.dwRGBBitCount = 32;
+    d.ddpfPixelFormat.dwRBitMask = 0xFF0000;
+    d.ddpfPixelFormat.dwGBitMask = 0xFF00;
+    d.ddpfPixelFormat.dwBBitMask = 0xFF;
+    d.ddpfPixelFormat.dwRGBAlphaBitMask = 0xFF000000;
+    if (IDirectDraw7_CreateSurface(dd, &d, &t, NULL) != DD_OK)
+        return NULL;
+    return t;
+}
+
+/* Fill one level (0: the top) with a colour; 0 if that level isn't there. */
+static int mip_fill(LPDIRECTDRAWSURFACE7 top, int level, DWORD colour)
+{
+    LPDIRECTDRAWSURFACE7 s = top, next;
+    DDSURFACEDESC2 d;
+    DDSCAPS2 caps;
+    DWORD x, y;
+    int i, ok = 0;
+
+    IDirectDrawSurface7_AddRef(s);
+    for (i = 0; i < level; i++) {
+        memset(&caps, 0, sizeof caps);
+        caps.dwCaps = DDSCAPS_TEXTURE | DDSCAPS_MIPMAP;
+        next = NULL;
+        IDirectDrawSurface7_GetAttachedSurface(s, &caps, &next);
+        IDirectDrawSurface7_Release(s);
+        if (!next)
+            return 0;
+        s = next;
+    }
+    memset(&d, 0, sizeof d);
+    d.dwSize = sizeof d;
+    if (IDirectDrawSurface7_Lock(s, NULL, &d, DDLOCK_WAIT | DDLOCK_WRITEONLY, NULL) == DD_OK) {
+        for (y = 0; y < d.dwHeight; y++)
+            for (x = 0; x < d.dwWidth; x++)
+                ((DWORD *)((BYTE *)d.lpSurface + y * d.lPitch))[x] = colour;
+        IDirectDrawSurface7_Unlock(s, NULL);
+        ok = 1;
+    }
+    IDirectDrawSurface7_Release(s);
+    return ok;
+}
+
+/* A square of size pixels with the texture, its top left corner at 96,96; then the colour in
+   its middle. */
+static void mip_draw(LPDIRECT3DDEVICE7 dev, LPDIRECTDRAWSURFACE7 back, LPDIRECTDRAWSURFACE7 tex,
+                     int bpp, float size, DWORD mipfilter, float bias, const char *what,
+                     DWORD expect_colour)
+{
+    TLV v[4];
+
+    IDirect3DDevice7_Clear(dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0, 1.0f, 0);
+    IDirect3DDevice7_BeginScene(dev);
+    IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_ZENABLE, FALSE);
+    IDirect3DDevice7_SetTexture(dev, 0, tex);
+    IDirect3DDevice7_SetTextureStageState(dev, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    IDirect3DDevice7_SetTextureStageState(dev, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    IDirect3DDevice7_SetTextureStageState(dev, 0, D3DTSS_MINFILTER, D3DTFN_POINT);
+    IDirect3DDevice7_SetTextureStageState(dev, 0, D3DTSS_MAGFILTER, D3DTFG_POINT);
+    IDirect3DDevice7_SetTextureStageState(dev, 0, D3DTSS_MIPFILTER, mipfilter);
+    IDirect3DDevice7_SetTextureStageState(dev, 0, D3DTSS_MIPMAPLODBIAS, *(DWORD *)&bias);
+    v[0] = tlv(96.0f, 96.0f, 0.5f, 0xFFFFFFFF, 0, 0);
+    v[1] = tlv(96.0f + size, 96.0f, 0.5f, 0xFFFFFFFF, 1, 0);
+    v[2] = tlv(96.0f, 96.0f + size, 0.5f, 0xFFFFFFFF, 0, 1);
+    v[3] = tlv(96.0f + size, 96.0f + size, 0.5f, 0xFFFFFFFF, 1, 1);
+    IDirect3DDevice7_DrawPrimitive(dev, D3DPT_TRIANGLESTRIP, TLV_FVF, v, 4, 0);
+    bias = 0.0f;
+    IDirect3DDevice7_SetTextureStageState(dev, 0, D3DTSS_MIPMAPLODBIAS, *(DWORD *)&bias);
+    IDirect3DDevice7_SetTextureStageState(dev, 0, D3DTSS_MIPFILTER, D3DTFP_NONE);
+    IDirect3DDevice7_SetTexture(dev, 0, NULL);
+    IDirect3DDevice7_SetTextureStageState(dev, 0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_ZENABLE, TRUE);
+    IDirect3DDevice7_EndScene(dev);
+    expect(back, bpp, what, 96 + (int)size / 2, 96 + (int)size / 2, (expect_colour >> 16) & 255,
+           (expect_colour >> 8) & 255, expect_colour & 255);
+}
+
+static void mipmaps(LPDIRECTDRAW7 dd, LPDIRECT3DDEVICE7 dev, LPDIRECTDRAWSURFACE7 back, int bpp,
+                    const D3DDEVICEDESC7 *hal)
+{
+    static const struct { const char *name; DWORD caps, caps2; } kinds[] = {
+        { "video memory", DDSCAPS_VIDEOMEMORY, 0 },
+        { "managed", 0, DDSCAPS2_TEXTUREMANAGE },      /* uploaded with texture blits */
+    };
+    int offered = (hal->dpcTriCaps.dwTextureFilterCaps & D3DPTFILTERCAPS_MIPFPOINT) != 0;
+    char what[80];
+    int k, l;
+
+    printf("mipmaps (%s):\n", offered ? "offered" : "not offered");
+    for (k = 0; k < 2; k++) {
+        LPDIRECTDRAWSURFACE7 t = mip_make(dd, kinds[k].caps, kinds[k].caps2);
+        if (!t) {
+            sprintf(what, "mipmapped texture, %s", kinds[k].name);
+            not_made(what, offered);
+            continue;
+        }
+        for (l = 0; l < 7; l++) {
+            if (!mip_fill(t, l, mip_colours[l])) {
+                printf("  %s: level %d missing\n", kinds[k].name, l);
+                failures++;
+                break;
+            }
+        }
+        if (l == 7) {
+            sprintf(what, "%s, 64x64: level 0", kinds[k].name);
+            mip_draw(dev, back, t, bpp, 64.0f, D3DTFP_POINT, 0.0f, what, mip_colours[0]);
+            sprintf(what, "%s, 8x8: level 3", kinds[k].name);
+            mip_draw(dev, back, t, bpp, 8.0f, D3DTFP_POINT, 0.0f, what, mip_colours[3]);
+            sprintf(what, "%s, 8x8, no mip filter: 0", kinds[k].name);
+            mip_draw(dev, back, t, bpp, 8.0f, D3DTFP_NONE, 0.0f, what, mip_colours[0]);
+            if (hal->dpcTriCaps.dwRasterCaps & D3DPRASTERCAPS_MIPMAPLODBIAS) {
+                sprintf(what, "%s, 8x8, bias +1: level 4", kinds[k].name);
+                mip_draw(dev, back, t, bpp, 8.0f, D3DTFP_POINT, 1.0f, what, mip_colours[4]);
+            }
+            /* one level written again */
+            mip_fill(t, 3, mip_colours[6]);
+            sprintf(what, "%s, level 3 rewritten: white", kinds[k].name);
+            mip_draw(dev, back, t, bpp, 8.0f, D3DTFP_POINT, 0.0f, what, mip_colours[6]);
+        }
+        IDirectDrawSurface7_Release(t);
+    }
+}
+
+/* ---- Colour key: a 4x4 texture, black on the left half (the key) and red on the right, drawn
+   over the middle of a blue screen; with the key on, blue must show through on the left. */
+static void colour_key(LPDIRECTDRAW7 dd, LPDIRECT3DDEVICE7 dev, LPDIRECTDRAWSURFACE7 back, int w,
+                       int h, int bpp, const D3DDEVICEDESC7 *hal)
+{
+    static const TEXFMT xrgb = { "32-bit XRGB", 32, 0xFF0000, 0xFF00, 0xFF, 0, 0xFFFF0000, 0, 0 };
+    static const struct { const char *name; const TEXFMT *f; } kinds[] = {
+        { "32-bit XRGB", &xrgb }, { "16-bit 565", &texfmts[1] },
+    };
+    int offered = (hal->dpcTriCaps.dwTextureCaps & D3DPTEXTURECAPS_TRANSPARENCY) != 0;
+    char what[80];
+    int k, on;
+
+    printf("colour key (%s):\n", offered ? "offered" : "not offered");
+    for (k = 0; k < 2; k++) {
+        const TEXFMT *f = kinds[k].f;
+        LPDIRECTDRAWSURFACE7 t = tex_make(dd, f, DDSCAPS_VIDEOMEMORY, DDSCAPS_TEXTURE);
+        DDCOLORKEY key = { 0, 0 };
+        DDSURFACEDESC2 d;
+        DWORD x, y;
+
+        if (!t) {
+            sprintf(what, "%s texture for the colour key", kinds[k].name);
+            not_made(what, offered);
+            continue;
+        }
+        memset(&d, 0, sizeof d);
+        d.dwSize = sizeof d;
+        if (IDirectDrawSurface7_Lock(t, NULL, &d, DDLOCK_WAIT | DDLOCK_WRITEONLY, NULL) == DD_OK) {
+            for (y = 0; y < 4; y++)
+                for (x = 0; x < 4; x++) {
+                    BYTE *row = (BYTE *)d.lpSurface + y * d.lPitch;
+                    DWORD v = x < 2 ? 0 : (f->bits == 32 ? 0xFF0000 : 0xF800);
+                    if (f->bits == 32)
+                        ((DWORD *)row)[x] = v;
+                    else
+                        ((WORD *)row)[x] = (WORD)v;
+                }
+            IDirectDrawSurface7_Unlock(t, NULL);
+        }
+        if (IDirectDrawSurface7_SetColorKey(t, DDCKEY_SRCBLT, &key) != DD_OK) {
+            printf("  %s: SetColorKey failed\n", kinds[k].name);
+            failures++;
+        }
+        for (on = 1; on >= 0; on--) {
+            TLV v[4];
+            IDirect3DDevice7_Clear(dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0x000000FF,
+                                   1.0f, 0);
+            IDirect3DDevice7_BeginScene(dev);
+            IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_ZENABLE, FALSE);
+            IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_COLORKEYENABLE, on);
+            IDirect3DDevice7_SetTexture(dev, 0, t);
+            IDirect3DDevice7_SetTextureStageState(dev, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+            IDirect3DDevice7_SetTextureStageState(dev, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+            v[0] = tlv(w * 0.25f, h * 0.25f, 0.5f, 0xFFFFFFFF, 0, 0);
+            v[1] = tlv(w * 0.75f, h * 0.25f, 0.5f, 0xFFFFFFFF, 1, 0);
+            v[2] = tlv(w * 0.25f, h * 0.75f, 0.5f, 0xFFFFFFFF, 0, 1);
+            v[3] = tlv(w * 0.75f, h * 0.75f, 0.5f, 0xFFFFFFFF, 1, 1);
+            IDirect3DDevice7_DrawPrimitive(dev, D3DPT_TRIANGLESTRIP, TLV_FVF, v, 4, 0);
+            IDirect3DDevice7_SetTexture(dev, 0, NULL);
+            IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_COLORKEYENABLE, FALSE);
+            IDirect3DDevice7_SetTextureStageState(dev, 0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+            IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_ZENABLE, TRUE);
+            IDirect3DDevice7_EndScene(dev);
+            sprintf(what, "%s, key %s: left", kinds[k].name, on ? "on" : "off");
+            if (on)
+                expect(back, bpp, what, w * 3 / 8, h / 2, 0, 0, 255);
+            else
+                expect(back, bpp, what, w * 3 / 8, h / 2, 0, 0, 0);
+            sprintf(what, "%s, key %s: right", kinds[k].name, on ? "on" : "off");
+            expect(back, bpp, what, w * 5 / 8, h / 2, 255, 0, 0);
+        }
+        IDirectDrawSurface7_Release(t);
+    }
+}
+
+/* A quad over a part of the screen, one colour, no texture. */
+static void quad(LPDIRECT3DDEVICE7 dev, float x0, float y0, float x1, float y1, DWORD colour)
+{
+    TLV v[4];
+
+    v[0] = tlv(x0, y0, 0.5f, colour, 0, 0);
+    v[1] = tlv(x1, y0, 0.5f, colour, 0, 0);
+    v[2] = tlv(x0, y1, 0.5f, colour, 0, 0);
+    v[3] = tlv(x1, y1, 0.5f, colour, 0, 0);
+    IDirect3DDevice7_DrawPrimitive(dev, D3DPT_TRIANGLESTRIP, TLV_FVF, v, 4, 0);
+}
+
+/* ---- Stencil: a quad on the left half marks the stencil buffer (1); a green quad over the
+   whole screen, drawn only where the stencil is 1, must cover the left half and not the right.
+   Then incrementing: a second mark over the middle makes 2 there. */
+static void stencil(LPDIRECT3DDEVICE7 dev, LPDIRECTDRAWSURFACE7 back, int w, int h, int bpp,
+                    const DDPIXELFORMAT *zpf)
+{
+    if (!(zpf->dwFlags & DDPF_STENCILBUFFER)) {
+        printf("stencil: no z-buffer format with a stencil buffer\n");
+        return;
+    }
+    printf("stencil (%lu bits):\n", zpf->dwStencilBitDepth);
+    IDirect3DDevice7_Clear(dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL,
+                           0x000000FF, 1.0f, 0);
+    IDirect3DDevice7_BeginScene(dev);
+    IDirect3DDevice7_SetTextureStageState(dev, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG2);
+    IDirect3DDevice7_SetTextureStageState(dev, 0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+    IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_ZENABLE, FALSE);
+    IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_STENCILENABLE, TRUE);
+    /* mark: always passes, writes the reference value 1, the colour is red */
+    IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_STENCILFUNC, D3DCMP_ALWAYS);
+    IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_STENCILREF, 1);
+    IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_STENCILPASS, D3DSTENCILOP_REPLACE);
+    quad(dev, 0, 0, w * 0.5f, (float)h, 0xFFFF0000);
+    /* the middle third: one more */
+    IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_STENCILPASS, D3DSTENCILOP_INCRSAT);
+    quad(dev, w / 3.0f, 0, w * 2 / 3.0f, (float)h, 0xFFFF0000);
+    /* green where the stencil is 1, white where it is 2 */
+    IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_STENCILPASS, D3DSTENCILOP_KEEP);
+    IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_STENCILFUNC, D3DCMP_EQUAL);
+    quad(dev, 0, 0, (float)w, (float)h, 0xFF00FF00);
+    IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_STENCILREF, 2);
+    quad(dev, 0, 0, (float)w, (float)h, 0xFFFFFFFF);
+    IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_STENCILENABLE, FALSE);
+    IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_STENCILFUNC, D3DCMP_ALWAYS);
+    IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_STENCILREF, 0);
+    IDirect3DDevice7_SetRenderState(dev, D3DRENDERSTATE_ZENABLE, TRUE);
+    IDirect3DDevice7_SetTextureStageState(dev, 0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    IDirect3DDevice7_SetTextureStageState(dev, 0, D3DTSS_COLORARG2, D3DTA_CURRENT);
+    IDirect3DDevice7_EndScene(dev);
+    expect(back, bpp, "stencil 1: green", w / 6, h / 2, 0, 255, 0);
+    expect(back, bpp, "stencil 2: white", w * 5 / 12, h / 2, 255, 255, 255);
+    expect(back, bpp, "stencil 0+1 (right of 2): green", w * 7 / 12, h / 2, 0, 255, 0);
+    expect(back, bpp, "stencil 0: clear colour", w * 5 / 6, h / 2, 0, 0, 255);
+}
+
 static LPDIRECTDRAWSURFACE7 make_texture(LPDIRECTDRAW7 dd, int bpp)
 {
     static const DWORD texels[4] = { 0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFFFFFF00 };
@@ -534,6 +811,9 @@ int main(int argc, char **argv)
     }
     expect(back, bpp, "blend: white on blue", w * 3 / 4, h * 3 / 4, 128, 128, 179);
     texture_updates(dd, dev, back, w, h, bpp, hal.dwDevCaps);
+    mipmaps(dd, dev, back, bpp, &hal);
+    colour_key(dd, dev, back, w, h, bpp, &hal);
+    stencil(dev, back, w, h, bpp, &zpf);
     cpu_writes(dev, back, w, h, bpp);
     IDirectDrawSurface7_Flip(front, NULL, DDFLIP_WAIT);
 

@@ -81,8 +81,27 @@ each per context, by surface memory), so the flips of a chain, after which Direc
 next back buffer as the target every frame, cost no copy; a target's memory is loaded only when
 the program wrote it or the GPU has no picture of it yet.
 
-Not yet: transform and lighting in the driver (Direct3D does it on the CPU), mipmap filtering
-(level 0 only), colour keys, stencil, palettized textures, state blocks recorded by the driver.
+Since 2026-11-17 also:
+- **Mipmaps.** Every level of a mipmapped texture is uploaded (the levels hang off the top one
+  in DirectDraw's attach list), with point or linear filtering between levels, the program's
+  level-of-detail bias (`D3DTSS_MIPMAPLODBIAS`) and largest level (`D3DTSS_MAXMIPLEVEL`). A
+  write to any level uploads the texture again; a texture blit copies every level the two
+  textures have in common, with the rectangle scaled to each. Before, only the top level was
+  used, so distant surfaces shimmered.
+- **Colour keys.** With `D3DRENDERSTATE_COLORKEYENABLE` on, a texture that has a source colour
+  key is uploaded as a 32-bit copy in which texels of the key's colour have alpha 0, and an
+  alpha test leaves them out (unless the program tests alpha itself; then its own test does,
+  as long as the texture's alpha reaches it).
+- **Stencil.** A 32-bit z-buffer format with 8 stencil bits, and the stencil render states
+  (every z-buffer already had a stencil part on the GPU).
+
+3DMark 2000 now gets mipmapped textures and runs to the end as before. Old and new driver in
+turn on the same host, each after its own restart (2026-11-17): old 11316 and 11183, new 11265
+and 11326 3D marks. That is no change; the host gave lower numbers that day than on
+2026-11-16 (11722 to 12189).
+
+Not yet: transform and lighting in the driver (Direct3D does it on the CPU), palettized
+textures, state blocks recorded by the driver, colour-key ranges and alpha-blended colour keys.
 
 `tools/win9x/d3dtest.c` checks it the way a game uses it: on Windows 98 SE with DirectX 7 in
 Proxmox (virgl on the host's Intel UHD 630) every pixel check passes (clear, Gouraud triangle,
@@ -90,7 +109,11 @@ depth test, texture texels, blending), the screen shows the frame, and the scene
 1,040 frames a second at 640x480x32 (each frame read back from the GPU and flipped).
 
 It also checks indexed drawing and texture updates (32-bit, 565, 1555 and 4444 textures:
-locked again, blitted from system memory, a texture in system memory rewritten).
+locked again, blitted from system memory, a texture in system memory rewritten), and since
+2026-11-17 mipmaps (a 64x64 texture whose seven levels have seven colours, in video memory and
+managed by DirectX: the level a quad's size picks, the bias, one level rewritten), colour keys
+(32-bit and 565, key on and off) and stencil (replace, increment, equal). All pass at 640x480
+in 32 and 16 bits.
 
 Windows 98 gives a new process the id of one that has just ended; the DLL's data is shared by
 all processes, so it tells processes apart by a number of its own kept in each process's
