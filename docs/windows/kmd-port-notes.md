@@ -982,9 +982,12 @@ No fine-timer samples remain in any of the five modes (idle included). The 64-bi
 texture regression tests still pass, and five more New-submenu cycles leave Explorer and
 the compositor running with no new crash events.
 
-These are clock measurements, not frame-rate claims. The DWM timing queries returned
-`DWM_E_COMPOSITIONDISABLED` even while glass was visible and `DwmIsCompositionEnabled` returned
-true; their zero frame counters are unusable. In-guest screen readback also took hundreds of
+These are clock measurements, not frame-rate claims. The early DWM timing queries returned
+`DWM_E_COMPOSITIONDISABLED` from a worker thread even while glass was visible and
+`DwmIsCompositionEnabled` returned true. Initializing the query on the window's UI thread
+made the global query succeed; the probe now keeps its queries on that thread. The query for
+the GDI window returns `E_PENDING`, and global submitted-frame identifiers must not be
+mistaken for counts of presented frames. In-guest screen readback also took hundreds of
 milliseconds per capture, so it cannot establish smooth animation. The UI probe now limits
 requests by QPC as well as pumping messages, since a move/resize generates messages that can
 otherwise make its message-aware wait return immediately. Exact frame pacing remains to be

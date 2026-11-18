@@ -19,7 +19,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-static volatile LONG done, actions;
+static volatile LONG actions;
+static HANDLE sample_process;
 static LARGE_INTEGER frequency, start;
 static const char *mode;
 static ULONGLONG tick_start;
@@ -70,16 +71,15 @@ static HANDLE compositor(DWORD *pid)
     return process;
 }
 
-static DWORD WINAPI sample(void *unused)
+static void sample(void)
 {
-    DWORD pid = 0;
-    HANDLE process = compositor(&pid);
-    unsigned n = 0;
-    (void)unused;
-    printf("ms,mode,actions,query_ms,hr,dwm_pid,dwm_cpu_100ns,probe_cpu_100ns,"
+    static DWORD pid;
+    static unsigned n;
+    HANDLE process = sample_process;
+    if (!n) printf("ms,mode,actions,query_ms,hr,dwm_pid,dwm_cpu_100ns,probe_cpu_100ns,"
            "frame,submitted,confirmed,late,outstanding,refresh,compose_qpc,"
            "displayed,dropped,missed,pixels,refresh_num,refresh_den,tick_ms,timer_100ns,window_hr\n");
-    do {
+    {
         DWM_TIMING_INFO t;
         double before = elapsed_ms(), after;
         HRESULT hr;
@@ -109,11 +109,8 @@ static DWORD WINAPI sample(void *unused)
                t.cPixelsDrawn, t.rateRefresh.uiNumerator, t.rateRefresh.uiDenominator,
                GetTickCount64() - tick_start, current, (unsigned long)window_hr);
         if (++n % 10 == 0) fflush(stdout);
-        Sleep(100);
-    } while (!InterlockedCompareExchange(&done, 0, 0));
-    if (process) CloseHandle(process);
-    fflush(stdout);
-    return 0;
+    }
+    sample_process = process;
 }
 
 static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wp, LPARAM lp)
@@ -146,12 +143,11 @@ int main(int argc, char **argv)
 {
     WNDCLASSA wc;
     HWND window;
-    HANDLE sampler;
     MSG msg;
     BOOL enabled = FALSE, quit = FALSE;
     ANIMATIONINFO animation = { sizeof(animation), 0 };
     int seconds = argc > 2 ? atoi(argv[2]) : 15;
-    double next_animation = 0, next_operation = 0;
+    double next_animation = 0, next_operation = 0, next_sample = 0;
     unsigned step = 0;
     mode = argc > 1 ? argv[1] : "move";
     if (seconds < 1 || seconds > 300 ||
@@ -180,6 +176,12 @@ int main(int argc, char **argv)
                            80, 80, 673, 430, NULL, NULL, wc.hInstance, NULL);
     if (!window) return 1;
     ShowWindow(window, SW_SHOWNORMAL);
+    fprintf(stderr, "initial window: visible=%d iconic=%d\n",
+            IsWindowVisible(window), IsIconic(window));
+    /* A parent's STARTUPINFO can override the first ShowWindow call. */
+    ShowWindow(window, SW_RESTORE);
+    SetWindowPos(window, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    SetForegroundWindow(window);
     UpdateWindow(window);
     {
         DWM_TIMING_INFO timing = {0};
@@ -193,8 +195,6 @@ int main(int argc, char **argv)
                 (unsigned long)global_hr, (unsigned long)window_hr);
     }
     probe_window = window;
-    sampler = CreateThread(NULL, 0, sample, NULL, 0, NULL);
-    if (!sampler) { DestroyWindow(window); return 1; }
     while (!quit && elapsed_ms() < seconds * 1000.0) {
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) { quit = TRUE; break; }
@@ -204,6 +204,11 @@ int main(int argc, char **argv)
         /* Moving/resizing generates messages itself. A message-aware wait alone
          * can return immediately and flood the compositor with requests. */
         double now = elapsed_ms();
+        if (now >= next_sample) {
+            sample();
+            now = elapsed_ms();
+            next_sample = now + 100;
+        }
         if (now < next_operation) {
             DWORD wait_ms = (DWORD)(next_operation - now) + 1;
             MsgWaitForMultipleObjects(0, NULL, FALSE, wait_ms, QS_ALLINPUT);
@@ -229,9 +234,8 @@ int main(int argc, char **argv)
         }
         ++step;
     }
-    InterlockedExchange(&done, 1);
-    WaitForSingleObject(sampler, INFINITE);
-    CloseHandle(sampler);
+    if (sample_process) CloseHandle(sample_process);
+    fflush(stdout);
     if (IsWindow(window)) DestroyWindow(window);
     return 0;
 }

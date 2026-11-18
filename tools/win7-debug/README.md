@@ -103,9 +103,10 @@ Run the executables outside the driver package directory so they use the install
   desktop, and takes over the pointer/keyboard; leave input alone until it finishes.
 - `dwmtiming.exe move 12 > move.csv`: repeat window operations for 12 QPC seconds. Modes are
   `idle`, `move`, `repaint`, `resize`, and `animate`. CSV includes tick time, timer resolution,
-  requested operations and DWM timing results. Check the HRESULTs before interpreting DWM
-  counters; UTM's composited desktop returned `DWM_E_COMPOSITIONDISABLED` for these queries.
-  Operation counts are not frame rates.
+  requested operations and DWM timing results. Queries run on the window's UI thread:
+  querying first from a worker returned `DWM_E_COMPOSITIONDISABLED` in the UTM guest.
+  Check HRESULTs; the global query succeeds, while the GDI window query returns `E_PENDING`.
+  Operation counts and submitted frame identifiers are not counts of displayed frames.
 - `timerbench.exe > timerbench.txt`: compare Windows' tick clock with QPC at several temporary
   timer resolutions. It releases each request and finishes with the ordinary timer. Run
   without other active programs requesting fine timers; the actual resolution is recorded.
