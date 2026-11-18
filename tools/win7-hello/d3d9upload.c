@@ -11,6 +11,7 @@
 #include <windows.h>
 #include <d3d9.h>
 #include <stdio.h>
+#include <string.h>
 
 static volatile LONG guarded;
 static LONG CALLBACK fault(EXCEPTION_POINTERS *exception)
@@ -65,7 +66,60 @@ static int picture(IDirect3DDevice9 *device, IDirect3DTexture9 *texture, DWORD e
     return pixel != (expected & 0xffffff);
 }
 
-int main(void)
+/* A subrectangle of an image retains the pitch of the full source. Check
+ * every pixel, including the destination pixels outside the updated box. */
+static int pitched_upload(IDirect3DDevice9 *device)
+{
+    IDirect3DTexture9 *texture = NULL;
+    IDirect3DSurface9 *src = NULL, *dst = NULL, *readback = NULL;
+    const RECT region = {13, 7, 36, 24};
+    const POINT offset = {4, 9};
+    const DWORD background = 0xff654321;
+    DWORD pixels[97 * 59];
+    HANDLE memory = pixels;
+    D3DLOCKED_RECT lock;
+    int failures = 0;
+    memset(pixels, 0, sizeof(pixels));
+    CHECK(IDirect3DDevice9_CreateTexture(device, 97, 59, 1, 0, D3DFMT_A8R8G8B8,
+                                        D3DPOOL_SYSTEMMEM, &texture, &memory));
+    CHECK(IDirect3DTexture9_GetSurfaceLevel(texture, 0, &src));
+    CHECK(IDirect3DDevice9_CreateRenderTarget(device, 32, 32, D3DFMT_A8R8G8B8,
+                                              D3DMULTISAMPLE_NONE, 0, FALSE, &dst, NULL));
+    CHECK(IDirect3DDevice9_CreateOffscreenPlainSurface(device, 32, 32, D3DFMT_A8R8G8B8,
+                                                      D3DPOOL_SYSTEMMEM, &readback, NULL));
+    CHECK(IDirect3DDevice9_ColorFill(device, dst, NULL, background));
+    for (int pass = 1; pass <= 2; ++pass) {
+        for (int y = 0; y < 59; ++y)
+            for (int x = 0; x < 97; ++x)
+                pixels[y * 97 + x] = 0xff000000u | (pass << 16) | (y << 8) | x;
+        CHECK(IDirect3DDevice9_UpdateSurface(device, src, &region, dst, &offset));
+        CHECK(IDirect3DDevice9_GetRenderTargetData(device, dst, readback));
+        CHECK(IDirect3DSurface9_LockRect(readback, &lock, NULL, D3DLOCK_READONLY));
+        for (int y = 0; y < 32; ++y) {
+            const DWORD *row = (const DWORD *)((const BYTE *)lock.pBits + y * lock.Pitch);
+            for (int x = 0; x < 32; ++x) {
+                int sx = x - offset.x + region.left, sy = y - offset.y + region.top;
+                DWORD expected = background;
+                if (sx >= region.left && sx < region.right && sy >= region.top && sy < region.bottom)
+                    expected = pixels[sy * 97 + sx];
+                if (row[x] != expected) {
+                    if (!failures)
+                        printf("pixel (%d,%d) got %08lx expected %08lx\n", x, y, row[x], expected);
+                    ++failures;
+                }
+            }
+        }
+        CHECK(IDirect3DSurface9_UnlockRect(readback));
+    }
+    IDirect3DSurface9_Release(readback);
+    IDirect3DSurface9_Release(dst);
+    IDirect3DSurface9_Release(src);
+    IDirect3DTexture9_Release(texture);
+    printf("Pitched subrectangle uploads: %d mismatches across 2048 pixels\n", failures);
+    return failures != 0;
+}
+
+int main(int argc, char **argv)
 {
     WNDCLASSA wc = {0};
     HWND window;
@@ -98,6 +152,13 @@ int main(void)
     CHECK(IDirect3D9Ex_CreateDeviceEx(d3d_ex, 0, D3DDEVTYPE_HAL, window,
                                      D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, NULL, &device_ex));
     device = (IDirect3DDevice9 *)device_ex;
+    if (argc == 2 && !strcmp(argv[1], "pitch")) {
+        int rc = pitched_upload(device);
+        IDirect3DDevice9_Release(device);
+        IDirect3D9Ex_Release(d3d_ex);
+        DestroyWindow(window);
+        return rc;
+    }
     pixels = VirtualAlloc(NULL, width * height * 4, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!pixels) return 1;
     for (i = 0; i < width * height; ++i) pixels[i] = 0xff2468ac;

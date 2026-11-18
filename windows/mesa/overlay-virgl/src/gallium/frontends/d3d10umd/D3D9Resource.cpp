@@ -1066,6 +1066,10 @@ D3D9TextureSubdata(D3D9Device *device, D3D9Resource *resource,
    unsigned upload_stride = stride;
    uintptr_t upload_layer_stride = layer_stride;
    uint8_t *tight = NULL;
+   /* Gallium's 2D copy accepts the original row pitch as a signed int.
+    * Window bitmaps often describe a rectangle inside a wider surface. */
+   const bool pitched_bitmap = depth == 1 && stride <= INT_MAX &&
+      (resource->format == D3DDDIFMT_A8R8G8B8 || resource->format == D3DDDIFMT_X8R8G8B8);
 
    if (D3D9FormatIsConvertedBump(resource->format)) {
       tight = D3D9ConvertBumpTexels(resource->format, data, stride,
@@ -1091,7 +1095,7 @@ D3D9TextureSubdata(D3D9Device *device, D3D9Resource *resource,
                                              (const uint8_t *)data + (size_t)z * layer_stride,
                                              stride, box->width, height);
       upload_data = tight;
-   } else if (stride != row_bytes || layer_stride != tight_layer_stride) {
+   } else if (!pitched_bitmap && (stride != row_bytes || layer_stride != tight_layer_stride)) {
       if (depth > SIZE_MAX / tight_layer_stride)
          return false;
       tight = (uint8_t *)malloc((size_t)tight_layer_stride * depth);
@@ -1311,6 +1315,11 @@ D3D9ClearColorPipe(D3D9Device *device, HANDLE resource_handle,
    const unsigned height = (unsigned)(dst.bottom - dst.top);
    const bool full_clear = dst.left == 0 && dst.top == 0 &&
       width == sub->width && height == sub->height;
+   if (!full_clear && sub->cpu_dirty &&
+       !D3D9UploadSubResource(device, resource, subresource_index)) {
+      D3D9ReleasePipeSurface(&surface);
+      return false;
+   }
    const bool yttrium = D3D9IsYttriumScreen(device->pipe->screen);
    const bool upload_full_clear = prefer_upload && yttrium &&
       !(resource->pipe_resource->bind & PIPE_BIND_DISPLAY_TARGET);
@@ -2088,7 +2097,7 @@ D3D9CopyTextureToCpuDestination(D3D9Device *device,
    }
 
    D3D9EndReadbackLock(device, src_sub);
-   dst_sub->cpu_dirty = false;
+   dst_sub->cpu_dirty = dst_resource->pipe_resource != NULL;
    return true;
 }
 
@@ -3134,7 +3143,16 @@ D3D9CreateResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *data)
                       templ.bind);
          }
 
-         for (UINT i = 0; i < resource->surf_count; ++i) {
+         /* A plain system-memory texture may wrap a window bitmap solely
+          * for a Blt. Its pixels are already in sub->data. Keep cpu_dirty
+          * set until an operation actually reads its own Gallium image. */
+         D3DDDI_RESOURCEFLAGS texture_only = {};
+         texture_only.Texture = 1;
+         const bool borrowed_bitmap = data->Pool == D3DDDIPOOL_SYSTEMMEM &&
+            data->Flags.Value == texture_only.Value && data->SurfCount == 1 &&
+            data->MipLevels <= 1 && data->pSurfList[0].pSysMem &&
+            (data->Format == D3DDDIFMT_A8R8G8B8 || data->Format == D3DDDIFMT_X8R8G8B8);
+         for (UINT i = 0; !borrowed_bitmap && i < resource->surf_count; ++i) {
             if (!D3D9UploadSubResource(device, resource, i)) {
                D3D9FreeResource(resource);
                return E_NOTIMPL;
@@ -3896,6 +3914,9 @@ D3D9GetCaptureAllocationHandle(HANDLE hDevice,
       return E_INVALIDARG;
 
    D3D9Resource *resource = D3D9CastResource(data->hResource);
+   if (resource->pipe_resource && sub->cpu_dirty &&
+       !D3D9UploadSubResource(device, resource, 0))
+      return E_FAIL;
    if (resource->display_resource &&
        (!D3D9PublishResource(device, resource) ||
         !yttrium_gdi_flush_handoff(device->pipe, "D3D9 capture allocation")))

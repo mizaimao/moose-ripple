@@ -135,6 +135,25 @@ timing query succeeds throughout the CSV and the compositor PID stays constant.
 The probe waits at least 1.5 seconds between requests. Host delivery timing
 requires a separately synchronized host display log.
 
+For a real Explorer window, run `explorerrestore.exe` in place of the
+`dwmtiming.exe` command inside the same trace session. The probe opens its
+own empty temporary folder in an 800×540 Explorer window. It sends 30
+minimize and restore commands, records the request markers, and verifies
+the window state and Aero composition each round. It closes the window and
+removes the empty folder at the end.
+
+On the analysis machine, run `python3 tools/win7-debug/restore-timing.py transitions.xml`
+on English `tracerpt` output. It reports the initial wait and the longest
+subsequent gap for each run as a median, 95th percentile and maximum. Within
+1.15 seconds of each restore request it counts guest presents preceded by a
+render with a dirty rectangle at least 32 pixels wide and high. This removes
+small updates such as the text caret. The resulting timestamps measure guest
+repaints. Measuring delivery to UTM also requires the host display log.
+
+Run `d3d9upload.exe pitch` and `d3d9upload32.exe pitch` outside the driver
+package directory to verify subrectangle uploads. Each compares every pixel
+after two updates from a wider, caller-owned bitmap.
+
 For user-mode samples, run the program with `RIPPLE_UMD_LOG` set: the user-mode driver writes the
 load addresses of the program's main modules when it is loaded (`guest/prof.cmd` does that for
 one assessment test, `guest/dxone.cmd` runs one test alone). Our driver's functions are named

@@ -701,3 +701,37 @@ Both 32-bit and 64-bit streaming probes verified four rendered tiles, including
 an index write at the far end of the buffer and a discard with earlier draws
 queued. Both texture upload probes passed. Explorer kept the same process
 through ten desktop **New** submenu checks across the two runs.
+
+## Explorer restores and bitmap uploads
+
+Restoring an 800×540 Explorer window exposed another cost. In a six-restore
+driver trace, DWM created a private system-memory texture from a 784×513
+window bitmap on every restore. Its 3,200-byte row pitch included 64 bytes
+outside the image on each row. Creating that resource took a median of 52 ms.
+The following same-size copy into video memory took another 32 ms.
+
+The driver now leaves the pixels of a caller-backed, single-level BGRA or BGRX
+system-memory texture in place until it needs its own GPU image. A window
+bitmap used only as a copy source goes directly into the destination, with
+the original row pitch. The existing dirty flag triggers an upload for a GPU
+read of the source. This follows the system-memory upload approach used by
+Gallium Nine. [Mesa 24.3.4, NineSurface9_CopyMemToDefault](https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-24.3.4/src/gallium/frontends/nine/surface9.c#L630-705)
+
+On the same 1280×1024 UTM boot, the previous release and the new driver each
+ran 30 restores after restarting DWM. All 60 rounds kept Aero active. The
+probe posted a restore command to Explorer's window. DWM presents and UTM host
+draws matched in order over each 1.15-second observation. Substantial repaints
+use the 32×32 dirty-region threshold described above.
+
+| UTM host measurement | Previous release | Direct bitmap upload |
+| --- | ---: | ---: |
+| Median wait for the first substantial repaint | 111 ms | 104 ms |
+| Median of each restore's longest subsequent gap | 185 ms | 120 ms |
+| 95th percentile of those gaps | 312 ms | 183 ms |
+| 95th percentile, counting only gaps that started in the first 500 ms | 254 ms | 183 ms |
+
+The longest subsequent gap with the new driver was 188 ms. One restore still
+took 286 ms to show its first substantial repaint. The window-movement check
+delivered 27.0 and 28.6 host updates per second respectively over the same
+five-second interval. The 32-bit and 64-bit subrectangle tests each compared
+2,048 pixels, including untouched borders, with zero mismatches.
