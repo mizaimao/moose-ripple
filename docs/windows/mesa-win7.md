@@ -831,6 +831,12 @@ percentile gap. On UTM the corresponding results were 5.3 and 226 ms.
 Explorer exposes the newly added area on both systems. UTM's slower
 resizing gives the toolbar larger steps to catch up with.
 
+Reducing the UTM desktop resolution also left the lag visible. With a
+stable guest performance counter and Aero active throughout, the same window
+changed size 5.4 times per second at 1280×1024, 5.1 times at 1024×768 and
+5.5 times after restoring 1280×1024 (three rounds per setting). The search
+edit showed a white block in all five fast resizes at each setting. [UTM timer configuration](test-vms.md#keeping-aero-active-on-cold-boots)
+
 Explorer's window DC already contained a gray fill in the newly exposed
 area while its toolbar still showed the old contents. A diagnostic driver
 copied each relevant source bitmap to private memory before uploading it,

@@ -107,6 +107,10 @@ Run the executables outside the driver package directory so they use the install
   querying first from a worker returned `DWM_E_COMPOSITIONDISABLED` in the UTM guest.
   Check HRESULTs; the global query succeeds, while the GDI window query returns `E_PENDING`.
   Operation counts and submitted frame identifiers are not counts of displayed frames.
+- `timerbench.exe counter` checks whether QPC moves backwards over twelve tick-clock seconds
+  each on one logical processor, with normal scheduling, and while rotating between processors.
+  It prints the counter frequency, number of regressions and largest backwards step. A backwards
+  step gives exit code 1. This checks the clock error that can make Aero exit on a UTM cold boot.
 - `timerbench.exe > timerbench.txt`: compare Windows' tick clock with QPC at several temporary
   timer resolutions. It releases each request and finishes with the ordinary timer. Run
   without other active programs requesting fine timers; the actual resolution is recorded.
