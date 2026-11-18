@@ -808,7 +808,28 @@ resizes with `explorerrestore.exe 10 search` produced a block 86 to 109
 pixels wide in every round. The scan across the search edit and the scan on
 the glass above it agreed in all ten. Each started and ended at zero.
 
-![Explorer search box before growth, with a white strip during growth, and after repaint](../../media/win7-explorer-search-resize.webp)
+![UTM and GeForce 9600 GT captures of Explorer before growth, during a half-second drag, during one abrupt growth step, and after repaint](../../media/win7-explorer-search-resize.webp)
+
+The same probe ran on Windows 7 Aero with NVIDIA's 9.18.13.4192 driver
+on a passed-through GeForce 9600 GT. Both guests used a 1280×1024 desktop
+and the same 680×440 Explorer window. All ten half-second resizes on the
+GeForce also produced a white block, with peak widths of 13–28 pixels.
+The paired captures above show a separate run that recorded a 102-pixel
+block on UTM and a 19-pixel block on the GeForce.
+
+Moving the pointer by the full 216 pixels in one step exposed a 208-pixel
+block on both. Both window DCs contained gray at the center of the block
+while the desktop showed white. The UTM capture saw the block in three
+successive samples spanning 92 ms. The GeForce capture saw it in one
+sample. Median sampling intervals were 64 ms and 24 ms respectively.
+The captures establish the appearance and ordering of the redraws. They
+do not give the exact time the block was visible.
+
+In a separate five-round three-second drag without pixel readback, the
+GeForce guest recorded 58.2 size changes per second with a 31 ms 95th
+percentile gap. On UTM the corresponding results were 5.3 and 226 ms.
+Explorer exposes the newly added area on both systems. UTM's slower
+resizing gives the toolbar larger steps to catch up with.
 
 Explorer's window DC already contained a gray fill in the newly exposed
 area while its toolbar still showed the old contents. A diagnostic driver
