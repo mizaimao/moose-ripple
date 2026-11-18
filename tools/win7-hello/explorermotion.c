@@ -1,6 +1,7 @@
 /* Measure held-button movement and Explorer's search-band repaint. MIT (LICENSE). */
 #define _WIN32_WINNT 0x0601
 #include "explorermotion.h"
+#include "explorerpixels.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -102,7 +103,10 @@ static BOOL grip(HWND window, const RECT *r, BOOL resize, POINT *p)
 BOOL measure_window_motion(HWND window, REGHANDLE trace, enum window_gesture gesture, int round)
 {
     enum { hz = 60, steps = 3 * hz };
-    BOOL resize = gesture != MOVE_WINDOW, search = gesture == CHECK_SEARCH_BAND;
+    BOOL resize = gesture != MOVE_WINDOW;
+    BOOL phase = gesture == TIME_SEARCH_REPAINT || gesture == TIME_SEARCH_PAINT;
+    BOOL search = gesture == CHECK_SEARCH_BAND || phase;
+    struct pixel_run *pixels = NULL;
     struct band_observer obs = {0};
     HANDLE observer = NULL;
     struct { int step; LONGLONG elapsed; RECT r; } samples[steps];
@@ -132,15 +136,21 @@ BOOL measure_window_motion(HWND window, REGHANDLE trace, enum window_gesture ges
         RECT edit;
         EnumChildWindows(window, find_search, (LPARAM)&band);
         if (!band || !GetWindowRect(band, &edit) || edit.bottom <= edit.top) return FALSE;
-        obs.window = window;
-        obs.margin = r.right - edit.right;
-        obs.y = edit.top - 2;
-        obs.height = edit.bottom - obs.y;
-        obs.round = round;
-        obs.stop = CreateEvent(NULL, TRUE, FALSE, NULL);
-        if (!obs.stop) return FALSE;
-        observer = CreateThread(NULL, 0, observe_band, &obs, 0, NULL);
-        if (!observer) { CloseHandle(obs.stop); return FALSE; }
+        if (phase) {
+            RECT patch = {edit.right + 216 - 28, edit.top, edit.right + 216 - 2, edit.bottom};
+            pixels = start_pixels(window, band, edit.right + 216, patch, gesture == TIME_SEARCH_REPAINT);
+            if (!pixels) return FALSE;
+        } else {
+            obs.window = window;
+            obs.margin = r.right - edit.right;
+            obs.y = edit.top - 2;
+            obs.height = edit.bottom - obs.y;
+            obs.round = round;
+            obs.stop = CreateEvent(NULL, TRUE, FALSE, NULL);
+            if (!obs.stop) return FALSE;
+            observer = CreateThread(NULL, 0, observe_band, &obs, 0, NULL);
+            if (!observer) { CloseHandle(obs.stop); return FALSE; }
+        }
         Sleep(300);
     }
     if (!mouse_button(MOUSEEVENTF_LEFTDOWN)) goto stop_observer;
@@ -168,6 +178,10 @@ release:
     if (!mouse_button(MOUSEEVENTF_LEFTUP)) ok = FALSE;
     Sleep(350);
 stop_observer:
+    if (pixels) {
+        Sleep(700);
+        if (!finish_pixels(pixels, "resize", round)) ok = FALSE;
+    }
     if (observer) {
         DWORD result;
         Sleep(700);

@@ -32,7 +32,7 @@ def motion_region(marker):
     return region
 
 
-def summarize(path):
+def summarize(path, minimize=False):
     requests, presents, renders, dirty = [], [], [], []
     unminimized = []
     region = None
@@ -46,9 +46,9 @@ def summarize(path):
         time = datetime.fromisoformat(system.find("{*}TimeCreated").get("SystemTime")[:26])
         if guid == MARKERS:
             marker = event.findtext("{*}Data", "")
-            if marker == "restore-start":
+            if marker == ("minimize-start" if minimize else "restore-start"):
                 requests.append(time)
-            elif marker == "restore-unminimized":
+            elif not minimize and marker == "restore-unminimized":
                 unminimized.append(time)
             elif marker.startswith("taskbar "):
                 region = motion_region(marker)
@@ -76,7 +76,7 @@ def summarize(path):
         event.clear()
 
     if len(processes) != 1 or not requests:
-        raise ValueError("expected one compositor process and at least one restore request")
+        raise ValueError("expected one compositor process and at least one requested transition")
     times = sorted(time for time, r in dirty if region is None or
                    (min(r["right"], region[2]) - max(r["left"], region[0]) >= 32 and
                     min(r["bottom"], region[3]) - max(r["top"], region[1]) >= 32))
@@ -91,8 +91,9 @@ def summarize(path):
             if first_dirty < len(times) and times[first_dirty] <= end and (p-end).total_seconds() < .15:
                 frames.append((p, start))
     stats = defaultdict(list)
-    if region and len(unminimized) != len(requests):
+    if region and not minimize and len(unminimized) != len(requests):
         raise ValueError("expected one unminimized marker per taskbar click")
+    first_label = "minimize to first window-motion present (ms)" if minimize else "click to first window-motion present (ms)"
     for t in sorted(requests):
         i = bisect_left(frames, (t,))
         ms = []
@@ -104,13 +105,16 @@ def summarize(path):
                 ms.append(elapsed)
         if region:
             if ms:
-                stats["click to first window-motion present (ms)"].append(ms[0])
+                stats[first_label].append(ms[0])
+                stats["motion-region presents"].append(len(ms))
+                if len(ms) >= 2:
+                    stats["longest gap between motion-region presents (ms)"].append(max(b - a for a, b in zip(ms, ms[1:])))
         elif len(ms) >= 2:
             stats["first present (ms)"].append(ms[0])
             stats["longest gap after first present (ms)"].append(max(b - a for a, b in zip(ms, ms[1:])))
     if region:
-        measured = len(stats["click to first window-motion present (ms)"])
-        print(f"{measured}/{len(requests)} clicks with a repaint in the motion region")
+        measured = len(stats[first_label])
+        print(f"{measured}/{len(requests)} {'minimizes' if minimize else 'clicks'} with a repaint in the motion region")
         for t, u in zip(sorted(requests), sorted(unminimized)):
             delay = (u - t).total_seconds() * 1000
             if not 0 <= delay <= 1500:
@@ -118,9 +122,9 @@ def summarize(path):
             stats["click to observed unminimized state (ms)"].append(delay)
     else:
         measured = len(stats["first present (ms)"])
-        print(f"{measured}/{len(requests)} restores with two or more substantial repaints")
+        print(f"{measured}/{len(requests)} {'minimizes' if minimize else 'restores'} with two or more substantial repaints")
     if not measured:
-        raise ValueError("no measurable restore frames")
+        raise ValueError("no measurable transition frames")
     for label, values in stats.items():
         values.sort()
         print(f"{label}: median {median(values):.1f}, p95 {values[ceil(.95 * len(values))-1]:.1f}, "
@@ -130,4 +134,6 @@ def summarize(path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("xml", help="English tracerpt XML from the transition trace")
-    summarize(parser.parse_args().xml)
+    parser.add_argument("--minimize", action="store_true", help="measure minimize requests instead of restores")
+    args = parser.parse_args()
+    summarize(args.xml, args.minimize)

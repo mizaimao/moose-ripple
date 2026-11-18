@@ -5,6 +5,6 @@
 #include <evntprov.h>
 
 extern const GUID motion_provider;
-enum window_gesture { MOVE_WINDOW, RESIZE_WINDOW, CHECK_SEARCH_BAND };
+enum window_gesture { MOVE_WINDOW, RESIZE_WINDOW, CHECK_SEARCH_BAND, TIME_SEARCH_REPAINT, TIME_SEARCH_PAINT };
 BOOL measure_window_motion(HWND window, REGHANDLE trace, enum window_gesture gesture, int round);
 #endif

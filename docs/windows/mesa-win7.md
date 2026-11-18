@@ -774,6 +774,50 @@ The 32-bit and 64-bit upload tests each verified two queued textures, with
 zero mismatches. Explorer kept its process through five desktop **New**
 submenu checks on the final driver.
 
+With the stable UTM clock, ten taskbar restores and ten minimize commands
+produced the following timings at 1280×1024. A motion present covers at
+least 32×32 pixels between the folder and its taskbar button. Each Windows
+present matched a UTM draw in order in all twenty transitions. The trace
+lost no events. Times are rounded to the nearest millisecond.
+
+| Measurement | Minimize | Restore |
+| --- | ---: | ---: |
+| Median time to first guest motion present | 86 ms | 200 ms |
+| Median time to first matching UTM draw | 92 ms | 212 ms |
+| Median of each transition's longest gap between motion draws | 140 ms | 50 ms |
+| Longest such gap | 217 ms | 63 ms |
+| Median time from a guest motion present to its UTM draw | 8 ms | 7 ms |
+
+In another ten rounds, a two-column strip of composed desktop pixels
+showed four or five intermediate changes per minimize
+and two or three per restore. Desktop readback took about 63 ms between
+samples, so this gives a lower bound on observed changes. The table uses
+the separate run without readback.
+
+A test process requested a 1 ms Windows timer period for ten rounds and
+released it before another ten rounds on the same boot. Median time to
+the first host restore draw was 212 ms before the request, 277 ms with it
+and 205 ms afterward. The median longest gap between subsequent restore
+draws fell to 32 ms with the request, compared with 50 and 49 ms in the
+two controls. The finer timer traded smoother subsequent draws for a
+longer initial wait.
+
+### Welcome to desktop
+
+Two UTM boots showed long display gaps around logon. The first had a
+2.86-second interval between full-screen draws shortly after Explorer
+started. On the second, a boot trace of the Windows compositor recorded
+a 2.199-second interval between completed presents. The corresponding
+UTM draws were 2.201 seconds apart. The four preceding and twelve
+following draws matched the guest sequence within 25 ms relative to the
+start of that gap. The trace reported zero lost events or buffers.
+
+The compositor spent 2.13 seconds of that interval in its
+`SCHEDULE_WFW` wait for work. The reported frozen Welcome screen
+followed by a cut is consistent with this gap in submitted frames. These
+timings leave the exact desktop switch and the fade request unidentified.
+[Welcome transition investigation](https://github.com/mizaimao/moose-ripple/issues/71)
+
 ## Live Explorer resize in UTM
 
 On Windows 7 x64 at 1280×1024, six three-second title-bar drags and six
@@ -853,8 +897,19 @@ the functions listed.
 | `CToolbar::TBPaint` | 138 | 147 | 0 |
 
 The navigation bar layout was on the stack in about 40% of resize samples
-in both rounds. Timing the child-window moves and the subsequent toolbar
-paint separately would show where the search field falls behind.
+in both rounds. A separate ten-round probe timed the move of the search
+child and sampled the final search-icon position in the window's backing
+bitmap. Even without reading the desktop, all ten rounds still had old
+pixels at least 105 ms after the child reached its final right edge.
+The median lower and upper bounds for the bitmap to settle were 112 and
+143 ms. Issuing one immediate repaint request to the search child at its
+final position gave overlapping bounds of 110 and 138 ms in ten rounds.
+
+Reading the same patch on both the backing bitmap and the composed
+desktop confirmed the stale bitmap in every trial. Desktop readback
+widened the sampling intervals. The source-only measurements above bracket
+the delay more closely. The driver can receive stale toolbar pixels well
+after Explorer has updated the search field's window coordinates.
 
 Explorer's window DC already contained a gray fill in the newly exposed
 area while its toolbar still showed the old contents. A diagnostic driver
