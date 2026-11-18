@@ -260,10 +260,17 @@ the line); Windows replaces them at the next start. Check that the debug port sh
 build before measuring: a comparison that skipped this (3DMark 2000 above) measured the same
 driver twice.
 
-**Open:** running d3dtest at 32 and then at 16 bits, followed by more test programs, sometimes
-left a program that had ended still holding its output file open ("Sharing violation" in the
-next batch step), and answering that prompt froze the whole guest (idle, no log). It happens
-with the drivers from before 2026-11-17 too; one d3dtest at a time doesn't do it.
+**The output file held after a test run** (2026-11-18): the first batch of test programs after
+Windows starts ends with "Sharing violation" on the output file of the first program that used
+DirectDraw (d3dtest, its output redirected to a file). The holder is DirectDraw's helper,
+`DDHELP.EXE`, which DirectDraw starts for the first program that uses it: that program is
+DDHELP's parent, nothing else from the run is still alive, and with DDHELP ended (a scratch
+tool calling TerminateProcess) Retry goes on and the batch finishes, every test passed.
+DirectDraw starts DDHELP with handle inheritance off, so the file reaches it some other way,
+from the DOS prompt's redirection. Later batches in the same session don't see it, as DDHELP
+is running already: a test batch starts one DirectDraw program without redirection first.
+**Open:** in earlier runs, answering that prompt froze the whole guest (idle, no log). On
+2026-11-18 Retry and Abort didn't; which answer froze it isn't known.
 
 ## Things learnt the hard way
 
