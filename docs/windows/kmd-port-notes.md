@@ -949,3 +949,47 @@ runs on a borrowed thread (an interrupt's deferred work) leaves no trace on that
 stack. Hog runs the guest under nested virtualization, where the interrupt level is one more
 thing emulated. It has not happened on the rig. If it comes back, on either host, the first
 thing to compare is what the display driver was doing at that moment (its serial log).
+
+## UTM: the fine timer slows the guest clock (2026-11-17)
+
+With Aero running under QEMU's TCG CPU emulation on Apple silicon, window operations made
+Windows' tick clock advance at roughly a third of the performance counter's rate. The
+driver's half-millisecond timer request was active almost throughout those operations.
+After it released the request on an idle desktop, the clocks agreed again.
+
+An isolated check (`tools/win7-hello/timerbench.c`) hides its console, requests each timer
+resolution temporarily, measures three QPC seconds, then releases the request. On this VM:
+
+| Requested interval | Actual interval | QPC elapsed | Tick-clock elapsed |
+| --- | --- | --- | --- |
+| ordinary | 15.625 ms | 3004 ms | 3000 ms |
+| 4 ms | 3.9062 ms | 3004 ms | 2766 ms |
+| 2 ms | 1.9531 ms | 3005 ms | 2562 ms |
+| 1 ms | 0.9765 ms | 3027 ms | 1703 ms |
+| 0.5 ms | 0.4882 ms | 3064 ms | 906 ms |
+| ordinary again | 15.625 ms | 3012 ms | 3016 ms |
+
+The command worker now recognizes QEMU's `TCGTCGTCGTCG` CPUID signature and leaves the timer
+resolution alone there. The stream detection and fine-timer request remain unchanged for
+other hypervisors. This avoids slowing all tick-based waits while trying to shorten GPU
+fence waits. It cannot prevent another program from requesting a fine timer.
+
+The x64 kernel driver builds, passes signature verification against the test certificate,
+and loads after restarting the display device. With the same user-mode driver installed,
+the ratio of tick time to QPC time changes from 0.357 to 1.000 during movement, 0.318 to 1.001
+during repainting, 0.347 to 1.001 during resizing, and 0.363 to 0.999 during minimize/restore.
+No fine-timer samples remain in any of the five modes (idle included). The 64-bit and 32-bit
+texture regression tests still pass, and five more New-submenu cycles leave Explorer and
+the compositor running with no new crash events.
+
+These are clock measurements, not frame-rate claims. The DWM timing queries returned
+`DWM_E_COMPOSITIONDISABLED` even while glass was visible and `DwmIsCompositionEnabled` returned
+true; their zero frame counters are unusable. In-guest screen readback also took hundreds of
+milliseconds per capture, so it cannot establish smooth animation. The UI probe now limits
+requests by QPC as well as pumping messages, since a move/resize generates messages that can
+otherwise make its message-aware wait return immediately. Exact frame pacing remains to be
+measured without screen-readback stalls.
+
+An attempted i386 kernel build still fails at the existing `InterlockedExchange64` call in
+`viogpu_vidpn.cpp`; the kernel installed for these checks is x64. The 32-bit user-mode driver
+and 32-bit regression executable both build and pass under that x64 guest.

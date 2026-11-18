@@ -449,6 +449,17 @@ void VioGpuCommander::ThreadWorkRoutine(void)
 
     KeSetPriorityThread(KeGetCurrentThread(), LOW_REALTIME_PRIORITY);
 
+    // TCG emulates the guest CPU. In UTM, requesting the finest Windows timer made
+    // the guest tick clock advance about one second per three real seconds,
+    // slowing sleeps, VSync and desktop animations.
+    // Keep the ordinary timer there; hardware virtualization retains the fast path.
+    UINT cpu[4];
+    __asm__ volatile("cpuid"
+                     : "=a"(cpu[0]), "=b"(cpu[1]), "=c"(cpu[2]), "=d"(cpu[3])
+                     : "a"(0x40000000U), "c"(0));
+    const BOOLEAN emulatedCpu = cpu[0] >= 0x40000000U &&
+        RtlCompareMemory(&cpu[1], "TCGTCGTCGTCG", 12) == 12;
+
     // While buffers are with the host, the queue is nudged every half millisecond (Windows'
     // finest timer): QEMU notices a finished fence at the guest's next notification or its own
     // 10 ms poll, so a program that waits for the GPU every frame was held to about 100 frames a
@@ -480,7 +491,7 @@ void VioGpuCommander::ThreadWorkRoutine(void)
                 streamStart = now;
             }
             lastWork = now;
-            if (!fineTimer && now - streamStart >= streamMin)
+            if (!emulatedCpu && !fineTimer && now - streamStart >= streamMin)
             {
                 ExSetTimerResolution(5000, TRUE);
                 fineTimer = TRUE;
