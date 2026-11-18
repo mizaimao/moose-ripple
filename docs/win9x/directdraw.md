@@ -210,6 +210,13 @@ them from are kept with the build tools, not in this repository.
 | Re-Volt demo | Direct3D | works since a fix the same day (below); menu and race; asks for a sound card |
 | Tomb Raider: The Last Revelation demo | Direct3D | crashes in its own code after its device is made, with and without sound; not traced further (the VM has no sound card) |
 
+On the two other test machines (2026-11-18), with the games copied over from the first VM's
+disk: in UTM on an Apple-silicon Mac (x86 emulated, host renderer OpenGL ES through ANGLE)
+Re-Volt and Serious Sam draw correctly, and d3dtest passes except for the mipmap level-of-detail
+bias, which OpenGL ES doesn't have (ignored there; 455 frames/s). On the Windows host Hog over
+ssh (KVM, host renderer llvmpipe, as ssh has no desktop session) d3dtest passes every check
+(925 frames/s) and Re-Volt draws correctly.
+
 **Re-Volt drew nothing from its race thread.** It makes its Direct3D device and sends its first
 commands in one thread and draws in another. The HAL left its OpenGL context current in the
 thread of the last call, and an OpenGL context is current in one thread at a time, so every
