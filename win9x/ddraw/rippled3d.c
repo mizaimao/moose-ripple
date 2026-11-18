@@ -170,6 +170,9 @@ static RDD_SHARED *shared;
 #define GL_DEPTH_ATTACHMENT             0x8D00
 #define GL_STENCIL_ATTACHMENT           0x8D20
 #define GL_DEPTH24_STENCIL8             0x88F0
+#define GL_RENDERBUFFER_WIDTH           0x8D42
+#define GL_RENDERBUFFER_HEIGHT          0x8D43
+#define GL_RENDERBUFFER_INTERNAL_FORMAT 0x8D44
 #define GL_FRAMEBUFFER_COMPLETE         0x8CD5
 #define GL_INCR_WRAP                    0x8507
 #define GL_DECR_WRAP                    0x8508
@@ -231,6 +234,7 @@ typedef struct {
     void (APIENTRY *Fogf)(GLenum, GLfloat);
     void (APIENTRY *Fogfv)(GLenum, const GLfloat *);
     const GLubyte *(APIENTRY *GetString)(GLenum);
+    GLenum (APIENTRY *GetError)(void);
     void (APIENTRY *StencilFunc)(GLenum, GLint, GLuint);
     void (APIENTRY *StencilOp)(GLenum, GLenum, GLenum);
     void (APIENTRY *StencilMask)(GLuint);
@@ -255,9 +259,10 @@ typedef struct {
     void (APIENTRY *FogCoordPointer)(GLenum, GLsizei, const GLvoid *);
     void (APIENTRY *ProvokingVertex)(GLenum);
     void (APIENTRY *WindowPos2i)(GLint, GLint);
+    void (APIENTRY *GetRenderbufferParameteriv)(GLenum, GLenum, GLint *);
 } GLF;
 
-#define GL_CORE_COUNT 53            /* entries up to wglGetProcAddress */
+#define GL_CORE_COUNT 54            /* entries up to wglGetProcAddress */
 static const char *const gl_names[] = {
     "glEnable", "glDisable", "glClear", "glClearColor", "glClearDepth", "glClearStencil",
     "glScissor", "glViewport", "glMatrixMode", "glLoadIdentity", "glOrtho", "glDepthFunc",
@@ -268,7 +273,7 @@ static const char *const gl_names[] = {
     "glTexParameterfv", "glTexEnvi", "glTexEnvfv", "glEnableClientState",
     "glDisableClientState", "glVertexPointer", "glColorPointer", "glTexCoordPointer",
     "glDrawArrays", "glDrawElements", "glColor4ub", "glFogi", "glFogf", "glFogfv", "glGetString",
-    "glStencilFunc", "glStencilOp", "glStencilMask",
+    "glGetError", "glStencilFunc", "glStencilOp", "glStencilMask",
     "wglCreateContext", "wglDeleteContext", "wglMakeCurrent", "wglGetCurrentContext",
     "wglGetProcAddress",
     /* extensions */
@@ -277,6 +282,7 @@ static const char *const gl_names[] = {
     "glCheckFramebufferStatusEXT", "glDeleteFramebuffersEXT", "glDeleteRenderbuffersEXT",
     "glActiveTextureARB", "glClientActiveTextureARB", "glSecondaryColorPointerEXT",
     "glFogCoordPointerEXT", "glProvokingVertexEXT", "glWindowPos2iARB",
+    "glGetRenderbufferParameterivEXT",
 };
 #define GL_ALL_COUNT (sizeof gl_names / sizeof gl_names[0])
 typedef char c_gl_names[sizeof(GLF) == GL_ALL_COUNT * sizeof(PROC) ? 1 : -1];
@@ -751,11 +757,42 @@ static GLF *gl_of(RCTX *c)
     return &c->p->gl;
 }
 
+/* The context is current in the calling thread for the length of one call into the driver:
+   every call makes it current here and lets go of it at its end (let_go). An OpenGL context is
+   current in one thread at a time, and programs call Direct3D from more than one: Re-Volt makes
+   its device and sends its first commands in one thread and draws in another, and a context
+   left current in the first kept every draw of the second from the GPU. While another thread
+   is inside a call, wait for it. */
 static void make_current(RCTX *c)
 {
     GLF *gl = gl_of(c);
-    if (gl->wglGetCurrentContext() != c->rc)
-        gl->wglMakeCurrent(c->dc, c->rc);
+    DWORD start;
+
+    if (gl->wglGetCurrentContext() == c->rc)
+        return;
+    for (start = GetTickCount();;) {
+        if (gl->wglMakeCurrent(c->dc, c->rc))
+            return;
+        if (GetTickCount() - start >= 500)
+            break;
+        Sleep(1);
+    }
+    {
+        static DWORD logged;
+        if (logged++ < 8) {
+            dbg("rd3d: context busy in another thread, thread "); dbg_hex(GetCurrentThreadId());
+            dbg(", error "); dbg_hex(GetLastError()); dbg("\r\n");
+        }
+    }
+}
+
+/* The end of a call that used the context (make_current). */
+static void let_go(RCTX *c)
+{
+    GLF *gl = gl_of(c);
+
+    if (gl->wglGetCurrentContext() == c->rc)
+        gl->wglMakeCurrent(NULL, NULL);
 }
 
 static LRESULT CALLBACK hidden_wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp)
@@ -849,8 +886,10 @@ void d3d_surface_access(LPDDRAWI_DDRAWSURFACE_LCL s)
 
     for (i = 0; i < MAX_CONTEXTS; i++) {
         RCTX *c = mine(&contexts[i].o, &m) ? contexts[i].c : NULL;
-        if (c && c->dirty && c->cur && c->cur->mem == s->lpGbl->fpVidMem)
+        if (c && c->dirty && c->cur && c->cur->mem == s->lpGbl->fpVidMem) {
             read_back(c);
+            let_go(c);
+        }
     }
 }
 
@@ -900,6 +939,14 @@ static GPUBUF *gpu_buffer(RCTX *c, GPUBUF *t, DWORD n, FLATPTR mem, DWORD w, DWO
     if (b->w != w || b->h != h) {
         gl->BindRenderbuffer(GL_RENDERBUFFER, b->rb);
         gl->RenderbufferStorage(GL_RENDERBUFFER, format, w, h);
+        {
+            GLenum e = gl->GetError();
+            static DWORD logged;
+            if (e && logged++ < 8) {
+                dbg("rd3d: renderbuffer "); dbg_hex(w); dbg(" x "); dbg_hex(h); dbg(" format ");
+                dbg_hex(format); dbg(": GL error "); dbg_hex(e); dbg("\r\n");
+            }
+        }
         b->w = w;
         b->h = h;
         b->written = 1;
@@ -907,6 +954,41 @@ static GPUBUF *gpu_buffer(RCTX *c, GPUBUF *t, DWORD n, FLATPTR mem, DWORD w, DWO
     b->mem = mem;
     b->used = ++c->clock;
     return b;
+}
+
+/* Why a target can't be drawn into, on the debug port, once for each kind of failure: GL's
+   status (0: the call itself failed, as with no context current) and what each buffer really
+   holds on the GPU (0 x 0: its storage was never made). */
+static void framebuffer_failed(RCTX *c, GLenum st, GLuint colour, GLuint depth, DWORD w, DWORD h)
+{
+    static GLenum last_st;
+    static DWORD last_w, last_h;
+    GLF *gl = gl_of(c);
+    GLuint rbs[2];
+    int k;
+
+    if (st == last_st && w == last_w && h == last_h)
+        return;
+    last_st = st; last_w = w; last_h = h;
+    dbg("rd3d: framebuffer incomplete, status "); dbg_hex(st); dbg(", target "); dbg_hex(w);
+    dbg(" x "); dbg_hex(h); dbg(", target caps "); dbg_hex(c->rt ? c->rt->ddsCaps.dwCaps : 0);
+    dbg(", thread "); dbg_hex(GetCurrentThreadId()); dbg(", GL error "); dbg_hex(gl->GetError());
+    dbg("\r\n");
+    if (!gl->GetRenderbufferParameteriv)
+        return;
+    rbs[0] = colour;
+    rbs[1] = depth;
+    for (k = 0; k < 2; k++) {
+        GLint rw = -1, rh = -1, rf = -1;
+        if (!rbs[k])
+            continue;
+        gl->BindRenderbuffer(GL_RENDERBUFFER, rbs[k]);
+        gl->GetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, &rw);
+        gl->GetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT, &rh);
+        gl->GetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_INTERNAL_FORMAT, &rf);
+        dbg(k ? "rd3d:   depth " : "rd3d:   colour "); dbg_hex(rw); dbg(" x "); dbg_hex(rh);
+        dbg(", format "); dbg_hex(rf); dbg("\r\n");
+    }
 }
 
 /* The framebuffer object for the render target: its colour buffer and the depth buffer of
@@ -938,9 +1020,12 @@ static int framebuffer(RCTX *c)
     gl->FramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, depth);
     c->cur = cb;
     c->fb_z = zmem;
-    if (gl->CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        dbg("rd3d: framebuffer incomplete\r\n");
-        return 0;
+    {
+        GLenum st = gl->CheckFramebufferStatus(GL_FRAMEBUFFER);
+        if (st != GL_FRAMEBUFFER_COMPLETE) {
+            framebuffer_failed(c, st, cb->rb, depth, w, h);
+            return 0;
+        }
     }
     if (c->fb_w == w && c->fb_h == h)
         return 1;                       /* the same size: the view stays */
@@ -1684,6 +1769,7 @@ static void texture_forget(DWORD h)
             continue;
         make_current(c);
         gl_of(c)->DeleteTextures(1, &c->tex[h].name);
+        let_go(c);
         memset(&c->tex[h], 0, sizeof c->tex[h]);
         c->ntextures--;
         c->stages_dirty = 1;
@@ -2184,6 +2270,7 @@ static DWORD WINAPI ContextCreate(LPD3DHAL_CONTEXTCREATEDATA d)
     dbg("\r\n");
     d->dwhContext = i + 1;
     d->ddrval = DD_OK;
+    let_go(c);
     return DDHAL_DRIVER_HANDLED;
 }
 
@@ -2554,6 +2641,7 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
     }
 done:
     d->dwFlags &= ~(D3DHALDP2_SWAPVERTEXBUFFER | D3DHALDP2_SWAPCOMMANDBUFFER);
+    let_go(c);
     return DDHAL_DRIVER_HANDLED;
 }
 
