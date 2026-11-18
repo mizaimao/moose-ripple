@@ -154,7 +154,8 @@ manager's own counters (free, locked, disk cache, committed; the ones System Mon
 the free system resources, and what our VxD holds (`RVD_GET_STATS`: contexts, buffers, the
 locked memory behind them, buffers kept for a host that stopped answering). Started next to a
 game with `start /m memlog 20 0 e9`, it writes to QEMU's debug port, which the host can read
-while the game runs.
+while the game runs. Give it a count or end it before restarting Windows: Windows 98 holds up
+a restart for a console program that is still running.
 
 Unreal Tournament on Direct3D, DM-Turbine and the maps after it, 26 minutes (2026-11-17,
 Proxmox VE, 256 MB guest):
