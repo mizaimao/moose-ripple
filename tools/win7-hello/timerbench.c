@@ -12,7 +12,61 @@
 #include <string.h>
 typedef LONG (WINAPI *query_fn)(PULONG, PULONG, PULONG);
 typedef LONG (WINAPI *set_fn)(ULONG, BOOLEAN, PULONG);
-int main(void) {
+
+/* Use the tick clock to end each run even if QPC goes backwards. */
+static int check_counter(void)
+{
+    const char *modes[] = {"pinned", "unbound", "rotating"};
+    DWORD_PTR allowed, system, cpus[sizeof(DWORD_PTR) * 8];
+    HANDLE thread = GetCurrentThread();
+    LARGE_INTEGER frequency;
+    unsigned count = 0;
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &allowed, &system) ||
+        !allowed || !QueryPerformanceFrequency(&frequency)) return 2;
+    for (DWORD_PTR bit = 1; bit; bit <<= 1)
+        if (allowed & bit) cpus[count++] = bit;
+    DWORD_PTR original = SetThreadAffinityMask(thread, cpus[0]);
+    if (!original) return 2;
+    int rc = 0;
+    printf("frequency=%lld processors=%u\n", frequency.QuadPart, count);
+    for (unsigned mode = 0; mode < 3; ++mode) {
+        LARGE_INTEGER previous, now;
+        LONGLONG worst = 0;
+        unsigned samples = 0, backwards = 0;
+        if (!SetThreadAffinityMask(thread, mode == 0 ? cpus[0] : allowed) ||
+            !QueryPerformanceCounter(&previous)) { rc = 2; break; }
+        ULONGLONG start = GetTickCount64();
+        do {
+            if (mode == 2 && !SetThreadAffinityMask(thread, cpus[samples % count])) {
+                rc = 2;
+                break;
+            }
+            Sleep(1);
+            if (!QueryPerformanceCounter(&now)) { rc = 2; break; }
+            LONGLONG delta = now.QuadPart - previous.QuadPart;
+            if (delta < 0) {
+                if (!backwards)
+                    printf("first regression: previous=%lld current=%lld\n", previous.QuadPart, now.QuadPart);
+                ++backwards;
+                if (delta < worst) worst = delta;
+            }
+            previous = now;
+            ++samples;
+        } while (GetTickCount64() - start < 12000);
+        printf("mode=%s samples=%u backwards=%u worst_ms=%.3f\n",
+               modes[mode], samples, backwards, 1000.0 * worst / frequency.QuadPart);
+        if (rc == 2) break;
+        if (backwards) rc = 1;
+    }
+    return SetThreadAffinityMask(thread, original) ? rc : 2;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "counter")) return check_counter();
+    if (argc != 1) {
+        fprintf(stderr, "Usage: timerbench.exe [counter]\n");
+        return 2;
+    }
     ULONG requests[] = {0, 40000, 20000, 10000, 5000, 0};
     unsigned i;
     int cpu[4]; char vendor[13] = {0};
@@ -38,11 +92,23 @@ int main(void) {
         }
         query(&minimum, &maximum, &current);
         tick = GetTickCount64(); QueryPerformanceCounter(&start);
-        do { Sleep(20); ++samples; QueryPerformanceCounter(&now); }
-        while ((now.QuadPart-start.QuadPart)*1000/frequency.QuadPart < 3000);
+        now = start;
+        BOOL backwards = FALSE;
+        do {
+            LARGE_INTEGER previous = now;
+            Sleep(20);
+            ++samples;
+            QueryPerformanceCounter(&now);
+            backwards = now.QuadPart < previous.QuadPart;
+        } while (!backwards && (now.QuadPart-start.QuadPart)*1000/frequency.QuadPart < 3000);
         printf("request=%lu actual=%lu qpc_ms=%.3f tick_ms=%llu sleeps=%u\n", requests[i], current,
             (double)(now.QuadPart-start.QuadPart)*1000/frequency.QuadPart, GetTickCount64()-tick, samples);
         if (requests[i]) set(requests[i], FALSE, &current);
+        if (backwards) {
+            fprintf(stderr, "QPC moved backwards during the timer-resolution test.\n");
+            if (console_visible) ShowWindow(console, SW_SHOW);
+            return 1;
+        }
         fflush(stdout);
     }
     if (console_visible) ShowWindow(console, SW_SHOW);

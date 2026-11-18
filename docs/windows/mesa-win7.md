@@ -773,3 +773,105 @@ updates per second in the separate five-second window-movement sample.
 The 32-bit and 64-bit upload tests each verified two queued textures, with
 zero mismatches. Explorer kept its process through five desktop **New**
 submenu checks on the final driver.
+
+## Live Explorer resize in UTM
+
+On Windows 7 x64 at 1280×1024, six three-second title-bar drags and six
+lower-right-corner resizes moved the pointer 216 pixels across and 108 down.
+Aero and full-window dragging were enabled. Guest pointer commands, observed
+window bounds, DWM presents and UTM display draws were timed separately.
+
+| Measurement on the merged driver | Drag | Resize |
+| --- | ---: | ---: |
+| Pointer commands per second | 57.1 | 56.0 |
+| Observed window bounds changes per second | 56.4 | 5.3 |
+| DWM presents per second | 30.3 | 24.8 |
+| UTM display draws per second | 30.2 | 24.7 |
+| 95th percentile gap between bounds changes | 31 ms | 226 ms |
+| 95th percentile gap between host draws | 61 ms | 89 ms |
+| Longest gap between host draws | 112 ms | 188 ms |
+
+A plain Win32 window with a solid background changed its bounds 57.8 times
+per second on the same resize path. Host draws can repeat the previous
+geometry. Raising the refresh thread's scheduling priority left Explorer at
+5.3 size changes per second and produced a 203 ms pause on a title-bar drag.
+Combining write-watch queries and resets gave 5.0 size changes per second
+against 5.1 on the release driver in an eight-round comparison. Both trials
+ran on the same boot and the release drivers were restored.
+
+### White strip beside the search box
+
+A half-second resize exposed the previous search box beside a white strip
+101 pixels wide. A slower three-second resize exposed a strip up to 18 pixels
+wide. Both cleared when the toolbar repainted. At 1280×1024, ten half-second
+resizes with `explorerrestore.exe 10 search` produced a block 86 to 109
+pixels wide in every round. The scan across the search edit and the scan on
+the glass above it agreed in all ten. Each started and ended at zero.
+
+![UTM and GeForce 9600 GT captures of Explorer before growth, during a half-second drag, during one abrupt growth step, and after repaint](../../media/win7-explorer-search-resize.webp)
+
+The same probe ran on Windows 7 Aero with NVIDIA's 9.18.13.4192 driver
+on a passed-through GeForce 9600 GT. Both guests used a 1280×1024 desktop
+and the same 680×440 Explorer window. All ten half-second resizes on the
+GeForce also produced a white block, with peak widths of 13–28 pixels.
+The paired captures above show a separate run that recorded a 102-pixel
+block on UTM and a 19-pixel block on the GeForce.
+
+Moving the pointer by the full 216 pixels in one step exposed a 208-pixel
+block on both. Both window DCs contained gray at the center of the block
+while the desktop showed white. The UTM capture saw the block in three
+successive samples spanning 92 ms. The GeForce capture saw it in one
+sample. Median sampling intervals were 64 ms and 24 ms respectively.
+The captures establish the appearance and ordering of the redraws. They
+do not give the exact time the block was visible.
+
+In a separate five-round three-second drag without pixel readback, the
+GeForce guest recorded 58.2 size changes per second with a 31 ms 95th
+percentile gap. On UTM the corresponding results were 5.3 and 226 ms.
+Explorer exposes the newly added area on both systems. UTM's slower
+resizing gives the toolbar larger steps to catch up with.
+
+Reducing the UTM desktop resolution also left the lag visible. With a
+stable guest performance counter and Aero active throughout, the same window
+changed size 5.4 times per second at 1280×1024, 5.1 times at 1024×768 and
+5.5 times after restoring 1280×1024 (three rounds per setting). The search
+edit showed a white block in all five fast resizes at each setting. [UTM timer configuration](test-vms.md#keeping-aero-active-on-cold-boots)
+
+An ETW profile on UTM compared two three-second corner resizes with two
+title-bar moves. The table counts samples from Explorer's window thread
+whose call stack included `ExplorerFrame.dll`. It excludes the first
+200 ms and last 100 ms of each gesture. A stack can include several of
+the functions listed.
+
+| Function on the stack | First resize | Second resize | Both title-bar moves |
+| --- | ---: | ---: | ---: |
+| Samples with an ExplorerFrame stack | 1,470 | 1,443 | 907 |
+| `CNavBar::ResizeBorderDW` | 598 | 567 | 0 |
+| `CShellBrowser::_PositionViewWindow` | 323 | 309 | 0 |
+| `DirectUI::HWNDHost::SyncRect` | 299 | 273 | 0 |
+| `CReBar::_ResizeChildren` | 259 | 242 | 0 |
+| `CToolbar::TBPaint` | 138 | 147 | 0 |
+
+The navigation bar layout was on the stack in about 40% of resize samples
+in both rounds. Timing the child-window moves and the subsequent toolbar
+paint separately would show where the search field falls behind.
+
+Explorer's window DC already contained a gray fill in the newly exposed
+area while its toolbar still showed the old contents. A diagnostic driver
+copied each relevant source bitmap to private memory before uploading it,
+then read the affected row back from the GPU. On one resize the incoming
+A8R8G8B8 bitmap had a 120-pixel run of `0x00f0f0f0` at its new right edge.
+The sampled GPU texels matched all 120 source pixels. The desktop capture
+showed a 120-pixel white band. The next growth step gave an 88-pixel run
+in both records. Enabling toolbar double buffering, requesting immediate
+repaints and making the glass opaque still exposed the strip. Turning off
+full-window dragging moved the flash to mouse release, where it reached
+216 pixels.
+
+A diagnostic build zeroed the incoming gray run at the top of the test
+window. The scan on the glass then read zero throughout one captured resize,
+but a 90-pixel white block was still visible inside the search edit. This is
+why the regression probe checks the control's top, middle and bottom as well
+as the glass. The release driver preserves the application's pixel values.
+
+The visual defect remains open. [Search-box resize issue](https://github.com/mizaimao/moose-ripple/issues/69)

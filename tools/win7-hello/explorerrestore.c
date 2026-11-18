@@ -1,4 +1,4 @@
-/* Time restores of a dedicated Explorer window on Windows 7.
+/* Exercise restore, move and resize of a dedicated Explorer window on Windows 7.
  * Run with the transition ETW provider enabled (tools/win7-debug/README.md).
  * MIT licence (LICENSE at the repository root).
  */
@@ -8,12 +8,11 @@
 #include <oleacc.h>
 #include <shellapi.h>
 #include <dwmapi.h>
-#include <evntprov.h>
+#include "explorermotion.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static const GUID provider = {0x6c38bba1,0x1768,0x48c6,{0x9c,0x07,0x40,0xda,0xdb,0xa4,0xb3,0x8f}};
 static REGHANDLE trace;
 static char folder[MAX_PATH], name[80];
 static HWND target;
@@ -128,26 +127,28 @@ int main(int argc, char **argv)
     char *end;
     long rounds = 30;
     BOOL clicks = argc == 3 && !strcmp(argv[2], "taskbar");
+    BOOL search = argc == 3 && !strcmp(argv[2], "search");
+    BOOL motion = search || (argc == 3 && !strcmp(argv[2], "motion"));
     if (argc >= 2) {
         rounds = strtol(argv[1], &end, 10);
         if (*end) rounds = 0;
     }
-    if ((argc > 2 && !clicks) || rounds < 1 || rounds > 100) {
-        fprintf(stderr, "Usage: explorerrestore.exe [rounds from 1 to 100 [taskbar]]\n");
+    if ((argc > 2 && !clicks && !motion) || rounds < 1 || rounds > 100) {
+        fprintf(stderr, "Usage: explorerrestore.exe [rounds from 1 to 100 [taskbar|motion|search]]\n");
         return 1;
     }
     HWND console = NULL;
     POINT original_cursor;
     BOOL saved_cursor = FALSE;
     if (clicks && FAILED(CoInitialize(NULL))) return 1;
-    if (EventRegister(&provider, NULL, NULL, &trace)) goto done;
+    if (EventRegister(&motion_provider, NULL, NULL, &trace)) goto done;
     if (!EventProviderEnabled(trace, 4, 0) ||
         FAILED(DwmIsCompositionEnabled(&composition)) || !composition ||
         !SystemParametersInfo(SPI_GETANIMATION, sizeof(anim), &anim, 0) || !anim.iMinAnimate) {
         fprintf(stderr, "Enable Aero, window animation and the transition ETW provider.\n");
         goto done;
     }
-    if (clicks) {
+    if (clicks || motion) {
         RECT work;
         if (!GetCursorPos(&original_cursor) ||
             !SystemParametersInfo(SPI_GETWORKAREA, 0, &work, 0)) goto done;
@@ -175,9 +176,10 @@ int main(int argc, char **argv)
     if (!target) { fprintf(stderr, "Dedicated Explorer window missing.\n"); goto done; }
     ShowWindow(target, SW_RESTORE);
     if (!SetWindowPos(target, HWND_TOP, 80, 80, 800, 540, SWP_SHOWWINDOW)) goto done;
-    GetWindowThreadProcessId(target, &pid);
+    DWORD thread = GetWindowThreadProcessId(target, &pid);
     printf("explorer_pid=%lu window=%p size=800x540 desktop=%dx%d\n", pid, (void *)target,
            GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+    if (motion) printf("explorer_ui_thread=%lu\n", thread);
     Sleep(2000);
     if (clicks) {
         if (!find_button()) {
@@ -186,7 +188,17 @@ int main(int argc, char **argv)
         }
         printf("taskbar_button=%ld,%ld\n", button.x, button.y);
     }
+    if (motion && EventWriteString(trace, 4, 0, L"motion-run-start")) goto done;
     for (int i = 0; i < rounds; ++i) {
+        if (motion) {
+            if ((!search && !measure_window_motion(target, trace, MOVE_WINDOW, i + 1)) ||
+                !measure_window_motion(target, trace, search ? CHECK_SEARCH_BAND : RESIZE_WINDOW, i + 1) ||
+                FAILED(DwmIsCompositionEnabled(&composition)) || !composition) {
+                fprintf(stderr, "Movement failed at round %d.\n", i + 1);
+                goto done;
+            }
+            continue;
+        }
         if (!transition(FALSE) || !(clicks ? click_restore() : transition(TRUE)) ||
             FAILED(DwmIsCompositionEnabled(&composition)) || !composition) {
             fprintf(stderr, "Transition failed at round %d.\n", i + 1);
@@ -194,6 +206,7 @@ int main(int argc, char **argv)
         }
         printf("round=%d restored=1 composition=1\n", i + 1);
     }
+    if (motion && EventWriteString(trace, 4, 0, L"motion-run-stop")) goto done;
     rc = 0;
 done:
     if (target && IsWindow(target)) {

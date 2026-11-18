@@ -16,6 +16,7 @@ done
 cc=$LLVM_MINGW/bin/x86_64-w64-mingw32-clang
 "$cc" -O2 -Wall -Wextra -Werror "$here/shellmenu.c" -o "$OUT/shellmenu.exe"
 "$cc" -O2 -Wall -Wextra -Werror "$here/dwmtiming.c" -ldwmapi -lgdi32 -o "$OUT/dwmtiming.exe"
-"$cc" -O2 -Wall -Wextra -Werror "$here/explorerrestore.c" -ldwmapi -lshell32 -loleacc -loleaut32 -lole32 -o "$OUT/explorerrestore.exe"
+"$cc" -O2 -Wall -Wextra -Werror "$here/explorerrestore.c" "$here/explorermotion.c" -ldwmapi -lshell32 -loleacc -loleaut32 -lole32 -lgdi32 -o "$OUT/explorerrestore.exe"
+"$cc" -O2 -Wall -Wextra -Werror "$here/motioncontrol.c" "$here/explorermotion.c" -ldwmapi -lgdi32 -o "$OUT/motioncontrol.exe"
 "$cc" -O2 -Wall -Wextra -Werror "$here/timerbench.c" -o "$OUT/timerbench.exe"
 "$cc" -O2 -Wall -Wextra -Werror "$here/vblank.c" -lgdi32 -o "$OUT/vblank.exe"

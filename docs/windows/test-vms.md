@@ -291,3 +291,22 @@ can lose the keyboard: click it before typing.
 
 Seeing the guest: QEMU's screendump stays black once the driver draws through the host GPU, so
 pictures come from `C:\rb\pkg\shot.ps1` in the guest (as on Hog).
+
+### Keeping Aero active on cold boots
+
+On the x86-64 Q35 test VM on Apple silicon, add `-machine hpet=on` to the
+VM's additional QEMU arguments while it is stopped, then start it. UTM
+supplied `hpet=off` in its generated machine arguments. With HPET off,
+one cold boot used a 3,579,545 Hz Windows performance counter that jumped
+backwards at the 24-bit wrap. The jump was about 4.687 seconds even on
+a single CPU. Desktop Window Manager logged Application event 9020 with
+`0x8898009b` and exited. Restarting the desktop composition service on
+that boot hit the same error.
+
+With HPET enabled, Windows detected ACPI device `PNP0103` and used a
+100,000,000 Hz counter on three cold boots. On each boot the counter stayed
+monotonic on one processor, with normal scheduling and while rotating between
+all four processors. On the final boot DWM stayed running through the
+timer-resolution sweep and Explorer opened the **New** submenu five times
+in the same process. Run `timerbench.exe counter` to repeat the clock check.
+The toolbar repaint can still appear with Aero running. [Paired resize captures](mesa-win7.md#white-strip-beside-the-search-box)
