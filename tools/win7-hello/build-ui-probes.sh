@@ -11,6 +11,7 @@ for arch in x86_64 i686; do
     case $arch in x86_64) suffix= ;; i686) suffix=32 ;; esac
     cc=$LLVM_MINGW/bin/$arch-w64-mingw32-clang
     "$cc" -O2 -Wall -Wextra -Werror "$here/d3d9upload.c" -ld3d9 -lgdi32 -o "$OUT/d3d9upload$suffix.exe"
+    "$cc" -O2 -Wall -Wextra -Werror "$here/d3d9stream.c" -ld3d9 -o "$OUT/d3d9stream$suffix.exe"
 done
 cc=$LLVM_MINGW/bin/x86_64-w64-mingw32-clang
 "$cc" -O2 -Wall -Wextra -Werror "$here/shellmenu.c" -o "$OUT/shellmenu.exe"

@@ -632,3 +632,38 @@ five desktop context-menu / New submenu cycles pass with the same Explorer proce
 new compositor crash. `tools/win7-hello/shellmenu.c` performs that menu check on an English
 Windows 7 desktop without creating files. This fixes the reproduced memory fault; animation
 timing is a separate investigation.
+
+## Aero window movement in UTM
+
+With the texture and guest-clock fixes installed, the compositor still spent most
+of its time rendering. A DWM-Core trace recorded seven completed frames in 9.19 s,
+including 9.04 s in rendering tasks. The slow driver calls were repeated
+`NOOVERWRITE` locks of a 640,032-byte dynamic, write-only vertex buffer. DWM
+requested access to the entire buffer to append small pieces of window geometry.
+
+The D3D9 driver now uses Windows write-watch memory for private vertex buffers
+whose first lock requests the entire buffer for streaming. On unlock, it uploads
+the range spanning the modified pages to the original GPU buffer. This preserves
+neighboring vertices and lets Gallium order the upload after earlier draws. A GPU
+copy into the buffer ends the optimization. An incomplete page list triggers a
+full upload.
+
+`tools/win7-hello/build-ui-probes.sh` builds `d3d9stream.exe` and
+`d3d9stream32.exe`. Each renders and checks four tiles across full and ranged
+locks, including a discard after queued draws and an indexed draw with a base
+vertex and stream offset.
+
+On Windows 7 x64 at 1280×1024 in UTM on Apple silicon, the previous driver
+and the new build ran the same 12-second workloads on the same boot. The rates
+count SPICE display draw notifications on the host between workload markers,
+excluding one second at each end. Aero stayed active in every guest sample.
+
+| Workload | Previous updates/s | New updates/s | Median gap before → after |
+| --- | ---: | ---: | ---: |
+| Move a window | 2.1 | 17.0 | 468 → 61 ms |
+| Minimize/restore every 750 ms | 1.0 | 3.4 | 1,059 → 313 ms |
+| Repaint a window | 15.4 | 20.4 | 32 → 32 ms |
+
+The minimize/restore average includes the pause between transitions. Repaint
+varied substantially between baseline runs. Window movement showed the clearest
+gain. The 95th-percentile gap fell from 841 to 100 ms.

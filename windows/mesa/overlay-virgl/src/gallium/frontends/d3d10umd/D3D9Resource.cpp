@@ -1397,6 +1397,16 @@ D3D9ClearDepthPipe(D3D9Device *device, HANDLE resource_handle,
    return true;
 }
 
+static void
+D3D9ReleaseWatchedVertices(D3D9Resource *resource)
+{
+   resource->may_watch_vertices = false;
+   if (resource->watched_vertices) {
+      VirtualFree(resource->watched_vertices, 0, MEM_RELEASE);
+      resource->watched_vertices = NULL;
+   }
+}
+
 static HRESULT
 D3D9CopyBuffer(D3D9Device *device, HANDLE dst_resource_handle,
                HANDLE src_resource_handle, UINT dst_offset,
@@ -1435,6 +1445,8 @@ D3D9CopyBuffer(D3D9Device *device, HANDLE dst_resource_handle,
                                          dst_offset, 0, 0,
                                          src_resource->pipe_resource, 0,
                                          &box);
+      /* Future locks must see the GPU copy, including untouched bytes. */
+      D3D9ReleaseWatchedVertices(dst_resource);
       dst->cpu_dirty = false;
       return S_OK;
    }
@@ -2619,6 +2631,7 @@ D3D9FreeResource(D3D9Resource *resource)
          resource->next->previous = resource->previous;
    }
 
+   D3D9ReleaseWatchedVertices(resource);
    D3D9ReleaseKept(resource);
    pipe_resource_reference(&resource->pipe_resource, NULL);
    pipe_resource_reference(&resource->display_resource, NULL);
@@ -3142,6 +3155,12 @@ D3D9CreateResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *data)
             device->last_systemmem_buffer->managed_default_resource =
                resource;
          }
+         resource->may_watch_vertices =
+            data->Pool == D3DDDIPOOL_VIDEOMEMORY && data->Flags.VertexBuffer &&
+            data->Flags.Dynamic && data->Flags.WriteOnly && !data->Flags.SharedResource &&
+            !data->Flags.MightDrawFromLocked && !resource->managed_source_resource &&
+            data->SurfCount == 1 && !data->pSurfList[0].pSysMem &&
+            resource->surfaces[0].size <= INT_MAX && device->pipe && device->pipe->buffer_map;
       } else {
          D3D9Warnf("unsupported CPU-only resource for unsupported "
                    "format=%u pool=%u flags=0x%08x resource=%p\n",
@@ -3363,6 +3382,7 @@ D3D9Lock(HANDLE hDevice, D3DDDIARG_LOCK *data)
       D3D9ReleaseWorkerBufferUpload(device, sub);
 
    if (data->Flags.NotifyOnly) {
+      D3D9ReleaseWatchedVertices(resource);
       if (buffer_resource && D3D9EnsureCpuBacking(sub)) {
          UINT offset = 0;
          UINT size = (UINT)sub->size;
@@ -3472,6 +3492,23 @@ D3D9Lock(HANDLE hDevice, D3DDDIARG_LOCK *data)
           (size_t)box.width > sub->size - box.x)
          return E_INVALIDARG;
 
+      /* DWM appends a few vertices per unrestricted lock. Watch private,
+       * initially empty buffers only if their first lock is a streaming one.
+       * A buffer first written through a different path stays on that path. */
+      if (resource->may_watch_vertices) {
+         resource->may_watch_vertices = false;
+         if (!box.x && (size_t)box.width == sub->size &&
+             (data->Flags.NoOverwrite || data->Flags.Discard)) {
+            resource->watched_vertices = (uint8_t *)VirtualAlloc(
+               NULL, sub->size, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_READWRITE);
+         }
+      }
+      if (resource->watched_vertices) {
+         data->pSurfData = resource->watched_vertices + box.x;
+         data->Pitch = data->SlicePitch = 0;
+         sub->cpu_locked = true;
+         return S_OK;
+      }
       if (D3D9ResourceUsesCpuBufferStorage(resource)) {
          if (!D3D9EnsureCpuBacking(sub))
             return E_OUTOFMEMORY;
@@ -3591,6 +3628,44 @@ D3D9Lock(HANDLE hDevice, D3DDDIARG_LOCK *data)
    return S_OK;
 }
 
+/* The caller may change only part of a dirty page. The shadow preserves
+ * adjacent vertices. Let Gallium order this upload against earlier draws. */
+static HRESULT
+D3D9UploadWatchedVertices(D3D9Device *device, D3D9Resource *resource, size_t size)
+{
+   uint8_t *base = resource->watched_vertices;
+   void *pages[64];
+   ULONG_PTR count = ARRAYSIZE(pages);
+   ULONG granularity = 0;
+   size_t first = 0, end = size;
+   if (GetWriteWatch(0, base, size, pages, &count, &granularity) == 0 &&
+       count < ARRAYSIZE(pages)) {
+      if (!count)
+         return S_OK;
+      first = size;
+      end = 0;
+      for (ULONG_PTR i = 0; i < count; ++i) {
+         const size_t offset = (uint8_t *)pages[i] - base;
+         first = MIN2(first, offset);
+         end = MAX2(end, offset + granularity);
+      }
+      end = MIN2(end, size);
+   }
+   /* A full page list or a failed query falls back to the entire buffer. */
+   struct pipe_context *pipe = device->pipe;
+   const unsigned discard = !first && end == size ?
+      PIPE_MAP_DISCARD_WHOLE_RESOURCE : PIPE_MAP_DISCARD_RANGE;
+   struct pipe_transfer *transfer = NULL;
+   void *map = pipe_buffer_map_range(pipe, resource->pipe_resource, (unsigned)first,
+                                     (unsigned)(end - first), PIPE_MAP_WRITE | discard, &transfer);
+   if (!map)
+      return E_OUTOFMEMORY;
+   memcpy(map, base + first, end - first);
+   pipe_buffer_unmap(pipe, transfer);
+   ResetWriteWatch(base, size);
+   return S_OK;
+}
+
 HRESULT APIENTRY
 D3D9Unlock(HANDLE hDevice, const D3DDDIARG_UNLOCK *data)
 {
@@ -3629,6 +3704,10 @@ D3D9Unlock(HANDLE hDevice, const D3DDDIARG_UNLOCK *data)
 
    if (sub->cpu_locked) {
       HRESULT hr = S_OK;
+      if (resource->watched_vertices) {
+         sub->cpu_locked = false;
+         return D3D9UploadWatchedVertices(device, resource, sub->size);
+      }
       if (sub->cpu_lock_write) {
          if (sub->cpu_lock_packed_mips &&
              !D3D9DistributePackedMipLock(resource))

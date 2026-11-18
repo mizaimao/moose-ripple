@@ -213,6 +213,7 @@ struct D3D9Resource
    UINT surf_count;
    UINT mip_levels;
    struct pipe_resource *pipe_resource;
+   uint8_t *watched_vertices;
    /* The last sampler view and the last surface made of it, kept while the next one asked
     * for is the same (D3D9Draw.cpp); let go with D3D9ReleaseKept */
    struct pipe_sampler_view *kept_view;
@@ -226,6 +227,7 @@ struct D3D9Resource
    UINT notify_lock_subresource;
    bool notify_lock_subresource_valid;
    bool managed_upload_complete;
+   bool may_watch_vertices;
    bool autogen_mipmap_dirty;
    struct pipe_resource *managed_default_pipe_resource;
    struct pipe_resource *managed_source_pipe_resource;
