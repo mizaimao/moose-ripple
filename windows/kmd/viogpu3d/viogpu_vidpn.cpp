@@ -2040,10 +2040,21 @@ void VioGpuVidPN::FlipThread(void *ctx)
     PAGED_CODE();
 
     VioGpuVidPN *vidpn = reinterpret_cast<VioGpuVidPN *>(ctx);
-    LARGE_INTEGER interval;
-    interval.QuadPart = -166666LL;
+    // Keep the 60 Hz deadlines on the interrupt clock. A fresh 16.67 ms wait
+    // after each flip takes two ticks on Windows 7's ordinary 15.625 ms timer.
+    const ULONGLONG frame = 166667; // 100 ns units
+    ULONGLONG next = KeQueryInterruptTime();
     while (true)
     {
+        const ULONGLONG now = KeQueryInterruptTime();
+        next += frame;
+        if (next <= now)
+        {
+            // Skip missed blanks after a late flip or a suspended guest.
+            next += ((now - next) / frame + 1) * frame;
+        }
+        LARGE_INTEGER interval;
+        interval.QuadPart = -(LONGLONG)(next - now);
         KeDelayExecutionThread(KernelMode, false, &interval);
         if (vidpn->m_shouldFlipStop)
         {

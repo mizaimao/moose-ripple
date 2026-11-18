@@ -996,3 +996,18 @@ measured without screen-readback stalls.
 An attempted i386 kernel build still fails at the existing `InterlockedExchange64` call in
 `viogpu_vidpn.cpp`; the kernel installed for these checks is x64. The 32-bit user-mode driver
 and 32-bit regression executable both build and pass under that x64 guest.
+
+## Refresh timing on the ordinary Windows 7 timer
+
+The display driver advertises 60 Hz. Its flip thread slept for 16.67 ms after
+every refresh. On the 15.625 ms Windows 7 timer in UTM, that usually cost two
+ticks. In 180 consecutive waits on the display adapter, the measured rate
+was 31.4 Hz and the median interval was 31.5 ms. Windows 7 detects timer
+expiration on system-clock ticks. [Windows driver timer accuracy](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/timer-accuracy)
+
+The flip thread now schedules successive deadlines against the interrupt
+clock and skips expired deadlines after a stall. On the same x64 boot the
+rate rose to 57.6 Hz, with a 16.3 ms median and a 30.9 ms 95th percentile.
+The ordinary guest timer and Aero animations remained enabled. These rates
+count refresh notifications. The number of distinct window frames also
+depends on how fast Explorer and DWM can draw them.
