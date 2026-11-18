@@ -92,6 +92,29 @@ In the guest, `guest/timerres.ps1 [SECONDS]` samples Windows' timer resolution a
 much of the time it ran fine (under 1 ms): the kernel driver takes the half-millisecond timer
 only for a stream of work, and an idle desktop should show 0%.
 
+The UI probes build on Linux with `sh tools/win7-hello/build-ui-probes.sh` (set
+`LLVM_MINGW` for another llvm-mingw prefix and `OUT` for another output directory).
+Run the executables outside the driver package directory so they use the installed driver:
+
+- `d3d9upload.exe` and `d3d9upload32.exe`: guard an unrelated texture's borrowed pixels during
+  resource creation, then render/read back explicit and managed uploads. Exit 0 means pass.
+- `shellmenu.exe 5`: open the desktop context menu and New submenu five times, checking that
+  the submenu appears and Explorer stays alive. Uses English menu mnemonics, shows the
+  desktop, and takes over the pointer/keyboard; leave input alone until it finishes.
+- `dwmtiming.exe move 12 > move.csv`: repeat window operations for 12 QPC seconds. Modes are
+  `idle`, `move`, `repaint`, `resize`, and `animate`. CSV includes tick time, timer resolution,
+  requested operations and DWM timing results. Queries run on the window's UI thread:
+  querying first from a worker returned `DWM_E_COMPOSITIONDISABLED` in the UTM guest.
+  Check HRESULTs; the global query succeeds, while the GDI window query returns `E_PENDING`.
+  Operation counts and submitted frame identifiers are not counts of displayed frames.
+- `timerbench.exe > timerbench.txt`: compare Windows' tick clock with QPC at several temporary
+  timer resolutions. It releases each request and finishes with the ordinary timer. Run
+  without other active programs requesting fine timers; the actual resolution is recorded.
+
+With the HTTP guest helpers, `rb uploadcheck`, `rb uploadcheck32`, `rb menuchk` and
+`rb utmtiming` fetch the corresponding executables and upload their results. `rb utmstate`
+records driver hashes, compositor/Explorer processes, animation settings and recent crashes.
+
 For user-mode samples, run the program with `RIPPLE_UMD_LOG` set: the user-mode driver writes the
 load addresses of the program's main modules when it is loaded (`guest/prof.cmd` does that for
 one assessment test, `guest/dxone.cmd` runs one test alone). Our driver's functions are named

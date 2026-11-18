@@ -3128,10 +3128,11 @@ D3D9CreateResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *data)
             }
          }
 
-         if (data->Pool != D3DDDIPOOL_SYSTEMMEM &&
-             data->Pool != D3D9_POOL_STAGINGMEM)
-            D3D9UploadManagedTextureData(device, resource,
-                                         device->last_systemmem_texture);
+         /* Creating a texture does not identify an upload source. The most recently
+          * created system-memory texture may be unrelated even when its dimensions
+          * match. Reading it here crashed the compositor when its borrowed bitmap
+          * was no longer mapped. TexBlt supplies the actual source when the runtime
+          * uploads a managed texture; leave that work to the explicit copy. */
          if ((data->Flags.VertexBuffer || data->Flags.IndexBuffer) &&
              data->Pool != D3DDDIPOOL_SYSTEMMEM &&
              D3D9ResourcesMatchForManagedBufferUpload(
