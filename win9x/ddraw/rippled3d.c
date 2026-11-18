@@ -6,9 +6,9 @@
  * (screen x and y, depth z, 1/w, colours, texture coordinates). This file plays them on
  * OpenGL, calling our OpenGL driver (Mesa's virgl driver in ripplegl.dll, the host GPU) directly
  * rather than through Windows' opengl32.dll: each Direct3D context is an OpenGL context drawing
- * into a framebuffer object the size of the render target. At the end of a scene (and before the render target is
- * locked or shown) the picture is read back into the render target's video memory, where
- * DirectDraw flips it to the screen.
+ * into a framebuffer object the size of the render target. At the end of a scene (and before
+ * the render target is locked or shown) the picture is read back into the render target's
+ * video memory, where DirectDraw flips it to the screen.
  *
  * Textures are DirectDraw surfaces: they are uploaded to OpenGL textures when first used and
  * again when DirectDraw says their contents changed.
