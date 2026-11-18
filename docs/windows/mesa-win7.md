@@ -837,6 +837,25 @@ changed size 5.4 times per second at 1280×1024, 5.1 times at 1024×768 and
 5.5 times after restoring 1280×1024 (three rounds per setting). The search
 edit showed a white block in all five fast resizes at each setting. [UTM timer configuration](test-vms.md#keeping-aero-active-on-cold-boots)
 
+An ETW profile on UTM compared two three-second corner resizes with two
+title-bar moves. The table counts samples from Explorer's window thread
+whose call stack included `ExplorerFrame.dll`. It excludes the first
+200 ms and last 100 ms of each gesture. A stack can include several of
+the functions listed.
+
+| Function on the stack | First resize | Second resize | Both title-bar moves |
+| --- | ---: | ---: | ---: |
+| Samples with an ExplorerFrame stack | 1,470 | 1,443 | 907 |
+| `CNavBar::ResizeBorderDW` | 598 | 567 | 0 |
+| `CShellBrowser::_PositionViewWindow` | 323 | 309 | 0 |
+| `DirectUI::HWNDHost::SyncRect` | 299 | 273 | 0 |
+| `CReBar::_ResizeChildren` | 259 | 242 | 0 |
+| `CToolbar::TBPaint` | 138 | 147 | 0 |
+
+The navigation bar layout was on the stack in about 40% of resize samples
+in both rounds. Timing the child-window moves and the subsequent toolbar
+paint separately would show where the search field falls behind.
+
 Explorer's window DC already contained a gray fill in the newly exposed
 area while its toolbar still showed the old contents. A diagnostic driver
 copied each relevant source bitmap to private memory before uploading it,
