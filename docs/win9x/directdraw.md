@@ -95,10 +95,12 @@ Since 2026-11-17 also:
 - **Stencil.** A 32-bit z-buffer format with 8 stencil bits, and the stencil render states
   (every z-buffer already had a stencil part on the GPU).
 
-3DMark 2000 now gets mipmapped textures and runs to the end as before. Old and new driver in
-turn on the same host, each after its own restart (2026-11-17): old 11316 and 11183, new 11265
-and 11326 3D marks. That is no change; the host gave lower numbers that day than on
-2026-11-16 (11722 to 12189).
+3DMark 2000 now gets mipmapped textures and runs to the end. Six runs with the new driver on
+2026-11-17 made 11161 to 11559 3D marks (11722 to 12189 with the old driver on 2026-11-16, a
+different day on the host). A comparison of old and new driver on the same day is still to do:
+the one reported first (old 11316 and 11183 against new 11265 and 11326) was the new driver
+all four times, because the test VM's startup file can't read the CD that was meant to swap
+the drivers (see "Changing a driver in the test VM" below).
 
 Not yet: transform and lighting in the driver (Direct3D does it on the CPU), palettized
 textures, state blocks recorded by the driver, colour-key ranges and alpha-blended colour keys.
@@ -191,6 +193,54 @@ program when a thread ended; textures were re-created whenever DirectDraw kept n
 stamp, until guest memory ran out and draws lost their index buffers; the texture manager's
 thousands of short-lived surfaces each kept an OpenGL texture (the budget above); and OpenGL's
 fog varying made the host's shaders fail.
+
+## Games (2026-11-17)
+
+Period demos on Windows 98 SE in the Proxmox VE test VM (DirectX 7, 256 MB, virgl on the host's
+Intel UHD 630, no sound card in the VM). The demos and the CD image the test machines install
+them from are kept with the build tools, not in this repository.
+
+| Game | API | Result |
+|---|---|---|
+| Quake III Arena demo | OpenGL | works; timedemo about 485 frames/s at 640x480 |
+| Unreal Tournament GOTY | OpenGL, Direct3D | works; 26 minutes of play without memory loss ([mesa.md](mesa.md)) |
+| Half-Life: Uplink | OpenGL | works once OpenGL is chosen in its Video modes menu (it starts in software); `timerefresh` 1594 frames/s at 320x240 |
+| Serious Sam: The First Encounter demo | OpenGL | works (intro, menu) |
+| Expendable demo | Direct3D | works (attract mode: particles, explosions, rain) |
+| Re-Volt demo | Direct3D | works since a fix the same day (below); menu and race; asks for a sound card |
+| Tomb Raider: The Last Revelation demo | Direct3D | crashes in its own code after its device is made, with and without sound; not traced further (the VM has no sound card) |
+
+**Re-Volt drew nothing from its race thread.** It makes its Direct3D device and sends its first
+commands in one thread and draws in another. The HAL left its OpenGL context current in the
+thread of the last call, and an OpenGL context is current in one thread at a time, so every
+call from the drawing thread failed (`wglMakeCurrent`: ERROR_BUSY) and drew nothing; the game
+also stopped reading the keyboard. Every call into the HAL now makes the context current and
+lets go of it at its end; a thread that finds it busy waits for the other one. d3dtest:
+1043 frames/s against 1044 before.
+
+**Tomb Raider: The Last Revelation lost its OpenGL context to a closed handle.** It releases
+its first DirectDraw object and makes another; the DirectDraw DLL closes its handle to the
+VxD then, and the VxD ended every GPU context of the process at any close, also the one the
+HAL's OpenGL context was using. The new device's buffers were never made (GL answered 0 x 0)
+and its framebuffer stayed incomplete. The VxD counts the handles of each process now and
+ends its contexts when the last one is closed. The game then gets its device and crashes in
+its own code.
+
+## Changing a driver in the test VM
+
+Copying a new `rippledd.dll` or `ripplevd.vxd` over the old one fails while Windows has it
+loaded (DirectDraw's helper process keeps the DLL), and the test VM's `AUTOEXEC.BAT` copy from
+`D:` works only for a hard disk there: DOS has no CD-ROM driver when it runs. A batch file on
+the test CD copies the new files to `C:` and lists them in `C:\WINDOWS\WININIT.INI` under
+`[rename]` as `c:\windows\system\rippledd.dll=c:\rbt\rippledd.new` (no space at the end of
+the line); Windows replaces them at the next start. Check that the debug port shows the new
+build before measuring: a comparison that skipped this (3DMark 2000 above) measured the same
+driver twice.
+
+**Open:** running d3dtest at 32 and then at 16 bits, followed by more test programs, sometimes
+left a program that had ended still holding its output file open ("Sharing violation" in the
+next batch step), and answering that prompt froze the whole guest (idle, no log). It happens
+with the drivers from before 2026-11-17 too; one d3dtest at a time doesn't do it.
 
 ## Things learnt the hard way
 
