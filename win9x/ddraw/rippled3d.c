@@ -4,8 +4,8 @@
  * Direct3D 7 hands a driver its work as command buffers (DrawPrimitives2, "DP2"): render
  * states, texture stage states, clears and primitives made of transformed and lit vertices
  * (screen x and y, depth z, 1/w, colours, texture coordinates). This file plays them on
- * OpenGL, through Windows' opengl32.dll and so through our OpenGL driver (Mesa's virgl driver,
- * the host GPU): each Direct3D context is an OpenGL context drawing into a framebuffer object
+ * OpenGL, calling our OpenGL driver (Mesa's virgl driver in ripplegl.dll, the host GPU) directly
+ * rather than through Windows' opengl32.dll: each Direct3D context is an OpenGL context drawing into a framebuffer object
  * the size of the render target. At the end of a scene (and before the render target is
  * locked or shown) the picture is read back into the render target's video memory, where
  * DirectDraw flips it to the screen.
@@ -188,7 +188,7 @@ static RDD_SHARED *shared;
 /* ---- OpenGL entry points, per process ---------------------------------------------------------- */
 typedef void (APIENTRY *GLVOIDENUM)(GLenum);
 typedef struct {
-    /* from opengl32.dll's exports: keep the order of gl_names[] */
+    /* from Mesa's DrvGetProcAddress: keep the order of gl_names[] */
     void (APIENTRY *Enable)(GLenum);
     void (APIENTRY *Disable)(GLenum);
     void (APIENTRY *Clear)(GLbitfield);
@@ -238,12 +238,12 @@ typedef struct {
     void (APIENTRY *StencilFunc)(GLenum, GLint, GLuint);
     void (APIENTRY *StencilOp)(GLenum, GLenum, GLenum);
     void (APIENTRY *StencilMask)(GLuint);
-    HGLRC (WINAPI *wglCreateContext)(HDC);
-    BOOL (WINAPI *wglDeleteContext)(HGLRC);
-    BOOL (WINAPI *wglMakeCurrent)(HDC, HGLRC);
-    HGLRC (WINAPI *wglGetCurrentContext)(void);
-    PROC (WINAPI *wglGetProcAddress)(LPCSTR);
-    /* extensions, from wglGetProcAddress once a context is current */
+    /* Mesa's own entry points in ripplegl.dll; Windows' OPENGL32 isn't used for these */
+    DWORD (WINAPI *DrvCreateContext)(HDC);
+    BOOL (WINAPI *DrvDeleteContext)(DWORD);
+    BOOL (WINAPI *RippleMakeCurrent)(DWORD);
+    PROC (WINAPI *DrvGetProcAddress)(LPCSTR);
+    /* extensions */
     void (APIENTRY *GenFramebuffers)(GLsizei, GLuint *);
     void (APIENTRY *BindFramebuffer)(GLenum, GLuint);
     void (APIENTRY *FramebufferRenderbuffer)(GLenum, GLenum, GLenum, GLuint);
@@ -262,7 +262,7 @@ typedef struct {
     void (APIENTRY *GetRenderbufferParameteriv)(GLenum, GLenum, GLint *);
 } GLF;
 
-#define GL_CORE_COUNT 54            /* entries up to wglGetProcAddress */
+#define GL_CORE_COUNT 53            /* entries up to DrvGetProcAddress */
 static const char *const gl_names[] = {
     "glEnable", "glDisable", "glClear", "glClearColor", "glClearDepth", "glClearStencil",
     "glScissor", "glViewport", "glMatrixMode", "glLoadIdentity", "glOrtho", "glDepthFunc",
@@ -274,8 +274,7 @@ static const char *const gl_names[] = {
     "glDisableClientState", "glVertexPointer", "glColorPointer", "glTexCoordPointer",
     "glDrawArrays", "glDrawElements", "glColor4ub", "glFogi", "glFogf", "glFogfv", "glGetString",
     "glGetError", "glStencilFunc", "glStencilOp", "glStencilMask",
-    "wglCreateContext", "wglDeleteContext", "wglMakeCurrent", "wglGetCurrentContext",
-    "wglGetProcAddress",
+    "DrvCreateContext", "DrvDeleteContext", "RippleMakeCurrent", "DrvGetProcAddress",
     /* extensions */
     "glGenFramebuffersEXT", "glBindFramebufferEXT", "glFramebufferRenderbufferEXT",
     "glGenRenderbuffersEXT", "glBindRenderbufferEXT", "glRenderbufferStorageEXT",
@@ -289,7 +288,7 @@ typedef char c_gl_names[sizeof(GLF) == GL_ALL_COUNT * sizeof(PROC) ? 1 : -1];
 
 /* What each process needs once: OpenGL's entry points and our window class. */
 typedef struct {
-    HMODULE opengl;
+    HMODULE opengl, mesa;
     int core_ok, ext_ok;
     GLF gl;
     ATOM wndclass;
@@ -443,14 +442,23 @@ static int gl_load_core(RPROC *p)
 
     if (p->core_ok)
         return 1;
+    /* OPENGL32 stays loaded: GDI's pixel format calls look for it. The context and every
+       OpenGL function come from Mesa itself, so that making the context current goes through
+       no window, device context or OPENGL32 (RippleMakeCurrent, make_current). */
     if (!p->opengl)
         p->opengl = LoadLibrary("OPENGL32.DLL");
-    if (!p->opengl)
+    if (!p->mesa)
+        p->mesa = LoadLibrary("RIPPLEGL.DLL");
+    if (!p->opengl || !p->mesa)
         return 0;
+    p->gl.DrvGetProcAddress = (PROC (WINAPI *)(LPCSTR))GetProcAddress(p->mesa,
+                                                                       "DrvGetProcAddress");
     for (i = 0; i < GL_CORE_COUNT; i++) {
-        slot[i] = GetProcAddress(p->opengl, gl_names[i]);
+        slot[i] = gl_names[i][0] == 'g' ? (p->gl.DrvGetProcAddress ?
+                                           p->gl.DrvGetProcAddress(gl_names[i]) : NULL) :
+                  GetProcAddress(p->mesa, gl_names[i]);
         if (!slot[i]) {
-            dbg("rd3d: opengl32 lacks "); dbg(gl_names[i]); dbg("\r\n");
+            dbg("rd3d: ripplegl lacks "); dbg(gl_names[i]); dbg("\r\n");
             return 0;
         }
     }
@@ -466,7 +474,7 @@ static int gl_load_ext(RPROC *p)
     if (p->ext_ok)
         return 1;
     for (i = GL_CORE_COUNT; i < (int)GL_ALL_COUNT; i++) {
-        slot[i] = p->gl.wglGetProcAddress(gl_names[i]);
+        slot[i] = p->gl.DrvGetProcAddress(gl_names[i]);
         if (!slot[i]) {
             dbg("rd3d: OpenGL lacks "); dbg(gl_names[i]); dbg("\r\n");
             if (i < GL_CORE_COUNT + 11)     /* framebuffers and multitexture are needed */
@@ -690,7 +698,7 @@ typedef struct {
     RPROC *p;
     HWND wnd;
     HDC dc;
-    HGLRC rc;
+    DWORD rc;                           /* Mesa's handle (DHGLRC) */
     LPDDRAWI_DIRECTDRAW_LCL ddl;
     LPDDRAWI_DDRAWSURFACE_LCL rt, z;
     GLuint fbo, white, fog_tex;
@@ -761,38 +769,27 @@ static GLF *gl_of(RCTX *c)
    every call makes it current here and lets go of it at its end (let_go). An OpenGL context is
    current in one thread at a time, and programs call Direct3D from more than one: Re-Volt makes
    its device and sends its first commands in one thread and draws in another, and a context
-   left current in the first kept every draw of the second from the GPU. While another thread
-   is inside a call, wait for it. */
+   left current in the first kept every draw of the second from the GPU. DirectDraw lets one
+   thread at a time into the driver.
+   Mesa makes it current with no drawable (the drawing goes to framebuffer objects), through
+   its own entry point: wglMakeCurrent checks the window's pixel format through GDI and KERNEL32,
+   which take locks of the whole system, and DirectDraw holds Windows' 16-bit lock during these
+   calls. Tomb Raider: The Last Revelation's drawing thread hung in it after a few hundred
+   frames, while a thread of another program waited for the 16-bit lock. */
 static void make_current(RCTX *c)
 {
-    GLF *gl = gl_of(c);
-    DWORD start;
+    static DWORD logged;
 
-    if (gl->wglGetCurrentContext() == c->rc)
-        return;
-    for (start = GetTickCount();;) {
-        if (gl->wglMakeCurrent(c->dc, c->rc))
-            return;
-        if (GetTickCount() - start >= 500)
-            break;
-        Sleep(1);
-    }
-    {
-        static DWORD logged;
-        if (logged++ < 8) {
-            dbg("rd3d: context busy in another thread, thread "); dbg_hex(GetCurrentThreadId());
-            dbg(", error "); dbg_hex(GetLastError()); dbg("\r\n");
-        }
+    if (!gl_of(c)->RippleMakeCurrent(c->rc) && logged++ < 8) {
+        dbg("rd3d: context "); dbg_hex(c->rc); dbg(" not made current in thread ");
+        dbg_hex(GetCurrentThreadId()); dbg("\r\n");
     }
 }
 
 /* The end of a call that used the context (make_current). */
 static void let_go(RCTX *c)
 {
-    GLF *gl = gl_of(c);
-
-    if (gl->wglGetCurrentContext() == c->rc)
-        gl->wglMakeCurrent(NULL, NULL);
+    gl_of(c)->RippleMakeCurrent(0);
 }
 
 static LRESULT CALLBACK hidden_wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp)
@@ -1064,8 +1061,8 @@ static void context_free(RCTX *c)
         for (i = 0; i < ZBUFFERS; i++)
             if (c->zb[i].rb)
                 gl->DeleteRenderbuffers(1, &c->zb[i].rb);
-        gl->wglMakeCurrent(NULL, NULL);
-        gl->wglDeleteContext(c->rc);
+        let_go(c);
+        gl->DrvDeleteContext(c->rc);
     }
     if (c->dc)
         ReleaseDC(c->wnd, c->dc);
@@ -2240,7 +2237,7 @@ static DWORD WINAPI ContextCreate(LPD3DHAL_CONTEXTCREATEDATA d)
     pfd.cColorBits = 32;
     pfd.cDepthBits = 24;
     fmt = c->dc ? ChoosePixelFormat(c->dc, &pfd) : 0;
-    if (!fmt || !SetPixelFormat(c->dc, fmt, &pfd) || !(c->rc = p->gl.wglCreateContext(c->dc))) {
+    if (!fmt || !SetPixelFormat(c->dc, fmt, &pfd) || !(c->rc = p->gl.DrvCreateContext(c->dc))) {
         dbg("rd3d: no OpenGL context\r\n");
         context_free(c);
         return DDHAL_DRIVER_HANDLED;

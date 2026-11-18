@@ -197,7 +197,9 @@ fog varying made the host's shaders fail.
 ## Games (2026-11-17)
 
 Period demos on Windows 98 SE in the Proxmox VE test VM (DirectX 7, 256 MB, virgl on the host's
-Intel UHD 630, no sound card in the VM). The demos and the CD image the test machines install
+Intel UHD 630). Since 2026-11-18 the VM has a Sound Blaster 16 (QEMU `-audiodev none,id=snd0
+-device sb16,audiodev=snd0`, sound going nowhere), which Windows 98's Add New Hardware finds
+and installs from its own CD. The demos and the CD image the test machines install
 them from are kept with the build tools, not in this repository.
 
 | Game | API | Result |
@@ -207,8 +209,8 @@ them from are kept with the build tools, not in this repository.
 | Half-Life: Uplink | OpenGL | works once OpenGL is chosen in its Video modes menu (it starts in software); `timerefresh` 1594 frames/s at 320x240 |
 | Serious Sam: The First Encounter demo | OpenGL | works (intro, menu) |
 | Expendable demo | Direct3D | works (attract mode: particles, explosions, rain) |
-| Re-Volt demo | Direct3D | works since a fix the same day (below); menu and race; asks for a sound card |
-| Tomb Raider: The Last Revelation demo | Direct3D | crashes in its own code after its device is made, with and without sound; not traced further (the VM has no sound card) |
+| Re-Volt demo | Direct3D | works since a fix the same day (below); menu and race |
+| Tomb Raider: The Last Revelation demo | Direct3D | works since 2026-11-18 (title flyby, the demo level with its torch light); needs a sound card: without one it crashes in its own sound code |
 
 On the two other test machines (2026-11-18), with the games copied over from the first VM's
 disk: in UTM on an Apple-silicon Mac (x86 emulated, host renderer OpenGL ES through ANGLE)
@@ -222,7 +224,7 @@ commands in one thread and draws in another. The HAL left its OpenGL context cur
 thread of the last call, and an OpenGL context is current in one thread at a time, so every
 call from the drawing thread failed (`wglMakeCurrent`: ERROR_BUSY) and drew nothing; the game
 also stopped reading the keyboard. Every call into the HAL now makes the context current and
-lets go of it at its end; a thread that finds it busy waits for the other one. d3dtest:
+lets go of it at its end (made current through Mesa itself since 2026-11-18, below). d3dtest:
 1043 frames/s against 1044 before.
 
 **Tomb Raider: The Last Revelation lost its OpenGL context to a closed handle.** It releases
@@ -230,8 +232,22 @@ its first DirectDraw object and makes another; the DirectDraw DLL closes its han
 VxD then, and the VxD ended every GPU context of the process at any close, also the one the
 HAL's OpenGL context was using. The new device's buffers were never made (GL answered 0 x 0)
 and its framebuffer stayed incomplete. The VxD counts the handles of each process now and
-ends its contexts when the last one is closed. The game then gets its device and crashes in
-its own code.
+ends its contexts when the last one is closed. The game then got its device and crashed in
+its sound code: the VM had no sound card, and the game uses its sound buffers without checking
+that they were made.
+
+**Tomb Raider: The Last Revelation then hung after a few hundred frames.** With a sound card it
+drew its title screen and stopped, with the whole guest idle. `dbgrun` with `DBGRUN_DUMP` (below)
+showed where: its drawing thread inside `wglMakeCurrent`, called by the HAL at the start of a
+Direct3D call. Windows' `OPENGL32` checks the window's pixel format there, through GDI and
+KERNEL32, which take locks of the whole system; the thread held Windows' 16-bit lock (DirectDraw
+holds it during these calls), and a thread of another program waited for that lock. The HAL now
+makes its context current through Mesa itself (`RippleMakeCurrent`, Mesa patch 0011): no
+drawable (the HAL draws into framebuffer objects), no window, no device context, no OPENGL32.
+The context is made with Mesa's `DrvCreateContext` and every OpenGL function comes from Mesa's
+`DrvGetProcAddress`; OPENGL32 stays loaded only because GDI's pixel format calls look for it
+when the context is made. The game then plays its title flyby and its demo level, and exits
+cleanly. d3dtest: 1085 frames/s (1040 before); Re-Volt's race still draws.
 
 ## Changing a driver in the test VM
 
@@ -273,3 +289,12 @@ with the drivers from before 2026-11-17 too; one d3dtest at a time doesn't do it
   text to QEMU's debug port (port 0xE9, a 25-byte patch in the test VM only) showed every
   message. `tools/win9x/dbgrun.c` (a minimal debugger that keeps OutputDebugString text and
   exceptions) and `tools/win9x/setini.c` (sets `[DirectDraw] debug=9` in WIN.INI) help there.
+- **Finding where a program hangs.** `set DBGRUN_DUMP=5` before `dbgrun E9 PROGRAM` logs every
+  thread of the program every 5 seconds on QEMU's debug port, which stays readable when the
+  guest is stuck: where each thread is, the addresses on its stack inside a loaded module
+  (module+offset, for `objdump` on the build host), and the owner of Windows' 16-bit lock.
+  Windows 9x reports a thread blocked inside a system DLL at its return address into the
+  caller. The lock (KERNEL32 hands out a pointer to it by ordinal 93 only) holds its owner as
+  a ring 0 thread handle, which sits 0x50 bytes after the owner's thread information block
+  (each thread's line shows it). `GetThreadSelectorEntry`, which finds that block, itself
+  waits for the 16-bit lock, so dbgrun asks once per thread, early.

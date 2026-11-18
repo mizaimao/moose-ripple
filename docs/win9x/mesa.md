@@ -237,6 +237,14 @@ lost from one run to the next.
   UHD 630, no other VM on the host). UT's `stat fps` read much lower in the first seconds of
   a map than later (2.2 ms against 57 ms in the same view before the fix), so take readings
   after 20 seconds or more.
+- **The Direct3D driver can't use `wglMakeCurrent`.** On Windows 98 it checks the window's
+  pixel format through GDI and KERNEL32, which take locks of the whole system, and the
+  Direct3D HAL is called with DirectDraw holding Windows' 16-bit lock: a game's drawing thread
+  hung there (Tomb Raider: The Last Revelation, [directdraw.md](directdraw.md#games-2026-11-17)).
+  Patch 0011 exports `RippleMakeCurrent(DHGLRC)`, which makes a context current with no
+  drawable (or none, with 0) and looks at no window or device context; the HAL takes its
+  context from `DrvCreateContext` and its functions from `DrvGetProcAddress`, all in
+  `ripplegl.dll`.
 - **The host's log** is where rendering errors show (`journalctl` on Proxmox VE, lines from
   `QEMU[pid]`).
 
