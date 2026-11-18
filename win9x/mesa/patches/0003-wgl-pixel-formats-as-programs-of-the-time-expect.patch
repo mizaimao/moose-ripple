@@ -35,7 +35,7 @@ diff -ruN a/src/gallium/frontends/wgl/stw_pixelformat.c b/src/gallium/frontends/
  };
  
  static const struct stw_pf_color_info
-@@ -98,13 +98,10 @@
+@@ -98,13 +98,12 @@
  static const struct stw_pf_depth_info
  stw_pf_depth_stencil[] = {
     /* pure depth */
@@ -46,7 +46,9 @@ diff -ruN a/src/gallium/frontends/wgl/stw_pixelformat.c b/src/gallium/frontends/
     /* combined depth-stencil */
 -   { PIPE_FORMAT_Z24_UNORM_S8_UINT, {24, 8} },
 -   { PIPE_FORMAT_S8_UINT_Z24_UNORM, {24, 8} }
-+   { PIPE_FORMAT_Z24_UNORM_S8_UINT, {24, 8} }
++   /* the order virgl hosts have (GL's DEPTH24_STENCIL8): with only the other one, no format
++    * had a stencil buffer, and a program asking for one got Windows' software OpenGL */
++   { PIPE_FORMAT_S8_UINT_Z24_UNORM, {24, 8} }
  };
  
  static const stw_pfd_flag

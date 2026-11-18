@@ -1,0 +1,55 @@
+diff -ruN a/src/gallium/frontends/wgl/stw_device.c b/src/gallium/frontends/wgl/stw_device.c
+--- a/src/gallium/frontends/wgl/stw_device.c
++++ b/src/gallium/frontends/wgl/stw_device.c
+@@ -80,6 +80,10 @@
+    DEVMODE devModes = { .dmSize = sizeof(DEVMODE) };
+ 
+    if (EnumDisplaySettings(NULL, ENUM_CURRENT_SETTINGS, &devModes)) {
++      /* moose-ripple, Windows 9x: 0 and 1 mean the adapter's default rate there, which the
++       * clamp below would turn into 30 Hz (a wait of two frames at 60) */
++      if (devModes.dmDisplayFrequency <= 1)
++         return 60;
+       /* clamp the value, just in case we get garbage */
+       return CLAMP(devModes.dmDisplayFrequency, 30, 120);
+    }
+@@ -131,6 +135,15 @@
+    u_driconf_fill_st_options(&stw_dev->st_options, &stw_dev->option_cache);
+ 
+    stw_dev->swap_interval = driQueryOptioni(&stw_dev->option_cache, "wgl_swap_interval");
++   /* moose-ripple, Windows 9x: no wait before a buffer swap unless the program asks for one
++    * (wglSwapIntervalEXT) or WGL_SWAP_INTERVAL sets one, which may also be 0 here. Mesa's
++    * default of one refresh period is emulated with a sleep; drivers of the time drew without
++    * one, and programs that never touch the setting (Unreal Tournament) lost most of their
++    * frame rate to it. */
++   {
++      const char *env = os_get_option("WGL_SWAP_INTERVAL");
++      stw_dev->swap_interval = env ? CLAMP(atoi(env), 0, 4) : 0;
++   }
+ }
+ 
+ char *
+diff -ruN a/src/gallium/frontends/wgl/stw_framebuffer.c b/src/gallium/frontends/wgl/stw_framebuffer.c
+--- a/src/gallium/frontends/wgl/stw_framebuffer.c
++++ b/src/gallium/frontends/wgl/stw_framebuffer.c
+@@ -732,9 +732,18 @@
+        * rollover.  See https://bugs.freedesktop.org/show_bug.cgi?id=102241
+        */
+       if ((delta >= 0) && (delta < min_swap_period)) {
+-         float fudge = 1.75f;  /* emperical fudge factor */
+-         int64_t wait = (min_swap_period - delta) * fudge;
+-         os_time_sleep(wait);
++         /* moose-ripple, Windows 9x: Sleep wakes only at the next timer tick, 55 ms apart unless
++          * some program has raised the timer rate, so it overshoots a refresh period several
++          * times over. Yield until the period is up instead (this keeps the CPU busy, so it
++          * happens only when a program asks for an interval), and count the next period from
++          * the end of the wait, so that one swap goes through per period. Upstream's fudge
++          * factor of 1.75 made up for counting from before the sleep. The wait ends early if
++          * the clock goes backwards. */
++         int64_t until = cur_time + (min_swap_period - delta), now;
++         while ((now = os_time_get_nano() / 1000) < until && now >= cur_time)
++            Sleep(0);
++         fb->prev_swap_time = now;
++         return;
+       }
+    }
+ 
