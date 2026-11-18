@@ -802,6 +802,22 @@ draws fell to 32 ms with the request, compared with 50 and 49 ms in the
 two controls. The finer timer traded smoother subsequent draws for a
 longer initial wait.
 
+### Welcome to desktop
+
+Two UTM boots showed long display gaps around logon. The first had a
+2.86-second interval between full-screen draws shortly after Explorer
+started. On the second, a boot trace of the Windows compositor recorded
+a 2.199-second interval between completed presents. The corresponding
+UTM draws were 2.201 seconds apart. The four preceding and twelve
+following draws matched the guest sequence within 25 ms relative to the
+start of that gap. The trace reported zero lost events or buffers.
+
+The compositor spent 2.13 seconds of that interval in its
+`SCHEDULE_WFW` wait for work. The reported frozen Welcome screen
+followed by a cut is consistent with this gap in submitted frames. These
+timings leave the exact desktop switch and the fade request unidentified.
+[Welcome transition investigation](https://github.com/mizaimao/moose-ripple/issues/71)
+
 ## Live Explorer resize in UTM
 
 On Windows 7 x64 at 1280×1024, six three-second title-bar drags and six
