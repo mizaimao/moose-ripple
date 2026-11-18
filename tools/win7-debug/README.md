@@ -135,6 +135,51 @@ timing query succeeds throughout the CSV and the compositor PID stays constant.
 The probe waits at least 1.5 seconds between requests. Host delivery timing
 requires a separately synchronized host display log.
 
+For a real Explorer window, run `explorerrestore.exe` in place of the
+`dwmtiming.exe` command inside the same trace session. The probe opens its
+own empty temporary folder in an 800×540 Explorer window. It sends 30
+minimize and restore commands, records the request markers, and verifies
+the window state and Aero composition each round. It closes the window and
+removes the empty folder at the end.
+
+On the analysis machine, run `python3 tools/win7-debug/restore-timing.py transitions.xml`
+on English `tracerpt` output. It reports the initial wait and the longest
+subsequent gap for each run as a median, 95th percentile and maximum. Within
+1.15 seconds of each restore request it counts guest presents preceded by a
+render with a dirty rectangle at least 32 pixels wide and high. This removes
+small updates such as the text caret. The resulting timestamps measure guest
+repaints. Measuring delivery to UTM also requires the host display log.
+
+To measure the delay from a taskbar click, use `explorerrestore.exe 50 taskbar`
+in the same trace session. Leave the mouse and keyboard idle. The probe finds
+the dedicated folder's taskbar button by its accessible name, clicks it, and
+checks that the same window is restored and in the foreground. Use a desktop
+with enough space between the restored window and the taskbar. The probe
+hides its console during this test and restores the original pointer position
+on exit.
+
+For taskbar clicks the analyzer reports when the probe first observed the
+window leave its minimized state and when DWM first presented movement away
+from the button. It looks for a repaint crossing at least 32×32 pixels in the
+space between the taskbar and the restored window, up to 200 pixels from the
+taskbar edge. It excludes 16 pixels beside the edge and accepts only renders
+that started after the click. Keep the desktop otherwise quiet because DWM's
+dirty rectangles describe the composited desktop. The host draw timestamp
+measures delivery to UTM's display client.
+
+Run `vblank.exe` separately to measure the driver's refresh signals. It waits
+for 180 consecutive vertical blanks on the display adapter, times them with
+the performance counter, and prints the observed rate, median and p95 interval.
+
+Run `d3d9upload.exe pitch` and `d3d9upload32.exe pitch` outside the driver
+package directory to verify subrectangle uploads. Each compares every pixel
+after two updates from a wider, caller-owned bitmap.
+
+Use the same executables with `bitmap` to check reuse of larger upload
+buffers. The test queues full and partial updates to two 640×640 textures,
+then samples each texture and compares all 1,024 output pixels, including
+the border around the partial update.
+
 For user-mode samples, run the program with `RIPPLE_UMD_LOG` set: the user-mode driver writes the
 load addresses of the program's main modules when it is loaded (`guest/prof.cmd` does that for
 one assessment test, `guest/dxone.cmd` runs one test alone). Our driver's functions are named

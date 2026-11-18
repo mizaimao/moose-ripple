@@ -701,3 +701,75 @@ Both 32-bit and 64-bit streaming probes verified four rendered tiles, including
 an index write at the far end of the buffer and a discard with earlier draws
 queued. Both texture upload probes passed. Explorer kept the same process
 through ten desktop **New** submenu checks across the two runs.
+
+## Explorer restores and bitmap uploads
+
+Restoring an 800×540 Explorer window exposed another cost. In a six-restore
+driver trace, DWM created a private system-memory texture from a 784×513
+window bitmap on every restore. Its 3,200-byte row pitch included 64 bytes
+outside the image on each row. Creating that resource took a median of 52 ms.
+The following same-size copy into video memory took another 32 ms.
+
+The driver now leaves the pixels of a caller-backed, single-level BGRA or BGRX
+system-memory texture in place until it needs its own GPU image. A window
+bitmap used only as a copy source goes directly into the destination, with
+the original row pitch. The existing dirty flag triggers an upload for a GPU
+read of the source. This follows the system-memory upload approach used by
+Gallium Nine. [Mesa 24.3.4, NineSurface9_CopyMemToDefault](https://gitlab.freedesktop.org/mesa/mesa/-/blob/mesa-24.3.4/src/gallium/frontends/nine/surface9.c#L630-705)
+
+On the same 1280×1024 UTM boot, the previous release and the new driver each
+ran 30 restores after restarting DWM. All 60 rounds kept Aero active. The
+probe posted a restore command to Explorer's window. DWM presents and UTM host
+draws matched in order over each 1.15-second observation. Substantial repaints
+use the 32×32 dirty-region threshold described above.
+
+| UTM host measurement | Previous release | Direct bitmap upload |
+| --- | ---: | ---: |
+| Median wait for the first substantial repaint | 111 ms | 104 ms |
+| Median of each restore's longest subsequent gap | 185 ms | 120 ms |
+| 95th percentile of those gaps | 312 ms | 183 ms |
+| 95th percentile, counting only gaps that started in the first 500 ms | 254 ms | 183 ms |
+
+The longest subsequent gap with the new driver was 188 ms. One restore still
+took 286 ms to show its first substantial repaint. The window-movement check
+delivered 27.0 and 28.6 host updates per second respectively over the same
+five-second interval. The 32-bit and 64-bit subrectangle tests each compared
+2,048 pixels, including untouched borders, with zero mismatches.
+
+## Clicking Explorer's taskbar button in UTM
+
+A 784×502 window bitmap required a 1.5 MiB Mesa transfer buffer. Smaller
+uploads could replace it with the 1 MiB default. On the next restore, merely
+writing one byte per row into the new mapping took 31–37 ms. Reading a byte
+per source row took less than 0.2 ms, and copying the bitmap after touching
+the destination took about 1.3 ms.
+
+The Windows virgl build now grows its default transfer-buffer size to the
+next power of two when a bitmap needs more room, up to 4 MiB. Small uploads
+can then use buffers of the same size as the window uploads. Mesa continues
+to track when each buffer is safe to reuse. In a separate six-click trace,
+the median CPU copy of the 784×502 bitmap fell from 37.7 ms to 0.9 ms. The
+first copy on the new driver took 38.6 ms, and the next five each took less
+than 1 ms.
+
+Each column below used 50 clicks on the dedicated Explorer window's taskbar
+button on one Windows 7 x64 boot at 1280×1024. Aero and minimize/restore
+animations stayed enabled. First movement means a DWM repaint extending at
+least 32×32 pixels into the space above the taskbar, excluding button glow.
+The host measurement matches that present with a UTM display draw. All 150
+rounds matched in order and the three traces reported zero lost events.
+Host/guest clock alignment introduces several milliseconds of uncertainty.
+
+| Measurement | Previous drivers | Refresh timing fix | Refresh timing and upload fixes |
+| --- | ---: | ---: | ---: |
+| Median click to observed unminimized state | 92 ms | 90 ms | 91 ms |
+| Median click to first guest motion present | 257 ms | 245 ms | 198 ms |
+| Median click to first host motion update | 276 ms | 261 ms | 204 ms |
+| 95th percentile click to first host motion update | 310 ms | 296 ms | 278 ms |
+| Longest observed click to first host motion update | 402 ms | 314 ms | 302 ms |
+
+The original drivers and the combined fixes both delivered 24.4 host
+updates per second in the separate five-second window-movement sample.
+The 32-bit and 64-bit upload tests each verified two queued textures, with
+zero mismatches. Explorer kept its process through five desktop **New**
+submenu checks on the final driver.
