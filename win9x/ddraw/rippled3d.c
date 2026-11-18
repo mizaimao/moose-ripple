@@ -171,6 +171,11 @@ static RDD_SHARED *shared;
 #define GL_STENCIL_ATTACHMENT           0x8D20
 #define GL_DEPTH24_STENCIL8             0x88F0
 #define GL_FRAMEBUFFER_COMPLETE         0x8CD5
+#define GL_INCR_WRAP                    0x8507
+#define GL_DECR_WRAP                    0x8508
+#define GL_TEXTURE_BASE_LEVEL           0x813C
+#define GL_TEXTURE_MAX_LEVEL            0x813D
+#define GL_TEXTURE_LOD_BIAS             0x8501
 #define GL_RGBA8                        0x8058
 #define GL_RGB8                         0x8051
 #define GL_RGB5                         0x8050
@@ -226,6 +231,9 @@ typedef struct {
     void (APIENTRY *Fogf)(GLenum, GLfloat);
     void (APIENTRY *Fogfv)(GLenum, const GLfloat *);
     const GLubyte *(APIENTRY *GetString)(GLenum);
+    void (APIENTRY *StencilFunc)(GLenum, GLint, GLuint);
+    void (APIENTRY *StencilOp)(GLenum, GLenum, GLenum);
+    void (APIENTRY *StencilMask)(GLuint);
     HGLRC (WINAPI *wglCreateContext)(HDC);
     BOOL (WINAPI *wglDeleteContext)(HGLRC);
     BOOL (WINAPI *wglMakeCurrent)(HDC, HGLRC);
@@ -249,7 +257,7 @@ typedef struct {
     void (APIENTRY *WindowPos2i)(GLint, GLint);
 } GLF;
 
-#define GL_CORE_COUNT 50            /* entries up to wglGetProcAddress */
+#define GL_CORE_COUNT 53            /* entries up to wglGetProcAddress */
 static const char *const gl_names[] = {
     "glEnable", "glDisable", "glClear", "glClearColor", "glClearDepth", "glClearStencil",
     "glScissor", "glViewport", "glMatrixMode", "glLoadIdentity", "glOrtho", "glDepthFunc",
@@ -260,6 +268,7 @@ static const char *const gl_names[] = {
     "glTexParameterfv", "glTexEnvi", "glTexEnvfv", "glEnableClientState",
     "glDisableClientState", "glVertexPointer", "glColorPointer", "glTexCoordPointer",
     "glDrawArrays", "glDrawElements", "glColor4ub", "glFogi", "glFogf", "glFogfv", "glGetString",
+    "glStencilFunc", "glStencilOp", "glStencilMask",
     "wglCreateContext", "wglDeleteContext", "wglMakeCurrent", "wglGetCurrentContext",
     "wglGetProcAddress",
     /* extensions */
@@ -642,11 +651,15 @@ int d3d_surface_format_ok(LPDDSURFACEDESC desc)
 #define STAGES 2
 #define FOG_UNIT STAGES                 /* the OpenGL texture unit that does fog */
 
+#define MAX_LEVELS 12                   /* mipmap levels of a 2048x2048 texture */
+
 typedef struct {
     GLuint name;
     FLATPTR mem;                        /* what was uploaded: memory, size, format */
     DWORD w, h, fmt;
-    DWORD stamp;                        /* DirectDraw's contents stamp then (0: none kept) */
+    DWORD levels;                       /* mipmap levels uploaded (1: the top level only) */
+    FLATPTR lmem[MAX_LEVELS];           /* each level's memory (lmem[0] is mem) */
+    DWORD stamp;                        /* DirectDraw's contents stamps then (0: none kept) */
     DWORD scene;                        /* the scene it was uploaded in */
     int dirty;                          /* written since (Lock, texture blit) */
 } TEXTURE;
@@ -688,6 +701,7 @@ typedef struct {
     int stages_dirty;
     DWORD scene;                        /* scenes ended so far */
     DWORD bound[STAGES];                /* surface handle of each stage's texture, 0 if none */
+    int keyed;                          /* a bound texture is drawn with its colour key */
     TEXTURE *tex;                       /* by surface handle */
     DWORD ntex;
     DWORD ntextures;                    /* OpenGL textures made (see TEXTURE_BUDGET) */
@@ -760,11 +774,18 @@ static void textures_written(FLATPTR mem)
         RCTX *c = mine(&contexts[i].o, &m) ? contexts[i].c : NULL;
         if (!c)
             continue;
-        for (j = 0; j < c->ntex; j++)
-            if (c->tex[j].name && c->tex[j].mem == mem) {
-                c->tex[j].dirty = 1;
+        for (j = 0; j < c->ntex; j++) {
+            TEXTURE *t = &c->tex[j];
+            DWORD l;
+            if (!t->name)
+                continue;
+            for (l = 0; l < t->levels && t->lmem[l] != mem; l++)
+                ;
+            if (t->mem == mem || l < t->levels) {
+                t->dirty = 1;
                 c->stages_dirty = 1;
             }
+        }
     }
 }
 
@@ -1032,6 +1053,55 @@ static void apply_fog(RCTX *c)
     c->stages_dirty = 1;
 }
 
+/* Direct3D's alpha test, and the colour key: a texel of the key's colour is not drawn. Such
+   texels have alpha 0 in the uploaded texture (keyed_copy), so while the program doesn't test
+   alpha itself, a test for alpha above 0 leaves them out. */
+static void apply_alpha_test(RCTX *c)
+{
+    GLF *gl = gl_of(c);
+
+    if (c->rs[D3DRENDERSTATE_ALPHATESTENABLE]) {
+        gl->Enable(GL_ALPHA_TEST);
+        gl->AlphaFunc(gl_cmp(c->rs[D3DRENDERSTATE_ALPHAFUNC]),
+                      (c->rs[D3DRENDERSTATE_ALPHAREF] & 255) / 255.0f);
+    } else if (c->keyed) {
+        gl->Enable(GL_ALPHA_TEST);
+        gl->AlphaFunc(GL_GREATER, 0.0f);
+    } else {
+        gl->Disable(GL_ALPHA_TEST);
+    }
+}
+
+static GLenum gl_stencil_op(DWORD op)
+{
+    switch (op) {
+    case D3DSTENCILOP_ZERO: return GL_ZERO;
+    case D3DSTENCILOP_REPLACE: return GL_REPLACE;
+    case D3DSTENCILOP_INCRSAT: return GL_INCR;
+    case D3DSTENCILOP_DECRSAT: return GL_DECR;
+    case D3DSTENCILOP_INVERT: return GL_INVERT;
+    case D3DSTENCILOP_INCR: return GL_INCR_WRAP;
+    case D3DSTENCILOP_DECR: return GL_DECR_WRAP;
+    }
+    return GL_KEEP;
+}
+
+/* The stencil test. Every z-buffer is depth and stencil on the GPU (gpu_buffer), so it works
+   whatever format the z-buffer has in memory. */
+static void apply_stencil(RCTX *c)
+{
+    GLF *gl = gl_of(c);
+    DWORD *rs = c->rs;
+
+    enable(gl, GL_STENCIL_TEST, rs[D3DRENDERSTATE_STENCILENABLE]);
+    gl->StencilFunc(gl_cmp(rs[D3DRENDERSTATE_STENCILFUNC]), (GLint)rs[D3DRENDERSTATE_STENCILREF],
+                    rs[D3DRENDERSTATE_STENCILMASK]);
+    gl->StencilOp(gl_stencil_op(rs[D3DRENDERSTATE_STENCILFAIL]),
+                  gl_stencil_op(rs[D3DRENDERSTATE_STENCILZFAIL]),
+                  gl_stencil_op(rs[D3DRENDERSTATE_STENCILPASS]));
+    gl->StencilMask(rs[D3DRENDERSTATE_STENCILWRITEMASK]);
+}
+
 static void render_state(RCTX *c, DWORD state, DWORD v)
 {
     GLF *gl = gl_of(c);
@@ -1056,12 +1126,22 @@ static void render_state(RCTX *c, DWORD state, DWORD v)
         apply_blend(c);
         break;
     case D3DRENDERSTATE_ALPHATESTENABLE:
-        enable(gl, GL_ALPHA_TEST, v);
-        break;
     case D3DRENDERSTATE_ALPHAREF:
     case D3DRENDERSTATE_ALPHAFUNC:
-        gl->AlphaFunc(gl_cmp(c->rs[D3DRENDERSTATE_ALPHAFUNC]),
-                      (c->rs[D3DRENDERSTATE_ALPHAREF] & 255) / 255.0f);
+        apply_alpha_test(c);
+        break;
+    case D3DRENDERSTATE_COLORKEYENABLE:   /* textures are uploaded with or without their key */
+        c->stages_dirty = 1;
+        break;
+    case D3DRENDERSTATE_STENCILENABLE:
+    case D3DRENDERSTATE_STENCILFAIL:
+    case D3DRENDERSTATE_STENCILZFAIL:
+    case D3DRENDERSTATE_STENCILPASS:
+    case D3DRENDERSTATE_STENCILFUNC:
+    case D3DRENDERSTATE_STENCILREF:
+    case D3DRENDERSTATE_STENCILMASK:
+    case D3DRENDERSTATE_STENCILWRITEMASK:
+        apply_stencil(c);
         break;
     case D3DRENDERSTATE_CULLMODE:
         /* Rows are flipped (row 0 at the top in GL too), so a triangle Direct3D sees clockwise
@@ -1132,14 +1212,45 @@ static GLenum gl_address(DWORD a)
     return GL_REPEAT;
 }
 
+/* The levels of a mipmapped texture: the top level, then each smaller one, attached to the one
+   before it (the DDK's sample drivers walk them the same way). A level that isn't half the
+   size of the one before (at least 1) ends the walk, as does one without memory. Returns how
+   many there are, at least 1. */
+static DWORD mip_chain(LPDDRAWI_DDRAWSURFACE_LCL s, LPDDRAWI_DDRAWSURFACE_LCL *lv)
+{
+    DWORD n = 1;
+
+    lv[0] = s;
+    while (n < MAX_LEVELS && (s->ddsCaps.dwCaps & DDSCAPS_MIPMAP) && s->lpAttachList) {
+        LPDDRAWI_DDRAWSURFACE_LCL next = s->lpAttachList->lpAttached;
+        DWORD w = s->lpGbl->wWidth > 1 ? s->lpGbl->wWidth / 2 : 1;
+        DWORD h = s->lpGbl->wHeight > 1 ? s->lpGbl->wHeight / 2 : 1;
+        if (!next || next == lv[0] || !(next->ddsCaps.dwCaps & DDSCAPS_MIPMAP) ||
+            !next->lpGbl || !next->lpGbl->fpVidMem || next->lpGbl->wWidth != w ||
+            next->lpGbl->wHeight != h)
+            break;
+        lv[n++] = s = next;
+    }
+    return n;
+}
+
+/* DirectDraw's contents stamps of all levels in one number (0: none kept): it changes when any
+   level is written. */
+static DWORD chain_stamp(LPDDRAWI_DDRAWSURFACE_LCL *lv, DWORD n)
+{
+    DWORD i, stamp = 0;
+
+    for (i = 0; i < n; i++)
+        stamp += GET_LPDDRAWSURFACE_GBL_MORE(lv[i]->lpGbl)->dwContentsStamp * (2 * i + 1);
+    return stamp;
+}
+
 /* Has the surface behind a texture been written since it was uploaded? Video memory is only
    written through our Lock (DirectDraw's own blits lock too) or a texture blit, which mark the
    texture; DirectDraw's contents stamp says so too when it keeps one. Surfaces in system memory
    are written without telling the driver: without a stamp they are taken again once a scene. */
-static int texture_changed(RCTX *c, TEXTURE *t, LPDDRAWI_DDRAWSURFACE_LCL s)
+static int texture_changed(RCTX *c, TEXTURE *t, LPDDRAWI_DDRAWSURFACE_LCL s, DWORD stamp)
 {
-    DWORD stamp = GET_LPDDRAWSURFACE_GBL_MORE(s->lpGbl)->dwContentsStamp;
-
     if (t->dirty || (stamp && stamp != t->stamp))
         return 1;
     return !stamp && (s->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY) && t->scene != c->scene;
@@ -1173,19 +1284,115 @@ static void texture_evict(RCTX *c, DWORD keep)
     c->ntextures--;
 }
 
+/* One channel of a texel, given its mask in the format, scaled to 8 bits. */
+static DWORD channel(DWORD v, DWORD mask)
+{
+    DWORD bits = 0, m;
+
+    if (!mask)
+        return 0;
+    while (!(mask & 1)) {
+        mask >>= 1;
+        v >>= 1;
+    }
+    v &= mask;
+    for (m = mask; m; m >>= 1)
+        bits++;
+    return bits >= 8 ? v >> (bits - 8) : (v * 255 + mask / 2) / mask;
+}
+
+/* A level of a texture with a colour key, as 32-bit BGRA for OpenGL: texels of the key colour
+   (red, green and blue compared) become black with alpha 0, the others keep their colour and
+   alpha (255 if the format has none). NULL if there is no memory for it. */
+static DWORD *keyed_copy(LPDDRAWI_DDRAWSURFACE_GBL g, const DDPIXELFORMAT *pf, DWORD key)
+{
+    DWORD bytes = pf->dwRGBBitCount / 8, x, y;
+    DWORD rgb = pf->dwRBitMask | pf->dwGBitMask | pf->dwBBitMask;
+    DWORD amask = (pf->dwFlags & DDPF_ALPHAPIXELS) ? pf->dwRGBAlphaBitMask : 0;
+    DWORD *out = (DWORD *)alloc((DWORD)g->wWidth * g->wHeight * 4), *o = out;
+
+    if (!out)
+        return NULL;
+    key &= rgb;
+    for (y = 0; y < g->wHeight; y++) {
+        const BYTE *row = (const BYTE *)g->fpVidMem + y * g->lPitch;
+        for (x = 0; x < g->wWidth; x++) {
+            DWORD v = bytes == 4 ? ((const DWORD *)row)[x] : ((const WORD *)row)[x];
+            if ((v & rgb) == key) {
+                *o++ = 0;
+                continue;
+            }
+            *o++ = (amask ? channel(v, amask) : 255) << 24 | channel(v, pf->dwRBitMask) << 16 |
+                   channel(v, pf->dwGBitMask) << 8 | channel(v, pf->dwBBitMask);
+        }
+    }
+    return out;
+}
+
+/* All levels of a texture to the bound OpenGL texture: new storage (TexImage2D) or the same
+   storage again (TexSubImage2D). A texture drawn with its colour key (keyed) goes as 32-bit
+   copies with the key's texels made transparent (keyed_copy). */
+static void texture_upload(GLF *gl, const PIXFMT *f, const DDPIXELFORMAT *pf,
+                           LPDDRAWI_DDRAWSURFACE_LCL *lv, DWORD levels, int fresh, int keyed)
+{
+    DWORD l;
+
+    gl->PixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    for (l = 0; l < levels; l++) {
+        LPDDRAWI_DDRAWSURFACE_GBL g = lv[l]->lpGbl;
+        if (keyed) {
+            DWORD *copy = keyed_copy(g, pf, lv[0]->ddckCKSrcBlt.dwColorSpaceLowValue);
+            if (!copy)
+                continue;
+            gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            if (fresh)
+                gl->TexImage2D(GL_TEXTURE_2D, l, GL_RGBA8, g->wWidth, g->wHeight, 0, GL_BGRA,
+                               GL_UNSIGNED_BYTE, copy);
+            else
+                gl->TexSubImage2D(GL_TEXTURE_2D, l, 0, 0, g->wWidth, g->wHeight, GL_BGRA,
+                                  GL_UNSIGNED_BYTE, copy);
+            release(copy);
+            continue;
+        }
+        gl->PixelStorei(GL_UNPACK_ROW_LENGTH, g->lPitch / f->bytes);
+        if (fresh)
+            gl->TexImage2D(GL_TEXTURE_2D, l, f->internal, g->wWidth, g->wHeight, 0, f->format,
+                           f->type, (const GLvoid *)g->fpVidMem);
+        else
+            gl->TexSubImage2D(GL_TEXTURE_2D, l, 0, 0, g->wWidth, g->wHeight, f->format, f->type,
+                              (const GLvoid *)g->fpVidMem);
+    }
+    gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+}
+
+/* Direct3D's minification and mipmap filters as one OpenGL filter. Without levels below the
+   top, mipmap filtering would make the texture incomplete (nothing drawn), so it is left out. */
+static GLint min_filter(const DWORD *st, DWORD levels)
+{
+    int linear = st[D3DTSS_MINFILTER] != D3DTFN_POINT;
+
+    if (levels < 2 || st[D3DTSS_MIPFILTER] == D3DTFP_NONE || st[D3DTSS_MIPFILTER] == 0)
+        return linear ? GL_LINEAR : GL_NEAREST;
+    if (st[D3DTSS_MIPFILTER] == D3DTFP_POINT)
+        return linear ? GL_LINEAR_MIPMAP_NEAREST : GL_NEAREST_MIPMAP_NEAREST;
+    return linear ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_LINEAR;
+}
+
 /* Bind the texture behind a surface handle, uploading it if it is new or has changed. 0 if
    there is no usable texture. */
 static int texture_bind(RCTX *c, DWORD h, int stage)
 {
     GLF *gl = gl_of(c);
     LPDDRAWI_DDRAWSURFACE_LCL s = handle_get(c->ddl, h);
+    LPDDRAWI_DDRAWSURFACE_LCL lv[MAX_LEVELS];
     LPDDRAWI_DDRAWSURFACE_GBL g;
     TEXTURE *t;
     DDPIXELFORMAT pf;
     PIXFMT f;
-    DWORD stamp, fmt;
+    DWORD stamp, fmt, levels, l;
+    int keyed;
     DWORD *st = c->tss[stage];
-    GLfloat border[4];
+    GLfloat border[4], bias;
 
     if (!s || !(g = s->lpGbl) || !g->fpVidMem)
         return 0;
@@ -1203,43 +1410,53 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
         c->ntextures++;
     }
     gl->BindTexture(GL_TEXTURE_2D, t->name);
-    stamp = GET_LPDDRAWSURFACE_GBL_MORE(g)->dwContentsStamp;
-    fmt = f.internal ^ (f.format << 8) ^ (f.type << 16);
-    if (t->mem != g->fpVidMem || t->w != g->wWidth || t->h != g->wHeight || t->fmt != fmt) {
+    levels = mip_chain(s, lv);
+    stamp = chain_stamp(lv, levels);
+    /* The colour key, if the program turned it on and the texture has one: the key's colour
+       is uploaded as transparent, so a change of either is a new upload (fmt) */
+    keyed = c->rs[D3DRENDERSTATE_COLORKEYENABLE] && (s->dwFlags & DDRAWISURF_HASCKEYSRCBLT);
+    fmt = f.internal ^ (f.format << 8) ^ (f.type << 16) ^
+          (keyed ? 0x80000000UL ^ s->ddckCKSrcBlt.dwColorSpaceLowValue : 0);
+    if (keyed)
+        c->keyed = 1;
+    if (t->mem != g->fpVidMem || t->w != g->wWidth || t->h != g->wHeight || t->fmt != fmt ||
+        t->levels != levels) {
         /* new: storage and contents */
-        gl->PixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        gl->PixelStorei(GL_UNPACK_ROW_LENGTH, g->lPitch / f.bytes);
-        gl->TexImage2D(GL_TEXTURE_2D, 0, f.internal, g->wWidth, g->wHeight, 0, f.format, f.type,
-                       (const GLvoid *)g->fpVidMem);
-        gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        texture_upload(gl, &f, &pf, lv, levels, 1, keyed);
         t->mem = g->fpVidMem;
         t->w = g->wWidth;
         t->h = g->wHeight;
         t->fmt = fmt;
-        tracef("rd3d: texture %lx new: %lux%lu, %lu bits, caps %08lx, memory %08lx, pitch %ld, "
-               "stamp %lx, sum %08lx\r\n", h, (DWORD)g->wWidth, (DWORD)g->wHeight,
-               pf.dwRGBBitCount, s->ddsCaps.dwCaps, g->fpVidMem, g->lPitch, stamp,
+        t->levels = levels;
+        for (l = 0; l < levels; l++)
+            t->lmem[l] = lv[l]->lpGbl->fpVidMem;
+        /* Levels 1 and down exist only with mipmaps; without, the top level is all there is
+           and the texture is complete without the others. */
+        gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, levels - 1);
+        tracef("rd3d: texture %lx new: %lux%lu, %lu levels, %lu bits, caps %08lx, memory %08lx, "
+               "pitch %ld, stamp %lx, sum %08lx\r\n", h, (DWORD)g->wWidth, (DWORD)g->wHeight,
+               levels, pf.dwRGBBitCount, s->ddsCaps.dwCaps, g->fpVidMem, g->lPitch, stamp,
                trace_on ? sum_rows((BYTE *)g->fpVidMem, g->lPitch, g->wWidth * f.bytes,
                                    g->wHeight) : 0);
-    } else if (texture_changed(c, t, s)) {
+    } else if (texture_changed(c, t, s, stamp)) {
         /* written since: the contents again, into the same storage */
         tracef("rd3d: texture %lx again: dirty %d, stamp %lx (was %lx), scene %lu (was %lu), "
                "sum %08lx\r\n", h, t->dirty, stamp, t->stamp, c->scene, t->scene,
                trace_on ? sum_rows((BYTE *)g->fpVidMem, g->lPitch, g->wWidth * f.bytes,
                                    g->wHeight) : 0);
-        gl->PixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        gl->PixelStorei(GL_UNPACK_ROW_LENGTH, g->lPitch / f.bytes);
-        gl->TexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, g->wWidth, g->wHeight, f.format, f.type,
-                          (const GLvoid *)g->fpVidMem);
-        gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        texture_upload(gl, &f, &pf, lv, levels, 0, keyed);
     }
     t->stamp = stamp;
     t->scene = c->scene;
     t->dirty = 0;
     gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
                       st[D3DTSS_MAGFILTER] == D3DTFG_POINT ? GL_NEAREST : GL_LINEAR);
-    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
-                      st[D3DTSS_MINFILTER] == D3DTFN_POINT ? GL_NEAREST : GL_LINEAR);
+    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, min_filter(st, levels));
+    /* MAXMIPLEVEL is the largest level the program allows (0: the top) */
+    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL,
+                      st[D3DTSS_MAXMIPLEVEL] < levels ? st[D3DTSS_MAXMIPLEVEL] : levels - 1);
+    bias = *(const float *)&st[D3DTSS_MIPMAPLODBIAS];
+    gl->TexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, &bias);
     gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl_address(st[D3DTSS_ADDRESSU]));
     gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl_address(st[D3DTSS_ADDRESSV]));
     border[0] = ((st[D3DTSS_BORDERCOLOR] >> 16) & 255) / 255.0f;
@@ -1392,6 +1609,7 @@ static void apply_stages(RCTX *c)
     factor[1] = ((tf >> 8) & 255) / 255.0f;
     factor[2] = (tf & 255) / 255.0f;
     factor[3] = ((tf >> 24) & 255) / 255.0f;
+    c->keyed = 0;                       /* texture_bind sets it again */
     for (s = 0; s < STAGES; s++) {
         DWORD *st = c->tss[s];
         DWORD cop = st[D3DTSS_COLOROP], aop = st[D3DTSS_ALPHAOP];
@@ -1426,12 +1644,14 @@ static void apply_stages(RCTX *c)
     }
     apply_fog_unit(c);
     gl->ActiveTexture(GL_TEXTURE0);
+    apply_alpha_test(c);
     c->stages_dirty = 0;
 }
 
 /* Has a texture in use changed since it was uploaded (the program wrote into it)? */
 static int textures_changed(RCTX *c)
 {
+    LPDDRAWI_DDRAWSURFACE_LCL lv[MAX_LEVELS];
     int s;
 
     for (s = 0; s < STAGES; s++) {
@@ -1443,7 +1663,8 @@ static int textures_changed(RCTX *c)
             continue;
         l = handle_get(c->ddl, h);
         t = &c->tex[h];
-        if (!l || l->lpGbl->fpVidMem != t->mem || texture_changed(c, t, l))
+        if (!l || l->lpGbl->fpVidMem != t->mem || mip_chain(l, lv) != t->levels ||
+            texture_changed(c, t, l, chain_stamp(lv, t->levels)))
             return 1;
     }
     return 0;
@@ -1700,6 +1921,7 @@ static void rt_upload(RCTX *c)
     gl->Disable(GL_ALPHA_TEST);
     gl->Disable(GL_COLOR_SUM);
     gl->Disable(GL_SCISSOR_TEST);       /* all of the target, not only the viewport */
+    gl->Disable(GL_STENCIL_TEST);
     for (u = 0; u <= FOG_UNIT; u++) {
         gl->ActiveTexture(GL_TEXTURE0 + u);
         gl->Disable(GL_TEXTURE_2D);
@@ -1714,9 +1936,10 @@ static void rt_upload(RCTX *c)
     gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     apply_depth_test(c);
     enable(gl, GL_BLEND, c->rs[D3DRENDERSTATE_ALPHABLENDENABLE]);
-    enable(gl, GL_ALPHA_TEST, c->rs[D3DRENDERSTATE_ALPHATESTENABLE]);
+    apply_alpha_test(c);
     enable(gl, GL_COLOR_SUM, c->rs[D3DRENDERSTATE_SPECULARENABLE]);
     apply_scissor(c);
+    enable(gl, GL_STENCIL_TEST, c->rs[D3DRENDERSTATE_STENCILENABLE]);
     c->stages_dirty = 1;
     c->dirty = 1;
 }
@@ -1815,6 +2038,7 @@ static void clear(RCTX *c, DWORD flags, DWORD color, float depth, DWORD stencil,
     if (flags & D3DCLEAR_STENCIL) {
         mask |= GL_STENCIL_BUFFER_BIT;
         gl->ClearStencil(stencil);
+        gl->StencilMask(0xFFFFFFFF);    /* a clear writes every bit, as the depth does */
     }
     if (!mask)
         return;
@@ -1830,6 +2054,7 @@ static void clear(RCTX *c, DWORD flags, DWORD color, float depth, DWORD stencil,
     }
     apply_scissor(c);                   /* the viewport's again */
     gl->DepthMask((GLboolean)(c->rs[D3DRENDERSTATE_ZWRITEENABLE] ? GL_TRUE : GL_FALSE));
+    gl->StencilMask(c->rs[D3DRENDERSTATE_STENCILWRITEMASK]);
 }
 
 /* ---- Render target ------------------------------------------------------------------------------ */
@@ -1864,6 +2089,12 @@ static void defaults(RCTX *c)
     render_state(c, D3DRENDERSTATE_SHADEMODE, D3DSHADE_GOURAUD);
     render_state(c, D3DRENDERSTATE_FILLMODE, D3DFILL_SOLID);
     render_state(c, D3DRENDERSTATE_TEXTUREFACTOR, 0xFFFFFFFF);
+    render_state(c, D3DRENDERSTATE_STENCILFAIL, D3DSTENCILOP_KEEP);
+    render_state(c, D3DRENDERSTATE_STENCILZFAIL, D3DSTENCILOP_KEEP);
+    render_state(c, D3DRENDERSTATE_STENCILPASS, D3DSTENCILOP_KEEP);
+    render_state(c, D3DRENDERSTATE_STENCILFUNC, D3DCMP_ALWAYS);
+    render_state(c, D3DRENDERSTATE_STENCILMASK, 0xFFFFFFFF);
+    render_state(c, D3DRENDERSTATE_STENCILWRITEMASK, 0xFFFFFFFF);
     for (s = 0; s < STAGES; s++) {
         c->tss[s][D3DTSS_COLOROP] = s ? D3DTOP_DISABLE : D3DTOP_MODULATE;
         c->tss[s][D3DTSS_COLORARG1] = D3DTA_TEXTURE;
@@ -1875,6 +2106,7 @@ static void defaults(RCTX *c)
         c->tss[s][D3DTSS_ADDRESSU] = c->tss[s][D3DTSS_ADDRESSV] = D3DTADDRESS_WRAP;
         c->tss[s][D3DTSS_MAGFILTER] = D3DTFG_POINT;
         c->tss[s][D3DTSS_MINFILTER] = D3DTFN_POINT;
+        c->tss[s][D3DTSS_MIPFILTER] = D3DTFP_NONE;
     }
     c->stages_dirty = 1;
 }
@@ -2062,38 +2294,62 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
 {
     LPDDRAWI_DDRAWSURFACE_LCL ds = handle_get(c->ddl, b->dwDDDestSurface);
     LPDDRAWI_DDRAWSURFACE_LCL ss = handle_get(c->ddl, b->dwDDSrcSurface);
-    LPDDRAWI_DDRAWSURFACE_GBL dg, sg;
+    LPDDRAWI_DDRAWSURFACE_LCL dl[MAX_LEVELS], sl[MAX_LEVELS];
     DDPIXELFORMAT pf;
-    DWORD bytes, w, h, y;
+    DWORD bytes, levels, n, l;
     RECTL r = b->rSrc;
 
     tracef("rd3d: texture blit %lx -> %lx, %ld,%ld-%ld,%ld to %ld,%ld, flags %lx%s\r\n",
            b->dwDDSrcSurface, b->dwDDDestSurface, r.left, r.top, r.right, r.bottom,
            b->pDest.x, b->pDest.y, b->dwFlags, ds && ss ? "" : " (unknown handle)");
-    if (!ds || !ss)
+    if (!ds || !ss || !ds->lpGbl->fpVidMem || !ss->lpGbl->fpVidMem)
         return;
-    dg = ds->lpGbl;
-    sg = ss->lpGbl;
     surface_format(ss, &pf);
     bytes = pf.dwRGBBitCount / 8;
-    if (!bytes || !dg->fpVidMem || !sg->fpVidMem)
+    if (!bytes)
         return;
     if (r.right <= r.left || r.bottom <= r.top) {
         r.left = r.top = 0;
-        r.right = sg->wWidth;
-        r.bottom = sg->wHeight;
+        r.right = ss->lpGbl->wWidth;
+        r.bottom = ss->lpGbl->wHeight;
     }
-    w = r.right - r.left;
-    h = r.bottom - r.top;
-    /* A copy in memory, so the source's newest picture must be there first, and the target's
-       too (the part not copied stays); a context's read-back may make another one current. */
-    d3d_surface_access(ss);
-    d3d_surface_access(ds);
-    make_current(c);
-    for (y = 0; y < h; y++)
-        memcpy((BYTE *)dg->fpVidMem + (b->pDest.y + y) * dg->lPitch + b->pDest.x * bytes,
-               (BYTE *)sg->fpVidMem + (r.top + y) * sg->lPitch + r.left * bytes, w * bytes);
-    d3d_surface_written(ds);            /* a render target too: its GPU picture is older now */
+    /* Mipmapped textures: every level the two have in common, with the rectangle and the
+       point scaled to it (the DDK's rule for this command). */
+    levels = mip_chain(ds, dl);
+    n = mip_chain(ss, sl);
+    if (n < levels)
+        levels = n;
+    for (l = 0; l < levels; l++) {
+        LPDDRAWI_DDRAWSURFACE_GBL dg = dl[l]->lpGbl, sg = sl[l]->lpGbl;
+        LONG left = r.left >> l, top = r.top >> l, x = b->pDest.x >> l, y = b->pDest.y >> l;
+        LONG w = (r.right >> l) - left, h = (r.bottom >> l) - top, i;
+        if (w < 1)
+            w = 1;
+        if (h < 1)
+            h = 1;
+        /* never outside either surface */
+        if (left < 0 || top < 0 || x < 0 || y < 0 || left >= (LONG)sg->wWidth ||
+            top >= (LONG)sg->wHeight || x >= (LONG)dg->wWidth || y >= (LONG)dg->wHeight)
+            break;
+        if (w > (LONG)sg->wWidth - left)
+            w = (LONG)sg->wWidth - left;
+        if (w > (LONG)dg->wWidth - x)
+            w = (LONG)dg->wWidth - x;
+        if (h > (LONG)sg->wHeight - top)
+            h = (LONG)sg->wHeight - top;
+        if (h > (LONG)dg->wHeight - y)
+            h = (LONG)dg->wHeight - y;
+        /* A copy in memory, so the source's newest picture must be there first, and the
+           target's too (the part not copied stays); a context's read-back may make another
+           one current. */
+        d3d_surface_access(sl[l]);
+        d3d_surface_access(dl[l]);
+        make_current(c);
+        for (i = 0; i < h; i++)
+            memcpy((BYTE *)dg->fpVidMem + (y + i) * dg->lPitch + x * bytes,
+                   (BYTE *)sg->fpVidMem + (top + i) * sg->lPitch + left * bytes, w * bytes);
+        d3d_surface_written(dl[l]);     /* a render target too: its GPU picture is older now */
+    }
     if (b->dwDDDestSurface < c->ntex)
         c->tex[b->dwDDDestSurface].dirty = 1;            /* upload again */
     c->stages_dirty = 1;
@@ -2328,7 +2584,8 @@ static void prim_caps(D3DPRIMCAPS *p)
     p->dwMiscCaps = D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW | D3DPMISCCAPS_CULLCCW |
                     D3DPMISCCAPS_MASKZ;
     p->dwRasterCaps = D3DPRASTERCAPS_DITHER | D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_SUBPIXEL |
-                      D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_FOGTABLE;
+                      D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_FOGTABLE |
+                      D3DPRASTERCAPS_MIPMAPLODBIAS;
     p->dwZCmpCaps = p->dwAlphaCmpCaps = D3DPCMPCAPS_NEVER | D3DPCMPCAPS_LESS | D3DPCMPCAPS_EQUAL |
         D3DPCMPCAPS_LESSEQUAL | D3DPCMPCAPS_GREATER | D3DPCMPCAPS_NOTEQUAL |
         D3DPCMPCAPS_GREATEREQUAL | D3DPCMPCAPS_ALWAYS;
@@ -2342,10 +2599,12 @@ static void prim_caps(D3DPRIMCAPS *p)
         D3DPSHADECAPS_ALPHAFLATBLEND | D3DPSHADECAPS_ALPHAGOURAUDBLEND |
         D3DPSHADECAPS_FOGFLAT | D3DPSHADECAPS_FOGGOURAUD;
     p->dwTextureCaps = D3DPTEXTURECAPS_PERSPECTIVE | D3DPTEXTURECAPS_ALPHA |
-                       D3DPTEXTURECAPS_POW2;
+                       D3DPTEXTURECAPS_POW2 | D3DPTEXTURECAPS_TRANSPARENCY;
     p->dwTextureFilterCaps = D3DPTFILTERCAPS_NEAREST | D3DPTFILTERCAPS_LINEAR |
-        D3DPTFILTERCAPS_MINFPOINT | D3DPTFILTERCAPS_MINFLINEAR | D3DPTFILTERCAPS_MAGFPOINT |
-        D3DPTFILTERCAPS_MAGFLINEAR;
+        D3DPTFILTERCAPS_MIPNEAREST | D3DPTFILTERCAPS_MIPLINEAR |
+        D3DPTFILTERCAPS_LINEARMIPNEAREST | D3DPTFILTERCAPS_LINEARMIPLINEAR |
+        D3DPTFILTERCAPS_MINFPOINT | D3DPTFILTERCAPS_MINFLINEAR | D3DPTFILTERCAPS_MIPFPOINT |
+        D3DPTFILTERCAPS_MIPFLINEAR | D3DPTFILTERCAPS_MAGFPOINT | D3DPTFILTERCAPS_MAGFLINEAR;
     p->dwTextureBlendCaps = D3DPTBLENDCAPS_DECAL | D3DPTBLENDCAPS_MODULATE |
         D3DPTBLENDCAPS_DECALALPHA | D3DPTBLENDCAPS_MODULATEALPHA | D3DPTBLENDCAPS_ADD;
     p->dwTextureAddressCaps = D3DPTADDRESSCAPS_WRAP | D3DPTADDRESSCAPS_MIRROR |
@@ -2437,21 +2696,30 @@ int d3d_driver_info(LPDDHAL_GETDRIVERINFODATA d)
             D3DTEXOPCAPS_ADDSIGNED2X | D3DTEXOPCAPS_SUBTRACT | D3DTEXOPCAPS_BLENDDIFFUSEALPHA |
             D3DTEXOPCAPS_BLENDTEXTUREALPHA | D3DTEXOPCAPS_BLENDFACTORALPHA |
             D3DTEXOPCAPS_BLENDCURRENTALPHA | D3DTEXOPCAPS_DOTPRODUCT3;
+        x.dwStencilCaps = D3DSTENCILCAPS_KEEP | D3DSTENCILCAPS_ZERO | D3DSTENCILCAPS_REPLACE |
+            D3DSTENCILCAPS_INCRSAT | D3DSTENCILCAPS_DECRSAT | D3DSTENCILCAPS_INVERT |
+            D3DSTENCILCAPS_INCR | D3DSTENCILCAPS_DECR;
         x.wMaxTextureBlendStages = STAGES;
         x.wMaxSimultaneousTextures = STAGES;
         x.dvMaxVertexW = 1.0e10f;
         return copy_answer(d, &x, sizeof x);
     }
     if (IsEqualGUID(&d->guidInfo, &GUID_ZPixelFormats)) {
-        struct { DWORD n; DDPIXELFORMAT f[2]; } z;
+        struct { DWORD n; DDPIXELFORMAT f[3]; } z;
         memset(&z, 0, sizeof z);
-        z.n = 2;
-        z.f[0].dwSize = z.f[1].dwSize = sizeof(DDPIXELFORMAT);
+        z.n = 3;
+        z.f[0].dwSize = z.f[1].dwSize = z.f[2].dwSize = sizeof(DDPIXELFORMAT);
         z.f[0].dwFlags = z.f[1].dwFlags = DDPF_ZBUFFER;
         z.f[0].dwZBufferBitDepth = 16;
         z.f[0].dwZBitMask = 0xFFFF;
         z.f[1].dwZBufferBitDepth = 32;
         z.f[1].dwZBitMask = 0x00FFFFFF;
+        /* 24 bits of depth and 8 of stencil */
+        z.f[2].dwFlags = DDPF_ZBUFFER | DDPF_STENCILBUFFER;
+        z.f[2].dwZBufferBitDepth = 32;
+        z.f[2].dwStencilBitDepth = 8;
+        z.f[2].dwZBitMask = 0x00FFFFFF;
+        z.f[2].dwStencilBitMask = 0xFF000000;
         return copy_answer(d, &z, sizeof z);
     }
     if (IsEqualGUID(&d->guidInfo, &GUID_Miscellaneous2Callbacks)) {

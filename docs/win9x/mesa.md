@@ -147,6 +147,43 @@ context still current, as a careless program does. Before the fixes below it los
 Windows' `opengl32.dll` releasing the context after the driver has cleaned up the thread,
 which allocates some thread-local variables again (not chased further).
 
+## Memory over a long session
+
+`tools/win9x/memlog.c` writes one line every few seconds: free memory, Windows' memory
+manager's own counters (free, locked, disk cache, committed; the ones System Monitor shows),
+the free system resources, and what our VxD holds (`RVD_GET_STATS`: contexts, buffers, the
+locked memory behind them, buffers kept for a host that stopped answering). Started next to a
+game with `start /m memlog 20 0 e9`, it writes to QEMU's debug port, which the host can read
+while the game runs. Give it a count or end it before restarting Windows: Windows 98 holds up
+a restart for a console program that is still running.
+
+Unreal Tournament on Direct3D, DM-Turbine and the maps after it, 26 minutes (2026-11-17,
+Proxmox VE, 256 MB guest):
+
+| minutes | free MB | disk cache MB | VxD buffers | VxD locked MB |
+|---|---|---|---|---|
+| 0 (before) | 211 | 13 | 0 | 0 |
+| 1 | 125 | 36 | 150 | 6.1 |
+| 8 | 105 | 36 | 453 | 8.1 |
+| 14 (map change) | 105 | 36 | 479 | 6.2 |
+| 22 | 99 | 36 | 525 | 7.5 |
+| 24 (map change) | 78 | 58 | 524 | 6.4 |
+| 26 | 77 | 58 | 525 | 7.5 |
+
+The driver's share levels off after the first maps' textures are made and does not grow with
+playing time. Free memory falls in steps when a map is loaded, and the step at 24 minutes is
+Windows' disk cache taking the free memory for the map's files (cache and locked memory grow by
+the same 22 MB), which it gives back when a program asks. An earlier 30-minute run that saw
+16 MB less free memory measured free memory alone, which this cache is part of. (The Direct3D
+driver draws through this OpenGL driver, so the run covers both.)
+
+After the game ends the VxD holds nothing (0 contexts, 0 buffers). Free memory came back to
+151 MB: 46 MB more disk cache than before the game, and 14 MB more in use otherwise (not
+traced; the DirectDraw heap, made by the first DirectDraw program and kept until Windows ends,
+is one candidate). A second start of the game, 3 minutes of play and quitting again left free
+memory 29 MB lower, with the disk cache 29 MB larger: the 14 MB did not grow, and nothing is
+lost from one run to the next.
+
 ## Things learnt the hard way
 
 - **The virgl driver kept a copy of every shader.** It cloned the shader Mesa hands it, and
