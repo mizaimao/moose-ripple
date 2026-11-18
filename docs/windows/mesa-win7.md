@@ -773,3 +773,59 @@ updates per second in the separate five-second window-movement sample.
 The 32-bit and 64-bit upload tests each verified two queued textures, with
 zero mismatches. Explorer kept its process through five desktop **New**
 submenu checks on the final driver.
+
+## Live Explorer resize in UTM
+
+On Windows 7 x64 at 1280×1024, six three-second title-bar drags and six
+lower-right-corner resizes moved the pointer 216 pixels across and 108 down.
+Aero and full-window dragging were enabled. Guest pointer commands, observed
+window bounds, DWM presents and UTM display draws were timed separately.
+
+| Measurement on the merged driver | Drag | Resize |
+| --- | ---: | ---: |
+| Pointer commands per second | 57.1 | 56.0 |
+| Observed window bounds changes per second | 56.4 | 5.3 |
+| DWM presents per second | 30.3 | 24.8 |
+| UTM display draws per second | 30.2 | 24.7 |
+| 95th percentile gap between bounds changes | 31 ms | 226 ms |
+| 95th percentile gap between host draws | 61 ms | 89 ms |
+| Longest gap between host draws | 112 ms | 188 ms |
+
+A plain Win32 window with a solid background changed its bounds 57.8 times
+per second on the same resize path. Host draws can repeat the previous
+geometry. Raising the refresh thread's scheduling priority left Explorer at
+5.3 size changes per second and produced a 203 ms pause on a title-bar drag.
+Combining write-watch queries and resets gave 5.0 size changes per second
+against 5.1 on the release driver in an eight-round comparison. Both trials
+ran on the same boot and the release drivers were restored.
+
+### White strip beside the search box
+
+A half-second resize exposed the previous search box beside a white strip
+101 pixels wide. A slower three-second resize exposed a strip up to 18 pixels
+wide. Both cleared when the toolbar repainted. At 1280×1024, ten half-second
+resizes with `explorerrestore.exe 10 search` produced a block 86 to 109
+pixels wide in every round. The scan across the search edit and the scan on
+the glass above it agreed in all ten. Each started and ended at zero.
+
+![Explorer search box before growth, with a white strip during growth, and after repaint](../../media/win7-explorer-search-resize.webp)
+
+Explorer's window DC already contained a gray fill in the newly exposed
+area while its toolbar still showed the old contents. A diagnostic driver
+copied each relevant source bitmap to private memory before uploading it,
+then read the affected row back from the GPU. On one resize the incoming
+A8R8G8B8 bitmap had a 120-pixel run of `0x00f0f0f0` at its new right edge.
+The sampled GPU texels matched all 120 source pixels. The desktop capture
+showed a 120-pixel white band. The next growth step gave an 88-pixel run
+in both records. Enabling toolbar double buffering, requesting immediate
+repaints and making the glass opaque still exposed the strip. Turning off
+full-window dragging moved the flash to mouse release, where it reached
+216 pixels.
+
+A diagnostic build zeroed the incoming gray run at the top of the test
+window. The scan on the glass then read zero throughout one captured resize,
+but a 90-pixel white block was still visible inside the search edit. This is
+why the regression probe checks the control's top, middle and bottom as well
+as the glass. The release driver preserves the application's pixel values.
+
+The visual defect remains open. [Search-box resize issue](https://github.com/mizaimao/moose-ripple/issues/69)

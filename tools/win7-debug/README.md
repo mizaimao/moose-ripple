@@ -158,6 +158,43 @@ with enough space between the restored window and the taskbar. The probe
 hides its console during this test and restores the original pointer position
 on exit.
 
+To measure moving and resizing, enable **Show window contents while dragging**
+and run `explorerrestore.exe 6 motion > motion.txt` inside the same ETW
+session. Leave the pointer idle. Each round moves the temporary folder by
+its title bar, then resizes it from the lower-right corner. The pointer
+travels 216 pixels across and 108 down over three seconds each time.
+The probe records the pointer command time and the observed Explorer window
+bounds. It verifies that the window changed during the gesture and reached
+the expected bounds before closing it.
+
+Run `python3 tools/win7-debug/motion-timing.py motion.txt transitions.xml`
+on the analysis machine. It reports pointer updates, changes in window
+bounds and compositor presents separately. It trims 250 ms at the start
+and 100 ms at the end of each gesture and computes gaps within each gesture.
+For host display draws, add `--utm-log debug.log` and two
+`--sync MARKER HOST_LOCAL_TIME` arguments. Each names a unique ETW marker
+and its independently measured timestamp on the host clock, in ISO format
+using the log's local time. The anchors must bracket the gestures. The
+probe emits `motion-run-start` and `motion-run-stop`. A synchronization
+tool can also write markers to the same ETW provider. A compositor present or host draw
+can repeat the same window geometry.
+
+For a comparison with a plain Win32 window, run `motioncontrol.exe 6 > control.txt`
+in a fresh trace. It uses the same pointer path, hit tests and bounds checks.
+
+To reproduce the white strip beside Explorer's search box, run
+`explorerrestore.exe 5 search > search.txt` in the same kind of ETW session,
+with Aero and full-window dragging enabled. This version grows the window by
+216×108 pixels in half a second. The `search` rows contain the round, time in
+milliseconds, observed right window edge and two widths in pixels. The first
+width is the longest near-white run shared by two rows of glass immediately
+above the search edit. The second checks the edit's top, middle and bottom
+rows for a solid block across all three. Compare each width during movement
+with its settled samples before and after the gesture.
+Use a background that makes the strip distinguishable from the glass.
+The exit status verifies the gesture and observer. The widths report the
+visual outcome.
+
 For taskbar clicks the analyzer reports when the probe first observed the
 window leave its minimized state and when DWM first presented movement away
 from the button. It looks for a repaint crossing at least 32×32 pixels in the
