@@ -667,3 +667,37 @@ excluding one second at each end. Aero stayed active in every guest sample.
 The minimize/restore average includes the pause between transitions. Repaint
 varied substantially between baseline runs. Window movement showed the clearest
 gain. The 95th-percentile gap fell from 841 to 100 ms.
+
+## Aero minimize and restore in UTM
+
+Tracing individual transitions on the vertex-buffer fix found another streaming
+buffer in the compositor. During the sampled transitions, 161 whole-buffer
+`NOOVERWRITE` locks on a 120,006-byte dynamic index buffer took 4.35 s in total
+(median 28 ms per lock). The driver now tracks writes to eligible private index
+buffers the same way it tracks writes to vertices.
+
+The table gives medians from a same-boot driver swap on the 1280×1024 UTM
+desktop. Each driver ran a 12-second warm-up, followed by seven minimizes and
+six restores. Times start at the probe's `ShowWindow` call. Guest timestamps
+come from DWM-Core ETW. Host updates are SPICE draw notifications. Clock
+alignment adds roughly 10 ms of uncertainty to host timings.
+
+| Measurement | Minimize, previous → new | Restore, previous → new |
+| --- | ---: | ---: |
+| First completed guest present | 403 → 93 ms | 398 → 87 ms |
+| First host display update | 406 → 121 ms | 431 → 114 ms |
+| Host updates within 500 ms | 1 → 10 | 1 → 8 |
+| Last substantial host repaint | 1,095 → 437 ms | 940 → 429 ms |
+
+The last row estimates animation completion by pairing guest presents and host
+updates in order on transitions with equal counts. It uses the last render
+whose dirty region extended at least 32 pixels in both dimensions. Individual
+restores still showed gaps of up to 199 ms between substantial repaints,
+including the initial wait. A separate same-boot comparison also showed the
+first guest present falling from 390 to 85 ms on minimize and 346 to 85 ms on
+restore.
+
+Both 32-bit and 64-bit streaming probes verified four rendered tiles, including
+an index write at the far end of the buffer and a discard with earlier draws
+queued. Both texture upload probes passed. Explorer kept the same process
+through ten desktop **New** submenu checks across the two runs.

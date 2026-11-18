@@ -115,6 +115,26 @@ With the HTTP guest helpers, `rb uploadcheck`, `rb uploadcheck32`, `rb menuchk` 
 `rb utmtiming` fetch the corresponding executables and upload their results. `rb utmstate`
 records driver hashes, compositor/Explorer processes, animation settings and recent crashes.
 
+To measure individual minimize and restore requests, run these commands in an
+elevated Windows 7 command prompt in a scratch directory with `dwmtiming.exe`.
+The second provider records when the probe calls and returns from `ShowWindow`.
+
+```bat
+>providers.txt echo {8c9dd1ad-e6e5-4b07-b455-684a9d879900} 0xffffffffffffffff 5
+>>providers.txt echo {6c38bba1-1768-48c6-9c07-40dadba4b38f} 0xffffffffffffffff 5
+logman start RippleTransitions -ets -o transitions.etl -pf providers.txt
+dwmtiming.exe transitions 23 > transitions.csv
+logman stop RippleTransitions -ets
+tracerpt transitions.etl -of XML -o transitions.xml
+```
+
+Each transition starts at a `minimize-start` or `restore-start` marker.
+Compare it with the following `SCHEDULE_RENDER` and
+`MILEVENT_MEDIA_UCE_PRESENTEVENT` start/stop events. Check that the global
+timing query succeeds throughout the CSV and the compositor PID stays constant.
+The probe waits at least 1.5 seconds between requests. Host delivery timing
+requires a separately synchronized host display log.
+
 For user-mode samples, run the program with `RIPPLE_UMD_LOG` set: the user-mode driver writes the
 load addresses of the program's main modules when it is loaded (`guest/prof.cmd` does that for
 one assessment test, `guest/dxone.cmd` runs one test alone). Our driver's functions are named

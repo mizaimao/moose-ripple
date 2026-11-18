@@ -1,7 +1,7 @@
 /* Measure Windows 7's compositor during repeatable window operations. No capture.
  * Build with llvm-mingw: clang -O2 -Wall -Wextra dwmtiming.c -ldwmapi -lgdi32
  * Run outside the driver package directory: dwmtiming.exe MODE SECONDS > run.csv
- * MODE: idle, move, repaint, resize, animate. Only this program's window is changed.
+ * MODE: idle, move, repaint, resize, animate, transitions. Only this program's window is changed.
  * Counters are raw DWM_TIMING_INFO values, not inferred screen refreshes. See
  * https://learn.microsoft.com/windows/win32/api/dwmapi/ns-dwmapi-dwm_timing_info
  * Duration uses QPC: the tick clock can lose time under CPU emulation. The CSV
@@ -14,6 +14,7 @@
 #define WINVER 0x0601
 #include <windows.h>
 #include <dwmapi.h>
+#include <evntprov.h>
 #include <tlhelp32.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +26,10 @@ static LARGE_INTEGER frequency, start;
 static const char *mode;
 static ULONGLONG tick_start;
 static HWND probe_window;
+/* Enable this provider alongside Microsoft-Windows-Dwm-Core to correlate each
+ * ShowWindow request with compositor frames in the same clock domain. */
+static const GUID transition_provider = {0x6c38bba1,0x1768,0x48c6,{0x9c,0x07,0x40,0xda,0xdb,0xa4,0xb3,0x8f}};
+static REGHANDLE transition_handle;
 typedef LONG (WINAPI *query_timer_fn)(PULONG, PULONG, PULONG);
 static query_timer_fn query_timer;
 
@@ -152,8 +157,8 @@ int main(int argc, char **argv)
     mode = argc > 1 ? argv[1] : "move";
     if (seconds < 1 || seconds > 300 ||
         (strcmp(mode, "idle") && strcmp(mode, "move") && strcmp(mode, "repaint") &&
-         strcmp(mode, "resize") && strcmp(mode, "animate"))) {
-        fprintf(stderr, "Usage: dwmtiming.exe idle|move|repaint|resize|animate [1-300 seconds]\n");
+         strcmp(mode, "resize") && strcmp(mode, "animate") && strcmp(mode, "transitions"))) {
+        fprintf(stderr, "Usage: dwmtiming.exe idle|move|repaint|resize|animate|transitions [1-300 seconds]\n");
         return 2;
     }
     QueryPerformanceFrequency(&frequency);
@@ -195,6 +200,15 @@ int main(int argc, char **argv)
                 (unsigned long)global_hr, (unsigned long)window_hr);
     }
     probe_window = window;
+    const BOOL transitions = strcmp(mode, "transitions") == 0;
+    if (transitions) {
+        ULONG err = EventRegister(&transition_provider, NULL, NULL, &transition_handle);
+        if (err || !EventProviderEnabled(transition_handle, 4, 0)) {
+            fprintf(stderr, "Enable the transition ETW provider before running this mode.\n");
+            return 1;
+        }
+        next_animation = elapsed_ms() + 1500;
+    }
     while (!quit && elapsed_ms() < seconds * 1000.0) {
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) { quit = TRUE; break; }
@@ -227,14 +241,21 @@ int main(int argc, char **argv)
             InvalidateRect(window, NULL, FALSE);
             UpdateWindow(window);
             InterlockedIncrement(&actions);
-        } else if (!strcmp(mode, "animate") && elapsed_ms() >= next_animation) {
-            ShowWindow(window, IsIconic(window) ? SW_RESTORE : SW_MINIMIZE);
-            next_animation = elapsed_ms() + 750;
+        } else if ((!strcmp(mode, "animate") || transitions) && elapsed_ms() >= next_animation) {
+            const BOOL restore = IsIconic(window);
+            if (transitions && next_animation + 1400 >= seconds * 1000.0) break;
+            if (transitions)
+                EventWriteString(transition_handle, 4, 0, restore ? L"restore-start" : L"minimize-start");
+            ShowWindow(window, restore ? SW_RESTORE : SW_MINIMIZE);
+            if (transitions)
+                EventWriteString(transition_handle, 4, 0, restore ? L"restore-return" : L"minimize-return");
+            next_animation = elapsed_ms() + (transitions ? 1500 : 750);
             InterlockedIncrement(&actions);
         }
         ++step;
     }
     if (sample_process) CloseHandle(sample_process);
+    if (transitions) EventUnregister(transition_handle);
     fflush(stdout);
     if (IsWindow(window)) DestroyWindow(window);
     return 0;

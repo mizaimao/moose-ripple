@@ -1,4 +1,4 @@
-/* Exercise the dynamic, write-only vertex buffer used by the D3D9 compositor.
+/* Exercise the dynamic, write-only vertex and index buffers used by the D3D9 compositor.
  * Check full and ranged NOOVERWRITE locks, stream offsets, indexed draws, and
  * DISCARD while earlier draws may still be queued. MIT licence (LICENSE).
  */
@@ -39,6 +39,10 @@ int main(void)
     const DWORD fvf = D3DFVF_XYZRHW | D3DFVF_DIFFUSE;
     const DWORD colors[] = {0xffff0000, 0xff00ff00, 0xff0000ff, 0xffff8000};
     const WORD order[] = {0, 1, 2, 3};
+    const WORD second_quad[] = {1016, 1017, 1018, 1019};
+    const WORD last_quad[] = {31997, 31998, 31999, 32000};
+    const UINT index_bytes = 120006;
+    const UINT last_index_group = index_bytes / sizeof(WORD) - 4;
     IDirect3DDevice9 *dev = NULL;
     IDirect3DVertexBuffer9 *vb = NULL;
     IDirect3DIndexBuffer9 *ib = NULL;
@@ -60,9 +64,9 @@ int main(void)
                                   D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &dev));
     CHECK(IDirect3DDevice9_CreateVertexBuffer(dev, 640032, D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY,
                                               fvf, D3DPOOL_DEFAULT, &vb, NULL));
-    CHECK(IDirect3DDevice9_CreateIndexBuffer(dev, sizeof(order), D3DUSAGE_WRITEONLY,
+    CHECK(IDirect3DDevice9_CreateIndexBuffer(dev, index_bytes, D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY,
                                              D3DFMT_INDEX16, D3DPOOL_DEFAULT, &ib, NULL));
-    CHECK(IDirect3DIndexBuffer9_Lock(ib, 0, 0, &indices, 0));
+    CHECK(IDirect3DIndexBuffer9_Lock(ib, 0, 0, &indices, D3DLOCK_DISCARD));
     memcpy(indices, order, sizeof(order));
     CHECK(IDirect3DIndexBuffer9_Unlock(ib));
     CHECK(IDirect3DDevice9_SetFVF(dev, fvf));
@@ -74,7 +78,10 @@ int main(void)
     CHECK(IDirect3DDevice9_SetStreamSource(dev, 0, vb, 0, sizeof(struct vertex)));
     CHECK(write_quad(vb, 20, D3DLOCK_DISCARD, TRUE, 0, colors[0]));
     CHECK(write_quad(vb, 1016, D3DLOCK_NOOVERWRITE, TRUE, 1, colors[1]));
-    CHECK(IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLESTRIP, 1016, 2));
+    CHECK(IDirect3DIndexBuffer9_Lock(ib, 0, 0, &indices, D3DLOCK_NOOVERWRITE));
+    memcpy((WORD *)indices + last_index_group, second_quad, sizeof(second_quad));
+    CHECK(IDirect3DIndexBuffer9_Unlock(ib));
+    CHECK(IDirect3DDevice9_DrawIndexedPrimitive(dev, D3DPT_TRIANGLESTRIP, 0, 1016, 4, last_index_group, 2));
     CHECK(write_quad(vb, 16004, D3DLOCK_NOOVERWRITE, FALSE, 2, colors[2]));
     CHECK(IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLESTRIP, 20, 2));
     CHECK(IDirect3DDevice9_SetStreamSource(dev, 0, vb, 16000 * sizeof(struct vertex),
@@ -82,7 +89,10 @@ int main(void)
     CHECK(IDirect3DDevice9_DrawIndexedPrimitive(dev, D3DPT_TRIANGLESTRIP, 4, 0, 4, 0, 2));
     CHECK(write_quad(vb, 31997, D3DLOCK_DISCARD, TRUE, 3, colors[3]));
     CHECK(IDirect3DDevice9_SetStreamSource(dev, 0, vb, 0, sizeof(struct vertex)));
-    CHECK(IDirect3DDevice9_DrawPrimitive(dev, D3DPT_TRIANGLESTRIP, 31997, 2));
+    CHECK(IDirect3DIndexBuffer9_Lock(ib, 0, sizeof(last_quad), &indices, D3DLOCK_DISCARD));
+    memcpy(indices, last_quad, sizeof(last_quad));
+    CHECK(IDirect3DIndexBuffer9_Unlock(ib));
+    CHECK(IDirect3DDevice9_DrawIndexedPrimitive(dev, D3DPT_TRIANGLESTRIP, 0, 31997, 4, 0, 2));
     CHECK(IDirect3DDevice9_EndScene(dev));
     CHECK(IDirect3DDevice9_GetRenderTarget(dev, 0, &target));
     CHECK(IDirect3DDevice9_CreateOffscreenPlainSurface(dev, 64, 16, D3DFMT_X8R8G8B8,
