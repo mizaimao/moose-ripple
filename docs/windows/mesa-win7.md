@@ -607,3 +607,28 @@ A host that refuses a draw says only "failed to dispatch DRAW_VBO". `RIPPLE_UMD_
 writes each draw as the host gets it (mode, start, count, base vertex, vertex layout), a
 refused draw writes the source line of its exit, and `RIPPLE_D3D9_REBIND` makes every draw
 bind all its state again, to tell a fault in the kept state from a fault in the drawing.
+
+## Compositor crash while creating textures (2026-11-17)
+
+The UTM desktop could lose Aero after opening windows or menus. Two compositor crashes
+produced the same invalid-read stack: `msvcrt!memcpy`, `util_copy_box`,
+`u_default_texture_subdata`, `D3D9TextureSubdata`, `D3D9UploadManagedTextureData`,
+`D3D9CreateResource`. The driver was copying from the most recently created system-memory
+texture into a new video-memory texture merely because their dimensions matched. The old
+resource could be a borrowed window bitmap whose pixels were no longer mapped. Creating
+another resource does not authorize that read.
+
+The guessed upload during resource creation is removed. `TexBlt` still receives the actual
+source and performs explicit uploads, including those requested by the runtime for managed
+textures.
+
+`tools/win7-hello/d3d9upload.c` reproduces the bad read using a Direct3D 9Ex texture backed by
+application memory. It guards those pixels only while creating an unrelated texture of the
+same dimensions, restores access, then checks explicit and managed uploads with two colors
+each through rendering and readback. The old driver faults during the unrelated creation;
+the fixed driver passes all checks in both 64-bit and 32-bit programs in UTM. Both driver
+variants were rebuilt from scratch and installed. The desktop retains glass and shadows;
+five desktop context-menu / New submenu cycles pass with the same Explorer process and no
+new compositor crash. `tools/win7-hello/shellmenu.c` performs that menu check on an English
+Windows 7 desktop without creating files. This fixes the reproduced memory fault; animation
+timing is a separate investigation.
