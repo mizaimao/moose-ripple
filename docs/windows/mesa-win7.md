@@ -1265,18 +1265,19 @@ blit and now the conversion) released their surface right after binding it. The 
 read freed memory: in a 32-bit process that happened to hold the old contents, in a 64-bit
 one the conversion crashed. Both now keep the surface until it is off the context.
 
-On the desktop OpenGL host (VM 220), with the build before the conversion moved to the host:
+On the desktop OpenGL host (VM 220), final build; the full assessment was run with the build
+before the conversion moved to the host:
 
 | Check | Before | Now |
 | --- | --- | --- |
-| `d3d9flipex`, both process sizes, flip and copy model | "blit" fails in all four runs | every step passes |
+| `d3d9flipex`, both process sizes, flip and copy model | "blit" fails in all four runs | 32 of 32 steps pass |
 | Sample video through DirectShow (`vidplay ds`) | not run | 64 of 64 points lit, moving |
 | Sample video through Media Foundation (`vidplay mf`) | black | 64 of 64 points lit, moving |
 | Sample video in Media Player | black | the picture, colours as expected |
 | 1080p H.264 clip through Media Foundation | cannot start | 64 of 64 points lit, moving |
-| Assessment: 1080 MPEG-2, 480i MPEG-2, 480p MPEG-2 | cannot start | 294 of 270 to 300, 296 of 270 to 300, 151 of 135 to 150 frames |
+| Assessment: 1080 MPEG-2, 480i MPEG-2, 480p MPEG-2 | cannot start | 296 of 270 to 300, 299 of 270 to 300, 150 of 135 to 150 frames |
 | Assessment: 1080 H.264, 480 H.264 | cannot start | 151 and 151 frames |
-| Assessment: 1080 VC-1 | passes | 147 of 135 to 150 frames |
+| Assessment: 1080 VC-1 | passes | 148 of 135 to 150 frames |
 | Full assessment | 7.0 to 7.1 | 7.1; high- and standard-definition playback pass |
 
 In UTM on Apple silicon (emulated processor, the host's renderer on OpenGL ES), final build,
