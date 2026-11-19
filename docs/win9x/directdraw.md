@@ -217,12 +217,40 @@ positions, including the title and menu, matched at every one of the 307,200 pix
 RGB565. Each path recorded 800 measured flips.
 [Tomb Raider title flyby](img/tr4-scanout.webp)
 
-Alt+Tab exposed an existing fullscreen restoration failure on both paths. Re-Volt reported
+Alt+Tab exposed a fullscreen restoration failure in the driver from #80 on both paths. Re-Volt reported
 `DDERR_OUTOFMEMORY` when returning to the race. Tomb Raider returned to a black game
 window and stopped submitting frames. Alt+F4 exited Tomb Raider with code 0 and restored
 the desktop. A separate DirectDraw 4 test reproduced Re-Volt's failure on the default path
 after Windows had already restored the game mode and granted exclusive access again.
 [DirectDraw restoration report](https://github.com/mizaimao/moose-ripple/issues/82)
+
+#### Restoring a game after Alt+Tab
+
+DirectDraw 7 calls the HAL's `CreateSurface` entry when restoring a lost flip chain on a
+driver that offers `CreateSurfaceEx`. Ripple previously supplied only `CanCreateSurface`
+for ordinary surface creation. A 32-bit `CreateSurface` entry now returns
+`DDHAL_DRIVER_NOTHANDLED` so DirectDraw can use its existing allocator for the primary
+surface and its attached back buffer.
+
+Run `ddtest restore` from a desktop mode other than 640×480×16. It enters that game mode,
+flips once, lets a second process take focus, and checks that both surfaces become lost.
+After regaining exclusive access, it restores the primary and flips again. The same test
+returned `0x8007000e` on the previous driver. With the fix, both restore and the next flip
+returned `DD_OK`. The ordinary `ddtest` and `d3dtest` checks also passed with GPU scanout
+off and on.
+
+Tomb Raider resumed its flyby at 30 frames/s with either setting. Re-Volt resumed its
+race, accepted the restart and accelerator controls, and returned to the 1280×720 desktop
+on exit. After the focus switch, a 30-second race sample gave 428.1 frames/s on a fresh
+VGA boot and 737.7 with GPU scanout. All 22,000 measured GPU flips avoided a read-back.
+The default 3DMark 2000 benchmark scored 21,442 with the fix and GPU scanout enabled,
+compared with 21,319 and 21,362 in the earlier GPU runs.
+[Both games after returning from the desktop](img/alt-tab-restore.webp)
+
+Launching Re-Volt with scanout off after a GPU-presented game in the same boot gave
+69.7 frames/s in that test. Once GPU scanout has taken over, displaying a changed VGA
+page requires the desktop mirror to convert and upload it. The current driver does this
+synchronously on each CPU flip. [Mixed-mode performance measurements](https://github.com/mizaimao/moose-ripple/issues/84)
 
 ### 3DMark 2000 (2026-11-16)
 
