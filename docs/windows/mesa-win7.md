@@ -1139,13 +1139,58 @@ and refuses a present path that carries a ramp. Nothing in the display path
 applies it. On the screen the ring stops for half a second and the desktop then
 appears at full brightness, with no fade in either direction.
 
-Showing the fade means applying the ramp where the kernel driver presents: a
-second scanout image drawn from the primary through the ramp at every ramp
-change and every present while a ramp is set. The kernel driver only copies
-regions today, so this needs drawing from the kernel driver. Open; Direct3D 9
-programs that set a gamma ramp for brightness or fades would gain it too.
+Showing the fade means applying the ramp where the kernel driver presents; the
+next section does that.
 
 `SwitchDesktopWithFade` cannot be tried from an ordinary program: it returns
 FALSE at once (`fadeprobe.exe`), while `SwitchDesktop` works. Locking and
 unlocking the session shows no pause of this kind either.
 [Welcome transition issue](https://github.com/mizaimao/moose-ripple/issues/71)
+
+## Gamma ramps
+
+virtio-gpu has no gamma control, so the kernel driver applies the ramp itself
+(`windows/kmd/viogpu3d/viogpu_gamma.cpp`). It reports ramps of 256 sixteen-bit
+entries a channel as supported and takes them from the present path
+(`DxgkDdiUpdateActiveVidPnPresentPath`, `DxgkDdiCommitVidPn`). While the ramp
+is the identity nothing changes. While it is anything else, the screen is a
+second image: the surface that would be on screen, drawn through the ramp.
+
+The drawing is the kernel driver's own, in a virgl context it creates for the
+purpose: a rectangle over the whole image, and a fragment shader that looks
+each colour channel up in a 256-entry table texture. The flip thread draws the
+image again whenever the surface was flipped, a piece of it changed or the
+ramp changed, sixty times a second at most, and puts the surface itself back
+on screen when the ramp returns to the identity. The table carries the top
+eight bits of each ramp entry. The pointer is the host's and is not dimmed.
+
+Two things came up on the way:
+
+- The host renderer binds a sampler view to its texture unit only when the
+  view in that slot changed, and binds a view that is being set on whichever
+  unit was used last. A table view kept from draw to draw lost its unit to the
+  screen surface that way, and the table lookups read the screen. Both views
+  are made anew for every draw.
+- At a desktop switch Windows destroys the surface on screen before it names
+  the next one. The flip thread kept the pointer and went on using it, which
+  the plain path survived and the draw did not (the host refused it, or it read
+  an unrelated allocation's size). The driver now forgets the surface when its
+  allocation is destroyed, under a lock the flip thread holds while it uses it,
+  and the image drawn last stays on screen until the next surface comes.
+
+On the Intel host (VM 220, 1024×768), frames read from the host's display
+every 0.1 s through a logon show Welcome going to black in six frames and the
+desktop coming up in five, and a half-brightness ramp set with
+`SetDeviceGammaRamp` halves every sampled channel exactly (228 to 114, 126 to
+63, black stays black). The buffer, upload and menu checks pass in both
+bitnesses, and the Explorer gestures run as before (172 to 178 sizes per
+three-second resize).
+
+In UTM (a trial session with the disk's changes discarded) the host accepted
+every command, the same checks pass, and the display client logged 27 draws
+during the half second of the fade to black. The fade back in is mostly not
+seen there: the compositor's first desktop frame arrives about 0.65 s after
+the switch, when the ramp is nearly at the identity again, so the screen stays
+black for that time and the desktop then appears almost at full brightness.
+That first frame's delay is the open part of the logon in UTM (see above).
+What the screen itself shows in UTM has not been captured.

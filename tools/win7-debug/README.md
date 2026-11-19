@@ -336,3 +336,6 @@ the next logon fetch the result (elevated prompt):
   gamma ramp (it sets half brightness for 0.6 s and reads it back) and times a
   switch to an empty desktop and back. `SwitchDesktopWithFade` refuses an
   ordinary program; the plain switch is the control.
+- `rb gammahold MS`: half brightness for MS milliseconds (the same program), for a look at
+  the host's display meanwhile: `VMID=220 scripts/screen-vnc.sh -n 10 -i 1 OUT.png` on the
+  Intel host. A capture taken inside the guest never shows a gamma ramp.

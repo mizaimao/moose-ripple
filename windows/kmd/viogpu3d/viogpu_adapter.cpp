@@ -539,6 +539,9 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 // VioGpu3DRenderKm)
                 pDriverCaps->PresentationCaps.SupportKernelModeCommandBuffer = 1;
 
+                // Gamma ramps of 256 sixteen-bit entries a channel; applied in viogpu_gamma.cpp
+                pDriverCaps->GammaRampCaps.Gamma_Rgb256x3x16 = 1;
+
                 // The only segment is an aperture the CPU cannot reach; see ripple_win7.h
                 pDriverCaps->MemoryManagementCaps.Value |= RIPPLE_VIDMMCAPS_SECTION_BACKED_PRIMARY;
 

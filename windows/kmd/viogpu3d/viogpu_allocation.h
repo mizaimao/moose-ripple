@@ -43,6 +43,18 @@ class VioGpuAllocation
         return m_options.width * 4;
     }
 
+    UINT GetWidth()
+    {
+        return m_options.width;
+    }
+    UINT GetHeight()
+    {
+        return m_options.height;
+    }
+    UINT GetFormat()
+    {
+        return m_options.format;
+    }
     BOOL IsCoherent()
     {
         return (m_options.flags & VIRGL_RESOURCE_FLAG_MAP_COHERENT) != 0;
