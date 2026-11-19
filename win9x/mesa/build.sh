@@ -6,12 +6,13 @@
 #   mesa/src-24.3.4-win9x     the release tarball, patches/ applied, overlay/ copied over it
 #   mesa/build-win9x          the build;  mesa/out-win9x  the DLLs (ripplegl.dll, opengl32.dll)
 # Toolchain: llvm-mingw, msvcrt variant (clang, lld, compiler-rt, libc++, mingw-w64), the same
-# one the Windows 7 build uses. Three things make its output load on Windows 98:
+# one the Windows 7 build uses. The 9x runtime needs:
 #   - everything from the toolchain linked statically, no native thread-local storage
 #     (-femulated-tls: Windows before Vista gives a DLL loaded at run time none);
 #   - win9x/compat/k32shim.c, the few kernel32 functions newer than Windows 98 that the
 #     toolchain's libraries call;
-#   - version 4.0 in the file headers.
+#   - version 4.0 in the file headers;
+#   - the MinGW formatter and its decimal conversion helpers built without SSE.
 # tools/win9x/check-imports.py then compares every DLL's imports with Windows 98 SE's own
 # libraries (W98SYS, taken from its setup cabinets) and the build fails if one is missing.
 set -eu
@@ -68,18 +69,45 @@ cmp -s "$here/../minivdd/rvd.h" "$SRC/src/gallium/winsys/virgl/rvd/rvd.h" ||
 NAMES="-Dgallium-wgl-dll-name=ripplegl -Dshared-glapi=disabled"
 [ "$(cat "$BUILD/.ripple-drivers" 2>/dev/null)" = "$DRIVERS $NAMES" ] || rm -rf "$BUILD"
 
-# Pentium II instructions only: the guest CPU model may be an old one, and Windows 98 predates
-# SSE2. No frame-pointer omission games either: plain, debuggable code.
+# Mesa and the compatibility objects target Pentium II.
 CPU_FLAGS="'-march=pentium2', '-mtune=generic', '-femulated-tls'"
-mkdir -p "$BUILD.compat"
-"$TRIPLE-clang" -O2 -march=pentium2 -femulated-tls -Wall -Werror \
-    -c "$here/../compat/k32shim.c" -o "$BUILD.compat/k32shim.new.o"
-# ninja doesn't know the DLLs depend on this object: when it changes, they are linked again.
-if ! cmp -s "$BUILD.compat/k32shim.new.o" "$BUILD.compat/k32shim.o"; then
-    mv "$BUILD.compat/k32shim.new.o" "$BUILD.compat/k32shim.o"
-    [ ! -d "$BUILD" ] || find "$BUILD" -name '*.dll' -delete
+# This is llvm-mingw 20261104's exact mingw-w64 revision. Its precompiled
+# printf uses XMM registers on ordinary formatting paths that Windows 95 runs.
+MINGW_REV=ee9bd87644156c41072a11ad957d1e11831a72df
+MINGW_SHA256=6a346a2e3eafa0e5ec8e30df89b16a05add8b50cb4cece8c47593799ca19e43b
+MINGW_ARCHIVE=$T/src/mesa-dl/mingw-w64-$MINGW_REV.tar.gz
+CRT=$T/mesa/mingw-crt-$MINGW_REV
+if [ ! -d "$CRT" ]; then
+    temp=$(mktemp -d "$T/mesa/mingw-crt.XXXXXX")
+    trap 'rm -rf "$temp"' 0
+    archive=$MINGW_ARCHIVE
+    if [ ! -f "$archive" ]; then
+        archive=$temp/archive
+        curl -fsSL --retry 2 -o "$archive" "https://codeload.github.com/mingw-w64/mingw-w64/tar.gz/$MINGW_REV"
+    fi
+    echo "$MINGW_SHA256  $archive" | sha256sum -c --quiet
+    [ "$archive" = "$MINGW_ARCHIVE" ] || mv "$archive" "$MINGW_ARCHIVE"
+    mkdir "$temp/crt"
+    prefix=mingw-w64-$MINGW_REV/mingw-w64-crt
+    tar xzf "$MINGW_ARCHIVE" -C "$temp/crt" --strip-components=2 "$prefix/stdio" "$prefix/gdtoa"
+    mv -T "$temp/crt" "$CRT"
+    rmdir "$temp"
+    trap - 0
 fi
-LINK_FLAGS="'-static', '-Wl,--major-os-version=4,--minor-os-version=0', '-Wl,--major-subsystem-version=4,--minor-subsystem-version=0', '$BUILD.compat/k32shim.o'"
+# Use a fresh object directory when upgrading an existing Windows 98 build.
+COMPAT=$BUILD.runtime
+FORMATTERS="mingw_pformat gdtoa dmisc misc gmisc"
+mkdir -p "$COMPAT"
+make -C "$COMPAT" -f "$here/runtime.mk" CC="$LLVM_MINGW/bin/$TRIPLE-clang" CRT="$CRT" FORMATTERS="$FORMATTERS"
+# Meson links these external objects explicitly. Refresh previously linked DLLs
+# when the objects change, including after an interrupted build.
+if [ -d "$BUILD" ]; then
+    find "$BUILD" -name '*.dll' ! -newer "$COMPAT/runtime.stamp" -delete
+fi
+LINK_FLAGS="'-static', '-Wl,--major-os-version=4,--minor-os-version=0', '-Wl,--major-subsystem-version=4,--minor-subsystem-version=0'"
+for object in k32shim $FORMATTERS; do
+    LINK_FLAGS="$LINK_FLAGS, '$COMPAT/$object.o'"
+done
 
 cross=$T/mesa/cross-win9x.ini
 cat > "$cross" <<EOC
@@ -115,7 +143,12 @@ if [ ! -f "$BUILD/build.ninja" ]; then
         -Dmicrosoft-clc=disabled -Dspirv-to-dxil=false -Dgallium-va=disabled \
         -Dvideo-codecs= $NAMES
     echo "$DRIVERS $NAMES" > "$BUILD/.ripple-drivers"
+elif [ "$(cat "$BUILD/.ripple-runtime-link" 2>/dev/null)" != "$LINK_FLAGS" ]; then
+    # Meson caches machine-file link arguments at setup. Update an existing
+    # configuration without rebuilding Mesa's C and C++ objects.
+    meson configure "$BUILD" "-Dc_link_args=[$LINK_FLAGS]" "-Dcpp_link_args=[$LINK_FLAGS]"
 fi
+printf '%s\n' "$LINK_FLAGS" > "$BUILD/.ripple-runtime-link"
 ninja -C "$BUILD"
 rm -rf "$OUT" && mkdir -p "$OUT"
 find "$BUILD" -name '*.dll' -exec cp {} "$OUT/" \;
