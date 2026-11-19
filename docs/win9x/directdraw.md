@@ -193,6 +193,37 @@ after GPU takeover are unsupported. Use the default VGA path on a fresh boot for
 programs. The GPU presentation results above are from the Intel host. UTM and other
 renderers still need testing.
 
+#### Re-Volt and Tomb Raider on the Intel host
+
+Both demos ran at 640×480 in 16-bit colour on the same Windows 98 SE / DirectX 7 driver.
+Each run recorded 30 seconds of driver flip counters. The figures below use only complete
+100-flip groups inside that interval. They measure how quickly the game submits frames.
+The host console updates at up to about 60 Hz.
+
+| Scene | Guest frames/s, VGA → GPU | GPU-to-guest reads per 100 flips, VGA → GPU | Time reading per flip, VGA → GPU |
+|---|---:|---:|---:|
+| Re-Volt Demo, single race | 564.6 → 1,038.4 | 100 → 0 | 1.331 ms → 0 |
+| Tomb Raider: The Last Revelation, title flyby | 30.0 → 30.0 | 100 → 0 | 1.384 ms → 0 |
+
+Re-Volt restarted the same single race in each run. Four seconds after the restart,
+the accelerator was held for eight seconds, then released. GPU presentation handled all
+31,000 measured flips. VGA read back all 16,800. Render throughput rose 84% in this pair
+of runs. Both captures show the track, cars and dashboard at the start line. The game placed
+the player fourth in one grid and third in the other, so these images are a visual comparison.
+[Re-Volt starting grids](img/revolt-scanout.webp)
+
+Tomb Raider's flyby kept its 30 frames/s pace on both paths. Five corresponding camera
+positions, including the title and menu, matched at every one of the 307,200 pixels in
+RGB565. Each path recorded 800 measured flips.
+[Tomb Raider title flyby](img/tr4-scanout.webp)
+
+Alt+Tab exposed an existing fullscreen restoration failure on both paths. Re-Volt reported
+`DDERR_OUTOFMEMORY` when returning to the race. Tomb Raider returned to a black game
+window and stopped submitting frames. Alt+F4 exited Tomb Raider with code 0 and restored
+the desktop. A separate DirectDraw 4 test reproduced Re-Volt's failure on the default path
+after Windows had already restored the game mode and granted exclusive access again.
+[DirectDraw restoration report](https://github.com/mizaimao/moose-ripple/issues/82)
+
 ### 3DMark 2000 (2026-11-16)
 
 3DMark 2000 1.1 runs its default benchmark to the end on Windows 98 SE in VM 230 (DirectX 7,
