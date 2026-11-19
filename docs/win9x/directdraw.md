@@ -114,6 +114,16 @@ message and isn't explained; the five after it, under the debugger, ended normal
 gltest and d3dtest run at the same speed with and without the change (1840 and 574 frames/s on
 that day's host).
 
+**16-bit targets read back four times faster** (2026-11-18). With `RIPPLE_D3D_PROFILE` set, the
+HAL times its read-backs: in 3DMark 2000's game scenes 7.0 ms of each 8.5 ms frame went into
+reading the finished picture back from the GPU, and a 16-bit frame at 1024x768 took longer
+(5.0 ms) than a 32-bit one twice its size (4.0 ms). Every target's colour buffer on the GPU was
+RGBA8, so each read-back of a 565 target converted every pixel. A 565 target gets a 565 colour
+buffer now: its read-back is a copy, 1.2 ms at 1024x768, and it reads destination alpha as 1,
+as Direct3D does for a target without alpha. 3DMark 2000's game scenes take 4.2 ms a frame,
+and its score went from 7784 to **14404 3D marks** the same day on the same host; gltest,
+d3dtest (its pixel checks at 16 and 32 bits), pftest and threadtest pass.
+
 Not yet: transform and lighting in the driver (Direct3D does it on the CPU), palettized
 textures, state blocks recorded by the driver, colour-key ranges and alpha-blended colour keys.
 
@@ -310,6 +320,9 @@ is running already: a test batch starts one DirectDraw program without redirecti
   text to QEMU's debug port (port 0xE9, a 25-byte patch in the test VM only) showed every
   message. `tools/win9x/dbgrun.c` (a minimal debugger that keeps OutputDebugString text and
   exceptions) and `tools/win9x/setini.c` (sets `[DirectDraw] debug=9` in WIN.INI) help there.
+- **Where a frame's time goes.** `set RIPPLE_D3D_PROFILE=1` before starting a Direct3D
+  program: every 100 frames the HAL writes the time per frame and the time of reading the
+  picture back from the GPU to QEMU's debug port (`rd3d: profile: ...`).
 - **Finding where a program hangs.** `set DBGRUN_DUMP=5` before `dbgrun E9 PROGRAM` logs every
   thread of the program every 5 seconds on QEMU's debug port, which stays readable when the
   guest is stuck: where each thread is, the addresses on its stack inside a loaded module
