@@ -12,7 +12,7 @@
 #   - win9x/compat/k32shim.c, the few kernel32 functions newer than Windows 98 that the
 #     toolchain's libraries call;
 #   - version 4.0 in the file headers;
-#   - the MinGW formatter and its decimal conversion helpers built without SSE.
+#   - scalar MinGW routines for printf, texture level-of-detail bias and pixel drawing.
 # tools/win9x/check-imports.py then compares every DLL's imports with Windows 98 SE's own
 # libraries (W98SYS, taken from its setup cabinets) and the build fails if one is missing.
 set -eu
@@ -72,11 +72,14 @@ NAMES="-Dgallium-wgl-dll-name=ripplegl -Dshared-glapi=disabled"
 # Mesa and the compatibility objects target Pentium II.
 CPU_FLAGS="'-march=pentium2', '-mtune=generic', '-femulated-tls'"
 # This is llvm-mingw 20261104's exact mingw-w64 revision. Its precompiled
-# printf uses XMM registers on ordinary formatting paths that Windows 95 runs.
+# printf, roundf and lroundf use XMM registers that Windows 95 cannot use.
 MINGW_REV=ee9bd87644156c41072a11ad957d1e11831a72df
 MINGW_SHA256=6a346a2e3eafa0e5ec8e30df89b16a05add8b50cb4cece8c47593799ca19e43b
 MINGW_ARCHIVE=$T/src/mesa-dl/mingw-w64-$MINGW_REV.tar.gz
-CRT=$T/mesa/mingw-crt-$MINGW_REV
+MATH_ROUTINES="roundf lroundf"
+# Key the cache by the math files we extract as well as the upstream revision.
+math_key=$(printf '%s' "$MATH_ROUTINES" | tr ' ' '-')
+CRT=$T/mesa/mingw-crt-$MINGW_REV-$math_key
 if [ ! -d "$CRT" ]; then
     temp=$(mktemp -d "$T/mesa/mingw-crt.XXXXXX")
     trap 'rm -rf "$temp"' 0
@@ -89,23 +92,28 @@ if [ ! -d "$CRT" ]; then
     [ "$archive" = "$MINGW_ARCHIVE" ] || mv "$archive" "$MINGW_ARCHIVE"
     mkdir "$temp/crt"
     prefix=mingw-w64-$MINGW_REV/mingw-w64-crt
-    tar xzf "$MINGW_ARCHIVE" -C "$temp/crt" --strip-components=2 "$prefix/stdio" "$prefix/gdtoa"
+    {
+        printf '%s\n' "$prefix/stdio" "$prefix/gdtoa"
+        for routine in $MATH_ROUTINES; do
+            printf '%s/math/%s.c\n' "$prefix" "$routine"
+        done
+    } | tar xzf "$MINGW_ARCHIVE" -C "$temp/crt" --strip-components=2 -T -
     mv -T "$temp/crt" "$CRT"
     rmdir "$temp"
     trap - 0
 fi
-# Use a fresh object directory when upgrading an existing Windows 98 build.
-COMPAT=$BUILD.runtime
-FORMATTERS="mingw_pformat gdtoa dmisc misc gmisc"
+# Make's dependency files contain absolute paths into the selected source cache.
+COMPAT=$BUILD.runtime/${CRT##*/}
+CRT_ROUTINES="$MATH_ROUTINES mingw_pformat gdtoa dmisc misc gmisc"
 mkdir -p "$COMPAT"
-make -C "$COMPAT" -f "$here/runtime.mk" CC="$LLVM_MINGW/bin/$TRIPLE-clang" CRT="$CRT" FORMATTERS="$FORMATTERS"
+make -C "$COMPAT" -f "$here/runtime.mk" CC="$LLVM_MINGW/bin/$TRIPLE-clang" CRT="$CRT" CRT_ROUTINES="$CRT_ROUTINES"
 # Meson links these external objects explicitly. Refresh previously linked DLLs
 # when the objects change, including after an interrupted build.
 if [ -d "$BUILD" ]; then
     find "$BUILD" -name '*.dll' ! -newer "$COMPAT/runtime.stamp" -delete
 fi
 LINK_FLAGS="'-static', '-Wl,--major-os-version=4,--minor-os-version=0', '-Wl,--major-subsystem-version=4,--minor-subsystem-version=0'"
-for object in k32shim $FORMATTERS; do
+for object in k32shim $CRT_ROUTINES; do
     LINK_FLAGS="$LINK_FLAGS, '$COMPAT/$object.o'"
 done
 

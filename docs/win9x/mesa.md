@@ -110,10 +110,13 @@ system DLLs export (unpacked from the setup cabinets into `.tools/win9x/w98dlls/
 Mesa build runs it on every DLL and fails when something is missing. It can't see functions
 that exist on Windows 98 only as stubs: those show up in testing.
 
-Mesa's own sources target the Pentium II instruction set. Windows 95 also reaches MinGW's
-formatted output code during OpenGL startup. The packaged llvm-mingw runtime uses SSE
-registers there, which the guest OS does not enable. The build links scalar versions of
-`mingw_pformat` and four decimal-conversion objects ahead of the toolchain libraries.
+Mesa's own sources target the Pentium II instruction set. Several routines in the
+packaged llvm-mingw runtime use SSE instructions that Windows 95 does not enable.
+The build compiles `mingw_pformat` and four decimal-conversion routines for the
+Pentium II so OpenGL can start. It also compiles `roundf`, which Mesa calls when
+a program changes the mipmap level bias, and `lroundf`, which converts pixel
+coordinates in `glDrawPixels`. Direct3D uses that path to restore a back buffer
+after a game writes into it.
 It downloads llvm-mingw 20261104's matching mingw-w64 source revision on first use,
 checks the archive's SHA-256 and caches it under `.tools/src/mesa-dl`. The compiler
 flags and source dependencies are in `win9x/mesa/runtime.mk`.
