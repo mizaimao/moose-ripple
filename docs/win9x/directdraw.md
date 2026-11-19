@@ -309,6 +309,70 @@ including its fence wait, and 916 ms updating the display. The 288 uploads avera
 1024×768 refresh was 16 ms at the guest clock's observed 1 ms resolution.
 [Follow-up on allowing flips during a fenced upload](https://github.com/mizaimao/moose-ripple/issues/85)
 
+#### Letting a VGA game render during an upload
+
+When the CPU mirror is already on screen, the mini-VDD can now submit one fenced
+upload and return to the game. DirectDraw selects its next VGA page while the host
+reads the previous sample. The mini-VDD holds that sample's backing until it receives
+the matching completion. It then flushes the image if the same process and mode
+still own the display. A timer handles the last upload when the flips stop.
+
+The first frame from a new owner still goes to the display synchronously. A mode
+change can allocate another image if one is still visible and the host still owns
+the backing for a different, earlier upload. This lets Windows construct the new
+image before switching to it and release the old backing when it is safe.
+
+On Windows 98 SE with an Intel UHD 630 at its 350 MHz minimum clock, each pass ran
+a GPU-presented scene, then two five-second VGA scenes. The older and newer drivers
+used the same HAL and Mesa DLLs. Rates are completed guest flips per second.
+
+| VGA mode after GPU takeover | Waited upload, two runs | One upload in flight, two runs |
+|---|---:|---:|
+| 640×480×16 | 482.0, 504.8 | 1,423.2, 1,450.8 |
+| 1024×768×16 | 89.4, 97.8 | 534.0, 538.4 |
+
+Both 1024×768 candidate streams submitted 293 asynchronous uploads. They flushed
+292 and 293 of them respectively before ownership changed. A guest flip still
+reads the application image back to VGA in this mode.
+
+In the same Re-Volt race, the guest went from **124.4 to 383.2 flips/s**. Both
+drivers read back once per flip. The average time spent in read-back fell from
+6.93 to 1.98 ms per flip. The guest counters cover 3,600 and 11,400 flips
+respectively, with the viewer recorder idle.
+
+Two separately restarted drives measured what a VNC viewer actually received.
+In an eight-second capture of the same moving 288×224 area, the older driver
+delivered 258 changed frames (32.1/s) and the newer one delivered 260 (32.5/s).
+The 95th-percentile gap between changed frames was 36.8 and 36.9 ms respectively.
+
+The held 1024×768×16 scene matched in all 786,432 captured pixels. After the last
+flip in `ddtest mirror`, the host showed a solid green page, then showed the blue
+320×240 front-buffer write without another flip. All other pixels stayed green.
+[Paired 1024×768 host captures](img/vga-upload-comparison.webp)
+
+The `rvdtest async` regression holds a real upload in the driver, switches from
+1024×768 to 640×480, then expires a second held upload and switches back. The first
+build failed the return to 1024×768. The revised driver completed the return, ran
+independent 3D commands during the timeout, received a fresh upload's matching reply
+and restored the original desktop. The test forces the deadline in software.
+
+At 1024×768×32 the direct GPU scene reached 3,957.2 guest frames/s with zero
+timed-loop read-backs. The VGA fallback reached 174.2 frames/s with one read-back
+per flip and displayed all 292 asynchronous uploads. Both held images matched the
+earlier VGA reference in all 786,432 RGB pixels.
+
+Re-Volt resumed its race after switching to the desktop and back. The full-screen
+DOS prompt echoed typed input and accepted a new command on return to a window.
+DirectDraw surface restoration, ordinary DirectDraw and Direct3D passed with GPU
+presentation both off and on. Windowed OpenGL, 8-bit DirectDraw and 3D request
+timeout recovery also passed.
+
+The default 3DMark 2000 benchmark with GPU presentation scored 20,843 immediately
+after the fault and mode-switch tests. A fresh-boot comparison scored 21,122 on
+the previous driver and 21,437 on the new driver. Both sent about 81.1% of timed
+flips directly to the GPU, recorded 233 read-backs in complete timing blocks and
+sent zero CPU mirror uploads. This benchmark exercised direct GPU presentation.
+
 ### 3DMark 2000 (2026-11-16)
 
 3DMark 2000 1.1 runs its default benchmark to the end on Windows 98 SE in VM 230 (DirectX 7,
