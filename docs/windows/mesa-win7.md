@@ -633,6 +633,22 @@ new compositor crash. `tools/win7-hello/shellmenu.c` performs that menu check on
 Windows 7 desktop without creating files. This fixes the reproduced memory fault; animation
 timing is a separate investigation.
 
+## Direct3D 9 mipmap selection
+
+`D3DSAMP_MAXMIPLEVEL` sets the most detailed mipmap an application wants
+to sample. With the state set to 1, a draw can still select level 2 or
+higher as a texture recedes into the distance. The previous driver
+restricted the texture view to level 1. The driver now keeps the full
+resident mip chain in the view and sets the sampler's minimum LOD.
+
+On Windows 7 x64 in UTM, `d3d9mip.exe` and `d3d9mip32.exe` each render
+a 32×32 target from a texture with a distinct color at every level. The
+release driver returned level 1 for all 1,024 pixels in three cases that
+expected level 2. These covered point and linear mip filtering and an
+explicit shader LOD. The fixed driver passed all twelve cases in both
+process sizes. Pass the expected full path to `viogpu_d3d10.dll` as an
+argument to verify which copy of the driver rendered the test.
+
 ## Aero window movement in UTM
 
 With the texture and guest-clock fixes installed, the compositor still spent most

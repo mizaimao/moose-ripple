@@ -2700,31 +2700,6 @@ D3D9GenerateAutogenMipmaps(D3D9Device *device, D3D9Resource *texture)
    return true;
 }
 
-static UINT
-D3D9TextureBaseLevel(D3D9Device *device, UINT stage, D3D9Resource *texture)
-{
-   const UINT mip_filter =
-      device->texture_stage_states[stage][D3DDDITSS_MIPFILTER];
-   const UINT texture_levels = texture->pipe_resource->last_level + 1;
-   UINT level = mip_filter == D3DTEXF_NONE ? 0 :
-      device->texture_stage_states[stage][D3DDDITSS_MAXMIPLEVEL];
-   if (level >= texture_levels)
-      level = texture_levels - 1;
-   return level;
-}
-
-static UINT
-D3D9TextureLastLevel(D3D9Device *device, UINT stage, D3D9Resource *texture,
-                     UINT base_level)
-{
-   const UINT mip_filter =
-      device->texture_stage_states[stage][D3DDDITSS_MIPFILTER];
-   const UINT max_mip_level =
-      device->texture_stage_states[stage][D3DDDITSS_MAXMIPLEVEL];
-   return (mip_filter == D3DTEXF_NONE || max_mip_level) ? base_level :
-      texture->pipe_resource->last_level;
-}
-
 static bool
 D3D9FillSamplerState(D3D9Device *device, UINT stage,
                      struct pipe_sampler_state *sampler)
@@ -2909,18 +2884,19 @@ D3D9CreateTextureBinding(D3D9Device *device, UINT stage,
          view_format = srgb_format;
    }
 
-   const UINT level = D3D9TextureBaseLevel(device, stage, texture);
-   const UINT last_level = D3D9TextureLastLevel(device, stage, texture, level);
-   const UINT first_view_level =
-      MIN2(view_base_level + level, view_resource->last_level);
-   const UINT last_view_level =
-      MIN2(view_base_level + last_level, view_resource->last_level);
+   const UINT first_view_level = MIN2(view_base_level, view_resource->last_level);
+   const UINT last_lod = sampler.min_mip_filter == PIPE_TEX_MIPFILTER_NONE ? 0 :
+      MIN2(texture->pipe_resource->last_level, view_resource->last_level - first_view_level);
+   /* MAXMIPLEVEL clamps the requested LOD. Moving the start of the view
+    * would also change what an explicit shader LOD of zero refers to. */
+   sampler.min_lod = (float)MIN2(device->texture_stage_states[stage][D3DDDITSS_MAXMIPLEVEL],
+                                 last_lod);
    struct pipe_sampler_view view;
    u_sampler_view_default_template(&view, view_resource, view_format);
    const UINT layer_count = D3D9TextureLayerCount(view_resource);
    view.target = view_resource->target;
    view.u.tex.first_level = first_view_level;
-   view.u.tex.last_level = last_view_level;
+   view.u.tex.last_level = first_view_level + last_lod;
    view.u.tex.first_layer = 0;
    view.u.tex.last_layer = layer_count ? layer_count - 1 : 0;
    if (view.target == PIPE_TEXTURE_CUBE ||
