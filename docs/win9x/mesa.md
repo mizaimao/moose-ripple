@@ -118,6 +118,12 @@ It downloads llvm-mingw 20261104's matching mingw-w64 source revision on first u
 checks the archive's SHA-256 and caches it under `.tools/src/mesa-dl`. The compiler
 flags and source dependencies are in `win9x/mesa/runtime.mk`.
 
+Mesa also generates vertex-copy routines at run time. On Windows 95 OSR2.5,
+a virtual Pentium III reported SSE support even though the OS disabled XMM
+instructions. Quake III hit an illegal instruction in Mesa's generated 12-byte
+vertex copy. The Win9x build now selects scalar vertex copies on Windows 95.
+Rendering still uses virgl. Windows 98 and Me use the usual CPU feature checks.
+
 ## Build and test
 
     win9x/mesa/build.sh             # .tools/mesa/out-win9x/ripplegl.dll and opengl32.dll
