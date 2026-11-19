@@ -255,13 +255,18 @@ clear, a system-memory surface copied to the back buffer, a video-memory surface
 filled under an ordinary lock and under a discarding one, a frame sent through
 Windows' software video processor, and a frame sent through the driver's own
 video processor to the middle of the window, with the background colour checked
-beside it. Run them outside the driver package directory too: beside the package
+beside it, frames in the two video formats, interlaced frames of which one
+field has to show alone, and a still interlaced picture whose edge has to
+stay on its row for either field. Run them outside the driver package directory too: beside the package
 a 64-bit program loads the package's copy of the driver, not the installed one.
 
 `vidplay.exe ds|mf FILE` (`guest/vidplay.cmd` runs both, in both process sizes)
 plays a video in a window of its own through DirectShow or through Media
 Foundation, both ending in the Enhanced Video Renderer, and reads the screen at
-64 points: how many are not black, and whether the picture moves.
+64 points: how many are not black, and whether the picture moves. Give the
+video's own width and height after the seconds to have it shown row for row
+for a screen capture. For interlaced video the trace at level 3 says which
+field each video output shows.
 
 `guest/hdclips.cmd TAG` runs each video playback test of Windows' own assessment
 alone, with the command line the full assessment uses, and sends what each

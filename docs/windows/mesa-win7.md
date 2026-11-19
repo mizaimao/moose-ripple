@@ -1233,8 +1233,8 @@ decoded frame to a DirectX Video Acceleration processor: a frame, a target, two 
 and a background colour. With none in the driver it uses a software processor of its own.
 The driver now offers the progressive device (`D3D9VideoProcessBlt`): the frame's part is
 scaled to its place on the target by the host, and what the frame leaves free takes the
-background colour. No deinterlacing, no colour controls, no sub-streams (Windows mixes
-subtitles itself then).
+background colour. No colour controls, no sub-streams (Windows mixes subtitles itself
+then).
 
 **Plain surfaces are kept in memory.** The renderer keeps each frame in a plain video-memory
 surface, which the decoder locks once per frame without discarding. As a host texture that
@@ -1263,6 +1263,37 @@ assessment's playback test went from 36.7 to 50.2 ms a frame), so it stays only 
 fallback for YUY2 and for a host without the two texture formats; `RIPPLE_VIDEO_CPU` forces
 it, to compare. Both give the same pixels in `d3d9flipex`'s "nv12" and "yuy2" steps
 (c8611f for a frame of c86020, 30a0d7 for one of 30a0d8).
+
+**Interlaced video is shown a field at a time (2026-11-19).** An interlaced frame holds two
+fields taken a sixtieth of a second apart, on alternate rows; shown whole, anything that
+moves is combed. The driver offers a second processor for it, DirectX Video Acceleration's
+"bob" device, listed first. The renderer creates it for interlaced video and asks for two
+outputs per frame, at the frame's start and half a frame later; each gets one field,
+stretched to the frame's height (`D3D9VideoField`). On the host path only the rows of that
+field go up, every second row of each plane, and the conversion draw places each at the
+height it has in the frame; the in-driver path repeats each row of the field.
+`RIPPLE_VIDEO_WEAVE` shows such frames whole again, to compare.
+
+Checked on both hosts with the final build. `d3d9flipex` has five steps for it. Three show
+one field of a frame whose fields differ (a colour on the even rows, its complement on the
+odd ones) and have to show that field's colour alone. Two show a still picture, white above
+the middle row and black from it on, through either field, and read the four rows about the
+edge: a field's rows have to land at the height they have in the frame, or a still picture
+hops by a row as the fields alternate. All pass on both conversion paths, 52 of 52 steps in
+all, in UTM and on the desktop OpenGL host. On the host path the rows about the edge read
+white, grey, black, black for the first field and white, white, grey, black for the second:
+the grey is the one row at the edge the field does not hold, halfway between its
+neighbours. The in-driver path, which repeats rows, has the white of the row above there.
+
+Playing the assessment's interlaced MPEG-2 clip through DirectShow in UTM, the trace
+recorded 116 outputs of the bottom field and 116 of the top one in strict alternation, the
+bottom field (the clip says odd rows first) at each frame's start. On the desktop OpenGL
+host a screen capture of that clip, enlarged, shows the moving riders with single
+outlines; with `RIPPLE_VIDEO_WEAVE` they are doubled. The assessment's frame counts do not
+change with it (293, 149, 298, 151, 151 and 151 there): its MPEG-2 tests already counted
+two outputs per frame, and its interlaced H.264 clip reaches the driver with every frame
+marked progressive and one output asked per frame, so there is nothing to separate, and
+that test stays at half the frames it expects.
 
 **A surface bound as render target has to outlive its binding.** Mesa's virgl context copies
 the framebuffer state without taking references, and sends the bound surface's resource
@@ -1307,7 +1338,7 @@ emulated processor.
 DirectShow cannot open the H.264 clip at all: Windows 7 has no DirectShow reader for MP4
 files, with any driver.
 
-Open: interlaced video is shown as it is decoded (no deinterlacing device), YUY2 frames are
-still converted in the driver, and a program that stretches a video-format surface itself,
+Open: YUY2 frames are still converted in the driver, and a program that stretches a
+video-format surface itself,
 without the video processor, is not served, which the format list says by not offering that
 conversion.

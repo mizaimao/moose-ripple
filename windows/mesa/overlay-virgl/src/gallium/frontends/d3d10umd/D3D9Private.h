@@ -458,6 +458,7 @@ HRESULT APIENTRY D3D9DepthFill(HANDLE hDevice,
 HRESULT APIENTRY D3D9Present(HANDLE hDevice, const D3DDDIARG_PRESENT *data);
 /* The video processor (D3D9Resource.cpp) */
 extern const GUID D3D9ProgressiveVideoProcessor;
+extern const GUID D3D9BobVideoProcessor;
 bool D3D9VideoProcessorTakes(D3DDDIFORMAT video, D3DDDIFORMAT target);
 HRESULT APIENTRY D3D9CreateVideoProcessDevice(
    HANDLE hDevice, D3DDDIARG_CREATEVIDEOPROCESSDEVICE *data);

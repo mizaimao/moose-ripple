@@ -1,8 +1,10 @@
 /* Does a video show a picture? Plays a file in a window of its own for a few seconds through
  * one of Windows' two playback pipelines, both ending in the Enhanced Video Renderer, and
  * reads the screen where the window is:
- *   vidplay ds FILE [SECONDS]   DirectShow: a filter graph with the renderer added first
- *   vidplay mf FILE [SECONDS]   Media Foundation, through MFPlay
+ *   vidplay ds FILE [SECONDS [WIDTH HEIGHT]]   DirectShow: a filter graph with the renderer added first
+ *   vidplay mf FILE [SECONDS]                  Media Foundation, through MFPlay
+ * WIDTH and HEIGHT: the picture's size in the window, by default 640 by 360; give the video's
+ * own size to have it shown row for row, for a screen capture.
  * Prints how many of 64 points spread over the picture are not black, twice, a second apart,
  * and whether the picture changed in between. Exit code 0 if at least a quarter are lit.
  * MIT licence (LICENSE at the repository root).
@@ -21,7 +23,11 @@
 /* The Enhanced Video Renderer's DirectShow filter; the headers here do not name it */
 DEFINE_GUID(CLSID_EnhancedVideoRenderer, 0xfa10746c, 0x9b63, 0x4b6c, 0xbc, 0x49, 0xfc, 0x30, 0x0e, 0xa5, 0xf2, 0x56);
 
-enum { WIDTH = 640, HEIGHT = 360, GRID = 8 };
+enum { GRID = 8 };
+/* The picture's size in the window. Given on the command line, the picture is stretched to it,
+ * not letterboxed: the video's own size then shows it row for row. */
+static int WIDTH = 640, HEIGHT = 360;
+static int fit;
 
 static void pump(DWORD ms)
 {
@@ -55,6 +61,10 @@ static int look(HWND window, COLORREF *seen)
     return lit;
 }
 
+/* What is playing, to stop it before the process ends */
+static IMFPMediaPlayer *mf_player;
+static IMediaControl *ds_control;
+
 static HRESULT play_directshow(HWND window, const WCHAR *path)
 {
     IGraphBuilder *graph = NULL;
@@ -74,28 +84,34 @@ static HRESULT play_directshow(HWND window, const WCHAR *path)
                                       (void **)&display);
     if (SUCCEEDED(hr)) hr = IMFVideoDisplayControl_SetVideoWindow(display, window);
     RECT all = { 0, 0, WIDTH, HEIGHT };
+    if (SUCCEEDED(hr) && fit) hr = IMFVideoDisplayControl_SetAspectRatioMode(display, MFVideoARMode_None);
     if (SUCCEEDED(hr)) hr = IMFVideoDisplayControl_SetVideoPosition(display, NULL, &all);
     printf("renderer ready hr=0x%08lx\n", (unsigned long)hr);
     if (SUCCEEDED(hr)) hr = IGraphBuilder_RenderFile(graph, path, NULL);
     printf("graph built hr=0x%08lx\n", (unsigned long)hr);
     if (SUCCEEDED(hr)) hr = IGraphBuilder_QueryInterface(graph, &IID_IMediaControl, (void **)&control);
     if (SUCCEEDED(hr)) hr = IMediaControl_Run(control);
-    return FAILED(hr) ? hr : S_OK;   /* left running; the process ends with it */
+    ds_control = control;
+    return FAILED(hr) ? hr : S_OK;
 }
 
 static HRESULT play_mediafoundation(HWND window, const WCHAR *path)
 {
-    IMFPMediaPlayer *player = NULL;
-    return MFPCreateMediaPlayer(path, TRUE, 0, NULL, window, &player);
+    return MFPCreateMediaPlayer(path, TRUE, 0, NULL, window, &mf_player);
 }
 
 int main(int argc, char **argv)
 {
     if (argc < 3 || (strcmp(argv[1], "ds") && strcmp(argv[1], "mf"))) {
-        printf("usage: vidplay ds|mf FILE [SECONDS]\n");
+        printf("usage: vidplay ds|mf FILE [SECONDS [WIDTH HEIGHT]]\n");
         return 2;
     }
     const int seconds = argc > 3 ? atoi(argv[3]) : 4;
+    if (argc > 5 && atoi(argv[4]) >= 160 && atoi(argv[5]) >= 160) {
+        WIDTH = atoi(argv[4]);
+        HEIGHT = atoi(argv[5]);
+        fit = 1;
+    }
     WCHAR path[MAX_PATH];
     MultiByteToWideChar(CP_ACP, 0, argv[2], -1, path, MAX_PATH);
 
@@ -130,5 +146,12 @@ int main(int argc, char **argv)
            GRID * GRID, changed,
            (unsigned long)((GetRValue(second[36]) << 16) | (GetGValue(second[36]) << 8) | GetBValue(second[36])));
     fflush(stdout);
+    /* Stop before the process ends. Left running, the renderer once crashed in its own DLL as
+     * the process unloaded it (a 32-bit Media Foundation run, one of 14). */
+    if (mf_player) {
+        IMFPMediaPlayer_Shutdown(mf_player);
+        IMFPMediaPlayer_Release(mf_player);
+    }
+    if (ds_control) IMediaControl_Stop(ds_control);
     return lit2 >= GRID * GRID / 4 ? 0 : 1;
 }

@@ -9,6 +9,7 @@
 
 #include "D3D9Host.h"
 #include "RippleLog.h"
+#include "D3D9Trace.h"
 
 #include "tgsi/tgsi_ureg.h"
 #include "util/format/u_format.h"
@@ -4526,7 +4527,9 @@ D3D9ColorFill(HANDLE hDevice, const D3DDDIARG_COLORFILL *data)
 }
 
 /*
- * The video processor (DirectX Video Acceleration 2, the progressive device).
+ * The video processor (DirectX Video Acceleration 2): the progressive device, and the
+ * deinterlacing one, which differs only in showing an interlaced frame one field at a time
+ * (D3D9VideoField).
  *
  * Windows' video renderer hands every decoded frame to a video processor with a target and
  * two rectangles, and expects the frame's part scaled to its place on the target, the rest
@@ -4551,6 +4554,8 @@ struct D3D9VideoProcessor {
    struct pipe_resource *chroma;       /* converted there into `frame` (D3D9VideoDrawNv12) */
    uint8_t *rgb;                       /* a video-format frame converted, before its upload */
    size_t rgb_capacity;
+   bool bob;                           /* the deinterlacing device (D3D9VideoField) */
+   UINT frame_field;                   /* which field of the source `frame` holds: 0 both */
 };
 
 bool
@@ -4565,13 +4570,17 @@ D3D9CreateVideoProcessDevice(HANDLE hDevice,
 {
    if (!hDevice || !data || !data->pVideoProcGuid)
       return E_INVALIDARG;
-   if (memcmp(data->pVideoProcGuid, &D3D9ProgressiveVideoProcessor, sizeof(GUID)) ||
+   const bool bob =
+      !memcmp(data->pVideoProcGuid, &D3D9BobVideoProcessor, sizeof(GUID));
+   if ((!bob &&
+        memcmp(data->pVideoProcGuid, &D3D9ProgressiveVideoProcessor, sizeof(GUID))) ||
        !D3D9VideoProcessorTakes(data->VideoDesc.Format, data->RenderTargetFormat))
       return E_INVALIDARG;
    D3D9VideoProcessor *processor =
       (D3D9VideoProcessor *)calloc(1, sizeof(*processor));
    if (!processor)
       return E_OUTOFMEMORY;
+   processor->bob = bob;
    data->hVideoProcess = processor;
    return S_OK;
 }
@@ -4692,8 +4701,9 @@ D3D9VideoMatrix(const DXVADDI_EXTENDEDFORMAT *colour, UINT height, float rows[3]
 
 /* The conversion draw's fragment shader. A fragment's place on the target gives the place
  * in the frame (c0: scale in xy, offset in zw, in texture coordinates, which are the same
- * for both planes); luma from the first texture, the chroma pair from the second; then the
- * three rows of the matrix (c1 to c3). */
+ * for both planes of a whole frame, c4 the same for the chroma plane, which differs when the
+ * planes hold one field); luma from the first texture, the chroma pair from the second;
+ * then the three rows of the matrix (c1 to c3). */
 static void *
 D3D9CreateVideoFs(struct pipe_context *pipe)
 {
@@ -4705,6 +4715,7 @@ D3D9CreateVideoFs(struct pipe_context *pipe)
    struct ureg_src c0 = ureg_DECL_constant(ureg, 0);
    struct ureg_src rows[3] = { ureg_DECL_constant(ureg, 1), ureg_DECL_constant(ureg, 2),
                                ureg_DECL_constant(ureg, 3) };
+   struct ureg_src c4 = ureg_DECL_constant(ureg, 4);
    struct ureg_src samplers[2] = { ureg_DECL_sampler(ureg, 0), ureg_DECL_sampler(ureg, 1) };
    for (unsigned i = 0; i < 2; ++i)
       ureg_DECL_sampler_view(ureg, i, TGSI_TEXTURE_2D, TGSI_RETURN_TYPE_FLOAT,
@@ -4720,6 +4731,8 @@ D3D9CreateVideoFs(struct pipe_context *pipe)
    ureg_MOV(ureg, ureg_writemask(coord, TGSI_WRITEMASK_ZW), ureg_imm1f(ureg, 0.0f));
    ureg_TEX(ureg, texel, TGSI_TEXTURE_2D, ureg_src(coord), samplers[0]);
    ureg_MOV(ureg, ureg_writemask(ycc, TGSI_WRITEMASK_X), ureg_src(texel));
+   ureg_MAD(ureg, ureg_writemask(coord, TGSI_WRITEMASK_XY), frag, c4,
+            ureg_swizzle(c4, TGSI_SWIZZLE_Z, TGSI_SWIZZLE_W, TGSI_SWIZZLE_Z, TGSI_SWIZZLE_W));
    ureg_TEX(ureg, texel, TGSI_TEXTURE_2D, ureg_src(coord), samplers[1]);
    ureg_MOV(ureg, ureg_writemask(ycc, TGSI_WRITEMASK_YZ),
             ureg_swizzle(ureg_src(texel), TGSI_SWIZZLE_X, TGSI_SWIZZLE_X, TGSI_SWIZZLE_Y,
@@ -4742,13 +4755,19 @@ D3D9CreateVideoFs(struct pipe_context *pipe)
 static bool
 D3D9VideoDrawNv12(D3D9Device *device, D3D9VideoProcessor *processor,
                   D3D9Resource *src_resource, D3D9SubResource *src_sub,
-                  const DXVADDI_EXTENDEDFORMAT *colour)
+                  const DXVADDI_EXTENDEDFORMAT *colour, UINT field)
 {
    struct pipe_context *pipe = device->pipe;
    struct pipe_screen *screen = device->screen;
    struct pipe_resource *dst_tex = processor->frame;
    const UINT width = src_sub->width, height = src_sub->height;
    const UINT chroma_width = (width + 1) / 2, chroma_height = (height + 1) / 2;
+   /* One field (D3D9VideoField): every second row of each plane goes up, from the first row
+    * for the top field and the second for the bottom one, and the draw stretches them over
+    * the frame, each row at the height it has in the frame. */
+   const UINT first_row = field == 2 ? 1 : 0, row_step = field ? 2 : 1;
+   const UINT luma_rows = field ? (height + 1 - first_row) / 2 : height;
+   const UINT chroma_rows = field ? (chroma_height + 1 - first_row) / 2 : chroma_height;
    /* RIPPLE_VIDEO_CPU (any value): convert in the driver instead, to compare the two */
    static int in_driver = -1;
    if (in_driver < 0)
@@ -4757,15 +4776,16 @@ D3D9VideoDrawNv12(D3D9Device *device, D3D9VideoProcessor *processor,
        !pipe->texture_subdata || !pipe->create_sampler_view ||
        !(dst_tex->bind & PIPE_BIND_RENDER_TARGET) ||
        src_sub->data_capacity < src_sub->size ||
-       src_sub->pitch < 2 * chroma_width ||
+       src_sub->pitch < 2 * chroma_width || !luma_rows || !chroma_rows ||
        !screen->is_format_supported(screen, PIPE_FORMAT_R8_UNORM, PIPE_TEXTURE_2D, 0, 0,
                                     PIPE_BIND_SAMPLER_VIEW) ||
        !screen->is_format_supported(screen, PIPE_FORMAT_R8G8_UNORM, PIPE_TEXTURE_2D, 0, 0,
                                     PIPE_BIND_SAMPLER_VIEW))
       return false;
 
-   if (processor->luma &&
-       (processor->luma->width0 != width || processor->luma->height0 != height)) {
+   if (processor->luma && processor->chroma &&
+       (processor->luma->width0 != width || processor->luma->height0 != luma_rows ||
+        processor->chroma->height0 != chroma_rows)) {
       pipe_resource_reference(&processor->luma, NULL);
       pipe_resource_reference(&processor->chroma, NULL);
    }
@@ -4781,12 +4801,12 @@ D3D9VideoDrawNv12(D3D9Device *device, D3D9VideoProcessor *processor,
       templ.usage = PIPE_USAGE_DEFAULT;
       templ.format = PIPE_FORMAT_R8_UNORM;
       templ.width0 = width;
-      templ.height0 = height;
+      templ.height0 = luma_rows;
       pipe_resource_reference(&processor->luma, NULL);
       processor->luma = screen->resource_create(screen, &templ);
       templ.format = PIPE_FORMAT_R8G8_UNORM;
       templ.width0 = chroma_width;
-      templ.height0 = chroma_height;
+      templ.height0 = chroma_rows;
       pipe_resource_reference(&processor->chroma, NULL);
       processor->chroma = screen->resource_create(screen, &templ);
       if (!processor->luma || !processor->chroma)
@@ -4814,17 +4834,19 @@ D3D9VideoDrawNv12(D3D9Device *device, D3D9VideoProcessor *processor,
       struct pipe_box box;
       memset(&box, 0, sizeof(box));
       box.depth = 1;
+      const UINT stride = src_sub->pitch * row_step;
       box.width = width;
-      box.height = height;
+      box.height = luma_rows;
       pipe->texture_subdata(pipe, processor->luma, 0,
                             PIPE_MAP_WRITE | PIPE_MAP_DISCARD_WHOLE_RESOURCE, &box,
-                            src_sub->data, src_sub->pitch, src_sub->pitch * height);
+                            src_sub->data + (size_t)src_sub->pitch * first_row, stride,
+                            stride * luma_rows);
       box.width = chroma_width;
-      box.height = chroma_height;
+      box.height = chroma_rows;
       pipe->texture_subdata(pipe, processor->chroma, 0,
                             PIPE_MAP_WRITE | PIPE_MAP_DISCARD_WHOLE_RESOURCE, &box,
-                            src_sub->data + (size_t)src_sub->pitch * height, src_sub->pitch,
-                            src_sub->pitch * chroma_height);
+                            src_sub->data + (size_t)src_sub->pitch * (height + first_row),
+                            stride, stride * chroma_rows);
    }
 
    struct pipe_sampler_view *views[2] = { NULL, NULL };
@@ -4876,11 +4898,22 @@ D3D9VideoDrawNv12(D3D9Device *device, D3D9VideoProcessor *processor,
       vp.swizzle_w = PIPE_VIEWPORT_SWIZZLE_POSITIVE_W;
       pipe->set_viewport_states(pipe, 0, 1, &vp);
 
-      /* a pixel of the frame texture (x + 0.5) is the same place in both planes */
-      float constants[16];
-      constants[0] = 1.0f / width;
-      constants[1] = 1.0f / height;
-      constants[2] = constants[3] = 0.0f;
+      /* A pixel of the frame texture (y + 0.5) to each plane, 0 to 1 over its rows. Whole
+       * frame: the same place in both. A field: its luma row k is the frame's row 2k (top) or
+       * 2k + 1 (bottom), and its chroma row m lies over the four frame rows from 4m (top) or
+       * 4m + 2 (bottom). */
+      float constants[20];
+      constants[0] = constants[16] = 1.0f / width;
+      constants[2] = constants[18] = 0.0f;
+      if (field) {
+         constants[1] = 1.0f / (2.0f * luma_rows);
+         constants[3] = (0.5f - first_row) / (2.0f * luma_rows);
+         constants[17] = 1.0f / (4.0f * chroma_rows);
+         constants[19] = (1.0f - 2.0f * first_row) / (4.0f * chroma_rows);
+      } else {
+         constants[1] = constants[17] = 1.0f / height;
+         constants[3] = constants[19] = 0.0f;
+      }
       float rows[3][4];
       D3D9VideoMatrix(colour, height, rows);
       memcpy(&constants[4], rows, sizeof(rows));
@@ -4942,7 +4975,7 @@ D3D9VideoDrawNv12(D3D9Device *device, D3D9VideoProcessor *processor,
  * from the nearest sample. */
 static void
 D3D9VideoToRgb(D3DDDIFORMAT format, const D3D9SubResource *sub,
-               const DXVADDI_EXTENDEDFORMAT *colour, uint8_t *out)
+               const DXVADDI_EXTENDEDFORMAT *colour, UINT field, uint8_t *out)
 {
    const UINT matrix = colour ? colour->VideoTransferMatrix : 0;   /* 1: BT.709, 2: BT.601 */
    const bool bt709 = matrix == 1 || (matrix != 2 && sub->height > 576);
@@ -4965,10 +4998,21 @@ D3D9VideoToRgb(D3DDDIFORMAT format, const D3D9SubResource *sub,
    }
 
    const UINT width = sub->width;
+   const UINT first_row = field == 2 ? 1 : 0;
+   const UINT chroma_height = (sub->height + 1) / 2;
    for (UINT y = 0; y < sub->height; ++y) {
-      const uint8_t *luma = sub->data + (size_t)y * sub->pitch;
+      /* One field (D3D9VideoField): each of its rows fills two rows of the frame. Its luma
+       * row k is the frame's row 2k (top) or 2k + 1 (bottom); two luma rows of a field share
+       * a chroma row of that field, which are every second row of the chroma plane. */
+      UINT row = y, chroma_row = y / 2;
+      if (field) {
+         const UINT k = (y > first_row ? y - first_row : 0) / 2;
+         row = MIN2(2 * k + first_row, sub->height - 1);
+         chroma_row = MIN2(2 * (k / 2) + first_row, chroma_height - 1);
+      }
+      const uint8_t *luma = sub->data + (size_t)row * sub->pitch;
       /* NV12: the chroma pairs of this row, in the plane after the luma rows */
-      const uint8_t *chroma = sub->data + (size_t)(sub->height + y / 2) * sub->pitch;
+      const uint8_t *chroma = sub->data + (size_t)(sub->height + chroma_row) * sub->pitch;
       uint8_t *pixel = out + (size_t)y * width * 4;
       for (UINT x = 0; x < width; ++x, pixel += 4) {
          int l, cb, cr;
@@ -4999,9 +5043,11 @@ D3D9VideoBlitFrame(D3D9Device *device, D3D9VideoProcessor *processor,
                    D3D9Resource *dst_resource, D3D9SubResource *dst_sub,
                    UINT dst_subresource_index, const RECT *dst,
                    D3D9Resource *src_resource, D3D9SubResource *src_sub,
-                   const RECT *src, const DXVADDI_EXTENDEDFORMAT *colour)
+                   const RECT *src, const DXVADDI_EXTENDEDFORMAT *colour, UINT field)
 {
    const bool video = D3D9IsVideoFormat(src_resource->format);
+   if (!video)
+      field = 0;   /* an RGB frame is shown whole */
    const enum pipe_format format = video ? PIPE_FORMAT_B8G8R8X8_UNORM :
       D3D9FormatToPipe(src_resource->format);
    if (!device->screen || !device->pipe->texture_subdata || !device->pipe->blit ||
@@ -5041,12 +5087,17 @@ D3D9VideoBlitFrame(D3D9Device *device, D3D9VideoProcessor *processor,
       processor->frame_source = NULL;
    }
    /* The renderer draws a frame again when its window is repainted: no second upload */
-   if ((processor->frame_source != src_resource || src_sub->cpu_dirty) &&
-       D3D9VideoDrawNv12(device, processor, src_resource, src_sub, colour)) {
+   const bool stale = processor->frame_source != src_resource || src_sub->cpu_dirty ||
+      processor->frame_field != field;
+   bool converted = false;
+   if (stale &&
+       D3D9VideoDrawNv12(device, processor, src_resource, src_sub, colour, field)) {
       processor->frame_source = src_resource;
+      processor->frame_field = field;
       src_sub->cpu_dirty = false;
+      converted = true;
    }
-   if (processor->frame_source != src_resource || src_sub->cpu_dirty) {
+   if (stale && !converted) {
       struct pipe_box box;
       memset(&box, 0, sizeof(box));
       box.width = src_sub->width;
@@ -5063,7 +5114,7 @@ D3D9VideoBlitFrame(D3D9Device *device, D3D9VideoProcessor *processor,
             if (!processor->rgb)
                return false;
          }
-         D3D9VideoToRgb(src_resource->format, src_sub, colour, processor->rgb);
+         D3D9VideoToRgb(src_resource->format, src_sub, colour, field, processor->rgb);
          pixels = processor->rgb;
          pitch = src_sub->width * 4;
       }
@@ -5071,6 +5122,7 @@ D3D9VideoBlitFrame(D3D9Device *device, D3D9VideoProcessor *processor,
                                     PIPE_MAP_WRITE | PIPE_MAP_DISCARD_WHOLE_RESOURCE,
                                     &box, pixels, pitch, pitch * src_sub->height);
       processor->frame_source = src_resource;
+      processor->frame_field = field;
       src_sub->cpu_dirty = false;
    }
 
@@ -5085,6 +5137,31 @@ D3D9VideoBlitFrame(D3D9Device *device, D3D9VideoProcessor *processor,
    dst_sub->cpu_dirty = false;
    D3D9MarkAutogenMipmapsDirty(dst_resource, dst_subresource_index);
    return true;
+}
+
+/* Which field of an interlaced frame is due: 0 for the whole frame, 1 for the top field (the
+ * even rows), 2 for the bottom one. Only the deinterlacing device shows fields, each in turn
+ * stretched to the frame's height ("bob"), and only of a frame that says its two fields are
+ * interleaved. The first field belongs to the first half of the frame's time and the second
+ * to the rest; the renderer asks once for each. The other device shows such a frame whole,
+ * both fields woven together, combed where something moved. */
+static UINT
+D3D9VideoField(const D3D9VideoProcessor *processor, const D3DDDIARG_VIDEOPROCESSBLT *data,
+               const DXVADDI_VIDEOSAMPLE *sample)
+{
+   const UINT kind = sample->SampleFormat.SampleFormat;
+   /* RIPPLE_VIDEO_WEAVE (any value): show interlaced frames whole after all, to compare */
+   static int weave = -1;
+   if (weave < 0)
+      weave = getenv("RIPPLE_VIDEO_WEAVE") != NULL;
+   if (weave || !processor->bob ||
+       (kind != DXVADDI_SampleFieldInterleavedEvenFirst &&
+        kind != DXVADDI_SampleFieldInterleavedOddFirst))
+      return 0;
+   const bool second =
+      data->TargetFrame >= sample->Start + (sample->End - sample->Start) / 2;
+   const bool top_first = kind == DXVADDI_SampleFieldInterleavedEvenFirst;
+   return top_first != second ? 1 : 2;
 }
 
 HRESULT APIENTRY
@@ -5122,11 +5199,14 @@ D3D9VideoProcessBlt(HANDLE hDevice, const D3DDDIARG_VIDEOPROCESSBLT *data)
       src = sample->SrcRect;
       dst = sample->DstRect;
       if (src_resource && src_sub && D3D9VideoClip(&target, &src, &dst)) {
+         const UINT field = D3D9VideoField(processor, data, sample);
+         if (field && D3D9TraceLevel() >= 3)
+            ripple_logf("  video blt shows the %s field", field == 1 ? "top" : "bottom");
          if (!src_resource->pipe_resource && src_sub->data)
             drawn = D3D9VideoBlitFrame(device, processor, dst_resource, dst_sub,
                                        processor->render_target_subresource, &dst,
                                        src_resource, src_sub, &src,
-                                       &sample->SampleFormat);
+                                       &sample->SampleFormat, field);
          else
             drawn = D3D9CopyRectPipe(device, processor->render_target,
                                      processor->render_target_subresource, &dst,
