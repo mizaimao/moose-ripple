@@ -243,6 +243,12 @@ struct D3D9Resource
    bool notify_lock_subresource_valid;
    bool managed_upload_complete;
    bool may_watch_buffer;
+   /* Watched buffer: its current lock only appends (NoOverwrite); a lock gave the contents
+    * up (Discard) and no upload has taken new storage since; an ordered upload is queued
+    * (D3D9UploadWatchedBuffer). */
+   bool watched_append;
+   bool watched_discard;
+   bool watched_ordered;
    bool autogen_mipmap_dirty;
    struct pipe_resource *managed_default_pipe_resource;
    struct pipe_resource *managed_source_pipe_resource;
