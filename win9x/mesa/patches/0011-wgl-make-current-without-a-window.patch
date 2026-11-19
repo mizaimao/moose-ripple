@@ -1,7 +1,9 @@
+/tmp/rb-p/a/src/gallium/frontends/wgl/stw_context.c
+/tmp/rb-p/b/src/gallium/frontends/wgl/stw_context.c
 diff -ruN a/src/gallium/frontends/wgl/stw_context.c b/src/gallium/frontends/wgl/stw_context.c
 --- a/src/gallium/frontends/wgl/stw_context.c
 +++ b/src/gallium/frontends/wgl/stw_context.c
-@@ -972,6 +972,25 @@
+@@ -972,6 +972,36 @@
  };
  
  
@@ -9,18 +11,29 @@ diff -ruN a/src/gallium/frontends/wgl/stw_context.c b/src/gallium/frontends/wgl/
 + * goes to framebuffer objects), or none with 0. It looks at no window or device context, so
 + * a Direct3D driver can call it on Windows 9x while DirectDraw holds the system's 16-bit
 + * lock: wglMakeCurrent goes through GDI and KERNEL32 locks there, and a game's thread hung
-+ * in it. */
++ * in it. The Direct3D driver makes its context current for each call and lets go of it at
++ * the end, so a context made current here is let go without a flush (release behaviour
++ * NONE, as with GL_KHR_context_flush_control): its commands stay queued for its next call,
++ * instead of going to the host after every call. A context with a window takes
++ * stw_make_current, flush included. */
 +BOOL APIENTRY
 +RippleMakeCurrent(DHGLRC dhglrc)
 +{
-+   struct stw_context *ctx = NULL;
++   struct stw_context *ctx = NULL, *old_ctx = stw_current_context();
 +
 +   if (dhglrc) {
 +      ctx = stw_lookup_context(dhglrc);
 +      if (!ctx)
 +         return false;
 +   }
-+   return stw_make_current(NULL, NULL, ctx);
++   if (old_ctx == ctx)
++      return true;
++   if ((old_ctx && (old_ctx->current_framebuffer || old_ctx->current_read_framebuffer)) ||
++       (ctx && (ctx->current_framebuffer || ctx->current_read_framebuffer)))
++      return stw_make_current(NULL, NULL, ctx);
++   if (ctx)
++      ctx->st->ctx->Const.ContextReleaseBehavior = GL_NONE;
++   return st_api_make_current(ctx ? ctx->st : NULL, NULL, NULL);
 +}
 +
 +

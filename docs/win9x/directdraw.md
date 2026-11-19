@@ -97,10 +97,22 @@ Since 2026-11-17 also:
 
 3DMark 2000 now gets mipmapped textures and runs to the end. Six runs with the new driver on
 2026-11-17 made 11161 to 11559 3D marks (11722 to 12189 with the old driver on 2026-11-16, a
-different day on the host). A comparison of old and new driver on the same day is still to do:
-the one reported first (old 11316 and 11183 against new 11265 and 11326) was the new driver
-all four times, because the test VM's startup file can't read the CD that was meant to swap
-the drivers (see "Changing a driver in the test VM" below).
+different day on the host). The comparison reported first (old 11316 and 11183 against new
+11265 and 11326) was the new driver all four times, because the test VM's startup file can't
+read the CD that was meant to swap the drivers (see "Changing a driver in the test VM" below).
+
+**Old against new on the same day** (2026-11-18, the swap checked by comparing the installed
+files with the CD's before each run; the host's GPU at its default minimum clock after a host
+restart and a sound card in the VM, so every number is lower than the ones above): the driver
+before 2026-11-17 made 7812 and 7747 3D marks, the one from 2026-11-18 morning 5822 and 5788,
+25% less. Since the Re-Volt fix (below) the HAL lets go of its context at the end of every call,
+and Mesa flushed the context's commands to the host each time (synchronous, through the VxD),
+many times a frame. Mesa patch 0011 lets go without a flush (release behaviour NONE, as
+`GL_KHR_context_flush_control` has it): 7784, then 7478, 7461, 7413 and 7412 under `dbgrun`
+(which costs a few percent). One run of six quit at the start of the benchmark without a
+message and isn't explained; the five after it, under the debugger, ended normally (exit code 0).
+gltest and d3dtest run at the same speed with and without the change (1840 and 574 frames/s on
+that day's host).
 
 Not yet: transform and lighting in the driver (Direct3D does it on the CPU), palettized
 textures, state blocks recorded by the driver, colour-key ranges and alpha-blended colour keys.
@@ -260,10 +272,17 @@ the line); Windows replaces them at the next start. Check that the debug port sh
 build before measuring: a comparison that skipped this (3DMark 2000 above) measured the same
 driver twice.
 
-**Open:** running d3dtest at 32 and then at 16 bits, followed by more test programs, sometimes
-left a program that had ended still holding its output file open ("Sharing violation" in the
-next batch step), and answering that prompt froze the whole guest (idle, no log). It happens
-with the drivers from before 2026-11-17 too; one d3dtest at a time doesn't do it.
+**The output file held after a test run** (2026-11-18): the first batch of test programs after
+Windows starts ends with "Sharing violation" on the output file of the first program that used
+DirectDraw (d3dtest, its output redirected to a file). The holder is DirectDraw's helper,
+`DDHELP.EXE`, which DirectDraw starts for the first program that uses it: that program is
+DDHELP's parent, nothing else from the run is still alive, and with DDHELP ended (a scratch
+tool calling TerminateProcess) Retry goes on and the batch finishes, every test passed.
+DirectDraw starts DDHELP with handle inheritance off, so the file reaches it some other way,
+from the DOS prompt's redirection. Later batches in the same session don't see it, as DDHELP
+is running already: a test batch starts one DirectDraw program without redirection first.
+**Open:** in earlier runs, answering that prompt froze the whole guest (idle, no log). On
+2026-11-18 Retry and Abort didn't; which answer froze it isn't known.
 
 ## Things learnt the hard way
 

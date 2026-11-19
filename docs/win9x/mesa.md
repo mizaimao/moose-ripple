@@ -244,7 +244,9 @@ lost from one run to the next.
   Patch 0011 exports `RippleMakeCurrent(DHGLRC)`, which makes a context current with no
   drawable (or none, with 0) and looks at no window or device context; the HAL takes its
   context from `DrvCreateContext` and its functions from `DrvGetProcAddress`, all in
-  `ripplegl.dll`.
+  `ripplegl.dll`. It lets go of a context without a flush (release behaviour NONE): the HAL
+  lets go at the end of every Direct3D call, and a flush each time sent the host a command
+  stream per call and cost 3DMark 2000 a quarter of its score.
 - **The host's log** is where rendering errors show (`journalctl` on Proxmox VE, lines from
   `QEMU[pid]`).
 
