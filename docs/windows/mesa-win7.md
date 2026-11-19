@@ -1192,5 +1192,13 @@ during the half second of the fade to black. The fade back in is mostly not
 seen there: the compositor's first desktop frame arrives about 0.65 s after
 the switch, when the ramp is nearly at the identity again, so the screen stays
 black for that time and the desktop then appears almost at full brightness.
-That first frame's delay is the open part of the logon in UTM (see above).
+That first frame's delay is Windows' own work under emulation (see above).
+
+So the driver does not depend on it. Ramps that arrive while there is no surface
+to draw (between the destroyed one and the next) are kept in order, with the
+time each came, and applied once a surface is there again, as far apart as
+they came. In UTM the display client then logged the fade to black (26 draws in
+0.5 s), 0.7 s of black, and the fade in (15 draws over 0.5 s). On the Intel
+host, where the first frame comes at once, frames taken every 0.1 s show six
+steps down and seven up as before, and the checks pass on both.
 What the screen itself shows in UTM has not been captured.

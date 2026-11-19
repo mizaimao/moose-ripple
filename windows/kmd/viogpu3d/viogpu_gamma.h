@@ -20,6 +20,10 @@ class VioGpuAllocation;
 class VioGpuGamma
 {
   public:
+    VioGpuGamma() : m_pending(NULL)
+    {
+    }
+    ~VioGpuGamma();
     void Init(VioGpuAdapter *adapter);
 
     // The ramp Windows wants, three times 256 sixteen-bit values; all NULL for the identity.
@@ -43,6 +47,14 @@ class VioGpuGamma
     // Free what was made on the host
     void Destroy();
 
+    // Between one surface and the next there is nothing to draw. Ramps that arrive then are
+    // kept in order (Hold) and applied once a surface is there again, as far apart as they came (Next), so
+    // that a fade is seen whole when its first frame comes late: at logon Windows raises the ramp
+    // for half a second from the desktop switch on, and an emulated guest's compositor takes
+    // longer than that to produce the desktop's first frame.
+    void Hold(BOOLEAN hold);
+    void Next();
+
   private:
     BOOLEAN Create(UINT width, UINT height, UINT format);
     void UploadTable(const UCHAR *table);
@@ -53,6 +65,17 @@ class VioGpuGamma
     UCHAR m_table[3][256]; // the ramp's top eight bits
     BOOLEAN m_identity;
     BOOLEAN m_dirty;
+    enum
+    {
+        PENDING = 64
+    };
+    UCHAR (*m_pending)[3][256]; // ramps that wait for a surface, a ring
+    ULONGLONG m_pendingTime[PENDING]; // when each came (interrupt time)
+    UINT m_pendingHead;
+    UINT m_pendingCount;
+    BOOLEAN m_hold;
+    BOOLEAN m_replaying;   // the waiting ramps are being applied, each as much later
+    ULONGLONG m_replayShift; // as the first of them was
 
     UINT m_ctx; // the context; 0: nothing made yet
     UINT m_shadow;
