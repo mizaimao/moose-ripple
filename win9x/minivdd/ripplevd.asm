@@ -35,6 +35,10 @@ VBE_VRAM_64K    equ     10
 RVD_HIRES_ON    equ     1               ; the driver has set its mode
 RVD_HIRES_OFF   equ     0
 RVD_SIGNATURE   equ     31445652h       ; "RVD1", our answer in EAX
+RVD_SCANOUT_QUERY equ   53434F55h       ; EDX with HIRES_ON: ask for scanout display ABI
+RVD_SIGNATURE2  equ     32445652h       ; "RVD2"
+RVD_MODE        equ     52564400h       ; low byte = bpp, EDX = (width << 16) | height
+RVD_PALETTE     equ     52565000h       ; low byte = palette index, EDX = 00RRGGBBh
 
 VxD_LOCKED_DATA_SEG
 WindowsVM       dd      0               ; the system VM's handle
@@ -61,6 +65,9 @@ MsgVMEnd        db      'rvd: a VM ends', 13, 10, 0
 VxD_LOCKED_DATA_ENDS
 
 VxD_LOCKED_CODE_SEG
+        extrn   _vgpu_display_mode:near, _vgpu_display_colour:near
+        extrn   _vgpu_leave_windows:near, _vgpu_desktop_tick:near
+        extrn   _vgpu_show_dos:near
 
 Begin_Control_Dispatch RippleVD
         Control_Dispatch Sys_Dynamic_Device_Init, MiniVDD_Dynamic_Init
@@ -97,6 +104,9 @@ SAY     macro   msg
 
 BeginProc RippleVD_SysExit
         SAY     MsgSysExit
+        pushad
+        call    _vgpu_leave_windows
+        popad
         clc
         ret
 EndProc RippleVD_SysExit
@@ -201,16 +211,46 @@ EndProc RippleVD_VbeTrap
 ; The display driver's VDD_REGISTER_DISPLAY_DRIVER_INFO call: EBP = its registers.
 BeginProc MiniVDD_RegisterDisplayDriver
         mov     eax, [ebp.Client_ECX]
+        mov     edx, eax
+        and     edx, 0FFFFFF00h
+        cmp     edx, RVD_MODE
+        je      short rd_mode
+        cmp     edx, RVD_PALETTE
+        je      short rd_colour
         and     eax, 1
         mov     HiRes, eax
         test    eax, eax
         jz      short rd_off
         mov     Disabled, 0             ; the driver is back (Windows runs on)
         SAY     MsgRegOn
+        cmp     [ebp.Client_EDX], RVD_SCANOUT_QUERY
+        je      short rd_v2
         jmp     short rd_said
 rd_off: SAY     MsgRegOff
 rd_said:
         mov     [ebp.Client_EAX], RVD_SIGNATURE
+        ret
+rd_mode:
+        pushad
+        movzx   eax, al
+        movzx   edx, VramBlocks
+        shl     edx, 16
+        push    edx
+        push    [ebp.Client_EDX]
+        push    eax
+        call    _vgpu_display_mode
+        add     esp, 12
+        popad
+        jmp     short rd_v2
+rd_colour:
+        pushad
+        movzx   eax, al
+        push    [ebp.Client_EDX]
+        push    eax
+        call    _vgpu_display_colour
+        add     esp, 8
+        popad
+rd_v2:  mov     [ebp.Client_EAX], RVD_SIGNATURE2
         ret
 EndProc MiniVDD_RegisterDisplayDriver
 
@@ -219,6 +259,9 @@ BeginProc MiniVDD_DisplayDriverDisabling
         SAY     MsgDisabling
         mov     HiRes, 0
         mov     Disabled, 1
+        pushad
+        call    _vgpu_leave_windows
+        popad
         call    RippleVD_MapVGA
         ret
 EndProc MiniVDD_DisplayDriverDisabling
@@ -255,6 +298,9 @@ EndProc MiniVDD_PreInt10ModeSet
 ; until the switch is done.
 BeginProc MiniVDD_PreHiResToVGA
         SAY     MsgToVGA
+        pushad
+        call    _vgpu_leave_windows
+        popad
         mov     ModeChange, 1
         push    eax
         push    edx
@@ -272,11 +318,24 @@ EndProc MiniVDD_PreHiResToVGA
 ; The screen comes back to Windows: the display driver is about to set its mode again.
 BeginProc MiniVDD_PreVGAToHiRes
         SAY     MsgToHiRes
+        pushad
+        call    _vgpu_leave_windows     ; stop sampling VGA while the mode changes
+        popad
         mov     ModeChange, 1
         ret
 EndProc MiniVDD_PreVGAToHiRes
 
-BeginProc MiniVDD_PostModeSwitch       ; POST_HIRES_TO_VGA and POST_VGA_TO_HIRES
+BeginProc MiniVDD_PostHiResToVGA
+        cmp     Disabled, 0
+        jne     short ph_done
+        pushad
+        call    _vgpu_show_dos
+        popad
+ph_done:
+        jmp     MiniVDD_PostModeSwitch
+EndProc MiniVDD_PostHiResToVGA
+
+BeginProc MiniVDD_PostModeSwitch
         SAY     MsgSwitched
         mov     ModeChange, 0
         ret
@@ -379,6 +438,44 @@ BeginProc _vmm_mutex_leave
         ret
 EndProc _vmm_mutex_leave
 
+BeginProc _vmm_mutex_owner
+        mov     eax, [esp+4]
+        VMMCall _GetMutexOwner, <eax>
+        ret
+EndProc _vmm_mutex_owner
+
+; Only schedule at interrupt time. Access the queue and VGA memory at a passive event in
+; the system VM, with interrupts enabled, outside VMM's critical section.
+BeginProc _vmm_queue_refresh
+        push    esi
+        mov     eax, [esp+8]            ; delay in milliseconds
+        xor     edx, edx
+        mov     esi, OFFSET32 RippleVD_RefreshTimeout
+        VMMCall Set_Global_Time_Out
+        mov     eax, esi                ; nonzero: timeout queued
+        pop     esi
+        ret
+EndProc _vmm_queue_refresh
+
+BeginProc RippleVD_RefreshTimeout
+        pushad
+        mov     ebx, WindowsVM
+        mov     eax, Low_Pri_Device_Boost
+        mov     ecx, PEF_Always_Sched or PEF_Wait_For_STI or PEF_Wait_Not_Crit or PEF_Wait_For_Passive
+        xor     edx, edx
+        mov     esi, OFFSET32 RippleVD_RefreshEvent
+        VMMCall Call_Priority_VM_Event
+        popad
+        ret
+EndProc RippleVD_RefreshTimeout
+
+BeginProc RippleVD_RefreshEvent
+        pushad
+        call    _vgpu_desktop_tick
+        popad
+        ret
+EndProc RippleVD_RefreshEvent
+
 VxD_LOCKED_CODE_ENDS
 
 ; ---- Initialisation ---------------------------------------------------------------------------
@@ -415,7 +512,7 @@ BeginProc MiniVDD_Dynamic_Init
         MiniVDDDispatch REGISTER_DISPLAY_DRIVER, RegisterDisplayDriver
         MiniVDDDispatch DISPLAY_DRIVER_DISABLING, DisplayDriverDisabling
         MiniVDDDispatch PRE_HIRES_TO_VGA, PreHiResToVGA
-        MiniVDDDispatch POST_HIRES_TO_VGA, PostModeSwitch
+        MiniVDDDispatch POST_HIRES_TO_VGA, PostHiResToVGA
         MiniVDDDispatch PRE_VGA_TO_HIRES, PreVGAToHiRes
         MiniVDDDispatch POST_VGA_TO_HIRES, PostModeSwitch
         MiniVDDDispatch PRE_INT_10_MODE_SET, PreInt10ModeSet

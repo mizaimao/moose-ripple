@@ -19,6 +19,7 @@ static WORD  wScreenSel;            /* selector covering the frame buffer */
 static DWORD dwVramSize;
 static DWORD dwLinear;              /* flat address of the frame buffer */
 static BYTE  bReEnable;
+static BYTE  bScanoutVdd;           /* mini-VDD accepts desktop mode and palette updates */
 static BYTE  bRepaintOff, bRepaintPending;
 static void (__far __pascal *lpRepaint)(void);  /* USER's "repaint the whole screen" */
 static BYTE __far *lpColorTable;    /* the screen's colour table inside the PDEVICE (8 bpp) */
@@ -163,6 +164,12 @@ static void set_dac(WORD start, WORD count, BYTE __far *colors)
         outp_(0x3C9, (BYTE)(colors[2] >> 2));
         outp_(0x3C9, (BYTE)(colors[1] >> 2));
         outp_(0x3C9, (BYTE)(colors[0] >> 2));
+        if (bScanoutVdd) {
+            DWORD rgb = ((DWORD)colors[2] << 16) | ((WORD)colors[1] << 8) | colors[0];
+            vdd_call(VDD_REGISTER_DISPLAY_DRIVER_INFO, RVD_DISPLAY_COLOR | start,
+                     rgb, 0, 0);
+        }
+        start++;
         colors += 4;
     }
 }
@@ -215,11 +222,16 @@ static void vdd_register(void)
 static void minivdd_hires(void)
 {
     static BYTE said;
-    DWORD r = vdd_call(VDD_REGISTER_DISPLAY_DRIVER_INFO, RVD_HIRES_ON, 0, 0, 0);
+    DWORD r = vdd_call(VDD_REGISTER_DISPLAY_DRIVER_INFO, RVD_HIRES_ON, RVD_SCANOUT_QUERY, 0, 0);
 
+    bScanoutVdd = r == RVD_SCANOUT_REPLY;
+    if (bScanoutVdd)
+        vdd_call(VDD_REGISTER_DISPLAY_DRIVER_INFO, RVD_DISPLAY_MODE | wBpp,
+                 ((DWORD)wXRes << 16) | wYRes, 0, 0);
     if (!said) {
         said = 1;
-        dbg(r == RVD_SIGNATURE ? "r9x: mini-VDD present\r\n" : "r9x: no mini-VDD\r\n");
+        dbg(bScanoutVdd ? "r9x: scanout mini-VDD present\r\n" :
+            r == RVD_SIGNATURE ? "r9x: mini-VDD present\r\n" : "r9x: no mini-VDD\r\n");
     }
 }
 
@@ -289,6 +301,7 @@ void __cdecl r9x_reset(void)
                    "r9x: the VDD asks for our mode again, but the driver is disabled\r\n");
     if (!wEnabled)
         return;
+    dd_mode_lost();
     set_mode();
     if (wBpp == 8 && lpColorTable)
         set_dac(0, 256, lpColorTable);
@@ -319,6 +332,7 @@ void __cdecl r9x_switch(WORD code)
     if (!wEnabled)
         return;
     if (code == 0x4001) {
+        dd_mode_lost();
         pd->deFlags |= BUSY;
         return;
     }
@@ -537,6 +551,7 @@ WORD DDI Disable(LPVOID lpDevice)
        told, and our int 2Fh handler stays in place until the end. */
     dbg("r9x: Disable\r\n");
     wEnabled = 0;
+    dd_mode_lost();
     pd->deFlags |= BUSY;
     int2f(START_IO_TRAP);
     dbg("r9x: Disable: I/O trapping on\r\n");

@@ -29,6 +29,13 @@ typedef unsigned long rvd_u32;
 #define RVD_TIMEOUT_AT_ONCE     0xFFFFFFFFUL    /* give up on a request as soon as it is sent,
                                                    and hold the device stalled until reset */
 #define RVD_GET_STATS           11  /* out: struct rvd_stats. No GPU needed */
+#define RVD_PRESENT             12  /* in: struct rvd_present; publish the latest GPU image */
+#define RVD_DESKTOP             13  /* in: CPU page byte offset; or no input, out: u32 takeover */
+
+struct rvd_present {
+    rvd_u32 context, buffer;    /* its scanout resource; updates to the same one coalesce */
+    rvd_u32 width, height;      /* must match the current display mode and resource */
+};
 
 #define RVD_MAX_CAPS            8
 
