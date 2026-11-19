@@ -72,7 +72,7 @@ VxD_LOCKED_CODE_SEG
         extrn   _vgpu_dac_vm:dword
         extrn   _vgpu_watch_dac:near, _vgpu_forget_dac:near
         extrn   _vgpu_dac_out:near, _vgpu_dac_read_data:near
-        extrn   _vgpu_arm_dac_return:near, _vgpu_dac_return:near
+        extrn   _vgpu_arm_dac_return:near, _vgpu_dac_return:near, _vgpu_focus_dac:near
 
 Begin_Control_Dispatch RippleVD
         Control_Dispatch Sys_Dynamic_Device_Init, MiniVDD_Dynamic_Init
@@ -124,14 +124,11 @@ BeginProc RippleVD_VMEnd
 EndProc RippleVD_VMEnd
 
 BeginProc RippleVD_DestroyVM
-        cmp     ebx,_vgpu_dac_vm
-        jne     short dvm_done
         pushad
         push    ebx
         call    _vgpu_forget_dac
         add     esp,4
         popad
-dvm_done:
         clc
         ret
 EndProc RippleVD_DestroyVM
@@ -391,11 +388,15 @@ EndProc RippleVD_AfterInt10
 
 BeginProc _vmm_rearm_dac
         pushad
+        mov     dword ptr [esp+28],0
+        cmp     ModeChange,0
+        jne     short ra_done
         mov     ebx,[esp+36]
         VxDCall VDD_Get_VM_Info
         cmp     ebx,edi
         jne     short ra_done
         call    RippleVD_TrapDAC
+        mov     dword ptr [esp+28],1
 ra_done:
         popad
         ret
@@ -488,10 +489,28 @@ ph_show:
         push    ebx
         call    _vgpu_show_dos
         add     esp,4
+        test    eax,eax
+        jz      short ph_restore
+        ; The main VDD installs its final VGA trap state after POST. Queue
+        ; this on the incoming VM as it resumes normal client execution.
+        mov     edx,eax                 ; generation of this focus switch
+        mov     esi,OFFSET32 RippleVD_FocusDAC
+        VMMCall Schedule_VM_Event
+ph_restore:
         popad
 ph_done:
         jmp     MiniVDD_PostModeSwitch
 EndProc MiniVDD_PostHiResToVGA
+
+BeginProc RippleVD_FocusDAC
+        pushad
+        push    ebx                     ; scheduled DOS VM
+        push    edx                     ; display generation
+        call    _vgpu_focus_dac
+        add     esp,8
+        popad
+        ret
+EndProc RippleVD_FocusDAC
 
 BeginProc MiniVDD_PostModeSwitch
         SAY     MsgSwitched

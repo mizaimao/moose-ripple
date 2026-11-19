@@ -124,7 +124,7 @@ extern void  __cdecl vmm_mutex_enter(u32 mutex);
 extern void  __cdecl vmm_mutex_leave(u32 mutex);
 extern u32   __cdecl vmm_mutex_owner(u32 mutex);
 extern u32   __cdecl vmm_queue_refresh(u32 delay_ms);
-extern void  __cdecl vmm_rearm_dac(u32 vm);
+extern int   __cdecl vmm_rearm_dac(u32 vm);
 
 /* ---- The virtio structures in the card's memory (virtio 1.0, 4.1.4.3) ------------------------ */
 /* common configuration, offsets */
@@ -356,6 +356,7 @@ static u32 dac_rgb, dac_known;
 static volatile u32 dac_generation;
 static u8 dac_index, dac_component, dac_writing;
 static u32 dac_return_vm, dac_return_token, dac_return_time;
+static u32 dac_focus_serial;
 static u32 display_w, display_h, display_bpp, vram_bytes, display_offset;
 static u32 palette[256];
 static u8 *vram;
@@ -1421,6 +1422,7 @@ void __cdecl vgpu_forget_dac(u32 vm)
         vgpu_dac_vm = 0;
     if (dos_active == vm) {
         dos_active = 0;
+        dac_focus_serial = 0;
         display_serial++;
     }
     if (dac_return_vm == vm)
@@ -1524,7 +1526,7 @@ u32 __cdecl vgpu_arm_dac_return(u32 vm)
     if (!takeover || !vram || (dos_active && dos_active != vm))
         return 0;
     now = vmm_time_ms();
-    if (dac_return_vm && now - dac_return_time < 2000)
+    if (dac_return_vm == vm && now - dac_return_time < 2000)
         return 0;
     if (!++dac_return_token)
         dac_return_token++;
@@ -1542,6 +1544,13 @@ void __cdecl vgpu_dac_return(u32 token, u32 current)
     if (current == vm && dos_active == vm && vgpu_dac_vm == vm &&
         vmm_time_ms() - dac_return_time < 2000 && is_vga_mode13())
         vmm_rearm_dac(vm);
+}
+
+void __cdecl vgpu_focus_dac(u32 serial, u32 vm)
+{
+    if (serial && serial == dac_focus_serial && serial == display_serial &&
+        vm == dos_active && vm == vgpu_dac_vm && is_vga_mode13() && vmm_rearm_dac(vm))
+        dac_focus_serial = 0;
 }
 
 static int mirror_mode13(struct desktop_image *d, struct gpu_rect *damage, u32 generation)
@@ -1626,6 +1635,12 @@ static int desktop_refresh(int paced)
                 dos_reported = 1;
             }
             return 0;
+        }
+        if (dac_focus_serial && dac_focus_serial == serial) {
+            /* The first ordinary sample also covers an unscheduled focus
+               event. Each acquisition gets at most one successful rearm. */
+            if (!mode13 || dos_active != vgpu_dac_vm || vmm_rearm_dac(dos_active))
+                dac_focus_serial = 0;
         }
     } else if (!valid_page(w, h, bpp, offset))
         return 0;
@@ -1738,6 +1753,7 @@ void __cdecl vgpu_display_mode(u32 bpp, u32 size, u32 bytes)
     end_cpu_flips();
     display_serial++;
     dos_active = 0;
+    dac_focus_serial = 0;
     display_w = size >> 16;
     display_h = size & 0xffff;
     vram_bytes = bytes;
@@ -1755,15 +1771,18 @@ void __cdecl vgpu_display_colour(u32 index, u32 colour)
 
 /* SET_SCANOUT takes the console from VGA for this boot. The DOS image uses the same
    transport so the GPU contexts and display resources stay valid across a switch. */
-void __cdecl vgpu_show_dos(u32 vm)
+u32 __cdecl vgpu_show_dos(u32 vm)
 {
     if (takeover && vram) {
         end_cpu_flips();
         display_serial++;
         dos_active = vm;
+        dac_focus_serial = vgpu_dac_vm == vm ? display_serial : 0;
         dos_reported = 0;
         queue_refresh(1);
+        return dac_focus_serial;
     }
+    return 0;
 }
 
 void __cdecl vgpu_leave_windows(void)
@@ -1771,6 +1790,7 @@ void __cdecl vgpu_leave_windows(void)
     end_cpu_flips();
     display_serial++;
     dos_active = 0;
+    dac_focus_serial = 0;
     display_bpp = presenter = 0;
     drop_gpu_page();
 }
