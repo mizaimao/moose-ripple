@@ -214,8 +214,8 @@ the old and new positions fit inside a 108×58 rectangle of 8-bit indices. The
 fallback updates the corresponding 216×116 rectangle of 32-bit pixels. It also
 handles hosts that cannot set up the indexed renderer. Both paths reproduced the
 three test frames exactly. The five-second 1024×768×32 Direct3D scene reached
-3,940.6 guest flips/s before the DOS change and 3,939.0 with the final driver.
-Every measured group of 100 flips in the final run recorded zero GPU readbacks.
+3,940.6 guest flips/s before the DOS change and 3,939.0 with the initial 50 ms
+indexed driver. Every measured group of 100 flips in that run recorded zero GPU readbacks.
 After DOS returned to Windows, DirectDraw surface restoration, ordinary DirectDraw
 and Direct3D passed with GPU presentation both off and on.
 
