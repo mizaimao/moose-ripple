@@ -188,10 +188,91 @@ After the first GPU presentation, the mini-VDD also draws the standard full-scre
 colour text console from its VGA character cells and font. An 80×25 prompt accepted input
 in full screen and after returning to a window with Alt+Enter. The 720×400 captures
 matched the VGA reference in glyph and cursor position at every pixel. Text was grey
-170 on the mirror and 168 on VGA. Full-screen DOS graphics
-after GPU takeover are unsupported. Use the default VGA path on a fresh boot for those
-programs. The GPU presentation results above are from the Intel host. UTM and other
-renderers still need testing.
+170 on the mirror and 168 on VGA.
+
+Standard BIOS mode 13h (320×200, 256 colours) also works after GPU presentation.
+On the Intel host, `DOS13.COM /K` displayed a frame, changed four palette entries
+without touching video memory, then moved a white block without changing the palette.
+All three 640×400 host captures matched fresh VGA at every pixel. At the native
+resolution, the palette change affected 53,572 pixels and the block move affected
+640. DOS read its palette entry back correctly and returned to the text prompt.
+[Fresh VGA and GPU captures](img/dos-mode13.webp)
+
+DOS writes its 8-bit indices in guest video memory. With virgl, the mini-VDD keeps
+a 320×200 index texture and a 256-entry colour table on the host. A GPU shader
+looks up each colour and doubles each pixel into a 640×400 display image. The first
+upload sends 64,000 index bytes and a 1,024-byte table. Later samples send changed
+indices or table entries. Holding a frame requires no upload or draw.
+
+| Change in the DOS probe | Indexed GPU uploads on Intel | 2D fallback uploads |
+|---|---:|---:|
+| Change four palette entries, keep the image indices | 16 bytes | 1,024,000 bytes |
+| Move a 20×16 white block | 6,264 bytes | 100,224 bytes |
+
+The byte counts cover image and palette data sent by the guest. On the block move,
+the old and new positions fit inside a 108×58 rectangle of 8-bit indices. The
+fallback updates the corresponding 216×116 rectangle of 32-bit pixels. It also
+handles hosts that cannot set up the indexed renderer. Both paths reproduced the
+three test frames exactly. The five-second 1024×768×32 Direct3D scene reached
+3,940.6 guest flips/s before the DOS change and 3,939.0 with the initial 50 ms
+indexed driver. Every measured group of 100 flips in that run recorded zero GPU readbacks.
+After DOS returned to Windows, DirectDraw surface restoration, ordinary DirectDraw
+and Direct3D passed with GPU presentation both off and on.
+
+To repeat the check, build the probe with `sh tools/win9x/build-tools.sh dos13`,
+run a GPU-presented Direct3D scene, and start the probe from a full-screen DOS prompt.
+Press Space to advance each frame. To test a palette write across Alt+Enter, run
+`DOS13.COM /S`. Switch to a window at the first frame and press Space there. Switch
+back to full screen and press Space to finish the colour. Repeat with `/S0` and
+`/S2` to switch before red or after green. Windows can reset the hardware write
+index during this transition. The driver restores the interrupted position before
+the program writes its next component. For planar DOS graphics, custom strides or
+display starts, use the default VGA path on a fresh boot.
+
+On Apple silicon with UTM 5.0.8, the 50 ms and 14 ms drivers both passed
+`DOS13.COM /K` and all three split palette writes after GPU presentation.
+In each run the guest verified the unchanged indices after the palette update,
+the block move and palette entry 3 (63, 32, 0). It returned to 80×25 text and
+then to Windows.
+
+A diagnostic driver read back the 640×400 GPU image selected for display after
+the scanout and flush commands succeeded. All 17 readbacks across the four runs
+matched the expected RGB values at every one of the 256,000 pixels, including
+frames during full-screen reentry. The RGB hashes for the initial frame, the
+palette change and the block move were `c3feaf35`, `51d0e925` and `f541a925`.
+The palette change uploaded 16 palette bytes and the block move uploaded 6,264
+index bytes. The UTM viewer itself was outside this pixel comparison.
+
+#### Scrolling in Tyrian 2000 on the Intel host
+
+Tyrian 2000's first recorded demo runs in standard chained mode 13h. With the
+50 ms refresh delay, a projectile could occupy the same spot in three consecutive
+host captures as the game continued to scroll. The driver now requests its next
+refresh after 14 ms while the current DOS session has a valid indexed image
+selected for display. The index texture and palette stay on the GPU.
+
+| Display path | Image changes/s, two 8 s samples | Median gap | 95th-percentile gap |
+|---|---:|---:|---:|
+| Native VGA | 33.34 / 33.33 | 30 ms | 30 ms |
+| Indexed GPU, 50 ms delay | 13.98 / 13.85 | 60 ms | 90 ms |
+| Indexed GPU, 14 ms delay | 33.33 / 33.32 | 30 ms | 30 ms |
+
+The guest ran `FILE0001 NOSOUND NOJOY` and entered its first attract demo
+without input. Each run sampled the same 192×144 region of the 640×400 host
+display. A local VNC client requested 120 samples/s and received about 33.3/s.
+Every reply during gameplay contained a changed image on native VGA and with
+the 14 ms delay. This measures the frames delivered to that client. To align the
+three sequences below, the first crop in each row was matched byte for byte
+before compression. Each subsequent column is the next reply, about 30 ms later.
+[Six consecutive captures from each display path](img/tyrian-pacing.webp)
+
+The five-second 1024×768×32 Direct3D takeover scene passed on the same two
+driver builds at 3,921.6 and 3,942.0 guest flips/s, respectively. Every measured
+group of 100 flips on each build recorded zero GPU readbacks. After Tyrian
+exited, the 14 ms build matched native VGA at every pixel in the three DOS
+probe frames, including the Alt+Enter switch during a palette write. The
+DirectDraw restoration, DirectDraw and Direct3D tests then passed with GPU
+presentation both off and on.
 
 #### Re-Volt and Tomb Raider on the Intel host
 
