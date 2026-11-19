@@ -193,9 +193,10 @@ What was changed to bring them from that tree to Mesa 24.3.4 on virgl:
 - **The renderer underneath.** The files call that project's own renderer in a dozen places
   and include two of its headers (MPL-2.0, not used here). `D3D9Host.h` and `D3D9Host.cpp`
   (ours) answer the same calls for virgl: a flush is a flush, the rest has nothing to answer.
-  The multisample counts and the anisotropy limit, which came from that renderer, are fixed
-  for now: no multisampling, 16 samples of anisotropic filtering (Windows 7's Direct3D 9
-  wants that many for a hardware device, `docs/windows/kmd-port-notes.md`).
+  The multisample counts and the anisotropy limit came from that renderer. The anisotropy
+  limit is fixed at 16 samples (Windows 7's Direct3D 9 wants that many for a hardware
+  device, `docs/windows/kmd-port-notes.md`); the sample counts are asked of the host since
+  2026-11-19 ("Multisampling", below).
 - **Mesa 26.1 to 24.3.** Capability lookups by function instead of the screen's tables;
   one more argument to `set_sampler_views`, `set_constant_buffer` and `ureg_tex_insn`;
   framebuffer and clear surfaces created as objects instead of held by value; three small
@@ -1342,3 +1343,56 @@ Open: YUY2 frames are still converted in the driver, and a program that stretche
 video-format surface itself,
 without the video processor, is not served, which the format list says by not offering that
 conversion.
+
+## Multisampling (2026-11-19)
+
+Multisampling (anti-aliasing: each pixel keeps several samples, and a pixel an edge runs
+through gets the share of them the shape covers) was switched off in the Direct3D 9 part: it
+offered no sample counts. It now works in a window and full screen. Four changes:
+
+- **The counts come from the host.** Windows asks the adapter which counts a format takes
+  before it has made a device, so the driver asks the host once a process, through a device
+  of its own on the primary display, as the Direct3D 10 part asks whether the host carries
+  Direct3D 10 (`D3D9QueryMsaaTypes`). A count is offered when the host draws to it in
+  colour and in depth with stencil. The log says what was found and what asking cost
+  (8 to 38 ms, once a process). `RIPPLE_NO_MSAA` (any value) offers none again.
+- **A multisampled surface could not be made at all** (Mesa patch 0041). It lives on the
+  host only, so the virgl driver gives it no storage in the guest and asks for an
+  allocation of size zero, which Windows refuses. It now asks for one byte.
+- **A multisampled full-screen back buffer** is a primary of one surface on Windows 7. Like
+  the other renderer's primaries it is now two images on virgl too: a multisampled one to
+  draw into, resolved into the one on screen at each present. The screen's own primary,
+  which the swap chain flips to every second frame, gets the same pair when it becomes the
+  render target of a multisampled device (`D3D9MatchStandardPrimarySamples`).
+- **A resolve to another size** (StretchRect from a multisampled surface to a smaller one)
+  resolves at full size first and then scales. In one step the host took one sample of
+  each pixel and the smoothing was lost.
+
+On the way, full-screen (exclusive) Direct3D 9 turned out never to have worked: the screen's
+own primary was opened without a Gallium resource, and the second frame failed (its own
+commit, "full-screen Direct3D 9 gets past its first frame").
+
+`d3d9msaa` (64-bit and 32-bit) draws a white triangle over a red one on black and reads the
+result back: grey pixels along the edges with the levels the sample count allows, and the red
+one hidden by the depth buffer. On the desktop OpenGL host (VM 220), final build:
+
+| Samples | Grey levels | Edge pixels: render target, window, screen | Full screen |
+|---|---|---|---|
+| 1 (control) | none | 0 | 0 |
+| 2 | 1 | 531 | 1226 |
+| 4 | 3 | 798 | 1741 |
+| 8 | 7 | 945 | 2125 |
+
+Both process sizes give the same numbers. Screen captures during the full-screen step show
+the grey steps on the real screen with 4 samples and stair steps without. The stream,
+upload, menu and video checks, `d3d9flipex` (52 of 52) and the occlusion counts still pass.
+The Windows assessment gave 7.0 against 7.1 with the merged driver on the same boot; the
+two runs differ by a few percent each way test by test, and the Direct3D 10 test that sets the
+score, run alternately twice with each driver, gave 315 and 319 frames a second without the
+change and 317 and 320 with it.
+
+In UTM on Apple silicon the host draws to one sample a pixel only, as its renderer reports
+through virgl, so no count is offered there: a program that asks for multisampling gets
+Direct3D's "not available", as on any card without it, and runs without. The control and
+the full-screen step pass there, and so do `d3d9flipex` (52 of 52) and the stream, upload
+and menu checks.
