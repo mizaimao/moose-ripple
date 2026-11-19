@@ -188,10 +188,46 @@ After the first GPU presentation, the mini-VDD also draws the standard full-scre
 colour text console from its VGA character cells and font. An 80×25 prompt accepted input
 in full screen and after returning to a window with Alt+Enter. The 720×400 captures
 matched the VGA reference in glyph and cursor position at every pixel. Text was grey
-170 on the mirror and 168 on VGA. Full-screen DOS graphics
-after GPU takeover are unsupported. Use the default VGA path on a fresh boot for those
-programs. The GPU presentation results above are from the Intel host. UTM and other
-renderers still need testing.
+170 on the mirror and 168 on VGA.
+
+Standard BIOS mode 13h (320×200, 256 colours) also works after GPU presentation.
+On the Intel host, `DOS13.COM /K` displayed a frame, changed four palette entries
+without touching video memory, then moved a white block without changing the palette.
+All three 640×400 host captures matched fresh VGA at every pixel. At the native
+resolution, the palette change affected 53,572 pixels and the block move affected
+640. DOS read its palette entry back correctly and returned to the text prompt.
+[Fresh VGA and GPU captures](img/dos-mode13.webp)
+
+DOS writes its 8-bit indices in guest video memory. With virgl, the mini-VDD keeps
+a 320×200 index texture and a 256-entry colour table on the host. A GPU shader
+looks up each colour and doubles each pixel into a 640×400 display image. The first
+upload sends 64,000 index bytes and a 1,024-byte table. Later samples send changed
+indices or table entries. Holding a frame requires no upload or draw.
+
+| Change in the DOS probe | Indexed GPU uploads on Intel | 2D fallback uploads |
+|---|---:|---:|
+| Change four palette entries, keep the image indices | 16 bytes | 1,024,000 bytes |
+| Move a 20×16 white block | 6,264 bytes | 100,224 bytes |
+
+The byte counts cover image and palette data sent by the guest. On the block move,
+the old and new positions fit inside a 108×58 rectangle of 8-bit indices. The
+fallback updates the corresponding 216×116 rectangle of 32-bit pixels. It also
+handles hosts that cannot set up the indexed renderer. Both paths reproduced the
+three test frames exactly. The five-second 1024×768×32 Direct3D scene reached
+3,940.6 guest flips/s before the DOS change and 3,939.0 with the final driver.
+Every measured group of 100 flips in the final run recorded zero GPU readbacks.
+After DOS returned to Windows, DirectDraw surface restoration, ordinary DirectDraw
+and Direct3D passed with GPU presentation both off and on.
+
+To repeat the check, build the probe with `sh tools/win9x/build-tools.sh dos13`,
+run a GPU-presented Direct3D scene, and start the probe from a full-screen DOS prompt.
+Press Space to advance each frame. To test a palette write across Alt+Enter, run
+`DOS13.COM /S`. Switch to a window at the first frame and press Space there. Switch
+back to full screen and press Space to finish the colour. Repeat with `/S0` and
+`/S2` to switch before red or after green. Windows can reset the hardware write
+index during this transition. The driver restores the interrupted position before
+the program writes its next component. For planar DOS graphics, custom strides or
+display starts, use the default VGA path on a fresh boot.
 
 #### Re-Volt and Tomb Raider on the Intel host
 
