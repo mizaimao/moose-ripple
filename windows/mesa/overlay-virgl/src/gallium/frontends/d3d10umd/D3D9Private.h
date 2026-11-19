@@ -72,8 +72,15 @@ struct D3D9Adapter
 struct D3D9Resource;
 struct D3D9KeptObject;
 
-/* What the draws have left bound in the context (D3D9Draw.cpp, D3D9Bind). The pointers are
- * only compared: the context holds what is bound. */
+struct D3D9BoundConstants
+{
+   void *data; /* owned copy of the last packed buffer */
+   unsigned size;
+   bool valid;
+};
+
+/* What the draws have left bound in the context (D3D9Draw.cpp, D3D9Bind).
+ * The context holds the state objects. */
 struct D3D9Bound
 {
    bool live;
@@ -84,6 +91,8 @@ struct D3D9Bound
    void *vs;
    void *fs;
    void *gs;
+   D3D9BoundConstants vs_constants;
+   D3D9BoundConstants ps_constants;
    bool fb_valid;
    struct pipe_framebuffer_state fb;
    /* the values last set, where a draw sets the same again */
