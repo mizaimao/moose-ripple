@@ -211,7 +211,9 @@ fog varying made the host's shaders fail.
 Period demos on Windows 98 SE in the Proxmox VE test VM (DirectX 7, 256 MB, virgl on the host's
 Intel UHD 630). Since 2026-11-18 the VM has a Sound Blaster 16 (QEMU `-audiodev none,id=snd0
 -device sb16,audiodev=snd0`, sound going nowhere), which Windows 98's Add New Hardware finds
-and installs from its own CD. The demos and the CD image the test machines install
+and installs from its own CD. To hear it, or to check that a program makes sound, give QEMU another
+back end: `-audiodev wav,id=snd0,path=/tmp/sound.wav` records it (Windows 98 SE's welcome
+screen music and its "tada" came out as 30 seconds of 44.1 kHz stereo, 2026-11-18). The demos and the CD image the test machines install
 them from are kept with the build tools, not in this repository.
 
 | Game | API | Result |
