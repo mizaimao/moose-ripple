@@ -633,6 +633,31 @@ new compositor crash. `tools/win7-hello/shellmenu.c` performs that menu check on
 Windows 7 desktop without creating files. This fixes the reproduced memory fault; animation
 timing is a separate investigation.
 
+## Direct3D 9 textured draws and mipmap selection
+
+`D3DSAMP_MAXMIPLEVEL` sets the most detailed mipmap an application wants
+to sample. With the state set to 1, a draw can still select level 2 or
+higher as a texture recedes into the distance. The previous driver
+restricted the texture view to level 1. The driver now keeps the full
+resident mip chain in the view and sets the sampler's minimum LOD.
+
+On an Intel desktop OpenGL 4.6 host, the release driver also left textured
+rectangles black. For a draw with position and texture coordinates, the
+vertex shader requested a missing color input. The driver supplied it on
+vertex buffer binding 16. The host rejected that binding with
+`GL_INVALID_VALUE` when creating the vertex layout. The driver now chooses
+a free binding in slots 0–15 for its default input, keeping the
+application's streams available to the shader.
+
+`d3d9mip.exe` and `d3d9mip32.exe` render a 32×32 target from a texture
+with a distinct color at every level. Fixing only the vertex binding let
+Intel render the rectangle. On both Intel and UTM that build still returned
+level 1 for every pixel in three cases that expected level 2. These covered
+point and linear mip filtering and an explicit shader LOD. With both fixes,
+all thirteen cases passed on both hosts in both process sizes, including a
+draw using application streams 0 and 15. Pass the expected full path to
+`viogpu_d3d10.dll` to verify which copy of the driver rendered the test.
+
 ## Aero window movement in UTM
 
 With the texture and guest-clock fixes installed, the compositor still spent most
