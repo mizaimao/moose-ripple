@@ -132,6 +132,11 @@ On Windows 95, the bundled IE4 installation supplies `MSVCRT.DLL` for OpenGL.
 Microsoft's DirectX 7 runtime also supplies that library and the Direct3D 7 and
 DirectInput interfaces used by the game tests. Install it for those games and restart.
 
+On OSR2.5, Quake III rendered level geometry through virgl with llvmpipe as the
+host renderer. The timedemo later stopped on an illegal instruction. Direct3D
+rendered textured frames, but the Re-Volt demo exited after 100 flips and
+Expendable stopped during startup. Treat game support on OSR2.5 as experimental.
+
 ## Things learnt the hard way
 
 - **A selector for the frame buffer:** `AllocSelector(0)` gives an empty descriptor that can't
