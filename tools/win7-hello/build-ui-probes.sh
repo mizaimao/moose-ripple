@@ -12,6 +12,7 @@ for arch in x86_64 i686; do
     cc=$LLVM_MINGW/bin/$arch-w64-mingw32-clang
     "$cc" -O2 -Wall -Wextra -Werror "$here/d3d9upload.c" -ld3d9 -lgdi32 -o "$OUT/d3d9upload$suffix.exe"
     "$cc" -O2 -Wall -Wextra -Werror "$here/d3d9mip.c" -ld3d9 -o "$OUT/d3d9mip$suffix.exe"
+    "$cc" -O2 -Wall -Wextra -Werror "$here/d3d9const.c" -ld3d9 -o "$OUT/d3d9const$suffix.exe"
     "$cc" -O2 -Wall -Wextra -Werror "$here/d3d9query.c" -ld3d9 -ldwmapi -o "$OUT/d3d9query$suffix.exe"
     "$cc" -O2 -Wall -Wextra -Werror "$here/d3d11query.c" -ld3d11 -ldwmapi -o "$OUT/d3d11query$suffix.exe"
     "$cc" -O2 -Wall -Wextra -Werror "$here/d3d9stream.c" -ld3d9 -o "$OUT/d3d9stream$suffix.exe"

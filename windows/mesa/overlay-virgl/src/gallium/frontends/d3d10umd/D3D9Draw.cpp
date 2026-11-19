@@ -50,6 +50,8 @@ D3D9ConsumeBackendDrawFailure(D3D9Device *device)
        !yttrium_gdi_take_draw_failure(device->pipe))
       return false;
 
+   device->bound.vs_constants.valid = false;
+   device->bound.ps_constants.valid = false;
    D3D9Warnf("draw failed owner=d3d9umd "
              "reason=backend_native_draw_failed action=return_E_FAIL\n");
    return true;
@@ -1902,8 +1904,8 @@ D3D9KeptSurface(D3D9Device *device, D3D9Resource *target,
 /* State left bound from draw to draw. A draw used to take everything off the context when it
  * was done (state objects, shaders, textures, an empty framebuffer) and the next draw put it
  * all back: some twenty commands a draw that changed nothing. Now what a draw binds stays,
- * the next binds only what differs (device->bound says what is there; pointers are only
- * compared, the context holds what is bound), and D3D9SettleDrawState takes it all off
+ * the next binds only what differs (device->bound says what is there), and
+ * D3D9SettleDrawState takes it all off
  * before anything else relies on the context's state or deletes what may be bound. */
 enum D3D9BoundKind {
    D3D9_BOUND_BLEND,
@@ -1968,6 +1970,31 @@ D3D9Bind(D3D9Device *device, enum D3D9BoundKind kind, void *handle)
    bound->live = true;
 }
 
+/* Virgl copies user constants into the command stream and retains them per shader stage.
+ * Compare the packed bytes, including shader-local and D3D9-derived constants. Keep the
+ * draw's allocation on a change so remembering the binding needs no extra allocation. */
+static void
+D3D9BindConstants(D3D9Device *device, enum pipe_shader_type shader,
+                  void *data, unsigned size)
+{
+   D3D9BoundConstants &bound = shader == MESA_SHADER_VERTEX ?
+      device->bound.vs_constants : device->bound.ps_constants;
+   if (bound.valid && bound.size == size && (!size || !memcmp(bound.data, data, size))) {
+      free(data);
+      return;
+   }
+
+   struct pipe_constant_buffer cb = {};
+   cb.user_buffer = data;
+   cb.buffer_size = size;
+   device->pipe->set_constant_buffer(device->pipe, shader, 0, false, &cb);
+   free(bound.data);
+   bound.data = data;
+   bound.size = size;
+   bound.valid = true;
+   device->bound.live = true;
+}
+
 /* COUNT sampler states and views for SHADER, from FIRST in the stage arrays. Fewer than are
  * bound: the rest come off. The same as are bound: nothing is sent. */
 static void
@@ -2024,6 +2051,8 @@ D3D9SettleDrawState(D3D9Device *device)
    D3D9BindSamplers(device, MESA_SHADER_VERTEX, D3DVERTEXTEXTURESAMPLER0, 0, NULL, NULL);
    pipe->set_constant_buffer(pipe, MESA_SHADER_FRAGMENT, 0, false, NULL);
    pipe->set_constant_buffer(pipe, MESA_SHADER_VERTEX, 0, false, NULL);
+   free(bound->ps_constants.data);
+   free(bound->vs_constants.data);
    D3D9Bind(device, D3D9_BOUND_GS, NULL);
    D3D9Bind(device, D3D9_BOUND_VS, NULL);
    D3D9Bind(device, D3D9_BOUND_FS, NULL);
@@ -3567,11 +3596,6 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       return D3D9DrawRefused(__LINE__, E_FAIL);
    }
 
-   struct pipe_constant_buffer cb;
-   memset(&cb, 0, sizeof(cb));
-   cb.user_buffer = constants;
-   cb.buffer_size = constants_size;
-
    void *translated_texture_samplers[ARRAYSIZE(device->textures)] = {};
    struct pipe_sampler_view *translated_texture_views[ARRAYSIZE(device->textures)] = {};
    UINT translated_ps_texture_count = 0;
@@ -3594,11 +3618,6 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
          return D3D9DrawRefused(__LINE__, E_FAIL);
       }
    }
-
-   struct pipe_constant_buffer fs_cb;
-   memset(&fs_cb, 0, sizeof(fs_cb));
-   fs_cb.user_buffer = fs_constants;
-   fs_cb.buffer_size = fs_constants_size;
 
    struct {
       unsigned count;
@@ -3666,17 +3685,15 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
    D3D9Bind(device, D3D9_BOUND_VS, translated_vs);
    D3D9Bind(device, D3D9_BOUND_FS, translated_ps);
    D3D9Bind(device, D3D9_BOUND_GS, point_position_gs ? point_gs : NULL);
-   pipe->set_constant_buffer(pipe, MESA_SHADER_VERTEX, 0, false, &cb);
-   pipe->set_constant_buffer(pipe, MESA_SHADER_FRAGMENT, 0, false, &fs_cb);
+   D3D9BindConstants(device, MESA_SHADER_VERTEX, constants, constants_size);
+   D3D9BindConstants(device, MESA_SHADER_FRAGMENT, fs_constants, fs_constants_size);
    if (!D3D9BindTranslatedTextures(device, translated_texture_samplers,
                                    translated_texture_views,
                                    &translated_ps_texture_count,
                                    &translated_vs_texture_count)) {
       D3D9SettleDrawState(device);
-      free(fs_constants);
       if (point_gs)
          pipe->delete_gs_state(pipe, point_gs);
-      free(constants);
       return D3D9DrawRefused(__LINE__, E_FAIL);
    }
    D3D9Bind(device, D3D9_BOUND_VERTEX_ELEMENTS, dynamic_vertex_elements);
@@ -3765,17 +3782,13 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
 
    /* The vertex buffers come off (they may be the program's own memory); this draw's
     * references to its texture views and its point shader go. The rest stays bound for the
-    * next draw (D3D9Bind). The constants stay too: they were copied into the command stream
-    * when they were set (virgl does that with constants given as memory, and this part of
-    * the driver runs on virgl only), so nothing points at the memory freed below. */
+    * next draw (D3D9Bind). */
    pipe->set_vertex_buffers(pipe, 0, NULL);
    D3D9ReleaseTranslatedTextures(device, translated_texture_views);
    if (point_position_gs)
       D3D9Bind(device, D3D9_BOUND_GS, NULL);
-   free(fs_constants);
    if (point_gs)
       pipe->delete_gs_state(pipe, point_gs);
-   free(constants);
 
    return D3D9ConsumeBackendDrawFailure(device) ? E_FAIL : S_OK;
 }

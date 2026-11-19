@@ -693,6 +693,30 @@ checks depth and overlapping queries. `d3d11query.exe --force-level9`
 exercises Windows' Direct3D 10 Level 9 translation. Both accept an optional
 expected absolute UMD path for testing application-local builds.
 
+## Direct3D 9 shader constants
+
+Windows games often draw several objects with the same shader constants.
+The driver now compares the final packed bytes separately for the vertex
+and pixel shaders. If the bytes match the current binding, the driver can
+skip sending that stage's constants to the host. Comparing after packing
+also accounts for constants supplied by the shader itself. The next draw
+rebinds the constants after a state reset or a reported backend draw failure.
+
+On UTM, a Chess Titans session issued 14,280 draws. The driver skipped
+12,648 of the 28,560 constant commands the previous draw path would have
+sent. Most of the savings came from the pixel shader, whose constants
+matched on 12,444 draws. Including command headers, this saved 954,720 of
+4,455,360 bytes (21.4%) of inline constant traffic in those draws. A
+105,140-draw session on an x86 host showed the same saving per draw.
+
+`d3d9const.exe` and `d3d9const32.exe` draw sixteen color tiles in one
+scene and check pixels after all draws have been submitted. They cover
+changes to one shader stage at a time, shader-local overrides, empty
+bindings and restoring the original values. Both process sizes passed on
+UTM and on an x86 host with desktop OpenGL, using both the previous and
+candidate DLLs. Pass the expected absolute DLL path to check which driver
+rendered the test.
+
 ## Aero window movement in UTM
 
 With the texture and guest-clock fixes installed, the compositor still spent most
