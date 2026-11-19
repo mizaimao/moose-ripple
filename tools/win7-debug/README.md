@@ -314,3 +314,25 @@ stops by context and submission sequence. Dwm-Udwm event 5002 records
 ordinary minimize (type 2) and restore (type 3) animation starts. Check
 those controls and the trace's lost-event and lost-buffer counts before
 interpreting missing events at logon. [Windows 7 graphics event layouts](https://github.com/GameTechDev/PresentMon/blob/main/PresentData/ETW/Microsoft_Windows_DxgKrnl_Win7.h)
+
+### What the screen shows after the switch, and Windows' fade
+
+Three small programs answer what a trace cannot. Each of the first two is
+started by a task at logon; the guest scripts arm it and restart, and after
+the next logon fetch the result (elevated prompt):
+
+- `rb logonshots arm`, then `rb logonshots fetch`: `logonshots.exe` reads the
+  screen 48 times from the moment the user's desktop becomes the input desktop
+  and writes one sheet of reduced frames (`logonshots.bmp`, rows of six) with
+  each frame's time, whether it differs from the one before, and whether the
+  shell window and the taskbar exist (`logonshots.txt`). Reading the screen
+  takes 80 to 150 ms a frame in UTM and makes the compositor work; take times
+  from an undisturbed trace.
+- `rb gammawatch arm`, then `rb gammawatch fetch`: `gammawatch.exe` polls the
+  display's gamma ramp every few milliseconds for 20 s and records every
+  change of its top value and the moment of the desktop switch. Windows 7
+  fades out and in around the switch with the ramp, half a second each way.
+- `rb fadeprobe`: `fadeprobe.exe` tells whether the installed driver takes a
+  gamma ramp (it sets half brightness for 0.6 s and reads it back) and times a
+  switch to an empty desktop and back. `SwitchDesktopWithFade` refuses an
+  ordinary program; the plain switch is the control.

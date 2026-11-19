@@ -1108,3 +1108,44 @@ Windows' default mitigations) the same order A, B, B, A gave 174.4 distinct
 sizes per resize before and 171.8 after, inside the spread of single gestures
 (162 to 178) and at the display's rate, with 173 to 176 drag positions on both
 sides. The stream, upload and menu checks pass there in both bitnesses too.
+
+## Logon in UTM: what the pause is, and the fade that is not shown
+
+Three things had been taken for one "Welcome holds, then jumps to the desktop"
+(2026-11-19, UTM on the M1 Max, 1280×1024, Aero, Meltdown mitigation off).
+
+**The seconds after the switch are a finished desktop.** A capture program
+started by a task at logon (`logonshots.exe`) read the screen 48 times from
+the moment the user's desktop became the input desktop. The first frame, 42 ms
+after the switch, already shows wallpaper, icons and taskbar. The next 28
+frames are identical; the first change, 4.4 s after the switch, is the
+notification icons arriving. A profile of the emulator over the same seconds
+of another boot shows the guest's four processors idle for 79% of the samples
+and no host thread at work. The 2.4 to 3.8 s without a new frame in the
+earlier traces is this: nothing on the screen changes.
+
+**Welcome itself is the emulated processor.** It lasted about 8 s with all four
+guest processors busy for 99% of the samples, a fifth of that translating code
+for the first time and looking it up. Its ring was redrawn 7 to 20 times a
+second.
+
+**The transition is a fade by gamma ramp, and the driver does not show it.**
+`gammawatch.exe`, started the same way, polled the display's gamma ramp through
+a logon. Windows lowered the top of the ramp from 65280 to 0 in 31 steps over
+0.50 s, switched desktops at zero, and raised it again in 0.48 s. Windows
+keeps the ramp it is given (`SetDeviceGammaRamp` succeeds and a half-brightness
+ramp reads back as set), although the kernel driver reports no gamma support
+and refuses a present path that carries a ramp. Nothing in the display path
+applies it. On the screen the ring stops for half a second and the desktop then
+appears at full brightness, with no fade in either direction.
+
+Showing the fade means applying the ramp where the kernel driver presents: a
+second scanout image drawn from the primary through the ramp at every ramp
+change and every present while a ramp is set. The kernel driver only copies
+regions today, so this needs drawing from the kernel driver. Open; Direct3D 9
+programs that set a gamma ramp for brightness or fades would gain it too.
+
+`SwitchDesktopWithFade` cannot be tried from an ordinary program: it returns
+FALSE at once (`fadeprobe.exe`), while `SwitchDesktop` works. Locking and
+unlocking the session shows no pause of this kind either.
+[Welcome transition issue](https://github.com/mizaimao/moose-ripple/issues/71)
