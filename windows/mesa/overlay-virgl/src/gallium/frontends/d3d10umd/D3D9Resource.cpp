@@ -145,6 +145,13 @@ D3D9FormatBytesPerPixel(D3DDDIFORMAT format)
    }
 }
 
+/* The two 32-bit RGB formats, which differ in whether the fourth byte means anything */
+static bool
+D3D9IsRgb32(D3DDDIFORMAT format)
+{
+   return format == D3DDDIFMT_X8R8G8B8 || format == D3DDDIFMT_A8R8G8B8;
+}
+
 static bool
 D3D9FormatIsBlockCompressed(D3DDDIFORMAT format)
 {
@@ -1597,8 +1604,8 @@ D3D9BlitCpuOnlySourceToTexture(D3D9Device *device,
       dst_resource->pipe_resource->format;
    if (src_format == PIPE_FORMAT_NONE || !bpp ||
        D3D9FormatIsBlockCompressed(src_resource->format) ||
-       src_resource->format != dst_resource->format ||
-       src_format != dst_format ||
+       (src_format != dst_format &&
+        !(D3D9IsRgb32(src_resource->format) && D3D9IsRgb32(dst_resource->format))) ||
        util_format_is_depth_or_stencil(src_format) ||
        util_format_is_depth_or_stencil(dst_format) ||
        dst_resource->pipe_resource->nr_samples > 1)
@@ -1766,6 +1773,40 @@ D3D9ResolveThenConvertPipe(D3D9Device *device, D3D9Resource *dst_resource,
    return true;
 }
 
+/* Both surfaces in memory (a plain surface updated from a system-memory one, or copied to
+ * another plain one): the rows are copied. Direct3D 9 allows no stretching between them. */
+static bool
+D3D9CopyInMemory(D3D9Resource *dst_resource, D3D9SubResource *dst_sub,
+                 const RECT *dst_rect, D3D9Resource *src_resource,
+                 D3D9SubResource *src_sub, const RECT *src_rect)
+{
+   if (dst_resource->pipe_resource || src_resource->pipe_resource ||
+       !src_sub->data || D3D9PoolNeedsReadback(dst_resource->pool) ||
+       dst_sub->cpu_locked || dst_sub->transfer)
+      return false;
+   const UINT bpp = D3D9FormatBytesPerPixel(src_resource->format);
+   if (!bpp || bpp != D3D9FormatBytesPerPixel(dst_resource->format) ||
+       D3D9FormatIsBlockCompressed(src_resource->format) ||
+       D3D9FormatIsBlockCompressed(dst_resource->format))
+      return false;
+   const RECT dst = D3D9ClampRect(dst_sub, dst_rect);
+   const RECT src = D3D9ClampRect(src_sub, src_rect);
+   const LONG width = dst.right - dst.left;
+   const LONG height = dst.bottom - dst.top;
+   if (width != src.right - src.left || height != src.bottom - src.top)
+      return false;
+   if (width <= 0 || height <= 0)
+      return true;
+   if (!D3D9EnsureCpuBacking(dst_sub))
+      return false;
+   for (LONG y = 0; y < height; ++y)
+      memmove(dst_sub->data + (size_t)(dst.top + y) * dst_sub->pitch + (size_t)dst.left * bpp,
+              src_sub->data + (size_t)(src.top + y) * src_sub->pitch + (size_t)src.left * bpp,
+              (size_t)width * bpp);
+   dst_sub->cpu_dirty = true;
+   return true;
+}
+
 static bool
 D3D9CopyRectPipe(D3D9Device *device, HANDLE dst_resource_handle,
                  UINT dst_subresource_index, const RECT *dst_rect,
@@ -1799,6 +1840,9 @@ D3D9CopyRectPipe(D3D9Device *device, HANDLE dst_resource_handle,
                                       dst_subresource_index, dst_rect,
                                       src_resource, src_sub, src_rect,
                                       filter))
+      return true;
+   if (D3D9CopyInMemory(dst_resource, dst_sub, dst_rect,
+                        src_resource, src_sub, src_rect))
       return true;
 
    if (!dst_resource->pipe_resource || !src_resource->pipe_resource)
@@ -2726,6 +2770,27 @@ D3D9DeallocateResource(D3D9Device *device, D3D9Resource *resource)
    return S_OK;
 }
 
+/* A plain video-memory surface of a Direct3D 9 program: no render target, no texture, only
+ * pixels the program locks and writes, fills with a colour, or copies from another such
+ * surface, and that are then copied or stretched to something that is drawn. Windows' video
+ * renderer keeps every decoded frame in one, and its decoder locks it without discarding.
+ * Kept in the driver's memory, a frame costs the decoder nothing but its own writes and the
+ * host one upload when the frame is shown; as a host texture every such lock first fetched
+ * the old contents back from the host.
+ * Not DirectDraw's plain surfaces: those are presented from (D3D9ResourceIsDDrawPresentSource).
+ */
+static bool
+D3D9IsPlainInMemory(const D3D9Device *device, const D3DDDIARG_CREATERESOURCE *data)
+{
+   D3DDDI_RESOURCEFLAGS decoder = {};
+   decoder.DecodeRenderTarget = 1;
+   return device->runtime_interface >= 9 &&
+      (data->Flags.Value == 0 || data->Flags.Value == decoder.Value) &&
+      !data->MultisampleType && D3D9PoolNeedsReadback(data->Pool) &&
+      !data->pSurfList[0].pSysMem &&
+      (data->Format == D3DDDIFMT_X8R8G8B8 || data->Format == D3DDDIFMT_A8R8G8B8);
+}
+
 static HRESULT
 D3D9CopyInitialData(const D3DDDIARG_CREATERESOURCE *data,
                     D3D9SubResource *dst,
@@ -2963,12 +3028,18 @@ D3D9CreateResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *data)
       }
    }
 
+   /* A plain surface kept in memory (D3D9IsPlainInMemory): from here on it behaves as a
+    * system-memory surface whose memory the driver allocates at the first use. */
+   const bool plain_in_memory = D3D9IsPlainInMemory(device, data);
+   if (plain_in_memory)
+      resource->pool = D3DDDIPOOL_SYSTEMMEM;
+
    /* Plain system-memory surfaces need no Gallium resource or screen. */
-   const bool cpu_only_plain =
-      !D3D9PoolNeedsReadback(data->Pool) &&
-      !(data->Flags.VertexBuffer || data->Flags.IndexBuffer ||
-        data->Flags.Texture || data->Flags.CubeMap || data->Flags.Volume ||
-        D3D9ResourceIsColorTarget(data) || data->Flags.ZBuffer);
+   const bool cpu_only_plain = plain_in_memory ||
+      (!D3D9PoolNeedsReadback(data->Pool) &&
+       !(data->Flags.VertexBuffer || data->Flags.IndexBuffer ||
+         data->Flags.Texture || data->Flags.CubeMap || data->Flags.Volume ||
+         D3D9ResourceIsColorTarget(data) || data->Flags.ZBuffer));
 
    if (!cpu_only_plain && device->screen) {
       const enum pipe_format pipe_format = D3D9ResourcePipeFormat(data);
@@ -4413,11 +4484,296 @@ D3D9ColorFill(HANDLE hDevice, const D3DDDIARG_COLORFILL *data)
    if (!device || !data)
       return E_INVALIDARG;
 
+   /* A plain surface kept in memory (D3D9IsPlainInMemory) is filled there */
+   D3D9Resource *resource = D3D9CastResource(data->hResource);
+   D3D9SubResource *sub =
+      D3D9GetSubResource(data->hResource, data->SubResourceIndex);
+   if (resource && sub && !resource->pipe_resource &&
+       !D3D9PoolNeedsReadback(resource->pool) && D3D9IsRgb32(resource->format) &&
+       !sub->cpu_locked && D3D9EnsureCpuBacking(sub)) {
+      const RECT dst = D3D9ClipRect(sub, &data->DstRect);
+      for (LONG y = dst.top; y < dst.bottom; ++y) {
+         UINT *row = (UINT *)(sub->data + (size_t)y * sub->pitch);
+         for (LONG x = dst.left; x < dst.right; ++x)
+            row[x] = data->Color;
+      }
+      sub->cpu_dirty = true;
+      return S_OK;
+   }
+
    const bool cleared =
       D3D9ClearColorPipe(device, data->hResource, data->SubResourceIndex,
                          &data->DstRect, data->Color, false, true);
    HRESULT hr = cleared ? S_OK : E_NOTIMPL;
    return hr;
+}
+
+/*
+ * The video processor (DirectX Video Acceleration 2, the progressive device).
+ *
+ * Windows' video renderer hands every decoded frame to a video processor with a target and
+ * two rectangles, and expects the frame's part scaled to its place on the target, the rest
+ * of the target in the background colour. Without one in the driver it falls back to a
+ * software processor of its own, and with this driver that path showed nothing but black
+ * (docs/windows/mesa-win7.md, "Windows Media Player").
+ *
+ * Frames are RGB: a decoder converts before it hands them over, as no YUV format is listed.
+ * They come in surfaces kept in memory (D3D9IsPlainInMemory), so a frame
+ * costs one upload into a texture this keeps and one scaled blit on the host.
+ */
+struct D3D9VideoProcessor {
+   HANDLE render_target;
+   UINT render_target_subresource;
+   struct pipe_resource *frame;        /* the frame last uploaded, on the host */
+   const D3D9Resource *frame_source;   /* and the surface it came from */
+};
+
+bool
+D3D9VideoProcessorTakes(D3DDDIFORMAT video, D3DDDIFORMAT target)
+{
+   return (video == D3DDDIFMT_X8R8G8B8 || video == D3DDDIFMT_A8R8G8B8) &&
+      (target == D3DDDIFMT_X8R8G8B8 || target == D3DDDIFMT_A8R8G8B8);
+}
+
+HRESULT APIENTRY
+D3D9CreateVideoProcessDevice(HANDLE hDevice,
+                             D3DDDIARG_CREATEVIDEOPROCESSDEVICE *data)
+{
+   if (!hDevice || !data || !data->pVideoProcGuid)
+      return E_INVALIDARG;
+   if (memcmp(data->pVideoProcGuid, &D3D9ProgressiveVideoProcessor, sizeof(GUID)) ||
+       !D3D9VideoProcessorTakes(data->VideoDesc.Format, data->RenderTargetFormat))
+      return E_INVALIDARG;
+   D3D9VideoProcessor *processor =
+      (D3D9VideoProcessor *)calloc(1, sizeof(*processor));
+   if (!processor)
+      return E_OUTOFMEMORY;
+   data->hVideoProcess = processor;
+   return S_OK;
+}
+
+HRESULT APIENTRY
+D3D9DestroyVideoProcessDevice(HANDLE hDevice, HANDLE hVideoProcessor)
+{
+   (void)hDevice;
+   D3D9VideoProcessor *processor = (D3D9VideoProcessor *)hVideoProcessor;
+   if (processor) {
+      pipe_resource_reference(&processor->frame, NULL);
+      free(processor);
+   }
+   return S_OK;
+}
+
+HRESULT APIENTRY
+D3D9VideoProcessBeginFrame(HANDLE hDevice, HANDLE hVideoProcess)
+{
+   return hDevice && hVideoProcess ? S_OK : E_INVALIDARG;
+}
+
+HRESULT APIENTRY
+D3D9VideoProcessEndFrame(HANDLE hDevice, D3DDDIARG_VIDEOPROCESSENDFRAME *data)
+{
+   return hDevice && data ? S_OK : E_INVALIDARG;
+}
+
+HRESULT APIENTRY
+D3D9SetVideoProcessRenderTarget(
+   HANDLE hDevice, const D3DDDIARG_SETVIDEOPROCESSRENDERTARGET *data)
+{
+   if (!hDevice || !data || !data->hVideoProcess)
+      return E_INVALIDARG;
+   D3D9VideoProcessor *processor = (D3D9VideoProcessor *)data->hVideoProcess;
+   processor->render_target = data->hRenderTarget;
+   processor->render_target_subresource = data->SubResourceIndex;
+   return S_OK;
+}
+
+/* The background colour comes as studio-range Y'CbCr (BT.601), sixteen bits a channel */
+static D3DCOLOR
+D3D9VideoBackground(const DXVADDI_AYUVSAMPLE16 *colour)
+{
+   const float y = 1.164f * ((colour->Y >> 8) - 16);
+   const float cb = (float)((colour->Cb >> 8) - 128);
+   const float cr = (float)((colour->Cr >> 8) - 128);
+   const int r = (int)(y + 1.596f * cr + 0.5f);
+   const int g = (int)(y - 0.813f * cr - 0.391f * cb + 0.5f);
+   const int b = (int)(y + 2.018f * cb + 0.5f);
+   return 0xff000000u | ((UINT)CLAMP(r, 0, 255) << 16) |
+      ((UINT)CLAMP(g, 0, 255) << 8) | (UINT)CLAMP(b, 0, 255);
+}
+
+/* A frame's destination cut to what of the target may be drawn, and its source cut by the
+ * same proportions. False if nothing is left. */
+static bool
+D3D9VideoClip(const RECT *bounds, RECT *src, RECT *dst)
+{
+   const LONG dst_width = dst->right - dst->left;
+   const LONG dst_height = dst->bottom - dst->top;
+   const LONG src_width = src->right - src->left;
+   const LONG src_height = src->bottom - src->top;
+   if (dst_width <= 0 || dst_height <= 0 || src_width <= 0 || src_height <= 0)
+      return false;
+   RECT cut;
+   cut.left = MAX2(dst->left, bounds->left);
+   cut.top = MAX2(dst->top, bounds->top);
+   cut.right = MIN2(dst->right, bounds->right);
+   cut.bottom = MIN2(dst->bottom, bounds->bottom);
+   if (cut.right <= cut.left || cut.bottom <= cut.top)
+      return false;
+   RECT part;
+   part.left = src->left + (LONG)((LONGLONG)(cut.left - dst->left) * src_width / dst_width);
+   part.right = src->left + (LONG)((LONGLONG)(cut.right - dst->left) * src_width / dst_width);
+   part.top = src->top + (LONG)((LONGLONG)(cut.top - dst->top) * src_height / dst_height);
+   part.bottom = src->top + (LONG)((LONGLONG)(cut.bottom - dst->top) * src_height / dst_height);
+   if (part.right <= part.left)
+      part.right = part.left + 1;
+   if (part.bottom <= part.top)
+      part.bottom = part.top + 1;
+   *src = part;
+   *dst = cut;
+   return true;
+}
+
+/* A frame in memory: uploaded into the processor's own texture when it changed, then
+ * scaled from there. */
+static bool
+D3D9VideoBlitFrame(D3D9Device *device, D3D9VideoProcessor *processor,
+                   D3D9Resource *dst_resource, D3D9SubResource *dst_sub,
+                   UINT dst_subresource_index, const RECT *dst,
+                   D3D9Resource *src_resource, D3D9SubResource *src_sub,
+                   const RECT *src)
+{
+   const enum pipe_format format = D3D9FormatToPipe(src_resource->format);
+   if (!device->screen || !device->pipe->texture_subdata || !device->pipe->blit ||
+       format == PIPE_FORMAT_NONE || !dst_resource->pipe_resource ||
+       src_sub->pitch < src_sub->width * 4 ||
+       src_sub->data_capacity < (size_t)src_sub->pitch * (src_sub->height - 1) +
+                                   (size_t)src_sub->width * 4)
+      return false;
+
+   if (processor->frame &&
+       (processor->frame->width0 != src_sub->width ||
+        processor->frame->height0 != src_sub->height ||
+        processor->frame->format != format)) {
+      pipe_resource_reference(&processor->frame, NULL);
+      processor->frame_source = NULL;
+   }
+   if (!processor->frame) {
+      struct pipe_resource templ;
+      memset(&templ, 0, sizeof(templ));
+      templ.target = PIPE_TEXTURE_2D;
+      templ.format = format;
+      templ.width0 = src_sub->width;
+      templ.height0 = src_sub->height;
+      templ.depth0 = 1;
+      templ.array_size = 1;
+      templ.nr_samples = 1;
+      templ.nr_storage_samples = 1;
+      templ.bind = PIPE_BIND_SAMPLER_VIEW;
+      templ.usage = PIPE_USAGE_DEFAULT;
+      processor->frame = device->screen->resource_create(device->screen, &templ);
+      if (!processor->frame)
+         return false;
+      processor->frame_source = NULL;
+   }
+   /* The renderer draws a frame again when its window is repainted: no second upload */
+   if (processor->frame_source != src_resource || src_sub->cpu_dirty) {
+      struct pipe_box box;
+      memset(&box, 0, sizeof(box));
+      box.width = src_sub->width;
+      box.height = src_sub->height;
+      box.depth = 1;
+      device->pipe->texture_subdata(device->pipe, processor->frame, 0,
+                                    PIPE_MAP_WRITE | PIPE_MAP_DISCARD_WHOLE_RESOURCE,
+                                    &box, src_sub->data, src_sub->pitch,
+                                    src_sub->pitch * src_sub->height);
+      processor->frame_source = src_resource;
+      src_sub->cpu_dirty = false;
+   }
+
+   struct pipe_blit_info info;
+   D3D9InitBlitInfo(&info, dst_resource->pipe_resource,
+                    D3D9PipeMipLevel(dst_resource, dst_subresource_index),
+                    D3D9PipeLayer(dst_resource, dst_subresource_index),
+                    dst_resource->pipe_resource->format, dst,
+                    processor->frame, 0, 0, format, src);
+   info.filter = PIPE_TEX_FILTER_LINEAR;
+   device->pipe->blit(device->pipe, &info);
+   dst_sub->cpu_dirty = false;
+   D3D9MarkAutogenMipmapsDirty(dst_resource, dst_subresource_index);
+   return true;
+}
+
+HRESULT APIENTRY
+D3D9VideoProcessBlt(HANDLE hDevice, const D3DDDIARG_VIDEOPROCESSBLT *data)
+{
+   D3D9Device *device = (D3D9Device *)hDevice;
+   if (!device || !device->pipe || !data || !data->hVideoProcess ||
+       (data->NumSrcSurfaces && !data->pSrcSurfaces))
+      return E_INVALIDARG;
+   D3D9VideoProcessor *processor = (D3D9VideoProcessor *)data->hVideoProcess;
+   D3D9Resource *dst_resource = D3D9CastResource(processor->render_target);
+   D3D9SubResource *dst_sub =
+      D3D9GetSubResource(processor->render_target,
+                         processor->render_target_subresource);
+   if (!dst_resource || !dst_sub)
+      return E_INVALIDARG;
+
+   RECT target;
+   target.left = MAX2(data->TargetRect.left, 0);
+   target.top = MAX2(data->TargetRect.top, 0);
+   target.right = MIN2(data->TargetRect.right, (LONG)dst_sub->width);
+   target.bottom = MIN2(data->TargetRect.bottom, (LONG)dst_sub->height);
+   if (target.right <= target.left || target.bottom <= target.top)
+      return S_OK;
+
+   /* The first sample is the video. Sub-streams (subtitles, a DVD's menu highlights) are
+    * not offered, so Windows mixes those itself before it comes here. */
+   RECT src = {}, dst = {};
+   bool drawn = false;
+   if (data->NumSrcSurfaces) {
+      const DXVADDI_VIDEOSAMPLE *sample = &data->pSrcSurfaces[0];
+      D3D9Resource *src_resource = D3D9CastResource(sample->SrcResource);
+      D3D9SubResource *src_sub =
+         D3D9GetSubResource(sample->SrcResource, sample->SrcSubResourceIndex);
+      src = sample->SrcRect;
+      dst = sample->DstRect;
+      if (src_resource && src_sub && D3D9VideoClip(&target, &src, &dst)) {
+         if (!src_resource->pipe_resource && src_sub->data)
+            drawn = D3D9VideoBlitFrame(device, processor, dst_resource, dst_sub,
+                                       processor->render_target_subresource, &dst,
+                                       src_resource, src_sub, &src);
+         else
+            drawn = D3D9CopyRectPipe(device, processor->render_target,
+                                     processor->render_target_subresource, &dst,
+                                     sample->SrcResource, sample->SrcSubResourceIndex,
+                                     &src, PIPE_TEX_FILTER_LINEAR);
+         if (!drawn)
+            return E_NOTIMPL;
+      }
+   }
+
+   /* What of the target the video leaves free takes the background colour */
+   const D3DCOLOR background = D3D9VideoBackground(&data->BackgroundColor);
+   RECT strips[4];
+   UINT count = 0;
+   if (!drawn) {
+      strips[count++] = target;
+   } else {
+      if (dst.top > target.top)
+         strips[count++] = RECT{ target.left, target.top, target.right, dst.top };
+      if (dst.bottom < target.bottom)
+         strips[count++] = RECT{ target.left, dst.bottom, target.right, target.bottom };
+      if (dst.left > target.left)
+         strips[count++] = RECT{ target.left, dst.top, dst.left, dst.bottom };
+      if (dst.right < target.right)
+         strips[count++] = RECT{ dst.right, dst.top, target.right, dst.bottom };
+   }
+   for (UINT i = 0; i < count; ++i)
+      D3D9ClearColorPipe(device, processor->render_target,
+                         processor->render_target_subresource, &strips[i],
+                         background, false, true);
+   return S_OK;
 }
 
 HRESULT APIENTRY

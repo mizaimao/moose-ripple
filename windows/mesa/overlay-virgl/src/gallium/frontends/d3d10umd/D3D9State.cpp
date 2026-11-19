@@ -1679,6 +1679,12 @@ D3D9FillDeviceFuncs(D3DDDI_DEVICEFUNCS *funcs)
    funcs->pfnOpenResource = D3D9OpenResource;
    funcs->pfnGetCaptureAllocationHandle = D3D9GetCaptureAllocationHandle;
    funcs->pfnCaptureToSysMem = D3D9CaptureToSysMem;
+   funcs->pfnCreateVideoProcessDevice = D3D9CreateVideoProcessDevice;
+   funcs->pfnDestroyVideoProcessDevice = D3D9DestroyVideoProcessDevice;
+   funcs->pfnVideoProcessBeginFrame = D3D9VideoProcessBeginFrame;
+   funcs->pfnVideoProcessEndFrame = D3D9VideoProcessEndFrame;
+   funcs->pfnSetVideoProcessRenderTarget = D3D9SetVideoProcessRenderTarget;
+   funcs->pfnVideoProcessBlt = D3D9VideoProcessBlt;
    funcs->pfnCreateVideoProcessor = D3D9CreateVideoProcessor;
    funcs->pfnSetVideoProcessBltState = D3D9SetVideoProcessBltState;
    funcs->pfnGetVideoProcessBltStatePrivate =

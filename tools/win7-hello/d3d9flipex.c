@@ -10,6 +10,9 @@
  *   video   a frame goes through Windows' software video processor into a second surface,
  *           which is copied to the back buffer: what the video renderer does for every
  *           frame when the driver offers no video processor of its own
+ *   proc    a frame in a video-memory surface goes through the driver's video processor to
+ *           the middle of the back buffer, on a background colour: what the renderer does
+ *           when the driver offers one
  * "d3d9flipex copy" runs the same steps with the ordinary copy-model swap chain as a control.
  * Prints one line per step; exit code 0 if every step showed its colour.
  * MIT licence (LICENSE at the repository root).
@@ -128,6 +131,78 @@ static HRESULT draw_blit(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, DW
 /* The video renderer's path without a decoder: both surfaces are DirectX Video Acceleration
  * "software render targets" (system memory), the processor is the software device. */
 static DWORD processed = 0x01000000;  /* what the processor's output surface held */
+
+static DWORD corner = 0x01000000;     /* the screen beside the frame the driver's processor drew */
+static HWND shown;
+
+/* The same through the processor the driver offers: the frame is in a video-memory surface,
+ * the target is the back buffer, and the frame goes to the middle three quarters of it, on a
+ * background colour that the test then looks for in a corner. */
+static HRESULT draw_processor(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, DWORD rgb)
+{
+    static IDirectXVideoProcessorService *service;
+    static IDirectXVideoProcessor *processor;
+    static IDirect3DSurface9 *frame;
+    static DXVA2_VideoDesc desc;
+    HRESULT hr = S_OK;
+    if (!service) {
+        hr = DXVA2CreateVideoService((IDirect3DDevice9 *)device, &IID_IDirectXVideoProcessorService,
+                                     (void **)&service);
+        if (FAILED(hr)) { printf("       DXVA2CreateVideoService hr=0x%08lx\n", (unsigned long)hr); return hr; }
+        desc.SampleWidth = WIDTH;
+        desc.SampleHeight = HEIGHT;
+        desc.SampleFormat.SampleFormat = DXVA2_SampleProgressiveFrame;
+        desc.Format = D3DFMT_X8R8G8B8;
+        desc.InputSampleFreq.Numerator = desc.OutputFrameFreq.Numerator = 30;
+        desc.InputSampleFreq.Denominator = desc.OutputFrameFreq.Denominator = 1;
+        DXVA2_VideoProcessorCaps caps;
+        memset(&caps, 0, sizeof(caps));
+        hr = IDirectXVideoProcessorService_GetVideoProcessorCaps(service, &DXVA2_VideoProcProgressiveDevice,
+                 &desc, D3DFMT_X8R8G8B8, &caps);
+        printf("       the driver's processor: hr=0x%08lx input pool %u operations 0x%x\n",
+               (unsigned long)hr, (unsigned)caps.InputPool, (unsigned)caps.VideoProcessorOperations);
+        if (FAILED(hr)) return hr;
+        hr = IDirectXVideoProcessorService_CreateSurface(service, WIDTH, HEIGHT, 0, D3DFMT_X8R8G8B8,
+                 caps.InputPool, 0, DXVA2_VideoProcessorRenderTarget, &frame, NULL);
+        if (FAILED(hr)) { printf("       CreateSurface hr=0x%08lx\n", (unsigned long)hr); return hr; }
+        hr = IDirectXVideoProcessorService_CreateVideoProcessor(service, &DXVA2_VideoProcProgressiveDevice,
+                 &desc, D3DFMT_X8R8G8B8, 0, &processor);
+        if (FAILED(hr)) { printf("       CreateVideoProcessor hr=0x%08lx\n", (unsigned long)hr); return hr; }
+    }
+    fill_flags = D3DLOCK_DONOTWAIT;
+    hr = fill(frame, rgb);
+    fill_flags = 0;
+    if (FAILED(hr)) return hr;
+
+    DXVA2_VideoProcessBltParams blt;
+    memset(&blt, 0, sizeof(blt));
+    SetRect(&blt.TargetRect, 0, 0, WIDTH, HEIGHT);
+    blt.BackgroundColor.Cr = 0x6e00;   /* a blue: Y 41, Cb 240, Cr 110 */
+    blt.BackgroundColor.Cb = 0xf000;
+    blt.BackgroundColor.Y = 0x2900;
+    blt.BackgroundColor.Alpha = 0xffff;
+    blt.DestFormat.SampleFormat = DXVA2_SampleProgressiveFrame;
+    blt.ProcAmpValues.Contrast.Value = blt.ProcAmpValues.Saturation.Value = 1;
+    blt.Alpha.Value = 1;
+    DXVA2_VideoSample sample;
+    memset(&sample, 0, sizeof(sample));
+    sample.End = 333333;
+    sample.SampleFormat.SampleFormat = DXVA2_SampleProgressiveFrame;
+    sample.SrcSurface = frame;
+    SetRect(&sample.SrcRect, 0, 0, WIDTH, HEIGHT);
+    SetRect(&sample.DstRect, WIDTH / 8, HEIGHT / 8, WIDTH - WIDTH / 8, HEIGHT - HEIGHT / 8);
+    sample.PlanarAlpha.Value = 1;
+    hr = IDirectXVideoProcessor_VideoProcessBlt(processor, back, &blt, &sample, 1, NULL);
+    if (SUCCEEDED(hr) && shown) {
+        POINT p = { WIDTH / 32, HEIGHT / 32 };
+        ClientToScreen(shown, &p);
+        HDC screen = GetDC(NULL);
+        COLORREF c = GetPixel(screen, p.x, p.y);
+        ReleaseDC(NULL, screen);
+        corner = (GetRValue(c) << 16) | (GetGValue(c) << 8) | GetBValue(c);
+    }
+    return hr;
+}
 
 static HRESULT draw_video(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, DWORD rgb)
 {
@@ -248,6 +323,9 @@ int main(int argc, char **argv)
     fill_flags = 0;
     ok &= step("video", device, window, 0x40d0d0, draw_video);
     printf("       the processor's output read back as %06lx\n", (unsigned long)processed);
+    shown = window;
+    ok &= step("proc", device, window, 0xc040c0, draw_processor);
+    printf("       beside the frame the screen showed %06lx (the background is a blue)\n", (unsigned long)corner);
     fflush(stdout);
     IDirect3DDevice9Ex_Release(device);
     IDirect3D9Ex_Release(d3d);

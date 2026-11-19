@@ -444,6 +444,21 @@ HRESULT APIENTRY D3D9ColorFill(HANDLE hDevice,
 HRESULT APIENTRY D3D9DepthFill(HANDLE hDevice,
                                const D3DDDIARG_DEPTHFILL *data);
 HRESULT APIENTRY D3D9Present(HANDLE hDevice, const D3DDDIARG_PRESENT *data);
+/* The video processor (D3D9Resource.cpp) */
+extern const GUID D3D9ProgressiveVideoProcessor;
+bool D3D9VideoProcessorTakes(D3DDDIFORMAT video, D3DDDIFORMAT target);
+HRESULT APIENTRY D3D9CreateVideoProcessDevice(
+   HANDLE hDevice, D3DDDIARG_CREATEVIDEOPROCESSDEVICE *data);
+HRESULT APIENTRY D3D9DestroyVideoProcessDevice(HANDLE hDevice,
+                                               HANDLE hVideoProcessor);
+HRESULT APIENTRY D3D9VideoProcessBeginFrame(HANDLE hDevice,
+                                            HANDLE hVideoProcess);
+HRESULT APIENTRY D3D9VideoProcessEndFrame(
+   HANDLE hDevice, D3DDDIARG_VIDEOPROCESSENDFRAME *data);
+HRESULT APIENTRY D3D9SetVideoProcessRenderTarget(
+   HANDLE hDevice, const D3DDDIARG_SETVIDEOPROCESSRENDERTARGET *data);
+HRESULT APIENTRY D3D9VideoProcessBlt(HANDLE hDevice,
+                                     const D3DDDIARG_VIDEOPROCESSBLT *data);
 HRESULT APIENTRY D3D9Clear(HANDLE hDevice, const D3DDDIARG_CLEAR *data,
                            UINT rect_count, const RECT *rects);
 HRESULT APIENTRY D3D9DestroyResource(HANDLE hDevice, HANDLE resource);

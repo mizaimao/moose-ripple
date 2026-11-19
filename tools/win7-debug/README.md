@@ -252,10 +252,16 @@ what a program draws reaches the screen the way Windows' video renderer presents
 a Direct3D 9Ex flip-model window, or the copy model with the argument `copy`.
 Each step draws one colour and then reads the screen where the window is: a
 clear, a system-memory surface copied to the back buffer, a video-memory surface
-filled under an ordinary lock and under a discarding one, and a frame sent
-through Windows' software video processor. Run them outside the driver package
-directory too: beside the package a 64-bit program loads the package's copy of
-the driver, not the installed one.
+filled under an ordinary lock and under a discarding one, a frame sent through
+Windows' software video processor, and a frame sent through the driver's own
+video processor to the middle of the window, with the background colour checked
+beside it. Run them outside the driver package directory too: beside the package
+a 64-bit program loads the package's copy of the driver, not the installed one.
+
+`vidplay.exe ds|mf FILE` (`guest/vidplay.cmd` runs both, in both process sizes)
+plays a video in a window of its own through DirectShow or through Media
+Foundation, both ending in the Enhanced Video Renderer, and reads the screen at
+64 points: how many are not black, and whether the picture moves.
 
 At trace level 3 a lock or unlock of a surface in memory also says how many of
 256 points spread over it are not black, which tells an empty frame from a dark

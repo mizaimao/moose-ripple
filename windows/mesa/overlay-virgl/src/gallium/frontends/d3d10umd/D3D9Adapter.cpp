@@ -533,6 +533,25 @@ D3D9ValidateData(const D3DDDIARG_GETCAPS *data, UINT size)
    return data && data->pData && data->DataSize >= size ? S_OK : E_INVALIDARG;
 }
 
+/* The video processor the driver offers (D3D9VideoProcessBlt in D3D9Resource.cpp): DirectX
+ * Video Acceleration's progressive device, by its well-known name. */
+const GUID D3D9ProgressiveVideoProcessor =
+   { 0x5a54a0c9, 0xc7ec, 0x4bd9, { 0x8e, 0xde, 0xf3, 0xc7, 0x5d, 0xc4, 0x39, 0x3b } };
+
+static const D3DDDIFORMAT g_video_targets[] = { D3DDDIFMT_X8R8G8B8, D3DDDIFMT_A8R8G8B8 };
+
+/* A question about a processor and a kind of video: is the processor ours, and is it video
+ * it takes? The target format may be left open. */
+static bool
+D3D9VideoProcessorKnows(const DXVADDI_VIDEOPROCESSORINPUT *input)
+{
+   return input && input->pVideoProcGuid &&
+      !memcmp(input->pVideoProcGuid, &D3D9ProgressiveVideoProcessor, sizeof(GUID)) &&
+      D3D9VideoProcessorTakes(input->VideoDesc.Format,
+                              input->RenderTargetFormat ? input->RenderTargetFormat :
+                                                          D3DDDIFMT_X8R8G8B8);
+}
+
 /* No multisampling yet: the sample counts have to come from the host's renderer. */
 static UINT
 D3D9QueryMsaaTypes(D3D9Adapter *adapter)
@@ -768,17 +787,85 @@ D3D9GetCaps(HANDLE hAdapter, const D3DDDIARG_GETCAPS *data)
          return E_INVALIDARG;
       D3D9FillCaps(adapter, (D3DCAPS9 *)data->pData);
       return S_OK;
-   /* moose-ripple: no video decoders, no video processors and no extensions, said as a
-    * count of none. "Not implemented" is taken for a failure: Windows' video renderer then
-    * gives up, where with none it uses its own software processor.
+   /* moose-ripple: no video decoders and no extensions, said as a count of none. "Not
+    * implemented" is taken for a failure: Windows' video renderer then gives up.
     */
    case D3DDDICAPS_GETDECODEGUIDCOUNT:
-   case D3DDDICAPS_GETVIDEOPROCESSORDEVICEGUIDCOUNT:
    case D3DDDICAPS_GETEXTENSIONGUIDCOUNT:
       if (FAILED(D3D9ValidateData(data, sizeof(UINT))))
          return E_INVALIDARG;
       *(UINT *)data->pData = 0;
       return S_OK;
+   /* One video processor, the progressive device (D3D9VideoProcessBlt): RGB frames, scaled
+    * to their place on an RGB target. No deinterlacing, no colour controls, no sub-streams.
+    */
+   case D3DDDICAPS_GETVIDEOPROCESSORDEVICEGUIDCOUNT:
+      if (FAILED(D3D9ValidateData(data, sizeof(UINT))))
+         return E_INVALIDARG;
+      *(UINT *)data->pData = 1;
+      return S_OK;
+   case D3DDDICAPS_GETVIDEOPROCESSORDEVICEGUIDS:
+      if (FAILED(D3D9ValidateData(data, sizeof(GUID))))
+         return E_INVALIDARG;
+      *(GUID *)data->pData = D3D9ProgressiveVideoProcessor;
+      return S_OK;
+   case D3DDDICAPS_GETVIDEOPROCESSORRTFORMATCOUNT:
+   case D3DDDICAPS_GETVIDEOPROCESSORRTSUBSTREAMFORMATCOUNT: {
+      if (FAILED(D3D9ValidateData(data, sizeof(UINT))))
+         return E_INVALIDARG;
+      const DXVADDI_VIDEOPROCESSORINPUT *input =
+         (const DXVADDI_VIDEOPROCESSORINPUT *)data->pInfo;
+      *(UINT *)data->pData =
+         data->Type == D3DDDICAPS_GETVIDEOPROCESSORRTFORMATCOUNT &&
+         D3D9VideoProcessorKnows(input) ? ARRAYSIZE(g_video_targets) : 0;
+      return S_OK;
+   }
+   case D3DDDICAPS_GETVIDEOPROCESSORRTFORMATS:
+      if (!D3D9VideoProcessorKnows((const DXVADDI_VIDEOPROCESSORINPUT *)data->pInfo) ||
+          FAILED(D3D9ValidateData(data, sizeof(g_video_targets))))
+         return E_INVALIDARG;
+      memcpy(data->pData, g_video_targets, sizeof(g_video_targets));
+      return S_OK;
+   case D3DDDICAPS_GETVIDEOPROCESSORRTSUBSTREAMFORMATS:
+      return S_OK;
+   case D3DDDICAPS_GETVIDEOPROCESSORCAPS: {
+      const DXVADDI_VIDEOPROCESSORINPUT *input =
+         (const DXVADDI_VIDEOPROCESSORINPUT *)data->pInfo;
+      if (!D3D9VideoProcessorKnows(input) ||
+          FAILED(D3D9ValidateData(data, sizeof(DXVADDI_VIDEOPROCESSORCAPS))))
+         return E_INVALIDARG;
+      DXVADDI_VIDEOPROCESSORCAPS *caps = (DXVADDI_VIDEOPROCESSORCAPS *)data->pData;
+      memset(caps, 0, sizeof(*caps));
+      caps->InputPool = D3DDDIPOOL_VIDEOMEMORY;
+      caps->OutputFormat = input->RenderTargetFormat ? input->RenderTargetFormat :
+                                                        D3DDDIFMT_X8R8G8B8;
+      caps->VideoProcessorOperations = DXVADDI_VIDEOPROCESS_STRETCHX |
+                                       DXVADDI_VIDEOPROCESS_STRETCHY |
+                                       DXVADDI_VIDEOPROCESS_SUBRECTS;
+      return S_OK;
+   }
+   /* Asked although no colour control and no filter is offered: the neutral value, fixed */
+   case D3DDDICAPS_GETPROCAMPRANGE: {
+      const DXVADDI_QUERYPROCAMPINPUT *input =
+         (const DXVADDI_QUERYPROCAMPINPUT *)data->pInfo;
+      if (!input || FAILED(D3D9ValidateData(data, sizeof(DXVADDI_VALUERANGE))))
+         return E_INVALIDARG;
+      DXVADDI_VALUERANGE *range = (DXVADDI_VALUERANGE *)data->pData;
+      memset(range, 0, sizeof(*range));
+      const SHORT neutral = input->ProcAmpCap == DXVADDI_PROCAMP_CONTRAST ||
+                            input->ProcAmpCap == DXVADDI_PROCAMP_SATURATION ? 1 : 0;
+      range->MinValue.Value = range->MaxValue.Value = range->DefaultValue.Value = neutral;
+      range->StepSize.Value = 1;
+      return S_OK;
+   }
+   case D3DDDICAPS_FILTERPROPERTYRANGE: {
+      if (FAILED(D3D9ValidateData(data, sizeof(DXVADDI_VALUERANGE))))
+         return E_INVALIDARG;
+      DXVADDI_VALUERANGE *range = (DXVADDI_VALUERANGE *)data->pData;
+      memset(range, 0, sizeof(*range));
+      range->StepSize.Value = 1;
+      return S_OK;
+   }
    case D3DDDICAPS_GETGAMMARAMPCAPS:
       if (FAILED(D3D9ValidateData(data, sizeof(DDIGAMMACAPS))))
          return E_INVALIDARG;
