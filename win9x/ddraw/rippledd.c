@@ -212,6 +212,15 @@ static DWORD WINAPI CanCreateSurface(LPDDHAL_CANCREATESURFACEDATA d)
     return DDHAL_DRIVER_HANDLED;
 }
 
+/* DirectDraw 7 calls this while restoring a lost flip chain. Without a 32-bit entry
+   the runtime goes through its Win16 thunk, even though the runtime owns the heaps.
+   Let it assign the primary and allocate the attached pages on create and restore. */
+static DWORD WINAPI CreateSurface(LPDDHAL_CREATESURFACEDATA d)
+{
+    (void)d;
+    return DDHAL_DRIVER_NOTHANDLED;
+}
+
 /* Select the CPU's page when GDI or DirectDraw will draw directly into its memory. The VxD
    follows writes from then on, including ones which bypass the DirectDraw HAL. */
 static int select_cpu_page(DWORD offset)
@@ -433,9 +442,11 @@ DWORD WINAPI DriverInit(DWORD context)
     cb = (LPDDHAL_DDCALLBACKS)s->ddcb;
     zero(cb, sizeof *cb);
     cb->dwSize = sizeof *cb;
-    cb->dwFlags = DDHAL_CB32_CANCREATESURFACE | DDHAL_CB32_WAITFORVERTICALBLANK |
-                  DDHAL_CB32_GETSCANLINE | DDHAL_CB32_FLIPTOGDISURFACE | DDHAL_CB32_SETEXCLUSIVEMODE;
+    cb->dwFlags = DDHAL_CB32_CANCREATESURFACE | DDHAL_CB32_CREATESURFACE |
+                  DDHAL_CB32_WAITFORVERTICALBLANK | DDHAL_CB32_GETSCANLINE |
+                  DDHAL_CB32_FLIPTOGDISURFACE | DDHAL_CB32_SETEXCLUSIVEMODE;
     cb->CanCreateSurface = CanCreateSurface;
+    cb->CreateSurface = CreateSurface;
     cb->WaitForVerticalBlank = WaitForVerticalBlank;
     cb->GetScanLine = GetScanLine;
     cb->FlipToGDISurface = FlipToGDISurface;
