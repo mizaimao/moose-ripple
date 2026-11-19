@@ -1,10 +1,13 @@
 /* Does a video show a picture? Plays a file in a window of its own for a few seconds through
  * one of Windows' two playback pipelines, both ending in the Enhanced Video Renderer, and
  * reads the screen where the window is:
- *   vidplay ds FILE [SECONDS]   DirectShow: a filter graph with the renderer added first
- *   vidplay mf FILE [SECONDS]   Media Foundation, through MFPlay
+ *   vidplay ds FILE [SECONDS [WIDTH HEIGHT]]   DirectShow: a filter graph with the renderer added first
+ *   vidplay mf FILE [SECONDS]                  Media Foundation, through MFPlay
+ * WIDTH and HEIGHT: the picture's size in the window, by default 640 by 360.
  * Prints how many of 64 points spread over the picture are not black, twice, a second apart,
- * and whether the picture changed in between. Exit code 0 if at least a quarter are lit.
+ * and whether the picture changed in between; then how much rows next to each other differ
+ * against rows two apart, which shows the combing of interlaced video that is not
+ * deinterlaced. Exit code 0 if at least a quarter of the points are lit.
  * MIT licence (LICENSE at the repository root).
  */
 #define COBJMACROS
@@ -21,7 +24,11 @@
 /* The Enhanced Video Renderer's DirectShow filter; the headers here do not name it */
 DEFINE_GUID(CLSID_EnhancedVideoRenderer, 0xfa10746c, 0x9b63, 0x4b6c, 0xbc, 0x49, 0xfc, 0x30, 0x0e, 0xa5, 0xf2, 0x56);
 
-enum { WIDTH = 640, HEIGHT = 360, GRID = 8 };
+enum { GRID = 8 };
+/* The picture's size in the window. Given as the video's own size, the picture is shown
+ * row for row (and stretched to the window, not letterboxed), which the combing figure needs. */
+static int WIDTH = 640, HEIGHT = 360;
+static int fit;
 
 static void pump(DWORD ms)
 {
@@ -55,6 +62,41 @@ static int look(HWND window, COLORREF *seen)
     return lit;
 }
 
+/* Combing: an interlaced frame shown whole has its two fields, taken a sixtieth of a second
+ * apart, on alternate rows, so where something moves, rows next to each other differ more
+ * than rows two apart. A block in the middle of the picture is read and both differences
+ * summed; the result is the first as a percentage of the second. A picture without combing
+ * stays well below 100. */
+static int combing(HWND window)
+{
+    enum { SIDE = 160 };
+    static DWORD pixels[SIDE * SIDE];
+    BITMAPINFO info = { { sizeof(BITMAPINFOHEADER), SIDE, -SIDE, 1, 32, BI_RGB, 0, 0, 0, 0, 0 }, { { 0, 0, 0, 0 } } };
+    POINT corner = { (WIDTH - SIDE) / 2, (HEIGHT - SIDE) / 2 };
+    ClientToScreen(window, &corner);
+    HDC screen = GetDC(NULL);
+    HDC memory = CreateCompatibleDC(screen);
+    HBITMAP bitmap = CreateCompatibleBitmap(screen, SIDE, SIDE);
+    HGDIOBJ old = SelectObject(memory, bitmap);
+    BitBlt(memory, 0, 0, SIDE, SIDE, screen, corner.x, corner.y, SRCCOPY);
+    SelectObject(memory, old);
+    GetDIBits(memory, bitmap, 0, SIDE, pixels, &info, DIB_RGB_COLORS);
+    DeleteObject(bitmap);
+    DeleteDC(memory);
+    ReleaseDC(NULL, screen);
+    long long next = 0, second = 0;
+    for (int y = 0; y + 2 < SIDE; ++y) {
+        for (int x = 0; x < SIDE; ++x) {
+            const int a = (pixels[y * SIDE + x] >> 8) & 0xff;
+            const int b = (pixels[(y + 1) * SIDE + x] >> 8) & 0xff;
+            const int c = (pixels[(y + 2) * SIDE + x] >> 8) & 0xff;
+            next += a > b ? a - b : b - a;
+            second += a > c ? a - c : c - a;
+        }
+    }
+    return second ? (int)(100 * next / second) : 0;
+}
+
 static HRESULT play_directshow(HWND window, const WCHAR *path)
 {
     IGraphBuilder *graph = NULL;
@@ -74,6 +116,7 @@ static HRESULT play_directshow(HWND window, const WCHAR *path)
                                       (void **)&display);
     if (SUCCEEDED(hr)) hr = IMFVideoDisplayControl_SetVideoWindow(display, window);
     RECT all = { 0, 0, WIDTH, HEIGHT };
+    if (SUCCEEDED(hr) && fit) hr = IMFVideoDisplayControl_SetAspectRatioMode(display, MFVideoARMode_None);
     if (SUCCEEDED(hr)) hr = IMFVideoDisplayControl_SetVideoPosition(display, NULL, &all);
     printf("renderer ready hr=0x%08lx\n", (unsigned long)hr);
     if (SUCCEEDED(hr)) hr = IGraphBuilder_RenderFile(graph, path, NULL);
@@ -92,10 +135,15 @@ static HRESULT play_mediafoundation(HWND window, const WCHAR *path)
 int main(int argc, char **argv)
 {
     if (argc < 3 || (strcmp(argv[1], "ds") && strcmp(argv[1], "mf"))) {
-        printf("usage: vidplay ds|mf FILE [SECONDS]\n");
+        printf("usage: vidplay ds|mf FILE [SECONDS [WIDTH HEIGHT]]\n");
         return 2;
     }
     const int seconds = argc > 3 ? atoi(argv[3]) : 4;
+    if (argc > 5 && atoi(argv[4]) >= 160 && atoi(argv[5]) >= 160) {
+        WIDTH = atoi(argv[4]);
+        HEIGHT = atoi(argv[5]);
+        fit = 1;
+    }
     WCHAR path[MAX_PATH];
     MultiByteToWideChar(CP_ACP, 0, argv[2], -1, path, MAX_PATH);
 
@@ -129,6 +177,15 @@ int main(int argc, char **argv)
     printf("points not black: %d then %d of %d; %d changed in a second; the middle is %06lx\n", lit1, lit2,
            GRID * GRID, changed,
            (unsigned long)((GetRValue(second[36]) << 16) | (GetGValue(second[36]) << 8) | GetBValue(second[36])));
+    int worst = 0, sum = 0;
+    for (int i = 0; i < 8; ++i) {
+        const int now = combing(window);
+        if (now > worst) worst = now;
+        sum += now;
+        pump(150);
+    }
+    printf("rows next to each other differ by %d%% of rows two apart on average, %d%% at most (8 looks)\n",
+           sum / 8, worst);
     fflush(stdout);
     return lit2 >= GRID * GRID / 4 ? 0 : 1;
 }

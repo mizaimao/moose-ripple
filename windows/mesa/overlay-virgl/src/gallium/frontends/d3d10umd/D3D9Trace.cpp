@@ -155,6 +155,17 @@ D3D9TraceArg(const D3DDDIARG_PRESENT *a)
 }
 
 static void
+D3D9TraceArg(D3DDDIARG_CREATEVIDEOPROCESSDEVICE *a)
+{
+   if (a && a->pVideoProcGuid)
+      ripple_logf("  video processor %08lx: video %ux%u format %d kind %u, %u/%u frames in, %u/%u out",
+                  (unsigned long)a->pVideoProcGuid->Data1, a->VideoDesc.SampleWidth, a->VideoDesc.SampleHeight,
+                  (int)a->VideoDesc.Format, (unsigned)a->VideoDesc.SampleFormat.SampleFormat,
+                  a->VideoDesc.InputSampleFreq.Numerator, a->VideoDesc.InputSampleFreq.Denominator,
+                  a->VideoDesc.OutputFrameFreq.Numerator, a->VideoDesc.OutputFrameFreq.Denominator);
+}
+
+static void
 D3D9TraceArg(const D3DDDIARG_VIDEOPROCESSBLT *a)
 {
    ripple_logf("  video blt to (%ld,%ld)-(%ld,%ld), %u samples", a->TargetRect.left, a->TargetRect.top,
@@ -166,6 +177,10 @@ D3D9TraceArg(const D3DDDIARG_VIDEOPROCESSBLT *a)
                   v->SrcSubResourceIndex, v->SrcRect.left, v->SrcRect.top, v->SrcRect.right, v->SrcRect.bottom,
                   v->DstRect.left, v->DstRect.top, v->DstRect.right, v->DstRect.bottom, r ? (int)r->format : -1,
                   r ? (int)r->pool : -1);
+      /* 2: a progressive frame, 3 and 4: two fields interleaved, the even or the odd rows first */
+      ripple_logf("      frame kind %u, shown from %lld to %lld, this output is for %lld",
+                  (unsigned)v->SampleFormat.SampleFormat, (long long)v->Start, (long long)v->End,
+                  (long long)a->TargetFrame);
    }
 }
 

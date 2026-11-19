@@ -1233,8 +1233,8 @@ decoded frame to a DirectX Video Acceleration processor: a frame, a target, two 
 and a background colour. With none in the driver it uses a software processor of its own.
 The driver now offers the progressive device (`D3D9VideoProcessBlt`): the frame's part is
 scaled to its place on the target by the host, and what the frame leaves free takes the
-background colour. No deinterlacing, no colour controls, no sub-streams (Windows mixes
-subtitles itself then).
+background colour. No colour controls, no sub-streams (Windows mixes subtitles itself
+then).
 
 **Plain surfaces are kept in memory.** The renderer keeps each frame in a plain video-memory
 surface, which the decoder locks once per frame without discarding. As a host texture that
@@ -1263,6 +1263,25 @@ assessment's playback test went from 36.7 to 50.2 ms a frame), so it stays only 
 fallback for YUY2 and for a host without the two texture formats; `RIPPLE_VIDEO_CPU` forces
 it, to compare. Both give the same pixels in `d3d9flipex`'s "nv12" and "yuy2" steps
 (c8611f for a frame of c86020, 30a0d7 for one of 30a0d8).
+
+**Interlaced video is shown a field at a time (2026-11-19).** An interlaced frame holds two
+fields taken a sixtieth of a second apart, on alternate rows; shown whole, anything that
+moves is combed. The driver offers a second processor for it, DirectX Video Acceleration's
+"bob" device, listed first. The renderer creates it for interlaced video and asks for two
+outputs per frame, at the frame's start and half a frame later; each gets one field,
+stretched to the frame's height (`D3D9VideoField`). On the host path only the rows of that
+field go up, every second row of each plane, and the conversion draw places each at the
+height it has in the frame; the in-driver path repeats each row of the field.
+`RIPPLE_VIDEO_WEAVE` shows such frames whole again, to compare.
+
+In UTM, `d3d9flipex`'s three field steps (a colour on the even rows, its complement on the
+odd rows) show the asked-for field alone on both paths, 44 of 44 steps in all. Playing the
+assessment's interlaced MPEG-2 clip through DirectShow, the trace recorded 116 outputs of
+the bottom field and 116 of the top one in strict alternation, the bottom field (the clip
+says odd rows first) at each frame's start. The assessment's frame counts do not change
+with it: its MPEG-2 tests already counted two outputs per frame, and its interlaced H.264
+clip arrives from the decoder with every frame marked progressive, so there is nothing to
+separate. Not yet run on the desktop OpenGL host, and not yet looked at on a screen.
 
 **A surface bound as render target has to outlive its binding.** Mesa's virgl context copies
 the framebuffer state without taking references, and sends the bound surface's resource
@@ -1307,7 +1326,7 @@ emulated processor.
 DirectShow cannot open the H.264 clip at all: Windows 7 has no DirectShow reader for MP4
 files, with any driver.
 
-Open: interlaced video is shown as it is decoded (no deinterlacing device), YUY2 frames are
-still converted in the driver, and a program that stretches a video-format surface itself,
+Open: YUY2 frames are still converted in the driver, and a program that stretches a
+video-format surface itself,
 without the video processor, is not served, which the format list says by not offering that
 conversion.

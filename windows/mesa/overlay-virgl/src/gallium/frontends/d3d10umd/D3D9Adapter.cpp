@@ -536,23 +536,34 @@ D3D9ValidateData(const D3DDDIARG_GETCAPS *data, UINT size)
    return data && data->pData && data->DataSize >= size ? S_OK : E_INVALIDARG;
 }
 
-/* The video processor the driver offers (D3D9VideoProcessBlt in D3D9Resource.cpp): DirectX
- * Video Acceleration's progressive device, by its well-known name. */
+/* The video processors the driver offers (D3D9VideoProcessBlt in D3D9Resource.cpp), by their
+ * well-known names: DirectX Video Acceleration's progressive device, and its "bob" device,
+ * which shows an interlaced frame one field at a time. */
 const GUID D3D9ProgressiveVideoProcessor =
    { 0x5a54a0c9, 0xc7ec, 0x4bd9, { 0x8e, 0xde, 0xf3, 0xc7, 0x5d, 0xc4, 0x39, 0x3b } };
+const GUID D3D9BobVideoProcessor =
+   { 0x335aa36e, 0x7884, 0x43a4, { 0x9c, 0x91, 0x7f, 0x87, 0xfa, 0xf3, 0xe3, 0x7e } };
 
 static const D3DDDIFORMAT g_video_targets[] = { D3DDDIFMT_X8R8G8B8, D3DDDIFMT_A8R8G8B8 };
 
 /* A question about a processor and a kind of video: is the processor ours, and is it video
- * it takes? The target format may be left open. */
+ * it takes? The target format may be left open. The bob device is for interlaced frames in
+ * a video format only: an RGB frame it could only show whole, which the other does. */
 static bool
 D3D9VideoProcessorKnows(const DXVADDI_VIDEOPROCESSORINPUT *input)
 {
-   return input && input->pVideoProcGuid &&
-      !memcmp(input->pVideoProcGuid, &D3D9ProgressiveVideoProcessor, sizeof(GUID)) &&
-      D3D9VideoProcessorTakes(input->VideoDesc.Format,
-                              input->RenderTargetFormat ? input->RenderTargetFormat :
-                                                          D3DDDIFMT_X8R8G8B8);
+   if (!input || !input->pVideoProcGuid ||
+       !D3D9VideoProcessorTakes(input->VideoDesc.Format,
+                                input->RenderTargetFormat ? input->RenderTargetFormat :
+                                                            D3DDDIFMT_X8R8G8B8))
+      return false;
+   if (!memcmp(input->pVideoProcGuid, &D3D9ProgressiveVideoProcessor, sizeof(GUID)))
+      return true;
+   const UINT kind = input->VideoDesc.SampleFormat.SampleFormat;
+   return !memcmp(input->pVideoProcGuid, &D3D9BobVideoProcessor, sizeof(GUID)) &&
+      D3D9IsVideoFormat(input->VideoDesc.Format) &&
+      (kind == DXVADDI_SampleFieldInterleavedEvenFirst ||
+       kind == DXVADDI_SampleFieldInterleavedOddFirst);
 }
 
 /* No multisampling yet: the sample counts have to come from the host's renderer. */
@@ -799,18 +810,22 @@ D3D9GetCaps(HANDLE hAdapter, const D3DDDIARG_GETCAPS *data)
          return E_INVALIDARG;
       *(UINT *)data->pData = 0;
       return S_OK;
-   /* One video processor, the progressive device (D3D9VideoProcessBlt): frames in RGB or a
-    * video format (D3D9IsVideoFormat), converted and scaled to their place on an RGB target. No deinterlacing, no colour controls, no sub-streams.
+   /* Two video processors (D3D9VideoProcessBlt): frames in RGB or a video format
+    * (D3D9IsVideoFormat), converted and scaled to their place on an RGB target, by the
+    * progressive device, or by the bob device one field at a time. The bob device comes
+    * first, as the better one for the interlaced video it is asked about. No colour
+    * controls, no sub-streams.
     */
    case D3DDDICAPS_GETVIDEOPROCESSORDEVICEGUIDCOUNT:
       if (FAILED(D3D9ValidateData(data, sizeof(UINT))))
          return E_INVALIDARG;
-      *(UINT *)data->pData = 1;
+      *(UINT *)data->pData = 2;
       return S_OK;
    case D3DDDICAPS_GETVIDEOPROCESSORDEVICEGUIDS:
-      if (FAILED(D3D9ValidateData(data, sizeof(GUID))))
+      if (FAILED(D3D9ValidateData(data, 2 * sizeof(GUID))))
          return E_INVALIDARG;
-      *(GUID *)data->pData = D3D9ProgressiveVideoProcessor;
+      ((GUID *)data->pData)[0] = D3D9BobVideoProcessor;
+      ((GUID *)data->pData)[1] = D3D9ProgressiveVideoProcessor;
       return S_OK;
    case D3DDDICAPS_GETVIDEOPROCESSORRTFORMATCOUNT:
    case D3DDDICAPS_GETVIDEOPROCESSORRTSUBSTREAMFORMATCOUNT: {
@@ -848,6 +863,8 @@ D3D9GetCaps(HANDLE hAdapter, const D3DDDIARG_GETCAPS *data)
       if (D3D9IsVideoFormat(input->VideoDesc.Format))
          caps->VideoProcessorOperations |= DXVADDI_VIDEOPROCESS_YUV2RGB |
                                            DXVADDI_VIDEOPROCESS_YUV2RGBEXTENDED;
+      if (!memcmp(input->pVideoProcGuid, &D3D9BobVideoProcessor, sizeof(GUID)))
+         caps->DeinterlaceTechnology = DXVADDI_DEINTERLACETECH_BOBVERTICALSTRETCH;
       return S_OK;
    }
    /* Asked although no colour control and no filter is offered: the neutral value, fixed */

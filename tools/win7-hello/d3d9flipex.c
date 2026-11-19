@@ -16,6 +16,11 @@
  *   nv12    the same with a frame in the video format decoders deliver, which the driver
  *           converts to RGB; the screen may differ by three in a channel
  *   yuy2    the same with the other video format the driver takes
+ *   field1  an interlaced NV12 frame, a colour on its even rows and the complement on its odd
+ *           rows, through the driver's deinterlacing processor: the first field alone has
+ *           to show, so the colour of the even rows everywhere
+ *   field2  the same for the second field, the odd rows
+ *   fieldy  the second field of a YUY2 frame
  * "d3d9flipex copy" runs the same steps with the ordinary copy-model swap chain as a control.
  * Prints one line per step; exit code 0 if every step showed its colour.
  * MIT licence (LICENSE at the repository root).
@@ -222,6 +227,10 @@ struct video_frame {
     IDirectXVideoProcessor *processor;
     IDirect3DSurface9 *frame;
     DXVA2_VideoDesc desc;
+    /* 0: a progressive frame. 1 and 2: an interlaced frame, the even rows first, of which the
+     * first or the second field is to be shown, by the deinterlacing device. The field asked
+     * for has the colour to show; the other one its complement. */
+    int field;
 };
 
 #define FORMAT_NV12 ((D3DFORMAT)MAKEFOURCC('N', 'V', '1', '2'))
@@ -241,7 +250,8 @@ static HRESULT draw_video_format(struct video_frame *v, D3DFORMAT nv12, IDirect3
         if (FAILED(hr)) return hr;
         desc.SampleWidth = WIDTH;
         desc.SampleHeight = HEIGHT;
-        desc.SampleFormat.SampleFormat = DXVA2_SampleProgressiveFrame;
+        desc.SampleFormat.SampleFormat = v->field ? DXVA2_SampleFieldInterleavedEvenFirst :
+                                                     DXVA2_SampleProgressiveFrame;
         desc.SampleFormat.NominalRange = 2;         /* 16 to 235 */
         desc.SampleFormat.VideoTransferMatrix = 2;  /* BT.601 */
         desc.Format = nv12;
@@ -250,35 +260,54 @@ static HRESULT draw_video_format(struct video_frame *v, D3DFORMAT nv12, IDirect3
         hr = IDirectXVideoProcessorService_CreateSurface(service, WIDTH, HEIGHT, 0, nv12, D3DPOOL_DEFAULT, 0,
                  DXVA2_VideoProcessorRenderTarget, &frame, NULL);
         if (FAILED(hr)) { printf("       CreateSurface hr=0x%08lx\n", (unsigned long)hr); return hr; }
-        hr = IDirectXVideoProcessorService_CreateVideoProcessor(service, &DXVA2_VideoProcProgressiveDevice,
+        if (v->field) {
+            UINT count = 0;
+            GUID *guids = NULL;
+            hr = IDirectXVideoProcessorService_GetVideoProcessorDeviceGuids(service, &desc, &count, &guids);
+            printf("       processors for interlaced video: hr=0x%08lx count=%u, the first is %s\n",
+                   (unsigned long)hr, count,
+                   count && IsEqualGUID(&guids[0], &DXVA2_VideoProcBobDevice) ? "the bob device" : "another");
+            if (guids) CoTaskMemFree(guids);
+        }
+        hr = IDirectXVideoProcessorService_CreateVideoProcessor(service,
+                 v->field ? &DXVA2_VideoProcBobDevice : &DXVA2_VideoProcProgressiveDevice,
                  &desc, D3DFMT_X8R8G8B8, 0, &processor);
         if (FAILED(hr)) { printf("       CreateVideoProcessor hr=0x%08lx\n", (unsigned long)hr); return hr; }
     }
-    const double r = (rgb >> 16) & 0xff, g = (rgb >> 8) & 0xff, b = rgb & 0xff;
-    const double luma = 0.299 * r + 0.587 * g + 0.114 * b;
-    const BYTE y = (BYTE)(16.0 + 219.0 * luma / 255.0 + 0.5);
-    const BYTE cb = (BYTE)(128.0 + 224.0 * (b - luma) / (1.772 * 255.0) + 0.5);
-    const BYTE cr = (BYTE)(128.0 + 224.0 * (r - luma) / (1.402 * 255.0) + 0.5);
+    /* colours[0] goes to the rows of the field to show (all rows of a progressive frame),
+     * colours[1] to the other field */
+    BYTE y[2], cb[2], cr[2];
+    for (int i = 0; i < 2; ++i) {
+        const DWORD colour = i ? rgb ^ 0xffffff : rgb;
+        const double r = (colour >> 16) & 0xff, g = (colour >> 8) & 0xff, b = colour & 0xff;
+        const double luma = 0.299 * r + 0.587 * g + 0.114 * b;
+        y[i] = (BYTE)(16.0 + 219.0 * luma / 255.0 + 0.5);
+        cb[i] = (BYTE)(128.0 + 224.0 * (b - luma) / (1.772 * 255.0) + 0.5);
+        cr[i] = (BYTE)(128.0 + 224.0 * (r - luma) / (1.402 * 255.0) + 0.5);
+    }
+#define OTHER(row) (v->field && ((row) & 1) != v->field - 1)
     D3DLOCKED_RECT lock;
     hr = IDirect3DSurface9_LockRect(frame, &lock, NULL, D3DLOCK_DONOTWAIT);
     if (FAILED(hr)) return hr;
     if (nv12 == FORMAT_NV12) {
         for (int row = 0; row < HEIGHT; ++row)
-            memset((BYTE *)lock.pBits + (size_t)row * lock.Pitch, y, WIDTH);
+            memset((BYTE *)lock.pBits + (size_t)row * lock.Pitch, y[OTHER(row)], WIDTH);
+        /* the chroma rows of an interlaced frame alternate between its fields too */
         for (int row = 0; row < HEIGHT / 2; ++row) {
             BYTE *pairs = (BYTE *)lock.pBits + (size_t)(HEIGHT + row) * lock.Pitch;
-            for (int x = 0; x < WIDTH; x += 2) { pairs[x] = cb; pairs[x + 1] = cr; }
+            for (int x = 0; x < WIDTH; x += 2) { pairs[x] = cb[OTHER(row)]; pairs[x + 1] = cr[OTHER(row)]; }
         }
     } else {
         for (int row = 0; row < HEIGHT; ++row) {
             BYTE *pixels = (BYTE *)lock.pBits + (size_t)row * lock.Pitch;
             for (int x = 0; x < WIDTH; x += 2) {
-                pixels[2 * x] = pixels[2 * x + 2] = y;
-                pixels[2 * x + 1] = cb;
-                pixels[2 * x + 3] = cr;
+                pixels[2 * x] = pixels[2 * x + 2] = y[OTHER(row)];
+                pixels[2 * x + 1] = cb[OTHER(row)];
+                pixels[2 * x + 3] = cr[OTHER(row)];
             }
         }
     }
+#undef OTHER
     IDirect3DSurface9_UnlockRect(frame);
 
     DXVA2_VideoProcessBltParams blt;
@@ -298,6 +327,8 @@ static HRESULT draw_video_format(struct video_frame *v, D3DFORMAT nv12, IDirect3
     SetRect(&sample.SrcRect, 0, 0, WIDTH, HEIGHT);
     SetRect(&sample.DstRect, 0, 0, WIDTH, HEIGHT);
     sample.PlanarAlpha.Value = 1;
+    /* the first field is shown in the first half of the frame's time, the second after it */
+    blt.TargetFrame = v->field == 2 ? 200000 : 0;
     return IDirectXVideoProcessor_VideoProcessBlt(processor, back, &blt, &sample, 1, NULL);
 #undef service
 #undef processor
@@ -314,6 +345,24 @@ static HRESULT draw_nv12(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, DW
 static HRESULT draw_yuy2(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, DWORD rgb)
 {
     static struct video_frame v;
+    return draw_video_format(&v, FORMAT_YUY2, device, back, rgb);
+}
+
+static HRESULT draw_field1(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, DWORD rgb)
+{
+    static struct video_frame v = { .field = 1 };
+    return draw_video_format(&v, FORMAT_NV12, device, back, rgb);
+}
+
+static HRESULT draw_field2(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, DWORD rgb)
+{
+    static struct video_frame v = { .field = 2 };
+    return draw_video_format(&v, FORMAT_NV12, device, back, rgb);
+}
+
+static HRESULT draw_field_yuy2(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, DWORD rgb)
+{
+    static struct video_frame v = { .field = 2 };
     return draw_video_format(&v, FORMAT_YUY2, device, back, rgb);
 }
 
@@ -443,6 +492,9 @@ int main(int argc, char **argv)
     tolerance = 3;
     ok &= step("nv12", device, window, 0xc86020, draw_nv12);
     ok &= step("yuy2", device, window, 0x30a0d8, draw_yuy2);
+    ok &= step("field1", device, window, 0xd0b040, draw_field1);
+    ok &= step("field2", device, window, 0x40b0d0, draw_field2);
+    ok &= step("fieldy", device, window, 0x60c860, draw_field_yuy2);
     tolerance = 0;
     fflush(stdout);
     IDirect3DDevice9Ex_Release(device);
