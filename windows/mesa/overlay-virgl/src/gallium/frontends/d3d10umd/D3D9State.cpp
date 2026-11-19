@@ -882,36 +882,156 @@ D3D9SetDisplayMode(HANDLE hDevice, const D3DDDIARG_SETDISPLAYMODE *data)
    return hr;
 }
 
-static const char *
-D3D9QueryTypeName(D3DDDIQUERYTYPE type)
+/* Virgl's GL backend can count only one interval at a time. Split it at each
+ * D3D9 query boundary so overlapping queries can share the intervals they
+ * have in common. Each open bracket owns a reference to the current segment
+ * and every segment between its BEGIN and END. */
+struct D3D9OcclusionSegment {
+   struct pipe_query *counter;
+   D3D9OcclusionSegment *next;
+   UINT users;
+};
+
+struct D3D9Query {
+   D3D9ObjectKind kind;
+   D3DDDIQUERYTYPE type;
+   D3D9Query *previous;
+   D3D9Query *next;
+   D3D9OcclusionSegment *first;
+   D3D9OcclusionSegment *last; /* NULL while building. */
+   DWORD samples;
+   bool failed;
+};
+
+static void
+D3D9LinkQuery(D3D9Query **head, D3D9Query *query)
 {
-   switch (type) {
-   case D3DDDIQUERYTYPE_EVENT:
-      return "EVENT";
-   case D3DDDIQUERYTYPE_OCCLUSION:
-      return "OCCLUSION";
-   default:
-      return "UNKNOWN";
+   query->previous = NULL;
+   query->next = *head;
+   if (query->next)
+      query->next->previous = query;
+   *head = query;
+}
+
+static void
+D3D9UnlinkQuery(D3D9Query **head, D3D9Query *query)
+{
+   if (query->previous)
+      query->previous->next = query->next;
+   else
+      *head = query->next;
+   if (query->next)
+      query->next->previous = query->previous;
+}
+
+static void
+D3D9ReleaseSegment(struct pipe_context *pipe, D3D9OcclusionSegment *segment)
+{
+   if (!--segment->users) {
+      if (segment->counter)
+         pipe->destroy_query(pipe, segment->counter);
+      free(segment);
    }
+}
+
+static void
+D3D9DiscardSegments(struct pipe_context *pipe, D3D9Query *query,
+                    D3D9OcclusionSegment *last)
+{
+   while (query->first) {
+      D3D9OcclusionSegment *segment = query->first;
+      query->first = segment == last ? NULL : segment->next;
+      D3D9ReleaseSegment(pipe, segment);
+   }
+   query->last = NULL;
+}
+
+static HRESULT
+D3D9CollectOcclusion(D3D9Device *device, D3D9Query *query);
+
+static void
+D3D9CollectOpenOcclusion(D3D9Device *device)
+{
+   for (D3D9Query *open = device->building_queries; open; open = open->next)
+      D3D9CollectOcclusion(device, open);
+}
+
+static HRESULT
+D3D9ChangeOcclusionInterval(D3D9Device *device, UINT next_users)
+{
+   struct pipe_context *pipe = device->pipe;
+   if (device->retired_occlusion) {
+      /* Its last owner released it when END failed. GL still has an active
+       * query until END succeeds, so retry before opening a new interval. */
+      if (!pipe->end_query(pipe, device->retired_occlusion))
+         return E_FAIL;
+      pipe->destroy_query(pipe, device->retired_occlusion);
+      device->retired_occlusion = NULL;
+   }
+   D3D9OcclusionSegment *old = device->active_occlusion;
+   /* Short inner queries may be discarded without ever being polled. */
+   if (old && (old->users > 1 || next_users > 1) &&
+       (++device->occlusion_boundaries % 32 == 0))
+      D3D9CollectOpenOcclusion(device);
+   D3D9OcclusionSegment *next = NULL;
+   if (next_users) {
+      next = (D3D9OcclusionSegment *)calloc(1, sizeof(*next));
+      if (!next)
+         return E_OUTOFMEMORY;
+      next->users = next_users;
+      /* COUNTER works on older desktop GL that supports only SAMPLES_PASSED.
+       * Virgl substitutes a scaled visibility result on GLES. */
+      next->counter = pipe->create_query(pipe, PIPE_QUERY_OCCLUSION_COUNTER, 0);
+      if (!next->counter) {
+         free(next);
+         return E_OUTOFMEMORY;
+      }
+   }
+   if (old && old->counter && !pipe->end_query(pipe, old->counter)) {
+      if (next) {
+         pipe->destroy_query(pipe, next->counter);
+         free(next);
+      }
+      return E_FAIL;
+   }
+   if (next && !pipe->begin_query(pipe, next->counter)) {
+      pipe->destroy_query(pipe, next->counter);
+      next->counter = NULL;
+      /* The old hardware interval has ended. Keep its logical brackets open
+       * and make their missing counts observable on GetData. A later BEGIN
+       * can start a fresh counter. */
+      if (old) {
+         next->users = old->users;
+         old->next = next;
+         device->active_occlusion = next;
+      } else {
+         free(next);
+      }
+      return E_FAIL;
+   }
+   if (old)
+      old->next = next;
+   device->active_occlusion = next;
+   return S_OK;
 }
 
 static HRESULT APIENTRY
 D3D9CreateQuery(HANDLE hDevice, D3DDDIARG_CREATEQUERY *data)
 {
-   (void)hDevice;
-   if (!data)
+   D3D9Device *device = (D3D9Device *)hDevice;
+   if (!device || !data)
       return E_INVALIDARG;
    if (data->QueryType != D3DDDIQUERYTYPE_EVENT &&
        data->QueryType != D3DDDIQUERYTYPE_OCCLUSION)
       return E_NOTIMPL;
 
-   D3D9Warnf("WARNING: D3D9 %s query is emulated type=%u\n",
-             D3D9QueryTypeName(data->QueryType), data->QueryType);
-   D3D9Object *query = D3D9CreateObject(D3D9_OBJECT_QUERY, 0, NULL);
+   D3D9Query *query = (D3D9Query *)calloc(1, sizeof(*query));
    if (!query)
       return E_OUTOFMEMORY;
 
-   query->query_type = data->QueryType;
+   query->kind = D3D9_OBJECT_QUERY;
+   query->type = data->QueryType;
+   D3D9LinkQuery(&device->queries, query);
    data->hQuery = query;
    return S_OK;
 }
@@ -919,40 +1039,100 @@ D3D9CreateQuery(HANDLE hDevice, D3DDDIARG_CREATEQUERY *data)
 static HRESULT APIENTRY
 D3D9IssueQuery(HANDLE hDevice, const D3DDDIARG_ISSUEQUERY *data)
 {
-   (void)hDevice;
-   if (!data || !data->hQuery)
+   D3D9Device *device = (D3D9Device *)hDevice;
+   if (!device || !data || !data->hQuery)
       return E_INVALIDARG;
 
-   D3D9Object *query = (D3D9Object *)data->hQuery;
+   D3D9Query *query = (D3D9Query *)data->hQuery;
    if (query->kind != D3D9_OBJECT_QUERY)
       return E_INVALIDARG;
-   D3D9Warnf("WARNING: D3D9 %s query issue is emulated type=%u "
-             "flags=0x%08x\n", D3D9QueryTypeName(query->query_type),
-             query->query_type, data->Flags.Value);
-   query->query_flags = data->Flags;
+   if (query->type == D3DDDIQUERYTYPE_EVENT)
+      return S_OK;
+
+   const bool building = query->first && !query->last;
+   if (data->Flags.Begin || (data->Flags.End && !building)) {
+      /* A repeated BEGIN restarts the bracket. END alone measures an empty
+       * bracket at this point in the command stream. */
+      D3D9OcclusionSegment *old = device->active_occlusion;
+      UINT next_users = old ? old->users : 0;
+      HRESULT hr = D3D9ChangeOcclusionInterval(device, next_users + (building ? 0 : 1));
+      if (FAILED(hr))
+         return hr;
+      D3D9DiscardSegments(device->pipe, query, building ? old : query->last);
+      query->first = device->active_occlusion;
+      query->samples = 0;
+      query->failed = false;
+      if (!building) {
+         D3D9UnlinkQuery(&device->queries, query);
+         D3D9LinkQuery(&device->building_queries, query);
+      }
+   }
+   if (data->Flags.End) {
+      D3D9OcclusionSegment *old = device->active_occlusion;
+      HRESULT hr = D3D9ChangeOcclusionInterval(device, old->users - 1);
+      if (FAILED(hr))
+         return hr;
+      query->last = old;
+      D3D9UnlinkQuery(&device->building_queries, query);
+      D3D9LinkQuery(&device->queries, query);
+   }
    return S_OK;
+}
+
+static HRESULT
+D3D9CollectOcclusion(D3D9Device *device, D3D9Query *query)
+{
+   struct pipe_context *pipe = device->pipe;
+   while (query->first && query->first != device->active_occlusion) {
+      D3D9OcclusionSegment *segment = query->first;
+      if (!segment->counter)
+         query->failed = true;
+      if (!query->failed) {
+         union pipe_query_result result;
+         if (!pipe->get_query_result(pipe, segment->counter, false, &result))
+            return S_FALSE;
+         if (device->exact_occlusion)
+            query->samples += (DWORD)MIN2(result.u64, (uint64_t)(UINT32_MAX - query->samples));
+         else
+            query->samples |= result.u64 != 0;
+      }
+      query->first = segment == query->last ? NULL : segment->next;
+      D3D9ReleaseSegment(pipe, segment);
+   }
+   if (!query->first)
+      query->last = NULL;
+   return query->failed ? E_FAIL : S_OK;
 }
 
 static HRESULT APIENTRY
 D3D9GetQueryData(HANDLE hDevice, const D3DDDIARG_GETQUERYDATA *data)
 {
-   if (!data || !data->hQuery)
+   D3D9Device *device = (D3D9Device *)hDevice;
+   if (!device || !data || !data->hQuery)
       return E_INVALIDARG;
 
-   D3D9Object *query = (D3D9Object *)data->hQuery;
+   D3D9Query *query = (D3D9Query *)data->hQuery;
    if (query->kind != D3D9_OBJECT_QUERY)
       return E_INVALIDARG;
-
-   D3D9Warnf("WARNING: D3D9 %s query data is emulated type=%u "
-             "flags=0x%08x\n", D3D9QueryTypeName(query->query_type),
-             query->query_type, query->query_flags.Value);
-   if (data->pData) {
-      if (query->query_type == D3DDDIQUERYTYPE_EVENT)
+   if (query->type == D3DDDIQUERYTYPE_EVENT) {
+      if (data->pData)
          *(BOOL *)data->pData = TRUE;
-      else if (query->query_type == D3DDDIQUERYTYPE_OCCLUSION)
-         *(DWORD *)data->pData = 0;
+      return S_OK;
    }
-
+   if (query->first && !query->last)
+      return S_FALSE;
+   if (query->first) {
+      HRESULT hr = D3D9CollectOcclusion(device, query);
+      /* A long-running outer query can span many short, already-polled
+       * queries. Fold its completed intervals before their counters pile up. */
+      D3D9CollectOpenOcclusion(device);
+      if (hr != S_OK)
+         return hr;
+   }
+   if (query->failed)
+      return E_FAIL;
+   if (data->pData)
+      *(DWORD *)data->pData = query->samples;
    return S_OK;
 }
 
@@ -1301,9 +1481,27 @@ D3D9UpdatePalette(HANDLE hDevice, const D3DDDIARG_UPDATEPALETTE *data,
 
 
 static HRESULT APIENTRY
-D3D9DestroyQuery(HANDLE hDevice, const HANDLE query)
+D3D9DestroyQuery(HANDLE hDevice, const HANDLE hQuery)
 {
-   (void)hDevice;
+   D3D9Device *device = (D3D9Device *)hDevice;
+   D3D9Query *query = (D3D9Query *)hQuery;
+   if (!device || !query || query->kind != D3D9_OBJECT_QUERY)
+      return E_INVALIDARG;
+   D3D9OcclusionSegment *last = query->last;
+   if (query->first && !last) {
+      D3D9UnlinkQuery(&device->building_queries, query);
+      last = device->active_occlusion;
+      if (last->users == 1) {
+         if (last->counter && !device->pipe->end_query(device->pipe, last->counter)) {
+            device->retired_occlusion = last->counter;
+            last->counter = NULL;
+         }
+         device->active_occlusion = NULL;
+      }
+   } else {
+      D3D9UnlinkQuery(&device->queries, query);
+   }
+   D3D9DiscardSegments(device->pipe, query, last);
    free(query);
    return S_OK;
 }
@@ -1369,6 +1567,15 @@ D3D9DestroyDevice(HANDLE hDevice)
    /* Match the D3D10/11 teardown rule for device-associated scratch
     * allocations released by Gallium below. */
    device->gdi_device.base.runtime_destroying = true;
+
+   while (device->queries)
+      D3D9DestroyQuery(device, device->queries);
+   while (device->building_queries)
+      D3D9DestroyQuery(device, device->building_queries);
+   if (device->retired_occlusion) {
+      device->pipe->end_query(device->pipe, device->retired_occlusion);
+      device->pipe->destroy_query(device->pipe, device->retired_occlusion);
+   }
 
    /* Detach surviving wrappers before the device storage is released. */
    while (device->resources) {

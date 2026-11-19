@@ -110,6 +110,12 @@ struct D3D9Device
    D3DDDI_DEVICECALLBACKS callbacks;
    struct pipe_screen *screen;
    struct pipe_context *pipe;
+   bool exact_occlusion;
+   struct D3D9OcclusionSegment *active_occlusion;
+   struct pipe_query *retired_occlusion;
+   UINT occlusion_boundaries;
+   struct D3D9Query *building_queries;
+   struct D3D9Query *queries;
    D3D9Resource *resources;
    struct gdikmt_device_d3dddi gdi_device;
    UINT render_states[256];
@@ -309,8 +315,6 @@ struct D3D9Object
    uint16_t translated_ps_sampler_mask;
    uint8_t translated_ps_sampler_targets[16];
    size_t size;
-   D3DDDIQUERYTYPE query_type;
-   D3DDDI_ISSUEQUERYFLAGS query_flags;
    uint8_t data[1];
 };
 
