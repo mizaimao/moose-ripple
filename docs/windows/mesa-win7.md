@@ -1274,14 +1274,26 @@ field go up, every second row of each plane, and the conversion draw places each
 height it has in the frame; the in-driver path repeats each row of the field.
 `RIPPLE_VIDEO_WEAVE` shows such frames whole again, to compare.
 
-In UTM, `d3d9flipex`'s three field steps (a colour on the even rows, its complement on the
-odd rows) show the asked-for field alone on both paths, 44 of 44 steps in all. Playing the
-assessment's interlaced MPEG-2 clip through DirectShow, the trace recorded 116 outputs of
-the bottom field and 116 of the top one in strict alternation, the bottom field (the clip
-says odd rows first) at each frame's start. The assessment's frame counts do not change
-with it: its MPEG-2 tests already counted two outputs per frame, and its interlaced H.264
-clip arrives from the decoder with every frame marked progressive, so there is nothing to
-separate. Not yet run on the desktop OpenGL host, and not yet looked at on a screen.
+Checked on both hosts with the final build. `d3d9flipex` has five steps for it. Three show
+one field of a frame whose fields differ (a colour on the even rows, its complement on the
+odd ones) and have to show that field's colour alone. Two show a still picture, white above
+the middle row and black from it on, through either field, and read the four rows about the
+edge: a field's rows have to land at the height they have in the frame, or a still picture
+hops by a row as the fields alternate. All pass on both conversion paths, 52 of 52 steps in
+all, in UTM and on the desktop OpenGL host. On the host path the rows about the edge read
+white, grey, black, black for the first field and white, white, grey, black for the second:
+the grey is the one row at the edge the field does not hold, halfway between its
+neighbours. The in-driver path, which repeats rows, has the white of the row above there.
+
+Playing the assessment's interlaced MPEG-2 clip through DirectShow in UTM, the trace
+recorded 116 outputs of the bottom field and 116 of the top one in strict alternation, the
+bottom field (the clip says odd rows first) at each frame's start. On the desktop OpenGL
+host a screen capture of that clip, enlarged, shows the moving riders with single
+outlines; with `RIPPLE_VIDEO_WEAVE` they are doubled. The assessment's frame counts do not
+change with it (293, 149, 298, 151, 151 and 151 there): its MPEG-2 tests already counted
+two outputs per frame, and its interlaced H.264 clip reaches the driver with every frame
+marked progressive and one output asked per frame, so there is nothing to separate, and
+that test stays at half the frames it expects.
 
 **A surface bound as render target has to outlive its binding.** Mesa's virgl context copies
 the framebuffer state without taking references, and sends the bound surface's resource

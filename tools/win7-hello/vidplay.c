@@ -3,11 +3,10 @@
  * reads the screen where the window is:
  *   vidplay ds FILE [SECONDS [WIDTH HEIGHT]]   DirectShow: a filter graph with the renderer added first
  *   vidplay mf FILE [SECONDS]                  Media Foundation, through MFPlay
- * WIDTH and HEIGHT: the picture's size in the window, by default 640 by 360.
+ * WIDTH and HEIGHT: the picture's size in the window, by default 640 by 360; give the video's
+ * own size to have it shown row for row, for a screen capture.
  * Prints how many of 64 points spread over the picture are not black, twice, a second apart,
- * and whether the picture changed in between; then how much rows next to each other differ
- * against rows two apart, which shows the combing of interlaced video that is not
- * deinterlaced. Exit code 0 if at least a quarter of the points are lit.
+ * and whether the picture changed in between. Exit code 0 if at least a quarter are lit.
  * MIT licence (LICENSE at the repository root).
  */
 #define COBJMACROS
@@ -25,8 +24,8 @@
 DEFINE_GUID(CLSID_EnhancedVideoRenderer, 0xfa10746c, 0x9b63, 0x4b6c, 0xbc, 0x49, 0xfc, 0x30, 0x0e, 0xa5, 0xf2, 0x56);
 
 enum { GRID = 8 };
-/* The picture's size in the window. Given as the video's own size, the picture is shown
- * row for row (and stretched to the window, not letterboxed), which the combing figure needs. */
+/* The picture's size in the window. Given on the command line, the picture is stretched to it,
+ * not letterboxed: the video's own size then shows it row for row. */
 static int WIDTH = 640, HEIGHT = 360;
 static int fit;
 
@@ -62,40 +61,9 @@ static int look(HWND window, COLORREF *seen)
     return lit;
 }
 
-/* Combing: an interlaced frame shown whole has its two fields, taken a sixtieth of a second
- * apart, on alternate rows, so where something moves, rows next to each other differ more
- * than rows two apart. A block in the middle of the picture is read and both differences
- * summed; the result is the first as a percentage of the second. A picture without combing
- * stays well below 100. */
-static int combing(HWND window)
-{
-    enum { SIDE = 160 };
-    static DWORD pixels[SIDE * SIDE];
-    BITMAPINFO info = { { sizeof(BITMAPINFOHEADER), SIDE, -SIDE, 1, 32, BI_RGB, 0, 0, 0, 0, 0 }, { { 0, 0, 0, 0 } } };
-    POINT corner = { (WIDTH - SIDE) / 2, (HEIGHT - SIDE) / 2 };
-    ClientToScreen(window, &corner);
-    HDC screen = GetDC(NULL);
-    HDC memory = CreateCompatibleDC(screen);
-    HBITMAP bitmap = CreateCompatibleBitmap(screen, SIDE, SIDE);
-    HGDIOBJ old = SelectObject(memory, bitmap);
-    BitBlt(memory, 0, 0, SIDE, SIDE, screen, corner.x, corner.y, SRCCOPY);
-    SelectObject(memory, old);
-    GetDIBits(memory, bitmap, 0, SIDE, pixels, &info, DIB_RGB_COLORS);
-    DeleteObject(bitmap);
-    DeleteDC(memory);
-    ReleaseDC(NULL, screen);
-    long long next = 0, second = 0;
-    for (int y = 0; y + 2 < SIDE; ++y) {
-        for (int x = 0; x < SIDE; ++x) {
-            const int a = (pixels[y * SIDE + x] >> 8) & 0xff;
-            const int b = (pixels[(y + 1) * SIDE + x] >> 8) & 0xff;
-            const int c = (pixels[(y + 2) * SIDE + x] >> 8) & 0xff;
-            next += a > b ? a - b : b - a;
-            second += a > c ? a - c : c - a;
-        }
-    }
-    return second ? (int)(100 * next / second) : 0;
-}
+/* What is playing, to stop it before the process ends */
+static IMFPMediaPlayer *mf_player;
+static IMediaControl *ds_control;
 
 static HRESULT play_directshow(HWND window, const WCHAR *path)
 {
@@ -123,13 +91,13 @@ static HRESULT play_directshow(HWND window, const WCHAR *path)
     printf("graph built hr=0x%08lx\n", (unsigned long)hr);
     if (SUCCEEDED(hr)) hr = IGraphBuilder_QueryInterface(graph, &IID_IMediaControl, (void **)&control);
     if (SUCCEEDED(hr)) hr = IMediaControl_Run(control);
-    return FAILED(hr) ? hr : S_OK;   /* left running; the process ends with it */
+    ds_control = control;
+    return FAILED(hr) ? hr : S_OK;
 }
 
 static HRESULT play_mediafoundation(HWND window, const WCHAR *path)
 {
-    IMFPMediaPlayer *player = NULL;
-    return MFPCreateMediaPlayer(path, TRUE, 0, NULL, window, &player);
+    return MFPCreateMediaPlayer(path, TRUE, 0, NULL, window, &mf_player);
 }
 
 int main(int argc, char **argv)
@@ -177,15 +145,13 @@ int main(int argc, char **argv)
     printf("points not black: %d then %d of %d; %d changed in a second; the middle is %06lx\n", lit1, lit2,
            GRID * GRID, changed,
            (unsigned long)((GetRValue(second[36]) << 16) | (GetGValue(second[36]) << 8) | GetBValue(second[36])));
-    int worst = 0, sum = 0;
-    for (int i = 0; i < 8; ++i) {
-        const int now = combing(window);
-        if (now > worst) worst = now;
-        sum += now;
-        pump(150);
-    }
-    printf("rows next to each other differ by %d%% of rows two apart on average, %d%% at most (8 looks)\n",
-           sum / 8, worst);
     fflush(stdout);
+    /* Stop before the process ends. Left running, the renderer once crashed in its own DLL as
+     * the process unloaded it (a 32-bit Media Foundation run, one of 14). */
+    if (mf_player) {
+        IMFPMediaPlayer_Shutdown(mf_player);
+        IMFPMediaPlayer_Release(mf_player);
+    }
+    if (ds_control) IMediaControl_Stop(ds_control);
     return lit2 >= GRID * GRID / 4 ? 0 : 1;
 }

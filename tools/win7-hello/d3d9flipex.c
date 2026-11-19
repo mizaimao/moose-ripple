@@ -1,6 +1,6 @@
 /* Does a Direct3D 9Ex flip-model window show what the program draws? Windows' video renderer
  * presents that way under the compositor: the program draws into back buffers it shares, and
- * the compositor takes them from there itself. Three steps, each checked by reading the
+ * the compositor takes them from there itself. The steps, each checked by reading the
  * screen where the window is:
  *   clear   the back buffer is cleared to a colour
  *   upload  a system-memory surface is filled and copied to the back buffer (UpdateSurface),
@@ -21,6 +21,9 @@
  *           to show, so the colour of the even rows everywhere
  *   field2  the same for the second field, the odd rows
  *   fieldy  the second field of a YUY2 frame
+ *   edge1   a still interlaced picture, white above the middle row and black from it on,
+ *           shown by its first field: the edge has to stay on its row
+ *   edge2   the same by its second field
  * "d3d9flipex copy" runs the same steps with the ordinary copy-model swap chain as a control.
  * Prints one line per step; exit code 0 if every step showed its colour.
  * MIT licence (LICENSE at the repository root).
@@ -49,21 +52,33 @@ static void pump(void)
     }
 }
 
-static COLORREF screen_pixel(HWND window)
+/* The screen at a place of the window, as 0xRRGGBB */
+static DWORD screen_at(HWND window, int x, int y)
 {
-    POINT p = { WIDTH / 2, HEIGHT / 2 };
+    POINT p = { x, y };
     ClientToScreen(window, &p);
     HDC screen = GetDC(NULL);
     COLORREF c = GetPixel(screen, p.x, p.y);
     ReleaseDC(NULL, screen);
-    return c;
+    return (GetRValue(c) << 16) | (GetGValue(c) << 8) | GetBValue(c);
 }
 
 static int tolerance;  /* how far a channel on the screen may be from the colour drawn */
 
-/* Present `frames` times what draw() makes, then compare the screen with rgb */
-static int step(const char *name, IDirect3DDevice9Ex *device, HWND window, DWORD rgb,
-                HRESULT (*draw)(IDirect3DDevice9Ex *, IDirect3DSurface9 *, DWORD))
+static int near_colour(DWORD shown, DWORD rgb)
+{
+    int ok = 1;
+    for (int shift = 0; shift < 24; shift += 8) {
+        const int difference = (int)((shown >> shift) & 0xff) - (int)((rgb >> shift) & 0xff);
+        ok &= difference <= tolerance && -difference <= tolerance;
+    }
+    return ok;
+}
+
+typedef HRESULT (*draw_fn)(IDirect3DDevice9Ex *, IDirect3DSurface9 *, DWORD);
+
+/* Present twenty times what draw() makes and let it reach the screen */
+static HRESULT show(IDirect3DDevice9Ex *device, DWORD rgb, draw_fn draw)
 {
     HRESULT hr = S_OK;
     for (int i = 0; i < 20 && SUCCEEDED(hr); ++i) {
@@ -80,15 +95,36 @@ static int step(const char *name, IDirect3DDevice9Ex *device, HWND window, DWORD
     }
     Sleep(300);
     pump();
-    COLORREF got = screen_pixel(window);
-    DWORD shown = (GetRValue(got) << 16) | (GetGValue(got) << 8) | GetBValue(got);
-    int ok = SUCCEEDED(hr);
-    for (int shift = 0; shift < 24; shift += 8) {
-        const int difference = (int)((shown >> shift) & 0xff) - (int)((rgb >> shift) & 0xff);
-        ok &= difference <= tolerance && -difference <= tolerance;
-    }
+    return hr;
+}
+
+/* Show what draw() makes, then compare the middle of the screen with rgb */
+static int step(const char *name, IDirect3DDevice9Ex *device, HWND window, DWORD rgb, draw_fn draw)
+{
+    const HRESULT hr = show(device, rgb, draw);
+    const DWORD shown = screen_at(window, WIDTH / 2, HEIGHT / 2);
+    const int ok = SUCCEEDED(hr) && near_colour(shown, rgb);
     printf("%-6s hr=0x%08lx drew %06lx screen %06lx %s\n", name, (unsigned long)hr,
            (unsigned long)rgb, (unsigned long)shown, ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+/* Where a field's rows land. The picture is still: white above the middle row, black from it
+ * on, in both fields. A field holds every second row, and the processor has to put each back
+ * at the height it has in the frame, or a still picture hops by a row as the fields
+ * alternate. Read are the four rows about the edge. The outer two have to be right for
+ * either field; of the inner two, the one the field has as a row of its own: the middle
+ * row, black, for the first field (the even rows), the row above it, white, for the second. */
+static int step_edge(const char *name, IDirect3DDevice9Ex *device, HWND window, int field, draw_fn draw)
+{
+    const HRESULT hr = show(device, 0xffffff, draw);
+    DWORD rows[4];
+    for (int i = 0; i < 4; ++i) rows[i] = screen_at(window, WIDTH / 2, HEIGHT / 2 - 2 + i);
+    const int ok = SUCCEEDED(hr) && near_colour(rows[0], 0xffffff) && near_colour(rows[3], 0x000000) &&
+                   (field == 1 ? near_colour(rows[2], 0x000000) : near_colour(rows[1], 0xffffff));
+    printf("%-6s hr=0x%08lx rows about the edge: %06lx %06lx | %06lx %06lx %s\n", name, (unsigned long)hr,
+           (unsigned long)rows[0], (unsigned long)rows[1], (unsigned long)rows[2], (unsigned long)rows[3],
+           ok ? "PASS" : "FAIL");
     return ok;
 }
 
@@ -231,6 +267,8 @@ struct video_frame {
      * first or the second field is to be shown, by the deinterlacing device. The field asked
      * for has the colour to show; the other one its complement. */
     int field;
+    /* A still picture instead: the colour above the middle row, its complement from it on */
+    int edge;
 };
 
 #define FORMAT_NV12 ((D3DFORMAT)MAKEFOURCC('N', 'V', '1', '2'))
@@ -285,25 +323,25 @@ static HRESULT draw_video_format(struct video_frame *v, D3DFORMAT nv12, IDirect3
         cb[i] = (BYTE)(128.0 + 224.0 * (b - luma) / (1.772 * 255.0) + 0.5);
         cr[i] = (BYTE)(128.0 + 224.0 * (r - luma) / (1.402 * 255.0) + 0.5);
     }
-#define OTHER(row) (v->field && ((row) & 1) != v->field - 1)
+#define OTHER(row, rows) (v->edge ? (row) >= (rows) / 2 : v->field && ((row) & 1) != v->field - 1)
     D3DLOCKED_RECT lock;
     hr = IDirect3DSurface9_LockRect(frame, &lock, NULL, D3DLOCK_DONOTWAIT);
     if (FAILED(hr)) return hr;
     if (nv12 == FORMAT_NV12) {
         for (int row = 0; row < HEIGHT; ++row)
-            memset((BYTE *)lock.pBits + (size_t)row * lock.Pitch, y[OTHER(row)], WIDTH);
+            memset((BYTE *)lock.pBits + (size_t)row * lock.Pitch, y[OTHER(row, HEIGHT)], WIDTH);
         /* the chroma rows of an interlaced frame alternate between its fields too */
         for (int row = 0; row < HEIGHT / 2; ++row) {
             BYTE *pairs = (BYTE *)lock.pBits + (size_t)(HEIGHT + row) * lock.Pitch;
-            for (int x = 0; x < WIDTH; x += 2) { pairs[x] = cb[OTHER(row)]; pairs[x + 1] = cr[OTHER(row)]; }
+            for (int x = 0; x < WIDTH; x += 2) { pairs[x] = cb[OTHER(row, HEIGHT / 2)]; pairs[x + 1] = cr[OTHER(row, HEIGHT / 2)]; }
         }
     } else {
         for (int row = 0; row < HEIGHT; ++row) {
             BYTE *pixels = (BYTE *)lock.pBits + (size_t)row * lock.Pitch;
             for (int x = 0; x < WIDTH; x += 2) {
-                pixels[2 * x] = pixels[2 * x + 2] = y[OTHER(row)];
-                pixels[2 * x + 1] = cb[OTHER(row)];
-                pixels[2 * x + 3] = cr[OTHER(row)];
+                pixels[2 * x] = pixels[2 * x + 2] = y[OTHER(row, HEIGHT)];
+                pixels[2 * x + 1] = cb[OTHER(row, HEIGHT)];
+                pixels[2 * x + 3] = cr[OTHER(row, HEIGHT)];
             }
         }
     }
@@ -364,6 +402,18 @@ static HRESULT draw_field_yuy2(IDirect3DDevice9Ex *device, IDirect3DSurface9 *ba
 {
     static struct video_frame v = { .field = 2 };
     return draw_video_format(&v, FORMAT_YUY2, device, back, rgb);
+}
+
+static HRESULT draw_edge1(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, DWORD rgb)
+{
+    static struct video_frame v = { .field = 1, .edge = 1 };
+    return draw_video_format(&v, FORMAT_NV12, device, back, rgb);
+}
+
+static HRESULT draw_edge2(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, DWORD rgb)
+{
+    static struct video_frame v = { .field = 2, .edge = 1 };
+    return draw_video_format(&v, FORMAT_NV12, device, back, rgb);
 }
 
 static HRESULT draw_video(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, DWORD rgb)
@@ -495,6 +545,8 @@ int main(int argc, char **argv)
     ok &= step("field1", device, window, 0xd0b040, draw_field1);
     ok &= step("field2", device, window, 0x40b0d0, draw_field2);
     ok &= step("fieldy", device, window, 0x60c860, draw_field_yuy2);
+    ok &= step_edge("edge1", device, window, 1, draw_edge1);
+    ok &= step_edge("edge2", device, window, 2, draw_edge2);
     tolerance = 0;
     fflush(stdout);
     IDirect3DDevice9Ex_Release(device);
