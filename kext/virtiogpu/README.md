@@ -49,5 +49,8 @@ for a burst of frames).
 
 Checked on the Intel host (VM 210, 1280x800), with and without the GL driver: a table at half
 brightness halves every sampled colour value exactly and leaves the picture in place, and a
-one-second fade steps down to black and back up in frames taken every 0.1 s. Not checked yet
-in UTM. The hardware pointer is drawn by the host and is not dimmed.
+one-second fade steps down to black and back up in frames taken every 0.1 s. In UTM on Apple
+silicon (a trial session, the disk's changes discarded) the host accepted every command and
+its display client logged about 27 draws a second through such a fade; what the screen itself
+shows there has not been captured. The hardware pointer is drawn by the host and is not
+dimmed.
