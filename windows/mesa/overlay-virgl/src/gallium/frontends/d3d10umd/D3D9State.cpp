@@ -1094,7 +1094,13 @@ D3D9CollectOcclusion(D3D9Device *device, D3D9Query *query)
          if (device->exact_occlusion)
             query->samples += (DWORD)MIN2(result.u64, (uint64_t)(UINT32_MAX - query->samples));
          else
-            query->samples |= result.u64 != 0;
+            /* A host that can only say whether anything was visible (OpenGL ES has no count)
+             * answers with a stand-in for "something", 1024 from virglrenderer, so that a
+             * program which culls below a threshold does not take the object for one pixel
+             * and drop it. That is passed on, once whatever number of intervals the query was
+             * cut into: the largest, not the sum. */
+            query->samples = MAX2(query->samples,
+                                  (DWORD)MIN2(result.u64, (uint64_t)UINT32_MAX));
       }
       query->first = segment == query->last ? NULL : segment->next;
       D3D9ReleaseSegment(pipe, segment);
@@ -1679,6 +1685,12 @@ D3D9FillDeviceFuncs(D3DDDI_DEVICEFUNCS *funcs)
    funcs->pfnOpenResource = D3D9OpenResource;
    funcs->pfnGetCaptureAllocationHandle = D3D9GetCaptureAllocationHandle;
    funcs->pfnCaptureToSysMem = D3D9CaptureToSysMem;
+   funcs->pfnCreateVideoProcessDevice = D3D9CreateVideoProcessDevice;
+   funcs->pfnDestroyVideoProcessDevice = D3D9DestroyVideoProcessDevice;
+   funcs->pfnVideoProcessBeginFrame = D3D9VideoProcessBeginFrame;
+   funcs->pfnVideoProcessEndFrame = D3D9VideoProcessEndFrame;
+   funcs->pfnSetVideoProcessRenderTarget = D3D9SetVideoProcessRenderTarget;
+   funcs->pfnVideoProcessBlt = D3D9VideoProcessBlt;
    funcs->pfnCreateVideoProcessor = D3D9CreateVideoProcessor;
    funcs->pfnSetVideoProcessBltState = D3D9SetVideoProcessBltState;
    funcs->pfnGetVideoProcessBltStatePrivate =

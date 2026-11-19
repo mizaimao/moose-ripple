@@ -247,6 +247,32 @@ buffers. The test queues full and partial updates to two 640×640 textures,
 then samples each texture and compares all 1,024 output pixels, including
 the border around the partial update.
 
+`d3d9flipex.exe` and `d3d9flipex32.exe` (`guest/flipex.cmd` runs both) check that
+what a program draws reaches the screen the way Windows' video renderer presents:
+a Direct3D 9Ex flip-model window, or the copy model with the argument `copy`.
+Each step draws one colour and then reads the screen where the window is: a
+clear, a system-memory surface copied to the back buffer, a video-memory surface
+filled under an ordinary lock and under a discarding one, a frame sent through
+Windows' software video processor, and a frame sent through the driver's own
+video processor to the middle of the window, with the background colour checked
+beside it. Run them outside the driver package directory too: beside the package
+a 64-bit program loads the package's copy of the driver, not the installed one.
+
+`vidplay.exe ds|mf FILE` (`guest/vidplay.cmd` runs both, in both process sizes)
+plays a video in a window of its own through DirectShow or through Media
+Foundation, both ending in the Enhanced Video Renderer, and reads the screen at
+64 points: how many are not black, and whether the picture moves.
+
+`guest/hdclips.cmd TAG` runs each video playback test of Windows' own assessment
+alone, with the command line the full assessment uses, and sends what each
+printed and its result file (frames rendered against frames expected).
+`guest/weirun.cmd TAG` runs the full assessment and sends the scores, the limits
+applied and the video figures from its result file.
+
+At trace level 3 a lock or unlock of a surface in memory also says how many of
+256 points spread over it are not black, which tells an empty frame from a dark
+one, and what address Windows passed with the lock.
+
 For user-mode samples, run the program with `RIPPLE_UMD_LOG` set: the user-mode driver writes the
 load addresses of the program's main modules when it is loaded (`guest/prof.cmd` does that for
 one assessment test, `guest/dxone.cmd` runs one test alone). Our driver's functions are named

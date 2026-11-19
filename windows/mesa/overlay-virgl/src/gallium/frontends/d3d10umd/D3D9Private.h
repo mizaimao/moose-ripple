@@ -159,6 +159,8 @@ struct D3D9Device
    /* D3D9KeyBlitPipe's shaders and state, made on first use. */
    struct {
       void *vs, *fs[2], *sampler, *blend, *rasterizer, *dsa, *velems;
+      /* the video processor's conversion draw (D3D9VideoDrawNv12) shares the rest */
+      void *video_fs, *video_sampler;
    } key_blit;
    HANDLE render_targets[4];
    UINT render_target_subresources[4];
@@ -378,6 +380,16 @@ static constexpr D3DDDIFORMAT D3D9_FMT_DF24 = D3D9FourCC('D', 'F', '2', '4');
 static constexpr D3DDDIFORMAT D3D9_FMT_INTZ = D3D9FourCC('I', 'N', 'T', 'Z');
 static constexpr D3DDDIFORMAT D3D9_FMT_AYUV = D3D9FourCC('A', 'Y', 'U', 'V');
 static constexpr D3DDDIFORMAT D3D9_FMT_YUY2 = D3D9FourCC('Y', 'U', 'Y', '2');
+static constexpr D3DDDIFORMAT D3D9_FMT_NV12 = D3D9FourCC('N', 'V', '1', '2');
+
+/* The video formats the driver takes: frames a decoder leaves in a plain surface, which the
+ * video processor converts (D3D9Resource.cpp). NV12 is a full-size plane of luma followed by
+ * a half-size plane of chroma pairs; YUY2 is two bytes a pixel, luma and alternating chroma. */
+static inline bool
+D3D9IsVideoFormat(D3DDDIFORMAT format)
+{
+   return format == D3D9_FMT_NV12 || format == D3D9_FMT_YUY2;
+}
 static constexpr D3DDDI_POOL D3D9_POOL_STAGINGMEM = (D3DDDI_POOL)5;
 
 static inline bool
@@ -444,6 +456,21 @@ HRESULT APIENTRY D3D9ColorFill(HANDLE hDevice,
 HRESULT APIENTRY D3D9DepthFill(HANDLE hDevice,
                                const D3DDDIARG_DEPTHFILL *data);
 HRESULT APIENTRY D3D9Present(HANDLE hDevice, const D3DDDIARG_PRESENT *data);
+/* The video processor (D3D9Resource.cpp) */
+extern const GUID D3D9ProgressiveVideoProcessor;
+bool D3D9VideoProcessorTakes(D3DDDIFORMAT video, D3DDDIFORMAT target);
+HRESULT APIENTRY D3D9CreateVideoProcessDevice(
+   HANDLE hDevice, D3DDDIARG_CREATEVIDEOPROCESSDEVICE *data);
+HRESULT APIENTRY D3D9DestroyVideoProcessDevice(HANDLE hDevice,
+                                               HANDLE hVideoProcessor);
+HRESULT APIENTRY D3D9VideoProcessBeginFrame(HANDLE hDevice,
+                                            HANDLE hVideoProcess);
+HRESULT APIENTRY D3D9VideoProcessEndFrame(
+   HANDLE hDevice, D3DDDIARG_VIDEOPROCESSENDFRAME *data);
+HRESULT APIENTRY D3D9SetVideoProcessRenderTarget(
+   HANDLE hDevice, const D3DDDIARG_SETVIDEOPROCESSRENDERTARGET *data);
+HRESULT APIENTRY D3D9VideoProcessBlt(HANDLE hDevice,
+                                     const D3DDDIARG_VIDEOPROCESSBLT *data);
 HRESULT APIENTRY D3D9Clear(HANDLE hDevice, const D3DDDIARG_CLEAR *data,
                            UINT rect_count, const RECT *rects);
 HRESULT APIENTRY D3D9DestroyResource(HANDLE hDevice, HANDLE resource);

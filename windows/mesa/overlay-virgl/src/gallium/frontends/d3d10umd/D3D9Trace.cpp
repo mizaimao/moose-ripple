@@ -53,21 +53,47 @@ D3D9TraceArg(D3DDDIARG_CREATERESOURCE *a)
                s ? s->SysMemPitch : 0, sub ? (void *)sub->data : NULL, sub ? sub->pitch : 0);
 }
 
+/* How much of a surface in memory holds a picture: of 256 points spread over it, how many are
+ * not black. The pixel in the middle alone cannot tell an empty frame from a dark one. */
+static unsigned
+D3D9TracePointsSet(const D3D9SubResource *sub)
+{
+   unsigned set = 0;
+   for (unsigned j = 0; j < 16; ++j) {
+      for (unsigned i = 0; i < 16; ++i) {
+         const size_t y = (size_t)sub->height * (2 * j + 1) / 32;
+         const size_t x = (size_t)sub->width * (2 * i + 1) / 32;
+         set += (*(const UINT *)(sub->data + y * sub->pitch + x * 4) & 0x00ffffff) != 0;
+      }
+   }
+   return set;
+}
+
+static bool
+D3D9TraceHasPixels(const D3D9SubResource *sub)
+{
+   return sub && sub->data && sub->width && sub->height && sub->pitch >= sub->width * 4;
+}
+
 static void
 D3D9TraceArg(D3DDDIARG_LOCK *a)
 {
    D3D9SubResource *sub = D3D9GetSubResource(a->hResource, a->SubResourceIndex);
    ripple_logf("  lock %p.%u flags 0x%08x pitch %u at %p (memory %p)", a->hResource, a->SubResourceIndex,
                a->Flags.Value, a->Pitch, a->pSurfData, sub ? (void *)sub->data : NULL);
+   if (D3D9TraceHasPixels(sub))
+      ripple_logf("    in memory at the lock: %u of 256 points not black", D3D9TracePointsSet(sub));
 }
 
 static void
 D3D9TraceArg(const D3DDDIARG_UNLOCK *a)
 {
    D3D9SubResource *sub = D3D9GetSubResource(a->hResource, a->SubResourceIndex);
-   if (sub && sub->data && sub->width && sub->height && sub->pitch >= sub->width * 4)
-      ripple_logf("  unlock %p.%u, pixel in the middle 0x%08x", a->hResource, a->SubResourceIndex,
-                  *(const UINT *)(sub->data + (size_t)(sub->height / 2) * sub->pitch + (sub->width / 2) * 4));
+   if (D3D9TraceHasPixels(sub))
+      ripple_logf("  unlock %p.%u, pixel in the middle 0x%08x, %u of 256 points not black", a->hResource,
+                  a->SubResourceIndex,
+                  *(const UINT *)(sub->data + (size_t)(sub->height / 2) * sub->pitch + (sub->width / 2) * 4),
+                  D3D9TracePointsSet(sub));
 }
 
 static void
@@ -148,6 +174,15 @@ template <typename T>
 static void
 D3D9TraceBefore(T)
 {
+}
+
+/* What Windows itself passes with a lock: for a surface in its own memory, where it has it */
+static void
+D3D9TraceBefore(D3DDDIARG_LOCK *a)
+{
+   if (a && a->Flags.NotifyOnly)
+      ripple_logf("  locking %p.%u: Windows passes %p pitch %u", a->hResource, a->SubResourceIndex,
+                  a->pSurfData, a->Pitch);
 }
 
 static void
