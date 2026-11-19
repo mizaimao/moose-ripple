@@ -3523,6 +3523,9 @@ D3D9Lock(HANDLE hDevice, D3DDDIARG_LOCK *data)
          }
       }
       if (resource->watched_buffer) {
+         resource->watched_append = data->Flags.NoOverwrite && !data->Flags.Discard;
+         if (data->Flags.Discard)
+            resource->watched_discard = true;
          data->pSurfData = resource->watched_buffer + box.x;
          data->Pitch = data->SlicePitch = 0;
          sub->cpu_locked = true;
@@ -3647,8 +3650,17 @@ D3D9Lock(HANDLE hDevice, D3DDDIARG_LOCK *data)
    return S_OK;
 }
 
-/* The caller may change only part of a dirty page. The shadow preserves
- * adjacent data. Let Gallium order this upload against earlier draws. */
+/* The caller may change only part of a dirty page. The shadow preserves adjacent data,
+ * so a page uploaded again carries the bytes the host already has and the new ones.
+ *
+ * An append (NoOverwrite) is written unsynchronized: the caller promised that queued
+ * draws do not use what it wrote, and the rest of the page is unchanged. An ordered copy
+ * costs one wait for the GPU per lock on a host whose GL maps a busy buffer by waiting
+ * (ANGLE on Metal), with the host's device thread stopped meanwhile.
+ * A discard takes new storage: draws queued before it keep the old one, and an ordered
+ * copy left in the queue would land after later appends to the same page and undo them.
+ * A lock with neither promise keeps the ordered copy, and so does every upload after it
+ * until the next discard, so that none overtakes it. */
 static HRESULT
 D3D9UploadWatchedBuffer(D3D9Device *device, D3D9Resource *resource, size_t size)
 {
@@ -3672,15 +3684,24 @@ D3D9UploadWatchedBuffer(D3D9Device *device, D3D9Resource *resource, size_t size)
    }
    /* A full page list or a failed query falls back to the entire buffer. */
    struct pipe_context *pipe = device->pipe;
-   const unsigned discard = !first && end == size ?
-      PIPE_MAP_DISCARD_WHOLE_RESOURCE : PIPE_MAP_DISCARD_RANGE;
+   unsigned usage = PIPE_MAP_WRITE;
+   if ((!first && end == size) || resource->watched_discard)
+      usage |= PIPE_MAP_DISCARD_WHOLE_RESOURCE;
+   else if (resource->watched_append && !resource->watched_ordered)
+      usage |= PIPE_MAP_DISCARD_RANGE | PIPE_MAP_UNSYNCHRONIZED;
+   else
+      usage |= PIPE_MAP_DISCARD_RANGE;
    struct pipe_transfer *transfer = NULL;
    void *map = pipe_buffer_map_range(pipe, resource->pipe_resource, (unsigned)first,
-                                     (unsigned)(end - first), PIPE_MAP_WRITE | discard, &transfer);
+                                     (unsigned)(end - first), usage, &transfer);
    if (!map)
       return E_OUTOFMEMORY;
    memcpy(map, base + first, end - first);
    pipe_buffer_unmap(pipe, transfer);
+   if (usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE)
+      resource->watched_discard = resource->watched_ordered = false;
+   else if (!(usage & PIPE_MAP_UNSYNCHRONIZED))
+      resource->watched_ordered = true;
    ResetWriteWatch(base, size);
    return S_OK;
 }

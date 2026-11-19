@@ -1048,3 +1048,63 @@ why the regression probe checks the control's top, middle and bottom as well
 as the glass. The release driver preserves the application's pixel values.
 
 The visual defect remains open. [Search-box resize issue](https://github.com/mizaimao/moose-ripple/issues/69)
+
+## Vertex buffer appends on a host that waits for the GPU
+
+A profile of UTM's QEMU process during the Explorer drag and resize
+(`tools/win7-debug/README.md`, "What the host does meanwhile") showed QEMU's
+main thread waiting inside virtio-gpu command processing for 10% of the drag
+and 13% of the resize. More than nine tenths of that was one path:
+`vrend_decode_copy_transfer3d`, `glMapBufferRange`, and ANGLE's Metal backend
+waiting for the GPU to finish (`waitUntilCompleted`) before it lets the CPU
+write into a buffer that queued draws still use. QEMU holds its global lock
+during that wait, so every guest processor that needs the lock stops as well.
+x64 Windows needs it constantly: each change of IRQL writes CR8, and the
+emulator takes the lock to set the APIC's task priority. The guest's four
+processor threads spent 11% of the drag and 17% of the resize waiting for it.
+
+The copies were ours. The compositor appends a few vertices or indices to a
+dynamic buffer per lock, and the driver uploads the pages that changed when
+the lock ends. It asked Gallium for an ordered write (`PIPE_MAP_DISCARD_RANGE`).
+On a busy buffer Mesa's virgl driver turns that into a copy from a staging
+buffer, placed in the command stream and marked synchronized. A desktop
+OpenGL driver serves such a map without stopping. ANGLE on Metal waits.
+
+The upload now follows what the lock promised:
+
+- An append (`D3DLOCK_NOOVERWRITE`) is written unsynchronized. The caller
+  promised that queued draws do not use what it wrote, and the rest of each
+  uploaded page is what the host already has. The host writes it at once.
+- A discard (`D3DLOCK_DISCARD`) takes new storage. Draws queued before it keep
+  the old storage, and no ordered copy stays in the queue, where it would land
+  after later appends to the same page and undo them.
+- A lock with neither promise keeps the ordered copy, and so does every upload
+  after it until the next discard.
+
+On UTM (M1 Max, 1280×1024, Aero, Meltdown mitigation off as in
+`docs/windows/test-vms.md`), the driver before and after the change ran the
+four-round gesture workload on one boot in the order A, B, B, A, B:
+
+| Per three-second gesture | Before | After |
+| --- | ---: | ---: |
+| Distinct window sizes, corner resize | 36.9 | 41.0 |
+| Host display draws per second, resize | 25.7 | 29.7 |
+| Host display draws per second, title-bar drag | 32.7 | 37.8 |
+| Distinct positions, title-bar drag | 163.5 | 162.7 |
+
+A profile with the change shows the main thread waiting with the lock held for
+1.5% of both gestures, none of it in the copy path, and the guest's processor
+threads waiting for the lock for 3% of the drag and 7% of the resize. The
+profile it is compared with is of the earlier driver on another boot.
+
+`d3d9stream.exe` and `d3d9stream32.exe` (appends, ranged locks and a discard
+while draws are queued) read back the expected colors, the texture upload
+checks pass in both bitnesses, five desktop context menus open, and a capture
+from inside the guest during a resize shows the desktop and the glass frame
+intact.
+
+On desktop OpenGL the change is neutral. On the Intel host (VM 220, 1024×768,
+Windows' default mitigations) the same order A, B, B, A gave 174.4 distinct
+sizes per resize before and 171.8 after, inside the spread of single gestures
+(162 to 178) and at the display's rate, with 173 to 176 drag positions on both
+sides. The stream, upload and menu checks pass there in both bitnesses too.
