@@ -95,6 +95,8 @@ static int profile_on;
 static LARGE_INTEGER prof_freq, prof_last;
 static DWORD prof_read, prof_frame;   /* timer ticks (Windows 98: 1.19 MHz) */
 static DWORD prof_n;
+static DWORD flip_reads, flip_read_ticks, flip_gpu, flip_count;
+static LARGE_INTEGER flip_start;
 
 static void profile_read_back(LARGE_INTEGER t0, LARGE_INTEGER t1)
 {
@@ -102,6 +104,8 @@ static void profile_read_back(LARGE_INTEGER t0, LARGE_INTEGER t1)
 
     if (!profile_on)
         return;
+    flip_reads++;
+    flip_read_ticks += t1.LowPart - t0.LowPart;
     if (!prof_freq.QuadPart)
         QueryPerformanceFrequency(&prof_freq);
     prof_read += t1.LowPart - t0.LowPart;
@@ -117,6 +121,30 @@ static void profile_read_back(LARGE_INTEGER t0, LARGE_INTEGER t1)
     prof_read = prof_frame = 0;
     prof_n = 0;
     prof_last.QuadPart = 0;
+}
+
+/* Measure presents independently: a GPU flip normally has no read-back to sample. */
+void d3d_profile_flip(int gpu)
+{
+    LARGE_INTEGER t;
+    char line[160];
+    if (!profile_on || !QueryPerformanceCounter(&t))
+        return;
+    if (!flip_start.QuadPart) {
+        flip_start = t;
+        flip_count = flip_gpu = flip_reads = flip_read_ticks = 0;
+        return;
+    }
+    flip_gpu += gpu;
+    if (++flip_count < 100 || !QueryPerformanceFrequency(&prof_freq) || !prof_freq.LowPart)
+        return;
+    wsprintf(line, "rd3d: 100 flips: %lu GPU, %lu reads, %lu us/flip, %lu us/flip reading\r\n",
+             flip_gpu, flip_reads, (DWORD)MulDiv((int)((t.LowPart - flip_start.LowPart) / flip_count),
+             1000000, (int)prof_freq.LowPart),
+             (DWORD)MulDiv((int)(flip_read_ticks / flip_count), 1000000, (int)prof_freq.LowPart));
+    dbg(line);
+    flip_start = t;
+    flip_count = flip_gpu = flip_reads = flip_read_ticks = 0;
 }
 
 static void tracef(const char *fmt, ...)
@@ -323,6 +351,7 @@ typedef struct {
     HMODULE opengl, mesa;
     int core_ok, ext_ok;
     GLF gl;
+    BOOL (WINAPI *present_color)(void); /* optional in ripplegl.dll */
     ATOM wndclass;
 } RPROC;
 
@@ -494,6 +523,7 @@ static int gl_load_core(RPROC *p)
             return 0;
         }
     }
+    p->present_color = (BOOL (WINAPI *)(void))GetProcAddress(p->mesa, "RipplePresentColor");
     p->core_ok = 1;
     return 1;
 }
@@ -722,6 +752,8 @@ typedef struct {
     DWORD used;                         /* when last attached (RCTX.clock) */
     GLuint rb;                          /* colour, or depth and stencil */
     GLenum format;                      /* rb's: colour_format, or depth and stencil */
+    DWORD serial;                       /* display mode in which this page was attached */
+    int deferred;                       /* exclusive flip-chain page newer on the GPU */
     int written;                        /* colour: the memory is newer than rb's picture (the
                                            program wrote it, or rb is new): it goes to the GPU
                                            before the next draw (rt_upload) */
@@ -740,6 +772,9 @@ typedef struct {
     GPUBUF cb[TARGETS];                 /* the picture of each render target */
     GPUBUF zb[ZBUFFERS];                /* the depth of each z-buffer */
     GPUBUF *cur;                        /* the attached colour buffer (NULL: none yet) */
+    GLuint read_fbo;                    /* read a previously displayed page without disturbing fbo */
+    int scanout_enabled, chain_active;
+    LPDDRAWI_DDRAWSURFACE_LCL front, back; /* members seen by the most recent GPU Flip */
     DWORD clock;
     DWORD vp_x, vp_y, vp_w, vp_h;       /* the viewport (0 wide: none given yet) */
     int dirty;                          /* drawn since the last read-back */
@@ -761,6 +796,7 @@ typedef struct {
 #define MAX_CONTEXTS 64
 /* Direct3D's context handle is the slot number plus one. */
 static struct { OWNER o; RCTX *c; } contexts[MAX_CONTEXTS];
+static int scanout_requested;           /* a process has opted in since the DLL loaded */
 
 static RCTX *context_of(ULONG_PTR handle)
 {
@@ -809,14 +845,17 @@ static GLF *gl_of(RCTX *c)
    which take locks of the whole system, and DirectDraw holds Windows' 16-bit lock during these
    calls. Tomb Raider: The Last Revelation's drawing thread hung in it after a few hundred
    frames, while a thread of another program waited for the 16-bit lock. */
-static void make_current(RCTX *c)
+static int make_current(RCTX *c)
 {
     static DWORD logged;
 
-    if (!gl_of(c)->RippleMakeCurrent(c->rc) && logged++ < 8) {
+    if (gl_of(c)->RippleMakeCurrent(c->rc))
+        return 1;
+    if (logged++ < 8) {
         dbg("rd3d: context "); dbg_hex(c->rc); dbg(" not made current in thread ");
         dbg_hex(GetCurrentThreadId()); dbg("\r\n");
     }
+    return 0;
 }
 
 /* The end of a call that used the context (make_current). */
@@ -869,67 +908,207 @@ static void targets_written(FLATPTR mem, const GPUBUF *keep)
         if (!c)
             continue;
         for (j = 0; j < TARGETS; j++)
-            if (c->cb[j].mem == mem && &c->cb[j] != keep)
+            if (c->cb[j].mem == mem && &c->cb[j] != keep) {
                 c->cb[j].written = 1;
+                c->cb[j].deferred = 0;
+            }
     }
 }
 
 /* The OpenGL picture of the render target goes into the memory it was drawn for: the attached
    colour buffer's (a flip gives the target surface other memory, the picture stays with its
    memory). The pitch and format are the target's, the same for every surface of a chain. */
-static void read_back(RCTX *c)
+static int read_pixels(RCTX *c, GPUBUF *b)
 {
     GLF *gl = gl_of(c);
-    LPDDRAWI_DDRAWSURFACE_GBL g;
     DDPIXELFORMAT pf;
     PIXFMT f;
-    FLATPTR mem;
+    DWORD w = b->w, h = b->h, pitch;
+    int texture = 0;
 
-    if (!c->dirty || !c->rt || !c->cur)
-        return;
-    c->dirty = 0;
-    if (c->cur->written)
-        return;                         /* the memory is newer: nothing drawn since it was */
-    g = c->rt->lpGbl;
-    mem = c->cur->mem;
-    tracef("rd3d: read back into %08lx (scene %lu)\r\n", mem, c->scene);
-    surface_format(c->rt, &pf);
+    if ((!b->deferred && (b != c->cur || !c->dirty)) || b->written || !b->mem)
+        return 1;
+    /* The old chain's memory may already belong to another mode. */
+    if (b->serial != shared->mode_serial) {
+        b->written = 1;
+        b->deferred = 0;
+        if (b == c->cur)
+            c->dirty = 0;
+        return 1;
+    }
+    if (b->deferred) {
+        display_format(&pf);
+        pitch = shared->pitch;
+    } else {
+        LPDDRAWI_DDRAWSURFACE_GBL g;
+        if (!c->rt)
+            return 1;
+        g = c->rt->lpGbl;
+        surface_format(c->rt, &pf);
+        pitch = g->lPitch;
+        if (w > g->wWidth) w = g->wWidth;
+        if (h > g->wHeight) h = g->wHeight;
+        texture = (c->rt->ddsCaps.dwCaps & DDSCAPS_TEXTURE) != 0;
+    }
     f = gl_format(&pf);
-    if (!f.bytes || !mem)
-        return;
-    make_current(c);
+    if (!f.bytes || !make_current(c))
+        return 0;
+    if (b != c->cur) {
+        if (!c->read_fbo)
+            gl->GenFramebuffers(1, &c->read_fbo);
+        if (!c->read_fbo)
+            return 0;
+        gl->BindFramebuffer(GL_FRAMEBUFFER, c->read_fbo);
+        gl->FramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, b->rb);
+        if (gl->CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            gl->BindFramebuffer(GL_FRAMEBUFFER, c->fbo);
+            return 0;
+        }
+    }
+    tracef("rd3d: read back into %08lx (scene %lu)\r\n", b->mem, c->scene);
     gl->PixelStorei(GL_PACK_ALIGNMENT, 1);
-    gl->PixelStorei(GL_PACK_ROW_LENGTH, g->lPitch / f.bytes);
+    gl->PixelStorei(GL_PACK_ROW_LENGTH, pitch / f.bytes);
     {
         LARGE_INTEGER t0, t1;
         if (profile_on)
             QueryPerformanceCounter(&t0);
-    gl->ReadPixels(0, 0, c->fb_w < g->wWidth ? c->fb_w : g->wWidth,
-                   c->fb_h < g->wHeight ? c->fb_h : g->wHeight, f.format, f.type,
-                   (GLvoid *)mem);
+        gl->ReadPixels(0, 0, w, h, f.format, f.type, (GLvoid *)b->mem);
         if (profile_on) {
             QueryPerformanceCounter(&t1);
             profile_read_back(t0, t1);
         }
     }
     gl->PixelStorei(GL_PACK_ROW_LENGTH, 0);
-    targets_written(mem, c->cur);       /* another context's picture of it is older now */
-    if (c->rt->ddsCaps.dwCaps & DDSCAPS_TEXTURE)
-        textures_written(mem);          /* a target that is a texture too: its new picture */
+    if (b != c->cur)
+        gl->BindFramebuffer(GL_FRAMEBUFFER, c->fbo);
+    else
+        c->dirty = 0;
+    b->deferred = 0;
+    targets_written(b->mem, b);
+    if (texture)
+        textures_written(b->mem);
+    return 1;
 }
 
-void d3d_surface_access(LPDDRAWI_DDRAWSURFACE_LCL s)
+static void read_back(RCTX *c)
+{
+    if (c->cur)
+        read_pixels(c, c->cur);
+}
+
+static int screen_page(LPDDRAWI_DDRAWSURFACE_LCL s)
+{
+    LPDDRAWI_DDRAWSURFACE_GBL g = s->lpGbl;
+    DWORD caps = s->ddsCaps.dwCaps, off = g->fpVidMem - shared->lfb;
+    DDPIXELFORMAT pf, screen;
+
+    if (!(caps & DDSCAPS_FLIP) || !(caps & DDSCAPS_VIDEOMEMORY) ||
+        (caps & (DDSCAPS_TEXTURE | DDSCAPS_OVERLAY | DDSCAPS_SYSTEMMEMORY)) ||
+        (shared->bpp != 16 && shared->bpp != 32) || !shared->pitch ||
+        g->wWidth != shared->width || g->wHeight != shared->height ||
+        g->lPitch != (LONG)shared->pitch || off % shared->pitch ||
+        off / shared->pitch > RDD_MAX_Y_OFFSET || off / shared->pitch + shared->height > shared->lines)
+        return 0;
+    surface_format(s, &pf);
+    display_format(&screen);
+    return pf.dwRGBBitCount == screen.dwRGBBitCount && pf.dwRBitMask == screen.dwRBitMask &&
+           pf.dwGBitMask == screen.dwGBitMask && pf.dwBBitMask == screen.dwBBitMask &&
+           !(pf.dwFlags & DDPF_ALPHAPIXELS);
+}
+
+/* Only defer a page after the first Flip on its chain actually reached scanout. The render
+   target LCL follows the back buffer across flips, while the picture stays with its page. */
+static void finish_target(RCTX *c)
+{
+    if (!c->dirty)
+        return;                         /* a previously deferred page stays on the GPU */
+    if (c->scanout_enabled && c->chain_active && c->rt && c->cur && !c->cur->written &&
+        c->cur->serial == shared->mode_serial && screen_page(c->rt)) {
+        c->cur->deferred = 1;
+        c->dirty = 0;
+    } else {
+        read_back(c);
+    }
+}
+
+int d3d_surface_access(LPDDRAWI_DDRAWSURFACE_LCL s)
 {
     OWNER m = me();
-    int i;
+    int i, j;
 
     for (i = 0; i < MAX_CONTEXTS; i++) {
         RCTX *c = mine(&contexts[i].o, &m) ? contexts[i].c : NULL;
-        if (c && c->dirty && c->cur && c->cur->mem == s->lpGbl->fpVidMem) {
-            read_back(c);
-            let_go(c);
+        if (!c || (!c->dirty && !c->chain_active))
+            continue;
+        for (j = 0; j < TARGETS; j++) {
+            GPUBUF *b = &c->cb[j];
+            if (b->mem == s->lpGbl->fpVidMem && (b->deferred || (b == c->cur && c->dirty))) {
+                int ok = read_pixels(c, b);
+                let_go(c);
+                if (!ok)
+                    return 0;
+            }
         }
     }
+    return 1;
+}
+
+static int end_chain(RCTX *c)
+{
+    int i;
+    if (!c->chain_active)
+        return 1;
+    for (i = 0; i < TARGETS; i++)
+        if (!read_pixels(c, &c->cb[i]))
+            return 0;
+    c->chain_active = 0;
+    c->front = c->back = NULL;
+    return 1;
+}
+
+int d3d_leave_exclusive(void)
+{
+    OWNER m = me();
+    int i;
+    for (i = 0; i < MAX_CONTEXTS; i++) {
+        RCTX *c = mine(&contexts[i].o, &m) ? contexts[i].c : NULL;
+        if (c && c->chain_active) {
+            int ok = end_chain(c);
+            let_go(c);
+            if (!ok)
+                return 0;
+        }
+    }
+    return 1;
+}
+
+int d3d_present(LPDDRAWI_DDRAWSURFACE_LCL front, LPDDRAWI_DDRAWSURFACE_LCL target)
+{
+    OWNER m;
+    int i;
+    if (!scanout_requested || !(front->ddsCaps.dwCaps & DDSCAPS_PRIMARYSURFACE) || !screen_page(target))
+        return 0;
+    m = me();
+    for (i = 0; i < MAX_CONTEXTS; i++) {
+        RCTX *c = mine(&contexts[i].o, &m) ? contexts[i].c : NULL;
+        if (c && c->scanout_enabled && c->rt && c->cur &&
+            c->cur->mem == target->lpGbl->fpVidMem && c->cur->serial == shared->mode_serial &&
+            !c->cur->written && screen_page(c->rt) && c->p->present_color) {
+            int ok = rdd_prepare_scanout() && make_current(c) && c->p->present_color();
+            let_go(c);
+            if (ok) {
+                if (!c->chain_active)
+                    dbg("rd3d: GPU flip chain active\r\n");
+                c->chain_active = 1;
+                c->front = front;
+                c->back = target;
+                return 1;
+            }
+            /* A rejected resource or an unsupported host takes the ordinary flip path. */
+            c->scanout_enabled = 0;
+        }
+    }
+    return 0;
 }
 
 /* The viewport as OpenGL's scissor. With a guard band (d3d_driver_info) Direct3D clips
@@ -971,8 +1150,14 @@ static GPUBUF *gpu_buffer(RCTX *c, GPUBUF *t, DWORD n, FLATPTR mem, DWORD w, DWO
         if (t[i].used < b->used)
             b = &t[i];                  /* not used yet, or attached longest ago */
     }
-    if (b->mem != mem)
+    if (t == c->cb && (b->mem != mem || b->w != w || b->h != h || b->format != format) &&
+        b->deferred && !read_pixels(c, b))
+        return NULL;
+    if (b->mem != mem || b->serial != shared->mode_serial) {
         b->written = 1;
+        b->deferred = 0;
+    }
+    b->serial = shared->mode_serial;
     if (!b->rb)
         gl->GenRenderbuffers(1, &b->rb);
     if (b->w != w || b->h != h || b->format != format) {
@@ -1062,15 +1247,24 @@ static int framebuffer(RCTX *c)
     GPUBUF *cb;
     GLuint depth;
 
-    if (c->fbo && c->cur && c->cur->mem == mem && c->fb_w == w && c->fb_h == h &&
+    if (c->cur && c->cur->serial != shared->mode_serial) {
+        c->cur->written = 1;
+        c->dirty = 0;
+        c->chain_active = 0;
+        c->front = c->back = NULL;
+    }
+    if (c->fbo && c->cur && c->cur->mem == mem && c->cur->serial == shared->mode_serial &&
+        c->fb_w == w && c->fb_h == h &&
         zmem == c->fb_z)
         return 1;
     if (c->cur && c->cur->mem != mem)
-        read_back(c);                   /* the old memory's picture, if newer, goes there */
+        finish_target(c);
     if (!c->fbo)
         gl->GenFramebuffers(1, &c->fbo);
     gl->BindFramebuffer(GL_FRAMEBUFFER, c->fbo);
     cb = gpu_buffer(c, c->cb, TARGETS, mem, w, h, colour_format(c->rt));
+    if (!cb)
+        return 0;
     gl->FramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, cb->rb);
     depth = zmem ? gpu_buffer(c, c->zb, ZBUFFERS, zmem, w, h, GL_DEPTH24_STENCIL8)->rb : 0;
     gl->FramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth);
@@ -1113,6 +1307,8 @@ static void context_free(RCTX *c)
             gl->DeleteTextures(1, &c->white);
         if (c->fog_tex)
             gl->DeleteTextures(1, &c->fog_tex);
+        if (c->read_fbo)
+            gl->DeleteFramebuffers(1, &c->read_fbo);
         if (c->fbo)
             gl->DeleteFramebuffers(1, &c->fbo);
         for (i = 0; i < TARGETS; i++)
@@ -1319,7 +1515,7 @@ static void render_state(RCTX *c, DWORD state, DWORD v)
         break;
     case D3DRENDERSTATE_SCENECAPTURE:
         if (!v) {                       /* EndScene: the picture into the render target */
-            read_back(c);
+            finish_target(c);
             c->scene++;
         }
         break;
@@ -2205,16 +2401,20 @@ static void clear(RCTX *c, DWORD flags, DWORD color, float depth, DWORD stencil,
    buffer (framebuffer, gpu_buffer): the picture it had on the GPU if that is as new as its
    memory, otherwise the memory goes in before the next draw (a clear of the whole target
    makes that moot). The depth is the new z-buffer's own. */
-static void set_render_target(RCTX *c, LPDDRAWI_DDRAWSURFACE_LCL rt, LPDDRAWI_DDRAWSURFACE_LCL z)
+static int set_render_target(RCTX *c, LPDDRAWI_DDRAWSURFACE_LCL rt, LPDDRAWI_DDRAWSURFACE_LCL z)
 {
-    read_back(c);
+    if (rt != c->rt && rt != c->front && rt != c->back && !end_chain(c))
+        return 0;
+    finish_target(c);
     tracef("rd3d: render target: caps %08lx, memory %08lx, %lux%lu; z-buffer memory %08lx\r\n",
            rt->ddsCaps.dwCaps, rt->lpGbl->fpVidMem, (DWORD)rt->lpGbl->wWidth,
            (DWORD)rt->lpGbl->wHeight, z ? z->lpGbl->fpVidMem : 0);
     c->rt = rt;
     c->z = z;
-    framebuffer(c);
+    if (!framebuffer(c))
+        return 0;
     apply_depth_test(c);                /* with or without a z-buffer now */
+    return 1;
 }
 
 /* ---- The Direct3D callbacks -------------------------------------------------------------------- */
@@ -2313,6 +2513,31 @@ static DWORD WINAPI ContextCreate(LPD3DHAL_CONTEXTCREATEDATA d)
         char v[8];
         trace_on = GetEnvironmentVariable("RIPPLE_D3D_TRACE", v, sizeof v) > 0;
         profile_on = GetEnvironmentVariable("RIPPLE_D3D_PROFILE", v, sizeof v) > 0;
+        flip_start.QuadPart = 0;
+        c->scanout_enabled = GetEnvironmentVariable("RIPPLE_D3D_SCANOUT", v, sizeof v) == 1 &&
+                             v[0] == '1' && p->present_color != NULL;
+    }
+    /* Multiple devices can share a surface. Resolve it in its original context before a
+       second device can draw there, and leave such sessions on the coherent CPU path. */
+    {
+        OWNER m = me();
+        int j;
+        for (j = 0; j < MAX_CONTEXTS; j++) {
+            RCTX *other = mine(&contexts[j].o, &m) ? contexts[j].c : NULL;
+            if (other) {
+                c->scanout_enabled = 0;
+                if (other->scanout_enabled) {
+                    if (!end_chain(other)) {
+                        let_go(other);
+                        context_free(c);
+                        return DDHAL_DRIVER_HANDLED;
+                    }
+                    other->scanout_enabled = 0;
+                    let_go(other);
+                    make_current(c);
+                }
+            }
+        }
     }
     c->ddl = d->lpDDLcl;
     c->rt = d->lpDDSLcl;
@@ -2324,6 +2549,8 @@ static DWORD WINAPI ContextCreate(LPD3DHAL_CONTEXTCREATEDATA d)
     defaults(c);
     contexts[i].o = me();
     contexts[i].c = c;
+    if (c->scanout_enabled)
+        scanout_requested = 1;
     dbg("rd3d: context "); dbg_hex((DWORD)c); dbg(" on "); dbg((const char *)p->gl.GetString(GL_RENDERER));
     dbg("\r\n");
     d->dwhContext = i + 1;
@@ -2335,6 +2562,10 @@ static DWORD WINAPI ContextCreate(LPD3DHAL_CONTEXTCREATEDATA d)
 static void context_remove(int i)
 {
     RCTX *c = contexts[i].c;
+    if (c && c->chain_active) {
+        end_chain(c);
+        rdd_desktop(0);
+    }
     contexts[i].o.pid = 0;
     contexts[i].c = NULL;
     if (c)
@@ -2487,9 +2718,8 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
         /* A copy in memory, so the source's newest picture must be there first, and the
            target's too (the part not copied stays); a context's read-back may make another
            one current. */
-        d3d_surface_access(sl[l]);
-        d3d_surface_access(dl[l]);
-        make_current(c);
+        if (!d3d_surface_access(sl[l]) || !d3d_surface_access(dl[l]) || !make_current(c))
+            return;
         for (i = 0; i < h; i++)
             memcpy((BYTE *)dg->fpVidMem + (y + i) * dg->lPitch + x * bytes,
                    (BYTE *)sg->fpVidMem + (top + i) * sg->lPitch + left * bytes, w * bytes);
@@ -2515,8 +2745,11 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
         return DDHAL_DRIVER_HANDLED;
     }
     gl = gl_of(c);
-    make_current(c);
-    framebuffer(c);                     /* a new size, or other memory after a flip */
+    if (!make_current(c) || !framebuffer(c)) { /* a new size, or other memory after a flip */
+        let_go(c);
+        d->ddrval = DDERR_GENERIC;
+        return DDHAL_DRIVER_HANDLED;
+    }
     memset(&v, 0, sizeof v);
     if (!parse_fvf(d->dwVertexType, &v))
         v.stride = d->dwVertexSize ? d->dwVertexSize : 32;
@@ -2577,8 +2810,10 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
             LPD3DHAL_DP2SETRENDERTARGET t = (LPD3DHAL_DP2SETRENDERTARGET)data;
             for (i = 0; i < n; i++) {
                 LPDDRAWI_DDRAWSURFACE_LCL rt = handle_get(c->ddl, t[i].hRenderTarget);
-                if (rt)
-                    set_render_target(c, rt, handle_get(c->ddl, t[i].hZBuffer));
+                if (rt && !set_render_target(c, rt, handle_get(c->ddl, t[i].hZBuffer))) {
+                    d->ddrval = DDERR_GENERIC;
+                    goto done;
+                }
             }
             cmd = data + n * sizeof(D3DHAL_DP2SETRENDERTARGET);
             break;

@@ -13,7 +13,12 @@ int d3d_driver_info(LPDDHAL_GETDRIVERINFODATA d);
 
 /* A surface is about to be read or shown (Lock, Flip): rendering still on the GPU for it goes
    into its memory first. */
-void d3d_surface_access(LPDDRAWI_DDRAWSURFACE_LCL s);
+int d3d_surface_access(LPDDRAWI_DDRAWSURFACE_LCL s);
+int d3d_present(LPDDRAWI_DDRAWSURFACE_LCL front, LPDDRAWI_DDRAWSURFACE_LCL target);
+int d3d_leave_exclusive(void);
+int rdd_prepare_scanout(void);
+int rdd_desktop(DWORD offset);
+void d3d_profile_flip(int gpu);
 
 /* A trace line (RIPPLE_D3D_TRACE) with two numbers. */
 void d3d_trace(const char *what, DWORD a, DWORD b);
