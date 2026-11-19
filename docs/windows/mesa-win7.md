@@ -813,10 +813,44 @@ following draws matched the guest sequence within 25 ms relative to the
 start of that gap. The trace reported zero lost events or buffers.
 
 The compositor spent 2.13 seconds of that interval in its
-`SCHEDULE_WFW` wait for work. The reported frozen Welcome screen
-followed by a cut is consistent with this gap in submitted frames. These
-timings leave the exact desktop switch and the fade request unidentified.
-[Welcome transition investigation](https://github.com/mizaimao/moose-ripple/issues/71)
+`SCHEDULE_WFW` wait for work. Four subsequent boots traced when the
+user's Default desktop became active. On every boot, the long gap
+began after the compositor had already presented several frames.
+
+Times below are relative to the first sample that saw the Default
+desktop active. The switch occurred between that sample and the last
+inactive sample, up to the interval in the second column earlier.
+
+| Desktop | Switch sampling interval | First present started | First present completed | Later gap between completed presents |
+| --- | ---: | ---: | ---: | ---: |
+| 1280×1024 | 42 ms | +324 ms | +997 ms | +1.70 to +4.09 s |
+| 1024×768 | 47 ms | +209 ms | +461 ms | +1.17 to +4.02 s |
+| 1280×1024 restored | 158 ms | +182 ms | +525 ms | +1.36 to +4.05 s |
+| 1280×1024 repeat | 45 ms | +230 ms | +568 ms | +1.26 to +3.79 s |
+
+The last two boots included graphics kernel events. The first present
+took 343 and 338 ms. On both, a render packet spent 138–140 ms between
+queue submission and completion. Two successive system packets then took
+83–85 ms apiece. The compositor requested the flip 339 and 336 ms into
+the respective presents. On the next present the flip request arrived
+within 1 ms. These are guest queue times and include any time waiting
+for execution. [Windows 7 queue event layouts](https://github.com/GameTechDev/PresentMon/blob/main/PresentData/ETW/Microsoft_Windows_DxgKrnl_Win7.h)
+
+The shell window existed 1.34–1.67 s before the first active sample.
+On the three boots that queried composition, Windows already reported
+it enabled before the switch. The compositor startup call returned a
+timeout on three boots and succeeded on the third boot in the table.
+All four recorded the long first present. Lowering the resolution
+shortened that call on one boot, and the later pause persisted.
+
+Within three seconds on either side of the active sample, Dwm-Udwm
+recorded no window-animation start, glass fade or transition event in
+the selected event set. Later in the same traces it recorded all 12
+test minimizes and 12 restores with the expected animation types.
+All four traces reported zero lost events and buffers. The appearance
+of the Welcome fade itself still needs a visual reference.
+[Capture instructions](../../tools/win7-debug/README.md#timing-the-welcome-screen) ·
+[Welcome transition issue](https://github.com/mizaimao/moose-ripple/issues/71)
 
 ## Live Explorer resize in UTM
 
