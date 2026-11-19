@@ -252,6 +252,34 @@ load addresses of the program's main modules when it is loaded (`guest/prof.cmd`
 one assessment test, `guest/dxone.cmd` runs one test alone). Our driver's functions are named
 from its own symbol table (`llvm-nm`), Windows' from the public symbol server (`resym.py`).
 
+## What the host does meanwhile (UTM)
+
+When the guest is slow and its own traces show only Windows at work, look at the emulator.
+`tools/win7-debug/utm-hostprof.sh SECONDS OUTDIR [INTERVAL_MS]` samples the call stacks of the
+VM's QEMU process on the Mac with macOS's `sample`, in one-second reports taken back to back,
+and brings them home with the display draws that UTM's debug log recorded over the same time.
+Start it about 12 seconds before the workload, so that the first reports show the idle guest.
+`sample` stops the process for every sample: at the default 1 ms the Explorer resize ran at a
+little over half its speed, at 10 ms within a tenth of it, with the same proportions in both.
+It runs as the logged-in user; if macOS refuses to let it look at the process, it says so and
+stops.
+
+`hostprof.py OUTDIR` (on the analysis machine) finds the gestures of `explorerrestore.exe N
+motion` in the draw log and prints, for the drags, the resizes and the idle time: how much of
+their samples each thread ran, and what the threads that run guest code were doing. The
+categories are translated guest code, the emulator's helpers called from it (memory slow
+path, TLB flush, lookup of translated code, device access), the emulator's own loop, and
+waits for QEMU's global lock. Three lists per phase give the raw function names behind them:
+the executing function, the first emulator function called from guest code, and who asked
+for the global lock. A fourth lists device work that waits while it holds that lock, which
+stops every guest processor that needs it.
+
+Two findings of 2026-11-18 came from it. Windows' Meltdown mitigation made the guest write
+CR3 on every system call (`docs/windows/test-vms.md`, "Windows' Meltdown mitigation on an
+emulated processor"). And the ordered uploads of the compositor's vertex buffer made the
+host wait for the GPU with the global lock held (`docs/windows/mesa-win7.md`, "Vertex buffer
+appends on a host that waits for the GPU").
+
 ## Timing the Welcome screen
 
 Copy `guest/welcome-trace.ps1` and the built `desktopactive.exe` to the same

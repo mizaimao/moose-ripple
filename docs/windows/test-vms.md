@@ -310,3 +310,32 @@ all four processors. On the final boot DWM stayed running through the
 timer-resolution sweep and Explorer opened the **New** submenu five times
 in the same process. Run `timerbench.exe counter` to repeat the clock check.
 The toolbar repaint can still appear with Aero running. [Paired resize captures](mesa-win7.md#white-strip-beside-the-search-box)
+
+### Windows' Meltdown mitigation on an emulated processor
+
+On a host that emulates the processor (UTM on Apple silicon), switch Windows' Meltdown
+mitigation off in the test guest. With it on, Windows 7 keeps separate page tables for user and
+kernel mode (kernel page-table isolation, "KVA shadow") and writes the CR3 register on the way
+into and out of every system call and interrupt. QEMU's emulator empties its address
+translation cache and its jump cache on every CR3 write, so the guest's processors then spend
+more time refilling those than running Windows' code. Windows turns the isolation on here
+because the VM's CPU model, `Penryn` with vendor `GenuineIntel`, counts as affected.
+
+Microsoft's switch (KB4072699), in an elevated prompt, then a restart:
+
+    reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" /v FeatureSettingsOverride /t REG_DWORD /d 3 /f
+    reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" /v FeatureSettingsOverrideMask /t REG_DWORD /d 3 /f
+
+`rb kvasoff` does both and restarts, `rb kvason` removes the two values again, and `rb kvas`
+reports the state: bit 0 of the first value is set while the isolation is on (`0x2b73` on,
+`0x2b70` off in this guest). The same two values also switch off the Spectre variant 2
+mitigation.
+
+Measured on 2026-11-18 on the M1 Max with the Explorer gestures of `explorerrestore.exe N
+motion` (1280x1024, Aero, windows drawn while dragging; same driver, one boot each): a
+three-second corner resize went from 17 to 18 distinct window sizes to 39 to 45, and the
+title-bar drag stayed at 155 to 170 positions. How it was found: `tools/win7-debug/README.md`,
+"What the host does meanwhile".
+
+This is for test guests on an emulated processor. A guest that runs on the host's own
+processor (VM 220, Hog) keeps Windows' default: there the switch of page tables is cheap.
