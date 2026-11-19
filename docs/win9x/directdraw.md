@@ -247,10 +247,67 @@ The default 3DMark 2000 benchmark scored 21,442 with the fix and GPU scanout ena
 compared with 21,319 and 21,362 in the earlier GPU runs.
 [Both games after returning from the desktop](img/alt-tab-restore.webp)
 
-Launching Re-Volt with scanout off after a GPU-presented game in the same boot gave
-69.7 frames/s in that test. Once GPU scanout has taken over, displaying a changed VGA
-page requires the desktop mirror to convert and upload it. The current driver does this
-synchronously on each CPU flip. [Mixed-mode performance measurements](https://github.com/mizaimao/moose-ripple/issues/84)
+#### VGA flips after GPU presentation
+
+After the first GPU presentation in a Windows session, the host display stays on virtio.
+A game using VGA can still change the display-start register, but the VxD also has to
+show that page on the host. Previously it scanned the page on every flip and uploaded
+every changed frame. Re-Volt reached only 69.7 frames/s in that case.
+
+The HAL now identifies an ordinary DirectDraw flip separately from a request to return
+the screen to GDI. Every flip selects its VGA page immediately. The VxD samples the
+latest page at most once per 17 ms during a run of flips from the same process.
+Its timer continues sampling when the game stops flipping, so a direct write to the
+visible page can still reach the host. A new owner and a return to GDI take effect
+immediately. Direct GPU presentation continues to keep eligible frames on the host.
+
+On the Intel UHD 630, each run first used GPU presentation at 640×480, then turned it
+off and ran the same five-second `d3dtest` scene at two resolutions. The rates measure
+completed guest flips. The paced mirror sampled the latest VGA page and uploaded it
+when the pixels changed.
+
+| 16-bit mode | Synchronous mirror, guest flips/s | Paced mirror, guest flips/s | Paced stream flips | Mirror samples | Host uploads |
+|---|---:|---:|---:|---:|---:|
+| 640×480 | 80.2 | 497.6 | 2,489 | 297 | 296 |
+| 1024×768 | 58.8 | 102.6 | 514 | 293 | 287 |
+
+Each stream count includes one setup flip before the timed loop. At 1024×768, the
+held reference frame matched the synchronous mirror at all 786,432 pixels, both in
+the host's captured RGB values and in the guest's RGB565 format.
+
+To exercise the last-frame case, run a GPU-presented Direct3D scene, then run
+`ddtest mirror` with GPU scanout off in the same boot. The test issues three quick
+flips between a red and a green page, then holds for seven seconds. On both drivers
+all 307,200 captured pixels were green. The test then wrote directly to the front
+buffer and held again without a flip. On both drivers precisely the upper-left
+320×240 pixels turned blue, and the other 230,400 stayed green.
+[Captured VGA pages after the final flip and front-buffer write](img/mixed-vga-mirror.webp)
+
+With GPU presentation off after takeover, Re-Volt survived a switch to the desktop and
+back on both drivers. In the same restarted, 30-second race its throughput rose from
+73.0 to 139.6 guest flips/s. Every measured flip still read the application image back
+to VGA. The improvement came from sampling fewer VGA pages for the host. In the earlier
+fresh-boot VGA run the game reached 428.1 flips/s. Direct GPU presentation reached
+737.7 flips/s after the focus switch and avoided the per-frame read-back.
+
+The game exited to the 1280×720 desktop. The 80×25 DOS prompt displayed text typed in
+full screen and accepted a new command after Alt+Enter returned it to a window.
+On both fresh VGA and the mirror, the window omitted the output typed in full screen.
+DirectDraw surface restoration, ordinary DirectDraw and the Direct3D rendering tests
+all passed with GPU scanout both off and on. The final ordinary driver scored 21,705
+in the default 3DMark 2000 benchmark with GPU presentation, compared with 21,442
+before this change on the same Intel rig. At 1024×768×32 the GPU-presented scene
+reached 3,942.6 guest frames/s. Its held image and the VGA mirror's held image each
+matched the earlier VGA reference at all 786,432 RGB pixels.
+Windowed OpenGL, recovery from a timed-out GPU request and 8-bit DirectDraw also
+passed after the 32-bit scene.
+
+A separate timing build measured the remaining cost of mirroring a 1024×768×16 page.
+Over 5,057 ms it spent 438 ms converting pixels, 3,019 ms in the transfer call
+including its fence wait, and 916 ms updating the display. The 288 uploads averaged
+10.48 ms in the transfer call. At 640×480 that call averaged 9.88 ms. The longest
+1024×768 refresh was 16 ms at the guest clock's observed 1 ms resolution.
+[Follow-up on allowing flips during a fenced upload](https://github.com/mizaimao/moose-ripple/issues/85)
 
 ### 3DMark 2000 (2026-11-16)
 

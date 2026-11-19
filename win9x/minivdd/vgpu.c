@@ -324,7 +324,7 @@ static u32 *page_table = 0;                     /* scratch: one entry per page o
 static u32 next_buffer = 0;
 static u32 lock = 0;
 static u32 gpu_page = 0;                        /* currently requested application image */
-static u32 presenter = 0;                       /* last GPU presenter until another owner takes over */
+static u32 presenter = 0;                       /* process whose final handle returns the display to GDI */
 static u32 pending_gpu = 0;                     /* latest GPU image awaiting a display update */
 static u32 last_gpu_update = 0;
 static u32 display_serial, gpu_flips, gpu_updates, timer_updates;
