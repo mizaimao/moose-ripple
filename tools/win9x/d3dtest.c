@@ -1,7 +1,11 @@
 /*
  * d3dtest: check a display driver's Direct3D 7 HAL from a program, the way a game uses it.
  *
- *   d3dtest [width height bpp [seconds]]       default: 640 480 32, 3 seconds
+ *   d3dtest [width height bpp [seconds [present|present-exit]]]   default: 640 480 32, 3 seconds
+ *   present holds the last scene still for a host capture, then checks the front pixels
+ *   and the next back buffer after a partial CPU write.
+ *   present-exit displays a nonzero CPU page, resumes GPU flips, then terminates at the
+ *   held frame to exercise desktop recovery when the process cannot release its driver.
  *
  * Lists the Direct3D devices and the HAL device's capabilities, then (full-screen, exclusive)
  * makes a flipping chain with a z-buffer, creates the HAL device and draws a frame with known
@@ -390,6 +394,52 @@ static void cpu_writes(LPDIRECT3DDEVICE7 dev, LPDIRECTDRAWSURFACE7 back, int w, 
     expect(back, bpp, "written by the program", 32, 32, 255, 255, 255);
     expect(back, bpp, "3D drawn after it", w / 2, h / 2 + h / 20, 255, 0, 0);
     expect(back, bpp, "clear colour around them", w * 3 / 4, h * 3 / 4, 0, 0, 102);
+}
+
+/* The VBE display start register, also checked by ddtest. A CPU flip selects its page
+   here; direct GPU flips leave this register alone. */
+static WORD vbe_y_offset(void)
+{
+    WORD line;
+    __asm {
+        mov dx, 01CEh
+        mov ax, 9
+        out dx, ax
+        inc dx
+        in ax, dx
+        mov line, ax
+    }
+    return line;
+}
+
+static WORD show_nonzero_cpu_page(LPDIRECTDRAWSURFACE7 front, LPDIRECTDRAWSURFACE7 back,
+                                  int w, int h, int bpp)
+{
+    DDSURFACEDESC2 d;
+    WORD line = 0;
+    int i, y;
+
+    for (i = 0; i < 2 && !line; i++) {
+        memset(&d, 0, sizeof d);
+        d.dwSize = sizeof d;
+        if (IDirectDrawSurface7_Lock(back, NULL, &d, DDLOCK_WAIT | DDLOCK_WRITEONLY, NULL) != DD_OK)
+            return 0;
+        *(BYTE *)d.lpSurface = 0xff;    /* software touched this page: Flip must use the CPU copy */
+        if (IDirectDrawSurface7_Unlock(back, NULL) != DD_OK ||
+            IDirectDrawSurface7_Flip(front, NULL, DDFLIP_WAIT) != DD_OK)
+            return 0;
+        line = vbe_y_offset();
+    }
+    if (!line)
+        return 0;
+    memset(&d, 0, sizeof d);
+    d.dwSize = sizeof d;
+    if (IDirectDrawSurface7_Lock(front, NULL, &d, DDLOCK_WAIT | DDLOCK_WRITEONLY, NULL) != DD_OK)
+        return 0;
+    /* A return to this obsolete page after exit will show solid white. */
+    for (y = 0; y < h; y++)
+        memset((BYTE *)d.lpSurface + y * d.lPitch, 0xff, w * (bpp / 8));
+    return IDirectDrawSurface7_Unlock(front, NULL) == DD_OK ? line : 0;
 }
 
 /* ---- Mipmaps: a 64x64 texture whose 7 levels each have a colour of their own; a quad of 8x8
@@ -820,11 +870,44 @@ int main(int argc, char **argv)
     start = GetTickCount();
     while (GetTickCount() - start < (DWORD)seconds * 1000) {
         scene(dev, tex, w, h, (GetTickCount() - start) * 0.002f);
-        IDirectDrawSurface7_Flip(front, NULL, DDFLIP_WAIT | DDFLIP_NOVSYNC);
+        r = IDirectDrawSurface7_Flip(front, NULL, DDFLIP_WAIT | DDFLIP_NOVSYNC);
+        if (r != DD_OK) {
+            printf("Flip failed: %08lx\n", r);
+            failures++;
+            break;
+        }
         frames++;
     }
     printf("%lu frames in %d s: %.1f a second\n", frames, seconds, frames / (double)seconds);
 
+    if (argc > 5 && (!strcmp(argv[5], "present") || !strcmp(argv[5], "present-exit"))) {
+        int abrupt = !strcmp(argv[5], "present-exit");
+        WORD cpu_line = 0;
+        if (abrupt) {
+            cpu_line = show_nonzero_cpu_page(front, back, w, h, bpp);
+            check(cpu_line != 0, "owner exit: wrote the displayed nonzero CPU page");
+            if (!cpu_line)
+                goto out;
+            printf("owner exit: CPU display start line %u\n", cpu_line);
+        }
+        scene(dev, tex, w, h, 0.0f);
+        r = IDirectDrawSurface7_Flip(front, NULL, DDFLIP_WAIT);
+        check(r == DD_OK, "final frame presented");
+        if (r == DD_OK) {
+            if (abrupt)
+                check(vbe_y_offset() == cpu_line, "GPU flip left the nonzero VBE page selected");
+            printf("holding reference frame for 10 seconds\n");
+            Sleep(10000);
+            if (abrupt) {
+                printf("ending test process with displayed surface live\n");
+                if (!TerminateProcess(GetCurrentProcess(), failures ? 1 : 0))
+                    check(0, "terminate with the display surface live");
+            }
+            expect(front, bpp, "presented top right", w * 3 / 4, h / 4, 0, 255, 0);
+            expect(front, bpp, "presented bottom right", w * 3 / 4, h * 3 / 4, 128, 128, 179);
+            cpu_writes(dev, back, w, h, bpp);
+        }
+    }
 out:
     if (tex) IDirectDrawSurface7_Release(tex);
     if (dev) IDirect3DDevice7_Release(dev);
