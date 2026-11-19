@@ -1,0 +1,25 @@
+virgl gdi: an allocation for a texture without guest storage still has a size
+
+A multisampled texture lives on the host only: the virgl driver gives it no storage in the
+guest and asks the winsys for a resource of size zero. On Windows a resource is an
+allocation, and Windows refuses one of no size (D3DKMTCreateAllocation, invalid parameter),
+so no multisampled render target or depth buffer could be made.
+
+Such an allocation is now one byte, the size textures that are filled through staging
+buffers already get. `tools/win7-hello/d3d9msaa.c` makes them.
+
+---
+--- a/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
++++ b/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
+@@ -218,7 +218,10 @@
+    AllocExchange.ResourceOptions.last_level = last_level;
+    AllocExchange.ResourceOptions.nr_samples = nr_samples;
+    AllocExchange.ResourceOptions.flags = flags;
+-   AllocExchange.Size = size;
++   /* moose-ripple: a multisampled texture has no storage in the guest
++    * (virgl_resource_layout gives it no size), and Windows refuses an allocation
++    * of no size. One byte, as textures filled through staging buffers get. */
++   AllocExchange.Size = size ? size : 1;
+ 
+    struct gdikmt_createallocation CreateAllocation;
+    D3DDDI_ALLOCATIONINFO AllocationInfo;

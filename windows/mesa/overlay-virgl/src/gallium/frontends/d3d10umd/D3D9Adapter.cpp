@@ -7,6 +7,7 @@
 #include "D3D9Private.h"
 #include "Format.h"
 #include "D3D9Trace.h"
+#include "RippleLog.h"
 #include "gallium/winsys/virgl/gdi/virgl_gdi_public.h"
 
 #include <stddef.h>
@@ -45,7 +46,7 @@ static const FORMATOP g_format_ops[] = {
     * required formats, docs/windows/mesa-win7.md), and that layer is what the compositor uses
     * on a host that cannot carry Direct3D 10. D3D9SrgbTargetFormat picks what the host can. */
    { D3DDDIFMT_X8R8G8B8, 0x009aec1f,
-     d3d9_ms_types, 0, 0 },
+     d3d9_ms_types, d3d9_ms_types, 0 },
    { D3DDDIFMT_R5G6B5, 0x008a6c1f, d3d9_ms_types, 0, 0 },
    { D3DDDIFMT_A8R8G8B8, 0x00dae01f,
      d3d9_ms_types, d3d9_ms_types, 0 },
@@ -566,12 +567,63 @@ D3D9VideoProcessorKnows(const DXVADDI_VIDEOPROCESSORINPUT *input)
        kind == DXVADDI_SampleFieldInterleavedOddFirst);
 }
 
-/* No multisampling yet: the sample counts have to come from the host's renderer. */
+/* The sample counts the host's renderer draws to, as the bits of Direct3D 9's multisample
+ * types (bit "type - 1"). Windows asks about formats when the adapter is opened, before it
+ * has made a device, so the host is asked once a process, through a device of our own on the
+ * primary display (as the Direct3D 10 part asks its question, OpenAdapterCommon). A count is
+ * offered when the host takes it for colour and for depth with stencil alike; the type
+ * Direct3D 9 calls non-maskable goes with any of them.
+ * RIPPLE_NO_MSAA (any value): none. */
 static UINT
 D3D9QueryMsaaTypes(D3D9Adapter *adapter)
 {
    (void)adapter;
-   return 0;
+   static int known = -1;
+
+   if (known >= 0)
+      return (UINT)known;
+   if (getenv("RIPPLE_NO_MSAA")) {
+      known = 0;
+      return 0;
+   }
+
+   UINT types = 0;
+   LARGE_INTEGER start, end, rate;
+   QueryPerformanceCounter(&start);
+   HDC dc = GetDC(NULL);
+   struct gdikmt_device *device = dc ? gdikmt_create_from_hdc(dc) : NULL;
+   if (device) {
+      struct pipe_screen *screen = d3d10_create_screen(device);
+      if (screen) {
+         for (UINT samples = 2; samples <= 8; samples *= 2) {
+            if (screen->is_format_supported(screen, PIPE_FORMAT_B8G8R8A8_UNORM, PIPE_TEXTURE_2D,
+                                            samples, samples, PIPE_BIND_RENDER_TARGET) &&
+                (screen->is_format_supported(screen, PIPE_FORMAT_Z24_UNORM_S8_UINT,
+                                             PIPE_TEXTURE_2D, samples, samples,
+                                             PIPE_BIND_DEPTH_STENCIL) ||
+                 screen->is_format_supported(screen, PIPE_FORMAT_S8_UINT_Z24_UNORM,
+                                             PIPE_TEXTURE_2D, samples, samples,
+                                             PIPE_BIND_DEPTH_STENCIL)))
+               types |= 1u << (samples - 1);
+         }
+         /* the screen owns the device and takes it along */
+         screen->destroy(screen);
+      } else {
+         device->destroy(device);
+      }
+   }
+   if (dc)
+      ReleaseDC(NULL, dc);
+   if (types)
+      types |= 1u << (D3DDDIMULTISAMPLE_NONMASKABLE - 1);
+   QueryPerformanceCounter(&end);
+   QueryPerformanceFrequency(&rate);
+   ripple_logf("d3d9: the host draws to%s%s%s%s samples a pixel (asked in %ld ms)",
+               types & 2 ? " 2" : "", types & 8 ? " 4" : "", types & 0x80 ? " 8" : "",
+               types ? "" : " no more than one",
+               (long)((end.QuadPart - start.QuadPart) * 1000 / rate.QuadPart));
+   known = (int)types;
+   return types;
 }
 
 static bool

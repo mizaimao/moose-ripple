@@ -120,6 +120,8 @@ struct D3D9Device
    struct pipe_screen *screen;
    struct pipe_context *pipe;
    bool exact_occlusion;
+   /* samples a pixel of the last primary the device made: 0 or 1 without multisampling */
+   unsigned primary_samples;
    struct D3D9OcclusionSegment *active_occlusion;
    struct pipe_query *retired_occlusion;
    UINT occlusion_boundaries;

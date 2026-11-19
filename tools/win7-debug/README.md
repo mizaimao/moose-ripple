@@ -260,6 +260,12 @@ field has to show alone, and a still interlaced picture whose edge has to
 stay on its row for either field. Run them outside the driver package directory too: beside the package
 a 64-bit program loads the package's copy of the driver, not the installed one.
 
+`d3d9msaa.exe [SAMPLES [full]]` and `d3d9msaa32.exe` (`guest/msaa.cmd` runs both and
+sends the driver log) check multisampling: the sample counts offered, then a
+triangle drawn with the most samples offered (or SAMPLES; 1 is the control) into
+a render target, a window and, with "full", the whole screen, each read back and
+counted for grey edge pixels.
+
 `vidplay.exe ds|mf FILE` (`guest/vidplay.cmd` runs both, in both process sizes)
 plays a video in a window of its own through DirectShow or through Media
 Foundation, both ending in the Enhanced Video Renderer, and reads the screen at

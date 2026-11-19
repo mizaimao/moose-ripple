@@ -1705,12 +1705,17 @@ D3D9BlitCpuOnlySourceToTexture(D3D9Device *device,
    return true;
 }
 
+/* A multisampled colour surface copied to a plain one of another format or another size:
+ * resolved first into a surface of its own size and format, then converted or stretched
+ * from there. moose-ripple: the stretch too. Asked to resolve and stretch in one blit, the
+ * host took one sample of each pixel, and the smoothing was gone. */
 static bool
 D3D9ResolveThenConvertPipe(D3D9Device *device, D3D9Resource *dst_resource,
                            D3D9SubResource *dst_sub,
                            UINT dst_subresource_index, const RECT *dst,
                            D3D9Resource *src_resource,
-                           UINT src_subresource_index, const RECT *src)
+                           UINT src_subresource_index, const RECT *src,
+                           unsigned filter)
 {
    if (!device || !device->screen || !device->pipe || !device->pipe->blit ||
        !dst_resource || !dst_sub || !src_resource ||
@@ -1719,17 +1724,20 @@ D3D9ResolveThenConvertPipe(D3D9Device *device, D3D9Resource *dst_resource,
 
    struct pipe_resource *dst_pipe = dst_resource->pipe_resource;
    struct pipe_resource *src_pipe = src_resource->pipe_resource;
-   if (src_pipe->nr_samples <= 1 || dst_pipe->nr_samples != 1 ||
-       src_pipe->format == dst_pipe->format ||
-       src_pipe->target == PIPE_BUFFER || dst_pipe->target == PIPE_BUFFER)
+   if (src_pipe->nr_samples <= 1 || dst_pipe->nr_samples > 1 ||
+       src_pipe->target == PIPE_BUFFER || dst_pipe->target == PIPE_BUFFER ||
+       util_format_is_depth_or_stencil(src_pipe->format))
       return false;
 
    const LONG dst_width = dst->right - dst->left;
    const LONG dst_height = dst->bottom - dst->top;
    const LONG src_width = src->right - src->left;
    const LONG src_height = src->bottom - src->top;
-   if (dst_width <= 0 || dst_height <= 0 ||
-       dst_width != src_width || dst_height != src_height)
+   if (dst_width <= 0 || dst_height <= 0 || src_width <= 0 || src_height <= 0)
+      return false;
+   const bool stretched = dst_width != src_width || dst_height != src_height;
+   /* the same size and format: a plain resolve, which the caller's own blit does */
+   if (!stretched && src_pipe->format == dst_pipe->format)
       return false;
 
    struct pipe_resource templ;
@@ -1770,6 +1778,8 @@ D3D9ResolveThenConvertPipe(D3D9Device *device, D3D9Resource *dst_resource,
                     D3D9PipeLayer(dst_resource, dst_subresource_index),
                     dst_pipe->format, dst, resolved, 0, 0,
                     resolved->format, &resolved_rect);
+   if (stretched)
+      info.filter = filter;
    device->pipe->blit(device->pipe, &info);
 
    pipe_resource_reference(&resolved, NULL);
@@ -1874,7 +1884,7 @@ D3D9CopyRectPipe(D3D9Device *device, HANDLE dst_resource_handle,
 
    if (D3D9ResolveThenConvertPipe(device, dst_resource, dst_sub,
                                   dst_subresource_index, &dst,
-                                  src_resource, src_subresource_index, &src))
+                                  src_resource, src_subresource_index, &src, filter))
       return true;
 
    const bool dst_depth_or_stencil =
@@ -2954,6 +2964,55 @@ D3D9TexBlt(HANDLE hDevice, const D3DDDIARG_TEXBLT *data)
    return E_NOTIMPL;
 }
 
+/* moose-ripple: the screen's own primary takes turns with the back buffer the device made
+ * (D3D9OpenResource), so in a multisampled full-screen device it is drawn to under the
+ * device's multisampled depth buffer. But it is the screen's image, one sample a pixel, and
+ * Windows opens it before it makes the back buffer that says how many samples the device
+ * has. So when it becomes the render target it is given what a multisampled back buffer has
+ * from its creation: a private multisampled image to draw into (pipe_resource), resolved
+ * into the image on screen (display_resource) when it is presented. In a device without
+ * multisampling it loses that image again. */
+static void
+D3D9MatchStandardPrimarySamples(D3D9Device *device, D3D9Resource *resource)
+{
+   if (!resource || !resource->runtime_standard_primary || !resource->pipe_resource ||
+       !device->screen)
+      return;
+
+   const struct pipe_resource *shown = resource->display_resource ?
+      resource->display_resource : resource->pipe_resource;
+   const unsigned wanted = MAX2(device->primary_samples, 1u);
+   if (wanted == MAX2(resource->pipe_resource->nr_samples, 1u))
+      return;
+
+   if (wanted > 1) {
+      struct pipe_resource templ;
+      memset(&templ, 0, sizeof(templ));
+      templ.target = PIPE_TEXTURE_2D;
+      templ.format = shown->format;
+      templ.width0 = shown->width0;
+      templ.height0 = shown->height0;
+      templ.depth0 = 1;
+      templ.array_size = 1;
+      templ.nr_samples = wanted;
+      templ.nr_storage_samples = wanted;
+      templ.bind = PIPE_BIND_RENDER_TARGET;
+      templ.usage = PIPE_USAGE_DEFAULT;
+      struct pipe_resource *drawn = device->screen->resource_create(device->screen, &templ);
+      if (!drawn)
+         return;
+      if (resource->display_resource)
+         pipe_resource_reference(&resource->pipe_resource, NULL);
+      else
+         resource->display_resource = resource->pipe_resource;
+      resource->pipe_resource = drawn;
+   } else {
+      pipe_resource_reference(&resource->pipe_resource, NULL);
+      resource->pipe_resource = resource->display_resource;
+      resource->display_resource = NULL;
+   }
+}
+
 HRESULT APIENTRY
 D3D9SetRenderTarget(HANDLE hDevice, const D3DDDIARG_SETRENDERTARGET *data)
 {
@@ -2966,6 +3025,7 @@ D3D9SetRenderTarget(HANDLE hDevice, const D3DDDIARG_SETRENDERTARGET *data)
    device->render_targets[data->RenderTargetIndex] = data->hRenderTarget;
    device->render_target_subresources[data->RenderTargetIndex] =
       data->SubResourceIndex;
+   D3D9MatchStandardPrimarySamples(device, D3D9CastResource(data->hRenderTarget));
    if (data->RenderTargetIndex == 0) {
       D3D9SubResource *sub =
          D3D9GetSubResource(data->hRenderTarget, data->SubResourceIndex);
@@ -3071,9 +3131,14 @@ D3D9CreateResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *data)
                MAX3(templ.width0, templ.height0, templ.depth0);
             templ.last_level = max_dimension ? util_logbase2(max_dimension) : 0;
          }
-         const bool msaa_primary =
-            yttrium && data->Flags.Primary && data->MultisampleType &&
-            data->SurfCount > 1;
+         /* moose-ripple: on virgl too a multisampled primary is two images, the one on
+          * screen and a private multisampled one to draw into, resolved at each present
+          * (below, and D3D9CopyToDisplayResource). Windows 7 makes a full-screen back
+          * buffer as a primary of one surface. Without the pair it was drawn to with one
+          * sample a pixel under a depth buffer with several, which no host accepts. */
+         const bool msaa_primary = data->Flags.Primary &&
+            (yttrium ? data->MultisampleType && data->SurfCount > 1 :
+                       data->MultisampleType > 1);
          /* Both bind SHARED and the DDI SharedResource flag can describe
           * runtime-managed storage. Keep the existing conservative split
           * qualification; neither bit proves application sharing intent. */
@@ -3103,7 +3168,7 @@ D3D9CreateResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *data)
          if (yttrium && data->Flags.DiscardRenderTarget)
             templ.flags |= YTTRIUM_GDI_RESOURCE_FLAG_CPU_READBACK;
          if (msaa_primary)
-            templ.bind &= ~PIPE_BIND_DISPLAY_TARGET;
+            templ.bind &= ~(PIPE_BIND_DISPLAY_TARGET | (yttrium ? 0 : PIPE_BIND_SHARED));
          else if (yttrium && data->Flags.Primary)
             templ.flags |= PIPE_RESOURCE_FLAG_FRONTEND_PRIV;
 
@@ -3192,6 +3257,10 @@ D3D9CreateResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *data)
             D3D9FreeResource(resource);
             return E_OUTOFMEMORY;
          }
+         /* what the screen's own primary has to match when it takes its turn as the
+          * back buffer (D3D9MatchStandardPrimarySamples) */
+         if (data->Flags.Primary)
+            device->primary_samples = msaa_primary ? templ.nr_samples : 1;
 
          /*
           * A multisampled primary has two Gallium resources: the runtime-
