@@ -658,6 +658,41 @@ all thirteen cases passed on both hosts in both process sizes, including a
 draw using application streams 0 and 15. Pass the expected full path to
 `viogpu_d3d10.dll` to verify which copy of the driver rendered the test.
 
+## Direct3D 9 visibility queries
+
+Games can skip a draw when an occlusion query reports that all its geometry
+was hidden. The old driver returned zero even for a fully visible rectangle.
+The driver now asks the GPU which samples passed the depth test. On a virgl
+host that advertises desktop GL sample counting, it returns the sample count.
+On UTM's OpenGL ES backend it returns 0 for hidden geometry and 1 for
+visible geometry. Applications that use the count as a measure of screen
+coverage still lack that information on UTM.
+
+| Windows 7 guest, 16×16 rectangle | Hidden | Half visible | Fully visible |
+| --- | ---: | ---: | ---: |
+| Previous driver | 0 | 0 | 0 |
+| UTM, OpenGL ES | 0 | 1 | 1 |
+| Desktop OpenGL over Mesa D3D12 | 0 | 128 | 256 |
+
+Two queries can cover some of the same draws. The driver splits the GPU
+counter at their boundaries and combines the intervals belonging to each
+query. Both 32-bit and 64-bit tests checked overlapping queries, reissue,
+and releasing an active query. Pixel readback independently verified which
+parts of the test scene were visible.
+
+Windows 7 refused to create a hardware device at feature level 9_3 on UTM
+when the driver removed occlusion queries from its capability list. Keeping
+the capability and rejecting query creation later caused Direct3D 11 to
+report device removal. With the visibility fallback, the same feature-level
+9_3 path drew a 16×16 square and completed its queries on both hosts.
+
+Run the probes built by `sh tools/win7-hello/build-ui-probes.sh` with the
+same arguments in both process sizes. Use `--expect-supported` for exact
+counts or `--expect-visibility` for the UTM fallback. `d3d9query.exe`
+checks depth and overlapping queries. `d3d11query.exe --force-level9`
+exercises Windows' Direct3D 10 Level 9 translation. Both accept an optional
+expected absolute UMD path for testing application-local builds.
+
 ## Aero window movement in UTM
 
 With the texture and guest-clock fixes installed, the compositor still spent most
