@@ -324,10 +324,11 @@ static u32 *page_table = 0;                     /* scratch: one entry per page o
 static u32 next_buffer = 0;
 static u32 lock = 0;
 static u32 gpu_page = 0;                        /* currently requested application image */
-static u32 presenter = 0;                       /* last GPU presenter until another owner takes over */
+static u32 presenter = 0;                       /* process whose final handle returns the display to GDI */
 static u32 pending_gpu = 0;                     /* latest GPU image awaiting a display update */
 static u32 last_gpu_update = 0;
 static u32 display_serial, gpu_flips, gpu_updates, timer_updates;
+static u32 cpu_owner, last_cpu_sample, cpu_flips, cpu_samples, cpu_uploads;
 #define DISPLAY_PERIOD_MS 17
 static u32 visible = 0;                         /* last SET_SCANOUT acknowledged */
 static u32 takeover = 0;                        /* virtio has taken the display from VGA */
@@ -788,6 +789,16 @@ static int attach_backing(u32 id, u8 *mem, u32 pages)
 
 static int desktop_refresh(void);
 
+static void end_cpu_flips(void)
+{
+    if (cpu_flips >= 10) {
+        dbg("rvd: CPU flips "); dbg_hex(cpu_flips); dbg(", mirror samples "); dbg_hex(cpu_samples);
+        dbg(", uploads "); dbg_hex(cpu_uploads); dbg(", bytes/upload "); dbg_hex(display_w * display_h * 4);
+        dbg("\r\n");
+    }
+    cpu_owner = cpu_flips = cpu_samples = cpu_uploads = 0;
+}
+
 static void drop_gpu_page(void)
 {
     if (gpu_flips >= 10) {
@@ -1223,7 +1234,7 @@ static int mirror_text(struct desktop_image *d, const struct vga_text *v)
 static int desktop_refresh(void)
 {
     u32 w = display_w, h = display_h, bpp = display_bpp, offset = display_offset;
-    u32 serial = display_serial;
+    u32 serial = display_serial, start = vmm_time_ms();
     int text = dos_text;
     struct vga_text v;
     unsigned slot = desktop_slot;
@@ -1280,6 +1291,14 @@ static int desktop_refresh(void)
         d->upload = 1;
         return 0;
     }
+    if (serial != display_serial)
+        return 0;
+    if (cpu_owner) {
+        last_cpu_sample = start;
+        cpu_samples++;
+        if (d->upload)
+            cpu_uploads++;
+    }
     d->upload = 0;
     if (text && dos_reported != 2) {
         dbg("rvd: displaying DOS text "); dbg_hex(v.cols); dbg(" x "); dbg_hex(v.rows); dbg("\r\n");
@@ -1287,13 +1306,14 @@ static int desktop_refresh(void)
     }
     desktop_slot = slot;
     release_desktop(slot ^ 1);
-    return !stalled;
+    return !stalled && serial == display_serial;
 }
 
 /* Display callbacks merely record the VGA layout. No GPU command runs with the Win16 lock
    in a mode-change or palette callback. Older display drivers never send these messages. */
 void __cdecl vgpu_display_mode(u32 bpp, u32 size, u32 bytes)
 {
+    end_cpu_flips();
     display_serial++;
     dos_text = 0;
     display_w = size >> 16;
@@ -1316,6 +1336,7 @@ void __cdecl vgpu_display_colour(u32 index, u32 colour)
 void __cdecl vgpu_show_dos(void)
 {
     if (takeover && vram) {
+        end_cpu_flips();
         display_serial++;
         dos_text = 1;
         dos_reported = 0;
@@ -1325,6 +1346,7 @@ void __cdecl vgpu_show_dos(void)
 
 void __cdecl vgpu_leave_windows(void)
 {
+    end_cpu_flips();
     display_serial++;
     dos_text = 0;
     display_bpp = presenter = 0;
@@ -1338,6 +1360,7 @@ static int publish_gpu(u32 id, struct buffer *b)
     if (b && b->width == display_w && b->height == display_h && display_bpp &&
         render_fence(b->context) && set_scanout(id, b->width, b->height) &&
         flush_scanout(id, b->width, b->height) && display_serial == serial) {
+        end_cpu_flips();
         if (!gpu_page)
             dbg("rvd: presenting GPU image\r\n");
         gpu_page = id;
@@ -1362,19 +1385,20 @@ void __cdecl vgpu_desktop_tick(void)
     if (lock && !vmm_mutex_owner(lock)) {
         vmm_mutex_enter(lock);
         if (takeover && (display_bpp || dos_text) && device_ready()) {
-            if (!gpu_page)
-                desktop_refresh();
-            else if (pending_gpu == gpu_page && vmm_time_ms() - last_gpu_update >= DISPLAY_PERIOD_MS &&
+            if (!gpu_page) {
+                if (!cpu_owner || vmm_time_ms() - last_cpu_sample >= DISPLAY_PERIOD_MS)
+                    desktop_refresh();
+            } else if (pending_gpu == gpu_page && vmm_time_ms() - last_gpu_update >= DISPLAY_PERIOD_MS &&
                      publish_gpu(gpu_page, find_buffer(gpu_page)))
                 timer_updates++;
         }
         vmm_mutex_leave(lock);
     }
     if (takeover && (display_bpp || dos_text)) {
-        if (!gpu_page)
+        if (!gpu_page && !cpu_owner)
             queue_refresh(dos_text ? 50 : 32);
-        else if (pending_gpu) {
-            age = vmm_time_ms() - last_gpu_update;
+        else if (!gpu_page || pending_gpu) {
+            age = vmm_time_ms() - (gpu_page ? last_gpu_update : last_cpu_sample);
             queue_refresh(age < DISPLAY_PERIOD_MS ? DISPLAY_PERIOD_MS - age : 1);
         }
     }
@@ -1470,6 +1494,54 @@ static u32 opened(u32 process, int change)
     return openers[i].handles;
 }
 
+/* Keep the logical page current on every Flip, including a flip to page zero. Its pixels
+   remain in VGA RAM. Only sample them when the display is due. The event also catches
+   writes to a held front buffer after the last Flip. GDI and ownership changes are immediate. */
+static u32 show_cpu_page(u32 process, u32 offset, int flip)
+{
+    u32 previous = display_offset, serial = display_serial, age;
+    if (!valid_page(display_w, display_h, display_bpp, offset) || dos_text)
+        return ERROR_INVALID_PARAMETER;
+    if (stalled)
+        return ERROR_TIMEOUT;
+    if (flip && cpu_owner == process && !gpu_page && cpu_samples) {
+        age = vmm_time_ms() - last_cpu_sample;
+        if (age < DISPLAY_PERIOD_MS && queue_refresh(DISPLAY_PERIOD_MS - age)) {
+            display_offset = offset;
+            cpu_flips++;
+            return 0;
+        }
+    }
+    if (!flip || cpu_owner != process)
+        end_cpu_flips();
+    if (flip)
+        cpu_owner = process;
+    display_offset = offset;
+    if (!desktop_refresh()) {
+        if (serial == display_serial) {
+            display_offset = previous;
+            end_cpu_flips();
+            if (gpu_page)
+                pending_gpu = gpu_page;
+            queue_refresh(1);
+        }
+        return failure();
+    }
+    if (gpu_page)
+        drop_gpu_page();
+    if (presenter != process)
+        presenter = 0;
+    if (flip) {
+        /* The HAL closes its temporary ioctl handle after each Flip. A separately open
+           device handle lets final process cleanup return the display start to page zero. */
+        if (opened(process, 0) > 1)
+            presenter = process;
+        cpu_flips++;
+    }
+    queue_refresh(flip ? DISPLAY_PERIOD_MS : 32);
+    return 0;
+}
+
 /* The last device handle closes even when the presenting program is terminated before its
    DirectDraw cleanup can run. Page zero belongs to GDI; a previous software flip may have
    left both our mirror and the card's display-start register on a different page. Keep the
@@ -1478,6 +1550,7 @@ static void presenter_closed(u32 process)
 {
     if (!presenter || presenter != process)
         return;
+    end_cpu_flips();
     presenter = 0;
     display_offset = 0;
     drop_gpu_page();
@@ -1703,17 +1776,16 @@ static u32 dispatch(struct dioc *p)
         if (err)
             return err;
         break;
-    case RVD_DESKTOP:
-        if (p->in_len < 4 || !valid_page(display_w, display_h, display_bpp, *(u32 *)p->in))
+    case RVD_DESKTOP: {
+        const struct rvd_desktop *d = (const struct rvd_desktop *)p->in;
+        if (p->in_len < sizeof(d->offset))
             return ERROR_INVALID_PARAMETER;
-        display_offset = *(u32 *)p->in;
-        if (presenter != p->process)
-            presenter = 0;                      /* the other process now owns this CPU page */
-        drop_gpu_page();
-        queue_refresh(32);
-        if (!desktop_refresh())
-            return failure();
+        err = show_cpu_page(p->process, d->offset, p->in_len >= sizeof(*d) &&
+                            (d->flags & RVD_DESKTOP_FLIP));
+        if (err)
+            return err;
         break;
+    }
     default:
         return ERROR_NOT_SUPPORTED;
     }

@@ -193,6 +193,122 @@ after GPU takeover are unsupported. Use the default VGA path on a fresh boot for
 programs. The GPU presentation results above are from the Intel host. UTM and other
 renderers still need testing.
 
+#### Re-Volt and Tomb Raider on the Intel host
+
+Both demos ran at 640×480 in 16-bit colour on the same Windows 98 SE / DirectX 7 driver.
+Each run recorded 30 seconds of driver flip counters. The figures below use only complete
+100-flip groups inside that interval. They measure how quickly the game submits frames.
+The host console updates at up to about 60 Hz.
+
+| Scene | Guest frames/s, VGA → GPU | GPU-to-guest reads per 100 flips, VGA → GPU | Time reading per flip, VGA → GPU |
+|---|---:|---:|---:|
+| Re-Volt Demo, single race | 564.6 → 1,038.4 | 100 → 0 | 1.331 ms → 0 |
+| Tomb Raider: The Last Revelation, title flyby | 30.0 → 30.0 | 100 → 0 | 1.384 ms → 0 |
+
+Re-Volt restarted the same single race in each run. Four seconds after the restart,
+the accelerator was held for eight seconds, then released. GPU presentation handled all
+31,000 measured flips. VGA read back all 16,800. Render throughput rose 84% in this pair
+of runs. Both captures show the track, cars and dashboard at the start line. The game placed
+the player fourth in one grid and third in the other, so these images are a visual comparison.
+[Re-Volt starting grids](img/revolt-scanout.webp)
+
+Tomb Raider's flyby kept its 30 frames/s pace on both paths. Five corresponding camera
+positions, including the title and menu, matched at every one of the 307,200 pixels in
+RGB565. Each path recorded 800 measured flips.
+[Tomb Raider title flyby](img/tr4-scanout.webp)
+
+Alt+Tab exposed a fullscreen restoration failure in the driver from #80 on both paths. Re-Volt reported
+`DDERR_OUTOFMEMORY` when returning to the race. Tomb Raider returned to a black game
+window and stopped submitting frames. Alt+F4 exited Tomb Raider with code 0 and restored
+the desktop. A separate DirectDraw 4 test reproduced Re-Volt's failure on the default path
+after Windows had already restored the game mode and granted exclusive access again.
+[DirectDraw restoration report](https://github.com/mizaimao/moose-ripple/issues/82)
+
+#### Restoring a game after Alt+Tab
+
+DirectDraw 7 calls the HAL's `CreateSurface` entry when restoring a lost flip chain on a
+driver that offers `CreateSurfaceEx`. Ripple previously supplied only `CanCreateSurface`
+for ordinary surface creation. A 32-bit `CreateSurface` entry now returns
+`DDHAL_DRIVER_NOTHANDLED` so DirectDraw can use its existing allocator for the primary
+surface and its attached back buffer.
+
+Run `ddtest restore` from a desktop mode other than 640×480×16. It enters that game mode,
+flips once, lets a second process take focus, and checks that both surfaces become lost.
+After regaining exclusive access, it restores the primary and flips again. The same test
+returned `0x8007000e` on the previous driver. With the fix, both restore and the next flip
+returned `DD_OK`. The ordinary `ddtest` and `d3dtest` checks also passed with GPU scanout
+off and on.
+
+Tomb Raider resumed its flyby at 30 frames/s with either setting. Re-Volt resumed its
+race, accepted the restart and accelerator controls, and returned to the 1280×720 desktop
+on exit. After the focus switch, a 30-second race sample gave 428.1 frames/s on a fresh
+VGA boot and 737.7 with GPU scanout. All 22,000 measured GPU flips avoided a read-back.
+The default 3DMark 2000 benchmark scored 21,442 with the fix and GPU scanout enabled,
+compared with 21,319 and 21,362 in the earlier GPU runs.
+[Both games after returning from the desktop](img/alt-tab-restore.webp)
+
+#### VGA flips after GPU presentation
+
+After the first GPU presentation in a Windows session, the host display stays on virtio.
+A game using VGA can still change the display-start register, but the VxD also has to
+show that page on the host. Previously it scanned the page on every flip and uploaded
+every changed frame. Re-Volt reached only 69.7 frames/s in that case.
+
+The HAL now identifies an ordinary DirectDraw flip separately from a request to return
+the screen to GDI. Every flip selects its VGA page immediately. The VxD samples the
+latest page at most once per 17 ms during a run of flips from the same process.
+Its timer continues sampling when the game stops flipping, so a direct write to the
+visible page can still reach the host. A new owner and a return to GDI take effect
+immediately. Direct GPU presentation continues to keep eligible frames on the host.
+
+On the Intel UHD 630, each run first used GPU presentation at 640×480, then turned it
+off and ran the same five-second `d3dtest` scene at two resolutions. The rates measure
+completed guest flips. The paced mirror sampled the latest VGA page and uploaded it
+when the pixels changed.
+
+| 16-bit mode | Synchronous mirror, guest flips/s | Paced mirror, guest flips/s | Paced stream flips | Mirror samples | Host uploads |
+|---|---:|---:|---:|---:|---:|
+| 640×480 | 80.2 | 497.6 | 2,489 | 297 | 296 |
+| 1024×768 | 58.8 | 102.6 | 514 | 293 | 287 |
+
+Each stream count includes one setup flip before the timed loop. At 1024×768, the
+held reference frame matched the synchronous mirror at all 786,432 pixels, both in
+the host's captured RGB values and in the guest's RGB565 format.
+
+To exercise the last-frame case, run a GPU-presented Direct3D scene, then run
+`ddtest mirror` with GPU scanout off in the same boot. The test issues three quick
+flips between a red and a green page, then holds for seven seconds. On both drivers
+all 307,200 captured pixels were green. The test then wrote directly to the front
+buffer and held again without a flip. On both drivers precisely the upper-left
+320×240 pixels turned blue, and the other 230,400 stayed green.
+[Captured VGA pages after the final flip and front-buffer write](img/mixed-vga-mirror.webp)
+
+With GPU presentation off after takeover, Re-Volt survived a switch to the desktop and
+back on both drivers. In the same restarted, 30-second race its throughput rose from
+73.0 to 139.6 guest flips/s. Every measured flip still read the application image back
+to VGA. The improvement came from sampling fewer VGA pages for the host. In the earlier
+fresh-boot VGA run the game reached 428.1 flips/s. Direct GPU presentation reached
+737.7 flips/s after the focus switch and avoided the per-frame read-back.
+
+The game exited to the 1280×720 desktop. The 80×25 DOS prompt displayed text typed in
+full screen and accepted a new command after Alt+Enter returned it to a window.
+On both fresh VGA and the mirror, the window omitted the output typed in full screen.
+DirectDraw surface restoration, ordinary DirectDraw and the Direct3D rendering tests
+all passed with GPU scanout both off and on. The final ordinary driver scored 21,705
+in the default 3DMark 2000 benchmark with GPU presentation, compared with 21,442
+before this change on the same Intel rig. At 1024×768×32 the GPU-presented scene
+reached 3,942.6 guest frames/s. Its held image and the VGA mirror's held image each
+matched the earlier VGA reference at all 786,432 RGB pixels.
+Windowed OpenGL, recovery from a timed-out GPU request and 8-bit DirectDraw also
+passed after the 32-bit scene.
+
+A separate timing build measured the remaining cost of mirroring a 1024×768×16 page.
+Over 5,057 ms it spent 438 ms converting pixels, 3,019 ms in the transfer call
+including its fence wait, and 916 ms updating the display. The 288 uploads averaged
+10.48 ms in the transfer call. At 640×480 that call averaged 9.88 ms. The longest
+1024×768 refresh was 16 ms at the guest clock's observed 1 ms resolution.
+[Follow-up on allowing flips during a fenced upload](https://github.com/mizaimao/moose-ripple/issues/85)
+
 ### 3DMark 2000 (2026-11-16)
 
 3DMark 2000 1.1 runs its default benchmark to the end on Windows 98 SE in VM 230 (DirectX 7,

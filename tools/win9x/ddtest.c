@@ -2,6 +2,8 @@
  * ddtest: check a display driver's DirectDraw HAL from a program, the way a game uses it.
  *
  *   ddtest [width height bpp [seconds]]        default: 640 480 32, 2 seconds
+ *   ddtest restore                            640x480, 16 bits, real switch to desktop and back
+ *   ddtest mirror                             640x480, 16 bits, hold a flipped page and a front write
  *
  * Prints what the HAL offers (capabilities, video memory), then takes the screen
  * (exclusive, full-screen), sets the mode, makes a primary surface with one back buffer,
@@ -10,6 +12,9 @@
  * display start moves), that the picture on the screen is the one drawn last, and how long
  * DirectDraw's emulated vertical blank takes. Output on standard output: ddtest > out.txt.
  * Exit status 0 when every check passed. Built by tools/win9x/build-tools.sh.
+ * The restore test launches another windowed process, waits for it, then restores the
+ * lost primary and flips. 1 means a restore or flip failed; 2 means the switch or
+ * prerequisite chain could not be established. Run from a different desktop mode.
  */
 #include <windows.h>
 #include <ddraw.h>
@@ -82,15 +87,17 @@ static DWORD colour(int bpp, int i)
     return c;
 }
 
-static void fill(LPDIRECTDRAWSURFACE s, int bpp, DWORD c, int w, int h)
+static HRESULT fill(LPDIRECTDRAWSURFACE s, int bpp, DWORD c, int w, int h, RECT *area)
 {
     DDSURFACEDESC d;
+    HRESULT r;
     int x, y;
 
     memset(&d, 0, sizeof d);
     d.dwSize = sizeof d;
-    if (IDirectDrawSurface_Lock(s, NULL, &d, DDLOCK_WAIT | DDLOCK_WRITEONLY, NULL) != DD_OK)
-        return;
+    r = IDirectDrawSurface_Lock(s, area, &d, DDLOCK_WAIT | DDLOCK_WRITEONLY, NULL);
+    if (r != DD_OK)
+        return r;
     for (y = 0; y < h; y++) {
         BYTE *row = (BYTE *)d.lpSurface + y * d.lPitch;
         for (x = 0; x < w; x++) {
@@ -100,7 +107,7 @@ static void fill(LPDIRECTDRAWSURFACE s, int bpp, DWORD c, int w, int h)
             else { row[x * 3] = (BYTE)c; row[x * 3 + 1] = (BYTE)(c >> 8); row[x * 3 + 2] = (BYTE)(c >> 16); }
         }
     }
-    IDirectDrawSurface_Unlock(s, d.lpSurface);
+    return IDirectDrawSurface_Unlock(s, d.lpSurface);
 }
 
 static DWORD read_pixel(LPDIRECTDRAWSURFACE s, int bpp, int x, int y)
@@ -122,6 +129,44 @@ static DWORD read_pixel(LPDIRECTDRAWSURFACE s, int bpp, int x, int y)
     return v;
 }
 
+static void mirror_pages(LPDIRECTDRAWSURFACE front, LPDIRECTDRAWSURFACE back, int w, int h)
+{
+    RECT quarter;
+    DWORD green = colour(16, 1), blue = colour(16, 2);
+    HRESULT r;
+    int i;
+
+    check(fill(front, 16, colour(16, 0), w, h, NULL) == DD_OK, "fill the front page red");
+    check(fill(back, 16, green, w, h, NULL) == DD_OK, "fill the back page green");
+    if (failures)
+        return;
+    Sleep(250);
+    for (i = 0; i < 3; i++) {
+        r = IDirectDrawSurface_Flip(front, NULL, DDFLIP_WAIT | DDFLIP_NOVSYNC);
+        if (r != DD_OK) {
+            printf("mirror Flip %d: %08lx\n", i + 1, r);
+            failures++;
+            return;
+        }
+    }
+    printf("ddtest mirror: holding final green page\n");
+    Sleep(7000);
+    check(read_pixel(front, 16, w / 4, h / 4) == green &&
+          read_pixel(front, 16, w * 3 / 4, h * 3 / 4) == green, "final front page is green");
+
+    SetRect(&quarter, 0, 0, w / 2, h / 2);
+    r = fill(front, 16, blue, quarter.right, quarter.bottom, &quarter);
+    check(r == DD_OK, "write the displayed top-left quarter");
+    if (r != DD_OK)
+        return;
+    printf("ddtest mirror: holding blue quarter on green\n");
+    Sleep(7000);
+    check(read_pixel(front, 16, w / 4, h / 4) == blue, "top-left quarter is blue");
+    check(read_pixel(front, 16, w * 3 / 4, h / 4) == green &&
+          read_pixel(front, 16, w / 4, h * 3 / 4) == green &&
+          read_pixel(front, 16, w * 3 / 4, h * 3 / 4) == green, "other three quarters stay green");
+}
+
 static void print_caps(const char *who, DDCAPS *c)
 {
     printf("%s: caps %08lx caps2 %08lx surface caps %08lx, video memory %lu KB (%lu KB free)\n",
@@ -132,6 +177,110 @@ static void print_caps(const char *who, DDCAPS *c)
 static LRESULT CALLBACK wndproc(HWND w, UINT m, WPARAM wp, LPARAM lp)
 {
     return DefWindowProc(w, m, wp, lp);
+}
+
+static void pump(DWORD ms)
+{
+    DWORD start = GetTickCount();
+    MSG msg;
+    do {
+        while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+        Sleep(10);
+    } while (GetTickCount() - start < ms);
+}
+
+/* A separate application's top-level window triggers DirectDraw's normal focus loss. */
+static int focus_helper(void)
+{
+    HWND w = CreateWindow("STATIC", "ddtest desktop switch", WS_OVERLAPPEDWINDOW,
+                          0, 0, 320, 160, NULL, NULL, GetModuleHandle(NULL), NULL);
+    if (!w)
+        return 2;
+    ShowWindow(w, SW_SHOWNORMAL);
+    SetForegroundWindow(w);
+    pump(2500);
+    DestroyWindow(w);
+    return 0;
+}
+
+static int restore_chain(HWND w, LPDIRECTDRAW dd, LPDIRECTDRAWSURFACE front,
+                         LPDIRECTDRAWSURFACE back)
+{
+    LPDIRECTDRAW4 dd4;
+    LPDIRECTDRAWSURFACE4 f4;
+    PROCESS_INFORMATION pi;
+    STARTUPINFO si;
+    char exe[MAX_PATH], cmd[MAX_PATH + 24];
+    DWORD start, helper_status, length;
+    int lost = 0, result = 2;
+    HRESULT r;
+
+    r = IDirectDrawSurface_Flip(front, NULL, DDFLIP_WAIT);
+    if (r != DD_OK) { printf("initial Flip: %08lx\n", r); return 2; }
+    if (IDirectDraw_QueryInterface(dd, &IID_IDirectDraw4, (void **)&dd4) != DD_OK)
+        return 2;
+    if (IDirectDrawSurface_QueryInterface(front, &IID_IDirectDrawSurface4, (void **)&f4) != DD_OK) {
+        IDirectDraw4_Release(dd4);
+        return 2;
+    }
+    length = GetModuleFileName(NULL, exe, sizeof exe);
+    if (!length || length >= sizeof exe)
+        goto done;
+    wsprintf(cmd, "\"%s\" restore-helper", exe);
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    if (!CreateProcess(exe, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        printf("starting focus helper failed: %lu\n", GetLastError());
+        goto done;
+    }
+    CloseHandle(pi.hThread);
+    for (start = GetTickCount(); WaitForSingleObject(pi.hProcess, 0) == WAIT_TIMEOUT; ) {
+        if (GetTickCount() - start > 10000) {
+            TerminateProcess(pi.hProcess, 2);
+            WaitForSingleObject(pi.hProcess, 1000);
+            break;
+        }
+        pump(30);
+        if (!lost && GetForegroundWindow() != w &&
+            IDirectDrawSurface4_IsLost(f4) == DDERR_SURFACELOST &&
+            IDirectDrawSurface_IsLost(back) == DDERR_SURFACELOST) {
+            lost = 1;
+        }
+    }
+    if (!GetExitCodeProcess(pi.hProcess, &helper_status))
+        helper_status = 2;
+    CloseHandle(pi.hProcess);
+    ShowWindow(w, SW_RESTORE);
+    SetForegroundWindow(w);
+    for (start = GetTickCount(); GetTickCount() - start < 5000; ) {
+        pump(30);
+        if (GetForegroundWindow() == w && IDirectDraw4_TestCooperativeLevel(dd4) == DD_OK)
+            break;
+    }
+    if (helper_status || !lost || GetForegroundWindow() != w ||
+        IDirectDraw4_TestCooperativeLevel(dd4) != DD_OK) {
+        printf("ddtest restore: helper=%lu, both surfaces lost=%d, exclusive owner=%08lx\n",
+               helper_status, lost, IDirectDraw4_TestCooperativeLevel(dd4));
+        goto done;
+    }
+    printf("ddtest restore: primary and back buffer lost, exclusive mode regained\n");
+    r = IDirectDrawSurface4_Restore(f4);
+    printf("ddtest restore: Restore(primary)=%08lx\n", r);
+    result = 1;
+    if (r != DD_OK || IDirectDrawSurface4_IsLost(f4) != DD_OK ||
+        IDirectDrawSurface_IsLost(back) != DD_OK)
+        goto done;
+    r = IDirectDrawSurface4_Flip(f4, NULL, DDFLIP_WAIT);
+    printf("ddtest restore: Flip(restored chain)=%08lx\n", r);
+    if (r == DD_OK)
+        result = 0;
+done:
+    IDirectDrawSurface4_Release(f4);
+    IDirectDraw4_Release(dd4);
+    return result;
 }
 
 int main(int argc, char **argv)
@@ -148,8 +297,14 @@ int main(int argc, char **argv)
     HRESULT r;
     DWORD start, frames = 0, y0, y1, y2, px;
     int i;
+    int restore = argc == 2 && !stricmp(argv[1], "restore"), restore_result = 2;
+    int mirror = argc == 2 && !stricmp(argv[1], "mirror");
 
     setvbuf(stdout, NULL, _IONBF, 0);       /* everything printed survives a crash */
+    if (argc == 2 && !stricmp(argv[1], "restore-helper"))
+        return focus_helper();
+    if (restore || mirror)
+        bpp = 16;
     if (DirectDrawCreate(NULL, &dd, NULL) != DD_OK) {
         printf("DirectDrawCreate failed\n");
         return 2;
@@ -167,7 +322,7 @@ int main(int argc, char **argv)
     wc.hInstance = GetModuleHandle(NULL);
     wc.lpszClassName = "ddtest";
     RegisterClass(&wc);
-    win = CreateWindowEx(WS_EX_TOPMOST, "ddtest", "ddtest", WS_POPUP | WS_VISIBLE, 0, 0,
+    win = CreateWindowEx(restore ? 0 : WS_EX_TOPMOST, "ddtest", "ddtest", WS_POPUP | WS_VISIBLE, 0, 0,
                          GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
                          NULL, NULL, wc.hInstance, NULL);
     r = IDirectDraw_SetCooperativeLevel(dd, win, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
@@ -180,12 +335,23 @@ int main(int argc, char **argv)
     sd.dwSize = sizeof sd;
     sd.dwFlags = DDSD_CAPS | DDSD_BACKBUFFERCOUNT;
     sd.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_COMPLEX;
+    if (restore)
+        sd.ddsCaps.dwCaps |= DDSCAPS_3DDEVICE;
     sd.dwBackBufferCount = 1;
     r = IDirectDraw_CreateSurface(dd, &sd, &front, NULL);
     printf("primary surface with a back buffer: %08lx\n", r);
     if (r != DD_OK) { failures++; goto out; }
     caps.dwCaps = DDSCAPS_BACKBUFFER;
-    IDirectDrawSurface_GetAttachedSurface(front, &caps, &back);
+    r = IDirectDrawSurface_GetAttachedSurface(front, &caps, &back);
+    if (r != DD_OK) { printf("GetAttachedSurface: %08lx\n", r); failures++; goto out; }
+    if (restore) {
+        restore_result = restore_chain(win, dd, front, back);
+        goto out;
+    }
+    if (mirror) {
+        mirror_pages(front, back, w, h);
+        goto out;
+    }
     memset(&sd, 0, sizeof sd); sd.dwSize = sizeof sd;
     IDirectDrawSurface_GetSurfaceDesc(back, &sd);
     printf("back buffer: caps %08lx, pitch %ld\n", sd.ddsCaps.dwCaps, sd.lPitch);
@@ -193,10 +359,10 @@ int main(int argc, char **argv)
 
     /* Flips move the display start between the two buffers. */
     y0 = vbe_y_offset();
-    fill(back, bpp, colour(bpp, 0), w, h);
+    fill(back, bpp, colour(bpp, 0), w, h, NULL);
     r = IDirectDrawSurface_Flip(front, NULL, DDFLIP_WAIT);
     y1 = vbe_y_offset();
-    fill(back, bpp, colour(bpp, 1), w, h);
+    fill(back, bpp, colour(bpp, 1), w, h, NULL);
     IDirectDrawSurface_Flip(front, NULL, DDFLIP_WAIT);
     y2 = vbe_y_offset();
     printf("display start (line): %lu, after a flip %lu, after another %lu\n", y0, y1, y2);
@@ -209,7 +375,7 @@ int main(int argc, char **argv)
     /* As fast as it goes, then locked to the (emulated) vertical blank. */
     start = GetTickCount();
     for (i = 0; GetTickCount() - start < (DWORD)seconds * 1000; i++) {
-        fill(back, bpp, colour(bpp, i), w, h);
+        fill(back, bpp, colour(bpp, i), w, h, NULL);
         IDirectDrawSurface_Flip(front, NULL, DDFLIP_WAIT | DDFLIP_NOVSYNC);
         frames++;
     }
@@ -223,6 +389,8 @@ int main(int argc, char **argv)
           "the vertical blank comes 60 times a second");
 
 out:
+    if (back)
+        IDirectDrawSurface_Release(back);
     if (front)
         IDirectDrawSurface_Release(front);
     IDirectDraw_RestoreDisplayMode(dd);
@@ -230,6 +398,11 @@ out:
     IDirectDraw_Release(dd);
     DestroyWindow(win);
     printf("display start after leaving: line %u\n", vbe_y_offset());
+    if (restore) {
+        printf("ddtest restore: %s\n", restore_result == 0 ? "passed" :
+               restore_result == 1 ? "FAILED" : "inconclusive");
+        return restore_result;
+    }
     printf(failures ? "ddtest FAILED: %d checks wrong\n" : "ddtest passed\n", failures);
     return failures ? 1 : 0;
 }

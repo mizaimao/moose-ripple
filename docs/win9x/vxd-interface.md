@@ -19,7 +19,8 @@ VxD, the test program and the winsys; this is version 2 of the interface.
 | `RVD_SUBMIT` | `struct rvd_submit`, commands | | a virgl command stream for a context |
 | `RVD_TRANSFER` | `struct rvd_transfer` | | copy between a buffer's memory and its GPU object, either way |
 | `RVD_PRESENT` | `struct rvd_present` | | show a scanout-capable GPU buffer owned by the caller's context and matching the current screen dimensions |
-| `RVD_DESKTOP` | byte offset | | select the CPU-drawn page at this offset in video memory. Offset zero selects the GDI desktop |
+| `RVD_DESKTOP` | 32-bit byte offset | | select and refresh the CPU-drawn page immediately. GDI uses offset zero |
+| `RVD_DESKTOP` | `struct rvd_desktop` | | select the CPU page at `offset`. With `flags = RVD_DESKTOP_FLIP`, successive DirectDraw flips may share a host display update. Zero flags request an immediate refresh |
 | `RVD_DESKTOP` | empty | 32-bit flag | query whether virtio owns the display. A newly loaded HAL uses this to resume CPU page flips |
 | `RVD_HEAP` | bytes wanted | `struct rvd_heap` | one block of system memory for the display driver's DirectDraw surfaces that are never shown (made at the first call, returned again later; valid in every process). No GPU needed |
 | `RVD_SET_TIMEOUT` | milliseconds (0: the default, 10 s; `RVD_TIMEOUT_AT_ONCE`: give up as soon as a request is sent, and keep the device stalled until set back) | contexts and buffers held for the host (optional) | how long a request may take before it fails with `ERROR_TIMEOUT`; for tests of the recovery, until the program that set it ends |
@@ -51,9 +52,22 @@ virgl's and is decided in user mode.
   update that same resource, the VxD tells the host display about the newest contents at
   most once per 17 ms. A timer delivers the last update even if drawing stops. This matters
   on a VNC host where each display notification can copy the whole frame to the console.
-  After the first GPU presentation, QEMU also uses virtio for GDI. When GDI regains the
-  screen, the VxD samples the CPU-drawn page and uploads it when pixels change, including
-  software cursor movement. For an 80-column colour DOS text screen, it reads the VGA
+  After the first GPU presentation, QEMU also uses virtio for CPU-drawn pages. Before
+  takeover, the HAL selects those pages through VGA's display-start register.
+- **CPU page flips.** The HAL makes the target surface readable, passes its byte offset to
+  the VxD with `RVD_DESKTOP_FLIP` and sets the VGA display start on success. The first flip
+  from a new process or after a GPU image is shown refreshes the mirror immediately. Each
+  subsequent flip selects its page immediately, including page zero. At the next 17 ms
+  refresh interval, a flip or timer samples the latest selected page. The timer continues
+  sampling the held page after flips stop, so direct writes and software cursor movement
+  reach the screen. Changed pixels trigger a fenced transfer of the whole image and a
+  display flush. The four-byte offset request keeps its immediate behaviour. An older VxD
+  that supports this request reads the offset at the start of the extended request too.
+- **Display ownership.** Returning to GDI selects page zero immediately. Publishing a GPU
+  image or changing modes ends the sequence of CPU flips. A timer already queued uses
+  the current mode and display owner. When the tracked presenter closes its last device
+  handle, the VxD restores page zero if that process still owns the display. For an
+  80-column colour DOS text screen, the VxD reads the VGA
   character cells, loaded font and hardware cursor and renders them into a display image.
   A mode switch leaves the running GPU transport and application contexts intact.
 - **Clean-up.** A context belongs to the process that made it, and a buffer to its context.

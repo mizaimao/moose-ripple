@@ -30,7 +30,12 @@ typedef unsigned long rvd_u32;
                                                    and hold the device stalled until reset */
 #define RVD_GET_STATS           11  /* out: struct rvd_stats. No GPU needed */
 #define RVD_PRESENT             12  /* in: struct rvd_present; publish the latest GPU image */
-#define RVD_DESKTOP             13  /* in: CPU page byte offset; or no input, out: u32 takeover */
+#define RVD_DESKTOP             13  /* in: offset or struct rvd_desktop; no input: out u32 takeover */
+
+#define RVD_DESKTOP_FLIP        1   /* select the CPU page now; its display update may coalesce */
+struct rvd_desktop {
+    rvd_u32 offset, flags;
+};
 
 struct rvd_present {
     rvd_u32 context, buffer;    /* its scanout resource; updates to the same one coalesce */
