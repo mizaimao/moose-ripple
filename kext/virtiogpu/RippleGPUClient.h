@@ -30,6 +30,7 @@ class RippleGPUClient : public IOUserClient
         uint64_t size;
         uint32_t attached;               // bit i: attached to fContext[i]
         uint32_t format, width, height;  // as created (for SURFACE_PRESENT)
+        uint32_t flags;                  // as created (bit 0: rows top first)
     };
 
     task_t             fTask;

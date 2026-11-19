@@ -24,3 +24,33 @@ The current choice is shown as the registry property `RippleCursor` (`software` 
 
 Refresh statistics: `RippleRefreshFramesSent`, `RippleRefreshPixelsSent`,
 `RippleRefreshAverageMicroseconds` (over the last 600 refresh ticks).
+
+## Gamma table
+
+Mac OS X hands the display a gamma table (`IOFramebuffer::setGammaTable`; on 10.6.8 three
+channels of 256 sixteen-bit entries) and uses it for more than calibration: `CGDisplayFade`
+and the system's own fades (login and logout, display sleep, resolution changes, a program
+capturing the display) are ramps of that table.
+
+virtio-gpu has no gamma control, so the driver applies the table itself (`RippleGamma`). While
+the table is the identity, nothing changes. While it is anything else, the screen is a second
+image: what would be on screen (the framebuffer's picture, or the GPU buffer a client is
+showing), drawn through the table by a small virgl context of the driver's own, and drawn
+again whenever that picture or the table changes. It needs a host with virgl; on a 2D-only
+host `setGammaTable` answers "unsupported", as before.
+
+`ioreg -c RippleFramebuffer -l | grep RippleGammaTable` says `identity` or `applied`. After a
+normal boot it is `identity`.
+
+`tools/gamma-test` (`make gammatest`) sets a dimmed table for a while (`gamma-test hold 50 5`)
+or runs a fade to black and back (`gamma-test fade 1`). A screenshot taken in the guest never
+contains the table; look at the host's display (`scripts/screen-vnc.sh`, with `-n` and `-i`
+for a burst of frames).
+
+Checked on the Intel host (VM 210, 1280x800), with and without the GL driver: a table at half
+brightness halves every sampled colour value exactly and leaves the picture in place, and a
+one-second fade steps down to black and back up in frames taken every 0.1 s. In UTM on Apple
+silicon (a trial session, the disk's changes discarded) the host accepted every command and
+its display client logged about 27 draws a second through such a fade; what the screen itself
+shows there has not been captured. The hardware pointer is drawn by the host and is not
+dimmed.

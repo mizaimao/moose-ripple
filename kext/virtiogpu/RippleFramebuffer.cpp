@@ -123,6 +123,9 @@ bool RippleFramebuffer::start(IOService *provider)
     if (!fCursorMem || fCursorMem->prepare() != kIOReturnSuccess)
         goto fail;
 
+    if (!fGamma.init(fDev))
+        LOG("no memory for the gamma commands; gamma tables will not be applied");
+
     LOG("host display %ux%u, %u modes, preferred %ux%u, VRAM %u MB at 0x%llx", prefW, prefH,
         fModeCount, fModes[fPreferred].width, fModes[fPreferred].height, kVRAMSize >> 20,
         (unsigned long long)fVRAMPA);
@@ -174,6 +177,8 @@ bool RippleFramebuffer::applyMode(IODisplayModeID m)
     VirtioGPUDevice::Rect none = { 0, 0, 0, 0 }, full = { 0, 0, md.width, md.height };
 
     fShownRes = 0;                            // a mode change gives the display back
+    fGamma.destroy();                         // its image has the old size
+    fGammaShown = false;
     if (fScanoutRes) {
         fDev->setScanout(0, 0, none);
         fDev->detachBacking(fScanoutRes);
@@ -247,7 +252,8 @@ bool RippleFramebuffer::refresh()
     for (uint32_t y = y0; y <= y1; y++)
         memcpy(shadow + y * stride + x0 * 4, vram + y * stride + x0 * 4, r.width * 4);
     fDev->transferToHost2D(fScanoutRes, r, (uint64_t)y0 * stride + x0 * 4);
-    fDev->resourceFlush(fScanoutRes, r);
+    if (!gammaPresent())
+        fDev->resourceFlush(fScanoutRes, r);
     return true;
 }
 
@@ -298,6 +304,7 @@ void RippleFramebuffer::stop(IOService *provider)
 void RippleFramebuffer::free()
 {
     if (fRefresh)    fRefresh->release();
+    if (fDev)        fGamma.free();
     if (fDev)        fDev->release();
     if (fVRAM)       { fVRAM->complete();      fVRAM->release(); }
     if (fCursorMem)  { fCursorMem->complete(); fCursorMem->release(); }
@@ -592,6 +599,95 @@ void RippleFramebuffer::publishCapsets()
     }
 }
 
+// ---- The gamma table (RippleGamma.h) ---------------------------------------------------------
+
+// What is on the display now, drawn through the gamma table, and that image shown. False if no
+// table is set or the image could not be drawn; the frame itself is then the scanout (again),
+// and the caller shows it.
+bool RippleFramebuffer::gammaPresent()
+{
+    const Mode &md = mode(fCurMode);
+    VirtioGPUDevice::Rect full = { 0, 0, md.width, md.height };
+    VirtioGPUDevice::Rect out = full;
+    uint32_t image = 0;
+    if (fGamma.active()) {
+        if (fShownRes) {
+            image = fGamma.draw(fShownRes, fShownWidth, fShownHeight, fShownFormat, fShownTopFirst,
+                                fShownRect);
+            out.width = fShownRect.width;
+            out.height = fShownRect.height;
+        } else if (fScanoutRes) {
+            // the framebuffer's own picture: a 2D resource, its rows top first
+            image = fGamma.draw(fScanoutRes, md.width, md.height, VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM,
+                                true, full);
+        }
+    }
+    if (!image) {
+        if (fGammaShown) {
+            fGammaShown = false;
+            if (fShownRes)
+                fDev->setScanout(0, fShownRes, fShownRect);
+            else if (fScanoutRes)
+                fDev->setScanout(0, fScanoutRes, full);
+        }
+        return false;
+    }
+    if (!fGammaShown || fGammaImage != image) {
+        fDev->setScanout(0, image, out);
+        fGammaShown = true;
+        fGammaImage = image;
+    }
+    fDev->resourceFlush(image, out);
+    return true;
+}
+
+struct GammaArgs {
+    UInt32 channelCount, dataCount, dataWidth;
+    const void *data;
+};
+
+IOReturn RippleFramebuffer::gammaAction(OSObject *owner, void *argp, void *, void *, void *)
+{
+    RippleFramebuffer *fb = (RippleFramebuffer *)owner;
+    const GammaArgs *a = (const GammaArgs *)argp;
+
+    if (!fb->fGamma.setTable(a->channelCount, a->dataCount, a->dataWidth, a->data))
+        return kIOReturnSuccess;
+    // `ioreg -c RippleFramebuffer -l | grep RippleGammaTable`: is a table being applied
+    if (fb->fGamma.active() != fb->fGammaPublished || !fb->getProperty("RippleGammaTable")) {
+        fb->fGammaPublished = fb->fGamma.active();
+        fb->setProperty("RippleGammaTable", fb->fGammaPublished ? "applied" : "identity");
+    }
+    if (!fb->fEnabled)
+        return kIOReturnSuccess;
+    // Draw through the new table, or, with the identity, put the frame itself back.
+    if (!fb->gammaPresent()) {
+        const Mode &md = fb->mode(fb->fCurMode);
+        VirtioGPUDevice::Rect full = { 0, 0, md.width, md.height };
+        if (fb->fShownRes)
+            fb->fDev->resourceFlush(fb->fShownRes, fb->fShownRect);
+        else if (fb->fScanoutRes)
+            fb->fDev->resourceFlush(fb->fScanoutRes, full);
+    }
+    return kIOReturnSuccess;
+}
+
+// Mac OS X's gamma table: one table for all channels or one each for red, green and blue,
+// dataCount entries of dataWidth bits. Its fades are ramps of this table.
+IOReturn RippleFramebuffer::setGammaTable(UInt32 channelCount, UInt32 dataCount, UInt32 dataWidth,
+                                          void *data)
+{
+    if (!fGammaLogged) {
+        fGammaLogged = true;
+        LOG("gamma table: %u channel(s) of %u entries, %u bits", (unsigned)channelCount,
+            (unsigned)dataCount, (unsigned)dataWidth);
+    }
+    if (!fDev || !fDev->hasVirgl())
+        return kIOReturnUnsupported;
+    GammaArgs a = { channelCount, dataCount, dataWidth, data };
+    return getWorkLoop()->runAction(&RippleFramebuffer::gammaAction, this, &a);
+}
+
 // ---- A GPU buffer on the display (uapi DISPLAY) ---------------------------------------------
 
 IOReturn RippleFramebuffer::showAction(OSObject *owner, void *idp, void *rectp, void *, void *)
@@ -606,7 +702,8 @@ IOReturn RippleFramebuffer::showAction(OSObject *owner, void *idp, void *rectp, 
         fb->fShownRes = 0;
         const Mode &md = fb->mode(fb->fCurMode);
         VirtioGPUDevice::Rect full = { 0, 0, md.width, md.height };
-        if (fb->fScanoutRes)
+        // (with a gamma table set, the refresh below draws the frame through it instead)
+        if (fb->fScanoutRes && !fb->fGamma.active())
             fb->fDev->setScanout(0, fb->fScanoutRes, full);
         fb->fFullRefresh = true;
         fb->refresh();
@@ -619,11 +716,24 @@ IOReturn RippleFramebuffer::showAction(OSObject *owner, void *idp, void *rectp, 
     if (!r->width || !r->height || (uint64_t)r->x + r->width > md.width ||
         (uint64_t)r->y + r->height > md.height)
         return kIOReturnBadArgument;
-    if (fb->fShownRes != id || memcmp(&fb->fShownRect, r, sizeof(*r)) != 0) {
+    const bool changed = fb->fShownRes != id || memcmp(&fb->fShownRect, r, sizeof(*r)) != 0;
+    if (fb->fGamma.active()) {
+        // A gamma table is set: the buffer is drawn through it, and that image is the scanout.
+        const uint32_t oldRes = fb->fShownRes;
+        const VirtioGPUDevice::Rect oldRect = fb->fShownRect;
+        fb->fShownRes = id;
+        fb->fShownRect = *r;
+        if (fb->gammaPresent())
+            return kIOReturnSuccess;
+        fb->fShownRes = oldRes;               // could not be drawn: shown as it is
+        fb->fShownRect = oldRect;
+    }
+    if (changed || fb->fGammaShown) {
         if (!fb->fDev->setScanout(0, id, *r))
             return kIOReturnError;
         fb->fShownRes = id;
         fb->fShownRect = *r;
+        fb->fGammaShown = false;
     }
     return fb->fDev->resourceFlush(id, *r) ? kIOReturnSuccess : kIOReturnError;
 }
@@ -636,6 +746,8 @@ IOReturn RippleFramebuffer::flushAction(OSObject *owner, void *idp, void *queued
 
     if (!id || fb->fShownRes != id)
         return kIOReturnNotReady;
+    if (fb->gammaPresent())
+        return kIOReturnSuccess;
     bool ok = queued ? fb->fDev->resourceFlushAsync(id, fb->fShownRect)
                      : fb->fDev->resourceFlush(id, fb->fShownRect);
     return ok ? kIOReturnSuccess : kIOReturnError;

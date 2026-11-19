@@ -10,6 +10,7 @@
 #include <IOKit/graphics/IOFramebuffer.h>
 #include <IOKit/IOTimerEventSource.h>
 #include "VirtioGPUDevice.h"
+#include "RippleGamma.h"
 #include <IOKit/graphics/IOAccelTypes.h>
 
 class RippleFramebuffer : public IOFramebuffer
@@ -38,6 +39,13 @@ class RippleFramebuffer : public IOFramebuffer
     uint32_t        fShownRes;       // a GPU buffer on the display instead of the VRAM (0: none)
     VirtioGPUDevice::Rect fShownRect; // its rectangle as last set as the scanout
     uint32_t        fShownFormat;    // its pixel format, as its owner made it (backend's number)
+    uint32_t        fShownWidth, fShownHeight;   // its size
+    bool            fShownTopFirst;  // its rows run top first
+
+    RippleGamma     fGamma;          // the gamma table and the image drawn through it
+    bool            fGammaShown;     // that image is the scanout
+    uint32_t        fGammaImage;     // (its resource, as last set)
+    bool            fGammaLogged, fGammaPublished;
 
     IOTimerEventSource *fRefresh;
     bool                fEnabled;
@@ -65,6 +73,8 @@ class RippleFramebuffer : public IOFramebuffer
     static IOReturn showAction(OSObject *owner, void *id, void *rect, void *, void *);
     static IOReturn flushAction(OSObject *owner, void *id, void *queued, void *, void *);
     static IOReturn copyAction(OSObject *owner, void *args, void *, void *, void *);
+    static IOReturn gammaAction(OSObject *owner, void *changed, void *, void *, void *);
+    bool  gammaPresent();        // what is on the display, drawn through the gamma table
     void  showCursor();
     void  publishCapsets();     // host GPU capability sets into the registry (diagnostics)
 
@@ -88,7 +98,9 @@ public:
     // something was copied into it (the GPU client's SURFACE_PRESENT); fails if another buffer
     // is on the display by then.
     uint32_t shownResource(uint32_t *format) const { *format = fShownFormat; return fShownRes; }
-    void setShownFormat(uint32_t format) { fShownFormat = format; }
+    // What the buffer about to be shown is like (before showResource)
+    void setShownInfo(uint32_t format, uint32_t width, uint32_t height, bool topFirst)
+        { fShownFormat = format; fShownWidth = width; fShownHeight = height; fShownTopFirst = topFirst; }
     IOReturn flushShown(uint32_t id, bool wait = true);   // !wait: queued only
     IOReturn copyToScreen(IOMemoryDescriptor *src, uint32_t rowBytes, int32_t ox, int32_t oy,
                           const IOAccelBounds *rects, uint32_t count);
@@ -125,6 +137,8 @@ public:
 
     virtual IOReturn setCursorImage(void *cursorImage);
     virtual IOReturn setCursorState(SInt32 x, SInt32 y, bool visible);
+    virtual IOReturn setGammaTable(UInt32 channelCount, UInt32 dataCount, UInt32 dataWidth,
+                                   void *data);
 };
 
 #endif

@@ -45,8 +45,8 @@ strip_vmin  = $(VTOOL) -remove-build-version macos -output $(1) $(1).v && rm -f 
 link_dylib  = $(call ULD,$(1)) -dylib -install_name /tmp/ripple/$(notdir $(2)) \
               -o $(2).v $(3) -lSystem && $(call strip_vmin,$(2))
 
-.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter surfaceprobe guestinput tscskew timerlate clean
-all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter winlist glfeaturecheck cieffects ticker guestinput tscskew timerlate
+.PHONY: all hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode gammatest qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter surfaceprobe guestinput tscskew timerlate clean
+all: hello hellodylib cglinfo accelprobe glshim virtiogpu ptrpos setmode gammatest qemutablet virglclear gpustress takeoverprobe glgears grab qecheck scanouttest gaplugin glcheck fbdump cicheck framemeter winlist glfeaturecheck cieffects ticker guestinput tscskew timerlate
 
 clean:
 	rm -rf $(OUT)
@@ -180,7 +180,7 @@ $(OUT)/RippleGA.plugin: $(OUT)/i386/ga/RippleGA $(OUT)/x86_64/ga/RippleGA gldriv
 VGPU_INC := -Ithird_party/virtio -Ikext/virtiogpu -Iinclude
 VGPU_OBJ  = $(OUT)/x86_64/virtiogpu/VirtioGPUDevice.o $(OUT)/x86_64/virtiogpu/RippleFramebuffer.o \
             $(OUT)/x86_64/virtiogpu/RippleAccelerator.o $(OUT)/x86_64/virtiogpu/RippleGPUClient.o \
-            $(OUT)/x86_64/virtiogpu/RippleSurfaceClient.o \
+            $(OUT)/x86_64/virtiogpu/RippleSurfaceClient.o $(OUT)/x86_64/virtiogpu/RippleGamma.o \
             $(OUT)/x86_64/virtiogpu/virtqueue.o \
             $(OUT)/x86_64/virtiogpu/info.o
 $(OUT)/x86_64/virtiogpu/%.o: kext/virtiogpu/%.cpp kext/virtiogpu/*.h include/ripple_gpu_uapi.h
@@ -236,6 +236,16 @@ $(OUT)/%/setmode/setmode: $(OUT)/%/setmode/setmode.o
 	$(call link_tool,$*,$@,$^,-framework ApplicationServices -framework CoreFoundation)
 setmode: $(OUT)/setmode
 $(OUT)/setmode: $(OUT)/i386/setmode/setmode $(OUT)/x86_64/setmode/setmode
+	$(LIPO) -create $^ -output $@
+
+# --- gamma-test (userspace tool: the display's gamma table) ------------------------------
+$(OUT)/%/gamma-test/gamma-test.o: tools/gamma-test/gamma-test.c
+	@mkdir -p $(dir $@)
+	$(CC) $(call target,$*) $(UCFLAGS) -c $< -o $@
+$(OUT)/%/gamma-test/gamma-test: $(OUT)/%/gamma-test/gamma-test.o
+	$(call link_tool,$*,$@,$^,-framework ApplicationServices -framework CoreFoundation)
+gammatest: $(OUT)/gamma-test
+$(OUT)/gamma-test: $(OUT)/i386/gamma-test/gamma-test $(OUT)/x86_64/gamma-test/gamma-test
 	$(LIPO) -create $^ -output $@
 
 # --- RippleQEMUTablet (codeless kext: Info.plist only) -----------------------------------
