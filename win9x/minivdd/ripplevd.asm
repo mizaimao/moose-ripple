@@ -48,6 +48,7 @@ ModeChange      dd      0               ; the VDD is switching the screen to or 
 VIndex          dw      0               ; the private copy: index register
 VRegs           dw      VBE_REGS dup (0);                   and the registers behind it
 VramBlocks      dw      0               ; the card's memory in 64 KB blocks, read once
+Int10Hooked     db      0
 LoadedMsg       db      'rvd: moose-ripple mini-VDD loaded', 13, 10, 0
 MsgInit         db      'rvd: mini-VDD starting', 13, 10, 0
 MsgNotCard      db      'rvd: not loading: the card''s ID register is not a VBE one', 13, 10, 0
@@ -68,6 +69,10 @@ VxD_LOCKED_CODE_SEG
         extrn   _vgpu_display_mode:near, _vgpu_display_colour:near
         extrn   _vgpu_leave_windows:near, _vgpu_desktop_tick:near
         extrn   _vgpu_show_dos:near
+        extrn   _vgpu_dac_vm:dword
+        extrn   _vgpu_watch_dac:near, _vgpu_forget_dac:near
+        extrn   _vgpu_dac_out:near, _vgpu_dac_read_data:near
+        extrn   _vgpu_arm_dac_return:near, _vgpu_dac_return:near
 
 Begin_Control_Dispatch RippleVD
         Control_Dispatch Sys_Dynamic_Device_Init, MiniVDD_Dynamic_Init
@@ -75,6 +80,7 @@ Begin_Control_Dispatch RippleVD
         Control_Dispatch W32_DEVICEIOCONTROL, RippleVD_IoControl
         Control_Dispatch System_Exit, RippleVD_SysExit
         Control_Dispatch Sys_VM_Terminate, RippleVD_VMEnd
+        Control_Dispatch Destroy_VM, RippleVD_DestroyVM
 End_Control_Dispatch RippleVD
 
 ; Say: ESI = zero-terminated text for QEMU's debug port. Keeps every register and the flags.
@@ -116,6 +122,19 @@ BeginProc RippleVD_VMEnd
         clc
         ret
 EndProc RippleVD_VMEnd
+
+BeginProc RippleVD_DestroyVM
+        cmp     ebx,_vgpu_dac_vm
+        jne     short dvm_done
+        pushad
+        push    ebx
+        call    _vgpu_forget_dac
+        add     esp,4
+        popad
+dvm_done:
+        clc
+        ret
+EndProc RippleVD_DestroyVM
 
 ; ---- The trap for ports 01CEh and 01CFh -------------------------------------------------------
 ; VMM calls this for every access from ring 3 or virtual 8086 mode:
@@ -283,15 +302,147 @@ EndProc RippleVD_MapVGA
 ; Before a video BIOS mode set in a VM: Windows' own after its display driver is disabled
 ; gets the card's VGA window (see RippleVD_MapVGA).
 BeginProc MiniVDD_PreInt10ModeSet
+        cmp     ebx,WindowsVM
+        je      short pi_windows
+        push    eax
+        and     al,7fh                  ; BIOS can preserve display memory
+        cmp     al,13h
+        pop     eax
+        jne     short pi_done
+        push    1                       ; a new BIOS mode can replace the DAC
+        call    RippleVD_WatchDAC
+        jmp     short pi_done
+pi_windows:
         cmp     Disabled, 0
         je      short pi_done
-        cmp     ebx, WindowsVM
-        jne     short pi_done
         call    RippleVD_MapVGA
 pi_done:
         clc
         ret
 EndProc MiniVDD_PreInt10ModeSet
+
+; The VDD may grant a full-screen VM direct access to these ports. Request
+; its ordinary DAC callbacks for this VM, as in the DDK's XGA mini-VDD.
+BeginProc RippleVD_WatchDAC
+        pushad
+        push    dword ptr [esp+36]      ; new BIOS mode vs foreground switch
+        push    ebx
+        call    _vgpu_watch_dac
+        add     esp,8
+        test    eax,eax
+        jz      short wd_done
+        call    RippleVD_TrapDAC
+wd_done:
+        popad
+        ret     4
+EndProc RippleVD_WatchDAC
+
+BeginProc RippleVD_TrapDAC
+        mov     edx,03c7h
+        VMMCall Enable_Local_Trapping
+        mov     edx,03c8h
+        VMMCall Enable_Local_Trapping
+        mov     edx,03c9h
+        VMMCall Enable_Local_Trapping
+        ret
+EndProc RippleVD_TrapDAC
+
+; The main VDD can restore direct port access at the end of a BIOS mode
+; change. Observe the interrupt return before the program's next DAC write.
+BeginProc RippleVD_ObserveInt10
+        cmp     ebx,WindowsVM
+        je      short bi_chain
+        cmp     [ebp.Client_AX],0013h
+        je      short bi_mode13
+        cmp     [ebp.Client_AX],0093h
+        jne     short bi_chain
+bi_mode13:
+        pushad
+        push    ebx
+        call    _vgpu_arm_dac_return
+        add     esp,4
+        test    eax,eax
+        jz      short bi_done
+        mov     edx,eax                 ; callback token
+        mov     eax,2000                ; also release it if the chain consumes the interrupt
+        mov     esi,OFFSET32 RippleVD_AfterInt10
+        VMMCall Call_When_VM_Returns
+bi_done:
+        popad
+bi_chain:
+        stc                             ; direct VMM to the next interrupt hook
+        ret
+EndProc RippleVD_ObserveInt10
+
+BeginProc RippleVD_AfterInt10
+        pushfd
+        pushad
+        push    edx
+        VMMCall Get_Cur_VM_Handle
+        pop     edx
+        push    ebx
+        push    edx
+        call    _vgpu_dac_return
+        add     esp,8
+        popad
+        popfd
+        ret
+EndProc RippleVD_AfterInt10
+
+BeginProc _vmm_rearm_dac
+        pushad
+        mov     ebx,[esp+36]
+        VxDCall VDD_Get_VM_Info
+        cmp     ebx,edi
+        jne     short ra_done
+        call    RippleVD_TrapDAC
+ra_done:
+        popad
+        ret
+EndProc _vmm_rearm_dac
+
+; Observe only the selected VM. Return the original AL and carry clear so
+; the main VDD continues its own hardware/virtual register handling.
+BeginProc MiniVDD_DACOut
+        cmp     ebx,_vgpu_dac_vm
+        jne     short do_done
+        pushad
+        movzx   eax,al
+        xor     ecx,ecx
+        cmp     dx,03c7h
+        jne     short do_record
+        push    eax
+        push    edx
+        VxDCall VDD_Get_VM_Info
+        pop     edx
+        pop     eax
+        xor     ecx,ecx
+        cmp     edi,ebx                 ; physical DAC only for the CRTC owner
+        sete    cl
+do_record:
+        push    ecx
+        push    eax
+        push    edx
+        call    _vgpu_dac_out
+        add     esp,12
+        popad
+do_done:
+        clc
+        ret
+EndProc MiniVDD_DACOut
+
+BeginProc MiniVDD_DACIn
+        cmp     ebx,_vgpu_dac_vm
+        jne     short di_done
+        cmp     dx,03c9h
+        jne     short di_done
+        pushad
+        call    _vgpu_dac_read_data
+        popad
+di_done:
+        clc
+        ret
+EndProc MiniVDD_DACIn
 
 ; The VDD is about to give the screen to a DOS session (or to its own message screen) and will
 ; set a VGA mode: take the card out of the display driver's mode, and let everything through
@@ -329,7 +480,14 @@ BeginProc MiniVDD_PostHiResToVGA
         cmp     Disabled, 0
         jne     short ph_done
         pushad
+        cmp     ebx,WindowsVM
+        je      short ph_show
+        push    0
+        call    RippleVD_WatchDAC
+ph_show:
+        push    ebx
         call    _vgpu_show_dos
+        add     esp,4
         popad
 ph_done:
         jmp     MiniVDD_PostModeSwitch
@@ -516,6 +674,8 @@ BeginProc MiniVDD_Dynamic_Init
         MiniVDDDispatch PRE_VGA_TO_HIRES, PreVGAToHiRes
         MiniVDDDispatch POST_VGA_TO_HIRES, PostModeSwitch
         MiniVDDDispatch PRE_INT_10_MODE_SET, PreInt10ModeSet
+        MiniVDDDispatch VIRTUALIZE_DAC_OUT, DACOut
+        MiniVDDDispatch VIRTUALIZE_DAC_IN, DACIn
 
         mov     esi, OFFSET32 RippleVD_VbeTrap
         mov     edx, VBE_INDEX
@@ -525,6 +685,14 @@ BeginProc MiniVDD_Dynamic_Init
         mov     edx, VBE_DATA
         VMMCall Install_IO_Handler
         jc      short di_notrap
+        cmp     Int10Hooked,0
+        jne     short di_iret_done
+        mov     eax,10h
+        mov     esi,OFFSET32 RippleVD_ObserveInt10
+        VMMCall Hook_V86_Int_Chain
+        jc      short di_iret_done
+        mov     Int10Hooked,1
+di_iret_done:
 
         mov     esi, OFFSET32 LoadedMsg         ; a line on QEMU's debug port
 di_msg: lodsb

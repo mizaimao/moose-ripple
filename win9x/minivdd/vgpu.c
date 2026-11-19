@@ -124,6 +124,7 @@ extern void  __cdecl vmm_mutex_enter(u32 mutex);
 extern void  __cdecl vmm_mutex_leave(u32 mutex);
 extern u32   __cdecl vmm_mutex_owner(u32 mutex);
 extern u32   __cdecl vmm_queue_refresh(u32 delay_ms);
+extern void  __cdecl vmm_rearm_dac(u32 vm);
 
 /* ---- The virtio structures in the card's memory (virtio 1.0, 4.1.4.3) ------------------------ */
 /* common configuration, offsets */
@@ -347,7 +348,14 @@ static u32 cpu_owner, last_cpu_sample, cpu_flips, cpu_samples, cpu_uploads;
 static u32 visible = 0;                         /* last SET_SCANOUT acknowledged */
 static u32 takeover = 0;                        /* virtio has taken the display from VGA */
 static u32 refresh_pending = 0;
-static int dos_text, dos_reported;
+static u32 dos_active;                          /* foreground DOS VM */
+static int dos_reported;
+u32 vgpu_dac_vm;                                /* VM observed by the mini-VDD DAC callbacks */
+static u32 dos_palette[256];                    /* set bit 24 when the RGB value is known */
+static u32 dac_rgb, dac_known;
+static volatile u32 dac_generation;
+static u8 dac_index, dac_component, dac_writing;
+static u32 dac_return_vm, dac_return_token, dac_return_time;
 static u32 display_w, display_h, display_bpp, vram_bytes, display_offset;
 static u32 palette[256];
 static u8 *vram;
@@ -1124,7 +1132,7 @@ static void retire_upload(int show)
         d->unsafe = upload_disabled = 1;
         dbg("rvd: invalid desktop upload fence, using synchronous transfers\r\n");
     } else if (show && !upload.expired && upload.serial == display_serial && upload.generation == cpu_generation &&
-               upload.owner == cpu_owner && !gpu_page && !dos_text && display_bpp &&
+               upload.owner == cpu_owner && !gpu_page && !dos_active && display_bpp &&
                desktop_slot == upload.slot && visible == id && flush_scanout(id, d->w, d->h)) {
         if (upload.generation == cpu_generation) {
             async_shown++;
@@ -1388,11 +1396,181 @@ static int mirror_text(struct desktop_image *d, const struct vga_text *v)
     return changed;
 }
 
+/* The main VDD owns the DAC ports. Its callbacks let us observe a DOS VM's BIOS
+   and application writes, including palette animation, without disturbing an
+   interrupted RGB triplet. A palette belongs to the VM that programmed it. */
+int __cdecl vgpu_watch_dac(u32 vm, int mode_set)
+{
+    if (!takeover || !vram || (dos_active && dos_active != vm))
+        return 0;
+    if (vgpu_dac_vm != vm || mode_set) {
+        zero(dos_palette, sizeof(dos_palette));
+        dac_writing = 0;
+        dac_known = 0;
+        dac_generation++;
+        vgpu_dac_vm = vm;
+    }
+    return 1;
+}
+
+void __cdecl vgpu_forget_dac(u32 vm)
+{
+    if (vgpu_dac_vm == vm)
+        vgpu_dac_vm = 0;
+    if (dos_active == vm) {
+        dos_active = 0;
+        display_serial++;
+    }
+    if (dac_return_vm == vm)
+        dac_return_vm = 0;
+}
+
+/* QEMU's standard six-bit VGA DAC fills both low bits from bit zero. */
+static u32 dac_to_byte(u32 v)
+{
+    return ((v & 63) << 2) | ((v & 1) * 3);
+}
+
+void __cdecl vgpu_dac_out(u32 port, u32 value, int physical)
+{
+    if (port == 0x3c8) {
+        dac_index = (u8)value;
+        dac_component = 0;
+        dac_writing = 1;
+    } else if (port == 0x3c7) {
+        dac_writing = 0;
+        /* This very OUT will install a fresh read index and start at red.
+           Only here can we bootstrap an unknown palette with physical reads.
+           Never touch the write index/cache. The caller forwards the OUT. */
+        if (physical && dos_active == vgpu_dac_vm && dac_known < 256) {
+            u32 i;
+            __asm {
+                mov dx, 03c7h
+                xor al, al
+                out dx, al
+            }
+            for (i = 0; i < 256; i++) {
+                u8 r, g, b;
+                __asm {
+                    mov dx, 03c9h
+                    in al, dx
+                    mov r, al
+                    in al, dx
+                    mov g, al
+                    in al, dx
+                    mov b, al
+                }
+                dos_palette[i] = 0x1000000UL | (dac_to_byte(r) << 16) |
+                                 (dac_to_byte(g) << 8) | dac_to_byte(b);
+            }
+            dac_known = 256;
+            dac_generation++;
+        }
+    } else if (port == 0x3c9 && dac_writing) {
+        dac_rgb = ((dac_rgb << 8) & 0xffffff) | dac_to_byte(value);
+        if (++dac_component == 3) {
+            u32 colour = 0x1000000UL | dac_rgb;
+            if (dos_palette[dac_index] != colour) {
+                if (!dos_palette[dac_index])
+                    dac_known++;
+                dos_palette[dac_index] = colour;
+                dac_generation++;
+            }
+            dac_index++;
+            dac_component = 0;
+        }
+    } else if (port == 0x3c9 && dac_known) {
+        /* A write without an observed index can change an unknown entry. */
+        zero(dos_palette, sizeof(dos_palette));
+        dac_known = 0;
+        dac_generation++;
+    }
+}
+
+void __cdecl vgpu_dac_read_data(void)
+{
+    dac_writing = 0;
+}
+
+/* Strict BIOS mode 13h: packed chain-four, 320-byte rows starting at zero,
+   400 visible scanlines with each row repeated. Reject planar modes, custom
+   stride/start, scanline splits and double-scanning on top of the row repeat. */
+static int is_vga_mode13(void)
+{
+    u8 overflow, scan;
+    u32 lines, split;
+    if (!vram || vram_bytes < 64000 || (vga_register(0x3ce, 6) & 0x0d) != 5 ||
+        (vga_register(0x3ce, 5) & 0x70) != 0x40 ||
+        (vga_register(0x3c4, 4) & 0x0e) != 0x0e ||
+        vga_register(0x3d4, 1) != 79 || vga_register(0x3d4, 0x13) != 40 ||
+        vga_register(0x3d4, 0x0c) || vga_register(0x3d4, 0x0d) ||
+        vga_register(0x3d4, 8) || !(vga_register(0x3d4, 0x14) & 0x40))
+        return 0;
+    overflow = vga_register(0x3d4, 7);
+    scan = vga_register(0x3d4, 9);
+    lines = 1 + vga_register(0x3d4, 0x12) + ((overflow & 2) << 7) + ((overflow & 0x40) << 3);
+    split = vga_register(0x3d4, 0x18) | ((overflow & 0x10) << 4) | ((scan & 0x40) << 3);
+    return lines == 400 && (scan & 0x9f) == 1 && split >= 399;
+}
+
+/* Some mode sets nest another INT 10h. Re-arm at the outer return, after
+   the main VDD has finished its mode-specific trap changes. A consumed
+   interrupt or a destroyed VM cannot leave a permanent outstanding callback. */
+u32 __cdecl vgpu_arm_dac_return(u32 vm)
+{
+    u32 now;
+    if (!takeover || !vram || (dos_active && dos_active != vm))
+        return 0;
+    now = vmm_time_ms();
+    if (dac_return_vm && now - dac_return_time < 2000)
+        return 0;
+    if (!++dac_return_token)
+        dac_return_token++;
+    dac_return_vm = vm;
+    dac_return_time = now;
+    return dac_return_token;
+}
+
+void __cdecl vgpu_dac_return(u32 token, u32 current)
+{
+    u32 vm = dac_return_vm;
+    if (!vm || token != dac_return_token)
+        return;
+    dac_return_vm = 0;
+    if (current == vm && dos_active == vm && vgpu_dac_vm == vm &&
+        vmm_time_ms() - dac_return_time < 2000 && is_vga_mode13())
+        vmm_rearm_dac(vm);
+}
+
+static int mirror_mode13(struct desktop_image *d)
+{
+    const u8 *src = vram;
+    u32 *row = (u32 *)d->mem;
+    u32 y, x, generation = dac_generation;
+    int changed = 0;
+    if (dos_active != vgpu_dac_vm)
+        return -1;
+    for (y = 0; y < 200; y++, row += 1280) {
+        for (x = 0; x < 640; x += 2) {
+            u32 colour = dos_palette[*src++];
+            if (!colour)
+                return -1;
+            colour &= 0xffffff;
+            if (row[x] != colour || row[x + 1] != colour ||
+                row[640 + x] != colour || row[641 + x] != colour) {
+                row[x] = row[x + 1] = row[640 + x] = row[641 + x] = colour;
+                changed = 1;
+            }
+        }
+    }
+    return generation == dac_generation ? changed : -1;
+}
+
 static int desktop_refresh(int paced)
 {
     u32 w = display_w, h = display_h, bpp = display_bpp, offset = display_offset;
     u32 serial = display_serial, start = vmm_time_ms();
-    int text = dos_text;
+    int text = 0, mode13 = 0, changed;
     struct vga_text v;
     unsigned slot = desktop_slot, i;
     struct desktop_image *d;
@@ -1401,7 +1579,7 @@ static int desktop_refresh(int paced)
 
     if (stalled)
         return 0;
-    paced = paced && cpu_owner && cpu_samples && !gpu_page && !text;
+    paced = paced && cpu_owner && cpu_samples && !gpu_page && !dos_active;
     retire_upload(paced);
     if (stalled || serial != display_serial)
         return 0;
@@ -1410,16 +1588,20 @@ static int desktop_refresh(int paced)
     if (upload.head && upload.slot == slot && paced && !upload.expired &&
         upload.generation == cpu_generation && upload.owner == cpu_owner && queue_refresh(2))
         return 1;
-    if (text) {
-        if (!read_vga_text(&v)) {
-            if (!dos_reported) {
-                dbg("rvd: waiting for VGA colour text mode\r\n");
+    if (dos_active) {
+        if ((text = read_vga_text(&v)) != 0) {
+            w = v.cols * v.cw;
+            h = v.rows * v.ch;
+        } else if ((mode13 = is_vga_mode13()) != 0) {
+            w = 640;
+            h = 400;
+        } else {
+            if (dos_reported != 1) {
+                dbg("rvd: waiting for supported VGA mode\r\n");
                 dos_reported = 1;
             }
             return 0;
         }
-        w = v.cols * v.cw;
-        h = v.rows * v.ch;
     } else if (!valid_page(w, h, bpp, offset))
         return 0;
     if (!vram) {
@@ -1436,8 +1618,21 @@ static int desktop_refresh(int paced)
         return 0;
     d = &desktops[slot];
     id = MAX_BUFFERS + 1 + slot;
-    if (text ? mirror_text(d, &v) : mirror_pixels(d, bpp, offset))
+    if (text)
+        changed = mirror_text(d, &v);
+    else if (mode13)
+        changed = mirror_mode13(d);
+    else
+        changed = mirror_pixels(d, bpp, offset);
+    if (changed)
         d->upload = 1;
+    if (changed < 0) {
+        if (dos_reported != 4) {
+            dbg("rvd: waiting for DOS mode 13h palette\r\n");
+            dos_reported = 4;
+        }
+        return 0;
+    }
     if (serial != display_serial)
         return 0;
     if (d->upload) {
@@ -1475,6 +1670,9 @@ static int desktop_refresh(int paced)
     if (text && dos_reported != 2) {
         dbg("rvd: displaying DOS text "); dbg_hex(v.cols); dbg(" x "); dbg_hex(v.rows); dbg("\r\n");
         dos_reported = 2;
+    } else if (mode13 && dos_reported != 3) {
+        dbg("rvd: displaying DOS mode 13h 320x200\r\n");
+        dos_reported = 3;
     }
     desktop_slot = slot;
     for (i = 0; i < DESKTOP_SLOTS && !stalled; i++)
@@ -1489,7 +1687,7 @@ void __cdecl vgpu_display_mode(u32 bpp, u32 size, u32 bytes)
 {
     end_cpu_flips();
     display_serial++;
-    dos_text = 0;
+    dos_active = 0;
     display_w = size >> 16;
     display_h = size & 0xffff;
     vram_bytes = bytes;
@@ -1505,14 +1703,14 @@ void __cdecl vgpu_display_colour(u32 index, u32 colour)
     palette[index] = colour & 0xffffff;
 }
 
-/* SET_SCANOUT takes the console from VGA for this boot. The DOS text image uses the same
+/* SET_SCANOUT takes the console from VGA for this boot. The DOS image uses the same
    transport so the GPU contexts and display resources stay valid across a switch. */
-void __cdecl vgpu_show_dos(void)
+void __cdecl vgpu_show_dos(u32 vm)
 {
     if (takeover && vram) {
         end_cpu_flips();
         display_serial++;
-        dos_text = 1;
+        dos_active = vm;
         dos_reported = 0;
         queue_refresh(1);
     }
@@ -1522,7 +1720,7 @@ void __cdecl vgpu_leave_windows(void)
 {
     end_cpu_flips();
     display_serial++;
-    dos_text = 0;
+    dos_active = 0;
     display_bpp = presenter = 0;
     drop_gpu_page();
 }
@@ -1554,13 +1752,13 @@ void __cdecl vgpu_desktop_tick(void)
 {
     u32 age;
     refresh_pending = 0;
-    if (!takeover || (!upload.head && ((!display_bpp && !dos_text) || (gpu_page && !pending_gpu))))
+    if (!takeover || (!upload.head && ((!display_bpp && !dos_active) || (gpu_page && !pending_gpu))))
         return;
     if (lock && !vmm_mutex_owner(lock)) {
         vmm_mutex_enter(lock);
         if (upload.head && device_ready())
             retire_upload(1);
-        if (takeover && (display_bpp || dos_text) && device_ready()) {
+        if (takeover && (display_bpp || dos_active) && device_ready()) {
             if (!gpu_page) {
                 if (!cpu_owner || vmm_time_ms() - last_cpu_sample >= DISPLAY_PERIOD_MS)
                     desktop_refresh(cpu_owner != 0);
@@ -1572,9 +1770,9 @@ void __cdecl vgpu_desktop_tick(void)
     }
     if (upload.head)
         queue_refresh(upload.expired || upload_test_held ? 17 : 2);
-    else if (takeover && (display_bpp || dos_text)) {
+    else if (takeover && (display_bpp || dos_active)) {
         if (!gpu_page && !cpu_owner)
-            queue_refresh(dos_text ? 50 : 32);
+            queue_refresh(dos_active ? 50 : 32);
         else if (!gpu_page || pending_gpu) {
             age = vmm_time_ms() - (gpu_page ? last_gpu_update : last_cpu_sample);
             queue_refresh(age < DISPLAY_PERIOD_MS ? DISPLAY_PERIOD_MS - age : 1);
@@ -1678,7 +1876,7 @@ static u32 opened(u32 process, int change)
 static u32 show_cpu_page(u32 process, u32 offset, int flip)
 {
     u32 previous = display_offset, serial = display_serial, age;
-    if (!valid_page(display_w, display_h, display_bpp, offset) || dos_text)
+    if (!valid_page(display_w, display_h, display_bpp, offset) || dos_active)
         return ERROR_INVALID_PARAMETER;
     if (stalled)
         return ERROR_TIMEOUT;
