@@ -373,6 +373,53 @@ the previous driver and 21,437 on the new driver. Both sent about 81.1% of timed
 flips directly to the GPU, recorded 233 read-backs in complete timing blocks and
 sent zero CPU mirror uploads. This benchmark exercised direct GPU presentation.
 
+#### Apple silicon UTM (2026-11-19)
+
+Windows 98 SE ran the same four driver binaries as the Intel test in a disposable
+UTM 5.0.8 guest with `virtio-vga-gl`. The guest compared each installed binary
+with the test disc after restarting. The default VGA path, opt-in GPU presentation
+and VGA fallback after GPU takeover ran on the same installed build.
+
+After a fresh boot with the Mac running only the Windows 98 VM, six five-second
+1024×768 scenes produced the following guest render rates. In both depths the
+direct path presented all 100 flips in each complete timing block on the GPU
+with zero read-backs. The two VGA paths performed one read-back per timed flip.
+
+| Scene depth | Fresh VGA (flips/s) | Direct GPU (flips/s) | VGA after GPU takeover (flips/s) |
+|---|---:|---:|---:|
+| 16-bit | 180.8 | 1,983.0 | 103.8 |
+| 32-bit | 216.8 | 1,932.0 | 100.0 |
+
+In Re-Volt, the older installed driver reported `DDERR_OUTOFMEMORY` when restoring
+the primary display after Alt+Tab. With the new driver the game returned to
+640×480×16 and resumed rendering when its window regained focus. On the GPU run
+a second Alt+Tab left the desktop active. The foreground helper returned focus to
+Re-Volt, and the driver resumed GPU presentation. After returning to the game on
+the VGA fallback, both guest VGA pages contained the live race and advancing HUD
+clocks. On separate restarted drives the guest completed **65.8 flips/s** with GPU
+presentation (1,800 flips, zero read-backs), and **41.5 flips/s** with the VGA
+fallback (800 flips, 800 read-backs). These rates use complete 100-flip blocks.
+[Re-Volt before and after the display restore fix](img/utm-revolt-restore.webp)
+
+The DirectDraw test held a green front buffer, wrote a blue top-left quarter and
+read the new pixels without a further flip. All 307,200 pixels in the sampled
+guest VGA page were green before the write. Afterwards the top-left 76,800 were
+blue and the remaining 230,400 stayed green. The asynchronous upload test recovered
+from a forced deadline, received the next upload's reply, and restored the desktop.
+The DOS text buffer contained the command typed in full screen and its echoed output.
+After returning to windowed DOS, another typed command wrote its marker to serial.
+In both color depths the two mipmap LOD-bias checks failed in all three display
+paths. The guest's other pixel checks passed.
+
+QEMU's virtual framebuffer capture showed the VGA reference before takeover.
+After takeover it returned solid black for the GPU scene, the VGA fallback, the
+desktop and DOS, even while the guest continued rendering. The eight-second Re-Volt
+captures in both modes also contained only black frames. Those captures cannot
+measure the rate of distinct frames in UTM's viewer. A separate eight-second
+GPU race with QEMU's SPICE update trace enabled produced no new VM log records.
+Full-screen GPU presentation remains opt-in pending a check of the UTM window.
+[QEMU captures before and after GPU takeover](img/utm-qmp-scanout.webp)
+
 ### 3DMark 2000 (2026-11-16)
 
 3DMark 2000 1.1 runs its default benchmark to the end on Windows 98 SE in VM 230 (DirectX 7,
