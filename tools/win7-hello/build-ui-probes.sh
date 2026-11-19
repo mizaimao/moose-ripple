@@ -16,6 +16,7 @@ for arch in x86_64 i686; do
     "$cc" -O2 -Wall -Wextra -Werror "$here/d3d9query.c" -ld3d9 -ldwmapi -o "$OUT/d3d9query$suffix.exe"
     "$cc" -O2 -Wall -Wextra -Werror "$here/d3d11query.c" -ld3d11 -ldwmapi -o "$OUT/d3d11query$suffix.exe"
     "$cc" -O2 -Wall -Wextra -Werror "$here/d3d9stream.c" -ld3d9 -o "$OUT/d3d9stream$suffix.exe"
+    "$cc" -O2 -Wall -Wextra -Werror "$here/d3d9flipex.c" -ld3d9 -ldxva2 -lole32 -lgdi32 -o "$OUT/d3d9flipex$suffix.exe"
 done
 cc=$LLVM_MINGW/bin/x86_64-w64-mingw32-clang
 "$cc" -O2 -Wall -Wextra -Werror "$here/desktopactive.c" -mwindows -ldwmapi -o "$OUT/desktopactive.exe"

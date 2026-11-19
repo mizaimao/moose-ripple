@@ -1,0 +1,35 @@
+virgl: a texture mapped for reading and writing is written back
+
+On a host that can copy a texture's contents into a staging buffer (virglrenderer 0.10 and
+later), a texture map that has to start from the host's texels took one of two forms: a read,
+or a write whose staging buffer is first filled from the host. The choice looked at the read
+flag alone, so a map for reading and writing counted as a read: the texels were fetched, the
+caller changed them, and unmap threw the changes away, with no error anywhere.
+
+Direct3D 9 reaches this with every lock of a video-memory surface that neither discards nor is
+read-only (the frontend keeps the old contents by mapping a staging copy for reading and
+writing): a surface filled that way and then copied to the screen showed whatever the host's
+texture held before. `tools/win7-hello/d3d9flipex.c` has that as its "blit" step.
+
+A map that writes now always takes the second form.
+
+---
+--- a/src/gallium/drivers/virgl/virgl_resource.c
++++ b/src/gallium/drivers/virgl/virgl_resource.c
+@@ -250,10 +250,13 @@
+        * copy_transfer_from_host, then we can return here with proper map.
+        */
+       if (res->use_staging) {
+-         if (xfer->base.usage & PIPE_MAP_READ)
+-            return VIRGL_TRANSFER_MAP_READ_FROM_STAGING;
+-         else
++         /* moose-ripple: a map that writes is written back, also when it reads as well.
++          * It used to count as a read alone: the host's texels were fetched, and what the
++          * caller then wrote into them was dropped at unmap. */
++         if (xfer->base.usage & PIPE_MAP_WRITE)
+             return VIRGL_TRANSFER_MAP_WRITE_TO_STAGING_WITH_READBACK;
++         else
++            return VIRGL_TRANSFER_MAP_READ_FROM_STAGING;
+       }
+ 
+       /* When the transfer queue has pending writes to this transfer's region,

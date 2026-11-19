@@ -247,6 +247,20 @@ buffers. The test queues full and partial updates to two 640×640 textures,
 then samples each texture and compares all 1,024 output pixels, including
 the border around the partial update.
 
+`d3d9flipex.exe` and `d3d9flipex32.exe` (`guest/flipex.cmd` runs both) check that
+what a program draws reaches the screen the way Windows' video renderer presents:
+a Direct3D 9Ex flip-model window, or the copy model with the argument `copy`.
+Each step draws one colour and then reads the screen where the window is: a
+clear, a system-memory surface copied to the back buffer, a video-memory surface
+filled under an ordinary lock and under a discarding one, and a frame sent
+through Windows' software video processor. Run them outside the driver package
+directory too: beside the package a 64-bit program loads the package's copy of
+the driver, not the installed one.
+
+At trace level 3 a lock or unlock of a surface in memory also says how many of
+256 points spread over it are not black, which tells an empty frame from a dark
+one, and what address Windows passed with the lock.
+
 For user-mode samples, run the program with `RIPPLE_UMD_LOG` set: the user-mode driver writes the
 load addresses of the program's main modules when it is loaded (`guest/prof.cmd` does that for
 one assessment test, `guest/dxone.cmd` runs one test alone). Our driver's functions are named
