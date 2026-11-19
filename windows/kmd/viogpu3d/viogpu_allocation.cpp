@@ -33,6 +33,8 @@ VioGpuAllocation::~VioGpuAllocation(void)
     // Rendering buffers are reported done to Windows once they are with the host, so Windows may
     // destroy an allocation the host still works on: its memory stays until the host is done
     WaitIdle();
+    // Should this be the surface on screen, the flip thread lets go of it first
+    m_adapter->vidpn.SourceGone(this);
     m_adapter->ctrlQueue.DestroyResource(m_Id);
     m_adapter->resourceIdr.PutId(m_Id);
 

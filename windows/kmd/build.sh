@@ -46,7 +46,8 @@ CXX="/GR- /EHs-c- /std:c++17"
 C_SRC="compat/intrinsics.c VirtIO/VirtIOPCICommon.c VirtIO/VirtIOPCILegacy.c VirtIO/VirtIOPCIModern.c VirtIO/VirtIORing.c VirtIO/VirtIORing-Packed.c"
 CXX_SRC="common/edid.cpp common/viogpu_idr.cpp common/ripple_pci.cpp common/viogpu_queue.cpp common/baseobj.cpp
          common/bitops.cpp viogpu3d/driver.cpp viogpu3d/viogpu_command.cpp viogpu3d/viogpu_device.cpp
-         viogpu3d/viogpu_allocation.cpp viogpu3d/viogpu_adapter.cpp viogpu3d/viogpu_vidpn.cpp"
+         viogpu3d/viogpu_allocation.cpp viogpu3d/viogpu_adapter.cpp viogpu3d/viogpu_vidpn.cpp
+         viogpu3d/viogpu_gamma.cpp"
 status=0
 for arch in $ARCHS; do
     case $arch in

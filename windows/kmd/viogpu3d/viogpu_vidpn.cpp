@@ -29,6 +29,8 @@ VioGpuVidPN::VioGpuVidPN(VioGpuAdapter *adapter)
     m_pFlipThread = NULL;
     KeInitializeSpinLock(&m_changedLock);
     RtlZeroMemory(&m_changedRect, sizeof(m_changedRect));
+    m_gamma.Init(adapter);
+    ExInitializeFastMutex(&m_sourceLock);
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
 }
@@ -164,7 +166,9 @@ void VioGpuVidPN::StopFlipThread()
         m_pFlipThread = NULL;
     }
     m_sourceRes = NULL;
+    m_sourceId = 0;
     m_sourceAddress.QuadPart = 0;
+    m_gamma.Destroy();
 }
 
 void VioGpuVidPN::Powerdown()
@@ -393,6 +397,7 @@ NTSTATUS VioGpuVidPN::SetSourceModeAndPath(CONST D3DKMDT_VIDPN_SOURCE_MODE *pSou
     pCurrentMode->SrcModeWidth = pSourceMode->Format.Graphics.VisibleRegionSize.cx;
     pCurrentMode->SrcModeHeight = pSourceMode->Format.Graphics.VisibleRegionSize.cy;
     pCurrentMode->Rotation = pPath->ContentTransformation.Rotation;
+    SetGammaRamp(&pPath->GammaRamp);
 
     pCurrentMode->DispInfo.Width = pSourceMode->Format.Graphics.PrimSurfSize.cx;
     pCurrentMode->DispInfo.Height = pSourceMode->Format.Graphics.PrimSurfSize.cy;
@@ -441,9 +446,9 @@ NTSTATUS VioGpuVidPN::IsVidPnPathFieldsValid(CONST D3DKMDT_VIDPN_PRESENT_PATH *p
                   MAX_CHILDREN));
         return STATUS_GRAPHICS_INVALID_VIDEO_PRESENT_TARGET;
     }
-    else if (pPath->GammaRamp.Type != D3DDDI_GAMMARAMP_DEFAULT)
+    else if (pPath->GammaRamp.Type != D3DDDI_GAMMARAMP_DEFAULT && pPath->GammaRamp.Type != D3DDDI_GAMMARAMP_RGB256x3x16)
     {
-        DbgPrint(TRACE_LEVEL_ERROR, ("pPath contains a gamma ramp (0x%I64x)", pPath->GammaRamp.Type));
+        DbgPrint(TRACE_LEVEL_ERROR, ("pPath contains a gamma ramp of another kind (0x%I64x)", pPath->GammaRamp.Type));
         return STATUS_GRAPHICS_GAMMA_RAMP_NOT_SUPPORTED;
     }
     else if ((pPath->ContentTransformation.Scaling != D3DKMDT_VPPS_IDENTITY) &&
@@ -531,6 +536,8 @@ VioGpuVidPN::UpdateActiveVidPnPresentPath(_In_ CONST DXGKARG_UPDATEACTIVEVIDPNPR
     }
 
     m_CurrentModes[pUpdateActiveVidPnPresentPath->VidPnPresentPathInfo.VidPnSourceId].Flags.FullscreenPresent = TRUE;
+
+    SetGammaRamp(&pUpdateActiveVidPnPresentPath->VidPnPresentPathInfo.GammaRamp);
 
     m_CurrentModes[pUpdateActiveVidPnPresentPath->VidPnPresentPathInfo.VidPnSourceId].Rotation = pUpdateActiveVidPnPresentPath->VidPnPresentPathInfo.ContentTransformation.Rotation;
 
@@ -1960,14 +1967,73 @@ void VioGpuVidPN::SetCustomDisplay(_In_ USHORT xres, _In_ USHORT yres)
     SetVideoModeInfo(m_CustomModeIndex, &tmpModeInfo);
 }
 
+// The ramp Windows hands over with a present path: sixteen-bit tables for red, green and blue,
+// or none.
+void VioGpuVidPN::SetGammaRamp(CONST D3DKMDT_GAMMA_RAMP *pRamp)
+{
+    PAGED_CODE();
+
+    if (pRamp->Type == D3DDDI_GAMMARAMP_RGB256x3x16 && pRamp->Data.pRgb256x3x16 != NULL &&
+        pRamp->DataSize >= sizeof(D3DDDI_GAMMA_RAMP_RGB256x3x16))
+    {
+        m_gamma.SetRamp(pRamp->Data.pRgb256x3x16->Red, pRamp->Data.pRgb256x3x16->Green, pRamp->Data.pRgb256x3x16->Blue);
+    }
+    else if (pRamp->Type == D3DDDI_GAMMARAMP_DEFAULT)
+    {
+        m_gamma.SetRamp(NULL, NULL, NULL);
+    }
+}
+
+// An allocation is being destroyed. If it is the surface on screen, there is none from now on
+// until Windows names the next; the flip thread is not in the middle of using it (the lock).
+void VioGpuVidPN::SourceGone(VioGpuAllocation *allocation)
+{
+    PAGED_CODE();
+
+    ExAcquireFastMutex(&m_sourceLock);
+    if (m_sourceRes == allocation)
+    {
+        m_sourceRes = NULL;
+        m_sourceId = 0;
+        m_sourceAddress.QuadPart = 0;
+    }
+    ExReleaseFastMutex(&m_sourceLock);
+}
+
 void VioGpuVidPN::Flip()
 {
     PAGED_CODE();
 
     RECT changed;
+    ExAcquireFastMutex(&m_sourceLock);
     VioGpuAllocation *sourceRes = m_sourceRes;
+    BOOLEAN flip = InterlockedExchange(&m_shouldFlip, 0) != 0;
 
-    if (InterlockedExchange(&m_shouldFlip, 0))
+    if (m_gamma.Active() && m_sourceAddress.QuadPart != 0 && sourceRes != NULL)
+    {
+        // A gamma ramp is set: the screen is the surface drawn through it, drawn again when
+        // the surface, a piece of it or the ramp changed.
+        BOOLEAN pieces = TakeChangedRect(&changed);
+        if (flip || pieces || m_gamma.Changed() || !m_gamma.Showing())
+        {
+            m_gamma.Show(sourceRes);
+        }
+        // Should the image not come about, the surface is shown as it is.
+        flip = !m_gamma.Showing();
+    }
+    else if (m_gamma.Showing() && !m_gamma.Active())
+    {
+        // The ramp is the identity again: the surface itself goes back on screen.
+        m_gamma.Hide();
+        flip = TRUE;
+    }
+
+    if (m_gamma.Showing())
+    {
+        // The image drawn through the ramp is on screen: up to date, or, between one surface
+        // and the next, as it was last drawn.
+    }
+    else if (flip)
     {
         // The whole surface goes out, whatever was noted as changed with it
         TakeChangedRect(&changed);
@@ -1989,6 +2055,7 @@ void VioGpuVidPN::Flip()
                                        changed.left,
                                        changed.top);
     }
+    ExReleaseFastMutex(&m_sourceLock);
     DXGKARGCB_NOTIFY_INTERRUPT_DATA interrupt;
     interrupt.InterruptType = DXGK_INTERRUPT_CRTC_VSYNC;
 
@@ -2076,6 +2143,7 @@ NTSTATUS VioGpuVidPN::SetVidPnSourceAddress(const DXGKARG_SETVIDPNSOURCEADDRESS 
 {
     m_sourceAddress = pSetVidPnSourceAddress->PrimaryAddress;
     m_sourceRes = reinterpret_cast<VioGpuAllocation *>(pSetVidPnSourceAddress->hAllocation);
+    m_sourceId = m_sourceRes ? (LONG)m_sourceRes->GetId() : 0;
     InterlockedOr(&m_shouldFlip, 1);
 
     return STATUS_SUCCESS;
@@ -2085,8 +2153,7 @@ NTSTATUS VioGpuVidPN::SetVidPnSourceAddress(const DXGKARG_SETVIDPNSOURCEADDRESS 
 // thread tells the host to show the changed part at its next turn.
 void VioGpuVidPN::ScreenChanged(UINT resId, const VIOGPU_BOX *box)
 {
-    VioGpuAllocation *sourceRes = m_sourceRes;
-    if (sourceRes == NULL || sourceRes->GetId() != resId || box->width == 0 || box->height == 0)
+    if (m_sourceId == 0 || (UINT)m_sourceId != resId || box->width == 0 || box->height == 0)
     {
         return;
     }

@@ -1,7 +1,7 @@
 /* Time Windows' fading desktop switch (the one logon uses) on the installed display driver:
  * switch to an empty desktop of our own and back with SwitchDesktopWithFade, and watch the
  * display's gamma ramp meanwhile from a second thread.
- *   fadeprobe.exe [FADE_MS]      default 1000
+ *   fadeprobe.exe [FADE_MS [HOLD_MS]]      defaults 1000 and 600
  * Prints whether the gamma ramp can be read and set, how long each switch took, and the lowest
  * top-of-ramp value seen during each. MIT licence (LICENSE at the repository root).
  */
@@ -50,6 +50,7 @@ static double timed(fade_fn fade, HDESK target, DWORD ms, BOOL *ok)
 int main(int argc, char **argv)
 {
     const DWORD ms = argc > 1 ? (DWORD)atoi(argv[1]) : 1000;
+    const DWORD hold = argc > 2 ? (DWORD)atoi(argv[2]) : 600;
     HDESK home = OpenInputDesktop(0, FALSE, DESKTOP_SWITCHDESKTOP);
     if (!home) { fprintf(stderr, "no input desktop (%lu)\n", GetLastError()); return 1; }
     fade_fn fade = (fade_fn)(void *)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SwitchDesktopWithFade");
@@ -76,7 +77,7 @@ int main(int argc, char **argv)
         SetLastError(0);
         BOOL set = SetDeviceGammaRamp(screen, dim);
         DWORD error = GetLastError();
-        Sleep(600);
+        Sleep(hold);
         WORD now[3][256];
         BOOL reread = GetDeviceGammaRamp(screen, now);
         COLORREF during = GetPixel(screen, x, y);

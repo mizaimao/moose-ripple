@@ -2,6 +2,7 @@
 
 #include "helper.h"
 #include "viogpu.h"
+#include "viogpu_gamma.h"
 
 class VioGpuAdapter;
 class VioGpuAllocation;
@@ -95,6 +96,8 @@ class VioGpuVidPN
     BOOLEAN TakeChangedRect(RECT *rect);
 
     NTSTATUS SetVidPnSourceAddress(const DXGKARG_SETVIDPNSOURCEADDRESS *pSetVidPnSourceAddress);
+    void SetGammaRamp(CONST D3DKMDT_GAMMA_RAMP *pRamp);
+    void SourceGone(VioGpuAllocation *allocation);
 
   private:
     NTSTATUS SetSourceModeAndPath(CONST D3DKMDT_VIDPN_SOURCE_MODE *pSourceMode,
@@ -130,6 +133,12 @@ class VioGpuVidPN
 
     PHYSICAL_ADDRESS m_sourceAddress = {0};
     VioGpuAllocation *m_sourceRes = NULL;
+    // Its resource on the host, for code that must not touch the allocation itself
+    volatile LONG m_sourceId = 0;
+    // Held by the flip thread while it uses m_sourceRes, and to forget an allocation that is
+    // being destroyed. Windows destroys the surface on screen at a desktop switch before it
+    // names the next one.
+    FAST_MUTEX m_sourceLock;
     volatile LONG m_shouldFlip = 0;
 
     // When the flip thread last reported a vertical blank (performance counter), for GetScanLine
@@ -142,4 +151,6 @@ class VioGpuVidPN
     KSPIN_LOCK m_changedLock;
     RECT m_changedRect;
     BOOLEAN m_changed = FALSE;
+    // The gamma ramp and the image drawn through it (viogpu_gamma.h)
+    VioGpuGamma m_gamma;
 };
