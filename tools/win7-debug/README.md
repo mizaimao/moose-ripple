@@ -251,3 +251,38 @@ For user-mode samples, run the program with `RIPPLE_UMD_LOG` set: the user-mode 
 load addresses of the program's main modules when it is loaded (`guest/prof.cmd` does that for
 one assessment test, `guest/dxone.cmd` runs one test alone). Our driver's functions are named
 from its own symbol table (`llvm-nm`), Windows' from the public symbol server (`resym.py`).
+
+## Timing the Welcome screen
+
+Copy `guest/welcome-trace.ps1` and the built `desktopactive.exe` to the same
+local directory on the Windows 7 guest. From that directory, in an elevated
+prompt under the account that will log on, run the arm command.
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -File welcome-trace.ps1 arm
+```
+
+Reboot and log on to the local console. After the desktop settles, minimize
+and restore an Explorer window three times as a trace control. From the
+same directory and account in an elevated prompt, stop the trace.
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -File welcome-trace.ps1 stop
+```
+
+The script stops the recording, removes its boot trace configuration and
+logon task, and leaves `welcome.etl` beside the script. Move the ETL before
+arming another run. The logon task runs at standard privilege and polls
+`UOI_IO` on its own Default desktop. In the ETL, find the last
+`watch-default-inactive` and first `watch-default-active` from the same
+probe process. The switch falls between those samples. A run that starts
+with the desktop already active cannot locate the switch. [Microsoft’s description of UOI_IO](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getuserobjectinformationw)
+
+In the same trace, find the first Dwm-Core `MILEVENT_MEDIA_UCE_PRESENTEVENT`
+start and stop on the compositor thread. Compare its duration with the
+next few presents. Windows 7's classic DxgKrnl `QueuePacket` and `Flip`
+events place graphics work inside that interval. Match queue starts and
+stops by context and submission sequence. Dwm-Udwm event 5002 records
+ordinary minimize (type 2) and restore (type 3) animation starts. Check
+those controls and the trace's lost-event and lost-buffer counts before
+interpreting missing events at logon. [Windows 7 graphics event layouts](https://github.com/GameTechDev/PresentMon/blob/main/PresentData/ETW/Microsoft_Windows_DxgKrnl_Win7.h)
