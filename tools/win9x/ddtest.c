@@ -3,6 +3,7 @@
  *
  *   ddtest [width height bpp [seconds]]        default: 640 480 32, 2 seconds
  *   ddtest restore                            640x480, 16 bits, real switch to desktop and back
+ *   ddtest mirror                             640x480, 16 bits, hold a flipped page and a front write
  *
  * Prints what the HAL offers (capabilities, video memory), then takes the screen
  * (exclusive, full-screen), sets the mode, makes a primary surface with one back buffer,
@@ -86,15 +87,17 @@ static DWORD colour(int bpp, int i)
     return c;
 }
 
-static void fill(LPDIRECTDRAWSURFACE s, int bpp, DWORD c, int w, int h)
+static HRESULT fill(LPDIRECTDRAWSURFACE s, int bpp, DWORD c, int w, int h, RECT *area)
 {
     DDSURFACEDESC d;
+    HRESULT r;
     int x, y;
 
     memset(&d, 0, sizeof d);
     d.dwSize = sizeof d;
-    if (IDirectDrawSurface_Lock(s, NULL, &d, DDLOCK_WAIT | DDLOCK_WRITEONLY, NULL) != DD_OK)
-        return;
+    r = IDirectDrawSurface_Lock(s, area, &d, DDLOCK_WAIT | DDLOCK_WRITEONLY, NULL);
+    if (r != DD_OK)
+        return r;
     for (y = 0; y < h; y++) {
         BYTE *row = (BYTE *)d.lpSurface + y * d.lPitch;
         for (x = 0; x < w; x++) {
@@ -104,7 +107,7 @@ static void fill(LPDIRECTDRAWSURFACE s, int bpp, DWORD c, int w, int h)
             else { row[x * 3] = (BYTE)c; row[x * 3 + 1] = (BYTE)(c >> 8); row[x * 3 + 2] = (BYTE)(c >> 16); }
         }
     }
-    IDirectDrawSurface_Unlock(s, d.lpSurface);
+    return IDirectDrawSurface_Unlock(s, d.lpSurface);
 }
 
 static DWORD read_pixel(LPDIRECTDRAWSURFACE s, int bpp, int x, int y)
@@ -124,6 +127,44 @@ static DWORD read_pixel(LPDIRECTDRAWSURFACE s, int bpp, int x, int y)
     else v = row[x * 3] | (row[x * 3 + 1] << 8) | (row[x * 3 + 2] << 16);
     IDirectDrawSurface_Unlock(s, d.lpSurface);
     return v;
+}
+
+static void mirror_pages(LPDIRECTDRAWSURFACE front, LPDIRECTDRAWSURFACE back, int w, int h)
+{
+    RECT quarter;
+    DWORD green = colour(16, 1), blue = colour(16, 2);
+    HRESULT r;
+    int i;
+
+    check(fill(front, 16, colour(16, 0), w, h, NULL) == DD_OK, "fill the front page red");
+    check(fill(back, 16, green, w, h, NULL) == DD_OK, "fill the back page green");
+    if (failures)
+        return;
+    Sleep(250);
+    for (i = 0; i < 3; i++) {
+        r = IDirectDrawSurface_Flip(front, NULL, DDFLIP_WAIT | DDFLIP_NOVSYNC);
+        if (r != DD_OK) {
+            printf("mirror Flip %d: %08lx\n", i + 1, r);
+            failures++;
+            return;
+        }
+    }
+    printf("ddtest mirror: holding final green page\n");
+    Sleep(7000);
+    check(read_pixel(front, 16, w / 4, h / 4) == green &&
+          read_pixel(front, 16, w * 3 / 4, h * 3 / 4) == green, "final front page is green");
+
+    SetRect(&quarter, 0, 0, w / 2, h / 2);
+    r = fill(front, 16, blue, quarter.right, quarter.bottom, &quarter);
+    check(r == DD_OK, "write the displayed top-left quarter");
+    if (r != DD_OK)
+        return;
+    printf("ddtest mirror: holding blue quarter on green\n");
+    Sleep(7000);
+    check(read_pixel(front, 16, w / 4, h / 4) == blue, "top-left quarter is blue");
+    check(read_pixel(front, 16, w * 3 / 4, h / 4) == green &&
+          read_pixel(front, 16, w / 4, h * 3 / 4) == green &&
+          read_pixel(front, 16, w * 3 / 4, h * 3 / 4) == green, "other three quarters stay green");
 }
 
 static void print_caps(const char *who, DDCAPS *c)
@@ -257,11 +298,12 @@ int main(int argc, char **argv)
     DWORD start, frames = 0, y0, y1, y2, px;
     int i;
     int restore = argc == 2 && !stricmp(argv[1], "restore"), restore_result = 2;
+    int mirror = argc == 2 && !stricmp(argv[1], "mirror");
 
     setvbuf(stdout, NULL, _IONBF, 0);       /* everything printed survives a crash */
     if (argc == 2 && !stricmp(argv[1], "restore-helper"))
         return focus_helper();
-    if (restore)
+    if (restore || mirror)
         bpp = 16;
     if (DirectDrawCreate(NULL, &dd, NULL) != DD_OK) {
         printf("DirectDrawCreate failed\n");
@@ -306,6 +348,10 @@ int main(int argc, char **argv)
         restore_result = restore_chain(win, dd, front, back);
         goto out;
     }
+    if (mirror) {
+        mirror_pages(front, back, w, h);
+        goto out;
+    }
     memset(&sd, 0, sizeof sd); sd.dwSize = sizeof sd;
     IDirectDrawSurface_GetSurfaceDesc(back, &sd);
     printf("back buffer: caps %08lx, pitch %ld\n", sd.ddsCaps.dwCaps, sd.lPitch);
@@ -313,10 +359,10 @@ int main(int argc, char **argv)
 
     /* Flips move the display start between the two buffers. */
     y0 = vbe_y_offset();
-    fill(back, bpp, colour(bpp, 0), w, h);
+    fill(back, bpp, colour(bpp, 0), w, h, NULL);
     r = IDirectDrawSurface_Flip(front, NULL, DDFLIP_WAIT);
     y1 = vbe_y_offset();
-    fill(back, bpp, colour(bpp, 1), w, h);
+    fill(back, bpp, colour(bpp, 1), w, h, NULL);
     IDirectDrawSurface_Flip(front, NULL, DDFLIP_WAIT);
     y2 = vbe_y_offset();
     printf("display start (line): %lu, after a flip %lu, after another %lu\n", y0, y1, y2);
@@ -329,7 +375,7 @@ int main(int argc, char **argv)
     /* As fast as it goes, then locked to the (emulated) vertical blank. */
     start = GetTickCount();
     for (i = 0; GetTickCount() - start < (DWORD)seconds * 1000; i++) {
-        fill(back, bpp, colour(bpp, i), w, h);
+        fill(back, bpp, colour(bpp, i), w, h, NULL);
         IDirectDrawSurface_Flip(front, NULL, DDFLIP_WAIT | DDFLIP_NOVSYNC);
         frames++;
     }

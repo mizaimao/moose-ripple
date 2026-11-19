@@ -223,15 +223,19 @@ static DWORD WINAPI CreateSurface(LPDDHAL_CREATESURFACEDATA d)
 
 /* Select the CPU's page when GDI or DirectDraw will draw directly into its memory. The VxD
    follows writes from then on, including ones which bypass the DirectDraw HAL. */
-static int select_cpu_page(DWORD offset)
+static int select_cpu_page(DWORD offset, int flip)
 {
     HANDLE h;
     DWORD got;
+    struct rvd_desktop page;
     int ok;
     h = CreateFile(RVD_DEVICE_NAME, 0, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (h == INVALID_HANDLE_VALUE)
         return 0;
-    ok = DeviceIoControl(h, RVD_DESKTOP, &offset, sizeof offset, NULL, 0, &got, NULL);
+    page.offset = offset;
+    page.flags = flip ? RVD_DESKTOP_FLIP : 0;
+    ok = DeviceIoControl(h, RVD_DESKTOP, &page, flip ? sizeof page : sizeof page.offset,
+                         NULL, 0, &got, NULL);
     CloseHandle(h);
     if (ok)
         gpu_page = 0;
@@ -260,13 +264,13 @@ int rdd_prepare_scanout(void)
     /* A previous VxD may lack both requests. Confirm the CPU path before the first GPU flip.
        The new VxD leaves VGA alone until that flip. */
     if (!scanout_used)
-        scanout_used = select_cpu_page(0);
+        scanout_used = select_cpu_page(0, 0);
     return scanout_used;
 }
 
 int rdd_desktop(DWORD offset)
 {
-    return !scanout_used || select_cpu_page(offset);
+    return !scanout_used || select_cpu_page(offset, 0);
 }
 
 /* Show another surface: point the start of the display at it. DirectDraw places back buffers
@@ -289,7 +293,7 @@ static DWORD WINAPI Flip(LPDDHAL_FLIPDATA d)
         gpu_mode = shared->mode_serial;
         d3d_profile_flip(1);
     } else {
-        if (!d3d_surface_access(d->lpSurfTarg) || !rdd_desktop(off)) {
+        if (!d3d_surface_access(d->lpSurfTarg) || (scanout_used && !select_cpu_page(off, 1))) {
             d->ddRVal = DDERR_GENERIC;
             return DDHAL_DRIVER_HANDLED;
         }
