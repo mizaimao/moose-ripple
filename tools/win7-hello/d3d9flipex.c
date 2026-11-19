@@ -15,6 +15,7 @@
  *           when the driver offers one
  *   nv12    the same with a frame in the video format decoders deliver, which the driver
  *           converts to RGB; the screen may differ by three in a channel
+ *   yuy2    the same with the other video format the driver takes
  * "d3d9flipex copy" runs the same steps with the ordinary copy-model swap chain as a control.
  * Prints one line per step; exit code 0 if every step showed its colour.
  * MIT licence (LICENSE at the repository root).
@@ -212,16 +213,27 @@ static HRESULT draw_processor(IDirect3DDevice9Ex *device, IDirect3DSurface9 *bac
     return hr;
 }
 
-/* A frame in the video format the decoders deliver, NV12 (a plane of luma, then a half-size
- * plane of chroma pairs), of one colour, through the driver's processor: the conversion to
- * RGB is the driver's. The frame says it is BT.601 in the studio range. */
-static HRESULT draw_nv12(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, DWORD rgb)
+/* A frame of one colour in a video format through the driver's processor: the conversion to
+ * RGB is the driver's. NV12, which the decoders deliver, is a plane of luma followed by a
+ * half-size plane of chroma pairs; YUY2 is two bytes a pixel, luma and alternating chroma.
+ * The frame says it is BT.601 in the studio range. */
+struct video_frame {
+    IDirectXVideoProcessorService *service;
+    IDirectXVideoProcessor *processor;
+    IDirect3DSurface9 *frame;
+    DXVA2_VideoDesc desc;
+};
+
+#define FORMAT_NV12 ((D3DFORMAT)MAKEFOURCC('N', 'V', '1', '2'))
+#define FORMAT_YUY2 ((D3DFORMAT)MAKEFOURCC('Y', 'U', 'Y', '2'))
+
+static HRESULT draw_video_format(struct video_frame *v, D3DFORMAT nv12, IDirect3DDevice9Ex *device,
+                                 IDirect3DSurface9 *back, DWORD rgb)
 {
-    static IDirectXVideoProcessorService *service;
-    static IDirectXVideoProcessor *processor;
-    static IDirect3DSurface9 *frame;
-    static DXVA2_VideoDesc desc;
-    const D3DFORMAT nv12 = (D3DFORMAT)MAKEFOURCC('N', 'V', '1', '2');
+#define service (v->service)
+#define processor (v->processor)
+#define frame (v->frame)
+#define desc (v->desc)
     HRESULT hr = S_OK;
     if (!service) {
         hr = DXVA2CreateVideoService((IDirect3DDevice9 *)device, &IID_IDirectXVideoProcessorService,
@@ -250,11 +262,22 @@ static HRESULT draw_nv12(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, DW
     D3DLOCKED_RECT lock;
     hr = IDirect3DSurface9_LockRect(frame, &lock, NULL, D3DLOCK_DONOTWAIT);
     if (FAILED(hr)) return hr;
-    for (int row = 0; row < HEIGHT; ++row)
-        memset((BYTE *)lock.pBits + (size_t)row * lock.Pitch, y, WIDTH);
-    for (int row = 0; row < HEIGHT / 2; ++row) {
-        BYTE *pairs = (BYTE *)lock.pBits + (size_t)(HEIGHT + row) * lock.Pitch;
-        for (int x = 0; x < WIDTH; x += 2) { pairs[x] = cb; pairs[x + 1] = cr; }
+    if (nv12 == FORMAT_NV12) {
+        for (int row = 0; row < HEIGHT; ++row)
+            memset((BYTE *)lock.pBits + (size_t)row * lock.Pitch, y, WIDTH);
+        for (int row = 0; row < HEIGHT / 2; ++row) {
+            BYTE *pairs = (BYTE *)lock.pBits + (size_t)(HEIGHT + row) * lock.Pitch;
+            for (int x = 0; x < WIDTH; x += 2) { pairs[x] = cb; pairs[x + 1] = cr; }
+        }
+    } else {
+        for (int row = 0; row < HEIGHT; ++row) {
+            BYTE *pixels = (BYTE *)lock.pBits + (size_t)row * lock.Pitch;
+            for (int x = 0; x < WIDTH; x += 2) {
+                pixels[2 * x] = pixels[2 * x + 2] = y;
+                pixels[2 * x + 1] = cb;
+                pixels[2 * x + 3] = cr;
+            }
+        }
     }
     IDirect3DSurface9_UnlockRect(frame);
 
@@ -276,6 +299,22 @@ static HRESULT draw_nv12(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, DW
     SetRect(&sample.DstRect, 0, 0, WIDTH, HEIGHT);
     sample.PlanarAlpha.Value = 1;
     return IDirectXVideoProcessor_VideoProcessBlt(processor, back, &blt, &sample, 1, NULL);
+#undef service
+#undef processor
+#undef frame
+#undef desc
+}
+
+static HRESULT draw_nv12(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, DWORD rgb)
+{
+    static struct video_frame v;
+    return draw_video_format(&v, FORMAT_NV12, device, back, rgb);
+}
+
+static HRESULT draw_yuy2(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, DWORD rgb)
+{
+    static struct video_frame v;
+    return draw_video_format(&v, FORMAT_YUY2, device, back, rgb);
 }
 
 static HRESULT draw_video(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, DWORD rgb)
@@ -403,6 +442,7 @@ int main(int argc, char **argv)
     printf("       beside the frame the screen showed %06lx (the background is a blue)\n", (unsigned long)corner);
     tolerance = 3;
     ok &= step("nv12", device, window, 0xc86020, draw_nv12);
+    ok &= step("yuy2", device, window, 0x30a0d8, draw_yuy2);
     tolerance = 0;
     fflush(stdout);
     IDirect3DDevice9Ex_Release(device);

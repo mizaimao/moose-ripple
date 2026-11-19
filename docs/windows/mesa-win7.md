@@ -1255,8 +1255,8 @@ and BT.601 below when it names none, studio range). A first version converted in
 by table: under emulation that was slower than the decoder's own conversion had been (the
 assessment's playback test went from 36.7 to 50.2 ms a frame), so it stays only as the
 fallback for YUY2 and for a host without the two texture formats; `RIPPLE_VIDEO_CPU` forces
-it, to compare. Both give the same pixels in `d3d9flipex`'s "nv12" step (c8611f for a frame
-of c86020).
+it, to compare. Both give the same pixels in `d3d9flipex`'s "nv12" and "yuy2" steps
+(c8611f for a frame of c86020, 30a0d7 for one of 30a0d8).
 
 **A surface bound as render target has to outlive its binding.** Mesa's virgl context copies
 the framebuffer state without taking references, and sends the bound surface's resource
@@ -1293,7 +1293,7 @@ frames rendered by each of the assessment's playback tests run alone:
 | Playback test of the full assessment, mean time per frame | 36.7 ms | 23.3 ms |
 | Full assessment | 5.9, limited "frames dropped when decoding high definition video" | 6.0, no limit; high-definition playback passes |
 
-There `d3d9flipex` passes all 28 steps in both process sizes and `vidplay` shows a moving
+There `d3d9flipex` passes all 32 steps in both process sizes and `vidplay` shows a moving
 picture through both pipelines. What is left of dropped frames in UTM is decoding on an
 emulated processor.
 
