@@ -269,6 +269,12 @@ printed and its result file (frames rendered against frames expected).
 `guest/weirun.cmd TAG` runs the full assessment and sends the scores, the limits
 applied and the video figures from its result file.
 
+`guest/pace.cmd TAG` records what paces the compositor while a window is dragged
+and resized, and `pace.py TAG-trace.xml` summarizes it (frames presented per
+second, gaps between presents, where the compositor waits). `guest/quiet.cmd`
+waits until Windows' own background work after a boot has finished; measure
+after it.
+
 At trace level 3 a lock or unlock of a surface in memory also says how many of
 256 points spread over it are not black, which tells an empty frame from a dark
 one, and what address Windows passed with the lock.

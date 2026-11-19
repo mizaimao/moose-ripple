@@ -1011,3 +1011,48 @@ rate rose to 57.6 Hz, with a 16.3 ms median and a 30.9 ms 95th percentile.
 The ordinary guest timer and Aero animations remained enabled. These rates
 count refresh notifications. The number of distinct window frames also
 depends on how fast Explorer and DWM can draw them.
+
+## What paces the compositor in UTM (2026-11-19)
+
+`tools/win7-debug/guest/pace.cmd` records the compositor's own events (the DWM-Core
+provider) around the standard drag and resize of an Explorer window, and
+`tools/win7-debug/pace.py` reads them: frames rendered and presented per second, the gaps
+between presents, and where the compositor's frame loop spends its time. Run it after
+`guest/quiet.cmd`: for the first minutes after a boot Windows' own servicing
+(TrustedInstaller, an update service) keeps a processor busy, and the same resize measured
+38 to 43 size changes per three seconds then against 43 to 49 once it had finished.
+
+In UTM on Apple silicon, while a window is dragged, the compositor has 6 to 8 ms of work per
+frame and presents 32 to 40 frames a second, with a median of 30 ms between presents. It is
+not short of processor time. Its loop waits for the vertical blank after each frame, in two
+ways, and says which in the event that ends the wait:
+
+| Kind of wait | Share of waits | Median length |
+| --- | ---: | ---: |
+| on the driver's vertical-blank signal | 59% | 8 to 14 ms |
+| a timed sleep of 1 to 9 ms | 41% | 23 to 25 ms |
+
+A sleep of a few milliseconds takes one or two ticks of the ordinary 15.6 ms timer, and that
+timer is all there is under QEMU's processor emulation (see "the fine timer slows the guest
+clock" above). Each such sleep costs the frame after it.
+
+What was tried, in throwaway sessions on the same guest:
+
+- **The blank signal sent before the frame goes to the host, from a thread of its own.** No
+  gain: 34.1 presents a second against 37.2 before in the same boot. The compositor's next
+  frame then overlaps the host's work on the previous one and takes 9.4 ms instead of 7.8.
+- **One blank per timer tick, and the display modes stating that rate (64 Hz) instead of
+  60.** With the rate stated as 60 the signal comes about a millisecond earlier each frame
+  than the compositor expects. Stated truthfully, the share of sleeps fell from 41% to 25%.
+  Merged driver, trial, trial, merged driver in one boot: 31.8, 36.7, 34.7 and 31.6 presents
+  a second during the drag, 28.3, 29.1, 27.7 and 26.1 during the resize. Not adopted: about
+  a tenth more frames does not justify a display that reports 64 Hz.
+- **Both together:** 39.1 presents a second against 42.6 for the second alone in that boot.
+- **A finer timer.** The guest's tick clock still falls behind with QEMU's
+  `-rtc driftfix=slew`, by the same amounts: 0.91 of real time at a 4 ms request, 0.58 at
+  1 ms, 0.31 at 0.5 ms.
+
+So the frame rate of animations in UTM is bounded by sleeps that Windows' compositor takes
+on a timer that cannot be made finer there, not by the driver's drawing. If the emulator
+kept the guest's fine timer ticks, the driver could take the fine timer as it does under
+hardware virtualization, where the same compositor presents 60 frames a second.
