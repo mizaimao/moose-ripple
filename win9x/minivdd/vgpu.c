@@ -355,6 +355,11 @@ static u32 dos_palette[256];                    /* set bit 24 when the RGB value
 static u32 dac_rgb, dac_known;
 static volatile u32 dac_generation;
 static u8 dac_index, dac_component, dac_writing;
+static struct {
+    u32 vm, generation;
+    u8 window_stream, prefix[2];
+} dac_resume;
+static int is_vga_mode13(void);
 static u32 dac_return_vm, dac_return_token, dac_return_time;
 static u32 dac_focus_serial;
 static u32 display_w, display_h, display_bpp, vram_bytes, display_offset;
@@ -1407,6 +1412,7 @@ int __cdecl vgpu_watch_dac(u32 vm, int mode_set)
     if (!takeover || !vram || (dos_active && dos_active != vm))
         return 0;
     if (vgpu_dac_vm != vm || mode_set) {
+        zero(&dac_resume, sizeof(dac_resume));
         zero(dos_palette, sizeof(dos_palette));
         dac_writing = 0;
         dac_known = 0;
@@ -1418,6 +1424,8 @@ int __cdecl vgpu_watch_dac(u32 vm, int mode_set)
 
 void __cdecl vgpu_forget_dac(u32 vm)
 {
+    if (dac_resume.vm == vm)
+        zero(&dac_resume, sizeof(dac_resume));
     if (vgpu_dac_vm == vm)
         vgpu_dac_vm = 0;
     if (dos_active == vm) {
@@ -1435,13 +1443,52 @@ static u32 dac_to_byte(u32 v)
     return ((v & 63) << 2) | ((v & 1) * 3);
 }
 
+/* Fullscreen restoration can reset the hardware DAC's write index and RGB
+   phase. Resume a transaction explicitly indexed by this VM while windowed
+   on its first further data write. Selecting the index and replaying at
+   most two bytes reconstructs the write latch without committing a colour
+   or moving the read index. The main VDD forwards the new guest byte. */
+static void resume_dac_write(void)
+{
+    u32 generation = dac_resume.generation;
+    u8 index = dac_index, count = dac_component;
+    u8 red = dac_resume.prefix[0], green = dac_resume.prefix[1];
+    dac_resume.generation = 0;
+    if (generation != display_serial || !dos_active || dos_active != dac_resume.vm ||
+        dos_active != vgpu_dac_vm || !dac_writing || count > 2 || !is_vga_mode13() ||
+        !vmm_rearm_dac(dos_active))
+        return;
+    __asm {
+        pushfd
+        cli
+        mov dx,03c8h
+        mov al,index
+        out dx,al
+        cmp count,0
+        je resume_done
+        inc dx
+        mov al,red
+        out dx,al
+        cmp count,2
+        jne resume_done
+        mov al,green
+        out dx,al
+    resume_done:
+        popfd
+    }
+}
+
 void __cdecl vgpu_dac_out(u32 port, u32 value, int physical)
 {
     if (port == 0x3c8) {
+        dac_resume.generation = 0;
+        dac_resume.window_stream = !dos_active && dac_resume.vm && dac_resume.vm == vgpu_dac_vm;
         dac_index = (u8)value;
         dac_component = 0;
         dac_writing = 1;
     } else if (port == 0x3c7) {
+        dac_resume.window_stream = 0;
+        dac_resume.generation = 0;
         dac_writing = 0;
         /* This very OUT will install a fresh read index and start at red.
            Only here can we bootstrap an unknown palette with physical reads.
@@ -1471,6 +1518,10 @@ void __cdecl vgpu_dac_out(u32 port, u32 value, int physical)
             dac_generation++;
         }
     } else if (port == 0x3c9 && dac_writing) {
+        if (dac_resume.generation)
+            resume_dac_write();
+        if (dac_resume.window_stream && dac_component < 2)
+            dac_resume.prefix[dac_component] = (u8)value;
         dac_rgb = ((dac_rgb << 8) & 0xffffff) | dac_to_byte(value);
         if (++dac_component == 3) {
             u32 colour = 0x1000000UL | dac_rgb;
@@ -1493,6 +1544,8 @@ void __cdecl vgpu_dac_out(u32 port, u32 value, int physical)
 
 void __cdecl vgpu_dac_read_data(void)
 {
+    dac_resume.window_stream = 0;
+    dac_resume.generation = 0;
     dac_writing = 0;
 }
 
@@ -1753,6 +1806,7 @@ void __cdecl vgpu_display_mode(u32 bpp, u32 size, u32 bytes)
     end_cpu_flips();
     display_serial++;
     dos_active = 0;
+    dac_resume.generation = 0;
     dac_focus_serial = 0;
     display_w = size >> 16;
     display_h = size & 0xffff;
@@ -1777,6 +1831,9 @@ u32 __cdecl vgpu_show_dos(u32 vm)
         end_cpu_flips();
         display_serial++;
         dos_active = vm;
+        if (dac_resume.vm == vm && dac_resume.window_stream && dac_writing && is_vga_mode13())
+            dac_resume.generation = display_serial;
+        dac_resume.window_stream = 0;
         dac_focus_serial = vgpu_dac_vm == vm ? display_serial : 0;
         dos_reported = 0;
         queue_refresh(1);
@@ -1787,6 +1844,11 @@ u32 __cdecl vgpu_show_dos(u32 vm)
 
 void __cdecl vgpu_leave_windows(void)
 {
+    if (dos_active) {
+        zero(&dac_resume, sizeof(dac_resume));
+        if (dos_active == vgpu_dac_vm && is_vga_mode13())
+            dac_resume.vm = dos_active;
+    }
     end_cpu_flips();
     display_serial++;
     dos_active = 0;

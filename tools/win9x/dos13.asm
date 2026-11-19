@@ -1,7 +1,7 @@
 ; VGA mode 13h display test for a DOS prompt. Build with:
 ;   nasm -f bin -o dos13.com tools/win9x/dos13.asm
 ; DOS13 holds each phase for ten seconds. DOS13 /K waits for Space instead.
-; DOS13 /S also waits after the first component of the palette change.
+; DOS13 /S also waits after red. /S0 and /S2 hold before red or after green.
 ; Escape returns to the original BIOS text mode during either hold.
 bits 16
 cpu 8086
@@ -40,6 +40,17 @@ start:
     cmp al, 's'
     jne usage
     inc byte [keyboard]
+    cmp cx, 3
+    jb .keyboard
+    mov al, [si]
+    cmp al, ' '
+    je .keyboard
+    sub al, '0'
+    cmp al, 2
+    ja usage
+    mov [split_position], al
+    inc si
+    dec cx
 .keyboard:
     inc byte [keyboard]
     sub cx, 2
@@ -116,21 +127,30 @@ phase_b:
     mov al, 1                 ; only the four quadrant DAC entries change
     out dx, al
     inc dx
+    cmp byte [keyboard], 2
+    jne .red
+    cmp byte [split_position], 0
+    jne .red
+    call hold_split
+    jc cancelled
+.red:
     lodsb
     out dx, al                ; leave green and blue pending for four BIOS ticks
     cmp byte [keyboard], 2
     jne .timed
-    push si
-    push dx
-    mov si, split_msg
-    call marker
-    call hold
-    pop dx
-    pop si
+    cmp byte [split_position], 0
+    je .timed
+    cmp byte [split_position], 2
+    jne .split
+    lodsb
+    out dx, al
+.split:
+    call hold_split
     jc cancelled
 .timed:
     call wait_for_dac_sample
-    mov cx, 4 * 3 - 1
+    mov cx, palette_b + 4 * 3
+    sub cx, si
     call palette_data
     mov si, frame_b
     call marker
@@ -298,6 +318,21 @@ marker:                       ; fixed NUL-terminated status to the QEMU debug po
 .done:
     ret
 
+hold_split:
+    push si
+    push dx
+    mov si, split_msg
+    call marker
+    mov al, [split_position]
+    add al, '0'
+    out 0e9h, al
+    mov si, newline
+    call marker
+    call hold
+    pop dx
+    pop si
+    ret
+
 hold:
     push es
     mov ax, 0040h
@@ -353,13 +388,15 @@ hold:
 palette_a:     db 0,0,0, 63,0,0, 0,63,0, 0,0,63, 63,63,0, 63,63,63
 palette_b:     db 0,63,63, 63,0,63, 63,32,0, 32,32,32
 keyboard:      db 0
+split_position: db 1
 old_mode:      db 3
 status:        db 0
 first_sum:     dw 0
 dac_read:      db 0,0,0
 frame_a:       db 'dos13: frame A',13,10,0
 frame_b:       db 'dos13: palette B',13,10,0
-split_msg:     db 'dos13: waiting after first red component',13,10,0
+split_msg:     db 'dos13: waiting with pending DAC components: ',0
+newline:       db 13,10,0
 frame_c:       db 'dos13: pixels C',13,10,0
 completed_msg: db 'dos13: frame indices unchanged',13,10,0
 moved_msg:     db 'dos13: block moved',13,10,0
@@ -373,6 +410,6 @@ read_value:    db 'dos13: DAC entry 3 RGB (hex) ',0
 hex_digits:    db '0123456789ABCDEF'
 read_error:    db 13,10,'dos13: ERROR DAC entry 3 readback differs from (63,32,0)',13,10,0
 restore_error: db 'dos13: ERROR text mode restore failed',13,10,0
-help:          db 'Usage: DOS13 [/K | /S]   /K waits for Space at each frame.',13,10
-               db '/S also waits after the first red component of the palette change.',13,10,'$'
+help:          db 'Usage: DOS13 [/K | /S0 | /S | /S2]   /K waits for Space at each frame.',13,10
+               db '/S0 pauses before red, /S after red, /S2 after green.',13,10,'$'
 text_required: db 'DOS13 must start in BIOS text mode.',13,10,'$'
