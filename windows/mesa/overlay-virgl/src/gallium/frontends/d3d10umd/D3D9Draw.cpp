@@ -28,7 +28,6 @@ static float D3D9RenderStateFloat(UINT value);
 static float D3D9PointSize(const D3D9Device *device);
 static bool D3D9ActiveVertexDeclHasPositionT(const D3D9Device *device);
 
-static constexpr UINT D3D9_DEFAULT_VERTEX_INPUT_BUFFER = 16;
 static constexpr UINT D3D9_SAMPLER_FETCH4 =
    (UINT)D3D9FourCC('G', 'E', 'T', '4');
 
@@ -1321,7 +1320,7 @@ D3D9FillTranslatedVsVertexElements(const D3D9Device *device,
                                    struct pipe_vertex_element *elements,
                                    UINT max_elements,
                                    uint32_t *stream_mask,
-                                   bool *uses_default_input)
+                                   UINT *default_stream)
 {
    const D3D9Object *decl = (const D3D9Object *)device->vertex_shader_decl;
    if (!decl || decl->kind != D3D9_OBJECT_VERTEX_DECL)
@@ -1332,12 +1331,13 @@ D3D9FillTranslatedVsVertexElements(const D3D9Device *device,
    const UINT decl_element_count = (UINT)(decl->size / sizeof(*decl_elements));
    UINT count = 0;
    uint32_t unread = 0;
+   uint32_t missing = 0;
+   int declared_element = -1;
    const bool position_t = D3D9ActiveVertexDeclHasPositionT(device);
    *stream_mask = 0;
-   *uses_default_input = false;
+   *default_stream = UINT_MAX;
 
-   if (!shader || shader->translated_vs_num_inputs > max_elements ||
-       D3D9_DEFAULT_VERTEX_INPUT_BUFFER >= PIPE_MAX_ATTRIBS)
+   if (!shader || shader->translated_vs_num_inputs > max_elements)
       return D3D9NoVertexElements(__LINE__, device, shader);
 
    for (UINT input = 0; input < shader->translated_vs_num_inputs; ++input) {
@@ -1368,9 +1368,7 @@ D3D9FillTranslatedVsVertexElements(const D3D9Device *device,
 
       if (!element) {
          memset(&elements[input], 0, sizeof(elements[input]));
-         elements[input].vertex_buffer_index = D3D9_DEFAULT_VERTEX_INPUT_BUFFER;
-         elements[input].src_format = PIPE_FORMAT_R32G32B32A32_FLOAT;
-         *uses_default_input = true;
+         missing |= 1u << input;
          count = input + 1;
          continue;
       }
@@ -1391,30 +1389,33 @@ D3D9FillTranslatedVsVertexElements(const D3D9Device *device,
       elements[input].instance_divisor =
          D3D9StreamInstanceDivisor(device, element->Stream);
       *stream_mask |= 1u << element->Stream;
+      declared_element = (int)input;
       count = input + 1;
    }
 
-   /* The slots of registers nothing reads: a copy of an element that is read, so that they
-    * name a buffer that is bound (the default input's own buffer is beyond what a host on
-    * OpenGL takes: 16 buffers). */
-   if (unread) {
-      int read = -1;
+   /* Registers the shader never reads can share any real element. */
+   if (declared_element < 0)
+      missing |= unread;
+   else if (unread) {
       for (UINT i = 0; i < count; ++i) {
-         if (!(unread & (1u << i)) &&
-             elements[i].vertex_buffer_index != D3D9_DEFAULT_VERTEX_INPUT_BUFFER) {
-            read = (int)i;
-            break;
-         }
+         if (unread & (1u << i))
+            elements[i] = elements[declared_element];
       }
+   }
+
+   if (missing) {
+      /* Desktop GL can expose exactly 16 vertex buffer bindings. The zero
+       * attribute must occupy one of the slots this draw leaves free. */
+      UINT spare = 0;
+      while (spare < ARRAYSIZE(device->streams) && (*stream_mask & (1u << spare)))
+         ++spare;
+      if (spare == ARRAYSIZE(device->streams))
+         return D3D9NoVertexElements(__LINE__, device, shader);
+      *default_stream = spare;
       for (UINT i = 0; i < count; ++i) {
-         if (!(unread & (1u << i)))
-            continue;
-         if (read >= 0) {
-            elements[i] = elements[read];
-         } else {
-            elements[i].vertex_buffer_index = D3D9_DEFAULT_VERTEX_INPUT_BUFFER;
+         if (missing & (1u << i)) {
+            elements[i].vertex_buffer_index = spare;
             elements[i].src_format = PIPE_FORMAT_R32G32B32A32_FLOAT;
-            *uses_default_input = true;
          }
       }
    }
@@ -3425,12 +3426,12 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
 
    struct pipe_vertex_element elements[PIPE_MAX_ATTRIBS];
    uint32_t stream_mask = 0;
-   bool uses_default_input = false;
+   UINT default_stream = UINT_MAX;
    const UINT element_count =
       D3D9FillTranslatedVsVertexElements(device, translated_vs_shader, elements,
                                          ARRAYSIZE(elements), &stream_mask,
-                                         &uses_default_input);
-   if (!element_count || (!stream_mask && !uses_default_input))
+                                         &default_stream);
+   if (!element_count || (!stream_mask && default_stream == UINT_MAX))
       return D3D9DrawRefused(__LINE__, E_FAIL);
 
    struct pipe_context *pipe = device->pipe;
@@ -3446,10 +3447,10 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       vbuffer_count = stream + 1;
    }
    static const float default_input[4] = {};
-   if (uses_default_input) {
-      vbuffers[D3D9_DEFAULT_VERTEX_INPUT_BUFFER].is_user_buffer = true;
-      vbuffers[D3D9_DEFAULT_VERTEX_INPUT_BUFFER].buffer.user = default_input;
-      vbuffer_count = MAX2(vbuffer_count, D3D9_DEFAULT_VERTEX_INPUT_BUFFER + 1);
+   if (default_stream != UINT_MAX) {
+      vbuffers[default_stream].is_user_buffer = true;
+      vbuffers[default_stream].buffer.user = default_input;
+      vbuffer_count = MAX2(vbuffer_count, default_stream + 1);
    }
 
    D3D9Resource *index_resource = NULL;
@@ -3725,7 +3726,7 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
                   indexed ? "indexed" : "arrays", indexed ? start_index : start_vertex,
                   vertex_count, indexed ? index_size : 0, draw_index_bias, min_index,
                   instance_count, element_count, vbuffer_count,
-                  uses_default_input ? ", one of them the default input" : "");
+                  default_stream != UINT_MAX ? ", one of them the default input" : "");
       for (UINT i = 0; i < element_count; ++i)
          ripple_logf("    element %u: buffer %u offset %u format %u divisor %u stride %u", i,
                      (unsigned)elements[i].vertex_buffer_index, (unsigned)elements[i].src_offset,
