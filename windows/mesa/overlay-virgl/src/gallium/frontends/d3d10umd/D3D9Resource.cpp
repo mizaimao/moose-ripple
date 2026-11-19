@@ -3301,9 +3301,36 @@ D3D9OpenResource(HANDLE hDevice, D3DDDIARG_OPENRESOURCE *data)
        !device->screen || !device->screen->resource_from_handle)
       return E_INVALIDARG;
 
+   /* moose-ripple: the screen's own primary, which Windows opens for a full-screen device,
+    * is opened like any other resource. A full-screen swap chain flips between it and the
+    * back buffer the device creates, so every second frame is drawn into it; left without
+    * a Gallium resource, as it was, the first Clear after the first flip failed and the
+    * program got an error for its second frame. Only if it cannot be opened does it stay
+    * without one (the form below), so that the device can at least be made. */
    const VIOGPU_CREATE_ALLOCATION_EXCHANGE *standard_primary_alloc = NULL;
-   if (D3D9OpenResourceIsRuntimeStandardPrimary(data,
-                                                &standard_primary_alloc)) {
+   const bool standard_primary =
+      D3D9OpenResourceIsRuntimeStandardPrimary(data, &standard_primary_alloc);
+
+   struct winsys_handle whandle;
+   memset(&whandle, 0, sizeof(whandle));
+   whandle.type = WINSYS_HANDLE_TYPE_WIN32_HANDLE;
+   whandle.handle = (HANDLE)(uintptr_t)data->hKMResource;
+
+   HANDLE old_hRTResource = device->gdi_device.hRTResource;
+   boolean old_hRTResourceIsD3D9 =
+      device->gdi_device.hRTResourceIsD3D9;
+   const D3DDDIARG_OPENRESOURCE *old_d3d9_open =
+      device->gdi_device.pD3D9OpenResource;
+   device->gdi_device.hRTResource = data->hResource;
+   device->gdi_device.hRTResourceIsD3D9 = true;
+   device->gdi_device.pD3D9OpenResource = data;
+   struct pipe_resource *pipe_resource =
+      device->screen->resource_from_handle(device->screen, NULL, &whandle, 0);
+   device->gdi_device.pD3D9OpenResource = old_d3d9_open;
+   device->gdi_device.hRTResource = old_hRTResource;
+   device->gdi_device.hRTResourceIsD3D9 = old_hRTResourceIsD3D9;
+
+   if (!pipe_resource && standard_primary) {
       const D3DDDIFORMAT d3d_format =
          D3D9VirglToFormat(standard_primary_alloc->ResourceOptions.format);
       if (d3d_format == D3DDDIFMT_UNKNOWN)
@@ -3367,7 +3394,7 @@ D3D9OpenResource(HANDLE hDevice, D3DDDIARG_OPENRESOURCE *data)
       D3D9Warnf("WARNING: D3D9 opened runtime standard-primary fullscreen "
                 "without Gallium backing resource=%p km=0x%lx "
                 "allocation=0x%lx %ux%u format=%u bind=0x%lx "
-                "owner=d3d9_runtime reason=standard_primary_not_yttrium\n",
+                "owner=d3d9_runtime reason=standard_primary_not_opened\n",
                 resource, (unsigned long)data->hKMResource,
                 (unsigned long)allocation,
                 standard_primary_alloc->ResourceOptions.width,
@@ -3377,24 +3404,6 @@ D3D9OpenResource(HANDLE hDevice, D3DDDIARG_OPENRESOURCE *data)
       return S_OK;
    }
 
-   struct winsys_handle whandle;
-   memset(&whandle, 0, sizeof(whandle));
-   whandle.type = WINSYS_HANDLE_TYPE_WIN32_HANDLE;
-   whandle.handle = (HANDLE)(uintptr_t)data->hKMResource;
-
-   HANDLE old_hRTResource = device->gdi_device.hRTResource;
-   boolean old_hRTResourceIsD3D9 =
-      device->gdi_device.hRTResourceIsD3D9;
-   const D3DDDIARG_OPENRESOURCE *old_d3d9_open =
-      device->gdi_device.pD3D9OpenResource;
-   device->gdi_device.hRTResource = data->hResource;
-   device->gdi_device.hRTResourceIsD3D9 = true;
-   device->gdi_device.pD3D9OpenResource = data;
-   struct pipe_resource *pipe_resource =
-      device->screen->resource_from_handle(device->screen, NULL, &whandle, 0);
-   device->gdi_device.pD3D9OpenResource = old_d3d9_open;
-   device->gdi_device.hRTResource = old_hRTResource;
-   device->gdi_device.hRTResourceIsD3D9 = old_hRTResourceIsD3D9;
    if (!pipe_resource)
       return E_OUTOFMEMORY;
 
@@ -3434,7 +3443,8 @@ D3D9OpenResource(HANDLE hDevice, D3DDDIARG_OPENRESOURCE *data)
    resource->flags.ZBuffer =
       (pipe_resource->bind & PIPE_BIND_DEPTH_STENCIL) != 0;
    resource->flags.Primary =
-      (pipe_resource->bind & PIPE_BIND_DISPLAY_TARGET) != 0;
+      standard_primary || (pipe_resource->bind & PIPE_BIND_DISPLAY_TARGET) != 0;
+   resource->runtime_standard_primary = standard_primary;
 
    D3DKMT_HANDLE allocation = D3D9GetPipeAllocation(device, resource);
    if (!allocation && data->pOpenAllocationInfo && data->NumAllocations)
