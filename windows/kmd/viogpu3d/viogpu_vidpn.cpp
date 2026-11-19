@@ -2008,8 +2008,17 @@ void VioGpuVidPN::Flip()
     ExAcquireFastMutex(&m_sourceLock);
     VioGpuAllocation *sourceRes = m_sourceRes;
     BOOLEAN flip = InterlockedExchange(&m_shouldFlip, 0) != 0;
+    const BOOLEAN haveSource = m_sourceAddress.QuadPart != 0 && sourceRes != NULL;
 
-    if (m_gamma.Active() && m_sourceAddress.QuadPart != 0 && sourceRes != NULL)
+    // Ramps that come while there is nothing to draw wait for the next surface, and are then
+    // applied one a tick (viogpu_gamma.h).
+    m_gamma.Hold(!haveSource && (m_gamma.Active() || m_gamma.Showing()));
+    if (haveSource)
+    {
+        m_gamma.Next();
+    }
+
+    if (m_gamma.Active() && haveSource)
     {
         // A gamma ramp is set: the screen is the surface drawn through it, drawn again when
         // the surface, a piece of it or the ramp changed.

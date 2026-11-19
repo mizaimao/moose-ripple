@@ -189,6 +189,11 @@ void VioGpuGamma::Init(VioGpuAdapter *adapter)
     }
     m_identity = TRUE;
     m_dirty = FALSE;
+    m_pending = (UCHAR(*)[3][256]) new (NonPagedPoolNx) BYTE[PENDING * sizeof(m_table)];
+    m_pendingHead = m_pendingCount = 0;
+    m_hold = FALSE;
+    m_replaying = FALSE;
+    m_replayShift = 0;
     m_ctx = m_shadow = m_lut = m_vertices = 0;
     m_width = m_height = m_format = 0;
     m_tableSent = FALSE;
@@ -214,7 +219,25 @@ void VioGpuGamma::SetRamp(const USHORT *red, const USHORT *green, const USHORT *
 
     KIRQL irql;
     KeAcquireSpinLock(&m_lock, &irql);
-    if (RtlCompareMemory(m_table, table, sizeof(table)) != sizeof(table))
+    if (m_pending != NULL && (m_hold || m_pendingCount != 0))
+    {
+        // Nothing to draw it on yet, or earlier ramps still wait: this one waits behind them.
+        // When the ring is full the newest takes the last place, so the final ramp is kept.
+        const UCHAR *last =
+            m_pendingCount ? &m_pending[(m_pendingHead + m_pendingCount - 1) % PENDING][0][0] : &m_table[0][0];
+        if (RtlCompareMemory(last, table, sizeof(table)) != sizeof(table))
+        {
+            if (m_pendingCount == PENDING)
+            {
+                m_pendingCount--;
+            }
+            const UINT slot = (m_pendingHead + m_pendingCount) % PENDING;
+            RtlCopyMemory(m_pending[slot], table, sizeof(table));
+            m_pendingTime[slot] = KeQueryInterruptTime();
+            m_pendingCount++;
+        }
+    }
+    else if (RtlCompareMemory(m_table, table, sizeof(table)) != sizeof(table))
     {
         RtlCopyMemory(m_table, table, sizeof(table));
         m_identity = identity;
@@ -226,7 +249,57 @@ void VioGpuGamma::SetRamp(const USHORT *red, const USHORT *green, const USHORT *
 
 BOOLEAN VioGpuGamma::Active()
 {
-    return !m_identity;
+    return !m_identity || m_pendingCount != 0;
+}
+
+VioGpuGamma::~VioGpuGamma()
+{
+    delete[] (BYTE *)m_pending;
+}
+
+void VioGpuGamma::Hold(BOOLEAN hold)
+{
+    m_hold = hold;
+}
+
+// The oldest ramp that waited becomes the ramp to draw through, once it is its turn: the
+// ramps are applied as far apart in time as they came.
+void VioGpuGamma::Next()
+{
+    if (m_pendingCount == 0)
+    {
+        return;
+    }
+    const ULONGLONG now = KeQueryInterruptTime();
+    KIRQL irql;
+    KeAcquireSpinLock(&m_lock, &irql);
+    if (m_pendingCount != 0 && !m_replaying)
+    {
+        m_replaying = TRUE;
+        m_replayShift = now - m_pendingTime[m_pendingHead];
+    }
+    if (m_pendingCount != 0 && now - m_replayShift >= m_pendingTime[m_pendingHead])
+    {
+        RtlCopyMemory(m_table, m_pending[m_pendingHead], sizeof(m_table));
+        m_pendingHead = (m_pendingHead + 1) % PENDING;
+        m_pendingCount--;
+        BOOLEAN identity = TRUE;
+        for (UINT i = 0; i < sizeof(m_table); i++)
+        {
+            if ((&m_table[0][0])[i] != (UCHAR)i)
+            {
+                identity = FALSE;
+                break;
+            }
+        }
+        m_identity = identity;
+        m_dirty = TRUE;
+    }
+    if (m_pendingCount == 0)
+    {
+        m_replaying = FALSE;
+    }
+    KeReleaseSpinLock(&m_lock, irql);
 }
 
 BOOLEAN VioGpuGamma::Changed()
