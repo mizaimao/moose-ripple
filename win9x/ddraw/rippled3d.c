@@ -88,6 +88,37 @@ static void dbg_hex(DWORD v)
    port, when the environment variable RIPPLE_D3D_TRACE is set (read at context creation). */
 static int trace_on;
 
+/* With RIPPLE_D3D_PROFILE set (read at context creation): every 100 read-backs, the time per
+   frame (from one read-back to the next) and the share of it spent reading the picture back
+   from the GPU, on QEMU's debug port. */
+static int profile_on;
+static LARGE_INTEGER prof_freq, prof_last;
+static DWORD prof_read, prof_frame;   /* timer ticks (Windows 98: 1.19 MHz) */
+static DWORD prof_n;
+
+static void profile_read_back(LARGE_INTEGER t0, LARGE_INTEGER t1)
+{
+    char line[160];
+
+    if (!profile_on)
+        return;
+    if (!prof_freq.QuadPart)
+        QueryPerformanceFrequency(&prof_freq);
+    prof_read += t1.LowPart - t0.LowPart;
+    if (prof_last.QuadPart)
+        prof_frame += t1.LowPart - prof_last.LowPart;
+    prof_last = t1;
+    if (++prof_n < 100 || !prof_freq.QuadPart)
+        return;
+    wsprintf(line, "rd3d: profile: %lu us a frame, read-back %lu us\r\n",
+             (DWORD)MulDiv((int)(prof_frame / (prof_n - 1)), 1000000, (int)prof_freq.LowPart),
+             (DWORD)MulDiv((int)(prof_read / prof_n), 1000000, (int)prof_freq.LowPart));
+    dbg(line);
+    prof_read = prof_frame = 0;
+    prof_n = 0;
+    prof_last.QuadPart = 0;
+}
+
 static void tracef(const char *fmt, ...)
 {
     char b[300];
@@ -184,6 +215,7 @@ static RDD_SHARED *shared;
 #define GL_RGB5                         0x8050
 #define GL_RGB5_A1                      0x8057
 #define GL_RGBA4                        0x8056
+#define GL_RGB565                       0x8D62
 
 /* ---- OpenGL entry points, per process ---------------------------------------------------------- */
 typedef void (APIENTRY *GLVOIDENUM)(GLenum);
@@ -688,7 +720,8 @@ typedef struct {
     FLATPTR mem;                        /* the surface's memory (0: not used yet) */
     DWORD w, h;                         /* the size of rb's storage */
     DWORD used;                         /* when last attached (RCTX.clock) */
-    GLuint rb;                          /* colour (RGBA8), or depth and stencil */
+    GLuint rb;                          /* colour, or depth and stencil */
+    GLenum format;                      /* rb's: colour_format, or depth and stencil */
     int written;                        /* colour: the memory is newer than rb's picture (the
                                            program wrote it, or rb is new): it goes to the GPU
                                            before the next draw (rt_upload) */
@@ -867,9 +900,18 @@ static void read_back(RCTX *c)
     make_current(c);
     gl->PixelStorei(GL_PACK_ALIGNMENT, 1);
     gl->PixelStorei(GL_PACK_ROW_LENGTH, g->lPitch / f.bytes);
+    {
+        LARGE_INTEGER t0, t1;
+        if (profile_on)
+            QueryPerformanceCounter(&t0);
     gl->ReadPixels(0, 0, c->fb_w < g->wWidth ? c->fb_w : g->wWidth,
                    c->fb_h < g->wHeight ? c->fb_h : g->wHeight, f.format, f.type,
                    (GLvoid *)mem);
+        if (profile_on) {
+            QueryPerformanceCounter(&t1);
+            profile_read_back(t0, t1);
+        }
+    }
     gl->PixelStorei(GL_PACK_ROW_LENGTH, 0);
     targets_written(mem, c->cur);       /* another context's picture of it is older now */
     if (c->rt->ddsCaps.dwCaps & DDSCAPS_TEXTURE)
@@ -933,7 +975,7 @@ static GPUBUF *gpu_buffer(RCTX *c, GPUBUF *t, DWORD n, FLATPTR mem, DWORD w, DWO
         b->written = 1;
     if (!b->rb)
         gl->GenRenderbuffers(1, &b->rb);
-    if (b->w != w || b->h != h) {
+    if (b->w != w || b->h != h || b->format != format) {
         gl->BindRenderbuffer(GL_RENDERBUFFER, b->rb);
         gl->RenderbufferStorage(GL_RENDERBUFFER, format, w, h);
         {
@@ -946,6 +988,7 @@ static GPUBUF *gpu_buffer(RCTX *c, GPUBUF *t, DWORD n, FLATPTR mem, DWORD w, DWO
         }
         b->w = w;
         b->h = h;
+        b->format = format;
         b->written = 1;
     }
     b->mem = mem;
@@ -988,6 +1031,23 @@ static void framebuffer_failed(RCTX *c, GLenum st, GLuint colour, GLuint depth, 
     }
 }
 
+/* The GPU format of a render target's colour buffer: 565 for a 565 target, so that reading the
+   picture back is a copy; converting from RGBA8 made a 16-bit frame at 1024x768 take longer to
+   read back (5.0 ms) than a 32-bit one twice its size (4.0 ms). Without alpha bits it also
+   reads destination alpha as 1, as Direct3D does for a target without alpha. RGBA8 for the
+   rest. */
+static GLenum colour_format(LPDDRAWI_DDRAWSURFACE_LCL rt)
+{
+    DDPIXELFORMAT pf;
+
+    if (!rt)
+        return GL_RGBA8;
+    surface_format(rt, &pf);
+    if ((pf.dwFlags & DDPF_RGB) && pf.dwRGBBitCount == 16 && pf.dwRBitMask == 0xF800)
+        return GL_RGB565;
+    return GL_RGBA8;
+}
+
 /* The framebuffer object for the render target: its colour buffer and the depth buffer of
    its z-buffer (none without one: the depth test is off then, apply_depth_test). Rows are
    kept in Direct3D's order (GL row 0 is the top row), so a read-back copies straight into the
@@ -1010,7 +1070,7 @@ static int framebuffer(RCTX *c)
     if (!c->fbo)
         gl->GenFramebuffers(1, &c->fbo);
     gl->BindFramebuffer(GL_FRAMEBUFFER, c->fbo);
-    cb = gpu_buffer(c, c->cb, TARGETS, mem, w, h, GL_RGBA8);
+    cb = gpu_buffer(c, c->cb, TARGETS, mem, w, h, colour_format(c->rt));
     gl->FramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, cb->rb);
     depth = zmem ? gpu_buffer(c, c->zb, ZBUFFERS, zmem, w, h, GL_DEPTH24_STENCIL8)->rb : 0;
     gl->FramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth);
@@ -2252,6 +2312,7 @@ static DWORD WINAPI ContextCreate(LPD3DHAL_CONTEXTCREATEDATA d)
     {
         char v[8];
         trace_on = GetEnvironmentVariable("RIPPLE_D3D_TRACE", v, sizeof v) > 0;
+        profile_on = GetEnvironmentVariable("RIPPLE_D3D_PROFILE", v, sizeof v) > 0;
     }
     c->ddl = d->lpDDLcl;
     c->rt = d->lpDDSLcl;
