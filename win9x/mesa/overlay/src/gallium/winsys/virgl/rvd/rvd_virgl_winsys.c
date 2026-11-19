@@ -49,6 +49,7 @@
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
 #include "virgl/virgl_public.h"
+#include "virgl/virgl_resource.h"
 #include "virgl/virgl_winsys.h"
 #include "virtio-gpu/virgl_protocol.h"
 #include "virgl_resource_cache.h"
@@ -597,6 +598,63 @@ static int rvd_submit_cmd(struct virgl_winsys *vws, struct virgl_cmd_buf *_cbuf,
       *fence = rvd_fence_create();
    rvd_clear_res_list(cbuf);
    return ret;
+}
+
+/* DirectDraw can show its full-screen render target without a guest-memory copy. The separate
+ * scanout texture lets the HAL keep drawing or reading back its original 565 or RGBA surface.
+ * Keep the old image alive across a resize until its replacement is on the display. */
+bool rvd_virgl_present_color(struct pipe_context *pipe, struct pipe_resource *color,
+                             struct pipe_resource **image)
+{
+   struct pipe_screen *screen = pipe->screen;
+   struct rvd_winsys *ws = rvd_winsys(virgl_screen(screen)->vws);
+   struct pipe_resource *dest = *image;
+   struct pipe_resource *replacement = NULL;
+   struct pipe_fence_handle *submitted = NULL;
+   struct pipe_blit_info blit = {0};
+   bool shown = false;
+
+   if (color->screen != screen || color->target != PIPE_TEXTURE_2D || color->nr_samples > 1)
+      return false;
+   if (!dest || dest->width0 != color->width0 || dest->height0 != color->height0) {
+      struct pipe_resource templ = {
+         .target = PIPE_TEXTURE_2D,
+         .format = PIPE_FORMAT_B8G8R8X8_UNORM,
+         .width0 = color->width0, .height0 = color->height0, .depth0 = 1, .array_size = 1,
+         .bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_SCANOUT,
+      };
+      if (!screen->is_format_supported(screen, templ.format, templ.target, 0, 0, templ.bind))
+         templ.format = PIPE_FORMAT_B8G8R8A8_UNORM;
+      if (!screen->is_format_supported(screen, templ.format, templ.target, 0, 0, templ.bind))
+         return false;
+      dest = replacement = screen->resource_create(screen, &templ);
+      if (!dest)
+         return false;
+   }
+
+   /* The HAL projects Direct3D's top row onto FBO row zero. Both the host blit and scanout
+    * use that row first, so the copy preserves row order. */
+   blit.src.resource = color;
+   blit.src.format = color->format;
+   u_box_2d(0, 0, color->width0, color->height0, &blit.src.box);
+   blit.dst.resource = dest;
+   blit.dst.format = dest->format;
+   blit.dst.box = blit.src.box;
+   blit.mask = PIPE_MASK_RGBA;
+   blit.filter = PIPE_TEX_FILTER_NEAREST;
+   pipe->blit(pipe, &blit);
+   pipe->flush(pipe, &submitted, 0);
+   if (submitted) { /* rvd_submit_cmd only returns a fence after the VxD accepts the commands */
+      struct rvd_present present = {
+         ws->ctx, virgl_resource(dest)->hw_res->res_handle, dest->width0, dest->height0
+      };
+      screen->fence_reference(screen, &submitted, NULL);
+      shown = rvd_call(ws, RVD_PRESENT, &present, sizeof(present), NULL, 0);
+      if (shown && replacement)
+         pipe_resource_reference(image, replacement);
+   }
+   pipe_resource_reference(&replacement, NULL);
+   return shown;
 }
 
 /* ---- A finished frame goes on the window ----------------------------------------------------- */
