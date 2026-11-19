@@ -1,0 +1,65 @@
+--- a/src/gallium/targets/wgl/wgl.c
++++ b/src/gallium/targets/wgl/wgl.c
+@@ -37,1 +37,8 @@
++/* Mesa's driver headers must precede the Windows SDK headers. */
++#ifdef GALLIUM_VIRGL
++#include "state_tracker/st_context.h"
++#include "main/context.h"
++#include "state_tracker/st_cb_bitmap.h"
++#endif
++
+ #include <windows.h>
+@@ -66,3 +73,4 @@
+ #ifdef GALLIUM_VIRGL
++#include "stw_context.h"
+ #include "virgl/rvd/rvd_virgl_public.h"
+ static bool use_virgl = false;
+@@ -81,1 +89,26 @@
++/* The Direct3D HAL binds a named FBO with one ordinary colour renderbuffer. Keep the
++ * render and present in order, including vertices still held by the GL frontend. */
++BOOL APIENTRY
++RipplePresentColor(void)
++{
++#ifdef GALLIUM_VIRGL
++   struct stw_context *ctx = stw_current_context();
++   if (!ctx || !use_virgl || ctx->current_framebuffer)
++      return false;
++   struct gl_context *gl = ctx->st->ctx;
++   _mesa_glthread_finish(gl);
++   struct gl_framebuffer *fb = gl->DrawBuffer;
++   if (!fb || !fb->Name || fb->_Status != GL_FRAMEBUFFER_COMPLETE)
++      return false;
++   struct gl_renderbuffer *rb = fb->Attachment[BUFFER_COLOR0].Renderbuffer;
++   if (!rb || !rb->texture || rb->TexImage)
++      return false;
++   FLUSH_VERTICES(gl, 0, 0);
++   st_flush_bitmap_cache(ctx->st);
++   return rvd_virgl_present_color(ctx->st->pipe, rb->texture, &ctx->ripple_scanout);
++#else
++   return false;
++#endif
++}
++
+ static const char *created_driver_name = NULL;
+--- a/src/gallium/frontends/wgl/stw_context.h
++++ b/src/gallium/frontends/wgl/stw_context.h
+@@ -53,2 +53,3 @@
+    struct hud_context *hud;
++   struct pipe_resource *ripple_scanout; /* full-screen Direct3D image, reused between flips */
+ };
+--- a/src/gallium/frontends/wgl/stw_context.c
++++ b/src/gallium/frontends/wgl/stw_context.c
+@@ -42,2 +42,3 @@
+ #include "util/u_atomic.h"
++#include "util/u_inlines.h"
+ #include "hud/hud_context.h"
+@@ -310,2 +311,3 @@
++   pipe_resource_reference(&ctx->ripple_scanout, NULL);
+    st_destroy_context(ctx->st);
+    FREE(ctx);
+--- a/src/gallium/targets/wgl/gallium_wgl.def.in
++++ b/src/gallium/targets/wgl/gallium_wgl.def.in
+@@ -21,1 +21,2 @@
+-RippleMakeCurrent@4
++RippleMakeCurrent@4
++RipplePresentColor@0

@@ -112,6 +112,10 @@ typedef struct {
    the card is in the driver's mode; it answers "RVD1" in EAX. */
 #define RVD_HIRES_ON   1UL
 #define RVD_SIGNATURE  0x31445652UL
+#define RVD_SCANOUT_QUERY  0x53434F55UL
+#define RVD_SCANOUT_REPLY  0x32445652UL
+#define RVD_DISPLAY_MODE   0x52564400UL
+#define RVD_DISPLAY_COLOR  0x52565000UL
 
 /* ---- Escapes -------------------------------------------------------------------------------- */
 #define QUERYESCSUPPORT 8
@@ -172,5 +176,6 @@ void dbg_hex(DWORD v);
 /* DirectDraw (ddraw16.c) */
 int  dd_escape(WORD function, LPVOID in, LPVOID out);
 void dd_mode_set(DWORD lfb, DWORD vram, WORD width, WORD height, WORD bpp, WORD pitch);
+void dd_mode_lost(void);
 
 #endif

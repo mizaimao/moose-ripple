@@ -143,6 +143,56 @@ Windows 98 gives a new process the id of one that has just ended; the DLL's data
 all processes, so it tells processes apart by a number of its own kept in each process's
 environment (the second run of a program failed before that).
 
+### Full-screen GPU presentation
+
+Set `RIPPLE_D3D_SCANOUT=1` before starting a full-screen Direct3D game to try the GPU display
+path. The default is the existing VGA path. With a 16- or 32-bit flip chain, the HAL keeps the
+finished colour buffer on the GPU. It reads a page back when DirectDraw needs its pixels, for
+example when the game locks a surface to draw into it. Mesa converts the finished frame on
+the GPU into a reusable display image. Windowed OpenGL still uses GDI for clipping.
+
+On Windows 98 SE with DirectX 7 and an Intel UHD 630, the same installed driver gave the
+following results with the option off and on. All tests ran at 1024×768. Each timed
+`d3dtest` loop ran for five seconds.
+
+| Test | VGA | GPU scanout |
+|---|---:|---:|
+| 3DMark 2000 default benchmark, 16-bit | 14,381 | 21,319 |
+| `d3dtest`, 16-bit | 787.4 frames/s | 2,980.2 frames/s |
+| `d3dtest`, 32-bit | 243.4 frames/s | 3,913.0 frames/s |
+| Guest read-backs per 100 flips in either timed loop | 100 | 0 |
+
+The default 3DMark score improved by 48.2% with the GPU minimum clock at 350 MHz in both
+runs. The previous release scored 14,404 under the same settings.
+
+The first GPU trial notified QEMU after every flip and rendered only 240 frames/s at 16 bits.
+Updating its VNC console can require a full-frame copy into host memory. The mini-VDD now
+publishes the latest image at up to about 60 Hz. The two runs rendered 14,901 and 19,565
+frames and each sent 294 display updates. A timer delivered the held frame after drawing
+stopped.
+
+Run `d3dtest 1024 768 16 5 present` (or use `32`) to capture the held frame and check CPU
+access. Both paths passed the front-buffer read and partial CPU-write checks. The two 32-bit
+captures matched at all 786,432 pixels. At 16 bits all 786,432 pixels matched when reduced
+to RGB565. The two display paths expand those values to 8-bit channels slightly differently
+(maximum difference of 7 red, 3 green and 7 blue on a 0–255 scale).
+[Side-by-side host captures](img/direct3d-scanout.webp)
+
+The process-exit test (`d3dtest 1280 720 32 2 present-exit`) left a nonzero CPU page
+selected, displayed a GPU frame, and terminated while it still owned that frame. The GDI
+desktop and Start menu were visible afterwards. Windowed OpenGL, `rvdtest stall` and
+640×480×8 DirectDraw passed after the GPU game exited. Restarting DDHELP and running
+DirectDraw again also passed the page-flip and pixel checks.
+
+After the first GPU presentation, the mini-VDD also draws the standard full-screen DOS
+colour text console from its VGA character cells and font. An 80×25 prompt accepted input
+in full screen and after returning to a window with Alt+Enter. The 720×400 captures
+matched the VGA reference in glyph and cursor position at every pixel. Text was grey
+170 on the mirror and 168 on VGA. Full-screen DOS graphics
+after GPU takeover are unsupported. Use the default VGA path on a fresh boot for those
+programs. The GPU presentation results above are from the Intel host. UTM and other
+renderers still need testing.
+
 ### 3DMark 2000 (2026-11-16)
 
 3DMark 2000 1.1 runs its default benchmark to the end on Windows 98 SE in VM 230 (DirectX 7,
@@ -293,8 +343,10 @@ tool calling TerminateProcess) Retry goes on and the batch finishes, every test 
 DirectDraw starts DDHELP with handle inheritance off, so the file reaches it some other way,
 from the DOS prompt's redirection. Later batches in the same session don't see it, as DDHELP
 is running already: a test batch starts one DirectDraw program without redirection first.
-**Open:** in earlier runs, answering that prompt froze the whole guest (idle, no log). On
-2026-11-18 Retry and Abort didn't; which answer froze it isn't known.
+In earlier runs, answering that prompt froze the guest. On 2026-11-18 Retry and Abort both
+returned control. On a separate cold boot, FIND on the first d3dtest output file reproduced
+the prompt. Fail returned “Access denied” and the same DOS window ran a new keyboard command.
+The original freeze remains unexplained.
 
 ## Things learnt the hard way
 

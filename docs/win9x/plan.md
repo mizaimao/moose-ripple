@@ -83,6 +83,24 @@ this project: nothing may look worse than without our driver).
 6. **Windows 2000:** miniport and display driver; the OpenGL and Direct3D parts reused.
 7. Later, maybe: Glide (3dfx games), Windows 95.
 
+## Windows 98 direct scanout
+
+Full-screen Direct3D games can keep the finished picture on the GPU. Mesa copies it into a
+display image on the host. The mini-VDD shows the latest frame at the console and switches
+back to a CPU-drawn desktop when the game gives up the screen. The first implementation is
+opt-in. The pixel checks, frame counts and benchmark results are in
+[DirectDraw and Direct3D](directdraw.md#full-screen-gpu-presentation).
+
+On the test host's QEMU version (9.2.0), selecting a virtio display resource switches the
+screen away from VGA. Selecting resource zero blanks the output. The mini-VDD therefore
+retains virtio display ownership for the rest of the boot and keeps a desktop image
+independent of any game. DOS works in a window and in standard full-screen 80-column
+colour text. Full-screen DOS graphics after GPU presentation and support on other host
+renderers remain open.
+[QEMU scanout](https://github.com/qemu/qemu/blob/v9.2.0/hw/display/virtio-gpu-virgl.c#L364-L422),
+[VGA selection](https://github.com/qemu/qemu/blob/v9.2.0/hw/display/virtio-vga.c#L20-L30),
+[device reset](https://github.com/qemu/qemu/blob/v9.2.0/hw/display/virtio-gpu-base.c#L21-L35).
+
 ## Toolchain (on the build host, under Wine; checked 2026-11-14)
 
 Everything runs from the repo's `.tools/win9x/` (git-ignored); the kits are unpacked there with

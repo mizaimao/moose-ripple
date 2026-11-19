@@ -18,6 +18,9 @@ VxD, the test program and the winsys; this is version 2 of the interface.
 | `RVD_BUFFER_DESTROY` | handle | | |
 | `RVD_SUBMIT` | `struct rvd_submit`, commands | | a virgl command stream for a context |
 | `RVD_TRANSFER` | `struct rvd_transfer` | | copy between a buffer's memory and its GPU object, either way |
+| `RVD_PRESENT` | `struct rvd_present` | | show a scanout-capable GPU buffer owned by the caller's context and matching the current screen dimensions |
+| `RVD_DESKTOP` | byte offset | | select the CPU-drawn page at this offset in video memory. Offset zero selects the GDI desktop |
+| `RVD_DESKTOP` | empty | 32-bit flag | query whether virtio owns the display. A newly loaded HAL uses this to resume CPU page flips |
 | `RVD_HEAP` | bytes wanted | `struct rvd_heap` | one block of system memory for the display driver's DirectDraw surfaces that are never shown (made at the first call, returned again later; valid in every process). No GPU needed |
 | `RVD_SET_TIMEOUT` | milliseconds (0: the default, 10 s; `RVD_TIMEOUT_AT_ONCE`: give up as soon as a request is sent, and keep the device stalled until set back) | contexts and buffers held for the host (optional) | how long a request may take before it fails with `ERROR_TIMEOUT`; for tests of the recovery, until the program that set it ends |
 | `RVD_GET_STATS` | | `struct rvd_stats` | what the VxD holds now: contexts and buffers in use, the locked memory behind the buffers, contexts and buffers held for a host that stopped answering, the DirectDraw heap. No GPU needed; for tests that look for memory a long session loses (`tools/win9x/memlog.c`) |
@@ -38,12 +41,21 @@ virgl's and is decided in user mode.
   the driver reads and writes the memory in place: a texture upload is "fill the memory, then
   `RVD_TRANSFER` to the host", a read-back the other way round. A buffer's handle is its virgl
   resource ID, which is what the command stream names.
-- **Requests are synchronous.** The VxD copies a request into its own physically contiguous
-  buffer (512 KB, so a command submission can be that large), puts it on the control queue and
-  polls until the device has answered. Nothing is outstanding when `DeviceIoControl` returns,
-  so there are no fences yet: a later read-back sees everything submitted before it. Requests
-  run one at a time under a mutex: ring 0 code in Windows 9x is not pre-empted, but a request
-  that allocates memory can block (paging), and another thread would get in.
+- **Command completion.** Ordinary requests use one pair of queue descriptors and a 512 KB
+  request buffer. The VxD polls for that pair's reply under a mutex. A GPU flip also queues
+  a fenced submit, which asks the host to finish the frame's rendering. Its reply has a
+  separate descriptor pair and buffer, so the display command can follow immediately. The
+  driver waits for a fence if all the available pairs are busy. Timeout recovery matches
+  replies by descriptor ID.
+- **Display updates.** The first GPU image is shown immediately. When successive flips
+  update that same resource, the VxD tells the host display about the newest contents at
+  most once per 17 ms. A timer delivers the last update even if drawing stops. This matters
+  on a VNC host where each display notification can copy the whole frame to the console.
+  After the first GPU presentation, QEMU also uses virtio for GDI. When GDI regains the
+  screen, the VxD samples the CPU-drawn page and uploads it when pixels change, including
+  software cursor movement. For an 80-column colour DOS text screen, it reads the VGA
+  character cells, loaded font and hardware cursor and renders them into a display image.
+  A mode switch leaves the running GPU transport and application contexts intact.
 - **Clean-up.** A context belongs to the process that made it, and a buffer to its context.
   When a program closes the device, exits or crashes, Windows sends the VxD a close message
   and the VxD removes that process's contexts and buffers on the host and frees their memory.
@@ -91,8 +103,6 @@ On a host without virgl (`-device virtio-vga` without `-gl`) the VxD still loads
 
 ## Not there yet
 
-- Interrupts and fences: the VxD polls, which stalls the guest for as long as the host takes
-  to answer (microseconds for most requests).
+- Completion interrupts. The VxD polls for ordinary requests.
 - The cursor queue is set up and unused.
-- A scanout of its own: the screen is still the VGA frame buffer, and finished frames are read
-  back and drawn there by GDI.
+- Windowed OpenGL still reads frames back for GDI to draw and clip.

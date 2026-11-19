@@ -43,6 +43,9 @@ CHECK(c_destroy, FIELD_OFFSET(DDHAL_DDCALLBACKS, DestroyDriver) == RDD_CB_DESTRO
 
 static HINSTANCE dll_instance;
 static RDD_SHARED *shared;             /* the 16-bit driver's block, flat */
+static int scanout_used;
+static FLATPTR gpu_page;               /* LFB address of the page currently presented from the GPU */
+static DWORD gpu_mode;
 
 /* ---- Small things ---------------------------------------------------------------------------- */
 static void dbg(const char *s)
@@ -209,6 +212,54 @@ static DWORD WINAPI CanCreateSurface(LPDDHAL_CANCREATESURFACEDATA d)
     return DDHAL_DRIVER_HANDLED;
 }
 
+/* Select the CPU's page when GDI or DirectDraw will draw directly into its memory. The VxD
+   follows writes from then on, including ones which bypass the DirectDraw HAL. */
+static int select_cpu_page(DWORD offset)
+{
+    HANDLE h;
+    DWORD got;
+    int ok;
+    h = CreateFile(RVD_DEVICE_NAME, 0, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return 0;
+    ok = DeviceIoControl(h, RVD_DESKTOP, &offset, sizeof offset, NULL, 0, &got, NULL);
+    CloseHandle(h);
+    if (ok)
+        gpu_page = 0;
+    return ok;
+}
+
+/* DDHELP can unload this DLL while the mini-VDD is still displaying the GDI mirror.
+   Query that state at DriverInit without changing the page an application is showing. */
+static void query_scanout(void)
+{
+    DWORD got, active;
+    HANDLE h = CreateFile(RVD_DEVICE_NAME, 0, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+        if (DeviceIoControl(h, RVD_DESKTOP, NULL, 0, &active, sizeof active, &got, NULL) &&
+            got == sizeof active) {
+            scanout_used = active != 0;
+            if (scanout_used)
+                dbg("rdd: existing desktop scanout found\r\n");
+        }
+        CloseHandle(h);
+    }
+}
+
+int rdd_prepare_scanout(void)
+{
+    /* A previous VxD may lack both requests. Confirm the CPU path before the first GPU flip.
+       The new VxD leaves VGA alone until that flip. */
+    if (!scanout_used)
+        scanout_used = select_cpu_page(0);
+    return scanout_used;
+}
+
+int rdd_desktop(DWORD offset)
+{
+    return !scanout_used || select_cpu_page(offset);
+}
+
 /* Show another surface: point the start of the display at it. DirectDraw places back buffers
    in the heap below the screen at the start of a line, so a line number is all the card needs;
    QEMU takes none past line RDD_MAX_Y_OFFSET, and the 16-bit driver's heap puts no back
@@ -218,14 +269,24 @@ static DWORD WINAPI Flip(LPDDHAL_FLIPDATA d)
     DWORD off = d->lpSurfTarg->lpGbl->fpVidMem - shared->lfb;
 
     d3d_trace("flip: from, to", d->lpSurfCurr->lpGbl->fpVidMem, d->lpSurfTarg->lpGbl->fpVidMem);
-    d3d_surface_access(d->lpSurfTarg);       /* a 3D picture still on the GPU */
     if (!shared->pitch || off % shared->pitch || off / shared->pitch > RDD_MAX_Y_OFFSET ||
         off / shared->pitch + shared->height > shared->lines) {
         dbg("rdd: can't show a surface at offset "); dbg_hex(off); dbg("\r\n");
         d->ddRVal = DDERR_GENERIC;
         return DDHAL_DRIVER_HANDLED;
     }
-    vbe_write(VBE_Y_OFFSET, (WORD)(off / shared->pitch));
+    if (d3d_present(d->lpSurfCurr, d->lpSurfTarg)) {
+        gpu_page = d->lpSurfTarg->lpGbl->fpVidMem;
+        gpu_mode = shared->mode_serial;
+        d3d_profile_flip(1);
+    } else {
+        if (!d3d_surface_access(d->lpSurfTarg) || !rdd_desktop(off)) {
+            d->ddRVal = DDERR_GENERIC;
+            return DDHAL_DRIVER_HANDLED;
+        }
+        vbe_write(VBE_Y_OFFSET, (WORD)(off / shared->pitch));
+        d3d_profile_flip(0);
+    }
     d->ddRVal = DD_OK;
     return DDHAL_DRIVER_HANDLED;
 }
@@ -246,7 +307,12 @@ static DWORD WINAPI Lock(LPDDHAL_LOCKDATA d)
     DWORD p = g->fpVidMem, bits = shared->bpp;
 
     d3d_trace("lock: memory, flags", g->fpVidMem, d->dwFlags);
-    d3d_surface_access(s);              /* a 3D picture still on the GPU goes in first */
+    if (!d3d_surface_access(s) || (p && p == gpu_page && gpu_mode == shared->mode_serial &&
+        !(d->dwFlags & DDLOCK_READONLY) &&
+        !rdd_desktop(p - shared->lfb))) {
+        d->ddRVal = DDERR_GENERIC;
+        return DDHAL_DRIVER_HANDLED;
+    }
     if (!(d->dwFlags & DDLOCK_READONLY))
         d3d_surface_written(s);         /* textures made from it are out of date */
     if (s->dwFlags & DDRAWISURF_HASPIXELFORMAT)
@@ -265,10 +331,23 @@ static DWORD WINAPI GetBltStatus(LPDDHAL_GETBLTSTATUSDATA d)
 }
 
 /* GDI's screen is the one at the start of video memory. */
+static HRESULT show_gdi(void)
+{
+    int synced = !scanout_used || d3d_leave_exclusive();
+    int shown = rdd_desktop(0);
+    vbe_write(VBE_Y_OFFSET, 0);
+    return synced && shown ? DD_OK : DDERR_GENERIC;
+}
+
 static DWORD WINAPI FlipToGDISurface(LPDDHAL_FLIPTOGDISURFACEDATA d)
 {
-    vbe_write(VBE_Y_OFFSET, 0);
-    d->ddRVal = DD_OK;
+    d->ddRVal = show_gdi();
+    return DDHAL_DRIVER_HANDLED;
+}
+
+static DWORD WINAPI SetExclusiveMode(LPDDHAL_SETEXCLUSIVEMODEDATA d)
+{
+    d->ddRVal = d->dwEnterExcl ? DD_OK : show_gdi();
     return DDHAL_DRIVER_HANDLED;
 }
 
@@ -347,6 +426,7 @@ DWORD WINAPI DriverInit(DWORD context)
         return 0;
     }
     shared = s;
+    query_scanout();
     clock_init();
     sys_heap(s);
 
@@ -354,11 +434,12 @@ DWORD WINAPI DriverInit(DWORD context)
     zero(cb, sizeof *cb);
     cb->dwSize = sizeof *cb;
     cb->dwFlags = DDHAL_CB32_CANCREATESURFACE | DDHAL_CB32_WAITFORVERTICALBLANK |
-                  DDHAL_CB32_GETSCANLINE | DDHAL_CB32_FLIPTOGDISURFACE;
+                  DDHAL_CB32_GETSCANLINE | DDHAL_CB32_FLIPTOGDISURFACE | DDHAL_CB32_SETEXCLUSIVEMODE;
     cb->CanCreateSurface = CanCreateSurface;
     cb->WaitForVerticalBlank = WaitForVerticalBlank;
     cb->GetScanLine = GetScanLine;
     cb->FlipToGDISurface = FlipToGDISurface;
+    cb->SetExclusiveMode = SetExclusiveMode;
     /* DestroyDriver is the 16-bit driver's (ddraw16.c), without its 32-bit flag. */
 
     scb = (LPDDHAL_DDSURFACECALLBACKS)s->surfcb;

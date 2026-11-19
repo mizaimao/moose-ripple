@@ -122,6 +122,8 @@ extern u32   __cdecl vmm_time_ms(void);
 extern u32   __cdecl vmm_mutex_create(void);
 extern void  __cdecl vmm_mutex_enter(u32 mutex);
 extern void  __cdecl vmm_mutex_leave(u32 mutex);
+extern u32   __cdecl vmm_mutex_owner(u32 mutex);
+extern u32   __cdecl vmm_queue_refresh(u32 delay_ms);
 
 /* ---- The virtio structures in the card's memory (virtio 1.0, 4.1.4.3) ------------------------ */
 /* common configuration, offsets */
@@ -214,6 +216,7 @@ struct vq_used_elem { u32 id, len; };
 struct vq_used  { u16 flags, idx; struct vq_used_elem ring[QUEUE_SIZE]; };
 
 struct vq {
+    u32 phys;
     struct vq_desc  *desc;
     struct vq_avail *avail;
     volatile struct vq_used *used;
@@ -224,7 +227,11 @@ struct vq {
 /* ---- virtio-gpu (virtio 1.1, 5.7) -------------------------------------------------------------- */
 struct gpu_ctrl_hdr { u32 type, flags, fence_lo, fence_hi, ctx_id, padding; };
 #define GPU_CMD_GET_DISPLAY_INFO        0x0100
+#define GPU_CMD_RESOURCE_CREATE_2D      0x0101
 #define GPU_CMD_RESOURCE_UNREF          0x0102
+#define GPU_CMD_SET_SCANOUT             0x0103
+#define GPU_CMD_RESOURCE_FLUSH          0x0104
+#define GPU_CMD_TRANSFER_TO_HOST_2D     0x0105
 #define GPU_CMD_RESOURCE_ATTACH_BACKING 0x0106
 #define GPU_CMD_GET_CAPSET_INFO         0x0108
 #define GPU_CMD_GET_CAPSET              0x0109
@@ -240,7 +247,13 @@ struct gpu_ctrl_hdr { u32 type, flags, fence_lo, fence_hi, ctx_id, padding; };
 #define GPU_RESP_OK_DISPLAY_INFO        0x1101
 #define GPU_RESP_OK_CAPSET_INFO         0x1102
 #define GPU_RESP_OK_CAPSET              0x1103
+#define GPU_RESP_ERR_INVALID_RESOURCE   0x1203
 struct gpu_display_one { u32 x, y, width, height, enabled, flags; };
+struct gpu_create_2d { struct gpu_ctrl_hdr hdr; u32 id, format, w, h; };
+struct gpu_rect { u32 x, y, w, h; };
+struct gpu_set_scanout { struct gpu_ctrl_hdr hdr; struct gpu_rect rect; u32 scanout, id; };
+struct gpu_flush { struct gpu_ctrl_hdr hdr; struct gpu_rect rect; u32 id, padding; };
+struct gpu_upload_2d { struct gpu_ctrl_hdr hdr; struct gpu_rect rect; u32 off_lo, off_hi, id, pad; };
 /* One u32 after the header, then padding: UNREF, CTX_ATTACH/DETACH_RESOURCE, GET_CAPSET_INFO */
 struct gpu_one_id { struct gpu_ctrl_hdr hdr; u32 id, padding; };
 struct gpu_ctx_create { struct gpu_ctrl_hdr hdr; u32 name_len, context_init; char name[64]; };
@@ -259,6 +272,14 @@ struct gpu_transfer_3d {
 };
 struct gpu_get_capset { struct gpu_ctrl_hdr hdr; u32 id, version; };
 struct gpu_capset_info { struct gpu_ctrl_hdr hdr; u32 id, max_version, max_size, padding; };
+
+/* Head 0 always belongs to the regular request. Additional descriptor pairs carry only
+   empty fenced submits; one locked page holds every request and reply independently. */
+#define FENCE_SLOTS (QUEUE_SIZE / 2 - 1)
+struct fence_slot { struct gpu_submit submit; struct gpu_ctrl_hdr reply; };
+static struct fence_slot *fences;
+static u32 fences_phys, fences_busy, async_failed;
+static u32 regular_done, regular_bytes;
 
 static void *common = 0, *isr = 0, *devcfg = 0, *notify_base = 0;
 static struct vq ctrlq = { 0 }, cursorq = { 0 };
@@ -293,11 +314,28 @@ static struct rvd_info info = { 0 };
    host may still have it (and may still write into the buffer's memory). Its ID and memory
    stay taken until device_ready() has the host forget it. */
 #define ZOMBIE           0xFFFFFFFFUL
-struct buffer { u32 context, mem_handle, pages; u8 *mem; };   /* context: 0 free, or ZOMBIE */
+struct buffer {
+    u32 context, mem_handle, pages; u8 *mem;    /* context: 0 free, or ZOMBIE */
+    u32 width, height, scanout;
+};
 static u32 ctx_owner[MAX_CONTEXTS] = { 0 };
 static struct buffer *buffers = 0;
 static u32 *page_table = 0;                     /* scratch: one entry per page of a new buffer */
 static u32 next_buffer = 0;
+static u32 lock = 0;
+static u32 gpu_page = 0;                        /* currently requested application image */
+static u32 presenter = 0;                       /* last GPU presenter until another owner takes over */
+static u32 pending_gpu = 0;                     /* latest GPU image awaiting a display update */
+static u32 last_gpu_update = 0;
+static u32 display_serial, gpu_flips, gpu_updates, timer_updates;
+#define DISPLAY_PERIOD_MS 17
+static u32 visible = 0;                         /* last SET_SCANOUT acknowledged */
+static u32 takeover = 0;                        /* virtio has taken the display from VGA */
+static u32 refresh_pending = 0;
+static int dos_text, dos_reported;
+static u32 display_w, display_h, display_bpp, vram_bytes, display_offset;
+static u32 palette[256];
+static u8 *vram;
 
 int vgpu_has_virgl(void)
 {
@@ -339,12 +377,18 @@ static int setup_queue(struct vq *q, u16 index)
         dbg("rvd: queue "); dbg_hex(index); dbg(" has no room\r\n");
         return 0;
     }
-    mem = (u8 *)vmm_alloc_contig(3, &phys);
+    mem = (u8 *)q->desc;
+    if (mem) {
+        phys = q->phys;
+        zero(mem, 3 * 4096);
+    } else
+        mem = (u8 *)vmm_alloc_contig(3, &phys);
     if (!mem) {
         dbg("rvd: no memory for queue "); dbg_hex(index); dbg("\r\n");
         return 0;
     }
     q->index = index;
+    q->phys = phys;
     q->last_used = 0;
     q->desc  = (struct vq_desc *)mem;
     q->avail = (struct vq_avail *)(mem + 4096);
@@ -359,27 +403,68 @@ static int setup_queue(struct vq *q, u16 index)
     return 1;
 }
 
-/* One request (in req_buf) with its answer (in resp_buf); waits, polling, until the device has
-   used the buffers. Returns the number of bytes the device wrote, 0 on a time-out (after which
-   the device counts as stalled until device_ready() sees the late answer). */
+static void enqueue_pair(u16 head, u32 req_pa, u32 req_len, u32 resp_pa, u32 resp_len)
+{
+    struct vq *q = &ctrlq;
+    struct vq_desc *d = &q->desc[head];
+    d[0].addr_lo = req_pa;  d[0].addr_hi = 0; d[0].len = req_len;
+    d[0].flags = VQ_DESC_NEXT; d[0].next = (u16)(head + 1);
+    d[1].addr_lo = resp_pa; d[1].addr_hi = 0; d[1].len = resp_len;
+    d[1].flags = VQ_DESC_WRITE; d[1].next = 0;
+    q->avail->ring[q->avail->idx % q->size] = head;
+    q->avail->idx++;
+    wr16(q->notify, 0, q->index);
+}
+
+/* Fenced work may complete after the flush queued behind it. Only the head ID identifies a
+   response, including a late response to a timed-out regular request. */
+static void drain_control(void)
+{
+    struct vq *q = &ctrlq;
+    if (q->used->idx == q->last_used)
+        return;
+    while (q->used->idx != q->last_used) {
+        volatile struct vq_used_elem *e = &q->used->ring[q->last_used % q->size];
+        u32 id = e->id;
+        if (!id) {
+            regular_bytes = e->len;
+            regular_done = 1;
+        } else if (!(id & 1) && id + 1 < q->size && id < QUEUE_SIZE) {
+            u32 slot = id / 2 - 1;
+            if (fences_busy & (1UL << slot)) {
+                struct fence_slot *s = &fences[slot];
+                if (e->len < sizeof(s->reply) || s->reply.type != GPU_RESP_OK_NODATA ||
+                    !(s->reply.flags & 1) || s->reply.fence_lo != s->submit.hdr.fence_lo) {
+                    if (!async_failed)
+                        dbg("rvd: queued render fence failed, switching to waited fences\r\n");
+                    async_failed = 1;
+                }
+                fences_busy &= ~(1UL << slot);
+            }
+        }
+        q->last_used++;
+    }
+    (void)rd8(isr, 0);
+}
+
+/* The main request remains synchronous. Its dedicated descriptors and pages can be reused
+   only once its own used-ring entry has arrived, even if a queued fence completes first. */
 static u32 command(u32 req_len, u32 resp_len)
 {
     struct vq *q = &ctrlq;
     u32 start, spins = 0;
-    u16 head = 0;
-
     if (stalled)
         return 0;
-    q->desc[0].addr_lo = req_phys;        q->desc[0].addr_hi = 0;
-    q->desc[0].len = req_len;             q->desc[0].flags = VQ_DESC_NEXT; q->desc[0].next = 1;
-    q->desc[1].addr_lo = resp_phys;       q->desc[1].addr_hi = 0;
-    q->desc[1].len = resp_len;            q->desc[1].flags = VQ_DESC_WRITE; q->desc[1].next = 0;
-    q->avail->ring[q->avail->idx % q->size] = head;
-    q->avail->idx++;
-    wr16(q->notify, 0, q->index);
+    regular_done = 0;
+    enqueue_pair(0, req_phys, req_len, resp_phys, resp_len);
 
     start = vmm_time_ms();
-    while (q->used->idx == q->last_used) {
+    while (!regular_done) {
+        if (q->used->idx != q->last_used && timeout_ms != RVD_TIMEOUT_AT_ONCE) {
+            drain_control();
+            if (regular_done)
+                break;
+        }
         if (timeout_ms == RVD_TIMEOUT_AT_ONCE ||
             ((++spins & 0xFFF) == 0 && vmm_time_ms() - start > timeout_ms)) {
             dbg("rvd: no answer yet to request "); dbg_hex(*(u32 *)req_buf);
@@ -388,9 +473,7 @@ static u32 command(u32 req_len, u32 resp_len)
             return 0;
         }
     }
-    q->last_used++;
-    (void)rd8(isr, 0);                          /* reading it takes the interrupt request back */
-    return q->used->ring[(u16)(q->last_used - 1) % q->size].len;
+    return regular_bytes;
 }
 
 /* Start a request in req_buf: `bytes` zeroed, type and context set. Never while stalled: the
@@ -432,9 +515,9 @@ static int one_id(u32 type, u32 ctx, u32 id)
 }
 
 /* virtio 1.0, 3.1.1: reset, announce ourselves, agree on features, set up the queues, go. */
-static int transport_init(void)
+static int map_transport(void)
 {
-    u32 bar_phys, bar_len, hi, i, handle, raw;
+    u32 bar_phys, bar_len, hi, i, raw;
     u8 *bar;
 
     i = gpu.cap[VIRTIO_PCI_CAP_COMMON].bar;
@@ -471,10 +554,18 @@ static int transport_init(void)
     notify_base = bar + gpu.cap[VIRTIO_PCI_CAP_NOTIFY].offset;
     isr         = bar + gpu.cap[VIRTIO_PCI_CAP_ISR].offset;
     devcfg      = bar + gpu.cap[VIRTIO_PCI_CAP_DEVICE].offset;
+    return 1;
+}
 
+static int start_transport(void)
+{
+    u32 i, hi, handle;
     wr8(common, CC_DEVICE_STATUS, 0);
     for (i = 0; i < 100000 && rd8(common, CC_DEVICE_STATUS) != 0; i++)
         ;
+    if (rd8(common, CC_DEVICE_STATUS) != 0)
+        return 0;
+    fences_busy = regular_done = async_failed = 0;
     wr8(common, CC_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
     wr8(common, CC_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER);
     wr32(common, CC_DEVICE_FEATURE_SELECT, 0);
@@ -499,10 +590,14 @@ static int transport_init(void)
         common = 0;
         return 0;
     }
-    req_buf    = (u8 *)vmm_alloc_contig(REQ_PAGES, &req_phys);
-    resp_buf   = (u8 *)vmm_alloc_contig(RESP_PAGES, &resp_phys);
-    buffers    = (struct buffer *)vmm_alloc_pages((MAX_BUFFERS * sizeof(struct buffer) + 4095) >> 12, &handle);
-    page_table = (u32 *)vmm_alloc_pages((MAX_BUFFER_PAGES * 4 + 4095) >> 12, &handle);
+    if (!req_buf)
+        req_buf = (u8 *)vmm_alloc_contig(REQ_PAGES, &req_phys);
+    if (!resp_buf)
+        resp_buf = (u8 *)vmm_alloc_contig(RESP_PAGES, &resp_phys);
+    if (!buffers)
+        buffers = (struct buffer *)vmm_alloc_pages((MAX_BUFFERS * sizeof(struct buffer) + 4095) >> 12, &handle);
+    if (!page_table)
+        page_table = (u32 *)vmm_alloc_pages((MAX_BUFFER_PAGES * 4 + 4095) >> 12, &handle);
     if (!req_buf || !resp_buf || !buffers || !page_table)
         dbg("rvd: no memory for the buffers\r\n");
     if (!req_buf || !resp_buf || !buffers || !page_table ||
@@ -583,7 +678,10 @@ static void quiet_interrupt(void)
 int __cdecl vgpu_init(void)
 {
     u32 bdf, id, ptr, i;
+    static int started = 0;
 
+    if (started)
+        return 1;
     for (bdf = 0; bdf < 0x100; bdf++) {
         id = pci_read32(bdf, 0x00);
         if (id == 0x10501AF4UL)
@@ -619,8 +717,9 @@ int __cdecl vgpu_init(void)
         if (type == VIRTIO_PCI_CAP_NOTIFY)
             gpu.notify_multiplier = pci_read32(bdf, ptr + 16);
     }
-    if (!gpu.cap[VIRTIO_PCI_CAP_COMMON].length || !transport_init())
+    if (!gpu.cap[VIRTIO_PCI_CAP_COMMON].length || !map_transport() || !start_transport())
         return 0;
+    started = 1;
     read_host_info();
     return 1;
 }
@@ -652,12 +751,67 @@ static struct buffer *find_buffer(u32 handle)
     return &buffers[handle - 1];
 }
 
+static int queue_refresh(u32 delay)
+{
+    if (!refresh_pending) {
+        refresh_pending = 1;
+        if (!vmm_queue_refresh(delay))
+            refresh_pending = 0;
+    }
+    return refresh_pending != 0;
+}
+
+/* A resource's backing list contains one entry per physically contiguous run of pages. */
+static int attach_backing(u32 id, u8 *mem, u32 pages)
+{
+    struct gpu_attach_backing *ab;
+    struct gpu_mem_entry *e;
+    u32 i, n;
+
+    if (!vmm_page_table(mem, pages, page_table))
+        return 0;
+    ab = (struct gpu_attach_backing *)request(GPU_CMD_RESOURCE_ATTACH_BACKING, 0, sizeof(*ab));
+    ab->id = id;
+    e = (struct gpu_mem_entry *)(ab + 1);
+    for (i = 0, n = 0; i < pages; i++) {
+        u32 phys = page_table[i] & 0xFFFFF000UL;
+        if (n && e[n - 1].addr_lo + e[n - 1].length == phys) {
+            e[n - 1].length += 4096;
+        } else {
+            e[n].addr_lo = phys; e[n].addr_hi = 0; e[n].length = 4096; e[n].padding = 0;
+            n++;
+        }
+    }
+    ab->entries = n;
+    return simple(sizeof(*ab) + n * sizeof(*e));
+}
+
+static int desktop_refresh(void);
+
+static void drop_gpu_page(void)
+{
+    if (gpu_flips >= 10) {
+        dbg("rvd: GPU flips "); dbg_hex(gpu_flips); dbg(", display updates ");
+        dbg_hex(gpu_updates); dbg(", from timer "); dbg_hex(timer_updates); dbg("\r\n");
+    }
+    gpu_flips = gpu_updates = timer_updates = gpu_page = pending_gpu = 0;
+}
+
 /* The host forgets the buffer; then its memory is free again. While the device is stalled the
    buffer becomes a zombie instead, its memory kept: the request still out may write into it. */
 static void buffer_destroy(struct buffer *b, int detach)
 {
     u32 id = (u32)(b - buffers) + 1;
 
+    if (id == gpu_page || id == visible) {
+        drop_gpu_page();
+        if (!stalled && display_bpp)
+            desktop_refresh();
+        if (takeover)
+            queue_refresh(32);
+        if (visible == id)
+            visible = 0;                        /* this ID may be reassigned after UNREF */
+    }
     if (detach)
         one_id(GPU_CMD_CTX_DETACH_RESOURCE, b->context, id);
     one_id(GPU_CMD_RESOURCE_UNREF, 0, id);
@@ -674,10 +828,8 @@ static void buffer_destroy(struct buffer *b, int detach)
 static u32 buffer_create(const struct rvd_buffer_create *c, struct rvd_buffer *out)
 {
     struct gpu_resource_create_3d *rc;
-    struct gpu_attach_backing *ab;
-    struct gpu_mem_entry *e;
     struct buffer *b;
-    u32 i, id, pages, n;
+    u32 i, id, pages;
 
     if (!valid_context(c->context))
         return ERROR_INVALID_PARAMETER;
@@ -699,10 +851,6 @@ static u32 buffer_create(const struct rvd_buffer_create *c, struct rvd_buffer *o
     if (!b->mem)
         return ERROR_NOT_ENOUGH_MEMORY;
     b->pages = pages;                           /* counted by RVD_GET_STATS, zombie or not */
-    if (!vmm_page_table(b->mem, pages, page_table)) {
-        vmm_free_pages(b->mem_handle);
-        return ERROR_GEN_FAILURE;
-    }
 
     rc = (struct gpu_resource_create_3d *)request(GPU_CMD_RESOURCE_CREATE_3D, c->context, sizeof(*rc));
     rc->id = id;
@@ -720,27 +868,17 @@ static u32 buffer_create(const struct rvd_buffer_create *c, struct rvd_buffer *o
         return ERROR_GEN_FAILURE;
     }
 
-    /* The memory behind it: one entry per run of pages that follow each other physically. */
-    ab = (struct gpu_attach_backing *)request(GPU_CMD_RESOURCE_ATTACH_BACKING, 0, sizeof(*ab));
-    ab->id = id;
-    e = (struct gpu_mem_entry *)(ab + 1);
-    for (i = 0, n = 0; i < pages; i++) {
-        u32 phys = page_table[i] & 0xFFFFF000UL;
-        if (n && e[n - 1].addr_lo + e[n - 1].length == phys) {
-            e[n - 1].length += 4096;
-        } else {
-            e[n].addr_lo = phys; e[n].addr_hi = 0; e[n].length = 4096; e[n].padding = 0;
-            n++;
-        }
-    }
-    ab->entries = n;
-    if (!simple(sizeof(*ab) + n * sizeof(*e)) ||
+    if (!attach_backing(id, b->mem, pages) ||
         !one_id(GPU_CMD_CTX_ATTACH_RESOURCE, c->context, id)) {
         b->context = c->context;
         buffer_destroy(b, 0);
         return failure();
     }
     b->context = c->context;
+    b->width = c->width;
+    b->height = c->height;
+    b->scanout = (c->bind & (1UL << 18)) && c->target == 2 && c->depth == 1 &&
+                 c->array_size == 1 && c->nr_samples <= 1;
     next_buffer = id % MAX_BUFFERS;
     out->handle = id;
     out->size = pages << 12;
@@ -801,14 +939,13 @@ static void reap(void)
    the answer is left alone, so a test sees the stalled state for as long as it wants. */
 static int device_ready(void)
 {
-    struct vq *q = &ctrlq;
-
     if (!stalled)
         return 1;
-    if (timeout_ms == RVD_TIMEOUT_AT_ONCE || q->used->idx == q->last_used)
+    if (timeout_ms == RVD_TIMEOUT_AT_ONCE)
         return 0;
-    q->last_used++;
-    (void)rd8(isr, 0);
+    drain_control();
+    if (!regular_done)
+        return 0;
     stalled = 0;
     dbg("rvd: the late answer came, the device is back\r\n");
     reap();
@@ -826,6 +963,467 @@ static u32 count_zombies(void)
     for (i = 1; i < MAX_CONTEXTS; i++)
         n += ctx_owner[i] == ZOMBIE;
     return n;
+}
+
+/* Two private IDs outside the Mesa buffer table. Build the replacement before releasing the
+   previous mode's image: the current scanout must stay live through a failed mode change. */
+struct desktop_image {
+    u8 *mem;
+    u32 handle, w, h;
+    int ready, upload;
+};
+static struct desktop_image desktops[2];
+static unsigned desktop_slot;
+static u32 next_fence;
+
+static void fence_request(struct gpu_ctrl_hdr *h)
+{
+    h->flags = 1;                                /* VIRTIO_GPU_FLAG_FENCE */
+    h->fence_lo = ++next_fence;
+}
+
+/* Creating the renderer fence pushes out the preceding GL work before the following display
+   command. Waiting for its reply would serialize every frame with QEMU's fence polling timer.
+   Only the fence is asynchronous: when we publish an image the display commands themselves
+   complete before we release the queue to the next caller. */
+static int render_fence(u32 ctx)
+{
+    u32 i, slots = ctrlq.size / 2 - 1;
+    struct gpu_submit *submit;
+    drain_control();
+    if (slots && !async_failed && timeout_ms != RVD_TIMEOUT_AT_ONCE) {
+        if (!fences)
+            fences = (struct fence_slot *)vmm_alloc_contig(
+                                 (FENCE_SLOTS * sizeof(*fences) + 4095) >> 12, &fences_phys);
+        for (i = 0; fences && i < slots; i++) {
+            struct fence_slot *s = &fences[i];
+            u32 pa = fences_phys + i * sizeof(*s);
+            if (fences_busy & (1UL << i))
+                continue;
+            zero(s, sizeof(*s));
+            s->submit.hdr.type = GPU_CMD_SUBMIT_3D;
+            s->submit.hdr.ctx_id = ctx;
+            fence_request(&s->submit.hdr);
+            fences_busy |= 1UL << i;
+            enqueue_pair((u16)((i + 1) * 2), pa, sizeof(s->submit),
+                         pa + sizeof(s->submit), sizeof(s->reply));
+            return 1;
+        }
+    }
+    /* Back-pressure: the normal pair always fits, even with all async descriptors in use. */
+    submit = (struct gpu_submit *)request(GPU_CMD_SUBMIT_3D, ctx, sizeof(*submit));
+    fence_request(&submit->hdr);
+    return simple(sizeof(*submit));
+}
+
+static int set_scanout(u32 id, u32 w, u32 h)
+{
+    struct gpu_set_scanout *s;
+    if (visible == id)
+        return 1;
+    s = (struct gpu_set_scanout *)request(GPU_CMD_SET_SCANOUT, 0, sizeof(*s));
+    s->id = id;
+    s->rect.w = w;
+    s->rect.h = h;
+    /* Even if the reply is late, QEMU may already have left VGA. */
+    takeover = 1;
+    if (!simple(sizeof(*s))) {
+        visible = 0;
+        return 0;
+    }
+    visible = id;
+    return 1;
+}
+
+static int flush_scanout(u32 id, u32 w, u32 h)
+{
+    struct gpu_flush *f = (struct gpu_flush *)request(GPU_CMD_RESOURCE_FLUSH, 0, sizeof(*f));
+    f->id = id;
+    f->rect.w = w;
+    f->rect.h = h;
+    return simple(sizeof(*f));
+}
+
+static int release_desktop(unsigned slot)
+{
+    struct desktop_image *d = &desktops[slot];
+    struct gpu_ctrl_hdr *r = (struct gpu_ctrl_hdr *)resp_buf;
+    if (!d->mem)
+        return 1;
+    /* A failed CREATE may never have reached the renderer. Keep the DMA backing unless UNREF
+       succeeds or the host specifically confirms it has no resource by this ID. */
+    if (stalled || (!one_id(GPU_CMD_RESOURCE_UNREF, 0, MAX_BUFFERS + 1 + slot) &&
+                    (stalled || r->type != GPU_RESP_ERR_INVALID_RESOURCE)))
+        return 0;
+    vmm_free_pages(d->handle);
+    zero(d, sizeof(*d));
+    return 1;
+}
+
+static int make_desktop(unsigned slot, u32 w, u32 h)
+{
+    struct desktop_image *d = &desktops[slot];
+    u32 id = MAX_BUFFERS + 1 + slot, pages = (w * h * 4 + 4095) >> 12;
+    struct gpu_create_2d *r;
+
+    if (d->ready && d->w == w && d->h == h)
+        return 1;
+    if (!pages || pages > MAX_BUFFER_PAGES || visible == id)
+        return 0;
+    if (!release_desktop(slot))
+        return 0;
+    d->mem = (u8 *)vmm_alloc_pages(pages, &d->handle);
+    if (!d->mem)
+        return 0;
+    r = (struct gpu_create_2d *)request(GPU_CMD_RESOURCE_CREATE_2D, 0, sizeof(*r));
+    r->id = id;
+    r->format = 2;                              /* VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM */
+    r->w = w; r->h = h;
+    if (!simple(sizeof(*r)) || !attach_backing(id, d->mem, pages)) {
+        release_desktop(slot);
+        return 0;
+    }
+    d->w = w; d->h = h;
+    d->ready = d->upload = 1;
+    return 1;
+}
+
+static int valid_page(u32 w, u32 h, u32 bpp, u32 offset)
+{
+    u32 row;
+    if (!w || !h || w > 4096 || h > 4096 || (w & 7) ||
+        (bpp != 8 && bpp != 16 && bpp != 24 && bpp != 32))
+        return 0;
+    row = w * (bpp / 8);
+    return offset <= vram_bytes && offset % row == 0 && h <= (vram_bytes - offset) / row;
+}
+
+/* The DIB engine, DirectDraw locks and the software cursor all write these same VGA bytes.
+   Sample them at a desktop event so writes without any later driver call remain visible.
+   Compare the shadow as we copy. A still desktop generates no device commands. */
+static int mirror_pixels(struct desktop_image *d, u32 bpp, u32 offset)
+{
+    const u8 *src = vram + offset;
+    u32 *dst = (u32 *)d->mem;
+    u32 n = d->w * d->h, pixel;
+    int changed = 0;
+    while (n--) {
+        switch (bpp) {
+        case 32: pixel = *(const u32 *)src; src += 4; break;
+        case 24: pixel = src[0] | ((u32)src[1] << 8) | ((u32)src[2] << 16); src += 3; break;
+        case 16: {
+            u32 p = *(const u16 *)src, r = p >> 11, g = (p >> 5) & 63, b = p & 31;
+            pixel = ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
+            src += 2;
+            break;
+        }
+        default: pixel = palette[*src++]; break;
+        }
+        if (*dst != pixel) {
+            *dst = pixel;
+            changed = 1;
+        }
+        dst++;
+    }
+    return changed;
+}
+
+/* The virtio-vga BAR0 is the VGA's raw RAM. Text characters, attributes and the
+   BIOS-loaded font occupy planes 0, 1 and 2 of each four-byte group. */
+struct vga_text {
+    u32 cols, rows, cw, ch, start, pitch, font[2], cursor, cursor_top, cursor_bottom;
+};
+
+static u8 vga_register(u16 port, u8 index)
+{
+    u8 value;
+    __asm {
+        pushfd
+        cli
+        mov dx, port
+        in al, dx
+        mov ah, al
+        mov al, index
+        out dx, al
+        inc dx
+        in al, dx
+        mov value, al
+        dec dx
+        mov al, ah
+        out dx, al
+        popfd
+    }
+    return value;
+}
+
+static int read_vga_text(struct vga_text *v)
+{
+    const u16 crtc = 0x3d4;
+    u8 gc = vga_register(0x3ce, 6), sr3, overflow, first;
+    u32 lines;
+    if ((gc & 0x0d) != 0x0c || !vram || vram_bytes < 256UL * 1024)
+        return 0;                               /* standard B800 colour text modes */
+    v->cols = 1 + vga_register(crtc, 1);
+    v->cw = (vga_register(0x3c4, 1) & 1) ? 8 : 9;
+    v->ch = 1 + (vga_register(crtc, 9) & 31);
+    overflow = vga_register(crtc, 7);
+    lines = 1 + vga_register(crtc, 0x12) + ((overflow & 2) << 7) + ((overflow & 0x40) << 3);
+    v->rows = lines / v->ch;
+    v->start = ((u32)vga_register(crtc, 0x0c) << 8 | vga_register(crtc, 0x0d)) * 4;
+    v->pitch = (u32)vga_register(crtc, 0x13) * 8;
+    if (v->cols != 80 || v->ch < 8 || v->rows < 1 || v->rows > 60 ||
+        lines % v->ch || v->pitch < 4 * v->cols ||
+        v->start + (v->rows - 1) * v->pitch + v->cols * 4 > vram_bytes)
+        return 0;
+    sr3 = vga_register(0x3c4, 3);
+    v->font[0] = (((sr3 & 3) * 2) + ((sr3 >> 4) & 1)) * 32768UL;
+    v->font[1] = ((((sr3 >> 2) & 3) * 2) + ((sr3 >> 5) & 1)) * 32768UL;
+    first = vga_register(crtc, 0x0a);
+    v->cursor = (first & 0x20) ? ~0UL :
+                ((u32)vga_register(crtc, 0x0e) << 8 | vga_register(crtc, 0x0f)) * 4;
+    v->cursor_top = first & 31;
+    v->cursor_bottom = vga_register(crtc, 0x0b) & 31;
+    return 1;
+}
+
+static int mirror_text(struct desktop_image *d, const struct vga_text *v)
+{
+    static const u32 colours[16] = {
+        0x000000, 0x0000aa, 0x00aa00, 0x00aaaa, 0xaa0000, 0xaa00aa, 0xaa5500, 0xaaaaaa,
+        0x555555, 0x5555ff, 0x55ff55, 0x55ffff, 0xff5555, 0xff55ff, 0xffff55, 0xffffff
+    };
+    u32 row, col, y, x, blink = (vmm_time_ms() >> 9) & 1;
+    int changed = 0;
+    for (row = 0; row < v->rows; row++) {
+        for (col = 0; col < v->cols; col++) {
+            u32 cell = v->start + row * v->pitch + col * 4;
+            u8 ch = vram[cell], attr = vram[cell + 1];
+            const u8 *glyph = vram + v->font[(attr >> 3) & 1] + (u32)ch * 128 + 2;
+            u32 fg = colours[attr & 15], bg = colours[(attr >> 4) & 7];
+            u32 *out = (u32 *)d->mem + row * v->ch * d->w + col * v->cw;
+            for (y = 0; y < v->ch; y++, out += d->w) {
+                u32 bits = ((attr & 0x80) && blink) ? 0 : (u32)glyph[y * 4] << 1;
+                if (ch >= 0xb0 && ch <= 0xdf)
+                    bits |= (bits >> 1) & 1;    /* VGA ninth dot for line drawing */
+                if (!blink && cell == v->cursor && y >= v->cursor_top && y <= v->cursor_bottom)
+                    bits = 511;
+                for (x = 0; x < v->cw; x++, bits <<= 1) {
+                    u32 pixel = (bits & 256) ? fg : bg;
+                    if (out[x] != pixel) {
+                        out[x] = pixel;
+                        changed = 1;
+                    }
+                }
+            }
+        }
+    }
+    return changed;
+}
+
+static int desktop_refresh(void)
+{
+    u32 w = display_w, h = display_h, bpp = display_bpp, offset = display_offset;
+    u32 serial = display_serial;
+    int text = dos_text;
+    struct vga_text v;
+    unsigned slot = desktop_slot;
+    struct desktop_image *d;
+    struct gpu_upload_2d *t;
+    u32 id;
+
+    if (stalled)
+        return 0;
+    if (text) {
+        if (!read_vga_text(&v)) {
+            if (!dos_reported) {
+                dbg("rvd: waiting for VGA colour text mode\r\n");
+                dos_reported = 1;
+            }
+            return 0;
+        }
+        w = v.cols * v.cw;
+        h = v.rows * v.ch;
+    } else if (!valid_page(w, h, bpp, offset))
+        return 0;
+    if (!vram) {
+        u32 bar = pci_read32(gpu.bdf, 0x10);
+        if (!(bar & 0xfffffff0UL) || (bar & 1) ||
+            ((bar & 6) == 4 && pci_read32(gpu.bdf, 0x14)))
+            return 0;
+        vram = (u8 *)vmm_map_phys(bar & 0xfffffff0UL, vram_bytes);
+    }
+    if (!vram)
+        return 0;
+    d = &desktops[slot];
+    if (d->mem && (!d->ready || d->w != w || d->h != h)) {
+        slot ^= 1;
+        d = &desktops[slot];
+    }
+    id = MAX_BUFFERS + 1 + slot;
+    if (!make_desktop(slot, w, h))
+        return 0;
+    if (text ? mirror_text(d, &v) : mirror_pixels(d, bpp, offset))
+        d->upload = 1;
+    if (serial != display_serial)
+        return 0;
+    if (d->upload) {
+        t = (struct gpu_upload_2d *)request(GPU_CMD_TRANSFER_TO_HOST_2D, 0, sizeof(*t));
+        t->id = id; t->rect.w = w; t->rect.h = h;
+        fence_request(&t->hdr);
+        if (!simple(sizeof(*t)))
+            return 0;
+    }
+    if (serial != display_serial)
+        return 0;
+    if ((visible != id || d->upload) &&
+        (!set_scanout(id, w, h) || !flush_scanout(id, w, h))) {
+        d->upload = 1;
+        return 0;
+    }
+    d->upload = 0;
+    if (text && dos_reported != 2) {
+        dbg("rvd: displaying DOS text "); dbg_hex(v.cols); dbg(" x "); dbg_hex(v.rows); dbg("\r\n");
+        dos_reported = 2;
+    }
+    desktop_slot = slot;
+    release_desktop(slot ^ 1);
+    return !stalled;
+}
+
+/* Display callbacks merely record the VGA layout. No GPU command runs with the Win16 lock
+   in a mode-change or palette callback. Older display drivers never send these messages. */
+void __cdecl vgpu_display_mode(u32 bpp, u32 size, u32 bytes)
+{
+    display_serial++;
+    dos_text = 0;
+    display_w = size >> 16;
+    display_h = size & 0xffff;
+    vram_bytes = bytes;
+    display_bpp = bpp;
+    display_offset = presenter = 0;
+    drop_gpu_page();
+    if (takeover)
+        queue_refresh(1);
+}
+
+void __cdecl vgpu_display_colour(u32 index, u32 colour)
+{
+    palette[index] = colour & 0xffffff;
+}
+
+/* SET_SCANOUT takes the console from VGA for this boot. The DOS text image uses the same
+   transport so the GPU contexts and display resources stay valid across a switch. */
+void __cdecl vgpu_show_dos(void)
+{
+    if (takeover && vram) {
+        display_serial++;
+        dos_text = 1;
+        dos_reported = 0;
+        queue_refresh(1);
+    }
+}
+
+void __cdecl vgpu_leave_windows(void)
+{
+    display_serial++;
+    dos_text = 0;
+    display_bpp = presenter = 0;
+    drop_gpu_page();
+}
+
+static int publish_gpu(u32 id, struct buffer *b)
+{
+    u32 serial = display_serial, start = vmm_time_ms();
+    pending_gpu = 0;
+    if (b && b->width == display_w && b->height == display_h && display_bpp &&
+        render_fence(b->context) && set_scanout(id, b->width, b->height) &&
+        flush_scanout(id, b->width, b->height) && display_serial == serial) {
+        if (!gpu_page)
+            dbg("rvd: presenting GPU image\r\n");
+        gpu_page = id;
+        last_gpu_update = start;
+        gpu_updates++;
+        return 1;
+    }
+    drop_gpu_page();
+    if (!stalled && display_bpp)
+        desktop_refresh();
+    if (display_bpp)
+        queue_refresh(1);
+    return 0;
+}
+
+void __cdecl vgpu_desktop_tick(void)
+{
+    u32 age;
+    refresh_pending = 0;
+    if (!takeover || (!display_bpp && !dos_text) || (gpu_page && !pending_gpu))
+        return;
+    if (lock && !vmm_mutex_owner(lock)) {
+        vmm_mutex_enter(lock);
+        if (takeover && (display_bpp || dos_text) && device_ready()) {
+            if (!gpu_page)
+                desktop_refresh();
+            else if (pending_gpu == gpu_page && vmm_time_ms() - last_gpu_update >= DISPLAY_PERIOD_MS &&
+                     publish_gpu(gpu_page, find_buffer(gpu_page)))
+                timer_updates++;
+        }
+        vmm_mutex_leave(lock);
+    }
+    if (takeover && (display_bpp || dos_text)) {
+        if (!gpu_page)
+            queue_refresh(dos_text ? 50 : 32);
+        else if (pending_gpu) {
+            age = vmm_time_ms() - last_gpu_update;
+            queue_refresh(age < DISPLAY_PERIOD_MS ? DISPLAY_PERIOD_MS - age : 1);
+        }
+    }
+}
+
+static u32 present_image(const struct rvd_present *p, u32 process)
+{
+    struct buffer *b = find_buffer(p->buffer);
+    u32 age;
+    static int reported = 0;
+    if (!lock)                                   /* required for periodic desktop updates */
+        return ERROR_NOT_ENOUGH_MEMORY;
+    if (!b || b->context != p->context || !valid_context(p->context) ||
+        ctx_owner[p->context] != process || !b->scanout ||
+        b->width != p->width || b->height != p->height ||
+        display_w != p->width || display_h != p->height ||
+        !valid_page(display_w, display_h, display_bpp, display_offset)) {
+        if (!reported) {
+            dbg("rvd: scanout rejected, context "); dbg_hex(p->context);
+            dbg(", resource "); dbg_hex(p->buffer);
+            dbg(", scanout bind "); dbg_hex(b ? b->scanout : 0);
+            dbg(", mode "); dbg_hex(display_w); dbg(" x "); dbg_hex(display_h);
+            dbg(" x "); dbg_hex(display_bpp); dbg("\r\n");
+            reported = 1;
+        }
+        return ERROR_INVALID_PARAMETER;
+    }
+    if (!takeover) {
+        if (!queue_refresh(1) || !desktop_refresh()) {
+            if (takeover && display_bpp)
+                queue_refresh(1);
+            dbg("rvd: could not prepare desktop scanout\r\n");
+            return failure();
+        }
+        dbg("rvd: desktop scanout ready\r\n");
+    }
+    presenter = process;
+    gpu_flips++;
+    /* The resource already on screen can be drawn many times between display refreshes.
+       Retain the most recent content there and arm the event even for a single final flip. */
+    if (gpu_page == p->buffer && visible == p->buffer) {
+        age = vmm_time_ms() - last_gpu_update;
+        if (age < DISPLAY_PERIOD_MS) {
+            pending_gpu = p->buffer;
+            if (queue_refresh(DISPLAY_PERIOD_MS - age))
+                return 0;
+        }
+    }
+    return publish_gpu(p->buffer, b) ? 0 : failure();
 }
 
 /* ---- The interface for user-mode drivers: DeviceIoControl on \\.\RIPPLEVD (rvd.h) ------------- */
@@ -872,6 +1470,42 @@ static u32 opened(u32 process, int change)
     return openers[i].handles;
 }
 
+/* The last device handle closes even when the presenting program is terminated before its
+   DirectDraw cleanup can run. Page zero belongs to GDI; a previous software flip may have
+   left both our mirror and the card's display-start register on a different page. Keep the
+   other display client's page if it has already taken over. */
+static void presenter_closed(u32 process)
+{
+    if (!presenter || presenter != process)
+        return;
+    presenter = 0;
+    display_offset = 0;
+    drop_gpu_page();
+    if (!display_bpp)
+        return;
+    __asm {
+        pushfd
+        cli
+        mov dx, 01ceh
+        in ax, dx
+        mov cx, ax                          ; preserve the VBE index across the two writes
+        mov ax, 9                           ; VBE_Y_OFFSET
+        out dx, ax
+        inc dx
+        xor ax, ax
+        out dx, ax
+        dec dx
+        mov ax, cx
+        out dx, ax
+        popfd
+    }
+    if (takeover) {
+        queue_refresh(1);
+        if (!stalled)
+            desktop_refresh();
+    }
+}
+
 static u32 dispatch(struct dioc *p)
 {
     u32 n = 0, i, err;
@@ -885,10 +1519,19 @@ static u32 dispatch(struct dioc *p)
         }
         if (common)
             device_ready();                     /* stalled or not, its contexts go */
+        presenter_closed(p->process);
         for (i = 1; common && i < MAX_CONTEXTS; i++) {
             if (ctx_owner[i] == p->process)
                 context_destroy(i);
         }
+        return 0;
+    }
+    if (p->code == RVD_DESKTOP && !p->in_len) {
+        if (!p->out || p->out_len < sizeof(u32))
+            return ERROR_INVALID_PARAMETER;
+        *(u32 *)p->out = takeover;
+        if (p->returned)
+            *p->returned = sizeof(u32);
         return 0;
     }
     if (p->code == RVD_GET_STATS) {             /* what is held now: no device needed */
@@ -929,6 +1572,13 @@ static u32 dispatch(struct dioc *p)
     }
     if (!common)
         return ERROR_NOT_SUPPORTED;
+    if (p->code == RVD_DESKTOP && !takeover) {
+        if (p->in_len < sizeof(u32))
+            return ERROR_INVALID_PARAMETER;
+        if (p->returned)
+            *p->returned = 0;
+        return 0;                               /* VGA follows its own display-start register */
+    }
     if (p->code == RVD_SET_TIMEOUT) {           /* for tests; 0 is the default again */
         if (p->in_len < 4)
             return ERROR_INVALID_PARAMETER;
@@ -946,7 +1596,7 @@ static u32 dispatch(struct dioc *p)
        contexts and buffers still works (they become zombies). */
     if (!device_ready() && (p->code == RVD_GET_CAPS || p->code == RVD_CONTEXT_CREATE ||
                             p->code == RVD_BUFFER_CREATE || p->code == RVD_SUBMIT ||
-                            p->code == RVD_TRANSFER))
+                            p->code == RVD_TRANSFER || p->code == RVD_PRESENT))
         return ERROR_TIMEOUT;
     switch (p->code) {
     case RVD_GET_INFO:
@@ -1046,6 +1696,24 @@ static u32 dispatch(struct dioc *p)
             return failure();
         break;
     }
+    case RVD_PRESENT:
+        if (p->in_len < sizeof(struct rvd_present))
+            return ERROR_INVALID_PARAMETER;
+        err = present_image((const struct rvd_present *)p->in, p->process);
+        if (err)
+            return err;
+        break;
+    case RVD_DESKTOP:
+        if (p->in_len < 4 || !valid_page(display_w, display_h, display_bpp, *(u32 *)p->in))
+            return ERROR_INVALID_PARAMETER;
+        display_offset = *(u32 *)p->in;
+        if (presenter != p->process)
+            presenter = 0;                      /* the other process now owns this CPU page */
+        drop_gpu_page();
+        queue_refresh(32);
+        if (!desktop_refresh())
+            return failure();
+        break;
     default:
         return ERROR_NOT_SUPPORTED;
     }
@@ -1060,7 +1728,6 @@ static u32 dispatch(struct dioc *p)
    nothing between the test and the store can block, so two threads can't both make one. */
 u32 __cdecl vgpu_ioctl(struct dioc *p)
 {
-    static u32 lock = 0;
     u32 err;
 
     if (p->code == DIOC_OPEN) {                /* counted outside the mutex: an open can come

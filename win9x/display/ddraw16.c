@@ -209,6 +209,12 @@ static WORD call_setinfo(WORD reset)
     return setinfo((LPVOID)&shared.hal, reset);
 }
 
+/* Full-screen DOS and the VDD's reset can change the displayed page without a GDI ReEnable. */
+void dd_mode_lost(void)
+{
+    shared.mode_serial++;
+}
+
 /* Called by Enable after every mode set (enable.c). */
 void dd_mode_set(DWORD lfb, DWORD vram, WORD width, WORD height, WORD bpp, WORD pitch)
 {

@@ -247,6 +247,10 @@ lost from one run to the next.
   `ripplegl.dll`. It lets go of a context without a flush (release behaviour NONE): the HAL
   lets go at the end of every Direct3D call, and a flush each time sent the host a command
   stream per call and cost 3DMark 2000 a quarter of its score.
+- Patch 0012 exports `RipplePresentColor()` for the Direct3D HAL. With the HAL's framebuffer
+  bound, it copies the colour attachment into a reusable 32-bit display image on the GPU,
+  submits the drawing, and asks the mini-VDD to display that image. The GPU converts 565
+  colour during the copy. CPU access to a DirectDraw surface can still require a read-back.
 - **The host's log** is where rendering errors show (`journalctl` on Proxmox VE, lines from
   `QEMU[pid]`).
 
