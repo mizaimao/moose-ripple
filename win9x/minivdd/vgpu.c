@@ -1091,12 +1091,14 @@ static int set_scanout(u32 id, u32 w, u32 h)
     return 1;
 }
 
-static int flush_scanout(u32 id, u32 w, u32 h)
+static int flush_scanout(u32 id, u32 w, u32 h, const struct gpu_rect *damage)
 {
     struct gpu_flush *f = (struct gpu_flush *)request(GPU_CMD_RESOURCE_FLUSH, 0, sizeof(*f));
     f->id = id;
     f->rect.w = w;
     f->rect.h = h;
+    if (damage)
+        f->rect = *damage;
     return simple(sizeof(*f));
 }
 
@@ -1133,7 +1135,7 @@ static void retire_upload(int show)
         dbg("rvd: invalid desktop upload fence, using synchronous transfers\r\n");
     } else if (show && !upload.expired && upload.serial == display_serial && upload.generation == cpu_generation &&
                upload.owner == cpu_owner && !gpu_page && !dos_active && display_bpp &&
-               desktop_slot == upload.slot && visible == id && flush_scanout(id, d->w, d->h)) {
+               desktop_slot == upload.slot && visible == id && flush_scanout(id, d->w, d->h, 0)) {
         if (upload.generation == cpu_generation) {
             async_shown++;
             cpu_uploads++;
@@ -1542,15 +1544,15 @@ void __cdecl vgpu_dac_return(u32 token, u32 current)
         vmm_rearm_dac(vm);
 }
 
-static int mirror_mode13(struct desktop_image *d)
+static int mirror_mode13(struct desktop_image *d, struct gpu_rect *damage, u32 generation)
 {
     const u8 *src = vram;
     u32 *row = (u32 *)d->mem;
-    u32 y, x, generation = dac_generation;
-    int changed = 0;
+    u32 y, x, left = 640, right = 0, top = 200, bottom = 0;
     if (dos_active != vgpu_dac_vm)
         return -1;
     for (y = 0; y < 200; y++, row += 1280) {
+        u32 row_left = 640, row_right = 0;
         for (x = 0; x < 640; x += 2) {
             u32 colour = dos_palette[*src++];
             if (!colour)
@@ -1559,21 +1561,40 @@ static int mirror_mode13(struct desktop_image *d)
             if (row[x] != colour || row[x + 1] != colour ||
                 row[640 + x] != colour || row[641 + x] != colour) {
                 row[x] = row[x + 1] = row[640 + x] = row[641 + x] = colour;
-                changed = 1;
+                if (!row_right)
+                    row_left = x;
+                row_right = x + 2;
             }
         }
+        if (row_right) {
+            if (row_left < left) left = row_left;
+            if (row_right > right) right = row_right;
+            if (y < top) top = y;
+            bottom = y + 1;
+        }
     }
-    return generation == dac_generation ? changed : -1;
+    if (generation != dac_generation)
+        return -1;
+    if (!right)
+        return 0;
+    damage->x = left; damage->w = right - left;
+    damage->y = top * 2; damage->h = (bottom - top) * 2;
+    return 1;
 }
 
 static int desktop_refresh(int paced)
 {
+    static unsigned last_mode13_slot = DESKTOP_SLOTS;
+    static u32 last_mode13_serial, last_mode13_palette;
     u32 w = display_w, h = display_h, bpp = display_bpp, offset = display_offset;
     u32 serial = display_serial, start = vmm_time_ms();
+    u32 generation = 0;
     int text = 0, mode13 = 0, changed;
     struct vga_text v;
-    unsigned slot = desktop_slot, i;
+    unsigned slot = desktop_slot, previous_mode13_slot, i;
     struct desktop_image *d;
+    struct gpu_rect damage;
+    const struct gpu_rect *region = 0;
     struct gpu_upload_2d *t;
     u32 id;
 
@@ -1588,6 +1609,10 @@ static int desktop_refresh(int paced)
     if (upload.head && upload.slot == slot && paced && !upload.expired &&
         upload.generation == cpu_generation && upload.owner == cpu_owner && queue_refresh(2))
         return 1;
+    /* A scan can modify the shadow before a mode switch, incomplete palette, or
+       failed transfer ends this attempt. Only a successful refresh restores the baseline. */
+    previous_mode13_slot = last_mode13_slot;
+    last_mode13_slot = DESKTOP_SLOTS;
     if (dos_active) {
         if ((text = read_vga_text(&v)) != 0) {
             w = v.cols * v.cw;
@@ -1620,9 +1645,15 @@ static int desktop_refresh(int paced)
     id = MAX_BUFFERS + 1 + slot;
     if (text)
         changed = mirror_text(d, &v);
-    else if (mode13)
-        changed = mirror_mode13(d);
-    else
+    else if (mode13) {
+        generation = dac_generation;
+        if (previous_mode13_slot != slot || slot != desktop_slot || visible != id ||
+            last_mode13_serial != serial)
+            d->upload = 1;
+        changed = mirror_mode13(d, &damage, generation);
+        if (changed > 0 && !d->upload && last_mode13_palette == generation)
+            region = &damage;
+    } else
         changed = mirror_pixels(d, bpp, offset);
     if (changed)
         d->upload = 1;
@@ -1633,6 +1664,8 @@ static int desktop_refresh(int paced)
         }
         return 0;
     }
+    /* mirror_mode13 checked that its decoded snapshot used one palette. Later
+       DAC writes belong to the next sample, including writes during the fence. */
     if (serial != display_serial)
         return 0;
     if (d->upload) {
@@ -1645,6 +1678,10 @@ static int desktop_refresh(int paced)
             return 0;
         t = (struct gpu_upload_2d *)request(GPU_CMD_TRANSFER_TO_HOST_2D, 0, sizeof(*t));
         t->id = id; t->rect.w = w; t->rect.h = h;
+        if (region) {
+            t->rect = *region;
+            t->off_lo = (region->y * w + region->x) * 4;
+        }
         fence_request(&t->hdr);
         if (!fence_ok(command(sizeof(*t), sizeof(t->hdr)), t->hdr.fence_lo)) {
             d->unsafe = 1;
@@ -1654,12 +1691,25 @@ static int desktop_refresh(int paced)
     if (serial != display_serial)
         return 0;
     if ((visible != id || d->upload) &&
-        (!set_scanout(id, w, h) || !flush_scanout(id, w, h))) {
+        (!set_scanout(id, w, h) || !flush_scanout(id, w, h, region))) {
         d->upload = 1;
         return 0;
     }
     if (serial != display_serial)
         return 0;
+    if (mode13) {
+        last_mode13_serial = serial;
+        last_mode13_palette = generation;
+        last_mode13_slot = slot;
+#ifdef RVD_TRACE_DOS13_DAMAGE
+        if (d->upload) {
+            dbg("rvd: DOS13 upload x y w h: ");
+            dbg_hex(region ? region->x : 0); dbg(" "); dbg_hex(region ? region->y : 0);
+            dbg(" "); dbg_hex(region ? region->w : w); dbg(" "); dbg_hex(region ? region->h : h);
+            dbg("\r\n");
+        }
+#endif
+    }
     if (cpu_owner) {
         last_cpu_sample = start;
         cpu_samples++;
@@ -1731,7 +1781,7 @@ static int publish_gpu(u32 id, struct buffer *b)
     pending_gpu = 0;
     if (b && b->width == display_w && b->height == display_h && display_bpp &&
         render_fence(b->context) && set_scanout(id, b->width, b->height) &&
-        flush_scanout(id, b->width, b->height) && display_serial == serial) {
+        flush_scanout(id, b->width, b->height, 0) && display_serial == serial) {
         end_cpu_flips();
         if (!gpu_page)
             dbg("rvd: presenting GPU image\r\n");
