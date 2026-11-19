@@ -1,0 +1,40 @@
+virgl-gdi: distinguish sample counts from boolean occlusion queries
+
+The virgl v1 occlusion flag is set even on an OpenGL ES renderer that
+substitutes a boolean result for a sample count. Read the capabilities
+of the screen's own adapter. Feature-check version 4 already reports the
+GLES bit on every ES host, under its earlier name VIRGL_CAP_FAKE_FP64.
+
+--- a/src/gallium/winsys/virgl/gdi/virgl_gdi_public.h
++++ b/src/gallium/winsys/virgl/gdi/virgl_gdi_public.h
+@@ -34 +34,10 @@
+-struct pipe_screen *virgl_gdi_screen_create(struct gdikmt_device *device);
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++struct pipe_screen *virgl_gdi_screen_create(struct gdikmt_device *device);
++bool virgl_gdi_has_occlusion_counter(struct pipe_screen *screen);
++
++#ifdef __cplusplus
++}
++#endif
+--- a/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
++++ b/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
+@@ -1290,2 +1290,16 @@
+    return pscreen;
+ }
++
++bool
++virgl_gdi_has_occlusion_counter(struct pipe_screen *pscreen)
++{
++   if (!pscreen || pscreen->destroy != virgl_gdi_screen_destroy)
++      return false;
++
++   struct virgl_screen *screen = virgl_screen(pscreen);
++   const struct virgl_gdi_winsys *ws = virgl_gdi_winsys(screen->vws);
++   const struct virgl_caps_v2 *caps = &screen->caps.caps.v2;
++   return (ws->adapterInfo.SupportedCapsetIDs & (1ull << VIRGL_DRM_CAPSET_VIRGL2)) &&
++          caps->host_feature_check_version >= 4 && caps->v1.bset.occlusion_query &&
++          !(caps->capability_bits & VIRGL_CAP_HOST_IS_GLES);
++}

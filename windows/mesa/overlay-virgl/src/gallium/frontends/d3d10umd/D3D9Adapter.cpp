@@ -7,11 +7,9 @@
 #include "D3D9Private.h"
 #include "Format.h"
 #include "D3D9Trace.h"
+#include "gallium/winsys/virgl/gdi/virgl_gdi_public.h"
 
 #include <stddef.h>
-
-extern "C" {
-}
 
 static UINT
 D3D9DriverVersion(const D3DDDIARG_OPENADAPTER *open_data)
@@ -603,6 +601,7 @@ D3D9CreateDevice(HANDLE hAdapter, D3DDDIARG_CREATEDEVICE *data)
 
    device->screen = d3d10_create_screen(&device->gdi_device.base);
    if (device->screen) {
+      device->exact_occlusion = virgl_gdi_has_occlusion_counter(device->screen);
       FormatInitForScreen(device->screen);
       D3D9InitFormatsForScreen(device->screen);
    }
