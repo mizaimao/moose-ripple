@@ -2,11 +2,16 @@
 # Build the Win32 test programs for Windows 95/98 on the Linux build host, with Visual C++ 6
 # under Wine (docs/win9x/plan.md, Toolchain). Output: build/win9x/tools/*.exe
 #   tools/win9x/build-tools.sh
+#   tools/win9x/build-tools.sh dos13   build the standalone DOS VGA test with NASM
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 T=${WIN9X_TOOLS:-$root/.tools/win9x}
 OUT=${OUT:-$root/build/win9x}/tools
+if [ "${1-}" = dos13 ]; then
+    mkdir -p "$OUT"
+    exec nasm -f bin -o "$OUT/dos13.com" "$here/dos13.asm"
+fi
 export WINEPREFIX=$T/wine WINEDEBUG=-all
 W() { winepath -w "$1"; }
 [ -e "$T/vc6/VC98/Bin/CL.EXE" ] || { echo "build-tools.sh: no Visual C++ 6 in $T/vc6" >&2; exit 1; }
