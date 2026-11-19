@@ -115,6 +115,23 @@ Then pick a monitor type that allows the sizes you want (Advanced > Monitor): wi
 "(Unknown Monitor)" Display Properties offers 640x480 only (programs can still set any mode
 the driver has).
 
+### Windows 95 OSR2.5 and Windows Me
+
+The `win98-v0.1.0` ISO also works on Windows Me 4.90.3000. Windows 95 OSR2.5
+needs the build with the 4.00 mini-VDD header and the Windows 95 OpenGL compatibility
+changes. Both systems use the same INF and the **moose-ripple virtio-vga** model.
+
+On a clean install, check Device Manager for the PCI bus before choosing **Have Disk**.
+If the only display adapter is the generic VGA device and the PCI bus is missing, use
+**Add New Hardware → System devices → PCI bus** and let Windows detect its devices.
+Restart when prompted. Select the PCI display adapter with vendor ID `1AF4` and
+device ID `1050`, install the driver from the CD root, then restart and select
+16-bit or 32-bit colour in Display Properties.
+
+On Windows 95, the bundled IE4 installation supplies `MSVCRT.DLL` for OpenGL.
+Microsoft's DirectX 7 runtime also supplies that library and the Direct3D 7 and
+DirectInput interfaces used by the game tests. Install it for those games and restart.
+
 ## Things learnt the hard way
 
 - **A selector for the frame buffer:** `AllocSelector(0)` gives an empty descriptor that can't
