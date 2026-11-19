@@ -1606,6 +1606,8 @@ void __cdecl vgpu_focus_dac(u32 serial, u32 vm)
         dac_focus_serial = 0;
 }
 
+#include "dos13gpu.h"
+
 static int mirror_mode13(struct desktop_image *d, struct gpu_rect *damage, u32 generation)
 {
     const u8 *src = vram;
@@ -1683,6 +1685,7 @@ static int desktop_refresh(int paced)
             w = 640;
             h = 400;
         } else {
+            pal.valid = 0;
             if (dos_reported != 1) {
                 dbg("rvd: waiting for supported VGA mode\r\n");
                 dos_reported = 1;
@@ -1706,6 +1709,19 @@ static int desktop_refresh(int paced)
     }
     if (!vram)
         return 0;
+    if (mode13) {
+        int shown = pal_present(serial);
+        if (shown > 0) {
+            if (dos_reported != 5) {
+                dbg("rvd: displaying DOS mode 13h through indexed GPU texture\r\n");
+                dos_reported = 5;
+            }
+            return 1;
+        }
+        if (shown < 0 || stalled || serial != display_serial)
+            return 0;
+    } else
+        pal.valid = 0;
     slot = prepare_desktop(w, h);
     if (slot == DESKTOP_SLOTS)
         return 0;
@@ -1796,6 +1812,7 @@ static int desktop_refresh(int paced)
     for (i = 0; i < DESKTOP_SLOTS && !stalled; i++)
         if (i != slot)
             release_desktop(i);
+    pal_release();
     return !stalled && serial == display_serial;
 }
 
@@ -1870,6 +1887,7 @@ static int publish_gpu(u32 id, struct buffer *b)
         gpu_page = id;
         last_gpu_update = start;
         gpu_updates++;
+        pal_release();
         return 1;
     }
     drop_gpu_page();
