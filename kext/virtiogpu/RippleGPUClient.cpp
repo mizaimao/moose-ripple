@@ -287,6 +287,7 @@ IOReturn RippleGPUClient::bufferCreate(const struct ripple_gpu_buffer_create *in
     b->format = p->format;
     b->width = p->width;
     b->height = p->height;
+    b->flags = p->flags;
     *handle = id;
     *size = bytes;
     return kIOReturnSuccess;
@@ -436,7 +437,8 @@ IOReturn RippleGPUClient::display(uint32_t handle, uint32_t x, uint32_t y, uint3
     // frame. Recorded before the call: if only the flush fails, the scanout already is this
     // buffer.
     fShown = handle;
-    fb->setShownFormat(findBuffer(handle)->format);
+    const Buffer *shown = findBuffer(handle);
+    fb->setShownInfo(shown->format, shown->width, shown->height, (shown->flags & 1) != 0);
     return fb->showResource(handle, x, y, w, h);
 }
 
