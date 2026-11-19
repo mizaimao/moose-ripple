@@ -187,10 +187,14 @@ int main(int argc, char **argv)
             }
         }
         ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)copy, 0);
+        /* visibility: a host that can only say whether anything was visible answers with a
+         * stand-in count for "something"; any count but zero is right then */
         UINT64 want = visibility ? (red != 0) : red;
-        printf("pass=%u red=%u wrong_pixels=%u GetData=%08lx samples=%llu expected=%llu\n",
-               pass, red, bad, (unsigned long)hr, (unsigned long long)samples, (unsigned long long)want);
-        mismatches += bad != 0 || hr != S_OK || samples != want;
+        printf("pass=%u red=%u wrong_pixels=%u GetData=%08lx samples=%llu expected=%s%llu\n",
+               pass, red, bad, (unsigned long)hr, (unsigned long long)samples,
+               visibility && red ? "any but " : "", (unsigned long long)(visibility && red ? 0 : want));
+        mismatches += bad != 0 || hr != S_OK ||
+            (visibility ? (samples != 0) != (red != 0) : samples != want);
     }
     rc = mismatches != 0;
 done:

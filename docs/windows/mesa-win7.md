@@ -666,14 +666,18 @@ Games can skip a draw when an occlusion query reports that all its geometry
 was hidden. The old driver returned zero even for a fully visible rectangle.
 The driver now asks the GPU which samples passed the depth test. On a virgl
 host that advertises desktop GL sample counting, it returns the sample count.
-On UTM's OpenGL ES backend it returns 0 for hidden geometry and 1 for
-visible geometry. Applications that use the count as a measure of screen
-coverage still lack that information on UTM.
+On UTM's OpenGL ES backend there is no count to be had: OpenGL ES can only say
+whether any sample passed. The host's renderer answers "something" with a
+stand-in count, 1024, so that a program which culls below a threshold does not
+take the object for a single pixel and drop it, and the driver passes that on
+(until 2026-11-19 it reported 1). Hidden geometry is 0. Applications that use
+the count as a measure of screen coverage still lack that information on UTM;
+exact counts there would need a counting query in the host's OpenGL layer.
 
 | Windows 7 guest, 16×16 rectangle | Hidden | Half visible | Fully visible |
 | --- | ---: | ---: | ---: |
 | Previous driver | 0 | 0 | 0 |
-| UTM, OpenGL ES | 0 | 1 | 1 |
+| UTM, OpenGL ES | 0 | 1024 | 1024 |
 | Desktop OpenGL over Mesa D3D12 | 0 | 128 | 256 |
 
 Two queries can cover some of the same draws. The driver splits the GPU
@@ -690,7 +694,9 @@ report device removal. With the visibility fallback, the same feature-level
 
 Run the probes built by `sh tools/win7-hello/build-ui-probes.sh` with the
 same arguments in both process sizes. Use `--expect-supported` for exact
-counts or `--expect-visibility` for the UTM fallback. `d3d9query.exe`
+counts or `--expect-visibility` for the UTM fallback (nothing is 0, something is
+any other count). `tools/win7-debug/guest/querychk.cmd exact|visibility` runs
+all four. `d3d9query.exe`
 checks depth and overlapping queries. `d3d11query.exe --force-level9`
 exercises Windows' Direct3D 10 Level 9 translation. Both accept an optional
 expected absolute UMD path for testing application-local builds.

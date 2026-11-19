@@ -59,6 +59,8 @@ static HRESULT read_pixels(IDirect3DDevice9 *device, IDirect3DSurface9 *target,
 static HRESULT check_samples(IDirect3DQuery9 *query, const char *name, DWORD pixels, BOOL visibility)
 {
     const DWORD sentinel = 0xdeadbeef;
+    /* A host that can only say whether anything was visible answers with a stand-in count
+     * for "something": any count but zero is right then, and zero for nothing. */
     const DWORD expected = visibility ? (pixels != 0) : pixels;
     DWORD count = sentinel;
     HRESULT hr = IDirect3DQuery9_GetData(query, &count, sizeof(count), 0);
@@ -68,9 +70,9 @@ static HRESULT check_samples(IDirect3DQuery9 *query, const char *name, DWORD pix
         hr = wait_for_result(query);
         if (hr == S_OK) hr = IDirect3DQuery9_GetData(query, &count, sizeof(count), 0);
     }
-    printf("%s expected=%lu samples=%lu GetData=%08lx\n", name, (unsigned long)expected,
-           (unsigned long)count, (unsigned long)hr);
-    return hr == S_OK && count == expected ? S_OK : E_FAIL;
+    printf("%s expected=%s%lu samples=%lu GetData=%08lx\n", name, visibility && pixels ? "any but 0, not " : "",
+           (unsigned long)(visibility && pixels ? 0 : expected), (unsigned long)count, (unsigned long)hr);
+    return hr == S_OK && (visibility ? (count != 0) == (pixels != 0) : count == expected) ? S_OK : E_FAIL;
 }
 
 static int check_overlap(IDirect3DDevice9 *device, IDirect3DSurface9 *target, IDirect3DSurface9 *copy,
@@ -175,7 +177,7 @@ int main(int argc, char **argv)
     HRESULT dwm = DwmIsCompositionEnabled(&aero);
     printf("process=%u-bit composition_hr=%08lx enabled=%d expected=%s\n",
            (unsigned)(8 * sizeof(void *)), (unsigned long)dwm, (int)aero,
-           unavailable ? "unavailable" : (visibility ? "visibility (0/1)" : "sample count"));
+           unavailable ? "unavailable" : (visibility ? "visibility (nothing or something)" : "sample count"));
     d3d = Direct3DCreate9(D3D_SDK_VERSION);
     if (!d3d) goto done;
     CHECK(IDirect3D9_CreateDevice(d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL,
