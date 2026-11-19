@@ -28,6 +28,17 @@ typedef unsigned long rvd_u32;
                                        the host. For tests; ends with the program that set it */
 #define RVD_TIMEOUT_AT_ONCE     0xFFFFFFFFUL    /* give up on a request as soon as it is sent,
                                                    and hold the device stalled until reset */
+/* Optional RVD_SET_TIMEOUT test form. Keep a device handle open while testing. */
+struct rvd_upload_test { rvd_u32 ms, action; }; /* ms must be zero; output is a status word */
+#define RVD_UPLOAD_RELEASE   0
+#define RVD_UPLOAD_ARM       1
+#define RVD_UPLOAD_QUERY     2
+#define RVD_UPLOAD_TIMEOUT   3
+#define RVD_UPLOAD_ARMED     1
+#define RVD_UPLOAD_HELD      2
+#define RVD_UPLOAD_TIMED_OUT 4
+#define RVD_UPLOAD_REPLIED   8
+#define RVD_UPLOAD_SUPPORTED 0x80000000UL /* older VxDs return only a small zombie count */
 #define RVD_GET_STATS           11  /* out: struct rvd_stats. No GPU needed */
 #define RVD_PRESENT             12  /* in: struct rvd_present; publish the latest GPU image */
 #define RVD_DESKTOP             13  /* in: offset or struct rvd_desktop; no input: out u32 takeover */

@@ -12,6 +12,9 @@
  *                      device is held stalled, checks that requests are refused and both are
  *                      kept for the host, then lets the VxD find the device back, checks they
  *                      are gone, and runs the clear test
+ *   rvdtest async      after GPU scanout was used in this boot, hold a CPU display upload
+ *                      across a mode switch, then time one out and check recovery. Uses
+ *                      1024x768 and 640x480 at 16 bits; restores the original desktop mode.
  *
  * Built with Visual C++ 6 for Windows 95/98 (tools/win9x/build-tools.sh). The virgl numbers
  * below are from virglrenderer's protocol (virgl_protocol.h, virgl_hw.h; MIT).
@@ -212,6 +215,187 @@ static int stall_test(void)
     return 0;
 }
 
+/* The two boundary markers also go to QEMU's debug console, even with stdout redirected. */
+static void async_message(const char *s)
+{
+    const char *p = s;
+    while (*p) {
+        char byte_value = *p++;
+        __asm { mov al, byte_value }
+        __asm { out 0E9h, al }
+    }
+    __asm { mov al, 10 }
+    __asm { out 0E9h, al }
+    puts(s);
+}
+
+static int upload_control(u32 action, u32 *state)
+{
+    struct rvd_upload_test test;
+    DWORD n = 0;
+    test.ms = 0;
+    test.action = action;
+    *state = 0;
+    return DeviceIoControl(dev, RVD_SET_TIMEOUT, &test, sizeof test, state, sizeof *state,
+                           &n, NULL) && n == sizeof *state;
+}
+
+static int display_mode(DEVMODE *dm)
+{
+    HDC dc;
+    int matches;
+    if (ChangeDisplaySettings(dm, 0) != DISP_CHANGE_SUCCESSFUL)
+        return 0;
+    dc = GetDC(NULL);
+    if (!dc)
+        return 0;
+    matches = (DWORD)GetDeviceCaps(dc, HORZRES) == dm->dmPelsWidth &&
+              (DWORD)GetDeviceCaps(dc, VERTRES) == dm->dmPelsHeight &&
+              (DWORD)(GetDeviceCaps(dc, BITSPIXEL) * GetDeviceCaps(dc, PLANES)) == dm->dmBitsPerPel;
+    ReleaseDC(NULL, dc);
+    return matches;
+}
+
+/* Paint a small part of the visible VGA page and notify the VxD just as the HAL does.
+   A non-flip request immediately shows the GDI page after a change of mode. */
+static int paint_page(DWORD colour, int flip)
+{
+    struct rvd_desktop page;
+    HDC dc = GetDC(NULL);
+    int ok;
+    if (!dc)
+        return 0;
+    ok = PatBlt(dc, 8, 8, 64, 64, colour);
+    ReleaseDC(NULL, dc);
+    page.offset = 0;
+    page.flags = flip ? RVD_DESKTOP_FLIP : 0;
+    return ok && call(RVD_DESKTOP, &page, sizeof page, NULL, 0, "select CPU page");
+}
+
+static int hold_upload(void)
+{
+    DWORD start;
+    u32 state;
+    int i = 0;
+    if (!paint_page(WHITENESS, 1) || !upload_control(RVD_UPLOAD_ARM, &state) ||
+        !(state & RVD_UPLOAD_ARMED))
+        return 0;
+    for (start = GetTickCount(); GetTickCount() - start < 3000; Sleep(20)) {
+        if (!paint_page(i++ & 1 ? WHITENESS : BLACKNESS, 1) ||
+            !upload_control(RVD_UPLOAD_QUERY, &state))
+            return 0;
+        if (state & RVD_UPLOAD_HELD)
+            return 1;
+    }
+    return 0;
+}
+
+static int release_upload(void)
+{
+    DWORD start;
+    u32 state;
+    if (!upload_control(RVD_UPLOAD_RELEASE, &state))
+        return 0;
+    for (start = GetTickCount(); GetTickCount() - start < 3000; Sleep(10)) {
+        if (!upload_control(RVD_UPLOAD_QUERY, &state))
+            return 0;
+        if (!(state & (RVD_UPLOAD_ARMED | RVD_UPLOAD_HELD)))
+            return 1;
+    }
+    return 0;
+}
+
+/* A fresh capture after the timeout can only be armed on a newly queued transfer.
+   Wait for its own device reply before releasing the test hold. */
+static int confirm_new_upload(void)
+{
+    u32 state;
+    DWORD start;
+    if (!hold_upload())
+        return 0;
+    for (start = GetTickCount(); GetTickCount() - start < 3000; Sleep(10)) {
+        if (!upload_control(RVD_UPLOAD_QUERY, &state) || !(state & RVD_UPLOAD_HELD))
+            return 0;
+        if (state & RVD_UPLOAD_REPLIED)
+            return release_upload();
+    }
+    return 0;
+}
+
+static int async_test(void)
+{
+    DEVMODE saved, mode;
+    struct rvd_stats before, after;
+    u32 state, takeover, ctx;
+    int ok = 0, released;
+    const char *stage;
+
+    if (!upload_control(RVD_UPLOAD_QUERY, &state) || !(state & RVD_UPLOAD_SUPPORTED)) {
+        async_message("async test unavailable: driver has no asynchronous upload test");
+        return 2;
+    }
+    if (!call(RVD_DESKTOP, NULL, 0, &takeover, sizeof takeover, "scanout takeover") || !takeover) {
+        async_message("async test requires one GPU-presented frame earlier in this boot");
+        return 2;
+    }
+    memset(&saved, 0, sizeof saved);
+    saved.dmSize = sizeof saved;
+    if (!EnumDisplaySettings(NULL, ENUM_CURRENT_SETTINGS, &saved) ||
+        !call(RVD_GET_STATS, NULL, 0, &before, sizeof before, "initial resource counts"))
+        return 1;
+    memset(&mode, 0, sizeof mode);
+    mode.dmSize = sizeof mode;
+    mode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL;
+    mode.dmPelsWidth = 1024; mode.dmPelsHeight = 768; mode.dmBitsPerPel = 16;
+    stage = "async test FAILED: cannot hold the initial 1024x768 CPU upload";
+    if (!display_mode(&mode) || !hold_upload())
+        goto done;
+    async_message("async test: upload held before 1024x768 to 640x480 switch");
+    mode.dmPelsWidth = 640; mode.dmPelsHeight = 480;
+    stage = "async test FAILED: 640x480 display could not use a different backing";
+    if (!display_mode(&mode) || !paint_page(BLACKNESS, 0) ||
+        !upload_control(RVD_UPLOAD_QUERY, &state) || !(state & RVD_UPLOAD_HELD) ||
+        !release_upload())
+        goto done;
+    stage = "async test FAILED: cannot force a held 640x480 upload to time out";
+    if (!hold_upload() || !upload_control(RVD_UPLOAD_TIMEOUT, &state) ||
+        (state & (RVD_UPLOAD_HELD | RVD_UPLOAD_TIMED_OUT)) != (RVD_UPLOAD_HELD | RVD_UPLOAD_TIMED_OUT))
+        goto done;
+    async_message("async test: held 640x480 CPU upload timed out");
+    stage = "async test FAILED: unrelated GPU commands stopped with the CPU upload";
+    if (!call(RVD_CONTEXT_CREATE, "probe", 5, &ctx, sizeof ctx, "context during upload timeout") ||
+        !call(RVD_CONTEXT_DESTROY, &ctx, sizeof ctx, NULL, 0, "release probe context"))
+        goto done;
+    mode.dmPelsWidth = 1024; mode.dmPelsHeight = 768;
+    stage = "async test FAILED: mode return with a timed-out upload";
+    if (!display_mode(&mode) || !paint_page(WHITENESS, 0) ||
+        !upload_control(RVD_UPLOAD_QUERY, &state) || !(state & RVD_UPLOAD_HELD) ||
+        !release_upload())
+        goto done;
+    stage = "async test FAILED: no new CPU upload replied after the timed-out one";
+    if (!confirm_new_upload())
+        goto done;
+    async_message("async test: a fresh CPU upload received its own reply after timeout");
+    stage = "async test FAILED: CPU display or 3D clear after upload release";
+    if (!paint_page(BLACKNESS, 1) || !clear_test(0) ||
+        !call(RVD_GET_STATS, NULL, 0, &after, sizeof after, "final resource counts") ||
+        before.zombies != after.zombies || before.contexts != after.contexts ||
+        before.buffers != after.buffers || before.buffer_pages != after.buffer_pages)
+        goto done;
+    ok = 1;
+done:
+    if (!ok)
+        async_message(stage);
+    released = release_upload();
+    if (!display_mode(&saved) || !released) {
+        async_message("async test FAILED: restore upload handling and desktop mode");
+        ok = 0;
+    }
+    if (ok)
+        async_message("async test passed: mode change, timeout, recovery and desktop return");
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
     struct rvd_info info;
@@ -268,6 +452,11 @@ int main(int argc, char **argv)
             return 1;
         }
         printf("stall test passed: 3D works again after a request timed out\n");
+    }
+    if (argc > 1 && !strcmp(argv[1], "async")) {
+        int result = async_test();
+        CloseHandle(dev);
+        return result;
     }
     CloseHandle(dev);
     return 0;

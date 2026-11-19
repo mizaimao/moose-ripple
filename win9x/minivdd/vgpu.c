@@ -273,13 +273,27 @@ struct gpu_transfer_3d {
 struct gpu_get_capset { struct gpu_ctrl_hdr hdr; u32 id, version; };
 struct gpu_capset_info { struct gpu_ctrl_hdr hdr; u32 id, max_version, max_size, padding; };
 
-/* Head 0 always belongs to the regular request. Additional descriptor pairs carry only
-   empty fenced submits; one locked page holds every request and reply independently. */
+/* Head 0 always belongs to the regular request. Additional pairs carry independent
+   fenced submissions and at most one desktop upload. */
 #define FENCE_SLOTS (QUEUE_SIZE / 2 - 1)
-struct fence_slot { struct gpu_submit submit; struct gpu_ctrl_hdr reply; };
+union fence_request_data {
+    struct gpu_ctrl_hdr hdr;
+    struct gpu_submit submit;
+    struct gpu_upload_2d upload;
+};
+struct fence_slot { union fence_request_data cmd; struct gpu_ctrl_hdr reply; };
 static struct fence_slot *fences;
 static u32 fences_phys, fences_busy, async_failed;
 static u32 regular_done, regular_bytes;
+/* Active until retirement, even after the used head was consumed by another command. */
+static struct {
+    u32 head, fence, slot, serial, generation, owner, start;
+    int result, expired;
+} upload;
+static u32 cpu_generation, async_uploads, async_shown, upload_test_owner, upload_test_start;
+static int upload_test_held, upload_disabled;
+static u32 unref_pending, unref_fence;
+static void finish_late_unref(void);
 
 static void *common = 0, *isr = 0, *devcfg = 0, *notify_base = 0;
 static struct vq ctrlq = { 0 }, cursorq = { 0 };
@@ -434,8 +448,13 @@ static void drain_control(void)
             u32 slot = id / 2 - 1;
             if (fences_busy & (1UL << slot)) {
                 struct fence_slot *s = &fences[slot];
-                if (e->len < sizeof(s->reply) || s->reply.type != GPU_RESP_OK_NODATA ||
-                    !(s->reply.flags & 1) || s->reply.fence_lo != s->submit.hdr.fence_lo) {
+                int ok = e->len == sizeof(s->reply) && s->reply.type == GPU_RESP_OK_NODATA &&
+                         (s->reply.flags & 1) && s->reply.fence_lo == s->cmd.hdr.fence_lo &&
+                         !s->reply.fence_hi;
+                if (id == upload.head && !upload.result) {
+                    upload.result = ok && s->cmd.hdr.type == GPU_CMD_TRANSFER_TO_HOST_2D &&
+                                    s->reply.fence_lo == upload.fence ? 1 : -1;
+                } else if (!ok) {
                     if (!async_failed)
                         dbg("rvd: queued render fence failed, switching to waited fences\r\n");
                     async_failed = 1;
@@ -787,15 +806,19 @@ static int attach_backing(u32 id, u8 *mem, u32 pages)
     return simple(sizeof(*ab) + n * sizeof(*e));
 }
 
-static int desktop_refresh(void);
+static int desktop_refresh(int paced);
 
 static void end_cpu_flips(void)
 {
     if (cpu_flips >= 10) {
         dbg("rvd: CPU flips "); dbg_hex(cpu_flips); dbg(", mirror samples "); dbg_hex(cpu_samples);
         dbg(", uploads "); dbg_hex(cpu_uploads); dbg(", bytes/upload "); dbg_hex(display_w * display_h * 4);
-        dbg("\r\n");
+        dbg(", async submitted "); dbg_hex(async_uploads);
+        dbg(", async displayed "); dbg_hex(async_shown); dbg("\r\n");
     }
+    if (cpu_owner)
+        cpu_generation++;
+    async_uploads = async_shown = 0;
     cpu_owner = cpu_flips = cpu_samples = cpu_uploads = 0;
 }
 
@@ -817,7 +840,7 @@ static void buffer_destroy(struct buffer *b, int detach)
     if (id == gpu_page || id == visible) {
         drop_gpu_page();
         if (!stalled && display_bpp)
-            desktop_refresh();
+            desktop_refresh(0);
         if (takeover)
             queue_refresh(32);
         if (visible == id)
@@ -957,6 +980,8 @@ static int device_ready(void)
     drain_control();
     if (!regular_done)
         return 0;
+    if (unref_pending)
+        finish_late_unref();
     stalled = 0;
     dbg("rvd: the late answer came, the device is back\r\n");
     reap();
@@ -976,16 +1001,18 @@ static u32 count_zombies(void)
     return n;
 }
 
-/* Two private IDs outside the Mesa buffer table. Build the replacement before releasing the
-   previous mode's image: the current scanout must stay live through a failed mode change. */
+/* One desktop can be on screen while a previous upload pins another. A mode change may
+   need a third image until the new scanout is acknowledged. Allocate each backing on use. */
+#define DESKTOP_SLOTS 3
 struct desktop_image {
     u8 *mem;
     u32 handle, w, h;
-    int ready, upload;
+    int ready, upload, unsafe;
 };
-static struct desktop_image desktops[2];
+static struct desktop_image desktops[DESKTOP_SLOTS];
 static unsigned desktop_slot;
 static u32 next_fence;
+static int release_desktop(unsigned slot);
 
 static void fence_request(struct gpu_ctrl_hdr *h)
 {
@@ -993,14 +1020,9 @@ static void fence_request(struct gpu_ctrl_hdr *h)
     h->fence_lo = ++next_fence;
 }
 
-/* Creating the renderer fence pushes out the preceding GL work before the following display
-   command. Waiting for its reply would serialize every frame with QEMU's fence polling timer.
-   Only the fence is asynchronous: when we publish an image the display commands themselves
-   complete before we release the queue to the next caller. */
-static int render_fence(u32 ctx)
+static struct fence_slot *new_fence(void)
 {
     u32 i, slots = ctrlq.size / 2 - 1;
-    struct gpu_submit *submit;
     drain_control();
     if (slots && !async_failed && timeout_ms != RVD_TIMEOUT_AT_ONCE) {
         if (!fences)
@@ -1008,18 +1030,33 @@ static int render_fence(u32 ctx)
                                  (FENCE_SLOTS * sizeof(*fences) + 4095) >> 12, &fences_phys);
         for (i = 0; fences && i < slots; i++) {
             struct fence_slot *s = &fences[i];
-            u32 pa = fences_phys + i * sizeof(*s);
             if (fences_busy & (1UL << i))
                 continue;
             zero(s, sizeof(*s));
-            s->submit.hdr.type = GPU_CMD_SUBMIT_3D;
-            s->submit.hdr.ctx_id = ctx;
-            fence_request(&s->submit.hdr);
+            fence_request(&s->cmd.hdr);
             fences_busy |= 1UL << i;
-            enqueue_pair((u16)((i + 1) * 2), pa, sizeof(s->submit),
-                         pa + sizeof(s->submit), sizeof(s->reply));
-            return 1;
+            return s;
         }
+    }
+    return 0;
+}
+
+static void send_fence(struct fence_slot *s, u32 bytes)
+{
+    u32 i = (u32)(s - fences), pa = fences_phys + i * sizeof(*s);
+    enqueue_pair((u16)((i + 1) * 2), pa, bytes, pa + sizeof(s->cmd), sizeof(s->reply));
+}
+
+/* The renderer fence pushes out the preceding GL work before the display command. */
+static int render_fence(u32 ctx)
+{
+    struct gpu_submit *submit;
+    struct fence_slot *s = new_fence();
+    if (s) {
+        s->cmd.hdr.type = GPU_CMD_SUBMIT_3D;
+        s->cmd.hdr.ctx_id = ctx;
+        send_fence(s, sizeof(s->cmd.submit));
+        return 1;
     }
     /* Back-pressure: the normal pair always fits, even with all async descriptors in use. */
     submit = (struct gpu_submit *)request(GPU_CMD_SUBMIT_3D, ctx, sizeof(*submit));
@@ -1055,17 +1092,124 @@ static int flush_scanout(u32 id, u32 w, u32 h)
     return simple(sizeof(*f));
 }
 
+static void release_upload_test(void)
+{
+    upload_test_owner = 0;
+    upload_test_held = 0;
+}
+
+/* The used-ring handler never issues a command: it can run inside a head-0 request.
+   Flush only in a caller that owns the queue, for the CPU stream that submitted the image. */
+static void retire_upload(int show)
+{
+    struct desktop_image *d;
+    u32 id;
+    if (upload_test_owner && vmm_time_ms() - upload_test_start >= 60000)
+        release_upload_test();
+    if (!upload.head || stalled)
+        return;
+    drain_control();
+    if ((!upload.result || upload_test_held) && !upload.expired &&
+        vmm_time_ms() - upload.start > timeout_ms) {
+        upload.expired = 1;
+        dbg("rvd: desktop upload timed out, keeping its backing until completion\r\n");
+    }
+    if (!upload.result || upload_test_held)
+        return;
+    d = &desktops[upload.slot];
+    id = MAX_BUFFERS + 1 + upload.slot;
+    if (upload.result < 0) {
+        /* The returned descriptor is ours again but the reply did not prove the host
+           finished reading the image. Replace it and require a fenced UNREF to free it. */
+        d->unsafe = upload_disabled = 1;
+        dbg("rvd: invalid desktop upload fence, using synchronous transfers\r\n");
+    } else if (show && !upload.expired && upload.serial == display_serial && upload.generation == cpu_generation &&
+               upload.owner == cpu_owner && !gpu_page && !dos_text && display_bpp &&
+               desktop_slot == upload.slot && visible == id && flush_scanout(id, d->w, d->h)) {
+        if (upload.generation == cpu_generation) {
+            async_shown++;
+            cpu_uploads++;
+            d->upload = 0;
+        }
+    }
+    upload.head = 0;
+    if (upload.slot != desktop_slot)
+        release_desktop(upload.slot);
+}
+
+static int begin_upload(unsigned slot, u32 id, u32 w, u32 h, u32 serial)
+{
+    struct fence_slot *s;
+    if (upload.head || upload_disabled || !queue_refresh(2) || !(s = new_fence()))
+        return 0;
+    if (display_serial != serial) {
+        fences_busy &= ~(1UL << (s - fences));
+        return 0;
+    }
+    s->cmd.upload.hdr.type = GPU_CMD_TRANSFER_TO_HOST_2D;
+    s->cmd.upload.rect.w = w; s->cmd.upload.rect.h = h; s->cmd.upload.id = id;
+    upload.head = ((u32)(s - fences) + 1) * 2;
+    upload.fence = s->cmd.hdr.fence_lo;
+    upload.slot = slot;
+    upload.serial = serial;
+    upload.owner = cpu_owner;
+    upload.generation = cpu_generation;
+    upload.start = vmm_time_ms();
+    upload.result = upload.expired = 0;
+    if (upload_test_owner && upload_test_owner == cpu_owner)
+        upload_test_held = 1;
+    send_fence(s, sizeof(s->cmd.upload));
+    async_uploads++;
+    return 1;
+}
+
+static int fence_ok(u32 bytes, u32 fence)
+{
+    struct gpu_ctrl_hdr *r = (struct gpu_ctrl_hdr *)resp_buf;
+    return bytes == sizeof(*r) && r->type == GPU_RESP_OK_NODATA && (r->flags & 1) &&
+           r->fence_lo == fence && !r->fence_hi;
+}
+
+/* A quarantined resource's UNREF can itself time out. Inspect head 0's saved reply
+   before ordinary device recovery reuses it for zombie cleanup. */
+static void finish_late_unref(void)
+{
+    struct desktop_image *d = &desktops[unref_pending - 1];
+    if (fence_ok(regular_bytes, unref_fence)) {
+        vmm_free_pages(d->handle);
+        zero(d, sizeof(*d));
+    }
+    unref_pending = 0;
+}
+
 static int release_desktop(unsigned slot)
 {
     struct desktop_image *d = &desktops[slot];
     struct gpu_ctrl_hdr *r = (struct gpu_ctrl_hdr *)resp_buf;
     if (!d->mem)
         return 1;
-    /* A failed CREATE may never have reached the renderer. Keep the DMA backing unless UNREF
-       succeeds or the host specifically confirms it has no resource by this ID. */
-    if (stalled || (!one_id(GPU_CMD_RESOURCE_UNREF, 0, MAX_BUFFERS + 1 + slot) &&
-                    (stalled || r->type != GPU_RESP_ERR_INVALID_RESOURCE)))
+    if ((upload.head && upload.slot == slot) || visible == MAX_BUFFERS + 1 + slot)
         return 0;
+    if (d->unsafe) {
+        struct gpu_one_id *unref;
+        if (stalled)
+            return 0;
+        unref = (struct gpu_one_id *)request(GPU_CMD_RESOURCE_UNREF, 0, sizeof(*unref));
+        unref->id = MAX_BUFFERS + 1 + slot;
+        fence_request(&unref->hdr);
+        unref_fence = unref->hdr.fence_lo;
+        if (!fence_ok(command(sizeof(*unref), sizeof(*r)), unref_fence)) {
+            if (stalled)
+                unref_pending = slot + 1;
+            return 0;
+        }
+    } else {
+        /* A failed CREATE may never have reached the renderer. Keep the DMA backing unless
+           UNREF succeeds or the host confirms it has no resource by this ID. */
+        if (stalled || (!one_id(GPU_CMD_RESOURCE_UNREF, 0, MAX_BUFFERS + 1 + slot) &&
+                        (stalled || r->type != GPU_RESP_ERR_INVALID_RESOURCE)))
+            return 0;
+    }
     vmm_free_pages(d->handle);
     zero(d, sizeof(*d));
     return 1;
@@ -1077,7 +1221,9 @@ static int make_desktop(unsigned slot, u32 w, u32 h)
     u32 id = MAX_BUFFERS + 1 + slot, pages = (w * h * 4 + 4095) >> 12;
     struct gpu_create_2d *r;
 
-    if (d->ready && d->w == w && d->h == h)
+    if (upload.head && upload.slot == slot)
+        return 0;
+    if (d->ready && !d->unsafe && d->w == w && d->h == h)
         return 1;
     if (!pages || pages > MAX_BUFFER_PAGES || visible == id)
         return 0;
@@ -1097,6 +1243,17 @@ static int make_desktop(unsigned slot, u32 w, u32 h)
     d->w = w; d->h = h;
     d->ready = d->upload = 1;
     return 1;
+}
+
+static unsigned prepare_desktop(u32 w, u32 h)
+{
+    unsigned slot;
+    if (make_desktop(desktop_slot, w, h))
+        return desktop_slot;
+    for (slot = 0; slot < DESKTOP_SLOTS && !stalled; slot++)
+        if (slot != desktop_slot && make_desktop(slot, w, h))
+            return slot;
+    return DESKTOP_SLOTS;
 }
 
 static int valid_page(u32 w, u32 h, u32 bpp, u32 offset)
@@ -1231,19 +1388,28 @@ static int mirror_text(struct desktop_image *d, const struct vga_text *v)
     return changed;
 }
 
-static int desktop_refresh(void)
+static int desktop_refresh(int paced)
 {
     u32 w = display_w, h = display_h, bpp = display_bpp, offset = display_offset;
     u32 serial = display_serial, start = vmm_time_ms();
     int text = dos_text;
     struct vga_text v;
-    unsigned slot = desktop_slot;
+    unsigned slot = desktop_slot, i;
     struct desktop_image *d;
     struct gpu_upload_2d *t;
     u32 id;
 
     if (stalled)
         return 0;
+    paced = paced && cpu_owner && cpu_samples && !gpu_page && !text;
+    retire_upload(paced);
+    if (stalled || serial != display_serial)
+        return 0;
+    /* Ordinary flips may continue selecting pages while this shadow is immutable.
+       A handoff builds its synchronous image in an available private slot. */
+    if (upload.head && upload.slot == slot && paced && !upload.expired &&
+        upload.generation == cpu_generation && upload.owner == cpu_owner && queue_refresh(2))
+        return 1;
     if (text) {
         if (!read_vga_text(&v)) {
             if (!dos_reported) {
@@ -1265,24 +1431,30 @@ static int desktop_refresh(void)
     }
     if (!vram)
         return 0;
-    d = &desktops[slot];
-    if (d->mem && (!d->ready || d->w != w || d->h != h)) {
-        slot ^= 1;
-        d = &desktops[slot];
-    }
-    id = MAX_BUFFERS + 1 + slot;
-    if (!make_desktop(slot, w, h))
+    slot = prepare_desktop(w, h);
+    if (slot == DESKTOP_SLOTS)
         return 0;
+    d = &desktops[slot];
+    id = MAX_BUFFERS + 1 + slot;
     if (text ? mirror_text(d, &v) : mirror_pixels(d, bpp, offset))
         d->upload = 1;
     if (serial != display_serial)
         return 0;
     if (d->upload) {
+        if (paced && visible == id && slot == desktop_slot && begin_upload(slot, id, w, h, serial)) {
+            last_cpu_sample = start;
+            cpu_samples++;
+            return 1;
+        }
+        if (serial != display_serial)
+            return 0;
         t = (struct gpu_upload_2d *)request(GPU_CMD_TRANSFER_TO_HOST_2D, 0, sizeof(*t));
         t->id = id; t->rect.w = w; t->rect.h = h;
         fence_request(&t->hdr);
-        if (!simple(sizeof(*t)))
+        if (!fence_ok(command(sizeof(*t), sizeof(t->hdr)), t->hdr.fence_lo)) {
+            d->unsafe = 1;
             return 0;
+        }
     }
     if (serial != display_serial)
         return 0;
@@ -1305,7 +1477,9 @@ static int desktop_refresh(void)
         dos_reported = 2;
     }
     desktop_slot = slot;
-    release_desktop(slot ^ 1);
+    for (i = 0; i < DESKTOP_SLOTS && !stalled; i++)
+        if (i != slot)
+            release_desktop(i);
     return !stalled && serial == display_serial;
 }
 
@@ -1370,7 +1544,7 @@ static int publish_gpu(u32 id, struct buffer *b)
     }
     drop_gpu_page();
     if (!stalled && display_bpp)
-        desktop_refresh();
+        desktop_refresh(0);
     if (display_bpp)
         queue_refresh(1);
     return 0;
@@ -1380,21 +1554,25 @@ void __cdecl vgpu_desktop_tick(void)
 {
     u32 age;
     refresh_pending = 0;
-    if (!takeover || (!display_bpp && !dos_text) || (gpu_page && !pending_gpu))
+    if (!takeover || (!upload.head && ((!display_bpp && !dos_text) || (gpu_page && !pending_gpu))))
         return;
     if (lock && !vmm_mutex_owner(lock)) {
         vmm_mutex_enter(lock);
+        if (upload.head && device_ready())
+            retire_upload(1);
         if (takeover && (display_bpp || dos_text) && device_ready()) {
             if (!gpu_page) {
                 if (!cpu_owner || vmm_time_ms() - last_cpu_sample >= DISPLAY_PERIOD_MS)
-                    desktop_refresh();
+                    desktop_refresh(cpu_owner != 0);
             } else if (pending_gpu == gpu_page && vmm_time_ms() - last_gpu_update >= DISPLAY_PERIOD_MS &&
                      publish_gpu(gpu_page, find_buffer(gpu_page)))
                 timer_updates++;
         }
         vmm_mutex_leave(lock);
     }
-    if (takeover && (display_bpp || dos_text)) {
+    if (upload.head)
+        queue_refresh(upload.expired || upload_test_held ? 17 : 2);
+    else if (takeover && (display_bpp || dos_text)) {
         if (!gpu_page && !cpu_owner)
             queue_refresh(dos_text ? 50 : 32);
         else if (!gpu_page || pending_gpu) {
@@ -1427,7 +1605,7 @@ static u32 present_image(const struct rvd_present *p, u32 process)
         return ERROR_INVALID_PARAMETER;
     }
     if (!takeover) {
-        if (!queue_refresh(1) || !desktop_refresh()) {
+        if (!queue_refresh(1) || !desktop_refresh(0)) {
             if (takeover && display_bpp)
                 queue_refresh(1);
             dbg("rvd: could not prepare desktop scanout\r\n");
@@ -1505,6 +1683,9 @@ static u32 show_cpu_page(u32 process, u32 offset, int flip)
     if (stalled)
         return ERROR_TIMEOUT;
     if (flip && cpu_owner == process && !gpu_page && cpu_samples) {
+        retire_upload(1);
+        if (stalled || serial != display_serial)
+            return failure();
         age = vmm_time_ms() - last_cpu_sample;
         if (age < DISPLAY_PERIOD_MS && queue_refresh(DISPLAY_PERIOD_MS - age)) {
             display_offset = offset;
@@ -1517,7 +1698,7 @@ static u32 show_cpu_page(u32 process, u32 offset, int flip)
     if (flip)
         cpu_owner = process;
     display_offset = offset;
-    if (!desktop_refresh()) {
+    if (!desktop_refresh(flip)) {
         if (serial == display_serial) {
             display_offset = previous;
             end_cpu_flips();
@@ -1575,7 +1756,7 @@ static void presenter_closed(u32 process)
     if (takeover) {
         queue_refresh(1);
         if (!stalled)
-            desktop_refresh();
+            desktop_refresh(0);
     }
 }
 
@@ -1586,6 +1767,8 @@ static u32 dispatch(struct dioc *p)
     if (p->code == DIOC_CLOSE) {                /* the handle is closed, or its program ended */
         if (opened(p->process, -1) > 0)
             return 0;                           /* the process has another handle open */
+        if (upload_test_owner == p->process)
+            release_upload_test();
         if (timeout_owner == p->process) {      /* a test setting ends with its program */
             timeout_ms = DEFAULT_TIMEOUT_MS;
             timeout_owner = 0;
@@ -1653,6 +1836,45 @@ static u32 dispatch(struct dioc *p)
         return 0;                               /* VGA follows its own display-start register */
     }
     if (p->code == RVD_SET_TIMEOUT) {           /* for tests; 0 is the default again */
+        if (p->in_len == sizeof(struct rvd_upload_test)) {
+            const struct rvd_upload_test *test = (const struct rvd_upload_test *)p->in;
+            u32 status = RVD_UPLOAD_SUPPORTED;
+            if (!p->in || test->ms || !p->out || p->out_len < sizeof(status) ||
+                test->action > RVD_UPLOAD_TIMEOUT)
+                return ERROR_INVALID_PARAMETER;
+            if (upload_test_owner && vmm_time_ms() - upload_test_start >= 60000)
+                release_upload_test();
+            if (test->action == RVD_UPLOAD_ARM) {
+                if (upload_test_owner)
+                    return ERROR_INVALID_PARAMETER;
+                upload_test_owner = p->process;
+                upload_test_start = vmm_time_ms();
+            } else if (upload_test_owner == p->process) {
+                if (test->action == RVD_UPLOAD_RELEASE) {
+                    release_upload_test();
+                    retire_upload(1);
+                } else if (test->action == RVD_UPLOAD_TIMEOUT) {
+                    if (!upload_test_held || timeout_ms == RVD_TIMEOUT_AT_ONCE)
+                        return ERROR_INVALID_PARAMETER;
+                    /* Exercise the production deadline check with a real submitted transfer.
+                       The test delays retirement even if the used entry already arrived. */
+                    upload.start = vmm_time_ms() - timeout_ms - 1;
+                    retire_upload(0);
+                }
+            }
+            if (upload.head && !stalled)
+                drain_control();
+            if (upload_test_owner == p->process) {
+                status |= RVD_UPLOAD_ARMED;
+                if (upload_test_held)
+                    status |= RVD_UPLOAD_HELD | (upload.expired ? RVD_UPLOAD_TIMED_OUT : 0) |
+                              (upload.result > 0 ? RVD_UPLOAD_REPLIED : 0);
+            }
+            *(u32 *)p->out = status;
+            if (p->returned)
+                *p->returned = sizeof(status);
+            return 0;
+        }
         if (p->in_len < 4)
             return ERROR_INVALID_PARAMETER;
         if (p->out_len >= 4) {                  /* what is held for the host before this call */
