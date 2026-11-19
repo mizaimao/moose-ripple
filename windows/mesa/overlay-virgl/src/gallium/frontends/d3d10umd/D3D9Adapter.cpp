@@ -97,10 +97,13 @@ static const FORMATOP g_format_ops[] = {
    { D3D9_FMT_DF16, 0x000410c1, 0, 0, 0 },
    { D3D9_FMT_DF24, 0x000410c1, 0, 0, 0 },
    { D3D9_FMT_INTZ, 0x000410c1, 0, 0, 0 },
-   /* moose-ripple: AYUV and YUY2 are not listed. The driver cannot make surfaces of them,
-    * let alone convert them; listed, Windows' video renderer chose them and then waited for
-    * pictures that never came. Without them it has the video converted before it arrives.
+   /* moose-ripple: the two video formats the video processor converts (D3D9IsVideoFormat),
+    * as plain surfaces only: a decoder fills them and the processor reads them. AYUV is not
+    * listed; it was once, with YUY2, when the driver could make surfaces of neither, and
+    * Windows' video renderer chose them and then waited for pictures that never came.
     */
+   { D3D9_FMT_NV12, FORMATOP_OFFSCREENPLAIN, 0, 0, 0 },
+   { D3D9_FMT_YUY2, FORMATOP_OFFSCREENPLAIN, 0, 0, 0 },
    { D3D9_FMT_R8, 0x00c2401f, d3d9_ms_types, 0, 0 },
    { D3D9_FMT_G8R8, 0x00c2401f, d3d9_ms_types, 0, 0 },
 };
@@ -796,8 +799,8 @@ D3D9GetCaps(HANDLE hAdapter, const D3DDDIARG_GETCAPS *data)
          return E_INVALIDARG;
       *(UINT *)data->pData = 0;
       return S_OK;
-   /* One video processor, the progressive device (D3D9VideoProcessBlt): RGB frames, scaled
-    * to their place on an RGB target. No deinterlacing, no colour controls, no sub-streams.
+   /* One video processor, the progressive device (D3D9VideoProcessBlt): frames in RGB or a
+    * video format (D3D9IsVideoFormat), converted and scaled to their place on an RGB target. No deinterlacing, no colour controls, no sub-streams.
     */
    case D3DDDICAPS_GETVIDEOPROCESSORDEVICEGUIDCOUNT:
       if (FAILED(D3D9ValidateData(data, sizeof(UINT))))
@@ -842,6 +845,9 @@ D3D9GetCaps(HANDLE hAdapter, const D3DDDIARG_GETCAPS *data)
       caps->VideoProcessorOperations = DXVADDI_VIDEOPROCESS_STRETCHX |
                                        DXVADDI_VIDEOPROCESS_STRETCHY |
                                        DXVADDI_VIDEOPROCESS_SUBRECTS;
+      if (D3D9IsVideoFormat(input->VideoDesc.Format))
+         caps->VideoProcessorOperations |= DXVADDI_VIDEOPROCESS_YUV2RGB |
+                                           DXVADDI_VIDEOPROCESS_YUV2RGBEXTENDED;
       return S_OK;
    }
    /* Asked although no colour control and no filter is offered: the neutral value, fixed */

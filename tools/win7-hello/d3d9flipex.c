@@ -13,6 +13,8 @@
  *   proc    a frame in a video-memory surface goes through the driver's video processor to
  *           the middle of the back buffer, on a background colour: what the renderer does
  *           when the driver offers one
+ *   nv12    the same with a frame in the video format decoders deliver, which the driver
+ *           converts to RGB; the screen may differ by three in a channel
  * "d3d9flipex copy" runs the same steps with the ordinary copy-model swap chain as a control.
  * Prints one line per step; exit code 0 if every step showed its colour.
  * MIT licence (LICENSE at the repository root).
@@ -51,6 +53,8 @@ static COLORREF screen_pixel(HWND window)
     return c;
 }
 
+static int tolerance;  /* how far a channel on the screen may be from the colour drawn */
+
 /* Present `frames` times what draw() makes, then compare the screen with rgb */
 static int step(const char *name, IDirect3DDevice9Ex *device, HWND window, DWORD rgb,
                 HRESULT (*draw)(IDirect3DDevice9Ex *, IDirect3DSurface9 *, DWORD))
@@ -72,7 +76,11 @@ static int step(const char *name, IDirect3DDevice9Ex *device, HWND window, DWORD
     pump();
     COLORREF got = screen_pixel(window);
     DWORD shown = (GetRValue(got) << 16) | (GetGValue(got) << 8) | GetBValue(got);
-    int ok = SUCCEEDED(hr) && shown == rgb;
+    int ok = SUCCEEDED(hr);
+    for (int shift = 0; shift < 24; shift += 8) {
+        const int difference = (int)((shown >> shift) & 0xff) - (int)((rgb >> shift) & 0xff);
+        ok &= difference <= tolerance && -difference <= tolerance;
+    }
     printf("%-6s hr=0x%08lx drew %06lx screen %06lx %s\n", name, (unsigned long)hr,
            (unsigned long)rgb, (unsigned long)shown, ok ? "PASS" : "FAIL");
     return ok;
@@ -204,6 +212,72 @@ static HRESULT draw_processor(IDirect3DDevice9Ex *device, IDirect3DSurface9 *bac
     return hr;
 }
 
+/* A frame in the video format the decoders deliver, NV12 (a plane of luma, then a half-size
+ * plane of chroma pairs), of one colour, through the driver's processor: the conversion to
+ * RGB is the driver's. The frame says it is BT.601 in the studio range. */
+static HRESULT draw_nv12(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, DWORD rgb)
+{
+    static IDirectXVideoProcessorService *service;
+    static IDirectXVideoProcessor *processor;
+    static IDirect3DSurface9 *frame;
+    static DXVA2_VideoDesc desc;
+    const D3DFORMAT nv12 = (D3DFORMAT)MAKEFOURCC('N', 'V', '1', '2');
+    HRESULT hr = S_OK;
+    if (!service) {
+        hr = DXVA2CreateVideoService((IDirect3DDevice9 *)device, &IID_IDirectXVideoProcessorService,
+                                     (void **)&service);
+        if (FAILED(hr)) return hr;
+        desc.SampleWidth = WIDTH;
+        desc.SampleHeight = HEIGHT;
+        desc.SampleFormat.SampleFormat = DXVA2_SampleProgressiveFrame;
+        desc.SampleFormat.NominalRange = 2;         /* 16 to 235 */
+        desc.SampleFormat.VideoTransferMatrix = 2;  /* BT.601 */
+        desc.Format = nv12;
+        desc.InputSampleFreq.Numerator = desc.OutputFrameFreq.Numerator = 30;
+        desc.InputSampleFreq.Denominator = desc.OutputFrameFreq.Denominator = 1;
+        hr = IDirectXVideoProcessorService_CreateSurface(service, WIDTH, HEIGHT, 0, nv12, D3DPOOL_DEFAULT, 0,
+                 DXVA2_VideoProcessorRenderTarget, &frame, NULL);
+        if (FAILED(hr)) { printf("       CreateSurface hr=0x%08lx\n", (unsigned long)hr); return hr; }
+        hr = IDirectXVideoProcessorService_CreateVideoProcessor(service, &DXVA2_VideoProcProgressiveDevice,
+                 &desc, D3DFMT_X8R8G8B8, 0, &processor);
+        if (FAILED(hr)) { printf("       CreateVideoProcessor hr=0x%08lx\n", (unsigned long)hr); return hr; }
+    }
+    const double r = (rgb >> 16) & 0xff, g = (rgb >> 8) & 0xff, b = rgb & 0xff;
+    const double luma = 0.299 * r + 0.587 * g + 0.114 * b;
+    const BYTE y = (BYTE)(16.0 + 219.0 * luma / 255.0 + 0.5);
+    const BYTE cb = (BYTE)(128.0 + 224.0 * (b - luma) / (1.772 * 255.0) + 0.5);
+    const BYTE cr = (BYTE)(128.0 + 224.0 * (r - luma) / (1.402 * 255.0) + 0.5);
+    D3DLOCKED_RECT lock;
+    hr = IDirect3DSurface9_LockRect(frame, &lock, NULL, D3DLOCK_DONOTWAIT);
+    if (FAILED(hr)) return hr;
+    for (int row = 0; row < HEIGHT; ++row)
+        memset((BYTE *)lock.pBits + (size_t)row * lock.Pitch, y, WIDTH);
+    for (int row = 0; row < HEIGHT / 2; ++row) {
+        BYTE *pairs = (BYTE *)lock.pBits + (size_t)(HEIGHT + row) * lock.Pitch;
+        for (int x = 0; x < WIDTH; x += 2) { pairs[x] = cb; pairs[x + 1] = cr; }
+    }
+    IDirect3DSurface9_UnlockRect(frame);
+
+    DXVA2_VideoProcessBltParams blt;
+    memset(&blt, 0, sizeof(blt));
+    SetRect(&blt.TargetRect, 0, 0, WIDTH, HEIGHT);
+    blt.BackgroundColor.Cr = blt.BackgroundColor.Cb = 0x8000;
+    blt.BackgroundColor.Y = 0x1000;
+    blt.BackgroundColor.Alpha = 0xffff;
+    blt.DestFormat.SampleFormat = DXVA2_SampleProgressiveFrame;
+    blt.ProcAmpValues.Contrast.Value = blt.ProcAmpValues.Saturation.Value = 1;
+    blt.Alpha.Value = 1;
+    DXVA2_VideoSample sample;
+    memset(&sample, 0, sizeof(sample));
+    sample.End = 333333;
+    sample.SampleFormat = desc.SampleFormat;
+    sample.SrcSurface = frame;
+    SetRect(&sample.SrcRect, 0, 0, WIDTH, HEIGHT);
+    SetRect(&sample.DstRect, 0, 0, WIDTH, HEIGHT);
+    sample.PlanarAlpha.Value = 1;
+    return IDirectXVideoProcessor_VideoProcessBlt(processor, back, &blt, &sample, 1, NULL);
+}
+
 static HRESULT draw_video(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, DWORD rgb)
 {
     static IDirectXVideoProcessorService *service;
@@ -279,6 +353,7 @@ static HRESULT draw_video(IDirect3DDevice9Ex *device, IDirect3DSurface9 *back, D
 int main(int argc, char **argv)
 {
     const int flip = !(argc > 1 && !strcmp(argv[1], "copy"));
+    setvbuf(stdout, NULL, _IONBF, 0);   /* a line is out before the next step can crash */
     WNDCLASSW wc = { 0 };
     wc.lpfnWndProc = DefWindowProcW;
     wc.hInstance = GetModuleHandleW(NULL);
@@ -326,6 +401,9 @@ int main(int argc, char **argv)
     shown = window;
     ok &= step("proc", device, window, 0xc040c0, draw_processor);
     printf("       beside the frame the screen showed %06lx (the background is a blue)\n", (unsigned long)corner);
+    tolerance = 3;
+    ok &= step("nv12", device, window, 0xc86020, draw_nv12);
+    tolerance = 0;
     fflush(stdout);
     IDirect3DDevice9Ex_Release(device);
     IDirect3D9Ex_Release(d3d);

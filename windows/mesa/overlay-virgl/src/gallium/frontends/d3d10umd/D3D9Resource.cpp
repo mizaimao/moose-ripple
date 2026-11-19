@@ -134,7 +134,9 @@ D3D9FormatBytesPerPixel(D3DDDIFORMAT format)
    case D3D9_FMT_R16F:
    case D3D9_FMT_V8U8:
    case D3D9_FMT_L6V5U5:
+   case D3D9_FMT_YUY2:
       return 2;
+   case D3D9_FMT_NV12: /* its luma plane; the rows of chroma: D3D9FormatRowCount */
    case D3D9_FMT_R8:
    case D3DDDIFMT_A8:
    case D3D9_FMT_P8:
@@ -214,6 +216,8 @@ D3D9FormatRowCount(D3DDDIFORMAT format, UINT height)
 {
    if (D3D9FormatIsBlockCompressed(format))
       return MAX2(1u, (height + 3u) / 4u);
+   if (format == D3D9_FMT_NV12)
+      return height + (height + 1u) / 2u;
    return height ? height : 1;
 }
 
@@ -2782,13 +2786,18 @@ D3D9DeallocateResource(D3D9Device *device, D3D9Resource *resource)
 static bool
 D3D9IsPlainInMemory(const D3D9Device *device, const D3DDDIARG_CREATERESOURCE *data)
 {
-   D3DDDI_RESOURCEFLAGS decoder = {};
-   decoder.DecodeRenderTarget = 1;
+   /* What such a surface may say it is for: nothing, or a decoder's frames. One in a video
+    * format may also be marked for the video processor; nothing can draw to those formats
+    * here, so it too only holds a frame. */
+   D3DDDI_RESOURCEFLAGS allowed = {};
+   allowed.DecodeRenderTarget = 1;
+   if (D3D9IsVideoFormat(data->Format))
+      allowed.VideoProcessRenderTarget = 1;
    return device->runtime_interface >= 9 &&
-      (data->Flags.Value == 0 || data->Flags.Value == decoder.Value) &&
+      (data->Flags.Value & ~allowed.Value) == 0 &&
       !data->MultisampleType && D3D9PoolNeedsReadback(data->Pool) &&
       !data->pSurfList[0].pSysMem &&
-      (data->Format == D3DDDIFMT_X8R8G8B8 || data->Format == D3DDDIFMT_A8R8G8B8);
+      (D3D9IsRgb32(data->Format) || D3D9IsVideoFormat(data->Format));
 }
 
 static HRESULT
@@ -4192,6 +4201,10 @@ D3D9DestroyKeyBlitState(D3D9Device *device)
       if (device->key_blit.fs[i])
          pipe->delete_fs_state(pipe, device->key_blit.fs[i]);
    }
+   if (device->key_blit.video_fs)
+      pipe->delete_fs_state(pipe, device->key_blit.video_fs);
+   if (device->key_blit.video_sampler)
+      pipe->delete_sampler_state(pipe, device->key_blit.video_sampler);
    if (device->key_blit.vs)
       pipe->delete_vs_state(pipe, device->key_blit.vs);
    memset(&device->key_blit, 0, sizeof(device->key_blit));
@@ -4334,8 +4347,11 @@ D3D9KeyBlitPipe(D3D9Device *device, const D3DDDIARG_BLT *data)
          templ.u.tex.first_layer = templ.u.tex.last_layer = dst_layer;
          fb.cbufs[0] = pipe->create_surface(pipe, dst_tex, &templ);
       }
+      /* The virgl context keeps the pointer without a reference of its own, and sends the
+       * surface's resource again with a draw that follows a flush: the surface has to live
+       * until it is off the context. */
+      struct pipe_surface *target = fb.cbufs[0];
       pipe->set_framebuffer_state(pipe, &fb);
-      pipe_surface_reference(&fb.cbufs[0], NULL);
 
       struct pipe_viewport_state vp;
       memset(&vp, 0, sizeof(vp));
@@ -4424,6 +4440,7 @@ D3D9KeyBlitPipe(D3D9Device *device, const D3DDDIARG_BLT *data)
       pipe->bind_blend_state(pipe, NULL);
       memset(&fb, 0, sizeof(fb));
       pipe->set_framebuffer_state(pipe, &fb);
+      pipe_surface_reference(&target, NULL);
       ok = !yttrium_gdi_take_draw_failure(pipe);
       if (ok) {
          dst_sub->cpu_dirty = false;
@@ -4517,22 +4534,29 @@ D3D9ColorFill(HANDLE hDevice, const D3DDDIARG_COLORFILL *data)
  * software processor of its own, and with this driver that path showed nothing but black
  * (docs/windows/mesa-win7.md, "Windows Media Player").
  *
- * Frames are RGB: a decoder converts before it hands them over, as no YUV format is listed.
- * They come in surfaces kept in memory (D3D9IsPlainInMemory), so a frame
- * costs one upload into a texture this keeps and one scaled blit on the host.
+ * Frames come in surfaces kept in memory (D3D9IsPlainInMemory), as RGB or in one of two
+ * video formats (D3D9IsVideoFormat). Every frame ends up as RGB in a texture this keeps and
+ * is scaled from there to the target by a blit. An RGB frame is uploaded into it. An NV12
+ * frame, which is what the decoders deliver, goes to the host as its two planes and is
+ * converted there by one draw into that texture (D3D9VideoDrawNv12): a byte and a half a
+ * pixel to upload and nothing to compute here. A YUY2 frame, or NV12 on a host without the
+ * two texture formats, is converted here on the processor (D3D9VideoToRgb) and uploaded.
  */
 struct D3D9VideoProcessor {
    HANDLE render_target;
    UINT render_target_subresource;
    struct pipe_resource *frame;        /* the frame last uploaded, on the host */
    const D3D9Resource *frame_source;   /* and the surface it came from */
+   struct pipe_resource *luma;         /* an NV12 frame's two planes on the host, */
+   struct pipe_resource *chroma;       /* converted there into `frame` (D3D9VideoDrawNv12) */
+   uint8_t *rgb;                       /* a video-format frame converted, before its upload */
+   size_t rgb_capacity;
 };
 
 bool
 D3D9VideoProcessorTakes(D3DDDIFORMAT video, D3DDDIFORMAT target)
 {
-   return (video == D3DDDIFMT_X8R8G8B8 || video == D3DDDIFMT_A8R8G8B8) &&
-      (target == D3DDDIFMT_X8R8G8B8 || target == D3DDDIFMT_A8R8G8B8);
+   return (D3D9IsRgb32(video) || D3D9IsVideoFormat(video)) && D3D9IsRgb32(target);
 }
 
 HRESULT APIENTRY
@@ -4559,6 +4583,9 @@ D3D9DestroyVideoProcessDevice(HANDLE hDevice, HANDLE hVideoProcessor)
    D3D9VideoProcessor *processor = (D3D9VideoProcessor *)hVideoProcessor;
    if (processor) {
       pipe_resource_reference(&processor->frame, NULL);
+      pipe_resource_reference(&processor->luma, NULL);
+      pipe_resource_reference(&processor->chroma, NULL);
+      free(processor->rgb);
       free(processor);
    }
    return S_OK;
@@ -4634,6 +4661,337 @@ D3D9VideoClip(const RECT *bounds, RECT *src, RECT *dst)
    return true;
 }
 
+/* What turns Y'CbCr (each 0 to 1, as sampled) into RGB: three rows of four, the fourth
+ * column the constant part. The matrix and the range are the frame's own (its extended
+ * format); where it does not say, high definition is BT.709, anything smaller BT.601, and
+ * the range the studio one (16 to 235), as video is unless it says otherwise. */
+static void
+D3D9VideoMatrix(const DXVADDI_EXTENDEDFORMAT *colour, UINT height, float rows[3][4])
+{
+   const UINT matrix = colour ? colour->VideoTransferMatrix : 0;   /* 1: BT.709, 2: BT.601 */
+   const bool bt709 = matrix == 1 || (matrix != 2 && height > 576);
+   const bool full_range = colour && colour->NominalRange == 1;   /* 1: 0 to 255 */
+   const float kr = bt709 ? 0.2126f : 0.299f;
+   const float kb = bt709 ? 0.0722f : 0.114f;
+   const float kg = 1.0f - kr - kb;
+   const float luma = full_range ? 1.0f : 255.0f / 219.0f;
+   const float chroma = full_range ? 1.0f : 255.0f / 224.0f;
+   const float luma_zero = full_range ? 0.0f : 16.0f / 255.0f;
+   const float chroma_zero = 128.0f / 255.0f;
+   const float from_cb[3] = { 0.0f, -2.0f * kb * (1.0f - kb) / kg * chroma,
+                              2.0f * (1.0f - kb) * chroma };
+   const float from_cr[3] = { 2.0f * (1.0f - kr) * chroma,
+                              -2.0f * kr * (1.0f - kr) / kg * chroma, 0.0f };
+   for (unsigned c = 0; c < 3; ++c) {
+      rows[c][0] = luma;
+      rows[c][1] = from_cb[c];
+      rows[c][2] = from_cr[c];
+      rows[c][3] = -luma * luma_zero - (from_cb[c] + from_cr[c]) * chroma_zero;
+   }
+}
+
+/* The conversion draw's fragment shader. A fragment's place on the target gives the place
+ * in the frame (c0: scale in xy, offset in zw, in texture coordinates, which are the same
+ * for both planes); luma from the first texture, the chroma pair from the second; then the
+ * three rows of the matrix (c1 to c3). */
+static void *
+D3D9CreateVideoFs(struct pipe_context *pipe)
+{
+   struct ureg_program *ureg = ureg_create(MESA_SHADER_FRAGMENT);
+   if (!ureg)
+      return NULL;
+   struct ureg_src frag = ureg_DECL_fs_input(ureg, TGSI_SEMANTIC_POSITION, 0,
+                                             TGSI_INTERPOLATE_LINEAR);
+   struct ureg_src c0 = ureg_DECL_constant(ureg, 0);
+   struct ureg_src rows[3] = { ureg_DECL_constant(ureg, 1), ureg_DECL_constant(ureg, 2),
+                               ureg_DECL_constant(ureg, 3) };
+   struct ureg_src samplers[2] = { ureg_DECL_sampler(ureg, 0), ureg_DECL_sampler(ureg, 1) };
+   for (unsigned i = 0; i < 2; ++i)
+      ureg_DECL_sampler_view(ureg, i, TGSI_TEXTURE_2D, TGSI_RETURN_TYPE_FLOAT,
+                             TGSI_RETURN_TYPE_FLOAT, TGSI_RETURN_TYPE_FLOAT,
+                             TGSI_RETURN_TYPE_FLOAT);
+   struct ureg_dst out = ureg_DECL_output(ureg, TGSI_SEMANTIC_COLOR, 0);
+   struct ureg_dst coord = ureg_DECL_temporary(ureg);
+   struct ureg_dst ycc = ureg_DECL_temporary(ureg);
+   struct ureg_dst texel = ureg_DECL_temporary(ureg);
+
+   ureg_MAD(ureg, ureg_writemask(coord, TGSI_WRITEMASK_XY), frag, c0,
+            ureg_swizzle(c0, TGSI_SWIZZLE_Z, TGSI_SWIZZLE_W, TGSI_SWIZZLE_Z, TGSI_SWIZZLE_W));
+   ureg_MOV(ureg, ureg_writemask(coord, TGSI_WRITEMASK_ZW), ureg_imm1f(ureg, 0.0f));
+   ureg_TEX(ureg, texel, TGSI_TEXTURE_2D, ureg_src(coord), samplers[0]);
+   ureg_MOV(ureg, ureg_writemask(ycc, TGSI_WRITEMASK_X), ureg_src(texel));
+   ureg_TEX(ureg, texel, TGSI_TEXTURE_2D, ureg_src(coord), samplers[1]);
+   ureg_MOV(ureg, ureg_writemask(ycc, TGSI_WRITEMASK_YZ),
+            ureg_swizzle(ureg_src(texel), TGSI_SWIZZLE_X, TGSI_SWIZZLE_X, TGSI_SWIZZLE_Y,
+                         TGSI_SWIZZLE_Y));
+   ureg_MOV(ureg, ureg_writemask(ycc, TGSI_WRITEMASK_W), ureg_imm1f(ureg, 1.0f));
+   ureg_DP4(ureg, ureg_writemask(out, TGSI_WRITEMASK_X), ureg_src(ycc), rows[0]);
+   ureg_DP4(ureg, ureg_writemask(out, TGSI_WRITEMASK_Y), ureg_src(ycc), rows[1]);
+   ureg_DP4(ureg, ureg_writemask(out, TGSI_WRITEMASK_Z), ureg_src(ycc), rows[2]);
+   ureg_MOV(ureg, ureg_writemask(out, TGSI_WRITEMASK_W), ureg_imm1f(ureg, 1.0f));
+   ureg_END(ureg);
+   return ureg_create_shader_and_destroy(ureg, pipe);
+}
+
+/* An NV12 frame converted by the host into the processor's frame texture: its luma plane
+ * as a one-channel texture and its chroma plane as a two-channel texture of half the size,
+ * and one quad over the whole frame. Drawn into a texture of the processor's own, not the
+ * target: the target is whatever the program has bound, and scaling to it is the blit's job
+ * as for any other frame. False if the host lacks either texture format or the draw fails;
+ * the caller then converts the frame itself. */
+static bool
+D3D9VideoDrawNv12(D3D9Device *device, D3D9VideoProcessor *processor,
+                  D3D9Resource *src_resource, D3D9SubResource *src_sub,
+                  const DXVADDI_EXTENDEDFORMAT *colour)
+{
+   struct pipe_context *pipe = device->pipe;
+   struct pipe_screen *screen = device->screen;
+   struct pipe_resource *dst_tex = processor->frame;
+   const UINT width = src_sub->width, height = src_sub->height;
+   const UINT chroma_width = (width + 1) / 2, chroma_height = (height + 1) / 2;
+   /* RIPPLE_VIDEO_CPU (any value): convert in the driver instead, to compare the two */
+   static int in_driver = -1;
+   if (in_driver < 0)
+      in_driver = getenv("RIPPLE_VIDEO_CPU") != NULL;
+   if (in_driver || src_resource->format != D3D9_FMT_NV12 || !screen || !dst_tex ||
+       !pipe->texture_subdata || !pipe->create_sampler_view ||
+       !(dst_tex->bind & PIPE_BIND_RENDER_TARGET) ||
+       src_sub->data_capacity < src_sub->size ||
+       src_sub->pitch < 2 * chroma_width ||
+       !screen->is_format_supported(screen, PIPE_FORMAT_R8_UNORM, PIPE_TEXTURE_2D, 0, 0,
+                                    PIPE_BIND_SAMPLER_VIEW) ||
+       !screen->is_format_supported(screen, PIPE_FORMAT_R8G8_UNORM, PIPE_TEXTURE_2D, 0, 0,
+                                    PIPE_BIND_SAMPLER_VIEW))
+      return false;
+
+   if (processor->luma &&
+       (processor->luma->width0 != width || processor->luma->height0 != height)) {
+      pipe_resource_reference(&processor->luma, NULL);
+      pipe_resource_reference(&processor->chroma, NULL);
+   }
+   if (!processor->luma || !processor->chroma) {
+      struct pipe_resource templ;
+      memset(&templ, 0, sizeof(templ));
+      templ.target = PIPE_TEXTURE_2D;
+      templ.depth0 = 1;
+      templ.array_size = 1;
+      templ.nr_samples = 1;
+      templ.nr_storage_samples = 1;
+      templ.bind = PIPE_BIND_SAMPLER_VIEW;
+      templ.usage = PIPE_USAGE_DEFAULT;
+      templ.format = PIPE_FORMAT_R8_UNORM;
+      templ.width0 = width;
+      templ.height0 = height;
+      pipe_resource_reference(&processor->luma, NULL);
+      processor->luma = screen->resource_create(screen, &templ);
+      templ.format = PIPE_FORMAT_R8G8_UNORM;
+      templ.width0 = chroma_width;
+      templ.height0 = chroma_height;
+      pipe_resource_reference(&processor->chroma, NULL);
+      processor->chroma = screen->resource_create(screen, &templ);
+      if (!processor->luma || !processor->chroma)
+         return false;
+   }
+
+   /* this sets the context's state itself and leaves it empty */
+   D3D9SettleDrawState(device);
+   if (!D3D9InitKeyBlitState(device))
+      return false;
+   if (!device->key_blit.video_fs)
+      device->key_blit.video_fs = D3D9CreateVideoFs(pipe);
+   if (!device->key_blit.video_sampler) {
+      struct pipe_sampler_state sampler;
+      memset(&sampler, 0, sizeof(sampler));
+      sampler.wrap_s = sampler.wrap_t = sampler.wrap_r = PIPE_TEX_WRAP_CLAMP_TO_EDGE;
+      sampler.min_img_filter = sampler.mag_img_filter = PIPE_TEX_FILTER_LINEAR;
+      sampler.min_mip_filter = PIPE_TEX_MIPFILTER_NONE;
+      device->key_blit.video_sampler = pipe->create_sampler_state(pipe, &sampler);
+   }
+   if (!device->key_blit.video_fs || !device->key_blit.video_sampler)
+      return false;
+
+   {
+      struct pipe_box box;
+      memset(&box, 0, sizeof(box));
+      box.depth = 1;
+      box.width = width;
+      box.height = height;
+      pipe->texture_subdata(pipe, processor->luma, 0,
+                            PIPE_MAP_WRITE | PIPE_MAP_DISCARD_WHOLE_RESOURCE, &box,
+                            src_sub->data, src_sub->pitch, src_sub->pitch * height);
+      box.width = chroma_width;
+      box.height = chroma_height;
+      pipe->texture_subdata(pipe, processor->chroma, 0,
+                            PIPE_MAP_WRITE | PIPE_MAP_DISCARD_WHOLE_RESOURCE, &box,
+                            src_sub->data + (size_t)src_sub->pitch * height, src_sub->pitch,
+                            src_sub->pitch * chroma_height);
+   }
+
+   struct pipe_sampler_view *views[2] = { NULL, NULL };
+   struct pipe_sampler_view view_templ;
+   u_sampler_view_default_template(&view_templ, processor->luma, PIPE_FORMAT_R8_UNORM);
+   views[0] = pipe->create_sampler_view(pipe, processor->luma, &view_templ);
+   u_sampler_view_default_template(&view_templ, processor->chroma, PIPE_FORMAT_R8G8_UNORM);
+   views[1] = pipe->create_sampler_view(pipe, processor->chroma, &view_templ);
+
+   const unsigned fb_w = width, fb_h = height;
+   const float verts[8] = { -1.0f, -1.0f, 1.0f, -1.0f, -1.0f, 1.0f, 1.0f, 1.0f };
+   struct pipe_vertex_buffer vb;
+   memset(&vb, 0, sizeof(vb));
+   unsigned vb_offset = 0;
+   struct pipe_resource *vb_release = NULL;
+   u_upload_data(pipe->stream_uploader, 0, sizeof(verts), 16, verts,
+                 &vb_offset, &vb.buffer.resource, &vb_release);
+   vb.buffer_offset = vb_offset;
+
+   bool ok = views[0] && views[1] && vb.buffer.resource;
+   if (ok) {
+      struct pipe_framebuffer_state fb;
+      memset(&fb, 0, sizeof(fb));
+      fb.width = fb_w;
+      fb.height = fb_h;
+      fb.nr_cbufs = 1;
+      {
+         struct pipe_surface templ;
+         memset(&templ, 0, sizeof(templ));
+         templ.format = dst_tex->format;
+         fb.cbufs[0] = pipe->create_surface(pipe, dst_tex, &templ);
+      }
+      /* The virgl context keeps the pointer without a reference of its own, and sends the
+       * surface's resource again with a draw that follows a flush: the surface has to live
+       * until it is off the context. */
+      struct pipe_surface *target = fb.cbufs[0];
+      pipe->set_framebuffer_state(pipe, &fb);
+
+      struct pipe_viewport_state vp;
+      memset(&vp, 0, sizeof(vp));
+      vp.scale[0] = fb_w * 0.5f;
+      vp.scale[1] = fb_h * 0.5f;
+      vp.scale[2] = 1.0f;
+      vp.translate[0] = fb_w * 0.5f;
+      vp.translate[1] = fb_h * 0.5f;
+      vp.swizzle_x = PIPE_VIEWPORT_SWIZZLE_POSITIVE_X;
+      vp.swizzle_y = PIPE_VIEWPORT_SWIZZLE_POSITIVE_Y;
+      vp.swizzle_z = PIPE_VIEWPORT_SWIZZLE_POSITIVE_Z;
+      vp.swizzle_w = PIPE_VIEWPORT_SWIZZLE_POSITIVE_W;
+      pipe->set_viewport_states(pipe, 0, 1, &vp);
+
+      /* a pixel of the frame texture (x + 0.5) is the same place in both planes */
+      float constants[16];
+      constants[0] = 1.0f / width;
+      constants[1] = 1.0f / height;
+      constants[2] = constants[3] = 0.0f;
+      float rows[3][4];
+      D3D9VideoMatrix(colour, height, rows);
+      memcpy(&constants[4], rows, sizeof(rows));
+      struct pipe_constant_buffer cb;
+      memset(&cb, 0, sizeof(cb));
+      cb.user_buffer = constants;
+      cb.buffer_size = sizeof(constants);
+
+      void *samplers[2] = { device->key_blit.video_sampler, device->key_blit.video_sampler };
+      pipe->bind_blend_state(pipe, device->key_blit.blend);
+      pipe->bind_rasterizer_state(pipe, device->key_blit.rasterizer);
+      pipe->bind_depth_stencil_alpha_state(pipe, device->key_blit.dsa);
+      if (pipe->set_sample_mask)
+         pipe->set_sample_mask(pipe, ~0u);
+      pipe->bind_vs_state(pipe, device->key_blit.vs);
+      pipe->bind_gs_state(pipe, NULL);
+      pipe->bind_fs_state(pipe, device->key_blit.video_fs);
+      pipe->set_constant_buffer(pipe, MESA_SHADER_VERTEX, 0, false, NULL);
+      pipe->set_constant_buffer(pipe, MESA_SHADER_FRAGMENT, 0, false, &cb);
+      pipe->bind_sampler_states(pipe, MESA_SHADER_FRAGMENT, 0, 2, samplers);
+      pipe->set_sampler_views(pipe, MESA_SHADER_FRAGMENT, 0, 2, 0, false, views);
+      pipe->bind_vertex_elements_state(pipe, device->key_blit.velems);
+      {
+         /* Mesa 24.3's context takes over one reference to the buffer */
+         struct pipe_resource *held = NULL;
+         pipe_resource_reference(&held, vb.buffer.resource);
+      }
+      pipe->set_vertex_buffers(pipe, 1, &vb);
+      util_draw_arrays(pipe, MESA_PRIM_TRIANGLE_STRIP, 0, 4);
+
+      pipe->set_vertex_buffers(pipe, 0, NULL);
+      pipe->bind_vertex_elements_state(pipe, NULL);
+      pipe->set_sampler_views(pipe, MESA_SHADER_FRAGMENT, 0, 0, 2, false, NULL);
+      void *no_samplers[2] = { NULL, NULL };
+      pipe->bind_sampler_states(pipe, MESA_SHADER_FRAGMENT, 0, 2, no_samplers);
+      pipe->set_constant_buffer(pipe, MESA_SHADER_FRAGMENT, 0, false, NULL);
+      pipe->bind_vs_state(pipe, NULL);
+      pipe->bind_fs_state(pipe, NULL);
+      pipe->bind_depth_stencil_alpha_state(pipe, NULL);
+      pipe->bind_rasterizer_state(pipe, NULL);
+      pipe->bind_blend_state(pipe, NULL);
+      memset(&fb, 0, sizeof(fb));
+      pipe->set_framebuffer_state(pipe, &fb);
+      pipe_surface_reference(&target, NULL);
+      ok = !yttrium_gdi_take_draw_failure(pipe);
+   }
+   pipe_resource_release(pipe, vb_release);
+   for (unsigned i = 0; i < 2; ++i) {
+      if (views[i])
+         pipe_sampler_view_release(views[i]);
+   }
+   return ok;
+}
+
+/* A frame in a video format to 32-bit RGB (B, G, R, 255), `out` holding width x height
+ * pixels without padding. The matrix and the range are the frame's own (its extended
+ * format); where it does not say, high definition is BT.709, anything smaller BT.601, and
+ * the range the studio one (16 to 235), as video is unless it says otherwise. Chroma is taken
+ * from the nearest sample. */
+static void
+D3D9VideoToRgb(D3DDDIFORMAT format, const D3D9SubResource *sub,
+               const DXVADDI_EXTENDEDFORMAT *colour, uint8_t *out)
+{
+   const UINT matrix = colour ? colour->VideoTransferMatrix : 0;   /* 1: BT.709, 2: BT.601 */
+   const bool bt709 = matrix == 1 || (matrix != 2 && sub->height > 576);
+   const bool full_range = colour && colour->NominalRange == 1;   /* 1: 0 to 255 */
+   const float kr = bt709 ? 0.2126f : 0.299f;
+   const float kb = bt709 ? 0.0722f : 0.114f;
+   const float kg = 1.0f - kr - kb;
+   const float luma_gain = full_range ? 1.0f : 255.0f / 219.0f;
+   const float chroma_gain = full_range ? 1.0f : 255.0f / 224.0f;
+   const int luma_zero = full_range ? 0 : 16;
+
+   /* in 1/1024ths: what each of Y, Cb and Cr adds to each of red, green and blue */
+   int from_y[256], red_cr[256], green_cb[256], green_cr[256], blue_cb[256];
+   for (int i = 0; i < 256; ++i) {
+      from_y[i] = (int)(luma_gain * (i - luma_zero) * 1024.0f) + 512;
+      red_cr[i] = (int)(2.0f * (1.0f - kr) * chroma_gain * (i - 128) * 1024.0f);
+      blue_cb[i] = (int)(2.0f * (1.0f - kb) * chroma_gain * (i - 128) * 1024.0f);
+      green_cb[i] = (int)(2.0f * kb * (1.0f - kb) / kg * chroma_gain * (i - 128) * 1024.0f);
+      green_cr[i] = (int)(2.0f * kr * (1.0f - kr) / kg * chroma_gain * (i - 128) * 1024.0f);
+   }
+
+   const UINT width = sub->width;
+   for (UINT y = 0; y < sub->height; ++y) {
+      const uint8_t *luma = sub->data + (size_t)y * sub->pitch;
+      /* NV12: the chroma pairs of this row, in the plane after the luma rows */
+      const uint8_t *chroma = sub->data + (size_t)(sub->height + y / 2) * sub->pitch;
+      uint8_t *pixel = out + (size_t)y * width * 4;
+      for (UINT x = 0; x < width; ++x, pixel += 4) {
+         int l, cb, cr;
+         if (format == D3D9_FMT_NV12) {
+            l = luma[x];
+            cb = chroma[x & ~1u];
+            cr = chroma[(x & ~1u) + 1];
+         } else {   /* YUY2: Y0 Cb Y1 Cr */
+            l = luma[2 * x];
+            cb = luma[4 * (x / 2) + 1];
+            cr = luma[4 * (x / 2) + 3];
+         }
+         const int r = (from_y[l] + red_cr[cr]) >> 10;
+         const int g = (from_y[l] - green_cb[cb] - green_cr[cr]) >> 10;
+         const int b = (from_y[l] + blue_cb[cb]) >> 10;
+         pixel[0] = (uint8_t)CLAMP(b, 0, 255);
+         pixel[1] = (uint8_t)CLAMP(g, 0, 255);
+         pixel[2] = (uint8_t)CLAMP(r, 0, 255);
+         pixel[3] = 255;
+      }
+   }
+}
+
 /* A frame in memory: uploaded into the processor's own texture when it changed, then
  * scaled from there. */
 static bool
@@ -4641,14 +4999,19 @@ D3D9VideoBlitFrame(D3D9Device *device, D3D9VideoProcessor *processor,
                    D3D9Resource *dst_resource, D3D9SubResource *dst_sub,
                    UINT dst_subresource_index, const RECT *dst,
                    D3D9Resource *src_resource, D3D9SubResource *src_sub,
-                   const RECT *src)
+                   const RECT *src, const DXVADDI_EXTENDEDFORMAT *colour)
 {
-   const enum pipe_format format = D3D9FormatToPipe(src_resource->format);
+   const bool video = D3D9IsVideoFormat(src_resource->format);
+   const enum pipe_format format = video ? PIPE_FORMAT_B8G8R8X8_UNORM :
+      D3D9FormatToPipe(src_resource->format);
    if (!device->screen || !device->pipe->texture_subdata || !device->pipe->blit ||
        format == PIPE_FORMAT_NONE || !dst_resource->pipe_resource ||
-       src_sub->pitch < src_sub->width * 4 ||
-       src_sub->data_capacity < (size_t)src_sub->pitch * (src_sub->height - 1) +
-                                   (size_t)src_sub->width * 4)
+       (video && src_sub->width % 2 != 0))
+      return false;
+   if (video ? src_sub->data_capacity < src_sub->size :
+               (src_sub->pitch < src_sub->width * 4 ||
+                src_sub->data_capacity < (size_t)src_sub->pitch * (src_sub->height - 1) +
+                                            (size_t)src_sub->width * 4))
       return false;
 
    if (processor->frame &&
@@ -4669,7 +5032,8 @@ D3D9VideoBlitFrame(D3D9Device *device, D3D9VideoProcessor *processor,
       templ.array_size = 1;
       templ.nr_samples = 1;
       templ.nr_storage_samples = 1;
-      templ.bind = PIPE_BIND_SAMPLER_VIEW;
+      /* a video frame is drawn into it by the conversion (D3D9VideoDrawNv12) */
+      templ.bind = PIPE_BIND_SAMPLER_VIEW | (video ? PIPE_BIND_RENDER_TARGET : 0);
       templ.usage = PIPE_USAGE_DEFAULT;
       processor->frame = device->screen->resource_create(device->screen, &templ);
       if (!processor->frame)
@@ -4677,16 +5041,35 @@ D3D9VideoBlitFrame(D3D9Device *device, D3D9VideoProcessor *processor,
       processor->frame_source = NULL;
    }
    /* The renderer draws a frame again when its window is repainted: no second upload */
+   if ((processor->frame_source != src_resource || src_sub->cpu_dirty) &&
+       D3D9VideoDrawNv12(device, processor, src_resource, src_sub, colour)) {
+      processor->frame_source = src_resource;
+      src_sub->cpu_dirty = false;
+   }
    if (processor->frame_source != src_resource || src_sub->cpu_dirty) {
       struct pipe_box box;
       memset(&box, 0, sizeof(box));
       box.width = src_sub->width;
       box.height = src_sub->height;
       box.depth = 1;
+      const uint8_t *pixels = src_sub->data;
+      UINT pitch = src_sub->pitch;
+      if (video) {
+         const size_t needed = (size_t)src_sub->width * src_sub->height * 4;
+         if (processor->rgb_capacity < needed) {
+            free(processor->rgb);
+            processor->rgb = (uint8_t *)malloc(needed);
+            processor->rgb_capacity = processor->rgb ? needed : 0;
+            if (!processor->rgb)
+               return false;
+         }
+         D3D9VideoToRgb(src_resource->format, src_sub, colour, processor->rgb);
+         pixels = processor->rgb;
+         pitch = src_sub->width * 4;
+      }
       device->pipe->texture_subdata(device->pipe, processor->frame, 0,
                                     PIPE_MAP_WRITE | PIPE_MAP_DISCARD_WHOLE_RESOURCE,
-                                    &box, src_sub->data, src_sub->pitch,
-                                    src_sub->pitch * src_sub->height);
+                                    &box, pixels, pitch, pitch * src_sub->height);
       processor->frame_source = src_resource;
       src_sub->cpu_dirty = false;
    }
@@ -4742,7 +5125,8 @@ D3D9VideoProcessBlt(HANDLE hDevice, const D3DDDIARG_VIDEOPROCESSBLT *data)
          if (!src_resource->pipe_resource && src_sub->data)
             drawn = D3D9VideoBlitFrame(device, processor, dst_resource, dst_sub,
                                        processor->render_target_subresource, &dst,
-                                       src_resource, src_sub, &src);
+                                       src_resource, src_sub, &src,
+                                       &sample->SampleFormat);
          else
             drawn = D3D9CopyRectPipe(device, processor->render_target,
                                      processor->render_target_subresource, &dst,

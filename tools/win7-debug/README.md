@@ -263,6 +263,12 @@ plays a video in a window of its own through DirectShow or through Media
 Foundation, both ending in the Enhanced Video Renderer, and reads the screen at
 64 points: how many are not black, and whether the picture moves.
 
+`guest/hdclips.cmd TAG` runs each video playback test of Windows' own assessment
+alone, with the command line the full assessment uses, and sends what each
+printed and its result file (frames rendered against frames expected).
+`guest/weirun.cmd TAG` runs the full assessment and sends the scores, the limits
+applied and the video figures from its result file.
+
 At trace level 3 a lock or unlock of a surface in memory also says how many of
 256 points spread over it are not black, which tells an empty frame from a dark
 one, and what address Windows passed with the lock.

@@ -335,7 +335,7 @@ Also seen: after ten idle minutes Windows switched the display off (the kernel d
 monitor's power state), and the first mouse movement brought it back with the compositor
 running. Sleep and hibernation stay switched off by the INF.
 
-### Windows Media Player: the picture stays black (open, 2026-11-15)
+### Windows Media Player: the picture stays black (2026-11-15; solved 2026-11-19, see "Video playback")
 
 The sample video plays (sound, time, controls) but its picture is black. The assessment's
 video test, which counts decoded frames, never showed this. What the Direct3D 9 trace found
@@ -373,6 +373,8 @@ Next: check that path, the compositor opening a surface the Direct3D 9 driver sh
 what it reads (a picture the compositor shows black reads as zeros, so likely another host
 resource than the one the player drew into); then put the processor back and check the
 picture.
+
+None of that was the cause; "Video playback" below has what was.
 
 ## Shaders that fit the host (2026-11-16)
 
@@ -1202,3 +1204,103 @@ they came. In UTM the display client then logged the fade to black (26 draws in
 host, where the first frame comes at once, frames taken every 0.1 s show six
 steps down and seven up as before, and the checks pass on both.
 What the screen itself shows in UTM has not been captured.
+
+## Video playback (2026-11-19)
+
+Until now Windows Media Player showed a black picture, and Windows' own assessment could not
+start its H.264 and MPEG-2 playback tests ("Could not find a codec to decode this file"), on
+every host. Four things were missing. Two small programs check them and stay as regression
+tests: `tools/win7-hello/d3d9flipex.c` (one colour per step, then the screen is read) and
+`vidplay.c` (plays a file through DirectShow or Media Foundation and counts lit points).
+
+**Writes under an ordinary lock were lost.** A Direct3D 9 lock of a video-memory surface that
+neither discards nor is read-only maps a staging copy of the surface for reading and writing.
+On a host that copies textures into staging buffers (virglrenderer 0.10 and later) Mesa's
+virgl driver took such a map for a read alone: the texels were fetched, the program changed
+them, and unmap dropped the changes without an error. A surface filled that way and copied
+to the screen showed what the host's texture had held before. Patch 0040 makes a map that
+writes always write back. This is the step "blit" of `d3d9flipex`; it failed in every run
+before the patch.
+
+**A video processor.** Windows' video renderer (the Enhanced Video Renderer) hands every
+decoded frame to a DirectX Video Acceleration processor: a frame, a target, two rectangles
+and a background colour. With none in the driver it uses a software processor of its own.
+The driver now offers the progressive device (`D3D9VideoProcessBlt`): the frame's part is
+scaled to its place on the target by the host, and what the frame leaves free takes the
+background colour. No deinterlacing, no colour controls, no sub-streams (Windows mixes
+subtitles itself then).
+
+**Plain surfaces are kept in memory.** The renderer keeps each frame in a plain video-memory
+surface, which the decoder locks once per frame without discarding. As a host texture that
+meant fetching the old contents back from the host for every frame. A plain surface of a
+Direct3D 9 program (no render target, no texture) now lives in the driver's memory
+(`D3D9IsPlainInMemory`): locks cost nothing, colour fills and copies between such surfaces
+are done in memory, and a frame costs one upload into a texture the processor keeps.
+DirectDraw's plain surfaces are not included, as it presents from them.
+
+**Two video formats.** With only RGB accepted, a decoder that cannot produce RGB (H.264,
+MPEG-2) had nothing to connect to, which is the "codec" message. And Media Foundation's
+pipeline, which Media Player uses, ran with RGB but never wrote a frame: the surfaces were
+locked twice per frame and their memory stayed empty, as did guard areas put before and
+after it for one experiment. DirectShow's pipeline wrote its frames into the same surfaces.
+NV12 and YUY2 are now listed as plain-surface formats and taken by the processor; the
+decoders then deliver NV12 and the frames arrive.
+
+**The conversion is the host's.** An NV12 frame goes up as its two planes, a one-channel
+texture of luma and a two-channel texture of chroma at half the size, and one draw converts
+it into a texture the processor keeps (`D3D9VideoDrawNv12`); the scaled blit to the target is
+the same as for an RGB frame. That is a byte and a half per pixel to upload and nothing to
+compute in the guest. The matrix and range are the frame's own (BT.709 for high definition
+and BT.601 below when it names none, studio range). A first version converted in the driver
+by table: under emulation that was slower than the decoder's own conversion had been (the
+assessment's playback test went from 36.7 to 50.2 ms a frame), so it stays only as the
+fallback for YUY2 and for a host without the two texture formats; `RIPPLE_VIDEO_CPU` forces
+it, to compare. Both give the same pixels in `d3d9flipex`'s "nv12" step (c8611f for a frame
+of c86020).
+
+**A surface bound as render target has to outlive its binding.** Mesa's virgl context copies
+the framebuffer state without taking references, and sends the bound surface's resource
+again with the first draw after a flush. The driver's two internal draws (the colour-key
+blit and now the conversion) released their surface right after binding it. The draw then
+read freed memory: in a 32-bit process that happened to hold the old contents, in a 64-bit
+one the conversion crashed. Both now keep the surface until it is off the context.
+
+On the desktop OpenGL host (VM 220), with the build before the conversion moved to the host:
+
+| Check | Before | Now |
+| --- | --- | --- |
+| `d3d9flipex`, both process sizes, flip and copy model | "blit" fails in all four runs | every step passes |
+| Sample video through DirectShow (`vidplay ds`) | not run | 64 of 64 points lit, moving |
+| Sample video through Media Foundation (`vidplay mf`) | black | 64 of 64 points lit, moving |
+| Sample video in Media Player | black | the picture, colours as expected |
+| 1080p H.264 clip through Media Foundation | cannot start | 64 of 64 points lit, moving |
+| Assessment: 1080 MPEG-2, 480i MPEG-2, 480p MPEG-2 | cannot start | 294 of 270 to 300, 296 of 270 to 300, 151 of 135 to 150 frames |
+| Assessment: 1080 H.264, 480 H.264 | cannot start | 151 and 151 frames |
+| Assessment: 1080 VC-1 | passes | 147 of 135 to 150 frames |
+| Full assessment | 7.0 to 7.1 | 7.1; high- and standard-definition playback pass |
+
+In UTM on Apple silicon (emulated processor, the host's renderer on OpenGL ES), final build,
+frames rendered by each of the assessment's playback tests run alone:
+
+| Test (frames expected) | Before | Now |
+| --- | --- | --- |
+| 1080 MPEG-2 (270 to 300) | cannot start | 195 |
+| 1080 VC-1 (135 to 150) | 78 | 82 |
+| 480i MPEG-2 (270 to 300) | cannot start | 245 |
+| 480p MPEG-2 (135 to 150) | cannot start | 125 |
+| 1080 H.264 (135 to 150) | cannot start | 150 |
+| 480 H.264 (270 to 300) | cannot start | 141 |
+| Playback test of the full assessment, mean time per frame | 36.7 ms | 23.3 ms |
+| Full assessment | 5.9, limited "frames dropped when decoding high definition video" | 6.0, no limit; high-definition playback passes |
+
+There `d3d9flipex` passes all 28 steps in both process sizes and `vidplay` shows a moving
+picture through both pipelines. What is left of dropped frames in UTM is decoding on an
+emulated processor.
+
+DirectShow cannot open the H.264 clip at all: Windows 7 has no DirectShow reader for MP4
+files, with any driver.
+
+Open: interlaced video is shown as it is decoded (no deinterlacing device), YUY2 frames are
+still converted in the driver, and a program that stretches a video-format surface itself,
+without the video processor, is not served, which the format list says by not offering that
+conversion.
