@@ -345,6 +345,7 @@ static u32 last_gpu_update = 0;
 static u32 display_serial, gpu_flips, gpu_updates, timer_updates;
 static u32 cpu_owner, last_cpu_sample, cpu_flips, cpu_samples, cpu_uploads;
 #define DISPLAY_PERIOD_MS 17
+#define DOS13_PERIOD_MS 14
 static u32 visible = 0;                         /* last SET_SCANOUT acknowledged */
 static u32 takeover = 0;                        /* virtio has taken the display from VGA */
 static u32 refresh_pending = 0;
@@ -1921,8 +1922,12 @@ void __cdecl vgpu_desktop_tick(void)
     if (upload.head)
         queue_refresh(upload.expired || upload_test_held ? 17 : 2);
     else if (takeover && (display_bpp || dos_active)) {
-        if (!gpu_page && !cpu_owner)
-            queue_refresh(dos_active ? 50 : 32);
+        if (!gpu_page && !cpu_owner) {
+            if (dos_active && pal.valid && pal.serial == display_serial && visible == PAL_TARGET)
+                queue_refresh(DOS13_PERIOD_MS);
+            else
+                queue_refresh(dos_active ? 50 : 32);
+        }
         else if (!gpu_page || pending_gpu) {
             age = vmm_time_ms() - (gpu_page ? last_gpu_update : last_cpu_sample);
             queue_refresh(age < DISPLAY_PERIOD_MS ? DISPLAY_PERIOD_MS - age : 1);

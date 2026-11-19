@@ -229,6 +229,51 @@ index during this transition. The driver restores the interrupted position befor
 the program writes its next component. For planar DOS graphics, custom strides or
 display starts, use the default VGA path on a fresh boot.
 
+On Apple silicon with UTM 5.0.8, the 50 ms and 14 ms drivers both passed
+`DOS13.COM /K` and all three split palette writes after GPU presentation.
+In each run the guest verified the unchanged indices after the palette update,
+the block move and palette entry 3 (63, 32, 0). It returned to 80×25 text and
+then to Windows.
+
+A diagnostic driver read back the 640×400 GPU image selected for display after
+the scanout and flush commands succeeded. All 17 readbacks across the four runs
+matched the expected RGB values at every one of the 256,000 pixels, including
+frames during full-screen reentry. The RGB hashes for the initial frame, the
+palette change and the block move were `c3feaf35`, `51d0e925` and `f541a925`.
+The palette change uploaded 16 palette bytes and the block move uploaded 6,264
+index bytes. The UTM viewer itself was outside this pixel comparison.
+
+#### Scrolling in Tyrian 2000 on the Intel host
+
+Tyrian 2000's first recorded demo runs in standard chained mode 13h. With the
+50 ms refresh delay, a projectile could occupy the same spot in three consecutive
+host captures as the game continued to scroll. The driver now requests its next
+refresh after 14 ms while the current DOS session has a valid indexed image
+selected for display. The index texture and palette stay on the GPU.
+
+| Display path | Image changes/s, two 8 s samples | Median gap | 95th-percentile gap |
+|---|---:|---:|---:|
+| Native VGA | 33.34 / 33.33 | 30 ms | 30 ms |
+| Indexed GPU, 50 ms delay | 13.98 / 13.85 | 60 ms | 90 ms |
+| Indexed GPU, 14 ms delay | 33.33 / 33.32 | 30 ms | 30 ms |
+
+The guest ran `FILE0001 NOSOUND NOJOY` and entered its first attract demo
+without input. Each run sampled the same 192×144 region of the 640×400 host
+display. A local VNC client requested 120 samples/s and received about 33.3/s.
+Every reply during gameplay contained a changed image on native VGA and with
+the 14 ms delay. This measures the frames delivered to that client. To align the
+three sequences below, the first crop in each row was matched byte for byte
+before compression. Each subsequent column is the next reply, about 30 ms later.
+[Six consecutive captures from each display path](img/tyrian-pacing.webp)
+
+The five-second 1024×768×32 Direct3D takeover scene passed on the same two
+driver builds at 3,921.6 and 3,942.0 guest flips/s, respectively. Every measured
+group of 100 flips on each build recorded zero GPU readbacks. After Tyrian
+exited, the 14 ms build matched native VGA at every pixel in the three DOS
+probe frames, including the Alt+Enter switch during a palette write. The
+DirectDraw restoration, DirectDraw and Direct3D tests then passed with GPU
+presentation both off and on.
+
 #### Re-Volt and Tomb Raider on the Intel host
 
 Both demos ran at 640×480 in 16-bit colour on the same Windows 98 SE / DirectX 7 driver.
