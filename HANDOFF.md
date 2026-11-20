@@ -1,12 +1,12 @@
 # Ripple driver handoff
 
-## Windows Vista SP2 x64 · 2026-11-19
+## Windows Vista SP2 x64 · 2026-11-20
 
-The last verified boot of the UTM guest `ripple-vista` used Microsoft’s Standard VGA Graphics Adapter at 640×480 in 32-bit color. Explorer was running and the Ripple service was stopped. The guest reported this over COM1. Visual confirmation of the recovered desktop is still open.
+Vista booted with the test-signed Ripple 7.14.1.3 driver active at 1280×768×32. The guest verified the installed kernel binary against its signed package. Both Direct3D triangle tests read back black, and desktop composition was off. The visible desktop still needs a separate check.
 
-With test signing enabled, Ripple 7.14.1.2 held 800×600 across reboot. Both 32-bit and 64-bit Direct3D applications created a hardware device and submitted a triangle, but the UTM window stayed blank and both pixel checks returned black. A test below Direct3D received completion for both GPU transfers and recovered **0 of 1,024 texture bytes**. An independent buffer copy matched **0 of 4,096 bytes**.
+The diagnostic driver saw all 32 expected bytes at the start of the test texture in guest memory. QEMU logged the upload and download for that same resource. Both transfers signaled completion, but the application recovered **0 of 1,024 texture bytes**. The buffer copy matched **0 of 4,096 bytes**.
 
-Resume with the prepared diagnostic driver and its matching `pipecheck.exe`. Compare the test pattern with the pages Vista gives Ripple for that texture. Commit `169f188` also fixes a display surface at offset zero being treated as absent. It compiled for both Vista and Windows 7 and still needs a Vista display test. See the [artifacts, test sequence and VGA recovery instructions](docs/windows/vista-sp2-probe.md#next-vista-run).
+The next measurement is the tagged texture’s backing immediately after the host completes the download, compared with the application’s read of the same prefix. The [Vista probe report](docs/windows/vista-sp2-probe.md#tagged-texture-run) records the transfer sequence and recovery procedure.
 
 ## Original project brief for Mac OS X 10.6 (Snow Leopard) guests
 

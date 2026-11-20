@@ -119,6 +119,25 @@ Rebinding the PCI adapter to Microsoft's built-in `display.inf` selected
 at 640×480 in 32-bit color, Explorer running and the Ripple service stopped.
 The test-signed package remains available for the next driver run.
 
+### Tagged texture run
+
+On November 20, Vista read version 7.14.1.3 from its removable DVD drive.
+After installation and reboot, the active display was Ripple at 1280×768
+in 32-bit color, Explorer was running, and the installed kernel binary
+matched the signed package byte for byte. The 32-bit and 64-bit triangle
+tests both read black at the two sample points. Desktop composition was off.
+The guest reported its display mode over the serial port. Visual inspection
+of this build is still pending.
+
+For the 16×16 test texture (resource 9), the kernel logged
+`mapped=1 match=32/32` when it attached the backing pages. QEMU recorded
+creation, context attachment, backing attachment, upload, download, and
+then teardown of that resource. Both transfers signaled completion. The
+application recovered 0 of 1,024 bytes, starting with 0x00 where it had
+written 0x1e. The independent buffer copy recovered 0 of 4,096 bytes.
+The next check is to sample the same backing after download completion
+and compare it with the application's read before it releases the texture.
+
 ## Rebuild and signing handoff
 
 From the Vista worktree on the Linux builder, set `MAIN` to the checkout
@@ -159,9 +178,9 @@ available in the existing checkout.
 | Artifact | What it contains |
 | --- | --- |
 | `build/ripple-vista-7.14.1.2-test-signed.zip` | Guest-tested package that held 800×600 and reproduced the black pixels. |
-| `build/kmd-vista-scanout/viogpu3d.sys` | Build of `169f188` that accepts a desktop surface at offset zero. Guest validation is pending. |
-| `tmp-utm-validation/probe-kmd/` | Matched diagnostic `viogpu3d.sys` and `pipecheck.exe`. This build adds a check of the first 32 bytes of the test texture. Its first tagged run is pending. |
-| `build/lab-tagged-3.iso` | Private 7.14.1.3 test CD, SHA-256 `906e869ffb80d1c973899e8d13c5959dae8dc4973bb4a38716cc0fad9b17ab13`. Both diagnostic binaries were read back from the ISO and matched the build outputs. Guest installation is pending. |
+| `build/kmd-vista-scanout/viogpu3d.sys` | Build of `169f188` that accepts a desktop surface at offset zero. Its effect on the visible desktop still needs verification. |
+| `tmp-utm-validation/probe-kmd/` | Matched diagnostic driver and application used in the tagged texture run. |
+| `build/lab-tagged-3.iso` | Guest-tested 7.14.1.3 CD, SHA-256 `906e869ffb80d1c973899e8d13c5959dae8dc4973bb4a38716cc0fad9b17ab13`. |
 
 1. Use the dedicated `ripple-vista` VM. The powered-off snapshot
    `clean-before-ripple` preserves the original VGA installation. The recovery
