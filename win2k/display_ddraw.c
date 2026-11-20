@@ -139,6 +139,25 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
             g->fpVidMem = DDHAL_PLEASEALLOC_BLOCKSIZE;
             d->flipBack = g;
             d->flipOwner = EngGetCurrentProcessId();
+            /* The miniport has just revoked any other process's view of the pages. */
+            {
+                DD_FLIP_VIEW **p = &d->views;
+                while (*p) {
+                    if ((*p)->owner != d->flipOwner) {
+                        DD_FLIP_VIEW *gone = *p;
+                        if (gone == d->activeView) d->activeView = NULL;
+                        *p = gone->next;
+                        EngFreeMem(gone);
+                    } else p = &(*p)->next;
+                }
+            }
+            /* A chain rebuilt in the same DirectDraw session uses the view mapped
+             * for the earlier one: DirectDraw does not map again. */
+            if (!d->activeView) {
+                DD_FLIP_VIEW *v = d->views;
+                while (v && v->owner != d->flipOwner) v = v->next;
+                d->activeView = v;
+            }
             data->ddRVal = DD_OK;
             rc = DDHAL_DRIVER_NOTHANDLED;
         }
@@ -567,13 +586,15 @@ static DWORD APIENTRY map_memory(PDD_MAPMEMORYDATA data)
         record = *link;
         if (record) {
             rc = DDHAL_DRIVER_HANDLED;
-            if (record == d->activeView && record->references == 1) {
+            /* The view outlives its chain (a rebuilt chain reuses it), so the last
+             * unmap releases it whether or not a chain is active. */
+            if (record->references == 1) {
                 RtlZeroMemory(&view, sizeof(view));
                 view.ProcessHandle = record->process;
                 view.RequestedVirtualAddress = (PVOID)record->address;
                 if (!request(d, IOCTL_VIDEO_UNSHARE_VIDEO_MEMORY, &view, sizeof(view), NULL, 0))
                     data->ddRVal = DDERR_GENERIC;
-                else d->activeView = NULL;
+                else if (record == d->activeView) d->activeView = NULL;
             }
             if (data->ddRVal == DD_OK && !--record->references) {
                 *link = record->next;

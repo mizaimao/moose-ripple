@@ -222,7 +222,13 @@ static VP_STATUS acquire_pages(ADAPTER *a)
     VP_STATUS status = scanout_info(a, &info);
     if (status) return status;
     if (info.pageCount != 2 || info.visiblePage != 0) return ERROR_NOT_SUPPORTED;
-    if (a->chainOwner || a->view.address) return ERROR_BUSY;
+    if (a->chainOwner) return ERROR_BUSY;
+    /* A view kept from this process's earlier chain stays: DirectDraw maps once
+     * per session and goes on using that address. Another process's goes. */
+    if (a->view.address && a->view.owner != owner) {
+        status = revoke_view(a);
+        if (status) return status;
+    }
     a->chainProcess = rb_view_open((HANDLE)-1);
     if (!a->chainProcess) return ERROR_ACCESS_DENIED;
     a->chainOwner = owner;
@@ -230,10 +236,10 @@ static VP_STATUS acquire_pages(ADAPTER *a)
     return NO_ERROR;
 }
 
-static VP_STATUS release_pages(ADAPTER *a)
+static VP_STATUS release_pages(ADAPTER *a, BOOLEAN keepView)
 {
     RB2K_DD_FLIP_INFO info;
-    VP_STATUS status = revoke_view(a);
+    VP_STATUS status = keepView ? NO_ERROR : revoke_view(a);
     if (status) return status;
     if (!scanout_info(a, &info)) {
         status = select_page(a, 0, &info);
@@ -254,7 +260,7 @@ static VP_STATUS set_mode(ADAPTER *a, ULONG request)
     USHORT enable = (request & VIDEO_MODE_NO_ZERO_MEMORY) ? 0xc1 : 0x41;
     VP_STATUS status;
     if (index >= ARRAY_COUNT(modes)) return ERROR_INVALID_PARAMETER;
-    status = release_pages(a);
+    status = release_pages(a, FALSE);
     if (status) return status;
     status = rb_gpu_surface_reset(&a->gpu);
     if (status) return status;
@@ -341,10 +347,10 @@ static VP_STATUS unshare_pages(ADAPTER *a, PVIDEO_REQUEST_PACKET r)
     if (r->InputBufferLength != sizeof(*request) || r->OutputBufferLength ||
         !request->ProcessHandle || !request->RequestedVirtualAddress ||
         request->ViewOffset || request->ViewSize) return ERROR_INVALID_PARAMETER;
-    if (!a->view.address) return NO_ERROR; /* A mode change can already have revoked it. */
-    if (a->view.address != request->RequestedVirtualAddress ||
-        a->view.supplied != request->ProcessHandle || a->view.owner != rb_view_current())
-        return ERROR_INVALID_HANDLE;
+    /* A mode change or another process's chain can already have revoked it. */
+    if (!a->view.address || a->view.address != request->RequestedVirtualAddress ||
+        a->view.owner != rb_view_current()) return NO_ERROR;
+    if (a->view.supplied != request->ProcessHandle) return ERROR_INVALID_HANDLE;
     if (a->view.refs == 1) return revoke_view(a);
     --a->view.refs;
     return NO_ERROR;
@@ -415,7 +421,9 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
         break;
     }
     case IOCTL_RB2K_DD_FLIP_RELEASE:
-        status = r->InputBufferLength || r->OutputBufferLength ? ERROR_INVALID_PARAMETER : release_pages(a);
+        /* The owner's view stays until DirectDraw unmaps it, another process
+         * takes the pages or the mode changes (a rebuilt chain reuses it). */
+        status = r->InputBufferLength || r->OutputBufferLength ? ERROR_INVALID_PARAMETER : release_pages(a, TRUE);
         break;
     case IOCTL_RB2K_DD_FLIP_ACQUIRE:
         status = r->InputBufferLength || r->OutputBufferLength ? ERROR_INVALID_PARAMETER : acquire_pages(a);
@@ -485,7 +493,7 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
         break;
     case IOCTL_VIDEO_RESET_DEVICE: {
         VIDEO_X86_BIOS_ARGUMENTS bios;
-        status = release_pages(a);
+        status = release_pages(a, FALSE);
         if (status) break;
         status = rb_gpu_surface_reset(&a->gpu);
         if (status) break;
