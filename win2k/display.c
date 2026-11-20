@@ -135,6 +135,7 @@ VOID DrvDisablePDEV(DHPDEV pdev)
     DISPLAY *display = (DISPLAY *)pdev;
     if (display->ddLock) {
         DrvDisableDirectDraw(pdev);
+        rb_dd_free_views(display);
         EngDeleteSemaphore(display->ddLock);
     }
     EngDeletePalette(display->palette);
@@ -159,6 +160,7 @@ VOID DrvDisableSurface(DHPDEV pdev)
     DISPLAY *display = (DISPLAY *)pdev;
     VIDEO_MEMORY request;
     ULONG returned;
+    if (display->ddEnabled) DrvDisableDirectDraw(pdev);
     if (display->surface) {
         EngDeleteSurface(display->surface);
         display->surface = NULL;
@@ -168,6 +170,7 @@ VOID DrvDisableSurface(DHPDEV pdev)
         EngDeviceIoControl(display->miniport, IOCTL_VIDEO_UNMAP_VIDEO_MEMORY,
             &request, sizeof(request), NULL, 0, &returned);
         display->mapping = NULL;
+        display->mappingBytes = 0;
     }
 }
 
@@ -191,6 +194,7 @@ HSURF DrvEnableSurface(DHPDEV pdev)
         !size.cy || display->mode.ScreenStride <= 0 ||
         mem.FrameBufferLength / (ULONG)size.cy < (ULONG)display->mode.ScreenStride)
         goto failed;
+    if (mem.VideoRamBase == mem.FrameBufferBase) display->mappingBytes = mem.FrameBufferLength;
     /* Let GDI draw directly into the top-down mapped framebuffer. */
     display->surface = (HSURF)EngCreateBitmap(size, display->mode.ScreenStride,
         BMF_32BPP, BMF_TOPDOWN, mem.FrameBufferBase);
@@ -210,9 +214,13 @@ ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
     ULONG returned;
     if (code == QUERYESCSUPPORT)
         return in && inSize == sizeof(ULONG) && (*(ULONG *)in == RB2K_GPU_ESCAPE ||
-                   *(ULONG *)in == RB2K_DD_STATS_ESCAPE);
+                   *(ULONG *)in == RB2K_DD_STATS_ESCAPE || *(ULONG *)in == RB2K_DD_SCANOUT_ESCAPE);
     if (inSize || !out || !surface || !surface->dhpdev) return 0;
     display = (DISPLAY *)surface->dhpdev;
+    if (code == RB2K_DD_SCANOUT_ESCAPE)
+        return outSize == sizeof(RB2K_DD_FLIP_INFO) &&
+               !EngDeviceIoControl(display->miniport, IOCTL_RB2K_DD_FLIP_INFO,
+                                   NULL, 0, out, outSize, &returned) && returned == outSize;
     if (code == RB2K_DD_STATS_ESCAPE) {
         RB2K_DD_CAPS caps;
         RB2K_DD_STATS *stats = out;

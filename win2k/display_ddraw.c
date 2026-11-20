@@ -24,11 +24,33 @@ static BOOL primary_caps(DWORD caps)
                       DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM));
 }
 
+static BOOL flip_caps(DWORD caps)
+{
+    DWORD allowed = DDSCAPS_PRIMARYSURFACE | DDSCAPS_FRONTBUFFER | DDSCAPS_BACKBUFFER |
+                    DDSCAPS_FLIP | DDSCAPS_COMPLEX | DDSCAPS_VISIBLE |
+                    DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM;
+    return !(caps & ~allowed) && (caps & (DDSCAPS_FLIP | DDSCAPS_BACKBUFFER)) &&
+           (caps & (DDSCAPS_PRIMARYSURFACE | DDSCAPS_FRONTBUFFER | DDSCAPS_BACKBUFFER));
+}
+
+static ULONG page_size(DISPLAY *d)
+{
+    RB2K_DD_FLIP_INFO f;
+    if (!request(d, IOCTL_RB2K_DD_FLIP_INFO, NULL, 0, &f, sizeof(f)) ||
+        f.pageCount != 2 || f.width != d->mode.VisScreenWidth || f.height != d->mode.VisScreenHeight ||
+        !f.height || f.pitch != d->mode.ScreenStride || f.width > f.pitch / sizeof(ULONG) ||
+        !f.pageBytes || f.pageBytes > d->mappingBytes / 2 ||
+        f.pageBytes % f.height || f.pageBytes / f.height != f.pitch) return 0;
+    return f.pageBytes;
+}
+
 static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
 {
     DWORD caps = desc->ddsCaps.dwCaps;
     const DDPIXELFORMAT *fmt = &desc->ddpfPixelFormat;
-    if (primary_caps(caps)) {
+    if (primary_caps(caps) || flip_caps(caps)) {
+        if (flip_caps(caps) && (!d->pageBytes ||
+            ((desc->dwFlags & DDSD_BACKBUFFERCOUNT) && desc->dwBackBufferCount > 1))) return FALSE;
         if (!d->mapping || !d->surface ||
             ((desc->dwFlags & DDSD_WIDTH) && desc->dwWidth != d->mode.VisScreenWidth) ||
             ((desc->dwFlags & DDSD_HEIGHT) && desc->dwHeight != d->mode.VisScreenHeight))
@@ -59,6 +81,29 @@ static DD_SLOT *find_slot(DISPLAY *d, PDD_SURFACE_GLOBAL global)
     return NULL;
 }
 
+static BOOL select_page(DISPLAY *d, ULONG page)
+{
+    if (!request(d, IOCTL_RB2K_DD_FLIP, &page, sizeof(page), NULL, 0)) return FALSE;
+    d->visiblePage = page;
+    return TRUE;
+}
+
+static BOOL desktop_page(DISPLAY *d)
+{
+    return !d->visiblePage || select_page(d, 0);
+}
+
+static void release_chain(DISPLAY *d)
+{
+    if (d->flipBack && request(d, IOCTL_RB2K_DD_FLIP_RELEASE, NULL, 0, NULL, 0))
+        d->visiblePage = 0;
+    else desktop_page(d);
+    d->flipBack = d->flipFront = NULL;
+    d->flipOwner = NULL;
+    d->activeView = NULL;
+    d->lockedPages = 0;
+}
+
 static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
 {
     DISPLAY *d = (DISPLAY *)data->lpDD->dhpdev;
@@ -72,6 +117,28 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
         return rc;
     }
     g = data->lplpSList[0]->lpGbl;
+    if (data->lplpSList[0]->ddsCaps.dwCaps & DDSCAPS_BACKBUFFER) {
+        EngAcquireSemaphore(d->ddLock);
+        if (!d->ddEnabled || !d->pageBytes || !flip_caps(data->lplpSList[0]->ddsCaps.dwCaps) ||
+            g->wWidth != d->mode.VisScreenWidth || g->wHeight != d->mode.VisScreenHeight)
+            data->ddRVal = DDERR_INVALIDCAPS;
+        else if (d->flipBack) data->ddRVal = DDERR_OUTOFVIDEOMEMORY;
+        else if (!request(d, IOCTL_RB2K_DD_FLIP_ACQUIRE, NULL, 0, NULL, 0))
+            data->ddRVal = DDERR_SURFACEBUSY;
+        else {
+            g->lPitch = desc->lPitch = d->mode.ScreenStride;
+            desc->dwFlags |= DDSD_PITCH;
+            g->dwBlockSizeX = d->pageBytes;
+            g->dwBlockSizeY = 1;
+            g->fpVidMem = DDHAL_PLEASEALLOC_BLOCKSIZE;
+            d->flipBack = g;
+            d->flipOwner = EngGetCurrentProcessId();
+            data->ddRVal = DD_OK;
+            rc = DDHAL_DRIVER_NOTHANDLED;
+        }
+        EngReleaseSemaphore(d->ddLock);
+        return rc;
+    }
     if (desc->ddsCaps.dwCaps & DDSCAPS_PRIMARYSURFACE) {
         /* NT normally creates the primary without entering this callback.
          * Its video-memory offset is zero in each of our display modes. */
@@ -125,6 +192,8 @@ static DWORD APIENTRY destroy_surface(PDD_DESTROYSURFACEDATA data)
     EngAcquireSemaphore(d->ddLock);
     slot = find_slot(d, data->lpDDSurface->lpGbl);
     if (slot) release_slot(d, slot);
+    if (d->flipBack == data->lpDDSurface->lpGbl || d->flipFront == data->lpDDSurface->lpGbl)
+        release_chain(d);
     EngReleaseSemaphore(d->ddLock);
     data->ddRVal = DD_OK;
     /* Let the runtime free its staging allocation. */
@@ -152,6 +221,67 @@ static BOOL rect_inside(const RECTL *r, ULONG width, ULONG height)
            (ULONG)r->right <= width && (ULONG)r->bottom <= height;
 }
 
+static BOOL surface_page(DISPLAY *d, const DD_SURFACE_LOCAL *l, ULONG *page)
+{
+    const DD_SURFACE_GLOBAL *g;
+    ULONG offset;
+    if (!l || !l->lpGbl || !d->flipBack || !d->pageBytes || !d->ddEnabled ||
+        d->flipOwner != EngGetCurrentProcessId()) return FALSE;
+    g = l->lpGbl;
+    if (g != d->flipBack && g != d->flipFront &&
+        (d->flipFront || !(l->ddsCaps.dwCaps & DDSCAPS_PRIMARYSURFACE))) return FALSE;
+    if (g->wWidth != d->mode.VisScreenWidth || g->wHeight != d->mode.VisScreenHeight ||
+        g->lPitch <= 0 || (ULONG)g->lPitch != d->mode.ScreenStride) return FALSE;
+    offset = g->fpVidMem;
+    if (offset != 0 && offset != d->pageBytes) return FALSE;
+    *page = offset ? 1 : 0;
+    return TRUE;
+}
+
+static DWORD APIENTRY flip(PDD_FLIPDATA data)
+{
+    DISPLAY *d = (DISPLAY *)data->lpDD->dhpdev;
+    ULONG current, target;
+    EngAcquireSemaphore(d->ddLock);
+    if (data->dwFlags & ~(DDFLIP_WAIT | DDFLIP_DONOTWAIT | DDFLIP_NOVSYNC))
+        data->ddRVal = DDERR_UNSUPPORTED;
+    else if (d->lockedPages) data->ddRVal = DDERR_SURFACEBUSY;
+    else if (!surface_page(d, data->lpSurfCurr, &current) ||
+             !surface_page(d, data->lpSurfTarg, &target) || current == target ||
+             (d->flipBack != data->lpSurfCurr->lpGbl && d->flipBack != data->lpSurfTarg->lpGbl))
+        data->ddRVal = DDERR_SURFACELOST;
+    else {
+        d->flipFront = d->flipBack == data->lpSurfTarg->lpGbl ?
+                       data->lpSurfCurr->lpGbl : data->lpSurfTarg->lpGbl;
+        data->ddRVal = select_page(d, target) ? DD_OK : DDERR_GENERIC;
+    }
+    EngReleaseSemaphore(d->ddLock);
+    return DDHAL_DRIVER_HANDLED;
+}
+
+static DWORD APIENTRY flip_status(PDD_GETFLIPSTATUSDATA data)
+{
+    DISPLAY *d = (DISPLAY *)data->lpDD->dhpdev;
+    ULONG page;
+    EngAcquireSemaphore(d->ddLock);
+    data->ddRVal = surface_page(d, data->lpDDSurface, &page) ? DD_OK : DDERR_SURFACELOST;
+    EngReleaseSemaphore(d->ddLock);
+    return DDHAL_DRIVER_HANDLED;
+}
+
+static HRESULT fill_page(DISPLAY *d, ULONG page, const RECTL *r, ULONG color)
+{
+    ULONG x, y, width;
+    BYTE *row;
+    if (d->lockedPages & (1UL << page)) return DDERR_SURFACEBUSY;
+    if (!rect_inside(r, d->mode.VisScreenWidth, d->mode.VisScreenHeight)) return DDERR_INVALIDRECT;
+    row = (BYTE *)d->mapping + page * d->pageBytes + r->top * d->mode.ScreenStride + r->left * 4;
+    width = r->right - r->left;
+    for (y = 0; y < (ULONG)(r->bottom - r->top); ++y, row += d->mode.ScreenStride)
+        for (x = 0; x < width; ++x) ((ULONG *)row)[x] = color;
+    return DD_OK;
+}
+
 static HRESULT present(DISPLAY *d, const DD_SLOT *src, const RECTL *from, const RECTL *to)
 {
     RB2K_DD_PRESENT p;
@@ -177,13 +307,17 @@ static DWORD APIENTRY blt(PDD_BLTDATA data)
     BOOL sourceCopy = operation == 0 || (operation == DDBLT_ROP &&
                       (data->bltFX.dwROP >> 16) == (SRCCOPY >> 16));
     BOOL primary;
+    ULONG page;
     HANDLE owner = EngGetCurrentProcessId();
     DWORD rc = DDHAL_DRIVER_HANDLED;
     EngAcquireSemaphore(d->ddLock);
     dst = find_slot(d, data->lpDDDestSurface->lpGbl);
     if (data->lpDDSrcSurface) src = find_slot(d, data->lpDDSrcSurface->lpGbl);
     primary = !dst && src && mapped_primary(d, data->lpDDDestSurface);
-    if (!dst && !src) rc = DDHAL_DRIVER_NOTHANDLED;
+    if (!data->lpDDSrcSurface && operation == DDBLT_COLORFILL && !data->IsClipped &&
+        surface_page(d, data->lpDDDestSurface, &page))
+        data->ddRVal = fill_page(d, page, &data->rDest, data->bltFX.dwFillColor);
+    else if (!dst && !src) rc = DDHAL_DRIVER_NOTHANDLED;
     else if ((!dst && !primary) || (data->lpDDSrcSurface && !src)) data->ddRVal = DDERR_UNSUPPORTED;
     else if ((dst && (dst->lost || dst->owner != owner)) || (src && (src->lost || src->owner != owner)))
         data->ddRVal = DDERR_SURFACELOST;
@@ -252,11 +386,28 @@ static DWORD APIENTRY lock_surface(PDD_LOCKDATA data)
     PVOID tmp = NULL;
     RB2K_DD_UNIFORM uniform;
     const ULONG *seed = NULL;
-    ULONG bytes, offset = 0;
+    ULONG bytes, page, offset = 0;
     DWORD rc = DDHAL_DRIVER_HANDLED;
     EngAcquireSemaphore(d->ddLock);
     s = find_slot(d, g);
-    if (!s) { rc = DDHAL_DRIVER_NOTHANDLED; goto done; }
+    if (!s) {
+        if (!surface_page(d, data->lpDDSurface, &page)) {
+            if (flip_caps(data->lpDDSurface->ddsCaps.dwCaps)) data->ddRVal = DDERR_SURFACELOST;
+            else rc = DDHAL_DRIVER_NOTHANDLED;
+        } else if (!d->activeView || data->fpProcess != d->activeView->address)
+            data->ddRVal = DDERR_CANTLOCKSURFACE;
+        else if (d->lockedPages & (1UL << page)) data->ddRVal = DDERR_SURFACEBUSY;
+        else if (data->bHasRect && !rect_inside(&data->rArea, g->wWidth, g->wHeight))
+            data->ddRVal = DDERR_INVALIDRECT;
+        else {
+            if (data->bHasRect) offset = data->rArea.top * g->lPitch + data->rArea.left * 4;
+            /* NT supplies the user-mode view created by our DdMapMemory. */
+            data->lpSurfData = (BYTE *)data->fpProcess + page * d->pageBytes + offset;
+            d->lockedPages |= 1UL << page;
+            data->ddRVal = DD_OK;
+        }
+        goto done;
+    }
     if (s->lost || s->owner != EngGetCurrentProcessId()) {
         data->ddRVal = DDERR_SURFACELOST; goto done;
     }
@@ -305,10 +456,16 @@ static DWORD APIENTRY unlock_surface(PDD_UNLOCKDATA data)
     DISPLAY *d = (DISPLAY *)data->lpDD->dhpdev;
     PDD_SURFACE_GLOBAL g = data->lpDDSurface->lpGbl;
     DD_SLOT *s;
+    ULONG page;
     DWORD rc = DDHAL_DRIVER_HANDLED;
     EngAcquireSemaphore(d->ddLock);
     s = find_slot(d, g);
-    if (!s) rc = DDHAL_DRIVER_NOTHANDLED;
+    if (!s) {
+        if (surface_page(d, data->lpDDSurface, &page) && (d->lockedPages & (1UL << page))) {
+            d->lockedPages &= ~(1UL << page);
+            data->ddRVal = DD_OK;
+        } else rc = DDHAL_DRIVER_NOTHANDLED;
+    }
     else if (s->owner != EngGetCurrentProcessId() || s->lost)
         data->ddRVal = DDERR_SURFACELOST;
     else if (!s->locked) data->ddRVal = DDERR_NOTLOCKED;
@@ -332,13 +489,134 @@ static DWORD APIENTRY unlock_surface(PDD_UNLOCKDATA data)
     return rc;
 }
 
+/* A process may receive the same address for its next chain before DirectDraw
+ * releases its previous mapping. Count both callbacks against that address. */
+static DD_FLIP_VIEW **find_view(DISPLAY *d, HANDLE owner, FLATPTR address)
+{
+    DD_FLIP_VIEW **p = &d->views;
+    while (*p && ((*p)->owner != owner || (*p)->address != address)) p = &(*p)->next;
+    return p;
+}
+
+void rb_dd_free_views(DISPLAY *d)
+{
+    while (d->views) {
+        DD_FLIP_VIEW *v = d->views;
+        d->views = v->next;
+        EngFreeMem(v);
+    }
+}
+
+static HRESULT map_chain(DISPLAY *d, PDD_MAPMEMORYDATA data, HANDLE owner)
+{
+    VIDEO_SHARE_MEMORY view;
+    VIDEO_SHARE_MEMORY_INFORMATION out;
+    DD_FLIP_VIEW *record = d->activeView, **link;
+    if (!record) {
+        record = EngAllocMem(FL_ZERO_MEMORY, sizeof(*record), 'v2bR');
+        if (!record) return DDERR_OUTOFMEMORY;
+        RtlZeroMemory(&view, sizeof(view));
+        view.ProcessHandle = data->hProcess;
+        view.ViewSize = d->pageBytes * 2;
+        if (!request(d, IOCTL_VIDEO_SHARE_VIDEO_MEMORY, &view, sizeof(view), &out, sizeof(out))) {
+            EngFreeMem(record);
+            return DDERR_GENERIC;
+        }
+        link = find_view(d, owner, (FLATPTR)out.VirtualAddress);
+        if (*link) {
+            EngFreeMem(record);
+            record = *link;
+        } else {
+            record->owner = owner;
+            record->address = (FLATPTR)out.VirtualAddress;
+            *link = record;
+        }
+        d->activeView = record;
+        record->process = data->hProcess;
+    }
+    if (record->references == (ULONG)-1 || record->process != data->hProcess) return DDERR_GENERIC;
+    ++record->references;
+    data->fpProcess = record->address;
+    return DD_OK;
+}
+
+static DWORD APIENTRY map_memory(PDD_MAPMEMORYDATA data)
+{
+    DISPLAY *d = (DISPLAY *)data->lpDD->dhpdev;
+    HANDLE owner = EngGetCurrentProcessId();
+    DD_FLIP_VIEW **link, *record;
+    VIDEO_SHARE_MEMORY view;
+    DWORD rc = DDHAL_DRIVER_NOTHANDLED;
+    EngAcquireSemaphore(d->ddLock);
+    data->ddRVal = DD_OK;
+    if (data->bMap) {
+        /* Windowed surfaces use DirectDraw's own per-surface staging memory. */
+        data->fpProcess = 0;
+        if (d->flipBack && d->flipOwner == owner) {
+            rc = DDHAL_DRIVER_HANDLED;
+            data->ddRVal = map_chain(d, data, owner);
+        }
+    } else {
+        link = find_view(d, owner, data->fpProcess);
+        record = *link;
+        if (record) {
+            rc = DDHAL_DRIVER_HANDLED;
+            if (record == d->activeView && record->references == 1) {
+                RtlZeroMemory(&view, sizeof(view));
+                view.ProcessHandle = record->process;
+                view.RequestedVirtualAddress = (PVOID)record->address;
+                if (!request(d, IOCTL_VIDEO_UNSHARE_VIDEO_MEMORY, &view, sizeof(view), NULL, 0))
+                    data->ddRVal = DDERR_GENERIC;
+                else d->activeView = NULL;
+            }
+            if (data->ddRVal == DD_OK && !--record->references) {
+                *link = record->next;
+                EngFreeMem(record);
+            }
+        }
+    }
+    EngReleaseSemaphore(d->ddLock);
+    return rc;
+}
+
+static DWORD APIENTRY exclusive_mode(PDD_SETEXCLUSIVEMODEDATA data)
+{
+    DISPLAY *d = (DISPLAY *)data->lpDD->dhpdev;
+    EngAcquireSemaphore(d->ddLock);
+    data->ddRVal = data->dwEnterExcl || desktop_page(d) ? DD_OK : DDERR_GENERIC;
+    EngReleaseSemaphore(d->ddLock);
+    return DDHAL_DRIVER_HANDLED;
+}
+
+static DWORD APIENTRY driver_info(PDD_GETDRIVERINFODATA data)
+{
+    /* GUID_NTCallbacks from the Windows 2000 DDK. */
+    static const GUID nt = {0x6fe9ecde,0xdf89,0x11d1,{0x9d,0xb0,0,0x60,0x08,0x27,0x71,0xba}};
+    DD_NTCALLBACKS callbacks;
+    ULONG bytes;
+    data->dwActualSize = 0;
+    data->ddRVal = DDERR_CURRENTLYNOTAVAIL;
+    if (IsEqualGUID(&data->guidInfo, &nt)) {
+        RtlZeroMemory(&callbacks, sizeof(callbacks));
+        callbacks.dwSize = sizeof(callbacks);
+        callbacks.dwFlags = DDHAL_NTCB32_SETEXCLUSIVEMODE;
+        callbacks.SetExclusiveMode = exclusive_mode;
+        bytes = min(data->dwExpectedSize, sizeof(callbacks));
+        if (bytes) RtlCopyMemory(data->lpvData, &callbacks, bytes);
+        data->dwActualSize = sizeof(callbacks);
+        data->ddRVal = DD_OK;
+    }
+    return DDHAL_DRIVER_HANDLED;
+}
+
 BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCount,
                                    VIDEOMEMORY *heaps, DWORD *fourCount, DWORD *fourCC)
 {
     DISPLAY *d = (DISPLAY *)pdev;
     RB2K_DD_CAPS caps;
     VIDEOMEMORYINFO *v = &info->vmiData;
-    (void)heaps; (void)fourCC;
+    ULONG pageBytes;
+    (void)fourCC;
     *heapCount = *fourCount = 0;
     if (!d->ddLock || !d->mapping || !rb_dd_caps(d, &caps)) return FALSE;
     RtlZeroMemory(info, sizeof(*info));
@@ -361,11 +639,28 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     info->ddCaps.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY |
                                   DDSCAPS_LOCALVIDMEM;
     info->ddCaps.dwVidMemTotal = caps.maxBytes * caps.slots;
+    pageBytes = page_size(d);
+    if (pageBytes) {
+        *heapCount = 1;
+        if (heaps) {
+            RtlZeroMemory(heaps, sizeof(*heaps));
+            heaps->dwFlags = VIDMEM_ISLINEAR;
+            heaps->fpStart = pageBytes;
+            heaps->fpEnd = pageBytes * 2 - 1;
+            heaps->ddsCaps.dwCaps = heaps->ddsCapsAlt.dwCaps = DDSCAPS_OFFSCREENPLAIN;
+        }
+        info->dwFlags = DDHALINFO_GETDRIVERINFOSET;
+        info->GetDriverInfo = driver_info;
+        info->ddCaps.ddsCaps.dwCaps |= DDSCAPS_FLIP;
+        info->ddCaps.dwCaps2 |= DDCAPS2_FLIPNOVSYNC;
+        info->ddCaps.dwVidMemTotal += pageBytes;
+    }
     {
         ULONG i;
         EngAcquireSemaphore(d->ddLock);
         for (i = 0; i < caps.slots; ++i)
             if (!d->slots[i].global) info->ddCaps.dwVidMemFree += caps.maxBytes;
+        if (!d->flipBack) info->ddCaps.dwVidMemFree += pageBytes;
         EngReleaseSemaphore(d->ddLock);
     }
     return TRUE;
@@ -376,6 +671,7 @@ BOOL APIENTRY DrvEnableDirectDraw(DHPDEV pdev, DD_CALLBACKS *c, DD_SURFACECALLBA
 {
     DISPLAY *d = (DISPLAY *)pdev;
     RB2K_DD_CAPS caps;
+    ULONG pageBytes;
     if (!d->ddLock || !rb_dd_caps(d, &caps)) return FALSE;
     RtlZeroMemory(c, sizeof(*c)); RtlZeroMemory(sc, sizeof(*sc)); RtlZeroMemory(pc, sizeof(*pc));
     c->dwSize = sizeof(*c); sc->dwSize = sizeof(*sc); pc->dwSize = sizeof(*pc);
@@ -388,7 +684,16 @@ BOOL APIENTRY DrvEnableDirectDraw(DHPDEV pdev, DD_CALLBACKS *c, DD_SURFACECALLBA
     sc->Blt = blt;
     sc->Lock = lock_surface;
     sc->Unlock = unlock_surface;
+    pageBytes = page_size(d);
+    if (pageBytes) {
+        c->dwFlags |= DDHAL_CB32_MAPMEMORY;
+        c->MapMemory = map_memory;
+        sc->dwFlags |= DDHAL_SURFCB32_FLIP | DDHAL_SURFCB32_GETFLIPSTATUS;
+        sc->Flip = flip;
+        sc->GetFlipStatus = flip_status;
+    }
     EngAcquireSemaphore(d->ddLock);
+    d->pageBytes = pageBytes;
     d->ddEnabled = TRUE;
     EngReleaseSemaphore(d->ddLock);
     return TRUE;
@@ -400,6 +705,8 @@ VOID APIENTRY DrvDisableDirectDraw(DHPDEV pdev)
     ULONG i;
     if (!d->ddLock) return;
     EngAcquireSemaphore(d->ddLock);
+    release_chain(d);
+    d->pageBytes = 0;
     d->ddEnabled = FALSE;
     for (i = 0; i < RB2K_DD_SLOTS; ++i)
         if (d->slots[i].global) release_slot(d, &d->slots[i]);

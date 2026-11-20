@@ -271,6 +271,10 @@ int main(int argc,char **argv)
     output=GetStdHandle(STD_OUTPUT_HANDLE);
     if (argc == 2 && !lstrcmpiA(argv[1], "/gpu")) {
         result = gpu_test();
+    } else if (argc == 2 && !lstrcmpiA(argv[1], "/ddraw-pair")) {
+        result = probe_ddraw(RB2K_DDRAW_PAIR);
+    } else if (argc == 2 && !lstrcmpiA(argv[1], "/flip")) {
+        result = probe_ddraw(RB2K_DDRAW_FLIP);
     } else if (argc == 2 && !lstrcmpiA(argv[1], "/window")) {
         result = probe_ddraw(RB2K_DDRAW_WINDOW);
     } else if (argc == 2 && (!lstrcmpiA(argv[1], "/ddraw") || !lstrcmpiA(argv[1], "/ddraw-full"))) {
@@ -280,7 +284,7 @@ int main(int argc,char **argv)
     } else if (argc == 1 || (argc == 2 && !lstrcmpiA(argv[1], "/pattern"))) {
         result = run(argc == 2, RB2K_DEFAULT_WIDTH, RB2K_DEFAULT_HEIGHT);
     } else {
-        line("Usage: W2KPROBE [/pattern | /pattern800 | /gpu | /ddraw | /ddraw-full | /window]"); return 2;
+        line("Usage: W2KPROBE [/pattern | /pattern800 | /gpu | /ddraw | /ddraw-full | /ddraw-pair | /window | /flip]"); return 2;
     }
     if(output_failed) return 1;
     return result;

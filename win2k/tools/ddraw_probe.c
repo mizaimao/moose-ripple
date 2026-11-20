@@ -9,6 +9,7 @@
 
 typedef HRESULT (WINAPI *CREATE_DIRECTDRAW)(GUID *, LPDIRECTDRAW *, IUnknown *);
 BOOL probe_ddraw_window(LPDIRECTDRAW dd, const char *path, DWORD memory);
+BOOL probe_ddraw_flip(LPDIRECTDRAW dd, const char *path, BOOL hardware);
 enum { Unavailable, Passed, Mismatch, NoHardware };
 
 static HRESULT report(const char *path, const char *operation, HRESULT hr)
@@ -25,16 +26,72 @@ static BOOL stats(HDC dc, RB2K_DD_COPY_STATS *out, BOOL copy)
                            (LPSTR)out) > 0;
 }
 
-static int fill_test(const char *path, LPDIRECTDRAW dd, DWORD requestedMemory, BOOL copy)
+static int read_surface(const char *path, LPDIRECTDRAWSURFACE surface, const DDSURFACEDESC *desc,
+                        DWORD byteCount, DWORD rgb, DWORD expected)
+{
+    DDSURFACEDESC lock;
+    DWORD x, y, sample, mismatches = 0;
+    int result = Unavailable;
+    ZeroMemory(&lock, sizeof(lock));
+    lock.dwSize = sizeof(lock);
+    if (FAILED(report(path, "Lock", IDirectDrawSurface_Lock(surface, NULL, &lock,
+                       DDLOCK_WAIT | DDLOCK_READONLY, NULL)))) return Unavailable;
+    if (lock.lpSurface && (lock.lPitch >= (LONG)(desc->dwWidth * byteCount) ||
+                          lock.lPitch <= -(LONG)(desc->dwWidth * byteCount))) {
+        for (y = 0; y < desc->dwHeight; ++y) {
+            const BYTE *row = (const BYTE *)lock.lpSurface + (LONG)y * lock.lPitch;
+            for (x = 0; x < desc->dwWidth; ++x) {
+                sample = 0;
+                memcpy(&sample, row + x * byteCount, byteCount);
+                if ((sample & rgb) != expected) ++mismatches;
+            }
+        }
+        printf("DirectDraw %s rgb_expected=%08lX pixels=%lu mismatches=%lu pitch=%ld\n", path,
+               expected, desc->dwWidth * desc->dwHeight, mismatches, lock.lPitch);
+        result = mismatches ? Mismatch : Passed;
+    }
+    if (FAILED(report(path, "Unlock", IDirectDrawSurface_Unlock(surface, lock.lpSurface))))
+        return Unavailable;
+    return result;
+}
+
+static BOOL second_client(void)
+{
+    char image[MAX_PATH], args[] = "w2kprobe.exe /ddraw";
+    STARTUPINFOA startup;
+    PROCESS_INFORMATION process;
+    DWORD mode, flags, code = 1, length = GetModuleFileNameA(NULL, image, sizeof(image));
+    if (!length || length >= sizeof(image)) return FALSE;
+    ZeroMemory(&startup, sizeof(startup));
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    flags = GetConsoleMode(startup.hStdInput, &mode) || GetConsoleMode(startup.hStdOutput, &mode)
+          ? 0 : DETACHED_PROCESS;
+    if (!CreateProcessA(image, args, NULL, NULL, TRUE, flags,
+                        NULL, NULL, &startup, &process)) return FALSE;
+    CloseHandle(process.hThread);
+    if (WaitForSingleObject(process.hProcess, 30000) == WAIT_OBJECT_0)
+        GetExitCodeProcess(process.hProcess, &code);
+    else TerminateProcess(process.hProcess, 1);
+    CloseHandle(process.hProcess);
+    printf("DirectDraw second process exit=%lu\n", code);
+    return code == 0;
+}
+
+static int fill_test(const char *path, LPDIRECTDRAW dd, DWORD requestedMemory, enum RB2K_DDRAW_TEST test)
 {
     LPDIRECTDRAWSURFACE surface = NULL, source = NULL;
     HDC dc = NULL;
     RB2K_DD_COPY_STATS start, filled, locked;
-    BOOL measured;
-    DDSURFACEDESC desc, lock;
+    BOOL measured, copy = test == RB2K_DDRAW_COPY;
+    BOOL pair = test == RB2K_DDRAW_PAIR && requestedMemory == DDSCAPS_VIDEOMEMORY;
+    DDSURFACEDESC desc;
     DDPIXELFORMAT format;
     DDBLTFX effect;
-    DWORD rgb, expected, byteCount, x, y, sample, mismatches;
+    DWORD rgb, expected, byteCount;
     int result = Unavailable;
     HRESULT hr;
     ZeroMemory(&desc, sizeof(desc));
@@ -74,6 +131,7 @@ static int fill_test(const char *path, LPDIRECTDRAW dd, DWORD requestedMemory, B
     expected = format.dwRBitMask | (format.dwGBitMask & ~(format.dwGBitMask >> 1));
     if (format.dwRBitMask == 0x00ff0000 && format.dwGBitMask == 0x0000ff00 &&
         format.dwBBitMask == 0x000000ff) expected = 0x003a87c5;
+    if (pair) expected ^= rgb;
     ZeroMemory(&effect, sizeof(effect));
     effect.dwSize = sizeof(effect);
     if (requestedMemory == DDSCAPS_VIDEOMEMORY)
@@ -98,27 +156,7 @@ static int fill_test(const char *path, LPDIRECTDRAW dd, DWORD requestedMemory, B
                                 DDBLT_COLORFILL | DDBLT_WAIT, &effect);
     if (FAILED(report(path, "Blt(second fill)", hr))) goto done;
     if (measured && !stats(dc, &filled, copy)) goto done;
-    ZeroMemory(&lock, sizeof(lock));
-    lock.dwSize = sizeof(lock);
-    hr = IDirectDrawSurface_Lock(surface, NULL, &lock, DDLOCK_WAIT | DDLOCK_READONLY, NULL);
-    if (FAILED(report(path, "Lock", hr))) goto done;
-    if (lock.lpSurface && (lock.lPitch >= (LONG)(desc.dwWidth * byteCount) ||
-                          lock.lPitch <= -(LONG)(desc.dwWidth * byteCount))) {
-        mismatches = 0;
-        for (y = 0; y < desc.dwHeight; ++y) {
-            const BYTE *row = (const BYTE *)lock.lpSurface + (LONG)y * lock.lPitch;
-            for (x = 0; x < desc.dwWidth; ++x) {
-                sample = 0;
-                memcpy(&sample, row + x * byteCount, byteCount);
-                if ((sample & rgb) != expected) ++mismatches;
-            }
-        }
-        printf("DirectDraw %s rgb_expected=%08lX pixels=%lu mismatches=%lu pitch=%ld\n", path,
-               expected, desc.dwWidth * desc.dwHeight, mismatches, lock.lPitch);
-        result = mismatches ? Mismatch : Passed;
-    }
-    if (FAILED(report(path, "Unlock", IDirectDrawSurface_Unlock(surface, lock.lpSurface))))
-        result = Unavailable;
+    result = read_surface(path, surface, &desc, byteCount, rgb, expected);
     if (measured && result == Passed) {
         if (!stats(dc, &locked, copy)) { result = Unavailable; goto done; }
         printf("DirectDraw host fills=%lu pre-lock readbacks=%lu lock readbacks=%lu uploads=%lu\n",
@@ -134,6 +172,10 @@ static int fill_test(const char *path, LPDIRECTDRAW dd, DWORD requestedMemory, B
             locked.transfers.uploads != start.transfers.uploads ||
             (copy && filled.hostCopies - start.hostCopies != 1))
             result = Mismatch;
+    }
+    if (pair && result == Passed) {
+        result = second_client() ? read_surface("first process after peer", surface, &desc,
+                                                byteCount, rgb, expected) : Mismatch;
     }
 done:
     if (dc) DeleteDC(dc);
@@ -153,6 +195,10 @@ static int check_path(CREATE_DIRECTDRAW create, const char *path, DWORD createFl
     if (hr == DDERR_NODIRECTDRAWHW && createFlags == DDCREATE_HARDWAREONLY)
         result = NoHardware;
     if (FAILED(report(path, "DirectDrawCreate", hr))) return result;
+    if (test == RB2K_DDRAW_FLIP) {
+        result = probe_ddraw_flip(dd, path, createFlags == DDCREATE_HARDWAREONLY) ? Passed : Mismatch;
+        goto done;
+    }
     if (test == RB2K_DDRAW_WINDOW) {
         result = probe_ddraw_window(dd, path, memory) ? Passed : Mismatch;
         goto done;
@@ -172,7 +218,7 @@ static int check_path(CREATE_DIRECTDRAW create, const char *path, DWORD createFl
         printf("DirectDraw %s HEL caps=%08lX colorfill=%d\n", path, emulation.dwCaps,
                !!(emulation.dwCaps & DDCAPS_BLTCOLORFILL));
     }
-    result = fill_test(path, dd, memory, test == RB2K_DDRAW_COPY);
+    result = fill_test(path, dd, memory, test);
     if (createFlags == DDCREATE_HARDWAREONLY && result != Mismatch) {
         if (FAILED(hr)) result = Unavailable;
         else if (hardware.dwCaps & DDCAPS_NOHARDWARE) result = NoHardware;
@@ -211,7 +257,9 @@ int probe_ddraw(enum RB2K_DDRAW_TEST test)
     hardware = check_path(create, "hardware-only", DDCREATE_HARDWAREONLY, DDSCAPS_VIDEOMEMORY, test);
     emulation = check_path(create, "emulation-only", DDCREATE_EMULATIONONLY, DDSCAPS_SYSTEMMEMORY, test);
     FreeLibrary(module);
-    if (test == RB2K_DDRAW_WINDOW)
+    if (test == RB2K_DDRAW_FLIP)
+        printf("DirectDraw fullscreen flip hardware=%s software=%s\n", states[hardware], states[emulation]);
+    else if (test == RB2K_DDRAW_WINDOW)
         printf("DirectDraw window hardware=%s software=%s\n", states[hardware], states[emulation]);
     else
         printf("DirectDraw hardware_video_fill=%s emulation_system_fill=%s\n",

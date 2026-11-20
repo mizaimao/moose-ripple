@@ -15,17 +15,30 @@ typedef struct {
     BOOL locked, writable, lost;
 } DD_SLOT;
 
+typedef struct DD_FLIP_VIEW {
+    struct DD_FLIP_VIEW *next;
+    HANDLE owner, process;
+    FLATPTR address;
+    ULONG references;
+} DD_FLIP_VIEW;
+
 typedef struct {
     HANDLE miniport;
     HDEV device;
     HPALETTE palette;
     HSURF surface;
     PVOID mapping;
+    ULONG mappingBytes;
     VIDEO_MODE_INFORMATION mode;
     HSEMAPHORE ddLock;
     BOOL ddEnabled;
+    ULONG pageBytes, visiblePage, lockedPages;
+    PDD_SURFACE_GLOBAL flipBack, flipFront;
+    HANDLE flipOwner;
+    DD_FLIP_VIEW *views, *activeView;
     DD_SLOT slots[RB2K_DD_SLOTS];
 } DISPLAY;
 
 BOOL rb_dd_caps(DISPLAY *display, RB2K_DD_CAPS *caps);
+void rb_dd_free_views(DISPLAY *display);
 #endif

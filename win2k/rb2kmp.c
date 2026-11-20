@@ -19,12 +19,26 @@ static const struct { USHORT width, height; } modes[] = {
     {640, 480}, {800, 600}, {1024, 768}
 };
 
+PVOID rb_view_current(void);
+HANDLE rb_view_open(HANDLE supplied);
+void rb_view_close(HANDLE handle);
+
+typedef struct {
+    PVOID address, owner;
+    HANDLE supplied, process;
+    ULONG refs, bytes;
+} FLIP_VIEW;
+
 typedef struct {
     VIDEO_ACCESS_RANGE fb;
     PUSHORT vbe;
     PVOID mappings[8];
     ULONG mode;
     BOOLEAN modeSet;
+    FLIP_VIEW view;
+    PVOID chainOwner;
+    HANDLE chainProcess;
+    ULONG flips;
     RB2K_GPU gpu;
 } ADAPTER;
 
@@ -86,8 +100,13 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
     /* VideoPort maps device memory during adapter discovery. BAR0 is a PCI
      * framebuffer; its address is not a general-purpose DMA backing entry. */
     if (a->gpu.common) {
-        a->gpu.primary.bytes = MIN_FRAME_BYTES;
-        a->gpu.primary.pixels = VideoPortGetDeviceBase(a, a->fb.RangeStart, MIN_FRAME_BYTES, 0);
+        ULONG bytes = a->fb.RangeLength < 2 * MIN_FRAME_BYTES ? a->fb.RangeLength : 2 * MIN_FRAME_BYTES;
+        a->gpu.primary.pixels = VideoPortGetDeviceBase(a, a->fb.RangeStart, bytes, 0);
+        if (!a->gpu.primary.pixels && bytes != MIN_FRAME_BYTES) {
+            bytes = MIN_FRAME_BYTES;
+            a->gpu.primary.pixels = VideoPortGetDeviceBase(a, a->fb.RangeStart, bytes, 0);
+        }
+        if (a->gpu.primary.pixels) a->gpu.primary.bytes = bytes;
     }
     config->NumEmulatorAccessEntries = 0;
     config->HardwareStateSize = 0;
@@ -122,14 +141,111 @@ static void mode_info(ULONG index, PVIDEO_MODE_INFORMATION m)
     m->AttributeFlags = VIDEO_MODE_COLOR | VIDEO_MODE_GRAPHICS | VIDEO_MODE_NO_OFF_SCREEN;
 }
 
+/* NT5 may round a user view to the 64 KiB allocation granularity. The only
+ * bytes in that padding belong to unused VGA RAM and are scrubbed as well. */
+static ULONG view_span(ULONG pageBytes)
+{
+    return (2 * pageBytes + 0xffffUL) & ~0xffffUL;
+}
+
+static VP_STATUS scanout_info(ADAPTER *a, RB2K_DD_FLIP_INFO *info)
+{
+    ULONG virtualWidth;
+    if (!a->modeSet || !(VideoPortReadRegisterUshort(a->vbe + VbeEnable) & 1) ||
+        VideoPortReadRegisterUshort(a->vbe + VbeBpp) != 32 ||
+        VideoPortReadRegisterUshort(a->vbe + VbeOffsetX)) return ERROR_NOT_READY;
+    info->width = VideoPortReadRegisterUshort(a->vbe + VbeX);
+    info->height = VideoPortReadRegisterUshort(a->vbe + VbeY);
+    virtualWidth = VideoPortReadRegisterUshort(a->vbe + VbeWidth);
+    if (info->width != modes[a->mode].width || info->height != modes[a->mode].height ||
+        virtualWidth != info->width) return ERROR_NOT_READY;
+    info->pitch = virtualWidth * sizeof(ULONG);
+    info->pageBytes = info->pitch * info->height;
+    info->pageCount = a->gpu.primary.pixels &&
+        view_span(info->pageBytes) <= a->gpu.primary.bytes &&
+        VideoPortReadRegisterUshort(a->vbe + VbeHeight) >= 2 * info->height ? 2 : 1;
+    info->yOffset = VideoPortReadRegisterUshort(a->vbe + VbeOffsetY);
+    info->visiblePage = info->yOffset == 0 ? 0 :
+        (info->pageCount == 2 && info->yOffset == info->height ? 1 : (ULONG)-1);
+    info->flips = a->flips;
+    return NO_ERROR;
+}
+
+static VP_STATUS select_page(ADAPTER *a, ULONG page, const RB2K_DD_FLIP_INFO *info)
+{
+    USHORT offset;
+    if (page >= info->pageCount) return ERROR_INVALID_PARAMETER;
+    offset = (USHORT)(page * info->height);
+    if (offset == info->yOffset) return NO_ERROR;
+    VideoPortWriteRegisterUshort(a->vbe + VbeOffsetY, offset);
+    if (VideoPortReadRegisterUshort(a->vbe + VbeOffsetY) != offset) return ERROR_WRITE_FAULT;
+    ++a->flips;
+    return NO_ERROR;
+}
+
+static VP_STATUS revoke_view(ADAPTER *a)
+{
+    VP_STATUS status;
+    if (!a->view.address) return NO_ERROR;
+    status = VideoPortUnmapMemory(a, a->view.address, a->view.process);
+    if (!status) {
+        rb_view_close(a->view.process);
+        VideoPortZeroMemory(&a->view, sizeof(a->view));
+    }
+    return status;
+}
+
+static void clear_back_page(ADAPTER *a, const RB2K_DD_FLIP_INFO *info)
+{
+    if (info->pageCount == 2)
+        VideoPortZeroDeviceMemory((PUCHAR)a->gpu.primary.pixels + info->pageBytes,
+                                  view_span(info->pageBytes) - info->pageBytes);
+}
+
+static VP_STATUS acquire_pages(ADAPTER *a)
+{
+    RB2K_DD_FLIP_INFO info;
+    PVOID owner = rb_view_current();
+    VP_STATUS status = scanout_info(a, &info);
+    if (status) return status;
+    if (info.pageCount != 2 || info.visiblePage != 0) return ERROR_NOT_SUPPORTED;
+    if (a->chainOwner || a->view.address) return ERROR_BUSY;
+    a->chainProcess = rb_view_open((HANDLE)-1);
+    if (!a->chainProcess) return ERROR_ACCESS_DENIED;
+    a->chainOwner = owner;
+    clear_back_page(a, &info);
+    return NO_ERROR;
+}
+
+static VP_STATUS release_pages(ADAPTER *a)
+{
+    RB2K_DD_FLIP_INFO info;
+    VP_STATUS status = revoke_view(a);
+    if (status) return status;
+    if (!scanout_info(a, &info)) {
+        status = select_page(a, 0, &info);
+        if (!status) clear_back_page(a, &info);
+    }
+    if (!status && a->chainProcess) {
+        rb_view_close(a->chainProcess);
+        a->chainProcess = NULL;
+        a->chainOwner = NULL;
+    }
+    return status;
+}
+
 static VP_STATUS set_mode(ADAPTER *a, ULONG request)
 {
+    RB2K_DD_FLIP_INFO info;
     ULONG index = request & ~(VIDEO_MODE_NO_ZERO_MEMORY | VIDEO_MODE_MAP_MEM_LINEAR);
     USHORT enable = (request & VIDEO_MODE_NO_ZERO_MEMORY) ? 0xc1 : 0x41;
     VP_STATUS status;
     if (index >= ARRAY_COUNT(modes)) return ERROR_INVALID_PARAMETER;
+    status = release_pages(a);
+    if (status) return status;
     status = rb_gpu_surface_reset(&a->gpu);
     if (status) return status;
+    a->modeSet = FALSE;
     VideoPortWriteRegisterUshort(a->vbe + VbeEnable, 0);
     VideoPortWriteRegisterUshort(a->vbe + VbeX, modes[index].width);
     VideoPortWriteRegisterUshort(a->vbe + VbeY, modes[index].height);
@@ -148,6 +264,76 @@ static VP_STATUS set_mode(ADAPTER *a, ULONG request)
     a->gpu.primary.width = modes[index].width;
     a->gpu.primary.height = modes[index].height;
     a->gpu.primary.pitchPixels = VideoPortReadRegisterUshort(a->vbe + VbeWidth);
+    if (!scanout_info(a, &info)) clear_back_page(a, &info);
+    return NO_ERROR;
+}
+
+static VP_STATUS share_pages(ADAPTER *a, PVIDEO_REQUEST_PACKET r)
+{
+    VIDEO_SHARE_MEMORY requested;
+    PVIDEO_SHARE_MEMORY_INFORMATION output = r->OutputBuffer;
+    RB2K_DD_FLIP_INFO info;
+    HANDLE process;
+    PVOID address, owner;
+    ULONG bytes, mapped, io = VIDEO_MEMORY_SPACE_USER_MODE;
+    VP_STATUS status;
+    if (r->InputBufferLength != sizeof(requested) || r->OutputBufferLength < sizeof(*output))
+        return ERROR_INVALID_PARAMETER;
+    requested = *(PVIDEO_SHARE_MEMORY)r->InputBuffer; /* Buffered input and output may alias. */
+    status = scanout_info(a, &info);
+    if (status) return status;
+    if (info.pageCount != 2) return ERROR_NOT_SUPPORTED;
+    bytes = 2 * info.pageBytes;
+    if (!requested.ProcessHandle || requested.ViewOffset || requested.RequestedVirtualAddress ||
+        requested.ViewSize != bytes) return ERROR_INVALID_PARAMETER;
+    owner = rb_view_current();
+    /* Windowed DirectDraw surfaces use their own user buffers. Mapping a
+     * scanout page here is exclusively for the live flipping chain. */
+    if (a->chainOwner != owner) return ERROR_ACCESS_DENIED;
+    if (a->view.address) {
+        if (a->view.owner != owner || a->view.supplied != requested.ProcessHandle ||
+            a->view.bytes != bytes || a->view.refs == (ULONG)-1) return ERROR_BUSY;
+        ++a->view.refs;
+    } else {
+        process = rb_view_open(requested.ProcessHandle);
+        if (!process) return ERROR_ACCESS_DENIED;
+        mapped = view_span(info.pageBytes);
+        address = process;
+        status = VideoPortMapMemory(a, a->fb.RangeStart, &mapped, &io, &address);
+        if (status) { rb_view_close(process); return status; }
+        if (!address) { rb_view_close(process); return ERROR_INVALID_DATA; }
+        a->view.process = process;
+        a->view.supplied = requested.ProcessHandle;
+        a->view.owner = owner;
+        a->view.address = address;
+        a->view.bytes = bytes;
+        a->view.refs = 1;
+        /* Return only a complete user-space view of the declared pages. */
+        if (mapped < bytes || mapped > view_span(info.pageBytes) ||
+            (ULONG)address >= 0x80000000UL || mapped > 0x80000000UL - (ULONG)address) {
+            revoke_view(a);
+            return ERROR_INVALID_DATA;
+        }
+    }
+    output->SharedViewOffset = 0;
+    output->SharedViewSize = bytes;
+    output->VirtualAddress = a->view.address;
+    r->StatusBlock->Information = sizeof(*output);
+    return NO_ERROR;
+}
+
+static VP_STATUS unshare_pages(ADAPTER *a, PVIDEO_REQUEST_PACKET r)
+{
+    PVIDEO_SHARE_MEMORY request = r->InputBuffer;
+    if (r->InputBufferLength != sizeof(*request) || r->OutputBufferLength ||
+        !request->ProcessHandle || !request->RequestedVirtualAddress ||
+        request->ViewOffset || request->ViewSize) return ERROR_INVALID_PARAMETER;
+    if (!a->view.address) return NO_ERROR; /* A mode change can already have revoked it. */
+    if (a->view.address != request->RequestedVirtualAddress ||
+        a->view.supplied != request->ProcessHandle || a->view.owner != rb_view_current())
+        return ERROR_INVALID_HANDLE;
+    if (a->view.refs == 1) return revoke_view(a);
+    --a->view.refs;
     return NO_ERROR;
 }
 
@@ -196,6 +382,37 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
     VP_STATUS status = ERROR_INSUFFICIENT_BUFFER;
     r->StatusBlock->Information = 0;
     switch (r->IoControlCode) {
+    case IOCTL_RB2K_DD_FLIP_INFO:
+        if (r->InputBufferLength || r->OutputBufferLength < sizeof(RB2K_DD_FLIP_INFO))
+            status = ERROR_INVALID_PARAMETER;
+        else {
+            status = scanout_info(a, r->OutputBuffer);
+            if (!status) r->StatusBlock->Information = sizeof(RB2K_DD_FLIP_INFO);
+        }
+        break;
+    case IOCTL_RB2K_DD_FLIP: {
+        RB2K_DD_FLIP_INFO info;
+        if (r->InputBufferLength != sizeof(ULONG) || r->OutputBufferLength)
+            status = ERROR_INVALID_PARAMETER;
+        else if (*(PULONG)r->InputBuffer && a->chainOwner != rb_view_current()) status = ERROR_ACCESS_DENIED;
+        else {
+            status = scanout_info(a, &info);
+            if (!status) status = select_page(a, *(PULONG)r->InputBuffer, &info);
+        }
+        break;
+    }
+    case IOCTL_RB2K_DD_FLIP_RELEASE:
+        status = r->InputBufferLength || r->OutputBufferLength ? ERROR_INVALID_PARAMETER : release_pages(a);
+        break;
+    case IOCTL_RB2K_DD_FLIP_ACQUIRE:
+        status = r->InputBufferLength || r->OutputBufferLength ? ERROR_INVALID_PARAMETER : acquire_pages(a);
+        break;
+    case IOCTL_VIDEO_SHARE_VIDEO_MEMORY:
+        status = share_pages(a, r);
+        break;
+    case IOCTL_VIDEO_UNSHARE_VIDEO_MEMORY:
+        status = unshare_pages(a, r);
+        break;
     case IOCTL_RB2K_DD_QUERY:
     case IOCTL_RB2K_DD_CREATE:
     case IOCTL_RB2K_DD_FILL:
@@ -252,6 +469,8 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
         break;
     case IOCTL_VIDEO_RESET_DEVICE: {
         VIDEO_X86_BIOS_ARGUMENTS bios;
+        status = release_pages(a);
+        if (status) break;
         status = rb_gpu_surface_reset(&a->gpu);
         if (status) break;
         VideoPortZeroMemory(&bios, sizeof(bios));

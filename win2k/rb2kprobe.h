@@ -5,11 +5,18 @@
 #define RB2K_DEFAULT_WIDTH 1024UL
 #define RB2K_DEFAULT_HEIGHT 768UL
 
-enum RB2K_DDRAW_TEST { RB2K_DDRAW_FILL, RB2K_DDRAW_COPY, RB2K_DDRAW_WINDOW };
+enum RB2K_DDRAW_TEST { RB2K_DDRAW_FILL, RB2K_DDRAW_COPY, RB2K_DDRAW_WINDOW,
+                      RB2K_DDRAW_FLIP, RB2K_DDRAW_PAIR };
 
 #define RB2K_GPU_VERSION 1
 #define RB2K_GPU_ESCAPE 0x52420001
 #define RB2K_DD_STATS_ESCAPE 0x52420002
+#define RB2K_DD_SCANOUT_ESCAPE 0x52420003
+/* Current Bochs framebuffer layout and verified page changes. Pitch and page
+ * size are bytes; yOffset is the hardware scanout origin in pixels. */
+typedef struct {
+    ULONG pageBytes, pageCount, visiblePage, flips, width, height, pitch, yOffset;
+} RB2K_DD_FLIP_INFO;
 #define IOCTL_RB2K_GPU_PROBE CTL_CODE(FILE_DEVICE_VIDEO, 0x900, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 enum {

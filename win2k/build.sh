@@ -21,13 +21,13 @@ cl() { wine "$vc/Bin/CL.EXE" /nologo "$@"; }
 link() { wine "$vc/Bin/LINK.EXE" /nologo "$@"; }
 
 cp "$here/rb2kmp.c" "$here"/gpu_*.c "$here"/*.h "$here/display.c" "$here/display_ddraw.c" "$here/install.c" \
-    "$here/tools/w2kprobe.c" "$here/tools/ddraw_probe.c" "$here/tools/window_probe.c" .
+    "$here/tools/w2kprobe.c" "$here/tools/ddraw_probe.c" "$here/tools/window_probe.c" "$here/tools/flip_probe.c" .
 export INCLUDE="$(w "$here/compat");$(w "$repo/third_party/virtio");$(w "$repo/third_party/virgl");$(w "$ddk/inc/ddk");$(w "$ddk/src/video/inc");$(w "$ddk/inc");$(w "$vc/Include")"
 export LIB="$(w "$ddk/libfre/i386")"
 cl /c /W3 /WX /O1 /Gz /Zl /GX- /D_X86_=1 /Di386=1 /D_WIN32_WINNT=0x0500 /DWINVER=0x0500 \
-    rb2kmp.c gpu_transport.c gpu_pixel.c gpu_surface.c
+    rb2kmp.c gpu_transport.c gpu_pixel.c gpu_surface.c gpu_view.c
 link /driver /subsystem:native,5.00 /osversion:5.0 /version:0.1 /machine:ix86 /nodefaultlib \
-    /entry:DriverEntry@8 /out:rb2kmp.sys rb2kmp.obj gpu_transport.obj gpu_pixel.obj gpu_surface.obj videoprt.lib
+    /entry:DriverEntry@8 /out:rb2kmp.sys rb2kmp.obj gpu_transport.obj gpu_pixel.obj gpu_surface.obj gpu_view.obj videoprt.lib ntoskrnl.lib
 
 export INCLUDE="$(w "$ddk/inc");$(w "$ddk/src/video/inc");$(w "$vc/Include")"
 cl /c /W3 /O1 /Oi /Zl /Gz /D_X86_=1 /DWINVER=0x0500 /D_WIN32_WINNT=0x0500 /DUNICODE /D_UNICODE \
@@ -42,7 +42,7 @@ cl /W3 /O1 /MD install.c /Fent5inst.exe /link /subsystem:console,5.00 setupapi.l
 
 export INCLUDE="$(w "$ddk/inc");$(w "$vc/Include")"
 export LIB="$(w "$ddk/libfre/i386");$(w "$vc/Lib")"
-cl /O1 /W3 /MT w2kprobe.c ddraw_probe.c window_probe.c /Few2kprobe.exe /link /subsystem:console,5.00 /version:1.0 \
+cl /O1 /W3 /MT w2kprobe.c ddraw_probe.c window_probe.c flip_probe.c /Few2kprobe.exe /link /subsystem:console,5.00 /version:1.0 \
     /machine:i386 setupapi.lib cfgmgr32.lib user32.lib gdi32.lib kernel32.lib
 
 # VC6 stamps the COFF header and exported DLLs with the current time. Use a

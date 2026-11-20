@@ -8,6 +8,9 @@ framebuffer. The driver performs DirectDraw colour fills and whole-surface
 copies on the host for up to four XRGB32 offscreen surfaces, each up to
 1024×768. Applications can copy a source rectangle from these surfaces
 to a window using a DirectDraw primary surface and an HWND clipper.
+In exclusive fullscreen mode the driver offers one back buffer when two
+pages fit in the adapter's video memory. A flip changes the adapter's display-start
+offset, and releasing the chain returns scanout to the desktop page.
 A separate diagnostic draws one pixel on the host
 through the same virtio control queue.
 
@@ -79,6 +82,24 @@ pattern from a host texture, first with another window overlapping it
 and again after uncovering it. The probe checks the image, the window
 margins and the overlapping window through GDI. It repeats the test
 using DirectDraw software emulation as a control.
+
+`w2kprobe.exe /flip` requests exclusive fullscreen mode, creates a primary
+surface with one attached back buffer, and writes a different pattern to
+each page. It flips five times and checks every front-buffer pixel after
+each swap. On hardware it also reads the adapter's display-start register
+to verify which page is visible. The hardware test runs at 640×480 and
+1024×768, then checks that Windows has restored the original desktop mode.
+
+`w2kprobe.exe /ddraw-pair` keeps one windowed DirectDraw surface alive
+while a second process creates and reads its own. After the second process
+exits, the first checks that its original colour is intact.
+
+On Windows 2000 SP4 under UTM, the 32-bit hardware paths matched all
+5,468,160 pixels checked across ten fullscreen flips. The adapter trace
+recorded each page switch, the return to page zero, and zero resource
+uploads or readbacks. Windows restored 1024×768×32 at 60 Hz. Only the
+owner of a fullscreen chain maps both video pages. Two simultaneous
+windowed clients retained their own offscreen pixels.
 
 On Windows 2000 SP4 in UTM at 1024×768×32, both paths passed. Known solid
 colours needed no GPU readback. For a patterned image the primary shares
