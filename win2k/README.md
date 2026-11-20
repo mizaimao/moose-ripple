@@ -19,7 +19,7 @@ and Visual C++ 6.0 under Wine. The script locates the kits under
 `.tools/win9x`, or under the directory named by `WIN9X_TOOLS`. Its default
 output directory is `build/win2k`.
 
-Copy the five output files into one directory the test guest can read.
+Copy the six output files into one directory the test guest can read.
 Run `w2kprobe.exe` to see the hardware ID and current modes. Run
 `nt5inst.exe` as a local administrator to install the driver, then restart
 Windows. The helper obtains the adapter's complete PCI hardware ID from
@@ -120,6 +120,32 @@ each of 58 clears was followed by a full 640×480 readback for GDI. With the
 change, 72 clears produced zero lock readbacks, saving 1,228,800 bytes per
 frame. Each frame still uploaded the GDI edits and read its visible
 rectangles for presentation.
+
+## Speed
+
+`ddbench.exe` times the same DirectDraw frames through the driver
+(hardware-only DirectDraw, video-memory surfaces) and through Windows'
+software path (emulation-only DirectDraw, system-memory surfaces), for
+three seconds each. It writes to standard output when that is redirected,
+otherwise to COM1. Measured on Windows 2000 SP4 in UTM on Apple silicon
+(one emulated Pentium III), 1024×768×32 desktop, 640×480 frames:
+
+| Frame | Driver | Software |
+| --- | ---: | ---: |
+| Fill a surface, copy it to a window | 315 fps | 755 fps |
+| CPU writes every pixel, copy it to a window | 92 fps | 454 fps |
+| Fullscreen: fill the back buffer, flip | 845 fps | 914 fps |
+| Fullscreen: fill, 100 64×64 sprites, flip | fails | 487 fps |
+| Same with a source colour key | fails | 496 fps |
+
+In a window the driver is two to five times slower than Windows' own
+software path. The desktop is guest memory that the CPU draws into, so
+each copy from a host texture to the screen is a GPU readback, and each
+CPU-written frame is also an upload. Fullscreen fills and flips run on the
+CPU in video memory on both paths. Copying part of a video-memory surface
+into the back buffer fails with `DDERR_UNSUPPORTED`, and the driver offers
+no colour keys. Microsoft's Donuts sample still draws its sprites
+correctly with the driver: its frame matched the software path's.
 
 The earlier 0.0.7.0 build supported full-surface fills on textures of
 at most 4 KiB each. GDI continues to draw the primary desktop. On 0.0.6.0
