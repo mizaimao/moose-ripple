@@ -121,6 +121,20 @@ change, 72 clears produced zero lock readbacks, saving 1,228,800 bytes per
 frame. Each frame still uploaded the GDI edits and read its visible
 rectangles for presentation.
 
+## OpenGL
+
+The display DLL answers `OPENGL_GETINFO` with the name `RIPPLEGL`, so
+Windows' own `opengl32.dll` loads the driver registered under that name in
+`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers`. With the
+Windows 98 build of `ripplegl.dll` (Mesa 24.3.4, `win9x/mesa`) copied to
+`system32` and registered both as a string value and as a key (`Dll`,
+`DriverVersion` 1, `Flags` 1, `Version` 2), `gltest` on Windows 2000 SP4
+reported Mesa as the renderer and passed all its pixel checks. Mesa drew in
+software (softpipe, about 9 frames a second at 320×240): its GPU path opens
+the Windows 98 kernel driver's `\\.\RIPPLEVD`, which Windows 2000 does not
+have yet. Microsoft's own software OpenGL (`GDI Generic`) passed the same
+checks at about 430 frames a second.
+
 ## Speed
 
 `ddbench.exe` times the same DirectDraw frames through the driver

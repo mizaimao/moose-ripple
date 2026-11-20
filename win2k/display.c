@@ -209,6 +209,21 @@ failed:
     return NULL;
 }
 
+/* Windows' opengl32.dll asks for the name of the installable client driver
+ * (ICD) with OPENGL_GETINFO and looks it up under
+ * HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers. The two
+ * numbers are the ICD interface version (2) and the driver's own version. */
+static ULONG opengl_info(ULONG outSize, PVOID out)
+{
+    static const WCHAR name[] = L"RIPPLEGL";
+    ULONG *info = out;
+    if (!out || outSize < 2 * sizeof(ULONG) + sizeof(name)) return 0;
+    info[0] = 2;
+    info[1] = 1;
+    RtlCopyMemory(info + 2, name, sizeof(name));
+    return 1;
+}
+
 ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
                 ULONG outSize, PVOID out)
 {
@@ -217,7 +232,10 @@ ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
     ULONG returned;
     if (code == QUERYESCSUPPORT)
         return in && inSize == sizeof(ULONG) && (*(ULONG *)in == RB2K_GPU_ESCAPE ||
-                   *(ULONG *)in == RB2K_DD_STATS_ESCAPE || *(ULONG *)in == RB2K_DD_SCANOUT_ESCAPE);
+                   *(ULONG *)in == RB2K_DD_STATS_ESCAPE || *(ULONG *)in == RB2K_DD_SCANOUT_ESCAPE ||
+                   *(ULONG *)in == OPENGL_GETINFO);
+    /* opengl32.dll passes a small input buffer of its own with this one. */
+    if (code == OPENGL_GETINFO) return opengl_info(outSize, out);
     if (inSize || !out || !surface || !surface->dhpdev) return 0;
     display = (DISPLAY *)surface->dhpdev;
     if (code == RB2K_DD_SCANOUT_ESCAPE)
