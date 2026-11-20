@@ -68,8 +68,8 @@
 struct rvd_winsys {
    struct virgl_winsys base;
    HANDLE dev;
-   HDC dc;                             /* Windows 2000: the display driver instead */
-   simple_mtx_t call_mutex;            /* one call at a time on that DC */
+   bool nt;                            /* Windows 2000: the display driver instead */
+   simple_mtx_t call_mutex;            /* one call at a time */
    uint32_t ctx;
    struct rvd_info info;
 
@@ -147,10 +147,13 @@ static bool rvd_call(struct rvd_winsys *ws, DWORD code, const void *in, DWORD in
 {
    DWORD n = 0;
 
-   if (ws->dc) {
+   if (ws->nt) {
+      /* A screen DC for each call: a DC kept from the thread that made the screen is
+       * refused once that thread has ended (threadtest), so every later call failed. */
       char stack[256];
       char *buf = in_len + 4 <= sizeof(stack) ? stack : MALLOC(in_len + 4);
-      bool ok;
+      HDC dc;
+      bool ok = false;
 
       if (!buf)
          return false;
@@ -158,7 +161,11 @@ static bool rvd_call(struct rvd_winsys *ws, DWORD code, const void *in, DWORD in
       if (in_len)
          memcpy(buf + 4, in, in_len);
       simple_mtx_lock(&ws->call_mutex);
-      ok = ExtEscape(ws->dc, RB2K_RVD_ESCAPE, (int)(in_len + 4), buf, (int)out_len, out) > 0;
+      dc = GetDC(NULL);
+      if (dc) {
+         ok = ExtEscape(dc, RB2K_RVD_ESCAPE, (int)(in_len + 4), buf, (int)out_len, out) > 0;
+         ReleaseDC(NULL, dc);
+      }
       simple_mtx_unlock(&ws->call_mutex);
       if (buf != stack)
          FREE(buf);
@@ -766,12 +773,10 @@ static void rvd_cache_entry_release(struct virgl_resource_cache_entry *entry, vo
    rvd_hw_res_destroy(user, cache_entry_container_res(entry));
 }
 
-static void rvd_close(HANDLE dev, HDC dc)
+static void rvd_close(HANDLE dev)
 {
    if (dev != INVALID_HANDLE_VALUE)
       CloseHandle(dev);
-   if (dc)
-      DeleteDC(dc);
 }
 
 static void rvd_winsys_destroy(struct virgl_winsys *vws)
@@ -781,7 +786,7 @@ static void rvd_winsys_destroy(struct virgl_winsys *vws)
 
    virgl_resource_cache_flush(&ws->cache);
    rvd_call(ws, RVD_CONTEXT_DESTROY, &ctx, sizeof(ctx), NULL, 0);
-   rvd_close(ws->dev, ws->dc);
+   rvd_close(ws->dev);
    simple_mtx_destroy(&ws->call_mutex);
    simple_mtx_destroy(&ws->cache_mutex);
    FREE(ws);
@@ -793,34 +798,35 @@ static struct virgl_winsys *rvd_winsys_create(void)
    char name[64];
    rvd_u32 ctx = 0;
    HANDLE dev;
-   HDC dc = NULL;
+   bool nt = false;
 
    dev = CreateFileA(RVD_DEVICE_NAME, 0, 0, NULL, 0, 0, NULL);
    if (dev == INVALID_HANDLE_VALUE) {
       /* Windows 2000: the display driver answers through GDI when it has a GPU. */
       DWORD escape = RB2K_RVD_ESCAPE;
+      HDC dc;
 
       if (GetVersion() & 0x80000000UL)
          return NULL;
-      dc = CreateDCA("DISPLAY", NULL, NULL, NULL);
+      dc = GetDC(NULL);
       if (!dc)
          return NULL;
-      if (ExtEscape(dc, QUERYESCSUPPORT, sizeof(escape), (LPCSTR)&escape, 0, NULL) <= 0) {
-         DeleteDC(dc);
+      nt = ExtEscape(dc, QUERYESCSUPPORT, sizeof(escape), (LPCSTR)&escape, 0, NULL) > 0;
+      ReleaseDC(NULL, dc);
+      if (!nt)
          return NULL;
-      }
    }
    ws = CALLOC_STRUCT(rvd_winsys);
    if (!ws) {
-      rvd_close(dev, dc);
+      rvd_close(dev);
       return NULL;
    }
    ws->dev = dev;
-   ws->dc = dc;
+   ws->nt = nt;
    simple_mtx_init(&ws->call_mutex, mtx_plain);
    if (!rvd_call(ws, RVD_GET_INFO, NULL, 0, &ws->info, sizeof(ws->info)) ||
        ws->info.version != RVD_INTERFACE_VERSION || !ws->info.virgl) {
-      rvd_close(dev, dc);
+      rvd_close(dev);
       simple_mtx_destroy(&ws->call_mutex);
       FREE(ws);
       return NULL;
@@ -832,7 +838,7 @@ static struct virgl_winsys *rvd_winsys_create(void)
       const char *base = strrchr(name, '\\');
       base = base ? base + 1 : name;
       if (!rvd_call(ws, RVD_CONTEXT_CREATE, base, (DWORD)strlen(base), &ctx, sizeof(ctx))) {
-         rvd_close(dev, dc);
+         rvd_close(dev);
          simple_mtx_destroy(&ws->call_mutex);
          FREE(ws);
          return NULL;
