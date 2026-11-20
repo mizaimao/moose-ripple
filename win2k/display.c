@@ -190,10 +190,10 @@ HSURF DrvEnableSurface(DHPDEV pdev)
         !size.cy || display->mode.ScreenStride <= 0 ||
         mem.FrameBufferLength / (ULONG)size.cy < (ULONG)display->mode.ScreenStride)
         goto failed;
-    display->surface = EngCreateDeviceSurface((DHSURF)display, size, BMF_32BPP);
-    if (!display->surface || !EngModifySurface(display->surface, display->device, 0,
-        MS_NOTSYSTEMMEMORY, (DHSURF)display, mem.FrameBufferBase,
-        display->mode.ScreenStride, NULL))
+    /* Let GDI draw directly into the top-down mapped framebuffer. */
+    display->surface = (HSURF)EngCreateBitmap(size, display->mode.ScreenStride,
+        BMF_32BPP, BMF_TOPDOWN, mem.FrameBufferBase);
+    if (!display->surface || !EngAssociateSurface(display->surface, display->device, 0))
         goto failed;
     return display->surface;
 failed:

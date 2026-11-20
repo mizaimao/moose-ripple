@@ -3,7 +3,7 @@ Signature="$Windows NT$"
 Class=Display
 ClassGuid={4D36E968-E325-11CE-BFC1-08002BE10318}
 Provider=%Vendor%
-DriverVer=11/19/2026,0.0.1.0
+DriverVer=11/20/2026,0.0.3.0
 
 [Manufacturer]
 %Vendor%=Models
