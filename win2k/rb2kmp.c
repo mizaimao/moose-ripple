@@ -43,6 +43,17 @@ typedef struct {
     RB2K_GPU gpu;
 } ADAPTER;
 
+/* DirectDraw offscreen surfaces as host textures are slower than Windows'
+ * own in this design (the desktop is guest memory) and cannot be blitted
+ * into the back buffer, so they are offered only when the adapter's registry
+ * key has RippleDirectDrawGpuSurfaces = 1 (for tests and later work). */
+static VP_STATUS gpu_surfaces(PVOID ext, PVOID context, PWSTR name, PVOID data, ULONG bytes)
+{
+    (void)ext; (void)name;
+    if (bytes == sizeof(ULONG)) ((RB2K_GPU *)context)->ddGpuSurfaces = *(PULONG)data != 0;
+    return NO_ERROR;
+}
+
 static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
                               PVIDEO_PORT_CONFIG_INFO config, PUCHAR again)
 {
@@ -98,6 +109,7 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
         return ERROR_DEV_NOT_EXIST;
     }
     rb_gpu_find(&a->gpu, a, slot, registers, config);
+    VideoPortGetRegistryParameters(a, L"RippleDirectDrawGpuSurfaces", FALSE, gpu_surfaces, &a->gpu);
     /* VideoPort maps device memory during adapter discovery. BAR0 is a PCI
      * framebuffer; its address is not a general-purpose DMA backing entry. */
     if (a->gpu.common) {
@@ -117,7 +129,7 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
 static BOOLEAN initialize(PVOID ext)
 {
     ADAPTER *a = ext;
-    static WCHAR adapterName[] = L"Ripple NT5 QEMU virtio-vga framebuffer";
+    static WCHAR adapterName[] = L"moose-ripple virtio-vga";
     VideoPortSetRegistryParameters(a, L"HardwareInformation.AdapterString",
                                    adapterName, sizeof(adapterName));
     VideoPortSetRegistryParameters(a, L"HardwareInformation.MemorySize",

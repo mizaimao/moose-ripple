@@ -6,6 +6,7 @@
 #include <string.h>
 
 typedef BOOL (WINAPI *UPDATE_DEVICE)(HWND, LPCSTR, LPCSTR, DWORD, PBOOL);
+typedef HWND (WINAPI *CONSOLE_WINDOW)(void);
 
 /* NT 5.0 can list the short PCI vendor/device ID among compatible IDs only.
  * NewDev's first argument must match an actual hardware ID exactly. */
@@ -48,6 +49,8 @@ int main(void)
     HMODULE library;
     UPDATE_DEVICE update;
     BOOL reboot = FALSE;
+    CONSOLE_WINDOW console;
+    HWND owner = NULL;
     DWORD error, length = GetModuleFileNameA(NULL, inf, sizeof(inf));
     if (!length || length >= sizeof(inf)) return 1;
     name = strrchr(inf, '\\');
@@ -66,9 +69,13 @@ int main(void)
     if (!library) return 1;
     update = (UPDATE_DEVICE)GetProcAddress(library, "UpdateDriverForPlugAndPlayDevicesA");
     if (!update) { FreeLibrary(library); return 1; }
+    /* Own Setup's prompts (the unsigned-driver one) by the console window, so
+     * they come to the front instead of opening behind other windows. */
+    console = (CONSOLE_WINDOW)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetConsoleWindow");
+    if (console) owner = console();
     puts("RB2K requesting native display install");
     fflush(stdout);
-    if (!update(NULL, hardware, inf, 0, &reboot)) {
+    if (!update(owner, hardware, inf, 0, &reboot)) {
         error = GetLastError();
         printf("RB2K install error %08lx\n", error);
         FreeLibrary(library);
