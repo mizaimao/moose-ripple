@@ -2011,7 +2011,12 @@ void VioGpuVidPN::Flip()
     ExAcquireFastMutex(&m_sourceLock);
     VioGpuAllocation *sourceRes = m_sourceRes;
     BOOLEAN flip = InterlockedExchange(&m_shouldFlip, 0) != 0;
-    const BOOLEAN haveSource = m_sourceAddress.QuadPart != 0 && sourceRes != NULL;
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+    // The first allocation in Vista's CPU-visible desktop segment can start at zero.
+    const BOOLEAN haveSource = sourceRes && (m_sourceAddress.QuadPart != 0 || m_sourceSegment == VistaDisplayMemory::SegmentId);
+#else
+    const BOOLEAN haveSource = sourceRes && m_sourceAddress.QuadPart != 0;
+#endif
 
     // Ramps that come while there is nothing to draw wait for the next surface, and are then
     // applied one a tick (viogpu_gamma.h).
@@ -2049,7 +2054,7 @@ void VioGpuVidPN::Flip()
     {
         // The whole surface goes out, whatever was noted as changed with it
         TakeChangedRect(&changed);
-        if (m_sourceAddress.QuadPart != 0 && sourceRes != NULL)
+        if (haveSource)
         {
             sourceRes->FlushToScreen(0);
         }
@@ -2153,6 +2158,9 @@ PAGED_CODE_SEG_END
 
 NTSTATUS VioGpuVidPN::SetVidPnSourceAddress(const DXGKARG_SETVIDPNSOURCEADDRESS *pSetVidPnSourceAddress)
 {
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+    m_sourceSegment = pSetVidPnSourceAddress->PrimarySegment;
+#endif
     m_sourceAddress = pSetVidPnSourceAddress->PrimaryAddress;
     m_sourceRes = reinterpret_cast<VioGpuAllocation *>(pSetVidPnSourceAddress->hAllocation);
     m_sourceId = m_sourceRes ? (LONG)m_sourceRes->GetId() : 0;

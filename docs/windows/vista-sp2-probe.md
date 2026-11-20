@@ -91,6 +91,26 @@ texture upload returned 2,048 mismatches across 2,048 pixels. The event query
 signaled for each of five occlusion tests, but all five visibility queries
 timed out. The revised kernel binary imports 71 functions.
 
+The UTM display remained blank while desktop commands still returned results
+on the guest serial port. In an independent test using the Windows graphics
+kernel interface directly, Ripple signaled completion for the upload and
+download of a private texture. After clearing the guest copy between the two
+transfers, zero of 1,024 bytes matched the uploaded pattern. A separate Mesa
+buffer copy returned zero of 4,096 matching bytes. The diagnostic then exited
+with an access violation before reporting its two optional color-format tests.
+
+The display thread also treated address zero as an absent desktop. Zero is a
+valid offset in Vista's dedicated desktop segment. A follow-up build accepts
+this offset when Windows identifies that segment and supplies a primary
+allocation. The change compiled for Vista and Windows 7; its effect on the
+visible desktop has not been verified.
+
+For recovery, Vista's VGA boot option alone kept Ripple selected at 640×480.
+Rebinding the PCI adapter to Microsoft's built-in `display.inf` selected
+`vgapnp.sys`. After reboot, Vista reported Standard VGA Graphics Adapter
+at 640×480 in 32-bit color, Explorer running and the Ripple service stopped.
+The test-signed package remains available for the next driver run.
+
 ## Rebuild and signing handoff
 
 From the Vista worktree on the Linux builder, set `MAIN` to the checkout

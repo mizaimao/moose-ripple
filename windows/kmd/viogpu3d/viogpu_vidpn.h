@@ -137,6 +137,9 @@ class VioGpuVidPN
     VioGpuAllocation *m_sourceRes = NULL;
     // Its resource on the host, for code that must not touch the allocation itself
     volatile LONG m_sourceId = 0;
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+    UINT m_sourceSegment = 0;
+#endif
     // Held by the flip thread while it uses m_sourceRes, and to forget an allocation that is
     // being destroyed. Windows destroys the surface on screen at a desktop switch before it
     // names the next one.
