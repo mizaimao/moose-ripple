@@ -1,7 +1,7 @@
 # Vista SP2 x64 display driver probe
 
 The kernel driver and both Direct3D 9 DLLs build from the Windows 7 driver at
-`63739fe`. On Vista SP2 x64 with test signing enabled, version 7.14.1.7
+`63739fe`. On Vista SP2 x64 with test signing enabled, version 7.14.1.8
 starts the adapter, runs the desktop at 1280×768 and draws the Direct3D 9
 triangle test correctly for both x64 and x86 applications. The guest reports
 Aero composition on. Earlier builds read every GPU result back as black;
@@ -233,6 +233,41 @@ the full Aero desktop with glass frames, gadgets, windows and taskbar.
 Still open: a GDI screen capture (Print Screen and the like) returns black
 while composition is on, and the escapes rejected as too small.
 
+### Queries and first program tests, 7.14.1.8
+
+Chess Titans (Direct3D 9) drew its 3D board correctly inside the Aero
+desktop, as seen in a dump of the compositor's frame.
+
+A standalone `winsat d3d -texshader` never finished. Two causes showed up.
+The test makes about 1,600 shaders, each compiled on the host through ANGLE,
+at roughly 150 a second; that cost is the host's and is shared with
+Windows 7. And the lab's `d3d9query` showed that every occlusion query
+stayed pending: the host writes a query's result straight into the query
+buffer's guest memory, which a Vista lock shows only after a submission that
+declares the write. Patch `0104` marks query buffers written in every
+submission that names them, and `0105` asks the host again in such a
+submission while a result is missing, instead of looking at the same old
+contents for ever. With both, all six queries in `d3d9query` returned:
+0 for the hidden and empty cases, 1,024 for every visible one. UTM's host
+(ANGLE on Metal) only reports whether any sample passed, so the test's
+exact-count check still fails there.
+
+After a clean install of 7.14.1.8, composition was on, both DLLs and the
+kernel driver matched the package and both triangle tests read back right.
+`winsat formal` rated every component 5.9 again. Against the 7.14.1.5
+assessment, which ran with composition off, single runs:
+
+| Test | 7.14.1.5 | 7.14.1.8 |
+| --- | --- | --- |
+| Compositor (`DWMFps`) | 1,798.56 | 1,754.39 |
+| Alpha blending (`AlphaFps`) | 2,181.87 | 2,122.59 |
+| Shader arithmetic (`ALUFps`) | 2,044.93 | 1,893.56 |
+| Texturing (`TexFps`) | 1,621.21 | 1,635.54 |
+| Video memory (MB/s) | 95,174 | 92,837 |
+
+The two runs differ in composition, so this is not a like-for-like
+comparison; repeated runs under the same conditions come next.
+
 ## Rebuild and signing handoff
 
 From the Vista worktree on the Linux builder, set `MAIN` to the checkout
@@ -272,6 +307,7 @@ available in the existing checkout.
 
 | Artifact | What it contains |
 | --- | --- |
+| `build/ripple-vista-7.14.1.8/` | Unsigned package of the 7.14.1.8 run: 7.14.1.7 plus Mesa patches `0104` and `0105` (occlusion queries). |
 | `build/ripple-vista-7.14.1.7/` | Unsigned package of the 7.14.1.7 run: the 7.14.1.6 kernel driver, both DLLs with the flip chain and viewport fixes and the frame dumps. Full Aero desktop. |
 | `tmp-utm-validation/shot.c`, `recv-shot.rb` | Guest screen capture and file upload over HTTP, and its receiver on the UTM host. |
 | `build/ripple-vista-7.14.1.6/` | Unsigned package installed in the 7.14.1.6 run: kernel driver and both Mesa DLLs with patches `0101` to `0103` (composition on). |
