@@ -100,6 +100,9 @@ DHPDEV DrvEnablePDEV(DEVMODEW *dm, LPWSTR address, ULONG patternCount,
     RtlZeroMemory(gdi, sizeof(*gdi));
     gdi->ulVersion = GDI_DRIVER_VERSION;
     gdi->ulTechnology = DT_RASDISPLAY;
+    /* GDI realizes raster fonts on this surface. Without TC_RA_ABLE the font
+     * mapper drops them, and the console's default Terminal face is one. */
+    gdi->flTextCaps = TC_RA_ABLE;
     gdi->ulHorzRes = display->mode.VisScreenWidth;
     gdi->ulVertRes = display->mode.VisScreenHeight;
     gdi->ulHorzSize = display->mode.XMillimeter;

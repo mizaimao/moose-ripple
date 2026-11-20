@@ -133,14 +133,11 @@ from GDI and the host display agreed on all four colours. The guest
 restored its previous mode. Windows also cold-booted at the saved 800×600×32
 setting, switched to 1024×768×32 and restored 800×600×32.
 
-A cold boot using the 32-bit framebuffer exposed a console limitation.
-Explorer and Calculator start, and a detached `cmd.exe` runs successfully.
-Creating a new console window fails with Windows error 31 from
-`AllocConsole`. The same test under the same account succeeded on the
-stock VGA desktop at 640×480 in 16 colours. A build that supplied all three
-default font descriptions also failed to open a console on the 32-bit desktop.
-
-A traced miniport received no requests during the failed console allocation.
-An immediately following successful resize generated mode-setting and memory
-mapping requests. This bounds the failure to a path that issues no new
-miniport request during that call. The underlying cause is still open.
+Console windows open on the 32-bit desktop. The display DLL reports
+`TC_RA_ABLE` in its text capabilities, so GDI realizes raster fonts on the
+framebuffer surface, as in the DDK's framebuffer sample. Builds without it
+listed the raster fonts, Terminal among them, but `AllocConsole` failed with
+Windows error 31; the console's default face is the raster Terminal font. On
+Windows 2000 SP4 in UTM at 1024×768×32, the build with the flag allocated and
+freed a console, and Command Prompt drew its banner in the Terminal font. The
+miniport was byte-identical in both builds.
