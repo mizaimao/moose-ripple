@@ -7,6 +7,8 @@
 
 typedef BOOL (WINAPI *UPDATE_DEVICE)(HWND, LPCSTR, LPCSTR, DWORD, PBOOL);
 typedef HWND (WINAPI *CONSOLE_WINDOW)(void);
+/* newdev.h: install even when Setup ranks the installed driver as good. */
+#define INSTALLFLAG_FORCE 0x00000001
 
 /* NT 5.0 can list the short PCI vendor/device ID among compatible IDs only.
  * NewDev's first argument must match an actual hardware ID exactly. */
@@ -75,7 +77,9 @@ int main(void)
     if (console) owner = console();
     puts("RB2K requesting native display install");
     fflush(stdout);
-    if (!update(owner, hardware, inf, 0, &reboot)) {
+    /* Windows 2000 ignores the dates and versions of unsigned drivers, so without
+     * FORCE an update over an earlier Ripple driver is "no better" (error 0x103). */
+    if (!update(owner, hardware, inf, INSTALLFLAG_FORCE, &reboot)) {
         error = GetLastError();
         printf("RB2K install error %08lx\n", error);
         FreeLibrary(library);
