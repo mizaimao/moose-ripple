@@ -5,6 +5,7 @@
 #include <setupapi.h>
 #include <cfgmgr32.h>
 #include <string.h>
+#include "rb2kprobe.h"
 
 static HANDLE output;
 static BOOL output_failed;
@@ -224,14 +225,55 @@ static int run(BOOL pattern)
     return result==DISP_CHANGE_SUCCESSFUL && matched && ok?0:1;
 }
 
+static int gpu_test(void)
+{
+    HDC dc = CreateDCA("DISPLAY", NULL, NULL, NULL);
+    RB2K_GPU_RESULT result;
+    int found, received = 0;
+    int escape = RB2K_GPU_ESCAPE;
+    char buf[180];
+    static const char * const stages[] = {
+        "unknown", "transport", "context", "resource", "backing", "attach",
+        "clear", "transfer", "compare", "cleanup", "done"
+    };
+    if (!dc) { line("Display DC unavailable"); return 1; }
+    ZeroMemory(&result, sizeof(result));
+    found = ExtEscape(dc, QUERYESCSUPPORT, sizeof(escape), (LPCSTR)&escape, 0, NULL);
+    if (found > 0)
+        received = ExtEscape(dc, escape, 0, NULL, sizeof(result), (LPSTR)&result);
+    DeleteDC(dc);
+    if (found <= 0 || received <= 0 || result.version != RB2K_GPU_VERSION) {
+        wsprintfA(buf, "GPU probe unavailable support=%d escape=%d version=%lu",
+                  found, received, result.version);
+        line(buf);
+        return 1;
+    }
+    wsprintfA(buf, "GPU stage=%s (%lu) status=%lu response=%08lX features=%08lX",
+        result.stage < sizeof(stages)/sizeof(stages[0]) ? stages[result.stage] : "unknown",
+        result.stage, result.status, result.response, result.features);
+    line(buf);
+    wsprintfA(buf, "GPU pixel expected=%08lX observed=%08lX", result.expected, result.observed);
+    line(buf);
+    if (result.stage != RB2K_STAGE_DONE || result.status || result.expected != 0xffff8000UL ||
+        result.observed != result.expected) {
+        line("GPU pixel FAIL");
+        return 1;
+    }
+    line("GPU pixel PASS");
+    return 0;
+}
+
 int main(int argc,char **argv)
 {
     int result;
     output=GetStdHandle(STD_OUTPUT_HANDLE);
-    if(argc>2 || (argc==2 && lstrcmpiA(argv[1],"/pattern")!=0)) {
-        line("Usage: W2KPROBE [/pattern]"); return 2;
+    if (argc == 2 && !lstrcmpiA(argv[1], "/gpu")) {
+        result = gpu_test();
+    } else if (argc == 1 || (argc == 2 && !lstrcmpiA(argv[1], "/pattern"))) {
+        result = run(argc == 2);
+    } else {
+        line("Usage: W2KPROBE [/pattern | /gpu]"); return 2;
     }
-    result=run(argc==2);
     if(output_failed) return 1;
     return result;
 }

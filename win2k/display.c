@@ -4,6 +4,7 @@
 #include <winddi.h>
 #include <devioctl.h>
 #include <ntddvdeo.h>
+#include "rb2kprobe.h"
 
 typedef struct {
     HANDLE miniport;
@@ -201,6 +202,24 @@ failed:
     return NULL;
 }
 
+ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
+                ULONG outSize, PVOID out)
+{
+    DISPLAY *display;
+    RB2K_GPU_RESULT result;
+    ULONG returned;
+    if (code == QUERYESCSUPPORT)
+        return in && inSize == sizeof(ULONG) && *(ULONG *)in == RB2K_GPU_ESCAPE;
+    if (code != RB2K_GPU_ESCAPE || inSize || !out || outSize != sizeof(result) ||
+        !surface || !surface->dhpdev) return 0;
+    display = (DISPLAY *)surface->dhpdev;
+    if (EngDeviceIoControl(display->miniport, IOCTL_RB2K_GPU_PROBE, NULL, 0,
+            &result, sizeof(result), &returned) || returned != sizeof(result))
+        return 0;
+    RtlCopyMemory(out, &result, sizeof(result));
+    return 1;
+}
+
 static DRVFN callbacks[] = {
     { INDEX_DrvGetModes, (PFN)DrvGetModes },
     { INDEX_DrvEnablePDEV, (PFN)DrvEnablePDEV },
@@ -208,7 +227,8 @@ static DRVFN callbacks[] = {
     { INDEX_DrvDisablePDEV, (PFN)DrvDisablePDEV },
     { INDEX_DrvEnableSurface, (PFN)DrvEnableSurface },
     { INDEX_DrvDisableSurface, (PFN)DrvDisableSurface },
-    { INDEX_DrvAssertMode, (PFN)DrvAssertMode }
+    { INDEX_DrvAssertMode, (PFN)DrvAssertMode },
+    { INDEX_DrvEscape, (PFN)DrvEscape }
 };
 
 BOOL DrvEnableDriver(ULONG engine, ULONG size, DRVENABLEDATA *data)

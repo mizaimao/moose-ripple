@@ -1,10 +1,11 @@
-/* Windows 2000 x86 miniport for the QEMU virtio-vga PCI function's
- * compatibility framebuffer. No virtqueue or GPU scanout is enabled. */
+/* Windows 2000 x86 miniport for QEMU virtio-vga. GDI uses the compatibility
+ * framebuffer while a fixed diagnostic can exercise the offscreen 3D queue. */
 #include <miniport.h>
 #include <devioctl.h>
 #include <winerror.h>
 #include <ntddvdeo.h>
 #include <video.h>
+#include "gpu_transport.h"
 
 #define ARRAY_COUNT(a) (sizeof(a) / sizeof((a)[0]))
 #define DISPI_OFFSET 0x500
@@ -24,6 +25,7 @@ typedef struct {
     PVOID mappings[8];
     ULONG mode;
     BOOLEAN modeSet;
+    RB2K_GPU gpu;
 } ADAPTER;
 
 static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
@@ -32,6 +34,7 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
     ADAPTER *a = ext;
     PCI_COMMON_CONFIG pci;
     VIDEO_ACCESS_RANGE ranges[16];
+    VIDEO_ACCESS_RANGE *registers = NULL;
     PHYSICAL_ADDRESS regs;
     ULONG slot = 0, i, bar0, bar2;
     VP_STATUS status;
@@ -53,7 +56,6 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
      * to bus-assigned memory ranges, never to an assumed physical address. */
     if ((bar0 & 7) != 0 || (bar2 & 1) || !(bar0 & ~15UL) || !(bar2 & ~15UL))
         return ERROR_DEV_NOT_EXIST;
-    regs.QuadPart = 0;
     for (i = 0; i < ARRAY_COUNT(ranges); ++i) {
         VIDEO_ACCESS_RANGE *r = &ranges[i];
         if (r->RangeInIoSpace || !r->RangeLength) continue;
@@ -64,9 +66,10 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
             (ULONG)r->RangeStart.HighPart ==
             ((bar2 & 6) == 4 ? pci.u.type0.BaseAddresses[3] : 0) &&
             r->RangeLength >= DISPI_OFFSET + DISPI_BYTES)
-            regs.QuadPart = r->RangeStart.QuadPart + DISPI_OFFSET;
+            registers = r;
     }
-    if (!a->fb.RangeLength || !regs.QuadPart) return ERROR_DEV_NOT_EXIST;
+    if (!a->fb.RangeLength || !registers) return ERROR_DEV_NOT_EXIST;
+    regs.QuadPart = registers->RangeStart.QuadPart + DISPI_OFFSET;
     a->vbe = VideoPortGetDeviceBase(a, regs, DISPI_BYTES, 0);
     if (!a->vbe) return ERROR_NOT_ENOUGH_MEMORY;
     id = VideoPortReadRegisterUshort(a->vbe + VbeId);
@@ -75,6 +78,7 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
         a->vbe = NULL;
         return ERROR_DEV_NOT_EXIST;
     }
+    rb_gpu_find(&a->gpu, a, slot, registers, config);
     config->NumEmulatorAccessEntries = 0;
     config->HardwareStateSize = 0;
     return NO_ERROR;
@@ -176,6 +180,14 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
     VP_STATUS status = ERROR_INSUFFICIENT_BUFFER;
     r->StatusBlock->Information = 0;
     switch (r->IoControlCode) {
+    case IOCTL_RB2K_GPU_PROBE:
+        if (r->InputBufferLength) status = ERROR_INVALID_PARAMETER;
+        else if (r->OutputBufferLength >= sizeof(RB2K_GPU_RESULT)) {
+            rb_gpu_probe(&a->gpu, r->OutputBuffer);
+            r->StatusBlock->Information = sizeof(RB2K_GPU_RESULT);
+            status = NO_ERROR;
+        }
+        break;
     case IOCTL_VIDEO_QUERY_NUM_AVAIL_MODES:
         if (r->OutputBufferLength >= sizeof(VIDEO_NUM_MODES)) {
             PVIDEO_NUM_MODES n = r->OutputBuffer;

@@ -20,12 +20,12 @@ export WINEPATH="$(w "$vc/Bin");$(w "$kit/vc6/Common/MSDev98/Bin")"
 cl() { wine "$vc/Bin/CL.EXE" /nologo "$@"; }
 link() { wine "$vc/Bin/LINK.EXE" /nologo "$@"; }
 
-cp "$here/rb2kmp.c" "$here/display.c" "$here/install.c" "$here/tools/w2kprobe.c" .
-export INCLUDE="$(w "$ddk/inc/ddk");$(w "$ddk/src/video/inc");$(w "$ddk/inc");$(w "$vc/Include")"
+cp "$here/rb2kmp.c" "$here"/gpu_*.c "$here"/*.h "$here/display.c" "$here/install.c" "$here/tools/w2kprobe.c" .
+export INCLUDE="$(w "$here/compat");$(w "$repo/third_party/virtio");$(w "$repo/third_party/virgl");$(w "$ddk/inc/ddk");$(w "$ddk/src/video/inc");$(w "$ddk/inc");$(w "$vc/Include")"
 export LIB="$(w "$ddk/libfre/i386")"
-cl /c /W3 /WX /O1 /Gz /Zl /GX- /D_X86_=1 /Di386=1 /D_WIN32_WINNT=0x0500 /DWINVER=0x0500 rb2kmp.c
+cl /c /W3 /WX /O1 /Gz /Zl /GX- /D_X86_=1 /Di386=1 /D_WIN32_WINNT=0x0500 /DWINVER=0x0500 rb2kmp.c gpu_transport.c gpu_pixel.c
 link /driver /subsystem:native,5.00 /osversion:5.0 /version:0.1 /machine:ix86 /nodefaultlib \
-    /entry:DriverEntry@8 /out:rb2kmp.sys rb2kmp.obj videoprt.lib
+    /entry:DriverEntry@8 /out:rb2kmp.sys rb2kmp.obj gpu_transport.obj gpu_pixel.obj videoprt.lib
 
 export INCLUDE="$(w "$ddk/inc");$(w "$ddk/src/video/inc");$(w "$vc/Include")"
 cl /c /W3 /O1 /Oi /Zl /Gz /D_X86_=1 /DWINVER=0x0500 /D_WIN32_WINNT=0x0500 /DUNICODE /D_UNICODE display.c

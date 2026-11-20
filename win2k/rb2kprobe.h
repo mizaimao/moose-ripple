@@ -1,0 +1,32 @@
+/* Fixed-size result shared by the miniport, display DLL and test program. */
+#ifndef RB2K_PROBE_H
+#define RB2K_PROBE_H
+
+#define RB2K_GPU_VERSION 1
+#define RB2K_GPU_ESCAPE 0x52420001
+#define IOCTL_RB2K_GPU_PROBE CTL_CODE(FILE_DEVICE_VIDEO, 0x900, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+enum {
+    RB2K_STAGE_TRANSPORT = 1,
+    RB2K_STAGE_CONTEXT,
+    RB2K_STAGE_RESOURCE,
+    RB2K_STAGE_BACKING,
+    RB2K_STAGE_ATTACH,
+    RB2K_STAGE_CLEAR,
+    RB2K_STAGE_TRANSFER,
+    RB2K_STAGE_COMPARE,
+    RB2K_STAGE_CLEANUP,
+    RB2K_STAGE_DONE
+};
+
+typedef struct {
+    ULONG version;
+    ULONG stage;
+    ULONG status;
+    ULONG response;
+    ULONG expected;
+    ULONG observed;
+    ULONG features;
+} RB2K_GPU_RESULT;
+
+#endif
