@@ -1,19 +1,5 @@
 /* Windows 2000 XDDM framebuffer display driver for the Ripple miniport. */
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <winddi.h>
-#include <devioctl.h>
-#include <ntddvdeo.h>
-#include "rb2kprobe.h"
-
-typedef struct {
-    HANDLE miniport;
-    HDEV device;
-    HPALETTE palette;
-    HSURF surface;
-    PVOID mapping;
-    VIDEO_MODE_INFORMATION mode;
-} DISPLAY;
+#include "display_private.h"
 
 /* Ask the paired miniport for its current mode table on each enumeration. */
 static VIDEO_MODE_INFORMATION *modes(HANDLE miniport, ULONG *count)
@@ -126,6 +112,7 @@ DHPDEV DrvEnablePDEV(DEVMODEW *dm, LPWSTR address, ULONG patternCount,
     RtlZeroMemory(info, sizeof(*info));
     info->hpalDefault = display->palette;
     info->iDitherFormat = BMF_32BPP;
+    display->ddLock = EngCreateSemaphore();
     return (DHPDEV)display;
 }
 
@@ -137,6 +124,10 @@ VOID DrvCompletePDEV(DHPDEV pdev, HDEV device)
 VOID DrvDisablePDEV(DHPDEV pdev)
 {
     DISPLAY *display = (DISPLAY *)pdev;
+    if (display->ddLock) {
+        DrvDisableDirectDraw(pdev);
+        EngDeleteSemaphore(display->ddLock);
+    }
     EngDeletePalette(display->palette);
     EngFreeMem(display);
 }
@@ -209,10 +200,20 @@ ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
     RB2K_GPU_RESULT result;
     ULONG returned;
     if (code == QUERYESCSUPPORT)
-        return in && inSize == sizeof(ULONG) && *(ULONG *)in == RB2K_GPU_ESCAPE;
-    if (code != RB2K_GPU_ESCAPE || inSize || !out || outSize != sizeof(result) ||
-        !surface || !surface->dhpdev) return 0;
+        return in && inSize == sizeof(ULONG) && (*(ULONG *)in == RB2K_GPU_ESCAPE ||
+                   *(ULONG *)in == RB2K_DD_STATS_ESCAPE);
+    if (inSize || !out || !surface || !surface->dhpdev) return 0;
     display = (DISPLAY *)surface->dhpdev;
+    if (code == RB2K_DD_STATS_ESCAPE) {
+        RB2K_DD_CAPS caps;
+        RB2K_DD_STATS *stats = out;
+        if (outSize != sizeof(*stats) || !rb_dd_caps(display, &caps)) return 0;
+        stats->hostFills = caps.hostFills;
+        stats->readbacks = caps.readbacks;
+        stats->uploads = caps.uploads;
+        return 1;
+    }
+    if (code != RB2K_GPU_ESCAPE || outSize != sizeof(result)) return 0;
     if (EngDeviceIoControl(display->miniport, IOCTL_RB2K_GPU_PROBE, NULL, 0,
             &result, sizeof(result), &returned) || returned != sizeof(result))
         return 0;
@@ -228,7 +229,10 @@ static DRVFN callbacks[] = {
     { INDEX_DrvEnableSurface, (PFN)DrvEnableSurface },
     { INDEX_DrvDisableSurface, (PFN)DrvDisableSurface },
     { INDEX_DrvAssertMode, (PFN)DrvAssertMode },
-    { INDEX_DrvEscape, (PFN)DrvEscape }
+    { INDEX_DrvEscape, (PFN)DrvEscape },
+    { INDEX_DrvGetDirectDrawInfo, (PFN)DrvGetDirectDrawInfo },
+    { INDEX_DrvEnableDirectDraw, (PFN)DrvEnableDirectDraw },
+    { INDEX_DrvDisableDirectDraw, (PFN)DrvDisableDirectDraw }
 };
 
 BOOL DrvEnableDriver(ULONG engine, ULONG size, DRVENABLEDATA *data)

@@ -1,4 +1,4 @@
-/* Windows 2000 x86, modern virtio PCI transport for one fixed offscreen test. */
+/* Windows 2000 x86 modern virtio PCI transport for offscreen rendering. */
 #include <miniport.h>
 #include <devioctl.h>
 #include <winerror.h>
@@ -18,11 +18,11 @@ enum {
     NoInterrupt = 1, QueueEntries = 2
 };
 /* One DMA allocation holds two descriptors, two small split rings, private
- * request/reply storage and a page of readback backing. Nothing in it is
+ * request/reply storage and one backing page per offscreen image. Nothing is
  * mapped into user space. These offsets meet the split-ring alignments. */
 enum {
     Desc = 0, Avail = 32, Used = 48, Request = 128, Reply = 1152,
-    PacketBytes = 1024, Backing = 4096, DmaBytes = 8192
+    PacketBytes = 1024, Backing = 4096, DmaBytes = Backing + RB2K_DD_MAX_BYTES * RB2K_DD_SLOTS
 };
 typedef struct { PHYSICAL_ADDRESS address; ULONG length; USHORT flags, next; } DESCRIPTOR;
 typedef struct { USHORT flags, index, ring[QueueEntries]; } AVAILABLE;
@@ -151,7 +151,7 @@ static VP_STATUS bus_master(RB2K_GPU *gpu, BOOLEAN enable, PULONG observed)
     return NO_ERROR;
 }
 
-static VP_STATUS start(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
+VP_STATUS rb_gpu_start(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
 {
     PUCHAR common = gpu->common;
     USHORT notifyOffset;
@@ -198,6 +198,7 @@ static VP_STATUS start(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
     ((AVAILABLE *)(gpu->dma + Avail))->flags = NoInterrupt;
     VideoPortInterlockedExchange(&gpu->barrier, 0);
     gpu->index = 0;
+    gpu->fence = 0;
     VideoPortWriteRegisterUshort((PUSHORT)(common + QueueSize), QueueEntries);
     write_address(gpu, QueueDesc, Desc);
     write_address(gpu, QueueDriver, Avail);
@@ -263,16 +264,33 @@ VP_STATUS rb_gpu_submit(RB2K_GPU *gpu, const void *request, ULONG bytes,
     return NO_ERROR;
 }
 
-ULONG *rb_gpu_backing(RB2K_GPU *gpu, PHYSICAL_ADDRESS *bus)
+ULONG *rb_gpu_backing(RB2K_GPU *gpu, ULONG slot, PHYSICAL_ADDRESS *bus)
 {
-    bus->QuadPart = gpu->bus.QuadPart + Backing;
-    return (PULONG)(gpu->dma + Backing);
+    ULONG offset = Backing + slot * RB2K_DD_MAX_BYTES;
+    if (!gpu->ready || slot >= RB2K_DD_SLOTS) return NULL;
+    bus->QuadPart = gpu->bus.QuadPart + offset;
+    return (PULONG)(gpu->dma + offset);
+}
+
+VP_STATUS rb_gpu_stop(RB2K_GPU *gpu)
+{
+    ULONG pciCommand;
+    VP_STATUS cleanup = stop(gpu);
+    /* A reset, including a failed attempt, invalidates all guest handles.
+     * The pinned buffers survive an unacknowledged reset until a retry. */
+    VideoPortZeroMemory(gpu->images, sizeof(gpu->images));
+    gpu->imageCount = 0;
+    if (!cleanup && gpu->enabledMaster) cleanup = bus_master(gpu, FALSE, &pciCommand);
+    if (!cleanup && gpu->dma) {
+        VideoPortFreeCommonBuffer(gpu->extension, gpu->allocated, gpu->dma, gpu->bus, TRUE);
+        gpu->dma = NULL;
+    }
+    return cleanup;
 }
 
 void rb_gpu_probe(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
 {
     VP_STATUS cleanup;
-    ULONG pciCommand;
     VideoPortZeroMemory(result, sizeof(*result));
     result->version = RB2K_GPU_VERSION;
     result->stage = RB2K_STAGE_TRANSPORT;
@@ -280,14 +298,14 @@ void rb_gpu_probe(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
         result->status = ERROR_BUSY;
         return;
     }
-    result->status = start(gpu, result);
-    if (!result->status) rb_gpu_pixel(gpu, result);
-    cleanup = stop(gpu);
-    if (!cleanup && gpu->enabledMaster) cleanup = bus_master(gpu, FALSE, &pciCommand);
-    if (!cleanup && gpu->dma) {
-        VideoPortFreeCommonBuffer(gpu->extension, gpu->allocated, gpu->dma, gpu->bus, TRUE);
-        gpu->dma = NULL;
+    if (gpu->imageCount) {
+        result->status = ERROR_BUSY;
+        VideoPortInterlockedExchange(&gpu->busy, 0);
+        return;
     }
+    result->status = rb_gpu_start(gpu, result);
+    if (!result->status) rb_gpu_pixel(gpu, result);
+    cleanup = rb_gpu_stop(gpu);
     if (cleanup && !result->status) {
         result->stage = RB2K_STAGE_CLEANUP;
         result->status = cleanup;

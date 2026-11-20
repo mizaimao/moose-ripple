@@ -1,5 +1,5 @@
 /* Windows 2000 x86 miniport for QEMU virtio-vga. GDI uses the compatibility
- * framebuffer while a fixed diagnostic can exercise the offscreen 3D queue. */
+ * framebuffer and DirectDraw uses host-rendered offscreen surfaces. */
 #include <miniport.h>
 #include <devioctl.h>
 #include <winerror.h>
@@ -116,7 +116,10 @@ static VP_STATUS set_mode(ADAPTER *a, ULONG request)
 {
     ULONG index = request & ~(VIDEO_MODE_NO_ZERO_MEMORY | VIDEO_MODE_MAP_MEM_LINEAR);
     USHORT enable = (request & VIDEO_MODE_NO_ZERO_MEMORY) ? 0xc1 : 0x41;
+    VP_STATUS status;
     if (index >= ARRAY_COUNT(modes)) return ERROR_INVALID_PARAMETER;
+    status = rb_gpu_surface_reset(&a->gpu);
+    if (status) return status;
     VideoPortWriteRegisterUshort(a->vbe + VbeEnable, 0);
     VideoPortWriteRegisterUshort(a->vbe + VbeX, modes[index].width);
     VideoPortWriteRegisterUshort(a->vbe + VbeY, modes[index].height);
@@ -180,6 +183,14 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
     VP_STATUS status = ERROR_INSUFFICIENT_BUFFER;
     r->StatusBlock->Information = 0;
     switch (r->IoControlCode) {
+    case IOCTL_RB2K_DD_QUERY:
+    case IOCTL_RB2K_DD_CREATE:
+    case IOCTL_RB2K_DD_FILL:
+    case IOCTL_RB2K_DD_READ:
+    case IOCTL_RB2K_DD_WRITE:
+    case IOCTL_RB2K_DD_DESTROY:
+        status = rb_gpu_surface_io(&a->gpu, r);
+        break;
     case IOCTL_RB2K_GPU_PROBE:
         if (r->InputBufferLength) status = ERROR_INVALID_PARAMETER;
         else if (r->OutputBufferLength >= sizeof(RB2K_GPU_RESULT)) {
@@ -225,6 +236,8 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
         break;
     case IOCTL_VIDEO_RESET_DEVICE: {
         VIDEO_X86_BIOS_ARGUMENTS bios;
+        status = rb_gpu_surface_reset(&a->gpu);
+        if (status) break;
         VideoPortZeroMemory(&bios, sizeof(bios));
         bios.Eax = 3;
         status = VideoPortInt10(a, &bios);

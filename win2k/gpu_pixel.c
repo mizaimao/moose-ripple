@@ -1,5 +1,5 @@
-/* Fixed diagnostic: render one orange pixel on the host, then read it
- * back into private DMA backing. The resource is never set as a scanout. */
+/* Wire commands shared by the fixed pixel diagnostic and offscreen
+ * DirectDraw surfaces. None of these operations changes the scanout. */
 #include <miniport.h>
 #include <devioctl.h>
 #include <winerror.h>
@@ -15,18 +15,18 @@
 #pragma warning(pop)
 
 enum {
-    PixelContext = 1, PixelResource = 1, PixelSurface = 1,
+    PixelSurface = 1, CreateWords = 1 + VIRGL_OBJ_SURFACE_SIZE,
     PipeTexture2D = 2, PipeClearColor0 = 1 << 2
 };
 
-/* Float bit patterns keep the miniport free of floating-point operations. */
+/* Each texture has a private context, so its surface object is always 1. */
 static const ULONG clear_commands[] = {
     VIRGL_CMD0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_SURFACE, VIRGL_OBJ_SURFACE_SIZE),
-    PixelSurface, PixelResource, VIRGL_FORMAT_B8G8R8A8_UNORM, 0, 0,
+    PixelSurface, 0, VIRGL_FORMAT_B8G8R8A8_UNORM, 0, 0,
     VIRGL_CMD0(VIRGL_CCMD_SET_FRAMEBUFFER_STATE, 0, VIRGL_SET_FRAMEBUFFER_STATE_SIZE(1)),
     1, 0, PixelSurface,
     VIRGL_CMD0(VIRGL_CCMD_CLEAR, 0, VIRGL_OBJ_CLEAR_SIZE),
-    PipeClearColor0, 0x3f800000, 0x3f000000, 0, 0x3f800000, 0, 0, 0
+    PipeClearColor0, 0, 0, 0, 0, 0, 0, 0
 };
 
 typedef union {
@@ -84,73 +84,134 @@ static BOOLEAN send_request(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     return TRUE;
 }
 
-/* The caller owns a freshly negotiated device for this diagnostic and resets
- * it even on failure, before the queue, backing memory or IDs can be reused.
- * Return immediately with the failing stage if a command is unacknowledged. */
-void rb_gpu_pixel(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
+BOOLEAN rb_gpu_create_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
+                            const RB2K_IMAGE *image, ULONG slot, const char *name, ULONG nameBytes)
 {
-    static const char name[] = "rb2k-pixel";
     PIXEL_REQUEST request;
     PHYSICAL_ADDRESS bus;
-    volatile ULONG *pixel = rb_gpu_backing(gpu, &bus);
-    result->expected = 0xffff8000UL;
-    if (!pixel) {
+    ULONG *backing = rb_gpu_backing(gpu, slot, &bus);
+    ULONG bytes = image->width * image->height * sizeof(ULONG);
+    if (!backing) {
         result->stage = RB2K_STAGE_BACKING;
         result->status = ERROR_NOT_ENOUGH_MEMORY;
-        return;
+        return FALSE;
     }
-    *pixel = ~result->expected;
+    /* A retired slot can be reused while another surface keeps the device
+     * active. Clear its exposed backing extent before attaching it again. */
+    VideoPortZeroMemory(backing, bytes);
+    begin_request(&request, VIRTIO_GPU_CMD_CTX_CREATE, image->id);
+    request.context.nlen = nameBytes;
+    VideoPortMoveMemory(request.context.debug_name, (PVOID)name, nameBytes);
+    if (!send_request(gpu, result, &request, sizeof(request.context), RB2K_STAGE_CONTEXT)) return FALSE;
 
-    begin_request(&request, VIRTIO_GPU_CMD_CTX_CREATE, PixelContext);
-    request.context.nlen = sizeof(name) - 1;
-    VideoPortMoveMemory(request.context.debug_name, (PVOID)name, sizeof(name));
-    if (!send_request(gpu, result, &request, sizeof(request.context), RB2K_STAGE_CONTEXT)) return;
-
-    begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D, PixelContext);
-    request.resource.resource_id = PixelResource;
+    begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D, image->id);
+    request.resource.resource_id = image->id;
     request.resource.target = PipeTexture2D;
     request.resource.format = VIRGL_FORMAT_B8G8R8A8_UNORM;
     request.resource.bind = VIRGL_BIND_RENDER_TARGET;
-    request.resource.width = request.resource.height = 1;
+    request.resource.width = image->width;
+    request.resource.height = image->height;
     request.resource.depth = request.resource.array_size = 1;
-    if (!send_request(gpu, result, &request, sizeof(request.resource), RB2K_STAGE_RESOURCE)) return;
+    if (!send_request(gpu, result, &request, sizeof(request.resource), RB2K_STAGE_RESOURCE)) return FALSE;
 
     begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING, 0);
-    request.backing.attach.resource_id = PixelResource;
+    request.backing.attach.resource_id = image->id;
     request.backing.attach.nr_entries = 1;
     request.backing.entry.addr = bus.QuadPart;
-    request.backing.entry.length = sizeof(*pixel);
-    if (!send_request(gpu, result, &request, sizeof(request.backing), RB2K_STAGE_BACKING)) return;
+    request.backing.entry.length = bytes;
+    if (!send_request(gpu, result, &request, sizeof(request.backing), RB2K_STAGE_BACKING)) return FALSE;
 
-    begin_request(&request, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, PixelContext);
-    request.ctx_resource.resource_id = PixelResource;
-    if (!send_request(gpu, result, &request, sizeof(request.ctx_resource), RB2K_STAGE_ATTACH)) return;
+    begin_request(&request, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, image->id);
+    request.ctx_resource.resource_id = image->id;
+    return send_request(gpu, result, &request, sizeof(request.ctx_resource), RB2K_STAGE_ATTACH);
+}
 
-    begin_request(&request, VIRTIO_GPU_CMD_SUBMIT_3D, PixelContext);
-    request.hdr.flags = VIRTIO_GPU_FLAG_FENCE;
-    request.hdr.fence_id = 1;
-    request.draw.submit.size = sizeof(clear_commands);
-    VideoPortMoveMemory(request.draw.words, (PVOID)clear_commands, sizeof(clear_commands));
-    if (!send_request(gpu, result, &request, sizeof(request.draw.submit) + sizeof(clear_commands),
-                      RB2K_STAGE_CLEAR)) return;
+/* IEEE single-precision encoding of channel/255 rounded to the nearest
+ * representable value, without using the kernel thread's floating-point state. */
+static ULONG channel_bits(ULONG channel)
+{
+    ULONG exponent = 127;
+    if (!channel) return 0;
+    while (channel < 255) {
+        channel <<= 1;
+        --exponent;
+    }
+    return (exponent << 23) | (((channel - 255) << 23) + 127) / 255;
+}
 
-    begin_request(&request, VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, PixelContext);
-    request.hdr.flags = VIRTIO_GPU_FLAG_FENCE;
-    request.hdr.fence_id = 2;
-    request.transfer.resource_id = PixelResource;
-    request.transfer.box.w = request.transfer.box.h = request.transfer.box.d = 1;
-    if (!send_request(gpu, result, &request, sizeof(request.transfer), RB2K_STAGE_TRANSFER)) return;
-    result->observed = *pixel;
+static BOOLEAN fenced(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
+                      PIXEL_REQUEST *request, ULONG bytes, ULONG stage)
+{
+    /* The renderer uses a 32-bit fence timeline. Reset at exhaustion before
+     * an old completion could be mistaken for a new fence. */
+    if (gpu->fence == 0xffffffffUL) {
+        result->status = ERROR_NO_MORE_ITEMS;
+        result->stage = stage;
+        return FALSE;
+    }
+    request->hdr.flags = VIRTIO_GPU_FLAG_FENCE;
+    request->hdr.fence_id = ++gpu->fence;
+    return send_request(gpu, result, request, bytes, stage);
+}
 
-    begin_request(&request, VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE, PixelContext);
-    request.ctx_resource.resource_id = PixelResource;
-    if (!send_request(gpu, result, &request, sizeof(request.ctx_resource), RB2K_STAGE_CLEANUP)) return;
-    begin_request(&request, VIRTIO_GPU_CMD_CTX_DESTROY, PixelContext);
-    if (!send_request(gpu, result, &request, sizeof(request.hdr), RB2K_STAGE_CLEANUP)) return;
+BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
+                          ULONG color, BOOLEAN createSurface)
+{
+    PIXEL_REQUEST request;
+    ULONG skip = createSurface ? 0 : CreateWords;
+    ULONG bytes = sizeof(clear_commands) - skip * sizeof(ULONG);
+    ULONG *words = request.draw.words;
+    begin_request(&request, VIRTIO_GPU_CMD_SUBMIT_3D, id);
+    request.draw.submit.size = bytes;
+    VideoPortMoveMemory(words, (PVOID)(clear_commands + skip), bytes);
+    if (createSurface) words[2] = id;
+    words[12 - skip] = channel_bits((color >> 16) & 255);
+    words[13 - skip] = channel_bits((color >> 8) & 255);
+    words[14 - skip] = channel_bits(color & 255);
+    words[15 - skip] = channel_bits(color >> 24);
+    return fenced(gpu, result, &request, sizeof(request.draw.submit) + bytes, RB2K_STAGE_CLEAR);
+}
+
+BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
+                              const RB2K_IMAGE *image, BOOLEAN readback)
+{
+    PIXEL_REQUEST request;
+    begin_request(&request, readback ? VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D :
+        VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D, image->id);
+    request.transfer.resource_id = image->id;
+    request.transfer.box.w = image->width;
+    request.transfer.box.h = image->height;
+    request.transfer.box.d = 1;
+    return fenced(gpu, result, &request, sizeof(request.transfer), RB2K_STAGE_TRANSFER);
+}
+
+BOOLEAN rb_gpu_destroy_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id)
+{
+    PIXEL_REQUEST request;
+    begin_request(&request, VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE, id);
+    request.ctx_resource.resource_id = id;
+    if (!send_request(gpu, result, &request, sizeof(request.ctx_resource), RB2K_STAGE_CLEANUP)) return FALSE;
+    begin_request(&request, VIRTIO_GPU_CMD_CTX_DESTROY, id);
+    if (!send_request(gpu, result, &request, sizeof(request.hdr), RB2K_STAGE_CLEANUP)) return FALSE;
     begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_UNREF, 0);
-    request.unref.resource_id = PixelResource;
-    if (!send_request(gpu, result, &request, sizeof(request.unref), RB2K_STAGE_CLEANUP)) return;
+    request.unref.resource_id = id;
+    return send_request(gpu, result, &request, sizeof(request.unref), RB2K_STAGE_CLEANUP);
+}
 
+void rb_gpu_pixel(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
+{
+    static const char name[] = "rb2k-pixel";
+    const RB2K_IMAGE image = {1, 1, 1, FALSE, FALSE};
+    PHYSICAL_ADDRESS bus;
+    volatile ULONG *pixel;
+    result->expected = 0xffff8000UL;
+    if (!rb_gpu_create_image(gpu, result, &image, 0, name, sizeof(name) - 1)) return;
+    pixel = rb_gpu_backing(gpu, 0, &bus);
+    *pixel = ~result->expected;
+    if (!rb_gpu_draw_image(gpu, result, image.id, result->expected, TRUE) ||
+        !rb_gpu_transfer_image(gpu, result, &image, TRUE)) return;
+    result->observed = *pixel;
+    if (!rb_gpu_destroy_image(gpu, result, image.id)) return;
     if (result->observed != result->expected) {
         result->stage = RB2K_STAGE_COMPARE;
         result->status = ERROR_INVALID_DATA;

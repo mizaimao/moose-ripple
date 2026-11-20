@@ -4,6 +4,7 @@
 
 #define RB2K_GPU_VERSION 1
 #define RB2K_GPU_ESCAPE 0x52420001
+#define RB2K_DD_STATS_ESCAPE 0x52420002
 #define IOCTL_RB2K_GPU_PROBE CTL_CODE(FILE_DEVICE_VIDEO, 0x900, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 enum {
@@ -28,5 +29,11 @@ typedef struct {
     ULONG observed;
     ULONG features;
 } RB2K_GPU_RESULT;
+
+typedef struct {
+    ULONG hostFills;
+    ULONG readbacks;
+    ULONG uploads;
+} RB2K_DD_STATS;
 
 #endif
