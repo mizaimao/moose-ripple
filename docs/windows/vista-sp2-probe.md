@@ -1,7 +1,7 @@
 # Vista SP2 x64 display driver probe
 
 The kernel driver and both Direct3D 9 DLLs build from the Windows 7 driver at
-`63739fe`. On Vista SP2 x64 with test signing enabled, version 7.14.1.6
+`63739fe`. On Vista SP2 x64 with test signing enabled, version 7.14.1.7
 starts the adapter, runs the desktop at 1280×768 and draws the Direct3D 9
 triangle test correctly for both x64 and x86 applications. The guest reports
 Aero composition on. Earlier builds read every GPU result back as black;
@@ -201,6 +201,38 @@ triangle tests still read back right with composition on. The kernel log
 shows about 130 escapes rejected as `buffer too small 0, should be at least
 20` from a caller not yet identified. The UTM window has not been looked at.
 
+### What the screen showed, 7.14.1.7
+
+Seen on the UTM window with 7.14.1.6: only a small part of the desktop,
+flickering hard. QEMU's `screendump` returns black for a 3D scanout, and a
+GDI capture inside the guest returns black once composition is on, so
+neither shows the screen. The Direct3D 9 driver now saves the frames it
+presents instead (`C:\Users\Public\ripple-swapdump` as the trigger, and
+`RIPPLE_DRAWDUMP` for single draws, both Vista only). Two bugs showed:
+
+1. The compositor's flip chain is one resource of two surfaces on Vista,
+   and the driver gave both surfaces one image. The compositor drew into
+   the buffer on screen, and every flip went to that same image (the host
+   trace showed one scanout resource). Each surface now has its own image,
+   allocated as a primary; drawing goes to one render image, copied to the
+   buffer Windows flips to at each present. The trace then alternated
+   between two scanout resources.
+2. The driver reset the viewport to the whole surface at every render
+   target change. The compositor redraws only what changed, through a small
+   viewport, and the runtime does not resend that viewport when it moves to
+   the next buffer of the chain. The presented frame was a piece of the
+   Found New Hardware dialog magnified to the whole screen (with 7.14.1.6,
+   a grey 1,201×641 block). On Vista the reset is gone.
+
+The dumps of the compositor's first frame were right after its last draw,
+so the scene itself was never the problem. After a clean install and reboot
+of 7.14.1.7, composition was on, both DLLs and the kernel driver matched the
+package, both triangle tests read back right, and the presented frame was
+the full Aero desktop with glass frames, gadgets, windows and taskbar.
+
+Still open: a GDI screen capture (Print Screen and the like) returns black
+while composition is on, and the escapes rejected as too small.
+
 ## Rebuild and signing handoff
 
 From the Vista worktree on the Linux builder, set `MAIN` to the checkout
@@ -240,6 +272,8 @@ available in the existing checkout.
 
 | Artifact | What it contains |
 | --- | --- |
+| `build/ripple-vista-7.14.1.7/` | Unsigned package of the 7.14.1.7 run: the 7.14.1.6 kernel driver, both DLLs with the flip chain and viewport fixes and the frame dumps. Full Aero desktop. |
+| `tmp-utm-validation/shot.c`, `recv-shot.rb` | Guest screen capture and file upload over HTTP, and its receiver on the UTM host. |
 | `build/ripple-vista-7.14.1.6/` | Unsigned package installed in the 7.14.1.6 run: kernel driver and both Mesa DLLs with patches `0101` to `0103` (composition on). |
 | `build/ripple-vista-7.14.1.5/` | The 7.14.1.5 package: the `169f188` kernel driver and both Mesa DLLs with patches `0101` and `0102`. |
 | `tmp-utm-validation/fix5/` and `deliver-fix.rb` | The same package with its guest install script, and the host script that delivers it over HTTP, installs it, reboots and runs the checks. |
@@ -256,11 +290,12 @@ available in the existing checkout.
    like `fix5/` on the UTM host and run
    `ruby deliver-fix.rb <folder> <guest address> <number>`. No CD change is
    needed. The run ends with the display check and both triangle tests.
-3. Check the visible desktop in the UTM window, with Aero on. Reading the
-   UTM window (any capture of the host's screen) needs the owner's approval
-   each time.
+3. Look at frames with the swap dump: `echo x >C:\Users\Public\ripple-swapdump`
+   in the guest, then fetch `C:\Users\Public\swap-PID.bmp` with
+   `ruby recv-shot.rb <guest> <out.bmp> 0 <guest file>` (the `shot.exe -f`
+   upload). Reading the UTM window itself needs the owner's approval each time.
 4. Then 3DMark06 and F.E.A.R. from the lab CD. Full-screen Direct3D 9 games
-   allocate primaries as the compositor does, so they depend on 7.14.1.6.
+   allocate primary flip chains as the compositor does.
 
 ### Recover the lab desktop
 
