@@ -5,6 +5,8 @@
 #define RB2K_DEFAULT_WIDTH 1024UL
 #define RB2K_DEFAULT_HEIGHT 768UL
 
+enum RB2K_DDRAW_TEST { RB2K_DDRAW_FILL, RB2K_DDRAW_COPY, RB2K_DDRAW_WINDOW };
+
 #define RB2K_GPU_VERSION 1
 #define RB2K_GPU_ESCAPE 0x52420001
 #define RB2K_DD_STATS_ESCAPE 0x52420002
@@ -43,5 +45,10 @@ typedef struct {
     RB2K_DD_STATS transfers;
     ULONG hostCopies;
 } RB2K_DD_COPY_STATS;
+
+typedef struct {
+    RB2K_DD_COPY_STATS offscreen;
+    ULONG presents, presentReadbacks, presentBytes;
+} RB2K_DD_PRESENT_STATS;
 
 #endif

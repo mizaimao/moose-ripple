@@ -83,6 +83,12 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
         return ERROR_DEV_NOT_EXIST;
     }
     rb_gpu_find(&a->gpu, a, slot, registers, config);
+    /* VideoPort maps device memory during adapter discovery. BAR0 is a PCI
+     * framebuffer; its address is not a general-purpose DMA backing entry. */
+    if (a->gpu.common) {
+        a->gpu.primary.bytes = MIN_FRAME_BYTES;
+        a->gpu.primary.pixels = VideoPortGetDeviceBase(a, a->fb.RangeStart, MIN_FRAME_BYTES, 0);
+    }
     config->NumEmulatorAccessEntries = 0;
     config->HardwareStateSize = 0;
     return NO_ERROR;
@@ -139,6 +145,9 @@ static VP_STATUS set_mode(ADAPTER *a, ULONG request)
         return ERROR_INVALID_FUNCTION;
     a->mode = index;
     a->modeSet = TRUE;
+    a->gpu.primary.width = modes[index].width;
+    a->gpu.primary.height = modes[index].height;
+    a->gpu.primary.pitchPixels = VideoPortReadRegisterUshort(a->vbe + VbeWidth);
     return NO_ERROR;
 }
 
@@ -194,6 +203,7 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
     case IOCTL_RB2K_DD_WRITE:
     case IOCTL_RB2K_DD_DESTROY:
     case IOCTL_RB2K_DD_COPY:
+    case IOCTL_RB2K_DD_PRESENT:
         status = rb_gpu_surface_io(&a->gpu, r);
         break;
     case IOCTL_RB2K_GPU_PROBE:

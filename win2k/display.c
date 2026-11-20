@@ -216,13 +216,20 @@ ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
     if (code == RB2K_DD_STATS_ESCAPE) {
         RB2K_DD_CAPS caps;
         RB2K_DD_STATS *stats = out;
-        if ((outSize != sizeof(*stats) && outSize != sizeof(RB2K_DD_COPY_STATS)) ||
+        if ((outSize != sizeof(*stats) && outSize != sizeof(RB2K_DD_COPY_STATS) &&
+             outSize != sizeof(RB2K_DD_PRESENT_STATS)) ||
             !rb_dd_caps(display, &caps)) return 0;
         stats->hostFills = caps.hostFills;
         stats->readbacks = caps.readbacks;
         stats->uploads = caps.uploads;
-        if (outSize == sizeof(RB2K_DD_COPY_STATS))
+        if (outSize >= sizeof(RB2K_DD_COPY_STATS))
             ((RB2K_DD_COPY_STATS *)out)->hostCopies = caps.hostCopies;
+        if (outSize == sizeof(RB2K_DD_PRESENT_STATS)) {
+            RB2K_DD_PRESENT_STATS *present = out;
+            present->presents = caps.presents;
+            present->presentReadbacks = caps.presentReadbacks;
+            present->presentBytes = caps.presentBytes;
+        }
         return 1;
     }
     if (code != RB2K_GPU_ESCAPE || outSize != sizeof(result)) return 0;

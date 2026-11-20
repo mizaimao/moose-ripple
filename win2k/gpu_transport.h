@@ -7,8 +7,14 @@
 
 typedef struct {
     ULONG id, width, height;
-    BOOLEAN defined, hasSurface;
+    BOOLEAN defined, hasSurface, uniform;
+    ULONG color;
 } RB2K_IMAGE;
+
+typedef struct {
+    PULONG pixels;
+    ULONG width, height, pitchPixels, bytes;
+} RB2K_PRIMARY;
 
 #define RB2K_SEGMENT_BYTES 65536UL
 #define RB2K_MAX_SEGMENTS ((RB2K_DD_MAX_BYTES + RB2K_SEGMENT_BYTES - 1) / RB2K_SEGMENT_BYTES)
@@ -30,6 +36,8 @@ typedef struct {
     LONG busy, barrier;
     BOOLEAN owned, ready, enabledMaster, tested;
     ULONG nextId, fence, imageCount, hostFills, readbacks, uploads, hostCopies;
+    ULONG presents, presentReadbacks, presentBytes;
+    RB2K_PRIMARY primary;
     RB2K_IMAGE images[RB2K_DD_SLOTS];
     RB2K_DMA_SEGMENT staging[RB2K_MAX_SEGMENTS];
 } RB2K_GPU;
@@ -49,6 +57,8 @@ BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
                           ULONG color, BOOLEAN createSurface);
 BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
                               const RB2K_IMAGE *image, PVOID pixels, BOOLEAN readback);
+BOOLEAN rb_gpu_transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resource,
+                            ULONG x, ULONG y, ULONG width, ULONG height, PVOID upload);
 BOOLEAN rb_gpu_copy_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
                           const RB2K_IMAGE *source, const RB2K_IMAGE *destination);
 BOOLEAN rb_gpu_destroy_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id);

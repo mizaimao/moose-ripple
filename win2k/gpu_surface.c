@@ -28,6 +28,9 @@ static VP_STATUS query(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     caps->readbacks = gpu->readbacks;
     caps->uploads = gpu->uploads;
     caps->hostCopies = gpu->hostCopies;
+    caps->presents = gpu->presents;
+    caps->presentReadbacks = gpu->presentReadbacks;
+    caps->presentBytes = gpu->presentBytes;
     packet->StatusBlock->Information = sizeof(*caps);
     return NO_ERROR;
 }
@@ -79,6 +82,60 @@ static RB2K_IMAGE *find_image(RB2K_GPU *gpu, ULONG id)
     return NULL;
 }
 
+static VP_STATUS command_error(RB2K_GPU *gpu, const RB2K_GPU_RESULT *result)
+{
+    /* Staging allocation precedes submission and leaves other images usable. */
+    if (result->stage != RB2K_STAGE_BACKING || result->status != ERROR_NOT_ENOUGH_MEMORY)
+        rb_gpu_stop(gpu); /* A late completion must not touch recycled storage. */
+    return result->status;
+}
+
+static VP_STATUS present(RB2K_GPU *gpu, const RB2K_IMAGE *image, const RB2K_DD_PRESENT *p)
+{
+    RB2K_PRIMARY *primary = &gpu->primary;
+    RB2K_GPU_RESULT result;
+    BOOLEAN solid = !image->defined || image->uniform;
+    ULONG span[64], offset = 0, y;
+    const ULONG segmentPixels = RB2K_SEGMENT_BYTES / sizeof(ULONG);
+    if (!primary->pixels || !primary->height || !primary->width || primary->pitchPixels < primary->width ||
+        primary->pitchPixels > primary->bytes / sizeof(ULONG) / primary->height)
+        return ERROR_NOT_READY;
+    if (!p->width || !p->height || p->width > image->width || p->height > image->height ||
+        p->srcX > image->width - p->width || p->srcY > image->height - p->height ||
+        p->width > primary->width || p->height > primary->height ||
+        p->dstX > primary->width - p->width || p->dstY > primary->height - p->height)
+        return ERROR_INVALID_PARAMETER;
+    if (solid) {
+        ULONG i, color = image->defined ? image->color : 0;
+        for (i = 0; i < sizeof(span) / sizeof(span[0]); ++i) span[i] = color;
+    } else {
+        if (!rb_gpu_transfer_box(gpu, &result, image->id, p->srcX, p->srcY,
+                                 p->width, p->height, NULL)) return command_error(gpu, &result);
+        ++gpu->presentReadbacks;
+        gpu->presentBytes += p->width * p->height * sizeof(ULONG);
+    }
+    for (y = 0; y < p->height; ++y) {
+        PULONG dst = primary->pixels + (p->dstY + y) * primary->pitchPixels + p->dstX;
+        ULONG remaining = p->width;
+        while (remaining) {
+            PULONG src = span;
+            ULONG count = sizeof(span) / sizeof(span[0]);
+            if (!solid) {
+                ULONG inSegment = offset % segmentPixels;
+                src = (PULONG)gpu->staging[offset / segmentPixels].data + inSegment;
+                count = segmentPixels - inSegment;
+            }
+            if (count > remaining) count = remaining;
+            VideoPortWriteRegisterBufferUlong(dst, src, count);
+            dst += count;
+            offset += count;
+            remaining -= count;
+        }
+    }
+    ++gpu->presents;
+    return NO_ERROR;
+}
+
 static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 {
     ULONG id, bytes;
@@ -98,7 +155,8 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         success = rb_gpu_draw_image(gpu, &result, id, fill->color, (BOOLEAN)!image->hasSurface);
         if (success) {
             ++gpu->hostFills;
-            image->hasSurface = image->defined = TRUE;
+            image->hasSurface = image->defined = image->uniform = TRUE;
+            image->color = fill->color;
         }
         break;
     }
@@ -124,6 +182,7 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         success = rb_gpu_transfer_image(gpu, &result, image, (PUCHAR)packet->InputBuffer + sizeof(id), FALSE);
         if (success) {
             image->defined = TRUE;
+            image->uniform = FALSE;
             ++gpu->uploads;
         }
         break;
@@ -145,10 +204,16 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         success = rb_gpu_copy_image(gpu, &result, image, destination);
         if (success) {
             destination->defined = TRUE;
+            destination->uniform = image->uniform;
+            destination->color = image->color;
             ++gpu->hostCopies;
         }
         break;
     }
+    case IOCTL_RB2K_DD_PRESENT:
+        if (packet->InputBufferLength != sizeof(RB2K_DD_PRESENT) || packet->OutputBufferLength)
+            return ERROR_INVALID_PARAMETER;
+        return present(gpu, image, packet->InputBuffer);
     case IOCTL_RB2K_DD_DESTROY:
         if (packet->InputBufferLength != sizeof(id) || packet->OutputBufferLength)
             return ERROR_INVALID_PARAMETER;
@@ -162,14 +227,7 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         return ERROR_INVALID_FUNCTION;
     }
     if (success) return NO_ERROR;
-    /* Staging allocation precedes the first command of a transfer. Existing
-     * textures can still be filled, copied or destroyed under memory pressure. */
-    if (result.stage == RB2K_STAGE_BACKING && result.status == ERROR_NOT_ENOUGH_MEMORY)
-        return result.status;
-    /* A timed-out command may complete late. Invalidate every host object
-     * on this device before reusing descriptors, pages or resource IDs. */
-    rb_gpu_stop(gpu);
-    return result.status;
+    return command_error(gpu, &result);
 }
 
 VP_STATUS rb_gpu_surface_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
@@ -188,6 +246,7 @@ VP_STATUS rb_gpu_surface_reset(RB2K_GPU *gpu)
     VP_STATUS status;
     if (VideoPortInterlockedExchange(&gpu->busy, 1)) return ERROR_BUSY;
     status = rb_gpu_stop(gpu);
+    gpu->primary.width = gpu->primary.height = gpu->primary.pitchPixels = 0;
     VideoPortInterlockedExchange(&gpu->busy, 0);
     return status;
 }

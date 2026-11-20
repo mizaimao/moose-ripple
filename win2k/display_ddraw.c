@@ -1,6 +1,6 @@
-/* NT5 DirectDraw colour fills and full-surface copies. The pixels live in a host
- * texture. DirectDraw allocates an individual user-mode staging buffer
- * for each surface, which is synchronized only at a CPU lock boundary. */
+/* NT5 DirectDraw offscreen surfaces live in host textures. The runtime's
+ * per-surface staging buffer is synchronized at a CPU lock boundary.
+ * Windowed presentation updates the visible part of the GDI framebuffer. */
 #include "display_private.h"
 
 static BOOL request(DISPLAY *d, ULONG code, PVOID in, ULONG inSize,
@@ -17,15 +17,26 @@ BOOL rb_dd_caps(DISPLAY *d, RB2K_DD_CAPS *caps)
            caps->maxBytes == RB2K_DD_MAX_BYTES && caps->slots == RB2K_DD_SLOTS;
 }
 
-static BOOL supported(const DDSURFACEDESC *desc)
+static BOOL primary_caps(DWORD caps)
+{
+    return (caps & DDSCAPS_PRIMARYSURFACE) &&
+           !(caps & ~(DDSCAPS_PRIMARYSURFACE | DDSCAPS_FRONTBUFFER | DDSCAPS_VISIBLE |
+                      DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM));
+}
+
+static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
 {
     DWORD caps = desc->ddsCaps.dwCaps;
     const DDPIXELFORMAT *fmt = &desc->ddpfPixelFormat;
-    if (!(caps & DDSCAPS_OFFSCREENPLAIN) ||
-        (caps & ~(DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM)) ||
-        !desc->dwWidth || desc->dwWidth > RB2K_DD_MAX_WIDTH ||
-        !desc->dwHeight || desc->dwHeight > RB2K_DD_MAX_HEIGHT)
-        return FALSE;
+    if (primary_caps(caps)) {
+        if (!d->mapping || !d->surface ||
+            ((desc->dwFlags & DDSD_WIDTH) && desc->dwWidth != d->mode.VisScreenWidth) ||
+            ((desc->dwFlags & DDSD_HEIGHT) && desc->dwHeight != d->mode.VisScreenHeight))
+            return FALSE;
+    } else if (!(caps & DDSCAPS_OFFSCREENPLAIN) ||
+               (caps & ~(DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM)) ||
+               !desc->dwWidth || desc->dwWidth > RB2K_DD_MAX_WIDTH ||
+               !desc->dwHeight || desc->dwHeight > RB2K_DD_MAX_HEIGHT) return FALSE;
     return !(desc->dwFlags & DDSD_PIXELFORMAT) ||
         (fmt->dwFlags == DDPF_RGB && fmt->dwRGBBitCount == 32 &&
          fmt->dwRBitMask == 0xff0000 && fmt->dwGBitMask == 0xff00 &&
@@ -34,7 +45,8 @@ static BOOL supported(const DDSURFACEDESC *desc)
 
 static DWORD APIENTRY can_create(PDD_CANCREATESURFACEDATA data)
 {
-    data->ddRVal = supported(data->lpDDSurfaceDesc) ? DD_OK : DDERR_INVALIDCAPS;
+    data->ddRVal = supported((DISPLAY *)data->lpDD->dhpdev, data->lpDDSurfaceDesc)
+                 ? DD_OK : DDERR_INVALIDCAPS;
     return DDHAL_DRIVER_HANDLED;
 }
 
@@ -55,11 +67,20 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
     RB2K_DD_CREATE create;
     DD_SLOT *slot;
     DWORD rc = DDHAL_DRIVER_HANDLED;
-    if (!supported(desc) || data->dwSCnt != 1) {
+    if (!supported(d, desc) || data->dwSCnt != 1) {
         data->ddRVal = DDERR_INVALIDCAPS;
         return rc;
     }
     g = data->lplpSList[0]->lpGbl;
+    if (desc->ddsCaps.dwCaps & DDSCAPS_PRIMARYSURFACE) {
+        /* NT normally creates the primary without entering this callback.
+         * Its video-memory offset is zero in each of our display modes. */
+        g->fpVidMem = 0;
+        g->lPitch = desc->lPitch = d->mode.ScreenStride;
+        desc->dwFlags |= DDSD_PITCH;
+        data->ddRVal = DD_OK;
+        return DDHAL_DRIVER_NOTHANDLED;
+    }
     if (g->wWidth != desc->dwWidth || g->wHeight != desc->dwHeight) {
         data->ddRVal = DDERR_INVALIDPARAMS;
         return rc;
@@ -116,22 +137,63 @@ static BOOL full_rect(const RECTL *r, const DD_SLOT *s)
            r->bottom == (LONG)s->height;
 }
 
+static BOOL mapped_primary(const DISPLAY *d, const DD_SURFACE_LOCAL *local)
+{
+    const DD_SURFACE_GLOBAL *g = local->lpGbl;
+    return d->ddEnabled && d->mapping && d->surface && primary_caps(local->ddsCaps.dwCaps) &&
+           g->wWidth == d->mode.VisScreenWidth && g->wHeight == d->mode.VisScreenHeight &&
+           g->lPitch > 0 && (ULONG)g->lPitch == d->mode.ScreenStride &&
+           (g->fpVidMem == 0 || g->fpVidMem == (FLATPTR)d->mapping);
+}
+
+static BOOL rect_inside(const RECTL *r, ULONG width, ULONG height)
+{
+    return r->left >= 0 && r->top >= 0 && r->right > r->left && r->bottom > r->top &&
+           (ULONG)r->right <= width && (ULONG)r->bottom <= height;
+}
+
+static HRESULT present(DISPLAY *d, const DD_SLOT *src, const RECTL *from, const RECTL *to)
+{
+    RB2K_DD_PRESENT p;
+    if (!rect_inside(from, src->width, src->height) ||
+        !rect_inside(to, d->mode.VisScreenWidth, d->mode.VisScreenHeight))
+        return DDERR_INVALIDRECT;
+    if (from->right - from->left != to->right - to->left ||
+        from->bottom - from->top != to->bottom - to->top) return DDERR_UNSUPPORTED;
+    p.source = src->id;
+    p.srcX = from->left; p.srcY = from->top;
+    p.dstX = to->left; p.dstY = to->top;
+    p.width = from->right - from->left; p.height = from->bottom - from->top;
+    return request(d, IOCTL_RB2K_DD_PRESENT, &p, sizeof(p), NULL, 0)
+         ? DD_OK : DDERR_GENERIC;
+}
+
 static DWORD APIENTRY blt(PDD_BLTDATA data)
 {
     DISPLAY *d = (DISPLAY *)data->lpDD->dhpdev;
     DD_SLOT *dst, *src = NULL;
     DWORD operation = data->dwFlags & ~(DDBLT_WAIT | DDBLT_DONOTWAIT);
+    /* NT may omit the low GDI operation word below the ROP3. */
+    BOOL sourceCopy = operation == 0 || (operation == DDBLT_ROP &&
+                      (data->bltFX.dwROP >> 16) == (SRCCOPY >> 16));
+    BOOL primary;
     HANDLE owner = EngGetCurrentProcessId();
     DWORD rc = DDHAL_DRIVER_HANDLED;
     EngAcquireSemaphore(d->ddLock);
     dst = find_slot(d, data->lpDDDestSurface->lpGbl);
     if (data->lpDDSrcSurface) src = find_slot(d, data->lpDDSrcSurface->lpGbl);
+    primary = !dst && src && mapped_primary(d, data->lpDDDestSurface);
     if (!dst && !src) rc = DDHAL_DRIVER_NOTHANDLED;
-    else if (!dst || (data->lpDDSrcSurface && !src)) data->ddRVal = DDERR_UNSUPPORTED;
-    else if (dst->lost || dst->owner != owner || (src && (src->lost || src->owner != owner)))
+    else if ((!dst && !primary) || (data->lpDDSrcSurface && !src)) data->ddRVal = DDERR_UNSUPPORTED;
+    else if ((dst && (dst->lost || dst->owner != owner)) || (src && (src->lost || src->owner != owner)))
         data->ddRVal = DDERR_SURFACELOST;
-    else if (dst->locked || (src && src->locked)) data->ddRVal = DDERR_SURFACEBUSY;
-    else if (data->IsClipped || !full_rect(&data->rDest, dst))
+    else if ((dst && dst->locked) || (src && src->locked)) data->ddRVal = DDERR_SURFACEBUSY;
+    /* NT5 has already intersected a window clipper with the visible region.
+     * Each callback describes one visible source/destination rectangle pair. */
+    else if (data->IsClipped) data->ddRVal = DDERR_UNSUPPORTED;
+    else if (primary)
+        data->ddRVal = sourceCopy ? present(d, src, &data->rSrc, &data->rDest) : DDERR_UNSUPPORTED;
+    else if (!full_rect(&data->rDest, dst))
         data->ddRVal = DDERR_UNSUPPORTED;
     else if (!src && operation == DDBLT_COLORFILL) {
         RB2K_DD_FILL fill;
@@ -140,9 +202,7 @@ static DWORD APIENTRY blt(PDD_BLTDATA data)
         data->ddRVal = request(d, IOCTL_RB2K_DD_FILL, &fill, sizeof(fill), NULL, 0)
                      ? DD_OK : DDERR_SURFACELOST;
         if (FAILED(data->ddRVal)) dst->lost = TRUE;
-    /* DirectDraw may omit the legacy GDI operation word below the ROP3. */
-    } else if (src && (operation == 0 || (operation == DDBLT_ROP &&
-               (data->bltFX.dwROP >> 16) == (SRCCOPY >> 16))) &&
+    } else if (src && sourceCopy &&
                src->width == dst->width && src->height == dst->height && full_rect(&data->rSrc, src)) {
         RB2K_DD_COPY copy;
         copy.source = src->id;
@@ -193,8 +253,7 @@ static DWORD APIENTRY lock_surface(PDD_LOCKDATA data)
     }
     if (data->bHasRect) {
         const RECTL *r = &data->rArea;
-        if (r->left < 0 || r->top < 0 || r->right <= r->left || r->bottom <= r->top ||
-            r->right > (LONG)s->width || r->bottom > (LONG)s->height) {
+        if (!rect_inside(r, s->width, s->height)) {
             data->ddRVal = DDERR_INVALIDRECT; goto done;
         }
         offset = ((ULONG)r->top * s->width + r->left) * 4;
@@ -279,7 +338,7 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     info->ddCaps.dwCaps = DDCAPS_BLT | DDCAPS_BLTCOLORFILL;
     /* DirectDraw indexes the raster-op bitset by the eight-bit ROP3 code. */
     info->ddCaps.dwRops[((SRCCOPY >> 16) & 255) / 32] |= 1UL << ((SRCCOPY >> 16) & 31);
-    info->ddCaps.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY |
+    info->ddCaps.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY |
                                   DDSCAPS_LOCALVIDMEM;
     info->ddCaps.dwVidMemTotal = caps.maxBytes * caps.slots;
     {

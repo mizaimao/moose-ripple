@@ -15,11 +15,15 @@
 #define IOCTL_RB2K_DD_WRITE   RB2K_DD_IOCTL(0x905)
 #define IOCTL_RB2K_DD_DESTROY RB2K_DD_IOCTL(0x906)
 #define IOCTL_RB2K_DD_COPY    RB2K_DD_IOCTL(0x907)
+#define IOCTL_RB2K_DD_PRESENT RB2K_DD_IOCTL(0x908)
 typedef struct {
     ULONG maxBytes, slots;
     ULONG hostFills, readbacks, uploads, hostCopies;
+    ULONG presents, presentReadbacks, presentBytes;
 } RB2K_DD_CAPS;
 typedef struct { ULONG width, height; } RB2K_DD_CREATE;
 typedef struct { ULONG id, color; } RB2K_DD_FILL;
 typedef struct { ULONG source, destination; } RB2K_DD_COPY;
+/* One visible rectangle, in source and primary pixel coordinates. */
+typedef struct { ULONG source, srcX, srcY, dstX, dstY, width, height; } RB2K_DD_PRESENT;
 #endif

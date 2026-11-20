@@ -166,12 +166,13 @@ BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
     return fenced(gpu, result, &request, sizeof(request.draw.submit) + bytes, RB2K_STAGE_CLEAR);
 }
 
-BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
-                              const RB2K_IMAGE *image, PVOID pixels, BOOLEAN readback)
+/* Use a packed DMA buffer even when the source box is inside a larger image. */
+BOOLEAN rb_gpu_transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resource,
+                            ULONG x, ULONG y, ULONG width, ULONG height, PVOID upload)
 {
     PIXEL_REQUEST request;
     BACKING_REQUEST backing;
-    ULONG bytes = image->width * image->height * sizeof(ULONG);
+    ULONG bytes = width * height * sizeof(ULONG);
     ULONG count = (bytes + RB2K_SEGMENT_BYTES - 1) / RB2K_SEGMENT_BYTES;
     ULONG i, used = sizeof(backing.attach) + count * sizeof(backing.entries[0]);
     result->stage = RB2K_STAGE_BACKING;
@@ -179,7 +180,7 @@ BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     if (result->status) return FALSE;
     VideoPortZeroMemory(&backing, used);
     backing.attach.hdr.type = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
-    backing.attach.resource_id = image->id;
+    backing.attach.resource_id = resource;
     backing.attach.nr_entries = count;
     for (i = 0; i < count; ++i) {
         ULONG offset = i * RB2K_SEGMENT_BYTES;
@@ -188,24 +189,39 @@ BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
         backing.entries[i].addr = gpu->staging[i].bus.QuadPart;
         backing.entries[i].length = length;
         /* A failed or short renderer write must never return another surface's bytes. */
-        if (readback) VideoPortZeroMemory(gpu->staging[i].data, length);
-        else VideoPortMoveMemory(gpu->staging[i].data, (PUCHAR)pixels + offset, length);
+        if (upload) VideoPortMoveMemory(gpu->staging[i].data, (PUCHAR)upload + offset, length);
+        else VideoPortZeroMemory(gpu->staging[i].data, length);
     }
     if (!send_request(gpu, result, &backing, used, RB2K_STAGE_BACKING)) return FALSE;
-    begin_request(&request, readback ? VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D :
-        VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D, image->id);
-    request.transfer.resource_id = image->id;
-    request.transfer.box.w = image->width;
-    request.transfer.box.h = image->height;
+    begin_request(&request, upload ? VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D :
+        VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, resource);
+    request.transfer.resource_id = resource;
+    request.transfer.box.x = x;
+    request.transfer.box.y = y;
+    request.transfer.box.w = width;
+    request.transfer.box.h = height;
     request.transfer.box.d = 1;
+    request.transfer.stride = width * sizeof(ULONG);
     if (!fenced(gpu, result, &request, sizeof(request.transfer), RB2K_STAGE_TRANSFER)) return FALSE;
     begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING, 0);
-    request.detach.resource_id = image->id;
-    if (!send_request(gpu, result, &request, sizeof(request.detach), RB2K_STAGE_BACKING)) return FALSE;
+    request.detach.resource_id = resource;
+    return send_request(gpu, result, &request, sizeof(request.detach), RB2K_STAGE_BACKING);
+}
+
+BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
+                              const RB2K_IMAGE *image, PVOID pixels, BOOLEAN readback)
+{
+    ULONG bytes = image->width * image->height * sizeof(ULONG);
+    ULONG offset;
+    if (!rb_gpu_transfer_box(gpu, result, image->id, 0, 0, image->width, image->height,
+                             readback ? NULL : pixels)) return FALSE;
     if (readback) {
-        for (i = 0; i < count; ++i)
-            VideoPortMoveMemory((PUCHAR)pixels + i * RB2K_SEGMENT_BYTES, gpu->staging[i].data,
-                                backing.entries[i].length);
+        for (offset = 0; offset < bytes; offset += RB2K_SEGMENT_BYTES) {
+            ULONG length = bytes - offset;
+            if (length > RB2K_SEGMENT_BYTES) length = RB2K_SEGMENT_BYTES;
+            VideoPortMoveMemory((PUCHAR)pixels + offset,
+                                gpu->staging[offset / RB2K_SEGMENT_BYTES].data, length);
+        }
     }
     return TRUE;
 }
@@ -245,7 +261,7 @@ BOOLEAN rb_gpu_destroy_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id)
 void rb_gpu_pixel(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
 {
     static const char name[] = "rb2k-pixel";
-    const RB2K_IMAGE image = {1, 1, 1, FALSE, FALSE};
+    const RB2K_IMAGE image = {1, 1, 1, FALSE, FALSE, FALSE, 0};
     result->expected = 0xffff8000UL;
     if (!rb_gpu_create_image(gpu, result, &image, name, sizeof(name) - 1)) return;
     result->observed = ~result->expected;
