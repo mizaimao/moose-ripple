@@ -6,6 +6,7 @@
 #include <ntddvdeo.h>
 #include <video.h>
 #include "gpu_transport.h"
+#include "rb2krvd.h"
 
 #define ARRAY_COUNT(a) (sizeof(a) / sizeof((a)[0]))
 #define DISPI_OFFSET 0x500
@@ -423,6 +424,9 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
     case IOCTL_RB2K_DD_PRESENT:
     case IOCTL_RB2K_DD_UNIFORM:
         status = rb_gpu_surface_io(&a->gpu, r);
+        break;
+    case IOCTL_RB2K_RVD:
+        status = rb_gpu_rvd_io(&a->gpu, r);
         break;
     case IOCTL_RB2K_GPU_PROBE:
         if (r->InputBufferLength) status = ERROR_INVALID_PARAMETER;

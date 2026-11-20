@@ -15,14 +15,18 @@ enum {
 enum {
     Ack = 1, Driver = 2, DriverOk = 4, FeaturesOk = 8, Virgl = 1,
     Version1High = 1, DescriptorNext = 1, DescriptorWrite = 2,
-    NoInterrupt = 1, QueueEntries = 2
+    NoInterrupt = 1, QueueEntries = 16
 };
-/* The queue needs one page. CPU transfers allocate separate DMA staging,
- * shared under the same lock and attached to one host texture at a time. */
+/* The queue and one request take the first page, the reply the second.
+ * Larger command data follows the request in separate DMA staging
+ * segments, chained as further descriptors. One request is in flight. */
 enum {
-    Desc = 0, Avail = 32, Used = 48, Request = 128, Reply = 1152,
-    PacketBytes = 1024, DmaBytes = 4096
+    Desc = 0, Avail = 256, Used = 512, Request = 1024, Reply = 4096,
+    PacketBytes = 1024, ReplyBytes = 4096, DmaBytes = 8192
 };
+typedef char queue_fits_before_request[Used + 4 + 8 * QueueEntries + 2 <= Request ? 1 : -1];
+typedef char avail_fits_before_used[Avail + 4 + 2 * QueueEntries + 2 <= Used ? 1 : -1];
+typedef char extents_fit_queue[RB2K_GPU_MAX_EXTENTS + 2 <= QueueEntries ? 1 : -1];
 typedef struct { PHYSICAL_ADDRESS address; ULONG length; USHORT flags, next; } DESCRIPTOR;
 typedef struct { USHORT flags, index, ring[QueueEntries]; } AVAILABLE;
 typedef struct { ULONG id, length; } USED_ENTRY;
@@ -212,6 +216,13 @@ VP_STATUS rb_gpu_start(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
 VP_STATUS rb_gpu_submit(RB2K_GPU *gpu, const void *request, ULONG bytes,
                         void *reply, ULONG capacity, PULONG received)
 {
+    return rb_gpu_submit_extents(gpu, request, bytes, NULL, 0, reply, capacity, received);
+}
+
+VP_STATUS rb_gpu_submit_extents(RB2K_GPU *gpu, const void *request, ULONG bytes,
+                                const RB2K_GPU_EXTENT *extents, ULONG count,
+                                void *reply, ULONG capacity, PULONG received)
+{
     DESCRIPTOR *desc;
     volatile AVAILABLE *available;
     volatile USED_RING *used;
@@ -219,7 +230,8 @@ VP_STATUS rb_gpu_submit(RB2K_GPU *gpu, const void *request, ULONG bytes,
     ULONG slot, i, length;
     *received = 0;
     if (!gpu->ready) return ERROR_NOT_READY;
-    if (!bytes || bytes > PacketBytes || !capacity || capacity > PacketBytes)
+    if (!bytes || bytes > PacketBytes || !capacity || capacity > ReplyBytes ||
+        count > RB2K_GPU_MAX_EXTENTS || (count && !extents))
         return ERROR_INVALID_PARAMETER;
     desc = (DESCRIPTOR *)(gpu->dma + Desc);
     available = (AVAILABLE *)(gpu->dma + Avail);
@@ -230,10 +242,17 @@ VP_STATUS rb_gpu_submit(RB2K_GPU *gpu, const void *request, ULONG bytes,
     desc[0].length = bytes;
     desc[0].flags = DescriptorNext;
     desc[0].next = 1;
-    desc[1].address.QuadPart = gpu->bus.QuadPart + Reply;
-    desc[1].length = capacity;
-    desc[1].flags = DescriptorWrite;
-    desc[1].next = 0;
+    /* Device-readable data that continues the request, in order. */
+    for (i = 0; i < count; ++i) {
+        desc[1 + i].address = extents[i].bus;
+        desc[1 + i].length = extents[i].length;
+        desc[1 + i].flags = DescriptorNext;
+        desc[1 + i].next = (USHORT)(2 + i);
+    }
+    desc[1 + count].address.QuadPart = gpu->bus.QuadPart + Reply;
+    desc[1 + count].length = capacity;
+    desc[1 + count].flags = DescriptorWrite;
+    desc[1 + count].next = 0;
     slot = gpu->index % QueueEntries;
     next = (USHORT)(gpu->index + 1);
     available->ring[slot] = 0;
@@ -243,8 +262,10 @@ VP_STATUS rb_gpu_submit(RB2K_GPU *gpu, const void *request, ULONG bytes,
     VideoPortWriteRegisterUshort(gpu->doorbell, 0);
     /* StartIO is synchronous. Bound a missing reply; no further command
      * can reuse these descriptors until the transport has been reset. */
+    /* Ten seconds: a host shader compile or a fenced readback behind a long
+     * frame can take more than one under emulation. */
     for (i = 0; used->index == gpu->index; ++i) {
-        if (i == 100000) {
+        if (i == 1000000) {
             gpu->ready = FALSE;
             return ERROR_TIMEOUT;
         }
@@ -317,7 +338,8 @@ void rb_gpu_probe(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
         result->status = ERROR_BUSY;
         return;
     }
-    if (gpu->imageCount) {
+    rb_gpu_rvd_sweep(gpu);
+    if (gpu->imageCount || gpu->rvdContexts) {
         result->status = ERROR_BUSY;
         VideoPortInterlockedExchange(&gpu->busy, 0);
         return;

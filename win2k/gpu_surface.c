@@ -51,7 +51,8 @@ static VP_STATUS create(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     if (gpu->nextId == 0xffffffffUL) return ERROR_NO_MORE_ITEMS;
     for (slot = 0; slot < RB2K_DD_SLOTS; ++slot) if (!gpu->images[slot].id) break;
     if (slot == RB2K_DD_SLOTS) return ERROR_NOT_ENOUGH_MEMORY;
-    if (!gpu->imageCount) {
+    /* OpenGL contexts (gpu_rvd.c) may already hold the transport. */
+    if (!gpu->ready) {
         status = rb_gpu_start(gpu, &result);
         if (status) {
             rb_gpu_stop(gpu);
@@ -63,7 +64,7 @@ static VP_STATUS create(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     image->width = size->width;
     image->height = size->height;
     if (!rb_gpu_create_image(gpu, &result, image, name, sizeof(name) - 1)) {
-        rb_gpu_stop(gpu);
+        if (!gpu->rvdContexts || !gpu->ready) rb_gpu_stop(gpu);
         return result.status;
     }
     ++gpu->imageCount;
@@ -85,8 +86,11 @@ static RB2K_IMAGE *find_image(RB2K_GPU *gpu, ULONG id)
 static VP_STATUS command_error(RB2K_GPU *gpu, const RB2K_GPU_RESULT *result)
 {
     /* Staging allocation precedes submission and leaves other images usable. */
-    if (result->stage != RB2K_STAGE_BACKING || result->status != ERROR_NOT_ENOUGH_MEMORY)
-        rb_gpu_stop(gpu); /* A late completion must not touch recycled storage. */
+    /* A late completion must not touch recycled storage. A host error
+     * reply leaves no command outstanding, so OpenGL contexts may stay. */
+    if ((result->stage != RB2K_STAGE_BACKING || result->status != ERROR_NOT_ENOUGH_MEMORY) &&
+        (!gpu->rvdContexts || !gpu->ready))
+        rb_gpu_stop(gpu);
     return result->status;
 }
 
@@ -229,7 +233,7 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         success = rb_gpu_destroy_image(gpu, &result, id);
         if (success) {
             VideoPortZeroMemory(image, sizeof(*image));
-            if (!--gpu->imageCount) return rb_gpu_stop(gpu);
+            if (!--gpu->imageCount && !gpu->rvdContexts) return rb_gpu_stop(gpu);
         }
         break;
     default:
@@ -254,7 +258,21 @@ VP_STATUS rb_gpu_surface_reset(RB2K_GPU *gpu)
 {
     VP_STATUS status;
     if (VideoPortInterlockedExchange(&gpu->busy, 1)) return ERROR_BUSY;
-    status = rb_gpu_stop(gpu);
+    if (gpu->rvdContexts && gpu->ready) {
+        /* A mode change loses the DirectDraw surfaces but not OpenGL's
+         * contexts: free the surfaces one by one and keep the transport. */
+        RB2K_GPU_RESULT result;
+        ULONG slot;
+        for (slot = 0; slot < RB2K_DD_SLOTS; ++slot) {
+            if (gpu->images[slot].id) rb_gpu_destroy_image(gpu, &result, gpu->images[slot].id);
+            VideoPortZeroMemory(&gpu->images[slot], sizeof(gpu->images[slot]));
+        }
+        gpu->imageCount = 0;
+        /* Only a transport timeout leaves a reset to do. */
+        status = gpu->ready ? NO_ERROR : rb_gpu_stop(gpu);
+    } else {
+        status = rb_gpu_stop(gpu);
+    }
     gpu->primary.width = gpu->primary.height = gpu->primary.pitchPixels = 0;
     VideoPortInterlockedExchange(&gpu->busy, 0);
     return status;

@@ -1,5 +1,6 @@
 /* Windows 2000 XDDM framebuffer display driver for the Ripple miniport. */
 #include "display_private.h"
+#include "rb2krvd.h"
 
 /* Ask the paired miniport for its current mode table on each enumeration. */
 static VIDEO_MODE_INFORMATION *modes(HANDLE miniport, ULONG *count)
@@ -233,9 +234,13 @@ ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
     if (code == QUERYESCSUPPORT)
         return in && inSize == sizeof(ULONG) && (*(ULONG *)in == RB2K_GPU_ESCAPE ||
                    *(ULONG *)in == RB2K_DD_STATS_ESCAPE || *(ULONG *)in == RB2K_DD_SCANOUT_ESCAPE ||
-                   *(ULONG *)in == OPENGL_GETINFO);
+                   *(ULONG *)in == OPENGL_GETINFO || *(ULONG *)in == RB2K_RVD_ESCAPE);
     /* opengl32.dll passes a small input buffer of its own with this one. */
     if (code == OPENGL_GETINFO) return opengl_info(outSize, out);
+    /* Mesa's winsys on Windows 2000 (display_rvd.c). */
+    if (code == RB2K_RVD_ESCAPE)
+        return surface && surface->dhpdev ?
+               rb_rvd_escape((DISPLAY *)surface->dhpdev, inSize, in, outSize, out) : 0;
     if (inSize || !out || !surface || !surface->dhpdev) return 0;
     display = (DISPLAY *)surface->dhpdev;
     if (code == RB2K_DD_SCANOUT_ESCAPE)
@@ -286,6 +291,7 @@ static DRVFN callbacks[] = {
 BOOL DrvEnableDriver(ULONG engine, ULONG size, DRVENABLEDATA *data)
 {
     if (engine < DDI_DRIVER_VERSION_NT5 || size < sizeof(*data)) return FALSE;
+    rb_rvd_init();
     data->iDriverVersion = DDI_DRIVER_VERSION_NT5;
     data->c = sizeof(callbacks) / sizeof(callbacks[0]);
     data->pdrvfn = callbacks;

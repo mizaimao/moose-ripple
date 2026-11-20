@@ -128,12 +128,29 @@ Windows' own `opengl32.dll` loads the driver registered under that name in
 `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers`. With the
 Windows 98 build of `ripplegl.dll` (Mesa 24.3.4, `win9x/mesa`) copied to
 `system32` and registered both as a string value and as a key (`Dll`,
-`DriverVersion` 1, `Flags` 1, `Version` 2), `gltest` on Windows 2000 SP4
-reported Mesa as the renderer and passed all its pixel checks. Mesa drew in
-software (softpipe, about 9 frames a second at 320×240): its GPU path opens
-the Windows 98 kernel driver's `\\.\RIPPLEVD`, which Windows 2000 does not
-have yet. Microsoft's own software OpenGL (`GDI Generic`) passed the same
-checks at about 430 frames a second.
+`DriverVersion` 1, `Flags` 1, `Version` 2), it draws on the host GPU.
+
+Mesa's virgl winsys uses the interface of the Windows 98 kernel driver
+(`win9x/minivdd/rvd.h`). On Windows 2000 it sends the same calls to the
+display DLL with `ExtEscape` (`rb2krvd.h`, `display_rvd.c`), and the miniport
+carries them out (`gpu_rvd.c`): host contexts, resources, command batches of
+up to 384 KB and transfers, one exchange with the host at a time. Each
+buffer has guest pages of its own, attached to the host resource for its
+whole life and mapped into the process that made it (`gpu_memory.c`). Mesa's
+command stream moves data between the two by itself, so the pages cannot be
+lent for single transfers. Mesa does not always destroy its context when a program ends, so the
+miniport frees the contexts and buffers of ended processes at the next
+creation and before the GPU self-test. While an
+OpenGL context is open the transport stays up, and a mode change frees only
+DirectDraw's surfaces.
+
+On Windows 2000 SP4 in UTM, `gltest` reported `virgl` as the renderer and
+passed all its pixel checks at about 590 frames a second at 320×240. The
+scene is small, so this mostly measures a frame's way to the window: a
+readback and a GDI copy. Microsoft's software OpenGL (`GDI Generic`) passed
+at about 430 frames a second and Mesa's softpipe at about 9. A screen
+capture of a 640×480 run showed the whole scene, clipped by an overlapping
+window.
 
 ## Speed
 

@@ -40,5 +40,7 @@ typedef struct {
 } DISPLAY;
 
 BOOL rb_dd_caps(DISPLAY *display, RB2K_DD_CAPS *caps);
+void rb_rvd_init(void);
+ULONG rb_rvd_escape(DISPLAY *display, ULONG inSize, PVOID in, ULONG outSize, PVOID out);
 void rb_dd_free_views(DISPLAY *display);
 #endif
