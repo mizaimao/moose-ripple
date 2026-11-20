@@ -305,9 +305,21 @@ Setup's unsigned-driver prompt had opened behind another window;
 `NT5INST.EXE` now passes its console window as the owner of Setup's
 prompts.
 
-## Stability
+## Stability and the final run
 
-On one boot: five Quake III timedemos in a row (77 to 78 frames a second),
-`threadtest`, a mode change while `gltest` drew, and `flipcycle`. Afterwards
-`rvdstat` showed no contexts, buffers or pages held, and the desktop was at
-1024×768×32.
+An earlier boot ran five Quake III timedemos in a row (77 to 78 frames a
+second), `threadtest` and a mode change while `gltest` drew; afterwards
+`rvdstat` showed no contexts, buffers or pages held.
+
+The final run installed the 0.1.0 package with `NT5INST.EXE` through Setup
+over the earlier driver. After the restart both driver files and
+`system32\ripplegl.dll` matched the package. On that boot: the mode,
+colour, 800×600, GPU, flip and console tests, `flipcycle`, `ddbench`
+(DirectDraw's choice: 923, 486, 1177, 426 and 435 frames a second),
+`gltest` on virgl (653 frames a second), `threadtest` (every pixel right;
+the heap check failed at 3.2 KB a thread, as above), two windowed
+timedemos (89 frames a second) and one full-screen (89), and Donuts, whose
+frame showed its sprites, score and counter. `rvdstat` showed nothing held
+and the desktop was at 1024×768×32. With `RippleDirectDrawGpuSurfaces` set
+and a restart, `/ddraw`, `/ddraw-full`, `/window`, `/ddraw-pair` and `/flip`
+passed too.
