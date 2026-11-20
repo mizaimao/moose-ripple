@@ -47,13 +47,27 @@ An independent copy of an existing Vista installation booted in UTM with a
 native x64 kernel, file version `6.0.6003.20555`. The guest's SetupAPI log
 recorded `PCI\VEN_1AF4&DEV_1050&SUBSYS_11001AF4&REV_01` and selected the
 built-in `display.inf` VGA driver. Windows accepted a normal shutdown, and a
-powered-off snapshot preserves this state. The interactive desktop has yet
-to be confirmed.
+powered-off snapshot preserves this state. A command launched from the guest
+desktop returned its output on COM1.
 
 The same three Ripple binaries were checked again against the native and
 WOW64 files in that guest. All 328 static imports resolved, including forwarded
-exports, as did the 16 GDI lookups in each DLL. The signed Ripple driver,
-hardware rendering and Aero still need a guest test.
+exports, as did the 16 GDI lookups in each DLL.
+
+### First signed run on Vista
+
+Vista enabled test signing and restarted. WDK 7.1 SignTool signed the kernel
+binary in the guest. Inf2Cat created the Vista x64 catalog, SignTool signed it,
+and Windows verified all four catalog members. DevCon installed 7.14.1.1 on
+the virtio display device and reported that the driver was running. After the
+next boot the kernel driver again enumerated the GPU's capabilities and the
+monitor's modes. The shared primary and shadow surface requests repeated at
+800×600 and 640×480. Each attempt ended with device teardown.
+
+Both the x64 and x86 probes obtained a Direct3D 9 object. On both,
+`Direct3DCreate9Ex` returned `0x8876086a` and both hardware-device creation
+attempts returned `0x8876086c`. Neither reached the triangle. The desktop
+composition query succeeded and reported composition off.
 
 ## Rebuild and signing handoff
 
