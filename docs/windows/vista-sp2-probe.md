@@ -288,6 +288,18 @@ once more after the last change. Windows' own desktop primary is not copied.
 With 7.14.1.10 a capture inside the guest showed the full Aero desktop.
 A Windows 7 kernel build compiled unchanged.
 
+### Programs under Aero, 7.14.1.10
+
+Each checked from a dump of the compositor's frame:
+
+| Program | Result |
+| --- | --- |
+| Chess Titans (x64, Direct3D 9) | 3D board and pieces drawn correctly (7.14.1.8). |
+| Mahjong Titans (x64) | Layout screen with textured tiles and tooltip drawn correctly. |
+| Purble Place (x64) | Title scene drawn correctly. |
+| Media Player Classic HC 64-bit, `Bear.wmv` | Playing correctly in its window (frame at 0:11 of 0:12). |
+| Windows Media Player 11 | Not tested: it opened its first-run settings wizard, which is the owner's to answer. |
+
 ## Rebuild and signing handoff
 
 From the Vista worktree on the Linux builder, set `MAIN` to the checkout
