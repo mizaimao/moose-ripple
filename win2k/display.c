@@ -242,7 +242,8 @@ ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
     if (code == RB2K_RVD_ESCAPE)
         return surface && surface->dhpdev ?
                rb_rvd_escape((DISPLAY *)surface->dhpdev, inSize, in, outSize, out) : 0;
-    if (code == RB2K_RVD_STATS_ESCAPE) return rb_rvd_stats(outSize, out);
+    if (code == RB2K_RVD_STATS_ESCAPE)
+        return surface && surface->dhpdev ? rb_rvd_stats((DISPLAY *)surface->dhpdev, outSize, out) : 0;
     if (inSize || !out || !surface || !surface->dhpdev) return 0;
     display = (DISPLAY *)surface->dhpdev;
     if (code == RB2K_DD_SCANOUT_ESCAPE)

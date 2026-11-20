@@ -393,6 +393,24 @@ static VP_STATUS buffer_destroy(RB2K_GPU *gpu, const RB2K_RVD_REQUEST *r)
     return NO_ERROR;
 }
 
+/* What programs hold now, after freeing what ended programs left. */
+static VP_STATUS held(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
+{
+    PULONG out = packet->OutputBuffer;
+    ULONG i;
+    if (packet->OutputBufferLength < 3 * sizeof(ULONG)) return ERROR_INSUFFICIENT_BUFFER;
+    sweep(gpu);
+    out[0] = out[1] = out[2] = 0;
+    for (i = 0; i < MaxContexts; ++i) if (contexts[i].id) ++out[0];
+    for (i = 0; i < MaxBuffers; ++i) {
+        if (!buffers[i].handle) continue;
+        ++out[1];
+        out[2] += buffers[i].pages.bytes / 4096;
+    }
+    packet->StatusBlock->Information = 3 * sizeof(ULONG);
+    return NO_ERROR;
+}
+
 static VP_STATUS submit(RB2K_GPU *gpu, const RB2K_RVD_REQUEST *r)
 {
     RB2K_GPU_EXTENT data[RB2K_GPU_MAX_EXTENTS];
@@ -455,6 +473,7 @@ VP_STATUS rb_gpu_rvd_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     case RB2K_RVD_OP_BUFFER_DESTROY: status = buffer_destroy(gpu, r); break;
     case RB2K_RVD_OP_SUBMIT: status = submit(gpu, r); break;
     case RB2K_RVD_OP_TRANSFER: status = transfer(gpu, r); break;
+    case RB2K_RVD_OP_HELD: status = held(gpu, packet); break;
     default: status = ERROR_INVALID_FUNCTION; break;
     }
     VideoPortInterlockedExchange(&gpu->busy, 0);

@@ -134,11 +134,18 @@ ULONG rb_rvd_escape(DISPLAY *d, ULONG inSize, PVOID in, ULONG outSize, PVOID out
     return done ? 1 : 0;
 }
 
-ULONG rb_rvd_stats(ULONG outSize, PVOID out)
+ULONG rb_rvd_stats(DISPLAY *d, ULONG outSize, PVOID out)
 {
+    RB2K_RVD_REQUEST r;
+    ULONG held[3];
     if (!lock || outSize != sizeof(stats) || !out) return 0;
     EngAcquireSemaphore(lock);
     EngQueryPerformanceFrequency(&stats.frequency);
+    begin(&r, RB2K_RVD_OP_HELD);
+    if (!request(d, &r, held, sizeof(held))) held[0] = held[1] = held[2] = 0;
+    stats.contexts = held[0];
+    stats.buffers = held[1];
+    stats.pages = held[2];
     RtlCopyMemory(out, &stats, sizeof(stats));
     EngReleaseSemaphore(lock);
     return 1;

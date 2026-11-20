@@ -22,7 +22,8 @@ enum {
     RB2K_RVD_OP_BUFFER_CREATE,      /* u.create; out: ULONG handle */
     RB2K_RVD_OP_BUFFER_DESTROY,     /* context, a: handle */
     RB2K_RVD_OP_SUBMIT,             /* context, bytes: commands at staging offset 0 */
-    RB2K_RVD_OP_TRANSFER            /* u.transfer, bytes: the box's data at staging offset 0 */
+    RB2K_RVD_OP_TRANSFER,           /* u.transfer */
+    RB2K_RVD_OP_HELD                /* out: ULONG[3] contexts, buffers, pages held now */
 };
 
 #define RB2K_RVD_STAGING_SEGMENTS 48
@@ -56,6 +57,7 @@ typedef struct {
     LONGLONG frequency;                  /* ticks a second */
     ULONG calls[RB2K_RVD_STAT_CODES];
     LONGLONG ticks[RB2K_RVD_STAT_CODES];
+    ULONG contexts, buffers, pages;     /* held for programs now, after a sweep */
 } RB2K_RVD_STATS;
 
 #endif

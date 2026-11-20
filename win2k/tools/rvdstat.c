@@ -1,6 +1,7 @@
 /* Print the display driver's OpenGL request counters (rb2krvd.h): calls and
  * total time per RVD call since Windows started, kernel and host included.
- * Run it before and after a program and subtract to profile that program. */
+ * Run it before and after a program and subtract to profile that program.
+ * It also prints the contexts, buffers and pages held for programs now. */
 #include <windows.h>
 #include <winioctl.h>
 #include <stdio.h>
@@ -27,6 +28,7 @@ int main(void)
             printf("RVDSTAT %s calls=%lu us=%I64d\n", names[i], s.calls[i],
                    s.ticks[i] * 1000000 / s.frequency);
     }
+    printf("RVDSTAT held contexts=%lu buffers=%lu pages=%lu\n", s.contexts, s.buffers, s.pages);
     DeleteDC(dc);
     return 0;
 }
