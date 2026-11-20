@@ -115,11 +115,12 @@ Then pick a monitor type that allows the sizes you want (Advanced > Monitor): wi
 "(Unknown Monitor)" Display Properties offers 640x480 only (programs can still set any mode
 the driver has).
 
-### Windows 95 OSR2.5 and Windows Me
+### One package for Windows 95 OSR2.5, Windows 98 SE and Windows Me
 
 The `win98-v0.1.0` ISO also works on Windows Me 4.90.3000. Windows 95 OSR2.5
 needs the build with the 4.00 mini-VDD header and the Windows 95 OpenGL compatibility
-changes. Both systems use the same INF and the **moose-ripple virtio-vga** model.
+changes. This build uses one INF and the same four driver files on all three systems.
+Select the **moose-ripple virtio-vga** model.
 
 On a clean install, check Device Manager for the PCI bus before choosing **Have Disk**.
 If the only display adapter is the generic VGA device and the PCI bus is missing, use
@@ -132,11 +133,20 @@ On Windows 95, the bundled IE4 installation supplies `MSVCRT.DLL` for OpenGL.
 Microsoft's DirectX 7 runtime also supplies that library and the Direct3D 7 and
 DirectInput interfaces used by the game tests. Install it for those games and restart.
 
-On OSR2.5, Quake III completed all 1,346 frames of `demo001` through virgl with
-llvmpipe as the host renderer. The driver selected the compatible vertex-copy
-code automatically. Direct3D game support remains experimental. The Direct3D 7
-test rendered textured frames and passed its video-memory mipmap checks before
-exiting early. Re-Volt also exited after 100 flips.
+On OSR2.5, Quake III completed all 1,346 frames of `demo001` with the default
+driver settings. The full Direct3D 7 test passed, including texture mipmap
+selection and restoring pixels written by the CPU. Re-Volt loaded its Toys in
+the Hood 1 track, continued rendering and exited cleanly when closed. These
+tests used virgl with llvmpipe, the host software renderer. With
+`RIPPLE_D3D_SCANOUT=1`, all 1,300 measured Direct3D frame flips stayed on
+the host with zero frame readbacks to the guest. The displayed colours also
+passed the pixel checks.
+
+Windows 98 SE and Windows Me passed OpenGL and Direct3D 7 with the same driver
+files on Intel UHD 630. Windows 98 SE passed DirectDraw surface restoration,
+page flipping and Direct3D with host presentation both enabled and disabled.
+Windows Me also passed surface restoration and completed two full Quake III
+timedemos.
 
 ## Things learnt the hard way
 
