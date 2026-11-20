@@ -221,6 +221,10 @@ struct D3D9SubResource
    bool notify_only_locked;
    bool notify_only_write;
    bool notify_only_full_mip_chain;
+   /* Vista: one buffer of a primary flip chain, the image shown when Windows flips to this
+    * surface. Every surface of the chain is drawn in the resource's one pipe_resource, which
+    * is copied here at each flip (D3D9Resource.cpp, D3D9FlushFrontbuffer). */
+   struct pipe_resource *flip_resource;
 };
 
 struct D3D9Resource

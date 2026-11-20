@@ -2572,8 +2572,21 @@ D3D9FlushFrontbuffer(D3D9Device *device, D3D9Resource *src_resource,
    unsigned flush_level = D3D9PipeMipLevel(src_resource,
                                            src_subresource_index);
    struct pipe_resource *resolved = NULL;
+   D3D9SubResource *flip_sub =
+      D3D9GetSubResource(src_resource, src_subresource_index);
 
-   if (src_resource->display_resource) {
+   if (flip_sub && flip_sub->flip_resource) {
+      /* Vista flip chain: the frame drawn in the one render image goes to the buffer
+       * Windows flips to, never to the one on screen. */
+      if (!device->pipe->resource_copy_region)
+         return E_FAIL;
+      struct pipe_box box;
+      u_box_2d(0, 0, flip_sub->width, flip_sub->height, &box);
+      device->pipe->resource_copy_region(device->pipe, flip_sub->flip_resource, 0, 0, 0, 0,
+                                         flush_resource, flush_level, &box);
+      flush_resource = flip_sub->flip_resource;
+      flush_level = 0;
+   } else if (src_resource->display_resource) {
       if (!D3D9CopyToDisplayResource(device, src_resource,
                                       src_subresource_index))
          return E_FAIL;
@@ -2707,6 +2720,7 @@ D3D9FreeResource(D3D9Resource *resource)
    pipe_resource_reference(&resource->managed_source_pipe_resource, NULL);
    for (UINT i = 0; i < resource->surf_count; ++i) {
       pipe_resource_reference(&resource->surfaces[i].readback_resource, NULL);
+      pipe_resource_reference(&resource->surfaces[i].flip_resource, NULL);
       pipe_resource_reference(
          &resource->surfaces[i].worker_upload_buffer, NULL);
       if (resource->surfaces[i].owns_data)
@@ -3026,6 +3040,7 @@ D3D9SetRenderTarget(HANDLE hDevice, const D3DDDIARG_SETRENDERTARGET *data)
    device->render_target_subresources[data->RenderTargetIndex] =
       data->SubResourceIndex;
    D3D9MatchStandardPrimarySamples(device, D3D9CastResource(data->hRenderTarget));
+#ifndef RIPPLE_VISTA
    if (data->RenderTargetIndex == 0) {
       D3D9SubResource *sub =
          D3D9GetSubResource(data->hRenderTarget, data->SubResourceIndex);
@@ -3036,6 +3051,11 @@ D3D9SetRenderTarget(HANDLE hDevice, const D3DDDIARG_SETRENDERTARGET *data)
          device->viewport.Height = sub->height;
       }
    }
+#endif
+   /* Vista: the viewport stays as the runtime last set it. The runtime sends a new one
+    * when the program changes it, but not when it moves a flip chain's drawing to the
+    * next buffer. The compositor redraws only what changed, through a viewport
+    * that small: reset to the whole surface, that piece covered the screen. */
    return S_OK;
 }
 
@@ -3246,6 +3266,46 @@ D3D9CreateResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *data)
             device->gdi_device.hRTResourceIsD3D9 = false;
          }
 
+         bool flip_chain = false;
+#ifdef RIPPLE_VISTA
+         /* Vista makes a primary flip chain (the compositor's, a full-screen game's) one
+          * resource of several surfaces; Windows 7 makes each buffer a resource of its own.
+          * Each surface gets an image of its own for Windows to flip to. All of them are
+          * drawn in the one pipe_resource below, copied to the surface's image at its flip
+          * (D3D9FlushFrontbuffer). With one image for the whole chain, the compositor drew
+          * into the buffer on screen: the picture flickered and was mostly missing. */
+         flip_chain = data->Flags.Primary && data->SurfCount > 1 &&
+            !msaa_primary && !optimal_local_display;
+         if (flip_chain) {
+            struct pipe_resource flip_templ = templ;
+            flip_templ.nr_samples = 1;
+            flip_templ.nr_storage_samples = 1;
+            flip_templ.flags |= PIPE_RESOURCE_FLAG_FRONTEND_PRIV;
+            for (UINT i = 0; i < resource->surf_count; ++i) {
+               D3D9SubResource *sub = &resource->surfaces[i];
+               sub->flip_resource =
+                  device->screen->resource_create(device->screen, &flip_templ);
+               sub->allocation = sub->flip_resource ?
+                  D3D9GetPipeResourceAllocation(device, sub->flip_resource) : 0;
+               if (!sub->allocation) {
+                  D3D9Warnf("ERROR D3D9 flip chain buffer %u of %u has no allocation "
+                            "resource=%p\n", i, resource->surf_count, resource);
+                  device->gdi_device.hRTResource = old_hRTResource;
+                  device->gdi_device.hRTResourceIsD3D9 = old_hRTResourceIsD3D9;
+                  device->gdi_device.allocationVidPn = old_allocationVidPn;
+                  device->gdi_device.isPrimary = old_isPrimary;
+                  D3D9FreeResource(resource);
+                  return E_OUTOFMEMORY;
+               }
+            }
+            /* the image drawn in is the driver's own */
+            device->gdi_device.allocationVidPn = 0;
+            device->gdi_device.isPrimary = false;
+            device->gdi_device.hRTResource = NULL;
+            device->gdi_device.hRTResourceIsD3D9 = false;
+         }
+#endif
+
          resource->pipe_resource =
             device->screen->resource_create(device->screen, &templ);
          device->gdi_device.hRTResource = old_hRTResource;
@@ -3279,7 +3339,7 @@ D3D9CreateResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *data)
          const D3DKMT_HANDLE render_allocation = msaa_primary &&
             !optimal_local_display ? D3D9GetPipeResourceAllocation(
                device, resource->pipe_resource) : allocation;
-         for (UINT i = 0; i < resource->surf_count; ++i) {
+         for (UINT i = 0; i < resource->surf_count && !flip_chain; ++i) {
             if (optimal_local_display || (msaa_primary && i == 0))
                resource->surfaces[i].allocation = display_allocation;
             else
