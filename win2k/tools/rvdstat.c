@@ -25,7 +25,7 @@ int main(void)
     }
     for (i = 1; i < RB2K_RVD_STAT_CODES; ++i) {
         if (s.calls[i])
-            printf("RVDSTAT %s calls=%lu us=%I64d\n", names[i], s.calls[i],
+            printf("RVDSTAT %s calls=%lu failed=%lu us=%I64d\n", names[i], s.calls[i], s.failures[i],
                    s.ticks[i] * 1000000 / s.frequency);
     }
     printf("RVDSTAT held contexts=%lu buffers=%lu pages=%lu\n", s.contexts, s.buffers, s.pages);

@@ -129,6 +129,7 @@ ULONG rb_rvd_escape(DISPLAY *d, ULONG inSize, PVOID in, ULONG outSize, PVOID out
                      RVD_FROM_HOST ? 14 : code;
         ++stats.calls[slot];
         stats.ticks[slot] += end - start;
+        if (!done) ++stats.failures[slot];
     }
     EngReleaseSemaphore(lock);
     return done ? 1 : 0;

@@ -58,6 +58,7 @@ typedef struct {
     ULONG calls[RB2K_RVD_STAT_CODES];
     LONGLONG ticks[RB2K_RVD_STAT_CODES];
     ULONG contexts, buffers, pages;     /* held for programs now, after a sweep */
+    ULONG failures[RB2K_RVD_STAT_CODES];
 } RB2K_RVD_STATS;
 
 #endif
