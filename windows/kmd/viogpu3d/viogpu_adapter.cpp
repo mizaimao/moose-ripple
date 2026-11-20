@@ -237,6 +237,11 @@ NTSTATUS VioGpuAdapter::StartDevice(_In_ DXGK_START_INFO *pDxgkStartInfo,
         return Status;
     }
 
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+    Status = desktopMemory.Initialize();
+    if (!NT_SUCCESS(Status))
+        return Status;
+#endif
     commander.Start();
     Status = vidpn.Start(pNumberOfViews, pNumberOfChildren);
     if (!NT_SUCCESS(Status))
@@ -576,7 +581,11 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 DXGK_QUERYSEGMENTOUT *pSegmentInfo = (DXGK_QUERYSEGMENTOUT *)pQueryAdapterInfo->pOutputData;
                 if (!pSegmentInfo[0].pSegmentDescriptor)
                 {
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+                    pSegmentInfo->NbSegment = 2;
+#else
                     pSegmentInfo->NbSegment = 1;
+#endif
                 }
                 else
                 {
@@ -608,6 +617,9 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                     // pSegmentDesc[0].Flags.DirectFlip = TRUE;
                     pSegmentDesc[0].Size = 256 * 1024 * 4096;
                     pSegmentDesc[0].CommitLimit = 256 * 1024 * 4096;
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+                    desktopMemory.Describe(&pSegmentDesc[1]);
+#endif
                 }
                 DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s Requested segments\n", __FUNCTION__));
                 return STATUS_SUCCESS;

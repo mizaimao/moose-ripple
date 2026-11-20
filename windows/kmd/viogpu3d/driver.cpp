@@ -558,6 +558,12 @@ VioGpu3DBuildPagingBuffer(_In_ CONST HANDLE hAdapter, _In_ DXGKARG_BUILDPAGINGBU
                 DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s (unmap aperture segment)\n", __FUNCTION__));
                 return Status;
             }
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+        case DXGK_OPERATION_TRANSFER:
+        case DXGK_OPERATION_FILL:
+        case DXGK_OPERATION_DISCARD_CONTENT:
+            return reinterpret_cast<VioGpuAdapter *>(hAdapter)->desktopMemory.Page(pBuildPagingBuffer);
+#endif
         default:
             {
                 DbgPrint(TRACE_LEVEL_ERROR,

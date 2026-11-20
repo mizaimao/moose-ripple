@@ -59,6 +59,7 @@ CXX_SRC="common/edid.cpp common/viogpu_idr.cpp common/ripple_pci.cpp common/viog
          common/bitops.cpp viogpu3d/driver.cpp viogpu3d/viogpu_command.cpp viogpu3d/viogpu_device.cpp
          viogpu3d/viogpu_allocation.cpp viogpu3d/viogpu_adapter.cpp viogpu3d/viogpu_vidpn.cpp
          viogpu3d/viogpu_gamma.cpp"
+[ "$TARGET" != vista ] || CXX_SRC="$CXX_SRC viogpu3d/vista_display_memory.cpp"
 status=0
 for arch in $ARCHS; do
     case $arch in

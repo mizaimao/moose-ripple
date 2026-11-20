@@ -1,9 +1,10 @@
 # Vista SP2 x64 display driver probe
 
 The kernel driver and both Direct3D 9 DLLs build from the Windows 7 driver at
-`63739fe`. Their imports resolve against the Vista SP2 x64 installation image
-used for the probe. Starting the adapter, drawing a frame, and composing the
-desktop with Aero still need a normal-boot test.
+`63739fe`. On Vista SP2 x64 with test signing enabled, version 7.14.1.2
+starts the adapter, sets an 800×600 desktop and opens a hardware Direct3D 9
+device for both x64 and x86 applications. The offscreen color checks currently
+return black, and the guest reports Aero composition off.
 
 ## What changed
 
@@ -68,6 +69,27 @@ Both the x64 and x86 probes obtained a Direct3D 9 object. On both,
 `Direct3DCreate9Ex` returned `0x8876086a` and both hardware-device creation
 attempts returned `0x8876086c`. Neither reached the triangle. The desktop
 composition query succeeded and reported composition off.
+
+### CPU-visible desktop surface
+
+Version 7.14.1.2 places the shared desktop primary in a second memory segment
+backed by contiguous guest RAM. Other allocations keep using the virtio
+aperture. Vista reserved 64 MiB on the test VM and requested 1,920,000 bytes
+for its 800×600 desktop. It set this mode during installation and again after
+reboot. The x64 and x86 probes identified Ripple, created a Direct3D 9Ex
+object and a hardware device, and submitted a clear, triangle and present.
+Both pixel checks returned black at the red and green sample positions.
+
+A separate offscreen test preserved `123456` in a CPU-only surface. On a
+lockable render target, a clear to `2060a0` and a fill to `cb4080` both read
+back as zero, through a direct lock and through a copy to system memory.
+The host trace recorded virtio GPU context submissions during the run.
+The x64 triangle also read back black with transfer optimizations disabled
+(`VIRGL_DEBUG=xfer`), with synchronous submissions (`VIRGL_DEBUG=sync`) and
+with coherent resources disabled (`VIRGL_DEBUG=nocoherent`). A pitched
+texture upload returned 2,048 mismatches across 2,048 pixels. The event query
+signaled for each of five occlusion tests, but all five visibility queries
+timed out. The revised kernel binary imports 71 functions.
 
 ## Rebuild and signing handoff
 

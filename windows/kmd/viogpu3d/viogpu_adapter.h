@@ -31,6 +31,7 @@
 
 #include "helper.h"
 #include "viogpu_allocation.h"
+#include "vista_display_memory.h"
 #include "viogpu_queue.h"
 #include <viogpu_command.h>
 #include <viogpu_vidpn.h>
@@ -69,6 +70,9 @@ class VioGpuAdapter : IVioGpuPCI
     CtrlQueue ctrlQueue;
 
     VioGpuMemSegment frameSegment;
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+    VistaDisplayMemory desktopMemory;
+#endif
 
     UINT64 m_u64HostFeatures;
     UINT64 m_u64GuestFeatures;

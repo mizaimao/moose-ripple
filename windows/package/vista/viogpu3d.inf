@@ -4,7 +4,7 @@ Signature="$Windows NT$"
 Class=Display
 ClassGUID={4d36e968-e325-11ce-bfc1-08002be10318}
 Provider=%Provider%
-DriverVer=11/19/2026,7.14.1.1
+DriverVer=11/19/2026,7.14.1.2
 CatalogFile=viogpu3d.cat
 
 [Manufacturer]
