@@ -323,3 +323,50 @@ frame showed its sprites, score and counter. `rvdstat` showed nothing held
 and the desktop was at 1024×768×32. With `RippleDirectDrawGpuSurfaces` set
 and a restart, `/ddraw`, `/ddraw-full`, `/window`, `/ddraw-pair` and `/flip`
 passed too.
+
+## The framebuffer's memory type
+
+On a Windows 11 host through WSL2 (QEMU 8.2.2 with KVM on an AMD Ryzen,
+virgl on Mesa's Direct3D 12 driver and a GeForce RTX 4090), the 0.1.0
+candidate passed every test but ran slowly: Quake III at 43 frames a second
+against 89 in UTM, `gltest` at 120, and DirectDraw near 50 whatever the
+frame held, Windows' own software path included. A test without any
+graphics API (`memtest.exe`, now among the tools) narrowed it down. The
+CPU and ordinary memory ran at full speed, and GDI drew 200 full-screen
+fills into a DIB in memory in 16 ms. The same fills on the screen took
+10.1 s, 50 ms each for 3 MB: about 60 MB/s into the framebuffer, and
+reading it back was no faster.
+
+QEMU's tracking of framebuffer writes for its display was not the cause:
+with no display (`-display none`) the fills took 9.4 s. The page tables
+were. QEMU's `info tlb` showed every framebuffer page mapped with both
+cache-disable bits (PCD and PWT). VideoPort maps device memory uncached,
+and asking it for write-combining (`VIDEO_MEMORY_SPACE_P6CACHE`) changed
+nothing: Windows 2000 makes write-combining through the MTRRs, which KVM
+on AMD processors does not apply, while it does honour the page
+attributes. KVM on Intel processors ignores the guest's memory type for
+memory like this, and UTM's emulated CPU has no caches to bypass, so
+neither of the other test hosts showed it.
+
+The framebuffer is ordinary memory inside the virtual machine, which the
+host reads coherently, so the miniport now maps every view of it cached:
+the display driver's (`MmMapIoSpace` with `MmCached`), its own scanout
+view, and the DirectDraw flip chain's view in the program's process (a
+view of `\Device\PhysicalMemory` without `PAGE_NOCACHE`, as VideoPort
+makes it otherwise). `info tlb` then showed the pages without PCD and PWT,
+and on the same host:
+
+| Test | uncached | cached |
+| --- | ---: | ---: |
+| 200 full-screen GDI fills, 1024×768×32 | 10.1 s | 15 ms |
+| 50 full-screen scrolls (screen to screen) | 6.2 s | 16 ms |
+| Quake III `timedemo demo001`, 640×480 window | 43 | 323 |
+| `gltest` | 120 | 353 |
+| DirectDraw, fill and copy to a window (DirectDraw's choice) | 51 | 17 790 |
+| DirectDraw, full-screen fill and flip | 50 | 7 110 |
+| the same with 100 colour-keyed sprites | 28 | 4 440 |
+
+On the Intel host (Proxmox VE 8.4, QEMU 9.2, UHD 630) both drivers fell
+within that host's run-to-run spread: Quake III 204 to 311 frames a second
+before and 213 to 242 after over four runs each, `gltest` 692 to 1005
+before and 627 to 1522 after.
