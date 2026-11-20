@@ -1,10 +1,11 @@
-# Windows 2000 framebuffer probe
+# Windows 2000 display driver and GPU probe
 
 This x86 driver draws a Windows 2000 desktop on QEMU's `virtio-vga-gl`
 adapter (PCI `1AF4:1050`). The miniport programs the compatibility display
 registers and maps video memory. The display DLL gives GDI a top-down
 32-bit bitmap backed by that memory. GDI draws directly into the visible
-framebuffer. Hardware 3D is a separate milestone.
+framebuffer. A separate diagnostic uses the virtio control queue to draw
+one offscreen pixel on the host.
 
 On the Linux build host, run `win2k/build.sh` with the Windows 2000 DDK
 and Visual C++ 6.0 under Wine. The script locates the kits under
@@ -21,6 +22,37 @@ Run `w2kprobe.exe /pattern` to switch temporarily to 800×600×32, sample
 red, green, blue and white on the visible window and restore the prior mode.
 The miniport also advertises 640×480 and 1024×768 at 32 bits.
 
+Run `w2kprobe.exe /gpu` to exercise the host renderer. The miniport creates
+a private 1×1 texture, clears it to orange, waits for completion, and
+reads four bytes back. The expected BGRA pixel is `0xffff8000`. The tool
+prints the stage and error code on failure and returns zero on success.
+The desktop continues to use the mapped framebuffer during this test.
+
+On Windows 2000 Professional SP4 with an Intel UHD 630 host, the adapter
+initially had PCI bus mastering disabled. The miniport enables it for the
+probe and restores the previous setting after resetting the queue. The guest
+retrieved the exact orange pixel on two successive runs. QEMU traced both
+command submissions and readbacks, and the Intel driver's per-process render
+time advanced on each run. Afterward, the framebuffer still showed all four
+test colours and the guest switched to 1024×768 and back to 800×600.
+
+The GPU run used a previously installed Ripple service. The two driver
+files were replaced on the powered-down test disk and verified after boot.
+On a separate stock VGA installation, Windows Setup installed the same
+build after the unsigned-driver prompt. Both files matched after reboot,
+and Windows offered all three 32-bit modes. The first boot retained the
+old four-bit setting. Select a 32-bit mode before running the GPU test.
+An in-place upgrade from the previous driver still needs qualification.
+
+`w2kprobe.exe /ddraw` tests the application-facing DirectDraw API. It asks
+for a hardware-only video-memory surface and then an emulated system-memory
+surface, fills each available surface, locks it, and compares a pixel.
+Success requires both paths to pass and the driver to advertise hardware
+colour fills. An exit code of 3 means DirectDraw reports no hardware
+acceleration and the software control passed. This framebuffer driver
+currently gives that result. The private GPU probe works independently
+of DirectDraw.
+
 On Windows 2000 Professional SP4 (build 2195), the stock VGA driver offered
 640×480 and 800×600 at four bits. The Ripple miniport started after reboot,
 and Windows switched to 800×600×32 at 60 Hz. Independent pixel samples
@@ -31,8 +63,9 @@ setting, switched to 1024×768×32 and restored 800×600×32.
 A cold boot using the 32-bit framebuffer exposed a console limitation.
 Explorer and Calculator start, and a detached `cmd.exe` runs successfully.
 Creating a new console window fails with Windows error 31 from
-`AllocConsole`. A control build that supplied all three default font
-descriptions gave the same result.
+`AllocConsole`. The same test under the same account succeeded on the
+stock VGA desktop at 640×480 in 16 colours. A build that supplied all three
+default font descriptions also failed to open a console on the 32-bit desktop.
 
 A traced miniport received no requests during the failed console allocation.
 An immediately following successful resize generated mode-setting and memory
