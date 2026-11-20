@@ -45,6 +45,16 @@ BYTE *VistaDisplayMemory::Range(ULONGLONG offset, SIZE_T size) const
     return offset <= m_size && size <= m_size - offset ? m_base + (SIZE_T)offset : NULL;
 }
 
+BOOLEAN VistaDisplayMemory::PhysicalAt(ULONGLONG offset, SIZE_T size, PHYSICAL_ADDRESS *address) const
+{
+    BYTE *start = Range(offset, size);
+    if (!start)
+        return FALSE;
+    // One contiguous block (Initialize): the address of its start covers the whole range
+    *address = MmGetPhysicalAddress(start);
+    return TRUE;
+}
+
 NTSTATUS VistaDisplayMemory::Page(DXGKARG_BUILDPAGINGBUFFER *paging)
 {
     PAGED_CODE();

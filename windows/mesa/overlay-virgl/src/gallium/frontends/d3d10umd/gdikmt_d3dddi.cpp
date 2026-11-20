@@ -94,7 +94,7 @@ d3dddi_create_allocation(struct gdikmt_device *dev, struct gdikmt_createallocati
       if (info->PrivateDriverDataSize != sizeof(tagged[i].allocation))
          continue;
       memcpy(&tagged[i].allocation, info->pPrivateDriverData, sizeof(tagged[i].allocation));
-      tagged[i].tag = VIOGPU_VISTA_PRIMARY_TAG;
+      tagged[i].tag = VIOGPU_VISTA_DRAWN_PRIMARY_TAG;
       info->pPrivateDriverData = &tagged[i];
       info->PrivateDriverDataSize = sizeof(tagged[i]);
    }

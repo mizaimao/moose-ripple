@@ -193,6 +193,10 @@ typedef struct _VIOGPU_VISTA_PRIMARY
     ULONG tag;
 } VIOGPU_VISTA_PRIMARY;
 #define VIOGPU_VISTA_PRIMARY_TAG 0x6D507256UL
+// The tag of a primary drawn by the GPU (the user-mode driver's, for flip chains). Placed like
+// the other; while it is on screen the kernel driver also copies its picture into its memory,
+// which is where Windows reads a screen capture from.
+#define VIOGPU_VISTA_DRAWN_PRIMARY_TAG 0x6D507244UL
 
 // ================= COMMAND BUFFER
 #define VIOGPU_CMD_NOP                0x0
