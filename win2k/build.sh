@@ -20,7 +20,8 @@ export WINEPATH="$(w "$vc/Bin");$(w "$kit/vc6/Common/MSDev98/Bin")"
 cl() { wine "$vc/Bin/CL.EXE" /nologo "$@"; }
 link() { wine "$vc/Bin/LINK.EXE" /nologo "$@"; }
 
-cp "$here/rb2kmp.c" "$here"/gpu_*.c "$here"/*.h "$here/display.c" "$here/install.c" "$here/tools/w2kprobe.c" .
+cp "$here/rb2kmp.c" "$here"/gpu_*.c "$here"/*.h "$here/display.c" "$here/install.c" \
+    "$here/tools/w2kprobe.c" "$here/tools/ddraw_probe.c" .
 export INCLUDE="$(w "$here/compat");$(w "$repo/third_party/virtio");$(w "$repo/third_party/virgl");$(w "$ddk/inc/ddk");$(w "$ddk/src/video/inc");$(w "$ddk/inc");$(w "$vc/Include")"
 export LIB="$(w "$ddk/libfre/i386")"
 cl /c /W3 /WX /O1 /Gz /Zl /GX- /D_X86_=1 /Di386=1 /D_WIN32_WINNT=0x0500 /DWINVER=0x0500 rb2kmp.c gpu_transport.c gpu_pixel.c
@@ -38,7 +39,7 @@ cl /W3 /O1 /MD install.c /Fent5inst.exe /link /subsystem:console,5.00 setupapi.l
 
 export INCLUDE="$(w "$ddk/inc");$(w "$vc/Include")"
 export LIB="$(w "$ddk/libfre/i386");$(w "$vc/Lib")"
-cl /O1 /W3 /MT w2kprobe.c /Few2kprobe.exe /link /subsystem:console,5.00 /version:1.0 \
+cl /O1 /W3 /MT w2kprobe.c ddraw_probe.c /Few2kprobe.exe /link /subsystem:console,5.00 /version:1.0 \
     /machine:i386 setupapi.lib cfgmgr32.lib user32.lib gdi32.lib kernel32.lib
 
 # VC6 stamps the COFF header and exported DLLs with the current time. Use a

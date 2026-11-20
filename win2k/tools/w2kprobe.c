@@ -7,6 +7,8 @@
 #include <string.h>
 #include "rb2kprobe.h"
 
+int probe_ddraw(void);
+
 static HANDLE output;
 static BOOL output_failed;
 
@@ -269,10 +271,12 @@ int main(int argc,char **argv)
     output=GetStdHandle(STD_OUTPUT_HANDLE);
     if (argc == 2 && !lstrcmpiA(argv[1], "/gpu")) {
         result = gpu_test();
+    } else if (argc == 2 && !lstrcmpiA(argv[1], "/ddraw")) {
+        result = probe_ddraw();
     } else if (argc == 1 || (argc == 2 && !lstrcmpiA(argv[1], "/pattern"))) {
         result = run(argc == 2);
     } else {
-        line("Usage: W2KPROBE [/pattern | /gpu]"); return 2;
+        line("Usage: W2KPROBE [/pattern | /gpu | /ddraw]"); return 2;
     }
     if(output_failed) return 1;
     return result;
