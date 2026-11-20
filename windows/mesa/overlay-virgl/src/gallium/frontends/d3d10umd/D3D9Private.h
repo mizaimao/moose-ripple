@@ -13,7 +13,11 @@
 #include <winddk_compat.h>
 
 #undef D3D_UMD_INTERFACE_VERSION
+#ifdef RIPPLE_VISTA
+#define D3D_UMD_INTERFACE_VERSION D3D_UMD_INTERFACE_VERSION_VISTA
+#else
 #define D3D_UMD_INTERFACE_VERSION D3D_UMD_INTERFACE_VERSION_WIN7
+#endif
 
 #include <d3d9.h>
 #include <d3dumddi.h>
@@ -217,6 +221,10 @@ struct D3D9SubResource
    bool notify_only_locked;
    bool notify_only_write;
    bool notify_only_full_mip_chain;
+   /* Vista: one buffer of a primary flip chain, the image shown when Windows flips to this
+    * surface. Every surface of the chain is drawn in the resource's one pipe_resource, which
+    * is copied here at each flip (D3D9Resource.cpp, D3D9FlushFrontbuffer). */
+   struct pipe_resource *flip_resource;
 };
 
 struct D3D9Resource
@@ -410,6 +418,12 @@ D3D9Resource *D3D9CastResource(HANDLE resource);
 D3D9SubResource *D3D9GetSubResource(HANDLE resource_handle,
                                     UINT subresource_index);
 bool D3D9PublishResource(D3D9Device *device, D3D9Resource *resource);
+#ifdef RIPPLE_VISTA
+/* Pictures for looking at (D3D9Resource.cpp): one image as a BMP file, and RIPPLE_DRAWDUMP */
+void D3D9DumpImage(D3D9Device *device, struct pipe_resource *image, unsigned level,
+                   const char *path);
+void D3D9DrawDump(D3D9Device *device);
+#endif
 
 bool D3D9UploadSubResource(D3D9Device *device, D3D9Resource *resource,
                            UINT subresource_index);
@@ -444,8 +458,10 @@ HRESULT APIENTRY D3D9LockAsync(HANDLE hDevice, D3DDDIARG_LOCKASYNC *data);
 HRESULT APIENTRY D3D9UnlockAsync(HANDLE hDevice,
                                  const D3DDDIARG_UNLOCKASYNC *data);
 HRESULT APIENTRY D3D9GetPitch(HANDLE hDevice, D3DDDIARG_GETPITCH *data);
+#if D3D_UMD_INTERFACE_VERSION >= D3D_UMD_INTERFACE_VERSION_WIN7
 HRESULT APIENTRY D3D9ResolveSharedResource(
    HANDLE hDevice, const D3DDDIARG_RESOLVESHAREDRESOURCE *data);
+#endif
 HRESULT APIENTRY D3D9QueryResourceResidency(
    HANDLE hDevice, const D3DDDIARG_QUERYRESOURCERESIDENCY *data);
 HRESULT APIENTRY D3D9GetCaptureAllocationHandle(

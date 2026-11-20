@@ -1,0 +1,21 @@
+Vista: a download marks its allocation as written. Vista shows a CPU lock
+the data the GPU wrote only when the submission declares a write to that
+allocation; without it the lock keeps returning the older contents.
+
+--- a/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
++++ b/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
+@@ -1050,6 +1050,14 @@
+ 
+    virgl_gdi_emit_res(vws, vdws->coreCtx, res, false);
+ 
++   /* Vista shows a CPU lock what the GPU wrote only when the submission
++    * declares a write to the allocation. A download writes the guest copy. */
++   struct virgl_gdi_cmd_buf *core = virgl_gdi_cmd_buf(vdws->coreCtx);
++   for (int i = 0; i < core->alloc_count; i++) {
++      if (core->ctx->pAllocationList[i].hAllocation == res->hAllocation)
++         core->ctx->pAllocationList[i].WriteOperation = 1;
++   }
++
+    virgl_gdi_cmd_buf(vdws->coreCtx)->driver_length =
+       sizeof(VIOGPU_COMMAND_HDR) + sizeof(VIOGPU_TRANSFER_CMD);
+ 

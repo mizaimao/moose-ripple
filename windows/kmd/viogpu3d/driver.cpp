@@ -84,7 +84,7 @@ extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_
     DbgPrint(TRACE_LEVEL_FATAL, ("---> VIOGPU FULL build on on %s %s\n", __DATE__, __TIME__));
     DRIVER_INITIALIZATION_DATA InitialData = {0};
 
-    InitialData.Version = DXGKDDI_INTERFACE_VERSION_WIN7;
+    InitialData.Version = DXGKDDI_INTERFACE_VERSION;
 
     InitialData.DxgkDdiAddDevice = VioGpu3DAddDevice;
     InitialData.DxgkDdiStartDevice = VioGpu3DStartDevice;
@@ -118,7 +118,9 @@ extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_
     InitialData.DxgkDdiPresent = VioGpu3DPresent;
     InitialData.DxgkDdiRender = VioGpu3DRender;
     // What makes Windows 7 count the driver as WDDM 1.1 (see VioGpu3DRenderKm)
+#if DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN7
     InitialData.DxgkDdiRenderKm = VioGpu3DRenderKm;
+#endif
     InitialData.DxgkDdiPatch = VioGpu3DPatch;
     InitialData.DxgkDdiSubmitCommand = VioGpu3DSubmitCommand;
 
@@ -134,7 +136,9 @@ extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_
     InitialData.DxgkDdiUpdateActiveVidPnPresentPath = VioGpu3DUpdateActiveVidPnPresentPath;
     InitialData.DxgkDdiSetVidPnSourceAddress = VioGpu3DSetVidPnSourceAddress;
     InitialData.DxgkDdiRecommendMonitorModes = VioGpu3DRecommendMonitorModes;
+#if DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN7
     InitialData.DxgkDdiQueryVidPnHWCapability = VioGpu3DQueryVidPnHWCapability;
+#endif
 
 
     InitialData.DxgkDdiCreateDevice = VioGpu3DCreateDevice;
@@ -554,6 +558,12 @@ VioGpu3DBuildPagingBuffer(_In_ CONST HANDLE hAdapter, _In_ DXGKARG_BUILDPAGINGBU
                 DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s (unmap aperture segment)\n", __FUNCTION__));
                 return Status;
             }
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+        case DXGK_OPERATION_TRANSFER:
+        case DXGK_OPERATION_FILL:
+        case DXGK_OPERATION_DISCARD_CONTENT:
+            return reinterpret_cast<VioGpuAdapter *>(hAdapter)->desktopMemory.Page(pBuildPagingBuffer);
+#endif
         default:
             {
                 DbgPrint(TRACE_LEVEL_ERROR,
@@ -859,6 +869,7 @@ VioGpu3DUpdateActiveVidPnPresentPath(_In_ CONST HANDLE hAdapter,
     return pAdapter->vidpn.UpdateActiveVidPnPresentPath(pUpdateActiveVidPnPresentPath);
 }
 
+#if DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN7
 NTSTATUS
 APIENTRY
 VioGpu3DQueryVidPnHWCapability(_In_ CONST HANDLE hAdapter, _Inout_ DXGKARG_QUERYVIDPNHWCAPABILITY *pVidPnHWCaps)
@@ -875,6 +886,7 @@ VioGpu3DQueryVidPnHWCapability(_In_ CONST HANDLE hAdapter, _Inout_ DXGKARG_QUERY
     }
     return pAdapter->vidpn.QueryVidPnHWCapability(pVidPnHWCaps);
 }
+#endif
 
 NTSTATUS
 APIENTRY

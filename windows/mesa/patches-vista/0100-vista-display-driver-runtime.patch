@@ -1,0 +1,35 @@
+Keep the D3D entry points in the module definition file and discard unused
+static C++ runtime functions. On x86 libunwind uses the Windows 7 name for
+EnumProcessModules. Vista exports the same function from PSAPI.
+
+--- a/src/gallium/targets/d3d10umd/meson.build
++++ b/src/gallium/targets/d3d10umd/meson.build
+@@ -12,7 +12,12 @@
+ gallium_d3d10_name = get_option('gallium-d3d10-dll-name')
++vista_sources = []
++if host_machine.cpu_family() == 'x86'
++  vista_sources += 'vista_psapi.c'
++endif
+ libgallium_d3d10 = shared_library(
+   gallium_d3d10_name,
+-  ['d3d10_gdi.c'],
++  ['d3d10_gdi.c'] + vista_sources,
++  link_args : ['-Wl,--gc-sections,--exclude-all-symbols', '-lpsapi'],
+   vs_module_defs : libgallium_d3d10_def,
+   include_directories : [
+     inc_include, inc_src, inc_mesa, inc_gallium, inc_gallium_aux, inc_d3d10umd, inc_gallium_winsys, inc_gallium_winsys_sw, inc_gallium_drivers, inc_winddk
+--- /dev/null
++++ b/src/gallium/targets/d3d10umd/vista_psapi.c
+@@ -0,0 +1,12 @@
++/* SPDX-License-Identifier: MIT */
++#define PSAPI_VERSION 1
++#include <windows.h>
++#include <psapi.h>
++
++/* The x86 unwind runtime requests this symbol by its Windows 7 name. */
++BOOL WINAPI
++K32EnumProcessModules(HANDLE process, HMODULE *modules, DWORD bytes,
++                      DWORD *bytes_needed)
++{
++   return EnumProcessModules(process, modules, bytes, bytes_needed);
++}

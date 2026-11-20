@@ -1,4 +1,14 @@
-# HANDOFF: Paravirtual GPU acceleration for Mac OS X 10.6 (Snow Leopard) guests
+# Ripple driver handoff
+
+## Windows Vista SP2 x64 · 2026-11-20
+
+Vista booted with the test-signed Ripple 7.14.1.3 driver active at 1280×768×32. The guest verified the installed kernel binary against its signed package. Both Direct3D triangle tests read back black, and desktop composition was off. The visible desktop still needs a separate check.
+
+The diagnostic driver saw all 32 expected bytes at the start of the test texture in guest memory. QEMU logged the upload and download for that same resource. Both transfers signaled completion, but the application recovered **0 of 1,024 texture bytes**. The buffer copy matched **0 of 4,096 bytes**.
+
+The next measurement is the tagged texture’s backing immediately after the host completes the download, compared with the application’s read of the same prefix. The [Vista probe report](docs/windows/vista-sp2-probe.md#tagged-texture-run) records the transfer sequence and recovery procedure.
+
+## Original project brief for Mac OS X 10.6 (Snow Leopard) guests
 
 Working name: **snow-virgl** (rename freely)
 Owner: MooseMan (human). Implementer: Claude Code agent.

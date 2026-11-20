@@ -39,6 +39,9 @@ enum {
    KMT_QUERY_RESOURCE_INFO,
    KMT_OPEN_RESOURCE,
    KMT_LOCK,
+#ifdef RIPPLE_VISTA
+   KMT_UNLOCK,
+#endif
    KMT_RENDER,
    KMT_PRESENT,
    KMT_SET_DISPLAY_MODE,
@@ -59,6 +62,9 @@ static const char *const kmt_names[KMT_COUNT] = {
    [KMT_QUERY_RESOURCE_INFO] = "D3DKMTQueryResourceInfo",
    [KMT_OPEN_RESOURCE] = "D3DKMTOpenResource",
    [KMT_LOCK] = "D3DKMTLock",
+#ifdef RIPPLE_VISTA
+   [KMT_UNLOCK] = "D3DKMTUnlock",
+#endif
    [KMT_RENDER] = "D3DKMTRender",
    [KMT_PRESENT] = "D3DKMTPresent",
    [KMT_SET_DISPLAY_MODE] = "D3DKMTSetDisplayMode",
@@ -231,6 +237,18 @@ d3dkmt_lock_allocation(struct gdikmt_device *dev, D3DKMT_HANDLE hAllocation,
       *ptr = arg.pData;
    return status;
 }
+
+#ifdef RIPPLE_VISTA
+static NTSTATUS
+d3dkmt_unlock_allocation(struct gdikmt_device *dev, D3DKMT_HANDLE hAllocation)
+{
+   D3DKMT_UNLOCK arg = {0};
+   arg.hDevice = d3dkmt_device(dev)->hDevice;
+   arg.NumAllocations = 1;
+   arg.phAllocations = &hAllocation;
+   return kmt[KMT_UNLOCK](&arg);
+}
+#endif
 
 static NTSTATUS
 d3dkmt_render(struct gdikmt_context *ctx, struct gdikmt_render *render)
@@ -420,6 +438,9 @@ gdikmt_create_from_hdc(HDC hDC)
    dev->base.queryAllocation = d3dkmt_query_allocation;
    dev->base.openAllocation = d3dkmt_open_allocation;
    dev->base.lockAllocation = d3dkmt_lock_allocation;
+#ifdef RIPPLE_VISTA
+   dev->base.unlockAllocation = d3dkmt_unlock_allocation;
+#endif
    dev->base.createContext = d3dkmt_create_context;
    dev->base.present = d3dkmt_present;
    dev->base.setDisplayMode = d3dkmt_set_display_mode;

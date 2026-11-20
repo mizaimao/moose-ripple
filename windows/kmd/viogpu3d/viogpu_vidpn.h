@@ -84,7 +84,9 @@ class VioGpuVidPN
     NTSTATUS RecommendMonitorModes(_In_ CONST DXGKARG_RECOMMENDMONITORMODES *CONST pRecommendMonitorModes);
     NTSTATUS EnumVidPnCofuncModality(_In_ CONST DXGKARG_ENUMVIDPNCOFUNCMODALITY *CONST pEnumCofuncModality);
     NTSTATUS SetVidPnSourceVisibility(_In_ CONST DXGKARG_SETVIDPNSOURCEVISIBILITY *pSetVidPnSourceVisibility);
+#if DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN7
     NTSTATUS QueryVidPnHWCapability(_Inout_ DXGKARG_QUERYVIDPNHWCAPABILITY *pVidPnHWCaps);
+#endif
     NTSTATUS GetScanLine(_Inout_ DXGKARG_GETSCANLINE *pGetScanLine);
 
     void Flip();
@@ -135,6 +137,13 @@ class VioGpuVidPN
     VioGpuAllocation *m_sourceRes = NULL;
     // Its resource on the host, for code that must not touch the allocation itself
     volatile LONG m_sourceId = 0;
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+    UINT m_sourceSegment = 0;
+    // A drawn primary was put on screen and its picture is still to be copied into its memory
+    // (Flip); the next copy no sooner than m_mirrorNext
+    BOOLEAN m_mirrorPending = FALSE;
+    ULONGLONG m_mirrorNext = 0;
+#endif
     // Held by the flip thread while it uses m_sourceRes, and to forget an allocation that is
     // being destroyed. Windows destroys the surface on screen at a desktop switch before it
     // names the next one.

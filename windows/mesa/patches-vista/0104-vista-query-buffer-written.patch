@@ -1,0 +1,23 @@
+Vista: a submission that names a query buffer marks it as written. The host writes query
+results straight into the buffer's guest memory, and Vista shows a CPU lock what the GPU
+wrote only when a submission declares the write: every occlusion query stayed pending.
+
+--- a/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
++++ b/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
+@@ -741,6 +741,16 @@
+ 
+       cbuf->alloc_count++;
+    }
++
++   /* Vista: the host writes query results straight into a query buffer's guest memory
++    * (VIRGL_BIND_CUSTOM). Vista shows a CPU lock what the GPU wrote only when a submission
++    * declares the write, so every submission that names a query buffer does. */
++   if (res->bind & VIRGL_BIND_CUSTOM) {
++      for (int i = 0; i < cbuf->alloc_count; i++) {
++         if (cbuf->ctx->pAllocationList[i].hAllocation == res->hAllocation)
++            cbuf->ctx->pAllocationList[i].WriteOperation = 1;
++      }
++   }
+ }
+ 
+ static bool
