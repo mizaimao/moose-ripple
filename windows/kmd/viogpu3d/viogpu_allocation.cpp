@@ -161,10 +161,12 @@ NTSTATUS VioGpuAllocation::GetStandardAllocationDriverData(DXGKARG_GETSTANDARDAL
     // GDI's own surfaces for what it draws in windows: refused, so GDI keeps those in system
     // memory and sends no drawing commands (driver.cpp, VioGpu3DRenderKm). Windows asks for
     // every bitmap GDI makes, so the refusal is not logged.
+#if DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN7
     if (pStandardAllocation->StandardAllocationType == D3DKMDT_STANDARDALLOCATION_GDISURFACE)
     {
         return STATUS_NOT_SUPPORTED;
     }
+#endif
 
     if (!pStandardAllocation->pResourcePrivateDriverData && !pStandardAllocation->pResourcePrivateDriverData)
     {

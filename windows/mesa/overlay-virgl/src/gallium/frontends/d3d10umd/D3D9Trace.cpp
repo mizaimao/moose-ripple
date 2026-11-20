@@ -331,6 +331,7 @@ D3D9TraceDeviceFuncs(D3DDDI_DEVICEFUNCS *funcs)
    TRACE(pfnOpenResource);
    TRACE(pfnGetCaptureAllocationHandle);
    TRACE(pfnCaptureToSysMem);
+#if D3D_UMD_INTERFACE_VERSION >= D3D_UMD_INTERFACE_VERSION_WIN7
    TRACE(pfnCreateVideoProcessor);
    TRACE(pfnSetVideoProcessBltState);
    TRACE(pfnGetVideoProcessBltStatePrivate);
@@ -339,6 +340,7 @@ D3D9TraceDeviceFuncs(D3DDDI_DEVICEFUNCS *funcs)
    TRACE(pfnVideoProcessBltHD);
    TRACE(pfnDestroyVideoProcessor);
    TRACE(pfnResolveSharedResource);
+#endif
 }
 
 static HRESULT (APIENTRY *d3d9_real_get_caps)(HANDLE, const D3DDDIARG_GETCAPS *);

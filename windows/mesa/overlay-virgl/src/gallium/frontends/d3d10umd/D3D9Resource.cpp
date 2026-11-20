@@ -4038,6 +4038,7 @@ D3D9GetPitch(HANDLE hDevice, D3DDDIARG_GETPITCH *data)
    return S_OK;
 }
 
+#if D3D_UMD_INTERFACE_VERSION >= D3D_UMD_INTERFACE_VERSION_WIN7
 HRESULT APIENTRY
 D3D9ResolveSharedResource(HANDLE hDevice,
                           const D3DDDIARG_RESOLVESHAREDRESOURCE *data)
@@ -4064,6 +4065,8 @@ D3D9ResolveSharedResource(HANDLE hDevice,
    }
    return S_OK;
 }
+
+#endif
 
 HRESULT APIENTRY
 D3D9QueryResourceResidency(HANDLE hDevice,

@@ -508,20 +508,21 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
             }
         case DXGKQAITYPE_DRIVERCAPS:
             {
-                if (!pQueryAdapterInfo->OutputDataSize)
+#if DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN7
+                const SIZE_T required = RTL_SIZEOF_THROUGH_FIELD(DXGK_DRIVERCAPS, WDDMVersion);
+#else
+                const SIZE_T required = RTL_SIZEOF_THROUGH_FIELD(DXGK_DRIVERCAPS, GpuEngineTopology);
+#endif
+                if (pQueryAdapterInfo->OutputDataSize < required)
                 {
                     DbgPrint(TRACE_LEVEL_ERROR,
-                             ("pQueryAdapterInfo->OutputDataSize (0x%u) is smaller than sizeof(DXGK_DRIVERCAPS) "
-                              "(0x%u)\n",
-                              pQueryAdapterInfo->OutputDataSize,
-                              sizeof(DXGK_DRIVERCAPS)));
+                             ("Driver caps buffer too short: %u bytes, need %u\n",
+                              pQueryAdapterInfo->OutputDataSize, (UINT)required));
                     return STATUS_BUFFER_TOO_SMALL;
                 }
 
                 DXGK_DRIVERCAPS *pDriverCaps = (DXGK_DRIVERCAPS *)pQueryAdapterInfo->pOutputData;
-                DbgPrint(TRACE_LEVEL_ERROR,
-                         ("InterruptMessageNumber = %d\n", pDriverCaps->InterruptMessageNumber));
-                RtlZeroMemory(pDriverCaps, pQueryAdapterInfo->OutputDataSize /*sizeof(DXGK_DRIVERCAPS)*/);
+                RtlZeroMemory(pDriverCaps, pQueryAdapterInfo->OutputDataSize);
                 pDriverCaps->HighestAcceptableAddress.QuadPart = (ULONG64)-1;
 
                 pDriverCaps->FlipCaps.FlipOnVSyncMmIo = TRUE;
@@ -533,17 +534,18 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
 
                 // Windows 7 accepts only this value from a driver of its own interface version, and
                 // refuses the adapter with any other, zero included.
+#if DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN7
                 pDriverCaps->WDDMVersion = DXGKDDI_WDDMv1;
 
                 // With DxgkDdiRenderKm, what makes this a WDDM 1.1 driver to Windows 7 (driver.cpp,
                 // VioGpu3DRenderKm)
                 pDriverCaps->PresentationCaps.SupportKernelModeCommandBuffer = 1;
+                // The only segment is an aperture the CPU cannot reach; see ripple_win7.h
+                pDriverCaps->MemoryManagementCaps.Value |= RIPPLE_VIDMMCAPS_SECTION_BACKED_PRIMARY;
+#endif
 
                 // Gamma ramps of 256 sixteen-bit entries a channel; applied in viogpu_gamma.cpp
                 pDriverCaps->GammaRampCaps.Gamma_Rgb256x3x16 = 1;
-
-                // The only segment is an aperture the CPU cannot reach; see ripple_win7.h
-                pDriverCaps->MemoryManagementCaps.Value |= RIPPLE_VIDMMCAPS_SECTION_BACKED_PRIMARY;
 
                 // Colour pointers up to 64x64 drawn by the host (SetPointerShape); Windows draws
                 // any other kind itself, after the driver refuses it.

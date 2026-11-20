@@ -6,6 +6,7 @@
 # MAIN: the checkout that holds .tools and .venv (default: this tree's root).
 # KIT:  the unpacked WDK 7.1 (default $MAIN/.tools/wdk71/kit/WinDDK/7600.16385.win7_wdk.100208-1538).
 # ARCHS: "amd64 i386" (default amd64 until the driver builds).
+# RIPPLE_TARGET=vista selects Vista SP2 and the WDK's lib/wlh import libraries.
 set -eu
 keep=0
 [ "${1:-}" = -k ] && { keep=1; shift; }
@@ -13,7 +14,17 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 MAIN=${MAIN:-$root}
 KIT=${KIT:-$MAIN/.tools/wdk71/kit/WinDDK/7600.16385.win7_wdk.100208-1538}
-OUT=${1:-$MAIN/build/win7-kmd}
+TARGET=${RIPPLE_TARGET:-win7}
+case $TARGET in
+    win7)
+        nt=0x0601; ntddi=0x06010000; subsystem=6.01; kit_os=win7
+        ddi=DXGKDDI_INTERFACE_VERSION_WIN7; umd=D3D_UMD_INTERFACE_VERSION_WIN7 ;;
+    vista)
+        nt=0x0600; ntddi=0x06000200; subsystem=6.00; kit_os=wlh
+        ddi=DXGKDDI_INTERFACE_VERSION_VISTA_SP1; umd=D3D_UMD_INTERFACE_VERSION_VISTA ;;
+    *) echo "Unsupported RIPPLE_TARGET: $TARGET" >&2; exit 1 ;;
+esac
+OUT=${1:-$MAIN/build/$TARGET-kmd}
 ARCHS=${ARCHS:-amd64}
 # DEBUG=1 (the default while the driver is being brought up): the driver's messages go to the
 # first serial port (COM1), which the test VM writes to a file on the host. DEBUG=0: no messages.
@@ -30,7 +41,7 @@ INC="-vfsoverlay $ov /I$here/common /I$here/shared /I$here/VirtIO /I$here/viogpu
 COMMON="/nologo /c /O2 /W3 /Zp8 /GS- /Gy /kernel /Gz -fms-compatibility-version=15.00 \
         -Wno-microsoft-anon-tag -Wno-pragma-pack -Wno-ignored-pragma-intrinsic -Wno-ignored-attributes \
         -Wno-nonportable-include-path -Wno-invalid-token-paste -Wno-unknown-pragmas \
-        /FI$here/compat/sal2.h /FI$here/compat/win7.h /D_KERNEL_MODE /D_WIN32_WINNT=0x0601 /DWINVER=0x0601 /DNTDDI_VERSION=0x06010000 /DVIOGPU_3D=1"
+        /FI$here/compat/sal2.h /FI$here/compat/win7.h /D_KERNEL_MODE /D_WIN32_WINNT=$nt /DWINVER=$nt /DNTDDI_VERSION=$ntddi /DDXGKDDI_INTERFACE_VERSION=$ddi /DD3D_UMD_INTERFACE_VERSION=$umd /DVIOGPU_3D=1"
 # (The driver's trace.h turns its own messages on; COM_DEBUG sends them to the serial port
 # instead of the kernel debugger. DBG itself is not defined: the kit's assertions do not
 # compile as C++ with clang.)
@@ -55,6 +66,8 @@ for arch in $ARCHS; do
         i386)  T=i686-pc-windows-msvc;   M=x86; D="/D_X86_ /Di386 /DSTD_CALL /DNONTOSPINTERLOCK"; E=DriverEntry@8 ;;
     esac
     o=$OUT/$arch; mkdir -p "$o"
+    libs=${WDK_TARGET_LIBS:-$KIT/lib/$kit_os}/$arch
+    [ -f "$libs/displib.lib" ] || { echo "Missing $TARGET display library in $libs" >&2; exit 1; }
     objs=
     for f in $C_SRC $CXX_SRC; do
         obj=$o/$(basename "${f%.*}").obj
@@ -68,10 +81,9 @@ for arch in $ARCHS; do
         fi
     done
     [ $status = 0 ] || continue
-    lld-link /nologo /machine:$M /driver /subsystem:native,6.01 /release /nodefaultlib \
-        /entry:$E /out:"$o/viogpu3d.sys" /map:"$o/viogpu3d.map" $objs "$KIT/lib/win7/$arch/displib.lib" \
-        "$KIT/lib/win7/$arch/ntoskrnl.lib" "$KIT/lib/win7/$arch/hal.lib" "$KIT/lib/win7/$arch/wmilib.lib" \
-        "$KIT/lib/win7/$arch/BufferOverflowK.lib"
+    lld-link /nologo /machine:$M /driver /subsystem:native,$subsystem /release /nodefaultlib \
+        /entry:$E /out:"$o/viogpu3d.sys" /map:"$o/viogpu3d.map" $objs "$libs/displib.lib" \
+        "$libs/ntoskrnl.lib" "$libs/hal.lib" "$libs/wmilib.lib" "$KIT/lib/$kit_os/$arch/BufferOverflowK.lib"
     ls -l "$o/viogpu3d.sys"
 done
 exit $status
