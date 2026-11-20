@@ -99,6 +99,14 @@ transfers, zero of 1,024 bytes matched the uploaded pattern. A separate Mesa
 buffer copy returned zero of 4,096 matching bytes. The diagnostic then exited
 with an access violation before reporting its two optional color-format tests.
 
+In the saved offscreen color trace, QEMU attached both 64×64 test textures
+(resource IDs 0xc and 0x9) and their guest backing before the first command
+submission for that test context. The trace records the attach requests but
+does not include the bytes in those pages. In the separate texture round-trip
+run, the serial log contained no GPU command error between the probe's begin
+and end markers. Both transfers signaled completion and the first byte read
+back as 0x00. The expected byte was 0x1e.
+
 The display thread also treated address zero as an absent desktop. Zero is a
 valid offset in Vista's dedicated desktop segment. A follow-up build accepts
 this offset when Windows identifies that segment and supplies a primary
@@ -153,6 +161,7 @@ available in the existing checkout.
 | `build/ripple-vista-7.14.1.2-test-signed.zip` | Guest-tested package that held 800×600 and reproduced the black pixels. |
 | `build/kmd-vista-scanout/viogpu3d.sys` | Build of `169f188` that accepts a desktop surface at offset zero. Guest validation is pending. |
 | `tmp-utm-validation/probe-kmd/` | Matched diagnostic `viogpu3d.sys` and `pipecheck.exe`. This build adds a check of the first 32 bytes of the test texture. Its first tagged run is pending. |
+| `build/lab-tagged-3.iso` | Private 7.14.1.3 test CD, SHA-256 `906e869ffb80d1c973899e8d13c5959dae8dc4973bb4a38716cc0fad9b17ab13`. Both diagnostic binaries were read back from the ISO and matched the build outputs. Guest installation is pending. |
 
 1. Use the dedicated `ripple-vista` VM. The powered-off snapshot
    `clean-before-ripple` preserves the original VGA installation. The recovery
