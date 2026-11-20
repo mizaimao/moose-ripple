@@ -1,10 +1,12 @@
 # Vista SP2 x64 display driver probe
 
 The kernel driver and both Direct3D 9 DLLs build from the Windows 7 driver at
-`63739fe`. On Vista SP2 x64 with test signing enabled, version 7.14.1.2
-starts the adapter, sets an 800×600 desktop and opens a hardware Direct3D 9
-device for both x64 and x86 applications. The offscreen color checks currently
-return black, and the guest reports Aero composition off.
+`63739fe`. On Vista SP2 x64 with test signing enabled, version 7.14.1.5
+starts the adapter, runs the desktop at 1280×768 and draws the Direct3D 9
+triangle test correctly for both x64 and x86 applications. The guest reports
+Aero composition off. Earlier builds read every GPU result back as black;
+[Why the GPU's data stayed invisible](#why-the-gpus-data-stayed-invisible)
+has the cause and the fix.
 
 ## What changed
 
@@ -138,6 +140,40 @@ written 0x1e. The independent buffer copy recovered 0 of 4,096 bytes.
 The next check is to sample the same backing after download completion
 and compare it with the application's read before it releases the texture.
 
+### Why the GPU's data stayed invisible
+
+Two Vista rules, each found with the direct kernel-interface test in
+`pipecheck.c`, explain the black pixels. Windows 7 needs neither.
+
+1. A CPU pointer returned by a lock does not show data the GPU writes after
+   that lock. The test wrote its pattern, uploaded it, overwrote the guest
+   copy, downloaded and read through the same lock: 0 of 1,024 bytes
+   matched. Unlocking and locking again before each step: 1,024 of 1,024.
+2. A fresh lock shows the GPU's data only when the download's submission
+   marks the allocation as written (`WriteOperation` in the allocation
+   list). With the mark: 1,024 of 1,024. Without it, relocking as in rule 1:
+   0 of 1,024, every byte still the sentinel.
+
+Mesa's GDI winsys broke both rules. It kept one lock for an allocation's
+whole life, and its downloads never set the write mark. Two Vista-only Mesa
+patches follow the rules: `0101` takes a lock per CPU access and releases it
+at unmap (the staging pool, which holds a lock for its lifetime, is turned
+off), and `0102` marks a download's allocation as written. With both,
+Mesa's GPU buffer copy reads back 4,096 of 4,096 bytes; before them it read
+0 of 4,096, also 500 ms later, so the cause was not timing.
+
+### 7.14.1.5 run
+
+On November 20 the guest downloaded package 7.14.1.5 (the `169f188` kernel
+driver and Mesa with both patches) from the UTM host over HTTP, verified
+each file's SHA-1, signed it in the guest and installed it. After the
+reboot, Ripple was the active display at 1280×768 in 32-bit color, Explorer
+was running, and the installed kernel driver and both Direct3D DLLs matched
+the package byte for byte. Both the x64 and x86 triangle tests reported
+`picture read back: right`, with red (0 0 255 in blue green red order)
+inside the triangle. Composition stayed off. The visible UTM window has not
+been checked yet.
+
 ## Rebuild and signing handoff
 
 From the Vista worktree on the Linux builder, set `MAIN` to the checkout
@@ -177,32 +213,25 @@ available in the existing checkout.
 
 | Artifact | What it contains |
 | --- | --- |
+| `build/ripple-vista-7.14.1.5/` | Unsigned package installed in the 7.14.1.5 run: the `169f188` kernel driver and both Mesa DLLs with patches `0101` and `0102`. |
+| `tmp-utm-validation/fix5/` and `deliver-fix.rb` | The same package with its guest install script, and the host script that delivers it over HTTP, installs it, reboots and runs the checks. |
+| `tmp-utm-validation/pipecheck-mark.c` | The write-mark experiment: the direct download with and without `WriteOperation`. |
 | `build/ripple-vista-7.14.1.2-test-signed.zip` | Guest-tested package that held 800×600 and reproduced the black pixels. |
-| `build/kmd-vista-scanout/viogpu3d.sys` | Build of `169f188` that accepts a desktop surface at offset zero. Its effect on the visible desktop still needs verification. |
-| `tmp-utm-validation/probe-kmd/` | Matched diagnostic driver and application used in the tagged texture run. |
-| `build/lab-tagged-3.iso` | Guest-tested 7.14.1.3 CD, SHA-256 `906e869ffb80d1c973899e8d13c5959dae8dc4973bb4a38716cc0fad9b17ab13`. |
+| `build/lab-tagged-3.iso` | Guest-tested 7.14.1.3 CD, SHA-256 `906e869ffb80d1c973899e8d13c5959dae8dc4973bb4a38716cc0fad9b17ab13`. It is still the guest's D: drive and supplies the signing tools. |
 
 1. Use the dedicated `ripple-vista` VM. The powered-off snapshot
    `clean-before-ripple` preserves the original VGA installation. The recovery
-   boot entry is the default. The original Ripple test entry is recorded in
-   `C:\RippleVista\ripple-boot-entry.txt`. Stage the matched diagnostic pair,
-   regenerate and test-sign the driver package, and boot the original test
-   entry. Confirm that Ripple owns the active display and that `viogpu3d`
-   is running.
-2. Run the matching `pipecheck.exe` with the lab's `D:\pipe.cmd` launcher.
-   The launcher expects the executable at `D:\bin\pipecheck.exe` and sends
-   results to COM1. In `ripple-vista-com1.log`, correlate
-   `Vista test texture created id=…` with
-   `Vista test texture backing id=… mapped=… match=…/32` for the same ID.
-   On a mapping after the CPU wrote its pattern and before it clears the
-   guest copy, `mapped=1 match=32/32` means the driver saw the expected
-   prefix. Trace the host upload and download from there. A partial match or
-   zero on that mapping directs attention to the guest pages and mapping
-   timing. A missing line or `mapped=0` leaves the comparison inconclusive.
-3. Verify all **1,024 texture bytes** and **4,096 buffer bytes**. Then repeat
-   the x86 and x64 triangle tests and check for red inside and green outside
-   (`picture read back: right`). Check the visible desktop separately with
-   the offset-zero fix. Aero and game testing follow correct rendering.
+   boot entry is the default. The Ripple test entry is recorded in
+   `C:\RippleVista\ripple-boot-entry.txt`, and the install scripts boot it
+   once with `bcdedit /bootsequence`.
+2. To try a new build, put the package and an install script in a folder
+   like `fix5/` on the UTM host and run
+   `ruby deliver-fix.rb <folder> <guest address> <number>`. No CD change is
+   needed. The run ends with the display check and both triangle tests.
+3. Check the visible desktop in the UTM window. Reading the UTM window
+   (any capture of the host's screen) needs the owner's approval each time.
+4. Turn on Aero: run the Windows graphics assessment (`winsat dwm`) and check
+   `DwmIsCompositionEnabled`. Then 3DMark06 and F.E.A.R. from the lab CD.
 
 ### Recover the lab desktop
 
