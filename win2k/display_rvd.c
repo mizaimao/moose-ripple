@@ -8,6 +8,7 @@
 
 static HSEMAPHORE lock;
 static RB2K_RVD_STAGING_INFO staging;
+static RB2K_RVD_STATS stats;
 
 void rb_rvd_init(void)
 {
@@ -111,11 +112,34 @@ static BOOL dispatch(DISPLAY *d, ULONG code, const UCHAR *in, ULONG inSize, PVOI
 
 ULONG rb_rvd_escape(DISPLAY *d, ULONG inSize, PVOID in, ULONG outSize, PVOID out)
 {
+    LONGLONG start, end;
+    ULONG code;
     BOOL done;
     if (!lock || !in || inSize < sizeof(ULONG) || (outSize && !out)) return 0;
+    code = *(const ULONG *)in;
+    EngQueryPerformanceCounter(&start);
     EngAcquireSemaphore(lock);
-    done = ready(d) && dispatch(d, *(const ULONG *)in, (const UCHAR *)in + sizeof(ULONG),
+    done = ready(d) && dispatch(d, code, (const UCHAR *)in + sizeof(ULONG),
                                 inSize - sizeof(ULONG), out, outSize);
+    EngQueryPerformanceCounter(&end);
+    if (code < RB2K_RVD_STAT_CODES) {
+        /* Readbacks are counted apart from uploads, in slot 14. */
+        ULONG slot = code == RVD_TRANSFER && inSize == sizeof(ULONG) + sizeof(struct rvd_transfer) &&
+                     ((const struct rvd_transfer *)((const UCHAR *)in + sizeof(ULONG)))->direction ==
+                     RVD_FROM_HOST ? 14 : code;
+        ++stats.calls[slot];
+        stats.ticks[slot] += end - start;
+    }
     EngReleaseSemaphore(lock);
     return done ? 1 : 0;
+}
+
+ULONG rb_rvd_stats(ULONG outSize, PVOID out)
+{
+    if (!lock || outSize != sizeof(stats) || !out) return 0;
+    EngAcquireSemaphore(lock);
+    EngQueryPerformanceFrequency(&stats.frequency);
+    RtlCopyMemory(out, &stats, sizeof(stats));
+    EngReleaseSemaphore(lock);
+    return 1;
 }

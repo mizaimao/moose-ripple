@@ -21,7 +21,7 @@ cl() { wine "$vc/Bin/CL.EXE" /nologo "$@"; }
 link() { wine "$vc/Bin/LINK.EXE" /nologo "$@"; }
 
 cp "$here/rb2kmp.c" "$here"/gpu_*.c "$here"/*.h "$here/display.c" "$here/display_ddraw.c" "$here/display_rvd.c" "$here/install.c" \
-    "$here/tools/w2kprobe.c" "$here/tools/ddraw_probe.c" "$here/tools/window_probe.c" "$here/tools/flip_probe.c" "$here/tools/ddraw_bench.c" .
+    "$here/tools/w2kprobe.c" "$here/tools/ddraw_probe.c" "$here/tools/window_probe.c" "$here/tools/flip_probe.c" "$here/tools/ddraw_bench.c" "$here/tools/rvdstat.c" .
 export INCLUDE="$(w "$here/compat");$(w "$repo/third_party/virtio");$(w "$repo/third_party/virgl");$(w "$repo/win9x/minivdd");$(w "$ddk/inc/ddk");$(w "$ddk/src/video/inc");$(w "$ddk/inc");$(w "$vc/Include")"
 export LIB="$(w "$ddk/libfre/i386")"
 cl /c /W3 /WX /O1 /Gz /Zl /GX- /D_X86_=1 /Di386=1 /D_WIN32_WINNT=0x0500 /DWINVER=0x0500 \
@@ -46,10 +46,13 @@ cl /O1 /W3 /MT w2kprobe.c ddraw_probe.c window_probe.c flip_probe.c /Few2kprobe.
     /machine:i386 setupapi.lib cfgmgr32.lib user32.lib gdi32.lib kernel32.lib
 cl /O1 /W3 /MT ddraw_bench.c /Feddbench.exe /link /subsystem:windows,5.00 /version:1.0 \
     /machine:i386 user32.lib gdi32.lib kernel32.lib
+export INCLUDE="$(w "$repo/win9x/minivdd");$(w "$ddk/inc");$(w "$vc/Include")"
+cl /O1 /W3 /MT rvdstat.c /Fervdstat.exe /link /subsystem:console,5.00 /version:1.0 \
+    /machine:i386 user32.lib gdi32.lib kernel32.lib
 
 # VC6 stamps the COFF header and exported DLLs with the current time. Use a
 # repeatable timestamp and maintain the image checksums required for drivers.
-"${PYTHON:-$repo/.venv/bin/python}" - rb2kmp.sys rb2kdisp.dll nt5inst.exe w2kprobe.exe ddbench.exe <<'PY'
+"${PYTHON:-$repo/.venv/bin/python}" - rb2kmp.sys rb2kdisp.dll nt5inst.exe w2kprobe.exe ddbench.exe rvdstat.exe <<'PY'
 import os
 from pathlib import Path
 from struct import iter_unpack, pack_into, unpack_from
@@ -84,4 +87,4 @@ for filename in sys.argv[1:]:
         pack_into("<I", data, checksum, total + len(data))
     path.write_bytes(data)
 PY
-cp rb2kmp.sys rb2kdisp.dll nt5inst.exe w2kprobe.exe ddbench.exe "$here/rb2k.inf" "$out/"
+cp rb2kmp.sys rb2kdisp.dll nt5inst.exe w2kprobe.exe ddbench.exe rvdstat.exe "$here/rb2k.inf" "$out/"

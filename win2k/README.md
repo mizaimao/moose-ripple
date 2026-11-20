@@ -166,12 +166,19 @@ settings, 32-bit colour, one emulated Pentium III in UTM on Apple silicon:
     (the result is in demoq3\qconsole.log)
 
 With 2.6 times the pixels the frame rate hardly changes, so on this host
-the frame's readback and copy are not the limit; the emulated CPU or the
-cost of each request to the host is, which is not yet measured. Screen
+the frame's readback and copy are not the limit (see below). Screen
 captures of the windowed run showed the level's textures, lighting and
 the game's text. Windows 98 reached about 300 frames a second in a window
 on a Proxmox VE host whose CPU is not emulated; it has not been timed in
 UTM.
+
+`rvdstat.exe` prints the time spent in each request to the driver since
+Windows started; run it before and after a program and subtract. In the
+windowed timedemo each frame made one command submission (about 1.3 ms,
+host included) and one readback of the frame (about 1.2 ms): about 2.5 ms
+of a 11.8 ms frame. The rest is the emulated CPU running the game, Mesa
+and GDI's copy of the frame to the window. The 685 textures and buffers
+made and freed during the run belong to loading the level.
 
 ## Speed
 

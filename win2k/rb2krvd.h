@@ -48,4 +48,14 @@ typedef struct {
     PUCHAR data[RB2K_RVD_STAGING_SEGMENTS];
 } RB2K_RVD_STAGING_INFO;
 
+/* ExtEscape(RB2K_RVD_STATS_ESCAPE), no input: the time spent in each RVD call
+ * code since the driver started, kernel and host included, for profiling. */
+#define RB2K_RVD_STATS_ESCAPE 0x52420011
+#define RB2K_RVD_STAT_CODES 16
+typedef struct {
+    LONGLONG frequency;                  /* ticks a second */
+    ULONG calls[RB2K_RVD_STAT_CODES];
+    LONGLONG ticks[RB2K_RVD_STAT_CODES];
+} RB2K_RVD_STATS;
+
 #endif
