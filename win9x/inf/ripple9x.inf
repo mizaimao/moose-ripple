@@ -7,7 +7,7 @@ Signature="$CHICAGO$"
 Class=Display
 ClassGUID={4D36E968-E325-11CE-BFC1-08002BE10318}
 Provider=%Provider%
-DriverVer=11/16/2026,0.1.0.0
+DriverVer=11/19/2026,0.2.0.0
 
 [DestinationDirs]
 DefaultDestDir=11                       ; WINDOWS\SYSTEM

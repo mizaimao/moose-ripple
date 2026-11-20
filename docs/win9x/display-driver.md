@@ -117,10 +117,11 @@ the driver has).
 
 ### One package for Windows 95 OSR2.5, Windows 98 SE and Windows Me
 
-The `win98-v0.1.0` ISO also works on Windows Me 4.90.3000. Windows 95 OSR2.5
-needs the build with the 4.00 mini-VDD header and the Windows 95 OpenGL compatibility
-changes. This build uses one INF and the same four driver files on all three systems.
-Select the **moose-ripple virtio-vga** model.
+Use the [Windows 9x 0.2.0 release](https://github.com/mizaimao/moose-ripple/releases/tag/win9x-v0.2.0)
+for Windows 95 OSR2.5, Windows 98 Second Edition and Windows Me. The ISO and
+ZIP contain one INF and the same four driver files for all three systems.
+Select the **moose-ripple virtio-vga** model. The installer reports version
+`0.2.0.0`, including when updating the earlier Windows 98 SE 0.1.0 package.
 
 On a clean install, check Device Manager for the PCI bus before choosing **Have Disk**.
 If the only display adapter is the generic VGA device and the PCI bus is missing, use
