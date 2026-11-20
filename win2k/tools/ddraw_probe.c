@@ -1,11 +1,12 @@
-/* Test ordinary DirectDraw colour fills through hardware-only and emulated
- * devices. Both paths use an offscreen surface and the current pixel format. */
+/* Fill the same offscreen surface twice through each DirectDraw device.
+ * The first application read is the lock following the second fill. */
 #define WIN32_LEAN_AND_MEAN
 #define DIRECTDRAW_VERSION 0x0700
 #include <windows.h>
 #include <ddraw.h>
 #include <stdio.h>
 #include <string.h>
+#include "rb2kprobe.h"
 
 typedef HRESULT (WINAPI *CREATE_DIRECTDRAW)(GUID *, LPDIRECTDRAW *, IUnknown *);
 enum { Unavailable, Passed, Mismatch, NoHardware };
@@ -17,19 +18,29 @@ static HRESULT report(const char *path, const char *operation, HRESULT hr)
     return hr;
 }
 
+static BOOL stats(HDC dc, RB2K_DD_STATS *out)
+{
+    return dc && ExtEscape(dc, RB2K_DD_STATS_ESCAPE, 0, NULL, sizeof(*out),
+                           (LPSTR)out) > 0;
+}
+
 static int fill_test(const char *path, LPDIRECTDRAW dd, DWORD requestedMemory)
 {
     LPDIRECTDRAWSURFACE surface = NULL;
+    HDC dc = NULL;
+    RB2K_DD_STATS start, filled, locked;
+    BOOL measured;
     DDSURFACEDESC desc, lock;
     DDPIXELFORMAT format;
     DDBLTFX effect;
-    DWORD rgb, expected, sample = 0, byteCount;
+    DWORD rgb, expected, byteCount, x, y, sample, mismatches;
     int result = Unavailable;
     HRESULT hr;
     ZeroMemory(&desc, sizeof(desc));
     desc.dwSize = sizeof(desc);
     desc.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT;
-    desc.dwWidth = desc.dwHeight = 16;
+    desc.dwWidth = 17;
+    desc.dwHeight = 13;
     desc.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | requestedMemory;
     if (FAILED(report(path, "CreateSurface", IDirectDraw_CreateSurface(dd, &desc, &surface, NULL))))
         return result;
@@ -38,7 +49,8 @@ static int fill_test(const char *path, LPDIRECTDRAW dd, DWORD requestedMemory)
         goto done;
     printf("DirectDraw %s surface_caps=%08lX requested_memory=%08lX\n", path,
            desc.ddsCaps.dwCaps, requestedMemory);
-    if (!(desc.ddsCaps.dwCaps & requestedMemory)) goto done;
+    if (!(desc.ddsCaps.dwCaps & requestedMemory) || desc.dwWidth != 17 || desc.dwHeight != 13)
+        goto done;
     ZeroMemory(&format, sizeof(format));
     format.dwSize = sizeof(format);
     if (FAILED(report(path, "GetPixelFormat", IDirectDrawSurface_GetPixelFormat(surface, &format))))
@@ -52,24 +64,52 @@ static int fill_test(const char *path, LPDIRECTDRAW dd, DWORD requestedMemory)
     byteCount = format.dwRGBBitCount / 8;
     rgb = format.dwRBitMask | format.dwGBitMask | format.dwBBitMask;
     expected = format.dwRBitMask | (format.dwGBitMask & ~(format.dwGBitMask >> 1));
+    if (format.dwRBitMask == 0x00ff0000 && format.dwGBitMask == 0x0000ff00 &&
+        format.dwBBitMask == 0x000000ff) expected = 0x003a87c5;
     ZeroMemory(&effect, sizeof(effect));
     effect.dwSize = sizeof(effect);
+    if (requestedMemory == DDSCAPS_VIDEOMEMORY)
+        dc = CreateDCA("DISPLAY", NULL, NULL, NULL);
+    measured = stats(dc, &start);
+    effect.dwFillColor = rgb ^ expected;
+    hr = IDirectDrawSurface_Blt(surface, NULL, NULL, NULL, DDBLT_COLORFILL | DDBLT_WAIT, &effect);
+    if (FAILED(report(path, "Blt(first fill)", hr))) goto done;
     effect.dwFillColor = expected;
     hr = IDirectDrawSurface_Blt(surface, NULL, NULL, NULL, DDBLT_COLORFILL | DDBLT_WAIT, &effect);
-    if (FAILED(report(path, "Blt(colorfill)", hr))) goto done;
+    if (FAILED(report(path, "Blt(second fill)", hr))) goto done;
+    if (measured && !stats(dc, &filled)) goto done;
     ZeroMemory(&lock, sizeof(lock));
     lock.dwSize = sizeof(lock);
     hr = IDirectDrawSurface_Lock(surface, NULL, &lock, DDLOCK_WAIT | DDLOCK_READONLY, NULL);
     if (FAILED(report(path, "Lock", hr))) goto done;
-    if (lock.lpSurface) {
-        memcpy(&sample, lock.lpSurface, byteCount);
-        printf("DirectDraw %s rgb_expected=%08lX rgb_observed=%08lX match=%u\n", path,
-               expected, sample & rgb, (sample & rgb) == expected);
-        result = (sample & rgb) == expected ? Passed : Mismatch;
+    if (lock.lpSurface && (lock.lPitch >= (LONG)(desc.dwWidth * byteCount) ||
+                          lock.lPitch <= -(LONG)(desc.dwWidth * byteCount))) {
+        mismatches = 0;
+        for (y = 0; y < desc.dwHeight; ++y) {
+            const BYTE *row = (const BYTE *)lock.lpSurface + (LONG)y * lock.lPitch;
+            for (x = 0; x < desc.dwWidth; ++x) {
+                sample = 0;
+                memcpy(&sample, row + x * byteCount, byteCount);
+                if ((sample & rgb) != expected) ++mismatches;
+            }
+        }
+        printf("DirectDraw %s rgb_expected=%08lX pixels=%lu mismatches=%lu pitch=%ld\n", path,
+               expected, desc.dwWidth * desc.dwHeight, mismatches, lock.lPitch);
+        result = mismatches ? Mismatch : Passed;
     }
     if (FAILED(report(path, "Unlock", IDirectDrawSurface_Unlock(surface, lock.lpSurface))))
         result = Unavailable;
+    if (measured && result == Passed) {
+        if (!stats(dc, &locked)) { result = Unavailable; goto done; }
+        printf("DirectDraw host fills=%lu pre-lock readbacks=%lu lock readbacks=%lu uploads=%lu\n",
+               filled.hostFills - start.hostFills, filled.readbacks - start.readbacks,
+               locked.readbacks - filled.readbacks, locked.uploads - start.uploads);
+        if (filled.hostFills - start.hostFills != 2 || filled.readbacks != start.readbacks ||
+            locked.readbacks - filled.readbacks != 1 || locked.uploads != start.uploads)
+            result = Mismatch;
+    }
 done:
+    if (dc) DeleteDC(dc);
     IDirectDrawSurface_Release(surface);
     return result;
 }
