@@ -142,20 +142,51 @@ signing machine, finish any embedded signing first, then run
 and sign the resulting `viogpu3d.cat`.
 [Microsoft's catalog instructions](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/creating-a-catalog-file-for-a-pnp-driver-package)
 
-## First boot
+## Next Vista run
 
-Use a snapshot of a disposable Vista SP2 x64 guest with the virtio-gpu 3D
-device. After installing the signed package and rebooting normally, record the
-Device Manager status and `sc query viogpu3d`. Correlate those with the guest
-serial driver log. The first display-specific uncertainty is the primary
-surface holding the desktop. Ripple exposes a GPU aperture the CPU cannot
-address directly. The Windows 7 driver used a memory capability bit for that
-surface that the Vista headers reserve. The Vista build leaves it clear.
-Record the first mode set and primary allocation before investigating Aero.
+The local worktree is `tmp-vista-sp2` on branch `vista-sp2-probe`. The
+following paths are relative to that worktree. The private lab artifacts are
+available in the existing checkout.
 
-Once Ripple is driving the display, run the existing x64 `d3d9probe.exe` and
-`d3d9test.exe` in a writable directory. Confirm the adapter ID, successful
-HAL device creation, the red triangle on green (`picture read back: right`),
-a successful present, and GPU commands from Ripple for that draw. The triangle
-test's exit code alone doesn't check its readback. For Aero, enable a glass
-theme and check actual composition and a correctly rendered glass window.
+| Artifact | What it contains |
+| --- | --- |
+| `build/ripple-vista-7.14.1.2-test-signed.zip` | Guest-tested package that held 800×600 and reproduced the black pixels. |
+| `build/kmd-vista-scanout/viogpu3d.sys` | Build of `169f188` that accepts a desktop surface at offset zero. Guest validation is pending. |
+| `tmp-utm-validation/probe-kmd/` | Matched diagnostic `viogpu3d.sys` and `pipecheck.exe`. This build adds a check of the first 32 bytes of the test texture. Its first tagged run is pending. |
+
+1. Use the dedicated `ripple-vista` VM. The powered-off snapshot
+   `clean-before-ripple` preserves the original VGA installation. The recovery
+   boot entry is the default. The original Ripple test entry is recorded in
+   `C:\RippleVista\ripple-boot-entry.txt`. Stage the matched diagnostic pair,
+   regenerate and test-sign the driver package, and boot the original test
+   entry. Confirm that Ripple owns the active display and that `viogpu3d`
+   is running.
+2. Run the matching `pipecheck.exe` with the lab's `D:\pipe.cmd` launcher.
+   The launcher expects the executable at `D:\bin\pipecheck.exe` and sends
+   results to COM1. In `ripple-vista-com1.log`, correlate
+   `Vista test texture created id=…` with
+   `Vista test texture backing id=… mapped=… match=…/32` for the same ID.
+   On a mapping after the CPU wrote its pattern and before it clears the
+   guest copy, `mapped=1 match=32/32` means the driver saw the expected
+   prefix. Trace the host upload and download from there. A partial match or
+   zero on that mapping directs attention to the guest pages and mapping
+   timing. A missing line or `mapped=0` leaves the comparison inconclusive.
+3. Verify all **1,024 texture bytes** and **4,096 buffer bytes**. Then repeat
+   the x86 and x64 triangle tests and check for red inside and green outside
+   (`picture read back: right`). Check the visible desktop separately with
+   the offset-zero fix. Aero and game testing follow correct rendering.
+
+### Recover the lab desktop
+
+On this guest, the VGA boot option still let Ripple own the display.
+The successful recovery used the following elevated command on the lab CD.
+DevCon returned 1 to request a reboot.
+
+```bat
+D:\bin\devcon.exe update "%windir%\inf\display.inf" "PCI\VEN_1AF4&DEV_1050&SUBSYS_11001AF4&REV_01"
+```
+
+After reboot, `D:\basecheck.cmd` reported Standard VGA Graphics Adapter at
+640×480 in 32-bit color, Explorer running and `viogpu3d` stopped. The check
+reads the guest's active display and service state over COM1. The recovered
+UTM window still needs a visual check.

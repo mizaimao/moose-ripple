@@ -1,4 +1,14 @@
-# HANDOFF: Paravirtual GPU acceleration for Mac OS X 10.6 (Snow Leopard) guests
+# Ripple driver handoff
+
+## Windows Vista SP2 x64 · 2026-11-19
+
+The last verified boot of the UTM guest `ripple-vista` used Microsoft’s Standard VGA Graphics Adapter at 640×480 in 32-bit color. Explorer was running and the Ripple service was stopped. The guest reported this over COM1. Visual confirmation of the recovered desktop is still open.
+
+With test signing enabled, Ripple 7.14.1.2 held 800×600 across reboot. Both 32-bit and 64-bit Direct3D applications created a hardware device and submitted a triangle, but the UTM window stayed blank and both pixel checks returned black. A test below Direct3D received completion for both GPU transfers and recovered **0 of 1,024 texture bytes**. An independent buffer copy matched **0 of 4,096 bytes**.
+
+Resume with the prepared diagnostic driver and its matching `pipecheck.exe`. Compare the test pattern with the pages Vista gives Ripple for that texture. Commit `169f188` also fixes a display surface at offset zero being treated as absent. It compiled for both Vista and Windows 7 and still needs a Vista display test. See the [artifacts, test sequence and VGA recovery instructions](docs/windows/vista-sp2-probe.md#next-vista-run).
+
+## Original project brief for Mac OS X 10.6 (Snow Leopard) guests
 
 Working name: **snow-virgl** (rename freely)
 Owner: MooseMan (human). Implementer: Claude Code agent.
