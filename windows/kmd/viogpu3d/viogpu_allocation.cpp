@@ -5,17 +5,6 @@
 #include "viogpu_adapter.h"
 #include "virgl_hw.h"
 
-#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
-// Passed back to CreateAllocation for the desktop primary only. Keep the
-// ordinary allocation description first for the user-mode driver's OpenResource.
-struct VistaSharedPrimary
-{
-    VIOGPU_CREATE_ALLOCATION_EXCHANGE allocation;
-    ULONG tag;
-};
-static const ULONG VistaPrimaryTag = 'mPrV';
-#endif
-
 VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_RESOURCE_OPTIONS *options)
 {
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
@@ -185,7 +174,7 @@ NTSTATUS VioGpuAllocation::GetStandardAllocationDriverData(DXGKARG_GETSTANDARDAL
         pStandardAllocation->AllocationPrivateDriverDataSize = sizeof(VIOGPU_CREATE_ALLOCATION_EXCHANGE);
 #if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
         if (pStandardAllocation->StandardAllocationType == D3DKMDT_STANDARDALLOCATION_SHAREDPRIMARYSURFACE)
-            pStandardAllocation->AllocationPrivateDriverDataSize = sizeof(VistaSharedPrimary);
+            pStandardAllocation->AllocationPrivateDriverDataSize = sizeof(VIOGPU_VISTA_PRIMARY);
 #endif
         return STATUS_SUCCESS;
     }
@@ -214,9 +203,9 @@ NTSTATUS VioGpuAllocation::GetStandardAllocationDriverData(DXGKARG_GETSTANDARDAL
         case D3DKMDT_STANDARDALLOCATION_SHAREDPRIMARYSURFACE:
             {
 #if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
-                if (pStandardAllocation->AllocationPrivateDriverDataSize < sizeof(VistaSharedPrimary))
+                if (pStandardAllocation->AllocationPrivateDriverDataSize < sizeof(VIOGPU_VISTA_PRIMARY))
                     return STATUS_BUFFER_TOO_SMALL;
-                static_cast<VistaSharedPrimary *>(pStandardAllocation->pAllocationPrivateDriverData)->tag = VistaPrimaryTag;
+                static_cast<VIOGPU_VISTA_PRIMARY *>(pStandardAllocation->pAllocationPrivateDriverData)->tag = VIOGPU_VISTA_PRIMARY_TAG;
 #endif
                 D3DKMDT_SHAREDPRIMARYSURFACEDATA *surfaceData = pStandardAllocation->pCreateSharedPrimarySurfaceData;
                 //[in] UINT                           Width;
@@ -340,15 +329,15 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
     allocationInfo->SupportedReadSegmentSet = 0b1;
     allocationInfo->SupportedWriteSegmentSet = 0b1;
 #if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
-    if (allocationInfo->PrivateDriverDataSize == sizeof(VistaSharedPrimary) &&
-        static_cast<const VistaSharedPrimary *>(allocationInfo->pPrivateDriverData)->tag == VistaPrimaryTag)
+    if (allocationInfo->PrivateDriverDataSize == sizeof(VIOGPU_VISTA_PRIMARY) &&
+        static_cast<const VIOGPU_VISTA_PRIMARY *>(allocationInfo->pPrivateDriverData)->tag == VIOGPU_VISTA_PRIMARY_TAG)
     {
         const UINT segment = VistaDisplayMemory::SegmentId;
         allocationInfo->PreferredSegment.SegmentId0 = segment;
         allocationInfo->SupportedReadSegmentSet = allocationInfo->SupportedWriteSegmentSet = 1u << (segment - 1);
         allocationInfo->EvictionSegmentSet = 0;
         allocationInfo->Flags.SynchronousPaging = TRUE;
-        DbgPrint(TRACE_LEVEL_WARNING, ("Vista shared primary %u bytes on segment %u\n", (UINT)allocationInfo->Size, segment));
+        DbgPrint(TRACE_LEVEL_WARNING, ("Vista primary %u bytes on segment %u\n", (UINT)allocationInfo->Size, segment));
     }
 #endif
 

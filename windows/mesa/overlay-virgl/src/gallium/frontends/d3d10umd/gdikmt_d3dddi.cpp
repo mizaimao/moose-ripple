@@ -11,6 +11,10 @@
 #include <string.h>
 
 #include "gdikmt_d3dddi.h"
+#ifdef RIPPLE_VISTA
+#include "RippleLog.h"
+#include "virtio/wddm/viogpu_wddm_driver.h"
+#endif
 
 #define DDI_INVALID_PARAMETER ((NTSTATUS)0xC000000DL)
 #define DDI_NO_MEMORY         ((NTSTATUS)0xC0000017L)
@@ -77,6 +81,25 @@ d3dddi_create_allocation(struct gdikmt_device *dev, struct gdikmt_createallocati
       }
    }
 
+#ifdef RIPPLE_VISTA
+   /* Vista refuses a primary (E_INVALIDARG) that can live only in the aperture segment. The
+    * tag has the kernel driver put it in its desktop segment, as it does the desktop's own
+    * primary (viogpum.h, VIOGPU_VISTA_PRIMARY). */
+   VIOGPU_VISTA_PRIMARY tagged[4];
+   void *untagged[4];
+   const UINT ntagged = !ddi->isPrimary ? 0 : create->NumAllocations < 4 ? create->NumAllocations : 4;
+   for (UINT i = 0; i < ntagged; i++) {
+      D3DDDI_ALLOCATIONINFO *info = &create->pAllocationInfo[i];
+      untagged[i] = info->pPrivateDriverData;
+      if (info->PrivateDriverDataSize != sizeof(tagged[i].allocation))
+         continue;
+      memcpy(&tagged[i].allocation, info->pPrivateDriverData, sizeof(tagged[i].allocation));
+      tagged[i].tag = VIOGPU_VISTA_PRIMARY_TAG;
+      info->pPrivateDriverData = &tagged[i];
+      info->PrivateDriverDataSize = sizeof(tagged[i]);
+   }
+#endif
+
    memset(&arg, 0, sizeof(arg));
    arg.pPrivateDriverData = create->pPrivateDriverData;
    arg.PrivateDriverDataSize = create->PrivateDriverDataSize;
@@ -85,6 +108,19 @@ d3dddi_create_allocation(struct gdikmt_device *dev, struct gdikmt_createallocati
    arg.pAllocationInfo = create->pAllocationInfo;
 
    hr = ddi->KTCallbacks.pfnAllocateCb(ddi->hRTDevice, &arg);
+#ifdef RIPPLE_VISTA
+   for (UINT i = 0; i < ntagged; i++) {
+      D3DDDI_ALLOCATIONINFO *info = &create->pAllocationInfo[i];
+      if (info->pPrivateDriverData == &tagged[i]) {
+         info->pPrivateDriverData = untagged[i];
+         info->PrivateDriverDataSize = sizeof(tagged[i].allocation);
+      }
+   }
+   if (FAILED(hr))
+      ripple_logf("Windows refused an allocation: 0x%08lx, primary %u, display %u, %u allocations",
+                  (unsigned long)hr, (unsigned)ddi->isPrimary, (unsigned)ddi->allocationVidPn,
+                  (unsigned)create->NumAllocations);
+#endif
    if (SUCCEEDED(hr)) {
       /* Allocations of a runtime resource are given back through that resource. */
       create->hResource = ddi->hRTResource;

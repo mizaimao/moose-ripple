@@ -1,0 +1,23 @@
+Vista: the private data that marks an allocation as a display primary, as the kernel
+driver's copy of this header defines it (windows/kmd/shared/viogpum.h).
+
+--- a/src/virtio/wddm/viogpu_wddm_driver.h
++++ b/src/virtio/wddm/viogpu_wddm_driver.h
+@@ -172,6 +172,17 @@
+ } VIOGPU_CREATE_ALLOCATION_EXCHANGE;
+ #pragma pack()
+ 
++// Vista only: the private data of an allocation that is to be a display primary, the
++// allocation exchange followed by VIOGPU_VISTA_PRIMARY_TAG. The kernel driver puts an
++// allocation sent with this tag in its desktop segment; Vista refuses a primary that can
++// live only in the aperture. The kernel driver's copy of this header has the same definition.
++typedef struct _VIOGPU_VISTA_PRIMARY
++{
++    VIOGPU_CREATE_ALLOCATION_EXCHANGE allocation;
++    ULONG tag;
++} VIOGPU_VISTA_PRIMARY;
++#define VIOGPU_VISTA_PRIMARY_TAG 0x6D507256UL
++
+ 
+ // ================= COMMAND BUFFER
+ #define VIOGPU_CMD_NOP                          0x0

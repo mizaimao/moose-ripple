@@ -181,6 +181,19 @@ typedef struct _VIOGPU_CREATE_ALLOCATION_EXCHANGE
 } VIOGPU_CREATE_ALLOCATION_EXCHANGE;
 #pragma pack()
 
+// Vista only: the private data of an allocation that is to be a display primary, the
+// allocation exchange followed by VIOGPU_VISTA_PRIMARY_TAG. Vista refuses a primary that can
+// live only in the aperture segment; the kernel driver puts an allocation sent with this tag
+// in its desktop segment. GetStandardAllocationDriverData tags the desktop's primary, the
+// user-mode driver the primaries of Direct3D programs (the compositor's, full-screen games').
+// The user-mode driver's copy of this header has the same definition.
+typedef struct _VIOGPU_VISTA_PRIMARY
+{
+    VIOGPU_CREATE_ALLOCATION_EXCHANGE allocation;
+    ULONG tag;
+} VIOGPU_VISTA_PRIMARY;
+#define VIOGPU_VISTA_PRIMARY_TAG 0x6D507256UL
+
 // ================= COMMAND BUFFER
 #define VIOGPU_CMD_NOP                0x0
 #define VIOGPU_CMD_SUBMIT             0x1 // Submit Command to virgl
