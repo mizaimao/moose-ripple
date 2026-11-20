@@ -30,6 +30,43 @@ static void wait_a_bit(unsigned *tries)
     Sleep(++*tries < 16 ? 0 : 1);
 }
 
+/* OSR2.5 lacks these three exports. Preserve newer systems' implementations
+   and the caller's last-error value across the internal symbol lookup. */
+static FARPROC optional_kernel_proc(const char *name)
+{
+    DWORD saved = GetLastError();
+    FARPROC fn = GetProcAddress(GetModuleHandleA("KERNEL32.DLL"), name);
+    SetLastError(saved);
+    return fn;
+}
+
+SHIM(BOOL, IsDebuggerPresent, 0, (void))
+{
+    typedef BOOL (WINAPI *debugger_proc)(void);
+    debugger_proc fn = (debugger_proc)optional_kernel_proc("IsDebuggerPresent");
+    return fn ? fn() : FALSE;
+}
+
+SHIM(BOOL, SwitchToThread, 0, (void))
+{
+    typedef BOOL (WINAPI *yield_proc)(void);
+    yield_proc fn = (yield_proc)optional_kernel_proc("SwitchToThread");
+    if (fn)
+        return fn();
+    /* libc++ ignores the return value. Let another thread run. */
+    Sleep(1);
+    return FALSE;
+}
+
+SHIM(BOOL, TryEnterCriticalSection, 4, (CRITICAL_SECTION *cs))
+{
+    typedef BOOL (WINAPI *try_proc)(CRITICAL_SECTION *);
+    try_proc fn = (try_proc)optional_kernel_proc("TryEnterCriticalSection");
+    /* libc++'s recursive_mutex::try_lock permits a spurious failure.
+       A failed attempt neither blocks nor alters another thread's lock. */
+    return fn ? fn(cs) : FALSE;
+}
+
 /* ---- One-time initialisation: the word is 0 (not run), 1 (running) or 2 (done) --------------- */
 typedef BOOL (WINAPI *once_fn)(void *once, void *param, void **context);
 
@@ -524,4 +561,25 @@ static void emutls_thread_exit(void)
             HeapFree(GetProcessHeap(), 0, ((void **)a->object[i])[-1]);
     }
     HeapFree(GetProcessHeap(), 0, a);
+}
+
+/* libc++abi's i686 exception state uses static PE TLS in the prebuilt toolchain.
+   Windows 95 cannot dynamically load that DLL. Compile its two accessors here so
+   Clang uses this driver's per-thread storage and thread-exit cleanup instead. */
+struct __cxa_exception;
+struct __cxa_eh_globals {
+    struct __cxa_exception *caughtExceptions;
+    unsigned int uncaughtExceptions;
+};
+_Static_assert(sizeof(struct __cxa_eh_globals) == 8, "32-bit libc++abi exception state");
+static __thread struct __cxa_eh_globals eh_globals;
+
+struct __cxa_eh_globals *__cdecl __cxa_get_globals(void)
+{
+    return &eh_globals;
+}
+
+struct __cxa_eh_globals *__cdecl __cxa_get_globals_fast(void)
+{
+    return &eh_globals;
 }

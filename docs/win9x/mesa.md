@@ -75,16 +75,15 @@ rate above), a comparison against a real card of the time, and more programs.
 
 Mesa needs a C11 and C++17 compiler; the compilers of the time (Visual C++ 6) can't build it.
 The build uses llvm-mingw (clang, lld, compiler-rt, libc++, mingw-w64 with the old
-`msvcrt.dll` as its C run-time), and four things make the result load and run on Windows 98:
+`msvcrt.dll` as its C run-time). The build supplies the following compatibility code.
 
 - **Version 4.0 in the file headers**, and everything from the toolchain linked statically.
 - **No native thread-local storage** (`-femulated-tls`). Windows before Vista gives a DLL
   loaded at run time no thread-local storage of its own. The emulation's run-time function
   (`__emutls_get_address`) is ours, in `win9x/compat/k32shim.c`: the compiler run-time's own
-  aborts on Windows 98, where `TlsGetValue` leaves the last error untouched. One part of the
-  toolchain still uses native thread-local storage: libc++abi's per-thread exception state.
-  Windows 98 doesn't set that up for a DLL loaded at run time, so a C++ exception thrown inside
-  the driver would read the wrong slot.
+  aborts on Windows 98, where `TlsGetValue` leaves the last error untouched. The shim also
+  supplies libc++abi's two accessors for per-thread C++ exception state, compiled with
+  the same emulation. This leaves the driver's native PE thread-local storage directory empty.
 - **`win9x/compat/k32shim.c`**: the kernel32 functions newer than Windows 98 that the
   toolchain's libraries and Mesa call (one-time initialisation, slim locks, condition
   variables, fiber-local storage, `GlobalMemoryStatusEx` and a few more), written with what
@@ -96,6 +95,9 @@ The build uses llvm-mingw (clang, lld, compiler-rt, libc++, mingw-w64 with the o
   (none are linked in today) C++ `thread_local` destructors and fiber-local storage callbacks.
   Windows 98 runs no thread-exit callbacks for a DLL loaded at run time, so the driver's entry
   point calls these itself (patch 0009).
+- **Windows 95 kernel imports.** The shim resolves `IsDebuggerPresent`, `SwitchToThread`
+  and `TryEnterCriticalSection` at run time. When the OS omits these exports, the
+  debugger and try-lock checks return false and the thread-yield call sleeps briefly.
 - **C11 threads for Windows 98** (`win9x/mesa/overlay/src/c11/impl/threads_win32.c` replaces
   Mesa's file): Mesa's version needs Vista's condition variables, and
   `TryEnterCriticalSection`, which Windows 98 exports but which always fails there. The
@@ -108,8 +110,22 @@ system DLLs export (unpacked from the setup cabinets into `.tools/win9x/w98dlls/
 Mesa build runs it on every DLL and fails when something is missing. It can't see functions
 that exist on Windows 98 only as stubs: those show up in testing.
 
-The code is built for the Pentium II instruction set (no SSE2: Windows 98 predates it, and the
-guest CPU model may be an old one).
+Mesa's own sources target the Pentium II instruction set. Several routines in the
+packaged llvm-mingw runtime use SSE instructions that Windows 95 does not enable.
+The build compiles `mingw_pformat` and four decimal-conversion routines for the
+Pentium II so OpenGL can start. It also compiles `roundf`, which Mesa calls when
+a program changes the mipmap level bias, and `lroundf`, which converts pixel
+coordinates in `glDrawPixels`. Direct3D uses that path to restore a back buffer
+after a game writes into it.
+It downloads llvm-mingw 20261104's matching mingw-w64 source revision on first use,
+checks the archive's SHA-256 and caches it under `.tools/src/mesa-dl`. The compiler
+flags and source dependencies are in `win9x/mesa/runtime.mk`.
+
+Mesa also generates vertex-copy routines at run time. On Windows 95 OSR2.5,
+a virtual Pentium III reported SSE support even though the OS disabled XMM
+instructions. Quake III hit an illegal instruction in Mesa's generated 12-byte
+vertex copy. The Win9x build now selects scalar vertex copies on Windows 95.
+Rendering still uses virgl. Windows 98 and Me use the usual CPU feature checks.
 
 ## Build and test
 

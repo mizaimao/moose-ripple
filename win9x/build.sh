@@ -50,7 +50,8 @@ V=$OUT/obj-minivdd
 rm -rf "$V" && mkdir -p "$V"
 cp "$here"/minivdd/* "$V/"
 cd "$V"
-WINEPATH="$(W "$T/ddk98/ddk/bin/win98")" wine ml.exe -nologo -coff -DBLD_COFF -DMASM6 -DMINIVDD=1 -W2 -c -Cx \
+# Windows 95 rejects the 98 DDK's default 4.10 VxD version. The mini-VDD uses the 4.00 interface.
+WINEPATH="$(W "$T/ddk98/ddk/bin/win98")" wine ml.exe -nologo -coff -DBLD_COFF -DMASM6 -DMINIVDD=1 -DWIN40COMPAT=1 -W2 -c -Cx \
     "-I$(W "$T/ddk98/ddk/inc/win98")" ripplevd.asm
 # The C part: Visual C++ 6, 32-bit flat, no run-time library, sections named as the VxD wants.
 WINEPATH="$(W "$T/vc6/VC98/Bin");$(W "$T/vc6/Common/MSDev98/Bin")" \

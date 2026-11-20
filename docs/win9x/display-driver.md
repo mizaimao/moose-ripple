@@ -115,6 +115,40 @@ Then pick a monitor type that allows the sizes you want (Advanced > Monitor): wi
 "(Unknown Monitor)" Display Properties offers 640x480 only (programs can still set any mode
 the driver has).
 
+### One package for Windows 95 OSR2.5, Windows 98 SE and Windows Me
+
+Use the [Windows 9x 0.2.0 release](https://github.com/mizaimao/moose-ripple/releases/tag/win9x-v0.2.0)
+for Windows 95 OSR2.5, Windows 98 Second Edition and Windows Me. The ISO and
+ZIP contain one INF and the same four driver files for all three systems.
+Select the **moose-ripple virtio-vga** model. The installer reports version
+`0.2.0.0`, including when updating the earlier Windows 98 SE 0.1.0 package.
+
+On a clean install, check Device Manager for the PCI bus before choosing **Have Disk**.
+If the only display adapter is the generic VGA device and the PCI bus is missing, use
+**Add New Hardware → System devices → PCI bus** and let Windows detect its devices.
+Restart when prompted. Select the PCI display adapter with vendor ID `1AF4` and
+device ID `1050`, install the driver from the CD root, then restart and select
+16-bit or 32-bit colour in Display Properties.
+
+On Windows 95, the bundled IE4 installation supplies `MSVCRT.DLL` for OpenGL.
+Microsoft's DirectX 7 runtime also supplies that library and the Direct3D 7 and
+DirectInput interfaces used by the game tests. Install it for those games and restart.
+
+On OSR2.5, Quake III completed all 1,346 frames of `demo001` with the default
+driver settings. The full Direct3D 7 test passed, including texture mipmap
+selection and restoring pixels written by the CPU. Re-Volt loaded its Toys in
+the Hood 1 track, continued rendering and exited cleanly when closed. These
+tests used virgl with llvmpipe, the host software renderer. With
+`RIPPLE_D3D_SCANOUT=1`, all 1,300 measured Direct3D frame flips stayed on
+the host with zero frame readbacks to the guest. The displayed colours also
+passed the pixel checks.
+
+Windows 98 SE and Windows Me passed OpenGL and Direct3D 7 with the same driver
+files on Intel UHD 630. Windows 98 SE passed DirectDraw surface restoration,
+page flipping and Direct3D with host presentation both enabled and disabled.
+Windows Me also passed surface restoration and completed two full Quake III
+timedemos.
+
 ## Things learnt the hard way
 
 - **A selector for the frame buffer:** `AllocSelector(0)` gives an empty descriptor that can't
