@@ -7,6 +7,7 @@
 #include <video.h>
 #include "gpu_transport.h"
 #include "rb2krvd.h"
+#include "gpu_memory.h"
 
 #define ARRAY_COUNT(a) (sizeof(a) / sizeof((a)[0]))
 #define DISPI_OFFSET 0x500
@@ -23,6 +24,8 @@ static const struct { USHORT width, height; } modes[] = {
 PVOID rb_view_current(void);
 HANDLE rb_view_open(HANDLE supplied);
 void rb_view_close(HANDLE handle);
+PVOID rb_view_map(HANDLE process, unsigned __int64 physical, ULONG *bytes);
+LONG rb_view_unmap(HANDLE process, PVOID address); /* NTSTATUS */
 
 typedef struct {
     PVOID address, owner;
@@ -110,14 +113,15 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
     }
     rb_gpu_find(&a->gpu, a, slot, registers, config);
     VideoPortGetRegistryParameters(a, L"RippleDirectDrawGpuSurfaces", FALSE, gpu_surfaces, &a->gpu);
-    /* VideoPort maps device memory during adapter discovery. BAR0 is a PCI
-     * framebuffer; its address is not a general-purpose DMA backing entry. */
+    /* Map the scanout pages during adapter discovery, cached like every other
+     * view of the framebuffer (rb_map_cached). BAR0 is a PCI framebuffer; its
+     * address is not a general-purpose DMA backing entry. */
     if (a->gpu.common) {
         ULONG bytes = a->fb.RangeLength < 2 * MIN_FRAME_BYTES ? a->fb.RangeLength : 2 * MIN_FRAME_BYTES;
-        a->gpu.primary.pixels = VideoPortGetDeviceBase(a, a->fb.RangeStart, bytes, 0);
+        a->gpu.primary.pixels = rb_map_cached((unsigned __int64)a->fb.RangeStart.QuadPart, bytes);
         if (!a->gpu.primary.pixels && bytes != MIN_FRAME_BYTES) {
             bytes = MIN_FRAME_BYTES;
-            a->gpu.primary.pixels = VideoPortGetDeviceBase(a, a->fb.RangeStart, bytes, 0);
+            a->gpu.primary.pixels = rb_map_cached((unsigned __int64)a->fb.RangeStart.QuadPart, bytes);
         }
         if (a->gpu.primary.pixels) a->gpu.primary.bytes = bytes;
     }
@@ -200,7 +204,7 @@ static VP_STATUS revoke_view(ADAPTER *a)
 {
     VP_STATUS status;
     if (!a->view.address) return NO_ERROR;
-    status = VideoPortUnmapMemory(a, a->view.address, a->view.process);
+    status = rb_view_unmap(a->view.process, a->view.address) < 0 ? ERROR_INVALID_PARAMETER : NO_ERROR;
     if (!status) {
         rb_view_close(a->view.process);
         VideoPortZeroMemory(&a->view, sizeof(a->view));
@@ -294,7 +298,7 @@ static VP_STATUS share_pages(ADAPTER *a, PVIDEO_REQUEST_PACKET r)
     RB2K_DD_FLIP_INFO info;
     HANDLE process;
     PVOID address, owner;
-    ULONG bytes, mapped, io = VIDEO_MEMORY_SPACE_USER_MODE;
+    ULONG bytes, mapped;
     VP_STATUS status;
     if (r->InputBufferLength != sizeof(requested) || r->OutputBufferLength < sizeof(*output))
         return ERROR_INVALID_PARAMETER;
@@ -317,10 +321,8 @@ static VP_STATUS share_pages(ADAPTER *a, PVIDEO_REQUEST_PACKET r)
         process = rb_view_open(requested.ProcessHandle);
         if (!process) return ERROR_ACCESS_DENIED;
         mapped = view_span(info.pageBytes);
-        address = process;
-        status = VideoPortMapMemory(a, a->fb.RangeStart, &mapped, &io, &address);
-        if (status) { rb_view_close(process); return status; }
-        if (!address) { rb_view_close(process); return ERROR_INVALID_DATA; }
+        address = rb_view_map(process, (unsigned __int64)a->fb.RangeStart.QuadPart, &mapped);
+        if (!address) { rb_view_close(process); return ERROR_NOT_ENOUGH_MEMORY; }
         a->view.process = process;
         a->view.supplied = requested.ProcessHandle;
         a->view.owner = owner;
@@ -360,16 +362,15 @@ static VP_STATUS map_frame(ADAPTER *a, PVIDEO_REQUEST_PACKET r)
 {
     PVIDEO_MEMORY_INFORMATION m = r->OutputBuffer;
     PVOID base = NULL;
-    ULONG size = a->fb.RangeLength, io = 0, i;
-    VP_STATUS status;
+    ULONG size = a->fb.RangeLength, i;
     if (r->InputBufferLength < sizeof(VIDEO_MEMORY) || r->OutputBufferLength < sizeof(*m))
         return ERROR_INSUFFICIENT_BUFFER;
     if (((PVIDEO_MEMORY)r->InputBuffer)->RequestedVirtualAddress)
         return ERROR_INVALID_PARAMETER;
     for (i = 0; i < ARRAY_COUNT(a->mappings); ++i) if (!a->mappings[i]) break;
     if (i == ARRAY_COUNT(a->mappings)) return ERROR_NOT_ENOUGH_MEMORY;
-    status = VideoPortMapMemory(a, a->fb.RangeStart, &size, &io, &base);
-    if (status != NO_ERROR) return status;
+    base = rb_map_cached((unsigned __int64)a->fb.RangeStart.QuadPart, size);
+    if (!base) return ERROR_NOT_ENOUGH_MEMORY;
     a->mappings[i] = base;
     m->VideoRamBase = m->FrameBufferBase = base;
     m->VideoRamLength = m->FrameBufferLength = size;
@@ -386,9 +387,9 @@ static VP_STATUS unmap_frame(ADAPTER *a, PVIDEO_REQUEST_PACKET r)
     if (!base) return ERROR_INVALID_PARAMETER;
     for (i = 0; i < ARRAY_COUNT(a->mappings); ++i) {
         if (a->mappings[i] == base) {
-            VP_STATUS status = VideoPortUnmapMemory(a, base, NULL);
-            if (status == NO_ERROR) a->mappings[i] = NULL;
-            return status;
+            rb_unmap_cached(base, a->fb.RangeLength);
+            a->mappings[i] = NULL;
+            return NO_ERROR;
         }
     }
     return ERROR_INVALID_PARAMETER;

@@ -100,3 +100,21 @@ void rb_pages_free(RB2K_PAGES *p)
     rb_process_deref(p->owner);
     RtlZeroMemory(p, sizeof(*p));
 }
+
+/* A cached kernel view of the framebuffer. The framebuffer is ordinary
+ * memory inside the virtual machine, which the host reads coherently.
+ * VideoPort maps device memory uncached, and Windows 2000 makes
+ * write-combining through MTRRs; KVM on AMD hosts ignores the guest's MTRRs
+ * but honours its page attributes, so every framebuffer access went to
+ * memory at about 60 MB/s there. */
+PVOID rb_map_cached(unsigned __int64 physical, ULONG bytes)
+{
+    PHYSICAL_ADDRESS at;
+    at.QuadPart = (LONGLONG)physical;
+    return MmMapIoSpace(at, bytes, MmCached);
+}
+
+void rb_unmap_cached(PVOID address, ULONG bytes)
+{
+    if (address) MmUnmapIoSpace(address, bytes);
+}

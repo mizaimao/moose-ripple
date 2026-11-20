@@ -20,5 +20,7 @@ BOOLEAN rb_process_gone(PVOID process);
 BOOLEAN rb_pages_alloc(RB2K_PAGES *pages, ULONG bytes);
 ULONG rb_pages_runs(const RB2K_PAGES *pages, RB2K_PAGE_RUN *out, ULONG max);
 void rb_pages_free(RB2K_PAGES *pages);
+PVOID rb_map_cached(unsigned __int64 physical, ULONG bytes);
+void rb_unmap_cached(PVOID address, ULONG bytes);
 
 #endif
