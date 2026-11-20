@@ -23,6 +23,7 @@
 #include "virtio/wddm/viogpu_wddm_driver.h"
 
 #include <stdlib.h>
+#include <stdio.h>
 
 static bool
 D3D9OrderedContextWorkerEnabled()
@@ -2550,6 +2551,114 @@ D3D9PublishResource(D3D9Device *device, D3D9Resource *resource)
       D3D9CopyToDisplayResource(device, resource, 0);
 }
 
+#ifdef RIPPLE_VISTA
+/* Vista: the frame going to the screen, saved for looking at, as the Mac driver's swapdump does.
+ * While C:\Users\Public\ripple-swapdump exists, the next presented frame of each program is
+ * written as C:\Users\Public\swap-PID.bmp and the trigger deleted. Looked for at most twice
+ * a second. */
+void
+D3D9DumpImage(D3D9Device *device, struct pipe_resource *image, unsigned level, const char *path)
+{
+   if (!image || util_format_get_blocksize(image->format) != 4 || !device->pipe->texture_map)
+      return;
+
+   const unsigned w = u_minify(image->width0, level), h = u_minify(image->height0, level);
+   struct pipe_box box;
+   u_box_2d(0, 0, w, h, &box);
+   struct pipe_transfer *transfer = NULL;
+   const uint8_t *map = (const uint8_t *)device->pipe->texture_map(
+      device->pipe, image, level, PIPE_MAP_READ, &box, &transfer);
+   if (!map)
+      return;
+
+   FILE *f = fopen(path, "wb");
+   if (f) {
+      BITMAPFILEHEADER bf = {};
+      BITMAPINFOHEADER bi = {};
+      bf.bfType = 0x4d42;
+      bf.bfOffBits = sizeof(bf) + sizeof(bi);
+      bf.bfSize = bf.bfOffBits + w * h * 4;
+      bi.biSize = sizeof(bi);
+      bi.biWidth = w;
+      bi.biHeight = -(LONG)h;
+      bi.biPlanes = 1;
+      bi.biBitCount = 32;
+      bi.biCompression = BI_RGB;
+      fwrite(&bf, sizeof(bf), 1, f);
+      fwrite(&bi, sizeof(bi), 1, f);
+      /* BMP keeps blue, green, red: swap where the image keeps red first */
+      const bool rgb = util_format_description(image->format)->swizzle[0] == PIPE_SWIZZLE_X;
+      uint8_t *row = (uint8_t *)malloc(w * 4);
+      for (unsigned y = 0; row && y < h; ++y) {
+         memcpy(row, map + (size_t)y * transfer->stride, w * 4);
+         for (unsigned x = 0; rgb && x < w; ++x) {
+            const uint8_t r = row[x * 4];
+            row[x * 4] = row[x * 4 + 2];
+            row[x * 4 + 2] = r;
+         }
+         fwrite(row, w * 4, 1, f);
+      }
+      free(row);
+      fclose(f);
+   }
+   device->pipe->texture_unmap(device->pipe, transfer);
+   ripple_logf("image dump: %s, %ux%u, format %u", path, w, h, (unsigned)image->format);
+}
+
+static void
+D3D9SwapDump(D3D9Device *device, struct pipe_resource *image, unsigned level)
+{
+   static DWORD next_look;
+   static const char trigger[] = "C:\\Users\\Public\\ripple-swapdump";
+   const DWORD now = GetTickCount();
+   if ((LONG)(now - next_look) < 0)
+      return;
+   next_look = now + 500;
+   if (GetFileAttributesA(trigger) == INVALID_FILE_ATTRIBUTES)
+      return;
+   DeleteFileA(trigger);
+   char path[MAX_PATH];
+   snprintf(path, sizeof(path), "C:\\Users\\Public\\swap-%lu.bmp", GetCurrentProcessId());
+   D3D9DumpImage(device, image, level, path);
+}
+
+/* Vista: RIPPLE_DRAWDUMP=N,M,... in a program's environment saves the first render target
+ * after its Nth, Mth, ... draw since it started, as C:\Users\Public\draw-PID-N.bmp. */
+void
+D3D9DrawDump(D3D9Device *device)
+{
+   static unsigned wanted[32], nwanted, draws;
+   static bool parsed;
+   if (!parsed) {
+      parsed = true;
+      const char *list = getenv("RIPPLE_DRAWDUMP");
+      while (list && *list && nwanted < ARRAYSIZE(wanted)) {
+         char *end;
+         unsigned long n = strtoul(list, &end, 10);
+         if (end == list)
+            break;
+         wanted[nwanted++] = (unsigned)n;
+         list = *end ? end + 1 : end;
+      }
+   }
+   if (!nwanted)
+      return;
+   ++draws;
+   for (unsigned i = 0; i < nwanted; ++i) {
+      if (wanted[i] != draws)
+         continue;
+      D3D9Resource *rt = D3D9CastResource(device->render_targets[0]);
+      if (!rt || !rt->pipe_resource)
+         return;
+      char path[MAX_PATH];
+      snprintf(path, sizeof(path), "C:\\Users\\Public\\draw-%lu-%u.bmp",
+               GetCurrentProcessId(), draws);
+      D3D9DumpImage(device, rt->pipe_resource,
+                    D3D9PipeMipLevel(rt, device->render_target_subresources[0]), path);
+   }
+}
+#endif
+
 static HRESULT
 D3D9FlushFrontbuffer(D3D9Device *device, D3D9Resource *src_resource,
                      UINT src_subresource_index, D3DKMT_HANDLE dst_allocation,
@@ -2574,6 +2683,9 @@ D3D9FlushFrontbuffer(D3D9Device *device, D3D9Resource *src_resource,
    struct pipe_resource *resolved = NULL;
    D3D9SubResource *flip_sub =
       D3D9GetSubResource(src_resource, src_subresource_index);
+#ifdef RIPPLE_VISTA
+   D3D9SwapDump(device, flush_resource, flush_level);
+#endif
 
    if (flip_sub && flip_sub->flip_resource) {
       /* Vista flip chain: the frame drawn in the one render image goes to the buffer

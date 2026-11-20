@@ -418,6 +418,12 @@ D3D9Resource *D3D9CastResource(HANDLE resource);
 D3D9SubResource *D3D9GetSubResource(HANDLE resource_handle,
                                     UINT subresource_index);
 bool D3D9PublishResource(D3D9Device *device, D3D9Resource *resource);
+#ifdef RIPPLE_VISTA
+/* Pictures for looking at (D3D9Resource.cpp): one image as a BMP file, and RIPPLE_DRAWDUMP */
+void D3D9DumpImage(D3D9Device *device, struct pipe_resource *image, unsigned level,
+                   const char *path);
+void D3D9DrawDump(D3D9Device *device);
+#endif
 
 bool D3D9UploadSubResource(D3D9Device *device, D3D9Resource *resource,
                            UINT subresource_index);

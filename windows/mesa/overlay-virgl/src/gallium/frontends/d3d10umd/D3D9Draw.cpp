@@ -3779,6 +3779,9 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
    } else {
       util_draw_arrays(pipe, mode, start_vertex, vertex_count);
    }
+#ifdef RIPPLE_VISTA
+   D3D9DrawDump(device);
+#endif
 
    /* The vertex buffers come off (they may be the program's own memory); this draw's
     * references to its texture views and its point shader go. The rest stays bound for the
