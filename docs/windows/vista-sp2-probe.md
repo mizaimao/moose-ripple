@@ -1,10 +1,10 @@
 # Vista SP2 x64 display driver probe
 
 The kernel driver and both Direct3D 9 DLLs build from the Windows 7 driver at
-`63739fe`. On Vista SP2 x64 with test signing enabled, version 7.14.1.5
+`63739fe`. On Vista SP2 x64 with test signing enabled, version 7.14.1.6
 starts the adapter, runs the desktop at 1280×768 and draws the Direct3D 9
 triangle test correctly for both x64 and x86 applications. The guest reports
-Aero composition off. Earlier builds read every GPU result back as black;
+Aero composition on. Earlier builds read every GPU result back as black;
 [Why the GPU's data stayed invisible](#why-the-gpus-data-stayed-invisible)
 has the cause and the fix.
 
@@ -174,6 +174,33 @@ the package byte for byte. Both the x64 and x86 triangle tests reported
 inside the triangle. Composition stayed off. The visible UTM window has not
 been checked yet.
 
+### Aero composition, 7.14.1.6
+
+Composition was requested in the guest's settings (`Composition` 1, Aero
+theme), and the Desktop Window Manager started on Ripple, but it exited at
+once with `0x8007000e`. A full `winsat formal` on 7.14.1.5 rated every
+component 5.9, Vista's maximum (Direct3D compositor test 1,799 frames/s),
+so the assessment was not the reason.
+
+The driver trace (`RIPPLE_UMD_TRACE=1` and `RIPPLE_UMD_LOG` set for the
+user, then the compositor service restarted) showed the first refusal: the
+compositor's full-screen pair of 1280×768 primary surfaces. Windows' own
+allocation call returned `E_INVALIDARG` for it; the driver passed that on as
+out of memory. The kernel driver had put only the desktop's own primary in
+its desktop segment, and offered every other allocation the aperture segment
+alone. Vista refuses a primary that can only live there, as it refused the
+desktop's primary before 7.14.1.2.
+
+In 7.14.1.6 the user-mode driver tags each primary it allocates with the
+same marker the kernel driver gives the desktop's primary
+(`VIOGPU_VISTA_PRIMARY` in `viogpum.h`, and Mesa's copy of that header via
+patch `0103`). The kernel driver places tagged allocations in the desktop
+segment. After installing it and restarting, Vista reported composition on,
+`dwm.exe` kept running, and no new compositor error was logged. Both
+triangle tests still read back right with composition on. The kernel log
+shows about 130 escapes rejected as `buffer too small 0, should be at least
+20` from a caller not yet identified. The UTM window has not been looked at.
+
 ## Rebuild and signing handoff
 
 From the Vista worktree on the Linux builder, set `MAIN` to the checkout
@@ -213,7 +240,8 @@ available in the existing checkout.
 
 | Artifact | What it contains |
 | --- | --- |
-| `build/ripple-vista-7.14.1.5/` | Unsigned package installed in the 7.14.1.5 run: the `169f188` kernel driver and both Mesa DLLs with patches `0101` and `0102`. |
+| `build/ripple-vista-7.14.1.6/` | Unsigned package installed in the 7.14.1.6 run: kernel driver and both Mesa DLLs with patches `0101` to `0103` (composition on). |
+| `build/ripple-vista-7.14.1.5/` | The 7.14.1.5 package: the `169f188` kernel driver and both Mesa DLLs with patches `0101` and `0102`. |
 | `tmp-utm-validation/fix5/` and `deliver-fix.rb` | The same package with its guest install script, and the host script that delivers it over HTTP, installs it, reboots and runs the checks. |
 | `tmp-utm-validation/pipecheck-mark.c` | The write-mark experiment: the direct download with and without `WriteOperation`. |
 | `build/ripple-vista-7.14.1.2-test-signed.zip` | Guest-tested package that held 800×600 and reproduced the black pixels. |
@@ -228,10 +256,11 @@ available in the existing checkout.
    like `fix5/` on the UTM host and run
    `ruby deliver-fix.rb <folder> <guest address> <number>`. No CD change is
    needed. The run ends with the display check and both triangle tests.
-3. Check the visible desktop in the UTM window. Reading the UTM window
-   (any capture of the host's screen) needs the owner's approval each time.
-4. Turn on Aero: run the Windows graphics assessment (`winsat dwm`) and check
-   `DwmIsCompositionEnabled`. Then 3DMark06 and F.E.A.R. from the lab CD.
+3. Check the visible desktop in the UTM window, with Aero on. Reading the
+   UTM window (any capture of the host's screen) needs the owner's approval
+   each time.
+4. Then 3DMark06 and F.E.A.R. from the lab CD. Full-screen Direct3D 9 games
+   allocate primaries as the compositor does, so they depend on 7.14.1.6.
 
 ### Recover the lab desktop
 
