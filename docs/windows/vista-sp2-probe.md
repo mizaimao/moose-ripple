@@ -1,7 +1,7 @@
 # Vista SP2 x64 display driver probe
 
 The kernel driver and both Direct3D 9 DLLs build from the Windows 7 driver at
-`63739fe`. On Vista SP2 x64 with test signing enabled, version 7.14.1.8
+`63739fe`. On Vista SP2 x64 with test signing enabled, version 7.14.1.10
 starts the adapter, runs the desktop at 1280×768 and draws the Direct3D 9
 triangle test correctly for both x64 and x86 applications. The guest reports
 Aero composition on. Earlier builds read every GPU result back as black;
@@ -230,8 +230,9 @@ of 7.14.1.7, composition was on, both DLLs and the kernel driver matched the
 package, both triangle tests read back right, and the presented frame was
 the full Aero desktop with glass frames, gadgets, windows and taskbar.
 
-Still open: a GDI screen capture (Print Screen and the like) returns black
-while composition is on, and the escapes rejected as too small.
+A GDI screen capture (Print Screen and the like) returned black while
+composition was on; 7.14.1.10 fixes it (below). Still open: the escapes
+rejected as too small.
 
 ### Queries and first program tests, 7.14.1.8
 
@@ -267,6 +268,25 @@ assessment, which ran with composition off, single runs:
 
 The two runs differ in composition, so this is not a like-for-like
 comparison; repeated runs under the same conditions come next.
+
+### Screen captures under Aero, 7.14.1.10
+
+A capture of the screen DC (`BitBlt` with `CAPTUREBLT`) came back black
+with composition on. A kernel driver built with `TRACE_PRESENT=1` received
+no copy request during the capture, only the compositor's flips, and a
+trace of the compositor showed no read-back either: Vista reads the capture
+straight from the memory of the primary on screen. The compositor's
+primaries are drawn on the host and their desktop-segment memory was never
+written.
+
+The user-mode driver now tags its primaries `VIOGPU_VISTA_DRAWN_PRIMARY_TAG`
+(placed like the desktop's own primary). While such a primary is on screen,
+the flip thread copies its picture into its memory: the contiguous segment
+range is attached as the host resource's backing once, then filled with a
+host-to-guest transfer at most twice a second while the screen changes and
+once more after the last change. Windows' own desktop primary is not copied.
+With 7.14.1.10 a capture inside the guest showed the full Aero desktop.
+A Windows 7 kernel build compiled unchanged.
 
 ## Rebuild and signing handoff
 
@@ -307,6 +327,7 @@ available in the existing checkout.
 
 | Artifact | What it contains |
 | --- | --- |
+| `build/ripple-vista-7.14.1.10/` | Unsigned package of the 7.14.1.10 run: 7.14.1.8 plus the screen capture copy (kernel driver and the drawn-primary tag). Current. |
 | `build/ripple-vista-7.14.1.8/` | Unsigned package of the 7.14.1.8 run: 7.14.1.7 plus Mesa patches `0104` and `0105` (occlusion queries). |
 | `build/ripple-vista-7.14.1.7/` | Unsigned package of the 7.14.1.7 run: the 7.14.1.6 kernel driver, both DLLs with the flip chain and viewport fixes and the frame dumps. Full Aero desktop. |
 | `tmp-utm-validation/shot.c`, `recv-shot.rb` | Guest screen capture and file upload over HTTP, and its receiver on the UTM host. |
