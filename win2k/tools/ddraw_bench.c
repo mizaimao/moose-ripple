@@ -1,6 +1,7 @@
 /* DirectDraw timing on Windows 2000: the same frames through the driver
  * (hardware-only DirectDraw, video-memory surfaces) and through Windows'
- * software path (emulation-only DirectDraw, system-memory surfaces).
+ * software path (emulation-only DirectDraw, system-memory surfaces), and as a
+ * program gets them that lets DirectDraw choose (default).
  * Results go to standard output when it is redirected, otherwise to COM1.
  * Each case runs for about three seconds. */
 #define WIN32_LEAN_AND_MEAN
@@ -154,7 +155,7 @@ done:
 enum { FillFlip, Sprites, KeyedSprites, Cases };
 static const char *const names[Cases] = {"flip-fill", "flip-sprites", "flip-keyed-sprites"};
 
-static void fullscreen_case(LPDIRECTDRAW dd, const char *path, BOOL hardware, int which)
+static void fullscreen_case(LPDIRECTDRAW dd, const char *path, DWORD chain, DWORD memory, int which)
 {
     RESULT r;
     DDSURFACEDESC d;
@@ -162,7 +163,7 @@ static void fullscreen_case(LPDIRECTDRAW dd, const char *path, BOOL hardware, in
     DDBLTFX fx;
     DDCOLORKEY key;
     LPDIRECTDRAWSURFACE front = NULL, back = NULL, sprite = NULL;
-    DWORD memory = hardware ? DDSCAPS_VIDEOMEMORY : DDSCAPS_SYSTEMMEMORY, start, i;
+    DWORD start, i;
     HRESULT hr;
     ZeroMemory(&r, sizeof(r));
     r.name = names[which];
@@ -172,7 +173,7 @@ static void fullscreen_case(LPDIRECTDRAW dd, const char *path, BOOL hardware, in
     d.dwFlags = DDSD_CAPS | DDSD_BACKBUFFERCOUNT;
     d.dwBackBufferCount = 1;
     d.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_COMPLEX | DDSCAPS_FLIP;
-    if (hardware) d.ddsCaps.dwCaps |= DDSCAPS_VIDEOMEMORY;
+    d.ddsCaps.dwCaps |= chain;
     hr = IDirectDraw_CreateSurface(dd, &d, &front, NULL);
     if (SUCCEEDED(hr)) {
         caps.dwCaps = DDSCAPS_BACKBUFFER;
@@ -212,7 +213,7 @@ done:
     report(&r);
 }
 
-static void fullscreen(const char *path, DWORD flags, BOOL hardware)
+static void fullscreen(const char *path, DWORD flags, DWORD chain, DWORD memory)
 {
     static const char cls[] = "RBBenchFull";
     WNDCLASSA wc;
@@ -235,7 +236,7 @@ static void fullscreen(const char *path, DWORD flags, BOOL hardware)
         wsprintfA(msg, "RBBENCH fullscreen %s setup hr=%08lX", path, (DWORD)hr);
         line(msg);
     } else {
-        for (which = 0; which < Cases; ++which) fullscreen_case(dd, path, hardware, which);
+        for (which = 0; which < Cases; ++which) fullscreen_case(dd, path, chain, memory, which);
         IDirectDraw_RestoreDisplayMode(dd);
         IDirectDraw_SetCooperativeLevel(dd, window, DDSCL_NORMAL);
     }
@@ -251,8 +252,9 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR args, int show)
     DEVMODEA mode;
     char msg[120];
     (void)inst; (void)prev; (void)args; (void)show;
+    /* A program started from Explorer may hold a standard handle that leads nowhere. */
     serial = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (!serial || serial == INVALID_HANDLE_VALUE)
+    if (!serial || serial == INVALID_HANDLE_VALUE || GetFileType(serial) == FILE_TYPE_UNKNOWN)
         serial = CreateFileA("COM1", GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (serial == INVALID_HANDLE_VALUE) return 1;
     ZeroMemory(&mode, sizeof(mode)); mode.dmSize = sizeof(mode);
@@ -264,10 +266,14 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR args, int show)
     if (create) {
         windowed("driver", (DWORD)DDCREATE_HARDWAREONLY, DDSCAPS_VIDEOMEMORY, FALSE);
         windowed("software", (DWORD)DDCREATE_EMULATIONONLY, DDSCAPS_SYSTEMMEMORY, FALSE);
+        windowed("default", 0, 0, FALSE);
         windowed("driver", (DWORD)DDCREATE_HARDWAREONLY, DDSCAPS_VIDEOMEMORY, TRUE);
         windowed("software", (DWORD)DDCREATE_EMULATIONONLY, DDSCAPS_SYSTEMMEMORY, TRUE);
-        fullscreen("driver", (DWORD)DDCREATE_HARDWAREONLY, TRUE);
-        fullscreen("software", (DWORD)DDCREATE_EMULATIONONLY, FALSE);
+        windowed("default", 0, 0, TRUE);
+        fullscreen("driver", (DWORD)DDCREATE_HARDWAREONLY, DDSCAPS_VIDEOMEMORY, DDSCAPS_VIDEOMEMORY);
+        fullscreen("software", (DWORD)DDCREATE_EMULATIONONLY, 0, DDSCAPS_SYSTEMMEMORY);
+        /* What a program gets that lets DirectDraw choose the memory. */
+        fullscreen("default", 0, 0, 0);
     }
     ZeroMemory(&mode, sizeof(mode)); mode.dmSize = sizeof(mode);
     EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &mode);

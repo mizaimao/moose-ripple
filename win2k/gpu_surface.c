@@ -31,6 +31,7 @@ static VP_STATUS query(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     caps->presents = gpu->presents;
     caps->presentReadbacks = gpu->presentReadbacks;
     caps->presentBytes = gpu->presentBytes;
+    caps->gpuSurfaces = gpu->ddGpuSurfaces;
     packet->StatusBlock->Information = sizeof(*caps);
     return NO_ERROR;
 }

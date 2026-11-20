@@ -55,7 +55,7 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
             ((desc->dwFlags & DDSD_WIDTH) && desc->dwWidth != d->mode.VisScreenWidth) ||
             ((desc->dwFlags & DDSD_HEIGHT) && desc->dwHeight != d->mode.VisScreenHeight))
             return FALSE;
-    } else if (!(caps & DDSCAPS_OFFSCREENPLAIN) ||
+    } else if (!d->gpuSurfaces || !(caps & DDSCAPS_OFFSCREENPLAIN) ||
                (caps & ~(DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM)) ||
                !desc->dwWidth || desc->dwWidth > RB2K_DD_MAX_WIDTH ||
                !desc->dwHeight || desc->dwHeight > RB2K_DD_MAX_HEIGHT) return FALSE;
@@ -67,8 +67,14 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
 
 static DWORD APIENTRY can_create(PDD_CANCREATESURFACEDATA data)
 {
-    data->ddRVal = supported((DISPLAY *)data->lpDD->dhpdev, data->lpDDSurfaceDesc)
-                 ? DD_OK : DDERR_INVALIDCAPS;
+    DISPLAY *d = (DISPLAY *)data->lpDD->dhpdev;
+    DWORD caps = data->lpDDSurfaceDesc->ddsCaps.dwCaps;
+    /* Without host-texture surfaces an offscreen surface goes to system
+     * memory, where Windows' own blits are faster here. */
+    if (!d->gpuSurfaces && !primary_caps(caps) && !flip_caps(caps))
+        data->ddRVal = DDERR_OUTOFVIDEOMEMORY;
+    else
+        data->ddRVal = supported(d, data->lpDDSurfaceDesc) ? DD_OK : DDERR_INVALIDCAPS;
     return DDHAL_DRIVER_HANDLED;
 }
 
@@ -638,6 +644,8 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     info->ddCaps.dwRops[((SRCCOPY >> 16) & 255) / 32] |= 1UL << ((SRCCOPY >> 16) & 31);
     info->ddCaps.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY |
                                   DDSCAPS_LOCALVIDMEM;
+    d->gpuSurfaces = caps.gpuSurfaces != 0;
+    if (!d->gpuSurfaces) caps.slots = 0;
     info->ddCaps.dwVidMemTotal = caps.maxBytes * caps.slots;
     pageBytes = page_size(d);
     if (pageBytes) {
@@ -673,6 +681,7 @@ BOOL APIENTRY DrvEnableDirectDraw(DHPDEV pdev, DD_CALLBACKS *c, DD_SURFACECALLBA
     RB2K_DD_CAPS caps;
     ULONG pageBytes;
     if (!d->ddLock || !rb_dd_caps(d, &caps)) return FALSE;
+    d->gpuSurfaces = caps.gpuSurfaces != 0;
     RtlZeroMemory(c, sizeof(*c)); RtlZeroMemory(sc, sizeof(*sc)); RtlZeroMemory(pc, sizeof(*pc));
     c->dwSize = sizeof(*c); sc->dwSize = sizeof(*sc); pc->dwSize = sizeof(*pc);
     c->dwFlags = DDHAL_CB32_CANCREATESURFACE | DDHAL_CB32_CREATESURFACE;

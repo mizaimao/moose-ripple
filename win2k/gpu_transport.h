@@ -47,6 +47,7 @@ typedef struct {
     LONG busy, barrier;
     BOOLEAN owned, ready, enabledMaster, tested;
     ULONG nextId, fence, imageCount, hostFills, readbacks, uploads, hostCopies;
+    BOOLEAN ddGpuSurfaces;
     ULONG presents, presentReadbacks, presentBytes;
     RB2K_PRIMARY primary;
     RB2K_IMAGE images[RB2K_DD_SLOTS];

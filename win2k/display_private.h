@@ -32,6 +32,7 @@ typedef struct {
     VIDEO_MODE_INFORMATION mode;
     HSEMAPHORE ddLock;
     BOOL ddEnabled;
+    BOOL gpuSurfaces;           /* offscreen surfaces as host textures (RB2K_DD_CAPS) */
     ULONG pageBytes, visiblePage, lockedPages;
     PDD_SURFACE_GLOBAL flipBack, flipFront;
     HANDLE flipOwner;
@@ -42,6 +43,6 @@ typedef struct {
 BOOL rb_dd_caps(DISPLAY *display, RB2K_DD_CAPS *caps);
 void rb_rvd_init(void);
 ULONG rb_rvd_escape(DISPLAY *display, ULONG inSize, PVOID in, ULONG outSize, PVOID out);
-ULONG rb_rvd_stats(ULONG outSize, PVOID out);
+ULONG rb_rvd_stats(DISPLAY *display, ULONG outSize, PVOID out);
 void rb_dd_free_views(DISPLAY *display);
 #endif

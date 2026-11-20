@@ -25,6 +25,7 @@ typedef struct {
     ULONG maxBytes, slots;
     ULONG hostFills, readbacks, uploads, hostCopies;
     ULONG presents, presentReadbacks, presentBytes;
+    ULONG gpuSurfaces;      /* offscreen surfaces as host textures (registry, off by default) */
 } RB2K_DD_CAPS;
 typedef struct { ULONG width, height; } RB2K_DD_CREATE;
 typedef struct { ULONG id, color; } RB2K_DD_FILL;
