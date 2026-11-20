@@ -114,6 +114,9 @@ Wine in `.tools/win9x` (or `WIN9X_TOOLS`):
   started, the requests that failed, and what programs hold now.
 - `flipcycle.exe`: rebuilds a full-screen flip chain four times in one
   DirectDraw session and checks sprites, flips and locks each time.
+- `memtest.exe`: times a compute loop, ordinary memory, GDI drawing into
+  memory and on the screen, and copies to and from the screen, to tell a
+  slow framebuffer from a slow CPU or a slow GPU path.
 
 ## Known limits
 
