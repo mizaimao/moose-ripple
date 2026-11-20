@@ -3,7 +3,7 @@ Signature="$Windows NT$"
 Class=Display
 ClassGuid={4D36E968-E325-11CE-BFC1-08002BE10318}
 Provider=%Vendor%
-DriverVer=11/20/2026,0.0.7.0
+DriverVer=11/20/2026,0.0.8.0
 
 [Manufacturer]
 %Vendor%=Models
@@ -20,6 +20,11 @@ AddReg=DisplaySettings
 [DisplaySettings]
 HKR,,InstalledDisplayDrivers,0x00010000,rb2kdisp
 HKR,,VgaCompatible,0x00010001,0
+; Defaults for a new device. Preserve an existing desktop selection on upgrade.
+HKR,,DefaultSettings.XResolution,0x00010003,1024
+HKR,,DefaultSettings.YResolution,0x00010003,768
+HKR,,DefaultSettings.BitsPerPel,0x00010003,32
+HKR,,DefaultSettings.VRefresh,0x00010003,60
 
 [Ripple.Services]
 AddService=rb2kmp,0x00000002,VideoService

@@ -33,10 +33,7 @@ typedef union {
     struct virtio_gpu_ctrl_hdr hdr;
     struct virtio_gpu_ctx_create context;
     struct virtio_gpu_resource_create_3d resource;
-    struct {
-        struct virtio_gpu_resource_attach_backing attach;
-        struct virtio_gpu_mem_entry entry;
-    } backing;
+    struct virtio_gpu_resource_detach_backing detach;
     struct virtio_gpu_ctx_resource ctx_resource;
     struct {
         struct virtio_gpu_cmd_submit submit;
@@ -46,10 +43,16 @@ typedef union {
     struct virtio_gpu_resource_unref unref;
 } PIXEL_REQUEST;
 
+typedef struct {
+    struct virtio_gpu_resource_attach_backing attach;
+    struct virtio_gpu_mem_entry entries[RB2K_MAX_SEGMENTS];
+} BACKING_REQUEST;
+
 /* The combined submit may have compiler-inserted tail padding. Only the
  * byte count in its wire header and the command words are transmitted. */
 typedef char gpu_header_must_be_24[sizeof(struct virtio_gpu_ctrl_hdr) == 24 ? 1 : -1];
 typedef char gpu_entry_must_be_16[sizeof(struct virtio_gpu_mem_entry) == 16 ? 1 : -1];
+typedef char backing_request_fits_queue[sizeof(BACKING_REQUEST) <= 1024 ? 1 : -1];
 
 static void begin_request(PIXEL_REQUEST *request, ULONG type, ULONG context)
 {
@@ -59,8 +62,9 @@ static void begin_request(PIXEL_REQUEST *request, ULONG type, ULONG context)
 }
 
 static BOOLEAN send_request(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
-                            PIXEL_REQUEST *request, ULONG bytes, ULONG stage)
+                            const void *request, ULONG bytes, ULONG stage)
 {
+    const struct virtio_gpu_ctrl_hdr *header = request;
     struct virtio_gpu_ctrl_hdr reply;
     ULONG received = 0;
     result->stage = stage;
@@ -76,29 +80,28 @@ static BOOLEAN send_request(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
         result->status = ERROR_GEN_FAILURE;
         return FALSE;
     }
-    if ((request->hdr.flags & VIRTIO_GPU_FLAG_FENCE) &&
-        (!(reply.flags & VIRTIO_GPU_FLAG_FENCE) || reply.fence_id != request->hdr.fence_id)) {
+    if ((header->flags & VIRTIO_GPU_FLAG_FENCE) &&
+        (!(reply.flags & VIRTIO_GPU_FLAG_FENCE) || reply.fence_id != header->fence_id)) {
         result->status = ERROR_INVALID_DATA;
         return FALSE;
     }
     return TRUE;
 }
 
-BOOLEAN rb_gpu_create_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
-                            const RB2K_IMAGE *image, ULONG slot, const char *name, ULONG nameBytes)
+static BOOLEAN context_resource(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG context,
+                                ULONG resource, BOOLEAN attach, ULONG stage)
 {
     PIXEL_REQUEST request;
-    PHYSICAL_ADDRESS bus;
-    ULONG *backing = rb_gpu_backing(gpu, slot, &bus);
-    ULONG bytes = image->width * image->height * sizeof(ULONG);
-    if (!backing) {
-        result->stage = RB2K_STAGE_BACKING;
-        result->status = ERROR_NOT_ENOUGH_MEMORY;
-        return FALSE;
-    }
-    /* A retired slot can be reused while another surface keeps the device
-     * active. Clear its exposed backing extent before attaching it again. */
-    VideoPortZeroMemory(backing, bytes);
+    begin_request(&request, attach ? VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE :
+                  VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE, context);
+    request.ctx_resource.resource_id = resource;
+    return send_request(gpu, result, &request, sizeof(request.ctx_resource), stage);
+}
+
+BOOLEAN rb_gpu_create_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
+                            const RB2K_IMAGE *image, const char *name, ULONG nameBytes)
+{
+    PIXEL_REQUEST request;
     begin_request(&request, VIRTIO_GPU_CMD_CTX_CREATE, image->id);
     request.context.nlen = nameBytes;
     VideoPortMoveMemory(request.context.debug_name, (PVOID)name, nameBytes);
@@ -114,16 +117,7 @@ BOOLEAN rb_gpu_create_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     request.resource.depth = request.resource.array_size = 1;
     if (!send_request(gpu, result, &request, sizeof(request.resource), RB2K_STAGE_RESOURCE)) return FALSE;
 
-    begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING, 0);
-    request.backing.attach.resource_id = image->id;
-    request.backing.attach.nr_entries = 1;
-    request.backing.entry.addr = bus.QuadPart;
-    request.backing.entry.length = bytes;
-    if (!send_request(gpu, result, &request, sizeof(request.backing), RB2K_STAGE_BACKING)) return FALSE;
-
-    begin_request(&request, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, image->id);
-    request.ctx_resource.resource_id = image->id;
-    return send_request(gpu, result, &request, sizeof(request.ctx_resource), RB2K_STAGE_ATTACH);
+    return context_resource(gpu, result, image->id, image->id, TRUE, RB2K_STAGE_ATTACH);
 }
 
 /* IEEE single-precision encoding of channel/255 rounded to the nearest
@@ -173,24 +167,74 @@ BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
 }
 
 BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
-                              const RB2K_IMAGE *image, BOOLEAN readback)
+                              const RB2K_IMAGE *image, PVOID pixels, BOOLEAN readback)
 {
     PIXEL_REQUEST request;
+    BACKING_REQUEST backing;
+    ULONG bytes = image->width * image->height * sizeof(ULONG);
+    ULONG count = (bytes + RB2K_SEGMENT_BYTES - 1) / RB2K_SEGMENT_BYTES;
+    ULONG i, used = sizeof(backing.attach) + count * sizeof(backing.entries[0]);
+    result->stage = RB2K_STAGE_BACKING;
+    result->status = rb_gpu_reserve_staging(gpu, bytes);
+    if (result->status) return FALSE;
+    VideoPortZeroMemory(&backing, used);
+    backing.attach.hdr.type = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
+    backing.attach.resource_id = image->id;
+    backing.attach.nr_entries = count;
+    for (i = 0; i < count; ++i) {
+        ULONG offset = i * RB2K_SEGMENT_BYTES;
+        ULONG length = bytes - offset;
+        if (length > RB2K_SEGMENT_BYTES) length = RB2K_SEGMENT_BYTES;
+        backing.entries[i].addr = gpu->staging[i].bus.QuadPart;
+        backing.entries[i].length = length;
+        /* A failed or short renderer write must never return another surface's bytes. */
+        if (readback) VideoPortZeroMemory(gpu->staging[i].data, length);
+        else VideoPortMoveMemory(gpu->staging[i].data, (PUCHAR)pixels + offset, length);
+    }
+    if (!send_request(gpu, result, &backing, used, RB2K_STAGE_BACKING)) return FALSE;
     begin_request(&request, readback ? VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D :
         VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D, image->id);
     request.transfer.resource_id = image->id;
     request.transfer.box.w = image->width;
     request.transfer.box.h = image->height;
     request.transfer.box.d = 1;
-    return fenced(gpu, result, &request, sizeof(request.transfer), RB2K_STAGE_TRANSFER);
+    if (!fenced(gpu, result, &request, sizeof(request.transfer), RB2K_STAGE_TRANSFER)) return FALSE;
+    begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING, 0);
+    request.detach.resource_id = image->id;
+    if (!send_request(gpu, result, &request, sizeof(request.detach), RB2K_STAGE_BACKING)) return FALSE;
+    if (readback) {
+        for (i = 0; i < count; ++i)
+            VideoPortMoveMemory((PUCHAR)pixels + i * RB2K_SEGMENT_BYTES, gpu->staging[i].data,
+                                backing.entries[i].length);
+    }
+    return TRUE;
+}
+
+BOOLEAN rb_gpu_copy_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
+                          const RB2K_IMAGE *source, const RB2K_IMAGE *destination)
+{
+    PIXEL_REQUEST request;
+    ULONG *words = request.draw.words;
+    ULONG bytes = (1 + VIRGL_CMD_RESOURCE_COPY_REGION_SIZE) * sizeof(ULONG);
+    if (!context_resource(gpu, result, destination->id, source->id, TRUE, RB2K_STAGE_ATTACH))
+        return FALSE;
+    begin_request(&request, VIRTIO_GPU_CMD_SUBMIT_3D, destination->id);
+    request.draw.submit.size = bytes;
+    words[0] = VIRGL_CMD0(VIRGL_CCMD_RESOURCE_COPY_REGION, 0, VIRGL_CMD_RESOURCE_COPY_REGION_SIZE);
+    words[VIRGL_CMD_RCR_DST_RES_HANDLE] = destination->id;
+    words[VIRGL_CMD_RCR_SRC_RES_HANDLE] = source->id;
+    words[VIRGL_CMD_RCR_SRC_W] = source->width;
+    words[VIRGL_CMD_RCR_SRC_H] = source->height;
+    words[VIRGL_CMD_RCR_SRC_D] = 1;
+    if (!fenced(gpu, result, &request, sizeof(request.draw.submit) + bytes, RB2K_STAGE_TRANSFER))
+        return FALSE;
+    return context_resource(gpu, result, destination->id, source->id, FALSE, RB2K_STAGE_CLEANUP);
 }
 
 BOOLEAN rb_gpu_destroy_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id)
 {
     PIXEL_REQUEST request;
-    begin_request(&request, VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE, id);
-    request.ctx_resource.resource_id = id;
-    if (!send_request(gpu, result, &request, sizeof(request.ctx_resource), RB2K_STAGE_CLEANUP)) return FALSE;
+    if (!context_resource(gpu, result, id, id, FALSE, RB2K_STAGE_CLEANUP)) return FALSE;
     begin_request(&request, VIRTIO_GPU_CMD_CTX_DESTROY, id);
     if (!send_request(gpu, result, &request, sizeof(request.hdr), RB2K_STAGE_CLEANUP)) return FALSE;
     begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_UNREF, 0);
@@ -202,15 +246,11 @@ void rb_gpu_pixel(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
 {
     static const char name[] = "rb2k-pixel";
     const RB2K_IMAGE image = {1, 1, 1, FALSE, FALSE};
-    PHYSICAL_ADDRESS bus;
-    volatile ULONG *pixel;
     result->expected = 0xffff8000UL;
-    if (!rb_gpu_create_image(gpu, result, &image, 0, name, sizeof(name) - 1)) return;
-    pixel = rb_gpu_backing(gpu, 0, &bus);
-    *pixel = ~result->expected;
+    if (!rb_gpu_create_image(gpu, result, &image, name, sizeof(name) - 1)) return;
+    result->observed = ~result->expected;
     if (!rb_gpu_draw_image(gpu, result, image.id, result->expected, TRUE) ||
-        !rb_gpu_transfer_image(gpu, result, &image, TRUE)) return;
-    result->observed = *pixel;
+        !rb_gpu_transfer_image(gpu, result, &image, &result->observed, TRUE)) return;
     if (!rb_gpu_destroy_image(gpu, result, image.id)) return;
     if (result->observed != result->expected) {
         result->stage = RB2K_STAGE_COMPARE;

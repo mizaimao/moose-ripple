@@ -59,6 +59,7 @@ DHPDEV DrvEnablePDEV(DEVMODEW *dm, LPWSTR address, ULONG patternCount,
                      LPWSTR deviceName, HANDLE miniport)
 {
     VIDEO_MODE_INFORMATION *table;
+    VIDEO_MODE_INFORMATION *selected = NULL;
     DISPLAY *display = NULL;
     GDIINFO *gdi = (GDIINFO *)caps;
     ULONG count, i;
@@ -73,12 +74,20 @@ DHPDEV DrvEnablePDEV(DEVMODEW *dm, LPWSTR address, ULONG patternCount,
             (dm->dmPelsHeight && dm->dmPelsHeight != m->VisScreenHeight) ||
             (dm->dmDisplayFrequency > 1 && dm->dmDisplayFrequency != m->Frequency))
             continue;
+        if (!selected) selected = m;
+        if (dm->dmPelsWidth || dm->dmPelsHeight) break;
+        if (m->VisScreenWidth == RB2K_DEFAULT_WIDTH &&
+            m->VisScreenHeight == RB2K_DEFAULT_HEIGHT) {
+            selected = m;
+            break;
+        }
+    }
+    if (selected) {
         display = EngAllocMem(FL_ZERO_MEMORY, sizeof(*display), 'd2bR');
         if (display) {
-            display->mode = *m;
+            display->mode = *selected;
             display->miniport = miniport;
         }
-        break;
     }
     EngFreeMem(table);
     if (!display) return NULL;
@@ -207,10 +216,13 @@ ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
     if (code == RB2K_DD_STATS_ESCAPE) {
         RB2K_DD_CAPS caps;
         RB2K_DD_STATS *stats = out;
-        if (outSize != sizeof(*stats) || !rb_dd_caps(display, &caps)) return 0;
+        if ((outSize != sizeof(*stats) && outSize != sizeof(RB2K_DD_COPY_STATS)) ||
+            !rb_dd_caps(display, &caps)) return 0;
         stats->hostFills = caps.hostFills;
         stats->readbacks = caps.readbacks;
         stats->uploads = caps.uploads;
+        if (outSize == sizeof(RB2K_DD_COPY_STATS))
+            ((RB2K_DD_COPY_STATS *)out)->hostCopies = caps.hostCopies;
         return 1;
     }
     if (code != RB2K_GPU_ESCAPE || outSize != sizeof(result)) return 0;

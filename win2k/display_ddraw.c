@@ -1,4 +1,4 @@
-/* NT5 DirectDraw colour fills. The authoritative pixels live in a host
+/* NT5 DirectDraw colour fills and full-surface copies. The pixels live in a host
  * texture. DirectDraw allocates an individual user-mode staging buffer
  * for each surface, which is synchronized only at a CPU lock boundary. */
 #include "display_private.h"
@@ -23,8 +23,8 @@ static BOOL supported(const DDSURFACEDESC *desc)
     const DDPIXELFORMAT *fmt = &desc->ddpfPixelFormat;
     if (!(caps & DDSCAPS_OFFSCREENPLAIN) ||
         (caps & ~(DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM)) ||
-        !desc->dwWidth || desc->dwWidth > RB2K_DD_MAX_BYTES / 4 ||
-        !desc->dwHeight || desc->dwHeight > RB2K_DD_MAX_BYTES / (4 * desc->dwWidth))
+        !desc->dwWidth || desc->dwWidth > RB2K_DD_MAX_WIDTH ||
+        !desc->dwHeight || desc->dwHeight > RB2K_DD_MAX_HEIGHT)
         return FALSE;
     return !(desc->dwFlags & DDSD_PIXELFORMAT) ||
         (fmt->dwFlags == DDPF_RGB && fmt->dwRGBBitCount == 32 &&
@@ -119,29 +119,37 @@ static BOOL full_rect(const RECTL *r, const DD_SLOT *s)
 static DWORD APIENTRY blt(PDD_BLTDATA data)
 {
     DISPLAY *d = (DISPLAY *)data->lpDD->dhpdev;
-    RB2K_DD_FILL fill;
-    DD_SLOT *s;
+    DD_SLOT *dst, *src = NULL;
+    DWORD operation = data->dwFlags & ~(DDBLT_WAIT | DDBLT_DONOTWAIT);
+    HANDLE owner = EngGetCurrentProcessId();
     DWORD rc = DDHAL_DRIVER_HANDLED;
     EngAcquireSemaphore(d->ddLock);
-    s = find_slot(d, data->lpDDDestSurface->lpGbl);
-    if (!s) {
-        if (data->lpDDSrcSurface && find_slot(d, data->lpDDSrcSurface->lpGbl))
-            data->ddRVal = DDERR_UNSUPPORTED;
-        else rc = DDHAL_DRIVER_NOTHANDLED;
-    }
-    else if (s->lost || s->owner != EngGetCurrentProcessId()) data->ddRVal = DDERR_SURFACELOST;
-    else if (s->locked) data->ddRVal = DDERR_SURFACEBUSY;
-    else if (data->IsClipped || !full_rect(&data->rDest, s) ||
-             !(data->dwFlags & DDBLT_COLORFILL) ||
-             (data->dwFlags & ~(DDBLT_COLORFILL | DDBLT_WAIT | DDBLT_DONOTWAIT)))
+    dst = find_slot(d, data->lpDDDestSurface->lpGbl);
+    if (data->lpDDSrcSurface) src = find_slot(d, data->lpDDSrcSurface->lpGbl);
+    if (!dst && !src) rc = DDHAL_DRIVER_NOTHANDLED;
+    else if (!dst || (data->lpDDSrcSurface && !src)) data->ddRVal = DDERR_UNSUPPORTED;
+    else if (dst->lost || dst->owner != owner || (src && (src->lost || src->owner != owner)))
+        data->ddRVal = DDERR_SURFACELOST;
+    else if (dst->locked || (src && src->locked)) data->ddRVal = DDERR_SURFACEBUSY;
+    else if (data->IsClipped || !full_rect(&data->rDest, dst))
         data->ddRVal = DDERR_UNSUPPORTED;
-    else {
-        fill.id = s->id;
+    else if (!src && operation == DDBLT_COLORFILL) {
+        RB2K_DD_FILL fill;
+        fill.id = dst->id;
         fill.color = data->bltFX.dwFillColor;
         data->ddRVal = request(d, IOCTL_RB2K_DD_FILL, &fill, sizeof(fill), NULL, 0)
                      ? DD_OK : DDERR_SURFACELOST;
-        if (FAILED(data->ddRVal)) s->lost = TRUE;
-    }
+        if (FAILED(data->ddRVal)) dst->lost = TRUE;
+    /* DirectDraw may omit the legacy GDI operation word below the ROP3. */
+    } else if (src && (operation == 0 || (operation == DDBLT_ROP &&
+               (data->bltFX.dwROP >> 16) == (SRCCOPY >> 16))) &&
+               src->width == dst->width && src->height == dst->height && full_rect(&data->rSrc, src)) {
+        RB2K_DD_COPY copy;
+        copy.source = src->id;
+        copy.destination = dst->id;
+        data->ddRVal = request(d, IOCTL_RB2K_DD_COPY, &copy, sizeof(copy), NULL, 0)
+                     ? DD_OK : DDERR_SURFACELOST;
+    } else data->ddRVal = DDERR_UNSUPPORTED;
     EngReleaseSemaphore(d->ddLock);
     return rc;
 }
@@ -269,6 +277,8 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     v->dwOffscreenAlign = 4;
     info->ddCaps.dwSize = sizeof(info->ddCaps);
     info->ddCaps.dwCaps = DDCAPS_BLT | DDCAPS_BLTCOLORFILL;
+    /* DirectDraw indexes the raster-op bitset by the eight-bit ROP3 code. */
+    info->ddCaps.dwRops[((SRCCOPY >> 16) & 255) / 32] |= 1UL << ((SRCCOPY >> 16) & 31);
     info->ddCaps.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY |
                                   DDSCAPS_LOCALVIDMEM;
     info->ddCaps.dwVidMemTotal = caps.maxBytes * caps.slots;

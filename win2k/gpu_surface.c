@@ -27,6 +27,7 @@ static VP_STATUS query(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     caps->hostFills = gpu->hostFills;
     caps->readbacks = gpu->readbacks;
     caps->uploads = gpu->uploads;
+    caps->hostCopies = gpu->hostCopies;
     packet->StatusBlock->Information = sizeof(*caps);
     return NO_ERROR;
 }
@@ -41,8 +42,8 @@ static VP_STATUS create(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     ULONG slot;
     if (packet->InputBufferLength != sizeof(*size) || packet->OutputBufferLength < sizeof(ULONG))
         return ERROR_INVALID_PARAMETER;
-    if (!size->height || !size->width ||
-        size->width > RB2K_DD_MAX_BYTES / sizeof(ULONG) / size->height)
+    if (!size->width || size->width > RB2K_DD_MAX_WIDTH ||
+        !size->height || size->height > RB2K_DD_MAX_HEIGHT)
         return ERROR_INVALID_PARAMETER;
     if (gpu->nextId == 0xffffffffUL) return ERROR_NO_MORE_ITEMS;
     for (slot = 0; slot < RB2K_DD_SLOTS; ++slot) if (!gpu->images[slot].id) break;
@@ -58,7 +59,7 @@ static VP_STATUS create(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     image->id = ++gpu->nextId;
     image->width = size->width;
     image->height = size->height;
-    if (!rb_gpu_create_image(gpu, &result, image, slot, name, sizeof(name) - 1)) {
+    if (!rb_gpu_create_image(gpu, &result, image, name, sizeof(name) - 1)) {
         rb_gpu_stop(gpu);
         return result.status;
     }
@@ -68,22 +69,27 @@ static VP_STATUS create(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     return NO_ERROR;
 }
 
+static RB2K_IMAGE *find_image(RB2K_GPU *gpu, ULONG id)
+{
+    ULONG i;
+    if (id) {
+        for (i = 0; i < RB2K_DD_SLOTS; ++i)
+            if (gpu->images[i].id == id) return &gpu->images[i];
+    }
+    return NULL;
+}
+
 static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 {
-    ULONG id, slot, bytes, *backing;
+    ULONG id, bytes;
     RB2K_IMAGE *image;
     RB2K_GPU_RESULT result;
-    PHYSICAL_ADDRESS bus;
     BOOLEAN success;
     if (packet->InputBufferLength < sizeof(id)) return ERROR_INVALID_PARAMETER;
     id = *(PULONG)packet->InputBuffer;
-    if (!id) return ERROR_INVALID_HANDLE;
-    for (slot = 0; slot < RB2K_DD_SLOTS; ++slot) if (gpu->images[slot].id == id) break;
-    if (slot == RB2K_DD_SLOTS) return ERROR_INVALID_HANDLE;
-    image = &gpu->images[slot];
+    image = find_image(gpu, id);
+    if (!image) return ERROR_INVALID_HANDLE;
     bytes = image->width * image->height * sizeof(ULONG);
-    backing = rb_gpu_backing(gpu, slot, &bus);
-    if (!backing) return ERROR_NOT_READY;
     switch (packet->IoControlCode) {
     case IOCTL_RB2K_DD_FILL: {
         RB2K_DD_FILL *fill = packet->InputBuffer;
@@ -106,9 +112,8 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
             packet->StatusBlock->Information = bytes;
             return NO_ERROR;
         }
-        success = rb_gpu_transfer_image(gpu, &result, image, TRUE);
+        success = rb_gpu_transfer_image(gpu, &result, image, packet->OutputBuffer, TRUE);
         if (success) {
-            VideoPortMoveMemory(packet->OutputBuffer, backing, bytes);
             packet->StatusBlock->Information = bytes;
             ++gpu->readbacks;
         }
@@ -116,13 +121,34 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     case IOCTL_RB2K_DD_WRITE:
         if (packet->InputBufferLength != sizeof(id) + bytes || packet->OutputBufferLength)
             return ERROR_INVALID_PARAMETER;
-        VideoPortMoveMemory(backing, (PUCHAR)packet->InputBuffer + sizeof(id), bytes);
-        success = rb_gpu_transfer_image(gpu, &result, image, FALSE);
+        success = rb_gpu_transfer_image(gpu, &result, image, (PUCHAR)packet->InputBuffer + sizeof(id), FALSE);
         if (success) {
             image->defined = TRUE;
             ++gpu->uploads;
         }
         break;
+    case IOCTL_RB2K_DD_COPY: {
+        RB2K_DD_COPY *copy = packet->InputBuffer;
+        RB2K_IMAGE *destination;
+        if (packet->InputBufferLength != sizeof(*copy) || packet->OutputBufferLength)
+            return ERROR_INVALID_PARAMETER;
+        destination = find_image(gpu, copy->destination);
+        if (!destination) return ERROR_INVALID_HANDLE;
+        if (image->width != destination->width || image->height != destination->height)
+            return ERROR_INVALID_PARAMETER;
+        if (image == destination) return NO_ERROR;
+        /* A fresh surface is logically zero until its first complete write. */
+        if (!image->defined) {
+            destination->defined = FALSE;
+            return NO_ERROR;
+        }
+        success = rb_gpu_copy_image(gpu, &result, image, destination);
+        if (success) {
+            destination->defined = TRUE;
+            ++gpu->hostCopies;
+        }
+        break;
+    }
     case IOCTL_RB2K_DD_DESTROY:
         if (packet->InputBufferLength != sizeof(id) || packet->OutputBufferLength)
             return ERROR_INVALID_PARAMETER;
@@ -136,6 +162,10 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         return ERROR_INVALID_FUNCTION;
     }
     if (success) return NO_ERROR;
+    /* Staging allocation precedes the first command of a transfer. Existing
+     * textures can still be filled, copied or destroyed under memory pressure. */
+    if (result.stage == RB2K_STAGE_BACKING && result.status == ERROR_NOT_ENOUGH_MEMORY)
+        return result.status;
     /* A timed-out command may complete late. Invalidate every host object
      * on this device before reusing descriptors, pages or resource IDs. */
     rb_gpu_stop(gpu);

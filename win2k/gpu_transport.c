@@ -17,12 +17,11 @@ enum {
     Version1High = 1, DescriptorNext = 1, DescriptorWrite = 2,
     NoInterrupt = 1, QueueEntries = 2
 };
-/* One DMA allocation holds two descriptors, two small split rings, private
- * request/reply storage and one backing page per offscreen image. Nothing is
- * mapped into user space. These offsets meet the split-ring alignments. */
+/* The queue needs one page. CPU transfers allocate separate DMA staging,
+ * shared under the same lock and attached to one host texture at a time. */
 enum {
     Desc = 0, Avail = 32, Used = 48, Request = 128, Reply = 1152,
-    PacketBytes = 1024, Backing = 4096, DmaBytes = Backing + RB2K_DD_MAX_BYTES * RB2K_DD_SLOTS
+    PacketBytes = 1024, DmaBytes = 4096
 };
 typedef struct { PHYSICAL_ADDRESS address; ULONG length; USHORT flags, next; } DESCRIPTOR;
 typedef struct { USHORT flags, index, ring[QueueEntries]; } AVAILABLE;
@@ -85,7 +84,7 @@ void rb_gpu_find(RB2K_GPU *gpu, PVOID extension, ULONG slot,
     config->DmaChannel = 1;
     config->Master = TRUE;
     config->DmaWidth = Width32Bits;
-    config->MaximumTransferLength = DmaBytes;
+    config->MaximumTransferLength = RB2K_SEGMENT_BYTES;
 }
 
 static void write32(RB2K_GPU *gpu, ULONG reg, ULONG value)
@@ -101,8 +100,7 @@ static void write_address(RB2K_GPU *gpu, ULONG reg, ULONG offset)
     write32(gpu, reg + 4, (ULONG)address.HighPart);
 }
 
-/* Only retire DMA storage after status zero acknowledges reset. A timeout
- * pins at most this one allocation until a subsequent reset succeeds. */
+/* Only retire DMA storage after status zero acknowledges reset. */
 static VP_STATUS stop(RB2K_GPU *gpu)
 {
     ULONG i;
@@ -264,23 +262,44 @@ VP_STATUS rb_gpu_submit(RB2K_GPU *gpu, const void *request, ULONG bytes,
     return NO_ERROR;
 }
 
-ULONG *rb_gpu_backing(RB2K_GPU *gpu, ULONG slot, PHYSICAL_ADDRESS *bus)
+VP_STATUS rb_gpu_reserve_staging(RB2K_GPU *gpu, ULONG bytes)
 {
-    ULONG offset = Backing + slot * RB2K_DD_MAX_BYTES;
-    if (!gpu->ready || slot >= RB2K_DD_SLOTS) return NULL;
-    bus->QuadPart = gpu->bus.QuadPart + offset;
-    return (PULONG)(gpu->dma + offset);
+    ULONG i;
+    if (!gpu->ready) return ERROR_NOT_READY;
+    if (!bytes || bytes > RB2K_DD_MAX_BYTES) return ERROR_INVALID_PARAMETER;
+    for (i = 0; i * RB2K_SEGMENT_BYTES < bytes; ++i) {
+        RB2K_DMA_SEGMENT *s = &gpu->staging[i];
+        if (!s->data) {
+            s->data = VideoPortGetCommonBuffer(gpu->extension, RB2K_SEGMENT_BYTES, 4096,
+                                                &s->bus, &s->allocated, TRUE);
+            if (!s->data) return ERROR_NOT_ENOUGH_MEMORY;
+            if (s->allocated < RB2K_SEGMENT_BYTES) {
+                VideoPortFreeCommonBuffer(gpu->extension, s->allocated, s->data, s->bus, TRUE);
+                s->data = NULL;
+                return ERROR_NOT_ENOUGH_MEMORY;
+            }
+        }
+    }
+    return NO_ERROR;
 }
 
 VP_STATUS rb_gpu_stop(RB2K_GPU *gpu)
 {
-    ULONG pciCommand;
+    ULONG pciCommand, i;
     VP_STATUS cleanup = stop(gpu);
     /* A reset, including a failed attempt, invalidates all guest handles.
      * The pinned buffers survive an unacknowledged reset until a retry. */
     VideoPortZeroMemory(gpu->images, sizeof(gpu->images));
     gpu->imageCount = 0;
     if (!cleanup && gpu->enabledMaster) cleanup = bus_master(gpu, FALSE, &pciCommand);
+    if (!cleanup) {
+        for (i = 0; i < RB2K_MAX_SEGMENTS; ++i) {
+            RB2K_DMA_SEGMENT *s = &gpu->staging[i];
+            if (!s->data) break;
+            VideoPortFreeCommonBuffer(gpu->extension, s->allocated, s->data, s->bus, TRUE);
+            s->data = NULL;
+        }
+    }
     if (!cleanup && gpu->dma) {
         VideoPortFreeCommonBuffer(gpu->extension, gpu->allocated, gpu->dma, gpu->bus, TRUE);
         gpu->dma = NULL;

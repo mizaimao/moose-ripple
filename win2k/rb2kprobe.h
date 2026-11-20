@@ -1,6 +1,9 @@
-/* Fixed-size result shared by the miniport, display DLL and test program. */
+/* Display defaults and diagnostic interface shared with the guest tools. */
 #ifndef RB2K_PROBE_H
 #define RB2K_PROBE_H
+
+#define RB2K_DEFAULT_WIDTH 1024UL
+#define RB2K_DEFAULT_HEIGHT 768UL
 
 #define RB2K_GPU_VERSION 1
 #define RB2K_GPU_ESCAPE 0x52420001
@@ -35,5 +38,10 @@ typedef struct {
     ULONG readbacks;
     ULONG uploads;
 } RB2K_DD_STATS;
+
+typedef struct {
+    RB2K_DD_STATS transfers;
+    ULONG hostCopies;
+} RB2K_DD_COPY_STATS;
 
 #endif
