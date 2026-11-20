@@ -18,8 +18,11 @@ adapter (PCI `1AF4:1050`), with OpenGL on the host's GPU.
 ## The virtual machine
 
 The driver was tested on QEMU's `pc-i440fx-2.12` machine with one
-Pentium III CPU and 512 MB of memory, in UTM on Apple silicon (the early
-2D and GPU-probe stages also on Proxmox VE with an Intel GPU). The display
+Pentium III CPU and 512 MB of memory on three hosts: UTM on Apple silicon
+(emulated CPU), Proxmox VE 8.4 with an Intel UHD 630 (QEMU 9.2 with KVM,
+`-display egl-headless`), and Windows 11 through WSL2 with an AMD CPU and
+an NVIDIA GPU (QEMU 8.2.2 with KVM, virgl on Mesa's Direct3D 12 driver,
+`GALLIUM_DRIVER=d3d12`). The display
 adapter needs host 3D (virgl) and no 64-bit host-memory window, which
 32-bit Windows 2000 cannot place:
 
@@ -50,20 +53,21 @@ driver) and `ripplegl.dll` (OpenGL), and registers the OpenGL driver under
 
 ## Speed
 
-Measured in UTM on Apple silicon, where the guest CPU is emulated: one
-Pentium III, 1024×768×32 desktop.
+Frames a second on the three test hosts (see The virtual machine), one
+Pentium III, 1024×768×32 desktop:
 
-| Program | frames a second |
-| --- | ---: |
-| Quake III Arena demo, `timedemo demo001`, 640×480 in a window | 85 |
-| the same, 1024×768 full-screen | 82 |
-| `gltest` (a small OpenGL scene, 320×240) | 590 |
-| DirectDraw, fill a 640×480 surface and copy it to a window | 840 |
-| DirectDraw, full-screen fill and flip, 640×480 | 1170 |
-| the same with 100 colour-keyed 64×64 sprites a frame | 440 |
+| Program | UTM, Apple silicon | Intel UHD 630, KVM | WSL2, NVIDIA, KVM |
+| --- | ---: | ---: | ---: |
+| Quake III Arena demo, `timedemo demo001`, 640×480 in a window | 85 | 210 to 240 | 320 |
+| the same, 1024×768 full-screen | 82 | not measured | not measured |
+| `gltest` (a small OpenGL scene, 320×240) | 590 | 600 to 1500 | 350 |
+| DirectDraw, fill a 640×480 surface and copy it to a window | 840 | 11 800 | 17 800 |
+| DirectDraw, full-screen fill and flip, 640×480 | 1170 | 16 000 | 7 100 |
+| the same with 100 colour-keyed 64×64 sprites a frame | 440 | 5 200 | 4 400 |
 
-On this host the emulated CPU running the program limits the frame rate;
-the driver's requests take about a fifth of a Quake III frame. The
+In UTM the emulated CPU running the program limits the frame rate; the
+driver's requests take about a fifth of a Quake III frame there. The Intel
+host's numbers vary from run to run; the ranges are four runs each. The
 DirectDraw rows are what a program gets when it lets DirectDraw choose
 where its surfaces live. [docs/win2k/development.md](../docs/win2k/development.md)
 has the details and the earlier measurements behind these choices.
