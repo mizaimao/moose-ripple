@@ -148,6 +148,15 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     if (!image) return ERROR_INVALID_HANDLE;
     bytes = image->width * image->height * sizeof(ULONG);
     switch (packet->IoControlCode) {
+    case IOCTL_RB2K_DD_UNIFORM: {
+        RB2K_DD_UNIFORM *answer = packet->OutputBuffer;
+        if (packet->InputBufferLength != sizeof(id) || packet->OutputBufferLength < sizeof(*answer))
+            return ERROR_INVALID_PARAMETER;
+        answer->known = !image->defined || image->uniform;
+        answer->color = image->defined && image->uniform ? image->color : 0;
+        packet->StatusBlock->Information = sizeof(*answer);
+        return NO_ERROR;
+    }
     case IOCTL_RB2K_DD_FILL: {
         RB2K_DD_FILL *fill = packet->InputBuffer;
         if (packet->InputBufferLength != sizeof(*fill) || packet->OutputBufferLength)

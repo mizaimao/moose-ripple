@@ -88,6 +88,18 @@ bytes across four rectangles. Removing the overlap yielded one rectangle
 of 298,936 pixels. The application uploaded its source pattern once
 during setup. Presenting the window required no uploads.
 
+When GDI or an application takes a writable lock after a solid fill, the
+display DLL fills the application's staging buffer from the known colour.
+A partial lock preserves pixels outside the locked rectangle. A patterned
+surface still requires a readback if the caller needs its existing pixels.
+
+Microsoft’s unmodified DirectX 7 Switcher sample displayed its text and
+bouncing ball in a window on the 1024×768 desktop. Before this change,
+each of 58 clears was followed by a full 640×480 readback for GDI. With the
+change, 72 clears produced zero lock readbacks, saving 1,228,800 bytes per
+frame. Each frame still uploaded the GDI edits and read its visible
+rectangles for presentation.
+
 The earlier 0.0.7.0 build supported full-surface fills on textures of
 at most 4 KiB each. GDI continues to draw the primary desktop. On 0.0.6.0
 the DirectDraw capability check reported no hardware acceleration and the

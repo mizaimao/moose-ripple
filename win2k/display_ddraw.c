@@ -216,16 +216,28 @@ static DWORD APIENTRY blt(PDD_BLTDATA data)
 
 /* Probe and access the runtime-owned staging buffer within the same SEH
  * frame. No user pointer is passed to the miniport or kept after unlock. */
-static BOOL copy_staging(PVOID user, PVOID buffer, ULONG bytes, BOOL toUser)
+static BOOL prepare_staging(PVOID user, const VOID *pixels, ULONG bytes, const ULONG *uniformColor)
 {
     __try {
-        if (toUser) {
-            EngProbeForReadAndWrite(user, bytes, 1);
-            if (buffer) RtlCopyMemory(user, buffer, bytes);
-        } else {
-            EngProbeForRead(user, bytes, 1);
-            RtlCopyMemory(buffer, user, bytes);
+        EngProbeForReadAndWrite(user, bytes, 1);
+        if (uniformColor) {
+            ULONG *out = user;
+            ULONG i;
+            for (i = 0; i < bytes / sizeof(*out); ++i) out[i] = *uniformColor;
+        } else if (pixels) {
+            RtlCopyMemory(user, pixels, bytes);
         }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL read_staging(PVOID user, PVOID pixels, ULONG bytes)
+{
+    __try {
+        EngProbeForRead(user, bytes, 1);
+        RtlCopyMemory(pixels, user, bytes);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return FALSE;
     }
@@ -238,6 +250,8 @@ static DWORD APIENTRY lock_surface(PDD_LOCKDATA data)
     PDD_SURFACE_GLOBAL g = data->lpDDSurface->lpGbl;
     DD_SLOT *s;
     PVOID tmp = NULL;
+    RB2K_DD_UNIFORM uniform;
+    const ULONG *seed = NULL;
     ULONG bytes, offset = 0;
     DWORD rc = DDHAL_DRIVER_HANDLED;
     EngAcquireSemaphore(d->ddLock);
@@ -261,13 +275,19 @@ static DWORD APIENTRY lock_surface(PDD_LOCKDATA data)
     bytes = s->width * s->height * 4;
     if (!(data->dwFlags & DDLOCK_WRITEONLY) ||
         (data->bHasRect && !full_rect(&data->rArea, s))) {
-        tmp = EngAllocMem(0, bytes, 'l2bR');
-        if (!tmp) { data->ddRVal = DDERR_OUTOFMEMORY; goto done; }
-        if (!request(d, IOCTL_RB2K_DD_READ, &s->id, sizeof(s->id), tmp, bytes)) {
-            s->lost = TRUE; data->ddRVal = DDERR_SURFACELOST; goto done;
+        if (!(data->dwFlags & DDLOCK_READONLY) &&
+            request(d, IOCTL_RB2K_DD_UNIFORM, &s->id, sizeof(s->id), &uniform, sizeof(uniform)) &&
+            uniform.known == 1) {
+            seed = &uniform.color;
+        } else {
+            tmp = EngAllocMem(0, bytes, 'l2bR');
+            if (!tmp) { data->ddRVal = DDERR_OUTOFMEMORY; goto done; }
+            if (!request(d, IOCTL_RB2K_DD_READ, &s->id, sizeof(s->id), tmp, bytes)) {
+                s->lost = TRUE; data->ddRVal = DDERR_SURFACELOST; goto done;
+            }
         }
     }
-    if (!copy_staging((PVOID)g->fpVidMem, tmp, bytes, TRUE)) {
+    if (!prepare_staging((PVOID)g->fpVidMem, tmp, bytes, seed)) {
         data->ddRVal = DDERR_GENERIC; goto done;
     }
     s->locked = TRUE;
@@ -299,7 +319,7 @@ static DWORD APIENTRY unlock_surface(PDD_UNLOCKDATA data)
             ULONG *packet = EngAllocMem(0, sizeof(ULONG) + bytes, 'u2bR');
             if (packet) {
                 *packet = s->id;
-                if (!copy_staging((PVOID)g->fpVidMem, packet + 1, bytes, FALSE) ||
+                if (!read_staging((PVOID)g->fpVidMem, packet + 1, bytes) ||
                     !request(d, IOCTL_RB2K_DD_WRITE, packet, sizeof(ULONG) + bytes, NULL, 0))
                     data->ddRVal = DDERR_SURFACELOST;
                 EngFreeMem(packet);

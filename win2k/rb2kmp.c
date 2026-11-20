@@ -204,6 +204,7 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
     case IOCTL_RB2K_DD_DESTROY:
     case IOCTL_RB2K_DD_COPY:
     case IOCTL_RB2K_DD_PRESENT:
+    case IOCTL_RB2K_DD_UNIFORM:
         status = rb_gpu_surface_io(&a->gpu, r);
         break;
     case IOCTL_RB2K_GPU_PROBE:

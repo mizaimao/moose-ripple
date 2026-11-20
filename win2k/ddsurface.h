@@ -16,6 +16,7 @@
 #define IOCTL_RB2K_DD_DESTROY RB2K_DD_IOCTL(0x906)
 #define IOCTL_RB2K_DD_COPY    RB2K_DD_IOCTL(0x907)
 #define IOCTL_RB2K_DD_PRESENT RB2K_DD_IOCTL(0x908)
+#define IOCTL_RB2K_DD_UNIFORM RB2K_DD_IOCTL(0x909)
 typedef struct {
     ULONG maxBytes, slots;
     ULONG hostFills, readbacks, uploads, hostCopies;
@@ -26,4 +27,6 @@ typedef struct { ULONG id, color; } RB2K_DD_FILL;
 typedef struct { ULONG source, destination; } RB2K_DD_COPY;
 /* One visible rectangle, in source and primary pixel coordinates. */
 typedef struct { ULONG source, srcX, srcY, dstX, dstY, width, height; } RB2K_DD_PRESENT;
+/* Input is a surface ID. A known value supplies every byte of a writable lock. */
+typedef struct { ULONG known, color; } RB2K_DD_UNIFORM;
 #endif
