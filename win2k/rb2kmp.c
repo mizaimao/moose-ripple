@@ -35,8 +35,8 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
     PCI_COMMON_CONFIG pci;
     VIDEO_ACCESS_RANGE ranges[16];
     VIDEO_ACCESS_RANGE *registers = NULL;
-    PHYSICAL_ADDRESS regs;
-    ULONG slot = 0, i, bar0, bar2;
+    PHYSICAL_ADDRESS regs, bar2Address;
+    ULONG slot = 0, i, bar0, bar2, bar2Type;
     VP_STATUS status;
     USHORT id;
     (void)context; (void)args;
@@ -52,19 +52,23 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
         pci.BaseClass != 3 || pci.SubClass != 0) return ERROR_DEV_NOT_EXIST;
     bar0 = pci.u.type0.BaseAddresses[0];
     bar2 = pci.u.type0.BaseAddresses[2];
-    /* BAR0 is 32-bit. BAR2 is often 64-bit on this x86 machine. Match both
-     * to bus-assigned memory ranges, never to an assumed physical address. */
-    if ((bar0 & 7) != 0 || (bar2 & 1) || !(bar0 & ~15UL) || !(bar2 & ~15UL))
+    bar2Type = bar2 & PCI_ADDRESS_MEMORY_TYPE_MASK;
+    if ((bar0 & (PCI_ADDRESS_IO_SPACE | PCI_ADDRESS_MEMORY_TYPE_MASK)) != PCI_TYPE_32BIT ||
+        (bar2 & PCI_ADDRESS_IO_SPACE) || bar2Type == PCI_ADDRESS_MEMORY_TYPE_MASK)
+        return ERROR_DEV_NOT_EXIST;
+    bar0 &= PCI_ADDRESS_MEMORY_ADDRESS_MASK;
+    /* A 64-bit BAR can start on a 4 GiB boundary with a zero low dword. */
+    bar2Address.LowPart = bar2 & PCI_ADDRESS_MEMORY_ADDRESS_MASK;
+    bar2Address.HighPart = bar2Type == PCI_TYPE_64BIT ? (LONG)pci.u.type0.BaseAddresses[3] : 0;
+    if (!bar0 || !bar2Address.QuadPart)
         return ERROR_DEV_NOT_EXIST;
     for (i = 0; i < ARRAY_COUNT(ranges); ++i) {
         VIDEO_ACCESS_RANGE *r = &ranges[i];
         if (r->RangeInIoSpace || !r->RangeLength) continue;
         if (r->RangeStart.HighPart == 0 &&
-            r->RangeStart.LowPart == (bar0 & ~15UL) && r->RangeLength >= MIN_FRAME_BYTES)
+            r->RangeStart.LowPart == bar0 && r->RangeLength >= MIN_FRAME_BYTES)
             a->fb = *r;
-        if (r->RangeStart.LowPart == (bar2 & ~15UL) &&
-            (ULONG)r->RangeStart.HighPart ==
-            ((bar2 & 6) == 4 ? pci.u.type0.BaseAddresses[3] : 0) &&
+        if (r->RangeStart.QuadPart == bar2Address.QuadPart &&
             r->RangeLength >= DISPI_OFFSET + DISPI_BYTES)
             registers = r;
     }
