@@ -8,6 +8,7 @@
 #include "rb2kprobe.h"
 
 typedef HRESULT (WINAPI *CREATE_DIRECTDRAW)(GUID *, LPDIRECTDRAW *, IUnknown *);
+BOOL probe_ddraw_window(LPDIRECTDRAW dd, const char *path, DWORD memory);
 enum { Unavailable, Passed, Mismatch, NoHardware };
 
 static HRESULT report(const char *path, const char *operation, HRESULT hr)
@@ -142,7 +143,7 @@ done:
 }
 
 static int check_path(CREATE_DIRECTDRAW create, const char *path, DWORD createFlags, DWORD memory,
-                      BOOL copy)
+                      enum RB2K_DDRAW_TEST test)
 {
     LPDIRECTDRAW dd = NULL;
     DDCAPS hardware, emulation;
@@ -152,6 +153,10 @@ static int check_path(CREATE_DIRECTDRAW create, const char *path, DWORD createFl
     if (hr == DDERR_NODIRECTDRAWHW && createFlags == DDCREATE_HARDWAREONLY)
         result = NoHardware;
     if (FAILED(report(path, "DirectDrawCreate", hr))) return result;
+    if (test == RB2K_DDRAW_WINDOW) {
+        result = probe_ddraw_window(dd, path, memory) ? Passed : Mismatch;
+        goto done;
+    }
     hr = IDirectDraw_SetCooperativeLevel(dd, NULL, DDSCL_NORMAL);
     if (FAILED(report(path, "SetCooperativeLevel(normal)", hr))) goto done;
     ZeroMemory(&hardware, sizeof(hardware));
@@ -167,7 +172,7 @@ static int check_path(CREATE_DIRECTDRAW create, const char *path, DWORD createFl
         printf("DirectDraw %s HEL caps=%08lX colorfill=%d\n", path, emulation.dwCaps,
                !!(emulation.dwCaps & DDCAPS_BLTCOLORFILL));
     }
-    result = fill_test(path, dd, memory, copy);
+    result = fill_test(path, dd, memory, test == RB2K_DDRAW_COPY);
     if (createFlags == DDCREATE_HARDWAREONLY && result != Mismatch) {
         if (FAILED(hr)) result = Unavailable;
         else if (hardware.dwCaps & DDCAPS_NOHARDWARE) result = NoHardware;
@@ -178,7 +183,7 @@ done:
     return result;
 }
 
-int probe_ddraw(BOOL copy)
+int probe_ddraw(enum RB2K_DDRAW_TEST test)
 {
     static const char *const states[] = {"unavailable", "pixel-pass", "pixel-mismatch", "no-HAL"};
     char filename[MAX_PATH];
@@ -203,11 +208,14 @@ int probe_ddraw(BOOL copy)
         FreeLibrary(module);
         return 4;
     }
-    hardware = check_path(create, "hardware-only", DDCREATE_HARDWAREONLY, DDSCAPS_VIDEOMEMORY, copy);
-    emulation = check_path(create, "emulation-only", DDCREATE_EMULATIONONLY, DDSCAPS_SYSTEMMEMORY, copy);
+    hardware = check_path(create, "hardware-only", DDCREATE_HARDWAREONLY, DDSCAPS_VIDEOMEMORY, test);
+    emulation = check_path(create, "emulation-only", DDCREATE_EMULATIONONLY, DDSCAPS_SYSTEMMEMORY, test);
     FreeLibrary(module);
-    printf("DirectDraw hardware_video_fill=%s emulation_system_fill=%s\n",
-           states[hardware], states[emulation]);
+    if (test == RB2K_DDRAW_WINDOW)
+        printf("DirectDraw window hardware=%s software=%s\n", states[hardware], states[emulation]);
+    else
+        printf("DirectDraw hardware_video_fill=%s emulation_system_fill=%s\n",
+               states[hardware], states[emulation]);
     if (fflush(stdout) || ferror(stdout) || emulation != Passed || hardware == Mismatch) return 1;
     if (hardware == NoHardware) return 3;
     return hardware == Passed ? 0 : 5;

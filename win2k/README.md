@@ -6,7 +6,9 @@ registers and maps video memory. The display DLL gives GDI a top-down
 32-bit bitmap backed by that memory. GDI draws directly into the visible
 framebuffer. The driver performs DirectDraw colour fills and whole-surface
 copies on the host for up to four XRGB32 offscreen surfaces, each up to
-1024×768. A separate diagnostic draws one pixel on the host
+1024×768. Applications can copy a source rectangle from these surfaces
+to a window using a DirectDraw primary surface and an HWND clipper.
+A separate diagnostic draws one pixel on the host
 through the same virtio control queue.
 
 On the Linux build host, run `win2k/build.sh` with the Windows 2000 DDK
@@ -70,6 +72,21 @@ the two fills and the copy, then one transfer from the destination when
 the application locked it. A separate two-surface test verified edits
 across scanlines at 1024×768 and isolation from a 1019×753 surface.
 The guest retained its 1024×768 mode across a cold boot.
+
+`w2kprobe.exe /window` opens a 640×480 test window and attaches a
+DirectDraw clipper to it. It presents a solid colour, then a cropped
+pattern from a host texture, first with another window overlapping it
+and again after uncovering it. The probe checks the image, the window
+margins and the overlapping window through GDI. It repeats the test
+using DirectDraw software emulation as a control.
+
+On Windows 2000 SP4 in UTM at 1024×768×32, both paths passed. Known solid
+colours needed no GPU readback. For a patterned image the primary shares
+GDI's framebuffer, so the driver reads back the visible rectangles. The
+overlapping window left 286,833 pixels visible, requiring 1,147,332
+bytes across four rectangles. Removing the overlap yielded one rectangle
+of 298,936 pixels. The application uploaded its source pattern once
+during setup. Presenting the window required no uploads.
 
 The earlier 0.0.7.0 build supported full-surface fills on textures of
 at most 4 KiB each. GDI continues to draw the primary desktop. On 0.0.6.0

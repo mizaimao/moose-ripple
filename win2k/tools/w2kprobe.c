@@ -7,7 +7,7 @@
 #include <string.h>
 #include "rb2kprobe.h"
 
-int probe_ddraw(BOOL copy);
+int probe_ddraw(enum RB2K_DDRAW_TEST test);
 
 static HANDLE output;
 static BOOL output_failed;
@@ -271,14 +271,16 @@ int main(int argc,char **argv)
     output=GetStdHandle(STD_OUTPUT_HANDLE);
     if (argc == 2 && !lstrcmpiA(argv[1], "/gpu")) {
         result = gpu_test();
+    } else if (argc == 2 && !lstrcmpiA(argv[1], "/window")) {
+        result = probe_ddraw(RB2K_DDRAW_WINDOW);
     } else if (argc == 2 && (!lstrcmpiA(argv[1], "/ddraw") || !lstrcmpiA(argv[1], "/ddraw-full"))) {
-        result = probe_ddraw(!lstrcmpiA(argv[1], "/ddraw-full"));
+        result = probe_ddraw(!lstrcmpiA(argv[1], "/ddraw-full") ? RB2K_DDRAW_COPY : RB2K_DDRAW_FILL);
     } else if (argc == 2 && !lstrcmpiA(argv[1], "/pattern800")) {
         result = run(TRUE, 800, 600);
     } else if (argc == 1 || (argc == 2 && !lstrcmpiA(argv[1], "/pattern"))) {
         result = run(argc == 2, RB2K_DEFAULT_WIDTH, RB2K_DEFAULT_HEIGHT);
     } else {
-        line("Usage: W2KPROBE [/pattern | /pattern800 | /gpu | /ddraw | /ddraw-full]"); return 2;
+        line("Usage: W2KPROBE [/pattern | /pattern800 | /gpu | /ddraw | /ddraw-full | /window]"); return 2;
     }
     if(output_failed) return 1;
     return result;
