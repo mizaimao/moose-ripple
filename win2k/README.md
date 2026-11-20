@@ -166,11 +166,12 @@ settings, 32-bit colour, one emulated Pentium III in UTM on Apple silicon:
     (the result is in demoq3\qconsole.log)
 
 With 2.6 times the pixels the frame rate hardly changes, so on this host
-the frame's readback and copy are not the limit; the emulated CPU or
-the cost of each request to the host is, which is not yet measured. Screen captures of the windowed run showed the
-level's textures, lighting and the game's text. Windows 98 reached about
-300 frames a second in a window on a Proxmox VE host whose CPU is not
-emulated; it has not been timed in UTM.
+the frame's readback and copy are not the limit; the emulated CPU or the
+cost of each request to the host is, which is not yet measured. Screen
+captures of the windowed run showed the level's textures, lighting and
+the game's text. Windows 98 reached about 300 frames a second in a window
+on a Proxmox VE host whose CPU is not emulated; it has not been timed in
+UTM.
 
 ## Speed
 
