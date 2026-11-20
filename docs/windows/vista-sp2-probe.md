@@ -41,6 +41,20 @@ Direct3D 9 `OpenAdapter` export.
 The default Windows 7 kernel driver and x64 and x86 Mesa targets also rebuilt
 in a separate build directory.
 
+### UTM test guest
+
+An independent copy of an existing Vista installation booted in UTM with a
+native x64 kernel, file version `6.0.6003.20555`. The guest's SetupAPI log
+recorded `PCI\VEN_1AF4&DEV_1050&SUBSYS_11001AF4&REV_01` and selected the
+built-in `display.inf` VGA driver. Windows accepted a normal shutdown, and a
+powered-off snapshot preserves this state. The interactive desktop has yet
+to be confirmed.
+
+The same three Ripple binaries were checked again against the native and
+WOW64 files in that guest. All 328 static imports resolved, including forwarded
+exports, as did the 16 GDI lookups in each DLL. The signed Ripple driver,
+hardware rendering and Aero still need a guest test.
+
 ## Rebuild and signing handoff
 
 From the Vista worktree on the Linux builder, set `MAIN` to the checkout
