@@ -152,6 +152,26 @@ at about 430 frames a second and Mesa's softpipe at about 9. A screen
 capture of a 640×480 run showed the whole scene, clipped by an overlapping
 window.
 
+The Quake III Arena demo runs on the host GPU too, from its files copied
+to `C:` (it needs no installer). `timedemo` with `demo001`, default
+settings, 32-bit colour, one emulated Pentium III in UTM on Apple silicon:
+
+| Mode | frames a second |
+| --- | ---: |
+| 640×480 in a window | 85 |
+| 1024×768 full-screen | 82 |
+
+    quake3.exe +set logfile 2 +set timedemo 1 +set s_initsound 0 +set r_mode 3
+        +set r_fullscreen 0 +set nextdemo quit +demo demo001
+    (the result is in demoq3\qconsole.log)
+
+With 2.6 times the pixels the frame rate hardly changes, so on this host
+the frame's readback and copy are not the limit; the emulated CPU or
+the cost of each request to the host is, which is not yet measured. Screen captures of the windowed run showed the
+level's textures, lighting and the game's text. Windows 98 reached about
+300 frames a second in a window on a Proxmox VE host whose CPU is not
+emulated; it has not been timed in UTM.
+
 ## Speed
 
 `ddbench.exe` times the same DirectDraw frames through the driver
