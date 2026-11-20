@@ -4,8 +4,9 @@ This x86 driver draws a Windows 2000 desktop on QEMU's `virtio-vga-gl`
 adapter (PCI `1AF4:1050`). The miniport programs the compatibility display
 registers and maps video memory. The display DLL gives GDI a top-down
 32-bit bitmap backed by that memory. GDI draws directly into the visible
-framebuffer. The 0.0.7.0 candidate adds DirectDraw callbacks for small
-offscreen surfaces. A separate diagnostic draws one pixel on the host
+framebuffer. The driver performs DirectDraw colour fills and whole-surface
+copies on the host for up to four XRGB32 offscreen surfaces, each up to
+1024×768. A separate diagnostic draws one pixel on the host
 through the same virtio control queue.
 
 On the Linux build host, run `win2k/build.sh` with the Windows 2000 DDK
@@ -19,9 +20,12 @@ Run `w2kprobe.exe` to see the hardware ID and current modes. Run
 Windows. The helper obtains the adapter's complete PCI hardware ID from
 SetupAPI before calling the native device installer.
 
-Run `w2kprobe.exe /pattern` to switch temporarily to 800×600×32, sample
-red, green, blue and white on the visible window and restore the prior mode.
-The miniport also advertises 640×480 and 1024×768 at 32 bits.
+The preferred desktop is 1024×768 at 32 bits and 60 Hz. The installer
+supplies defaults for a new device and preserves an existing selection.
+Use Display Properties to save 1024×768 on an upgraded guest. The driver
+also supports 640×480 and 800×600. Run `w2kprobe.exe /pattern` to
+sample four colours at 1024×768 and restore the original mode. Use
+`/pattern800` to exercise the same change and restoration at 800×600.
 
 Run `w2kprobe.exe /gpu` to exercise the host renderer. The miniport creates
 a private 1×1 texture, clears it to orange, waits for completion, and
@@ -53,8 +57,22 @@ driver exposes its transfer counters, the test checks for two GPU fills,
 zero earlier readbacks, one readback at lock, and zero uploads. Run on an
 idle desktop so unrelated DirectDraw clients do not contribute to the totals.
 
-0.0.7.0 targets full-surface fills on up to four XRGB32 surfaces of at
-most 4 KiB each. GDI continues to draw the primary desktop. On 0.0.6.0
+Run `w2kprobe.exe /ddraw-full` at 1024×768×32 to check a pair of
+desktop-sized surfaces. It fills the source, copies it to the destination,
+and overwrites the source before locking the destination. A pass requires
+all 786,432 destination pixels to retain the first colour on both paths.
+The hardware path must report two fills, one host-side copy, no uploads,
+and a single readback at the lock.
+
+On Windows 2000 Professional SP4 under Apple-silicon UTM, 0.0.8.0 passed
+this test on a 1024×768×32 desktop at 60 Hz. QEMU recorded both textures,
+the two fills and the copy, then one transfer from the destination when
+the application locked it. A separate two-surface test verified edits
+across scanlines at 1024×768 and isolation from a 1019×753 surface.
+The guest retained its 1024×768 mode across a cold boot.
+
+The earlier 0.0.7.0 build supported full-surface fills on textures of
+at most 4 KiB each. GDI continues to draw the primary desktop. On 0.0.6.0
 the DirectDraw capability check reported no hardware acceleration and the
 software control passed (exit 3).
 

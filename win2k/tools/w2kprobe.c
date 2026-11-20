@@ -1,4 +1,4 @@
-/* Windows 2000 display baseline; /pattern is the only option that changes a mode. */
+/* Windows 2000 display diagnostic. Pattern checks temporarily select a mode. */
 #define WINVER 0x0500
 #define _WIN32_WINNT 0x0500
 #include <windows.h>
@@ -7,7 +7,7 @@
 #include <string.h>
 #include "rb2kprobe.h"
 
-int probe_ddraw(void);
+int probe_ddraw(BOOL copy);
 
 static HANDLE output;
 static BOOL output_failed;
@@ -130,7 +130,7 @@ static LRESULT CALLBACK window_proc(HWND window,UINT msg,WPARAM wp,LPARAM lp)
     return DefWindowProcA(window,msg,wp,lp);
 }
 
-static BOOL paint_test(void)
+static BOOL paint_test(DWORD width, DWORD height)
 {
     WNDCLASSA wc;
     HWND w;
@@ -144,7 +144,7 @@ static BOOL paint_test(void)
     wc.lpfnWndProc=window_proc;
     if(!RegisterClassA(&wc)) return FALSE;
     w=CreateWindowExA(WS_EX_TOPMOST|WS_EX_TOOLWINDOW,wc.lpszClassName,"Display test",
-        WS_POPUP,0,0,800,600,NULL,NULL,wc.hInstance,NULL);
+        WS_POPUP,0,0,(int)width,(int)height,NULL,NULL,wc.hInstance,NULL);
     if(!w){ UnregisterClassA(wc.lpszClassName,wc.hInstance); return FALSE; }
     ShowWindow(w,SW_SHOWNOACTIVATE);
     RedrawWindow(w,NULL,NULL,RDW_INVALIDATE|RDW_UPDATENOW);
@@ -181,7 +181,7 @@ static BOOL same_mode(const DEVMODEA *a,const DEVMODEA *b)
            a->dmDisplayFlags==b->dmDisplayFlags;
 }
 
-static int run(BOOL pattern)
+static int run(BOOL pattern, DWORD width, DWORD height)
 {
     OSVERSIONINFOEXA os;
     DEVMODEA original,m,desired,restore;
@@ -200,24 +200,24 @@ static int run(BOOL pattern)
     show_mode("Current",&original);
     for(i=0;mode(i,&m);i++) {
         show_mode("Mode",&m);
-        if(m.dmPelsWidth==800 && m.dmPelsHeight==600 && m.dmBitsPerPel==32) had_target=TRUE;
+        if(m.dmPelsWidth==width && m.dmPelsHeight==height && m.dmBitsPerPel==32) had_target=TRUE;
     }
-    wsprintfA(buf,"Modes=%lu target_800x600x32=%s",i,had_target?"yes":"no"); line(buf);
+    wsprintfA(buf,"Modes=%lu target_%lux%lux32=%s",i,width,height,had_target?"yes":"no"); line(buf);
     if (!i) ok=FALSE;
     if(!pattern) return ok?0:1;
     if(!had_target) { line("Pattern SKIP requested mode unavailable"); return 3; }
     ZeroMemory(&desired,sizeof desired); desired.dmSize=sizeof desired;
     desired.dmFields=DM_PELSWIDTH|DM_PELSHEIGHT|DM_BITSPERPEL;
-    desired.dmPelsWidth=800; desired.dmPelsHeight=600; desired.dmBitsPerPel=32;
+    desired.dmPelsWidth=width; desired.dmPelsHeight=height; desired.dmBitsPerPel=32;
     result=ChangeDisplaySettingsA(&desired,CDS_TEST);
     wsprintfA(buf,"Test mode result=%ld",result); line(buf);
     if(result!=DISP_CHANGE_SUCCESSFUL) return 3;
     result=ChangeDisplaySettingsA(&desired,CDS_FULLSCREEN);
     wsprintfA(buf,"Set mode result=%ld",result); line(buf);
     if(result!=DISP_CHANGE_SUCCESSFUL) return 1;
-    matched=mode(ENUM_CURRENT_SETTINGS,&m) && m.dmPelsWidth==800 && m.dmPelsHeight==600 && m.dmBitsPerPel==32;
+    matched=mode(ENUM_CURRENT_SETTINGS,&m) && m.dmPelsWidth==width && m.dmPelsHeight==height && m.dmBitsPerPel==32;
     if(matched) show_mode("Pattern mode",&m);
-    if(!matched || !paint_test()) ok=FALSE;
+    if(!matched || !paint_test(width,height)) ok=FALSE;
     restore=original;
     restore.dmFields=DM_PELSWIDTH|DM_PELSHEIGHT|DM_BITSPERPEL|DM_DISPLAYFLAGS;
     if(original.dmDisplayFrequency>1) restore.dmFields|=DM_DISPLAYFREQUENCY;
@@ -271,12 +271,14 @@ int main(int argc,char **argv)
     output=GetStdHandle(STD_OUTPUT_HANDLE);
     if (argc == 2 && !lstrcmpiA(argv[1], "/gpu")) {
         result = gpu_test();
-    } else if (argc == 2 && !lstrcmpiA(argv[1], "/ddraw")) {
-        result = probe_ddraw();
+    } else if (argc == 2 && (!lstrcmpiA(argv[1], "/ddraw") || !lstrcmpiA(argv[1], "/ddraw-full"))) {
+        result = probe_ddraw(!lstrcmpiA(argv[1], "/ddraw-full"));
+    } else if (argc == 2 && !lstrcmpiA(argv[1], "/pattern800")) {
+        result = run(TRUE, 800, 600);
     } else if (argc == 1 || (argc == 2 && !lstrcmpiA(argv[1], "/pattern"))) {
-        result = run(argc == 2);
+        result = run(argc == 2, RB2K_DEFAULT_WIDTH, RB2K_DEFAULT_HEIGHT);
     } else {
-        line("Usage: W2KPROBE [/pattern | /gpu | /ddraw]"); return 2;
+        line("Usage: W2KPROBE [/pattern | /pattern800 | /gpu | /ddraw | /ddraw-full]"); return 2;
     }
     if(output_failed) return 1;
     return result;
