@@ -1,0 +1,221 @@
+Vista: lock an allocation only for the length of one CPU access. Vista shows
+the CPU what the GPU wrote only through a lock taken after the write, so a
+mapping kept from an earlier lock reads old data. Every map now takes a
+fresh lock and every unmap releases it. The staging pool, which keeps one
+lock for its whole life, is switched off by clearing the copy-transfer caps.
+
+--- a/src/gallium/drivers/virgl/virgl_buffer.c
++++ b/src/gallium/drivers/virgl/virgl_buffer.c
+@@ -36,6 +36,7 @@
+    bool persistent_coherent = trans->base.usage & (PIPE_MAP_PERSISTENT |
+                                                    PIPE_MAP_COHERENT);
+ 
++   virgl_transfer_release_map(vctx, trans);
+    if ((trans->base.usage & PIPE_MAP_WRITE) && !persistent_coherent) {
+       if (transfer->usage & PIPE_MAP_FLUSH_EXPLICIT) {
+          if (trans->range.end <= trans->range.start) {
+--- a/src/gallium/drivers/virgl/virgl_query.c
++++ b/src/gallium/drivers/virgl/virgl_query.c
+@@ -212,6 +212,8 @@
+       return false;
+ 
+    host_state->query_state = VIRGL_QUERY_STATE_WAIT_HOST;
++   if (vs->vws->resource_unmap)
++      vs->vws->resource_unmap(vs->vws, query->buf->hw_res);
+    query->ready = false;
+ 
+    virgl_encoder_end_query(vctx, query->handle);
+@@ -252,6 +254,9 @@
+          return false;
+ 
+       host_state = vs->vws->resource_map(vs->vws, query->buf->hw_res);
++
++      if (!host_state)
++         return false;
+ 
+       /* The resource is idle and the result should be available at this point,
+        * unless we are dealing with an older host.  In that case,
+@@ -266,10 +271,14 @@
+             pipe_buffer_unmap(ctx, transfer);
+             if (!wait)
+                return false;
++         } else if (vs->vws->resource_unmap) {
++            vs->vws->resource_unmap(vs->vws, query->buf->hw_res);
+          }
+ 
+          host_state = pipe_buffer_map(ctx, &query->buf->b,
+                PIPE_MAP_READ, &transfer);
++         if (!host_state)
++            return false;
+       }
+ 
+       if (query->result_size == 8)
+@@ -279,6 +288,8 @@
+ 
+       if (transfer)
+          pipe_buffer_unmap(ctx, transfer);
++      else if (vs->vws->resource_unmap)
++         vs->vws->resource_unmap(vs->vws, query->buf->hw_res);
+ 
+       query->ready = true;
+    }
+--- a/src/gallium/drivers/virgl/virgl_resource.c
++++ b/src/gallium/drivers/virgl/virgl_resource.c
+@@ -962,11 +962,22 @@
+    return trans;
+ }
+ 
++void
++virgl_transfer_release_map(struct virgl_context *vctx, struct virgl_transfer *trans)
++{
++   struct virgl_winsys *vws = virgl_screen(vctx->base.screen)->vws;
++   if (trans->hw_res_map && vws->resource_unmap) {
++      vws->resource_unmap(vws, trans->hw_res);
++      trans->hw_res_map = NULL;
++   }
++}
++
+ void virgl_resource_destroy_transfer(struct virgl_context *vctx,
+                                      struct virgl_transfer *trans)
+ {
+    struct virgl_winsys *vws = virgl_screen(vctx->base.screen)->vws;
+ 
++   virgl_transfer_release_map(vctx, trans);
+    vws->resource_reference(vws, &trans->copy_src_hw_res, NULL);
+ 
+    util_range_destroy(&trans->range);
+--- a/src/gallium/drivers/virgl/virgl_resource.h
++++ b/src/gallium/drivers/virgl/virgl_resource.h
+@@ -193,6 +193,8 @@
+                                unsigned level, unsigned usage,
+                                const struct pipe_box *box);
+ 
++void virgl_transfer_release_map(struct virgl_context *vctx, struct virgl_transfer *trans);
++
+ void virgl_resource_destroy_transfer(struct virgl_context *vctx,
+                                      struct virgl_transfer *trans);
+ 
+--- a/src/gallium/drivers/virgl/virgl_texture.c
++++ b/src/gallium/drivers/virgl/virgl_texture.c
+@@ -160,7 +160,7 @@
+ 
+    resolve_tmp = ctx->screen->resource_create(ctx->screen, &templ);
+    if (!resolve_tmp)
+-      return NULL;
++      goto fail;
+ 
+    if (usage & PIPE_MAP_READ) {
+       virgl_copy_region_with_blit(ctx, resolve_tmp, 0, &dst_box, resource,
+@@ -186,6 +186,7 @@
+          struct virgl_winsys *vws = virgl_screen(ctx->screen)->vws;
+          void *src = ptr;
+          ptr = vws->resource_map(vws, vtex->hw_res);
++         trans->hw_res_map = ptr;
+          if (!ptr)
+             goto fail;
+ 
+@@ -216,6 +217,8 @@
+    }
+ 
+ fail:
++   if (trans->resolve_transfer)
++      virgl_resource_destroy_transfer(vctx, virgl_transfer(trans->resolve_transfer));
+    pipe_resource_reference(&resolve_tmp, NULL);
+    virgl_resource_destroy_transfer(vctx, trans);
+    return NULL;
+@@ -264,6 +267,10 @@
+    struct virgl_context *vctx = virgl_context(ctx);
+    struct virgl_transfer *trans = virgl_transfer(transfer);
+    bool queue_unmap = false;
++
++   virgl_transfer_release_map(vctx, trans);
++   if (trans->resolve_transfer)
++      virgl_transfer_release_map(vctx, virgl_transfer(trans->resolve_transfer));
+ 
+    if (transfer->usage & PIPE_MAP_WRITE &&
+        (transfer->usage & PIPE_MAP_FLUSH_EXPLICIT) == 0) {
+--- a/src/gallium/drivers/virgl/virgl_transfer_queue.c
++++ b/src/gallium/drivers/virgl/virgl_transfer_queue.c
+@@ -366,11 +366,10 @@
+ 
+    u_box_1d(offset, size, &box);
+    queued = virgl_transfer_queue_find_overlap(queue, hw_res, 0, &box, true);
+-   if (!queued)
++   if (!queued || !queued->hw_res_map)
+       return false;
+ 
+    assert(queued->base.resource->target == PIPE_BUFFER);
+-   assert(queued->hw_res_map);
+ 
+    memcpy((uint8_t *)queued->hw_res_map + offset, data, size);
+    u_box_union_2d(&queued->base.box, &queued->base.box, &box);
+--- a/src/gallium/drivers/virgl/virgl_winsys.h
++++ b/src/gallium/drivers/virgl/virgl_winsys.h
+@@ -81,6 +81,7 @@
+                               struct virgl_hw_res *sres);
+ 
+    void *(*resource_map)(struct virgl_winsys *vws, struct virgl_hw_res *res);
++   void (*resource_unmap)(struct virgl_winsys *vws, struct virgl_hw_res *res);
+    void (*resource_wait)(struct virgl_winsys *vws, struct virgl_hw_res *res);
+    bool (*resource_is_busy)(struct virgl_winsys *vws,
+                             struct virgl_hw_res *res);
+--- a/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
++++ b/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
+@@ -645,17 +645,17 @@
+ static void *
+ virgl_gdi_resource_map(struct virgl_winsys *qws, struct virgl_hw_res *res)
+ {
+-   if (res->ptr)
+-      return res->ptr;
++   void *ptr = NULL;
+ 
+    struct virgl_gdi_winsys *qdws = virgl_gdi_winsys(qws);
+ 
+    D3DDDICB_LOCKFLAGS flags;
+    flags.Value = 0;
+    flags.IgnoreSync = true;
++   flags.LockEntire = true;
+ 
+    NTSTATUS Status = qdws->device->lockAllocation(
+-      qdws->device, res->hAllocation, flags, &res->ptr);
++      qdws->device, res->hAllocation, flags, &ptr);
+    if (!NT_SUCCESS(Status)) {
+       _debug_printf(
+          "Failed to map allocation(D3DKMTLock) with status code: %lx\n",
+@@ -663,7 +663,16 @@
+       return NULL;
+    }
+ 
+-   return res->ptr;
++   return ptr;
++}
++
++static void
++virgl_gdi_resource_unmap(struct virgl_winsys *vws, struct virgl_hw_res *res)
++{
++   struct gdikmt_device *dev = virgl_gdi_winsys(vws)->device;
++   NTSTATUS status = dev->unlockAllocation(dev, res->hAllocation);
++   if (!NT_SUCCESS(status))
++      _debug_printf("Failed to unlock allocation: %lx\n", status);
+ }
+ 
+ static void
+@@ -1122,6 +1131,10 @@
+       if (!NT_SUCCESS(ret))
+          return -1;
+    }
++   /* The staging pool keeps a CPU lock across host transfers. Vista requires
++    * a fresh mapping to make data written by the GPU visible to the CPU. */
++   caps->caps.v2.capability_bits &= ~VIRGL_CAP_COPY_TRANSFER;
++   caps->caps.v2.capability_bits_v2 &= ~VIRGL_CAP_V2_COPY_TRANSFER_BOTH_DIRECTIONS;
+    return 0;
+ }
+ 
+@@ -1262,6 +1275,7 @@
+    qdws->base.resource_get_storage_size =
+       virgl_gdi_winsys_resource_get_storage_size;
+    qdws->base.resource_map = virgl_gdi_resource_map;
++   qdws->base.resource_unmap = virgl_gdi_resource_unmap;
+    qdws->base.resource_wait = virgl_gdi_resource_wait;
+    qdws->base.resource_is_busy = virgl_gdi_resource_is_busy;
+ 

@@ -224,6 +224,18 @@ d3dddi_lock_allocation(struct gdikmt_device *dev, D3DKMT_HANDLE hAllocation,
    return hr;
 }
 
+#ifdef RIPPLE_VISTA
+static NTSTATUS
+d3dddi_unlock_allocation(struct gdikmt_device *dev, D3DKMT_HANDLE hAllocation)
+{
+   struct gdikmt_device_d3dddi *ddi = d3dddi_device(dev);
+   D3DDDICB_UNLOCK arg = {};
+   arg.NumAllocations = 1;
+   arg.phAllocations = &hAllocation;
+   return ddi->KTCallbacks.pfnUnlockCb(ddi->hRTDevice, &arg);
+}
+#endif
+
 static NTSTATUS
 d3dddi_render(struct gdikmt_context *ctx, struct gdikmt_render *render)
 {
@@ -374,6 +386,9 @@ gdikmt_d3dddi_fill_basefuncs(struct gdikmt_device_d3dddi *device)
    device->base.queryAllocation = d3dddi_query_allocation;
    device->base.openAllocation = d3dddi_open_allocation;
    device->base.lockAllocation = d3dddi_lock_allocation;
+#ifdef RIPPLE_VISTA
+   device->base.unlockAllocation = d3dddi_unlock_allocation;
+#endif
    device->base.createContext = d3dddi_create_context;
    device->base.present = d3dddi_present;
    device->base.setDisplayMode = d3dddi_set_display_mode;

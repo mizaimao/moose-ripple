@@ -111,9 +111,13 @@ struct gdikmt_device {
    NTSTATUS (*queryAllocation)(struct gdikmt_device *dev, struct gdikmt_openallocation *open);
    NTSTATUS (*openAllocation)(struct gdikmt_device *dev, struct gdikmt_openallocation *open);
 
-   /* The allocation's memory, for as long as the allocation lives. */
+   /* Map allocation memory for CPU access. */
    NTSTATUS (*lockAllocation)(struct gdikmt_device *dev, D3DKMT_HANDLE hAllocation,
                               D3DDDICB_LOCKFLAGS flags, void **ptr);
+
+#ifdef RIPPLE_VISTA
+   NTSTATUS (*unlockAllocation)(struct gdikmt_device *dev, D3DKMT_HANDLE hAllocation);
+#endif
 
    NTSTATUS (*createContext)(struct gdikmt_device *dev, struct gdikmt_context **ctx);
 
