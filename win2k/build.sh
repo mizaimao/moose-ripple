@@ -6,6 +6,11 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo=$(cd "$here/.." && pwd)
 kit=$(cd "${WIN9X_TOOLS:-$repo/.tools/win9x}" && pwd)
 out=${OUT:-$repo/build/win2k}
+archive=${WINED3D_SOURCE:-}
+case "$archive" in
+    ""|/*) ;;
+    *) archive=$PWD/$archive ;;
+esac
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 work=$(mktemp -d "$out/.obj.XXXXXX")
@@ -98,3 +103,6 @@ PY
 cp rb2kmp.sys rb2kdisp.dll rbntmode.dll nt5inst.exe w2kprobe.exe ddbench.exe rvdstat.exe flipcycle.exe memtest.exe regmode.exe "$out/"
 # Use the same Windows text format for folder installs and test discs.
 awk '{ sub(/\r$/, ""); printf "%s\r\n", $0 }' "$here/rb2k.inf" > "$out/rb2k.inf"
+if [ -n "$archive" ]; then
+    sh "$here/d3d/build.sh" "$archive" "$out"
+fi

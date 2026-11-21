@@ -1,0 +1,62 @@
+--- a/dlls/wined3d/directx.c
++++ b/dlls/wined3d/directx.c
+@@ -3641,4 +3641,9 @@
+         gl_info->supported[ARB_HALF_FLOAT_VERTEX] = TRUE;
+     }
++    /* Ripple's virgl path can encode a clear on an sRGB backing even when
++     * the render-target view is linear. Wine already has distinct linear
++     * and sRGB texture storage for implementations without decode control. */
++    if (!strncmp(gl_renderer_str, "virgl", 5) && GetModuleHandleA("ripplegl.dll"))
++        gl_info->supported[EXT_TEXTURE_SRGB_DECODE] = FALSE;
+     if (gl_info->supported[ARB_FRAMEBUFFER_SRGB] && !gl_info->supported[EXT_TEXTURE_SRGB_DECODE])
+     {
+--- a/dlls/wined3d/device.c
++++ b/dlls/wined3d/device.c
+@@ -30,2 +30,3 @@
++#include <math.h>
+ #include <stdio.h>
+ #ifdef HAVE_FLOAT_H
+@@ -287,2 +288,9 @@
++static float clear_srgb_component(float linear)
++{
++    if (linear <= wined3d_srgb_const1[0])
++        return linear * wined3d_srgb_const0[3];
++    return wined3d_srgb_const0[1] * powf(linear, wined3d_srgb_const0[0]) - wined3d_srgb_const0[2];
++}
++
+ void device_clear_render_targets(struct wined3d_device *device, UINT rt_count, const struct wined3d_fb_state *fb,
+         UINT rect_count, const RECT *rects, const RECT *draw_rect, DWORD flags, const struct wined3d_color *color,
+@@ -387,4 +395,26 @@
+     if (flags & WINED3DCLEAR_TARGET)
+     {
++        const struct wined3d_rendertarget_view *rt0 = rt_count ? fb->render_targets[0] : NULL;
++        BOOL srgb = rt0 && (rt0->format_flags & WINED3DFMT_FLAG_SRGB_WRITE)
++                && device->state.render_states[WINED3D_RS_SRGBWRITEENABLE];
++        struct wined3d_color clear_color = *color;
++
++        /* Clear has no fragment shader. Match the conversion that a draw
++         * would apply, including before the next draw processes dirty state. */
++        if (gl_info->supported[ARB_FRAMEBUFFER_SRGB])
++        {
++            if (srgb)
++                gl_info->gl_ops.gl.p_glEnable(GL_FRAMEBUFFER_SRGB);
++            else
++                gl_info->gl_ops.gl.p_glDisable(GL_FRAMEBUFFER_SRGB);
++            context_invalidate_state(context, STATE_RENDER(WINED3D_RS_SRGBWRITEENABLE));
++        }
++        else if (srgb)
++        {
++            clear_color.r = clear_srgb_component(color->r);
++            clear_color.g = clear_srgb_component(color->g);
++            clear_color.b = clear_srgb_component(color->b);
++        }
++
+         for (i = 0; i < rt_count; ++i)
+         {
+@@ -403,5 +433,5 @@
+         context_invalidate_state(context, STATE_RENDER(WINED3D_RS_COLORWRITEENABLE2));
+         context_invalidate_state(context, STATE_RENDER(WINED3D_RS_COLORWRITEENABLE3));
+-        gl_info->gl_ops.gl.p_glClearColor(color->r, color->g, color->b, color->a);
++        gl_info->gl_ops.gl.p_glClearColor(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
+         checkGLcall("glClearColor");
+         clear_mask = clear_mask | GL_COLOR_BUFFER_BIT;
