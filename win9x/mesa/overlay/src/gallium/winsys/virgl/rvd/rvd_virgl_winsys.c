@@ -10,6 +10,9 @@
  *   - a finished frame is read back into its buffer's memory and drawn on the window with
  *     GDI (flush_frontbuffer), which also clips it against other windows.
  *
+ * Windows 2000 has no VxD: the same calls go to the display driver with ExtEscape
+ * (win2k/rb2krvd.h and win2k/display_rvd.c), which keeps a buffer's memory in this process.
+ *
  * The resource cache, reference counting and command buffer resource lists are adapted from
  * that file.
  *
@@ -57,11 +60,16 @@
 #include "rvd.h"
 #include "rvd_virgl_public.h"
 
+/* The display driver's escape on Windows 2000 (win2k/rb2krvd.h). */
+#define RB2K_RVD_ESCAPE 0x52420010
+
 #define CACHE_TIMEOUT_USEC      1000000
 
 struct rvd_winsys {
    struct virgl_winsys base;
    HANDLE dev;
+   bool nt;                            /* Windows 2000: the display driver instead */
+   simple_mtx_t call_mutex;            /* one call at a time */
    uint32_t ctx;
    struct rvd_info info;
 
@@ -139,6 +147,30 @@ static bool rvd_call(struct rvd_winsys *ws, DWORD code, const void *in, DWORD in
 {
    DWORD n = 0;
 
+   if (ws->nt) {
+      /* A screen DC for each call: a DC kept from the thread that made the screen is
+       * refused once that thread has ended (threadtest), so every later call failed. */
+      char stack[256];
+      char *buf = in_len + 4 <= sizeof(stack) ? stack : MALLOC(in_len + 4);
+      HDC dc;
+      bool ok = false;
+
+      if (!buf)
+         return false;
+      memcpy(buf, &code, 4);
+      if (in_len)
+         memcpy(buf + 4, in, in_len);
+      simple_mtx_lock(&ws->call_mutex);
+      dc = GetDC(NULL);
+      if (dc) {
+         ok = ExtEscape(dc, RB2K_RVD_ESCAPE, (int)(in_len + 4), buf, (int)out_len, out) > 0;
+         ReleaseDC(NULL, dc);
+      }
+      simple_mtx_unlock(&ws->call_mutex);
+      if (buf != stack)
+         FREE(buf);
+      return ok;
+   }
    return DeviceIoControl(ws->dev, code, (void *)in, in_len, out, out_len, &n, NULL) != 0;
 }
 
@@ -741,6 +773,12 @@ static void rvd_cache_entry_release(struct virgl_resource_cache_entry *entry, vo
    rvd_hw_res_destroy(user, cache_entry_container_res(entry));
 }
 
+static void rvd_close(HANDLE dev)
+{
+   if (dev != INVALID_HANDLE_VALUE)
+      CloseHandle(dev);
+}
+
 static void rvd_winsys_destroy(struct virgl_winsys *vws)
 {
    struct rvd_winsys *ws = rvd_winsys(vws);
@@ -748,7 +786,8 @@ static void rvd_winsys_destroy(struct virgl_winsys *vws)
 
    virgl_resource_cache_flush(&ws->cache);
    rvd_call(ws, RVD_CONTEXT_DESTROY, &ctx, sizeof(ctx), NULL, 0);
-   CloseHandle(ws->dev);
+   rvd_close(ws->dev);
+   simple_mtx_destroy(&ws->call_mutex);
    simple_mtx_destroy(&ws->cache_mutex);
    FREE(ws);
 }
@@ -758,21 +797,37 @@ static struct virgl_winsys *rvd_winsys_create(void)
    struct rvd_winsys *ws;
    char name[64];
    rvd_u32 ctx = 0;
-   DWORD n = 0;
    HANDLE dev;
+   bool nt = false;
 
    dev = CreateFileA(RVD_DEVICE_NAME, 0, 0, NULL, 0, 0, NULL);
-   if (dev == INVALID_HANDLE_VALUE)
-      return NULL;
+   if (dev == INVALID_HANDLE_VALUE) {
+      /* Windows 2000: the display driver answers through GDI when it has a GPU. */
+      DWORD escape = RB2K_RVD_ESCAPE;
+      HDC dc;
+
+      if (GetVersion() & 0x80000000UL)
+         return NULL;
+      dc = GetDC(NULL);
+      if (!dc)
+         return NULL;
+      nt = ExtEscape(dc, QUERYESCSUPPORT, sizeof(escape), (LPCSTR)&escape, 0, NULL) > 0;
+      ReleaseDC(NULL, dc);
+      if (!nt)
+         return NULL;
+   }
    ws = CALLOC_STRUCT(rvd_winsys);
    if (!ws) {
-      CloseHandle(dev);
+      rvd_close(dev);
       return NULL;
    }
    ws->dev = dev;
-   if (!DeviceIoControl(dev, RVD_GET_INFO, NULL, 0, &ws->info, sizeof(ws->info), &n, NULL) ||
+   ws->nt = nt;
+   simple_mtx_init(&ws->call_mutex, mtx_plain);
+   if (!rvd_call(ws, RVD_GET_INFO, NULL, 0, &ws->info, sizeof(ws->info)) ||
        ws->info.version != RVD_INTERFACE_VERSION || !ws->info.virgl) {
-      CloseHandle(dev);
+      rvd_close(dev);
+      simple_mtx_destroy(&ws->call_mutex);
       FREE(ws);
       return NULL;
    }
@@ -783,7 +838,8 @@ static struct virgl_winsys *rvd_winsys_create(void)
       const char *base = strrchr(name, '\\');
       base = base ? base + 1 : name;
       if (!rvd_call(ws, RVD_CONTEXT_CREATE, base, (DWORD)strlen(base), &ctx, sizeof(ctx))) {
-         CloseHandle(dev);
+         rvd_close(dev);
+         simple_mtx_destroy(&ws->call_mutex);
          FREE(ws);
          return NULL;
       }

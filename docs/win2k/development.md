@@ -1,0 +1,372 @@
+# Windows 2000 driver: development notes
+
+How the Windows 2000 driver (`win2k/`) was built up and checked, step by step, with
+the measurements behind each decision. The user-facing description is
+[win2k/README.md](../../win2k/README.md). Unless a section says otherwise, the guest
+is Windows 2000 Professional SP4 (build 2195), x86, in QEMU with `virtio-vga-gl`.
+
+## The framebuffer, the GPU probe and DirectDraw
+
+This x86 driver draws a Windows 2000 desktop on QEMU's `virtio-vga-gl`
+adapter (PCI `1AF4:1050`). The miniport programs the compatibility display
+registers and maps video memory. The display DLL gives GDI a top-down
+32-bit bitmap backed by that memory. GDI draws directly into the visible
+framebuffer. The driver performs DirectDraw colour fills and whole-surface
+copies on the host for up to four XRGB32 offscreen surfaces, each up to
+1024×768. Applications can copy a source rectangle from these surfaces
+to a window using a DirectDraw primary surface and an HWND clipper.
+In exclusive fullscreen mode the driver offers one back buffer when two
+pages fit in the adapter's video memory. A flip changes the adapter's display-start
+offset, and releasing the chain returns scanout to the desktop page.
+A separate diagnostic draws one pixel on the host
+through the same virtio control queue.
+
+On the Linux build host, run `win2k/build.sh` with the Windows 2000 DDK
+and Visual C++ 6.0 under Wine. The script locates the kits under
+`.tools/win9x`, or under the directory named by `WIN9X_TOOLS`. Its default
+output directory is `build/win2k`.
+
+Copy the six output files into one directory the test guest can read.
+Run `w2kprobe.exe` to see the hardware ID and current modes. Run
+`nt5inst.exe` as a local administrator to install the driver, then restart
+Windows. The helper obtains the adapter's complete PCI hardware ID from
+SetupAPI before calling the native device installer.
+
+The preferred desktop is 1024×768 at 32 bits and 60 Hz. The installer
+supplies defaults for a new device and preserves an existing selection.
+Use Display Properties to save 1024×768 on an upgraded guest. The driver
+also supports 640×480 and 800×600. Run `w2kprobe.exe /pattern` to
+sample four colours at 1024×768 and restore the original mode. Use
+`/pattern800` to exercise the same change and restoration at 800×600.
+
+Run `w2kprobe.exe /gpu` to exercise the host renderer. The miniport creates
+a private 1×1 texture, clears it to orange, waits for completion, and
+reads four bytes back. The expected BGRA pixel is `0xffff8000`. The tool
+prints the stage and error code on failure and returns zero on success.
+The desktop continues to use the mapped framebuffer during this test.
+
+On Windows 2000 Professional SP4 with driver 0.0.6.0 and an Intel UHD 630 host, the adapter
+initially had PCI bus mastering disabled. The miniport enables it for the
+probe and restores the previous setting after resetting the queue. The guest
+retrieved the exact orange pixel on two successive runs. QEMU traced both
+command submissions and readbacks, and the Intel driver's per-process render
+time advanced on each run. Afterward, the framebuffer still showed all four
+test colours and the guest switched to 1024×768 and back to 800×600.
+
+The GPU run used a previously installed Ripple service. The two driver
+files were replaced on the powered-down test disk and verified after boot.
+On a separate stock VGA installation, Windows Setup installed the same
+build after the unsigned-driver prompt. Both files matched after reboot,
+and Windows offered all three 32-bit modes. The first boot retained the
+old four-bit setting. Select a 32-bit mode before running the GPU test.
+An in-place upgrade from the previous driver still needs qualification.
+
+`w2kprobe.exe /ddraw` tests the application-facing DirectDraw API. It
+requests a 17×13 hardware-only offscreen surface, fills it with two
+different colours, then takes one read-only lock and checks all 221 pixels.
+It repeats the operation on an emulated system-memory surface. When the
+driver exposes its transfer counters, the test checks for two GPU fills,
+zero earlier readbacks, one readback at lock, and zero uploads. Run on an
+idle desktop so unrelated DirectDraw clients do not contribute to the totals.
+
+Run `w2kprobe.exe /ddraw-full` at 1024×768×32 to check a pair of
+desktop-sized surfaces. It fills the source, copies it to the destination,
+and overwrites the source before locking the destination. A pass requires
+all 786,432 destination pixels to retain the first colour on both paths.
+The hardware path must report two fills, one host-side copy, no uploads,
+and a single readback at the lock.
+
+On Windows 2000 Professional SP4 under Apple-silicon UTM, 0.0.8.0 passed
+this test on a 1024×768×32 desktop at 60 Hz. QEMU recorded both textures,
+the two fills and the copy, then one transfer from the destination when
+the application locked it. A separate two-surface test verified edits
+across scanlines at 1024×768 and isolation from a 1019×753 surface.
+The guest retained its 1024×768 mode across a cold boot.
+
+`w2kprobe.exe /window` opens a 640×480 test window and attaches a
+DirectDraw clipper to it. It presents a solid colour, then a cropped
+pattern from a host texture, first with another window overlapping it
+and again after uncovering it. The probe checks the image, the window
+margins and the overlapping window through GDI. It repeats the test
+using DirectDraw software emulation as a control.
+
+`w2kprobe.exe /flip` requests exclusive fullscreen mode, creates a primary
+surface with one attached back buffer, and writes a different pattern to
+each page. It flips five times and checks every front-buffer pixel after
+each swap. On hardware it also reads the adapter's display-start register
+to verify which page is visible. The hardware test runs at 640×480 and
+1024×768, then checks that Windows has restored the original desktop mode.
+
+`w2kprobe.exe /ddraw-pair` keeps one windowed DirectDraw surface alive
+while a second process creates and reads its own. After the second process
+exits, the first checks that its original colour is intact.
+
+On Windows 2000 SP4 under UTM, the 32-bit hardware paths matched all
+5,468,160 pixels checked across ten fullscreen flips. The adapter trace
+recorded each page switch, the return to page zero, and zero resource
+uploads or readbacks. Windows restored 1024×768×32 at 60 Hz. Only the
+owner of a fullscreen chain maps both video pages. Two simultaneous
+windowed clients retained their own offscreen pixels.
+
+On Windows 2000 SP4 in UTM at 1024×768×32, both paths passed. Known solid
+colours needed no GPU readback. For a patterned image the primary shares
+GDI's framebuffer, so the driver reads back the visible rectangles. The
+overlapping window left 286,833 pixels visible, requiring 1,147,332
+bytes across four rectangles. Removing the overlap yielded one rectangle
+of 298,936 pixels. The application uploaded its source pattern once
+during setup. Presenting the window required no uploads.
+
+When GDI or an application takes a writable lock after a solid fill, the
+display DLL fills the application's staging buffer from the known colour.
+A partial lock preserves pixels outside the locked rectangle. A patterned
+surface still requires a readback if the caller needs its existing pixels.
+
+Microsoft’s unmodified DirectX 7 Switcher sample displayed its text and
+bouncing ball in a window on the 1024×768 desktop. Before this change,
+each of 58 clears was followed by a full 640×480 readback for GDI. With the
+change, 72 clears produced zero lock readbacks, saving 1,228,800 bytes per
+frame. Each frame still uploaded the GDI edits and read its visible
+rectangles for presentation.
+
+## OpenGL
+
+The display DLL answers `OPENGL_GETINFO` with the name `RIPPLEGL`, so
+Windows' own `opengl32.dll` loads the driver registered under that name in
+`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers`. With the
+Windows 98 build of `ripplegl.dll` (Mesa 24.3.4, `win9x/mesa`) copied to
+`system32` and registered both as a string value and as a key (`Dll`,
+`DriverVersion` 1, `Flags` 1, `Version` 2), it draws on the host GPU.
+
+Mesa's virgl winsys uses the interface of the Windows 98 kernel driver
+(`win9x/minivdd/rvd.h`). On Windows 2000 it sends the same calls to the
+display DLL with `ExtEscape` (`rb2krvd.h`, `display_rvd.c`), and the miniport
+carries them out (`gpu_rvd.c`): host contexts, resources, command batches of
+up to 384 KB and transfers, one exchange with the host at a time. Each
+buffer has guest pages of its own, attached to the host resource for its
+whole life and mapped into the process that made it (`gpu_memory.c`). Mesa's
+command stream moves data between the two by itself, so the pages cannot be
+lent for single transfers. Mesa does not always destroy its context when a program ends, so the
+miniport frees the contexts and buffers of ended processes at the next
+creation and before the GPU self-test. While an
+OpenGL context is open the transport stays up, and a mode change frees only
+DirectDraw's surfaces.
+
+On Windows 2000 SP4 in UTM, `gltest` reported `virgl` as the renderer and
+passed all its pixel checks at about 590 frames a second at 320×240. The
+scene is small, so this mostly measures a frame's way to the window: a
+readback and a GDI copy. Microsoft's software OpenGL (`GDI Generic`) passed
+at about 430 frames a second and Mesa's softpipe at about 9. A screen
+capture of a 640×480 run showed the whole scene, clipped by an overlapping
+window.
+
+The Quake III Arena demo runs on the host GPU too, from its files copied
+to `C:` (it needs no installer). `timedemo` with `demo001`, default
+settings, 32-bit colour, one emulated Pentium III in UTM on Apple silicon:
+
+| Mode | frames a second |
+| --- | ---: |
+| 640×480 in a window | 85 |
+| 1024×768 full-screen | 82 |
+
+    quake3.exe +set logfile 2 +set timedemo 1 +set s_initsound 0 +set r_mode 3
+        +set r_fullscreen 0 +set nextdemo quit +demo demo001
+    (the result is in demoq3\qconsole.log)
+
+With 2.6 times the pixels the frame rate hardly changes, so on this host
+the frame's readback and copy are not the limit (see below). Screen
+captures of the windowed run showed the level's textures, lighting and
+the game's text. Windows 98 reached about 300 frames a second in a window
+on a Proxmox VE host whose CPU is not emulated; it has not been timed in
+UTM.
+
+`rvdstat.exe` prints the time spent in each request to the driver since
+Windows started; run it before and after a program and subtract. In the
+windowed timedemo each frame made one command submission (about 1.3 ms,
+host included) and one readback of the frame (about 1.2 ms): about 2.5 ms
+of a 11.8 ms frame. The rest is the emulated CPU running the game, Mesa
+and GDI's copy of the frame to the window. The 685 textures and buffers
+made and freed during the run belong to loading the level.
+
+## Speed
+
+`ddbench.exe` times the same DirectDraw frames through the driver
+(hardware-only DirectDraw, video-memory surfaces) and through Windows'
+software path (emulation-only DirectDraw, system-memory surfaces), for
+three seconds each. It writes to standard output when that is redirected,
+otherwise to COM1. Measured on Windows 2000 SP4 in UTM on Apple silicon
+(one emulated Pentium III), 1024×768×32 desktop, 640×480 frames:
+
+| Frame | Driver | Software |
+| --- | ---: | ---: |
+| Fill a surface, copy it to a window | 315 fps | 755 fps |
+| CPU writes every pixel, copy it to a window | 92 fps | 454 fps |
+| Fullscreen: fill the back buffer, flip | 845 fps | 914 fps |
+| Fullscreen: fill, 100 64×64 sprites, flip | fails | 487 fps |
+| Same with a source colour key | fails | 496 fps |
+
+In a window the driver is two to five times slower than Windows' own
+software path. The desktop is guest memory that the CPU draws into, so
+each copy from a host texture to the screen is a GPU readback, and each
+CPU-written frame is also an upload. Fullscreen fills and flips run on the
+CPU in video memory on both paths. Copying part of a video-memory surface
+into the back buffer fails with `DDERR_UNSUPPORTED`, and the driver offers
+no colour keys. Microsoft's Donuts sample still draws its sprites
+correctly with the driver: its frame matched the software path's.
+
+The earlier 0.0.7.0 build supported full-surface fills on textures of
+at most 4 KiB each. GDI continues to draw the primary desktop. On 0.0.6.0
+the DirectDraw capability check reported no hardware acceleration and the
+software control passed (exit 3).
+
+On Windows 2000 Professional SP4 (build 2195), the stock VGA driver offered
+640×480 and 800×600 at four bits. The Ripple miniport started after reboot,
+and Windows switched to 800×600×32 at 60 Hz. Independent pixel samples
+from GDI and the host display agreed on all four colours. The guest
+restored its previous mode. Windows also cold-booted at the saved 800×600×32
+setting, switched to 1024×768×32 and restored 800×600×32.
+
+Console windows open on the 32-bit desktop. The display DLL reports
+`TC_RA_ABLE` in its text capabilities, so GDI realizes raster fonts on the
+framebuffer surface, as in the DDK's framebuffer sample. Builds without it
+listed the raster fonts, Terminal among them, but `AllocConsole` failed with
+Windows error 31; the console's default face is the raster Terminal font. On
+Windows 2000 SP4 in UTM at 1024×768×32, the build with the flag allocated and
+freed a console, and Command Prompt drew its banner in the Terminal font. The
+miniport was byte-identical in both builds.
+
+## Frame time
+
+`rvdstat.exe` (the display DLL's per-request counters) during Quake III's
+windowed timedemo: each frame made one command submission (about 1.3 ms,
+host included) and one readback of the frame (about 1.2 ms), 2.5 ms of a
+11.8 ms frame. The 685 textures and buffers made and freed during the run
+belong to loading the level. Sending readbacks without a fence, as the
+Windows 98 kernel driver does, made the timedemo slower (70 and 74 frames a
+second against 85 and 82), so the fence stays. In UTM the emulated CPU
+running the game, Mesa and GDI's copy of the frame is the limit.
+
+## DirectDraw surfaces in system memory
+
+With offscreen surfaces as host textures, `ddbench.exe` measured the driver
+two to five times slower than Windows' own DirectDraw code in a window, and
+blits from such a surface into the back buffer failed. The display driver
+now declines offscreen surfaces in video memory with
+`DDERR_OUTOFVIDEOMEMORY` unless `RippleDirectDrawGpuSurfaces` is 1. What a
+program gets that lets DirectDraw choose (UTM, 640×480 frames):
+
+| Frame | before | after |
+| --- | ---: | ---: |
+| Fill a surface, copy it to a window | 327 | 843 |
+| CPU writes every pixel, copy it to a window | 90 | 450 |
+| Full-screen: fill the back buffer, flip | 1077 | 1171 |
+| Full-screen: fill, 100 64×64 sprites, flip | fails | 427 |
+| Same with a source colour key | fails | 440 |
+
+With the switch on (and a restart) the GPU-surface tests (`w2kprobe /ddraw`,
+`/ddraw-full`, `/window`) still pass.
+
+## Rebuilt flip chains
+
+Releasing a flip chain revoked the owner's mapping of the two video pages,
+but DirectDraw maps them once per session and keeps using the address. A
+chain rebuilt in the same session, as games do after a mode change, then
+failed every lock and blit into the back buffer with
+`DDERR_CANTLOCKSURFACE` (`flipcycle.exe`: rounds 2 to 4). The view now stays
+until DirectDraw unmaps it, another process acquires the pages, or the mode
+changes; the display driver reuses it for the next chain and forgets the
+views of processes whose mapping the miniport revoked. All four rounds then
+passed, before and after `w2kprobe /flip`.
+
+## OpenGL from several threads
+
+Mesa's winsys kept the display DC of the thread that created the screen.
+After that thread ended, Windows refused the escape on it: `threadtest`
+failed 299 of 300 threads with black pixels, and the driver's counters
+showed only the first thread's requests arriving. Each request now takes
+`GetDC(NULL)`. `threadtest` then passed every pixel check. Its memory check
+(at most 1 KB a thread after the first 50) measured 49 bytes for create and
+delete, 147 with make-current, and about 3.2 KB a thread or 1.2 KB a context
+in one thread when drawing; Microsoft's software OpenGL measured 442 bytes.
+Over 100 contexts Mesa made 103 GPU buffers and destroyed 100, and the
+driver held none afterwards, so the remaining growth is the program's heap.
+
+## Installing through Setup
+
+Windows 2000's `opengl32.dll` reads the `OpenGLDrivers\RIPPLEGL` key form
+(`Dll`, `DriverVersion`, `Flags`, `Version`). With only a string value of
+that name it used its own software OpenGL. The INF writes the key form and
+copies `ripplegl.dll` to `system32`.
+
+Updating the earlier driver with `NT5INST.EXE` and the 0.1.0.0 INF, after
+removing the hand-made OpenGL registration and DLL: Setup copied
+`rb2kmp.sys`, `rb2kdisp.dll` and `ripplegl.dll` and asked for a restart.
+After it, both driver files matched the package and `gltest` ran on virgl.
+Setup's unsigned-driver prompt had opened behind another window;
+`NT5INST.EXE` now passes its console window as the owner of Setup's
+prompts.
+
+## Stability and the final run
+
+An earlier boot ran five Quake III timedemos in a row (77 to 78 frames a
+second), `threadtest` and a mode change while `gltest` drew; afterwards
+`rvdstat` showed no contexts, buffers or pages held.
+
+The final run installed the 0.1.0 package with `NT5INST.EXE` through Setup
+over the earlier driver. After the restart both driver files and
+`system32\ripplegl.dll` matched the package. On that boot: the mode,
+colour, 800×600, GPU, flip and console tests, `flipcycle`, `ddbench`
+(DirectDraw's choice: 923, 486, 1177, 426 and 435 frames a second),
+`gltest` on virgl (653 frames a second), `threadtest` (every pixel right;
+the heap check failed at 3.2 KB a thread, as above), two windowed
+timedemos (89 frames a second) and one full-screen (89), and Donuts, whose
+frame showed its sprites, score and counter. `rvdstat` showed nothing held
+and the desktop was at 1024×768×32. With `RippleDirectDrawGpuSurfaces` set
+and a restart, `/ddraw`, `/ddraw-full`, `/window`, `/ddraw-pair` and `/flip`
+passed too.
+
+## The framebuffer's memory type
+
+On a Windows 11 host through WSL2 (QEMU 8.2.2 with KVM on an AMD Ryzen,
+virgl on Mesa's Direct3D 12 driver and a GeForce RTX 4090), the 0.1.0
+candidate passed every test but ran slowly: Quake III at 43 frames a second
+against 89 in UTM, `gltest` at 120, and DirectDraw near 50 whatever the
+frame held, Windows' own software path included. A test without any
+graphics API (`memtest.exe`, now among the tools) narrowed it down. The
+CPU and ordinary memory ran at full speed, and GDI drew 200 full-screen
+fills into a DIB in memory in 16 ms. The same fills on the screen took
+10.1 s, 50 ms each for 3 MB: about 60 MB/s into the framebuffer, and
+reading it back was no faster.
+
+QEMU's tracking of framebuffer writes for its display was not the cause:
+with no display (`-display none`) the fills took 9.4 s. The page tables
+were. QEMU's `info tlb` showed every framebuffer page mapped with both
+cache-disable bits (PCD and PWT). VideoPort maps device memory uncached,
+and asking it for write-combining (`VIDEO_MEMORY_SPACE_P6CACHE`) changed
+nothing: Windows 2000 makes write-combining through the MTRRs, which KVM
+on AMD processors does not apply, while it does honour the page
+attributes. KVM on Intel processors ignores the guest's memory type for
+memory like this, and UTM's emulated CPU has no caches to bypass, so
+neither of the other test hosts showed it.
+
+The framebuffer is ordinary memory inside the virtual machine, which the
+host reads coherently, so the miniport now maps every view of it cached:
+the display driver's (`MmMapIoSpace` with `MmCached`), its own scanout
+view, and the DirectDraw flip chain's view in the program's process (a
+view of `\Device\PhysicalMemory` without `PAGE_NOCACHE`, as VideoPort
+makes it otherwise). `info tlb` then showed the pages without PCD and PWT,
+and on the same host:
+
+| Test | uncached | cached |
+| --- | ---: | ---: |
+| 200 full-screen GDI fills, 1024×768×32 | 10.1 s | 15 ms |
+| 50 full-screen scrolls (screen to screen) | 6.2 s | 16 ms |
+| Quake III `timedemo demo001`, 640×480 window | 43 | 323 |
+| `gltest` | 120 | 353 |
+| DirectDraw, fill and copy to a window (DirectDraw's choice) | 51 | 17 790 |
+| DirectDraw, full-screen fill and flip | 50 | 7 110 |
+| the same with 100 colour-keyed sprites | 28 | 4 440 |
+
+On the Intel host (Proxmox VE 8.4, QEMU 9.2, UHD 630) both drivers fell
+within that host's run-to-run spread: Quake III 204 to 311 frames a second
+before and 213 to 242 after over four runs each, `gltest` 692 to 1005
+before and 627 to 1522 after.
