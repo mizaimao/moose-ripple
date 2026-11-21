@@ -9,7 +9,7 @@
 
 typedef HRESULT (WINAPI *CREATE_DIRECTDRAW)(GUID *, LPDIRECTDRAW *, IUnknown *);
 BOOL probe_ddraw_window(LPDIRECTDRAW dd, const char *path, DWORD memory);
-BOOL probe_ddraw_flip(LPDIRECTDRAW dd, const char *path, BOOL hardware);
+BOOL probe_ddraw_flip(LPDIRECTDRAW dd, const char *path, DWORD createFlags, DWORD bpp);
 enum { Unavailable, Passed, Mismatch, NoHardware };
 
 static HRESULT report(const char *path, const char *operation, HRESULT hr)
@@ -195,8 +195,11 @@ static int check_path(CREATE_DIRECTDRAW create, const char *path, DWORD createFl
     if (hr == DDERR_NODIRECTDRAWHW && createFlags == DDCREATE_HARDWAREONLY)
         result = NoHardware;
     if (FAILED(report(path, "DirectDrawCreate", hr))) return result;
-    if (test == RB2K_DDRAW_FLIP) {
-        result = probe_ddraw_flip(dd, path, createFlags == DDCREATE_HARDWAREONLY) ? Passed : Mismatch;
+    if (test == RB2K_DDRAW_FLIP || test == RB2K_DDRAW_FLIP16 || test == RB2K_DDRAW_FLIP8) {
+        DWORD bpp = 32;
+        if (test == RB2K_DDRAW_FLIP16) bpp = 16;
+        if (test == RB2K_DDRAW_FLIP8) bpp = 8;
+        result = probe_ddraw_flip(dd, path, createFlags, bpp) ? Passed : Mismatch;
         goto done;
     }
     if (test == RB2K_DDRAW_WINDOW) {
@@ -236,7 +239,7 @@ int probe_ddraw(enum RB2K_DDRAW_TEST test)
     UINT length;
     HMODULE module;
     CREATE_DIRECTDRAW create;
-    int hardware, emulation;
+    int hardware, emulation, normal = Passed;
     length = GetSystemDirectoryA(filename, sizeof(filename));
     if (!length || length + sizeof("\\ddraw.dll") > sizeof(filename)) {
         puts("DirectDraw system directory unavailable");
@@ -256,15 +259,19 @@ int probe_ddraw(enum RB2K_DDRAW_TEST test)
     }
     hardware = check_path(create, "hardware-only", DDCREATE_HARDWAREONLY, DDSCAPS_VIDEOMEMORY, test);
     emulation = check_path(create, "emulation-only", DDCREATE_EMULATIONONLY, DDSCAPS_SYSTEMMEMORY, test);
+    if (test == RB2K_DDRAW_FLIP8) {
+        normal = check_path(create, "default", 0, DDSCAPS_VIDEOMEMORY, test);
+        printf("DirectDraw default indexed palette and video-memory flips=%s\n", states[normal]);
+    }
     FreeLibrary(module);
-    if (test == RB2K_DDRAW_FLIP)
+    if (test == RB2K_DDRAW_FLIP || test == RB2K_DDRAW_FLIP16 || test == RB2K_DDRAW_FLIP8)
         printf("DirectDraw fullscreen flip hardware=%s software=%s\n", states[hardware], states[emulation]);
     else if (test == RB2K_DDRAW_WINDOW)
         printf("DirectDraw window hardware=%s software=%s\n", states[hardware], states[emulation]);
     else
         printf("DirectDraw hardware_video_fill=%s emulation_system_fill=%s\n",
                states[hardware], states[emulation]);
-    if (fflush(stdout) || ferror(stdout) || emulation != Passed || hardware == Mismatch) return 1;
+    if (fflush(stdout) || ferror(stdout) || emulation != Passed || normal != Passed || hardware == Mismatch) return 1;
     if (hardware == NoHardware) return 3;
     return hardware == Passed ? 0 : 5;
 }

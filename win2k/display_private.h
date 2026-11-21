@@ -30,6 +30,9 @@ typedef struct {
     PVOID mapping;
     ULONG mappingBytes;
     VIDEO_MODE_INFORMATION mode;
+    ULONG bitmapFormat;
+    ULONG paletteColors[256];
+    BOOL paletteActive;
     HSEMAPHORE ddLock;
     BOOL ddEnabled;
     BOOL gpuSurfaces;           /* offscreen surfaces as host textures (RB2K_DD_CAPS) */
@@ -41,6 +44,8 @@ typedef struct {
 } DISPLAY;
 
 BOOL rb_dd_caps(DISPLAY *display, RB2K_DD_CAPS *caps);
+HPALETTE rb_create_palette(DISPLAY *display);
+BOOL rb_restore_palette(DISPLAY *display);
 void rb_rvd_init(void);
 ULONG rb_rvd_escape(DISPLAY *display, ULONG inSize, PVOID in, ULONG outSize, PVOID out);
 ULONG rb_rvd_stats(DISPLAY *display, ULONG outSize, PVOID out);

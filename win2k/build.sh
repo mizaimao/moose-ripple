@@ -20,7 +20,7 @@ export WINEPATH="$(w "$vc/Bin");$(w "$kit/vc6/Common/MSDev98/Bin")"
 cl() { wine "$vc/Bin/CL.EXE" /nologo "$@"; }
 link() { wine "$vc/Bin/LINK.EXE" /nologo "$@"; }
 
-cp "$here/rb2kmp.c" "$here"/gpu_*.c "$here"/*.h "$here/display.c" "$here/display_ddraw.c" "$here/display_rvd.c" "$here/install.c" "$here/setupmode.c" \
+cp "$here/rb2kmp.c" "$here"/gpu_*.c "$here"/*.h "$here/display.c" "$here/display_ddraw.c" "$here/display_palette.c" "$here/display_rvd.c" "$here/install.c" "$here/setupmode.c" \
     "$here/tools/w2kprobe.c" "$here/tools/ddraw_probe.c" "$here/tools/window_probe.c" "$here/tools/flip_probe.c" "$here/tools/ddraw_bench.c" "$here/tools/rvdstat.c" "$here/tools/flipcycle.c" "$here/tools/memtest.c" "$here/tools/regmode.c" .
 export INCLUDE="$(w "$here/compat");$(w "$repo/third_party/virtio");$(w "$repo/third_party/virgl");$(w "$repo/win9x/minivdd");$(w "$ddk/inc/ddk");$(w "$ddk/src/video/inc");$(w "$ddk/inc");$(w "$vc/Include")"
 export LIB="$(w "$ddk/libfre/i386")"
@@ -31,10 +31,10 @@ link /driver /subsystem:native,5.00 /osversion:5.0 /version:0.1 /machine:ix86 /n
 
 export INCLUDE="$(w "$here/compat");$(w "$repo/third_party/virgl");$(w "$repo/win9x/minivdd");$(w "$ddk/inc");$(w "$ddk/src/video/inc");$(w "$vc/Include")"
 cl /c /W3 /O1 /Oi /Zl /Gz /D_X86_=1 /DWINVER=0x0500 /D_WIN32_WINNT=0x0500 /DUNICODE /D_UNICODE \
-    display.c display_ddraw.c display_rvd.c
+    display.c display_ddraw.c display_palette.c display_rvd.c
 link /dll /release /nodefaultlib /machine:i386 /subsystem:native,5.00 /osversion:5.0 /version:5.00 \
     /entry:DrvEnableDriver@12 /export:DrvEnableDriver=_DrvEnableDriver@12 /out:rb2kdisp.dll \
-    display.obj display_ddraw.obj display_rvd.obj win32k.lib libcntpr.lib
+    display.obj display_ddraw.obj display_palette.obj display_rvd.obj win32k.lib libcntpr.lib
 
 export INCLUDE="$(w "$vc/Include")"
 export LIB="$(w "$vc/Lib");$(w "$ddk/libfre/i386")"

@@ -440,6 +440,9 @@ all 1,346 frames at 266.3 fps in a 640×480 window and 150.1 fps at
 
 ### UTM on Apple silicon
 
+When a guest keeps loading an older driver CD, follow the
+[UTM test-media runbook](utm-test-media.md).
+
 The clean XP SP3 disk booted on i440fx with one emulated Pentium III and
 512 MiB. Stock VGA ran at 640×480 and Device Manager showed code 28 for
 the display adapter. After the native installer finished and XP cold-booted,
@@ -470,5 +473,69 @@ settings. After the last full-screen run both desktop modes were again
 | 640×480 window | 65.6 fps | 76.6 fps |
 | 1024×768 full-screen | 60.9 fps | 71.5 fps |
 
-The driver currently offers 32-bit colour. Games that require 8-bit
-palettized or 16-bit modes need additional driver support.
+These XP game and benchmark results used the 32-bit display modes.
+
+## 16-bit colour development
+
+The miniport now offers RGB565 at 640×480, 800×600 and 1024×768 at 60 Hz.
+The original 32-bit mode indices and preferred 1024×768×32 desktop carry
+forward. GDI and DirectDraw use the same red, green and blue masks
+(`0xf800`, `0x07e0`, `0x001f`). Full-screen DirectDraw can use two
+framebuffer pages. In 16-bit mode Windows handles offscreen surfaces in
+system memory. The optional host textures use 32-bit pixels.
+
+An Apple silicon host test ran the driver's mode, scanout and rectangle-fill
+routines against memory-backed registers and two framebuffer pages. It
+checked the colour masks, pitch, page offsets, return to page zero and the
+single-page fallback with insufficient memory. Rectangle fills at an odd
+horizontal offset matched all 6,294,528 pixels checked across both pages,
+three resolutions and two depths.
+
+Windows 2000 SP4 and XP SP3 installed the same build in UTM. After
+restart, each guest's miniport and display DLL matched the test files byte
+for byte. `w2kprobe /pattern16` read the expected four GDI colours at
+800×600. `w2kprobe /flip16` passed hardware page flips
+at 640×480 and 1024×768 and software flips at 640×480. The hardware
+rectangle fill, its untouched border and both page images matched. Each
+path restored the 1024×768×32 desktop at 60 Hz. The 32-bit colour and GPU
+pixel checks passed on both systems.
+
+## 8-bit indexed colour
+
+The development driver offers a 256-colour palette at the same three
+resolutions. Each framebuffer byte is a palette index. GDI can update a
+range of entries while the two flip pages retain their pixel data. The
+display driver keeps the current table across mode resets. The miniport
+programs full 8-bit red, green and blue values through the virtual VGA
+colour registers.
+
+On Apple silicon, a host test ran the display driver's palette updates,
+the miniport's register writes and the framebuffer routines against a
+simulated colour table and framebuffer. Nine modes at 8, 16 and 32 bits
+matched all 9,441,792 pixels checked across both pages. All 256 colours,
+a single-entry update, the neighbouring entries, the final table entry
+and palette restoration passed.
+
+Two failures appeared inside XP SP3. Its halftone service returned 216
+colours. Requiring 256 made an enumerated mode fail during activation.
+The driver now supplies all 256 entries and keeps the 20 Windows system
+colours at their reserved indices. Advertising separate hardware palette
+capabilities also made hardware-only DirectDraw surface creation fail.
+The driver reports an indexed primary surface and lets Windows manage its
+palette through GDI.
+
+On Windows 2000 SP4 and XP SP3, all four GDI test colours matched at
+800×600×8.
+In `w2kprobe /flip8`, the default DirectDraw interface attached a 256-entry
+palette to a video-memory flip chain. Changing entry 73 recoloured its
+visible pixel without changing entry 74 or repainting either pixel.
+At 640×480 and 1024×768, the scanout page and vertical offset followed
+every hardware flip and the full frame matched its expected indices.
+The software path at 640×480 also passed palette animation and all 81
+visible samples on each of five flips. The saved and current desktops
+returned to 1024×768×32 at 60 Hz.
+
+Forcing `DDCREATE_HARDWAREONLY` passed the page and index checks with
+the existing palette. Explicit palette creation on that interface returned
+`E_NOTIMPL` on XP. The default interface used by the combined test can
+create the palette and use hardware page flipping in the same session.

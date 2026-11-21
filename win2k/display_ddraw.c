@@ -38,7 +38,7 @@ static ULONG page_size(DISPLAY *d)
     RB2K_DD_FLIP_INFO f;
     if (!request(d, IOCTL_RB2K_DD_FLIP_INFO, NULL, 0, &f, sizeof(f)) ||
         f.pageCount != 2 || f.width != d->mode.VisScreenWidth || f.height != d->mode.VisScreenHeight ||
-        !f.height || f.pitch != d->mode.ScreenStride || f.width > f.pitch / sizeof(ULONG) ||
+        !f.height || f.pitch != d->mode.ScreenStride || f.width > f.pitch / (d->mode.BitsPerPlane / 8) ||
         !f.pageBytes || f.pageBytes > d->mappingBytes / 2 ||
         f.pageBytes % f.height || f.pageBytes / f.height != f.pitch) return 0;
     return f.pageBytes;
@@ -59,10 +59,13 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
                (caps & ~(DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM)) ||
                !desc->dwWidth || desc->dwWidth > RB2K_DD_MAX_WIDTH ||
                !desc->dwHeight || desc->dwHeight > RB2K_DD_MAX_HEIGHT) return FALSE;
-    return !(desc->dwFlags & DDSD_PIXELFORMAT) ||
-        (fmt->dwFlags == DDPF_RGB && fmt->dwRGBBitCount == 32 &&
-         fmt->dwRBitMask == 0xff0000 && fmt->dwGBitMask == 0xff00 &&
-         fmt->dwBBitMask == 0xff);
+    if (!(desc->dwFlags & DDSD_PIXELFORMAT)) return TRUE;
+    if (fmt->dwRGBBitCount != d->mode.BitsPerPlane) return FALSE;
+    if (d->mode.BitsPerPlane == 8)
+        return (fmt->dwFlags & DDPF_PALETTEINDEXED8) &&
+               !(fmt->dwFlags & ~(DDPF_PALETTEINDEXED8 | DDPF_RGB));
+    return fmt->dwFlags == DDPF_RGB && fmt->dwRBitMask == d->mode.RedMask &&
+           fmt->dwGBitMask == d->mode.GreenMask && fmt->dwBBitMask == d->mode.BlueMask;
 }
 
 static DWORD APIENTRY can_create(PDD_CANCREATESURFACEDATA data)
@@ -300,10 +303,18 @@ static HRESULT fill_page(DISPLAY *d, ULONG page, const RECTL *r, ULONG color)
     BYTE *row;
     if (d->lockedPages & (1UL << page)) return DDERR_SURFACEBUSY;
     if (!rect_inside(r, d->mode.VisScreenWidth, d->mode.VisScreenHeight)) return DDERR_INVALIDRECT;
-    row = (BYTE *)d->mapping + page * d->pageBytes + r->top * d->mode.ScreenStride + r->left * 4;
+    row = (BYTE *)d->mapping + page * d->pageBytes + r->top * d->mode.ScreenStride +
+          r->left * (d->mode.BitsPerPlane / 8);
     width = r->right - r->left;
-    for (y = 0; y < (ULONG)(r->bottom - r->top); ++y, row += d->mode.ScreenStride)
-        for (x = 0; x < width; ++x) ((ULONG *)row)[x] = color;
+    for (y = 0; y < (ULONG)(r->bottom - r->top); ++y, row += d->mode.ScreenStride) {
+        if (d->mode.BitsPerPlane == 8) {
+            RtlFillMemory(row, width, (BYTE)color);
+        } else if (d->mode.BitsPerPlane == 16) {
+            for (x = 0; x < width; ++x) ((USHORT *)row)[x] = (USHORT)color;
+        } else {
+            for (x = 0; x < width; ++x) ((ULONG *)row)[x] = color;
+        }
+    }
     return DD_OK;
 }
 
@@ -425,7 +436,8 @@ static DWORD APIENTRY lock_surface(PDD_LOCKDATA data)
         else if (data->bHasRect && !rect_inside(&data->rArea, g->wWidth, g->wHeight))
             data->ddRVal = DDERR_INVALIDRECT;
         else {
-            if (data->bHasRect) offset = data->rArea.top * g->lPitch + data->rArea.left * 4;
+            if (data->bHasRect)
+                offset = data->rArea.top * g->lPitch + data->rArea.left * (d->mode.BitsPerPlane / 8);
             /* NT supplies the user-mode view created by our DdMapMemory. */
             data->lpSurfData = (BYTE *)data->fpProcess + page * d->pageBytes + offset;
             d->lockedPages |= 1UL << page;
@@ -654,10 +666,13 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     v->lDisplayPitch = d->mode.ScreenStride;
     v->ddpfDisplay.dwSize = sizeof(v->ddpfDisplay);
     v->ddpfDisplay.dwFlags = DDPF_RGB;
-    v->ddpfDisplay.dwRGBBitCount = 32;
+    v->ddpfDisplay.dwRGBBitCount = d->mode.BitsPerPlane;
     v->ddpfDisplay.dwRBitMask = d->mode.RedMask;
     v->ddpfDisplay.dwGBitMask = d->mode.GreenMask;
     v->ddpfDisplay.dwBBitMask = d->mode.BlueMask;
+    /* The indexed primary uses the desktop DAC through DrvSetPalette. */
+    if (d->mode.BitsPerPlane == 8)
+        v->ddpfDisplay.dwFlags |= DDPF_PALETTEINDEXED8;
     v->dwOffscreenAlign = 4;
     info->ddCaps.dwSize = sizeof(info->ddCaps);
     info->ddCaps.dwCaps = DDCAPS_BLT | DDCAPS_BLTCOLORFILL;

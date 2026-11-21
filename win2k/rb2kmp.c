@@ -10,15 +10,20 @@
 #include "gpu_memory.h"
 
 #define ARRAY_COUNT(a) (sizeof(a) / sizeof((a)[0]))
+#define VGA_MMIO_OFFSET 0x400
 #define DISPI_OFFSET 0x500
 #define DISPI_BYTES 0x16
+#define VBE_8BIT_DAC 0x20
 #define MIN_FRAME_BYTES (1024UL * 768 * 4)
 #define MONITOR_ID 1
 
 enum { VbeId, VbeX, VbeY, VbeBpp, VbeEnable, VbeBank, VbeWidth,
        VbeHeight, VbeOffsetX, VbeOffsetY };
-static const struct { USHORT width, height; } modes[] = {
-    {640, 480}, {800, 600}, {1024, 768}
+/* Keep the existing 32-bit mode indices stable across driver updates. */
+static const struct { USHORT width, height, bpp; } modes[] = {
+    {640, 480, 32}, {800, 600, 32}, {1024, 768, 32},
+    {640, 480, 16}, {800, 600, 16}, {1024, 768, 16},
+    {640, 480, 8},  {800, 600, 8},  {1024, 768, 8}
 };
 
 PVOID rb_view_current(void);
@@ -35,6 +40,7 @@ typedef struct {
 
 typedef struct {
     VIDEO_ACCESS_RANGE fb;
+    PUCHAR vga;
     PUSHORT vbe;
     PVOID mappings[8];
     ULONG mode;
@@ -102,12 +108,15 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
             registers = r;
     }
     if (!a->fb.RangeLength || !registers) return ERROR_DEV_NOT_EXIST;
-    regs.QuadPart = registers->RangeStart.QuadPart + DISPI_OFFSET;
-    a->vbe = VideoPortGetDeviceBase(a, regs, DISPI_BYTES, 0);
-    if (!a->vbe) return ERROR_NOT_ENOUGH_MEMORY;
+    /* BAR2 mirrors VGA ports 3C0-3DF at 400h and the VBE registers at 500h. */
+    regs.QuadPart = registers->RangeStart.QuadPart + VGA_MMIO_OFFSET;
+    a->vga = VideoPortGetDeviceBase(a, regs, DISPI_OFFSET - VGA_MMIO_OFFSET + DISPI_BYTES, 0);
+    if (!a->vga) return ERROR_NOT_ENOUGH_MEMORY;
+    a->vbe = (PUSHORT)(a->vga + (DISPI_OFFSET - VGA_MMIO_OFFSET));
     id = VideoPortReadRegisterUshort(a->vbe + VbeId);
     if (id < 0xb0c0 || id > 0xb0c5) {
-        VideoPortFreeDeviceBase(a, a->vbe);
+        VideoPortFreeDeviceBase(a, a->vga);
+        a->vga = NULL;
         a->vbe = NULL;
         return ERROR_DEV_NOT_EXIST;
     }
@@ -148,14 +157,41 @@ static void mode_info(ULONG index, PVIDEO_MODE_INFORMATION m)
     m->ModeIndex = index;
     m->VisScreenWidth = m->VideoMemoryBitmapWidth = modes[index].width;
     m->VisScreenHeight = m->VideoMemoryBitmapHeight = modes[index].height;
-    m->ScreenStride = m->VisScreenWidth * 4;
     m->NumberOfPlanes = 1;
-    m->BitsPerPlane = 32;
+    m->BitsPerPlane = modes[index].bpp;
+    m->ScreenStride = m->VisScreenWidth * (m->BitsPerPlane / 8);
     m->Frequency = 60;
     m->XMillimeter = 320; m->YMillimeter = 240;
-    m->NumberRedBits = m->NumberGreenBits = m->NumberBlueBits = 8;
-    m->RedMask = 0xff0000; m->GreenMask = 0xff00; m->BlueMask = 0xff;
     m->AttributeFlags = VIDEO_MODE_COLOR | VIDEO_MODE_GRAPHICS | VIDEO_MODE_NO_OFF_SCREEN;
+    if (m->BitsPerPlane == 8) {
+        m->AttributeFlags |= VIDEO_MODE_PALETTE_DRIVEN | VIDEO_MODE_MANAGED_PALETTE;
+        m->NumberRedBits = m->NumberGreenBits = m->NumberBlueBits = 8;
+    } else if (m->BitsPerPlane == 16) {
+        m->NumberRedBits = m->NumberBlueBits = 5; m->NumberGreenBits = 6;
+        m->RedMask = 0xf800; m->GreenMask = 0x07e0; m->BlueMask = 0x001f;
+    } else {
+        m->NumberRedBits = m->NumberGreenBits = m->NumberBlueBits = 8;
+        m->RedMask = 0xff0000; m->GreenMask = 0xff00; m->BlueMask = 0xff;
+    }
+}
+
+static VP_STATUS set_colors(ADAPTER *a, PVIDEO_CLUT clut, ULONG bytes)
+{
+    ULONG header = FIELD_OFFSET(VIDEO_CLUT, LookupTable), i;
+    if (bytes < header || !clut) return ERROR_INSUFFICIENT_BUFFER;
+    if (!clut->NumEntries || clut->FirstEntry >= 256 ||
+        clut->NumEntries > 256 - clut->FirstEntry) return ERROR_INVALID_PARAMETER;
+    if (clut->NumEntries > (bytes - header) / sizeof(clut->LookupTable[0]))
+        return ERROR_INSUFFICIENT_BUFFER;
+    if (!a->modeSet || modes[a->mode].bpp != 8) return ERROR_NOT_READY;
+    VideoPortWriteRegisterUchar(a->vga + 8, (UCHAR)clut->FirstEntry);
+    for (i = 0; i < clut->NumEntries; ++i) {
+        VIDEO_CLUTDATA *color = &clut->LookupTable[i].RgbArray;
+        VideoPortWriteRegisterUchar(a->vga + 9, color->Red);
+        VideoPortWriteRegisterUchar(a->vga + 9, color->Green);
+        VideoPortWriteRegisterUchar(a->vga + 9, color->Blue);
+    }
+    return NO_ERROR;
 }
 
 /* NT5 may round a user view to the 64 KiB allocation granularity. The only
@@ -169,14 +205,14 @@ static VP_STATUS scanout_info(ADAPTER *a, RB2K_DD_FLIP_INFO *info)
 {
     ULONG virtualWidth;
     if (!a->modeSet || !(VideoPortReadRegisterUshort(a->vbe + VbeEnable) & 1) ||
-        VideoPortReadRegisterUshort(a->vbe + VbeBpp) != 32 ||
+        VideoPortReadRegisterUshort(a->vbe + VbeBpp) != modes[a->mode].bpp ||
         VideoPortReadRegisterUshort(a->vbe + VbeOffsetX)) return ERROR_NOT_READY;
     info->width = VideoPortReadRegisterUshort(a->vbe + VbeX);
     info->height = VideoPortReadRegisterUshort(a->vbe + VbeY);
     virtualWidth = VideoPortReadRegisterUshort(a->vbe + VbeWidth);
     if (info->width != modes[a->mode].width || info->height != modes[a->mode].height ||
         virtualWidth != info->width) return ERROR_NOT_READY;
-    info->pitch = virtualWidth * sizeof(ULONG);
+    info->pitch = virtualWidth * (modes[a->mode].bpp / 8);
     info->pageBytes = info->pitch * info->height;
     info->pageCount = a->gpu.primary.pixels &&
         view_span(info->pageBytes) <= a->gpu.primary.bytes &&
@@ -264,6 +300,7 @@ static VP_STATUS set_mode(ADAPTER *a, ULONG request)
     USHORT enable = (request & VIDEO_MODE_NO_ZERO_MEMORY) ? 0xc1 : 0x41;
     VP_STATUS status;
     if (index >= ARRAY_COUNT(modes)) return ERROR_INVALID_PARAMETER;
+    if (modes[index].bpp == 8) enable |= VBE_8BIT_DAC;
     status = release_pages(a, FALSE);
     if (status) return status;
     status = rb_gpu_surface_reset(&a->gpu);
@@ -272,18 +309,20 @@ static VP_STATUS set_mode(ADAPTER *a, ULONG request)
     VideoPortWriteRegisterUshort(a->vbe + VbeEnable, 0);
     VideoPortWriteRegisterUshort(a->vbe + VbeX, modes[index].width);
     VideoPortWriteRegisterUshort(a->vbe + VbeY, modes[index].height);
-    VideoPortWriteRegisterUshort(a->vbe + VbeBpp, 32);
+    VideoPortWriteRegisterUshort(a->vbe + VbeBpp, modes[index].bpp);
     VideoPortWriteRegisterUshort(a->vbe + VbeEnable, enable);
     VideoPortWriteRegisterUshort(a->vbe + VbeWidth, modes[index].width);
     VideoPortWriteRegisterUshort(a->vbe + VbeOffsetX, 0);
     VideoPortWriteRegisterUshort(a->vbe + VbeOffsetY, 0);
     if (VideoPortReadRegisterUshort(a->vbe + VbeX) != modes[index].width ||
         VideoPortReadRegisterUshort(a->vbe + VbeY) != modes[index].height ||
-        VideoPortReadRegisterUshort(a->vbe + VbeBpp) != 32 ||
-        !(VideoPortReadRegisterUshort(a->vbe + VbeEnable) & 1))
+        VideoPortReadRegisterUshort(a->vbe + VbeBpp) != modes[index].bpp ||
+        (VideoPortReadRegisterUshort(a->vbe + VbeEnable) & (VBE_8BIT_DAC | 1)) !=
+            (enable & (VBE_8BIT_DAC | 1)))
         return ERROR_INVALID_FUNCTION;
     a->mode = index;
     a->modeSet = TRUE;
+    a->gpu.primary.bitsPerPixel = modes[index].bpp;
     a->gpu.primary.width = modes[index].width;
     a->gpu.primary.height = modes[index].height;
     a->gpu.primary.pitchPixels = VideoPortReadRegisterUshort(a->vbe + VbeWidth);
@@ -485,6 +524,9 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
     case IOCTL_VIDEO_SET_CURRENT_MODE:
         if (r->InputBufferLength >= sizeof(VIDEO_MODE))
             status = set_mode(a, ((PVIDEO_MODE)r->InputBuffer)->RequestedMode);
+        break;
+    case IOCTL_VIDEO_SET_COLOR_REGISTERS:
+        status = set_colors(a, r->InputBuffer, r->InputBufferLength);
         break;
     case IOCTL_VIDEO_MAP_VIDEO_MEMORY:
         status = map_frame(a, r);

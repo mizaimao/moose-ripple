@@ -31,7 +31,8 @@ static VP_STATUS query(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     caps->presents = gpu->presents;
     caps->presentReadbacks = gpu->presentReadbacks;
     caps->presentBytes = gpu->presentBytes;
-    caps->gpuSurfaces = gpu->ddGpuSurfaces;
+    /* Optional host textures and their primary-blit path use 32-bit pixels. */
+    caps->gpuSurfaces = gpu->ddGpuSurfaces && gpu->primary.bitsPerPixel == 32;
     packet->StatusBlock->Information = sizeof(*caps);
     return NO_ERROR;
 }
@@ -46,6 +47,7 @@ static VP_STATUS create(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     ULONG slot;
     if (packet->InputBufferLength != sizeof(*size) || packet->OutputBufferLength < sizeof(ULONG))
         return ERROR_INVALID_PARAMETER;
+    if (gpu->primary.bitsPerPixel != 32) return ERROR_NOT_SUPPORTED;
     if (!size->width || size->width > RB2K_DD_MAX_WIDTH ||
         !size->height || size->height > RB2K_DD_MAX_HEIGHT)
         return ERROR_INVALID_PARAMETER;
@@ -102,7 +104,8 @@ static VP_STATUS present(RB2K_GPU *gpu, const RB2K_IMAGE *image, const RB2K_DD_P
     BOOLEAN solid = !image->defined || image->uniform;
     ULONG span[64], offset = 0, y;
     const ULONG segmentPixels = RB2K_SEGMENT_BYTES / sizeof(ULONG);
-    if (!primary->pixels || !primary->height || !primary->width || primary->pitchPixels < primary->width ||
+    if (primary->bitsPerPixel != 32 || !primary->pixels || !primary->height || !primary->width ||
+        primary->pitchPixels < primary->width ||
         primary->pitchPixels > primary->bytes / sizeof(ULONG) / primary->height)
         return ERROR_NOT_READY;
     if (!p->width || !p->height || p->width > image->width || p->height > image->height ||
@@ -274,7 +277,7 @@ VP_STATUS rb_gpu_surface_reset(RB2K_GPU *gpu)
     } else {
         status = rb_gpu_stop(gpu);
     }
-    gpu->primary.width = gpu->primary.height = gpu->primary.pitchPixels = 0;
+    gpu->primary.width = gpu->primary.height = gpu->primary.pitchPixels = gpu->primary.bitsPerPixel = 0;
     VideoPortInterlockedExchange(&gpu->busy, 0);
     return status;
 }

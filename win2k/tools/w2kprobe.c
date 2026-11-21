@@ -181,7 +181,7 @@ static BOOL same_mode(const DEVMODEA *a,const DEVMODEA *b)
            a->dmDisplayFlags==b->dmDisplayFlags;
 }
 
-static int run(BOOL pattern, DWORD width, DWORD height)
+static int run(BOOL pattern, DWORD width, DWORD height, DWORD bpp)
 {
     OSVERSIONINFOEXA os;
     DEVMODEA original,m,desired,restore;
@@ -200,22 +200,22 @@ static int run(BOOL pattern, DWORD width, DWORD height)
     show_mode("Current",&original);
     for(i=0;mode(i,&m);i++) {
         show_mode("Mode",&m);
-        if(m.dmPelsWidth==width && m.dmPelsHeight==height && m.dmBitsPerPel==32) had_target=TRUE;
+        if(m.dmPelsWidth==width && m.dmPelsHeight==height && m.dmBitsPerPel==bpp) had_target=TRUE;
     }
-    wsprintfA(buf,"Modes=%lu target_%lux%lux32=%s",i,width,height,had_target?"yes":"no"); line(buf);
+    wsprintfA(buf,"Modes=%lu target_%lux%lux%lu=%s",i,width,height,bpp,had_target?"yes":"no"); line(buf);
     if (!i) ok=FALSE;
     if(!pattern) return ok?0:1;
     if(!had_target) { line("Pattern SKIP requested mode unavailable"); return 3; }
     ZeroMemory(&desired,sizeof desired); desired.dmSize=sizeof desired;
     desired.dmFields=DM_PELSWIDTH|DM_PELSHEIGHT|DM_BITSPERPEL;
-    desired.dmPelsWidth=width; desired.dmPelsHeight=height; desired.dmBitsPerPel=32;
+    desired.dmPelsWidth=width; desired.dmPelsHeight=height; desired.dmBitsPerPel=bpp;
     result=ChangeDisplaySettingsA(&desired,CDS_TEST);
     wsprintfA(buf,"Test mode result=%ld",result); line(buf);
     if(result!=DISP_CHANGE_SUCCESSFUL) return 3;
     result=ChangeDisplaySettingsA(&desired,CDS_FULLSCREEN);
     wsprintfA(buf,"Set mode result=%ld",result); line(buf);
     if(result!=DISP_CHANGE_SUCCESSFUL) return 1;
-    matched=mode(ENUM_CURRENT_SETTINGS,&m) && m.dmPelsWidth==width && m.dmPelsHeight==height && m.dmBitsPerPel==32;
+    matched=mode(ENUM_CURRENT_SETTINGS,&m) && m.dmPelsWidth==width && m.dmPelsHeight==height && m.dmBitsPerPel==bpp;
     if(matched) show_mode("Pattern mode",&m);
     if(!matched || !paint_test(width,height)) ok=FALSE;
     restore=original;
@@ -275,16 +275,24 @@ int main(int argc,char **argv)
         result = probe_ddraw(RB2K_DDRAW_PAIR);
     } else if (argc == 2 && !lstrcmpiA(argv[1], "/flip")) {
         result = probe_ddraw(RB2K_DDRAW_FLIP);
+    } else if (argc == 2 && !lstrcmpiA(argv[1], "/flip16")) {
+        result = probe_ddraw(RB2K_DDRAW_FLIP16);
+    } else if (argc == 2 && !lstrcmpiA(argv[1], "/flip8")) {
+        result = probe_ddraw(RB2K_DDRAW_FLIP8);
     } else if (argc == 2 && !lstrcmpiA(argv[1], "/window")) {
         result = probe_ddraw(RB2K_DDRAW_WINDOW);
     } else if (argc == 2 && (!lstrcmpiA(argv[1], "/ddraw") || !lstrcmpiA(argv[1], "/ddraw-full"))) {
         result = probe_ddraw(!lstrcmpiA(argv[1], "/ddraw-full") ? RB2K_DDRAW_COPY : RB2K_DDRAW_FILL);
     } else if (argc == 2 && !lstrcmpiA(argv[1], "/pattern800")) {
-        result = run(TRUE, 800, 600);
+        result = run(TRUE, 800, 600, 32);
+    } else if (argc == 2 && !lstrcmpiA(argv[1], "/pattern16")) {
+        result = run(TRUE, 800, 600, 16);
+    } else if (argc == 2 && !lstrcmpiA(argv[1], "/pattern8")) {
+        result = run(TRUE, 800, 600, 8);
     } else if (argc == 1 || (argc == 2 && !lstrcmpiA(argv[1], "/pattern"))) {
-        result = run(argc == 2, RB2K_DEFAULT_WIDTH, RB2K_DEFAULT_HEIGHT);
+        result = run(argc == 2, RB2K_DEFAULT_WIDTH, RB2K_DEFAULT_HEIGHT, 32);
     } else {
-        line("Usage: W2KPROBE [/pattern | /pattern800 | /gpu | /ddraw | /ddraw-full | /ddraw-pair | /window | /flip]"); return 2;
+        line("Usage: W2KPROBE [/pattern | /pattern800 | /pattern16 | /pattern8 | /gpu | /ddraw | /ddraw-full | /ddraw-pair | /window | /flip | /flip16 | /flip8]"); return 2;
     }
     if(output_failed) return 1;
     return result;
