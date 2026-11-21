@@ -491,11 +491,13 @@ single-page fallback with insufficient memory. Rectangle fills at an odd
 horizontal offset matched all 6,294,528 pixels checked across both pages,
 three resolutions and two depths.
 
-Windows 2000 and XP guest verification is pending. Run `w2kprobe /pattern16`
-for 800×600 GDI colours, then `w2kprobe /flip16` for the hardware and
-software DirectDraw paths. The hardware test checks the 16-bit surface
-masks, rectangular fills and locks, and compares both page images after
-flips at 640×480 and 1024×768. Both paths check the restored desktop.
+On XP SP3 in UTM, the installed miniport and display DLL matched the test
+build byte for byte after restart. `w2kprobe /pattern16` read the expected
+four GDI colours at 800×600. `w2kprobe /flip16` passed hardware page flips
+at 640×480 and 1024×768 and software flips at 640×480. The hardware
+rectangle fill, its untouched border and both page images matched. Each
+path restored the 1024×768×32 desktop at 60 Hz. The 32-bit colour and GPU
+pixel checks passed in the same run. Windows 2000 testing is pending.
 
 ## 8-bit indexed colour
 
@@ -516,5 +518,16 @@ and palette restoration passed.
 For guest verification, `w2kprobe /pattern8` selects 800×600, draws four
 colours and restores the original mode. `w2kprobe /flip8` changes an
 entry on a DirectDraw primary surface, samples the two test pixels and
-checks full-screen flipping. These guest checks are pending on both
-Windows 2000 and XP.
+checks full-screen flipping. In the first native XP SP3 run, Windows
+listed all three 8-bit modes and accepted the 800×600 mode query.
+Applying that mode returned `DISP_CHANGE_FAILED`. Both DirectDraw paths
+returned `0x80004001` trying to enter 640×480×8. The 32-bit desktop
+restored after both attempts.
+
+A driver trace showed that XP's halftone palette contained 216 entries.
+The driver had required 256 and aborted the mode change. It now creates
+a full RGB palette with the 20 Windows system colours at their reserved
+indices. After a fresh install and restart on XP, the 800×600×8 GDI test
+read back all four colours and restored the original desktop. DirectDraw
+entered the 8-bit mode. The first fullscreen flip test still failed at
+hardware surface creation and when locking the software primary.
