@@ -370,3 +370,36 @@ On the Intel host (Proxmox VE 8.4, QEMU 9.2, UHD 630) both drivers fell
 within that host's run-to-run spread: Quake III 204 to 311 frames a second
 before and 213 to 242 after over four runs each, `gltest` 692 to 1005
 before and 627 to 1522 after.
+
+## Windows XP (in progress)
+
+The 0.1.0 package, unchanged, on Windows XP Professional (32-bit, 5.1.2600) with KVM and
+an Intel UHD 630: Setup installs it after XP's "has not passed Windows Logo testing"
+prompt (Continue Anyway), and after the restart the desktop is at 1024×768×32. The mode,
+colour, 800×600, GPU, console and `flipcycle` tests pass, and `gltest` runs on virgl
+(about 980 frames a second).
+
+**The desktop falls back to 640×480.** After a full-screen DirectDraw program ends, the
+desktop stays at 640×480, and every later start comes up at 640×480 too. `regmode.exe`
+shows why: right after the install Windows has no saved desktop mode for the adapter
+(`ENUM_REGISTRY_SETTINGS` gives 0×0). The first start's 1024×768 comes from the INF's
+defaults; DirectDraw's restore goes to the saved mode, finds none, and XP picks 640×480.
+XP keeps the saved mode under the hardware profile
+(`Hardware Profiles\Current\System\CurrentControlSet\Control\Video\{GUID}\0000`), which
+the install leaves empty; the INF's `DefaultSettings` go to `Control\Video\{GUID}\0000`.
+Once a mode was saved through `ChangeDisplaySettings` with `CDS_UPDATEREGISTRY`
+(`regmode /set 1024x768`), the flip test restored 1024×768 and a restart kept it. Planned
+fix: a step at the first logon that saves the current mode when none is saved, run from
+the INF so that installs through Device Manager get it too.
+
+**Init data size.** Registered with Windows 2000's `VIDEO_HW_INITIALIZATION_DATA`, the
+miniport makes XP map `\Device\Video0` to the legacy key `Services\rb2kmp\Device0`; with
+XP's size (one `ULONG` longer) XP uses `Control\Video\{GUID}\0000` like a native XP driver.
+The miniport now tries XP's size first and registers again with Windows 2000's when
+`VideoPortInitialize` returns `STATUS_REVISION_MISMATCH`. Not yet tested on Windows 2000.
+The saved-mode problem is the same with either size.
+
+**Still to do on XP:** the first-logon fix; the Quake III, `ddbench`, `rvdstat`,
+`threadtest` and GPU-surface tests; a clean XP SP3 install; the other two test hosts.
+The driver offers only 32-bit desktop modes, so games that ask DirectDraw for 8-bit or
+16-bit full-screen modes will fail until it offers them (the same on Windows 2000).
