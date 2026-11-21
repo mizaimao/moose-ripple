@@ -18,7 +18,9 @@ VGA and restored the saved desktop after full-screen DirectDraw programs.
   [Display-mode tests](../docs/win2k/development.md#16-bit-colour-development)
 - **OpenGL:** Windows' own `opengl32.dll` loads `ripplegl.dll`, Mesa
   24.3.4 with its virgl driver. The host renders. It is the same DLL as
-  the Windows 9x driver's.
+  the Windows 9x driver's. By default GDI displays the finished frames.
+  An experimental GPU presentation path is opt-in. For Quake results and
+  per-operation timings, see the [presentation tests](../docs/win2k/development.md#experimental-gpu-presentation-for-opengl).
 - **DirectDraw:** full-screen programs flip between two pages in video
   memory. Other surfaces live in system memory, where Windows' own
   DirectDraw code draws them faster than the GPU could here (see Speed).

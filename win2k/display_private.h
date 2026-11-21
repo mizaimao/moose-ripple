@@ -27,6 +27,8 @@ typedef struct {
     HDEV device;
     HPALETTE palette;
     HSURF surface;
+    HSURF bitmap;
+    SURFOBJ *cpuSurface;
     PVOID mapping;
     ULONG mappingBytes;
     VIDEO_MODE_INFORMATION mode;
@@ -35,6 +37,7 @@ typedef struct {
     BOOL paletteActive;
     HSEMAPHORE ddLock;
     BOOL ddEnabled;
+    BOOL glActive;
     BOOL gpuSurfaces;           /* offscreen surfaces as host textures (RB2K_DD_CAPS) */
     ULONG pageBytes, visiblePage, lockedPages;
     PDD_SURFACE_GLOBAL flipBack, flipFront;
@@ -49,5 +52,11 @@ BOOL rb_restore_palette(DISPLAY *display);
 void rb_rvd_init(void);
 ULONG rb_rvd_escape(DISPLAY *display, ULONG inSize, PVOID in, ULONG outSize, PVOID out);
 ULONG rb_rvd_stats(DISPLAY *display, ULONG outSize, PVOID out);
+ULONG rb_gl_stats(DISPLAY *display, ULONG operation, ULONG bytes, PVOID out);
+BOOL rb_gl_device_surface(DISPLAY *d);
+void rb_gl_cpu_lock(void);
+void rb_gl_cpu_unlock(void);
+BOOL rb_gl_cpu_access(DISPLAY *d, const RECTL *rect, ULONG access);
+BOOL rb_gl_cpu_flush(DISPLAY *d);
 void rb_dd_free_views(DISPLAY *display);
 #endif

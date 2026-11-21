@@ -66,7 +66,7 @@ static VP_STATUS create(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     image->id = ++gpu->nextId;
     image->width = size->width;
     image->height = size->height;
-    if (!rb_gpu_create_image(gpu, &result, image, name, sizeof(name) - 1)) {
+    if (!rb_gpu_create_image(gpu, &result, image, name, sizeof(name) - 1, FALSE)) {
         if (!gpu->rvdContexts || !gpu->ready) rb_gpu_stop(gpu);
         return result.status;
     }
@@ -206,6 +206,7 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     case IOCTL_RB2K_DD_COPY: {
         RB2K_DD_COPY *copy = packet->InputBuffer;
         RB2K_IMAGE *destination;
+        RB2K_DD_PRESENT region = {0};
         if (packet->InputBufferLength != sizeof(*copy) || packet->OutputBufferLength)
             return ERROR_INVALID_PARAMETER;
         destination = find_image(gpu, copy->destination);
@@ -218,7 +219,10 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
             destination->defined = FALSE;
             return NO_ERROR;
         }
-        success = rb_gpu_copy_image(gpu, &result, image, destination);
+        region.source = image->id;
+        region.width = image->width;
+        region.height = image->height;
+        success = rb_gpu_copy_region(gpu, &result, destination->id, &region);
         if (success) {
             destination->defined = TRUE;
             destination->uniform = image->uniform;

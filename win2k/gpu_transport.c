@@ -307,7 +307,10 @@ VP_STATUS rb_gpu_reserve_staging(RB2K_GPU *gpu, ULONG bytes)
 VP_STATUS rb_gpu_stop(RB2K_GPU *gpu)
 {
     ULONG pciCommand, i;
-    VP_STATUS cleanup = stop(gpu);
+    VP_STATUS cleanup;
+    rb_gl_finish(gpu);
+    cleanup = stop(gpu);
+    if (!cleanup) VideoPortZeroMemory(&gpu->glDesktop, sizeof(gpu->glDesktop));
     /* A reset, including a failed attempt, invalidates all guest handles.
      * The pinned buffers survive an unacknowledged reset until a retry. */
     VideoPortZeroMemory(gpu->images, sizeof(gpu->images));

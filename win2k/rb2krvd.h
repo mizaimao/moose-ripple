@@ -8,9 +8,14 @@
 #define RB2K_RVD_H
 
 #include "rvd.h"
+#include "ddsurface.h"
 
 #define RB2K_RVD_ESCAPE 0x52420010
+#define RB2K_GL_PRESENT_ESCAPE 0x52420012
+#define RB2K_GL_STATS_ESCAPE 0x52420013
+#define RB2K_GL_TIMING_ESCAPE 0x52420014
 #define IOCTL_RB2K_RVD CTL_CODE(FILE_DEVICE_VIDEO, 0x910, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_RB2K_GL_FRAME CTL_CODE(FILE_DEVICE_VIDEO, 0x911, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 /* Display DLL to miniport. */
 enum {
@@ -23,7 +28,12 @@ enum {
     RB2K_RVD_OP_BUFFER_DESTROY,     /* context, a: handle */
     RB2K_RVD_OP_SUBMIT,             /* context, bytes: commands at staging offset 0 */
     RB2K_RVD_OP_TRANSFER,           /* u.transfer */
-    RB2K_RVD_OP_HELD                /* out: ULONG[3] contexts, buffers, pages held now */
+    RB2K_RVD_OP_HELD,               /* out: ULONG[3] contexts, buffers, pages held now */
+    RB2K_RVD_OP_GDI_ACCESS,         /* u.rect: primary area, out: ULONG GPU desktop active */
+    RB2K_RVD_OP_GDI_FLUSH,          /* publish completed GDI drawing, out: ULONG active */
+    RB2K_RVD_OP_GL_STATS,           /* out: RB2K_GL_STATS over the lifetime of the driver */
+    RB2K_RVD_OP_GL_OPTION,          /* out: ULONG, allow device-managed 32-bit desktop */
+    RB2K_RVD_OP_GL_TIMING           /* out: RB2K_GL_TIMING */
 };
 
 #define RB2K_RVD_STAGING_SEGMENTS 48
@@ -40,6 +50,7 @@ typedef struct {
         char name[RB2K_RVD_MAX_NAME];
         struct rvd_buffer_create create;
         struct rvd_transfer transfer;
+        RB2K_RECT rect;
     } u;
 } RB2K_RVD_REQUEST;
 

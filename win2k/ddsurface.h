@@ -32,6 +32,26 @@ typedef struct { ULONG id, color; } RB2K_DD_FILL;
 typedef struct { ULONG source, destination; } RB2K_DD_COPY;
 /* One visible rectangle, in source and primary pixel coordinates. */
 typedef struct { ULONG source, srcX, srcY, dstX, dstY, width, height; } RB2K_DD_PRESENT;
+typedef struct { ULONG left, top, right, bottom; } RB2K_RECT;
+enum { RB2K_CPU_READ, RB2K_CPU_DRAW, RB2K_CPU_REPLACE };
+#define RB2K_GL_MAX_RECTS 32
+typedef struct {
+    ULONG context, source, width, height;
+    LONG originX, originY;
+    ULONG count;
+    RB2K_RECT rects[RB2K_GL_MAX_RECTS];
+} RB2K_GL_FRAME;
+typedef struct {
+    ULONG frames, readbacks, uploads, readbackPixels, fullFrameReads;
+    ULONG lastReadWidth, lastReadHeight;
+} RB2K_GL_STATS;
+enum { RB2K_GL_READ_PART, RB2K_GL_READ_FRAME, RB2K_GL_UPLOAD, RB2K_GL_COPY,
+       RB2K_GL_FLUSH, RB2K_GL_TIME_COUNT };
+typedef struct { LONGLONG ticks; ULONG calls, failed; } RB2K_GL_TIME;
+typedef struct {
+    LONGLONG frequency;
+    RB2K_GL_TIME operations[RB2K_GL_TIME_COUNT];
+} RB2K_GL_TIMING;
 /* Input is a surface ID. A known value supplies every byte of a writable lock. */
 typedef struct { ULONG known, color; } RB2K_DD_UNIFORM;
 #endif

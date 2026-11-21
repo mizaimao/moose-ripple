@@ -1,5 +1,5 @@
-/* Wire commands shared by the fixed pixel diagnostic and offscreen
- * DirectDraw surfaces. None of these operations changes the scanout. */
+/* Virtio commands for the pixel diagnostic, DirectDraw textures and the
+ * optional OpenGL desktop. Only rb_gpu_show_desktop selects a scanout. */
 #include <miniport.h>
 #include <devioctl.h>
 #include <winerror.h>
@@ -7,6 +7,7 @@
 #include <video.h>
 #include "rb2kprobe.h"
 #include "gpu_transport.h"
+#include "gpu_memory.h"
 #pragma warning(push)
 #pragma warning(disable:4200) /* flexible capset array in the virtio ABI */
 #include <linux/virtio_gpu.h>
@@ -41,6 +42,8 @@ typedef union {
     } draw;
     struct virtio_gpu_transfer_host_3d transfer;
     struct virtio_gpu_resource_unref unref;
+    struct virtio_gpu_set_scanout scanout;
+    struct virtio_gpu_resource_flush flush;
 } PIXEL_REQUEST;
 
 typedef struct {
@@ -99,7 +102,7 @@ static BOOLEAN context_resource(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG co
 }
 
 BOOLEAN rb_gpu_create_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
-                            const RB2K_IMAGE *image, const char *name, ULONG nameBytes)
+                            const RB2K_IMAGE *image, const char *name, ULONG nameBytes, BOOLEAN scanout)
 {
     PIXEL_REQUEST request;
     begin_request(&request, VIRTIO_GPU_CMD_CTX_CREATE, image->id);
@@ -111,7 +114,7 @@ BOOLEAN rb_gpu_create_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     request.resource.resource_id = image->id;
     request.resource.target = PipeTexture2D;
     request.resource.format = VIRGL_FORMAT_B8G8R8A8_UNORM;
-    request.resource.bind = VIRGL_BIND_RENDER_TARGET;
+    request.resource.bind = VIRGL_BIND_RENDER_TARGET | (scanout ? VIRGL_BIND_SCANOUT : 0);
     request.resource.width = image->width;
     request.resource.height = image->height;
     request.resource.depth = request.resource.array_size = 1;
@@ -166,9 +169,28 @@ BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
     return fenced(gpu, result, &request, sizeof(request.draw.submit) + bytes, RB2K_STAGE_CLEAR);
 }
 
-/* Use a packed DMA buffer even when the source box is inside a larger image. */
-BOOLEAN rb_gpu_transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resource,
-                            ULONG x, ULONG y, ULONG width, ULONG height, PVOID upload)
+/* The DMA pages hold packed rows. The VGA primary may have a wider stride. */
+static void copy_rows(RB2K_GPU *gpu, PUCHAR pixels, ULONG pitch, ULONG rowBytes,
+                      ULONG rows, BOOLEAN toPrimary)
+{
+    ULONG row, offset = 0;
+    for (row = 0; row < rows; ++row, pixels += pitch) {
+        ULONG done = 0;
+        while (done < rowBytes) {
+            ULONG inPage = offset % RB2K_SEGMENT_BYTES;
+            ULONG bytes = RB2K_SEGMENT_BYTES - inPage;
+            PUCHAR page = gpu->staging[offset / RB2K_SEGMENT_BYTES].data + inPage;
+            if (bytes > rowBytes - done) bytes = rowBytes - done;
+            if (toPrimary) VideoPortMoveMemory(pixels + done, page, bytes);
+            else VideoPortMoveMemory(page, pixels + done, bytes);
+            done += bytes;
+            offset += bytes;
+        }
+    }
+}
+
+static BOOLEAN transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resource,
+                            ULONG x, ULONG y, ULONG width, ULONG height, PVOID upload, ULONG pitch)
 {
     PIXEL_REQUEST request;
     BACKING_REQUEST backing;
@@ -189,9 +211,12 @@ BOOLEAN rb_gpu_transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resour
         backing.entries[i].addr = gpu->staging[i].bus.QuadPart;
         backing.entries[i].length = length;
         /* A failed or short renderer write must never return another surface's bytes. */
-        if (upload) VideoPortMoveMemory(gpu->staging[i].data, (PUCHAR)upload + offset, length);
-        else VideoPortZeroMemory(gpu->staging[i].data, length);
+        if (!upload) VideoPortZeroMemory(gpu->staging[i].data, length);
+        else if (pitch == width * sizeof(ULONG))
+            VideoPortMoveMemory(gpu->staging[i].data, (PUCHAR)upload + offset, length);
     }
+    if (upload && pitch != width * sizeof(ULONG))
+        copy_rows(gpu, upload, pitch, width * sizeof(ULONG), height, FALSE);
     if (!send_request(gpu, result, &backing, used, RB2K_STAGE_BACKING)) return FALSE;
     begin_request(&request, upload ? VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D :
         VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, resource);
@@ -206,6 +231,84 @@ BOOLEAN rb_gpu_transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resour
     begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING, 0);
     request.detach.resource_id = resource;
     return send_request(gpu, result, &request, sizeof(request.detach), RB2K_STAGE_BACKING);
+}
+
+BOOLEAN rb_gpu_transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resource,
+                            ULONG x, ULONG y, ULONG width, ULONG height, PVOID upload)
+{
+    return transfer_box(gpu, result, resource, x, y, width, height, upload, width * sizeof(ULONG));
+}
+
+BOOLEAN rb_gl_record_time(RB2K_GPU *gpu, ULONG operation, LONGLONG start, BOOLEAN ok)
+{
+    RB2K_GL_TIME *time = &gpu->glTiming.operations[operation];
+    time->ticks += rb_counter_ticks(NULL) - start;
+    ++time->calls;
+    if (!ok) ++time->failed;
+    return ok;
+}
+
+BOOLEAN rb_gpu_primary_transfer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
+                                const RB2K_RECT *rect, BOOLEAN readback)
+{
+    ULONG width = rect->right - rect->left, height = rect->bottom - rect->top;
+    ULONG pitch = gpu->primary.pitchPixels * sizeof(ULONG);
+    ULONG operation = RB2K_GL_UPLOAD;
+    LONGLONG start;
+    PULONG first;
+    if (!gpu->primary.pixels || gpu->primary.bitsPerPixel != 32 ||
+        gpu->primary.width != gpu->glDesktop.image.width || gpu->primary.height != gpu->glDesktop.image.height ||
+        !width || !height || rect->right > gpu->primary.width || rect->bottom > gpu->primary.height ||
+        rect->left >= rect->right || rect->top >= rect->bottom ||
+        gpu->primary.pitchPixels < gpu->primary.width ||
+        gpu->primary.pitchPixels > gpu->primary.bytes / sizeof(ULONG) / gpu->primary.height) {
+        result->status = ERROR_INVALID_PARAMETER;
+        return FALSE;
+    }
+    if (readback) {
+        const RB2K_RECT *owned = &gpu->glDesktop.gpuPixels;
+        operation = rect->left == owned->left && rect->top == owned->top &&
+            rect->right == owned->right && rect->bottom == owned->bottom ?
+            RB2K_GL_READ_FRAME : RB2K_GL_READ_PART;
+    }
+    first = gpu->primary.pixels + rect->top * gpu->primary.pitchPixels + rect->left;
+    start = rb_counter_ticks(NULL);
+    if (!transfer_box(gpu, result, gpu->glDesktop.image.id, rect->left, rect->top,
+                      width, height, readback ? NULL : first, pitch))
+        return rb_gl_record_time(gpu, operation, start, FALSE);
+    if (readback) copy_rows(gpu, (PUCHAR)first, pitch, width * sizeof(ULONG), height, TRUE);
+    if (readback) {
+        ++gpu->glStats.readbacks;
+        gpu->glStats.readbackPixels += width * height;
+        gpu->glStats.lastReadWidth = width;
+        gpu->glStats.lastReadHeight = height;
+        if (operation == RB2K_GL_READ_FRAME) ++gpu->glStats.fullFrameReads;
+    }
+    else ++gpu->glStats.uploads;
+    return rb_gl_record_time(gpu, operation, start, TRUE);
+}
+
+BOOLEAN rb_gpu_show_desktop(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, BOOLEAN select)
+{
+    PIXEL_REQUEST request;
+    RB2K_IMAGE *image = &gpu->glDesktop.image;
+    LONGLONG start = rb_counter_ticks(NULL);
+    BOOLEAN ok;
+    if (select) {
+        begin_request(&request, VIRTIO_GPU_CMD_SET_SCANOUT, 0);
+        request.scanout.resource_id = image->id;
+        request.scanout.r.width = image->width;
+        request.scanout.r.height = image->height;
+        if (!send_request(gpu, result, &request, sizeof(request.scanout), RB2K_STAGE_TRANSFER))
+            return rb_gl_record_time(gpu, RB2K_GL_FLUSH, start, FALSE);
+        gpu->glDesktop.visible = TRUE;
+    }
+    begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_FLUSH, 0);
+    request.flush.resource_id = image->id;
+    request.flush.r.width = image->width;
+    request.flush.r.height = image->height;
+    ok = send_request(gpu, result, &request, sizeof(request.flush), RB2K_STAGE_TRANSFER);
+    return rb_gl_record_time(gpu, RB2K_GL_FLUSH, start, ok);
 }
 
 BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
@@ -226,25 +329,30 @@ BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     return TRUE;
 }
 
-BOOLEAN rb_gpu_copy_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
-                          const RB2K_IMAGE *source, const RB2K_IMAGE *destination)
+/* The caller clips both rectangles to the resources before submitting them. */
+BOOLEAN rb_gpu_copy_region(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
+                           ULONG destination, const RB2K_DD_PRESENT *region)
 {
     PIXEL_REQUEST request;
     ULONG *words = request.draw.words;
     ULONG bytes = (1 + VIRGL_CMD_RESOURCE_COPY_REGION_SIZE) * sizeof(ULONG);
-    if (!context_resource(gpu, result, destination->id, source->id, TRUE, RB2K_STAGE_ATTACH))
+    if (!context_resource(gpu, result, destination, region->source, TRUE, RB2K_STAGE_ATTACH))
         return FALSE;
-    begin_request(&request, VIRTIO_GPU_CMD_SUBMIT_3D, destination->id);
+    begin_request(&request, VIRTIO_GPU_CMD_SUBMIT_3D, destination);
     request.draw.submit.size = bytes;
     words[0] = VIRGL_CMD0(VIRGL_CCMD_RESOURCE_COPY_REGION, 0, VIRGL_CMD_RESOURCE_COPY_REGION_SIZE);
-    words[VIRGL_CMD_RCR_DST_RES_HANDLE] = destination->id;
-    words[VIRGL_CMD_RCR_SRC_RES_HANDLE] = source->id;
-    words[VIRGL_CMD_RCR_SRC_W] = source->width;
-    words[VIRGL_CMD_RCR_SRC_H] = source->height;
+    words[VIRGL_CMD_RCR_DST_RES_HANDLE] = destination;
+    words[VIRGL_CMD_RCR_DST_X] = region->dstX;
+    words[VIRGL_CMD_RCR_DST_Y] = region->dstY;
+    words[VIRGL_CMD_RCR_SRC_RES_HANDLE] = region->source;
+    words[VIRGL_CMD_RCR_SRC_X] = region->srcX;
+    words[VIRGL_CMD_RCR_SRC_Y] = region->srcY;
+    words[VIRGL_CMD_RCR_SRC_W] = region->width;
+    words[VIRGL_CMD_RCR_SRC_H] = region->height;
     words[VIRGL_CMD_RCR_SRC_D] = 1;
     if (!fenced(gpu, result, &request, sizeof(request.draw.submit) + bytes, RB2K_STAGE_TRANSFER))
         return FALSE;
-    return context_resource(gpu, result, destination->id, source->id, FALSE, RB2K_STAGE_CLEANUP);
+    return context_resource(gpu, result, destination, region->source, FALSE, RB2K_STAGE_CLEANUP);
 }
 
 BOOLEAN rb_gpu_destroy_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id)
@@ -263,7 +371,7 @@ void rb_gpu_pixel(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
     static const char name[] = "rb2k-pixel";
     const RB2K_IMAGE image = {1, 1, 1, FALSE, FALSE, FALSE, 0};
     result->expected = 0xffff8000UL;
-    if (!rb_gpu_create_image(gpu, result, &image, name, sizeof(name) - 1)) return;
+    if (!rb_gpu_create_image(gpu, result, &image, name, sizeof(name) - 1, FALSE)) return;
     result->observed = ~result->expected;
     if (!rb_gpu_draw_image(gpu, result, image.id, result->expected, TRUE) ||
         !rb_gpu_transfer_image(gpu, result, &image, &result->observed, TRUE)) return;

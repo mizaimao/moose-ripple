@@ -542,3 +542,80 @@ Forcing `DDCREATE_HARDWAREONLY` passed the page and index checks with
 the existing palette. Explicit palette creation on that interface returned
 `E_NOTIMPL` on XP. The default interface used by the combined test can
 create the palette and use hardware page flipping in the same session.
+
+## Experimental GPU presentation for OpenGL
+
+The ordinary renderer downloads a completed frame and passes it to GDI.
+With the adapter DWORD `RippleGpuDesktop=1` set before boot, the driver
+can display a 32-bit desktop texture up to 1024×768. Setting
+`RIPPLE_GL_PRESENT=1` in an OpenGL application opts its swaps into that
+path. GDI supplies the window's visible rectangles to `DrvDrawEscape`.
+The miniport copies these rectangles into its own desktop texture. When
+GDI needs desktop pixels, the miniport synchronizes the affected area
+with the framebuffer. Software cursor drawing also uses this path.
+
+On an M1 Max running UTM, each OS ran the same 969-frame OpenGL Quake
+demo at 640×480 in a foreground window. The game, installed driver, Mesa
+ICD, resolution, timer and demo settings were fixed. After a warmup, the
+six trials used the ordinary, GPU, GPU, ordinary, GPU, ordinary paths.
+Both sides used the same opt-in desktop. Only the process environment
+variable changed between runs.
+Host elapsed time runs from game launch to the serial score. Process CPU
+includes kernel and user time. The synthetic test times 240 swaps with
+a full-screen window, an unobstructed 640×480 window, a software cursor,
+and a window partly covered by a green rectangle. Each trial checks its
+own red and blue pixels and the cover's green pixel where applicable.
+
+Keep the ordinary path as the default. In the initial Windows 2000
+comparison, GPU presentation reduced Quake from 48.6 to 30.4 fps
+despite reducing 240 full-screen test swaps from 1,186 to 710 ms.
+Timing the individual driver operations reproduced that regression.
+XP's three runs per setting showed no measurable game improvement.
+
+| Test, median of three | Windows 2000 ordinary | Windows 2000 GPU | XP ordinary | XP GPU |
+| --- | ---: | ---: | ---: | ---: |
+| Windowed Quake (fps) | 47.5 | 30.8 | 46.3 | 46.1 |
+| Host time from launch to score (s) | 22.61 | 34.98 | 23.77 | 23.72 |
+| Game process CPU (s) | 7.03 | 19.41 | 7.91 | 8.01 |
+| 240 full-screen swaps, cursor hidden (ms) | 1,176 | 714 | 1,212 | 714 |
+| 240 windowed swaps, cursor hidden (ms) | 749 | 896 | 610 | 733 |
+| Same window with a software cursor (ms) | 699 | 2,098 | 643 | 2,146 |
+| Same window with a green window covering its centre (ms) | 615 | 1,964 | 626 | 2,056 |
+
+The miniport measures elapsed time through each device reply. Each
+rectangle copy attaches the source texture, waits for the copy, then
+detaches it. Two `rvdstat.exe` snapshots around the game include
+startup and teardown. Counts and seconds below are medians per game.
+Time per call is total time divided by total calls across the three
+GPU trials. XP uploaded 3, 3 and 20 times in those trials.
+
+| Desktop operation | 2000 calls | 2000 seconds | 2000 µs/call | XP calls | XP seconds | XP µs/call |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| GPU rectangle copy | 4,308 | 8.1551 | 1,890 | 1,079 | 1.9426 | 1,815 |
+| Upload GDI pixels | 2,255 | 4.0561 | 1,843 | 3 | 0.0201 | 3,863 |
+| Read partial desktop region | 1,117 | 0.7872 | 692 | 1 | 0.0006 | 559 |
+| Flush desktop to scanout | 3,331 | 0.2676 | 81 | 1,081 | 0.0848 | 77 |
+| Read whole GPU-owned region | 1 | 0.0024 | 2,441 | 1 | 0.0029 | 2,854 |
+
+Windows 2000 copied four visible rectangles per presented frame. XP
+copied one. The per-copy costs were similar. On the ordinary path,
+Windows 2000 spent 1.306 s downloading 1,086 application frames and XP
+spent 1.271 s downloading 1,101. GPU presentation eliminated those
+downloads on both. The largest cost on Windows 2000 was the repeated
+rectangle-copy sequence. Submitting a frame's rectangles together is
+the next like-for-like presentation comparison.
+
+All 24 measured synthetic trials on each OS passed the path, foreground
+and pixel checks. The unmeasured first ordinary-path probe on each OS
+returned a failure with matching sampled colours. Its executable did
+not log the failing condition. All twelve measured game runs held the
+foreground, released their GPU resources and restored the desktop.
+One earlier Windows 2000 run also had an 8-bit page-flip mismatch at
+1024×768. The immediate repeat and both later isolated repeats passed.
+
+The tests sampled the program's own GDI pixels. The UTM viewer still
+needs a visual check. On the opt-in XP desktop, set
+`RIPPLE_GL_PRESENT=1` and run `glpresent.exe full hold`. At `GLP HOLD`
+the 1024×768 client should show solid red in the lower-left 512×384
+quarter and solid blue everywhere else. Display depth changes while a
+GPU-presented OpenGL context is still live also remain unverified.

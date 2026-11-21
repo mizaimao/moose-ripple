@@ -200,6 +200,9 @@ VOID DrvDisableSurface(DHPDEV pdev)
         EngDeleteSurface(display->surface);
         display->surface = NULL;
     }
+    if (display->cpuSurface) { EngUnlockSurface(display->cpuSurface); display->cpuSurface = NULL; }
+    if (display->bitmap) { EngDeleteSurface(display->bitmap); display->bitmap = NULL; }
+    display->glActive = FALSE;
     if (display->mapping) {
         request.RequestedVirtualAddress = display->mapping;
         EngDeviceIoControl(display->miniport, IOCTL_VIDEO_UNMAP_VIDEO_MEMORY,
@@ -230,11 +233,20 @@ HSURF DrvEnableSurface(DHPDEV pdev)
         mem.FrameBufferLength / (ULONG)size.cy < (ULONG)display->mode.ScreenStride)
         goto failed;
     if (mem.VideoRamBase == mem.FrameBufferBase) display->mappingBytes = mem.FrameBufferLength;
-    /* Let GDI draw directly into the top-down mapped framebuffer. */
-    display->surface = (HSURF)EngCreateBitmap(size, display->mode.ScreenStride,
+    display->bitmap = (HSURF)EngCreateBitmap(size, display->mode.ScreenStride,
         display->bitmapFormat, BMF_TOPDOWN, mem.FrameBufferBase);
-    if (!display->surface || !EngAssociateSurface(display->surface, display->device, 0))
-        goto failed;
+    if (!display->bitmap) goto failed;
+    if (display->bitmapFormat == BMF_32BPP && rb_gl_device_surface(display)) {
+        display->cpuSurface = EngLockSurface(display->bitmap);
+        display->surface = EngCreateDeviceSurface((DHSURF)display, size, display->bitmapFormat);
+        if (!display->cpuSurface || !display->surface ||
+            !EngAssociateSurface(display->surface, display->device, HOOK_BITBLT | HOOK_COPYBITS |
+                HOOK_STROKEPATH | HOOK_FILLPATH | HOOK_STROKEANDFILLPATH | HOOK_TEXTOUT)) goto failed;
+    } else {
+        display->surface = display->bitmap;
+        display->bitmap = NULL;
+        if (!EngAssociateSurface(display->surface, display->device, 0)) goto failed;
+    }
     return display->surface;
 failed:
     DrvDisableSurface(pdev);
@@ -266,7 +278,8 @@ ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
         return in && inSize == sizeof(ULONG) && (*(ULONG *)in == RB2K_GPU_ESCAPE ||
                    *(ULONG *)in == RB2K_DD_STATS_ESCAPE || *(ULONG *)in == RB2K_DD_SCANOUT_ESCAPE ||
                    *(ULONG *)in == OPENGL_GETINFO || *(ULONG *)in == RB2K_RVD_ESCAPE ||
-                   *(ULONG *)in == RB2K_RVD_STATS_ESCAPE);
+                   *(ULONG *)in == RB2K_RVD_STATS_ESCAPE || *(ULONG *)in == RB2K_GL_PRESENT_ESCAPE ||
+                   *(ULONG *)in == RB2K_GL_STATS_ESCAPE || *(ULONG *)in == RB2K_GL_TIMING_ESCAPE);
     /* opengl32.dll passes a small input buffer of its own with this one. */
     if (code == OPENGL_GETINFO) return opengl_info(outSize, out);
     /* Mesa's winsys on Windows 2000 (display_rvd.c). */
@@ -277,6 +290,10 @@ ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
         return surface && surface->dhpdev ? rb_rvd_stats((DISPLAY *)surface->dhpdev, outSize, out) : 0;
     if (inSize || !out || !surface || !surface->dhpdev) return 0;
     display = (DISPLAY *)surface->dhpdev;
+    if (code == RB2K_GL_STATS_ESCAPE && outSize == sizeof(RB2K_GL_STATS))
+        return rb_gl_stats(display, RB2K_RVD_OP_GL_STATS, outSize, out);
+    if (code == RB2K_GL_TIMING_ESCAPE && outSize == sizeof(RB2K_GL_TIMING))
+        return rb_gl_stats(display, RB2K_RVD_OP_GL_TIMING, outSize, out);
     if (code == RB2K_DD_SCANOUT_ESCAPE)
         return outSize == sizeof(RB2K_DD_FLIP_INFO) &&
                !EngDeviceIoControl(display->miniport, IOCTL_RB2K_DD_FLIP_INFO,
@@ -318,6 +335,13 @@ static DRVFN callbacks[] = {
     { INDEX_DrvAssertMode, (PFN)DrvAssertMode },
     { INDEX_DrvSetPalette, (PFN)DrvSetPalette },
     { INDEX_DrvEscape, (PFN)DrvEscape },
+    { INDEX_DrvDrawEscape, (PFN)DrvDrawEscape },
+    { INDEX_DrvBitBlt, (PFN)DrvBitBlt },
+    { INDEX_DrvCopyBits, (PFN)DrvCopyBits },
+    { INDEX_DrvTextOut, (PFN)DrvTextOut },
+    { INDEX_DrvStrokePath, (PFN)DrvStrokePath },
+    { INDEX_DrvFillPath, (PFN)DrvFillPath },
+    { INDEX_DrvStrokeAndFillPath, (PFN)DrvStrokeAndFillPath },
     { INDEX_DrvGetDirectDrawInfo, (PFN)DrvGetDirectDrawInfo },
     { INDEX_DrvEnableDirectDraw, (PFN)DrvEnableDirectDraw },
     { INDEX_DrvDisableDirectDraw, (PFN)DrvDisableDirectDraw }
