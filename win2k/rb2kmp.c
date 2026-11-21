@@ -538,11 +538,8 @@ static ULONG child(PVOID ext, PVIDEO_CHILD_ENUM_INFO info, PVIDEO_CHILD_TYPE typ
 ULONG DriverEntry(PVOID context1, PVOID context2)
 {
     /* Windows XP's init data is one ULONG longer. Registered with it, XP keeps
-     * the display settings under Control\Video\{GUID}\0000, where the INF's
-     * SoftwareSettings put them; with the Windows 2000 size it reads
-     * Services\rb2kmp\Device0 instead, finds no saved mode, and falls back to
-     * 640x480 at boot and after full-screen DirectDraw. Windows 2000 refuses
-     * the longer size with STATUS_REVISION_MISMATCH. */
+     * adapter settings under Control\Video\{GUID}\0000. The Windows 2000
+     * layout selects the legacy Services\rb2kmp\Device0 path on XP. */
     struct {
         VIDEO_HW_INITIALIZATION_DATA w2k;
         ULONG reserved;

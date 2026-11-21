@@ -18,6 +18,13 @@ AddReg=OpenGLDriver
 [Ripple.SoftwareSettings]
 AddReg=DisplaySettings
 
+[Ripple.CoInstallers]
+CopyFiles=ModeInstaller
+AddReg=RegisterModeInstaller
+
+[RegisterModeInstaller]
+HKR,,CoInstallers32,0x00010008,"rbntmode.dll,RippleInstall"
+
 [DisplaySettings]
 HKR,,InstalledDisplayDrivers,0x00010000,rb2kdisp
 HKR,,VgaCompatible,0x00010001,0
@@ -41,6 +48,7 @@ ServiceBinary=%12%\rb2kmp.sys
 Miniport=12
 Display=11
 OpenGL=11
+ModeInstaller=11
 
 [Miniport]
 rb2kmp.sys
@@ -50,6 +58,9 @@ rb2kdisp.dll
 
 [OpenGL]
 ripplegl.dll
+
+[ModeInstaller]
+rbntmode.dll
 
 ; Windows 2000's opengl32.dll reads this key form (Dll, Version, Flags); with
 ; only a string value of the same name it falls back to its software OpenGL.
@@ -66,6 +77,7 @@ HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\RIPPLEGL",Versi
 rb2kmp.sys=1
 rb2kdisp.dll=1
 ripplegl.dll=1
+rbntmode.dll=1
 
 [Strings]
 Vendor="moose-ripple"
