@@ -1,0 +1,59 @@
+Vista: while a query result is not there, ask the host again in a submission that marks the
+query buffer written, then look again. Without one, every later look at the buffer saw its
+old contents: a pending query stayed pending, and a waiting caller looped for ever.
+
+252:int virgl_encoder_get_query_result(struct virgl_context *ctx,
+--- a/src/gallium/drivers/virgl/virgl_query.c
++++ b/src/gallium/drivers/virgl/virgl_query.c
+@@ -243,7 +243,6 @@
+       struct virgl_screen *vs = virgl_screen(ctx->screen);
+       struct virgl_context *vctx = virgl_context(ctx);
+       volatile struct virgl_host_query_state *host_state;
+-      struct pipe_transfer *transfer = NULL;
+ 
+       if (vs->vws->res_is_referenced(vs->vws, vctx->cbuf, query->buf->hw_res))
+          ctx->flush(ctx, NULL, 0);
+@@ -264,19 +263,19 @@
+        * coherent, and transfers are unsynchronized.  We have to repeatedly
+        * transfer until we get the result back.
+        */
++      /* Vista: what the host writes into the buffer shows through a lock only after a
++       * submission that marks the buffer written (virgl_gdi_emit_res). While the result is
++       * not there, ask the host for it again in such a submission, then look again, or
++       * come back later when not waiting. A look without one sees the old contents forever. */
+       while (host_state->query_state != VIRGL_QUERY_STATE_DONE) {
+-         debug_printf("VIRGL: get_query_result is forced blocking\n");
+-
+-         if (transfer) {
+-            pipe_buffer_unmap(ctx, transfer);
+-            if (!wait)
+-               return false;
+-         } else if (vs->vws->resource_unmap) {
+-            vs->vws->resource_unmap(vs->vws, query->buf->hw_res);
+-         }
+-
+-         host_state = pipe_buffer_map(ctx, &query->buf->b,
+-               PIPE_MAP_READ, &transfer);
++         vs->vws->resource_unmap(vs->vws, query->buf->hw_res);
++         virgl_encoder_get_query_result(vctx, query->handle, wait);
++         vs->vws->emit_res(vs->vws, vctx->cbuf, query->buf->hw_res, false);
++         ctx->flush(ctx, NULL, 0);
++         if (!wait)
++            return false;
++         vs->vws->resource_wait(vs->vws, query->buf->hw_res);
++         host_state = vs->vws->resource_map(vs->vws, query->buf->hw_res);
+          if (!host_state)
+             return false;
+       }
+@@ -286,10 +285,7 @@
+       else
+          query->result = (uint32_t) host_state->result;
+ 
+-      if (transfer)
+-         pipe_buffer_unmap(ctx, transfer);
+-      else if (vs->vws->resource_unmap)
+-         vs->vws->resource_unmap(vs->vws, query->buf->hw_res);
++      vs->vws->resource_unmap(vs->vws, query->buf->hw_res);
+ 
+       query->ready = true;
+    }

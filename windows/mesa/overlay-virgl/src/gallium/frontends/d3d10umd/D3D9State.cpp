@@ -778,6 +778,7 @@ D3D9_UNSUPPORTED_STUB_1(D3D9StateSet, D3DDDIARG_STATESET)
 D3D9_UNSUPPORTED_STUB_1(D3D9SetConvolutionKernelMono, const D3DDDIARG_SETCONVOLUTIONKERNELMONO)
 D3D9_UNSUPPORTED_STUB_1(D3D9ComposeRects, const D3DDDIARG_COMPOSERECTS)
 
+#if D3D_UMD_INTERFACE_VERSION >= D3D_UMD_INTERFACE_VERSION_WIN7
 static HRESULT APIENTRY
 D3D9CreateVideoProcessor(HANDLE hDevice,
                          D3DDDIARG_DXVAHD_CREATEVIDEOPROCESSOR *data)
@@ -854,6 +855,8 @@ D3D9DestroyVideoProcessor(HANDLE hDevice, HANDLE videoProcessor)
    D3D9WarnOncef(&logged, "unsupported D3D9DestroyVideoProcessor\n");
    return E_NOTIMPL;
 }
+
+#endif
 
 static HRESULT APIENTRY
 D3D9SetDisplayMode(HANDLE hDevice, const D3DDDIARG_SETDISPLAYMODE *data)
@@ -1691,6 +1694,7 @@ D3D9FillDeviceFuncs(D3DDDI_DEVICEFUNCS *funcs)
    funcs->pfnVideoProcessEndFrame = D3D9VideoProcessEndFrame;
    funcs->pfnSetVideoProcessRenderTarget = D3D9SetVideoProcessRenderTarget;
    funcs->pfnVideoProcessBlt = D3D9VideoProcessBlt;
+#if D3D_UMD_INTERFACE_VERSION >= D3D_UMD_INTERFACE_VERSION_WIN7
    funcs->pfnCreateVideoProcessor = D3D9CreateVideoProcessor;
    funcs->pfnSetVideoProcessBltState = D3D9SetVideoProcessBltState;
    funcs->pfnGetVideoProcessBltStatePrivate =
@@ -1701,4 +1705,5 @@ D3D9FillDeviceFuncs(D3DDDI_DEVICEFUNCS *funcs)
    funcs->pfnVideoProcessBltHD = D3D9VideoProcessBltHD;
    funcs->pfnDestroyVideoProcessor = D3D9DestroyVideoProcessor;
    funcs->pfnResolveSharedResource = D3D9ResolveSharedResource;
+#endif
 }

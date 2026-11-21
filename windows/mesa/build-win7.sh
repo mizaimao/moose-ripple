@@ -15,7 +15,14 @@
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
-T=$root/.tools
+MAIN=${MAIN:-$root}
+T=$MAIN/.tools
+TARGET=${RIPPLE_TARGET:-win7}
+case $TARGET in
+    win7) SRC_PLATFORM=win ;;
+    vista) SRC_PLATFORM=vista ;;
+    *) echo "Unsupported RIPPLE_TARGET: $TARGET" >&2; exit 1 ;;
+esac
 MESA_VERSION=24.3.4
 MESA_SHA256=e641ae27191d387599219694560d221b7feaa91c900bcec46bf444218ed66025
 TARBALL=$T/src/mesa-dl/mesa-$MESA_VERSION.tar.xz
@@ -34,15 +41,19 @@ case $VARIANT in
     virgl) DRIVERS=virgl; NAMES="-Dgallium-wgl-dll-name=viogpu_wgl -Dgallium-d3d10-dll-name=viogpu_d3d10"; SUFFIX=-virgl ;;
     *) echo "build-win7.sh: VARIANT is sw or virgl" >&2; exit 1 ;;
 esac
-SRC=$T/mesa/src-$MESA_VERSION-win$SUFFIX
+SRC=$T/mesa/src-$MESA_VERSION-$SRC_PLATFORM$SUFFIX
 PATCHDIRS="$here/patches"
 OVERLAY=
 [ $VARIANT = sw ] || { PATCHDIRS="$PATCHDIRS $here/patches-virgl"; OVERLAY=$here/overlay-virgl; }
-BUILD=$T/mesa/build-win7-$ARCH$SUFFIX
-OUT=$T/mesa/out-win7-$ARCH$SUFFIX
+if [ "$TARGET" = vista ]; then
+    [ "$VARIANT" = virgl ] || { echo "Vista supports VARIANT=virgl" >&2; exit 1; }
+    PATCHDIRS="$PATCHDIRS $here/patches-vista"
+fi
+BUILD=$T/mesa/build-$TARGET-$ARCH$SUFFIX
+OUT=$T/mesa/out-$TARGET-$ARCH$SUFFIX
 LLVM_MINGW=${LLVM_MINGW:-$T/llvm-mingw/llvm-mingw-20261104-msvcrt-ubuntu-22.04-x86_64}
 KIT=${KIT:-$T/wdk71/kit/WinDDK/7600.16385.win7_wdk.100208-1538}
-export PATH="$LLVM_MINGW/bin:$root/.venv/bin:$T/gnu/bin:$PATH"
+export PATH="$LLVM_MINGW/bin:$MAIN/.venv/bin:$T/gnu/bin:$PATH"
 
 [ -x "$LLVM_MINGW/bin/x86_64-w64-mingw32-clang" ] || { echo "build-win7.sh: no llvm-mingw at $LLVM_MINGW" >&2; exit 1; }
 [ -d "$KIT/inc/api" ] || { echo "build-win7.sh: no WDK 7.1 at $KIT" >&2; exit 1; }
@@ -79,6 +90,11 @@ if [ "${1:-}" = --clean ] || [ "$(cat "$SRC/.ripple-win-stamp" 2>/dev/null)" != 
     # C files are duplicate symbols (with MSVC, Mesa includes d3d10_1.h first to hide them).
     sed -i -e "s/MAKE_##TYPE##(/MAKE_##TYPE(/" -e "s/^const \(UINT\|INT\) /static const \1 /" \
         "$SRC/include/winddk/d3d10umddi.h"
+    # The D3D10 header declares a pointer to the newer allocation record even
+    # with the Vista DDI. Only the WDDM 1.0 member of that union is used.
+    if [ "$TARGET" = vista ]; then
+        sed -i '/^typedef struct D3D10DDIARG_OPENRESOURCE/i typedef struct _D3DDDI_OPENALLOCATIONINFO2 D3DDDI_OPENALLOCATIONINFO2;' "$SRC/include/winddk/d3d10umddi.h"
+    fi
     # d3dkmthk.h uses SAL annotations that MinGW lacks. Mesa's winddk_compat.h defines them
     # empty, but only the Direct3D 10 code includes it first; gdikmt and the virgl winsys include
     # d3dkmthk.h directly, so the local copy includes it itself.
@@ -86,7 +102,7 @@ if [ "${1:-}" = --clean ] || [ "$(cat "$SRC/.ripple-win-stamp" 2>/dev/null)" != 
     echo "$stamp" > "$SRC/.ripple-win-stamp"
 fi
 
-cross=$T/mesa/cross-win7-$ARCH.ini
+cross=$T/mesa/cross-$TARGET-$ARCH.ini
 cat > "$cross" <<EOC
 [binaries]
 c = '$LLVM_MINGW/bin/${TRIPLE}-clang'
@@ -102,7 +118,18 @@ cpu_family = '$CPU_FAMILY'
 cpu = '$CPU'
 endian = 'little'
 EOC
+if [ "$TARGET" = vista ]; then
+    cat >> "$cross" <<'EOC'
 
+[built-in options]
+cpp_args = ['-DRIPPLE_VISTA', '-DD3D_UMD_INTERFACE_VERSION=0x000C', '-DDXGKDDI_INTERFACE_VERSION=0x1053']
+EOC
+fi
+
+c_args="'-Wno-error=incompatible-pointer-types','-Wno-error=missing-prototypes'"
+if [ "$TARGET" = vista ]; then
+    c_args="$c_args,'-DRIPPLE_VISTA','-DD3D_UMD_INTERFACE_VERSION=0x000C','-DDXGKDDI_INTERFACE_VERSION=0x1053'"
+fi
 if [ ! -f "$BUILD/build.ninja" ]; then
     meson setup "$BUILD" "$SRC" --cross-file "$cross" \
         --buildtype=release -Db_ndebug=true -Dprefix=/ \
@@ -113,7 +140,14 @@ if [ ! -f "$BUILD/build.ninja" ]; then
         -Dvalgrind=disabled -Dlibunwind=disabled -Dlmsensors=disabled -Dbuild-tests=false \
         -Dmicrosoft-clc=disabled -Dspirv-to-dxil=false -Dgallium-va=disabled \
         -Dvideo-codecs= -Dshared-glapi=enabled \
-        "-Dc_args=['-Wno-error=incompatible-pointer-types','-Wno-error=missing-prototypes']"
+        "-Dc_args=[$c_args]"
+fi
+if [ "$TARGET" = vista ]; then
+    dll=src/gallium/targets/d3d10umd/viogpu_d3d10.dll
+    ninja -C "$BUILD" "$dll"
+    mkdir -p "$OUT"
+    cp "$BUILD/$dll" "$OUT/"
+    exit
 fi
 ninja -C "$BUILD"
 rm -rf "$OUT" && mkdir -p "$OUT"

@@ -436,3 +436,10 @@ Before the switch VM 210 had stopped answering ssh after about an hour idle (VM 
 test on the same GPU meanwhile); it was powered off before its state could be read. Cause
 unknown; `stop.sh` now captures a panic message first. RippleVirtioGPU also refuses PCI BARs
 above 4 GB now (KI-2 in known-issues.md).
+
+## 2026-11-19: Vista SP2 x64 display probe
+
+Built the display miniport and both Direct3D 9 DLLs for Vista. All 328
+imports and both sets of 16 graphics entry points resolve on the reference
+image. The first normal boot with a signed package will test the primary
+display allocation and a hardware triangle. [Results and build instructions](../windows/vista-sp2-probe.md)

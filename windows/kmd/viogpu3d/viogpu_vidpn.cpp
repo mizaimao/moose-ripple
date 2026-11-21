@@ -770,6 +770,7 @@ NTSTATUS VioGpuVidPN::EscapeCustomResoulution(VIOGPU_DISP_MODE *resolution)
     return STATUS_SUCCESS;
 }
 
+#if DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN7
 NTSTATUS VioGpuVidPN::QueryVidPnHWCapability(_Inout_ DXGKARG_QUERYVIDPNHWCAPABILITY *pVidPnHWCaps)
 {
     PAGED_CODE();
@@ -791,6 +792,8 @@ NTSTATUS VioGpuVidPN::QueryVidPnHWCapability(_Inout_ DXGKARG_QUERYVIDPNHWCAPABIL
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
     return STATUS_SUCCESS;
 }
+
+#endif
 
 NTSTATUS VioGpuVidPN::IsSupportedVidPn(_Inout_ DXGKARG_ISSUPPORTEDVIDPN *pIsSupportedVidPn)
 {
@@ -2008,7 +2011,12 @@ void VioGpuVidPN::Flip()
     ExAcquireFastMutex(&m_sourceLock);
     VioGpuAllocation *sourceRes = m_sourceRes;
     BOOLEAN flip = InterlockedExchange(&m_shouldFlip, 0) != 0;
-    const BOOLEAN haveSource = m_sourceAddress.QuadPart != 0 && sourceRes != NULL;
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+    // The first allocation in Vista's CPU-visible desktop segment can start at zero.
+    const BOOLEAN haveSource = sourceRes && (m_sourceAddress.QuadPart != 0 || m_sourceSegment == VistaDisplayMemory::SegmentId);
+#else
+    const BOOLEAN haveSource = sourceRes && m_sourceAddress.QuadPart != 0;
+#endif
 
     // Ramps that come while there is nothing to draw wait for the next surface, and are then
     // applied one a tick (viogpu_gamma.h).
@@ -2046,9 +2054,12 @@ void VioGpuVidPN::Flip()
     {
         // The whole surface goes out, whatever was noted as changed with it
         TakeChangedRect(&changed);
-        if (m_sourceAddress.QuadPart != 0 && sourceRes != NULL)
+        if (haveSource)
         {
             sourceRes->FlushToScreen(0);
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+            m_mirrorPending = sourceRes->IsDrawnPrimary() && m_sourceSegment == VistaDisplayMemory::SegmentId;
+#endif
         }
         else
         {
@@ -2064,6 +2075,25 @@ void VioGpuVidPN::Flip()
                                        changed.left,
                                        changed.top);
     }
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+    // Vista: the picture of a drawn primary on screen goes into its memory too, for screen
+    // captures (VioGpuAllocation::MirrorToMemory): at most twice a second while it changes, and
+    // once more after the last change
+    if (m_mirrorPending && haveSource && sourceRes->IsDrawnPrimary())
+    {
+        const ULONGLONG now = KeQueryInterruptTime();
+        PHYSICAL_ADDRESS memory;
+        if (now >= m_mirrorNext &&
+            m_pAdapter->desktopMemory.PhysicalAt(m_sourceAddress.QuadPart,
+                                                 (SIZE_T)sourceRes->GetPitch() * sourceRes->GetHeight(),
+                                                 &memory))
+        {
+            sourceRes->MirrorToMemory(memory);
+            m_mirrorPending = FALSE;
+            m_mirrorNext = now + 5000000; // half a second, in 100 ns units
+        }
+    }
+#endif
     ExReleaseFastMutex(&m_sourceLock);
     DXGKARGCB_NOTIFY_INTERRUPT_DATA interrupt;
     interrupt.InterruptType = DXGK_INTERRUPT_CRTC_VSYNC;
@@ -2150,6 +2180,9 @@ PAGED_CODE_SEG_END
 
 NTSTATUS VioGpuVidPN::SetVidPnSourceAddress(const DXGKARG_SETVIDPNSOURCEADDRESS *pSetVidPnSourceAddress)
 {
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+    m_sourceSegment = pSetVidPnSourceAddress->PrimarySegment;
+#endif
     m_sourceAddress = pSetVidPnSourceAddress->PrimaryAddress;
     m_sourceRes = reinterpret_cast<VioGpuAllocation *>(pSetVidPnSourceAddress->hAllocation);
     m_sourceId = m_sourceRes ? (LONG)m_sourceRes->GetId() : 0;

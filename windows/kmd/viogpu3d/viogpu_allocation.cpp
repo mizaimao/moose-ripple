@@ -20,6 +20,10 @@ VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_RESOURCE_OPTIO
     m_pageCount = 0;
     m_pageOffset = 0;
     m_DxPhysicalAddress = 0;
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+    m_drawnPrimary = FALSE;
+    m_mirrorAttached = FALSE;
+#endif
 
     KeInitializeEvent(&m_busyNotification, NotificationEvent, TRUE);
     m_busy = 0;
@@ -75,6 +79,39 @@ void VioGpuAllocation::DetachBacking()
 }
 
 PAGED_CODE_SEG_BEGIN
+
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+// Vista reads a screen capture straight from the memory of the primary on screen. A primary
+// the GPU draws has its picture only on the host: copied into that memory (contiguous, in the
+// desktop segment), a capture shows the screen instead of black. The memory is attached as the
+// host resource's backing the first time.
+void VioGpuAllocation::MirrorToMemory(PHYSICAL_ADDRESS memory)
+{
+    PAGED_CODE();
+    const ULONG pitch = m_options.width * 4;
+    if (!m_mirrorAttached)
+    {
+        GPU_MEM_ENTRY *ent = new (NonPagedPoolNx) GPU_MEM_ENTRY[1];
+        if (!ent)
+        {
+            return;
+        }
+        ent->addr = memory.QuadPart;
+        ent->length = pitch * m_options.height;
+        ent->padding = 0;
+        m_adapter->ctrlQueue.AttachBacking(m_Id, ent, 1);
+        m_mirrorAttached = TRUE;
+    }
+    VIOGPU_TRANSFER_CMD transfer;
+    RtlZeroMemory(&transfer, sizeof(transfer));
+    transfer.res_id = m_Id;
+    transfer.box.width = m_options.width;
+    transfer.box.height = m_options.height;
+    transfer.box.depth = 1;
+    transfer.stride = pitch;
+    m_adapter->ctrlQueue.TransferHostCmd(false, 0, &transfer, NULL, NULL, FALSE);
+}
+#endif
 
 void VioGpuAllocation::MarkBusy()
 {
@@ -161,18 +198,27 @@ NTSTATUS VioGpuAllocation::GetStandardAllocationDriverData(DXGKARG_GETSTANDARDAL
     // GDI's own surfaces for what it draws in windows: refused, so GDI keeps those in system
     // memory and sends no drawing commands (driver.cpp, VioGpu3DRenderKm). Windows asks for
     // every bitmap GDI makes, so the refusal is not logged.
+#if DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN7
     if (pStandardAllocation->StandardAllocationType == D3DKMDT_STANDARDALLOCATION_GDISURFACE)
     {
         return STATUS_NOT_SUPPORTED;
     }
+#endif
 
-    if (!pStandardAllocation->pResourcePrivateDriverData && !pStandardAllocation->pResourcePrivateDriverData)
+    if (!pStandardAllocation->pAllocationPrivateDriverData && !pStandardAllocation->pResourcePrivateDriverData)
     {
         pStandardAllocation->ResourcePrivateDriverDataSize = sizeof(VIOGPU_CREATE_RESOURCE_EXCHANGE);
         pStandardAllocation->AllocationPrivateDriverDataSize = sizeof(VIOGPU_CREATE_ALLOCATION_EXCHANGE);
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+        if (pStandardAllocation->StandardAllocationType == D3DKMDT_STANDARDALLOCATION_SHAREDPRIMARYSURFACE)
+            pStandardAllocation->AllocationPrivateDriverDataSize = sizeof(VIOGPU_VISTA_PRIMARY);
+#endif
         return STATUS_SUCCESS;
     }
 
+    if (!pStandardAllocation->pAllocationPrivateDriverData ||
+        pStandardAllocation->AllocationPrivateDriverDataSize < sizeof(VIOGPU_CREATE_ALLOCATION_EXCHANGE))
+        return STATUS_BUFFER_TOO_SMALL;
     VIOGPU_CREATE_ALLOCATION_EXCHANGE *allocationExchange = (VIOGPU_CREATE_ALLOCATION_EXCHANGE *)pStandardAllocation->pAllocationPrivateDriverData;
 
     allocationExchange->ResourceOptions.target = 2;
@@ -193,6 +239,11 @@ NTSTATUS VioGpuAllocation::GetStandardAllocationDriverData(DXGKARG_GETSTANDARDAL
     {
         case D3DKMDT_STANDARDALLOCATION_SHAREDPRIMARYSURFACE:
             {
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+                if (pStandardAllocation->AllocationPrivateDriverDataSize < sizeof(VIOGPU_VISTA_PRIMARY))
+                    return STATUS_BUFFER_TOO_SMALL;
+                static_cast<VIOGPU_VISTA_PRIMARY *>(pStandardAllocation->pAllocationPrivateDriverData)->tag = VIOGPU_VISTA_PRIMARY_TAG;
+#endif
                 D3DKMDT_SHAREDPRIMARYSURFACEDATA *surfaceData = pStandardAllocation->pCreateSharedPrimarySurfaceData;
                 //[in] UINT                           Width;
                 //[in] UINT                           Height;
@@ -314,6 +365,20 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
 
     allocationInfo->SupportedReadSegmentSet = 0b1;
     allocationInfo->SupportedWriteSegmentSet = 0b1;
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+    const ULONG vistaTag = allocationInfo->PrivateDriverDataSize == sizeof(VIOGPU_VISTA_PRIMARY)
+        ? static_cast<const VIOGPU_VISTA_PRIMARY *>(allocationInfo->pPrivateDriverData)->tag : 0;
+    if (vistaTag == VIOGPU_VISTA_PRIMARY_TAG || vistaTag == VIOGPU_VISTA_DRAWN_PRIMARY_TAG)
+    {
+        allocation->m_drawnPrimary = vistaTag == VIOGPU_VISTA_DRAWN_PRIMARY_TAG;
+        const UINT segment = VistaDisplayMemory::SegmentId;
+        allocationInfo->PreferredSegment.SegmentId0 = segment;
+        allocationInfo->SupportedReadSegmentSet = allocationInfo->SupportedWriteSegmentSet = 1u << (segment - 1);
+        allocationInfo->EvictionSegmentSet = 0;
+        allocationInfo->Flags.SynchronousPaging = TRUE;
+        DbgPrint(TRACE_LEVEL_WARNING, ("Vista primary %u bytes on segment %u\n", (UINT)allocationInfo->Size, segment));
+    }
+#endif
 
     DbgPrint(TRACE_LEVEL_INFORMATION,
              ("<--- %s res_id=%d size=%d\n", __FUNCTION__, allocation->GetId(), allocationInfo->Size));

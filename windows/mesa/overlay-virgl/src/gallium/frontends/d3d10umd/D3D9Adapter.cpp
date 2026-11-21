@@ -16,7 +16,7 @@ static UINT
 D3D9DriverVersion(const D3DDDIARG_OPENADAPTER *open_data)
 {
    (void)open_data;
-   return D3D_UMD_INTERFACE_VERSION_WIN7;
+   return D3D_UMD_INTERFACE_VERSION;
 }
 
 static float

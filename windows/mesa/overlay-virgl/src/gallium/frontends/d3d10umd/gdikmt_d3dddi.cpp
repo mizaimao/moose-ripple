@@ -11,6 +11,10 @@
 #include <string.h>
 
 #include "gdikmt_d3dddi.h"
+#ifdef RIPPLE_VISTA
+#include "RippleLog.h"
+#include "virtio/wddm/viogpu_wddm_driver.h"
+#endif
 
 #define DDI_INVALID_PARAMETER ((NTSTATUS)0xC000000DL)
 #define DDI_NO_MEMORY         ((NTSTATUS)0xC0000017L)
@@ -77,6 +81,25 @@ d3dddi_create_allocation(struct gdikmt_device *dev, struct gdikmt_createallocati
       }
    }
 
+#ifdef RIPPLE_VISTA
+   /* Vista refuses a primary (E_INVALIDARG) that can live only in the aperture segment. The
+    * tag has the kernel driver put it in its desktop segment, as it does the desktop's own
+    * primary (viogpum.h, VIOGPU_VISTA_PRIMARY). */
+   VIOGPU_VISTA_PRIMARY tagged[4];
+   void *untagged[4];
+   const UINT ntagged = !ddi->isPrimary ? 0 : create->NumAllocations < 4 ? create->NumAllocations : 4;
+   for (UINT i = 0; i < ntagged; i++) {
+      D3DDDI_ALLOCATIONINFO *info = &create->pAllocationInfo[i];
+      untagged[i] = info->pPrivateDriverData;
+      if (info->PrivateDriverDataSize != sizeof(tagged[i].allocation))
+         continue;
+      memcpy(&tagged[i].allocation, info->pPrivateDriverData, sizeof(tagged[i].allocation));
+      tagged[i].tag = VIOGPU_VISTA_DRAWN_PRIMARY_TAG;
+      info->pPrivateDriverData = &tagged[i];
+      info->PrivateDriverDataSize = sizeof(tagged[i]);
+   }
+#endif
+
    memset(&arg, 0, sizeof(arg));
    arg.pPrivateDriverData = create->pPrivateDriverData;
    arg.PrivateDriverDataSize = create->PrivateDriverDataSize;
@@ -85,6 +108,19 @@ d3dddi_create_allocation(struct gdikmt_device *dev, struct gdikmt_createallocati
    arg.pAllocationInfo = create->pAllocationInfo;
 
    hr = ddi->KTCallbacks.pfnAllocateCb(ddi->hRTDevice, &arg);
+#ifdef RIPPLE_VISTA
+   for (UINT i = 0; i < ntagged; i++) {
+      D3DDDI_ALLOCATIONINFO *info = &create->pAllocationInfo[i];
+      if (info->pPrivateDriverData == &tagged[i]) {
+         info->pPrivateDriverData = untagged[i];
+         info->PrivateDriverDataSize = sizeof(tagged[i].allocation);
+      }
+   }
+   if (FAILED(hr))
+      ripple_logf("Windows refused an allocation: 0x%08lx, primary %u, display %u, %u allocations",
+                  (unsigned long)hr, (unsigned)ddi->isPrimary, (unsigned)ddi->allocationVidPn,
+                  (unsigned)create->NumAllocations);
+#endif
    if (SUCCEEDED(hr)) {
       /* Allocations of a runtime resource are given back through that resource. */
       create->hResource = ddi->hRTResource;
@@ -223,6 +259,18 @@ d3dddi_lock_allocation(struct gdikmt_device *dev, D3DKMT_HANDLE hAllocation,
       *ptr = arg.pData;
    return hr;
 }
+
+#ifdef RIPPLE_VISTA
+static NTSTATUS
+d3dddi_unlock_allocation(struct gdikmt_device *dev, D3DKMT_HANDLE hAllocation)
+{
+   struct gdikmt_device_d3dddi *ddi = d3dddi_device(dev);
+   D3DDDICB_UNLOCK arg = {};
+   arg.NumAllocations = 1;
+   arg.phAllocations = &hAllocation;
+   return ddi->KTCallbacks.pfnUnlockCb(ddi->hRTDevice, &arg);
+}
+#endif
 
 static NTSTATUS
 d3dddi_render(struct gdikmt_context *ctx, struct gdikmt_render *render)
@@ -374,6 +422,9 @@ gdikmt_d3dddi_fill_basefuncs(struct gdikmt_device_d3dddi *device)
    device->base.queryAllocation = d3dddi_query_allocation;
    device->base.openAllocation = d3dddi_open_allocation;
    device->base.lockAllocation = d3dddi_lock_allocation;
+#ifdef RIPPLE_VISTA
+   device->base.unlockAllocation = d3dddi_unlock_allocation;
+#endif
    device->base.createContext = d3dddi_create_context;
    device->base.present = d3dddi_present;
    device->base.setDisplayMode = d3dddi_set_display_mode;

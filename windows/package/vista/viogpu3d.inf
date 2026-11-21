@@ -1,0 +1,76 @@
+; Ripple's Vista SP2 x64 display probe. Vista's compositor uses Direct3D 9Ex.
+[Version]
+Signature="$Windows NT$"
+Class=Display
+ClassGUID={4d36e968-e325-11ce-bfc1-08002be10318}
+Provider=%Provider%
+DriverVer=11/19/2026,7.14.1.2
+CatalogFile=viogpu3d.cat
+
+[Manufacturer]
+%Provider%=Ripple,NTamd64.6.0
+
+[Ripple.NTamd64.6.0]
+%Device%=DisplayInstall, PCI\VEN_1AF4&DEV_1050&SUBSYS_11001AF4&REV_01
+
+[SourceDisksNames]
+1=%Disk%,,,
+
+[SourceDisksFiles]
+viogpu3d.sys=1
+viogpu_d3d10.dll=1
+viogpu_d3d10.x86.dll=1
+
+[DestinationDirs]
+KernelFiles=12
+Graphics64=11
+Graphics32=10,SysWOW64
+
+[KernelFiles]
+viogpu3d.sys
+
+[Graphics64]
+viogpu_d3d10.dll
+
+[Graphics32]
+viogpu_d3d10.dll,viogpu_d3d10.x86.dll
+
+[DisplayInstall]
+FeatureScore=F6
+CopyFiles=KernelFiles,Graphics64,Graphics32
+AddReg=GraphicsSettings
+
+[DisplayInstall.SoftwareSettings]
+AddReg=GraphicsSettings
+
+[GraphicsSettings]
+HKR,,UserModeDriverName,0x00010000,viogpu_d3d10.dll
+HKR,,InstalledDisplayDrivers,0x00010000,viogpu_d3d10
+HKR,,UserModeDriverNameWow,0x00010000,viogpu_d3d10.dll
+HKR,,InstalledDisplayDriversWow,0x00010000,viogpu_d3d10
+HKR,,HWCursor,0x00010001,1
+HKR,,FlexResolution,0x00010001,1
+HKR,,UsePhysicalMemory,0x00010001,0
+HKR,,VgaCompatible,0x00010001,0
+
+[DisplayInstall.HW]
+AddReg=InterruptSettings
+
+[InterruptSettings]
+HKR,"Interrupt Management\MessageSignaledInterruptProperties",MSISupported,0x00010001,0
+
+[DisplayInstall.Services]
+AddService=viogpu3d,0x00000002,DriverService
+
+[DriverService]
+DisplayName=%Device%
+ServiceType=1
+StartType=3
+ErrorControl=0
+LoadOrderGroup=Video
+ServiceBinary=%12%\viogpu3d.sys
+
+[Strings]
+Provider="moose-ripple"
+Device="Ripple virtio-gpu 3D (Vista probe)"
+Disk="Ripple Vista display driver"
