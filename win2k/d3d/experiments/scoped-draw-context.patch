@@ -1,0 +1,101 @@
+--- a/dlls/d3d8/device.c
++++ b/dlls/d3d8/device.c
+@@ -33,6 +33,26 @@
+ #include "d3d8_private.h"
+
+ WINE_DEFAULT_DEBUG_CHANNEL(d3d8);
++
++
++extern void *CDECL rb_up_context_begin(struct wined3d_device *device);
++extern void CDECL rb_up_context_end(void *context);
++static int rb_group = -1;
++static unsigned int rb_draws, rb_wrapped, rb_presents;
++
++static void rb_context_report(void)
++{
++    HANDLE f;
++    DWORD count;
++    char line[128];
++    if (++rb_presents != 900) return;
++    f = CreateFileA("rbctx.log", GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
++            FILE_ATTRIBUTE_NORMAL, NULL);
++    if (f == INVALID_HANDLE_VALUE) return;
++    wsprintfA(line, "CTX mode=%d draws=%u wrapped=%u\r\n", rb_group, rb_draws, rb_wrapped);
++    WriteFile(f, line, lstrlenA(line), &count, NULL);
++    CloseHandle(f);
++}
+
+ static void STDMETHODCALLTYPE d3d8_null_wined3d_object_destroyed(void *parent) {}
+
+@@ -707,6 +727,7 @@
+     struct d3d8_device *device = impl_from_IDirect3DDevice8(iface);
+     HRESULT hr;
+
++    rb_context_report();
+     TRACE("iface %p, src_rect %s, dst_rect %s, dst_window_override %p, dirty_region %p.\n",
+             iface, wine_dbgstr_rect(src_rect), wine_dbgstr_rect(dst_rect), dst_window_override, dirty_region);
+
+@@ -2048,6 +2069,7 @@
+     UINT size = vtx_count * stride;
+     UINT vb_pos, align;
+     BYTE *buffer_data;
++    void *outer_context = NULL;
+
+     TRACE("iface %p, primitive_type %#x, primitive_count %u, data %p, stride %u.\n",
+             iface, primitive_type, primitive_count, data, stride);
+@@ -2059,6 +2081,14 @@
+     }
+
+     wined3d_mutex_lock();
++    if (rb_group == -1)
++    {
++        char value[4];
++        rb_group = GetEnvironmentVariableA("RBQGROUP", value, sizeof(value)) == 1 && value[0] == '1';
++    }
++    ++rb_draws;
++    if (rb_group && (outer_context = rb_up_context_begin(device->wined3d_device))) ++rb_wrapped;
++
+     hr = d3d8_device_prepare_vertex_buffer(device, size);
+     if (FAILED(hr))
+         goto done;
+@@ -2088,6 +2118,7 @@
+     wined3d_device_set_stream_source(device->wined3d_device, 0, NULL, 0, 0);
+
+ done:
++    if (outer_context) rb_up_context_end(outer_context);
+     wined3d_mutex_unlock();
+     return hr;
+ }
+--- a/dlls/wined3d/device.c
++++ b/dlls/wined3d/device.c
+@@ -3400,6 +3400,21 @@
+     TRACE("Returning %s\n", debug_d3dprimitivetype(*primitive_type));
+ }
+
++
++void *CDECL rb_up_context_begin(struct wined3d_device *device)
++{
++    struct wined3d_surface *target;
++    if (!device->fb.render_targets[0]
++            || !(target = wined3d_rendertarget_view_get_surface(device->fb.render_targets[0])))
++        return NULL;
++    return context_acquire(device, target);
++}
++
++void CDECL rb_up_context_end(struct wined3d_context *context)
++{
++    context_release(context);
++}
++
+ HRESULT CDECL wined3d_device_draw_primitive(struct wined3d_device *device, UINT start_vertex, UINT vertex_count)
+ {
+     TRACE("device %p, start_vertex %u, vertex_count %u.\n", device, start_vertex, vertex_count);
+--- a/dlls/wined3d/wined3d.spec
++++ b/dlls/wined3d/wined3d.spec
+@@ -285,3 +285,6 @@
+ @ cdecl wined3d_volume_get_resource(ptr)
+ @ cdecl wined3d_volume_map(ptr ptr ptr long)
+ @ cdecl wined3d_volume_unmap(ptr)
++
++@ cdecl rb_up_context_begin(ptr)
++@ cdecl rb_up_context_end(ptr)
