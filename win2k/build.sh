@@ -95,4 +95,6 @@ for filename in sys.argv[1:]:
         pack_into("<I", data, checksum, total + len(data))
     path.write_bytes(data)
 PY
-cp rb2kmp.sys rb2kdisp.dll rbntmode.dll nt5inst.exe w2kprobe.exe ddbench.exe rvdstat.exe flipcycle.exe memtest.exe regmode.exe "$here/rb2k.inf" "$out/"
+cp rb2kmp.sys rb2kdisp.dll rbntmode.dll nt5inst.exe w2kprobe.exe ddbench.exe rvdstat.exe flipcycle.exe memtest.exe regmode.exe "$out/"
+# Use the same Windows text format for folder installs and test discs.
+awk '{ sub(/\r$/, ""); printf "%s\r\n", $0 }' "$here/rb2k.inf" > "$out/rb2k.inf"
