@@ -491,13 +491,14 @@ single-page fallback with insufficient memory. Rectangle fills at an odd
 horizontal offset matched all 6,294,528 pixels checked across both pages,
 three resolutions and two depths.
 
-On XP SP3 in UTM, the installed miniport and display DLL matched the test
-build byte for byte after restart. `w2kprobe /pattern16` read the expected
-four GDI colours at 800×600. `w2kprobe /flip16` passed hardware page flips
+Windows 2000 SP4 and XP SP3 installed the same build in UTM. After
+restart, each guest's miniport and display DLL matched the test files byte
+for byte. `w2kprobe /pattern16` read the expected four GDI colours at
+800×600. `w2kprobe /flip16` passed hardware page flips
 at 640×480 and 1024×768 and software flips at 640×480. The hardware
 rectangle fill, its untouched border and both page images matched. Each
 path restored the 1024×768×32 desktop at 60 Hz. The 32-bit colour and GPU
-pixel checks passed in the same run. Windows 2000 testing is pending.
+pixel checks passed on both systems.
 
 ## 8-bit indexed colour
 
@@ -523,8 +524,8 @@ capabilities also made hardware-only DirectDraw surface creation fail.
 The driver reports an indexed primary surface and lets Windows manage its
 palette through GDI.
 
-After installation and restart, XP reported a byte-for-byte match for the
-miniport and display DLL. All four GDI test colours matched at 800×600×8.
+On Windows 2000 SP4 and XP SP3, all four GDI test colours matched at
+800×600×8.
 In `w2kprobe /flip8`, the default DirectDraw interface attached a 256-entry
 palette to a video-memory flip chain. Changing entry 73 recoloured its
 visible pixel without changing entry 74 or repainting either pixel.

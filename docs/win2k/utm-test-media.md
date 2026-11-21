@@ -82,6 +82,13 @@ IDE **Disk Image** after the boot disk. For a disposable driver test, start
 the VM with `utmctl start "$vm_name" --disposable`. An in-guest restart
 lets Windows load the driver. Shutting down ends the disposable session.
 
+The Windows 2000 SP4 test guest read the FAT disk on IDE. Its default
+installation did not mount the same disk on the emulated LSI SCSI
+controller. To keep a fixed CD with the VM, temporarily move that CD to
+SCSI and put the test disk on IDE. Windows 2000 then read the test files
+from `D:\`. After shutdown, return the original CD to IDE and remove the
+temporary disk.
+
 Inside Windows, run `NT5INST.EXE` from the test drive and restart. Compare
 the two installed files against the same drive before running any graphics
 checks. Substitute its drive letter in these commands.
