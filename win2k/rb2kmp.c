@@ -531,18 +531,37 @@ static ULONG child(PVOID ext, PVIDEO_CHILD_ENUM_INFO info, PVIDEO_CHILD_TYPE typ
     return VIDEO_ENUM_MORE_DEVICES;
 }
 
+#ifndef STATUS_REVISION_MISMATCH
+#define STATUS_REVISION_MISMATCH 0xC0000059L
+#endif
+
 ULONG DriverEntry(PVOID context1, PVOID context2)
 {
-    VIDEO_HW_INITIALIZATION_DATA init;
+    /* Windows XP's init data is one ULONG longer. Registered with it, XP keeps
+     * the display settings under Control\Video\{GUID}\0000, where the INF's
+     * SoftwareSettings put them; with the Windows 2000 size it reads
+     * Services\rb2kmp\Device0 instead, finds no saved mode, and falls back to
+     * 640x480 at boot and after full-screen DirectDraw. Windows 2000 refuses
+     * the longer size with STATUS_REVISION_MISMATCH. */
+    struct {
+        VIDEO_HW_INITIALIZATION_DATA w2k;
+        ULONG reserved;
+    } init;
+    ULONG status;
     VideoPortZeroMemory(&init, sizeof(init));
-    init.HwInitDataSize = sizeof(init);
-    init.AdapterInterfaceType = PCIBus;
-    init.HwDeviceExtensionSize = sizeof(ADAPTER);
-    init.HwFindAdapter = find_adapter;
-    init.HwInitialize = initialize;
-    init.HwStartIO = start_io;
-    init.HwGetPowerState = power;
-    init.HwSetPowerState = power;
-    init.HwGetVideoChildDescriptor = child;
-    return VideoPortInitialize(context1, context2, &init, NULL);
+    init.w2k.HwInitDataSize = sizeof(init);
+    init.w2k.AdapterInterfaceType = PCIBus;
+    init.w2k.HwDeviceExtensionSize = sizeof(ADAPTER);
+    init.w2k.HwFindAdapter = find_adapter;
+    init.w2k.HwInitialize = initialize;
+    init.w2k.HwStartIO = start_io;
+    init.w2k.HwGetPowerState = power;
+    init.w2k.HwSetPowerState = power;
+    init.w2k.HwGetVideoChildDescriptor = child;
+    status = VideoPortInitialize(context1, context2, &init.w2k, NULL);
+    if (status == STATUS_REVISION_MISMATCH) {
+        init.w2k.HwInitDataSize = sizeof(init.w2k);
+        status = VideoPortInitialize(context1, context2, &init.w2k, NULL);
+    }
+    return status;
 }

@@ -121,6 +121,8 @@ Wine in `.tools/win9x` (or `WIN9X_TOOLS`):
 - `memtest.exe`: times a compute loop, ordinary memory, GDI drawing into
   memory and on the screen, and copies to and from the screen, to tell a
   slow framebuffer from a slow CPU or a slow GPU path.
+- `regmode.exe`: the desktop mode Windows has saved and the one in use;
+  `/set 1024x768` saves a mode.
 
 ## Known limits
 
