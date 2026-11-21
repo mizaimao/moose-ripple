@@ -145,6 +145,37 @@ each complete run, XP charged the game process 5.2 seconds of CPU time with
 the scene skipped and 34.5 seconds with it visible. Separating that CPU time
 between the game, WineD3D and the OpenGL driver requires a finer profile.
 
+### The same game on Linux QEMU
+
+Linux QEMU 9.2 ran the same 969-frame `demo1` in a 640×480 window with
+the sound disabled. Both hosts used the same stock XP SP3 disk, test data,
+game executable and Direct3D DLLs. The guest had one Pentium III CPU,
+512 MiB and the `pc-i440fx-2.12` machine type on both hosts. Both Linux
+benchmarks booted fresh overlays of one driver installation. XP checked that
+the installed miniport, display DLL and OpenGL DLL matched the test files.
+On the i9-9900K, KVM ran the guest code directly on the CPU. QEMU's Tiny
+Code Generator (TCG) emulated the guest CPU in software on that same machine.
+
+| XP host and CPU mode | 3D scene visible | 3D scene skipped |
+| --- | ---: | ---: |
+| UTM on Apple silicon, emulated x86 | 21.0 fps | 56.2 fps |
+| Linux QEMU with KVM, Intel UHD 630 | 56.6–57.6 fps | 59.6–59.7 fps |
+| Linux QEMU with TCG, Intel UHD 630 | 13.9–14.2 fps | 56.0–56.4 fps |
+
+Each Linux range covers three runs with the scene visible or two with it
+skipped, all using the default Windows timer. A separate 1 ms timer trial
+with the scene visible produced 60.0 fps under KVM and 11.8 fps under TCG.
+The game logged the applied `r_norefresh` value on every run. The Linux guest
+framebuffers showed textured level geometry and the player's weapon with
+both CPU modes. Both modes also passed the 8,192-pixel Direct3D 8 check.
+
+Drawing the scene added 52–54 ms per frame under Linux CPU emulation,
+compared with 30 ms in UTM. The Linux host clock measured 18–19 seconds
+from game launch to the full-scene score with KVM and 72–74 seconds with
+TCG, including startup. XP charged Quake about 3 seconds of CPU time per
+complete run with KVM and 56–58 seconds with TCG. Changing the CPU mode
+alone reproduced the slowdown with the same host GPU and renderer.
+
 ### Direct3D 9 games on XP
 
 DarkPlaces, build 20140513, ran the same shareware `demo1` in a 640×480
