@@ -4,8 +4,9 @@ A display driver for Windows 2000 (SP4, x86) on QEMU's `virtio-vga-gl`
 adapter (PCI `1AF4:1050`), with OpenGL on the host's GPU.
 
 The development build also runs on 32-bit Windows XP Professional SP3.
-Its installer and full-screen mode restoration have been tested on an Intel
-KVM host. [Windows XP tests](../docs/win2k/development.md#windows-xp-sp3-x86)
+On Intel KVM and in UTM on Apple silicon, the driver installed over stock
+VGA and restored the saved desktop after full-screen DirectDraw programs.
+[Windows XP tests](../docs/win2k/development.md#windows-xp-sp3-x86)
 
 - **Desktop:** 640×480, 800×600 and 1024×768 at 32-bit colour, 60 Hz.
   GDI draws into the adapter's framebuffer. Command Prompt windows,
@@ -40,12 +41,13 @@ or SPICE with `gl=on`). The UTM test VM had the display card
 
 ## Install
 
-1. Start Windows 2000 on the stock VGA driver. In Device Manager, the
-   adapter is a PCI display controller with vendor `1AF4` and device
-   `1050`.
+1. Start Windows 2000 SP4 or XP Professional SP3 on the stock VGA driver.
+   In Device Manager, the adapter is a PCI display controller with vendor
+   `1AF4` and device `1050`.
 2. Open its properties, choose **Driver > Update Driver**, then **Have
-   Disk**, and point to `RB2K.INF` on the CD or in the folder with the
-   driver files. Accept the prompt about the missing digital signature.
+   Disk**, and point to the folder containing `RB2K.INF`. For a driver CD
+   with the INF at its root, enter the CD drive (for example, `D:\`).
+   Accept the prompt about the missing digital signature.
    `NT5INST.EXE`, run as an administrator from the same folder, does the
    same without the wizard.
 3. Restart. If Windows has not switched already, choose 1024×768 and
@@ -59,8 +61,8 @@ Windows Setup uses it to initialize the new adapter's saved desktop mode on XP.
 
 ## Speed
 
-Frames a second on the three test hosts (see The virtual machine), one
-Pentium III, 1024×768×32 desktop:
+The table shows Windows 2000 frame rates on the three test hosts. Each VM
+used one Pentium III and a 1024×768×32 desktop.
 
 | Program | UTM, Apple silicon | Intel UHD 630, KVM | WSL2, NVIDIA, KVM |
 | --- | ---: | ---: | ---: |
@@ -121,7 +123,8 @@ Wine in `.tools/win9x` (or `WIN9X_TOOLS`):
   `/flip` checks full-screen page flipping; `/ddraw`, `/ddraw-full` and
   `/window` check the GPU surfaces when they are switched on.
 - `ddbench.exe`: DirectDraw frame rates through the driver, Windows'
-  software path and DirectDraw's own choice.
+  software path and DirectDraw's own choice. The full-screen benchmark
+  changes its fill colour every frame, so the display flashes during the test.
 - `rvdstat.exe`: the time spent in each OpenGL request since Windows
   started, the requests that failed, and what programs hold now.
 - `flipcycle.exe`: rebuilds a full-screen flip chain four times in one

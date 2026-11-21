@@ -430,6 +430,45 @@ and a virtio-vga-gl adapter on an Intel UHD 630.
   hardware and software copies matched all 786,432 pixels. The clipped-window,
   two-process and flip tests also passed.
 
-The clean operating-system install and the UTM and WSL2 hosts still need
-testing on XP. The driver currently offers 32-bit colour. Games that
-require 8-bit palettized or 16-bit modes need additional driver support.
+A second Intel test used a clean XP Professional SP3 install from the stock
+CD on i440fx, one Penryn vCPU and 1 GiB. Stock VGA started at 640×480.
+After installation and a cold boot, the saved and active desktops were
+1024×768×32 at 60 Hz before any full-screen test. Both DirectDraw paths
+restored that mode, and it survived another cold boot. Quake III completed
+all 1,346 frames at 266.3 fps in a 640×480 window and 150.1 fps at
+1024×768 full-screen.
+
+### UTM on Apple silicon
+
+The clean XP SP3 disk booted on i440fx with one emulated Pentium III and
+512 MiB. Stock VGA ran at 640×480 and Device Manager showed code 28 for
+the display adapter. After the native installer finished and XP cold-booted,
+Device Manager reported code 0. The installed miniport, display DLL, OpenGL
+DLL and mode co-installer matched the test disc. The saved and active modes
+were both 1024×768×32 at 60 Hz before the first full-screen test.
+
+Both DirectDraw flip paths restored that exact desktop. The console test,
+the four flip-chain rebuilds and the GPU pixel check passed. The OpenGL
+renderer reported `virgl` and OpenGL 2.1. The 320×240 `gltest` scene
+ran at 561 fps and passed all nine pixel checks. Donuts completed 977
+hardware flips and restored the desktop. The 300-thread OpenGL test
+passed, and the driver reported zero contexts,
+buffers and pages held after the run.
+
+On the next cold boot, the saved and active modes still matched. With
+optional DirectDraw GPU surfaces enabled, hardware and software copies
+each matched all 786,432 pixels at 1024×768. Clipped windows, two
+simultaneous clients and both desktop-restore checks passed.
+
+Quake III completed all 1,346 frames of `demo001` in each run. The repeat
+used another cold boot after switching back to the default DirectDraw
+settings. After the last full-screen run both desktop modes were again
+1024×768×32 at 60 Hz, and the driver held no contexts, buffers or pages.
+
+| Quake III mode | First run | Repeat |
+| --- | ---: | ---: |
+| 640×480 window | 65.6 fps | 76.6 fps |
+| 1024×768 full-screen | 60.9 fps | 71.5 fps |
+
+The driver currently offers 32-bit colour. Games that require 8-bit
+palettized or 16-bit modes need additional driver support.
