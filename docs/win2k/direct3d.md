@@ -252,26 +252,31 @@ checks accounted for about 4% on this workload.
 
 #### Reusing the OpenGL context within one draw
 
-The XP experiment acquires the WineD3D context at the start of
+The experimental patch acquires the WineD3D context at the start of
 `DrawPrimitiveUP`, keeps it active across the vertex upload and draw,
 and releases it before returning to the game. This lets the nested
-operations share the current context. Both settings ran the original
-Quake executable with the same two experimental DLLs on one XP boot.
+operations share the current context. Each guest ran the original Quake
+executable and the same two experimental DLLs on one boot. After a
+warm-up, the six runs used control, reuse, reuse, control, reuse, control.
+All runs used the 969-frame `demo1` in a 640×480 window on the same
+Apple silicon host with UTM and the default guest timer.
 
-| Context handling | Timedemo fps, three runs | Median fps | Host time from launch to score | Median XP process CPU |
-| --- | ---: | ---: | ---: | ---: |
-| Existing behavior | 20.3, 20.1, 21.0 | 20.3 | 50.2–53.0 s | 35.8 s |
-| Keep the context through upload and draw | 24.1, 23.8, 24.4 | 24.1 | 43.7–45.4 s | 28.3 s |
+| Guest | Context handling | Timedemo fps, three runs | Median fps | Host time from launch to score | Median game process CPU |
+| --- | --- | ---: | ---: | ---: | ---: |
+| XP SP3 | Control | 20.3, 20.1, 21.0 | 20.3 | 50.2–53.0 s | 35.8 s |
+| XP SP3 | Reuse | 24.1, 23.8, 24.4 | 24.1 | 43.7–45.4 s | 28.3 s |
+| 2000 SP4 | Control | 20.9, 20.8, 20.8 | 20.8 | 50.3–50.7 s | 34.5 s |
+| 2000 SP4 | Reuse | 24.4, 24.2, 24.0 | 24.2 | 42.8–43.8 s | 27.7 s |
 
-The median frame rate rose 18.7%. Two enabled runs were bracketed by
-controls, then the guest repeated the enabled and control settings once
-more. All six runs held the foreground and exited normally. At the 900th
-presentation the enabled runs had taken the new path for every one of
-about 432,500 draws. The two settings each matched all 8,192 pixels in
-the separate texture test. The desktop returned to 1024×768 and the
-driver released its contexts, buffers and pages. The next compatibility
-checks are Windows 2000 and applications that switch between their own
-WGL context and Direct3D.
+Median frame rate increased 18.7% on XP and 16.3% on Windows 2000.
+All twelve timed runs held the foreground and exited normally. At the
+900th presentation the enabled runs had reused the context on every one
+of about 432,500 draws. Each setting on each guest matched all 8,192
+pixels in the separate texture test. Both desktops returned to
+1024×768×32 at 60 Hz and the driver released its contexts, buffers and
+pages. The standard runtime uses the original context handling.
+Applications that switch between their own WGL context and Direct3D
+still need a compatibility check before enabling reuse by default.
 
 To repeat the trial, append the linked patch to
 `win2k/d3d/clear-srgb.patch` in a scratch checkout, then use the loose
