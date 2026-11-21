@@ -300,6 +300,93 @@ Each checked from a dump of the compositor's frame:
 | Media Player Classic HC 64-bit, `Bear.wmv` | Playing correctly in its window (frame at 0:11 of 0:12). |
 | Windows Media Player 11 | Not tested: it opened its first-run settings wizard, which is the owner's to answer. |
 
+### 3DMark06: fixed-function drawing is missing on Vista
+
+3DMark06 1.2.1 installs and registers. Its installer gives `3DMark06.exe` the
+compatibility layer `DISABLEDWM` (`HKCU\Software\Microsoft\Windows
+NT\CurrentVersion\AppCompatFlags\Layers`), so Aero turns off while it is
+open; the compositor logs event 9013 ("composition was disabled by a
+running application"). That is expected, not a crash. 3DMark06 runs with
+administrator rights, so stopping it needs an elevated `taskkill`.
+
+The default run switches to 1280×1024, aborts within 2 seconds and reports
+"...error occurred (E_FAIL)". With `RIPPLE_UMD_TRACE=1`, the first draw (a
+triangle fan of 2 primitives) has neither a vertex nor a pixel shader:
+`unsupported D3D9 draw without a translated VS/PS pair`, and `DrawPrimitive`
+returns `E_NOTIMPL`. It is a fixed-function draw.
+
+The Direct3D 9 driver expects the Windows 7 runtime, which turns
+fixed-function state into vs/ps shaders carrying a `TEXT` comment `$FF`
+(`D3D9ShaderHasRuntimeFixedFunctionComment`). Vista SP2's `d3d9.dll`
+contains the same converter (public symbols name `CFFConverterEventHandler`,
+`ff2vs::CConverterToVertexShader` and `ff2ps::CConverterToPixelShader`), but
+it does not use it for this driver; fixed-function state reaches the driver
+as render and texture-stage states. The runtime reads the DWORD values
+`UseVSConverter` and `UsePSConverter` from `HKLM\SOFTWARE\Microsoft\Direct3D`
+at device creation, but in the retail build the flag they set is never read:
+setting them (also under `Wow6432Node`) changed nothing, and they were
+removed again. The public `d3d9.pdb` matches the DLL by GUID, but its
+addresses do not map directly because the shipped DLL was reordered after
+linking (OMAP); finding the runtime's own switch that way needs the OMAP
+tables applied.
+
+The fix is fixed-function support in the user-mode driver, as Vista's own
+drivers had. Suggested shape:
+
+- Generate `ps_2_0` (texture stages) and `vs_2_0` (transform, lighting,
+  material, fog coordinate, texture coordinates) bytecode from the device
+  state the driver already keeps (`render_states`, `texture_stage_states`,
+  `transforms`, `material`, `lights`), with a `TEXT $FF` comment. The
+  existing runtime fixed-function paths then apply, including the
+  pre-transformed (POSITIONT) vertex shader generated from the declaration,
+  and translation through the normal shader path adds fog, alpha test and
+  sampler variants. Cache the shaders by a key of the state they encode.
+- Semantics to copy: Mesa's `src/gallium/frontends/nine/nine_ff.c`
+  (`ps_get_ts_arg`, `ps_do_ts_op`, `nine_ff_build_ps`; the vertex side in
+  the same file). In `ps_2_0`, build `D3DTA_COMPLEMENT` with an `add` from
+  1, since `ps_2_0` has no complement source modifier.
+- Constants: put the texture factor and per-stage constants into the
+  device's constant arrays for the draw and restore the program's values
+  afterwards; constants are copied to the GPU per draw from
+  `ps_float_constants`/`vs_float_constants`.
+- Hook: `D3D9Draw.cpp`, where `D3D9FailNoTranslatedShaderPair()` is returned.
+  A new source file needs a Vista patch adding it to
+  `src/gallium/frontends/d3d10umd/meson.build`; the D3D9 files are listed by
+  `patches-virgl/0019`.
+
+Pre-transformed 2D draws need only the pixel side, which is the smaller first
+step and may be enough for 3DMark06's first screens.
+
+### DreamScene
+
+DreamScene (Ultimate Extra, `DreamScene.dll` 6.0.6000.16504, content in
+`%windir%\Web\Windows DreamScene`) keeps its setting in
+`HKCU\Software\Microsoft\Windows\CurrentVersion\DreamScene` (`FilePath`,
+`Paused`, `CrashGuard`, `PositionStyle`, `AudioFirstStart`). Setting
+`FilePath` and restarting Explorer starts it without the user interface.
+
+Turning it on from Desktop Background crashed Explorer at
+`DreamScene.dll+0x119e8`. The disassembly there is a teardown that calls
+`IMediaControl::Stop`, `IMediaEventEx::SetNotifyWindow(NULL)` and then
+`Release` on an object that was already freed: a bug in DreamScene's own
+failure path.
+
+With Explorer restarted under `RIPPLE_UMD_TRACE=3`, DreamScene creates a
+Direct3D 9 device, a 1280×768 render target, a 1280×768 dynamic A8R8G8B8
+texture and an 80-byte system-memory vertex buffer, then destroys them all
+without a draw or present. No driver call fails, and it asks for no
+video-processing capabilities. The same happens with `Bear.wmv`, with the
+DreamScene sample `vid8895.mpg`, and with K-Lite's 64-bit LAV splitter and
+decoders unregistered, so neither a failing driver call nor the codec pack
+explains it. Its video player stops before its first frame for a reason not
+found yet. Next: a user-mode debugger attached to Explorer with a break in
+`DreamScene.dll`, or DirectShow logging, to get the failing call and its
+`HRESULT`.
+
+Two smaller notes from the same runs: Vista's `winsat` has no `-alphabench`
+option (it prints an error and exits), and `winsat d3d -texshader` builds
+about 1,600 shaders, which take long to compile on this host.
+
 ## Rebuild and signing handoff
 
 From the Vista worktree on the Linux builder, set `MAIN` to the checkout
@@ -363,8 +450,16 @@ available in the existing checkout.
    in the guest, then fetch `C:\Users\Public\swap-PID.bmp` with
    `ruby recv-shot.rb <guest> <out.bmp> 0 <guest file>` (the `shot.exe -f`
    upload). Reading the UTM window itself needs the owner's approval each time.
-4. Then 3DMark06 and F.E.A.R. from the lab CD. Full-screen Direct3D 9 games
-   allocate primary flip chains as the compositor does.
+4. Next work: fixed-function support (see "3DMark06: fixed-function drawing
+   is missing on Vista"), then DreamScene. 3DMark06 Advanced is installed and
+   registered in the guest; F.E.A.R. Platinum's installer has not been run.
+5. Guest automation runs commands through the Run dialog. It cuts a command
+   longer than about 259 characters without an error, so put anything longer
+   in a script file and run that. A screen capture tool without a console
+   window keeps its own window out of the capture and out of the way of
+   clicks. Large files go in with `bitsadmin /transfer`; `certutil
+   -urlcache` keeps the whole file in memory and stalls on hundreds of
+   megabytes. Only one tool may type into the guest at a time.
 
 ### Recover the lab desktop
 
