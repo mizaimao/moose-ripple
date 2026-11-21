@@ -493,4 +493,25 @@ for 800×600 GDI colours, then `w2kprobe /flip16` for the hardware and
 software DirectDraw paths. The hardware test checks the 16-bit surface
 masks, rectangular fills and locks, and compares both page images after
 flips at 640×480 and 1024×768. Both paths check the restored desktop.
-Games that require an 8-bit indexed display still need palette support.
+
+## 8-bit indexed colour
+
+The development driver offers a 256-colour palette at the same three
+resolutions. Each framebuffer byte is a palette index. GDI can update a
+range of entries while the two flip pages retain their pixel data. The
+display driver keeps the current table across mode resets. The miniport
+programs full 8-bit red, green and blue values through the virtual VGA
+colour registers.
+
+On Apple silicon, a host test ran the display driver's palette updates,
+the miniport's register writes and the framebuffer routines against a
+simulated colour table and framebuffer. Nine modes at 8, 16 and 32 bits
+matched all 9,441,792 pixels checked across both pages. All 256 colours,
+a single-entry update, the neighbouring entries, the final table entry
+and palette restoration passed.
+
+For guest verification, `w2kprobe /pattern8` selects 800×600, draws four
+colours and restores the original mode. `w2kprobe /flip8` changes an
+entry on a DirectDraw primary surface, samples the two test pixels and
+checks full-screen flipping. These guest checks are pending on both
+Windows 2000 and XP.

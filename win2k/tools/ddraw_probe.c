@@ -195,8 +195,10 @@ static int check_path(CREATE_DIRECTDRAW create, const char *path, DWORD createFl
     if (hr == DDERR_NODIRECTDRAWHW && createFlags == DDCREATE_HARDWAREONLY)
         result = NoHardware;
     if (FAILED(report(path, "DirectDrawCreate", hr))) return result;
-    if (test == RB2K_DDRAW_FLIP || test == RB2K_DDRAW_FLIP16) {
-        DWORD bpp = test == RB2K_DDRAW_FLIP16 ? 16 : 32;
+    if (test == RB2K_DDRAW_FLIP || test == RB2K_DDRAW_FLIP16 || test == RB2K_DDRAW_FLIP8) {
+        DWORD bpp = 32;
+        if (test == RB2K_DDRAW_FLIP16) bpp = 16;
+        if (test == RB2K_DDRAW_FLIP8) bpp = 8;
         result = probe_ddraw_flip(dd, path, createFlags == DDCREATE_HARDWAREONLY, bpp) ? Passed : Mismatch;
         goto done;
     }
@@ -258,7 +260,7 @@ int probe_ddraw(enum RB2K_DDRAW_TEST test)
     hardware = check_path(create, "hardware-only", DDCREATE_HARDWAREONLY, DDSCAPS_VIDEOMEMORY, test);
     emulation = check_path(create, "emulation-only", DDCREATE_EMULATIONONLY, DDSCAPS_SYSTEMMEMORY, test);
     FreeLibrary(module);
-    if (test == RB2K_DDRAW_FLIP || test == RB2K_DDRAW_FLIP16)
+    if (test == RB2K_DDRAW_FLIP || test == RB2K_DDRAW_FLIP16 || test == RB2K_DDRAW_FLIP8)
         printf("DirectDraw fullscreen flip hardware=%s software=%s\n", states[hardware], states[emulation]);
     else if (test == RB2K_DDRAW_WINDOW)
         printf("DirectDraw window hardware=%s software=%s\n", states[hardware], states[emulation]);

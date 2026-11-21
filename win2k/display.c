@@ -69,7 +69,7 @@ DHPDEV DrvEnablePDEV(DEVMODEW *dm, LPWSTR address, ULONG patternCount,
     if (!table) return NULL;
     for (i = 0; i < count; ++i) {
         VIDEO_MODE_INFORMATION *m = &table[i];
-        if ((m->BitsPerPlane != 16 && m->BitsPerPlane != 32) || m->NumberOfPlanes != 1 ||
+        if ((m->BitsPerPlane != 8 && m->BitsPerPlane != 16 && m->BitsPerPlane != 32) || m->NumberOfPlanes != 1 ||
             (dm->dmBitsPerPel && dm->dmBitsPerPel != m->BitsPerPlane) ||
             (dm->dmPelsWidth && dm->dmPelsWidth != m->VisScreenWidth) ||
             (dm->dmPelsHeight && dm->dmPelsHeight != m->VisScreenHeight) ||
@@ -87,14 +87,17 @@ DHPDEV DrvEnablePDEV(DEVMODEW *dm, LPWSTR address, ULONG patternCount,
         display = EngAllocMem(FL_ZERO_MEMORY, sizeof(*display), 'd2bR');
         if (display) {
             display->mode = *selected;
-            display->bitmapFormat = selected->BitsPerPlane == 16 ? BMF_16BPP : BMF_32BPP;
+            switch (selected->BitsPerPlane) {
+            case 8: display->bitmapFormat = BMF_8BPP; break;
+            case 16: display->bitmapFormat = BMF_16BPP; break;
+            default: display->bitmapFormat = BMF_32BPP; break;
+            }
             display->miniport = miniport;
         }
     }
     EngFreeMem(table);
     if (!display) return NULL;
-    display->palette = EngCreatePalette(PAL_BITFIELDS, 0, NULL,
-        display->mode.RedMask, display->mode.GreenMask, display->mode.BlueMask);
+    display->palette = rb_create_palette(display);
     if (!display->palette) {
         EngFreeMem(display);
         return NULL;
@@ -129,6 +132,17 @@ DHPDEV DrvEnablePDEV(DEVMODEW *dm, LPWSTR address, ULONG patternCount,
     info->hpalDefault = display->palette;
     info->iDitherFormat = display->bitmapFormat;
     display->ddLock = EngCreateSemaphore();
+    if (display->bitmapFormat == BMF_8BPP) {
+        if (!display->ddLock) {
+            EngDeletePalette(display->palette);
+            EngFreeMem(display);
+            return NULL;
+        }
+        gdi->ulNumColors = 20;
+        gdi->ulNumPalReg = 256;
+        gdi->ulHTOutputFormat = HT_FORMAT_8BPP;
+        info->flGraphicsCaps |= GCAPS_PALMANAGED;
+    }
     return (DHPDEV)display;
 }
 
@@ -154,12 +168,21 @@ BOOL DrvAssertMode(DHPDEV pdev, BOOL enable)
     DISPLAY *display = (DISPLAY *)pdev;
     VIDEO_MODE mode;
     ULONG returned;
+    BOOL indexed = display->bitmapFormat == BMF_8BPP, ok;
+    if (indexed) EngAcquireSemaphore(display->ddLock);
     mode.RequestedMode = display->mode.ModeIndex;
     if (enable)
-        return !EngDeviceIoControl(display->miniport, IOCTL_VIDEO_SET_CURRENT_MODE,
+        ok = !EngDeviceIoControl(display->miniport, IOCTL_VIDEO_SET_CURRENT_MODE,
             &mode, sizeof(mode), NULL, 0, &returned);
-    return !EngDeviceIoControl(display->miniport, IOCTL_VIDEO_RESET_DEVICE,
-        NULL, 0, NULL, 0, &returned);
+    else
+        ok = !EngDeviceIoControl(display->miniport, IOCTL_VIDEO_RESET_DEVICE,
+            NULL, 0, NULL, 0, &returned);
+    if (indexed) {
+        if (enable && ok) ok = rb_restore_palette(display);
+        if (enable || ok) display->paletteActive = enable && ok;
+        EngReleaseSemaphore(display->ddLock);
+    }
+    return ok;
 }
 
 VOID DrvDisableSurface(DHPDEV pdev)
@@ -168,6 +191,11 @@ VOID DrvDisableSurface(DHPDEV pdev)
     VIDEO_MEMORY request;
     ULONG returned;
     if (display->ddEnabled) DrvDisableDirectDraw(pdev);
+    if (display->bitmapFormat == BMF_8BPP) {
+        EngAcquireSemaphore(display->ddLock);
+        display->paletteActive = FALSE;
+        EngReleaseSemaphore(display->ddLock);
+    }
     if (display->surface) {
         EngDeleteSurface(display->surface);
         display->surface = NULL;
@@ -288,6 +316,7 @@ static DRVFN callbacks[] = {
     { INDEX_DrvEnableSurface, (PFN)DrvEnableSurface },
     { INDEX_DrvDisableSurface, (PFN)DrvDisableSurface },
     { INDEX_DrvAssertMode, (PFN)DrvAssertMode },
+    { INDEX_DrvSetPalette, (PFN)DrvSetPalette },
     { INDEX_DrvEscape, (PFN)DrvEscape },
     { INDEX_DrvGetDirectDrawInfo, (PFN)DrvGetDirectDrawInfo },
     { INDEX_DrvEnableDirectDraw, (PFN)DrvEnableDirectDraw },

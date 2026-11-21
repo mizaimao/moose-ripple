@@ -277,6 +277,8 @@ int main(int argc,char **argv)
         result = probe_ddraw(RB2K_DDRAW_FLIP);
     } else if (argc == 2 && !lstrcmpiA(argv[1], "/flip16")) {
         result = probe_ddraw(RB2K_DDRAW_FLIP16);
+    } else if (argc == 2 && !lstrcmpiA(argv[1], "/flip8")) {
+        result = probe_ddraw(RB2K_DDRAW_FLIP8);
     } else if (argc == 2 && !lstrcmpiA(argv[1], "/window")) {
         result = probe_ddraw(RB2K_DDRAW_WINDOW);
     } else if (argc == 2 && (!lstrcmpiA(argv[1], "/ddraw") || !lstrcmpiA(argv[1], "/ddraw-full"))) {
@@ -285,10 +287,12 @@ int main(int argc,char **argv)
         result = run(TRUE, 800, 600, 32);
     } else if (argc == 2 && !lstrcmpiA(argv[1], "/pattern16")) {
         result = run(TRUE, 800, 600, 16);
+    } else if (argc == 2 && !lstrcmpiA(argv[1], "/pattern8")) {
+        result = run(TRUE, 800, 600, 8);
     } else if (argc == 1 || (argc == 2 && !lstrcmpiA(argv[1], "/pattern"))) {
         result = run(argc == 2, RB2K_DEFAULT_WIDTH, RB2K_DEFAULT_HEIGHT, 32);
     } else {
-        line("Usage: W2KPROBE [/pattern | /pattern800 | /pattern16 | /gpu | /ddraw | /ddraw-full | /ddraw-pair | /window | /flip | /flip16]"); return 2;
+        line("Usage: W2KPROBE [/pattern | /pattern800 | /pattern16 | /pattern8 | /gpu | /ddraw | /ddraw-full | /ddraw-pair | /window | /flip | /flip16 | /flip8]"); return 2;
     }
     if(output_failed) return 1;
     return result;

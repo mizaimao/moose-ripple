@@ -29,6 +29,8 @@ static DWORD pixel(DWORD x, DWORD y, DWORD image)
 
 static DWORD native_pixel(DWORD rgb, DWORD bpp)
 {
+    if (bpp == 8)
+        return ((rgb >> 16) & 0xe0) | ((rgb >> 11) & 0x1c) | ((rgb >> 6) & 3);
     if (bpp == 16)
         return ((rgb >> 8) & 0xf800) | ((rgb >> 5) & 0x07e0) | ((rgb >> 3) & 0x001f);
     return rgb;
@@ -46,15 +48,19 @@ static BOOL pixels(LPDIRECTDRAWSURFACE surface, DWORD width, DWORD height, DWORD
         &lock, DDLOCK_WAIT | (write ? DDLOCK_WRITEONLY : DDLOCK_READONLY), NULL))) return FALSE;
     valid = lock.lpSurface && lock.dwWidth == width && lock.dwHeight == height &&
             lock.lPitch >= (LONG)(width * (bpp / 8)) && (lock.ddpfPixelFormat.dwFlags & DDPF_RGB) &&
-            lock.ddpfPixelFormat.dwRGBBitCount == bpp &&
-            lock.ddpfPixelFormat.dwRBitMask == native_pixel(0xff0000, bpp) &&
-            lock.ddpfPixelFormat.dwGBitMask == native_pixel(0x00ff00, bpp) &&
-            lock.ddpfPixelFormat.dwBBitMask == native_pixel(0x0000ff, bpp);
+            lock.ddpfPixelFormat.dwRGBBitCount == bpp;
+    if (bpp == 8) valid = valid && (lock.ddpfPixelFormat.dwFlags & DDPF_PALETTEINDEXED8);
+    else valid = valid && lock.ddpfPixelFormat.dwRBitMask == native_pixel(0xff0000, bpp) &&
+                 lock.ddpfPixelFormat.dwGBitMask == native_pixel(0x00ff00, bpp) &&
+                 lock.ddpfPixelFormat.dwBBitMask == native_pixel(0x0000ff, bpp);
     if (valid) for (y = 0; y < height; ++y) {
         BYTE *row = (BYTE *)lock.lpSurface + y * lock.lPitch;
         for (x = 0; x < width; ++x) {
             DWORD expected = native_pixel(pixel(x, y, image), bpp);
-            if (bpp == 16) {
+            if (bpp == 8) {
+                if (write) row[x] = (BYTE)expected;
+                else if (row[x] != expected) ++wrong;
+            } else if (bpp == 16) {
                 if (write) ((WORD *)row)[x] = (WORD)expected;
                 else if (((WORD *)row)[x] != expected) ++wrong;
             } else {
@@ -66,6 +72,52 @@ static BOOL pixels(LPDIRECTDRAWSURFACE surface, DWORD width, DWORD height, DWORD
     printf("Flip %s image=%lu pixels=%lu mismatches=%lu pitch=%ld valid=%d\n",
            write ? "write" : "check", image, width * height, wrong, lock.lPitch, valid);
     return call("unlock", IDirectDrawSurface_Unlock(surface, lock.lpSurface)) && valid && !wrong;
+}
+
+/* Change one colour twice without repainting its pixel or its neighbour. */
+static BOOL indexed_palette(LPDIRECTDRAW dd, LPDIRECTDRAWSURFACE front, LPDIRECTDRAWPALETTE *palette)
+{
+    PALETTEENTRY colors[256], saved, changed = { 19, 159, 221, 0 };
+    DDSURFACEDESC lock;
+    RECT pair = { 17, 15, 19, 16 };
+    DWORD i;
+    BOOL ok = TRUE;
+    for (i = 0; i < 256; ++i) {
+        colors[i].peRed = (BYTE)((i >> 5) * 255 / 7);
+        colors[i].peGreen = (BYTE)(((i >> 2) & 7) * 255 / 7);
+        colors[i].peBlue = (BYTE)((i & 3) * 255 / 3);
+        colors[i].peFlags = 0;
+    }
+    if (!call("create 256 colours", IDirectDraw_CreatePalette(dd, DDPCAPS_8BIT | DDPCAPS_ALLOW256,
+              colors, palette, NULL)) ||
+        !call("attach palette", IDirectDrawSurface_SetPalette(front, *palette))) return FALSE;
+    ZeroMemory(&lock, sizeof(lock)); lock.dwSize = sizeof(lock);
+    if (!call("lock index pair", IDirectDrawSurface_Lock(front, &pair, &lock,
+              DDLOCK_WAIT | DDLOCK_WRITEONLY, NULL))) return FALSE;
+    ok = lock.lpSurface && lock.ddpfPixelFormat.dwRGBBitCount == 8;
+    if (ok) {
+        ((BYTE *)lock.lpSurface)[0] = 73;
+        ((BYTE *)lock.lpSurface)[1] = 74;
+    }
+    if (!call("unlock index pair", IDirectDrawSurface_Unlock(front, lock.lpSurface)) || !ok) return FALSE;
+    saved = colors[73];
+    for (i = 0; i < 3; ++i) {
+        HDC dc;
+        COLORREF a, b;
+        if (i) {
+            colors[73] = i == 1 ? changed : saved;
+            if (!call("cycle one colour", IDirectDrawPalette_SetEntries(*palette, 0, 73, 1, &colors[73])))
+                return FALSE;
+        }
+        if (!call("indexed surface DC", IDirectDrawSurface_GetDC(front, &dc))) return FALSE;
+        a = GetPixel(dc, pair.left, pair.top);
+        b = GetPixel(dc, pair.left + 1, pair.top);
+        if (!call("release indexed DC", IDirectDrawSurface_ReleaseDC(front, dc))) return FALSE;
+        if (a != RGB(colors[73].peRed, colors[73].peGreen, colors[73].peBlue) ||
+            b != RGB(colors[74].peRed, colors[74].peGreen, colors[74].peBlue)) ok = FALSE;
+    }
+    printf("Indexed palette animation and neighbour match=%d\n", ok);
+    return ok;
 }
 
 /* An odd horizontal origin exercises byte offsets for both Blt and Lock.
@@ -139,6 +191,7 @@ static BOOL exercise(LPDIRECTDRAW dd, HWND window, const char *path, BOOL hardwa
                      DWORD width, DWORD height, DWORD bpp)
 {
     LPDIRECTDRAWSURFACE front = NULL, back = NULL;
+    LPDIRECTDRAWPALETTE palette = NULL;
     DDSURFACEDESC desc;
     DDSCAPS caps;
     HDC dc = NULL;
@@ -156,6 +209,7 @@ static BOOL exercise(LPDIRECTDRAW dd, HWND window, const char *path, BOOL hardwa
     if (!call("create double buffer", IDirectDraw_CreateSurface(dd, &desc, &front, NULL))) goto done;
     caps.dwCaps = DDSCAPS_BACKBUFFER;
     if (!call("get attached back", IDirectDrawSurface_GetAttachedSurface(front, &caps, &back))) goto done;
+    if (bpp == 8 && !indexed_palette(dd, front, &palette)) goto done;
     if (hardware) {
         dc = CreateDCA("DISPLAY", NULL, NULL, NULL);
         if (!scanout(dc, &start) || start.pageCount < 2 || start.visiblePage || start.yOffset ||
@@ -186,6 +240,7 @@ static BOOL exercise(LPDIRECTDRAW dd, HWND window, const char *path, BOOL hardwa
 done:
     if (back) IDirectDrawSurface_Release(back);
     if (front) IDirectDrawSurface_Release(front);
+    if (palette) IDirectDrawPalette_Release(palette);
     if (dc) {
         if (!scanout(dc, &now) || now.yOffset || now.visiblePage) passed = FALSE;
         else puts("Flip chain released on desktop page zero");

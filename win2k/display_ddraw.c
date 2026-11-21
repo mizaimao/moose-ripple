@@ -59,10 +59,13 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
                (caps & ~(DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM)) ||
                !desc->dwWidth || desc->dwWidth > RB2K_DD_MAX_WIDTH ||
                !desc->dwHeight || desc->dwHeight > RB2K_DD_MAX_HEIGHT) return FALSE;
-    return !(desc->dwFlags & DDSD_PIXELFORMAT) ||
-        (fmt->dwFlags == DDPF_RGB && fmt->dwRGBBitCount == d->mode.BitsPerPlane &&
-         fmt->dwRBitMask == d->mode.RedMask && fmt->dwGBitMask == d->mode.GreenMask &&
-         fmt->dwBBitMask == d->mode.BlueMask);
+    if (!(desc->dwFlags & DDSD_PIXELFORMAT)) return TRUE;
+    if (fmt->dwRGBBitCount != d->mode.BitsPerPlane) return FALSE;
+    if (d->mode.BitsPerPlane == 8)
+        return (fmt->dwFlags & DDPF_PALETTEINDEXED8) &&
+               !(fmt->dwFlags & ~(DDPF_PALETTEINDEXED8 | DDPF_RGB));
+    return fmt->dwFlags == DDPF_RGB && fmt->dwRBitMask == d->mode.RedMask &&
+           fmt->dwGBitMask == d->mode.GreenMask && fmt->dwBBitMask == d->mode.BlueMask;
 }
 
 static DWORD APIENTRY can_create(PDD_CANCREATESURFACEDATA data)
@@ -304,7 +307,9 @@ static HRESULT fill_page(DISPLAY *d, ULONG page, const RECTL *r, ULONG color)
           r->left * (d->mode.BitsPerPlane / 8);
     width = r->right - r->left;
     for (y = 0; y < (ULONG)(r->bottom - r->top); ++y, row += d->mode.ScreenStride) {
-        if (d->mode.BitsPerPlane == 16) {
+        if (d->mode.BitsPerPlane == 8) {
+            RtlFillMemory(row, width, (BYTE)color);
+        } else if (d->mode.BitsPerPlane == 16) {
             for (x = 0; x < width; ++x) ((USHORT *)row)[x] = (USHORT)color;
         } else {
             for (x = 0; x < width; ++x) ((ULONG *)row)[x] = color;
@@ -665,6 +670,11 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     v->ddpfDisplay.dwRBitMask = d->mode.RedMask;
     v->ddpfDisplay.dwGBitMask = d->mode.GreenMask;
     v->ddpfDisplay.dwBBitMask = d->mode.BlueMask;
+    if (d->mode.BitsPerPlane == 8) {
+        v->ddpfDisplay.dwFlags |= DDPF_PALETTEINDEXED8;
+        /* Windows manages the primary palette through GDI. Both pages use that DAC. */
+        info->ddCaps.dwPalCaps = DDPCAPS_8BIT | DDPCAPS_ALLOW256;
+    }
     v->dwOffscreenAlign = 4;
     info->ddCaps.dwSize = sizeof(info->ddCaps);
     info->ddCaps.dwCaps = DDCAPS_BLT | DDCAPS_BLTCOLORFILL;
