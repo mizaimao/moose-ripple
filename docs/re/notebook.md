@@ -443,3 +443,11 @@ Built the display miniport and both Direct3D 9 DLLs for Vista. All 328
 imports and both sets of 16 graphics entry points resolve on the reference
 image. The first normal boot with a signed package will test the primary
 display allocation and a hardware triangle. [Results and build instructions](../windows/vista-sp2-probe.md)
+
+## 2026-11-20 Windows XP desktop restoration
+
+A new display adapter had a 1024×768 desktop and an empty saved mode.
+The display co-installer now initializes the adapter's hardware profile.
+Full-screen DirectDraw and a cold boot restored 1024×768 on XP SP3.
+A Device Manager update preserved 800×600, and Quake III and Donuts
+both returned to the desktop. [Test results](../win2k/development.md#windows-xp-sp3-x86)

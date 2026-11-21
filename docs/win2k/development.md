@@ -370,3 +370,105 @@ On the Intel host (Proxmox VE 8.4, QEMU 9.2, UHD 630) both drivers fell
 within that host's run-to-run spread: Quake III 204 to 311 frames a second
 before and 213 to 242 after over four runs each, `gltest` 692 to 1005
 before and 627 to 1522 after.
+
+## Windows XP SP3 x86
+
+### Desktop mode after a full-screen application
+
+On a fresh driver install, XP initially showed 1024×768×32 at 60 Hz, but
+`EnumDisplaySettings(ENUM_REGISTRY_SETTINGS)` returned 0×0. Exiting a
+full-screen DirectDraw application left the desktop at 640×480 and the next
+boot kept it there. Manually saving 1024×768 through `ChangeDisplaySettings`
+fixed both. XP's display installer had written the INF defaults to the
+adapter's `Control\Video\{GUID}\0000` key in HKLM. The matching key in
+the current hardware profile had no saved resolution.
+
+The INF now registers `rbntmode.dll` as a device co-installer. After Windows
+Setup installs the adapter on XP, the DLL reads its `VideoID` and copies
+the missing resolution, depth and refresh values from the INF defaults to
+that adapter's hardware profile. Existing values survive an update. Both
+`NT5INST.EXE` and Device Manager's **Have Disk** use this installation step.
+
+The miniport supplies XP's size of `VIDEO_HW_INITIALIZATION_DATA` so
+`\Device\Video0` maps to `Control\Video\{GUID}\0000`. It retries with
+the Windows 2000 size on `STATUS_REVISION_MISMATCH`. On Windows 2000 SP4,
+both the initial XP-sized miniport and the complete package with the
+co-installer were installed from stock VGA on separate test disks. The
+installed files matched, the GPU pixel was correct, and both DirectDraw
+flip paths restored 1024×768. The complete package also passed
+`regmode /check 1024x768` before and after the flip.
+
+### Intel KVM results
+
+The test started on the stock VGA driver in an existing XP Professional
+SP3 x86 installation, using QEMU's Q35 machine, one Penryn vCPU, 2 GiB
+and a virtio-vga-gl adapter on an Intel UHD 630.
+
+- `NT5INST.EXE` installed the driver. Before the first full-screen test,
+  the saved and active modes were 1024×768×32 at 60 Hz. Both DirectDraw
+  flip paths restored that exact mode. It survived a cold boot.
+- After selecting 800×600, a **Have Disk** reinstall from the CD root and a
+  restart preserved 800×600×32 at 60 Hz. Both flip paths restored it. To
+  repeat the regression test, run `regmode /check 1024x768` before and after
+  `w2kprobe /flip` and after a reboot. Use `/check 800x600` for the update case.
+  Checking the starting resolution catches a run that begins and ends at 640×480.
+- The installed miniport, display DLL and OpenGL DLL matched the disc.
+  Both GDI colour patterns, the console, the GPU pixel and all four
+  `flipcycle` rounds passed.
+- On virgl, `gltest` passed at 1,010 frames per second. Quake III's
+  1,346-frame `demo001` timedemo ran at 233.8 fps in a 640×480 window
+  and 163.9 fps at 1024×768 full-screen. The full-screen frame showed the
+  textured map, player, weapon and HUD.
+- DirectDraw's default path reached 11,848 fps for a windowed fill and copy,
+  10,661 fps for a full-screen fill and flip, and 4,382 fps with 100
+  colour-keyed sprites per frame. Stock DirectX 7 Donuts made 20,056 hardware
+  flips, exited normally and restored 1024×768.
+- `threadtest` passed 300 threads. After the games and thread test,
+  `rvdstat` reported zero held contexts, buffers and pages.
+- Enabling `RippleDirectDrawGpuSurfaces` through the live video device map
+  and rebooting enabled the optional offscreen path on XP. The full-size
+  hardware and software copies matched all 786,432 pixels. The clipped-window,
+  two-process and flip tests also passed.
+
+A second Intel test used a clean XP Professional SP3 install from the stock
+CD on i440fx, one Penryn vCPU and 1 GiB. Stock VGA started at 640×480.
+After installation and a cold boot, the saved and active desktops were
+1024×768×32 at 60 Hz before any full-screen test. Both DirectDraw paths
+restored that mode, and it survived another cold boot. Quake III completed
+all 1,346 frames at 266.3 fps in a 640×480 window and 150.1 fps at
+1024×768 full-screen.
+
+### UTM on Apple silicon
+
+The clean XP SP3 disk booted on i440fx with one emulated Pentium III and
+512 MiB. Stock VGA ran at 640×480 and Device Manager showed code 28 for
+the display adapter. After the native installer finished and XP cold-booted,
+Device Manager reported code 0. The installed miniport, display DLL, OpenGL
+DLL and mode co-installer matched the test disc. The saved and active modes
+were both 1024×768×32 at 60 Hz before the first full-screen test.
+
+Both DirectDraw flip paths restored that exact desktop. The console test,
+the four flip-chain rebuilds and the GPU pixel check passed. The OpenGL
+renderer reported `virgl` and OpenGL 2.1. The 320×240 `gltest` scene
+ran at 561 fps and passed all nine pixel checks. Donuts completed 977
+hardware flips and restored the desktop. The 300-thread OpenGL test
+passed, and the driver reported zero contexts,
+buffers and pages held after the run.
+
+On the next cold boot, the saved and active modes still matched. With
+optional DirectDraw GPU surfaces enabled, hardware and software copies
+each matched all 786,432 pixels at 1024×768. Clipped windows, two
+simultaneous clients and both desktop-restore checks passed.
+
+Quake III completed all 1,346 frames of `demo001` in each run. The repeat
+used another cold boot after switching back to the default DirectDraw
+settings. After the last full-screen run both desktop modes were again
+1024×768×32 at 60 Hz, and the driver held no contexts, buffers or pages.
+
+| Quake III mode | First run | Repeat |
+| --- | ---: | ---: |
+| 640×480 window | 65.6 fps | 76.6 fps |
+| 1024×768 full-screen | 60.9 fps | 71.5 fps |
+
+The driver currently offers 32-bit colour. Games that require 8-bit
+palettized or 16-bit modes need additional driver support.

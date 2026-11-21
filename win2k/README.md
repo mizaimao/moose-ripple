@@ -3,6 +3,11 @@
 A display driver for Windows 2000 (SP4, x86) on QEMU's `virtio-vga-gl`
 adapter (PCI `1AF4:1050`), with OpenGL on the host's GPU.
 
+The development build also runs on 32-bit Windows XP Professional SP3.
+On Intel KVM and in UTM on Apple silicon, the driver installed over stock
+VGA and restored the saved desktop after full-screen DirectDraw programs.
+[Windows XP tests](../docs/win2k/development.md#windows-xp-sp3-x86)
+
 - **Desktop:** 640×480, 800×600 and 1024×768 at 32-bit colour, 60 Hz.
   GDI draws into the adapter's framebuffer. Command Prompt windows,
   mode changes and the Display control panel work as usual.
@@ -36,12 +41,13 @@ or SPICE with `gl=on`). The UTM test VM had the display card
 
 ## Install
 
-1. Start Windows 2000 on the stock VGA driver. In Device Manager, the
-   adapter is a PCI display controller with vendor `1AF4` and device
-   `1050`.
+1. Start Windows 2000 SP4 or XP Professional SP3 on the stock VGA driver.
+   In Device Manager, the adapter is a PCI display controller with vendor
+   `1AF4` and device `1050`.
 2. Open its properties, choose **Driver > Update Driver**, then **Have
-   Disk**, and point to `RB2K.INF` on the CD or in the folder with the
-   driver files. Accept the prompt about the missing digital signature.
+   Disk**, and point to the folder containing `RB2K.INF`. For a driver CD
+   with the INF at its root, enter the CD drive (for example, `D:\`).
+   Accept the prompt about the missing digital signature.
    `NT5INST.EXE`, run as an administrator from the same folder, does the
    same without the wizard.
 3. Restart. If Windows has not switched already, choose 1024×768 and
@@ -50,11 +56,13 @@ or SPICE with `gl=on`). The UTM test VM had the display card
 The INF installs `rb2kmp.sys` (the miniport), `rb2kdisp.dll` (the display
 driver) and `ripplegl.dll` (OpenGL), and registers the OpenGL driver under
 `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\RIPPLEGL`.
+On the XP development branch, keep `rbntmode.dll` alongside the INF.
+Windows Setup uses it to initialize the new adapter's saved desktop mode on XP.
 
 ## Speed
 
-Frames a second on the three test hosts (see The virtual machine), one
-Pentium III, 1024×768×32 desktop:
+The table shows Windows 2000 frame rates on the three test hosts. Each VM
+used one Pentium III and a 1024×768×32 desktop.
 
 | Program | UTM, Apple silicon | Intel UHD 630, KVM | WSL2, NVIDIA, KVM |
 | --- | ---: | ---: | ---: |
@@ -95,8 +103,10 @@ back buffer for full-screen flipping. Offscreen surfaces as host textures
 (`gpu_surface.c`) are switched off: copying them to the screen means a GPU
 readback into the CPU-drawn desktop, which is two to five times slower
 than Windows' own code, and they cannot be copied into the back buffer.
-For tests, set the DWORD `RippleDirectDrawGpuSurfaces` to 1 in the
-miniport's `Device0` key and restart.
+For tests, set the DWORD `RippleDirectDrawGpuSurfaces` to 1 in the adapter
+key named by `HKLM\HARDWARE\DEVICEMAP\VIDEO` and restart. For this
+driver the key is under `Services\rb2kmp\Device0` on Windows 2000 and
+`Control\Video\{GUID}\0000` on XP.
 
 ## Build
 
@@ -113,7 +123,8 @@ Wine in `.tools/win9x` (or `WIN9X_TOOLS`):
   `/flip` checks full-screen page flipping; `/ddraw`, `/ddraw-full` and
   `/window` check the GPU surfaces when they are switched on.
 - `ddbench.exe`: DirectDraw frame rates through the driver, Windows'
-  software path and DirectDraw's own choice.
+  software path and DirectDraw's own choice. The full-screen benchmark
+  changes its fill colour every frame, so the display flashes during the test.
 - `rvdstat.exe`: the time spent in each OpenGL request since Windows
   started, the requests that failed, and what programs hold now.
 - `flipcycle.exe`: rebuilds a full-screen flip chain four times in one
@@ -121,6 +132,9 @@ Wine in `.tools/win9x` (or `WIN9X_TOOLS`):
 - `memtest.exe`: times a compute loop, ordinary memory, GDI drawing into
   memory and on the screen, and copies to and from the screen, to tell a
   slow framebuffer from a slow CPU or a slow GPU path.
+- `regmode.exe` reports the saved and current desktop modes.
+  `/check 1024x768` returns success when both are 1024×768×32 at 60 Hz.
+  `/set 800x600` saves and applies that resolution.
 
 ## Known limits
 
