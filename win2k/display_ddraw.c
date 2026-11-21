@@ -670,11 +670,9 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     v->ddpfDisplay.dwRBitMask = d->mode.RedMask;
     v->ddpfDisplay.dwGBitMask = d->mode.GreenMask;
     v->ddpfDisplay.dwBBitMask = d->mode.BlueMask;
-    if (d->mode.BitsPerPlane == 8) {
+    /* The indexed primary uses the desktop DAC through DrvSetPalette. */
+    if (d->mode.BitsPerPlane == 8)
         v->ddpfDisplay.dwFlags |= DDPF_PALETTEINDEXED8;
-        /* Windows manages the primary palette through GDI. Both pages use that DAC. */
-        info->ddCaps.dwPalCaps = DDPCAPS_8BIT | DDPCAPS_ALLOW256;
-    }
     v->dwOffscreenAlign = 4;
     info->ddCaps.dwSize = sizeof(info->ddCaps);
     info->ddCaps.dwCaps = DDCAPS_BLT | DDCAPS_BLTCOLORFILL;

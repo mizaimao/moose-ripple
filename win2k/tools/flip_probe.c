@@ -74,12 +74,30 @@ static BOOL pixels(LPDIRECTDRAWSURFACE surface, DWORD width, DWORD height, DWORD
     return call("unlock", IDirectDrawSurface_Unlock(surface, lock.lpSurface)) && valid && !wrong;
 }
 
+static BOOL present_index_pair(LPDIRECTDRAWSURFACE front, LPDIRECTDRAWSURFACE back, POINT at)
+{
+    DDSURFACEDESC lock;
+    BOOL ok;
+    ZeroMemory(&lock, sizeof(lock)); lock.dwSize = sizeof(lock);
+    if (!call("lock indexed back", IDirectDrawSurface_Lock(back, NULL, &lock,
+              DDLOCK_WAIT | DDLOCK_WRITEONLY, NULL))) return FALSE;
+    ok = lock.lpSurface && lock.ddpfPixelFormat.dwRGBBitCount == 8 &&
+         lock.dwHeight > (DWORD)at.y && lock.dwWidth > (DWORD)(at.x + 1) && lock.lPitch > at.x + 1;
+    if (ok) {
+        BYTE *pair = (BYTE *)lock.lpSurface + at.y * lock.lPitch + at.x;
+        pair[0] = 73;
+        pair[1] = 74;
+    }
+    return call("unlock indexed back", IDirectDrawSurface_Unlock(back, lock.lpSurface)) && ok &&
+           call("present index pair", IDirectDrawSurface_Flip(front, NULL, DDFLIP_WAIT));
+}
+
 /* Change one colour twice without repainting its pixel or its neighbour. */
-static BOOL indexed_palette(LPDIRECTDRAW dd, LPDIRECTDRAWSURFACE front, LPDIRECTDRAWPALETTE *palette)
+static BOOL indexed_palette(LPDIRECTDRAW dd, HWND window, LPDIRECTDRAWSURFACE front,
+                            LPDIRECTDRAWSURFACE back, LPDIRECTDRAWPALETTE *palette)
 {
     PALETTEENTRY colors[256], saved, changed = { 19, 159, 221, 0 };
-    DDSURFACEDESC lock;
-    RECT pair = { 17, 15, 19, 16 };
+    POINT at = { 17, 15 };
     DWORD i;
     BOOL ok = TRUE;
     for (i = 0; i < 256; ++i) {
@@ -91,28 +109,25 @@ static BOOL indexed_palette(LPDIRECTDRAW dd, LPDIRECTDRAWSURFACE front, LPDIRECT
     if (!call("create 256 colours", IDirectDraw_CreatePalette(dd, DDPCAPS_8BIT | DDPCAPS_ALLOW256,
               colors, palette, NULL)) ||
         !call("attach palette", IDirectDrawSurface_SetPalette(front, *palette))) return FALSE;
-    ZeroMemory(&lock, sizeof(lock)); lock.dwSize = sizeof(lock);
-    if (!call("lock index pair", IDirectDrawSurface_Lock(front, &pair, &lock,
-              DDLOCK_WAIT | DDLOCK_WRITEONLY, NULL))) return FALSE;
-    ok = lock.lpSurface && lock.ddpfPixelFormat.dwRGBBitCount == 8;
-    if (ok) {
-        ((BYTE *)lock.lpSurface)[0] = 73;
-        ((BYTE *)lock.lpSurface)[1] = 74;
-    }
-    if (!call("unlock index pair", IDirectDrawSurface_Unlock(front, lock.lpSurface)) || !ok) return FALSE;
+    /* Populate both pages and return to page zero before sampling with GDI. */
+    if (!present_index_pair(front, back, at) || !present_index_pair(front, back, at)) return FALSE;
     saved = colors[73];
     for (i = 0; i < 3; ++i) {
         HDC dc;
+        POINT screen = at;
         COLORREF a, b;
         if (i) {
             colors[73] = i == 1 ? changed : saved;
             if (!call("cycle one colour", IDirectDrawPalette_SetEntries(*palette, 0, 73, 1, &colors[73])))
                 return FALSE;
         }
-        if (!call("indexed surface DC", IDirectDrawSurface_GetDC(front, &dc))) return FALSE;
-        a = GetPixel(dc, pair.left, pair.top);
-        b = GetPixel(dc, pair.left + 1, pair.top);
-        if (!call("release indexed DC", IDirectDrawSurface_ReleaseDC(front, dc))) return FALSE;
+        if (!ClientToScreen(window, &screen) || WindowFromPoint(screen) != window) return FALSE;
+        dc = GetDC(window);
+        if (!dc) return FALSE;
+        a = GetPixel(dc, at.x, at.y);
+        b = GetPixel(dc, at.x + 1, at.y);
+        ReleaseDC(window, dc);
+        printf("Indexed palette step=%lu visible=%06lX neighbour=%06lX\n", i, a, b);
         if (a != RGB(colors[73].peRed, colors[73].peGreen, colors[73].peBlue) ||
             b != RGB(colors[74].peRed, colors[74].peGreen, colors[74].peBlue)) ok = FALSE;
     }
@@ -187,7 +202,7 @@ static BOOL sample_window(HWND window, DWORD width, DWORD height, DWORD bpp, DWO
     return wrong == 0;
 }
 
-static BOOL exercise(LPDIRECTDRAW dd, HWND window, const char *path, BOOL hardware,
+static BOOL exercise(LPDIRECTDRAW dd, HWND window, const char *path, DWORD createFlags,
                      DWORD width, DWORD height, DWORD bpp)
 {
     LPDIRECTDRAWSURFACE front = NULL, back = NULL;
@@ -197,7 +212,7 @@ static BOOL exercise(LPDIRECTDRAW dd, HWND window, const char *path, BOOL hardwa
     HDC dc = NULL;
     RB2K_DD_FLIP_INFO start, now;
     DWORD frame;
-    BOOL passed = FALSE;
+    BOOL passed = FALSE, hardware = createFlags != DDCREATE_EMULATIONONLY;
     printf("Flip %s requested=%lux%lux%lu\n", path, width, height, bpp);
     if (!call("set mode", IDirectDraw_SetDisplayMode(dd, width, height, bpp))) return FALSE;
     ZeroMemory(&desc, sizeof(desc));
@@ -209,7 +224,10 @@ static BOOL exercise(LPDIRECTDRAW dd, HWND window, const char *path, BOOL hardwa
     if (!call("create double buffer", IDirectDraw_CreateSurface(dd, &desc, &front, NULL))) goto done;
     caps.dwCaps = DDSCAPS_BACKBUFFER;
     if (!call("get attached back", IDirectDrawSurface_GetAttachedSurface(front, &caps, &back))) goto done;
-    if (bpp == 8 && !indexed_palette(dd, front, &palette)) goto done;
+    /* The default path uses Windows palette objects with real video-memory flips.
+     * The hardware-only path exercises those same pages with the system palette. */
+    if (bpp == 8 && createFlags != DDCREATE_HARDWAREONLY &&
+        !indexed_palette(dd, window, front, back, &palette)) goto done;
     if (hardware) {
         dc = CreateDCA("DISPLAY", NULL, NULL, NULL);
         if (!scanout(dc, &start) || start.pageCount < 2 || start.visiblePage || start.yOffset ||
@@ -249,7 +267,7 @@ done:
     return passed;
 }
 
-BOOL probe_ddraw_flip(LPDIRECTDRAW dd, const char *path, BOOL hardware, DWORD bpp)
+BOOL probe_ddraw_flip(LPDIRECTDRAW dd, const char *path, DWORD createFlags, DWORD bpp)
 {
     static const char name[] = "W2KFullscreenFlip";
     WNDCLASSA wc;
@@ -272,8 +290,9 @@ BOOL probe_ddraw_flip(LPDIRECTDRAW dd, const char *path, BOOL hardware, DWORD bp
         UpdateWindow(window);
         ShowCursor(FALSE);
         if (call("exclusive", IDirectDraw_SetCooperativeLevel(dd, window, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN))) {
-            passed = exercise(dd, window, path, hardware, 640, 480, bpp);
-            if (passed && hardware) passed = exercise(dd, window, path, hardware, 1024, 768, bpp);
+            passed = exercise(dd, window, path, createFlags, 640, 480, bpp);
+            if (passed && createFlags != DDCREATE_EMULATIONONLY)
+                passed = exercise(dd, window, path, createFlags, 1024, 768, bpp);
             if (!call("restore display", IDirectDraw_RestoreDisplayMode(dd))) passed = FALSE;
             if (!call("leave exclusive", IDirectDraw_SetCooperativeLevel(dd, window, DDSCL_NORMAL))) passed = FALSE;
         }

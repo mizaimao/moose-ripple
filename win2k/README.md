@@ -11,8 +11,10 @@ VGA and restored the saved desktop after full-screen DirectDraw programs.
 - **Desktop:** 640×480, 800×600 and 1024×768 at 32-bit colour, 60 Hz.
   GDI draws into the adapter's framebuffer. Command Prompt windows,
   mode changes and the Display control panel work as usual. The development
-  build also offers 16-bit RGB565 and 8-bit indexed colour at these sizes. Windows guest testing
-  for the new modes is pending.
+  build also offers 16-bit RGB565 and 8-bit indexed colour at these sizes.
+  XP SP3 passed native GDI and DirectDraw page-flip checks at both depths,
+  including palette animation on an 8-bit video-memory surface.
+  [Display-mode tests](../docs/win2k/development.md#16-bit-colour-development)
 - **OpenGL:** Windows' own `opengl32.dll` loads `ripplegl.dll`, Mesa
   24.3.4 with its virgl driver. The host renders. It is the same DLL as
   the Windows 9x driver's.

@@ -515,19 +515,26 @@ matched all 9,441,792 pixels checked across both pages. All 256 colours,
 a single-entry update, the neighbouring entries, the final table entry
 and palette restoration passed.
 
-For guest verification, `w2kprobe /pattern8` selects 800×600, draws four
-colours and restores the original mode. `w2kprobe /flip8` changes an
-entry on a DirectDraw primary surface, samples the two test pixels and
-checks full-screen flipping. In the first native XP SP3 run, Windows
-listed all three 8-bit modes and accepted the 800×600 mode query.
-Applying that mode returned `DISP_CHANGE_FAILED`. Both DirectDraw paths
-returned `0x80004001` trying to enter 640×480×8. The 32-bit desktop
-restored after both attempts.
+Two failures appeared inside XP SP3. Its halftone service returned 216
+colours. Requiring 256 made an enumerated mode fail during activation.
+The driver now supplies all 256 entries and keeps the 20 Windows system
+colours at their reserved indices. Advertising separate hardware palette
+capabilities also made hardware-only DirectDraw surface creation fail.
+The driver reports an indexed primary surface and lets Windows manage its
+palette through GDI.
 
-A driver trace showed that XP's halftone palette contained 216 entries.
-The driver had required 256 and aborted the mode change. It now creates
-a full RGB palette with the 20 Windows system colours at their reserved
-indices. After a fresh install and restart on XP, the 800×600×8 GDI test
-read back all four colours and restored the original desktop. DirectDraw
-entered the 8-bit mode. The first fullscreen flip test still failed at
-hardware surface creation and when locking the software primary.
+After installation and restart, XP reported a byte-for-byte match for the
+miniport and display DLL. All four GDI test colours matched at 800×600×8.
+In `w2kprobe /flip8`, the default DirectDraw interface attached a 256-entry
+palette to a video-memory flip chain. Changing entry 73 recoloured its
+visible pixel without changing entry 74 or repainting either pixel.
+At 640×480 and 1024×768, the scanout page and vertical offset followed
+every hardware flip and the full frame matched its expected indices.
+The software path at 640×480 also passed palette animation and all 81
+visible samples on each of five flips. The saved and current desktops
+returned to 1024×768×32 at 60 Hz.
+
+Forcing `DDCREATE_HARDWAREONLY` passed the page and index checks with
+the existing palette. Explicit palette creation on that interface returned
+`E_NOTIMPL` on XP. The default interface used by the combined test can
+create the palette and use hardware page flipping in the same session.
