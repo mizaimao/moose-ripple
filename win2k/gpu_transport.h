@@ -13,7 +13,7 @@ typedef struct {
 
 typedef struct {
     PULONG pixels;
-    ULONG width, height, pitchPixels, bytes;
+    ULONG width, height, pitchPixels, bytes, bitsPerPixel;
 } RB2K_PRIMARY;
 
 #define RB2K_SEGMENT_BYTES 65536UL

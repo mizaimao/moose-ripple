@@ -470,5 +470,27 @@ settings. After the last full-screen run both desktop modes were again
 | 640×480 window | 65.6 fps | 76.6 fps |
 | 1024×768 full-screen | 60.9 fps | 71.5 fps |
 
-The driver currently offers 32-bit colour. Games that require 8-bit
-palettized or 16-bit modes need additional driver support.
+These XP game and benchmark results used the 32-bit display modes.
+
+## 16-bit colour development
+
+The miniport now offers RGB565 at 640×480, 800×600 and 1024×768 at 60 Hz.
+The original 32-bit mode indices and preferred 1024×768×32 desktop carry
+forward. GDI and DirectDraw use the same red, green and blue masks
+(`0xf800`, `0x07e0`, `0x001f`). Full-screen DirectDraw can use two
+framebuffer pages. In 16-bit mode Windows handles offscreen surfaces in
+system memory. The optional host textures use 32-bit pixels.
+
+An Apple silicon host test ran the driver's mode, scanout and rectangle-fill
+routines against memory-backed registers and two framebuffer pages. It
+checked the colour masks, pitch, page offsets, return to page zero and the
+single-page fallback with insufficient memory. Rectangle fills at an odd
+horizontal offset matched all 6,294,528 pixels checked across both pages,
+three resolutions and two depths.
+
+Windows 2000 and XP guest verification is pending. Run `w2kprobe /pattern16`
+for 800×600 GDI colours, then `w2kprobe /flip16` for the hardware and
+software DirectDraw paths. The hardware test checks the 16-bit surface
+masks, rectangular fills and locks, and compares both page images after
+flips at 640×480 and 1024×768. Both paths check the restored desktop.
+Games that require an 8-bit indexed display still need palette support.

@@ -30,6 +30,7 @@ typedef struct {
     PVOID mapping;
     ULONG mappingBytes;
     VIDEO_MODE_INFORMATION mode;
+    ULONG bitmapFormat;
     HSEMAPHORE ddLock;
     BOOL ddEnabled;
     BOOL gpuSurfaces;           /* offscreen surfaces as host textures (RB2K_DD_CAPS) */

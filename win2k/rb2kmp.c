@@ -17,8 +17,10 @@
 
 enum { VbeId, VbeX, VbeY, VbeBpp, VbeEnable, VbeBank, VbeWidth,
        VbeHeight, VbeOffsetX, VbeOffsetY };
-static const struct { USHORT width, height; } modes[] = {
-    {640, 480}, {800, 600}, {1024, 768}
+/* Keep the existing 32-bit mode indices stable across driver updates. */
+static const struct { USHORT width, height, bpp; } modes[] = {
+    {640, 480, 32}, {800, 600, 32}, {1024, 768, 32},
+    {640, 480, 16}, {800, 600, 16}, {1024, 768, 16}
 };
 
 PVOID rb_view_current(void);
@@ -148,13 +150,18 @@ static void mode_info(ULONG index, PVIDEO_MODE_INFORMATION m)
     m->ModeIndex = index;
     m->VisScreenWidth = m->VideoMemoryBitmapWidth = modes[index].width;
     m->VisScreenHeight = m->VideoMemoryBitmapHeight = modes[index].height;
-    m->ScreenStride = m->VisScreenWidth * 4;
     m->NumberOfPlanes = 1;
-    m->BitsPerPlane = 32;
+    m->BitsPerPlane = modes[index].bpp;
+    m->ScreenStride = m->VisScreenWidth * (m->BitsPerPlane / 8);
     m->Frequency = 60;
     m->XMillimeter = 320; m->YMillimeter = 240;
-    m->NumberRedBits = m->NumberGreenBits = m->NumberBlueBits = 8;
-    m->RedMask = 0xff0000; m->GreenMask = 0xff00; m->BlueMask = 0xff;
+    if (m->BitsPerPlane == 16) {
+        m->NumberRedBits = m->NumberBlueBits = 5; m->NumberGreenBits = 6;
+        m->RedMask = 0xf800; m->GreenMask = 0x07e0; m->BlueMask = 0x001f;
+    } else {
+        m->NumberRedBits = m->NumberGreenBits = m->NumberBlueBits = 8;
+        m->RedMask = 0xff0000; m->GreenMask = 0xff00; m->BlueMask = 0xff;
+    }
     m->AttributeFlags = VIDEO_MODE_COLOR | VIDEO_MODE_GRAPHICS | VIDEO_MODE_NO_OFF_SCREEN;
 }
 
@@ -169,14 +176,14 @@ static VP_STATUS scanout_info(ADAPTER *a, RB2K_DD_FLIP_INFO *info)
 {
     ULONG virtualWidth;
     if (!a->modeSet || !(VideoPortReadRegisterUshort(a->vbe + VbeEnable) & 1) ||
-        VideoPortReadRegisterUshort(a->vbe + VbeBpp) != 32 ||
+        VideoPortReadRegisterUshort(a->vbe + VbeBpp) != modes[a->mode].bpp ||
         VideoPortReadRegisterUshort(a->vbe + VbeOffsetX)) return ERROR_NOT_READY;
     info->width = VideoPortReadRegisterUshort(a->vbe + VbeX);
     info->height = VideoPortReadRegisterUshort(a->vbe + VbeY);
     virtualWidth = VideoPortReadRegisterUshort(a->vbe + VbeWidth);
     if (info->width != modes[a->mode].width || info->height != modes[a->mode].height ||
         virtualWidth != info->width) return ERROR_NOT_READY;
-    info->pitch = virtualWidth * sizeof(ULONG);
+    info->pitch = virtualWidth * (modes[a->mode].bpp / 8);
     info->pageBytes = info->pitch * info->height;
     info->pageCount = a->gpu.primary.pixels &&
         view_span(info->pageBytes) <= a->gpu.primary.bytes &&
@@ -272,18 +279,19 @@ static VP_STATUS set_mode(ADAPTER *a, ULONG request)
     VideoPortWriteRegisterUshort(a->vbe + VbeEnable, 0);
     VideoPortWriteRegisterUshort(a->vbe + VbeX, modes[index].width);
     VideoPortWriteRegisterUshort(a->vbe + VbeY, modes[index].height);
-    VideoPortWriteRegisterUshort(a->vbe + VbeBpp, 32);
+    VideoPortWriteRegisterUshort(a->vbe + VbeBpp, modes[index].bpp);
     VideoPortWriteRegisterUshort(a->vbe + VbeEnable, enable);
     VideoPortWriteRegisterUshort(a->vbe + VbeWidth, modes[index].width);
     VideoPortWriteRegisterUshort(a->vbe + VbeOffsetX, 0);
     VideoPortWriteRegisterUshort(a->vbe + VbeOffsetY, 0);
     if (VideoPortReadRegisterUshort(a->vbe + VbeX) != modes[index].width ||
         VideoPortReadRegisterUshort(a->vbe + VbeY) != modes[index].height ||
-        VideoPortReadRegisterUshort(a->vbe + VbeBpp) != 32 ||
+        VideoPortReadRegisterUshort(a->vbe + VbeBpp) != modes[index].bpp ||
         !(VideoPortReadRegisterUshort(a->vbe + VbeEnable) & 1))
         return ERROR_INVALID_FUNCTION;
     a->mode = index;
     a->modeSet = TRUE;
+    a->gpu.primary.bitsPerPixel = modes[index].bpp;
     a->gpu.primary.width = modes[index].width;
     a->gpu.primary.height = modes[index].height;
     a->gpu.primary.pitchPixels = VideoPortReadRegisterUshort(a->vbe + VbeWidth);

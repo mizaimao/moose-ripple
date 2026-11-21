@@ -10,7 +10,9 @@ VGA and restored the saved desktop after full-screen DirectDraw programs.
 
 - **Desktop:** 640×480, 800×600 and 1024×768 at 32-bit colour, 60 Hz.
   GDI draws into the adapter's framebuffer. Command Prompt windows,
-  mode changes and the Display control panel work as usual.
+  mode changes and the Display control panel work as usual. The development
+  build also offers 16-bit RGB565 at these sizes. Windows guest testing
+  for the new modes is pending.
 - **OpenGL:** Windows' own `opengl32.dll` loads `ripplegl.dll`, Mesa
   24.3.4 with its virgl driver. The host renders. It is the same DLL as
   the Windows 9x driver's.
@@ -87,7 +89,7 @@ Bochs-compatible registers and maps the framebuffer. It also drives the
 virtio-gpu side of the adapter (`gpu_transport.c`): one queue of 16
 descriptors, one request at a time, each waited for.
 
-The display driver (`display.c`) gives GDI a 32-bit bitmap over the
+The display driver (`display.c`) gives GDI a bitmap in the selected colour depth over the
 framebuffer and answers `OPENGL_GETINFO` with `RIPPLEGL`, the name of the
 OpenGL driver. Mesa's virgl winsys (`win9x/mesa`) talks to the GPU through
 the interface of the Windows 9x kernel driver (`win9x/minivdd/rvd.h`); on
@@ -106,7 +108,8 @@ than Windows' own code, and they cannot be copied into the back buffer.
 For tests, set the DWORD `RippleDirectDrawGpuSurfaces` to 1 in the adapter
 key named by `HKLM\HARDWARE\DEVICEMAP\VIDEO` and restart. For this
 driver the key is under `Services\rb2kmp\Device0` on Windows 2000 and
-`Control\Video\{GUID}\0000` on XP.
+`Control\Video\{GUID}\0000` on XP. The optional host textures require a
+32-bit display mode. In 16-bit mode, offscreen surfaces use system memory.
 
 ## Build
 
@@ -122,6 +125,8 @@ Wine in `.tools/win9x` (or `WIN9X_TOOLS`):
   check colours and a mode change; `/gpu` draws one pixel on the host;
   `/flip` checks full-screen page flipping; `/ddraw`, `/ddraw-full` and
   `/window` check the GPU surfaces when they are switched on.
+  Use `/pattern16` for GDI colours at 800×600 and `/flip16` for 16-bit
+  DirectDraw fills, locks, page flips and desktop restoration.
 - `ddbench.exe`: DirectDraw frame rates through the driver, Windows'
   software path and DirectDraw's own choice. The full-screen benchmark
   changes its fill colour every frame, so the display flashes during the test.
@@ -139,7 +144,7 @@ Wine in `.tools/win9x` (or `WIN9X_TOOLS`):
 ## Known limits
 
 - Direct3D is not accelerated (see above).
-- Only 32-bit colour: 640×480, 800×600 and 1024×768.
+- Games that require an 8-bit indexed display mode still need palette support.
 - Each OpenGL context that draws leaves about 1.2 KB in the program's own
   heap (`threadtest`: 300 contexts in one thread); the GPU's buffers and
   contexts are all returned (`rvdstat` shows none held afterwards).

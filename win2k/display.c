@@ -69,8 +69,8 @@ DHPDEV DrvEnablePDEV(DEVMODEW *dm, LPWSTR address, ULONG patternCount,
     if (!table) return NULL;
     for (i = 0; i < count; ++i) {
         VIDEO_MODE_INFORMATION *m = &table[i];
-        if (m->BitsPerPlane != 32 || m->NumberOfPlanes != 1 ||
-            (dm->dmBitsPerPel && dm->dmBitsPerPel != 32) ||
+        if ((m->BitsPerPlane != 16 && m->BitsPerPlane != 32) || m->NumberOfPlanes != 1 ||
+            (dm->dmBitsPerPel && dm->dmBitsPerPel != m->BitsPerPlane) ||
             (dm->dmPelsWidth && dm->dmPelsWidth != m->VisScreenWidth) ||
             (dm->dmPelsHeight && dm->dmPelsHeight != m->VisScreenHeight) ||
             (dm->dmDisplayFrequency > 1 && dm->dmDisplayFrequency != m->Frequency))
@@ -87,6 +87,7 @@ DHPDEV DrvEnablePDEV(DEVMODEW *dm, LPWSTR address, ULONG patternCount,
         display = EngAllocMem(FL_ZERO_MEMORY, sizeof(*display), 'd2bR');
         if (display) {
             display->mode = *selected;
+            display->bitmapFormat = selected->BitsPerPlane == 16 ? BMF_16BPP : BMF_32BPP;
             display->miniport = miniport;
         }
     }
@@ -109,10 +110,12 @@ DHPDEV DrvEnablePDEV(DEVMODEW *dm, LPWSTR address, ULONG patternCount,
     gdi->ulHorzSize = display->mode.XMillimeter;
     gdi->ulVertSize = display->mode.YMillimeter;
     gdi->cPlanes = 1;
-    gdi->cBitsPixel = 32;
+    gdi->cBitsPixel = display->mode.BitsPerPlane;
     gdi->ulNumColors = (ULONG)-1;
     gdi->ulLogPixelsX = gdi->ulLogPixelsY = dm->dmLogPixels ? dm->dmLogPixels : 96;
-    gdi->ulDACRed = gdi->ulDACGreen = gdi->ulDACBlue = 8;
+    gdi->ulDACRed = display->mode.NumberRedBits;
+    gdi->ulDACGreen = display->mode.NumberGreenBits;
+    gdi->ulDACBlue = display->mode.NumberBlueBits;
     gdi->ulAspectX = gdi->ulAspectY = 36;
     gdi->ulAspectXY = 51;
     gdi->xStyleStep = gdi->yStyleStep = gdi->denStyleStep = 1;
@@ -120,11 +123,11 @@ DHPDEV DrvEnablePDEV(DEVMODEW *dm, LPWSTR address, ULONG patternCount,
     gdi->ulPanningHorzRes = gdi->ulHorzRes;
     gdi->ulPanningVertRes = gdi->ulVertRes;
     gdi->ulHTPatternSize = HT_PATSIZE_4x4_M;
-    gdi->ulHTOutputFormat = HT_FORMAT_32BPP;
+    gdi->ulHTOutputFormat = display->mode.BitsPerPlane == 16 ? HT_FORMAT_16BPP : HT_FORMAT_32BPP;
     gdi->flHTFlags = HT_FLAG_ADDITIVE_PRIMS;
     RtlZeroMemory(info, sizeof(*info));
     info->hpalDefault = display->palette;
-    info->iDitherFormat = BMF_32BPP;
+    info->iDitherFormat = display->bitmapFormat;
     display->ddLock = EngCreateSemaphore();
     return (DHPDEV)display;
 }
@@ -201,7 +204,7 @@ HSURF DrvEnableSurface(DHPDEV pdev)
     if (mem.VideoRamBase == mem.FrameBufferBase) display->mappingBytes = mem.FrameBufferLength;
     /* Let GDI draw directly into the top-down mapped framebuffer. */
     display->surface = (HSURF)EngCreateBitmap(size, display->mode.ScreenStride,
-        BMF_32BPP, BMF_TOPDOWN, mem.FrameBufferBase);
+        display->bitmapFormat, BMF_TOPDOWN, mem.FrameBufferBase);
     if (!display->surface || !EngAssociateSurface(display->surface, display->device, 0))
         goto failed;
     return display->surface;

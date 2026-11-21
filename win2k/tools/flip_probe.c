@@ -27,7 +27,14 @@ static DWORD pixel(DWORD x, DWORD y, DWORD image)
     return image ? (rgb ^ 0x00ffffffUL) : rgb;
 }
 
-static BOOL pixels(LPDIRECTDRAWSURFACE surface, DWORD width, DWORD height,
+static DWORD native_pixel(DWORD rgb, DWORD bpp)
+{
+    if (bpp == 16)
+        return ((rgb >> 8) & 0xf800) | ((rgb >> 5) & 0x07e0) | ((rgb >> 3) & 0x001f);
+    return rgb;
+}
+
+static BOOL pixels(LPDIRECTDRAWSURFACE surface, DWORD width, DWORD height, DWORD bpp,
                    DWORD image, BOOL write)
 {
     DDSURFACEDESC lock;
@@ -38,20 +45,65 @@ static BOOL pixels(LPDIRECTDRAWSURFACE surface, DWORD width, DWORD height,
     if (!call(write ? "lock back" : "lock front", IDirectDrawSurface_Lock(surface, NULL,
         &lock, DDLOCK_WAIT | (write ? DDLOCK_WRITEONLY : DDLOCK_READONLY), NULL))) return FALSE;
     valid = lock.lpSurface && lock.dwWidth == width && lock.dwHeight == height &&
-            lock.lPitch >= (LONG)(width * 4) && lock.ddpfPixelFormat.dwRGBBitCount == 32 &&
-            lock.ddpfPixelFormat.dwRBitMask == 0xff0000 && lock.ddpfPixelFormat.dwGBitMask == 0xff00 &&
-            lock.ddpfPixelFormat.dwBBitMask == 0xff;
+            lock.lPitch >= (LONG)(width * (bpp / 8)) && (lock.ddpfPixelFormat.dwFlags & DDPF_RGB) &&
+            lock.ddpfPixelFormat.dwRGBBitCount == bpp &&
+            lock.ddpfPixelFormat.dwRBitMask == native_pixel(0xff0000, bpp) &&
+            lock.ddpfPixelFormat.dwGBitMask == native_pixel(0x00ff00, bpp) &&
+            lock.ddpfPixelFormat.dwBBitMask == native_pixel(0x0000ff, bpp);
     if (valid) for (y = 0; y < height; ++y) {
-        DWORD *row = (DWORD *)((BYTE *)lock.lpSurface + y * lock.lPitch);
+        BYTE *row = (BYTE *)lock.lpSurface + y * lock.lPitch;
         for (x = 0; x < width; ++x) {
-            DWORD expected = pixel(x, y, image);
-            if (write) row[x] = expected;
-            else if ((row[x] & 0xffffff) != expected) ++wrong;
+            DWORD expected = native_pixel(pixel(x, y, image), bpp);
+            if (bpp == 16) {
+                if (write) ((WORD *)row)[x] = (WORD)expected;
+                else if (((WORD *)row)[x] != expected) ++wrong;
+            } else {
+                if (write) ((DWORD *)row)[x] = expected;
+                else if ((((DWORD *)row)[x] & 0xffffff) != expected) ++wrong;
+            }
         }
     }
     printf("Flip %s image=%lu pixels=%lu mismatches=%lu pitch=%ld valid=%d\n",
            write ? "write" : "check", image, width * height, wrong, lock.lPitch, valid);
     return call("unlock", IDirectDrawSurface_Unlock(surface, lock.lpSurface)) && valid && !wrong;
+}
+
+/* An odd horizontal origin exercises byte offsets for both Blt and Lock.
+ * Neighbouring words must keep the background colour. */
+static BOOL fill_rect16(LPDIRECTDRAWSURFACE surface)
+{
+    RECT rect = {7, 5, 12, 9};
+    DDBLTFX fx;
+    DDSURFACEDESC locked;
+    LONG x, y;
+    BOOL ok;
+    ZeroMemory(&fx, sizeof(fx)); fx.dwSize = sizeof(fx);
+    fx.dwFillColor = 0x1234;
+    if (!call("16-bit background fill", IDirectDrawSurface_Blt(surface, NULL, NULL, NULL,
+             DDBLT_COLORFILL | DDBLT_WAIT, &fx))) return FALSE;
+    fx.dwFillColor = 0xa35b;
+    if (!call("16-bit rectangle fill", IDirectDrawSurface_Blt(surface, &rect, NULL, NULL,
+             DDBLT_COLORFILL | DDBLT_WAIT, &fx))) return FALSE;
+    ZeroMemory(&locked, sizeof(locked)); locked.dwSize = sizeof(locked);
+    if (!call("16-bit guard lock", IDirectDrawSurface_Lock(surface, NULL, &locked,
+             DDLOCK_WAIT | DDLOCK_READONLY, NULL))) return FALSE;
+    ok = locked.lpSurface && locked.lPitch >= (rect.right + 1) * (LONG)sizeof(WORD) &&
+         locked.dwHeight > (DWORD)rect.bottom && locked.ddpfPixelFormat.dwRGBBitCount == 16;
+    if (ok) for (y = rect.top - 1; y <= rect.bottom; ++y) {
+        WORD *row = (WORD *)((BYTE *)locked.lpSurface + y * locked.lPitch);
+        for (x = rect.left - 1; x <= rect.right; ++x) {
+            WORD expected = (x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom)
+                          ? 0xa35b : 0x1234;
+            if (row[x] != expected) ok = FALSE;
+        }
+    }
+    if (!call("16-bit guard unlock", IDirectDrawSurface_Unlock(surface, locked.lpSurface))) return FALSE;
+    ZeroMemory(&locked, sizeof(locked)); locked.dwSize = sizeof(locked);
+    if (!call("16-bit rectangle lock", IDirectDrawSurface_Lock(surface, &rect, &locked,
+             DDLOCK_WAIT | DDLOCK_READONLY, NULL))) return FALSE;
+    ok = ok && locked.lpSurface && *(WORD *)locked.lpSurface == 0xa35b;
+    printf("Flip RGB565 rectangle and guards match=%d\n", ok);
+    return call("16-bit rectangle unlock", IDirectDrawSurface_Unlock(surface, locked.lpSurface)) && ok;
 }
 
 static BOOL scanout(HDC dc, RB2K_DD_FLIP_INFO *info)
@@ -60,7 +112,7 @@ static BOOL scanout(HDC dc, RB2K_DD_FLIP_INFO *info)
                            sizeof(*info), (LPSTR)info) > 0;
 }
 
-static BOOL sample_window(HWND window, DWORD width, DWORD height, DWORD image)
+static BOOL sample_window(HWND window, DWORD width, DWORD height, DWORD bpp, DWORD image)
 {
     HDC dc = GetDC(window);
     DWORD col, row, wrong = 0;
@@ -70,9 +122,12 @@ static BOOL sample_window(HWND window, DWORD width, DWORD height, DWORD image)
             int x = col * (width - 1) / 8, y = row * (height - 1) / 8;
             POINT at;
             DWORD rgb = pixel(x, y, image);
+            COLORREF sample;
             at.x = x; at.y = y;
-            if (!ClientToScreen(window, &at) || WindowFromPoint(at) != window ||
-                GetPixel(dc, x, y) != RGB((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255)) ++wrong;
+            if (!ClientToScreen(window, &at) || WindowFromPoint(at) != window) { ++wrong; continue; }
+            sample = GetPixel(dc, x, y);
+            if (sample == CLR_INVALID || native_pixel(((DWORD)GetRValue(sample) << 16) |
+                    ((DWORD)GetGValue(sample) << 8) | GetBValue(sample), bpp) != native_pixel(rgb, bpp)) ++wrong;
         }
     }
     ReleaseDC(window, dc);
@@ -80,7 +135,8 @@ static BOOL sample_window(HWND window, DWORD width, DWORD height, DWORD image)
     return wrong == 0;
 }
 
-static BOOL exercise(LPDIRECTDRAW dd, HWND window, const char *path, BOOL hardware, DWORD width, DWORD height)
+static BOOL exercise(LPDIRECTDRAW dd, HWND window, const char *path, BOOL hardware,
+                     DWORD width, DWORD height, DWORD bpp)
 {
     LPDIRECTDRAWSURFACE front = NULL, back = NULL;
     DDSURFACEDESC desc;
@@ -89,8 +145,8 @@ static BOOL exercise(LPDIRECTDRAW dd, HWND window, const char *path, BOOL hardwa
     RB2K_DD_FLIP_INFO start, now;
     DWORD frame;
     BOOL passed = FALSE;
-    printf("Flip %s requested=%lux%lux32\n", path, width, height);
-    if (!call("set mode", IDirectDraw_SetDisplayMode(dd, width, height, 32))) return FALSE;
+    printf("Flip %s requested=%lux%lux%lu\n", path, width, height, bpp);
+    if (!call("set mode", IDirectDraw_SetDisplayMode(dd, width, height, bpp))) return FALSE;
     ZeroMemory(&desc, sizeof(desc));
     desc.dwSize = sizeof(desc);
     desc.dwFlags = DDSD_CAPS | DDSD_BACKBUFFERCOUNT;
@@ -103,16 +159,17 @@ static BOOL exercise(LPDIRECTDRAW dd, HWND window, const char *path, BOOL hardwa
     if (hardware) {
         dc = CreateDCA("DISPLAY", NULL, NULL, NULL);
         if (!scanout(dc, &start) || start.pageCount < 2 || start.visiblePage || start.yOffset ||
-            start.width != width || start.height != height || start.pitch != width*4 ||
+            start.width != width || start.height != height || start.pitch != width * (bpp / 8) ||
             start.pageBytes != start.pitch * height) {
             puts("Flip initial scanout geometry unavailable or incorrect");
             goto done;
         }
+        if (bpp == 16 && !fill_rect16(back)) goto done;
     }
     /* Release an odd number of flips in, with page one still on screen. */
     for (frame = 0; frame < 5; ++frame) {
         DWORD page = (frame + 1) % 2;
-        if ((frame < 2 || !hardware) && !pixels(back, width, height, frame % 2, TRUE)) goto done;
+        if ((frame < 2 || !hardware) && !pixels(back, width, height, bpp, frame % 2, TRUE)) goto done;
         if (!call("swap", IDirectDrawSurface_Flip(front, NULL, DDFLIP_WAIT))) goto done;
         if (hardware) {
             if (!scanout(dc, &now)) goto done;
@@ -122,8 +179,8 @@ static BOOL exercise(LPDIRECTDRAW dd, HWND window, const char *path, BOOL hardwa
                 now.flips - start.flips != frame + 1) goto done;
         }
         if (hardware) {
-            if (!pixels(front, width, height, frame % 2, FALSE)) goto done;
-        } else if (!sample_window(window, width, height, frame % 2)) goto done;
+            if (!pixels(front, width, height, bpp, frame % 2, FALSE)) goto done;
+        } else if (!sample_window(window, width, height, bpp, frame % 2)) goto done;
     }
     passed = TRUE;
 done:
@@ -137,7 +194,7 @@ done:
     return passed;
 }
 
-BOOL probe_ddraw_flip(LPDIRECTDRAW dd, const char *path, BOOL hardware)
+BOOL probe_ddraw_flip(LPDIRECTDRAW dd, const char *path, BOOL hardware, DWORD bpp)
 {
     static const char name[] = "W2KFullscreenFlip";
     WNDCLASSA wc;
@@ -160,8 +217,8 @@ BOOL probe_ddraw_flip(LPDIRECTDRAW dd, const char *path, BOOL hardware)
         UpdateWindow(window);
         ShowCursor(FALSE);
         if (call("exclusive", IDirectDraw_SetCooperativeLevel(dd, window, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN))) {
-            passed = exercise(dd, window, path, hardware, 640, 480);
-            if (passed && hardware) passed = exercise(dd, window, path, hardware, 1024, 768);
+            passed = exercise(dd, window, path, hardware, 640, 480, bpp);
+            if (passed && hardware) passed = exercise(dd, window, path, hardware, 1024, 768, bpp);
             if (!call("restore display", IDirectDraw_RestoreDisplayMode(dd))) passed = FALSE;
             if (!call("leave exclusive", IDirectDraw_SetCooperativeLevel(dd, window, DDSCL_NORMAL))) passed = FALSE;
         }
