@@ -371,35 +371,65 @@ within that host's run-to-run spread: Quake III 204 to 311 frames a second
 before and 213 to 242 after over four runs each, `gltest` 692 to 1005
 before and 627 to 1522 after.
 
-## Windows XP (in progress)
+## Windows XP SP3 x86
 
-The 0.1.0 package, unchanged, on Windows XP Professional (32-bit, 5.1.2600) with KVM and
-an Intel UHD 630: Setup installs it after XP's "has not passed Windows Logo testing"
-prompt (Continue Anyway), and after the restart the desktop is at 1024×768×32. The mode,
-colour, 800×600, GPU, console and `flipcycle` tests pass, and `gltest` runs on virgl
-(about 980 frames a second).
+### Desktop mode after a full-screen application
 
-**The desktop falls back to 640×480.** After a full-screen DirectDraw program ends, the
-desktop stays at 640×480, and every later start comes up at 640×480 too. `regmode.exe`
-shows why: right after the install Windows has no saved desktop mode for the adapter
-(`ENUM_REGISTRY_SETTINGS` gives 0×0). The first start's 1024×768 comes from the INF's
-defaults; DirectDraw's restore goes to the saved mode, finds none, and XP picks 640×480.
-XP keeps the saved mode under the hardware profile
-(`Hardware Profiles\Current\System\CurrentControlSet\Control\Video\{GUID}\0000`), which
-the install leaves empty; the INF's `DefaultSettings` go to `Control\Video\{GUID}\0000`.
-Once a mode was saved through `ChangeDisplaySettings` with `CDS_UPDATEREGISTRY`
-(`regmode /set 1024x768`), the flip test restored 1024×768 and a restart kept it. Planned
-fix: a step at the first logon that saves the current mode when none is saved, run from
-the INF so that installs through Device Manager get it too.
+On a fresh driver install, XP initially showed 1024×768×32 at 60 Hz, but
+`EnumDisplaySettings(ENUM_REGISTRY_SETTINGS)` returned 0×0. Exiting a
+full-screen DirectDraw application left the desktop at 640×480 and the next
+boot kept it there. Manually saving 1024×768 through `ChangeDisplaySettings`
+fixed both. XP's display installer had written the INF defaults to the
+adapter's `Control\Video\{GUID}\0000` key in HKLM. The matching key in
+the current hardware profile had no saved resolution.
 
-**Init data size.** Registered with Windows 2000's `VIDEO_HW_INITIALIZATION_DATA`, the
-miniport makes XP map `\Device\Video0` to the legacy key `Services\rb2kmp\Device0`; with
-XP's size (one `ULONG` longer) XP uses `Control\Video\{GUID}\0000` like a native XP driver.
-The miniport now tries XP's size first and registers again with Windows 2000's when
-`VideoPortInitialize` returns `STATUS_REVISION_MISMATCH`. Not yet tested on Windows 2000.
-The saved-mode problem is the same with either size.
+The INF now registers `rbntmode.dll` as a device co-installer. After Windows
+Setup installs the adapter on XP, the DLL reads its `VideoID` and copies
+the missing resolution, depth and refresh values from the INF defaults to
+that adapter's hardware profile. Existing values survive an update. Both
+`NT5INST.EXE` and Device Manager's **Have Disk** use this installation step.
 
-**Still to do on XP:** the first-logon fix; the Quake III, `ddbench`, `rvdstat`,
-`threadtest` and GPU-surface tests; a clean XP SP3 install; the other two test hosts.
-The driver offers only 32-bit desktop modes, so games that ask DirectDraw for 8-bit or
-16-bit full-screen modes will fail until it offers them (the same on Windows 2000).
+The miniport supplies XP's size of `VIDEO_HW_INITIALIZATION_DATA` so
+`\Device\Video0` maps to `Control\Video\{GUID}\0000`. It retries with
+the Windows 2000 size on `STATUS_REVISION_MISMATCH`. On Windows 2000 SP4,
+both the initial XP-sized miniport and the complete package with the
+co-installer were installed from stock VGA on separate test disks. The
+installed files matched, the GPU pixel was correct, and both DirectDraw
+flip paths restored 1024×768. The complete package also passed
+`regmode /check 1024x768` before and after the flip.
+
+### Intel KVM results
+
+The test started on the stock VGA driver in an existing XP Professional
+SP3 x86 installation, using QEMU's Q35 machine, one Penryn vCPU, 2 GiB
+and a virtio-vga-gl adapter on an Intel UHD 630.
+
+- `NT5INST.EXE` installed the driver. Before the first full-screen test,
+  the saved and active modes were 1024×768×32 at 60 Hz. Both DirectDraw
+  flip paths restored that exact mode. It survived a cold boot.
+- After selecting 800×600, a **Have Disk** reinstall from the CD root and a
+  restart preserved 800×600×32 at 60 Hz. Both flip paths restored it. To
+  repeat the regression test, run `regmode /check 1024x768` before and after
+  `w2kprobe /flip` and after a reboot. Use `/check 800x600` for the update case.
+  Checking the starting resolution catches a run that begins and ends at 640×480.
+- The installed miniport, display DLL and OpenGL DLL matched the disc.
+  Both GDI colour patterns, the console, the GPU pixel and all four
+  `flipcycle` rounds passed.
+- On virgl, `gltest` passed at 1,010 frames per second. Quake III's
+  1,346-frame `demo001` timedemo ran at 233.8 fps in a 640×480 window
+  and 163.9 fps at 1024×768 full-screen. The full-screen frame showed the
+  textured map, player, weapon and HUD.
+- DirectDraw's default path reached 11,848 fps for a windowed fill and copy,
+  10,661 fps for a full-screen fill and flip, and 4,382 fps with 100
+  colour-keyed sprites per frame. Stock DirectX 7 Donuts made 20,056 hardware
+  flips, exited normally and restored 1024×768.
+- `threadtest` passed 300 threads. After the games and thread test,
+  `rvdstat` reported zero held contexts, buffers and pages.
+- Enabling `RippleDirectDrawGpuSurfaces` through the live video device map
+  and rebooting enabled the optional offscreen path on XP. The full-size
+  hardware and software copies matched all 786,432 pixels. The clipped-window,
+  two-process and flip tests also passed.
+
+The clean operating-system install and the UTM and WSL2 hosts still need
+testing on XP. The driver currently offers 32-bit colour. Games that
+require 8-bit palettized or 16-bit modes need additional driver support.

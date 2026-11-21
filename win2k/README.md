@@ -3,6 +3,10 @@
 A display driver for Windows 2000 (SP4, x86) on QEMU's `virtio-vga-gl`
 adapter (PCI `1AF4:1050`), with OpenGL on the host's GPU.
 
+The development build also runs on 32-bit Windows XP Professional SP3.
+Its installer and full-screen mode restoration have been tested on an Intel
+KVM host. [Windows XP tests](../docs/win2k/development.md#windows-xp-sp3-x86)
+
 - **Desktop:** 640×480, 800×600 and 1024×768 at 32-bit colour, 60 Hz.
   GDI draws into the adapter's framebuffer. Command Prompt windows,
   mode changes and the Display control panel work as usual.
@@ -50,6 +54,8 @@ or SPICE with `gl=on`). The UTM test VM had the display card
 The INF installs `rb2kmp.sys` (the miniport), `rb2kdisp.dll` (the display
 driver) and `ripplegl.dll` (OpenGL), and registers the OpenGL driver under
 `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\OpenGLDrivers\RIPPLEGL`.
+On the XP development branch, keep `rbntmode.dll` alongside the INF.
+Windows Setup uses it to initialize the new adapter's saved desktop mode on XP.
 
 ## Speed
 
@@ -95,8 +101,10 @@ back buffer for full-screen flipping. Offscreen surfaces as host textures
 (`gpu_surface.c`) are switched off: copying them to the screen means a GPU
 readback into the CPU-drawn desktop, which is two to five times slower
 than Windows' own code, and they cannot be copied into the back buffer.
-For tests, set the DWORD `RippleDirectDrawGpuSurfaces` to 1 in the
-miniport's `Device0` key and restart.
+For tests, set the DWORD `RippleDirectDrawGpuSurfaces` to 1 in the adapter
+key named by `HKLM\HARDWARE\DEVICEMAP\VIDEO` and restart. For this
+driver the key is under `Services\rb2kmp\Device0` on Windows 2000 and
+`Control\Video\{GUID}\0000` on XP.
 
 ## Build
 
@@ -121,8 +129,9 @@ Wine in `.tools/win9x` (or `WIN9X_TOOLS`):
 - `memtest.exe`: times a compute loop, ordinary memory, GDI drawing into
   memory and on the screen, and copies to and from the screen, to tell a
   slow framebuffer from a slow CPU or a slow GPU path.
-- `regmode.exe`: the desktop mode Windows has saved and the one in use;
-  `/set 1024x768` saves a mode.
+- `regmode.exe` reports the saved and current desktop modes.
+  `/check 1024x768` returns success when both are 1024×768×32 at 60 Hz.
+  `/set 800x600` saves and applies that resolution.
 
 ## Known limits
 
