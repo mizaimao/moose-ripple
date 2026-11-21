@@ -21,10 +21,13 @@ offset, and releasing the chain returns scanout to the desktop page.
 A separate diagnostic draws one pixel on the host
 through the same virtio control queue.
 
-On the Linux build host, run `win2k/build.sh` with the Windows 2000 DDK
-and Visual C++ 6.0 under Wine. The script locates the kits under
-`.tools/win9x`, or under the directory named by `WIN9X_TOOLS`. Its default
-output directory is `build/win2k`.
+On Linux, `win2k/build.sh` cross-compiles the miniport and display DLL
+with Clang targeting the x86 Microsoft ABI and links them against the
+Windows 2000 DDK. The user programs use LLVM-MinGW with the system
+msvcrt runtime. The script locates the DDK and VC6 headers under
+`.tools/win9x` or `WIN9X_TOOLS`, and the compiler under
+`.tools/llvm-mingw` or `LLVM_MINGW`. Loose files go to `build/win2k`
+or the directory in `OUT`.
 
 Copy the six output files into one directory the test guest can read.
 Run `w2kprobe.exe` to see the hardware ID and current modes. Run

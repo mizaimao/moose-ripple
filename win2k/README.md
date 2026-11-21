@@ -116,8 +116,9 @@ driver the key is under `Services\rb2kmp\Device0` on Windows 2000 and
 
 ## Build
 
-On the Linux build host, with the Windows 2000 DDK and Visual C++ 6.0 under
-Wine in `.tools/win9x` (or `WIN9X_TOOLS`):
+The Linux build uses the msvcrt variant of LLVM-MinGW, the Windows 2000
+DDK headers and import libraries, and the Visual C++ 6.0 headers. Set
+`LLVM_MINGW` and `WIN9X_TOOLS` if the tools are outside `.tools/`.
 
     win2k/build.sh                  # build/win2k: the driver files, the INF and the tools
     win9x/mesa/build.sh             # ripplegl.dll (docs/win9x/mesa.md)
