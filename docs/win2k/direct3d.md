@@ -104,6 +104,47 @@ Run the timedemo from the game directory with the shareware `id1` directory besi
 D3DQuake.exe -window -width 640 -height 480 -nosound -nocdaudio -nojoy -condebug +timedemo demo1
 ```
 
+### Direct3D 8 performance on XP
+
+The stock Direct3D Quake executable replayed the 969-frame `demo1` on the
+same XP SP3 boot. Each run used the same driver, game data, 32-bit desktop
+and sound settings. The runner checked the actual game window dimensions
+and sampled which process owned the foreground window.
+
+| Window | Pixels per frame | First run | Repeat |
+| --- | ---: | ---: | ---: |
+| 320×240 | 76,800 | 21.4 fps | 21.1 fps |
+| 640×480 | 307,200 | 20.3 fps | 20.6 fps |
+| 800×600 | 480,000 | 19.8 fps | 19.7 fps |
+
+The runs went from 640×480 to 320×240 to 800×600 and then repeated in
+reverse order. Quake held the foreground in every sample. Increasing
+pixel count 6.25 times lowered the average frame rate by about 7%.
+Over each complete run the display driver spent 1.02–1.05 seconds reading
+pixels back at 320×240 and 1.99–2.01 seconds at 800×600. All GPU submissions
+and pixel reads succeeded.
+
+Quake asks its Direct3D 8 hardware device to use software vertex processing.
+At 640×480 a diagnostic DLL honoured that request for the first and last runs
+and forced hardware vertex processing for the two runs between them. The
+default produced 20.8 and 21.1 fps. The hardware override produced 19.0 and
+18.8 fps. The driver, executable, data and other runtime DLLs were identical.
+[Direct3D Quake source](https://dxquake.sourceforge.net/)
+
+The game calls `Sleep(1)` in its main loop, including during the timedemo.
+With the stock runtime at 640×480, requesting a 1 ms Windows timer period
+gave 21.8 and 21.9 fps. Restoring the default gave 21.2 fps. A clock on the
+host measured 49.6, 48.8 and 49.9 seconds respectively from game launch to
+the score. Finer timer resolution made little difference to elapsed time.
+
+At 640×480, `r_norefresh 1` skips the 3D scene while the game continues to
+draw the status bar and present each frame. The same demo then took 17.2
+seconds (56.2 fps). Restoring the scene with `r_norefresh 0` took 46.2
+seconds (21.0 fps). Drawing the scene added about 30 ms per frame. Across
+each complete run, XP charged the game process 5.2 seconds of CPU time with
+the scene skipped and 34.5 seconds with it visible. Separating that CPU time
+between the game, WineD3D and the OpenGL driver requires a finer profile.
+
 ### Direct3D 9 games on XP
 
 DarkPlaces, build 20140513, ran the same shareware `demo1` in a 640×480
