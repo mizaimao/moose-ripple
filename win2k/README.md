@@ -22,8 +22,9 @@ VGA and restored the saved desktop after full-screen DirectDraw programs.
 - **DirectDraw:** full-screen programs flip between two pages in video
   memory. Other surfaces live in system memory, where Windows' own
   DirectDraw code draws them faster than the GPU could here (see Speed).
-- **Direct3D** games still need a hardware rendering path on Windows 2000
-  and XP. [Direct3D investigation](https://github.com/mizaimao/moose-ripple/issues/106)
+- **Direct3D 8 and 9** games can use a per-game runtime built from WineD3D.
+  It translates their drawing calls into OpenGL on Ripple's host GPU.
+  [Install the Direct3D runtime](../docs/win2k/direct3d.md)
 
 ## The virtual machine
 
@@ -122,6 +123,9 @@ Wine in `.tools/win9x` (or `WIN9X_TOOLS`):
     win2k/build.sh                  # build/win2k: the driver files, the INF and the tools
     win9x/mesa/build.sh             # ripplegl.dll (docs/win9x/mesa.md)
 
+Set `WINED3D_SOURCE` to the pinned Wine source archive to also build the
+Direct3D libraries. [Direct3D build instructions](../docs/win2k/direct3d.md#build-the-loose-files)
+
 ## Tools
 
 - `w2kprobe.exe`: hardware ID and modes; `/pattern` and `/pattern800`
@@ -148,7 +152,9 @@ Wine in `.tools/win9x` (or `WIN9X_TOOLS`):
 
 ## Known limits
 
-- Direct3D is not accelerated (see above).
+- Direct3D coverage is per game and per API version. The compatibility
+  runtime exposes the x86 Direct3D 8 and 9 interfaces to the executable
+  beside it. [Game tests](../docs/win2k/direct3d.md#guest-results)
 - 8-bit and 16-bit full-screen game compatibility awaits guest testing.
 - Each OpenGL context that draws leaves about 1.2 KB in the program's own
   heap (`threadtest`: 300 contexts in one thread); the GPU's buffers and
