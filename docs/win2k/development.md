@@ -440,6 +440,9 @@ all 1,346 frames at 266.3 fps in a 640×480 window and 150.1 fps at
 
 ### UTM on Apple silicon
 
+When a guest keeps loading an older driver CD, follow the
+[UTM test-media runbook](utm-test-media.md).
+
 The clean XP SP3 disk booted on i440fx with one emulated Pentium III and
 512 MiB. Stock VGA ran at 640×480 and Device Manager showed code 28 for
 the display adapter. After the native installer finished and XP cold-booted,
