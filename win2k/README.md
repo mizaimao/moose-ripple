@@ -25,8 +25,10 @@ VGA and restored the saved desktop after full-screen DirectDraw programs.
   memory. Other surfaces live in system memory, where Windows' own
   DirectDraw code draws them faster than the GPU could here (see Speed).
 - **Direct3D 7** has an experimental native hardware driver for 32-bit
-  render targets. It clears a target and draws untextured, smoothly shaded
-  triangle lists. [Native pixel tests](../docs/win2k/development.md#native-hardware-device-and-full-target-clear)
+  render targets. Both Windows 2000 and XP passed pixel tests for untextured
+  triangle lists, indexed triangle lists and 16-bit depth testing.
+  [Indexed triangle tests](../docs/win2k/development.md#native-indexed-triangle-lists) ·
+  [Depth tests](../docs/win2k/development.md#native-16-bit-depth-rendering)
 
 ## The virtual machine
 
@@ -121,6 +123,8 @@ key named by `HKLM\HARDWARE\DEVICEMAP\VIDEO` and restart. For this
 driver the key is under `Services\rb2kmp\Device0` on Windows 2000 and
 `Control\Video\{GUID}\0000` on XP. The optional host textures require a
 32-bit display mode. In 8-bit and 16-bit modes, offscreen surfaces use system memory.
+For native Direct3D 7 tests, set both `RippleDirectDrawGpuSurfaces` and
+`RippleNativeD3D7` to 1 in that key and restart.
 
 ## Build
 
@@ -154,11 +158,17 @@ DDK headers and import libraries, and the Visual C++ 6.0 headers. Set
 - `regmode.exe` reports the saved and current desktop modes.
   `/check 1024x768` returns success when both are 1024×768×32 at 60 Hz.
   `/set 800x600` saves and applies that resolution.
+- `ipixels.exe hal` draws an indexed triangle and checks two frames against
+  the expected colours. Use `ipixels.exe rgb` for Microsoft's software
+  reference. `z16pixels.exe hal` and `z16pixels.exe rgb` check which
+  pixels survive when two triangles overlap at different depths.
 
 ## Known limits
 
-- Direct3D games that need texture sampling, indexed draws, depth buffers or
-  the Direct3D 8 or 9 driver interfaces still need more of the native port.
+- Stock Direct3D Quake 0.73 starts on the hardware device and clears its
+  target, but its indexed draws use unsupported settings. Both Windows
+  2000 and XP recorded zero game triangles. Texture sampling and the
+  Direct3D 8 and 9 driver interfaces remain open.
   [Direct3D work](https://github.com/mizaimao/moose-ripple/issues/106)
 - 8-bit and 16-bit full-screen game compatibility awaits guest testing.
 - Each OpenGL context that draws leaves about 1.2 KB in the program's own
