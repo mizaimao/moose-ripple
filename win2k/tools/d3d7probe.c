@@ -96,6 +96,39 @@ static BOOL draw(IDirect3DDevice7 *device)
     return call("triangle list", drawn) && call("end", ended);
 }
 
+/* D3DX7 opens a 3D-tagged primary for windowed presentation. Check only
+ * pixels in this test's client, including two guards outside the blit. */
+static BOOL window_pixels(HWND window, IDirectDrawSurface7 *primary, IDirectDrawSurface7 *target)
+{
+    static const struct { LONG x, y; int r, g, b, tolerance; } samples[] = {
+        {3, 3, 0, 0, 0, 0}, {16, 16, 0, 0, 102, 0},
+        {48, 48, 128, 64, 64, 4}, {124, 124, 0, 0, 0, 0}
+    };
+    RECT src = {0, 0, 96, 96}, dst = {8, 8, 104, 104};
+    POINT origin = {0, 0};
+    HDC client = GetDC(window);
+    unsigned i, matched = 0;
+    if (!client) return FALSE;
+    if (!ClientToScreen(window, &origin) || !PatBlt(client, 0, 0, Side, Side, BLACKNESS)) goto done;
+    GdiFlush();
+    OffsetRect(&dst, origin.x, origin.y);
+    if (!call("window primary blit", IDirectDrawSurface7_Blt(primary, &dst, target, &src, DDBLT_WAIT, NULL)))
+        goto done;
+    for (i = 0; i < sizeof(samples)/sizeof(samples[0]); ++i) {
+        POINT point = {origin.x + samples[i].x, origin.y + samples[i].y};
+        COLORREF color;
+        if (WindowFromPoint(point) != window) continue;
+        color = GetPixel(client, samples[i].x, samples[i].y);
+        if (color != CLR_INVALID && abs(GetRValue(color)-samples[i].r) <= samples[i].tolerance &&
+            abs(GetGValue(color)-samples[i].g) <= samples[i].tolerance &&
+            abs(GetBValue(color)-samples[i].b) <= samples[i].tolerance) ++matched;
+    }
+done:
+    ReleaseDC(window, client);
+    printf("D7 primary samples=%u/%u\n", matched, (unsigned)(sizeof(samples)/sizeof(samples[0])));
+    return matched == sizeof(samples)/sizeof(samples[0]);
+}
+
 /* Check the DirectDraw render target independently of HAL enumeration. */
 static BOOL target_fill(IDirectDrawSurface7 *target, HDC dc)
 {
@@ -184,7 +217,7 @@ static BOOL scene(IDirect3DDevice7 *device, IDirectDrawSurface7 *target, HDC dc,
 
 int main(int argc, char **argv)
 {
-    BOOL hal, clearOnly, targetOnly, gotStats, good = FALSE, restored;
+    BOOL hal, clearOnly, targetOnly, windowed, gotStats, good = FALSE, restored;
     ENUM_DEVICE e;
     D3DDEVICEDESC7 caps;
     DEVMODEA before = {0}, after = {0};
@@ -193,24 +226,34 @@ int main(int argc, char **argv)
     IDirectDraw7 *dd = NULL;
     IDirect3D7 *d3d = NULL;
     IDirect3DDevice7 *device = NULL;
-    IDirectDrawSurface7 *target = NULL;
+    IDirectDrawSurface7 *target = NULL, *primary = NULL;
+    IDirectDrawClipper *clipper = NULL;
     DDSURFACEDESC2 d = {0};
+    WNDCLASSA wc = {0};
     HWND window;
     HDC dc;
     int result = 1;
     if (argc != 2 || (strcmp(argv[1], "hal") && strcmp(argv[1], "clear") &&
-                      strcmp(argv[1], "rgb") && strcmp(argv[1], "target"))) {
-        puts("Usage: d3d7probe rgb|target|clear|hal"); return 1;
+                      strcmp(argv[1], "rgb") && strcmp(argv[1], "target") && strcmp(argv[1], "window"))) {
+        puts("Usage: d3d7probe rgb|target|clear|hal|window"); return 1;
     }
     setvbuf(stdout, NULL, _IONBF, 0);
     clearOnly = !strcmp(argv[1], "clear");
-    hal = clearOnly || !strcmp(argv[1], "hal");
+    windowed = !strcmp(argv[1], "window");
+    hal = clearOnly || windowed || !strcmp(argv[1], "hal");
     targetOnly = !strcmp(argv[1], "target");
     e.wanted = hal || targetOnly ? &IID_IDirect3DHALDevice : &IID_IDirect3DRGBDevice;
     e.found = FALSE;
     before.dmSize = after.dmSize = sizeof(before);
     if (!EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &before)) return 1;
-    window = CreateWindowExA(0, "STATIC", "Direct3D 7 pixel test", WS_POPUP, 0, 0, Side, Side,
+    if (windowed) {
+        wc.lpfnWndProc = DefWindowProcA;
+        wc.hInstance = GetModuleHandleA(NULL);
+        wc.lpszClassName = "RippleD3D7Window";
+        if (!RegisterClassA(&wc)) return 1;
+    }
+    window = CreateWindowExA(windowed ? WS_EX_TOPMOST : 0, windowed ? wc.lpszClassName : "STATIC",
+                             "Direct3D 7 pixel test", WS_POPUP, 0, 0, Side, Side,
                              NULL, NULL, GetModuleHandleA(NULL), NULL);
     if (!window) return 1;
     dc = CreateDCA("DISPLAY", NULL, NULL, NULL);
@@ -223,6 +266,16 @@ int main(int argc, char **argv)
         !call("enumerate", IDirect3D7_EnumDevices(d3d, device_info, &e))) goto done;
     printf("D7 requested=%s listed=%d\n", argv[1], e.found);
     d.dwSize = sizeof(d);
+    if (windowed) {
+        ShowWindow(window, SW_SHOWNOACTIVATE);
+        UpdateWindow(window);
+        d.dwFlags = DDSD_CAPS;
+        d.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_3DDEVICE;
+        if (!call("3D primary", IDirectDraw7_CreateSurface(dd, &d, &primary, NULL)) ||
+            !call("create clipper", IDirectDraw7_CreateClipper(dd, 0, &clipper, NULL)) ||
+            !call("clip window", IDirectDrawClipper_SetHWnd(clipper, 0, window)) ||
+            !call("attach clipper", IDirectDrawSurface7_SetClipper(primary, clipper))) goto done;
+    }
     d.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
     d.dwWidth = d.dwHeight = Side;
     d.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE |
@@ -254,10 +307,13 @@ int main(int argc, char **argv)
                pixels(target, FALSE, NULL);
     } else {
         good = scene(device, target, dc, hal);
+        if (good && windowed) good = window_pixels(window, primary, target);
     }
 done:
     if (device) IDirect3DDevice7_Release(device);
     if (target) IDirectDrawSurface7_Release(target);
+    if (primary) IDirectDrawSurface7_Release(primary);
+    if (clipper) IDirectDrawClipper_Release(clipper);
     if (d3d) IDirect3D7_Release(d3d);
     if (dd) IDirectDraw7_Release(dd);
     if (gotStats && get_stats(dc, &final)) {
