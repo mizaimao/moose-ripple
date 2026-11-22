@@ -30,8 +30,11 @@ enum { ArgDiffuse = 0, ArgCurrent, ArgTexture, ArgFactor, ArgSpecular, ArgSelect
        ArgComplement = 0x10, ArgAlphaReplicate = 0x20 };
 enum { CullNone = 1, CullCw, CullCcw };
 
+/* The constant ranges below cover RB2K_D3D7_VERTICES (96) vertices of four
+ * constants each: CONST[1..384] here, CONST[15..398] in object_shader. */
+typedef char vertex_constants_match[RB2K_D3D7_VERTICES == 96 ? 1 : -1];
 static const char vertex_shader[] =
-    "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..96]\nDCL ADDR[0]\n"
+    "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..384]\nDCL ADDR[0]\n"
     "DCL TEMP[0..2]\nDCL OUT[0], POSITION\nDCL OUT[1], GENERIC[0]\n"
     "DCL OUT[2], GENERIC[1]\nDCL OUT[3], GENERIC[2]\n"
     "IMM[0] FLT32 {0x3f000000, 0x3f800000, 0x40000000, 0x00000000}\n"
@@ -58,7 +61,7 @@ static const char vertex_shader[] =
  * half-pixel shift of Direct3D's integer pixel centres. Vertices follow
  * from CONST[15], four constants each as in the transformed path. */
 static const char object_shader[] =
-    "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..110]\nDCL ADDR[0]\n"
+    "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..398]\nDCL ADDR[0]\n"
     "DCL TEMP[0..4]\nDCL OUT[0], POSITION\nDCL OUT[1], GENERIC[0]\n"
     "DCL OUT[2], GENERIC[1]\nDCL OUT[3], GENERIC[2]\n"
     "IMM[0] FLT32 {0x3f800000, 0x40000000, 0x00000000, 0x00000000}\n"
@@ -529,9 +532,12 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
 BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
                        const RB2K_D3D7_DRAW *d, const RB2K_TEXTURE *texture)
 {
-    ULONG words[4 + 8 + 7 + 56 + 16*RB2K_D3D7_VERTICES + 13], *p = words, i, count = d->count;
+    /* Viewport 8, scissor 4, constants 7 + 56 + 16 per vertex, draw 13. */
+    ULONG i, count = d->count, total = 28 + (d->transform ? 60 : 0) + 16*count, *p;
     ULONG width = dimension_bits(image->width), height = dimension_bits(image->height);
     if (!rb_gpu_prepare_target(gpu, r, image) || !states(gpu, r, image, d, texture)) return FALSE;
+    p = rb_gpu_frame_reserve(gpu, r, image, total);
+    if (!p) return FALSE;
     *p++ = VIRGL_CMD0(VIRGL_CCMD_SET_VIEWPORT_STATE,0,VIRGL_SET_VIEWPORT_STATE_SIZE(1));
     *p++ = 0;
     /* The viewport scale and translation each use half the dimensions. */
@@ -590,7 +596,6 @@ BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
     *p++ = 0;                  /* minimum index */
     *p++ = count - 1;          /* maximum index */
     *p++ = 0;                  /* stream-output count */
-    if (!rb_gpu_frame_words(gpu,r,image,words,p-words)) return FALSE;
     image->uniform = FALSE;
     return TRUE;
 }

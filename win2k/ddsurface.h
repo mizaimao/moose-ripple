@@ -36,7 +36,7 @@
 #define IOCTL_RB2K_D3D7_TEXTURE RB2K_DD_IOCTL(0x91c)
 #define IOCTL_RB2K_D3D7_TEXTURE_FREE RB2K_DD_IOCTL(0x91d)
 typedef struct { ULONG clears, triangles; } RB2K_D3D7_COMPLETED;
-#define RB2K_D3D7_VERTICES 24
+#define RB2K_D3D7_VERTICES 96
 /* IEEE transformed position, packed Direct3D diffuse and specular colours
  * and the stage-zero texture coordinate. */
 typedef struct { ULONG x, y, z, rhw, diffuse, specular, u, v; } RB2K_D3D7_VERTEX;

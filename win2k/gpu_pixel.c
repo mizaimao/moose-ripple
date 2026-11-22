@@ -199,20 +199,31 @@ BOOLEAN rb_gpu_frame_flush(RB2K_GPU *gpu, RB2K_GPU_RESULT *r)
     return submit_frame(gpu, r, TRUE);
 }
 
-BOOLEAN rb_gpu_frame_words(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
-                           const ULONG *words, ULONG count)
+/* Room for count words at the end of the image's open frame. The caller
+ * writes all of them before its next frame request. */
+ULONG *rb_gpu_frame_reserve(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, ULONG count)
 {
     const ULONG capacity = sizeof(gpu->d7Frame.words)/sizeof(ULONG);
+    ULONG *words;
     if (!count || count > capacity || image->frameFailed) {
         r->status = ERROR_INVALID_DATA;
         r->stage = RB2K_STAGE_TRANSFER;
-        return FALSE;
+        return NULL;
     }
-    if (gpu->d7Frame.target != image && !rb_gpu_frame_flush(gpu, r)) return FALSE;
-    if (count > capacity-gpu->d7Frame.count && !submit_frame(gpu, r, FALSE)) return FALSE;
-    VideoPortMoveMemory(gpu->d7Frame.words + gpu->d7Frame.count, (PVOID)words, count*sizeof(*words));
+    if (gpu->d7Frame.target != image && !rb_gpu_frame_flush(gpu, r)) return NULL;
+    if (count > capacity-gpu->d7Frame.count && !submit_frame(gpu, r, FALSE)) return NULL;
+    words = gpu->d7Frame.words + gpu->d7Frame.count;
     gpu->d7Frame.count += count;
     gpu->d7Frame.target = image;
+    return words;
+}
+
+BOOLEAN rb_gpu_frame_words(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
+                           const ULONG *words, ULONG count)
+{
+    ULONG *room = rb_gpu_frame_reserve(gpu, r, image, count);
+    if (!room) return FALSE;
+    VideoPortMoveMemory(room, (PVOID)words, count*sizeof(*words));
     return TRUE;
 }
 

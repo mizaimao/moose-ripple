@@ -158,6 +158,7 @@ void rb_gpu_pixel(RB2K_GPU *gpu, RB2K_GPU_RESULT *result);
 BOOLEAN rb_gpu_create_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
                             const RB2K_IMAGE *image, const char *name, ULONG nameBytes, BOOLEAN scanout);
 ULONG rb_gpu_channel(ULONG channel);
+ULONG *rb_gpu_frame_reserve(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image, ULONG count);
 BOOLEAN rb_gpu_frame_words(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image,
                            const ULONG *words, ULONG count);
 BOOLEAN rb_gpu_frame_flush(RB2K_GPU *gpu, RB2K_GPU_RESULT *result);

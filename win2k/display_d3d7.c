@@ -40,6 +40,7 @@ typedef struct {
     ULONG viewport[4], zRange[2];
     BOOL inScene, queued;
     ULONG minStart, maxEnd;     /* diagnostics for one command buffer */
+    RB2K_D3D7_DRAW draw;        /* the batch being filled */
     D7_STAGE stages[TextureStages];
 } D7_CONTEXT;
 /* A system-memory texture registered through CreateSurfaceEx. The address
@@ -750,7 +751,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
 {
     DISPLAY *d = c->display;
     DD_SLOT *s, *z;
-    RB2K_D3D7_DRAW draw;
+    RB2K_D3D7_DRAW *draw = &c->draw;   /* too large for the kernel stack */
     D7_STAGE *st = &c->stages[0];
     D7_TEXTURE *tex = NULL;
     ULONG fvf = a->dwVertexType, offset = 16, diffuse = 0, specular = 0, coord = 0, coordFloats = 0;
@@ -765,8 +766,8 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     if (c->fill != D3DFILL_SOLID) { skip(c, RB2K_D7_SKIP_FILL, p->primitives); return DD_OK; }
     if (c->stencil) { skip(c, RB2K_D7_SKIP_STENCIL, p->primitives); return DD_OK; }
     if (c->stages[1].colorOp != D3DTOP_DISABLE) { skip(c, RB2K_D7_SKIP_STAGE1, p->primitives); return DD_OK; }
-    RtlZeroMemory(&draw, FIELD_OFFSET(RB2K_D3D7_DRAW, vertices));
-    if (stage_words(c, &draw.colorStage, &draw.alphaStage, &needTexture) == StageUnsupported) {
+    RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D7_DRAW, vertices));
+    if (stage_words(c, &draw->colorStage, &draw->alphaStage, &needTexture) == StageUnsupported) {
         skip(c, RB2K_D7_SKIP_COMBINER, p->primitives);
         return DD_OK;
     }
@@ -803,39 +804,39 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
             return DD_OK;
         }
         if (tex->mipmaps && st->mipFilter != D3DTFP_NONE) d->d7draw.ignored[RB2K_D7_IGNORED_MIPMAP] += p->primitives;
-        draw.texture = texture_ready(c, tex, s->id);
-        if (!draw.texture) { skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives); return DD_OK; }
+        draw->texture = texture_ready(c, tex, s->id);
+        if (!draw->texture) { skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives); return DD_OK; }
     }
     texture = needTexture;
     if (c->fog) d->d7draw.ignored[RB2K_D7_IGNORED_FOG] += p->primitives;
     if (c->colorKey) d->d7draw.ignored[RB2K_D7_IGNORED_COLORKEY] += p->primitives;
     if (c->clipPlanes) d->d7draw.ignored[RB2K_D7_IGNORED_CLIPPLANE] += p->primitives;
 
-    draw.target = s->id;
-    draw.depth = z ? z->id : 0;
+    draw->target = s->id;
+    draw->depth = z ? z->id : 0;
     if (z && c->zEnable && c->zFunc >= D3DCMP_NEVER && c->zFunc <= D3DCMP_ALWAYS)
-        draw.depthState = RB2K_Z_ENABLE | (c->zWrite ? RB2K_Z_WRITE : 0) | (c->zFunc - 1);
+        draw->depthState = RB2K_Z_ENABLE | (c->zWrite ? RB2K_Z_WRITE : 0) | (c->zFunc - 1);
     if (c->alphaTest && c->alphaFunc >= D3DCMP_NEVER && c->alphaFunc <= D3DCMP_ALWAYS)
-        draw.alphaTest = RB2K_D7_ON | (c->alphaFunc << 8) | (c->alphaRef & 255);
+        draw->alphaTest = RB2K_D7_ON | (c->alphaFunc << 8) | (c->alphaRef & 255);
     if (c->blend && c->srcBlend >= D3DBLEND_ZERO && c->srcBlend <= D3DBLEND_BOTHINVSRCALPHA &&
         c->dstBlend >= D3DBLEND_ZERO && c->dstBlend <= D3DBLEND_BOTHINVSRCALPHA)
-        draw.blend = RB2K_D7_ON | (c->srcBlend << 8) | c->dstBlend;
-    draw.cull = c->cull >= D3DCULL_NONE && c->cull <= D3DCULL_CCW ? c->cull : D3DCULL_NONE;
-    draw.specular = c->specular ? 1 : 0;
-    draw.factor = c->factor;
-    draw.sampler = (st->addressU >= 1 && st->addressU <= 4 ? st->addressU : 1) |
+        draw->blend = RB2K_D7_ON | (c->srcBlend << 8) | c->dstBlend;
+    draw->cull = c->cull >= D3DCULL_NONE && c->cull <= D3DCULL_CCW ? c->cull : D3DCULL_NONE;
+    draw->specular = c->specular ? 1 : 0;
+    draw->factor = c->factor;
+    draw->sampler = (st->addressU >= 1 && st->addressU <= 4 ? st->addressU : 1) |
                    (st->addressV >= 1 && st->addressV <= 4 ? st->addressV : 1) << 4 |
                    (st->magFilter >= 1 && st->magFilter <= 5 ? st->magFilter : 1) << 8 |
                    (st->minFilter >= 1 && st->minFilter <= 3 ? st->minFilter : 1) << 12;
-    draw.border = st->border;
+    draw->border = st->border;
     if (objectSpace) {
         /* Lights are not applied yet: lit draws use their vertex colours. */
         if (c->lighting) d->d7draw.ignored[RB2K_D7_IGNORED_LIGHTING] += p->primitives;
-        draw.transform = 1;
-        RtlCopyMemory(draw.matrices, c->matrices, sizeof(draw.matrices));
-        RtlCopyMemory(draw.viewport, c->viewport, sizeof(c->viewport));
-        draw.viewport[4] = c->zRange[0];
-        draw.viewport[5] = c->zRange[1];
+        draw->transform = 1;
+        RtlCopyMemory(draw->matrices, c->matrices, sizeof(draw->matrices));
+        RtlCopyMemory(draw->viewport, c->viewport, sizeof(c->viewport));
+        draw->viewport[4] = c->zRange[0];
+        draw->viewport[5] = c->zRange[1];
     }
 
     /* Check the whole vertex window before the first host draw. */
@@ -846,7 +847,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
             if (v > high) high = v;
         }
     }
-    record_state(c, &draw, fvf, tex ? tex->format : 0, p->primitives);
+    record_state(c, draw, fvf, tex ? tex->format : 0, p->primitives);
     if (!p->inline_) {
         if (p->first < c->minStart) c->minStart = p->first;
         if (p->first + high > c->maxEnd) c->maxEnd = p->first + high;
@@ -885,7 +886,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     __try {
         if (!p->inline_) EngProbeForRead((PVOID)(base + low * stride), (high - low) * stride + offset, 1);
         for (t = 0; t < p->primitives; ++t) {
-            RB2K_D3D7_VERTEX *out = draw.vertices + count;
+            RB2K_D3D7_VERTEX *out = draw->vertices + count;
             ULONG flat;
             BOOL bad = FALSE;
             if (limit != 0xffffffff) {
@@ -917,12 +918,12 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
             if (bad) { ++d->d7draw.badPositions; skip(c, RB2K_D7_SKIP_VERTEX, 1); continue; }
             count += 3;
             if (count == RB2K_D3D7_VERTICES || t + 1 == p->primitives) {
-                hr = send_batch(c, &draw, count, tex);
+                hr = send_batch(c, draw, count, tex);
                 if (FAILED(hr)) break;
                 count = 0;
             }
         }
-        if (SUCCEEDED(hr) && count) hr = send_batch(c, &draw, count, tex);
+        if (SUCCEEDED(hr) && count) hr = send_batch(c, draw, count, tex);
     } __except (EXCEPTION_EXECUTE_HANDLER) { hr = refused(d, RB2K_D7_FAIL_PROBE, a, p, low, high, stride); }
     return hr;
 }
