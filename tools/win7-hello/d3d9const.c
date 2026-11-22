@@ -18,15 +18,20 @@
 #define VS_COLOR_C17 0x02000001,0xe00f0001,0xa0e40011    /* mov o1, c17 */
 #define PS_DECLS D3DPS_VERSION(3,0),0x0200001f,0x8000000a,0x900f0000 /* dcl_color v0 */
 #define PS_ADD_C17 0x03000002,0x800f0800,0x90e40000,0xa0e40011      /* add oC0, v0, c17 */
+/* mova a0, c50; mov o1, c60[a0.component] */
+#define VS_INDIRECT(component) {VS_DECLS, MOVE_POS, \
+    0x0200002e,0xb00f0000,0xa0e40032, \
+    0x03000001,0xe00f0001,0xa0e4203c,0xb0000000 | ((component)*0x55u << 16), 0xffff}
 
-enum { keep = -1, global_shader, local_shader, no_constants };
+enum { keep = -1, global_shader, local_shader, no_constants, address_x, address_y, address_z, address_w };
 static const DWORD vs_code[][32] = {
     {VS_DECLS, MOVE_POS, VS_COLOR_C17, 0x0000ffff},
     {VS_DECLS, 0x05000051,0xa00f0011,0,0x3f800000,0,0x3f800000, /* def c17, 0,1,0,1 */
      MOVE_POS, VS_COLOR_C17, 0x0000ffff},
     {VS_DECLS, 0x0200001f,0x8000000a,0x900f0001, /* dcl_color v1 */
      MOVE_POS, 0x02000001,0xe00f0001,0x90e40001, /* mov o1, v1 */
-     0x0000ffff}
+     0x0000ffff},
+    VS_INDIRECT(0), VS_INDIRECT(1), VS_INDIRECT(2), VS_INDIRECT(3)
 };
 static const DWORD ps_code[][32] = {
     {PS_DECLS, PS_ADD_C17, 0x0000ffff},
@@ -58,7 +63,11 @@ static const struct {
     {"restore API PS",     keep,          global_shader, keep, keep,  0x00ffff},
     {"restore API VS/PS",  global_shader, keep,          keep, keep,  0xffff00},
     {"both local DEF",     local_shader,  local_shader,  keep, keep,  0x00ffff},
-    {"both global again",  global_shader, global_shader, keep, keep,  0xffff00}
+    {"both global again",  global_shader, global_shader, keep, keep,  0xffff00},
+    {"indirect a0.x",      address_x,     no_constants,  keep, keep,  0xff0000},
+    {"indirect a0.y",      address_y,     no_constants,  keep, keep,  0x00ff00},
+    {"indirect a0.z",      address_z,     no_constants,  keep, keep,  0x0000ff},
+    {"indirect a0.w",      address_w,     no_constants,  keep, keep,  0xffff00}
 };
 enum { tile = 8, case_count = sizeof(cases)/sizeof(cases[0]), width = tile*case_count };
 
@@ -73,7 +82,7 @@ int main(int argc, char **argv)
     IDirect3D9 *d3d = NULL;
     IDirect3DDevice9 *device = NULL;
     IDirect3DVertexDeclaration9 *decl = NULL;
-    IDirect3DVertexShader9 *vs[3] = {0};
+    IDirect3DVertexShader9 *vs[sizeof(vs_code)/sizeof(vs_code[0])] = {0};
     IDirect3DPixelShader9 *ps[3] = {0};
     IDirect3DSurface9 *target = NULL, *copy = NULL;
     D3DPRESENT_PARAMETERS pp = {0};
@@ -105,10 +114,14 @@ int main(int argc, char **argv)
     }
     CHECK(IDirect3DDevice9_CreateVertexDeclaration(device, elements, &decl));
     CHECK(IDirect3DDevice9_SetVertexDeclaration(device, decl));
-    for (unsigned i=0; i<3; ++i) {
+    for (unsigned i=0; i<sizeof(vs)/sizeof(vs[0]); ++i)
         CHECK(IDirect3DDevice9_CreateVertexShader(device, vs_code[i], &vs[i]));
+    for (unsigned i=0; i<sizeof(ps)/sizeof(ps[0]); ++i)
         CHECK(IDirect3DDevice9_CreatePixelShader(device, ps_code[i], &ps[i]));
-    }
+    const float addresses[] = {1.25f, 1.75f, 3.25f, 3.75f};
+    const float palette[][4] = {{1,0,0,1}, {0,1,0,1}, {0,0,1,1}, {1,1,0,1}};
+    CHECK(IDirect3DDevice9_SetVertexShaderConstantF(device, 50, addresses, 1));
+    CHECK(IDirect3DDevice9_SetVertexShaderConstantF(device, 61, palette[0], 4));
     CHECK(IDirect3DDevice9_GetRenderTarget(device, 0, &target));
     CHECK(IDirect3DDevice9_CreateOffscreenPlainSurface(device, width, tile, pp.BackBufferFormat,
                                                        D3DPOOL_SYSTEMMEM, &copy, NULL));
@@ -150,10 +163,10 @@ int main(int argc, char **argv)
 done:
     if (copy) IDirect3DSurface9_Release(copy);
     if (target) IDirect3DSurface9_Release(target);
-    for (unsigned i=0; i<3; ++i) {
+    for (unsigned i=0; i<sizeof(vs)/sizeof(vs[0]); ++i)
         if (vs[i]) IDirect3DVertexShader9_Release(vs[i]);
+    for (unsigned i=0; i<sizeof(ps)/sizeof(ps[0]); ++i)
         if (ps[i]) IDirect3DPixelShader9_Release(ps[i]);
-    }
     if (decl) IDirect3DVertexDeclaration9_Release(decl);
     if (device) IDirect3DDevice9_Release(device);
     if (d3d) IDirect3D9_Release(d3d);

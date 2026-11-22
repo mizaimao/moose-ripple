@@ -1396,3 +1396,316 @@ through virgl, so no count is offered there: a program that asks for multisampli
 Direct3D's "not available", as on any card without it, and runs without. The control and
 the full-screen step pass there, and so do `d3d9flipex` (52 of 52) and the stream, upload
 and menu checks.
+
+## 3DMark06 on the Intel UHD 630 (2026-11-21)
+
+Windows 7 SP1 x64 ran 3DMark06 1.2.0.0 on an Intel Core i9-9900K with UHD 630
+graphics, through QEMU/KVM and virgl. The comparison with Vista SP2 used four
+virtual CPUs, 4 GiB of memory, the Penryn CPU model, the same Q35 machine with
+HPET enabled, and a 1280×1024 display in 32-bit colour. The default suite uses
+no antialiasing and runs its two CPU tests at 640×480. The benchmark executable
+had SHA-256 `a8270172b9356e5e4870658a54a2b06ef5545c4c771b0c456aa5d490b0f0a8a3`.
+
+The first test-signed driver used the graphics DLLs from PR #98. Its
+windowed Direct3D 9 triangle and background both read back correctly, and
+Present succeeded. In two attempts, 3DMark06 stopped on `DrawPrimitive`
+before completing the first scene. In the timed attempt the error appeared
+9.29 real seconds after Run. QEMU recorded one display-buffer switch in
+that interval. The benchmark produced no score or gameplay frame rate.
+
+A separate 32-bit fullscreen test presented its first two-colour image.
+Clearing the next buffer returned `0x80004005` and the front buffer kept
+the first image through both subsequent colour changes. The benchmark's
+driver trace identified the same screen buffer. It had no Gallium resource,
+and `D3D9BindFramebuffer` failed when the application drew into it.
+[Fullscreen resource fix](https://github.com/mizaimao/moose-ripple/commit/8121872f1bbacecd44d15a9e0954ceeb016c5aeb)
+
+With the fullscreen fix installed, all three clears and presents succeeded in
+the standalone test. 3DMark06 then reached a fourth loading-screen draw that
+the driver rejected with `E_NOTIMPL`. It used already-transformed vertices
+(`POSITIONT`) and an application pixel shader.
+
+`tools/win7-hello/d3d9positiont.c` checks three draws on a 16×16 target. It
+exercises a constant colour and a sampled texture with pixel shader 2.0, and
+a constant colour with pixel shader 3.0. Each draw checks the 12×12 quad and
+the surrounding border. On both x86 and x64, all three cases had 144 wrong
+pixels before the shader change and zero afterwards. The test used the same
+kernel and fullscreen fix throughout.
+
+The next benchmark attempt reached fullscreen and exited 20.0 host seconds
+after Run. Windows logged an application error in `3DMark06.exe`. The nine
+fullscreen clock samples covered 18.22 seconds on the host, 18.23 on the
+Windows performance counter and 16.71 on the Windows tick clock. This run
+ended before a score or a per-scene display rate could be measured.
+
+### Immediate fullscreen presentation
+
+Windows requests a DMA command for an immediate fullscreen flip. The previous
+miniport returned success with an empty buffer, leaving the host display black.
+The new command keeps the source allocation in the scheduler's patch list and
+selects it for display after earlier rendering has been queued. A flip at
+vertical blank continues to use the scheduler's display-address callback.
+[Windows display-driver present interface](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dkmddi/ns-d3dkmddi-_dxgkarg_present)
+
+The 32-bit fullscreen probe held three two-colour patterns for 3.5 guest seconds
+each at 1280×1024. A viewer connected before the test and sampled the host
+display at (320, 512) and (960, 512) about twice per real second. Each cell
+counts patterns whose midpoint matched both expected pixels. All four interior
+samples in every hold agreed with its midpoint. [Fullscreen probe](../../tools/win7-hello/d3d9fullscreen.c)
+
+| Swap effect | Presentation interval | Previous kernel | Immediate-flip kernel |
+| --- | --- | ---: | ---: |
+| Flip | Immediate | 0/3 | 3/3 |
+| Discard | Immediate | 0/3 | 3/3 |
+| Flip | One vertical blank | 3/3 | 3/3 |
+| Discard | One vertical blank | 3/3 | 3/3 |
+
+For the single-change comparison, the unmodified kernel at `bccab87` was
+rebuilt with its original compile timestamp. All seven PE sections matched
+the archived driver. The same immediate-flip source change was applied to
+that control and built separately on the current Windows branch. The display
+trial used a disposable Windows 7 disk and the following SHA-256 hashes.
+Windows verified the new kernel signature and all four catalog members.
+The running guest confirmed both installed shader DLLs and the kernel after reboot.
+
+| File | SHA-256 |
+| --- | --- |
+| Previous kernel | `47b67bdec23ac64aea5b35554f7fee3d7267ebae3ce20c1da92fc3ee0a0d0c9c` |
+| New test-signed kernel | `9e7005109db86deafbb386ec46b81273554a9de23defdb7c6707c9d5e9354062` |
+| New signed catalog | `1eb674421b6a29f68eef664e4eb12c7722942efa73493ad6863c90d2d75fdba5` |
+| x64 shader DLL, both runs | `c0c5c6bfd84d35541307a1a689556d240ae3449e5983b1e2f3f6005595839257` |
+| x86 shader DLL, both runs | `4776a89526bd065128e66635158026bddb7ca35ca248e4a0e14a6c4ba5321427` |
+| Fullscreen probe, both runs | `75ec12d5e8839841107cffc1bec6ce9ce7ea8254ea08983a8cdb4b536fd5479f` |
+
+### Resource lists and the benchmark exit
+
+On both kernels, Windows logged the first application error in the 32-bit
+graphics DLL and then another in 3DMark06 in the same process. The first error
+mapped to `virgl_gdi_emit_res`, where the driver entered resources into the
+Windows allocation and patch lists. Those lists can change after each render
+callback. The code used the requested capacity when building the next batch.
+
+The Windows 7 port holds the command and its resource references until
+submission. It checks the actual command, allocation and patch capacities
+returned by Windows, asks for more space when needed, and checks the returned
+capacities again before writing. Each allocation retains its patch entry.
+The Windows 7 build applies this to virgl. [Windows render callback](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dumddi/ns-d3dumddi-_d3dddicb_render)
+
+With the previous kernel (`47b67bde…`) and only the resource-list change
+added to the shader DLLs, the default suite completed. The offline result
+scored **4,156**, with **2,050 SM2.0**, **928 HDR/SM3.0**, and **4,873 CPU**.
+Across 193 fullscreen samples, the host advanced 485.10 seconds, the Windows
+performance counter 485.11 seconds and the tick clock 401.17 seconds.
+The timed run had zero viewers.
+There were too few display-buffer switches to measure the six scene rates
+on this kernel. The benchmark's own scene rates are in its result file.
+
+| Resource-list trial artifact | SHA-256 |
+| --- | --- |
+| x64 DLL | `c6c2eddb9362c0d0c8ff1cac19afd76964341ef8dc673fc462089263bf06eebe` |
+| x86 DLL | `b1b68dc289398d0281169e3296bab2018fdd6c4b4cb180fb8695efd5cb1a744d` |
+| Signed catalog with previous kernel | `4a9156d55ae008a6e558fa98b83934527897cc580ffd5f1d9ffe2b36b5daf678` |
+| Saved 4,156-point result | `1884dbdd1afdd74b6b389272a8a3c7fc2b9b4bfa3c3e6807728897c097016cf4` |
+
+### Windows 7 and Vista on the same UHD 630
+
+A fresh Windows 7 test disk combined the immediate-flip kernel with the same
+two resource-list DLLs. After reboot the guest verified the three installed
+file hashes, and all 12 fullscreen colour patterns passed on the host display.
+The combined catalog SHA-256 was
+`39e015bdd0692687d1329f1ecb5c124bdd802747d6cc964d8febc8bb659b44ea`.
+
+The benchmark ran separately with zero viewer connections. Both operating
+systems used 3DMark06 1.2.0 with the same virtual CPU, four cores, 4 GiB of
+RAM, virtual HPET, Intel UHD 630 and graphics settings (1280×1024, no AA).
+Each local result recorded all six tests successful. Windows 7 reached the
+score dialog 857.56 host seconds after Run. Its 118,356-byte result has
+SHA-256 `25981ef18cba5440dfe9cf7de6302380d82a69bae461ea48202e1b433173373e`.
+
+The **9,389** figure is provisional as a graphics-performance comparison.
+In a separate boot with identical drivers, the host viewer showed Return
+to Proxycon advancing from HUD frame 987 to 1,140, while a stretched brown
+surface obscured the scene. The fullscreen colour tests and the saved score
+did not detect this rendering error. Vista had shown the same symptom when
+postprocessing quads lost their texture coordinates with a vertex shader
+still bound.
+
+The subsequent shader trials below repeat the same suite and inspect the
+individual scenes on the external display. [Bound shader and screen-space
+coordinates](#screen-space-texture-coordinates-with-a-bound-vertex-shader) ·
+[Scalar address register](#vertex-shader-constants-selected-through-the-address-register)
+
+| Matched no-viewer run | Windows 7 SP1 | Vista SP2 |
+| --- | ---: | ---: |
+| 3DMark06 | **9,389** | **13,964** |
+| SM2.0 | 2,721 | 5,726 |
+| HDR/SM3.0 | 4,498 | 5,890 |
+| CPU | 4,869 | 4,591 |
+| Real seconds between first and last fullscreen clock samples | 833.42 | 914.57 |
+| Windows performance-counter seconds | 833.41 | 914.58 |
+| Windows tick seconds | 401.73 | 404.14 |
+
+The host counted changes between the two display buffers for each scene.
+For each graphics test the sample covers 30 real seconds, ending five
+seconds before the last switch. For each CPU test it covers 20 switches
+and ends five switches before the last. The game's FPS column is its
+average for the full scene, on its own clock.
+
+| Test | Windows 7 game FPS | Windows 7 late display changes/s | Vista late display changes/s |
+| --- | ---: | ---: | ---: |
+| Return to Proxycon | 30.242 | 11.82 | 26.73 |
+| Firefly Forest | 15.109 | 8.36 | 13.54 |
+| Red Valley CPU 1 | 1.617 | 1.53 | 1.47 |
+| Red Valley CPU 2 | 2.346 | 2.60 | 2.59 |
+| Canyon Flight | 80.527 | 7.20 | 25.34 |
+| Deep Freeze | 9.440 | 8.43 | 26.71 |
+
+During the Windows 7 Deep Freeze sample QEMU recorded about 18,011
+host-to-guest transfer commands and 253 display switches. Across the
+interior of the HDR phase, 71,820 transfers targeted two resource IDs.
+Neither ID was selected for display during the trace. The trace provides
+the resource ID but omits the transfer size and the time spent waiting.
+
+### Screen-space texture coordinates with a bound vertex shader
+
+3DMark06 leaves a vertex shader bound when switching to a fullscreen
+postprocessing quad whose vertices already contain screen coordinates
+(`POSITIONT`). The quad still supplies texture coordinates for the pixel
+shader. The Windows 7 driver used the old vertex shader's input map, which
+could omit those coordinates. The fix builds the input mapping from the
+active declaration and the pixel shader for these draws.
+
+The 16×16 test first binds a position-only application vertex shader, then
+switches to transformed vertices and draws a four-colour texture. It compares
+all 256 pixels, including the border. Each architecture returned **108 wrong
+pixels before the change and zero afterward**. The three existing draws on
+each architecture matched throughout. The same immediate-flip kernel ran in
+both tests. [Four-colour probe](../../tools/win7-hello/d3d9positiont.c)
+
+| Bound-shader trial | SHA-256 |
+| --- | --- |
+| x64 DLL | `9daab67bfc24a2cea8e375fed8f5f5da99835415500259867cbec7360baf0aa1` |
+| x86 DLL | `9e64515218520ae88b666f42eedb44be4df40ace3ebe289976f58bf94fbeb496` |
+| Test-signed catalog | `d95ee69b604c9185d182d7288d61743bbcc2abbb51c426e2a12e74b7f5fac391` |
+
+In an independent visual run, the Intel display showed the hangar, soldiers
+and crates around 13.57 seconds in Return to Proxycon. The old DLLs had shown
+a stretched surface at 14.34 seconds. Firefly Forest showed the vegetation
+and both fireflies. Broad orange bands were still apparent in the hangar,
+and grey triangles crossed both the terrain and sky in Red Valley.
+
+A separate no-viewer run saved a provisional **9,247** (SM2.0 **2,843**,
+HDR/SM3.0 **4,247**, CPU **4,904**). The fullscreen samples spanned 817.55
+host seconds, 817.54 Windows performance-counter seconds and 397.80 Windows
+tick seconds. Late host display rates in suite order were 11.25, 7.74, 1.61,
+2.59, 6.40 and 8.00 changes per real second. The renderer logged 167,499
+failures converting TGSI opcode 61 (`ARR`), including 166,896 within the
+Canyon Flight buffer pair. The saved result SHA-256 is
+`fe77fe7c54cb65ba8d2b7042cb6401d729cc1e3c4ed1f38a235752da28c17a2e`.
+
+### Vertex shader constants selected through the address register
+
+A Direct3D 9 vertex shader can index its constants through any component of
+the four-component address register. The Intel host renderer accepts a scalar
+address and rejected the driver's round-and-load instruction (`ARR`). The
+translator now selects the requested component first. For `MOVA` it rounds
+the value before loading it through `ARL`. Vertex shader 1.1 retains its
+round-down behavior.
+
+The trial kept the immediate-flip kernel and the bound-shader texture input
+fix. Windows verified the new test-signed catalog and its four members in
+a fresh disk overlay. The before and after checks use identical x86 and x64
+executables. Each tests sixteen existing constant cases and four indices
+whose expected colours are red, green, blue and yellow.
+[Constant probe](../../tools/win7-hello/d3d9const.c)
+
+Both architectures also compiled against the current Windows 7 branch. The
+measurements below use the pinned package in the table so the two trials
+differ by one driver source file.
+
+| Scalar-address trial | SHA-256 |
+| --- | --- |
+| Kernel | `9e7005109db86deafbb386ec46b81273554a9de23defdb7c6707c9d5e9354062` |
+| x64 DLL | `20ce031591dc140560fddca9a8ab5fad6620a53d57c079f4bb2d4fe27ae5d16e` |
+| x86 DLL | `3327ef27260a1cc58b9a666dd0522443514a74535eb8f2369406051c823ba294` |
+| Test-signed catalog | `5ad84f03ab209e58250395cda5aff79dbeae4e4963bdf3e6a84809105524dcb1` |
+
+Each architecture returned black for all 64 indirect pixels on the previous
+DLLs. After the change, every indirect pixel matched its expected colour.
+All sixteen control cases matched on both builds. The host logged sixteen
+failed `ARR` conversions during the before-check boot and zero during the
+after-check boot.
+
+In both Red Valley CPU tests, independent Intel display captures show the
+same camera position at frame 38, 19.00 game seconds. The previous build
+drew long grey triangles across the sky and terrain. With scalar addressing,
+the canyon, base and vehicles are visible. The orange bands across the
+Return to Proxycon hangar at 10.88 game seconds also cleared in the
+corresponding 10.99-second view.
+
+The independent visual run captured 192 display samples and reached the
+score dialog. It also showed both fireflies, the airship and dragon in
+Canyon Flight, and the snow station in Deep Freeze.
+
+The zero-viewer run saved **9,808** (SM2.0 **3,412**, HDR/SM3.0 **4,177**,
+CPU **4,856**), up from **9,247** on the previous DLLs. Run to score took
+813.50 real seconds, down from 843.93. Across 195 fullscreen samples the
+host advanced **789.71 s**, the Windows performance counter **789.72 s** and
+the Windows tick clock **406.83 s**. The tick clock ran at 51.5% of real
+time, so the host display rates below are the basis for comparing speed.
+The matched Vista run scored **13,964**. The saved Windows 7 result has
+SHA-256 `b1ddcca0ccb4184fe4daa39e5c75b41e755311e73a80c8cfa5c4b4825b98b51d`.
+
+| Scene | Win 7 before, display changes/s | Win 7 scalar, display changes/s | Vista, display changes/s | Win 7 failed conversions before | Win 7 failed conversions after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Return to Proxycon | 11.25 | 18.48 | 26.73 | 168 | 0 |
+| Firefly Forest | 7.74 | 9.26 | 13.54 | 381 | 0 |
+| Red Valley CPU 1 | 1.61 | 1.59 | 1.47 | 12 | 0 |
+| Red Valley CPU 2 | 2.59 | 2.49 | 2.59 | 12 | 0 |
+| Canyon Flight | 6.40 | 7.61 | 25.34 | 166,896 | 0 |
+| Deep Freeze | 8.00 | 8.53 | 26.71 | 30 | 0 |
+
+The full host trace went from **167,499** failed shader conversions to
+**zero**. The largest remaining display-rate gaps are in the HDR tests. In
+the 30-second Deep Freeze window, Windows 7 issued about 18,143 host-to-guest
+transfer commands and Vista issued about 27. Across the interior of the
+Windows 7 HDR phase, all 79,732 transfers targeted two resources that QEMU
+never selected as display buffers. Canyon Flight accounted for 37,310 reads
+and Deep Freeze for 42,422 within that window.
+
+### Timing the Windows 7 HDR vertex-buffer reads
+
+A diagnostic x86 DLL recorded the Direct3D call, Gallium buffer description,
+byte range and performance-counter timestamps around both resource waits and
+the host transfer submission. The kernel and x64 DLL matched the 9,808
+control. QEMU independently recorded each transfer and the description of
+the resource active at that point. Resource IDs can be reused after a scene.
+
+The first diagnostic retained the final scene across benchmark exit. Its
+42,514 Deep Freeze reads all came from one render thread. It transferred
+3,778,784 bytes in total, including 41,235 reads of just 80 bytes. Between
+the first and last read, 73.08 real seconds elapsed. The thread spent 53.23
+seconds in the two resource waits. The largest distance from a timed call
+to its independently sampled host counter interval was about 21 ms.
+
+A second run retained all six driver loads. Both HDR scenes used a private
+768 KiB dynamic, write-only vertex buffer. The creation flags were `0x80044`,
+the pool was `D3DDDIPOOL_VIDEOMEMORY` and the format was `D3DDDIFMT_VERTEXDATA`.
+Every read originated in a ranged `NoOverwrite` lock on the same render thread.
+The lock flags `0x14` became `PIPE_MAP_READ | PIPE_MAP_WRITE | PIPE_MAP_UNSYNCHRONIZED`.
+Neither buffer had a write-watch allocation. QEMU matched every call to the
+active buffer. The two rows cover each full scene in the repeat.
+
+| HDR scene | Host reads | Bytes | Wait before submission | Wait after submission | Both waits per call, median / p95 / p99 | Waits in late 30 real seconds |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Canyon Flight | 43,069 | 3,902,960 | 13.162 s | 33.035 s | 0.469 / 1.274 / 26.279 ms | 20.158 s |
+| Deep Freeze | 42,014 | 3,735,232 | 21.582 s | 31.949 s | 0.858 / 1.336 / 34.806 ms | 22.180 s |
+
+Canyon spent **46.197 s** in the two waits and Deep Freeze **53.531 s**.
+Of 85,083 transfers, 82,320 fetched 80 bytes each. The guest score file for
+this diagnostic recorded 9,278 (3,438 / 3,690 / 4,850). The uninstrumented
+comparison remains 9,808 on Windows 7 and 13,964 on Vista. The Windows disk
+log recorded all three fullscreen transitions. The serial log missed one.
+QEMU bracketed that transition within one second, and the independent
+Windows mode samples confirmed the change. Per-call timings use the performance counter.
+[Direct3D resource flags](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dukmdt/ns-d3dukmdt-_d3dddi_resourceflags) · [Direct3D lock flags](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dumddi/ns-d3dumddi-_d3dddi_lockflags)

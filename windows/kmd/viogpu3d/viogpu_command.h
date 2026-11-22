@@ -38,6 +38,11 @@ class VioGpuCommand
 
     void AttachAllocations(DXGK_ALLOCATIONLIST *allocationList, UINT allocationListLength);
 
+#if DXGKDDI_INTERFACE_VERSION == DXGKDDI_INTERFACE_VERSION_WIN7
+    NTSTATUS BuildFlip(DXGKARG_PRESENT *present);
+    void PatchFlip(const DXGK_ALLOCATIONLIST &source);
+#endif
+
     // An event to set when the command has run; the reference to it is given to the command.
     void SetCompletionEvent(PKEVENT pEvent)
     {
@@ -91,6 +96,9 @@ class VioGpuCommand
 #endif
 
     char *m_pDmaBuffer;
+#if DXGKDDI_INTERFACE_VERSION == DXGKDDI_INTERFACE_VERSION_WIN7
+    VioGpuAllocation *m_flipSource;
+#endif
     char *m_pCommand;
     char *m_pEnd;
 

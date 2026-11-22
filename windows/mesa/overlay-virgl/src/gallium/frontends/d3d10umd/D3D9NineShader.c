@@ -1112,6 +1112,23 @@ nine_get_position_input(struct shader_translator *tx)
                                   0, TGSI_INTERPOLATE_LINEAR);
 }
 
+/* virgl exposes a scalar address register. Select the D3D component before
+ * loading it. Older hosts support ARL but reject ARR used for MOVA. */
+static struct ureg_src
+tx_float_address(struct shader_translator *tx, struct ureg_src value, bool round_nearest)
+{
+    struct ureg_dst address = ureg_writemask(tx->regs.address, TGSI_WRITEMASK_X);
+    if (round_nearest) {
+        struct ureg_dst rounded = ureg_DECL_local_temporary(tx->ureg);
+        ureg_ROUND(tx->ureg, rounded, value);
+        ureg_ARL(tx->ureg, address, ureg_src(rounded));
+        ureg_release_temporary(tx->ureg, rounded);
+    } else {
+        ureg_ARL(tx->ureg, address, value);
+    }
+    return ureg_scalar(ureg_src(address), TGSI_SWIZZLE_X);
+}
+
 static struct ureg_src
 tx_src_param(struct shader_translator *tx, const struct sm1_src_param *param)
 {
@@ -1137,11 +1154,9 @@ tx_src_param(struct shader_translator *tx, const struct sm1_src_param *param)
             assert(!ureg_dst_is_undef(tx->regs.a0));
             /* Round to lowest for vs1.1 (contrary to the doc), else
              * round to nearest */
-            if (tx->version.major < 2 && tx->version.minor < 2)
-                ureg_ARL(ureg, tx->regs.address, ureg_src(tx->regs.a0));
-            else
-                ureg_ARR(ureg, tx->regs.address, ureg_src(tx->regs.a0));
-            src = ureg_src(tx->regs.address);
+            src = tx_float_address(tx,
+                ureg_scalar(ureg_src(tx->regs.a0), param->swizzle & 3),
+                tx->version.major >= 2 || tx->version.minor >= 2);
         } else {
             if (tx->version.major < 2 && tx->version.minor < 4) {
                 /* no subroutines, so should be defined */
@@ -1249,13 +1264,14 @@ tx_src_param(struct shader_translator *tx, const struct sm1_src_param *param)
     case D3DSPR_LOOP:
         if (ureg_dst_is_undef(tx->regs.address))
             tx->regs.address = ureg_DECL_address(ureg);
-        if (!tx->native_integers)
-            ureg_ARR(ureg, tx->regs.address,
-                     ureg_scalar(ureg_src(tx_get_loopal(tx)), TGSI_SWIZZLE_Y));
-        else
-            ureg_UARL(ureg, tx->regs.address,
+        if (!tx->native_integers) {
+            src = tx_float_address(tx,
+                ureg_scalar(ureg_src(tx_get_loopal(tx)), TGSI_SWIZZLE_Y), true);
+        } else {
+            ureg_UARL(ureg, ureg_writemask(tx->regs.address, TGSI_WRITEMASK_X),
                       ureg_scalar(ureg_src(tx_get_loopal(tx)), TGSI_SWIZZLE_Y));
-        src = ureg_src(tx->regs.address);
+            src = ureg_scalar(ureg_src(tx->regs.address), TGSI_SWIZZLE_X);
+        }
         break;
     case D3DSPR_MISCTYPE:
         switch (param->idx) {

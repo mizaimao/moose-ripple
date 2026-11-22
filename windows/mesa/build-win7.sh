@@ -7,8 +7,8 @@
 # Its own source tree and build directory, apart from the Mac side's:
 #   .tools/mesa/src-24.3.4-win[-virgl]   the release tarball, the patches, WDK 7.1 DDI headers
 #   .tools/mesa/build-win7-ARCH[-virgl]  the build; .tools/mesa/out-win7-ARCH[-virgl] the DLLs
-# Patches: patches/ for both variants, for virgl also patches-virgl/, all applied in file-name
-# order; then, for virgl, the files in overlay-virgl/ (our kernel bridge) copied over the tree.
+# Both variants use patches/. Virgl also includes patches-virgl/ and patches-$TARGET/.
+# The build sorts all patches by filename, then copies overlay-virgl/ for the virgl variant.
 # Toolchain: llvm-mingw (msvcrt variant, as Windows 7 has no UCRT) in .tools/llvm-mingw. Its
 # clang 23 makes incompatible pointer types an error, which Mesa 24.3's SPIR-V code trips on
 # MinGW (setjmp buffer): kept a warning.
@@ -48,6 +48,8 @@ OVERLAY=
 if [ "$TARGET" = vista ]; then
     [ "$VARIANT" = virgl ] || { echo "Vista supports VARIANT=virgl" >&2; exit 1; }
     PATCHDIRS="$PATCHDIRS $here/patches-vista"
+elif [ "$VARIANT" = virgl ]; then
+    PATCHDIRS="$PATCHDIRS $here/patches-win7"
 fi
 BUILD=$T/mesa/build-$TARGET-$ARCH$SUFFIX
 OUT=$T/mesa/out-$TARGET-$ARCH$SUFFIX
