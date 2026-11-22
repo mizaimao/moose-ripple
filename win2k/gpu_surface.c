@@ -177,9 +177,13 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         return NO_ERROR;
     }
     /* A DirectDraw lock, blit, present or release can observe this image
-     * before EndScene. Preserve the ordering of both sides of a blit. */
-    if (packet->IoControlCode != IOCTL_RB2K_D3D7_CLEAR && packet->IoControlCode != IOCTL_RB2K_D3D7_DRAW &&
-        packet->IoControlCode != IOCTL_RB2K_D3D7_ZCLEAR) {
+     * before EndScene. Preserve the ordering of both sides of a blit. A
+     * present reads the image back in its own context after the frame in
+     * queue order, so it only queues the frame and does not wait for it. */
+    if (packet->IoControlCode == IOCTL_RB2K_DD_PRESENT) {
+        if (!rb_gpu_order_image(gpu, &result, image)) return command_error(gpu, &result);
+    } else if (packet->IoControlCode != IOCTL_RB2K_D3D7_CLEAR && packet->IoControlCode != IOCTL_RB2K_D3D7_DRAW &&
+               packet->IoControlCode != IOCTL_RB2K_D3D7_ZCLEAR) {
         if (!rb_gpu_sync_image(gpu, &result, image)) return command_error(gpu, &result);
     }
     if ((image->frameFailed || (image->depthOwner && image->depthOwner->frameFailed)) &&

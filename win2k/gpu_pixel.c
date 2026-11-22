@@ -258,6 +258,14 @@ BOOLEAN rb_gpu_sync_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image)
     return r->status == NO_ERROR;
 }
 
+/* Queue the image's open frame without waiting for it. A request in the
+ * image's own context that follows in the queue sees all its drawing. */
+BOOLEAN rb_gpu_order_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image)
+{
+    RB2K_IMAGE *writer = image->depthOwner ? image->depthOwner : image;
+    return gpu->d7Frame.target != writer || rb_gpu_frame_flush(gpu, r);
+}
+
 /* One view belongs to one colour context. Rebinding retires the old view
  * before reusing its handle or attaching its resource in a different context.
  * Repeated frames using the same pair add neither a submit nor a wait. */
@@ -423,9 +431,11 @@ static void copy_rows(RB2K_GPU *gpu, PUCHAR pixels, ULONG pitch, ULONG rowBytes,
     }
 }
 
+/* An ordered read is not fenced: the renderer copies the pixels before it
+ * answers, after everything queued earlier in that context. */
 static BOOLEAN transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG context, ULONG resource,
                             ULONG x, ULONG y, ULONG width, ULONG height, PVOID upload, ULONG pitch,
-                            ULONG rowBytes)
+                            ULONG rowBytes, BOOLEAN ordered)
 {
     PIXEL_REQUEST request;
     BACKING_REQUEST backing;
@@ -462,7 +472,8 @@ static BOOLEAN transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG contex
     request.transfer.box.h = height;
     request.transfer.box.d = 1;
     request.transfer.stride = rowBytes;
-    if (!fenced(gpu, result, &request.hdr, sizeof(request.transfer), RB2K_STAGE_TRANSFER)) return FALSE;
+    if (ordered && !upload ? !send_request(gpu, result, &request.hdr, sizeof(request.transfer), RB2K_STAGE_TRANSFER) :
+        !fenced(gpu, result, &request.hdr, sizeof(request.transfer), RB2K_STAGE_TRANSFER)) return FALSE;
     begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING, 0);
     request.detach.resource_id = resource;
     return send_request(gpu, result, &request, sizeof(request.detach), RB2K_STAGE_BACKING);
@@ -472,7 +483,7 @@ BOOLEAN rb_gpu_transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resour
                             ULONG x, ULONG y, ULONG width, ULONG height, PVOID upload)
 {
     ULONG rowBytes = width * sizeof(ULONG);
-    return transfer_box(gpu, result, resource, resource, x, y, width, height, upload, rowBytes, rowBytes);
+    return transfer_box(gpu, result, resource, resource, x, y, width, height, upload, rowBytes, rowBytes, TRUE);
 }
 
 BOOLEAN rb_gl_record_time(RB2K_GPU *gpu, ULONG operation, LONGLONG start, BOOLEAN ok)
@@ -590,7 +601,7 @@ BOOLEAN rb_gpu_primary_transfer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     first = gpu->primary.pixels + rect->top * gpu->primary.pitchPixels + rect->left;
     start = rb_counter_ticks(NULL);
     if (!transfer_box(gpu, result, gpu->glDesktop.image.id, gpu->glDesktop.image.id, rect->left, rect->top,
-                      width, height, readback ? NULL : first, pitch, width * sizeof(ULONG)))
+                      width, height, readback ? NULL : first, pitch, width * sizeof(ULONG), FALSE))
         return rb_gl_record_time(gpu, operation, start, FALSE);
     if (readback) copy_rows(gpu, (PUCHAR)first, pitch, width * sizeof(ULONG), height, TRUE);
     if (readback) {
@@ -634,7 +645,7 @@ BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     ULONG bytes = rowBytes * image->height;
     ULONG offset;
     if (!transfer_box(gpu, result, image->id, image->id, 0, 0, image->width, image->height,
-                      readback ? NULL : pixels, rowBytes, rowBytes)) return FALSE;
+                      readback ? NULL : pixels, rowBytes, rowBytes, FALSE)) return FALSE;
     if (readback) {
         for (offset = 0; offset < bytes; offset += RB2K_SEGMENT_BYTES) {
             ULONG length = bytes - offset;
@@ -798,7 +809,7 @@ BOOLEAN rb_gpu_texture_upload(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K
         return result->status == NO_ERROR;
     }
     return transfer_box(gpu, result, image->id, texture->id, 0, y, texture->width, rows,
-                        texels, rowBytes, rowBytes);
+                        texels, rowBytes, rowBytes, FALSE);
 }
 
 BOOLEAN rb_gpu_texture_free(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture)
