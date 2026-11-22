@@ -790,6 +790,13 @@ the clear colour and two untouched pixels outside the destination rectangle.
 Exit code 0 means the pixels and counters matched, 1 means a check
 failed, and 2 means the requested hardware was unavailable.
 
+`z16pixels rgb` and `z16pixels hal` request a separate 16-bit depth
+surface on the software and hardware device respectively. Two overlapping
+triangles are drawn in both orders. The nearer red triangle must win both
+times. With depth writes disabled, the blue triangle drawn last must win.
+Each draw also checks a blue pixel outside the overlap and a black pixel
+outside both triangles.
+
 The software reference clears all 16,384 pixels to dark blue, then draws a
 triangle with red, green and blue vertices. It checks 4,095 interior pixels
 against the interpolated colours and 11,233 background pixels against the
