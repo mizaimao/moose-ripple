@@ -1033,3 +1033,60 @@ enumeration fails. The 16-bit depth test draws overlapping triangles in
 both orders and repeats with depth writes disabled. On both revisions of
 each guest, Microsoft's RGB device matched all nine pixel samples. The
 hardware device returned `DDERR_NOZBUFFERHW` at enumeration, before drawing.
+
+### Native 16-bit depth surface storage
+
+Four fresh Windows 2000 SP4 and XP SP3 boots compared the production driver
+with and without Z16 surface storage. The test programs, desktop mode and
+driver settings matched. The previous driver returned `DDERR_NOZBUFFERHW`
+for both requested sizes on each OS. The new driver accepted both sizes.
+`zstore.exe` wrote a pattern, overwrote one pixel through a partial lock,
+then read the whole surface via DirectDraw.
+
+| Z16 video-memory surface | Row pitch | Windows 2000 values matched | XP values matched | Miniport transfers per guest |
+| --- | ---: | ---: | ---: | --- |
+| 3×3 | 6 bytes | 9/9 | 9/9 | 2 reads, 2 writes |
+| 257×129 | 514 bytes | 33,153/33,153 | 33,153/33,153 | 2 reads, 2 writes |
+
+The colour controls passed on both revisions and systems, including all
+four pixels in the test window. Each boot ran one 120-frame block per mode
+after the storage check. The candidate had just completed four depth
+uploads and four reads. The control had rejected both allocations.
+
+| Colour control, 120 frames | Windows 2000 before | Windows 2000 after | XP before | XP after |
+| --- | ---: | ---: | ---: | ---: |
+| Software RGB | 11.157 ms | 13.539 ms | 2.365 ms | 6.099 ms |
+| Native offscreen | 32.777 ms | 41.063 ms | 21.941 ms | 31.477 ms |
+| Native offscreen before window copy | 23.802 ms | 92.270 ms | 72.688 ms | 77.284 ms |
+
+The separate `z16pixels` overlapping-triangle
+test matched nine samples with Microsoft's RGB device on every boot.
+Hardware depth enumeration still returned `DDERR_NOZBUFFERHW`. Connecting
+a depth surface to the host framebuffer and applying the depth comparison
+and write state are the next rendering steps.
+
+With Microsoft's RGB device forced, the original Direct3D Quake 0.73
+completed all 969 frames of `demo1` at 640×480 on Windows 2000. Both the
+control and new driver measured **57.6 fps**. All four matching D3DX7
+startup requests selected the RGB device. The driver's counters recorded
+zero native contexts, clears and draws during the game. Both XP boots
+started the demo, then the game exited with `0xc0000005` before scoring.
+The test restored the software-selection registry setting on all four
+boots. The XP wrapper reported success despite the game's failure. The
+game process exit and timedemo output determine the result.
+
+Two separate XP boots isolated timing around the first attempted visible
+copy. Each ran three 120-frame offscreen blocks, one tagged-primary
+window copy and three more offscreen blocks. Only the registration DLL
+differed. Times below are medians of the three blocks in each group.
+
+| XP registration | Before the copy | Visible pixels | After the copy |
+| --- | ---: | ---: | ---: |
+| Previous | 58.178 ms | 0/4 | 57.303 ms |
+| Fixed | 58.930 ms | 4/4 | 81.489 ms |
+
+Both drivers completed all 120 frames in every block. After the successful
+copy, the fixed driver's three runs took 76.444–81.733 ms. The measured
+miniport operations accounted for 22.921–23.693 ms per block. None waited
+for an older frame's queue slot. The next timing check is at the Direct3D
+runtime calls and final surface lock.
