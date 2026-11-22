@@ -126,7 +126,7 @@ BOOLEAN rb_gpu_create_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
 
 /* IEEE single-precision encoding of channel/255 rounded to the nearest
  * representable value, without using the kernel thread's floating-point state. */
-static ULONG channel_bits(ULONG channel)
+ULONG rb_gpu_channel(ULONG channel)
 {
     ULONG exponent = 127;
     if (!channel) return 0;
@@ -152,6 +152,27 @@ static BOOLEAN fenced(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     return send_request(gpu, result, header, bytes, stage);
 }
 
+/* Only driver-generated virgl words enter this helper. The miniport serializes
+ * submissions and owns the scratch packet until the fence completes. */
+BOOLEAN rb_gpu_image_commands(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
+                              const ULONG *words, ULONG count)
+{
+    struct virtio_gpu_cmd_submit *p = (struct virtio_gpu_cmd_submit *)gpu->copyPacket.bytes;
+    ULONG bytes;
+    if (!count || count > (sizeof(gpu->copyPacket.bytes)-sizeof(*p))/sizeof(ULONG)) {
+        result->status = ERROR_INVALID_PARAMETER;
+        result->stage = RB2K_STAGE_TRANSFER;
+        return FALSE;
+    }
+    bytes = count*sizeof(ULONG);
+    VideoPortZeroMemory(p, sizeof(*p));
+    p->hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    p->hdr.ctx_id = id;
+    p->size = bytes;
+    VideoPortMoveMemory(p+1, (PVOID)words, bytes);
+    return fenced(gpu, result, &p->hdr, sizeof(*p)+bytes, RB2K_STAGE_TRANSFER);
+}
+
 BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
                           ULONG color, BOOLEAN createSurface)
 {
@@ -163,10 +184,10 @@ BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
     request.draw.submit.size = bytes;
     VideoPortMoveMemory(words, (PVOID)(clear_commands + skip), bytes);
     if (createSurface) words[2] = id;
-    words[12 - skip] = channel_bits((color >> 16) & 255);
-    words[13 - skip] = channel_bits((color >> 8) & 255);
-    words[14 - skip] = channel_bits(color & 255);
-    words[15 - skip] = channel_bits(color >> 24);
+    words[12 - skip] = rb_gpu_channel((color >> 16) & 255);
+    words[13 - skip] = rb_gpu_channel((color >> 8) & 255);
+    words[14 - skip] = rb_gpu_channel(color & 255);
+    words[15 - skip] = rb_gpu_channel(color >> 24);
     return fenced(gpu, result, &request.hdr, sizeof(request.draw.submit) + bytes, RB2K_STAGE_CLEAR);
 }
 

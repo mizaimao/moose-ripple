@@ -163,6 +163,24 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     if (!image) return ERROR_INVALID_HANDLE;
     bytes = image->width * image->height * sizeof(ULONG);
     switch (packet->IoControlCode) {
+    case IOCTL_RB2K_D3D7_TRIANGLES: {
+        const RB2K_D3D7_BATCH *b = packet->InputBuffer;
+        ULONG i;
+        if (!gpu->nativeD3D7 || !gpu->ddGpuSurfaces || gpu->primary.bitsPerPixel != 32)
+            return ERROR_NOT_SUPPORTED;
+        if (packet->OutputBufferLength || packet->InputBufferLength < FIELD_OFFSET(RB2K_D3D7_BATCH,vertices) ||
+            !b->count || b->count > RB2K_D3D7_VERTICES || b->count % 3 ||
+            packet->InputBufferLength != FIELD_OFFSET(RB2K_D3D7_BATCH,vertices)+b->count*sizeof(b->vertices[0]))
+            return ERROR_INVALID_PARAMETER;
+        for (i = 0; i < b->count; ++i) {
+            const RB2K_D3D7_VERTEX *v = &b->vertices[i];
+            if ((v->x & 0x7fffffff) >= 0x7f800000 || (v->y & 0x7fffffff) >= 0x7f800000 ||
+                (v->z & 0x7fffffff) >= 0x7f800000 || !v->rhw || v->rhw >= 0x7f800000)
+                return ERROR_INVALID_PARAMETER;
+        }
+        success = rb_gpu_triangles(gpu, &result, image, b);
+        break;
+    }
     case IOCTL_RB2K_DD_UNIFORM: {
         RB2K_DD_UNIFORM *answer = packet->OutputBuffer;
         if (packet->InputBufferLength != sizeof(id) || packet->OutputBufferLength < sizeof(*answer))

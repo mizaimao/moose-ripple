@@ -20,6 +20,7 @@ typedef struct {
     DISPLAY *display;
     PDD_DIRECTDRAW_LOCAL local;
     HANDLE owner;
+    ULONG cull, shade, fill, drawFeatures;
     D7_STAGE stages[TextureStages];
 } D7_CONTEXT;
 
@@ -142,6 +143,9 @@ static DWORD APIENTRY create_context(LPD3DNTHAL_CONTEXTCREATEDATA a)
             c->local = local;
             c->owner = s->owner;
             c->target = s->id;
+            c->cull = D3DCULL_CCW;
+            c->shade = D3DSHADE_GOURAUD;
+            c->fill = D3DFILL_SOLID;
             c->id = ++lastContext;
             for (stage = 0; stage < TextureStages; ++stage) {
                 c->stages[stage].colorOp = stage ? D3DTOP_DISABLE : D3DTOP_MODULATE;
@@ -187,7 +191,10 @@ static HRESULT texture_passes(const D7_CONTEXT *c)
             break;
         if (s->colorOp != D3DTOP_SELECTARG1 || !diffuse_argument(s->colorArg1))
             return D3DERR_UNSUPPORTEDCOLOROPERATION;
-        if (s->alphaOp != D3DTOP_SELECTARG1 || !diffuse_argument(s->alphaArg1))
+        /* With an XRGB target and blending and alpha testing off, a missing
+         * alpha texture cannot affect an output colour channel. */
+        if (s->alphaOp != D3DTOP_SELECTARG1 || (!diffuse_argument(s->alphaArg1) &&
+            (s->texture || s->alphaArg1 != D3DTA_TEXTURE)))
             return D3DERR_UNSUPPORTEDALPHAOPERATION;
     }
     return DD_OK;
@@ -215,6 +222,91 @@ static DD_SLOT *target(D7_CONTEXT *c, ULONG key, BOOL byHandle)
             return s;
     }
     return NULL;
+}
+
+/* The first rasterizer accepts solid, untextured Gouraud triangles. Keep
+ * state that changes their observable colour or coverage across DP2 calls. */
+static void render_state(D7_CONTEXT *c, ULONG state, ULONG value)
+{
+    ULONG feature;
+    switch (state) {
+    case D3DRENDERSTATE_CULLMODE: c->cull = value; return;
+    case D3DRENDERSTATE_SHADEMODE: c->shade = value; return;
+    case D3DRENDERSTATE_FILLMODE: c->fill = value; return;
+    case D3DRENDERSTATE_ZENABLE: feature = 1; break;
+    case D3DRENDERSTATE_ALPHATESTENABLE: feature = 2; break;
+    case D3DRENDERSTATE_ALPHABLENDENABLE: feature = 4; break;
+    case D3DRENDERSTATE_FOGENABLE: feature = 8; break;
+    case D3DRENDERSTATE_STENCILENABLE: feature = 16; break;
+    case D3DRENDERSTATE_SPECULARENABLE: feature = 32; break;
+    case D3DRENDERSTATE_CLIPPLANEENABLE: feature = 64; break;
+    default: return;
+    }
+    if (value) c->drawFeatures |= feature;
+    else c->drawFeatures &= ~feature;
+}
+
+static HRESULT triangle_list(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a,
+                             ULONG stride, ULONG first, ULONG primitives)
+{
+    DD_SLOT *s = target(c, c->target, FALSE);
+    RB2K_D3D7_VERTEX *vertices;
+    RB2K_D3D7_BATCH batch;
+    PDD_SURFACE_GLOBAL g;
+    ULONG address, offset, bytes, i, written, count = 3*primitives;
+    HRESULT hr;
+    if (!s) return DDERR_SURFACELOST;
+    if (s->locked) return DDERR_SURFACEBUSY;
+    if (!count) return DD_OK;
+    if (c->drawFeatures || c->shade != D3DSHADE_GOURAUD || c->fill != D3DFILL_SOLID ||
+        c->cull != D3DCULL_NONE || (a->dwVertexType & D3DFVF_POSITION_MASK) != D3DFVF_XYZRHW ||
+        !(a->dwVertexType & D3DFVF_DIFFUSE) || (a->dwVertexType & (D3DFVF_RESERVED0 | D3DFVF_RESERVED1 |
+                                                                   D3DFVF_NORMAL))) return DDERR_UNSUPPORTED;
+    hr = texture_passes(c);
+    if (FAILED(hr)) return hr;
+    if (stride < sizeof(*vertices) || stride > 256 || first > a->dwVertexLength ||
+        count > a->dwVertexLength-first || first > (0xffffffffUL-a->dwVertexOffset)/stride ||
+        count > MaxCommandBytes/stride) return DDERR_INVALIDPARAMS;
+    offset = a->dwVertexOffset+first*stride;
+    bytes = count*stride;
+    if (bytes > 0xffffffffUL-offset) return DDERR_INVALIDPARAMS;
+    if (a->dwFlags & D3DNTHALDP2_USERMEMVERTICES) address = (ULONG)a->lpVertices;
+    else {
+        if (!a->lpDDVertex || !(a->lpDDVertex->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY) ||
+            !(g = a->lpDDVertex->lpGbl) || offset+bytes > g->dwLinearSize) return DDERR_INVALIDPARAMS;
+        address = g->fpVidMem;
+    }
+    if (!address || offset+bytes > 0xffffffffUL-address) return DDERR_INVALIDPARAMS;
+    vertices = EngAllocMem(0, count*sizeof(*vertices), 'v7bR');
+    if (!vertices) return DDERR_OUTOFMEMORY;
+    /* Snapshot and check the whole list before the first host draw. The
+     * driver only reads the transformed position and packed diffuse colour. */
+    hr = DD_OK;
+    __try {
+        const BYTE *v = (const BYTE *)(address+offset);
+        EngProbeForRead((PVOID)v, bytes, 1);
+        for (i = 0; i < count; ++i, v += stride) {
+            RB2K_D3D7_VERTEX *d = &vertices[i];
+            RtlCopyMemory(d, v, sizeof(*d));
+            if ((d->x & 0x7fffffff) >= 0x7f800000 || (d->y & 0x7fffffff) >= 0x7f800000 ||
+                (d->z & 0x7fffffff) >= 0x7f800000 || !d->rhw || d->rhw >= 0x7f800000) {
+                hr = DDERR_INVALIDPARAMS;
+                break;
+            }
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) { hr = DDERR_INVALIDPARAMS; }
+
+    batch.target = s->id;
+    for (i = 0; SUCCEEDED(hr) && i < count; i += batch.count) {
+        batch.count = min(count-i,RB2K_D3D7_VERTICES);
+        RtlCopyMemory(batch.vertices, vertices+i, batch.count*sizeof(*vertices));
+        if (EngDeviceIoControl(c->display->miniport, IOCTL_RB2K_D3D7_TRIANGLES, &batch,
+                FIELD_OFFSET(RB2K_D3D7_BATCH,vertices)+batch.count*sizeof(*vertices),
+                NULL, 0, &written)) hr = DDERR_GENERIC;
+        else c->display->d7.totals.triangles += batch.count/3;
+    }
+    EngFreeMem(vertices);
+    return hr;
 }
 
 static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, const RECT *rects, ULONG count)
@@ -257,7 +349,8 @@ static BOOL copy_commands(LPD3DNTHAL_DRAWPRIMITIVES2DATA a, BYTE *out)
 
 /* The 9x DP2 wire layout is identical here. Consume only complete records
  * from the snapshot. State packets cannot affect a target-only clear. */
-static HRESULT commands(D7_CONTEXT *c, const BYTE *bytes, ULONG length, ULONG *offset)
+static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG stride,
+                        const BYTE *bytes, ULONG length, ULONG *offset)
 {
     while (*offset < length) {
         const D3DNTHAL_DP2COMMAND *h;
@@ -270,7 +363,22 @@ static HRESULT commands(D7_CONTEXT *c, const BYTE *bytes, ULONG length, ULONG *o
         p = (const BYTE *)(h + 1);
         remaining -= sizeof(*h);
         switch (h->bCommand) {
-        case D3DNTDP2OP_RENDERSTATE: used = n*sizeof(D3DNTHAL_DP2RENDERSTATE); break;
+        case D3DNTDP2OP_RENDERSTATE: {
+            const D3DNTHAL_DP2RENDERSTATE *rs = (const D3DNTHAL_DP2RENDERSTATE *)p;
+            used = n*sizeof(*rs);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            for (; n; --n, ++rs) render_state(c, rs->RenderState, rs->dwState);
+            break;
+        }
+        case D3DNTDP2OP_TRIANGLELIST: {
+            const D3DNTHAL_DP2TRIANGLELIST *list = (const D3DNTHAL_DP2TRIANGLELIST *)p;
+            HRESULT hr;
+            used = sizeof(*list);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            hr = triangle_list(c, a, stride, list->wVStart, n);
+            if (FAILED(hr)) return hr;
+            break;
+        }
         case D3DNTDP2OP_TEXTURESTAGESTATE: {
             const D3DNTHAL_DP2TEXTURESTAGESTATE *st = (const D3DNTHAL_DP2TEXTURESTAGESTATE *)p;
             used = n*sizeof(*st);
@@ -341,6 +449,7 @@ static DWORD APIENTRY dp2(LPD3DNTHAL_DRAWPRIMITIVES2DATA a)
 {
     D7_CONTEXT *c;
     BYTE *copy = NULL;
+    ULONG stride = a->dwVertexSize; /* Shares its field with the return code. */
     a->dwErrorOffset = 0;
     a->ddrval = DDERR_INVALIDOBJECT;
     EngAcquireSemaphore(registry);
@@ -354,7 +463,7 @@ static DWORD APIENTRY dp2(LPD3DNTHAL_DRAWPRIMITIVES2DATA a)
             copy = EngAllocMem(0, a->dwCommandLength, '72bR');
             if (!copy) a->ddrval = DDERR_OUTOFMEMORY;
             else if (copy_commands(a, copy)) {
-                a->ddrval = commands(c, copy, a->dwCommandLength, &a->dwErrorOffset);
+                a->ddrval = commands(c, a, stride, copy, a->dwCommandLength, &a->dwErrorOffset);
             }
         }
         if (FAILED(a->ddrval)) {
@@ -392,7 +501,8 @@ static const D3DNTHAL_GLOBALDRIVERDATA global = {
         .dtcTransformCaps = { .dwSize = sizeof(D3DTRANSFORMCAPS) },
         .dlcLightingCaps = { .dwSize = sizeof(D3DLIGHTINGCAPS) },
         .dpcLineCaps = { .dwSize = sizeof(D3DPRIMCAPS) },
-        .dpcTriCaps = { .dwSize = sizeof(D3DPRIMCAPS) },
+        .dpcTriCaps = { .dwSize = sizeof(D3DPRIMCAPS), .dwMiscCaps = D3DPMISCCAPS_CULLNONE,
+                        .dwShadeCaps = D3DPSHADECAPS_COLORGOURAUDRGB },
         .dwDeviceRenderBitDepth = DDBD_32
     }
 };

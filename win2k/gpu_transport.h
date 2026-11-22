@@ -10,7 +10,7 @@ typedef struct {
     ULONG id, width, height;
     BOOLEAN defined, hasSurface, uniform;
     ULONG color;
-    BOOLEAN sampled;
+    BOOLEAN sampled, triangleState;
 } RB2K_IMAGE;
 typedef struct {
     RB2K_IMAGE image;
@@ -102,6 +102,11 @@ VP_STATUS rb_gpu_stop(RB2K_GPU *gpu);
 void rb_gpu_pixel(RB2K_GPU *gpu, RB2K_GPU_RESULT *result);
 BOOLEAN rb_gpu_create_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
                             const RB2K_IMAGE *image, const char *name, ULONG nameBytes, BOOLEAN scanout);
+ULONG rb_gpu_channel(ULONG channel);
+BOOLEAN rb_gpu_image_commands(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
+                              const ULONG *words, ULONG count);
+BOOLEAN rb_gpu_triangles(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image,
+                         const RB2K_D3D7_BATCH *batch);
 BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
                           ULONG color, BOOLEAN createSurface);
 BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,

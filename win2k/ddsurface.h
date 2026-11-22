@@ -24,6 +24,14 @@
 #define IOCTL_RB2K_DD_FLIP_RELEASE RB2K_DD_IOCTL(0x90c)
 #define IOCTL_RB2K_DD_FLIP_ACQUIRE RB2K_DD_IOCTL(0x90d)
 #define IOCTL_RB2K_DD_CREATE_TEXTURE RB2K_DD_IOCTL(0x90e)
+#define IOCTL_RB2K_D3D7_TRIANGLES RB2K_DD_IOCTL(0x90f)
+#define RB2K_D3D7_VERTICES 24
+/* IEEE transformed position and a packed Direct3D diffuse colour. */
+typedef struct { ULONG x, y, z, rhw, color; } RB2K_D3D7_VERTEX;
+typedef struct {
+    ULONG target, count;
+    RB2K_D3D7_VERTEX vertices[RB2K_D3D7_VERTICES];
+} RB2K_D3D7_BATCH;
 typedef struct {
     ULONG maxBytes, slots;
     ULONG hostFills, readbacks, uploads, hostCopies;

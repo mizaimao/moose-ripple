@@ -135,7 +135,7 @@ def main():
         work = Path(directory)
         overlay = header_overlay(work)
         build_kernel(work, overlay, "rb2kmp.sys",
-                     "rb2kmp gpu_transport gpu_pixel gpu_present gpu_surface gpu_rvd gpu_memory gpu_view gpu_cursor",
+                     "rb2kmp gpu_transport gpu_pixel gpu_triangle gpu_present gpu_surface gpu_rvd gpu_memory gpu_view gpu_cursor",
                      [ddk_headers, video_headers, public_headers, vc_headers], ["-Di386=1"],
                      ["videoprt.lib", "ntoskrnl.lib", "hal.lib"], ["/driver", "/entry:DriverEntry@8"])
         build_kernel(work, overlay, "rb2kdisp.dll", "display display_ddraw display_palette display_rvd display_gdi display_cursor display_d3d7",
