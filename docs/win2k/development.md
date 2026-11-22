@@ -703,3 +703,75 @@ on red, green and red again were `6699b8a1`, `9044e1de` and `6699b8a1`.
 Windows rounded each opaque hotspot channel down by one before the driver
 received it. The test checks for consistent channel rounding and requires
 an exact checksum match for each submitted shape.
+
+### Quake with the hardware pointer
+
+The native OpenGL build of Quake ran the same 969-frame shareware demo on
+an M1 Max in UTM. Each figure below is the median of three runs per setting
+after warm-up. The game used `timedemo demo1`, `gl_texsort 0`,
+`host_framerate 0.05` and `r_norefresh 0`, with sound disabled.
+The GDI path downloads the rendered frame to guest memory.
+Both GPU paths copy it to the desktop on the host. The inline setting also
+changes how the driver submits small GDI writes.
+
+| Guest and rendering area | GDI fps | Batched GPU fps | GPU with inline writes, fps | Host seconds to score, GDI / batched / inline |
+| --- | ---: | ---: | ---: | --- |
+| Windows 2000 SP4, 640×480 window | 49.5 | 47.6 | 47.7 | 21.67 / 22.74 / 22.92 |
+| Windows 2000 SP4, 1024×768 decorated window | 39.7 | 47.8 | 48.2 | 27.08 / 23.02 / 22.86 |
+| Windows 2000 SP4, 1024×768 exclusive fullscreen | 40.2 | 47.9 | 47.9 | 26.96 / 22.86 / 22.99 |
+| Windows XP SP3, 640×480 window | 48.6 | 47.1 | 47.2 | 22.70 / 23.65 / 23.73 |
+| Windows XP SP3, 1024×768 decorated window | 38.3 | 46.2 | 46.5 | 28.40 / 24.36 / 24.17 |
+| Windows XP SP3, 1024×768 exclusive fullscreen | 39.1 | 47.4 | 46.6 | 28.28 / 23.09 / 24.07 |
+
+At 640×480 on Windows 2000, GDI frame downloads took 1.24 seconds.
+Eliminating them introduced 2.04 seconds of fenced GPU copies on the
+inline path. At 1024×768 windowed, GDI made 1,113 downloads in 2.53
+seconds. The inline path made one in 0.002 seconds and spent 2.06 seconds
+copying on the GPU. Game-process CPU time fell from 11.56 to 6.97 seconds.
+The device timers cover only part of the 4.22-second improvement measured
+on the host. In exclusive fullscreen the inline path made zero downloads.
+
+The same size effect appeared on XP. GDI's full-frame downloads took
+1.25 seconds at 640×480 and 2.46 seconds in the 1024×768 window.
+GPU copy time was 1.99 and 2.02 seconds, respectively. In the larger
+window, game-process CPU time fell from 12.55 to 7.94 seconds.
+
+With mouse capture disabled on XP, placing the visible software pointer
+inside, outside and back inside the 640×480 game window gave 33.5, 48.4
+and 33.5 fps. The driver counted 2,213, 88 and 2,207 desktop uploads.
+With the hardware pointer the same placements gave 47.2, 47.6 and 50.7
+fps, with three, four and four uploads. Both inside runs performed a
+single desktop read when returning to GDI.
+
+The 240-frame visible-pointer test used the same driver binaries and
+changed only the adapter's cursor setting. On both systems the software
+pointer caused a median of 240 desktop reads and 480 uploads. The
+hardware pointer reduced both counts to zero. Median swap time fell from
+2,101 to 720 ms on Windows 2000 and from 2,181 to 738 ms on XP.
+
+Windows 2000's natural 640×480 game also exposed the pointer cost.
+With the software pointer, GDI / batched / inline scored 49.6 / 32.9 /
+38.6 fps. Enabling the hardware pointer gave 49.5 / 47.6 / 47.7 fps.
+In the inline case, median desktop uploads fell from 2,263 to 95,
+partial reads from 1,124 to 39, and host time from 27.70 to 22.92 s.
+
+The launcher checks the game's actual client rectangle, foreground
+ownership, 32-bit display mode and window style. Quake first received a
+1024×755 client when it requested a decorated 1024×768 window. The
+launcher sizes the client before starting the timedemo and requires the
+engine to acknowledge the command. Fullscreen uses the game's native
+display-mode switch. Every larger run in the table kept the verified size
+and foreground, processed 969 frames and released its resources.
+
+An independent Windows 2000 fullscreen series gave 40.3 / 47.7 / 48.4
+fps. Its companion windowed series missed a timedemo command and is
+excluded. The Windows 2000 640×480 run used the earlier alpha probe that
+expected the unrounded application colour. The corrected probe passed in
+both larger Windows 2000 runs and on XP with identical graphics binaries.
+On XP one 640×480 ordinary-GDI synthetic case lost foreground.
+Its pixels matched. Two independent 240-frame repeats and both indexed
+page-flip repeats passed. On Windows 2000, the 8-bit test after Quake
+returned palette index 255 throughout page zero with the hardware pointer
+enabled and disabled. Of 786,432 pixels, 774,144 differed from the
+expected pattern. Both isolated repeats on each setting passed. The
+source of that repaint remains open.
