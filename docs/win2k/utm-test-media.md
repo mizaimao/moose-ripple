@@ -106,8 +106,11 @@ build that supports the hardware-pointer diagnostic and look for
 printed only the resource count. A normal restart from inside Windows
 preserves the disposable session. Where Setup's restart did not occur,
 this guest-side VBScript logged the old boot time and requested a local
-restart through WMI. Run it using `cscript //nologo` from an account
-permitted to restart that guest.
+restart through WMI. Run it from a fresh guest command prompt after the
+installer exits, using `cscript //nologo` from an account permitted to
+restart that guest. One installer invoked the same method and received a
+zero return code while two subsequent checks still saw the previous
+driver. Invoking it from the desktop then started the new driver.
 
 ```vbscript
 Set service = GetObject("winmgmts:{impersonationLevel=impersonate,(Shutdown)}!\\.\root\cimv2")
