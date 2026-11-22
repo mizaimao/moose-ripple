@@ -3843,12 +3843,14 @@ D3D9Lock(HANDLE hDevice, D3DDDIARG_LOCK *data)
           (size_t)box.width > sub->size - box.x)
          return E_INVALIDARG;
 
-      /* DWM appends a few vertices or indices per unrestricted lock. Watch private,
-       * initially empty buffers only if their first lock is a streaming one.
-       * A buffer first written through a different path stays on that path. */
+      /* An initially empty private vertex buffer can start streaming at any
+       * offset. Its shadow preserves neighboring vertices on later partial
+       * writes. Index buffers keep the compositor's whole-buffer first lock. */
       if (resource->may_watch_buffer) {
          resource->may_watch_buffer = false;
-         if (!box.x && (size_t)box.width == sub->size &&
+         const bool whole_buffer = !box.x && (size_t)box.width == sub->size;
+         if ((whole_buffer || (resource->flags.VertexBuffer && box.width > 0 &&
+                               !data->Flags.ReadOnly)) &&
              (data->Flags.NoOverwrite || data->Flags.Discard)) {
             resource->watched_buffer = (uint8_t *)VirtualAlloc(
                NULL, sub->size, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_READWRITE);

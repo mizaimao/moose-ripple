@@ -16,6 +16,7 @@ for arch in x86_64 i686; do
     "$cc" -O2 -Wall -Wextra -Werror "$here/d3d9query.c" -ld3d9 -ldwmapi -o "$OUT/d3d9query$suffix.exe"
     "$cc" -O2 -Wall -Wextra -Werror "$here/d3d11query.c" -ld3d11 -ldwmapi -o "$OUT/d3d11query$suffix.exe"
     "$cc" -O2 -Wall -Wextra -Werror "$here/d3d9stream.c" -ld3d9 -o "$OUT/d3d9stream$suffix.exe"
+    "$cc" -std=c11 -O2 -Wall -Wextra -Werror -Wl,--no-insert-timestamp "$here/d3d9ranged.c" -ld3d9 -luser32 -o "$OUT/d3d9ranged$suffix.exe"
     "$cc" -O2 -Wall -Wextra -Werror "$here/d3d9flipex.c" -ld3d9 -ldxva2 -lole32 -lgdi32 -o "$OUT/d3d9flipex$suffix.exe"
     "$cc" -O2 -Wall -Wextra -Werror "$here/vidplay.c" -lmfplay -lole32 -lgdi32 -o "$OUT/vidplay$suffix.exe"
     "$cc" -O2 -Wall -Wextra -Werror "$here/d3d9msaa.c" -ld3d9 -lgdi32 -o "$OUT/d3d9msaa$suffix.exe"
