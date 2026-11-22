@@ -916,7 +916,17 @@ Explicit requests for a hardware device without depth and for the RGB
 software device also failed. DirectDraw successfully created a plain
 primary surface and a 640×480 offscreen hardware render target. Creating
 a 16-bit depth surface returned a separate error, `DDERR_NOZBUFFERHW`.
-The next diagnostic traces the surface descriptors reaching the DirectDraw
-callbacks during context creation. The game recorded no frame rate in any
-of the six boots. The historical XP score on this Intel system was 57.3 fps
-for the same 969-frame demo in the 0.81 Direct3D 8 version.
+The game recorded no frame rate in any of the six boots. The historical XP
+score on this Intel system was 57.3 fps for the same 969-frame demo in the
+0.81 Direct3D 8 version.
+
+A separate trace captured the DirectDraw calls made by the stock D3DX7
+library when given the game's four windowed context requests. On both guests
+each attempt reached `CanCreateSurface` once. The driver returned
+`DDERR_INVALIDCAPS` for `0x6200`, a primary surface in video memory marked
+`DDSCAPS_3DDEVICE`. Requests explicitly selecting hardware with or without
+depth and RGB software with 16-bit depth reached the same rejection. The
+ordinary primary (`0x4200`) and the 640×480 offscreen hardware render
+target (`0x6040`) succeeded in the direct control. The next pixel test
+renders to an offscreen target and blits it onto the flagged primary in a
+window. [Microsoft DirectDraw surface flags](https://learn.microsoft.com/en-us/windows/win32/api/ddraw/ns-ddraw-ddscaps)
