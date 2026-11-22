@@ -807,5 +807,59 @@ and zero uploads. All pixels matched. The target check calls DirectDraw
 
 The historical Direct3D 8 Quake `demo1` comparison used 969 frames at
 640×480. The optimized medians were 24.2 fps on Windows 2000 and 24.1 fps
-on XP. A native game score requires the Direct3D 8 interface used by that
-executable. [Port and game test plan](https://github.com/mizaimao/moose-ripple/issues/106)
+on XP. Version 0.81 requires Direct3D 8. The earlier 0.73 Direct3D 7 renderer
+can play the same demo. [Port and game test plan](https://github.com/mizaimao/moose-ripple/issues/106)
+
+### Native hardware device and full-target clear
+
+Set both `RippleDirectDrawGpuSurfaces` and `RippleNativeD3D7` to 1 on the
+test adapter. The native option applies to the 32-bit display mode. Run
+`d3d7probe clear` to request the stock Direct3D 7 hardware device and check
+a full 128×128 blue clear. It checks the returned device GUID, hardware
+rasterization flag, every target pixel, one completed native clear and the
+live context and surface counts after release.
+
+On XP SP3, supplying the texture-stage and driver-state callbacks let the
+runtime request the driver's depth formats and extended capabilities.
+Returning the extended capability record then changed hardware device
+creation and clear from zero successes in three tries to three in three.
+Windows 2000 SP4 also passed all three hardware clears. Each clear had
+zero pixel mismatches. Ordinary DirectDraw hardware and
+software fills passed, and a separate 16×16 XRGB texture check returned
+all 256 uploaded pixels on each of three readbacks. In the clear-only revision the
+native draw stopped at its first triangle-list command.
+
+### First native triangle
+
+The same test now draws transformed, untextured Gouraud triangle lists.
+On XP SP3 all three hardware runs and three RGB software runs passed. Each
+hardware run counted 121 triangles and 122 clears. Both sampled triangle
+frames matched all 4,095 interior and 11,233 background pixels checked.
+After release the driver counted zero live contexts and targets.
+
+The median time for 120 frames at 128×128, including the final synchronous
+read, was 431.0 ms on the hardware device and 47.2 ms on the RGB device.
+
+### Submission timing on XP
+
+The instrumented test used the same executable before and after batching.
+Each timed block drew 120 frames at 128×128 and waited for its final pixel
+read. The hardware clear and Gouraud checks passed in all six runs.
+
+| XP SP3 | Three hardware runs, ms | Median, ms | Render submissions / fences per frame |
+| --- | --- | --- | --- |
+| Separate clear and draw | 451.0, 445.0, 452.2 | 451.0 | 2 / 2 |
+| Batched at scene end | 865.2, 264.5, 261.2 | 264.5 | 1 / 1 |
+
+When a scene exceeds one command packet, intermediate packets carry no
+GPU fence. A surface read synchronizes earlier drawing to that target.
+
+Time in the render queue fell from about 395 ms to 200 ms per block.
+The slowest batched run also spent about 200 ms in that queue. The other
+delay occurred outside it. The software control medians were 44.7 ms
+and 44.6 ms. No texture uploads occurred in these timed blocks.
+
+The original Direct3D Quake 0.73 window reached 640×480 with both drivers.
+The game reported `DDERR_INVALIDCAPS` and never recorded a hardware
+context or draw. Neither run produced a `demo1` score for comparison with
+the historical 0.81 renderer. [Author's game releases](https://dxquake.sourceforge.net/)

@@ -24,8 +24,9 @@ VGA and restored the saved desktop after full-screen DirectDraw programs.
 - **DirectDraw:** full-screen programs flip between two pages in video
   memory. Other surfaces live in system memory, where Windows' own
   DirectDraw code draws them faster than the GPU could here (see Speed).
-- **Direct3D** games still need a hardware rendering path on Windows 2000
-  and XP. [Direct3D investigation](https://github.com/mizaimao/moose-ripple/issues/106)
+- **Direct3D 7** has an experimental native hardware driver for 32-bit
+  render targets. It clears a target and draws untextured, smoothly shaded
+  triangle lists. [Native pixel tests](../docs/win2k/development.md#native-hardware-device-and-full-target-clear)
 
 ## The virtual machine
 
@@ -156,7 +157,9 @@ DDK headers and import libraries, and the Visual C++ 6.0 headers. Set
 
 ## Known limits
 
-- Direct3D is not accelerated (see above).
+- Direct3D games that need texture sampling, indexed draws, depth buffers or
+  the Direct3D 8 or 9 driver interfaces still need more of the native port.
+  [Direct3D work](https://github.com/mizaimao/moose-ripple/issues/106)
 - 8-bit and 16-bit full-screen game compatibility awaits guest testing.
 - Each OpenGL context that draws leaves about 1.2 KB in the program's own
   heap (`threadtest`: 300 contexts in one thread); the GPU's buffers and
