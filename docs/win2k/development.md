@@ -983,7 +983,43 @@ mapped primary without an offscreen slot as `DDERR_SURFACELOST`. The
 follow-up change acknowledges that registration and keeps hardware render
 targets in their existing offscreen slots. Fourteen DDK descriptor checks
 per driver verified the callback result and whether it assigned a surface
-handle. The follow-up still needs the guest window test.
+handle.
+
+Four fresh boots compared the old and new registration callbacks. Each pair
+used the same test program, miniport, Quake executable and settings. Only
+the display DLL differed. A passing copy required the display callback, a
+successful miniport copy and all four expected pixels in the test window.
+
+| Window copy | Windows 2000 before | Windows 2000 after | XP before | XP after |
+| --- | ---: | ---: | ---: | ---: |
+| 3D-tagged primary, three cases | 0/3 | 3/3 | 0/3 | 3/3 |
+| Ordinary primary, two controls | 2/2 | 2/2 | 2/2 | 2/2 |
+
+The three tagged cases covered a 96×96 crop with the window device context
+held, the same crop after releasing it and a full 128×128 copy. The old
+driver received zero copy callbacks for these cases. The changed driver
+received one per case. The hardware and software DirectDraw window controls
+also preserved the regions obscured by another window.
+
+Each of the five cases also timed 120 offscreen frames at 128×128 through
+the final surface read. The window copy followed the timed interval. Each
+case completed all 120 submitted frames with zero pending or failed.
+
+| Guest | Old registration, median of five | New registration, median of five |
+| --- | ---: | ---: |
+| Windows 2000 SP4 | 31.616 ms | 33.783 ms |
+| Windows XP SP3 | 32.771 ms | 60.541 ms |
+
+On XP the first case took 32.771 ms before and 31.950 ms after. All four
+later cases took longer with the new driver. Each XP boot waited once for
+a two-frame queue slot across 600 frames. Each case's final GPU wait was
+9.28–9.93 ms. Those waits do not account for the change in median. A repeat
+with the offscreen control run before any windows is needed to isolate it.
+
+Stock Direct3D Quake 0.73 at 640×480 returned
+`D3DXERR_CAPSNOTSUPPORTED` on every boot. It made five surface registrations
+and zero native context, clear or draw calls per launch. It produced no
+`demo1` score to compare with the historical Direct3D 8 result.
 
 At the current 1024×768×32 display mode, direct hardware queries
 enumerated one texture format and zero depth formats on both systems.
@@ -993,5 +1029,7 @@ formats, whether given that mode explicitly or asked for the current mode.
 For the RGB device, the same library reported two depth, seven colour-texture
 and six render-target formats. Its hardware capability query enumerates
 depth before texture formats and skips collecting the rest when depth
-enumeration fails. The next test for 16-bit depth draws overlapping
-triangles in both orders and repeats with depth writes disabled.
+enumeration fails. The 16-bit depth test draws overlapping triangles in
+both orders and repeats with depth writes disabled. On both revisions of
+each guest, Microsoft's RGB device matched all nine pixel samples. The
+hardware device returned `DDERR_NOZBUFFERHW` at enumeration, before drawing.
