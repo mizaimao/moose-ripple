@@ -1709,3 +1709,78 @@ log recorded all three fullscreen transitions. The serial log missed one.
 QEMU bracketed that transition within one second, and the independent
 Windows mode samples confirmed the change. Per-call timings use the performance counter.
 [Direct3D resource flags](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dukmdt/ns-d3dukmdt-_d3dddi_resourceflags) · [Direct3D lock flags](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dumddi/ns-d3dumddi-_d3dddi_lockflags)
+
+### Ranged first locks on streaming vertex buffers
+
+3DMark06 starts writing each empty 768 KiB vertex buffer a few vertices at
+a time. The driver now allows the first ranged `NoOverwrite` or `Discard`
+write on a private, initially empty, dynamic write-only vertex buffer to
+allocate the existing write-watch shadow. On unlock, the driver uploads the
+changed pages. The shadow retains the other vertices on those pages for
+later partial writes. The index-buffer path still requires a whole-buffer
+first lock.
+
+The x86 and x64 probes first populated three adjacent quads, then changed
+only the four colour fields in the first quad while holding a lock spanning
+two. Each architecture checked 864 pixels across write-only and readable
+buffers and read back 240 bytes from the readable control. Every check
+passed on both the scalar package and the candidate. A separate visual run
+captured 231 external display samples across six scenes. Both Red Valley
+comparisons matched frame 38 at 19.00 game seconds. The other scenes showed
+the lit hangar, the fireflies, the airship and the snow station.
+[Partial-write and neighbouring-vertex probe](../../tools/win7-hello/d3d9ranged.c)
+
+| Tested component | SHA-256 |
+| --- | --- |
+| Kernel | `9e7005109db86deafbb386ec46b81273554a9de23defdb7c6707c9d5e9354062` |
+| x64 DLL | `8cf1426a5414544a13317f8b047934ed95c5ba9fb7589dc9ef295619942a7c30` |
+| x86 DLL | `df9fa451e9c2a8077c8cc0361c95ab491310cc2433e18ad680417473030bd6b7` |
+| Test-signed catalog | `5c874ff4a24a92ce1251b764751a14743f174bb51498292a29996597be5c9151` |
+
+The measured DLLs were built from the scalar package's sources with one
+file changed, `D3D9Resource.cpp`. Both architectures also built from the
+current Windows 7 branch. Windows verified the signatures and catalog
+members in a fresh disposable disk.
+
+On the Intel UHD 630 QEMU host, the matched Windows 7 run with no viewer
+scored **20,868** (SM2.0 **6,079**, HDR/SM3.0 **12,596**, CPU **5,214**).
+The scalar package scored **9,808** and Vista scored **13,964** at the same
+1280 × 1024 settings. The candidate's saved result has SHA-256
+`4373eda1028abb77eb85b46dc9673b7188f10681a52b666296dddbf43fd90e47`.
+
+From Run to score, real time increased from **813.50 s** to **1,076.32 s**.
+Across fullscreen samples, the performance counter advanced **1,050.52 s**
+in **1,050.51 host seconds**, while the Windows tick clock advanced only
+**403.82 s** (38.4% of real time, down from 51.5%). During the two HDR
+scenes the tick clock ran at 30.8% of real time, down from 45.0%. The
+host display measurements give an independent view of the graphics gain.
+
+The host counts cover all six full scenes in the scored runs. The wait
+totals come from separate matched runs that timed each read in the x86
+driver, before and after transfer submission. Display rates use the late
+30 real seconds of each graphics scene and 20 display changes late in each
+fixed-step CPU scene.
+
+| Scene | Host reads, scalar → candidate | Vertex read waits, scalar → candidate (s) | Display changes/s, scalar → candidate | Vista display changes/s |
+| --- | ---: | ---: | ---: | ---: |
+| Return to Proxycon | 16,827 → 0 | 47.839 → 0 | 18.48 → 29.98 | 26.73 |
+| Firefly Forest | 10,769 → 0 | 79.998 → 0 | 9.26 → 13.38 | 13.54 |
+| Red Valley CPU 1 | 1,362 → 0 | 0.772 → 0 | 1.59 → 1.76 | 1.47 |
+| Red Valley CPU 2 | 2,836 → 0 | 1.691 → 0 | 2.49 → 3.64 | 2.59 |
+| Canyon Flight | 37,310 → 0 | 46.197 → 0 | 7.61 → 26.88 | 25.34 |
+| Deep Freeze | 44,294 → 0 | 53.531 → 0 | 8.53 → 45.77 | 26.71 |
+
+The six scored scenes went from **113,398** host-to-guest transfers to
+**zero**. In the timed scalar run, 116,362 benchmark vertex-buffer reads
+spent **230.028 s** in those two waits. QEMU also saw one separate transfer
+from a display-sized resource, which had no matching benchmark lock. In
+the timed candidate run, the guest wrote all six module-load headers and
+recorded zero readbacks. QEMU independently recorded zero downloads for
+the entire run. Both scored runs had zero host shader-conversion failures.
+
+The timed candidate kept the same kernel and x64 DLL. Its x86 DLL had
+SHA-256 `75f1a3a8af54f73e862134efc7f91894894a9c632d1380c0efafa644cff33bb3`
+and its verified catalog had SHA-256
+`f15ce36d8117a7d0a580a3cd84d561599950ea86ce2453060e75ca3c31054165`.
+This diagnostic scored 21,984. Its Windows tick clock advanced 398.93 s
+in 1,137.19 host seconds.
