@@ -19,6 +19,9 @@ enum { Side = 128 };
 #define CLEAR_COLOR 0xff000066UL
 #define FVF (D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_SPECULAR | D3DFVF_TEX1)
 typedef struct { float x, y, z, rhw; DWORD diffuse, specular; float u, v; } VERTEX;
+/* The same vertex in object space, for the T&L path (xyz mode). */
+typedef struct { float x, y, z; DWORD diffuse, specular; float u, v; } OBJECT_VERTEX;
+#define OBJECT_FVF (D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_SPECULAR | D3DFVF_TEX1)
 typedef struct { int x, y; DWORD rgb; int tolerance; } SAMPLE;
 enum { Argb8888, Rgb565, Argb1555, Argb4444, Formats };
 static const char *const formatNames[] = { "argb8888", "rgb565", "argb1555", "argb4444" };
@@ -28,6 +31,24 @@ static IDirect3DDevice7 *device;
 static IDirectDrawSurface7 *target;
 static HDC displayDc;
 static int passed, failed;
+static BOOL xyz, perspective;
+
+/* Draw a triangle list, in object space in xyz mode: the projection set in
+ * main maps object x and y to the same pixels as the transformed vertex. */
+static HRESULT triangles(VERTEX *v, DWORD n)
+{
+    OBJECT_VERTEX o[6];
+    DWORD i;
+    if (!xyz) return IDirect3DDevice7_DrawPrimitive(device, D3DPT_TRIANGLELIST, FVF, v, n, 0);
+    for (i = 0; i < n && i < 6; ++i) {
+        if (perspective) {
+            /* Two units in front of a right-handed camera: w = 2. */
+            o[i].x = (v[i].x / 64 - 1) * 2; o[i].y = (1 - v[i].y / 64) * 2; o[i].z = -2;
+        } else { o[i].x = v[i].x; o[i].y = v[i].y; o[i].z = v[i].z; }
+        o[i].diffuse = v[i].diffuse; o[i].specular = v[i].specular; o[i].u = v[i].u; o[i].v = v[i].v;
+    }
+    return IDirect3DDevice7_DrawPrimitive(device, D3DPT_TRIANGLELIST, OBJECT_FVF, o, n, 0);
+}
 
 static BOOL call(const char *what, HRESULT hr)
 {
@@ -80,7 +101,7 @@ static BOOL quad(DWORD diffuse)
     v[0] = vertex(16, 16, diffuse, 0, 0); v[1] = vertex(112, 16, diffuse, 1, 0);
     v[2] = vertex(16, 112, diffuse, 0, 1); v[3] = vertex(112, 16, diffuse, 1, 0);
     v[4] = vertex(112, 112, diffuse, 1, 1); v[5] = vertex(16, 112, diffuse, 0, 1);
-    return call("quad", IDirect3DDevice7_DrawPrimitive(device, D3DPT_TRIANGLELIST, FVF, v, 6, 0));
+    return call("quad", triangles(v, 6));
 }
 
 static BOOL begin(void)
@@ -271,7 +292,7 @@ static void cull(const char *name, DWORD mode, BOOL showCw, BOOL showCcw)
     v[5] = vertex(120, 8, 0xffff0000, 0, 0);
     s[0].rgb = showCw ? 0x00ff00 : CLEAR_COLOR & 0xffffff;
     s[1].rgb = showCcw ? 0xff0000 : CLEAR_COLOR & 0xffffff;
-    if (!begin() || !call("cull draw", IDirect3DDevice7_DrawPrimitive(device, D3DPT_TRIANGLELIST, FVF, v, 6, 0)) ||
+    if (!begin() || !call("cull draw", triangles(v, 6)) ||
         !end()) { ++failed; printf("TPIX case=%s setup failed\n", name); return; }
     report(name, s, 3);
 }
@@ -284,7 +305,7 @@ static void flat(void)
     set(D3DRENDERSTATE_SHADEMODE, D3DSHADE_FLAT);
     v[0] = vertex(16, 16, 0xffff0000, 0, 0); v[1] = vertex(112, 16, 0xff00ff00, 0, 0);
     v[2] = vertex(16, 112, 0xff0000ff, 0, 0);
-    if (!begin() || !call("flat draw", IDirect3DDevice7_DrawPrimitive(device, D3DPT_TRIANGLELIST, FVF, v, 3, 0)) ||
+    if (!begin() || !call("flat draw", triangles(v, 3)) ||
         !end()) { ++failed; puts("TPIX case=flat setup failed"); return; }
     report("flat", s, 2);
 }
@@ -342,15 +363,23 @@ int main(int argc, char **argv)
     D3DVIEWPORT7 vp = {0, 0, Side, Side, 0, 1};
     D3DDEVICEDESC7 caps;
     HWND window;
-    if (argc != 2 || (strcmp(argv[1], "hal") && strcmp(argv[1], "rgb"))) { puts("Usage: tpixels hal|rgb"); return 1; }
+    BOOL tnl;
+    if (argc < 2 || argc > 3 || (strcmp(argv[1], "hal") && strcmp(argv[1], "rgb") && strcmp(argv[1], "tnl")) ||
+        (argc == 3 && strcmp(argv[2], "xyz") && strcmp(argv[2], "persp"))) {
+        puts("Usage: tpixels hal|rgb|tnl [xyz|persp]");
+        return 1;
+    }
     setvbuf(stdout, NULL, _IONBF, 0);
-    hal = !strcmp(argv[1], "hal");
-    e.wanted = hal ? &IID_IDirect3DHALDevice : &IID_IDirect3DRGBDevice;
+    tnl = !strcmp(argv[1], "tnl");
+    hal = tnl || !strcmp(argv[1], "hal");
+    xyz = argc == 3;
+    perspective = xyz && !strcmp(argv[2], "persp");
+    e.wanted = tnl ? &IID_IDirect3DTnLHalDevice : hal ? &IID_IDirect3DHALDevice : &IID_IDirect3DRGBDevice;
     e.found = FALSE;
     window = CreateWindowExA(0, "STATIC", "Direct3D 7 texture test", WS_POPUP, 0, 0, Side, Side,
                              NULL, NULL, GetModuleHandleA(NULL), NULL);
     displayDc = CreateDCA("DISPLAY", NULL, NULL, NULL);
-    printf("TPIX begin path=%s\n", argv[1]);
+    printf("TPIX begin path=%s%s\n", argv[1], perspective ? " persp" : xyz ? " xyz" : "");
     if (!window || !call("DirectDrawCreateEx", DirectDrawCreateEx(NULL, (void **)&dd, &IID_IDirectDraw7, NULL)) ||
         !call("cooperative level", IDirectDraw7_SetCooperativeLevel(dd, window, DDSCL_NORMAL)) ||
         !call("IDirect3D7", IDirectDraw7_QueryInterface(dd, &IID_IDirect3D7, (void **)&d3d)) ||
@@ -367,6 +396,24 @@ int main(int argc, char **argv)
         !call("CreateDevice", IDirect3D7_CreateDevice(d3d, e.wanted, target, &device)) ||
         !call("device caps", IDirect3DDevice7_GetCaps(device, &caps)) ||
         !call("viewport", IDirect3DDevice7_SetViewport(device, &vp))) goto done;
+    if (xyz) {
+        /* Object x and y in pixels: clip x = x/64 - 1, clip y = 1 - y/64. */
+        D3DMATRIX identity = {0}, projection = {0};
+        identity._11 = identity._22 = identity._33 = identity._44 = 1;
+        if (perspective) {
+            /* Right-handed, as Quake uses: near 1, far 100, w = -z. */
+            projection._11 = projection._22 = 1;
+            projection._33 = projection._43 = 100.0f / (1 - 100);
+            projection._34 = -1;
+        } else {
+            projection._11 = 1.0f / 64; projection._22 = -1.0f / 64; projection._33 = 1;
+            projection._41 = -1; projection._42 = 1; projection._44 = 1;
+        }
+        if (!call("world", IDirect3DDevice7_SetTransform(device, D3DTRANSFORMSTATE_WORLD, &identity)) ||
+            !call("view", IDirect3DDevice7_SetTransform(device, D3DTRANSFORMSTATE_VIEW, &identity)) ||
+            !call("projection", IDirect3DDevice7_SetTransform(device, D3DTRANSFORMSTATE_PROJECTION, &projection)))
+            goto done;
+    }
     printf("TPIX device guid=%08lx caps=%08lx texture_caps=%08lx filter=%08lx\n", caps.deviceGUID.Data1,
            caps.dwDevCaps, caps.dpcTriCaps.dwTextureCaps, caps.dpcTriCaps.dwTextureFilterCaps);
     formats();
@@ -387,7 +434,7 @@ done:
     if (dd) IDirectDraw7_Release(dd);
     if (displayDc) DeleteDC(displayDc);
     DestroyWindow(window);
-    printf("TPIX end path=%s pass=%d fail=%d result=%s\n", argv[1], passed, failed,
+    printf("TPIX end path=%s%s pass=%d fail=%d result=%s\n", argv[1], perspective ? " persp" : xyz ? " xyz" : "", passed, failed,
            passed && !failed ? "PASS" : "FAIL");
     return passed && !failed ? 0 : 1;
 }

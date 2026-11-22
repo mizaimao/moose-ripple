@@ -10,7 +10,7 @@ int main(void)
     static const char *const skips[RB2K_D7_SKIPS] = {
         "fill", "stencil", "stage1", "vertex", "texture", "combiner", "primitive", "clear"
     };
-    static const char *const ignored[RB2K_D7_IGNORED] = { "fog", "colorkey", "clipplane", "mipmap" };
+    static const char *const ignored[RB2K_D7_IGNORED] = { "fog", "colorkey", "clipplane", "mipmap", "lighting" };
     RB2K_D7_DRAWSTATS s;
     HDC dc = CreateDCA("DISPLAY", NULL, NULL, NULL);
     ULONG i;
@@ -45,11 +45,18 @@ int main(void)
            s.lastDrawState[6], s.lastDrawState[7]);
     for (i = 0; i < sizeof(s.states) / sizeof(s.states[0]) && s.states[i].calls; ++i)
         printf("D7STATE %lu calls=%lu primitives=%lu color=%lx alpha=%lx blend=%lx alphatest=%lx depth=%lx "
-               "cull=%lu shade=%lu fvf=%lx texformat=%lu\n", i, s.states[i].calls, s.states[i].primitives,
+               "cull=%lu shade=%lu fvf=%lx texformat=%lu transform=%lu\n", i, s.states[i].calls, s.states[i].primitives,
                s.states[i].colorStage, s.states[i].alphaStage, s.states[i].blend, s.states[i].alphaTest,
-               s.states[i].depthState, s.states[i].cull, s.states[i].shade, s.states[i].fvf, s.states[i].texFormat);
+               s.states[i].depthState, s.states[i].cull, s.states[i].shade, s.states[i].fvf, s.states[i].texFormat,
+               s.states[i].transform);
     printf("D7DRAW state_overflow=%lu past_window_calls=%lu skipped_triangles=%lu\n", s.stateOverflow, s.beyondCalls,
            s.beyondVertices);
+    printf("D7XFORM types");
+    for (i = 0; i < 32; ++i) if (s.transformTypes[i]) printf(" %lu=%lu", i, s.transformTypes[i]);
+    putchar('\n');
+    printf("D7REG mipmaps=%lu managed=%lu\n", s.regMipmaps, s.regManaged);
+    printf("D7SURF refused=%lu caps=%08lx flags=%08lx size=%lux%lu format=%08lx count=%lu\n", s.surfaceRefused, s.refusedCaps,
+           s.refusedFlags, s.refusedWidth, s.refusedHeight, s.refusedFormat, s.refusedCount);
     if (s.historyStop) {
         ULONG n = s.historyNext < 32 ? s.historyNext : 32, k;
         for (k = 0; k < n; ++k) {
