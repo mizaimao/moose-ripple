@@ -784,7 +784,10 @@ The first test uses the system DirectDraw and Direct3D 7 runtimes. It opens
 a 128×128 offscreen surface on a 1024×768×32 desktop. Run
 `d3d7probe rgb` for the Microsoft software renderer, `d3d7probe target`
 to check the host render target, and `d3d7probe hal` to request the hardware
-device. Exit code 0 means the pixels and counters matched, 1 means a check
+device. `d3d7probe window` also presents the rendered triangle to a clipped
+window using a primary surface marked for Direct3D. It samples the triangle,
+the clear colour and two untouched pixels outside the destination rectangle.
+Exit code 0 means the pixels and counters matched, 1 means a check
 failed, and 2 means the requested hardware was unavailable.
 
 The software reference clears all 16,384 pixels to dark blue, then draws a
@@ -927,6 +930,61 @@ each attempt reached `CanCreateSurface` once. The driver returned
 `DDSCAPS_3DDEVICE`. Requests explicitly selecting hardware with or without
 depth and RGB software with 16-bit depth reached the same rejection. The
 ordinary primary (`0x4200`) and the 640×480 offscreen hardware render
-target (`0x6040`) succeeded in the direct control. The next pixel test
-renders to an offscreen target and blits it onto the flagged primary in a
-window. [Microsoft DirectDraw surface flags](https://learn.microsoft.com/en-us/windows/win32/api/ddraw/ns-ddraw-ddscaps)
+target (`0x6040`) succeeded in the direct control. [Microsoft DirectDraw surface flags](https://learn.microsoft.com/en-us/windows/win32/api/ddraw/ns-ddraw-ddscaps)
+
+### Windowed primary and game startup
+
+Four fresh Intel QEMU boots compared the original display driver and the
+change that accepts the 3D flag on a primary surface. The miniport and the
+other 24 test-drive files, including the game and pixel test, matched.
+On both systems the original driver rejected the primary in all three
+window tests. The changed driver accepted it in all three. All six changed
+driver tests rendered the offscreen triangle correctly, counted 122 clears
+and 121 triangles, and released their contexts and targets. The final copy
+to the window returned `E_FAIL` before the test could sample a visible pixel.
+
+All four windowed startup requests from Direct3D Quake 0.73 advanced from
+`DDERR_INVALIDCAPS` to `D3DXERR_CAPSNOTSUPPORTED` on both guests. The
+same library error occurred when the test explicitly requested hardware
+with depth disabled. Explicitly requesting the Microsoft RGB device with
+16-bit depth succeeded and returned its software device identifier
+(`a4665c60`). Direct3D's hardware depth-format enumeration returned
+`DDERR_NOZBUFFERHW` and zero formats.
+
+The original game made five surface-registration calls with the changed
+driver on each OS. It made zero native context or draw calls and returned
+no timedemo score. The offscreen controls below are medians of three
+120-frame runs at 128×128, including the final read. The changed boots
+also rendered three extra window-test sequences before these timings.
+
+| Guest | Hardware before | Hardware after | RGB before | RGB after |
+| --- | ---: | ---: | ---: | ---: |
+| Windows 2000 SP4 | 81.212 ms | 44.658 ms | 8.835 ms | 11.177 ms |
+| Windows XP SP3 | 66.008 ms | 35.603 ms | 11.063 ms | 4.899 ms |
+
+Two further fresh boots traced the copy into the test window. Both
+systems returned `E_FAIL` for all three tagged-primary cases before
+entering the display driver's `Blt` callback. Releasing the window's
+device context first and copying the entire target both reproduced it.
+Changing only the primary to an ordinary one let the full 128×128 and
+cropped 96×96 copies reach the miniport. Both copies matched all four
+visible samples on each OS. The ordinary DirectDraw hardware and
+software window controls also passed, including the covered regions.
+Each tagged test recorded two surface registrations, compared with one
+for an ordinary primary. The driver's registration callback treated a
+mapped primary without an offscreen slot as `DDERR_SURFACELOST`. The
+follow-up change acknowledges that registration and keeps hardware render
+targets in their existing offscreen slots. Fourteen DDK descriptor checks
+per driver verified the callback result and whether it assigned a surface
+handle. The follow-up still needs the guest window test.
+
+At the current 1024×768×32 display mode, direct hardware queries
+enumerated one texture format and zero depth formats on both systems.
+The stock D3DX7 library returned `D3DXERR_CAPSNOTSUPPORTED` for hardware
+device caps and reported zero depth, colour-texture and render-target
+formats, whether given that mode explicitly or asked for the current mode.
+For the RGB device, the same library reported two depth, seven colour-texture
+and six render-target formats. Its hardware capability query enumerates
+depth before texture formats and skips collecting the rest when depth
+enumeration fails. The next test for 16-bit depth draws overlapping
+triangles in both orders and repeats with depth writes disabled.
