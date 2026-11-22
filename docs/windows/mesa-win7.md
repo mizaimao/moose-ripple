@@ -1476,3 +1476,79 @@ The running guest confirmed both installed shader DLLs and the kernel after rebo
 | x64 shader DLL, both runs | `c0c5c6bfd84d35541307a1a689556d240ae3449e5983b1e2f3f6005595839257` |
 | x86 shader DLL, both runs | `4776a89526bd065128e66635158026bddb7ca35ca248e4a0e14a6c4ba5321427` |
 | Fullscreen probe, both runs | `75ec12d5e8839841107cffc1bec6ce9ce7ea8254ea08983a8cdb4b536fd5479f` |
+
+### Resource lists and the benchmark exit
+
+On both kernels, Windows logged the first application error in the 32-bit
+graphics DLL and then another in 3DMark06 in the same process. The first error
+mapped to `virgl_gdi_emit_res`, where the driver entered resources into the
+Windows allocation and patch lists. Those lists can change after each render
+callback. The code used the requested capacity when building the next batch.
+
+The Windows 7 port holds the command and its resource references until
+submission. It checks the actual command, allocation and patch capacities
+returned by Windows, asks for more space when needed, and checks the returned
+capacities again before writing. Each allocation retains its patch entry.
+The Windows 7 build applies this to virgl. [Windows render callback](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dumddi/ns-d3dumddi-_d3dddicb_render)
+
+With the previous kernel (`47b67bde…`) and only the resource-list change
+added to the shader DLLs, the default suite completed. The offline result
+scored **4,156**, with **2,050 SM2.0**, **928 HDR/SM3.0**, and **4,873 CPU**.
+Across 193 fullscreen samples, the host advanced 485.10 seconds, the Windows
+performance counter 485.11 seconds and the tick clock 401.17 seconds.
+The timed run had zero viewers.
+There were too few display-buffer switches to measure the six scene rates
+on this kernel. The benchmark's own scene rates are in its result file.
+
+| Resource-list trial artifact | SHA-256 |
+| --- | --- |
+| x64 DLL | `c6c2eddb9362c0d0c8ff1cac19afd76964341ef8dc673fc462089263bf06eebe` |
+| x86 DLL | `b1b68dc289398d0281169e3296bab2018fdd6c4b4cb180fb8695efd5cb1a744d` |
+| Signed catalog with previous kernel | `4a9156d55ae008a6e558fa98b83934527897cc580ffd5f1d9ffe2b36b5daf678` |
+| Saved 4,156-point result | `1884dbdd1afdd74b6b389272a8a3c7fc2b9b4bfa3c3e6807728897c097016cf4` |
+
+### Windows 7 and Vista on the same UHD 630
+
+A fresh Windows 7 test disk combined the immediate-flip kernel with the same
+two resource-list DLLs. After reboot the guest verified the three installed
+file hashes, and all 12 fullscreen colour patterns passed on the host display.
+The combined catalog SHA-256 was
+`39e015bdd0692687d1329f1ecb5c124bdd802747d6cc964d8febc8bb659b44ea`.
+
+The benchmark ran separately with zero viewer connections. Both operating
+systems used 3DMark06 1.2.0 with the same virtual CPU, four cores, 4 GiB of
+RAM, virtual HPET, Intel UHD 630 and graphics settings (1280×1024, no AA).
+Each local result recorded all six tests successful. Windows 7 reached the
+score dialog 857.56 host seconds after Run. Its 118,356-byte result has
+SHA-256 `25981ef18cba5440dfe9cf7de6302380d82a69bae461ea48202e1b433173373e`.
+
+| Matched no-viewer run | Windows 7 SP1 | Vista SP2 |
+| --- | ---: | ---: |
+| 3DMark06 | **9,389** | **13,964** |
+| SM2.0 | 2,721 | 5,726 |
+| HDR/SM3.0 | 4,498 | 5,890 |
+| CPU | 4,869 | 4,591 |
+| Real seconds between first and last fullscreen clock samples | 833.42 | 914.57 |
+| Windows performance-counter seconds | 833.41 | 914.58 |
+| Windows tick seconds | 401.73 | 404.14 |
+
+The host counted changes between the two display buffers for each scene.
+For each graphics test the sample covers 30 real seconds, ending five
+seconds before the last switch. For each CPU test it covers 20 switches
+and ends five switches before the last. The game's FPS column is its
+average for the full scene, on its own clock.
+
+| Test | Windows 7 game FPS | Windows 7 late display changes/s | Vista late display changes/s |
+| --- | ---: | ---: | ---: |
+| Return to Proxycon | 30.242 | 11.82 | 26.73 |
+| Firefly Forest | 15.109 | 8.36 | 13.54 |
+| Red Valley CPU 1 | 1.617 | 1.53 | 1.47 |
+| Red Valley CPU 2 | 2.346 | 2.60 | 2.59 |
+| Canyon Flight | 80.527 | 7.20 | 25.34 |
+| Deep Freeze | 9.440 | 8.43 | 26.71 |
+
+During the Windows 7 Deep Freeze sample QEMU recorded about 18,011
+host-to-guest transfer commands and 253 display switches. Across the
+interior of the HDR phase, 71,820 transfers targeted two resource IDs.
+Neither ID was selected for display during the trace. The trace provides
+the resource ID but omits the transfer size and the time spent waiting.
