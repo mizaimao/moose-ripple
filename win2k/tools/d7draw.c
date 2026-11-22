@@ -66,6 +66,22 @@ int main(void)
                    h[3], h[4], h[5], h[6], (LONG)h[7], h[8], h[9]);
         }
     }
+    {
+        /* Miniport time per operation and the scene flight, totals since boot. */
+        static const char *const names[RB2K_D7_OPS] = { "clear", "draw", "read", "upload", "flush" };
+        RB2K_D7_PROFILE p;
+        RB2K_D7_FLIGHT f;
+        if (ExtEscape(dc, RB2K_D3D7_PROFILE_ESCAPE, 0, NULL, sizeof(p), (LPSTR)&p) > 0 && p.frequency > 0)
+            for (i = 0; i < RB2K_D7_OPS; ++i)
+                printf("D7PROFILE op=%s calls=%lu submits=%lu bytes=%lu failed=%lu op_us=%I64d queue_us=%I64d "
+                       "fence_us=%I64d\n", names[i], p.op[i].calls, p.op[i].submits, p.op[i].bytes, p.op[i].failed,
+                       p.op[i].ticks * 1000000 / p.frequency, p.op[i].queueTicks * 1000000 / p.frequency,
+                       p.op[i].fenceTicks * 1000000 / p.frequency);
+        if (ExtEscape(dc, RB2K_D3D7_FLIGHT_ESCAPE, 0, NULL, sizeof(f), (LPSTR)&f) > 0 && f.frequency > 0)
+            printf("D7FLIGHT queued=%lu completed=%lu peak=%lu throttle_waits=%lu throttle_us=%I64d "
+                   "access_waits=%lu access_us=%I64d\n", f.queued, f.completed, f.peak, f.throttleWaits,
+                   f.throttleTicks * 1000000 / f.frequency, f.accessWaits, f.accessTicks * 1000000 / f.frequency);
+    }
     DeleteDC(dc);
     return 0;
 }
