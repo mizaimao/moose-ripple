@@ -1530,6 +1530,11 @@ did not detect this rendering error. Vista had shown the same symptom when
 postprocessing quads lost their texture coordinates with a vertex shader
 still bound.
 
+The subsequent shader trials below repeat the same suite and inspect the
+individual scenes on the external display. [Bound shader and screen-space
+coordinates](#screen-space-texture-coordinates-with-a-bound-vertex-shader) ·
+[Scalar address register](#vertex-shader-constants-selected-through-the-address-register)
+
 | Matched no-viewer run | Windows 7 SP1 | Vista SP2 |
 | --- | ---: | ---: |
 | 3DMark06 | **9,389** | **13,964** |
@@ -1597,3 +1602,74 @@ tick seconds. Late host display rates in suite order were 11.25, 7.74, 1.61,
 failures converting TGSI opcode 61 (`ARR`), including 166,896 within the
 Canyon Flight buffer pair. The saved result SHA-256 is
 `fe77fe7c54cb65ba8d2b7042cb6401d729cc1e3c4ed1f38a235752da28c17a2e`.
+
+### Vertex shader constants selected through the address register
+
+A Direct3D 9 vertex shader can index its constants through any component of
+the four-component address register. The Intel host renderer accepts a scalar
+address and rejected the driver's round-and-load instruction (`ARR`). The
+translator now selects the requested component first. For `MOVA` it rounds
+the value before loading it through `ARL`. Vertex shader 1.1 retains its
+round-down behavior.
+
+The trial kept the immediate-flip kernel and the bound-shader texture input
+fix. Windows verified the new test-signed catalog and its four members in
+a fresh disk overlay. The before and after checks use identical x86 and x64
+executables. Each tests sixteen existing constant cases and four indices
+whose expected colours are red, green, blue and yellow.
+[Constant probe](../../tools/win7-hello/d3d9const.c)
+
+Both architectures also compiled against the current Windows 7 branch. The
+measurements below use the pinned package in the table so the two trials
+differ by one driver source file.
+
+| Scalar-address trial | SHA-256 |
+| --- | --- |
+| Kernel | `9e7005109db86deafbb386ec46b81273554a9de23defdb7c6707c9d5e9354062` |
+| x64 DLL | `20ce031591dc140560fddca9a8ab5fad6620a53d57c079f4bb2d4fe27ae5d16e` |
+| x86 DLL | `3327ef27260a1cc58b9a666dd0522443514a74535eb8f2369406051c823ba294` |
+| Test-signed catalog | `5ad84f03ab209e58250395cda5aff79dbeae4e4963bdf3e6a84809105524dcb1` |
+
+Each architecture returned black for all 64 indirect pixels on the previous
+DLLs. After the change, every indirect pixel matched its expected colour.
+All sixteen control cases matched on both builds. The host logged sixteen
+failed `ARR` conversions during the before-check boot and zero during the
+after-check boot.
+
+In both Red Valley CPU tests, independent Intel display captures show the
+same camera position at frame 38, 19.00 game seconds. The previous build
+drew long grey triangles across the sky and terrain. With scalar addressing,
+the canyon, base and vehicles are visible. The orange bands across the
+Return to Proxycon hangar at 10.88 game seconds also cleared in the
+corresponding 10.99-second view.
+
+The independent visual run captured 192 display samples and reached the
+score dialog. It also showed both fireflies, the airship and dragon in
+Canyon Flight, and the snow station in Deep Freeze.
+
+The zero-viewer run saved **9,808** (SM2.0 **3,412**, HDR/SM3.0 **4,177**,
+CPU **4,856**), up from **9,247** on the previous DLLs. Run to score took
+813.50 real seconds, down from 843.93. Across 195 fullscreen samples the
+host advanced **789.71 s**, the Windows performance counter **789.72 s** and
+the Windows tick clock **406.83 s**. The tick clock ran at 51.5% of real
+time, so the host display rates below are the basis for comparing speed.
+The matched Vista run scored **13,964**. The saved Windows 7 result has
+SHA-256 `b1ddcca0ccb4184fe4daa39e5c75b41e755311e73a80c8cfa5c4b4825b98b51d`.
+
+| Scene | Win 7 before, display changes/s | Win 7 scalar, display changes/s | Vista, display changes/s | Win 7 failed conversions before | Win 7 failed conversions after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Return to Proxycon | 11.25 | 18.48 | 26.73 | 168 | 0 |
+| Firefly Forest | 7.74 | 9.26 | 13.54 | 381 | 0 |
+| Red Valley CPU 1 | 1.61 | 1.59 | 1.47 | 12 | 0 |
+| Red Valley CPU 2 | 2.59 | 2.49 | 2.59 | 12 | 0 |
+| Canyon Flight | 6.40 | 7.61 | 25.34 | 166,896 | 0 |
+| Deep Freeze | 8.00 | 8.53 | 26.71 | 30 | 0 |
+
+The full host trace went from **167,499** failed shader conversions to
+**zero**. The largest remaining display-rate gaps are in the HDR tests. In
+the 30-second Deep Freeze window, Windows 7 issued about 18,143 host-to-guest
+transfer commands and Vista issued about 27. Across the interior of the
+Windows 7 HDR phase, all 79,732 transfers targeted two resources that QEMU
+never selected as display buffers. The trace identifies their resource IDs. Determining
+which driver operation requests them and how long it waits requires further
+measurement.
