@@ -1670,6 +1670,42 @@ The full host trace went from **167,499** failed shader conversions to
 the 30-second Deep Freeze window, Windows 7 issued about 18,143 host-to-guest
 transfer commands and Vista issued about 27. Across the interior of the
 Windows 7 HDR phase, all 79,732 transfers targeted two resources that QEMU
-never selected as display buffers. The trace identifies their resource IDs. Determining
-which driver operation requests them and how long it waits requires further
-measurement.
+never selected as display buffers. Canyon Flight accounted for 37,310 reads
+and Deep Freeze for 42,422 within that window.
+
+### Timing the Windows 7 HDR vertex-buffer reads
+
+A diagnostic x86 DLL recorded the Direct3D call, Gallium buffer description,
+byte range and performance-counter timestamps around both resource waits and
+the host transfer submission. The kernel and x64 DLL matched the 9,808
+control. QEMU independently recorded each transfer and the description of
+the resource active at that point. Resource IDs can be reused after a scene.
+
+The first diagnostic retained the final scene across benchmark exit. Its
+42,514 Deep Freeze reads all came from one render thread. It transferred
+3,778,784 bytes in total, including 41,235 reads of just 80 bytes. Between
+the first and last read, 73.08 real seconds elapsed. The thread spent 53.23
+seconds in the two resource waits. The largest distance from a timed call
+to its independently sampled host counter interval was about 21 ms.
+
+A second run retained all six driver loads. Both HDR scenes used a private
+768 KiB dynamic, write-only vertex buffer. The creation flags were `0x80044`,
+the pool was `D3DDDIPOOL_VIDEOMEMORY` and the format was `D3DDDIFMT_VERTEXDATA`.
+Every read originated in a ranged `NoOverwrite` lock on the same render thread.
+The lock flags `0x14` became `PIPE_MAP_READ | PIPE_MAP_WRITE | PIPE_MAP_UNSYNCHRONIZED`.
+Neither buffer had a write-watch allocation. QEMU matched every call to the
+active buffer. The two rows cover each full scene in the repeat.
+
+| HDR scene | Host reads | Bytes | Wait before submission | Wait after submission | Both waits per call, median / p95 / p99 | Waits in late 30 real seconds |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Canyon Flight | 43,069 | 3,902,960 | 13.162 s | 33.035 s | 0.469 / 1.274 / 26.279 ms | 20.158 s |
+| Deep Freeze | 42,014 | 3,735,232 | 21.582 s | 31.949 s | 0.858 / 1.336 / 34.806 ms | 22.180 s |
+
+Canyon spent **46.197 s** in the two waits and Deep Freeze **53.531 s**.
+Of 85,083 transfers, 82,320 fetched 80 bytes each. The guest score file for
+this diagnostic recorded 9,278 (3,438 / 3,690 / 4,850). The uninstrumented
+comparison remains 9,808 on Windows 7 and 13,964 on Vista. The Windows disk
+log recorded all three fullscreen transitions. The serial log missed one.
+QEMU bracketed that transition within one second, and the independent
+Windows mode samples confirmed the change. Per-call timings use the performance counter.
+[Direct3D resource flags](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dukmdt/ns-d3dukmdt-_d3dddi_resourceflags) · [Direct3D lock flags](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dumddi/ns-d3dumddi-_d3dddi_lockflags)
