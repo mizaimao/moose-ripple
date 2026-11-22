@@ -7,6 +7,7 @@
 #include <ntddvdeo.h>
 #include "ddsurface.h"
 #include "rb2kprobe.h"
+#include "rb2kcursor.h"
 
 typedef struct {
     PDD_SURFACE_GLOBAL global;
@@ -36,6 +37,10 @@ typedef struct {
     ULONG paletteColors[256];
     BOOL paletteActive;
     HSEMAPHORE ddLock;
+    HSEMAPHORE cursorLock;
+    BOOL cursorOwned;
+    BOOL sampleCursor;
+    RB2K_CURSOR_SOURCE cursorSource;
     BOOL ddEnabled;
     BOOL glActive;
     BOOL gpuSurfaces;           /* offscreen surfaces as host textures (RB2K_DD_CAPS) */
@@ -47,6 +52,8 @@ typedef struct {
 } DISPLAY;
 
 BOOL rb_dd_caps(DISPLAY *display, RB2K_DD_CAPS *caps);
+BOOL rb_cursor_stats(DISPLAY *d, RB2K_CURSOR_STATS *stats);
+void rb_display_cursor_release(DISPLAY *d);
 HPALETTE rb_create_palette(DISPLAY *display);
 BOOL rb_restore_palette(DISPLAY *display);
 void rb_rvd_init(void);

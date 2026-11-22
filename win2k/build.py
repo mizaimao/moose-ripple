@@ -116,6 +116,7 @@ def build_programs(work):
         ("regmode.exe", ["tools/regmode"], ["-mwindows", "-luser32"]),
         ("rvdstat.exe", ["tools/rvdstat"], ["-lgdi32", "-luser32"]),
         ("glpresent.exe", ["tools/glpresent"], ["-lopengl32", "-lgdi32", "-luser32"]),
+        ("cursorqa.exe", ["tools/cursorqa"], ["-lgdi32", "-luser32"]),
     ]
     args = [bin_dir / "i686-w64-mingw32-clang", "-O2", "-D_WIN32_WINNT=0x0500",
             "-I", source, "-I", repo / "win9x/minivdd",
@@ -133,10 +134,10 @@ def main():
         work = Path(directory)
         overlay = header_overlay(work)
         build_kernel(work, overlay, "rb2kmp.sys",
-                     "rb2kmp gpu_transport gpu_pixel gpu_present gpu_surface gpu_rvd gpu_memory gpu_view",
+                     "rb2kmp gpu_transport gpu_pixel gpu_present gpu_surface gpu_rvd gpu_memory gpu_view gpu_cursor",
                      [ddk_headers, video_headers, public_headers, vc_headers], ["-Di386=1"],
                      ["videoprt.lib", "ntoskrnl.lib", "hal.lib"], ["/driver", "/entry:DriverEntry@8"])
-        build_kernel(work, overlay, "rb2kdisp.dll", "display display_ddraw display_palette display_rvd display_gdi",
+        build_kernel(work, overlay, "rb2kdisp.dll", "display display_ddraw display_palette display_rvd display_gdi display_cursor",
                      [public_headers, video_headers, vc_headers], ["-DUNICODE", "-D_UNICODE", "-DWINVER=0x0500"],
                      ["win32k.lib", "libcntpr.lib"], ["/dll", "/entry:DrvEnableDriver@12",
                                                       "/export:DrvEnableDriver=_DrvEnableDriver@12"])

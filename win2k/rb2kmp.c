@@ -123,6 +123,7 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
     rb_gpu_find(&a->gpu, a, slot, registers, config);
     VideoPortGetRegistryParameters(a, L"RippleDirectDrawGpuSurfaces", FALSE, registry_flag, &a->gpu.ddGpuSurfaces);
     VideoPortGetRegistryParameters(a, L"RippleGpuDesktop", FALSE, registry_flag, &a->gpu.glEnabled);
+    VideoPortGetRegistryParameters(a, L"RippleHardwareCursor", FALSE, registry_flag, &a->gpu.cursorEnabled);
     /* Map the scanout pages during adapter discovery, cached like every other
      * view of the framebuffer (rb_map_cached). BAR0 is a PCI framebuffer; its
      * address is not a general-purpose DMA backing entry. */
@@ -489,6 +490,9 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
     case IOCTL_RB2K_RVD:
     case IOCTL_RB2K_GL_FRAME:
         status = rb_gpu_rvd_io(&a->gpu, r);
+        break;
+    case IOCTL_RB2K_CURSOR:
+        status = rb_cursor_io(&a->gpu, r);
         break;
     case IOCTL_RB2K_GPU_PROBE:
         if (r->InputBufferLength) status = ERROR_INVALID_PARAMETER;

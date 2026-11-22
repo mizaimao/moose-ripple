@@ -638,3 +638,68 @@ bit-block transfer, its raster-operation code. The per-callback counts
 also distinguish writes up to 64×64 pixels. `glpresent.exe window stripes`
 places twenty narrow opaque bands over a window, checks an exposed pixel
 between the bands and checks the cover's colour.
+
+OpenGL Quake ran the same 969-frame demo three times per setting, in
+rotating order, at 640×480 on a 1024×768 desktop on an M1 Max. The
+host timer measured game launch to score. All measured runs held focus.
+
+| Guest | GDI fps | Per-rectangle fps | Batched fps | Host seconds, GDI / per rectangle / batched |
+| --- | ---: | ---: | ---: | --- |
+| Windows 2000 | 48.4 | 30.4 | 32.8 | 22.56 / 35.84 / 32.72 |
+| Windows XP SP3 | 46.8 | 45.6 | 45.3 | 23.70 / 23.83 / 24.69 |
+
+On Windows 2000, batching changed the median from 4,352 rectangles
+with 4,352 waits to 4,348 rectangles with 1,087 waits. Copy time fell
+from 8.21 to 2.63 s. On XP both paths already had one rectangle per
+present, and copy time was 1.98 and 1.96 s. Both systems passed the 26
+measured image checks and seven legacy tests. The cold-start probe on
+each lost foreground despite matching colours and was excluded.
+
+In a Windows 2000 per-rectangle run, 2,189 of 2,270 uploads came from
+bitmap-to-desktop `DrvCopyBits` calls. In the synthetic cursor test, each
+swap generated two 31×27 uploads and one partial read. With Quake's
+mouse grab disabled, placing the cursor inside, outside and back inside
+gave 33.0, 45.5 and 33.7 fps with batched copies. Desktop uploads were
+2,527, 204 and 2,204. On XP the stock game showed no visible pointer
+inside its client in any timed sample and made a median of three uploads.
+Disabling Quake's mouse grab on XP reproduced the Windows 2000 effect.
+Inside, outside and back inside gave 33.0, 46.6 and 33.3 fps. XP recorded
+2,135, 62 and 2,191 uploads, respectively. In the two inside runs only the
+initial upload came from anything other than bitmap-to-desktop copies.
+Ordinary GDI remains the default on both systems.
+
+### Small desktop writes and the hardware pointer
+
+`RIPPLE_GL_PRESENT=inline` uses the same per-frame copy as `1`.
+When GDI finishes drawing, the miniport puts the pixels of up to three
+pending rectangles of 64×64 or smaller in one virgl command stream.
+It waits for the device to return the command buffer so the guest can
+reuse the bytes. It requests no GPU completion fence for those writes.
+Larger rectangles retain the fenced transfer. `glpresent.exe window uploads`
+writes new colours twice to 13×17, 64×64 and 65×1 rectangles in its own
+window and reads both ends and the neighbouring pixel after each write.
+`rvdstat.exe` reports the numbers of inline rectangles and submissions.
+
+The independent adapter setting `RippleHardwareCursor=1` enables the
+virtio cursor queue in 32-bit modes. The display driver translates GDI's
+AND/XOR shape or premultiplied BGRA image into a padded 64×64 resource.
+A fenced upload completes before the cursor queue selects it. Mouse
+movement uses the existing resource. GDI draws a shape that inverts
+whatever lies underneath. [Windows pointer callbacks](https://learn.microsoft.com/en-us/windows/win32/api/winddi/nf-winddi-drvsetpointershape) · [Virtio GPU cursor protocol](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html) · [SPICE cursor pixel format](https://www.spice-space.org/spice-protocol.html)
+
+`cursorqa.exe` checks the monochrome mask, hotspot, movement, hiding and
+inversion fallback. For alpha pointers it alternates two known hotspot
+colours and returns to the first. Windows can expand the application's
+bitmap and move its hotspot when adding a shadow. The probe asks the
+display driver to checksum the next alpha bitmap Windows supplies, with
+transparent padding to 64×64. It compares that value with the independent
+checksum of the entire resource submitted by the miniport. The test also
+checks the hotspot colour and counts partially transparent pixels.
+
+Windows 2000 supplied a 41×39 image with hotspot (8,14) for the 32×32
+application cursor with hotspot (5,11). Both versions contained 61
+partially transparent coloured pixels. The source and submitted checksums
+on red, green and red again were `6699b8a1`, `9044e1de` and `6699b8a1`.
+Windows rounded each opaque hotspot channel down by one before the driver
+received it. The test checks for consistent channel rounding and requires
+an exact checksum match for each submitted shape.

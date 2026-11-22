@@ -169,6 +169,51 @@ BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
     return fenced(gpu, result, &request.hdr, sizeof(request.draw.submit) + bytes, RB2K_STAGE_CLEAR);
 }
 
+VP_STATUS rb_gpu_cursor_pixels(RB2K_GPU *gpu)
+{
+    struct virtio_gpu_resource_create_2d create;
+    struct { struct virtio_gpu_resource_attach_backing header; struct virtio_gpu_mem_entry entry; } backing;
+    struct virtio_gpu_transfer_to_host_2d transfer;
+    RB2K_GPU_RESULT result;
+    if (!gpu->ready || !gpu->cursorDoorbell) return ERROR_NOT_SUPPORTED;
+    if (!gpu->cursorResource) {
+        ULONG id;
+        if (gpu->nextId == 0xffffffffUL) return ERROR_NO_MORE_ITEMS;
+        if (!gpu->nextId) gpu->nextId = 1; /* resource 1 belongs to the single-pixel diagnostic */
+        id = ++gpu->nextId;
+        VideoPortZeroMemory(&create, sizeof(create));
+        create.hdr.type = VIRTIO_GPU_CMD_RESOURCE_CREATE_2D;
+        create.resource_id = id;
+        create.format = VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM;
+        create.width = create.height = RB2K_CURSOR_EDGE;
+        if (!fenced(gpu, &result, &create.hdr, sizeof(create), RB2K_STAGE_RESOURCE)) return result.status;
+        VideoPortZeroMemory(&backing, sizeof(backing));
+        backing.header.hdr.type = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
+        backing.header.resource_id = id;
+        backing.header.nr_entries = 1;
+        backing.entry.addr = gpu->bus.QuadPart + RB2K_CURSOR_DMA_PIXELS;
+        backing.entry.length = sizeof(gpu->cursorShape.pixels);
+        if (!fenced(gpu, &result, &backing.header.hdr, sizeof(backing), RB2K_STAGE_BACKING)) {
+            PIXEL_REQUEST unref;
+            RB2K_GPU_RESULT cleanup;
+            begin_request(&unref, VIRTIO_GPU_CMD_RESOURCE_UNREF, 0);
+            unref.unref.resource_id = id;
+            if (gpu->ready) send_request(gpu, &cleanup, &unref, sizeof(unref.unref), RB2K_STAGE_CLEANUP);
+            return result.status;
+        }
+        gpu->cursorResource = id;
+    }
+    VideoPortMoveMemory(gpu->dma + RB2K_CURSOR_DMA_PIXELS, gpu->cursorShape.pixels,
+                        sizeof(gpu->cursorShape.pixels));
+    VideoPortZeroMemory(&transfer, sizeof(transfer));
+    transfer.hdr.type = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
+    transfer.r.width = transfer.r.height = RB2K_CURSOR_EDGE;
+    transfer.resource_id = gpu->cursorResource;
+    if (!fenced(gpu, &result, &transfer.hdr, sizeof(transfer), RB2K_STAGE_TRANSFER)) return result.status;
+    ++gpu->cursorStats.transfers;
+    return NO_ERROR;
+}
+
 /* The DMA pages hold packed rows. The VGA primary may have a wider stride. */
 static void copy_rows(RB2K_GPU *gpu, PUCHAR pixels, ULONG pitch, ULONG rowBytes,
                       ULONG rows, BOOLEAN toPrimary)

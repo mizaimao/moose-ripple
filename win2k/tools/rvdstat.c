@@ -6,6 +6,7 @@
 #include <winioctl.h>
 #include <stdio.h>
 #include "rb2krvd.h"
+#include "rb2kcursor.h"
 
 static const char *const names[RB2K_RVD_STAT_CODES] = {
     "", "get_info", "get_caps", "context_create", "context_destroy", "buffer_create",
@@ -19,6 +20,7 @@ int main(void)
     RB2K_GL_STATS gl;
     RB2K_GL_TIMING timing;
     RB2K_GL_PROFILE profile;
+    RB2K_CURSOR_STATS cursor;
     static const char *const paints[] = {
         "initial", "CopyBits-bitmap", "CopyBits-desktop", "BitBlt", "BitBlt-mask",
         "TextOut", "StrokePath", "FillPath", "StrokeAndFillPath"
@@ -64,6 +66,17 @@ int main(void)
                        paints[kind], w->tag >> 16, w->uploads, w->pixels, w->small, w->excluded,
                        w->width, w->height);
         }
+    }
+    if (ExtEscape(dc, RB2K_CURSOR_ESCAPE, 0, NULL, sizeof(cursor), (LPSTR)&cursor) > 0) {
+        printf("GLCURSOR on=%lu mono=%lu color=%lu alpha=%lu decline=%lu invert=%lu failed=%lu transfers=%lu updates=%lu moves=%lu hides=%lu restores=%lu visible=%lu\n",
+               cursor.enabled, cursor.accepted[0], cursor.accepted[1], cursor.accepted[2],
+               cursor.declined, cursor.inverted, cursor.failed, cursor.transfers, cursor.updates,
+               cursor.moves, cursor.hides, cursor.restores, cursor.visible);
+        if (cursor.lastDecline.reason)
+            printf("GLCURSOR_REJECT reason=%lu flags=%lx mask=%lu %ldx%ld color=%lu %ldx%ld\n",
+                   cursor.lastDecline.reason,cursor.lastDecline.flags,
+                   cursor.lastDecline.maskFormat,cursor.lastDecline.maskWidth,cursor.lastDecline.maskHeight,
+                   cursor.lastDecline.colorFormat,cursor.lastDecline.colorWidth,cursor.lastDecline.colorHeight);
     }
     DeleteDC(dc);
     return 0;

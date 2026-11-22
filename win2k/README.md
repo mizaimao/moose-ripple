@@ -91,8 +91,13 @@ has the details and the earlier measurements behind these choices.
 
 The miniport (`rb2kmp.c`) sets the display mode through the adapter's
 Bochs-compatible registers and maps the framebuffer. It also drives the
-virtio-gpu side of the adapter (`gpu_transport.c`): one queue of 16
-descriptors, one request at a time, each waited for.
+virtio-gpu side of the adapter through a 16-descriptor control queue in
+`gpu_transport.c`. Each request waits for its descriptors to be returned.
+With the adapter DWORD `RippleHardwareCursor=1`, 32-bit display modes
+also use the virtio cursor queue. Supported pointer shapes occupy a
+64×64 surface, and moving them leaves the desktop pixels alone. GDI
+handles pointers with destination-dependent inverted pixels. The stock
+installation uses the software pointer.
 
 The display driver (`display.c`) gives GDI a bitmap in the selected colour depth over the
 framebuffer and answers `OPENGL_GETINFO` with `RIPPLEGL`, the name of the

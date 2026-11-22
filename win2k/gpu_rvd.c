@@ -129,7 +129,8 @@ static VP_STATUS start(RB2K_GPU *gpu)
 
 static void stop_when_idle(RB2K_GPU *gpu)
 {
-    if (gpu->ready && !gpu->rvdContexts && !gpu->imageCount) rb_gpu_stop(gpu);
+    if (gpu->ready && !gpu->rvdContexts && !gpu->imageCount &&
+        (!gpu->cursorValid || gpu->glDesktop.image.id)) rb_gpu_stop(gpu);
 }
 
 /* The host lets go of the resource and its pages before they are freed. */

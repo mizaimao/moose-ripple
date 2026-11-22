@@ -131,6 +131,12 @@ DHPDEV DrvEnablePDEV(DEVMODEW *dm, LPWSTR address, ULONG patternCount,
     RtlZeroMemory(info, sizeof(*info));
     info->hpalDefault = display->palette;
     info->iDitherFormat = display->bitmapFormat;
+    if (display->bitmapFormat == BMF_32BPP) {
+        RB2K_CURSOR_STATS cursor;
+        if (rb_cursor_stats(display, &cursor) && cursor.enabled)
+            display->cursorLock = EngCreateSemaphore();
+        if (display->cursorLock) info->flGraphicsCaps2 |= GCAPS2_ALPHACURSOR;
+    }
     display->ddLock = EngCreateSemaphore();
     if (display->bitmapFormat == BMF_8BPP) {
         if (!display->ddLock) {
@@ -154,6 +160,10 @@ VOID DrvCompletePDEV(DHPDEV pdev, HDEV device)
 VOID DrvDisablePDEV(DHPDEV pdev)
 {
     DISPLAY *display = (DISPLAY *)pdev;
+    if (display->cursorLock) {
+        rb_display_cursor_release(display);
+        EngDeleteSemaphore(display->cursorLock);
+    }
     if (display->ddLock) {
         DrvDisableDirectDraw(pdev);
         rb_dd_free_views(display);
@@ -190,6 +200,7 @@ VOID DrvDisableSurface(DHPDEV pdev)
     DISPLAY *display = (DISPLAY *)pdev;
     VIDEO_MEMORY request;
     ULONG returned;
+    rb_display_cursor_release(display);
     if (display->ddEnabled) DrvDisableDirectDraw(pdev);
     if (display->bitmapFormat == BMF_8BPP) {
         EngAcquireSemaphore(display->ddLock);
@@ -276,6 +287,7 @@ ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
     ULONG returned;
     if (code == QUERYESCSUPPORT)
         return in && inSize == sizeof(ULONG) && (*(ULONG *)in == RB2K_GPU_ESCAPE ||
+                   *(ULONG *)in == RB2K_CURSOR_ESCAPE || *(ULONG *)in == RB2K_CURSOR_SOURCE_ESCAPE ||
                    *(ULONG *)in == RB2K_DD_STATS_ESCAPE || *(ULONG *)in == RB2K_DD_SCANOUT_ESCAPE ||
                    *(ULONG *)in == OPENGL_GETINFO || *(ULONG *)in == RB2K_RVD_ESCAPE ||
                    *(ULONG *)in == RB2K_RVD_STATS_ESCAPE || *(ULONG *)in == RB2K_GL_PRESENT_ESCAPE ||
@@ -290,8 +302,28 @@ ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
                rb_rvd_escape((DISPLAY *)surface->dhpdev, inSize, in, outSize, out) : 0;
     if (code == RB2K_RVD_STATS_ESCAPE)
         return surface && surface->dhpdev ? rb_rvd_stats((DISPLAY *)surface->dhpdev, outSize, out) : 0;
+    if (code == RB2K_CURSOR_SOURCE_ESCAPE) {
+        if (!surface || !(display = (DISPLAY *)surface->dhpdev) || !display->cursorLock ||
+            !out || outSize != sizeof(display->cursorSource) ||
+            (inSize && (inSize != sizeof(ULONG) || !in || *(ULONG *)in != 1))) return 0;
+        EngAcquireSemaphore(display->cursorLock);
+        if (inSize) {
+            RtlZeroMemory(&display->cursorSource, sizeof(display->cursorSource));
+            display->sampleCursor = TRUE;
+        }
+        RtlCopyMemory(out, &display->cursorSource, outSize);
+        EngReleaseSemaphore(display->cursorLock);
+        return 1;
+    }
     if (inSize || !out || !surface || !surface->dhpdev) return 0;
     display = (DISPLAY *)surface->dhpdev;
+    if (code == RB2K_CURSOR_ESCAPE) {
+        RB2K_CURSOR_STATS cursor;
+        if ((outSize != sizeof(cursor) && outSize != FIELD_OFFSET(RB2K_CURSOR_STATS, lastDecline)) ||
+            !rb_cursor_stats(display, &cursor)) return 0;
+        RtlCopyMemory(out, &cursor, outSize);
+        return 1;
+    }
     if (code == RB2K_GL_STATS_ESCAPE && outSize == sizeof(RB2K_GL_STATS))
         return rb_gl_stats(display, RB2K_RVD_OP_GL_STATS, outSize, out);
     if (code == RB2K_GL_TIMING_ESCAPE && outSize == sizeof(RB2K_GL_TIMING))
@@ -339,6 +371,8 @@ static DRVFN callbacks[] = {
     { INDEX_DrvDisableSurface, (PFN)DrvDisableSurface },
     { INDEX_DrvAssertMode, (PFN)DrvAssertMode },
     { INDEX_DrvSetPalette, (PFN)DrvSetPalette },
+    { INDEX_DrvSetPointerShape, (PFN)DrvSetPointerShape },
+    { INDEX_DrvMovePointer, (PFN)DrvMovePointer },
     { INDEX_DrvEscape, (PFN)DrvEscape },
     { INDEX_DrvDrawEscape, (PFN)DrvDrawEscape },
     { INDEX_DrvBitBlt, (PFN)DrvBitBlt },

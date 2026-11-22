@@ -265,6 +265,7 @@ VP_STATUS rb_gpu_surface_reset(RB2K_GPU *gpu)
 {
     VP_STATUS status;
     if (VideoPortInterlockedExchange(&gpu->busy, 1)) return ERROR_BUSY;
+    rb_cursor_forget(gpu);
     if (gpu->rvdContexts && gpu->ready) {
         /* A mode change loses the DirectDraw surfaces but not OpenGL's
          * contexts: free the surfaces one by one and keep the transport. */
