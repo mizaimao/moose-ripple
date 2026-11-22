@@ -774,4 +774,38 @@ page-flip repeats passed. On Windows 2000, the 8-bit test after Quake
 returned palette index 255 throughout page zero with the hardware pointer
 enabled and disabled. Of 786,432 pixels, 774,144 differed from the
 expected pattern. Both isolated repeats on each setting passed. The
-source of that repaint remains open.
+source of that repaint remains open. A subsequent GDI-only boot reproduced
+the same locked page on both immediate repeats, after ten Quake launches
+and zero GPU desktop frames. [Indexed page issue](https://github.com/mizaimao/moose-ripple/issues/114)
+
+## Native Direct3D 7 pixel test
+
+The first test uses the system DirectDraw and Direct3D 7 runtimes. It opens
+a 128×128 offscreen surface on a 1024×768×32 desktop. Run
+`d3d7probe rgb` for the Microsoft software renderer, `d3d7probe target`
+to check the host render target, and `d3d7probe hal` to request the hardware
+device. Exit code 0 means the pixels and counters matched, 1 means a check
+failed, and 2 means the requested hardware was unavailable.
+
+The software reference clears all 16,384 pixels to dark blue, then draws a
+triangle with red, green and blue vertices. It checks 4,095 interior pixels
+against the interpolated colours and 11,233 background pixels against the
+clear. It repeats the draw for 120 frames and locks the target before ending
+the timing.
+
+| Test, three runs per system | Windows 2000 SP4 | Windows XP SP3 |
+| --- | --- | --- |
+| Original driver, software device | 3 passes | 3 passes |
+| Original driver, hardware device | 3 unavailable | 3 unavailable |
+| Host render targets enabled, before accepting the 3D surface flag | 3 rejected | 3 rejected |
+| Same setting, after accepting the flag | 3 passes | 3 passes |
+
+The last two rows used the same guest, driver configuration and executable
+on each system. Each passing target check recorded one GPU fill, one readback
+and zero uploads. All pixels matched. The target check calls DirectDraw
+`Blt` and verifies the storage used by a later Direct3D device.
+
+The historical Direct3D 8 Quake `demo1` comparison used 969 frames at
+640×480. The optimized medians were 24.2 fps on Windows 2000 and 24.1 fps
+on XP. A native game score requires the Direct3D 8 interface used by that
+executable. [Port and game test plan](https://github.com/mizaimao/moose-ripple/issues/106)
