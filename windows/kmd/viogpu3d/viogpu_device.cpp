@@ -177,7 +177,20 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
     if (pPresent->Flags.Flip)
     {
 #ifdef RIPPLE_TRACE_PRESENT
-        DbgPrint(TRACE_LEVEL_FATAL, ("P flip\n"));
+        DbgPrint(TRACE_LEVEL_FATAL, ("P flip dma=%u interval=%u\n", pPresent->pDmaBuffer != NULL, pPresent->FlipInterval));
+#endif
+#if DXGKDDI_INTERFACE_VERSION == DXGKDDI_INTERFACE_VERSION_WIN7
+        // VSync flips get a SetVidPnSourceAddress callback. An immediate DMA flip
+        // must select the rendered surface when its buffer reaches the GPU queue.
+        if (pPresent->pDmaBuffer && pPresent->FlipInterval == D3DDDI_FLIPINTERVAL_IMMEDIATE) {
+            VioGpuCommand *cmd = new (NonPagedPoolNx) VioGpuCommand(m_pAdapter);
+            if (!cmd)
+                return STATUS_INSUFFICIENT_RESOURCES;
+            NTSTATUS status = cmd->BuildFlip(pPresent);
+            if (!NT_SUCCESS(status))
+                delete cmd;
+            return status;
+        }
 #endif
         // Nothing to run for a flip. The private data may still hold the pointer of an earlier
         // use of this buffer, which SubmitCommand would take for a command.

@@ -542,3 +542,236 @@ Forcing `DDCREATE_HARDWAREONLY` passed the page and index checks with
 the existing palette. Explicit palette creation on that interface returned
 `E_NOTIMPL` on XP. The default interface used by the combined test can
 create the palette and use hardware page flipping in the same session.
+
+## Experimental GPU presentation for OpenGL
+
+The ordinary renderer downloads a completed frame and passes it to GDI.
+With the adapter DWORD `RippleGpuDesktop=1` set before boot, the driver
+can display a 32-bit desktop texture up to 1024×768. Setting
+`RIPPLE_GL_PRESENT=1` in an OpenGL application opts its swaps into that
+path. GDI supplies the window's visible rectangles to `DrvDrawEscape`.
+The miniport copies these rectangles into its own desktop texture. When
+GDI needs desktop pixels, the miniport synchronizes the affected area
+with the framebuffer. Software cursor drawing also uses this path.
+
+On an M1 Max running UTM, each OS ran the same 969-frame OpenGL Quake
+demo at 640×480 in a foreground window. The game, installed driver, Mesa
+ICD, resolution, timer and demo settings were fixed. After a warmup, the
+six trials used the ordinary, GPU, GPU, ordinary, GPU, ordinary paths.
+Both sides used the same opt-in desktop. Only the process environment
+variable changed between runs.
+Host elapsed time runs from game launch to the serial score. Process CPU
+includes kernel and user time. The synthetic test times 240 swaps with
+a full-screen window, an unobstructed 640×480 window, a software cursor,
+and a window partly covered by a green rectangle. Each trial checks its
+own red and blue pixels and the cover's green pixel where applicable.
+
+Keep the ordinary path as the default. In the initial Windows 2000
+comparison, GPU presentation reduced Quake from 48.6 to 30.4 fps
+despite reducing 240 full-screen test swaps from 1,186 to 710 ms.
+Timing the individual driver operations reproduced that regression.
+XP's three runs per setting showed no measurable game improvement.
+
+| Test, median of three | Windows 2000 ordinary | Windows 2000 GPU | XP ordinary | XP GPU |
+| --- | ---: | ---: | ---: | ---: |
+| Windowed Quake (fps) | 47.5 | 30.8 | 46.3 | 46.1 |
+| Host time from launch to score (s) | 22.61 | 34.98 | 23.77 | 23.72 |
+| Game process CPU (s) | 7.03 | 19.41 | 7.91 | 8.01 |
+| 240 full-screen swaps, cursor hidden (ms) | 1,176 | 714 | 1,212 | 714 |
+| 240 windowed swaps, cursor hidden (ms) | 749 | 896 | 610 | 733 |
+| Same window with a software cursor (ms) | 699 | 2,098 | 643 | 2,146 |
+| Same window with a green window covering its centre (ms) | 615 | 1,964 | 626 | 2,056 |
+
+The miniport measures elapsed time through each device reply. Each
+rectangle copy attaches the source texture, waits for the copy, then
+detaches it. Two `rvdstat.exe` snapshots around the game include
+startup and teardown. Counts and seconds below are medians per game.
+Time per call is total time divided by total calls across the three
+GPU trials. XP uploaded 3, 3 and 20 times in those trials.
+
+| Desktop operation | 2000 calls | 2000 seconds | 2000 µs/call | XP calls | XP seconds | XP µs/call |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| GPU rectangle copy | 4,308 | 8.1551 | 1,890 | 1,079 | 1.9426 | 1,815 |
+| Upload GDI pixels | 2,255 | 4.0561 | 1,843 | 3 | 0.0201 | 3,863 |
+| Read partial desktop region | 1,117 | 0.7872 | 692 | 1 | 0.0006 | 559 |
+| Flush desktop to scanout | 3,331 | 0.2676 | 81 | 1,081 | 0.0848 | 77 |
+| Read whole GPU-owned region | 1 | 0.0024 | 2,441 | 1 | 0.0029 | 2,854 |
+
+Windows 2000 copied four visible rectangles per presented frame. XP
+copied one. The per-copy costs were similar. On the ordinary path,
+Windows 2000 spent 1.306 s downloading 1,086 application frames and XP
+spent 1.271 s downloading 1,101. GPU presentation eliminated those
+downloads on both. The largest cost on Windows 2000 was the repeated
+rectangle-copy sequence. Submitting a frame's rectangles together is
+the next like-for-like presentation comparison.
+
+All 24 measured synthetic trials on each OS passed the path, foreground
+and pixel checks. The unmeasured first ordinary-path probe on each OS
+returned a failure with matching sampled colours. Its executable did
+not log the failing condition. All twelve measured game runs held the
+foreground, released their GPU resources and restored the desktop.
+One earlier Windows 2000 run also had an 8-bit page-flip mismatch at
+1024×768. The immediate repeat and both later isolated repeats passed.
+
+The tests sampled the program's own GDI pixels. The UTM viewer still
+needs a visual check. On the opt-in XP desktop, set
+`RIPPLE_GL_PRESENT=1` and run `glpresent.exe full hold`. At `GLP HOLD`
+the 1024×768 client should show solid red in the lower-left 512×384
+quarter and solid blue everywhere else. Display depth changes while a
+GPU-presented OpenGL context is still live also remain unverified.
+
+### Batching the visible rectangles
+
+With `RIPPLE_GL_PRESENT=1`, the miniport attaches the application's
+texture to the desktop context once, submits every visible rectangle
+in one command buffer, waits for its fence, then detaches the texture.
+It accepts up to 32 rectangles. GDI handles windows whose visible region
+exceeds that limit. For a comparison on the same installed driver, use
+`RIPPLE_GL_PRESENT=rect` to submit and fence each rectangle separately,
+or `RIPPLE_GL_PRESENT=0` for ordinary GDI presentation.
+
+`rvdstat.exe` reports cumulative rectangle and fence counts and the
+elapsed ticks for attachment, fenced submission and detachment. The
+fenced interval includes host execution and the guest waiting for the
+device reply. The upload counters identify the GDI callback and, for a
+bit-block transfer, its raster-operation code. The per-callback counts
+also distinguish writes up to 64×64 pixels. `glpresent.exe window stripes`
+places twenty narrow opaque bands over a window, checks an exposed pixel
+between the bands and checks the cover's colour.
+
+OpenGL Quake ran the same 969-frame demo three times per setting, in
+rotating order, at 640×480 on a 1024×768 desktop on an M1 Max. The
+host timer measured game launch to score. All measured runs held focus.
+
+| Guest | GDI fps | Per-rectangle fps | Batched fps | Host seconds, GDI / per rectangle / batched |
+| --- | ---: | ---: | ---: | --- |
+| Windows 2000 | 48.4 | 30.4 | 32.8 | 22.56 / 35.84 / 32.72 |
+| Windows XP SP3 | 46.8 | 45.6 | 45.3 | 23.70 / 23.83 / 24.69 |
+
+On Windows 2000, batching changed the median from 4,352 rectangles
+with 4,352 waits to 4,348 rectangles with 1,087 waits. Copy time fell
+from 8.21 to 2.63 s. On XP both paths already had one rectangle per
+present, and copy time was 1.98 and 1.96 s. Both systems passed the 26
+measured image checks and seven legacy tests. The cold-start probe on
+each lost foreground despite matching colours and was excluded.
+
+In a Windows 2000 per-rectangle run, 2,189 of 2,270 uploads came from
+bitmap-to-desktop `DrvCopyBits` calls. In the synthetic cursor test, each
+swap generated two 31×27 uploads and one partial read. With Quake's
+mouse grab disabled, placing the cursor inside, outside and back inside
+gave 33.0, 45.5 and 33.7 fps with batched copies. Desktop uploads were
+2,527, 204 and 2,204. On XP the stock game showed no visible pointer
+inside its client in any timed sample and made a median of three uploads.
+Disabling Quake's mouse grab on XP reproduced the Windows 2000 effect.
+Inside, outside and back inside gave 33.0, 46.6 and 33.3 fps. XP recorded
+2,135, 62 and 2,191 uploads, respectively. In the two inside runs only the
+initial upload came from anything other than bitmap-to-desktop copies.
+Ordinary GDI remains the default on both systems.
+
+### Small desktop writes and the hardware pointer
+
+`RIPPLE_GL_PRESENT=inline` uses the same per-frame copy as `1`.
+When GDI finishes drawing, the miniport puts the pixels of up to three
+pending rectangles of 64×64 or smaller in one virgl command stream.
+It waits for the device to return the command buffer so the guest can
+reuse the bytes. It requests no GPU completion fence for those writes.
+Larger rectangles retain the fenced transfer. `glpresent.exe window uploads`
+writes new colours twice to 13×17, 64×64 and 65×1 rectangles in its own
+window and reads both ends and the neighbouring pixel after each write.
+`rvdstat.exe` reports the numbers of inline rectangles and submissions.
+
+The independent adapter setting `RippleHardwareCursor=1` enables the
+virtio cursor queue in 32-bit modes. The display driver translates GDI's
+AND/XOR shape or premultiplied BGRA image into a padded 64×64 resource.
+A fenced upload completes before the cursor queue selects it. Mouse
+movement uses the existing resource. GDI draws a shape that inverts
+whatever lies underneath. [Windows pointer callbacks](https://learn.microsoft.com/en-us/windows/win32/api/winddi/nf-winddi-drvsetpointershape) · [Virtio GPU cursor protocol](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html) · [SPICE cursor pixel format](https://www.spice-space.org/spice-protocol.html)
+
+`cursorqa.exe` checks the monochrome mask, hotspot, movement, hiding and
+inversion fallback. For alpha pointers it alternates two known hotspot
+colours and returns to the first. Windows can expand the application's
+bitmap and move its hotspot when adding a shadow. The probe asks the
+display driver to checksum the next alpha bitmap Windows supplies, with
+transparent padding to 64×64. It compares that value with the independent
+checksum of the entire resource submitted by the miniport. The test also
+checks the hotspot colour and counts partially transparent pixels.
+
+Windows 2000 supplied a 41×39 image with hotspot (8,14) for the 32×32
+application cursor with hotspot (5,11). Both versions contained 61
+partially transparent coloured pixels. The source and submitted checksums
+on red, green and red again were `6699b8a1`, `9044e1de` and `6699b8a1`.
+Windows rounded each opaque hotspot channel down by one before the driver
+received it. The test checks for consistent channel rounding and requires
+an exact checksum match for each submitted shape.
+
+### Quake with the hardware pointer
+
+The native OpenGL build of Quake ran the same 969-frame shareware demo on
+an M1 Max in UTM. Each figure below is the median of three runs per setting
+after warm-up. The game used `timedemo demo1`, `gl_texsort 0`,
+`host_framerate 0.05` and `r_norefresh 0`, with sound disabled.
+The GDI path downloads the rendered frame to guest memory.
+Both GPU paths copy it to the desktop on the host. The inline setting also
+changes how the driver submits small GDI writes.
+
+| Guest and rendering area | GDI fps | Batched GPU fps | GPU with inline writes, fps | Host seconds to score, GDI / batched / inline |
+| --- | ---: | ---: | ---: | --- |
+| Windows 2000 SP4, 640×480 window | 49.5 | 47.6 | 47.7 | 21.67 / 22.74 / 22.92 |
+| Windows 2000 SP4, 1024×768 decorated window | 39.7 | 47.8 | 48.2 | 27.08 / 23.02 / 22.86 |
+| Windows 2000 SP4, 1024×768 exclusive fullscreen | 40.2 | 47.9 | 47.9 | 26.96 / 22.86 / 22.99 |
+| Windows XP SP3, 640×480 window | 48.6 | 47.1 | 47.2 | 22.70 / 23.65 / 23.73 |
+| Windows XP SP3, 1024×768 decorated window | 38.3 | 46.2 | 46.5 | 28.40 / 24.36 / 24.17 |
+| Windows XP SP3, 1024×768 exclusive fullscreen | 39.1 | 47.4 | 46.6 | 28.28 / 23.09 / 24.07 |
+
+At 640×480 on Windows 2000, GDI frame downloads took 1.24 seconds.
+Eliminating them introduced 2.04 seconds of fenced GPU copies on the
+inline path. At 1024×768 windowed, GDI made 1,113 downloads in 2.53
+seconds. The inline path made one in 0.002 seconds and spent 2.06 seconds
+copying on the GPU. Game-process CPU time fell from 11.56 to 6.97 seconds.
+The device timers cover only part of the 4.22-second improvement measured
+on the host. In exclusive fullscreen the inline path made zero downloads.
+
+The same size effect appeared on XP. GDI's full-frame downloads took
+1.25 seconds at 640×480 and 2.46 seconds in the 1024×768 window.
+GPU copy time was 1.99 and 2.02 seconds, respectively. In the larger
+window, game-process CPU time fell from 12.55 to 7.94 seconds.
+
+With mouse capture disabled on XP, placing the visible software pointer
+inside, outside and back inside the 640×480 game window gave 33.5, 48.4
+and 33.5 fps. The driver counted 2,213, 88 and 2,207 desktop uploads.
+With the hardware pointer the same placements gave 47.2, 47.6 and 50.7
+fps, with three, four and four uploads. Both inside runs performed a
+single desktop read when returning to GDI.
+
+The 240-frame visible-pointer test used the same driver binaries and
+changed only the adapter's cursor setting. On both systems the software
+pointer caused a median of 240 desktop reads and 480 uploads. The
+hardware pointer reduced both counts to zero. Median swap time fell from
+2,101 to 720 ms on Windows 2000 and from 2,181 to 738 ms on XP.
+
+Windows 2000's natural 640×480 game also exposed the pointer cost.
+With the software pointer, GDI / batched / inline scored 49.6 / 32.9 /
+38.6 fps. Enabling the hardware pointer gave 49.5 / 47.6 / 47.7 fps.
+In the inline case, median desktop uploads fell from 2,263 to 95,
+partial reads from 1,124 to 39, and host time from 27.70 to 22.92 s.
+
+The launcher checks the game's actual client rectangle, foreground
+ownership, 32-bit display mode and window style. Quake first received a
+1024×755 client when it requested a decorated 1024×768 window. The
+launcher sizes the client before starting the timedemo and requires the
+engine to acknowledge the command. Fullscreen uses the game's native
+display-mode switch. Every larger run in the table kept the verified size
+and foreground, processed 969 frames and released its resources.
+
+An independent Windows 2000 fullscreen series gave 40.3 / 47.7 / 48.4
+fps. Its companion windowed series missed a timedemo command and is
+excluded. The Windows 2000 640×480 run used the earlier alpha probe that
+expected the unrounded application colour. The corrected probe passed in
+both larger Windows 2000 runs and on XP with identical graphics binaries.
+On XP one 640×480 ordinary-GDI synthetic case lost foreground.
+Its pixels matched. Two independent 240-frame repeats and both indexed
+page-flip repeats passed. On Windows 2000, the 8-bit test after Quake
+returned palette index 255 throughout page zero with the hardware pointer
+enabled and disabled. Of 786,432 pixels, 774,144 differed from the
+expected pattern. Both isolated repeats on each setting passed. The
+source of that repaint remains open.

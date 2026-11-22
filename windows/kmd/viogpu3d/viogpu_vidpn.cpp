@@ -2003,12 +2003,11 @@ void VioGpuVidPN::SourceGone(VioGpuAllocation *allocation)
     ExReleaseFastMutex(&m_sourceLock);
 }
 
-void VioGpuVidPN::Flip()
+void VioGpuVidPN::RefreshScanoutLocked(BOOLEAN verticalBlank)
 {
     PAGED_CODE();
 
     RECT changed;
-    ExAcquireFastMutex(&m_sourceLock);
     VioGpuAllocation *sourceRes = m_sourceRes;
     BOOLEAN flip = InterlockedExchange(&m_shouldFlip, 0) != 0;
 #if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
@@ -2021,7 +2020,7 @@ void VioGpuVidPN::Flip()
     // Ramps that come while there is nothing to draw wait for the next surface, and are then
     // applied one a tick (viogpu_gamma.h).
     m_gamma.Hold(!haveSource && (m_gamma.Active() || m_gamma.Showing()));
-    if (haveSource)
+    if (haveSource && verticalBlank)
     {
         m_gamma.Next();
     }
@@ -2094,12 +2093,34 @@ void VioGpuVidPN::Flip()
         }
     }
 #endif
+}
+
+#if DXGKDDI_INTERFACE_VERSION == DXGKDDI_INTERFACE_VERSION_WIN7
+void VioGpuVidPN::PresentDmaFlip(VioGpuAllocation *source, PHYSICAL_ADDRESS address)
+{
+    PAGED_CODE();
+    ExAcquireFastMutex(&m_sourceLock);
+    m_sourceAddress = address;
+    m_sourceRes = source;
+    m_sourceId = (LONG)source->GetId();
+    InterlockedExchange(&m_shouldFlip, 1);
+    RefreshScanoutLocked(FALSE);
+    ExReleaseFastMutex(&m_sourceLock);
+}
+#endif
+
+void VioGpuVidPN::Flip()
+{
+    PAGED_CODE();
+    ExAcquireFastMutex(&m_sourceLock);
+    RefreshScanoutLocked(TRUE);
+    PHYSICAL_ADDRESS presented = m_sourceAddress;
     ExReleaseFastMutex(&m_sourceLock);
     DXGKARGCB_NOTIFY_INTERRUPT_DATA interrupt;
     interrupt.InterruptType = DXGK_INTERRUPT_CRTC_VSYNC;
 
     interrupt.CrtcVsync.VidPnTargetId = 0;
-    interrupt.CrtcVsync.PhysicalAddress = m_sourceAddress;
+    interrupt.CrtcVsync.PhysicalAddress = presented;
 
     InterlockedExchange64(&m_lastVSync, KeQueryPerformanceCounter(NULL).QuadPart);
     m_pAdapter->NotifyInterrupt(&interrupt, true);

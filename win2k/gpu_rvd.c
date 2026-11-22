@@ -23,6 +23,7 @@
 #pragma warning(push)
 #pragma warning(disable:4200) /* flexible capset array in the virtio ABI */
 #include <linux/virtio_gpu.h>
+#include <virgl_hw.h>
 #pragma warning(pop)
 
 enum { MaxContexts = 64, MaxBuffers = 4096 };
@@ -34,6 +35,7 @@ typedef struct {
 
 typedef struct {
     ULONG handle, context;
+    ULONG frameWidth, frameHeight;
     RB2K_PAGES pages;
 } RVD_BUFFER;
 
@@ -127,7 +129,8 @@ static VP_STATUS start(RB2K_GPU *gpu)
 
 static void stop_when_idle(RB2K_GPU *gpu)
 {
-    if (gpu->ready && !gpu->rvdContexts && !gpu->imageCount) rb_gpu_stop(gpu);
+    if (gpu->ready && !gpu->rvdContexts && !gpu->imageCount &&
+        (!gpu->cursorValid || gpu->glDesktop.image.id)) rb_gpu_stop(gpu);
 }
 
 /* The host lets go of the resource and its pages before they are freed. */
@@ -284,6 +287,7 @@ static VP_STATUS context_create(RB2K_GPU *gpu, const RB2K_RVD_REQUEST *r,
     if (packet->OutputBufferLength < sizeof(ULONG) || r->bytes > RB2K_RVD_MAX_NAME)
         return ERROR_INVALID_PARAMETER;
     sweep(gpu);
+    if (gpu->glDesktop.image.id) stop_when_idle(gpu);
     for (slot = 0; slot < MaxContexts; ++slot) if (!contexts[slot].id) break;
     if (slot == MaxContexts) return ERROR_NOT_ENOUGH_MEMORY;
     status = start(gpu);
@@ -337,6 +341,12 @@ static VP_STATUS buffer_create(RB2K_GPU *gpu, const RB2K_RVD_REQUEST *r,
     if (!rb_pages_alloc(&buffer->pages, bytes)) return ERROR_NOT_ENOUGH_MEMORY;
     buffer->handle = ++gpu->nextId;
     buffer->context = b->context;
+    if (b->target == 2 && b->depth == 1 && b->array_size == 1 &&
+        b->nr_samples <= 1 && !b->flags &&
+        (b->format == VIRGL_FORMAT_B8G8R8A8_UNORM || b->format == VIRGL_FORMAT_B8G8R8X8_UNORM)) {
+        buffer->frameWidth = b->width;
+        buffer->frameHeight = b->height;
+    }
 
     begin(&c, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D, b->context);
     c.resource.resource_id = buffer->handle;
@@ -400,6 +410,7 @@ static VP_STATUS held(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     ULONG i;
     if (packet->OutputBufferLength < 3 * sizeof(ULONG)) return ERROR_INSUFFICIENT_BUFFER;
     sweep(gpu);
+    if (gpu->glDesktop.image.id) stop_when_idle(gpu);
     out[0] = out[1] = out[2] = 0;
     for (i = 0; i < MaxContexts; ++i) if (contexts[i].id) ++out[0];
     for (i = 0; i < MaxBuffers; ++i) {
@@ -457,10 +468,32 @@ static VP_STATUS transfer(RB2K_GPU *gpu, const RB2K_RVD_REQUEST *r)
     return send(gpu, &c, sizeof(c.transfer), NULL, 0, from, NULL, 0, VIRTIO_GPU_RESP_OK_NODATA);
 }
 
+static VP_STATUS present_frame(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
+{
+    const RB2K_GL_FRAME *f = packet->InputBuffer;
+    ULONG header = FIELD_OFFSET(RB2K_GL_FRAME, rects);
+    RVD_BUFFER *b;
+    if (packet->InputBufferLength < header || packet->OutputBufferLength ||
+        !f->count || f->count > RB2K_GL_MAX_RECTS || f->mode > RB2K_FRAME_INLINE_UPLOADS ||
+        packet->InputBufferLength != header + f->count * sizeof(f->rects[0]))
+        return ERROR_INVALID_PARAMETER;
+    b = own_buffer(f->source);
+    if (!b || !b->frameWidth || !b->frameHeight || b->context != f->context ||
+        !own_context(f->context) || b->frameWidth != f->width || b->frameHeight != f->height)
+        return ERROR_INVALID_PARAMETER;
+    return rb_gl_present(gpu, f);
+}
+
 VP_STATUS rb_gpu_rvd_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 {
     const RB2K_RVD_REQUEST *r = packet->InputBuffer;
     VP_STATUS status;
+    if (packet->IoControlCode == IOCTL_RB2K_GL_FRAME) {
+        if (VideoPortInterlockedExchange(&gpu->busy, 1)) return ERROR_BUSY;
+        status = present_frame(gpu, packet);
+        VideoPortInterlockedExchange(&gpu->busy, 0);
+        return status;
+    }
     if (packet->InputBufferLength != sizeof(*r)) return ERROR_INVALID_PARAMETER;
     if (VideoPortInterlockedExchange(&gpu->busy, 1)) return ERROR_BUSY;
     switch (r->op) {
@@ -474,6 +507,55 @@ VP_STATUS rb_gpu_rvd_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     case RB2K_RVD_OP_SUBMIT: status = submit(gpu, r); break;
     case RB2K_RVD_OP_TRANSFER: status = transfer(gpu, r); break;
     case RB2K_RVD_OP_HELD: status = held(gpu, packet); break;
+    case RB2K_RVD_OP_GDI_ACCESS:
+    case RB2K_RVD_OP_GDI_FLUSH: {
+        ULONG active;
+        if (packet->OutputBufferLength != sizeof(active)) { status = ERROR_INVALID_PARAMETER; break; }
+        if (r->op == RB2K_RVD_OP_GDI_ACCESS && gpu->glDesktop.image.id) {
+            sweep(gpu);
+            stop_when_idle(gpu);
+        }
+        active = gpu->glDesktop.image.id != 0;
+        /* GDI can start its next operation just after the last GL client
+         * exits. A VGA-only desktop is a successful CPU drawing target. */
+        status = NO_ERROR;
+        if (active) status = r->op == RB2K_RVD_OP_GDI_ACCESS ?
+            rb_gl_access(gpu, &r->u.rect, r->a, r->b) : rb_gl_flush(gpu);
+        if (!status) {
+            *(PULONG)packet->OutputBuffer = active;
+            packet->StatusBlock->Information = sizeof(active);
+        }
+        break;
+    }
+    case RB2K_RVD_OP_GL_STATS:
+        if (packet->OutputBufferLength != sizeof(gpu->glStats)) { status = ERROR_INVALID_PARAMETER; break; }
+        VideoPortMoveMemory(packet->OutputBuffer, &gpu->glStats, sizeof(gpu->glStats));
+        packet->StatusBlock->Information = sizeof(gpu->glStats);
+        status = NO_ERROR;
+        break;
+    case RB2K_RVD_OP_GL_TIMING:
+        if (packet->OutputBufferLength != sizeof(gpu->glTiming)) { status = ERROR_INVALID_PARAMETER; break; }
+        rb_counter_ticks(&gpu->glTiming.frequency);
+        VideoPortMoveMemory(packet->OutputBuffer, &gpu->glTiming, sizeof(gpu->glTiming));
+        packet->StatusBlock->Information = sizeof(gpu->glTiming);
+        status = NO_ERROR;
+        break;
+    case RB2K_RVD_OP_GL_OPTION:
+        if (packet->OutputBufferLength != sizeof(ULONG)) { status = ERROR_INVALID_PARAMETER; break; }
+        *(PULONG)packet->OutputBuffer = gpu->glEnabled;
+        packet->StatusBlock->Information = sizeof(ULONG);
+        status = NO_ERROR;
+        break;
+    case RB2K_RVD_OP_GL_PROFILE:
+        if (packet->OutputBufferLength != sizeof(gpu->glProfile) &&
+            packet->OutputBufferLength != FIELD_OFFSET(RB2K_GL_PROFILE, inlineBatches)) {
+            status = ERROR_INVALID_PARAMETER; break;
+        }
+        rb_counter_ticks(&gpu->glProfile.frequency);
+        VideoPortMoveMemory(packet->OutputBuffer, &gpu->glProfile, packet->OutputBufferLength);
+        packet->StatusBlock->Information = packet->OutputBufferLength;
+        status = NO_ERROR;
+        break;
     default: status = ERROR_INVALID_FUNCTION; break;
     }
     VideoPortInterlockedExchange(&gpu->busy, 0);
