@@ -47,6 +47,7 @@ static ULONG page_size(DISPLAY *d)
 static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
 {
     DWORD caps = desc->ddsCaps.dwCaps;
+    DWORD storage = caps & (DDSCAPS_TEXTURE | DDSCAPS_OFFSCREENPLAIN);
     const DDPIXELFORMAT *fmt = &desc->ddpfPixelFormat;
     if (primary_caps(caps) || flip_caps(caps)) {
         if (flip_caps(caps) && (!d->pageBytes ||
@@ -55,9 +56,10 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
             ((desc->dwFlags & DDSD_WIDTH) && desc->dwWidth != d->mode.VisScreenWidth) ||
             ((desc->dwFlags & DDSD_HEIGHT) && desc->dwHeight != d->mode.VisScreenHeight))
             return FALSE;
-    } else if (!d->gpuSurfaces || !(caps & DDSCAPS_OFFSCREENPLAIN) ||
+    } else if (!d->gpuSurfaces || (storage != DDSCAPS_OFFSCREENPLAIN &&
+               (storage != DDSCAPS_TEXTURE || !d->nativeD3D7)) ||
                (caps & ~(DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM |
-                         DDSCAPS_3DDEVICE)) ||
+                         DDSCAPS_3DDEVICE | DDSCAPS_TEXTURE)) ||
                !desc->dwWidth || desc->dwWidth > RB2K_DD_MAX_WIDTH ||
                !desc->dwHeight || desc->dwHeight > RB2K_DD_MAX_HEIGHT) return FALSE;
     if (!(desc->dwFlags & DDSD_PIXELFORMAT)) return TRUE;
@@ -82,7 +84,7 @@ static DWORD APIENTRY can_create(PDD_CANCREATESURFACEDATA data)
     return DDHAL_DRIVER_HANDLED;
 }
 
-static DD_SLOT *find_slot(DISPLAY *d, PDD_SURFACE_GLOBAL global)
+DD_SLOT *rb_dd_slot(DISPLAY *d, PDD_SURFACE_GLOBAL global)
 {
     ULONG i;
     for (i = 0; i < RB2K_DD_SLOTS; ++i) {
@@ -184,10 +186,11 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
     create.width = desc->dwWidth;
     create.height = desc->dwHeight;
     EngAcquireSemaphore(d->ddLock);
-    slot = find_slot(d, NULL);
-    if (!d->ddEnabled || find_slot(d, g))
+    slot = rb_dd_slot(d, NULL);
+    if (!d->ddEnabled || rb_dd_slot(d, g))
         data->ddRVal = DDERR_SURFACELOST;
-    else if (!slot || !request(d, IOCTL_RB2K_DD_CREATE, &create, sizeof(create),
+    else if (!slot || !request(d, desc->ddsCaps.dwCaps & DDSCAPS_TEXTURE ?
+                               IOCTL_RB2K_DD_CREATE_TEXTURE : IOCTL_RB2K_DD_CREATE, &create, sizeof(create),
                                &slot->id, sizeof(slot->id)))
         data->ddRVal = DDERR_OUTOFVIDEOMEMORY;
     else {
@@ -219,7 +222,7 @@ static DWORD APIENTRY destroy_surface(PDD_DESTROYSURFACEDATA data)
     DISPLAY *d = (DISPLAY *)data->lpDD->dhpdev;
     DD_SLOT *slot;
     EngAcquireSemaphore(d->ddLock);
-    slot = find_slot(d, data->lpDDSurface->lpGbl);
+    slot = rb_dd_slot(d, data->lpDDSurface->lpGbl);
     if (slot) release_slot(d, slot);
     if (d->flipBack == data->lpDDSurface->lpGbl || d->flipFront == data->lpDDSurface->lpGbl)
         release_chain(d);
@@ -348,8 +351,8 @@ static DWORD APIENTRY blt(PDD_BLTDATA data)
     HANDLE owner = EngGetCurrentProcessId();
     DWORD rc = DDHAL_DRIVER_HANDLED;
     EngAcquireSemaphore(d->ddLock);
-    dst = find_slot(d, data->lpDDDestSurface->lpGbl);
-    if (data->lpDDSrcSurface) src = find_slot(d, data->lpDDSrcSurface->lpGbl);
+    dst = rb_dd_slot(d, data->lpDDDestSurface->lpGbl);
+    if (data->lpDDSrcSurface) src = rb_dd_slot(d, data->lpDDSrcSurface->lpGbl);
     primary = !dst && src && mapped_primary(d, data->lpDDDestSurface);
     if (!data->lpDDSrcSurface && operation == DDBLT_COLORFILL && !data->IsClipped &&
         surface_page(d, data->lpDDDestSurface, &page))
@@ -426,7 +429,7 @@ static DWORD APIENTRY lock_surface(PDD_LOCKDATA data)
     ULONG bytes, page, offset = 0;
     DWORD rc = DDHAL_DRIVER_HANDLED;
     EngAcquireSemaphore(d->ddLock);
-    s = find_slot(d, g);
+    s = rb_dd_slot(d, g);
     if (!s) {
         if (!surface_page(d, data->lpDDSurface, &page)) {
             if (flip_caps(data->lpDDSurface->ddsCaps.dwCaps)) data->ddRVal = DDERR_SURFACELOST;
@@ -497,7 +500,7 @@ static DWORD APIENTRY unlock_surface(PDD_UNLOCKDATA data)
     ULONG page;
     DWORD rc = DDHAL_DRIVER_HANDLED;
     EngAcquireSemaphore(d->ddLock);
-    s = find_slot(d, g);
+    s = rb_dd_slot(d, g);
     if (!s) {
         if (surface_page(d, data->lpDDSurface, &page) && (d->lockedPages & (1UL << page))) {
             d->lockedPages &= ~(1UL << page);
@@ -636,6 +639,8 @@ static DWORD APIENTRY driver_info(PDD_GETDRIVERINFODATA data)
     ULONG bytes;
     data->dwActualSize = 0;
     data->ddRVal = DDERR_CURRENTLYNOTAVAIL;
+    if (((DISPLAY *)data->dhpdev)->nativeD3D7 && rb_d7_info(data))
+        return DDHAL_DRIVER_HANDLED;
     if (IsEqualGUID(&data->guidInfo, &nt)) {
         RtlZeroMemory(&callbacks, sizeof(callbacks));
         callbacks.dwSize = sizeof(callbacks);
@@ -681,12 +686,20 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     info->ddCaps.dwRops[((SRCCOPY >> 16) & 255) / 32] |= 1UL << ((SRCCOPY >> 16) & 31);
     info->ddCaps.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY |
                                   DDSCAPS_LOCALVIDMEM;
-    d->gpuSurfaces = caps.gpuSurfaces != 0;
+    d->gpuSurfaces = (caps.gpuSurfaces & RB2K_DD_HOST_SURFACES) != 0;
+    d->nativeD3D7 = (caps.gpuSurfaces & RB2K_DD_NATIVE_D3D7) != 0;
     if (d->gpuSurfaces)
         info->ddCaps.ddsCaps.dwCaps |= DDSCAPS_3DDEVICE;
     else
         caps.slots = 0;
     info->ddCaps.dwVidMemTotal = caps.maxBytes * caps.slots;
+    if (d->nativeD3D7) {
+        info->ddCaps.ddsCaps.dwCaps |= DDSCAPS_TEXTURE;
+        v->dwTextureAlign = 4;
+        rb_d7_caps(info);
+        info->dwFlags |= DDHALINFO_GETDRIVERINFOSET;
+        info->GetDriverInfo = driver_info;
+    }
     pageBytes = page_size(d);
     if (pageBytes) {
         *heapCount = 1;
@@ -697,7 +710,7 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
             heaps->fpEnd = pageBytes * 2 - 1;
             heaps->ddsCaps.dwCaps = heaps->ddsCapsAlt.dwCaps = DDSCAPS_OFFSCREENPLAIN;
         }
-        info->dwFlags = DDHALINFO_GETDRIVERINFOSET;
+        info->dwFlags |= DDHALINFO_GETDRIVERINFOSET;
         info->GetDriverInfo = driver_info;
         info->ddCaps.ddsCaps.dwCaps |= DDSCAPS_FLIP;
         info->ddCaps.dwCaps2 |= DDCAPS2_FLIPNOVSYNC;
@@ -706,6 +719,8 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     {
         ULONG i;
         EngAcquireSemaphore(d->ddLock);
+        ++d->d7.halInfoCalls;
+        d->d7.nativeEnabled = d->nativeD3D7;
         for (i = 0; i < caps.slots; ++i)
             if (!d->slots[i].global) info->ddCaps.dwVidMemFree += caps.maxBytes;
         if (!d->flipBack) info->ddCaps.dwVidMemFree += pageBytes;
@@ -721,7 +736,7 @@ BOOL APIENTRY DrvEnableDirectDraw(DHPDEV pdev, DD_CALLBACKS *c, DD_SURFACECALLBA
     RB2K_DD_CAPS caps;
     ULONG pageBytes;
     if (!d->ddLock || !rb_dd_caps(d, &caps)) return FALSE;
-    d->gpuSurfaces = caps.gpuSurfaces != 0;
+    d->gpuSurfaces = (caps.gpuSurfaces & RB2K_DD_HOST_SURFACES) != 0;
     RtlZeroMemory(c, sizeof(*c)); RtlZeroMemory(sc, sizeof(*sc)); RtlZeroMemory(pc, sizeof(*pc));
     c->dwSize = sizeof(*c); sc->dwSize = sizeof(*sc); pc->dwSize = sizeof(*pc);
     c->dwFlags = DDHAL_CB32_CANCREATESURFACE | DDHAL_CB32_CREATESURFACE;
@@ -744,6 +759,7 @@ BOOL APIENTRY DrvEnableDirectDraw(DHPDEV pdev, DD_CALLBACKS *c, DD_SURFACECALLBA
     EngAcquireSemaphore(d->ddLock);
     d->pageBytes = pageBytes;
     d->ddEnabled = TRUE;
+    ++d->d7.enableCalls;
     EngReleaseSemaphore(d->ddLock);
     return TRUE;
 }
@@ -760,4 +776,5 @@ VOID APIENTRY DrvDisableDirectDraw(DHPDEV pdev)
     for (i = 0; i < RB2K_DD_SLOTS; ++i)
         if (d->slots[i].global) release_slot(d, &d->slots[i]);
     EngReleaseSemaphore(d->ddLock);
+    rb_d7_disable(d);
 }

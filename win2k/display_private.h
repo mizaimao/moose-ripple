@@ -8,12 +8,15 @@
 #include "ddsurface.h"
 #include "rb2kprobe.h"
 #include "rb2kcursor.h"
+#include "rb2kd3d7.h"
 
 typedef struct {
     PDD_SURFACE_GLOBAL global;
     HANDLE owner;
     ULONG id, width, height;
     BOOL locked, writable, lost;
+    PDD_DIRECTDRAW_LOCAL local;
+    ULONG d3dHandle;
 } DD_SLOT;
 
 typedef struct DD_FLIP_VIEW {
@@ -44,6 +47,9 @@ typedef struct {
     BOOL ddEnabled;
     BOOL glActive;
     BOOL gpuSurfaces;           /* offscreen surfaces as host textures (RB2K_DD_CAPS) */
+    BOOL nativeD3D7;
+    HRESULT (CALLBACK *parseD3DExtension)(PVOID command, PVOID *next);
+    RB2K_D3D7_DIAGNOSTICS d7;
     ULONG pageBytes, visiblePage, lockedPages;
     PDD_SURFACE_GLOBAL flipBack, flipFront;
     HANDLE flipOwner;
@@ -54,6 +60,12 @@ typedef struct {
 BOOL rb_dd_caps(DISPLAY *display, RB2K_DD_CAPS *caps);
 BOOL rb_cursor_stats(DISPLAY *d, RB2K_CURSOR_STATS *stats);
 void rb_display_cursor_release(DISPLAY *d);
+DD_SLOT *rb_dd_slot(DISPLAY *display, PDD_SURFACE_GLOBAL surface);
+void rb_d7_init(void);
+void rb_d7_disable(DISPLAY *display);
+void rb_d7_caps(DD_HALINFO *info);
+BOOL rb_d7_info(PDD_GETDRIVERINFODATA data);
+ULONG rb_d7_stats(DISPLAY *display, ULONG size, PVOID out);
 HPALETTE rb_create_palette(DISPLAY *display);
 BOOL rb_restore_palette(DISPLAY *display);
 void rb_rvd_init(void);

@@ -7,6 +7,8 @@
 #define RB2K_DD_MAX_HEIGHT 768UL
 #define RB2K_DD_MAX_BYTES (RB2K_DD_MAX_WIDTH * RB2K_DD_MAX_HEIGHT * 4)
 #define RB2K_DD_SLOTS 4
+#define RB2K_DD_HOST_SURFACES 1
+#define RB2K_DD_NATIVE_D3D7 2
 #define RB2K_DD_IOCTL(n) CTL_CODE(FILE_DEVICE_VIDEO,n,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_RB2K_DD_QUERY   RB2K_DD_IOCTL(0x901)
 #define IOCTL_RB2K_DD_CREATE  RB2K_DD_IOCTL(0x902)
@@ -21,11 +23,12 @@
 #define IOCTL_RB2K_DD_FLIP      RB2K_DD_IOCTL(0x90b)
 #define IOCTL_RB2K_DD_FLIP_RELEASE RB2K_DD_IOCTL(0x90c)
 #define IOCTL_RB2K_DD_FLIP_ACQUIRE RB2K_DD_IOCTL(0x90d)
+#define IOCTL_RB2K_DD_CREATE_TEXTURE RB2K_DD_IOCTL(0x90e)
 typedef struct {
     ULONG maxBytes, slots;
     ULONG hostFills, readbacks, uploads, hostCopies;
     ULONG presents, presentReadbacks, presentBytes;
-    ULONG gpuSurfaces;      /* offscreen surfaces as host textures (registry, off by default) */
+    ULONG gpuSurfaces;      /* host-surface and native D3D7 capability bits */
 } RB2K_DD_CAPS;
 typedef struct { ULONG width, height; } RB2K_DD_CREATE;
 typedef struct { ULONG id, color; } RB2K_DD_FILL;

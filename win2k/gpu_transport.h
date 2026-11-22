@@ -10,6 +10,7 @@ typedef struct {
     ULONG id, width, height;
     BOOLEAN defined, hasSurface, uniform;
     ULONG color;
+    BOOLEAN sampled;
 } RB2K_IMAGE;
 typedef struct {
     RB2K_IMAGE image;
@@ -63,7 +64,7 @@ typedef struct {
     LONG busy, barrier;
     BOOLEAN owned, ready, enabledMaster, tested;
     ULONG nextId, fence, imageCount, hostFills, readbacks, uploads, hostCopies;
-    BOOLEAN ddGpuSurfaces;
+    BOOLEAN ddGpuSurfaces, nativeD3D7;
     BOOLEAN glEnabled;
     ULONG presents, presentReadbacks, presentBytes;
     RB2K_PRIMARY primary;

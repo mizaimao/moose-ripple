@@ -32,7 +32,11 @@ static VP_STATUS query(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     caps->presentReadbacks = gpu->presentReadbacks;
     caps->presentBytes = gpu->presentBytes;
     /* Optional host textures and their primary-blit path use 32-bit pixels. */
-    caps->gpuSurfaces = gpu->ddGpuSurfaces && gpu->primary.bitsPerPixel == 32;
+    caps->gpuSurfaces = 0;
+    if (gpu->ddGpuSurfaces && gpu->primary.bitsPerPixel == 32) {
+        caps->gpuSurfaces = RB2K_DD_HOST_SURFACES;
+        if (gpu->nativeD3D7) caps->gpuSurfaces |= RB2K_DD_NATIVE_D3D7;
+    }
     packet->StatusBlock->Information = sizeof(*caps);
     return NO_ERROR;
 }
@@ -45,9 +49,11 @@ static VP_STATUS create(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     RB2K_IMAGE *image;
     VP_STATUS status;
     ULONG slot;
+    BOOLEAN texture = packet->IoControlCode == IOCTL_RB2K_DD_CREATE_TEXTURE;
     if (packet->InputBufferLength != sizeof(*size) || packet->OutputBufferLength < sizeof(ULONG))
         return ERROR_INVALID_PARAMETER;
-    if (gpu->primary.bitsPerPixel != 32) return ERROR_NOT_SUPPORTED;
+    if (gpu->primary.bitsPerPixel != 32 || (texture && (!gpu->nativeD3D7 || !gpu->ddGpuSurfaces)))
+        return ERROR_NOT_SUPPORTED;
     if (!size->width || size->width > RB2K_DD_MAX_WIDTH ||
         !size->height || size->height > RB2K_DD_MAX_HEIGHT)
         return ERROR_INVALID_PARAMETER;
@@ -66,6 +72,7 @@ static VP_STATUS create(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     image->id = ++gpu->nextId;
     image->width = size->width;
     image->height = size->height;
+    image->sampled = texture;
     if (!rb_gpu_create_image(gpu, &result, image, name, sizeof(name) - 1, FALSE)) {
         if (!gpu->rvdContexts || !gpu->ready) rb_gpu_stop(gpu);
         return result.status;
@@ -255,7 +262,8 @@ VP_STATUS rb_gpu_surface_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     VP_STATUS status;
     if (VideoPortInterlockedExchange(&gpu->busy, 1)) return ERROR_BUSY;
     if (packet->IoControlCode == IOCTL_RB2K_DD_QUERY) status = query(gpu, packet);
-    else if (packet->IoControlCode == IOCTL_RB2K_DD_CREATE) status = create(gpu, packet);
+    else if (packet->IoControlCode == IOCTL_RB2K_DD_CREATE ||
+             packet->IoControlCode == IOCTL_RB2K_DD_CREATE_TEXTURE) status = create(gpu, packet);
     else status = image_request(gpu, packet);
     VideoPortInterlockedExchange(&gpu->busy, 0);
     return status;

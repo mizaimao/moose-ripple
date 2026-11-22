@@ -115,6 +115,7 @@ BOOLEAN rb_gpu_create_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     request.resource.target = PipeTexture2D;
     request.resource.format = VIRGL_FORMAT_B8G8R8A8_UNORM;
     request.resource.bind = VIRGL_BIND_RENDER_TARGET | (scanout ? VIRGL_BIND_SCANOUT : 0);
+    if (image->sampled) request.resource.bind |= VIRGL_BIND_SAMPLER_VIEW;
     request.resource.width = image->width;
     request.resource.height = image->height;
     request.resource.depth = request.resource.array_size = 1;

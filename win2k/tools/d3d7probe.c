@@ -141,11 +141,12 @@ static BOOL scene(IDirect3DDevice7 *device, IDirectDrawSurface7 *target)
 
 int main(int argc, char **argv)
 {
-    BOOL hal, targetOnly, gotStats, good = FALSE, restored;
+    BOOL hal, clearOnly, targetOnly, gotStats, good = FALSE, restored;
     ENUM_DEVICE e;
     D3DDEVICEDESC7 caps;
     DEVMODEA before = {0}, after = {0};
     RB2K_D3D7_STATS base = {0}, final = {0};
+    RB2K_D3D7_DIAGNOSTICS trace;
     IDirectDraw7 *dd = NULL;
     IDirect3D7 *d3d = NULL;
     IDirect3DDevice7 *device = NULL;
@@ -154,11 +155,13 @@ int main(int argc, char **argv)
     HWND window;
     HDC dc;
     int result = 1;
-    if (argc != 2 || (strcmp(argv[1], "hal") && strcmp(argv[1], "rgb") && strcmp(argv[1], "target"))) {
-        puts("Usage: d3d7probe rgb|hal|target"); return 1;
+    if (argc != 2 || (strcmp(argv[1], "hal") && strcmp(argv[1], "clear") &&
+                      strcmp(argv[1], "rgb") && strcmp(argv[1], "target"))) {
+        puts("Usage: d3d7probe rgb|target|clear|hal"); return 1;
     }
     setvbuf(stdout, NULL, _IONBF, 0);
-    hal = !strcmp(argv[1], "hal");
+    clearOnly = !strcmp(argv[1], "clear");
+    hal = clearOnly || !strcmp(argv[1], "hal");
     targetOnly = !strcmp(argv[1], "target");
     e.wanted = hal || targetOnly ? &IID_IDirect3DHALDevice : &IID_IDirect3DRGBDevice;
     e.found = FALSE;
@@ -202,7 +205,13 @@ int main(int argc, char **argv)
     if (!e.found ||
         !IsEqualGUID(&caps.deviceGUID, e.wanted) || !!(caps.dwDevCaps & D3DDEVCAPS_HWRASTERIZATION) != hal)
         goto done;
-    good = scene(device, target);
+    if (clearOnly) {
+        D3DRECT rect = {0, 0, Side, Side};
+        good = call("clear", IDirect3DDevice7_Clear(device, 1, &rect, D3DCLEAR_TARGET, CLEAR_COLOR, 1, 0)) &&
+               pixels(target, FALSE, NULL);
+    } else {
+        good = scene(device, target);
+    }
 done:
     if (device) IDirect3DDevice7_Release(device);
     if (target) IDirectDrawSurface7_Release(target);
@@ -213,7 +222,20 @@ done:
         printf("D7 host clears=%lu triangles=%lu live_contexts=%lu/%lu live_targets=%lu/%lu\n",
                clears, triangles, base.contexts, final.contexts, base.targets, final.targets);
         good &= final.contexts == base.contexts && final.targets == base.targets;
-        good &= hal ? (clears >= Frames+2 && triangles >= Frames+1) : (!clears && !triangles);
+        if (clearOnly) good &= clears == 1 && !triangles;
+        else if (hal) good &= clears >= Frames+2 && triangles >= Frames+1;
+        else good &= !clears && !triangles;
+        if (ExtEscape(dc, RB2K_D3D7_STATS_ESCAPE, 0, NULL, sizeof(trace), (LPSTR)&trace) > 0) {
+            ULONG i;
+            printf("D7 caps info=%lu enabled=%lu native=%lu dp2_table=%lu surface_table=%lu\n",
+                   trace.halInfoCalls, trace.enableCalls, trace.nativeEnabled, trace.callbackQueries, trace.surfaceQueries);
+            printf("D7 query IDs");
+            for (i = 0; i < trace.queryCount && i < RB2K_D3D7_QUERY_LIMIT; ++i) printf(" %08lx", trace.queryIds[i]);
+            putchar('\n');
+            printf("D7 callbacks surface=%lu context=%lu clear_tokens=%lu dp2=%lu last_op=%lu hr=%08lx offset=%lu\n",
+                   trace.surfaceCalls, trace.contextCalls, trace.clearCalls, trace.commandCalls,
+                   trace.lastCommand, trace.lastError, trace.errorOffset);
+        }
     } else if (hal || gotStats) {
         good = FALSE;
     }
