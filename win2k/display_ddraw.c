@@ -52,6 +52,17 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
     DWORD caps = desc->ddsCaps.dwCaps;
     DWORD storage = caps & (DDSCAPS_TEXTURE | DDSCAPS_OFFSCREENPLAIN);
     const DDPIXELFORMAT *fmt = &desc->ddpfPixelFormat;
+    if (caps & DDSCAPS_ZBUFFER) {
+        if (!d->z16Storage || !d->nativeD3D7 || !d->gpuSurfaces ||
+            (caps & ~(DDSCAPS_ZBUFFER | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM)) ||
+            !desc->dwWidth || desc->dwWidth > RB2K_DD_MAX_WIDTH ||
+            !desc->dwHeight || desc->dwHeight > RB2K_DD_MAX_HEIGHT)
+            return FALSE;
+        if (desc->dwFlags & DDSD_PIXELFORMAT)
+            return fmt->dwSize == sizeof(*fmt) && fmt->dwFlags == DDPF_ZBUFFER &&
+                   fmt->dwZBufferBitDepth == 16 && fmt->dwZBitMask == 0xffff;
+        return (desc->dwFlags & DDSD_ZBUFFERBITDEPTH) && desc->dwZBufferBitDepth == 16;
+    }
     if (primary_caps(d, caps) || flip_caps(caps)) {
         if (flip_caps(caps) && (!d->pageBytes ||
             ((desc->dwFlags & DDSD_BACKBUFFERCOUNT) && desc->dwBackBufferCount > 1))) return FALSE;
@@ -119,6 +130,11 @@ static void release_chain(DISPLAY *d)
     d->lockedPages = 0;
 }
 
+static ULONG slot_pitch(const DD_SLOT *slot)
+{
+    return slot->width * (slot->depth16 ? sizeof(USHORT) : sizeof(ULONG));
+}
+
 static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
 {
     DISPLAY *d = (DISPLAY *)data->lpDD->dhpdev;
@@ -126,6 +142,7 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
     DDSURFACEDESC *desc = data->lpDDSurfaceDesc;
     RB2K_DD_CREATE create;
     DD_SLOT *slot;
+    ULONG createCode = IOCTL_RB2K_DD_CREATE;
     DWORD rc = DDHAL_DRIVER_HANDLED;
     if (!supported(d, desc) || data->dwSCnt != 1) {
         data->ddRVal = DDERR_INVALIDCAPS;
@@ -188,12 +205,13 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
     }
     create.width = desc->dwWidth;
     create.height = desc->dwHeight;
+    if (desc->ddsCaps.dwCaps & DDSCAPS_ZBUFFER) createCode = IOCTL_RB2K_DD_CREATE_Z16;
+    else if (desc->ddsCaps.dwCaps & DDSCAPS_TEXTURE) createCode = IOCTL_RB2K_DD_CREATE_TEXTURE;
     EngAcquireSemaphore(d->ddLock);
     slot = rb_dd_slot(d, NULL);
     if (!d->ddEnabled || rb_dd_slot(d, g))
         data->ddRVal = DDERR_SURFACELOST;
-    else if (!slot || !request(d, desc->ddsCaps.dwCaps & DDSCAPS_TEXTURE ?
-                               IOCTL_RB2K_DD_CREATE_TEXTURE : IOCTL_RB2K_DD_CREATE, &create, sizeof(create),
+    else if (!slot || !request(d, createCode, &create, sizeof(create),
                                &slot->id, sizeof(slot->id)))
         data->ddRVal = DDERR_OUTOFVIDEOMEMORY;
     else {
@@ -201,7 +219,8 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
         slot->owner = EngGetCurrentProcessId();
         slot->width = create.width;
         slot->height = create.height;
-        g->lPitch = create.width * 4;
+        slot->depth16 = createCode == IOCTL_RB2K_DD_CREATE_Z16;
+        g->lPitch = slot_pitch(slot);
         g->dwUserMemSize = g->lPitch * create.height;
         g->fpVidMem = DDHAL_PLEASEALLOC_USERMEM;
         desc->lPitch = g->lPitch;
@@ -365,6 +384,7 @@ static DWORD APIENTRY blt(PDD_BLTDATA data)
     else if ((dst && (dst->lost || dst->owner != owner)) || (src && (src->lost || src->owner != owner)))
         data->ddRVal = DDERR_SURFACELOST;
     else if ((dst && dst->locked) || (src && src->locked)) data->ddRVal = DDERR_SURFACEBUSY;
+    else if ((dst && dst->depth16) || (src && src->depth16)) data->ddRVal = DDERR_UNSUPPORTED;
     /* NT5 has already intersected a window clipper with the visible region.
      * Each callback describes one visible source/destination rectangle pair. */
     else if (data->IsClipped) data->ddRVal = DDERR_UNSUPPORTED;
@@ -465,12 +485,12 @@ static DWORD APIENTRY lock_surface(PDD_LOCKDATA data)
         if (!rect_inside(r, s->width, s->height)) {
             data->ddRVal = DDERR_INVALIDRECT; goto done;
         }
-        offset = ((ULONG)r->top * s->width + r->left) * 4;
+        offset = (ULONG)r->top * slot_pitch(s) + r->left * (s->depth16 ? sizeof(USHORT) : sizeof(ULONG));
     }
-    bytes = s->width * s->height * 4;
+    bytes = slot_pitch(s) * s->height;
     if (!(data->dwFlags & DDLOCK_WRITEONLY) ||
         (data->bHasRect && !full_rect(&data->rArea, s))) {
-        if (!(data->dwFlags & DDLOCK_READONLY) &&
+        if (!s->depth16 && !(data->dwFlags & DDLOCK_READONLY) &&
             request(d, IOCTL_RB2K_DD_UNIFORM, &s->id, sizeof(s->id), &uniform, sizeof(uniform)) &&
             uniform.known == 1) {
             seed = &uniform.color;
@@ -516,7 +536,7 @@ static DWORD APIENTRY unlock_surface(PDD_UNLOCKDATA data)
     else {
         data->ddRVal = DD_OK;
         if (s->writable) {
-            ULONG bytes = s->width * s->height * 4;
+            ULONG bytes = slot_pitch(s) * s->height;
             ULONG *packet = EngAllocMem(0, sizeof(ULONG) + bytes, 'u2bR');
             if (packet) {
                 *packet = s->id;
@@ -691,6 +711,11 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
                                   DDSCAPS_LOCALVIDMEM;
     d->gpuSurfaces = (caps.gpuSurfaces & RB2K_DD_HOST_SURFACES) != 0;
     d->nativeD3D7 = (caps.gpuSurfaces & RB2K_DD_NATIVE_D3D7) != 0;
+    d->z16Storage = (caps.gpuSurfaces & RB2K_DD_Z16_STORAGE) != 0;
+    if (d->z16Storage) {
+        info->ddCaps.ddsCaps.dwCaps |= DDSCAPS_ZBUFFER;
+        v->dwZBufferAlign = sizeof(USHORT);
+    }
     if (d->gpuSurfaces)
         info->ddCaps.ddsCaps.dwCaps |= DDSCAPS_3DDEVICE;
     else
@@ -740,6 +765,7 @@ BOOL APIENTRY DrvEnableDirectDraw(DHPDEV pdev, DD_CALLBACKS *c, DD_SURFACECALLBA
     ULONG pageBytes;
     if (!d->ddLock || !rb_dd_caps(d, &caps)) return FALSE;
     d->gpuSurfaces = (caps.gpuSurfaces & RB2K_DD_HOST_SURFACES) != 0;
+    d->z16Storage = (caps.gpuSurfaces & RB2K_DD_Z16_STORAGE) != 0;
     RtlZeroMemory(c, sizeof(*c)); RtlZeroMemory(sc, sizeof(*sc)); RtlZeroMemory(pc, sizeof(*pc));
     c->dwSize = sizeof(*c); sc->dwSize = sizeof(*sc); pc->dwSize = sizeof(*pc);
     c->dwFlags = DDHAL_CB32_CANCREATESURFACE | DDHAL_CB32_CREATESURFACE;

@@ -36,7 +36,7 @@ static VP_STATUS query(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     caps->gpuSurfaces = 0;
     if (gpu->ddGpuSurfaces && gpu->primary.bitsPerPixel == 32) {
         caps->gpuSurfaces = RB2K_DD_HOST_SURFACES;
-        if (gpu->nativeD3D7) caps->gpuSurfaces |= RB2K_DD_NATIVE_D3D7;
+        if (gpu->nativeD3D7) caps->gpuSurfaces |= RB2K_DD_NATIVE_D3D7 | RB2K_DD_Z16_STORAGE;
     }
     packet->StatusBlock->Information = sizeof(*caps);
     return NO_ERROR;

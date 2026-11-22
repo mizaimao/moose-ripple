@@ -14,7 +14,7 @@ typedef struct {
     PDD_SURFACE_GLOBAL global;
     HANDLE owner;
     ULONG id, width, height;
-    BOOL locked, writable, lost;
+    BOOL locked, writable, lost, depth16;
     PDD_DIRECTDRAW_LOCAL local;
     ULONG d3dHandle;
 } DD_SLOT;
@@ -48,6 +48,7 @@ typedef struct {
     BOOL glActive;
     BOOL gpuSurfaces;           /* offscreen surfaces as host textures (RB2K_DD_CAPS) */
     BOOL nativeD3D7;
+    BOOL z16Storage;
     HRESULT (CALLBACK *parseD3DExtension)(PVOID command, PVOID *next);
     RB2K_D3D7_DIAGNOSTICS d7;
     ULONG pageBytes, visiblePage, lockedPages;
