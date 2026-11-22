@@ -67,7 +67,8 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
         /* A Direct3D texture in runtime-allocated user memory; the native
          * path reads and uploads it at draw time (display_d3d7.c). */
         DDPIXELFORMAT desktop = {0};
-        if (!d->nativeD3D7 || (caps & ~(DDSCAPS_TEXTURE | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM)) ||
+        if (!d->nativeD3D7 ||
+            (caps & ~(DDSCAPS_TEXTURE | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM | DDSCAPS_MIPMAP | DDSCAPS_COMPLEX)) ||
             !desc->dwWidth || desc->dwWidth > RB2K_D7_TEXTURE_SIDE ||
             !desc->dwHeight || desc->dwHeight > RB2K_D7_TEXTURE_SIDE) return FALSE;
         return rb_d7_texture_format((desc->dwFlags & DDSD_PIXELFORMAT) ? fmt : &desktop,
@@ -105,6 +106,13 @@ static DWORD APIENTRY can_create(PDD_CANCREATESURFACEDATA data)
         data->ddRVal = DDERR_OUTOFVIDEOMEMORY;
     else
         data->ddRVal = supported(d, data->lpDDSurfaceDesc) ? DD_OK : DDERR_INVALIDCAPS;
+    if (data->ddRVal != DD_OK && (caps & DDSCAPS_TEXTURE)) {   /* counted for d7draw.exe */
+        const DDSURFACEDESC *s = data->lpDDSurfaceDesc;
+        ++d->d7draw.surfaceRefused;
+        d->d7draw.refusedCaps = caps; d->d7draw.refusedFlags = s->dwFlags;
+        d->d7draw.refusedWidth = s->dwWidth; d->d7draw.refusedHeight = s->dwHeight;
+        d->d7draw.refusedFormat = s->ddpfPixelFormat.dwFlags << 8 | s->ddpfPixelFormat.dwRGBBitCount;
+    }
     return DDHAL_DRIVER_HANDLED;
 }
 
@@ -154,7 +162,12 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
     DD_SLOT *slot;
     ULONG createCode = IOCTL_RB2K_DD_CREATE;
     DWORD rc = DDHAL_DRIVER_HANDLED;
-    if (!supported(d, desc) || data->dwSCnt != 1) {
+    if (!supported(d, desc) || !data->dwSCnt ||
+        (data->dwSCnt != 1 && !(desc->ddsCaps.dwCaps & DDSCAPS_MIPMAP))) {
+        ++d->d7draw.surfaceRefused;
+        d->d7draw.refusedCaps = desc->ddsCaps.dwCaps; d->d7draw.refusedFlags = desc->dwFlags;
+        d->d7draw.refusedWidth = desc->dwWidth; d->d7draw.refusedHeight = desc->dwHeight;
+        d->d7draw.refusedCount = data->dwSCnt;
         data->ddRVal = DDERR_INVALIDCAPS;
         return rc;
     }
@@ -163,13 +176,27 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
         DDPIXELFORMAT desktop = {0};
         ULONG format = rb_d7_texture_format((desc->dwFlags & DDSD_PIXELFORMAT) ? &desc->ddpfPixelFormat :
                                             &desktop, d->mode.BitsPerPlane);
-        if (g->wWidth != desc->dwWidth || g->wHeight != desc->dwHeight) {
+        ULONG i;
+        /* NT creates a mipmap chain one level per call, each with the
+         * top level's description; every level gets its own user memory
+         * and the native path draws from the top level. */
+        if (!(desc->ddsCaps.dwCaps & DDSCAPS_MIPMAP) &&
+            (g->wWidth != desc->dwWidth || g->wHeight != desc->dwHeight)) {
             data->ddRVal = DDERR_INVALIDPARAMS;
             return rc;
         }
-        g->lPitch = desc->lPitch = (g->wWidth * rb_d7_texel_bytes(format) + 3) & ~3;
-        g->dwUserMemSize = g->lPitch * g->wHeight;
-        g->fpVidMem = DDHAL_PLEASEALLOC_USERMEM;
+        for (i = 0; i < data->dwSCnt; ++i) {
+            PDD_SURFACE_GLOBAL level = data->lplpSList[i]->lpGbl;
+            if (!level->wWidth || level->wWidth > desc->dwWidth ||
+                !level->wHeight || level->wHeight > desc->dwHeight) {
+                data->ddRVal = DDERR_INVALIDPARAMS;
+                return rc;
+            }
+            level->lPitch = (level->wWidth * rb_d7_texel_bytes(format) + 3) & ~3;
+            level->dwUserMemSize = level->lPitch * level->wHeight;
+            level->fpVidMem = DDHAL_PLEASEALLOC_USERMEM;
+        }
+        desc->lPitch = g->lPitch;
         desc->dwFlags |= DDSD_PITCH;
         data->ddRVal = DD_OK;
         return DDHAL_DRIVER_NOTHANDLED;
@@ -749,7 +776,7 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
         caps.slots = 0;
     info->ddCaps.dwVidMemTotal = caps.maxBytes * caps.slots;
     if (d->nativeD3D7) {
-        info->ddCaps.ddsCaps.dwCaps |= DDSCAPS_TEXTURE;
+        info->ddCaps.ddsCaps.dwCaps |= DDSCAPS_TEXTURE | DDSCAPS_MIPMAP;
         v->dwTextureAlign = 4;
         rb_d7_caps(info, d->z16Render);
         info->dwFlags |= DDHALINFO_GETDRIVERINFOSET;

@@ -31,7 +31,7 @@ enum { RB2K_D7_SKIP_FILL, RB2K_D7_SKIP_STENCIL, RB2K_D7_SKIP_STAGE1, RB2K_D7_SKI
        RB2K_D7_SKIP_TEXTURE, RB2K_D7_SKIP_COMBINER, RB2K_D7_SKIP_PRIMITIVE, RB2K_D7_SKIP_CLEAR,
        RB2K_D7_SKIPS };
 enum { RB2K_D7_IGNORED_FOG, RB2K_D7_IGNORED_COLORKEY, RB2K_D7_IGNORED_CLIPPLANE,
-       RB2K_D7_IGNORED_MIPMAP, RB2K_D7_IGNORED };
+       RB2K_D7_IGNORED_MIPMAP, RB2K_D7_IGNORED_LIGHTING, RB2K_D7_IGNORED };
 #define RB2K_D7_OPCODES 48
 typedef struct {
     ULONG version, drawn, drawCalls, skippedCalls;
@@ -51,12 +51,18 @@ typedef struct {
      * kernel surface, its address and size, requested size, lowest start,
      * highest start plus index, result. Recording stops 16 buffers after the
      * first draw that indexes past the stated window. */
+    ULONG transformTypes[32];   /* SETTRANSFORM types received; 31 counts any other */
+    /* Texture surfaces refused at CanCreateSurface or CreateSurface, with
+     * the last one's caps, description flags, size, pixel format (flags << 8
+     * | bits) and surface count; mipmapped and managed textures registered. */
+    ULONG surfaceRefused, refusedCaps, refusedFlags, refusedWidth, refusedHeight, refusedFormat, refusedCount;
+    ULONG regMipmaps, regManaged;
     ULONG historyStop, historyNext;
     ULONG history[32][10];
     struct {
-        ULONG colorStage, alphaStage, blend, alphaTest, depthState, cull, shade, fvf, texFormat;
+        ULONG colorStage, alphaStage, blend, alphaTest, depthState, cull, shade, fvf, texFormat, transform;
         ULONG calls, primitives;
-    } states[24];
+    } states[64];
 } RB2K_D7_DRAWSTATS;
 enum { RB2K_D7_FAIL_RANGE, RB2K_D7_FAIL_VBCAPS, RB2K_D7_FAIL_LINEAR, RB2K_D7_FAIL_ADDRESS,
        RB2K_D7_FAIL_PROBE, RB2K_D7_FAIL_IMMEDIATE, RB2K_D7_FAIL_LENGTH, RB2K_D7_FAIL_OTHER };

@@ -35,7 +35,9 @@ typedef struct {
     ULONG cull, shade, fill;
     ULONG zEnable, zWrite, zFunc;
     ULONG alphaTest, alphaFunc, alphaRef, blend, srcBlend, dstBlend;
-    ULONG fog, specular, stencil, clipPlanes, colorKey, factor;
+    ULONG fog, specular, stencil, clipPlanes, colorKey, factor, lighting;
+    ULONG matrices[3][16];      /* world, view, projection */
+    ULONG viewport[4], zRange[2];
     BOOL inScene, queued;
     ULONG minStart, maxEnd;     /* diagnostics for one command buffer */
     D7_STAGE stages[TextureStages];
@@ -168,6 +170,8 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
     t->height = g->wHeight;
     t->format = rb_d7_texture_format(&g->ddpfSurface, d->mode.BitsPerPlane);
     t->mipmaps = (l->ddsCaps.dwCaps & DDSCAPS_MIPMAP) != 0;
+    if (t->mipmaps) ++d->d7draw.regMipmaps;
+    if (l->lpSurfMore && (l->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_TEXTUREMANAGE)) ++d->d7draw.regManaged;
     if (!t->width || t->width > RB2K_D7_TEXTURE_SIDE || !t->height || t->height > RB2K_D7_TEXTURE_SIDE ||
         t->pitch < t->width * rb_d7_texel_bytes(t->format))
         t->format = TexNone;
@@ -328,6 +332,7 @@ static DWORD APIENTRY create_context(LPD3DNTHAL_CONTEXTCREATEDATA a)
         a->ddrval = DDERR_OUTOFMEMORY;
         for (i = 0; lastContext != 0xffffffffUL && i < MaxContexts; ++i) {
             D7_CONTEXT *c = &contexts[i];
+            ULONG m;
             if (c->id) continue;
             RtlZeroMemory(c, sizeof(*c));
             c->display = d;
@@ -345,6 +350,12 @@ static DWORD APIENTRY create_context(LPD3DNTHAL_CONTEXTCREATEDATA a)
             c->srcBlend = D3DBLEND_ONE;
             c->dstBlend = D3DBLEND_ZERO;
             c->factor = 0xffffffff;
+            c->lighting = TRUE;
+            for (m = 0; m < 3; ++m)
+                c->matrices[m][0] = c->matrices[m][5] = c->matrices[m][10] = c->matrices[m][15] = 0x3f800000;
+            c->viewport[2] = s->width;
+            c->viewport[3] = s->height;
+            c->zRange[1] = 0x3f800000;
             default_stages(c);
             c->id = ++lastContext;
             a->dwhContext = c->id;
@@ -484,6 +495,7 @@ static void render_state(D7_CONTEXT *c, ULONG state, ULONG value)
     case D3DRENDERSTATE_CLIPPLANEENABLE: c->clipPlanes = value; break;
     case D3DRENDERSTATE_COLORKEYENABLE: c->colorKey = value; break;
     case D3DRENDERSTATE_TEXTUREFACTOR: c->factor = value; break;
+    case D3DRENDERSTATE_LIGHTING: c->lighting = value; break;
     }
 }
 
@@ -675,7 +687,8 @@ static void record_state(D7_CONTEXT *c, const RB2K_D3D7_DRAW *draw, ULONG fvf, U
         if (s->states[i].colorStage == draw->colorStage && s->states[i].alphaStage == draw->alphaStage &&
             s->states[i].blend == draw->blend && s->states[i].alphaTest == draw->alphaTest &&
             s->states[i].depthState == draw->depthState && s->states[i].cull == draw->cull &&
-            s->states[i].shade == c->shade && s->states[i].fvf == fvf && s->states[i].texFormat == format) break;
+            s->states[i].shade == c->shade && s->states[i].fvf == fvf && s->states[i].texFormat == format &&
+            s->states[i].transform == draw->transform) break;
     }
     if (i == n) { ++s->stateOverflow; return; }
     s->states[i].colorStage = draw->colorStage;
@@ -687,6 +700,7 @@ static void record_state(D7_CONTEXT *c, const RB2K_D3D7_DRAW *draw, ULONG fvf, U
     s->states[i].shade = c->shade;
     s->states[i].fvf = fvf;
     s->states[i].texFormat = format;
+    s->states[i].transform = draw->transform;
     ++s->states[i].calls;
     s->states[i].primitives += primitives;
 }
@@ -742,7 +756,8 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     ULONG fvf = a->dwVertexType, offset = 16, diffuse = 0, specular = 0, coord = 0, coordFloats = 0;
     ULONG sets, i, t, low = 0xffffffff, high = 0, address = 0, count = 0, flatSource = 0;
     ULONG limit = 0xffffffff;              /* highest index inside the runtime's window */
-    BOOL texture, needTexture;
+    ULONG position;
+    BOOL texture, needTexture, objectSpace;
     HRESULT hr = render_surfaces(c, &s, &z);
     const BYTE *base = NULL;
     if (FAILED(hr)) return hr;
@@ -755,12 +770,18 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         skip(c, RB2K_D7_SKIP_COMBINER, p->primitives);
         return DD_OK;
     }
-    /* Vertex layout: transformed position, then the optional fields in FVF order. */
-    if ((fvf & D3DFVF_POSITION_MASK) != D3DFVF_XYZRHW || (fvf & (D3DFVF_RESERVED0 | D3DFVF_NORMAL)) ||
+    /* Vertex layout: a transformed position, or an object-space position
+     * with any blend weights and normal (the T&L device), then the optional
+     * fields in FVF order. */
+    position = fvf & D3DFVF_POSITION_MASK;
+    objectSpace = position != D3DFVF_XYZRHW;
+    if (!position || (fvf & D3DFVF_RESERVED0) || (!objectSpace && (fvf & D3DFVF_NORMAL)) ||
         (st->coordIndex >> 16) || (needTexture && (st->transform & 0xff))) {
         skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
         return DD_OK;
     }
+    if (objectSpace) offset = 12 + (position >= D3DFVF_XYZB1 ? 4 * ((position - D3DFVF_XYZRHW) / 2) : 0);
+    if (fvf & D3DFVF_NORMAL) offset += 12;
     if (fvf & D3DFVF_RESERVED1) offset += 4;
     if (fvf & D3DFVF_DIFFUSE) { diffuse = offset; offset += 4; }
     if (fvf & D3DFVF_SPECULAR) { specular = offset; offset += 4; }
@@ -771,7 +792,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         if (i == (st->coordIndex & 0xffff)) { coord = offset; coordFloats = n; }
         offset += 4 * n;
     }
-    if (offset > stride || stride > 256 || (!p->inline_ && (stride < 16))) {
+    if (offset > stride || stride > 256) {
         skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
         return DD_OK;
     }
@@ -807,6 +828,15 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
                    (st->magFilter >= 1 && st->magFilter <= 5 ? st->magFilter : 1) << 8 |
                    (st->minFilter >= 1 && st->minFilter <= 3 ? st->minFilter : 1) << 12;
     draw.border = st->border;
+    if (objectSpace) {
+        /* Lights are not applied yet: lit draws use their vertex colours. */
+        if (c->lighting) d->d7draw.ignored[RB2K_D7_IGNORED_LIGHTING] += p->primitives;
+        draw.transform = 1;
+        RtlCopyMemory(draw.matrices, c->matrices, sizeof(draw.matrices));
+        RtlCopyMemory(draw.viewport, c->viewport, sizeof(c->viewport));
+        draw.viewport[4] = c->zRange[0];
+        draw.viewport[5] = c->zRange[1];
+    }
 
     /* Check the whole vertex window before the first host draw. */
     for (t = 0; t < p->primitives; ++t) {
@@ -870,7 +900,8 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
             for (i = 0; i < 3; ++i) {
                 const BYTE *v = base + prim_vertex(p, t, i, &flat) * stride;
                 RB2K_D3D7_VERTEX *o = out + i;
-                RtlCopyMemory(o, v, 16);
+                RtlCopyMemory(o, v, objectSpace ? 12 : 16);
+                if (objectSpace) o->rhw = 0x3f800000;
                 o->diffuse = diffuse ? *(const ULONG *)(v + diffuse) : 0xffffffff;
                 o->specular = specular ? *(const ULONG *)(v + specular) : 0;
                 o->u = coordFloats ? *(const ULONG *)(v + coord) : 0;
@@ -996,9 +1027,7 @@ static ULONG fixed_records(ULONG op, ULONG n)
     case D3DNTDP2OP_INDEXEDLINESTRIP: return sizeof(D3DNTHAL_DP2STARTVERTEX) + (n + 1) * sizeof(WORD);
     case D3DNTDP2OP_INDEXEDLINELIST2:
         return sizeof(D3DNTHAL_DP2STARTVERTEX) + n * sizeof(D3DNTHAL_DP2INDEXEDLINELIST);
-    case D3DNTDP2OP_VIEWPORTINFO: return n * sizeof(D3DNTHAL_DP2VIEWPORTINFO);
     case D3DNTDP2OP_WINFO: return n * sizeof(D3DNTHAL_DP2WINFO);
-    case D3DNTDP2OP_ZRANGE: return n * sizeof(D3DNTHAL_DP2ZRANGE);
     case D3DNTDP2OP_SETPALETTE: return n * sizeof(D3DNTHAL_DP2SETPALETTE);
     case D3DNTDP2OP_STATESET: return n * sizeof(D3DNTHAL_DP2STATESET);
     case D3DNTDP2OP_SETPRIORITY: return n * sizeof(D3DNTHAL_DP2SETPRIORITY);
@@ -1104,6 +1133,51 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             for (; n; --n, ++st) {
                 if (st->wStage >= TextureStages) return DDERR_INVALIDPARAMS;
                 stage_state(&c->stages[st->wStage], st->TSState, st->dwValue);
+            }
+            break;
+        }
+        case D3DNTDP2OP_SETTRANSFORM: {
+            /* World, view and projection; texture matrices are not applied. */
+            const D3DNTHAL_DP2SETTRANSFORM *x = (const D3DNTHAL_DP2SETTRANSFORM *)p;
+            used = n * sizeof(*x);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            for (; n; --n, ++x) {
+                ++c->display->d7draw.transformTypes[x->xfrmType < 31 ? x->xfrmType : 31];
+                if (x->xfrmType >= D3DTRANSFORMSTATE_WORLD && x->xfrmType <= D3DTRANSFORMSTATE_PROJECTION)
+                    RtlCopyMemory(c->matrices[x->xfrmType - D3DTRANSFORMSTATE_WORLD], &x->matrix, 64);
+            }
+            break;
+        }
+        case D3DNTDP2OP_VIEWPORTINFO: {
+            const D3DNTHAL_DP2VIEWPORTINFO *v = (const D3DNTHAL_DP2VIEWPORTINFO *)p;
+            used = n * sizeof(*v);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            if (n) {
+                v += n - 1;
+                c->viewport[0] = v->dwX; c->viewport[1] = v->dwY;
+                c->viewport[2] = v->dwWidth; c->viewport[3] = v->dwHeight;
+            }
+            break;
+        }
+        case D3DNTDP2OP_ZRANGE: {
+            const D3DNTHAL_DP2ZRANGE *z = (const D3DNTHAL_DP2ZRANGE *)p;
+            used = n * sizeof(*z);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            if (n) RtlCopyMemory(c->zRange, z + n - 1, sizeof(c->zRange));
+            break;
+        }
+        case D3DNTDP2OP_SETMATERIAL: used = n * sizeof(D3DNTHAL_DP2SETMATERIAL); break;
+        case D3DNTDP2OP_CREATELIGHT: used = n * sizeof(D3DNTHAL_DP2CREATELIGHT); break;
+        case D3DNTDP2OP_SETLIGHT: {
+            /* Lights are not drawn yet; a data record carries a D3DLIGHT7. */
+            ULONG k;
+            used = 0;
+            for (k = 0; k < n; ++k) {
+                const D3DNTHAL_DP2SETLIGHT *l = (const D3DNTHAL_DP2SETLIGHT *)(p + used);
+                if (remaining - min(remaining, used) < sizeof(*l)) return DDERR_INVALIDPARAMS;
+                used += sizeof(*l);
+                if (l->lightData == 2) used += sizeof(D3DLIGHT7);   /* D3DHAL_SETLIGHT_DATA */
+                if (used > remaining) return DDERR_INVALIDPARAMS;
             }
             break;
         }
@@ -1304,15 +1378,20 @@ static const D3DNTHAL_GLOBALDRIVERDATA global = {
     .lpTextureFormats = textureFormats,
     .hwCaps = {
         .dwSize = sizeof(D3DNTHALDEVICEDESC_V1),
-        .dwFlags = D3DDD_COLORMODEL | D3DDD_DEVCAPS | D3DDD_TRICAPS |
-                   D3DDD_LINECAPS | D3DDD_DEVICERENDERBITDEPTH,
+        .dwFlags = D3DDD_COLORMODEL | D3DDD_DEVCAPS | D3DDD_TRICAPS | D3DDD_TRANSFORMCAPS |
+                   D3DDD_LIGHTINGCAPS | D3DDD_BCLIPPING | D3DDD_LINECAPS | D3DDD_DEVICERENDERBITDEPTH,
         .dcmColorModel = D3DCOLOR_RGB,
+        /* The host transforms and clips object-space vertices, so the
+         * runtime also offers a T&L device and hands over vertex buffers
+         * as the program wrote them. No lights are offered yet. */
         .dwDevCaps = D3DDEVCAPS_FLOATTLVERTEX | D3DDEVCAPS_TLVERTEXSYSTEMMEMORY |
                      D3DDEVCAPS_TEXTURESYSTEMMEMORY | D3DDEVCAPS_TEXTUREVIDEOMEMORY |
                      D3DDEVCAPS_DRAWPRIMTLVERTEX | D3DDEVCAPS_DRAWPRIMITIVES2 |
-                     D3DDEVCAPS_DRAWPRIMITIVES2EX | D3DDEVCAPS_HWRASTERIZATION,
-        .dtcTransformCaps = { .dwSize = sizeof(D3DTRANSFORMCAPS) },
-        .dlcLightingCaps = { .dwSize = sizeof(D3DLIGHTINGCAPS) },
+                     D3DDEVCAPS_DRAWPRIMITIVES2EX | D3DDEVCAPS_HWRASTERIZATION |
+                     D3DDEVCAPS_HWTRANSFORMANDLIGHT,
+        .dtcTransformCaps = { .dwSize = sizeof(D3DTRANSFORMCAPS), .dwCaps = D3DTRANSFORMCAPS_CLIP },
+        .bClipping = TRUE,
+        .dlcLightingCaps = { .dwSize = sizeof(D3DLIGHTINGCAPS), .dwLightingModel = D3DLIGHTINGMODEL_RGB },
         .dpcLineCaps = { .dwSize = sizeof(D3DPRIMCAPS) },
         .dpcTriCaps = TRI_CAPS,
         .dwDeviceRenderBitDepth = DDBD_32
@@ -1388,7 +1467,7 @@ BOOL rb_d7_info(PDD_GETDRIVERINFODATA a)
             D3DTEXOPCAPS_SUBTRACT | D3DTEXOPCAPS_ADDSMOOTH | D3DTEXOPCAPS_BLENDDIFFUSEALPHA |
             D3DTEXOPCAPS_BLENDTEXTUREALPHA | D3DTEXOPCAPS_BLENDFACTORALPHA |
             D3DTEXOPCAPS_BLENDTEXTUREALPHAPM | D3DTEXOPCAPS_BLENDCURRENTALPHA,
-        .wMaxTextureBlendStages = 1, .wMaxSimultaneousTextures = 1,
+        .wMaxTextureBlendStages = 1, .wMaxSimultaneousTextures = 1, .wMaxVertexBlendMatrices = 1,
         .dvMaxVertexW = 1.0e10f
     };
     D3DNTHAL_D3DEXTENDEDCAPS caps;

@@ -17,6 +17,7 @@ typedef struct {
 } RB2K_D7_CACHE;
 typedef struct {
     BOOLEAN pipeline;
+    ULONG vertexShaders, boundVertex;   /* bit and value: 1 transformed input, 2 object space */
     ULONG rasters, boundRaster, viewTexture;
     RB2K_D7_CACHE dsa, blend, sampler, shader;
 } RB2K_D7_STATE;

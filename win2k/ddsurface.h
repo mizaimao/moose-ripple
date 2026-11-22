@@ -59,6 +59,12 @@ typedef struct {
     ULONG texture;      /* host texture, zero for none */
     ULONG sampler;      /* address U | V << 4 | MAG << 8 | MIN << 12, Direct3D values */
     ULONG border;
+    /* Nonzero: positions are in object space, with w 1, and the host
+     * applies the world, view and projection matrices (Direct3D row-major,
+     * IEEE words) and the viewport (pixels; minimum and maximum z as IEEE). */
+    ULONG transform;
+    ULONG matrices[3][16];
+    ULONG viewport[6];
     RB2K_D3D7_VERTEX vertices[RB2K_D3D7_VERTICES];
 } RB2K_D3D7_DRAW;
 /* Texels are tightly packed B8G8R8A8 rows. A zero id creates a texture of
