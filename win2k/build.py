@@ -115,6 +115,7 @@ def build_programs(work):
         ("memtest.exe", ["tools/memtest"], ["-mwindows", "-lgdi32", "-luser32"]),
         ("regmode.exe", ["tools/regmode"], ["-mwindows", "-luser32"]),
         ("rvdstat.exe", ["tools/rvdstat"], ["-lgdi32", "-luser32"]),
+        ("d3d7probe.exe", ["tools/d3d7probe"], ["-lddraw", "-ldxguid", "-lgdi32", "-luser32"]),
     ]
     args = [bin_dir / "i686-w64-mingw32-clang", "-O2", "-D_WIN32_WINNT=0x0500",
             "-I", source, "-I", repo / "win9x/minivdd",
