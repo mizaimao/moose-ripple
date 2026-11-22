@@ -1,5 +1,5 @@
-/* Private display DLL to miniport interface for offscreen 32-bit surfaces.
- * Rows are tightly packed. A successful READ returns width*height*4 bytes.
+/* Private display DLL to miniport interface for offscreen surfaces.
+ * Rows are tightly packed. XRGB uses four bytes per pixel and Z16 uses two.
  * WRITE takes the surface ID followed immediately by that many bytes. */
 #ifndef RB2K_DDSURFACE_H
 #define RB2K_DDSURFACE_H
@@ -30,6 +30,7 @@
 #define IOCTL_RB2K_D3D7_FLUSH RB2K_DD_IOCTL(0x915)
 #define IOCTL_RB2K_D3D7_COMPLETED RB2K_DD_IOCTL(0x916)
 #define IOCTL_RB2K_D3D7_FLIGHT RB2K_DD_IOCTL(0x917)
+#define IOCTL_RB2K_DD_CREATE_Z16 RB2K_DD_IOCTL(0x918)
 typedef struct { ULONG clears, triangles; } RB2K_D3D7_COMPLETED;
 #define RB2K_D3D7_VERTICES 24
 /* IEEE transformed position and a packed Direct3D diffuse colour. */

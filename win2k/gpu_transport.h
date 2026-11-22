@@ -12,6 +12,7 @@ typedef struct {
     BOOLEAN defined, hasSurface, uniform;
     ULONG color;
     BOOLEAN sampled, triangleState, frameFailed;
+    BOOLEAN depth16;
 } RB2K_IMAGE;
 typedef struct {
     RB2K_IMAGE image;
