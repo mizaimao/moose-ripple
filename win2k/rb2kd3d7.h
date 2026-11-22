@@ -57,6 +57,7 @@ typedef struct {
      * | bits) and surface count; mipmapped and managed textures registered. */
     ULONG surfaceRefused, refusedCaps, refusedFlags, refusedWidth, refusedHeight, refusedFormat, refusedCount;
     ULONG regMipmaps, regManaged;
+    ULONG lightsBeyond;   /* SETLIGHT records for an index past the 32 kept */
     ULONG historyStop, historyNext;
     ULONG history[32][10];
     struct {

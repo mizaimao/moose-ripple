@@ -22,7 +22,11 @@
 #define D3DERR_TOOMANYOPERATIONS MAKE_DDHRESULT(2077)
 #endif
 
-enum { MaxContexts = 16, MaxCommandBytes = 1 << 20, TextureStages = 8, MaxTextures = 1024 };
+enum { MaxContexts = 16, MaxCommandBytes = 1 << 20, TextureStages = 8, MaxTextures = 1024, MaxLights = 32 };
+/* DP2 SETLIGHT operations (D3DHAL_SETLIGHT_*). */
+enum { SetLightEnable, SetLightDisable, SetLightData };
+typedef char light_record[sizeof(D3DLIGHT7) == 26 * sizeof(ULONG) ? 1 : -1];
+typedef char material_record[sizeof(D3DNTHAL_DP2SETMATERIAL) == 17 * sizeof(ULONG) ? 1 : -1];
 typedef struct {
     ULONG texture, colorOp, colorArg1, colorArg2, alphaOp, alphaArg1, alphaArg2;
     ULONG coordIndex, addressU, addressV, magFilter, minFilter, mipFilter, border, transform;
@@ -38,6 +42,13 @@ typedef struct {
     ULONG fog, specular, stencil, clipPlanes, colorKey, factor, lighting;
     ULONG matrices[3][16];      /* world, view, projection */
     ULONG viewport[4], zRange[2];
+    /* Lighting: D3DRENDERSTATE_AMBIENT, COLORVERTEX, LOCALVIEWER and
+     * NORMALIZENORMALS, the diffuse, specular, ambient and emissive material
+     * sources, the D3DMATERIAL7, and lights by index with their D3DLIGHT7. */
+    ULONG ambient, colorVertex, localViewer, normalize, sources[4];
+    ULONG material[17];
+    ULONG lightOn;
+    ULONG lights[MaxLights][26];
     BOOL inScene, queued;
     ULONG minStart, maxEnd;     /* diagnostics for one command buffer */
     RB2K_D3D7_DRAW draw;        /* the batch being filled */
@@ -352,6 +363,9 @@ static DWORD APIENTRY create_context(LPD3DNTHAL_CONTEXTCREATEDATA a)
             c->dstBlend = D3DBLEND_ZERO;
             c->factor = 0xffffffff;
             c->lighting = TRUE;
+            c->colorVertex = c->localViewer = TRUE;
+            c->sources[0] = D3DMCS_COLOR1;
+            c->sources[1] = D3DMCS_COLOR2;
             for (m = 0; m < 3; ++m)
                 c->matrices[m][0] = c->matrices[m][5] = c->matrices[m][10] = c->matrices[m][15] = 0x3f800000;
             c->viewport[2] = s->width;
@@ -497,6 +511,14 @@ static void render_state(D7_CONTEXT *c, ULONG state, ULONG value)
     case D3DRENDERSTATE_COLORKEYENABLE: c->colorKey = value; break;
     case D3DRENDERSTATE_TEXTUREFACTOR: c->factor = value; break;
     case D3DRENDERSTATE_LIGHTING: c->lighting = value; break;
+    case D3DRENDERSTATE_AMBIENT: c->ambient = value; break;
+    case D3DRENDERSTATE_COLORVERTEX: c->colorVertex = value; break;
+    case D3DRENDERSTATE_LOCALVIEWER: c->localViewer = value; break;
+    case D3DRENDERSTATE_NORMALIZENORMALS: c->normalize = value; break;
+    case D3DRENDERSTATE_DIFFUSEMATERIALSOURCE: c->sources[0] = value; break;
+    case D3DRENDERSTATE_SPECULARMATERIALSOURCE: c->sources[1] = value; break;
+    case D3DRENDERSTATE_AMBIENTMATERIALSOURCE: c->sources[2] = value; break;
+    case D3DRENDERSTATE_EMISSIVEMATERIALSOURCE: c->sources[3] = value; break;
     }
 }
 
@@ -747,6 +769,36 @@ static HRESULT send_batch(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, ULONG count, D7_T
     return DD_OK;
 }
 
+/* Copy the enabled lights and the material for a lit draw. A light of
+ * another type, or past the eighth, is left out and its draw counted. A
+ * material source falls back to the material when the vertex lacks that
+ * colour, as Direct3D does. */
+static void light_draw(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, BOOL hasDiffuse, BOOL hasSpecular, ULONG primitives)
+{
+    ULONG k, flags = 0;
+    draw->lighting = 1;
+    for (k = 0; k < MaxLights; ++k) {
+        if (!(c->lightOn & (1UL << k))) continue;
+        if (c->lights[k][0] < D3DLIGHT_POINT || c->lights[k][0] > D3DLIGHT_DIRECTIONAL ||
+            draw->lightCount == RB2K_D7_LIGHTS) {
+            c->display->d7draw.ignored[RB2K_D7_IGNORED_LIGHTING] += primitives;
+            continue;
+        }
+        RtlCopyMemory(draw->lights[draw->lightCount++], c->lights[k], sizeof(c->lights[k]));
+    }
+    for (k = 0; k < 4; ++k) {
+        ULONG s = c->colorVertex ? c->sources[k] : D3DMCS_MATERIAL;
+        if ((s == D3DMCS_COLOR1 && !hasDiffuse) || (s == D3DMCS_COLOR2 && !hasSpecular) || s > D3DMCS_COLOR2)
+            s = D3DMCS_MATERIAL;
+        flags |= s << (RB2K_D7_SOURCE_SHIFT + 2 * k);
+    }
+    if (c->normalize) flags |= RB2K_D7_NORMALIZE;
+    if (c->localViewer) flags |= RB2K_D7_LOCAL_VIEWER;
+    draw->lightFlags = flags;
+    draw->ambient = c->ambient;
+    RtlCopyMemory(draw->material, c->material, sizeof(draw->material));
+}
+
 static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG stride, const PRIMS *p)
 {
     DISPLAY *d = c->display;
@@ -754,7 +806,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     RB2K_D3D7_DRAW *draw = &c->draw;   /* too large for the kernel stack */
     D7_STAGE *st = &c->stages[0];
     D7_TEXTURE *tex = NULL;
-    ULONG fvf = a->dwVertexType, offset = 16, diffuse = 0, specular = 0, coord = 0, coordFloats = 0;
+    ULONG fvf = a->dwVertexType, offset = 16, diffuse = 0, specular = 0, coord = 0, coordFloats = 0, normal = 0;
     ULONG sets, i, t, low = 0xffffffff, high = 0, address = 0, count = 0, flatSource = 0;
     ULONG limit = 0xffffffff;              /* highest index inside the runtime's window */
     ULONG position;
@@ -782,7 +834,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         return DD_OK;
     }
     if (objectSpace) offset = 12 + (position >= D3DFVF_XYZB1 ? 4 * ((position - D3DFVF_XYZRHW) / 2) : 0);
-    if (fvf & D3DFVF_NORMAL) offset += 12;
+    if (fvf & D3DFVF_NORMAL) { normal = offset; offset += 12; }
     if (fvf & D3DFVF_RESERVED1) offset += 4;
     if (fvf & D3DFVF_DIFFUSE) { diffuse = offset; offset += 4; }
     if (fvf & D3DFVF_SPECULAR) { specular = offset; offset += 4; }
@@ -830,9 +882,8 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
                    (st->minFilter >= 1 && st->minFilter <= 3 ? st->minFilter : 1) << 12;
     draw->border = st->border;
     if (objectSpace) {
-        /* Lights are not applied yet: lit draws use their vertex colours. */
-        if (c->lighting) d->d7draw.ignored[RB2K_D7_IGNORED_LIGHTING] += p->primitives;
         draw->transform = 1;
+        if (c->lighting) light_draw(c, draw, diffuse != 0, specular != 0, p->primitives);
         RtlCopyMemory(draw->matrices, c->matrices, sizeof(draw->matrices));
         RtlCopyMemory(draw->viewport, c->viewport, sizeof(c->viewport));
         draw->viewport[4] = c->zRange[0];
@@ -903,6 +954,8 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
                 RB2K_D3D7_VERTEX *o = out + i;
                 RtlCopyMemory(o, v, objectSpace ? 12 : 16);
                 if (objectSpace) o->rhw = 0x3f800000;
+                if (normal) RtlCopyMemory(&o->nx, v + normal, 12);
+                else o->nx = o->ny = o->nz = 0;
                 o->diffuse = diffuse ? *(const ULONG *)(v + diffuse) : 0xffffffff;
                 o->specular = specular ? *(const ULONG *)(v + specular) : 0;
                 o->u = coordFloats ? *(const ULONG *)(v + coord) : 0;
@@ -1167,18 +1220,30 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             if (n) RtlCopyMemory(c->zRange, z + n - 1, sizeof(c->zRange));
             break;
         }
-        case D3DNTDP2OP_SETMATERIAL: used = n * sizeof(D3DNTHAL_DP2SETMATERIAL); break;
+        case D3DNTDP2OP_SETMATERIAL:
+            used = n * sizeof(D3DNTHAL_DP2SETMATERIAL);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            if (n) RtlCopyMemory(c->material, (const D3DNTHAL_DP2SETMATERIAL *)p + n - 1, sizeof(c->material));
+            break;
         case D3DNTDP2OP_CREATELIGHT: used = n * sizeof(D3DNTHAL_DP2CREATELIGHT); break;
         case D3DNTDP2OP_SETLIGHT: {
-            /* Lights are not drawn yet; a data record carries a D3DLIGHT7. */
+            /* Enable, disable, or set the D3DLIGHT7 that follows the record.
+             * Lights past MaxLights are not drawn. */
             ULONG k;
             used = 0;
             for (k = 0; k < n; ++k) {
                 const D3DNTHAL_DP2SETLIGHT *l = (const D3DNTHAL_DP2SETLIGHT *)(p + used);
+                ULONG index;
                 if (remaining - min(remaining, used) < sizeof(*l)) return DDERR_INVALIDPARAMS;
                 used += sizeof(*l);
-                if (l->lightData == 2) used += sizeof(D3DLIGHT7);   /* D3DHAL_SETLIGHT_DATA */
-                if (used > remaining) return DDERR_INVALIDPARAMS;
+                index = l->dwIndex;
+                if (l->lightData == SetLightData) {
+                    if (remaining - min(remaining, used) < sizeof(D3DLIGHT7)) return DDERR_INVALIDPARAMS;
+                    if (index < MaxLights) RtlCopyMemory(c->lights[index], p + used, sizeof(c->lights[index]));
+                    used += sizeof(D3DLIGHT7);
+                } else if (index < MaxLights && l->lightData == SetLightEnable) c->lightOn |= 1UL << index;
+                else if (index < MaxLights && l->lightData == SetLightDisable) c->lightOn &= ~(1UL << index);
+                if (index >= MaxLights) ++c->display->d7draw.lightsBeyond;
             }
             break;
         }
@@ -1382,9 +1447,9 @@ static const D3DNTHAL_GLOBALDRIVERDATA global = {
         .dwFlags = D3DDD_COLORMODEL | D3DDD_DEVCAPS | D3DDD_TRICAPS | D3DDD_TRANSFORMCAPS |
                    D3DDD_LIGHTINGCAPS | D3DDD_BCLIPPING | D3DDD_LINECAPS | D3DDD_DEVICERENDERBITDEPTH,
         .dcmColorModel = D3DCOLOR_RGB,
-        /* The host transforms and clips object-space vertices, so the
-         * runtime also offers a T&L device and hands over vertex buffers
-         * as the program wrote them. No lights are offered yet. */
+        /* The host transforms, lights and clips object-space vertices, so
+         * the runtime also offers a T&L device and hands over vertex
+         * buffers as the program wrote them. */
         .dwDevCaps = D3DDEVCAPS_FLOATTLVERTEX | D3DDEVCAPS_TLVERTEXSYSTEMMEMORY |
                      D3DDEVCAPS_TEXTURESYSTEMMEMORY | D3DDEVCAPS_TEXTUREVIDEOMEMORY |
                      D3DDEVCAPS_DRAWPRIMTLVERTEX | D3DDEVCAPS_DRAWPRIMITIVES2 |
@@ -1392,7 +1457,9 @@ static const D3DNTHAL_GLOBALDRIVERDATA global = {
                      D3DDEVCAPS_HWTRANSFORMANDLIGHT,
         .dtcTransformCaps = { .dwSize = sizeof(D3DTRANSFORMCAPS), .dwCaps = D3DTRANSFORMCAPS_CLIP },
         .bClipping = TRUE,
-        .dlcLightingCaps = { .dwSize = sizeof(D3DLIGHTINGCAPS), .dwLightingModel = D3DLIGHTINGMODEL_RGB },
+        .dlcLightingCaps = { .dwSize = sizeof(D3DLIGHTINGCAPS),
+            .dwCaps = D3DLIGHTCAPS_POINT | D3DLIGHTCAPS_SPOT | D3DLIGHTCAPS_DIRECTIONAL,
+            .dwLightingModel = D3DLIGHTINGMODEL_RGB, .dwNumLights = RB2K_D7_LIGHTS },
         .dpcLineCaps = { .dwSize = sizeof(D3DPRIMCAPS) },
         .dpcTriCaps = TRI_CAPS,
         .dwDeviceRenderBitDepth = DDBD_32
@@ -1469,7 +1536,9 @@ BOOL rb_d7_info(PDD_GETDRIVERINFODATA a)
             D3DTEXOPCAPS_BLENDTEXTUREALPHA | D3DTEXOPCAPS_BLENDFACTORALPHA |
             D3DTEXOPCAPS_BLENDTEXTUREALPHAPM | D3DTEXOPCAPS_BLENDCURRENTALPHA,
         .wMaxTextureBlendStages = 1, .wMaxSimultaneousTextures = 1, .wMaxVertexBlendMatrices = 1,
-        .dvMaxVertexW = 1.0e10f
+        .dvMaxVertexW = 1.0e10f, .dwMaxActiveLights = RB2K_D7_LIGHTS,
+        .dwVertexProcessingCaps = D3DVTXPCAPS_MATERIALSOURCE7 | D3DVTXPCAPS_DIRECTIONALLIGHTS |
+                                  D3DVTXPCAPS_POSITIONALLIGHTS | D3DVTXPCAPS_LOCALVIEWER
     };
     D3DNTHAL_D3DEXTENDEDCAPS caps;
     const void *source;

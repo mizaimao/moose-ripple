@@ -37,9 +37,16 @@
 #define IOCTL_RB2K_D3D7_TEXTURE_FREE RB2K_DD_IOCTL(0x91d)
 typedef struct { ULONG clears, triangles; } RB2K_D3D7_COMPLETED;
 #define RB2K_D3D7_VERTICES 96
-/* IEEE transformed position, packed Direct3D diffuse and specular colours
- * and the stage-zero texture coordinate. */
-typedef struct { ULONG x, y, z, rhw, diffuse, specular, u, v; } RB2K_D3D7_VERTEX;
+/* IEEE transformed position, packed Direct3D diffuse and specular colours,
+ * the stage-zero texture coordinate and, for lit draws, the IEEE normal. */
+typedef struct { ULONG x, y, z, rhw, diffuse, specular, u, v, nx, ny, nz; } RB2K_D3D7_VERTEX;
+#define RB2K_D7_LIGHTS 8
+/* Lighting flags: normalize normals, local viewer, then the Direct3D material
+ * source (D3DMCS_*, already resolved against the vertex format) of the
+ * diffuse, specular, ambient and emissive colours, two bits each. */
+#define RB2K_D7_NORMALIZE 1
+#define RB2K_D7_LOCAL_VIEWER 2
+#define RB2K_D7_SOURCE_SHIFT 4
 /* The low three depth-state bits are D3DCMPFUNC minus one. Disabled depth
  * uses zero. The other words keep Direct3D's own values; the miniport
  * validates each one before it creates a host object for it. */
@@ -65,6 +72,11 @@ typedef struct {
     ULONG transform;
     ULONG matrices[3][16];
     ULONG viewport[6];
+    /* Nonzero with transform: light the vertices with the D3DMATERIAL7, the
+     * D3DRENDERSTATE_AMBIENT colour and the first lightCount D3DLIGHT7s. */
+    ULONG lighting, lightCount, lightFlags, ambient;
+    ULONG material[17];
+    ULONG lights[RB2K_D7_LIGHTS][26];
     RB2K_D3D7_VERTEX vertices[RB2K_D3D7_VERTICES];
 } RB2K_D3D7_DRAW;
 /* Texels are tightly packed B8G8R8A8 rows. A zero id creates a texture of

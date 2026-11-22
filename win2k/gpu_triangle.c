@@ -15,10 +15,10 @@
 #include <virgl_protocol.h>
 
 enum {
-    Raster = 9, Elements = 5, VertexShader = 6, ObjectShader = 7, DsaBase = 16, BlendBase = 32,
+    Raster = 9, Elements = 5, VertexShader = 6, ObjectShader = 7, LitShader = 8, DsaBase = 16, BlendBase = 32,
     SamplerBase = 48, ShaderBase = 64, TextureView = 80
 };
-enum { VertexStage = 0, FragmentStage = 1, PipeTriangles = 4, ShaderText = 2400 };
+enum { VertexStage = 0, FragmentStage = 1, PipeTriangles = 4, ShaderText = 2400, LitText = 8192 };
 
 /* Direct3D 7 values used on the wire (d3dtypes.h). */
 enum {
@@ -114,12 +114,14 @@ static const ULONG pipeline[] = {
 static BOOLEAN shader(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, ULONG handle,
                       ULONG stage, const char *text, ULONG size)
 {
-    ULONG words[6+(ShaderText+3)/4], n = (size+3)/4;
-    if (size > ShaderText) {
+    ULONG n = (size+3)/4, *words;
+    if (!size || size > LitText) {
         r->status = ERROR_INVALID_DATA;
         r->stage = RB2K_STAGE_TRANSFER;
         return FALSE;
     }
+    words = rb_gpu_frame_reserve(gpu, r, image, 6+n);
+    if (!words) return FALSE;
     words[0] = CREATE(VIRGL_OBJECT_SHADER,5+n);
     words[1] = handle;
     words[2] = stage;
@@ -128,7 +130,7 @@ static BOOLEAN shader(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, ULON
     words[5] = 0;
     words[5+n] = 0;
     VideoPortMoveMemory(words+6,(PVOID)text,size);
-    return rb_gpu_frame_words(gpu,r,image,words,6+n);
+    return TRUE;
 }
 
 /* Encode a positive integer dimension as an IEEE single without enabling
@@ -167,12 +169,12 @@ BOOLEAN rb_gpu_prepare_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *ima
 
 /* ---- fragment shader text for Direct3D texture stage zero ---- */
 
-typedef struct { char *p; ULONG n, line; BOOLEAN overflow; } TEXT;
+typedef struct { char *p; ULONG n, line, size; BOOLEAN overflow; } TEXT;
 
 static void put(TEXT *t, const char *s)
 {
     while (*s) {
-        if (t->n + 1 >= ShaderText) { t->overflow = TRUE; return; }
+        if (t->n + 1 >= t->size) { t->overflow = TRUE; return; }
         t->p[t->n++] = *s++;
     }
     t->p[t->n] = 0;
@@ -294,7 +296,7 @@ static ULONG fragment_text(char *out, ULONG color, ULONG alpha, ULONG specular)
 {
     TEXT t;
     BOOLEAN sampled = uses(color, ArgTexture) || uses(alpha, ArgTexture);
-    t.p = out; t.n = 0; t.line = 0; t.overflow = FALSE;
+    t.p = out; t.n = 0; t.line = 0; t.size = ShaderText; t.overflow = FALSE;
     put(&t, "FRAG\nDCL IN[0], GENERIC[0], LINEAR\nDCL IN[1], GENERIC[1], LINEAR\n"
             "DCL IN[2], GENERIC[2], PERSPECTIVE\nDCL OUT[0], COLOR\n");
     if (sampled) put(&t, "DCL SAMP[0]\n");
@@ -312,6 +314,153 @@ static ULONG fragment_text(char *out, ULONG color, ULONG alpha, ULONG specular)
     op(&t, "END", 0, 0, 0);
     return t.overflow ? 0 : t.n + 1;
 }
+
+/* ---- vertex shader for Direct3D 7 fixed-function lighting ---- */
+
+/* Constants: 0 target size, 1..12 world, view and projection columns, 13
+ * viewport, 14 depth range, 15 global ambient, 16..19 material diffuse,
+ * ambient, specular and emissive, 20 (power, normalize, local viewer,
+ * specular enabled), 21 and 22 the material sources as flags (diffuse from
+ * colour 1 or 2, specular from 1 or 2; ambient, emissive), 23 the light
+ * count and first light constant as integers. Vertices follow from 24, five
+ * constants each (position, colours 1 and 2, texture coordinate, normal),
+ * then each light: diffuse, specular, ambient, position, direction,
+ * (range, attenuation 0..2), (theta, phi, falloff), (directional, spot).
+ * Lighting is done in camera space, as Direct3D does. Every choice between
+ * light types is a CMP, so values a type leaves undefined never mix in. */
+enum { LitVertexBase = 24, LitVertexConstants = 5, LitLightConstants = 8,
+       LitConstants = LitVertexBase + LitVertexConstants*RB2K_D3D7_VERTICES +
+                      LitLightConstants*RB2K_D7_LIGHTS };
+static const char *const lit_lines[] = {
+    "UMAD TEMP[0].x, SV[0].xxxx, IMM[1].xxxx, IMM[1].yyyy",
+    "UARL ADDR[0].x, TEMP[0].xxxx",
+    "MOV TEMP[1], CONST[ADDR[0].x]",
+    "DP4 TEMP[2].x, TEMP[1], CONST[1]", "DP4 TEMP[2].y, TEMP[1], CONST[2]",
+    "DP4 TEMP[2].z, TEMP[1], CONST[3]", "DP4 TEMP[2].w, TEMP[1], CONST[4]",
+    "DP4 TEMP[3].x, TEMP[2], CONST[5]", "DP4 TEMP[3].y, TEMP[2], CONST[6]",
+    "DP4 TEMP[3].z, TEMP[2], CONST[7]", "DP4 TEMP[3].w, TEMP[2], CONST[8]",
+    "DP4 TEMP[4].x, TEMP[3], CONST[9]", "DP4 TEMP[4].y, TEMP[3], CONST[10]",
+    "DP4 TEMP[4].z, TEMP[3], CONST[11]", "DP4 TEMP[4].w, TEMP[3], CONST[12]",
+    /* The normal in camera space, normalized when asked. */
+    "MOV TEMP[5], CONST[ADDR[0].x+4]",
+    "DP3 TEMP[6].x, TEMP[5], CONST[1]", "DP3 TEMP[6].y, TEMP[5], CONST[2]",
+    "DP3 TEMP[6].z, TEMP[5], CONST[3]",
+    "DP3 TEMP[7].x, TEMP[6], CONST[5]", "DP3 TEMP[7].y, TEMP[6], CONST[6]",
+    "DP3 TEMP[7].z, TEMP[6], CONST[7]", "MOV TEMP[7].w, IMM[0].zzzz",
+    "DP3 TEMP[14].x, TEMP[7], TEMP[7]", "MAX TEMP[14].x, TEMP[14].xxxx, IMM[2].wwww",
+    "RSQ TEMP[14].x, TEMP[14].xxxx", "MUL TEMP[14].xyz, TEMP[7], TEMP[14].xxxx",
+    "CMP TEMP[7].xyz, -CONST[20].yyyy, TEMP[14], TEMP[7]",
+    /* Vertex colours, texture coordinate and the four material colours. */
+    "MOV TEMP[8], CONST[ADDR[0].x+1]", "MOV TEMP[9], CONST[ADDR[0].x+2]",
+    "MOV TEMP[26], CONST[ADDR[0].x+3]",
+    "ADD TEMP[14], TEMP[8], -CONST[16]", "MAD TEMP[10], CONST[21].xxxx, TEMP[14], CONST[16]",
+    "ADD TEMP[14], TEMP[9], -CONST[16]", "MAD TEMP[10], CONST[21].yyyy, TEMP[14], TEMP[10]",
+    "ADD TEMP[14], TEMP[8], -CONST[18]", "MAD TEMP[11], CONST[21].zzzz, TEMP[14], CONST[18]",
+    "ADD TEMP[14], TEMP[9], -CONST[18]", "MAD TEMP[11], CONST[21].wwww, TEMP[14], TEMP[11]",
+    "ADD TEMP[14], TEMP[8], -CONST[17]", "MAD TEMP[12], CONST[22].xxxx, TEMP[14], CONST[17]",
+    "ADD TEMP[14], TEMP[9], -CONST[17]", "MAD TEMP[12], CONST[22].yyyy, TEMP[14], TEMP[12]",
+    "ADD TEMP[14], TEMP[8], -CONST[19]", "MAD TEMP[13], CONST[22].zzzz, TEMP[14], CONST[19]",
+    "ADD TEMP[14], TEMP[9], -CONST[19]", "MAD TEMP[13], CONST[22].wwww, TEMP[14], TEMP[13]",
+    /* Ambient, diffuse and specular sums; the direction to the viewer. */
+    "MOV TEMP[15], CONST[15]", "MOV TEMP[16], IMM[0].zzzz", "MOV TEMP[17], IMM[0].zzzz",
+    "DP3 TEMP[14].x, TEMP[3], TEMP[3]", "MAX TEMP[14].x, TEMP[14].xxxx, IMM[2].wwww",
+    "RSQ TEMP[14].x, TEMP[14].xxxx", "MUL TEMP[18].xyz, -TEMP[3], TEMP[14].xxxx",
+    "CMP TEMP[18].xyz, -CONST[20].zzzz, TEMP[18], IMM[2]", "MOV TEMP[18].w, IMM[0].zzzz",
+    "MOV TEMP[0].y, IMM[3].xxxx",
+    "BGNLOOP",
+    "USGE TEMP[0].z, TEMP[0].yyyy, CONST[23].xxxx",
+    "UIF TEMP[0].zzzz", "BRK", "ENDIF",
+    "UMAD TEMP[0].w, TEMP[0].yyyy, IMM[1].zzzz, CONST[23].yyyy",
+    "UARL ADDR[0].x, TEMP[0].wwww",
+    /* Light position and direction in camera space. */
+    "DP4 TEMP[19].x, CONST[ADDR[0].x+3], CONST[5]", "DP4 TEMP[19].y, CONST[ADDR[0].x+3], CONST[6]",
+    "DP4 TEMP[19].z, CONST[ADDR[0].x+3], CONST[7]",
+    "DP3 TEMP[20].x, CONST[ADDR[0].x+4], CONST[5]", "DP3 TEMP[20].y, CONST[ADDR[0].x+4], CONST[6]",
+    "DP3 TEMP[20].z, CONST[ADDR[0].x+4], CONST[7]", "MOV TEMP[20].w, IMM[0].zzzz",
+    "DP3 TEMP[22].x, TEMP[20], TEMP[20]", "MAX TEMP[22].x, TEMP[22].xxxx, IMM[2].wwww",
+    "RSQ TEMP[22].x, TEMP[22].xxxx", "MUL TEMP[20].xyz, TEMP[20], TEMP[22].xxxx",
+    /* Point and spot: direction to the light, distance, attenuation, range. */
+    "ADD TEMP[21].xyz, TEMP[19], -TEMP[3]", "MOV TEMP[21].w, IMM[0].zzzz",
+    "DP3 TEMP[22].x, TEMP[21], TEMP[21]", "MAX TEMP[22].x, TEMP[22].xxxx, IMM[2].wwww",
+    "RSQ TEMP[22].y, TEMP[22].xxxx", "MUL TEMP[22].z, TEMP[22].xxxx, TEMP[22].yyyy",
+    "MUL TEMP[21].xyz, TEMP[21], TEMP[22].yyyy",
+    "MAD TEMP[22].w, CONST[ADDR[0].x+5].zzzz, TEMP[22].zzzz, CONST[ADDR[0].x+5].yyyy",
+    "MAD TEMP[22].w, CONST[ADDR[0].x+5].wwww, TEMP[22].xxxx, TEMP[22].wwww",
+    "RCP TEMP[22].w, TEMP[22].wwww",
+    "SGE TEMP[23].x, CONST[ADDR[0].x+5].xxxx, TEMP[22].zzzz",
+    "MUL TEMP[22].w, TEMP[22].wwww, TEMP[23].xxxx",
+    /* Spot: ((rho - cos(phi/2)) / (cos(theta/2) - cos(phi/2)))^falloff inside the outer cone. */
+    "DP3 TEMP[23].x, -TEMP[21], TEMP[20]",
+    "MUL TEMP[23].yz, CONST[ADDR[0].x+6].xxyy, IMM[0].wwww",
+    "COS TEMP[23].y, TEMP[23].yyyy", "COS TEMP[23].z, TEMP[23].zzzz",
+    "ADD TEMP[23].w, TEMP[23].xxxx, -TEMP[23].zzzz",
+    "ADD TEMP[24].x, TEMP[23].yyyy, -TEMP[23].zzzz", "MAX TEMP[24].x, TEMP[24].xxxx, IMM[2].wwww",
+    "RCP TEMP[24].x, TEMP[24].xxxx", "MUL_SAT TEMP[23].w, TEMP[23].wwww, TEMP[24].xxxx",
+    "MAX TEMP[23].w, TEMP[23].wwww, IMM[2].wwww",
+    "POW TEMP[23].w, TEMP[23].wwww, CONST[ADDR[0].x+6].zzzz",
+    "SLT TEMP[24].y, TEMP[23].zzzz, TEMP[23].xxxx", "MUL TEMP[23].w, TEMP[23].wwww, TEMP[24].yyyy",
+    "CMP TEMP[23].w, -CONST[ADDR[0].x+7].yyyy, TEMP[23].wwww, IMM[0].xxxx",
+    "MUL TEMP[22].w, TEMP[22].wwww, TEMP[23].wwww",
+    /* Directional: toward the light is minus its direction, no attenuation. */
+    "CMP TEMP[21].xyz, -CONST[ADDR[0].x+7].xxxx, -TEMP[20], TEMP[21]",
+    "CMP TEMP[22].w, -CONST[ADDR[0].x+7].xxxx, IMM[0].xxxx, TEMP[22].wwww",
+    /* Ambient, diffuse, and specular with the halfway vector where N.L > 0. */
+    "MAD TEMP[15], CONST[ADDR[0].x+2], TEMP[22].wwww, TEMP[15]",
+    "DP3 TEMP[24].x, TEMP[7], TEMP[21]", "MAX TEMP[24].x, TEMP[24].xxxx, IMM[0].zzzz",
+    "MUL TEMP[24].y, TEMP[24].xxxx, TEMP[22].wwww",
+    "MAD TEMP[16], CONST[ADDR[0].x], TEMP[24].yyyy, TEMP[16]",
+    "ADD TEMP[25].xyz, TEMP[21], TEMP[18]", "MOV TEMP[25].w, IMM[0].zzzz",
+    "DP3 TEMP[24].z, TEMP[25], TEMP[25]", "MAX TEMP[24].z, TEMP[24].zzzz, IMM[2].wwww",
+    "RSQ TEMP[24].z, TEMP[24].zzzz", "MUL TEMP[25].xyz, TEMP[25], TEMP[24].zzzz",
+    "DP3 TEMP[24].z, TEMP[7], TEMP[25]", "MAX TEMP[24].z, TEMP[24].zzzz, IMM[2].wwww",
+    "POW TEMP[24].z, TEMP[24].zzzz, CONST[20].xxxx",
+    "SLT TEMP[24].w, IMM[0].zzzz, TEMP[24].xxxx", "MUL TEMP[24].z, TEMP[24].zzzz, TEMP[24].wwww",
+    "MUL TEMP[24].z, TEMP[24].zzzz, TEMP[22].wwww",
+    "MAD TEMP[17], CONST[ADDR[0].x+1], TEMP[24].zzzz, TEMP[17]",
+    "UADD TEMP[0].y, TEMP[0].yyyy, IMM[1].wwww",
+    "ENDLOOP",
+    /* Diffuse: Ca*ambient + Cd*diffuse + Ce with the alpha of Cd; specular:
+     * Cs*specular when enabled, with the vertex specular alpha (fog). */
+    "MUL TEMP[14], TEMP[12], TEMP[15]", "MAD TEMP[14], TEMP[10], TEMP[16], TEMP[14]",
+    "ADD TEMP[14], TEMP[14], TEMP[13]", "MOV TEMP[14].w, TEMP[10].wwww", "MOV_SAT OUT[1], TEMP[14]",
+    "MUL TEMP[14], TEMP[11], TEMP[17]", "MUL TEMP[14].xyz, TEMP[14], CONST[20].wwww",
+    "MOV TEMP[14].w, TEMP[9].wwww", "MOV_SAT OUT[2], TEMP[14]",
+    "MOV OUT[3], TEMP[26]",
+    /* The viewport mapping of object_shader, from the clip position. */
+    "RCP TEMP[27].x, CONST[0].xxxx", "RCP TEMP[27].y, CONST[0].yyyy",
+    "MUL TEMP[28].xy, CONST[13].zwww, TEMP[27].xyyy",
+    "MAD TEMP[27].zw, CONST[13].xxxy, IMM[0].yyyy, CONST[13].xxzw",
+    "ADD TEMP[27].zw, TEMP[27], IMM[0].xxxx",
+    "MAD TEMP[28].zw, TEMP[27], TEMP[27].xxxy, -IMM[0].xxxx",
+    "MUL TEMP[29].x, TEMP[4].xxxx, TEMP[28].xxxx",
+    "MAD OUT[0].x, TEMP[4].wwww, TEMP[28].zzzz, TEMP[29].xxxx",
+    "MUL TEMP[29].y, TEMP[4].yyyy, -TEMP[28].yyyy",
+    "MAD OUT[0].y, TEMP[4].wwww, TEMP[28].wwww, TEMP[29].yyyy",
+    "ADD TEMP[27].x, CONST[14].yyyy, -CONST[14].xxxx", "MUL TEMP[27].x, TEMP[27].xxxx, IMM[0].yyyy",
+    "MAD TEMP[27].y, CONST[14].xxxx, IMM[0].yyyy, -IMM[0].xxxx",
+    "MUL TEMP[29].z, TEMP[4].zzzz, TEMP[27].xxxx",
+    "MAD OUT[0].z, TEMP[4].wwww, TEMP[27].yyyy, TEMP[29].zzzz",
+    "MOV OUT[0].w, TEMP[4].wwww",
+    "END"
+};
+
+static ULONG lit_text(char *out)
+{
+    TEXT t;
+    ULONG i;
+    t.p = out; t.n = 0; t.line = 0; t.size = LitText; t.overflow = FALSE;
+    put(&t, "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..");
+    number(&t, LitConstants - 1);
+    put(&t, "]\nDCL ADDR[0]\nDCL TEMP[0..29]\nDCL OUT[0], POSITION\nDCL OUT[1], GENERIC[0]\n"
+            "DCL OUT[2], GENERIC[1]\nDCL OUT[3], GENERIC[2]\n"
+            "IMM[0] FLT32 {0x3f800000, 0x40000000, 0x00000000, 0x3f000000}\n"
+            "IMM[1] UINT32 {5, 24, 8, 1}\n"
+            "IMM[2] FLT32 {0x00000000, 0x00000000, 0xbf800000, 0x0d800000}\n"
+            "IMM[3] UINT32 {0, 0, 0, 0}\n");
+    for (i = 0; i < sizeof(lit_lines)/sizeof(*lit_lines); ++i) op(&t, lit_lines[i], 0, 0, 0);
+    return t.overflow ? 0 : t.n + 1;
+}
+typedef char lit_layout[LitVertexBase == 24 && LitVertexConstants == 5 && LitLightConstants == 8 ? 1 : -1];
 
 /* ---- validation and state objects ---- */
 
@@ -331,6 +480,16 @@ BOOLEAN rb_gpu_d7_valid(const RB2K_D3D7_DRAW *d)
     if (d->transform > 1 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
         d->viewport[0] > 8192 || d->viewport[1] > 8192 || d->viewport[2] > 8192 || d->viewport[3] > 8192)))
         return FALSE;
+    if (d->lighting) {
+        ULONG k;
+        if (d->lighting != 1 || !d->transform || d->lightCount > RB2K_D7_LIGHTS ||
+            (d->lightFlags & ~((0xffUL << RB2K_D7_SOURCE_SHIFT) | RB2K_D7_NORMALIZE | RB2K_D7_LOCAL_VIEWER)))
+            return FALSE;
+        for (k = 0; k < 4; ++k)
+            if (((d->lightFlags >> (RB2K_D7_SOURCE_SHIFT + 2*k)) & 3) > 2) return FALSE;
+        for (k = 0; k < d->lightCount; ++k)
+            if (d->lights[k][0] < 1 || d->lights[k][0] > 3) return FALSE;   /* point, spot, directional */
+    }
     if (!stage_valid(d->colorStage) || !stage_valid(d->alphaStage)) return FALSE;
     if (d->sampler >> 16 || addressU < 1 || addressU > 4 || addressV < 1 || addressV > 4 ||
         mag < 1 || mag > 5 || min < 1 || min > 3) return FALSE;
@@ -387,14 +546,22 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
         s->pipeline = TRUE;
     }
     {
-        ULONG want = d->transform ? 2 : 1, handle = d->transform ? ObjectShader : VertexShader;
-        if (!(s->vertexShaders & want)) {
-            if (d->transform ? !shader(gpu,r,image,handle,VertexStage,object_shader,sizeof(object_shader)) :
-                               !shader(gpu,r,image,handle,VertexStage,vertex_shader,sizeof(vertex_shader)))
-                return FALSE;
-            s->vertexShaders |= want;
-        }
-        if (s->boundVertex != want) {
+static char litText[LitText];
+static ULONG litSize;
+ULONG want = d->lighting ? 4 : d->transform ? 2 : 1;
+ULONG handle = d->lighting ? LitShader : d->transform ? ObjectShader : VertexShader;
+if (!(s->vertexShaders & want)) {
+    BOOLEAN ok;
+    if (d->lighting) {
+        if (!litSize) litSize = lit_text(litText);
+        ok = litSize && shader(gpu,r,image,handle,VertexStage,litText,litSize);
+        if (!litSize) { r->status = ERROR_INVALID_DATA; r->stage = RB2K_STAGE_TRANSFER; }
+    } else if (d->transform) ok = shader(gpu,r,image,handle,VertexStage,object_shader,sizeof(object_shader));
+    else ok = shader(gpu,r,image,handle,VertexStage,vertex_shader,sizeof(vertex_shader));
+    if (!ok) return FALSE;
+    s->vertexShaders |= want;
+}
+if (s->boundVertex != want) {
             ULONG bind[] = { VIRGL_CMD0(VIRGL_CCMD_BIND_SHADER,0,VIRGL_BIND_SHADER_SIZE), handle, VertexStage };
             if (!rb_gpu_frame_words(gpu,r,image,bind,3)) return FALSE;
             s->boundVertex = want;
@@ -532,8 +699,11 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
 BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
                        const RB2K_D3D7_DRAW *d, const RB2K_TEXTURE *texture)
 {
-    /* Viewport 8, scissor 4, constants 7 + 56 + 16 per vertex, draw 13. */
-    ULONG i, count = d->count, total = 28 + (d->transform ? 60 : 0) + 16*count, *p;
+    /* Viewport 8, scissor 4, constants 7 + 56 (+ 36 lit) + 16 (20 lit) per vertex
+     * (+ 32 per light), draw 13. */
+    ULONG lit = d->lighting != 0, lights = lit ? d->lightCount : 0, perVertex = lit ? 20 : 16;
+    ULONG extra = (d->transform ? 56 : 0) + (lit ? 36 + 32*lights : 0);
+    ULONG i, count = d->count, total = 28 + (d->transform ? 4 : 0) + extra + perVertex*count, *p;
     ULONG width = dimension_bits(image->width), height = dimension_bits(image->height);
     if (!rb_gpu_prepare_target(gpu, r, image) || !states(gpu, r, image, d, texture)) return FALSE;
     p = rb_gpu_frame_reserve(gpu, r, image, total);
@@ -557,7 +727,7 @@ BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
         *p++ = VIRGL_CMD0(VIRGL_CCMD_SET_SCISSOR_STATE,0,VIRGL_SET_SCISSOR_STATE_SIZE(1));
         *p++ = 0; *p++ = x0 | y0 << 16; *p++ = x1 | y1 << 16;
     }
-    *p++ = VIRGL_CMD0(VIRGL_CCMD_SET_CONSTANT_BUFFER,0,6+(d->transform ? 56 : 0)+16*count);
+    *p++ = VIRGL_CMD0(VIRGL_CCMD_SET_CONSTANT_BUFFER,0,6+extra+perVertex*count);
     *p++ = VertexStage; *p++ = 0;
     /* Constant zero supplies the shader with its viewport dimensions. */
     *p++ = width; *p++ = height; *p++ = 0; *p++ = 0;
@@ -568,8 +738,28 @@ BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
             for (col = 0; col < 4; ++col)
                 for (row = 0; row < 4; ++row) *p++ = d->matrices[m][row * 4 + col];
         for (i = 0; i < 4; ++i) *p++ = integer_bits(d->viewport[i]);
-        *p++ = d->viewport[4]; *p++ = d->viewport[5]; *p++ = 0; *p++ = 0;
+    *p++ = d->viewport[4]; *p++ = d->viewport[5]; *p++ = 0; *p++ = 0;
+}
+if (lit) {
+    /* Constants 15..23 of lit_lines; Direct3D material sources 1 and 2 are
+     * the vertex colours. */
+    const ULONG one = 0x3f800000, sources = d->lightFlags >> RB2K_D7_SOURCE_SHIFT;
+    ULONG k;
+    *p++ = rb_gpu_channel((d->ambient >> 16) & 255);
+    *p++ = rb_gpu_channel((d->ambient >> 8) & 255);
+    *p++ = rb_gpu_channel(d->ambient & 255);
+    *p++ = rb_gpu_channel(d->ambient >> 24);
+    for (k = 0; k < 16; ++k) *p++ = d->material[k];
+    *p++ = d->material[16];
+    *p++ = d->lightFlags & RB2K_D7_NORMALIZE ? one : 0;
+    *p++ = d->lightFlags & RB2K_D7_LOCAL_VIEWER ? one : 0;
+    *p++ = d->specular ? one : 0;
+    for (k = 0; k < 4; ++k) {
+        *p++ = ((sources >> 2*k) & 3) == 1 ? one : 0;
+        *p++ = ((sources >> 2*k) & 3) == 2 ? one : 0;
     }
+    *p++ = lights; *p++ = LitVertexBase + LitVertexConstants*count; *p++ = 0; *p++ = 0;
+}
     for (i = 0; i < count; ++i) {
         const RB2K_D3D7_VERTEX *v = d->vertices + i;
         *p++ = v->x; *p++ = v->y; *p++ = v->z; *p++ = v->rhw;
@@ -581,8 +771,21 @@ BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
         *p++ = rb_gpu_channel((v->specular >> 8) & 255);
         *p++ = rb_gpu_channel(v->specular & 255);
         *p++ = rb_gpu_channel(v->specular >> 24);
-        *p++ = v->u; *p++ = v->v; *p++ = 0; *p++ = 0x3f800000;
-    }
+    *p++ = v->u; *p++ = v->v; *p++ = 0; *p++ = 0x3f800000;
+    if (lit) { *p++ = v->nx; *p++ = v->ny; *p++ = v->nz; *p++ = 0; }
+}
+for (i = 0; i < lights; ++i) {
+    /* D3DLIGHT7: type, diffuse, specular, ambient, position, direction,
+     * range, falloff, attenuation 0..2, theta, phi. */
+    const ULONG *l = d->lights[i];
+    ULONG k;
+    for (k = 1; k <= 12; ++k) *p++ = l[k];
+    *p++ = l[13]; *p++ = l[14]; *p++ = l[15]; *p++ = 0x3f800000;
+    *p++ = l[16]; *p++ = l[17]; *p++ = l[18]; *p++ = 0;
+    *p++ = l[19]; *p++ = l[21]; *p++ = l[22]; *p++ = l[23];
+    *p++ = l[24]; *p++ = l[25]; *p++ = l[20]; *p++ = 0;
+    *p++ = l[0] == 3 ? 0x3f800000 : 0; *p++ = l[0] == 2 ? 0x3f800000 : 0; *p++ = 0; *p++ = 0;
+}
     *p++ = VIRGL_CMD0(VIRGL_CCMD_DRAW_VBO,0,VIRGL_DRAW_VBO_SIZE);
     *p++ = 0;                  /* first vertex */
     *p++ = count;
