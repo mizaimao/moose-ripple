@@ -1560,3 +1560,40 @@ host-to-guest transfer commands and 253 display switches. Across the
 interior of the HDR phase, 71,820 transfers targeted two resource IDs.
 Neither ID was selected for display during the trace. The trace provides
 the resource ID but omits the transfer size and the time spent waiting.
+
+### Screen-space texture coordinates with a bound vertex shader
+
+3DMark06 leaves a vertex shader bound when switching to a fullscreen
+postprocessing quad whose vertices already contain screen coordinates
+(`POSITIONT`). The quad still supplies texture coordinates for the pixel
+shader. The Windows 7 driver used the old vertex shader's input map, which
+could omit those coordinates. The fix builds the input mapping from the
+active declaration and the pixel shader for these draws.
+
+The 16×16 test first binds a position-only application vertex shader, then
+switches to transformed vertices and draws a four-colour texture. It compares
+all 256 pixels, including the border. Each architecture returned **108 wrong
+pixels before the change and zero afterward**. The three existing draws on
+each architecture matched throughout. The same immediate-flip kernel ran in
+both tests. [Four-colour probe](../../tools/win7-hello/d3d9positiont.c)
+
+| Bound-shader trial | SHA-256 |
+| --- | --- |
+| x64 DLL | `9daab67bfc24a2cea8e375fed8f5f5da99835415500259867cbec7360baf0aa1` |
+| x86 DLL | `9e64515218520ae88b666f42eedb44be4df40ace3ebe289976f58bf94fbeb496` |
+| Test-signed catalog | `d95ee69b604c9185d182d7288d61743bbcc2abbb51c426e2a12e74b7f5fac391` |
+
+In an independent visual run, the Intel display showed the hangar, soldiers
+and crates around 13.57 seconds in Return to Proxycon. The old DLLs had shown
+a stretched surface at 14.34 seconds. Firefly Forest showed the vegetation
+and both fireflies. Broad orange bands were still apparent in the hangar,
+and grey triangles crossed both the terrain and sky in Red Valley.
+
+A separate no-viewer run saved a provisional **9,247** (SM2.0 **2,843**,
+HDR/SM3.0 **4,247**, CPU **4,904**). The fullscreen samples spanned 817.55
+host seconds, 817.54 Windows performance-counter seconds and 397.80 Windows
+tick seconds. Late host display rates in suite order were 11.25, 7.74, 1.61,
+2.59, 6.40 and 8.00 changes per real second. The renderer logged 167,499
+failures converting TGSI opcode 61 (`ARR`), including 166,896 within the
+Canyon Flight buffer pair. The saved result SHA-256 is
+`fe77fe7c54cb65ba8d2b7042cb6401d729cc1e3c4ed1f38a235752da28c17a2e`.

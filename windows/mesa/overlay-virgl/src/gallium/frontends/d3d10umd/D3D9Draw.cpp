@@ -677,25 +677,6 @@ D3D9UpdateTranslatedShaderState(D3D9Device *device)
    return S_OK;
 }
 
-static bool
-D3D9HasTranslatedShaderPair(const D3D9Device *device)
-{
-   return D3D9TranslatedVsState(device) && D3D9TranslatedPsState(device);
-}
-
-static bool
-D3D9TranslatedShaderPairIsRuntimeFixedFunction(const D3D9Device *device)
-{
-   const D3D9Object *vs =
-      (const D3D9Object *)device->vertex_shader_func;
-   const D3D9Object *ps =
-      (const D3D9Object *)device->pixel_shader;
-
-   return D3D9HasTranslatedShaderPair(device) &&
-          D3D9ShaderHasRuntimeFixedFunctionComment(vs) &&
-          D3D9ShaderHasRuntimeFixedFunctionComment(ps);
-}
-
 static HRESULT
 D3D9FailNoTranslatedShaderPair(const D3D9Device *device)
 {
@@ -3384,9 +3365,6 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
    void *translated_ps = D3D9TranslatedPsState(device);
    void *translated_vs = D3D9TranslatedVsState(device);
    const bool translated_shader_pair = translated_vs && translated_ps;
-   const bool runtime_fixed_function_pair =
-      translated_shader_pair &&
-      D3D9TranslatedShaderPairIsRuntimeFixedFunction(device);
    const bool generate_position_t_ps_input_vs =
       !translated_vs && D3D9CanUsePositionTPsInputFixedFunction(device);
    const bool generate_position_t_diffuse_vs =
@@ -3412,24 +3390,19 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       !generate_position_t_runtime_ps_vs && translated_ps &&
       D3D9InitPositionTPsInputFixedFunctionVsInfo(device, &fixed_function_vs_shader,
                                                   current_ps);
-   /*
-    * D3D9 POSITIONT fixed-function draws consume app-provided texture
-    * coordinates directly.  The runtime's generated FF VS may still contain
-    * texture-transform code, so keep the translated FF PS but generate the
-    * POSITIONT VS from the active declaration.
-    */
-   const bool replace_position_t_runtime_ff_vs =
-      runtime_fixed_function_pair && D3D9ActiveVertexDeclHasPositionT(device) &&
-      D3D9InitPositionTDeclVsInfo(
-         device, current_ps, &fixed_function_vs_shader);
+   /* POSITIONT bypasses a bound vertex shader. The postprocessing pixel
+    * shader still consumes the texture coordinates in the active declaration. */
+   const bool replace_position_t_vs =
+      translated_shader_pair && D3D9ActiveVertexDeclHasPositionT(device) &&
+      D3D9InitPositionTPsInputFixedFunctionVsInfo(device, &fixed_function_vs_shader,
+                                                 current_ps);
 
-   if (((!translated_vs || replace_position_t_runtime_ff_vs) &&
+   if ((!translated_vs &&
         !generate_position_t_ps_input_vs &&
         !generate_position_t_diffuse_vs &&
         !generate_position_t_runtime_ps_vs &&
         !generate_position_t_runtime_processed_diffuse_vs &&
-        !generate_position_t_runtime_processed_vs &&
-        !replace_position_t_runtime_ff_vs) || !translated_ps)
+        !generate_position_t_runtime_processed_vs) || !translated_ps)
       return D3D9FailNoTranslatedShaderPair(device);
 
    if (generate_position_t_ps_input_vs) {
@@ -3449,7 +3422,7 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
        generate_position_t_runtime_ps_vs ||
        generate_position_t_runtime_processed_diffuse_vs ||
        generate_position_t_runtime_processed_vs ||
-       replace_position_t_runtime_ff_vs) ?
+       replace_position_t_vs) ?
       &fixed_function_vs_shader :
       (translated_vs ? (const D3D9Object *)device->vertex_shader_func : NULL);
 
@@ -3537,10 +3510,10 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
        generate_position_t_runtime_ps_vs ||
        generate_position_t_runtime_processed_diffuse_vs ||
        generate_position_t_runtime_processed_vs ||
-       replace_position_t_runtime_ff_vs) {
+       replace_position_t_vs) {
       fixed_function_shaders.vs =
          (generate_position_t_ps_input_vs ||
-          replace_position_t_runtime_ff_vs ||
+          replace_position_t_vs ||
           generate_position_t_runtime_processed_vs ||
           generate_position_t_runtime_ps_vs) ?
          D3D9CreatePositionTPsInputFixedFunctionVs(device,
