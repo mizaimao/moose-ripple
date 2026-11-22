@@ -56,7 +56,8 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
             ((desc->dwFlags & DDSD_HEIGHT) && desc->dwHeight != d->mode.VisScreenHeight))
             return FALSE;
     } else if (!d->gpuSurfaces || !(caps & DDSCAPS_OFFSCREENPLAIN) ||
-               (caps & ~(DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM)) ||
+               (caps & ~(DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM |
+                         DDSCAPS_3DDEVICE)) ||
                !desc->dwWidth || desc->dwWidth > RB2K_DD_MAX_WIDTH ||
                !desc->dwHeight || desc->dwHeight > RB2K_DD_MAX_HEIGHT) return FALSE;
     if (!(desc->dwFlags & DDSD_PIXELFORMAT)) return TRUE;
@@ -681,7 +682,10 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     info->ddCaps.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY |
                                   DDSCAPS_LOCALVIDMEM;
     d->gpuSurfaces = caps.gpuSurfaces != 0;
-    if (!d->gpuSurfaces) caps.slots = 0;
+    if (d->gpuSurfaces)
+        info->ddCaps.ddsCaps.dwCaps |= DDSCAPS_3DDEVICE;
+    else
+        caps.slots = 0;
     info->ddCaps.dwVidMemTotal = caps.maxBytes * caps.slots;
     pageBytes = page_size(d);
     if (pageBytes) {
