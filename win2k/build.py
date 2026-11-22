@@ -119,6 +119,7 @@ def build_programs(work):
         ("ipixels.exe", ["tools/d3d7probe"], ["-DRB_D3D7_INDEXED_PROBE", "-lddraw", "-ldxguid", "-lgdi32", "-luser32"]),
         ("z16pixels.exe", ["tools/z16pixels"], ["-lddraw", "-ldxguid", "-lgdi32", "-luser32"]),
         ("tpixels.exe", ["tools/tpixels"], ["-lddraw", "-ldxguid", "-lgdi32", "-luser32"]),
+        ("tlight.exe", ["tools/tlight"], ["-lddraw", "-ldxguid", "-luser32"]),
         ("d7draw.exe", ["tools/d7draw"], ["-lgdi32"]),
         ("zstore.exe", ["tools/zstore"], ["-lddraw", "-ldxguid", "-lgdi32", "-luser32"]),
         ("glpresent.exe", ["tools/glpresent"], ["-lopengl32", "-lgdi32", "-luser32"]),
