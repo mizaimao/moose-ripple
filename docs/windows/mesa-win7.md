@@ -1522,6 +1522,14 @@ Each local result recorded all six tests successful. Windows 7 reached the
 score dialog 857.56 host seconds after Run. Its 118,356-byte result has
 SHA-256 `25981ef18cba5440dfe9cf7de6302380d82a69bae461ea48202e1b433173373e`.
 
+The **9,389** figure is provisional as a graphics-performance comparison.
+In a separate boot with identical drivers, the host viewer showed Return
+to Proxycon advancing from HUD frame 987 to 1,140, while a stretched brown
+surface obscured the scene. The fullscreen colour tests and the saved score
+did not detect this rendering error. Vista had shown the same symptom when
+postprocessing quads lost their texture coordinates with a vertex shader
+still bound.
+
 | Matched no-viewer run | Windows 7 SP1 | Vista SP2 |
 | --- | ---: | ---: |
 | 3DMark06 | **9,389** | **13,964** |
