@@ -863,3 +863,60 @@ The original Direct3D Quake 0.73 window reached 640×480 with both drivers.
 The game reported `DDERR_INVALIDCAPS` and never recorded a hardware
 context or draw. Neither run produced a `demo1` score for comparison with
 the historical 0.81 renderer. [Author's game releases](https://dxquake.sourceforge.net/)
+
+### Two frames in flight on stock QEMU
+
+The opt-in native driver keeps up to two scenes in flight. When submitting
+frame N it waits only if frame N−2 still owns the command buffer it needs.
+A lock, copy or destruction of a render target waits for outstanding GPU
+work on that target. The test setting `RippleD3D7WaitCurrent=1` selects the
+synchronous control in the same driver binary.
+
+Linux QEMU 9.2.0 with KVM and Intel UHD 630 ran a 128×128 render target on a
+1024×768, 32-bit desktop. Each timing covers 120 clear-and-triangle scenes
+through the final synchronized surface lock. Each row reports the median of
+three runs per mode. The RGB column uses the software device in the
+two-frame driver's guest.
+
+| Guest | Wait for each frame | Two frames in flight | RGB software |
+| --- | ---: | ---: | ---: |
+| Windows 2000 SP4 | 1,200.869 ms | 55.789 ms | 8.400 ms |
+| Windows XP SP3 | 1,200.930 ms | 64.165 ms | 11.243 ms |
+
+XP's three two-frame runs took 65.063, 27.259 and 64.165 ms. All reached
+two outstanding scenes, completed all 120 fences by the final read and
+matched both triangle samples. Waiting after each scene cost about 1.194 s
+per block. The two-frame runs recorded zero waits for N−2 and one
+9.50–9.82 ms wait at the final read.
+
+Windows 2000's two-frame runs took 103.018, 41.512 and 55.789 ms. Each
+completed 120 fences and passed the pixel test. Only the second run waited
+for N−2, twice for 19.241 ms in total. All three waited for the target at
+the final read, for 9.37–9.92 ms. On both guests the hardware device
+completed 121 triangles and 122 clears per test and released its context
+and render target.
+
+QEMU checks for completed GPU work after processing new control commands.
+If work remains, it schedules another check 10 ms later. The measured
+9.95 ms per synchronous fence is consistent with waiting for that timer.
+Submitting the next scene gives QEMU another opportunity to retire the
+previous fence. [QEMU control handler](https://github.com/qemu/qemu/blob/v9.2.0/hw/display/virtio-gpu-gl.c#L92-L102) · [QEMU fence timer](https://github.com/qemu/qemu/blob/v9.2.0/hw/display/virtio-gpu-virgl.c#L977-L986)
+
+The separate XRGB texture test wrote and read back 20 images at each size.
+On both guests, 16×16 and 64×64 writes used 20 inline submissions and zero
+upload fences. At 65×65 the existing transfer path used 60 submissions and
+20 fences. All texels matched.
+
+Direct3D Quake 0.73 reported `DDERR_INVALIDCAPS` before creating a native
+device on all four hardware boots. Two further boots disabled the native
+Direct3D device, one per OS. Both reproduced the same game error and passed
+all three RGB software pixel tests. Each of the original game's four D3DX7
+windowed context requests returned the same error in a separate test.
+Explicit requests for a hardware device without depth and for the RGB
+software device also failed. DirectDraw successfully created a plain
+primary surface and a 640×480 offscreen hardware render target. Creating
+a 16-bit depth surface returned a separate error, `DDERR_NOZBUFFERHW`.
+The next diagnostic traces the surface descriptors reaching the DirectDraw
+callbacks during context creation. The game recorded no frame rate in any
+of the six boots. The historical XP score on this Intel system was 57.3 fps
+for the same 969-frame demo in the 0.81 Direct3D 8 version.
