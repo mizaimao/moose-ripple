@@ -1061,9 +1061,8 @@ uploads and four reads. The control had rejected both allocations.
 
 The separate `z16pixels` overlapping-triangle
 test matched nine samples with Microsoft's RGB device on every boot.
-Hardware depth enumeration still returned `DDERR_NOZBUFFERHW`. Connecting
-a depth surface to the host framebuffer and applying the depth comparison
-and write state are the next rendering steps.
+Hardware depth enumeration on this storage-only revision still returned
+`DDERR_NOZBUFFERHW`.
 
 With Microsoft's RGB device forced, the original Direct3D Quake 0.73
 completed all 969 frames of `demo1` at 640×480 on Windows 2000. Both the
@@ -1090,3 +1089,62 @@ copy, the fixed driver's three runs took 76.444–81.733 ms. The measured
 miniport operations accounted for 22.921–23.693 ms per block. None waited
 for an older frame's queue slot. The next timing check is at the Direct3D
 runtime calls and final surface lock.
+
+### Native 16-bit depth rendering
+
+The native Direct3D 7 device now attaches a Z16 surface to its colour
+target. The GPU clears depth, compares incoming triangle depth and
+honours the depth-write enable state. A CPU lock on depth waits for the
+colour context that last wrote it. Reusing the same attachment adds no
+queue submission or fence wait.
+
+Four fresh Intel UHD 630 guests compared the storage-only driver with
+the depth renderer. The display DLL and miniport were the only two
+files that changed. On both systems the control returned
+`DDERR_NOZBUFFERHW` before the first hardware depth pixel. The new HAL
+matched Microsoft's RGB reference in all three cases. Each case also
+checked a far-only pixel and untouched background.
+
+| Hardware depth test | Expected overlap | Windows 2000 SP4 | Windows XP SP3 |
+| --- | --- | ---: | ---: |
+| Near triangle first, then far | Red | 3/3 | 3/3 |
+| Far triangle first, then near | Red | 3/3 | 3/3 |
+| Near triangle first, depth writes disabled | Blue | 3/3 | 3/3 |
+
+Before Quake started, each candidate had counted six more native
+triangles and three more clears than its control, matching the three
+new depth cases. Microsoft's RGB device matched all nine
+pixels on all four boots. The existing Z16 lock test still matched
+33,162 values per boot. The native window test matched all four pixels.
+
+The stock Direct3D Quake 0.73 startup changed on both systems. All four
+game-matched D3DX7 requests had previously returned
+`D3DXERR_CAPSNOTSUPPORTED`. All four selected the hardware device
+(`84e63de0`) with the new driver. Quake then finished `demo1` at
+640×480 and exited normally on each system.
+
+| Stock Quake, 969 frames | Windows 2000 SP4 | Windows XP SP3 |
+| --- | ---: | ---: |
+| Timedemo rate printed by the game | 39.7 fps | 39.1 fps |
+| Native GPU clears during the game | 970 | 970 |
+| Native GPU triangles during the game | **0** | **0** |
+| Game observed in the foreground | 25/25 samples | 0/26 samples |
+
+**Game rendering remains incomplete.** Both drivers last reported
+command 26, `D3DNTDP2OP_INDEXEDTRIANGLELIST2`, and
+`D3DNTERR_COMMAND_UNPARSED` (`0x88760bb8`). The game loop advanced
+without the driver drawing its triangles. A performance comparison with
+software or the historical game baseline needs confirmed scene geometry.
+The next pixel test uses nonconsecutive indices so a sequential draw
+cannot pass it. [Indexed triangle list format](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dhal/ns-d3dhal-_d3dhal_dp2indexedtrianglelist2).
+
+Each guest also ran one 120-frame colour block in each configuration.
+The offscreen timer ends on the final lock, before the visible copy in
+the window case. These single observations show the variation across
+boots. The dedicated repeated XP timing experiment is recorded above.
+
+| Colour control, 120 frames | Windows 2000 storage | Windows 2000 rendering | XP storage | XP rendering |
+| --- | ---: | ---: | ---: | ---: |
+| Microsoft RGB | 13.491 ms | 13.594 ms | 10.136 ms | 6.537 ms |
+| Native offscreen | 21.968 ms | 32.034 ms | 84.156 ms | 76.255 ms |
+| Native offscreen before window copy | 47.692 ms | 48.967 ms | 20.967 ms | 31.572 ms |
