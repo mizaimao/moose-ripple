@@ -65,7 +65,7 @@ BOOL DrvCopyBits(SURFOBJ *dst, SURFOBJ *src, CLIPOBJ *clip, XLATEOBJ *xlate,
 {
     DISPLAY *d = primary(dst);
     BOOL ok;
-    rb_gl_cpu_lock();
+    rb_gl_cpu_lock(primary(src) ? RB2K_PAINT_COPY_DESKTOP : RB2K_PAINT_COPY_BITMAP, 0);
     ok = read_source(src, origin, rect) && prepare_blt(d, rect, clip, TRUE) &&
         EngCopyBits(bitmap(dst), bitmap(src), clip, xlate, rect, origin);
     return finish(d, ok);
@@ -76,7 +76,7 @@ BOOL DrvBitBlt(SURFOBJ *dst, SURFOBJ *src, SURFOBJ *mask, CLIPOBJ *clip, XLATEOB
 {
     DISPLAY *d = primary(dst);
     BOOL ok;
-    rb_gl_cpu_lock();
+    rb_gl_cpu_lock(mask ? RB2K_PAINT_MASKBLT : RB2K_PAINT_BLT, rop);
     ok = read_source(src, origin, rect) && read_source(mask, maskOrigin, rect) &&
         prepare_blt(d, rect, clip, ((rop ^ (rop >> 1)) & 0x5555) == 0) &&
         EngBitBlt(bitmap(dst), bitmap(src), bitmap(mask),
@@ -89,7 +89,7 @@ BOOL DrvTextOut(SURFOBJ *dst, STROBJ *text, FONTOBJ *font, CLIPOBJ *clip,
 {
     DISPLAY *d = primary(dst);
     BOOL ok;
-    rb_gl_cpu_lock();
+    rb_gl_cpu_lock(RB2K_PAINT_TEXT, 0);
     ok = rb_gl_cpu_access(d, &text->rclBkGround, TRUE) &&
         (!opaque || rb_gl_cpu_access(d, opaque, TRUE)) &&
         EngTextOut(bitmap(dst), text, font, clip, extra, opaque, fore, back, origin, mix);
@@ -101,7 +101,7 @@ BOOL DrvStrokePath(SURFOBJ *dst, PATHOBJ *path, CLIPOBJ *clip, XFORMOBJ *transfo
 {
     DISPLAY *d = primary(dst);
     BOOL ok;
-    rb_gl_cpu_lock();
+    rb_gl_cpu_lock(RB2K_PAINT_STROKE, 0);
     ok = rb_gl_cpu_access(d, bounds(clip), TRUE) &&
         EngStrokePath(bitmap(dst), path, clip, transform, brush, origin, line, mix);
     return finish(d, ok);
@@ -112,7 +112,7 @@ BOOL DrvFillPath(SURFOBJ *dst, PATHOBJ *path, CLIPOBJ *clip, BRUSHOBJ *brush,
 {
     DISPLAY *d = primary(dst);
     BOOL ok;
-    rb_gl_cpu_lock();
+    rb_gl_cpu_lock(RB2K_PAINT_FILL, 0);
     ok = rb_gl_cpu_access(d, bounds(clip), TRUE) &&
         EngFillPath(bitmap(dst), path, clip, brush, origin, mix, options);
     return finish(d, ok);
@@ -124,7 +124,7 @@ BOOL DrvStrokeAndFillPath(SURFOBJ *dst, PATHOBJ *path, CLIPOBJ *clip, XFORMOBJ *
 {
     DISPLAY *d = primary(dst);
     BOOL ok;
-    rb_gl_cpu_lock();
+    rb_gl_cpu_lock(RB2K_PAINT_STROKE_FILL, 0);
     ok = rb_gl_cpu_access(d, bounds(clip), TRUE) &&
         EngStrokeAndFillPath(bitmap(dst), path, clip, transform, stroke, line, fill, origin, mix, options);
     return finish(d, ok);

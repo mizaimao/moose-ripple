@@ -206,7 +206,7 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     case IOCTL_RB2K_DD_COPY: {
         RB2K_DD_COPY *copy = packet->InputBuffer;
         RB2K_IMAGE *destination;
-        RB2K_DD_PRESENT region = {0};
+        RB2K_RECT region = {0};
         if (packet->InputBufferLength != sizeof(*copy) || packet->OutputBufferLength)
             return ERROR_INVALID_PARAMETER;
         destination = find_image(gpu, copy->destination);
@@ -219,10 +219,9 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
             destination->defined = FALSE;
             return NO_ERROR;
         }
-        region.source = image->id;
-        region.width = image->width;
-        region.height = image->height;
-        success = rb_gpu_copy_region(gpu, &result, destination->id, &region);
+        region.right = image->width;
+        region.bottom = image->height;
+        success = rb_gpu_copy_rects(gpu, &result, destination->id, image->id, &region, 1, 0, 0, NULL);
         if (success) {
             destination->defined = TRUE;
             destination->uniform = image->uniform;

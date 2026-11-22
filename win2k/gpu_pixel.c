@@ -137,7 +137,7 @@ static ULONG channel_bits(ULONG channel)
 }
 
 static BOOLEAN fenced(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
-                      PIXEL_REQUEST *request, ULONG bytes, ULONG stage)
+                      struct virtio_gpu_ctrl_hdr *header, ULONG bytes, ULONG stage)
 {
     /* The renderer uses a 32-bit fence timeline. Reset at exhaustion before
      * an old completion could be mistaken for a new fence. */
@@ -146,9 +146,9 @@ static BOOLEAN fenced(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
         result->stage = stage;
         return FALSE;
     }
-    request->hdr.flags = VIRTIO_GPU_FLAG_FENCE;
-    request->hdr.fence_id = ++gpu->fence;
-    return send_request(gpu, result, request, bytes, stage);
+    header->flags = VIRTIO_GPU_FLAG_FENCE;
+    header->fence_id = ++gpu->fence;
+    return send_request(gpu, result, header, bytes, stage);
 }
 
 BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
@@ -166,7 +166,7 @@ BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
     words[13 - skip] = channel_bits((color >> 8) & 255);
     words[14 - skip] = channel_bits(color & 255);
     words[15 - skip] = channel_bits(color >> 24);
-    return fenced(gpu, result, &request, sizeof(request.draw.submit) + bytes, RB2K_STAGE_CLEAR);
+    return fenced(gpu, result, &request.hdr, sizeof(request.draw.submit) + bytes, RB2K_STAGE_CLEAR);
 }
 
 /* The DMA pages hold packed rows. The VGA primary may have a wider stride. */
@@ -227,7 +227,7 @@ static BOOLEAN transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resour
     request.transfer.box.h = height;
     request.transfer.box.d = 1;
     request.transfer.stride = width * sizeof(ULONG);
-    if (!fenced(gpu, result, &request, sizeof(request.transfer), RB2K_STAGE_TRANSFER)) return FALSE;
+    if (!fenced(gpu, result, &request.hdr, sizeof(request.transfer), RB2K_STAGE_TRANSFER)) return FALSE;
     begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING, 0);
     request.detach.resource_id = resource;
     return send_request(gpu, result, &request, sizeof(request.detach), RB2K_STAGE_BACKING);
@@ -329,30 +329,63 @@ BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     return TRUE;
 }
 
-/* The caller clips both rectangles to the resources before submitting them. */
-BOOLEAN rb_gpu_copy_region(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
-                           ULONG destination, const RB2K_DD_PRESENT *region)
+enum { CopyWords = 1 + VIRGL_CMD_RESOURCE_COPY_REGION_SIZE };
+typedef struct {
+    struct virtio_gpu_cmd_submit submit;
+    ULONG command[RB2K_GL_MAX_RECTS][CopyWords];
+} COPY_PACKET;
+typedef char all_copies_fit_inline[sizeof(COPY_PACKET) <= RB2K_INLINE_PACKET_BYTES ? 1 : -1];
+
+/* All rectangles have already been clipped against both resources. The
+ * host sees a single ordered submission and the source stays attached until
+ * every copy in that submission completes. */
+BOOLEAN rb_gpu_copy_rects(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG destination,
+                          ULONG source, const RB2K_RECT *rects, ULONG count,
+                          LONG originX, LONG originY, RB2K_GL_PROFILE *profile)
 {
-    PIXEL_REQUEST request;
-    ULONG *words = request.draw.words;
-    ULONG bytes = (1 + VIRGL_CMD_RESOURCE_COPY_REGION_SIZE) * sizeof(ULONG);
-    if (!context_resource(gpu, result, destination, region->source, TRUE, RB2K_STAGE_ATTACH))
+    COPY_PACKET *p = (COPY_PACKET *)gpu->copyPacket.bytes;
+    RB2K_GPU_RESULT cleanup;
+    ULONG i, bytes;
+    LONGLONG start = 0, attached = 0, completed = 0;
+    BOOLEAN ok;
+    if (!count || count > RB2K_GL_MAX_RECTS) { result->status = ERROR_INVALID_PARAMETER; return FALSE; }
+    bytes = count * sizeof(p->command[0]);
+    VideoPortZeroMemory(p, sizeof(p->submit) + bytes);
+    p->submit.hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    p->submit.hdr.ctx_id = destination;
+    p->submit.size = bytes;
+    for (i = 0; i < count; ++i) {
+        const RB2K_RECT *r = &rects[i];
+        ULONG *w = p->command[i];
+        w[0] = VIRGL_CMD0(VIRGL_CCMD_RESOURCE_COPY_REGION, 0, VIRGL_CMD_RESOURCE_COPY_REGION_SIZE);
+        w[VIRGL_CMD_RCR_DST_RES_HANDLE] = destination;
+        w[VIRGL_CMD_RCR_DST_X] = r->left;
+        w[VIRGL_CMD_RCR_DST_Y] = r->top;
+        w[VIRGL_CMD_RCR_SRC_RES_HANDLE] = source;
+        w[VIRGL_CMD_RCR_SRC_X] = (ULONG)((__int64)r->left - originX);
+        w[VIRGL_CMD_RCR_SRC_Y] = (ULONG)((__int64)r->top - originY);
+        w[VIRGL_CMD_RCR_SRC_W] = r->right - r->left;
+        w[VIRGL_CMD_RCR_SRC_H] = r->bottom - r->top;
+        w[VIRGL_CMD_RCR_SRC_D] = 1;
+    }
+    if (profile) start = rb_counter_ticks(NULL);
+    if (!context_resource(gpu, result, destination, source, TRUE, RB2K_STAGE_ATTACH)) return FALSE;
+    if (profile) attached = rb_counter_ticks(NULL);
+    ok = fenced(gpu, result, &p->submit.hdr, sizeof(p->submit) + bytes, RB2K_STAGE_TRANSFER);
+    if (profile) completed = rb_counter_ticks(NULL);
+    if (!ok) {
+        if (gpu->ready) context_resource(gpu, &cleanup, destination, source, FALSE, RB2K_STAGE_CLEANUP);
         return FALSE;
-    begin_request(&request, VIRTIO_GPU_CMD_SUBMIT_3D, destination);
-    request.draw.submit.size = bytes;
-    words[0] = VIRGL_CMD0(VIRGL_CCMD_RESOURCE_COPY_REGION, 0, VIRGL_CMD_RESOURCE_COPY_REGION_SIZE);
-    words[VIRGL_CMD_RCR_DST_RES_HANDLE] = destination;
-    words[VIRGL_CMD_RCR_DST_X] = region->dstX;
-    words[VIRGL_CMD_RCR_DST_Y] = region->dstY;
-    words[VIRGL_CMD_RCR_SRC_RES_HANDLE] = region->source;
-    words[VIRGL_CMD_RCR_SRC_X] = region->srcX;
-    words[VIRGL_CMD_RCR_SRC_Y] = region->srcY;
-    words[VIRGL_CMD_RCR_SRC_W] = region->width;
-    words[VIRGL_CMD_RCR_SRC_H] = region->height;
-    words[VIRGL_CMD_RCR_SRC_D] = 1;
-    if (!fenced(gpu, result, &request, sizeof(request.draw.submit) + bytes, RB2K_STAGE_TRANSFER))
-        return FALSE;
-    return context_resource(gpu, result, destination, region->source, FALSE, RB2K_STAGE_CLEANUP);
+    }
+    ok = context_resource(gpu, result, destination, source, FALSE, RB2K_STAGE_CLEANUP);
+    if (ok && profile) {
+        profile->rectangles += count;
+        ++profile->fences;
+        profile->attachTicks += attached - start;
+        profile->fenceTicks += completed - attached;
+        profile->detachTicks += rb_counter_ticks(NULL) - completed;
+    }
+    return ok;
 }
 
 BOOLEAN rb_gpu_destroy_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id)

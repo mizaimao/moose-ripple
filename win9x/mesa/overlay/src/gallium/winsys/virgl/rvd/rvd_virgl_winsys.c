@@ -63,6 +63,7 @@
 /* The display driver's escape on Windows 2000 (win2k/rb2krvd.h). */
 #define RB2K_RVD_ESCAPE 0x52420010
 #define RB2K_GL_PRESENT_ESCAPE 0x52420012
+#define RB2K_GL_RECT_PRESENT_ESCAPE 0x52420015
 
 #define CACHE_TIMEOUT_USEC      1000000
 
@@ -71,6 +72,7 @@ struct rvd_winsys {
    HANDLE dev;
    bool nt;                            /* Windows 2000: the display driver instead */
    int (WINAPI *draw_escape)(HDC, int, int, LPCSTR);
+   int present_escape;
    simple_mtx_t call_mutex;            /* one call at a time */
    uint32_t ctx;
    struct rvd_info info;
@@ -730,7 +732,7 @@ static void rvd_flush_frontbuffer(struct virgl_winsys *vws, struct virgl_cmd_buf
    if (ws->draw_escape && level == 0 && layer == 0 && bpp == 32) {
       struct rvd_present frame = {ws->ctx, res->res_handle, res->width, res->height};
       /* GDI supplies the destination window and its visible region to the display driver. */
-      if (ws->draw_escape(dc, RB2K_GL_PRESENT_ESCAPE, sizeof(frame), (LPCSTR)&frame) == 1)
+      if (ws->draw_escape(dc, ws->present_escape, sizeof(frame), (LPCSTR)&frame) == 1)
          return;
    }
    u_box_2d(0, 0, res->width, res->height, &box);
@@ -834,8 +836,11 @@ static struct virgl_winsys *rvd_winsys_create(void)
    ws->nt = nt;
    if (nt) {
       const char *present = getenv("RIPPLE_GL_PRESENT");
-      if (present && !strcmp(present, "1"))
+      if (present && (!strcmp(present, "1") || !strcmp(present, "rect"))) {
+         /* "rect" retains the per-rectangle fence for matched comparisons. */
+         ws->present_escape = !strcmp(present, "rect") ? RB2K_GL_RECT_PRESENT_ESCAPE : RB2K_GL_PRESENT_ESCAPE;
          ws->draw_escape = (void *)GetProcAddress(GetModuleHandleA("gdi32.dll"), "DrawEscape");
+      }
    }
    simple_mtx_init(&ws->call_mutex, mtx_plain);
    if (!rvd_call(ws, RVD_GET_INFO, NULL, 0, &ws->info, sizeof(ws->info)) ||

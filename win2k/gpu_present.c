@@ -28,12 +28,13 @@ static VP_STATUS read_gpu_pixels(RB2K_GPU *gpu)
     return NO_ERROR;
 }
 
-VP_STATUS rb_gl_access(RB2K_GPU *gpu, const RB2K_RECT *rect, ULONG access)
+VP_STATUS rb_gl_access(RB2K_GPU *gpu, const RB2K_RECT *rect, ULONG access, ULONG tag)
 {
     RB2K_GL_DESKTOP *d = &gpu->glDesktop;
     RB2K_GPU_RESULT result;
     if (!d->image.id) return ERROR_NOT_READY;
-    if (access > RB2K_CPU_REPLACE || !area(rect) || rect->right > d->image.width || rect->bottom > d->image.height)
+    if (access > RB2K_CPU_REPLACE || (tag & 0xffff) >= RB2K_PAINT_COUNT ||
+        !area(rect) || rect->right > d->image.width || rect->bottom > d->image.height)
         return ERROR_INVALID_PARAMETER;
     if (access != RB2K_CPU_REPLACE && overlaps(rect, &d->gpuPixels)) {
         RB2K_RECT part = *rect;
@@ -45,9 +46,36 @@ VP_STATUS rb_gl_access(RB2K_GPU *gpu, const RB2K_RECT *rect, ULONG access)
     }
     if (access != RB2K_CPU_READ) {
         if (d->writeCount >= sizeof(d->gdiWrites) / sizeof(d->gdiWrites[0])) return ERROR_BUSY;
+        d->writeTags[d->writeCount] = tag;
         d->gdiWrites[d->writeCount++] = *rect;
     }
     return NO_ERROR;
+}
+
+/* Attribute successful uploads to the callback that dirtied the pixels.
+ * A small write inside an excluded piece of the last game frame is counted
+ * separately from desktop paint outside the window. */
+static void record_upload(RB2K_GPU *gpu, ULONG tag, const RB2K_RECT *r)
+{
+    RB2K_GL_DESKTOP *d = &gpu->glDesktop;
+    ULONG width = r->right - r->left, height = r->bottom - r->top, i;
+    RB2K_GL_WRITER *w;
+    for (i = 0; i < RB2K_GL_WRITERS; ++i) {
+        w = &gpu->glProfile.writers[i];
+        if (!w->uploads || w->tag == tag) break;
+    }
+    if (i == RB2K_GL_WRITERS) { ++gpu->glProfile.otherUploads; return; }
+    w->tag = tag;
+    ++w->uploads;
+    w->pixels += width * height;
+    if (width > 64 || height > 64) return;
+    ++w->small;
+    w->width = width;
+    w->height = height;
+    if (!d->clipCount || r->left < d->gpuPixels.left || r->top < d->gpuPixels.top ||
+        r->right > d->gpuPixels.right || r->bottom > d->gpuPixels.bottom) return;
+    for (i = 0; i < d->clipCount; ++i) if (overlaps(r, &d->clip[i])) return;
+    ++w->excluded;
 }
 
 static VP_STATUS upload_gdi(RB2K_GPU *gpu)
@@ -55,8 +83,10 @@ static VP_STATUS upload_gdi(RB2K_GPU *gpu)
     RB2K_GL_DESKTOP *d = &gpu->glDesktop;
     RB2K_GPU_RESULT result;
     ULONG i;
-    for (i = 0; i < d->writeCount; ++i)
+    for (i = 0; i < d->writeCount; ++i) {
         if (!rb_gpu_primary_transfer(gpu, &result, &d->gdiWrites[i], FALSE)) return result.status;
+        record_upload(gpu, d->writeTags[i], &d->gdiWrites[i]);
+    }
     d->writeCount = 0;
     return NO_ERROR;
 }
@@ -80,8 +110,7 @@ VP_STATUS rb_gl_present(RB2K_GPU *gpu, const RB2K_GL_FRAME *f)
     RB2K_PRIMARY *vga = &gpu->primary;
     RB2K_GPU_RESULT result;
     RB2K_RECT next;
-    RB2K_DD_PRESENT part;
-    ULONG i;
+    ULONG i, batch;
     VP_STATUS status;
     if (!gpu->glEnabled || !gpu->ready || !vga->pixels || vga->bitsPerPixel != 32 ||
         !vga->width || vga->width > RB2K_DD_MAX_WIDTH || !vga->height ||
@@ -111,6 +140,7 @@ VP_STATUS rb_gl_present(RB2K_GPU *gpu, const RB2K_GL_FRAME *f)
         }
         d->gdiWrites[0].right = vga->width;
         d->gdiWrites[0].bottom = vga->height;
+        d->writeTags[0] = RB2K_PAINT_INITIAL;
         d->writeCount = 1;
     }
     if (d->image.width != vga->width || d->image.height != vga->height) return ERROR_NOT_READY;
@@ -121,20 +151,16 @@ VP_STATUS rb_gl_present(RB2K_GPU *gpu, const RB2K_GL_FRAME *f)
     }
     status = upload_gdi(gpu);
     if (status) return status;
-    part.source = f->source;
-    for (i = 0; i < f->count; ++i) {
-        const RB2K_RECT *r = &f->rects[i];
-        LONGLONG start;
-        BOOLEAN ok;
-        part.dstX = r->left; part.dstY = r->top;
-        part.srcX = (ULONG)((__int64)r->left - f->originX);
-        part.srcY = (ULONG)((__int64)r->top - f->originY);
-        part.width = r->right - r->left; part.height = r->bottom - r->top;
-        start = rb_counter_ticks(NULL);
-        ok = rb_gpu_copy_region(gpu, &result, d->image.id, &part);
+    batch = f->perRectangle ? 1 : f->count;
+    for (i = 0; i < f->count; i += batch) {
+        LONGLONG start = rb_counter_ticks(NULL);
+        BOOLEAN ok = rb_gpu_copy_rects(gpu, &result, d->image.id, f->source,
+                                       &f->rects[i], batch, f->originX, f->originY, &gpu->glProfile);
         if (!rb_gl_record_time(gpu, RB2K_GL_COPY, start, ok)) return result.status;
     }
     d->gpuPixels = next;
+    VideoPortMoveMemory(d->clip, (PVOID)f->rects, f->count * sizeof(d->clip[0]));
+    d->clipCount = f->count;
     if (!rb_gpu_show_desktop(gpu, &result, (BOOLEAN)!d->visible)) return result.status;
     ++gpu->glStats.frames;
     return NO_ERROR;

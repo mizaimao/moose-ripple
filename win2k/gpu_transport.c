@@ -22,8 +22,9 @@ enum {
  * segments, chained as further descriptors. One request is in flight. */
 enum {
     Desc = 0, Avail = 256, Used = 512, Request = 1024, Reply = 4096,
-    PacketBytes = 1024, ReplyBytes = 4096, DmaBytes = 8192
+    PacketBytes = RB2K_INLINE_PACKET_BYTES, ReplyBytes = 4096, DmaBytes = 8192
 };
+typedef char request_fits_before_reply[Request + PacketBytes <= Reply ? 1 : -1];
 typedef char queue_fits_before_request[Used + 4 + 8 * QueueEntries + 2 <= Request ? 1 : -1];
 typedef char avail_fits_before_used[Avail + 4 + 2 * QueueEntries + 2 <= Used ? 1 : -1];
 typedef char extents_fit_queue[RB2K_GPU_MAX_EXTENTS + 2 <= QueueEntries ? 1 : -1];

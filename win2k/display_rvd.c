@@ -7,6 +7,7 @@
 #include "rb2krvd.h"
 
 static HSEMAPHORE lock;
+static ULONG paintTag;                  /* protected by lock for one GDI callback */
 static RB2K_RVD_STAGING_INFO staging;
 static RB2K_RVD_STATS stats;
 
@@ -182,7 +183,7 @@ ULONG DrvDrawEscape(SURFOBJ *surface, ULONG code, CLIPOBJ *clip, RECTL *window,
     RB2K_GL_FRAME out;
     ULONG bytes, returned;
     BOOL ok;
-    if (code != RB2K_GL_PRESENT_ESCAPE) return (ULONG)-1;
+    if (code != RB2K_GL_PRESENT_ESCAPE && code != RB2K_GL_RECT_PRESENT_ESCAPE) return (ULONG)-1;
     if (!lock || !surface || !surface->dhpdev || !clip || !window ||
         !frame || inSize != sizeof(*frame)) return 0;
     d = (DISPLAY *)surface->dhpdev;
@@ -192,6 +193,7 @@ ULONG DrvDrawEscape(SURFOBJ *surface, ULONG code, CLIPOBJ *clip, RECTL *window,
     out.context = frame->context; out.source = frame->buffer;
     out.width = frame->width; out.height = frame->height;
     out.originX = window->left; out.originY = window->top; out.count = 0;
+    out.perRectangle = code == RB2K_GL_RECT_PRESENT_ESCAPE;
     if (clip->iDComplexity == DC_COMPLEX) {
         struct { ULONG count; RECTL rects[8]; } batch;
         BOOL more;
@@ -223,7 +225,11 @@ BOOL rb_gl_device_surface(DISPLAY *d)
     return lock && request(d, &r, &enabled, sizeof(enabled)) && enabled != 0;
 }
 
-void rb_gl_cpu_lock(void) { EngAcquireSemaphore(lock); }
+void rb_gl_cpu_lock(ULONG writer, ULONG rop)
+{
+    EngAcquireSemaphore(lock);
+    paintTag = (rop << 16) | writer;
+}
 void rb_gl_cpu_unlock(void) { EngReleaseSemaphore(lock); }
 
 /* Only the real GDI drawing callbacks enter here. GDI also synchronizes
@@ -244,6 +250,7 @@ BOOL rb_gl_cpu_access(DISPLAY *d, const RECTL *rect, ULONG access)
     w = (LONG)d->mode.VisScreenWidth; h = (LONG)d->mode.VisScreenHeight;
     begin(&r, RB2K_RVD_OP_GDI_ACCESS);
     r.a = access;
+    r.b = paintTag;
     if (rect && (rect->right <= 0 || rect->bottom <= 0 || rect->left >= w || rect->top >= h)) return TRUE;
     r.u.rect.left = rect && rect->left > 0 ? rect->left : 0;
     r.u.rect.top = rect && rect->top > 0 ? rect->top : 0;

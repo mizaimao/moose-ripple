@@ -54,7 +54,7 @@ ULONG rb_rvd_escape(DISPLAY *display, ULONG inSize, PVOID in, ULONG outSize, PVO
 ULONG rb_rvd_stats(DISPLAY *display, ULONG outSize, PVOID out);
 ULONG rb_gl_stats(DISPLAY *display, ULONG operation, ULONG bytes, PVOID out);
 BOOL rb_gl_device_surface(DISPLAY *d);
-void rb_gl_cpu_lock(void);
+void rb_gl_cpu_lock(ULONG writer, ULONG rop);
 void rb_gl_cpu_unlock(void);
 BOOL rb_gl_cpu_access(DISPLAY *d, const RECTL *rect, ULONG access);
 BOOL rb_gl_cpu_flush(DISPLAY *d);

@@ -18,6 +18,11 @@ int main(void)
     RB2K_RVD_STATS s;
     RB2K_GL_STATS gl;
     RB2K_GL_TIMING timing;
+    RB2K_GL_PROFILE profile;
+    static const char *const paints[] = {
+        "initial", "CopyBits-bitmap", "CopyBits-desktop", "BitBlt", "BitBlt-mask",
+        "TextOut", "StrokePath", "FillPath", "StrokeAndFillPath"
+    };
     static const char *const operations[RB2K_GL_TIME_COUNT] = {
         "partial_read", "frame_read", "upload", "copy", "flush"
     };
@@ -43,6 +48,20 @@ int main(void)
             const RB2K_GL_TIME *t = &timing.operations[i];
             printf("GLTIME %s calls=%lu failed=%lu ticks=%I64d frequency=%I64d\n",
                    operations[i], t->calls, t->failed, t->ticks, timing.frequency);
+        }
+    }
+    if (ExtEscape(dc, RB2K_GL_PROFILE_ESCAPE, 0, NULL, sizeof(profile), (LPSTR)&profile) > 0 &&
+        profile.frequency > 0) {
+        printf("GLCOPY rects=%lu fences=%lu attach=%I64d fence=%I64d detach=%I64d frequency=%I64d other=%lu\n",
+               profile.rectangles, profile.fences, profile.attachTicks, profile.fenceTicks,
+               profile.detachTicks, profile.frequency, profile.otherUploads);
+        for (i = 0; i < RB2K_GL_WRITERS; ++i) {
+            const RB2K_GL_WRITER *w = &profile.writers[i];
+            ULONG kind = w->tag & 0xffff;
+            if (w->uploads && kind < RB2K_PAINT_COUNT)
+                printf("GLPAINT %s rop=%04lx calls=%lu pixels=%I64u small=%lu excluded=%lu width=%lu height=%lu\n",
+                       paints[kind], w->tag >> 16, w->uploads, w->pixels, w->small, w->excluded,
+                       w->width, w->height);
         }
     }
     DeleteDC(dc);

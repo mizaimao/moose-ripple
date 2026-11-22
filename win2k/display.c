@@ -279,7 +279,8 @@ ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
                    *(ULONG *)in == RB2K_DD_STATS_ESCAPE || *(ULONG *)in == RB2K_DD_SCANOUT_ESCAPE ||
                    *(ULONG *)in == OPENGL_GETINFO || *(ULONG *)in == RB2K_RVD_ESCAPE ||
                    *(ULONG *)in == RB2K_RVD_STATS_ESCAPE || *(ULONG *)in == RB2K_GL_PRESENT_ESCAPE ||
-                   *(ULONG *)in == RB2K_GL_STATS_ESCAPE || *(ULONG *)in == RB2K_GL_TIMING_ESCAPE);
+                   *(ULONG *)in == RB2K_GL_STATS_ESCAPE || *(ULONG *)in == RB2K_GL_TIMING_ESCAPE ||
+                   *(ULONG *)in == RB2K_GL_PROFILE_ESCAPE || *(ULONG *)in == RB2K_GL_RECT_PRESENT_ESCAPE);
     /* opengl32.dll passes a small input buffer of its own with this one. */
     if (code == OPENGL_GETINFO) return opengl_info(outSize, out);
     /* Mesa's winsys on Windows 2000 (display_rvd.c). */
@@ -294,6 +295,8 @@ ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
         return rb_gl_stats(display, RB2K_RVD_OP_GL_STATS, outSize, out);
     if (code == RB2K_GL_TIMING_ESCAPE && outSize == sizeof(RB2K_GL_TIMING))
         return rb_gl_stats(display, RB2K_RVD_OP_GL_TIMING, outSize, out);
+    if (code == RB2K_GL_PROFILE_ESCAPE && outSize == sizeof(RB2K_GL_PROFILE))
+        return rb_gl_stats(display, RB2K_RVD_OP_GL_PROFILE, outSize, out);
     if (code == RB2K_DD_SCANOUT_ESCAPE)
         return outSize == sizeof(RB2K_DD_FLIP_INFO) &&
                !EngDeviceIoControl(display->miniport, IOCTL_RB2K_DD_FLIP_INFO,

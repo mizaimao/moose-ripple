@@ -619,3 +619,22 @@ needs a visual check. On the opt-in XP desktop, set
 the 1024×768 client should show solid red in the lower-left 512×384
 quarter and solid blue everywhere else. Display depth changes while a
 GPU-presented OpenGL context is still live also remain unverified.
+
+### Batching the visible rectangles
+
+With `RIPPLE_GL_PRESENT=1`, the miniport attaches the application's
+texture to the desktop context once, submits every visible rectangle
+in one command buffer, waits for its fence, then detaches the texture.
+It accepts up to 32 rectangles. GDI handles windows whose visible region
+exceeds that limit. For a comparison on the same installed driver, use
+`RIPPLE_GL_PRESENT=rect` to submit and fence each rectangle separately,
+or `RIPPLE_GL_PRESENT=0` for ordinary GDI presentation.
+
+`rvdstat.exe` reports cumulative rectangle and fence counts and the
+elapsed ticks for attachment, fenced submission and detachment. The
+fenced interval includes host execution and the guest waiting for the
+device reply. The upload counters identify the GDI callback and, for a
+bit-block transfer, its raster-operation code. The per-callback counts
+also distinguish writes up to 64×64 pixels. `glpresent.exe window stripes`
+places twenty narrow opaque bands over a window, checks an exposed pixel
+between the bands and checks the cover's colour.

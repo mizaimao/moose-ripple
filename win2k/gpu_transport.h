@@ -13,7 +13,9 @@ typedef struct {
 typedef struct {
     RB2K_IMAGE image;
     RB2K_RECT gpuPixels, gdiWrites[3];
-    ULONG writeCount;
+    ULONG writeCount, writeTags[3];
+    RB2K_RECT clip[RB2K_GL_MAX_RECTS];
+    ULONG clipCount;
     BOOLEAN visible;
 } RB2K_GL_DESKTOP;
 
@@ -40,6 +42,7 @@ typedef struct {
 /* OpenGL (the RIPPLEVD interface, gpu_rvd.c) has its own staging, written and
  * read by the display DLL under its lock between requests. */
 #define RB2K_RVD_SEGMENTS 48
+#define RB2K_INLINE_PACKET_BYTES 2048
 
 typedef struct {
     PVOID extension;
@@ -60,6 +63,10 @@ typedef struct {
     RB2K_GL_DESKTOP glDesktop;
     RB2K_GL_STATS glStats;
     RB2K_GL_TIMING glTiming;
+    RB2K_GL_PROFILE glProfile;
+    /* Private to the synchronous miniport request. Keep the maximum copy
+     * batch off the NT kernel stack. */
+    union { ULONGLONG aligned; UCHAR bytes[RB2K_INLINE_PACKET_BYTES]; } copyPacket;
     RB2K_IMAGE images[RB2K_DD_SLOTS];
     RB2K_DMA_SEGMENT staging[RB2K_MAX_SEGMENTS];
     RB2K_DMA_SEGMENT rvdStaging[RB2K_RVD_SEGMENTS];
@@ -87,13 +94,14 @@ BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
                               const RB2K_IMAGE *image, PVOID pixels, BOOLEAN readback);
 BOOLEAN rb_gpu_transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resource,
                             ULONG x, ULONG y, ULONG width, ULONG height, PVOID upload);
-BOOLEAN rb_gpu_copy_region(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
-                           ULONG destination, const RB2K_DD_PRESENT *region);
+BOOLEAN rb_gpu_copy_rects(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG destination,
+                          ULONG source, const RB2K_RECT *rects, ULONG count,
+                          LONG originX, LONG originY, RB2K_GL_PROFILE *profile);
 BOOLEAN rb_gpu_primary_transfer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
                                 const RB2K_RECT *rect, BOOLEAN readback);
 BOOLEAN rb_gpu_show_desktop(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, BOOLEAN select);
 VP_STATUS rb_gl_present(RB2K_GPU *gpu, const RB2K_GL_FRAME *frame);
-VP_STATUS rb_gl_access(RB2K_GPU *gpu, const RB2K_RECT *rect, ULONG access);
+VP_STATUS rb_gl_access(RB2K_GPU *gpu, const RB2K_RECT *rect, ULONG access, ULONG tag);
 VP_STATUS rb_gl_flush(RB2K_GPU *gpu);
 VP_STATUS rb_gl_finish(RB2K_GPU *gpu);
 BOOLEAN rb_gpu_destroy_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id);

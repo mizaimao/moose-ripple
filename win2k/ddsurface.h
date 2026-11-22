@@ -38,7 +38,7 @@ enum { RB2K_CPU_READ, RB2K_CPU_DRAW, RB2K_CPU_REPLACE };
 typedef struct {
     ULONG context, source, width, height;
     LONG originX, originY;
-    ULONG count;
+    ULONG count, perRectangle;
     RB2K_RECT rects[RB2K_GL_MAX_RECTS];
 } RB2K_GL_FRAME;
 typedef struct {
@@ -52,6 +52,19 @@ typedef struct {
     LONGLONG frequency;
     RB2K_GL_TIME operations[RB2K_GL_TIME_COUNT];
 } RB2K_GL_TIMING;
+enum { RB2K_PAINT_INITIAL, RB2K_PAINT_COPY_BITMAP, RB2K_PAINT_COPY_DESKTOP,
+       RB2K_PAINT_BLT, RB2K_PAINT_MASKBLT, RB2K_PAINT_TEXT, RB2K_PAINT_STROKE,
+       RB2K_PAINT_FILL, RB2K_PAINT_STROKE_FILL, RB2K_PAINT_COUNT };
+#define RB2K_GL_WRITERS 24
+typedef struct {
+    ULONG tag, uploads, small, excluded, width, height;
+    ULONGLONG pixels;
+} RB2K_GL_WRITER;
+typedef struct {
+    LONGLONG frequency, attachTicks, fenceTicks, detachTicks;
+    ULONG rectangles, fences, otherUploads;
+    RB2K_GL_WRITER writers[RB2K_GL_WRITERS];
+} RB2K_GL_PROFILE;
 /* Input is a surface ID. A known value supplies every byte of a writable lock. */
 typedef struct { ULONG known, color; } RB2K_DD_UNIFORM;
 #endif

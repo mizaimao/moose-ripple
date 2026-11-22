@@ -473,7 +473,7 @@ static VP_STATUS present_frame(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     ULONG header = FIELD_OFFSET(RB2K_GL_FRAME, rects);
     RVD_BUFFER *b;
     if (packet->InputBufferLength < header || packet->OutputBufferLength ||
-        !f->count || f->count > RB2K_GL_MAX_RECTS ||
+        !f->count || f->count > RB2K_GL_MAX_RECTS || f->perRectangle > 1 ||
         packet->InputBufferLength != header + f->count * sizeof(f->rects[0]))
         return ERROR_INVALID_PARAMETER;
     b = own_buffer(f->source);
@@ -519,7 +519,7 @@ VP_STATUS rb_gpu_rvd_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
          * exits. A VGA-only desktop is a successful CPU drawing target. */
         status = NO_ERROR;
         if (active) status = r->op == RB2K_RVD_OP_GDI_ACCESS ?
-            rb_gl_access(gpu, &r->u.rect, r->a) : rb_gl_flush(gpu);
+            rb_gl_access(gpu, &r->u.rect, r->a, r->b) : rb_gl_flush(gpu);
         if (!status) {
             *(PULONG)packet->OutputBuffer = active;
             packet->StatusBlock->Information = sizeof(active);
@@ -543,6 +543,13 @@ VP_STATUS rb_gpu_rvd_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         if (packet->OutputBufferLength != sizeof(ULONG)) { status = ERROR_INVALID_PARAMETER; break; }
         *(PULONG)packet->OutputBuffer = gpu->glEnabled;
         packet->StatusBlock->Information = sizeof(ULONG);
+        status = NO_ERROR;
+        break;
+    case RB2K_RVD_OP_GL_PROFILE:
+        if (packet->OutputBufferLength != sizeof(gpu->glProfile)) { status = ERROR_INVALID_PARAMETER; break; }
+        rb_counter_ticks(&gpu->glProfile.frequency);
+        VideoPortMoveMemory(packet->OutputBuffer, &gpu->glProfile, sizeof(gpu->glProfile));
+        packet->StatusBlock->Information = sizeof(gpu->glProfile);
         status = NO_ERROR;
         break;
     default: status = ERROR_INVALID_FUNCTION; break;
