@@ -348,17 +348,54 @@ BOOLEAN rb_gl_record_time(RB2K_GPU *gpu, ULONG operation, LONGLONG start, BOOLEA
     return ok;
 }
 
-/* Put the pixels in the command itself. Once the control queue returns
- * the descriptor, the guest can reuse its staging space even if the host
- * GPU has more drawing to do. Later commands use the same desktop context. */
-VP_STATUS rb_gpu_inline_uploads(RB2K_GPU *gpu, const RB2K_RECT *rects, ULONG count)
+/* Keep pixels inside the virgl command. Returning an unfenced descriptor
+ * means the command stream owns its data and staging may be reused. */
+static ULONG inline_write(PULONG words, ULONG id, ULONG x, ULONG y, ULONG w, ULONG h,
+                          const ULONG *pixels, ULONG pitchPixels)
 {
-    const RB2K_PRIMARY *primary = &gpu->primary;
+    ULONG row, count = VIRGL_RESOURCE_IW_DATA_START + w*h;
+    VideoPortZeroMemory(words, VIRGL_RESOURCE_IW_DATA_START * sizeof(*words));
+    words[0] = VIRGL_CMD0(VIRGL_CCMD_RESOURCE_INLINE_WRITE, 0, count-1);
+    words[VIRGL_RESOURCE_IW_RES_HANDLE] = id;
+    words[VIRGL_RESOURCE_IW_USAGE] = 2; /* PIPE_MAP_WRITE */
+    words[VIRGL_RESOURCE_IW_STRIDE] = w*sizeof(*words);
+    words[VIRGL_RESOURCE_IW_LAYER_STRIDE] = w*h*sizeof(*words);
+    words[VIRGL_RESOURCE_IW_X] = x;
+    words[VIRGL_RESOURCE_IW_Y] = y;
+    words[VIRGL_RESOURCE_IW_W] = w;
+    words[VIRGL_RESOURCE_IW_H] = h;
+    words[VIRGL_RESOURCE_IW_D] = 1;
+    for (row = 0; row < h; ++row)
+        VideoPortMoveMemory(words + VIRGL_RESOURCE_IW_DATA_START + row*w,
+                            (PVOID)(pixels + row*pitchPixels), w*sizeof(*words));
+    return count;
+}
+
+static VP_STATUS submit_inline(RB2K_GPU *gpu, ULONG id, ULONG words)
+{
     struct virtio_gpu_cmd_submit submit;
     struct virtio_gpu_ctrl_hdr reply;
     RB2K_GPU_EXTENT data;
+    ULONG received;
+    VP_STATUS status;
+    VideoPortZeroMemory(&submit, sizeof(submit));
+    submit.hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    submit.hdr.ctx_id = id;
+    submit.size = words*sizeof(ULONG);
+    data.bus = gpu->staging[0].bus;
+    data.length = submit.size;
+    status = rb_gpu_submit_extents(gpu, &submit, sizeof(submit), &data, 1,
+                                   &reply, sizeof(reply), &received);
+    if (!status && (received != sizeof(reply) || reply.type != VIRTIO_GPU_RESP_OK_NODATA))
+        status = ERROR_INVALID_DATA;
+    return status;
+}
+
+VP_STATUS rb_gpu_inline_uploads(RB2K_GPU *gpu, const RB2K_RECT *rects, ULONG count)
+{
+    const RB2K_PRIMARY *primary = &gpu->primary;
     PULONG words;
-    ULONG i, y, total = 0, received;
+    ULONG i, total = 0;
     VP_STATUS status;
     LONGLONG start = rb_counter_ticks(NULL);
     if (!count || count > sizeof(gpu->glDesktop.gdiWrites) / sizeof(*rects) ||
@@ -374,36 +411,13 @@ VP_STATUS rb_gpu_inline_uploads(RB2K_GPU *gpu, const RB2K_RECT *rects, ULONG cou
         const RB2K_RECT *r = &rects[i];
         ULONG w = r->right - r->left, h = r->bottom - r->top;
         ULONG size = VIRGL_RESOURCE_IW_DATA_START + w * h;
-        PULONG command = words + total;
         if (!w || !h || w > 64 || h > 64 || r->left >= r->right || r->top >= r->bottom ||
             r->right > primary->width || r->bottom > primary->height ||
             size > RB2K_SEGMENT_BYTES / sizeof(*words) - total) return ERROR_INVALID_PARAMETER;
-        VideoPortZeroMemory(command, VIRGL_RESOURCE_IW_DATA_START * sizeof(*words));
-        command[0] = VIRGL_CMD0(VIRGL_CCMD_RESOURCE_INLINE_WRITE, 0, size - 1);
-        command[VIRGL_RESOURCE_IW_RES_HANDLE] = gpu->glDesktop.image.id;
-        command[VIRGL_RESOURCE_IW_USAGE] = 2; /* PIPE_MAP_WRITE */
-        command[VIRGL_RESOURCE_IW_STRIDE] = w * sizeof(*words);
-        command[VIRGL_RESOURCE_IW_LAYER_STRIDE] = w * h * sizeof(*words);
-        command[VIRGL_RESOURCE_IW_X] = r->left;
-        command[VIRGL_RESOURCE_IW_Y] = r->top;
-        command[VIRGL_RESOURCE_IW_W] = w;
-        command[VIRGL_RESOURCE_IW_H] = h;
-        command[VIRGL_RESOURCE_IW_D] = 1;
-        for (y = 0; y < h; ++y)
-            VideoPortMoveMemory(command + VIRGL_RESOURCE_IW_DATA_START + y * w,
-                primary->pixels + (r->top + y) * primary->pitchPixels + r->left, w * sizeof(*words));
-        total += size;
+        total += inline_write(words+total, gpu->glDesktop.image.id, r->left, r->top, w, h,
+                              primary->pixels + r->top*primary->pitchPixels + r->left, primary->pitchPixels);
     }
-    VideoPortZeroMemory(&submit, sizeof(submit));
-    submit.hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
-    submit.hdr.ctx_id = gpu->glDesktop.image.id;
-    submit.size = total * sizeof(*words);
-    data.bus = gpu->staging[0].bus;
-    data.length = submit.size;
-    status = rb_gpu_submit_extents(gpu, &submit, sizeof(submit), &data, 1,
-                                   &reply, sizeof(reply), &received);
-    if (!status && (received != sizeof(reply) || reply.type != VIRTIO_GPU_RESP_OK_NODATA))
-        status = ERROR_INVALID_DATA;
+    status = submit_inline(gpu, gpu->glDesktop.image.id, total);
     rb_gl_record_time(gpu, RB2K_GL_UPLOAD, start, (BOOLEAN)!status);
     if (!status) {
         gpu->glTiming.operations[RB2K_GL_UPLOAD].calls += count - 1;
@@ -482,6 +496,17 @@ BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
 {
     ULONG bytes = image->width * image->height * sizeof(ULONG);
     ULONG offset;
+    if (image->sampled && !readback && image->width <= 64 && image->height <= 64) {
+        ULONG count;
+        result->stage = RB2K_STAGE_BACKING;
+        result->status = rb_gpu_reserve_staging(gpu, bytes + VIRGL_RESOURCE_IW_DATA_START*sizeof(ULONG));
+        if (result->status) return FALSE;
+        count = inline_write((PULONG)gpu->staging[0].data, image->id, 0, 0, image->width,
+                             image->height, pixels, image->width);
+        result->stage = RB2K_STAGE_TRANSFER;
+        result->status = submit_inline(gpu, image->id, count);
+        return result->status == NO_ERROR;
+    }
     if (!rb_gpu_transfer_box(gpu, result, image->id, 0, 0, image->width, image->height,
                              readback ? NULL : pixels)) return FALSE;
     if (readback) {
