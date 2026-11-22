@@ -1232,28 +1232,43 @@ Microsoft's RGB device widens 5-bit red to 248; the hardware path
 replicates the high bits to 255. Video-memory and managed textures need
 texture hardware by design, so the RGB device reports `DDERR_NOTEXTUREHW`.
 
-Stock Direct3D Quake 0.73 now draws on the hardware device without a
-failed command buffer. Guest screenshots show its text, status bar and
-most of the level, but the picture is not correct yet: parts of the level
-are missing or torn, and the full-screen tint after an item pickup looks
-much stronger than it should, which is not yet checked against a
-reference. The game uses Direct3D's own
-vertex processing, and with a driver that never swaps vertex buffers the
-runtime indexes vertices it has not written once its 64 KB transformed
-vertex buffer fills. On XP it starts batches past the end of the buffer.
-On Windows 2000 it states more vertices than the buffer holds. Reading
-past the end found 5 to 23% plausible screen positions, against 97%
-inside the buffer, and no wrap-around rule produced clean geometry. The
-driver draws only triangles inside the runtime's stated window and skips
-the rest.
+### T&L device and mipmapped textures
+
+The driver also offers the T&L device (`D3DDEVCAPS_HWTRANSFORMANDLIGHT`).
+The runtime then sends object-space vertices together with the world,
+view and projection matrices, the viewport and the depth range, and a
+second vertex shader applies them on the host. Transformed draws are
+clipped to the Direct3D viewport with a scissor rectangle. Lights are not
+applied yet: a lit draw keeps its vertex colours and is counted.
+`tpixels.exe tnl` runs the cases above through this device, and `xyz` or
+`persp` sends object-space vertices with an orthographic or a right-handed
+perspective projection. All cases pass on both guests.
+
+Video-memory textures may be mipmap chains. NT creates such a chain one
+level per `CreateSurface` call, each call carrying the top level's
+description, so every level is sized from its own surface. Draws sample
+the top level only; mipmapped draws are counted.
+
+Before this, Quake 0.73 drew no level at all. Its world and model
+textures are managed mipmapped textures, the runtime's texture manager
+could not create their video-memory copies, and it dropped every draw
+that used one without an error. The geometry seen in earlier screenshots
+was not the level either. On the hardware device the runtime transforms
+vertices itself into a 64 KB buffer, and with a driver that never swaps
+vertex buffers it indexes vertices it has not written once that buffer
+fills: on XP it starts batches past the end, on Windows 2000 it states
+more vertices than the buffer holds. The driver skips triangles outside
+the stated window on that device. The T&L device does not use this
+buffer, and guest screenshots now show the level, models, lighting and
+status bar as expected.
 
 | 969-frame `demo1` at 640×480, one run | Windows 2000 SP4 | Windows XP SP3 |
 | --- | ---: | ---: |
-| Rate printed by the game | 50.3 fps | 45.1 fps |
-| Native triangles drawn | 171,243 | 180,367 |
-| Triangles skipped outside the vertex window | 75,177 | 67,431 |
+| Rate printed by the game | 18.0 fps | 16.7 fps |
+| Native triangles drawn | 2,138,967 | 2,146,971 |
+| Triangles skipped | 0 | 0 |
 | Failed command buffers | 0 | 0 |
 
-A device that does its own vertex processing (a T&L HAL) receives the
-program's untransformed vertex buffers instead of the runtime's, which
-avoids this buffer.
+The earlier, faster numbers drew about a tenth of the triangles. Each
+driver request still carries at most eight triangles, so a run makes
+about 290,000 requests; larger batches are the next step.
