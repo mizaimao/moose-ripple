@@ -48,7 +48,7 @@ typedef struct {
     BOOL glActive;
     BOOL gpuSurfaces;           /* offscreen surfaces as host textures (RB2K_DD_CAPS) */
     BOOL nativeD3D7;
-    BOOL z16Storage;
+    BOOL z16Storage, z16Render;
     HRESULT (CALLBACK *parseD3DExtension)(PVOID command, PVOID *next);
     RB2K_D3D7_DIAGNOSTICS d7;
     ULONG pageBytes, visiblePage, lockedPages;
@@ -65,7 +65,7 @@ DD_SLOT *rb_dd_slot(DISPLAY *display, PDD_SURFACE_GLOBAL surface);
 BOOL rb_dd_mapped_primary(const DISPLAY *display, const DD_SURFACE_LOCAL *surface);
 void rb_d7_init(void);
 void rb_d7_disable(DISPLAY *display);
-void rb_d7_caps(DD_HALINFO *info);
+void rb_d7_caps(DD_HALINFO *info, BOOL depth);
 BOOL rb_d7_info(PDD_GETDRIVERINFODATA data);
 ULONG rb_d7_stats(DISPLAY *display, ULONG size, PVOID out);
 HPALETTE rb_create_palette(DISPLAY *display);

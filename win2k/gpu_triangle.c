@@ -75,7 +75,7 @@ static ULONG dimension_bits(ULONG value)
     return ((127+shift)<<23) | ((value ^ (1UL<<shift)) << (23-shift));
 }
 
-static BOOLEAN prepare(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image)
+BOOLEAN rb_gpu_prepare_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image)
 {
     ULONG fb[] = {
         CREATE(VIRGL_OBJECT_SURFACE,VIRGL_OBJ_SURFACE_SIZE),1,image->id,VIRGL_FORMAT_B8G8R8A8_UNORM,0,0,
@@ -83,28 +83,58 @@ static BOOLEAN prepare(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image)
     };
     if (!image->defined) {
         /* Uncovered pixels of a fresh target are logically zero. */
-        if (!rb_gpu_draw_image(gpu,r,image->id,0,!image->hasSurface,image)) return FALSE;
+        if (!rb_gpu_draw_image(gpu,r,image->id,0,!image->hasSurface,image,
+                               image->depthBuffer ? RB2K_D7_DEPTH_VIEW : 0)) return FALSE;
         image->defined = image->uniform = image->hasSurface = TRUE;
         image->color = 0;
     } else if (!image->hasSurface) {
         if (!rb_gpu_frame_words(gpu,r,image,fb,sizeof(fb)/sizeof(*fb))) return FALSE;
         image->hasSurface = TRUE;
     }
+    return TRUE;
+}
+
+static BOOLEAN prepare(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, ULONG state)
+{
+    ULONG words[8], count = 0, object = Depth, bit = 0;
+    if (!rb_gpu_prepare_target(gpu, r, image)) return FALSE;
     if (!image->triangleState) {
         if (!shader(gpu,r,image,VertexShader,VertexStage,vertex_shader,sizeof(vertex_shader)) ||
             !shader(gpu,r,image,FragmentShader,FragmentStage,fragment_shader,sizeof(fragment_shader)) ||
             !rb_gpu_frame_words(gpu,r,image,pipeline,sizeof(pipeline)/sizeof(*pipeline))) return FALSE;
         image->triangleState = TRUE;
     }
+    if (image->boundDepthState == state) return TRUE;
+    if (state & RB2K_Z_ENABLE) {
+        ULONG index = state & (RB2K_Z_WRITE | 7);
+        /* Each colour context owns at most sixteen enabled DSA objects. */
+        object = 16 + index;
+        bit = 1UL << index;
+        if (!(image->depthStates & bit)) {
+            words[count++] = CREATE(VIRGL_OBJECT_DSA, VIRGL_OBJ_DSA_SIZE);
+            words[count++] = object;
+            words[count++] = VIRGL_OBJ_DSA_S0_DEPTH_ENABLE(1) |
+                VIRGL_OBJ_DSA_S0_DEPTH_WRITEMASK(!!(state & RB2K_Z_WRITE)) |
+                VIRGL_OBJ_DSA_S0_DEPTH_FUNC(index & 7);
+            words[count++] = 0;
+            words[count++] = 0;
+            words[count++] = 0;
+        }
+    }
+    words[count++] = BIND(VIRGL_OBJECT_DSA);
+    words[count++] = object;
+    if (!rb_gpu_frame_words(gpu, r, image, words, count)) return FALSE;
+    image->depthStates |= bit;
+    image->boundDepthState = state;
     return TRUE;
 }
 
 BOOLEAN rb_gpu_triangles(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
-                         const RB2K_D3D7_BATCH *batch)
+                         const RB2K_D3D7_VERTEX *vertices, ULONG count, ULONG depthState)
 {
     ULONG words[8 + 7 + 8*RB2K_D3D7_VERTICES + 13], *p = words, i;
     ULONG width = dimension_bits(image->width), height = dimension_bits(image->height);
-    if (!prepare(gpu,r,image)) return FALSE;
+    if (!prepare(gpu,r,image,depthState)) return FALSE;
     *p++ = VIRGL_CMD0(VIRGL_CCMD_SET_VIEWPORT_STATE,0,VIRGL_SET_VIEWPORT_STATE_SIZE(1));
     *p++ = 0;
     /* The viewport scale and translation each use half the dimensions. */
@@ -114,12 +144,12 @@ BOOLEAN rb_gpu_triangles(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
     *p++ = width - (1UL << 23);
     *p++ = height - (1UL << 23);
     *p++ = 0x3f000000;
-    *p++ = VIRGL_CMD0(VIRGL_CCMD_SET_CONSTANT_BUFFER,0,6+8*batch->count);
+    *p++ = VIRGL_CMD0(VIRGL_CCMD_SET_CONSTANT_BUFFER,0,6+8*count);
     *p++ = VertexStage; *p++ = 0;
     /* Constant zero supplies the shader with its viewport dimensions. */
     *p++ = width; *p++ = height; *p++ = 0; *p++ = 0;
-    for (i = 0; i < batch->count; ++i) {
-        const RB2K_D3D7_VERTEX *v = batch->vertices + i;
+    for (i = 0; i < count; ++i) {
+        const RB2K_D3D7_VERTEX *v = vertices + i;
         *p++ = v->x;
         *p++ = v->y;
         *p++ = v->z;
@@ -131,7 +161,7 @@ BOOLEAN rb_gpu_triangles(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
     }
     *p++ = VIRGL_CMD0(VIRGL_CCMD_DRAW_VBO,0,VIRGL_DRAW_VBO_SIZE);
     *p++ = 0;                  /* first vertex */
-    *p++ = batch->count;
+    *p++ = count;
     *p++ = PipeTriangles;
     *p++ = 0;                  /* unindexed */
     *p++ = 1;                  /* one instance */
@@ -140,7 +170,7 @@ BOOLEAN rb_gpu_triangles(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
     *p++ = 0;                  /* primitive restart */
     *p++ = 0;                  /* restart index */
     *p++ = 0;                  /* minimum index */
-    *p++ = batch->count - 1;   /* maximum index */
+    *p++ = count - 1;          /* maximum index */
     *p++ = 0;                  /* stream-output count */
     if (!rb_gpu_frame_words(gpu,r,image,words,p-words)) return FALSE;
     image->uniform = FALSE;

@@ -712,6 +712,7 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     d->gpuSurfaces = (caps.gpuSurfaces & RB2K_DD_HOST_SURFACES) != 0;
     d->nativeD3D7 = (caps.gpuSurfaces & RB2K_DD_NATIVE_D3D7) != 0;
     d->z16Storage = (caps.gpuSurfaces & RB2K_DD_Z16_STORAGE) != 0;
+    d->z16Render = d->z16Storage && (caps.gpuSurfaces & RB2K_DD_Z16_RENDER) != 0;
     if (d->z16Storage) {
         info->ddCaps.ddsCaps.dwCaps |= DDSCAPS_ZBUFFER;
         v->dwZBufferAlign = sizeof(USHORT);
@@ -724,7 +725,7 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     if (d->nativeD3D7) {
         info->ddCaps.ddsCaps.dwCaps |= DDSCAPS_TEXTURE;
         v->dwTextureAlign = 4;
-        rb_d7_caps(info);
+        rb_d7_caps(info, d->z16Render);
         info->dwFlags |= DDHALINFO_GETDRIVERINFOSET;
         info->GetDriverInfo = driver_info;
     }
@@ -766,6 +767,7 @@ BOOL APIENTRY DrvEnableDirectDraw(DHPDEV pdev, DD_CALLBACKS *c, DD_SURFACECALLBA
     if (!d->ddLock || !rb_dd_caps(d, &caps)) return FALSE;
     d->gpuSurfaces = (caps.gpuSurfaces & RB2K_DD_HOST_SURFACES) != 0;
     d->z16Storage = (caps.gpuSurfaces & RB2K_DD_Z16_STORAGE) != 0;
+    d->z16Render = d->z16Storage && (caps.gpuSurfaces & RB2K_DD_Z16_RENDER) != 0;
     RtlZeroMemory(c, sizeof(*c)); RtlZeroMemory(sc, sizeof(*sc)); RtlZeroMemory(pc, sizeof(*pc));
     c->dwSize = sizeof(*c); sc->dwSize = sizeof(*sc); pc->dwSize = sizeof(*pc);
     c->dwFlags = DDHAL_CB32_CANCREATESURFACE | DDHAL_CB32_CREATESURFACE;

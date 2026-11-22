@@ -10,6 +10,7 @@
 #define RB2K_DD_HOST_SURFACES 1
 #define RB2K_DD_NATIVE_D3D7 2
 #define RB2K_DD_Z16_STORAGE 4
+#define RB2K_DD_Z16_RENDER 8
 #define RB2K_DD_IOCTL(n) CTL_CODE(FILE_DEVICE_VIDEO,n,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_RB2K_DD_QUERY   RB2K_DD_IOCTL(0x901)
 #define IOCTL_RB2K_DD_CREATE  RB2K_DD_IOCTL(0x902)
@@ -32,6 +33,8 @@
 #define IOCTL_RB2K_D3D7_COMPLETED RB2K_DD_IOCTL(0x916)
 #define IOCTL_RB2K_D3D7_FLIGHT RB2K_DD_IOCTL(0x917)
 #define IOCTL_RB2K_DD_CREATE_Z16 RB2K_DD_IOCTL(0x918)
+#define IOCTL_RB2K_D3D7_ZCLEAR RB2K_DD_IOCTL(0x919)
+#define IOCTL_RB2K_D3D7_ZTRIANGLES RB2K_DD_IOCTL(0x91a)
 typedef struct { ULONG clears, triangles; } RB2K_D3D7_COMPLETED;
 #define RB2K_D3D7_VERTICES 24
 /* IEEE transformed position and a packed Direct3D diffuse colour. */
@@ -40,6 +43,16 @@ typedef struct {
     ULONG target, count;
     RB2K_D3D7_VERTEX vertices[RB2K_D3D7_VERTICES];
 } RB2K_D3D7_BATCH;
+/* These requests keep the original colour-only wire records intact. The
+ * low three state bits are D3DCMPFUNC minus one. Disabled depth uses zero. */
+#define RB2K_Z_ENABLE 16
+#define RB2K_Z_WRITE 8
+typedef struct {
+    ULONG target, count, depth, state;
+    RB2K_D3D7_VERTEX vertices[RB2K_D3D7_VERTICES];
+} RB2K_D3D7_ZBATCH;
+typedef struct { ULONG target, depth, flags, color, depthBits; } RB2K_D3D7_ZCLEAR;
+enum { RB2K_CLEAR_COLOR = 1, RB2K_CLEAR_DEPTH = 2 };
 typedef struct {
     ULONG maxBytes, slots;
     ULONG hostFills, readbacks, uploads, hostCopies;

@@ -226,7 +226,7 @@ BOOLEAN rb_gpu_frame_words(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
 }
 
 BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
-                          ULONG color, BOOLEAN createSurface, RB2K_IMAGE *frameTarget)
+                          ULONG color, BOOLEAN createSurface, RB2K_IMAGE *frameTarget, ULONG depthView)
 {
     PIXEL_REQUEST request;
     ULONG skip = createSurface ? 0 : CreateWords;
@@ -236,12 +236,124 @@ BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
     request.draw.submit.size = bytes;
     VideoPortMoveMemory(words, (PVOID)(clear_commands + skip), bytes);
     if (createSurface) words[2] = id;
+    words[8 - skip] = depthView;
     words[12 - skip] = rb_gpu_channel((color >> 16) & 255);
     words[13 - skip] = rb_gpu_channel((color >> 8) & 255);
     words[14 - skip] = rb_gpu_channel(color & 255);
     words[15 - skip] = rb_gpu_channel(color >> 24);
     if (frameTarget) return rb_gpu_frame_words(gpu, result, frameTarget, words, bytes / sizeof(*words));
     return fenced(gpu, result, &request.hdr, sizeof(request.draw.submit) + bytes, RB2K_STAGE_CLEAR);
+}
+
+/* Depth writes run in the attached colour target's context. A CPU observer
+ * must wait on that target even when locking just the depth surface. */
+BOOLEAN rb_gpu_sync_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image)
+{
+    RB2K_IMAGE *writer = image->depthOwner ? image->depthOwner : image;
+    if (gpu->d7Frame.target == writer && !rb_gpu_frame_flush(gpu, r)) return FALSE;
+    r->stage = RB2K_STAGE_TRANSFER;
+    r->status = rb_gpu_wait_image(gpu, writer);
+    return r->status == NO_ERROR;
+}
+
+/* One view belongs to one colour context. Rebinding retires the old view
+ * before reusing its handle or attaching its resource in a different context.
+ * Repeated frames using the same pair add neither a submit nor a wait. */
+BOOLEAN rb_gpu_depth_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *color, RB2K_IMAGE *depth)
+{
+    static const ULONG release[] = {
+        VIRGL_CMD0(VIRGL_CCMD_SET_FRAMEBUFFER_STATE, 0, VIRGL_SET_FRAMEBUFFER_STATE_SIZE(1)),
+        1, 0, RB2K_D7_COLOR_VIEW,
+        VIRGL_CMD0(VIRGL_CCMD_DESTROY_OBJECT, VIRGL_OBJECT_SURFACE, 1), RB2K_D7_DEPTH_VIEW
+    };
+    ULONG attach[] = {
+        VIRGL_CMD0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_SURFACE, VIRGL_OBJ_SURFACE_SIZE),
+        RB2K_D7_DEPTH_VIEW, 0, VIRGL_FORMAT_Z16_UNORM, 0, 0,
+        VIRGL_CMD0(VIRGL_CCMD_SET_FRAMEBUFFER_STATE, 0, VIRGL_SET_FRAMEBUFFER_STATE_SIZE(1)),
+        1, RB2K_D7_DEPTH_VIEW, RB2K_D7_COLOR_VIEW,
+        /* An untouched depth surface is logically zero, including after a first partial draw. */
+        VIRGL_CMD0(VIRGL_CCMD_CLEAR, 0, VIRGL_OBJ_CLEAR_SIZE), 1, 0, 0, 0, 0, 0, 0, 0
+    };
+    RB2K_IMAGE *old = color->depthBuffer;
+    ULONG count = sizeof(attach)/sizeof(*attach);
+    if (color->depth16 || (depth && (!depth->depth16 || depth->frameFailed ||
+        color->width != depth->width || color->height != depth->height))) {
+        r->status = ERROR_INVALID_PARAMETER;
+        r->stage = RB2K_STAGE_ATTACH;
+        return FALSE;
+    }
+    if (old == depth) return TRUE;
+    if (old) {
+        if (!rb_gpu_frame_words(gpu, r, color, release, sizeof(release)/sizeof(*release)) ||
+            !rb_gpu_sync_image(gpu, r, color) ||
+            !context_resource(gpu, r, color->id, old->id, FALSE, RB2K_STAGE_CLEANUP)) {
+            gpu->ready = FALSE;
+            return FALSE;
+        }
+        old->depthOwner = NULL;
+        color->depthBuffer = NULL;
+    }
+    if (!depth) return TRUE;
+    if (depth->depthOwner && !rb_gpu_depth_target(gpu, r, depth->depthOwner, NULL)) return FALSE;
+    if (!rb_gpu_prepare_target(gpu, r, color) ||
+        !context_resource(gpu, r, color->id, depth->id, TRUE, RB2K_STAGE_ATTACH)) return FALSE;
+    attach[2] = depth->id;
+    if (depth->defined) count -= 1 + VIRGL_OBJ_CLEAR_SIZE;
+    if (!rb_gpu_frame_words(gpu, r, color, attach, count)) {
+        RB2K_GPU_RESULT cleanup;
+        if (gpu->ready && !context_resource(gpu, &cleanup, color->id, depth->id, FALSE, RB2K_STAGE_CLEANUP))
+            gpu->ready = FALSE;
+        return FALSE;
+    }
+    color->depthBuffer = depth;
+    depth->depthOwner = color;
+    depth->defined = TRUE;
+    return TRUE;
+}
+
+/* Direct3D supplies a float in [0,1]. Gallium clears use a double. Expand
+ * the IEEE bits exactly, including subnormals, without using kernel FP state. */
+static void clear_depth_words(ULONG value, ULONG *lo, ULONG *hi)
+{
+    ULONG fraction = value & 0x7fffff;
+    ULONG exponent = (value >> 23) & 255;
+    if (!(value & 0x7fffffff)) { *lo = *hi = 0; return; }
+    if (exponent) exponent += 896;
+    else {
+        exponent = 897;
+        while (!(fraction & 0x800000)) { fraction <<= 1; --exponent; }
+        fraction &= 0x7fffff;
+    }
+    *lo = fraction << 29;
+    *hi = (exponent << 20) | (fraction >> 3);
+}
+
+BOOLEAN rb_gpu_clear_buffers(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
+                             ULONG flags, ULONG color, ULONG depthBits)
+{
+    ULONG words[1 + VIRGL_OBJ_CLEAR_SIZE] = { VIRGL_CMD0(VIRGL_CCMD_CLEAR, 0, VIRGL_OBJ_CLEAR_SIZE) };
+    if (flags & RB2K_CLEAR_DEPTH) {
+        if (!image->depthBuffer || (depthBits > 0x3f800000 && depthBits != 0x80000000)) {
+            r->stage = RB2K_STAGE_CLEAR;
+            r->status = ERROR_INVALID_PARAMETER;
+            return FALSE;
+        }
+        words[VIRGL_OBJ_CLEAR_BUFFERS] |= 1; /* PIPE_CLEAR_DEPTH */
+        clear_depth_words(depthBits, words + VIRGL_OBJ_CLEAR_DEPTH_0, words + VIRGL_OBJ_CLEAR_DEPTH_1);
+    }
+    if (flags & RB2K_CLEAR_COLOR) {
+        words[VIRGL_OBJ_CLEAR_BUFFERS] |= PipeClearColor0;
+        words[VIRGL_OBJ_CLEAR_COLOR_0] = rb_gpu_channel((color >> 16) & 255);
+        words[VIRGL_OBJ_CLEAR_COLOR_1] = rb_gpu_channel((color >> 8) & 255);
+        words[VIRGL_OBJ_CLEAR_COLOR_2] = rb_gpu_channel(color & 255);
+        words[VIRGL_OBJ_CLEAR_COLOR_3] = rb_gpu_channel(color >> 24);
+    }
+    if (!rb_gpu_frame_words(gpu, r, image, words, sizeof(words)/sizeof(*words))) return FALSE;
+    if (flags & RB2K_CLEAR_COLOR) {
+        image->defined = image->uniform = TRUE;
+        image->color = color;
+    }
+    return TRUE;
 }
 
 VP_STATUS rb_gpu_cursor_pixels(RB2K_GPU *gpu)
@@ -620,7 +732,7 @@ void rb_gpu_pixel(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
     result->expected = 0xffff8000UL;
     if (!rb_gpu_create_image(gpu, result, &image, name, sizeof(name) - 1, FALSE)) return;
     result->observed = ~result->expected;
-    if (!rb_gpu_draw_image(gpu, result, image.id, result->expected, TRUE, NULL) ||
+    if (!rb_gpu_draw_image(gpu, result, image.id, result->expected, TRUE, NULL, 0) ||
         !rb_gpu_transfer_image(gpu, result, &image, &result->observed, TRUE)) return;
     if (!rb_gpu_destroy_image(gpu, result, image.id)) return;
     if (result->observed != result->expected) {

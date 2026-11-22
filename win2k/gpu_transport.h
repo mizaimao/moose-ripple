@@ -7,12 +7,14 @@
 #include "rb2kcursor.h"
 #include "rb2kd3d7.h"
 
-typedef struct {
+typedef struct RB2K_IMAGE {
     ULONG id, width, height;
     BOOLEAN defined, hasSurface, uniform;
     ULONG color;
     BOOLEAN sampled, triangleState, frameFailed;
     BOOLEAN depth16;
+    struct RB2K_IMAGE *depthBuffer, *depthOwner;
+    ULONG depthStates, boundDepthState;
 } RB2K_IMAGE;
 typedef struct {
     RB2K_IMAGE image;
@@ -133,9 +135,15 @@ BOOLEAN rb_gpu_frame_words(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *i
                            const ULONG *words, ULONG count);
 BOOLEAN rb_gpu_frame_flush(RB2K_GPU *gpu, RB2K_GPU_RESULT *result);
 BOOLEAN rb_gpu_triangles(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image,
-                         const RB2K_D3D7_BATCH *batch);
+                         const RB2K_D3D7_VERTEX *vertices, ULONG count, ULONG depthState);
+BOOLEAN rb_gpu_prepare_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image);
+BOOLEAN rb_gpu_depth_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *color, RB2K_IMAGE *depth);
+BOOLEAN rb_gpu_clear_buffers(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image,
+                             ULONG flags, ULONG color, ULONG depthBits);
+BOOLEAN rb_gpu_sync_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image);
+enum { RB2K_D7_COLOR_VIEW = 1, RB2K_D7_DEPTH_VIEW = 8 };
 BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
-                          ULONG color, BOOLEAN createSurface, RB2K_IMAGE *frameTarget);
+                          ULONG color, BOOLEAN createSurface, RB2K_IMAGE *frameTarget, ULONG depthView);
 BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
                               const RB2K_IMAGE *image, PVOID pixels, BOOLEAN readback);
 BOOLEAN rb_gpu_transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resource,

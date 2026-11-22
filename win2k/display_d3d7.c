@@ -16,11 +16,12 @@ typedef struct {
     ULONG texture, colorOp, colorArg1, alphaOp, alphaArg1;
 } D7_STAGE;
 typedef struct {
-    ULONG id, target;
+    ULONG id, target, depth;
     DISPLAY *display;
     PDD_DIRECTDRAW_LOCAL local;
     HANDLE owner;
     ULONG cull, shade, fill, drawFeatures;
+    ULONG zEnable, zWrite, zFunc;
     BOOL inScene, queued;
     D7_STAGE stages[TextureStages];
 } D7_CONTEXT;
@@ -61,7 +62,7 @@ static DWORD APIENTRY register_surface(PDD_CREATESURFACEEXDATA a)
     DISPLAY *d = (DISPLAY *)a->lpDDLcl->lpGbl->dhpdev;
     DD_SLOT *slot;
     a->ddRVal = DD_OK;
-    if (!l || !l->lpGbl || !(l->ddsCaps.dwCaps & DDSCAPS_3DDEVICE) ||
+    if (!l || !l->lpGbl || !(l->ddsCaps.dwCaps & (DDSCAPS_3DDEVICE | (d->z16Render ? DDSCAPS_ZBUFFER : 0))) ||
         (l->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY)) return DDHAL_DRIVER_HANDLED;
     EngAcquireSemaphore(d->ddLock);
     ++d->d7.surfaceCalls;
@@ -73,7 +74,8 @@ static DWORD APIENTRY register_surface(PDD_CREATESURFACEEXDATA a)
         a->ddRVal = a->dwFlags ? DDERR_UNSUPPORTED : DD_OK;
     else if (!d->ddEnabled || !slot || slot->lost || slot->owner != EngGetCurrentProcessId())
         a->ddRVal = DDERR_SURFACELOST;
-    else if (a->dwFlags || !l->lpSurfMore || !l->lpSurfMore->dwSurfaceHandle ||
+    else if (slot->depth16 != !!(l->ddsCaps.dwCaps & DDSCAPS_ZBUFFER) ||
+             a->dwFlags || !l->lpSurfMore || !l->lpSurfMore->dwSurfaceHandle ||
              (slot->local && slot->local != a->lpDDLcl))
         a->ddRVal = DDERR_UNSUPPORTED;
     else {
@@ -140,19 +142,23 @@ static DWORD APIENTRY create_context(LPD3DNTHAL_CONTEXTCREATEDATA a)
     PDD_DIRECTDRAW_LOCAL local = a->lpDDLcl;
     ULONG i;
     DISPLAY *d;
-    DD_SLOT *s;
+    DD_SLOT *s, *z = NULL;
     a->dwhContext = 0;
     a->ddrval = DDERR_UNSUPPORTED;
     if (!local || !local->lpGbl || !a->lpDDSLcl || !a->lpDDSLcl->lpGbl ||
-        !(a->lpDDSLcl->ddsCaps.dwCaps & DDSCAPS_3DDEVICE) || a->lpDDSZLcl)
+        !(a->lpDDSLcl->ddsCaps.dwCaps & DDSCAPS_3DDEVICE) ||
+        (a->lpDDSZLcl && (!a->lpDDSZLcl->lpGbl || !(a->lpDDSZLcl->ddsCaps.dwCaps & DDSCAPS_ZBUFFER))))
         return DDHAL_DRIVER_HANDLED;
     d = (DISPLAY *)local->lpGbl->dhpdev;
     EngAcquireSemaphore(registry);
     EngAcquireSemaphore(d->ddLock);
     s = rb_dd_slot(d, a->lpDDSLcl->lpGbl);
+    if (a->lpDDSZLcl) z = rb_dd_slot(d, a->lpDDSZLcl->lpGbl);
     ++d->d7.contextCalls;
-    if (!d->ddEnabled || !s || s->lost || s->owner != EngGetCurrentProcessId() ||
-        (s->local && s->local != local)) a->ddrval = DDERR_SURFACELOST;
+    if (!d->ddEnabled || !s || s->depth16 || s->lost || s->owner != EngGetCurrentProcessId() ||
+        (s->local && s->local != local) || (a->lpDDSZLcl && (!d->z16Render || !z || !z->depth16 ||
+        z->lost || z->owner != s->owner || (z->local && z->local != local) ||
+        z->width != s->width || z->height != s->height))) a->ddrval = DDERR_SURFACELOST;
     else {
         a->ddrval = DDERR_OUTOFMEMORY;
         for (i = 0; lastContext != 0xffffffffUL && i < MaxContexts; ++i) {
@@ -163,6 +169,10 @@ static DWORD APIENTRY create_context(LPD3DNTHAL_CONTEXTCREATEDATA a)
             c->local = local;
             c->owner = s->owner;
             c->target = s->id;
+            c->depth = z ? z->id : 0;
+            c->zEnable = z ? D3DZB_TRUE : D3DZB_FALSE;
+            c->zWrite = TRUE;
+            c->zFunc = D3DCMP_LESSEQUAL;
             c->cull = D3DCULL_CCW;
             c->shade = D3DSHADE_GOURAUD;
             c->fill = D3DFILL_SOLID;
@@ -250,6 +260,18 @@ static DD_SLOT *target(D7_CONTEXT *c, ULONG key, BOOL byHandle)
     return NULL;
 }
 
+static HRESULT render_surfaces(D7_CONTEXT *c, DD_SLOT **color, DD_SLOT **depth)
+{
+    DD_SLOT *s = target(c, c->target, FALSE);
+    DD_SLOT *z = c->depth ? target(c, c->depth, FALSE) : NULL;
+    if (!s || s->depth16 || (c->depth && (!z || !z->depth16 ||
+        z->width != s->width || z->height != s->height))) return DDERR_SURFACELOST;
+    if (s->locked || (z && z->locked)) return DDERR_SURFACEBUSY;
+    *color = s;
+    *depth = z;
+    return DD_OK;
+}
+
 /* The first rasterizer accepts solid, untextured Gouraud triangles. Keep
  * state that changes their observable colour or coverage across DP2 calls. */
 static void render_state(D7_CONTEXT *c, ULONG state, ULONG value)
@@ -259,7 +281,12 @@ static void render_state(D7_CONTEXT *c, ULONG state, ULONG value)
     case D3DRENDERSTATE_CULLMODE: c->cull = value; return;
     case D3DRENDERSTATE_SHADEMODE: c->shade = value; return;
     case D3DRENDERSTATE_FILLMODE: c->fill = value; return;
-    case D3DRENDERSTATE_ZENABLE: feature = 1; break;
+    case D3DRENDERSTATE_ZENABLE:
+        c->zEnable = value;
+        if (c->display->z16Render) return;
+        feature = 1; break;
+    case D3DRENDERSTATE_ZWRITEENABLE: c->zWrite = value; return;
+    case D3DRENDERSTATE_ZFUNC: c->zFunc = value; return;
     case D3DRENDERSTATE_ALPHATESTENABLE: feature = 2; break;
     case D3DRENDERSTATE_ALPHABLENDENABLE: feature = 4; break;
     case D3DRENDERSTATE_FOGENABLE: feature = 8; break;
@@ -275,15 +302,16 @@ static void render_state(D7_CONTEXT *c, ULONG state, ULONG value)
 static HRESULT triangle_list(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a,
                              ULONG stride, ULONG first, ULONG primitives)
 {
-    DD_SLOT *s = target(c, c->target, FALSE);
-    RB2K_D3D7_VERTEX *vertices;
-    RB2K_D3D7_BATCH batch;
+    DD_SLOT *s, *z;
+    RB2K_D3D7_VERTEX *vertices, *batchVertices;
+    union { RB2K_D3D7_BATCH plain; RB2K_D3D7_ZBATCH depth; } batch;
     PDD_SURFACE_GLOBAL g;
-    ULONG address, offset, bytes, i, written, count = 3*primitives;
-    HRESULT hr;
-    if (!s) return DDERR_SURFACELOST;
-    if (s->locked) return DDERR_SURFACEBUSY;
+    ULONG address, offset, bytes, i, written, count = 3*primitives, batchCount, header, code;
+    HRESULT hr = render_surfaces(c, &s, &z);
+    if (FAILED(hr)) return hr;
     if (!count) return DD_OK;
+    if (z && c->zEnable && (c->zEnable != D3DZB_TRUE ||
+        c->zFunc < D3DCMP_NEVER || c->zFunc > D3DCMP_ALWAYS)) return DDERR_UNSUPPORTED;
     if (c->drawFeatures || c->shade != D3DSHADE_GOURAUD || c->fill != D3DFILL_SOLID ||
         c->cull != D3DCULL_NONE || (a->dwVertexType & D3DFVF_POSITION_MASK) != D3DFVF_XYZRHW ||
         !(a->dwVertexType & D3DFVF_DIFFUSE) || (a->dwVertexType & (D3DFVF_RESERVED0 | D3DFVF_RESERVED1 |
@@ -322,33 +350,58 @@ static HRESULT triangle_list(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a,
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) { hr = DDERR_INVALIDPARAMS; }
 
-    batch.target = s->id;
-    for (i = 0; SUCCEEDED(hr) && i < count; i += batch.count) {
-        batch.count = min(count-i,RB2K_D3D7_VERTICES);
-        RtlCopyMemory(batch.vertices, vertices+i, batch.count*sizeof(*vertices));
-        if (EngDeviceIoControl(c->display->miniport, IOCTL_RB2K_D3D7_TRIANGLES, &batch,
-                FIELD_OFFSET(RB2K_D3D7_BATCH,vertices)+batch.count*sizeof(*vertices),
-                NULL, 0, &written)) hr = DDERR_GENERIC;
+    if (z) {
+        batch.depth.target = s->id;
+        batch.depth.depth = z->id;
+        batch.depth.state = c->zEnable ? RB2K_Z_ENABLE | (c->zWrite ? RB2K_Z_WRITE : 0) | (c->zFunc-1) : 0;
+        batchVertices = batch.depth.vertices;
+        header = FIELD_OFFSET(RB2K_D3D7_ZBATCH,vertices);
+        code = IOCTL_RB2K_D3D7_ZTRIANGLES;
+    } else {
+        batch.plain.target = s->id;
+        batchVertices = batch.plain.vertices;
+        header = FIELD_OFFSET(RB2K_D3D7_BATCH,vertices);
+        code = IOCTL_RB2K_D3D7_TRIANGLES;
+    }
+    for (i = 0; SUCCEEDED(hr) && i < count; i += batchCount) {
+        batchCount = min(count-i,RB2K_D3D7_VERTICES);
+        if (z) batch.depth.count = batchCount;
+        else batch.plain.count = batchCount;
+        RtlCopyMemory(batchVertices, vertices+i, batchCount*sizeof(*vertices));
+        if (EngDeviceIoControl(c->display->miniport, code, &batch, header+batchCount*sizeof(*vertices),
+                               NULL, 0, &written)) hr = DDERR_GENERIC;
         else c->queued = TRUE;
     }
     EngFreeMem(vertices);
     return hr;
 }
 
-static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, const RECT *rects, ULONG count)
+static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, ULONG depthBits, const RECT *rects, ULONG count)
 {
-    DD_SLOT *s = target(c, c->target, FALSE);
+    DD_SLOT *s, *z;
     RB2K_DD_FILL f;
     ULONG written;
-    if (!s) return DDERR_SURFACELOST;
-    if (s->locked) return DDERR_SURFACEBUSY;
-    if (flags != D3DCLEAR_TARGET || count != 1 || !rects || rects->left || rects->top ||
+    HRESULT hr = render_surfaces(c, &s, &z);
+    if (FAILED(hr)) return hr;
+    if (!flags || (flags & ~(D3DCLEAR_TARGET|D3DCLEAR_ZBUFFER)) ||
+        ((flags & D3DCLEAR_ZBUFFER) && !z) || count != 1 || !rects || rects->left || rects->top ||
         rects->right != (LONG)s->width || rects->bottom != (LONG)s->height)
         return DDERR_UNSUPPORTED;
-    f.id = s->id;
-    f.color = color;
-    if (EngDeviceIoControl(c->display->miniport, IOCTL_RB2K_D3D7_CLEAR,
-                           &f, sizeof(f), NULL, 0, &written)) return DDERR_SURFACELOST;
+    if (z) {
+        RB2K_D3D7_ZCLEAR both = {0};
+        both.target = s->id;
+        both.depth = z->id;
+        both.flags = flags;
+        both.color = color;
+        both.depthBits = depthBits;
+        if (EngDeviceIoControl(c->display->miniport, IOCTL_RB2K_D3D7_ZCLEAR,
+                               &both, sizeof(both), NULL, 0, &written)) return DDERR_SURFACELOST;
+    } else {
+        f.id = s->id;
+        f.color = color;
+        if (EngDeviceIoControl(c->display->miniport, IOCTL_RB2K_D3D7_CLEAR,
+                               &f, sizeof(f), NULL, 0, &written)) return DDERR_SURFACELOST;
+    }
     c->queued = TRUE;
     return DD_OK;
 }
@@ -447,25 +500,30 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
         }
         case D3DNTDP2OP_SETRENDERTARGET: {
             const D3DNTHAL_DP2SETRENDERTARGET *set = (const D3DNTHAL_DP2SETRENDERTARGET *)p;
-            DD_SLOT *s;
+            DD_SLOT *s, *z;
             used = n*sizeof(*set);
             if (used > remaining) return DDERR_INVALIDPARAMS;
             for (; n; --n, ++set) {
-                if (set->hZBuffer) return DDERR_UNSUPPORTED;
                 s = target(c, set->hRenderTarget, TRUE);
-                if (!s) return DDERR_SURFACELOST;
-                if (s->id != c->target && FAILED(finish_scene(c))) return DDERR_SURFACELOST;
+                z = set->hZBuffer ? target(c, set->hZBuffer, TRUE) : NULL;
+                if (!s || s->depth16 || (set->hZBuffer && (!z || !z->depth16 ||
+                    z->width != s->width || z->height != s->height))) return DDERR_SURFACELOST;
+                if ((s->id != c->target || (z ? z->id : 0) != c->depth) && FAILED(finish_scene(c)))
+                    return DDERR_SURFACELOST;
                 c->target = s->id;
+                c->depth = z ? z->id : 0;
             }
             break;
         }
         case D3DNTDP2OP_CLEAR: {
             const D3DNTHAL_DP2CLEAR *f = (const D3DNTHAL_DP2CLEAR *)p;
             HRESULT hr;
+            ULONG depthBits;
             ++c->display->d7.clearCalls;
             used = FIELD_OFFSET(D3DNTHAL_DP2CLEAR, Rects) + n*sizeof(RECT);
             if (used > remaining) return DDERR_INVALIDPARAMS;
-            hr = clear(c, f->dwFlags, f->dwFillColor, f->Rects, n);
+            RtlCopyMemory(&depthBits, &f->dvFillDepth, sizeof(depthBits));
+            hr = clear(c, f->dwFlags, f->dwFillColor, depthBits, f->Rects, n);
             if (FAILED(hr)) return hr;
             break;
         }
@@ -547,11 +605,26 @@ static const D3DNTHAL_CALLBACKS cb = {
     .ContextDestroy = destroy_context
 };
 
-void rb_d7_caps(DD_HALINFO *info)
+void rb_d7_caps(DD_HALINFO *info, BOOL depth)
 {
+    static D3DNTHAL_GLOBALDRIVERDATA withDepth;
     if (!registry) return;
     info->ddCaps.dwCaps |= DDCAPS_3D;
     info->lpD3DGlobalDriverData = (PVOID)&global;
+    if (depth) {
+        EngAcquireSemaphore(registry);
+        if (!withDepth.dwSize) {
+            withDepth = global;
+            withDepth.hwCaps.dwFlags |= D3DDD_DEVICEZBUFFERBITDEPTH;
+            withDepth.hwCaps.dwDeviceZBufferBitDepth = DDBD_16;
+            withDepth.hwCaps.dpcTriCaps.dwZCmpCaps = D3DPCMPCAPS_NEVER | D3DPCMPCAPS_LESS |
+                D3DPCMPCAPS_EQUAL | D3DPCMPCAPS_LESSEQUAL | D3DPCMPCAPS_GREATER |
+                D3DPCMPCAPS_NOTEQUAL | D3DPCMPCAPS_GREATEREQUAL | D3DPCMPCAPS_ALWAYS;
+        }
+        EngReleaseSemaphore(registry);
+        info->ddCaps.dwZBufferBitDepths = DDBD_16;
+        info->lpD3DGlobalDriverData = &withDepth;
+    }
     info->lpD3DHALCallbacks = (PVOID)&cb;
 }
 
@@ -562,9 +635,12 @@ BOOL rb_d7_info(PDD_GETDRIVERINFODATA a)
     static const GUID parser = {0x2e04ffa0,0x98e4,0x11d1,{0x8c,0xe1,0x00,0xa0,0xc9,0x06,0x29,0xa8}};
     static const GUID depth = {0x93869880,0x36cf,0x11d1,{0x9b,0x1b,0x00,0xaa,0x00,0xbb,0xb8,0xae}};
     static const GUID extended = {0x7de41f80,0x9d93,0x11d0,{0x89,0xab,0x00,0xa0,0xc9,0x05,0x41,0x29}};
-    /* GUID_ZPixelFormats returns a DWORD count followed by that many
-     * DDPIXELFORMATs. The initial colour-only pipeline has no depth surface. */
+    /* Return the colour-only descriptor when paired with an older miniport. */
     static const DWORD depthFormats = 0;
+    static const struct { DWORD count; DDPIXELFORMAT format; } z16 = {
+        1, { .dwSize = sizeof(DDPIXELFORMAT), .dwFlags = DDPF_ZBUFFER,
+             .dwZBufferBitDepth = 16, .dwZBitMask = 0xffff }
+    };
     static const D3DNTHAL_CALLBACKS3 c3 = {
         .dwSize = sizeof(c3),
         .dwFlags = D3DNTHAL3_CB32_DRAWPRIMITIVES2 | D3DNTHAL3_CB32_VALIDATETEXTURESTAGESTATE,
@@ -599,7 +675,10 @@ BOOL rb_d7_info(PDD_GETDRIVERINFODATA a)
     EngReleaseSemaphore(d->ddLock);
     if (IsEqualGUID(&a->guidInfo, &g3)) { source = &c3; size = sizeof(c3); }
     else if (IsEqualGUID(&a->guidInfo, &gm)) { source = &misc; size = sizeof(misc); }
-    else if (IsEqualGUID(&a->guidInfo, &depth)) { source = &depthFormats; size = sizeof(depthFormats); }
+    else if (IsEqualGUID(&a->guidInfo, &depth)) {
+        if (d->z16Render) { source = &z16; size = sizeof(z16); }
+        else { source = &depthFormats; size = sizeof(depthFormats); }
+    }
     else if (IsEqualGUID(&a->guidInfo, &extended)) {
         /* DX6 and DX7 request different lengths of this record. The HAL
          * currently accepts XRGB storage and a single diffuse stage. */
