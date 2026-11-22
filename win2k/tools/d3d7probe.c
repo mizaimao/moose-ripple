@@ -90,8 +90,19 @@ static BOOL draw(IDirect3DDevice7 *device)
     HRESULT drawn, ended;
     if (!call("clear", IDirect3DDevice7_Clear(device, 0, NULL, D3DCLEAR_TARGET, CLEAR_COLOR, 1, 0)) ||
         !call("begin", IDirect3DDevice7_BeginScene(device))) return FALSE;
+#ifdef RB_D3D7_INDEXED_PROBE
+    /* Only these three indices select the original RGB triangle. */
+    VERTEX pool[5] = {
+        {124,124,0.5f,1,0xffffffff}, vertices[1], {123,124,0.5f,1,0xffffffff},
+        vertices[2], vertices[0]
+    };
+    WORD indices[] = {4,1,3};
+    drawn = IDirect3DDevice7_DrawIndexedPrimitive(device, D3DPT_TRIANGLELIST,
+        D3DFVF_XYZRHW | D3DFVF_DIFFUSE, pool, 5, indices, 3, 0);
+#else
     drawn = IDirect3DDevice7_DrawPrimitive(device, D3DPT_TRIANGLELIST,
         D3DFVF_XYZRHW | D3DFVF_DIFFUSE, vertices, 3, 0);
+#endif
     ended = IDirect3DDevice7_EndScene(device);
     return call("triangle list", drawn) && call("end", ended);
 }

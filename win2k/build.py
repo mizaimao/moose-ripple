@@ -116,6 +116,7 @@ def build_programs(work):
         ("regmode.exe", ["tools/regmode"], ["-mwindows", "-luser32"]),
         ("rvdstat.exe", ["tools/rvdstat"], ["-lgdi32", "-luser32"]),
         ("d3d7probe.exe", ["tools/d3d7probe"], ["-lddraw", "-ldxguid", "-lgdi32", "-luser32"]),
+        ("ipixels.exe", ["tools/d3d7probe"], ["-DRB_D3D7_INDEXED_PROBE", "-lddraw", "-ldxguid", "-lgdi32", "-luser32"]),
         ("z16pixels.exe", ["tools/z16pixels"], ["-lddraw", "-ldxguid", "-lgdi32", "-luser32"]),
         ("zstore.exe", ["tools/zstore"], ["-lddraw", "-ldxguid", "-lgdi32", "-luser32"]),
         ("glpresent.exe", ["tools/glpresent"], ["-lopengl32", "-lgdi32", "-luser32"]),
