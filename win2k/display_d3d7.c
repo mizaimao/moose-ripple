@@ -66,7 +66,12 @@ static DWORD APIENTRY register_surface(PDD_CREATESURFACEEXDATA a)
     EngAcquireSemaphore(d->ddLock);
     ++d->d7.surfaceCalls;
     slot = rb_dd_slot(d, l->lpGbl);
-    if (!d->ddEnabled || !slot || slot->lost || slot->owner != EngGetCurrentProcessId())
+    /* DirectDraw registers a 3D-tagged window primary before it will blit
+     * to it. Its storage is the scanout mapping. Only offscreen targets
+     * need a host image and a Direct3D surface handle. */
+    if (!slot && d->nativeD3D7 && rb_dd_mapped_primary(d, l))
+        a->ddRVal = a->dwFlags ? DDERR_UNSUPPORTED : DD_OK;
+    else if (!d->ddEnabled || !slot || slot->lost || slot->owner != EngGetCurrentProcessId())
         a->ddRVal = DDERR_SURFACELOST;
     else if (a->dwFlags || !l->lpSurfMore || !l->lpSurfMore->dwSurfaceHandle ||
              (slot->local && slot->local != a->lpDDLcl))

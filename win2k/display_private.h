@@ -61,6 +61,7 @@ BOOL rb_dd_caps(DISPLAY *display, RB2K_DD_CAPS *caps);
 BOOL rb_cursor_stats(DISPLAY *d, RB2K_CURSOR_STATS *stats);
 void rb_display_cursor_release(DISPLAY *d);
 DD_SLOT *rb_dd_slot(DISPLAY *display, PDD_SURFACE_GLOBAL surface);
+BOOL rb_dd_mapped_primary(const DISPLAY *display, const DD_SURFACE_LOCAL *surface);
 void rb_d7_init(void);
 void rb_d7_disable(DISPLAY *display);
 void rb_d7_caps(DD_HALINFO *info);

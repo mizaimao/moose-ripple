@@ -241,7 +241,7 @@ static BOOL full_rect(const RECTL *r, const DD_SLOT *s)
            r->bottom == (LONG)s->height;
 }
 
-static BOOL mapped_primary(const DISPLAY *d, const DD_SURFACE_LOCAL *local)
+BOOL rb_dd_mapped_primary(const DISPLAY *d, const DD_SURFACE_LOCAL *local)
 {
     const DD_SURFACE_GLOBAL *g = local->lpGbl;
     return d->ddEnabled && d->mapping && d->surface && primary_caps(d, local->ddsCaps.dwCaps) &&
@@ -356,7 +356,7 @@ static DWORD APIENTRY blt(PDD_BLTDATA data)
     EngAcquireSemaphore(d->ddLock);
     dst = rb_dd_slot(d, data->lpDDDestSurface->lpGbl);
     if (data->lpDDSrcSurface) src = rb_dd_slot(d, data->lpDDSrcSurface->lpGbl);
-    primary = !dst && src && mapped_primary(d, data->lpDDDestSurface);
+    primary = !dst && src && rb_dd_mapped_primary(d, data->lpDDDestSurface);
     if (!data->lpDDSrcSurface && operation == DDBLT_COLORFILL && !data->IsClipped &&
         surface_page(d, data->lpDDDestSurface, &page))
         data->ddRVal = fill_page(d, page, &data->rDest, data->bltFX.dwFillColor);
