@@ -17,8 +17,11 @@ BOOL rb_dd_caps(DISPLAY *d, RB2K_DD_CAPS *caps)
            caps->maxBytes == RB2K_DD_MAX_BYTES && caps->slots == RB2K_DD_SLOTS;
 }
 
-static BOOL primary_caps(DWORD caps)
+static BOOL primary_caps(const DISPLAY *d, DWORD caps)
 {
+    /* D3DX7 also marks its windowed presentation surface as a 3D device
+     * when the actual render target is a separate offscreen buffer. */
+    if (d->nativeD3D7) caps &= ~DDSCAPS_3DDEVICE;
     return (caps & DDSCAPS_PRIMARYSURFACE) &&
            !(caps & ~(DDSCAPS_PRIMARYSURFACE | DDSCAPS_FRONTBUFFER | DDSCAPS_VISIBLE |
                       DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM));
@@ -49,7 +52,7 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
     DWORD caps = desc->ddsCaps.dwCaps;
     DWORD storage = caps & (DDSCAPS_TEXTURE | DDSCAPS_OFFSCREENPLAIN);
     const DDPIXELFORMAT *fmt = &desc->ddpfPixelFormat;
-    if (primary_caps(caps) || flip_caps(caps)) {
+    if (primary_caps(d, caps) || flip_caps(caps)) {
         if (flip_caps(caps) && (!d->pageBytes ||
             ((desc->dwFlags & DDSD_BACKBUFFERCOUNT) && desc->dwBackBufferCount > 1))) return FALSE;
         if (!d->mapping || !d->surface ||
@@ -77,7 +80,7 @@ static DWORD APIENTRY can_create(PDD_CANCREATESURFACEDATA data)
     DWORD caps = data->lpDDSurfaceDesc->ddsCaps.dwCaps;
     /* Without host-texture surfaces an offscreen surface goes to system
      * memory, where Windows' own blits are faster here. */
-    if (!d->gpuSurfaces && !primary_caps(caps) && !flip_caps(caps))
+    if (!d->gpuSurfaces && !primary_caps(d, caps) && !flip_caps(caps))
         data->ddRVal = DDERR_OUTOFVIDEOMEMORY;
     else
         data->ddRVal = supported(d, data->lpDDSurfaceDesc) ? DD_OK : DDERR_INVALIDCAPS;
@@ -241,7 +244,7 @@ static BOOL full_rect(const RECTL *r, const DD_SLOT *s)
 static BOOL mapped_primary(const DISPLAY *d, const DD_SURFACE_LOCAL *local)
 {
     const DD_SURFACE_GLOBAL *g = local->lpGbl;
-    return d->ddEnabled && d->mapping && d->surface && primary_caps(local->ddsCaps.dwCaps) &&
+    return d->ddEnabled && d->mapping && d->surface && primary_caps(d, local->ddsCaps.dwCaps) &&
            g->wWidth == d->mode.VisScreenWidth && g->wHeight == d->mode.VisScreenHeight &&
            g->lPitch > 0 && (ULONG)g->lPitch == d->mode.ScreenStride &&
            (g->fpVidMem == 0 || g->fpVidMem == (FLATPTR)d->mapping);
