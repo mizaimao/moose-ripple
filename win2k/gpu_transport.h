@@ -16,7 +16,7 @@ typedef struct {
     ULONG writeCount, writeTags[3];
     RB2K_RECT clip[RB2K_GL_MAX_RECTS];
     ULONG clipCount;
-    BOOLEAN visible;
+    BOOLEAN visible, inlineUploads;
 } RB2K_GL_DESKTOP;
 
 typedef struct {
@@ -99,6 +99,7 @@ BOOLEAN rb_gpu_copy_rects(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG destinat
                           LONG originX, LONG originY, RB2K_GL_PROFILE *profile);
 BOOLEAN rb_gpu_primary_transfer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
                                 const RB2K_RECT *rect, BOOLEAN readback);
+VP_STATUS rb_gpu_inline_uploads(RB2K_GPU *gpu, const RB2K_RECT *rects, ULONG count);
 BOOLEAN rb_gpu_show_desktop(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, BOOLEAN select);
 VP_STATUS rb_gl_present(RB2K_GPU *gpu, const RB2K_GL_FRAME *frame);
 VP_STATUS rb_gl_access(RB2K_GPU *gpu, const RB2K_RECT *rect, ULONG access, ULONG tag);

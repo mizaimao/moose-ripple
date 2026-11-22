@@ -64,6 +64,7 @@
 #define RB2K_RVD_ESCAPE 0x52420010
 #define RB2K_GL_PRESENT_ESCAPE 0x52420012
 #define RB2K_GL_RECT_PRESENT_ESCAPE 0x52420015
+#define RB2K_GL_INLINE_PRESENT_ESCAPE 0x52420017
 
 #define CACHE_TIMEOUT_USEC      1000000
 
@@ -836,11 +837,16 @@ static struct virgl_winsys *rvd_winsys_create(void)
    ws->nt = nt;
    if (nt) {
       const char *present = getenv("RIPPLE_GL_PRESENT");
-      if (present && (!strcmp(present, "1") || !strcmp(present, "rect"))) {
-         /* "rect" retains the per-rectangle fence for matched comparisons. */
-         ws->present_escape = !strcmp(present, "rect") ? RB2K_GL_RECT_PRESENT_ESCAPE : RB2K_GL_PRESENT_ESCAPE;
-         ws->draw_escape = (void *)GetProcAddress(GetModuleHandleA("gdi32.dll"), "DrawEscape");
+      if (present) {
+         if (!strcmp(present, "1"))
+            ws->present_escape = RB2K_GL_PRESENT_ESCAPE;
+         else if (!strcmp(present, "rect"))
+            ws->present_escape = RB2K_GL_RECT_PRESENT_ESCAPE;
+         else if (!strcmp(present, "inline"))
+            ws->present_escape = RB2K_GL_INLINE_PRESENT_ESCAPE;
       }
+      if (ws->present_escape)
+         ws->draw_escape = (void *)GetProcAddress(GetModuleHandleA("gdi32.dll"), "DrawEscape");
    }
    simple_mtx_init(&ws->call_mutex, mtx_plain);
    if (!rvd_call(ws, RVD_GET_INFO, NULL, 0, &ws->info, sizeof(ws->info)) ||

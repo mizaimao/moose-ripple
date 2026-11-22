@@ -82,12 +82,28 @@ static VP_STATUS upload_gdi(RB2K_GPU *gpu)
 {
     RB2K_GL_DESKTOP *d = &gpu->glDesktop;
     RB2K_GPU_RESULT result;
-    ULONG i;
-    for (i = 0; i < d->writeCount; ++i) {
-        if (!rb_gpu_primary_transfer(gpu, &result, &d->gdiWrites[i], FALSE)) return result.status;
-        record_upload(gpu, d->writeTags[i], &d->gdiWrites[i]);
+    ULONG i, count;
+    while (d->writeCount) {
+        count = 0;
+        while (d->inlineUploads && count < d->writeCount) {
+            const RB2K_RECT *r = &d->gdiWrites[count];
+            if (r->right - r->left > 64 || r->bottom - r->top > 64) break;
+            ++count;
+        }
+        if (count) {
+            VP_STATUS status = rb_gpu_inline_uploads(gpu, d->gdiWrites, count);
+            if (status) return status;
+        } else {
+            if (!rb_gpu_primary_transfer(gpu, &result, d->gdiWrites, FALSE)) return result.status;
+            count = 1;
+        }
+        for (i = 0; i < count; ++i) record_upload(gpu, d->writeTags[i], &d->gdiWrites[i]);
+        d->writeCount -= count;
+        for (i = 0; i < d->writeCount; ++i) {
+            d->gdiWrites[i] = d->gdiWrites[count + i];
+            d->writeTags[i] = d->writeTags[count + i];
+        }
     }
-    d->writeCount = 0;
     return NO_ERROR;
 }
 
@@ -149,9 +165,10 @@ VP_STATUS rb_gl_present(RB2K_GPU *gpu, const RB2K_GL_FRAME *f)
         status = read_gpu_pixels(gpu);
         if (status) return status;
     }
+    d->inlineUploads = f->mode == RB2K_FRAME_INLINE_UPLOADS;
     status = upload_gdi(gpu);
     if (status) return status;
-    batch = f->perRectangle ? 1 : f->count;
+    batch = f->mode == RB2K_FRAME_PER_RECT ? 1 : f->count;
     for (i = 0; i < f->count; i += batch) {
         LONGLONG start = rb_counter_ticks(NULL);
         BOOLEAN ok = rb_gpu_copy_rects(gpu, &result, d->image.id, f->source,

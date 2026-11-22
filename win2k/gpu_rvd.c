@@ -473,7 +473,7 @@ static VP_STATUS present_frame(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     ULONG header = FIELD_OFFSET(RB2K_GL_FRAME, rects);
     RVD_BUFFER *b;
     if (packet->InputBufferLength < header || packet->OutputBufferLength ||
-        !f->count || f->count > RB2K_GL_MAX_RECTS || f->perRectangle > 1 ||
+        !f->count || f->count > RB2K_GL_MAX_RECTS || f->mode > RB2K_FRAME_INLINE_UPLOADS ||
         packet->InputBufferLength != header + f->count * sizeof(f->rects[0]))
         return ERROR_INVALID_PARAMETER;
     b = own_buffer(f->source);
@@ -546,10 +546,13 @@ VP_STATUS rb_gpu_rvd_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         status = NO_ERROR;
         break;
     case RB2K_RVD_OP_GL_PROFILE:
-        if (packet->OutputBufferLength != sizeof(gpu->glProfile)) { status = ERROR_INVALID_PARAMETER; break; }
+        if (packet->OutputBufferLength != sizeof(gpu->glProfile) &&
+            packet->OutputBufferLength != FIELD_OFFSET(RB2K_GL_PROFILE, inlineBatches)) {
+            status = ERROR_INVALID_PARAMETER; break;
+        }
         rb_counter_ticks(&gpu->glProfile.frequency);
-        VideoPortMoveMemory(packet->OutputBuffer, &gpu->glProfile, sizeof(gpu->glProfile));
-        packet->StatusBlock->Information = sizeof(gpu->glProfile);
+        VideoPortMoveMemory(packet->OutputBuffer, &gpu->glProfile, packet->OutputBufferLength);
+        packet->StatusBlock->Information = packet->OutputBufferLength;
         status = NO_ERROR;
         break;
     default: status = ERROR_INVALID_FUNCTION; break;

@@ -183,7 +183,8 @@ ULONG DrvDrawEscape(SURFOBJ *surface, ULONG code, CLIPOBJ *clip, RECTL *window,
     RB2K_GL_FRAME out;
     ULONG bytes, returned;
     BOOL ok;
-    if (code != RB2K_GL_PRESENT_ESCAPE && code != RB2K_GL_RECT_PRESENT_ESCAPE) return (ULONG)-1;
+    if (code != RB2K_GL_PRESENT_ESCAPE && code != RB2K_GL_RECT_PRESENT_ESCAPE &&
+        code != RB2K_GL_INLINE_PRESENT_ESCAPE) return (ULONG)-1;
     if (!lock || !surface || !surface->dhpdev || !clip || !window ||
         !frame || inSize != sizeof(*frame)) return 0;
     d = (DISPLAY *)surface->dhpdev;
@@ -193,7 +194,9 @@ ULONG DrvDrawEscape(SURFOBJ *surface, ULONG code, CLIPOBJ *clip, RECTL *window,
     out.context = frame->context; out.source = frame->buffer;
     out.width = frame->width; out.height = frame->height;
     out.originX = window->left; out.originY = window->top; out.count = 0;
-    out.perRectangle = code == RB2K_GL_RECT_PRESENT_ESCAPE;
+    out.mode = RB2K_FRAME_BATCH;
+    if (code == RB2K_GL_RECT_PRESENT_ESCAPE) out.mode = RB2K_FRAME_PER_RECT;
+    if (code == RB2K_GL_INLINE_PRESENT_ESCAPE) out.mode = RB2K_FRAME_INLINE_UPLOADS;
     if (clip->iDComplexity == DC_COMPLEX) {
         struct { ULONG count; RECTL rects[8]; } batch;
         BOOL more;

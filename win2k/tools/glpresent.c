@@ -37,6 +37,36 @@ static int check(HDC dc, int x, int y, COLORREF expected)
     return 0;
 }
 
+static int check_uploads(HDC dc, BOOL inlineWrites)
+{
+    static const RECT boxes[] = {{16,20,29,37}, {40,20,104,84}, {112,20,177,21}};
+    static const COLORREF colors[] = {RGB(231,17,83), RGB(14,181,92), RGB(226,106,7)};
+    RB2K_GL_PROFILE before, after;
+    int pass, n, ok = 1;
+    if (!profile(dc, &before)) return 0;
+    for (pass = 0; pass < 2; ++pass) {
+        for (n = 0; n < 3; ++n) {
+            HBRUSH brush = CreateSolidBrush(colors[(n + pass) % 3]);
+            if (!brush) return 0;
+            ok &= FillRect(dc, &boxes[n], brush) != 0;
+            DeleteObject(brush);
+        }
+        GdiFlush();
+        for (n = 0; n < 3; ++n) {
+            ok &= check(dc, boxes[n].left, boxes[n].top, colors[(n + pass) % 3]);
+            ok &= check(dc, boxes[n].right - 1, boxes[n].bottom - 1, colors[(n + pass) % 3]);
+            ok &= check(dc, boxes[n].right, boxes[n].top, RGB(0,0,255));
+        }
+    }
+    if (!profile(dc, &after)) return 0;
+    printf("GLP GDI uploads inline_rects=%lu batches=%lu pixels=%s\n",
+           after.inlineRects - before.inlineRects, after.inlineBatches - before.inlineBatches,
+           ok ? "pass" : "fail");
+    if (inlineWrites) ok &= after.inlineRects - before.inlineRects >= 4;
+    else ok &= after.inlineRects == before.inlineRects;
+    return ok;
+}
+
 int main(int argc, char **argv)
 {
     WNDCLASSA wc;
@@ -52,17 +82,18 @@ int main(int argc, char **argv)
     char mode[8] = "";
     const char *renderer;
     int format, width, height, x, y, n, good, full, direct, hidden = 0;
-    BOOL cursor, covered, stripes, hold;
+    BOOL cursor, covered, stripes, hold, uploads;
     const int frames = 240;
     if (argc < 2 || argc > 3 || (strcmp(argv[1], "window") && strcmp(argv[1], "full"))) return 2;
     cursor = argc == 3 && !strcmp(argv[2], "cursor");
     covered = argc == 3 && !strcmp(argv[2], "covered");
     stripes = argc == 3 && !strcmp(argv[2], "stripes");
     hold = argc == 3 && !strcmp(argv[2], "hold");
-    if (argc == 3 && !cursor && !covered && !stripes && !hold) return 2;
+    uploads = argc == 3 && !strcmp(argv[2], "uploads");
+    if (argc == 3 && !cursor && !covered && !stripes && !hold && !uploads) return 2;
     full = !strcmp(argv[1], "full");
     GetEnvironmentVariableA("RIPPLE_GL_PRESENT", mode, sizeof(mode));
-    direct = !strcmp(mode, "1") || !strcmp(mode, "rect");
+    direct = !strcmp(mode, "1") || !strcmp(mode, "rect") || !strcmp(mode, "inline");
     width = full ? GetSystemMetrics(SM_CXSCREEN) : 640;
     height = full ? GetSystemMetrics(SM_CYSCREEN) : 480;
     x = full ? 0 : 64; y = full ? 0 : 80;
@@ -175,6 +206,7 @@ int main(int argc, char **argv)
         after.fullFrameReads == before.fullFrameReads &&
         rb1.calls[14] == rb0.calls[14];
     else good &= after.frames == before.frames && rb1.calls[14] - rb0.calls[14] >= (ULONG)frames;
+    if (uploads) good &= check_uploads(dc, !strcmp(mode, "inline"));
     if (hold && good && direct) {
         scene(width, height, 1);
         if (!SwapBuffers(dc) || !counters(dc, &after, &rb1) || after.frames != read.frames + 1) return 1;

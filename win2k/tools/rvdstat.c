@@ -55,6 +55,7 @@ int main(void)
         printf("GLCOPY rects=%lu fences=%lu attach=%I64d fence=%I64d detach=%I64d frequency=%I64d other=%lu\n",
                profile.rectangles, profile.fences, profile.attachTicks, profile.fenceTicks,
                profile.detachTicks, profile.frequency, profile.otherUploads);
+        printf("GLINLINE batches=%lu rects=%lu\n", profile.inlineBatches, profile.inlineRects);
         for (i = 0; i < RB2K_GL_WRITERS; ++i) {
             const RB2K_GL_WRITER *w = &profile.writers[i];
             ULONG kind = w->tag & 0xffff;

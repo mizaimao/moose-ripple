@@ -35,10 +35,11 @@ typedef struct { ULONG source, srcX, srcY, dstX, dstY, width, height; } RB2K_DD_
 typedef struct { ULONG left, top, right, bottom; } RB2K_RECT;
 enum { RB2K_CPU_READ, RB2K_CPU_DRAW, RB2K_CPU_REPLACE };
 #define RB2K_GL_MAX_RECTS 32
+enum { RB2K_FRAME_BATCH, RB2K_FRAME_PER_RECT, RB2K_FRAME_INLINE_UPLOADS };
 typedef struct {
     ULONG context, source, width, height;
     LONG originX, originY;
-    ULONG count, perRectangle;
+    ULONG count, mode;
     RB2K_RECT rects[RB2K_GL_MAX_RECTS];
 } RB2K_GL_FRAME;
 typedef struct {
@@ -64,6 +65,7 @@ typedef struct {
     LONGLONG frequency, attachTicks, fenceTicks, detachTicks;
     ULONG rectangles, fences, otherUploads;
     RB2K_GL_WRITER writers[RB2K_GL_WRITERS];
+    ULONG inlineBatches, inlineRects;
 } RB2K_GL_PROFILE;
 /* Input is a surface ID. A known value supplies every byte of a writable lock. */
 typedef struct { ULONG known, color; } RB2K_DD_UNIFORM;
