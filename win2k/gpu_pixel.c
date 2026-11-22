@@ -168,34 +168,26 @@ static BOOLEAN fenced(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     return send_request(gpu, result, header, bytes, stage);
 }
 
-/* Command data is inline in the control descriptor. After an unfenced
- * descriptor is returned the scratch packet is reusable. The fence on the
- * last packet completes all earlier drawing in this image's virgl context. */
+/* Every packet of a frame is queued without waiting; the host runs them
+ * in order. The last one carries the frame's work counts, and with
+ * RippleD3D7WaitCurrent set the frame is waited for. */
 static BOOLEAN submit_frame(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, BOOLEAN last)
 {
-    struct virtio_gpu_cmd_submit *p = (struct virtio_gpu_cmd_submit *)gpu->copyPacket.bytes;
-    ULONG bytes = gpu->d7Frame.count * sizeof(ULONG);
-    BOOLEAN ok, asynchronous = last && !gpu->d7WaitCurrent;
-    if (!bytes) return TRUE;
-    VideoPortZeroMemory(p, sizeof(*p));
-    p->hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
-    p->hdr.ctx_id = gpu->d7Frame.target->id;
-    p->size = bytes;
-    VideoPortMoveMemory(p+1, gpu->d7Frame.words, bytes);
-    bytes += sizeof(*p);
-    if (asynchronous) {
-        r->stage = RB2K_STAGE_TRANSFER;
-        r->status = rb_gpu_submit_scene(gpu, p, bytes);
+    static const RB2K_D3D7_COMPLETED none;
+    RB2K_IMAGE *target = gpu->d7Frame.target;
+    BOOLEAN ok;
+    if (!gpu->d7Frame.count) return TRUE;
+    r->stage = RB2K_STAGE_TRANSFER;
+    r->status = rb_gpu_submit_scene(gpu, gpu->d7Frame.words, gpu->d7Frame.count,
+                                    last ? &gpu->d7Frame.pending : &none);
+    ok = r->status == NO_ERROR;
+    if (ok && last && gpu->d7WaitCurrent) {
+        r->status = rb_gpu_wait_image(gpu, target);
         ok = r->status == NO_ERROR;
-    } else if (last) ok = fenced(gpu, r, &p->hdr, bytes, RB2K_STAGE_TRANSFER);
-    else ok = send_request(gpu, r, p, bytes, RB2K_STAGE_TRANSFER);
+    }
     gpu->d7Frame.count = 0;
     if (last || !ok) {
-        if (ok && !asynchronous) {
-            gpu->d7Completed.clears += gpu->d7Frame.pending.clears;
-            gpu->d7Completed.triangles += gpu->d7Frame.pending.triangles;
-            gpu->hostFills += gpu->d7Frame.pending.clears;
-        } else if (!ok) gpu->d7Frame.target->frameFailed = TRUE;
+        if (!ok) target->frameFailed = TRUE;
         gpu->d7Frame.target = NULL;
         gpu->d7Frame.pending.clears = gpu->d7Frame.pending.triangles = 0;
     }

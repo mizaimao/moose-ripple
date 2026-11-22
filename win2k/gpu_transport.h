@@ -79,6 +79,8 @@ typedef struct {
  * read by the display DLL under its lock between requests. */
 #define RB2K_RVD_SEGMENTS 48
 #define RB2K_INLINE_PACKET_BYTES 2048
+/* Native Direct3D 7 command words gathered into one virgl submission. */
+#define RB2K_D7_FRAME_WORDS ((64UL * 1024 - 128) / sizeof(ULONG))
 
 typedef struct {
     PVOID extension;
@@ -103,7 +105,7 @@ typedef struct {
         RB2K_IMAGE *target;
         ULONG count;
         RB2K_D3D7_COMPLETED pending;
-        ULONG words[(RB2K_INLINE_PACKET_BYTES - 32) / sizeof(ULONG)];
+        ULONG words[RB2K_D7_FRAME_WORDS];
     } d7Frame;
     RB2K_D3D7_COMPLETED d7Completed;
     RB2K_D7_SUBMISSION d7Submitted[RB2K_D7_FLIGHT_SLOTS];
@@ -140,7 +142,7 @@ VP_STATUS rb_gpu_submit(RB2K_GPU *gpu, const void *request, ULONG bytes,
 VP_STATUS rb_gpu_submit_extents(RB2K_GPU *gpu, const void *request, ULONG bytes,
                                 const RB2K_GPU_EXTENT *extents, ULONG count,
                                 void *reply, ULONG capacity, PULONG received);
-VP_STATUS rb_gpu_submit_scene(RB2K_GPU *gpu, const void *request, ULONG bytes);
+VP_STATUS rb_gpu_submit_scene(RB2K_GPU *gpu, const ULONG *words, ULONG count, const RB2K_D3D7_COMPLETED *work);
 VP_STATUS rb_gpu_poll_scenes(RB2K_GPU *gpu);
 VP_STATUS rb_gpu_wait_image(RB2K_GPU *gpu, const RB2K_IMAGE *image);
 VP_STATUS rb_gpu_reserve_staging(RB2K_GPU *gpu, ULONG bytes);

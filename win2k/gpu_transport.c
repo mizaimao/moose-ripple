@@ -38,9 +38,10 @@ typedef struct { PHYSICAL_ADDRESS address; ULONG length; USHORT flags, next; } D
 typedef struct { USHORT flags, index, ring[QueueEntries]; } AVAILABLE;
 typedef struct { ULONG id, length; } USED_ENTRY;
 typedef struct { USHORT flags, index; USED_ENTRY ring[QueueEntries]; } USED_RING;
-enum { FrameFirstDesc = QueueEntries - 2*RB2K_D7_FLIGHT_SLOTS, FramePacketBytes = 4096,
-       FrameDmaBytes = FramePacketBytes*RB2K_D7_FLIGHT_SLOTS };
-typedef char frame_reply_fits[PacketBytes + sizeof(struct virtio_gpu_ctrl_hdr) <= FramePacketBytes ? 1 : -1];
+/* Each scene slot holds one SUBMIT_3D packet and, at its end, the reply. */
+enum { FrameFirstDesc = QueueEntries - 2*RB2K_D7_FLIGHT_SLOTS, FramePacketBytes = 65536,
+       FrameReplyOffset = FramePacketBytes - 64, FrameDmaBytes = FramePacketBytes*RB2K_D7_FLIGHT_SLOTS };
+typedef char frame_fits[sizeof(struct virtio_gpu_cmd_submit) + RB2K_D7_FRAME_WORDS*sizeof(ULONG) <= FrameReplyOffset ? 1 : -1];
 typedef char check_desc_size[sizeof(DESCRIPTOR) == 16 ? 1 : -1];
 
 typedef struct { ULONG start, bytes; } REGION;
@@ -330,7 +331,7 @@ static VP_STATUS collect_control(RB2K_GPU *gpu, ULONG capacity, PULONG received,
         slot = (id-FrameFirstDesc)/2;
         job = &gpu->d7Submitted[slot];
         if (!job->image || !gpu->d7Packets.data) return control_error(gpu, ERROR_INVALID_DATA);
-        reply = (struct virtio_gpu_ctrl_hdr *)(gpu->d7Packets.data + slot*FramePacketBytes + PacketBytes);
+        reply = (struct virtio_gpu_ctrl_hdr *)(gpu->d7Packets.data + slot*FramePacketBytes + FrameReplyOffset);
         if (length != sizeof(*reply) || reply->type != VIRTIO_GPU_RESP_OK_NODATA ||
             !(reply->flags & VIRTIO_GPU_FLAG_FENCE) || reply->fence_id != job->fence) {
             job->image->frameFailed = TRUE;
@@ -394,18 +395,21 @@ VP_STATUS rb_gpu_wait_image(RB2K_GPU *gpu, const RB2K_IMAGE *image)
     return NO_ERROR;
 }
 
-VP_STATUS rb_gpu_submit_scene(RB2K_GPU *gpu, const void *request, ULONG bytes)
+/* Queue the open frame's command words as one fenced SUBMIT_3D without
+ * waiting for it. The host runs control requests in queue order. */
+VP_STATUS rb_gpu_submit_scene(RB2K_GPU *gpu, const ULONG *words, ULONG count, const RB2K_D3D7_COMPLETED *work)
 {
     RB2K_DMA_SEGMENT *dma = &gpu->d7Packets;
     ULONG slot = gpu->d7Next, offset = slot*FramePacketBytes;
+    ULONG bytes = sizeof(struct virtio_gpu_cmd_submit) + count*sizeof(ULONG);
     USHORT head = (USHORT)(FrameFirstDesc + 2*slot);
     RB2K_D7_SUBMISSION *job = &gpu->d7Submitted[slot];
-    struct virtio_gpu_ctrl_hdr *header;
+    struct virtio_gpu_cmd_submit *packet;
     DESCRIPTOR *desc;
     LONGLONG start;
     VP_STATUS status;
     if (!gpu->ready || !gpu->d7Frame.target) return ERROR_NOT_READY;
-    if (bytes < sizeof(*header) || bytes > PacketBytes) return ERROR_INVALID_PARAMETER;
+    if (!count || count > RB2K_D7_FRAME_WORDS) return ERROR_INVALID_PARAMETER;
     if (gpu->fence == 0xffffffffUL) return ERROR_NO_MORE_ITEMS;
     if (!dma->data) {
         dma->data = VideoPortGetCommonBuffer(gpu->extension, FrameDmaBytes, 4096,
@@ -422,22 +426,26 @@ VP_STATUS rb_gpu_submit_scene(RB2K_GPU *gpu, const void *request, ULONG bytes)
     status = rb_gpu_poll_scenes(gpu);
     if (!status) status = wait_job(gpu, job, TRUE);
     if (status) return status;
-    header = (struct virtio_gpu_ctrl_hdr *)(dma->data + offset);
-    VideoPortMoveMemory(header, (PVOID)request, bytes);
-    header->flags = VIRTIO_GPU_FLAG_FENCE;
-    header->fence_id = ++gpu->fence;
-    VideoPortZeroMemory(dma->data + offset + PacketBytes, sizeof(*header));
+    packet = (struct virtio_gpu_cmd_submit *)(dma->data + offset);
+    VideoPortZeroMemory(packet, sizeof(*packet));
+    packet->hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    packet->hdr.ctx_id = gpu->d7Frame.target->id;
+    packet->hdr.flags = VIRTIO_GPU_FLAG_FENCE;
+    packet->hdr.fence_id = ++gpu->fence;
+    packet->size = count*sizeof(ULONG);
+    VideoPortMoveMemory(packet+1, (PVOID)words, count*sizeof(ULONG));
+    VideoPortZeroMemory(dma->data + offset + FrameReplyOffset, sizeof(struct virtio_gpu_ctrl_hdr));
     desc = (DESCRIPTOR *)(gpu->dma + Desc);
     desc[head].address.QuadPart = dma->bus.QuadPart + offset;
     desc[head].length = bytes;
     desc[head].flags = DescriptorNext;
     desc[head].next = head+1;
-    desc[head+1].address.QuadPart = dma->bus.QuadPart + offset + PacketBytes;
-    desc[head+1].length = sizeof(*header);
+    desc[head+1].address.QuadPart = dma->bus.QuadPart + offset + FrameReplyOffset;
+    desc[head+1].length = sizeof(struct virtio_gpu_ctrl_hdr);
     desc[head+1].flags = DescriptorWrite;
     desc[head+1].next = 0;
     job->image = gpu->d7Frame.target;
-    job->work = gpu->d7Frame.pending;
+    job->work = *work;
     job->fence = gpu->fence;
     gpu->d7Next = (slot+1) % RB2K_D7_FLIGHT_SLOTS;
     ++gpu->d7Flight.queued;
