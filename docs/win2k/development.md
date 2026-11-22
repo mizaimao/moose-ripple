@@ -1262,13 +1262,25 @@ the stated window on that device. The T&L device does not use this
 buffer, and guest screenshots now show the level, models, lighting and
 status bar as expected.
 
-| 969-frame `demo1` at 640×480, one run | Windows 2000 SP4 | Windows XP SP3 |
-| --- | ---: | ---: |
-| Rate printed by the game | 18.0 fps | 16.7 fps |
-| Native triangles drawn | 2,138,967 | 2,146,971 |
-| Triangles skipped | 0 | 0 |
-| Failed command buffers | 0 | 0 |
+Three changes then made it faster. A frame's commands went to the host in
+2 KB packets, each but the last a request that waited for the host; they
+now go in packets of up to 64 KB, queued without waiting. A draw request
+now carries up to 32 triangles instead of 8. A windowed present waited for
+the frame's fence and then read the image back with a fenced transfer,
+and QEMU checks virgl fences on a 10 ms timer; a present now only queues
+the frame and reads the image back unfenced in the same context, which the
+host runs after the frame's drawing. Locks and blits still wait.
 
-The earlier, faster numbers drew about a tenth of the triangles. Each
-driver request still carries at most eight triangles, so a run makes
-about 290,000 requests; larger batches are the next step.
+| 969-frame `demo1` at 640×480 | Windows 2000 SP4 | Windows XP SP3 |
+| --- | ---: | ---: |
+| First correct picture, one run each | 18.0 fps | 16.7 fps |
+| After the three changes | 45.6 fps (one run) | 36.3 and 39.7 fps (two runs) |
+| Native triangles drawn | 2,195,812 | 2,185,962 |
+| Triangles skipped | 0 | 0 |
+| Draw requests | 98,265 | 97,864 |
+| Waits for a frame's fence | 97 | 94 |
+
+Runs of the same XP build differ by about 3 fps. Four scene slots instead
+of two, and unfenced texture uploads, measured 36.5 and 37.4 fps against
+36.3 and 39.7, so neither was kept. The earlier, faster-looking numbers on
+the software vertex path drew about a tenth of the triangles.
