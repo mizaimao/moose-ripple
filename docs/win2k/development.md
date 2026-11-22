@@ -1194,3 +1194,66 @@ offset zero. No game triangle completed, so these frame rates cannot
 establish rendering performance against software or the historical
 baseline. The next diagnostic records the vertex format and active
 render settings at each rejected draw.
+
+### Native textures, blending and culling
+
+The native path now draws texture stage zero. A texture lives in system
+memory, or in "video memory" that the runtime allocates in the program's
+own memory, in one of six RGB formats (32-bit with and without alpha,
+5-6-5, 1-5-5-5 with and without alpha, 4-4-4-4). Programs and the
+runtime's texture manager write textures without telling the driver, so
+each texture used in a scene is read once, compared with its last upload
+by checksum, and converted to B8G8R8A8 for a host texture. The texture
+manager's copies arrive as texture blits between the two kinds of memory.
+Stage-zero colour and alpha operations become fragment shaders generated
+per combination. Alpha test, blending, cull modes, flat shading, the
+sampler state, triangle strips and fans, and immediate fans are handled.
+A draw this path cannot reproduce is skipped and counted; the rest of the
+command buffer is still drawn.
+
+`tpixels.exe hal|rgb` draws each case on a 128×128 target and checks
+pixels well inside the shapes. Every case passed on both the hardware
+device and Microsoft's RGB device, on a fresh Windows 2000 SP4 and a
+fresh Windows XP SP3 guest on the Intel UHD 630. The earlier colour,
+indexed and depth tests also passed on both.
+
+| Case | Checks |
+| --- | --- |
+| Select texture, 8888 / 565 / 1555 / 4444 | four quadrant colours and the background each |
+| Texture × diffuse colour | four half-bright quadrants |
+| Alpha test (greater than 0x80) | two quadrants kept, two discarded |
+| Blend source alpha / additive | blended colour within 3 levels |
+| Cull none / counter-clockwise / clockwise | which of two triangles remains |
+| Flat shading | colour of the first vertex |
+| Texture rewritten between scenes | the new colour in the next scene |
+| Video-memory and managed textures (hardware only) | four quadrant colours |
+
+Microsoft's RGB device widens 5-bit red to 248; the hardware path
+replicates the high bits to 255. Video-memory and managed textures need
+texture hardware by design, so the RGB device reports `DDERR_NOTEXTUREHW`.
+
+Stock Direct3D Quake 0.73 now draws on the hardware device without a
+failed command buffer. Guest screenshots show its text, status bar and
+most of the level, but the picture is not correct yet: parts of the level
+are missing or torn, and the full-screen tint after an item pickup looks
+much stronger than it should, which is not yet checked against a
+reference. The game uses Direct3D's own
+vertex processing, and with a driver that never swaps vertex buffers the
+runtime indexes vertices it has not written once its 64 KB transformed
+vertex buffer fills. On XP it starts batches past the end of the buffer.
+On Windows 2000 it states more vertices than the buffer holds. Reading
+past the end found 5 to 23% plausible screen positions, against 97%
+inside the buffer, and no wrap-around rule produced clean geometry. The
+driver draws only triangles inside the runtime's stated window and skips
+the rest.
+
+| 969-frame `demo1` at 640×480, one run | Windows 2000 SP4 | Windows XP SP3 |
+| --- | ---: | ---: |
+| Rate printed by the game | 50.3 fps | 45.1 fps |
+| Native triangles drawn | 171,243 | 180,367 |
+| Triangles skipped outside the vertex window | 75,177 | 67,431 |
+| Failed command buffers | 0 | 0 |
+
+A device that does its own vertex processing (a T&L HAL) receives the
+program's untransformed vertex buffers instead of the runtime's, which
+avoids this buffer.

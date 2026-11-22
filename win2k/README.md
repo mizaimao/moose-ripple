@@ -25,9 +25,10 @@ VGA and restored the saved desktop after full-screen DirectDraw programs.
   memory. Other surfaces live in system memory, where Windows' own
   DirectDraw code draws them faster than the GPU could here (see Speed).
 - **Direct3D 7** has an experimental native hardware driver for 32-bit
-  render targets. Both Windows 2000 and XP passed pixel tests for untextured
-  triangle lists, indexed triangle lists and 16-bit depth testing.
-  [Indexed triangle tests](../docs/win2k/development.md#native-indexed-triangle-lists) ·
+  render targets. Both Windows 2000 and XP passed pixel tests for triangle
+  lists, indexed triangles, 16-bit depth testing, textures in four formats,
+  texture modulation, alpha test, blending, culling and flat shading.
+  [Texture and blending tests](../docs/win2k/development.md#native-textures-blending-and-culling) ·
   [Depth tests](../docs/win2k/development.md#native-16-bit-depth-rendering)
 
 ## The virtual machine
@@ -165,10 +166,14 @@ DDK headers and import libraries, and the Visual C++ 6.0 headers. Set
 
 ## Known limits
 
-- Stock Direct3D Quake 0.73 starts on the hardware device and clears its
-  target, but its indexed draws use unsupported settings. Both Windows
-  2000 and XP recorded zero game triangles. Texture sampling and the
-  Direct3D 8 and 9 driver interfaces remain open.
+- Stock Direct3D Quake 0.73 now draws its text, status bar and most of its
+  world on the hardware device, but the picture is not correct yet. With
+  Direct3D doing the vertex processing, the runtime indexes vertices it has
+  not written once its 64 KB vertex buffer fills, on both Windows 2000 and
+  XP. The driver skips those triangles (about a quarter of the game's).
+  Driver vertex processing (a T&L device) would avoid the runtime's buffer.
+  Only texture stage zero, without mipmaps or fog, is drawn. The Direct3D 8
+  and 9 driver interfaces remain open.
   [Direct3D work](https://github.com/mizaimao/moose-ripple/issues/106)
 - 8-bit and 16-bit full-screen game compatibility awaits guest testing.
 - Each OpenGL context that draws leaves about 1.2 KB in the program's own
