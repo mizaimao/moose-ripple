@@ -1437,3 +1437,42 @@ after Run. Windows logged an application error in `3DMark06.exe`. The nine
 fullscreen clock samples covered 18.22 seconds on the host, 18.23 on the
 Windows performance counter and 16.71 on the Windows tick clock. This run
 ended before a score or a per-scene display rate could be measured.
+
+### Immediate fullscreen presentation
+
+Windows requests a DMA command for an immediate fullscreen flip. The previous
+miniport returned success with an empty buffer, leaving the host display black.
+The new command keeps the source allocation in the scheduler's patch list and
+selects it for display after earlier rendering has been queued. A flip at
+vertical blank continues to use the scheduler's display-address callback.
+[Windows display-driver present interface](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dkmddi/ns-d3dkmddi-_dxgkarg_present)
+
+The 32-bit fullscreen probe held three two-colour patterns for 3.5 guest seconds
+each at 1280×1024. A viewer connected before the test and sampled the host
+display at (320, 512) and (960, 512) about twice per real second. Each cell
+counts patterns whose midpoint matched both expected pixels. All four interior
+samples in every hold agreed with its midpoint. [Fullscreen probe](../../tools/win7-hello/d3d9fullscreen.c)
+
+| Swap effect | Presentation interval | Previous kernel | Immediate-flip kernel |
+| --- | --- | ---: | ---: |
+| Flip | Immediate | 0/3 | 3/3 |
+| Discard | Immediate | 0/3 | 3/3 |
+| Flip | One vertical blank | 3/3 | 3/3 |
+| Discard | One vertical blank | 3/3 | 3/3 |
+
+For the single-change comparison, the unmodified kernel at `bccab87` was
+rebuilt with its original compile timestamp. All seven PE sections matched
+the archived driver. The same immediate-flip source change was applied to
+that control and built separately on the current Windows branch. The display
+trial used a disposable Windows 7 disk and the following SHA-256 hashes.
+Windows verified the new kernel signature and all four catalog members.
+The running guest confirmed both installed shader DLLs and the kernel after reboot.
+
+| File | SHA-256 |
+| --- | --- |
+| Previous kernel | `47b67bdec23ac64aea5b35554f7fee3d7267ebae3ce20c1da92fc3ee0a0d0c9c` |
+| New test-signed kernel | `9e7005109db86deafbb386ec46b81273554a9de23defdb7c6707c9d5e9354062` |
+| New signed catalog | `1eb674421b6a29f68eef664e4eb12c7722942efa73493ad6863c90d2d75fdba5` |
+| x64 shader DLL, both runs | `c0c5c6bfd84d35541307a1a689556d240ae3449e5983b1e2f3f6005595839257` |
+| x86 shader DLL, both runs | `4776a89526bd065128e66635158026bddb7ca35ca248e4a0e14a6c4ba5321427` |
+| Fullscreen probe, both runs | `75ec12d5e8839841107cffc1bec6ce9ce7ea8254ea08983a8cdb4b536fd5479f` |

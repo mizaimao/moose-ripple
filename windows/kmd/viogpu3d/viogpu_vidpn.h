@@ -90,6 +90,9 @@ class VioGpuVidPN
     NTSTATUS GetScanLine(_Inout_ DXGKARG_GETSCANLINE *pGetScanLine);
 
     void Flip();
+#if DXGKDDI_INTERFACE_VERSION == DXGKDDI_INTERFACE_VERSION_WIN7
+    void PresentDmaFlip(VioGpuAllocation *source, PHYSICAL_ADDRESS address);
+#endif
     static void FlipThread(void *ctx);
     NTSTATUS StartFlipThread();
     void StopFlipThread();
@@ -102,6 +105,7 @@ class VioGpuVidPN
     void SourceGone(VioGpuAllocation *allocation);
 
   private:
+    void RefreshScanoutLocked(BOOLEAN verticalBlank);
     NTSTATUS SetSourceModeAndPath(CONST D3DKMDT_VIDPN_SOURCE_MODE *pSourceMode,
                                   CONST D3DKMDT_VIDPN_PRESENT_PATH *pPath);
     NTSTATUS AddSingleMonitorMode(_In_ CONST DXGKARG_RECOMMENDMONITORMODES *CONST pRecommendMonitorModes);
