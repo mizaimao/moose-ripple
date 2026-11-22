@@ -299,14 +299,43 @@ static void render_state(D7_CONTEXT *c, ULONG state, ULONG value)
     else c->drawFeatures &= ~feature;
 }
 
+/* Indices in LIST2 follow a base vertex and are relative to that base.
+ * The command snapshot owns the indices. Validate the entire source window
+ * before gathering vertices or allowing a partial draw. */
+static BOOL vertex_range(ULONG first, ULONG count, const WORD *indices, ULONG available,
+                         ULONG stride, ULONG vertexOffset, ULONG *lowest, ULONG *offset, ULONG *bytes)
+{
+    ULONG low = 0, high, i, start;
+    if (!count || stride < sizeof(RB2K_D3D7_VERTEX) || stride > 256 || first >= available) return FALSE;
+    if (indices) {
+        if (count > MaxCommandBytes / sizeof(*indices)) return FALSE;
+        low = high = indices[0];
+        for (i = 1; i < count; ++i) {
+            if (indices[i] < low) low = indices[i];
+            if (indices[i] > high) high = indices[i];
+        }
+    } else {
+        if (count > MaxCommandBytes / stride) return FALSE;
+        high = count - 1;
+    }
+    if (high >= available - first) return FALSE;
+    start = first + low;
+    if (start > (0xffffffffUL - vertexOffset) / stride) return FALSE;
+    *lowest = low;
+    *offset = vertexOffset + start * stride;
+    /* The highest possible WORD index is 65535 and stride is at most 256. */
+    *bytes = (high - low) * stride + sizeof(RB2K_D3D7_VERTEX);
+    return *bytes <= 0xffffffffUL - *offset;
+}
+
 static HRESULT triangle_list(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a,
-                             ULONG stride, ULONG first, ULONG primitives)
+                             ULONG stride, ULONG first, ULONG primitives, const WORD *indices)
 {
     DD_SLOT *s, *z;
     RB2K_D3D7_VERTEX *vertices, *batchVertices;
     union { RB2K_D3D7_BATCH plain; RB2K_D3D7_ZBATCH depth; } batch;
     PDD_SURFACE_GLOBAL g;
-    ULONG address, offset, bytes, i, written, count = 3*primitives, batchCount, header, code;
+    ULONG address, offset, bytes, low, i, written, count = 3*primitives, batchCount, header, code;
     HRESULT hr = render_surfaces(c, &s, &z);
     if (FAILED(hr)) return hr;
     if (!count) return DD_OK;
@@ -318,12 +347,8 @@ static HRESULT triangle_list(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a,
                                                                    D3DFVF_NORMAL))) return DDERR_UNSUPPORTED;
     hr = texture_passes(c);
     if (FAILED(hr)) return hr;
-    if (stride < sizeof(*vertices) || stride > 256 || first > a->dwVertexLength ||
-        count > a->dwVertexLength-first || first > (0xffffffffUL-a->dwVertexOffset)/stride ||
-        count > MaxCommandBytes/stride) return DDERR_INVALIDPARAMS;
-    offset = a->dwVertexOffset+first*stride;
-    bytes = count*stride;
-    if (bytes > 0xffffffffUL-offset) return DDERR_INVALIDPARAMS;
+    if (!vertex_range(first, count, indices, a->dwVertexLength, stride, a->dwVertexOffset,
+                      &low, &offset, &bytes)) return DDERR_INVALIDPARAMS;
     if (a->dwFlags & D3DNTHALDP2_USERMEMVERTICES) address = (ULONG)a->lpVertices;
     else {
         if (!a->lpDDVertex || !(a->lpDDVertex->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY) ||
@@ -337,9 +362,10 @@ static HRESULT triangle_list(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a,
      * driver only reads the transformed position and packed diffuse colour. */
     hr = DD_OK;
     __try {
-        const BYTE *v = (const BYTE *)(address+offset);
-        EngProbeForRead((PVOID)v, bytes, 1);
-        for (i = 0; i < count; ++i, v += stride) {
+        const BYTE *start = (const BYTE *)(address+offset);
+        EngProbeForRead((PVOID)start, bytes, 1);
+        for (i = 0; i < count; ++i) {
+            const BYTE *v = start + (indices ? indices[i]-low : i) * stride;
             RB2K_D3D7_VERTEX *d = &vertices[i];
             RtlCopyMemory(d, v, sizeof(*d));
             if ((d->x & 0x7fffffff) >= 0x7f800000 || (d->y & 0x7fffffff) >= 0x7f800000 ||
@@ -454,12 +480,18 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             }
             break;
         }
-        case D3DNTDP2OP_TRIANGLELIST: {
-            const D3DNTHAL_DP2TRIANGLELIST *list = (const D3DNTHAL_DP2TRIANGLELIST *)p;
+        case D3DNTDP2OP_TRIANGLELIST:
+        case D3DNTDP2OP_INDEXEDTRIANGLELIST2: {
+            const D3DNTHAL_DP2STARTVERTEX *base = (const D3DNTHAL_DP2STARTVERTEX *)p;
+            const WORD *indices = NULL;
             HRESULT hr;
-            used = sizeof(*list);
+            used = sizeof(*base);
+            if (h->bCommand == D3DNTDP2OP_INDEXEDTRIANGLELIST2) {
+                used += n * sizeof(D3DNTHAL_DP2INDEXEDTRIANGLELIST2);
+                indices = (const WORD *)(p + sizeof(*base));
+            }
             if (used > remaining) return DDERR_INVALIDPARAMS;
-            hr = triangle_list(c, a, stride, list->wVStart, n);
+            hr = triangle_list(c, a, stride, base->wVStart, n, indices);
             if (FAILED(hr)) return hr;
             break;
         }
