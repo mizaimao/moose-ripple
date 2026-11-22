@@ -300,6 +300,47 @@ Each checked from a dump of the compositor's frame:
 | Media Player Classic HC 64-bit, `Bear.wmv` | Playing correctly in its window (frame at 0:11 of 0:12). |
 | Windows Media Player 11 | Not tested: it opened its first-run settings wizard, which is the owner's to answer. |
 
+### Capture on demand
+
+Vista now requests pixels from the host GPU when a program captures the
+screen. The kernel marks GPU-drawn flip-chain primaries as inaccessible
+to the CPU and keeps the shared, CPU-drawn desktop primary accessible.
+Vista can then copy the requested rectangle into a staging surface. This
+replaces the full-screen copy previously made up to twice a second.
+[Allocation flags](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dkmddi/ns-d3dkmddi-_dxgk_allocationinfoflags) · [Staging surfaces](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dkmdt/ns-d3dkmdt-_d3dkmdt_stagingsurfacedata)
+
+On an Intel UHD 630, two 180 × 120 captures of an Aero window each caused
+one host read of that rectangle (3.55 ms and 0.42 ms). All 256 sampled
+pixels per colour matched the external display.
+[Paired guest and display captures](img/vista-capture-on-demand.webp)
+
+With Aero on, one keyboard comparison per driver captured two solid
+colours presented by Direct3D 9. Print Screen produced a fresh 1280 × 1024
+clipboard bitmap for each colour. All 512 sampled pixels per driver
+matched on the external display, in the screen DC and in the clipboard.
+
+A matched 3DMark06 1.2.0 run at 1280 × 1024 with no viewer measured the
+change on the Vista fullscreen test build. Both user-mode DLLs and the
+benchmark executable were identical between runs. The count and time
+cover each full scene. Display changes per real second come from a late
+sample within each scene.
+
+| Scene | Periodic reads | Periodic read time (s) | On-demand reads | Periodic display/s | On-demand display/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Return to Proxycon | 217 | 0.681 | 0 | 26.20 | 26.86 |
+| Firefly Forest | 130 | 0.431 | 0 | 13.21 | 14.01 |
+| Red Valley CPU 1 | 27 | 0.035 | 0 | 1.42 | 1.49 |
+| Red Valley CPU 2 | 37 | 0.046 | 0 | 2.60 | 2.65 |
+| Canyon Flight | 171 | 0.575 | 0 | 25.57 | 24.83 |
+| Deep Freeze | 144 | 0.490 | 0 | 25.48 | 27.36 |
+
+Across all six scenes, capture on demand removed 726 reads and 2.258 s
+in host read calls. The score changed from 13,619 to 13,750, within the
+observed spread of the original driver. The guest performance counter
+tracked real time. Windows tick time advanced 404.11 s in 881.83 real
+fullscreen seconds with periodic copies and 404.37 s in 896.59 real
+seconds with capture on demand.
+
 ## Rebuild and signing handoff
 
 From the Vista worktree on the Linux builder, set `MAIN` to the checkout

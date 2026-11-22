@@ -2056,9 +2056,6 @@ void VioGpuVidPN::RefreshScanoutLocked(BOOLEAN verticalBlank)
         if (haveSource)
         {
             sourceRes->FlushToScreen(0);
-#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
-            m_mirrorPending = sourceRes->IsDrawnPrimary() && m_sourceSegment == VistaDisplayMemory::SegmentId;
-#endif
         }
         else
         {
@@ -2074,25 +2071,6 @@ void VioGpuVidPN::RefreshScanoutLocked(BOOLEAN verticalBlank)
                                        changed.left,
                                        changed.top);
     }
-#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
-    // Vista: the picture of a drawn primary on screen goes into its memory too, for screen
-    // captures (VioGpuAllocation::MirrorToMemory): at most twice a second while it changes, and
-    // once more after the last change
-    if (m_mirrorPending && haveSource && sourceRes->IsDrawnPrimary())
-    {
-        const ULONGLONG now = KeQueryInterruptTime();
-        PHYSICAL_ADDRESS memory;
-        if (now >= m_mirrorNext &&
-            m_pAdapter->desktopMemory.PhysicalAt(m_sourceAddress.QuadPart,
-                                                 (SIZE_T)sourceRes->GetPitch() * sourceRes->GetHeight(),
-                                                 &memory))
-        {
-            sourceRes->MirrorToMemory(memory);
-            m_mirrorPending = FALSE;
-            m_mirrorNext = now + 5000000; // half a second, in 100 ns units
-        }
-    }
-#endif
 }
 
 #if DXGKDDI_INTERFACE_VERSION == DXGKDDI_INTERFACE_VERSION_WIN7

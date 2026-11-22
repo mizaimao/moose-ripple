@@ -11,9 +11,6 @@ class VistaDisplayMemory
     NTSTATUS Initialize();
     void Describe(DXGK_SEGMENTDESCRIPTOR *segment) const;
     NTSTATUS Page(DXGKARG_BUILDPAGINGBUFFER *paging);
-    // The physical address of a range of the segment, for the host to write into; FALSE when
-    // the range is not all inside it
-    BOOLEAN PhysicalAt(ULONGLONG offset, SIZE_T size, PHYSICAL_ADDRESS *address) const;
 
   private:
     BYTE *m_base;

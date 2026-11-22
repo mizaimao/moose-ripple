@@ -75,17 +75,6 @@ class VioGpuAllocation
     NTSTATUS EscapeResourceInfo(VIOGPU_RES_INFO_REQ *resInfo);
     NTSTATUS EscapeResourceBusy(VIOGPU_RES_BUSY_REQ *resBusy);
 
-#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
-    // Vista: a primary drawn by the GPU (VIOGPU_VISTA_DRAWN_PRIMARY_TAG), and the copy of its
-    // picture into its own memory in the desktop segment, where Windows reads screen captures
-    // (viogpu_vidpn.cpp, VioGpuVidPN::Flip)
-    BOOLEAN IsDrawnPrimary() const
-    {
-        return m_drawnPrimary;
-    }
-    void MirrorToMemory(PHYSICAL_ADDRESS memory);
-#endif
-
   private:
     VioGpuAdapter *m_adapter;
 
@@ -97,11 +86,6 @@ class VioGpuAllocation
     size_t m_pageOffset;
 
     size_t m_DxPhysicalAddress;
-
-#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
-    BOOLEAN m_drawnPrimary;
-    BOOLEAN m_mirrorAttached;
-#endif
 
     KEVENT m_busyNotification;
     volatile LONG m_busy;
