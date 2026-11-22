@@ -17,9 +17,9 @@ driver's copy of this header defines it (windows/kmd/shared/viogpum.h).
 +    ULONG tag;
 +} VIOGPU_VISTA_PRIMARY;
 +#define VIOGPU_VISTA_PRIMARY_TAG 0x6D507256UL
-+// The tag of a primary drawn by the GPU (the user-mode driver's, for flip chains). Placed like
-+// the other; while it is on screen the kernel driver also copies its picture into its memory,
-+// which is where Windows reads a screen capture from.
++// The user-mode driver's flip-chain primaries are drawn on the GPU. They use the
++// desktop segment for scanout, but their pixels are CPU-accessible only through
++// a staging copy.
 +#define VIOGPU_VISTA_DRAWN_PRIMARY_TAG 0x6D507244UL
 +
  
