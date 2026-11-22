@@ -97,3 +97,27 @@ checks. Substitute its drive letter in these commands.
 fc /b D:\rb2kmp.sys %SystemRoot%\system32\drivers\rb2kmp.sys
 fc /b D:\rb2kdisp.dll %SystemRoot%\system32\rb2kdisp.dll
 ```
+
+Windows 2000 Setup can report success and request a restart while the
+previous driver is still active. If the scheduled test never starts,
+confirm the FAT volume label with `vol D:`. Run `D:\rvdstat.exe` on a
+build that supports the hardware-pointer diagnostic and look for
+`GLCURSOR on=0` or `GLCURSOR on=1`. In testing, the older loaded driver
+printed only the resource count. A normal restart from inside Windows
+preserves the disposable session. Where Setup's restart did not occur,
+this guest-side VBScript logged the old boot time and requested a local
+restart through WMI. Run it using `cscript //nologo` from an account
+permitted to restart that guest.
+
+```vbscript
+Set service = GetObject("winmgmts:{impersonationLevel=impersonate,(Shutdown)}!\\.\root\cimv2")
+For Each os In service.InstancesOf("Win32_OperatingSystem")
+    WScript.Echo "Prior guest boot " & os.LastBootUpTime
+    WScript.Quit os.Win32Shutdown(2)
+Next
+WScript.Quit 1
+```
+
+Wait for the scheduled test at the next logon. The Windows 2000 run
+confirmed the installed bytes, the new driver counters and all three
+alpha-pointer checksums before starting the timed game.
