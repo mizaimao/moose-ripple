@@ -25,8 +25,6 @@
 #define IOCTL_RB2K_DD_FLIP      RB2K_DD_IOCTL(0x90b)
 #define IOCTL_RB2K_DD_FLIP_RELEASE RB2K_DD_IOCTL(0x90c)
 #define IOCTL_RB2K_DD_FLIP_ACQUIRE RB2K_DD_IOCTL(0x90d)
-#define IOCTL_RB2K_DD_CREATE_TEXTURE RB2K_DD_IOCTL(0x90e)
-#define IOCTL_RB2K_D3D7_TRIANGLES RB2K_DD_IOCTL(0x90f)
 #define IOCTL_RB2K_D3D7_CLEAR RB2K_DD_IOCTL(0x913)
 #define IOCTL_RB2K_D3D7_PROFILE RB2K_DD_IOCTL(0x914)
 #define IOCTL_RB2K_D3D7_FLUSH RB2K_DD_IOCTL(0x915)
@@ -34,23 +32,41 @@
 #define IOCTL_RB2K_D3D7_FLIGHT RB2K_DD_IOCTL(0x917)
 #define IOCTL_RB2K_DD_CREATE_Z16 RB2K_DD_IOCTL(0x918)
 #define IOCTL_RB2K_D3D7_ZCLEAR RB2K_DD_IOCTL(0x919)
-#define IOCTL_RB2K_D3D7_ZTRIANGLES RB2K_DD_IOCTL(0x91a)
+#define IOCTL_RB2K_D3D7_DRAW RB2K_DD_IOCTL(0x91b)
+#define IOCTL_RB2K_D3D7_TEXTURE RB2K_DD_IOCTL(0x91c)
+#define IOCTL_RB2K_D3D7_TEXTURE_FREE RB2K_DD_IOCTL(0x91d)
 typedef struct { ULONG clears, triangles; } RB2K_D3D7_COMPLETED;
 #define RB2K_D3D7_VERTICES 24
-/* IEEE transformed position and a packed Direct3D diffuse colour. */
-typedef struct { ULONG x, y, z, rhw, color; } RB2K_D3D7_VERTEX;
-typedef struct {
-    ULONG target, count;
-    RB2K_D3D7_VERTEX vertices[RB2K_D3D7_VERTICES];
-} RB2K_D3D7_BATCH;
-/* These requests keep the original colour-only wire records intact. The
- * low three state bits are D3DCMPFUNC minus one. Disabled depth uses zero. */
+/* IEEE transformed position, packed Direct3D diffuse and specular colours
+ * and the stage-zero texture coordinate. */
+typedef struct { ULONG x, y, z, rhw, diffuse, specular, u, v; } RB2K_D3D7_VERTEX;
+/* The low three depth-state bits are D3DCMPFUNC minus one. Disabled depth
+ * uses zero. The other words keep Direct3D's own values; the miniport
+ * validates each one before it creates a host object for it. */
 #define RB2K_Z_ENABLE 16
 #define RB2K_Z_WRITE 8
+#define RB2K_D7_ON 0x80000000UL
 typedef struct {
-    ULONG target, count, depth, state;
+    ULONG target, depth, count;
+    ULONG depthState;
+    ULONG alphaTest;    /* RB2K_D7_ON | D3DCMPFUNC << 8 | reference */
+    ULONG blend;        /* RB2K_D7_ON | source D3DBLEND << 8 | destination D3DBLEND */
+    ULONG cull;         /* D3DCULL */
+    ULONG colorStage;   /* D3DTEXTUREOP | first argument << 8 | second argument << 16 */
+    ULONG alphaStage;
+    ULONG specular;     /* nonzero adds the interpolated specular colour */
+    ULONG factor;       /* D3DRENDERSTATE_TEXTUREFACTOR */
+    ULONG texture;      /* host texture, zero for none */
+    ULONG sampler;      /* address U | V << 4 | MAG << 8 | MIN << 12, Direct3D values */
+    ULONG border;
     RB2K_D3D7_VERTEX vertices[RB2K_D3D7_VERTICES];
-} RB2K_D3D7_ZBATCH;
+} RB2K_D3D7_DRAW;
+/* Texels are tightly packed B8G8R8A8 rows. A zero id creates a texture of
+ * the given size from row zero; the reply is the texture id. */
+#define RB2K_D7_TEXTURES 1024
+#define RB2K_D7_TEXTURE_SIDE 1024
+#define RB2K_D7_UPLOAD_BYTES (256UL * 1024)
+typedef struct { ULONG id, target, width, height, y, rows; } RB2K_D3D7_TEXTURE;
 typedef struct { ULONG target, depth, flags, color, depthBits; } RB2K_D3D7_ZCLEAR;
 enum { RB2K_CLEAR_COLOR = 1, RB2K_CLEAR_DEPTH = 2 };
 typedef struct {

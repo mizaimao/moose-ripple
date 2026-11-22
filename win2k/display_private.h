@@ -51,6 +51,7 @@ typedef struct {
     BOOL z16Storage, z16Render;
     HRESULT (CALLBACK *parseD3DExtension)(PVOID command, PVOID *next);
     RB2K_D3D7_DIAGNOSTICS d7;
+    RB2K_D7_DRAWSTATS d7draw;
     ULONG pageBytes, visiblePage, lockedPages;
     PDD_SURFACE_GLOBAL flipBack, flipFront;
     HANDLE flipOwner;
@@ -68,6 +69,12 @@ void rb_d7_disable(DISPLAY *display);
 void rb_d7_caps(DD_HALINFO *info, BOOL depth);
 BOOL rb_d7_info(PDD_GETDRIVERINFODATA data);
 ULONG rb_d7_stats(DISPLAY *display, ULONG size, PVOID out);
+ULONG rb_d7_drawstats(DISPLAY *display, ULONG size, PVOID out);
+/* Direct3D texture formats, each converted to B8G8R8A8 for the host. */
+enum { TexNone, TexArgb8888, TexXrgb8888, TexRgb565, TexArgb1555, TexXrgb1555, TexArgb4444, TexFormats };
+ULONG rb_d7_texture_format(const DDPIXELFORMAT *format, ULONG desktopBits);
+ULONG rb_d7_texel_bytes(ULONG format);
+void rb_d7_surface_destroyed(DISPLAY *display, PDD_SURFACE_GLOBAL surface);
 HPALETTE rb_create_palette(DISPLAY *display);
 BOOL rb_restore_palette(DISPLAY *display);
 void rb_rvd_init(void);

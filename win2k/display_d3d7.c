@@ -1,6 +1,15 @@
 /* Stock NT5 Direct3D 7 callbacks. An offscreen DirectDraw surface owns the
  * host image. The runtime's surface numbers are local to a DirectDraw object.
- * Numeric context handles never expose display-driver addresses. */
+ * Numeric context handles never expose display-driver addresses.
+ *
+ * A texture lives in system memory or in "video memory" that the runtime
+ * allocates in the process (display_ddraw.c); either is written without
+ * telling the driver. Each texture used in a scene is read once, compared
+ * with its last upload by checksum, and converted to B8G8R8A8 for the host
+ * when it changed. The texture manager's copies arrive as texture blits
+ * between the two. One texture stage is
+ * drawn. A draw this path cannot reproduce is consumed and counted, and the
+ * rest of the command buffer is still drawn. */
 #include "display_private.h"
 #include <d3dnthal.h>
 #include "rb2kd3d7.h"
@@ -9,32 +18,57 @@
 #ifndef D3DERR_UNSUPPORTEDCOLOROPERATION
 #define D3DERR_UNSUPPORTEDCOLOROPERATION MAKE_DDHRESULT(2073)
 #define D3DERR_UNSUPPORTEDALPHAOPERATION MAKE_DDHRESULT(2075)
+#define D3DERR_UNSUPPORTEDCOLORARG MAKE_DDHRESULT(2074)
+#define D3DERR_TOOMANYOPERATIONS MAKE_DDHRESULT(2077)
 #endif
 
-enum { MaxContexts = 16, MaxCommandBytes = 65536, TextureStages = 8 };
+enum { MaxContexts = 16, MaxCommandBytes = 1 << 20, TextureStages = 8, MaxTextures = 1024 };
 typedef struct {
-    ULONG texture, colorOp, colorArg1, alphaOp, alphaArg1;
+    ULONG texture, colorOp, colorArg1, colorArg2, alphaOp, alphaArg1, alphaArg2;
+    ULONG coordIndex, addressU, addressV, magFilter, minFilter, mipFilter, border, transform;
 } D7_STAGE;
 typedef struct {
     ULONG id, target, depth;
     DISPLAY *display;
     PDD_DIRECTDRAW_LOCAL local;
     HANDLE owner;
-    ULONG cull, shade, fill, drawFeatures;
+    ULONG cull, shade, fill;
     ULONG zEnable, zWrite, zFunc;
+    ULONG alphaTest, alphaFunc, alphaRef, blend, srcBlend, dstBlend;
+    ULONG fog, specular, stencil, clipPlanes, colorKey, factor;
     BOOL inScene, queued;
+    ULONG minStart, maxEnd;     /* diagnostics for one command buffer */
     D7_STAGE stages[TextureStages];
 } D7_CONTEXT;
+/* A system-memory texture registered through CreateSurfaceEx. The address
+ * belongs to the owning process, which is current during its callbacks. */
+typedef struct {
+    PDD_DIRECTDRAW_LOCAL local;
+    PDD_SURFACE_GLOBAL global;
+    DISPLAY *display;
+    HANDLE owner;
+    ULONG handle, format, width, height, pitch, mipmaps;
+    FLATPTR address;
+    ULONG host, sum, epoch;
+    ULONG targets[RB2K_DD_SLOTS];
+} D7_TEXTURE;
 
 static HSEMAPHORE registry;
 static D7_CONTEXT contexts[MaxContexts];
 static ULONG lastContext;
+static D7_TEXTURE *textures;
+static ULONG textureEpoch = 1;
+static BYTE *texelScratch, *uploadScratch;
+static ULONG texelScratchBytes;
 
 /* A context-only callback takes the registry first, then the display lock.
  * DrvDisableDirectDraw drops the display lock before retiring the contexts. */
 void rb_d7_init(void)
 {
     if (!registry) registry = EngCreateSemaphore();
+    if (!textures) textures = EngAllocMem(FL_ZERO_MEMORY, MaxTextures * sizeof(*textures), 't7bR');
+    if (!uploadScratch)
+        uploadScratch = EngAllocMem(0, sizeof(RB2K_D3D7_TEXTURE) + RB2K_D7_UPLOAD_BYTES, 'p7bR');
 }
 
 static D7_CONTEXT *owned_context(ULONG id)
@@ -46,6 +80,20 @@ static D7_CONTEXT *owned_context(ULONG id)
     return NULL;
 }
 
+static BOOL request(DISPLAY *d, ULONG code, PVOID in, ULONG inSize, PVOID out, ULONG outSize)
+{
+    ULONG written = 0;
+    return !EngDeviceIoControl(d->miniport, code, in, inSize, out, outSize, &written) &&
+           written == outSize;
+}
+
+static void release_texture(D7_TEXTURE *t, BOOL host)
+{
+    if (host && t->host) request(t->display, IOCTL_RB2K_D3D7_TEXTURE_FREE, &t->host, sizeof(t->host), NULL, 0);
+    if (t->display) --t->display->d7draw.textures;
+    RtlZeroMemory(t, sizeof(*t));
+}
+
 void rb_d7_disable(DISPLAY *d)
 {
     ULONG i;
@@ -53,6 +101,93 @@ void rb_d7_disable(DISPLAY *d)
     EngAcquireSemaphore(registry);
     for (i = 0; i < MaxContexts; ++i)
         if (contexts[i].display == d) RtlZeroMemory(&contexts[i], sizeof(contexts[i]));
+    /* Every DirectDraw object of this display is going away. */
+    for (i = 0; textures && i < MaxTextures; ++i)
+        if (textures[i].display == d) release_texture(&textures[i], TRUE);
+    EngReleaseSemaphore(registry);
+}
+
+static D7_TEXTURE *find_texture(PDD_DIRECTDRAW_LOCAL local, ULONG handle)
+{
+    ULONG i;
+    for (i = 0; textures && handle && i < MaxTextures; ++i)
+        if (textures[i].handle == handle && textures[i].local == local) return &textures[i];
+    return NULL;
+}
+
+/* Decode a texture's pixel format. NT copies the surface format into the
+ * kernel record without the flag that says the surface has its own, so a
+ * plausible RGB format is taken as given and anything else as the desktop's. */
+ULONG rb_d7_texture_format(const DDPIXELFORMAT *f, ULONG desktopBits)
+{
+    ULONG alpha = (f->dwFlags & DDPF_ALPHAPIXELS) ? f->dwRGBAlphaBitMask : 0;
+    if (!(f->dwFlags & DDPF_RGB) || !f->dwRGBBitCount) return desktopBits == 32 ? TexXrgb8888 : TexNone;
+    if (f->dwFlags & ~(DDPF_RGB | DDPF_ALPHAPIXELS)) return TexNone;
+    if (f->dwRGBBitCount == 32 && f->dwRBitMask == 0xff0000 && f->dwGBitMask == 0xff00 &&
+        f->dwBBitMask == 0xff)
+        return alpha == 0xff000000 ? TexArgb8888 : alpha ? TexNone : TexXrgb8888;
+    if (f->dwRGBBitCount != 16) return TexNone;
+    if (f->dwRBitMask == 0xf800 && f->dwGBitMask == 0x07e0 && f->dwBBitMask == 0x1f && !alpha)
+        return TexRgb565;
+    if (f->dwRBitMask == 0x7c00 && f->dwGBitMask == 0x03e0 && f->dwBBitMask == 0x1f)
+        return alpha == 0x8000 ? TexArgb1555 : alpha ? TexNone : TexXrgb1555;
+    if (f->dwRBitMask == 0x0f00 && f->dwGBitMask == 0x00f0 && f->dwBBitMask == 0x0f && alpha == 0xf000)
+        return TexArgb4444;
+    return TexNone;
+}
+
+ULONG rb_d7_texel_bytes(ULONG format)
+{
+    return format == TexArgb8888 || format == TexXrgb8888 ? 4 : 2;
+}
+
+/* Record or forget a texture. System memory belongs to the application;
+ * a video-memory texture is runtime-allocated user memory (display_ddraw.c).
+ * The runtime calls this again with a zero address when a system-memory
+ * surface is destroyed, and DestroySurface reports video-memory ones. */
+static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE_LOCAL l)
+{
+    PDD_SURFACE_GLOBAL g = l->lpGbl;
+    ULONG handle = l->lpSurfMore ? l->lpSurfMore->dwSurfaceHandle : 0, i;
+    D7_TEXTURE *t;
+    if (!textures || !handle) return;
+    t = find_texture(local, handle);
+    if (t) release_texture(t, TRUE);
+    if (!g->fpVidMem) return;
+    for (i = 0; i < MaxTextures && textures[i].handle; ++i) {}
+    if (i == MaxTextures) return;
+    t = &textures[i];
+    t->local = local;
+    t->global = g;
+    t->display = d;
+    t->owner = EngGetCurrentProcessId();
+    t->handle = handle;
+    t->address = g->fpVidMem;
+    t->pitch = g->lPitch > 0 ? (ULONG)g->lPitch : 0;
+    t->width = g->wWidth;
+    t->height = g->wHeight;
+    t->format = rb_d7_texture_format(&g->ddpfSurface, d->mode.BitsPerPlane);
+    t->mipmaps = (l->ddsCaps.dwCaps & DDSCAPS_MIPMAP) != 0;
+    if (!t->width || t->width > RB2K_D7_TEXTURE_SIDE || !t->height || t->height > RB2K_D7_TEXTURE_SIDE ||
+        t->pitch < t->width * rb_d7_texel_bytes(t->format))
+        t->format = TexNone;
+    ++d->d7draw.textures;
+    ++d->d7draw.registered[t->format];
+    if (!(l->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY)) ++d->d7draw.videoTextures;
+}
+
+/* DestroySurface for a video-memory texture (display_ddraw.c), called
+ * before it takes the display lock. */
+void rb_d7_surface_destroyed(DISPLAY *d, PDD_SURFACE_GLOBAL g)
+{
+    ULONG i;
+    if (!registry || !textures) return;
+    EngAcquireSemaphore(registry);
+    EngAcquireSemaphore(d->ddLock);
+    for (i = 0; i < MaxTextures; ++i)
+        if (textures[i].display == d && textures[i].global == g && textures[i].handle)
+            release_texture(&textures[i], TRUE);
+    EngReleaseSemaphore(d->ddLock);
     EngReleaseSemaphore(registry);
 }
 
@@ -62,7 +197,17 @@ static DWORD APIENTRY register_surface(PDD_CREATESURFACEEXDATA a)
     DISPLAY *d = (DISPLAY *)a->lpDDLcl->lpGbl->dhpdev;
     DD_SLOT *slot;
     a->ddRVal = DD_OK;
-    if (!l || !l->lpGbl || !(l->ddsCaps.dwCaps & (DDSCAPS_3DDEVICE | (d->z16Render ? DDSCAPS_ZBUFFER : 0))) ||
+    if (!l || !l->lpGbl) return DDHAL_DRIVER_HANDLED;
+    if ((l->ddsCaps.dwCaps & (DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE)) == DDSCAPS_TEXTURE) {
+        EngAcquireSemaphore(registry);
+        EngAcquireSemaphore(d->ddLock);
+        ++d->d7.surfaceCalls;
+        if (d->nativeD3D7) register_texture(d, a->lpDDLcl, l);
+        EngReleaseSemaphore(d->ddLock);
+        EngReleaseSemaphore(registry);
+        return DDHAL_DRIVER_HANDLED;
+    }
+    if (!(l->ddsCaps.dwCaps & (DDSCAPS_3DDEVICE | (d->z16Render ? DDSCAPS_ZBUFFER : 0))) ||
         (l->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY)) return DDHAL_DRIVER_HANDLED;
     EngAcquireSemaphore(d->ddLock);
     ++d->d7.surfaceCalls;
@@ -114,6 +259,8 @@ static DWORD APIENTRY destroy_local(PDD_DESTROYDDLOCALDATA a)
         DD_SLOT *s = &d->slots[i];
         if (s->local == a->pDDLcl) { s->local = NULL; s->d3dHandle = 0; }
     }
+    for (i = 0; textures && i < MaxTextures; ++i)
+        if (textures[i].local == a->pDDLcl) release_texture(&textures[i], TRUE);
     EngReleaseSemaphore(d->ddLock);
     EngReleaseSemaphore(registry);
     return DDHAL_DRIVER_HANDLED;
@@ -135,6 +282,24 @@ static DWORD APIENTRY get_driver_state(PDD_GETDRIVERSTATEDATA a)
         a->ddRVal = DDERR_UNSUPPORTED;
     }
     return DDHAL_DRIVER_HANDLED;
+}
+
+static void default_stages(D7_CONTEXT *c)
+{
+    ULONG stage;
+    for (stage = 0; stage < TextureStages; ++stage) {
+        D7_STAGE *s = &c->stages[stage];
+        RtlZeroMemory(s, sizeof(*s));
+        s->colorOp = stage ? D3DTOP_DISABLE : D3DTOP_MODULATE;
+        s->alphaOp = stage ? D3DTOP_DISABLE : D3DTOP_SELECTARG1;
+        s->colorArg1 = s->alphaArg1 = D3DTA_TEXTURE;
+        s->colorArg2 = s->alphaArg2 = D3DTA_CURRENT;
+        s->coordIndex = stage;
+        s->addressU = s->addressV = D3DTADDRESS_WRAP;
+        s->magFilter = D3DTFG_POINT;
+        s->minFilter = D3DTFN_POINT;
+        s->mipFilter = D3DTFP_NONE;
+    }
 }
 
 static DWORD APIENTRY create_context(LPD3DNTHAL_CONTEXTCREATEDATA a)
@@ -163,8 +328,8 @@ static DWORD APIENTRY create_context(LPD3DNTHAL_CONTEXTCREATEDATA a)
         a->ddrval = DDERR_OUTOFMEMORY;
         for (i = 0; lastContext != 0xffffffffUL && i < MaxContexts; ++i) {
             D7_CONTEXT *c = &contexts[i];
-            ULONG stage;
             if (c->id) continue;
+            RtlZeroMemory(c, sizeof(*c));
             c->display = d;
             c->local = local;
             c->owner = s->owner;
@@ -176,12 +341,12 @@ static DWORD APIENTRY create_context(LPD3DNTHAL_CONTEXTCREATEDATA a)
             c->cull = D3DCULL_CCW;
             c->shade = D3DSHADE_GOURAUD;
             c->fill = D3DFILL_SOLID;
+            c->alphaFunc = D3DCMP_ALWAYS;
+            c->srcBlend = D3DBLEND_ONE;
+            c->dstBlend = D3DBLEND_ZERO;
+            c->factor = 0xffffffff;
+            default_stages(c);
             c->id = ++lastContext;
-            for (stage = 0; stage < TextureStages; ++stage) {
-                c->stages[stage].colorOp = stage ? D3DTOP_DISABLE : D3DTOP_MODULATE;
-                c->stages[stage].alphaOp = stage ? D3DTOP_DISABLE : D3DTOP_SELECTARG1;
-                c->stages[stage].colorArg1 = c->stages[stage].alphaArg1 = D3DTA_TEXTURE;
-            }
             a->dwhContext = c->id;
             a->ddrval = DD_OK;
             break;
@@ -210,38 +375,64 @@ static DWORD APIENTRY destroy_context(LPD3DNTHAL_CONTEXTDESTROYDATA a)
     return DDHAL_DRIVER_HANDLED;
 }
 
-/* Stage zero starts with interpolated diffuse colour. This first path can
- * pass it through unchanged. An active sampler or blend requires more of
- * the fixed-function pipeline than this device currently implements. */
-static BOOL diffuse_argument(ULONG arg)
+/* ---- texture stage zero, reduced to what the miniport draws ---- */
+
+enum { StageOk, StageDisabled, StageUnsupported };
+
+/* Stage zero's current colour is the diffuse colour. */
+static ULONG stage_argument(ULONG arg, BOOL *ok)
 {
-    return arg == D3DTA_DIFFUSE || arg == D3DTA_CURRENT;
+    ULONG select = arg & D3DTA_SELECTMASK;
+    if (arg & ~(D3DTA_SELECTMASK | D3DTA_COMPLEMENT | D3DTA_ALPHAREPLICATE) ||
+        select > D3DTA_SPECULAR) *ok = FALSE;
+    if (select == D3DTA_CURRENT) arg = (arg & ~D3DTA_SELECTMASK) | D3DTA_DIFFUSE;
+    return arg;
 }
 
-static HRESULT texture_passes(const D7_CONTEXT *c)
+static BOOL samples_texture(ULONG op, ULONG arg1, ULONG arg2)
 {
-    ULONG i;
-    for (i = 0; i < TextureStages; ++i) {
-        const D7_STAGE *s = &c->stages[i];
-        if (s->colorOp == D3DTOP_DISABLE || (!s->texture && s->colorArg1 == D3DTA_TEXTURE))
-            break;
-        if (s->colorOp != D3DTOP_SELECTARG1 || !diffuse_argument(s->colorArg1))
-            return D3DERR_UNSUPPORTEDCOLOROPERATION;
-        /* With an XRGB target and blending and alpha testing off, a missing
-         * alpha texture cannot affect an output colour channel. */
-        if (s->alphaOp != D3DTOP_SELECTARG1 || (!diffuse_argument(s->alphaArg1) &&
-            (s->texture || s->alphaArg1 != D3DTA_TEXTURE)))
-            return D3DERR_UNSUPPORTEDALPHAOPERATION;
+    if (op == D3DTOP_BLENDTEXTUREALPHA || op == D3DTOP_BLENDTEXTUREALPHAPM) return TRUE;
+    return (op != D3DTOP_SELECTARG2 && (arg1 & D3DTA_SELECTMASK) == D3DTA_TEXTURE) ||
+           (op != D3DTOP_SELECTARG1 && (arg2 & D3DTA_SELECTMASK) == D3DTA_TEXTURE);
+}
+
+/* Fill the colour and alpha stage words. A stage that reads a missing texture
+ * passes the diffuse colour through, as the 9x HAL and the RGB device do. */
+static ULONG stage_words(const D7_CONTEXT *c, ULONG *color, ULONG *alpha, BOOL *texture)
+{
+    const D7_STAGE *s = &c->stages[0];
+    ULONG colorOp = s->colorOp, alphaOp = s->alphaOp;
+    BOOL ok = TRUE;
+    ULONG c1 = stage_argument(s->colorArg1, &ok), c2 = stage_argument(s->colorArg2, &ok);
+    ULONG a1 = stage_argument(s->alphaArg1, &ok), a2 = stage_argument(s->alphaArg2, &ok);
+    *texture = FALSE;
+    if (colorOp == D3DTOP_DISABLE ||
+        ((samples_texture(colorOp, c1, c2) || (alphaOp != D3DTOP_DISABLE && samples_texture(alphaOp, a1, a2))) &&
+         !s->texture)) {
+        *color = *alpha = D3DTOP_SELECTARG1 | (D3DTA_DIFFUSE << 8);
+        return StageDisabled;
     }
-    return DD_OK;
+    if (alphaOp == D3DTOP_DISABLE) { alphaOp = D3DTOP_SELECTARG1; a1 = D3DTA_DIFFUSE; }
+    if (!ok || colorOp < D3DTOP_SELECTARG1 || colorOp > D3DTOP_BLENDCURRENTALPHA ||
+        alphaOp < D3DTOP_SELECTARG1 || alphaOp > D3DTOP_BLENDCURRENTALPHA) return StageUnsupported;
+    *color = colorOp | (c1 << 8) | (c2 << 16);
+    *alpha = alphaOp | (a1 << 8) | (a2 << 16);
+    *texture = samples_texture(colorOp, c1, c2) || samples_texture(alphaOp, a1, a2);
+    return StageOk;
 }
 
 static DWORD APIENTRY validate_stages(LPD3DNTHAL_VALIDATETEXTURESTAGESTATEDATA a)
 {
     D7_CONTEXT *c;
+    ULONG color, alpha;
+    BOOL texture;
     EngAcquireSemaphore(registry);
     c = owned_context(a->dwhContext);
-    a->ddrval = !c ? DDERR_INVALIDOBJECT : a->dwFlags ? DDERR_INVALIDPARAMS : texture_passes(c);
+    if (!c) a->ddrval = DDERR_INVALIDOBJECT;
+    else if (a->dwFlags) a->ddrval = DDERR_INVALIDPARAMS;
+    else if (c->stages[1].colorOp != D3DTOP_DISABLE) a->ddrval = D3DERR_TOOMANYOPERATIONS;
+    else a->ddrval = stage_words(c, &color, &alpha, &texture) == StageUnsupported ?
+                     D3DERR_UNSUPPORTEDCOLOROPERATION : DD_OK;
     a->dwNumPasses = SUCCEEDED(a->ddrval) ? 1 : 0;
     EngReleaseSemaphore(registry);
     return DDHAL_DRIVER_HANDLED;
@@ -272,134 +463,470 @@ static HRESULT render_surfaces(D7_CONTEXT *c, DD_SLOT **color, DD_SLOT **depth)
     return DD_OK;
 }
 
-/* The first rasterizer accepts solid, untextured Gouraud triangles. Keep
- * state that changes their observable colour or coverage across DP2 calls. */
 static void render_state(D7_CONTEXT *c, ULONG state, ULONG value)
 {
-    ULONG feature;
     switch (state) {
-    case D3DRENDERSTATE_CULLMODE: c->cull = value; return;
-    case D3DRENDERSTATE_SHADEMODE: c->shade = value; return;
-    case D3DRENDERSTATE_FILLMODE: c->fill = value; return;
-    case D3DRENDERSTATE_ZENABLE:
-        c->zEnable = value;
-        if (c->display->z16Render) return;
-        feature = 1; break;
-    case D3DRENDERSTATE_ZWRITEENABLE: c->zWrite = value; return;
-    case D3DRENDERSTATE_ZFUNC: c->zFunc = value; return;
-    case D3DRENDERSTATE_ALPHATESTENABLE: feature = 2; break;
-    case D3DRENDERSTATE_ALPHABLENDENABLE: feature = 4; break;
-    case D3DRENDERSTATE_FOGENABLE: feature = 8; break;
-    case D3DRENDERSTATE_STENCILENABLE: feature = 16; break;
-    case D3DRENDERSTATE_SPECULARENABLE: feature = 32; break;
-    case D3DRENDERSTATE_CLIPPLANEENABLE: feature = 64; break;
-    default: return;
+    case D3DRENDERSTATE_CULLMODE: c->cull = value; break;
+    case D3DRENDERSTATE_SHADEMODE: c->shade = value; break;
+    case D3DRENDERSTATE_FILLMODE: c->fill = value; break;
+    case D3DRENDERSTATE_ZENABLE: c->zEnable = value; break;
+    case D3DRENDERSTATE_ZWRITEENABLE: c->zWrite = value; break;
+    case D3DRENDERSTATE_ZFUNC: c->zFunc = value; break;
+    case D3DRENDERSTATE_ALPHATESTENABLE: c->alphaTest = value; break;
+    case D3DRENDERSTATE_ALPHAFUNC: c->alphaFunc = value; break;
+    case D3DRENDERSTATE_ALPHAREF: c->alphaRef = value; break;
+    case D3DRENDERSTATE_ALPHABLENDENABLE: c->blend = value; break;
+    case D3DRENDERSTATE_SRCBLEND: c->srcBlend = value; break;
+    case D3DRENDERSTATE_DESTBLEND: c->dstBlend = value; break;
+    case D3DRENDERSTATE_FOGENABLE: c->fog = value; break;
+    case D3DRENDERSTATE_SPECULARENABLE: c->specular = value; break;
+    case D3DRENDERSTATE_STENCILENABLE: c->stencil = value; break;
+    case D3DRENDERSTATE_CLIPPLANEENABLE: c->clipPlanes = value; break;
+    case D3DRENDERSTATE_COLORKEYENABLE: c->colorKey = value; break;
+    case D3DRENDERSTATE_TEXTUREFACTOR: c->factor = value; break;
     }
-    if (value) c->drawFeatures |= feature;
-    else c->drawFeatures &= ~feature;
 }
 
-/* Indices in LIST2 follow a base vertex and are relative to that base.
- * The command snapshot owns the indices. Validate the entire source window
- * before gathering vertices or allowing a partial draw. */
-static BOOL vertex_range(ULONG first, ULONG count, const WORD *indices, ULONG available,
-                         ULONG stride, ULONG vertexOffset, ULONG *lowest, ULONG *offset, ULONG *bytes)
+static void stage_state(D7_STAGE *s, ULONG state, ULONG value)
 {
-    ULONG low = 0, high, i, start;
-    if (!count || stride < sizeof(RB2K_D3D7_VERTEX) || stride > 256 || first >= available) return FALSE;
-    if (indices) {
-        if (count > MaxCommandBytes / sizeof(*indices)) return FALSE;
-        low = high = indices[0];
-        for (i = 1; i < count; ++i) {
-            if (indices[i] < low) low = indices[i];
-            if (indices[i] > high) high = indices[i];
-        }
-    } else {
-        if (count > MaxCommandBytes / stride) return FALSE;
-        high = count - 1;
+    switch (state) {
+    case D3DTSS_TEXTUREMAP: s->texture = value; break;
+    case D3DTSS_COLOROP: s->colorOp = value; break;
+    case D3DTSS_COLORARG1: s->colorArg1 = value; break;
+    case D3DTSS_COLORARG2: s->colorArg2 = value; break;
+    case D3DTSS_ALPHAOP: s->alphaOp = value; break;
+    case D3DTSS_ALPHAARG1: s->alphaArg1 = value; break;
+    case D3DTSS_ALPHAARG2: s->alphaArg2 = value; break;
+    case D3DTSS_TEXCOORDINDEX: s->coordIndex = value; break;
+    case D3DTSS_ADDRESS: s->addressU = s->addressV = value; break;
+    case D3DTSS_ADDRESSU: s->addressU = value; break;
+    case D3DTSS_ADDRESSV: s->addressV = value; break;
+    case D3DTSS_MAGFILTER: s->magFilter = value; break;
+    case D3DTSS_MINFILTER: s->minFilter = value; break;
+    case D3DTSS_MIPFILTER: s->mipFilter = value; break;
+    case D3DTSS_BORDERCOLOR: s->border = value; break;
+    case D3DTSS_TEXTURETRANSFORMFLAGS: s->transform = value; break;
     }
-    if (high >= available - first) return FALSE;
-    start = first + low;
-    if (start > (0xffffffffUL - vertexOffset) / stride) return FALSE;
-    *lowest = low;
-    *offset = vertexOffset + start * stride;
-    /* The highest possible WORD index is 65535 and stride is at most 256. */
-    *bytes = (high - low) * stride + sizeof(RB2K_D3D7_VERTEX);
-    return *bytes <= 0xffffffffUL - *offset;
 }
 
-static HRESULT triangle_list(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a,
-                             ULONG stride, ULONG first, ULONG primitives, const WORD *indices)
+/* ---- texture upload ---- */
+
+static ULONG expand(ULONG v, ULONG bits)
 {
-    DD_SLOT *s, *z;
-    RB2K_D3D7_VERTEX *vertices, *batchVertices;
-    union { RB2K_D3D7_BATCH plain; RB2K_D3D7_ZBATCH depth; } batch;
-    PDD_SURFACE_GLOBAL g;
-    ULONG address, offset, bytes, low, i, written, count = 3*primitives, batchCount, header, code;
-    HRESULT hr = render_surfaces(c, &s, &z);
-    if (FAILED(hr)) return hr;
-    if (!count) return DD_OK;
-    if (z && c->zEnable && (c->zEnable != D3DZB_TRUE ||
-        c->zFunc < D3DCMP_NEVER || c->zFunc > D3DCMP_ALWAYS)) return DDERR_UNSUPPORTED;
-    if (c->drawFeatures || c->shade != D3DSHADE_GOURAUD || c->fill != D3DFILL_SOLID ||
-        c->cull != D3DCULL_NONE || (a->dwVertexType & D3DFVF_POSITION_MASK) != D3DFVF_XYZRHW ||
-        !(a->dwVertexType & D3DFVF_DIFFUSE) || (a->dwVertexType & (D3DFVF_RESERVED0 | D3DFVF_RESERVED1 |
-                                                                   D3DFVF_NORMAL))) return DDERR_UNSUPPORTED;
-    hr = texture_passes(c);
-    if (FAILED(hr)) return hr;
-    if (!vertex_range(first, count, indices, a->dwVertexLength, stride, a->dwVertexOffset,
-                      &low, &offset, &bytes)) return DDERR_INVALIDPARAMS;
-    if (a->dwFlags & D3DNTHALDP2_USERMEMVERTICES) address = (ULONG)a->lpVertices;
-    else {
-        if (!a->lpDDVertex || !(a->lpDDVertex->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY) ||
-            !(g = a->lpDDVertex->lpGbl) || offset+bytes > g->dwLinearSize) return DDERR_INVALIDPARAMS;
-        address = g->fpVidMem;
+    return bits == 4 ? v * 17 : bits == 5 ? (v << 3) | (v >> 2) : (v << 2) | (v >> 4);
+}
+
+static ULONG convert(ULONG format, ULONG p)
+{
+    switch (format) {
+    case TexArgb8888: return p;
+    case TexXrgb8888: return p | 0xff000000;
+    case TexRgb565:
+        return 0xff000000 | expand((p >> 11) & 31, 5) << 16 | expand((p >> 5) & 63, 6) << 8 | expand(p & 31, 5);
+    case TexArgb1555:
+    case TexXrgb1555:
+        return (format == TexXrgb1555 || (p & 0x8000) ? 0xff000000 : 0) |
+               expand((p >> 10) & 31, 5) << 16 | expand((p >> 5) & 31, 5) << 8 | expand(p & 31, 5);
+    case TexArgb4444:
+        return expand((p >> 12) & 15, 4) << 24 | expand((p >> 8) & 15, 4) << 16 |
+               expand((p >> 4) & 15, 4) << 8 | expand(p & 15, 4);
     }
-    if (!address || offset+bytes > 0xffffffffUL-address) return DDERR_INVALIDPARAMS;
-    vertices = EngAllocMem(0, count*sizeof(*vertices), 'v7bR');
-    if (!vertices) return DDERR_OUTOFMEMORY;
-    /* Snapshot and check the whole list before the first host draw. The
-     * driver only reads the transformed position and packed diffuse colour. */
-    hr = DD_OK;
+    return 0;
+}
+
+/* Read the level-zero texels into the scratch buffer, tightly packed. */
+static BOOL read_texels(D7_TEXTURE *t, ULONG *sum)
+{
+    ULONG row = t->width * rb_d7_texel_bytes(t->format), bytes = row * t->height, y, i, h = 0x811c9dc5;
+    if (bytes > texelScratchBytes) {
+        if (texelScratch) EngFreeMem(texelScratch);
+        texelScratch = EngAllocMem(0, bytes, 'r7bR');
+        texelScratchBytes = texelScratch ? bytes : 0;
+        if (!texelScratch) return FALSE;
+    }
     __try {
-        const BYTE *start = (const BYTE *)(address+offset);
-        EngProbeForRead((PVOID)start, bytes, 1);
-        for (i = 0; i < count; ++i) {
-            const BYTE *v = start + (indices ? indices[i]-low : i) * stride;
-            RB2K_D3D7_VERTEX *d = &vertices[i];
-            RtlCopyMemory(d, v, sizeof(*d));
-            if ((d->x & 0x7fffffff) >= 0x7f800000 || (d->y & 0x7fffffff) >= 0x7f800000 ||
-                (d->z & 0x7fffffff) >= 0x7f800000 || !d->rhw || d->rhw >= 0x7f800000) {
-                hr = DDERR_INVALIDPARAMS;
-                break;
+        EngProbeForRead((PVOID)t->address, t->pitch * (t->height - 1) + row, 1);
+        for (y = 0; y < t->height; ++y)
+            RtlCopyMemory(texelScratch + y * row, (const BYTE *)t->address + y * t->pitch, row);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return FALSE; }
+    for (i = 0; i + 4 <= bytes; i += 4) h = (h ^ *(const ULONG *)(texelScratch + i)) * 0x01000193;
+    *sum = h ^ bytes;
+    return TRUE;
+}
+
+static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
+{
+    RB2K_D3D7_TEXTURE *packet = (RB2K_D3D7_TEXTURE *)uploadScratch;
+    ULONG chunk = RB2K_D7_UPLOAD_BYTES / (t->width * 4), y, id = t->host, tries;
+    ULONG *out = (ULONG *)(packet + 1), bpp = rb_d7_texel_bytes(t->format);
+    if (!packet || !chunk) return FALSE;
+    for (tries = 0; tries < 2; ++tries) {
+        BOOL ok = TRUE;
+        for (y = 0; ok && y < t->height; y += chunk) {
+            ULONG rows = min(chunk, t->height - y), x, r, newId = 0;
+            for (r = 0; r < rows; ++r) {
+                const BYTE *src = texelScratch + (y + r) * t->width * bpp;
+                for (x = 0; x < t->width; ++x)
+                    out[r * t->width + x] = convert(t->format, bpp == 4 ? ((const ULONG *)src)[x] :
+                                                                     ((const USHORT *)src)[x]);
+            }
+            packet->id = y ? id : t->host;
+            packet->target = targetId;
+            packet->width = t->width;
+            packet->height = t->height;
+            packet->y = y;
+            packet->rows = rows;
+            ok = request(d, IOCTL_RB2K_D3D7_TEXTURE, packet, sizeof(*packet) + rows * t->width * 4,
+                         &newId, sizeof(newId));
+            if (ok) id = newId;
+        }
+        if (ok) {
+            if (t->host != id) RtlZeroMemory(t->targets, sizeof(t->targets));
+            t->host = id;
+            ++d->d7draw.uploads;
+            d->d7draw.uploadBytes += t->width * t->height * 4;
+            return TRUE;
+        }
+        /* A transport reset releases every host texture; make a new one. */
+        if (!t->host) break;
+        t->host = id = 0;
+        RtlZeroMemory(t->targets, sizeof(t->targets));
+    }
+    ++d->d7draw.uploadFailures;
+    return FALSE;
+}
+
+/* The host texture for this draw, checked once a scene. The miniport
+ * attaches a texture to the target it is uploaded for. */
+static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
+{
+    ULONG sum, i;
+    BOOL attached = FALSE;
+    for (i = 0; i < RB2K_DD_SLOTS; ++i) if (t->targets[i] == targetId) attached = TRUE;
+    if (t->host && attached && t->epoch == textureEpoch) return t->host;
+    ++c->display->d7draw.checks;
+    if (!read_texels(t, &sum)) { ++c->display->d7draw.checkFailures; return 0; }
+    t->epoch = textureEpoch;
+    if (t->host && attached && sum == t->sum) return t->host;
+    if (!upload_texture(c->display, t, targetId)) return 0;
+    t->sum = sum;
+    for (i = 0; i < RB2K_DD_SLOTS && t->targets[i] != targetId; ++i) {}
+    if (i == RB2K_DD_SLOTS) {
+        /* Reuse the entry of a target that no longer exists. */
+        for (i = 0; i < RB2K_DD_SLOTS && t->targets[i] && target(c, t->targets[i], FALSE); ++i) {}
+        if (i < RB2K_DD_SLOTS) t->targets[i] = targetId;
+    }
+    return t->host;
+}
+
+/* ---- triangles ---- */
+
+enum { List, Strip, Fan };
+/* The source of one primitive command's vertices. */
+typedef struct {
+    const BYTE *inline_;   /* immediate vertices in the command snapshot */
+    ULONG first, primitives, kind;
+    const WORD *indices;   /* relative to first, or NULL */
+    ULONG indexStride;     /* WORDs per triangle record for INDEXEDTRIANGLELIST */
+} PRIMS;
+
+static ULONG prim_vertex(const PRIMS *p, ULONG t, ULONG corner, ULONG *flat)
+{
+    ULONG n;
+    switch (p->kind) {
+    case Strip:
+        /* Odd strip triangles swap their first two vertices to keep the winding. */
+        n = t + ((t & 1) && corner < 2 ? 1 - corner : corner);
+        *flat = t;
+        break;
+    case Fan:
+        n = corner ? t + corner : 0;
+        *flat = t + 1;
+        break;
+    default:
+        n = t * 3 + corner;
+        *flat = t * 3;
+        if (p->indexStride == 4) { n = t * 4 + corner; *flat = t * 4; }
+        break;
+    }
+    if (p->indices) { *flat = p->indices[*flat]; n = p->indices[n]; }
+    return n;
+}
+
+static BOOL bad_position(const RB2K_D3D7_VERTEX *v)
+{
+    return (v->x & 0x7fffffff) >= 0x7f800000 || (v->y & 0x7fffffff) >= 0x7f800000 ||
+           (v->z & 0x7fffffff) >= 0x7f800000 || !(v->rhw & 0x7fffffff) || (v->rhw & 0x7fffffff) >= 0x7f800000;
+}
+
+static void skip(D7_CONTEXT *c, ULONG reason, ULONG primitives)
+{
+    c->display->d7draw.skipped[reason] += primitives;
+    ++c->display->d7draw.skippedCalls;
+}
+
+/* Diagnostics: count each distinct drawn state, and keep the last refused
+ * vertex window with the reason. */
+static void record_state(D7_CONTEXT *c, const RB2K_D3D7_DRAW *draw, ULONG fvf, ULONG format, ULONG primitives)
+{
+    RB2K_D7_DRAWSTATS *s = &c->display->d7draw;
+    ULONG i, n = sizeof(s->states) / sizeof(s->states[0]);
+    for (i = 0; i < n && s->states[i].calls; ++i) {
+        if (s->states[i].colorStage == draw->colorStage && s->states[i].alphaStage == draw->alphaStage &&
+            s->states[i].blend == draw->blend && s->states[i].alphaTest == draw->alphaTest &&
+            s->states[i].depthState == draw->depthState && s->states[i].cull == draw->cull &&
+            s->states[i].shade == c->shade && s->states[i].fvf == fvf && s->states[i].texFormat == format) break;
+    }
+    if (i == n) { ++s->stateOverflow; return; }
+    s->states[i].colorStage = draw->colorStage;
+    s->states[i].alphaStage = draw->alphaStage;
+    s->states[i].blend = draw->blend;
+    s->states[i].alphaTest = draw->alphaTest;
+    s->states[i].depthState = draw->depthState;
+    s->states[i].cull = draw->cull;
+    s->states[i].shade = c->shade;
+    s->states[i].fvf = fvf;
+    s->states[i].texFormat = format;
+    ++s->states[i].calls;
+    s->states[i].primitives += primitives;
+}
+
+static HRESULT refused(DISPLAY *d, ULONG site, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, const PRIMS *p,
+                       ULONG low, ULONG high, ULONG stride)
+{
+    ULONG *r = d->d7draw.lastRange;
+    PDD_SURFACE_GLOBAL g = a->lpDDVertex ? a->lpDDVertex->lpGbl : NULL;
+    ++d->d7draw.failSites[site];
+    r[0] = d->d7.lastCommand; r[1] = p->first; r[2] = low; r[3] = high;
+    r[4] = a->dwVertexLength; r[5] = a->dwVertexOffset; r[6] = g ? g->dwLinearSize : 0;
+    r[7] = a->dwFlags; r[8] = stride; r[9] = p->primitives;
+    return DDERR_INVALIDPARAMS;
+}
+
+static HRESULT send_batch(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, ULONG count, D7_TEXTURE *tex)
+{
+    DISPLAY *d = c->display;
+    ULONG written = 0, error;
+    draw->count = count;
+    error = EngDeviceIoControl(d->miniport, IOCTL_RB2K_D3D7_DRAW, draw,
+                               FIELD_OFFSET(RB2K_D3D7_DRAW, vertices) + count * sizeof(draw->vertices[0]),
+                               NULL, 0, &written);
+    if (error) {
+        ++d->d7draw.drawFailures;
+        d->d7draw.lastDrawError = error;
+        d->d7draw.lastDrawState[0] = draw->colorStage;
+        d->d7draw.lastDrawState[1] = draw->alphaStage;
+        d->d7draw.lastDrawState[2] = draw->blend;
+        d->d7draw.lastDrawState[3] = draw->alphaTest;
+        d->d7draw.lastDrawState[4] = draw->depthState;
+        d->d7draw.lastDrawState[5] = draw->texture;
+        d->d7draw.lastDrawState[6] = draw->sampler;
+        d->d7draw.lastDrawState[7] = draw->depth;
+        /* The texture may have gone with a transport reset. */
+        if (tex) { tex->host = 0; RtlZeroMemory(tex->targets, sizeof(tex->targets)); }
+        return DDERR_GENERIC;
+    }
+    c->queued = TRUE;
+    d->d7draw.drawn += count / 3;
+    ++d->d7draw.drawCalls;
+    return DD_OK;
+}
+
+static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG stride, const PRIMS *p)
+{
+    DISPLAY *d = c->display;
+    DD_SLOT *s, *z;
+    RB2K_D3D7_DRAW draw;
+    D7_STAGE *st = &c->stages[0];
+    D7_TEXTURE *tex = NULL;
+    ULONG fvf = a->dwVertexType, offset = 16, diffuse = 0, specular = 0, coord = 0, coordFloats = 0;
+    ULONG sets, i, t, low = 0xffffffff, high = 0, address = 0, count = 0, flatSource = 0;
+    ULONG limit = 0xffffffff;              /* highest index inside the runtime's window */
+    BOOL texture, needTexture;
+    HRESULT hr = render_surfaces(c, &s, &z);
+    const BYTE *base = NULL;
+    if (FAILED(hr)) return hr;
+    if (!p->primitives) return DD_OK;
+    if (c->fill != D3DFILL_SOLID) { skip(c, RB2K_D7_SKIP_FILL, p->primitives); return DD_OK; }
+    if (c->stencil) { skip(c, RB2K_D7_SKIP_STENCIL, p->primitives); return DD_OK; }
+    if (c->stages[1].colorOp != D3DTOP_DISABLE) { skip(c, RB2K_D7_SKIP_STAGE1, p->primitives); return DD_OK; }
+    RtlZeroMemory(&draw, FIELD_OFFSET(RB2K_D3D7_DRAW, vertices));
+    if (stage_words(c, &draw.colorStage, &draw.alphaStage, &needTexture) == StageUnsupported) {
+        skip(c, RB2K_D7_SKIP_COMBINER, p->primitives);
+        return DD_OK;
+    }
+    /* Vertex layout: transformed position, then the optional fields in FVF order. */
+    if ((fvf & D3DFVF_POSITION_MASK) != D3DFVF_XYZRHW || (fvf & (D3DFVF_RESERVED0 | D3DFVF_NORMAL)) ||
+        (st->coordIndex >> 16) || (needTexture && (st->transform & 0xff))) {
+        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+        return DD_OK;
+    }
+    if (fvf & D3DFVF_RESERVED1) offset += 4;
+    if (fvf & D3DFVF_DIFFUSE) { diffuse = offset; offset += 4; }
+    if (fvf & D3DFVF_SPECULAR) { specular = offset; offset += 4; }
+    sets = (fvf & D3DFVF_TEXCOUNT_MASK) >> D3DFVF_TEXCOUNT_SHIFT;
+    for (i = 0; i < sets; ++i) {
+        static const UCHAR floats[] = { 2, 3, 4, 1 };
+        ULONG n = floats[(fvf >> (16 + 2*i)) & 3];
+        if (i == (st->coordIndex & 0xffff)) { coord = offset; coordFloats = n; }
+        offset += 4 * n;
+    }
+    if (offset > stride || stride > 256 || (!p->inline_ && (stride < 16))) {
+        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+        return DD_OK;
+    }
+    if (needTexture) {
+        tex = find_texture(c->local, st->texture);
+        if (!tex || !tex->format || tex->owner != c->owner) {
+            skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives);
+            return DD_OK;
+        }
+        if (tex->mipmaps && st->mipFilter != D3DTFP_NONE) d->d7draw.ignored[RB2K_D7_IGNORED_MIPMAP] += p->primitives;
+        draw.texture = texture_ready(c, tex, s->id);
+        if (!draw.texture) { skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives); return DD_OK; }
+    }
+    texture = needTexture;
+    if (c->fog) d->d7draw.ignored[RB2K_D7_IGNORED_FOG] += p->primitives;
+    if (c->colorKey) d->d7draw.ignored[RB2K_D7_IGNORED_COLORKEY] += p->primitives;
+    if (c->clipPlanes) d->d7draw.ignored[RB2K_D7_IGNORED_CLIPPLANE] += p->primitives;
+
+    draw.target = s->id;
+    draw.depth = z ? z->id : 0;
+    if (z && c->zEnable && c->zFunc >= D3DCMP_NEVER && c->zFunc <= D3DCMP_ALWAYS)
+        draw.depthState = RB2K_Z_ENABLE | (c->zWrite ? RB2K_Z_WRITE : 0) | (c->zFunc - 1);
+    if (c->alphaTest && c->alphaFunc >= D3DCMP_NEVER && c->alphaFunc <= D3DCMP_ALWAYS)
+        draw.alphaTest = RB2K_D7_ON | (c->alphaFunc << 8) | (c->alphaRef & 255);
+    if (c->blend && c->srcBlend >= D3DBLEND_ZERO && c->srcBlend <= D3DBLEND_BOTHINVSRCALPHA &&
+        c->dstBlend >= D3DBLEND_ZERO && c->dstBlend <= D3DBLEND_BOTHINVSRCALPHA)
+        draw.blend = RB2K_D7_ON | (c->srcBlend << 8) | c->dstBlend;
+    draw.cull = c->cull >= D3DCULL_NONE && c->cull <= D3DCULL_CCW ? c->cull : D3DCULL_NONE;
+    draw.specular = c->specular ? 1 : 0;
+    draw.factor = c->factor;
+    draw.sampler = (st->addressU >= 1 && st->addressU <= 4 ? st->addressU : 1) |
+                   (st->addressV >= 1 && st->addressV <= 4 ? st->addressV : 1) << 4 |
+                   (st->magFilter >= 1 && st->magFilter <= 5 ? st->magFilter : 1) << 8 |
+                   (st->minFilter >= 1 && st->minFilter <= 3 ? st->minFilter : 1) << 12;
+    draw.border = st->border;
+
+    /* Check the whole vertex window before the first host draw. */
+    for (t = 0; t < p->primitives; ++t) {
+        for (i = 0; i < 3; ++i) {
+            ULONG v = prim_vertex(p, t, i, &flatSource);
+            if (v < low) low = v;
+            if (v > high) high = v;
+        }
+    }
+    record_state(c, &draw, fvf, tex ? tex->format : 0, p->primitives);
+    if (!p->inline_) {
+        if (p->first < c->minStart) c->minStart = p->first;
+        if (p->first + high > c->maxEnd) c->maxEnd = p->first + high;
+    }
+    if (p->inline_) base = p->inline_;
+    else {
+        PDD_SURFACE_GLOBAL g;
+        ULONG window = a->dwVertexLength;      /* vertices valid from the offset */
+        if (a->dwFlags & D3DNTHALDP2_USERMEMVERTICES) address = (ULONG)a->lpVertices;
+        else {
+            if (!a->lpDDVertex || !(a->lpDDVertex->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY) ||
+                !(g = a->lpDDVertex->lpGbl)) return refused(d, RB2K_D7_FAIL_VBCAPS, a, p, low, high, stride);
+            if (a->dwVertexOffset >= g->dwLinearSize)
+                return refused(d, RB2K_D7_FAIL_LINEAR, a, p, low, high, stride);
+            address = g->fpVidMem;
+            /* Windows 2000's runtime can state more vertices than its buffer holds. */
+            window = min(window, (g->dwLinearSize - a->dwVertexOffset) / stride);
+        }
+        if (!address) return refused(d, RB2K_D7_FAIL_ADDRESS, a, p, low, high, stride);
+        /* With software vertex processing and a driver that never swaps
+         * buffers, the runtime can index past the vertices it has written
+         * (both NT5 runtimes, with Direct3D Quake 0.73). Draw the triangles
+         * inside the window and count the rest as skipped. */
+        if (p->first >= window || low > window - 1 - p->first) {
+            ++d->d7draw.beyondCalls;
+            d->d7draw.beyondVertices += p->primitives;
+            skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+            return DD_OK;
+        }
+        if (high > window - 1 - p->first) {
+            ++d->d7draw.beyondCalls;
+            high = limit = window - 1 - p->first;
+        }
+        base = (const BYTE *)address + a->dwVertexOffset + p->first * stride;
+    }
+    __try {
+        if (!p->inline_) EngProbeForRead((PVOID)(base + low * stride), (high - low) * stride + offset, 1);
+        for (t = 0; t < p->primitives; ++t) {
+            RB2K_D3D7_VERTEX *out = draw.vertices + count;
+            ULONG flat;
+            BOOL bad = FALSE;
+            if (limit != 0xffffffff) {
+                ULONG worst = 0;
+                for (i = 0; i < 3; ++i) worst = max(worst, prim_vertex(p, t, i, &flat));
+                if (worst > limit || flat > limit) {
+                    ++d->d7draw.beyondVertices;
+                    skip(c, RB2K_D7_SKIP_VERTEX, 1);
+                    continue;
+                }
+            }
+            for (i = 0; i < 3; ++i) {
+                const BYTE *v = base + prim_vertex(p, t, i, &flat) * stride;
+                RB2K_D3D7_VERTEX *o = out + i;
+                RtlCopyMemory(o, v, 16);
+                o->diffuse = diffuse ? *(const ULONG *)(v + diffuse) : 0xffffffff;
+                o->specular = specular ? *(const ULONG *)(v + specular) : 0;
+                o->u = coordFloats ? *(const ULONG *)(v + coord) : 0;
+                o->v = coordFloats > 1 ? *(const ULONG *)(v + coord + 4) : 0;
+                bad |= bad_position(o);
+            }
+            if (c->shade == D3DSHADE_FLAT) {
+                const BYTE *v = base + flat * stride;
+                ULONG fd = diffuse ? *(const ULONG *)(v + diffuse) : 0xffffffff;
+                ULONG fs = specular ? *(const ULONG *)(v + specular) : 0;
+                for (i = 0; i < 3; ++i) { out[i].diffuse = fd; out[i].specular = fs; }
+            }
+            if (bad) { ++d->d7draw.badPositions; skip(c, RB2K_D7_SKIP_VERTEX, 1); continue; }
+            count += 3;
+            if (count == RB2K_D3D7_VERTICES || t + 1 == p->primitives) {
+                hr = send_batch(c, &draw, count, tex);
+                if (FAILED(hr)) break;
+                count = 0;
             }
         }
-    } __except(EXCEPTION_EXECUTE_HANDLER) { hr = DDERR_INVALIDPARAMS; }
-
-    if (z) {
-        batch.depth.target = s->id;
-        batch.depth.depth = z->id;
-        batch.depth.state = c->zEnable ? RB2K_Z_ENABLE | (c->zWrite ? RB2K_Z_WRITE : 0) | (c->zFunc-1) : 0;
-        batchVertices = batch.depth.vertices;
-        header = FIELD_OFFSET(RB2K_D3D7_ZBATCH,vertices);
-        code = IOCTL_RB2K_D3D7_ZTRIANGLES;
-    } else {
-        batch.plain.target = s->id;
-        batchVertices = batch.plain.vertices;
-        header = FIELD_OFFSET(RB2K_D3D7_BATCH,vertices);
-        code = IOCTL_RB2K_D3D7_TRIANGLES;
-    }
-    for (i = 0; SUCCEEDED(hr) && i < count; i += batchCount) {
-        batchCount = min(count-i,RB2K_D3D7_VERTICES);
-        if (z) batch.depth.count = batchCount;
-        else batch.plain.count = batchCount;
-        RtlCopyMemory(batchVertices, vertices+i, batchCount*sizeof(*vertices));
-        if (EngDeviceIoControl(c->display->miniport, code, &batch, header+batchCount*sizeof(*vertices),
-                               NULL, 0, &written)) hr = DDERR_GENERIC;
-        else c->queued = TRUE;
-    }
-    EngFreeMem(vertices);
+        if (SUCCEEDED(hr) && count) hr = send_batch(c, &draw, count, tex);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { hr = refused(d, RB2K_D7_FAIL_PROBE, a, p, low, high, stride); }
     return hr;
+}
+
+/* The runtime's texture manager copies a system-memory texture into its
+ * video-memory copy. Both live in this process's memory, so copy the top
+ * level directly; the next draw compares and uploads it. A null source only
+ * asks for the destination to be loaded, which the next draw does anyway. */
+static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
+{
+    DISPLAY *d = c->display;
+    D7_TEXTURE *dst, *src;
+    LONG left = b->rSrc.left, top = b->rSrc.top, right = b->rSrc.right, bottom = b->rSrc.bottom;
+    ULONG bpp, y, rows, bytes;
+    if (!b->dwDDSrcSurface) return;
+    dst = find_texture(c->local, b->dwDDDestSurface);
+    src = find_texture(c->local, b->dwDDSrcSurface);
+    if (!dst || !src || !dst->format || dst->format != src->format ||
+        dst->owner != c->owner || src->owner != c->owner) { ++d->d7draw.texBltFailures; return; }
+    if (right <= left || bottom <= top) { left = top = 0; right = src->width; bottom = src->height; }
+    if (left < 0 || top < 0 || (ULONG)right > src->width || (ULONG)bottom > src->height ||
+        b->pDest.x < 0 || b->pDest.y < 0 || (ULONG)(b->pDest.x + right - left) > dst->width ||
+        (ULONG)(b->pDest.y + bottom - top) > dst->height) { ++d->d7draw.texBltFailures; return; }
+    bpp = rb_d7_texel_bytes(src->format);
+    rows = bottom - top;
+    bytes = (right - left) * bpp;
+    __try {
+        const BYTE *from = (const BYTE *)src->address + top * src->pitch + left * bpp;
+        BYTE *to = (BYTE *)dst->address + b->pDest.y * dst->pitch + b->pDest.x * bpp;
+        EngProbeForRead((PVOID)from, (rows - 1) * src->pitch + bytes, 1);
+        EngProbeForReadAndWrite(to, (rows - 1) * dst->pitch + bytes, 1);
+        for (y = 0; y < rows; ++y) RtlCopyMemory(to + y * dst->pitch, from + y * src->pitch, bytes);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ++d->d7draw.texBltFailures; return; }
+    dst->epoch = 0;
+    ++d->d7draw.texBlts;
 }
 
 static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, ULONG depthBits, const RECT *rects, ULONG count)
@@ -409,10 +936,14 @@ static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, ULONG depthBits, c
     ULONG written;
     HRESULT hr = render_surfaces(c, &s, &z);
     if (FAILED(hr)) return hr;
-    if (!flags || (flags & ~(D3DCLEAR_TARGET|D3DCLEAR_ZBUFFER)) ||
-        ((flags & D3DCLEAR_ZBUFFER) && !z) || count != 1 || !rects || rects->left || rects->top ||
-        rects->right != (LONG)s->width || rects->bottom != (LONG)s->height)
-        return DDERR_UNSUPPORTED;
+    if (!flags) return DD_OK;
+    /* Stencil and part-target clears are not drawn yet. */
+    if ((flags & ~(D3DCLEAR_TARGET|D3DCLEAR_ZBUFFER)) || ((flags & D3DCLEAR_ZBUFFER) && !z) ||
+        count != 1 || !rects || rects->left || rects->top ||
+        rects->right != (LONG)s->width || rects->bottom != (LONG)s->height) {
+        ++c->display->d7draw.skipped[RB2K_D7_SKIP_CLEAR];
+        return DD_OK;
+    }
     if (z) {
         RB2K_D3D7_ZCLEAR both = {0};
         both.target = s->id;
@@ -434,7 +965,7 @@ static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, ULONG depthBits, c
 
 /* The command buffer is an NT system-memory execute surface. Snapshot a
  * bounded range before walking it so its lengths cannot change during use. */
-static BOOL copy_commands(LPD3DNTHAL_DRAWPRIMITIVES2DATA a, BYTE *out)
+static BOOL copy_commands(LPD3DNTHAL_DRAWPRIMITIVES2DATA a, BYTE *out, ULONG *origin)
 {
     PDD_SURFACE_GLOBAL g;
     ULONG address, capacity;
@@ -449,24 +980,52 @@ static BOOL copy_commands(LPD3DNTHAL_DRAWPRIMITIVES2DATA a, BYTE *out)
         EngProbeForRead((PVOID)address, a->dwCommandLength, 1);
         RtlCopyMemory(out, (PVOID)address, a->dwCommandLength);
     } __except(EXCEPTION_EXECUTE_HANDLER) { return FALSE; }
+    *origin = address;
     return TRUE;
 }
 
-/* The 9x DP2 wire layout is identical here. Consume only complete records
- * from the snapshot. State packets cannot affect a target-only clear. */
+/* Size in bytes of a command's records after the header, for the ones
+ * this path consumes without drawing. Zero means variable or unknown. */
+static ULONG fixed_records(ULONG op, ULONG n)
+{
+    switch (op) {
+    case D3DNTDP2OP_POINTS: return n * sizeof(D3DNTHAL_DP2POINTS);
+    case D3DNTDP2OP_INDEXEDLINELIST: return n * sizeof(D3DNTHAL_DP2INDEXEDLINELIST);
+    case D3DNTDP2OP_LINELIST:
+    case D3DNTDP2OP_LINESTRIP: return sizeof(D3DNTHAL_DP2STARTVERTEX);
+    case D3DNTDP2OP_INDEXEDLINESTRIP: return sizeof(D3DNTHAL_DP2STARTVERTEX) + (n + 1) * sizeof(WORD);
+    case D3DNTDP2OP_INDEXEDLINELIST2:
+        return sizeof(D3DNTHAL_DP2STARTVERTEX) + n * sizeof(D3DNTHAL_DP2INDEXEDLINELIST);
+    case D3DNTDP2OP_VIEWPORTINFO: return n * sizeof(D3DNTHAL_DP2VIEWPORTINFO);
+    case D3DNTDP2OP_WINFO: return n * sizeof(D3DNTHAL_DP2WINFO);
+    case D3DNTDP2OP_ZRANGE: return n * sizeof(D3DNTHAL_DP2ZRANGE);
+    case D3DNTDP2OP_SETPALETTE: return n * sizeof(D3DNTHAL_DP2SETPALETTE);
+    case D3DNTDP2OP_STATESET: return n * sizeof(D3DNTHAL_DP2STATESET);
+    case D3DNTDP2OP_SETPRIORITY: return n * sizeof(D3DNTHAL_DP2SETPRIORITY);
+    case D3DNTDP2OP_SETTEXLOD: return n * sizeof(D3DNTHAL_DP2SETTEXLOD);
+    case D3DNTDP2OP_SETCLIPPLANE: return n * sizeof(D3DNTHAL_DP2SETCLIPPLANE);
+    }
+    return 0;
+}
+
 static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG stride,
-                        const BYTE *bytes, ULONG length, ULONG *offset)
+                        const BYTE *bytes, ULONG length, ULONG origin, ULONG *offset)
 {
     while (*offset < length) {
         const D3DNTHAL_DP2COMMAND *h;
         const BYTE *p;
         ULONG n, used, remaining = length-*offset;
+        HRESULT hr;
+        PRIMS prims;
         if (remaining < sizeof(*h)) return DDERR_INVALIDPARAMS;
         h = (const D3DNTHAL_DP2COMMAND *)(bytes + *offset);
         c->display->d7.lastCommand = h->bCommand;
+        if (h->bCommand < RB2K_D7_OPCODES) ++c->display->d7draw.opcodes[h->bCommand];
         n = h->wStateCount;
         p = (const BYTE *)(h + 1);
         remaining -= sizeof(*h);
+        RtlZeroMemory(&prims, sizeof(prims));
+        prims.primitives = n;
         switch (h->bCommand) {
         case D3DNTDP2OP_RENDERSTATE: {
             const D3DNTHAL_DP2RENDERSTATE *rs = (const D3DNTHAL_DP2RENDERSTATE *)p;
@@ -475,23 +1034,66 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             for (; n; --n, ++rs) {
                 if (rs->RenderState == D3DRENDERSTATE_SCENECAPTURE) {
                     c->inScene = rs->dwState != 0;
-                    if (!c->inScene && FAILED(finish_scene(c))) return DDERR_SURFACELOST;
+                    if (!c->inScene) {
+                        ++textureEpoch;
+                        if (FAILED(finish_scene(c))) return DDERR_SURFACELOST;
+                    }
                 } else render_state(c, rs->RenderState, rs->dwState);
             }
             break;
         }
         case D3DNTDP2OP_TRIANGLELIST:
-        case D3DNTDP2OP_INDEXEDTRIANGLELIST2: {
-            const D3DNTHAL_DP2STARTVERTEX *base = (const D3DNTHAL_DP2STARTVERTEX *)p;
-            const WORD *indices = NULL;
-            HRESULT hr;
-            used = sizeof(*base);
-            if (h->bCommand == D3DNTDP2OP_INDEXEDTRIANGLELIST2) {
-                used += n * sizeof(D3DNTHAL_DP2INDEXEDTRIANGLELIST2);
-                indices = (const WORD *)(p + sizeof(*base));
-            }
+        case D3DNTDP2OP_TRIANGLESTRIP:
+        case D3DNTDP2OP_TRIANGLEFAN:
+            used = sizeof(D3DNTHAL_DP2STARTVERTEX);
             if (used > remaining) return DDERR_INVALIDPARAMS;
-            hr = triangle_list(c, a, stride, base->wVStart, n, indices);
+            prims.first = ((const D3DNTHAL_DP2STARTVERTEX *)p)->wVStart;
+            prims.kind = h->bCommand == D3DNTDP2OP_TRIANGLELIST ? List :
+                         h->bCommand == D3DNTDP2OP_TRIANGLESTRIP ? Strip : Fan;
+            hr = triangles(c, a, stride, &prims);
+            if (FAILED(hr)) return hr;
+            break;
+        case D3DNTDP2OP_INDEXEDTRIANGLELIST2:
+        case D3DNTDP2OP_INDEXEDTRIANGLESTRIP:
+        case D3DNTDP2OP_INDEXEDTRIANGLEFAN: {
+            ULONG indices = h->bCommand == D3DNTDP2OP_INDEXEDTRIANGLELIST2 ? 3 * n : n + 2;
+            used = sizeof(D3DNTHAL_DP2STARTVERTEX) + indices * sizeof(WORD);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            prims.first = ((const D3DNTHAL_DP2STARTVERTEX *)p)->wVStart;
+            prims.indices = (const WORD *)(p + sizeof(D3DNTHAL_DP2STARTVERTEX));
+            prims.kind = h->bCommand == D3DNTDP2OP_INDEXEDTRIANGLELIST2 ? List :
+                         h->bCommand == D3DNTDP2OP_INDEXEDTRIANGLESTRIP ? Strip : Fan;
+            if (n) {
+                hr = triangles(c, a, stride, &prims);
+                if (FAILED(hr)) return hr;
+            }
+            break;
+        }
+        case D3DNTDP2OP_INDEXEDTRIANGLELIST:
+            /* Absolute indices with an edge-flag word per triangle. */
+            used = n * sizeof(D3DNTHAL_DP2INDEXEDTRIANGLELIST);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            prims.indices = (const WORD *)p;
+            prims.indexStride = 4;
+            hr = triangles(c, a, stride, &prims);
+            if (FAILED(hr)) return hr;
+            break;
+        case D3DNTDP2OP_TRIANGLEFAN_IMM:
+        case D3DNTDP2OP_LINELIST_IMM: {
+            /* Vertices follow in the command buffer at a DWORD-aligned address. */
+            ULONG head = h->bCommand == D3DNTDP2OP_TRIANGLEFAN_IMM ? sizeof(D3DNTHAL_DP2TRIANGLEFAN_IMM) : 0;
+            ULONG start = origin + *offset + sizeof(*h) + head, pad = (4 - (start & 3)) & 3;
+            ULONG vertices = h->bCommand == D3DNTDP2OP_TRIANGLEFAN_IMM ? n + 2 : 2 * n;
+            if (!stride || vertices > (remaining - min(remaining, head + pad)) / stride ||
+                head + pad > remaining) {
+                ++c->display->d7draw.failSites[RB2K_D7_FAIL_IMMEDIATE];
+                return DDERR_INVALIDPARAMS;
+            }
+            used = head + pad + vertices * stride;
+            if (h->bCommand == D3DNTDP2OP_LINELIST_IMM) { skip(c, RB2K_D7_SKIP_PRIMITIVE, n); break; }
+            prims.inline_ = p + head + pad;
+            prims.kind = Fan;
+            hr = triangles(c, a, stride, &prims);
             if (FAILED(hr)) return hr;
             break;
         }
@@ -500,26 +1102,27 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             used = n*sizeof(*st);
             if (used > remaining) return DDERR_INVALIDPARAMS;
             for (; n; --n, ++st) {
-                D7_STAGE *s;
                 if (st->wStage >= TextureStages) return DDERR_INVALIDPARAMS;
-                s = &c->stages[st->wStage];
-                switch (st->TSState) {
-                case D3DTSS_TEXTUREMAP: s->texture = st->dwValue; break;
-                case D3DTSS_COLOROP: s->colorOp = st->dwValue; break;
-                case D3DTSS_COLORARG1: s->colorArg1 = st->dwValue; break;
-                case D3DTSS_ALPHAOP: s->alphaOp = st->dwValue; break;
-                case D3DTSS_ALPHAARG1: s->alphaArg1 = st->dwValue; break;
-                }
+                stage_state(&c->stages[st->wStage], st->TSState, st->dwValue);
             }
             break;
         }
-        case D3DNTDP2OP_VIEWPORTINFO: used = n*sizeof(D3DNTHAL_DP2VIEWPORTINFO); break;
-        case D3DNTDP2OP_WINFO: used = n*sizeof(D3DNTHAL_DP2WINFO); break;
-        case D3DNTDP2OP_ZRANGE: used = n*sizeof(D3DNTHAL_DP2ZRANGE); break;
+        case D3DNTDP2OP_TEXBLT: {
+            const D3DNTHAL_DP2TEXBLT *b = (const D3DNTHAL_DP2TEXBLT *)p;
+            used = n * sizeof(*b);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            for (; n; --n, ++b) texture_blt(c, b);
+            break;
+        }
+        case D3DNTDP2OP_UPDATEPALETTE: {
+            const D3DNTHAL_DP2UPDATEPALETTE *u = (const D3DNTHAL_DP2UPDATEPALETTE *)p;
+            if (remaining < sizeof(*u)) return DDERR_INVALIDPARAMS;
+            used = sizeof(*u) + u->wNumEntries * sizeof(DWORD);
+            break;
+        }
         case D3DNTDP2OP_EXT: {
             const D3DNTHAL_DP2EXT *ext = (const D3DNTHAL_DP2EXT *)p;
             PVOID next = NULL;
-            HRESULT hr;
             if (n != 1 || remaining < sizeof(*ext) ||
                 ext->dwSize > remaining-sizeof(*ext)) return DDERR_INVALIDPARAMS;
             if (!c->display->parseD3DExtension) return D3DNTERR_COMMAND_UNPARSED;
@@ -549,7 +1152,6 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
         }
         case D3DNTDP2OP_CLEAR: {
             const D3DNTHAL_DP2CLEAR *f = (const D3DNTHAL_DP2CLEAR *)p;
-            HRESULT hr;
             ULONG depthBits;
             ++c->display->d7.clearCalls;
             used = FIELD_OFFSET(D3DNTHAL_DP2CLEAR, Rects) + n*sizeof(RECT);
@@ -559,7 +1161,14 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             if (FAILED(hr)) return hr;
             break;
         }
-        default: return D3DNTERR_COMMAND_UNPARSED;
+        default:
+            used = fixed_records(h->bCommand, n);
+            if (!used && n) return D3DNTERR_COMMAND_UNPARSED;
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            if (h->bCommand == D3DNTDP2OP_POINTS || h->bCommand == D3DNTDP2OP_INDEXEDLINELIST ||
+                h->bCommand == D3DNTDP2OP_LINELIST || h->bCommand == D3DNTDP2OP_LINESTRIP ||
+                h->bCommand == D3DNTDP2OP_INDEXEDLINESTRIP || h->bCommand == D3DNTDP2OP_INDEXEDLINELIST2)
+                skip(c, RB2K_D7_SKIP_PRIMITIVE, n);
         }
         if (used > remaining) return DDERR_INVALIDPARAMS;
         *offset += sizeof(*h) + used;
@@ -567,11 +1176,35 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
     return DD_OK;
 }
 
+/* Diagnostics: keep the last command buffers, up to 16 after the first draw
+ * that indexes past the runtime's stated vertex window. */
+static void record_history(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG flags, ULONG beyond)
+{
+    RB2K_D7_DRAWSTATS *s = &c->display->d7draw;
+    PDD_SURFACE_GLOBAL g = !(flags & D3DNTHALDP2_USERMEMVERTICES) && a->lpDDVertex ? a->lpDDVertex->lpGbl : NULL;
+    ULONG *h;
+    if (s->historyStop && s->historyNext >= s->historyStop) return;
+    h = s->history[s->historyNext++ % 32];
+    h[0] = flags;
+    h[1] = a->dwVertexOffset;
+    h[2] = a->dwVertexLength;
+    h[3] = (flags & D3DNTHALDP2_USERMEMVERTICES) ? 0 : (ULONG)a->lpDDVertex;
+    h[4] = (flags & D3DNTHALDP2_USERMEMVERTICES) ? (ULONG)a->lpVertices : g ? (ULONG)g->fpVidMem : 0;
+    h[5] = g ? g->dwLinearSize : 0;
+    h[6] = (flags & D3DNTHALDP2_REQVERTEXBUFSIZE) ? a->dwReqVertexBufSize : 0;
+    h[7] = c->minStart;
+    h[8] = c->maxEnd;
+    h[9] = a->ddrval;
+    if (!s->historyStop && s->beyondCalls != beyond) s->historyStop = s->historyNext + 16;
+}
+
 static DWORD APIENTRY dp2(LPD3DNTHAL_DRAWPRIMITIVES2DATA a)
 {
     D7_CONTEXT *c;
     BYTE *copy = NULL;
     ULONG stride = a->dwVertexSize; /* Shares its field with the return code. */
+    ULONG origin = 0;
+    ULONG entryFlags = a->dwFlags, beyond = 0;
     a->dwErrorOffset = 0;
     a->ddrval = DDERR_INVALIDOBJECT;
     EngAcquireSemaphore(registry);
@@ -579,56 +1212,109 @@ static DWORD APIENTRY dp2(LPD3DNTHAL_DRAWPRIMITIVES2DATA a)
     if (c) {
         EngAcquireSemaphore(c->display->ddLock);
         ++c->display->d7.commandCalls;
+        ++c->display->d7draw.dp2Calls;
+        c->minStart = 0xffffffff;
+        c->maxEnd = 0;
+        beyond = c->display->d7draw.beyondCalls;
         a->ddrval = DDERR_INVALIDPARAMS;
         if (!a->dwCommandLength) a->ddrval = DD_OK;
         else if (a->dwCommandLength <= MaxCommandBytes) {
             copy = EngAllocMem(0, a->dwCommandLength, '72bR');
             if (!copy) a->ddrval = DDERR_OUTOFMEMORY;
-            else if (copy_commands(a, copy)) {
-                a->ddrval = commands(c, a, stride, copy, a->dwCommandLength, &a->dwErrorOffset);
+            else if (copy_commands(a, copy, &origin)) {
+                ULONG sites = 0, i;
+                for (i = 0; i < 8; ++i) sites += c->display->d7draw.failSites[i];
+                a->ddrval = commands(c, a, stride, copy, a->dwCommandLength, origin, &a->dwErrorOffset);
+                for (i = 0; i < 8; ++i) sites -= c->display->d7draw.failSites[i];
+                if (a->ddrval == DDERR_INVALIDPARAMS && !sites)
+                    ++c->display->d7draw.failSites[a->dwErrorOffset + 4 > a->dwCommandLength ?
+                                                   RB2K_D7_FAIL_LENGTH : RB2K_D7_FAIL_OTHER];
             }
+            else ++c->display->d7draw.failSites[RB2K_D7_FAIL_ADDRESS];
+        } else {
+            ++c->display->d7draw.failSites[RB2K_D7_FAIL_LENGTH];
+            c->display->d7draw.lastRange[9] = a->dwCommandLength;
         }
+        record_history(c, a, entryFlags, beyond);
         /* Runtimes may issue operations outside BeginScene/EndScene.
          * Complete that command buffer before returning to the caller. */
+        if (!c->inScene) ++textureEpoch;
         if ((!c->inScene || FAILED(a->ddrval)) && FAILED(finish_scene(c)) && SUCCEEDED(a->ddrval))
             a->ddrval = DDERR_SURFACELOST;
         if (FAILED(a->ddrval)) {
             c->display->d7.lastError = a->ddrval;
+            ++c->display->d7draw.dp2Failures;
+            c->display->d7draw.lastFailure = a->ddrval;
+            c->display->d7draw.lastFailureOp = c->display->d7.lastCommand;
             c->display->d7.errorOffset = a->dwErrorOffset;
         }
         EngReleaseSemaphore(c->display->ddLock);
     }
     if (copy) EngFreeMem(copy);
+    /* This driver never swaps buffers. A swap flag left set tells the runtime
+     * it was handed a fresh vertex buffer, and its next start vertices then
+     * run past the end of the real one (as the 9x HAL also clears them). */
+    a->dwFlags &= ~(D3DNTHALDP2_SWAPVERTEXBUFFER | D3DNTHALDP2_SWAPCOMMANDBUFFER);
     EngReleaseSemaphore(registry);
     return DDHAL_DRIVER_HANDLED;
 }
 
 /* The runtime reads DDSURFACEDESC records here, including on DirectX 7.
- * The associated texture has a single XRGB level and a host sampler bind. */
-static DDSURFACEDESC textureFormat = {
-    .dwSize = sizeof(DDSURFACEDESC), .dwFlags = DDSD_CAPS | DDSD_PIXELFORMAT,
-    .ddsCaps = { .dwCaps = DDSCAPS_TEXTURE },
-    .ddpfPixelFormat = {
-        .dwSize = sizeof(DDPIXELFORMAT), .dwFlags = DDPF_RGB, .dwRGBBitCount = 32,
-        .dwRBitMask = 0xff0000, .dwGBitMask = 0xff00, .dwBBitMask = 0xff
-    }
+ * Every format is converted to B8G8R8A8 for the host at upload. */
+#define TEXTURE_FORMAT(bits, r, g, b, a) { \
+    .dwSize = sizeof(DDSURFACEDESC), .dwFlags = DDSD_CAPS | DDSD_PIXELFORMAT, \
+    .ddsCaps = { .dwCaps = DDSCAPS_TEXTURE }, \
+    .ddpfPixelFormat = { .dwSize = sizeof(DDPIXELFORMAT), \
+        .dwFlags = DDPF_RGB | ((a) ? DDPF_ALPHAPIXELS : 0), .dwRGBBitCount = (bits), \
+        .dwRBitMask = (r), .dwGBitMask = (g), .dwBBitMask = (b), .dwRGBAlphaBitMask = (a) } }
+static DDSURFACEDESC textureFormats[] = {
+    TEXTURE_FORMAT(32, 0xff0000, 0xff00, 0xff, 0xff000000),
+    TEXTURE_FORMAT(32, 0xff0000, 0xff00, 0xff, 0),
+    TEXTURE_FORMAT(16, 0xf800, 0x07e0, 0x001f, 0),
+    TEXTURE_FORMAT(16, 0x7c00, 0x03e0, 0x001f, 0x8000),
+    TEXTURE_FORMAT(16, 0x0f00, 0x00f0, 0x000f, 0xf000),
+    TEXTURE_FORMAT(16, 0x7c00, 0x03e0, 0x001f, 0)
 };
+#define TRI_CAPS { \
+    .dwSize = sizeof(D3DPRIMCAPS), \
+    .dwMiscCaps = D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW | D3DPMISCCAPS_CULLCCW | D3DPMISCCAPS_MASKZ, \
+    .dwRasterCaps = D3DPRASTERCAPS_SUBPIXEL, \
+    .dwAlphaCmpCaps = D3DPCMPCAPS_NEVER | D3DPCMPCAPS_LESS | D3DPCMPCAPS_EQUAL | D3DPCMPCAPS_LESSEQUAL | \
+                      D3DPCMPCAPS_GREATER | D3DPCMPCAPS_NOTEQUAL | D3DPCMPCAPS_GREATEREQUAL | D3DPCMPCAPS_ALWAYS, \
+    .dwSrcBlendCaps = BLEND_CAPS, .dwDestBlendCaps = BLEND_CAPS, \
+    .dwShadeCaps = D3DPSHADECAPS_COLORFLATRGB | D3DPSHADECAPS_COLORGOURAUDRGB | \
+                   D3DPSHADECAPS_SPECULARFLATRGB | D3DPSHADECAPS_SPECULARGOURAUDRGB | \
+                   D3DPSHADECAPS_ALPHAFLATBLEND | D3DPSHADECAPS_ALPHAGOURAUDBLEND, \
+    .dwTextureCaps = D3DPTEXTURECAPS_PERSPECTIVE | D3DPTEXTURECAPS_ALPHA, \
+    .dwTextureFilterCaps = D3DPTFILTERCAPS_NEAREST | D3DPTFILTERCAPS_LINEAR | \
+                           D3DPTFILTERCAPS_MINFPOINT | D3DPTFILTERCAPS_MINFLINEAR | \
+                           D3DPTFILTERCAPS_MAGFPOINT | D3DPTFILTERCAPS_MAGFLINEAR, \
+    .dwTextureBlendCaps = D3DPTBLENDCAPS_DECAL | D3DPTBLENDCAPS_MODULATE | D3DPTBLENDCAPS_DECALALPHA | \
+                          D3DPTBLENDCAPS_MODULATEALPHA | D3DPTBLENDCAPS_ADD, \
+    .dwTextureAddressCaps = D3DPTADDRESSCAPS_WRAP | D3DPTADDRESSCAPS_MIRROR | D3DPTADDRESSCAPS_CLAMP | \
+                            D3DPTADDRESSCAPS_BORDER | D3DPTADDRESSCAPS_INDEPENDENTUV }
+#define BLEND_CAPS (D3DPBLENDCAPS_ZERO | D3DPBLENDCAPS_ONE | D3DPBLENDCAPS_SRCCOLOR | \
+    D3DPBLENDCAPS_INVSRCCOLOR | D3DPBLENDCAPS_SRCALPHA | D3DPBLENDCAPS_INVSRCALPHA | \
+    D3DPBLENDCAPS_DESTALPHA | D3DPBLENDCAPS_INVDESTALPHA | D3DPBLENDCAPS_DESTCOLOR | \
+    D3DPBLENDCAPS_INVDESTCOLOR | D3DPBLENDCAPS_SRCALPHASAT | D3DPBLENDCAPS_BOTHSRCALPHA | \
+    D3DPBLENDCAPS_BOTHINVSRCALPHA)
 static const D3DNTHAL_GLOBALDRIVERDATA global = {
     .dwSize = sizeof(D3DNTHAL_GLOBALDRIVERDATA),
-    .dwNumTextureFormats = 1, .lpTextureFormats = &textureFormat,
+    .dwNumTextureFormats = sizeof(textureFormats) / sizeof(textureFormats[0]),
+    .lpTextureFormats = textureFormats,
     .hwCaps = {
         .dwSize = sizeof(D3DNTHALDEVICEDESC_V1),
         .dwFlags = D3DDD_COLORMODEL | D3DDD_DEVCAPS | D3DDD_TRICAPS |
                    D3DDD_LINECAPS | D3DDD_DEVICERENDERBITDEPTH,
         .dcmColorModel = D3DCOLOR_RGB,
         .dwDevCaps = D3DDEVCAPS_FLOATTLVERTEX | D3DDEVCAPS_TLVERTEXSYSTEMMEMORY |
+                     D3DDEVCAPS_TEXTURESYSTEMMEMORY | D3DDEVCAPS_TEXTUREVIDEOMEMORY |
                      D3DDEVCAPS_DRAWPRIMTLVERTEX | D3DDEVCAPS_DRAWPRIMITIVES2 |
                      D3DDEVCAPS_DRAWPRIMITIVES2EX | D3DDEVCAPS_HWRASTERIZATION,
         .dtcTransformCaps = { .dwSize = sizeof(D3DTRANSFORMCAPS) },
         .dlcLightingCaps = { .dwSize = sizeof(D3DLIGHTINGCAPS) },
         .dpcLineCaps = { .dwSize = sizeof(D3DPRIMCAPS) },
-        .dpcTriCaps = { .dwSize = sizeof(D3DPRIMCAPS), .dwMiscCaps = D3DPMISCCAPS_CULLNONE,
-                        .dwShadeCaps = D3DPSHADECAPS_COLORGOURAUDRGB },
+        .dpcTriCaps = TRI_CAPS,
         .dwDeviceRenderBitDepth = DDBD_32
     }
 };
@@ -649,6 +1335,7 @@ void rb_d7_caps(DD_HALINFO *info, BOOL depth)
             withDepth = global;
             withDepth.hwCaps.dwFlags |= D3DDD_DEVICEZBUFFERBITDEPTH;
             withDepth.hwCaps.dwDeviceZBufferBitDepth = DDBD_16;
+            withDepth.hwCaps.dpcTriCaps.dwRasterCaps |= D3DPRASTERCAPS_ZTEST;
             withDepth.hwCaps.dpcTriCaps.dwZCmpCaps = D3DPCMPCAPS_NEVER | D3DPCMPCAPS_LESS |
                 D3DPCMPCAPS_EQUAL | D3DPCMPCAPS_LESSEQUAL | D3DPCMPCAPS_GREATER |
                 D3DPCMPCAPS_NOTEQUAL | D3DPCMPCAPS_GREATEREQUAL | D3DPCMPCAPS_ALWAYS;
@@ -685,7 +1372,26 @@ BOOL rb_d7_info(PDD_GETDRIVERINFODATA a)
         .CreateSurfaceEx = register_surface, .GetDriverState = get_driver_state,
         .DestroyDDLocal = destroy_local
     };
-    D3DNTHAL_D3DEXTENDEDCAPS caps = {0};
+    /* The guard band lets the runtime pass screen-edge triangles unclipped;
+     * the host clips them. The floats are written as IEEE bit patterns. */
+    static const D3DNTHAL_D3DEXTENDEDCAPS extendedCaps = {
+        .dwSize = sizeof(D3DNTHAL_D3DEXTENDEDCAPS),
+        .dwMinTextureWidth = 1, .dwMinTextureHeight = 1,
+        .dwMaxTextureWidth = RB2K_D7_TEXTURE_SIDE, .dwMaxTextureHeight = RB2K_D7_TEXTURE_SIDE,
+        .dwMaxTextureRepeat = 2048, .dwMaxTextureAspectRatio = RB2K_D7_TEXTURE_SIDE, .dwMaxAnisotropy = 1,
+        .dvGuardBandLeft = -4096.0f, .dvGuardBandTop = -4096.0f,
+        .dvGuardBandRight = 4095.0f, .dvGuardBandBottom = 4095.0f,
+        .dwFVFCaps = 8,
+        .dwTextureOpCaps = D3DTEXOPCAPS_DISABLE | D3DTEXOPCAPS_SELECTARG1 | D3DTEXOPCAPS_SELECTARG2 |
+            D3DTEXOPCAPS_MODULATE | D3DTEXOPCAPS_MODULATE2X | D3DTEXOPCAPS_MODULATE4X |
+            D3DTEXOPCAPS_ADD | D3DTEXOPCAPS_ADDSIGNED | D3DTEXOPCAPS_ADDSIGNED2X |
+            D3DTEXOPCAPS_SUBTRACT | D3DTEXOPCAPS_ADDSMOOTH | D3DTEXOPCAPS_BLENDDIFFUSEALPHA |
+            D3DTEXOPCAPS_BLENDTEXTUREALPHA | D3DTEXOPCAPS_BLENDFACTORALPHA |
+            D3DTEXOPCAPS_BLENDTEXTUREALPHAPM | D3DTEXOPCAPS_BLENDCURRENTALPHA,
+        .wMaxTextureBlendStages = 1, .wMaxSimultaneousTextures = 1,
+        .dvMaxVertexW = 1.0e10f
+    };
+    D3DNTHAL_D3DEXTENDEDCAPS caps;
     const void *source;
     DISPLAY *d = (DISPLAY *)a->dhpdev;
     ULONG size, i;
@@ -712,15 +1418,9 @@ BOOL rb_d7_info(PDD_GETDRIVERINFODATA a)
         else { source = &depthFormats; size = sizeof(depthFormats); }
     }
     else if (IsEqualGUID(&a->guidInfo, &extended)) {
-        /* DX6 and DX7 request different lengths of this record. The HAL
-         * currently accepts XRGB storage and a single diffuse stage. */
+        /* DX6 and DX7 request different lengths of this record. */
+        caps = extendedCaps;
         caps.dwSize = min(a->dwExpectedSize, sizeof(caps));
-        caps.dwMinTextureWidth = caps.dwMinTextureHeight = 1;
-        caps.dwMaxTextureWidth = RB2K_DD_MAX_WIDTH;
-        caps.dwMaxTextureHeight = RB2K_DD_MAX_HEIGHT;
-        caps.dwMaxTextureAspectRatio = RB2K_DD_MAX_WIDTH;
-        caps.dwTextureOpCaps = D3DTEXOPCAPS_DISABLE | D3DTEXOPCAPS_SELECTARG1;
-        caps.wMaxTextureBlendStages = 1;
         source = &caps;
         size = caps.dwSize;
     }
@@ -766,5 +1466,17 @@ ULONG rb_d7_stats(DISPLAY *d, ULONG bytes, PVOID out)
     EngReleaseSemaphore(d->ddLock);
     EngReleaseSemaphore(registry);
     RtlCopyMemory(out, &s, bytes);
+    return 1;
+}
+
+ULONG rb_d7_drawstats(DISPLAY *d, ULONG bytes, PVOID out)
+{
+    if (!registry || !d->ddLock || bytes != sizeof(RB2K_D7_DRAWSTATS)) return 0;
+    EngAcquireSemaphore(registry);
+    EngAcquireSemaphore(d->ddLock);
+    d->d7draw.version = RB2K_D7_DRAWSTATS_VERSION;
+    RtlCopyMemory(out, &d->d7draw, bytes);
+    EngReleaseSemaphore(d->ddLock);
+    EngReleaseSemaphore(registry);
     return 1;
 }

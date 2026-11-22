@@ -7,15 +7,37 @@
 #include "rb2kcursor.h"
 #include "rb2kd3d7.h"
 
+/* Host state objects one colour context has created for Direct3D draws.
+ * Each table maps a validated key to a fixed object handle range. */
+enum { RB2K_D7_DSA_KEYS = 16, RB2K_D7_BLEND_KEYS = 8, RB2K_D7_SAMPLER_KEYS = 8,
+       RB2K_D7_SHADER_KEYS = 16 };
+typedef struct {
+    ULONG keys[RB2K_D7_SHADER_KEYS > RB2K_D7_DSA_KEYS ? RB2K_D7_SHADER_KEYS : RB2K_D7_DSA_KEYS][3];
+    ULONG used, next, bound;
+} RB2K_D7_CACHE;
+typedef struct {
+    BOOLEAN pipeline;
+    ULONG rasters, boundRaster, viewTexture;
+    RB2K_D7_CACHE dsa, blend, sampler, shader;
+} RB2K_D7_STATE;
+
 typedef struct RB2K_IMAGE {
     ULONG id, width, height;
     BOOLEAN defined, hasSurface, uniform;
     ULONG color;
-    BOOLEAN sampled, triangleState, frameFailed;
+    BOOLEAN frameFailed;
     BOOLEAN depth16;
     struct RB2K_IMAGE *depthBuffer, *depthOwner;
-    ULONG depthStates, boundDepthState;
+    RB2K_D7_STATE d7;
 } RB2K_IMAGE;
+
+/* A Direct3D texture is a host resource without a context of its own. It
+ * is attached to each colour context that samples it. */
+typedef struct {
+    ULONG id, width, height;
+    ULONG contexts[RB2K_DD_SLOTS];
+} RB2K_TEXTURE;
+#define RB2K_D7_TEXEL_BUDGET (64UL << 20)
 typedef struct {
     RB2K_IMAGE image;
     RB2K_RECT gpuPixels, gdiWrites[3];
@@ -101,6 +123,8 @@ typedef struct {
      * batch off the NT kernel stack. */
     union { ULONGLONG aligned; UCHAR bytes[RB2K_INLINE_PACKET_BYTES]; } copyPacket;
     RB2K_IMAGE images[RB2K_DD_SLOTS];
+    RB2K_TEXTURE textures[RB2K_D7_TEXTURES];
+    ULONG textureCount, textureBytes;
     RB2K_DMA_SEGMENT staging[RB2K_MAX_SEGMENTS];
     RB2K_DMA_SEGMENT rvdStaging[RB2K_RVD_SEGMENTS];
     ULONG rvdContexts;
@@ -134,8 +158,18 @@ ULONG rb_gpu_channel(ULONG channel);
 BOOLEAN rb_gpu_frame_words(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image,
                            const ULONG *words, ULONG count);
 BOOLEAN rb_gpu_frame_flush(RB2K_GPU *gpu, RB2K_GPU_RESULT *result);
-BOOLEAN rb_gpu_triangles(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image,
-                         const RB2K_D3D7_VERTEX *vertices, ULONG count, ULONG depthState);
+BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image,
+                       const RB2K_D3D7_DRAW *draw, const RB2K_TEXTURE *texture);
+BOOLEAN rb_gpu_d7_valid(const RB2K_D3D7_DRAW *draw);
+BOOLEAN rb_gpu_d7_samples(const RB2K_D3D7_DRAW *draw);
+RB2K_TEXTURE *rb_gpu_texture(RB2K_GPU *gpu, ULONG id);
+BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture);
+BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture,
+                              const RB2K_IMAGE *image);
+BOOLEAN rb_gpu_texture_upload(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K_TEXTURE *texture,
+                              const RB2K_IMAGE *image, ULONG y, ULONG rows, PVOID texels);
+BOOLEAN rb_gpu_texture_free(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture);
+void rb_gpu_texture_forget(RB2K_GPU *gpu);
 BOOLEAN rb_gpu_prepare_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image);
 BOOLEAN rb_gpu_depth_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *color, RB2K_IMAGE *depth);
 BOOLEAN rb_gpu_clear_buffers(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image,

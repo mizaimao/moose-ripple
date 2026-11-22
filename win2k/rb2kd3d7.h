@@ -23,6 +23,44 @@ typedef struct {
     LONGLONG frequency, throttleTicks, accessTicks;
     ULONG limit, peak, pending, queued, completed, throttleWaits, accessWaits, failed;
 } RB2K_D7_FLIGHT;
+/* Read-only counts of what the native path drew or set aside, in triangles
+ * unless named otherwise. A skipped draw is consumed and leaves the target
+ * unchanged; the reason is the first unsupported feature found. */
+#define RB2K_D3D7_DRAW_ESCAPE 0x52420023
+enum { RB2K_D7_SKIP_FILL, RB2K_D7_SKIP_STENCIL, RB2K_D7_SKIP_STAGE1, RB2K_D7_SKIP_VERTEX,
+       RB2K_D7_SKIP_TEXTURE, RB2K_D7_SKIP_COMBINER, RB2K_D7_SKIP_PRIMITIVE, RB2K_D7_SKIP_CLEAR,
+       RB2K_D7_SKIPS };
+enum { RB2K_D7_IGNORED_FOG, RB2K_D7_IGNORED_COLORKEY, RB2K_D7_IGNORED_CLIPPLANE,
+       RB2K_D7_IGNORED_MIPMAP, RB2K_D7_IGNORED };
+#define RB2K_D7_OPCODES 48
+typedef struct {
+    ULONG version, drawn, drawCalls, skippedCalls;
+    ULONG skipped[RB2K_D7_SKIPS], ignored[RB2K_D7_IGNORED];
+    ULONG textures, uploads, uploadBytes, checks, uploadFailures, checkFailures;
+    ULONG opcodes[RB2K_D7_OPCODES];
+    ULONG registered[8];        /* texture registrations by decoded format, zero unsupported */
+    ULONG videoTextures, texBlts, texBltFailures, drawFailures;
+    ULONG dp2Calls, dp2Failures, lastFailure, lastFailureOp;
+    /* Diagnostics: why vertex data was refused, the last refused range,
+     * the last host draw error and the distinct drawn state combinations. */
+    ULONG badPositions, failSites[8];
+    ULONG lastRange[10];        /* op, first, low, high, available, offset, linear, flags, stride, count */
+    ULONG lastDrawError, lastDrawState[8];
+    ULONG stateOverflow, beyondCalls, beyondVertices;   /* draws past the vertex window, triangles skipped */
+    /* The last 32 command buffers: flags, vertex offset, length,
+     * kernel surface, its address and size, requested size, lowest start,
+     * highest start plus index, result. Recording stops 16 buffers after the
+     * first draw that indexes past the stated window. */
+    ULONG historyStop, historyNext;
+    ULONG history[32][10];
+    struct {
+        ULONG colorStage, alphaStage, blend, alphaTest, depthState, cull, shade, fvf, texFormat;
+        ULONG calls, primitives;
+    } states[24];
+} RB2K_D7_DRAWSTATS;
+enum { RB2K_D7_FAIL_RANGE, RB2K_D7_FAIL_VBCAPS, RB2K_D7_FAIL_LINEAR, RB2K_D7_FAIL_ADDRESS,
+       RB2K_D7_FAIL_PROBE, RB2K_D7_FAIL_IMMEDIATE, RB2K_D7_FAIL_LENGTH, RB2K_D7_FAIL_OTHER };
+#define RB2K_D7_DRAWSTATS_VERSION 1
 #define RB2K_D3D7_QUERY_LIMIT 24
 typedef struct {
     RB2K_D3D7_STATS totals;

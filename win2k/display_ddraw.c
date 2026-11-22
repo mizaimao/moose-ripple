@@ -63,6 +63,16 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
                    fmt->dwZBufferBitDepth == 16 && fmt->dwZBitMask == 0xffff;
         return (desc->dwFlags & DDSD_ZBUFFERBITDEPTH) && desc->dwZBufferBitDepth == 16;
     }
+    if ((caps & DDSCAPS_TEXTURE) && !(caps & DDSCAPS_3DDEVICE)) {
+        /* A Direct3D texture in runtime-allocated user memory; the native
+         * path reads and uploads it at draw time (display_d3d7.c). */
+        DDPIXELFORMAT desktop = {0};
+        if (!d->nativeD3D7 || (caps & ~(DDSCAPS_TEXTURE | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM)) ||
+            !desc->dwWidth || desc->dwWidth > RB2K_D7_TEXTURE_SIDE ||
+            !desc->dwHeight || desc->dwHeight > RB2K_D7_TEXTURE_SIDE) return FALSE;
+        return rb_d7_texture_format((desc->dwFlags & DDSD_PIXELFORMAT) ? fmt : &desktop,
+                                    d->mode.BitsPerPlane) != TexNone;
+    }
     if (primary_caps(d, caps) || flip_caps(caps)) {
         if (flip_caps(caps) && (!d->pageBytes ||
             ((desc->dwFlags & DDSD_BACKBUFFERCOUNT) && desc->dwBackBufferCount > 1))) return FALSE;
@@ -70,10 +80,10 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
             ((desc->dwFlags & DDSD_WIDTH) && desc->dwWidth != d->mode.VisScreenWidth) ||
             ((desc->dwFlags & DDSD_HEIGHT) && desc->dwHeight != d->mode.VisScreenHeight))
             return FALSE;
-    } else if (!d->gpuSurfaces || (storage != DDSCAPS_OFFSCREENPLAIN &&
-               (storage != DDSCAPS_TEXTURE || !d->nativeD3D7)) ||
+    } else if (!d->gpuSurfaces || storage != DDSCAPS_OFFSCREENPLAIN ||
+               /* Textures returned above; render-to-texture is not offered. */
                (caps & ~(DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM |
-                         DDSCAPS_3DDEVICE | DDSCAPS_TEXTURE)) ||
+                         DDSCAPS_3DDEVICE)) ||
                !desc->dwWidth || desc->dwWidth > RB2K_DD_MAX_WIDTH ||
                !desc->dwHeight || desc->dwHeight > RB2K_DD_MAX_HEIGHT) return FALSE;
     if (!(desc->dwFlags & DDSD_PIXELFORMAT)) return TRUE;
@@ -149,6 +159,21 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
         return rc;
     }
     g = data->lplpSList[0]->lpGbl;
+    if (desc->ddsCaps.dwCaps & DDSCAPS_TEXTURE) {
+        DDPIXELFORMAT desktop = {0};
+        ULONG format = rb_d7_texture_format((desc->dwFlags & DDSD_PIXELFORMAT) ? &desc->ddpfPixelFormat :
+                                            &desktop, d->mode.BitsPerPlane);
+        if (g->wWidth != desc->dwWidth || g->wHeight != desc->dwHeight) {
+            data->ddRVal = DDERR_INVALIDPARAMS;
+            return rc;
+        }
+        g->lPitch = desc->lPitch = (g->wWidth * rb_d7_texel_bytes(format) + 3) & ~3;
+        g->dwUserMemSize = g->lPitch * g->wHeight;
+        g->fpVidMem = DDHAL_PLEASEALLOC_USERMEM;
+        desc->dwFlags |= DDSD_PITCH;
+        data->ddRVal = DD_OK;
+        return DDHAL_DRIVER_NOTHANDLED;
+    }
     if (data->lplpSList[0]->ddsCaps.dwCaps & DDSCAPS_BACKBUFFER) {
         EngAcquireSemaphore(d->ddLock);
         if (!d->ddEnabled || !d->pageBytes || !flip_caps(data->lplpSList[0]->ddsCaps.dwCaps) ||
@@ -206,7 +231,6 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
     create.width = desc->dwWidth;
     create.height = desc->dwHeight;
     if (desc->ddsCaps.dwCaps & DDSCAPS_ZBUFFER) createCode = IOCTL_RB2K_DD_CREATE_Z16;
-    else if (desc->ddsCaps.dwCaps & DDSCAPS_TEXTURE) createCode = IOCTL_RB2K_DD_CREATE_TEXTURE;
     EngAcquireSemaphore(d->ddLock);
     slot = rb_dd_slot(d, NULL);
     if (!d->ddEnabled || rb_dd_slot(d, g))
@@ -243,6 +267,8 @@ static DWORD APIENTRY destroy_surface(PDD_DESTROYSURFACEDATA data)
 {
     DISPLAY *d = (DISPLAY *)data->lpDD->dhpdev;
     DD_SLOT *slot;
+    if (data->lpDDSurface->ddsCaps.dwCaps & DDSCAPS_TEXTURE)
+        rb_d7_surface_destroyed(d, data->lpDDSurface->lpGbl);
     EngAcquireSemaphore(d->ddLock);
     slot = rb_dd_slot(d, data->lpDDSurface->lpGbl);
     if (slot) release_slot(d, slot);

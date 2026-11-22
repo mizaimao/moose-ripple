@@ -553,6 +553,7 @@ VP_STATUS rb_gpu_stop(RB2K_GPU *gpu)
      * The pinned buffers survive an unacknowledged reset until a retry. */
     VideoPortZeroMemory(gpu->images, sizeof(gpu->images));
     gpu->imageCount = 0;
+    rb_gpu_texture_forget(gpu);
     VideoPortZeroMemory(&gpu->d7Frame, sizeof(gpu->d7Frame));
     VideoPortZeroMemory(gpu->d7Submitted, sizeof(gpu->d7Submitted));
     gpu->d7Flight.pending = 0;

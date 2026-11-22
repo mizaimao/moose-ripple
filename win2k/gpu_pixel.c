@@ -118,7 +118,6 @@ BOOLEAN rb_gpu_create_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     request.resource.format = image->depth16 ? VIRGL_FORMAT_Z16_UNORM : VIRGL_FORMAT_B8G8R8A8_UNORM;
     request.resource.bind = image->depth16 ? VIRGL_BIND_DEPTH_STENCIL : VIRGL_BIND_RENDER_TARGET;
     if (scanout) request.resource.bind |= VIRGL_BIND_SCANOUT;
-    if (image->sampled) request.resource.bind |= VIRGL_BIND_SAMPLER_VIEW;
     request.resource.width = image->width;
     request.resource.height = image->height;
     request.resource.depth = request.resource.array_size = 1;
@@ -421,7 +420,7 @@ static void copy_rows(RB2K_GPU *gpu, PUCHAR pixels, ULONG pitch, ULONG rowBytes,
     }
 }
 
-static BOOLEAN transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resource,
+static BOOLEAN transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG context, ULONG resource,
                             ULONG x, ULONG y, ULONG width, ULONG height, PVOID upload, ULONG pitch,
                             ULONG rowBytes)
 {
@@ -452,7 +451,7 @@ static BOOLEAN transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resour
         copy_rows(gpu, upload, pitch, rowBytes, height, FALSE);
     if (!send_request(gpu, result, &backing, used, RB2K_STAGE_BACKING)) return FALSE;
     begin_request(&request, upload ? VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D :
-        VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, resource);
+        VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, context);
     request.transfer.resource_id = resource;
     request.transfer.box.x = x;
     request.transfer.box.y = y;
@@ -470,7 +469,7 @@ BOOLEAN rb_gpu_transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resour
                             ULONG x, ULONG y, ULONG width, ULONG height, PVOID upload)
 {
     ULONG rowBytes = width * sizeof(ULONG);
-    return transfer_box(gpu, result, resource, x, y, width, height, upload, rowBytes, rowBytes);
+    return transfer_box(gpu, result, resource, resource, x, y, width, height, upload, rowBytes, rowBytes);
 }
 
 BOOLEAN rb_gl_record_time(RB2K_GPU *gpu, ULONG operation, LONGLONG start, BOOLEAN ok)
@@ -587,7 +586,7 @@ BOOLEAN rb_gpu_primary_transfer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     }
     first = gpu->primary.pixels + rect->top * gpu->primary.pitchPixels + rect->left;
     start = rb_counter_ticks(NULL);
-    if (!transfer_box(gpu, result, gpu->glDesktop.image.id, rect->left, rect->top,
+    if (!transfer_box(gpu, result, gpu->glDesktop.image.id, gpu->glDesktop.image.id, rect->left, rect->top,
                       width, height, readback ? NULL : first, pitch, width * sizeof(ULONG)))
         return rb_gl_record_time(gpu, operation, start, FALSE);
     if (readback) copy_rows(gpu, (PUCHAR)first, pitch, width * sizeof(ULONG), height, TRUE);
@@ -631,18 +630,7 @@ BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     ULONG rowBytes = image->width * (image->depth16 ? sizeof(USHORT) : sizeof(ULONG));
     ULONG bytes = rowBytes * image->height;
     ULONG offset;
-    if (image->sampled && !readback && image->width <= 64 && image->height <= 64) {
-        ULONG count;
-        result->stage = RB2K_STAGE_BACKING;
-        result->status = rb_gpu_reserve_staging(gpu, bytes + VIRGL_RESOURCE_IW_DATA_START*sizeof(ULONG));
-        if (result->status) return FALSE;
-        count = inline_write((PULONG)gpu->staging[0].data, image->id, 0, 0, image->width,
-                             image->height, pixels, image->width);
-        result->stage = RB2K_STAGE_TRANSFER;
-        result->status = submit_inline(gpu, image->id, count);
-        return result->status == NO_ERROR;
-    }
-    if (!transfer_box(gpu, result, image->id, 0, 0, image->width, image->height,
+    if (!transfer_box(gpu, result, image->id, image->id, 0, 0, image->width, image->height,
                       readback ? NULL : pixels, rowBytes, rowBytes)) return FALSE;
     if (readback) {
         for (offset = 0; offset < bytes; offset += RB2K_SEGMENT_BYTES) {
@@ -741,4 +729,92 @@ void rb_gpu_pixel(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
         return;
     }
     result->stage = RB2K_STAGE_DONE;
+}
+
+/* ---- Direct3D textures: host resources without a context of their own ---- */
+
+RB2K_TEXTURE *rb_gpu_texture(RB2K_GPU *gpu, ULONG id)
+{
+    ULONG i;
+    for (i = 0; id && i < RB2K_D7_TEXTURES; ++i)
+        if (gpu->textures[i].id == id) return &gpu->textures[i];
+    return NULL;
+}
+
+BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture)
+{
+    PIXEL_REQUEST request;
+    begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D, 0);
+    request.resource.resource_id = texture->id;
+    request.resource.target = PipeTexture2D;
+    request.resource.format = VIRGL_FORMAT_B8G8R8A8_UNORM;
+    request.resource.bind = VIRGL_BIND_SAMPLER_VIEW;
+    request.resource.width = texture->width;
+    request.resource.height = texture->height;
+    request.resource.depth = request.resource.array_size = 1;
+    return send_request(gpu, result, &request, sizeof(request.resource), RB2K_STAGE_RESOURCE);
+}
+
+/* A texture is attached to each colour context that samples it. Context ids
+ * are never reused, so an entry for a destroyed target is only stale. */
+BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture,
+                              const RB2K_IMAGE *image)
+{
+    ULONG i, free = RB2K_DD_SLOTS;
+    for (i = 0; i < RB2K_DD_SLOTS; ++i) {
+        ULONG j;
+        if (texture->contexts[i] == image->id) return TRUE;
+        for (j = 0; j < RB2K_DD_SLOTS && gpu->images[j].id != texture->contexts[i]; ++j) {}
+        if (free == RB2K_DD_SLOTS && (!texture->contexts[i] || j == RB2K_DD_SLOTS)) free = i;
+    }
+    if (free == RB2K_DD_SLOTS) {
+        result->status = ERROR_NOT_ENOUGH_MEMORY;
+        result->stage = RB2K_STAGE_ATTACH;
+        return FALSE;
+    }
+    if (!context_resource(gpu, result, image->id, texture->id, TRUE, RB2K_STAGE_ATTACH)) return FALSE;
+    texture->contexts[free] = image->id;
+    return TRUE;
+}
+
+/* Earlier draws in the open frame must reach the host before new texels. */
+BOOLEAN rb_gpu_texture_upload(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K_TEXTURE *texture,
+                              const RB2K_IMAGE *image, ULONG y, ULONG rows, PVOID texels)
+{
+    ULONG rowBytes = texture->width * sizeof(ULONG), bytes = rowBytes * rows;
+    if (gpu->d7Frame.target && gpu->d7Frame.count && !submit_frame(gpu, result, FALSE)) return FALSE;
+    if (bytes <= 16384) {
+        ULONG count;
+        result->stage = RB2K_STAGE_BACKING;
+        result->status = rb_gpu_reserve_staging(gpu, bytes + VIRGL_RESOURCE_IW_DATA_START*sizeof(ULONG));
+        if (result->status) return FALSE;
+        count = inline_write((PULONG)gpu->staging[0].data, texture->id, 0, y, texture->width,
+                             rows, texels, texture->width);
+        result->stage = RB2K_STAGE_TRANSFER;
+        result->status = submit_inline(gpu, image->id, count);
+        return result->status == NO_ERROR;
+    }
+    return transfer_box(gpu, result, image->id, texture->id, 0, y, texture->width, rows,
+                        texels, rowBytes, rowBytes);
+}
+
+BOOLEAN rb_gpu_texture_free(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture)
+{
+    PIXEL_REQUEST request;
+    /* Unreferencing detaches the resource from every context. A bound view
+     * keeps the host storage alive until that context replaces it. */
+    begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_UNREF, 0);
+    request.unref.resource_id = texture->id;
+    if (!send_request(gpu, result, &request, sizeof(request.unref), RB2K_STAGE_CLEANUP)) return FALSE;
+    gpu->textureBytes -= texture->width * texture->height * sizeof(ULONG);
+    --gpu->textureCount;
+    VideoPortZeroMemory(texture, sizeof(*texture));
+    return TRUE;
+}
+
+/* The transport is going away or every context was destroyed. */
+void rb_gpu_texture_forget(RB2K_GPU *gpu)
+{
+    VideoPortZeroMemory(gpu->textures, sizeof(gpu->textures));
+    gpu->textureCount = gpu->textureBytes = 0;
 }

@@ -51,12 +51,10 @@ static VP_STATUS create(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     RB2K_IMAGE *image;
     VP_STATUS status;
     ULONG slot;
-    BOOLEAN texture = packet->IoControlCode == IOCTL_RB2K_DD_CREATE_TEXTURE;
     BOOLEAN depth16 = packet->IoControlCode == IOCTL_RB2K_DD_CREATE_Z16;
     if (packet->InputBufferLength != sizeof(*size) || packet->OutputBufferLength < sizeof(ULONG))
         return ERROR_INVALID_PARAMETER;
-    if (gpu->primary.bitsPerPixel != 32 ||
-        ((texture || depth16) && (!gpu->nativeD3D7 || !gpu->ddGpuSurfaces)))
+    if (gpu->primary.bitsPerPixel != 32 || (depth16 && (!gpu->nativeD3D7 || !gpu->ddGpuSurfaces)))
         return ERROR_NOT_SUPPORTED;
     if (!size->width || size->width > RB2K_DD_MAX_WIDTH ||
         !size->height || size->height > RB2K_DD_MAX_HEIGHT)
@@ -76,7 +74,6 @@ static VP_STATUS create(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     image->id = ++gpu->nextId;
     image->width = size->width;
     image->height = size->height;
-    image->sampled = texture;
     image->depth16 = depth16;
     if (!rb_gpu_create_image(gpu, &result, image, name, sizeof(name) - 1, FALSE)) {
         VideoPortZeroMemory(image, sizeof(*image));
@@ -181,46 +178,48 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     }
     /* A DirectDraw lock, blit, present or release can observe this image
      * before EndScene. Preserve the ordering of both sides of a blit. */
-    if (packet->IoControlCode != IOCTL_RB2K_D3D7_CLEAR && packet->IoControlCode != IOCTL_RB2K_D3D7_TRIANGLES &&
-        packet->IoControlCode != IOCTL_RB2K_D3D7_ZCLEAR && packet->IoControlCode != IOCTL_RB2K_D3D7_ZTRIANGLES) {
+    if (packet->IoControlCode != IOCTL_RB2K_D3D7_CLEAR && packet->IoControlCode != IOCTL_RB2K_D3D7_DRAW &&
+        packet->IoControlCode != IOCTL_RB2K_D3D7_ZCLEAR) {
         if (!rb_gpu_sync_image(gpu, &result, image)) return command_error(gpu, &result);
     }
     if ((image->frameFailed || (image->depthOwner && image->depthOwner->frameFailed)) &&
         packet->IoControlCode != IOCTL_RB2K_DD_DESTROY) return ERROR_INVALID_DATA;
     bytes = image->width * image->height * (image->depth16 ? sizeof(USHORT) : sizeof(ULONG));
     switch (packet->IoControlCode) {
-    case IOCTL_RB2K_D3D7_TRIANGLES:
-    case IOCTL_RB2K_D3D7_ZTRIANGLES: {
-        const RB2K_D3D7_BATCH *b = packet->InputBuffer;
-        const RB2K_D3D7_ZBATCH *z = packet->InputBuffer;
-        const RB2K_D3D7_VERTEX *vertices;
+    case IOCTL_RB2K_D3D7_DRAW: {
+        const RB2K_D3D7_DRAW *d = packet->InputBuffer;
         RB2K_IMAGE *depth = NULL;
-        ULONG i, state = 0;
-        BOOLEAN withDepth = packet->IoControlCode == IOCTL_RB2K_D3D7_ZTRIANGLES;
-        ULONG header = withDepth ? FIELD_OFFSET(RB2K_D3D7_ZBATCH,vertices) : FIELD_OFFSET(RB2K_D3D7_BATCH,vertices);
+        RB2K_TEXTURE *texture = NULL;
+        ULONG i, header = FIELD_OFFSET(RB2K_D3D7_DRAW, vertices);
         if (!gpu->nativeD3D7 || !gpu->ddGpuSurfaces || gpu->primary.bitsPerPixel != 32)
             return ERROR_NOT_SUPPORTED;
         if (packet->OutputBufferLength || packet->InputBufferLength < header ||
-            !b->count || b->count > RB2K_D3D7_VERTICES || b->count % 3 ||
-            packet->InputBufferLength != header+b->count*sizeof(*vertices))
+            !d->count || d->count > RB2K_D3D7_VERTICES || d->count % 3 ||
+            packet->InputBufferLength != header + d->count*sizeof(d->vertices[0]) ||
+            !rb_gpu_d7_valid(d) || image->depth16 || (d->depthState && !d->depth))
             return ERROR_INVALID_PARAMETER;
-        vertices = withDepth ? z->vertices : b->vertices;
-        if (withDepth) {
-            state = z->state;
-            if (state && (!(state & RB2K_Z_ENABLE) || state > (RB2K_Z_ENABLE | RB2K_Z_WRITE | 7)))
-                return ERROR_INVALID_PARAMETER;
-            depth = find_image(gpu, z->depth);
+        if (d->depth) {
+            depth = find_image(gpu, d->depth);
             if (!depth || !depth->depth16) return ERROR_INVALID_HANDLE;
         }
-        for (i = 0; i < b->count; ++i) {
-            const RB2K_D3D7_VERTEX *v = vertices+i;
+        if (rb_gpu_d7_samples(d)) {
+            ULONG j;
+            texture = rb_gpu_texture(gpu, d->texture);
+            if (!texture) return ERROR_INVALID_HANDLE;
+            /* The display DLL attaches a texture when it uploads it here. */
+            for (j = 0; j < RB2K_DD_SLOTS && texture->contexts[j] != image->id; ++j) {}
+            if (j == RB2K_DD_SLOTS) return ERROR_INVALID_HANDLE;
+        }
+        for (i = 0; i < d->count; ++i) {
+            const RB2K_D3D7_VERTEX *v = d->vertices+i;
             if ((v->x & 0x7fffffff) >= 0x7f800000 || (v->y & 0x7fffffff) >= 0x7f800000 ||
-                (v->z & 0x7fffffff) >= 0x7f800000 || !v->rhw || v->rhw >= 0x7f800000)
+                (v->z & 0x7fffffff) >= 0x7f800000 || !(v->rhw & 0x7fffffff) ||
+                (v->rhw & 0x7fffffff) >= 0x7f800000)
                 return ERROR_INVALID_PARAMETER;
         }
         if (depth && !rb_gpu_depth_target(gpu, &result, image, depth)) return command_error(gpu, &result);
-        success = rb_gpu_triangles(gpu, &result, image, vertices, b->count, state);
-        if (success) gpu->d7Frame.pending.triangles += b->count/3;
+        success = rb_gpu_d7_draw(gpu, &result, image, d, texture);
+        if (success) gpu->d7Frame.pending.triangles += d->count/3;
         break;
     }
     case IOCTL_RB2K_DD_UNIFORM: {
@@ -351,6 +350,66 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     return command_error(gpu, &result);
 }
 
+/* Create a Direct3D texture or replace rows of one, attached to the target
+ * that will sample it. Texture ids share the image counter. */
+static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
+{
+    RB2K_GPU_RESULT result;
+    RB2K_TEXTURE *t;
+    const RB2K_D3D7_TEXTURE *in = packet->InputBuffer;
+    RB2K_IMAGE *image;
+    ULONG bytes;
+    if (!gpu->nativeD3D7 || !gpu->ddGpuSurfaces) return ERROR_NOT_SUPPORTED;
+    if (packet->IoControlCode == IOCTL_RB2K_D3D7_TEXTURE_FREE) {
+        if (packet->InputBufferLength != sizeof(ULONG) || packet->OutputBufferLength)
+            return ERROR_INVALID_PARAMETER;
+        t = rb_gpu_texture(gpu, *(PULONG)packet->InputBuffer);
+        /* A transport reset has already released it. */
+        if (!t) return NO_ERROR;
+        return rb_gpu_texture_free(gpu, &result, t) ? NO_ERROR : command_error(gpu, &result);
+    }
+    if (packet->InputBufferLength < sizeof(*in) || packet->OutputBufferLength < sizeof(ULONG))
+        return ERROR_INVALID_PARAMETER;
+    if (!in->width || in->width > RB2K_D7_TEXTURE_SIDE || !in->height || in->height > RB2K_D7_TEXTURE_SIDE ||
+        !in->rows || in->y >= in->height || in->rows > in->height - in->y)
+        return ERROR_INVALID_PARAMETER;
+    bytes = in->width * in->rows * sizeof(ULONG);
+    if (bytes > RB2K_D7_UPLOAD_BYTES || packet->InputBufferLength != sizeof(*in) + bytes)
+        return ERROR_INVALID_PARAMETER;
+    image = find_image(gpu, in->target);
+    if (!image || image->depth16) return ERROR_INVALID_HANDLE;
+    if (image->frameFailed) return ERROR_INVALID_DATA;
+    if (in->id) {
+        t = rb_gpu_texture(gpu, in->id);
+        if (!t) return ERROR_INVALID_HANDLE;
+        if (t->width != in->width || t->height != in->height) return ERROR_INVALID_PARAMETER;
+    } else {
+        ULONG i, size = in->width * in->height * sizeof(ULONG);
+        if (in->y) return ERROR_INVALID_PARAMETER;
+        if (gpu->nextId == 0xffffffffUL) return ERROR_NO_MORE_ITEMS;
+        for (i = 0; i < RB2K_D7_TEXTURES && gpu->textures[i].id; ++i) {}
+        if (i == RB2K_D7_TEXTURES || size > RB2K_D7_TEXEL_BUDGET - gpu->textureBytes)
+            return ERROR_NOT_ENOUGH_MEMORY;
+        t = &gpu->textures[i];
+        t->id = ++gpu->nextId;
+        t->width = in->width;
+        t->height = in->height;
+        if (!rb_gpu_texture_create(gpu, &result, t)) {
+            VideoPortZeroMemory(t, sizeof(*t));
+            return command_error(gpu, &result);
+        }
+        ++gpu->textureCount;
+        gpu->textureBytes += size;
+    }
+    if (!rb_gpu_texture_attach(gpu, &result, t, image) ||
+        !rb_gpu_texture_upload(gpu, &result, t, image, in->y, in->rows, (PVOID)(in + 1)))
+        return command_error(gpu, &result);
+    ++gpu->uploads;
+    *(PULONG)packet->OutputBuffer = t->id;
+    packet->StatusBlock->Information = sizeof(ULONG);
+    return NO_ERROR;
+}
+
 VP_STATUS rb_gpu_surface_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 {
     VP_STATUS status;
@@ -389,7 +448,6 @@ VP_STATUS rb_gpu_surface_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     }
     else if (packet->IoControlCode == IOCTL_RB2K_DD_QUERY) status = query(gpu, packet);
     else if (packet->IoControlCode == IOCTL_RB2K_DD_CREATE ||
-             packet->IoControlCode == IOCTL_RB2K_DD_CREATE_TEXTURE ||
              packet->IoControlCode == IOCTL_RB2K_DD_CREATE_Z16) status = create(gpu, packet);
     else {
         ULONG op = RB2K_D7_OPS;
@@ -398,16 +456,18 @@ VP_STATUS rb_gpu_surface_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         case IOCTL_RB2K_D3D7_FLUSH: op = RB2K_D7_FLUSH; break;
         case IOCTL_RB2K_D3D7_CLEAR:
         case IOCTL_RB2K_D3D7_ZCLEAR: op = RB2K_D7_CLEAR; break;
-        case IOCTL_RB2K_D3D7_TRIANGLES:
-        case IOCTL_RB2K_D3D7_ZTRIANGLES: op = RB2K_D7_DRAW; break;
+        case IOCTL_RB2K_D3D7_DRAW: op = RB2K_D7_DRAW; break;
         case IOCTL_RB2K_DD_READ: op = RB2K_D7_READ; break;
-        case IOCTL_RB2K_DD_WRITE: op = RB2K_D7_UPLOAD; break;
+        case IOCTL_RB2K_DD_WRITE:
+        case IOCTL_RB2K_D3D7_TEXTURE: op = RB2K_D7_UPLOAD; break;
         }
         if (gpu->nativeD3D7 && op < RB2K_D7_OPS) {
             gpu->d7Measure = &gpu->d7Profile.op[op];
             start = rb_counter_ticks(NULL);
         }
-        status = image_request(gpu, packet);
+        if (packet->IoControlCode == IOCTL_RB2K_D3D7_TEXTURE ||
+            packet->IoControlCode == IOCTL_RB2K_D3D7_TEXTURE_FREE) status = texture_request(gpu, packet);
+        else status = image_request(gpu, packet);
         if (gpu->d7Measure) {
             gpu->d7Measure->ticks += rb_counter_ticks(NULL)-start;
             ++gpu->d7Measure->calls;
@@ -448,6 +508,9 @@ VP_STATUS rb_gpu_surface_reset(RB2K_GPU *gpu)
             VideoPortZeroMemory(&gpu->images[slot], sizeof(gpu->images[slot]));
         }
         gpu->imageCount = 0;
+        for (slot = 0; slot < RB2K_D7_TEXTURES; ++slot)
+            if (gpu->ready && gpu->textures[slot].id) rb_gpu_texture_free(gpu, &result, &gpu->textures[slot]);
+        rb_gpu_texture_forget(gpu);
         /* Only a transport timeout leaves a reset to do. */
         status = gpu->ready ? NO_ERROR : rb_gpu_stop(gpu);
     } else {

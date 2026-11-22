@@ -295,7 +295,8 @@ ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
                    *(ULONG *)in == RB2K_GL_STATS_ESCAPE || *(ULONG *)in == RB2K_GL_TIMING_ESCAPE ||
                    *(ULONG *)in == RB2K_GL_PROFILE_ESCAPE || *(ULONG *)in == RB2K_GL_RECT_PRESENT_ESCAPE ||
                    *(ULONG *)in == RB2K_GL_INLINE_PRESENT_ESCAPE || *(ULONG *)in == RB2K_D3D7_STATS_ESCAPE ||
-                   *(ULONG *)in == RB2K_D3D7_PROFILE_ESCAPE || *(ULONG *)in == RB2K_D3D7_FLIGHT_ESCAPE);
+                   *(ULONG *)in == RB2K_D3D7_PROFILE_ESCAPE || *(ULONG *)in == RB2K_D3D7_FLIGHT_ESCAPE ||
+                   *(ULONG *)in == RB2K_D3D7_DRAW_ESCAPE);
     /* opengl32.dll passes a small input buffer of its own with this one. */
     if (code == OPENGL_GETINFO) return opengl_info(outSize, out);
     /* Mesa's winsys on Windows 2000 (display_rvd.c). */
@@ -342,6 +343,7 @@ ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
                !EngDeviceIoControl(display->miniport, IOCTL_RB2K_D3D7_PROFILE,
                                    NULL, 0, out, outSize, &returned) && returned == outSize;
     if (code == RB2K_D3D7_STATS_ESCAPE) return rb_d7_stats(display, outSize, out);
+    if (code == RB2K_D3D7_DRAW_ESCAPE) return rb_d7_drawstats(display, outSize, out);
     if (code == RB2K_DD_SCANOUT_ESCAPE)
         return outSize == sizeof(RB2K_DD_FLIP_INFO) &&
                !EngDeviceIoControl(display->miniport, IOCTL_RB2K_DD_FLIP_INFO,
