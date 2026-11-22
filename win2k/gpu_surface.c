@@ -172,9 +172,16 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     }
     /* A DirectDraw lock, blit, present or release can observe this image
      * before EndScene. Preserve the ordering of both sides of a blit. */
-    if (packet->IoControlCode != IOCTL_RB2K_D3D7_CLEAR &&
-        packet->IoControlCode != IOCTL_RB2K_D3D7_TRIANGLES && !rb_gpu_frame_flush(gpu, &result))
-        return command_error(gpu, &result);
+    if (packet->IoControlCode != IOCTL_RB2K_D3D7_CLEAR && packet->IoControlCode != IOCTL_RB2K_D3D7_TRIANGLES) {
+        VP_STATUS wait;
+        if (gpu->d7Frame.target == image && !rb_gpu_frame_flush(gpu, &result)) return command_error(gpu, &result);
+        wait = rb_gpu_wait_image(gpu, image);
+        if (wait) {
+            result.stage = RB2K_STAGE_TRANSFER;
+            result.status = wait;
+            return command_error(gpu, &result);
+        }
+    }
     if (image->frameFailed && packet->IoControlCode != IOCTL_RB2K_DD_DESTROY) return ERROR_INVALID_DATA;
     bytes = image->width * image->height * sizeof(ULONG);
     switch (packet->IoControlCode) {
@@ -257,6 +264,13 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
             return ERROR_INVALID_PARAMETER;
         destination = find_image(gpu, copy->destination);
         if (!destination) return ERROR_INVALID_HANDLE;
+        if (gpu->d7Frame.target == destination && !rb_gpu_frame_flush(gpu, &result))
+            return command_error(gpu, &result);
+        result.status = rb_gpu_wait_image(gpu, destination);
+        if (result.status) {
+            result.stage = RB2K_STAGE_TRANSFER;
+            return command_error(gpu, &result);
+        }
         if (destination->frameFailed) return ERROR_INVALID_DATA;
         if (image->width != destination->width || image->height != destination->height)
             return ERROR_INVALID_PARAMETER;
@@ -301,7 +315,23 @@ VP_STATUS rb_gpu_surface_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 {
     VP_STATUS status;
     if (VideoPortInterlockedExchange(&gpu->busy, 1)) return ERROR_BUSY;
-    if (packet->IoControlCode == IOCTL_RB2K_D3D7_COMPLETED) {
+    if (packet->IoControlCode == IOCTL_RB2K_D3D7_FLIGHT || packet->IoControlCode == IOCTL_RB2K_D3D7_COMPLETED) {
+        status = rb_gpu_poll_scenes(gpu);
+        if (status) {
+            VideoPortInterlockedExchange(&gpu->busy, 0);
+            return status;
+        }
+    }
+    if (packet->IoControlCode == IOCTL_RB2K_D3D7_FLIGHT) {
+        status = ERROR_INVALID_PARAMETER;
+        if (!packet->InputBufferLength && packet->OutputBufferLength == sizeof(gpu->d7Flight)) {
+            gpu->d7Flight.limit = gpu->d7WaitCurrent ? 1 : RB2K_D7_FLIGHT_SLOTS;
+            rb_counter_ticks(&gpu->d7Flight.frequency);
+            *(RB2K_D7_FLIGHT *)packet->OutputBuffer = gpu->d7Flight;
+            packet->StatusBlock->Information = sizeof(gpu->d7Flight);
+            status = NO_ERROR;
+        }
+    } else if (packet->IoControlCode == IOCTL_RB2K_D3D7_COMPLETED) {
         status = ERROR_INVALID_PARAMETER;
         if (!packet->InputBufferLength && packet->OutputBufferLength == sizeof(gpu->d7Completed)) {
             *(RB2K_D3D7_COMPLETED *)packet->OutputBuffer = gpu->d7Completed;
@@ -356,6 +386,7 @@ VP_STATUS rb_gpu_surface_reset(RB2K_GPU *gpu)
         RB2K_GPU_RESULT r;
         if (!rb_gpu_frame_flush(gpu, &r)) frameStatus = r.status;
     }
+    if (!frameStatus) frameStatus = rb_gpu_wait_image(gpu, NULL);
     rb_cursor_forget(gpu);
     if (gpu->rvdContexts && gpu->ready) {
         /* A mode change loses the DirectDraw surfaces but not OpenGL's

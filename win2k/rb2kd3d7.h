@@ -18,6 +18,11 @@ typedef struct {
     LONGLONG frequency;
     RB2K_D7_TIME op[RB2K_D7_OPS];
 } RB2K_D7_PROFILE;
+#define RB2K_D3D7_FLIGHT_ESCAPE 0x52420022
+typedef struct {
+    LONGLONG frequency, throttleTicks, accessTicks;
+    ULONG limit, peak, pending, queued, completed, throttleWaits, accessWaits, failed;
+} RB2K_D7_FLIGHT;
 #define RB2K_D3D7_QUERY_LIMIT 24
 typedef struct {
     RB2K_D3D7_STATS totals;

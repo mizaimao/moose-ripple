@@ -139,12 +139,13 @@ static void print_profile(const RB2K_D7_PROFILE *before, const RB2K_D7_PROFILE *
     }
 }
 
-static BOOL scene(IDirect3DDevice7 *device, IDirectDrawSurface7 *target, HDC dc)
+static BOOL scene(IDirect3DDevice7 *device, IDirectDrawSurface7 *target, HDC dc, BOOL hardware)
 {
     D3DVIEWPORT7 vp = {0, 0, Side, Side, 0, 1};
     LARGE_INTEGER clock, start, end;
     RB2K_D7_PROFILE before, after;
-    BOOL profiling;
+    RB2K_D7_FLIGHT first, last;
+    BOOL profiling, flights;
     int n;
     if (!call("viewport", IDirect3DDevice7_SetViewport(device, &vp)) ||
         !call("lighting", IDirect3DDevice7_SetRenderState(device, D3DRENDERSTATE_LIGHTING, FALSE)) ||
@@ -157,11 +158,26 @@ static BOOL scene(IDirect3DDevice7 *device, IDirectDrawSurface7 *target, HDC dc)
         !pixels(target, FALSE, NULL) || !draw(device) || !pixels(target, TRUE, NULL))
         return FALSE;
     profiling = get_profile(dc, &before);
+    flights = dc && ExtEscape(dc, RB2K_D3D7_FLIGHT_ESCAPE, 0, NULL, sizeof(first), (LPSTR)&first) > 0;
     if (!QueryPerformanceFrequency(&clock) || !QueryPerformanceCounter(&start)) return FALSE;
     for (n = 0; n < Frames; ++n) if (!draw(device)) return FALSE;
     if (!pixels(target, TRUE, &end) || end.QuadPart <= start.QuadPart) return FALSE;
     if (profiling && get_profile(dc, &after) && before.frequency == after.frequency)
         print_profile(&before, &after);
+    if (flights) {
+        ULONG queued, completed;
+        if (ExtEscape(dc, RB2K_D3D7_FLIGHT_ESCAPE, 0, NULL, sizeof(last), (LPSTR)&last) <= 0 ||
+            first.frequency <= 0 || first.frequency != last.frequency) return FALSE;
+        queued = last.queued-first.queued;
+        completed = last.completed-first.completed;
+        printf("D7 frame flight limit=%lu peak=%lu queued=%lu completed=%lu pending=%lu failed=%lu "
+               "throttle_waits=%lu throttle_us=%I64d access_waits=%lu access_us=%I64d\n",
+               last.limit, last.peak, queued, completed, last.pending, last.failed-first.failed,
+               last.throttleWaits-first.throttleWaits, (last.throttleTicks-first.throttleTicks)*1000000/last.frequency,
+               last.accessWaits-first.accessWaits, (last.accessTicks-first.accessTicks)*1000000/last.frequency);
+        if (queued != (hardware && last.limit == 2 ? Frames : 0) || completed != queued ||
+            last.peak > last.limit || last.pending || last.failed != first.failed) return FALSE;
+    }
     printf("D7 timed frames=%d us=%I64d\n", Frames, (end.QuadPart-start.QuadPart)*1000000/clock.QuadPart);
     return TRUE;
 }
@@ -237,7 +253,7 @@ int main(int argc, char **argv)
         good = call("clear", IDirect3DDevice7_Clear(device, 1, &rect, D3DCLEAR_TARGET, CLEAR_COLOR, 1, 0)) &&
                pixels(target, FALSE, NULL);
     } else {
-        good = scene(device, target, dc);
+        good = scene(device, target, dc, hal);
     }
 done:
     if (device) IDirect3DDevice7_Release(device);

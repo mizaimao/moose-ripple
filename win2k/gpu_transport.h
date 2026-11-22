@@ -35,6 +35,13 @@ typedef struct {
     ULONG allocated;
 } RB2K_DMA_SEGMENT;
 
+enum { RB2K_D7_FLIGHT_SLOTS = 2 };
+typedef struct {
+    RB2K_IMAGE *image;
+    RB2K_D3D7_COMPLETED work;
+    ULONG fence;
+} RB2K_D7_SUBMISSION;
+
 /* Device-readable data chained after a request (at most RB2K_GPU_MAX_EXTENTS). */
 #define RB2K_GPU_MAX_EXTENTS 13
 typedef struct {
@@ -55,7 +62,7 @@ typedef struct {
     PUCHAR dma;
     PHYSICAL_ADDRESS bus;
     ULONG allocated;
-    USHORT index;
+    USHORT index, usedIndex;
     USHORT cursorIndex;
     PUSHORT cursorDoorbell;
     ULONG features, cursorResource;
@@ -73,6 +80,11 @@ typedef struct {
         ULONG words[(RB2K_INLINE_PACKET_BYTES - 32) / sizeof(ULONG)];
     } d7Frame;
     RB2K_D3D7_COMPLETED d7Completed;
+    RB2K_D7_SUBMISSION d7Submitted[RB2K_D7_FLIGHT_SLOTS];
+    RB2K_DMA_SEGMENT d7Packets;
+    RB2K_D7_FLIGHT d7Flight;
+    ULONG d7Next;
+    BOOLEAN d7WaitCurrent;
     RB2K_D7_PROFILE d7Profile;
     RB2K_D7_TIME *d7Measure; /* set only during a serialized native operation */
     BOOLEAN glEnabled;
@@ -100,6 +112,9 @@ VP_STATUS rb_gpu_submit(RB2K_GPU *gpu, const void *request, ULONG bytes,
 VP_STATUS rb_gpu_submit_extents(RB2K_GPU *gpu, const void *request, ULONG bytes,
                                 const RB2K_GPU_EXTENT *extents, ULONG count,
                                 void *reply, ULONG capacity, PULONG received);
+VP_STATUS rb_gpu_submit_scene(RB2K_GPU *gpu, const void *request, ULONG bytes);
+VP_STATUS rb_gpu_poll_scenes(RB2K_GPU *gpu);
+VP_STATUS rb_gpu_wait_image(RB2K_GPU *gpu, const RB2K_IMAGE *image);
 VP_STATUS rb_gpu_reserve_staging(RB2K_GPU *gpu, ULONG bytes);
 VP_STATUS rb_gpu_start(RB2K_GPU *gpu, RB2K_GPU_RESULT *result);
 #define RB2K_CURSOR_DMA_PIXELS 12288

@@ -160,7 +160,7 @@ static BOOLEAN submit_frame(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, BOOLEAN last)
 {
     struct virtio_gpu_cmd_submit *p = (struct virtio_gpu_cmd_submit *)gpu->copyPacket.bytes;
     ULONG bytes = gpu->d7Frame.count * sizeof(ULONG);
-    BOOLEAN ok;
+    BOOLEAN ok, asynchronous = last && !gpu->d7WaitCurrent;
     if (!bytes) return TRUE;
     VideoPortZeroMemory(p, sizeof(*p));
     p->hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
@@ -168,15 +168,19 @@ static BOOLEAN submit_frame(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, BOOLEAN last)
     p->size = bytes;
     VideoPortMoveMemory(p+1, gpu->d7Frame.words, bytes);
     bytes += sizeof(*p);
-    ok = last ? fenced(gpu, r, &p->hdr, bytes, RB2K_STAGE_TRANSFER) :
-                send_request(gpu, r, p, bytes, RB2K_STAGE_TRANSFER);
+    if (asynchronous) {
+        r->stage = RB2K_STAGE_TRANSFER;
+        r->status = rb_gpu_submit_scene(gpu, p, bytes);
+        ok = r->status == NO_ERROR;
+    } else if (last) ok = fenced(gpu, r, &p->hdr, bytes, RB2K_STAGE_TRANSFER);
+    else ok = send_request(gpu, r, p, bytes, RB2K_STAGE_TRANSFER);
     gpu->d7Frame.count = 0;
     if (last || !ok) {
-        if (ok) {
+        if (ok && !asynchronous) {
             gpu->d7Completed.clears += gpu->d7Frame.pending.clears;
             gpu->d7Completed.triangles += gpu->d7Frame.pending.triangles;
             gpu->hostFills += gpu->d7Frame.pending.clears;
-        } else gpu->d7Frame.target->frameFailed = TRUE;
+        } else if (!ok) gpu->d7Frame.target->frameFailed = TRUE;
         gpu->d7Frame.target = NULL;
         gpu->d7Frame.pending.clears = gpu->d7Frame.pending.triangles = 0;
     }
