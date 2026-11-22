@@ -1284,3 +1284,31 @@ Runs of the same XP build differ by about 3 fps. Four scene slots instead
 of two, and unfenced texture uploads, measured 36.5 and 37.4 fps against
 36.3 and 39.7, so neither was kept. The earlier, faster-looking numbers on
 the software vertex path drew about a tenth of the triangles.
+
+### Lighting
+
+The T&L device applies Direct3D 7 fixed-function lighting. The display
+driver keeps the material, the lighting render states and up to 32 lights
+by index, and sends the first eight enabled lights with each lit draw; the
+driver offers eight active lights. One generated vertex shader loops over
+the lights in camera space: point, spot and directional lights with range
+and attenuation, global and per-light ambient, emissive, specular with a
+local or distant viewer, normalized normals, and material colours taken
+from the vertex where its format has them.
+
+`tlight.exe rgb|tnl` lights a quad facing the camera in fifteen cases and
+compares pixels inside it with Direct3D's lighting equations evaluated for
+a corner vertex. The quad and every light are symmetric about the view
+axis, so all corners light alike. All fifteen cases pass on Microsoft's RGB
+device, which checks the expected values, and on the T&L device, on both
+Windows 2000 SP4 and XP SP3.
+
+| Case | Checks |
+| --- | --- |
+| Directional diffuse, two directional lights | colour times N·L, sums |
+| Global ambient, light ambient, emissive | ambient and emissive terms |
+| Point light: attenuation 0, linear attenuation, out of range | 1/(a0 + a1·d), range cut |
+| Spot light inside the falloff band, outside the outer cone | falloff factor, cut-off |
+| Diffuse colour from the vertex | material source |
+| Specular with local and distant viewer | halfway vector, power |
+| Normal of length 2 with and without normalizing | NORMALIZENORMALS |
