@@ -1396,3 +1396,44 @@ through virgl, so no count is offered there: a program that asks for multisampli
 Direct3D's "not available", as on any card without it, and runs without. The control and
 the full-screen step pass there, and so do `d3d9flipex` (52 of 52) and the stream, upload
 and menu checks.
+
+## 3DMark06 on the Intel UHD 630 (2026-11-21)
+
+Windows 7 SP1 x64 ran 3DMark06 1.2.0.0 on an Intel Core i9-9900K with UHD 630
+graphics, through QEMU/KVM and virgl. The comparison with Vista SP2 used four
+virtual CPUs, 4 GiB of memory, the Penryn CPU model, the same Q35 machine with
+HPET enabled, and a 1280×1024 display in 32-bit colour. The default suite uses
+no antialiasing and runs its two CPU tests at 640×480. The benchmark executable
+had SHA-256 `a8270172b9356e5e4870658a54a2b06ef5545c4c771b0c456aa5d490b0f0a8a3`.
+
+The first test-signed driver used the graphics DLLs from PR #98. Its
+windowed Direct3D 9 triangle and background both read back correctly, and
+Present succeeded. In two attempts, 3DMark06 stopped on `DrawPrimitive`
+before completing the first scene. In the timed attempt the error appeared
+9.29 real seconds after Run. QEMU recorded one display-buffer switch in
+that interval. The benchmark produced no score or gameplay frame rate.
+
+A separate 32-bit fullscreen test presented its first two-colour image.
+Clearing the next buffer returned `0x80004005` and the front buffer kept
+the first image through both subsequent colour changes. The benchmark's
+driver trace identified the same screen buffer. It had no Gallium resource,
+and `D3D9BindFramebuffer` failed when the application drew into it.
+[Fullscreen resource fix](https://github.com/mizaimao/moose-ripple/commit/8121872f1bbacecd44d15a9e0954ceeb016c5aeb)
+
+With the fullscreen fix installed, all three clears and presents succeeded in
+the standalone test. 3DMark06 then reached a fourth loading-screen draw that
+the driver rejected with `E_NOTIMPL`. It used already-transformed vertices
+(`POSITIONT`) and an application pixel shader.
+
+`tools/win7-hello/d3d9positiont.c` checks three draws on a 16×16 target. It
+exercises a constant colour and a sampled texture with pixel shader 2.0, and
+a constant colour with pixel shader 3.0. Each draw checks the 12×12 quad and
+the surrounding border. On both x86 and x64, all three cases had 144 wrong
+pixels before the shader change and zero afterwards. The test used the same
+kernel and fullscreen fix throughout.
+
+The next benchmark attempt reached fullscreen and exited 20.0 host seconds
+after Run. Windows logged an application error in `3DMark06.exe`. The nine
+fullscreen clock samples covered 18.22 seconds on the host, 18.23 on the
+Windows performance counter and 16.71 on the Windows tick clock. This run
+ended before a score or a per-scene display rate could be measured.
