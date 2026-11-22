@@ -25,6 +25,8 @@
 #define IOCTL_RB2K_DD_FLIP_ACQUIRE RB2K_DD_IOCTL(0x90d)
 #define IOCTL_RB2K_DD_CREATE_TEXTURE RB2K_DD_IOCTL(0x90e)
 #define IOCTL_RB2K_D3D7_TRIANGLES RB2K_DD_IOCTL(0x90f)
+#define IOCTL_RB2K_D3D7_CLEAR RB2K_DD_IOCTL(0x913)
+#define IOCTL_RB2K_D3D7_PROFILE RB2K_DD_IOCTL(0x914)
 #define RB2K_D3D7_VERTICES 24
 /* IEEE transformed position and a packed Direct3D diffuse colour. */
 typedef struct { ULONG x, y, z, rhw, color; } RB2K_D3D7_VERTEX;

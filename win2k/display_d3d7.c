@@ -321,7 +321,7 @@ static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, const RECT *rects,
         return DDERR_UNSUPPORTED;
     f.id = s->id;
     f.color = color;
-    if (EngDeviceIoControl(c->display->miniport, IOCTL_RB2K_DD_FILL,
+    if (EngDeviceIoControl(c->display->miniport, IOCTL_RB2K_D3D7_CLEAR,
                            &f, sizeof(f), NULL, 0, &written)) return DDERR_SURFACELOST;
     ++c->display->d7.totals.clears;
     return DD_OK;

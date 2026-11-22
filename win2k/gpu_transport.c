@@ -5,6 +5,11 @@
 #include <ntddvdeo.h>
 #include <video.h>
 #include "gpu_transport.h"
+#include "gpu_memory.h"
+#pragma warning(push)
+#pragma warning(disable:4200)
+#include <linux/virtio_gpu.h>
+#pragma warning(pop)
 
 enum {
     DeviceFeatureSelect = 0, DeviceFeature = 4, DriverFeatureSelect = 8,
@@ -284,6 +289,7 @@ VP_STATUS rb_gpu_submit_extents(RB2K_GPU *gpu, const void *request, ULONG bytes,
     DESCRIPTOR *desc;
     ULONG i;
     VP_STATUS status;
+    LONGLONG start = 0;
     *received = 0;
     if (!gpu->ready) return ERROR_NOT_READY;
     if (!bytes || bytes > PacketBytes || !capacity || capacity > ReplyBytes ||
@@ -307,7 +313,21 @@ VP_STATUS rb_gpu_submit_extents(RB2K_GPU *gpu, const void *request, ULONG bytes,
     desc[1 + count].length = capacity;
     desc[1 + count].flags = DescriptorWrite;
     desc[1 + count].next = 0;
+    if (gpu->d7Measure) start = rb_counter_ticks(NULL);
     status = submit_chain(gpu, 0, 0, QueueEntries, &gpu->index, gpu->doorbell, capacity, received);
+    if (gpu->d7Measure) {
+        const struct virtio_gpu_ctrl_hdr *header = request;
+        RB2K_D7_TIME *t = gpu->d7Measure;
+        LONGLONG waited = rb_counter_ticks(NULL)-start;
+        t->queueTicks += waited;
+        ++t->submits;
+        t->bytes += bytes;
+        for (i = 0; i < count; ++i) t->bytes += extents[i].length;
+        if (bytes >= sizeof(*header) && (header->flags & VIRTIO_GPU_FLAG_FENCE)) {
+            t->fenceTicks += waited;
+            ++t->fences;
+        }
+    }
     if (!status) VideoPortMoveMemory(reply, gpu->dma + Reply, *received);
     return status;
 }

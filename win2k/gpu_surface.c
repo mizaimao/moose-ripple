@@ -7,6 +7,7 @@
 #include <ntddvdeo.h>
 #include <video.h>
 #include "gpu_transport.h"
+#include "gpu_memory.h"
 
 static VP_STATUS query(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 {
@@ -190,6 +191,9 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         packet->StatusBlock->Information = sizeof(*answer);
         return NO_ERROR;
     }
+    case IOCTL_RB2K_D3D7_CLEAR:
+        if (!gpu->nativeD3D7 || !gpu->ddGpuSurfaces) return ERROR_NOT_SUPPORTED;
+        /* The control uses the same single fenced fill as DirectDraw. */
     case IOCTL_RB2K_DD_FILL: {
         RB2K_DD_FILL *fill = packet->InputBuffer;
         if (packet->InputBufferLength != sizeof(*fill) || packet->OutputBufferLength)
@@ -279,10 +283,39 @@ VP_STATUS rb_gpu_surface_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 {
     VP_STATUS status;
     if (VideoPortInterlockedExchange(&gpu->busy, 1)) return ERROR_BUSY;
-    if (packet->IoControlCode == IOCTL_RB2K_DD_QUERY) status = query(gpu, packet);
+    if (packet->IoControlCode == IOCTL_RB2K_D3D7_PROFILE) {
+        status = ERROR_INVALID_PARAMETER;
+        if (!packet->InputBufferLength && packet->OutputBufferLength == sizeof(gpu->d7Profile)) {
+            rb_counter_ticks(&gpu->d7Profile.frequency);
+            VideoPortMoveMemory(packet->OutputBuffer, &gpu->d7Profile, sizeof(gpu->d7Profile));
+            packet->StatusBlock->Information = sizeof(gpu->d7Profile);
+            status = NO_ERROR;
+        }
+    }
+    else if (packet->IoControlCode == IOCTL_RB2K_DD_QUERY) status = query(gpu, packet);
     else if (packet->IoControlCode == IOCTL_RB2K_DD_CREATE ||
              packet->IoControlCode == IOCTL_RB2K_DD_CREATE_TEXTURE) status = create(gpu, packet);
-    else status = image_request(gpu, packet);
+    else {
+        ULONG op = RB2K_D7_OPS;
+        LONGLONG start = 0;
+        switch (packet->IoControlCode) {
+        case IOCTL_RB2K_D3D7_CLEAR: op = RB2K_D7_CLEAR; break;
+        case IOCTL_RB2K_D3D7_TRIANGLES: op = RB2K_D7_DRAW; break;
+        case IOCTL_RB2K_DD_READ: op = RB2K_D7_READ; break;
+        case IOCTL_RB2K_DD_WRITE: op = RB2K_D7_UPLOAD; break;
+        }
+        if (gpu->nativeD3D7 && op < RB2K_D7_OPS) {
+            gpu->d7Measure = &gpu->d7Profile.op[op];
+            start = rb_counter_ticks(NULL);
+        }
+        status = image_request(gpu, packet);
+        if (gpu->d7Measure) {
+            gpu->d7Measure->ticks += rb_counter_ticks(NULL)-start;
+            ++gpu->d7Measure->calls;
+            if (status) ++gpu->d7Measure->failed;
+            gpu->d7Measure = NULL;
+        }
+    }
     VideoPortInterlockedExchange(&gpu->busy, 0);
     return status;
 }

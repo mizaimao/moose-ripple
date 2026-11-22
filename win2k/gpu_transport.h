@@ -5,6 +5,7 @@
 #include "rb2kprobe.h"
 #include "ddsurface.h"
 #include "rb2kcursor.h"
+#include "rb2kd3d7.h"
 
 typedef struct {
     ULONG id, width, height;
@@ -65,6 +66,8 @@ typedef struct {
     BOOLEAN owned, ready, enabledMaster, tested;
     ULONG nextId, fence, imageCount, hostFills, readbacks, uploads, hostCopies;
     BOOLEAN ddGpuSurfaces, nativeD3D7;
+    RB2K_D7_PROFILE d7Profile;
+    RB2K_D7_TIME *d7Measure; /* set only during a serialized native operation */
     BOOLEAN glEnabled;
     ULONG presents, presentReadbacks, presentBytes;
     RB2K_PRIMARY primary;

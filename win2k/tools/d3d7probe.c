@@ -117,10 +117,34 @@ static BOOL target_fill(IDirectDrawSurface7 *target, HDC dc)
            before.uploads == after.uploads;
 }
 
-static BOOL scene(IDirect3DDevice7 *device, IDirectDrawSurface7 *target)
+static BOOL get_profile(HDC dc, RB2K_D7_PROFILE *p)
+{
+    return dc && ExtEscape(dc, RB2K_D3D7_PROFILE_ESCAPE, 0, NULL, sizeof(*p), (LPSTR)p) > 0 &&
+           p->frequency > 0;
+}
+
+static void print_profile(const RB2K_D7_PROFILE *before, const RB2K_D7_PROFILE *after)
+{
+    static const char *const names[] = {"clear", "draw", "read", "upload", "flush"};
+    unsigned i;
+    for (i = 0; i < RB2K_D7_OPS; ++i) {
+        const RB2K_D7_TIME *a = &before->op[i], *b = &after->op[i];
+        printf("D7 frame profile op=%s calls=%lu submits=%lu fences=%lu bytes=%lu failed=%lu "
+               "op_us=%I64d queue_us=%I64d fence_us=%I64d\n",
+               names[i], b->calls-a->calls, b->submits-a->submits, b->fences-a->fences,
+               b->bytes-a->bytes, b->failed-a->failed,
+               (b->ticks-a->ticks)*1000000/after->frequency,
+               (b->queueTicks-a->queueTicks)*1000000/after->frequency,
+               (b->fenceTicks-a->fenceTicks)*1000000/after->frequency);
+    }
+}
+
+static BOOL scene(IDirect3DDevice7 *device, IDirectDrawSurface7 *target, HDC dc)
 {
     D3DVIEWPORT7 vp = {0, 0, Side, Side, 0, 1};
     LARGE_INTEGER clock, start, end;
+    RB2K_D7_PROFILE before, after;
+    BOOL profiling;
     int n;
     if (!call("viewport", IDirect3DDevice7_SetViewport(device, &vp)) ||
         !call("lighting", IDirect3DDevice7_SetRenderState(device, D3DRENDERSTATE_LIGHTING, FALSE)) ||
@@ -132,9 +156,12 @@ static BOOL scene(IDirect3DDevice7 *device, IDirectDrawSurface7 *target)
         !call("clear", IDirect3DDevice7_Clear(device, 0, NULL, D3DCLEAR_TARGET, CLEAR_COLOR, 1, 0)) ||
         !pixels(target, FALSE, NULL) || !draw(device) || !pixels(target, TRUE, NULL))
         return FALSE;
+    profiling = get_profile(dc, &before);
     if (!QueryPerformanceFrequency(&clock) || !QueryPerformanceCounter(&start)) return FALSE;
     for (n = 0; n < Frames; ++n) if (!draw(device)) return FALSE;
     if (!pixels(target, TRUE, &end) || end.QuadPart <= start.QuadPart) return FALSE;
+    if (profiling && get_profile(dc, &after) && before.frequency == after.frequency)
+        print_profile(&before, &after);
     printf("D7 timed frames=%d us=%I64d\n", Frames, (end.QuadPart-start.QuadPart)*1000000/clock.QuadPart);
     return TRUE;
 }
@@ -210,7 +237,7 @@ int main(int argc, char **argv)
         good = call("clear", IDirect3DDevice7_Clear(device, 1, &rect, D3DCLEAR_TARGET, CLEAR_COLOR, 1, 0)) &&
                pixels(target, FALSE, NULL);
     } else {
-        good = scene(device, target);
+        good = scene(device, target, dc);
     }
 done:
     if (device) IDirect3DDevice7_Release(device);
