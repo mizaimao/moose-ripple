@@ -22,8 +22,10 @@ enum {
  * segments, chained as further descriptors. One request is in flight. */
 enum {
     Desc = 0, Avail = 256, Used = 512, Request = 1024, Reply = 4096,
-    PacketBytes = 1024, ReplyBytes = 4096, DmaBytes = 8192
+    PacketBytes = RB2K_INLINE_PACKET_BYTES, ReplyBytes = 4096, DmaBytes = 8192,
+    CursorQueue = 8192, CursorEntries = 2, CursorDmaBytes = RB2K_CURSOR_DMA_PIXELS + RB2K_CURSOR_PIXELS * 4
 };
+typedef char request_fits_before_reply[Request + PacketBytes <= Reply ? 1 : -1];
 typedef char queue_fits_before_request[Used + 4 + 8 * QueueEntries + 2 <= Request ? 1 : -1];
 typedef char avail_fits_before_used[Avail + 4 + 2 * QueueEntries + 2 <= Used ? 1 : -1];
 typedef char extents_fit_queue[RB2K_GPU_MAX_EXTENTS + 2 <= QueueEntries ? 1 : -1];
@@ -117,6 +119,9 @@ static VP_STATUS stop(RB2K_GPU *gpu)
         }
         gpu->owned = FALSE;
     }
+    gpu->cursorResource = 0;
+    gpu->cursorDoorbell = NULL;
+    gpu->cursorVisible = FALSE;
     return NO_ERROR;
 }
 
@@ -153,11 +158,30 @@ static VP_STATUS bus_master(RB2K_GPU *gpu, BOOLEAN enable, PULONG observed)
     return NO_ERROR;
 }
 
+static PUSHORT configure_queue(RB2K_GPU *gpu, USHORT number, USHORT entries, ULONG offset)
+{
+    PUCHAR common = gpu->common;
+    USHORT notify;
+    VideoPortWriteRegisterUshort((PUSHORT)(common + QueueSelect), number);
+    if (VideoPortReadRegisterUshort((PUSHORT)(common + QueueSize)) < entries ||
+        VideoPortReadRegisterUshort((PUSHORT)(common + QueueEnable))) return NULL;
+    notify = VideoPortReadRegisterUshort((PUSHORT)(common + QueueNotifyOffset));
+    if (notify && gpu->multiplier > (gpu->notifySize - 2) / notify) return NULL;
+    if ((notify * gpu->multiplier) & 1) return NULL;
+    ((AVAILABLE *)(gpu->dma + offset + Avail))->flags = NoInterrupt;
+    VideoPortInterlockedExchange(&gpu->barrier, 0);
+    VideoPortWriteRegisterUshort((PUSHORT)(common + QueueSize), entries);
+    write_address(gpu, QueueDesc, offset + Desc);
+    write_address(gpu, QueueDriver, offset + Avail);
+    write_address(gpu, QueueDevice, offset + Used);
+    VideoPortWriteRegisterUshort((PUSHORT)(common + QueueEnable), 1);
+    return (PUSHORT)(gpu->notifyBase + notify * gpu->multiplier);
+}
+
 VP_STATUS rb_gpu_start(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
 {
     PUCHAR common = gpu->common;
-    USHORT notifyOffset;
-    ULONG high;
+    ULONG high, bytes = gpu->cursorEnabled ? CursorDmaBytes : DmaBytes;
     VP_STATUS status;
     if (!common) return ERROR_NOT_SUPPORTED;
     status = bus_master(gpu, TRUE, &result->response);
@@ -172,6 +196,7 @@ VP_STATUS rb_gpu_start(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
     VideoPortWriteRegisterUchar(common + DeviceStatus, Ack | Driver);
     write32(gpu, DeviceFeatureSelect, 0);
     result->features = VideoPortReadRegisterUlong((PULONG)(common + DeviceFeature));
+    gpu->features = result->features;
     write32(gpu, DeviceFeatureSelect, 1);
     high = VideoPortReadRegisterUlong((PULONG)(common + DeviceFeature));
     if (!(result->features & Virgl) || !(high & Version1High)) return ERROR_NOT_SUPPORTED;
@@ -182,30 +207,21 @@ VP_STATUS rb_gpu_start(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
     VideoPortWriteRegisterUchar(common + DeviceStatus, Ack | Driver | FeaturesOk);
     if (!(VideoPortReadRegisterUchar(common + DeviceStatus) & FeaturesOk))
         return ERROR_NOT_SUPPORTED;
-    VideoPortWriteRegisterUshort((PUSHORT)(common + QueueSelect), 0);
-    if (VideoPortReadRegisterUshort((PUSHORT)(common + QueueSize)) < QueueEntries ||
-        VideoPortReadRegisterUshort((PUSHORT)(common + QueueEnable))) return ERROR_INVALID_DATA;
-    notifyOffset = VideoPortReadRegisterUshort((PUSHORT)(common + QueueNotifyOffset));
-    if (notifyOffset && gpu->multiplier > (gpu->notifySize - 2) / notifyOffset)
-        return ERROR_INVALID_DATA;
-    if ((notifyOffset * gpu->multiplier) & 1) return ERROR_INVALID_DATA;
-    gpu->doorbell = (PUSHORT)(gpu->notifyBase + notifyOffset * gpu->multiplier);
-
+    if (!gpu->dma && gpu->cursorEnabled)
+        gpu->dma = VideoPortGetCommonBuffer(gpu->extension, bytes, 4096, &gpu->bus,
+                                            &gpu->allocated, TRUE);
     if (!gpu->dma)
         gpu->dma = VideoPortGetCommonBuffer(gpu->extension, DmaBytes, 4096, &gpu->bus,
                                             &gpu->allocated, TRUE);
     if (!gpu->dma || gpu->allocated < DmaBytes) return ERROR_NOT_ENOUGH_MEMORY;
     if (gpu->bus.LowPart & 15) return ERROR_INVALID_DATA;
-    VideoPortZeroMemory(gpu->dma, DmaBytes);
-    ((AVAILABLE *)(gpu->dma + Avail))->flags = NoInterrupt;
-    VideoPortInterlockedExchange(&gpu->barrier, 0);
-    gpu->index = 0;
+    VideoPortZeroMemory(gpu->dma, gpu->allocated < bytes ? DmaBytes : bytes);
+    gpu->index = gpu->cursorIndex = 0;
     gpu->fence = 0;
-    VideoPortWriteRegisterUshort((PUSHORT)(common + QueueSize), QueueEntries);
-    write_address(gpu, QueueDesc, Desc);
-    write_address(gpu, QueueDriver, Avail);
-    write_address(gpu, QueueDevice, Used);
-    VideoPortWriteRegisterUshort((PUSHORT)(common + QueueEnable), 1);
+    gpu->doorbell = configure_queue(gpu, 0, QueueEntries, 0);
+    if (!gpu->doorbell) return ERROR_INVALID_DATA;
+    if (gpu->cursorEnabled && gpu->allocated >= CursorDmaBytes)
+        gpu->cursorDoorbell = configure_queue(gpu, 1, CursorEntries, CursorQueue);
     VideoPortWriteRegisterUchar(common + DeviceStatus, Ack | Driver | FeaturesOk | DriverOk);
     if (VideoPortReadRegisterUchar(common + DeviceStatus) != (Ack | Driver | FeaturesOk | DriverOk))
         return ERROR_NOT_READY;
@@ -219,23 +235,61 @@ VP_STATUS rb_gpu_submit(RB2K_GPU *gpu, const void *request, ULONG bytes,
     return rb_gpu_submit_extents(gpu, request, bytes, NULL, 0, reply, capacity, received);
 }
 
+/* Each queue allows one in-flight request. A timeout quarantines both
+ * queues until the transport acknowledges a reset. */
+static VP_STATUS submit_chain(RB2K_GPU *gpu, ULONG offset, USHORT number, USHORT entries,
+                              PUSHORT index, PUSHORT doorbell, ULONG capacity, PULONG received)
+{
+    volatile AVAILABLE *available = (AVAILABLE *)(gpu->dma + offset + Avail);
+    volatile USED_RING *used = (USED_RING *)(gpu->dma + offset + Used);
+    USHORT slot = *index % entries, next = (USHORT)(*index + 1);
+    ULONG i;
+    available->ring[slot] = 0;
+    VideoPortInterlockedExchange(&gpu->barrier, 0);
+    available->index = next;
+    VideoPortInterlockedExchange(&gpu->barrier, 0);
+    VideoPortWriteRegisterUshort(doorbell, number);
+    for (i = 0; used->index == *index; ++i) {
+        if (i == 1000000) { gpu->ready = FALSE; return ERROR_TIMEOUT; }
+        VideoPortStallExecution(10);
+    }
+    VideoPortInterlockedExchange(&gpu->barrier, 0);
+    if (used->index != next || used->ring[slot].id != 0 || used->ring[slot].length > capacity) {
+        gpu->ready = FALSE;
+        return ERROR_INVALID_DATA;
+    }
+    *index = next;
+    *received = used->ring[slot].length;
+    return NO_ERROR;
+}
+
+VP_STATUS rb_gpu_cursor_command(RB2K_GPU *gpu, const void *request, ULONG bytes)
+{
+    DESCRIPTOR *desc;
+    ULONG received;
+    if (!gpu->ready || !gpu->cursorDoorbell) return ERROR_NOT_READY;
+    if (!bytes || bytes > RB2K_CURSOR_DMA_PIXELS - CursorQueue - Request) return ERROR_INVALID_PARAMETER;
+    desc = (DESCRIPTOR *)(gpu->dma + CursorQueue + Desc);
+    VideoPortMoveMemory(gpu->dma + CursorQueue + Request, (PVOID)request, bytes);
+    desc->address.QuadPart = gpu->bus.QuadPart + CursorQueue + Request;
+    desc->length = bytes;
+    desc->flags = desc->next = 0;
+    return submit_chain(gpu, CursorQueue, 1, CursorEntries, &gpu->cursorIndex, gpu->cursorDoorbell, 0, &received);
+}
+
 VP_STATUS rb_gpu_submit_extents(RB2K_GPU *gpu, const void *request, ULONG bytes,
                                 const RB2K_GPU_EXTENT *extents, ULONG count,
                                 void *reply, ULONG capacity, PULONG received)
 {
     DESCRIPTOR *desc;
-    volatile AVAILABLE *available;
-    volatile USED_RING *used;
-    USHORT next;
-    ULONG slot, i, length;
+    ULONG i;
+    VP_STATUS status;
     *received = 0;
     if (!gpu->ready) return ERROR_NOT_READY;
     if (!bytes || bytes > PacketBytes || !capacity || capacity > ReplyBytes ||
         count > RB2K_GPU_MAX_EXTENTS || (count && !extents))
         return ERROR_INVALID_PARAMETER;
     desc = (DESCRIPTOR *)(gpu->dma + Desc);
-    available = (AVAILABLE *)(gpu->dma + Avail);
-    used = (USED_RING *)(gpu->dma + Used);
     VideoPortMoveMemory(gpu->dma + Request, (PVOID)request, bytes);
     VideoPortZeroMemory(gpu->dma + Reply, capacity);
     desc[0].address.QuadPart = gpu->bus.QuadPart + Request;
@@ -253,34 +307,9 @@ VP_STATUS rb_gpu_submit_extents(RB2K_GPU *gpu, const void *request, ULONG bytes,
     desc[1 + count].length = capacity;
     desc[1 + count].flags = DescriptorWrite;
     desc[1 + count].next = 0;
-    slot = gpu->index % QueueEntries;
-    next = (USHORT)(gpu->index + 1);
-    available->ring[slot] = 0;
-    VideoPortInterlockedExchange(&gpu->barrier, 0);
-    available->index = next;
-    VideoPortInterlockedExchange(&gpu->barrier, 0);
-    VideoPortWriteRegisterUshort(gpu->doorbell, 0);
-    /* StartIO is synchronous. Bound a missing reply; no further command
-     * can reuse these descriptors until the transport has been reset. */
-    /* Ten seconds: a host shader compile or a fenced readback behind a long
-     * frame can take more than one under emulation. */
-    for (i = 0; used->index == gpu->index; ++i) {
-        if (i == 1000000) {
-            gpu->ready = FALSE;
-            return ERROR_TIMEOUT;
-        }
-        VideoPortStallExecution(10);
-    }
-    VideoPortInterlockedExchange(&gpu->barrier, 0);
-    length = used->ring[slot].length;
-    if (used->index != next || used->ring[slot].id != 0 || length > capacity) {
-        gpu->ready = FALSE;
-        return ERROR_INVALID_DATA;
-    }
-    gpu->index = next;
-    VideoPortMoveMemory(reply, gpu->dma + Reply, length);
-    *received = length;
-    return NO_ERROR;
+    status = submit_chain(gpu, 0, 0, QueueEntries, &gpu->index, gpu->doorbell, capacity, received);
+    if (!status) VideoPortMoveMemory(reply, gpu->dma + Reply, *received);
+    return status;
 }
 
 VP_STATUS rb_gpu_reserve_staging(RB2K_GPU *gpu, ULONG bytes)
@@ -307,7 +336,10 @@ VP_STATUS rb_gpu_reserve_staging(RB2K_GPU *gpu, ULONG bytes)
 VP_STATUS rb_gpu_stop(RB2K_GPU *gpu)
 {
     ULONG pciCommand, i;
-    VP_STATUS cleanup = stop(gpu);
+    VP_STATUS cleanup;
+    rb_gl_finish(gpu);
+    cleanup = stop(gpu);
+    if (!cleanup) VideoPortZeroMemory(&gpu->glDesktop, sizeof(gpu->glDesktop));
     /* A reset, including a failed attempt, invalidates all guest handles.
      * The pinned buffers survive an unacknowledged reset until a retry. */
     VideoPortZeroMemory(gpu->images, sizeof(gpu->images));
@@ -324,6 +356,10 @@ VP_STATUS rb_gpu_stop(RB2K_GPU *gpu)
     if (!cleanup && gpu->dma) {
         VideoPortFreeCommonBuffer(gpu->extension, gpu->allocated, gpu->dma, gpu->bus, TRUE);
         gpu->dma = NULL;
+    }
+    if (!cleanup && gpu->cursorValid && gpu->cursorShape.info.x >= 0) {
+        if (rb_cursor_restore(gpu)) ++gpu->cursorStats.failed;
+        else ++gpu->cursorStats.restores;
     }
     return cleanup;
 }
@@ -344,7 +380,8 @@ void rb_gpu_probe(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
         VideoPortInterlockedExchange(&gpu->busy, 0);
         return;
     }
-    result->status = rb_gpu_start(gpu, result);
+    if (gpu->ready) result->features = gpu->features;
+    else result->status = rb_gpu_start(gpu, result);
     if (!result->status) rb_gpu_pixel(gpu, result);
     cleanup = rb_gpu_stop(gpu);
     if (cleanup && !result->status) {

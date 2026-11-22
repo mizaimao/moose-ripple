@@ -8,6 +8,13 @@
 
 typedef char run_matches_virtio_entry[sizeof(RB2K_PAGE_RUN) == 16 ? 1 : -1];
 
+LONGLONG rb_counter_ticks(LONGLONG *frequency)
+{
+    LARGE_INTEGER hz, ticks = KeQueryPerformanceCounter(frequency ? &hz : NULL);
+    if (frequency) *frequency = hz.QuadPart;
+    return ticks.QuadPart;
+}
+
 PVOID rb_process_ref(void)
 {
     PEPROCESS process = PsGetCurrentProcess();

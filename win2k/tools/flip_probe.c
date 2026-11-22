@@ -36,6 +36,30 @@ static DWORD native_pixel(DWORD rgb, DWORD bpp)
     return rgb;
 }
 
+/* Describe a failed read of the probe's own indexed patterns while its
+ * surface is still locked. A flat repaint and the other page's image
+ * require different fixes. */
+static void indexed_mismatch(const DDSURFACEDESC *lock, DWORD width, DWORD height, DWORD image)
+{
+    DWORD counts[256] = {0}, other = 0, most = 0, x, y;
+    BOOL first = TRUE;
+    for (y = 0; y < height; ++y) {
+        const BYTE *row = (const BYTE *)lock->lpSurface + y * lock->lPitch;
+        for (x = 0; x < width; ++x) {
+            DWORD value = row[x];
+            DWORD expected = native_pixel(pixel(x, y, image), 8);
+            ++counts[value];
+            if (value == (expected ^ 255)) ++other;
+            if (first && value != expected) {
+                printf("Indexed first mismatch x=%lu y=%lu expected=%lu got=%lu\n", x, y, expected, value);
+                first = FALSE;
+            }
+        }
+    }
+    for (x = 1; x < 256; ++x) if (counts[x] > counts[most]) most = x;
+    printf("Indexed actual dominant=%lu count=%lu other_image_matches=%lu\n", most, counts[most], other);
+}
+
 static BOOL pixels(LPDIRECTDRAWSURFACE surface, DWORD width, DWORD height, DWORD bpp,
                    DWORD image, BOOL write)
 {
@@ -71,6 +95,7 @@ static BOOL pixels(LPDIRECTDRAWSURFACE surface, DWORD width, DWORD height, DWORD
     }
     printf("Flip %s image=%lu pixels=%lu mismatches=%lu pitch=%ld valid=%d\n",
            write ? "write" : "check", image, width * height, wrong, lock.lPitch, valid);
+    if (wrong && bpp == 8 && !write) indexed_mismatch(&lock, width, height, image);
     return call("unlock", IDirectDrawSurface_Unlock(surface, lock.lpSurface)) && valid && !wrong;
 }
 

@@ -131,6 +131,12 @@ DHPDEV DrvEnablePDEV(DEVMODEW *dm, LPWSTR address, ULONG patternCount,
     RtlZeroMemory(info, sizeof(*info));
     info->hpalDefault = display->palette;
     info->iDitherFormat = display->bitmapFormat;
+    if (display->bitmapFormat == BMF_32BPP) {
+        RB2K_CURSOR_STATS cursor;
+        if (rb_cursor_stats(display, &cursor) && cursor.enabled)
+            display->cursorLock = EngCreateSemaphore();
+        if (display->cursorLock) info->flGraphicsCaps2 |= GCAPS2_ALPHACURSOR;
+    }
     display->ddLock = EngCreateSemaphore();
     if (display->bitmapFormat == BMF_8BPP) {
         if (!display->ddLock) {
@@ -154,6 +160,10 @@ VOID DrvCompletePDEV(DHPDEV pdev, HDEV device)
 VOID DrvDisablePDEV(DHPDEV pdev)
 {
     DISPLAY *display = (DISPLAY *)pdev;
+    if (display->cursorLock) {
+        rb_display_cursor_release(display);
+        EngDeleteSemaphore(display->cursorLock);
+    }
     if (display->ddLock) {
         DrvDisableDirectDraw(pdev);
         rb_dd_free_views(display);
@@ -190,6 +200,7 @@ VOID DrvDisableSurface(DHPDEV pdev)
     DISPLAY *display = (DISPLAY *)pdev;
     VIDEO_MEMORY request;
     ULONG returned;
+    rb_display_cursor_release(display);
     if (display->ddEnabled) DrvDisableDirectDraw(pdev);
     if (display->bitmapFormat == BMF_8BPP) {
         EngAcquireSemaphore(display->ddLock);
@@ -200,6 +211,9 @@ VOID DrvDisableSurface(DHPDEV pdev)
         EngDeleteSurface(display->surface);
         display->surface = NULL;
     }
+    if (display->cpuSurface) { EngUnlockSurface(display->cpuSurface); display->cpuSurface = NULL; }
+    if (display->bitmap) { EngDeleteSurface(display->bitmap); display->bitmap = NULL; }
+    display->glActive = FALSE;
     if (display->mapping) {
         request.RequestedVirtualAddress = display->mapping;
         EngDeviceIoControl(display->miniport, IOCTL_VIDEO_UNMAP_VIDEO_MEMORY,
@@ -230,11 +244,20 @@ HSURF DrvEnableSurface(DHPDEV pdev)
         mem.FrameBufferLength / (ULONG)size.cy < (ULONG)display->mode.ScreenStride)
         goto failed;
     if (mem.VideoRamBase == mem.FrameBufferBase) display->mappingBytes = mem.FrameBufferLength;
-    /* Let GDI draw directly into the top-down mapped framebuffer. */
-    display->surface = (HSURF)EngCreateBitmap(size, display->mode.ScreenStride,
+    display->bitmap = (HSURF)EngCreateBitmap(size, display->mode.ScreenStride,
         display->bitmapFormat, BMF_TOPDOWN, mem.FrameBufferBase);
-    if (!display->surface || !EngAssociateSurface(display->surface, display->device, 0))
-        goto failed;
+    if (!display->bitmap) goto failed;
+    if (display->bitmapFormat == BMF_32BPP && rb_gl_device_surface(display)) {
+        display->cpuSurface = EngLockSurface(display->bitmap);
+        display->surface = EngCreateDeviceSurface((DHSURF)display, size, display->bitmapFormat);
+        if (!display->cpuSurface || !display->surface ||
+            !EngAssociateSurface(display->surface, display->device, HOOK_BITBLT | HOOK_COPYBITS |
+                HOOK_STROKEPATH | HOOK_FILLPATH | HOOK_STROKEANDFILLPATH | HOOK_TEXTOUT)) goto failed;
+    } else {
+        display->surface = display->bitmap;
+        display->bitmap = NULL;
+        if (!EngAssociateSurface(display->surface, display->device, 0)) goto failed;
+    }
     return display->surface;
 failed:
     DrvDisableSurface(pdev);
@@ -264,9 +287,13 @@ ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
     ULONG returned;
     if (code == QUERYESCSUPPORT)
         return in && inSize == sizeof(ULONG) && (*(ULONG *)in == RB2K_GPU_ESCAPE ||
+                   *(ULONG *)in == RB2K_CURSOR_ESCAPE || *(ULONG *)in == RB2K_CURSOR_SOURCE_ESCAPE ||
                    *(ULONG *)in == RB2K_DD_STATS_ESCAPE || *(ULONG *)in == RB2K_DD_SCANOUT_ESCAPE ||
                    *(ULONG *)in == OPENGL_GETINFO || *(ULONG *)in == RB2K_RVD_ESCAPE ||
-                   *(ULONG *)in == RB2K_RVD_STATS_ESCAPE);
+                   *(ULONG *)in == RB2K_RVD_STATS_ESCAPE || *(ULONG *)in == RB2K_GL_PRESENT_ESCAPE ||
+                   *(ULONG *)in == RB2K_GL_STATS_ESCAPE || *(ULONG *)in == RB2K_GL_TIMING_ESCAPE ||
+                   *(ULONG *)in == RB2K_GL_PROFILE_ESCAPE || *(ULONG *)in == RB2K_GL_RECT_PRESENT_ESCAPE ||
+                   *(ULONG *)in == RB2K_GL_INLINE_PRESENT_ESCAPE);
     /* opengl32.dll passes a small input buffer of its own with this one. */
     if (code == OPENGL_GETINFO) return opengl_info(outSize, out);
     /* Mesa's winsys on Windows 2000 (display_rvd.c). */
@@ -275,8 +302,35 @@ ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
                rb_rvd_escape((DISPLAY *)surface->dhpdev, inSize, in, outSize, out) : 0;
     if (code == RB2K_RVD_STATS_ESCAPE)
         return surface && surface->dhpdev ? rb_rvd_stats((DISPLAY *)surface->dhpdev, outSize, out) : 0;
+    if (code == RB2K_CURSOR_SOURCE_ESCAPE) {
+        if (!surface || !(display = (DISPLAY *)surface->dhpdev) || !display->cursorLock ||
+            !out || outSize != sizeof(display->cursorSource) ||
+            (inSize && (inSize != sizeof(ULONG) || !in || *(ULONG *)in != 1))) return 0;
+        EngAcquireSemaphore(display->cursorLock);
+        if (inSize) {
+            RtlZeroMemory(&display->cursorSource, sizeof(display->cursorSource));
+            display->sampleCursor = TRUE;
+        }
+        RtlCopyMemory(out, &display->cursorSource, outSize);
+        EngReleaseSemaphore(display->cursorLock);
+        return 1;
+    }
     if (inSize || !out || !surface || !surface->dhpdev) return 0;
     display = (DISPLAY *)surface->dhpdev;
+    if (code == RB2K_CURSOR_ESCAPE) {
+        RB2K_CURSOR_STATS cursor;
+        if ((outSize != sizeof(cursor) && outSize != FIELD_OFFSET(RB2K_CURSOR_STATS, lastDecline)) ||
+            !rb_cursor_stats(display, &cursor)) return 0;
+        RtlCopyMemory(out, &cursor, outSize);
+        return 1;
+    }
+    if (code == RB2K_GL_STATS_ESCAPE && outSize == sizeof(RB2K_GL_STATS))
+        return rb_gl_stats(display, RB2K_RVD_OP_GL_STATS, outSize, out);
+    if (code == RB2K_GL_TIMING_ESCAPE && outSize == sizeof(RB2K_GL_TIMING))
+        return rb_gl_stats(display, RB2K_RVD_OP_GL_TIMING, outSize, out);
+    if (code == RB2K_GL_PROFILE_ESCAPE && (outSize == sizeof(RB2K_GL_PROFILE) ||
+        outSize == FIELD_OFFSET(RB2K_GL_PROFILE, inlineBatches)))
+        return rb_gl_stats(display, RB2K_RVD_OP_GL_PROFILE, outSize, out);
     if (code == RB2K_DD_SCANOUT_ESCAPE)
         return outSize == sizeof(RB2K_DD_FLIP_INFO) &&
                !EngDeviceIoControl(display->miniport, IOCTL_RB2K_DD_FLIP_INFO,
@@ -317,7 +371,16 @@ static DRVFN callbacks[] = {
     { INDEX_DrvDisableSurface, (PFN)DrvDisableSurface },
     { INDEX_DrvAssertMode, (PFN)DrvAssertMode },
     { INDEX_DrvSetPalette, (PFN)DrvSetPalette },
+    { INDEX_DrvSetPointerShape, (PFN)DrvSetPointerShape },
+    { INDEX_DrvMovePointer, (PFN)DrvMovePointer },
     { INDEX_DrvEscape, (PFN)DrvEscape },
+    { INDEX_DrvDrawEscape, (PFN)DrvDrawEscape },
+    { INDEX_DrvBitBlt, (PFN)DrvBitBlt },
+    { INDEX_DrvCopyBits, (PFN)DrvCopyBits },
+    { INDEX_DrvTextOut, (PFN)DrvTextOut },
+    { INDEX_DrvStrokePath, (PFN)DrvStrokePath },
+    { INDEX_DrvFillPath, (PFN)DrvFillPath },
+    { INDEX_DrvStrokeAndFillPath, (PFN)DrvStrokeAndFillPath },
     { INDEX_DrvGetDirectDrawInfo, (PFN)DrvGetDirectDrawInfo },
     { INDEX_DrvEnableDirectDraw, (PFN)DrvEnableDirectDraw },
     { INDEX_DrvDisableDirectDraw, (PFN)DrvDisableDirectDraw }

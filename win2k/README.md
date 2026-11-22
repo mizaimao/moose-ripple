@@ -18,7 +18,9 @@ VGA and restored the saved desktop after full-screen DirectDraw programs.
   [Display-mode tests](../docs/win2k/development.md#16-bit-colour-development)
 - **OpenGL:** Windows' own `opengl32.dll` loads `ripplegl.dll`, Mesa
   24.3.4 with its virgl driver. The host renders. It is the same DLL as
-  the Windows 9x driver's.
+  the Windows 9x driver's. By default GDI displays the finished frames.
+  An experimental GPU presentation path is opt-in. For Quake results and
+  per-operation timings, see the [presentation tests](../docs/win2k/development.md#experimental-gpu-presentation-for-opengl).
 - **DirectDraw:** full-screen programs flip between two pages in video
   memory. Other surfaces live in system memory, where Windows' own
   DirectDraw code draws them faster than the GPU could here (see Speed).
@@ -89,8 +91,13 @@ has the details and the earlier measurements behind these choices.
 
 The miniport (`rb2kmp.c`) sets the display mode through the adapter's
 Bochs-compatible registers and maps the framebuffer. It also drives the
-virtio-gpu side of the adapter (`gpu_transport.c`): one queue of 16
-descriptors, one request at a time, each waited for.
+virtio-gpu side of the adapter through a 16-descriptor control queue in
+`gpu_transport.c`. Each request waits for its descriptors to be returned.
+With the adapter DWORD `RippleHardwareCursor=1`, 32-bit display modes
+also use the virtio cursor queue. Supported pointer shapes occupy a
+64×64 surface, and moving them leaves the desktop pixels alone. GDI
+handles pointers with destination-dependent inverted pixels. The stock
+installation uses the software pointer.
 
 The display driver (`display.c`) gives GDI a bitmap in the selected colour depth over the
 framebuffer and answers `OPENGL_GETINFO` with `RIPPLEGL`, the name of the
@@ -116,8 +123,9 @@ driver the key is under `Services\rb2kmp\Device0` on Windows 2000 and
 
 ## Build
 
-On the Linux build host, with the Windows 2000 DDK and Visual C++ 6.0 under
-Wine in `.tools/win9x` (or `WIN9X_TOOLS`):
+The Linux build uses the msvcrt variant of LLVM-MinGW, the Windows 2000
+DDK headers and import libraries, and the Visual C++ 6.0 headers. Set
+`LLVM_MINGW` and `WIN9X_TOOLS` if the tools are outside `.tools/`.
 
     win2k/build.sh                  # build/win2k: the driver files, the INF and the tools
     win9x/mesa/build.sh             # ripplegl.dll (docs/win9x/mesa.md)

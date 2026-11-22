@@ -62,6 +62,9 @@
 
 /* The display driver's escape on Windows 2000 (win2k/rb2krvd.h). */
 #define RB2K_RVD_ESCAPE 0x52420010
+#define RB2K_GL_PRESENT_ESCAPE 0x52420012
+#define RB2K_GL_RECT_PRESENT_ESCAPE 0x52420015
+#define RB2K_GL_INLINE_PRESENT_ESCAPE 0x52420017
 
 #define CACHE_TIMEOUT_USEC      1000000
 
@@ -69,6 +72,8 @@ struct rvd_winsys {
    struct virgl_winsys base;
    HANDLE dev;
    bool nt;                            /* Windows 2000: the display driver instead */
+   int (WINAPI *draw_escape)(HDC, int, int, LPCSTR);
+   int present_escape;
    simple_mtx_t call_mutex;            /* one call at a time */
    uint32_t ctx;
    struct rvd_info info;
@@ -690,13 +695,14 @@ bool rvd_virgl_present_color(struct pipe_context *pipe, struct pipe_resource *co
 }
 
 /* ---- A finished frame goes on the window ----------------------------------------------------- */
-/* Read the frame back into its buffer's memory (rows from the top, as Mesa keeps window
- * frames) and let GDI draw it: GDI knows where the window is and what covers it. */
+/* DrawEscape can present an NT5 window from its GPU resource. The GDI path
+ * reads top-down rows into guest memory and paints the window's visible region. */
 static void rvd_flush_frontbuffer(struct virgl_winsys *vws, struct virgl_cmd_buf *cbuf,
                                   struct virgl_hw_res *res, unsigned level, unsigned layer,
                                   void *winsys_drawable_handle, struct pipe_box *sub_box)
 {
    HDC dc = (HDC)winsys_drawable_handle;
+   struct rvd_winsys *ws = rvd_winsys(vws);
    struct {
       BITMAPINFOHEADER h;
       DWORD masks[3];
@@ -723,6 +729,12 @@ static void rvd_flush_frontbuffer(struct virgl_winsys *vws, struct virgl_cmd_buf
       break;
    default:
       return;
+   }
+   if (ws->draw_escape && level == 0 && layer == 0 && bpp == 32) {
+      struct rvd_present frame = {ws->ctx, res->res_handle, res->width, res->height};
+      /* GDI supplies the destination window and its visible region to the display driver. */
+      if (ws->draw_escape(dc, ws->present_escape, sizeof(frame), (LPCSTR)&frame) == 1)
+         return;
    }
    u_box_2d(0, 0, res->width, res->height, &box);
    /* GDI wants every row to start on a 4-byte boundary. */
@@ -823,6 +835,19 @@ static struct virgl_winsys *rvd_winsys_create(void)
    }
    ws->dev = dev;
    ws->nt = nt;
+   if (nt) {
+      const char *present = getenv("RIPPLE_GL_PRESENT");
+      if (present) {
+         if (!strcmp(present, "1"))
+            ws->present_escape = RB2K_GL_PRESENT_ESCAPE;
+         else if (!strcmp(present, "rect"))
+            ws->present_escape = RB2K_GL_RECT_PRESENT_ESCAPE;
+         else if (!strcmp(present, "inline"))
+            ws->present_escape = RB2K_GL_INLINE_PRESENT_ESCAPE;
+      }
+      if (ws->present_escape)
+         ws->draw_escape = (void *)GetProcAddress(GetModuleHandleA("gdi32.dll"), "DrawEscape");
+   }
    simple_mtx_init(&ws->call_mutex, mtx_plain);
    if (!rvd_call(ws, RVD_GET_INFO, NULL, 0, &ws->info, sizeof(ws->info)) ||
        ws->info.version != RVD_INTERFACE_VERSION || !ws->info.virgl) {
