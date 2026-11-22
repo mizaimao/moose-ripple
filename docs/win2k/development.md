@@ -1135,8 +1135,6 @@ command 26, `D3DNTDP2OP_INDEXEDTRIANGLELIST2`, and
 `D3DNTERR_COMMAND_UNPARSED` (`0x88760bb8`). The game loop advanced
 without the driver drawing its triangles. A performance comparison with
 software or the historical game baseline needs confirmed scene geometry.
-The next pixel test uses nonconsecutive indices so a sequential draw
-cannot pass it. [Indexed triangle list format](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dhal/ns-d3dhal-_d3dhal_dp2indexedtrianglelist2).
 
 Each guest also ran one 120-frame colour block in each configuration.
 The offscreen timer ends on the final lock, before the visible copy in
@@ -1148,3 +1146,51 @@ boots. The dedicated repeated XP timing experiment is recorded above.
 | Microsoft RGB | 13.491 ms | 13.594 ms | 10.136 ms | 6.537 ms |
 | Native offscreen | 21.968 ms | 32.034 ms | 84.156 ms | 76.255 ms |
 | Native offscreen before window copy | 47.692 ms | 48.967 ms | 20.967 ms | 31.572 ms |
+
+### Native indexed triangle lists
+
+The display driver now handles `D3DNTDP2OP_INDEXEDTRIANGLELIST2`
+(command 26). It adds each 16-bit index to the command's base vertex,
+checks the referenced vertex range and submits the vertices in draw
+order. [Indexed triangle list format](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dhal/ns-d3dhal-_d3dhal_dp2indexedtrianglelist2).
+
+The `ipixels.exe` test draws the reference red, green and blue triangle
+using vertices 4, 1 and 3 from a five-vertex buffer. The other two
+vertices make a sequential draw produce the wrong image. Four fresh
+Intel UHD 630 guests compared the previous driver with the indexed
+implementation. Only the display DLL differed between the two inputs.
+
+| Indexed test at 128×128 | Windows 2000 SP4 | Windows XP SP3 |
+| --- | ---: | ---: |
+| Native triangles completed, previous driver | 0 | 0 |
+| Native triangles completed, indexed driver | 121 | 121 |
+| Incorrect pixels in either of the two native reads | 0/15,328 | 0/15,328 |
+| Native time for 120 indexed frames, including final read | 21.905 ms | 21.866 ms |
+| Microsoft RGB time for the same 120 frames, previous / indexed driver | 10.977 / 11.179 ms | 10.649 / 11.013 ms |
+
+Each native read checked 4,095 interior pixels and 11,233 background
+pixels. The driver completed 120 queued frames after the warm-up, with
+one wait at surface access and zero queue-slot waits. Of the timed block,
+the read took 10.212 ms on Windows 2000 and 10.326 ms on XP. The ordinary
+triangle, window copy, nine hardware depth samples and all 33,162 depth
+storage values also passed on every boot.
+
+The original Direct3D Quake 0.73 completed the 969-frame `demo1` at
+640×480 on all four boots. Each boot's four matching D3DX7 requests
+selected the hardware device. The driver counters immediately before
+and after the game isolate its work from the earlier pixel test.
+
+| Quake on the previous / indexed driver | Windows 2000 SP4 | Windows XP SP3 |
+| --- | ---: | ---: |
+| Rate printed by the game (one run per driver) | 37.8 / 38.8 fps | 39.7 / 39.3 fps |
+| Completed native clears | 970 / 970 | 970 / 970 |
+| Completed native triangles | 0 / 0 | 0 / 0 |
+| Game observed in the foreground | 26 of 26 on both | 0 of 25 / 0 of 26 |
+
+After the game, both previous drivers reported an unparsed command 26
+(`0x88760bb8`). Both indexed drivers reached the draw handler and
+reported `DDERR_UNSUPPORTED` (`0x80004001`) on that command at byte
+offset zero. No game triangle completed, so these frame rates cannot
+establish rendering performance against software or the historical
+baseline. The next diagnostic records the vertex format and active
+render settings at each rejected draw.
