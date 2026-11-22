@@ -364,6 +364,7 @@ VP_STATUS rb_gpu_stop(RB2K_GPU *gpu)
      * The pinned buffers survive an unacknowledged reset until a retry. */
     VideoPortZeroMemory(gpu->images, sizeof(gpu->images));
     gpu->imageCount = 0;
+    VideoPortZeroMemory(&gpu->d7Frame, sizeof(gpu->d7Frame));
     if (!cleanup && gpu->enabledMaster) cleanup = bus_master(gpu, FALSE, &pciCommand);
     if (!cleanup) {
         for (i = 0; i < RB2K_MAX_SEGMENTS; ++i) {

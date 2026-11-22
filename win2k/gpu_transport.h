@@ -11,7 +11,7 @@ typedef struct {
     ULONG id, width, height;
     BOOLEAN defined, hasSurface, uniform;
     ULONG color;
-    BOOLEAN sampled, triangleState;
+    BOOLEAN sampled, triangleState, frameFailed;
 } RB2K_IMAGE;
 typedef struct {
     RB2K_IMAGE image;
@@ -66,6 +66,13 @@ typedef struct {
     BOOLEAN owned, ready, enabledMaster, tested;
     ULONG nextId, fence, imageCount, hostFills, readbacks, uploads, hostCopies;
     BOOLEAN ddGpuSurfaces, nativeD3D7;
+    struct {
+        RB2K_IMAGE *target;
+        ULONG count;
+        RB2K_D3D7_COMPLETED pending;
+        ULONG words[(RB2K_INLINE_PACKET_BYTES - 32) / sizeof(ULONG)];
+    } d7Frame;
+    RB2K_D3D7_COMPLETED d7Completed;
     RB2K_D7_PROFILE d7Profile;
     RB2K_D7_TIME *d7Measure; /* set only during a serialized native operation */
     BOOLEAN glEnabled;
@@ -106,12 +113,13 @@ void rb_gpu_pixel(RB2K_GPU *gpu, RB2K_GPU_RESULT *result);
 BOOLEAN rb_gpu_create_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
                             const RB2K_IMAGE *image, const char *name, ULONG nameBytes, BOOLEAN scanout);
 ULONG rb_gpu_channel(ULONG channel);
-BOOLEAN rb_gpu_image_commands(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
-                              const ULONG *words, ULONG count);
+BOOLEAN rb_gpu_frame_words(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image,
+                           const ULONG *words, ULONG count);
+BOOLEAN rb_gpu_frame_flush(RB2K_GPU *gpu, RB2K_GPU_RESULT *result);
 BOOLEAN rb_gpu_triangles(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image,
                          const RB2K_D3D7_BATCH *batch);
 BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
-                          ULONG color, BOOLEAN createSurface);
+                          ULONG color, BOOLEAN createSurface, RB2K_IMAGE *frameTarget);
 BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
                               const RB2K_IMAGE *image, PVOID pixels, BOOLEAN readback);
 BOOLEAN rb_gpu_transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resource,

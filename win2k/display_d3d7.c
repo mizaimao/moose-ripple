@@ -21,6 +21,7 @@ typedef struct {
     PDD_DIRECTDRAW_LOCAL local;
     HANDLE owner;
     ULONG cull, shade, fill, drawFeatures;
+    BOOL inScene, queued;
     D7_STAGE stages[TextureStages];
 } D7_CONTEXT;
 
@@ -78,22 +79,36 @@ static DWORD APIENTRY register_surface(PDD_CREATESURFACEEXDATA a)
     return DDHAL_DRIVER_HANDLED;
 }
 
+/* The queue is shared by all DirectDraw clients. Flush only this target.
+ * A surface observer may already have finished the same commands. */
+static HRESULT finish_scene(D7_CONTEXT *c)
+{
+    ULONG written;
+    if (!c->queued) return DD_OK;
+    c->queued = FALSE;
+    return EngDeviceIoControl(c->display->miniport, IOCTL_RB2K_D3D7_FLUSH, &c->target,
+                              sizeof(c->target), NULL, 0, &written) ? DDERR_SURFACELOST : DD_OK;
+}
+
 static DWORD APIENTRY destroy_local(PDD_DESTROYDDLOCALDATA a)
 {
     DISPLAY *d = (DISPLAY *)a->pDDLcl->lpGbl->dhpdev;
     ULONG i;
     EngAcquireSemaphore(registry);
     EngAcquireSemaphore(d->ddLock);
-    for (i = 0; i < MaxContexts; ++i)
-        if (contexts[i].display == d && contexts[i].local == a->pDDLcl)
+    a->ddRVal = DD_OK;
+    for (i = 0; i < MaxContexts; ++i) {
+        if (contexts[i].display == d && contexts[i].local == a->pDDLcl) {
+            if (FAILED(finish_scene(&contexts[i]))) a->ddRVal = DDERR_SURFACELOST;
             RtlZeroMemory(&contexts[i], sizeof(contexts[i]));
+        }
+    }
     for (i = 0; i < RB2K_DD_SLOTS; ++i) {
         DD_SLOT *s = &d->slots[i];
         if (s->local == a->pDDLcl) { s->local = NULL; s->d3dHandle = 0; }
     }
     EngReleaseSemaphore(d->ddLock);
     EngReleaseSemaphore(registry);
-    a->ddRVal = DD_OK;
     return DDHAL_DRIVER_HANDLED;
 }
 
@@ -169,7 +184,13 @@ static DWORD APIENTRY destroy_context(LPD3DNTHAL_CONTEXTDESTROYDATA a)
     EngAcquireSemaphore(registry);
     c = owned_context(a->dwhContext);
     a->ddrval = c ? DD_OK : DDERR_INVALIDOBJECT;
-    if (c) RtlZeroMemory(c, sizeof(*c));
+    if (c) {
+        DISPLAY *d = c->display;
+        EngAcquireSemaphore(d->ddLock);
+        a->ddrval = finish_scene(c);
+        RtlZeroMemory(c, sizeof(*c));
+        EngReleaseSemaphore(d->ddLock);
+    }
     EngReleaseSemaphore(registry);
     return DDHAL_DRIVER_HANDLED;
 }
@@ -303,7 +324,7 @@ static HRESULT triangle_list(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a,
         if (EngDeviceIoControl(c->display->miniport, IOCTL_RB2K_D3D7_TRIANGLES, &batch,
                 FIELD_OFFSET(RB2K_D3D7_BATCH,vertices)+batch.count*sizeof(*vertices),
                 NULL, 0, &written)) hr = DDERR_GENERIC;
-        else c->display->d7.totals.triangles += batch.count/3;
+        else c->queued = TRUE;
     }
     EngFreeMem(vertices);
     return hr;
@@ -323,7 +344,7 @@ static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, const RECT *rects,
     f.color = color;
     if (EngDeviceIoControl(c->display->miniport, IOCTL_RB2K_D3D7_CLEAR,
                            &f, sizeof(f), NULL, 0, &written)) return DDERR_SURFACELOST;
-    ++c->display->d7.totals.clears;
+    c->queued = TRUE;
     return DD_OK;
 }
 
@@ -367,7 +388,12 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             const D3DNTHAL_DP2RENDERSTATE *rs = (const D3DNTHAL_DP2RENDERSTATE *)p;
             used = n*sizeof(*rs);
             if (used > remaining) return DDERR_INVALIDPARAMS;
-            for (; n; --n, ++rs) render_state(c, rs->RenderState, rs->dwState);
+            for (; n; --n, ++rs) {
+                if (rs->RenderState == D3DRENDERSTATE_SCENECAPTURE) {
+                    c->inScene = rs->dwState != 0;
+                    if (!c->inScene && FAILED(finish_scene(c))) return DDERR_SURFACELOST;
+                } else render_state(c, rs->RenderState, rs->dwState);
+            }
             break;
         }
         case D3DNTDP2OP_TRIANGLELIST: {
@@ -423,6 +449,7 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
                 if (set->hZBuffer) return DDERR_UNSUPPORTED;
                 s = target(c, set->hRenderTarget, TRUE);
                 if (!s) return DDERR_SURFACELOST;
+                if (s->id != c->target && FAILED(finish_scene(c))) return DDERR_SURFACELOST;
                 c->target = s->id;
             }
             break;
@@ -466,6 +493,10 @@ static DWORD APIENTRY dp2(LPD3DNTHAL_DRAWPRIMITIVES2DATA a)
                 a->ddrval = commands(c, a, stride, copy, a->dwCommandLength, &a->dwErrorOffset);
             }
         }
+        /* Runtimes may issue operations outside BeginScene/EndScene.
+         * Complete that command buffer before returning to the caller. */
+        if ((!c->inScene || FAILED(a->ddrval)) && FAILED(finish_scene(c)) && SUCCEEDED(a->ddrval))
+            a->ddrval = DDERR_SURFACELOST;
         if (FAILED(a->ddrval)) {
             c->display->d7.lastError = a->ddrval;
             c->display->d7.errorOffset = a->dwErrorOffset;
@@ -601,6 +632,18 @@ ULONG rb_d7_stats(DISPLAY *d, ULONG bytes, PVOID out)
     EngAcquireSemaphore(registry);
     EngAcquireSemaphore(d->ddLock);
     s = d->d7;
+    if (d->d7.nativeEnabled) {
+        RB2K_D3D7_COMPLETED completed;
+        ULONG written = 0;
+        if (EngDeviceIoControl(d->miniport, IOCTL_RB2K_D3D7_COMPLETED, NULL, 0,
+                               &completed, sizeof(completed), &written) || written != sizeof(completed)) {
+            EngReleaseSemaphore(d->ddLock);
+            EngReleaseSemaphore(registry);
+            return 0;
+        }
+        s.totals.clears = completed.clears;
+        s.totals.triangles = completed.triangles;
+    }
     s.totals.version = RB2K_D3D7_STATS_VERSION;
     for (i = 0; i < MaxContexts; ++i) if (contexts[i].display == d) ++s.totals.contexts;
     for (i = 0; i < RB2K_DD_SLOTS; ++i) if (d->slots[i].d3dHandle) ++s.totals.targets;

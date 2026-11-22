@@ -50,7 +50,7 @@ static const ULONG pipeline[] = {
     VIRGL_CMD0(VIRGL_CCMD_BIND_SHADER,0,VIRGL_BIND_SHADER_SIZE),FragmentShader,FragmentStage
 };
 
-static BOOLEAN shader(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, ULONG id, ULONG handle,
+static BOOLEAN shader(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, ULONG handle,
                       ULONG stage, const char *text, ULONG size)
 {
     ULONG words[6+(sizeof(vertex_shader)+3)/4], n = (size+3)/4;
@@ -63,7 +63,7 @@ static BOOLEAN shader(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, ULONG id, ULONG handle,
     words[5] = 0;
     words[5+n] = 0;
     VideoPortMoveMemory(words+6,(PVOID)text,size);
-    return rb_gpu_image_commands(gpu,r,id,words,6+n);
+    return rb_gpu_frame_words(gpu,r,image,words,6+n);
 }
 
 /* Encode a positive integer dimension as an IEEE single without enabling
@@ -83,17 +83,17 @@ static BOOLEAN prepare(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image)
     };
     if (!image->defined) {
         /* Uncovered pixels of a fresh target are logically zero. */
-        if (!rb_gpu_draw_image(gpu,r,image->id,0,!image->hasSurface)) return FALSE;
+        if (!rb_gpu_draw_image(gpu,r,image->id,0,!image->hasSurface,image)) return FALSE;
         image->defined = image->uniform = image->hasSurface = TRUE;
         image->color = 0;
     } else if (!image->hasSurface) {
-        if (!rb_gpu_image_commands(gpu,r,image->id,fb,sizeof(fb)/sizeof(*fb))) return FALSE;
+        if (!rb_gpu_frame_words(gpu,r,image,fb,sizeof(fb)/sizeof(*fb))) return FALSE;
         image->hasSurface = TRUE;
     }
     if (!image->triangleState) {
-        if (!shader(gpu,r,image->id,VertexShader,VertexStage,vertex_shader,sizeof(vertex_shader)) ||
-            !shader(gpu,r,image->id,FragmentShader,FragmentStage,fragment_shader,sizeof(fragment_shader)) ||
-            !rb_gpu_image_commands(gpu,r,image->id,pipeline,sizeof(pipeline)/sizeof(*pipeline))) return FALSE;
+        if (!shader(gpu,r,image,VertexShader,VertexStage,vertex_shader,sizeof(vertex_shader)) ||
+            !shader(gpu,r,image,FragmentShader,FragmentStage,fragment_shader,sizeof(fragment_shader)) ||
+            !rb_gpu_frame_words(gpu,r,image,pipeline,sizeof(pipeline)/sizeof(*pipeline))) return FALSE;
         image->triangleState = TRUE;
     }
     return TRUE;
@@ -142,7 +142,7 @@ BOOLEAN rb_gpu_triangles(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
     *p++ = 0;                  /* minimum index */
     *p++ = batch->count - 1;   /* maximum index */
     *p++ = 0;                  /* stream-output count */
-    if (!rb_gpu_image_commands(gpu,r,image->id,words,p-words)) return FALSE;
+    if (!rb_gpu_frame_words(gpu,r,image,words,p-words)) return FALSE;
     image->uniform = FALSE;
     return TRUE;
 }

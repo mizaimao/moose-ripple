@@ -162,6 +162,20 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     id = *(PULONG)packet->InputBuffer;
     image = find_image(gpu, id);
     if (!image) return ERROR_INVALID_HANDLE;
+    if (packet->IoControlCode == IOCTL_RB2K_D3D7_FLUSH) {
+        if (packet->InputBufferLength != sizeof(id) || packet->OutputBufferLength)
+            return ERROR_INVALID_PARAMETER;
+        if (image->frameFailed) return ERROR_INVALID_DATA;
+        if (gpu->d7Frame.target == image && !rb_gpu_frame_flush(gpu, &result))
+            return command_error(gpu, &result);
+        return NO_ERROR;
+    }
+    /* A DirectDraw lock, blit, present or release can observe this image
+     * before EndScene. Preserve the ordering of both sides of a blit. */
+    if (packet->IoControlCode != IOCTL_RB2K_D3D7_CLEAR &&
+        packet->IoControlCode != IOCTL_RB2K_D3D7_TRIANGLES && !rb_gpu_frame_flush(gpu, &result))
+        return command_error(gpu, &result);
+    if (image->frameFailed && packet->IoControlCode != IOCTL_RB2K_DD_DESTROY) return ERROR_INVALID_DATA;
     bytes = image->width * image->height * sizeof(ULONG);
     switch (packet->IoControlCode) {
     case IOCTL_RB2K_D3D7_TRIANGLES: {
@@ -180,6 +194,7 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
                 return ERROR_INVALID_PARAMETER;
         }
         success = rb_gpu_triangles(gpu, &result, image, b);
+        if (success) gpu->d7Frame.pending.triangles += b->count/3;
         break;
     }
     case IOCTL_RB2K_DD_UNIFORM: {
@@ -193,14 +208,16 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     }
     case IOCTL_RB2K_D3D7_CLEAR:
         if (!gpu->nativeD3D7 || !gpu->ddGpuSurfaces) return ERROR_NOT_SUPPORTED;
-        /* The control uses the same single fenced fill as DirectDraw. */
+        /* Both paths use the same virgl clear encoding. */
     case IOCTL_RB2K_DD_FILL: {
         RB2K_DD_FILL *fill = packet->InputBuffer;
         if (packet->InputBufferLength != sizeof(*fill) || packet->OutputBufferLength)
             return ERROR_INVALID_PARAMETER;
-        success = rb_gpu_draw_image(gpu, &result, id, fill->color, (BOOLEAN)!image->hasSurface);
+        success = rb_gpu_draw_image(gpu, &result, id, fill->color, (BOOLEAN)!image->hasSurface,
+                                    packet->IoControlCode == IOCTL_RB2K_D3D7_CLEAR ? image : NULL);
         if (success) {
-            ++gpu->hostFills;
+            if (packet->IoControlCode == IOCTL_RB2K_D3D7_CLEAR) ++gpu->d7Frame.pending.clears;
+            else ++gpu->hostFills;
             image->hasSurface = image->defined = image->uniform = TRUE;
             image->color = fill->color;
         }
@@ -240,6 +257,7 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
             return ERROR_INVALID_PARAMETER;
         destination = find_image(gpu, copy->destination);
         if (!destination) return ERROR_INVALID_HANDLE;
+        if (destination->frameFailed) return ERROR_INVALID_DATA;
         if (image->width != destination->width || image->height != destination->height)
             return ERROR_INVALID_PARAMETER;
         if (image == destination) return NO_ERROR;
@@ -283,7 +301,14 @@ VP_STATUS rb_gpu_surface_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 {
     VP_STATUS status;
     if (VideoPortInterlockedExchange(&gpu->busy, 1)) return ERROR_BUSY;
-    if (packet->IoControlCode == IOCTL_RB2K_D3D7_PROFILE) {
+    if (packet->IoControlCode == IOCTL_RB2K_D3D7_COMPLETED) {
+        status = ERROR_INVALID_PARAMETER;
+        if (!packet->InputBufferLength && packet->OutputBufferLength == sizeof(gpu->d7Completed)) {
+            *(RB2K_D3D7_COMPLETED *)packet->OutputBuffer = gpu->d7Completed;
+            packet->StatusBlock->Information = sizeof(gpu->d7Completed);
+            status = NO_ERROR;
+        }
+    } else if (packet->IoControlCode == IOCTL_RB2K_D3D7_PROFILE) {
         status = ERROR_INVALID_PARAMETER;
         if (!packet->InputBufferLength && packet->OutputBufferLength == sizeof(gpu->d7Profile)) {
             rb_counter_ticks(&gpu->d7Profile.frequency);
@@ -299,6 +324,7 @@ VP_STATUS rb_gpu_surface_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         ULONG op = RB2K_D7_OPS;
         LONGLONG start = 0;
         switch (packet->IoControlCode) {
+        case IOCTL_RB2K_D3D7_FLUSH: op = RB2K_D7_FLUSH; break;
         case IOCTL_RB2K_D3D7_CLEAR: op = RB2K_D7_CLEAR; break;
         case IOCTL_RB2K_D3D7_TRIANGLES: op = RB2K_D7_DRAW; break;
         case IOCTL_RB2K_DD_READ: op = RB2K_D7_READ; break;
@@ -322,8 +348,14 @@ VP_STATUS rb_gpu_surface_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 
 VP_STATUS rb_gpu_surface_reset(RB2K_GPU *gpu)
 {
-    VP_STATUS status;
+    VP_STATUS status, frameStatus = NO_ERROR;
     if (VideoPortInterlockedExchange(&gpu->busy, 1)) return ERROR_BUSY;
+    /* Mode changes lose these DirectDraw surfaces even if the transport
+     * survives for an OpenGL client. Finish submitted scenes first. */
+    if (gpu->d7Frame.target) {
+        RB2K_GPU_RESULT r;
+        if (!rb_gpu_frame_flush(gpu, &r)) frameStatus = r.status;
+    }
     rb_cursor_forget(gpu);
     if (gpu->rvdContexts && gpu->ready) {
         /* A mode change loses the DirectDraw surfaces but not OpenGL's
@@ -342,5 +374,5 @@ VP_STATUS rb_gpu_surface_reset(RB2K_GPU *gpu)
     }
     gpu->primary.width = gpu->primary.height = gpu->primary.pitchPixels = gpu->primary.bitsPerPixel = 0;
     VideoPortInterlockedExchange(&gpu->busy, 0);
-    return status;
+    return status ? status : frameStatus;
 }

@@ -27,6 +27,9 @@
 #define IOCTL_RB2K_D3D7_TRIANGLES RB2K_DD_IOCTL(0x90f)
 #define IOCTL_RB2K_D3D7_CLEAR RB2K_DD_IOCTL(0x913)
 #define IOCTL_RB2K_D3D7_PROFILE RB2K_DD_IOCTL(0x914)
+#define IOCTL_RB2K_D3D7_FLUSH RB2K_DD_IOCTL(0x915)
+#define IOCTL_RB2K_D3D7_COMPLETED RB2K_DD_IOCTL(0x916)
+typedef struct { ULONG clears, triangles; } RB2K_D3D7_COMPLETED;
 #define RB2K_D3D7_VERTICES 24
 /* IEEE transformed position and a packed Direct3D diffuse colour. */
 typedef struct { ULONG x, y, z, rhw, color; } RB2K_D3D7_VERTEX;

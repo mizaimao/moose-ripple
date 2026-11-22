@@ -54,6 +54,7 @@ typedef struct {
 /* The combined submit may have compiler-inserted tail padding. Only the
  * byte count in its wire header and the command words are transmitted. */
 typedef char gpu_header_must_be_24[sizeof(struct virtio_gpu_ctrl_hdr) == 24 ? 1 : -1];
+typedef char frame_header_is_32[sizeof(struct virtio_gpu_cmd_submit) == 32 ? 1 : -1];
 typedef char gpu_entry_must_be_16[sizeof(struct virtio_gpu_mem_entry) == 16 ? 1 : -1];
 typedef char backing_request_fits_queue[sizeof(BACKING_REQUEST) <= 1024 ? 1 : -1];
 
@@ -152,29 +153,60 @@ static BOOLEAN fenced(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     return send_request(gpu, result, header, bytes, stage);
 }
 
-/* Only driver-generated virgl words enter this helper. The miniport serializes
- * submissions and owns the scratch packet until the fence completes. */
-BOOLEAN rb_gpu_image_commands(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
-                              const ULONG *words, ULONG count)
+/* Command data is inline in the control descriptor. After an unfenced
+ * descriptor is returned the scratch packet is reusable. The fence on the
+ * last packet completes all earlier drawing in this image's virgl context. */
+static BOOLEAN submit_frame(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, BOOLEAN last)
 {
     struct virtio_gpu_cmd_submit *p = (struct virtio_gpu_cmd_submit *)gpu->copyPacket.bytes;
-    ULONG bytes;
-    if (!count || count > (sizeof(gpu->copyPacket.bytes)-sizeof(*p))/sizeof(ULONG)) {
-        result->status = ERROR_INVALID_PARAMETER;
-        result->stage = RB2K_STAGE_TRANSFER;
-        return FALSE;
-    }
-    bytes = count*sizeof(ULONG);
+    ULONG bytes = gpu->d7Frame.count * sizeof(ULONG);
+    BOOLEAN ok;
+    if (!bytes) return TRUE;
     VideoPortZeroMemory(p, sizeof(*p));
     p->hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
-    p->hdr.ctx_id = id;
+    p->hdr.ctx_id = gpu->d7Frame.target->id;
     p->size = bytes;
-    VideoPortMoveMemory(p+1, (PVOID)words, bytes);
-    return fenced(gpu, result, &p->hdr, sizeof(*p)+bytes, RB2K_STAGE_TRANSFER);
+    VideoPortMoveMemory(p+1, gpu->d7Frame.words, bytes);
+    bytes += sizeof(*p);
+    ok = last ? fenced(gpu, r, &p->hdr, bytes, RB2K_STAGE_TRANSFER) :
+                send_request(gpu, r, p, bytes, RB2K_STAGE_TRANSFER);
+    gpu->d7Frame.count = 0;
+    if (last || !ok) {
+        if (ok) {
+            gpu->d7Completed.clears += gpu->d7Frame.pending.clears;
+            gpu->d7Completed.triangles += gpu->d7Frame.pending.triangles;
+            gpu->hostFills += gpu->d7Frame.pending.clears;
+        } else gpu->d7Frame.target->frameFailed = TRUE;
+        gpu->d7Frame.target = NULL;
+        gpu->d7Frame.pending.clears = gpu->d7Frame.pending.triangles = 0;
+    }
+    return ok;
+}
+
+BOOLEAN rb_gpu_frame_flush(RB2K_GPU *gpu, RB2K_GPU_RESULT *r)
+{
+    return submit_frame(gpu, r, TRUE);
+}
+
+BOOLEAN rb_gpu_frame_words(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
+                           const ULONG *words, ULONG count)
+{
+    const ULONG capacity = sizeof(gpu->d7Frame.words)/sizeof(ULONG);
+    if (!count || count > capacity || image->frameFailed) {
+        r->status = ERROR_INVALID_DATA;
+        r->stage = RB2K_STAGE_TRANSFER;
+        return FALSE;
+    }
+    if (gpu->d7Frame.target != image && !rb_gpu_frame_flush(gpu, r)) return FALSE;
+    if (count > capacity-gpu->d7Frame.count && !submit_frame(gpu, r, FALSE)) return FALSE;
+    VideoPortMoveMemory(gpu->d7Frame.words + gpu->d7Frame.count, (PVOID)words, count*sizeof(*words));
+    gpu->d7Frame.count += count;
+    gpu->d7Frame.target = image;
+    return TRUE;
 }
 
 BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
-                          ULONG color, BOOLEAN createSurface)
+                          ULONG color, BOOLEAN createSurface, RB2K_IMAGE *frameTarget)
 {
     PIXEL_REQUEST request;
     ULONG skip = createSurface ? 0 : CreateWords;
@@ -188,6 +220,7 @@ BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
     words[13 - skip] = rb_gpu_channel((color >> 8) & 255);
     words[14 - skip] = rb_gpu_channel(color & 255);
     words[15 - skip] = rb_gpu_channel(color >> 24);
+    if (frameTarget) return rb_gpu_frame_words(gpu, result, frameTarget, words, bytes / sizeof(*words));
     return fenced(gpu, result, &request.hdr, sizeof(request.draw.submit) + bytes, RB2K_STAGE_CLEAR);
 }
 
@@ -539,7 +572,7 @@ void rb_gpu_pixel(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
     result->expected = 0xffff8000UL;
     if (!rb_gpu_create_image(gpu, result, &image, name, sizeof(name) - 1, FALSE)) return;
     result->observed = ~result->expected;
-    if (!rb_gpu_draw_image(gpu, result, image.id, result->expected, TRUE) ||
+    if (!rb_gpu_draw_image(gpu, result, image.id, result->expected, TRUE, NULL) ||
         !rb_gpu_transfer_image(gpu, result, &image, &result->observed, TRUE)) return;
     if (!rb_gpu_destroy_image(gpu, result, image.id)) return;
     if (result->observed != result->expected) {
