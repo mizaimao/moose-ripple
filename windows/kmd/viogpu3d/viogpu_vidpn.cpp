@@ -2073,11 +2073,16 @@ void VioGpuVidPN::RefreshScanoutLocked(BOOLEAN verticalBlank)
     }
 }
 
-#if DXGKDDI_INTERFACE_VERSION == DXGKDDI_INTERFACE_VERSION_WIN7
-void VioGpuVidPN::PresentDmaFlip(VioGpuAllocation *source, PHYSICAL_ADDRESS address)
+#if DXGKDDI_INTERFACE_VERSION <= DXGKDDI_INTERFACE_VERSION_WIN7
+void VioGpuVidPN::PresentDmaFlip(VioGpuAllocation *source, UINT segment, PHYSICAL_ADDRESS address)
 {
     PAGED_CODE();
     ExAcquireFastMutex(&m_sourceLock);
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+    m_sourceSegment = segment;
+#else
+    UNREFERENCED_PARAMETER(segment);
+#endif
     m_sourceAddress = address;
     m_sourceRes = source;
     m_sourceId = (LONG)source->GetId();

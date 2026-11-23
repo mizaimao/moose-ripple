@@ -38,7 +38,7 @@ class VioGpuCommand
 
     void AttachAllocations(DXGK_ALLOCATIONLIST *allocationList, UINT allocationListLength);
 
-#if DXGKDDI_INTERFACE_VERSION == DXGKDDI_INTERFACE_VERSION_WIN7
+#if DXGKDDI_INTERFACE_VERSION <= DXGKDDI_INTERFACE_VERSION_WIN7
     NTSTATUS BuildFlip(DXGKARG_PRESENT *present);
     void PatchFlip(const DXGK_ALLOCATIONLIST &source);
 #endif
@@ -96,7 +96,7 @@ class VioGpuCommand
 #endif
 
     char *m_pDmaBuffer;
-#if DXGKDDI_INTERFACE_VERSION == DXGKDDI_INTERFACE_VERSION_WIN7
+#if DXGKDDI_INTERFACE_VERSION <= DXGKDDI_INTERFACE_VERSION_WIN7
     VioGpuAllocation *m_flipSource;
 #endif
     char *m_pCommand;

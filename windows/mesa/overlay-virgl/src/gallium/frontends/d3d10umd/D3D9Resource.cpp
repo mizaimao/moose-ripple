@@ -1301,6 +1301,43 @@ D3D9PipeMapUsage(D3DDDI_LOCKFLAGS flags)
    return usage;
 }
 
+#ifdef RIPPLE_VISTA
+static bool
+D3D9ClearPrimaryRect(struct pipe_context *pipe, const struct pipe_surface *primary,
+                     const union pipe_color_union *color, const RECT &rect)
+{
+   /* A display-segment allocation need not have a writable virgl backing.
+    * Clear a rectangle-sized render target and copy its pixels on the GPU.
+    * This also works on hosts whose render-target clear covers a whole view. */
+   struct pipe_resource templ = {};
+   templ.target = PIPE_TEXTURE_2D;
+   templ.format = primary->format;
+   templ.width0 = rect.right - rect.left;
+   templ.height0 = rect.bottom - rect.top;
+   templ.depth0 = templ.array_size = 1;
+   templ.nr_samples = primary->texture->nr_samples;
+   templ.nr_storage_samples = primary->texture->nr_storage_samples;
+   templ.bind = PIPE_BIND_RENDER_TARGET;
+   struct pipe_resource *tile = pipe->screen->resource_create(pipe->screen, &templ);
+   if (!tile)
+      return false;
+   struct pipe_surface view = {};
+   view.format = tile->format;
+   struct pipe_surface *target = pipe->create_surface(pipe, tile, &view);
+   const bool ready = target != NULL;
+   if (ready) {
+      pipe->clear_render_target(pipe, target, color, 0, 0, templ.width0, templ.height0, true);
+      struct pipe_box box;
+      u_box_2d(0, 0, templ.width0, templ.height0, &box);
+      pipe->resource_copy_region(pipe, primary->texture, primary->u.tex.level,
+                                 rect.left, rect.top, primary->u.tex.first_layer, tile, 0, &box);
+      pipe_surface_reference(&target, NULL);
+   }
+   pipe_resource_reference(&tile, NULL);
+   return ready;
+}
+#endif
+
 static bool
 D3D9ClearColorPipe(D3D9Device *device, HANDLE resource_handle,
                    UINT subresource_index, const RECT *rect,
@@ -1340,10 +1377,20 @@ D3D9ClearColorPipe(D3D9Device *device, HANDLE resource_handle,
       upload_full_clear ||
       (yttrium && D3D9PipeMipLevel(resource, subresource_index) != 0);
 
-   if (needs_upload &&
-       D3D9ClearColorRectUpload(device->pipe, &surface, &clear_color,
-                                (unsigned)dst.left, (unsigned)dst.top,
-                                width, height)) {
+   bool cleared = false;
+#ifdef RIPPLE_VISTA
+   if (!full_clear && resource->flags.Primary && !yttrium) {
+      if (!D3D9ClearPrimaryRect(device->pipe, &surface, &clear_color, dst)) {
+         D3D9ReleasePipeSurface(&surface);
+         return false;
+      }
+      cleared = true;
+   } else
+#endif
+   if (needs_upload)
+      cleared = D3D9ClearColorRectUpload(device->pipe, &surface, &clear_color,
+                                         (unsigned)dst.left, (unsigned)dst.top, width, height);
+   if (cleared) {
       D3D9ReleasePipeSurface(&surface);
       sub->cpu_dirty = false;
       D3D9MarkAutogenMipmapsDirty(resource, subresource_index);

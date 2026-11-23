@@ -3,11 +3,12 @@
 #include "viogpu_adapter.h"
 #include "baseobj.h"
 
-#if DXGKDDI_INTERFACE_VERSION == DXGKDDI_INTERFACE_VERSION_WIN7
+#if DXGKDDI_INTERFACE_VERSION <= DXGKDDI_INTERFACE_VERSION_WIN7
 // Only a kernel-generated flip associates this DMA packet with a scanout allocation.
-struct ImmediateFlipPacket
+struct DmaFlipPacket
 {
     VIOGPU_COMMAND_HDR header;
+    UINT segment; // Vista: offset zero is valid in its display-memory segment
     PHYSICAL_ADDRESS address;
 };
 #endif
@@ -35,7 +36,7 @@ VioGpuCommand::VioGpuCommand(VioGpuAdapter *adapter)
     t[0] = KeQueryPerformanceCounter(NULL).QuadPart;
 #endif
     m_pDmaBuffer = NULL;
-#if DXGKDDI_INTERFACE_VERSION == DXGKDDI_INTERFACE_VERSION_WIN7
+#if DXGKDDI_INTERFACE_VERSION <= DXGKDDI_INTERFACE_VERSION_WIN7
     m_flipSource = NULL;
 #endif
     m_pCommand = NULL;
@@ -77,14 +78,14 @@ void VioGpuCommand::PrepareSubmit(const DXGKARG_SUBMITCOMMAND *pSubmitCommand)
 
 PAGED_CODE_SEG_BEGIN
 
-#if DXGKDDI_INTERFACE_VERSION == DXGKDDI_INTERFACE_VERSION_WIN7
+#if DXGKDDI_INTERFACE_VERSION <= DXGKDDI_INTERFACE_VERSION_WIN7
 NTSTATUS VioGpuCommand::BuildFlip(DXGKARG_PRESENT *present)
 {
     if (!present->pDmaBuffer || !present->pDmaBufferPrivateData || present->DmaBufferPrivateDataSize < sizeof(VioGpuCommand *))
         return STATUS_INVALID_PARAMETER;
     VioGpuCommand **privateData = static_cast<VioGpuCommand **>(present->pDmaBufferPrivateData);
     *privateData = NULL;
-    if (present->DmaSize < sizeof(ImmediateFlipPacket) || !present->PatchLocationListOutSize)
+    if (present->DmaSize < sizeof(DmaFlipPacket) || !present->PatchLocationListOutSize)
         return STATUS_GRAPHICS_INSUFFICIENT_DMA_BUFFER;
     if (!present->pAllocationList || !present->pPatchLocationListOut)
         return STATUS_INVALID_PARAMETER;
@@ -93,7 +94,7 @@ NTSTATUS VioGpuCommand::BuildFlip(DXGKARG_PRESENT *present)
     if (!allocation || !allocation->GetAllocation())
         return STATUS_INVALID_PARAMETER;
 
-    ImmediateFlipPacket *packet = static_cast<ImmediateFlipPacket *>(present->pDmaBuffer);
+    DmaFlipPacket *packet = static_cast<DmaFlipPacket *>(present->pDmaBuffer);
     RtlZeroMemory(packet, sizeof(*packet));
     packet->header.type = VIOGPU_CMD_NOP;
     packet->header.size = sizeof(*packet) - sizeof(packet->header);
@@ -104,7 +105,7 @@ NTSTATUS VioGpuCommand::BuildFlip(DXGKARG_PRESENT *present)
     D3DDDI_PATCHLOCATIONLIST *patch = present->pPatchLocationListOut++;
     RtlZeroMemory(patch, sizeof(*patch));
     patch->AllocationIndex = DXGK_PRESENT_SOURCE_INDEX;
-    patch->PatchOffset = FIELD_OFFSET(ImmediateFlipPacket, address);
+    patch->PatchOffset = FIELD_OFFSET(DmaFlipPacket, address);
     *privateData = this;
     present->pDmaBuffer = packet + 1;
     return STATUS_SUCCESS;
@@ -113,7 +114,8 @@ NTSTATUS VioGpuCommand::BuildFlip(DXGKARG_PRESENT *present)
 void VioGpuCommand::PatchFlip(const DXGK_ALLOCATIONLIST &source)
 {
     if (m_flipSource) {
-        ImmediateFlipPacket *packet = reinterpret_cast<ImmediateFlipPacket *>(m_pDmaBuffer);
+        DmaFlipPacket *packet = reinterpret_cast<DmaFlipPacket *>(m_pDmaBuffer);
+        packet->segment = source.SegmentId;
         packet->address = source.PhysicalAddress;
     }
 }
@@ -152,10 +154,10 @@ void VioGpuCommand::Run()
         }
         m_queuedAll = TRUE;
 
-#if DXGKDDI_INTERFACE_VERSION == DXGKDDI_INTERFACE_VERSION_WIN7
+#if DXGKDDI_INTERFACE_VERSION <= DXGKDDI_INTERFACE_VERSION_WIN7
         if (m_flipSource) {
-            ImmediateFlipPacket *packet = reinterpret_cast<ImmediateFlipPacket *>(m_pDmaBuffer);
-            m_pAdapter->vidpn.PresentDmaFlip(m_flipSource, packet->address);
+            DmaFlipPacket *packet = reinterpret_cast<DmaFlipPacket *>(m_pDmaBuffer);
+            m_pAdapter->vidpn.PresentDmaFlip(m_flipSource, packet->segment, packet->address);
         }
 #endif
         m_pAdapter->ctrlQueue.DeferKicks(TRUE);
@@ -876,7 +878,7 @@ NTSTATUS VioGpuCommander::Patch(const DXGKARG_PATCH *pPatch)
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--> %s \n", __FUNCTION__));
 
-#if DXGKDDI_INTERFACE_VERSION == DXGKDDI_INTERFACE_VERSION_WIN7
+#if DXGKDDI_INTERFACE_VERSION <= DXGKDDI_INTERFACE_VERSION_WIN7
     if (pPatch->Flags.Present && pPatch->pDmaBufferPrivateData &&
         pPatch->DmaBufferPrivateDataSize >= sizeof(VioGpuCommand *) &&
         pPatch->pAllocationList && pPatch->AllocationListSize > DXGK_PRESENT_SOURCE_INDEX) {
