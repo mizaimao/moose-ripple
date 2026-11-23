@@ -133,6 +133,9 @@ typedef struct {
     RB2K_TEXTURE textures[RB2K_D7_TEXTURES];
     ULONG textureCount, textureBytes;
     RB2K_DMA_SEGMENT staging[RB2K_MAX_SEGMENTS];
+    /* The image whose whole readback staging holds for further presents;
+     * zero once staging or any image may have changed. */
+    ULONG presentCache;
     RB2K_DMA_SEGMENT rvdStaging[RB2K_RVD_SEGMENTS];
     ULONG rvdContexts;
 } RB2K_GPU;

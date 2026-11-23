@@ -112,7 +112,7 @@ static VP_STATUS present(RB2K_GPU *gpu, const RB2K_IMAGE *image, const RB2K_DD_P
     RB2K_PRIMARY *primary = &gpu->primary;
     RB2K_GPU_RESULT result;
     BOOLEAN solid = !image->defined || image->uniform;
-    ULONG span[64], offset = 0, y;
+    ULONG span[64], offset, y;
     const ULONG segmentPixels = RB2K_SEGMENT_BYTES / sizeof(ULONG);
     if (primary->bitsPerPixel != 32 || !primary->pixels || !primary->height || !primary->width ||
         primary->pitchPixels < primary->width ||
@@ -126,17 +126,21 @@ static VP_STATUS present(RB2K_GPU *gpu, const RB2K_IMAGE *image, const RB2K_DD_P
     if (solid) {
         ULONG i, color = image->defined ? image->color : 0;
         for (i = 0; i < sizeof(span) / sizeof(span[0]); ++i) span[i] = color;
-    } else {
+    } else if (gpu->presentCache != image->id) {
+        /* Windows presents each visible rectangle separately. Read the whole
+         * image back once; the following rectangles copy from staging. */
         LONGLONG read = rb_counter_ticks(NULL);
-        if (!rb_gpu_transfer_box(gpu, &result, image->id, p->srcX, p->srcY,
-                                 p->width, p->height, NULL)) return command_error(gpu, &result);
+        if (!rb_gpu_transfer_box(gpu, &result, image->id, 0, 0,
+                                 image->width, image->height, NULL)) return command_error(gpu, &result);
         if (gpu->d7Measure) gpu->d7Measure->fenceTicks += rb_counter_ticks(NULL) - read;
+        gpu->presentCache = image->id;
         ++gpu->presentReadbacks;
-        gpu->presentBytes += p->width * p->height * sizeof(ULONG);
+        gpu->presentBytes += image->width * image->height * sizeof(ULONG);
     }
     for (y = 0; y < p->height; ++y) {
         PULONG dst = primary->pixels + (p->dstY + y) * primary->pitchPixels + p->dstX;
         ULONG remaining = p->width;
+        offset = (p->srcY + y) * image->width + p->srcX;
         while (remaining) {
             PULONG src = span;
             ULONG count = sizeof(span) / sizeof(span[0]);
@@ -229,6 +233,8 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
      * before EndScene. Preserve the ordering of both sides of a blit. A
      * present reads the image back in its own context after the frame in
      * queue order, so it only queues the frame and does not wait for it. */
+    /* Anything but a present may change an image the cached readback holds. */
+    if (packet->IoControlCode != IOCTL_RB2K_DD_PRESENT) gpu->presentCache = 0;
     if (packet->IoControlCode == IOCTL_RB2K_DD_PRESENT) {
         if (!rb_gpu_order_image(gpu, &result, image)) return command_error(gpu, &result);
     } else if (packet->IoControlCode != IOCTL_RB2K_D3D7_CLEAR && packet->IoControlCode != IOCTL_RB2K_D3D7_DRAW &&

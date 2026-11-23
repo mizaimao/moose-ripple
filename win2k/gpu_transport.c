@@ -534,6 +534,7 @@ VP_STATUS rb_gpu_reserve_staging(RB2K_GPU *gpu, ULONG bytes)
     ULONG i;
     if (!gpu->ready) return ERROR_NOT_READY;
     if (!bytes || bytes > RB2K_DD_MAX_BYTES) return ERROR_INVALID_PARAMETER;
+    gpu->presentCache = 0;
     for (i = 0; i * RB2K_SEGMENT_BYTES < bytes; ++i) {
         RB2K_DMA_SEGMENT *s = &gpu->staging[i];
         if (!s->data) {
@@ -554,6 +555,7 @@ VP_STATUS rb_gpu_stop(RB2K_GPU *gpu)
 {
     ULONG pciCommand, i;
     VP_STATUS cleanup;
+    gpu->presentCache = 0;
     rb_gl_finish(gpu);
     cleanup = stop(gpu);
     if (!cleanup) VideoPortZeroMemory(&gpu->glDesktop, sizeof(gpu->glDesktop));
