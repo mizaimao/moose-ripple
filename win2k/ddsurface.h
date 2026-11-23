@@ -96,12 +96,15 @@ typedef struct {
     ULONG stage1Color, stage1Alpha, texture1, sampler1, border1;
     RB2K_D3D7_VERTEX vertices[RB2K_D3D7_VERTICES];
 } RB2K_D3D7_DRAW;
-/* Texels are tightly packed B8G8R8A8 rows. A zero id creates a texture of
- * the given size from row zero; the reply is the texture id. */
+/* Texels are tightly packed B8G8R8A8 rows of one mipmap level; width and
+ * height are the top level's and y and rows count within the level. A zero
+ * id creates a texture of the given size and levels from row zero of level
+ * zero; the reply is the texture id. */
 #define RB2K_D7_TEXTURES 1024
 #define RB2K_D7_TEXTURE_SIDE 1024
 #define RB2K_D7_UPLOAD_BYTES (256UL * 1024)
-typedef struct { ULONG id, target, width, height, y, rows; } RB2K_D3D7_TEXTURE;
+#define RB2K_D7_LEVELS 11
+typedef struct { ULONG id, target, width, height, y, rows, levels, level; } RB2K_D3D7_TEXTURE;
 typedef struct { ULONG target, depth, flags, color, depthBits; } RB2K_D3D7_ZCLEAR;
 enum { RB2K_CLEAR_COLOR = 1, RB2K_CLEAR_DEPTH = 2 };
 typedef struct {

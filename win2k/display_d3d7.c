@@ -66,6 +66,9 @@ typedef struct {
     HANDLE owner;
     ULONG handle, format, width, height, pitch, mipmaps;
     FLATPTR address;
+    /* Mipmap levels found on the attach chain, level zero being the above. */
+    ULONG levels, levelPitch[RB2K_D7_LEVELS];
+    FLATPTR levelAddress[RB2K_D7_LEVELS];
     ULONG host, sum, epoch;
     ULONG targets[RB2K_DD_SLOTS];
 } D7_TEXTURE;
@@ -186,6 +189,31 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
     t->format = rb_d7_texture_format(&g->ddpfSurface, d->mode.BitsPerPlane);
     t->mipmaps = (l->ddsCaps.dwCaps & DDSCAPS_MIPMAP) != 0;
     if (t->mipmaps) ++d->d7draw.regMipmaps;
+    t->levels = 1;
+    t->levelAddress[0] = t->address;
+    t->levelPitch[0] = t->pitch;
+    if (t->mipmaps) {
+        /* Each level is attached to the one above it and is half its size. */
+        PDD_SURFACE_LOCAL m = l;
+        ULONG stop = 5;
+        while (t->levels < RB2K_D7_LEVELS) {
+            PDD_SURFACE_GLOBAL mg;
+            if (!m->lpAttachList) { stop = 0; break; }
+            if (!(m = m->lpAttachList->lpAttached)) { stop = 1; break; }
+            if (!(m->ddsCaps.dwCaps & DDSCAPS_MIPMAP)) { stop = 2; break; }
+            mg = m->lpGbl;
+            if (!mg || mg->wWidth != max(1, t->width >> t->levels) || mg->wHeight != max(1, t->height >> t->levels)) {
+                stop = 3;
+                break;
+            }
+            if (!mg->fpVidMem || mg->lPitch <= 0) { stop = 4; break; }
+            t->levelAddress[t->levels] = mg->fpVidMem;
+            t->levelPitch[t->levels] = (ULONG)mg->lPitch;
+            ++t->levels;
+        }
+        if (stop < 5 && (t->width >> t->levels || t->height >> t->levels)) ++d->d7draw.mipStops[stop];
+        else ++d->d7draw.mipChains;
+    }
     if (l->lpSurfMore && (l->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_TEXTUREMANAGE)) ++d->d7draw.regManaged;
     if (!t->width || t->width > RB2K_D7_TEXTURE_SIDE || !t->height || t->height > RB2K_D7_TEXTURE_SIDE ||
         t->pitch < t->width * rb_d7_texel_bytes(t->format))
@@ -585,19 +613,30 @@ static ULONG convert(ULONG format, ULONG p)
 }
 
 /* Read the level-zero texels into the scratch buffer, tightly packed. */
+/* The texels of every level, tightly packed level after level. */
+static ULONG level_side(ULONG size, ULONG level) { return size >> level ? size >> level : 1; }
+
 static BOOL read_texels(D7_TEXTURE *t, ULONG *sum)
 {
-    ULONG row = t->width * rb_d7_texel_bytes(t->format), bytes = row * t->height, y, i, h = 0x811c9dc5;
+    ULONG bpp = rb_d7_texel_bytes(t->format), bytes = 0, level, y, i, h = 0x811c9dc5;
+    BYTE *out;
+    for (level = 0; level < t->levels; ++level)
+        bytes += level_side(t->width, level) * bpp * level_side(t->height, level);
     if (bytes > texelScratchBytes) {
         if (texelScratch) EngFreeMem(texelScratch);
         texelScratch = EngAllocMem(0, bytes, 'r7bR');
         texelScratchBytes = texelScratch ? bytes : 0;
         if (!texelScratch) return FALSE;
     }
+    out = texelScratch;
     __try {
-        EngProbeForRead((PVOID)t->address, t->pitch * (t->height - 1) + row, 1);
-        for (y = 0; y < t->height; ++y)
-            RtlCopyMemory(texelScratch + y * row, (const BYTE *)t->address + y * t->pitch, row);
+        for (level = 0; level < t->levels; ++level) {
+            ULONG row = level_side(t->width, level) * bpp, rows = level_side(t->height, level);
+            const BYTE *in = (const BYTE *)t->levelAddress[level];
+            if (t->levelPitch[level] < row) return FALSE;
+            EngProbeForRead((PVOID)in, t->levelPitch[level] * (rows - 1) + row, 1);
+            for (y = 0; y < rows; ++y, out += row) RtlCopyMemory(out, in + y * t->levelPitch[level], row);
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) { return FALSE; }
     for (i = 0; i + 4 <= bytes; i += 4) h = (h ^ *(const ULONG *)(texelScratch + i)) * 0x01000193;
     *sum = h ^ bytes;
@@ -607,34 +646,42 @@ static BOOL read_texels(D7_TEXTURE *t, ULONG *sum)
 static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
 {
     RB2K_D3D7_TEXTURE *packet = (RB2K_D3D7_TEXTURE *)uploadScratch;
-    ULONG chunk = RB2K_D7_UPLOAD_BYTES / (t->width * 4), y, id = t->host, tries;
-    ULONG *out = (ULONG *)(packet + 1), bpp = rb_d7_texel_bytes(t->format);
-    if (!packet || !chunk) return FALSE;
+    ULONG id = t->host, tries, bpp = rb_d7_texel_bytes(t->format), total = 0;
+    ULONG *out = (ULONG *)(packet + 1);
+    if (!packet || t->width * 4 > RB2K_D7_UPLOAD_BYTES) return FALSE;
     for (tries = 0; tries < 2; ++tries) {
         BOOL ok = TRUE;
-        for (y = 0; ok && y < t->height; y += chunk) {
-            ULONG rows = min(chunk, t->height - y), x, r, newId = 0;
-            for (r = 0; r < rows; ++r) {
-                const BYTE *src = texelScratch + (y + r) * t->width * bpp;
-                for (x = 0; x < t->width; ++x)
-                    out[r * t->width + x] = convert(t->format, bpp == 4 ? ((const ULONG *)src)[x] :
-                                                                     ((const USHORT *)src)[x]);
+        const BYTE *src = texelScratch;
+        ULONG level;
+        total = 0;
+        for (level = 0; ok && level < t->levels; ++level) {
+            ULONG width = level_side(t->width, level), height = level_side(t->height, level);
+            ULONG chunk = RB2K_D7_UPLOAD_BYTES / (width * 4), y;
+            for (y = 0; ok && y < height; y += chunk) {
+                ULONG rows = min(chunk, height - y), x, r, newId = 0;
+                for (r = 0; r < rows; ++r, src += width * bpp)
+                    for (x = 0; x < width; ++x)
+                        out[r * width + x] = convert(t->format, bpp == 4 ? ((const ULONG *)src)[x] :
+                                                                         ((const USHORT *)src)[x]);
+                packet->id = level || y ? id : t->host;
+                packet->target = targetId;
+                packet->width = t->width;
+                packet->height = t->height;
+                packet->y = y;
+                packet->rows = rows;
+                packet->levels = t->levels;
+                packet->level = level;
+                ok = request(d, IOCTL_RB2K_D3D7_TEXTURE, packet, sizeof(*packet) + rows * width * 4,
+                             &newId, sizeof(newId));
+                if (ok) id = newId;
+                total += rows * width * 4;
             }
-            packet->id = y ? id : t->host;
-            packet->target = targetId;
-            packet->width = t->width;
-            packet->height = t->height;
-            packet->y = y;
-            packet->rows = rows;
-            ok = request(d, IOCTL_RB2K_D3D7_TEXTURE, packet, sizeof(*packet) + rows * t->width * 4,
-                         &newId, sizeof(newId));
-            if (ok) id = newId;
         }
         if (ok) {
             if (t->host != id) RtlZeroMemory(t->targets, sizeof(t->targets));
             t->host = id;
             ++d->d7draw.uploads;
-            d->d7draw.uploadBytes += t->width * t->height * 4;
+            d->d7draw.uploadBytes += total;
             return TRUE;
         }
         /* A transport reset releases every host texture; make a new one. */
@@ -907,7 +954,8 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
             skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives);
             return DD_OK;
         }
-        if (tex->mipmaps && st->mipFilter != D3DTFP_NONE) d->d7draw.ignored[RB2K_D7_IGNORED_MIPMAP] += p->primitives;
+        if (tex->mipmaps && tex->levels == 1 && st->mipFilter != D3DTFP_NONE)
+            d->d7draw.ignored[RB2K_D7_IGNORED_MIPMAP] += p->primitives;
         draw->texture = texture_ready(c, tex, s->id);
         if (!draw->texture) { skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives); return DD_OK; }
     }
@@ -917,7 +965,8 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
             skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives);
             return DD_OK;
         }
-        if (tex1->mipmaps && st1->mipFilter != D3DTFP_NONE) d->d7draw.ignored[RB2K_D7_IGNORED_MIPMAP] += p->primitives;
+        if (tex1->mipmaps && tex1->levels == 1 && st1->mipFilter != D3DTFP_NONE)
+            d->d7draw.ignored[RB2K_D7_IGNORED_MIPMAP] += p->primitives;
         draw->texture1 = texture_ready(c, tex1, s->id);
         if (!draw->texture1) { skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives); return DD_OK; }
     }
@@ -941,12 +990,16 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     draw->sampler = (st->addressU >= 1 && st->addressU <= 4 ? st->addressU : 1) |
                    (st->addressV >= 1 && st->addressV <= 4 ? st->addressV : 1) << 4 |
                    (st->magFilter >= 1 && st->magFilter <= 5 ? st->magFilter : 1) << 8 |
-                   (st->minFilter >= 1 && st->minFilter <= 3 ? st->minFilter : 1) << 12;
+                   (st->minFilter >= 1 && st->minFilter <= 3 ? st->minFilter : 1) << 12 |
+                   (tex && tex->levels > 1 && st->mipFilter >= D3DTFP_POINT && st->mipFilter <= D3DTFP_LINEAR ?
+                    st->mipFilter : D3DTFP_NONE) << 16;
     draw->border = st->border;
     draw->sampler1 = (st1->addressU >= 1 && st1->addressU <= 4 ? st1->addressU : 1) |
                      (st1->addressV >= 1 && st1->addressV <= 4 ? st1->addressV : 1) << 4 |
                      (st1->magFilter >= 1 && st1->magFilter <= 5 ? st1->magFilter : 1) << 8 |
-                     (st1->minFilter >= 1 && st1->minFilter <= 3 ? st1->minFilter : 1) << 12;
+                     (st1->minFilter >= 1 && st1->minFilter <= 3 ? st1->minFilter : 1) << 12 |
+                     (tex1 && tex1->levels > 1 && st1->mipFilter >= D3DTFP_POINT && st1->mipFilter <= D3DTFP_LINEAR ?
+                      st1->mipFilter : D3DTFP_NONE) << 16;
     draw->border1 = st1->border;
     if (objectSpace) {
         draw->transform = 1;
@@ -1070,14 +1123,27 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
         b->pDest.x < 0 || b->pDest.y < 0 || (ULONG)(b->pDest.x + right - left) > dst->width ||
         (ULONG)(b->pDest.y + bottom - top) > dst->height) { ++d->d7draw.texBltFailures; return; }
     bpp = rb_d7_texel_bytes(src->format);
-    rows = bottom - top;
-    bytes = (right - left) * bpp;
     __try {
-        const BYTE *from = (const BYTE *)src->address + top * src->pitch + left * bpp;
-        BYTE *to = (BYTE *)dst->address + b->pDest.y * dst->pitch + b->pDest.x * bpp;
-        EngProbeForRead((PVOID)from, (rows - 1) * src->pitch + bytes, 1);
-        EngProbeForReadAndWrite(to, (rows - 1) * dst->pitch + bytes, 1);
-        for (y = 0; y < rows; ++y) RtlCopyMemory(to + y * dst->pitch, from + y * src->pitch, bytes);
+        /* Mipmapped textures copy the matching rectangle of each level both have. */
+        ULONG level, levels = min(src->levels, dst->levels);
+        if (src->width != dst->width || src->height != dst->height) levels = 1;
+        for (level = 0; level < levels; ++level) {
+            ULONG x0 = (ULONG)left >> level, y0 = (ULONG)top >> level, dx = (ULONG)b->pDest.x >> level;
+            ULONG dy = (ULONG)b->pDest.y >> level;
+            ULONG x1 = max(x0 + 1, (ULONG)right >> level), y1 = max(y0 + 1, (ULONG)bottom >> level);
+            const BYTE *from;
+            BYTE *to;
+            if (x1 > level_side(src->width, level) || y1 > level_side(src->height, level) ||
+                dx + x1 - x0 > level_side(dst->width, level) || dy + y1 - y0 > level_side(dst->height, level)) break;
+            rows = y1 - y0;
+            bytes = (x1 - x0) * bpp;
+            from = (const BYTE *)src->levelAddress[level] + y0 * src->levelPitch[level] + x0 * bpp;
+            to = (BYTE *)dst->levelAddress[level] + dy * dst->levelPitch[level] + dx * bpp;
+            EngProbeForRead((PVOID)from, (rows - 1) * src->levelPitch[level] + bytes, 1);
+            EngProbeForReadAndWrite(to, (rows - 1) * dst->levelPitch[level] + bytes, 1);
+            for (y = 0; y < rows; ++y)
+                RtlCopyMemory(to + y * dst->levelPitch[level], from + y * src->levelPitch[level], bytes);
+        }
     } __except (EXCEPTION_EXECUTE_HANDLER) { ++d->d7draw.texBltFailures; return; }
     dst->epoch = 0;
     ++d->d7draw.texBlts;
@@ -1504,7 +1570,10 @@ static DDSURFACEDESC textureFormats[] = {
                    D3DPSHADECAPS_ALPHAFLATBLEND | D3DPSHADECAPS_ALPHAGOURAUDBLEND, \
     .dwTextureCaps = D3DPTEXTURECAPS_PERSPECTIVE | D3DPTEXTURECAPS_ALPHA, \
     .dwTextureFilterCaps = D3DPTFILTERCAPS_NEAREST | D3DPTFILTERCAPS_LINEAR | \
+                           D3DPTFILTERCAPS_MIPNEAREST | D3DPTFILTERCAPS_MIPLINEAR | \
+                           D3DPTFILTERCAPS_LINEARMIPNEAREST | D3DPTFILTERCAPS_LINEARMIPLINEAR | \
                            D3DPTFILTERCAPS_MINFPOINT | D3DPTFILTERCAPS_MINFLINEAR | \
+                           D3DPTFILTERCAPS_MIPFPOINT | D3DPTFILTERCAPS_MIPFLINEAR | \
                            D3DPTFILTERCAPS_MAGFPOINT | D3DPTFILTERCAPS_MAGFLINEAR, \
     .dwTextureBlendCaps = D3DPTBLENDCAPS_DECAL | D3DPTBLENDCAPS_MODULATE | D3DPTBLENDCAPS_DECALALPHA | \
                           D3DPTBLENDCAPS_MODULATEALPHA | D3DPTBLENDCAPS_ADD, \

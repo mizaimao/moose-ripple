@@ -39,7 +39,7 @@ typedef struct RB2K_IMAGE {
 /* A Direct3D texture is a host resource without a context of its own. It
  * is attached to each colour context that samples it. */
 typedef struct {
-    ULONG id, width, height;
+    ULONG id, width, height, levels, bytes;   /* bytes: counted against RB2K_D7_TEXEL_BUDGET */
     ULONG contexts[RB2K_DD_SLOTS];
 } RB2K_TEXTURE;
 #define RB2K_D7_TEXEL_BUDGET (64UL << 20)
@@ -175,7 +175,7 @@ BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTU
 BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture,
                               const RB2K_IMAGE *image);
 BOOLEAN rb_gpu_texture_upload(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K_TEXTURE *texture,
-                              const RB2K_IMAGE *image, ULONG y, ULONG rows, PVOID texels);
+                              const RB2K_IMAGE *image, ULONG level, ULONG y, ULONG rows, PVOID texels);
 BOOLEAN rb_gpu_texture_free(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture);
 void rb_gpu_texture_forget(RB2K_GPU *gpu);
 BOOLEAN rb_gpu_prepare_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image);

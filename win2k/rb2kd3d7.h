@@ -58,6 +58,9 @@ typedef struct {
     ULONG surfaceRefused, refusedCaps, refusedFlags, refusedWidth, refusedHeight, refusedFormat, refusedCount;
     ULONG regMipmaps, regManaged;
     ULONG lightsBeyond;   /* SETLIGHT records for an index past the 32 kept */
+    /* Mipmapped textures registered with a full chain, and why a chain stopped
+     * early: no attach list, no attached surface, not a mipmap, size, memory. */
+    ULONG mipChains, mipStops[5];
     ULONG historyStop, historyNext;
     ULONG history[32][10];
     struct {

@@ -435,7 +435,7 @@ static void copy_rows(RB2K_GPU *gpu, PUCHAR pixels, ULONG pitch, ULONG rowBytes,
  * answers, after everything queued earlier in that context. */
 static BOOLEAN transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG context, ULONG resource,
                             ULONG x, ULONG y, ULONG width, ULONG height, PVOID upload, ULONG pitch,
-                            ULONG rowBytes, BOOLEAN ordered)
+                            ULONG rowBytes, BOOLEAN ordered, ULONG level)
 {
     PIXEL_REQUEST request;
     BACKING_REQUEST backing;
@@ -466,6 +466,7 @@ static BOOLEAN transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG contex
     begin_request(&request, upload ? VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D :
         VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, context);
     request.transfer.resource_id = resource;
+    request.transfer.level = level;
     request.transfer.box.x = x;
     request.transfer.box.y = y;
     request.transfer.box.w = width;
@@ -483,7 +484,7 @@ BOOLEAN rb_gpu_transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resour
                             ULONG x, ULONG y, ULONG width, ULONG height, PVOID upload)
 {
     ULONG rowBytes = width * sizeof(ULONG);
-    return transfer_box(gpu, result, resource, resource, x, y, width, height, upload, rowBytes, rowBytes, TRUE);
+    return transfer_box(gpu, result, resource, resource, x, y, width, height, upload, rowBytes, rowBytes, TRUE, 0);
 }
 
 BOOLEAN rb_gl_record_time(RB2K_GPU *gpu, ULONG operation, LONGLONG start, BOOLEAN ok)
@@ -498,12 +499,13 @@ BOOLEAN rb_gl_record_time(RB2K_GPU *gpu, ULONG operation, LONGLONG start, BOOLEA
 /* Keep pixels inside the virgl command. Returning an unfenced descriptor
  * means the command stream owns its data and staging may be reused. */
 static ULONG inline_write(PULONG words, ULONG id, ULONG x, ULONG y, ULONG w, ULONG h,
-                          const ULONG *pixels, ULONG pitchPixels)
+                          const ULONG *pixels, ULONG pitchPixels, ULONG level)
 {
     ULONG row, count = VIRGL_RESOURCE_IW_DATA_START + w*h;
     VideoPortZeroMemory(words, VIRGL_RESOURCE_IW_DATA_START * sizeof(*words));
     words[0] = VIRGL_CMD0(VIRGL_CCMD_RESOURCE_INLINE_WRITE, 0, count-1);
     words[VIRGL_RESOURCE_IW_RES_HANDLE] = id;
+    words[VIRGL_RESOURCE_IW_LEVEL] = level;
     words[VIRGL_RESOURCE_IW_USAGE] = 2; /* PIPE_MAP_WRITE */
     words[VIRGL_RESOURCE_IW_STRIDE] = w*sizeof(*words);
     words[VIRGL_RESOURCE_IW_LAYER_STRIDE] = w*h*sizeof(*words);
@@ -562,7 +564,7 @@ VP_STATUS rb_gpu_inline_uploads(RB2K_GPU *gpu, const RB2K_RECT *rects, ULONG cou
             r->right > primary->width || r->bottom > primary->height ||
             size > RB2K_SEGMENT_BYTES / sizeof(*words) - total) return ERROR_INVALID_PARAMETER;
         total += inline_write(words+total, gpu->glDesktop.image.id, r->left, r->top, w, h,
-                              primary->pixels + r->top*primary->pitchPixels + r->left, primary->pitchPixels);
+                              primary->pixels + r->top*primary->pitchPixels + r->left, primary->pitchPixels, 0);
     }
     status = submit_inline(gpu, gpu->glDesktop.image.id, total);
     rb_gl_record_time(gpu, RB2K_GL_UPLOAD, start, (BOOLEAN)!status);
@@ -601,7 +603,7 @@ BOOLEAN rb_gpu_primary_transfer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     first = gpu->primary.pixels + rect->top * gpu->primary.pitchPixels + rect->left;
     start = rb_counter_ticks(NULL);
     if (!transfer_box(gpu, result, gpu->glDesktop.image.id, gpu->glDesktop.image.id, rect->left, rect->top,
-                      width, height, readback ? NULL : first, pitch, width * sizeof(ULONG), FALSE))
+                      width, height, readback ? NULL : first, pitch, width * sizeof(ULONG), FALSE, 0))
         return rb_gl_record_time(gpu, operation, start, FALSE);
     if (readback) copy_rows(gpu, (PUCHAR)first, pitch, width * sizeof(ULONG), height, TRUE);
     if (readback) {
@@ -645,7 +647,7 @@ BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     ULONG bytes = rowBytes * image->height;
     ULONG offset;
     if (!transfer_box(gpu, result, image->id, image->id, 0, 0, image->width, image->height,
-                      readback ? NULL : pixels, rowBytes, rowBytes, FALSE)) return FALSE;
+                      readback ? NULL : pixels, rowBytes, rowBytes, FALSE, 0)) return FALSE;
     if (readback) {
         for (offset = 0; offset < bytes; offset += RB2K_SEGMENT_BYTES) {
             ULONG length = bytes - offset;
@@ -766,6 +768,7 @@ BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTU
     request.resource.width = texture->width;
     request.resource.height = texture->height;
     request.resource.depth = request.resource.array_size = 1;
+    request.resource.last_level = texture->levels - 1;
     return send_request(gpu, result, &request, sizeof(request.resource), RB2K_STAGE_RESOURCE);
 }
 
@@ -793,23 +796,23 @@ BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTU
 
 /* Earlier draws in the open frame must reach the host before new texels. */
 BOOLEAN rb_gpu_texture_upload(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K_TEXTURE *texture,
-                              const RB2K_IMAGE *image, ULONG y, ULONG rows, PVOID texels)
+                              const RB2K_IMAGE *image, ULONG level, ULONG y, ULONG rows, PVOID texels)
 {
-    ULONG rowBytes = texture->width * sizeof(ULONG), bytes = rowBytes * rows;
+    ULONG width = texture->width >> level ? texture->width >> level : 1;
+    ULONG rowBytes = width * sizeof(ULONG), bytes = rowBytes * rows;
     if (gpu->d7Frame.target && gpu->d7Frame.count && !submit_frame(gpu, result, FALSE)) return FALSE;
     if (bytes <= 16384) {
         ULONG count;
         result->stage = RB2K_STAGE_BACKING;
         result->status = rb_gpu_reserve_staging(gpu, bytes + VIRGL_RESOURCE_IW_DATA_START*sizeof(ULONG));
         if (result->status) return FALSE;
-        count = inline_write((PULONG)gpu->staging[0].data, texture->id, 0, y, texture->width,
-                             rows, texels, texture->width);
+        count = inline_write((PULONG)gpu->staging[0].data, texture->id, 0, y, width, rows, texels, width, level);
         result->stage = RB2K_STAGE_TRANSFER;
         result->status = submit_inline(gpu, image->id, count);
         return result->status == NO_ERROR;
     }
-    return transfer_box(gpu, result, image->id, texture->id, 0, y, texture->width, rows,
-                        texels, rowBytes, rowBytes, FALSE);
+    return transfer_box(gpu, result, image->id, texture->id, 0, y, width, rows,
+                        texels, rowBytes, rowBytes, FALSE, level);
 }
 
 BOOLEAN rb_gpu_texture_free(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture)
@@ -820,7 +823,7 @@ BOOLEAN rb_gpu_texture_free(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE
     begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_UNREF, 0);
     request.unref.resource_id = texture->id;
     if (!send_request(gpu, result, &request, sizeof(request.unref), RB2K_STAGE_CLEANUP)) return FALSE;
-    gpu->textureBytes -= texture->width * texture->height * sizeof(ULONG);
+    gpu->textureBytes -= texture->bytes;
     --gpu->textureCount;
     VideoPortZeroMemory(texture, sizeof(*texture));
     return TRUE;

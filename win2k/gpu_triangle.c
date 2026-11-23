@@ -587,10 +587,10 @@ BOOLEAN rb_gpu_d7_valid(const RB2K_D3D7_DRAW *d)
     {
         ULONG addressU = d->sampler1 & 15, addressV = (d->sampler1 >> 4) & 15;
         ULONG mag = (d->sampler1 >> 8) & 15, min = (d->sampler1 >> 12) & 15;
-        if (d->sampler1 >> 16 || addressU < 1 || addressU > 4 || addressV < 1 || addressV > 4 ||
+        if (d->sampler1 >> 20 || ((d->sampler1 >> 16) & 15) > 3 || addressU < 1 || addressU > 4 || addressV < 1 || addressV > 4 ||
             mag < 1 || mag > 5 || min < 1 || min > 3) return FALSE;
     }
-    if (d->sampler >> 16 || addressU < 1 || addressU > 4 || addressV < 1 || addressV > 4 ||
+    if (d->sampler >> 20 || ((d->sampler >> 16) & 15) > 3 || addressU < 1 || addressU > 4 || addressV < 1 || addressV > 4 ||
         mag < 1 || mag > 5 || min < 1 || min > 3) return FALSE;
     return TRUE;
 }
@@ -632,11 +632,12 @@ static ULONG pipe_wrap(ULONG address)
     return map[address];
 }
 
-/* Create (or replace) one sampler object. Only the top
- * level of a texture is uploaded: no mipmap filter. */
+/* Create (or replace) one sampler object. The Direct3D mip filter (point 2,
+ * linear 3) becomes Gallium's nearest (0) or linear (1); anything else
+ * samples the top level only (2). */
 static ULONG sampler_words(ULONG *words, ULONG handle, ULONG state, ULONG sampler, ULONG border)
 {
-    ULONG n = 0, mag = (sampler >> 8) & 15, min = (sampler >> 12) & 15;
+    ULONG n = 0, mag = (sampler >> 8) & 15, min = (sampler >> 12) & 15, mip = (sampler >> 16) & 15;
     if (state == Replaced) { words[n++] = DESTROY(VIRGL_OBJECT_SAMPLER_STATE); words[n++] = handle; }
     words[n++] = CREATE(VIRGL_OBJECT_SAMPLER_STATE, VIRGL_OBJ_SAMPLER_STATE_SIZE);
     words[n++] = handle;
@@ -644,9 +645,11 @@ static ULONG sampler_words(ULONG *words, ULONG handle, ULONG state, ULONG sample
                  VIRGL_OBJ_SAMPLE_STATE_S0_WRAP_T(pipe_wrap((sampler >> 4) & 15)) |
                  VIRGL_OBJ_SAMPLE_STATE_S0_WRAP_R(2) |
                  VIRGL_OBJ_SAMPLE_STATE_S0_MIN_IMG_FILTER(min != 1) |
-                 VIRGL_OBJ_SAMPLE_STATE_S0_MIN_MIP_FILTER(2) |
+                 VIRGL_OBJ_SAMPLE_STATE_S0_MIN_MIP_FILTER(mip == 2 ? 0 : mip == 3 ? 1 : 2) |
                  VIRGL_OBJ_SAMPLE_STATE_S0_MAG_IMG_FILTER(mag != 1);
-    words[n++] = 0; words[n++] = 0; words[n++] = 0;
+    /* No level-of-detail bias, and every level reachable (minimum 0, maximum
+     * 1000.0); a maximum of zero would clamp sampling to the top level. */
+    words[n++] = 0; words[n++] = 0; words[n++] = 0x447a0000;
     words[n++] = rb_gpu_channel((border >> 16) & 255);
     words[n++] = rb_gpu_channel((border >> 8) & 255);
     words[n++] = rb_gpu_channel(border & 255);
@@ -806,7 +809,8 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
                 if (s->viewTexture) { words[n++] = DESTROY(VIRGL_OBJECT_SAMPLER_VIEW); words[n++] = TextureView; }
                 words[n++] = CREATE(VIRGL_OBJECT_SAMPLER_VIEW, VIRGL_OBJ_SAMPLER_VIEW_SIZE);
                 words[n++] = TextureView; words[n++] = texture->id; words[n++] = VIRGL_FORMAT_B8G8R8A8_UNORM;
-                words[n++] = 0; words[n++] = 0; words[n++] = 0x688; /* identity swizzle */
+                words[n++] = 0; words[n++] = (texture->levels - 1) << 8;   /* all mipmap levels */
+                words[n++] = 0x688; /* identity swizzle */
                 s->viewTexture = texture->id;
                 changed = TRUE;
             }
@@ -821,7 +825,8 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
                 if (s->viewTexture1) { words[n++] = DESTROY(VIRGL_OBJECT_SAMPLER_VIEW); words[n++] = TextureView1; }
                 words[n++] = CREATE(VIRGL_OBJECT_SAMPLER_VIEW, VIRGL_OBJ_SAMPLER_VIEW_SIZE);
                 words[n++] = TextureView1; words[n++] = texture1->id; words[n++] = VIRGL_FORMAT_B8G8R8A8_UNORM;
-                words[n++] = 0; words[n++] = 0; words[n++] = 0x688; /* identity swizzle */
+                words[n++] = 0; words[n++] = (texture1->levels - 1) << 8;   /* all mipmap levels */
+                words[n++] = 0x688; /* identity swizzle */
                 s->viewTexture1 = texture1->id;
                 changed = TRUE;
             }
