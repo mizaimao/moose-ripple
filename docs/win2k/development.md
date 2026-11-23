@@ -1312,3 +1312,30 @@ Windows 2000 SP4 and XP SP3.
 | Diffuse colour from the vertex | material source |
 | Specular with local and distant viewer | halfway vector, power |
 | Normal of length 2 with and without normalizing | NORMALIZENORMALS |
+
+### Fog
+
+The native path fogs draws. Table fog is computed per pixel from the depth,
+or from w when the runtime's WINFO command says the projection is
+perspective. On the T&L device a vertex fog mode is computed from each
+vertex's camera-space depth, or its distance with range fog. Otherwise the
+fog factor is the specular alpha, which the runtime fills when it does the
+vertex processing. Linear, exponential and squared exponential modes are
+generated into the fragment shader. The driver offers vertex, table, range
+and w-based fog.
+
+`tfog.exe rgb|hal|tnl` fogs a blue quad toward red at one depth and
+compares pixels inside it with Direct3D's fog formulas. Microsoft's
+software vertex path ignores range fog, and its RGB device has no w-based
+fog; there the results match z-based fog, so those cases run only where the
+device offers them. Every case that runs passes on Windows 2000 SP4 and XP
+SP3.
+
+| Case | Vertices | RGB | HAL | T&L |
+| --- | --- | :---: | :---: | :---: |
+| Specular-alpha factor | transformed | pass | pass | pass |
+| Table fog from z: linear, exponential, squared | transformed | pass | pass | pass |
+| Vertex fog: linear, exponential | object space | pass | pass | pass |
+| Vertex fog with range | object space | n/a | n/a | pass |
+| Table fog from z under an orthographic projection | object space | pass | pass | pass |
+| Table fog from w under a perspective projection | object space | n/a | pass | pass |
