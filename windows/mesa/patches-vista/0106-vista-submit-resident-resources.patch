@@ -1,0 +1,377 @@
+Vista: keep the commands and their resources until the current Windows buffers
+can hold the whole submission. Retain one patch location for each allocation.
+
+--- a/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
++++ b/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
+@@ -703,54 +703,43 @@
+
+    return;
+ }
++
++struct virgl_gdi_batch_resource {
++   struct virgl_hw_res *res;
++   bool written;
++};
+
+ static void
+-virgl_gdi_emit_res(struct virgl_winsys *qws, struct virgl_cmd_buf *_cbuf,
+-                   struct virgl_hw_res *res, bool write_buf)
++virgl_gdi_add_resource(struct virgl_gdi_cmd_buf *cbuf, struct virgl_hw_res *res,
++                       bool written)
+ {
+-   struct virgl_gdi_winsys *qdws = virgl_gdi_winsys(qws);
+-   struct virgl_gdi_cmd_buf *cbuf = virgl_gdi_cmd_buf(_cbuf);
+-   bool already_in_list = false;
+-   for (int i = 0; i < cbuf->alloc_count; i++) {
+-      if (cbuf->ctx->pAllocationList[i].hAllocation == res->hAllocation) {
+-         already_in_list = true;
+-         break;
++   /* Query results and downloads both change what a subsequent CPU lock sees. */
++   written |= (res->bind & VIRGL_BIND_CUSTOM) != 0;
++   util_dynarray_foreach(&cbuf->resources, struct virgl_gdi_batch_resource, entry) {
++      if (entry->res->hAllocation == res->hAllocation) {
++         entry->written |= written;
++         return;
+       }
+    }
+-
+-   if (write_buf)
+-      cbuf->base.buf[cbuf->base.cdw++] = res->res_handle;
+-   if (!already_in_list) {
+-      assert(cbuf->alloc_count <= cbuf->max_alloc);
+-
+-      memset(&cbuf->ctx->pAllocationList[cbuf->alloc_count], 0,
+-             sizeof(D3DDDI_ALLOCATIONLIST));
+-      cbuf->ctx->pAllocationList[cbuf->alloc_count].hAllocation =
+-         res->hAllocation;
+-
+-      memset(&cbuf->ctx->pPatchLocationList[cbuf->alloc_count], 0,
+-             sizeof(D3DDDI_PATCHLOCATIONLIST));
+-      cbuf->ctx->pPatchLocationList[cbuf->alloc_count].AllocationIndex =
+-         cbuf->alloc_count;
+-
+-      cbuf->res_bo[cbuf->alloc_count] = NULL;
+-      virgl_gdi_resource_reference(&qdws->base,
+-                                   &cbuf->res_bo[cbuf->alloc_count], res);
+-
+-      p_atomic_inc(&res->num_cs_references);
+-
+-      cbuf->alloc_count++;
++   struct virgl_gdi_batch_resource *entry =
++      util_dynarray_grow(&cbuf->resources, struct virgl_gdi_batch_resource, 1);
++   if (!entry) {
++      cbuf->out_of_memory = true;
++      return;
+    }
++   entry->res = NULL;
++   entry->written = written;
++   virgl_gdi_resource_reference(cbuf->ws, &entry->res, res);
++   p_atomic_inc(&res->num_cs_references);
++}
+
+-   /* Vista: the host writes query results straight into a query buffer's guest memory
+-    * (VIRGL_BIND_CUSTOM). Vista shows a CPU lock what the GPU wrote only when a submission
+-    * declares the write, so every submission that names a query buffer does. */
+-   if (res->bind & VIRGL_BIND_CUSTOM) {
+-      for (int i = 0; i < cbuf->alloc_count; i++) {
+-         if (cbuf->ctx->pAllocationList[i].hAllocation == res->hAllocation)
+-            cbuf->ctx->pAllocationList[i].WriteOperation = 1;
+-      }
+-   }
++static void
++virgl_gdi_emit_res(struct virgl_winsys *qws, struct virgl_cmd_buf *_cbuf,
++                   struct virgl_hw_res *res, bool write_buf)
++{
++   if (write_buf)
++      _cbuf->buf[_cbuf->cdw++] = res->res_handle;
++   virgl_gdi_add_resource(virgl_gdi_cmd_buf(_cbuf), res, false);
+ }
+
+ static bool
+@@ -784,49 +773,40 @@
+       return NULL;
+    }
+
+-   // Resize buffer to suit our needs
+-   memset(cbuf->ctx->pCommandBuffer, 0,
+-          sizeof(VIOGPU_COMMAND_HDR)); // Create nop header
+-   struct gdikmt_render render;
+-   memset(&render, 0, sizeof(render));
+-   render.CommandLength = sizeof(VIOGPU_COMMAND_HDR);
+-   render.ResizeCommandBuffer = true;
+-   render.ResizeAllocationList = true;
+-   render.ResizePatchLocationList = true;
+-
+-   render.NewCommandBufferSize = size * 4 + 0x100;
+-   render.NewAllocationListSize = 1024;
+-   render.NewPatchLocationListSize = 1024;
+-   Status = cbuf->ctx->render(cbuf->ctx, &render);
+-   if (!NT_SUCCESS(Status)) {
+-      _debug_printf(
+-         "Failed to resize cmdbuf(D3DKMTRender) with status code: %lx\n",
+-         Status);
++   if (size > (UINT_MAX - 0x100) / sizeof(uint32_t) ||
++       !(cbuf->commands = MALLOC(size * sizeof(uint32_t) + 0x100))) {
++      cbuf->ctx->destroy(cbuf->ctx);
+       FREE(cbuf);
+       return NULL;
+    }
++   cbuf->command_capacity = size * sizeof(uint32_t) + 0x100;
++   cbuf->base.buf = (uint32_t *)(cbuf->commands + sizeof(VIOGPU_COMMAND_HDR));
++   util_dynarray_init(&cbuf->resources, NULL);
++   return &cbuf->base;
++}
+
++static void
++virgl_gdi_finish_batch(struct virgl_gdi_cmd_buf *cbuf, bool submitted)
++{
++   util_dynarray_foreach(&cbuf->resources, struct virgl_gdi_batch_resource, entry) {
++      if (submitted)
++         p_atomic_set(&entry->res->maybe_busy, true);
++      p_atomic_dec(&entry->res->num_cs_references);
++      virgl_gdi_resource_reference(cbuf->ws, &entry->res, NULL);
++   }
++   util_dynarray_clear(&cbuf->resources);
++   cbuf->out_of_memory = false;
++   cbuf->base.cdw = 0;
+    cbuf->driver_length = 0;
+-
+-   cbuf->max_alloc = render.NewAllocationListSize;
+-   cbuf->res_bo =
+-      CALLOC(render.NewAllocationListSize, sizeof(struct virgl_hw_res *));
+-
+-   cbuf->base.buf =
+-      (uint8_t *)cbuf->ctx->pCommandBuffer + sizeof(VIOGPU_COMMAND_HDR);
+-   return &cbuf->base;
+ }
+
+ static void
+ virgl_gdi_cmd_buf_destroy(struct virgl_cmd_buf *_cbuf)
+ {
+    struct virgl_gdi_cmd_buf *cbuf = virgl_gdi_cmd_buf(_cbuf);
+-
+-   for (int i = 0; i < cbuf->alloc_count; i++) {
+-      p_atomic_dec(&cbuf->res_bo[i]->num_cs_references);
+-      virgl_gdi_resource_reference(cbuf->ws, &cbuf->res_bo[i], NULL);
+-   }
+-
++   virgl_gdi_finish_batch(cbuf, false);
++   util_dynarray_fini(&cbuf->resources);
++   FREE(cbuf->commands);
+    cbuf->ctx->destroy(cbuf->ctx);
+    FREE(cbuf);
+ }
+@@ -903,6 +883,32 @@
+    memset(stats, 0, sizeof(stats));
+    submits = 0;
+    total_words = 0;
++}
++
++/* Each render callback can return different buffers. Resize with a NOP before
++ * filling them, leaving the encoded virgl packet and its references intact. */
++static bool
++virgl_gdi_prepare_render(struct virgl_gdi_cmd_buf *cbuf, UINT length, UINT count)
++{
++   struct gdikmt_context *ctx = cbuf->ctx;
++   if (!ctx->pCommandBuffer || ctx->CommandBufferSize < sizeof(VIOGPU_COMMAND_HDR))
++      return false;
++   struct gdikmt_render resize = {0};
++   resize.ResizeCommandBuffer = length > ctx->CommandBufferSize;
++   resize.ResizeAllocationList = count && (!ctx->pAllocationList || count > ctx->AllocationListSize);
++   resize.ResizePatchLocationList = count && (!ctx->pPatchLocationList || count > ctx->PatchLocationListSize);
++   if (resize.ResizeCommandBuffer || resize.ResizeAllocationList || resize.ResizePatchLocationList) {
++      resize.CommandLength = sizeof(VIOGPU_COMMAND_HDR);
++      resize.NewCommandBufferSize = cbuf->command_capacity;
++      resize.NewAllocationListSize = count;
++      resize.NewPatchLocationListSize = count;
++      memset(ctx->pCommandBuffer, 0, resize.CommandLength);
++      if (!NT_SUCCESS(ctx->render(ctx, &resize)))
++         return false;
++   }
++   return ctx->pCommandBuffer && length <= ctx->CommandBufferSize &&
++          (!count || (ctx->pAllocationList && count <= ctx->AllocationListSize &&
++                      ctx->pPatchLocationList && count <= ctx->PatchLocationListSize));
+ }
+
+ static int
+@@ -915,8 +921,12 @@
+    struct gdikmt_render render;
+    memset(&render, 0, sizeof(render));
+
++   if (fence)
++      *fence = NULL;
++   if (cbuf->out_of_memory)
++      goto failed;
+    if (cbuf->driver_length == 0) {
+-      VIOGPU_COMMAND_HDR *cmdHdr = cbuf->ctx->pCommandBuffer;
++      VIOGPU_COMMAND_HDR *cmdHdr = (VIOGPU_COMMAND_HDR *)cbuf->commands;
+       cmdHdr->type = VIOGPU_CMD_SUBMIT;
+       cmdHdr->size = cbuf->base.cdw * 4;
+       virgl_gdi_cmd_stats(cbuf->base.buf, cbuf->base.cdw);
+@@ -925,38 +935,48 @@
+       render.CommandLength = cbuf->driver_length;
+    }
+
+-   render.AllocationCount = cbuf->alloc_count;
+-   render.PatchLocationCount = cbuf->alloc_count;
++   render.AllocationCount = util_dynarray_num_elements(&cbuf->resources, struct virgl_gdi_batch_resource);
++   render.PatchLocationCount = render.AllocationCount;
++   if (render.CommandLength > cbuf->command_capacity ||
++       !virgl_gdi_prepare_render(cbuf, render.CommandLength, render.AllocationCount))
++      goto failed;
++   memcpy(cbuf->ctx->pCommandBuffer, cbuf->commands, render.CommandLength);
++   D3DDDI_ALLOCATIONLIST *allocation = cbuf->ctx->pAllocationList;
++   D3DDDI_PATCHLOCATIONLIST *patch = cbuf->ctx->pPatchLocationList;
++   util_dynarray_foreach(&cbuf->resources, struct virgl_gdi_batch_resource, entry) {
++      *allocation = (D3DDDI_ALLOCATIONLIST){0};
++      allocation->hAllocation = entry->res->hAllocation;
++      allocation->WriteOperation = entry->written;
++      *patch = (D3DDDI_PATCHLOCATIONLIST){0};
++      patch->AllocationIndex = allocation - cbuf->ctx->pAllocationList;
++      allocation++;
++      patch++;
++   }
+
+    if (fence) {
+       HANDLE event = CreateEventA(NULL, TRUE, FALSE, NULL);
+-      if (event) {
+-         *fence = virgl_gdi_fence_create(qws, event, false);
+-         if (*fence) {
+-            LARGE_INTEGER now;
+-            QueryPerformanceCounter(&now);
+-            virgl_gdi_fence(*fence)->created = now.QuadPart;
+-         }
+-
+-         /* The kernel driver sets the event when these commands have run on the host,
+-          * asked by a command of its own at the end of the buffer: Windows 7 has no
+-          * way to have the system do it. Without room for that command the event is
+-          * set at submission.
+-          */
+-         UINT end = render.CommandLength;
+-         UINT need = sizeof(VIOGPU_COMMAND_HDR) + sizeof(VIOGPU_SIGNAL_CMD);
+-         if (end + need <= cbuf->ctx->CommandBufferSize) {
+-            VIOGPU_COMMAND_HDR *hdr =
+-               (VIOGPU_COMMAND_HDR *)((uint8_t *)cbuf->ctx->pCommandBuffer + end);
+-            VIOGPU_SIGNAL_CMD *signal = (VIOGPU_SIGNAL_CMD *)(hdr + 1);
++      if (!event)
++         goto failed;
++      *fence = virgl_gdi_fence_create(qws, event, false);
++      if (!*fence)
++         goto failed;
++      LARGE_INTEGER now;
++      QueryPerformanceCounter(&now);
++      virgl_gdi_fence(*fence)->created = now.QuadPart;
+
+-            hdr->type = VIOGPU_CMD_SIGNAL_EVENT;
+-            hdr->size = sizeof(VIOGPU_SIGNAL_CMD);
+-            signal->hEvent = (ULONGLONG)(UINT_PTR)event;
+-            render.CommandLength += need;
+-         } else {
+-            render.CompletionEvent = event;
+-         }
++      /* Prefer a kernel completion event when there is room for its command. */
++      UINT end = render.CommandLength;
++      UINT need = sizeof(VIOGPU_COMMAND_HDR) + sizeof(VIOGPU_SIGNAL_CMD);
++      if (need <= cbuf->ctx->CommandBufferSize - end) {
++         VIOGPU_COMMAND_HDR *hdr =
++            (VIOGPU_COMMAND_HDR *)((uint8_t *)cbuf->ctx->pCommandBuffer + end);
++         VIOGPU_SIGNAL_CMD *signal = (VIOGPU_SIGNAL_CMD *)(hdr + 1);
++         hdr->type = VIOGPU_CMD_SIGNAL_EVENT;
++         hdr->size = sizeof(VIOGPU_SIGNAL_CMD);
++         signal->hEvent = (ULONGLONG)(UINT_PTR)event;
++         render.CommandLength += need;
++      } else {
++         render.CompletionEvent = event;
+       }
+    }
+
+@@ -965,22 +985,16 @@
+       _debug_printf(
+          "Failed to submit cmdbuf(D3DKMTRender) with status code: %lx\n",
+          Status);
+-      return -1;
++      goto failed;
+    }
++   virgl_gdi_finish_batch(cbuf, true);
++   return 0;
+
+-   cbuf->base.buf =
+-      (uint8_t *)cbuf->ctx->pCommandBuffer + sizeof(VIOGPU_COMMAND_HDR);
+-   cbuf->base.cdw = 0;
+-
+-   for (int i = 0; i < cbuf->alloc_count; i++) {
+-      p_atomic_set(&cbuf->res_bo[i]->maybe_busy, true);
+-
+-      p_atomic_dec(&cbuf->res_bo[i]->num_cs_references);
+-      virgl_gdi_resource_reference(cbuf->ws, &cbuf->res_bo[i], NULL);
+-   }
+-
+-   cbuf->alloc_count = 0;
+-   return 0;
++failed:
++   if (fence && *fence)
++      virgl_gdi_fence_reference(qws, fence, NULL);
++   virgl_gdi_finish_batch(cbuf, false);
++   return -1;
+ }
+
+ static int
+@@ -993,7 +1007,7 @@
+    mtx_lock(&vdws->coreMtx);
+
+    uint8_t *pCommandBuffer =
+-      virgl_gdi_cmd_buf(vdws->coreCtx)->ctx->pCommandBuffer;
++      virgl_gdi_cmd_buf(vdws->coreCtx)->commands;
+
+    VIOGPU_COMMAND_HDR *cmdHdr = (VIOGPU_COMMAND_HDR *)pCommandBuffer;
+    cmdHdr->type = VIOGPU_CMD_TRANSFER_TO_HOST;
+@@ -1036,7 +1050,7 @@
+    mtx_lock(&vdws->coreMtx);
+
+    uint8_t *pCommandBuffer =
+-      virgl_gdi_cmd_buf(vdws->coreCtx)->ctx->pCommandBuffer;
++      virgl_gdi_cmd_buf(vdws->coreCtx)->commands;
+
+    VIOGPU_COMMAND_HDR *cmdHdr = (VIOGPU_COMMAND_HDR *)pCommandBuffer;
+    cmdHdr->type = VIOGPU_CMD_TRANSFER_FROM_HOST;
+@@ -1058,15 +1072,7 @@
+    transferCmd->offset = buf_offset;
+    transferCmd->level = level;
+
+-   virgl_gdi_emit_res(vws, vdws->coreCtx, res, false);
+-
+-   /* Vista shows a CPU lock what the GPU wrote only when the submission
+-    * declares a write to the allocation. A download writes the guest copy. */
+-   struct virgl_gdi_cmd_buf *core = virgl_gdi_cmd_buf(vdws->coreCtx);
+-   for (int i = 0; i < core->alloc_count; i++) {
+-      if (core->ctx->pAllocationList[i].hAllocation == res->hAllocation)
+-         core->ctx->pAllocationList[i].WriteOperation = 1;
+-   }
++   virgl_gdi_add_resource(virgl_gdi_cmd_buf(vdws->coreCtx), res, true);
+
+    virgl_gdi_cmd_buf(vdws->coreCtx)->driver_length =
+       sizeof(VIOGPU_COMMAND_HDR) + sizeof(VIOGPU_TRANSFER_CMD);
+--- a/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.h
++++ b/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.h
+@@ -29,6 +29,7 @@
+ #include <stdint.h>
+ #include "virgl_gdi_public.h"
+ #include "util/u_thread.h"
++#include "util/u_dynarray.h"
+ #include "pipe/p_state.h"
+ #include "util/list.h"
+ #include "virgl/virgl_winsys.h"
+@@ -97,10 +98,10 @@
+
+    int in_fence_fd;
+
+-   int alloc_count;
+-   int max_alloc;
+-   struct virgl_hw_res **res_bo;
+-
++   struct util_dynarray resources;
++   bool out_of_memory;
++   uint8_t *commands;
++   UINT command_capacity;
+    UINT driver_length;
+ };
