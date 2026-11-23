@@ -169,8 +169,8 @@ DDK headers and import libraries, and the Visual C++ 6.0 headers. Set
 - Stock Direct3D Quake 0.73 draws its level, models and status bar through
   the driver's T&L device on Windows 2000 and XP, at about 46 and 36 to 40
   fps in a 640×480 window. The T&L device also applies Direct3D lights,
-  and fog is drawn. Only texture stage zero is drawn, from the top mipmap
-  level. The Direct3D 8 and 9 driver interfaces remain open.
+  and fog and two texture stages are drawn, each texture from its top
+  mipmap level. The Direct3D 8 and 9 driver interfaces remain open.
   [Direct3D work](https://github.com/mizaimao/moose-ripple/issues/106)
 - 8-bit and 16-bit full-screen game compatibility awaits guest testing.
 - Each OpenGL context that draws leaves about 1.2 KB in the program's own

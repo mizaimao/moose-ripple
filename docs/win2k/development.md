@@ -1339,3 +1339,37 @@ SP3.
 | Vertex fog with range | object space | n/a | n/a | pass |
 | Table fog from z under an orthographic projection | object space | pass | pass | pass |
 | Table fog from w under a perspective projection | object space | n/a | pass | pass |
+
+### Two texture stages
+
+The native path draws two texture stages, and the driver offers two
+stages with two textures. Stage one combines over stage zero's result with
+the same operations, where an argument may also be the current colour; it
+samples its own texture with its own coordinate set, which travels in the
+otherwise unused half of each vertex's texture-coordinate constant. A third
+enabled stage is still skipped and counted.
+
+The renderer keeps only the sampler and view slots up to the last one set,
+so setting slot zero alone drops slot one. A draw with stage one therefore
+sets both slots in one command each. Quake 0.73 found this at once: with
+two stages offered it draws its lightmaps in stage one, and with stage
+zero's texture changing between draws the lightmaps came out as noise.
+
+`tstage.exe rgb|hal|tnl` draws a quad with two 8×8 textures of four flat
+quadrants. Stage one reads the second coordinate set, mirrored left to
+right, so each screen quadrant combines a known texel of each texture.
+Microsoft's RGB device draws stage zero alone correctly but no texture at
+all once stage one is enabled, so the expected values follow Direct3D's
+documented operations and the RGB device runs the two-stage cases for
+reference only. All nine cases pass on the HAL and T&L devices on Windows
+2000 SP4 and XP SP3, and Quake's lightmapped walls look as they did with
+one stage (44.3 and 39.7 fps).
+
+| Case | Checks |
+| --- | --- |
+| Stage zero only | control |
+| Modulate, add, select current | stage one over stage zero |
+| Blend by texture alpha, by current alpha | stage-one alpha sources |
+| Texture times diffuse | stage one ignoring the current colour |
+| First coordinate set | TEXCOORDINDEX |
+| Stage zero's texture changes between two draws | both slots stay bound |
