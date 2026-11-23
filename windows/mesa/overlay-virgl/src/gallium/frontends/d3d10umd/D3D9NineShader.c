@@ -457,6 +457,7 @@ struct shader_translator
     bool wpos_is_sysval;
     bool face_is_sysval_integer;
     bool mul_zero_wins;
+    bool lower_fetch4;
     bool always_output_pointsize;
     bool no_vs_window_space;
     /* moose-ripple: the input a vertex shader's register v# is, plus one (0: none yet). See
@@ -881,71 +882,61 @@ TEX_if_fetch4(struct shader_translator *tx, struct ureg_dst dst,
               unsigned target, struct ureg_src src0,
               struct ureg_src src1, INT idx, DWORD flags, BYTE sampler_swizzle)
 {
-    struct ureg_dst coord;
-    struct ureg_dst projected;
-    struct ureg_dst rcp;
-    struct ureg_dst size;
-    struct ureg_dst tmp;
-    struct ureg_src result;
-    struct ureg_src src_tg4[3];
-
-    if (!(tx->info->fetch4 & (1 << idx)))
+    if (!(tx->info->fetch4 & (1 << idx)) || target != TGSI_TEXTURE_2D)
         return false;
-
-    if (target != TGSI_TEXTURE_2D)
-        return false;
-
     if (flags == NINED3DSI_TEXLD_PROJECT &&
         (tx->info->fetch4_projected_fallback & (1 << idx)))
         return false;
 
-    coord = tx_scratch(tx);
-    size = tx_scratch(tx);
-
+    struct ureg_dst coord = tx_scratch(tx);
+    struct ureg_dst size = tx_scratch(tx);
+    struct ureg_dst tmp = tx_scratch(tx);
     ureg_MOV(tx->ureg, coord, src0);
     if (flags == NINED3DSI_TEXLD_PROJECT) {
-        projected = tx_scratch(tx);
-        rcp = tx_scratch(tx);
-
-        ureg_RCP(tx->ureg, ureg_writemask(rcp, TGSI_WRITEMASK_X),
-                 NINE_APPLY_SWIZZLE(src0, W));
-        ureg_MUL(tx->ureg, ureg_writemask(projected, TGSI_WRITEMASK_XY),
-                 src0, ureg_scalar(ureg_src(rcp), TGSI_SWIZZLE_X));
-        ureg_MOV(tx->ureg, coord, ureg_src(projected));
+        ureg_RCP(tx->ureg, ureg_writemask(coord, TGSI_WRITEMASK_W), NINE_APPLY_SWIZZLE(src0, W));
+        ureg_MUL(tx->ureg, ureg_writemask(coord, TGSI_WRITEMASK_XY),
+                 src0, ureg_scalar(ureg_src(coord), TGSI_SWIZZLE_W));
     }
     ureg_TXQ(tx->ureg, ureg_writemask(size, TGSI_WRITEMASK_XY),
              target, ureg_imm1u(tx->ureg, 0), src1);
-    ureg_I2F(tx->ureg, ureg_writemask(size, TGSI_WRITEMASK_XY),
-             ureg_src(size));
-    ureg_DIV(tx->ureg, ureg_writemask(size, TGSI_WRITEMASK_XY),
-             ureg_imm2f(tx->ureg, 0.5f, 0.5f), ureg_src(size));
-    ureg_ADD(tx->ureg, ureg_writemask(coord, TGSI_WRITEMASK_XY),
-             ureg_src(coord), ureg_src(size));
+    ureg_I2F(tx->ureg, ureg_writemask(size, TGSI_WRITEMASK_XY), ureg_src(size));
 
-    tmp = tx_scratch(tx);
-    if (tx->info->fetch4_ati1 & (1 << idx)) {
-        ureg_TEX(tx->ureg, tmp, target, ureg_src(coord), src1);
-        result = ureg_swizzle(ureg_src(tmp), NINE_SWIZZLE4(X, X, X, X));
-        result = ureg_swizzle(result,
-                              (sampler_swizzle >> 0) & 0x3,
-                              (sampler_swizzle >> 2) & 0x3,
-                              (sampler_swizzle >> 4) & 0x3,
-                              (sampler_swizzle >> 6) & 0x3);
-        ureg_MOV(tx->ureg, dst, result);
-        return true;
+    const bool scalar = (tx->info->fetch4_ati1 & (1 << idx)) != 0;
+    if (tx->lower_fetch4 && !scalar) {
+        /* Fetch4 adds half a texel before the gather. The four texel centres
+         * lie around floor(uv * size). Keep wrap and border handling in the sampler. */
+        static const float centres[4][2] = {
+            {0.5f, 1.5f}, {1.5f, 1.5f}, {1.5f, 0.5f}, {0.5f, 0.5f}
+        };
+        struct ureg_dst tap = tx_scratch(tx);
+        ureg_MUL(tx->ureg, ureg_writemask(coord, TGSI_WRITEMASK_XY), ureg_src(coord), ureg_src(size));
+        ureg_FLR(tx->ureg, ureg_writemask(coord, TGSI_WRITEMASK_XY), ureg_src(coord));
+        ureg_DIV(tx->ureg, ureg_writemask(size, TGSI_WRITEMASK_XY),
+                 ureg_imm1f(tx->ureg, 1.0f), ureg_src(size));
+        ureg_MOV(tx->ureg, ureg_writemask(tap, TGSI_WRITEMASK_W), ureg_imm1f(tx->ureg, 0.0f));
+        for (unsigned i = 0; i < 4; ++i) {
+            ureg_ADD(tx->ureg, ureg_writemask(tap, TGSI_WRITEMASK_XY), ureg_src(coord),
+                     ureg_imm2f(tx->ureg, centres[i][0], centres[i][1]));
+            ureg_MUL(tx->ureg, ureg_writemask(tap, TGSI_WRITEMASK_XY), ureg_src(tap), ureg_src(size));
+            ureg_TXL(tx->ureg, ureg_writemask(tap, TGSI_WRITEMASK_X), target, ureg_src(tap), src1);
+            ureg_MOV(tx->ureg, ureg_writemask(tmp, 1u << i), ureg_scalar(ureg_src(tap), TGSI_SWIZZLE_X));
+        }
+    } else {
+        ureg_DIV(tx->ureg, ureg_writemask(size, TGSI_WRITEMASK_XY),
+                 ureg_imm2f(tx->ureg, 0.5f, 0.5f), ureg_src(size));
+        ureg_ADD(tx->ureg, ureg_writemask(coord, TGSI_WRITEMASK_XY), ureg_src(coord), ureg_src(size));
+        if (scalar) {
+            ureg_TEX(tx->ureg, tmp, target, ureg_src(coord), src1);
+        } else {
+            struct ureg_src gather_src[3] = {ureg_src(coord), ureg_imm1f(tx->ureg, 0.f), src1};
+            ureg_tex_insn(tx->ureg, TGSI_OPCODE_TG4, &tmp, 1, target,
+                          TGSI_RETURN_TYPE_FLOAT, NULL, 0, gather_src, 3);
+        }
     }
-
-    src_tg4[0] = ureg_src(coord);
-    src_tg4[1] = ureg_imm1f(tx->ureg, 0.f);
-    src_tg4[2] = src1;
-    ureg_tex_insn(tx->ureg, TGSI_OPCODE_TG4, &tmp, 1, target,
-                  TGSI_RETURN_TYPE_FLOAT, NULL, 0, src_tg4, 3);
-    result = ureg_swizzle(ureg_src(tmp), NINE_SWIZZLE4(Z, X, Y, W));
-    result = ureg_swizzle(result,
-                          (sampler_swizzle >> 0) & 0x3,
-                          (sampler_swizzle >> 2) & 0x3,
-                          (sampler_swizzle >> 4) & 0x3,
-                          (sampler_swizzle >> 6) & 0x3);
+    struct ureg_src result = scalar ? ureg_swizzle(ureg_src(tmp), NINE_SWIZZLE4(X, X, X, X)) :
+                                      ureg_swizzle(ureg_src(tmp), NINE_SWIZZLE4(Z, X, Y, W));
+    result = ureg_swizzle(result, (sampler_swizzle >> 0) & 0x3, (sampler_swizzle >> 2) & 0x3,
+                          (sampler_swizzle >> 4) & 0x3, (sampler_swizzle >> 6) & 0x3);
     ureg_MOV(tx->ureg, dst, result);
     return true;
 }
@@ -3868,6 +3859,10 @@ tx_ctor(struct shader_translator *tx, struct pipe_screen *screen, struct nine_sh
     tx->face_is_sysval_integer = GET_CAP(FS_FACE_IS_INTEGER_SYSVAL);
     tx->no_vs_window_space = !GET_CAP(VS_WINDOW_SPACE_POSITION);
     tx->mul_zero_wins = GET_CAP(LEGACY_MATH_RULES);
+#ifdef RIPPLE_VISTA
+    /* The virgl ES 3.0 profile emits GLSL ES 3.00, which has no textureGather. */
+    tx->lower_fetch4 = !GET_CAP(MAX_TEXTURE_GATHER_COMPONENTS) || GET_CAP(GLSL_FEATURE_LEVEL) < 150;
+#endif
 
     if (info->emulate_features) {
         tx->shift_wpos = true;

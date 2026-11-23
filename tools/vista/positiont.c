@@ -31,13 +31,15 @@ static const struct vertex quad[] = {
     {13.5f,13.5f,0.5f,1,1,1}, {1.5f,13.5f,0.5f,1,0,1}
 };
 
-int main(void)
+int main(int argc, char **argv)
 {
-    static const struct { const char *name; const DWORD *code; DWORD fvf; } tests[] = {
-        {"ps_2_0 constant, position only", solid2, D3DFVF_XYZRHW},
-        {"ps_2_0 sampled texture", sample2, D3DFVF_XYZRHW | D3DFVF_TEX1},
-        {"ps_3_0 constant, position only", solid3, D3DFVF_XYZRHW}
+    static const struct { const char *name; const DWORD *code; DWORD fvf; int gather; } tests[] = {
+        {"ps_2_0 constant, position only", solid2, D3DFVF_XYZRHW, 0},
+        {"ps_2_0 sampled texture", sample2, D3DFVF_XYZRHW | D3DFVF_TEX1, 0},
+        {"ps_3_0 constant, position only", solid3, D3DFVF_XYZRHW, 0},
+        {"ps_2_0 Fetch4, clamp", sample2, D3DFVF_XYZRHW | D3DFVF_TEX1, 1}
     };
+    const int test_fetch4 = argc == 2 && !strcmp(argv[1], "--fetch4");
     HWND window = CreateWindowA("STATIC", "D3D9 screen-space probe", WS_OVERLAPPEDWINDOW,
                                 0, 0, 64, 64, NULL, NULL, GetModuleHandle(NULL), NULL);
     IDirect3D9 *d3d = Direct3DCreate9(D3D_SDK_VERSION);
@@ -83,6 +85,13 @@ int main(void)
                                                        D3DPOOL_SYSTEMMEM, &copy, NULL));
 
     for (unsigned i = 0; i < sizeof(tests) / sizeof(tests[0]); ++i) {
+        if (tests[i].gather) {
+            if (!test_fetch4) continue;
+            CHECK(IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP));
+            CHECK(IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP));
+            CHECK(IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MIPMAPLODBIAS,
+                                                   MAKEFOURCC('G','E','T','4')));
+        }
         CHECK(IDirect3DDevice9_SetFVF(device, tests[i].fvf));
         CHECK(IDirect3DDevice9_CreatePixelShader(device, tests[i].code, &shader));
         CHECK(IDirect3DDevice9_SetPixelShader(device, shader));
@@ -99,9 +108,23 @@ int main(void)
             const DWORD *row = (const DWORD *)((const BYTE *)map.pBits + y * map.Pitch);
             for (int x = 0; x < 16; ++x) {
                 DWORD expected = background;
-                if (x >= 2 && x < 14 && y >= 2 && y < 14)
-                    expected = tests[i].code == sample2 ? texels[y >= 8][x >= 8] : 0xffff0000;
-                if ((row[x] ^ expected) & 0x00ffffff) ++bad;
+                if (x >= 2 && x < 14 && y >= 2 && y < 14) {
+                    if (tests[i].gather) {
+                        /* Fetch4 returns four neighbours' red channels. Clamp
+                         * repeats the last column and row at the two edges. */
+                        DWORD right = (texels[y >= 8][1] >> 16) & 0xff;
+                        DWORD below = (texels[1][x >= 8] >> 16) & 0xff;
+                        DWORD diagonal = (texels[1][1] >> 16) & 0xff;
+                        expected = (right << 16) | (below << 8) | diagonal;
+                    } else {
+                        expected = tests[i].code == sample2 ? texels[y >= 8][x >= 8] : 0xffff0000;
+                    }
+                }
+                if ((row[x] ^ expected) & 0x00ffffff) {
+                    if (!bad) printf("first mismatch (%d,%d) expected %06lx read %06lx\n", x, y,
+                                     expected & 0xffffffUL, row[x] & 0xffffffUL);
+                    ++bad;
+                }
             }
         }
         CHECK(IDirect3DSurface9_UnlockRect(copy));
