@@ -22,6 +22,7 @@ for arch in x86_64 i686; do
     "$cc" -O2 -Wall -Wextra -Werror "$here/d3d9msaa.c" -ld3d9 -lgdi32 -o "$OUT/d3d9msaa$suffix.exe"
     "$cc" -O2 -Wall -Wextra -Werror "$here/d3d9positiont.c" -ld3d9 -luser32 -o "$OUT/d3d9positiont$suffix.exe"
     "$cc" -O2 -Wall -Wextra -Werror "$here/d3d9fullscreen.c" -ld3d9 -luser32 -o "$OUT/d3d9fullscreen$suffix.exe"
+    "$cc" -O2 -Wall -Wextra -Werror "$here/d3d9caps.c" -ld3d9 -luser32 -o "$OUT/d3d9caps$suffix.exe"
 done
 cc=$LLVM_MINGW/bin/x86_64-w64-mingw32-clang
 "$cc" -O2 -Wall -Wextra -Werror "$here/desktopactive.c" -mwindows -ldwmapi -o "$OUT/desktopactive.exe"
