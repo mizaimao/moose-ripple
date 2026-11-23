@@ -68,6 +68,7 @@ typedef struct {
     LONGLONG frequency, dp2Ticks, checkTicks, uploadTicks;
     LONGLONG copyTicks, drawTicks;   /* the command-buffer copy; draw requests to the miniport */
     ULONG drawRequests;              /* IOCTL_RB2K_D3D7_DRAWS requests carrying the draws */
+    ULONG textureWrites, checksSkipped;   /* texture locks and blits seen; checks they saved */
     ULONG historyStop, historyNext;
     ULONG history[32][10];
     struct {

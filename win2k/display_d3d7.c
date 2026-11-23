@@ -69,6 +69,9 @@ typedef struct {
     /* Mipmap levels found on the attach chain, level zero being the above. */
     ULONG levels, levelPitch[RB2K_D7_LEVELS];
     FLATPTR levelAddress[RB2K_D7_LEVELS];
+    /* Video-memory textures are written only through DirectDraw locks and
+     * blits, which mark them dirty; others are checked once a scene. */
+    BOOL tracked, dirty;
     ULONG host, sum, epoch;
     ULONG targets[RB2K_DD_SLOTS];
 } D7_TEXTURE;
@@ -231,6 +234,8 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
     t->format = rb_d7_texture_format(&g->ddpfSurface, d->mode.BitsPerPlane);
     t->mipmaps = (l->ddsCaps.dwCaps & DDSCAPS_MIPMAP) != 0;
     if (t->mipmaps) ++d->d7draw.regMipmaps;
+    t->tracked = !(l->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY);
+    t->dirty = TRUE;
     t->levels = 1;
     t->levelAddress[0] = t->address;
     t->levelPitch[0] = t->pitch;
@@ -263,6 +268,24 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
     ++d->d7draw.textures;
     ++d->d7draw.registered[t->format];
     if (!(l->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY)) ++d->d7draw.videoTextures;
+}
+
+/* A DirectDraw lock, unlock or blit of a texture surface (display_ddraw.c).
+ * Mark every registered texture with that surface as a level dirty. This
+ * runs without the registry semaphore: it only sets flags, and a texture
+ * registered meanwhile starts dirty anyway. */
+void rb_d7_texture_written(DISPLAY *d, PDD_SURFACE_GLOBAL g)
+{
+    ULONG i, level;
+    if (!textures || !g) return;
+    ++d->d7draw.textureWrites;
+    for (i = 0; i < MaxTextures; ++i) {
+        D7_TEXTURE *t = &textures[i];
+        if (!t->handle || t->display != d) continue;
+        if (t->global == g) t->dirty = TRUE;
+        else for (level = 0; level < t->levels; ++level)
+            if (t->levelAddress[level] == g->fpVidMem) { t->dirty = TRUE; break; }
+    }
 }
 
 /* DestroySurface for a video-memory texture (display_ddraw.c), called
@@ -742,8 +765,11 @@ static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
     ULONG sum, i;
     BOOL attached = FALSE;
     for (i = 0; i < RB2K_DD_SLOTS; ++i) if (t->targets[i] == targetId) attached = TRUE;
+    if (t->host && attached && t->tracked && !t->dirty) { ++c->display->d7draw.checksSkipped; return t->host; }
     if (t->host && attached && t->epoch == textureEpoch) return t->host;
     ++c->display->d7draw.checks;
+    /* Cleared before reading, so a write during the read marks it again. */
+    t->dirty = FALSE;
     {
         LONGLONG start, end;
         BOOL read;
@@ -1202,6 +1228,7 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { ++d->d7draw.texBltFailures; return; }
     dst->epoch = 0;
+    dst->dirty = TRUE;
     ++d->d7draw.texBlts;
 }
 

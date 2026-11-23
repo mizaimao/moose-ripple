@@ -74,6 +74,7 @@ ULONG rb_d7_drawstats(DISPLAY *display, ULONG size, PVOID out);
 enum { TexNone, TexArgb8888, TexXrgb8888, TexRgb565, TexArgb1555, TexXrgb1555, TexArgb4444, TexFormats };
 ULONG rb_d7_texture_format(const DDPIXELFORMAT *format, ULONG desktopBits);
 ULONG rb_d7_texel_bytes(ULONG format);
+void rb_d7_texture_written(DISPLAY *d, PDD_SURFACE_GLOBAL g);
 void rb_d7_surface_destroyed(DISPLAY *display, PDD_SURFACE_GLOBAL surface);
 HPALETTE rb_create_palette(DISPLAY *display);
 BOOL rb_restore_palette(DISPLAY *display);

@@ -425,6 +425,8 @@ static DWORD APIENTRY blt(PDD_BLTDATA data)
     ULONG page;
     HANDLE owner = EngGetCurrentProcessId();
     DWORD rc = DDHAL_DRIVER_HANDLED;
+    if (data->lpDDDestSurface->ddsCaps.dwCaps & DDSCAPS_TEXTURE)
+        rb_d7_texture_written(d, data->lpDDDestSurface->lpGbl);
     EngAcquireSemaphore(d->ddLock);
     dst = rb_dd_slot(d, data->lpDDDestSurface->lpGbl);
     if (data->lpDDSrcSurface) src = rb_dd_slot(d, data->lpDDSrcSurface->lpGbl);
@@ -504,6 +506,7 @@ static DWORD APIENTRY lock_surface(PDD_LOCKDATA data)
     const ULONG *seed = NULL;
     ULONG bytes, page, offset = 0;
     DWORD rc = DDHAL_DRIVER_HANDLED;
+    if (data->lpDDSurface->ddsCaps.dwCaps & DDSCAPS_TEXTURE) rb_d7_texture_written(d, g);
     EngAcquireSemaphore(d->ddLock);
     s = rb_dd_slot(d, g);
     if (!s) {
@@ -575,6 +578,7 @@ static DWORD APIENTRY unlock_surface(PDD_UNLOCKDATA data)
     DD_SLOT *s;
     ULONG page;
     DWORD rc = DDHAL_DRIVER_HANDLED;
+    if (data->lpDDSurface->ddsCaps.dwCaps & DDSCAPS_TEXTURE) rb_d7_texture_written(d, g);
     EngAcquireSemaphore(d->ddLock);
     s = rb_dd_slot(d, g);
     if (!s) {
