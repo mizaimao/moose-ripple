@@ -1399,3 +1399,42 @@ fps with its mipmaps drawn.
 | Point filter, quads for levels 0, 1 and 3 | that level |
 | Linear filter at level 2.5 | half level 2, half level 3 |
 | The same five cases on a managed texture (HAL and T&L) | as above |
+
+### Speed against Microsoft's RGB device
+
+Three more changes took cost out of each Quake frame. The display driver
+now gathers a scene's draws into one miniport request of up to 64 KB
+instead of one request per draw: 129,000 requests became about 12,000. A
+windowed present read its rectangle back from the host and waited for it,
+and Windows presents each visible rectangle of a partly covered window
+separately; the miniport now reads the whole image back once and copies
+later rectangles of the same frame from staging, until any other request
+touches an image. Every texture a scene used was read and checksummed
+once a scene; a video-memory texture, which includes the runtime's
+managed copies, changes only through DirectDraw locks and blits, so those
+now mark it dirty and a clean one is used as it is. System-memory
+textures are still checked once a scene. `tpixels` rewrites its video and
+managed textures between two draws to check the second change arrives.
+
+On the Intel host, Quake's 969-frame `demo1` at 640×480 in a window ran
+the native T&L device and then Microsoft's RGB device in the same Windows
+2000 SP4 boot (`SoftwareOnly` set for the second run). The host GPU's
+minimum clock was held at 1200 MHz and the CPU governor at `performance`
+for these runs; at the host's default 350 MHz minimum, runs of one build
+varied from 36 to 50 fps.
+
+| Windows 2000 SP4, three boots each | Native T&L device | RGB device, same boot |
+| --- | ---: | ---: |
+| Before the three changes | 121.0, 121.1, 121.4 fps | 91.7, 85.7, 88.1 fps |
+| After them | 130.1, 130.4, 130.6 fps | 83.8, 86.0, 85.1 fps |
+| After them, Windows' default timer period | 60.6, 61.0 fps | 54.4, 53.9 fps |
+
+The test launcher sets a 1 ms system timer period with `timeBeginPeriod`
+for the first two rows. With Windows' default 15.6 ms period both devices
+lose time to a wait on the system timer that the driver does not make;
+the base build also ran 60.7 fps there, so that row cannot show the
+driver's own changes. On XP SP3 the native device ran 123.1 fps with the
+1 ms period. In the same native run on Windows 2000 the display driver
+spent 5.3 s of 7.4 s in its `DrawPrimitives2` handler, the miniport about 0.85 s
+presenting and 1.4 s uploading textures; texture checks took 5 ms where
+they had taken 1 to 3.5 s. All pixel tests pass on both systems.
