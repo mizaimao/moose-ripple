@@ -122,6 +122,7 @@ def build_programs(work):
         ("tlight.exe", ["tools/tlight"], ["-lddraw", "-ldxguid", "-luser32"]),
         ("tfog.exe", ["tools/tfog"], ["-lddraw", "-ldxguid", "-luser32"]),
         ("tstage.exe", ["tools/tstage"], ["-lddraw", "-ldxguid", "-luser32"]),
+        ("tmip.exe", ["tools/tmip"], ["-lddraw", "-ldxguid", "-luser32"]),
         ("d7draw.exe", ["tools/d7draw"], ["-lgdi32"]),
         ("zstore.exe", ["tools/zstore"], ["-lddraw", "-ldxguid", "-lgdi32", "-luser32"]),
         ("glpresent.exe", ["tools/glpresent"], ["-lopengl32", "-lgdi32", "-luser32"]),
