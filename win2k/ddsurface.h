@@ -47,6 +47,16 @@ typedef struct { ULONG x, y, z, rhw, diffuse, specular, u, v, nx, ny, nz; } RB2K
 #define RB2K_D7_NORMALIZE 1
 #define RB2K_D7_LOCAL_VIEWER 2
 #define RB2K_D7_SOURCE_SHIFT 4
+/* Fog: the factor comes from the specular alpha, from the camera-space
+ * depth of each vertex (T&L only), or from each pixel's depth (table fog,
+ * the depth z or, when the projection is perspective, w); then the
+ * D3DFOGMODE of the computed kinds, range fog and w-based table fog. */
+#define RB2K_D7_FOG_ALPHA 1
+#define RB2K_D7_FOG_VERTEX 2
+#define RB2K_D7_FOG_TABLE 3
+#define RB2K_D7_FOG_MODE_SHIFT 4
+#define RB2K_D7_FOG_RANGE 0x100
+#define RB2K_D7_FOG_W 0x200
 /* The low three depth-state bits are D3DCMPFUNC minus one. Disabled depth
  * uses zero. The other words keep Direct3D's own values; the miniport
  * validates each one before it creates a host object for it. */
@@ -77,6 +87,9 @@ typedef struct {
     ULONG lighting, lightCount, lightFlags, ambient;
     ULONG material[17];
     ULONG lights[RB2K_D7_LIGHTS][26];
+    /* Fog kind and flags as above, D3DRENDERSTATE_FOGCOLOR, and the IEEE
+     * start, end and density render states. */
+    ULONG fog, fogColor, fogStart, fogEnd, fogDensity;
     RB2K_D3D7_VERTEX vertices[RB2K_D3D7_VERTICES];
 } RB2K_D3D7_DRAW;
 /* Texels are tightly packed B8G8R8A8 rows. A zero id creates a texture of

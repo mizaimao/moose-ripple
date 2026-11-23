@@ -46,6 +46,9 @@ typedef struct {
      * NORMALIZENORMALS, the diffuse, specular, ambient and emissive material
      * sources, the D3DMATERIAL7, and lights by index with their D3DLIGHT7. */
     ULONG ambient, colorVertex, localViewer, normalize, sources[4];
+    /* Fog render states and the w range of the projection (D3DDP2OP_WINFO,
+     * equal ends for an affine projection). */
+    ULONG fogColor, fogTable, fogVertex, fogStart, fogEnd, fogDensity, rangeFog, wNear, wFar;
     ULONG material[17];
     ULONG lightOn;
     ULONG lights[MaxLights][26];
@@ -366,6 +369,7 @@ static DWORD APIENTRY create_context(LPD3DNTHAL_CONTEXTCREATEDATA a)
             c->colorVertex = c->localViewer = TRUE;
             c->sources[0] = D3DMCS_COLOR1;
             c->sources[1] = D3DMCS_COLOR2;
+            c->fogEnd = c->fogDensity = c->wNear = c->wFar = 0x3f800000;
             for (m = 0; m < 3; ++m)
                 c->matrices[m][0] = c->matrices[m][5] = c->matrices[m][10] = c->matrices[m][15] = 0x3f800000;
             c->viewport[2] = s->width;
@@ -505,6 +509,13 @@ static void render_state(D7_CONTEXT *c, ULONG state, ULONG value)
     case D3DRENDERSTATE_SRCBLEND: c->srcBlend = value; break;
     case D3DRENDERSTATE_DESTBLEND: c->dstBlend = value; break;
     case D3DRENDERSTATE_FOGENABLE: c->fog = value; break;
+    case D3DRENDERSTATE_FOGCOLOR: c->fogColor = value; break;
+    case D3DRENDERSTATE_FOGTABLEMODE: c->fogTable = value; break;
+    case D3DRENDERSTATE_FOGVERTEXMODE: c->fogVertex = value; break;
+    case D3DRENDERSTATE_FOGSTART: c->fogStart = value; break;
+    case D3DRENDERSTATE_FOGEND: c->fogEnd = value; break;
+    case D3DRENDERSTATE_FOGDENSITY: c->fogDensity = value; break;
+    case D3DRENDERSTATE_RANGEFOGENABLE: c->rangeFog = value; break;
     case D3DRENDERSTATE_SPECULARENABLE: c->specular = value; break;
     case D3DRENDERSTATE_STENCILENABLE: c->stencil = value; break;
     case D3DRENDERSTATE_CLIPPLANEENABLE: c->clipPlanes = value; break;
@@ -769,6 +780,29 @@ static HRESULT send_batch(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, ULONG count, D7_T
     return DD_OK;
 }
 
+/* Choose the draw's fog: table fog when a table mode is set, else fog
+ * computed per vertex on the T&L device when a vertex mode is set, else the
+ * factor in the specular alpha. Table fog uses w when the projection is
+ * perspective, as Direct3D does on hardware that offers w-based fog. */
+static void fog_draw(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, BOOL objectSpace)
+{
+    ULONG kind = RB2K_D7_FOG_ALPHA, mode = 0, flags = 0;
+    if (c->fogTable >= D3DFOG_EXP && c->fogTable <= D3DFOG_LINEAR) {
+        kind = RB2K_D7_FOG_TABLE;
+        mode = c->fogTable;
+        if (c->wNear != c->wFar) flags = RB2K_D7_FOG_W;
+    } else if (objectSpace && c->fogVertex >= D3DFOG_EXP && c->fogVertex <= D3DFOG_LINEAR) {
+        kind = RB2K_D7_FOG_VERTEX;
+        mode = c->fogVertex;
+        if (c->rangeFog) flags = RB2K_D7_FOG_RANGE;
+    }
+    draw->fog = kind | mode << RB2K_D7_FOG_MODE_SHIFT | flags;
+    draw->fogColor = c->fogColor;
+    draw->fogStart = c->fogStart;
+    draw->fogEnd = c->fogEnd;
+    draw->fogDensity = c->fogDensity;
+}
+
 /* Copy the enabled lights and the material for a lit draw. A light of
  * another type, or past the eighth, is left out and its draw counted. A
  * material source falls back to the material when the vertex lacks that
@@ -860,7 +894,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         if (!draw->texture) { skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives); return DD_OK; }
     }
     texture = needTexture;
-    if (c->fog) d->d7draw.ignored[RB2K_D7_IGNORED_FOG] += p->primitives;
+    if (c->fog) fog_draw(c, draw, objectSpace);
     if (c->colorKey) d->d7draw.ignored[RB2K_D7_IGNORED_COLORKEY] += p->primitives;
     if (c->clipPlanes) d->d7draw.ignored[RB2K_D7_IGNORED_CLIPPLANE] += p->primitives;
 
@@ -1213,6 +1247,13 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             }
             break;
         }
+        case D3DNTDP2OP_WINFO: {
+            const D3DNTHAL_DP2WINFO *w = (const D3DNTHAL_DP2WINFO *)p;
+            used = n * sizeof(*w);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            if (n) RtlCopyMemory(&c->wNear, w + n - 1, 2 * sizeof(ULONG));
+            break;
+        }
         case D3DNTDP2OP_ZRANGE: {
             const D3DNTHAL_DP2ZRANGE *z = (const D3DNTHAL_DP2ZRANGE *)p;
             used = n * sizeof(*z);
@@ -1418,7 +1459,8 @@ static DDSURFACEDESC textureFormats[] = {
 #define TRI_CAPS { \
     .dwSize = sizeof(D3DPRIMCAPS), \
     .dwMiscCaps = D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW | D3DPMISCCAPS_CULLCCW | D3DPMISCCAPS_MASKZ, \
-    .dwRasterCaps = D3DPRASTERCAPS_SUBPIXEL, \
+    .dwRasterCaps = D3DPRASTERCAPS_SUBPIXEL | D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_FOGTABLE | \
+                    D3DPRASTERCAPS_FOGRANGE | D3DPRASTERCAPS_WFOG | D3DPRASTERCAPS_ZFOG, \
     .dwAlphaCmpCaps = D3DPCMPCAPS_NEVER | D3DPCMPCAPS_LESS | D3DPCMPCAPS_EQUAL | D3DPCMPCAPS_LESSEQUAL | \
                       D3DPCMPCAPS_GREATER | D3DPCMPCAPS_NOTEQUAL | D3DPCMPCAPS_GREATEREQUAL | D3DPCMPCAPS_ALWAYS, \
     .dwSrcBlendCaps = BLEND_CAPS, .dwDestBlendCaps = BLEND_CAPS, \
@@ -1538,7 +1580,7 @@ BOOL rb_d7_info(PDD_GETDRIVERINFODATA a)
         .wMaxTextureBlendStages = 1, .wMaxSimultaneousTextures = 1, .wMaxVertexBlendMatrices = 1,
         .dvMaxVertexW = 1.0e10f, .dwMaxActiveLights = RB2K_D7_LIGHTS,
         .dwVertexProcessingCaps = D3DVTXPCAPS_MATERIALSOURCE7 | D3DVTXPCAPS_DIRECTIONALLIGHTS |
-                                  D3DVTXPCAPS_POSITIONALLIGHTS | D3DVTXPCAPS_LOCALVIEWER
+                                  D3DVTXPCAPS_POSITIONALLIGHTS | D3DVTXPCAPS_LOCALVIEWER | D3DVTXPCAPS_VERTEXFOG
     };
     D3DNTHAL_D3DEXTENDEDCAPS caps;
     const void *source;
