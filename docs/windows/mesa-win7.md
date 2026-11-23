@@ -1784,3 +1784,33 @@ and its verified catalog had SHA-256
 `f15ce36d8117a7d0a580a3cd84d561599950ea86ce2453060e75ca3c31054165`.
 This diagnostic scored 21,984. Its Windows tick clock advanced 398.93 s
 in 1,137.19 host seconds.
+
+### What Direct3D 9 reports on Vista and Windows 7 (2026-11-23)
+
+`tools/win7-hello/d3d9caps.c` lists everything a Direct3D 9 program can ask about
+the adapter, in a fixed order. It ran at 32 and 64 bits in disposable copies of
+the two 3DMark06 controls on the Intel UHD 630: Vista with the 192 KiB package,
+Windows 7 with the ranged-vertex package. Same host, QEMU and virtual machine.
+
+The two lists match in every `D3DCAPS9` field. That includes vertex-processing
+caps, shader versions and instruction limits, declaration types, vertex-texture
+filtering and the maximum point size. The device created with hardware, pure,
+mixed and software vertex processing matches too, with the same behaviour flags
+and the same software vertex-processing state. Every `CheckDeviceFormat` answer
+matches for each format, resource type and usage: render targets, depth, HDR
+blending and filtering, vertex textures, DXT and the extra FourCC formats. So do
+all depth-stencil matches. Nothing in these answers sends 3DMark06 down a
+different path on Vista. The differences:
+
+| Query | Vista control | Windows 7 control |
+| --- | --- | --- |
+| Multisample types (X8R8G8B8, A8R8G8B8, A16B16G16R16F, D24S8, ...) | 2, 4 and 8 samples | none |
+| `CheckDeviceFormatConversion` from YUY2 and UYVY to RGB | yes (Vista's video path) | no |
+| Available texture memory | 1,088 MiB | 1,024 MiB |
+
+The multisample difference is in the source, not the host. The Windows 7 control
+was built from `8121872`, the commit before multisampling (`63739fe`). Its DLLs
+lack the host probe, which the driver log confirms. The Vista control includes
+that commit. The default 3DMark06 run uses no anti-aliasing. Still, the
+Windows 7 scores so far come from a driver without `63739fe`, and the merged
+Windows 7 driver has no 3DMark06 run yet.
