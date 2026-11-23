@@ -9,7 +9,9 @@ typedef struct {
 } RB2K_D3D7_STATS;
 #define RB2K_D3D7_STATS_VERSION 1
 #define RB2K_D3D7_PROFILE_ESCAPE 0x52420021
-enum { RB2K_D7_CLEAR, RB2K_D7_DRAW, RB2K_D7_READ, RB2K_D7_UPLOAD, RB2K_D7_FLUSH, RB2K_D7_OPS };
+/* A present's fenceTicks is its readback from the host; the rest is the copy
+ * to the screen. */
+enum { RB2K_D7_CLEAR, RB2K_D7_DRAW, RB2K_D7_READ, RB2K_D7_UPLOAD, RB2K_D7_FLUSH, RB2K_D7_PRESENT, RB2K_D7_OPS };
 typedef struct {
     LONGLONG ticks, queueTicks, fenceTicks;
     ULONG calls, submits, fences, bytes, failed;
@@ -61,6 +63,11 @@ typedef struct {
     /* Mipmapped textures registered with a full chain, and why a chain stopped
      * early: no attach list, no attached surface, not a mipmap, size, memory. */
     ULONG mipChains, mipStops[5];
+    /* Display-driver time: whole DrawPrimitives2 calls, and within them the
+     * once-a-scene texture reads and checksums and the texture uploads. */
+    LONGLONG frequency, dp2Ticks, checkTicks, uploadTicks;
+    LONGLONG copyTicks, drawTicks;   /* the command-buffer copy; draw requests to the miniport */
+    ULONG drawRequests;              /* IOCTL_RB2K_D3D7_DRAWS requests carrying the draws */
     ULONG historyStop, historyNext;
     ULONG history[32][10];
     struct {

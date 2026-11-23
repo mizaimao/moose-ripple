@@ -35,6 +35,10 @@
 #define IOCTL_RB2K_D3D7_DRAW RB2K_DD_IOCTL(0x91b)
 #define IOCTL_RB2K_D3D7_TEXTURE RB2K_DD_IOCTL(0x91c)
 #define IOCTL_RB2K_D3D7_TEXTURE_FREE RB2K_DD_IOCTL(0x91d)
+/* Several draws to one target: the target id, then records of a ULONG byte
+ * count and an RB2K_D3D7_DRAW holding that many bytes (header and vertices). */
+#define IOCTL_RB2K_D3D7_DRAWS RB2K_DD_IOCTL(0x91e)
+#define RB2K_D7_DRAWS_BYTES (64UL * 1024)
 typedef struct { ULONG clears, triangles; } RB2K_D3D7_COMPLETED;
 #define RB2K_D3D7_VERTICES 96
 /* IEEE transformed position, packed Direct3D diffuse and specular colours,

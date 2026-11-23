@@ -100,11 +100,53 @@ static D7_CONTEXT *owned_context(ULONG id)
     return NULL;
 }
 
+/* Draw records waiting to go to the miniport in one IOCTL_RB2K_D3D7_DRAWS
+ * request: the target id, then a byte count and a draw for each. Records
+ * exist only inside a DrawPrimitives2 call, under the registry semaphore;
+ * they leave before any other request to the miniport and before the call
+ * returns, so requests stay in order. */
+static BYTE *drawQueue;
+static ULONG drawQueueBytes;
+static DISPLAY *drawQueueDisplay;
+
+static ULONG flush_draws(void)
+{
+    DISPLAY *d = drawQueueDisplay;
+    ULONG written = 0, error;
+    LONGLONG start, end;
+    if (!drawQueueBytes) return 0;
+    EngQueryPerformanceCounter(&start);
+    error = EngDeviceIoControl(d->miniport, IOCTL_RB2K_D3D7_DRAWS, drawQueue, drawQueueBytes, NULL, 0, &written);
+    EngQueryPerformanceCounter(&end);
+    d->d7draw.drawTicks += end - start;
+    ++d->d7draw.drawRequests;
+    drawQueueBytes = 0;
+    if (error) {
+        ULONG i;
+        ++d->d7draw.drawFailures;
+        d->d7draw.lastDrawError = error;
+        /* A transport reset releases the host textures: upload them again. */
+        for (i = 0; textures && i < MaxTextures; ++i)
+            if (textures[i].display == d) {
+                textures[i].host = 0;
+                RtlZeroMemory(textures[i].targets, sizeof(textures[i].targets));
+            }
+    }
+    return error;
+}
+
+/* Every other miniport request from this file goes through here. */
+static ULONG miniport(DISPLAY *d, ULONG code, PVOID in, ULONG inSize, PVOID out, ULONG outSize, ULONG *written)
+{
+    flush_draws();
+    *written = 0;
+    return EngDeviceIoControl(d->miniport, code, in, inSize, out, outSize, written);
+}
+
 static BOOL request(DISPLAY *d, ULONG code, PVOID in, ULONG inSize, PVOID out, ULONG outSize)
 {
-    ULONG written = 0;
-    return !EngDeviceIoControl(d->miniport, code, in, inSize, out, outSize, &written) &&
-           written == outSize;
+    ULONG written;
+    return !miniport(d, code, in, inSize, out, outSize, &written) && written == outSize;
 }
 
 static void release_texture(D7_TEXTURE *t, BOOL host)
@@ -285,8 +327,8 @@ static HRESULT finish_scene(D7_CONTEXT *c)
     ULONG written;
     if (!c->queued) return DD_OK;
     c->queued = FALSE;
-    return EngDeviceIoControl(c->display->miniport, IOCTL_RB2K_D3D7_FLUSH, &c->target,
-                              sizeof(c->target), NULL, 0, &written) ? DDERR_SURFACELOST : DD_OK;
+    return miniport(c->display, IOCTL_RB2K_D3D7_FLUSH, &c->target,
+                    sizeof(c->target), NULL, 0, &written) ? DDERR_SURFACELOST : DD_OK;
 }
 
 static DWORD APIENTRY destroy_local(PDD_DESTROYDDLOCALDATA a)
@@ -702,10 +744,26 @@ static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
     for (i = 0; i < RB2K_DD_SLOTS; ++i) if (t->targets[i] == targetId) attached = TRUE;
     if (t->host && attached && t->epoch == textureEpoch) return t->host;
     ++c->display->d7draw.checks;
-    if (!read_texels(t, &sum)) { ++c->display->d7draw.checkFailures; return 0; }
+    {
+        LONGLONG start, end;
+        BOOL read;
+        EngQueryPerformanceCounter(&start);
+        read = read_texels(t, &sum);
+        EngQueryPerformanceCounter(&end);
+        c->display->d7draw.checkTicks += end - start;
+        if (!read) { ++c->display->d7draw.checkFailures; return 0; }
+    }
     t->epoch = textureEpoch;
     if (t->host && attached && sum == t->sum) return t->host;
-    if (!upload_texture(c->display, t, targetId)) return 0;
+    {
+        LONGLONG start, end;
+        BOOL uploaded;
+        EngQueryPerformanceCounter(&start);
+        uploaded = upload_texture(c->display, t, targetId);
+        EngQueryPerformanceCounter(&end);
+        c->display->d7draw.uploadTicks += end - start;
+        if (!uploaded) return 0;
+    }
     t->sum = sum;
     for (i = 0; i < RB2K_DD_SLOTS && t->targets[i] != targetId; ++i) {}
     if (i == RB2K_DD_SLOTS) {
@@ -802,30 +860,28 @@ static HRESULT refused(DISPLAY *d, ULONG site, LPD3DNTHAL_DRAWPRIMITIVES2DATA a,
     return DDERR_INVALIDPARAMS;
 }
 
-static HRESULT send_batch(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, ULONG count, D7_TEXTURE *tex, D7_TEXTURE *tex1)
+/* Queue one draw of count vertices; a full queue, or one for another
+ * target, goes to the miniport first. */
+static HRESULT send_batch(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, ULONG count)
 {
     DISPLAY *d = c->display;
-    ULONG written = 0, error;
+    ULONG bytes = FIELD_OFFSET(RB2K_D3D7_DRAW, vertices) + count * sizeof(draw->vertices[0]);
     draw->count = count;
-    error = EngDeviceIoControl(d->miniport, IOCTL_RB2K_D3D7_DRAW, draw,
-                               FIELD_OFFSET(RB2K_D3D7_DRAW, vertices) + count * sizeof(draw->vertices[0]),
-                               NULL, 0, &written);
-    if (error) {
-        ++d->d7draw.drawFailures;
-        d->d7draw.lastDrawError = error;
-        d->d7draw.lastDrawState[0] = draw->colorStage;
-        d->d7draw.lastDrawState[1] = draw->alphaStage;
-        d->d7draw.lastDrawState[2] = draw->blend;
-        d->d7draw.lastDrawState[3] = draw->alphaTest;
-        d->d7draw.lastDrawState[4] = draw->depthState;
-        d->d7draw.lastDrawState[5] = draw->texture;
-        d->d7draw.lastDrawState[6] = draw->sampler;
-        d->d7draw.lastDrawState[7] = draw->depth;
-        /* The texture may have gone with a transport reset. */
-        if (tex) { tex->host = 0; RtlZeroMemory(tex->targets, sizeof(tex->targets)); }
-        if (tex1) { tex1->host = 0; RtlZeroMemory(tex1->targets, sizeof(tex1->targets)); }
-        return DDERR_GENERIC;
+    if (!drawQueue) {
+        drawQueue = EngAllocMem(0, sizeof(ULONG) + RB2K_D7_DRAWS_BYTES, 'q7bR');
+        if (!drawQueue) return DDERR_OUTOFMEMORY;
     }
+    if (drawQueueBytes && (drawQueueDisplay != d || *(const ULONG *)drawQueue != draw->target ||
+                           drawQueueBytes + sizeof(ULONG) + bytes > sizeof(ULONG) + RB2K_D7_DRAWS_BYTES) &&
+        flush_draws()) return DDERR_GENERIC;
+    if (!drawQueueBytes) {
+        *(ULONG *)drawQueue = draw->target;
+        drawQueueBytes = sizeof(ULONG);
+        drawQueueDisplay = d;
+    }
+    *(ULONG *)(drawQueue + drawQueueBytes) = bytes;
+    RtlCopyMemory(drawQueue + drawQueueBytes + sizeof(ULONG), draw, bytes);
+    drawQueueBytes += sizeof(ULONG) + bytes;
     c->queued = TRUE;
     d->d7draw.drawn += count / 3;
     ++d->d7draw.drawCalls;
@@ -1093,12 +1149,12 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
             if (bad) { ++d->d7draw.badPositions; skip(c, RB2K_D7_SKIP_VERTEX, 1); continue; }
             count += 3;
             if (count == RB2K_D3D7_VERTICES || t + 1 == p->primitives) {
-                hr = send_batch(c, draw, count, tex, tex1);
+                hr = send_batch(c, draw, count);
                 if (FAILED(hr)) break;
                 count = 0;
             }
         }
-        if (SUCCEEDED(hr) && count) hr = send_batch(c, draw, count, tex, tex1);
+        if (SUCCEEDED(hr) && count) hr = send_batch(c, draw, count);
     } __except (EXCEPTION_EXECUTE_HANDLER) { hr = refused(d, RB2K_D7_FAIL_PROBE, a, p, low, high, stride); }
     return hr;
 }
@@ -1171,13 +1227,13 @@ static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, ULONG depthBits, c
         both.flags = flags;
         both.color = color;
         both.depthBits = depthBits;
-        if (EngDeviceIoControl(c->display->miniport, IOCTL_RB2K_D3D7_ZCLEAR,
-                               &both, sizeof(both), NULL, 0, &written)) return DDERR_SURFACELOST;
+        if (miniport(c->display, IOCTL_RB2K_D3D7_ZCLEAR, &both, sizeof(both), NULL, 0, &written))
+            return DDERR_SURFACELOST;
     } else {
         f.id = s->id;
         f.color = color;
-        if (EngDeviceIoControl(c->display->miniport, IOCTL_RB2K_D3D7_CLEAR,
-                               &f, sizeof(f), NULL, 0, &written)) return DDERR_SURFACELOST;
+        if (miniport(c->display, IOCTL_RB2K_D3D7_CLEAR, &f, sizeof(f), NULL, 0, &written))
+            return DDERR_SURFACELOST;
     }
     c->queued = TRUE;
     return DD_OK;
@@ -1487,8 +1543,10 @@ static DWORD APIENTRY dp2(LPD3DNTHAL_DRAWPRIMITIVES2DATA a)
     ULONG stride = a->dwVertexSize; /* Shares its field with the return code. */
     ULONG origin = 0;
     ULONG entryFlags = a->dwFlags, beyond = 0;
+    LONGLONG start, end;
     a->dwErrorOffset = 0;
     a->ddrval = DDERR_INVALIDOBJECT;
+    EngQueryPerformanceCounter(&start);
     EngAcquireSemaphore(registry);
     c = owned_context(a->dwhContext);
     if (c) {
@@ -1501,9 +1559,14 @@ static DWORD APIENTRY dp2(LPD3DNTHAL_DRAWPRIMITIVES2DATA a)
         a->ddrval = DDERR_INVALIDPARAMS;
         if (!a->dwCommandLength) a->ddrval = DD_OK;
         else if (a->dwCommandLength <= MaxCommandBytes) {
+            LONGLONG copied;
+            BOOL ok;
             copy = EngAllocMem(0, a->dwCommandLength, '72bR');
+            ok = copy && copy_commands(a, copy, &origin);
+            EngQueryPerformanceCounter(&copied);
+            c->display->d7draw.copyTicks += copied - start;
             if (!copy) a->ddrval = DDERR_OUTOFMEMORY;
-            else if (copy_commands(a, copy, &origin)) {
+            else if (ok) {
                 ULONG sites = 0, i;
                 for (i = 0; i < 8; ++i) sites += c->display->d7draw.failSites[i];
                 a->ddrval = commands(c, a, stride, copy, a->dwCommandLength, origin, &a->dwErrorOffset);
@@ -1523,6 +1586,7 @@ static DWORD APIENTRY dp2(LPD3DNTHAL_DRAWPRIMITIVES2DATA a)
         if (!c->inScene) ++textureEpoch;
         if ((!c->inScene || FAILED(a->ddrval)) && FAILED(finish_scene(c)) && SUCCEEDED(a->ddrval))
             a->ddrval = DDERR_SURFACELOST;
+        if (flush_draws() && SUCCEEDED(a->ddrval)) a->ddrval = DDERR_GENERIC;
         if (FAILED(a->ddrval)) {
             c->display->d7.lastError = a->ddrval;
             ++c->display->d7draw.dp2Failures;
@@ -1530,6 +1594,9 @@ static DWORD APIENTRY dp2(LPD3DNTHAL_DRAWPRIMITIVES2DATA a)
             c->display->d7draw.lastFailureOp = c->display->d7.lastCommand;
             c->display->d7.errorOffset = a->dwErrorOffset;
         }
+        EngQueryPerformanceCounter(&end);
+        c->display->d7draw.dp2Ticks += end - start;
+        if (!c->display->d7draw.frequency) EngQueryPerformanceFrequency(&c->display->d7draw.frequency);
         EngReleaseSemaphore(c->display->ddLock);
     }
     if (copy) EngFreeMem(copy);
