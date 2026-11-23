@@ -1,5 +1,5 @@
-/* Screen-space triangle fans with an application pixel shader and no vertex
- * shader. Build with llvm-mingw clang positiont.c -O2 -ld3d9 -luser32.
+/* Screen-space triangle fans with an application pixel shader.
+ * Build with llvm-mingw clang positiont.c -O2 -ld3d9 -luser32.
  * MIT licence (LICENSE at the repository root).
  */
 #define COBJMACROS
@@ -21,6 +21,11 @@ static const DWORD sample2[] = { D3DPS_VERSION(2,0), 0x0200001f, 0x80000000, 0xb
     0x0200001f, 0x90000000, 0xa00f0800, 0x03000042, 0x800f0000, 0xb0e40000, 0xa0e40800,
     0x02000001, 0x800f0800, 0x80e40000, 0xffff };
 
+/* dcl_position v0; dcl_position o0; mov o0,v0. Supplies no texture coordinates. */
+static const DWORD position_vs[] = { D3DVS_VERSION(3,0),
+    0x0200001f, 0x80000000, 0x900f0000, 0x0200001f, 0x80000000, 0xe00f0000,
+    0x02000001, 0xe00f0000, 0x90e40000, 0xffff };
+
 static const DWORD texels[2][2] = {
     {0xff235688, 0xffa7821b}, {0xffcc3344, 0xff2adc56}
 };
@@ -33,11 +38,12 @@ static const struct vertex quad[] = {
 
 int main(int argc, char **argv)
 {
-    static const struct { const char *name; const DWORD *code; DWORD fvf; int gather; } tests[] = {
-        {"ps_2_0 constant, position only", solid2, D3DFVF_XYZRHW, 0},
-        {"ps_2_0 sampled texture", sample2, D3DFVF_XYZRHW | D3DFVF_TEX1, 0},
-        {"ps_3_0 constant, position only", solid3, D3DFVF_XYZRHW, 0},
-        {"ps_2_0 Fetch4, clamp", sample2, D3DFVF_XYZRHW | D3DFVF_TEX1, 1}
+    static const struct { const char *name; const DWORD *code; DWORD fvf; int gather, bound_vs; } tests[] = {
+        {"ps_2_0 constant, position only", solid2, D3DFVF_XYZRHW, 0, 0},
+        {"ps_2_0 sampled texture", sample2, D3DFVF_XYZRHW | D3DFVF_TEX1, 0, 0},
+        {"ps_3_0 constant, position only", solid3, D3DFVF_XYZRHW, 0, 0},
+        {"ps_2_0 sampled texture with bound VS", sample2, D3DFVF_XYZRHW | D3DFVF_TEX1, 0, 1},
+        {"ps_2_0 Fetch4, clamp", sample2, D3DFVF_XYZRHW | D3DFVF_TEX1, 1, 0}
     };
     const int test_fetch4 = argc == 2 && !strcmp(argv[1], "--fetch4");
     HWND window = CreateWindowA("STATIC", "D3D9 screen-space probe", WS_OVERLAPPEDWINDOW,
@@ -46,6 +52,7 @@ int main(int argc, char **argv)
     IDirect3DDevice9 *device = NULL;
     IDirect3DVertexBuffer9 *vb = NULL;
     IDirect3DTexture9 *texture = NULL;
+    IDirect3DVertexShader9 *previous_vs = NULL;
     IDirect3DPixelShader9 *shader = NULL;
     IDirect3DSurface9 *target = NULL, *copy = NULL;
     D3DPRESENT_PARAMETERS pp = {0};
@@ -83,6 +90,7 @@ int main(int argc, char **argv)
     CHECK(IDirect3DDevice9_GetRenderTarget(device, 0, &target));
     CHECK(IDirect3DDevice9_CreateOffscreenPlainSurface(device, 16, 16, pp.BackBufferFormat,
                                                        D3DPOOL_SYSTEMMEM, &copy, NULL));
+    CHECK(IDirect3DDevice9_CreateVertexShader(device, position_vs, &previous_vs));
 
     for (unsigned i = 0; i < sizeof(tests) / sizeof(tests[0]); ++i) {
         if (tests[i].gather) {
@@ -92,6 +100,9 @@ int main(int argc, char **argv)
             CHECK(IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MIPMAPLODBIAS,
                                                    MAKEFOURCC('G','E','T','4')));
         }
+        if (tests[i].bound_vs)
+            CHECK(IDirect3DDevice9_SetFVF(device, D3DFVF_XYZ));
+        CHECK(IDirect3DDevice9_SetVertexShader(device, tests[i].bound_vs ? previous_vs : NULL));
         CHECK(IDirect3DDevice9_SetFVF(device, tests[i].fvf));
         CHECK(IDirect3DDevice9_CreatePixelShader(device, tests[i].code, &shader));
         CHECK(IDirect3DDevice9_SetPixelShader(device, shader));
@@ -135,6 +146,7 @@ int main(int argc, char **argv)
 done:
     if (copy) IDirect3DSurface9_Release(copy);
     if (target) IDirect3DSurface9_Release(target);
+    if (previous_vs) IDirect3DVertexShader9_Release(previous_vs);
     if (shader) IDirect3DPixelShader9_Release(shader);
     if (texture) IDirect3DTexture9_Release(texture);
     if (vb) IDirect3DVertexBuffer9_Release(vb);
