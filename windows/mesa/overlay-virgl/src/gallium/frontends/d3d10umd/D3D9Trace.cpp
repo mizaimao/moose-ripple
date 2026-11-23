@@ -53,6 +53,23 @@ D3D9TraceArg(D3DDDIARG_CREATERESOURCE *a)
                s ? s->SysMemPitch : 0, sub ? (void *)sub->data : NULL, sub ? sub->pitch : 0);
 }
 
+static bool
+D3D9TraceIsColor32(HANDLE handle)
+{
+   const D3D9Resource *resource = D3D9CastResource(handle);
+   return resource &&
+      (resource->format == D3DDDIFMT_A8R8G8B8 || resource->format == D3DDDIFMT_X8R8G8B8 ||
+       resource->format == D3DDDIFMT_A8B8G8R8 || resource->format == D3DDDIFMT_X8B8G8R8);
+}
+
+static UINT
+D3D9TracePixel(const uint8_t *data, size_t pitch, size_t x, size_t y)
+{
+   UINT pixel;
+   memcpy(&pixel, data + y * pitch + x * sizeof(pixel), sizeof(pixel));
+   return pixel;
+}
+
 /* How much of a surface in memory holds a picture: of 256 points spread over it, how many are
  * not black. The pixel in the middle alone cannot tell an empty frame from a dark one. */
 static unsigned
@@ -60,19 +77,25 @@ D3D9TracePointsSet(const D3D9SubResource *sub)
 {
    unsigned set = 0;
    for (unsigned j = 0; j < 16; ++j) {
+      const size_t y = (uint64_t)sub->height * (2 * j + 1) / 32;
       for (unsigned i = 0; i < 16; ++i) {
-         const size_t y = (size_t)sub->height * (2 * j + 1) / 32;
-         const size_t x = (size_t)sub->width * (2 * i + 1) / 32;
-         set += (*(const UINT *)(sub->data + y * sub->pitch + x * 4) & 0x00ffffff) != 0;
+         const size_t x = (uint64_t)sub->width * (2 * i + 1) / 32;
+         set += (D3D9TracePixel(sub->data, sub->pitch, x, y) & 0x00ffffff) != 0;
       }
    }
    return set;
 }
 
 static bool
-D3D9TraceHasPixels(const D3D9SubResource *sub)
+D3D9TraceHasPixels(HANDLE handle, const D3D9SubResource *sub)
 {
-   return sub && sub->data && sub->width && sub->height && sub->pitch >= sub->width * 4;
+   /* Compressed textures can have a generous pitch but store one row per four texels. */
+   if (!sub || !sub->data || !D3D9TraceIsColor32(handle) || !sub->width ||
+       !sub->height || sub->width > sub->pitch / sizeof(UINT))
+      return false;
+   const size_t row_bytes = (size_t)sub->width * sizeof(UINT);
+   return row_bytes <= sub->data_capacity &&
+      sub->height - 1 <= (sub->data_capacity - row_bytes) / sub->pitch;
 }
 
 static void
@@ -81,7 +104,7 @@ D3D9TraceArg(D3DDDIARG_LOCK *a)
    D3D9SubResource *sub = D3D9GetSubResource(a->hResource, a->SubResourceIndex);
    ripple_logf("  lock %p.%u flags 0x%08x pitch %u at %p (memory %p)", a->hResource, a->SubResourceIndex,
                a->Flags.Value, a->Pitch, a->pSurfData, sub ? (void *)sub->data : NULL);
-   if (D3D9TraceHasPixels(sub))
+   if (D3D9TraceHasPixels(a->hResource, sub))
       ripple_logf("    in memory at the lock: %u of 256 points not black", D3D9TracePointsSet(sub));
 }
 
@@ -89,10 +112,10 @@ static void
 D3D9TraceArg(const D3DDDIARG_UNLOCK *a)
 {
    D3D9SubResource *sub = D3D9GetSubResource(a->hResource, a->SubResourceIndex);
-   if (D3D9TraceHasPixels(sub))
+   if (D3D9TraceHasPixels(a->hResource, sub))
       ripple_logf("  unlock %p.%u, pixel in the middle 0x%08x, %u of 256 points not black", a->hResource,
                   a->SubResourceIndex,
-                  *(const UINT *)(sub->data + (size_t)(sub->height / 2) * sub->pitch + (sub->width / 2) * 4),
+                  D3D9TracePixel(sub->data, sub->pitch, sub->width / 2, sub->height / 2),
                   D3D9TracePointsSet(sub));
 }
 
@@ -128,9 +151,9 @@ D3D9TraceArg(const D3DDDIARG_BLT *a)
                a->DstRect.bottom, a->Flags.Value);
    /* A copy of the CPU's pixels: the one in the middle, to see whether there is a picture */
    D3D9SubResource *src = D3D9GetSubResource(a->hSrcResource, a->SrcSubResourceIndex);
-   if (src && src->data && src->width && src->height && src->pitch >= src->width * 4)
+   if (D3D9TraceHasPixels(a->hSrcResource, src))
       ripple_logf("    source in memory %ux%u, pixel in the middle 0x%08x", src->width, src->height,
-                  *(const UINT *)(src->data + (size_t)(src->height / 2) * src->pitch + (src->width / 2) * 4));
+                  D3D9TracePixel(src->data, src->pitch, src->width / 2, src->height / 2));
 }
 
 static void
@@ -204,10 +227,15 @@ static void
 D3D9TraceBefore(const D3DDDIARG_UNLOCK *a)
 {
    D3D9SubResource *sub = D3D9GetSubResource(a->hResource, a->SubResourceIndex);
-   if (sub && sub->transfer && sub->transfer_map && sub->width && sub->height)
+   if (!sub || !sub->transfer || !sub->transfer_map || !D3D9TraceIsColor32(a->hResource) ||
+       !sub->transfer->resource || sub->transfer->resource->target == PIPE_BUFFER)
+      return;
+   const pipe_box &box = sub->transfer->box;
+   const size_t stride = sub->transfer->stride;
+   if (box.width > 0 && box.height > 0 && (size_t)box.width <= stride / sizeof(UINT) &&
+       (size_t)box.height <= SIZE_MAX / stride)
       ripple_logf("  unlocking %p.%u, mapped pixel in the middle 0x%08x", a->hResource, a->SubResourceIndex,
-                  *(const UINT *)((const uint8_t *)sub->transfer_map +
-                                  (size_t)(sub->height / 2) * sub->transfer->stride + (sub->width / 2) * 4));
+                  D3D9TracePixel((const uint8_t *)sub->transfer_map, stride, box.width / 2, box.height / 2));
 }
 
 /*
