@@ -36,6 +36,62 @@ static const struct vertex quad[] = {
     {13.5f,13.5f,0.5f,1,1,1}, {1.5f,13.5f,0.5f,1,0,1}
 };
 
+static int check_points(IDirect3DDevice9 *device, IDirect3DSurface9 *target,
+                        IDirect3DSurface9 *copy)
+{
+    static const struct { const char *name; int vertex_size, sprite; } cases[] = {
+        {"fixed-size point", 0, 0}, {"per-vertex point size", 1, 0},
+        {"four-colour point sprite", 0, 1}
+    };
+    static const float point[] = {7.5f, 7.5f, 0.5f, 1.0f, 8.0f, 0.0f, 0.0f};
+    static const int positions[][2] = {{5,5}, {10,5}, {5,10}, {10,10}, {1,7}, {14,7}};
+    IDirect3DPixelShader9 *ps = NULL;
+    int rc = 1;
+    unsigned failures = 0;
+    CHECK(IDirect3DDevice9_SetVertexShader(device, NULL));
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        const DWORD fvf = D3DFVF_XYZRHW | (cases[i].vertex_size ? D3DFVF_PSIZE : 0) |
+                          (cases[i].sprite ? D3DFVF_TEX1 : 0);
+        const float size = cases[i].vertex_size ? 1.0f : 8.0f;
+        DWORD size_bits;
+        memcpy(&size_bits, &size, sizeof(size_bits));
+        CHECK(IDirect3DDevice9_SetFVF(device, fvf));
+        CHECK(IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSIZE, size_bits));
+        CHECK(IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSPRITEENABLE, cases[i].sprite));
+        CHECK(IDirect3DDevice9_CreatePixelShader(device, cases[i].sprite ? sample2 : solid2, &ps));
+        CHECK(IDirect3DDevice9_SetPixelShader(device, ps));
+        IDirect3DPixelShader9_Release(ps);
+        ps = NULL;
+        CHECK(IDirect3DDevice9_Clear(device, 0, NULL, D3DCLEAR_TARGET, background, 1.0f, 0));
+        CHECK(IDirect3DDevice9_BeginScene(device));
+        CHECK(IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_POINTLIST, 1, point,
+                                              (4 + cases[i].vertex_size + 2 * cases[i].sprite) * sizeof(float)));
+        CHECK(IDirect3DDevice9_EndScene(device));
+        CHECK(IDirect3DDevice9_GetRenderTargetData(device, target, copy));
+        D3DLOCKED_RECT map;
+        CHECK(IDirect3DSurface9_LockRect(copy, &map, NULL, D3DLOCK_READONLY));
+        unsigned bad = 0;
+        for (unsigned j = 0; j < sizeof(positions) / sizeof(positions[0]); ++j) {
+            const int x = positions[j][0], y = positions[j][1];
+            const DWORD *row = (const DWORD *)((const BYTE *)map.pBits + y * map.Pitch);
+            DWORD expected = j >= 4 ? background :
+                             cases[i].sprite ? texels[y >= 8][x >= 8] : 0xffff0000;
+            if ((expected ^ row[x]) & 0x00ffffff) {
+                printf("%s (%d,%d) expected %06lx read %06lx\n", cases[i].name, x, y,
+                       expected & 0xffffffUL, row[x] & 0xffffffUL);
+                ++bad;
+            }
+        }
+        CHECK(IDirect3DSurface9_UnlockRect(copy));
+        printf("%s mismatches=%u/6\n", cases[i].name, bad);
+        failures += bad;
+    }
+    rc = failures != 0;
+done:
+    if (ps) IDirect3DPixelShader9_Release(ps);
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
     static const struct { const char *name; const DWORD *code; DWORD fvf; int gather, bound_vs; } tests[] = {
@@ -46,6 +102,7 @@ int main(int argc, char **argv)
         {"ps_2_0 Fetch4, clamp", sample2, D3DFVF_XYZRHW | D3DFVF_TEX1, 1, 0}
     };
     const int test_fetch4 = argc == 2 && !strcmp(argv[1], "--fetch4");
+    const int test_points = argc == 2 && !strcmp(argv[1], "--points");
     HWND window = CreateWindowA("STATIC", "D3D9 screen-space probe", WS_OVERLAPPEDWINDOW,
                                 0, 0, 64, 64, NULL, NULL, GetModuleHandle(NULL), NULL);
     IDirect3D9 *d3d = Direct3DCreate9(D3D_SDK_VERSION);
@@ -92,6 +149,11 @@ int main(int argc, char **argv)
                                                        D3DPOOL_SYSTEMMEM, &copy, NULL));
     CHECK(IDirect3DDevice9_CreateVertexShader(device, position_vs, &previous_vs));
 
+    if (test_points) {
+        failures += check_points(device, target, copy);
+        CHECK(IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSPRITEENABLE, FALSE));
+        CHECK(IDirect3DDevice9_SetStreamSource(device, 0, vb, 0, sizeof(quad[0])));
+    }
     for (unsigned i = 0; i < sizeof(tests) / sizeof(tests[0]); ++i) {
         if (tests[i].gather) {
             if (!test_fetch4) continue;

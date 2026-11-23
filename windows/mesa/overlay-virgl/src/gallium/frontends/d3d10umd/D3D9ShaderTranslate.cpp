@@ -62,6 +62,7 @@ D3D9TranslateVertexShaderForState(D3D9Device *device, D3D9Object *shader,
    nine.screen = device->screen;
    nine.screen_sw = device->screen;
    nine.max_vs_const_f = NINE_MAX_CONST_F;
+   nine.driver_caps.always_output_pointsize = !D3D9CanExpandPointsWithGs(device->screen);
 
    nine_shader_info info = {};
    info.type = PIPE_SHADER_VERTEX;

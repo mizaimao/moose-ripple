@@ -66,11 +66,24 @@
 EXTERN_C struct pipe_screen *
 d3d10_create_screen(gdikmt_device *device);
 
+static inline bool
+D3D9CanExpandPointsWithGs(struct pipe_screen *screen)
+{
+#ifdef RIPPLE_VISTA
+   /* A rejected geometry shader invalidates the whole virgl context. */
+   return screen->get_param(screen, PIPE_CAP_GLSL_FEATURE_LEVEL) >= 150 &&
+          screen->get_param(screen, PIPE_CAP_MAX_GEOMETRY_OUTPUT_VERTICES) >= 4;
+#else
+   return true;
+#endif
+}
+
 struct D3D9Adapter
 {
    HANDLE hRTAdapter;
    D3DDDI_ADAPTERCALLBACKS callbacks;
    UINT ms_types;
+   float max_point_size;
 };
 
 struct D3D9Resource;
