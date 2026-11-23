@@ -1373,3 +1373,29 @@ one stage (44.3 and 39.7 fps).
 | Texture times diffuse | stage one ignoring the current colour |
 | First coordinate set | TEXCOORDINDEX |
 | Stage zero's texture changes between two draws | both slots stay bound |
+
+### Mipmaps
+
+Textures are drawn with all their mipmap levels. The display driver walks
+each texture's mipmap chain when the texture is registered, reads and
+checksums every level once a scene, and uploads every level; texture blits
+copy the matching rectangle of each level. Host textures carry all their
+levels, their views cover them, and the stage's point or linear mip filter
+becomes the sampler's. A sampler's maximum level of detail must be set:
+left at zero it clamps sampling to the top level.
+
+`tmip.exe rgb|hal|tnl` draws a 64×64 texture of seven flat-coloured levels
+on quads sized to pick a given level. Sizes sit a quarter level inside each
+level: Microsoft's RGB device rounds the level of detail down, hardware to
+the nearest level, and exact powers of two fall on the boundary between
+them. The HAL and T&L devices also draw a texture the runtime manages,
+whose video-memory copy is a separate chain. Every case passes on all three
+devices on Windows 2000 SP4 and XP SP3, and Quake runs at 43.0 and 38.4
+fps with its mipmaps drawn.
+
+| Case | Expected |
+| --- | --- |
+| No mip filter | level 0 |
+| Point filter, quads for levels 0, 1 and 3 | that level |
+| Linear filter at level 2.5 | half level 2, half level 3 |
+| The same five cases on a managed texture (HAL and T&L) | as above |
