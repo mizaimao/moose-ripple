@@ -40,6 +40,12 @@ static constexpr UINT d3d9_ms_types =
    (1u << (D3DDDIMULTISAMPLE_4_SAMPLES - 1)) |
    (1u << (D3DDDIMULTISAMPLE_8_SAMPLES - 1));
 
+#ifdef RIPPLE_VISTA
+static constexpr DWORD d3d9_video_format_ops = FORMATOP_OFFSCREENPLAIN | FORMATOP_CONVERT_TO_ARGB;
+#else
+static constexpr DWORD d3d9_video_format_ops = FORMATOP_OFFSCREENPLAIN;
+#endif
+
 static const FORMATOP g_format_ops[] = {
    /* With FORMATOP_SRGBWRITE: Windows' Direct3D 10 Level 9 layer makes no device at any
     * feature level on a driver whose X8R8G8B8 cannot be drawn to in sRGB (its table of
@@ -98,13 +104,10 @@ static const FORMATOP g_format_ops[] = {
    { D3D9_FMT_DF16, 0x000410c1, 0, 0, 0 },
    { D3D9_FMT_DF24, 0x000410c1, 0, 0, 0 },
    { D3D9_FMT_INTZ, 0x000410c1, 0, 0, 0 },
-   /* moose-ripple: the two video formats the video processor converts (D3D9IsVideoFormat),
-    * as plain surfaces only: a decoder fills them and the processor reads them. AYUV is not
-    * listed; it was once, with YUY2, when the driver could make surfaces of neither, and
-    * Windows' video renderer chose them and then waited for pictures that never came.
-    */
-   { D3D9_FMT_NV12, FORMATOP_OFFSCREENPLAIN, 0, 0, 0 },
-   { D3D9_FMT_YUY2, FORMATOP_OFFSCREENPLAIN, 0, 0, 0 },
+   /* A decoder fills these plain surfaces. Vista also advertises the
+    * StretchRect conversion implemented with the video processor. */
+   { D3D9_FMT_NV12, d3d9_video_format_ops, 0, 0, 0 },
+   { D3D9_FMT_YUY2, d3d9_video_format_ops, 0, 0, 0 },
    { D3D9_FMT_R8, 0x00c2401f, d3d9_ms_types, 0, 0 },
    { D3D9_FMT_G8R8, 0x00c2401f, d3d9_ms_types, 0, 0 },
 };
@@ -126,6 +129,11 @@ D3D9FillCaps(const D3D9Adapter *adapter, D3DCAPS9 *caps)
    caps->DeviceType = D3DDEVTYPE_HAL;
    caps->AdapterOrdinal = 0;
    caps->Caps = 0x00020000;
+#ifdef RIPPLE_VISTA
+   /* Vista's VMR9 checks the legacy DirectDraw FourCC blit capability in
+    * this field before it will enumerate the DXVA video processors. */
+   caps->Caps |= 0x00000100u; /* DDCAPS_BLTFOURCC */
+#endif
    caps->Caps2 = 0xe0020000;
    caps->Caps3 =
       0x000003a0 & ~D3DCAPS3_LINEAR_TO_SRGB_PRESENTATION;
@@ -205,7 +213,7 @@ D3D9FillCaps(const D3D9Adapter *adapter, D3DCAPS9 *caps)
     * back to software vertex processing. Applications that need higher
     * indices still have to. */
    caps->MaxVertexBlendMatrixIndex = 8;
-   caps->MaxPointSize = D3D9FloatFromBits(0x46000000);
+   caps->MaxPointSize = adapter->max_point_size;
    caps->MaxPrimitiveCount = 0x007fffff;
    caps->MaxVertexIndex = 0x00ffffff;
    caps->MaxStreams = 0x00000010;
@@ -545,7 +553,22 @@ const GUID D3D9ProgressiveVideoProcessor =
 const GUID D3D9BobVideoProcessor =
    { 0x335aa36e, 0x7884, 0x43a4, { 0x9c, 0x91, 0x7f, 0x87, 0xfa, 0xf3, 0xe3, 0x7e } };
 
-static const D3DDDIFORMAT g_video_targets[] = { D3DDDIFMT_X8R8G8B8, D3DDDIFMT_A8R8G8B8 };
+static const D3DDDIFORMAT g_video_targets[] = {
+   D3DDDIFMT_X8R8G8B8, D3DDDIFMT_A8R8G8B8,
+#ifdef RIPPLE_VISTA
+   D3D9_FMT_YUY2,
+#endif
+};
+
+static UINT
+D3D9VideoTargetCount(const DXVADDI_VIDEOPROCESSORINPUT *input)
+{
+#ifdef RIPPLE_VISTA
+   if (input->VideoDesc.Format != D3D9_FMT_YUY2)
+      return ARRAYSIZE(g_video_targets) - 1;
+#endif
+   return ARRAYSIZE(g_video_targets);
+}
 
 /* A question about a processor and a kind of video: is the processor ours, and is it video
  * it takes? The target format may be left open. The bob device is for interlaced frames in
@@ -574,20 +597,20 @@ D3D9VideoProcessorKnows(const DXVADDI_VIDEOPROCESSORINPUT *input)
  * offered when the host takes it for colour and for depth with stencil alike; the type
  * Direct3D 9 calls non-maskable goes with any of them.
  * RIPPLE_NO_MSAA (any value): none. */
-static UINT
-D3D9QueryMsaaTypes(D3D9Adapter *adapter)
+struct D3D9RasterCaps {
+   UINT ms_types;
+   float max_point_size;
+};
+
+static D3D9RasterCaps
+D3D9QueryRasterCaps()
 {
-   (void)adapter;
-   static int known = -1;
-
-   if (known >= 0)
-      return (UINT)known;
-   if (getenv("RIPPLE_NO_MSAA")) {
-      known = 0;
-      return 0;
-   }
-
-   UINT types = 0;
+   D3D9RasterCaps caps = {0, 8192.0f};
+   const bool probe_msaa = !getenv("RIPPLE_NO_MSAA");
+#ifndef RIPPLE_VISTA
+   if (!probe_msaa)
+      return caps;
+#endif
    LARGE_INTEGER start, end, rate;
    QueryPerformanceCounter(&start);
    HDC dc = GetDC(NULL);
@@ -595,7 +618,9 @@ D3D9QueryMsaaTypes(D3D9Adapter *adapter)
    if (device) {
       struct pipe_screen *screen = d3d10_create_screen(device);
       if (screen) {
-         for (UINT samples = 2; samples <= 8; samples *= 2) {
+         if (!D3D9CanExpandPointsWithGs(screen))
+            caps.max_point_size = MAX2(1.0f, screen->get_paramf(screen, PIPE_CAPF_MAX_POINT_SIZE));
+         for (UINT samples = 2; probe_msaa && samples <= 8; samples *= 2) {
             if (screen->is_format_supported(screen, PIPE_FORMAT_B8G8R8A8_UNORM, PIPE_TEXTURE_2D,
                                             samples, samples, PIPE_BIND_RENDER_TARGET) &&
                 (screen->is_format_supported(screen, PIPE_FORMAT_Z24_UNORM_S8_UINT,
@@ -604,7 +629,7 @@ D3D9QueryMsaaTypes(D3D9Adapter *adapter)
                  screen->is_format_supported(screen, PIPE_FORMAT_S8_UINT_Z24_UNORM,
                                              PIPE_TEXTURE_2D, samples, samples,
                                              PIPE_BIND_DEPTH_STENCIL)))
-               types |= 1u << (samples - 1);
+               caps.ms_types |= 1u << (samples - 1);
          }
          /* the screen owns the device and takes it along */
          screen->destroy(screen);
@@ -614,16 +639,16 @@ D3D9QueryMsaaTypes(D3D9Adapter *adapter)
    }
    if (dc)
       ReleaseDC(NULL, dc);
-   if (types)
-      types |= 1u << (D3DDDIMULTISAMPLE_NONMASKABLE - 1);
+   if (caps.ms_types)
+      caps.ms_types |= 1u << (D3DDDIMULTISAMPLE_NONMASKABLE - 1);
    QueryPerformanceCounter(&end);
    QueryPerformanceFrequency(&rate);
-   ripple_logf("d3d9: the host draws to%s%s%s%s samples a pixel (asked in %ld ms)",
-               types & 2 ? " 2" : "", types & 8 ? " 4" : "", types & 0x80 ? " 8" : "",
-               types ? "" : " no more than one",
+   ripple_logf("d3d9: the host draws to%s%s%s%s samples a pixel, max point size %.0f (asked in %ld ms)",
+               caps.ms_types & 2 ? " 2" : "", caps.ms_types & 8 ? " 4" : "",
+               caps.ms_types & 0x80 ? " 8" : "", caps.ms_types ? "" : " no more than one",
+               caps.max_point_size,
                (long)((end.QuadPart - start.QuadPart) * 1000 / rate.QuadPart));
-   known = (int)types;
-   return types;
+   return caps;
 }
 
 static bool
@@ -715,7 +740,7 @@ D3D9CreateDevice(HANDLE hAdapter, D3DDDIARG_CREATEDEVICE *data)
    device->render_states[D3DRS_FOGDENSITY] = default_float.u;
    device->render_states[D3DRS_POINTSIZE] = default_float.u;
    device->render_states[D3DRS_POINTSIZE_MIN] = default_float.u;
-   default_float.f = 8192.0f;
+   default_float.f = adapter->max_point_size;
    device->render_states[D3DRS_POINTSIZE_MAX] = default_float.u;
    default_float.f = 1.0f;
    device->render_states[D3DRS_POINTSCALE_A] = default_float.u;
@@ -887,15 +912,19 @@ D3D9GetCaps(HANDLE hAdapter, const D3DDDIARG_GETCAPS *data)
          (const DXVADDI_VIDEOPROCESSORINPUT *)data->pInfo;
       *(UINT *)data->pData =
          data->Type == D3DDDICAPS_GETVIDEOPROCESSORRTFORMATCOUNT &&
-         D3D9VideoProcessorKnows(input) ? ARRAYSIZE(g_video_targets) : 0;
+         D3D9VideoProcessorKnows(input) ? D3D9VideoTargetCount(input) : 0;
       return S_OK;
    }
-   case D3DDDICAPS_GETVIDEOPROCESSORRTFORMATS:
-      if (!D3D9VideoProcessorKnows((const DXVADDI_VIDEOPROCESSORINPUT *)data->pInfo) ||
-          FAILED(D3D9ValidateData(data, sizeof(g_video_targets))))
+   case D3DDDICAPS_GETVIDEOPROCESSORRTFORMATS: {
+      const auto *input = (const DXVADDI_VIDEOPROCESSORINPUT *)data->pInfo;
+      if (!D3D9VideoProcessorKnows(input))
          return E_INVALIDARG;
-      memcpy(data->pData, g_video_targets, sizeof(g_video_targets));
+      const UINT bytes = D3D9VideoTargetCount(input) * sizeof(g_video_targets[0]);
+      if (FAILED(D3D9ValidateData(data, bytes)))
+         return E_INVALIDARG;
+      memcpy(data->pData, g_video_targets, bytes);
       return S_OK;
+   }
    case D3DDDICAPS_GETVIDEOPROCESSORRTSUBSTREAMFORMATS:
       return S_OK;
    case D3DDDICAPS_GETVIDEOPROCESSORCAPS: {
@@ -912,7 +941,7 @@ D3D9GetCaps(HANDLE hAdapter, const D3DDDIARG_GETCAPS *data)
       caps->VideoProcessorOperations = DXVADDI_VIDEOPROCESS_STRETCHX |
                                        DXVADDI_VIDEOPROCESS_STRETCHY |
                                        DXVADDI_VIDEOPROCESS_SUBRECTS;
-      if (D3D9IsVideoFormat(input->VideoDesc.Format))
+      if (D3D9IsVideoFormat(input->VideoDesc.Format) && !D3D9IsVideoFormat(caps->OutputFormat))
          caps->VideoProcessorOperations |= DXVADDI_VIDEOPROCESS_YUV2RGB |
                                            DXVADDI_VIDEOPROCESS_YUV2RGBEXTENDED;
       if (!memcmp(input->pVideoProcGuid, &D3D9BobVideoProcessor, sizeof(GUID)))
@@ -968,7 +997,9 @@ OpenAdapter(D3DDDIARG_OPENADAPTER *open_data)
    adapter->hRTAdapter = open_data->hAdapter;
    if (open_data->pAdapterCallbacks)
       adapter->callbacks = *open_data->pAdapterCallbacks;
-   adapter->ms_types = D3D9QueryMsaaTypes(adapter);
+   static const D3D9RasterCaps raster_caps = D3D9QueryRasterCaps();
+   adapter->ms_types = raster_caps.ms_types;
+   adapter->max_point_size = raster_caps.max_point_size;
 
    open_data->hAdapter = adapter;
    open_data->pAdapterFuncs->pfnGetCaps = D3D9GetCaps;

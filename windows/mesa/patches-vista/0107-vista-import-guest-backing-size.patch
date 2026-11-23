@@ -1,0 +1,19 @@
+Vista gives shared display allocations full guest backing. Report the size
+from the open-allocation exchange so virgl can map them through that backing.
+Reporting zero selects COPY_TRANSFER for every import, even though the Vista
+winsys disables that protocol and has no staging manager for it.
+
+--- a/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
++++ b/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
+@@ -348,10 +348,5 @@
+ virgl_gdi_winsys_resource_get_storage_size(struct virgl_winsys *qws,
+                                            struct virgl_hw_res *res)
+ {
+-   // This is of course not a real size, but this function
+-   // is called only for imported resources, to determine
+-   // whether we should use staging path, and due to
+-   // D3DKMTLock implications we have to use staging path
+-   // on any imported resource
+-   return 0;
++   return res->size;
+ }

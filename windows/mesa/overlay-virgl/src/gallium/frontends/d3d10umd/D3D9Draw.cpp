@@ -10,6 +10,7 @@
 
 #include "pipe/p_state.h"
 #include "tgsi/tgsi_ureg.h"
+#include "util/bitscan.h"
 #include "util/u_draw.h"
 #include "util/format/u_format.h"
 #include "util/u_inlines.h"
@@ -27,6 +28,28 @@
 static float D3D9RenderStateFloat(UINT value);
 static float D3D9PointSize(const D3D9Device *device);
 static bool D3D9ActiveVertexDeclHasPositionT(const D3D9Device *device);
+static bool D3D9ActiveDeclHasUsage(const D3D9Device *device, uint16_t usage);
+
+static uint8_t
+D3D9NativeClipPlaneMask(const D3D9Device *device)
+{
+#ifdef RIPPLE_VISTA
+   const uint8_t mask = (uint8_t)device->render_states[D3DRS_CLIPPLANEENABLE];
+   if (mask && device->vertex_shader_func && !D3D9ActiveVertexDeclHasPositionT(device) &&
+       !D3D9FragmentClipPlaneMask(device->screen, mask))
+      return mask;
+#endif
+   return 0;
+}
+
+static void
+D3D9PointSizeRange(const D3D9Device *device, float *minimum, float *maximum)
+{
+   const float low = D3D9RenderStateFloat(device->render_states[D3DRS_POINTSIZE_MIN]);
+   const float high = D3D9RenderStateFloat(device->render_states[D3DRS_POINTSIZE_MAX]);
+   *minimum = MAX2(low, 0.0f);
+   *maximum = high > 0.0f ? high : 8192.0f;
+}
 
 static constexpr UINT D3D9_SAMPLER_FETCH4 =
    (UINT)D3D9FourCC('G', 'E', 'T', '4');
@@ -617,6 +640,9 @@ D3D9UpdateTranslatedShaderState(D3D9Device *device)
    const UINT fog_mode = device->render_states[D3DRS_FOGTABLEMODE] & 0x3;
    const uint8_t projected = D3D9TranslatedPsProjected(device);
    const uint8_t clip_plane_mask =
+#ifdef RIPPLE_VISTA
+      position_t ? 0 :
+#endif
       (uint8_t)(device->render_states[D3DRS_CLIPPLANEENABLE] & 0xff);
 
    D3D9Object *vs = (D3D9Object *)device->vertex_shader_func;
@@ -635,6 +661,7 @@ D3D9UpdateTranslatedShaderState(D3D9Device *device)
 
    D3D9Object *ps = (D3D9Object *)device->pixel_shader;
    if (ps && ps->kind == D3D9_OBJECT_SHADER) {
+      const uint8_t fragment_clip_planes = D3D9FragmentClipPlaneMask(device->screen, clip_plane_mask);
       const uint32_t sampler_ps1xtypes =
          D3D9PixelShaderUsesPs1xSamplerTypes(ps) ?
          D3D9TranslatedPs1xSamplerTypes(device) : 0;
@@ -653,6 +680,7 @@ D3D9UpdateTranslatedShaderState(D3D9Device *device)
          ((UINT)projected << 4) | D3D9TranslatedPsShadeKey(device) |
          (sampler_ps1xtypes << 13);
       if (ps->translated_ps_key != key ||
+          ps->translated_ps_clip_plane_mask != fragment_clip_planes ||
           ps->translated_ps_sampler_type_overrides !=
           sampler_type_overrides ||
           ps->translated_ps_sampler_type_override_mask !=
@@ -668,7 +696,8 @@ D3D9UpdateTranslatedShaderState(D3D9Device *device)
                                                        sampler_type_overrides,
                                                        sampler_type_override_mask,
                                                        fetch4, fetch4_ati1,
-                                                       fetch4_projected_fallback);
+                                                       fetch4_projected_fallback,
+                                                       fragment_clip_planes);
          if (FAILED(hr))
             return hr;
       }
@@ -1101,6 +1130,11 @@ D3D9InitPositionTPsInputFixedFunctionVsInfo(const D3D9Device *device, D3D9Object
          return false;
    }
 
+#ifdef RIPPLE_VISTA
+   /* Point size is consumed by the rasterizer even when the PS has no input for it. */
+   if (D3D9ActiveDeclHasUsage(device, NINE_DECLUSAGE_PSIZE))
+      return D3D9AppendUniqueVsInput(shader, NINE_DECLUSAGE_PSIZE);
+#endif
    return true;
 }
 
@@ -1135,9 +1169,17 @@ D3D9ActiveDeclHasUsage(const D3D9Device *device, uint16_t usage)
    return false;
 }
 
+static void
+D3D9EmitFixedPointSize(struct ureg_program *ureg, const D3D9Device *device)
+{
+   struct ureg_dst out = ureg_DECL_output(ureg, TGSI_SEMANTIC_PSIZE, 0);
+   ureg_MOV(ureg, ureg_writemask(out, TGSI_WRITEMASK_X),
+            ureg_imm1f(ureg, D3D9PointSize(device)));
+}
+
 static void *
 D3D9CreatePositionTPsInputFixedFunctionVs(D3D9Device *device,
-                                          const D3D9Object *shader)
+                                         const D3D9Object *shader, bool native_points)
 {
    struct ureg_program *ureg = ureg_create(MESA_SHADER_VERTEX);
    if (!ureg)
@@ -1180,6 +1222,8 @@ D3D9CreatePositionTPsInputFixedFunctionVs(D3D9Device *device,
             ureg_scalar(ureg_src(tmp), TGSI_SWIZZLE_W));
    ureg_MOV(ureg, out_pos, ureg_src(tmp));
 
+   if (native_points && !D3D9ActiveDeclHasUsage(device, NINE_DECLUSAGE_PSIZE))
+      D3D9EmitFixedPointSize(ureg, device);
    for (UINT input = 1; input < shader->translated_vs_num_inputs; ++input) {
       unsigned semantic, index;
 
@@ -1189,9 +1233,18 @@ D3D9CreatePositionTPsInputFixedFunctionVs(D3D9Device *device,
          return NULL;
       }
 
-      /* A PSIZE element goes to the point expansion geometry shader in the
-       * generic slot the Nine vertex shaders use. */
+      /* A native point uses PSIZE directly. The expansion shader consumes
+       * the same clamped value through Nine's generic varying. */
       if (shader->translated_vs_input_map[input] == NINE_DECLUSAGE_PSIZE) {
+         if (native_points) {
+            float low, high;
+            D3D9PointSizeRange(device, &low, &high);
+            struct ureg_dst size = ureg_writemask(tmp, TGSI_WRITEMASK_X);
+            struct ureg_dst out = ureg_DECL_output(ureg, TGSI_SEMANTIC_PSIZE, 0);
+            ureg_MAX(ureg, size, ureg_scalar(inputs[input], TGSI_SWIZZLE_X), ureg_imm1f(ureg, low));
+            ureg_MIN(ureg, ureg_writemask(out, TGSI_WRITEMASK_X), ureg_src(size), ureg_imm1f(ureg, high));
+            continue;
+         }
          semantic = TGSI_SEMANTIC_GENERIC;
          index = D3D9_NINE_POINT_SIZE_GENERIC;
       }
@@ -1415,7 +1468,7 @@ D3D9FillTranslatedVsVertexElements(const D3D9Device *device,
 }
 
 static void *
-D3D9CreatePositionTDiffuseFixedFunctionVs(D3D9Device *device)
+D3D9CreatePositionTDiffuseFixedFunctionVs(D3D9Device *device, bool native_points)
 {
    struct ureg_program *ureg = ureg_create(MESA_SHADER_VERTEX);
    if (!ureg)
@@ -1457,6 +1510,8 @@ D3D9CreatePositionTDiffuseFixedFunctionVs(D3D9Device *device)
             ureg_scalar(ureg_src(tmp), TGSI_SWIZZLE_W));
    ureg_MOV(ureg, out_pos, ureg_src(tmp));
    ureg_MOV(ureg, out_color, color);
+   if (native_points)
+      D3D9EmitFixedPointSize(ureg, device);
    /* No specular colour, so the vertex fog factor is 0 (full fog), as in
     * D3D9CreatePositionTPsInputFixedFunctionVs. */
    if (device->render_states[D3DRS_FOGENABLE]) {
@@ -1540,13 +1595,21 @@ D3D9CreatePointPositionGs(D3D9Device *device, float x_scale,
    struct {
       unsigned semantic, index;
       bool texcoord;
-   } varyings[11];
+   } varyings[13];
    unsigned varying_count = 0;
    varyings[varying_count++] = {TGSI_SEMANTIC_COLOR, 0, false};
    varyings[varying_count++] = {TGSI_SEMANTIC_GENERIC, 8, false};
    for (unsigned t = 0; t < 8; ++t)
       varyings[varying_count++] = {texcoord_sn, t, true};
    varyings[varying_count++] = {TGSI_SEMANTIC_GENERIC, 16, false};
+   const unsigned clip_count = (util_last_bit(D3D9NativeClipPlaneMask(device)) + 3u) & ~3u;
+   if (clip_count) {
+      /* All four corners of a D3D9 point use the center's clip distances. */
+      ureg_property(ureg, TGSI_PROPERTY_NUM_CLIPDIST_ENABLED, clip_count);
+      varyings[varying_count++] = {TGSI_SEMANTIC_CLIPDIST, 0, false};
+      if (clip_count > 4)
+         varyings[varying_count++] = {TGSI_SEMANTIC_CLIPDIST, 1, false};
+   }
    struct ureg_src in_varying[ARRAY_SIZE(varyings)];
    struct ureg_dst out_varying[ARRAY_SIZE(varyings)];
    for (unsigned v = 0; v < varying_count; ++v) {
@@ -2176,7 +2239,8 @@ D3D9CreateBlendState(D3D9Device *device)
 
 static void *
 D3D9CreateRasterizerState(D3D9Device *device, bool depth_clamp,
-                          bool point_position_gs, enum mesa_prim mode)
+                          bool point_position_gs, bool native_vertex_point_size,
+                          enum mesa_prim mode)
 {
    struct pipe_context *pipe = device->pipe;
    struct pipe_rasterizer_state state;
@@ -2184,6 +2248,7 @@ D3D9CreateRasterizerState(D3D9Device *device, bool depth_clamp,
    state.half_pixel_center = 1;
    state.bottom_edge_rule = 0;
    state.clip_halfz = 1;
+   state.clip_plane_enable = D3D9NativeClipPlaneMask(device);
    state.flatshade =
       device->render_states[D3DRS_SHADEMODE] == D3DSHADE_FLAT;
    state.flatshade_first = 1;
@@ -2229,8 +2294,9 @@ D3D9CreateRasterizerState(D3D9Device *device, bool depth_clamp,
    state.offset_tri = state.offset_units != 0.0f || state.offset_scale != 0.0f;
    state.line_width = 1.0f;
    state.point_size = D3D9PointSize(device);
+   state.point_size_per_vertex = native_vertex_point_size;
    state.point_quad_rasterization = !point_position_gs &&
-      (state.point_size > 1.0f ||
+      (native_vertex_point_size || state.point_size > 1.0f ||
        device->render_states[D3DRS_POINTSPRITEENABLE]);
    state.sprite_coord_mode = PIPE_SPRITE_COORD_UPPER_LEFT;
    if (!point_position_gs && device->render_states[D3DRS_POINTSPRITEENABLE])
@@ -3431,6 +3497,9 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
    const bool translated_vs_point_size =
       translated_vs && !generate_position_t_runtime_processed_diffuse_vs &&
       !generate_position_t_runtime_processed_vs &&
+#ifdef RIPPLE_VISTA
+      !replace_position_t_vs &&
+#endif
       D3D9TranslatedVsOutputsPointSize(device);
 
    struct pipe_vertex_element elements[PIPE_MAX_ATTRIBS];
@@ -3502,10 +3571,10 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
             generated_vs_point_size = true;
       }
    }
-   const bool point_position_gs =
-      mode == MESA_PRIM_POINTS &&
-      (translated_vs_point_size || generated_vs_point_size ||
-       D3D9PointSize(device) > 1.0f);
+   const bool native_points = mode == MESA_PRIM_POINTS &&
+      !D3D9CanExpandPointsWithGs(device->screen);
+   const bool point_position_gs = mode == MESA_PRIM_POINTS && !native_points &&
+      (translated_vs_point_size || generated_vs_point_size || D3D9PointSize(device) > 1.0f);
    if (generate_position_t_ps_input_vs || generate_position_t_diffuse_vs ||
        generate_position_t_runtime_ps_vs ||
        generate_position_t_runtime_processed_diffuse_vs ||
@@ -3516,9 +3585,8 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
           replace_position_t_vs ||
           generate_position_t_runtime_processed_vs ||
           generate_position_t_runtime_ps_vs) ?
-         D3D9CreatePositionTPsInputFixedFunctionVs(device,
-                                                   &fixed_function_vs_shader) :
-         D3D9CreatePositionTDiffuseFixedFunctionVs(device);
+         D3D9CreatePositionTPsInputFixedFunctionVs(device, &fixed_function_vs_shader, native_points) :
+         D3D9CreatePositionTDiffuseFixedFunctionVs(device, native_points);
       if (!fixed_function_shaders.vs)
          return D3D9DrawRefused(__LINE__, E_FAIL);
       translated_vs = fixed_function_shaders.vs;
@@ -3529,7 +3597,8 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       D3D9ActiveVertexDeclHasPositionT(device);
    void *rasterizer = D3D9CreateRasterizerState(device,
                                                 position_t_depth_clamp,
-                                                point_position_gs, mode);
+                                                point_position_gs,
+                                                native_points, mode);
    void *dsa = D3D9CreateDepthStencilState(device);
    void *point_gs = NULL;
    if (point_position_gs) {
@@ -3539,14 +3608,8 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       const float height = device->viewport.Height ?
          (float)device->viewport.Height : 1.0f;
 
-      float point_size_min =
-         D3D9RenderStateFloat(device->render_states[D3DRS_POINTSIZE_MIN]);
-      float point_size_max =
-         D3D9RenderStateFloat(device->render_states[D3DRS_POINTSIZE_MAX]);
-      if (point_size_min < 0.0f)
-         point_size_min = 0.0f;
-      if (point_size_max <= 0.0f)
-         point_size_max = 8192.0f;
+      float point_size_min, point_size_max;
+      D3D9PointSizeRange(device, &point_size_min, &point_size_max);
 
       const bool sprite =
          device->render_states[D3DRS_POINTSPRITEENABLE] != 0;

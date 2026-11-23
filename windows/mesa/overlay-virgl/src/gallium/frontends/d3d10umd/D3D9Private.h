@@ -66,11 +66,34 @@
 EXTERN_C struct pipe_screen *
 d3d10_create_screen(gdikmt_device *device);
 
+static inline bool
+D3D9CanExpandPointsWithGs(struct pipe_screen *screen)
+{
+#ifdef RIPPLE_VISTA
+   /* A rejected geometry shader invalidates the whole virgl context. */
+   return screen->get_param(screen, PIPE_CAP_GLSL_FEATURE_LEVEL) >= 150 &&
+          screen->get_param(screen, PIPE_CAP_MAX_GEOMETRY_OUTPUT_VERTICES) >= 4;
+#else
+   return true;
+#endif
+}
+
+static inline uint8_t
+D3D9FragmentClipPlaneMask(struct pipe_screen *screen, uint8_t mask)
+{
+#ifdef RIPPLE_VISTA
+   if (mask && screen->get_param(screen, PIPE_CAP_GLSL_FEATURE_LEVEL) < 150)
+      return mask;
+#endif
+   return 0;
+}
+
 struct D3D9Adapter
 {
    HANDLE hRTAdapter;
    D3DDDI_ADAPTERCALLBACKS callbacks;
    UINT ms_types;
+   float max_point_size;
 };
 
 struct D3D9Resource;
@@ -327,6 +350,7 @@ struct D3D9Object
    uint8_t translated_vs_sampler_targets[4];
    void *translated_ps_cso;
    UINT translated_ps_key;
+   uint8_t translated_ps_clip_plane_mask;
    uint64_t translated_ps_sampler_type_overrides;
    uint16_t translated_ps_sampler_type_override_mask;
    uint16_t translated_ps_fetch4;

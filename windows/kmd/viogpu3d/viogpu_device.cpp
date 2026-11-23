@@ -179,10 +179,16 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
 #ifdef RIPPLE_TRACE_PRESENT
         DbgPrint(TRACE_LEVEL_FATAL, ("P flip dma=%u interval=%u\n", pPresent->pDmaBuffer != NULL, pPresent->FlipInterval));
 #endif
-#if DXGKDDI_INTERFACE_VERSION == DXGKDDI_INTERFACE_VERSION_WIN7
+#if DXGKDDI_INTERFACE_VERSION <= DXGKDDI_INTERFACE_VERSION_WIN7
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+        // Vista sends immediate flips through a DMA buffer. Only the MMIO
+        // path gets a subsequent SetVidPnSourceAddress from the scheduler.
+        if (pPresent->pDmaBuffer) {
+#else
         // VSync flips get a SetVidPnSourceAddress callback. An immediate DMA flip
         // must select the rendered surface when its buffer reaches the GPU queue.
         if (pPresent->pDmaBuffer && pPresent->FlipInterval == D3DDDI_FLIPINTERVAL_IMMEDIATE) {
+#endif
             VioGpuCommand *cmd = new (NonPagedPoolNx) VioGpuCommand(m_pAdapter);
             if (!cmd)
                 return STATUS_INSUFFICIENT_RESOURCES;
