@@ -311,20 +311,26 @@ static void flat(void)
 }
 
 /* Rewrite one quadrant between scenes; the next scene must show it. */
-static void rewrite(void)
+/* The top-left quadrant of a texture becomes yellow. */
+static const DWORD after[4] = { 0xffffff00, 0xff00ff00, 0xff0000ff, 0xffffffff };
+static void repaint(IDirectDrawSurface7 *t)
 {
-    static const DWORD after[4] = { 0xffffff00, 0xff00ff00, 0xff0000ff, 0xffffffff };
-    IDirectDrawSurface7 *t = texture(Argb8888, SystemMemory, primaries);
     DDSURFACEDESC2 d = {0};
     int x, y;
-    textured("rewrite-before", t, D3DTOP_SELECTARG1, 0xffffffff, primaries, 0);
-    if (!t) return;
     d.dwSize = sizeof(d);
     if (call("relock texture", IDirectDrawSurface7_Lock(t, NULL, &d, DDLOCK_WAIT, NULL))) {
         for (y = 0; y < 4; ++y)
             for (x = 0; x < 4; ++x) ((DWORD *)((BYTE *)d.lpSurface + y * d.lPitch))[x] = after[0];
         IDirectDrawSurface7_Unlock(t, NULL);
     }
+}
+
+static void rewrite(void)
+{
+    IDirectDrawSurface7 *t = texture(Argb8888, SystemMemory, primaries);
+    textured("rewrite-before", t, D3DTOP_SELECTARG1, 0xffffffff, primaries, 0);
+    if (!t) return;
+    repaint(t);
     textured("rewrite-after", t, D3DTOP_SELECTARG1, 0xffffffff, after, 0);
     IDirectDrawSurface7_Release(t);
 }
@@ -341,7 +347,12 @@ static void hardware_memory(BOOL hal)
         if (!hal) { printf("TPIX case=%s not applicable to the RGB device\n", names[i]); continue; }
         t = texture(Argb8888, kinds[i], primaries);
         textured(names[i], t, D3DTOP_SELECTARG1, 0xffffffff, primaries, 0);
-        if (t) IDirectDrawSurface7_Release(t);
+        if (t) {
+            /* A later rewrite must reach the next scene. */
+            repaint(t);
+            textured(i ? "managed-rewrite" : "video-rewrite", t, D3DTOP_SELECTARG1, 0xffffffff, after, 0);
+            IDirectDrawSurface7_Release(t);
+        }
     }
 }
 

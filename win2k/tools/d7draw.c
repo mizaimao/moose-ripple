@@ -54,6 +54,7 @@ int main(void)
     printf("D7XFORM types");
     for (i = 0; i < 32; ++i) if (s.transformTypes[i]) printf(" %lu=%lu", i, s.transformTypes[i]);
     putchar('\n');
+    printf("D7TEXW writes=%lu checks_skipped=%lu\n", s.textureWrites, s.checksSkipped);
     if (s.frequency > 0)
         printf("D7TIME requests=%lu dp2_us=%I64d check_us=%I64d upload_us=%I64d copy_us=%I64d draw_us=%I64d\n", s.drawRequests,
                s.dp2Ticks * 1000000 / s.frequency, s.checkTicks * 1000000 / s.frequency,
