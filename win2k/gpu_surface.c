@@ -193,7 +193,7 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     case IOCTL_RB2K_D3D7_DRAW: {
         const RB2K_D3D7_DRAW *d = packet->InputBuffer;
         RB2K_IMAGE *depth = NULL;
-        RB2K_TEXTURE *texture = NULL;
+        RB2K_TEXTURE *texture = NULL, *texture1 = NULL;
         ULONG i, header = FIELD_OFFSET(RB2K_D3D7_DRAW, vertices);
         if (!gpu->nativeD3D7 || !gpu->ddGpuSurfaces || gpu->primary.bitsPerPixel != 32)
             return ERROR_NOT_SUPPORTED;
@@ -206,13 +206,16 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
             depth = find_image(gpu, d->depth);
             if (!depth || !depth->depth16) return ERROR_INVALID_HANDLE;
         }
-        if (rb_gpu_d7_samples(d)) {
+        for (i = 0; i < 2; ++i) {
             ULONG j;
-            texture = rb_gpu_texture(gpu, d->texture);
-            if (!texture) return ERROR_INVALID_HANDLE;
+            RB2K_TEXTURE *t;
+            if (!rb_gpu_d7_samples(d, i)) continue;
+            t = rb_gpu_texture(gpu, i ? d->texture1 : d->texture);
+            if (!t) return ERROR_INVALID_HANDLE;
             /* The display DLL attaches a texture when it uploads it here. */
-            for (j = 0; j < RB2K_DD_SLOTS && texture->contexts[j] != image->id; ++j) {}
+            for (j = 0; j < RB2K_DD_SLOTS && t->contexts[j] != image->id; ++j) {}
             if (j == RB2K_DD_SLOTS) return ERROR_INVALID_HANDLE;
+            if (i) texture1 = t; else texture = t;
         }
         for (i = 0; i < d->count; ++i) {
             const RB2K_D3D7_VERTEX *v = d->vertices+i;
@@ -222,7 +225,7 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
                 return ERROR_INVALID_PARAMETER;
         }
         if (depth && !rb_gpu_depth_target(gpu, &result, image, depth)) return command_error(gpu, &result);
-        success = rb_gpu_d7_draw(gpu, &result, image, d, texture);
+        success = rb_gpu_d7_draw(gpu, &result, image, d, texture, texture1);
         if (success) gpu->d7Frame.pending.triangles += d->count/3;
         break;
     }

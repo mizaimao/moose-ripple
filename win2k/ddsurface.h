@@ -38,8 +38,9 @@
 typedef struct { ULONG clears, triangles; } RB2K_D3D7_COMPLETED;
 #define RB2K_D3D7_VERTICES 96
 /* IEEE transformed position, packed Direct3D diffuse and specular colours,
- * the stage-zero texture coordinate and, for lit draws, the IEEE normal. */
-typedef struct { ULONG x, y, z, rhw, diffuse, specular, u, v, nx, ny, nz; } RB2K_D3D7_VERTEX;
+ * the stage-zero texture coordinate and, for lit draws, the IEEE normal. The
+ * last pair is stage one's texture coordinate. */
+typedef struct { ULONG x, y, z, rhw, diffuse, specular, u, v, nx, ny, nz, u1, v1; } RB2K_D3D7_VERTEX;
 #define RB2K_D7_LIGHTS 8
 /* Lighting flags: normalize normals, local viewer, then the Direct3D material
  * source (D3DMCS_*, already resolved against the vertex format) of the
@@ -90,6 +91,9 @@ typedef struct {
     /* Fog kind and flags as above, D3DRENDERSTATE_FOGCOLOR, and the IEEE
      * start, end and density render states. */
     ULONG fog, fogColor, fogStart, fogEnd, fogDensity;
+    /* Texture stage one: colour and alpha words as for stage zero, where an
+     * argument may also be the current colour; zero when the stage is off. */
+    ULONG stage1Color, stage1Alpha, texture1, sampler1, border1;
     RB2K_D3D7_VERTEX vertices[RB2K_D3D7_VERTICES];
 } RB2K_D3D7_DRAW;
 /* Texels are tightly packed B8G8R8A8 rows. A zero id creates a texture of

@@ -405,17 +405,18 @@ static DWORD APIENTRY destroy_context(LPD3DNTHAL_CONTEXTDESTROYDATA a)
     return DDHAL_DRIVER_HANDLED;
 }
 
-/* ---- texture stage zero, reduced to what the miniport draws ---- */
+/* ---- texture stages zero and one, reduced to what the miniport draws ---- */
 
 enum { StageOk, StageDisabled, StageUnsupported };
 
-/* Stage zero's current colour is the diffuse colour. */
-static ULONG stage_argument(ULONG arg, BOOL *ok)
+/* Stage zero's current colour is the diffuse colour; stage one's is stage
+ * zero's result. */
+static ULONG stage_argument(ULONG arg, ULONG stage, BOOL *ok)
 {
     ULONG select = arg & D3DTA_SELECTMASK;
     if (arg & ~(D3DTA_SELECTMASK | D3DTA_COMPLEMENT | D3DTA_ALPHAREPLICATE) ||
         select > D3DTA_SPECULAR) *ok = FALSE;
-    if (select == D3DTA_CURRENT) arg = (arg & ~D3DTA_SELECTMASK) | D3DTA_DIFFUSE;
+    if (select == D3DTA_CURRENT && !stage) arg = (arg & ~D3DTA_SELECTMASK) | D3DTA_DIFFUSE;
     return arg;
 }
 
@@ -426,23 +427,24 @@ static BOOL samples_texture(ULONG op, ULONG arg1, ULONG arg2)
            (op != D3DTOP_SELECTARG1 && (arg2 & D3DTA_SELECTMASK) == D3DTA_TEXTURE);
 }
 
-/* Fill the colour and alpha stage words. A stage that reads a missing texture
- * passes the diffuse colour through, as the 9x HAL and the RGB device do. */
-static ULONG stage_words(const D7_CONTEXT *c, ULONG *color, ULONG *alpha, BOOL *texture)
+/* Fill the colour and alpha words of stage n. A stage that reads a missing
+ * texture passes its current colour through, as the 9x HAL and the RGB
+ * device do; a disabled stage one leaves stage zero's result. */
+static ULONG stage_words(const D7_CONTEXT *c, ULONG n, ULONG *color, ULONG *alpha, BOOL *texture)
 {
-    const D7_STAGE *s = &c->stages[0];
-    ULONG colorOp = s->colorOp, alphaOp = s->alphaOp;
+    const D7_STAGE *s = &c->stages[n];
+    ULONG colorOp = s->colorOp, alphaOp = s->alphaOp, current = n ? D3DTA_CURRENT : D3DTA_DIFFUSE;
     BOOL ok = TRUE;
-    ULONG c1 = stage_argument(s->colorArg1, &ok), c2 = stage_argument(s->colorArg2, &ok);
-    ULONG a1 = stage_argument(s->alphaArg1, &ok), a2 = stage_argument(s->alphaArg2, &ok);
+    ULONG c1 = stage_argument(s->colorArg1, n, &ok), c2 = stage_argument(s->colorArg2, n, &ok);
+    ULONG a1 = stage_argument(s->alphaArg1, n, &ok), a2 = stage_argument(s->alphaArg2, n, &ok);
     *texture = FALSE;
     if (colorOp == D3DTOP_DISABLE ||
         ((samples_texture(colorOp, c1, c2) || (alphaOp != D3DTOP_DISABLE && samples_texture(alphaOp, a1, a2))) &&
          !s->texture)) {
-        *color = *alpha = D3DTOP_SELECTARG1 | (D3DTA_DIFFUSE << 8);
+        *color = *alpha = D3DTOP_SELECTARG1 | (current << 8);
         return StageDisabled;
     }
-    if (alphaOp == D3DTOP_DISABLE) { alphaOp = D3DTOP_SELECTARG1; a1 = D3DTA_DIFFUSE; }
+    if (alphaOp == D3DTOP_DISABLE) { alphaOp = D3DTOP_SELECTARG1; a1 = current; }
     if (!ok || colorOp < D3DTOP_SELECTARG1 || colorOp > D3DTOP_BLENDCURRENTALPHA ||
         alphaOp < D3DTOP_SELECTARG1 || alphaOp > D3DTOP_BLENDCURRENTALPHA) return StageUnsupported;
     *color = colorOp | (c1 << 8) | (c2 << 16);
@@ -460,8 +462,10 @@ static DWORD APIENTRY validate_stages(LPD3DNTHAL_VALIDATETEXTURESTAGESTATEDATA a
     c = owned_context(a->dwhContext);
     if (!c) a->ddrval = DDERR_INVALIDOBJECT;
     else if (a->dwFlags) a->ddrval = DDERR_INVALIDPARAMS;
-    else if (c->stages[1].colorOp != D3DTOP_DISABLE) a->ddrval = D3DERR_TOOMANYOPERATIONS;
-    else a->ddrval = stage_words(c, &color, &alpha, &texture) == StageUnsupported ?
+    else if (c->stages[1].colorOp != D3DTOP_DISABLE && c->stages[2].colorOp != D3DTOP_DISABLE)
+        a->ddrval = D3DERR_TOOMANYOPERATIONS;
+    else a->ddrval = stage_words(c, 0, &color, &alpha, &texture) == StageUnsupported ||
+                     stage_words(c, 1, &color, &alpha, &texture) == StageUnsupported ?
                      D3DERR_UNSUPPORTEDCOLOROPERATION : DD_OK;
     a->dwNumPasses = SUCCEEDED(a->ddrval) ? 1 : 0;
     EngReleaseSemaphore(registry);
@@ -751,7 +755,7 @@ static HRESULT refused(DISPLAY *d, ULONG site, LPD3DNTHAL_DRAWPRIMITIVES2DATA a,
     return DDERR_INVALIDPARAMS;
 }
 
-static HRESULT send_batch(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, ULONG count, D7_TEXTURE *tex)
+static HRESULT send_batch(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, ULONG count, D7_TEXTURE *tex, D7_TEXTURE *tex1)
 {
     DISPLAY *d = c->display;
     ULONG written = 0, error;
@@ -772,6 +776,7 @@ static HRESULT send_batch(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, ULONG count, D7_T
         d->d7draw.lastDrawState[7] = draw->depth;
         /* The texture may have gone with a transport reset. */
         if (tex) { tex->host = 0; RtlZeroMemory(tex->targets, sizeof(tex->targets)); }
+        if (tex1) { tex1->host = 0; RtlZeroMemory(tex1->targets, sizeof(tex1->targets)); }
         return DDERR_GENERIC;
     }
     c->queued = TRUE;
@@ -838,24 +843,35 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     DISPLAY *d = c->display;
     DD_SLOT *s, *z;
     RB2K_D3D7_DRAW *draw = &c->draw;   /* too large for the kernel stack */
-    D7_STAGE *st = &c->stages[0];
-    D7_TEXTURE *tex = NULL;
+    D7_STAGE *st = &c->stages[0], *st1 = &c->stages[1];
+    D7_TEXTURE *tex = NULL, *tex1 = NULL;
     ULONG fvf = a->dwVertexType, offset = 16, diffuse = 0, specular = 0, coord = 0, coordFloats = 0, normal = 0;
+    ULONG coord1 = 0, coord1Floats = 0;
     ULONG sets, i, t, low = 0xffffffff, high = 0, address = 0, count = 0, flatSource = 0;
     ULONG limit = 0xffffffff;              /* highest index inside the runtime's window */
     ULONG position;
-    BOOL texture, needTexture, objectSpace;
+    BOOL texture, needTexture, needTexture1 = FALSE, objectSpace;
     HRESULT hr = render_surfaces(c, &s, &z);
     const BYTE *base = NULL;
     if (FAILED(hr)) return hr;
     if (!p->primitives) return DD_OK;
     if (c->fill != D3DFILL_SOLID) { skip(c, RB2K_D7_SKIP_FILL, p->primitives); return DD_OK; }
     if (c->stencil) { skip(c, RB2K_D7_SKIP_STENCIL, p->primitives); return DD_OK; }
-    if (c->stages[1].colorOp != D3DTOP_DISABLE) { skip(c, RB2K_D7_SKIP_STAGE1, p->primitives); return DD_OK; }
+    /* Two stages are drawn; a third one counts as the stage-one skip. */
+    if (st->colorOp != D3DTOP_DISABLE && st1->colorOp != D3DTOP_DISABLE && c->stages[2].colorOp != D3DTOP_DISABLE) {
+        skip(c, RB2K_D7_SKIP_STAGE1, p->primitives);
+        return DD_OK;
+    }
     RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D7_DRAW, vertices));
-    if (stage_words(c, &draw->colorStage, &draw->alphaStage, &needTexture) == StageUnsupported) {
+    if (stage_words(c, 0, &draw->colorStage, &draw->alphaStage, &needTexture) == StageUnsupported) {
         skip(c, RB2K_D7_SKIP_COMBINER, p->primitives);
         return DD_OK;
+    }
+    if (st->colorOp != D3DTOP_DISABLE) {
+        ULONG color1, alpha1, state1 = stage_words(c, 1, &color1, &alpha1, &needTexture1);
+        if (state1 == StageUnsupported) { skip(c, RB2K_D7_SKIP_COMBINER, p->primitives); return DD_OK; }
+        if (state1 == StageOk) { draw->stage1Color = color1; draw->stage1Alpha = alpha1; }
+        else needTexture1 = FALSE;
     }
     /* Vertex layout: a transformed position, or an object-space position
      * with any blend weights and normal (the T&L device), then the optional
@@ -863,7 +879,8 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     position = fvf & D3DFVF_POSITION_MASK;
     objectSpace = position != D3DFVF_XYZRHW;
     if (!position || (fvf & D3DFVF_RESERVED0) || (!objectSpace && (fvf & D3DFVF_NORMAL)) ||
-        (st->coordIndex >> 16) || (needTexture && (st->transform & 0xff))) {
+        (st->coordIndex >> 16) || (needTexture && (st->transform & 0xff)) ||
+        (draw->stage1Color && ((st1->coordIndex >> 16) || (needTexture1 && (st1->transform & 0xff))))) {
         skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
         return DD_OK;
     }
@@ -877,6 +894,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         static const UCHAR floats[] = { 2, 3, 4, 1 };
         ULONG n = floats[(fvf >> (16 + 2*i)) & 3];
         if (i == (st->coordIndex & 0xffff)) { coord = offset; coordFloats = n; }
+        if (i == (st1->coordIndex & 0xffff)) { coord1 = offset; coord1Floats = n; }
         offset += 4 * n;
     }
     if (offset > stride || stride > 256) {
@@ -892,6 +910,16 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         if (tex->mipmaps && st->mipFilter != D3DTFP_NONE) d->d7draw.ignored[RB2K_D7_IGNORED_MIPMAP] += p->primitives;
         draw->texture = texture_ready(c, tex, s->id);
         if (!draw->texture) { skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives); return DD_OK; }
+    }
+    if (needTexture1) {
+        tex1 = find_texture(c->local, st1->texture);
+        if (!tex1 || !tex1->format || tex1->owner != c->owner) {
+            skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives);
+            return DD_OK;
+        }
+        if (tex1->mipmaps && st1->mipFilter != D3DTFP_NONE) d->d7draw.ignored[RB2K_D7_IGNORED_MIPMAP] += p->primitives;
+        draw->texture1 = texture_ready(c, tex1, s->id);
+        if (!draw->texture1) { skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives); return DD_OK; }
     }
     texture = needTexture;
     if (c->fog) fog_draw(c, draw, objectSpace);
@@ -915,6 +943,11 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
                    (st->magFilter >= 1 && st->magFilter <= 5 ? st->magFilter : 1) << 8 |
                    (st->minFilter >= 1 && st->minFilter <= 3 ? st->minFilter : 1) << 12;
     draw->border = st->border;
+    draw->sampler1 = (st1->addressU >= 1 && st1->addressU <= 4 ? st1->addressU : 1) |
+                     (st1->addressV >= 1 && st1->addressV <= 4 ? st1->addressV : 1) << 4 |
+                     (st1->magFilter >= 1 && st1->magFilter <= 5 ? st1->magFilter : 1) << 8 |
+                     (st1->minFilter >= 1 && st1->minFilter <= 3 ? st1->minFilter : 1) << 12;
+    draw->border1 = st1->border;
     if (objectSpace) {
         draw->transform = 1;
         if (c->lighting) light_draw(c, draw, diffuse != 0, specular != 0, p->primitives);
@@ -994,6 +1027,8 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
                 o->specular = specular ? *(const ULONG *)(v + specular) : 0;
                 o->u = coordFloats ? *(const ULONG *)(v + coord) : 0;
                 o->v = coordFloats > 1 ? *(const ULONG *)(v + coord + 4) : 0;
+                o->u1 = coord1Floats ? *(const ULONG *)(v + coord1) : 0;
+                o->v1 = coord1Floats > 1 ? *(const ULONG *)(v + coord1 + 4) : 0;
                 bad |= bad_position(o);
             }
             if (c->shade == D3DSHADE_FLAT) {
@@ -1005,12 +1040,12 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
             if (bad) { ++d->d7draw.badPositions; skip(c, RB2K_D7_SKIP_VERTEX, 1); continue; }
             count += 3;
             if (count == RB2K_D3D7_VERTICES || t + 1 == p->primitives) {
-                hr = send_batch(c, draw, count, tex);
+                hr = send_batch(c, draw, count, tex, tex1);
                 if (FAILED(hr)) break;
                 count = 0;
             }
         }
-        if (SUCCEEDED(hr) && count) hr = send_batch(c, draw, count, tex);
+        if (SUCCEEDED(hr) && count) hr = send_batch(c, draw, count, tex, tex1);
     } __except (EXCEPTION_EXECUTE_HANDLER) { hr = refused(d, RB2K_D7_FAIL_PROBE, a, p, low, high, stride); }
     return hr;
 }
@@ -1577,7 +1612,7 @@ BOOL rb_d7_info(PDD_GETDRIVERINFODATA a)
             D3DTEXOPCAPS_SUBTRACT | D3DTEXOPCAPS_ADDSMOOTH | D3DTEXOPCAPS_BLENDDIFFUSEALPHA |
             D3DTEXOPCAPS_BLENDTEXTUREALPHA | D3DTEXOPCAPS_BLENDFACTORALPHA |
             D3DTEXOPCAPS_BLENDTEXTUREALPHAPM | D3DTEXOPCAPS_BLENDCURRENTALPHA,
-        .wMaxTextureBlendStages = 1, .wMaxSimultaneousTextures = 1, .wMaxVertexBlendMatrices = 1,
+        .wMaxTextureBlendStages = 2, .wMaxSimultaneousTextures = 2, .wMaxVertexBlendMatrices = 1,
         .dvMaxVertexW = 1.0e10f, .dwMaxActiveLights = RB2K_D7_LIGHTS,
         .dwVertexProcessingCaps = D3DVTXPCAPS_MATERIALSOURCE7 | D3DVTXPCAPS_DIRECTIONALLIGHTS |
                                   D3DVTXPCAPS_POSITIONALLIGHTS | D3DVTXPCAPS_LOCALVIEWER | D3DVTXPCAPS_VERTEXFOG

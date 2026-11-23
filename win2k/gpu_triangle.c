@@ -16,9 +16,11 @@
 
 enum {
     Raster = 9, Elements = 5, VertexShader = 6, ObjectShader = 7, LitShader = 8, DsaBase = 16, BlendBase = 32,
-    SamplerBase = 48, ShaderBase = 64, TextureView = 80
+    SamplerBase = 48, Sampler1Base = 56, ShaderBase = 64, TextureView = 80, TextureView1 = 81
 };
 enum { VertexStage = 0, FragmentStage = 1, PipeTriangles = 4, ShaderText = 2400, LitText = 8192 };
+typedef char sampler_handles_fit[Sampler1Base + RB2K_D7_SAMPLER_KEYS <= ShaderBase &&
+                                 SamplerBase + RB2K_D7_SAMPLER_KEYS <= Sampler1Base ? 1 : -1];
 
 /* Direct3D 7 values used on the wire (d3dtypes.h). */
 enum {
@@ -205,10 +207,13 @@ static void op(TEXT *t, const char *a, const char *b, const char *c, const char 
     put(t, "\n");
 }
 
-static const char *source(ULONG arg)
+/* Registers: TEMP[0] and TEMP[5] are the stage zero and one texels, TEMP[6]
+ * stage zero's result for stage one's current colour. */
+static const char *source(ULONG arg, ULONG stage)
 {
     switch (arg & ArgSelect) {
-    case ArgTexture: return "TEMP[0]";
+    case ArgTexture: return stage ? "TEMP[5]" : "TEMP[0]";
+    case ArgCurrent: return "TEMP[6]";
     case ArgFactor: return "CONST[0]";
     case ArgSpecular: return "IN[1]";
     }
@@ -216,19 +221,19 @@ static const char *source(ULONG arg)
 }
 
 /* Copy one argument, with its modifiers, into the given temporary. */
-static void argument(TEXT *t, ULONG arg, const char *slot)
+static void argument(TEXT *t, ULONG arg, const char *slot, ULONG stage)
 {
     number(t, t->line++);
     put(t, (arg & ArgComplement) ? ": ADD " : ": MOV ");
     put(t, slot);
     put(t, (arg & ArgComplement) ? ", IMM[0].xxxx, -" : ", ");
-    put(t, source(arg));
+    put(t, source(arg, stage));
     if (arg & ArgAlphaReplicate) put(t, ".wwww");
     put(t, "\n");
 }
 
 /* Combine TEMP[1] and TEMP[2] into the TEMP[3] channels named by mask. */
-static void combine(TEXT *t, ULONG top, const char *mask)
+static void combine(TEXT *t, ULONG top, const char *mask, ULONG stage)
 {
     char d[16] = "TEMP[3]";
     ULONG i = 7;
@@ -256,12 +261,14 @@ static void combine(TEXT *t, ULONG top, const char *mask)
     case TopAddSmooth:
         op(t, "ADD TEMP[4], IMM[0].xxxx, -TEMP[1]", 0, 0, 0);
         op(t, "MAD_SAT ", d, ", TEMP[2], TEMP[4], TEMP[1]", 0); break;
-    case TopBlendDiffuse:
-    case TopBlendCurrent: op(t, "LRP ", d, ", IN[0].wwww, TEMP[1], TEMP[2]", 0); break;
-    case TopBlendTexture: op(t, "LRP ", d, ", TEMP[0].wwww, TEMP[1], TEMP[2]", 0); break;
+    case TopBlendDiffuse: op(t, "LRP ", d, ", IN[0].wwww, TEMP[1], TEMP[2]", 0); break;
+    case TopBlendCurrent:
+        op(t, "LRP ", d, stage ? ", TEMP[6].wwww, TEMP[1], TEMP[2]" : ", IN[0].wwww, TEMP[1], TEMP[2]", 0); break;
+    case TopBlendTexture:
+        op(t, "LRP ", d, stage ? ", TEMP[5].wwww, TEMP[1], TEMP[2]" : ", TEMP[0].wwww, TEMP[1], TEMP[2]", 0); break;
     case TopBlendFactor: op(t, "LRP ", d, ", CONST[0].wwww, TEMP[1], TEMP[2]", 0); break;
     case TopBlendTexturePm:
-        op(t, "ADD TEMP[4], IMM[0].xxxx, -TEMP[0].wwww", 0, 0, 0);
+        op(t, stage ? "ADD TEMP[4], IMM[0].xxxx, -TEMP[5].wwww" : "ADD TEMP[4], IMM[0].xxxx, -TEMP[0].wwww", 0, 0, 0);
         op(t, "MAD_SAT ", d, ", TEMP[2], TEMP[4], TEMP[1]", 0); break;
     }
 }
@@ -278,12 +285,14 @@ static BOOLEAN uses(ULONG stage, ULONG arg)
            (second_used(stage) && ((stage >> 16) & ArgSelect) == arg);
 }
 
-BOOLEAN rb_gpu_d7_samples(const RB2K_D3D7_DRAW *d)
+BOOLEAN rb_gpu_d7_samples(const RB2K_D3D7_DRAW *d, ULONG stage)
 {
+    if (stage) return d->stage1Color && (uses(d->stage1Color, ArgTexture) || uses(d->stage1Alpha, ArgTexture));
     return uses(d->colorStage, ArgTexture) || uses(d->alphaStage, ArgTexture);
 }
 
-static BOOLEAN stage_valid(ULONG stage)
+/* Stage one may also read the current colour. */
+static BOOLEAN stage_valid(ULONG stage, BOOLEAN current)
 {
     ULONG top = stage & 255, i;
     if (stage >> 24 || top < TopSelect1 || top > TopBlendCurrent) return FALSE;
@@ -291,7 +300,8 @@ static BOOLEAN stage_valid(ULONG stage)
         ULONG arg = (stage >> i) & 255;
         if ((arg & ~(ArgSelect | ArgComplement | ArgAlphaReplicate)) ||
             ((arg & ArgSelect) != ArgDiffuse && (arg & ArgSelect) != ArgTexture &&
-             (arg & ArgSelect) != ArgFactor && (arg & ArgSelect) != ArgSpecular)) return FALSE;
+             (arg & ArgSelect) != ArgFactor && (arg & ArgSelect) != ArgSpecular &&
+             (!current || (arg & ArgSelect) != ArgCurrent))) return FALSE;
     }
     return TRUE;
 }
@@ -322,10 +332,16 @@ static void fog_text(TEXT *t, ULONG fog)
     op(t, "LRP TEMP[3].xyz, TEMP[4].xxxx, TEMP[3], CONST[1]", 0, 0, 0);
 }
 
-static ULONG fragment_text(char *out, ULONG color, ULONG alpha, ULONG specular, ULONG fog)
+/* Stage one, when on, samples its texture with the second coordinate pair
+ * (IN[2].zw) and combines over stage zero's result. */
+static ULONG fragment_text(char *out, ULONG color, ULONG alpha, ULONG specular, ULONG fog,
+                           ULONG color1, ULONG alpha1)
 {
     TEXT t;
     BOOLEAN sampled = uses(color, ArgTexture) || uses(alpha, ArgTexture);
+    BOOLEAN sampled1 = color1 && (uses(color1, ArgTexture) || uses(alpha1, ArgTexture));
+    BOOLEAN factor = uses(color, ArgFactor) || uses(alpha, ArgFactor) ||
+                     (color1 && (uses(color1, ArgFactor) || uses(alpha1, ArgFactor)));
     ULONG kind = fog & 3;
     t.p = out; t.n = 0; t.line = 0; t.size = ShaderText; t.overflow = FALSE;
     put(&t, "FRAG\nDCL IN[0], GENERIC[0], LINEAR\nDCL IN[1], GENERIC[1], LINEAR\n"
@@ -334,17 +350,31 @@ static ULONG fragment_text(char *out, ULONG color, ULONG alpha, ULONG specular, 
     if (kind == RB2K_D7_FOG_TABLE) put(&t, "DCL IN[3], POSITION, LINEAR\n");
     put(&t, "DCL OUT[0], COLOR\n");
     if (sampled) put(&t, "DCL SAMP[0]\n");
+    if (sampled1) put(&t, "DCL SAMP[1]\n");
     if (kind) put(&t, "DCL CONST[0..2]\n");
-    else if (uses(color, ArgFactor) || uses(alpha, ArgFactor)) put(&t, "DCL CONST[0]\n");
-    put(&t, "DCL TEMP[0..4]\nIMM[0] FLT32 {0x3f800000, 0x40000000, 0x40800000, 0x3f000000}\n");
+    else if (factor) put(&t, "DCL CONST[0]\n");
+    put(&t, "DCL TEMP[0..7]\nIMM[0] FLT32 {0x3f800000, 0x40000000, 0x40800000, 0x3f000000}\n");
     if (kind) put(&t, "IMM[1] FLT32 {0x3fb8aa3b, 0x00000000, 0x00000000, 0x00000000}\n");   /* log2(e) */
     if (sampled) op(&t, "TEX TEMP[0], IN[2], SAMP[0], 2D", 0, 0, 0);
-    if (first_used(color)) argument(&t, (color >> 8) & 255, "TEMP[1]");
-    if (second_used(color)) argument(&t, (color >> 16) & 255, "TEMP[2]");
-    combine(&t, color & 255, ".xyz");
-    if (first_used(alpha)) argument(&t, (alpha >> 8) & 255, "TEMP[1]");
-    if (second_used(alpha)) argument(&t, (alpha >> 16) & 255, "TEMP[2]");
-    combine(&t, alpha & 255, ".w");
+    if (first_used(color)) argument(&t, (color >> 8) & 255, "TEMP[1]", 0);
+    if (second_used(color)) argument(&t, (color >> 16) & 255, "TEMP[2]", 0);
+    combine(&t, color & 255, ".xyz", 0);
+    if (first_used(alpha)) argument(&t, (alpha >> 8) & 255, "TEMP[1]", 0);
+    if (second_used(alpha)) argument(&t, (alpha >> 16) & 255, "TEMP[2]", 0);
+    combine(&t, alpha & 255, ".w", 0);
+    if (color1) {
+        op(&t, "MOV TEMP[6], TEMP[3]", 0, 0, 0);
+        if (sampled1) {
+            op(&t, "MOV TEMP[7], IN[2].zwzw", 0, 0, 0);
+            op(&t, "TEX TEMP[5], TEMP[7], SAMP[1], 2D", 0, 0, 0);
+        }
+        if (first_used(color1)) argument(&t, (color1 >> 8) & 255, "TEMP[1]", 1);
+        if (second_used(color1)) argument(&t, (color1 >> 16) & 255, "TEMP[2]", 1);
+        combine(&t, color1 & 255, ".xyz", 1);
+        if (first_used(alpha1)) argument(&t, (alpha1 >> 8) & 255, "TEMP[1]", 1);
+        if (second_used(alpha1)) argument(&t, (alpha1 >> 16) & 255, "TEMP[2]", 1);
+        combine(&t, alpha1 & 255, ".w", 1);
+    }
     if (specular) op(&t, "ADD_SAT TEMP[3].xyz, TEMP[3], IN[1]", 0, 0, 0);
     if (kind) fog_text(&t, fog);
     op(&t, "MOV OUT[0], TEMP[3]", 0, 0, 0);
@@ -551,7 +581,15 @@ BOOLEAN rb_gpu_d7_valid(const RB2K_D3D7_DRAW *d)
         for (k = 0; k < d->lightCount; ++k)
             if (d->lights[k][0] < 1 || d->lights[k][0] > 3) return FALSE;   /* point, spot, directional */
     }
-    if (!stage_valid(d->colorStage) || !stage_valid(d->alphaStage)) return FALSE;
+    if (!stage_valid(d->colorStage, FALSE) || !stage_valid(d->alphaStage, FALSE)) return FALSE;
+    if (d->stage1Color ? !stage_valid(d->stage1Color, TRUE) || !stage_valid(d->stage1Alpha, TRUE)
+                       : d->stage1Alpha != 0) return FALSE;
+    {
+        ULONG addressU = d->sampler1 & 15, addressV = (d->sampler1 >> 4) & 15;
+        ULONG mag = (d->sampler1 >> 8) & 15, min = (d->sampler1 >> 12) & 15;
+        if (d->sampler1 >> 16 || addressU < 1 || addressU > 4 || addressV < 1 || addressV > 4 ||
+            mag < 1 || mag > 5 || min < 1 || min > 3) return FALSE;
+    }
     if (d->sampler >> 16 || addressU < 1 || addressU > 4 || addressV < 1 || addressV > 4 ||
         mag < 1 || mag > 5 || min < 1 || min > 3) return FALSE;
     return TRUE;
@@ -594,13 +632,35 @@ static ULONG pipe_wrap(ULONG address)
     return map[address];
 }
 
+/* Create (or replace) one sampler object. Only the top
+ * level of a texture is uploaded: no mipmap filter. */
+static ULONG sampler_words(ULONG *words, ULONG handle, ULONG state, ULONG sampler, ULONG border)
+{
+    ULONG n = 0, mag = (sampler >> 8) & 15, min = (sampler >> 12) & 15;
+    if (state == Replaced) { words[n++] = DESTROY(VIRGL_OBJECT_SAMPLER_STATE); words[n++] = handle; }
+    words[n++] = CREATE(VIRGL_OBJECT_SAMPLER_STATE, VIRGL_OBJ_SAMPLER_STATE_SIZE);
+    words[n++] = handle;
+    words[n++] = VIRGL_OBJ_SAMPLE_STATE_S0_WRAP_S(pipe_wrap(sampler & 15)) |
+                 VIRGL_OBJ_SAMPLE_STATE_S0_WRAP_T(pipe_wrap((sampler >> 4) & 15)) |
+                 VIRGL_OBJ_SAMPLE_STATE_S0_WRAP_R(2) |
+                 VIRGL_OBJ_SAMPLE_STATE_S0_MIN_IMG_FILTER(min != 1) |
+                 VIRGL_OBJ_SAMPLE_STATE_S0_MIN_MIP_FILTER(2) |
+                 VIRGL_OBJ_SAMPLE_STATE_S0_MAG_IMG_FILTER(mag != 1);
+    words[n++] = 0; words[n++] = 0; words[n++] = 0;
+    words[n++] = rb_gpu_channel((border >> 16) & 255);
+    words[n++] = rb_gpu_channel((border >> 8) & 255);
+    words[n++] = rb_gpu_channel(border & 255);
+    words[n++] = rb_gpu_channel(border >> 24);
+    return n;
+}
+
 /* Emit the state changes of one draw: depth and alpha test, blend, cull,
  * fragment shader, texture factor, sampler and texture view. */
 static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
-                      const RB2K_D3D7_DRAW *d, const RB2K_TEXTURE *texture)
+                      const RB2K_D3D7_DRAW *d, const RB2K_TEXTURE *texture, const RB2K_TEXTURE *texture1)
 {
     RB2K_D7_STATE *s = &image->d7;
-    ULONG words[64], n = 0, slot, key[4], state, i;
+    ULONG words[96], n = 0, slot, key[6], state, i;
     char text[ShaderText];
     if (!s->pipeline) {
         if (!rb_gpu_frame_words(gpu,r,image,pipeline,sizeof(pipeline)/sizeof(*pipeline))) return FALSE;
@@ -696,9 +756,11 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
     n = 0;
 
     key[0] = d->colorStage; key[1] = d->alphaStage; key[2] = d->specular; key[3] = d->fog;
-    slot = cache_slot(&s->shader, RB2K_D7_SHADER_KEYS, key, 4, &state);
+    key[4] = d->stage1Color; key[5] = d->stage1Alpha;
+    slot = cache_slot(&s->shader, RB2K_D7_SHADER_KEYS, key, 6, &state);
     if (state != Hit) {
-        ULONG size = fragment_text(text, d->colorStage, d->alphaStage, d->specular, d->fog);
+        ULONG size = fragment_text(text, d->colorStage, d->alphaStage, d->specular, d->fog,
+                                   d->stage1Color, d->stage1Alpha);
         if (!size) { r->status = ERROR_INVALID_DATA; r->stage = RB2K_STAGE_TRANSFER; return FALSE; }
         if (state == Replaced) {
             words[0] = DESTROY(VIRGL_OBJECT_SHADER); words[1] = ShaderBase + slot;
@@ -711,7 +773,8 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
         words[n++] = ShaderBase + slot; words[n++] = FragmentStage;
         s->shader.bound = slot + 1;
     }
-    if (d->fog || uses(d->colorStage, ArgFactor) || uses(d->alphaStage, ArgFactor)) {
+    if (d->fog || uses(d->colorStage, ArgFactor) || uses(d->alphaStage, ArgFactor) ||
+        (d->stage1Color && (uses(d->stage1Color, ArgFactor) || uses(d->stage1Alpha, ArgFactor)))) {
         /* The texture factor, then for fog its colour and start, end, density. */
         words[n++] = VIRGL_CMD0(VIRGL_CCMD_SET_CONSTANT_BUFFER,0,d->fog ? 14 : 6);
         words[n++] = FragmentStage; words[n++] = 0;
@@ -727,49 +790,62 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
             words[n++] = d->fogStart; words[n++] = d->fogEnd; words[n++] = d->fogDensity; words[n++] = 0;
         }
     }
-    if (texture) {
-        key[0] = d->sampler; key[1] = d->border;
-        slot = cache_slot(&s->sampler, RB2K_D7_SAMPLER_KEYS, key, 2, &state);
-        if (state != Hit) {
-            ULONG mag = (d->sampler >> 8) & 15, min = (d->sampler >> 12) & 15;
-            if (state == Replaced) {
-                words[n++] = DESTROY(VIRGL_OBJECT_SAMPLER_STATE); words[n++] = SamplerBase + slot;
+    {
+        /* Stage zero uses sampler and view slot zero, stage one slot one. The
+         * renderer keeps only the slots up to the last one set, so a draw with
+         * stage one sets both slots at once; slot zero then repeats stage
+         * one's objects when stage zero has no texture. */
+        ULONG views = texture1 ? 2 : texture ? 1 : 0, h[2] = { 0, 0 }, view0;
+        BOOLEAN changed = FALSE;
+        if (texture) {
+            key[0] = d->sampler; key[1] = d->border;
+            slot = cache_slot(&s->sampler, RB2K_D7_SAMPLER_KEYS, key, 2, &state);
+            if (state != Hit) { n += sampler_words(words + n, SamplerBase + slot, state, d->sampler, d->border); changed = TRUE; }
+            h[0] = SamplerBase + slot;
+            if (s->viewTexture != texture->id) {
+                if (s->viewTexture) { words[n++] = DESTROY(VIRGL_OBJECT_SAMPLER_VIEW); words[n++] = TextureView; }
+                words[n++] = CREATE(VIRGL_OBJECT_SAMPLER_VIEW, VIRGL_OBJ_SAMPLER_VIEW_SIZE);
+                words[n++] = TextureView; words[n++] = texture->id; words[n++] = VIRGL_FORMAT_B8G8R8A8_UNORM;
+                words[n++] = 0; words[n++] = 0; words[n++] = 0x688; /* identity swizzle */
+                s->viewTexture = texture->id;
+                changed = TRUE;
             }
-            words[n++] = CREATE(VIRGL_OBJECT_SAMPLER_STATE, VIRGL_OBJ_SAMPLER_STATE_SIZE);
-            words[n++] = SamplerBase + slot;
-            /* Only the top level is uploaded: no mipmap filter. */
-            words[n++] = VIRGL_OBJ_SAMPLE_STATE_S0_WRAP_S(pipe_wrap(d->sampler & 15)) |
-                         VIRGL_OBJ_SAMPLE_STATE_S0_WRAP_T(pipe_wrap((d->sampler >> 4) & 15)) |
-                         VIRGL_OBJ_SAMPLE_STATE_S0_WRAP_R(2) |
-                         VIRGL_OBJ_SAMPLE_STATE_S0_MIN_IMG_FILTER(min != 1) |
-                         VIRGL_OBJ_SAMPLE_STATE_S0_MIN_MIP_FILTER(2) |
-                         VIRGL_OBJ_SAMPLE_STATE_S0_MAG_IMG_FILTER(mag != 1);
-            words[n++] = 0; words[n++] = 0; words[n++] = 0;
-            words[n++] = rb_gpu_channel((d->border >> 16) & 255);
-            words[n++] = rb_gpu_channel((d->border >> 8) & 255);
-            words[n++] = rb_gpu_channel(d->border & 255);
-            words[n++] = rb_gpu_channel(d->border >> 24);
         }
-        if (s->sampler.bound != slot + 1) {
-            words[n++] = VIRGL_CMD0(VIRGL_CCMD_BIND_SAMPLER_STATES,0,VIRGL_BIND_SAMPLER_STATES(1));
-            words[n++] = FragmentStage; words[n++] = 0; words[n++] = SamplerBase + slot;
-            s->sampler.bound = slot + 1;
+        if (texture1) {
+            key[0] = d->sampler1; key[1] = d->border1;
+            slot = cache_slot(&s->sampler1, RB2K_D7_SAMPLER_KEYS, key, 2, &state);
+            if (state != Hit) { n += sampler_words(words + n, Sampler1Base + slot, state, d->sampler1, d->border1); changed = TRUE; }
+            h[1] = Sampler1Base + slot;
+            if (!texture) h[0] = h[1];
+            if (s->viewTexture1 != texture1->id) {
+                if (s->viewTexture1) { words[n++] = DESTROY(VIRGL_OBJECT_SAMPLER_VIEW); words[n++] = TextureView1; }
+                words[n++] = CREATE(VIRGL_OBJECT_SAMPLER_VIEW, VIRGL_OBJ_SAMPLER_VIEW_SIZE);
+                words[n++] = TextureView1; words[n++] = texture1->id; words[n++] = VIRGL_FORMAT_B8G8R8A8_UNORM;
+                words[n++] = 0; words[n++] = 0; words[n++] = 0x688; /* identity swizzle */
+                s->viewTexture1 = texture1->id;
+                changed = TRUE;
+            }
         }
-        if (s->viewTexture != texture->id) {
-            if (s->viewTexture) { words[n++] = DESTROY(VIRGL_OBJECT_SAMPLER_VIEW); words[n++] = TextureView; }
-            words[n++] = CREATE(VIRGL_OBJECT_SAMPLER_VIEW, VIRGL_OBJ_SAMPLER_VIEW_SIZE);
-            words[n++] = TextureView; words[n++] = texture->id; words[n++] = VIRGL_FORMAT_B8G8R8A8_UNORM;
-            words[n++] = 0; words[n++] = 0; words[n++] = 0x688; /* identity swizzle */
-            words[n++] = VIRGL_CMD0(VIRGL_CCMD_SET_SAMPLER_VIEWS,0,VIRGL_SET_SAMPLER_VIEWS_SIZE(1));
-            words[n++] = FragmentStage; words[n++] = 0; words[n++] = TextureView;
-            s->viewTexture = texture->id;
+        view0 = texture ? TextureView : TextureView1;
+        if (views && (changed || s->boundSamplers != views || s->boundSampler[0] != h[0] ||
+                      (views == 2 && s->boundSampler[1] != h[1]))) {
+            words[n++] = VIRGL_CMD0(VIRGL_CCMD_BIND_SAMPLER_STATES,0,VIRGL_BIND_SAMPLER_STATES(views));
+            words[n++] = FragmentStage; words[n++] = 0;
+            for (i = 0; i < views; ++i) words[n++] = h[i];
+            s->boundSamplers = views; s->boundSampler[0] = h[0]; s->boundSampler[1] = h[1];
+        }
+        if (views && (changed || s->boundViews != views || s->boundView0 != view0)) {
+            words[n++] = VIRGL_CMD0(VIRGL_CCMD_SET_SAMPLER_VIEWS,0,VIRGL_SET_SAMPLER_VIEWS_SIZE(views));
+            words[n++] = FragmentStage; words[n++] = 0; words[n++] = view0;
+            if (views == 2) words[n++] = TextureView1;
+            s->boundViews = views; s->boundView0 = view0;
         }
     }
     return !n || rb_gpu_frame_words(gpu, r, image, words, n);
 }
 
 BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
-                       const RB2K_D3D7_DRAW *d, const RB2K_TEXTURE *texture)
+                       const RB2K_D3D7_DRAW *d, const RB2K_TEXTURE *texture, const RB2K_TEXTURE *texture1)
 {
     /* Viewport 8, scissor 4, constants 7 + 56 (+ 36 lit) + 16 (20 lit) per vertex
      * (+ 32 per light), draw 13. */
@@ -777,7 +853,7 @@ BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
     ULONG extra = (d->transform ? 56 : 0) + (lit ? 36 + 32*lights : 0);
     ULONG i, count = d->count, total = 28 + (d->transform ? 4 : 0) + extra + perVertex*count, *p;
     ULONG width = dimension_bits(image->width), height = dimension_bits(image->height);
-    if (!rb_gpu_prepare_target(gpu, r, image) || !states(gpu, r, image, d, texture)) return FALSE;
+    if (!rb_gpu_prepare_target(gpu, r, image) || !states(gpu, r, image, d, texture, texture1)) return FALSE;
     p = rb_gpu_frame_reserve(gpu, r, image, total);
     if (!p) return FALSE;
     *p++ = VIRGL_CMD0(VIRGL_CCMD_SET_VIEWPORT_STATE,0,VIRGL_SET_VIEWPORT_STATE_SIZE(1));
@@ -843,7 +919,7 @@ BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
         *p++ = rb_gpu_channel((v->specular >> 8) & 255);
         *p++ = rb_gpu_channel(v->specular & 255);
         *p++ = rb_gpu_channel(v->specular >> 24);
-        *p++ = v->u; *p++ = v->v; *p++ = 0; *p++ = 0x3f800000;
+        *p++ = v->u; *p++ = v->v; *p++ = v->u1; *p++ = v->v1;
         if (lit) { *p++ = v->nx; *p++ = v->ny; *p++ = v->nz; *p++ = 0; }
     }
     for (i = 0; i < lights; ++i) {

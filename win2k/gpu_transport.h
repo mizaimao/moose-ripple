@@ -12,14 +12,18 @@
 enum { RB2K_D7_DSA_KEYS = 16, RB2K_D7_BLEND_KEYS = 8, RB2K_D7_SAMPLER_KEYS = 8,
        RB2K_D7_SHADER_KEYS = 16 };
 typedef struct {
-    ULONG keys[RB2K_D7_SHADER_KEYS > RB2K_D7_DSA_KEYS ? RB2K_D7_SHADER_KEYS : RB2K_D7_DSA_KEYS][4];
+    ULONG keys[RB2K_D7_SHADER_KEYS > RB2K_D7_DSA_KEYS ? RB2K_D7_SHADER_KEYS : RB2K_D7_DSA_KEYS][6];
     ULONG used, next, bound;
 } RB2K_D7_CACHE;
 typedef struct {
     BOOLEAN pipeline;
     ULONG vertexShaders, boundVertex;   /* bit and value: 1 transformed input, 2 object space */
-    ULONG rasters, boundRaster, viewTexture;
-    RB2K_D7_CACHE dsa, blend, sampler, shader;
+    ULONG rasters, boundRaster, viewTexture, viewTexture1;
+    /* Samplers and views bound together from slot zero; the renderer drops
+     * the slots past the last set. boundViews counts views, boundView0 is the
+     * view handle in slot zero. */
+    ULONG boundSampler[2], boundSamplers, boundViews, boundView0;
+    RB2K_D7_CACHE dsa, blend, sampler, sampler1, shader;   /* sampler1: texture stage one */
 } RB2K_D7_STATE;
 
 typedef struct RB2K_IMAGE {
@@ -163,9 +167,9 @@ BOOLEAN rb_gpu_frame_words(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *i
                            const ULONG *words, ULONG count);
 BOOLEAN rb_gpu_frame_flush(RB2K_GPU *gpu, RB2K_GPU_RESULT *result);
 BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image,
-                       const RB2K_D3D7_DRAW *draw, const RB2K_TEXTURE *texture);
+                       const RB2K_D3D7_DRAW *draw, const RB2K_TEXTURE *texture, const RB2K_TEXTURE *texture1);
 BOOLEAN rb_gpu_d7_valid(const RB2K_D3D7_DRAW *draw);
-BOOLEAN rb_gpu_d7_samples(const RB2K_D3D7_DRAW *draw);
+BOOLEAN rb_gpu_d7_samples(const RB2K_D3D7_DRAW *draw, ULONG stage);
 RB2K_TEXTURE *rb_gpu_texture(RB2K_GPU *gpu, ULONG id);
 BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture);
 BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture,
