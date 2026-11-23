@@ -33,13 +33,13 @@ Reference image: Vista Ultimate SP2 x64, updated media, kernel file version
 The audit used System32 for
 native x64 and SysWOW64 for x86, following forwarded exports in both cases.
 It also checked the PE architecture, subsystem version 6.0 and both DLLs'
-Direct3D 9 `OpenAdapter` export.
+Direct3D 9 `OpenAdapter` export. The counts are for 7.14.1.20.
 
 | Binary | Imports | Additional GDI functions looked up at runtime | Unresolved |
 | --- | ---: | ---: | ---: |
-| viogpu3d.sys (x64) | 69 | 0 | 0 |
-| viogpu_d3d10.dll (x64) | 127 | 16 | 0 |
-| viogpu_d3d10.x86.dll (x86) | 132 | 16 | 0 |
+| viogpu3d.sys (x64) | 71 | 0 | 0 |
+| viogpu_d3d10.dll (x64) | 135 | 17 | 0 |
+| viogpu_d3d10.x86.dll (x86) | 138 | 17 | 0 |
 
 The default Windows 7 kernel driver and x64 and x86 Mesa targets also rebuilt
 in a separate build directory.
@@ -300,6 +300,29 @@ Each checked from a dump of the compositor's frame:
 | Media Player Classic HC 64-bit, `Bear.wmv` | Playing correctly in its window (frame at 0:11 of 0:12). |
 | Windows Media Player 11 | Not tested: it opened its first-run settings wizard, which is the owner's to answer. |
 
+### Fullscreen games and DreamScene, 7.14.1.20
+
+3DMark06's six default tests and DreamScene's video wallpaper needed these
+changes on Vista. Windows 7 already had its own versions of the first two.
+The screen-space shader, bound-shader and relative-addressing fixes made for
+Windows 7 serve Vista unchanged; the rest are Vista only.
+
+| Change | What failed before it |
+| --- | --- |
+| Submissions sized to the lists the render callback returns (patch 0106) | 3DMark06 crashed in the graphics DLL after about four minutes. |
+| Immediate fullscreen flips presented from the DMA buffer, with the allocation's segment | Fullscreen frames never reached the screen; it kept showing the desktop. |
+| Partial clears of a primary done on the GPU, imported display allocations mapped through their backing (patch 0107) | Clearing part of a fullscreen buffer crashed the program. |
+| YUY2 output from the video processor, StretchRect from video surfaces | VMR9 found no video processor, so DreamScene and video wallpapers stopped. |
+| Fetch4 lowered to four reads where the host has no texture gather | The GLES renderer (Apple silicon) rejected the shader and its draws were lost. |
+| Native points where the host has no geometry shaders | Firefly Forest drew nothing on the GLES renderer. |
+| User clip planes on both renderers | Canyon Flight was black on the GLES renderer; on Intel the planes did not clip. |
+
+The swap and draw dumps now read through a staging copy, which also works for
+scanout and shared primaries, and `RIPPLE_SWAPDUMP_REQUEST` names a
+per-program trigger file. `tools/vista/` has the pixel tests for these paths:
+`positiont.c` (screen-space draws, Fetch4, points, clip planes),
+`fullscreen-present.c` and `video-processor.c`.
+
 ### Capture on demand
 
 Vista now requests pixels from the host GPU when a program captures the
@@ -404,8 +427,8 @@ available in the existing checkout.
    in the guest, then fetch `C:\Users\Public\swap-PID.bmp` with
    `ruby recv-shot.rb <guest> <out.bmp> 0 <guest file>` (the `shot.exe -f`
    upload). Reading the UTM window itself needs the owner's approval each time.
-4. Then 3DMark06 and F.E.A.R. from the lab CD. Full-screen Direct3D 9 games
-   allocate primary flip chains as the compositor does.
+4. 3DMark06 runs all six default tests (it needs an elevated start and
+   turns Aero off while it runs). F.E.A.R. is still untested.
 
 ### Recover the lab desktop
 
