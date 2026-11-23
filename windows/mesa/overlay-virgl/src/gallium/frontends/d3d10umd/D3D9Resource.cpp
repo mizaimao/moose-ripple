@@ -2552,26 +2552,69 @@ D3D9PublishResource(D3D9Device *device, D3D9Resource *resource)
 }
 
 #ifdef RIPPLE_VISTA
-/* Vista: the frame going to the screen, saved for looking at, as the Mac driver's swapdump does.
- * While C:\Users\Public\ripple-swapdump exists, the next presented frame of each program is
- * written as C:\Users\Public\swap-PID.bmp and the trigger deleted. Looked for at most twice
- * a second. */
+/* Save an application render target to a BMP. The present hook can use a
+ * process-specific request file or the shared ripple-swapdump trigger. */
 void
 D3D9DumpImage(D3D9Device *device, struct pipe_resource *image, unsigned level, const char *path)
 {
-   if (!image || util_format_get_blocksize(image->format) != 4 || !device->pipe->texture_map)
+   if (!image || util_format_get_blocksize(image->format) != 4 || !device->pipe->texture_map) {
+      ripple_logf("image dump skipped: %s, unsupported resource or format %u",
+                  path, image ? (unsigned)image->format : 0);
       return;
+   }
 
    const unsigned w = u_minify(image->width0, level), h = u_minify(image->height0, level);
    struct pipe_box box;
    u_box_2d(0, 0, w, h, &box);
+   /* A scanout or shared primary need not have guest backing for a transfer.
+    * Copy its rendered contents into an ordinary readable resource first. */
+   struct pipe_resource templ = {};
+   templ.target = PIPE_TEXTURE_2D;
+   templ.format = image->format;
+   templ.width0 = w;
+   templ.height0 = h;
+   templ.depth0 = templ.array_size = 1;
+   templ.nr_samples = templ.nr_storage_samples = 1;
+   templ.usage = PIPE_USAGE_STAGING;
+   const bool resolve = image->nr_samples > 1;
+   if (resolve)
+      templ.bind = PIPE_BIND_RENDER_TARGET;
+   struct pipe_resource *staging = device->screen->resource_create(device->screen, &templ);
+   if (!staging || (resolve ? !device->pipe->blit : !device->pipe->resource_copy_region)) {
+      pipe_resource_reference(&staging, NULL);
+      ripple_logf("image dump staging unavailable: %s, %ux%u format %u", path, w, h, image->format);
+      return;
+   }
+   if (resolve) {
+      struct pipe_blit_info blit = {};
+      blit.src.resource = image;
+      blit.src.level = level;
+      blit.src.format = image->format;
+      blit.src.box = box;
+      blit.dst.resource = staging;
+      blit.dst.format = templ.format;
+      blit.dst.box = box;
+      blit.mask = PIPE_MASK_RGBA;
+      blit.filter = PIPE_TEX_FILTER_NEAREST;
+      device->pipe->blit(device->pipe, &blit);
+   } else {
+      device->pipe->resource_copy_region(device->pipe, staging, 0, 0, 0, 0, image, level, &box);
+   }
    struct pipe_transfer *transfer = NULL;
    const uint8_t *map = (const uint8_t *)device->pipe->texture_map(
-      device->pipe, image, level, PIPE_MAP_READ, &box, &transfer);
-   if (!map)
+      device->pipe, staging, 0, PIPE_MAP_READ, &box, &transfer);
+   if (!map) {
+      ripple_logf("image dump map failed: %s, %ux%u format %u bind 0x%x samples %u",
+                  path, w, h, (unsigned)image->format, image->bind, image->nr_samples);
+      pipe_resource_reference(&staging, NULL);
       return;
+   }
 
-   FILE *f = fopen(path, "wb");
+   /* A reader watching the file should only see a whole frame, including on a retry. */
+   char pending[MAX_PATH];
+   const int length = snprintf(pending, sizeof(pending), "%s.%lu.tmp", path, GetCurrentThreadId());
+   FILE *f = length > 0 && (size_t)length < sizeof(pending) ? fopen(pending, "wb") : NULL;
+   bool complete = false;
    if (f) {
       BITMAPFILEHEADER bf = {};
       BITMAPINFOHEADER bi = {};
@@ -2584,32 +2627,48 @@ D3D9DumpImage(D3D9Device *device, struct pipe_resource *image, unsigned level, c
       bi.biPlanes = 1;
       bi.biBitCount = 32;
       bi.biCompression = BI_RGB;
-      fwrite(&bf, sizeof(bf), 1, f);
-      fwrite(&bi, sizeof(bi), 1, f);
+      complete = fwrite(&bf, sizeof(bf), 1, f) == 1 && fwrite(&bi, sizeof(bi), 1, f) == 1;
       /* BMP keeps blue, green, red: swap where the image keeps red first */
       const bool rgb = util_format_description(image->format)->swizzle[0] == PIPE_SWIZZLE_X;
-      uint8_t *row = (uint8_t *)malloc(w * 4);
-      for (unsigned y = 0; row && y < h; ++y) {
-         memcpy(row, map + (size_t)y * transfer->stride, w * 4);
-         for (unsigned x = 0; rgb && x < w; ++x) {
-            const uint8_t r = row[x * 4];
-            row[x * 4] = row[x * 4 + 2];
-            row[x * 4 + 2] = r;
+      const size_t row_bytes = (size_t)w * 4;
+      uint8_t *row = rgb ? (uint8_t *)malloc(row_bytes) : NULL;
+      if (rgb && !row)
+         complete = false;
+      for (unsigned y = 0; complete && y < h; ++y) {
+         const uint8_t *src = map + (size_t)y * transfer->stride;
+         if (rgb) {
+            memcpy(row, src, row_bytes);
+            for (unsigned x = 0; x < w; ++x) {
+               const uint8_t r = row[x * 4];
+               row[x * 4] = row[x * 4 + 2];
+               row[x * 4 + 2] = r;
+            }
+            src = row;
          }
-         fwrite(row, w * 4, 1, f);
+         complete = fwrite(src, row_bytes, 1, f) == 1;
       }
       free(row);
-      fclose(f);
+      if (fclose(f) != 0)
+         complete = false;
+      if (complete)
+         complete = MoveFileExA(pending, path, MOVEFILE_REPLACE_EXISTING) != FALSE;
+      if (!complete)
+         DeleteFileA(pending);
    }
    device->pipe->texture_unmap(device->pipe, transfer);
-   ripple_logf("image dump: %s, %ux%u, format %u", path, w, h, (unsigned)image->format);
+   pipe_resource_reference(&staging, NULL);
+   ripple_logf("image dump%s: %s, %ux%u, format %u", complete ? "" : " write failed",
+               path, w, h, (unsigned)image->format);
 }
 
 static void
 D3D9SwapDump(D3D9Device *device, struct pipe_resource *image, unsigned level)
 {
    static DWORD next_look;
-   static const char trigger[] = "C:\\Users\\Public\\ripple-swapdump";
+   /* The optional path lets a test request only its own next presentation.
+    * Other processes continue to watch the default trigger. */
+   static const char *const request = getenv("RIPPLE_SWAPDUMP_REQUEST");
+   const char *trigger = request && *request ? request : "C:\\Users\\Public\\ripple-swapdump";
    const DWORD now = GetTickCount();
    if ((LONG)(now - next_look) < 0)
       return;
