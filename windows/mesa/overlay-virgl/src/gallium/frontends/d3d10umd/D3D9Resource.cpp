@@ -1574,6 +1574,11 @@ D3D9InitBlitInfo(struct pipe_blit_info *info,
    info->filter = PIPE_TEX_FILTER_NEAREST;
 }
 
+static bool D3D9BlitVideoSurface(D3D9Device *device, D3D9Resource *dst_resource,
+                                D3D9SubResource *dst_sub, UINT dst_index, const RECT *dst,
+                                D3D9Resource *src_resource, D3D9SubResource *src_sub,
+                                const RECT *src, enum pipe_tex_filter filter);
+
 static bool
 D3D9BlitCpuOnlySourceToTexture(D3D9Device *device,
                                D3D9Resource *dst_resource,
@@ -1602,6 +1607,11 @@ D3D9BlitCpuOnlySourceToTexture(D3D9Device *device,
    if (dst_width <= 0 || dst_height <= 0 ||
        src_width <= 0 || src_height <= 0)
       return true;
+
+   if (D3D_UMD_INTERFACE_VERSION < D3D_UMD_INTERFACE_VERSION_WIN7 &&
+       D3D9IsVideoFormat(src_resource->format))
+      return D3D9BlitVideoSurface(device, dst_resource, dst_sub, dst_subresource_index,
+                                 &dst, src_resource, src_sub, &src, filter);
 
    const enum pipe_format src_format =
       D3D9FormatToPipe(src_resource->format);
@@ -4876,6 +4886,10 @@ struct D3D9VideoProcessor {
 bool
 D3D9VideoProcessorTakes(D3DDDIFORMAT video, D3DDDIFORMAT target)
 {
+#ifdef RIPPLE_VISTA
+   if (target == D3D9_FMT_YUY2)
+      return video == D3D9_FMT_YUY2;
+#endif
    return (D3D9IsRgb32(video) || D3D9IsVideoFormat(video)) && D3D9IsRgb32(target);
 }
 
@@ -4900,16 +4914,22 @@ D3D9CreateVideoProcessDevice(HANDLE hDevice,
    return S_OK;
 }
 
+static void
+D3D9ReleaseVideoFrame(D3D9VideoProcessor *processor)
+{
+   pipe_resource_reference(&processor->frame, NULL);
+   pipe_resource_reference(&processor->luma, NULL);
+   pipe_resource_reference(&processor->chroma, NULL);
+   free(processor->rgb);
+}
+
 HRESULT APIENTRY
 D3D9DestroyVideoProcessDevice(HANDLE hDevice, HANDLE hVideoProcessor)
 {
    (void)hDevice;
    D3D9VideoProcessor *processor = (D3D9VideoProcessor *)hVideoProcessor;
    if (processor) {
-      pipe_resource_reference(&processor->frame, NULL);
-      pipe_resource_reference(&processor->luma, NULL);
-      pipe_resource_reference(&processor->chroma, NULL);
-      free(processor->rgb);
+      D3D9ReleaseVideoFrame(processor);
       free(processor);
    }
    return S_OK;
@@ -5327,7 +5347,8 @@ D3D9VideoToRgb(D3DDDIFORMAT format, const D3D9SubResource *sub,
       }
       const uint8_t *luma = sub->data + (size_t)row * sub->pitch;
       /* NV12: the chroma pairs of this row, in the plane after the luma rows */
-      const uint8_t *chroma = sub->data + (size_t)(sub->height + chroma_row) * sub->pitch;
+      const uint8_t *chroma = format == D3D9_FMT_NV12 ?
+         sub->data + (size_t)(sub->height + chroma_row) * sub->pitch : NULL;
       uint8_t *pixel = out + (size_t)y * width * 4;
       for (UINT x = 0; x < width; ++x, pixel += 4) {
          int l, cb, cr;
@@ -5358,7 +5379,8 @@ D3D9VideoBlitFrame(D3D9Device *device, D3D9VideoProcessor *processor,
                    D3D9Resource *dst_resource, D3D9SubResource *dst_sub,
                    UINT dst_subresource_index, const RECT *dst,
                    D3D9Resource *src_resource, D3D9SubResource *src_sub,
-                   const RECT *src, const DXVADDI_EXTENDEDFORMAT *colour, UINT field)
+                   const RECT *src, const DXVADDI_EXTENDEDFORMAT *colour, UINT field,
+                   enum pipe_tex_filter filter)
 {
    const bool video = D3D9IsVideoFormat(src_resource->format);
    if (!video)
@@ -5366,13 +5388,14 @@ D3D9VideoBlitFrame(D3D9Device *device, D3D9VideoProcessor *processor,
    const enum pipe_format format = video ? PIPE_FORMAT_B8G8R8X8_UNORM :
       D3D9FormatToPipe(src_resource->format);
    if (!device->screen || !device->pipe->texture_subdata || !device->pipe->blit ||
-       format == PIPE_FORMAT_NONE || !dst_resource->pipe_resource ||
+       format == PIPE_FORMAT_NONE || !dst_resource->pipe_resource || !src_sub->data ||
+       !src_sub->width || !src_sub->height ||
        (video && src_sub->width % 2 != 0))
       return false;
-   if (video ? src_sub->data_capacity < src_sub->size :
-               (src_sub->pitch < src_sub->width * 4 ||
-                src_sub->data_capacity < (size_t)src_sub->pitch * (src_sub->height - 1) +
-                                            (size_t)src_sub->width * 4))
+   const size_t rows = D3D9FormatRowCount(src_resource->format, src_sub->height);
+   const size_t row_bytes = (size_t)src_sub->width * D3D9FormatBytesPerPixel(src_resource->format);
+   if (!row_bytes || src_sub->pitch < row_bytes || src_sub->data_capacity < row_bytes ||
+       rows - 1 > (src_sub->data_capacity - row_bytes) / src_sub->pitch)
       return false;
 
    if (processor->frame &&
@@ -5447,11 +5470,33 @@ D3D9VideoBlitFrame(D3D9Device *device, D3D9VideoProcessor *processor,
                     D3D9PipeLayer(dst_resource, dst_subresource_index),
                     dst_resource->pipe_resource->format, dst,
                     processor->frame, 0, 0, format, src);
-   info.filter = PIPE_TEX_FILTER_LINEAR;
+   info.filter = filter;
    device->pipe->blit(device->pipe, &info);
    dst_sub->cpu_dirty = false;
    D3D9MarkAutogenMipmapsDirty(dst_resource, dst_subresource_index);
    return true;
+}
+
+/* StretchRect has no persistent video processor. Its source can be updated
+ * between two blits or used concurrently by a separate video processor. */
+static bool
+D3D9BlitVideoSurface(D3D9Device *device, D3D9Resource *dst_resource,
+                    D3D9SubResource *dst_sub, UINT dst_index, const RECT *dst,
+                    D3D9Resource *src_resource, D3D9SubResource *src_sub,
+                    const RECT *src, enum pipe_tex_filter filter)
+{
+   const enum pipe_format target = dst_resource->pipe_resource->format;
+   if (util_format_is_depth_or_stencil(target) || util_format_is_compressed(target) ||
+       dst_resource->pipe_resource->nr_samples > 1)
+      return false;
+   D3D9VideoProcessor converter = {};
+   const bool dirty = src_sub->cpu_dirty;
+   const bool ok = D3D9VideoBlitFrame(device, &converter, dst_resource, dst_sub,
+                                     dst_index, dst, src_resource, src_sub, src,
+                                     NULL, 0, filter);
+   src_sub->cpu_dirty = dirty;
+   D3D9ReleaseVideoFrame(&converter);
+   return ok;
 }
 
 /* Which field of an interlaced frame is due: 0 for the whole frame, 1 for the top field (the
@@ -5479,6 +5524,104 @@ D3D9VideoField(const D3D9VideoProcessor *processor, const D3DDDIARG_VIDEOPROCESS
    return top_first != second ? 1 : 2;
 }
 
+#ifdef RIPPLE_VISTA
+static bool
+D3D9HasYuy2Data(const D3D9SubResource *sub)
+{
+   if (!sub || !sub->data || !sub->width || !sub->height || (sub->width & 1))
+      return false;
+   const uint64_t row_bytes = (uint64_t)sub->width * 2;
+   return sub->pitch >= row_bytes &&
+          (uint64_t)(sub->height - 1) * sub->pitch + row_bytes <= sub->data_capacity;
+}
+
+/* Vista's VMR9 asks for a YUY2 intermediate. Each pair of output pixels
+ * has two lumas and one shared pair of chroma values. */
+static HRESULT
+D3D9VideoBltYuy2(D3D9VideoProcessor *processor, const D3DDDIARG_VIDEOPROCESSBLT *data,
+                 D3D9SubResource *output, const RECT &target)
+{
+   /* A fresh video-processor destination can be written before its first lock. */
+   if (!D3D9EnsureCpuBacking(output))
+      return E_OUTOFMEMORY;
+   if (!D3D9HasYuy2Data(output))
+      return E_INVALIDARG;
+
+   const D3D9SubResource *input = NULL;
+   RECT src = {}, dst = {};
+   UINT field = 0;
+   if (data->NumSrcSurfaces) {
+      const DXVADDI_VIDEOSAMPLE *sample = &data->pSrcSurfaces[0];
+      src = sample->SrcRect;
+      dst = sample->DstRect;
+      if (D3D9VideoClip(&target, &src, &dst)) {
+         const D3D9Resource *resource = D3D9CastResource(sample->SrcResource);
+         input = D3D9GetSubResource(sample->SrcResource, sample->SrcSubResourceIndex);
+         if (!resource || resource->format != D3D9_FMT_YUY2 || !D3D9HasYuy2Data(input) ||
+             src.left < 0 || src.top < 0 || (UINT)src.right > input->width ||
+             (UINT)src.bottom > input->height)
+            return E_INVALIDARG;
+         field = D3D9VideoField(processor, data, sample);
+      }
+   }
+
+   const uint8_t *source = input ? input->data : NULL;
+   uint8_t *saved = NULL;
+   if (source == output->data) {
+      const size_t bytes = (size_t)(input->height - 1) * input->pitch + (size_t)input->width * 2;
+      saved = (uint8_t *)malloc(bytes);
+      if (!saved)
+         return E_OUTOFMEMORY;
+      memcpy(saved, source, bytes);
+      source = saved;
+   }
+
+   const unsigned bg_y = data->BackgroundColor.Y >> 8;
+   const unsigned bg_u = data->BackgroundColor.Cb >> 8;
+   const unsigned bg_v = data->BackgroundColor.Cr >> 8;
+   for (LONG y = target.top; y < target.bottom; ++y) {
+      uint8_t *out = output->data + (size_t)y * output->pitch;
+      const uint8_t *in = NULL;
+      if (source && y >= dst.top && y < dst.bottom) {
+         LONG sy = src.top + (LONG)((LONGLONG)(y - dst.top) * (src.bottom - src.top) /
+                                    (dst.bottom - dst.top));
+         if (field)
+            sy = CLAMP((sy & ~1L) + (LONG)field - 1, src.top, src.bottom - 1);
+         in = source + (size_t)sy * input->pitch;
+      }
+      for (LONG x = target.left & ~1L; x < target.right; x += 2) {
+         uint8_t *pair = out + (size_t)x * 2;
+         unsigned sum_u = 0, sum_v = 0;
+         for (LONG n = 0; n < 2; ++n) {
+            const LONG dx = x + n;
+            if (dx < target.left || dx >= target.right)
+               continue;
+            unsigned luma = bg_y, u = bg_u, v = bg_v;
+            if (in && dx >= dst.left && dx < dst.right) {
+               const LONG sx = src.left + (LONG)((LONGLONG)(dx - dst.left) * (src.right - src.left) /
+                                                  (dst.right - dst.left));
+               const uint8_t *p = in + (size_t)(sx & ~1L) * 2;
+               luma = p[(sx & 1) * 2];
+               u = p[1];
+               v = p[3];
+            }
+            pair[n * 2] = (uint8_t)luma;
+            sum_u += u;
+            sum_v += v;
+         }
+         /* On a partial pair the neighbour outside the target keeps its chroma. */
+         if (x >= target.left && x + 1 < target.right) {
+            pair[1] = (uint8_t)((sum_u + 1) / 2);
+            pair[3] = (uint8_t)((sum_v + 1) / 2);
+         }
+      }
+   }
+   free(saved);
+   output->cpu_dirty = true;
+   return S_OK;
+}
+#endif
+
 HRESULT APIENTRY
 D3D9VideoProcessBlt(HANDLE hDevice, const D3DDDIARG_VIDEOPROCESSBLT *data)
 {
@@ -5501,6 +5644,10 @@ D3D9VideoProcessBlt(HANDLE hDevice, const D3DDDIARG_VIDEOPROCESSBLT *data)
    target.bottom = MIN2(data->TargetRect.bottom, (LONG)dst_sub->height);
    if (target.right <= target.left || target.bottom <= target.top)
       return S_OK;
+#ifdef RIPPLE_VISTA
+   if (dst_resource->format == D3D9_FMT_YUY2)
+      return D3D9VideoBltYuy2(processor, data, dst_sub, target);
+#endif
 
    /* The first sample is the video. Sub-streams (subtitles, a DVD's menu highlights) are
     * not offered, so Windows mixes those itself before it comes here. */
@@ -5521,7 +5668,7 @@ D3D9VideoProcessBlt(HANDLE hDevice, const D3DDDIARG_VIDEOPROCESSBLT *data)
             drawn = D3D9VideoBlitFrame(device, processor, dst_resource, dst_sub,
                                        processor->render_target_subresource, &dst,
                                        src_resource, src_sub, &src,
-                                       &sample->SampleFormat, field);
+                                       &sample->SampleFormat, field, PIPE_TEX_FILTER_LINEAR);
          else
             drawn = D3D9CopyRectPipe(device, processor->render_target,
                                      processor->render_target_subresource, &dst,

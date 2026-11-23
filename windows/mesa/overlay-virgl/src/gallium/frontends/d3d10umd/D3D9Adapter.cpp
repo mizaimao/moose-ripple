@@ -40,6 +40,12 @@ static constexpr UINT d3d9_ms_types =
    (1u << (D3DDDIMULTISAMPLE_4_SAMPLES - 1)) |
    (1u << (D3DDDIMULTISAMPLE_8_SAMPLES - 1));
 
+#ifdef RIPPLE_VISTA
+static constexpr DWORD d3d9_video_format_ops = FORMATOP_OFFSCREENPLAIN | FORMATOP_CONVERT_TO_ARGB;
+#else
+static constexpr DWORD d3d9_video_format_ops = FORMATOP_OFFSCREENPLAIN;
+#endif
+
 static const FORMATOP g_format_ops[] = {
    /* With FORMATOP_SRGBWRITE: Windows' Direct3D 10 Level 9 layer makes no device at any
     * feature level on a driver whose X8R8G8B8 cannot be drawn to in sRGB (its table of
@@ -98,13 +104,10 @@ static const FORMATOP g_format_ops[] = {
    { D3D9_FMT_DF16, 0x000410c1, 0, 0, 0 },
    { D3D9_FMT_DF24, 0x000410c1, 0, 0, 0 },
    { D3D9_FMT_INTZ, 0x000410c1, 0, 0, 0 },
-   /* moose-ripple: the two video formats the video processor converts (D3D9IsVideoFormat),
-    * as plain surfaces only: a decoder fills them and the processor reads them. AYUV is not
-    * listed; it was once, with YUY2, when the driver could make surfaces of neither, and
-    * Windows' video renderer chose them and then waited for pictures that never came.
-    */
-   { D3D9_FMT_NV12, FORMATOP_OFFSCREENPLAIN, 0, 0, 0 },
-   { D3D9_FMT_YUY2, FORMATOP_OFFSCREENPLAIN, 0, 0, 0 },
+   /* A decoder fills these plain surfaces. Vista also advertises the
+    * StretchRect conversion implemented with the video processor. */
+   { D3D9_FMT_NV12, d3d9_video_format_ops, 0, 0, 0 },
+   { D3D9_FMT_YUY2, d3d9_video_format_ops, 0, 0, 0 },
    { D3D9_FMT_R8, 0x00c2401f, d3d9_ms_types, 0, 0 },
    { D3D9_FMT_G8R8, 0x00c2401f, d3d9_ms_types, 0, 0 },
 };
@@ -126,6 +129,11 @@ D3D9FillCaps(const D3D9Adapter *adapter, D3DCAPS9 *caps)
    caps->DeviceType = D3DDEVTYPE_HAL;
    caps->AdapterOrdinal = 0;
    caps->Caps = 0x00020000;
+#ifdef RIPPLE_VISTA
+   /* Vista's VMR9 checks the legacy DirectDraw FourCC blit capability in
+    * this field before it will enumerate the DXVA video processors. */
+   caps->Caps |= 0x00000100u; /* DDCAPS_BLTFOURCC */
+#endif
    caps->Caps2 = 0xe0020000;
    caps->Caps3 =
       0x000003a0 & ~D3DCAPS3_LINEAR_TO_SRGB_PRESENTATION;
@@ -545,7 +553,22 @@ const GUID D3D9ProgressiveVideoProcessor =
 const GUID D3D9BobVideoProcessor =
    { 0x335aa36e, 0x7884, 0x43a4, { 0x9c, 0x91, 0x7f, 0x87, 0xfa, 0xf3, 0xe3, 0x7e } };
 
-static const D3DDDIFORMAT g_video_targets[] = { D3DDDIFMT_X8R8G8B8, D3DDDIFMT_A8R8G8B8 };
+static const D3DDDIFORMAT g_video_targets[] = {
+   D3DDDIFMT_X8R8G8B8, D3DDDIFMT_A8R8G8B8,
+#ifdef RIPPLE_VISTA
+   D3D9_FMT_YUY2,
+#endif
+};
+
+static UINT
+D3D9VideoTargetCount(const DXVADDI_VIDEOPROCESSORINPUT *input)
+{
+#ifdef RIPPLE_VISTA
+   if (input->VideoDesc.Format != D3D9_FMT_YUY2)
+      return ARRAYSIZE(g_video_targets) - 1;
+#endif
+   return ARRAYSIZE(g_video_targets);
+}
 
 /* A question about a processor and a kind of video: is the processor ours, and is it video
  * it takes? The target format may be left open. The bob device is for interlaced frames in
@@ -887,15 +910,19 @@ D3D9GetCaps(HANDLE hAdapter, const D3DDDIARG_GETCAPS *data)
          (const DXVADDI_VIDEOPROCESSORINPUT *)data->pInfo;
       *(UINT *)data->pData =
          data->Type == D3DDDICAPS_GETVIDEOPROCESSORRTFORMATCOUNT &&
-         D3D9VideoProcessorKnows(input) ? ARRAYSIZE(g_video_targets) : 0;
+         D3D9VideoProcessorKnows(input) ? D3D9VideoTargetCount(input) : 0;
       return S_OK;
    }
-   case D3DDDICAPS_GETVIDEOPROCESSORRTFORMATS:
-      if (!D3D9VideoProcessorKnows((const DXVADDI_VIDEOPROCESSORINPUT *)data->pInfo) ||
-          FAILED(D3D9ValidateData(data, sizeof(g_video_targets))))
+   case D3DDDICAPS_GETVIDEOPROCESSORRTFORMATS: {
+      const auto *input = (const DXVADDI_VIDEOPROCESSORINPUT *)data->pInfo;
+      if (!D3D9VideoProcessorKnows(input))
          return E_INVALIDARG;
-      memcpy(data->pData, g_video_targets, sizeof(g_video_targets));
+      const UINT bytes = D3D9VideoTargetCount(input) * sizeof(g_video_targets[0]);
+      if (FAILED(D3D9ValidateData(data, bytes)))
+         return E_INVALIDARG;
+      memcpy(data->pData, g_video_targets, bytes);
       return S_OK;
+   }
    case D3DDDICAPS_GETVIDEOPROCESSORRTSUBSTREAMFORMATS:
       return S_OK;
    case D3DDDICAPS_GETVIDEOPROCESSORCAPS: {
@@ -912,7 +939,7 @@ D3D9GetCaps(HANDLE hAdapter, const D3DDDIARG_GETCAPS *data)
       caps->VideoProcessorOperations = DXVADDI_VIDEOPROCESS_STRETCHX |
                                        DXVADDI_VIDEOPROCESS_STRETCHY |
                                        DXVADDI_VIDEOPROCESS_SUBRECTS;
-      if (D3D9IsVideoFormat(input->VideoDesc.Format))
+      if (D3D9IsVideoFormat(input->VideoDesc.Format) && !D3D9IsVideoFormat(caps->OutputFormat))
          caps->VideoProcessorOperations |= DXVADDI_VIDEOPROCESS_YUV2RGB |
                                            DXVADDI_VIDEOPROCESS_YUV2RGBEXTENDED;
       if (!memcmp(input->pVideoProcGuid, &D3D9BobVideoProcessor, sizeof(GUID)))
