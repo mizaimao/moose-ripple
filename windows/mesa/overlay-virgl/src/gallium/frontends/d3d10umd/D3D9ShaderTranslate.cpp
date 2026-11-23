@@ -74,6 +74,7 @@ D3D9TranslateVertexShaderForState(D3D9Device *device, D3D9Object *shader,
       D3D9ShaderHasRuntimeFixedFunctionComment(shader) ? 1 : 0;
    info.force_position_t = position_t;
    info.clip_plane_emulation = clip_plane_mask;
+   info.fragment_clip_planes = D3D9FragmentClipPlaneMask(device->screen, clip_plane_mask);
    info.point_size_min = 0.0f;
    info.point_size_max = 8192.0f;
 
@@ -127,7 +128,8 @@ D3D9TranslatePixelShaderForState(D3D9Device *device, D3D9Object *shader,
                                  uint16_t sampler_type_override_mask,
                                  uint16_t fetch4,
                                  uint16_t fetch4_ati1,
-                                 uint16_t fetch4_projected_fallback)
+                                 uint16_t fetch4_projected_fallback,
+                                 uint8_t fragment_clip_planes)
 {
    if (!device || !device->pipe || !device->screen || !shader ||
        shader->kind != D3D9_OBJECT_SHADER ||
@@ -161,6 +163,7 @@ D3D9TranslatePixelShaderForState(D3D9Device *device, D3D9Object *shader,
    info.fetch4 = fetch4;
    info.fetch4_ati1 = fetch4_ati1;
    info.fetch4_projected_fallback = fetch4_projected_fallback;
+   info.fragment_clip_planes = fragment_clip_planes;
    info.alpha_test_emulation = PIPE_FUNC_ALWAYS;
 
    const HRESULT hr = nine_translate_shader(&nine, &info, device->pipe);
@@ -188,6 +191,7 @@ D3D9TranslatePixelShaderForState(D3D9Device *device, D3D9Object *shader,
    shader->translated_ps_fetch4 = fetch4;
    shader->translated_ps_fetch4_ati1 = fetch4_ati1;
    shader->translated_ps_fetch4_projected_fallback = fetch4_projected_fallback;
+   shader->translated_ps_clip_plane_mask = fragment_clip_planes;
    shader->translated_ps_const_used_size = info.const_used_size;
    shader->translated_ps_const_ranges = info.const_ranges;
    shader->translated_ps_lconstf_ranges = info.lconstf.ranges;
@@ -211,5 +215,5 @@ D3D9TranslatePixelShader(D3D9Device *device, D3D9Object *shader)
 {
    return D3D9TranslatePixelShaderForState(device, shader, false,
                                           D3DFOG_NONE, true, 0, 0, 0, 0, 0,
-                                          0, 0);
+                                          0, 0, 0);
 }

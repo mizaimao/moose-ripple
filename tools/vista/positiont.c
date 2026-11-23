@@ -92,6 +92,74 @@ done:
     return rc;
 }
 
+static int check_clip_planes(IDirect3DDevice9 *device, IDirect3DSurface9 *target,
+                             IDirect3DSurface9 *copy, IDirect3DVertexShader9 *vs)
+{
+    static const float vertices[][3] = {{-1,1,0.5f}, {1,1,0.5f}, {1,-1,0.5f}, {-1,-1,0.5f}};
+    static const float up[] = {0,1,0,0};
+    static const struct { const char *name; DWORD mask; float x; unsigned red; } cases[] = {
+        {"unclipped", 0, 1, 15}, {"right half", 1, 1, 10},
+        {"top half, plane five", 32, 1, 3}, {"upper right", 33, 1, 2},
+        {"upper left, same mask", 33, -1, 1}, {"disabled again", 0, -1, 15}
+    };
+    IDirect3DPixelShader9 *ps = NULL;
+    unsigned failures = 0;
+    int rc = 1;
+    CHECK(IDirect3DDevice9_CreatePixelShader(device, solid2, &ps));
+    CHECK(IDirect3DDevice9_SetPixelShader(device, ps));
+    CHECK(IDirect3DDevice9_SetFVF(device, D3DFVF_XYZ));
+    CHECK(IDirect3DDevice9_SetVertexShader(device, vs));
+    CHECK(IDirect3DDevice9_SetClipPlane(device, 5, up));
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        const float side[] = {cases[i].x, 0, 0, 0};
+        CHECK(IDirect3DDevice9_SetClipPlane(device, 0, side));
+        CHECK(IDirect3DDevice9_SetRenderState(device, D3DRS_CLIPPLANEENABLE, cases[i].mask));
+        CHECK(IDirect3DDevice9_Clear(device, 0, NULL, D3DCLEAR_TARGET, background, 1, 0));
+        CHECK(IDirect3DDevice9_BeginScene(device));
+        CHECK(IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLEFAN, 2, vertices, sizeof(vertices[0])));
+        CHECK(IDirect3DDevice9_EndScene(device));
+        CHECK(IDirect3DDevice9_GetRenderTargetData(device, target, copy));
+        D3DLOCKED_RECT map;
+        CHECK(IDirect3DSurface9_LockRect(copy, &map, NULL, D3DLOCK_READONLY));
+        unsigned bad = 0;
+        for (unsigned j = 0; j < 4; ++j) {
+            const DWORD *row = (const DWORD *)((const BYTE *)map.pBits + ((j & 2) ? 12 : 3) * map.Pitch);
+            DWORD expected = (cases[i].red & (1u << j)) ? 0xffff0000 : background;
+            bad += ((row[(j & 1) ? 12 : 3] ^ expected) & 0xffffff) != 0;
+        }
+        CHECK(IDirect3DSurface9_UnlockRect(copy));
+        printf("clip %s mismatches=%u/4\n", cases[i].name, bad);
+        failures += bad;
+    }
+    /* Scaled points clip at the original vertex on devices without CLIPPLANESCALEDPOINTS. */
+    static const float points[][3] = {{-0.5f,0,0.5f}, {0.5f,0,0.5f}};
+    const float right[] = {1,0,0,0}, size = 6.0f;
+    DWORD size_bits;
+    memcpy(&size_bits, &size, sizeof(size_bits));
+    CHECK(IDirect3DDevice9_SetClipPlane(device, 0, right));
+    CHECK(IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSIZE, size_bits));
+    for (DWORD enabled = 0; enabled <= 1; ++enabled) {
+        CHECK(IDirect3DDevice9_SetRenderState(device, D3DRS_CLIPPLANEENABLE, enabled));
+        CHECK(IDirect3DDevice9_Clear(device, 0, NULL, D3DCLEAR_TARGET, background, 1, 0));
+        CHECK(IDirect3DDevice9_BeginScene(device));
+        CHECK(IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_POINTLIST, 2, points, sizeof(points[0])));
+        CHECK(IDirect3DDevice9_EndScene(device));
+        CHECK(IDirect3DDevice9_GetRenderTargetData(device, target, copy));
+        D3DLOCKED_RECT map;
+        CHECK(IDirect3DSurface9_LockRect(copy, &map, NULL, D3DLOCK_READONLY));
+        const DWORD *row = (const DWORD *)((const BYTE *)map.pBits + 8 * map.Pitch);
+        unsigned bad = ((row[4] ^ (enabled ? background : 0xffff0000)) & 0xffffff) != 0;
+        bad += ((row[12] ^ 0xffff0000) & 0xffffff) != 0;
+        CHECK(IDirect3DSurface9_UnlockRect(copy));
+        printf("clip scaled points, plane %lu mismatches=%u/2\n", (unsigned long)enabled, bad);
+        failures += bad;
+    }
+    rc = failures != 0;
+done:
+    if (ps) IDirect3DPixelShader9_Release(ps);
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
     static const struct { const char *name; const DWORD *code; DWORD fvf; int gather, bound_vs; } tests[] = {
@@ -149,6 +217,11 @@ int main(int argc, char **argv)
                                                        D3DPOOL_SYSTEMMEM, &copy, NULL));
     CHECK(IDirect3DDevice9_CreateVertexShader(device, position_vs, &previous_vs));
 
+    if (argc == 2 && !strcmp(argv[1], "--clip-planes")) {
+        failures += check_clip_planes(device, target, copy, previous_vs);
+        CHECK(IDirect3DDevice9_SetRenderState(device, D3DRS_CLIPPLANEENABLE, 0));
+        CHECK(IDirect3DDevice9_SetStreamSource(device, 0, vb, 0, sizeof(quad[0])));
+    }
     if (test_points) {
         failures += check_points(device, target, copy);
         CHECK(IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSPRITEENABLE, FALSE));

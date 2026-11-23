@@ -4093,6 +4093,32 @@ nine_find_vs_input(struct nine_shader_info *info, uint16_t usage,
     return false;
 }
 
+/* ES 3.0 can interpolate distances even when it cannot export gl_ClipDistance.
+ * Generic indices ending in 6 above the fog slot are unused by the D3D9 semantic map. */
+static void
+shader_add_fragment_clip_planes(struct shader_translator *tx)
+{
+    for (unsigned group = 0; group < 2; ++group) {
+        unsigned enabled = (tx->info->fragment_clip_planes >> (group * 4)) & 0xf;
+        if (!enabled)
+            continue;
+        const unsigned semantic_index = 26 + group * 10;
+        if (IS_PS) {
+            struct ureg_src distances = ureg_DECL_fs_input(tx->ureg, TGSI_SEMANTIC_GENERIC,
+                                                           semantic_index, TGSI_INTERPOLATE_PERSPECTIVE);
+            ureg_KILL_IF(tx->ureg, distances);
+        } else {
+            struct ureg_dst distances = ureg_DECL_output(tx->ureg, TGSI_SEMANTIC_GENERIC, semantic_index);
+            ureg_MOV(tx->ureg, distances, ureg_imm1f(tx->ureg, 0.0f));
+            for (unsigned component = 0; component < 4; ++component) {
+                if (enabled & (1u << component))
+                    ureg_DP4(tx->ureg, ureg_writemask(distances, 1u << component),
+                             ureg_src(tx->regs.oPos), nine_special_constant_src(tx, group * 4 + component));
+            }
+        }
+    }
+}
+
 static void parse_shader(struct shader_translator *tx)
 {
     struct nine_shader_info *info = tx->info;
@@ -4191,7 +4217,9 @@ static void parse_shader(struct shader_translator *tx)
         info->point_size = true;
     }
 
-    if (IS_VS && tx->info->clip_plane_emulation > 0) {
+    if (info->fragment_clip_planes) {
+        shader_add_fragment_clip_planes(tx);
+    } else if (IS_VS && info->clip_plane_emulation) {
         struct ureg_dst clipdist[2] = {ureg_dst_undef(), ureg_dst_undef()};
         int num_clipdist = 0;
         int i;
@@ -4199,6 +4227,11 @@ static void parse_shader(struct shader_translator *tx)
             if (tx->info->clip_plane_emulation & (1 << i))
                 num_clipdist = i + 1;
         }
+#ifdef RIPPLE_VISTA
+        /* virgl reads a whole vec4 from each geometry-shader clip-distance
+         * input. Supply zeroes for inactive lanes so that read is in bounds. */
+        num_clipdist = (num_clipdist + 3) & ~3;
+#endif
         /* TODO: handle undefined channels of oPos (w is not always written to I think. default is 1) *
          * Note in d3d9 it's not possible to output clipvert, so we don't need to check
          * for its existence */

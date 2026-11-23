@@ -28,4 +28,5 @@ HRESULT D3D9TranslatePixelShaderForState(D3D9Device *device,
                                          uint16_t sampler_type_override_mask,
                                          uint16_t fetch4,
                                          uint16_t fetch4_ati1,
-                                         uint16_t fetch4_projected_fallback);
+                                         uint16_t fetch4_projected_fallback,
+                                         uint8_t fragment_clip_planes);

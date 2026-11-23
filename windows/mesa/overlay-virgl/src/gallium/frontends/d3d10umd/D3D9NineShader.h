@@ -183,6 +183,7 @@ struct nine_shader_info
    uint16_t fetch4_projected_fallback;
    uint8_t alpha_test_emulation;
    uint8_t clip_plane_emulation;
+   uint8_t fragment_clip_planes;
    bool emulate_features;
    unsigned const_i_base;
    unsigned const_b_base;
