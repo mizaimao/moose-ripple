@@ -774,4 +774,667 @@ page-flip repeats passed. On Windows 2000, the 8-bit test after Quake
 returned palette index 255 throughout page zero with the hardware pointer
 enabled and disabled. Of 786,432 pixels, 774,144 differed from the
 expected pattern. Both isolated repeats on each setting passed. The
-source of that repaint remains open.
+source of that repaint remains open. A subsequent GDI-only boot reproduced
+the same locked page on both immediate repeats, after ten Quake launches
+and zero GPU desktop frames. [Indexed page issue](https://github.com/mizaimao/moose-ripple/issues/114)
+
+## Native Direct3D 7 pixel test
+
+The first test uses the system DirectDraw and Direct3D 7 runtimes. It opens
+a 128×128 offscreen surface on a 1024×768×32 desktop. Run
+`d3d7probe rgb` for the Microsoft software renderer, `d3d7probe target`
+to check the host render target, and `d3d7probe hal` to request the hardware
+device. `d3d7probe window` also presents the rendered triangle to a clipped
+window using a primary surface marked for Direct3D. It samples the triangle,
+the clear colour and two untouched pixels outside the destination rectangle.
+Exit code 0 means the pixels and counters matched, 1 means a check
+failed, and 2 means the requested hardware was unavailable.
+
+`z16pixels rgb` and `z16pixels hal` request a separate 16-bit depth
+surface on the software and hardware device respectively. Two overlapping
+triangles are drawn in both orders. The nearer red triangle must win both
+times. With depth writes disabled, the blue triangle drawn last must win.
+Each draw also checks a blue pixel outside the overlap and a black pixel
+outside both triangles.
+
+The software reference clears all 16,384 pixels to dark blue, then draws a
+triangle with red, green and blue vertices. It checks 4,095 interior pixels
+against the interpolated colours and 11,233 background pixels against the
+clear. It repeats the draw for 120 frames and locks the target before ending
+the timing.
+
+| Test, three runs per system | Windows 2000 SP4 | Windows XP SP3 |
+| --- | --- | --- |
+| Original driver, software device | 3 passes | 3 passes |
+| Original driver, hardware device | 3 unavailable | 3 unavailable |
+| Host render targets enabled, before accepting the 3D surface flag | 3 rejected | 3 rejected |
+| Same setting, after accepting the flag | 3 passes | 3 passes |
+
+The last two rows used the same guest, driver configuration and executable
+on each system. Each passing target check recorded one GPU fill, one readback
+and zero uploads. All pixels matched. The target check calls DirectDraw
+`Blt` and verifies the storage used by a later Direct3D device.
+
+The historical Direct3D 8 Quake `demo1` comparison used 969 frames at
+640×480. The optimized medians were 24.2 fps on Windows 2000 and 24.1 fps
+on XP. Version 0.81 requires Direct3D 8. The earlier 0.73 Direct3D 7 renderer
+can play the same demo. [Port and game test plan](https://github.com/mizaimao/moose-ripple/issues/106)
+
+### Native hardware device and full-target clear
+
+Set both `RippleDirectDrawGpuSurfaces` and `RippleNativeD3D7` to 1 on the
+test adapter. The native option applies to the 32-bit display mode. Run
+`d3d7probe clear` to request the stock Direct3D 7 hardware device and check
+a full 128×128 blue clear. It checks the returned device GUID, hardware
+rasterization flag, every target pixel, one completed native clear and the
+live context and surface counts after release.
+
+On XP SP3, supplying the texture-stage and driver-state callbacks let the
+runtime request the driver's depth formats and extended capabilities.
+Returning the extended capability record then changed hardware device
+creation and clear from zero successes in three tries to three in three.
+Windows 2000 SP4 also passed all three hardware clears. Each clear had
+zero pixel mismatches. Ordinary DirectDraw hardware and
+software fills passed, and a separate 16×16 XRGB texture check returned
+all 256 uploaded pixels on each of three readbacks. In the clear-only revision the
+native draw stopped at its first triangle-list command.
+
+### First native triangle
+
+The same test now draws transformed, untextured Gouraud triangle lists.
+On XP SP3 all three hardware runs and three RGB software runs passed. Each
+hardware run counted 121 triangles and 122 clears. Both sampled triangle
+frames matched all 4,095 interior and 11,233 background pixels checked.
+After release the driver counted zero live contexts and targets.
+
+The median time for 120 frames at 128×128, including the final synchronous
+read, was 431.0 ms on the hardware device and 47.2 ms on the RGB device.
+
+### Submission timing on XP
+
+The instrumented test used the same executable before and after batching.
+Each timed block drew 120 frames at 128×128 and waited for its final pixel
+read. The hardware clear and Gouraud checks passed in all six runs.
+
+| XP SP3 | Three hardware runs, ms | Median, ms | Render submissions / fences per frame |
+| --- | --- | --- | --- |
+| Separate clear and draw | 451.0, 445.0, 452.2 | 451.0 | 2 / 2 |
+| Batched at scene end | 865.2, 264.5, 261.2 | 264.5 | 1 / 1 |
+
+When a scene exceeds one command packet, intermediate packets carry no
+GPU fence. A surface read synchronizes earlier drawing to that target.
+
+Time in the render queue fell from about 395 ms to 200 ms per block.
+The slowest batched run also spent about 200 ms in that queue. The other
+delay occurred outside it. The software control medians were 44.7 ms
+and 44.6 ms. No texture uploads occurred in these timed blocks.
+
+The original Direct3D Quake 0.73 window reached 640×480 with both drivers.
+The game reported `DDERR_INVALIDCAPS` and never recorded a hardware
+context or draw. Neither run produced a `demo1` score for comparison with
+the historical 0.81 renderer. [Author's game releases](https://dxquake.sourceforge.net/)
+
+### Two frames in flight on stock QEMU
+
+The opt-in native driver keeps up to two scenes in flight. When submitting
+frame N it waits only if frame N−2 still owns the command buffer it needs.
+A lock, copy or destruction of a render target waits for outstanding GPU
+work on that target. The test setting `RippleD3D7WaitCurrent=1` selects the
+synchronous control in the same driver binary.
+
+Linux QEMU 9.2.0 with KVM and Intel UHD 630 ran a 128×128 render target on a
+1024×768, 32-bit desktop. Each timing covers 120 clear-and-triangle scenes
+through the final synchronized surface lock. Each row reports the median of
+three runs per mode. The RGB column uses the software device in the
+two-frame driver's guest.
+
+| Guest | Wait for each frame | Two frames in flight | RGB software |
+| --- | ---: | ---: | ---: |
+| Windows 2000 SP4 | 1,200.869 ms | 55.789 ms | 8.400 ms |
+| Windows XP SP3 | 1,200.930 ms | 64.165 ms | 11.243 ms |
+
+XP's three two-frame runs took 65.063, 27.259 and 64.165 ms. All reached
+two outstanding scenes, completed all 120 fences by the final read and
+matched both triangle samples. Waiting after each scene cost about 1.194 s
+per block. The two-frame runs recorded zero waits for N−2 and one
+9.50–9.82 ms wait at the final read.
+
+Windows 2000's two-frame runs took 103.018, 41.512 and 55.789 ms. Each
+completed 120 fences and passed the pixel test. Only the second run waited
+for N−2, twice for 19.241 ms in total. All three waited for the target at
+the final read, for 9.37–9.92 ms. On both guests the hardware device
+completed 121 triangles and 122 clears per test and released its context
+and render target.
+
+QEMU checks for completed GPU work after processing new control commands.
+If work remains, it schedules another check 10 ms later. The measured
+9.95 ms per synchronous fence is consistent with waiting for that timer.
+Submitting the next scene gives QEMU another opportunity to retire the
+previous fence. [QEMU control handler](https://github.com/qemu/qemu/blob/v9.2.0/hw/display/virtio-gpu-gl.c#L92-L102) · [QEMU fence timer](https://github.com/qemu/qemu/blob/v9.2.0/hw/display/virtio-gpu-virgl.c#L977-L986)
+
+The separate XRGB texture test wrote and read back 20 images at each size.
+On both guests, 16×16 and 64×64 writes used 20 inline submissions and zero
+upload fences. At 65×65 the existing transfer path used 60 submissions and
+20 fences. All texels matched.
+
+Direct3D Quake 0.73 reported `DDERR_INVALIDCAPS` before creating a native
+device on all four hardware boots. Two further boots disabled the native
+Direct3D device, one per OS. Both reproduced the same game error and passed
+all three RGB software pixel tests. Each of the original game's four D3DX7
+windowed context requests returned the same error in a separate test.
+Explicit requests for a hardware device without depth and for the RGB
+software device also failed. DirectDraw successfully created a plain
+primary surface and a 640×480 offscreen hardware render target. Creating
+a 16-bit depth surface returned a separate error, `DDERR_NOZBUFFERHW`.
+The game recorded no frame rate in any of the six boots. The historical XP
+score on this Intel system was 57.3 fps for the same 969-frame demo in the
+0.81 Direct3D 8 version.
+
+A separate trace captured the DirectDraw calls made by the stock D3DX7
+library when given the game's four windowed context requests. On both guests
+each attempt reached `CanCreateSurface` once. The driver returned
+`DDERR_INVALIDCAPS` for `0x6200`, a primary surface in video memory marked
+`DDSCAPS_3DDEVICE`. Requests explicitly selecting hardware with or without
+depth and RGB software with 16-bit depth reached the same rejection. The
+ordinary primary (`0x4200`) and the 640×480 offscreen hardware render
+target (`0x6040`) succeeded in the direct control. [Microsoft DirectDraw surface flags](https://learn.microsoft.com/en-us/windows/win32/api/ddraw/ns-ddraw-ddscaps)
+
+### Windowed primary and game startup
+
+Four fresh Intel QEMU boots compared the original display driver and the
+change that accepts the 3D flag on a primary surface. The miniport and the
+other 24 test-drive files, including the game and pixel test, matched.
+On both systems the original driver rejected the primary in all three
+window tests. The changed driver accepted it in all three. All six changed
+driver tests rendered the offscreen triangle correctly, counted 122 clears
+and 121 triangles, and released their contexts and targets. The final copy
+to the window returned `E_FAIL` before the test could sample a visible pixel.
+
+All four windowed startup requests from Direct3D Quake 0.73 advanced from
+`DDERR_INVALIDCAPS` to `D3DXERR_CAPSNOTSUPPORTED` on both guests. The
+same library error occurred when the test explicitly requested hardware
+with depth disabled. Explicitly requesting the Microsoft RGB device with
+16-bit depth succeeded and returned its software device identifier
+(`a4665c60`). Direct3D's hardware depth-format enumeration returned
+`DDERR_NOZBUFFERHW` and zero formats.
+
+The original game made five surface-registration calls with the changed
+driver on each OS. It made zero native context or draw calls and returned
+no timedemo score. The offscreen controls below are medians of three
+120-frame runs at 128×128, including the final read. The changed boots
+also rendered three extra window-test sequences before these timings.
+
+| Guest | Hardware before | Hardware after | RGB before | RGB after |
+| --- | ---: | ---: | ---: | ---: |
+| Windows 2000 SP4 | 81.212 ms | 44.658 ms | 8.835 ms | 11.177 ms |
+| Windows XP SP3 | 66.008 ms | 35.603 ms | 11.063 ms | 4.899 ms |
+
+Two further fresh boots traced the copy into the test window. Both
+systems returned `E_FAIL` for all three tagged-primary cases before
+entering the display driver's `Blt` callback. Releasing the window's
+device context first and copying the entire target both reproduced it.
+Changing only the primary to an ordinary one let the full 128×128 and
+cropped 96×96 copies reach the miniport. Both copies matched all four
+visible samples on each OS. The ordinary DirectDraw hardware and
+software window controls also passed, including the covered regions.
+Each tagged test recorded two surface registrations, compared with one
+for an ordinary primary. The driver's registration callback treated a
+mapped primary without an offscreen slot as `DDERR_SURFACELOST`. The
+follow-up change acknowledges that registration and keeps hardware render
+targets in their existing offscreen slots. Fourteen DDK descriptor checks
+per driver verified the callback result and whether it assigned a surface
+handle.
+
+Four fresh boots compared the old and new registration callbacks. Each pair
+used the same test program, miniport, Quake executable and settings. Only
+the display DLL differed. A passing copy required the display callback, a
+successful miniport copy and all four expected pixels in the test window.
+
+| Window copy | Windows 2000 before | Windows 2000 after | XP before | XP after |
+| --- | ---: | ---: | ---: | ---: |
+| 3D-tagged primary, three cases | 0/3 | 3/3 | 0/3 | 3/3 |
+| Ordinary primary, two controls | 2/2 | 2/2 | 2/2 | 2/2 |
+
+The three tagged cases covered a 96×96 crop with the window device context
+held, the same crop after releasing it and a full 128×128 copy. The old
+driver received zero copy callbacks for these cases. The changed driver
+received one per case. The hardware and software DirectDraw window controls
+also preserved the regions obscured by another window.
+
+Each of the five cases also timed 120 offscreen frames at 128×128 through
+the final surface read. The window copy followed the timed interval. Each
+case completed all 120 submitted frames with zero pending or failed.
+
+| Guest | Old registration, median of five | New registration, median of five |
+| --- | ---: | ---: |
+| Windows 2000 SP4 | 31.616 ms | 33.783 ms |
+| Windows XP SP3 | 32.771 ms | 60.541 ms |
+
+On XP the first case took 32.771 ms before and 31.950 ms after. All four
+later cases took longer with the new driver. Each XP boot waited once for
+a two-frame queue slot across 600 frames. Each case's final GPU wait was
+9.28–9.93 ms. Those waits do not account for the change in median. A repeat
+with the offscreen control run before any windows is needed to isolate it.
+
+Stock Direct3D Quake 0.73 at 640×480 returned
+`D3DXERR_CAPSNOTSUPPORTED` on every boot. It made five surface registrations
+and zero native context, clear or draw calls per launch. It produced no
+`demo1` score to compare with the historical Direct3D 8 result.
+
+At the current 1024×768×32 display mode, direct hardware queries
+enumerated one texture format and zero depth formats on both systems.
+The stock D3DX7 library returned `D3DXERR_CAPSNOTSUPPORTED` for hardware
+device caps and reported zero depth, colour-texture and render-target
+formats, whether given that mode explicitly or asked for the current mode.
+For the RGB device, the same library reported two depth, seven colour-texture
+and six render-target formats. Its hardware capability query enumerates
+depth before texture formats and skips collecting the rest when depth
+enumeration fails. The 16-bit depth test draws overlapping triangles in
+both orders and repeats with depth writes disabled. On both revisions of
+each guest, Microsoft's RGB device matched all nine pixel samples. The
+hardware device returned `DDERR_NOZBUFFERHW` at enumeration, before drawing.
+
+### Native 16-bit depth surface storage
+
+Four fresh Windows 2000 SP4 and XP SP3 boots compared the production driver
+with and without Z16 surface storage. The test programs, desktop mode and
+driver settings matched. The previous driver returned `DDERR_NOZBUFFERHW`
+for both requested sizes on each OS. The new driver accepted both sizes.
+`zstore.exe` wrote a pattern, overwrote one pixel through a partial lock,
+then read the whole surface via DirectDraw.
+
+| Z16 video-memory surface | Row pitch | Windows 2000 values matched | XP values matched | Miniport transfers per guest |
+| --- | ---: | ---: | ---: | --- |
+| 3×3 | 6 bytes | 9/9 | 9/9 | 2 reads, 2 writes |
+| 257×129 | 514 bytes | 33,153/33,153 | 33,153/33,153 | 2 reads, 2 writes |
+
+The colour controls passed on both revisions and systems, including all
+four pixels in the test window. Each boot ran one 120-frame block per mode
+after the storage check. The candidate had just completed four depth
+uploads and four reads. The control had rejected both allocations.
+
+| Colour control, 120 frames | Windows 2000 before | Windows 2000 after | XP before | XP after |
+| --- | ---: | ---: | ---: | ---: |
+| Software RGB | 11.157 ms | 13.539 ms | 2.365 ms | 6.099 ms |
+| Native offscreen | 32.777 ms | 41.063 ms | 21.941 ms | 31.477 ms |
+| Native offscreen before window copy | 23.802 ms | 92.270 ms | 72.688 ms | 77.284 ms |
+
+The separate `z16pixels` overlapping-triangle
+test matched nine samples with Microsoft's RGB device on every boot.
+Hardware depth enumeration on this storage-only revision still returned
+`DDERR_NOZBUFFERHW`.
+
+With Microsoft's RGB device forced, the original Direct3D Quake 0.73
+completed all 969 frames of `demo1` at 640×480 on Windows 2000. Both the
+control and new driver measured **57.6 fps**. All four matching D3DX7
+startup requests selected the RGB device. The driver's counters recorded
+zero native contexts, clears and draws during the game. Both XP boots
+started the demo, then the game exited with `0xc0000005` before scoring.
+The test restored the software-selection registry setting on all four
+boots. The XP wrapper reported success despite the game's failure. The
+game process exit and timedemo output determine the result.
+
+Two separate XP boots isolated timing around the first attempted visible
+copy. Each ran three 120-frame offscreen blocks, one tagged-primary
+window copy and three more offscreen blocks. Only the registration DLL
+differed. Times below are medians of the three blocks in each group.
+
+| XP registration | Before the copy | Visible pixels | After the copy |
+| --- | ---: | ---: | ---: |
+| Previous | 58.178 ms | 0/4 | 57.303 ms |
+| Fixed | 58.930 ms | 4/4 | 81.489 ms |
+
+Both drivers completed all 120 frames in every block. After the successful
+copy, the fixed driver's three runs took 76.444–81.733 ms. The measured
+miniport operations accounted for 22.921–23.693 ms per block. None waited
+for an older frame's queue slot. The next timing check is at the Direct3D
+runtime calls and final surface lock.
+
+### Native 16-bit depth rendering
+
+The native Direct3D 7 device now attaches a Z16 surface to its colour
+target. The GPU clears depth, compares incoming triangle depth and
+honours the depth-write enable state. A CPU lock on depth waits for the
+colour context that last wrote it. Reusing the same attachment adds no
+queue submission or fence wait.
+
+Four fresh Intel UHD 630 guests compared the storage-only driver with
+the depth renderer. The display DLL and miniport were the only two
+files that changed. On both systems the control returned
+`DDERR_NOZBUFFERHW` before the first hardware depth pixel. The new HAL
+matched Microsoft's RGB reference in all three cases. Each case also
+checked a far-only pixel and untouched background.
+
+| Hardware depth test | Expected overlap | Windows 2000 SP4 | Windows XP SP3 |
+| --- | --- | ---: | ---: |
+| Near triangle first, then far | Red | 3/3 | 3/3 |
+| Far triangle first, then near | Red | 3/3 | 3/3 |
+| Near triangle first, depth writes disabled | Blue | 3/3 | 3/3 |
+
+Before Quake started, each candidate had counted six more native
+triangles and three more clears than its control, matching the three
+new depth cases. Microsoft's RGB device matched all nine
+pixels on all four boots. The existing Z16 lock test still matched
+33,162 values per boot. The native window test matched all four pixels.
+
+The stock Direct3D Quake 0.73 startup changed on both systems. All four
+game-matched D3DX7 requests had previously returned
+`D3DXERR_CAPSNOTSUPPORTED`. All four selected the hardware device
+(`84e63de0`) with the new driver. Quake then finished `demo1` at
+640×480 and exited normally on each system.
+
+| Stock Quake, 969 frames | Windows 2000 SP4 | Windows XP SP3 |
+| --- | ---: | ---: |
+| Timedemo rate printed by the game | 39.7 fps | 39.1 fps |
+| Native GPU clears during the game | 970 | 970 |
+| Native GPU triangles during the game | **0** | **0** |
+| Game observed in the foreground | 25/25 samples | 0/26 samples |
+
+**Game rendering remains incomplete.** Both drivers last reported
+command 26, `D3DNTDP2OP_INDEXEDTRIANGLELIST2`, and
+`D3DNTERR_COMMAND_UNPARSED` (`0x88760bb8`). The game loop advanced
+without the driver drawing its triangles. A performance comparison with
+software or the historical game baseline needs confirmed scene geometry.
+
+Each guest also ran one 120-frame colour block in each configuration.
+The offscreen timer ends on the final lock, before the visible copy in
+the window case. These single observations show the variation across
+boots. The dedicated repeated XP timing experiment is recorded above.
+
+| Colour control, 120 frames | Windows 2000 storage | Windows 2000 rendering | XP storage | XP rendering |
+| --- | ---: | ---: | ---: | ---: |
+| Microsoft RGB | 13.491 ms | 13.594 ms | 10.136 ms | 6.537 ms |
+| Native offscreen | 21.968 ms | 32.034 ms | 84.156 ms | 76.255 ms |
+| Native offscreen before window copy | 47.692 ms | 48.967 ms | 20.967 ms | 31.572 ms |
+
+### Native indexed triangle lists
+
+The display driver now handles `D3DNTDP2OP_INDEXEDTRIANGLELIST2`
+(command 26). It adds each 16-bit index to the command's base vertex,
+checks the referenced vertex range and submits the vertices in draw
+order. [Indexed triangle list format](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/d3dhal/ns-d3dhal-_d3dhal_dp2indexedtrianglelist2).
+
+The `ipixels.exe` test draws the reference red, green and blue triangle
+using vertices 4, 1 and 3 from a five-vertex buffer. The other two
+vertices make a sequential draw produce the wrong image. Four fresh
+Intel UHD 630 guests compared the previous driver with the indexed
+implementation. Only the display DLL differed between the two inputs.
+
+| Indexed test at 128×128 | Windows 2000 SP4 | Windows XP SP3 |
+| --- | ---: | ---: |
+| Native triangles completed, previous driver | 0 | 0 |
+| Native triangles completed, indexed driver | 121 | 121 |
+| Incorrect pixels in either of the two native reads | 0/15,328 | 0/15,328 |
+| Native time for 120 indexed frames, including final read | 21.905 ms | 21.866 ms |
+| Microsoft RGB time for the same 120 frames, previous / indexed driver | 10.977 / 11.179 ms | 10.649 / 11.013 ms |
+
+Each native read checked 4,095 interior pixels and 11,233 background
+pixels. The driver completed 120 queued frames after the warm-up, with
+one wait at surface access and zero queue-slot waits. Of the timed block,
+the read took 10.212 ms on Windows 2000 and 10.326 ms on XP. The ordinary
+triangle, window copy, nine hardware depth samples and all 33,162 depth
+storage values also passed on every boot.
+
+The original Direct3D Quake 0.73 completed the 969-frame `demo1` at
+640×480 on all four boots. Each boot's four matching D3DX7 requests
+selected the hardware device. The driver counters immediately before
+and after the game isolate its work from the earlier pixel test.
+
+| Quake on the previous / indexed driver | Windows 2000 SP4 | Windows XP SP3 |
+| --- | ---: | ---: |
+| Rate printed by the game (one run per driver) | 37.8 / 38.8 fps | 39.7 / 39.3 fps |
+| Completed native clears | 970 / 970 | 970 / 970 |
+| Completed native triangles | 0 / 0 | 0 / 0 |
+| Game observed in the foreground | 26 of 26 on both | 0 of 25 / 0 of 26 |
+
+After the game, both previous drivers reported an unparsed command 26
+(`0x88760bb8`). Both indexed drivers reached the draw handler and
+reported `DDERR_UNSUPPORTED` (`0x80004001`) on that command at byte
+offset zero. No game triangle completed, so these frame rates cannot
+establish rendering performance against software or the historical
+baseline. The next diagnostic records the vertex format and active
+render settings at each rejected draw.
+
+### Native textures, blending and culling
+
+The native path now draws texture stage zero. A texture lives in system
+memory, or in "video memory" that the runtime allocates in the program's
+own memory, in one of six RGB formats (32-bit with and without alpha,
+5-6-5, 1-5-5-5 with and without alpha, 4-4-4-4). Programs and the
+runtime's texture manager write textures without telling the driver, so
+each texture used in a scene is read once, compared with its last upload
+by checksum, and converted to B8G8R8A8 for a host texture. The texture
+manager's copies arrive as texture blits between the two kinds of memory.
+Stage-zero colour and alpha operations become fragment shaders generated
+per combination. Alpha test, blending, cull modes, flat shading, the
+sampler state, triangle strips and fans, and immediate fans are handled.
+A draw this path cannot reproduce is skipped and counted; the rest of the
+command buffer is still drawn.
+
+`tpixels.exe hal|rgb` draws each case on a 128×128 target and checks
+pixels well inside the shapes. Every case passed on both the hardware
+device and Microsoft's RGB device, on a fresh Windows 2000 SP4 and a
+fresh Windows XP SP3 guest on the Intel UHD 630. The earlier colour,
+indexed and depth tests also passed on both.
+
+| Case | Checks |
+| --- | --- |
+| Select texture, 8888 / 565 / 1555 / 4444 | four quadrant colours and the background each |
+| Texture × diffuse colour | four half-bright quadrants |
+| Alpha test (greater than 0x80) | two quadrants kept, two discarded |
+| Blend source alpha / additive | blended colour within 3 levels |
+| Cull none / counter-clockwise / clockwise | which of two triangles remains |
+| Flat shading | colour of the first vertex |
+| Texture rewritten between scenes | the new colour in the next scene |
+| Video-memory and managed textures (hardware only) | four quadrant colours |
+
+Microsoft's RGB device widens 5-bit red to 248; the hardware path
+replicates the high bits to 255. Video-memory and managed textures need
+texture hardware by design, so the RGB device reports `DDERR_NOTEXTUREHW`.
+
+### T&L device and mipmapped textures
+
+The driver also offers the T&L device (`D3DDEVCAPS_HWTRANSFORMANDLIGHT`).
+The runtime then sends object-space vertices together with the world,
+view and projection matrices, the viewport and the depth range, and a
+second vertex shader applies them on the host. Transformed draws are
+clipped to the Direct3D viewport with a scissor rectangle. Lights are not
+applied yet: a lit draw keeps its vertex colours and is counted.
+`tpixels.exe tnl` runs the cases above through this device, and `xyz` or
+`persp` sends object-space vertices with an orthographic or a right-handed
+perspective projection. All cases pass on both guests.
+
+Video-memory textures may be mipmap chains. NT creates such a chain one
+level per `CreateSurface` call, each call carrying the top level's
+description, so every level is sized from its own surface. Draws sample
+the top level only; mipmapped draws are counted.
+
+Before this, Quake 0.73 drew no level at all. Its world and model
+textures are managed mipmapped textures, the runtime's texture manager
+could not create their video-memory copies, and it dropped every draw
+that used one without an error. The geometry seen in earlier screenshots
+was not the level either. On the hardware device the runtime transforms
+vertices itself into a 64 KB buffer, and with a driver that never swaps
+vertex buffers it indexes vertices it has not written once that buffer
+fills: on XP it starts batches past the end, on Windows 2000 it states
+more vertices than the buffer holds. The driver skips triangles outside
+the stated window on that device. The T&L device does not use this
+buffer, and guest screenshots now show the level, models, lighting and
+status bar as expected.
+
+Three changes then made it faster. A frame's commands went to the host in
+2 KB packets, each but the last a request that waited for the host; they
+now go in packets of up to 64 KB, queued without waiting. A draw request
+now carries up to 32 triangles instead of 8. A windowed present waited for
+the frame's fence and then read the image back with a fenced transfer,
+and QEMU checks virgl fences on a 10 ms timer; a present now only queues
+the frame and reads the image back unfenced in the same context, which the
+host runs after the frame's drawing. Locks and blits still wait.
+
+| 969-frame `demo1` at 640×480 | Windows 2000 SP4 | Windows XP SP3 |
+| --- | ---: | ---: |
+| First correct picture, one run each | 18.0 fps | 16.7 fps |
+| After the three changes | 45.6 fps (one run) | 36.3 and 39.7 fps (two runs) |
+| Native triangles drawn | 2,195,812 | 2,185,962 |
+| Triangles skipped | 0 | 0 |
+| Draw requests | 98,265 | 97,864 |
+| Waits for a frame's fence | 97 | 94 |
+
+Runs of the same XP build differ by about 3 fps. Four scene slots instead
+of two, and unfenced texture uploads, measured 36.5 and 37.4 fps against
+36.3 and 39.7, so neither was kept. The earlier, faster-looking numbers on
+the software vertex path drew about a tenth of the triangles.
+
+### Lighting
+
+The T&L device applies Direct3D 7 fixed-function lighting. The display
+driver keeps the material, the lighting render states and up to 32 lights
+by index, and sends the first eight enabled lights with each lit draw; the
+driver offers eight active lights. One generated vertex shader loops over
+the lights in camera space: point, spot and directional lights with range
+and attenuation, global and per-light ambient, emissive, specular with a
+local or distant viewer, normalized normals, and material colours taken
+from the vertex where its format has them.
+
+`tlight.exe rgb|tnl` lights a quad facing the camera in fifteen cases and
+compares pixels inside it with Direct3D's lighting equations evaluated for
+a corner vertex. The quad and every light are symmetric about the view
+axis, so all corners light alike. All fifteen cases pass on Microsoft's RGB
+device, which checks the expected values, and on the T&L device, on both
+Windows 2000 SP4 and XP SP3.
+
+| Case | Checks |
+| --- | --- |
+| Directional diffuse, two directional lights | colour times N·L, sums |
+| Global ambient, light ambient, emissive | ambient and emissive terms |
+| Point light: attenuation 0, linear attenuation, out of range | 1/(a0 + a1·d), range cut |
+| Spot light inside the falloff band, outside the outer cone | falloff factor, cut-off |
+| Diffuse colour from the vertex | material source |
+| Specular with local and distant viewer | halfway vector, power |
+| Normal of length 2 with and without normalizing | NORMALIZENORMALS |
+
+### Fog
+
+The native path fogs draws. Table fog is computed per pixel from the depth,
+or from w when the runtime's WINFO command says the projection is
+perspective. On the T&L device a vertex fog mode is computed from each
+vertex's camera-space depth, or its distance with range fog. Otherwise the
+fog factor is the specular alpha, which the runtime fills when it does the
+vertex processing. Linear, exponential and squared exponential modes are
+generated into the fragment shader. The driver offers vertex, table, range
+and w-based fog.
+
+`tfog.exe rgb|hal|tnl` fogs a blue quad toward red at one depth and
+compares pixels inside it with Direct3D's fog formulas. Microsoft's
+software vertex path ignores range fog, and its RGB device has no w-based
+fog; there the results match z-based fog, so those cases run only where the
+device offers them. Every case that runs passes on Windows 2000 SP4 and XP
+SP3.
+
+| Case | Vertices | RGB | HAL | T&L |
+| --- | --- | :---: | :---: | :---: |
+| Specular-alpha factor | transformed | pass | pass | pass |
+| Table fog from z: linear, exponential, squared | transformed | pass | pass | pass |
+| Vertex fog: linear, exponential | object space | pass | pass | pass |
+| Vertex fog with range | object space | n/a | n/a | pass |
+| Table fog from z under an orthographic projection | object space | pass | pass | pass |
+| Table fog from w under a perspective projection | object space | n/a | pass | pass |
+
+### Two texture stages
+
+The native path draws two texture stages, and the driver offers two
+stages with two textures. Stage one combines over stage zero's result with
+the same operations, where an argument may also be the current colour; it
+samples its own texture with its own coordinate set, which travels in the
+otherwise unused half of each vertex's texture-coordinate constant. A third
+enabled stage is still skipped and counted.
+
+The renderer keeps only the sampler and view slots up to the last one set,
+so setting slot zero alone drops slot one. A draw with stage one therefore
+sets both slots in one command each. Quake 0.73 found this at once: with
+two stages offered it draws its lightmaps in stage one, and with stage
+zero's texture changing between draws the lightmaps came out as noise.
+
+`tstage.exe rgb|hal|tnl` draws a quad with two 8×8 textures of four flat
+quadrants. Stage one reads the second coordinate set, mirrored left to
+right, so each screen quadrant combines a known texel of each texture.
+Microsoft's RGB device draws stage zero alone correctly but no texture at
+all once stage one is enabled, so the expected values follow Direct3D's
+documented operations and the RGB device runs the two-stage cases for
+reference only. All nine cases pass on the HAL and T&L devices on Windows
+2000 SP4 and XP SP3, and Quake's lightmapped walls look as they did with
+one stage (44.3 and 39.7 fps).
+
+| Case | Checks |
+| --- | --- |
+| Stage zero only | control |
+| Modulate, add, select current | stage one over stage zero |
+| Blend by texture alpha, by current alpha | stage-one alpha sources |
+| Texture times diffuse | stage one ignoring the current colour |
+| First coordinate set | TEXCOORDINDEX |
+| Stage zero's texture changes between two draws | both slots stay bound |
+
+### Mipmaps
+
+Textures are drawn with all their mipmap levels. The display driver walks
+each texture's mipmap chain when the texture is registered, reads and
+checksums every level once a scene, and uploads every level; texture blits
+copy the matching rectangle of each level. Host textures carry all their
+levels, their views cover them, and the stage's point or linear mip filter
+becomes the sampler's. A sampler's maximum level of detail must be set:
+left at zero it clamps sampling to the top level.
+
+`tmip.exe rgb|hal|tnl` draws a 64×64 texture of seven flat-coloured levels
+on quads sized to pick a given level. Sizes sit a quarter level inside each
+level: Microsoft's RGB device rounds the level of detail down, hardware to
+the nearest level, and exact powers of two fall on the boundary between
+them. The HAL and T&L devices also draw a texture the runtime manages,
+whose video-memory copy is a separate chain. Every case passes on all three
+devices on Windows 2000 SP4 and XP SP3, and Quake runs at 43.0 and 38.4
+fps with its mipmaps drawn.
+
+| Case | Expected |
+| --- | --- |
+| No mip filter | level 0 |
+| Point filter, quads for levels 0, 1 and 3 | that level |
+| Linear filter at level 2.5 | half level 2, half level 3 |
+| The same five cases on a managed texture (HAL and T&L) | as above |
+
+### Speed against Microsoft's RGB device
+
+Three more changes took cost out of each Quake frame. The display driver
+now gathers a scene's draws into one miniport request of up to 64 KB
+instead of one request per draw: 129,000 requests became about 12,000. A
+windowed present read its rectangle back from the host and waited for it,
+and Windows presents each visible rectangle of a partly covered window
+separately; the miniport now reads the whole image back once and copies
+later rectangles of the same frame from staging, until any other request
+touches an image. Every texture a scene used was read and checksummed
+once a scene; a video-memory texture, which includes the runtime's
+managed copies, changes only through DirectDraw locks and blits, so those
+now mark it dirty and a clean one is used as it is. System-memory
+textures are still checked once a scene. `tpixels` rewrites its video and
+managed textures between two draws to check the second change arrives.
+
+On the Intel host, Quake's 969-frame `demo1` at 640×480 in a window ran
+the native T&L device and then Microsoft's RGB device in the same Windows
+2000 SP4 boot (`SoftwareOnly` set for the second run). The host GPU's
+minimum clock was held at 1200 MHz and the CPU governor at `performance`
+for these runs; at the host's default 350 MHz minimum, runs of one build
+varied from 36 to 50 fps.
+
+| Windows 2000 SP4, three boots each | Native T&L device | RGB device, same boot |
+| --- | ---: | ---: |
+| Before the three changes | 121.0, 121.1, 121.4 fps | 91.7, 85.7, 88.1 fps |
+| After them | 130.1, 130.4, 130.6 fps | 83.8, 86.0, 85.1 fps |
+| After them, Windows' default timer period | 60.6, 61.0 fps | 54.4, 53.9 fps |
+
+The test launcher sets a 1 ms system timer period with `timeBeginPeriod`
+for the first two rows. With Windows' default 15.6 ms period both devices
+lose time to a wait on the system timer that the driver does not make;
+the base build also ran 60.7 fps there, so that row cannot show the
+driver's own changes. On XP SP3 the native device ran 123.1 fps with the
+1 ms period. In the same native run on Windows 2000 the display driver
+spent 5.3 s of 7.4 s in its `DrawPrimitives2` handler, the miniport about 0.85 s
+presenting and 1.4 s uploading textures; texture checks took 5 ms where
+they had taken 1 to 3.5 s. All pixel tests pass on both systems.

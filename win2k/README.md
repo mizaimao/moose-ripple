@@ -24,8 +24,12 @@ VGA and restored the saved desktop after full-screen DirectDraw programs.
 - **DirectDraw:** full-screen programs flip between two pages in video
   memory. Other surfaces live in system memory, where Windows' own
   DirectDraw code draws them faster than the GPU could here (see Speed).
-- **Direct3D** games still need a hardware rendering path on Windows 2000
-  and XP. [Direct3D investigation](https://github.com/mizaimao/moose-ripple/issues/106)
+- **Direct3D 7** has an experimental native hardware driver for 32-bit
+  render targets. Both Windows 2000 and XP passed pixel tests for triangle
+  lists, indexed triangles, 16-bit depth testing, textures in four formats,
+  texture modulation, alpha test, blending, culling and flat shading.
+  [Texture and blending tests](../docs/win2k/development.md#native-textures-blending-and-culling) ·
+  [Depth tests](../docs/win2k/development.md#native-16-bit-depth-rendering)
 
 ## The virtual machine
 
@@ -120,6 +124,8 @@ key named by `HKLM\HARDWARE\DEVICEMAP\VIDEO` and restart. For this
 driver the key is under `Services\rb2kmp\Device0` on Windows 2000 and
 `Control\Video\{GUID}\0000` on XP. The optional host textures require a
 32-bit display mode. In 8-bit and 16-bit modes, offscreen surfaces use system memory.
+For native Direct3D 7 tests, set both `RippleDirectDrawGpuSurfaces` and
+`RippleNativeD3D7` to 1 in that key and restart.
 
 ## Build
 
@@ -153,10 +159,20 @@ DDK headers and import libraries, and the Visual C++ 6.0 headers. Set
 - `regmode.exe` reports the saved and current desktop modes.
   `/check 1024x768` returns success when both are 1024×768×32 at 60 Hz.
   `/set 800x600` saves and applies that resolution.
+- `ipixels.exe hal` draws an indexed triangle and checks two frames against
+  the expected colours. Use `ipixels.exe rgb` for Microsoft's software
+  reference. `z16pixels.exe hal` and `z16pixels.exe rgb` check which
+  pixels survive when two triangles overlap at different depths.
 
 ## Known limits
 
-- Direct3D is not accelerated (see above).
+- Stock Direct3D Quake 0.73 draws its level, models and status bar through
+  the driver's T&L device on Windows 2000 and XP, at about 130 and 123 fps
+  in a 640×480 window with a 1 ms timer period; Microsoft's RGB device runs
+  the same demo at about 85 fps. The T&L device also applies Direct3D lights,
+  and fog, two texture stages and mipmaps are drawn. The Direct3D 8 and 9
+  driver interfaces remain open.
+  [Direct3D work](https://github.com/mizaimao/moose-ripple/issues/106)
 - 8-bit and 16-bit full-screen game compatibility awaits guest testing.
 - Each OpenGL context that draws leaves about 1.2 KB in the program's own
   heap (`threadtest`: 300 contexts in one thread); the GPU's buffers and

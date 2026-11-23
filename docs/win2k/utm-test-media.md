@@ -124,3 +124,12 @@ WScript.Quit 1
 Wait for the scheduled test at the next logon. The Windows 2000 run
 confirmed the installed bytes, the new driver counters and all three
 alpha-pointer checksums before starting the timed game.
+
+In a Windows 2000 Direct3D test, Setup finished and a later restart
+request returned error 1115 (shutdown already in progress). A fresh
+desktop command could still run, and the active display driver lacked
+the new counters. That run was excluded. On a fresh disposable boot
+with the same driver files, an interactive helper enabled the process's
+`SeShutdownPrivilege` and called `ExitWindowsEx(EWX_REBOOT, 0)` after
+Setup. The scheduled test then verified the files, selected the native
+hardware device and passed three GPU clears.

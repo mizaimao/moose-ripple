@@ -17,8 +17,11 @@ BOOL rb_dd_caps(DISPLAY *d, RB2K_DD_CAPS *caps)
            caps->maxBytes == RB2K_DD_MAX_BYTES && caps->slots == RB2K_DD_SLOTS;
 }
 
-static BOOL primary_caps(DWORD caps)
+static BOOL primary_caps(const DISPLAY *d, DWORD caps)
 {
+    /* D3DX7 also marks its windowed presentation surface as a 3D device
+     * when the actual render target is a separate offscreen buffer. */
+    if (d->nativeD3D7) caps &= ~DDSCAPS_3DDEVICE;
     return (caps & DDSCAPS_PRIMARYSURFACE) &&
            !(caps & ~(DDSCAPS_PRIMARYSURFACE | DDSCAPS_FRONTBUFFER | DDSCAPS_VISIBLE |
                       DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM));
@@ -47,16 +50,41 @@ static ULONG page_size(DISPLAY *d)
 static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
 {
     DWORD caps = desc->ddsCaps.dwCaps;
+    DWORD storage = caps & (DDSCAPS_TEXTURE | DDSCAPS_OFFSCREENPLAIN);
     const DDPIXELFORMAT *fmt = &desc->ddpfPixelFormat;
-    if (primary_caps(caps) || flip_caps(caps)) {
+    if (caps & DDSCAPS_ZBUFFER) {
+        if (!d->z16Storage || !d->nativeD3D7 || !d->gpuSurfaces ||
+            (caps & ~(DDSCAPS_ZBUFFER | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM)) ||
+            !desc->dwWidth || desc->dwWidth > RB2K_DD_MAX_WIDTH ||
+            !desc->dwHeight || desc->dwHeight > RB2K_DD_MAX_HEIGHT)
+            return FALSE;
+        if (desc->dwFlags & DDSD_PIXELFORMAT)
+            return fmt->dwSize == sizeof(*fmt) && fmt->dwFlags == DDPF_ZBUFFER &&
+                   fmt->dwZBufferBitDepth == 16 && fmt->dwZBitMask == 0xffff;
+        return (desc->dwFlags & DDSD_ZBUFFERBITDEPTH) && desc->dwZBufferBitDepth == 16;
+    }
+    if ((caps & DDSCAPS_TEXTURE) && !(caps & DDSCAPS_3DDEVICE)) {
+        /* A Direct3D texture in runtime-allocated user memory; the native
+         * path reads and uploads it at draw time (display_d3d7.c). */
+        DDPIXELFORMAT desktop = {0};
+        if (!d->nativeD3D7 ||
+            (caps & ~(DDSCAPS_TEXTURE | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM | DDSCAPS_MIPMAP | DDSCAPS_COMPLEX)) ||
+            !desc->dwWidth || desc->dwWidth > RB2K_D7_TEXTURE_SIDE ||
+            !desc->dwHeight || desc->dwHeight > RB2K_D7_TEXTURE_SIDE) return FALSE;
+        return rb_d7_texture_format((desc->dwFlags & DDSD_PIXELFORMAT) ? fmt : &desktop,
+                                    d->mode.BitsPerPlane) != TexNone;
+    }
+    if (primary_caps(d, caps) || flip_caps(caps)) {
         if (flip_caps(caps) && (!d->pageBytes ||
             ((desc->dwFlags & DDSD_BACKBUFFERCOUNT) && desc->dwBackBufferCount > 1))) return FALSE;
         if (!d->mapping || !d->surface ||
             ((desc->dwFlags & DDSD_WIDTH) && desc->dwWidth != d->mode.VisScreenWidth) ||
             ((desc->dwFlags & DDSD_HEIGHT) && desc->dwHeight != d->mode.VisScreenHeight))
             return FALSE;
-    } else if (!d->gpuSurfaces || !(caps & DDSCAPS_OFFSCREENPLAIN) ||
-               (caps & ~(DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM)) ||
+    } else if (!d->gpuSurfaces || storage != DDSCAPS_OFFSCREENPLAIN ||
+               /* Textures returned above; render-to-texture is not offered. */
+               (caps & ~(DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM |
+                         DDSCAPS_3DDEVICE)) ||
                !desc->dwWidth || desc->dwWidth > RB2K_DD_MAX_WIDTH ||
                !desc->dwHeight || desc->dwHeight > RB2K_DD_MAX_HEIGHT) return FALSE;
     if (!(desc->dwFlags & DDSD_PIXELFORMAT)) return TRUE;
@@ -74,14 +102,21 @@ static DWORD APIENTRY can_create(PDD_CANCREATESURFACEDATA data)
     DWORD caps = data->lpDDSurfaceDesc->ddsCaps.dwCaps;
     /* Without host-texture surfaces an offscreen surface goes to system
      * memory, where Windows' own blits are faster here. */
-    if (!d->gpuSurfaces && !primary_caps(caps) && !flip_caps(caps))
+    if (!d->gpuSurfaces && !primary_caps(d, caps) && !flip_caps(caps))
         data->ddRVal = DDERR_OUTOFVIDEOMEMORY;
     else
         data->ddRVal = supported(d, data->lpDDSurfaceDesc) ? DD_OK : DDERR_INVALIDCAPS;
+    if (data->ddRVal != DD_OK && (caps & DDSCAPS_TEXTURE)) {   /* counted for d7draw.exe */
+        const DDSURFACEDESC *s = data->lpDDSurfaceDesc;
+        ++d->d7draw.surfaceRefused;
+        d->d7draw.refusedCaps = caps; d->d7draw.refusedFlags = s->dwFlags;
+        d->d7draw.refusedWidth = s->dwWidth; d->d7draw.refusedHeight = s->dwHeight;
+        d->d7draw.refusedFormat = s->ddpfPixelFormat.dwFlags << 8 | s->ddpfPixelFormat.dwRGBBitCount;
+    }
     return DDHAL_DRIVER_HANDLED;
 }
 
-static DD_SLOT *find_slot(DISPLAY *d, PDD_SURFACE_GLOBAL global)
+DD_SLOT *rb_dd_slot(DISPLAY *d, PDD_SURFACE_GLOBAL global)
 {
     ULONG i;
     for (i = 0; i < RB2K_DD_SLOTS; ++i) {
@@ -113,6 +148,11 @@ static void release_chain(DISPLAY *d)
     d->lockedPages = 0;
 }
 
+static ULONG slot_pitch(const DD_SLOT *slot)
+{
+    return slot->width * (slot->depth16 ? sizeof(USHORT) : sizeof(ULONG));
+}
+
 static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
 {
     DISPLAY *d = (DISPLAY *)data->lpDD->dhpdev;
@@ -120,12 +160,47 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
     DDSURFACEDESC *desc = data->lpDDSurfaceDesc;
     RB2K_DD_CREATE create;
     DD_SLOT *slot;
+    ULONG createCode = IOCTL_RB2K_DD_CREATE;
     DWORD rc = DDHAL_DRIVER_HANDLED;
-    if (!supported(d, desc) || data->dwSCnt != 1) {
+    if (!supported(d, desc) || !data->dwSCnt ||
+        (data->dwSCnt != 1 && !(desc->ddsCaps.dwCaps & DDSCAPS_MIPMAP))) {
+        ++d->d7draw.surfaceRefused;
+        d->d7draw.refusedCaps = desc->ddsCaps.dwCaps; d->d7draw.refusedFlags = desc->dwFlags;
+        d->d7draw.refusedWidth = desc->dwWidth; d->d7draw.refusedHeight = desc->dwHeight;
+        d->d7draw.refusedCount = data->dwSCnt;
         data->ddRVal = DDERR_INVALIDCAPS;
         return rc;
     }
     g = data->lplpSList[0]->lpGbl;
+    if (desc->ddsCaps.dwCaps & DDSCAPS_TEXTURE) {
+        DDPIXELFORMAT desktop = {0};
+        ULONG format = rb_d7_texture_format((desc->dwFlags & DDSD_PIXELFORMAT) ? &desc->ddpfPixelFormat :
+                                            &desktop, d->mode.BitsPerPlane);
+        ULONG i;
+        /* NT creates a mipmap chain one level per call, each with the
+         * top level's description; every level gets its own user memory
+         * and the native path draws from the top level. */
+        if (!(desc->ddsCaps.dwCaps & DDSCAPS_MIPMAP) &&
+            (g->wWidth != desc->dwWidth || g->wHeight != desc->dwHeight)) {
+            data->ddRVal = DDERR_INVALIDPARAMS;
+            return rc;
+        }
+        for (i = 0; i < data->dwSCnt; ++i) {
+            PDD_SURFACE_GLOBAL level = data->lplpSList[i]->lpGbl;
+            if (!level->wWidth || level->wWidth > desc->dwWidth ||
+                !level->wHeight || level->wHeight > desc->dwHeight) {
+                data->ddRVal = DDERR_INVALIDPARAMS;
+                return rc;
+            }
+            level->lPitch = (level->wWidth * rb_d7_texel_bytes(format) + 3) & ~3;
+            level->dwUserMemSize = level->lPitch * level->wHeight;
+            level->fpVidMem = DDHAL_PLEASEALLOC_USERMEM;
+        }
+        desc->lPitch = g->lPitch;
+        desc->dwFlags |= DDSD_PITCH;
+        data->ddRVal = DD_OK;
+        return DDHAL_DRIVER_NOTHANDLED;
+    }
     if (data->lplpSList[0]->ddsCaps.dwCaps & DDSCAPS_BACKBUFFER) {
         EngAcquireSemaphore(d->ddLock);
         if (!d->ddEnabled || !d->pageBytes || !flip_caps(data->lplpSList[0]->ddsCaps.dwCaps) ||
@@ -182,11 +257,12 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
     }
     create.width = desc->dwWidth;
     create.height = desc->dwHeight;
+    if (desc->ddsCaps.dwCaps & DDSCAPS_ZBUFFER) createCode = IOCTL_RB2K_DD_CREATE_Z16;
     EngAcquireSemaphore(d->ddLock);
-    slot = find_slot(d, NULL);
-    if (!d->ddEnabled || find_slot(d, g))
+    slot = rb_dd_slot(d, NULL);
+    if (!d->ddEnabled || rb_dd_slot(d, g))
         data->ddRVal = DDERR_SURFACELOST;
-    else if (!slot || !request(d, IOCTL_RB2K_DD_CREATE, &create, sizeof(create),
+    else if (!slot || !request(d, createCode, &create, sizeof(create),
                                &slot->id, sizeof(slot->id)))
         data->ddRVal = DDERR_OUTOFVIDEOMEMORY;
     else {
@@ -194,7 +270,8 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
         slot->owner = EngGetCurrentProcessId();
         slot->width = create.width;
         slot->height = create.height;
-        g->lPitch = create.width * 4;
+        slot->depth16 = createCode == IOCTL_RB2K_DD_CREATE_Z16;
+        g->lPitch = slot_pitch(slot);
         g->dwUserMemSize = g->lPitch * create.height;
         g->fpVidMem = DDHAL_PLEASEALLOC_USERMEM;
         desc->lPitch = g->lPitch;
@@ -217,8 +294,10 @@ static DWORD APIENTRY destroy_surface(PDD_DESTROYSURFACEDATA data)
 {
     DISPLAY *d = (DISPLAY *)data->lpDD->dhpdev;
     DD_SLOT *slot;
+    if (data->lpDDSurface->ddsCaps.dwCaps & DDSCAPS_TEXTURE)
+        rb_d7_surface_destroyed(d, data->lpDDSurface->lpGbl);
     EngAcquireSemaphore(d->ddLock);
-    slot = find_slot(d, data->lpDDSurface->lpGbl);
+    slot = rb_dd_slot(d, data->lpDDSurface->lpGbl);
     if (slot) release_slot(d, slot);
     if (d->flipBack == data->lpDDSurface->lpGbl || d->flipFront == data->lpDDSurface->lpGbl)
         release_chain(d);
@@ -234,10 +313,10 @@ static BOOL full_rect(const RECTL *r, const DD_SLOT *s)
            r->bottom == (LONG)s->height;
 }
 
-static BOOL mapped_primary(const DISPLAY *d, const DD_SURFACE_LOCAL *local)
+BOOL rb_dd_mapped_primary(const DISPLAY *d, const DD_SURFACE_LOCAL *local)
 {
     const DD_SURFACE_GLOBAL *g = local->lpGbl;
-    return d->ddEnabled && d->mapping && d->surface && primary_caps(local->ddsCaps.dwCaps) &&
+    return d->ddEnabled && d->mapping && d->surface && primary_caps(d, local->ddsCaps.dwCaps) &&
            g->wWidth == d->mode.VisScreenWidth && g->wHeight == d->mode.VisScreenHeight &&
            g->lPitch > 0 && (ULONG)g->lPitch == d->mode.ScreenStride &&
            (g->fpVidMem == 0 || g->fpVidMem == (FLATPTR)d->mapping);
@@ -346,10 +425,12 @@ static DWORD APIENTRY blt(PDD_BLTDATA data)
     ULONG page;
     HANDLE owner = EngGetCurrentProcessId();
     DWORD rc = DDHAL_DRIVER_HANDLED;
+    if (data->lpDDDestSurface->ddsCaps.dwCaps & DDSCAPS_TEXTURE)
+        rb_d7_texture_written(d, data->lpDDDestSurface->lpGbl);
     EngAcquireSemaphore(d->ddLock);
-    dst = find_slot(d, data->lpDDDestSurface->lpGbl);
-    if (data->lpDDSrcSurface) src = find_slot(d, data->lpDDSrcSurface->lpGbl);
-    primary = !dst && src && mapped_primary(d, data->lpDDDestSurface);
+    dst = rb_dd_slot(d, data->lpDDDestSurface->lpGbl);
+    if (data->lpDDSrcSurface) src = rb_dd_slot(d, data->lpDDSrcSurface->lpGbl);
+    primary = !dst && src && rb_dd_mapped_primary(d, data->lpDDDestSurface);
     if (!data->lpDDSrcSurface && operation == DDBLT_COLORFILL && !data->IsClipped &&
         surface_page(d, data->lpDDDestSurface, &page))
         data->ddRVal = fill_page(d, page, &data->rDest, data->bltFX.dwFillColor);
@@ -358,6 +439,7 @@ static DWORD APIENTRY blt(PDD_BLTDATA data)
     else if ((dst && (dst->lost || dst->owner != owner)) || (src && (src->lost || src->owner != owner)))
         data->ddRVal = DDERR_SURFACELOST;
     else if ((dst && dst->locked) || (src && src->locked)) data->ddRVal = DDERR_SURFACEBUSY;
+    else if ((dst && dst->depth16) || (src && src->depth16)) data->ddRVal = DDERR_UNSUPPORTED;
     /* NT5 has already intersected a window clipper with the visible region.
      * Each callback describes one visible source/destination rectangle pair. */
     else if (data->IsClipped) data->ddRVal = DDERR_UNSUPPORTED;
@@ -424,8 +506,9 @@ static DWORD APIENTRY lock_surface(PDD_LOCKDATA data)
     const ULONG *seed = NULL;
     ULONG bytes, page, offset = 0;
     DWORD rc = DDHAL_DRIVER_HANDLED;
+    if (data->lpDDSurface->ddsCaps.dwCaps & DDSCAPS_TEXTURE) rb_d7_texture_written(d, g);
     EngAcquireSemaphore(d->ddLock);
-    s = find_slot(d, g);
+    s = rb_dd_slot(d, g);
     if (!s) {
         if (!surface_page(d, data->lpDDSurface, &page)) {
             if (flip_caps(data->lpDDSurface->ddsCaps.dwCaps)) data->ddRVal = DDERR_SURFACELOST;
@@ -458,12 +541,12 @@ static DWORD APIENTRY lock_surface(PDD_LOCKDATA data)
         if (!rect_inside(r, s->width, s->height)) {
             data->ddRVal = DDERR_INVALIDRECT; goto done;
         }
-        offset = ((ULONG)r->top * s->width + r->left) * 4;
+        offset = (ULONG)r->top * slot_pitch(s) + r->left * (s->depth16 ? sizeof(USHORT) : sizeof(ULONG));
     }
-    bytes = s->width * s->height * 4;
+    bytes = slot_pitch(s) * s->height;
     if (!(data->dwFlags & DDLOCK_WRITEONLY) ||
         (data->bHasRect && !full_rect(&data->rArea, s))) {
-        if (!(data->dwFlags & DDLOCK_READONLY) &&
+        if (!s->depth16 && !(data->dwFlags & DDLOCK_READONLY) &&
             request(d, IOCTL_RB2K_DD_UNIFORM, &s->id, sizeof(s->id), &uniform, sizeof(uniform)) &&
             uniform.known == 1) {
             seed = &uniform.color;
@@ -495,8 +578,9 @@ static DWORD APIENTRY unlock_surface(PDD_UNLOCKDATA data)
     DD_SLOT *s;
     ULONG page;
     DWORD rc = DDHAL_DRIVER_HANDLED;
+    if (data->lpDDSurface->ddsCaps.dwCaps & DDSCAPS_TEXTURE) rb_d7_texture_written(d, g);
     EngAcquireSemaphore(d->ddLock);
-    s = find_slot(d, g);
+    s = rb_dd_slot(d, g);
     if (!s) {
         if (surface_page(d, data->lpDDSurface, &page) && (d->lockedPages & (1UL << page))) {
             d->lockedPages &= ~(1UL << page);
@@ -509,7 +593,7 @@ static DWORD APIENTRY unlock_surface(PDD_UNLOCKDATA data)
     else {
         data->ddRVal = DD_OK;
         if (s->writable) {
-            ULONG bytes = s->width * s->height * 4;
+            ULONG bytes = slot_pitch(s) * s->height;
             ULONG *packet = EngAllocMem(0, sizeof(ULONG) + bytes, 'u2bR');
             if (packet) {
                 *packet = s->id;
@@ -635,6 +719,8 @@ static DWORD APIENTRY driver_info(PDD_GETDRIVERINFODATA data)
     ULONG bytes;
     data->dwActualSize = 0;
     data->ddRVal = DDERR_CURRENTLYNOTAVAIL;
+    if (((DISPLAY *)data->dhpdev)->nativeD3D7 && rb_d7_info(data))
+        return DDHAL_DRIVER_HANDLED;
     if (IsEqualGUID(&data->guidInfo, &nt)) {
         RtlZeroMemory(&callbacks, sizeof(callbacks));
         callbacks.dwSize = sizeof(callbacks);
@@ -680,9 +766,26 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     info->ddCaps.dwRops[((SRCCOPY >> 16) & 255) / 32] |= 1UL << ((SRCCOPY >> 16) & 31);
     info->ddCaps.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY |
                                   DDSCAPS_LOCALVIDMEM;
-    d->gpuSurfaces = caps.gpuSurfaces != 0;
-    if (!d->gpuSurfaces) caps.slots = 0;
+    d->gpuSurfaces = (caps.gpuSurfaces & RB2K_DD_HOST_SURFACES) != 0;
+    d->nativeD3D7 = (caps.gpuSurfaces & RB2K_DD_NATIVE_D3D7) != 0;
+    d->z16Storage = (caps.gpuSurfaces & RB2K_DD_Z16_STORAGE) != 0;
+    d->z16Render = d->z16Storage && (caps.gpuSurfaces & RB2K_DD_Z16_RENDER) != 0;
+    if (d->z16Storage) {
+        info->ddCaps.ddsCaps.dwCaps |= DDSCAPS_ZBUFFER;
+        v->dwZBufferAlign = sizeof(USHORT);
+    }
+    if (d->gpuSurfaces)
+        info->ddCaps.ddsCaps.dwCaps |= DDSCAPS_3DDEVICE;
+    else
+        caps.slots = 0;
     info->ddCaps.dwVidMemTotal = caps.maxBytes * caps.slots;
+    if (d->nativeD3D7) {
+        info->ddCaps.ddsCaps.dwCaps |= DDSCAPS_TEXTURE | DDSCAPS_MIPMAP;
+        v->dwTextureAlign = 4;
+        rb_d7_caps(info, d->z16Render);
+        info->dwFlags |= DDHALINFO_GETDRIVERINFOSET;
+        info->GetDriverInfo = driver_info;
+    }
     pageBytes = page_size(d);
     if (pageBytes) {
         *heapCount = 1;
@@ -693,7 +796,7 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
             heaps->fpEnd = pageBytes * 2 - 1;
             heaps->ddsCaps.dwCaps = heaps->ddsCapsAlt.dwCaps = DDSCAPS_OFFSCREENPLAIN;
         }
-        info->dwFlags = DDHALINFO_GETDRIVERINFOSET;
+        info->dwFlags |= DDHALINFO_GETDRIVERINFOSET;
         info->GetDriverInfo = driver_info;
         info->ddCaps.ddsCaps.dwCaps |= DDSCAPS_FLIP;
         info->ddCaps.dwCaps2 |= DDCAPS2_FLIPNOVSYNC;
@@ -702,6 +805,8 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     {
         ULONG i;
         EngAcquireSemaphore(d->ddLock);
+        ++d->d7.halInfoCalls;
+        d->d7.nativeEnabled = d->nativeD3D7;
         for (i = 0; i < caps.slots; ++i)
             if (!d->slots[i].global) info->ddCaps.dwVidMemFree += caps.maxBytes;
         if (!d->flipBack) info->ddCaps.dwVidMemFree += pageBytes;
@@ -717,7 +822,9 @@ BOOL APIENTRY DrvEnableDirectDraw(DHPDEV pdev, DD_CALLBACKS *c, DD_SURFACECALLBA
     RB2K_DD_CAPS caps;
     ULONG pageBytes;
     if (!d->ddLock || !rb_dd_caps(d, &caps)) return FALSE;
-    d->gpuSurfaces = caps.gpuSurfaces != 0;
+    d->gpuSurfaces = (caps.gpuSurfaces & RB2K_DD_HOST_SURFACES) != 0;
+    d->z16Storage = (caps.gpuSurfaces & RB2K_DD_Z16_STORAGE) != 0;
+    d->z16Render = d->z16Storage && (caps.gpuSurfaces & RB2K_DD_Z16_RENDER) != 0;
     RtlZeroMemory(c, sizeof(*c)); RtlZeroMemory(sc, sizeof(*sc)); RtlZeroMemory(pc, sizeof(*pc));
     c->dwSize = sizeof(*c); sc->dwSize = sizeof(*sc); pc->dwSize = sizeof(*pc);
     c->dwFlags = DDHAL_CB32_CANCREATESURFACE | DDHAL_CB32_CREATESURFACE;
@@ -740,6 +847,7 @@ BOOL APIENTRY DrvEnableDirectDraw(DHPDEV pdev, DD_CALLBACKS *c, DD_SURFACECALLBA
     EngAcquireSemaphore(d->ddLock);
     d->pageBytes = pageBytes;
     d->ddEnabled = TRUE;
+    ++d->d7.enableCalls;
     EngReleaseSemaphore(d->ddLock);
     return TRUE;
 }
@@ -756,4 +864,5 @@ VOID APIENTRY DrvDisableDirectDraw(DHPDEV pdev)
     for (i = 0; i < RB2K_DD_SLOTS; ++i)
         if (d->slots[i].global) release_slot(d, &d->slots[i]);
     EngReleaseSemaphore(d->ddLock);
+    rb_d7_disable(d);
 }

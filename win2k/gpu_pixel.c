@@ -54,6 +54,7 @@ typedef struct {
 /* The combined submit may have compiler-inserted tail padding. Only the
  * byte count in its wire header and the command words are transmitted. */
 typedef char gpu_header_must_be_24[sizeof(struct virtio_gpu_ctrl_hdr) == 24 ? 1 : -1];
+typedef char frame_header_is_32[sizeof(struct virtio_gpu_cmd_submit) == 32 ? 1 : -1];
 typedef char gpu_entry_must_be_16[sizeof(struct virtio_gpu_mem_entry) == 16 ? 1 : -1];
 typedef char backing_request_fits_queue[sizeof(BACKING_REQUEST) <= 1024 ? 1 : -1];
 
@@ -105,6 +106,7 @@ BOOLEAN rb_gpu_create_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
                             const RB2K_IMAGE *image, const char *name, ULONG nameBytes, BOOLEAN scanout)
 {
     PIXEL_REQUEST request;
+    RB2K_GPU_RESULT cleanup;
     begin_request(&request, VIRTIO_GPU_CMD_CTX_CREATE, image->id);
     request.context.nlen = nameBytes;
     VideoPortMoveMemory(request.context.debug_name, (PVOID)name, nameBytes);
@@ -113,19 +115,34 @@ BOOLEAN rb_gpu_create_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D, image->id);
     request.resource.resource_id = image->id;
     request.resource.target = PipeTexture2D;
-    request.resource.format = VIRGL_FORMAT_B8G8R8A8_UNORM;
-    request.resource.bind = VIRGL_BIND_RENDER_TARGET | (scanout ? VIRGL_BIND_SCANOUT : 0);
+    request.resource.format = image->depth16 ? VIRGL_FORMAT_Z16_UNORM : VIRGL_FORMAT_B8G8R8A8_UNORM;
+    request.resource.bind = image->depth16 ? VIRGL_BIND_DEPTH_STENCIL : VIRGL_BIND_RENDER_TARGET;
+    if (scanout) request.resource.bind |= VIRGL_BIND_SCANOUT;
     request.resource.width = image->width;
     request.resource.height = image->height;
     request.resource.depth = request.resource.array_size = 1;
-    if (!send_request(gpu, result, &request, sizeof(request.resource), RB2K_STAGE_RESOURCE)) return FALSE;
-
-    return context_resource(gpu, result, image->id, image->id, TRUE, RB2K_STAGE_ATTACH);
+    if (send_request(gpu, result, &request, sizeof(request.resource), RB2K_STAGE_RESOURCE)) {
+        if (context_resource(gpu, result, image->id, image->id, TRUE, RB2K_STAGE_ATTACH)) return TRUE;
+        if (gpu->ready) {
+            begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_UNREF, 0);
+            request.unref.resource_id = image->id;
+            if (!send_request(gpu, &cleanup, &request, sizeof(request.unref), RB2K_STAGE_CLEANUP))
+                gpu->ready = FALSE;
+        }
+    }
+    /* A renderer may reject a format after its private context is created.
+     * Undo the successful steps and preserve the caller's original error. */
+    if (gpu->ready) {
+        begin_request(&request, VIRTIO_GPU_CMD_CTX_DESTROY, image->id);
+        if (!send_request(gpu, &cleanup, &request, sizeof(request.hdr), RB2K_STAGE_CLEANUP))
+            gpu->ready = FALSE;
+    }
+    return FALSE;
 }
 
 /* IEEE single-precision encoding of channel/255 rounded to the nearest
  * representable value, without using the kernel thread's floating-point state. */
-static ULONG channel_bits(ULONG channel)
+ULONG rb_gpu_channel(ULONG channel)
 {
     ULONG exponent = 127;
     if (!channel) return 0;
@@ -151,8 +168,67 @@ static BOOLEAN fenced(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     return send_request(gpu, result, header, bytes, stage);
 }
 
+/* Every packet of a frame is queued without waiting; the host runs them
+ * in order. The last one carries the frame's work counts, and with
+ * RippleD3D7WaitCurrent set the frame is waited for. */
+static BOOLEAN submit_frame(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, BOOLEAN last)
+{
+    static const RB2K_D3D7_COMPLETED none;
+    RB2K_IMAGE *target = gpu->d7Frame.target;
+    BOOLEAN ok;
+    if (!gpu->d7Frame.count) return TRUE;
+    r->stage = RB2K_STAGE_TRANSFER;
+    r->status = rb_gpu_submit_scene(gpu, gpu->d7Frame.words, gpu->d7Frame.count,
+                                    last ? &gpu->d7Frame.pending : &none);
+    ok = r->status == NO_ERROR;
+    if (ok && last && gpu->d7WaitCurrent) {
+        r->status = rb_gpu_wait_image(gpu, target);
+        ok = r->status == NO_ERROR;
+    }
+    gpu->d7Frame.count = 0;
+    if (last || !ok) {
+        if (!ok) target->frameFailed = TRUE;
+        gpu->d7Frame.target = NULL;
+        gpu->d7Frame.pending.clears = gpu->d7Frame.pending.triangles = 0;
+    }
+    return ok;
+}
+
+BOOLEAN rb_gpu_frame_flush(RB2K_GPU *gpu, RB2K_GPU_RESULT *r)
+{
+    return submit_frame(gpu, r, TRUE);
+}
+
+/* Room for count words at the end of the image's open frame. The caller
+ * writes all of them before its next frame request. */
+ULONG *rb_gpu_frame_reserve(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, ULONG count)
+{
+    const ULONG capacity = sizeof(gpu->d7Frame.words)/sizeof(ULONG);
+    ULONG *words;
+    if (!count || count > capacity || image->frameFailed) {
+        r->status = ERROR_INVALID_DATA;
+        r->stage = RB2K_STAGE_TRANSFER;
+        return NULL;
+    }
+    if (gpu->d7Frame.target != image && !rb_gpu_frame_flush(gpu, r)) return NULL;
+    if (count > capacity-gpu->d7Frame.count && !submit_frame(gpu, r, FALSE)) return NULL;
+    words = gpu->d7Frame.words + gpu->d7Frame.count;
+    gpu->d7Frame.count += count;
+    gpu->d7Frame.target = image;
+    return words;
+}
+
+BOOLEAN rb_gpu_frame_words(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
+                           const ULONG *words, ULONG count)
+{
+    ULONG *room = rb_gpu_frame_reserve(gpu, r, image, count);
+    if (!room) return FALSE;
+    VideoPortMoveMemory(room, (PVOID)words, count*sizeof(*words));
+    return TRUE;
+}
+
 BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
-                          ULONG color, BOOLEAN createSurface)
+                          ULONG color, BOOLEAN createSurface, RB2K_IMAGE *frameTarget, ULONG depthView)
 {
     PIXEL_REQUEST request;
     ULONG skip = createSurface ? 0 : CreateWords;
@@ -162,11 +238,132 @@ BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
     request.draw.submit.size = bytes;
     VideoPortMoveMemory(words, (PVOID)(clear_commands + skip), bytes);
     if (createSurface) words[2] = id;
-    words[12 - skip] = channel_bits((color >> 16) & 255);
-    words[13 - skip] = channel_bits((color >> 8) & 255);
-    words[14 - skip] = channel_bits(color & 255);
-    words[15 - skip] = channel_bits(color >> 24);
+    words[8 - skip] = depthView;
+    words[12 - skip] = rb_gpu_channel((color >> 16) & 255);
+    words[13 - skip] = rb_gpu_channel((color >> 8) & 255);
+    words[14 - skip] = rb_gpu_channel(color & 255);
+    words[15 - skip] = rb_gpu_channel(color >> 24);
+    if (frameTarget) return rb_gpu_frame_words(gpu, result, frameTarget, words, bytes / sizeof(*words));
     return fenced(gpu, result, &request.hdr, sizeof(request.draw.submit) + bytes, RB2K_STAGE_CLEAR);
+}
+
+/* Depth writes run in the attached colour target's context. A CPU observer
+ * must wait on that target even when locking just the depth surface. */
+BOOLEAN rb_gpu_sync_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image)
+{
+    RB2K_IMAGE *writer = image->depthOwner ? image->depthOwner : image;
+    if (gpu->d7Frame.target == writer && !rb_gpu_frame_flush(gpu, r)) return FALSE;
+    r->stage = RB2K_STAGE_TRANSFER;
+    r->status = rb_gpu_wait_image(gpu, writer);
+    return r->status == NO_ERROR;
+}
+
+/* Queue the image's open frame without waiting for it. A request in the
+ * image's own context that follows in the queue sees all its drawing. */
+BOOLEAN rb_gpu_order_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image)
+{
+    RB2K_IMAGE *writer = image->depthOwner ? image->depthOwner : image;
+    return gpu->d7Frame.target != writer || rb_gpu_frame_flush(gpu, r);
+}
+
+/* One view belongs to one colour context. Rebinding retires the old view
+ * before reusing its handle or attaching its resource in a different context.
+ * Repeated frames using the same pair add neither a submit nor a wait. */
+BOOLEAN rb_gpu_depth_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *color, RB2K_IMAGE *depth)
+{
+    static const ULONG release[] = {
+        VIRGL_CMD0(VIRGL_CCMD_SET_FRAMEBUFFER_STATE, 0, VIRGL_SET_FRAMEBUFFER_STATE_SIZE(1)),
+        1, 0, RB2K_D7_COLOR_VIEW,
+        VIRGL_CMD0(VIRGL_CCMD_DESTROY_OBJECT, VIRGL_OBJECT_SURFACE, 1), RB2K_D7_DEPTH_VIEW
+    };
+    ULONG attach[] = {
+        VIRGL_CMD0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_SURFACE, VIRGL_OBJ_SURFACE_SIZE),
+        RB2K_D7_DEPTH_VIEW, 0, VIRGL_FORMAT_Z16_UNORM, 0, 0,
+        VIRGL_CMD0(VIRGL_CCMD_SET_FRAMEBUFFER_STATE, 0, VIRGL_SET_FRAMEBUFFER_STATE_SIZE(1)),
+        1, RB2K_D7_DEPTH_VIEW, RB2K_D7_COLOR_VIEW,
+        /* An untouched depth surface is logically zero, including after a first partial draw. */
+        VIRGL_CMD0(VIRGL_CCMD_CLEAR, 0, VIRGL_OBJ_CLEAR_SIZE), 1, 0, 0, 0, 0, 0, 0, 0
+    };
+    RB2K_IMAGE *old = color->depthBuffer;
+    ULONG count = sizeof(attach)/sizeof(*attach);
+    if (color->depth16 || (depth && (!depth->depth16 || depth->frameFailed ||
+        color->width != depth->width || color->height != depth->height))) {
+        r->status = ERROR_INVALID_PARAMETER;
+        r->stage = RB2K_STAGE_ATTACH;
+        return FALSE;
+    }
+    if (old == depth) return TRUE;
+    if (old) {
+        if (!rb_gpu_frame_words(gpu, r, color, release, sizeof(release)/sizeof(*release)) ||
+            !rb_gpu_sync_image(gpu, r, color) ||
+            !context_resource(gpu, r, color->id, old->id, FALSE, RB2K_STAGE_CLEANUP)) {
+            gpu->ready = FALSE;
+            return FALSE;
+        }
+        old->depthOwner = NULL;
+        color->depthBuffer = NULL;
+    }
+    if (!depth) return TRUE;
+    if (depth->depthOwner && !rb_gpu_depth_target(gpu, r, depth->depthOwner, NULL)) return FALSE;
+    if (!rb_gpu_prepare_target(gpu, r, color) ||
+        !context_resource(gpu, r, color->id, depth->id, TRUE, RB2K_STAGE_ATTACH)) return FALSE;
+    attach[2] = depth->id;
+    if (depth->defined) count -= 1 + VIRGL_OBJ_CLEAR_SIZE;
+    if (!rb_gpu_frame_words(gpu, r, color, attach, count)) {
+        RB2K_GPU_RESULT cleanup;
+        if (gpu->ready && !context_resource(gpu, &cleanup, color->id, depth->id, FALSE, RB2K_STAGE_CLEANUP))
+            gpu->ready = FALSE;
+        return FALSE;
+    }
+    color->depthBuffer = depth;
+    depth->depthOwner = color;
+    depth->defined = TRUE;
+    return TRUE;
+}
+
+/* Direct3D supplies a float in [0,1]. Gallium clears use a double. Expand
+ * the IEEE bits exactly, including subnormals, without using kernel FP state. */
+static void clear_depth_words(ULONG value, ULONG *lo, ULONG *hi)
+{
+    ULONG fraction = value & 0x7fffff;
+    ULONG exponent = (value >> 23) & 255;
+    if (!(value & 0x7fffffff)) { *lo = *hi = 0; return; }
+    if (exponent) exponent += 896;
+    else {
+        exponent = 897;
+        while (!(fraction & 0x800000)) { fraction <<= 1; --exponent; }
+        fraction &= 0x7fffff;
+    }
+    *lo = fraction << 29;
+    *hi = (exponent << 20) | (fraction >> 3);
+}
+
+BOOLEAN rb_gpu_clear_buffers(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
+                             ULONG flags, ULONG color, ULONG depthBits)
+{
+    ULONG words[1 + VIRGL_OBJ_CLEAR_SIZE] = { VIRGL_CMD0(VIRGL_CCMD_CLEAR, 0, VIRGL_OBJ_CLEAR_SIZE) };
+    if (flags & RB2K_CLEAR_DEPTH) {
+        if (!image->depthBuffer || (depthBits > 0x3f800000 && depthBits != 0x80000000)) {
+            r->stage = RB2K_STAGE_CLEAR;
+            r->status = ERROR_INVALID_PARAMETER;
+            return FALSE;
+        }
+        words[VIRGL_OBJ_CLEAR_BUFFERS] |= 1; /* PIPE_CLEAR_DEPTH */
+        clear_depth_words(depthBits, words + VIRGL_OBJ_CLEAR_DEPTH_0, words + VIRGL_OBJ_CLEAR_DEPTH_1);
+    }
+    if (flags & RB2K_CLEAR_COLOR) {
+        words[VIRGL_OBJ_CLEAR_BUFFERS] |= PipeClearColor0;
+        words[VIRGL_OBJ_CLEAR_COLOR_0] = rb_gpu_channel((color >> 16) & 255);
+        words[VIRGL_OBJ_CLEAR_COLOR_1] = rb_gpu_channel((color >> 8) & 255);
+        words[VIRGL_OBJ_CLEAR_COLOR_2] = rb_gpu_channel(color & 255);
+        words[VIRGL_OBJ_CLEAR_COLOR_3] = rb_gpu_channel(color >> 24);
+    }
+    if (!rb_gpu_frame_words(gpu, r, image, words, sizeof(words)/sizeof(*words))) return FALSE;
+    if (flags & RB2K_CLEAR_COLOR) {
+        image->defined = image->uniform = TRUE;
+        image->color = color;
+    }
+    return TRUE;
 }
 
 VP_STATUS rb_gpu_cursor_pixels(RB2K_GPU *gpu)
@@ -234,12 +431,15 @@ static void copy_rows(RB2K_GPU *gpu, PUCHAR pixels, ULONG pitch, ULONG rowBytes,
     }
 }
 
-static BOOLEAN transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resource,
-                            ULONG x, ULONG y, ULONG width, ULONG height, PVOID upload, ULONG pitch)
+/* An ordered read is not fenced: the renderer copies the pixels before it
+ * answers, after everything queued earlier in that context. */
+static BOOLEAN transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG context, ULONG resource,
+                            ULONG x, ULONG y, ULONG width, ULONG height, PVOID upload, ULONG pitch,
+                            ULONG rowBytes, BOOLEAN ordered, ULONG level)
 {
     PIXEL_REQUEST request;
     BACKING_REQUEST backing;
-    ULONG bytes = width * height * sizeof(ULONG);
+    ULONG bytes = rowBytes * height;
     ULONG count = (bytes + RB2K_SEGMENT_BYTES - 1) / RB2K_SEGMENT_BYTES;
     ULONG i, used = sizeof(backing.attach) + count * sizeof(backing.entries[0]);
     result->stage = RB2K_STAGE_BACKING;
@@ -257,22 +457,24 @@ static BOOLEAN transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resour
         backing.entries[i].length = length;
         /* A failed or short renderer write must never return another surface's bytes. */
         if (!upload) VideoPortZeroMemory(gpu->staging[i].data, length);
-        else if (pitch == width * sizeof(ULONG))
+        else if (pitch == rowBytes)
             VideoPortMoveMemory(gpu->staging[i].data, (PUCHAR)upload + offset, length);
     }
-    if (upload && pitch != width * sizeof(ULONG))
-        copy_rows(gpu, upload, pitch, width * sizeof(ULONG), height, FALSE);
+    if (upload && pitch != rowBytes)
+        copy_rows(gpu, upload, pitch, rowBytes, height, FALSE);
     if (!send_request(gpu, result, &backing, used, RB2K_STAGE_BACKING)) return FALSE;
     begin_request(&request, upload ? VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D :
-        VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, resource);
+        VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, context);
     request.transfer.resource_id = resource;
+    request.transfer.level = level;
     request.transfer.box.x = x;
     request.transfer.box.y = y;
     request.transfer.box.w = width;
     request.transfer.box.h = height;
     request.transfer.box.d = 1;
-    request.transfer.stride = width * sizeof(ULONG);
-    if (!fenced(gpu, result, &request.hdr, sizeof(request.transfer), RB2K_STAGE_TRANSFER)) return FALSE;
+    request.transfer.stride = rowBytes;
+    if (ordered && !upload ? !send_request(gpu, result, &request.hdr, sizeof(request.transfer), RB2K_STAGE_TRANSFER) :
+        !fenced(gpu, result, &request.hdr, sizeof(request.transfer), RB2K_STAGE_TRANSFER)) return FALSE;
     begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING, 0);
     request.detach.resource_id = resource;
     return send_request(gpu, result, &request, sizeof(request.detach), RB2K_STAGE_BACKING);
@@ -281,7 +483,8 @@ static BOOLEAN transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resour
 BOOLEAN rb_gpu_transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resource,
                             ULONG x, ULONG y, ULONG width, ULONG height, PVOID upload)
 {
-    return transfer_box(gpu, result, resource, x, y, width, height, upload, width * sizeof(ULONG));
+    ULONG rowBytes = width * sizeof(ULONG);
+    return transfer_box(gpu, result, resource, resource, x, y, width, height, upload, rowBytes, rowBytes, TRUE, 0);
 }
 
 BOOLEAN rb_gl_record_time(RB2K_GPU *gpu, ULONG operation, LONGLONG start, BOOLEAN ok)
@@ -293,17 +496,55 @@ BOOLEAN rb_gl_record_time(RB2K_GPU *gpu, ULONG operation, LONGLONG start, BOOLEA
     return ok;
 }
 
-/* Put the pixels in the command itself. Once the control queue returns
- * the descriptor, the guest can reuse its staging space even if the host
- * GPU has more drawing to do. Later commands use the same desktop context. */
-VP_STATUS rb_gpu_inline_uploads(RB2K_GPU *gpu, const RB2K_RECT *rects, ULONG count)
+/* Keep pixels inside the virgl command. Returning an unfenced descriptor
+ * means the command stream owns its data and staging may be reused. */
+static ULONG inline_write(PULONG words, ULONG id, ULONG x, ULONG y, ULONG w, ULONG h,
+                          const ULONG *pixels, ULONG pitchPixels, ULONG level)
 {
-    const RB2K_PRIMARY *primary = &gpu->primary;
+    ULONG row, count = VIRGL_RESOURCE_IW_DATA_START + w*h;
+    VideoPortZeroMemory(words, VIRGL_RESOURCE_IW_DATA_START * sizeof(*words));
+    words[0] = VIRGL_CMD0(VIRGL_CCMD_RESOURCE_INLINE_WRITE, 0, count-1);
+    words[VIRGL_RESOURCE_IW_RES_HANDLE] = id;
+    words[VIRGL_RESOURCE_IW_LEVEL] = level;
+    words[VIRGL_RESOURCE_IW_USAGE] = 2; /* PIPE_MAP_WRITE */
+    words[VIRGL_RESOURCE_IW_STRIDE] = w*sizeof(*words);
+    words[VIRGL_RESOURCE_IW_LAYER_STRIDE] = w*h*sizeof(*words);
+    words[VIRGL_RESOURCE_IW_X] = x;
+    words[VIRGL_RESOURCE_IW_Y] = y;
+    words[VIRGL_RESOURCE_IW_W] = w;
+    words[VIRGL_RESOURCE_IW_H] = h;
+    words[VIRGL_RESOURCE_IW_D] = 1;
+    for (row = 0; row < h; ++row)
+        VideoPortMoveMemory(words + VIRGL_RESOURCE_IW_DATA_START + row*w,
+                            (PVOID)(pixels + row*pitchPixels), w*sizeof(*words));
+    return count;
+}
+
+static VP_STATUS submit_inline(RB2K_GPU *gpu, ULONG id, ULONG words)
+{
     struct virtio_gpu_cmd_submit submit;
     struct virtio_gpu_ctrl_hdr reply;
     RB2K_GPU_EXTENT data;
+    ULONG received;
+    VP_STATUS status;
+    VideoPortZeroMemory(&submit, sizeof(submit));
+    submit.hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    submit.hdr.ctx_id = id;
+    submit.size = words*sizeof(ULONG);
+    data.bus = gpu->staging[0].bus;
+    data.length = submit.size;
+    status = rb_gpu_submit_extents(gpu, &submit, sizeof(submit), &data, 1,
+                                   &reply, sizeof(reply), &received);
+    if (!status && (received != sizeof(reply) || reply.type != VIRTIO_GPU_RESP_OK_NODATA))
+        status = ERROR_INVALID_DATA;
+    return status;
+}
+
+VP_STATUS rb_gpu_inline_uploads(RB2K_GPU *gpu, const RB2K_RECT *rects, ULONG count)
+{
+    const RB2K_PRIMARY *primary = &gpu->primary;
     PULONG words;
-    ULONG i, y, total = 0, received;
+    ULONG i, total = 0;
     VP_STATUS status;
     LONGLONG start = rb_counter_ticks(NULL);
     if (!count || count > sizeof(gpu->glDesktop.gdiWrites) / sizeof(*rects) ||
@@ -319,36 +560,13 @@ VP_STATUS rb_gpu_inline_uploads(RB2K_GPU *gpu, const RB2K_RECT *rects, ULONG cou
         const RB2K_RECT *r = &rects[i];
         ULONG w = r->right - r->left, h = r->bottom - r->top;
         ULONG size = VIRGL_RESOURCE_IW_DATA_START + w * h;
-        PULONG command = words + total;
         if (!w || !h || w > 64 || h > 64 || r->left >= r->right || r->top >= r->bottom ||
             r->right > primary->width || r->bottom > primary->height ||
             size > RB2K_SEGMENT_BYTES / sizeof(*words) - total) return ERROR_INVALID_PARAMETER;
-        VideoPortZeroMemory(command, VIRGL_RESOURCE_IW_DATA_START * sizeof(*words));
-        command[0] = VIRGL_CMD0(VIRGL_CCMD_RESOURCE_INLINE_WRITE, 0, size - 1);
-        command[VIRGL_RESOURCE_IW_RES_HANDLE] = gpu->glDesktop.image.id;
-        command[VIRGL_RESOURCE_IW_USAGE] = 2; /* PIPE_MAP_WRITE */
-        command[VIRGL_RESOURCE_IW_STRIDE] = w * sizeof(*words);
-        command[VIRGL_RESOURCE_IW_LAYER_STRIDE] = w * h * sizeof(*words);
-        command[VIRGL_RESOURCE_IW_X] = r->left;
-        command[VIRGL_RESOURCE_IW_Y] = r->top;
-        command[VIRGL_RESOURCE_IW_W] = w;
-        command[VIRGL_RESOURCE_IW_H] = h;
-        command[VIRGL_RESOURCE_IW_D] = 1;
-        for (y = 0; y < h; ++y)
-            VideoPortMoveMemory(command + VIRGL_RESOURCE_IW_DATA_START + y * w,
-                primary->pixels + (r->top + y) * primary->pitchPixels + r->left, w * sizeof(*words));
-        total += size;
+        total += inline_write(words+total, gpu->glDesktop.image.id, r->left, r->top, w, h,
+                              primary->pixels + r->top*primary->pitchPixels + r->left, primary->pitchPixels, 0);
     }
-    VideoPortZeroMemory(&submit, sizeof(submit));
-    submit.hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
-    submit.hdr.ctx_id = gpu->glDesktop.image.id;
-    submit.size = total * sizeof(*words);
-    data.bus = gpu->staging[0].bus;
-    data.length = submit.size;
-    status = rb_gpu_submit_extents(gpu, &submit, sizeof(submit), &data, 1,
-                                   &reply, sizeof(reply), &received);
-    if (!status && (received != sizeof(reply) || reply.type != VIRTIO_GPU_RESP_OK_NODATA))
-        status = ERROR_INVALID_DATA;
+    status = submit_inline(gpu, gpu->glDesktop.image.id, total);
     rb_gl_record_time(gpu, RB2K_GL_UPLOAD, start, (BOOLEAN)!status);
     if (!status) {
         gpu->glTiming.operations[RB2K_GL_UPLOAD].calls += count - 1;
@@ -384,8 +602,8 @@ BOOLEAN rb_gpu_primary_transfer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     }
     first = gpu->primary.pixels + rect->top * gpu->primary.pitchPixels + rect->left;
     start = rb_counter_ticks(NULL);
-    if (!transfer_box(gpu, result, gpu->glDesktop.image.id, rect->left, rect->top,
-                      width, height, readback ? NULL : first, pitch))
+    if (!transfer_box(gpu, result, gpu->glDesktop.image.id, gpu->glDesktop.image.id, rect->left, rect->top,
+                      width, height, readback ? NULL : first, pitch, width * sizeof(ULONG), FALSE, 0))
         return rb_gl_record_time(gpu, operation, start, FALSE);
     if (readback) copy_rows(gpu, (PUCHAR)first, pitch, width * sizeof(ULONG), height, TRUE);
     if (readback) {
@@ -425,10 +643,11 @@ BOOLEAN rb_gpu_show_desktop(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, BOOLEAN sele
 BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
                               const RB2K_IMAGE *image, PVOID pixels, BOOLEAN readback)
 {
-    ULONG bytes = image->width * image->height * sizeof(ULONG);
+    ULONG rowBytes = image->width * (image->depth16 ? sizeof(USHORT) : sizeof(ULONG));
+    ULONG bytes = rowBytes * image->height;
     ULONG offset;
-    if (!rb_gpu_transfer_box(gpu, result, image->id, 0, 0, image->width, image->height,
-                             readback ? NULL : pixels)) return FALSE;
+    if (!transfer_box(gpu, result, image->id, image->id, 0, 0, image->width, image->height,
+                      readback ? NULL : pixels, rowBytes, rowBytes, FALSE, 0)) return FALSE;
     if (readback) {
         for (offset = 0; offset < bytes; offset += RB2K_SEGMENT_BYTES) {
             ULONG length = bytes - offset;
@@ -517,7 +736,7 @@ void rb_gpu_pixel(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
     result->expected = 0xffff8000UL;
     if (!rb_gpu_create_image(gpu, result, &image, name, sizeof(name) - 1, FALSE)) return;
     result->observed = ~result->expected;
-    if (!rb_gpu_draw_image(gpu, result, image.id, result->expected, TRUE) ||
+    if (!rb_gpu_draw_image(gpu, result, image.id, result->expected, TRUE, NULL, 0) ||
         !rb_gpu_transfer_image(gpu, result, &image, &result->observed, TRUE)) return;
     if (!rb_gpu_destroy_image(gpu, result, image.id)) return;
     if (result->observed != result->expected) {
@@ -526,4 +745,93 @@ void rb_gpu_pixel(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
         return;
     }
     result->stage = RB2K_STAGE_DONE;
+}
+
+/* ---- Direct3D textures: host resources without a context of their own ---- */
+
+RB2K_TEXTURE *rb_gpu_texture(RB2K_GPU *gpu, ULONG id)
+{
+    ULONG i;
+    for (i = 0; id && i < RB2K_D7_TEXTURES; ++i)
+        if (gpu->textures[i].id == id) return &gpu->textures[i];
+    return NULL;
+}
+
+BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture)
+{
+    PIXEL_REQUEST request;
+    begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D, 0);
+    request.resource.resource_id = texture->id;
+    request.resource.target = PipeTexture2D;
+    request.resource.format = VIRGL_FORMAT_B8G8R8A8_UNORM;
+    request.resource.bind = VIRGL_BIND_SAMPLER_VIEW;
+    request.resource.width = texture->width;
+    request.resource.height = texture->height;
+    request.resource.depth = request.resource.array_size = 1;
+    request.resource.last_level = texture->levels - 1;
+    return send_request(gpu, result, &request, sizeof(request.resource), RB2K_STAGE_RESOURCE);
+}
+
+/* A texture is attached to each colour context that samples it. Context ids
+ * are never reused, so an entry for a destroyed target is only stale. */
+BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture,
+                              const RB2K_IMAGE *image)
+{
+    ULONG i, free = RB2K_DD_SLOTS;
+    for (i = 0; i < RB2K_DD_SLOTS; ++i) {
+        ULONG j;
+        if (texture->contexts[i] == image->id) return TRUE;
+        for (j = 0; j < RB2K_DD_SLOTS && gpu->images[j].id != texture->contexts[i]; ++j) {}
+        if (free == RB2K_DD_SLOTS && (!texture->contexts[i] || j == RB2K_DD_SLOTS)) free = i;
+    }
+    if (free == RB2K_DD_SLOTS) {
+        result->status = ERROR_NOT_ENOUGH_MEMORY;
+        result->stage = RB2K_STAGE_ATTACH;
+        return FALSE;
+    }
+    if (!context_resource(gpu, result, image->id, texture->id, TRUE, RB2K_STAGE_ATTACH)) return FALSE;
+    texture->contexts[free] = image->id;
+    return TRUE;
+}
+
+/* Earlier draws in the open frame must reach the host before new texels. */
+BOOLEAN rb_gpu_texture_upload(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K_TEXTURE *texture,
+                              const RB2K_IMAGE *image, ULONG level, ULONG y, ULONG rows, PVOID texels)
+{
+    ULONG width = texture->width >> level ? texture->width >> level : 1;
+    ULONG rowBytes = width * sizeof(ULONG), bytes = rowBytes * rows;
+    if (gpu->d7Frame.target && gpu->d7Frame.count && !submit_frame(gpu, result, FALSE)) return FALSE;
+    if (bytes <= 16384) {
+        ULONG count;
+        result->stage = RB2K_STAGE_BACKING;
+        result->status = rb_gpu_reserve_staging(gpu, bytes + VIRGL_RESOURCE_IW_DATA_START*sizeof(ULONG));
+        if (result->status) return FALSE;
+        count = inline_write((PULONG)gpu->staging[0].data, texture->id, 0, y, width, rows, texels, width, level);
+        result->stage = RB2K_STAGE_TRANSFER;
+        result->status = submit_inline(gpu, image->id, count);
+        return result->status == NO_ERROR;
+    }
+    return transfer_box(gpu, result, image->id, texture->id, 0, y, width, rows,
+                        texels, rowBytes, rowBytes, FALSE, level);
+}
+
+BOOLEAN rb_gpu_texture_free(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture)
+{
+    PIXEL_REQUEST request;
+    /* Unreferencing detaches the resource from every context. A bound view
+     * keeps the host storage alive until that context replaces it. */
+    begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_UNREF, 0);
+    request.unref.resource_id = texture->id;
+    if (!send_request(gpu, result, &request, sizeof(request.unref), RB2K_STAGE_CLEANUP)) return FALSE;
+    gpu->textureBytes -= texture->bytes;
+    --gpu->textureCount;
+    VideoPortZeroMemory(texture, sizeof(*texture));
+    return TRUE;
+}
+
+/* The transport is going away or every context was destroyed. */
+void rb_gpu_texture_forget(RB2K_GPU *gpu)
+{
+    VideoPortZeroMemory(gpu->textures, sizeof(gpu->textures));
+    gpu->textureCount = gpu->textureBytes = 0;
 }

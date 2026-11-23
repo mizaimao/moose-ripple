@@ -5,6 +5,11 @@
 #include <ntddvdeo.h>
 #include <video.h>
 #include "gpu_transport.h"
+#include "gpu_memory.h"
+#pragma warning(push)
+#pragma warning(disable:4200)
+#include <linux/virtio_gpu.h>
+#pragma warning(pop)
 
 enum {
     DeviceFeatureSelect = 0, DeviceFeature = 4, DriverFeatureSelect = 8,
@@ -19,7 +24,7 @@ enum {
 };
 /* The queue and one request take the first page, the reply the second.
  * Larger command data follows the request in separate DMA staging
- * segments, chained as further descriptors. One request is in flight. */
+ * segments. Native D3D frames use separate packets and descriptor pairs. */
 enum {
     Desc = 0, Avail = 256, Used = 512, Request = 1024, Reply = 4096,
     PacketBytes = RB2K_INLINE_PACKET_BYTES, ReplyBytes = 4096, DmaBytes = 8192,
@@ -33,6 +38,10 @@ typedef struct { PHYSICAL_ADDRESS address; ULONG length; USHORT flags, next; } D
 typedef struct { USHORT flags, index, ring[QueueEntries]; } AVAILABLE;
 typedef struct { ULONG id, length; } USED_ENTRY;
 typedef struct { USHORT flags, index; USED_ENTRY ring[QueueEntries]; } USED_RING;
+/* Each scene slot holds one SUBMIT_3D packet and, at its end, the reply. */
+enum { FrameFirstDesc = QueueEntries - 2*RB2K_D7_FLIGHT_SLOTS, FramePacketBytes = 65536,
+       FrameReplyOffset = FramePacketBytes - 64, FrameDmaBytes = FramePacketBytes*RB2K_D7_FLIGHT_SLOTS };
+typedef char frame_fits[sizeof(struct virtio_gpu_cmd_submit) + RB2K_D7_FRAME_WORDS*sizeof(ULONG) <= FrameReplyOffset ? 1 : -1];
 typedef char check_desc_size[sizeof(DESCRIPTOR) == 16 ? 1 : -1];
 
 typedef struct { ULONG start, bytes; } REGION;
@@ -216,7 +225,8 @@ VP_STATUS rb_gpu_start(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
     if (!gpu->dma || gpu->allocated < DmaBytes) return ERROR_NOT_ENOUGH_MEMORY;
     if (gpu->bus.LowPart & 15) return ERROR_INVALID_DATA;
     VideoPortZeroMemory(gpu->dma, gpu->allocated < bytes ? DmaBytes : bytes);
-    gpu->index = gpu->cursorIndex = 0;
+    gpu->index = gpu->usedIndex = gpu->cursorIndex = 0;
+    gpu->d7Next = 0;
     gpu->fence = 0;
     gpu->doorbell = configure_queue(gpu, 0, QueueEntries, 0);
     if (!gpu->doorbell) return ERROR_INVALID_DATA;
@@ -235,7 +245,7 @@ VP_STATUS rb_gpu_submit(RB2K_GPU *gpu, const void *request, ULONG bytes,
     return rb_gpu_submit_extents(gpu, request, bytes, NULL, 0, reply, capacity, received);
 }
 
-/* Each queue allows one in-flight request. A timeout quarantines both
+/* These callers have one in-flight request. A timeout quarantines both
  * queues until the transport acknowledges a reset. */
 static VP_STATUS submit_chain(RB2K_GPU *gpu, ULONG offset, USHORT number, USHORT entries,
                               PUSHORT index, PUSHORT doorbell, ULONG capacity, PULONG received)
@@ -277,18 +287,199 @@ VP_STATUS rb_gpu_cursor_command(RB2K_GPU *gpu, const void *request, ULONG bytes)
     return submit_chain(gpu, CursorQueue, 1, CursorEntries, &gpu->cursorIndex, gpu->cursorDoorbell, 0, &received);
 }
 
+/* The control queue has one ordinary request (head 0) and at most two
+ * pending native scenes. Used entries can arrive in a different order. */
+static VP_STATUS control_error(RB2K_GPU *gpu, VP_STATUS status)
+{
+    gpu->ready = FALSE;
+    ++gpu->d7Flight.failed;
+    return status;
+}
+
+static void publish_control(RB2K_GPU *gpu, USHORT head)
+{
+    volatile AVAILABLE *available = (AVAILABLE *)(gpu->dma + Avail);
+    available->ring[gpu->index % QueueEntries] = head;
+    VideoPortInterlockedExchange(&gpu->barrier, 0);
+    available->index = ++gpu->index;
+    VideoPortInterlockedExchange(&gpu->barrier, 0);
+    VideoPortWriteRegisterUshort(gpu->doorbell, 0);
+}
+
+static VP_STATUS collect_control(RB2K_GPU *gpu, ULONG capacity, PULONG received, BOOLEAN *ordinaryDone)
+{
+    volatile USED_RING *used = (USED_RING *)(gpu->dma + Used);
+    USHORT end = used->index;
+    if (end == gpu->usedIndex) return NO_ERROR;
+    if ((USHORT)(end-gpu->usedIndex) > (USHORT)(gpu->index-gpu->usedIndex))
+        return control_error(gpu, ERROR_INVALID_DATA);
+    VideoPortInterlockedExchange(&gpu->barrier, 0);
+    while (gpu->usedIndex != end) {
+        volatile USED_ENTRY *entry = &used->ring[gpu->usedIndex % QueueEntries];
+        ULONG id = entry->id, length = entry->length, slot;
+        RB2K_D7_SUBMISSION *job;
+        struct virtio_gpu_ctrl_hdr *reply;
+        ++gpu->usedIndex;
+        if (!id) {
+            if (!ordinaryDone || *ordinaryDone || length > capacity) return control_error(gpu, ERROR_INVALID_DATA);
+            *received = length;
+            *ordinaryDone = TRUE;
+            continue;
+        }
+        if (id < FrameFirstDesc || id >= QueueEntries || ((id-FrameFirstDesc) & 1))
+            return control_error(gpu, ERROR_INVALID_DATA);
+        slot = (id-FrameFirstDesc)/2;
+        job = &gpu->d7Submitted[slot];
+        if (!job->image || !gpu->d7Packets.data) return control_error(gpu, ERROR_INVALID_DATA);
+        reply = (struct virtio_gpu_ctrl_hdr *)(gpu->d7Packets.data + slot*FramePacketBytes + FrameReplyOffset);
+        if (length != sizeof(*reply) || reply->type != VIRTIO_GPU_RESP_OK_NODATA ||
+            !(reply->flags & VIRTIO_GPU_FLAG_FENCE) || reply->fence_id != job->fence) {
+            job->image->frameFailed = TRUE;
+            return control_error(gpu, ERROR_INVALID_DATA);
+        }
+        gpu->d7Completed.clears += job->work.clears;
+        gpu->d7Completed.triangles += job->work.triangles;
+        gpu->hostFills += job->work.clears;
+        job->image = NULL;
+        --gpu->d7Flight.pending;
+        ++gpu->d7Flight.completed;
+    }
+    return NO_ERROR;
+}
+
+VP_STATUS rb_gpu_poll_scenes(RB2K_GPU *gpu)
+{
+    if (!gpu->d7Flight.pending) return NO_ERROR;
+    return gpu->ready ? collect_control(gpu, 0, NULL, NULL) : ERROR_NOT_READY;
+}
+
+static VP_STATUS wait_job(RB2K_GPU *gpu, RB2K_D7_SUBMISSION *job, BOOLEAN throttling)
+{
+    LONGLONG start, elapsed;
+    ULONG polls;
+    VP_STATUS status;
+    if (!job->image) return NO_ERROR;
+    status = collect_control(gpu, 0, NULL, NULL);
+    if (status || !job->image) return status;
+    start = rb_counter_ticks(NULL);
+    for (polls = 0; job->image; ++polls) {
+        if (polls == 1000000) return control_error(gpu, ERROR_TIMEOUT);
+        VideoPortStallExecution(10);
+        status = collect_control(gpu, 0, NULL, NULL);
+        if (status) return status;
+    }
+    elapsed = rb_counter_ticks(NULL)-start;
+    if (throttling) {
+        ++gpu->d7Flight.throttleWaits;
+        gpu->d7Flight.throttleTicks += elapsed;
+    } else {
+        ++gpu->d7Flight.accessWaits;
+        gpu->d7Flight.accessTicks += elapsed;
+    }
+    if (gpu->d7Measure) gpu->d7Measure->fenceTicks += elapsed;
+    return NO_ERROR;
+}
+
+VP_STATUS rb_gpu_wait_image(RB2K_GPU *gpu, const RB2K_IMAGE *image)
+{
+    ULONG i;
+    if (!gpu->d7Flight.pending) return NO_ERROR;
+    if (!gpu->ready) return ERROR_NOT_READY;
+    for (i = 0; i < RB2K_D7_FLIGHT_SLOTS; ++i) {
+        RB2K_D7_SUBMISSION *job = &gpu->d7Submitted[i];
+        if (!image || job->image == image) {
+            VP_STATUS status = wait_job(gpu, job, FALSE);
+            if (status) return status;
+        }
+    }
+    return NO_ERROR;
+}
+
+/* Queue the open frame's command words as one fenced SUBMIT_3D without
+ * waiting for it. The host runs control requests in queue order. */
+VP_STATUS rb_gpu_submit_scene(RB2K_GPU *gpu, const ULONG *words, ULONG count, const RB2K_D3D7_COMPLETED *work)
+{
+    RB2K_DMA_SEGMENT *dma = &gpu->d7Packets;
+    ULONG slot = gpu->d7Next, offset = slot*FramePacketBytes;
+    ULONG bytes = sizeof(struct virtio_gpu_cmd_submit) + count*sizeof(ULONG);
+    USHORT head = (USHORT)(FrameFirstDesc + 2*slot);
+    RB2K_D7_SUBMISSION *job = &gpu->d7Submitted[slot];
+    struct virtio_gpu_cmd_submit *packet;
+    DESCRIPTOR *desc;
+    LONGLONG start;
+    VP_STATUS status;
+    if (!gpu->ready || !gpu->d7Frame.target) return ERROR_NOT_READY;
+    if (!count || count > RB2K_D7_FRAME_WORDS) return ERROR_INVALID_PARAMETER;
+    if (gpu->fence == 0xffffffffUL) return ERROR_NO_MORE_ITEMS;
+    if (!dma->data) {
+        dma->data = VideoPortGetCommonBuffer(gpu->extension, FrameDmaBytes, 4096,
+                                              &dma->bus, &dma->allocated, TRUE);
+        if (!dma->data) return ERROR_NOT_ENOUGH_MEMORY;
+        if (dma->allocated < FrameDmaBytes) {
+            VideoPortFreeCommonBuffer(gpu->extension, dma->allocated, dma->data, dma->bus, TRUE);
+            dma->data = NULL;
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+    }
+    start = rb_counter_ticks(NULL);
+    /* This is frame N-2's slot. Leave the immediately preceding scene alone. */
+    status = rb_gpu_poll_scenes(gpu);
+    if (!status) status = wait_job(gpu, job, TRUE);
+    if (status) return status;
+    packet = (struct virtio_gpu_cmd_submit *)(dma->data + offset);
+    VideoPortZeroMemory(packet, sizeof(*packet));
+    packet->hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    packet->hdr.ctx_id = gpu->d7Frame.target->id;
+    packet->hdr.flags = VIRTIO_GPU_FLAG_FENCE;
+    packet->hdr.fence_id = ++gpu->fence;
+    packet->size = count*sizeof(ULONG);
+    VideoPortMoveMemory(packet+1, (PVOID)words, count*sizeof(ULONG));
+    VideoPortZeroMemory(dma->data + offset + FrameReplyOffset, sizeof(struct virtio_gpu_ctrl_hdr));
+    desc = (DESCRIPTOR *)(gpu->dma + Desc);
+    desc[head].address.QuadPart = dma->bus.QuadPart + offset;
+    desc[head].length = bytes;
+    desc[head].flags = DescriptorNext;
+    desc[head].next = head+1;
+    desc[head+1].address.QuadPart = dma->bus.QuadPart + offset + FrameReplyOffset;
+    desc[head+1].length = sizeof(struct virtio_gpu_ctrl_hdr);
+    desc[head+1].flags = DescriptorWrite;
+    desc[head+1].next = 0;
+    job->image = gpu->d7Frame.target;
+    job->work = *work;
+    job->fence = gpu->fence;
+    gpu->d7Next = (slot+1) % RB2K_D7_FLIGHT_SLOTS;
+    ++gpu->d7Flight.queued;
+    if (++gpu->d7Flight.pending > gpu->d7Flight.peak) gpu->d7Flight.peak = gpu->d7Flight.pending;
+    publish_control(gpu, head);
+    if (gpu->d7Measure) {
+        ++gpu->d7Measure->submits;
+        ++gpu->d7Measure->fences;
+        gpu->d7Measure->bytes += bytes;
+        gpu->d7Measure->queueTicks += rb_counter_ticks(NULL)-start;
+    }
+    return NO_ERROR;
+}
+
 VP_STATUS rb_gpu_submit_extents(RB2K_GPU *gpu, const void *request, ULONG bytes,
                                 const RB2K_GPU_EXTENT *extents, ULONG count,
                                 void *reply, ULONG capacity, PULONG received)
 {
     DESCRIPTOR *desc;
-    ULONG i;
+    ULONG i, polls;
+    BOOLEAN done = FALSE;
     VP_STATUS status;
+    LONGLONG start = 0;
     *received = 0;
     if (!gpu->ready) return ERROR_NOT_READY;
     if (!bytes || bytes > PacketBytes || !capacity || capacity > ReplyBytes ||
         count > RB2K_GPU_MAX_EXTENTS || (count && !extents))
         return ERROR_INVALID_PARAMETER;
+    /* Large scatter/gather requests may need the descriptors that frames
+     * normally occupy. Finish only the slots whose descriptors overlap. */
+    for (i = 0; i < RB2K_D7_FLIGHT_SLOTS && 1+count >= FrameFirstDesc+2*i; ++i) {
+        status = wait_job(gpu, &gpu->d7Submitted[i], FALSE);
+        if (status) return status;
+    }
     desc = (DESCRIPTOR *)(gpu->dma + Desc);
     VideoPortMoveMemory(gpu->dma + Request, (PVOID)request, bytes);
     VideoPortZeroMemory(gpu->dma + Reply, capacity);
@@ -307,7 +498,33 @@ VP_STATUS rb_gpu_submit_extents(RB2K_GPU *gpu, const void *request, ULONG bytes,
     desc[1 + count].length = capacity;
     desc[1 + count].flags = DescriptorWrite;
     desc[1 + count].next = 0;
-    status = submit_chain(gpu, 0, 0, QueueEntries, &gpu->index, gpu->doorbell, capacity, received);
+    if (gpu->d7Measure) start = rb_counter_ticks(NULL);
+    if (!gpu->d7Flight.pending) {
+        /* Keep the ordinary single-request path when no scene owns the queue. */
+        status = submit_chain(gpu, 0, 0, QueueEntries, &gpu->index, gpu->doorbell, capacity, received);
+        gpu->usedIndex = gpu->index;
+    } else {
+        publish_control(gpu, 0);
+        for (polls = 0; ; ++polls) {
+            status = collect_control(gpu, capacity, received, &done);
+            if (status || done) break;
+            if (polls == 1000000) { status = control_error(gpu, ERROR_TIMEOUT); break; }
+            VideoPortStallExecution(10);
+        }
+    }
+    if (gpu->d7Measure) {
+        const struct virtio_gpu_ctrl_hdr *header = request;
+        RB2K_D7_TIME *t = gpu->d7Measure;
+        LONGLONG waited = rb_counter_ticks(NULL)-start;
+        t->queueTicks += waited;
+        ++t->submits;
+        t->bytes += bytes;
+        for (i = 0; i < count; ++i) t->bytes += extents[i].length;
+        if (bytes >= sizeof(*header) && (header->flags & VIRTIO_GPU_FLAG_FENCE)) {
+            t->fenceTicks += waited;
+            ++t->fences;
+        }
+    }
     if (!status) VideoPortMoveMemory(reply, gpu->dma + Reply, *received);
     return status;
 }
@@ -317,6 +534,7 @@ VP_STATUS rb_gpu_reserve_staging(RB2K_GPU *gpu, ULONG bytes)
     ULONG i;
     if (!gpu->ready) return ERROR_NOT_READY;
     if (!bytes || bytes > RB2K_DD_MAX_BYTES) return ERROR_INVALID_PARAMETER;
+    gpu->presentCache = 0;
     for (i = 0; i * RB2K_SEGMENT_BYTES < bytes; ++i) {
         RB2K_DMA_SEGMENT *s = &gpu->staging[i];
         if (!s->data) {
@@ -337,6 +555,7 @@ VP_STATUS rb_gpu_stop(RB2K_GPU *gpu)
 {
     ULONG pciCommand, i;
     VP_STATUS cleanup;
+    gpu->presentCache = 0;
     rb_gl_finish(gpu);
     cleanup = stop(gpu);
     if (!cleanup) VideoPortZeroMemory(&gpu->glDesktop, sizeof(gpu->glDesktop));
@@ -344,6 +563,15 @@ VP_STATUS rb_gpu_stop(RB2K_GPU *gpu)
      * The pinned buffers survive an unacknowledged reset until a retry. */
     VideoPortZeroMemory(gpu->images, sizeof(gpu->images));
     gpu->imageCount = 0;
+    rb_gpu_texture_forget(gpu);
+    VideoPortZeroMemory(&gpu->d7Frame, sizeof(gpu->d7Frame));
+    VideoPortZeroMemory(gpu->d7Submitted, sizeof(gpu->d7Submitted));
+    gpu->d7Flight.pending = 0;
+    if (!cleanup && gpu->d7Packets.data) {
+        RB2K_DMA_SEGMENT *dma = &gpu->d7Packets;
+        VideoPortFreeCommonBuffer(gpu->extension, dma->allocated, dma->data, dma->bus, TRUE);
+        dma->data = NULL;
+    }
     if (!cleanup && gpu->enabledMaster) cleanup = bus_master(gpu, FALSE, &pciCommand);
     if (!cleanup) {
         for (i = 0; i < RB2K_MAX_SEGMENTS; ++i) {

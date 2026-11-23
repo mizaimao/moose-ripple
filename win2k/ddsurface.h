@@ -1,5 +1,5 @@
-/* Private display DLL to miniport interface for offscreen 32-bit surfaces.
- * Rows are tightly packed. A successful READ returns width*height*4 bytes.
+/* Private display DLL to miniport interface for offscreen surfaces.
+ * Rows are tightly packed. XRGB uses four bytes per pixel and Z16 uses two.
  * WRITE takes the surface ID followed immediately by that many bytes. */
 #ifndef RB2K_DDSURFACE_H
 #define RB2K_DDSURFACE_H
@@ -7,6 +7,10 @@
 #define RB2K_DD_MAX_HEIGHT 768UL
 #define RB2K_DD_MAX_BYTES (RB2K_DD_MAX_WIDTH * RB2K_DD_MAX_HEIGHT * 4)
 #define RB2K_DD_SLOTS 4
+#define RB2K_DD_HOST_SURFACES 1
+#define RB2K_DD_NATIVE_D3D7 2
+#define RB2K_DD_Z16_STORAGE 4
+#define RB2K_DD_Z16_RENDER 8
 #define RB2K_DD_IOCTL(n) CTL_CODE(FILE_DEVICE_VIDEO,n,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_RB2K_DD_QUERY   RB2K_DD_IOCTL(0x901)
 #define IOCTL_RB2K_DD_CREATE  RB2K_DD_IOCTL(0x902)
@@ -21,11 +25,97 @@
 #define IOCTL_RB2K_DD_FLIP      RB2K_DD_IOCTL(0x90b)
 #define IOCTL_RB2K_DD_FLIP_RELEASE RB2K_DD_IOCTL(0x90c)
 #define IOCTL_RB2K_DD_FLIP_ACQUIRE RB2K_DD_IOCTL(0x90d)
+#define IOCTL_RB2K_D3D7_CLEAR RB2K_DD_IOCTL(0x913)
+#define IOCTL_RB2K_D3D7_PROFILE RB2K_DD_IOCTL(0x914)
+#define IOCTL_RB2K_D3D7_FLUSH RB2K_DD_IOCTL(0x915)
+#define IOCTL_RB2K_D3D7_COMPLETED RB2K_DD_IOCTL(0x916)
+#define IOCTL_RB2K_D3D7_FLIGHT RB2K_DD_IOCTL(0x917)
+#define IOCTL_RB2K_DD_CREATE_Z16 RB2K_DD_IOCTL(0x918)
+#define IOCTL_RB2K_D3D7_ZCLEAR RB2K_DD_IOCTL(0x919)
+#define IOCTL_RB2K_D3D7_DRAW RB2K_DD_IOCTL(0x91b)
+#define IOCTL_RB2K_D3D7_TEXTURE RB2K_DD_IOCTL(0x91c)
+#define IOCTL_RB2K_D3D7_TEXTURE_FREE RB2K_DD_IOCTL(0x91d)
+/* Several draws to one target: the target id, then records of a ULONG byte
+ * count and an RB2K_D3D7_DRAW holding that many bytes (header and vertices). */
+#define IOCTL_RB2K_D3D7_DRAWS RB2K_DD_IOCTL(0x91e)
+#define RB2K_D7_DRAWS_BYTES (64UL * 1024)
+typedef struct { ULONG clears, triangles; } RB2K_D3D7_COMPLETED;
+#define RB2K_D3D7_VERTICES 96
+/* IEEE transformed position, packed Direct3D diffuse and specular colours,
+ * the stage-zero texture coordinate and, for lit draws, the IEEE normal. The
+ * last pair is stage one's texture coordinate. */
+typedef struct { ULONG x, y, z, rhw, diffuse, specular, u, v, nx, ny, nz, u1, v1; } RB2K_D3D7_VERTEX;
+#define RB2K_D7_LIGHTS 8
+/* Lighting flags: normalize normals, local viewer, then the Direct3D material
+ * source (D3DMCS_*, already resolved against the vertex format) of the
+ * diffuse, specular, ambient and emissive colours, two bits each. */
+#define RB2K_D7_NORMALIZE 1
+#define RB2K_D7_LOCAL_VIEWER 2
+#define RB2K_D7_SOURCE_SHIFT 4
+/* Fog: the factor comes from the specular alpha, from the camera-space
+ * depth of each vertex (T&L only), or from each pixel's depth (table fog,
+ * the depth z or, when the projection is perspective, w); then the
+ * D3DFOGMODE of the computed kinds, range fog and w-based table fog. */
+#define RB2K_D7_FOG_ALPHA 1
+#define RB2K_D7_FOG_VERTEX 2
+#define RB2K_D7_FOG_TABLE 3
+#define RB2K_D7_FOG_MODE_SHIFT 4
+#define RB2K_D7_FOG_RANGE 0x100
+#define RB2K_D7_FOG_W 0x200
+/* The low three depth-state bits are D3DCMPFUNC minus one. Disabled depth
+ * uses zero. The other words keep Direct3D's own values; the miniport
+ * validates each one before it creates a host object for it. */
+#define RB2K_Z_ENABLE 16
+#define RB2K_Z_WRITE 8
+#define RB2K_D7_ON 0x80000000UL
+typedef struct {
+    ULONG target, depth, count;
+    ULONG depthState;
+    ULONG alphaTest;    /* RB2K_D7_ON | D3DCMPFUNC << 8 | reference */
+    ULONG blend;        /* RB2K_D7_ON | source D3DBLEND << 8 | destination D3DBLEND */
+    ULONG cull;         /* D3DCULL */
+    ULONG colorStage;   /* D3DTEXTUREOP | first argument << 8 | second argument << 16 */
+    ULONG alphaStage;
+    ULONG specular;     /* nonzero adds the interpolated specular colour */
+    ULONG factor;       /* D3DRENDERSTATE_TEXTUREFACTOR */
+    ULONG texture;      /* host texture, zero for none */
+    ULONG sampler;      /* address U | V << 4 | MAG << 8 | MIN << 12, Direct3D values */
+    ULONG border;
+    /* Nonzero: positions are in object space, with w 1, and the host
+     * applies the world, view and projection matrices (Direct3D row-major,
+     * IEEE words) and the viewport (pixels; minimum and maximum z as IEEE). */
+    ULONG transform;
+    ULONG matrices[3][16];
+    ULONG viewport[6];
+    /* Nonzero with transform: light the vertices with the D3DMATERIAL7, the
+     * D3DRENDERSTATE_AMBIENT colour and the first lightCount D3DLIGHT7s. */
+    ULONG lighting, lightCount, lightFlags, ambient;
+    ULONG material[17];
+    ULONG lights[RB2K_D7_LIGHTS][26];
+    /* Fog kind and flags as above, D3DRENDERSTATE_FOGCOLOR, and the IEEE
+     * start, end and density render states. */
+    ULONG fog, fogColor, fogStart, fogEnd, fogDensity;
+    /* Texture stage one: colour and alpha words as for stage zero, where an
+     * argument may also be the current colour; zero when the stage is off. */
+    ULONG stage1Color, stage1Alpha, texture1, sampler1, border1;
+    RB2K_D3D7_VERTEX vertices[RB2K_D3D7_VERTICES];
+} RB2K_D3D7_DRAW;
+/* Texels are tightly packed B8G8R8A8 rows of one mipmap level; width and
+ * height are the top level's and y and rows count within the level. A zero
+ * id creates a texture of the given size and levels from row zero of level
+ * zero; the reply is the texture id. */
+#define RB2K_D7_TEXTURES 1024
+#define RB2K_D7_TEXTURE_SIDE 1024
+#define RB2K_D7_UPLOAD_BYTES (256UL * 1024)
+#define RB2K_D7_LEVELS 11
+typedef struct { ULONG id, target, width, height, y, rows, levels, level; } RB2K_D3D7_TEXTURE;
+typedef struct { ULONG target, depth, flags, color, depthBits; } RB2K_D3D7_ZCLEAR;
+enum { RB2K_CLEAR_COLOR = 1, RB2K_CLEAR_DEPTH = 2 };
 typedef struct {
     ULONG maxBytes, slots;
     ULONG hostFills, readbacks, uploads, hostCopies;
     ULONG presents, presentReadbacks, presentBytes;
-    ULONG gpuSurfaces;      /* offscreen surfaces as host textures (registry, off by default) */
+    ULONG gpuSurfaces;      /* host-surface and native D3D7 capability bits */
 } RB2K_DD_CAPS;
 typedef struct { ULONG width, height; } RB2K_DD_CREATE;
 typedef struct { ULONG id, color; } RB2K_DD_FILL;

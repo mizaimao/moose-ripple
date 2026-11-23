@@ -115,6 +115,16 @@ def build_programs(work):
         ("memtest.exe", ["tools/memtest"], ["-mwindows", "-lgdi32", "-luser32"]),
         ("regmode.exe", ["tools/regmode"], ["-mwindows", "-luser32"]),
         ("rvdstat.exe", ["tools/rvdstat"], ["-lgdi32", "-luser32"]),
+        ("d3d7probe.exe", ["tools/d3d7probe"], ["-lddraw", "-ldxguid", "-lgdi32", "-luser32"]),
+        ("ipixels.exe", ["tools/d3d7probe"], ["-DRB_D3D7_INDEXED_PROBE", "-lddraw", "-ldxguid", "-lgdi32", "-luser32"]),
+        ("z16pixels.exe", ["tools/z16pixels"], ["-lddraw", "-ldxguid", "-lgdi32", "-luser32"]),
+        ("tpixels.exe", ["tools/tpixels"], ["-lddraw", "-ldxguid", "-lgdi32", "-luser32"]),
+        ("tlight.exe", ["tools/tlight"], ["-lddraw", "-ldxguid", "-luser32"]),
+        ("tfog.exe", ["tools/tfog"], ["-lddraw", "-ldxguid", "-luser32"]),
+        ("tstage.exe", ["tools/tstage"], ["-lddraw", "-ldxguid", "-luser32"]),
+        ("tmip.exe", ["tools/tmip"], ["-lddraw", "-ldxguid", "-luser32"]),
+        ("d7draw.exe", ["tools/d7draw"], ["-lgdi32"]),
+        ("zstore.exe", ["tools/zstore"], ["-lddraw", "-ldxguid", "-lgdi32", "-luser32"]),
         ("glpresent.exe", ["tools/glpresent"], ["-lopengl32", "-lgdi32", "-luser32"]),
         ("cursorqa.exe", ["tools/cursorqa"], ["-lgdi32", "-luser32"]),
     ]
@@ -134,10 +144,10 @@ def main():
         work = Path(directory)
         overlay = header_overlay(work)
         build_kernel(work, overlay, "rb2kmp.sys",
-                     "rb2kmp gpu_transport gpu_pixel gpu_present gpu_surface gpu_rvd gpu_memory gpu_view gpu_cursor",
+                     "rb2kmp gpu_transport gpu_pixel gpu_triangle gpu_present gpu_surface gpu_rvd gpu_memory gpu_view gpu_cursor",
                      [ddk_headers, video_headers, public_headers, vc_headers], ["-Di386=1"],
                      ["videoprt.lib", "ntoskrnl.lib", "hal.lib"], ["/driver", "/entry:DriverEntry@8"])
-        build_kernel(work, overlay, "rb2kdisp.dll", "display display_ddraw display_palette display_rvd display_gdi display_cursor",
+        build_kernel(work, overlay, "rb2kdisp.dll", "display display_ddraw display_palette display_rvd display_gdi display_cursor display_d3d7",
                      [public_headers, video_headers, vc_headers], ["-DUNICODE", "-D_UNICODE", "-DWINVER=0x0500"],
                      ["win32k.lib", "libcntpr.lib"], ["/dll", "/entry:DrvEnableDriver@12",
                                                       "/export:DrvEnableDriver=_DrvEnableDriver@12"])
