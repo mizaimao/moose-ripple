@@ -54,6 +54,11 @@ int main(void)
     printf("D7XFORM types");
     for (i = 0; i < 32; ++i) if (s.transformTypes[i]) printf(" %lu=%lu", i, s.transformTypes[i]);
     putchar('\n');
+    if (s.frequency > 0)
+        printf("D7TIME requests=%lu dp2_us=%I64d check_us=%I64d upload_us=%I64d copy_us=%I64d draw_us=%I64d\n", s.drawRequests,
+               s.dp2Ticks * 1000000 / s.frequency, s.checkTicks * 1000000 / s.frequency,
+               s.uploadTicks * 1000000 / s.frequency, s.copyTicks * 1000000 / s.frequency,
+               s.drawTicks * 1000000 / s.frequency);
     printf("D7REG mipmaps=%lu managed=%lu chains=%lu stops=%lu,%lu,%lu,%lu,%lu\n", s.regMipmaps, s.regManaged,
            s.mipChains, s.mipStops[0], s.mipStops[1], s.mipStops[2], s.mipStops[3], s.mipStops[4]);
     printf("D7SURF refused=%lu caps=%08lx flags=%08lx size=%lux%lu format=%08lx count=%lu\n", s.surfaceRefused, s.refusedCaps,
@@ -69,7 +74,7 @@ int main(void)
     }
     {
         /* Miniport time per operation and the scene flight, totals since boot. */
-        static const char *const names[RB2K_D7_OPS] = { "clear", "draw", "read", "upload", "flush" };
+        static const char *const names[RB2K_D7_OPS] = { "clear", "draw", "read", "upload", "flush", "present" };
         RB2K_D7_PROFILE p;
         RB2K_D7_FLIGHT f;
         if (ExtEscape(dc, RB2K_D3D7_PROFILE_ESCAPE, 0, NULL, sizeof(p), (LPSTR)&p) > 0 && p.frequency > 0)

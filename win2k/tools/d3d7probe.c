@@ -169,7 +169,7 @@ static BOOL get_profile(HDC dc, RB2K_D7_PROFILE *p)
 
 static void print_profile(const RB2K_D7_PROFILE *before, const RB2K_D7_PROFILE *after)
 {
-    static const char *const names[] = {"clear", "draw", "read", "upload", "flush"};
+    static const char *const names[] = {"clear", "draw", "read", "upload", "flush", "present"};
     unsigned i;
     for (i = 0; i < RB2K_D7_OPS; ++i) {
         const RB2K_D7_TIME *a = &before->op[i], *b = &after->op[i];
