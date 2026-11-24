@@ -71,6 +71,19 @@ int main(void)
            s.mipChains, s.mipStops[0], s.mipStops[1], s.mipStops[2], s.mipStops[3], s.mipStops[4]);
     printf("D7SURF refused=%lu caps=%08lx flags=%08lx size=%lux%lu format=%08lx count=%lu\n", s.surfaceRefused, s.refusedCaps,
            s.refusedFlags, s.refusedWidth, s.refusedHeight, s.refusedFormat, s.refusedCount);
+    printf("D8INFO version=%lx buffers=%lu stream_draws=%lu requests", s.d8Version, s.d8Buffers, s.d8StreamDraws);
+    for (i = 0; i < 32; ++i) if (s.d8Requests[i]) printf(" %lu=%lu", i, s.d8Requests[i]);
+    printf(" contexts");
+    for (i = 0; i < 8; ++i) if (s.d8ContextKinds[i]) printf(" %lu=%lu", i, s.d8ContextKinds[i]);
+    printf("\n");
+    if (s.d8LogCount) {
+        printf("D8GDI2");
+        for (i = 0; i < s.d8LogCount && i < 24; ++i) printf(" %lx/%lu", s.d8Log[i][0], s.d8Log[i][1]);
+        printf("\n");
+    }
+    for (i = 0; i < s.d8TraceCount && i < 64; ++i)
+        printf("D8TRACE %lu op=%lu n=%lu flags=%lx w=%lx,%lx,%lx,%lx\n", i, s.d8Trace[i][0], s.d8Trace[i][1],
+               s.d8Trace[i][2], s.d8Trace[i][3], s.d8Trace[i][4], s.d8Trace[i][5], s.d8Trace[i][6]);
     if (s.historyStop) {
         ULONG n = s.historyNext < 32 ? s.historyNext : 32, k;
         for (k = 0; k < n; ++k) {

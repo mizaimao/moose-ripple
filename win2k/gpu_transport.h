@@ -104,7 +104,7 @@ typedef struct {
     LONG busy, barrier;
     BOOLEAN owned, ready, enabledMaster, tested;
     ULONG nextId, fence, imageCount, hostFills, readbacks, uploads, hostCopies;
-    BOOLEAN ddGpuSurfaces, nativeD3D7, plainSurfaces;
+    BOOLEAN ddGpuSurfaces, nativeD3D7, plainSurfaces, d3d8;
     struct {
         RB2K_IMAGE *target;
         ULONG count;

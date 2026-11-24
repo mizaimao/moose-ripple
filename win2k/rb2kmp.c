@@ -66,7 +66,8 @@ typedef struct {
  * host images. Plain 2D offscreen surfaces as host textures are slower than
  * Windows' own in this design (the desktop is guest memory) and cannot be
  * blitted into the back buffer, so they are offered only when the key has
- * RippleDirectDrawGpuSurfaces = 1 (for tests). */
+ * RippleDirectDrawGpuSurfaces = 1 (for tests). With native Direct3D 7, the
+ * Direct3D 8 driver interface is offered too unless RippleD3D8 = 0. */
 static VP_STATUS registry_flag(PVOID ext, PVOID context, PWSTR name, PVOID data, ULONG bytes)
 {
     (void)ext; (void)name;
@@ -133,11 +134,13 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
     }
     rb_gpu_find(&a->gpu, a, slot, registers, config);
     a->gpu.nativeD3D7 = TRUE;
+    a->gpu.d3d8 = TRUE;
     VideoPortGetRegistryParameters(a, L"RippleDirectDrawGpuSurfaces", FALSE, registry_flag, &a->gpu.plainSurfaces);
     VideoPortGetRegistryParameters(a, L"RippleGpuDesktop", FALSE, registry_flag, &a->gpu.glEnabled);
     VideoPortGetRegistryParameters(a, L"RippleHardwareCursor", FALSE, registry_flag, &a->gpu.cursorEnabled);
     VideoPortGetRegistryParameters(a, L"RippleNativeD3D7", FALSE, registry_flag, &a->gpu.nativeD3D7);
     VideoPortGetRegistryParameters(a, L"RippleD3D7WaitCurrent", FALSE, registry_flag, &a->gpu.d7WaitCurrent);
+    VideoPortGetRegistryParameters(a, L"RippleD3D8", FALSE, registry_flag, &a->gpu.d3d8);
     a->gpu.ddGpuSurfaces = a->gpu.plainSurfaces || a->gpu.nativeD3D7;
     /* Map the scanout pages during adapter discovery, cached like every other
      * view of the framebuffer (rb_map_cached). BAR0 is a PCI framebuffer; its

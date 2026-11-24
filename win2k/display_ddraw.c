@@ -2,6 +2,7 @@
  * per-surface staging buffer is synchronized at a CPU lock boundary.
  * Windowed presentation updates the visible part of the GDI framebuffer. */
 #include "display_private.h"
+#include "d3d8ddi.h"
 
 static BOOL request(DISPLAY *d, ULONG code, PVOID in, ULONG inSize,
                     PVOID out, ULONG size)
@@ -422,7 +423,10 @@ static DWORD APIENTRY blt(PDD_BLTDATA data)
 {
     DISPLAY *d = (DISPLAY *)data->lpDD->dhpdev;
     DD_SLOT *dst, *src = NULL;
-    DWORD operation = data->dwFlags & ~(DDBLT_WAIT | DDBLT_DONOTWAIT);
+    /* A present is complete when this returns, so the present flags of a
+     * Direct3D 8 runtime need no queue accounting. */
+    DWORD operation = data->dwFlags & ~(DDBLT_WAIT | DDBLT_DONOTWAIT | RB_DDBLT_PRESENTATION |
+                                        RB_DDBLT_LAST_PRESENTATION);
     /* NT may omit the low GDI operation word below the ROP3. */
     BOOL sourceCopy = operation == 0 || (operation == DDBLT_ROP &&
                       (data->bltFX.dwROP >> 16) == (SRCCOPY >> 16));
@@ -768,6 +772,9 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
      * native Direct3D is on; below 32 bits it cannot be used: it renders
      * only to 32-bit targets, and textures and host surfaces are refused. */
     d->d3dDescribed = (caps.gpuSurfaces & RB2K_DD_NATIVE_D3D7) != 0;
+    /* Likewise the Direct3D 8 interface; its format list offers 3D only in
+     * the 32-bit display format. */
+    d->d3d8 = d->d3dDescribed && (caps.gpuSurfaces & RB2K_DD_D3D8) != 0;
     if (d->mode.BitsPerPlane != 32) caps.gpuSurfaces = 0;
     RtlZeroMemory(info, sizeof(*info));
     info->dwSize = sizeof(*info);
@@ -810,6 +817,7 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
         v->dwTextureAlign = 4;
         rb_d7_caps(info, d->z16Render);
         info->dwFlags |= DDHALINFO_GETDRIVERINFOSET;
+        if (d->d3d8) info->dwFlags |= RB_DDHALINFO_GETDRIVERINFO2;
         info->GetDriverInfo = driver_info;
     }
     pageBytes = page_size(d);

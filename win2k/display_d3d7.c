@@ -13,6 +13,7 @@
 #include "display_private.h"
 #include <d3dnthal.h>
 #include "rb2kd3d7.h"
+#include "d3d8ddi.h"
 
 /* These Direct3D 7 HRESULTs are declared only in the user-side d3d.h. */
 #ifndef D3DERR_UNSUPPORTEDCOLOROPERATION
@@ -22,7 +23,8 @@
 #define D3DERR_TOOMANYOPERATIONS MAKE_DDHRESULT(2077)
 #endif
 
-enum { MaxContexts = 16, MaxCommandBytes = 1 << 20, TextureStages = 8, MaxTextures = 1024, MaxLights = 32 };
+enum { MaxContexts = 16, MaxCommandBytes = 1 << 20, TextureStages = 8, MaxTextures = 1024, MaxLights = 32,
+       MaxBuffers = 1024 };
 /* DP2 SETLIGHT operations (D3DHAL_SETLIGHT_*). */
 enum { SetLightEnable, SetLightDisable, SetLightData };
 typedef char light_record[sizeof(D3DLIGHT7) == 26 * sizeof(ULONG) ? 1 : -1];
@@ -52,6 +54,12 @@ typedef struct {
     ULONG material[17];
     ULONG lightOn;
     ULONG lights[MaxLights][26];
+    /* Direct3D 8: the vertex format given as the vertex shader (a shader
+     * handle has its low bit set), the pixel shader, stream zero (a
+     * registered buffer, or the user memory of DrawPrimitiveUP) and the
+     * index buffer. Only stream zero is offered. */
+    BOOL dx8, streamUser;
+    ULONG fvf, pixelShader, streamHandle, streamStride, indexHandle, indexStride;
     BOOL inScene, queued;
     ULONG minStart, maxEnd;     /* diagnostics for one command buffer */
     RB2K_D3D7_DRAW draw;        /* the batch being filled */
@@ -76,7 +84,21 @@ typedef struct {
     ULONG targets[RB2K_DD_SLOTS];
 } D7_TEXTURE;
 
+/* A Direct3D 8 vertex or index buffer registered through CreateSurfaceEx.
+ * The runtime keeps both in the owning process's memory; the address and
+ * size are read from the surface at each draw. */
+typedef struct {
+    PDD_DIRECTDRAW_LOCAL local;
+    PDD_SURFACE_GLOBAL global;
+    DISPLAY *display;
+    HANDLE owner;
+    ULONG handle;
+} D8_BUFFER;
+
 static HSEMAPHORE registry;
+static D8_BUFFER *buffers;
+static WORD *indexScratch;      /* indices copied out of the process before use */
+static ULONG indexScratchCount;
 static D7_CONTEXT contexts[MaxContexts];
 static ULONG lastContext;
 static D7_TEXTURE *textures;
@@ -90,6 +112,7 @@ void rb_d7_init(void)
 {
     if (!registry) registry = EngCreateSemaphore();
     if (!textures) textures = EngAllocMem(FL_ZERO_MEMORY, MaxTextures * sizeof(*textures), 't7bR');
+    if (!buffers) buffers = EngAllocMem(FL_ZERO_MEMORY, MaxBuffers * sizeof(*buffers), 'b8bR');
     if (!uploadScratch)
         uploadScratch = EngAllocMem(0, sizeof(RB2K_D3D7_TEXTURE) + RB2K_D7_UPLOAD_BYTES, 'p7bR');
 }
@@ -169,6 +192,8 @@ void rb_d7_disable(DISPLAY *d)
     /* Every DirectDraw object of this display is going away. */
     for (i = 0; textures && i < MaxTextures; ++i)
         if (textures[i].display == d) release_texture(&textures[i], TRUE);
+    for (i = 0; buffers && i < MaxBuffers; ++i)
+        if (buffers[i].display == d) RtlZeroMemory(&buffers[i], sizeof(buffers[i]));
     EngReleaseSemaphore(registry);
 }
 
@@ -186,6 +211,17 @@ static D7_TEXTURE *find_texture(PDD_DIRECTDRAW_LOCAL local, ULONG handle)
 ULONG rb_d7_texture_format(const DDPIXELFORMAT *f, ULONG desktopBits)
 {
     ULONG alpha = (f->dwFlags & DDPF_ALPHAPIXELS) ? f->dwRGBAlphaBitMask : 0;
+    if (f->dwFlags & (RB_DDPF_D3DFORMAT | DDPF_FOURCC)) {
+        switch (f->dwFourCC) {
+        case RbFmtA8R8G8B8: return TexArgb8888;
+        case RbFmtX8R8G8B8: return TexXrgb8888;
+        case RbFmtR5G6B5: return TexRgb565;
+        case RbFmtX1R5G5B5: return TexXrgb1555;
+        case RbFmtA1R5G5B5: return TexArgb1555;
+        case RbFmtA4R4G4B4: return TexArgb4444;
+        }
+        return TexNone;
+    }
     if (!(f->dwFlags & DDPF_RGB) || !f->dwRGBBitCount) return desktopBits == 32 ? TexXrgb8888 : TexNone;
     if (f->dwFlags & ~(DDPF_RGB | DDPF_ALPHAPIXELS)) return TexNone;
     if (f->dwRGBBitCount == 32 && f->dwRBitMask == 0xff0000 && f->dwGBitMask == 0xff00 &&
@@ -303,6 +339,34 @@ void rb_d7_surface_destroyed(DISPLAY *d, PDD_SURFACE_GLOBAL g)
     EngReleaseSemaphore(registry);
 }
 
+static D8_BUFFER *find_buffer(PDD_DIRECTDRAW_LOCAL local, ULONG handle)
+{
+    ULONG i;
+    for (i = 0; buffers && handle && i < MaxBuffers; ++i)
+        if (buffers[i].handle == handle && buffers[i].local == local) return &buffers[i];
+    return NULL;
+}
+
+/* The runtime registers a buffer again with a zero address when it goes. */
+static void register_buffer(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE_LOCAL l)
+{
+    ULONG handle = l->lpSurfMore ? l->lpSurfMore->dwSurfaceHandle : 0, i;
+    D8_BUFFER *b;
+    if (!buffers || !handle) return;
+    b = find_buffer(local, handle);
+    if (b) RtlZeroMemory(b, sizeof(*b));
+    if (!l->lpGbl->fpVidMem) return;
+    for (i = 0; i < MaxBuffers && buffers[i].handle; ++i) {}
+    if (i == MaxBuffers) return;
+    b = &buffers[i];
+    b->local = local;
+    b->global = l->lpGbl;
+    b->display = d;
+    b->owner = EngGetCurrentProcessId();
+    b->handle = handle;
+    ++d->d7draw.d8Buffers;
+}
+
 static DWORD APIENTRY register_surface(PDD_CREATESURFACEEXDATA a)
 {
     PDD_SURFACE_LOCAL l = a->lpDDSLcl;
@@ -310,6 +374,14 @@ static DWORD APIENTRY register_surface(PDD_CREATESURFACEEXDATA a)
     DD_SLOT *slot;
     a->ddRVal = DD_OK;
     if (!l || !l->lpGbl) return DDHAL_DRIVER_HANDLED;
+    if (l->ddsCaps.dwCaps & DDSCAPS_EXECUTEBUFFER) {
+        EngAcquireSemaphore(registry);
+        EngAcquireSemaphore(d->ddLock);
+        if (d->nativeD3D7) register_buffer(d, a->lpDDLcl, l);
+        EngReleaseSemaphore(d->ddLock);
+        EngReleaseSemaphore(registry);
+        return DDHAL_DRIVER_HANDLED;
+    }
     if ((l->ddsCaps.dwCaps & (DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE)) == DDSCAPS_TEXTURE) {
         EngAcquireSemaphore(registry);
         EngAcquireSemaphore(d->ddLock);
@@ -373,6 +445,8 @@ static DWORD APIENTRY destroy_local(PDD_DESTROYDDLOCALDATA a)
     }
     for (i = 0; textures && i < MaxTextures; ++i)
         if (textures[i].local == a->pDDLcl) release_texture(&textures[i], TRUE);
+    for (i = 0; buffers && i < MaxBuffers; ++i)
+        if (buffers[i].local == a->pDDLcl) RtlZeroMemory(&buffers[i], sizeof(buffers[i]));
     EngReleaseSemaphore(d->ddLock);
     EngReleaseSemaphore(registry);
     return DDHAL_DRIVER_HANDLED;
@@ -417,7 +491,7 @@ static void default_stages(D7_CONTEXT *c)
 static DWORD APIENTRY create_context(LPD3DNTHAL_CONTEXTCREATEDATA a)
 {
     PDD_DIRECTDRAW_LOCAL local = a->lpDDLcl;
-    ULONG i;
+    ULONG i, kind = (ULONG)a->dwhContext;
     DISPLAY *d;
     DD_SLOT *s, *z = NULL;
     a->dwhContext = 0;
@@ -432,6 +506,7 @@ static DWORD APIENTRY create_context(LPD3DNTHAL_CONTEXTCREATEDATA a)
     s = rb_dd_slot(d, a->lpDDSLcl->lpGbl);
     if (a->lpDDSZLcl) z = rb_dd_slot(d, a->lpDDSZLcl->lpGbl);
     ++d->d7.contextCalls;
+    ++d->d7draw.d8ContextKinds[kind < 7 ? kind : 7];
     if (!d->ddEnabled || !s || s->depth16 || s->lost || s->owner != EngGetCurrentProcessId() ||
         (s->local && s->local != local) || (a->lpDDSZLcl && (!d->z16Render || !z || !z->depth16 ||
         z->lost || z->owner != s->owner || (z->local && z->local != local) ||
@@ -469,6 +544,8 @@ static DWORD APIENTRY create_context(LPD3DNTHAL_CONTEXTCREATEDATA a)
             c->viewport[3] = s->height;
             c->zRange[1] = 0x3f800000;
             default_stages(c);
+            /* The Direct3D 8 and 9 runtimes pass 4 here; Direct3D 7 passes 3. */
+            c->dx8 = kind >= 4;
             c->id = ++lastContext;
             a->dwhContext = c->id;
             a->ddrval = DD_OK;
@@ -809,6 +886,12 @@ typedef struct {
     ULONG first, primitives, kind;
     const WORD *indices;   /* relative to first, or NULL */
     ULONG indexStride;     /* WORDs per triangle record for INDEXEDTRIANGLELIST */
+    /* A DirectX 8 draw from stream zero: its data and size in the process,
+     * the signed byte offset of vertex zero, the stride and vertex format. */
+    BOOL stream;
+    const BYTE *streamData;
+    ULONG streamBytes, streamStride, fvf;
+    LONG streamFirst;
 } PRIMS;
 
 static ULONG prim_vertex(const PRIMS *p, ULONG t, ULONG corner, ULONG *flat)
@@ -974,7 +1057,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     RB2K_D3D7_DRAW *draw = &c->draw;   /* too large for the kernel stack */
     D7_STAGE *st = &c->stages[0], *st1 = &c->stages[1];
     D7_TEXTURE *tex = NULL, *tex1 = NULL;
-    ULONG fvf = a->dwVertexType, offset = 16, diffuse = 0, specular = 0, coord = 0, coordFloats = 0, normal = 0;
+    ULONG fvf = p->stream ? p->fvf : a->dwVertexType, offset = 16, diffuse = 0, specular = 0, coord = 0, coordFloats = 0, normal = 0;
     ULONG coord1 = 0, coord1Floats = 0;
     ULONG sets, i, t, low = 0xffffffff, high = 0, address = 0, count = 0, flatSource = 0;
     ULONG limit = 0xffffffff;              /* highest index inside the runtime's window */
@@ -1101,12 +1184,21 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         }
     }
     record_state(c, draw, fvf, tex ? tex->format : 0, p->primitives);
-    if (!p->inline_) {
+    if (!p->inline_ && !p->stream) {
         if (p->first < c->minStart) c->minStart = p->first;
         if (p->first + high > c->maxEnd) c->maxEnd = p->first + high;
     }
     if (p->inline_) base = p->inline_;
-    else {
+    else if (p->stream) {
+        LONGLONG lo = p->streamFirst + (LONGLONG)low * stride, hi = p->streamFirst + (LONGLONG)high * stride + offset;
+        if (lo < 0 || hi > p->streamBytes) {
+            ++d->d7draw.beyondCalls;
+            d->d7draw.beyondVertices += p->primitives;
+            skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+            return DD_OK;
+        }
+        base = p->streamData + p->streamFirst;
+    } else {
         PDD_SURFACE_GLOBAL g;
         ULONG window = a->dwVertexLength;      /* vertices valid from the offset */
         if (a->dwFlags & D3DNTHALDP2_USERMEMVERTICES) address = (ULONG)a->lpVertices;
@@ -1183,6 +1275,117 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         if (SUCCEEDED(hr) && count) hr = send_batch(c, draw, count);
     } __except (EXCEPTION_EXECUTE_HANDLER) { hr = refused(d, RB2K_D7_FAIL_PROBE, a, p, low, high, stride); }
     return hr;
+}
+
+/* ---- Direct3D 8 streams ---- */
+
+static void trace8(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG op, ULONG n, const BYTE *p, ULONG avail)
+{
+    RB2K_D7_DRAWSTATS *s = &c->display->d7draw;
+    ULONG *t, k;
+    if (s->d8TraceCount >= 64) return;
+    t = s->d8Trace[s->d8TraceCount++];
+    t[0] = op; t[1] = n; t[2] = a->dwFlags;
+    for (k = 0; k < 4; ++k) t[3 + k] = 4 * (k + 1) <= avail ? ((const ULONG *)p)[k] : 0;
+    if (op == RbDp2SetStreamSourceUm) {
+        t[5] = (ULONG)a->lpVertices;
+        t[6] = a->dwVertexLength;
+    }
+}
+
+static BOOL index_scratch(ULONG count)
+{
+    if (count <= indexScratchCount) return TRUE;
+    if (indexScratch) EngFreeMem(indexScratch);
+    indexScratchCount = 0;
+    indexScratch = EngAllocMem(0, count * sizeof(WORD), 'i8bR');
+    if (!indexScratch) return FALSE;
+    indexScratchCount = count;
+    return TRUE;
+}
+
+/* Stream zero: a registered buffer, or for DrawPrimitiveUP the user memory
+ * the runtime passes as the command buffer's vertices. */
+static BOOL stream_zero(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, PRIMS *p)
+{
+    if (c->streamUser) {
+        if (a->dwFlags & D3DNTHALDP2_USERMEMVERTICES) {
+            if (!a->lpVertices) return FALSE;
+            p->streamData = (const BYTE *)a->lpVertices + a->dwVertexOffset;
+            p->streamBytes = a->dwVertexLength * c->streamStride;
+        } else {
+            PDD_SURFACE_GLOBAL g = a->lpDDVertex ? a->lpDDVertex->lpGbl : NULL;
+            if (!g || !g->fpVidMem || a->dwVertexOffset > g->dwLinearSize) return FALSE;
+            p->streamData = (const BYTE *)g->fpVidMem + a->dwVertexOffset;
+            p->streamBytes = g->dwLinearSize - a->dwVertexOffset;
+        }
+    } else {
+        D8_BUFFER *b = find_buffer(c->local, c->streamHandle);
+        if (!b || b->owner != c->owner || !b->global->fpVidMem) return FALSE;
+        p->streamData = (const BYTE *)b->global->fpVidMem;
+        p->streamBytes = b->global->dwLinearSize;
+    }
+    return TRUE;
+}
+
+/* One DirectX 8 draw. first is the signed byte offset of vertex zero in
+ * stream zero; an indexed draw reads 16-bit indices from indexByte on. */
+static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG type, LONGLONG first,
+                           ULONG count, BOOL indexed, ULONG indexByte)
+{
+    PRIMS prims;
+    RtlZeroMemory(&prims, sizeof(prims));
+    prims.primitives = count;
+    ++c->display->d7draw.d8StreamDraws;
+    if (!count) return DD_OK;
+    if (type < RbTriangleList || type > RbTriangleFan) { skip(c, RB2K_D7_SKIP_PRIMITIVE, count); return DD_OK; }
+    if (c->pixelShader) { skip(c, RB2K_D7_SKIP_COMBINER, count); return DD_OK; }
+    prims.kind = type == RbTriangleList ? List : type == RbTriangleStrip ? Strip : Fan;
+    if ((c->fvf & 1) || !c->streamStride || c->streamStride > 256 || !stream_zero(c, a, &prims) ||
+        first < -0x7fffffffLL || first > (LONGLONG)prims.streamBytes) {
+        skip(c, RB2K_D7_SKIP_VERTEX, count);
+        return DD_OK;
+    }
+    prims.stream = TRUE;
+    prims.streamFirst = (LONG)first;
+    prims.streamStride = c->streamStride;
+    prims.fvf = c->fvf;
+    if (indexed) {
+        D8_BUFFER *b = find_buffer(c->local, c->indexHandle);
+        ULONG indices = type == RbTriangleList ? 3 * count : count + 2, size;
+        if (!b || b->owner != c->owner || c->indexStride != 2 || !b->global->fpVidMem || count > 0xffff ||
+            indexByte > (size = b->global->dwLinearSize) || indices > (size - indexByte) / 2) {
+            skip(c, RB2K_D7_SKIP_VERTEX, count);
+            return DD_OK;
+        }
+        if (!index_scratch(indices)) return DDERR_OUTOFMEMORY;
+        __try {
+            const BYTE *from = (const BYTE *)b->global->fpVidMem + indexByte;
+            EngProbeForRead((PVOID)from, indices * sizeof(WORD), 1);
+            RtlCopyMemory(indexScratch, from, indices * sizeof(WORD));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            skip(c, RB2K_D7_SKIP_VERTEX, count);
+            return DD_OK;
+        }
+        prims.indices = indexScratch;
+    }
+    return triangles(c, a, prims.streamStride, &prims);
+}
+
+/* A command that carries count records of size bytes, each followed by a
+ * variable part whose length in bytes is the record word at index word. */
+static ULONG variable_records(const BYTE *p, ULONG remaining, ULONG count, ULONG size, ULONG word, ULONG word2)
+{
+    ULONG used = 0, k;
+    for (k = 0; k < count; ++k) {
+        const ULONG *r = (const ULONG *)(p + used);
+        ULONG extra;
+        if (remaining - min(remaining, used) < size) return 0xffffffff;
+        extra = r[word] + (word2 ? r[word2] : 0);
+        if (extra < r[word] || extra > remaining - used - size) return 0xffffffff;
+        used += size + extra;
+    }
+    return used;
 }
 
 /* The runtime's texture manager copies a system-memory texture into its
@@ -1403,8 +1606,13 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             used = n*sizeof(*st);
             if (used > remaining) return DDERR_INVALIDPARAMS;
             for (; n; --n, ++st) {
+                ULONG value = st->dwValue;
                 if (st->wStage >= TextureStages) return DDERR_INVALIDPARAMS;
-                stage_state(&c->stages[st->wStage], st->TSState, st->dwValue);
+                /* Direct3D 8 filters: mip NONE, POINT, LINEAR are 0..2 (Direct3D 7
+                 * uses 1..3), and magnification ANISOTROPIC is 3. */
+                if (c->dx8 && st->TSState == D3DTSS_MIPFILTER) ++value;
+                else if (c->dx8 && st->TSState == D3DTSS_MAGFILTER && value == 3) value = D3DTFG_LINEAR;
+                stage_state(&c->stages[st->wStage], st->TSState, value);
             }
             break;
         }
@@ -1414,9 +1622,11 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             used = n * sizeof(*x);
             if (used > remaining) return DDERR_INVALIDPARAMS;
             for (; n; --n, ++x) {
+                /* Direct3D 8 numbers the first world matrix 256. */
+                ULONG type = x->xfrmType == 256 ? D3DTRANSFORMSTATE_WORLD : x->xfrmType;
                 ++c->display->d7draw.transformTypes[x->xfrmType < 31 ? x->xfrmType : 31];
-                if (x->xfrmType >= D3DTRANSFORMSTATE_WORLD && x->xfrmType <= D3DTRANSFORMSTATE_PROJECTION)
-                    RtlCopyMemory(c->matrices[x->xfrmType - D3DTRANSFORMSTATE_WORLD], &x->matrix, 64);
+                if (type >= D3DTRANSFORMSTATE_WORLD && type <= D3DTRANSFORMSTATE_PROJECTION)
+                    RtlCopyMemory(c->matrices[type - D3DTRANSFORMSTATE_WORLD], &x->matrix, 64);
             }
             break;
         }
@@ -1526,6 +1736,137 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             if (FAILED(hr)) return hr;
             break;
         }
+        case RbDp2SetVertexShader:
+        case RbDp2DeleteVertexShader:
+        case RbDp2SetPixelShader:
+        case RbDp2DeletePixelShader: {
+            const RB_DP2_HANDLE *v = (const RB_DP2_HANDLE *)p;
+            used = n * sizeof(*v);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            trace8(c, a, h->bCommand, n, p, remaining);
+            if (n && h->bCommand == RbDp2SetVertexShader) { c->fvf = v[n - 1].handle; c->dx8 = TRUE; }
+            if (n && h->bCommand == RbDp2SetPixelShader) c->pixelShader = v[n - 1].handle;
+            break;
+        }
+        case RbDp2SetStreamSource: {
+            const RB_DP2_STREAM_SOURCE *s = (const RB_DP2_STREAM_SOURCE *)p;
+            used = n * sizeof(*s);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            trace8(c, a, h->bCommand, n, p, remaining);
+            for (; n; --n, ++s)
+                if (!s->stream) { c->streamUser = FALSE; c->streamHandle = s->handle; c->streamStride = s->stride; }
+            break;
+        }
+        case RbDp2SetStreamSourceUm: {
+            const RB_DP2_STREAM_SOURCE_UM *s = (const RB_DP2_STREAM_SOURCE_UM *)p;
+            used = n * sizeof(*s);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            trace8(c, a, h->bCommand, n, p, remaining);
+            for (; n; --n, ++s)
+                if (!s->stream) { c->streamUser = TRUE; c->streamHandle = 0; c->streamStride = s->stride; }
+            break;
+        }
+        case RbDp2SetIndices: {
+            const RB_DP2_INDICES *s = (const RB_DP2_INDICES *)p;
+            used = n * sizeof(*s);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            trace8(c, a, h->bCommand, n, p, remaining);
+            if (n) { c->indexHandle = s[n - 1].handle; c->indexStride = s[n - 1].stride; }
+            break;
+        }
+        case RbDp2DrawPrimitive: {
+            const RB_DP2_DRAW_PRIMITIVE *s = (const RB_DP2_DRAW_PRIMITIVE *)p;
+            used = n * sizeof(*s);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            trace8(c, a, h->bCommand, n, p, remaining);
+            for (; n; --n, ++s) {
+                hr = stream_draw(c, a, s->type, (LONGLONG)s->start * c->streamStride, s->count, FALSE, 0);
+                if (FAILED(hr)) return hr;
+            }
+            break;
+        }
+        case RbDp2DrawPrimitive2: {
+            const RB_DP2_DRAW_PRIMITIVE2 *s = (const RB_DP2_DRAW_PRIMITIVE2 *)p;
+            used = n * sizeof(*s);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            trace8(c, a, h->bCommand, n, p, remaining);
+            for (; n; --n, ++s) {
+                hr = stream_draw(c, a, s->type, s->firstOffset, s->count, FALSE, 0);
+                if (FAILED(hr)) return hr;
+            }
+            break;
+        }
+        case RbDp2ClippedTriangleFan: {
+            const RB_DP2_CLIPPED_FAN *s = (const RB_DP2_CLIPPED_FAN *)p;
+            used = n * sizeof(*s);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            trace8(c, a, h->bCommand, n, p, remaining);
+            for (; n; --n, ++s) {
+                hr = stream_draw(c, a, RbTriangleFan, s->firstOffset, s->count, FALSE, 0);
+                if (FAILED(hr)) return hr;
+            }
+            break;
+        }
+        case RbDp2DrawIndexedPrimitive: {
+            const RB_DP2_DRAW_INDEXED *s = (const RB_DP2_DRAW_INDEXED *)p;
+            used = n * sizeof(*s);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            trace8(c, a, h->bCommand, n, p, remaining);
+            for (; n; --n, ++s) {
+                hr = stream_draw(c, a, s->type, (LONGLONG)s->baseVertex * c->streamStride, s->count, TRUE,
+                                 s->startIndex * c->indexStride);
+                if (FAILED(hr)) return hr;
+            }
+            break;
+        }
+        case RbDp2DrawIndexedPrimitive2: {
+            const RB_DP2_DRAW_INDEXED2 *s = (const RB_DP2_DRAW_INDEXED2 *)p;
+            used = n * sizeof(*s);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            trace8(c, a, h->bCommand, n, p, remaining);
+            for (; n; --n, ++s) {
+                hr = stream_draw(c, a, s->type, s->baseOffset, s->count, TRUE, s->startOffset);
+                if (FAILED(hr)) return hr;
+            }
+            break;
+        }
+        case RbDp2CreateVertexShader:
+            used = variable_records(p, remaining, n, sizeof(RB_DP2_CREATE_VERTEX_SHADER), 1, 2);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            trace8(c, a, h->bCommand, n, p, remaining);
+            break;
+        case RbDp2CreatePixelShader:
+            used = variable_records(p, remaining, n, sizeof(RB_DP2_CREATE_PIXEL_SHADER), 1, 0);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            trace8(c, a, h->bCommand, n, p, remaining);
+            break;
+        case RbDp2SetVertexShaderConst:
+        case RbDp2SetPixelShaderConst: {
+            /* Each record is followed by count four-float constants. */
+            ULONG k;
+            used = 0;
+            for (k = 0; k < n; ++k) {
+                const RB_DP2_SHADER_CONST *r = (const RB_DP2_SHADER_CONST *)(p + used);
+                if (remaining - min(remaining, used) < sizeof(*r)) return DDERR_INVALIDPARAMS;
+                used += sizeof(*r);
+                if (r->count > (remaining - used) / 16) return DDERR_INVALIDPARAMS;
+                used += r->count * 16;
+            }
+            trace8(c, a, h->bCommand, n, p, remaining);
+            break;
+        }
+        case RbDp2BufferBlt:
+        case RbDp2VolumeBlt:
+        case RbDp2MultiplyTransform:
+        case RbDp2AddDirtyRect:
+        case RbDp2AddDirtyBox:
+            used = n * (h->bCommand == RbDp2BufferBlt ? sizeof(RB_DP2_BUFFER_BLT) :
+                        h->bCommand == RbDp2VolumeBlt ? sizeof(RB_DP2_VOLUME_BLT) :
+                        h->bCommand == RbDp2MultiplyTransform ? sizeof(RB_DP2_MULTIPLY_TRANSFORM) :
+                        h->bCommand == RbDp2AddDirtyRect ? sizeof(RB_DP2_DIRTY_RECT) : sizeof(RB_DP2_DIRTY_BOX));
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            trace8(c, a, h->bCommand, n, p, remaining);
+            break;
         default:
             used = fixed_records(h->bCommand, n);
             if (!used && n) return D3DNTERR_COMMAND_UNPARSED;
@@ -1734,8 +2075,140 @@ void rb_d7_caps(DD_HALINFO *info, BOOL depth)
     info->lpD3DHALCallbacks = (PVOID)&cb;
 }
 
+/* The Direct3D 8 interface describes the same device as the Direct3D 7
+ * one, as the runtime itself translates it for a Direct3D 7 driver, with
+ * one vertex stream. Vertex and pixel shaders are not offered yet; the
+ * runtime runs vertex shaders in software. */
+static const ULONG d8Formats[][2] = {
+    { RbFmtX8R8G8B8, RbFormatTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
+                     RbFormatDisplayMode | RbFormat3D },
+    { RbFmtA8R8G8B8, RbFormatTexture },
+    { RbFmtR5G6B5, RbFormatTexture | RbFormatDisplayMode },
+    { RbFmtX1R5G5B5, RbFormatTexture },
+    { RbFmtA1R5G5B5, RbFormatTexture },
+    { RbFmtA4R4G4B4, RbFormatTexture },
+    { RbFmtD16, RbFormatZStencil }      /* last: only with depth rendering */
+};
+
+static ULONG d8_format_count(const DISPLAY *d)
+{
+    ULONG n = sizeof(d8Formats) / sizeof(d8Formats[0]);
+    return d->z16Render ? n : n - 1;
+}
+
+static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDEDCAPS *x)
+{
+    const D3DNTHALDEVICEDESC_V1 *hw = &global.hwCaps;
+    const D3DPRIMCAPS *tri = &hw->dpcTriCaps;
+    RtlZeroMemory(c, sizeof(*c));
+    c->deviceType = 1;                  /* D3DDEVTYPE_HAL */
+    c->caps2 = RB_D3DCAPS2_CANRENDERWINDOWED;
+    c->presentationIntervals = RB_D3DPRESENT_INTERVAL_IMMEDIATE | RB_D3DPRESENT_INTERVAL_ONE;
+    c->devCaps = hw->dwDevCaps & ~D3DDEVCAPS_FLOATTLVERTEX;
+    c->primitiveMiscCaps = tri->dwMiscCaps;
+    c->rasterCaps = tri->dwRasterCaps & ~D3DPRASTERCAPS_SUBPIXEL;
+    c->srcBlendCaps = tri->dwSrcBlendCaps;
+    c->destBlendCaps = tri->dwDestBlendCaps;
+    c->alphaCmpCaps = tri->dwAlphaCmpCaps;
+    c->shadeCaps = tri->dwShadeCaps;
+    c->textureCaps = tri->dwTextureCaps | 0x4000;     /* D3DPTEXTURECAPS_MIPMAP */
+    c->textureFilterCaps = tri->dwTextureFilterCaps;
+    c->textureAddressCaps = tri->dwTextureAddressCaps;
+    if (d->z16Render) {
+        c->rasterCaps |= D3DPRASTERCAPS_ZTEST;
+        c->zCmpCaps = D3DPCMPCAPS_NEVER | D3DPCMPCAPS_LESS | D3DPCMPCAPS_EQUAL | D3DPCMPCAPS_LESSEQUAL |
+                      D3DPCMPCAPS_GREATER | D3DPCMPCAPS_NOTEQUAL | D3DPCMPCAPS_GREATEREQUAL | D3DPCMPCAPS_ALWAYS;
+    }
+    c->maxTextureWidth = c->maxTextureHeight = RB2K_D7_TEXTURE_SIDE;
+    c->maxTextureRepeat = x->dwMaxTextureRepeat;
+    c->maxTextureAspectRatio = x->dwMaxTextureAspectRatio;
+    c->maxAnisotropy = 1;
+    c->maxVertexW = 0x501502f9;                         /* 1e10 */
+    c->guardBandLeft = c->guardBandTop = 0xc5800000;    /* -4096 */
+    c->guardBandRight = c->guardBandBottom = 0x457ff000; /* 4095 */
+    c->fvfCaps = x->dwFVFCaps;
+    c->textureOpCaps = x->dwTextureOpCaps;
+    c->maxTextureBlendStages = x->wMaxTextureBlendStages;
+    c->maxSimultaneousTextures = x->wMaxSimultaneousTextures;
+    c->vertexProcessingCaps = x->dwVertexProcessingCaps & ~D3DVTXPCAPS_VERTEXFOG;
+    c->maxActiveLights = x->dwMaxActiveLights;
+    c->maxPointSize = 0x3f800000;                       /* 1 */
+    c->maxPrimitiveCount = 0xffff;
+    c->maxVertexIndex = 0xffff;
+    c->maxStreams = 1;
+    c->maxStreamStride = 255;
+    c->vertexShaderVersion = 0xfffe0000;            /* version 0.0 */
+    c->pixelShaderVersion = 0xffff0000;
+    c->maxPixelShaderValue = 0x3f800000;            /* 1 */
+}
+
+/* GetDriverInfo2 requests arrive with the stereo-mode GUID. The size of the
+ * reply buffer is the one in the request; the outer size is not used. */
+static BOOL d8_info(DISPLAY *d, PDD_GETDRIVERINFODATA a, const D3DNTHAL_D3DEXTENDEDCAPS *x)
+{
+    RB_GDI2_HEADER *h = a->lpvData;
+    ULONG size, room;
+    if (!h || h->magic != RB_GDI2_MAGIC) return FALSE;
+    room = h->expectedSize;
+    EngAcquireSemaphore(d->ddLock);
+    ++d->d7draw.d8Requests[h->type < 31 ? h->type : 31];
+    if (d->d7draw.d8LogCount < 24) {
+        d->d7draw.d8Log[d->d7draw.d8LogCount][0] = h->type;
+        d->d7draw.d8Log[d->d7draw.d8LogCount++][1] = room;
+    }
+    EngReleaseSemaphore(d->ddLock);
+    switch (h->type) {
+    case RbGdi2Caps8: {
+        RB_D3DCAPS8 caps;
+        d8_caps(d, &caps, x);
+        size = sizeof(caps);
+        size = min(size, room);
+        RtlCopyMemory(h, &caps, size);
+        break;
+    }
+    case RbGdi2FormatCount: {
+        RB_GDI2_FORMAT_COUNT *f = (RB_GDI2_FORMAT_COUNT *)h;
+        if (room < sizeof(*f)) goto unavailable;
+        f->count = d8_format_count(d);
+        f->reserved = 0;
+        size = sizeof(*f);
+        break;
+    }
+    case RbGdi2Format: {
+        RB_GDI2_FORMAT *f = (RB_GDI2_FORMAT *)h;
+        ULONG index = f->index;
+        if (room < sizeof(*f) || index >= d8_format_count(d)) goto unavailable;
+        RtlZeroMemory(&f->format, sizeof(f->format));
+        f->format.dwSize = sizeof(f->format);
+        f->format.dwFlags = RB_DDPF_D3DFORMAT;
+        f->format.dwFourCC = d8Formats[index][0];
+        f->format.dwRBitMask = d8Formats[index][1];     /* the operations */
+        size = sizeof(*f);
+        break;
+    }
+    case RbGdi2DxVersion: {
+        RB_GDI2_DX_VERSION *v = (RB_GDI2_DX_VERSION *)h;
+        if (room < sizeof(*v)) goto unavailable;
+        d->d7draw.d8Version = v->version;
+        size = sizeof(*v);
+        break;
+    }
+    default:
+        goto unavailable;
+    }
+    a->dwActualSize = size;
+    a->ddRVal = DD_OK;
+    return TRUE;
+unavailable:
+    /* Requests this driver does not answer, such as the Direct3D 9 ones. */
+    a->dwActualSize = 0;
+    a->ddRVal = DDERR_CURRENTLYNOTAVAIL;
+    return TRUE;
+}
+
 BOOL rb_d7_info(PDD_GETDRIVERINFODATA a)
 {
+    static const GUID stereo = {0xf828169c,0xa8e8,0x11d2,{0xa1,0xf2,0x00,0xa0,0xc9,0x83,0xea,0xf6}};
     static const GUID g3 = {0xddf41230,0xec0a,0x11d0,{0xa9,0xb6,0x00,0xaa,0x00,0xc0,0x99,0x3e}};
     static const GUID gm = {0x406b2f00,0x3e5a,0x11d1,{0xb6,0x40,0x00,0xaa,0x00,0xa1,0xf9,0x6a}};
     static const GUID parser = {0x2e04ffa0,0x98e4,0x11d1,{0x8c,0xe1,0x00,0xa0,0xc9,0x06,0x29,0xa8}};
@@ -1800,6 +2273,7 @@ BOOL rb_d7_info(PDD_GETDRIVERINFODATA a)
         return TRUE;
     }
     EngReleaseSemaphore(d->ddLock);
+    if (IsEqualGUID(&a->guidInfo, &stereo)) return d->d3d8 && d8_info(d, a, &extendedCaps);
     if (IsEqualGUID(&a->guidInfo, &g3)) { source = &c3; size = sizeof(c3); }
     else if (IsEqualGUID(&a->guidInfo, &gm)) { source = &misc; size = sizeof(misc); }
     else if (IsEqualGUID(&a->guidInfo, &depth)) {
