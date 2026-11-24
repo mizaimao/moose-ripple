@@ -47,6 +47,7 @@ typedef struct {
     BOOL ddEnabled;
     BOOL glActive;
     BOOL gpuSurfaces;           /* offscreen surfaces as host textures (RB2K_DD_CAPS) */
+    BOOL plainSurfaces;         /* plain 2D ones too, not only Direct3D's */
     BOOL d3dDescribed;          /* the Direct3D HAL description is given in every depth */
     BOOL nativeD3D7;
     BOOL z16Storage, z16Render;

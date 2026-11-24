@@ -30,8 +30,8 @@ VGA and restored the saved desktop after full-screen DirectDraw programs.
 - **DirectDraw:** full-screen programs flip between two pages in video
   memory. Other surfaces live in system memory, where Windows' own
   DirectDraw code draws them faster than the GPU could here (see Speed).
-- **Direct3D 7** has an experimental native hardware driver for 32-bit
-  render targets. Both Windows 2000 and XP passed pixel tests for triangle
+- **Direct3D 7** has a native hardware driver for 32-bit render targets,
+  on by default. Both Windows 2000 and XP passed pixel tests for triangle
   lists, indexed triangles, 16-bit depth testing, textures in four formats,
   texture modulation, alpha test, blending, culling and flat shading.
   [Texture and blending tests](../docs/win2k/development.md#native-textures-blending-and-culling) ·
@@ -121,17 +121,19 @@ and buffers that an ended program left behind are freed at the next
 creation.
 
 DirectDraw (`display_ddraw.c`) offers the second framebuffer page as a
-back buffer for full-screen flipping. Offscreen surfaces as host textures
-(`gpu_surface.c`) are switched off: copying them to the screen means a GPU
-readback into the CPU-drawn desktop, which is two to five times slower
-than Windows' own code, and they cannot be copied into the back buffer.
-For tests, set the DWORD `RippleDirectDrawGpuSurfaces` to 1 in the adapter
-key named by `HKLM\HARDWARE\DEVICEMAP\VIDEO` and restart. For this
-driver the key is under `Services\rb2kmp\Device0` on Windows 2000 and
-`Control\Video\{GUID}\0000` on XP. The optional host textures require a
-32-bit display mode. In 8-bit and 16-bit modes, offscreen surfaces use system memory.
-For native Direct3D 7 tests, set both `RippleDirectDrawGpuSurfaces` and
-`RippleNativeD3D7` to 1 in that key and restart.
+back buffer for full-screen flipping. Native Direct3D 7 (`display_d3d7.c`)
+is on by default; its render targets, depth buffers and textures are host
+images (`gpu_surface.c`). It needs a 32-bit display mode. To switch it
+off, set the DWORD `RippleNativeD3D7` to 0 in the adapter key named by
+`HKLM\HARDWARE\DEVICEMAP\VIDEO` and restart. For this driver the key
+is under `Services\rb2kmp\Device0` on Windows 2000 and
+`Control\Video\{GUID}\0000` on XP.
+
+Plain 2D offscreen surfaces stay in system memory. As host textures,
+copying them to the screen means a GPU readback into the CPU-drawn
+desktop, which is two to five times slower than Windows' own code, and
+they cannot be copied into the back buffer. For tests, set the DWORD
+`RippleDirectDrawGpuSurfaces` to 1 in the same key and restart.
 
 ## Build
 

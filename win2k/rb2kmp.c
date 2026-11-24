@@ -61,10 +61,12 @@ typedef struct {
     RB2K_GPU gpu;
 } ADAPTER;
 
-/* DirectDraw offscreen surfaces as host textures are slower than Windows'
- * own in this design (the desktop is guest memory) and cannot be blitted
- * into the back buffer, so they are offered only when the adapter's registry
- * key has RippleDirectDrawGpuSurfaces = 1 (for tests and later work). */
+/* Native Direct3D 7 is on unless the adapter's registry key has
+ * RippleNativeD3D7 = 0; its render targets, depth buffers and textures are
+ * host images. Plain 2D offscreen surfaces as host textures are slower than
+ * Windows' own in this design (the desktop is guest memory) and cannot be
+ * blitted into the back buffer, so they are offered only when the key has
+ * RippleDirectDrawGpuSurfaces = 1 (for tests). */
 static VP_STATUS registry_flag(PVOID ext, PVOID context, PWSTR name, PVOID data, ULONG bytes)
 {
     (void)ext; (void)name;
@@ -130,11 +132,13 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
         return ERROR_DEV_NOT_EXIST;
     }
     rb_gpu_find(&a->gpu, a, slot, registers, config);
-    VideoPortGetRegistryParameters(a, L"RippleDirectDrawGpuSurfaces", FALSE, registry_flag, &a->gpu.ddGpuSurfaces);
+    a->gpu.nativeD3D7 = TRUE;
+    VideoPortGetRegistryParameters(a, L"RippleDirectDrawGpuSurfaces", FALSE, registry_flag, &a->gpu.plainSurfaces);
     VideoPortGetRegistryParameters(a, L"RippleGpuDesktop", FALSE, registry_flag, &a->gpu.glEnabled);
     VideoPortGetRegistryParameters(a, L"RippleHardwareCursor", FALSE, registry_flag, &a->gpu.cursorEnabled);
     VideoPortGetRegistryParameters(a, L"RippleNativeD3D7", FALSE, registry_flag, &a->gpu.nativeD3D7);
     VideoPortGetRegistryParameters(a, L"RippleD3D7WaitCurrent", FALSE, registry_flag, &a->gpu.d7WaitCurrent);
+    a->gpu.ddGpuSurfaces = a->gpu.plainSurfaces || a->gpu.nativeD3D7;
     /* Map the scanout pages during adapter discovery, cached like every other
      * view of the framebuffer (rb_map_cached). BAR0 is a PCI framebuffer; its
      * address is not a general-purpose DMA backing entry. */
