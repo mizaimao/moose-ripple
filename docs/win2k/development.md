@@ -1704,3 +1704,47 @@ material, and the same quad with linear vertex fog. All 23 cases passed
 with hardware vertex processing, where the host lights and fogs the
 vertices, and with software vertex processing, where the runtime does.
 Direct3D 8 Quake ran at 58.8 fps.
+
+## Pixel shader 2.0 for Direct3D 9 programs
+
+Direct3D 9 programs now get pixel shader 2.0 on the hardware device. The
+display driver translates ps_2_0 shaders into TGSI as it does version 1
+shaders: declared samplers and coordinates, `def` constants, c0 to c31,
+and the shader model 2 instructions with negation and absolute value,
+computed unclamped as Direct3D 9 does. The expanded instructions (`nrm`,
+`crs`, `dp2add`, `sincos` and the matrix forms) go through scratch
+registers, and the result is written after fog. Only 2D samplers are
+accepted, because the device has no cube or volume textures yet, and
+texture coordinates t0 to t3 and samplers s0 to s3 are available.
+
+No new driver interface was needed. Microsoft's Direct3D 9 runtime asks
+a driver of the Direct3D 8 interface for its Direct3D 8 record, and it
+announces itself as version 9 just before. The record reports pixel
+shader 2.0 to that runtime and 1.3 to the Direct3D 8 runtime. Declaring
+the Direct3D 9 interface itself (version 4 in GetDriverInfo2) made the
+runtime report no hardware device, both with a Direct3D 9 record that
+matched what the runtime builds and with pixel shader 2.0 in it; the
+interface would need more than these replies. Once 2.0 is offered, the
+runtime also sets states for samplers 8 to 15, which are now ignored
+instead of refused.
+
+On XP SP3 under KVM on the Intel UHD 630 host, `d9pixels` (the
+`d8pixels` cases through the Direct3D 9 interfaces, plus eight shader
+model 2.0 cases) passed every case with hardware and with software
+vertex processing:
+
+| Case | Result |
+| --- | --- |
+| Fixed-function, version 1 pixel shaders, fog and lighting through Direct3D 9 | pass |
+| ps_2_0 texture lookup times the diffuse colour | pass |
+| ps_2_0 `texkill` | pass |
+| ps_2_0 `pow`, `rcp`, `rsq`, `nrm` and `dp2add` with values above one | pass |
+| `pow`, `rcp`, `rsq`, `nrm`, `dp2add` each alone | pass |
+
+`d8pixels` still saw version 1.3 and passed its 23 cases, the Direct3D 8
+and 9 textured scenes passed, and Direct3D 8 Quake ran at 58.8 fps. The
+runtime refuses a shader that writes `oC0` with `_sat`, and a version 1.1
+shader in the Direct3D 8 test with `_bias` on a texture register and a
+negated `def` constant; `d9pixels` skips that one unless asked for it.
+Windows 2000 has no Direct3D 9 runtime and was not rerun; its Direct3D 7
+path is unchanged.

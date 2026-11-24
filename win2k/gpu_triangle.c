@@ -1093,7 +1093,7 @@ BOOLEAN rb_gpu_d8_valid(const RB2K_D3D8_DRAW *d)
         ((d->alphaTest >> 8) & 15) < 1 || ((d->alphaTest >> 8) & 15) > 8)) return FALSE;
     if (d->blend && ((d->blend & ~(RB2K_D7_ON | 0xffff)) ||
         !blend_valid((d->blend >> 8) & 255) || !blend_valid(d->blend & 255))) return FALSE;
-    if (d->cull < CullNone || d->cull > CullCcw) return FALSE;
+    if (d->cull < CullNone || d->cull > CullCcw || (d->constantCount != 8 && d->constantCount != 32)) return FALSE;
     if (d->transform > 1 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
         d->viewport[0] > 8192 || d->viewport[1] > 8192 || d->viewport[2] > 8192 || d->viewport[3] > 8192)))
         return FALSE;
@@ -1125,7 +1125,7 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
                        const char *program, ULONG programBytes, RB2K_TEXTURE *const *textures)
 {
     RB2K_D7_STATE *s = &image->d7;
-    ULONG words[128], n = 0, slot, key[6], state, i, k, h[RB2K_D8_STAGES], views[RB2K_D8_STAGES];
+    ULONG words[192], n = 0, slot, key[6], state, i, k, h[RB2K_D8_STAGES], views[RB2K_D8_STAGES];
     ULONG lit = d->lighting != 0, lights = lit ? d->lightCount : 0;
     ULONG stages = 0, fill = 0, count = d->count, extra = (d->transform ? 56 : 0) + (lit ? 36 + 32 * lights : 0);
     ULONG perVertex = 4 * (lit ? PsLitVertexConstants : PsVertexConstants);
@@ -1177,10 +1177,10 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
         s->shader.bound = slot + 1;
     }
     gpu->d8Step = 5;
-    /* c0..c7, then for fog its colour and start, end, density. */
-    words[n++] = VIRGL_CMD0(VIRGL_CCMD_SET_CONSTANT_BUFFER,0,2 + (d->fog ? 40 : 32));
+    /* The program's constants, then for fog its colour and start, end, density. */
+    words[n++] = VIRGL_CMD0(VIRGL_CCMD_SET_CONSTANT_BUFFER,0,2 + 4 * d->constantCount + (d->fog ? 8 : 0));
     words[n++] = FragmentStage; words[n++] = 0;
-    for (i = 0; i < 8; ++i) for (k = 0; k < 4; ++k) words[n++] = d->constants[i][k];
+    for (i = 0; i < d->constantCount; ++i) for (k = 0; k < 4; ++k) words[n++] = d->constants[i][k];
     if (d->fog) {
         words[n++] = rb_gpu_channel((d->fogColor >> 16) & 255);
         words[n++] = rb_gpu_channel((d->fogColor >> 8) & 255);

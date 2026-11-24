@@ -40,7 +40,7 @@ typedef struct {
  * (program zero when it could not be translated). */
 enum { ShaderVariants = 4 };
 typedef struct {
-    ULONG handle, samplers, coords, tokenCount;
+    ULONG handle, samplers, coords, tokenCount, constants;   /* constants: 8, or 32 for shader model 2 */
     ULONG *tokens;
     struct { ULONG fog, program; } variants[ShaderVariants];
 } D8_SHADER;
@@ -78,7 +78,7 @@ typedef struct {
     ULONG minStart, maxEnd;     /* diagnostics for one command buffer */
     RB2K_D3D7_DRAW draw;        /* the batch being filled */
     D8_SHADER shaders[MaxShaders];
-    ULONG psConst[8][4];        /* pixel shader constants c0..c7 */
+    ULONG psConst[32][4];       /* pixel shader constants c0..c31 */
     RB2K_D3D8_DRAW draw8;       /* the pixel shader batch being filled */
     D7_STAGE stages[TextureStages];
 } D7_CONTEXT;
@@ -1400,6 +1400,7 @@ static void create_shader(D7_CONTEXT *c, ULONG handle, const BYTE *code, ULONG b
     sh->handle = handle;
     /* The tokens stay for the fog variants made at draw time. */
     sh->tokenCount = bytes / 4;
+    sh->constants = sh->tokenCount && *(const ULONG *)code == 0xffff0200 ? 32 : 8;
     sh->tokens = sh->tokenCount ? EngAllocMem(0, sh->tokenCount * sizeof(ULONG), 'k8bR') : NULL;
     if (sh->tokens) RtlCopyMemory(sh->tokens, code, sh->tokenCount * sizeof(ULONG));
     sh->variants[0].program = translate_program(c, sh, 0, &info);
@@ -1509,7 +1510,8 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     draw->fogStart = c->fogStart;
     draw->fogEnd = c->fogEnd;
     draw->fogDensity = c->fogDensity;
-    RtlCopyMemory(draw->constants, c->psConst, sizeof(draw->constants));
+    draw->constantCount = sh->constants;
+    RtlCopyMemory(draw->constants, c->psConst, sh->constants * 16);
     if (objectSpace) {
         draw->transform = 1;
         RtlCopyMemory(draw->matrices, c->matrices, sizeof(draw->matrices));
@@ -1920,7 +1922,9 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             if (used > remaining) return DDERR_INVALIDPARAMS;
             for (; n; --n, ++st) {
                 ULONG value = st->dwValue;
-                if (st->wStage >= TextureStages) return DDERR_INVALIDPARAMS;
+                /* With pixel shader 2.0 the Direct3D 9 runtime also sets samplers
+                 * 8 to 15, which no draw here uses. */
+                if (st->wStage >= TextureStages) continue;
                 /* Direct3D 8 filters: mip NONE, POINT, LINEAR are 0..2 (Direct3D 7
                  * uses 1..3), and magnification ANISOTROPIC is 3. */
                 if (c->dx8 && st->TSState == D3DTSS_MIPFILTER) ++value;
@@ -2177,8 +2181,8 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
                 if (remaining - min(remaining, used) < sizeof(*r)) return DDERR_INVALIDPARAMS;
                 used += sizeof(*r);
                 if (r->count > (remaining - used) / 16) return DDERR_INVALIDPARAMS;
-                if (h->bCommand == RbDp2SetPixelShaderConst && r->reg < 8)
-                    RtlCopyMemory(c->psConst[r->reg], p + used, min(r->count, 8 - r->reg) * 16);
+                if (h->bCommand == RbDp2SetPixelShaderConst && r->reg < 32)
+                    RtlCopyMemory(c->psConst[r->reg], p + used, min(r->count, 32 - r->reg) * 16);
                 used += r->count * 16;
             }
             trace8(c, a, h->bCommand, n, p, remaining);
@@ -2406,8 +2410,8 @@ void rb_d7_caps(DD_HALINFO *info, BOOL depth)
 
 /* The Direct3D 8 interface describes the same device as the Direct3D 7
  * one, as the runtime itself translates it for a Direct3D 7 driver, with
- * one vertex stream. Vertex and pixel shaders are not offered yet; the
- * runtime runs vertex shaders in software. */
+ * one vertex stream. Pixel shaders are offered (see below); the runtime
+ * runs vertex shaders in software. */
 static const ULONG d8Formats[][2] = {
     { RbFmtX8R8G8B8, RbFormatTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
                      RbFormatDisplayMode | RbFormat3D },
@@ -2467,7 +2471,10 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     c->maxStreams = 1;
     c->maxStreamStride = 255;
     c->vertexShaderVersion = 0xfffe0000;            /* version 0.0 */
-    c->pixelShaderVersion = 0xffff0103;            /* 1.3 */
+    /* 1.3 for Direct3D 8; shader model 2 when the runtime that asks has
+     * announced itself as Direct3D 9, which uses this record for drivers of
+     * the Direct3D 8 interface. */
+    c->pixelShaderVersion = d->d7draw.d8Version >= 0x900 ? 0xffff0200 : 0xffff0103;
     c->maxSimultaneousTextures = RB2K_D8_STAGES;
     c->maxPixelShaderValue = 0x3f800000;            /* 1 */
 }
