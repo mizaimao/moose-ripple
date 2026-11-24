@@ -1399,6 +1399,11 @@ and menu checks.
 
 ## 3DMark06 on the Intel UHD 630 (2026-11-21)
 
+The scores in this section were taken with a guest clock that ran slow and are
+too high: see [3DMark06 with a guest clock that keeps real
+time](#3dmark06-with-a-guest-clock-that-keeps-real-time-2026-11-23) for
+comparable ones.
+
 Windows 7 SP1 x64 ran 3DMark06 1.2.0.0 on an Intel Core i9-9900K with UHD 630
 graphics, through QEMU/KVM and virgl. The comparison with Vista SP2 used four
 virtual CPUs, 4 GiB of memory, the Penryn CPU model, the same Q35 machine with
@@ -1814,3 +1819,76 @@ lack the host probe, which the driver log confirms. The Vista control includes
 that commit. The default 3DMark06 run uses no anti-aliasing. Still, the
 Windows 7 scores so far come from a driver without `63739fe`, and the merged
 Windows 7 driver has no 3DMark06 run yet.
+
+### 3DMark06 with a guest clock that keeps real time (2026-11-23)
+
+The 3DMark06 scores above this section were measured in a VM whose Windows
+tick clock ran slow under graphics load. The last rows of the matched run
+show it: about 404 tick seconds in 833 and 915 real seconds. 3DMark06 times
+its scenes with that clock. Each scene ran for more than twice its intended
+length, and the frames drawn in it were counted against the intended length.
+Every score came out too high, by a factor that changed with the system and
+the run (the tick clock kept between 31% and 48% of real time). Those scores
+do not show which system is faster, and they cannot be compared with scores
+from a real machine.
+
+Two settings of the test machine made Vista look a third slower than
+Windows 7. Neither is in the driver.
+
+The first is the guest clock. The earlier test VM was a plain Q35 machine
+with `-cpu Penryn` and an HPET. The runs below use the clock and CPU options
+that Proxmox VE gives its Windows guests:
+
+    -machine hpet=off
+    -rtc driftfix=slew,base=localtime
+    -global kvm-pit.lost_tick_policy=discard
+    -cpu Penryn,enforce,hv_time,hv_vapic,hv_vpindex,hv_runtime,hv_reset,hv_spinlocks=0x1fff,+kvm_pv_eoi,+kvm_pv_unhalt
+
+(Windows 7 also gets `hv_relaxed`, Vista `hv_vendor_id=proxmox,kvm=off`.)
+With them the game's FPS for each scene matches the display changes per
+real second in QEMU's trace. QEMU's HPET skips the ticks it could not
+deliver on time. Without an HPET, Windows ticks from the RTC, and with
+`driftfix=slew` QEMU delivers late RTC ticks afterwards. Which of the
+options is needed under KVM was not separated. Under CPU emulation,
+`hpet=off` with `driftfix=slew` was enough
+([guest clock in UTM](test-vms.md#guest-clock-on-an-emulated-processor)).
+
+The second is the host's power saving. By default this host's GPU may clock
+down to 350 MHz and its CPUs use the `powersave` governor, and both slow
+down in the short waits between a guest's frames. For the runs below the
+GPU minimum was 1200 MHz (`gt_min_freq_mhz`) and the governor
+`performance`. On the old clock, a Vista run with these two settings showed
+about 34 display changes per real second in Return to Proxycon and 41 in
+Deep Freeze, where the runs with the defaults had shown 27 in both. (The
+driver builds of those runs differ slightly, so the size of the gain is
+approximate.)
+
+Both drivers were built from the same source (`e046429`; the Vista package
+is 7.14.1.20), test-signed, and installed in disposable copies of the two
+controls. Same host, four virtual CPUs, 4 GiB of RAM, 1280×1024, the
+default suite, no viewer.
+
+| | Windows 7 SP1 | Vista SP2 |
+| --- | ---: | ---: |
+| 3DMark06 | **10,731** | **10,306** |
+| SM2.0 | 3,253 | 3,088 |
+| HDR/SM3.0 | 4,644 | 4,550 |
+| CPU | 8,473 | 7,496 |
+| Return to Proxycon (FPS) | 39.07 | 36.95 |
+| Firefly Forest | 15.14 | 14.52 |
+| Red Valley CPU 1 | 2.778 | 2.554 |
+| Red Valley CPU 2 | 4.135 | 3.521 |
+| Canyon Flight | 38.53 | 37.40 |
+| Deep Freeze | 54.35 | 53.60 |
+
+Vista is 1% to 6% behind in the four graphics tests, and 8% and 15% behind
+in the two CPU tests, which draw little. The six scenes take about 400
+seconds together, the benchmark's own length; the earlier runs needed 830
+to 1,140. The results have SHA-256
+`8d7f506b5f4bc4b95c16fb1ba5728a5d2d043ef7d53db57ab4fae91308f0ac68` (Windows 7)
+and `8b7180a629789bd47280201b2cef99b7f8dddf934ff1a49cbdf9b20a9ca15802` (Vista).
+
+A quick check for a slow tick clock on any VM: start the program with
+`RIPPLE_UMD_LOG` and `RIPPLE_UMD_TIMES=1` set. Every 256 presented frames
+the driver log then says how far the tick clock moved against the
+performance counter, next to where the frame's time went.
