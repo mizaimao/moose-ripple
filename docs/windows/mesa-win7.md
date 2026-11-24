@@ -970,6 +970,36 @@ Combining write-watch queries and resets gave 5.0 size changes per second
 against 5.1 on the release driver in an eight-round comparison. Both trials
 ran on the same boot and the release drivers were restored.
 
+### Where a resize frame goes (2026-11-24)
+
+A window resized every 16 ms (`tools/win7-hello/dwmtiming.c resize`) is drawn about 19 times
+a second on Vista and 30 on Windows 7 in UTM, and the kernel driver's 1 ms timer
+(`kmd-port-notes.md`, last section) does not change that. The timing report in the
+compositor (`RIPPLE_UMD_TIMES`, which now times each way a copy is done and the three steps of
+an upload) gives for one Vista resize frame of 49 ms:
+
+| Part of a resize frame on Vista | Time |
+| --- | ---: |
+| After the old surfaces are destroyed, outside the driver | 21 ms |
+| One upload of the window's picture into the new texture | 10.1 ms |
+| The 18 other copies (glass blur passes, screen buffer), all on the GPU | 0.09 ms |
+| Present | 4.9 ms |
+| 32 vertex buffer unlocks | 2.5 ms |
+
+The compositor makes the same 19 copies in every frame of a moving window, in 0.08 ms. The
+upload is the one cost inside the driver. Mapping and unmapping the texture take 0.04 ms each
+and reading the source pages beforehand 0.07 ms; the 10 ms are the copy of 1.2 MB into the new
+texture's own memory. Every size is a new texture, and Windows hands out new memory a page at
+a time as it is written, about 30 µs a page under processor emulation. The same upload into a
+texture that already exists (a window repainted at one size) takes 0.6 ms.
+
+Tried and not adopted: sending every texture upload through virgl's staging buffers, which
+are used over and over, where before only a busy texture went that way. On Vista it does
+nothing, because staging is switched off there (patch 0101: Vista needs a fresh lock for
+every access). On Windows 7, one boot, old and new user-mode driver in turn: 29.4 and 29.7
+resize updates a second, 55.0 and 54.9 for a moving window. What is left of a resize frame is
+Windows' own work for the new surfaces, in the resized program and in the compositor.
+
 ### White strip beside the search box
 
 A half-second resize exposed the previous search box beside a white strip
