@@ -69,6 +69,10 @@ typedef struct {
     LONGLONG copyTicks, drawTicks;   /* the command-buffer copy; draw requests to the miniport */
     ULONG drawRequests;              /* IOCTL_RB2K_D3D7_DRAWS requests carrying the draws */
     ULONG textureWrites, checksSkipped;   /* texture locks and blits seen; checks they saved */
+    /* DirectDraw setup per desktop depth (8, 16, 32 bits): DrvGetDirectDrawInfo
+     * calls, its failures, the last failure's reason (1 no lock, 2 no mapping,
+     * 3 capability query failed), and DrvEnableDirectDraw failures. */
+    ULONG ddModes[3][4];
     ULONG historyStop, historyNext;
     ULONG history[32][10];
     struct {
