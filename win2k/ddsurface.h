@@ -64,7 +64,8 @@ typedef struct {
     ULONG depthState, alphaTest, blend, cull;
     ULONG program;
     ULONG textures[RB2K_D8_STAGES], samplers[RB2K_D8_STAGES], borders[RB2K_D8_STAGES];
-    ULONG constants[8][4];
+    ULONG constantCount;            /* 8 for version 1 programs, 32 for shader model 2 */
+    ULONG constants[32][4];
     ULONG fog, fogColor, fogStart, fogEnd, fogDensity;   /* as in RB2K_D3D7_DRAW */
     ULONG transform;
     ULONG matrices[3][16];
