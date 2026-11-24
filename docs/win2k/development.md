@@ -1565,3 +1565,63 @@ launcher could not close the game afterwards with its bound key. Vertex
 and pixel shaders are not offered (the capabilities report shader
 version 0), and a Direct3D 9 vertex declaration test failed with
 `E_FAIL`. Windows 2000 ships with Direct3D 7 only and was not tested here.
+
+## Direct3D 8 driver interface
+
+With native Direct3D 7 on, the display driver also offers the Direct3D 8
+driver interface. Pixel and vertex shaders can only be reported through
+it, so the shader work builds on it. To switch it off, set the DWORD
+`RippleD3D8` to 0 in the adapter key and restart; Microsoft's Direct3D 8
+and 9 runtimes then translate their calls to the Direct3D 7 interface, as
+they did before.
+
+The driver answers the GetDriverInfo2 requests with a D3DCAPS8 record
+and a list of surface formats with the operations each allows. It accepts
+the DirectX 8 DrawPrimitives2 commands: vertex stream zero, index
+buffers, `DrawPrimitive` and `DrawIndexedPrimitive` with their byte-offset
+forms, and the clipped triangle fans of software vertex processing. The
+record copies what the runtime itself builds for this Direct3D 7 driver,
+except that it offers one vertex stream, which marks a DirectX 8 driver.
+Shaders are reported as version 0.0, so the runtime still runs vertex
+shaders in software.
+
+Four details mattered on XP SP3:
+
+- GetDriverInfo2 requests share their GUID with stereo-mode queries. On
+  NT the outer expected size is always 24 bytes; the real size is in the
+  request itself, as the DDK says. Copying only 24 bytes of the record made
+  the runtime report no hardware device (`D3DERR_NOTAVAILABLE`).
+- The runtime marks the blits of `Present` with `DDBLT_PRESENTATION` and
+  `DDBLT_LAST_PRESENTATION`, but only for DirectX 8 drivers. The display
+  driver refused them as an unknown operation, and the runtime then locked
+  the back buffer and copied it with the CPU: Direct3D 8 Quake ran at
+  29.6 fps instead of 58.7. The flags are ignored now; each present is
+  finished before `Blt` returns.
+- `DrawPrimitiveUP` vertices arrive through a vertex buffer the runtime
+  owns and registers like any other, set as stream zero.
+- The runtimes create a Direct3D 8 or 9 context with 4 as the input
+  handle value; Direct3D 7 passes 3. Direct3D 8 numbers the first world
+  matrix 256, and its mipmap filter values are one lower than Direct3D 7's.
+
+Installed from the stock INF under KVM on the Intel UHD 630 host:
+
+| Check | Windows XP SP3 | Windows 2000 SP4 |
+| --- | --- | --- |
+| `d8pixels`, hardware and software vertex processing: clear, triangles from user memory, vertex buffer, strip, indexed, indexed with a base vertex, managed texture, untransformed vertices | 8 of 8 pass each way | no Direct3D 8 runtime installed |
+| Direct3D 8 and 9 textured scenes from Microsoft's runtimes | pass | not run |
+| Direct3D 7 pixel tests on the RGB, HAL and T&L devices | pass | pass |
+| DirectDraw flips at 8, 16 and 32 bits | not rerun | pass |
+| Quake 0.73 `demo1`, 640×480 window, 1 ms timer | 122.0 fps | 128.1 fps |
+
+Direct3D 8 Quake (0.81), the same `demo1` in a 640×480 window, ran three
+times with the interface on and three times after a restart with
+`RippleD3D8` set to 0, in one installation:
+
+| Interface | Run 1 | Run 2 | Run 3 |
+| --- | ---: | ---: | ---: |
+| Direct3D 8 | 57.6 fps | 58.7 fps | 58.6 fps |
+| Direct3D 7 (switched off) | 58.4 fps | 58.6 fps | 58.7 fps |
+
+Guest screenshots showed the level, weapon and status bar drawn the same
+way. `d8pixels.exe` is built against the Direct3D 8 headers of the
+Windows 7 WDK (`WDK_ROOT`).

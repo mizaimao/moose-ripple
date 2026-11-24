@@ -34,7 +34,7 @@ enum { RB2K_D7_SKIP_FILL, RB2K_D7_SKIP_STENCIL, RB2K_D7_SKIP_STAGE1, RB2K_D7_SKI
        RB2K_D7_SKIPS };
 enum { RB2K_D7_IGNORED_FOG, RB2K_D7_IGNORED_COLORKEY, RB2K_D7_IGNORED_CLIPPLANE,
        RB2K_D7_IGNORED_MIPMAP, RB2K_D7_IGNORED_LIGHTING, RB2K_D7_IGNORED };
-#define RB2K_D7_OPCODES 48
+#define RB2K_D7_OPCODES 100
 typedef struct {
     ULONG version, drawn, drawCalls, skippedCalls;
     ULONG skipped[RB2K_D7_SKIPS], ignored[RB2K_D7_IGNORED];
@@ -79,10 +79,19 @@ typedef struct {
         ULONG colorStage, alphaStage, blend, alphaTest, depthState, cull, shade, fvf, texFormat, transform;
         ULONG calls, primitives;
     } states[64];
+    /* The Direct3D 8 interface: GetDriverInfo2 requests by type (31 counts
+     * any other), the DirectX version the runtime announced, context
+     * creations by the runtime's input handle value (7 counts any other),
+     * buffers registered, draws from vertex streams, and the first DirectX 8
+     * commands: opcode, record count, DrawPrimitives2 flags and the first
+     * four record words. */
+    ULONG d8Requests[32], d8Version, d8ContextKinds[8], d8Buffers, d8StreamDraws;
+    ULONG d8TraceCount, d8Trace[64][7];
+    ULONG d8LogCount, d8Log[24][2];     /* the first GetDriverInfo2 requests: type, expected size */
 } RB2K_D7_DRAWSTATS;
 enum { RB2K_D7_FAIL_RANGE, RB2K_D7_FAIL_VBCAPS, RB2K_D7_FAIL_LINEAR, RB2K_D7_FAIL_ADDRESS,
        RB2K_D7_FAIL_PROBE, RB2K_D7_FAIL_IMMEDIATE, RB2K_D7_FAIL_LENGTH, RB2K_D7_FAIL_OTHER };
-#define RB2K_D7_DRAWSTATS_VERSION 1
+#define RB2K_D7_DRAWSTATS_VERSION 2
 #define RB2K_D3D7_QUERY_LIMIT 24
 typedef struct {
     RB2K_D3D7_STATS totals;

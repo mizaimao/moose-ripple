@@ -15,6 +15,9 @@ vc_headers = kit / "vc6/VC98/Include"
 ddk_headers = ddk / "inc/ddk"
 video_headers = ddk / "src/video/inc"
 public_headers = ddk / "inc"
+# Direct3D 8 and 9 application headers for the test programs: the Windows 7
+# WDK's copies of Microsoft's DirectX headers.
+wdk = Path(os.environ.get("WDK_ROOT", repo / ".tools/wdk71/kit/WinDDK/7600.16385.win7_wdk.100208-1538")).resolve()
 dest = Path(os.environ.get("OUT", repo / "build/win2k")).resolve()
 stamp = int(os.environ.get("SOURCE_DATE_EPOCH", "0"))
 if not 0 <= stamp <= 0xffffffff:
@@ -128,6 +131,12 @@ def build_programs(work):
         ("glpresent.exe", ["tools/glpresent"], ["-lopengl32", "-lgdi32", "-luser32"]),
         ("cursorqa.exe", ["tools/cursorqa"], ["-lgdi32", "-luser32"]),
     ]
+    # Only Microsoft's headers declare the Direct3D 8 interfaces here.
+    d3d = work / "d3d-include"
+    d3d.mkdir()
+    for name in ("d3d8.h", "d3d8types.h", "d3d8caps.h"):
+        (d3d / name).write_bytes((wdk / "inc/api" / name).read_bytes())
+    targets.append(("d8pixels.exe", ["tools/d8pixels"], ["-I", d3d, "-luser32"]))
     args = [bin_dir / "i686-w64-mingw32-clang", "-O2", "-D_WIN32_WINNT=0x0500",
             "-I", source, "-I", repo / "win9x/minivdd",
             "-Wl,--major-subsystem-version,5,--minor-subsystem-version,0,--major-os-version,5,--minor-os-version,0,--no-insert-timestamp"]

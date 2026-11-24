@@ -36,6 +36,10 @@ VGA and restored the saved desktop after full-screen DirectDraw programs.
   texture modulation, alpha test, blending, culling and flat shading.
   [Texture and blending tests](../docs/win2k/development.md#native-textures-blending-and-culling) ·
   [Depth tests](../docs/win2k/development.md#native-16-bit-depth-rendering)
+- **Direct3D 8 and 9** programs use the same device through Microsoft's
+  runtimes and the Direct3D 8 driver interface, on by default with native
+  Direct3D 7. Shaders are not offered yet; vertex shaders run in software.
+  [Driver interface notes](../docs/win2k/development.md#direct3d-8-driver-interface)
 
 ## The virtual machine
 
@@ -127,7 +131,9 @@ images (`gpu_surface.c`). It needs a 32-bit display mode. To switch it
 off, set the DWORD `RippleNativeD3D7` to 0 in the adapter key named by
 `HKLM\HARDWARE\DEVICEMAP\VIDEO` and restart. For this driver the key
 is under `Services\rb2kmp\Device0` on Windows 2000 and
-`Control\Video\{GUID}\0000` on XP.
+`Control\Video\{GUID}\0000` on XP. The same device also offers the
+Direct3D 8 driver interface; `RippleD3D8` set to 0 in that key switches
+only the interface off.
 
 Plain 2D offscreen surfaces stay in system memory. As host textures,
 copying them to the screen means a GPU readback into the CPU-drawn
@@ -138,8 +144,9 @@ they cannot be copied into the back buffer. For tests, set the DWORD
 ## Build
 
 The Linux build uses the msvcrt variant of LLVM-MinGW, the Windows 2000
-DDK headers and import libraries, and the Visual C++ 6.0 headers. Set
-`LLVM_MINGW` and `WIN9X_TOOLS` if the tools are outside `.tools/`.
+DDK headers and import libraries, and the Visual C++ 6.0 headers. The
+Direct3D 8 test program uses the DirectX headers of the Windows 7 WDK. Set
+`LLVM_MINGW`, `WIN9X_TOOLS` and `WDK_ROOT` if the tools are outside `.tools/`.
 
     win2k/build.sh                  # build/win2k: the driver files, the INF and the tools
     win9x/mesa/build.sh             # ripplegl.dll (docs/win9x/mesa.md)
@@ -174,6 +181,10 @@ DDK headers and import libraries, and the Visual C++ 6.0 headers. Set
   the expected colours. Use `ipixels.exe rgb` for Microsoft's software
   reference. `z16pixels.exe hal` and `z16pixels.exe rgb` check which
   pixels survive when two triangles overlap at different depths.
+- `d8pixels.exe` draws eight Direct3D 8 cases on the hardware device and
+  checks their pixels; `d8pixels.exe sw` uses software vertex processing.
+  `d7draw.exe` also reports the Direct3D 8 interface requests and the
+  first DirectX 8 commands.
 
 ## Known limits
 
