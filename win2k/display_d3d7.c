@@ -1032,7 +1032,8 @@ static HRESULT send_batch8(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, ULONG count)
 {
     draw->count = count;
     ++c->display->d7draw.psDraws;
-    return queue_record(c, draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices) + count * sizeof(draw->vertices[0]),
+    return queue_record(c, draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices) +
+                        count * RB2K_D8_VERTEX_WORDS(draw->coordSets) * sizeof(ULONG),
                         RB2K_D8_RECORD, count / 3);
 }
 
@@ -1422,8 +1423,9 @@ static ULONG stage_sampler(const D7_STAGE *st, const D7_TEXTURE *tex)
 }
 
 /* A draw with a pixel shader. The program replaces the texture stages; the
- * coordinates of stages 0..3 reach it as four components each, a missing
- * one being 0 or, for the fourth, 1. Untransformed vertices are lit and
+ * coordinates of stages 0..7 reach it as four components each, a missing
+ * one being 0 or, for the fourth, 1. Only the sets up to the last one the
+ * program reads travel with the vertices. Untransformed vertices are lit and
  * fog blends the shader's result as for the fixed-function draws. */
 static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
 {
@@ -1433,6 +1435,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     DD_SLOT *s, *z;
     ULONG program = 0, fog = 0;
     ULONG fvf = p->fvf, stride = p->streamStride, offset = 16, diffuse = 0, specular = 0, normal = 0, position, sets, i, t, k;
+    ULONG used = 0, words;
     ULONG coordOffset[RB2K_D8_STAGES], coordFloats[RB2K_D8_STAGES];
     ULONG low = 0xffffffff, high = 0, count = 0, flatSource = 0;
     BOOL objectSpace;
@@ -1482,6 +1485,9 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
             offset = 0xffffffff;
     if (offset > stride || stride > 256) { skip(c, RB2K_D7_SKIP_VERTEX, p->primitives); return DD_OK; }
     RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices));
+    for (k = 0; k < RB2K_D8_STAGES; ++k) if (sh->coords & (1UL << k)) used = k + 1;
+    draw->coordSets = used;
+    words = RB2K_D8_VERTEX_WORDS(used);
     for (k = 0; k < RB2K_D8_STAGES; ++k) {
         D7_STAGE *st = &c->stages[k];
         D7_TEXTURE *tex;
@@ -1551,12 +1557,12 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     __try {
         EngProbeForRead((PVOID)(base + low * stride), (high - low) * stride + offset, 1);
         for (t = 0; t < p->primitives; ++t) {
-            RB2K_D3D8_VERTEX *out = draw->vertices + count;
+            ULONG *out = draw->vertices + count * words;
             ULONG flat;
             BOOL bad = FALSE;
             for (i = 0; i < 3; ++i) {
                 const BYTE *v = base + prim_vertex(p, t, i, &flat) * stride;
-                RB2K_D3D8_VERTEX *o = out + i;
+                RB2K_D3D8_VERTEX *o = (RB2K_D3D8_VERTEX *)(out + i * words);
                 ULONG j;
                 RtlCopyMemory(o, v, objectSpace ? 12 : 16);
                 if (objectSpace) o->rhw = 0x3f800000;
@@ -1564,7 +1570,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
                 else o->nx = o->ny = o->nz = 0;
                 o->diffuse = diffuse ? *(const ULONG *)(v + diffuse) : 0xffffffff;
                 o->specular = specular ? *(const ULONG *)(v + specular) : 0;
-                for (k = 0; k < RB2K_D8_STAGES; ++k)
+                for (k = 0; k < used; ++k)
                     for (j = 0; j < 4; ++j)
                         o->tc[k][j] = j < coordFloats[k] ? *(const ULONG *)(v + coordOffset[k] + 4 * j) :
                                       j == 3 ? 0x3f800000 : 0;
@@ -1574,7 +1580,11 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
                 const BYTE *v = base + flat * stride;
                 ULONG fd = diffuse ? *(const ULONG *)(v + diffuse) : 0xffffffff;
                 ULONG fs = specular ? *(const ULONG *)(v + specular) : 0;
-                for (i = 0; i < 3; ++i) { out[i].diffuse = fd; out[i].specular = fs; }
+                for (i = 0; i < 3; ++i) {
+                    RB2K_D3D8_VERTEX *o = (RB2K_D3D8_VERTEX *)(out + i * words);
+                    o->diffuse = fd;
+                    o->specular = fs;
+                }
             }
             if (bad) { ++d->d7draw.badPositions; skip(c, RB2K_D7_SKIP_VERTEX, 1); continue; }
             count += 3;
@@ -2475,7 +2485,7 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
      * announced itself as Direct3D 9, which uses this record for drivers of
      * the Direct3D 8 interface. */
     c->pixelShaderVersion = d->d7draw.d8Version >= 0x900 ? 0xffff0200 : 0xffff0103;
-    c->maxSimultaneousTextures = RB2K_D8_STAGES;
+    c->maxSimultaneousTextures = RB_PS_COORD_SETS;  /* t0..t3 of version 1 shaders */
     c->maxPixelShaderValue = 0x3f800000;            /* 1 */
 }
 

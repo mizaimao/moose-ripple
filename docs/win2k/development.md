@@ -1715,7 +1715,8 @@ computed unclamped as Direct3D 9 does. The expanded instructions (`nrm`,
 `crs`, `dp2add`, `sincos` and the matrix forms) go through scratch
 registers, and the result is written after fog. Only 2D samplers are
 accepted, because the device has no cube or volume textures yet, and
-texture coordinates t0 to t3 and samplers s0 to s3 are available.
+texture coordinates t0 to t7 and samplers s0 to s7 are available (see the
+next section).
 
 No new driver interface was needed. Microsoft's Direct3D 9 runtime asks
 a driver of the Direct3D 8 interface for its Direct3D 8 record, and it
@@ -1748,3 +1749,24 @@ shader in the Direct3D 8 test with `_bias` on a texture register and a
 negated `def` constant; `d9pixels` skips that one unless asked for it.
 Windows 2000 has no Direct3D 9 runtime and was not rerun; its Direct3D 7
 path is unchanged.
+
+## Eight coordinate sets and samplers for pixel shader 2.0
+
+Shader model 2 programs can read texture coordinates t0 to t7 and sample
+s0 to s7. A pixel shader draw carries only the coordinate sets up to the
+last one its program reads: each vertex in the record is 9 + 4 x sets
+words (position, colours, normal, then the sets), and the vertex shaders
+step through the vertex constants by a stride passed in `CONST[0].z`
+instead of a fixed seven or eight constants. They output all eight sets
+as `GENERIC[2..9]`, so a set the draw does not carry holds words of the
+next vertex, which the program never reads; the fog depths moved from
+`GENERIC[6]` to `GENERIC[10]`. Version 1 programs keep t0 to t3, and the
+device still reports four simultaneous textures, the limit for them and
+for the fixed-function stages.
+
+On XP SP3 under KVM on the Intel UHD 630 host, a new `d9pixels` case draws
+with eight coordinate sets, samples s7 with t7 and s6 with t5 and adds
+t6, while sets 0 to 4 run the other way so that a wrong set would show.
+`d9pixels` passed all 31 cases with hardware and with software vertex
+processing, `d8pixels` its 23, the Direct3D 8 and 9 textured scenes
+passed, and Direct3D 8 Quake ran at 58.7 fps (58.6 before).

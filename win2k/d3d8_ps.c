@@ -488,8 +488,8 @@ static void fog_lines(PS *s, unsigned int fog, unsigned int log2e, const char *c
     if (kind == RB_PS_FOG_ALPHA) fog_line(s, "MOV_SAT TEMP[2].x, IN[1].wwww", 0, 0, 0, 0);
     else {
         if (kind == RB_PS_FOG_VERTEX)
-            fog_line(s, (fog & RB_PS_FOG_RANGE) ? "MOV TEMP[2].y, IN[8].yyyy" : "MOV TEMP[2].y, IN[8].xxxx", 0, 0, 0, 0);
-        else fog_line(s, (fog & RB_PS_FOG_W) ? "RCP TEMP[2].y, IN[8].wwww" : "MOV TEMP[2].y, IN[8].zzzz", 0, 0, 0, 0);
+            fog_line(s, (fog & RB_PS_FOG_RANGE) ? "MOV TEMP[2].y, IN[10].yyyy" : "MOV TEMP[2].y, IN[10].xxxx", 0, 0, 0, 0);
+        else fog_line(s, (fog & RB_PS_FOG_W) ? "RCP TEMP[2].y, IN[10].wwww" : "MOV TEMP[2].y, IN[10].zzzz", 0, 0, 0, 0);
         if (mode == 3) {   /* linear: (end - d) / (end - start) */
             fog_line(s, "ADD TEMP[2].x, ", c1, ".yyyy, -TEMP[2].yyyy", 0, 0);
             fog_line(s, "ADD TEMP[2].z, ", c1, ".yyyy, -", c1, ".xxxx");
@@ -542,7 +542,7 @@ static int reg2_name(PS *s, unsigned int token, unsigned int add, char *out, uns
         cat(out, size, "]");
         return 1;
     case Reg2Texture:
-        if (num >= RB_PS_COORD_SETS) return fail(s, RbPsRegister, token);
+        if (num >= RB_PS2_COORD_SETS) return fail(s, RbPsRegister, token);
         cat(out, size, "IN["); cat_number(out, size, 2 + num); cat(out, size, "]");
         s->info->coords |= 1u << num;
         return 1;
@@ -617,7 +617,7 @@ static int instruction2(PS *s, unsigned int op, unsigned int control, const unsi
         unsigned int sampler;
         if (n < 3 || control > 2 || reg2_type(p[2]) != Reg2Sampler) return fail(s, RbPsOpcode, op);
         sampler = reg_num(p[2]);
-        if (sampler >= RB_PS_COORD_SETS || !targets[s->samplerKind[sampler] < 5 ? s->samplerKind[sampler] : 0])
+        if (sampler >= RB_PS2_SAMPLERS || !targets[s->samplerKind[sampler] < 5 ? s->samplerKind[sampler] : 0])
             return fail(s, RbPsRegister, p[2]);
         if (!dest2(s, p[0], d, sizeof(d), &sat) || !source2(s, p[1], 0, 0, a, sizeof(a))) return 0;
         name[0] = 0;
@@ -752,14 +752,14 @@ static unsigned int translate2(PS *s, const unsigned int *tokens, unsigned int c
 {
     unsigned int imm = 3, k, log2e;
     put(&s->t, "FRAG\nDCL IN[0], GENERIC[0], LINEAR\nDCL IN[1], GENERIC[1], LINEAR\n");
-    for (k = 0; k < RB_PS_COORD_SETS; ++k) {
+    for (k = 0; k < RB_PS2_COORD_SETS; ++k) {
         put(&s->t, "DCL IN["); number(&s->t, 2 + k); put(&s->t, "], GENERIC["); number(&s->t, 2 + k);
         put(&s->t, "], PERSPECTIVE\n");
     }
-    if ((fog & 3) == RB_PS_FOG_VERTEX) put(&s->t, "DCL IN[8], GENERIC[6], PERSPECTIVE\n");
-    if ((fog & 3) == RB_PS_FOG_TABLE) put(&s->t, "DCL IN[8], POSITION, LINEAR\n");
+    if ((fog & 3) == RB_PS_FOG_VERTEX) put(&s->t, "DCL IN[10], GENERIC[10], PERSPECTIVE\n");
+    if ((fog & 3) == RB_PS_FOG_TABLE) put(&s->t, "DCL IN[10], POSITION, LINEAR\n");
     put(&s->t, "DCL OUT[0], COLOR\n");
-    for (k = 0; k < RB_PS_COORD_SETS; ++k) { put(&s->t, "DCL SAMP["); number(&s->t, k); put(&s->t, "]\n"); }
+    for (k = 0; k < RB_PS2_SAMPLERS; ++k) { put(&s->t, "DCL SAMP["); number(&s->t, k); put(&s->t, "]\n"); }
     put(&s->t, fog ? "DCL CONST[0..33]\n" : "DCL CONST[0..31]\n");
     put(&s->t, "DCL TEMP[0..20]\n"
                "IMM[0] FLT32 {0x3f000000, 0x3f800000, 0x40000000, 0x40800000}\n"
@@ -804,8 +804,8 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
         put(&s.t, "DCL IN["); number(&s.t, 2 + k); put(&s.t, "], GENERIC["); number(&s.t, 2 + k);
         put(&s.t, "], PERSPECTIVE\n");
     }
-    if ((fog & 3) == RB_PS_FOG_VERTEX) put(&s.t, "DCL IN[8], GENERIC[6], PERSPECTIVE\n");
-    if ((fog & 3) == RB_PS_FOG_TABLE) put(&s.t, "DCL IN[8], POSITION, LINEAR\n");
+    if ((fog & 3) == RB_PS_FOG_VERTEX) put(&s.t, "DCL IN[10], GENERIC[10], PERSPECTIVE\n");
+    if ((fog & 3) == RB_PS_FOG_TABLE) put(&s.t, "DCL IN[10], POSITION, LINEAR\n");
     put(&s.t, "DCL OUT[0], COLOR\n");
     for (k = 0; k < RB_PS_COORD_SETS; ++k) { put(&s.t, "DCL SAMP["); number(&s.t, k); put(&s.t, "]\n"); }
     put(&s.t, fog ? "DCL CONST[0..9]\n" : "DCL CONST[0..7]\n");

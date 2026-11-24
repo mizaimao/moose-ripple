@@ -49,20 +49,25 @@
 #define IOCTL_RB2K_D3D8_PROGRAM_FREE RB2K_DD_IOCTL(0x921)
 #define RB2K_D8_PROGRAMS 32
 #define RB2K_D8_PROGRAM_BYTES 4096
-#define RB2K_D8_STAGES 4
+#define RB2K_D8_STAGES 8            /* samplers, and texture coordinate sets */
 #define RB2K_D8_VERTICES 48
 #define RB2K_D8_RECORD 0x80000000UL
 /* samplers: the texture stages the program samples; text: TGSI, zero-terminated. */
 typedef struct { ULONG samplers; char text[RB2K_D8_PROGRAM_BYTES]; } RB2K_D3D8_PROGRAM;
 /* A transformed or object-space position as for RB2K_D3D7_VERTEX, the packed
- * colours, and four IEEE components of the coordinates of each stage. */
-typedef struct { ULONG x, y, z, rhw, diffuse, specular, tc[RB2K_D8_STAGES][4], nx, ny, nz; } RB2K_D3D8_VERTEX;
-/* The first seven words match RB2K_D3D7_DRAW. Constants are c0..c7 as
- * IEEE words; samplers and borders are encoded as in RB2K_D3D7_DRAW. */
+ * colours, the IEEE normal, and four IEEE components of each texture
+ * coordinate set. A draw carries only its first coordSets sets, so its
+ * vertices are RB2K_D8_VERTEX_WORDS(coordSets) words apart. */
+typedef struct { ULONG x, y, z, rhw, diffuse, specular, nx, ny, nz, tc[RB2K_D8_STAGES][4]; } RB2K_D3D8_VERTEX;
+#define RB2K_D8_VERTEX_WORDS(sets) (9UL + 4UL * (sets))
+/* The first seven words match RB2K_D3D7_DRAW. Constants are c0..c7 (or
+ * c0..c31) as IEEE words; samplers and borders are encoded as in
+ * RB2K_D3D7_DRAW. */
 typedef struct {
     ULONG target, depth, count;
     ULONG depthState, alphaTest, blend, cull;
     ULONG program;
+    ULONG coordSets;                /* 0..RB2K_D8_STAGES */
     ULONG textures[RB2K_D8_STAGES], samplers[RB2K_D8_STAGES], borders[RB2K_D8_STAGES];
     ULONG constantCount;            /* 8 for version 1 programs, 32 for shader model 2 */
     ULONG constants[32][4];
@@ -75,7 +80,7 @@ typedef struct {
     ULONG lighting, lightCount, lightFlags, ambient, specular;
     ULONG material[17];
     ULONG lights[8][26];
-    RB2K_D3D8_VERTEX vertices[RB2K_D8_VERTICES];
+    ULONG vertices[RB2K_D8_VERTICES * RB2K_D8_VERTEX_WORDS(RB2K_D8_STAGES)];
 } RB2K_D3D8_DRAW;
 typedef struct { ULONG clears, triangles; } RB2K_D3D7_COMPLETED;
 #define RB2K_D3D7_VERTICES 96

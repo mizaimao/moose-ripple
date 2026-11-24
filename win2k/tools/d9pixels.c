@@ -2,7 +2,7 @@
  * transformed triangles from user memory, a vertex buffer, an index buffer
  * with and without a base vertex, a strip, a managed texture and untransformed
  * vertices, fourteen pixel shaders of versions 1.1 and 1.2, including fog
- * and lit untransformed vertices, and eight of shader model 2.0. Each case
+ * and lit untransformed vertices, and nine of shader model 2.0. Each case
  * draws on a 128x128 lockable back buffer and inspects a few pixels well
  * inside the shapes. "sw" asks for software vertex
  * processing. Built against the Microsoft headers; d3d9.dll is loaded at
@@ -664,6 +664,60 @@ static void pixel_shaders(int only, BOOL version2)
             ps_quad(v, 32, 32, 96, 96, 0xffffffff, 0, 0, 1, 1);
             ps_run(ops[o].name, ps, v, 1, cs, 2);
         }
+    }
+    if (version2 && (!only || only == 29)) {
+        /* ps_2_0 with sets t5..t7 and samplers s6 and s7: texld r0, t7, s7;
+         * texld r1, t5, s6; mul r0, r0, r1; add r0.z, r0, t6.x. Sets 0 to 4
+         * run the other way, so taking a wrong set shows. */
+        static const DWORD ps[] = { 0xffff0200, P2DCL_T(5, 3), P2DCL_T(6, 3), P2DCL_T(7, 3), P2DCL_S(6), P2DCL_S(7),
+            P2I(OTex, 3), P2D(RR, 0, 15), P2SRC(RT, 7), P2SRC(10, 7),
+            P2I(OTex, 3), P2D(RR, 1, 15), P2SRC(RT, 5), P2SRC(10, 6),
+            P2I(OMul, 3), P2D(RR, 0, 15), P2SRC(RR, 0), P2SRC(RR, 1),
+            P2I(OAdd, 3), P2D(RR, 0, 4), P2SRC(RR, 0), P2S(RT, 6, 0x00, 0),
+            P2I(OMov, 2), P2D(8, 0, 15), P2SRC(RR, 0), PSEND };
+        typedef struct { float x, y, z, rhw; DWORD diffuse; float tc[8][2]; } WIDEVERTEX;
+        const float xs[6] = { 32, 96, 32, 32, 96, 96 }, ys[6] = { 32, 32, 96, 96, 32, 96 };
+        WIDEVERTEX w[6];
+        IDirect3DPixelShader9 *handle = NULL;
+        HRESULT hr;
+        int j;
+        for (i = 0; i < 6; ++i) {
+            float u = xs[i] == 32 ? 0.0f : 1.0f, vv = ys[i] == 32 ? 0.0f : 1.0f;
+            w[i].x = xs[i]; w[i].y = ys[i]; w[i].z = 0.5f; w[i].rhw = 1.0f; w[i].diffuse = 0xffffffff;
+            for (j = 0; j < 8; ++j) { w[i].tc[j][0] = 1.0f - u; w[i].tc[j][1] = 1.0f - vv; }
+            w[i].tc[5][0] = u; w[i].tc[5][1] = vv;
+            w[i].tc[6][0] = 0.25f; w[i].tc[6][1] = 0.0f;
+            w[i].tc[7][0] = u; w[i].tc[7][1] = vv;
+        }
+        for (i = 0; i < 4; ++i) {
+            float y[3] = { 1.0f, 1.0f, 0.0f };
+            texel(i, t);
+            for (k = 0; k < 3; ++k) want[i][k] = t[k] * y[k] + (k == 2 ? 0.25f : 0.0f);
+        }
+        quad_samples(s, want);
+        IDirect3DDevice9_SetTexture(device, 6, (IDirect3DBaseTexture9 *)ps_textures[1]);
+        IDirect3DDevice9_SetTexture(device, 7, (IDirect3DBaseTexture9 *)ps_textures[0]);
+        for (k = 6; k < 8; ++k) {
+            IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+            IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+            IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+            IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+            IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+        }
+        hr = IDirect3DDevice9_CreatePixelShader(device, ps, &handle);
+        if (FAILED(hr)) fail_hr("ps2_eight_sets", "create", hr);
+        else {
+            if (begin("ps2_eight_sets")) {
+                IDirect3DDevice9_SetPixelShader(device, handle);
+                IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX8);
+                hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, w, sizeof(w[0]));
+                IDirect3DDevice9_SetPixelShader(device, NULL);
+                if (FAILED(hr)) { fail_hr("ps2_eight_sets", "draw", hr); IDirect3DDevice9_EndScene(device); }
+                else check("ps2_eight_sets", s, 5);
+            }
+            IDirect3DPixelShader9_Release(handle);
+        }
+        for (k = 6; k < 8; ++k) IDirect3DDevice9_SetTexture(device, k, NULL);
     }
     if (only == 12) {   /* tex t0; add r0, t0_bias, c0 */
         static const DWORD ps[] = { PSV(1), DEF(0, F05, F05, F05, F05), OTex, DST(RT, 0),

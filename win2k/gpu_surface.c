@@ -230,7 +230,8 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
     ULONG i, program, header = FIELD_OFFSET(RB2K_D3D8_DRAW, vertices);
     *status = ERROR_INVALID_PARAMETER;
     if (!gpu->d3d8 || length < header || !d->count || d->count > RB2K_D8_VERTICES || d->count % 3 ||
-        length != header + d->count*sizeof(d->vertices[0]) || d->target != image->id ||
+        d->coordSets > RB2K_D8_STAGES ||
+        length != header + d->count * RB2K_D8_VERTEX_WORDS(d->coordSets) * sizeof(ULONG) || d->target != image->id ||
         !rb_gpu_d8_valid(d) || image->depth16 || (d->depthState && !d->depth))
         return refuse(gpu, RB2K_D7_SITE_RECORD, *status, 0);
     *status = ERROR_INVALID_HANDLE;
@@ -253,7 +254,7 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
     }
     *status = ERROR_INVALID_PARAMETER;
     for (i = 0; i < d->count; ++i) {
-        const RB2K_D3D8_VERTEX *v = d->vertices+i;
+        const RB2K_D3D8_VERTEX *v = (const RB2K_D3D8_VERTEX *)(d->vertices + i * RB2K_D8_VERTEX_WORDS(d->coordSets));
         if ((v->x & 0x7fffffff) >= 0x7f800000 || (v->y & 0x7fffffff) >= 0x7f800000 ||
             (v->z & 0x7fffffff) >= 0x7f800000 || !(v->rhw & 0x7fffffff) ||
             (v->rhw & 0x7fffffff) >= 0x7f800000)
