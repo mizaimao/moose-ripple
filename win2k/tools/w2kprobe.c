@@ -265,9 +265,27 @@ static int gpu_test(void)
     return 0;
 }
 
+extern DWORD rb_flip_width, rb_flip_height;
+
+/* WIDTHxHEIGHTxBITS, for example 1280x1024x32. */
+static BOOL mode_argument(const char *text, DWORD *width, DWORD *height, DWORD *bpp)
+{
+    DWORD *field[3], i;
+    field[0] = width; field[1] = height; field[2] = bpp;
+    for (i = 0; i < 3; ++i) {
+        DWORD value = 0;
+        if (*text < '0' || *text > '9') return FALSE;
+        while (*text >= '0' && *text <= '9') value = value * 10 + (DWORD)(*text++ - '0');
+        *field[i] = value;
+        if (i < 2 && *text++ != 'x') return FALSE;
+    }
+    return !*text && *width && *height && (*bpp == 8 || *bpp == 16 || *bpp == 32);
+}
+
 int main(int argc,char **argv)
 {
     int result;
+    DWORD width, height, bpp;
     output=GetStdHandle(STD_OUTPUT_HANDLE);
     if (argc == 2 && !lstrcmpiA(argv[1], "/gpu")) {
         result = gpu_test();
@@ -289,10 +307,18 @@ int main(int argc,char **argv)
         result = run(TRUE, 800, 600, 16);
     } else if (argc == 2 && !lstrcmpiA(argv[1], "/pattern8")) {
         result = run(TRUE, 800, 600, 8);
+    } else if (argc == 3 && !lstrcmpiA(argv[1], "/pattern") &&
+               mode_argument(argv[2], &width, &height, &bpp)) {
+        result = run(TRUE, width, height, bpp);
+    } else if (argc == 3 && !lstrcmpiA(argv[1], "/flipat") &&
+               mode_argument(argv[2], &width, &height, &bpp)) {
+        rb_flip_width = width;
+        rb_flip_height = height;
+        result = probe_ddraw(bpp == 32 ? RB2K_DDRAW_FLIP : bpp == 16 ? RB2K_DDRAW_FLIP16 : RB2K_DDRAW_FLIP8);
     } else if (argc == 1 || (argc == 2 && !lstrcmpiA(argv[1], "/pattern"))) {
         result = run(argc == 2, RB2K_DEFAULT_WIDTH, RB2K_DEFAULT_HEIGHT, 32);
     } else {
-        line("Usage: W2KPROBE [/pattern | /pattern800 | /pattern16 | /pattern8 | /gpu | /ddraw | /ddraw-full | /ddraw-pair | /window | /flip | /flip16 | /flip8]"); return 2;
+        line("Usage: W2KPROBE [/pattern | /pattern800 | /pattern16 | /pattern8 | /gpu | /ddraw | /ddraw-full | /ddraw-pair | /window | /flip | /flip16 | /flip8 | /pattern WxHxB | /flipat WxHxB]"); return 2;
     }
     if(output_failed) return 1;
     return result;
