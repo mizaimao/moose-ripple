@@ -76,6 +76,9 @@ int main(void)
     printf(" contexts");
     for (i = 0; i < 8; ++i) if (s.d8ContextKinds[i]) printf(" %lu=%lu", i, s.d8ContextKinds[i]);
     printf("\n");
+    printf("D8PS created=%lu draws=%lu last_detail=%lx failed", s.psCreated, s.psDraws, s.psLastDetail);
+    for (i = 0; i < 8; ++i) printf(" %lu", s.psFailed[i]);
+    printf("\n");
     if (s.d8LogCount) {
         printf("D8GDI2");
         for (i = 0; i < s.d8LogCount && i < 24; ++i) printf(" %lx/%lu", s.d8Log[i][0], s.d8Log[i][1]);
@@ -104,6 +107,8 @@ int main(void)
                        "fence_us=%I64d\n", names[i], p.op[i].calls, p.op[i].submits, p.op[i].bytes, p.op[i].failed,
                        p.op[i].ticks * 1000000 / p.frequency, p.op[i].queueTicks * 1000000 / p.frequency,
                        p.op[i].fenceTicks * 1000000 / p.frequency);
+        if (ExtEscape(dc, RB2K_D3D7_PROFILE_ESCAPE, 0, NULL, sizeof(p), (LPSTR)&p) > 0)
+            printf("D7REFUSED site=%lu status=%lu stage=%lu count=%lu\n", p.failSite, p.failStatus, p.failStage, p.failCount);
         if (ExtEscape(dc, RB2K_D3D7_FLIGHT_ESCAPE, 0, NULL, sizeof(f), (LPSTR)&f) > 0 && f.frequency > 0)
             printf("D7FLIGHT queued=%lu completed=%lu peak=%lu throttle_waits=%lu throttle_us=%I64d "
                    "access_waits=%lu access_us=%I64d\n", f.queued, f.completed, f.peak, f.throttleWaits,

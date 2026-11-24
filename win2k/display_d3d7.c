@@ -14,6 +14,7 @@
 #include <d3dnthal.h>
 #include "rb2kd3d7.h"
 #include "d3d8ddi.h"
+#include "d3d8_ps.h"
 
 /* These Direct3D 7 HRESULTs are declared only in the user-side d3d.h. */
 #ifndef D3DERR_UNSUPPORTEDCOLOROPERATION
@@ -24,7 +25,7 @@
 #endif
 
 enum { MaxContexts = 16, MaxCommandBytes = 1 << 20, TextureStages = 8, MaxTextures = 1024, MaxLights = 32,
-       MaxBuffers = 1024 };
+       MaxBuffers = 1024, MaxShaders = 32 };
 /* DP2 SETLIGHT operations (D3DHAL_SETLIGHT_*). */
 enum { SetLightEnable, SetLightDisable, SetLightData };
 typedef char light_record[sizeof(D3DLIGHT7) == 26 * sizeof(ULONG) ? 1 : -1];
@@ -33,6 +34,9 @@ typedef struct {
     ULONG texture, colorOp, colorArg1, colorArg2, alphaOp, alphaArg1, alphaArg2;
     ULONG coordIndex, addressU, addressV, magFilter, minFilter, mipFilter, border, transform;
 } D7_STAGE;
+/* A pixel shader of a context: its handle, the miniport program (zero when
+ * it could not be translated) and the stages it samples and reads. */
+typedef struct { ULONG handle, program, samplers, coords; } D8_SHADER;
 typedef struct {
     ULONG id, target, depth;
     DISPLAY *display;
@@ -63,6 +67,9 @@ typedef struct {
     BOOL inScene, queued;
     ULONG minStart, maxEnd;     /* diagnostics for one command buffer */
     RB2K_D3D7_DRAW draw;        /* the batch being filled */
+    D8_SHADER shaders[MaxShaders];
+    ULONG psConst[8][4];        /* pixel shader constants c0..c7 */
+    RB2K_D3D8_DRAW draw8;       /* the pixel shader batch being filled */
     D7_STAGE stages[TextureStages];
 } D7_CONTEXT;
 /* A system-memory texture registered through CreateSurfaceEx. The address
@@ -95,9 +102,11 @@ typedef struct {
     ULONG handle;
 } D8_BUFFER;
 
+static void release_shaders(D7_CONTEXT *c);
 static HSEMAPHORE registry;
 static D8_BUFFER *buffers;
 static WORD *indexScratch;      /* indices copied out of the process before use */
+static RB2K_D3D8_PROGRAM *programScratch;   /* a translated pixel shader on its way */
 static ULONG indexScratchCount;
 static D7_CONTEXT contexts[MaxContexts];
 static ULONG lastContext;
@@ -113,6 +122,7 @@ void rb_d7_init(void)
     if (!registry) registry = EngCreateSemaphore();
     if (!textures) textures = EngAllocMem(FL_ZERO_MEMORY, MaxTextures * sizeof(*textures), 't7bR');
     if (!buffers) buffers = EngAllocMem(FL_ZERO_MEMORY, MaxBuffers * sizeof(*buffers), 'b8bR');
+    if (!programScratch) programScratch = EngAllocMem(0, sizeof(*programScratch), 's8bR');
     if (!uploadScratch)
         uploadScratch = EngAllocMem(0, sizeof(RB2K_D3D7_TEXTURE) + RB2K_D7_UPLOAD_BYTES, 'p7bR');
 }
@@ -188,7 +198,10 @@ void rb_d7_disable(DISPLAY *d)
     if (!registry) return;
     EngAcquireSemaphore(registry);
     for (i = 0; i < MaxContexts; ++i)
-        if (contexts[i].display == d) RtlZeroMemory(&contexts[i], sizeof(contexts[i]));
+        if (contexts[i].display == d) {
+            release_shaders(&contexts[i]);
+            RtlZeroMemory(&contexts[i], sizeof(contexts[i]));
+        }
     /* Every DirectDraw object of this display is going away. */
     for (i = 0; textures && i < MaxTextures; ++i)
         if (textures[i].display == d) release_texture(&textures[i], TRUE);
@@ -436,6 +449,7 @@ static DWORD APIENTRY destroy_local(PDD_DESTROYDDLOCALDATA a)
     for (i = 0; i < MaxContexts; ++i) {
         if (contexts[i].display == d && contexts[i].local == a->pDDLcl) {
             if (FAILED(finish_scene(&contexts[i]))) a->ddRVal = DDERR_SURFACELOST;
+            release_shaders(&contexts[i]);
             RtlZeroMemory(&contexts[i], sizeof(contexts[i]));
         }
     }
@@ -568,6 +582,7 @@ static DWORD APIENTRY destroy_context(LPD3DNTHAL_CONTEXTDESTROYDATA a)
         DISPLAY *d = c->display;
         EngAcquireSemaphore(d->ddLock);
         a->ddrval = finish_scene(c);
+        release_shaders(c);
         RtlZeroMemory(c, sizeof(*c));
         EngReleaseSemaphore(d->ddLock);
     }
@@ -971,30 +986,44 @@ static HRESULT refused(DISPLAY *d, ULONG site, LPD3DNTHAL_DRAWPRIMITIVES2DATA a,
 
 /* Queue one draw of count vertices; a full queue, or one for another
  * target, goes to the miniport first. */
-static HRESULT send_batch(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, ULONG count)
+static HRESULT queue_record(D7_CONTEXT *c, const void *record, ULONG bytes, ULONG kind, ULONG triangles)
 {
     DISPLAY *d = c->display;
-    ULONG bytes = FIELD_OFFSET(RB2K_D3D7_DRAW, vertices) + count * sizeof(draw->vertices[0]);
-    draw->count = count;
+    ULONG target = *(const ULONG *)record;
     if (!drawQueue) {
         drawQueue = EngAllocMem(0, sizeof(ULONG) + RB2K_D7_DRAWS_BYTES, 'q7bR');
         if (!drawQueue) return DDERR_OUTOFMEMORY;
     }
-    if (drawQueueBytes && (drawQueueDisplay != d || *(const ULONG *)drawQueue != draw->target ||
+    if (drawQueueBytes && (drawQueueDisplay != d || *(const ULONG *)drawQueue != target ||
                            drawQueueBytes + sizeof(ULONG) + bytes > sizeof(ULONG) + RB2K_D7_DRAWS_BYTES) &&
         flush_draws()) return DDERR_GENERIC;
     if (!drawQueueBytes) {
-        *(ULONG *)drawQueue = draw->target;
+        *(ULONG *)drawQueue = target;
         drawQueueBytes = sizeof(ULONG);
         drawQueueDisplay = d;
     }
-    *(ULONG *)(drawQueue + drawQueueBytes) = bytes;
-    RtlCopyMemory(drawQueue + drawQueueBytes + sizeof(ULONG), draw, bytes);
+    *(ULONG *)(drawQueue + drawQueueBytes) = bytes | kind;
+    RtlCopyMemory(drawQueue + drawQueueBytes + sizeof(ULONG), record, bytes);
     drawQueueBytes += sizeof(ULONG) + bytes;
     c->queued = TRUE;
-    d->d7draw.drawn += count / 3;
+    d->d7draw.drawn += triangles;
     ++d->d7draw.drawCalls;
     return DD_OK;
+}
+
+static HRESULT send_batch(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, ULONG count)
+{
+    draw->count = count;
+    return queue_record(c, draw, FIELD_OFFSET(RB2K_D3D7_DRAW, vertices) + count * sizeof(draw->vertices[0]), 0,
+                        count / 3);
+}
+
+static HRESULT send_batch8(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, ULONG count)
+{
+    draw->count = count;
+    ++c->display->d7draw.psDraws;
+    return queue_record(c, draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices) + count * sizeof(draw->vertices[0]),
+                        RB2K_D8_RECORD, count / 3);
 }
 
 /* Choose the draw's fog: table fog when a table mode is set, else fog
@@ -1277,6 +1306,212 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     return hr;
 }
 
+/* ---- Direct3D 8 pixel shaders ---- */
+
+static D8_SHADER *find_shader(D7_CONTEXT *c, ULONG handle)
+{
+    ULONG i;
+    for (i = 0; handle && i < MaxShaders; ++i)
+        if (c->shaders[i].handle == handle) return &c->shaders[i];
+    return NULL;
+}
+
+static void release_shader(D7_CONTEXT *c, D8_SHADER *sh)
+{
+    if (sh->program) request(c->display, IOCTL_RB2K_D3D8_PROGRAM_FREE, &sh->program, sizeof(sh->program), NULL, 0);
+    RtlZeroMemory(sh, sizeof(*sh));
+}
+
+static void release_shaders(D7_CONTEXT *c)
+{
+    ULONG i;
+    for (i = 0; i < MaxShaders; ++i) if (c->shaders[i].handle) release_shader(c, &c->shaders[i]);
+}
+
+/* Translate a pixel shader and give its text to the miniport. A shader that
+ * cannot be translated keeps its handle; draws with it are counted and
+ * skipped. */
+static void create_shader(D7_CONTEXT *c, ULONG handle, const BYTE *code, ULONG bytes)
+{
+    RB2K_D7_DRAWSTATS *s = &c->display->d7draw;
+    D8_SHADER *sh = find_shader(c, handle);
+    RB_PS_INFO info;
+    ULONG i, n = 0, id = 0, written;
+    if (sh) release_shader(c, sh);
+    for (i = 0; i < MaxShaders && c->shaders[i].handle; ++i) {}
+    if (!handle || i == MaxShaders) { ++s->psFailed[RbPsReasons]; return; }
+    sh = &c->shaders[i];
+    sh->handle = handle;
+    info.reason = RbPsOverflow;
+    info.detail = 0;
+    if (programScratch)
+        n = rb_ps_translate((const unsigned int *)code, bytes / 4, programScratch->text,
+                            sizeof(programScratch->text), &info);
+    if (n) {
+        programScratch->samplers = info.samplers;
+        if (!miniport(c->display, IOCTL_RB2K_D3D8_PROGRAM, programScratch, sizeof(ULONG) + n, &id, sizeof(id),
+                      &written) && written == sizeof(id)) {
+            sh->program = id;
+            sh->samplers = info.samplers;
+            sh->coords = info.coords;
+        } else info.reason = RbPsReasons;
+    }
+    if (sh->program) ++s->psCreated;
+    else {
+        ++s->psFailed[info.reason < RbPsReasons ? info.reason : RbPsReasons];
+        s->psLastDetail = info.detail;
+    }
+}
+
+static ULONG stage_sampler(const D7_STAGE *st, const D7_TEXTURE *tex)
+{
+    return (st->addressU >= 1 && st->addressU <= 4 ? st->addressU : 1) |
+           (st->addressV >= 1 && st->addressV <= 4 ? st->addressV : 1) << 4 |
+           (st->magFilter >= 1 && st->magFilter <= 5 ? st->magFilter : 1) << 8 |
+           (st->minFilter >= 1 && st->minFilter <= 3 ? st->minFilter : 1) << 12 |
+           (tex && tex->levels > 1 && st->mipFilter >= D3DTFP_POINT && st->mipFilter <= D3DTFP_LINEAR ?
+            st->mipFilter : D3DTFP_NONE) << 16;
+}
+
+/* A draw with a pixel shader. The program replaces the texture stages; the
+ * coordinates of stages 0..3 reach it as four components each, a missing
+ * one being 0 or, for the fourth, 1. Lighting is not combined with pixel
+ * shaders yet, and fog is not applied after them. */
+static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
+{
+    DISPLAY *d = c->display;
+    RB2K_D3D8_DRAW *draw = &c->draw8;
+    D8_SHADER *sh = find_shader(c, c->pixelShader);
+    DD_SLOT *s, *z;
+    ULONG fvf = p->fvf, stride = p->streamStride, offset = 16, diffuse = 0, specular = 0, position, sets, i, t, k;
+    ULONG coordOffset[RB2K_D8_STAGES], coordFloats[RB2K_D8_STAGES];
+    ULONG low = 0xffffffff, high = 0, count = 0, flatSource = 0;
+    BOOL objectSpace;
+    const BYTE *base;
+    LONGLONG lo, hi;
+    HRESULT hr = render_surfaces(c, &s, &z);
+    if (FAILED(hr)) return hr;
+    if (!p->primitives) return DD_OK;
+    if (!sh || !sh->program) { skip(c, RB2K_D7_SKIP_COMBINER, p->primitives); return DD_OK; }
+    if (c->fill != D3DFILL_SOLID) { skip(c, RB2K_D7_SKIP_FILL, p->primitives); return DD_OK; }
+    if (c->stencil) { skip(c, RB2K_D7_SKIP_STENCIL, p->primitives); return DD_OK; }
+    position = fvf & D3DFVF_POSITION_MASK;
+    objectSpace = position != D3DFVF_XYZRHW;
+    if (!p->stream || !position || (fvf & D3DFVF_RESERVED0) || (!objectSpace && (fvf & D3DFVF_NORMAL)) ||
+        (objectSpace && c->lighting)) {
+        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+        return DD_OK;
+    }
+    if (objectSpace) offset = 12 + (position >= D3DFVF_XYZB1 ? 4 * ((position - D3DFVF_XYZRHW) / 2) : 0);
+    if (fvf & D3DFVF_NORMAL) offset += 12;
+    if (fvf & D3DFVF_RESERVED1) offset += 4;
+    if (fvf & D3DFVF_DIFFUSE) { diffuse = offset; offset += 4; }
+    if (fvf & D3DFVF_SPECULAR) { specular = offset; offset += 4; }
+    for (k = 0; k < RB2K_D8_STAGES; ++k) coordOffset[k] = coordFloats[k] = 0;
+    sets = (fvf & D3DFVF_TEXCOUNT_MASK) >> D3DFVF_TEXCOUNT_SHIFT;
+    for (i = 0; i < sets; ++i) {
+        static const UCHAR floats[] = { 2, 3, 4, 1 };
+        ULONG n = floats[(fvf >> (16 + 2*i)) & 3];
+        for (k = 0; k < RB2K_D8_STAGES; ++k)
+            if ((sh->coords & (1UL << k)) && i == (c->stages[k].coordIndex & 0xffff)) {
+                coordOffset[k] = offset;
+                coordFloats[k] = n;
+            }
+        offset += 4 * n;
+    }
+    for (k = 0; k < RB2K_D8_STAGES; ++k)
+        if ((sh->coords & (1UL << k)) && (c->stages[k].coordIndex >> 16)) offset = 0xffffffff;
+    if (offset > stride || stride > 256) { skip(c, RB2K_D7_SKIP_VERTEX, p->primitives); return DD_OK; }
+    RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices));
+    for (k = 0; k < RB2K_D8_STAGES; ++k) {
+        D7_STAGE *st = &c->stages[k];
+        D7_TEXTURE *tex;
+        if (!(sh->samplers & (1UL << k))) continue;
+        tex = find_texture(c->local, st->texture);
+        if (!tex || !tex->format || tex->owner != c->owner || !(draw->textures[k] = texture_ready(c, tex, s->id))) {
+            skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives);
+            return DD_OK;
+        }
+        draw->samplers[k] = stage_sampler(st, tex);
+        draw->borders[k] = st->border;
+    }
+    draw->target = s->id;
+    draw->depth = z ? z->id : 0;
+    if (z && c->zEnable && c->zFunc >= D3DCMP_NEVER && c->zFunc <= D3DCMP_ALWAYS)
+        draw->depthState = RB2K_Z_ENABLE | (c->zWrite ? RB2K_Z_WRITE : 0) | (c->zFunc - 1);
+    if (c->alphaTest && c->alphaFunc >= D3DCMP_NEVER && c->alphaFunc <= D3DCMP_ALWAYS)
+        draw->alphaTest = RB2K_D7_ON | (c->alphaFunc << 8) | (c->alphaRef & 255);
+    if (c->blend && c->srcBlend >= D3DBLEND_ZERO && c->srcBlend <= D3DBLEND_BOTHINVSRCALPHA &&
+        c->dstBlend >= D3DBLEND_ZERO && c->dstBlend <= D3DBLEND_BOTHINVSRCALPHA)
+        draw->blend = RB2K_D7_ON | (c->srcBlend << 8) | c->dstBlend;
+    draw->cull = c->cull >= D3DCULL_NONE && c->cull <= D3DCULL_CCW ? c->cull : D3DCULL_NONE;
+    draw->program = sh->program;
+    RtlCopyMemory(draw->constants, c->psConst, sizeof(draw->constants));
+    if (objectSpace) {
+        draw->transform = 1;
+        RtlCopyMemory(draw->matrices, c->matrices, sizeof(draw->matrices));
+        RtlCopyMemory(draw->viewport, c->viewport, sizeof(c->viewport));
+        draw->viewport[4] = c->zRange[0];
+        draw->viewport[5] = c->zRange[1];
+    }
+    if (c->fog) d->d7draw.ignored[RB2K_D7_IGNORED_FOG] += p->primitives;
+    for (t = 0; t < p->primitives; ++t)
+        for (i = 0; i < 3; ++i) {
+            ULONG v = prim_vertex(p, t, i, &flatSource);
+            if (v < low) low = v;
+            if (v > high) high = v;
+        }
+    lo = p->streamFirst + (LONGLONG)low * stride;
+    hi = p->streamFirst + (LONGLONG)high * stride + offset;
+    if (lo < 0 || hi > p->streamBytes) {
+        ++d->d7draw.beyondCalls;
+        d->d7draw.beyondVertices += p->primitives;
+        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+        return DD_OK;
+    }
+    base = p->streamData + p->streamFirst;
+    __try {
+        EngProbeForRead((PVOID)(base + low * stride), (high - low) * stride + offset, 1);
+        for (t = 0; t < p->primitives; ++t) {
+            RB2K_D3D8_VERTEX *out = draw->vertices + count;
+            ULONG flat;
+            BOOL bad = FALSE;
+            for (i = 0; i < 3; ++i) {
+                const BYTE *v = base + prim_vertex(p, t, i, &flat) * stride;
+                RB2K_D3D8_VERTEX *o = out + i;
+                ULONG j;
+                RtlCopyMemory(o, v, objectSpace ? 12 : 16);
+                if (objectSpace) o->rhw = 0x3f800000;
+                o->diffuse = diffuse ? *(const ULONG *)(v + diffuse) : 0xffffffff;
+                o->specular = specular ? *(const ULONG *)(v + specular) : 0;
+                for (k = 0; k < RB2K_D8_STAGES; ++k)
+                    for (j = 0; j < 4; ++j)
+                        o->tc[k][j] = j < coordFloats[k] ? *(const ULONG *)(v + coordOffset[k] + 4 * j) :
+                                      j == 3 ? 0x3f800000 : 0;
+                bad |= bad_position((const RB2K_D3D7_VERTEX *)o);
+            }
+            if (c->shade == D3DSHADE_FLAT) {
+                const BYTE *v = base + flat * stride;
+                ULONG fd = diffuse ? *(const ULONG *)(v + diffuse) : 0xffffffff;
+                ULONG fs = specular ? *(const ULONG *)(v + specular) : 0;
+                for (i = 0; i < 3; ++i) { out[i].diffuse = fd; out[i].specular = fs; }
+            }
+            if (bad) { ++d->d7draw.badPositions; skip(c, RB2K_D7_SKIP_VERTEX, 1); continue; }
+            count += 3;
+            if (count == RB2K_D8_VERTICES || t + 1 == p->primitives) {
+                hr = send_batch8(c, draw, count);
+                if (FAILED(hr)) break;
+                count = 0;
+            }
+        }
+        if (SUCCEEDED(hr) && count) hr = send_batch8(c, draw, count);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+        hr = DD_OK;
+    }
+    return hr;
+}
+
 /* ---- Direct3D 8 streams ---- */
 
 static void trace8(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG op, ULONG n, const BYTE *p, ULONG avail)
@@ -1339,7 +1574,6 @@ static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULON
     ++c->display->d7draw.d8StreamDraws;
     if (!count) return DD_OK;
     if (type < RbTriangleList || type > RbTriangleFan) { skip(c, RB2K_D7_SKIP_PRIMITIVE, count); return DD_OK; }
-    if (c->pixelShader) { skip(c, RB2K_D7_SKIP_COMBINER, count); return DD_OK; }
     prims.kind = type == RbTriangleList ? List : type == RbTriangleStrip ? Strip : Fan;
     if ((c->fvf & 1) || !c->streamStride || c->streamStride > 256 || !stream_zero(c, a, &prims) ||
         first < -0x7fffffffLL || first > (LONGLONG)prims.streamBytes) {
@@ -1369,6 +1603,7 @@ static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULON
         }
         prims.indices = indexScratch;
     }
+    if (c->pixelShader) return shader_triangles(c, &prims);
     return triangles(c, a, prims.streamStride, &prims);
 }
 
@@ -1746,6 +1981,13 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             trace8(c, a, h->bCommand, n, p, remaining);
             if (n && h->bCommand == RbDp2SetVertexShader) { c->fvf = v[n - 1].handle; c->dx8 = TRUE; }
             if (n && h->bCommand == RbDp2SetPixelShader) c->pixelShader = v[n - 1].handle;
+            if (h->bCommand == RbDp2DeletePixelShader) {
+                ULONG k;
+                for (k = 0; k < n; ++k) {
+                    D8_SHADER *sh = find_shader(c, v[k].handle);
+                    if (sh) release_shader(c, sh);
+                }
+            }
             break;
         }
         case RbDp2SetStreamSource: {
@@ -1835,11 +2077,18 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             if (used > remaining) return DDERR_INVALIDPARAMS;
             trace8(c, a, h->bCommand, n, p, remaining);
             break;
-        case RbDp2CreatePixelShader:
+        case RbDp2CreatePixelShader: {
+            ULONG k;
             used = variable_records(p, remaining, n, sizeof(RB_DP2_CREATE_PIXEL_SHADER), 1, 0);
             if (used > remaining) return DDERR_INVALIDPARAMS;
             trace8(c, a, h->bCommand, n, p, remaining);
+            for (k = 0, used = 0; k < n; ++k) {
+                const RB_DP2_CREATE_PIXEL_SHADER *r = (const RB_DP2_CREATE_PIXEL_SHADER *)(p + used);
+                create_shader(c, r->handle, p + used + sizeof(*r), r->codeBytes);
+                used += sizeof(*r) + r->codeBytes;
+            }
             break;
+        }
         case RbDp2SetVertexShaderConst:
         case RbDp2SetPixelShaderConst: {
             /* Each record is followed by count four-float constants. */
@@ -1850,6 +2099,8 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
                 if (remaining - min(remaining, used) < sizeof(*r)) return DDERR_INVALIDPARAMS;
                 used += sizeof(*r);
                 if (r->count > (remaining - used) / 16) return DDERR_INVALIDPARAMS;
+                if (h->bCommand == RbDp2SetPixelShaderConst && r->reg < 8)
+                    RtlCopyMemory(c->psConst[r->reg], p + used, min(r->count, 8 - r->reg) * 16);
                 used += r->count * 16;
             }
             trace8(c, a, h->bCommand, n, p, remaining);
@@ -2138,7 +2389,8 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     c->maxStreams = 1;
     c->maxStreamStride = 255;
     c->vertexShaderVersion = 0xfffe0000;            /* version 0.0 */
-    c->pixelShaderVersion = 0xffff0000;
+    c->pixelShaderVersion = 0xffff0103;            /* 1.3 */
+    c->maxSimultaneousTextures = RB2K_D8_STAGES;
     c->maxPixelShaderValue = 0x3f800000;            /* 1 */
 }
 

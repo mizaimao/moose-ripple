@@ -19,7 +19,12 @@ typedef struct {
 typedef struct {
     LONGLONG frequency;
     RB2K_D7_TIME op[RB2K_D7_OPS];
+    /* The last refused draw record: the step (RB2K_D7_SITE_*), its status,
+     * the transport stage of a command failure, and refusals so far. */
+    ULONG failSite, failStatus, failStage, failCount;
 } RB2K_D7_PROFILE;
+enum { RB2K_D7_SITE_RECORD = 1, RB2K_D7_SITE_PROGRAM, RB2K_D7_SITE_DEPTH, RB2K_D7_SITE_TEXTURE,
+       RB2K_D7_SITE_VERTEX, RB2K_D7_SITE_COMMAND, RB2K_D7_SITE_STEP = 16 };   /* STEP + step in the draw */
 #define RB2K_D3D7_FLIGHT_ESCAPE 0x52420022
 typedef struct {
     LONGLONG frequency, throttleTicks, accessTicks;
@@ -88,6 +93,10 @@ typedef struct {
     ULONG d8Requests[32], d8Version, d8ContextKinds[8], d8Buffers, d8StreamDraws;
     ULONG d8TraceCount, d8Trace[64][7];
     ULONG d8LogCount, d8Log[24][2];     /* the first GetDriverInfo2 requests: type, expected size */
+    /* Pixel shaders given to the miniport, those refused by reason (the
+     * translator's codes; 7 counts other failures), the token behind the
+     * last refusal, and pixel shader draw records queued. */
+    ULONG psCreated, psFailed[8], psLastDetail, psDraws;
 } RB2K_D7_DRAWSTATS;
 enum { RB2K_D7_FAIL_RANGE, RB2K_D7_FAIL_VBCAPS, RB2K_D7_FAIL_LINEAR, RB2K_D7_FAIL_ADDRESS,
        RB2K_D7_FAIL_PROBE, RB2K_D7_FAIL_IMMEDIATE, RB2K_D7_FAIL_LENGTH, RB2K_D7_FAIL_OTHER };

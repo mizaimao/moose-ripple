@@ -10,7 +10,7 @@
 /* Host state objects one colour context has created for Direct3D draws.
  * Each table maps a validated key to a fixed object handle range. */
 enum { RB2K_D7_DSA_KEYS = 16, RB2K_D7_BLEND_KEYS = 8, RB2K_D7_SAMPLER_KEYS = 8,
-       RB2K_D7_SHADER_KEYS = 16 };
+       RB2K_D7_SHADER_KEYS = 16, RB2K_D8_SAMPLER_KEYS = 16 };
 typedef struct {
     ULONG keys[RB2K_D7_SHADER_KEYS > RB2K_D7_DSA_KEYS ? RB2K_D7_SHADER_KEYS : RB2K_D7_DSA_KEYS][6];
     ULONG used, next, bound;
@@ -24,6 +24,9 @@ typedef struct {
      * view handle in slot zero. */
     ULONG boundSampler[2], boundSamplers, boundViews, boundView0;
     RB2K_D7_CACHE dsa, blend, sampler, sampler1, shader;   /* sampler1: texture stage one */
+    /* Pixel shader draws: the texture in each stage's view, and their samplers. */
+    ULONG psViews[RB2K_D8_STAGES];
+    RB2K_D7_CACHE psSampler;
 } RB2K_D7_STATE;
 
 typedef struct RB2K_IMAGE {
@@ -138,6 +141,11 @@ typedef struct {
     ULONG presentCache;
     RB2K_DMA_SEGMENT rvdStaging[RB2K_RVD_SEGMENTS];
     ULONG rvdContexts;
+    /* Direct3D 8 pixel shader programs as TGSI text; an id is a serial
+     * number and the slot, so a freed id is never reused. */
+    struct { ULONG id, samplers, bytes; char text[RB2K_D8_PROGRAM_BYTES]; } programs[RB2K_D8_PROGRAMS];
+    ULONG programSerial;
+    ULONG d8Step;       /* the step of a pixel shader draw being queued, for failures */
 } RB2K_GPU;
 
 void rb_gpu_find(RB2K_GPU *gpu, PVOID extension, ULONG slot,
@@ -172,6 +180,9 @@ BOOLEAN rb_gpu_frame_flush(RB2K_GPU *gpu, RB2K_GPU_RESULT *result);
 BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image,
                        const RB2K_D3D7_DRAW *draw, const RB2K_TEXTURE *texture, const RB2K_TEXTURE *texture1);
 BOOLEAN rb_gpu_d7_valid(const RB2K_D3D7_DRAW *draw);
+BOOLEAN rb_gpu_d8_valid(const RB2K_D3D8_DRAW *draw);
+BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image, const RB2K_D3D8_DRAW *draw,
+                       const char *program, ULONG programBytes, RB2K_TEXTURE *const *textures);
 BOOLEAN rb_gpu_d7_samples(const RB2K_D3D7_DRAW *draw, ULONG stage);
 RB2K_TEXTURE *rb_gpu_texture(RB2K_GPU *gpu, ULONG id);
 BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture);

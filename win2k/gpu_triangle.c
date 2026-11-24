@@ -16,7 +16,8 @@
 
 enum {
     Raster = 9, Elements = 5, VertexShader = 6, ObjectShader = 7, LitShader = 8, DsaBase = 16, BlendBase = 32,
-    SamplerBase = 48, Sampler1Base = 56, ShaderBase = 64, TextureView = 80, TextureView1 = 81
+    SamplerBase = 48, Sampler1Base = 56, ShaderBase = 64, TextureView = 80, TextureView1 = 81,
+    PsVertexShader = 82, PsObjectShader = 83, PsViewBase = 84, PsSamplerBase = 96
 };
 enum { VertexStage = 0, FragmentStage = 1, PipeTriangles = 4, ShaderText = 2400, LitText = 8192 };
 typedef char sampler_handles_fit[Sampler1Base + RB2K_D7_SAMPLER_KEYS <= ShaderBase &&
@@ -657,6 +658,77 @@ static ULONG sampler_words(ULONG *words, ULONG handle, ULONG state, ULONG sample
     return n;
 }
 
+/* Depth and alpha test, blend and rasterizer objects, shared by the
+ * fixed-function and the pixel shader draws. */
+static BOOLEAN fixed_states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, ULONG depthState,
+                            ULONG alphaTest, ULONG blend, ULONG cull, ULONG transform)
+{
+    RB2K_D7_STATE *s = &image->d7;
+    ULONG words[64], n = 0, slot, key[1], state, i;
+    /* Depth and alpha test share one object. */
+    key[0] = depthState | (alphaTest << 8);
+    slot = cache_slot(&s->dsa, RB2K_D7_DSA_KEYS, key, 1, &state);
+    if (state != Hit) {
+        ULONG z = depthState;
+        if (state == Replaced) { words[n++] = DESTROY(VIRGL_OBJECT_DSA); words[n++] = DsaBase + slot; }
+        words[n++] = CREATE(VIRGL_OBJECT_DSA, VIRGL_OBJ_DSA_SIZE);
+        words[n++] = DsaBase + slot;
+        words[n++] = (z & RB2K_Z_ENABLE ? VIRGL_OBJ_DSA_S0_DEPTH_ENABLE(1) |
+                      VIRGL_OBJ_DSA_S0_DEPTH_WRITEMASK(!!(z & RB2K_Z_WRITE)) |
+                      VIRGL_OBJ_DSA_S0_DEPTH_FUNC(z & 7) : 0) |
+                     (alphaTest ? VIRGL_OBJ_DSA_S0_ALPHA_ENABLED(1) |
+                      VIRGL_OBJ_DSA_S0_ALPHA_FUNC(((alphaTest >> 8) & 15) - 1) : 0);
+        words[n++] = 0;
+        words[n++] = 0;
+        words[n++] = rb_gpu_channel(alphaTest & 255);
+    }
+    if (s->dsa.bound != slot + 1) {
+        words[n++] = BIND(VIRGL_OBJECT_DSA); words[n++] = DsaBase + slot;
+        s->dsa.bound = slot + 1;
+    }
+    key[0] = blend;
+    slot = cache_slot(&s->blend, RB2K_D7_BLEND_KEYS, key, 1, &state);
+    if (state != Hit) {
+        ULONG src = (blend >> 8) & 255, dst = blend & 255, rt = VIRGL_OBJ_BLEND_S2_RT_COLORMASK(15);
+        if (src == 12) { src = 5; dst = 6; }        /* both source alpha */
+        else if (src == 13) { src = 6; dst = 5; }   /* both inverse source alpha */
+        if (blend) rt |= VIRGL_OBJ_BLEND_S2_RT_BLEND_ENABLE(1) |
+            VIRGL_OBJ_BLEND_S2_RT_RGB_SRC_FACTOR(pipe_blend(src)) |
+            VIRGL_OBJ_BLEND_S2_RT_RGB_DST_FACTOR(pipe_blend(dst)) |
+            VIRGL_OBJ_BLEND_S2_RT_ALPHA_SRC_FACTOR(pipe_blend(src)) |
+            VIRGL_OBJ_BLEND_S2_RT_ALPHA_DST_FACTOR(pipe_blend(dst));
+        if (state == Replaced) { words[n++] = DESTROY(VIRGL_OBJECT_BLEND); words[n++] = BlendBase + slot; }
+        words[n++] = CREATE(VIRGL_OBJECT_BLEND, VIRGL_OBJ_BLEND_SIZE);
+        words[n++] = BlendBase + slot;
+        words[n++] = 0; words[n++] = 0; words[n++] = rt;
+        for (i = 1; i < VIRGL_MAX_COLOR_BUFS; ++i) words[n++] = 0;
+    }
+    if (s->blend.bound != slot + 1) {
+        words[n++] = BIND(VIRGL_OBJECT_BLEND); words[n++] = BlendBase + slot;
+        s->blend.bound = slot + 1;
+    }
+    if (s->boundRaster != cull + 3 * transform) {
+        ULONG key = cull + 3 * transform, bit = 1UL << key;
+        if (!(s->rasters & bit)) {
+            /* Window coordinates follow the Direct3D screen (y down), so a
+             * clockwise triangle faces the front, as in Gallium Nine.
+             * Transformed draws are clipped to the Direct3D viewport. */
+            words[n++] = CREATE(VIRGL_OBJECT_RASTERIZER, VIRGL_OBJ_RS_SIZE);
+            words[n++] = Raster + key;
+            words[n++] = VIRGL_OBJ_RS_S0_DEPTH_CLIP(1) | VIRGL_OBJ_RS_S0_HALF_PIXEL_CENTER(1) |
+                         VIRGL_OBJ_RS_S0_SCISSOR(transform) |
+                         VIRGL_OBJ_RS_S0_BOTTOM_EDGE_RULE(1) |
+                         VIRGL_OBJ_RS_S0_CULL_FACE(cull == CullCw ? 1 : cull == CullCcw ? 2 : 0);
+            words[n++] = 0x3f800000; words[n++] = 0; words[n++] = 0;
+            words[n++] = 0x3f800000; words[n++] = 0; words[n++] = 0; words[n++] = 0;
+            s->rasters |= bit;
+        }
+        words[n++] = BIND(VIRGL_OBJECT_RASTERIZER); words[n++] = Raster + key;
+        s->boundRaster = key;
+    }
+    return !n || rb_gpu_frame_words(gpu, r, image, words, n);
+}
+
 /* Emit the state changes of one draw: depth and alpha test, blend, cull,
  * fragment shader, texture factor, sampler and texture view. */
 static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
@@ -694,69 +766,7 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
             s->boundVertex = want;
         }
     }
-    /* Depth and alpha test share one object. */
-    key[0] = d->depthState | (d->alphaTest << 8);
-    slot = cache_slot(&s->dsa, RB2K_D7_DSA_KEYS, key, 1, &state);
-    if (state != Hit) {
-        ULONG z = d->depthState;
-        if (state == Replaced) { words[n++] = DESTROY(VIRGL_OBJECT_DSA); words[n++] = DsaBase + slot; }
-        words[n++] = CREATE(VIRGL_OBJECT_DSA, VIRGL_OBJ_DSA_SIZE);
-        words[n++] = DsaBase + slot;
-        words[n++] = (z & RB2K_Z_ENABLE ? VIRGL_OBJ_DSA_S0_DEPTH_ENABLE(1) |
-                      VIRGL_OBJ_DSA_S0_DEPTH_WRITEMASK(!!(z & RB2K_Z_WRITE)) |
-                      VIRGL_OBJ_DSA_S0_DEPTH_FUNC(z & 7) : 0) |
-                     (d->alphaTest ? VIRGL_OBJ_DSA_S0_ALPHA_ENABLED(1) |
-                      VIRGL_OBJ_DSA_S0_ALPHA_FUNC(((d->alphaTest >> 8) & 15) - 1) : 0);
-        words[n++] = 0;
-        words[n++] = 0;
-        words[n++] = rb_gpu_channel(d->alphaTest & 255);
-    }
-    if (s->dsa.bound != slot + 1) {
-        words[n++] = BIND(VIRGL_OBJECT_DSA); words[n++] = DsaBase + slot;
-        s->dsa.bound = slot + 1;
-    }
-    key[0] = d->blend;
-    slot = cache_slot(&s->blend, RB2K_D7_BLEND_KEYS, key, 1, &state);
-    if (state != Hit) {
-        ULONG src = (d->blend >> 8) & 255, dst = d->blend & 255, rt = VIRGL_OBJ_BLEND_S2_RT_COLORMASK(15);
-        if (src == 12) { src = 5; dst = 6; }        /* both source alpha */
-        else if (src == 13) { src = 6; dst = 5; }   /* both inverse source alpha */
-        if (d->blend) rt |= VIRGL_OBJ_BLEND_S2_RT_BLEND_ENABLE(1) |
-            VIRGL_OBJ_BLEND_S2_RT_RGB_SRC_FACTOR(pipe_blend(src)) |
-            VIRGL_OBJ_BLEND_S2_RT_RGB_DST_FACTOR(pipe_blend(dst)) |
-            VIRGL_OBJ_BLEND_S2_RT_ALPHA_SRC_FACTOR(pipe_blend(src)) |
-            VIRGL_OBJ_BLEND_S2_RT_ALPHA_DST_FACTOR(pipe_blend(dst));
-        if (state == Replaced) { words[n++] = DESTROY(VIRGL_OBJECT_BLEND); words[n++] = BlendBase + slot; }
-        words[n++] = CREATE(VIRGL_OBJECT_BLEND, VIRGL_OBJ_BLEND_SIZE);
-        words[n++] = BlendBase + slot;
-        words[n++] = 0; words[n++] = 0; words[n++] = rt;
-        for (i = 1; i < VIRGL_MAX_COLOR_BUFS; ++i) words[n++] = 0;
-    }
-    if (s->blend.bound != slot + 1) {
-        words[n++] = BIND(VIRGL_OBJECT_BLEND); words[n++] = BlendBase + slot;
-        s->blend.bound = slot + 1;
-    }
-    if (s->boundRaster != d->cull + 3 * d->transform) {
-        ULONG key = d->cull + 3 * d->transform, bit = 1UL << key;
-        if (!(s->rasters & bit)) {
-            /* Window coordinates follow the Direct3D screen (y down), so a
-             * clockwise triangle faces the front, as in Gallium Nine.
-             * Transformed draws are clipped to the Direct3D viewport. */
-            words[n++] = CREATE(VIRGL_OBJECT_RASTERIZER, VIRGL_OBJ_RS_SIZE);
-            words[n++] = Raster + key;
-            words[n++] = VIRGL_OBJ_RS_S0_DEPTH_CLIP(1) | VIRGL_OBJ_RS_S0_HALF_PIXEL_CENTER(1) |
-                         VIRGL_OBJ_RS_S0_SCISSOR(d->transform) |
-                         VIRGL_OBJ_RS_S0_BOTTOM_EDGE_RULE(1) |
-                         VIRGL_OBJ_RS_S0_CULL_FACE(d->cull == CullCw ? 1 : d->cull == CullCcw ? 2 : 0);
-            words[n++] = 0x3f800000; words[n++] = 0; words[n++] = 0;
-            words[n++] = 0x3f800000; words[n++] = 0; words[n++] = 0; words[n++] = 0;
-            s->rasters |= bit;
-        }
-        words[n++] = BIND(VIRGL_OBJECT_RASTERIZER); words[n++] = Raster + key;
-        s->boundRaster = key;
-    }
-    if (n && !rb_gpu_frame_words(gpu, r, image, words, n)) return FALSE;
-    n = 0;
+    if (!fixed_states(gpu, r, image, d->depthState, d->alphaTest, d->blend, d->cull, d->transform)) return FALSE;
 
     key[0] = d->colorStage; key[1] = d->alphaStage; key[2] = d->specular; key[3] = d->fog;
     key[4] = d->stage1Color; key[5] = d->stage1Alpha;
@@ -952,6 +962,250 @@ BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
     *p++ = 0;                  /* minimum index */
     *p++ = count - 1;          /* maximum index */
     *p++ = 0;                  /* stream-output count */
+    image->uniform = FALSE;
+    return TRUE;
+}
+
+/* ---- Direct3D 8 pixel shader draws ---- */
+
+/* Vertices are constants from CONST[1] (transformed) or CONST[15] (object
+ * space, after the matrices and viewport of object_lines), seven each:
+ * position, diffuse, specular and the coordinates of stages 0..3. The
+ * outputs are GENERIC[0..5], the inputs of the translated pixel shader. */
+enum { PsVertexConstants = 7 };
+typedef char ps_layout[RB2K_D8_STAGES == 4 && PsVertexConstants == 3 + RB2K_D8_STAGES ? 1 : -1];
+static const char *const ps_transformed_lines[] = {
+    "UMAD TEMP[0].x, SV[0].xxxx, IMM[1].yyyy, IMM[1].xxxx",
+    "UARL ADDR[0].x, TEMP[0].xxxx",
+    "MOV TEMP[1], CONST[ADDR[0].x]",
+    "RCP TEMP[2].x, CONST[0].xxxx",
+    "RCP TEMP[2].y, CONST[0].yyyy",
+    "ADD TEMP[1].xy, TEMP[1], IMM[0].xxxx",
+    "MUL TEMP[1].xy, TEMP[1], TEMP[2]",
+    "MAD TEMP[1].xyz, TEMP[1], IMM[0].zzzz, -IMM[0].yyyy",
+    "RCP TEMP[0].w, TEMP[1].wwww",
+    "MUL OUT[0].xyz, TEMP[1], TEMP[0].wwww",
+    "MOV OUT[0].w, TEMP[0].wwww"
+};
+
+static ULONG ps_vertex_text(char *out, BOOLEAN object)
+{
+    TEXT t;
+    ULONG i, base = object ? 15 : 1;
+    t.p = out; t.n = 0; t.line = 0; t.size = LitText; t.overflow = FALSE;
+    put(&t, "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..");
+    number(&t, base + PsVertexConstants * RB2K_D8_VERTICES - 1);
+    put(&t, "]\nDCL ADDR[0]\nDCL TEMP[0..5]\nDCL OUT[0], POSITION\n");
+    for (i = 0; i < 3 + RB2K_D8_STAGES - 1; ++i) {
+        put(&t, "DCL OUT["); number(&t, i + 1); put(&t, "], GENERIC["); number(&t, i); put(&t, "]\n");
+    }
+    put(&t, object ? "IMM[0] FLT32 {0x3f800000, 0x40000000, 0x00000000, 0x00000000}\n"
+                   : "IMM[0] FLT32 {0x3f000000, 0x3f800000, 0x40000000, 0x00000000}\n");
+    put(&t, "IMM[1] UINT32 {");
+    number(&t, base);
+    put(&t, ", 7, 0, 0}\n");
+    if (object) {
+        /* object_lines without its addressing (0..3), fog depth (17..22) and outputs (39..). */
+        op(&t, ps_transformed_lines[0], 0, 0, 0);
+        op(&t, ps_transformed_lines[1], 0, 0, 0);
+        for (i = 4; i <= 16; ++i) op(&t, object_lines[i], 0, 0, 0);
+        for (i = 23; i <= 38; ++i) op(&t, object_lines[i], 0, 0, 0);
+    } else {
+        for (i = 0; i < sizeof(ps_transformed_lines) / sizeof(*ps_transformed_lines); ++i)
+            op(&t, ps_transformed_lines[i], 0, 0, 0);
+    }
+    for (i = 1; i < PsVertexConstants; ++i) {
+        char line[40], *p = line;
+        const char *a = "MOV OUT[", *b = "], CONST[ADDR[0].x+", *c = "]";
+        while (*a) *p++ = *a++;
+        *p++ = (char)('0' + i);
+        while (*b) *p++ = *b++;
+        *p++ = (char)('0' + i);
+        while (*c) *p++ = *c++;
+        *p = 0;
+        op(&t, line, 0, 0, 0);
+    }
+    op(&t, "END", 0, 0, 0);
+    return t.overflow ? 0 : t.n + 1;
+}
+typedef char object_lines_layout[sizeof(object_lines) / sizeof(*object_lines) == 43 ? 1 : -1];
+
+static BOOLEAN sampler_valid(ULONG sampler)
+{
+    ULONG addressU = sampler & 15, addressV = (sampler >> 4) & 15;
+    ULONG mag = (sampler >> 8) & 15, min = (sampler >> 12) & 15;
+    return !(sampler >> 20) && ((sampler >> 16) & 15) <= 3 && addressU >= 1 && addressU <= 4 &&
+           addressV >= 1 && addressV <= 4 && mag >= 1 && mag <= 5 && min >= 1 && min <= 3;
+}
+
+BOOLEAN rb_gpu_d8_valid(const RB2K_D3D8_DRAW *d)
+{
+    ULONG k;
+    if (d->depthState && (!(d->depthState & RB2K_Z_ENABLE) ||
+        d->depthState > (RB2K_Z_ENABLE | RB2K_Z_WRITE | 7))) return FALSE;
+    if (d->alphaTest && ((d->alphaTest & ~(RB2K_D7_ON | 0xfff)) ||
+        ((d->alphaTest >> 8) & 15) < 1 || ((d->alphaTest >> 8) & 15) > 8)) return FALSE;
+    if (d->blend && ((d->blend & ~(RB2K_D7_ON | 0xffff)) ||
+        !blend_valid((d->blend >> 8) & 255) || !blend_valid(d->blend & 255))) return FALSE;
+    if (d->cull < CullNone || d->cull > CullCcw) return FALSE;
+    if (d->transform > 1 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
+        d->viewport[0] > 8192 || d->viewport[1] > 8192 || d->viewport[2] > 8192 || d->viewport[3] > 8192)))
+        return FALSE;
+    for (k = 0; k < RB2K_D8_STAGES; ++k)
+        if (d->textures[k] && !sampler_valid(d->samplers[k])) return FALSE;
+    return TRUE;
+}
+
+/* program: the TGSI text of the pixel shader; textures: the texture of each
+ * stage it samples, NULL for the others. */
+BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, const RB2K_D3D8_DRAW *d,
+                       const char *program, ULONG programBytes, RB2K_TEXTURE *const *textures)
+{
+    RB2K_D7_STATE *s = &image->d7;
+    ULONG words[128], n = 0, slot, key[6], state, i, k, h[RB2K_D8_STAGES], views[RB2K_D8_STAGES];
+    ULONG stages = 0, fill = 0, count = d->count, extra = d->transform ? 56 : 0;
+    ULONG perVertex = 4 * PsVertexConstants, total = 28 + (d->transform ? 4 : 0) + extra + perVertex * count, *p;
+    ULONG width = dimension_bits(image->width), height = dimension_bits(image->height);
+    gpu->d8Step = 1;
+    if (!rb_gpu_prepare_target(gpu, r, image)) return FALSE;
+    if (!s->pipeline) {
+        if (!rb_gpu_frame_words(gpu,r,image,pipeline,sizeof(pipeline)/sizeof(*pipeline))) return FALSE;
+        s->pipeline = TRUE;
+    }
+    gpu->d8Step = 2;
+    {
+        static char transformedText[LitText], objectText[LitText];
+        static ULONG transformedSize, objectSize;
+        ULONG want = d->transform ? 16 : 8, handle = d->transform ? PsObjectShader : PsVertexShader;
+        if (!(s->vertexShaders & want)) {
+            ULONG *size = d->transform ? &objectSize : &transformedSize;
+            char *text = d->transform ? objectText : transformedText;
+            if (!*size) *size = ps_vertex_text(text, d->transform != 0);
+            if (!*size) { r->status = ERROR_INVALID_DATA; r->stage = RB2K_STAGE_TRANSFER; return FALSE; }
+            if (!shader(gpu, r, image, handle, VertexStage, text, *size)) return FALSE;
+            s->vertexShaders |= want;
+        }
+        if (s->boundVertex != want) {
+            ULONG bind[] = { VIRGL_CMD0(VIRGL_CCMD_BIND_SHADER,0,VIRGL_BIND_SHADER_SIZE), handle, VertexStage };
+            if (!rb_gpu_frame_words(gpu,r,image,bind,3)) return FALSE;
+            s->boundVertex = want;
+        }
+    }
+    gpu->d8Step = 3;
+    if (!fixed_states(gpu, r, image, d->depthState, d->alphaTest, d->blend, d->cull, d->transform)) return FALSE;
+    /* The program shares the fragment shader table; its key cannot be a
+     * fixed-function one, whose colour stage word is never all ones. */
+    gpu->d8Step = 4;
+    key[0] = 0xffffffff; key[1] = d->program; key[2] = key[3] = key[4] = key[5] = 0;
+    slot = cache_slot(&s->shader, RB2K_D7_SHADER_KEYS, key, 6, &state);
+    if (state != Hit) {
+        if (state == Replaced) {
+            words[0] = DESTROY(VIRGL_OBJECT_SHADER); words[1] = ShaderBase + slot;
+            if (!rb_gpu_frame_words(gpu, r, image, words, 2)) return FALSE;
+        }
+        if (!shader(gpu, r, image, ShaderBase + slot, FragmentStage, program, programBytes)) return FALSE;
+    }
+    if (s->shader.bound != slot + 1) {
+        words[n++] = VIRGL_CMD0(VIRGL_CCMD_BIND_SHADER,0,VIRGL_BIND_SHADER_SIZE);
+        words[n++] = ShaderBase + slot; words[n++] = FragmentStage;
+        s->shader.bound = slot + 1;
+    }
+    gpu->d8Step = 5;
+    /* c0..c7 */
+    words[n++] = VIRGL_CMD0(VIRGL_CCMD_SET_CONSTANT_BUFFER,0,2 + 32);
+    words[n++] = FragmentStage; words[n++] = 0;
+    for (i = 0; i < 8; ++i) for (k = 0; k < 4; ++k) words[n++] = d->constants[i][k];
+    if (!rb_gpu_frame_words(gpu, r, image, words, n)) return FALSE;
+    n = 0;
+    /* Each sampled stage gets its sampler and view in its own slot; slots
+     * below the last sampled one that the program does not sample repeat a
+     * sampled stage's objects. */
+    gpu->d8Step = 6;
+    for (k = 0; k < RB2K_D8_STAGES; ++k) {
+        if (!textures[k]) continue;
+        stages = k + 1;
+        fill = k;
+        key[0] = d->samplers[k]; key[1] = d->borders[k];
+        slot = cache_slot(&s->psSampler, RB2K_D8_SAMPLER_KEYS, key, 2, &state);
+        if (state != Hit) n += sampler_words(words + n, PsSamplerBase + slot, state, d->samplers[k], d->borders[k]);
+        h[k] = PsSamplerBase + slot;
+        views[k] = PsViewBase + k;
+        if (s->psViews[k] != textures[k]->id) {
+            if (s->psViews[k]) { words[n++] = DESTROY(VIRGL_OBJECT_SAMPLER_VIEW); words[n++] = PsViewBase + k; }
+            words[n++] = CREATE(VIRGL_OBJECT_SAMPLER_VIEW, VIRGL_OBJ_SAMPLER_VIEW_SIZE);
+            words[n++] = PsViewBase + k; words[n++] = textures[k]->id; words[n++] = VIRGL_FORMAT_B8G8R8A8_UNORM;
+            words[n++] = 0; words[n++] = (textures[k]->levels - 1) << 8;   /* all mipmap levels */
+            words[n++] = 0x688; /* identity swizzle */
+            s->psViews[k] = textures[k]->id;
+        }
+        /* Nothing to send when the sampler and view are already current. */
+        if (n && !rb_gpu_frame_words(gpu, r, image, words, n)) return FALSE;
+        n = 0;
+    }
+    gpu->d8Step = 7;
+    if (stages) {
+        for (k = 0; k < stages; ++k) if (!textures[k]) { h[k] = h[fill]; views[k] = views[fill]; }
+        words[n++] = VIRGL_CMD0(VIRGL_CCMD_BIND_SAMPLER_STATES,0,VIRGL_BIND_SAMPLER_STATES(stages));
+        words[n++] = FragmentStage; words[n++] = 0;
+        for (k = 0; k < stages; ++k) words[n++] = h[k];
+        words[n++] = VIRGL_CMD0(VIRGL_CCMD_SET_SAMPLER_VIEWS,0,VIRGL_SET_SAMPLER_VIEWS_SIZE(stages));
+        words[n++] = FragmentStage; words[n++] = 0;
+        for (k = 0; k < stages; ++k) words[n++] = views[k];
+        if (!rb_gpu_frame_words(gpu, r, image, words, n)) return FALSE;
+        n = 0;
+        /* The fixed-function draws bind their own slots again next time. */
+        s->boundSamplers = s->boundViews = 0;
+    }
+    gpu->d8Step = 8;
+    p = rb_gpu_frame_reserve(gpu, r, image, total);
+    if (!p) return FALSE;
+    *p++ = VIRGL_CMD0(VIRGL_CCMD_SET_VIEWPORT_STATE,0,VIRGL_SET_VIEWPORT_STATE_SIZE(1));
+    *p++ = 0;
+    *p++ = width - (1UL << 23);
+    *p++ = height - (1UL << 23);
+    *p++ = 0x3f000000;
+    *p++ = width - (1UL << 23);
+    *p++ = height - (1UL << 23);
+    *p++ = 0x3f000000;
+    if (d->transform) {
+        ULONG x0 = d->viewport[0], y0 = d->viewport[1];
+        ULONG x1 = d->viewport[0] + d->viewport[2], y1 = d->viewport[1] + d->viewport[3];
+        if (x1 > image->width) x1 = image->width;
+        if (y1 > image->height) y1 = image->height;
+        if (x0 > x1) x0 = x1;
+        if (y0 > y1) y0 = y1;
+        *p++ = VIRGL_CMD0(VIRGL_CCMD_SET_SCISSOR_STATE,0,VIRGL_SET_SCISSOR_STATE_SIZE(1));
+        *p++ = 0; *p++ = x0 | y0 << 16; *p++ = x1 | y1 << 16;
+    }
+    *p++ = VIRGL_CMD0(VIRGL_CCMD_SET_CONSTANT_BUFFER,0,6+extra+perVertex*count);
+    *p++ = VertexStage; *p++ = 0;
+    *p++ = width; *p++ = height; *p++ = 0; *p++ = 0;
+    if (d->transform) {
+        ULONG m, row, col;
+        for (m = 0; m < 3; ++m)
+            for (col = 0; col < 4; ++col)
+                for (row = 0; row < 4; ++row) *p++ = d->matrices[m][row * 4 + col];
+        for (i = 0; i < 4; ++i) *p++ = integer_bits(d->viewport[i]);
+        *p++ = d->viewport[4]; *p++ = d->viewport[5]; *p++ = 0; *p++ = 0;
+    }
+    for (i = 0; i < count; ++i) {
+        const RB2K_D3D8_VERTEX *v = d->vertices + i;
+        *p++ = v->x; *p++ = v->y; *p++ = v->z; *p++ = v->rhw;
+        *p++ = rb_gpu_channel((v->diffuse >> 16) & 255);
+        *p++ = rb_gpu_channel((v->diffuse >> 8) & 255);
+        *p++ = rb_gpu_channel(v->diffuse & 255);
+        *p++ = rb_gpu_channel(v->diffuse >> 24);
+        *p++ = rb_gpu_channel((v->specular >> 16) & 255);
+        *p++ = rb_gpu_channel((v->specular >> 8) & 255);
+        *p++ = rb_gpu_channel(v->specular & 255);
+        *p++ = rb_gpu_channel(v->specular >> 24);
+        for (k = 0; k < RB2K_D8_STAGES; ++k) {
+            *p++ = v->tc[k][0]; *p++ = v->tc[k][1]; *p++ = v->tc[k][2]; *p++ = v->tc[k][3];
+        }
+    }
+    *p++ = VIRGL_CMD0(VIRGL_CCMD_DRAW_VBO,0,VIRGL_DRAW_VBO_SIZE);
+    *p++ = 0; *p++ = count; *p++ = PipeTriangles; *p++ = 0; *p++ = 1; *p++ = 0; *p++ = 0;
+    *p++ = 0; *p++ = 0; *p++ = 0; *p++ = count - 1; *p++ = 0;
     image->uniform = FALSE;
     return TRUE;
 }
