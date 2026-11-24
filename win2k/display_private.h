@@ -47,6 +47,7 @@ typedef struct {
     BOOL ddEnabled;
     BOOL glActive;
     BOOL gpuSurfaces;           /* offscreen surfaces as host textures (RB2K_DD_CAPS) */
+    BOOL d3dDescribed;          /* the Direct3D HAL description is given in every depth */
     BOOL nativeD3D7;
     BOOL z16Storage, z16Render;
     HRESULT (CALLBACK *parseD3DExtension)(PVOID command, PVOID *next);
@@ -75,6 +76,7 @@ enum { TexNone, TexArgb8888, TexXrgb8888, TexRgb565, TexArgb1555, TexXrgb1555, T
 ULONG rb_d7_texture_format(const DDPIXELFORMAT *format, ULONG desktopBits);
 ULONG rb_d7_texel_bytes(ULONG format);
 void rb_d7_texture_written(DISPLAY *d, PDD_SURFACE_GLOBAL g);
+extern ULONG rb_dd_mode_stats[3][4];
 void rb_d7_surface_destroyed(DISPLAY *display, PDD_SURFACE_GLOBAL surface);
 HPALETTE rb_create_palette(DISPLAY *display);
 BOOL rb_restore_palette(DISPLAY *display);

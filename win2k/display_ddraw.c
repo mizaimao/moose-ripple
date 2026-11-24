@@ -719,7 +719,7 @@ static DWORD APIENTRY driver_info(PDD_GETDRIVERINFODATA data)
     ULONG bytes;
     data->dwActualSize = 0;
     data->ddRVal = DDERR_CURRENTLYNOTAVAIL;
-    if (((DISPLAY *)data->dhpdev)->nativeD3D7 && rb_d7_info(data))
+    if (((DISPLAY *)data->dhpdev)->d3dDescribed && rb_d7_info(data))
         return DDHAL_DRIVER_HANDLED;
     if (IsEqualGUID(&data->guidInfo, &nt)) {
         RtlZeroMemory(&callbacks, sizeof(callbacks));
@@ -734,6 +734,14 @@ static DWORD APIENTRY driver_info(PDD_GETDRIVERINFODATA data)
     return DDHAL_DRIVER_HANDLED;
 }
 
+/* Shared by every PDEV of this driver; d7draw.exe prints them. */
+ULONG rb_dd_mode_stats[3][4];
+
+static ULONG *mode_stats(const DISPLAY *d)
+{
+    return rb_dd_mode_stats[d->mode.BitsPerPlane == 8 ? 0 : d->mode.BitsPerPlane == 16 ? 1 : 2];
+}
+
 BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCount,
                                    VIDEOMEMORY *heaps, DWORD *fourCount, DWORD *fourCC)
 {
@@ -743,7 +751,19 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     ULONG pageBytes;
     (void)fourCC;
     *heapCount = *fourCount = 0;
-    if (!d->ddLock || !d->mapping || !rb_dd_caps(d, &caps)) return FALSE;
+    ++mode_stats(d)[0];
+    if (!d->ddLock || !d->mapping || !rb_dd_caps(d, &caps)) {
+        ++mode_stats(d)[1];
+        mode_stats(d)[2] = !d->ddLock ? 1 : !d->mapping ? 2 : 3;
+        return FALSE;
+    }
+    /* DirectDraw's user-mode side drops the hardware layer of a mode that
+     * lacks the Direct3D description an earlier mode had, and then fails
+     * page flipping there. So every depth describes the Direct3D HAL when
+     * native Direct3D is on; below 32 bits it cannot be used: it renders
+     * only to 32-bit targets, and textures and host surfaces are refused. */
+    d->d3dDescribed = (caps.gpuSurfaces & RB2K_DD_NATIVE_D3D7) != 0;
+    if (d->mode.BitsPerPlane != 32) caps.gpuSurfaces = 0;
     RtlZeroMemory(info, sizeof(*info));
     info->dwSize = sizeof(*info);
     v->pvPrimary = d->mapping;
@@ -779,7 +799,7 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     else
         caps.slots = 0;
     info->ddCaps.dwVidMemTotal = caps.maxBytes * caps.slots;
-    if (d->nativeD3D7) {
+    if (d->d3dDescribed) {
         info->ddCaps.ddsCaps.dwCaps |= DDSCAPS_TEXTURE | DDSCAPS_MIPMAP;
         v->dwTextureAlign = 4;
         rb_d7_caps(info, d->z16Render);
@@ -821,7 +841,11 @@ BOOL APIENTRY DrvEnableDirectDraw(DHPDEV pdev, DD_CALLBACKS *c, DD_SURFACECALLBA
     DISPLAY *d = (DISPLAY *)pdev;
     RB2K_DD_CAPS caps;
     ULONG pageBytes;
-    if (!d->ddLock || !rb_dd_caps(d, &caps)) return FALSE;
+    if (!d->ddLock || !rb_dd_caps(d, &caps)) {
+        ++mode_stats(d)[3];
+        return FALSE;
+    }
+    if (d->mode.BitsPerPlane != 32) caps.gpuSurfaces = 0;
     d->gpuSurfaces = (caps.gpuSurfaces & RB2K_DD_HOST_SURFACES) != 0;
     d->z16Storage = (caps.gpuSurfaces & RB2K_DD_Z16_STORAGE) != 0;
     d->z16Render = d->z16Storage && (caps.gpuSurfaces & RB2K_DD_Z16_RENDER) != 0;
