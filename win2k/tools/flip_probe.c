@@ -58,6 +58,17 @@ static void indexed_mismatch(const DDSURFACEDESC *lock, DWORD width, DWORD heigh
     }
     for (x = 1; x < 256; ++x) if (counts[x] > counts[most]) most = x;
     printf("Indexed actual dominant=%lu count=%lu other_image_matches=%lu\n", most, counts[most], other);
+    /* Writes that do not stick mean the page no longer reaches memory;
+     * writes that stick mean something overwrote it. Restore afterwards. */
+    {
+        volatile BYTE *probe = (volatile BYTE *)lock->lpSurface;
+        BYTE saved[3], seen[3];
+        for (x = 0; x < 3; ++x) saved[x] = probe[x];
+        for (x = 0; x < 3; ++x) probe[x] = (BYTE)(0x5a + x);
+        for (x = 0; x < 3; ++x) seen[x] = probe[x];
+        for (x = 0; x < 3; ++x) probe[x] = saved[x];
+        printf("Indexed write-back wrote=5a,5b,5c read=%02x,%02x,%02x\n", seen[0], seen[1], seen[2]);
+    }
 }
 
 static BOOL pixels(LPDIRECTDRAWSURFACE surface, DWORD width, DWORD height, DWORD bpp,
