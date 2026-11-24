@@ -211,6 +211,98 @@ static BOOLEAN draw_one(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *imag
     return TRUE;
 }
 
+/* One pixel shader draw: validate it, find its program, depth buffer and
+ * textures, and queue its commands. */
+static BOOLEAN refuse(RB2K_GPU *gpu, ULONG site, VP_STATUS status, ULONG stage)
+{
+    gpu->d7Profile.failSite = site;
+    gpu->d7Profile.failStatus = status;
+    gpu->d7Profile.failStage = stage;
+    ++gpu->d7Profile.failCount;
+    return FALSE;
+}
+
+static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image,
+                         const RB2K_D3D8_DRAW *d, ULONG length, VP_STATUS *status)
+{
+    RB2K_IMAGE *depth = NULL;
+    RB2K_TEXTURE *textures[RB2K_D8_STAGES];
+    ULONG i, program, header = FIELD_OFFSET(RB2K_D3D8_DRAW, vertices);
+    *status = ERROR_INVALID_PARAMETER;
+    if (!gpu->d3d8 || length < header || !d->count || d->count > RB2K_D8_VERTICES || d->count % 3 ||
+        length != header + d->count*sizeof(d->vertices[0]) || d->target != image->id ||
+        !rb_gpu_d8_valid(d) || image->depth16 || (d->depthState && !d->depth))
+        return refuse(gpu, RB2K_D7_SITE_RECORD, *status, 0);
+    *status = ERROR_INVALID_HANDLE;
+    for (program = 0; program < RB2K_D8_PROGRAMS && (!d->program || gpu->programs[program].id != d->program); ++program) {}
+    if (program == RB2K_D8_PROGRAMS) return refuse(gpu, RB2K_D7_SITE_PROGRAM, *status, d->program);
+    if (d->depth) {
+        depth = find_image(gpu, d->depth);
+        if (!depth || !depth->depth16) return refuse(gpu, RB2K_D7_SITE_DEPTH, *status, 0);
+    }
+    for (i = 0; i < RB2K_D8_STAGES; ++i) {
+        ULONG j;
+        RB2K_TEXTURE *t;
+        textures[i] = NULL;
+        if (!(gpu->programs[program].samplers & (1UL << i))) continue;
+        t = rb_gpu_texture(gpu, d->textures[i]);
+        if (!t) return refuse(gpu, RB2K_D7_SITE_TEXTURE, *status, i);
+        for (j = 0; j < RB2K_DD_SLOTS && t->contexts[j] != image->id; ++j) {}
+        if (j == RB2K_DD_SLOTS) return refuse(gpu, RB2K_D7_SITE_TEXTURE, *status, 16 + i);
+        textures[i] = t;
+    }
+    *status = ERROR_INVALID_PARAMETER;
+    for (i = 0; i < d->count; ++i) {
+        const RB2K_D3D8_VERTEX *v = d->vertices+i;
+        if ((v->x & 0x7fffffff) >= 0x7f800000 || (v->y & 0x7fffffff) >= 0x7f800000 ||
+            (v->z & 0x7fffffff) >= 0x7f800000 || !(v->rhw & 0x7fffffff) ||
+            (v->rhw & 0x7fffffff) >= 0x7f800000)
+            return refuse(gpu, RB2K_D7_SITE_VERTEX, *status, i);
+    }
+    *status = NO_ERROR;
+    gpu->d8Step = 0;
+    if ((depth && !rb_gpu_depth_target(gpu, result, image, depth)) ||
+        !rb_gpu_d8_draw(gpu, result, image, d, gpu->programs[program].text, gpu->programs[program].bytes, textures)) {
+        refuse(gpu, RB2K_D7_SITE_STEP + gpu->d8Step, result->status, result->stage);
+        *status = command_error(gpu, result);
+        return FALSE;
+    }
+    gpu->d7Frame.pending.triangles += d->count/3;
+    return TRUE;
+}
+
+/* Keep or forget the TGSI text of a pixel shader program. */
+static VP_STATUS program_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
+{
+    const RB2K_D3D8_PROGRAM *in = packet->InputBuffer;
+    ULONG i, bytes, free = RB2K_D8_PROGRAMS;
+    if (!gpu->nativeD3D7 || !gpu->ddGpuSurfaces || !gpu->d3d8) return ERROR_NOT_SUPPORTED;
+    if (packet->IoControlCode == IOCTL_RB2K_D3D8_PROGRAM_FREE) {
+        ULONG id;
+        if (packet->InputBufferLength != sizeof(ULONG) || packet->OutputBufferLength) return ERROR_INVALID_PARAMETER;
+        id = *(PULONG)packet->InputBuffer;
+        for (i = 0; i < RB2K_D8_PROGRAMS; ++i)
+            if (id && gpu->programs[i].id == id) gpu->programs[i].id = 0;
+        return NO_ERROR;
+    }
+    if (packet->InputBufferLength <= sizeof(ULONG) || packet->InputBufferLength > sizeof(*in) ||
+        packet->OutputBufferLength < sizeof(ULONG) || in->samplers >> RB2K_D8_STAGES) return ERROR_INVALID_PARAMETER;
+    bytes = packet->InputBufferLength - sizeof(ULONG);
+    for (i = 0; i < bytes && in->text[i]; ++i) {}
+    if (i == bytes || i < 4) return ERROR_INVALID_PARAMETER;
+    bytes = i + 1;
+    for (i = 0; i < RB2K_D8_PROGRAMS && free == RB2K_D8_PROGRAMS; ++i) if (!gpu->programs[i].id) free = i;
+    if (free == RB2K_D8_PROGRAMS) return ERROR_NOT_ENOUGH_MEMORY;
+    if (!(++gpu->programSerial & 0xffffff)) ++gpu->programSerial;
+    gpu->programs[free].id = (gpu->programSerial << 8) | (free + 1);
+    gpu->programs[free].samplers = in->samplers;
+    gpu->programs[free].bytes = bytes;
+    VideoPortMoveMemory(gpu->programs[free].text, (PVOID)in->text, bytes);
+    *(PULONG)packet->OutputBuffer = gpu->programs[free].id;
+    packet->StatusBlock->Information = sizeof(ULONG);
+    return NO_ERROR;
+}
+
 static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 {
     ULONG id, bytes;
@@ -266,11 +358,13 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
             if (packet->InputBufferLength > RB2K_D7_DRAWS_BYTES + sizeof(ULONG) || !left)
                 return ERROR_INVALID_PARAMETER;
             while (left) {
-                ULONG length;
+                ULONG length, kind;
                 if (left < sizeof(ULONG)) return ERROR_INVALID_PARAMETER;
-                length = *(const ULONG *)p;
+                kind = *(const ULONG *)p & RB2K_D8_RECORD;
+                length = *(const ULONG *)p & ~RB2K_D8_RECORD;
                 if (length > left - sizeof(ULONG) || length & 3) return ERROR_INVALID_PARAMETER;
-                if (!draw_one(gpu, &result, image, (const RB2K_D3D7_DRAW *)(p + sizeof(ULONG)), length, &status))
+                if (kind ? !draw_one8(gpu, &result, image, (const RB2K_D3D8_DRAW *)(p + sizeof(ULONG)), length, &status)
+                         : !draw_one(gpu, &result, image, (const RB2K_D3D7_DRAW *)(p + sizeof(ULONG)), length, &status))
                     return status;
                 p += sizeof(ULONG) + length;
                 left -= sizeof(ULONG) + length;
@@ -538,6 +632,8 @@ VP_STATUS rb_gpu_surface_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         }
         if (packet->IoControlCode == IOCTL_RB2K_D3D7_TEXTURE ||
             packet->IoControlCode == IOCTL_RB2K_D3D7_TEXTURE_FREE) status = texture_request(gpu, packet);
+        else if (packet->IoControlCode == IOCTL_RB2K_D3D8_PROGRAM ||
+                 packet->IoControlCode == IOCTL_RB2K_D3D8_PROGRAM_FREE) status = program_request(gpu, packet);
         else status = image_request(gpu, packet);
         if (gpu->d7Measure) {
             gpu->d7Measure->ticks += rb_counter_ticks(NULL)-start;

@@ -1,14 +1,16 @@
 /* Check what a Direct3D 8 program draws on the hardware device: a clear,
  * transformed triangles from user memory, a vertex buffer, an index buffer
  * with and without a base vertex, a strip, a managed texture and untransformed
- * vertices. Each case draws on a 128x128 lockable back buffer and inspects
- * a few pixels well inside the shapes. "sw" asks for software vertex
+ * vertices, and eleven pixel shaders of versions 1.1 and 1.2. Each case
+ * draws on a 128x128 lockable back buffer and inspects a few pixels well
+ * inside the shapes. "sw" asks for software vertex
  * processing. Built against the Microsoft headers; d3d8.dll is loaded at
  * run time. */
 #define COBJMACROS
 #include <windows.h>
 #include <d3d8.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 enum { Side = 128 };
@@ -252,6 +254,283 @@ static void case_transform(void)
     check("transform", s, 3);
 }
 
+/* ---- pixel shaders ----
+ * Token streams are assembled by hand: version, then each instruction's
+ * opcode followed by its destination and source parameters. */
+#define PSV(minor) (0xffff0100UL | (minor))
+#define PSEND 0x0000ffffUL
+#define PD(type, num, mask, mod, shift) (0x80000000UL | ((DWORD)(type) << 28) | ((DWORD)(mask) << 16) | \
+                                         ((DWORD)(mod) << 20) | ((DWORD)(shift) << 24) | (num))
+#define PS_(type, num, swz, mod) (0x80000000UL | ((DWORD)(type) << 28) | ((DWORD)(swz) << 16) | ((DWORD)(mod) << 24) | (num))
+enum { RR = 0, RV = 1, RC = 2, RT = 3 };
+enum { SwXYZW = 0xe4, SwA = 0xff };
+enum { MNone, MNeg, MBias, MBiasNeg, MBx2, MBx2Neg, MComp };
+enum { OMov = 1, OAdd = 2, OSub = 3, OMad = 4, OMul = 5, ODp3 = 8, OLrp = 18, OTexcoord = 64,
+       OTexkill = 65, OTex = 66, OCnd = 80, ODef = 81, OCmp = 88 };
+#define CO 0x40000000UL
+/* IEEE single bit patterns for def. */
+enum { F0 = 0, F01 = 0x3dcccccd, F02 = 0x3e4ccccd, F025 = 0x3e800000, F05 = 0x3f000000, F06 = 0x3f19999a,
+       F075 = 0x3f400000, F1 = 0x3f800000 };
+#define DEF(c, a, b, d, e) ODef, PD(RC, c, 15, 0, 0), (DWORD)(a), (DWORD)(b), (DWORD)(d), (DWORD)(e)
+#define DST(r, n) PD(r, n, 15, 0, 0)
+#define SRC(r, n) PS_(r, n, SwXYZW, MNone)
+
+typedef struct { float x, y, z, rhw; DWORD diffuse, specular; float u0, v0, u1, v1; } PSVERTEX;
+#define PSFVF (D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_SPECULAR | D3DFVF_TEX2)
+
+/* A quad as two triangles of a list; the coordinates run from (u0, v0)
+ * at the top left to (u1, v1) at the bottom right, in both sets. */
+static void ps_quad(PSVERTEX *v, float x0, float y0, float x1, float y1, DWORD diffuse,
+                    float u0, float v0, float u1, float v1)
+{
+    const float xs[6] = { x0, x1, x0, x0, x1, x1 }, ys[6] = { y0, y0, y1, y1, y0, y1 };
+    int i;
+    for (i = 0; i < 6; ++i) {
+        v[i].x = xs[i]; v[i].y = ys[i]; v[i].z = 0.5f; v[i].rhw = 1.0f;
+        v[i].diffuse = diffuse; v[i].specular = 0;
+        v[i].u0 = v[i].u1 = xs[i] == x0 ? u0 : u1;
+        v[i].v0 = v[i].v1 = ys[i] == y0 ? v0 : v1;
+    }
+}
+
+static DWORD rgb(float r, float g, float b)
+{
+    float c[3];
+    DWORD out = 0;
+    int k;
+    c[0] = r; c[1] = g; c[2] = b;
+    for (k = 0; k < 3; ++k) {
+        float f = c[k] < 0 ? 0 : c[k] > 1 ? 1 : c[k];
+        out = (out << 8) | (DWORD)(f * 255.0f + 0.5f);
+    }
+    return out;
+}
+
+static float clampu(float f) { return f < -1 ? -1 : f > 1 ? 1 : f; }
+static float unit(DWORD channel) { return (float)(channel & 255) / 255.0f; }
+
+static IDirect3DTexture8 *ps_textures[2];
+
+static IDirect3DTexture8 *texture2x2(const DWORD *texels)
+{
+    IDirect3DTexture8 *t = NULL;
+    D3DLOCKED_RECT r;
+    int y;
+    if (FAILED(IDirect3DDevice8_CreateTexture(device, 2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &t))) return NULL;
+    if (SUCCEEDED(IDirect3DTexture8_LockRect(t, 0, &r, NULL, 0))) {
+        for (y = 0; y < 2; ++y) memcpy((BYTE *)r.pBits + y * r.Pitch, texels + 2 * y, 8);
+        IDirect3DTexture8_UnlockRect(t, 0);
+    }
+    return t;
+}
+
+/* Draw quads with a pixel shader and compare the samples. */
+static void ps_run(const char *name, const DWORD *tokens, const PSVERTEX *v, UINT quads, const SAMPLE *s, int samples)
+{
+    DWORD handle = 0;
+    HRESULT hr = IDirect3DDevice8_CreatePixelShader(device, tokens, &handle);
+    if (FAILED(hr)) { fail_hr(name, "create", hr); return; }
+    if (begin(name)) {
+        IDirect3DDevice8_SetPixelShader(device, handle);
+        IDirect3DDevice8_SetVertexShader(device, PSFVF);
+        hr = IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2 * quads, v, sizeof(v[0]));
+        IDirect3DDevice8_SetPixelShader(device, 0);
+        if (FAILED(hr)) { fail_hr(name, "draw", hr); IDirect3DDevice8_EndScene(device); }
+        else check(name, s, samples);
+    }
+    IDirect3DDevice8_DeletePixelShader(device, handle);
+}
+
+static const DWORD texels0[4] = { 0xffff0000, 0xff00ff00, 0xff0000ff, 0xffffffff };
+static const DWORD texels1[4] = { 0xffffff00, 0xffffff00, 0xffffff00, 0xffffff00 };
+/* The four texel centres of a 2x2 texture over the quad 32..96. */
+static const int corners[4][2] = { { 48, 48 }, { 80, 48 }, { 48, 80 }, { 80, 80 } };
+
+static void quad_samples(SAMPLE *s, const float (*colour)[3])
+{
+    int i;
+    for (i = 0; i < 4; ++i) {
+        s[i].x = corners[i][0]; s[i].y = corners[i][1];
+        s[i].rgb = rgb(colour[i][0], colour[i][1], colour[i][2]);
+    }
+    s[4].x = 8; s[4].y = 8; s[4].rgb = CLEAR_COLOR;
+}
+
+static void texel(int i, float *c)
+{
+    c[0] = unit(texels0[i] >> 16); c[1] = unit(texels0[i] >> 8); c[2] = unit(texels0[i]);
+}
+
+/* only: run that case alone (numbered from 1), or all when zero. */
+static void pixel_shaders(int only)
+{
+    PSVERTEX v[12];
+    SAMPLE s[5];
+    float want[4][3], t[3], d;
+    int i, k;
+    ps_textures[0] = texture2x2(texels0);
+    ps_textures[1] = texture2x2(texels1);
+    for (k = 0; k < 2; ++k) {
+        IDirect3DDevice8_SetTexture(device, k, (IDirect3DBaseTexture8 *)ps_textures[k]);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_MINFILTER, D3DTEXF_POINT);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_MIPFILTER, D3DTEXF_NONE);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_ADDRESSU, D3DTADDRESS_CLAMP);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_ADDRESSV, D3DTADDRESS_CLAMP);
+    }
+    if (!only || only == 1) {   /* mov r0, v0 */
+        static const DWORD ps[] = { PSV(1), OMov, DST(RR, 0), SRC(RV, 0), PSEND };
+        ps_quad(v, 32, 32, 96, 96, 0xff4080c0, 0, 0, 1, 1);
+        for (i = 0; i < 4; ++i) { want[i][0] = unit(0x40); want[i][1] = unit(0x80); want[i][2] = unit(0xc0); }
+        quad_samples(s, want);
+        ps_run("ps_mov", ps, v, 1, s, 5);
+    }
+    if (!only || only == 2) {   /* tex t0; mul r0, t0, v0 */
+        static const DWORD ps[] = { PSV(1), OTex, DST(RT, 0), OMul, DST(RR, 0), SRC(RT, 0), SRC(RV, 0), PSEND };
+        ps_quad(v, 32, 32, 96, 96, 0x80808080, 0, 0, 1, 1);
+        d = unit(0x80);
+        for (i = 0; i < 4; ++i) { texel(i, t); for (k = 0; k < 3; ++k) want[i][k] = t[k] * d; }
+        quad_samples(s, want);
+        ps_run("ps_texture", ps, v, 1, s, 5);
+    }
+    if (!only || only == 3) {   /* def c0; mad r0, v0, c1, c0 with c1 set by the program; the blue sum clamps */
+        static const DWORD ps[] = { PSV(1), DEF(0, F025, F05, F075, F1),
+            OMad, DST(RR, 0), SRC(RV, 0), SRC(RC, 1), SRC(RC, 0), PSEND };
+        static const float c1[4] = { 0.5f, 0.5f, 0.5f, 0.0f };
+        IDirect3DDevice8_SetPixelShaderConstant(device, 1, c1, 1);
+        ps_quad(v, 32, 32, 96, 96, 0xff663399, 0, 0, 1, 1);
+        for (i = 0; i < 4; ++i) {
+            want[i][0] = 0.25f + unit(0x66) * 0.5f; want[i][1] = 0.5f + unit(0x33) * 0.5f;
+            want[i][2] = 0.75f + unit(0x99) * 0.5f;
+        }
+        quad_samples(s, want);
+        ps_run("ps_constants", ps, v, 1, s, 5);
+    }
+    if (!only || only == 4) {   /* tex t0; mul_x2 r0, t0_bias, 1-v0; sub_sat_d2 r0, r0, -c0: the negative
+         * channels of the first result must survive until the second. */
+        static const DWORD ps[] = { PSV(1), DEF(0, F02, F02, F02, F0), OTex, DST(RT, 0),
+            OMul, PD(RR, 0, 15, 0, 1), PS_(RT, 0, SwXYZW, MBias), PS_(RV, 0, SwXYZW, MComp),
+            OSub, PD(RR, 0, 15, 1, 15), SRC(RR, 0), PS_(RC, 0, SwXYZW, MNeg), PSEND };
+        ps_quad(v, 32, 32, 96, 96, 0x40404040, 0, 0, 1, 1);
+        d = 1.0f - unit(0x40);
+        for (i = 0; i < 4; ++i) {
+            texel(i, t);
+            for (k = 0; k < 3; ++k) want[i][k] = (clampu((t[k] - 0.5f) * d * 2.0f) + 0.2f) * 0.5f;
+        }
+        quad_samples(s, want);
+        ps_run("ps_modifiers", ps, v, 1, s, 5);
+    }
+    if (!only || only == 5) {   /* tex t0; mul r0.rgb, t0, v0 + mov r0.a, c0.a, blended by that alpha */
+        static const DWORD ps[] = { PSV(1), DEF(0, F0, F0, F0, F025), OTex, DST(RT, 0),
+            OMul, PD(RR, 0, 7, 0, 0), SRC(RT, 0), SRC(RV, 0),
+            OMov | CO, PD(RR, 0, 8, 0, 0), PS_(RC, 0, SwA, MNone), PSEND };
+        ps_quad(v, 32, 32, 96, 96, 0xffffffff, 0, 0, 1, 1);
+        for (i = 0; i < 4; ++i) {
+            texel(i, t);
+            want[i][0] = t[0] * 0.25f; want[i][1] = t[1] * 0.25f; want[i][2] = t[2] * 0.25f + unit(0x66) * 0.75f;
+        }
+        quad_samples(s, want);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_ALPHABLENDENABLE, TRUE);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+        ps_run("ps_coissue", ps, v, 1, s, 5);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_ALPHABLENDENABLE, FALSE);
+    }
+    if (!only || only == 6) {   /* mov r0, v0; cnd r0, r0.a, c0, c1: red where alpha is over a half */
+        static const DWORD ps[] = { PSV(1), DEF(0, F1, F0, F0, F1), DEF(1, F0, F1, F0, F1),
+            OMov, DST(RR, 0), SRC(RV, 0), OCnd, DST(RR, 0), PS_(RR, 0, SwA, MNone), SRC(RC, 0), SRC(RC, 1), PSEND };
+        static const SAMPLE cs[] = { { 40, 64, 0xff0000 }, { 88, 64, 0x00ff00 }, { 8, 8, CLEAR_COLOR } };
+        ps_quad(v, 32, 32, 64, 96, 0xc0ffffff, 0, 0, 1, 1);
+        ps_quad(v + 6, 64, 32, 96, 96, 0x40ffffff, 0, 0, 1, 1);
+        ps_run("ps_cnd", ps, v, 2, cs, 3);
+    }
+    if (!only || only == 7) {   /* ps.1.2: cmp r0, v0_bias, c0, c1, per channel */
+        static const DWORD ps[] = { PSV(2), DEF(0, F1, F0, F0, F1), DEF(1, F0, F1, F0, F1),
+            OCmp, DST(RR, 0), PS_(RV, 0, SwXYZW, MBias), SRC(RC, 0), SRC(RC, 1), PSEND };
+        static const SAMPLE cs[] = { { 64, 64, 0xffff00 }, { 8, 8, CLEAR_COLOR } };
+        ps_quad(v, 32, 32, 96, 96, 0xffc040c0, 0, 0, 1, 1);
+        ps_run("ps_cmp", ps, v, 1, cs, 2);
+    }
+    if (!only || only == 8) {   /* dp3 r0, v0_bx2, c0 */
+        static const DWORD ps[] = { PSV(1), DEF(0, F06, F02, F01, F0),
+            ODp3, DST(RR, 0), PS_(RV, 0, SwXYZW, MBx2), SRC(RC, 0), PSEND };
+        SAMPLE cs[2];
+        float x = 2 * unit(0xff) - 1, y = 2 * unit(0x80) - 1, z = 2 * unit(0x80) - 1;
+        float dot = 0.6f * x + 0.2f * y + 0.1f * z;
+        cs[0].x = 64; cs[0].y = 64; cs[0].rgb = rgb(dot, dot, dot);
+        cs[1].x = 8; cs[1].y = 8; cs[1].rgb = CLEAR_COLOR;
+        ps_quad(v, 32, 32, 96, 96, 0xffff8080, 0, 0, 1, 1);
+        ps_run("ps_dp3", ps, v, 1, cs, 2);
+    }
+    if (!only || only == 9) {   /* texcoord t0; mov r0, t0 */
+        static const DWORD ps[] = { PSV(1), OTexcoord, DST(RT, 0), OMov, DST(RR, 0), SRC(RT, 0), PSEND };
+        SAMPLE cs[2];
+        cs[0].x = 64; cs[0].y = 64; cs[0].rgb = rgb(0.25f, 0.75f, 0.0f);
+        cs[1].x = 8; cs[1].y = 8; cs[1].rgb = CLEAR_COLOR;
+        ps_quad(v, 32, 32, 96, 96, 0xffffffff, 0.25f, 0.75f, 0.25f, 0.75f);
+        ps_run("ps_texcoord", ps, v, 1, cs, 2);
+    }
+    if (!only || only == 10) {   /* texkill t0; mov r0, v0: the left half has negative coordinates */
+        static const DWORD ps[] = { PSV(1), OTexkill, DST(RT, 0), OMov, DST(RR, 0), SRC(RV, 0), PSEND };
+        static const SAMPLE cs[] = { { 40, 64, CLEAR_COLOR }, { 88, 64, 0x20e020 } };
+        ps_quad(v, 32, 32, 96, 96, 0xff20e020, -1.0f, 0.5f, 1.0f, 0.5f);
+        ps_run("ps_texkill", ps, v, 1, cs, 2);
+    }
+    if (!only || only == 11) {   /* tex t0; tex t1; lrp r0, v0.a, t0, t1 */
+        static const DWORD ps[] = { PSV(1), OTex, DST(RT, 0), OTex, DST(RT, 1),
+            OLrp, DST(RR, 0), PS_(RV, 0, SwA, MNone), SRC(RT, 0), SRC(RT, 1), PSEND };
+        ps_quad(v, 32, 32, 96, 96, 0x40ffffff, 0, 0, 1, 1);
+        d = unit(0x40);
+        for (i = 0; i < 4; ++i) {
+            texel(i, t);
+            want[i][0] = d * t[0] + (1 - d); want[i][1] = d * t[1] + (1 - d); want[i][2] = d * t[2];
+        }
+        quad_samples(s, want);
+        ps_run("ps_two_textures", ps, v, 1, s, 5);
+    }
+    if (only == 12) {   /* tex t0; add r0, t0_bias, c0 */
+        static const DWORD ps[] = { PSV(1), DEF(0, F05, F05, F05, F05), OTex, DST(RT, 0),
+            OAdd, DST(RR, 0), PS_(RT, 0, SwXYZW, MBias), SRC(RC, 0), PSEND };
+        ps_quad(v, 32, 32, 96, 96, 0xffffffff, 0, 0, 1, 1);
+        for (i = 0; i < 4; ++i) { texel(i, t); for (k = 0; k < 3; ++k) want[i][k] = t[k]; }
+        quad_samples(s, want);
+        ps_run("ps_bias", ps, v, 1, s, 5);
+    }
+    if (only == 13) {   /* mov r0, 1-v0 */
+        static const DWORD ps[] = { PSV(1), OMov, DST(RR, 0), PS_(RV, 0, SwXYZW, MComp), PSEND };
+        ps_quad(v, 32, 32, 96, 96, 0xff4080c0, 0, 0, 1, 1);
+        for (i = 0; i < 4; ++i) { want[i][0] = 1 - unit(0x40); want[i][1] = 1 - unit(0x80); want[i][2] = 1 - unit(0xc0); }
+        quad_samples(s, want);
+        ps_run("ps_complement", ps, v, 1, s, 5);
+    }
+    if (only == 14) {   /* tex t0; mul_x2 r0, t0, v0 */
+        static const DWORD ps[] = { PSV(1), OTex, DST(RT, 0), OMul, PD(RR, 0, 15, 0, 1), SRC(RT, 0), SRC(RV, 0), PSEND };
+        ps_quad(v, 32, 32, 96, 96, 0x40404040, 0, 0, 1, 1);
+        for (i = 0; i < 4; ++i) { texel(i, t); for (k = 0; k < 3; ++k) want[i][k] = t[k] * unit(0x40) * 2; }
+        quad_samples(s, want);
+        ps_run("ps_x2", ps, v, 1, s, 5);
+    }
+    if (only == 15) {   /* tex t0; mov_sat_d2 r0, t0 */
+        static const DWORD ps[] = { PSV(1), OTex, DST(RT, 0), OMov, PD(RR, 0, 15, 1, 15), SRC(RT, 0), PSEND };
+        ps_quad(v, 32, 32, 96, 96, 0xffffffff, 0, 0, 1, 1);
+        for (i = 0; i < 4; ++i) { texel(i, t); for (k = 0; k < 3; ++k) want[i][k] = t[k] * 0.5f; }
+        quad_samples(s, want);
+        ps_run("ps_sat_d2", ps, v, 1, s, 5);
+    }
+    if (only == 16) {   /* def c0; add r0, v0, -c0 */
+        static const DWORD ps[] = { PSV(1), DEF(0, F02, F02, F02, F0), OAdd, DST(RR, 0), SRC(RV, 0),
+            PS_(RC, 0, SwXYZW, MNeg), PSEND };
+        ps_quad(v, 32, 32, 96, 96, 0xff4080c0, 0, 0, 1, 1);
+        for (i = 0; i < 4; ++i) { want[i][0] = unit(0x40) - 0.2f; want[i][1] = unit(0x80) - 0.2f; want[i][2] = unit(0xc0) - 0.2f; }
+        quad_samples(s, want);
+        ps_run("ps_negative_constant", ps, v, 1, s, 5);
+    }
+    for (k = 0; k < 2; ++k) {
+        IDirect3DDevice8_SetTexture(device, k, NULL);
+        if (ps_textures[k]) IDirect3DTexture8_Release(ps_textures[k]);
+    }
+}
+
 int main(int argc, char **argv)
 {
     IDirect3D8 *(WINAPI *create)(UINT);
@@ -261,9 +540,15 @@ int main(int argc, char **argv)
     D3DCAPS8 caps;
     HWND window;
     DWORD flags;
-    BOOL software = argc > 1 && !lstrcmpiA(argv[1], "sw");
+    BOOL software = FALSE;
+    int only = 0, a;
     HRESULT hr;
     setvbuf(stdout, NULL, _IONBF, 0);
+    /* "sw": software vertex processing; "ps=N": only pixel shader case N. */
+    for (a = 1; a < argc; ++a) {
+        if (!lstrcmpiA(argv[a], "sw")) software = TRUE;
+        else if (!strncmp(argv[a], "ps=", 3)) only = atoi(argv[a] + 3);
+    }
     create = lib ? (IDirect3D8 *(WINAPI *)(UINT))GetProcAddress(lib, "Direct3DCreate8") : NULL;
     d3d = create ? create(D3D_SDK_VERSION) : NULL;
     if (!d3d) { printf("D8PIX no Direct3D 8 runtime\nD8PIX end result=FAIL\n"); return 1; }
@@ -314,14 +599,18 @@ int main(int argc, char **argv)
     IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_NONE);
     IDirect3DDevice8_SetRenderState(device, D3DRS_ZENABLE, D3DZB_FALSE);
     IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, FALSE);
-    case_clear();
-    case_up();
-    case_vb();
-    case_strip();
-    indexed("indexed", 0, 0x00ffff);
-    indexed("base", 3, 0xff8000);
-    case_texture();
-    case_transform();
+    if (!only) {
+        case_clear();
+        case_up();
+        case_vb();
+        case_strip();
+        indexed("indexed", 0, 0x00ffff);
+        indexed("base", 3, 0xff8000);
+        case_texture();
+        case_transform();
+    }
+    if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 2)) pixel_shaders(only);
+    else printf("D8PIX pixel shaders not offered\n");
     IDirect3DDevice8_Release(device);
     IDirect3D8_Release(d3d);
     DestroyWindow(window);

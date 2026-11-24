@@ -42,6 +42,34 @@
  * count and an RB2K_D3D7_DRAW holding that many bytes (header and vertices). */
 #define IOCTL_RB2K_D3D7_DRAWS RB2K_DD_IOCTL(0x91e)
 #define RB2K_D7_DRAWS_BYTES (64UL * 1024)
+/* Direct3D 8 pixel shaders. PROGRAM takes an RB2K_D3D8_PROGRAM and returns
+ * the program id; PROGRAM_FREE takes the id. A shader draw goes into the
+ * same queue as an RB2K_D3D8_DRAW whose byte count has RB2K_D8_RECORD set. */
+#define IOCTL_RB2K_D3D8_PROGRAM RB2K_DD_IOCTL(0x920)
+#define IOCTL_RB2K_D3D8_PROGRAM_FREE RB2K_DD_IOCTL(0x921)
+#define RB2K_D8_PROGRAMS 32
+#define RB2K_D8_PROGRAM_BYTES 4096
+#define RB2K_D8_STAGES 4
+#define RB2K_D8_VERTICES 48
+#define RB2K_D8_RECORD 0x80000000UL
+/* samplers: the texture stages the program samples; text: TGSI, zero-terminated. */
+typedef struct { ULONG samplers; char text[RB2K_D8_PROGRAM_BYTES]; } RB2K_D3D8_PROGRAM;
+/* A transformed or object-space position as for RB2K_D3D7_VERTEX, the packed
+ * colours, and four IEEE components of the coordinates of each stage. */
+typedef struct { ULONG x, y, z, rhw, diffuse, specular, tc[RB2K_D8_STAGES][4]; } RB2K_D3D8_VERTEX;
+/* The first seven words match RB2K_D3D7_DRAW. Constants are c0..c7 as
+ * IEEE words; samplers and borders are encoded as in RB2K_D3D7_DRAW. */
+typedef struct {
+    ULONG target, depth, count;
+    ULONG depthState, alphaTest, blend, cull;
+    ULONG program;
+    ULONG textures[RB2K_D8_STAGES], samplers[RB2K_D8_STAGES], borders[RB2K_D8_STAGES];
+    ULONG constants[8][4];
+    ULONG transform;
+    ULONG matrices[3][16];
+    ULONG viewport[6];
+    RB2K_D3D8_VERTEX vertices[RB2K_D8_VERTICES];
+} RB2K_D3D8_DRAW;
 typedef struct { ULONG clears, triangles; } RB2K_D3D7_COMPLETED;
 #define RB2K_D3D7_VERTICES 96
 /* IEEE transformed position, packed Direct3D diffuse and specular colours,

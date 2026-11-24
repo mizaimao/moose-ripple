@@ -1625,3 +1625,65 @@ times with the interface on and three times after a restart with
 Guest screenshots showed the level, weapon and status bar drawn the same
 way. `d8pixels.exe` is built against the Direct3D 8 headers of the
 Windows 7 WDK (`WDK_ROOT`).
+
+## Direct3D 8 pixel shaders
+
+The device reports pixel shader version 1.3. The display driver
+translates each shader into Gallium TGSI text (`d3d8_ps.c`) when the
+runtime creates it, and the miniport keeps the text and creates the host
+shader in each render target's context on first use. A pixel shader draw
+carries the coordinates of texture stages 0 to 3 as four components each,
+the constants c0 to c7 and up to four textures.
+
+The translator covers the arithmetic instructions with their source
+modifiers (negation, bias, sign scale, complement) and result modifiers
+(shifts, saturation), co-issued pairs, `cnd` and `cmp`, constants given
+by `def`, and the texture instructions `tex`, `texcoord`, `texkill`,
+`texreg2ar`, `texreg2gb`, `texreg2rgb`, the `texm3x2` pair, `texm3x3`
+without sampling, `texdp3` and `texdp3tex`. Results are clamped to
+[-1, 1] after each instruction, matching the maximum pixel shader value
+of 1 the device reports, so negative intermediate values survive as they
+do on ps 1.1 hardware. A shader using bump mapping, cube maps or depth
+output is refused; the runtime still creates it, and draws with it are
+counted and skipped. `d7draw` reports shaders created and refused.
+
+During development `d3d8_ps.c` was also built natively on the Linux
+build host, and Mesa's TGSI text parser accepted each test shader's
+translation before it ran in a guest.
+
+Not yet drawn with a pixel shader: lit untransformed vertices, texture
+transforms and generated coordinates; fog is not applied after the
+shader. Version 1.4 is not offered.
+
+Installed from the stock INF under KVM on the Intel UHD 630 host:
+
+| Check | Windows XP SP3 | Windows 2000 SP4 |
+| --- | --- | --- |
+| `d8pixels`: 8 fixed-function and 11 pixel shader cases, hardware and software vertex processing | 19 of 19 pass each way | no Direct3D 8 runtime |
+| The same pixel shader cases one per process, plus five single-modifier variants | 16 of 16 pass | not run |
+| Direct3D 8 and 9 textured scenes | pass | not run |
+| Direct3D 7 pixel tests on the RGB, HAL and T&L devices | pass | pass |
+| DirectDraw flips at 8, 16 and 32 bits | not rerun | pass |
+
+The pixel shader cases cover colour and texture inputs, `def` and program
+constants, the modifiers including a negative intermediate result,
+co-issue with alpha blending, `cnd`, per-channel `cmp`, `dp3`,
+`texcoord`, `texkill` and two textures, each against colours computed on
+the CPU.
+
+One bug only showed with several shaders in one device: when a stage's
+sampler and view were already current, the draw queued an empty command,
+which the miniport treats as a failure, and the transport stopped. Each
+case passed in its own process, which pointed at state carried between
+draws. `d7draw` now prints the step at which the miniport last refused a
+draw.
+
+Quake 0.73 `demo1` in a 640×480 window, three runs on each build:
+
+| Build | Windows XP SP3 | Windows 2000 SP4 |
+| --- | --- | --- |
+| Direct3D 8 interface only | 121.9, 123.0, 129.7 fps | 128.1 fps (one run) |
+| With pixel shaders | 122.0, 122.1, 119.8 fps | 127.7, 128.6, 127.5 fps |
+
+Direct3D 8 Quake (0.81) ran at 57.9 and 58.7 fps with pixel shaders
+offered, as before.
