@@ -56,7 +56,7 @@ typedef struct {
 typedef char gpu_header_must_be_24[sizeof(struct virtio_gpu_ctrl_hdr) == 24 ? 1 : -1];
 typedef char frame_header_is_32[sizeof(struct virtio_gpu_cmd_submit) == 32 ? 1 : -1];
 typedef char gpu_entry_must_be_16[sizeof(struct virtio_gpu_mem_entry) == 16 ? 1 : -1];
-typedef char backing_request_fits_queue[sizeof(BACKING_REQUEST) <= 1024 ? 1 : -1];
+typedef char backing_request_fits_queue[sizeof(BACKING_REQUEST) <= RB2K_INLINE_PACKET_BYTES ? 1 : -1];
 
 static void begin_request(PIXEL_REQUEST *request, ULONG type, ULONG context)
 {

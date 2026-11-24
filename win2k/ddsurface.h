@@ -3,8 +3,9 @@
  * WRITE takes the surface ID followed immediately by that many bytes. */
 #ifndef RB2K_DDSURFACE_H
 #define RB2K_DDSURFACE_H
-#define RB2K_DD_MAX_WIDTH 1024UL
-#define RB2K_DD_MAX_HEIGHT 768UL
+/* Host images cover the largest screen mode, 1600x1200 or 1680x1050. */
+#define RB2K_DD_MAX_WIDTH 1680UL
+#define RB2K_DD_MAX_HEIGHT 1200UL
 #define RB2K_DD_MAX_BYTES (RB2K_DD_MAX_WIDTH * RB2K_DD_MAX_HEIGHT * 4)
 #define RB2K_DD_SLOTS 4
 #define RB2K_DD_HOST_SURFACES 1
