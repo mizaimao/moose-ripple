@@ -134,9 +134,10 @@ def build_programs(work):
     # Only Microsoft's headers declare the Direct3D 8 interfaces here.
     d3d = work / "d3d-include"
     d3d.mkdir()
-    for name in ("d3d8.h", "d3d8types.h", "d3d8caps.h"):
+    for name in ("d3d8.h", "d3d8types.h", "d3d8caps.h", "d3d9.h", "d3d9types.h", "d3d9caps.h"):
         (d3d / name).write_bytes((wdk / "inc/api" / name).read_bytes())
     targets.append(("d8pixels.exe", ["tools/d8pixels"], ["-I", d3d, "-luser32"]))
+    targets.append(("d9pixels.exe", ["tools/d9pixels"], ["-I", d3d, "-luser32"]))
     args = [bin_dir / "i686-w64-mingw32-clang", "-O2", "-D_WIN32_WINNT=0x0500",
             "-I", source, "-I", repo / "win9x/minivdd",
             "-Wl,--major-subsystem-version,5,--minor-subsystem-version,0,--major-os-version,5,--minor-os-version,0,--no-insert-timestamp"]
