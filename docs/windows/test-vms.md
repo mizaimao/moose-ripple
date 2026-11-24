@@ -294,6 +294,12 @@ pictures come from `C:\rb\pkg\shot.ps1` in the guest (as on Hog).
 
 ### Keeping Aero active on cold boots
 
+Replaced on 2026-11-24 by the arguments in [Guest clock on an emulated
+processor](#guest-clock-on-an-emulated-processor): with `hpet=on` the Windows
+tick clock runs slow under load, and with those arguments the counter fault
+described here did not come back. This section stays as the record of that
+fault and of the check for it.
+
 On the x86-64 Q35 test VM on Apple silicon, add `-machine hpet=on` to the
 VM's additional QEMU arguments while it is stopped, then start it. UTM
 supplied `hpet=off` in its generated machine arguments. With HPET off,
@@ -310,6 +316,96 @@ all four processors. On the final boot DWM stayed running through the
 timer-resolution sweep and Explorer opened the **New** submenu five times
 in the same process. Run `timerbench.exe counter` to repeat the clock check.
 The toolbar repaint can still appear with Aero running. [Paired resize captures](mesa-win7.md#white-strip-beside-the-search-box)
+
+### Guest clock on an emulated processor
+
+With `-machine hpet=on` the Windows tick clock of these emulated VMs ran slow
+whenever a program asked for a fine timer, as games, 3DMark06 and video
+players do (1 ms). Windows then takes its ticks from the HPET, and QEMU's HPET
+skips every periodic tick it cannot deliver on time. In a 3DMark06 run on the
+Vista guest the tick clock moved 58% to 66% of real time. Whatever a program
+times by that clock ran that much slower, and 3DMark06, which counts its
+frames against tick time, reported scores about 1.7 times too high.
+
+Since 2026-11-24 the Windows 7 and the Vista VM have these additional QEMU
+arguments instead of `-machine hpet=on`:
+
+    -machine hpet=off
+    -rtc driftfix=slew
+
+Without an HPET, Windows ticks from the RTC, and with `driftfix=slew` QEMU
+delivers the RTC ticks it was late with afterwards. On the Vista guest
+(driver 7.14.1.20, a disposable session each, 1280x1024, default suite):
+
+| | `hpet=on` | `hpet=off`, `driftfix=slew` |
+| --- | ---: | ---: |
+| Tick clock against real time during 3DMark06 | 58% to 66% | 98% to 101% |
+| 3DMark06 | 2,117 | 1,182 |
+| Return to Proxycon (FPS) | 7.33 | 4.41 |
+| Firefly Forest | 4.03 | 2.37 |
+| Red Valley CPU 1 | 0.195 | 0.117 |
+| Red Valley CPU 2 | 0.209 | 0.131 |
+| Canyon Flight | 15.93 | 7.52 |
+| Deep Freeze | 8.89 | 5.19 |
+| From the Run click to the score | about 42 min | 37 min |
+
+The right column is the real speed; the left one is the same speed divided by
+a slow clock. The run stays long because the two processor tests draw one
+frame in about eight seconds on the emulated processor (the Intel test
+machine draws 2.5 to 3.5 a second).
+
+The new arguments cost little or nothing. `timerbench.exe` without an
+argument compares the tick clock with the performance counter at each timer
+rate, and `timerbench.exe cost` runs the same arithmetic on all four
+processors at each rate and then counts reads of the counter:
+
+| | `hpet=on` | `hpet=off`, `driftfix=slew` |
+| --- | ---: | ---: |
+| Windows 7 tick clock, 1 ms timer | 72% | 100% |
+| Windows 7 tick clock, 0.5 ms timer | 37% | 100% |
+| Vista tick clock, 1 ms timer | 65% | 99% to 100% |
+| Vista tick clock, 0.5 ms timer | 34% | 91% to 94% |
+| Windows 7 work a second, 1 ms timer (billions) | 1.48 | 1.41 to 1.51 |
+| Vista work a second, 1 ms timer (billions) | 1.28 | 1.28 |
+| Windows 7 counter reads a second, one thread (millions) | 1.3 | 1.6 to 2.2 |
+| Vista counter reads a second, one thread (millions) | 0.6 to 1.1 | 1.3 to 1.4 |
+
+At a 0.5 ms timer, where every one of 2,048 ticks a second now arrives, the
+work a second was 3% to 12% lower than at the default rate on Windows 7 and
+4% lower than with `hpet=on` on Vista. On Vista the 0.5 ms rate stayed in
+force after the test released it, with either set of arguments; with
+`hpet=on` the tick clock then ran at a third of real time in the two test
+runs that followed.
+
+`hpet=on` had been added for the counter fault of the section above, so that
+check was repeated with the new arguments. `timerbench.exe counter` found a
+3,579,545 Hz counter that never stepped backwards, pinned to one processor,
+with normal scheduling and rotating between all four, on Vista and on three
+Windows 7 cold boots. On those three the compositor was running and no new
+event 9020 was logged. If the fault returns, that check and the event log
+show it.
+
+A guest that keeps real time also notices that nobody touches it. A 3DMark06
+run takes over half an hour here, and the test scripts send no keyboard or
+mouse input while it runs. The Vista guest has a screen saver with a wait of
+ten minutes. With the clock right it started while 3DMark06 was on the
+desktop between its two processor tests, 22 minutes after the Run click in
+three runs of three. 3DMark06 lost the screen, showed a message box and ended
+the run without a score, which from outside looked like a benchmark that had
+hung. The slow clock had hidden this. Before a long unattended run, in the
+guest (the two `powercfg` lines elevated):
+
+    keep-awake.exe
+    powercfg -change -monitor-timeout-ac 0
+    powercfg -change -standby-timeout-ac 0
+
+`tools/vista/keep-awake.c` switches the screen saver off for the logon
+session and leaves the saved setting alone. Scheduled jobs come due as well:
+a Windows Defender scan started in the middle of one run.
+
+UTM's **Use TSO** switch does not apply to these VMs. It works only with the
+hypervisor, which an x86 guest on Apple silicon cannot use. The VMs' debug
+log is not a cost either: about 28 lines a second during a 3DMark06 run.
 
 ### Windows' Meltdown mitigation on an emulated processor
 

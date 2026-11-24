@@ -974,6 +974,11 @@ resolution alone there. The stream detection and fine-timer request remain uncha
 other hypervisors. This avoids slowing all tick-based waits while trying to shorten GPU
 fence waits. It cannot prevent another program from requesting a fine timer.
 
+Since 2026-11-24 the VM's clock arguments keep the tick clock right when a program does
+request one ([Guest clock on an emulated
+processor](test-vms.md#guest-clock-on-an-emulated-processor)). The driver still leaves the
+timer alone under emulation: the fine rate takes a few percent of the processors there.
+
 The x64 kernel driver builds, passes signature verification against the test certificate,
 and loads after restarting the display device. With the same user-mode driver installed,
 the ratio of tick time to QPC time changes from 0.357 to 1.000 during movement, 0.318 to 1.001

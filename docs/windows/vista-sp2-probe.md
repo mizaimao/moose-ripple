@@ -342,6 +342,11 @@ colours presented by Direct3D 9. Print Screen produced a fresh 1280 × 1024
 clipboard bitmap for each colour. All 512 sampled pixels per driver
 matched on the external display, in the screen DC and in the clipboard.
 
+The scores below were taken with a guest clock that ran slow and are too
+high; the display changes per real second are not affected. Comparable
+scores: [3DMark06 with a guest clock that keeps real
+time](mesa-win7.md#3dmark06-with-a-guest-clock-that-keeps-real-time-2026-11-23).
+
 A matched 3DMark06 1.2.0 run at 1280 × 1024 with no viewer measured the
 change on the Vista fullscreen test build. Both user-mode DLLs and the
 benchmark executable were identical between runs. The count and time

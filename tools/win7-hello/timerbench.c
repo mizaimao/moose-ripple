@@ -3,6 +3,8 @@
  * to avoid cursor drawing keeping the display driver busy. Run on an otherwise
  * idle guest; other processes can request a finer timer than this test.
  * Run: timerbench.exe > timerbench.txt
+ * "timerbench.exe counter" checks that QPC never steps backwards; "timerbench.exe cost"
+ * measures the processor time the ticks take at each resolution.
  * MIT licence (LICENSE at the repository root).
  */
 #define _WIN32_WINNT 0x0601
@@ -61,10 +63,123 @@ static int check_counter(void)
     return SetThreadAffinityMask(thread, original) ? rc : 2;
 }
 
+/* What the timer ticks cost: the same arithmetic on every processor for three counter seconds
+ * at each timer resolution. Where each tick is expensive (an emulated processor), a fine timer
+ * takes a visible share of the machine, and a host that delivers late ticks afterwards takes
+ * more than one that drops them. */
+static volatile LONG cost_stop;
+
+static DWORD WINAPI cost_thread(void *arg)
+{
+    unsigned long long *count = arg, n = 0;
+    unsigned x = 1;
+    while (!cost_stop) {
+        for (int i = 0; i < 4096; ++i) x = x * 1664525u + 1013904223u;
+        n += 1 + (x & 0);
+    }
+    *count = n;
+    return 0;
+}
+
+struct counter_reads { unsigned long long calls, backwards; };
+
+static DWORD WINAPI counter_thread(void *arg)
+{
+    struct counter_reads *reads = arg;
+    LARGE_INTEGER previous, now;
+    unsigned long long calls = 0, backwards = 0;
+    QueryPerformanceCounter(&previous);
+    while (!cost_stop) {
+        for (int i = 0; i < 64; ++i) {
+            QueryPerformanceCounter(&now);
+            if (now.QuadPart < previous.QuadPart) ++backwards;
+            previous = now;
+        }
+        calls += 64;
+    }
+    reads->calls = calls;
+    reads->backwards = backwards;
+    return 0;
+}
+
+static int check_cost(void)
+{
+    ULONG requests[] = {0, 10000, 5000, 0};
+    query_fn query = (query_fn)(void *)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryTimerResolution");
+    set_fn set = (set_fn)(void *)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtSetTimerResolution");
+    SYSTEM_INFO info;
+    LARGE_INTEGER frequency, start, now;
+    if (!query || !set || !QueryPerformanceFrequency(&frequency)) return 2;
+    GetSystemInfo(&info);
+    unsigned threads = info.dwNumberOfProcessors > 64 ? 64 : info.dwNumberOfProcessors;
+    printf("processors=%u frequency=%lld\n", threads, frequency.QuadPart);
+    for (unsigned i = 0; i < sizeof(requests) / sizeof(requests[0]); ++i) {
+        HANDLE handles[64];
+        unsigned long long counts[64] = {0}, total = 0;
+        ULONG minimum, maximum, current;
+        Sleep(500);
+        if (requests[i] && set(requests[i], TRUE, &current) < 0) return 1;
+        query(&minimum, &maximum, &current);
+        cost_stop = 0;
+        ULONGLONG tick = GetTickCount64();
+        QueryPerformanceCounter(&start);
+        for (unsigned t = 0; t < threads; ++t)
+            handles[t] = CreateThread(NULL, 0, cost_thread, &counts[t], 0, NULL);
+        do {
+            Sleep(20);
+            QueryPerformanceCounter(&now);
+        } while ((now.QuadPart - start.QuadPart) * 1000 / frequency.QuadPart < 3000);
+        cost_stop = 1;
+        WaitForMultipleObjects(threads, handles, TRUE, INFINITE);
+        QueryPerformanceCounter(&now);
+        tick = GetTickCount64() - tick;
+        for (unsigned t = 0; t < threads; ++t) {
+            total += counts[t];
+            CloseHandle(handles[t]);
+        }
+        double seconds = (double)(now.QuadPart - start.QuadPart) / frequency.QuadPart;
+        printf("request=%lu actual=%lu work_per_s=%.0f qpc_ms=%.3f tick_ms=%llu\n", requests[i], current,
+               total / seconds, seconds * 1000, tick);
+        fflush(stdout);
+        if (requests[i]) set(requests[i], FALSE, &current);
+    }
+    /* What reading the counter costs, from one thread and then from every processor at once.
+     * The tick clock ends each run, so a counter that steps backwards cannot hold it up. */
+    const unsigned readers[] = {1, threads};
+    for (unsigned i = 0; i < (threads > 1 ? 2u : 1u); ++i) {
+        HANDLE handles[64];
+        struct counter_reads reads[64] = {{0, 0}};
+        unsigned long long total = 0, backwards = 0;
+        Sleep(500);
+        cost_stop = 0;
+        ULONGLONG tick = GetTickCount64();
+        QueryPerformanceCounter(&start);
+        for (unsigned t = 0; t < readers[i]; ++t)
+            handles[t] = CreateThread(NULL, 0, counter_thread, &reads[t], 0, NULL);
+        while (GetTickCount64() - tick < 3000)
+            Sleep(20);
+        cost_stop = 1;
+        WaitForMultipleObjects(readers[i], handles, TRUE, INFINITE);
+        QueryPerformanceCounter(&now);
+        tick = GetTickCount64() - tick;
+        for (unsigned t = 0; t < readers[i]; ++t) {
+            total += reads[t].calls;
+            backwards += reads[t].backwards;
+            CloseHandle(handles[t]);
+        }
+        double seconds = (double)(now.QuadPart - start.QuadPart) / frequency.QuadPart;
+        printf("counter_readers=%u reads_per_s=%.0f backwards=%llu qpc_ms=%.3f tick_ms=%llu\n", readers[i],
+               total / seconds, backwards, seconds * 1000, tick);
+        fflush(stdout);
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "counter")) return check_counter();
+    if (argc == 2 && !strcmp(argv[1], "cost")) return check_cost();
     if (argc != 1) {
-        fprintf(stderr, "Usage: timerbench.exe [counter]\n");
+        fprintf(stderr, "Usage: timerbench.exe [counter|cost]\n");
         return 2;
     }
     ULONG requests[] = {0, 40000, 20000, 10000, 5000, 0};
