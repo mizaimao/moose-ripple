@@ -187,7 +187,7 @@ Direct3D 8 test program uses the DirectX headers of the Windows 7 WDK. Set
   pixel shader cases, including fog and lighting, on the hardware device and checks their pixels;
   `d8pixels.exe sw` uses software vertex processing and `ps=N` runs one
   pixel shader case alone. `d9pixels.exe` runs the same cases through
-  Direct3D 9, plus eight pixel shader 2.0 cases.
+  Direct3D 9, plus nine pixel shader 2.0 cases.
   `d7draw.exe` also reports the Direct3D 8 interface requests and the
   first DirectX 8 commands.
 
