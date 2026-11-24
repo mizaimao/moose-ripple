@@ -9,9 +9,12 @@
  *
  * Fragment shader inputs, matching the vertex shader of shader draws:
  * GENERIC[0] the diffuse and GENERIC[1] the specular colour, GENERIC[2+n]
- * texture coordinate set n. Constants c0..c7 are CONST[0..7]; texture stage
- * n is sampler n. */
+ * texture coordinate set n (t0..t3 for version 1, t0..t7 for shader model
+ * 2), GENERIC[10] the fog depths. Constants c0..c7 are CONST[0..7]; texture
+ * stage n is sampler n (s0..s7 for shader model 2). */
 #define RB_PS_COORD_SETS 4
+#define RB_PS2_COORD_SETS 8
+#define RB_PS2_SAMPLERS 8
 #define RB_PS_CONSTANTS 8
 #define RB_PS2_CONSTANTS 32     /* c0..c31 of shader model 2 */
 #define RB_PS_TEXT_BYTES 4096
@@ -30,7 +33,7 @@ typedef struct {
 } RB_PS_INFO;
 
 /* Fog applied to the shader's result, encoded as RB2K_D3D7_DRAW.fog: the
- * factor from the specular alpha, from the vertex depths in GENERIC[6]
+ * factor from the specular alpha, from the vertex depths in GENERIC[10]
  * (camera z, distance), or from the pixel depth (z, or w with the W flag);
  * then the D3DFOGMODE, and the range and W flags. CONST[8] holds the fog
  * colour and CONST[9] the start, end and density (CONST[32] and [33] for
