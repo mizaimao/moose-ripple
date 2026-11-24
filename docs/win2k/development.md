@@ -696,6 +696,39 @@ Inside, outside and back inside gave 33.0, 46.6 and 33.3 fps. XP recorded
 initial upload came from anything other than bitmap-to-desktop copies.
 Ordinary GDI remains the default on both systems.
 
+### On the Intel host: keep it off
+
+The GPU path stays opt-in. On the Intel UHD 630 host under KVM, every
+case was several times slower with it than with the ordinary download to
+GDI. Both paths ran alternately in the same boot of each system, with the
+adapter DWORD `RippleGpuDesktop=1` set and only `RIPPLE_GL_PRESENT`
+changed between runs. The host GPU's minimum clock was held at 1200 MHz.
+The Quake III Arena demo ran `timedemo demo001`, three runs per path; the
+ranges are the lowest and highest. `glpresent` timed 240 swaps, two or
+three runs per path.
+
+| Test | Windows 2000, ordinary | Windows 2000, GPU | XP, ordinary | XP, GPU |
+| --- | ---: | ---: | ---: | ---: |
+| Quake III, 640×480 window (fps) | 466.6 to 467.8 | 28.8 to 29.9 | 443.8 to 469.6 | 28.7 to 28.9 |
+| Quake III, 800×600 window (fps) | 418.8 to 422.7 | 29.9 | 392.2 to 392.8 | 28.5 to 28.6 |
+| Quake III, 1024×768 full screen (fps) | 374.2 to 375.9 | 84.3 to 84.4 | 373.5 to 376.0 | 83.0 to 83.3 |
+| 240 swaps, 640×480 window (ms) | 204 to 210 | 2,693 to 2,765 | 224 to 227 | 8,243 to 8,292 |
+| 240 swaps, full screen (ms) | 406 to 408 | 2,688 to 2,721 | 401 to 408 | 2,707 to 2,728 |
+| 240 swaps, window with a software pointer (ms) | 203 to 209 | 8,008 to 8,067 | 206 to 228 | 29,696 to 29,919 |
+
+Each GPU-presented frame waits for its fence, and QEMU checks virgl
+fences on a 10 ms timer, so a full-screen frame costs at least about
+11 ms. A windowed frame also synchronizes desktop pixels around the
+window and costs about three such waits. On this host the ordinary path's
+download and GDI copy cost under 1 ms a frame. The earlier comparison that
+favoured the GPU path at 1024×768 ran under UTM on Apple silicon, where
+the CPU copy is far slower. Guest screenshots showed Quake III correct on
+the ordinary path in a window and at full screen. XP's `glpresent` pixel
+checks failed on both paths in this run, because the test runner left
+the Start menu holding the focus. To make the GPU path worth turning on,
+its present would first have to stop waiting for each frame's fence, as
+the native Direct3D 7 present does.
+
 ### Small desktop writes and the hardware pointer
 
 `RIPPLE_GL_PRESENT=inline` uses the same per-frame copy as `1`.
