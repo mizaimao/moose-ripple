@@ -1552,3 +1552,16 @@ on Windows 2000 and 123 fps on XP. With native Direct3D switched off, XP
 gave the same plain-surface results as with it on: the hardware window
 and fill cases declined the video-memory surface, and the system-memory
 cases passed.
+
+The default also gives Direct3D 8 and 9 programs a hardware device on XP
+SP3: Microsoft's own `d3d8.dll` and `d3d9.dll` runtimes drive this
+Direct3D 7 level driver for fixed-function drawing. Before, both failed
+the hardware capability query with `D3DERR_NOTAVAILABLE`. In one boot
+from the stock INF, the Direct3D 8 and 9 textured-scene tests matched
+all 4,096 pixels in both frames, and the Direct3D 8 build of Quake (0.81)
+ran `demo1` in a 640×480 window at 57.2 fps with a 1 ms timer; guest
+screenshots showed the textured level, weapon and status bar. The test
+launcher could not close the game afterwards with its bound key. Vertex
+and pixel shaders are not offered (the capabilities report shader
+version 0), and a Direct3D 9 vertex declaration test failed with
+`E_FAIL`. Windows 2000 ships with Direct3D 7 only and was not tested here.
