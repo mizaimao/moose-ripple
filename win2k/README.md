@@ -183,8 +183,8 @@ Direct3D 8 test program uses the DirectX headers of the Windows 7 WDK. Set
   the expected colours. Use `ipixels.exe rgb` for Microsoft's software
   reference. `z16pixels.exe hal` and `z16pixels.exe rgb` check which
   pixels survive when two triangles overlap at different depths.
-- `d8pixels.exe` draws eight Direct3D 8 fixed-function cases and eleven
-  pixel shaders on the hardware device and checks their pixels;
+- `d8pixels.exe` draws eight Direct3D 8 fixed-function cases and fifteen
+  pixel shader cases, including fog and lighting, on the hardware device and checks their pixels;
   `d8pixels.exe sw` uses software vertex processing and `ps=N` runs one
   pixel shader case alone.
   `d7draw.exe` also reports the Direct3D 8 interface requests and the

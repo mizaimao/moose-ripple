@@ -29,14 +29,24 @@ enum { MaxContexts = 16, MaxCommandBytes = 1 << 20, TextureStages = 8, MaxTextur
 /* DP2 SETLIGHT operations (D3DHAL_SETLIGHT_*). */
 enum { SetLightEnable, SetLightDisable, SetLightData };
 typedef char light_record[sizeof(D3DLIGHT7) == 26 * sizeof(ULONG) ? 1 : -1];
+typedef char d8_lights_match[RB2K_D7_LIGHTS == 8 ? 1 : -1];
 typedef char material_record[sizeof(D3DNTHAL_DP2SETMATERIAL) == 17 * sizeof(ULONG) ? 1 : -1];
 typedef struct {
     ULONG texture, colorOp, colorArg1, colorArg2, alphaOp, alphaArg1, alphaArg2;
     ULONG coordIndex, addressU, addressV, magFilter, minFilter, mipFilter, border, transform;
 } D7_STAGE;
-/* A pixel shader of a context: its handle, the miniport program (zero when
- * it could not be translated) and the stages it samples and reads. */
-typedef struct { ULONG handle, program, samplers, coords; } D8_SHADER;
+/* A pixel shader of a context: its handle, its tokens, the stages it
+ * samples and reads, and its miniport programs, one per fog setting
+ * (program zero when it could not be translated). */
+enum { ShaderVariants = 4 };
+typedef struct {
+    ULONG handle, samplers, coords, tokenCount;
+    ULONG *tokens;
+    struct { ULONG fog, program; } variants[ShaderVariants];
+} D8_SHADER;
+typedef char fog_codes_match[RB_PS_FOG_ALPHA == RB2K_D7_FOG_ALPHA && RB_PS_FOG_VERTEX == RB2K_D7_FOG_VERTEX &&
+                             RB_PS_FOG_TABLE == RB2K_D7_FOG_TABLE && RB_PS_FOG_MODE_SHIFT == RB2K_D7_FOG_MODE_SHIFT &&
+                             RB_PS_FOG_RANGE == RB2K_D7_FOG_RANGE && RB_PS_FOG_W == RB2K_D7_FOG_W ? 1 : -1];
 typedef struct {
     ULONG id, target, depth;
     DISPLAY *display;
@@ -1318,8 +1328,54 @@ static D8_SHADER *find_shader(D7_CONTEXT *c, ULONG handle)
 
 static void release_shader(D7_CONTEXT *c, D8_SHADER *sh)
 {
-    if (sh->program) request(c->display, IOCTL_RB2K_D3D8_PROGRAM_FREE, &sh->program, sizeof(sh->program), NULL, 0);
+    ULONG k;
+    for (k = 0; k < ShaderVariants; ++k)
+        if (sh->variants[k].program)
+            request(c->display, IOCTL_RB2K_D3D8_PROGRAM_FREE, &sh->variants[k].program, sizeof(ULONG), NULL, 0);
+    if (sh->tokens) EngFreeMem(sh->tokens);
     RtlZeroMemory(sh, sizeof(*sh));
+}
+
+/* Translate the shader with a fog setting and give it to the miniport;
+ * zero when it cannot be translated or kept. */
+static ULONG translate_program(D7_CONTEXT *c, D8_SHADER *sh, ULONG fog, RB_PS_INFO *info)
+{
+    ULONG n = 0, id = 0, written;
+    info->reason = RbPsOverflow;
+    info->detail = 0;
+    if (programScratch && sh->tokens)
+        n = rb_ps_translate((const unsigned int *)sh->tokens, sh->tokenCount, fog, programScratch->text,
+                            sizeof(programScratch->text), info);
+    if (!n) return 0;
+    programScratch->samplers = info->samplers;
+    if (miniport(c->display, IOCTL_RB2K_D3D8_PROGRAM, programScratch, sizeof(ULONG) + n, &id, sizeof(id),
+                 &written) || written != sizeof(id)) {
+        info->reason = RbPsReasons;
+        return 0;
+    }
+    sh->samplers = info->samplers;
+    sh->coords = info->coords;
+    return id;
+}
+
+/* The program of a shader for one fog setting; a fifth setting replaces the
+ * last kept one. */
+static ULONG shader_program(D7_CONTEXT *c, D8_SHADER *sh, ULONG fog)
+{
+    RB_PS_INFO info;
+    ULONG k;
+    for (k = 0; k < ShaderVariants; ++k)
+        if (sh->variants[k].program && sh->variants[k].fog == fog) return sh->variants[k].program;
+    for (k = 0; k < ShaderVariants - 1 && sh->variants[k].program; ++k) {}
+    if (sh->variants[k].program)
+        request(c->display, IOCTL_RB2K_D3D8_PROGRAM_FREE, &sh->variants[k].program, sizeof(ULONG), NULL, 0);
+    sh->variants[k].fog = fog;
+    sh->variants[k].program = translate_program(c, sh, fog, &info);
+    if (!sh->variants[k].program) {
+        ++c->display->d7draw.psFailed[info.reason < RbPsReasons ? info.reason : RbPsReasons];
+        c->display->d7draw.psLastDetail = info.detail;
+    }
+    return sh->variants[k].program;
 }
 
 static void release_shaders(D7_CONTEXT *c)
@@ -1336,27 +1392,18 @@ static void create_shader(D7_CONTEXT *c, ULONG handle, const BYTE *code, ULONG b
     RB2K_D7_DRAWSTATS *s = &c->display->d7draw;
     D8_SHADER *sh = find_shader(c, handle);
     RB_PS_INFO info;
-    ULONG i, n = 0, id = 0, written;
+    ULONG i;
     if (sh) release_shader(c, sh);
     for (i = 0; i < MaxShaders && c->shaders[i].handle; ++i) {}
     if (!handle || i == MaxShaders) { ++s->psFailed[RbPsReasons]; return; }
     sh = &c->shaders[i];
     sh->handle = handle;
-    info.reason = RbPsOverflow;
-    info.detail = 0;
-    if (programScratch)
-        n = rb_ps_translate((const unsigned int *)code, bytes / 4, programScratch->text,
-                            sizeof(programScratch->text), &info);
-    if (n) {
-        programScratch->samplers = info.samplers;
-        if (!miniport(c->display, IOCTL_RB2K_D3D8_PROGRAM, programScratch, sizeof(ULONG) + n, &id, sizeof(id),
-                      &written) && written == sizeof(id)) {
-            sh->program = id;
-            sh->samplers = info.samplers;
-            sh->coords = info.coords;
-        } else info.reason = RbPsReasons;
-    }
-    if (sh->program) ++s->psCreated;
+    /* The tokens stay for the fog variants made at draw time. */
+    sh->tokenCount = bytes / 4;
+    sh->tokens = sh->tokenCount ? EngAllocMem(0, sh->tokenCount * sizeof(ULONG), 'k8bR') : NULL;
+    if (sh->tokens) RtlCopyMemory(sh->tokens, code, sh->tokenCount * sizeof(ULONG));
+    sh->variants[0].program = translate_program(c, sh, 0, &info);
+    if (sh->variants[0].program) ++s->psCreated;
     else {
         ++s->psFailed[info.reason < RbPsReasons ? info.reason : RbPsReasons];
         s->psLastDetail = info.detail;
@@ -1375,15 +1422,16 @@ static ULONG stage_sampler(const D7_STAGE *st, const D7_TEXTURE *tex)
 
 /* A draw with a pixel shader. The program replaces the texture stages; the
  * coordinates of stages 0..3 reach it as four components each, a missing
- * one being 0 or, for the fourth, 1. Lighting is not combined with pixel
- * shaders yet, and fog is not applied after them. */
+ * one being 0 or, for the fourth, 1. Untransformed vertices are lit and
+ * fog blends the shader's result as for the fixed-function draws. */
 static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
 {
     DISPLAY *d = c->display;
     RB2K_D3D8_DRAW *draw = &c->draw8;
     D8_SHADER *sh = find_shader(c, c->pixelShader);
     DD_SLOT *s, *z;
-    ULONG fvf = p->fvf, stride = p->streamStride, offset = 16, diffuse = 0, specular = 0, position, sets, i, t, k;
+    ULONG program = 0, fog = 0;
+    ULONG fvf = p->fvf, stride = p->streamStride, offset = 16, diffuse = 0, specular = 0, normal = 0, position, sets, i, t, k;
     ULONG coordOffset[RB2K_D8_STAGES], coordFloats[RB2K_D8_STAGES];
     ULONG low = 0xffffffff, high = 0, count = 0, flatSource = 0;
     BOOL objectSpace;
@@ -1392,18 +1440,26 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     HRESULT hr = render_surfaces(c, &s, &z);
     if (FAILED(hr)) return hr;
     if (!p->primitives) return DD_OK;
-    if (!sh || !sh->program) { skip(c, RB2K_D7_SKIP_COMBINER, p->primitives); return DD_OK; }
     if (c->fill != D3DFILL_SOLID) { skip(c, RB2K_D7_SKIP_FILL, p->primitives); return DD_OK; }
     if (c->stencil) { skip(c, RB2K_D7_SKIP_STENCIL, p->primitives); return DD_OK; }
     position = fvf & D3DFVF_POSITION_MASK;
     objectSpace = position != D3DFVF_XYZRHW;
-    if (!p->stream || !position || (fvf & D3DFVF_RESERVED0) || (!objectSpace && (fvf & D3DFVF_NORMAL)) ||
-        (objectSpace && c->lighting)) {
+    /* Fog as for the fixed-function draws (fog_draw). */
+    if (c->fog) {
+        if (c->fogTable >= D3DFOG_EXP && c->fogTable <= D3DFOG_LINEAR)
+            fog = RB2K_D7_FOG_TABLE | c->fogTable << RB2K_D7_FOG_MODE_SHIFT | (c->wNear != c->wFar ? RB2K_D7_FOG_W : 0);
+        else if (objectSpace && c->fogVertex >= D3DFOG_EXP && c->fogVertex <= D3DFOG_LINEAR)
+            fog = RB2K_D7_FOG_VERTEX | c->fogVertex << RB2K_D7_FOG_MODE_SHIFT | (c->rangeFog ? RB2K_D7_FOG_RANGE : 0);
+        else fog = RB2K_D7_FOG_ALPHA;
+    }
+    if (sh) program = shader_program(c, sh, fog);
+    if (!program) { skip(c, RB2K_D7_SKIP_COMBINER, p->primitives); return DD_OK; }
+    if (!p->stream || !position || (fvf & D3DFVF_RESERVED0) || (!objectSpace && (fvf & D3DFVF_NORMAL))) {
         skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
         return DD_OK;
     }
     if (objectSpace) offset = 12 + (position >= D3DFVF_XYZB1 ? 4 * ((position - D3DFVF_XYZRHW) / 2) : 0);
-    if (fvf & D3DFVF_NORMAL) offset += 12;
+    if (fvf & D3DFVF_NORMAL) { normal = offset; offset += 12; }
     if (fvf & D3DFVF_RESERVED1) offset += 4;
     if (fvf & D3DFVF_DIFFUSE) { diffuse = offset; offset += 4; }
     if (fvf & D3DFVF_SPECULAR) { specular = offset; offset += 4; }
@@ -1447,7 +1503,12 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
         c->dstBlend >= D3DBLEND_ZERO && c->dstBlend <= D3DBLEND_BOTHINVSRCALPHA)
         draw->blend = RB2K_D7_ON | (c->srcBlend << 8) | c->dstBlend;
     draw->cull = c->cull >= D3DCULL_NONE && c->cull <= D3DCULL_CCW ? c->cull : D3DCULL_NONE;
-    draw->program = sh->program;
+    draw->program = program;
+    draw->fog = fog;
+    draw->fogColor = c->fogColor;
+    draw->fogStart = c->fogStart;
+    draw->fogEnd = c->fogEnd;
+    draw->fogDensity = c->fogDensity;
     RtlCopyMemory(draw->constants, c->psConst, sizeof(draw->constants));
     if (objectSpace) {
         draw->transform = 1;
@@ -1455,8 +1516,21 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
         RtlCopyMemory(draw->viewport, c->viewport, sizeof(c->viewport));
         draw->viewport[4] = c->zRange[0];
         draw->viewport[5] = c->zRange[1];
+        if (c->lighting) {
+            /* The fixed-function batch is free between calls: let light_draw
+             * resolve the lights and material sources there, then copy them. */
+            RB2K_D3D7_DRAW *lit = &c->draw;
+            RtlZeroMemory(lit, FIELD_OFFSET(RB2K_D3D7_DRAW, vertices));
+            light_draw(c, lit, diffuse != 0, specular != 0, p->primitives);
+            draw->lighting = 1;
+            draw->lightCount = lit->lightCount;
+            draw->lightFlags = lit->lightFlags;
+            draw->ambient = lit->ambient;
+            draw->specular = c->specular ? 1 : 0;
+            RtlCopyMemory(draw->material, lit->material, sizeof(draw->material));
+            RtlCopyMemory(draw->lights, lit->lights, sizeof(draw->lights));
+        }
     }
-    if (c->fog) d->d7draw.ignored[RB2K_D7_IGNORED_FOG] += p->primitives;
     for (t = 0; t < p->primitives; ++t)
         for (i = 0; i < 3; ++i) {
             ULONG v = prim_vertex(p, t, i, &flatSource);
@@ -1484,6 +1558,8 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
                 ULONG j;
                 RtlCopyMemory(o, v, objectSpace ? 12 : 16);
                 if (objectSpace) o->rhw = 0x3f800000;
+                if (normal) RtlCopyMemory(&o->nx, v + normal, 12);
+                else o->nx = o->ny = o->nz = 0;
                 o->diffuse = diffuse ? *(const ULONG *)(v + diffuse) : 0xffffffff;
                 o->specular = specular ? *(const ULONG *)(v + specular) : 0;
                 for (k = 0; k < RB2K_D8_STAGES; ++k)

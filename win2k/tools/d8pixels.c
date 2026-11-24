@@ -1,7 +1,8 @@
 /* Check what a Direct3D 8 program draws on the hardware device: a clear,
  * transformed triangles from user memory, a vertex buffer, an index buffer
  * with and without a base vertex, a strip, a managed texture and untransformed
- * vertices, and eleven pixel shaders of versions 1.1 and 1.2. Each case
+ * vertices, and fifteen pixel shaders of versions 1.1 and 1.2, including
+ * fog and lit untransformed vertices. Each case
  * draws on a 128x128 lockable back buffer and inspects a few pixels well
  * inside the shapes. "sw" asks for software vertex
  * processing. Built against the Microsoft headers; d3d8.dll is loaded at
@@ -487,6 +488,98 @@ static void pixel_shaders(int only)
         }
         quad_samples(s, want);
         ps_run("ps_two_textures", ps, v, 1, s, 5);
+    }
+    if (!only || only == 17) {   /* mov r0, v0 with fog from the specular alpha: a quarter of the colour */
+        static const DWORD ps[] = { PSV(1), OMov, DST(RR, 0), SRC(RV, 0), PSEND };
+        float fog = unit(0x40);
+        ps_quad(v, 32, 32, 96, 96, 0xff4080c0, 0, 0, 1, 1);
+        for (i = 0; i < 6; ++i) v[i].specular = 0x40000000;
+        for (i = 0; i < 4; ++i) {
+            want[i][0] = fog * unit(0x40); want[i][1] = fog * unit(0x80) + (1 - fog); want[i][2] = fog * unit(0xc0);
+        }
+        quad_samples(s, want);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_FOGENABLE, TRUE);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_FOGCOLOR, 0x0000ff00);
+        ps_run("ps_fog_alpha", ps, v, 1, s, 5);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_FOGENABLE, FALSE);
+    }
+    if (!only || only == 18) {   /* the same with linear table fog over z 0..1, the quad at z 0.5 */
+        static const DWORD ps[] = { PSV(1), OMov, DST(RR, 0), SRC(RV, 0), PSEND };
+        ps_quad(v, 32, 32, 96, 96, 0xff4080c0, 0, 0, 1, 1);
+        for (i = 0; i < 4; ++i) {
+            want[i][0] = 0.5f * unit(0x40); want[i][1] = 0.5f * unit(0x80) + 0.5f; want[i][2] = 0.5f * unit(0xc0);
+        }
+        quad_samples(s, want);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_FOGENABLE, TRUE);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_FOGCOLOR, 0x0000ff00);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_FOGTABLEMODE, D3DFOG_LINEAR);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_FOGSTART, F0);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_FOGEND, F1);
+        ps_run("ps_fog_table", ps, v, 1, s, 5);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_FOGTABLEMODE, D3DFOG_NONE);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_FOGENABLE, FALSE);
+    }
+    if (!only || only == 19 || only == 20) {
+        /* Untransformed quad facing a white directional light, lit from the
+         * material: mov r0, v0 gives the material diffuse colour; 20 adds
+         * linear vertex fog over camera z 0..1 with the quad at 0.5. */
+        static const DWORD ps[] = { PSV(1), OMov, DST(RR, 0), SRC(RV, 0), PSEND };
+        typedef struct { float x, y, z, nx, ny, nz; } LITVERTEX;
+        LITVERTEX q[6] = {
+            { -0.5f, 0.5f, 0.5f, 0, 0, -1 }, { 0.5f, 0.5f, 0.5f, 0, 0, -1 }, { -0.5f, -0.5f, 0.5f, 0, 0, -1 },
+            { -0.5f, -0.5f, 0.5f, 0, 0, -1 }, { 0.5f, 0.5f, 0.5f, 0, 0, -1 }, { 0.5f, -0.5f, 0.5f, 0, 0, -1 } };
+        D3DMATERIAL8 m;
+        D3DLIGHT8 l;
+        D3DMATRIX identity;
+        DWORD handle = 0;
+        int fogged;
+        memset(&m, 0, sizeof(m));
+        m.Diffuse.r = 0.5f; m.Diffuse.g = 0.25f; m.Diffuse.b = 1.0f; m.Diffuse.a = 1.0f;
+        memset(&l, 0, sizeof(l));
+        l.Type = D3DLIGHT_DIRECTIONAL;
+        l.Diffuse.r = l.Diffuse.g = l.Diffuse.b = l.Diffuse.a = 1.0f;
+        l.Direction.z = 1.0f;
+        memset(&identity, 0, sizeof(identity));
+        identity._11 = identity._22 = identity._33 = identity._44 = 1.0f;
+        for (fogged = 0; fogged < 2; ++fogged) {
+            const char *name = fogged ? "ps_lit_fog" : "ps_lit";
+            float f = fogged ? 0.5f : 1.0f;
+            HRESULT hr;
+            if (only && only != 19 + fogged) continue;
+            for (i = 0; i < 4; ++i) { want[i][0] = 0.5f * f; want[i][1] = 0.25f * f + (1 - f); want[i][2] = f; }
+            quad_samples(s, want);
+            IDirect3DDevice8_SetTransform(device, D3DTS_WORLD, &identity);
+            IDirect3DDevice8_SetTransform(device, D3DTS_VIEW, &identity);
+            IDirect3DDevice8_SetTransform(device, D3DTS_PROJECTION, &identity);
+            IDirect3DDevice8_SetMaterial(device, &m);
+            IDirect3DDevice8_SetLight(device, 0, &l);
+            IDirect3DDevice8_LightEnable(device, 0, TRUE);
+            IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, TRUE);
+            IDirect3DDevice8_SetRenderState(device, D3DRS_AMBIENT, 0);
+            IDirect3DDevice8_SetRenderState(device, D3DRS_COLORVERTEX, FALSE);
+            if (fogged) {
+                IDirect3DDevice8_SetRenderState(device, D3DRS_FOGENABLE, TRUE);
+                IDirect3DDevice8_SetRenderState(device, D3DRS_FOGCOLOR, 0x0000ff00);
+                IDirect3DDevice8_SetRenderState(device, D3DRS_FOGVERTEXMODE, D3DFOG_LINEAR);
+                IDirect3DDevice8_SetRenderState(device, D3DRS_FOGSTART, F0);
+                IDirect3DDevice8_SetRenderState(device, D3DRS_FOGEND, F1);
+            }
+            hr = IDirect3DDevice8_CreatePixelShader(device, ps, &handle);
+            if (FAILED(hr)) fail_hr(name, "create", hr);
+            else if (begin(name)) {
+                IDirect3DDevice8_SetPixelShader(device, handle);
+                IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZ | D3DFVF_NORMAL);
+                hr = IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, q, sizeof(q[0]));
+                IDirect3DDevice8_SetPixelShader(device, 0);
+                if (FAILED(hr)) { fail_hr(name, "draw", hr); IDirect3DDevice8_EndScene(device); }
+                else check(name, s, 5);
+            }
+            if (handle) IDirect3DDevice8_DeletePixelShader(device, handle);
+            handle = 0;
+            IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+            IDirect3DDevice8_SetRenderState(device, D3DRS_FOGVERTEXMODE, D3DFOG_NONE);
+            IDirect3DDevice8_SetRenderState(device, D3DRS_FOGENABLE, FALSE);
+        }
     }
     if (only == 12) {   /* tex t0; add r0, t0_bias, c0 */
         static const DWORD ps[] = { PSV(1), DEF(0, F05, F05, F05, F05), OTex, DST(RT, 0),
