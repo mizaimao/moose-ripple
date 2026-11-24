@@ -334,8 +334,13 @@ arguments instead of `-machine hpet=on`:
     -rtc driftfix=slew
 
 Without an HPET, Windows ticks from the RTC, and with `driftfix=slew` QEMU
-delivers the RTC ticks it was late with afterwards. On the Vista guest
-(driver 7.14.1.20, a disposable session each, 1280x1024, default suite):
+delivers the RTC ticks it was late with afterwards. Both arguments are
+needed: UTM's own default, `hpet=off` without the RTC option, loses ticks as
+the HPET does (on the Vista guest the tick clock ran at 63% of real time with
+a 1 ms timer and at 33% with 0.5 ms).
+
+On the Vista guest (driver 7.14.1.20, a disposable session each, 1280x1024,
+default suite):
 
 | | `hpet=on` | `hpet=off`, `driftfix=slew` |
 | --- | ---: | ---: |

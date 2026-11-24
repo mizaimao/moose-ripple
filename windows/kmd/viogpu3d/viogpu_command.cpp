@@ -504,6 +504,30 @@ void VioGpuCommander::ThreadWork(PVOID Context)
     pdev->ThreadWorkRoutine();
 }
 
+// Under CPU emulation, with the fine timer held: did the tick clock keep up with the performance
+// counter since the marks were set? Two spans in a row under 85% say no. A host that stalls for
+// a moment delivers the ticks afterwards and must not cost the fine timer for the rest of the
+// session.
+static BOOLEAN TickClockKeepsUp(ULONGLONG *tickMark, LONGLONG *counterMark, UINT *failed)
+{
+    LARGE_INTEGER frequency;
+    const ULONGLONG tick = KeQueryInterruptTime();
+    const LONGLONG counter = KeQueryPerformanceCounter(&frequency).QuadPart;
+    const ULONGLONG ticked = tick - *tickMark;
+    const ULONGLONG real = (ULONGLONG)(counter - *counterMark) * 10000000 / (ULONGLONG)frequency.QuadPart;
+    *tickMark = tick;
+    *counterMark = counter;
+    *failed = ticked * 100 < real * 85 ? *failed + 1 : 0;
+    if (*failed < 2)
+    {
+        return TRUE;
+    }
+    DbgPrint(TRACE_LEVEL_ERROR,
+             ("The tick clock moved %u ms in %u ms with a fine timer: keeping the ordinary timer\n",
+              (UINT)(ticked / 10000), (UINT)(real / 10000)));
+    return FALSE;
+}
+
 void VioGpuCommander::ThreadWorkRoutine(void)
 {
     PAGED_CODE();
@@ -511,10 +535,17 @@ void VioGpuCommander::ThreadWorkRoutine(void)
 
     KeSetPriorityThread(KeGetCurrentThread(), LOW_REALTIME_PRIORITY);
 
-    // TCG emulates the guest CPU. In UTM, requesting the finest Windows timer made
-    // the guest tick clock advance about one second per three real seconds,
-    // slowing sleeps, VSync and desktop animations.
-    // Keep the ordinary timer there; hardware virtualization retains the fast path.
+    // TCG emulates the guest CPU (UTM on Apple silicon). The timer is taken at 1 ms there, not
+    // at half a millisecond: the finer rate costs up to a tenth of the emulated processors.
+    // Without a fine timer the nudges below come once per 15.6 ms tick, and a window moved
+    // under Aero was drawn 36 times a second where 1 ms gives 55.
+    //
+    // Some virtual timers lose ticks at such a rate when the processor is emulated. QEMU's
+    // HPET does: the guest's tick clock then ran at two thirds of real time with a 1 ms
+    // timer and at a third with half a millisecond, slowing sleeps, VSync and animations.
+    // (The RTC with -rtc driftfix=slew does not.) So while the fine timer is held there,
+    // the tick clock is compared with the performance counter, and if it falls behind, the
+    // fine timer is given up until the driver is loaded again.
     UINT cpu[4];
     __asm__ volatile("cpuid"
                      : "=a"(cpu[0]), "=b"(cpu[1]), "=c"(cpu[2]), "=d"(cpu[3])
@@ -537,8 +568,12 @@ void VioGpuCommander::ThreadWorkRoutine(void)
     // The times are the interrupt time, which moves in steps of the timer (15.6 ms when
     // coarse), so the cursor's 30 ms can read as 47: hence 60.
     const ULONGLONG streamGap = 100 * 10000, streamMin = 60 * 10000;
-    ULONGLONG streamStart = 0, lastWork = 0;
-    BOOLEAN fineTimer = FALSE;
+    const ULONG fineResolution = emulatedCpu ? 10000 : 5000;
+    const ULONGLONG checkSpan = 500 * 10000;
+    ULONGLONG streamStart = 0, lastWork = 0, checkTick = 0;
+    LONGLONG checkCounter = 0;
+    UINT checkFailed = 0;
+    BOOLEAN fineTimer = FALSE, fineAllowed = TRUE;
     for (;;)
     {
         LARGE_INTEGER nudge, idle;
@@ -553,10 +588,19 @@ void VioGpuCommander::ThreadWorkRoutine(void)
                 streamStart = now;
             }
             lastWork = now;
-            if (!emulatedCpu && !fineTimer && now - streamStart >= streamMin)
+            if (fineAllowed && !fineTimer && now - streamStart >= streamMin)
             {
-                ExSetTimerResolution(5000, TRUE);
+                ExSetTimerResolution(fineResolution, TRUE);
                 fineTimer = TRUE;
+                checkTick = now;
+                checkCounter = KeQueryPerformanceCounter(NULL).QuadPart;
+            }
+            else if (emulatedCpu && fineTimer && now - checkTick >= checkSpan &&
+                     !TickClockKeepsUp(&checkTick, &checkCounter, &checkFailed))
+            {
+                ExSetTimerResolution(0, FALSE);
+                fineTimer = FALSE;
+                fineAllowed = FALSE;
             }
         }
         NTSTATUS wait = KeWaitForSingleObject(&m_QueueEvent,
@@ -582,6 +626,12 @@ void VioGpuCommander::ThreadWorkRoutine(void)
             }
             else if (m_running == 0)
             {
+                // a stream shorter than the span is checked as it ends
+                if (emulatedCpu && fineTimer && KeQueryInterruptTime() - checkTick >= checkSpan / 5 &&
+                    !TickClockKeepsUp(&checkTick, &checkCounter, &checkFailed))
+                {
+                    fineAllowed = FALSE;
+                }
                 ExSetTimerResolution(0, FALSE);
                 fineTimer = FALSE;
             }

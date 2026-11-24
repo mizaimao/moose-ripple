@@ -4,13 +4,15 @@
  * idle guest; other processes can request a finer timer than this test.
  * Run: timerbench.exe > timerbench.txt
  * "timerbench.exe counter" checks that QPC never steps backwards; "timerbench.exe cost"
- * measures the processor time the ticks take at each resolution.
+ * measures the processor time the ticks take at each resolution; "timerbench.exe hold 10000 60"
+ * keeps a 1 ms timer requested for a minute while another test runs.
  * MIT licence (LICENSE at the repository root).
  */
 #define _WIN32_WINNT 0x0601
 #include <windows.h>
 #include <intrin.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 typedef LONG (WINAPI *query_fn)(PULONG, PULONG, PULONG);
 typedef LONG (WINAPI *set_fn)(ULONG, BOOLEAN, PULONG);
@@ -175,11 +177,31 @@ static int check_cost(void)
     return 0;
 }
 
+/* Keep a timer resolution requested (in 100 ns units; 0 requests nothing) for some seconds, so
+ * that another test can run with and without a fine timer in force. */
+static int hold(ULONG request, unsigned seconds)
+{
+    query_fn query = (query_fn)(void *)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryTimerResolution");
+    set_fn set = (set_fn)(void *)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtSetTimerResolution");
+    ULONG minimum, maximum, current;
+    if (!query || !set || (request && set(request, TRUE, &current) < 0)) return 2;
+    query(&minimum, &maximum, &current);
+    printf("request=%lu actual=%lu for %u s\n", request, current, seconds);
+    fflush(stdout);
+    Sleep(seconds * 1000);
+    query(&minimum, &maximum, &current);
+    printf("actual at the end=%lu\n", current);
+    if (request) set(request, FALSE, &current);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "counter")) return check_counter();
     if (argc == 2 && !strcmp(argv[1], "cost")) return check_cost();
+    if (argc == 4 && !strcmp(argv[1], "hold"))
+        return hold(strtoul(argv[2], NULL, 10), (unsigned)strtoul(argv[3], NULL, 10));
     if (argc != 1) {
-        fprintf(stderr, "Usage: timerbench.exe [counter|cost]\n");
+        fprintf(stderr, "Usage: timerbench.exe [counter|cost|hold UNITS_OF_100NS SECONDS]\n");
         return 2;
     }
     ULONG requests[] = {0, 40000, 20000, 10000, 5000, 0};

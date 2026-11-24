@@ -976,8 +976,8 @@ fence waits. It cannot prevent another program from requesting a fine timer.
 
 Since 2026-11-24 the VM's clock arguments keep the tick clock right when a program does
 request one ([Guest clock on an emulated
-processor](test-vms.md#guest-clock-on-an-emulated-processor)). The driver still leaves the
-timer alone under emulation: the fine rate takes a few percent of the processors there.
+processor](test-vms.md#guest-clock-on-an-emulated-processor)), and the driver takes a 1 ms
+timer there for a stream of work ("UTM: a 1 ms timer for a stream of work" below).
 
 The x64 kernel driver builds, passes signature verification against the test certificate,
 and loads after restarting the display device. With the same user-mode driver installed,
@@ -1061,3 +1061,62 @@ So the frame rate of animations in UTM is bounded by sleeps that Windows' compos
 on a timer that cannot be made finer there, not by the driver's drawing. If the emulator
 kept the guest's fine timer ticks, the driver could take the fine timer as it does under
 hardware virtualization, where the same compositor presents 60 frames a second.
+
+## UTM: a 1 ms timer for a stream of work (2026-11-24)
+
+The trial with a finer timer above ran on a VM that had `-machine hpet=on`: Windows took its
+ticks from QEMU's HPET, and `-rtc driftfix=slew` had nothing to act on. With `-machine
+hpet=off` and `-rtc driftfix=slew` together the guest keeps its fine timer ticks
+(`test-vms.md`, "Guest clock on an emulated processor"), so the driver now takes a fine timer
+under processor emulation as well, by the same rule as elsewhere: only for a stream of work.
+
+It takes 1 ms there, not the half millisecond of hardware virtualization. Half a millisecond
+costs up to a tenth of the emulated processors and 1 ms is enough: the work thread's nudge to
+the host, which was coming once per 15.6 ms tick, comes every millisecond.
+
+What showed it was the timing report of the user-mode driver (`RIPPLE_UMD_TIMES`) switched on
+in the compositor. While a window moved on the Vista guest, a compositor frame took 27.5 ms,
+3.8 ms of it inside the driver, and the guest's four processors were 83% idle: the frame was
+waiting, and another program holding a 1 ms timer was enough to bring it to 18 ms. Measured
+with `tools/win7-hello/dwmtiming.c` (one window operation every 16 ms for 30 seconds), as
+screen updates a second counted on the host, one run each on the same VM:
+
+| Vista SP2 in UTM, Aero, 1280×768 | Before | With the 1 ms timer |
+| --- | ---: | ---: |
+| Move a window | 36.3 | 55.8 |
+| Repaint a window | 35.3 | 56.4 |
+| Resize a window | 19.5 | 21.0 |
+| Timer interrupts a second, window moving | 64 | 1,020 |
+| Timer interrupts a second, idle desktop | 64 | 64 |
+
+Windows 7 SP1 in the same UTM, Aero at 1280×1024, both kernel drivers one after the other in
+one boot (replaced in place, the display device restarted):
+
+| Windows 7 SP1 in UTM | Before | With the 1 ms timer |
+| --- | ---: | ---: |
+| Move a window | 27.1 | 55.6 |
+| Repaint a window | 25.0 | 57.4 |
+| Resize a window | 30.3 | 30.0 |
+
+Resizing is not held up by the timer. Each size change destroys and creates the window's
+surfaces, and the memory work for that in Windows' kernel, for the resized program and for the
+compositor, empties every processor's address translation cache, which is slow under
+emulation. Inside the user-mode driver a resize frame has about 18 copies between surfaces at
+half a millisecond each.
+
+A VM whose timer device loses ticks at 1 ms would pay for this with a slow clock. That is
+QEMU's HPET under emulation, and also UTM's own default, `hpet=off` without the RTC option:
+there the tick clock ran at 63% of real time with a 1 ms timer and at 33% with half a
+millisecond. So while the driver holds the fine timer under emulation it compares the tick
+clock with the performance counter, every half second and when a shorter stream ends. Two
+spans in a row under 85% make it release the timer and not take it again until the driver is
+loaded again, with one line in the debug output:
+
+    The tick clock moved 519 ms in 817 ms with a fine timer: keeping the ordinary timer
+
+On the same Vista guest with UTM's default clock arguments that line came within a second of
+the first stream. After it the timer was back at 64 interrupts a second, idle and with a
+window moving, and the window moved at the old rate (37.3 and 37.6 updates a second in one
+session, 28.2 in another shortly after a restart, where the unchanged driver had given 37.5
+before the swap). Such a VM gains nothing and loses nothing; the gain needs `-rtc
+driftfix=slew`.
