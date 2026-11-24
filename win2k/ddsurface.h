@@ -56,7 +56,7 @@
 typedef struct { ULONG samplers; char text[RB2K_D8_PROGRAM_BYTES]; } RB2K_D3D8_PROGRAM;
 /* A transformed or object-space position as for RB2K_D3D7_VERTEX, the packed
  * colours, and four IEEE components of the coordinates of each stage. */
-typedef struct { ULONG x, y, z, rhw, diffuse, specular, tc[RB2K_D8_STAGES][4]; } RB2K_D3D8_VERTEX;
+typedef struct { ULONG x, y, z, rhw, diffuse, specular, tc[RB2K_D8_STAGES][4], nx, ny, nz; } RB2K_D3D8_VERTEX;
 /* The first seven words match RB2K_D3D7_DRAW. Constants are c0..c7 as
  * IEEE words; samplers and borders are encoded as in RB2K_D3D7_DRAW. */
 typedef struct {
@@ -65,9 +65,15 @@ typedef struct {
     ULONG program;
     ULONG textures[RB2K_D8_STAGES], samplers[RB2K_D8_STAGES], borders[RB2K_D8_STAGES];
     ULONG constants[8][4];
+    ULONG fog, fogColor, fogStart, fogEnd, fogDensity;   /* as in RB2K_D3D7_DRAW */
     ULONG transform;
     ULONG matrices[3][16];
     ULONG viewport[6];
+    /* Lighting as in RB2K_D3D7_DRAW (object space only); specular adds
+     * the lit specular colour. */
+    ULONG lighting, lightCount, lightFlags, ambient, specular;
+    ULONG material[17];
+    ULONG lights[8][26];
     RB2K_D3D8_VERTEX vertices[RB2K_D8_VERTICES];
 } RB2K_D3D8_DRAW;
 typedef struct { ULONG clears, triangles; } RB2K_D3D7_COMPLETED;

@@ -17,7 +17,7 @@
 enum {
     Raster = 9, Elements = 5, VertexShader = 6, ObjectShader = 7, LitShader = 8, DsaBase = 16, BlendBase = 32,
     SamplerBase = 48, Sampler1Base = 56, ShaderBase = 64, TextureView = 80, TextureView1 = 81,
-    PsVertexShader = 82, PsObjectShader = 83, PsViewBase = 84, PsSamplerBase = 96
+    PsVertexShader = 82, PsObjectShader = 83, PsViewBase = 84, PsSamplerBase = 96, PsLitShader = 112
 };
 enum { VertexStage = 0, FragmentStage = 1, PipeTriangles = 4, ShaderText = 2400, LitText = 8192 };
 typedef char sampler_handles_fit[Sampler1Base + RB2K_D7_SAMPLER_KEYS <= ShaderBase &&
@@ -996,7 +996,7 @@ static ULONG ps_vertex_text(char *out, BOOLEAN object)
     put(&t, "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..");
     number(&t, base + PsVertexConstants * RB2K_D8_VERTICES - 1);
     put(&t, "]\nDCL ADDR[0]\nDCL TEMP[0..5]\nDCL OUT[0], POSITION\n");
-    for (i = 0; i < 3 + RB2K_D8_STAGES - 1; ++i) {
+    for (i = 0; i < 3 + RB2K_D8_STAGES - 1 + (object ? 1 : 0); ++i) {
         put(&t, "DCL OUT["); number(&t, i + 1); put(&t, "], GENERIC["); number(&t, i); put(&t, "]\n");
     }
     put(&t, object ? "IMM[0] FLT32 {0x3f800000, 0x40000000, 0x00000000, 0x00000000}\n"
@@ -1005,10 +1005,12 @@ static ULONG ps_vertex_text(char *out, BOOLEAN object)
     number(&t, base);
     put(&t, ", 7, 0, 0}\n");
     if (object) {
-        /* object_lines without its addressing (0..3), fog depth (17..22) and outputs (39..). */
+        /* object_lines without its addressing (0..3) and outputs (39..); its
+         * fog depths (17..21) go to GENERIC[6]. */
         op(&t, ps_transformed_lines[0], 0, 0, 0);
         op(&t, ps_transformed_lines[1], 0, 0, 0);
-        for (i = 4; i <= 16; ++i) op(&t, object_lines[i], 0, 0, 0);
+        for (i = 4; i <= 21; ++i) op(&t, object_lines[i], 0, 0, 0);
+        op(&t, "MOV OUT[7], TEMP[5]", 0, 0, 0);
         for (i = 23; i <= 38; ++i) op(&t, object_lines[i], 0, 0, 0);
     } else {
         for (i = 0; i < sizeof(ps_transformed_lines) / sizeof(*ps_transformed_lines); ++i)
@@ -1029,6 +1031,50 @@ static ULONG ps_vertex_text(char *out, BOOLEAN object)
     return t.overflow ? 0 : t.n + 1;
 }
 typedef char object_lines_layout[sizeof(object_lines) / sizeof(*object_lines) == 43 ? 1 : -1];
+
+/* The lighting shader (lit_lines) for pixel shader draws: eight constants
+ * per vertex (position, diffuse, specular, stage 0 coordinates, normal,
+ * stages 1..3), the coordinates of all four stages out as GENERIC[2..5]
+ * and the fog depths as GENERIC[6]. */
+enum { PsLitVertexConstants = 8 };
+static ULONG ps_lit_text(char *out)
+{
+    TEXT t;
+    ULONG i, found = 0;
+    t.p = out; t.n = 0; t.line = 0; t.size = LitText; t.overflow = FALSE;
+    put(&t, "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..");
+    number(&t, LitVertexBase + PsLitVertexConstants * RB2K_D8_VERTICES + LitLightConstants * RB2K_D7_LIGHTS - 1);
+    put(&t, "]\nDCL ADDR[0]\nDCL TEMP[0..32]\nDCL OUT[0], POSITION\n");
+    for (i = 0; i < 7; ++i) {
+        put(&t, "DCL OUT["); number(&t, i + 1); put(&t, "], GENERIC["); number(&t, i); put(&t, "]\n");
+    }
+    put(&t, "IMM[0] FLT32 {0x3f800000, 0x40000000, 0x00000000, 0x3f000000}\n"
+            "IMM[1] UINT32 {8, 24, 8, 1}\n"
+            "IMM[2] FLT32 {0x00000000, 0x00000000, 0xbf800000, 0x0d800000}\n"
+            "IMM[3] UINT32 {0, 0, 0, 0}\n");
+    for (i = 0; i < sizeof(lit_lines)/sizeof(*lit_lines); ++i) {
+        const char *l = lit_lines[i], *fogOut = "MOV OUT[4], TEMP[14]", *coordIn = "MOV TEMP[26], CONST[ADDR[0].x+3]";
+        const char *a, *b;
+        for (a = l, b = fogOut; *a && *a == *b; ++a, ++b) {}
+        if (!*a && !*b) {
+            op(&t, "MOV OUT[7], TEMP[14]", 0, 0, 0);
+            op(&t, "MOV OUT[4], TEMP[30]", 0, 0, 0);
+            op(&t, "MOV OUT[5], TEMP[31]", 0, 0, 0);
+            op(&t, "MOV OUT[6], TEMP[32]", 0, 0, 0);
+            found |= 1;
+            continue;
+        }
+        op(&t, l, 0, 0, 0);
+        for (a = l, b = coordIn; *a && *a == *b; ++a, ++b) {}
+        if (!*a && !*b) {
+            op(&t, "MOV TEMP[30], CONST[ADDR[0].x+5]", 0, 0, 0);
+            op(&t, "MOV TEMP[31], CONST[ADDR[0].x+6]", 0, 0, 0);
+            op(&t, "MOV TEMP[32], CONST[ADDR[0].x+7]", 0, 0, 0);
+            found |= 2;
+        }
+    }
+    return t.overflow || found != 3 ? 0 : t.n + 1;
+}
 
 static BOOLEAN sampler_valid(ULONG sampler)
 {
@@ -1053,6 +1099,23 @@ BOOLEAN rb_gpu_d8_valid(const RB2K_D3D8_DRAW *d)
         return FALSE;
     for (k = 0; k < RB2K_D8_STAGES; ++k)
         if (d->textures[k] && !sampler_valid(d->samplers[k])) return FALSE;
+    if (d->fog) {
+        ULONG kind = d->fog & 3, mode = (d->fog >> RB2K_D7_FOG_MODE_SHIFT) & 3;
+        if ((d->fog & ~(3UL | 3UL << RB2K_D7_FOG_MODE_SHIFT | RB2K_D7_FOG_RANGE | RB2K_D7_FOG_W)) || !kind ||
+            (kind == RB2K_D7_FOG_ALPHA ? d->fog != kind : !mode) ||
+            (kind == RB2K_D7_FOG_VERTEX && !d->transform) ||
+            ((d->fog & RB2K_D7_FOG_RANGE) && kind != RB2K_D7_FOG_VERTEX) ||
+            ((d->fog & RB2K_D7_FOG_W) && kind != RB2K_D7_FOG_TABLE)) return FALSE;
+    }
+    if (d->lighting) {
+        if (d->lighting != 1 || !d->transform || d->lightCount > RB2K_D7_LIGHTS || d->specular > 1 ||
+            (d->lightFlags & ~((0xffUL << RB2K_D7_SOURCE_SHIFT) | RB2K_D7_NORMALIZE | RB2K_D7_LOCAL_VIEWER)))
+            return FALSE;
+        for (k = 0; k < 4; ++k)
+            if (((d->lightFlags >> (RB2K_D7_SOURCE_SHIFT + 2*k)) & 3) > 2) return FALSE;
+        for (k = 0; k < d->lightCount; ++k)
+            if (d->lights[k][0] < 1 || d->lights[k][0] > 3) return FALSE;
+    }
     return TRUE;
 }
 
@@ -1063,8 +1126,10 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
 {
     RB2K_D7_STATE *s = &image->d7;
     ULONG words[128], n = 0, slot, key[6], state, i, k, h[RB2K_D8_STAGES], views[RB2K_D8_STAGES];
-    ULONG stages = 0, fill = 0, count = d->count, extra = d->transform ? 56 : 0;
-    ULONG perVertex = 4 * PsVertexConstants, total = 28 + (d->transform ? 4 : 0) + extra + perVertex * count, *p;
+    ULONG lit = d->lighting != 0, lights = lit ? d->lightCount : 0;
+    ULONG stages = 0, fill = 0, count = d->count, extra = (d->transform ? 56 : 0) + (lit ? 36 + 32 * lights : 0);
+    ULONG perVertex = 4 * (lit ? PsLitVertexConstants : PsVertexConstants);
+    ULONG total = 28 + (d->transform ? 4 : 0) + extra + perVertex * count, *p;
     ULONG width = dimension_bits(image->width), height = dimension_bits(image->height);
     gpu->d8Step = 1;
     if (!rb_gpu_prepare_target(gpu, r, image)) return FALSE;
@@ -1074,13 +1139,14 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
     }
     gpu->d8Step = 2;
     {
-        static char transformedText[LitText], objectText[LitText];
-        static ULONG transformedSize, objectSize;
-        ULONG want = d->transform ? 16 : 8, handle = d->transform ? PsObjectShader : PsVertexShader;
+        static char transformedText[LitText], objectText[LitText], litText[LitText];
+        static ULONG transformedSize, objectSize, litSize;
+        ULONG want = d->lighting ? 32 : d->transform ? 16 : 8;
+        ULONG handle = d->lighting ? PsLitShader : d->transform ? PsObjectShader : PsVertexShader;
         if (!(s->vertexShaders & want)) {
-            ULONG *size = d->transform ? &objectSize : &transformedSize;
-            char *text = d->transform ? objectText : transformedText;
-            if (!*size) *size = ps_vertex_text(text, d->transform != 0);
+            ULONG *size = d->lighting ? &litSize : d->transform ? &objectSize : &transformedSize;
+            char *text = d->lighting ? litText : d->transform ? objectText : transformedText;
+            if (!*size) *size = d->lighting ? ps_lit_text(text) : ps_vertex_text(text, d->transform != 0);
             if (!*size) { r->status = ERROR_INVALID_DATA; r->stage = RB2K_STAGE_TRANSFER; return FALSE; }
             if (!shader(gpu, r, image, handle, VertexStage, text, *size)) return FALSE;
             s->vertexShaders |= want;
@@ -1111,10 +1177,17 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
         s->shader.bound = slot + 1;
     }
     gpu->d8Step = 5;
-    /* c0..c7 */
-    words[n++] = VIRGL_CMD0(VIRGL_CCMD_SET_CONSTANT_BUFFER,0,2 + 32);
+    /* c0..c7, then for fog its colour and start, end, density. */
+    words[n++] = VIRGL_CMD0(VIRGL_CCMD_SET_CONSTANT_BUFFER,0,2 + (d->fog ? 40 : 32));
     words[n++] = FragmentStage; words[n++] = 0;
     for (i = 0; i < 8; ++i) for (k = 0; k < 4; ++k) words[n++] = d->constants[i][k];
+    if (d->fog) {
+        words[n++] = rb_gpu_channel((d->fogColor >> 16) & 255);
+        words[n++] = rb_gpu_channel((d->fogColor >> 8) & 255);
+        words[n++] = rb_gpu_channel(d->fogColor & 255);
+        words[n++] = 0x3f800000;
+        words[n++] = d->fogStart; words[n++] = d->fogEnd; words[n++] = d->fogDensity; words[n++] = 0;
+    }
     if (!rb_gpu_frame_words(gpu, r, image, words, n)) return FALSE;
     n = 0;
     /* Each sampled stage gets its sampler and view in its own slot; slots
@@ -1188,6 +1261,24 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
         for (i = 0; i < 4; ++i) *p++ = integer_bits(d->viewport[i]);
         *p++ = d->viewport[4]; *p++ = d->viewport[5]; *p++ = 0; *p++ = 0;
     }
+    if (lit) {
+        /* Constants 15..23 of lit_lines, as in rb_gpu_d7_draw. */
+        const ULONG one = 0x3f800000, sources = d->lightFlags >> RB2K_D7_SOURCE_SHIFT;
+        *p++ = rb_gpu_channel((d->ambient >> 16) & 255);
+        *p++ = rb_gpu_channel((d->ambient >> 8) & 255);
+        *p++ = rb_gpu_channel(d->ambient & 255);
+        *p++ = rb_gpu_channel(d->ambient >> 24);
+        for (k = 0; k < 16; ++k) *p++ = d->material[k];
+        *p++ = d->material[16];
+        *p++ = d->lightFlags & RB2K_D7_NORMALIZE ? one : 0;
+        *p++ = d->lightFlags & RB2K_D7_LOCAL_VIEWER ? one : 0;
+        *p++ = d->specular ? one : 0;
+        for (k = 0; k < 4; ++k) {
+            *p++ = ((sources >> 2*k) & 3) == 1 ? one : 0;
+            *p++ = ((sources >> 2*k) & 3) == 2 ? one : 0;
+        }
+        *p++ = lights; *p++ = LitVertexBase + PsLitVertexConstants*count; *p++ = 0; *p++ = 0;
+    }
     for (i = 0; i < count; ++i) {
         const RB2K_D3D8_VERTEX *v = d->vertices + i;
         *p++ = v->x; *p++ = v->y; *p++ = v->z; *p++ = v->rhw;
@@ -1199,9 +1290,26 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
         *p++ = rb_gpu_channel((v->specular >> 8) & 255);
         *p++ = rb_gpu_channel(v->specular & 255);
         *p++ = rb_gpu_channel(v->specular >> 24);
-        for (k = 0; k < RB2K_D8_STAGES; ++k) {
+        if (lit) {
+            /* stage 0, normal, stages 1..3 */
+            *p++ = v->tc[0][0]; *p++ = v->tc[0][1]; *p++ = v->tc[0][2]; *p++ = v->tc[0][3];
+            *p++ = v->nx; *p++ = v->ny; *p++ = v->nz; *p++ = 0;
+            for (k = 1; k < RB2K_D8_STAGES; ++k) {
+                *p++ = v->tc[k][0]; *p++ = v->tc[k][1]; *p++ = v->tc[k][2]; *p++ = v->tc[k][3];
+            }
+        } else for (k = 0; k < RB2K_D8_STAGES; ++k) {
             *p++ = v->tc[k][0]; *p++ = v->tc[k][1]; *p++ = v->tc[k][2]; *p++ = v->tc[k][3];
         }
+    }
+    for (i = 0; i < lights; ++i) {
+        /* As in rb_gpu_d7_draw. */
+        const ULONG *l = d->lights[i];
+        for (k = 1; k <= 12; ++k) *p++ = l[k];
+        *p++ = l[13]; *p++ = l[14]; *p++ = l[15]; *p++ = 0x3f800000;
+        *p++ = l[16]; *p++ = l[17]; *p++ = l[18]; *p++ = 0;
+        *p++ = l[19]; *p++ = l[21]; *p++ = l[22]; *p++ = l[23];
+        *p++ = l[24]; *p++ = l[25]; *p++ = l[20]; *p++ = 0;
+        *p++ = l[0] == 3 ? 0x3f800000 : 0; *p++ = l[0] == 2 ? 0x3f800000 : 0; *p++ = 0; *p++ = 0;
     }
     *p++ = VIRGL_CMD0(VIRGL_CCMD_DRAW_VBO,0,VIRGL_DRAW_VBO_SIZE);
     *p++ = 0; *p++ = count; *p++ = PipeTriangles; *p++ = 0; *p++ = 1; *p++ = 0; *p++ = 0;
