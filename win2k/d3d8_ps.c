@@ -466,11 +466,41 @@ static int walk(PS *s, const unsigned int *tok, unsigned int count, int pass, un
     return fail(s, RbPsTruncated, count);
 }
 
-unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, char *out,
+/* Blend the clamped result with the fog colour, as Direct3D does after a
+ * version 1 pixel shader. TEMP[2] holds the factor; log2e is IMM[log2e]. */
+static void fog_lines(PS *s, unsigned int fog, unsigned int log2e)
+{
+    unsigned int kind = fog & 3, mode = (fog >> RB_PS_FOG_MODE_SHIFT) & 3;
+    char imm[24];
+    imm[0] = 0;
+    cat(imm, sizeof(imm), "-IMM["); cat_number(imm, sizeof(imm), log2e); cat(imm, sizeof(imm), "].xxxx");
+    line(s, "MOV_SAT TEMP[0], TEMP[0]", 0, 0, 0, 0, 0, 0);
+    if (kind == RB_PS_FOG_ALPHA) line(s, "MOV_SAT TEMP[2].x, IN[1].wwww", 0, 0, 0, 0, 0, 0);
+    else {
+        if (kind == RB_PS_FOG_VERTEX)
+            line(s, (fog & RB_PS_FOG_RANGE) ? "MOV TEMP[2].y, IN[8].yyyy" : "MOV TEMP[2].y, IN[8].xxxx", 0, 0, 0, 0, 0, 0);
+        else line(s, (fog & RB_PS_FOG_W) ? "RCP TEMP[2].y, IN[8].wwww" : "MOV TEMP[2].y, IN[8].zzzz", 0, 0, 0, 0, 0, 0);
+        if (mode == 3) {   /* linear: (end - d) / (end - start) */
+            line(s, "ADD TEMP[2].x, CONST[9].yyyy, -TEMP[2].yyyy", 0, 0, 0, 0, 0, 0);
+            line(s, "ADD TEMP[2].z, CONST[9].yyyy, -CONST[9].xxxx", 0, 0, 0, 0, 0, 0);
+            line(s, "RCP TEMP[2].z, TEMP[2].zzzz", 0, 0, 0, 0, 0, 0);
+            line(s, "MUL_SAT TEMP[2].x, TEMP[2].xxxx, TEMP[2].zzzz", 0, 0, 0, 0, 0, 0);
+        } else {           /* exp(-(density d)) or exp(-(density d)^2) */
+            line(s, "MUL TEMP[2].x, CONST[9].zzzz, TEMP[2].yyyy", 0, 0, 0, 0, 0, 0);
+            if (mode == 2) line(s, "MUL TEMP[2].x, TEMP[2].xxxx, TEMP[2].xxxx", 0, 0, 0, 0, 0, 0);
+            line(s, "MUL TEMP[2].x, TEMP[2].xxxx, ", imm, 0, 0, 0, 0, 0);
+            line(s, "EX2 TEMP[2].x, TEMP[2].xxxx", 0, 0, 0, 0, 0, 0);
+            line(s, "MOV_SAT TEMP[2].x, TEMP[2].xxxx", 0, 0, 0, 0, 0, 0);
+        }
+    }
+    line(s, "LRP TEMP[0].xyz, TEMP[2].xxxx, TEMP[0], CONST[8]", 0, 0, 0, 0, 0, 0);
+}
+
+unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, unsigned int fog, char *out,
                              unsigned int size, RB_PS_INFO *info)
 {
     PS s;
-    unsigned int imm = 3, k;
+    unsigned int imm = 3, k, log2e;
     char *z = (char *)&s;
     for (k = 0; k < sizeof(s); ++k) z[k] = 0;
     info->samplers = info->coords = info->reason = info->detail = 0;
@@ -487,18 +517,24 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, cha
         put(&s.t, "DCL IN["); number(&s.t, 2 + k); put(&s.t, "], GENERIC["); number(&s.t, 2 + k);
         put(&s.t, "], PERSPECTIVE\n");
     }
+    if ((fog & 3) == RB_PS_FOG_VERTEX) put(&s.t, "DCL IN[8], GENERIC[6], PERSPECTIVE\n");
+    if ((fog & 3) == RB_PS_FOG_TABLE) put(&s.t, "DCL IN[8], POSITION, LINEAR\n");
     put(&s.t, "DCL OUT[0], COLOR\n");
     for (k = 0; k < RB_PS_COORD_SETS; ++k) { put(&s.t, "DCL SAMP["); number(&s.t, k); put(&s.t, "]\n"); }
-    put(&s.t, "DCL CONST[0..7]\nDCL TEMP[0..18]\n"
+    put(&s.t, fog ? "DCL CONST[0..9]\n" : "DCL CONST[0..7]\n");
+    put(&s.t, "DCL TEMP[0..18]\n"
               "IMM[0] FLT32 {0x3f000000, 0x3f800000, 0x40000000, 0x40800000}\n"
               "IMM[1] FLT32 {0x41000000, 0x3e800000, 0x3e000000, 0xbf800000}\n"
               "IMM[2] FLT32 {0x00000000, 0x00000000, 0x00000000, 0x00000000}\n");
     if (!walk(&s, tokens, count, 0, &imm)) return 0;
+    log2e = imm;
+    if (fog) { put(&s.t, "IMM["); number(&s.t, log2e); put(&s.t, "] FLT32 {0x3fb8aa3b, 0x00000000, 0x00000000, 0x00000000}\n"); }
     /* Registers start at zero, so a shader never reads undefined values. */
     line(&s, "MOV TEMP[0], IMM[2]", 0, 0, 0, 0, 0, 0);
     line(&s, "MOV TEMP[1], IMM[2]", 0, 0, 0, 0, 0, 0);
     if (!walk(&s, tokens, count, 1, &imm)) return 0;
     flush(&s);
+    if (fog) fog_lines(&s, fog, log2e);
     line(&s, "MOV OUT[0], TEMP[0]", 0, 0, 0, 0, 0, 0);
     line(&s, "END", 0, 0, 0, 0, 0, 0);
     if (s.t.overflow) return fail(&s, RbPsOverflow, s.t.n);
