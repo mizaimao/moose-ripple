@@ -1419,8 +1419,10 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
             }
         offset += 4 * n;
     }
+    /* Generated coordinates and texture transforms are not applied yet. */
     for (k = 0; k < RB2K_D8_STAGES; ++k)
-        if ((sh->coords & (1UL << k)) && (c->stages[k].coordIndex >> 16)) offset = 0xffffffff;
+        if ((sh->coords & (1UL << k)) && ((c->stages[k].coordIndex >> 16) || (c->stages[k].transform & 0xff)))
+            offset = 0xffffffff;
     if (offset > stride || stride > 256) { skip(c, RB2K_D7_SKIP_VERTEX, p->primitives); return DD_OK; }
     RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices));
     for (k = 0; k < RB2K_D8_STAGES; ++k) {
