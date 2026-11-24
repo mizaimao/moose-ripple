@@ -1,4 +1,4 @@
-/* Direct3D 8 pixel shaders 1.1 to 1.3 as Gallium TGSI text.
+/* Direct3D pixel shaders 1.1 to 1.3 and 2.0 as Gallium TGSI text.
  *
  * Registers: r0 and r1 are TEMP[0] and TEMP[1], texture registers t0..t3
  * TEMP[8..11], v0 and v1 IN[0] and IN[1], texture coordinate set n IN[2+n],
@@ -37,7 +37,8 @@ typedef struct {
     TEXT t;
     unsigned int minor;
     unsigned int defined;           /* constants given by def */
-    unsigned int defImm[RB_PS_CONSTANTS];
+    unsigned int defImm[RB_PS2_CONSTANTS];
+    unsigned char samplerKind[16];  /* shader model 2: D3DSAMPLER_TEXTURE_TYPE of each sampler */
     unsigned int written;           /* r0, r1 and t0..t3 written so far: bits 0-1, 8-11 */
     unsigned int pads;              /* texm3x2/texm3x3 dot products so far */
     /* Results waiting to be written: register, write mask, result slot. */
@@ -468,32 +469,317 @@ static int walk(PS *s, const unsigned int *tok, unsigned int count, int pass, un
 
 /* Blend the clamped result with the fog colour, as Direct3D does after a
  * version 1 pixel shader. TEMP[2] holds the factor; log2e is IMM[log2e]. */
-static void fog_lines(PS *s, unsigned int fog, unsigned int log2e)
+static void fog_line(PS *s, const char *a, const char *b, const char *c, const char *d, const char *e)
+{
+    line(s, a, b, c, d, e, 0, 0);
+}
+
+/* color: the result register; base: the fog colour constant, followed by
+ * the start, end and density. */
+static void fog_lines(PS *s, unsigned int fog, unsigned int log2e, const char *color, unsigned int base)
 {
     unsigned int kind = fog & 3, mode = (fog >> RB_PS_FOG_MODE_SHIFT) & 3;
-    char imm[24];
-    imm[0] = 0;
+    char imm[24], c0[16], c1[16];
+    imm[0] = c0[0] = c1[0] = 0;
     cat(imm, sizeof(imm), "-IMM["); cat_number(imm, sizeof(imm), log2e); cat(imm, sizeof(imm), "].xxxx");
-    line(s, "MOV_SAT TEMP[0], TEMP[0]", 0, 0, 0, 0, 0, 0);
-    if (kind == RB_PS_FOG_ALPHA) line(s, "MOV_SAT TEMP[2].x, IN[1].wwww", 0, 0, 0, 0, 0, 0);
+    cat(c0, sizeof(c0), "CONST["); cat_number(c0, sizeof(c0), base); cat(c0, sizeof(c0), "]");
+    cat(c1, sizeof(c1), "CONST["); cat_number(c1, sizeof(c1), base + 1); cat(c1, sizeof(c1), "]");
+    fog_line(s, "MOV_SAT ", color, ", ", color, 0);
+    if (kind == RB_PS_FOG_ALPHA) fog_line(s, "MOV_SAT TEMP[2].x, IN[1].wwww", 0, 0, 0, 0);
     else {
         if (kind == RB_PS_FOG_VERTEX)
-            line(s, (fog & RB_PS_FOG_RANGE) ? "MOV TEMP[2].y, IN[8].yyyy" : "MOV TEMP[2].y, IN[8].xxxx", 0, 0, 0, 0, 0, 0);
-        else line(s, (fog & RB_PS_FOG_W) ? "RCP TEMP[2].y, IN[8].wwww" : "MOV TEMP[2].y, IN[8].zzzz", 0, 0, 0, 0, 0, 0);
+            fog_line(s, (fog & RB_PS_FOG_RANGE) ? "MOV TEMP[2].y, IN[8].yyyy" : "MOV TEMP[2].y, IN[8].xxxx", 0, 0, 0, 0);
+        else fog_line(s, (fog & RB_PS_FOG_W) ? "RCP TEMP[2].y, IN[8].wwww" : "MOV TEMP[2].y, IN[8].zzzz", 0, 0, 0, 0);
         if (mode == 3) {   /* linear: (end - d) / (end - start) */
-            line(s, "ADD TEMP[2].x, CONST[9].yyyy, -TEMP[2].yyyy", 0, 0, 0, 0, 0, 0);
-            line(s, "ADD TEMP[2].z, CONST[9].yyyy, -CONST[9].xxxx", 0, 0, 0, 0, 0, 0);
-            line(s, "RCP TEMP[2].z, TEMP[2].zzzz", 0, 0, 0, 0, 0, 0);
-            line(s, "MUL_SAT TEMP[2].x, TEMP[2].xxxx, TEMP[2].zzzz", 0, 0, 0, 0, 0, 0);
+            fog_line(s, "ADD TEMP[2].x, ", c1, ".yyyy, -TEMP[2].yyyy", 0, 0);
+            fog_line(s, "ADD TEMP[2].z, ", c1, ".yyyy, -", c1, ".xxxx");
+            fog_line(s, "RCP TEMP[2].z, TEMP[2].zzzz", 0, 0, 0, 0);
+            fog_line(s, "MUL_SAT TEMP[2].x, TEMP[2].xxxx, TEMP[2].zzzz", 0, 0, 0, 0);
         } else {           /* exp(-(density d)) or exp(-(density d)^2) */
-            line(s, "MUL TEMP[2].x, CONST[9].zzzz, TEMP[2].yyyy", 0, 0, 0, 0, 0, 0);
-            if (mode == 2) line(s, "MUL TEMP[2].x, TEMP[2].xxxx, TEMP[2].xxxx", 0, 0, 0, 0, 0, 0);
-            line(s, "MUL TEMP[2].x, TEMP[2].xxxx, ", imm, 0, 0, 0, 0, 0);
-            line(s, "EX2 TEMP[2].x, TEMP[2].xxxx", 0, 0, 0, 0, 0, 0);
-            line(s, "MOV_SAT TEMP[2].x, TEMP[2].xxxx", 0, 0, 0, 0, 0, 0);
+            fog_line(s, "MUL TEMP[2].x, ", c1, ".zzzz, TEMP[2].yyyy", 0, 0);
+            if (mode == 2) fog_line(s, "MUL TEMP[2].x, TEMP[2].xxxx, TEMP[2].xxxx", 0, 0, 0, 0);
+            fog_line(s, "MUL TEMP[2].x, TEMP[2].xxxx, ", imm, 0, 0, 0);
+            fog_line(s, "EX2 TEMP[2].x, TEMP[2].xxxx", 0, 0, 0, 0);
+            fog_line(s, "MOV_SAT TEMP[2].x, TEMP[2].xxxx", 0, 0, 0, 0);
         }
     }
-    line(s, "LRP TEMP[0].xyz, TEMP[2].xxxx, TEMP[0], CONST[8]", 0, 0, 0, 0, 0, 0);
+    line(s, "LRP ", color, ".xyz, TEMP[2].xxxx, ", color, ", ", c0, 0);
+}
+
+/* ---- shader model 2 ----
+ * Registers: r0..r11 are TEMP[0..11], v0 and v1 IN[0] and IN[1], t# the
+ * coordinates IN[2+#], c0..c31 CONST[0..31] unless defined, s# SAMP[#] and
+ * oC0 TEMP[20]. TEMP[17..19] hold intermediate values of expanded
+ * instructions. Arithmetic is unclamped, as in Direct3D 9. */
+enum {
+    Op2Rcp = 6, Op2Rsq = 7, Op2Min = 10, Op2Max = 11, Op2Exp = 14, Op2Log = 15, Op2Frc = 19, Op2M4x4 = 20,
+    Op2M4x3 = 21, Op2M3x4 = 22, Op2M3x3 = 23, Op2M3x2 = 24, Op2Dcl = 31, Op2Pow = 32, Op2Crs = 33,
+    Op2Abs = 35, Op2Nrm = 36, Op2Sincos = 37, Op2Dp2add = 90
+};
+enum { Reg2Temp = 0, Reg2Input = 1, Reg2Const = 2, Reg2Texture = 3, Reg2ColorOut = 8, Reg2Sampler = 10 };
+enum { Mod2Abs = 11, Mod2AbsNeg = 12 };
+
+static unsigned int reg2_type(unsigned int t) { return ((t >> 28) & 7) | ((t >> 8) & 0x18); }
+
+static int reg2_name(PS *s, unsigned int token, unsigned int add, char *out, unsigned int size)
+{
+    unsigned int type = reg2_type(token), num = reg_num(token) + add;
+    out[0] = 0;
+    if (token & 0x2000) return fail(s, RbPsRegister, token);   /* relative addressing */
+    switch (type) {
+    case Reg2Temp:
+        if (num > 11) return fail(s, RbPsRegister, token);
+        cat(out, size, "TEMP["); cat_number(out, size, num); cat(out, size, "]");
+        return 1;
+    case Reg2Input:
+        if (num > 1) return fail(s, RbPsRegister, token);
+        cat(out, size, "IN["); cat_number(out, size, num); cat(out, size, "]");
+        return 1;
+    case Reg2Const:
+        if (num >= RB_PS2_CONSTANTS) return fail(s, RbPsRegister, token);
+        if (s->defined & (1u << num)) { cat(out, size, "IMM["); cat_number(out, size, s->defImm[num]); }
+        else { cat(out, size, "CONST["); cat_number(out, size, num); }
+        cat(out, size, "]");
+        return 1;
+    case Reg2Texture:
+        if (num >= RB_PS_COORD_SETS) return fail(s, RbPsRegister, token);
+        cat(out, size, "IN["); cat_number(out, size, 2 + num); cat(out, size, "]");
+        s->info->coords |= 1u << num;
+        return 1;
+    case Reg2ColorOut:
+        if (num) return fail(s, RbPsRegister, token);
+        cat(out, size, "TEMP[20]");
+        return 1;
+    }
+    return fail(s, RbPsRegister, token);
+}
+
+/* A source with its swizzle, negation and absolute value. scalar: take one
+ * component (a replicate swizzle's, else w) for every channel. */
+static int source2(PS *s, unsigned int token, unsigned int add, int scalar, char *out, unsigned int size)
+{
+    char name[32];
+    unsigned int mod = (token >> 24) & 15, swz = (token >> 16) & 0xff;
+    if (!(token & 0x80000000u)) return fail(s, RbPsRegister, token);
+    if (!reg2_name(s, token, add, name, sizeof(name))) return 0;
+    if (scalar) {
+        static const char *const rep[4] = { ".xxxx", ".yyyy", ".zzzz", ".wwww" };
+        cat(name, sizeof(name), rep[swz == 0xe4 ? 3 : swz & 3]);
+    } else swizzle(token, name, sizeof(name));
+    out[0] = 0;
+    switch (mod) {
+    case ModNone: cat(out, size, name); return 1;
+    case ModNeg: cat(out, size, "-"); cat(out, size, name); return 1;
+    case Mod2Abs: cat(out, size, "|"); cat(out, size, name); cat(out, size, "|"); return 1;
+    case Mod2AbsNeg: cat(out, size, "-|"); cat(out, size, name); cat(out, size, "|"); return 1;
+    }
+    return fail(s, RbPsModifier, token);
+}
+
+/* The destination register with its write mask; sat gets "_SAT" or "". */
+static int dest2(PS *s, unsigned int token, char *out, unsigned int size, const char **sat)
+{
+    char mask[6];
+    unsigned int type = reg2_type(token);
+    if (!(token & 0x80000000u) || ((token >> 24) & 15) || ((token >> 20) & 8) ||
+        (type != Reg2Temp && type != Reg2ColorOut)) return fail(s, RbPsRegister, token);
+    if (!reg2_name(s, token, 0, out, size)) return 0;
+    mask_text((token >> 16) & 15 ? (token >> 16) & 15 : 15, mask, sizeof(mask));
+    cat(out, size, mask);
+    *sat = (token >> 20) & 1 ? "_SAT " : " ";   /* partial precision and centroid are ignored */
+    return 1;
+}
+
+/* |x| of an operand that may carry a negation or an absolute value already. */
+static void absolute(const char *a, char *out, unsigned int size)
+{
+    const char *x = a[0] == '-' ? a + 1 : a;
+    out[0] = 0;
+    if (x[0] == '|') cat(out, size, x);
+    else { cat(out, size, "|"); cat(out, size, x); cat(out, size, "|"); }
+}
+
+static int instruction2(PS *s, unsigned int op, unsigned int control, const unsigned int *p, unsigned int n)
+{
+    char d[40], a[48], b[48], c[48], name[24];
+    const char *sat = " ";
+    unsigned int k, rows;
+    switch (op) {
+    case OpNop: case OpDef: case Op2Dcl: return 1;
+    case OpTexkill:
+        if (n < 1 || !reg2_name(s, p[0], 0, name, sizeof(name))) return 0;
+        line(s, "KILL_IF ", name, ".xyzz", 0, 0, 0, 0);
+        return 1;
+    case OpTex: {
+        static const char *const ops[3] = { "TEX", "TXP", "TXB" };
+        /* Only 2D textures exist on this device so far. */
+        static const char *const targets[5] = { 0, 0, "2D", 0, 0 };
+        unsigned int sampler;
+        if (n < 3 || control > 2 || reg2_type(p[2]) != Reg2Sampler) return fail(s, RbPsOpcode, op);
+        sampler = reg_num(p[2]);
+        if (sampler >= RB_PS_COORD_SETS || !targets[s->samplerKind[sampler] < 5 ? s->samplerKind[sampler] : 0])
+            return fail(s, RbPsRegister, p[2]);
+        if (!dest2(s, p[0], d, sizeof(d), &sat) || !source2(s, p[1], 0, 0, a, sizeof(a))) return 0;
+        name[0] = 0;
+        cat(name, sizeof(name), "SAMP["); cat_number(name, sizeof(name), sampler); cat(name, sizeof(name), "], ");
+        line(s, ops[control], sat, d, ", ", a, ", ", name);
+        s->t.n -= 1; s->t.p[s->t.n] = 0;
+        put(&s->t, targets[s->samplerKind[sampler]]); put(&s->t, "\n");
+        s->info->samplers |= 1u << sampler;
+        return 1;
+    }
+    }
+    if (n < 2 || !dest2(s, p[0], d, sizeof(d), &sat)) return 0;
+    switch (op) {
+    case OpMov: case Op2Abs: case Op2Frc:
+        if (!source2(s, p[1], 0, 0, a, sizeof(a))) return 0;
+        if (op == Op2Abs) absolute(a, b, sizeof(b));
+        line(s, op == Op2Frc ? "FRC" : "MOV", sat, d, ", ", op == Op2Abs ? b : a, 0, 0);
+        return 1;
+    case Op2Rcp: case Op2Rsq: case Op2Exp: case Op2Log: {
+        static const char *const names[] = { "RCP", "RSQ", "EX2", "LG2" };
+        unsigned int which = op == Op2Rcp ? 0 : op == Op2Rsq ? 1 : op == Op2Exp ? 2 : 3;
+        if (!source2(s, p[1], 0, 1, a, sizeof(a))) return 0;
+        if (which == 1 || which == 3) {   /* of the absolute value */
+            absolute(a, b, sizeof(b));
+            line(s, names[which], sat, d, ", ", b, 0, 0);
+        } else line(s, names[which], sat, d, ", ", a, 0, 0);
+        return 1;
+    }
+    case Op2Pow:
+        if (n < 3 || !source2(s, p[1], 0, 1, a, sizeof(a)) || !source2(s, p[2], 0, 1, b, sizeof(b))) return 0;
+        absolute(a, c, sizeof(c));
+        line(s, "POW", sat, d, ", ", c, ", ", b);
+        return 1;
+    case OpAdd: case OpSub: case OpMul: case OpDp3: case OpDp4: case Op2Min: case Op2Max: {
+        static const char *const names[] = { "ADD", "ADD", "MUL", "DP3", "DP4", "MIN", "MAX" };
+        unsigned int which = op == OpAdd ? 0 : op == OpSub ? 1 : op == OpMul ? 2 : op == OpDp3 ? 3 :
+                             op == OpDp4 ? 4 : op == Op2Min ? 5 : 6;
+        if (n < 3 || !source2(s, p[1], 0, 0, a, sizeof(a)) || !source2(s, p[2], 0, 0, b, sizeof(b))) return 0;
+        if (op == OpSub) {
+            c[0] = 0;
+            if (b[0] == '-') cat(c, sizeof(c), b + 1); else { cat(c, sizeof(c), "-"); cat(c, sizeof(c), b); }
+            line(s, names[which], sat, d, ", ", a, ", ", c);
+        } else line(s, names[which], sat, d, ", ", a, ", ", b);
+        return 1;
+    }
+    case OpMad: case OpLrp: case OpCmp: case Op2Dp2add:
+        if (n < 4 || !source2(s, p[1], 0, 0, a, sizeof(a)) || !source2(s, p[2], 0, 0, b, sizeof(b)) ||
+            !source2(s, p[3], 0, op == Op2Dp2add, c, sizeof(c))) return 0;
+        if (op == Op2Dp2add) {
+            line(s, "MOV TEMP[17], ", a, 0, 0, 0, 0, 0);
+            line(s, "MOV TEMP[18], ", b, 0, 0, 0, 0, 0);
+            line(s, "MUL TEMP[19].x, TEMP[17].xxxx, TEMP[18].xxxx", 0, 0, 0, 0, 0, 0);
+            line(s, "MAD TEMP[19].x, TEMP[17].yyyy, TEMP[18].yyyy, TEMP[19].xxxx", 0, 0, 0, 0, 0, 0);
+            line(s, "ADD", sat, d, ", TEMP[19].xxxx, ", c, 0, 0);
+            return 1;
+        }
+        line(s, op == OpMad ? "MAD" : op == OpLrp ? "LRP" : "CMP", sat, d, ", ", a, ", ", op == OpCmp ? c : b);
+        s->t.n -= 1; s->t.p[s->t.n] = 0;
+        put(&s->t, ", "); put(&s->t, op == OpCmp ? b : c); put(&s->t, "\n");
+        return 1;
+    case Op2Nrm:
+        if (!source2(s, p[1], 0, 0, a, sizeof(a))) return 0;
+        line(s, "MOV TEMP[17], ", a, 0, 0, 0, 0, 0);
+        line(s, "DP3 TEMP[19].x, TEMP[17], TEMP[17]", 0, 0, 0, 0, 0, 0);
+        line(s, "RSQ TEMP[19].x, TEMP[19].xxxx", 0, 0, 0, 0, 0, 0);
+        line(s, "MUL", sat, d, ", TEMP[17], TEMP[19].xxxx", 0, 0, 0);
+        return 1;
+    case Op2Crs:
+        if (n < 3 || !source2(s, p[1], 0, 0, a, sizeof(a)) || !source2(s, p[2], 0, 0, b, sizeof(b))) return 0;
+        line(s, "MOV TEMP[17], ", a, 0, 0, 0, 0, 0);
+        line(s, "MOV TEMP[18], ", b, 0, 0, 0, 0, 0);
+        line(s, "MUL TEMP[19], TEMP[17].yzxx, TEMP[18].zxyy", 0, 0, 0, 0, 0, 0);
+        line(s, "MAD TEMP[19], -TEMP[17].zxyy, TEMP[18].yzxx, TEMP[19]", 0, 0, 0, 0, 0, 0);
+        line(s, "MOV", sat, d, ", TEMP[19]", 0, 0, 0);
+        return 1;
+    case Op2Sincos:
+        /* x is the cosine and y the sine; shader model 2 passes two more constants. */
+        if (!source2(s, p[1], 0, 1, a, sizeof(a))) return 0;
+        line(s, "COS TEMP[19].x, ", a, 0, 0, 0, 0, 0);
+        line(s, "SIN TEMP[19].y, ", a, 0, 0, 0, 0, 0);
+        line(s, "MOV", sat, d, ", TEMP[19]", 0, 0, 0);
+        return 1;
+    case Op2M4x4: case Op2M4x3: case Op2M3x4: case Op2M3x3: case Op2M3x2: {
+        static const char *const xyzw[4] = { "TEMP[19].x, ", "TEMP[19].y, ", "TEMP[19].z, ", "TEMP[19].w, " };
+        int four = op == Op2M4x4 || op == Op2M4x3;
+        rows = op == Op2M4x4 || op == Op2M3x4 ? 4 : op == Op2M3x2 ? 2 : 3;
+        if (n < 3 || !source2(s, p[1], 0, 0, a, sizeof(a))) return 0;
+        line(s, "MOV TEMP[17], ", a, 0, 0, 0, 0, 0);
+        for (k = 0; k < rows; ++k) {
+            if (!source2(s, p[2], k, 0, b, sizeof(b))) return 0;
+            line(s, four ? "DP4 " : "DP3 ", xyzw[k], "TEMP[17], ", b, 0, 0, 0);
+        }
+        line(s, "MOV", sat, d, ", TEMP[19]", 0, 0, 0);
+        return 1;
+    }
+    }
+    return fail(s, RbPsOpcode, op);
+}
+
+/* Pass 0: declarations and def constants; pass 1: instructions. */
+static int walk2(PS *s, const unsigned int *tok, unsigned int count, int pass, unsigned int *imm)
+{
+    unsigned int i = 1;
+    while (i < count) {
+        unsigned int t = tok[i], op = t & 0xffff, n = (t >> 24) & 15;
+        if (t == OpEnd) return 1;
+        if (op == OpComment) { i += 1 + ((t >> 16) & 0x7fff); continue; }
+        if (t & 0x90000000u) return fail(s, RbPsOpcode, t);    /* predication and reserved bits */
+        if (i + 1 + n > count) return fail(s, RbPsTruncated, i);
+        if (pass == 0) {
+            if (op == OpDef) {
+                unsigned int c = reg_num(tok[i + 1]);
+                if (n != 5 || reg2_type(tok[i + 1]) != Reg2Const || c >= RB_PS2_CONSTANTS)
+                    return fail(s, RbPsRegister, tok[i + 1]);
+                s->defined |= 1u << c;
+                s->defImm[c] = (*imm)++;
+                put(&s->t, "IMM["); number(&s->t, s->defImm[c]); put(&s->t, "] FLT32 {");
+                hex(&s->t, tok[i + 2]); put(&s->t, ", "); hex(&s->t, tok[i + 3]); put(&s->t, ", ");
+                hex(&s->t, tok[i + 4]); put(&s->t, ", "); hex(&s->t, tok[i + 5]); put(&s->t, "}\n");
+            } else if (op == Op2Dcl) {
+                if (n != 2) return fail(s, RbPsOpcode, t);
+                if (reg2_type(tok[i + 2]) == Reg2Sampler && reg_num(tok[i + 2]) < 16)
+                    s->samplerKind[reg_num(tok[i + 2])] = (unsigned char)((tok[i + 1] >> 27) & 15);
+            }
+        } else if (!instruction2(s, op, (t >> 16) & 0xff, tok + i + 1, n)) return 0;
+        i += 1 + n;
+    }
+    return fail(s, RbPsTruncated, count);
+}
+
+static unsigned int translate2(PS *s, const unsigned int *tokens, unsigned int count, unsigned int fog)
+{
+    unsigned int imm = 3, k, log2e;
+    put(&s->t, "FRAG\nDCL IN[0], GENERIC[0], LINEAR\nDCL IN[1], GENERIC[1], LINEAR\n");
+    for (k = 0; k < RB_PS_COORD_SETS; ++k) {
+        put(&s->t, "DCL IN["); number(&s->t, 2 + k); put(&s->t, "], GENERIC["); number(&s->t, 2 + k);
+        put(&s->t, "], PERSPECTIVE\n");
+    }
+    if ((fog & 3) == RB_PS_FOG_VERTEX) put(&s->t, "DCL IN[8], GENERIC[6], PERSPECTIVE\n");
+    if ((fog & 3) == RB_PS_FOG_TABLE) put(&s->t, "DCL IN[8], POSITION, LINEAR\n");
+    put(&s->t, "DCL OUT[0], COLOR\n");
+    for (k = 0; k < RB_PS_COORD_SETS; ++k) { put(&s->t, "DCL SAMP["); number(&s->t, k); put(&s->t, "]\n"); }
+    put(&s->t, fog ? "DCL CONST[0..33]\n" : "DCL CONST[0..31]\n");
+    put(&s->t, "DCL TEMP[0..20]\n"
+               "IMM[0] FLT32 {0x3f000000, 0x3f800000, 0x40000000, 0x40800000}\n"
+               "IMM[1] FLT32 {0x41000000, 0x3e800000, 0x3e000000, 0xbf800000}\n"
+               "IMM[2] FLT32 {0x00000000, 0x00000000, 0x00000000, 0x00000000}\n");
+    if (!walk2(s, tokens, count, 0, &imm)) return 0;
+    log2e = imm;
+    if (fog) { put(&s->t, "IMM["); number(&s->t, log2e); put(&s->t, "] FLT32 {0x3fb8aa3b, 0x00000000, 0x00000000, 0x00000000}\n"); }
+    for (k = 0; k < 12; ++k) {
+        char r[12];
+        r[0] = 0; cat(r, sizeof(r), "TEMP["); cat_number(r, sizeof(r), k); cat(r, sizeof(r), "]");
+        line(s, "MOV ", r, ", IMM[2]", 0, 0, 0, 0);
+    }
+    line(s, "MOV TEMP[20], IMM[2]", 0, 0, 0, 0, 0, 0);
+    if (!walk2(s, tokens, count, 1, &imm)) return 0;
+    if (fog) fog_lines(s, fog, log2e, "TEMP[20]", RB_PS2_CONSTANTS);
+    line(s, "MOV OUT[0], TEMP[20]", 0, 0, 0, 0, 0, 0);
+    line(s, "END", 0, 0, 0, 0, 0, 0);
+    if (s->t.overflow) return fail(s, RbPsOverflow, s->t.n);
+    return s->t.n + 1;
 }
 
 unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, unsigned int fog, char *out,
@@ -507,6 +793,7 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
     s.info = info;
     s.t.p = out; s.t.size = size;
     if (size) out[0] = 0;
+    if (count && tokens[0] == 0xffff0200u) return translate2(&s, tokens, count, fog);
     if (!count || (tokens[0] & 0xffffff00u) != 0xffff0100u || (tokens[0] & 0xff) < 1 || (tokens[0] & 0xff) > 3) {
         fail(&s, RbPsVersion, count ? tokens[0] : 0);
         return 0;
@@ -534,7 +821,7 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
     line(&s, "MOV TEMP[1], IMM[2]", 0, 0, 0, 0, 0, 0);
     if (!walk(&s, tokens, count, 1, &imm)) return 0;
     flush(&s);
-    if (fog) fog_lines(&s, fog, log2e);
+    if (fog) fog_lines(&s, fog, log2e, "TEMP[0]", RB_PS_CONSTANTS);
     line(&s, "MOV OUT[0], TEMP[0]", 0, 0, 0, 0, 0, 0);
     line(&s, "END", 0, 0, 0, 0, 0, 0);
     if (s.t.overflow) return fail(&s, RbPsOverflow, s.t.n);
