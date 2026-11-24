@@ -14,6 +14,7 @@
 #define RB2K_DD_Z16_RENDER 8
 #define RB2K_DD_PLAIN_SURFACES 16   /* plain 2D offscreen surfaces too */
 #define RB2K_DD_D3D8 32             /* the Direct3D 8 driver interface */
+#define RB2K_DD_VERTEX_SHADERS 64   /* vertex shaders on the host GPU */
 #define RB2K_DD_IOCTL(n) CTL_CODE(FILE_DEVICE_VIDEO,n,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_RB2K_DD_QUERY   RB2K_DD_IOCTL(0x901)
 #define IOCTL_RB2K_DD_CREATE  RB2K_DD_IOCTL(0x902)
@@ -47,8 +48,8 @@
  * same queue as an RB2K_D3D8_DRAW whose byte count has RB2K_D8_RECORD set. */
 #define IOCTL_RB2K_D3D8_PROGRAM RB2K_DD_IOCTL(0x920)
 #define IOCTL_RB2K_D3D8_PROGRAM_FREE RB2K_DD_IOCTL(0x921)
-#define RB2K_D8_PROGRAMS 32
-#define RB2K_D8_PROGRAM_BYTES 4096
+#define RB2K_D8_PROGRAMS 48
+#define RB2K_D8_PROGRAM_BYTES 8192
 #define RB2K_D8_STAGES 8            /* samplers, and texture coordinate sets */
 #define RB2K_D8_VERTICES 48
 #define RB2K_D8_RECORD 0x80000000UL
@@ -60,6 +61,14 @@ typedef struct { ULONG samplers; char text[RB2K_D8_PROGRAM_BYTES]; } RB2K_D3D8_P
  * vertices are RB2K_D8_VERTEX_WORDS(coordSets) words apart. */
 typedef struct { ULONG x, y, z, rhw, diffuse, specular, nx, ny, nz, tc[RB2K_D8_STAGES][4]; } RB2K_D3D8_VERTEX;
 #define RB2K_D8_VERTEX_WORDS(sets) (9UL + 4UL * (sets))
+/* Draws with a vertex program (transform 2) carry the vertex shader's
+ * constants c0..c(vertexConstants-1) and then each vertex's words as the
+ * stream holds them, vertexWords apart (whole constants). The program reads
+ * c0 at constant RB2K_D8_VS_CONST_BASE. */
+#define RB2K_D8_VS_CONST_BASE 19
+#define RB2K_D8_VS_CONSTANTS 256
+#define RB2K_D8_VS_VERTEX_WORDS 64
+#define RB2K_D8_RECORD_WORDS 4096
 /* The first seven words match RB2K_D3D7_DRAW. Constants are c0..c7 (or
  * c0..c31) as IEEE words; samplers and borders are encoded as in
  * RB2K_D3D7_DRAW. */
@@ -72,16 +81,19 @@ typedef struct {
     ULONG constantCount;            /* 8 for version 1 programs, 32 for shader model 2 */
     ULONG constants[32][4];
     ULONG fog, fogColor, fogStart, fogEnd, fogDensity;   /* as in RB2K_D3D7_DRAW */
-    ULONG transform;
+    ULONG transform;                /* 0 transformed, 1 object space, 2 vertex program */
     ULONG matrices[3][16];
     ULONG viewport[6];
+    ULONG vertexProgram, vertexConstants, vertexWords;   /* transform 2 */
     /* Lighting as in RB2K_D3D7_DRAW (object space only); specular adds
      * the lit specular colour. */
     ULONG lighting, lightCount, lightFlags, ambient, specular;
     ULONG material[17];
     ULONG lights[8][26];
-    ULONG vertices[RB2K_D8_VERTICES * RB2K_D8_VERTEX_WORDS(RB2K_D8_STAGES)];
+    ULONG vertices[RB2K_D8_RECORD_WORDS];
 } RB2K_D3D8_DRAW;
+typedef char rb2k_d8_record_fits[RB2K_D8_VERTICES * RB2K_D8_VERTEX_WORDS(RB2K_D8_STAGES) <= RB2K_D8_RECORD_WORDS &&
+    4 * RB2K_D8_VS_CONSTANTS + RB2K_D8_VERTICES * RB2K_D8_VS_VERTEX_WORDS <= RB2K_D8_RECORD_WORDS ? 1 : -1];
 typedef struct { ULONG clears, triangles; } RB2K_D3D7_COMPLETED;
 #define RB2K_D3D7_VERTICES 96
 /* IEEE transformed position, packed Direct3D diffuse and specular colours,

@@ -97,10 +97,17 @@ typedef struct {
      * translator's codes; 7 counts other failures), the token behind the
      * last refusal, and pixel shader draw records queued. */
     ULONG psCreated, psFailed[8], psLastDetail, psDraws;
+    /* Vertex shaders created, and the first four: handle, declaration and
+     * code bytes, then the first 45 words of declaration and code. */
+    ULONG vsCreated, vsLog[4][48];
+    /* Vertex programs made, shaders refused by reason, the token behind the
+     * last refusal, triangles drawn with a vertex program, those of them with
+     * the texture stages as their pixel program, and stage programs refused. */
+    ULONG vsTranslated, vsFailed[8], vsLastDetail, vsDraws, vsStageDraws, stageFailed;
 } RB2K_D7_DRAWSTATS;
 enum { RB2K_D7_FAIL_RANGE, RB2K_D7_FAIL_VBCAPS, RB2K_D7_FAIL_LINEAR, RB2K_D7_FAIL_ADDRESS,
        RB2K_D7_FAIL_PROBE, RB2K_D7_FAIL_IMMEDIATE, RB2K_D7_FAIL_LENGTH, RB2K_D7_FAIL_OTHER };
-#define RB2K_D7_DRAWSTATS_VERSION 2
+#define RB2K_D7_DRAWSTATS_VERSION 3
 #define RB2K_D3D7_QUERY_LIMIT 24
 typedef struct {
     RB2K_D3D7_STATS totals;

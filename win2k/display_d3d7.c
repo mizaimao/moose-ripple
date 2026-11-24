@@ -25,7 +25,7 @@
 #endif
 
 enum { MaxContexts = 16, MaxCommandBytes = 1 << 20, TextureStages = 8, MaxTextures = 1024, MaxLights = 32,
-       MaxBuffers = 1024, MaxShaders = 32 };
+       MaxBuffers = 1024, MaxShaders = 32, MaxVertexShaders = 32 };
 /* DP2 SETLIGHT operations (D3DHAL_SETLIGHT_*). */
 enum { SetLightEnable, SetLightDisable, SetLightData };
 typedef char light_record[sizeof(D3DLIGHT7) == 26 * sizeof(ULONG) ? 1 : -1];
@@ -44,6 +44,23 @@ typedef struct {
     ULONG *tokens;
     struct { ULONG fog, program; } variants[ShaderVariants];
 } D8_SHADER;
+/* A vertex shader of a context: its handle, its declaration and code (one
+ * allocation), the constants and vertex words it reads, and its miniport
+ * programs without and with oFog in the specular alpha (zero until made;
+ * failed when it cannot be translated). */
+typedef struct {
+    ULONG handle, declCount, tokenCount, constants, words;
+    ULONG *decl, *tokens;
+    ULONG program[2];
+    BOOL failed[2];
+} D8_VSHADER;
+/* A pixel program made from the texture stage states, for draws with a
+ * vertex shader and no pixel shader: the states it was made from (seven
+ * words a stage, then specular and fog), its program and what it samples. */
+enum { StagePrograms = 8, StageKey = 7 * 8 + 2 };
+typedef struct { ULONG key[StageKey], program, samplers; } D8_STAGE_PROGRAM;
+typedef char vs_layout_match[RB_VS_CONST_BASE == RB2K_D8_VS_CONST_BASE && RB_VS_CONSTANTS == RB2K_D8_VS_CONSTANTS &&
+                             4 * RB_VS_VERTEX_CONSTANTS == RB2K_D8_VS_VERTEX_WORDS && RB_VS_VERTICES == RB2K_D8_VERTICES ? 1 : -1];
 typedef char fog_codes_match[RB_PS_FOG_ALPHA == RB2K_D7_FOG_ALPHA && RB_PS_FOG_VERTEX == RB2K_D7_FOG_VERTEX &&
                              RB_PS_FOG_TABLE == RB2K_D7_FOG_TABLE && RB_PS_FOG_MODE_SHIFT == RB2K_D7_FOG_MODE_SHIFT &&
                              RB_PS_FOG_RANGE == RB2K_D7_FOG_RANGE && RB_PS_FOG_W == RB2K_D7_FOG_W ? 1 : -1];
@@ -79,6 +96,10 @@ typedef struct {
     RB2K_D3D7_DRAW draw;        /* the batch being filled */
     D8_SHADER shaders[MaxShaders];
     ULONG psConst[32][4];       /* pixel shader constants c0..c31 */
+    D8_VSHADER vshaders[MaxVertexShaders];
+    ULONG vsConst[RB_VS_CONSTANTS][4];   /* vertex shader constants */
+    D8_STAGE_PROGRAM stagePrograms[StagePrograms];
+    ULONG stageNext;
     RB2K_D3D8_DRAW draw8;       /* the pixel shader batch being filled */
     D7_STAGE stages[TextureStages];
 } D7_CONTEXT;
@@ -1032,8 +1053,9 @@ static HRESULT send_batch8(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, ULONG count)
 {
     draw->count = count;
     ++c->display->d7draw.psDraws;
-    return queue_record(c, draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices) +
-                        count * RB2K_D8_VERTEX_WORDS(draw->coordSets) * sizeof(ULONG),
+    return queue_record(c, draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices) + sizeof(ULONG) *
+                        (draw->transform == 2 ? 4 * draw->vertexConstants + count * draw->vertexWords :
+                         count * RB2K_D8_VERTEX_WORDS(draw->coordSets)),
                         RB2K_D8_RECORD, count / 3);
 }
 
@@ -1379,10 +1401,134 @@ static ULONG shader_program(D7_CONTEXT *c, D8_SHADER *sh, ULONG fog)
     return sh->variants[k].program;
 }
 
+static void release_vshader(D7_CONTEXT *c, D8_VSHADER *vs)
+{
+    ULONG k;
+    for (k = 0; k < 2; ++k)
+        if (vs->program[k]) request(c->display, IOCTL_RB2K_D3D8_PROGRAM_FREE, &vs->program[k], sizeof(ULONG), NULL, 0);
+    if (vs->decl) EngFreeMem(vs->decl);
+    RtlZeroMemory(vs, sizeof(*vs));
+}
+
+static D8_VSHADER *find_vshader(D7_CONTEXT *c, ULONG handle)
+{
+    ULONG i;
+    for (i = 0; handle && i < MaxVertexShaders; ++i)
+        if (c->vshaders[i].handle == handle) return &c->vshaders[i];
+    return NULL;
+}
+
 static void release_shaders(D7_CONTEXT *c)
 {
     ULONG i;
     for (i = 0; i < MaxShaders; ++i) if (c->shaders[i].handle) release_shader(c, &c->shaders[i]);
+    for (i = 0; i < MaxVertexShaders; ++i) if (c->vshaders[i].handle) release_vshader(c, &c->vshaders[i]);
+    for (i = 0; i < StagePrograms; ++i)
+        if (c->stagePrograms[i].program)
+            request(c->display, IOCTL_RB2K_D3D8_PROGRAM_FREE, &c->stagePrograms[i].program, sizeof(ULONG), NULL, 0);
+    RtlZeroMemory(c->stagePrograms, sizeof(c->stagePrograms));
+}
+
+/* The pixel program for the current texture stages, specular and fog;
+ * as gets its samplers and constant count for pixel_states. Zero when the
+ * stages cannot be translated. */
+static ULONG stage_program(D7_CONTEXT *c, ULONG fog, D8_SHADER *as)
+{
+    RB_STAGE_STATE st[TextureStages];
+    ULONG key[StageKey], i, k, n = 0, id = 0, written;
+    D8_STAGE_PROGRAM *e;
+    RB_PS_INFO info;
+    RtlZeroMemory(key, sizeof(key));
+    for (i = 0; i < TextureStages && c->stages[i].colorOp != D3DTOP_DISABLE; ++i) {
+        const D7_STAGE *s = &c->stages[i];
+        st[i].colorOp = s->colorOp; st[i].colorArg1 = s->colorArg1; st[i].colorArg2 = s->colorArg2;
+        st[i].alphaOp = s->alphaOp; st[i].alphaArg1 = s->alphaArg1; st[i].alphaArg2 = s->alphaArg2;
+        st[i].coordIndex = s->coordIndex;
+        RtlCopyMemory(key + 7 * i, &st[i], 7 * sizeof(ULONG));
+    }
+    key[7 * 8] = c->specular ? 1 : 0;
+    key[7 * 8 + 1] = fog;
+    RtlZeroMemory(as, sizeof(*as));
+    as->constants = 8;
+    for (k = 0; k < StagePrograms; ++k) {
+        e = &c->stagePrograms[k];
+        ULONG w;
+        for (w = 0; w < StageKey && e->key[w] == key[w]; ++w) {}
+        if (e->program && w == StageKey) {
+            as->samplers = e->samplers;
+            return e->program;
+        }
+    }
+    if (programScratch)
+        n = rb_stage_translate(st, i, c->specular ? 1 : 0, fog, programScratch->text, sizeof(programScratch->text), &info);
+    if (n) {
+        programScratch->samplers = info.samplers;
+        if (miniport(c->display, IOCTL_RB2K_D3D8_PROGRAM, programScratch, sizeof(ULONG) + n, &id, sizeof(id),
+                     &written) || written != sizeof(id)) id = 0;
+    }
+    if (!id) { ++c->display->d7draw.stageFailed; return 0; }
+    e = &c->stagePrograms[c->stageNext];
+    c->stageNext = (c->stageNext + 1) % StagePrograms;
+    if (e->program) request(c->display, IOCTL_RB2K_D3D8_PROGRAM_FREE, &e->program, sizeof(ULONG), NULL, 0);
+    RtlCopyMemory(e->key, key, sizeof(key));
+    e->program = id;
+    e->samplers = as->samplers = info.samplers;
+    return id;
+}
+
+/* Keep a vertex shader's declaration and code; it is translated at its first draw. */
+static void create_vshader(D7_CONTEXT *c, ULONG handle, const BYTE *decl, ULONG declBytes, ULONG codeBytes)
+{
+    D8_VSHADER *vs = find_vshader(c, handle);
+    ULONG i;
+    if (vs) release_vshader(c, vs);
+    for (i = 0; i < MaxVertexShaders && c->vshaders[i].handle; ++i) {}
+    if (!handle || i == MaxVertexShaders || !codeBytes || (declBytes | codeBytes) % 4) {
+        ++c->display->d7draw.vsFailed[RbPsReasons];
+        return;
+    }
+    vs = &c->vshaders[i];
+    vs->decl = EngAllocMem(0, declBytes + codeBytes, 'v8bR');
+    if (!vs->decl) return;
+    RtlCopyMemory(vs->decl, decl, declBytes + codeBytes);
+    vs->handle = handle;
+    vs->declCount = declBytes / 4;
+    vs->tokens = vs->decl + vs->declCount;
+    vs->tokenCount = codeBytes / 4;
+}
+
+/* The miniport program of a vertex shader with or without fog in the
+ * specular alpha; zero when it cannot be made. */
+static ULONG vertex_program(D7_CONTEXT *c, D8_VSHADER *vs, ULONG flags)
+{
+    RB2K_D7_DRAWSTATS *st = &c->display->d7draw;
+    ULONG k = flags & RB_VS_FOG_ALPHA ? 1 : 0, n = 0, id = 0, written;
+    RB_PS_INFO info;
+    if (vs->program[k] || vs->failed[k]) return vs->program[k];
+    info.reason = RbPsOverflow;
+    info.detail = 0;
+    if (programScratch)
+        n = rb_vs_translate((const unsigned int *)vs->tokens, vs->tokenCount, (const unsigned int *)vs->decl,
+                            vs->declCount, flags, programScratch->text, sizeof(programScratch->text), &info);
+    if (n) {
+        programScratch->samplers = 0;
+        if (miniport(c->display, IOCTL_RB2K_D3D8_PROGRAM, programScratch, sizeof(ULONG) + n, &id, sizeof(id),
+                     &written) || written != sizeof(id)) {
+            id = 0;
+            info.reason = RbPsReasons;
+        }
+    }
+    if (!id) {
+        vs->failed[k] = TRUE;
+        ++st->vsFailed[info.reason < RbPsReasons ? info.reason : RbPsReasons];
+        st->vsLastDetail = info.detail;
+        return 0;
+    }
+    ++st->vsTranslated;
+    vs->constants = info.constants;
+    vs->words = info.coords;
+    vs->program[k] = id;
+    return id;
 }
 
 /* Translate a pixel shader and give its text to the miniport. A shader that
@@ -1420,6 +1566,46 @@ static ULONG stage_sampler(const D7_STAGE *st, const D7_TEXTURE *tex)
            (st->minFilter >= 1 && st->minFilter <= 3 ? st->minFilter : 1) << 12 |
            (tex && tex->levels > 1 && st->mipFilter >= D3DTFP_POINT && st->mipFilter <= D3DTFP_LINEAR ?
             st->mipFilter : D3DTFP_NONE) << 16;
+}
+
+/* The pixel shader half of a shader draw: textures, render states, the
+ * program and its constants. FALSE when a texture is not ready; the draw is
+ * then counted as skipped. */
+static BOOL pixel_states(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, const D8_SHADER *sh, DD_SLOT *s, DD_SLOT *z,
+                         ULONG program, ULONG fog, ULONG primitives)
+{
+    ULONG k;
+    for (k = 0; k < RB2K_D8_STAGES; ++k) {
+        D7_STAGE *st = &c->stages[k];
+        D7_TEXTURE *tex;
+        if (!(sh->samplers & (1UL << k))) continue;
+        tex = find_texture(c->local, st->texture);
+        if (!tex || !tex->format || tex->owner != c->owner || !(draw->textures[k] = texture_ready(c, tex, s->id))) {
+            skip(c, RB2K_D7_SKIP_TEXTURE, primitives);
+            return FALSE;
+        }
+        draw->samplers[k] = stage_sampler(st, tex);
+        draw->borders[k] = st->border;
+    }
+    draw->target = s->id;
+    draw->depth = z ? z->id : 0;
+    if (z && c->zEnable && c->zFunc >= D3DCMP_NEVER && c->zFunc <= D3DCMP_ALWAYS)
+        draw->depthState = RB2K_Z_ENABLE | (c->zWrite ? RB2K_Z_WRITE : 0) | (c->zFunc - 1);
+    if (c->alphaTest && c->alphaFunc >= D3DCMP_NEVER && c->alphaFunc <= D3DCMP_ALWAYS)
+        draw->alphaTest = RB2K_D7_ON | (c->alphaFunc << 8) | (c->alphaRef & 255);
+    if (c->blend && c->srcBlend >= D3DBLEND_ZERO && c->srcBlend <= D3DBLEND_BOTHINVSRCALPHA &&
+        c->dstBlend >= D3DBLEND_ZERO && c->dstBlend <= D3DBLEND_BOTHINVSRCALPHA)
+        draw->blend = RB2K_D7_ON | (c->srcBlend << 8) | c->dstBlend;
+    draw->cull = c->cull >= D3DCULL_NONE && c->cull <= D3DCULL_CCW ? c->cull : D3DCULL_NONE;
+    draw->program = program;
+    draw->fog = fog;
+    draw->fogColor = c->fogColor;
+    draw->fogStart = c->fogStart;
+    draw->fogEnd = c->fogEnd;
+    draw->fogDensity = c->fogDensity;
+    draw->constantCount = sh->constants;
+    RtlCopyMemory(draw->constants, c->psConst, sh->constants * 16);
+    return TRUE;
 }
 
 /* A draw with a pixel shader. The program replaces the texture stages; the
@@ -1488,36 +1674,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     for (k = 0; k < RB2K_D8_STAGES; ++k) if (sh->coords & (1UL << k)) used = k + 1;
     draw->coordSets = used;
     words = RB2K_D8_VERTEX_WORDS(used);
-    for (k = 0; k < RB2K_D8_STAGES; ++k) {
-        D7_STAGE *st = &c->stages[k];
-        D7_TEXTURE *tex;
-        if (!(sh->samplers & (1UL << k))) continue;
-        tex = find_texture(c->local, st->texture);
-        if (!tex || !tex->format || tex->owner != c->owner || !(draw->textures[k] = texture_ready(c, tex, s->id))) {
-            skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives);
-            return DD_OK;
-        }
-        draw->samplers[k] = stage_sampler(st, tex);
-        draw->borders[k] = st->border;
-    }
-    draw->target = s->id;
-    draw->depth = z ? z->id : 0;
-    if (z && c->zEnable && c->zFunc >= D3DCMP_NEVER && c->zFunc <= D3DCMP_ALWAYS)
-        draw->depthState = RB2K_Z_ENABLE | (c->zWrite ? RB2K_Z_WRITE : 0) | (c->zFunc - 1);
-    if (c->alphaTest && c->alphaFunc >= D3DCMP_NEVER && c->alphaFunc <= D3DCMP_ALWAYS)
-        draw->alphaTest = RB2K_D7_ON | (c->alphaFunc << 8) | (c->alphaRef & 255);
-    if (c->blend && c->srcBlend >= D3DBLEND_ZERO && c->srcBlend <= D3DBLEND_BOTHINVSRCALPHA &&
-        c->dstBlend >= D3DBLEND_ZERO && c->dstBlend <= D3DBLEND_BOTHINVSRCALPHA)
-        draw->blend = RB2K_D7_ON | (c->srcBlend << 8) | c->dstBlend;
-    draw->cull = c->cull >= D3DCULL_NONE && c->cull <= D3DCULL_CCW ? c->cull : D3DCULL_NONE;
-    draw->program = program;
-    draw->fog = fog;
-    draw->fogColor = c->fogColor;
-    draw->fogStart = c->fogStart;
-    draw->fogEnd = c->fogEnd;
-    draw->fogDensity = c->fogDensity;
-    draw->constantCount = sh->constants;
-    RtlCopyMemory(draw->constants, c->psConst, sh->constants * 16);
+    if (!pixel_states(c, draw, sh, s, z, program, fog, p->primitives)) return DD_OK;
     if (objectSpace) {
         draw->transform = 1;
         RtlCopyMemory(draw->matrices, c->matrices, sizeof(draw->matrices));
@@ -1602,6 +1759,97 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     return hr;
 }
 
+/* A draw with a vertex shader and a pixel shader. The vertices travel as
+ * the stream holds them, padded to whole constants after the vertex
+ * shader's constants, and the vertex program fetches its inputs itself.
+ * Fog comes from oFog (in the specular alpha) or, as table fog, from the
+ * pixel depth. Without a pixel shader the texture stages become a pixel
+ * program of their own. Flat shading is not applied. */
+static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
+{
+    DISPLAY *d = c->display;
+    RB2K_D3D8_DRAW *draw = &c->draw8;
+    D8_VSHADER *vs = find_vshader(c, c->fvf);
+    D8_SHADER *sh = find_shader(c, c->pixelShader), stages;
+    DD_SLOT *s, *z;
+    ULONG program = 0, vprogram = 0, fog = 0, flags = 0, stride = p->streamStride, words, i, t, count = 0;
+    ULONG low = 0xffffffff, high = 0, flat;
+    ULONG *out;
+    const BYTE *base;
+    LONGLONG lo, hi;
+    HRESULT hr = render_surfaces(c, &s, &z);
+    if (FAILED(hr)) return hr;
+    if (!p->primitives) return DD_OK;
+    if (c->fill != D3DFILL_SOLID) { skip(c, RB2K_D7_SKIP_FILL, p->primitives); return DD_OK; }
+    if (c->stencil) { skip(c, RB2K_D7_SKIP_STENCIL, p->primitives); return DD_OK; }
+    if (c->fog) {
+        if (c->fogTable >= D3DFOG_EXP && c->fogTable <= D3DFOG_LINEAR)
+            fog = RB2K_D7_FOG_TABLE | c->fogTable << RB2K_D7_FOG_MODE_SHIFT | (c->wNear != c->wFar ? RB2K_D7_FOG_W : 0);
+        else { fog = RB2K_D7_FOG_ALPHA; flags = RB_VS_FOG_ALPHA; }
+    }
+    if (vs) vprogram = vertex_program(c, vs, flags);
+    if (sh) program = shader_program(c, sh, fog);
+    else {
+        /* The fixed-function pixel stages after the vertex shader. */
+        program = stage_program(c, fog, &stages);
+        sh = &stages;
+        d->d7draw.vsStageDraws += p->primitives;
+    }
+    words = (stride + 15) / 16 * 4;
+    if (!vprogram || !program || !p->stream || stride % 4 || words > RB2K_D8_VS_VERTEX_WORDS || vs->words > stride / 4) {
+        skip(c, vprogram && program ? RB2K_D7_SKIP_VERTEX : RB2K_D7_SKIP_COMBINER, p->primitives);
+        return DD_OK;
+    }
+    RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices));
+    if (!pixel_states(c, draw, sh, s, z, program, fog, p->primitives)) return DD_OK;
+    if (sh == &stages) draw->constants[0][0] = c->factor;   /* the texture factor, unpacked by the program */
+    draw->transform = 2;
+    draw->vertexProgram = vprogram;
+    draw->vertexConstants = vs->constants;
+    draw->vertexWords = words;
+    RtlCopyMemory(draw->viewport, c->viewport, sizeof(c->viewport));
+    draw->viewport[4] = c->zRange[0];
+    draw->viewport[5] = c->zRange[1];
+    RtlCopyMemory(draw->vertices, c->vsConst, vs->constants * 16);
+    out = draw->vertices + 4 * vs->constants;
+    for (t = 0; t < p->primitives; ++t)
+        for (i = 0; i < 3; ++i) {
+            ULONG v = prim_vertex(p, t, i, &flat);
+            if (v < low) low = v;
+            if (v > high) high = v;
+        }
+    lo = p->streamFirst + (LONGLONG)low * stride;
+    hi = p->streamFirst + (LONGLONG)high * stride + stride;
+    if (lo < 0 || hi > p->streamBytes) {
+        ++d->d7draw.beyondCalls;
+        d->d7draw.beyondVertices += p->primitives;
+        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+        return DD_OK;
+    }
+    base = p->streamData + p->streamFirst;
+    __try {
+        EngProbeForRead((PVOID)(base + low * stride), (high - low + 1) * stride, 1);
+        for (t = 0; t < p->primitives; ++t) {
+            for (i = 0; i < 3; ++i) {
+                ULONG *o = out + (count + i) * words;
+                RtlCopyMemory(o, base + prim_vertex(p, t, i, &flat) * stride, stride);
+                RtlZeroMemory((BYTE *)o + stride, words * 4 - stride);
+            }
+            count += 3;
+            if (count == RB2K_D8_VERTICES || t + 1 == p->primitives) {
+                d->d7draw.vsDraws += count / 3;
+                hr = send_batch8(c, draw, count);
+                if (FAILED(hr)) break;
+                count = 0;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+        hr = DD_OK;
+    }
+    return hr;
+}
+
 /* ---- Direct3D 8 streams ---- */
 
 static void trace8(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG op, ULONG n, const BYTE *p, ULONG avail)
@@ -1665,7 +1913,8 @@ static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULON
     if (!count) return DD_OK;
     if (type < RbTriangleList || type > RbTriangleFan) { skip(c, RB2K_D7_SKIP_PRIMITIVE, count); return DD_OK; }
     prims.kind = type == RbTriangleList ? List : type == RbTriangleStrip ? Strip : Fan;
-    if ((c->fvf & 1) || !c->streamStride || c->streamStride > 256 || !stream_zero(c, a, &prims) ||
+    if (((c->fvf & 1) && !c->display->vertexShaders) || !c->streamStride || c->streamStride > 256 ||
+        !stream_zero(c, a, &prims) ||
         first < -0x7fffffffLL || first > (LONGLONG)prims.streamBytes) {
         skip(c, RB2K_D7_SKIP_VERTEX, count);
         return DD_OK;
@@ -1693,6 +1942,7 @@ static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULON
         }
         prims.indices = indexScratch;
     }
+    if (c->fvf & 1) return program_triangles(c, &prims);
     if (c->pixelShader) return shader_triangles(c, &prims);
     return triangles(c, a, prims.streamStride, &prims);
 }
@@ -2073,6 +2323,13 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             trace8(c, a, h->bCommand, n, p, remaining);
             if (n && h->bCommand == RbDp2SetVertexShader) { c->fvf = v[n - 1].handle; c->dx8 = TRUE; }
             if (n && h->bCommand == RbDp2SetPixelShader) c->pixelShader = v[n - 1].handle;
+            if (h->bCommand == RbDp2DeleteVertexShader) {
+                ULONG k;
+                for (k = 0; k < n; ++k) {
+                    D8_VSHADER *vs = find_vshader(c, v[k].handle);
+                    if (vs) release_vshader(c, vs);
+                }
+            }
             if (h->bCommand == RbDp2DeletePixelShader) {
                 ULONG k;
                 for (k = 0; k < n; ++k) {
@@ -2164,11 +2421,25 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             }
             break;
         }
-        case RbDp2CreateVertexShader:
+        case RbDp2CreateVertexShader: {
+            ULONG k;
             used = variable_records(p, remaining, n, sizeof(RB_DP2_CREATE_VERTEX_SHADER), 1, 2);
             if (used > remaining) return DDERR_INVALIDPARAMS;
             trace8(c, a, h->bCommand, n, p, remaining);
+            for (k = 0, used = 0; k < n; ++k) {
+                const RB_DP2_CREATE_VERTEX_SHADER *r = (const RB_DP2_CREATE_VERTEX_SHADER *)(p + used);
+                RB2K_D7_DRAWSTATS *st = &c->display->d7draw;
+                if (st->vsCreated < 4) {
+                    ULONG *log = st->vsLog[st->vsCreated], words = (r->declBytes + r->codeBytes) / 4;
+                    log[0] = r->handle; log[1] = r->declBytes; log[2] = r->codeBytes;
+                    RtlCopyMemory(log + 3, p + used + sizeof(*r), min(words, 45UL) * 4);
+                }
+                ++st->vsCreated;
+                create_vshader(c, r->handle, p + used + sizeof(*r), r->declBytes, r->codeBytes);
+                used += sizeof(*r) + r->declBytes + r->codeBytes;
+            }
             break;
+        }
         case RbDp2CreatePixelShader: {
             ULONG k;
             used = variable_records(p, remaining, n, sizeof(RB_DP2_CREATE_PIXEL_SHADER), 1, 0);
@@ -2193,6 +2464,8 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
                 if (r->count > (remaining - used) / 16) return DDERR_INVALIDPARAMS;
                 if (h->bCommand == RbDp2SetPixelShaderConst && r->reg < 32)
                     RtlCopyMemory(c->psConst[r->reg], p + used, min(r->count, 32 - r->reg) * 16);
+                if (h->bCommand == RbDp2SetVertexShaderConst && r->reg < RB_VS_CONSTANTS)
+                    RtlCopyMemory(c->vsConst[r->reg], p + used, min(r->count, RB_VS_CONSTANTS - r->reg) * 16);
                 used += r->count * 16;
             }
             trace8(c, a, h->bCommand, n, p, remaining);
@@ -2481,6 +2754,10 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     c->maxStreams = 1;
     c->maxStreamStride = 255;
     c->vertexShaderVersion = 0xfffe0000;            /* version 0.0 */
+    if (d->vertexShaders) {
+        c->vertexShaderVersion = d->d7draw.d8Version >= 0x900 ? 0xfffe0200 : 0xfffe0101;
+        c->maxVertexShaderConst = d->d7draw.d8Version >= 0x900 ? 256 : 96;
+    }
     /* 1.3 for Direct3D 8; shader model 2 when the runtime that asks has
      * announced itself as Direct3D 9, which uses this record for drivers of
      * the Direct3D 8 interface. */

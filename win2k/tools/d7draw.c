@@ -79,6 +79,16 @@ int main(void)
     printf("D8PS created=%lu draws=%lu last_detail=%lx failed", s.psCreated, s.psDraws, s.psLastDetail);
     for (i = 0; i < 8; ++i) printf(" %lu", s.psFailed[i]);
     printf("\n");
+    printf("D8VS created=%lu translated=%lu draws=%lu stage_draws=%lu stage_failed=%lu last_detail=%lx failed",
+           s.vsCreated, s.vsTranslated, s.vsDraws, s.vsStageDraws, s.stageFailed, s.vsLastDetail);
+    for (i = 0; i < 8; ++i) printf(" %lu", s.vsFailed[i]);
+    printf("\n");
+    for (i = 0; i < s.vsCreated && i < 4; ++i) {
+        ULONG k, words = (s.vsLog[i][1] + s.vsLog[i][2]) / 4;
+        printf("D8VS %lu handle=%lx decl=%lu code=%lu w=", i, s.vsLog[i][0], s.vsLog[i][1], s.vsLog[i][2]);
+        for (k = 0; k < words && k < 45; ++k) printf("%s%lx", k ? "," : "", s.vsLog[i][3 + k]);
+        printf("\n");
+    }
     if (s.d8LogCount) {
         printf("D8GDI2");
         for (i = 0; i < s.d8LogCount && i < 24; ++i) printf(" %lx/%lu", s.d8Log[i][0], s.d8Log[i][1]);

@@ -17,7 +17,8 @@
 enum {
     Raster = 9, Elements = 5, VertexShader = 6, ObjectShader = 7, LitShader = 8, DsaBase = 16, BlendBase = 32,
     SamplerBase = 48, Sampler1Base = 56, ShaderBase = 64, TextureView = 80, TextureView1 = 81,
-    PsVertexShader = 82, PsObjectShader = 83, PsViewBase = 84, PsSamplerBase = 96, PsLitShader = 112
+    PsVertexShader = 82, PsObjectShader = 83, PsViewBase = 84, PsSamplerBase = 96, PsLitShader = 112,
+    VsProgramBase = 128, VsProgramKeys = 16
 };
 enum { VertexStage = 0, FragmentStage = 1, PipeTriangles = 4, ShaderText = 2400, LitText = 8192 };
 typedef char sampler_handles_fit[Sampler1Base + RB2K_D7_SAMPLER_KEYS <= ShaderBase &&
@@ -568,7 +569,7 @@ BOOLEAN rb_gpu_d7_valid(const RB2K_D3D7_DRAW *d)
         ULONG kind = d->fog & 3, mode = (d->fog >> RB2K_D7_FOG_MODE_SHIFT) & 3;
         if ((d->fog & ~(3UL | 3UL << RB2K_D7_FOG_MODE_SHIFT | RB2K_D7_FOG_RANGE | RB2K_D7_FOG_W)) || !kind ||
             (kind == RB2K_D7_FOG_ALPHA ? d->fog != kind : !mode) ||
-            (kind == RB2K_D7_FOG_VERTEX && !d->transform) ||
+            (kind == RB2K_D7_FOG_VERTEX && d->transform != 1) ||
             ((d->fog & RB2K_D7_FOG_RANGE) && kind != RB2K_D7_FOG_VERTEX) ||
             ((d->fog & RB2K_D7_FOG_W) && kind != RB2K_D7_FOG_TABLE)) return FALSE;
     }
@@ -1117,7 +1118,9 @@ BOOLEAN rb_gpu_d8_valid(const RB2K_D3D8_DRAW *d)
     if (d->blend && ((d->blend & ~(RB2K_D7_ON | 0xffff)) ||
         !blend_valid((d->blend >> 8) & 255) || !blend_valid(d->blend & 255))) return FALSE;
     if (d->cull < CullNone || d->cull > CullCcw || (d->constantCount != 8 && d->constantCount != 32)) return FALSE;
-    if (d->transform > 1 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
+    if (d->transform == 2 && (d->lighting || !d->vertexProgram || d->vertexConstants > RB2K_D8_VS_CONSTANTS ||
+        !d->vertexWords || d->vertexWords % 4 || d->vertexWords > RB2K_D8_VS_VERTEX_WORDS)) return FALSE;
+    if (d->transform > 2 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
         d->viewport[0] > 8192 || d->viewport[1] > 8192 || d->viewport[2] > 8192 || d->viewport[3] > 8192)))
         return FALSE;
     for (k = 0; k < RB2K_D8_STAGES; ++k)
@@ -1145,14 +1148,18 @@ BOOLEAN rb_gpu_d8_valid(const RB2K_D3D8_DRAW *d)
 /* program: the TGSI text of the pixel shader; textures: the texture of each
  * stage it samples, NULL for the others. */
 BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, const RB2K_D3D8_DRAW *d,
-                       const char *program, ULONG programBytes, RB2K_TEXTURE *const *textures)
+                       const char *program, ULONG programBytes, const char *vertexProgram, ULONG vertexBytes,
+                       RB2K_TEXTURE *const *textures)
 {
     RB2K_D7_STATE *s = &image->d7;
     ULONG words[192], n = 0, slot, key[6], state, i, k, h[RB2K_D8_STAGES], views[RB2K_D8_STAGES];
-    ULONG lit = d->lighting != 0, lights = lit ? d->lightCount : 0;
-    ULONG stages = 0, fill = 0, count = d->count, extra = (d->transform ? 56 : 0) + (lit ? 36 + 32 * lights : 0);
+    BOOLEAN shaded = d->transform == 2;
+    ULONG lit = !shaded && d->lighting != 0, lights = lit ? d->lightCount : 0;
+    ULONG stages = 0, fill = 0, count = d->count;
+    ULONG extra = shaded ? 4 * (RB2K_D8_VS_CONST_BASE - 1) + 4 * d->vertexConstants :
+                  (d->transform ? 56 : 0) + (lit ? 36 + 32 * lights : 0);
     ULONG sets = d->coordSets, words8 = RB2K_D8_VERTEX_WORDS(sets);
-    ULONG stride = lit ? 4 + (sets ? sets : 1) : 3 + sets, perVertex = 4 * stride;
+    ULONG stride = shaded ? d->vertexWords / 4 : lit ? 4 + (sets ? sets : 1) : 3 + sets, perVertex = 4 * stride;
     ULONG total = 28 + (d->transform ? 4 : 0) + extra + perVertex * count, *p;
     ULONG width = dimension_bits(image->width), height = dimension_bits(image->height);
     gpu->d8Step = 1;
@@ -1162,7 +1169,24 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
         s->pipeline = TRUE;
     }
     gpu->d8Step = 2;
-    {
+    if (shaded) {
+        /* The vertex program, kept per colour context by its id. */
+        key[0] = d->vertexProgram;
+        slot = cache_slot(&s->vsProgram, VsProgramKeys, key, 1, &state);
+        if (state != Hit) {
+            if (state == Replaced) {
+                words[0] = DESTROY(VIRGL_OBJECT_SHADER); words[1] = VsProgramBase + slot;
+                if (!rb_gpu_frame_words(gpu, r, image, words, 2)) return FALSE;
+                if (s->boundVertex == 0x100 + slot) s->boundVertex = 0;
+            }
+            if (!shader(gpu, r, image, VsProgramBase + slot, VertexStage, vertexProgram, vertexBytes)) return FALSE;
+        }
+        if (s->boundVertex != 0x100 + slot) {
+            ULONG bind[] = { VIRGL_CMD0(VIRGL_CCMD_BIND_SHADER,0,VIRGL_BIND_SHADER_SIZE), VsProgramBase + slot, VertexStage };
+            if (!rb_gpu_frame_words(gpu,r,image,bind,3)) return FALSE;
+            s->boundVertex = 0x100 + slot;
+        }
+    } else {
         static char transformedText[LitText], objectText[LitText], litText[LitText];
         static ULONG transformedSize, objectSize, litSize;
         ULONG want = d->lighting ? 32 : d->transform ? 16 : 8;
@@ -1182,7 +1206,7 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
         }
     }
     gpu->d8Step = 3;
-    if (!fixed_states(gpu, r, image, d->depthState, d->alphaTest, d->blend, d->cull, d->transform)) return FALSE;
+    if (!fixed_states(gpu, r, image, d->depthState, d->alphaTest, d->blend, d->cull, d->transform != 0)) return FALSE;
     /* The program shares the fragment shader table; its key cannot be a
      * fixed-function one, whose colour stage word is never all ones. */
     gpu->d8Step = 4;
@@ -1276,8 +1300,15 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
     }
     *p++ = VIRGL_CMD0(VIRGL_CCMD_SET_CONSTANT_BUFFER,0,6+extra+perVertex*count);
     *p++ = VertexStage; *p++ = 0;
-    *p++ = width; *p++ = height; *p++ = stride; *p++ = 0;
-    if (d->transform) {
+    *p++ = width; *p++ = height; *p++ = stride; *p++ = shaded ? RB2K_D8_VS_CONST_BASE + d->vertexConstants : 0;
+    if (shaded) {
+        /* The viewport, its depth range, no integer constants yet, then the
+         * shader's constants and the vertices as they came. */
+        for (i = 0; i < 4; ++i) *p++ = integer_bits(d->viewport[i]);
+        *p++ = d->viewport[4]; *p++ = d->viewport[5]; *p++ = 0; *p++ = 0;
+        for (i = 0; i < 4 * (RB2K_D8_VS_CONST_BASE - 3); ++i) *p++ = 0;
+        for (i = 0; i < 4 * d->vertexConstants + count * d->vertexWords; ++i) *p++ = d->vertices[i];
+    } else if (d->transform) {
         ULONG m, row, col;
         for (m = 0; m < 3; ++m)
             for (col = 0; col < 4; ++col)
@@ -1303,7 +1334,7 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
         }
         *p++ = lights; *p++ = LitVertexBase + stride * count; *p++ = 0; *p++ = 0;
     }
-    for (i = 0; i < count; ++i) {
+    for (i = 0; !shaded && i < count; ++i) {
         const RB2K_D3D8_VERTEX *v = (const RB2K_D3D8_VERTEX *)(d->vertices + i * words8);
         *p++ = v->x; *p++ = v->y; *p++ = v->z; *p++ = v->rhw;
         *p++ = rb_gpu_channel((v->diffuse >> 16) & 255);
