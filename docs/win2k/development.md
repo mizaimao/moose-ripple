@@ -1651,9 +1651,8 @@ During development `d3d8_ps.c` was also built natively on the Linux
 build host, and Mesa's TGSI text parser accepted each test shader's
 translation before it ran in a guest.
 
-Not yet drawn with a pixel shader: lit untransformed vertices, texture
-transforms and generated coordinates; fog is not applied after the
-shader. Version 1.4 is not offered.
+Not yet drawn with a pixel shader: texture transforms and generated
+coordinates. Version 1.4 is not offered.
 
 Installed from the stock INF under KVM on the Intel UHD 630 host:
 
@@ -1687,3 +1686,21 @@ Quake 0.73 `demo1` in a 640×480 window, three runs on each build:
 
 Direct3D 8 Quake (0.81) ran at 57.9 and 58.7 fps with pixel shaders
 offered, as before.
+
+### Fog and lighting with pixel shaders
+
+Fog now blends the result of a version 1 pixel shader as it does the
+fixed-function colour: the factor comes from the specular alpha, from
+the depths the untransformed vertex shader computes, or from the pixel
+depth, with the same choice as the fixed-function draws. The translator
+writes one program per fog setting a shader is drawn with and keeps up to
+four. Untransformed vertices with lighting on are now drawn with a pixel
+shader too, through a variant of the lighting vertex shader that passes
+on all four coordinate sets.
+
+On XP SP3, `d8pixels` gained four cases: alpha fog from the specular
+alpha, linear table fog, a quad lit by a directional light from its
+material, and the same quad with linear vertex fog. All 23 cases passed
+with hardware vertex processing, where the host lights and fogs the
+vertices, and with software vertex processing, where the runtime does.
+Direct3D 8 Quake ran at 58.8 fps.
