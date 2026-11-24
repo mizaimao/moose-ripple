@@ -38,6 +38,7 @@ static VP_STATUS query(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     caps->gpuSurfaces = 0;
     if (gpu->ddGpuSurfaces) {
         caps->gpuSurfaces = RB2K_DD_HOST_SURFACES;
+        if (gpu->plainSurfaces) caps->gpuSurfaces |= RB2K_DD_PLAIN_SURFACES;
         if (gpu->nativeD3D7)
             caps->gpuSurfaces |= RB2K_DD_NATIVE_D3D7 | RB2K_DD_Z16_STORAGE | RB2K_DD_Z16_RENDER;
     }

@@ -82,6 +82,7 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
             ((desc->dwFlags & DDSD_HEIGHT) && desc->dwHeight != d->mode.VisScreenHeight))
             return FALSE;
     } else if (!d->gpuSurfaces || storage != DDSCAPS_OFFSCREENPLAIN ||
+               (!d->plainSurfaces && !(caps & DDSCAPS_3DDEVICE)) ||
                /* Textures returned above; render-to-texture is not offered. */
                (caps & ~(DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM |
                          DDSCAPS_3DDEVICE)) ||
@@ -101,8 +102,12 @@ static DWORD APIENTRY can_create(PDD_CANCREATESURFACEDATA data)
     DISPLAY *d = (DISPLAY *)data->lpDD->dhpdev;
     DWORD caps = data->lpDDSurfaceDesc->ddsCaps.dwCaps;
     /* Without host-texture surfaces an offscreen surface goes to system
-     * memory, where Windows' own blits are faster here. */
-    if (!d->gpuSurfaces && !primary_caps(d, caps) && !flip_caps(caps))
+     * memory, where Windows' own blits are faster here. Native Direct3D
+     * keeps only its render targets, depth buffers and textures on the
+     * host; plain 2D surfaces stay in system memory unless asked for. */
+    if (!primary_caps(d, caps) && !flip_caps(caps) &&
+        (!d->gpuSurfaces ||
+         (!d->plainSurfaces && !(caps & (DDSCAPS_3DDEVICE | DDSCAPS_TEXTURE | DDSCAPS_ZBUFFER)))))
         data->ddRVal = DDERR_OUTOFVIDEOMEMORY;
     else
         data->ddRVal = supported(d, data->lpDDSurfaceDesc) ? DD_OK : DDERR_INVALIDCAPS;
@@ -787,6 +792,7 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     info->ddCaps.ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY |
                                   DDSCAPS_LOCALVIDMEM;
     d->gpuSurfaces = (caps.gpuSurfaces & RB2K_DD_HOST_SURFACES) != 0;
+    d->plainSurfaces = (caps.gpuSurfaces & RB2K_DD_PLAIN_SURFACES) != 0;
     d->nativeD3D7 = (caps.gpuSurfaces & RB2K_DD_NATIVE_D3D7) != 0;
     d->z16Storage = (caps.gpuSurfaces & RB2K_DD_Z16_STORAGE) != 0;
     d->z16Render = d->z16Storage && (caps.gpuSurfaces & RB2K_DD_Z16_RENDER) != 0;
@@ -847,6 +853,7 @@ BOOL APIENTRY DrvEnableDirectDraw(DHPDEV pdev, DD_CALLBACKS *c, DD_SURFACECALLBA
     }
     if (d->mode.BitsPerPlane != 32) caps.gpuSurfaces = 0;
     d->gpuSurfaces = (caps.gpuSurfaces & RB2K_DD_HOST_SURFACES) != 0;
+    d->plainSurfaces = (caps.gpuSurfaces & RB2K_DD_PLAIN_SURFACES) != 0;
     d->z16Storage = (caps.gpuSurfaces & RB2K_DD_Z16_STORAGE) != 0;
     d->z16Render = d->z16Storage && (caps.gpuSurfaces & RB2K_DD_Z16_RENDER) != 0;
     RtlZeroMemory(c, sizeof(*c)); RtlZeroMemory(sc, sizeof(*sc)); RtlZeroMemory(pc, sizeof(*pc));

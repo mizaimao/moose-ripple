@@ -1520,3 +1520,35 @@ Windows 2000 SP4 and XP SP3 the 8-bit and 16-bit hardware, software and
 default flip cases pass with native Direct3D on, including palette
 animation, and the Direct3D pixel tests still pass afterwards on the
 32-bit desktop.
+
+### On by default
+
+Native Direct3D 7 is on unless the adapter key has the DWORD
+`RippleNativeD3D7` set to 0. Its render targets (offscreen surfaces with
+the 3D-device flag), 16-bit depth buffers and textures are host images.
+Plain 2D offscreen surfaces in video memory are still declined with
+`DDERR_OUTOFVIDEOMEMORY`, so DirectDraw keeps them in system memory as
+before (see DirectDraw surfaces in system memory).
+`RippleDirectDrawGpuSurfaces` set to 1 still moves them to the host for
+tests. Without the native device, stock Quake 0.73 runs on Microsoft's
+RGB device, which drew the level as a flat colour in guest screenshots.
+
+Each system was installed from the stock INF with neither switch set,
+tested, then restarted with `RippleNativeD3D7` set to 0 and tested
+again. KVM on the Intel UHD 630 host, GPU minimum clock at 1200 MHz:
+
+| Check | Windows 2000 SP4 | Windows XP SP3 |
+| --- | --- | --- |
+| Direct3D 7 pixel tests on the RGB, HAL and T&L devices: colour, depth, indexed triangles, textures, lighting, fog, two stages, mipmaps | pass | pass |
+| Quake 0.73 `demo1`, 640×480 window, 1 ms timer | 127.2 fps | 121.6 fps |
+| Guest screenshots during the demo | textured level, weapon and status bar | the same |
+| DirectDraw full-screen flips at 8, 16 and 32 bits | pass | pass |
+| Plain offscreen surface asked for in video memory | declined; system memory passes | the same |
+| After `RippleNativeD3D7` = 0: hardware device | not listed | not listed |
+| After `RippleNativeD3D7` = 0: RGB device and 32-bit flips | pass | pass |
+
+The Quake rates match the earlier runs with both switches set, 130 fps
+on Windows 2000 and 123 fps on XP. With native Direct3D switched off, XP
+gave the same plain-surface results as with it on: the hardware window
+and fill cases declined the video-memory surface, and the system-memory
+cases passed.
