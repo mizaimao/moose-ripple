@@ -303,6 +303,9 @@ done:
     return passed;
 }
 
+/* The second, larger flip case; w2kprobe /flipat changes it. */
+DWORD rb_flip_width = 1024, rb_flip_height = 768;
+
 BOOL probe_ddraw_flip(LPDIRECTDRAW dd, const char *path, DWORD createFlags, DWORD bpp)
 {
     static const char name[] = "W2KFullscreenFlip";
@@ -328,7 +331,7 @@ BOOL probe_ddraw_flip(LPDIRECTDRAW dd, const char *path, DWORD createFlags, DWOR
         if (call("exclusive", IDirectDraw_SetCooperativeLevel(dd, window, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN))) {
             passed = exercise(dd, window, path, createFlags, 640, 480, bpp);
             if (passed && createFlags != DDCREATE_EMULATIONONLY)
-                passed = exercise(dd, window, path, createFlags, 1024, 768, bpp);
+                passed = exercise(dd, window, path, createFlags, rb_flip_width, rb_flip_height, bpp);
             if (!call("restore display", IDirectDraw_RestoreDisplayMode(dd))) passed = FALSE;
             if (!call("leave exclusive", IDirectDraw_SetCooperativeLevel(dd, window, DDSCL_NORMAL))) passed = FALSE;
         }

@@ -19,12 +19,21 @@
 
 enum { VbeId, VbeX, VbeY, VbeBpp, VbeEnable, VbeBank, VbeWidth,
        VbeHeight, VbeOffsetX, VbeOffsetY };
-/* Keep the existing 32-bit mode indices stable across driver updates. */
+/* Keep the existing mode indices stable across driver updates: new modes
+ * go at the end. A mode is offered when one page fits (see mode_fits). */
 static const struct { USHORT width, height, bpp; } modes[] = {
     {640, 480, 32}, {800, 600, 32}, {1024, 768, 32},
     {640, 480, 16}, {800, 600, 16}, {1024, 768, 16},
-    {640, 480, 8},  {800, 600, 8},  {1024, 768, 8}
+    {640, 480, 8},  {800, 600, 8},  {1024, 768, 8},
+    {1152, 864, 32}, {1280, 720, 32}, {1280, 800, 32}, {1280, 960, 32}, {1280, 1024, 32},
+    {1440, 900, 32}, {1600, 900, 32}, {1600, 1200, 32}, {1680, 1050, 32},
+    {1152, 864, 16}, {1280, 720, 16}, {1280, 800, 16}, {1280, 960, 16}, {1280, 1024, 16},
+    {1440, 900, 16}, {1600, 900, 16}, {1600, 1200, 16}, {1680, 1050, 16},
+    {1152, 864, 8}, {1280, 720, 8}, {1280, 800, 8}, {1280, 960, 8}, {1280, 1024, 8},
+    {1440, 900, 8}, {1600, 900, 8}, {1600, 1200, 8}, {1680, 1050, 8}
 };
+/* The largest page in the table, in bytes (1600x1200 at 32 bits). */
+#define MAX_PAGE_BYTES (1600UL * 1200 * 4)
 
 PVOID rb_view_current(void);
 HANDLE rb_view_open(HANDLE supplied);
@@ -130,7 +139,7 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
      * view of the framebuffer (rb_map_cached). BAR0 is a PCI framebuffer; its
      * address is not a general-purpose DMA backing entry. */
     if (a->gpu.common) {
-        ULONG bytes = a->fb.RangeLength < 2 * MIN_FRAME_BYTES ? a->fb.RangeLength : 2 * MIN_FRAME_BYTES;
+        ULONG bytes = a->fb.RangeLength < 2 * MAX_PAGE_BYTES ? a->fb.RangeLength : 2 * MAX_PAGE_BYTES;
         a->gpu.primary.pixels = rb_map_cached((unsigned __int64)a->fb.RangeStart.QuadPart, bytes);
         if (!a->gpu.primary.pixels && bytes != MIN_FRAME_BYTES) {
             bytes = MIN_FRAME_BYTES;
@@ -152,6 +161,29 @@ static BOOLEAN initialize(PVOID ext)
     VideoPortSetRegistryParameters(a, L"HardwareInformation.MemorySize",
                                    &a->fb.RangeLength, sizeof(ULONG));
     return TRUE;
+}
+
+/* A mode needs one page of framebuffer; a 32-bit page must also fit the
+ * miniport's own framebuffer view and the largest host image. DirectDraw
+ * page flipping needs a second page, and scanout_info reports one page
+ * where it does not fit: QEMU's virtio-vga has 8 MB, so 32-bit modes above
+ * 1280x800 have a desktop but no flip chain. */
+static BOOLEAN mode_fits(const ADAPTER *a, ULONG index)
+{
+    ULONG page;
+    if (index >= ARRAY_COUNT(modes)) return FALSE;
+    if (index < 9) return TRUE;
+    page = (ULONG)modes[index].width * modes[index].height * (modes[index].bpp / 8);
+    if (page > a->fb.RangeLength) return FALSE;
+    return modes[index].bpp != 32 ||
+           (page <= RB2K_DD_MAX_BYTES && (!a->gpu.primary.pixels || page <= a->gpu.primary.bytes));
+}
+
+static ULONG fitting_modes(const ADAPTER *a)
+{
+    ULONG i, n = 0;
+    for (i = 0; i < ARRAY_COUNT(modes); ++i) n += mode_fits(a, i);
+    return n;
 }
 
 static void mode_info(ULONG index, PVIDEO_MODE_INFORMATION m)
@@ -303,7 +335,7 @@ static VP_STATUS set_mode(ADAPTER *a, ULONG request)
     ULONG index = request & ~(VIDEO_MODE_NO_ZERO_MEMORY | VIDEO_MODE_MAP_MEM_LINEAR);
     USHORT enable = (request & VIDEO_MODE_NO_ZERO_MEMORY) ? 0xc1 : 0x41;
     VP_STATUS status;
-    if (index >= ARRAY_COUNT(modes)) return ERROR_INVALID_PARAMETER;
+    if (!mode_fits(a, index)) return ERROR_INVALID_PARAMETER;
     if (modes[index].bpp == 8) enable |= VBE_8BIT_DAC;
     status = release_pages(a, FALSE);
     if (status) return status;
@@ -518,17 +550,18 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
     case IOCTL_VIDEO_QUERY_NUM_AVAIL_MODES:
         if (r->OutputBufferLength >= sizeof(VIDEO_NUM_MODES)) {
             PVIDEO_NUM_MODES n = r->OutputBuffer;
-            n->NumModes = ARRAY_COUNT(modes);
+            n->NumModes = fitting_modes(a);
             n->ModeInformationLength = sizeof(VIDEO_MODE_INFORMATION);
             r->StatusBlock->Information = sizeof(*n);
             status = NO_ERROR;
         }
         break;
     case IOCTL_VIDEO_QUERY_AVAIL_MODES:
-        if (r->OutputBufferLength >= ARRAY_COUNT(modes) * sizeof(VIDEO_MODE_INFORMATION)) {
+        if (r->OutputBufferLength >= fitting_modes(a) * sizeof(VIDEO_MODE_INFORMATION)) {
+            ULONG n = 0;
             for (i = 0; i < ARRAY_COUNT(modes); ++i)
-                mode_info(i, (PVIDEO_MODE_INFORMATION)r->OutputBuffer + i);
-            r->StatusBlock->Information = ARRAY_COUNT(modes) * sizeof(VIDEO_MODE_INFORMATION);
+                if (mode_fits(a, i)) mode_info(i, (PVIDEO_MODE_INFORMATION)r->OutputBuffer + n++);
+            r->StatusBlock->Information = n * sizeof(VIDEO_MODE_INFORMATION);
             status = NO_ERROR;
         }
         break;

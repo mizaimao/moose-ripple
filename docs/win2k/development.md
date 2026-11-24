@@ -543,6 +543,34 @@ the existing palette. Explicit palette creation on that interface returned
 `E_NOTIMPL` on XP. The default interface used by the combined test can
 create the palette and use hardware page flipping in the same session.
 
+## Screen sizes above 1024×768
+
+The miniport also offers 1152×864, 1280×720, 1280×800, 1280×960,
+1280×1024, 1440×900, 1600×900, 1600×1200 and 1680×1050 at 8, 16 and 32
+bits. They follow the earlier modes, so those keep their mode indices. A
+mode is offered when one screen fits in the framebuffer. DirectDraw page
+flipping needs a second screen; where it does not fit, the miniport
+reports a single page and the display driver offers no flip chain. QEMU's
+virtio-vga has an 8 MB framebuffer, and QEMU 9.2 has no option to change
+it. So 32-bit flipping works up to 1280×800, 16-bit and 8-bit flipping
+up to 1680×1050 and 1600×1200, and 1920×1080 at 32 bits needs 8.3 MB and
+is not offered. Direct3D and OpenGL textures and render targets live in
+host GPU memory and are not limited by it. Host images, the miniport's
+own framebuffer view and its readback staging grow to the largest mode;
+a readback of a 1680×1200 image takes 124 staging segments of 64 KB,
+which still fit one 2 KB request.
+
+`w2kprobe /pattern WxHxB` checks four GDI colours in any offered mode.
+On Windows 2000 SP4 and XP SP3 under KVM on the Intel host:
+
+| Check | Windows 2000 SP4 | Windows XP SP3 |
+| --- | --- | --- |
+| GDI colours at 1280×1024×32 and 1680×1050×32 | pass | pass |
+| GDI colours at 1440×900, 1600×900 and 1600×1200 at 32 bits; 1600×1200 and 1680×1050 at 16 bits; 1600×1200 at 8 bits | pass | not run |
+| DirectDraw flip chain at 1280×800×32 (`/flipat`) | pass | pass |
+| Direct3D pixel tests on a 1280×1024×32 desktop, HAL and T&L | pass | pass |
+| Quake 0.73 `demo1` in an 800×600 window on that desktop | 103.7 fps | 98.9 fps |
+
 ## Experimental GPU presentation for OpenGL
 
 The ordinary renderer downloads a completed frame and passes it to GDI.

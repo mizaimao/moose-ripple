@@ -8,10 +8,16 @@ On Intel KVM and in UTM on Apple silicon, the driver installed over stock
 VGA and restored the saved desktop after full-screen DirectDraw programs.
 [Windows XP tests](../docs/win2k/development.md#windows-xp-sp3-x86)
 
-- **Desktop:** 640×480, 800×600 and 1024×768 at 32-bit colour, 60 Hz.
+- **Desktop:** 640×480 to 1680×1050 and 1600×1200 at 32-bit colour, 60 Hz:
+  640×480, 800×600, 1024×768, 1152×864, 1280×720, 1280×800, 1280×960,
+  1280×1024, 1440×900, 1600×900, 1600×1200 and 1680×1050.
   GDI draws into the adapter's framebuffer. Command Prompt windows,
   mode changes and the Display control panel work as usual. The development
   build also offers 16-bit RGB565 and 8-bit indexed colour at these sizes.
+  QEMU's virtio-vga has 8 MB of framebuffer, so full-screen DirectDraw page
+  flipping, which needs two screens of it, works at 32 bits up to 1280×800,
+  and 1920×1080 at 32 bits does not fit.
+  [Screen sizes](../docs/win2k/development.md#screen-sizes-above-1024768)
   Windows 2000 SP4 and XP SP3 passed native GDI and DirectDraw page-flip
   checks at both depths, including palette animation on an 8-bit
   video-memory surface.
@@ -146,6 +152,9 @@ DDK headers and import libraries, and the Visual C++ 6.0 headers. Set
   DirectDraw fills, locks, page flips and desktop restoration.
   `/pattern8` and `/flip8` exercise 8-bit modes. The flip test changes a
   palette entry while two adjacent pixels keep their original indices.
+  `/pattern WxHxB` and `/flipat WxHxB` (for example `/pattern 1280x1024x32`)
+  run the colour check, or the flip test with that size as its larger case,
+  in any offered mode.
 - `ddbench.exe`: DirectDraw frame rates through the driver, Windows'
   software path and DirectDraw's own choice. The full-screen benchmark
   changes its fill colour every frame, so the display flashes during the test.
