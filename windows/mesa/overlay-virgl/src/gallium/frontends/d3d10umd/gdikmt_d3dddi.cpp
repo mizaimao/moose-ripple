@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "gdikmt_d3dddi.h"
+#include "D3D9Trace.h"
 #ifdef RIPPLE_VISTA
 #include "RippleLog.h"
 #include "virtio/wddm/viogpu_wddm_driver.h"
@@ -64,7 +65,11 @@ d3dddi_escape(struct gdikmt_device *dev, void *data, UINT size)
    arg.hDevice = ddi->hRTDevice;
    arg.pPrivateDriverData = data;
    arg.PrivateDriverDataSize = size;
-   return ddi->KTCallbacks.pfnEscapeCb(ddi->hRTAdapter, &arg);
+   const unsigned long long timed = D3D9TimesOn() ? D3D9TimesNow() : 0;
+   const HRESULT hr = ddi->KTCallbacks.pfnEscapeCb(ddi->hRTAdapter, &arg);
+   if (timed)
+      D3D9TimesCallback(D3D9_TIMED_ESCAPE, timed);
+   return hr;
 }
 
 static NTSTATUS
@@ -254,7 +259,10 @@ d3dddi_lock_allocation(struct gdikmt_device *dev, D3DKMT_HANDLE hAllocation,
    arg.hAllocation = hAllocation;
    arg.Flags = flags;
 
+   const unsigned long long timed = D3D9TimesOn() ? D3D9TimesNow() : 0;
    hr = ddi->KTCallbacks.pfnLockCb(ddi->hRTDevice, &arg);
+   if (timed)
+      D3D9TimesCallback(D3D9_TIMED_LOCK, timed);
    if (SUCCEEDED(hr))
       *ptr = arg.pData;
    return hr;
@@ -268,7 +276,11 @@ d3dddi_unlock_allocation(struct gdikmt_device *dev, D3DKMT_HANDLE hAllocation)
    D3DDDICB_UNLOCK arg = {};
    arg.NumAllocations = 1;
    arg.phAllocations = &hAllocation;
-   return ddi->KTCallbacks.pfnUnlockCb(ddi->hRTDevice, &arg);
+   const unsigned long long timed = D3D9TimesOn() ? D3D9TimesNow() : 0;
+   const HRESULT hr = ddi->KTCallbacks.pfnUnlockCb(ddi->hRTDevice, &arg);
+   if (timed)
+      D3D9TimesCallback(D3D9_TIMED_UNLOCK, timed);
+   return hr;
 }
 #endif
 
@@ -292,7 +304,10 @@ d3dddi_render(struct gdikmt_context *ctx, struct gdikmt_render *render)
    arg.Flags.ResizeAllocationList = render->ResizeAllocationList;
    arg.Flags.ResizePatchLocationList = render->ResizePatchLocationList;
 
+   const unsigned long long timed = D3D9TimesOn() ? D3D9TimesNow() : 0;
    hr = ddi->KTCallbacks.pfnRenderCb(ddi->hRTDevice, &arg);
+   if (timed)
+      D3D9TimesCallback(D3D9_TIMED_RENDER, timed);
    if (FAILED(hr))
       return hr;
 
@@ -381,7 +396,10 @@ d3dddi_present(struct gdikmt_context *ctx, D3DKMT_HANDLE hAllocation,
       if (info && info->magic == GDIKMT_PRESENT_INFO_MAGIC)
          present.hDstAllocation = info->hDstAllocation;
       present.hContext = d3dddi_context(ctx)->hContext;
+      const unsigned long long timed = D3D9TimesOn() ? D3D9TimesNow() : 0;
       hr = ddi->KTCallbacks.pfnPresentCb(ddi->hRTDevice, &present);
+      if (timed)
+         D3D9TimesCallback(D3D9_TIMED_PRESENT, timed);
       if (info && info->magic == GDIKMT_PRESENT_INFO_MAGIC)
          info->status = hr;
       return hr;

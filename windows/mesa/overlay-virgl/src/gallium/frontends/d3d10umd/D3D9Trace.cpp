@@ -30,8 +30,165 @@ D3D9TraceLevel(void)
 static void
 D3D9TraceResult(const char *name, HRESULT hr)
 {
-   if (FAILED(hr) || d3d9_trace_level >= 2)
+   if (d3d9_trace_level > 0 && (FAILED(hr) || d3d9_trace_level >= 2))
       ripple_logf("d3d9: %s -> 0x%08lx", name, (unsigned long)hr);
+}
+
+/*
+ * RIPPLE_UMD_TIMES: where the drawing thread's time goes (D3D9Trace.h). Times are taken with
+ * the processor's time stamp counter, which costs nothing to read in a virtual machine, and
+ * turned into milliseconds against the performance counter over each 256 frames. Only the
+ * thread that makes the first call is counted.
+ */
+struct D3D9TimeStat {
+   const char *name;
+   uint64_t calls, ticks, longest, after, after_longest;
+};
+
+static int d3d9_times = -1;
+static D3D9TimeStat *d3d9_time_stats[400];
+static unsigned d3d9_time_count;
+static D3D9TimeStat d3d9_time_callbacks[D3D9_TIMED_CALLBACKS] = {
+   {"lock"}, {"unlock"}, {"render"}, {"present"}, {"escape"},
+};
+static D3D9TimeStat *d3d9_time_last;
+static uint64_t d3d9_time_last_exit, d3d9_time_window;
+static LARGE_INTEGER d3d9_time_window_counter;
+static DWORD d3d9_time_window_tick;
+static DWORD d3d9_time_thread;
+static unsigned d3d9_time_frames;
+
+bool
+D3D9TimesOn(void)
+{
+   if (d3d9_times < 0)
+      d3d9_times = getenv("RIPPLE_UMD_TIMES") && getenv("RIPPLE_UMD_LOG");
+   return d3d9_times > 0;
+}
+
+unsigned long long
+D3D9TimesNow(void)
+{
+   return __builtin_ia32_rdtsc();
+}
+
+static bool
+D3D9TimesMine(void)
+{
+   const DWORD thread = GetCurrentThreadId();
+   if (!d3d9_time_thread) {
+      d3d9_time_thread = thread;
+      d3d9_time_window = D3D9TimesNow();
+      QueryPerformanceCounter(&d3d9_time_window_counter);
+      d3d9_time_window_tick = GetTickCount();
+   }
+   return thread == d3d9_time_thread;
+}
+
+void
+D3D9TimesCallback(enum D3D9TimedCallback which, unsigned long long start)
+{
+   if (!D3D9TimesMine())
+      return;
+   const uint64_t ticks = D3D9TimesNow() - start;
+   D3D9TimeStat *stat = &d3d9_time_callbacks[which];
+   stat->calls++;
+   stat->ticks += ticks;
+   if (ticks > stat->longest)
+      stat->longest = ticks;
+}
+
+static void
+D3D9TimesReport(uint64_t now)
+{
+   LARGE_INTEGER counter, frequency;
+   QueryPerformanceCounter(&counter);
+   QueryPerformanceFrequency(&frequency);
+   const double ms = (double)(counter.QuadPart - d3d9_time_window_counter.QuadPart) * 1000.0 /
+                     (double)frequency.QuadPart;
+   const double per_tick = now > d3d9_time_window ? ms / (double)(now - d3d9_time_window) : 0.0;
+   const double frames = d3d9_time_frames;
+   uint64_t inside = 0;
+   for (unsigned i = 0; i < d3d9_time_count; ++i)
+      inside += d3d9_time_stats[i]->ticks;
+   /* The tick clock is what timeGetTime, Sleep and most games go by. It moves with the timer
+    * interrupts, so it falls behind the performance counter when the host delivers them late. */
+   const DWORD tick = GetTickCount();
+   ripple_logf("times over %u frames: %.2f ms a frame, %.2f ms of it inside the driver; "
+               "the tick clock moved %.0f%% of that time",
+               d3d9_time_frames, ms / frames, inside * per_tick / frames,
+               ms > 0 ? (double)(tick - d3d9_time_window_tick) * 100.0 / ms : 0.0);
+   /* the largest first; a few lines say where the time is */
+   for (unsigned pass = 0; pass < 2; ++pass) {
+      bool shown[400] = {};
+      for (unsigned line = 0; line < 8; ++line) {
+         int best = -1;
+         for (unsigned i = 0; i < d3d9_time_count; ++i) {
+            const D3D9TimeStat *s = d3d9_time_stats[i];
+            const uint64_t value = pass ? s->after : s->ticks;
+            if (!shown[i] && value &&
+                (best < 0 || value > (pass ? d3d9_time_stats[best]->after : d3d9_time_stats[best]->ticks)))
+               best = (int)i;
+         }
+         if (best < 0)
+            break;
+         shown[best] = true;
+         const D3D9TimeStat *s = d3d9_time_stats[best];
+         if (pass)
+            ripple_logf("  outside the driver after %s: %.3f ms a frame, longest %.3f ms", s->name,
+                        s->after * per_tick / frames, s->after_longest * per_tick);
+         else
+            ripple_logf("  inside %s: %.1f calls and %.3f ms a frame, longest %.3f ms", s->name,
+                        s->calls / frames, s->ticks * per_tick / frames, s->longest * per_tick);
+      }
+   }
+   for (unsigned i = 0; i < D3D9_TIMED_CALLBACKS; ++i) {
+      D3D9TimeStat *s = &d3d9_time_callbacks[i];
+      if (s->calls)
+         ripple_logf("  kernel %s: %.1f calls and %.3f ms a frame, longest %.3f ms", s->name,
+                     s->calls / frames, s->ticks * per_tick / frames, s->longest * per_tick);
+      s->calls = s->ticks = s->longest = 0;
+   }
+   for (unsigned i = 0; i < d3d9_time_count; ++i) {
+      D3D9TimeStat *s = d3d9_time_stats[i];
+      s->calls = s->ticks = s->longest = s->after = s->after_longest = 0;
+   }
+   d3d9_time_frames = 0;
+   d3d9_time_window = D3D9TimesNow();
+   QueryPerformanceCounter(&d3d9_time_window_counter);
+   d3d9_time_window_tick = GetTickCount();
+}
+
+static void
+D3D9TimesEnter(uint64_t now)
+{
+   if (!d3d9_time_last)
+      return;
+   const uint64_t gap = now - d3d9_time_last_exit;
+   d3d9_time_last->after += gap;
+   if (gap > d3d9_time_last->after_longest)
+      d3d9_time_last->after_longest = gap;
+}
+
+static void
+D3D9TimesLeave(D3D9TimeStat *stat, const char *name, uint64_t start, uint64_t now)
+{
+   if (!stat->name) {
+      stat->name = name;
+      if (d3d9_time_count < ARRAYSIZE(d3d9_time_stats))
+         d3d9_time_stats[d3d9_time_count++] = stat;
+   }
+   stat->calls++;
+   stat->ticks += now - start;
+   if (now - start > stat->longest)
+      stat->longest = now - start;
+   d3d9_time_last = stat;
+   d3d9_time_last_exit = now;
+   if (!strcmp(name, "Present") && ++d3d9_time_frames == 256) {
+      D3D9TimesReport(now);
+      /* writing the report is not time after Present */
+      d3d9_time_last_exit = D3D9TimesNow();
+   }
 }
 
 /* Level 3: what a call was about. Any other argument says nothing. */
@@ -253,6 +410,15 @@ D3D9TraceWrap(HRESULT (APIENTRY *real)(Args...), const char *name)
    struct Thunk {
       static HRESULT APIENTRY call(Args... args)
       {
+         if (d3d9_times > 0 && D3D9TimesMine()) {
+            static D3D9TimeStat stat;
+            const uint64_t start = D3D9TimesNow();
+            D3D9TimesEnter(start);
+            HRESULT timed = s_real(args...);
+            D3D9TimesLeave(&stat, s_name, start, D3D9TimesNow());
+            D3D9TraceResult(s_name, timed);
+            return timed;
+         }
          if (d3d9_trace_level >= 3)
             (D3D9TraceBefore(args), ...);
          HRESULT hr = s_real(args...);
@@ -276,7 +442,7 @@ D3D9TraceWrap(HRESULT (APIENTRY *real)(Args...), const char *name)
 void
 D3D9TraceDeviceFuncs(D3DDDI_DEVICEFUNCS *funcs)
 {
-   if (D3D9TraceLevel() <= 0)
+   if (D3D9TraceLevel() <= 0 && !D3D9TimesOn())
       return;
 
    TRACE(pfnSetRenderState);
