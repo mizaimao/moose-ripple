@@ -32,9 +32,11 @@ static VP_STATUS query(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     caps->presents = gpu->presents;
     caps->presentReadbacks = gpu->presentReadbacks;
     caps->presentBytes = gpu->presentBytes;
-    /* Optional host textures and their primary-blit path use 32-bit pixels. */
+    /* The features switched on for this adapter. They use 32-bit pixels, so
+     * the display driver offers them only in its 32-bit modes: during a mode
+     * change it may ask before the miniport has set the new mode. */
     caps->gpuSurfaces = 0;
-    if (gpu->ddGpuSurfaces && gpu->primary.bitsPerPixel == 32) {
+    if (gpu->ddGpuSurfaces) {
         caps->gpuSurfaces = RB2K_DD_HOST_SURFACES;
         if (gpu->nativeD3D7)
             caps->gpuSurfaces |= RB2K_DD_NATIVE_D3D7 | RB2K_DD_Z16_STORAGE | RB2K_DD_Z16_RENDER;

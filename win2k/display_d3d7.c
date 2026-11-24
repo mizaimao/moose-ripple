@@ -1864,6 +1864,7 @@ ULONG rb_d7_drawstats(DISPLAY *d, ULONG bytes, PVOID out)
     EngAcquireSemaphore(registry);
     EngAcquireSemaphore(d->ddLock);
     d->d7draw.version = RB2K_D7_DRAWSTATS_VERSION;
+    RtlCopyMemory(d->d7draw.ddModes, rb_dd_mode_stats, sizeof(rb_dd_mode_stats));
     RtlCopyMemory(out, &d->d7draw, bytes);
     EngReleaseSemaphore(d->ddLock);
     EngReleaseSemaphore(registry);

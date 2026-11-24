@@ -240,6 +240,17 @@ static BOOL exercise(LPDIRECTDRAW dd, HWND window, const char *path, DWORD creat
     BOOL passed = FALSE, hardware = createFlags != DDCREATE_EMULATIONONLY;
     printf("Flip %s requested=%lux%lux%lu\n", path, width, height, bpp);
     if (!call("set mode", IDirectDraw_SetDisplayMode(dd, width, height, bpp))) return FALSE;
+    {
+        /* What DirectDraw's hardware layer offers in the new mode. */
+        DDCAPS hal, hel;
+        HRESULT hr;
+        ZeroMemory(&hal, sizeof(hal)); ZeroMemory(&hel, sizeof(hel));
+        hal.dwSize = hel.dwSize = sizeof(hal);
+        hr = IDirectDraw_GetCaps(dd, &hal, &hel);
+        printf("Flip caps hr=%08lX hal=%08lX hal_surfaces=%08lX hal_vidmem=%lu free=%lu hel=%08lX\n",
+               (DWORD)hr, hal.dwCaps, hal.ddsCaps.dwCaps, hal.dwVidMemTotal, hal.dwVidMemFree, hel.dwCaps);
+        fflush(stdout);
+    }
     ZeroMemory(&desc, sizeof(desc));
     desc.dwSize = sizeof(desc);
     desc.dwFlags = DDSD_CAPS | DDSD_BACKBUFFERCOUNT;

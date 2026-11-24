@@ -1438,3 +1438,24 @@ driver's own changes. On XP SP3 the native device ran 123.1 fps with the
 spent 5.3 s of 7.4 s in its `DrawPrimitives2` handler, the miniport about 0.85 s
 presenting and 1.4 s uploading textures; texture checks took 5 ms where
 they had taken 1 to 3.5 s. All pixel tests pass on both systems.
+
+### Page flipping at 8 and 16 bits with native Direct3D on
+
+With native Direct3D switched on, every full-screen DirectDraw flip chain
+at 8 or 16 bits failed with `DDERR_UNSUPPORTEDMODE` on both systems, and
+DirectDraw's software fallback then broke the test program. The flip
+probe now prints the capabilities DirectDraw reports after each mode
+change, and `d7draw` counts the display driver's DirectDraw setup per
+depth. The driver's setup succeeded in the lower depths, yet DirectDraw
+reported no hardware there (`DDCAPS_NOHARDWARE`). With native Direct3D
+off, the same build reported the usual blit and flip capabilities and
+every flip passed. The only difference was that the 32-bit desktop
+described a Direct3D HAL and the lower depths described none.
+
+Every depth now gives the same Direct3D description while native
+Direct3D is on. Below 32 bits it cannot be used: the device renders only
+to 32-bit targets, and textures and host surfaces are refused there. On
+Windows 2000 SP4 and XP SP3 the 8-bit and 16-bit hardware, software and
+default flip cases pass with native Direct3D on, including palette
+animation, and the Direct3D pixel tests still pass afterwards on the
+32-bit desktop.
