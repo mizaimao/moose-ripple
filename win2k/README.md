@@ -38,8 +38,10 @@ VGA and restored the saved desktop after full-screen DirectDraw programs.
   [Depth tests](../docs/win2k/development.md#native-16-bit-depth-rendering)
 - **Direct3D 8 and 9** programs use the same device through Microsoft's
   runtimes and the Direct3D 8 driver interface, on by default with native
-  Direct3D 7. Shaders are not offered yet; vertex shaders run in software.
-  [Driver interface notes](../docs/win2k/development.md#direct3d-8-driver-interface)
+  Direct3D 7. Pixel shaders 1.1 to 1.3 run on the host GPU; vertex shaders
+  run in software.
+  [Driver interface notes](../docs/win2k/development.md#direct3d-8-driver-interface) ·
+  [Pixel shader notes](../docs/win2k/development.md#direct3d-8-pixel-shaders)
 
 ## The virtual machine
 
@@ -181,8 +183,10 @@ Direct3D 8 test program uses the DirectX headers of the Windows 7 WDK. Set
   the expected colours. Use `ipixels.exe rgb` for Microsoft's software
   reference. `z16pixels.exe hal` and `z16pixels.exe rgb` check which
   pixels survive when two triangles overlap at different depths.
-- `d8pixels.exe` draws eight Direct3D 8 cases on the hardware device and
-  checks their pixels; `d8pixels.exe sw` uses software vertex processing.
+- `d8pixels.exe` draws eight Direct3D 8 fixed-function cases and eleven
+  pixel shaders on the hardware device and checks their pixels;
+  `d8pixels.exe sw` uses software vertex processing and `ps=N` runs one
+  pixel shader case alone.
   `d7draw.exe` also reports the Direct3D 8 interface requests and the
   first DirectX 8 commands.
 
