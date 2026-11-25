@@ -198,8 +198,9 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
                 data->ddRVal = DDERR_INVALIDPARAMS;
                 return rc;
             }
-            level->lPitch = (level->wWidth * rb_d7_texel_bytes(format) + 3) & ~3;
-            level->dwUserMemSize = level->lPitch * level->wHeight;
+            /* Compressed levels hold rows of 4x4 blocks. */
+            level->lPitch = (rb_d7_row_bytes(format, level->wWidth) + 3) & ~3;
+            level->dwUserMemSize = level->lPitch * rb_d7_rows(format, level->wHeight);
             level->fpVidMem = DDHAL_PLEASEALLOC_USERMEM;
         }
         desc->lPitch = g->lPitch;
@@ -758,7 +759,6 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     RB2K_DD_CAPS caps;
     VIDEOMEMORYINFO *v = &info->vmiData;
     ULONG pageBytes;
-    (void)fourCC;
     *heapCount = *fourCount = 0;
     ++mode_stats(d)[0];
     if (!d->ddLock || !d->mapping || !rb_dd_caps(d, &caps)) {
@@ -775,6 +775,13 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     /* Likewise the Direct3D 8 interface; its format list offers 3D only in
      * the 32-bit display format. */
     d->d3d8 = d->d3dDescribed && (caps.gpuSurfaces & RB2K_DD_D3D8) != 0;
+    if (d->d3d8) {
+        /* The DXT texture formats (display_d3d7.c decodes them). */
+        static const DWORD codes[] = { RbFmtDxt1, RbFmtDxt2, RbFmtDxt3, RbFmtDxt4, RbFmtDxt5 };
+        ULONG k;
+        *fourCount = sizeof(codes) / sizeof(codes[0]);
+        if (fourCC) for (k = 0; k < *fourCount; ++k) fourCC[k] = codes[k];
+    }
     d->vertexShaders = d->d3d8 && (caps.gpuSurfaces & RB2K_DD_VERTEX_SHADERS) != 0;
     if (d->mode.BitsPerPlane != 32) caps.gpuSurfaces = 0;
     RtlZeroMemory(info, sizeof(*info));

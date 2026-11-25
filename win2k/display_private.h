@@ -75,9 +75,15 @@ BOOL rb_d7_info(PDD_GETDRIVERINFODATA data);
 ULONG rb_d7_stats(DISPLAY *display, ULONG size, PVOID out);
 ULONG rb_d7_drawstats(DISPLAY *display, ULONG size, PVOID out);
 /* Direct3D texture formats, each converted to B8G8R8A8 for the host. */
-enum { TexNone, TexArgb8888, TexXrgb8888, TexRgb565, TexArgb1555, TexXrgb1555, TexArgb4444, TexFormats };
+/* Texture formats; the DXT ones are stored as 4x4 blocks (DXT2 and DXT4
+ * decode as DXT3 and DXT5). */
+enum { TexNone, TexArgb8888, TexXrgb8888, TexRgb565, TexArgb1555, TexXrgb1555, TexArgb4444, TexDxt1, TexDxt3,
+       TexDxt5, TexFormats };
 ULONG rb_d7_texture_format(const DDPIXELFORMAT *format, ULONG desktopBits);
 ULONG rb_d7_texel_bytes(ULONG format);
+/* A level's bytes per row (of texels, or of 4x4 blocks) and its rows. */
+ULONG rb_d7_row_bytes(ULONG format, ULONG width);
+ULONG rb_d7_rows(ULONG format, ULONG height);
 void rb_d7_texture_written(DISPLAY *d, PDD_SURFACE_GLOBAL g);
 extern ULONG rb_dd_mode_stats[3][4];
 void rb_d7_surface_destroyed(DISPLAY *display, PDD_SURFACE_GLOBAL surface);
