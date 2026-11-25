@@ -1995,3 +1995,21 @@ against 17 and 20 in two sessions with four). During loading the processors spen
 of the time handling the flush requests they send each other (`KiIpiInterrupt`: 0.07 of a
 processor against 0.25). One run each: an indication, not a figure, and the test VMs stay at
 four processors.
+
+### UTM's host could take DXT textures (2026-11-25)
+
+The decoder exists because the guest is offered no DXT formats in UTM. Neither ANGLE nor the
+GPU is the reason. `tools/win7-debug/angle-probe.c` loads the ANGLE libraries inside UTM
+(5.0.8, ANGLE 2.1.22612), makes an off-screen ES 3 context on the Metal backend as UTM's QEMU
+does, and on an Apple silicon Mac it lists `GL_EXT_texture_compression_dxt1`,
+`GL_ANGLE_texture_compression_dxt3`, `GL_ANGLE_texture_compression_dxt5` and
+`GL_EXT_texture_compression_s3tc_srgb`, and a DXT1, a DXT3 and a DXT5 upload are accepted.
+ANGLE's OpenGL backend gives the same list, so UTM's renderer setting changes nothing here.
+
+virglrenderer offers the DXT formats to the guest when the host lists `GL_S3_s3tc`,
+`GL_EXT_texture_compression_s3tc` or `GL_ANGLE_texture_compression_dxt` (`vrend_formats.c`;
+the same three names are in the library UTM ships). ANGLE lists none of them: its names end
+in `dxt1`, `dxt3` and `dxt5`. With that check widened the host would take the blocks as they
+are: nothing to decode on the emulated processor, and an eighth to a quarter of the bytes to
+write into new texture memory, which is most of what a loading frame still costs. Not tried:
+it needs a virglrenderer built for UTM.
