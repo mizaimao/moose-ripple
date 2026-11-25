@@ -15,6 +15,8 @@ typedef struct {
     HANDLE owner;
     ULONG id, width, height;
     BOOL locked, writable, lost, depth16;
+    BOOL stencil;               /* a depth buffer of 24 bits with 8 of stencil (depth16 set too) */
+    BOOL alpha;                 /* a render target whose format keeps alpha */
     PDD_DIRECTDRAW_LOCAL local;
     ULONG d3dHandle;
 } DD_SLOT;
@@ -53,6 +55,7 @@ typedef struct {
     BOOL d3dDescribed;          /* the Direct3D HAL description is given in every depth */
     BOOL nativeD3D7;
     BOOL z16Storage, z16Render;
+    BOOL z24s8;                 /* depth buffers with stencil */
     HRESULT (CALLBACK *parseD3DExtension)(PVOID command, PVOID *next);
     RB2K_D3D7_DIAGNOSTICS d7;
     RB2K_D7_DRAWSTATS d7draw;

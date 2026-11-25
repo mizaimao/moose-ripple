@@ -15,6 +15,7 @@
 #define RB2K_DD_PLAIN_SURFACES 16   /* plain 2D offscreen surfaces too */
 #define RB2K_DD_D3D8 32             /* the Direct3D 8 driver interface */
 #define RB2K_DD_VERTEX_SHADERS 64   /* vertex shaders on the host GPU */
+#define RB2K_DD_Z24S8 128           /* depth buffers of 24 bits with 8 of stencil */
 #define RB2K_DD_IOCTL(n) CTL_CODE(FILE_DEVICE_VIDEO,n,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_RB2K_DD_QUERY   RB2K_DD_IOCTL(0x901)
 #define IOCTL_RB2K_DD_CREATE  RB2K_DD_IOCTL(0x902)
@@ -35,6 +36,7 @@
 #define IOCTL_RB2K_D3D7_COMPLETED RB2K_DD_IOCTL(0x916)
 #define IOCTL_RB2K_D3D7_FLIGHT RB2K_DD_IOCTL(0x917)
 #define IOCTL_RB2K_DD_CREATE_Z16 RB2K_DD_IOCTL(0x918)
+#define IOCTL_RB2K_DD_CREATE_Z24S8 RB2K_DD_IOCTL(0x922)
 #define IOCTL_RB2K_D3D7_ZCLEAR RB2K_DD_IOCTL(0x919)
 #define IOCTL_RB2K_D3D7_DRAW RB2K_DD_IOCTL(0x91b)
 #define IOCTL_RB2K_D3D7_TEXTURE RB2K_DD_IOCTL(0x91c)
@@ -75,6 +77,7 @@ typedef struct { ULONG x, y, z, rhw, diffuse, specular, nx, ny, nz, tc[RB2K_D8_S
 typedef struct {
     ULONG target, depth, count;
     ULONG depthState, alphaTest, blend, cull;
+    ULONG stencil, stencilRef;      /* RB2K_STENCIL_ON etc.; reference, masks */
     ULONG program;
     ULONG coordSets;                /* 0..RB2K_D8_STAGES */
     ULONG textures[RB2K_D8_STAGES], samplers[RB2K_D8_STAGES], borders[RB2K_D8_STAGES];
@@ -123,12 +126,16 @@ typedef struct { ULONG x, y, z, rhw, diffuse, specular, u, v, nx, ny, nz, u1, v1
 #define RB2K_Z_ENABLE 16
 #define RB2K_Z_WRITE 8
 #define RB2K_D7_ON 0x80000000UL
+/* In a blend word: the render target keeps alpha, so destination alpha is
+ * its own (without it, Direct3D reads it as one). */
+#define RB2K_BLEND_DEST_ALPHA 0x10000UL
 typedef struct {
     ULONG target, depth, count;
     ULONG depthState;
     ULONG alphaTest;    /* RB2K_D7_ON | D3DCMPFUNC << 8 | reference */
     ULONG blend;        /* RB2K_D7_ON | source D3DBLEND << 8 | destination D3DBLEND */
     ULONG cull;         /* D3DCULL */
+    ULONG stencil, stencilRef;  /* see RB2K_STENCIL_ON */
     ULONG colorStage;   /* D3DTEXTUREOP | first argument << 8 | second argument << 16 */
     ULONG alphaStage;
     ULONG specular;     /* nonzero adds the interpolated specular colour */
@@ -170,8 +177,13 @@ typedef struct { ULONG id, target, width, height, y, rows, levels, level, format
 #define RB2K_D7_BLOCKS_DXT1 1
 #define RB2K_D7_BLOCKS_DXT3 2
 #define RB2K_D7_BLOCKS_DXT5 3
-typedef struct { ULONG target, depth, flags, color, depthBits; } RB2K_D3D7_ZCLEAR;
-enum { RB2K_CLEAR_COLOR = 1, RB2K_CLEAR_DEPTH = 2 };
+typedef struct { ULONG target, depth, flags, color, depthBits, stencil; } RB2K_D3D7_ZCLEAR;
+enum { RB2K_CLEAR_COLOR = 1, RB2K_CLEAR_DEPTH = 2, RB2K_CLEAR_STENCIL = 4 };
+/* Stencil state of a draw (both faces): RB2K_STENCIL_ON, the comparison
+ * (D3DCMP_* - 1) in bits 0-2 and the fail, depth-fail and pass operations
+ * (Gallium's PIPE_STENCIL_OP_*) in bits 4-6, 8-10 and 12-14; and the
+ * reference value, read mask and write mask in bytes 0, 1 and 2. */
+#define RB2K_STENCIL_ON 0x80000000UL
 typedef struct {
     ULONG maxBytes, slots;
     ULONG hostFills, readbacks, uploads, hostCopies;

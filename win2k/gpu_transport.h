@@ -28,6 +28,7 @@ typedef struct {
     ULONG psViews[RB2K_D8_STAGES];
     RB2K_D7_CACHE psSampler;
     RB2K_D7_CACHE vsProgram;            /* vertex programs by id */
+    ULONG stencilRef;                   /* the reference value sent, plus 0x100 once sent */
 } RB2K_D7_STATE;
 
 typedef struct RB2K_IMAGE {
@@ -36,6 +37,7 @@ typedef struct RB2K_IMAGE {
     ULONG color;
     BOOLEAN frameFailed;
     BOOLEAN depth16;
+    BOOLEAN stencil8;       /* a depth image of 24 bits with 8 of stencil (with depth16 set) */
     struct RB2K_IMAGE *depthBuffer, *depthOwner;
     RB2K_D7_STATE d7;
 } RB2K_IMAGE;
@@ -203,7 +205,7 @@ void rb_gpu_texture_forget(RB2K_GPU *gpu);
 BOOLEAN rb_gpu_prepare_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image);
 BOOLEAN rb_gpu_depth_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *color, RB2K_IMAGE *depth);
 BOOLEAN rb_gpu_clear_buffers(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image,
-                             ULONG flags, ULONG color, ULONG depthBits);
+                             ULONG flags, ULONG color, ULONG depthBits, ULONG stencil);
 BOOLEAN rb_gpu_sync_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image);
 BOOLEAN rb_gpu_order_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image);
 enum { RB2K_D7_COLOR_VIEW = 1, RB2K_D7_DEPTH_VIEW = 8 };

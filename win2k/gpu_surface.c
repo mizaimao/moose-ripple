@@ -42,7 +42,8 @@ static VP_STATUS query(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         if (gpu->plainSurfaces) caps->gpuSurfaces |= RB2K_DD_PLAIN_SURFACES;
         if (gpu->nativeD3D7)
             caps->gpuSurfaces |= RB2K_DD_NATIVE_D3D7 | RB2K_DD_Z16_STORAGE | RB2K_DD_Z16_RENDER |
-                                 (gpu->d3d8 ? RB2K_DD_D3D8 : 0) | (gpu->d3d8 && gpu->vertexShaders ? RB2K_DD_VERTEX_SHADERS : 0);
+                                 (gpu->d3d8 ? RB2K_DD_D3D8 : 0) | (gpu->d3d8 && gpu->vertexShaders ? RB2K_DD_VERTEX_SHADERS : 0) |
+                                 RB2K_DD_Z24S8;
     }
     packet->StatusBlock->Information = sizeof(*caps);
     return NO_ERROR;
@@ -56,7 +57,8 @@ static VP_STATUS create(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     RB2K_IMAGE *image;
     VP_STATUS status;
     ULONG slot;
-    BOOLEAN depth16 = packet->IoControlCode == IOCTL_RB2K_DD_CREATE_Z16;
+    BOOLEAN stencil8 = packet->IoControlCode == IOCTL_RB2K_DD_CREATE_Z24S8;
+    BOOLEAN depth16 = packet->IoControlCode == IOCTL_RB2K_DD_CREATE_Z16 || stencil8;
     if (packet->InputBufferLength != sizeof(*size) || packet->OutputBufferLength < sizeof(ULONG))
         return ERROR_INVALID_PARAMETER;
     if (gpu->primary.bitsPerPixel != 32 || (depth16 && (!gpu->nativeD3D7 || !gpu->ddGpuSurfaces)))
@@ -80,6 +82,7 @@ static VP_STATUS create(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     image->width = size->width;
     image->height = size->height;
     image->depth16 = depth16;
+    image->stencil8 = stencil8;
     if (!rb_gpu_create_image(gpu, &result, image, name, sizeof(name) - 1, FALSE)) {
         VideoPortZeroMemory(image, sizeof(*image));
         if (!gpu->ready || (!gpu->imageCount && !gpu->rvdContexts)) rb_gpu_stop(gpu);
@@ -176,12 +179,12 @@ static BOOLEAN draw_one(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *imag
     *status = ERROR_INVALID_PARAMETER;
     if (length < header || !d->count || d->count > RB2K_D3D7_VERTICES || d->count % 3 ||
         length != header + d->count*sizeof(d->vertices[0]) || d->target != image->id ||
-        !rb_gpu_d7_valid(d) || image->depth16 || (d->depthState && !d->depth))
+        !rb_gpu_d7_valid(d) || image->depth16 || ((d->depthState || d->stencil) && !d->depth))
         return FALSE;
     *status = ERROR_INVALID_HANDLE;
     if (d->depth) {
         depth = find_image(gpu, d->depth);
-        if (!depth || !depth->depth16) return FALSE;
+        if (!depth || !depth->depth16 || (d->stencil && !depth->stencil8)) return FALSE;
     }
     for (i = 0; i < 2; ++i) {
         ULONG j;
@@ -241,7 +244,7 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
     }
     if (!gpu->d3d8 || length < header || !d->count || d->count > RB2K_D8_VERTICES || d->count % 3 || !words ||
         length != header + words * sizeof(ULONG) || d->target != image->id ||
-        !rb_gpu_d8_valid(d) || image->depth16 || (d->depthState && !d->depth))
+        !rb_gpu_d8_valid(d) || image->depth16 || ((d->depthState || d->stencil) && !d->depth))
         return refuse(gpu, RB2K_D7_SITE_RECORD, *status, 0);
     *status = ERROR_INVALID_HANDLE;
     for (program = 0; program < RB2K_D8_PROGRAMS && (!d->program || gpu->programs[program].id != d->program); ++program) {}
@@ -254,7 +257,7 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
     }
     if (d->depth) {
         depth = find_image(gpu, d->depth);
-        if (!depth || !depth->depth16) return refuse(gpu, RB2K_D7_SITE_DEPTH, *status, 0);
+        if (!depth || !depth->depth16 || (d->stencil && !depth->stencil8)) return refuse(gpu, RB2K_D7_SITE_DEPTH, *status, 0);
     }
     for (i = 0; i < RB2K_D8_STAGES; ++i) {
         ULONG j;
@@ -331,6 +334,8 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     id = *(PULONG)packet->InputBuffer;
     image = find_image(gpu, id);
     if (!image) return ERROR_INVALID_HANDLE;
+    /* Depth with stencil is never read or written by the processor. */
+    if (image->stencil8 && packet->IoControlCode != IOCTL_RB2K_DD_DESTROY) return ERROR_NOT_SUPPORTED;
     if (image->depth16 && packet->IoControlCode != IOCTL_RB2K_DD_READ &&
         packet->IoControlCode != IOCTL_RB2K_DD_WRITE &&
         packet->IoControlCode != IOCTL_RB2K_DD_DESTROY)
@@ -405,13 +410,13 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         RB2K_IMAGE *depth;
         if (!gpu->nativeD3D7 || !gpu->ddGpuSurfaces) return ERROR_NOT_SUPPORTED;
         if (packet->OutputBufferLength || packet->InputBufferLength != sizeof(*z) ||
-            !z->flags || (z->flags & ~(RB2K_CLEAR_COLOR|RB2K_CLEAR_DEPTH)) ||
+            !z->flags || (z->flags & ~(RB2K_CLEAR_COLOR|RB2K_CLEAR_DEPTH|RB2K_CLEAR_STENCIL)) ||
             ((z->flags & RB2K_CLEAR_DEPTH) && z->depthBits > 0x3f800000 && z->depthBits != 0x80000000))
             return ERROR_INVALID_PARAMETER;
         depth = find_image(gpu, z->depth);
         if (!depth || !depth->depth16) return ERROR_INVALID_HANDLE;
         if (!rb_gpu_depth_target(gpu, &result, image, depth)) return command_error(gpu, &result);
-        success = rb_gpu_clear_buffers(gpu, &result, image, z->flags, z->color, z->depthBits);
+        success = rb_gpu_clear_buffers(gpu, &result, image, z->flags, z->color, z->depthBits, z->stencil);
         if (success) ++gpu->d7Frame.pending.clears;
         break;
     }
@@ -645,7 +650,8 @@ VP_STATUS rb_gpu_surface_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     }
     else if (packet->IoControlCode == IOCTL_RB2K_DD_QUERY) status = query(gpu, packet);
     else if (packet->IoControlCode == IOCTL_RB2K_DD_CREATE ||
-             packet->IoControlCode == IOCTL_RB2K_DD_CREATE_Z16) status = create(gpu, packet);
+             packet->IoControlCode == IOCTL_RB2K_DD_CREATE_Z16 ||
+             packet->IoControlCode == IOCTL_RB2K_DD_CREATE_Z24S8) status = create(gpu, packet);
     else {
         ULONG op = RB2K_D7_OPS;
         LONGLONG start = 0;
