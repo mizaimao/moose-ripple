@@ -1005,6 +1005,75 @@ static void vertex_shaders(int only)
     }
 }
 
+/* ---- compressed textures ---- */
+
+/* A managed texture of the given format from raw blocks. */
+static IDirect3DTexture9 *block_texture(D3DFORMAT format, UINT side, const void *blocks, UINT bytes)
+{
+    IDirect3DTexture9 *t = NULL;
+    D3DLOCKED_RECT r;
+    UINT rowBytes = bytes / ((side + 3) / 4), y;
+    if (FAILED(IDirect3DDevice9_CreateTexture(device, side, side, 1, 0, format, D3DPOOL_MANAGED, &t, NULL))) return NULL;
+    if (SUCCEEDED(IDirect3DTexture9_LockRect(t, 0, &r, NULL, 0))) {
+        for (y = 0; y < (side + 3) / 4; ++y) memcpy((BYTE *)r.pBits + y * r.Pitch, (const BYTE *)blocks + y * rowBytes, rowBytes);
+        IDirect3DTexture9_UnlockRect(t, 0);
+    }
+    return t;
+}
+
+static void textured_quad(const char *name, IDirect3DTexture9 *t, DWORD arg, const SAMPLE *s, int samples)
+{
+    TLTEXVERTEX v[6];
+    const float xs[6] = { 32, 96, 32, 32, 96, 96 }, ys[6] = { 32, 32, 96, 96, 32, 96 };
+    HRESULT hr;
+    int i;
+    for (i = 0; i < 6; ++i) {
+        v[i].x = xs[i]; v[i].y = ys[i]; v[i].z = 0.5f; v[i].rhw = 1; v[i].diffuse = 0xffffffff;
+        v[i].u = xs[i] == 32 ? 0.0f : 1.0f; v[i].v = ys[i] == 32 ? 0.0f : 1.0f;
+    }
+    if (!t) { fail_hr(name, "texture", E_FAIL); return; }
+    if (!begin(name)) return;
+    IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)t);
+    IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+    IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+    IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, arg);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
+    IDirect3DDevice9_SetFVF(device, TLTEXFVF);
+    hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+    IDirect3DDevice9_SetTexture(device, 0, NULL);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    if (FAILED(hr)) { fail_hr(name, "draw", hr); IDirect3DDevice9_EndScene(device); }
+    else check(name, s, samples);
+    IDirect3DTexture9_Release(t);
+}
+
+/* DXT1: four 4x4 blocks of red, green, blue, and the colour a third of the
+ * way from red to blue; DXT3 and DXT5: one block whose alpha shows as grey
+ * (8/15 of full, and the second of six steps from 200 to 40). */
+static void case_dxt(void)
+{
+    static const BYTE dxt1[32] = {
+        0x00, 0xf8, 0x00, 0xf8, 0, 0, 0, 0,  0xe0, 0x07, 0xe0, 0x07, 0, 0, 0, 0,
+        0x1f, 0x00, 0x1f, 0x00, 0, 0, 0, 0,  0x00, 0xf8, 0x1f, 0x00, 0xaa, 0xaa, 0xaa, 0xaa };
+    static const BYTE dxt3[16] = { 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0 };
+    static const BYTE dxt5[16] = { 200, 40, 0x92, 0x24, 0x49, 0x92, 0x24, 0x49, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0 };
+    static const SAMPLE s1[] = { { 48, 48, 0xff0000 }, { 80, 48, 0x00ff00 }, { 48, 80, 0x0000ff }, { 80, 80, 0xaa0055 },
+                                 { 8, 8, CLEAR_COLOR } };
+    static const SAMPLE s3[] = { { 64, 64, 0x888888 }, { 8, 8, CLEAR_COLOR } };
+    static const SAMPLE s5[] = { { 64, 64, 0xb1b1b1 }, { 8, 8, CLEAR_COLOR } };
+    if (FAILED(IDirect3D9_CheckDeviceFormat(d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, D3DFMT_X8R8G8B8, 0, D3DRTYPE_TEXTURE, D3DFMT_DXT1))) {
+        printf("D9PIX DXT textures not offered\n");
+        return;
+    }
+    textured_quad("dxt1", block_texture(D3DFMT_DXT1, 8, dxt1, sizeof(dxt1)), D3DTA_TEXTURE, s1, 5);
+    textured_quad("dxt3_alpha", block_texture(D3DFMT_DXT3, 4, dxt3, sizeof(dxt3)), D3DTA_TEXTURE | D3DTA_ALPHAREPLICATE, s3, 2);
+    textured_quad("dxt5_alpha", block_texture(D3DFMT_DXT5, 4, dxt5, sizeof(dxt5)), D3DTA_TEXTURE | D3DTA_ALPHAREPLICATE, s5, 2);
+}
+
 int main(int argc, char **argv)
 {
     IDirect3D9 *(WINAPI *create)(UINT);
@@ -1083,6 +1152,7 @@ int main(int argc, char **argv)
         indexed("base", 3, 0xff8000);
         case_texture();
         case_transform();
+        case_dxt();
     }
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 2) && (!only || only < 30))
         pixel_shaders(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
