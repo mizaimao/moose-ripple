@@ -956,3 +956,53 @@ Dock:
 
 So a covered window now costs this game nothing. Picture looked at: the game under the Dock
 with the Dock drawn over it.
+
+### UTM: what limits the frame rate (2026-11-25, issue 109)
+
+The Mac OS X part of issue 109's measurement: UTM 5 on an M1 Max, the guest with four emulated
+CPUs (multi-threaded translation), release 0.2.2 installed, 1280x800. Sampled on the host over
+60 s: CPU time of each QEMU thread (`ps -M`, the difference of two readings) and the GPU's
+`Device Utilization %` (`ioreg -c IOAccelerator`, every 5 s).
+
+| | guest frames/s | host GPU busy | QEMU, all threads | the four CPU threads | QEMU's main thread |
+|---|---|---|---|---|---|
+| idle desktop | | 0-1% | 25% of a core | 4-6% each | 7% |
+| gl-gears 1280x720 | 56.8 | 15-19% | 55% | 11-13% each | 5% |
+| OpenArena timedemo, 1024x768 | 14.9 (141 on the KVM host) | 5-7% | 108% | 23-27% each | 5% |
+
+gl-gears is no load test: it draws on a 60 Hz timer and reaches it. The timedemo is: it runs
+as fast as it can, and the four CPU threads together use one core's worth, which is one guest
+thread kept busy and moved between the guest's CPUs. The host's side of the renderer (QEMU's
+main thread) and the GPU are nearly idle. So of the issue's three candidates it is the first,
+the emulated CPU: a frame takes 67 ms of guest time where the KVM host needs 7.
+
+Where those 67 ms go, from a 10 s `sample` of the game in the guest (3485 samples of its main
+thread): 30% in the swap, nearly all of that blocked in a kernel call, waiting for the host;
+10% in the driver's draw path; the rest in the game's own code (its vertex maths, emulated).
+So the third candidate, waiting on round trips, is about a third of a frame here, and it is
+the part a driver can change. Release 0.2.2 does not have the fix for the wait on QEMU's
+10 ms fence timer (above, "The slow wait, found"), which is the likely cause.
+
+The same run with the drivers of this day in the guest (the kext that prods QEMU while it
+waits, the flush thread for covered windows, the texture cache, the corrected sampler binds):
+
+| OpenArena timedemo in UTM | release 0.2.2 | today's drivers |
+|---|---|---|
+| frames/s | 14.9 | 22.9 (22.2 in the run that was profiled) |
+| frame times, shortest / mean / longest | 37 / 66.9 / 240 ms | 18 / 43.7 / 214 ms |
+| the game's main thread: share in the swap | 30% | 4% |
+| ...in the driver's draw calls | 10% | 16% |
+| host GPU busy | 5-7% | 6-11% |
+| QEMU, all threads; the four CPU threads | 108%; 23-27% each | 145%; 31-36% each |
+
+The wait in the swap is gone and the game is half as fast again. Its window reaches under the
+Dock in both runs, so the flush thread has a part in that next to the kext's shorter wait.
+What is left on the game's thread is its own drawing code (three quarters of the samples) and
+kernel calls inside the frame (a fifth, in `mach_msg_trap`): the emulated CPU is the limit
+now, and queued submits are the next thing to try there.
+
+A trap met on the way: a UTM guest that is restarted while it is still rebuilding its kext
+caches hangs in the boot loader at Extensions.mkext. After installing kexts there, wait until
+`ps ax | grep [k]extcache` prints nothing. The guest was repaired from a second guest (its disk
+attached over QMP as a USB disk, `kextcache -u` on it), as docs/install.md describes for a new
+disk.
