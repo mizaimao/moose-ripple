@@ -10,6 +10,7 @@
  */
 #include <dlfcn.h>
 #include <mach/mach_time.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -397,14 +398,88 @@ gld_window_direct_surface(const struct gld_window *w)
 }
 
 /* The kernel has a new frame of the window but did not put it on the screen: WindowServer
- * draws the window itself at the moment and redraws it for a surface flush. */
+ * draws the window itself at the moment (something is drawn over it, it is moving, Exposé)
+ * and redraws it for a surface flush. The flush returns when WindowServer has done that, 3 to
+ * 7 ms later, and the program used to wait for it at every swap (OpenArena's timedemo with its
+ * window reaching under the Dock: 100.8 frames/s, against 140.8 with the Dock hidden).
+ *
+ * A thread of its own makes the call now. The program waits only while the flush for its
+ * previous frame is still on its way, so it draws its next frame during WindowServer's redraw
+ * and is never more than one frame ahead of what WindowServer was told. The frame itself is
+ * already in WindowServer's texture of the surface (the kernel copied it at the present).
+ * RIPPLE_GL_FLUSH_THREAD=0 in the environment or the file
+ * /Library/Logs/RippleGL/no-flush-thread bring the call back onto the program's thread. */
+static pthread_mutex_t flush_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t flush_wake = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t flush_done = PTHREAD_COND_INITIALIZER;
+static struct { uint32_t cid, wid, sid; bool vsync; } flush_job;
+static bool flush_queued, flush_busy, flush_thread_up;
+
+static void *
+flush_main(void *arg)
+{
+   (void)arg;
+   pthread_mutex_lock(&flush_lock);
+   for (;;) {
+      while (!flush_queued)
+         pthread_cond_wait(&flush_wake, &flush_lock);
+      uint32_t cid = flush_job.cid, wid = flush_job.wid, sid = flush_job.sid;
+      bool vsync = flush_job.vsync;
+      flush_queued = false;
+      flush_busy = true;
+      pthread_mutex_unlock(&flush_lock);
+      cgs.FlushSurfaceWithOptions(cid, wid, sid, NULL, vsync);
+      pthread_mutex_lock(&flush_lock);
+      flush_busy = false;
+      pthread_cond_broadcast(&flush_done);
+   }
+   return NULL;
+}
+
+static bool
+flush_thread_wanted(void)
+{
+   static int wanted = -1;
+   if (wanted < 0) {
+      const char *env = getenv("RIPPLE_GL_FLUSH_THREAD");
+      wanted = !(env && !strcmp(env, "0")) &&
+               access("/Library/Logs/RippleGL/no-flush-thread", F_OK) != 0;
+   }
+   return wanted;
+}
+
 void
 gld_window_direct_flush(void *data)
 {
    struct gld_window *w = data;
 
-   if (w && w->direct)
-      cgs.FlushSurfaceWithOptions(w->cid, w->wid, w->sid, NULL, w->vsync);
+   if (!w || !w->direct)
+      return;
+   if (flush_thread_wanted()) {
+      pthread_mutex_lock(&flush_lock);
+      if (!flush_thread_up) {
+         pthread_t thread;
+         pthread_attr_t attr;
+         pthread_attr_init(&attr);
+         pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+         flush_thread_up = pthread_create(&thread, &attr, flush_main, NULL) == 0;
+         pthread_attr_destroy(&attr);
+      }
+      if (flush_thread_up) {
+         while (flush_queued || flush_busy)
+            pthread_cond_wait(&flush_done, &flush_lock);
+         flush_job.cid = w->cid;
+         flush_job.wid = w->wid;
+         flush_job.sid = w->sid;
+         flush_job.vsync = w->vsync;
+         flush_queued = true;
+         pthread_cond_signal(&flush_wake);
+         pthread_mutex_unlock(&flush_lock);
+         return;
+      }
+      pthread_mutex_unlock(&flush_lock);
+   }
+   cgs.FlushSurfaceWithOptions(w->cid, w->wid, w->sid, NULL, w->vsync);
 }
 
 void
