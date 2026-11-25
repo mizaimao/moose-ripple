@@ -95,6 +95,7 @@ int main(void)
         for (k = 0; k < words && k < 42; ++k) printf("%s%lx", k ? "," : "", s.psLog[i][2 + k]);
         printf("\n");
     }
+    printf("D8BLOCKS uploads=%lu last_status=%lu upload_failures=%lu\n", s.blockUploads, s.blockStatus, s.uploadFailures);
     printf("D8STATESET begin=%lu end=%lu delete=%lu execute=%lu capture=%lu create=%lu other=%lu failures=%lu\n",
            s.stateSets[0], s.stateSets[1], s.stateSets[2], s.stateSets[3], s.stateSets[4], s.stateSets[5], s.stateSets[6],
            s.blockFailures);

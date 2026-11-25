@@ -938,6 +938,53 @@ static BOOL decode_texture(const D7_TEXTURE *t)
     return TRUE;
 }
 
+/* Set once the miniport answers that the host cannot sample DXT blocks. */
+static BOOL hostBlocksRefused;
+
+/* A compressed texture's blocks as they are, level by level in whole block
+ * rows. FALSE when they could not be sent; hostBlocksRefused tells a host
+ * without the format from other failures. */
+static BOOL upload_blocks(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
+{
+    RB2K_D3D7_TEXTURE *packet = (RB2K_D3D7_TEXTURE *)uploadScratch;
+    const BYTE *src = texelScratch;
+    ULONG id = t->host, level, total = 0, written, status;
+    ULONG format = t->format == TexDxt1 ? RB2K_D7_BLOCKS_DXT1 : t->format == TexDxt3 ? RB2K_D7_BLOCKS_DXT3 :
+                   RB2K_D7_BLOCKS_DXT5;
+    for (level = 0; level < t->levels; ++level) {
+        ULONG width = level_side(t->width, level), height = level_side(t->height, level);
+        ULONG rowBytes = rb_d7_row_bytes(t->format, width), blockRows = rb_d7_rows(t->format, height);
+        ULONG chunk = RB2K_D7_UPLOAD_BYTES / rowBytes, by;
+        for (by = 0; by < blockRows; by += chunk) {
+            ULONG rows = min(chunk, blockRows - by), newId = 0;
+            RtlCopyMemory(packet + 1, src, rows * rowBytes);
+            src += rows * rowBytes;
+            packet->id = level || by ? id : t->host;
+            packet->target = targetId;
+            packet->width = t->width;
+            packet->height = t->height;
+            packet->y = by * 4;
+            packet->rows = min(rows * 4, height - by * 4);
+            packet->levels = t->levels;
+            packet->level = level;
+            packet->format = format;
+            status = miniport(d, IOCTL_RB2K_D3D7_TEXTURE, packet, sizeof(*packet) + rows * rowBytes, &newId,
+                              sizeof(newId), &written);
+            if (status) d->d7draw.blockStatus = status;
+            if (status || written != sizeof(newId)) return FALSE;
+            if (!newId) { hostBlocksRefused = TRUE; return FALSE; }   /* the host cannot sample these */
+            id = newId;
+            total += rows * rowBytes;
+        }
+    }
+    if (t->host != id) RtlZeroMemory(t->targets, sizeof(t->targets));
+    t->host = id;
+    ++d->d7draw.uploads;
+    ++d->d7draw.blockUploads;
+    d->d7draw.uploadBytes += total;
+    return TRUE;
+}
+
 static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
 {
     RB2K_D3D7_TEXTURE *packet = (RB2K_D3D7_TEXTURE *)uploadScratch;
@@ -945,6 +992,14 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
     ULONG *out = (ULONG *)(packet + 1);
     const BYTE *texels = texelScratch;
     if (!packet || t->width * 4 > RB2K_D7_UPLOAD_BYTES) return FALSE;
+    if (compressed(format) && !hostBlocksRefused) {
+        /* The host decodes them when it can: a reset releases the texture
+         * like any other, so try once more with a new one. */
+        if (upload_blocks(d, t, targetId)) return TRUE;
+        if (!hostBlocksRefused && t->host) { t->host = 0; if (upload_blocks(d, t, targetId)) return TRUE; }
+        if (!hostBlocksRefused) { ++d->d7draw.uploadFailures; return FALSE; }
+        t->host = 0;
+    }
     if (compressed(format)) {
         /* Decoded here: the host gets the texels as ARGB. */
         if (!decode_texture(t)) return FALSE;
@@ -974,6 +1029,7 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
                 packet->rows = rows;
                 packet->levels = t->levels;
                 packet->level = level;
+                packet->format = 0;
                 ok = request(d, IOCTL_RB2K_D3D7_TEXTURE, packet, sizeof(*packet) + rows * width * 4,
                              &newId, sizeof(newId));
                 if (ok) id = newId;

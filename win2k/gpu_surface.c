@@ -8,6 +8,7 @@
 #include <video.h>
 #include "gpu_transport.h"
 #include "gpu_memory.h"
+#include <virgl_hw.h>
 
 static VP_STATUS query(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 {
@@ -520,6 +521,9 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 
 /* Create a Direct3D texture or replace rows of one, attached to the target
  * that will sample it. Texture ids share the image counter. */
+/* Host formats of the upload formats of RB2K_D3D7_TEXTURE. */
+static const ULONG block_formats[4] = { 0, VIRGL_FORMAT_DXT1_RGBA, VIRGL_FORMAT_DXT3_RGBA, VIRGL_FORMAT_DXT5_RGBA };
+
 static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 {
     RB2K_GPU_RESULT result;
@@ -542,12 +546,22 @@ static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         !in->levels || in->levels > RB2K_D7_LEVELS || in->level >= in->levels ||
         ((in->width | in->height) >> (in->levels - 1)) == 0)
         return ERROR_INVALID_PARAMETER;
+    if (in->format > RB2K_D7_BLOCKS_DXT5) return ERROR_INVALID_PARAMETER;
+    /* Blocks as they are only where the host samples them; otherwise the
+     * answer is texture id zero (the video port reports every failure alike). */
+    if (in->format && (!gpu->hostDxt || !((rb_gpu_host_blocks(gpu) >> in->format) & 1))) {
+        *(PULONG)packet->OutputBuffer = 0;
+        packet->StatusBlock->Information = sizeof(ULONG);
+        return NO_ERROR;
+    }
     {
         /* Rows of one level, each level half the one above, at least one. */
         ULONG width = in->width >> in->level ? in->width >> in->level : 1;
         ULONG height = in->height >> in->level ? in->height >> in->level : 1;
-        if (!in->rows || in->y >= height || in->rows > height - in->y) return ERROR_INVALID_PARAMETER;
-        bytes = width * in->rows * sizeof(ULONG);
+        if (!in->rows || in->y >= height || in->rows > height - in->y || (in->format && in->y % 4))
+            return ERROR_INVALID_PARAMETER;
+        bytes = in->format ? (width + 3) / 4 * (in->format == RB2K_D7_BLOCKS_DXT1 ? 8 : 16) * ((in->rows + 3) / 4) :
+                width * in->rows * sizeof(ULONG);
     }
     if (bytes > RB2K_D7_UPLOAD_BYTES || packet->InputBufferLength != sizeof(*in) + bytes)
         return ERROR_INVALID_PARAMETER;
@@ -557,11 +571,13 @@ static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     if (in->id) {
         t = rb_gpu_texture(gpu, in->id);
         if (!t) return ERROR_INVALID_HANDLE;
-        if (t->width != in->width || t->height != in->height || t->levels != in->levels)
+        if (t->width != in->width || t->height != in->height || t->levels != in->levels ||
+            t->format != block_formats[in->format])
             return ERROR_INVALID_PARAMETER;
     } else {
         /* Levels below the top add up to under a third of it. */
-        ULONG i, size = in->width * in->height * sizeof(ULONG);
+        ULONG i, size = in->format ? (in->width + 3) / 4 * ((in->height + 3) / 4) * (in->format == RB2K_D7_BLOCKS_DXT1 ? 8 : 16) :
+                        in->width * in->height * sizeof(ULONG);
         if (in->levels > 1) size += size / 3 + 4 * sizeof(ULONG);
         if (in->y || in->level) return ERROR_INVALID_PARAMETER;
         if (gpu->nextId == 0xffffffffUL) return ERROR_NO_MORE_ITEMS;
@@ -574,6 +590,7 @@ static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         t->height = in->height;
         t->levels = in->levels;
         t->bytes = size;
+        t->format = block_formats[in->format];
         if (!rb_gpu_texture_create(gpu, &result, t)) {
             VideoPortZeroMemory(t, sizeof(*t));
             return command_error(gpu, &result);

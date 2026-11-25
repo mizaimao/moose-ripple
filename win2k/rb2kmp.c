@@ -135,12 +135,14 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
     rb_gpu_find(&a->gpu, a, slot, registers, config);
     a->gpu.nativeD3D7 = TRUE;
     a->gpu.d3d8 = TRUE;
+    a->gpu.hostDxt = TRUE;
     VideoPortGetRegistryParameters(a, L"RippleDirectDrawGpuSurfaces", FALSE, registry_flag, &a->gpu.plainSurfaces);
     VideoPortGetRegistryParameters(a, L"RippleGpuDesktop", FALSE, registry_flag, &a->gpu.glEnabled);
     VideoPortGetRegistryParameters(a, L"RippleHardwareCursor", FALSE, registry_flag, &a->gpu.cursorEnabled);
     VideoPortGetRegistryParameters(a, L"RippleNativeD3D7", FALSE, registry_flag, &a->gpu.nativeD3D7);
     VideoPortGetRegistryParameters(a, L"RippleD3D7WaitCurrent", FALSE, registry_flag, &a->gpu.d7WaitCurrent);
     VideoPortGetRegistryParameters(a, L"RippleD3D8", FALSE, registry_flag, &a->gpu.d3d8);
+    VideoPortGetRegistryParameters(a, L"RippleHostDxt", FALSE, registry_flag, &a->gpu.hostDxt);
     VideoPortGetRegistryParameters(a, L"RippleVertexShaders", FALSE, registry_flag, &a->gpu.vertexShaders);
     a->gpu.ddGpuSurfaces = a->gpu.plainSurfaces || a->gpu.nativeD3D7;
     /* Map the scanout pages during adapter discovery, cached like every other
