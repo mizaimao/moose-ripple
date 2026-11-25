@@ -291,6 +291,12 @@ ULONG rb_d7_texture_format(const DDPIXELFORMAT *f, ULONG desktopBits)
         }
         return TexNone;
     }
+    /* Luminance and alpha-only formats, as the runtime describes L8, A8L8 and A8
+     * (the bit count and masks share their places with the RGB ones). */
+    if (f->dwFlags == 0x00020000 && f->dwRGBBitCount == 8 && f->dwRBitMask == 0xff) return TexL8;   /* DDPF_LUMINANCE */
+    if (f->dwFlags == (0x00020000 | DDPF_ALPHAPIXELS) && f->dwRGBBitCount == 16 && f->dwRBitMask == 0xff &&
+        f->dwRGBAlphaBitMask == 0xff00) return TexA8L8;
+    if (f->dwFlags == 0x00000002 && f->dwRGBBitCount == 8) return TexA8;   /* DDPF_ALPHA */
     if (!(f->dwFlags & DDPF_RGB) || !f->dwRGBBitCount) return desktopBits == 32 ? TexXrgb8888 : TexNone;
     if (f->dwFlags & ~(DDPF_RGB | DDPF_ALPHAPIXELS)) return TexNone;
     if (f->dwRGBBitCount == 32 && f->dwRBitMask == 0xff0000 && f->dwGBitMask == 0xff00 &&
@@ -415,6 +421,7 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
             slot->local = local;
             slot->d3dHandle = handle;
             ++d->d7draw.targetTextures;
+            ++d->d7draw.textures;
             return;
         }
     }
