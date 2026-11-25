@@ -48,7 +48,10 @@ static CGLContextObj make_context(CGLPixelFormatAttribute renderer, CGLPixelForm
 /* Compare two RGBA8 buffers: max channel difference and pixels off by more than 16. */
 static void compare(const uint8_t *a, const uint8_t *b, int *maxd, double *off)
 {
-    int m = 0, bad = 0;
+    /* CI_EFFECTS_WHERE=1: where the pixels off by more than 16 are (count, bounding box, the
+     * first few with both values), to tell a stray edge from a wrong picture. */
+    bool where = getenv("CI_EFFECTS_WHERE") != NULL;
+    int m = 0, bad = 0, x0 = W, y0 = H, x1 = -1, y1 = -1;
     for (int i = 0; i < W * H; i++) {
         int worst = 0;
         for (int c = 0; c < 4; c++) {
@@ -58,9 +61,21 @@ static void compare(const uint8_t *a, const uint8_t *b, int *maxd, double *off)
         }
         if (worst > m)
             m = worst;
-        if (worst > 16)
+        if (worst > 16) {
+            int x = i % W, y = i / W;
+            if (where && bad < 4)
+                printf("    off at %d,%d (row 0 on top): ours %02x%02x%02x%02x, reference "
+                       "%02x%02x%02x%02x\n", x, y, a[i * 4], a[i * 4 + 1], a[i * 4 + 2],
+                       a[i * 4 + 3], b[i * 4], b[i * 4 + 1], b[i * 4 + 2], b[i * 4 + 3]);
+            x0 = x < x0 ? x : x0;
+            y0 = y < y0 ? y : y0;
+            x1 = x > x1 ? x : x1;
+            y1 = y > y1 ? y : y1;
             bad++;
+        }
     }
+    if (where && bad)
+        printf("    %d pixels off, within %d,%d to %d,%d\n", bad, x0, y0, x1, y1);
     *maxd = m;
     *off = 100.0 * bad / (W * H);
 }

@@ -63,6 +63,8 @@
 #define RIPPLE_PREFIX_BYTES     (sizeof(struct ripple_gpu_submit) + RIPPLE_MAX_HANDLES * 4)
 
 #define CACHE_TIMEOUT_USEC      1000000
+/* Most texture memory the cache may hold on the host (4 bytes a texel, counted roughly). */
+#define CACHE_TEXTURE_BYTES     (64u << 20)
 
 static unsigned work_count;       /* submits and uploads so far (ripple_virgl_work_count) */
 
@@ -77,6 +79,7 @@ struct ripple_winsys {
 
    struct virgl_resource_cache cache;
    simple_mtx_t cache_mutex;
+   uint64_t cached_texture_bytes;      /* textures in the cache now (under cache_mutex) */
 
    simple_mtx_t fence_mutex;
    uint64_t signalled;                 /* every fence up to this one has signalled */
@@ -89,6 +92,8 @@ struct virgl_hw_res {
    uint32_t res_handle;                /* the ripple buffer handle = virgl resource id */
    uint32_t bind;
    uint32_t size;                      /* as requested */
+   uint32_t texture_bytes;             /* a texture's share of CACHE_TEXTURE_BYTES; 0: a buffer */
+   bool external;                      /* its handle went to the kernel: never cached */
    void *ptr;                          /* mapping, made on first use */
    uint64_t fence;                     /* last fence that used it */
    int num_cs_references;
@@ -237,8 +242,32 @@ static int ripple_fence_get_fd(struct virgl_winsys *vws, struct pipe_fence_handl
 
 /* ---- Resources ----------------------------------------------------------------------- */
 
+/* Textures are cached like the buffers (the DRM winsys leaves them out): Core Image makes a
+ * texture of the same size for every pass of every render and deletes it again, and each
+ * BUFFER_CREATE and BUFFER_DESTROY is a round trip to the host. A cached texture keeps its
+ * old picture, which is as undefined as a new texture's. Two limits: a texture whose handle
+ * the frontend gave to the kernel (a window's or the display's frame) is destroyed at once,
+ * since the kernel may still show it; and the cache holds at most CACHE_TEXTURE_BYTES of
+ * textures, destroying the ones that have waited longest to make room.
+ * RIPPLE_GL_TEXCACHE=0 in the environment or the file /Library/Logs/RippleGL/no-texcache
+ * bring the old behaviour back for a comparison. */
+#define TEXTURE_BINDS (VIRGL_BIND_SAMPLER_VIEW | VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_DEPTH_STENCIL)
+
+static bool texture_cache_wanted(void)
+{
+   static int wanted = -1;
+   if (wanted < 0) {
+      const char *env = getenv("RIPPLE_GL_TEXCACHE");
+      wanted = !(env && !strcmp(env, "0")) &&
+               access("/Library/Logs/RippleGL/no-texcache", F_OK) != 0;
+   }
+   return wanted;
+}
+
 static inline bool can_cache_resource(uint32_t bind)
 {
+   if (bind & VIRGL_BIND_SAMPLER_VIEW)
+      return !(bind & ~TEXTURE_BINDS) && texture_cache_wanted();
    return bind == VIRGL_BIND_CONSTANT_BUFFER ||
           bind == VIRGL_BIND_INDEX_BUFFER ||
           bind == VIRGL_BIND_VERTEX_BUFFER ||
@@ -263,8 +292,9 @@ static FILE *res_log(void)
 static void ripple_hw_res_destroy(struct ripple_winsys *ws, struct virgl_hw_res *res)
 {
    if (res_log())
-      fprintf(res_log(), "RippleGLDriver: buffer %u destroyed (cs references %d)\n",
-              res->res_handle, p_atomic_read(&res->num_cs_references));
+      fprintf(res_log(), "RippleGLDriver: buffer %u destroyed (cs references %d%s)\n",
+              res->res_handle, p_atomic_read(&res->num_cs_references),
+              res->external ? ", the kernel had its handle" : "");
    if (res->ptr)
       IOConnectUnmapMemory64(ws->conn, res->res_handle, mach_task_self(),
                              (mach_vm_address_t)(uintptr_t)res->ptr);
@@ -288,6 +318,8 @@ static void ripple_resource_wait(struct virgl_winsys *vws, struct virgl_hw_res *
       ripple_fence_wait_forever(ripple_winsys(vws), fence);
 }
 
+static void ripple_cache_entry_release(struct virgl_resource_cache_entry *entry, void *user);
+
 static void ripple_resource_reference(struct virgl_winsys *vws, struct virgl_hw_res **dres,
                                       struct virgl_hw_res *sres)
 {
@@ -295,12 +327,34 @@ static void ripple_resource_reference(struct virgl_winsys *vws, struct virgl_hw_
    struct virgl_hw_res *old = *dres;
 
    if (pipe_reference(old ? &old->reference : NULL, sres ? &sres->reference : NULL)) {
-      if (!can_cache_resource(old->bind)) {
-         ripple_hw_res_destroy(ws, old);
-      } else {
+      bool cache = can_cache_resource(old->bind) && !old->external;
+
+      if (old->texture_bytes > CACHE_TEXTURE_BYTES)
+         cache = false;
+      if (cache) {
          simple_mtx_lock(&ws->cache_mutex);
+         /* Over the limit the textures that have waited longest go first: the one released
+          * now is the likeliest to be asked for again. */
+         list_for_each_entry_safe(struct virgl_resource_cache_entry, entry,
+                                  &ws->cache.resources, head) {
+            struct virgl_hw_res *waiting = cache_entry_container_res(entry);
+
+            if (!old->texture_bytes ||
+                ws->cached_texture_bytes + old->texture_bytes <= CACHE_TEXTURE_BYTES)
+               break;
+            if (waiting->texture_bytes) {
+               list_del(&entry->head);
+               ripple_cache_entry_release(entry, ws);
+            }
+         }
+         ws->cached_texture_bytes += old->texture_bytes;
          virgl_resource_cache_add(&ws->cache, &old->cache_entry);
+         if (res_log())
+            fprintf(res_log(), "RippleGLDriver: buffer %u cached (fence %llu)\n",
+                    old->res_handle, (unsigned long long)p_atomic_read(&old->fence));
          simple_mtx_unlock(&ws->cache_mutex);
+      } else {
+         ripple_hw_res_destroy(ws, old);
       }
    }
    *dres = sres;
@@ -350,6 +404,11 @@ ripple_resource_create_new(struct ripple_winsys *ws, struct virgl_resource_param
               params.array_size, params.last_level + 1, params.nr_samples, params.size);
    res->bind = params.bind;
    res->size = params.size;
+   if (params.bind & VIRGL_BIND_SAMPLER_VIEW) {
+      uint64_t bytes = (uint64_t)MAX2(params.width, 1) * MAX2(params.height, 1) *
+                       MAX2(params.depth, 1) * MAX2(params.array_size, 1) * 4;
+      res->texture_bytes = (uint32_t)MIN2(bytes, UINT32_MAX);
+   }
    p_atomic_set(&res->num_cs_references, 0);
    virgl_resource_cache_entry_init(&res->cache_entry, params);
    return res;
@@ -378,10 +437,16 @@ ripple_resource_create(struct virgl_winsys *vws, enum pipe_texture_target target
       simple_mtx_lock(&ws->cache_mutex);
       struct virgl_resource_cache_entry *entry =
          virgl_resource_cache_remove_compatible(&ws->cache, params);
+      if (entry) {
+         struct virgl_hw_res *cached = cache_entry_container_res(entry);
+         ws->cached_texture_bytes -= cached->texture_bytes;
+      }
       simple_mtx_unlock(&ws->cache_mutex);
       if (entry) {
          struct virgl_hw_res *res = cache_entry_container_res(entry);
          pipe_reference_init(&res->reference, 1);
+         if (res_log())
+            fprintf(res_log(), "RippleGLDriver: buffer %u reused\n", res->res_handle);
          return res;
       }
    }
@@ -732,13 +797,24 @@ static int ripple_get_fd(struct virgl_winsys *vws)
 static bool ripple_cache_entry_is_busy(struct virgl_resource_cache_entry *entry, void *user)
 {
    struct ripple_winsys *ws = user;
+   struct virgl_hw_res *res = cache_entry_container_res(entry);
+   bool busy = ripple_resource_is_busy(&ws->base, res);
 
-   return ripple_resource_is_busy(&ws->base, cache_entry_container_res(entry));
+   if (busy && res_log())
+      fprintf(res_log(), "RippleGLDriver: buffer %u in the cache is busy (fence %llu)\n",
+              res->res_handle, (unsigned long long)p_atomic_read(&res->fence));
+   return busy;
 }
 
+/* An entry leaves the cache unused: it waited too long, or it makes room for a newer texture.
+ * Called with cache_mutex held (or at the end, when nothing else runs). */
 static void ripple_cache_entry_release(struct virgl_resource_cache_entry *entry, void *user)
 {
-   ripple_hw_res_destroy(user, cache_entry_container_res(entry));
+   struct ripple_winsys *ws = user;
+   struct virgl_hw_res *res = cache_entry_container_res(entry);
+
+   ws->cached_texture_bytes -= res->texture_bytes;
+   ripple_hw_res_destroy(ws, res);
 }
 
 static void ripple_winsys_destroy(struct virgl_winsys *vws)
@@ -878,8 +954,14 @@ uint32_t ripple_virgl_screen_context(struct pipe_screen *screen)
    return ripple_winsys(virgl_screen(screen)->vws)->ctx;
 }
 
+/* The handle is for a kernel call (DISPLAY, SURFACE_PRESENT, SURFACE_TEXTURE), and the kernel
+ * may keep showing that buffer: from here on it is destroyed when released, never cached. */
 uint32_t ripple_virgl_resource_handle(struct pipe_resource *res)
 {
    struct virgl_resource *vres = virgl_resource(res);
-   return vres && vres->hw_res ? vres->hw_res->res_handle : 0;
+
+   if (!vres || !vres->hw_res)
+      return 0;
+   vres->hw_res->external = true;
+   return vres->hw_res->res_handle;
 }
