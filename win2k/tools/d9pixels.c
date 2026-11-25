@@ -4,7 +4,7 @@
  * vertices, fourteen pixel shaders of versions 1.1 and 1.2, including fog
  * and lit untransformed vertices, nine of shader model 2.0, seven with
  * vertex shaders 1.1 and 2.0 (hardware ones when offered) or blending
- * after shaders. Each case
+ * after shaders, and two of cube maps. Each case
  * draws on a 128x128 lockable back buffer and inspects a few pixels well
  * inside the shapes. "sw" asks for software vertex
  * processing. Built against the Microsoft headers; d3d9.dll is loaded at
@@ -1074,6 +1074,69 @@ static void case_dxt(void)
     textured_quad("dxt5_alpha", block_texture(D3DFMT_DXT5, 4, dxt5, sizeof(dxt5)), D3DTA_TEXTURE | D3DTA_ALPHAREPLICATE, s5, 2);
 }
 
+/* ---- cube maps ----
+ * A 4x4 cube map with a solid colour on each face (+X red, -X green, +Y
+ * blue, -Y yellow, +Z cyan, -Z magenta), sampled in the six directions by
+ * six small quads: 40 with ps_2_0 (dcl_cube), 41 with ps_1_1 (tex). */
+static void cube_cases(int only, BOOL version2)
+{
+    typedef struct { float x, y, z, rhw; DWORD diffuse; float u, v, w; } CV;
+    static const DWORD colors[6] = { 0xffff0000, 0xff00ff00, 0xff0000ff, 0xffffff00, 0xff00ffff, 0xffff00ff };
+    static const float dirs[6][3] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
+    static const DWORD ps2[] = { 0xffff0200, P2DCL_T(0, 7), P2I(31, 2), (0x80000000UL | (3UL << 27)), P2D(10, 0, 15),
+        P2I(OTex, 3), P2D(RR, 0, 15), P2SRC(RT, 0), P2SRC(10, 0), P2I(OMov, 2), P2D(8, 0, 15), P2SRC(RR, 0), PSEND };
+    static const DWORD ps1[] = { PSV(1), OTex, DST(RT, 0), OMov, DST(RR, 0), SRC(RT, 0), PSEND };
+    IDirect3DCubeTexture9 *cube = NULL;
+    CV v[36];
+    SAMPLE s[7];
+    int face, i, pass;
+    if (FAILED(IDirect3DDevice9_CreateCubeTexture(device, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &cube, NULL))) {
+        printf("D9PIX cube textures not offered\n");
+        return;
+    }
+    for (face = 0; face < 6; ++face) {
+        D3DLOCKED_RECT r;
+        int y, x;
+        if (FAILED(IDirect3DCubeTexture9_LockRect(cube, (D3DCUBEMAP_FACES)face, 0, &r, NULL, 0))) continue;
+        for (y = 0; y < 4; ++y) for (x = 0; x < 4; ++x) ((DWORD *)((BYTE *)r.pBits + y * r.Pitch))[x] = colors[face];
+        IDirect3DCubeTexture9_UnlockRect(cube, (D3DCUBEMAP_FACES)face, 0);
+    }
+    for (face = 0; face < 6; ++face) {
+        float x0 = 4.0f + face * 20, x1 = x0 + 16;
+        const float xs[6] = { x0, x1, x0, x0, x1, x1 }, ys[6] = { 56, 56, 72, 72, 56, 72 };
+        for (i = 0; i < 6; ++i) {
+            CV *p = &v[face * 6 + i];
+            p->x = xs[i]; p->y = ys[i]; p->z = 0.5f; p->rhw = 1; p->diffuse = 0xffffffff;
+            p->u = dirs[face][0]; p->v = dirs[face][1]; p->w = dirs[face][2];
+        }
+        s[face].x = (int)x0 + 8; s[face].y = 64; s[face].rgb = colors[face] & 0xffffff;
+    }
+    s[6].x = 8; s[6].y = 8; s[6].rgb = CLEAR_COLOR;
+    IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)cube);
+    IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+    IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+    IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+    for (pass = 40; pass <= 41; ++pass) {
+        IDirect3DPixelShader9 *handle = NULL;
+        const char *name = pass == 40 ? "ps2_cube" : "ps1_cube";
+        HRESULT hr;
+        if ((only && only != pass) || (pass == 40 && !version2)) continue;
+        hr = IDirect3DDevice9_CreatePixelShader(device, pass == 40 ? ps2 : ps1, &handle);
+        if (FAILED(hr)) { fail_hr(name, "create", hr); continue; }
+        if (begin(name)) {
+            IDirect3DDevice9_SetPixelShader(device, handle);
+            IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE3(0));
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 12, v, sizeof(v[0]));
+            IDirect3DDevice9_SetPixelShader(device, NULL);
+            if (FAILED(hr)) { fail_hr(name, "draw", hr); IDirect3DDevice9_EndScene(device); }
+            else check(name, s, 7);
+        }
+        IDirect3DPixelShader9_Release(handle);
+    }
+    IDirect3DDevice9_SetTexture(device, 0, NULL);
+    IDirect3DCubeTexture9_Release(cube);
+}
+
 int main(int argc, char **argv)
 {
     IDirect3D9 *(WINAPI *create)(UINT);
@@ -1157,6 +1220,8 @@ int main(int argc, char **argv)
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 2) && (!only || only < 30))
         pixel_shaders(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
     else if (caps.PixelShaderVersion < D3DPS_VERSION(1, 2)) printf("D9PIX pixel shaders not offered\n");
+    if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (caps.TextureCaps & D3DPTEXTURECAPS_CUBEMAP) && (!only || only >= 40))
+        cube_cases(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
     if (caps.PixelShaderVersion < D3DPS_VERSION(2, 0)) printf("D9PIX vertex shader cases need pixel shader 2.0\n");
     else if (flags == D3DCREATE_SOFTWARE_VERTEXPROCESSING || caps.VertexShaderVersion >= D3DVS_VERSION(2, 0)) {
         if (!only || only >= 30) vertex_shaders(only);
