@@ -136,7 +136,7 @@ typedef struct {
      * blits, which mark them dirty; others are checked once a scene. */
     BOOL tracked, dirty;
     ULONG host, sum, epoch;
-    ULONG targets[RB2K_DD_SLOTS];
+    ULONG targets[RB2K_ATTACH];
 } D7_TEXTURE;
 
 /* A Direct3D 8 vertex or index buffer registered through CreateSurfaceEx.
@@ -1249,7 +1249,7 @@ static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
     BOOL attached = FALSE;
     /* A render target texture is sampled on the host, but never while it is the target. */
     if (t->image) return t->image == targetId ? 0 : RB2K_TEXTURE_IMAGE | t->image;
-    for (i = 0; i < RB2K_DD_SLOTS; ++i) if (t->targets[i] == targetId) attached = TRUE;
+    for (i = 0; i < RB2K_ATTACH; ++i) if (t->targets[i] == targetId) attached = TRUE;
     if (t->host && attached && t->tracked && !t->dirty) { ++c->display->d7draw.checksSkipped; return t->host; }
     if (t->host && attached && t->epoch == textureEpoch) return t->host;
     ++c->display->d7draw.checks;
@@ -1276,11 +1276,11 @@ static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
         if (!uploaded) return 0;
     }
     t->sum = sum;
-    for (i = 0; i < RB2K_DD_SLOTS && t->targets[i] != targetId; ++i) {}
-    if (i == RB2K_DD_SLOTS) {
+    for (i = 0; i < RB2K_ATTACH && t->targets[i] != targetId; ++i) {}
+    if (i == RB2K_ATTACH) {
         /* Reuse the entry of a target that no longer exists. */
-        for (i = 0; i < RB2K_DD_SLOTS && t->targets[i] && target(c, t->targets[i], FALSE); ++i) {}
-        if (i < RB2K_DD_SLOTS) t->targets[i] = targetId;
+        for (i = 0; i < RB2K_ATTACH && t->targets[i] && target(c, t->targets[i], FALSE); ++i) {}
+        if (i < RB2K_ATTACH) t->targets[i] = targetId;
     }
     return t->host;
 }

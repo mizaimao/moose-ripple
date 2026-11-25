@@ -39,7 +39,7 @@ typedef struct RB2K_IMAGE {
     BOOLEAN depth16;
     BOOLEAN stencil8;       /* a depth image of 24 bits with 8 of stencil (with depth16 set) */
     struct RB2K_IMAGE *depthBuffer, *depthOwner;
-    ULONG sampledBy[RB2K_DD_SLOTS];     /* contexts of the targets that sample this image */
+    ULONG sampledBy[RB2K_ATTACH];       /* contexts of the targets that sample this image */
     RB2K_D7_STATE d7;
 } RB2K_IMAGE;
 
@@ -50,7 +50,7 @@ typedef struct {
     ULONG format;                               /* host format; 0 for B8G8R8A8 */
     ULONG faces;                                /* 1, or 6 for a cube map */
     ULONG depth;                                /* a volume's slices; 1 otherwise */
-    ULONG contexts[RB2K_DD_SLOTS];
+    ULONG contexts[RB2K_ATTACH];
 } RB2K_TEXTURE;
 #define RB2K_D7_TEXEL_BUDGET (64UL << 20)
 typedef struct {

@@ -823,14 +823,14 @@ BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTU
 BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture,
                               const RB2K_IMAGE *image)
 {
-    ULONG i, free = RB2K_DD_SLOTS;
-    for (i = 0; i < RB2K_DD_SLOTS; ++i) {
+    ULONG i, free = RB2K_ATTACH;
+    for (i = 0; i < RB2K_ATTACH; ++i) {
         ULONG j;
         if (texture->contexts[i] == image->id) return TRUE;
         for (j = 0; j < RB2K_DD_SLOTS && gpu->images[j].id != texture->contexts[i]; ++j) {}
-        if (free == RB2K_DD_SLOTS && (!texture->contexts[i] || j == RB2K_DD_SLOTS)) free = i;
+        if (free == RB2K_ATTACH && (!texture->contexts[i] || j == RB2K_DD_SLOTS)) free = i;
     }
-    if (free == RB2K_DD_SLOTS) {
+    if (free == RB2K_ATTACH) {
         result->status = ERROR_NOT_ENOUGH_MEMORY;
         result->stage = RB2K_STAGE_ATTACH;
         return FALSE;
@@ -844,14 +844,14 @@ BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTU
  * to that target's context too, like a texture. */
 BOOLEAN rb_gpu_image_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *source, const RB2K_IMAGE *target)
 {
-    ULONG i, free = RB2K_DD_SLOTS;
-    for (i = 0; i < RB2K_DD_SLOTS; ++i) {
+    ULONG i, free = RB2K_ATTACH;
+    for (i = 0; i < RB2K_ATTACH; ++i) {
         ULONG j;
         if (source->sampledBy[i] == target->id) return TRUE;
         for (j = 0; j < RB2K_DD_SLOTS && gpu->images[j].id != source->sampledBy[i]; ++j) {}
-        if (free == RB2K_DD_SLOTS && (!source->sampledBy[i] || j == RB2K_DD_SLOTS)) free = i;
+        if (free == RB2K_ATTACH && (!source->sampledBy[i] || j == RB2K_DD_SLOTS)) free = i;
     }
-    if (free == RB2K_DD_SLOTS) {
+    if (free == RB2K_ATTACH) {
         result->status = ERROR_NOT_ENOUGH_MEMORY;
         result->stage = RB2K_STAGE_ATTACH;
         return FALSE;
