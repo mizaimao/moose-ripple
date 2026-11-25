@@ -282,6 +282,9 @@ ULONG rb_d7_texture_format(const DDPIXELFORMAT *f, ULONG desktopBits)
         case RbFmtX1R5G5B5: return TexXrgb1555;
         case RbFmtA1R5G5B5: return TexArgb1555;
         case RbFmtA4R4G4B4: return TexArgb4444;
+        case RbFmtL8: return TexL8;
+        case RbFmtA8L8: return TexA8L8;
+        case RbFmtA8: return TexA8;
         case RbFmtDxt1: return TexDxt1;
         case RbFmtDxt2: case RbFmtDxt3: return TexDxt3;
         case RbFmtDxt4: case RbFmtDxt5: return TexDxt5;
@@ -305,10 +308,10 @@ ULONG rb_d7_texture_format(const DDPIXELFORMAT *f, ULONG desktopBits)
 
 ULONG rb_d7_texel_bytes(ULONG format)
 {
-    return format == TexArgb8888 || format == TexXrgb8888 ? 4 : 2;
+    return format == TexArgb8888 || format == TexXrgb8888 ? 4 : format == TexL8 || format == TexA8 ? 1 : 2;
 }
 
-static BOOL compressed(ULONG format) { return format >= TexDxt1 && format <= TexDxt5; }
+static BOOL compressed(ULONG format) { return RB_TEX_COMPRESSED(format); }
 
 ULONG rb_d7_row_bytes(ULONG format, ULONG width)
 {
@@ -458,7 +461,7 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
         t->pitch < rb_d7_row_bytes(t->format, t->width))
         t->format = TexNone;
     ++d->d7draw.textures;
-    ++d->d7draw.registered[t->format < 7 ? t->format : 7];   /* 7: compressed */
+    ++d->d7draw.registered[t->format < 7 ? t->format : 7];   /* 7: compressed and the rest */
     if (!(l->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY)) ++d->d7draw.videoTextures;
 }
 
@@ -937,6 +940,10 @@ static ULONG convert(ULONG format, ULONG p)
     case TexArgb4444:
         return expand((p >> 12) & 15, 4) << 24 | expand((p >> 8) & 15, 4) << 16 |
                expand((p >> 4) & 15, 4) << 8 | expand(p & 15, 4);
+    /* Luminance is grey; an alpha-only texture samples as black with alpha. */
+    case TexL8: return 0xff000000 | (p & 255) * 0x010101;
+    case TexA8L8: return (p >> 8) << 24 | (p & 255) * 0x010101;
+    case TexA8: return (p & 255) << 24;
     }
     return 0;
 }
@@ -1184,7 +1191,7 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
                 for (r = 0; r < rows; ++r, src += width * bpp)
                     for (x = 0; x < width; ++x)
                         out[r * width + x] = convert(format, bpp == 4 ? ((const ULONG *)src)[x] :
-                                                                         ((const USHORT *)src)[x]);
+                                                     bpp == 2 ? ((const USHORT *)src)[x] : src[x]);
                 packet->id = plane || y ? id : t->host;
                 packet->face = t->depth > 1 ? slice : face;
                 packet->faces = t->faces;
@@ -3457,6 +3464,10 @@ static const ULONG d8Formats[][2] = {
     { RbFmtA4R4G4B4, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     { RbFmtDxt1, RbFormatTexture | RbFormatCubeTexture }, { RbFmtDxt2, RbFormatTexture | RbFormatCubeTexture }, { RbFmtDxt3, RbFormatTexture | RbFormatCubeTexture },
     { RbFmtDxt4, RbFormatTexture | RbFormatCubeTexture }, { RbFmtDxt5, RbFormatTexture | RbFormatCubeTexture },
+    /* converted to 32 bits on upload */
+    { RbFmtL8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtA8L8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtA8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     /* last: only with depth rendering */
     { RbFmtD16, RbFormatZStencil }, { RbFmtD24S8, RbFormatZStencil }, { RbFmtD24X8, RbFormatZStencil }
 };

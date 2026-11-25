@@ -35,7 +35,7 @@ enum {
 };
 enum {
     RbFmtA8R8G8B8 = 21, RbFmtX8R8G8B8 = 22, RbFmtR5G6B5 = 23, RbFmtX1R5G5B5 = 24,
-    RbFmtA1R5G5B5 = 25, RbFmtA4R4G4B4 = 26, RbFmtD16 = 80, RbFmtD24S8 = 75, RbFmtD24X8 = 77,
+    RbFmtA1R5G5B5 = 25, RbFmtA4R4G4B4 = 26, RbFmtA8 = 28, RbFmtL8 = 50, RbFmtA8L8 = 51, RbFmtD16 = 80, RbFmtD24S8 = 75, RbFmtD24X8 = 77,
     RbFmtDxt1 = 0x31545844, RbFmtDxt2 = 0x32545844, RbFmtDxt3 = 0x33545844, RbFmtDxt4 = 0x34545844,
     RbFmtDxt5 = 0x35545844
 };

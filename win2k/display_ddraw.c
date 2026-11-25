@@ -230,7 +230,7 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
         if (more && (more->ddsCapsEx.dwCaps2 & DDSCAPS2_VOLUME)) {
             /* A volume: its slices follow each other, a slice pitch apart. */
             depth = more->ddsCapsEx.dwCaps4;
-            if (!depth || depth > RB2K_D7_VOLUME_SIDE || format >= TexDxt1 || format == TexNone) {
+            if (!depth || depth > RB2K_D7_VOLUME_SIDE || RB_TEX_COMPRESSED(format) || format == TexNone) {
                 /* counted for d7draw.exe: the count field holds the depth */
                 ++d->d7draw.surfaceRefused;
                 d->d7draw.refusedCaps = desc->ddsCaps.dwCaps; d->d7draw.refusedFlags = desc->dwFlags;
@@ -684,7 +684,7 @@ static DWORD APIENTRY lock_surface(PDD_LOCKDATA data)
                 else {
                     offset = front * g->dwBlockSizeY;   /* the slice pitch of a volume */
                     if (data->bHasRect) {
-                        if (format >= TexDxt1)   /* rows of 4x4 blocks */
+                        if (RB_TEX_COMPRESSED(format))   /* rows of 4x4 blocks */
                             offset += (area.top / 4) * g->lPitch + (area.left / 4) * (format == TexDxt1 ? 8 : 16);
                         else
                             offset += area.top * g->lPitch + area.left *
