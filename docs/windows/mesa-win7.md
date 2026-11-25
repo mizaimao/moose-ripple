@@ -1931,10 +1931,14 @@ where the guest's processors execute taken through QEMU's monitor, and the scree
 counted on the host.
 
 In a scene (Return to Proxycon at 4.4 frames a second) about one of the four processors is
-busy. The game's own code has about 45% of it, this driver about 18% (360 indexed draw calls
-a frame at 0.1 ms each), Direct3D's runtime about 8%. The other processors are idle or
-serving the 1 ms timer, whose interrupts on all four take 15% to 18% of all samples. A frame
-is bound by the emulated processor running the game, not by the driver.
+busy. Of 4,000 samples taken in the scene, the game's own code has 12.0% (about half of one
+processor), this driver 3.1%, Direct3D's runtime and D3DX 1.9%. The driver's share is spread
+thin: its most sampled function has 0.4%, and a frame makes 360 indexed draw calls at 0.1 ms
+each. The largest item after the game is not in a program at all: the 1 ms timer that the
+benchmark asks for interrupts all four processors a thousand times a second, and handling
+it (with the counter read that goes with each tick) takes about 20% of all samples, a
+quarter of the time of the processor the game runs on. A frame is bound by the emulated
+processor running the game, not by the driver.
 
 Loading is different. A test took about three and a half minutes to load, and a frame of
 its loading screen 730 to 820 ms, 585 to 634 ms of that inside the driver's `Unlock` of a
