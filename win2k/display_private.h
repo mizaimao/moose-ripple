@@ -10,6 +10,15 @@
 #include "rb2kcursor.h"
 #include "rb2kd3d7.h"
 
+/* Volume textures (newer DirectDraw headers name these; the build uses older ones):
+ * the depth is DDSCAPSEX.dwCaps4 and the slice pitch DD_SURFACE_GLOBAL.dwBlockSizeY. */
+#ifndef DDSCAPS2_VOLUME
+#define DDSCAPS2_VOLUME 0x00200000L
+#endif
+#ifndef DDLOCK_HASVOLUMETEXTUREBOXRECT
+#define DDLOCK_HASVOLUMETEXTUREBOXRECT 0x00008000L
+#endif
+
 typedef struct {
     PDD_SURFACE_GLOBAL global;
     HANDLE owner;

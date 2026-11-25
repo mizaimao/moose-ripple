@@ -583,8 +583,14 @@ static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         !in->levels || in->levels > RB2K_D7_LEVELS || in->level >= in->levels ||
         ((in->width | in->height) >> (in->levels - 1)) == 0)
         return ERROR_INVALID_PARAMETER;
-    if (in->format > RB2K_D7_BLOCKS_DXT5 || (in->faces != 1 && in->faces != 6) || in->face >= in->faces ||
-        (in->faces == 6 && in->width != in->height)) return ERROR_INVALID_PARAMETER;
+    {
+        ULONG depth = in->depth > 1 ? in->depth : 1, slices = depth >> in->level ? depth >> in->level : 1;
+        if (in->format > RB2K_D7_BLOCKS_DXT5 || (in->faces != 1 && in->faces != 6) ||
+            (in->faces == 6 && in->width != in->height) || depth > RB2K_D7_VOLUME_SIDE ||
+            (depth > 1 && (in->faces != 1 || in->format || in->width > RB2K_D7_VOLUME_SIDE ||
+                           in->height > RB2K_D7_VOLUME_SIDE)) ||
+            in->face >= (depth > 1 ? slices : in->faces)) return ERROR_INVALID_PARAMETER;
+    }
     /* Blocks as they are only where the host samples them; otherwise the
      * answer is texture id zero (the video port reports every failure alike). */
     if (in->format && (!gpu->hostDxt || !((rb_gpu_host_blocks(gpu) >> in->format) & 1))) {
@@ -610,6 +616,7 @@ static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         t = rb_gpu_texture(gpu, in->id);
         if (!t) return ERROR_INVALID_HANDLE;
         if (t->width != in->width || t->height != in->height || t->levels != in->levels || t->faces != in->faces ||
+            t->depth != (in->depth > 1 ? in->depth : 1) ||
             t->format != block_formats[in->format])
             return ERROR_INVALID_PARAMETER;
     } else {
@@ -619,6 +626,7 @@ static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         if (in->levels > 1) size += size / 3 + 4 * sizeof(ULONG);
         if (in->y || in->level || in->face) return ERROR_INVALID_PARAMETER;
         size *= in->faces;
+        if (in->depth > 1) size *= in->depth;
         if (gpu->nextId == 0xffffffffUL) return ERROR_NO_MORE_ITEMS;
         for (i = 0; i < RB2K_D7_TEXTURES && gpu->textures[i].id; ++i) {}
         if (i == RB2K_D7_TEXTURES || size > RB2K_D7_TEXEL_BUDGET - gpu->textureBytes)
@@ -631,6 +639,7 @@ static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         t->bytes = size;
         t->format = block_formats[in->format];
         t->faces = in->faces;
+        t->depth = in->depth > 1 ? in->depth : 1;
         if (!rb_gpu_texture_create(gpu, &result, t)) {
             VideoPortZeroMemory(t, sizeof(*t));
             return command_error(gpu, &result);

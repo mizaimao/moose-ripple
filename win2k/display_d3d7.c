@@ -129,6 +129,7 @@ typedef struct {
      * the six of a cube map in Direct3D's order +X, -X, +Y, -Y, +Z, -Z),
      * level zero of face zero being the above. */
     ULONG levels, faces, levelPitch[6][RB2K_D7_LEVELS];
+    ULONG depth;    /* a volume's slices at level zero (each level has half as many); 1 otherwise */
     FLATPTR levelAddress[6][RB2K_D7_LEVELS];
     ULONG image;    /* a render target texture: the image id (sampled as it is) */
     /* Video-memory textures are written only through DirectDraw locks and
@@ -397,6 +398,7 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
     t->tracked = !(l->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY);
     t->dirty = TRUE;
     t->faces = 1;
+    t->depth = 1;
     {
         DD_SLOT *slot = rb_dd_slot(d, g);
         if (slot && slot->texture && !slot->lost && slot->owner == t->owner) {
@@ -439,6 +441,12 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
         ++d->d7draw.cubeTextures;
     } else {
         ULONG stop;
+        if (l->lpSurfMore && (l->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_VOLUME)) {
+            /* A volume: its slices follow each other in each level's memory. */
+            t->depth = l->lpSurfMore->ddsCapsEx.dwCaps4;   /* the depth */
+            if (!t->depth || t->depth > RB2K_D7_VOLUME_SIDE || compressed(t->format)) t->format = TexNone;
+            ++d->d7draw.volumeTextures;
+        }
         t->levels = face_levels(t, 0, l, FALSE, &stop);
         if (t->mipmaps) {
             if (stop < 5 && (t->width >> t->levels || t->height >> t->levels)) ++d->d7draw.mipStops[stop];
@@ -937,13 +945,42 @@ static ULONG convert(ULONG format, ULONG p)
 /* The texels of every level, tightly packed level after level. */
 static ULONG level_side(ULONG size, ULONG level) { return size >> level ? size >> level : 1; }
 
+/* A texture's planes in upload order: each face's levels (one face, or a
+ * cube map's six), or each level's slices (a volume). */
+static ULONG level_depth(const D7_TEXTURE *t, ULONG level)
+{
+    return t->depth >> level ? t->depth >> level : 1;
+}
+
+static ULONG plane_count(const D7_TEXTURE *t)
+{
+    ULONG level, n = 0;
+    if (t->depth <= 1) return t->faces * t->levels;
+    for (level = 0; level < t->levels; ++level) n += level_depth(t, level);
+    return n;
+}
+
+static void plane_at(const D7_TEXTURE *t, ULONG i, ULONG *face, ULONG *level, ULONG *slice)
+{
+    if (t->depth <= 1) {
+        *face = i / t->levels;
+        *level = i % t->levels;
+        *slice = 0;
+        return;
+    }
+    *face = 0;
+    for (*level = 0; *level + 1 < t->levels && i >= level_depth(t, *level); ++*level) i -= level_depth(t, *level);
+    *slice = i;
+}
+
 static BOOL read_texels(D7_TEXTURE *t, ULONG *sum)
 {
-    ULONG bytes = 0, level, face, y, i, h = 0x811c9dc5;
+    ULONG bytes = 0, level, face, slice, plane, planes = plane_count(t), y, i, h = 0x811c9dc5;
     BYTE *out;
-    for (level = 0; level < t->levels; ++level)
+    for (plane = 0; plane < planes; ++plane) {
+        plane_at(t, plane, &face, &level, &slice);
         bytes += rb_d7_row_bytes(t->format, level_side(t->width, level)) * rb_d7_rows(t->format, level_side(t->height, level));
-    bytes *= t->faces;
+    }
     if (bytes > texelScratchBytes) {
         if (texelScratch) EngFreeMem(texelScratch);
         texelScratch = EngAllocMem(0, bytes, 'r7bR');
@@ -952,11 +989,15 @@ static BOOL read_texels(D7_TEXTURE *t, ULONG *sum)
     }
     out = texelScratch;
     __try {
-        for (face = 0; face < t->faces; ++face)
-            for (level = 0; level < t->levels; ++level) {
-                ULONG row = rb_d7_row_bytes(t->format, level_side(t->width, level));
-                ULONG rows = rb_d7_rows(t->format, level_side(t->height, level)), pitch = t->levelPitch[face][level];
-                const BYTE *in = (const BYTE *)t->levelAddress[face][level];
+        for (plane = 0; plane < planes; ++plane) {
+                ULONG row, rows, pitch;
+                const BYTE *in;
+                plane_at(t, plane, &face, &level, &slice);
+                row = rb_d7_row_bytes(t->format, level_side(t->width, level));
+                rows = rb_d7_rows(t->format, level_side(t->height, level));
+                pitch = t->levelPitch[face][level];
+                /* A volume's slices follow each other, a slice pitch apart. */
+                in = (const BYTE *)t->levelAddress[face][level] + slice * pitch * rows;
                 if (pitch < row) return FALSE;
                 EngProbeForRead((PVOID)in, pitch * (rows - 1) + row, 1);
                 for (y = 0; y < rows; ++y, out += row) RtlCopyMemory(out, in + y * pitch, row);
@@ -1027,11 +1068,13 @@ static ULONG decodeScratchBytes;
 /* Every level of a compressed texture from the scratch buffer, decoded. */
 static BOOL decode_texture(const D7_TEXTURE *t)
 {
-    ULONG bytes = 0, level, face;
+    ULONG bytes = 0, level, face, slice, plane, planes = plane_count(t);
     const BYTE *in = texelScratch;
     ULONG *out;
-    for (level = 0; level < t->levels; ++level) bytes += level_side(t->width, level) * level_side(t->height, level) * 4;
-    bytes *= t->faces;
+    for (plane = 0; plane < planes; ++plane) {
+        plane_at(t, plane, &face, &level, &slice);
+        bytes += level_side(t->width, level) * level_side(t->height, level) * 4;
+    }
     if (bytes > decodeScratchBytes) {
         if (decodeScratch) EngFreeMem(decodeScratch);
         decodeScratch = EngAllocMem(0, bytes, 'x7bR');
@@ -1039,9 +1082,11 @@ static BOOL decode_texture(const D7_TEXTURE *t)
         if (!decodeScratch) return FALSE;
     }
     out = (ULONG *)decodeScratch;
-    for (face = 0; face < t->faces; ++face)
-        for (level = 0; level < t->levels; ++level) {
-            ULONG w = level_side(t->width, level), h = level_side(t->height, level);
+    for (plane = 0; plane < planes; ++plane) {
+            ULONG w, h;
+            plane_at(t, plane, &face, &level, &slice);
+            w = level_side(t->width, level);
+            h = level_side(t->height, level);
             decode_level(t->format, in, w, h, out);
             in += rb_d7_row_bytes(t->format, w) * rb_d7_rows(t->format, h);
             out += w * h;
@@ -1074,6 +1119,7 @@ static BOOL upload_blocks(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
             packet->id = face || level || by ? id : t->host;
             packet->face = face;
             packet->faces = t->faces;
+            packet->depth = 1;
             packet->target = targetId;
             packet->width = t->width;
             packet->height = t->height;
@@ -1124,22 +1170,25 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
     for (tries = 0; tries < 2; ++tries) {
         BOOL ok = TRUE;
         const BYTE *src = texels;
-        ULONG level;
+        ULONG level, face, slice, plane, planes = plane_count(t);
         total = 0;
-        ULONG face;
-        for (face = 0; ok && face < t->faces; ++face)
-        for (level = 0; ok && level < t->levels; ++level) {
-            ULONG width = level_side(t->width, level), height = level_side(t->height, level);
-            ULONG chunk = RB2K_D7_UPLOAD_BYTES / (width * 4), y;
+        for (plane = 0; ok && plane < planes; ++plane) {
+            ULONG width, height, chunk, y;
+            plane_at(t, plane, &face, &level, &slice);
+            width = level_side(t->width, level);
+            height = level_side(t->height, level);
+            chunk = RB2K_D7_UPLOAD_BYTES / (width * 4);
+            {
             for (y = 0; ok && y < height; y += chunk) {
                 ULONG rows = min(chunk, height - y), x, r, newId = 0;
                 for (r = 0; r < rows; ++r, src += width * bpp)
                     for (x = 0; x < width; ++x)
                         out[r * width + x] = convert(format, bpp == 4 ? ((const ULONG *)src)[x] :
                                                                          ((const USHORT *)src)[x]);
-                packet->id = face || level || y ? id : t->host;
-                packet->face = face;
+                packet->id = plane || y ? id : t->host;
+                packet->face = t->depth > 1 ? slice : face;
                 packet->faces = t->faces;
+                packet->depth = t->depth;
                 packet->target = targetId;
                 packet->width = t->width;
                 packet->height = t->height;
@@ -1152,6 +1201,7 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
                              &newId, sizeof(newId));
                 if (ok) id = newId;
                 total += rows * width * 4;
+            }
             }
         }
         if (ok) {
@@ -1474,7 +1524,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     }
     if (needTexture) {
         tex = find_texture(c->local, st->texture);
-        if (!tex || !tex->format || tex->owner != c->owner || tex->faces != 1) {
+        if (!tex || !tex->format || tex->owner != c->owner || tex->faces != 1 || tex->depth > 1) {
             texture_skip(c, tex, s->id);
             skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives);
             return DD_OK;
@@ -1486,7 +1536,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     }
     if (needTexture1) {
         tex1 = find_texture(c->local, st1->texture);
-        if (!tex1 || !tex1->format || tex1->owner != c->owner || tex1->faces != 1) {
+        if (!tex1 || !tex1->format || tex1->owner != c->owner || tex1->faces != 1 || tex1->depth > 1) {
             skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives);
             return DD_OK;
         }
@@ -1878,16 +1928,22 @@ static void create_shader(D7_CONTEXT *c, ULONG handle, const BYTE *code, ULONG b
     }
 }
 
-/* The stages among samplers whose texture is a cube map. */
-static ULONG cube_stages(D7_CONTEXT *c, ULONG samplers)
+/* The stages among samplers whose texture is a cube map (volume: a volume). */
+static ULONG cube_stages(D7_CONTEXT *c, ULONG samplers, BOOL volume)
 {
     ULONG k, mask = 0;
     for (k = 0; k < RB2K_D8_STAGES; ++k)
         if ((samplers >> k) & 1) {
             D7_TEXTURE *tex = find_texture(c->local, c->stages[k].texture);
-            if (tex && tex->faces == 6) mask |= 1UL << k;
+            if (tex && (volume ? tex->depth > 1 : tex->faces == 6)) mask |= 1UL << k;
         }
     return mask;
+}
+
+/* The program variant key of a version 1 shader: fog, cube and volume stages. */
+static ULONG stage_kinds(D7_CONTEXT *c, ULONG samplers, ULONG fog)
+{
+    return fog | cube_stages(c, samplers, FALSE) << RB_PS_CUBE_SHIFT | cube_stages(c, samplers, TRUE) << RB_PS_VOLUME_SHIFT;
 }
 
 static ULONG stage_sampler(const D7_STAGE *st, const D7_TEXTURE *tex)
@@ -1975,7 +2031,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
             fog = RB2K_D7_FOG_VERTEX | c->fogVertex << RB2K_D7_FOG_MODE_SHIFT | (c->rangeFog ? RB2K_D7_FOG_RANGE : 0);
         else fog = RB2K_D7_FOG_ALPHA;
     }
-    if (sh) program = shader_program(c, sh, fog | cube_stages(c, sh->samplers) << RB_PS_CUBE_SHIFT);
+    if (sh) program = shader_program(c, sh, stage_kinds(c, sh->samplers, fog));
     if (!program) { skip(c, RB2K_D7_SKIP_COMBINER, p->primitives); return DD_OK; }
     if (!p->stream || !position || (fvf & D3DFVF_RESERVED0) || (!objectSpace && (fvf & D3DFVF_NORMAL))) {
         skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
@@ -2120,12 +2176,12 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
         else { fog = RB2K_D7_FOG_ALPHA; flags = RB_VS_FOG_ALPHA; }
     }
     if (vs) vprogram = vertex_program(c, vs, flags);
-    if (sh) program = shader_program(c, sh, fog | cube_stages(c, sh->samplers) << RB_PS_CUBE_SHIFT);
+    if (sh) program = shader_program(c, sh, stage_kinds(c, sh->samplers, fog));
     else {
         /* The fixed-function pixel stages after the vertex shader (which do
          * not sample cube maps). */
         program = stage_program(c, fog, &stages);
-        if (program && cube_stages(c, stages.samplers)) program = 0;
+        if (program && (cube_stages(c, stages.samplers, FALSE) || cube_stages(c, stages.samplers, TRUE))) program = 0;
         sh = &stages;
         d->d7draw.vsStageDraws += p->primitives;
     }
@@ -2313,6 +2369,52 @@ static ULONG variable_records(const BYTE *p, ULONG remaining, ULONG count, ULONG
  * video-memory copy. Both live in this process's memory, so copy the top
  * level directly; the next draw compares and uploads it. A null source only
  * asks for the destination to be loaded, which the next draw does anyway. */
+/* A box of a volume copied into another volume, at each level both have. */
+static void volume_blt(D7_CONTEXT *c, const RB_DP2_VOLUME_BLT *b)
+{
+    DISPLAY *d = c->display;
+    D7_TEXTURE *dst = find_texture(c->local, b->dest), *src = find_texture(c->local, b->source);
+    ULONG left = b->box[0], top = b->box[1], right = b->box[2], bottom = b->box[3], front = b->box[4], back = b->box[5];
+    ULONG bpp, level, levels;
+    if (!dst || !src || !dst->format || dst->format != src->format || compressed(src->format) ||
+        dst->depth < 2 || src->depth < 2 || dst->owner != c->owner || src->owner != c->owner) {
+        ++d->d7draw.texBltFailures;
+        return;
+    }
+    if (right <= left || bottom <= top || back <= front) {
+        left = top = front = 0;
+        right = src->width; bottom = src->height; back = src->depth;
+    }
+    if (right > src->width || bottom > src->height || back > src->depth ||
+        b->x + right - left > dst->width || b->y + bottom - top > dst->height ||
+        b->z + back - front > dst->depth) { ++d->d7draw.texBltFailures; return; }
+    bpp = rb_d7_texel_bytes(src->format);
+    levels = min(src->levels, dst->levels);
+    if (src->width != dst->width || src->height != dst->height || src->depth != dst->depth) levels = 1;
+    __try {
+        for (level = 0; level < levels; ++level) {
+            ULONG x0 = left >> level, y0 = top >> level, z0 = front >> level;
+            ULONG x1 = max(x0 + 1, right >> level), y1 = max(y0 + 1, bottom >> level), z1 = max(z0 + 1, back >> level);
+            ULONG dx = b->x >> level, dy = b->y >> level, dz = b->z >> level, z, y;
+            ULONG rows = rb_d7_rows(src->format, level_side(src->height, level));
+            ULONG sp = src->levelPitch[0][level], dp = dst->levelPitch[0][level];
+            if (x1 > level_side(src->width, level) || y1 > level_side(src->height, level) || z1 > level_depth(src, level) ||
+                dx + x1 - x0 > level_side(dst->width, level) || dy + y1 - y0 > level_side(dst->height, level) ||
+                dz + z1 - z0 > level_depth(dst, level)) break;
+            for (z = 0; z < z1 - z0; ++z) {
+                const BYTE *from = (const BYTE *)src->levelAddress[0][level] + (z0 + z) * sp * rows + y0 * sp + x0 * bpp;
+                BYTE *to = (BYTE *)dst->levelAddress[0][level] + (dz + z) * dp * rows + dy * dp + dx * bpp;
+                EngProbeForRead((PVOID)from, (y1 - y0 - 1) * sp + (x1 - x0) * bpp, 1);
+                EngProbeForReadAndWrite(to, (y1 - y0 - 1) * dp + (x1 - x0) * bpp, 1);
+                for (y = 0; y < y1 - y0; ++y) RtlCopyMemory(to + y * dp, from + y * sp, (x1 - x0) * bpp);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { ++d->d7draw.texBltFailures; return; }
+    dst->epoch = 0;
+    dst->dirty = TRUE;
+    ++d->d7draw.texBlts;
+}
+
 static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
 {
     DISPLAY *d = c->display;
@@ -2323,6 +2425,7 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
     dst = find_texture(c->local, b->dwDDDestSurface);
     src = find_texture(c->local, b->dwDDSrcSurface);
     if (!dst || !src || !dst->format || dst->format != src->format || dst->faces != src->faces || dst->image || src->image ||
+        dst->depth > 1 || src->depth > 1 ||
         dst->owner != c->owner || src->owner != c->owner) { ++d->d7draw.texBltFailures; return; }
     if (right <= left || bottom <= top) { left = top = 0; right = src->width; bottom = src->height; }
     if (left < 0 || top < 0 || (ULONG)right > src->width || (ULONG)bottom > src->height ||
@@ -3125,6 +3228,11 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
                         h->bCommand == RbDp2AddDirtyRect ? sizeof(RB_DP2_DIRTY_RECT) : sizeof(RB_DP2_DIRTY_BOX));
             if (used > remaining) return DDERR_INVALIDPARAMS;
             trace8(c, a, h->bCommand, n, p, remaining);
+            if (h->bCommand == RbDp2VolumeBlt) {
+                const RB_DP2_VOLUME_BLT *b = (const RB_DP2_VOLUME_BLT *)p;
+                ULONG k;
+                for (k = 0; k < n; ++k) volume_blt(c, b + k);
+            }
             break;
         default:
             used = fixed_records(h->bCommand, n);
@@ -3339,14 +3447,14 @@ void rb_d7_caps(DD_HALINFO *info, BOOL depth)
  * one vertex stream. Pixel shaders are offered (see below); the runtime
  * runs vertex shaders in software. */
 static const ULONG d8Formats[][2] = {
-    { RbFmtX8R8G8B8, RbFormatTexture | RbFormatCubeTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
+    { RbFmtX8R8G8B8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
                      RbFormatDisplayMode | RbFormat3D },
     /* a back buffer with alpha over the X8R8G8B8 desktop, or a target */
-    { RbFmtA8R8G8B8, RbFormatTexture | RbFormatCubeTexture | RbFormatOffscreenTarget | RbFormatSameTargetUpToAlpha },
-    { RbFmtR5G6B5, RbFormatTexture | RbFormatCubeTexture | RbFormatDisplayMode },
-    { RbFmtX1R5G5B5, RbFormatTexture | RbFormatCubeTexture },
-    { RbFmtA1R5G5B5, RbFormatTexture | RbFormatCubeTexture },
-    { RbFmtA4R4G4B4, RbFormatTexture | RbFormatCubeTexture },
+    { RbFmtA8R8G8B8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture | RbFormatOffscreenTarget | RbFormatSameTargetUpToAlpha },
+    { RbFmtR5G6B5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture | RbFormatDisplayMode },
+    { RbFmtX1R5G5B5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtA1R5G5B5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtA4R4G4B4, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     { RbFmtDxt1, RbFormatTexture | RbFormatCubeTexture }, { RbFmtDxt2, RbFormatTexture | RbFormatCubeTexture }, { RbFmtDxt3, RbFormatTexture | RbFormatCubeTexture },
     { RbFmtDxt4, RbFormatTexture | RbFormatCubeTexture }, { RbFmtDxt5, RbFormatTexture | RbFormatCubeTexture },
     /* last: only with depth rendering */
@@ -3379,7 +3487,12 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     /* Cube maps, sampled by pixel shaders (the fixed-function stages do not). */
     c->textureCaps |= 0x800 | 0x10000;   /* D3DPTEXTURECAPS_CUBEMAP, MIPCUBEMAP */
     c->cubeTextureFilterCaps = c->textureFilterCaps;
+    /* Volumes too, also only for pixel shaders. */
+    c->textureCaps |= 0x2000 | 0x8000;   /* D3DPTEXTURECAPS_VOLUMEMAP, MIPVOLUMEMAP */
+    c->volumeTextureFilterCaps = c->textureFilterCaps;
+    c->maxVolumeExtent = RB2K_D7_VOLUME_SIDE;
     c->textureAddressCaps = tri->dwTextureAddressCaps;
+    c->volumeTextureAddressCaps = c->textureAddressCaps;
     c->stencilCaps = d->z24s8 ? 0xff : 0;
     if (d->z16Render) {
         c->rasterCaps |= D3DPRASTERCAPS_ZTEST;

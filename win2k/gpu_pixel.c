@@ -17,7 +17,7 @@
 
 enum {
     PixelSurface = 1, CreateWords = 1 + VIRGL_OBJ_SURFACE_SIZE,
-    PipeTexture2D = 2, PipeTextureCube = 4, PipeClearColor0 = 1 << 2
+    PipeTexture2D = 2, PipeTexture3D = 3, PipeTextureCube = 4, PipeClearColor0 = 1 << 2
 };
 
 /* Each texture has a private context, so its surface object is always 1. */
@@ -807,12 +807,12 @@ BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTU
     PIXEL_REQUEST request;
     begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D, 0);
     request.resource.resource_id = texture->id;
-    request.resource.target = texture->faces == 6 ? PipeTextureCube : PipeTexture2D;
+    request.resource.target = texture->depth > 1 ? PipeTexture3D : texture->faces == 6 ? PipeTextureCube : PipeTexture2D;
     request.resource.format = texture->format ? texture->format : VIRGL_FORMAT_B8G8R8A8_UNORM;
     request.resource.bind = VIRGL_BIND_SAMPLER_VIEW;
     request.resource.width = texture->width;
     request.resource.height = texture->height;
-    request.resource.depth = 1;
+    request.resource.depth = texture->depth > 1 ? texture->depth : 1;
     request.resource.array_size = texture->faces == 6 ? 6 : 1;
     request.resource.last_level = texture->levels - 1;
     return send_request(gpu, result, &request, sizeof(request.resource), RB2K_STAGE_RESOURCE);

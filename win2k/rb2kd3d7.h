@@ -114,6 +114,7 @@ typedef struct {
     ULONG blockUploads;                 /* compressed textures sent as blocks for the host to decode */
     ULONG blockStatus;                  /* the last failure status of such an upload */
     ULONG cubeTextures;                 /* cube maps registered */
+    ULONG volumeTextures;               /* volume textures registered */
     /* Full-screen chains: flips, those that showed a drawn image, chain
      * front images made, blits touching a chain surface; the last eight flips
      * (current and target page offsets, their image ids, result) and render

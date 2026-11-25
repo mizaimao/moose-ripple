@@ -48,6 +48,8 @@ typedef struct {
 /* Version 1 shaders: the stages whose texture is a cube map, in bits 16-23
  * of the fog argument (shader model 2 declares its samplers). */
 #define RB_PS_CUBE_SHIFT 16
+/* and the stages whose texture is a volume, in bits 24-31. */
+#define RB_PS_VOLUME_SHIFT 24
 
 /* tokens: the shader's token stream, count words long. Returns the length
  * of the text written to out including the terminating zero, or 0. */

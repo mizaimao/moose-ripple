@@ -222,10 +222,19 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
         DDPIXELFORMAT desktop = {0};
         ULONG format = rb_d7_texture_format((desc->dwFlags & DDSD_PIXELFORMAT) ? &desc->ddpfPixelFormat :
                                             &desktop, d->mode.BitsPerPlane);
-        ULONG i;
+        ULONG i, depth = 1;
+        PDD_SURFACE_MORE more = data->lplpSList[0]->lpSurfMore;
         /* NT creates a mipmap chain one level per call, each with the
          * top level's description; every level gets its own user memory
          * and the native path draws from the top level. */
+        if (more && (more->ddsCapsEx.dwCaps2 & DDSCAPS2_VOLUME)) {
+            /* A volume: its slices follow each other, a slice pitch apart. */
+            depth = more->ddsCapsEx.dwCaps4;
+            if (!depth || depth > RB2K_D7_VOLUME_SIDE || format >= TexDxt1) {
+                data->ddRVal = DDERR_INVALIDPARAMS;
+                return rc;
+            }
+        }
         if (!(desc->ddsCaps.dwCaps & DDSCAPS_MIPMAP) &&
             (g->wWidth != desc->dwWidth || g->wHeight != desc->dwHeight)) {
             data->ddRVal = DDERR_INVALIDPARAMS;
@@ -241,6 +250,13 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
             /* Compressed levels hold rows of 4x4 blocks. */
             level->lPitch = (rb_d7_row_bytes(format, level->wWidth) + 3) & ~3;
             level->dwUserMemSize = level->lPitch * rb_d7_rows(format, level->wHeight);
+            if (depth > 1) {
+                ULONG shift = 0, slices;
+                while (shift < 16 && (desc->dwWidth >> shift) > level->wWidth) ++shift;
+                slices = depth >> shift ? depth >> shift : 1;
+                level->dwBlockSizeY = level->dwUserMemSize;   /* the slice pitch */
+                level->dwUserMemSize *= slices;
+            }
             level->fpVidMem = DDHAL_PLEASEALLOC_USERMEM;
         }
         desc->lPitch = g->lPitch;
@@ -649,17 +665,24 @@ static DWORD APIENTRY lock_surface(PDD_LOCKDATA data)
                  * allocated for us. Windows would add the process's view of
                  * the frame buffer to that address once a full-screen chain
                  * has mapped one, so the address is given here. */
-                ULONG format = rb_d7_texture_format(&g->ddpfSurface, d->mode.BitsPerPlane);
-                if (data->bHasRect && !rect_inside(&data->rArea, g->wWidth, g->wHeight))
+                ULONG format = rb_d7_texture_format(&g->ddpfSurface, d->mode.BitsPerPlane), front = 0;
+                RECTL area = data->rArea;
+                if (data->bHasRect && (data->dwFlags & DDLOCK_HASVOLUMETEXTUREBOXRECT)) {
+                    /* A box of a volume: front and back ride in the high words. */
+                    front = (ULONG)area.left >> 16;
+                    area.left &= 0xffff;
+                    area.right &= 0xffff;
+                }
+                if (data->bHasRect && !rect_inside(&area, g->wWidth, g->wHeight))
                     data->ddRVal = DDERR_INVALIDRECT;
                 else {
+                    offset = front * g->dwBlockSizeY;   /* the slice pitch of a volume */
                     if (data->bHasRect) {
                         if (format >= TexDxt1)   /* rows of 4x4 blocks */
-                            offset = (data->rArea.top / 4) * g->lPitch +
-                                     (data->rArea.left / 4) * (format == TexDxt1 ? 8 : 16);
+                            offset += (area.top / 4) * g->lPitch + (area.left / 4) * (format == TexDxt1 ? 8 : 16);
                         else
-                            offset = data->rArea.top * g->lPitch + data->rArea.left *
-                                     (format ? rb_d7_texel_bytes(format) : g->ddpfSurface.dwRGBBitCount / 8);
+                            offset += area.top * g->lPitch + area.left *
+                                      (format ? rb_d7_texel_bytes(format) : g->ddpfSurface.dwRGBBitCount / 8);
                     }
                     data->lpSurfData = (BYTE *)g->fpVidMem + offset;
                     data->ddRVal = DD_OK;

@@ -49,6 +49,7 @@ typedef struct {
     ULONG id, width, height, levels, bytes;   /* bytes: counted against RB2K_D7_TEXEL_BUDGET */
     ULONG format;                               /* host format; 0 for B8G8R8A8 */
     ULONG faces;                                /* 1, or 6 for a cube map */
+    ULONG depth;                                /* a volume's slices; 1 otherwise */
     ULONG contexts[RB2K_DD_SLOTS];
 } RB2K_TEXTURE;
 #define RB2K_D7_TEXEL_BUDGET (64UL << 20)
