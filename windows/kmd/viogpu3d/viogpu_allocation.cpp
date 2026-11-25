@@ -320,6 +320,16 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
     allocationInfo->PreferredSegment.Direction0 = 0;
 
     allocationInfo->Flags.CpuVisible = TRUE;
+#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+    // The CPU's view of an allocation is mapped cached, not write-combined. For every page it
+    // maps write-combined Windows changes the page's caching and interrupts all processors to
+    // tell them, which is most of the cost of writing a new texture where the processors are
+    // emulated. The aperture segment is cache-coherent (DxgkDdiQueryAdapterInfo), and the host
+    // reads an allocation's pages only when a transfer command names them. Vista only so far:
+    // on Windows 7 the first try left Direct3D 9 programs unable to start
+    // (docs/windows/kmd-port-notes.md, "Cached memory for allocations").
+    allocationInfo->Flags.Cached = TRUE;
+#endif
 
     allocationInfo->HintedBank.Value = 0;
     allocationInfo->MaximumRenamingListLength = 0;
@@ -336,6 +346,8 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
         // The compositor draws its primary on the host GPU. A CPU reader needs a
         // staging copy. Only the shared desktop primary contains CPU-addressable pixels.
         allocationInfo->Flags.CpuVisible = vistaTag == VIOGPU_VISTA_PRIMARY_TAG;
+        // The display memory segment is not described as cache-coherent.
+        allocationInfo->Flags.Cached = FALSE;
         const UINT segment = VistaDisplayMemory::SegmentId;
         allocationInfo->PreferredSegment.SegmentId0 = segment;
         allocationInfo->SupportedReadSegmentSet = allocationInfo->SupportedWriteSegmentSet = 1u << (segment - 1);
