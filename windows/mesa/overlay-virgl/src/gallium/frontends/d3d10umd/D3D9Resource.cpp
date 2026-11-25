@@ -10,6 +10,7 @@
 #include "D3D9Host.h"
 #include "RippleLog.h"
 #include "D3D9Trace.h"
+#include "D3D9Dxt.h"
 
 #include "tgsi/tgsi_ureg.h"
 #include "util/format/u_format.h"
@@ -1102,12 +1103,14 @@ D3D9TextureSubdata(D3D9Device *device, D3D9Resource *resource,
       tight = (uint8_t *)malloc((size_t)upload_layer_stride * depth);
       if (!tight)
          return false;
+      const enum d3d9_dxt_kind kind =
+         resource->format == D3D9_FMT_DXT1 ? D3D9_DXT_KIND_1 :
+         resource->format == D3D9_FMT_DXT2 || resource->format == D3D9_FMT_DXT3 ? D3D9_DXT_KIND_3 :
+                                                                                   D3D9_DXT_KIND_5;
       for (UINT z = 0; z < depth; ++z)
-         util_format_unpack_rgba_8unorm_rect(D3D9DxtPipeFormat(resource->format),
-                                             tight + (size_t)z * upload_layer_stride,
-                                             upload_stride,
-                                             (const uint8_t *)data + (size_t)z * layer_stride,
-                                             stride, box->width, height);
+         d3d9_dxt_decode(kind, tight + (size_t)z * upload_layer_stride, upload_stride,
+                         (const uint8_t *)data + (size_t)z * layer_stride, stride, box->width,
+                         height);
       upload_data = tight;
    } else if (!pitched_bitmap && (stride != row_bytes || layer_stride != tight_layer_stride)) {
       if (depth > SIZE_MAX / tight_layer_stride)
