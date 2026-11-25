@@ -276,13 +276,14 @@ Second try (2026-11-16), with the kernel driver of "Speed, third round"
 (`docs/windows/kmd-port-notes.md`): the desktop comes up in under two minutes from start,
 Windows Basic as before. Chess Titans stopped at "Loading": the host renderer refused its
 textures (`Unknown format is 106` in the VM's debug log, then the context dropped). Format 106 is
-DXT1; ANGLE gives UTM's renderer no S3TC. The Direct3D 9 driver now asks the host for the DXT
-formats when a device is made, and where they are missing keeps DXT textures as R8G8B8A8 and
-decompresses them on upload (the program still sees DXT), since 2026-11-25 with a decoder of
-its own (`mesa-win7.md`, "A game in UTM: where the time goes"). Chess Titans
-then draws right, marble and reflections. Still open there: a DXT texture the program locks
-directly in video memory (rare; textures normally arrive by the runtime's upload) is mapped as
-R8G8B8A8, not converted.
+DXT1; UTM's renderer offers the guest no DXT formats (ANGLE has them, under names that
+virglrenderer does not look for: `mesa-win7.md`, "UTM's host could take DXT textures"). The
+Direct3D 9 driver now asks the host for the DXT formats when a device is made, and where they
+are missing keeps DXT textures as R8G8B8A8 and decompresses them on upload (the program still
+sees DXT), since 2026-11-25 with a decoder of its own (`mesa-win7.md`, "A game in UTM: where
+the time goes"). Chess Titans then draws right, marble and reflections. Still open there: a
+DXT texture the program locks directly in video memory (rare; textures normally arrive by the
+runtime's upload) is mapped as R8G8B8A8, not converted.
 
 Third try (2026-11-17): Aero. The compositor runs on the driver's Direct3D 9 part there, after
 six changes (`mesa-win7.md`, "Aero on a host without Direct3D 10"): glass frames, taskbar and
