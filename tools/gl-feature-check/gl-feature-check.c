@@ -660,6 +660,272 @@ static void run_vbo(const char *name, CGLPixelFormatAttribute renderer)
 }
 
 
+/* Three sampler2D uniforms on units 0, 1 and 2 (a red, a green and a blue texture), declared
+ * in the order Cinebench R11.5's facade shader has them (the unit 2 one first, the unit 0 one
+ * last). Each case prints what the lookups through the unit 1 and unit 2 samplers give:
+ *   all used   every sampler contributes
+ *   0 unused   the unit 0 lookup is there but its result is multiplied by a constant zero, as
+ *              a light without highlights makes it in Cinebench
+ *   0 absent   the unit 0 sampler is declared and never used
+ * Right is "0 255 0" for unit 1 and "0 0 255" for unit 2 in every case. */
+static void run_samplers(const char *name, CGLPixelFormatAttribute renderer)
+{
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
+                                        renderer, 0 };
+    if (!renderer)
+        attrs[3] = 0;
+    CGLPixelFormatObj pf;
+    GLint n;
+    CGLContextObj c;
+    if (CGLChoosePixelFormat(attrs, &pf, &n) || !pf || CGLCreateContext(pf, NULL, &c))
+        return;
+    CGLSetCurrentContext(c);
+    static const unsigned char colours[3][4] = { { 255, 0, 0, 255 }, { 0, 255, 0, 255 },
+                                                 { 0, 0, 255, 255 } };
+    GLuint tex[3], col, fbo;
+    glGenTextures(3, tex);
+    for (int i = 0; i < 3; i++) {
+        unsigned char img[8 * 8 * 4];
+        for (int p = 0; p < 64; p++)
+            memcpy(img + p * 4, colours[i], 4);
+        glActiveTexture(GL_TEXTURE0 + i);
+        glBindTexture(GL_TEXTURE_2D, tex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 8, 8, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    }
+    glActiveTexture(GL_TEXTURE3);
+    glGenTextures(1, &col);
+    glBindTexture(GL_TEXTURE_2D, col);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glActiveTexture(GL_TEXTURE0);
+    glGenFramebuffersEXT(1, &fbo);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+    glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_2D, col, 0);
+    glViewport(0, 0, W, H);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    static const char *vs_src =
+        "void main() { gl_Position = ftransform(); gl_TexCoord[0] = gl_MultiTexCoord0; }\n";
+    static const char *head =
+        "uniform sampler2D bmptex6F;\n"         /* unit 2 */
+        "uniform sampler2D bmptex4F;\n"         /* unit 1 */
+        "uniform float which;\n"
+        "uniform sampler2D matspecfn_0F;\n"     /* unit 0 */
+        "void main() {\n"
+        "  vec2 uvw = fract(gl_TexCoord[0].xy);\n"
+        "  vec4 ocolor = vec4(0.0, 0.0, 0.0, 1.0);\n";
+    static const char *body[3] = {
+        "  ocolor.rgb += texture2D(matspecfn_0F, uvw).rgb * 0.001;\n",
+        "  vec3 lightcolorS = vec3(0.0);\n"
+        "  vec3 diffspec = vec3(0.3, 0.4, 0.5);\n"
+        "  diffspec.y = diffspec.z > 0.0 ? texture2D(matspecfn_0F, diffspec.yz).r : 0.0;\n"
+        "  ocolor.rgb += diffspec.yyy * max(vec3(0.0), lightcolorS.rgb);\n",
+        "" };
+    static const char *tail =
+        "  vec4 color_1 = texture2D(bmptex6F, uvw.xy);\n"
+        "  vec4 color_5 = texture2D(bmptex4F, uvw.xy);\n"
+        "  vec4 color_0 = texture2D(matspecfn_0F, uvw.xy);\n"
+        "  ocolor.rgb += which > 1.5 ? color_0.rgb : which > 0.5 ? color_1.rgb : color_5.rgb;\n"
+        "  gl_FragColor = ocolor;\n"
+        "}\n";
+    static const char *label[3] = { "all used", "0 unused", "0 absent" };
+    printf("%s (%s):\n", name, glGetString(GL_RENDERER));
+    for (int v = 0; v < 3; v++) {
+        char fs_src[2048];
+        snprintf(fs_src, sizeof(fs_src), "%s%s%s", head, body[v], tail);
+        const char *fsp = fs_src;
+        GLhandleARB vs = glCreateShaderObjectARB(GL_VERTEX_SHADER_ARB);
+        GLhandleARB fs = glCreateShaderObjectARB(GL_FRAGMENT_SHADER_ARB);
+        GLhandleARB prog = glCreateProgramObjectARB();
+        glShaderSourceARB(vs, 1, &vs_src, NULL);
+        glShaderSourceARB(fs, 1, &fsp, NULL);
+        glCompileShaderARB(vs);
+        glCompileShaderARB(fs);
+        glAttachObjectARB(prog, vs);
+        glAttachObjectARB(prog, fs);
+        glLinkProgramARB(prog);
+        glUseProgramObjectARB(prog);
+        GLint l0 = glGetUniformLocationARB(prog, "matspecfn_0F");
+        GLint l1 = glGetUniformLocationARB(prog, "bmptex4F");
+        GLint l2 = glGetUniformLocationARB(prog, "bmptex6F");
+        /* Cinebench's order: unit 0, then 1, then 2, binding the texture just before */
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, tex[0]);
+        glUniform1iARB(l0, 0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, tex[1]);
+        glUniform1iARB(l1, 1);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, tex[2]);
+        glUniform1iARB(l2, 2);
+        glActiveTexture(GL_TEXTURE0);
+        unsigned char got[3][4];
+        for (int w = 0; w < 3; w++) {
+            glUniform1fARB(glGetUniformLocationARB(prog, "which"), (float)w);
+            glClearColor(0.5f, 0.5f, 0.5f, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glBegin(GL_QUADS);
+            glTexCoord2f(0, 0); glVertex2f(-1, -1);
+            glTexCoord2f(1, 0); glVertex2f(1, -1);
+            glTexCoord2f(1, 1); glVertex2f(1, 1);
+            glTexCoord2f(0, 1); glVertex2f(-1, 1);
+            glEnd();
+            glReadPixels(W / 2, H / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, got[w]);
+        }
+        glUseProgramObjectARB(0);
+        printf("  %s (locations %d %d %d): unit 0 sampler gives %d %d %d, unit 1 sampler gives %d %d %d, unit 2 sampler gives "
+               "%d %d %d; GL error 0x%x\n", label[v], l0, l1, l2, got[2][0], got[2][1], got[2][2], got[0][0], got[0][1],
+               got[0][2], got[1][0], got[1][1], got[1][2], glGetError());
+    }
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+    CGLDestroyPixelFormat(pf);
+}
+
+/* The same surface drawn by two GLSL programs must land on the same depth. Cinebench R11.5
+ * draws layers of one object with different programs whose vertex shaders all compute the
+ * position with the same words ("oposition = (transmatrix * iposition);") next to different
+ * other work. Program A does only that; program B also transforms the vertex with two more
+ * matrices, as Cinebench's material shaders do. A draws a tilted quad with GL_LESS, B draws it
+ * again with GL_EQUAL: every pixel must pass (and with GL_LESS none). */
+static void run_samepos(const char *name, CGLPixelFormatAttribute renderer)
+{
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
+                                        renderer, 0 };
+    if (!renderer)
+        attrs[3] = 0;
+    CGLPixelFormatObj pf;
+    GLint n;
+    CGLContextObj c;
+    if (CGLChoosePixelFormat(attrs, &pf, &n) || !pf || CGLCreateContext(pf, NULL, &c))
+        return;
+    CGLSetCurrentContext(c);
+    static const char *vs_a =
+        "uniform mat4 transmatrix;\n"
+        "void main() {\n"
+        "  vec4 oposition;\n"
+        "  vec4 iposition = gl_Vertex;\n"
+        "  iposition.w = 1.0;\n"
+        "  oposition = (transmatrix * iposition);\n"
+        "  gl_Position = oposition;\n"
+        "}\n";
+    static const char *fs_a = "void main() { gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0); }\n";
+    static const char *vs_b =
+        "uniform mat4 transmatrix;\n"
+        "uniform mat4 objectmatrix;\n"
+        "uniform mat3 objectmatrix_n;\n"
+        "uniform mat3 texmatrixR;\n"
+        "uniform vec3 texmatrixP;\n"
+        "void main() {\n"
+        "  vec4 worldcoord;\n"
+        "  vec4 oposition;\n"
+        "  vec3 ouvw;\n"
+        "  vec4 iposition = gl_Vertex;\n"
+        "  iposition.w = 1.0;\n"
+        "  worldcoord = objectmatrix * iposition;\n"
+        "  ouvw.xyz = (texmatrixR * iposition.xyz) + texmatrixP;\n"
+        "  oposition = (transmatrix * iposition);\n"
+        "  gl_TexCoord[0] = worldcoord;\n"
+        "  gl_TexCoord[1].xyz = objectmatrix_n * gl_Normal;\n"
+        "  gl_TexCoord[2].xyz = ouvw;\n"
+        "  gl_Position = oposition;\n"
+        "}\n";
+    static const char *fs_b =
+        "void main() {\n"
+        "  vec3 v = gl_TexCoord[0].xyz + gl_TexCoord[1].xyz + fract(gl_TexCoord[2].xyz);\n"
+        "  gl_FragColor = vec4(0.0, 0.0, 1.0, 1.0) + vec4(v * 0.0000001, 0.0);\n"
+        "}\n";
+    const char *src[4] = { vs_a, fs_a, vs_b, fs_b };
+    GLhandleARB prog[2];
+    for (int p = 0; p < 2; p++) {
+        GLhandleARB vs = glCreateShaderObjectARB(GL_VERTEX_SHADER_ARB);
+        GLhandleARB fs = glCreateShaderObjectARB(GL_FRAGMENT_SHADER_ARB);
+        prog[p] = glCreateProgramObjectARB();
+        glShaderSourceARB(vs, 1, &src[p * 2], NULL);
+        glShaderSourceARB(fs, 1, &src[p * 2 + 1], NULL);
+        glCompileShaderARB(vs);
+        glCompileShaderARB(fs);
+        glAttachObjectARB(prog[p], vs);
+        glAttachObjectARB(prog[p], fs);
+        glLinkProgramARB(prog[p]);
+    }
+    /* A projection with awkward numbers, column major: a quad from a real scene lands here. */
+    static const GLfloat trans[16] = { 0.000731f, 0.000113f, -0.000207f, -0.000199f,
+                                       -0.000091f, 0.001057f, 0.000311f, 0.000301f,
+                                       0.000277f, -0.000189f, 0.000403f, 0.000397f,
+                                       -0.137f, 0.229f, 0.371f, 1.613f };
+    static const GLfloat obj[16] = { 0.83f, 0.11f, -0.54f, 0, -0.07f, 0.99f, 0.09f, 0,
+                                     0.55f, -0.04f, 0.83f, 0, 22297.1f, 59.53f, 4124.03f, 1 };
+    static const GLfloat m3[9] = { 0.83f, 0.11f, -0.54f, -0.07f, 0.99f, 0.09f, 0.55f, -0.04f, 0.83f };
+    static const GLfloat quad[4][3] = { { -2811.37f, -2603.11f, 913.77f },
+                                        { 2907.53f, -2499.83f, -1207.19f },
+                                        { 3011.29f, 2713.61f, 1511.03f },
+                                        { -2707.91f, 2809.07f, -1103.47f } };
+    GLuint col, dep, fbo;
+    glGenTextures(1, &col);
+    glBindTexture(GL_TEXTURE_2D, col);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glGenTextures(1, &dep);
+    glBindTexture(GL_TEXTURE_2D, dep);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32, W, H, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glGenFramebuffersEXT(1, &fbo);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+    glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_2D, col, 0);
+    glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_DEPTH_ATTACHMENT_EXT, GL_TEXTURE_2D, dep, 0);
+    glViewport(0, 0, W, H);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_DEPTH_TEST);
+    printf("%s (%s):\n", name, glGetString(GL_RENDERER));
+    static const GLenum funcs[2] = { GL_EQUAL, GL_LESS };
+    for (int t = 0; t < 2; t++) {
+        unsigned char px[W * H * 4];
+        int red = 0, blue = 0;
+        glClearColor(0, 0, 0, 1);
+        glClearDepth(1.0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        for (int p = 0; p < 2; p++) {
+            glUseProgramObjectARB(prog[p]);
+            glUniformMatrix4fvARB(glGetUniformLocationARB(prog[p], "transmatrix"), 1, GL_FALSE, trans);
+            if (p) {
+                glUniformMatrix4fvARB(glGetUniformLocationARB(prog[p], "objectmatrix"), 1, GL_FALSE, obj);
+                glUniformMatrix3fvARB(glGetUniformLocationARB(prog[p], "objectmatrix_n"), 1, GL_FALSE, m3);
+                glUniformMatrix3fvARB(glGetUniformLocationARB(prog[p], "texmatrixR"), 1, GL_FALSE, m3);
+                glUniform3fARB(glGetUniformLocationARB(prog[p], "texmatrixP"), 0.31f, 0.47f, 0.59f);
+            }
+            glDepthFunc(p ? funcs[t] : GL_LESS);
+            glBegin(GL_QUADS);
+            for (int v = 0; v < 4; v++) {
+                glNormal3f(0.2f, 0.3f, 0.93f);
+                glVertex3fv(quad[v]);
+            }
+            glEnd();
+        }
+        glUseProgramObjectARB(0);
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        for (int i = 0; i < W * H; i++) {
+            red += px[i * 4] > 128;
+            blue += px[i * 4 + 2] > 128;
+        }
+        printf("  second program with %s: its pixels %4d, the first program's left %4d; GL error "
+               "0x%x\n", t ? "GL_LESS " : "GL_EQUAL", blue, red, glGetError());
+    }
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+    CGLDestroyPixelFormat(pf);
+}
+
 /* Depth peeling as Cinebench R11.5 draws its glass: a slanted surface is drawn into a depth
  * texture, then drawn again into a second framebuffer with a program that samples the first
  * depth texture (GL_DEPTH_TEXTURE_MODE GL_ALPHA) at its own pixel and discards the fragment
@@ -1663,6 +1929,16 @@ int main(int argc, char **argv)
 
         run_tex3d("ours", 0);
         run_tex3d("software", (CGLPixelFormatAttribute)0x00020400);
+        return 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "samplers")) {
+        run_samplers("ours", 0);
+        run_samplers("software", (CGLPixelFormatAttribute)0x00020400);
+        return 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "samepos")) {
+        run_samepos("ours", 0);
+        run_samepos("software", (CGLPixelFormatAttribute)0x00020400);
         return 0;
     }
     if (argc > 1 && !strcmp(argv[1], "peel")) {
