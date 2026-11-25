@@ -402,6 +402,13 @@ emulated CPU: about a third in the game's own lens flare test
 (`M3GMesh::IntersectsWithLineFast`), about a third in our draw path (sampler state encoding and
 a new transfer for each vertex upload), and four more threads poll with `usleep`.
 
+Later (2026-11-25): the CPU decode is now a block at a time (`ripple_s3tc.h`, patch 0011; the
+same decoder as the Vista/7 driver's, same texels as Mesa's on 20 million random ones). Measured
+in UTM (ripple-sl1068, the same boot, with the debug switches `dxtstats` and `dxtmesa`): the game's
+start to its menu decodes 132 DXT uploads, 15.4 million texels, in 0.33 s against 1.47 s with
+Mesa's unpack. Its last upload comes about 171 s after launch either way, so the decode was a
+small part of that wait; most of it lies elsewhere.
+
 Looking at a guest's screen without a screenshot from the host: two debug switches write what
 the driver has, as PPM files in `/Library/Logs/RippleGL/` (`scripts/sheet.sh` converts them).
 `touch displaydump` gives the whole screen at WindowServer's next redraw (`display.ppm`);
