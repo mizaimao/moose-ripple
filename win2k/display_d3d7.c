@@ -78,6 +78,9 @@ typedef struct {
     ULONG zEnable, zWrite, zFunc;
     ULONG alphaTest, alphaFunc, alphaRef, blend, srcBlend, dstBlend;
     ULONG fog, specular, stencil, clipPlanes, colorKey, factor, lighting;
+    /* The stencil test: comparison, reference, masks, and the operations on
+     * fail, depth fail and pass (D3D values). */
+    ULONG stencilFunc, stencilRef, stencilMask, stencilWriteMask, stencilFail, stencilZFail, stencilPass;
     ULONG matrices[3][16];      /* world, view, projection */
     ULONG viewport[4], zRange[2];
     /* Lighting: D3DRENDERSTATE_AMBIENT, COLORVERTEX, LOCALVIEWER and
@@ -145,6 +148,7 @@ typedef struct {
 
 static void release_shaders(D7_CONTEXT *c);
 static void release_blocks(D7_CONTEXT *c);
+static void stencil_state(const D7_CONTEXT *c, const DD_SLOT *z, ULONG *stencil, ULONG *ref);
 static HSEMAPHORE registry;
 static D8_BUFFER *buffers;
 static WORD *indexScratch;      /* indices copied out of the process before use */
@@ -604,6 +608,9 @@ static DWORD APIENTRY create_context(LPD3DNTHAL_CONTEXTCREATEDATA a)
             c->srcBlend = D3DBLEND_ONE;
             c->dstBlend = D3DBLEND_ZERO;
             c->factor = 0xffffffff;
+            c->stencilFunc = D3DCMP_ALWAYS;
+            c->stencilMask = c->stencilWriteMask = 0xffffffff;
+            c->stencilFail = c->stencilZFail = c->stencilPass = D3DSTENCILOP_KEEP;
             c->lighting = TRUE;
             c->colorVertex = c->localViewer = TRUE;
             c->sources[0] = D3DMCS_COLOR1;
@@ -764,6 +771,13 @@ static void render_state(D7_CONTEXT *c, ULONG state, ULONG value)
     case D3DRENDERSTATE_RANGEFOGENABLE: c->rangeFog = value; break;
     case D3DRENDERSTATE_SPECULARENABLE: c->specular = value; break;
     case D3DRENDERSTATE_STENCILENABLE: c->stencil = value; break;
+    case D3DRENDERSTATE_STENCILFAIL: c->stencilFail = value; break;
+    case D3DRENDERSTATE_STENCILZFAIL: c->stencilZFail = value; break;
+    case D3DRENDERSTATE_STENCILPASS: c->stencilPass = value; break;
+    case D3DRENDERSTATE_STENCILFUNC: c->stencilFunc = value; break;
+    case D3DRENDERSTATE_STENCILREF: c->stencilRef = value; break;
+    case D3DRENDERSTATE_STENCILMASK: c->stencilMask = value; break;
+    case D3DRENDERSTATE_STENCILWRITEMASK: c->stencilWriteMask = value; break;
     case D3DRENDERSTATE_CLIPPLANEENABLE: c->clipPlanes = value; break;
     case D3DRENDERSTATE_COLORKEYENABLE: c->colorKey = value; break;
     case D3DRENDERSTATE_TEXTUREFACTOR: c->factor = value; break;
@@ -1301,7 +1315,6 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     if (FAILED(hr)) return hr;
     if (!p->primitives) return DD_OK;
     if (c->fill != D3DFILL_SOLID) { skip(c, RB2K_D7_SKIP_FILL, p->primitives); return DD_OK; }
-    if (c->stencil) { skip(c, RB2K_D7_SKIP_STENCIL, p->primitives); return DD_OK; }
     /* Two stages are drawn; a third one counts as the stage-one skip. */
     if (st->colorOp != D3DTOP_DISABLE && st1->colorOp != D3DTOP_DISABLE && c->stages[2].colorOp != D3DTOP_DISABLE) {
         skip(c, RB2K_D7_SKIP_STAGE1, p->primitives);
@@ -1377,11 +1390,12 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     draw->depth = z ? z->id : 0;
     if (z && c->zEnable && c->zFunc >= D3DCMP_NEVER && c->zFunc <= D3DCMP_ALWAYS)
         draw->depthState = RB2K_Z_ENABLE | (c->zWrite ? RB2K_Z_WRITE : 0) | (c->zFunc - 1);
+    stencil_state(c, z, &draw->stencil, &draw->stencilRef);
     if (c->alphaTest && c->alphaFunc >= D3DCMP_NEVER && c->alphaFunc <= D3DCMP_ALWAYS)
         draw->alphaTest = RB2K_D7_ON | (c->alphaFunc << 8) | (c->alphaRef & 255);
     if (c->blend && c->srcBlend >= D3DBLEND_ZERO && c->srcBlend <= D3DBLEND_BOTHINVSRCALPHA &&
         c->dstBlend >= D3DBLEND_ZERO && c->dstBlend <= D3DBLEND_BOTHINVSRCALPHA)
-        draw->blend = RB2K_D7_ON | (c->srcBlend << 8) | c->dstBlend;
+        draw->blend = RB2K_D7_ON | (c->srcBlend << 8) | c->dstBlend | (s->alpha ? RB2K_BLEND_DEST_ALPHA : 0);
     draw->cull = c->cull >= D3DCULL_NONE && c->cull <= D3DCULL_CCW ? c->cull : D3DCULL_NONE;
     draw->specular = c->specular ? 1 : 0;
     draw->factor = c->factor;
@@ -1511,6 +1525,21 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
 }
 
 /* ---- Direct3D 8 pixel shaders ---- */
+
+/* The stencil words of a draw (RB2K_STENCIL_ON); none without a stencil
+ * buffer, where Direct3D's test always passes. */
+static void stencil_state(const D7_CONTEXT *c, const DD_SLOT *z, ULONG *stencil, ULONG *ref)
+{
+    /* D3DSTENCILOP KEEP..DECR to Gallium's KEEP, ZERO, REPLACE, INCR (clamp),
+     * DECR (clamp), INCR_WRAP, DECR_WRAP, INVERT. */
+    static const UCHAR ops[9] = { 0, 0, 1, 2, 3, 4, 7, 5, 6 };
+    *stencil = *ref = 0;
+    if (!c->stencil || !z || !z->stencil || c->stencilFunc < D3DCMP_NEVER || c->stencilFunc > D3DCMP_ALWAYS ||
+        c->stencilFail - 1 > 7 || c->stencilZFail - 1 > 7 || c->stencilPass - 1 > 7) return;
+    *stencil = RB2K_STENCIL_ON | (c->stencilFunc - 1) | ops[c->stencilFail] << 4 | ops[c->stencilZFail] << 8 |
+               ops[c->stencilPass] << 12;
+    *ref = (c->stencilRef & 255) | (c->stencilMask & 255) << 8 | (c->stencilWriteMask & 255) << 16;
+}
 
 static D8_SHADER *find_shader(D7_CONTEXT *c, ULONG handle)
 {
@@ -1768,11 +1797,12 @@ static BOOL pixel_states(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, const D8_SHADER *s
     draw->depth = z ? z->id : 0;
     if (z && c->zEnable && c->zFunc >= D3DCMP_NEVER && c->zFunc <= D3DCMP_ALWAYS)
         draw->depthState = RB2K_Z_ENABLE | (c->zWrite ? RB2K_Z_WRITE : 0) | (c->zFunc - 1);
+    stencil_state(c, z, &draw->stencil, &draw->stencilRef);
     if (c->alphaTest && c->alphaFunc >= D3DCMP_NEVER && c->alphaFunc <= D3DCMP_ALWAYS)
         draw->alphaTest = RB2K_D7_ON | (c->alphaFunc << 8) | (c->alphaRef & 255);
     if (c->blend && c->srcBlend >= D3DBLEND_ZERO && c->srcBlend <= D3DBLEND_BOTHINVSRCALPHA &&
         c->dstBlend >= D3DBLEND_ZERO && c->dstBlend <= D3DBLEND_BOTHINVSRCALPHA)
-        draw->blend = RB2K_D7_ON | (c->srcBlend << 8) | c->dstBlend;
+        draw->blend = RB2K_D7_ON | (c->srcBlend << 8) | c->dstBlend | (s->alpha ? RB2K_BLEND_DEST_ALPHA : 0);
     draw->cull = c->cull >= D3DCULL_NONE && c->cull <= D3DCULL_CCW ? c->cull : D3DCULL_NONE;
     draw->program = program;
     draw->fog = fog;
@@ -1808,7 +1838,6 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     if (FAILED(hr)) return hr;
     if (!p->primitives) return DD_OK;
     if (c->fill != D3DFILL_SOLID) { skip(c, RB2K_D7_SKIP_FILL, p->primitives); return DD_OK; }
-    if (c->stencil) { skip(c, RB2K_D7_SKIP_STENCIL, p->primitives); return DD_OK; }
     position = fvf & D3DFVF_POSITION_MASK;
     objectSpace = position != D3DFVF_XYZRHW;
     /* Fog as for the fixed-function draws (fog_draw). */
@@ -1958,7 +1987,6 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
     if (FAILED(hr)) return hr;
     if (!p->primitives) return DD_OK;
     if (c->fill != D3DFILL_SOLID) { skip(c, RB2K_D7_SKIP_FILL, p->primitives); return DD_OK; }
-    if (c->stencil) { skip(c, RB2K_D7_SKIP_STENCIL, p->primitives); return DD_OK; }
     if (c->fog) {
         if (c->fogTable >= D3DFOG_EXP && c->fogTable <= D3DFOG_LINEAR)
             fog = RB2K_D7_FOG_TABLE | c->fogTable << RB2K_D7_FOG_MODE_SHIFT | (c->wNear != c->wFar ? RB2K_D7_FOG_W : 0);
@@ -2210,7 +2238,8 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
     ++d->d7draw.texBlts;
 }
 
-static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, ULONG depthBits, const RECT *rects, ULONG count)
+static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, ULONG depthBits, ULONG stencil, const RECT *rects,
+                     ULONG count)
 {
     DD_SLOT *s, *z;
     RB2K_DD_FILL f;
@@ -2218,8 +2247,11 @@ static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, ULONG depthBits, c
     HRESULT hr = render_surfaces(c, &s, &z);
     if (FAILED(hr)) return hr;
     if (!flags) return DD_OK;
-    /* Stencil and part-target clears are not drawn yet. */
-    if ((flags & ~(D3DCLEAR_TARGET|D3DCLEAR_ZBUFFER)) || ((flags & D3DCLEAR_ZBUFFER) && !z) ||
+    /* Without a stencil buffer a stencil clear has nothing to clear. */
+    if ((flags & D3DCLEAR_STENCIL) && (!z || !z->stencil)) flags &= ~D3DCLEAR_STENCIL;
+    if (!flags) return DD_OK;
+    /* Part-target clears are not drawn yet. */
+    if ((flags & ~(D3DCLEAR_TARGET|D3DCLEAR_ZBUFFER|D3DCLEAR_STENCIL)) || ((flags & D3DCLEAR_ZBUFFER) && !z) ||
         count != 1 || !rects || rects->left || rects->top ||
         rects->right != (LONG)s->width || rects->bottom != (LONG)s->height) {
         ++c->display->d7draw.skipped[RB2K_D7_SKIP_CLEAR];
@@ -2232,6 +2264,7 @@ static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, ULONG depthBits, c
         both.flags = flags;
         both.color = color;
         both.depthBits = depthBits;
+        both.stencil = stencil & 255;
         if (miniport(c->display, IOCTL_RB2K_D3D7_ZCLEAR, &both, sizeof(both), NULL, 0, &written))
             return DDERR_SURFACELOST;
     } else {
@@ -2786,7 +2819,7 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             used = FIELD_OFFSET(D3DNTHAL_DP2CLEAR, Rects) + n*sizeof(RECT);
             if (used > remaining) return DDERR_INVALIDPARAMS;
             RtlCopyMemory(&depthBits, &f->dvFillDepth, sizeof(depthBits));
-            hr = clear(c, f->dwFlags, f->dwFillColor, depthBits, f->Rects, n);
+            hr = clear(c, f->dwFlags, f->dwFillColor, depthBits, f->dwFillStencil, f->Rects, n);
             if (FAILED(hr)) return hr;
             break;
         }
@@ -3155,14 +3188,14 @@ void rb_d7_caps(DD_HALINFO *info, BOOL depth)
         if (!withDepth.dwSize) {
             withDepth = global;
             withDepth.hwCaps.dwFlags |= D3DDD_DEVICEZBUFFERBITDEPTH;
-            withDepth.hwCaps.dwDeviceZBufferBitDepth = DDBD_16;
+            withDepth.hwCaps.dwDeviceZBufferBitDepth = DDBD_16 | DDBD_32;
             withDepth.hwCaps.dpcTriCaps.dwRasterCaps |= D3DPRASTERCAPS_ZTEST;
             withDepth.hwCaps.dpcTriCaps.dwZCmpCaps = D3DPCMPCAPS_NEVER | D3DPCMPCAPS_LESS |
                 D3DPCMPCAPS_EQUAL | D3DPCMPCAPS_LESSEQUAL | D3DPCMPCAPS_GREATER |
                 D3DPCMPCAPS_NOTEQUAL | D3DPCMPCAPS_GREATEREQUAL | D3DPCMPCAPS_ALWAYS;
         }
         EngReleaseSemaphore(registry);
-        info->ddCaps.dwZBufferBitDepths = DDBD_16;
+        info->ddCaps.dwZBufferBitDepths = DDBD_16 | DDBD_32;
         info->lpD3DGlobalDriverData = &withDepth;
     }
     info->lpD3DHALCallbacks = (PVOID)&cb;
@@ -3175,20 +3208,22 @@ void rb_d7_caps(DD_HALINFO *info, BOOL depth)
 static const ULONG d8Formats[][2] = {
     { RbFmtX8R8G8B8, RbFormatTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
                      RbFormatDisplayMode | RbFormat3D },
-    { RbFmtA8R8G8B8, RbFormatTexture },
+    /* a back buffer with alpha over the X8R8G8B8 desktop, or a target */
+    { RbFmtA8R8G8B8, RbFormatTexture | RbFormatOffscreenTarget | RbFormatSameTargetUpToAlpha },
     { RbFmtR5G6B5, RbFormatTexture | RbFormatDisplayMode },
     { RbFmtX1R5G5B5, RbFormatTexture },
     { RbFmtA1R5G5B5, RbFormatTexture },
     { RbFmtA4R4G4B4, RbFormatTexture },
     { RbFmtDxt1, RbFormatTexture }, { RbFmtDxt2, RbFormatTexture }, { RbFmtDxt3, RbFormatTexture },
     { RbFmtDxt4, RbFormatTexture }, { RbFmtDxt5, RbFormatTexture },
-    { RbFmtD16, RbFormatZStencil }      /* last: only with depth rendering */
+    /* last: only with depth rendering */
+    { RbFmtD16, RbFormatZStencil }, { RbFmtD24S8, RbFormatZStencil }, { RbFmtD24X8, RbFormatZStencil }
 };
 
 static ULONG d8_format_count(const DISPLAY *d)
 {
     ULONG n = sizeof(d8Formats) / sizeof(d8Formats[0]);
-    return d->z16Render ? n : n - 1;
+    return d->z16Render ? n : n - 3;
 }
 
 static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDEDCAPS *x)
@@ -3209,6 +3244,7 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     c->textureCaps = tri->dwTextureCaps | 0x4000;     /* D3DPTEXTURECAPS_MIPMAP */
     c->textureFilterCaps = tri->dwTextureFilterCaps;
     c->textureAddressCaps = tri->dwTextureAddressCaps;
+    c->stencilCaps = d->z24s8 ? 0xff : 0;
     if (d->z16Render) {
         c->rasterCaps |= D3DPRASTERCAPS_ZTEST;
         c->zCmpCaps = D3DPCMPCAPS_NEVER | D3DPCMPCAPS_LESS | D3DPCMPCAPS_EQUAL | D3DPCMPCAPS_LESSEQUAL |
@@ -3319,9 +3355,13 @@ BOOL rb_d7_info(PDD_GETDRIVERINFODATA a)
     static const GUID extended = {0x7de41f80,0x9d93,0x11d0,{0x89,0xab,0x00,0xa0,0xc9,0x05,0x41,0x29}};
     /* Return the colour-only descriptor when paired with an older miniport. */
     static const DWORD depthFormats = 0;
-    static const struct { DWORD count; DDPIXELFORMAT format; } z16 = {
-        1, { .dwSize = sizeof(DDPIXELFORMAT), .dwFlags = DDPF_ZBUFFER,
-             .dwZBufferBitDepth = 16, .dwZBitMask = 0xffff }
+    /* 16 bits of depth, and 24 with 8 of stencil. */
+    static const struct { DWORD count; DDPIXELFORMAT format[2]; } z16 = {
+        2, { { .dwSize = sizeof(DDPIXELFORMAT), .dwFlags = DDPF_ZBUFFER,
+               .dwZBufferBitDepth = 16, .dwZBitMask = 0xffff },
+             { .dwSize = sizeof(DDPIXELFORMAT), .dwFlags = DDPF_ZBUFFER | DDPF_STENCILBUFFER,
+               .dwZBufferBitDepth = 32, .dwStencilBitDepth = 8, .dwZBitMask = 0xffffff00,
+               .dwStencilBitMask = 0xff } }
     };
     static const D3DNTHAL_CALLBACKS3 c3 = {
         .dwSize = sizeof(c3),
@@ -3345,6 +3385,7 @@ BOOL rb_d7_info(PDD_GETDRIVERINFODATA a)
         .dvGuardBandLeft = -4096.0f, .dvGuardBandTop = -4096.0f,
         .dvGuardBandRight = 4095.0f, .dvGuardBandBottom = 4095.0f,
         .dwFVFCaps = 8,
+        .dwStencilCaps = 0xff,  /* KEEP, ZERO, REPLACE, INCRSAT, DECRSAT, INVERT, INCR, DECR */
         .dwTextureOpCaps = D3DTEXOPCAPS_DISABLE | D3DTEXOPCAPS_SELECTARG1 | D3DTEXOPCAPS_SELECTARG2 |
             D3DTEXOPCAPS_MODULATE | D3DTEXOPCAPS_MODULATE2X | D3DTEXOPCAPS_MODULATE4X |
             D3DTEXOPCAPS_ADD | D3DTEXOPCAPS_ADDSIGNED | D3DTEXOPCAPS_ADDSIGNED2X |

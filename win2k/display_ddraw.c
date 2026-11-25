@@ -48,6 +48,17 @@ static ULONG page_size(DISPLAY *d)
     return f.pageBytes;
 }
 
+/* 32 bits of depth buffer: 24 of depth, and 8 of stencil or unused
+ * (Direct3D's D24S8 and D24X8), with the stencil in either byte. */
+static BOOL depth_stencil(const DDPIXELFORMAT *f)
+{
+    if (f->dwZBufferBitDepth != 32) return FALSE;
+    if (f->dwFlags == DDPF_ZBUFFER) return f->dwZBitMask == 0xffffff00 || f->dwZBitMask == 0x00ffffff;
+    return f->dwFlags == (DDPF_ZBUFFER | DDPF_STENCILBUFFER) && f->dwStencilBitDepth == 8 &&
+           ((f->dwZBitMask == 0xffffff00 && f->dwStencilBitMask == 0xff) ||
+            (f->dwZBitMask == 0x00ffffff && f->dwStencilBitMask == 0xff000000));
+}
+
 static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
 {
     DWORD caps = desc->ddsCaps.dwCaps;
@@ -60,8 +71,9 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
             !desc->dwHeight || desc->dwHeight > RB2K_DD_MAX_HEIGHT)
             return FALSE;
         if (desc->dwFlags & DDSD_PIXELFORMAT)
-            return fmt->dwSize == sizeof(*fmt) && fmt->dwFlags == DDPF_ZBUFFER &&
-                   fmt->dwZBufferBitDepth == 16 && fmt->dwZBitMask == 0xffff;
+            return fmt->dwSize == sizeof(*fmt) &&
+                   ((fmt->dwFlags == DDPF_ZBUFFER && fmt->dwZBufferBitDepth == 16 && fmt->dwZBitMask == 0xffff) ||
+                    (d->z24s8 && depth_stencil(fmt)));
         return (desc->dwFlags & DDSD_ZBUFFERBITDEPTH) && desc->dwZBufferBitDepth == 16;
     }
     if ((caps & DDSCAPS_TEXTURE) && !(caps & DDSCAPS_3DDEVICE)) {
@@ -94,6 +106,10 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
     if (d->mode.BitsPerPlane == 8)
         return (fmt->dwFlags & DDPF_PALETTEINDEXED8) &&
                !(fmt->dwFlags & ~(DDPF_PALETTEINDEXED8 | DDPF_RGB));
+    /* A 32-bit render target may keep alpha: the host image stores it. */
+    if (fmt->dwFlags == (DDPF_RGB | DDPF_ALPHAPIXELS) && d->mode.BitsPerPlane == 32 && (caps & DDSCAPS_3DDEVICE) &&
+        fmt->dwRGBAlphaBitMask == 0xff000000 && fmt->dwRBitMask == d->mode.RedMask &&
+        fmt->dwGBitMask == d->mode.GreenMask && fmt->dwBBitMask == d->mode.BlueMask) return TRUE;
     return fmt->dwFlags == DDPF_RGB && fmt->dwRBitMask == d->mode.RedMask &&
            fmt->dwGBitMask == d->mode.GreenMask && fmt->dwBBitMask == d->mode.BlueMask;
 }
@@ -156,7 +172,7 @@ static void release_chain(DISPLAY *d)
 
 static ULONG slot_pitch(const DD_SLOT *slot)
 {
-    return slot->width * (slot->depth16 ? sizeof(USHORT) : sizeof(ULONG));
+    return slot->width * (slot->depth16 && !slot->stencil ? sizeof(USHORT) : sizeof(ULONG));
 }
 
 static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
@@ -264,7 +280,9 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
     }
     create.width = desc->dwWidth;
     create.height = desc->dwHeight;
-    if (desc->ddsCaps.dwCaps & DDSCAPS_ZBUFFER) createCode = IOCTL_RB2K_DD_CREATE_Z16;
+    if (desc->ddsCaps.dwCaps & DDSCAPS_ZBUFFER)
+        createCode = (desc->dwFlags & DDSD_PIXELFORMAT) && depth_stencil(&desc->ddpfPixelFormat) ?
+                     IOCTL_RB2K_DD_CREATE_Z24S8 : IOCTL_RB2K_DD_CREATE_Z16;
     EngAcquireSemaphore(d->ddLock);
     slot = rb_dd_slot(d, NULL);
     if (!d->ddEnabled || rb_dd_slot(d, g))
@@ -277,7 +295,10 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
         slot->owner = EngGetCurrentProcessId();
         slot->width = create.width;
         slot->height = create.height;
-        slot->depth16 = createCode == IOCTL_RB2K_DD_CREATE_Z16;
+        slot->depth16 = createCode != IOCTL_RB2K_DD_CREATE;
+        slot->stencil = createCode == IOCTL_RB2K_DD_CREATE_Z24S8;
+        slot->alpha = !slot->depth16 && (desc->dwFlags & DDSD_PIXELFORMAT) &&
+                      (desc->ddpfPixelFormat.dwFlags & DDPF_ALPHAPIXELS);
         g->lPitch = slot_pitch(slot);
         g->dwUserMemSize = g->lPitch * create.height;
         g->fpVidMem = DDHAL_PLEASEALLOC_USERMEM;
@@ -551,7 +572,7 @@ static DWORD APIENTRY lock_surface(PDD_LOCKDATA data)
         if (!rect_inside(r, s->width, s->height)) {
             data->ddRVal = DDERR_INVALIDRECT; goto done;
         }
-        offset = (ULONG)r->top * slot_pitch(s) + r->left * (s->depth16 ? sizeof(USHORT) : sizeof(ULONG));
+        offset = (ULONG)r->top * slot_pitch(s) + r->left * (s->depth16 && !s->stencil ? sizeof(USHORT) : sizeof(ULONG));
     }
     bytes = slot_pitch(s) * s->height;
     if (!(data->dwFlags & DDLOCK_WRITEONLY) ||
@@ -811,6 +832,7 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     d->nativeD3D7 = (caps.gpuSurfaces & RB2K_DD_NATIVE_D3D7) != 0;
     d->z16Storage = (caps.gpuSurfaces & RB2K_DD_Z16_STORAGE) != 0;
     d->z16Render = d->z16Storage && (caps.gpuSurfaces & RB2K_DD_Z16_RENDER) != 0;
+    d->z24s8 = d->z16Render && (caps.gpuSurfaces & RB2K_DD_Z24S8) != 0;
     if (d->z16Storage) {
         info->ddCaps.ddsCaps.dwCaps |= DDSCAPS_ZBUFFER;
         v->dwZBufferAlign = sizeof(USHORT);
@@ -872,6 +894,7 @@ BOOL APIENTRY DrvEnableDirectDraw(DHPDEV pdev, DD_CALLBACKS *c, DD_SURFACECALLBA
     d->plainSurfaces = (caps.gpuSurfaces & RB2K_DD_PLAIN_SURFACES) != 0;
     d->z16Storage = (caps.gpuSurfaces & RB2K_DD_Z16_STORAGE) != 0;
     d->z16Render = d->z16Storage && (caps.gpuSurfaces & RB2K_DD_Z16_RENDER) != 0;
+    d->z24s8 = d->z16Render && (caps.gpuSurfaces & RB2K_DD_Z24S8) != 0;
     RtlZeroMemory(c, sizeof(*c)); RtlZeroMemory(sc, sizeof(*sc)); RtlZeroMemory(pc, sizeof(*pc));
     c->dwSize = sizeof(*c); sc->dwSize = sizeof(*sc); pc->dwSize = sizeof(*pc);
     c->dwFlags = DDHAL_CB32_CANCREATESURFACE | DDHAL_CB32_CREATESURFACE;

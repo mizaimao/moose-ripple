@@ -555,11 +555,13 @@ BOOLEAN rb_gpu_d7_valid(const RB2K_D3D7_DRAW *d)
 {
     ULONG addressU = d->sampler & 15, addressV = (d->sampler >> 4) & 15;
     ULONG mag = (d->sampler >> 8) & 15, min = (d->sampler >> 12) & 15;
+    if (d->stencil && (d->stencil & ~(RB2K_STENCIL_ON | 0x7777) || !(d->stencil & RB2K_STENCIL_ON) ||
+        d->stencilRef >> 24)) return FALSE;
     if (d->depthState && (!(d->depthState & RB2K_Z_ENABLE) ||
         d->depthState > (RB2K_Z_ENABLE | RB2K_Z_WRITE | 7))) return FALSE;
     if (d->alphaTest && ((d->alphaTest & ~(RB2K_D7_ON | 0xfff)) ||
         ((d->alphaTest >> 8) & 15) < 1 || ((d->alphaTest >> 8) & 15) > 8)) return FALSE;
-    if (d->blend && ((d->blend & ~(RB2K_D7_ON | 0xffff)) ||
+    if (d->blend && ((d->blend & ~(RB2K_D7_ON | RB2K_BLEND_DEST_ALPHA | 0xffff)) ||
         !blend_valid((d->blend >> 8) & 255) || !blend_valid(d->blend & 255))) return FALSE;
     if (d->cull < CullNone || d->cull > CullCcw || d->specular > 1) return FALSE;
     if (d->transform > 1 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
@@ -618,13 +620,16 @@ static ULONG cache_slot(RB2K_D7_CACHE *c, ULONG limit, const ULONG *key, ULONG w
     return i;
 }
 
-static ULONG pipe_blend(ULONG factor)
+static ULONG pipe_blend(ULONG factor, BOOLEAN alpha)
 {
-    /* The render target has no alpha channel for Direct3D: destination
-     * alpha is one, and the saturated source factor is therefore zero. */
+    /* Without alpha in the render target Direct3D reads destination alpha
+     * as one, and the saturated source factor is therefore zero. */
     static const UCHAR map[] = {
         0, 0x11, 0x01, 0x02, 0x12, 0x03, 0x13, 0x01, 0x11, 0x05, 0x15, 0x11, 0x03, 0x13
     };
+    if (alpha && factor == 7) return 0x04;      /* DESTALPHA */
+    if (alpha && factor == 8) return 0x14;      /* INVDESTALPHA */
+    if (alpha && factor == 11) return 0x06;     /* SRCALPHASAT */
     return map[factor];
 }
 
@@ -662,15 +667,25 @@ static ULONG sampler_words(ULONG *words, ULONG handle, ULONG state, ULONG sample
 /* Depth and alpha test, blend and rasterizer objects, shared by the
  * fixed-function and the pixel shader draws. */
 static BOOLEAN fixed_states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, ULONG depthState,
-                            ULONG alphaTest, ULONG blend, ULONG cull, ULONG transform)
+                            ULONG alphaTest, ULONG blend, ULONG cull, ULONG transform, ULONG stencil, ULONG stencilRef)
 {
     RB2K_D7_STATE *s = &image->d7;
-    ULONG words[64], n = 0, slot, key[1], state, i;
-    /* Depth and alpha test share one object. */
+    ULONG words[64], n = 0, slot, key[3], state, i;
+    /* Depth, alpha and stencil tests share one object; the stencil
+     * reference value is set apart. */
     key[0] = depthState | (alphaTest << 8);
-    slot = cache_slot(&s->dsa, RB2K_D7_DSA_KEYS, key, 1, &state);
+    key[1] = stencil;
+    key[2] = stencil ? stencilRef & 0xffff00 : 0;
+    slot = cache_slot(&s->dsa, RB2K_D7_DSA_KEYS, key, 3, &state);
     if (state != Hit) {
-        ULONG z = depthState;
+        ULONG z = depthState, face = 0;
+        if (stencil)
+            face = VIRGL_OBJ_DSA_S1_STENCIL_ENABLED(1) | VIRGL_OBJ_DSA_S1_STENCIL_FUNC(stencil & 7) |
+                   VIRGL_OBJ_DSA_S1_STENCIL_FAIL_OP((stencil >> 4) & 7) |
+                   VIRGL_OBJ_DSA_S1_STENCIL_ZFAIL_OP((stencil >> 8) & 7) |
+                   VIRGL_OBJ_DSA_S1_STENCIL_ZPASS_OP((stencil >> 12) & 7) |
+                   VIRGL_OBJ_DSA_S1_STENCIL_VALUEMASK((stencilRef >> 8) & 255) |
+                   VIRGL_OBJ_DSA_S1_STENCIL_WRITEMASK((stencilRef >> 16) & 255);
         if (state == Replaced) { words[n++] = DESTROY(VIRGL_OBJECT_DSA); words[n++] = DsaBase + slot; }
         words[n++] = CREATE(VIRGL_OBJECT_DSA, VIRGL_OBJ_DSA_SIZE);
         words[n++] = DsaBase + slot;
@@ -679,25 +694,31 @@ static BOOLEAN fixed_states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image
                       VIRGL_OBJ_DSA_S0_DEPTH_FUNC(z & 7) : 0) |
                      (alphaTest ? VIRGL_OBJ_DSA_S0_ALPHA_ENABLED(1) |
                       VIRGL_OBJ_DSA_S0_ALPHA_FUNC(((alphaTest >> 8) & 15) - 1) : 0);
-        words[n++] = 0;
-        words[n++] = 0;
+        words[n++] = face;      /* front */
+        words[n++] = face;      /* back: Direct3D's one-sided stencil covers both */
         words[n++] = rb_gpu_channel(alphaTest & 255);
     }
     if (s->dsa.bound != slot + 1) {
         words[n++] = BIND(VIRGL_OBJECT_DSA); words[n++] = DsaBase + slot;
         s->dsa.bound = slot + 1;
     }
+    if (stencil && s->stencilRef != (0x100 | (stencilRef & 255))) {
+        words[n++] = VIRGL_CMD0(VIRGL_CCMD_SET_STENCIL_REF, 0, VIRGL_SET_STENCIL_REF_SIZE);
+        words[n++] = VIRGL_STENCIL_REF_VAL(stencilRef & 255, stencilRef & 255);
+        s->stencilRef = 0x100 | (stencilRef & 255);
+    }
     key[0] = blend;
     slot = cache_slot(&s->blend, RB2K_D7_BLEND_KEYS, key, 1, &state);
     if (state != Hit) {
         ULONG src = (blend >> 8) & 255, dst = blend & 255, rt = VIRGL_OBJ_BLEND_S2_RT_COLORMASK(15);
+        BOOLEAN alpha = (blend & RB2K_BLEND_DEST_ALPHA) != 0;
         if (src == 12) { src = 5; dst = 6; }        /* both source alpha */
         else if (src == 13) { src = 6; dst = 5; }   /* both inverse source alpha */
         if (blend) rt |= VIRGL_OBJ_BLEND_S2_RT_BLEND_ENABLE(1) |
-            VIRGL_OBJ_BLEND_S2_RT_RGB_SRC_FACTOR(pipe_blend(src)) |
-            VIRGL_OBJ_BLEND_S2_RT_RGB_DST_FACTOR(pipe_blend(dst)) |
-            VIRGL_OBJ_BLEND_S2_RT_ALPHA_SRC_FACTOR(pipe_blend(src)) |
-            VIRGL_OBJ_BLEND_S2_RT_ALPHA_DST_FACTOR(pipe_blend(dst));
+            VIRGL_OBJ_BLEND_S2_RT_RGB_SRC_FACTOR(pipe_blend(src, alpha)) |
+            VIRGL_OBJ_BLEND_S2_RT_RGB_DST_FACTOR(pipe_blend(dst, alpha)) |
+            VIRGL_OBJ_BLEND_S2_RT_ALPHA_SRC_FACTOR(pipe_blend(src, alpha)) |
+            VIRGL_OBJ_BLEND_S2_RT_ALPHA_DST_FACTOR(pipe_blend(dst, alpha));
         if (state == Replaced) { words[n++] = DESTROY(VIRGL_OBJECT_BLEND); words[n++] = BlendBase + slot; }
         words[n++] = CREATE(VIRGL_OBJECT_BLEND, VIRGL_OBJ_BLEND_SIZE);
         words[n++] = BlendBase + slot;
@@ -767,7 +788,8 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
             s->boundVertex = want;
         }
     }
-    if (!fixed_states(gpu, r, image, d->depthState, d->alphaTest, d->blend, d->cull, d->transform)) return FALSE;
+    if (!fixed_states(gpu, r, image, d->depthState, d->alphaTest, d->blend, d->cull, d->transform, d->stencil,
+                      d->stencilRef)) return FALSE;
 
     key[0] = d->colorStage; key[1] = d->alphaStage; key[2] = d->specular; key[3] = d->fog;
     key[4] = d->stage1Color; key[5] = d->stage1Alpha;
@@ -1113,11 +1135,13 @@ static BOOLEAN sampler_valid(ULONG sampler)
 BOOLEAN rb_gpu_d8_valid(const RB2K_D3D8_DRAW *d)
 {
     ULONG k;
+    if (d->stencil && (d->stencil & ~(RB2K_STENCIL_ON | 0x7777) || !(d->stencil & RB2K_STENCIL_ON) ||
+        d->stencilRef >> 24)) return FALSE;
     if (d->depthState && (!(d->depthState & RB2K_Z_ENABLE) ||
         d->depthState > (RB2K_Z_ENABLE | RB2K_Z_WRITE | 7))) return FALSE;
     if (d->alphaTest && ((d->alphaTest & ~(RB2K_D7_ON | 0xfff)) ||
         ((d->alphaTest >> 8) & 15) < 1 || ((d->alphaTest >> 8) & 15) > 8)) return FALSE;
-    if (d->blend && ((d->blend & ~(RB2K_D7_ON | 0xffff)) ||
+    if (d->blend && ((d->blend & ~(RB2K_D7_ON | RB2K_BLEND_DEST_ALPHA | 0xffff)) ||
         !blend_valid((d->blend >> 8) & 255) || !blend_valid(d->blend & 255))) return FALSE;
     if (d->cull < CullNone || d->cull > CullCcw || (d->constantCount != 8 && d->constantCount != 32)) return FALSE;
     if (d->transform == 2 && (d->lighting || !d->vertexProgram || d->vertexConstants > RB2K_D8_VS_CONSTANTS ||
@@ -1208,7 +1232,8 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
         }
     }
     gpu->d8Step = 3;
-    if (!fixed_states(gpu, r, image, d->depthState, d->alphaTest, d->blend, d->cull, d->transform != 0)) return FALSE;
+    if (!fixed_states(gpu, r, image, d->depthState, d->alphaTest, d->blend, d->cull, d->transform != 0, d->stencil,
+                      d->stencilRef)) return FALSE;
     /* The program shares the fragment shader table; its key cannot be a
      * fixed-function one, whose colour stage word is never all ones. */
     gpu->d8Step = 4;

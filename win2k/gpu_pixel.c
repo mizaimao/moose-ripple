@@ -115,7 +115,8 @@ BOOLEAN rb_gpu_create_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D, image->id);
     request.resource.resource_id = image->id;
     request.resource.target = PipeTexture2D;
-    request.resource.format = image->depth16 ? VIRGL_FORMAT_Z16_UNORM : VIRGL_FORMAT_B8G8R8A8_UNORM;
+    request.resource.format = image->stencil8 ? VIRGL_FORMAT_S8_UINT_Z24_UNORM :
+                              image->depth16 ? VIRGL_FORMAT_Z16_UNORM : VIRGL_FORMAT_B8G8R8A8_UNORM;
     request.resource.bind = image->depth16 ? VIRGL_BIND_DEPTH_STENCIL : VIRGL_BIND_RENDER_TARGET;
     if (scanout) request.resource.bind |= VIRGL_BIND_SCANOUT;
     request.resource.width = image->width;
@@ -284,6 +285,7 @@ BOOLEAN rb_gpu_depth_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *color
         /* An untouched depth surface is logically zero, including after a first partial draw. */
         VIRGL_CMD0(VIRGL_CCMD_CLEAR, 0, VIRGL_OBJ_CLEAR_SIZE), 1, 0, 0, 0, 0, 0, 0, 0
     };
+    if (depth && depth->stencil8) { attach[3] = VIRGL_FORMAT_S8_UINT_Z24_UNORM; attach[11] = 3; }   /* and stencil */
     RB2K_IMAGE *old = color->depthBuffer;
     ULONG count = sizeof(attach)/sizeof(*attach);
     if (color->depth16 || (depth && (!depth->depth16 || depth->frameFailed ||
@@ -339,7 +341,7 @@ static void clear_depth_words(ULONG value, ULONG *lo, ULONG *hi)
 }
 
 BOOLEAN rb_gpu_clear_buffers(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
-                             ULONG flags, ULONG color, ULONG depthBits)
+                             ULONG flags, ULONG color, ULONG depthBits, ULONG stencil)
 {
     ULONG words[1 + VIRGL_OBJ_CLEAR_SIZE] = { VIRGL_CMD0(VIRGL_CCMD_CLEAR, 0, VIRGL_OBJ_CLEAR_SIZE) };
     if (flags & RB2K_CLEAR_DEPTH) {
@@ -350,6 +352,15 @@ BOOLEAN rb_gpu_clear_buffers(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *imag
         }
         words[VIRGL_OBJ_CLEAR_BUFFERS] |= 1; /* PIPE_CLEAR_DEPTH */
         clear_depth_words(depthBits, words + VIRGL_OBJ_CLEAR_DEPTH_0, words + VIRGL_OBJ_CLEAR_DEPTH_1);
+    }
+    if (flags & RB2K_CLEAR_STENCIL) {
+        if (!image->depthBuffer || !image->depthBuffer->stencil8 || stencil > 255) {
+            r->stage = RB2K_STAGE_CLEAR;
+            r->status = ERROR_INVALID_PARAMETER;
+            return FALSE;
+        }
+        words[VIRGL_OBJ_CLEAR_BUFFERS] |= 2; /* PIPE_CLEAR_STENCIL */
+        words[VIRGL_OBJ_CLEAR_STENCIL] = stencil;
     }
     if (flags & RB2K_CLEAR_COLOR) {
         words[VIRGL_OBJ_CLEAR_BUFFERS] |= PipeClearColor0;
