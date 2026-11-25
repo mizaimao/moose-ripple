@@ -872,3 +872,34 @@ The filters gain little, and the Photo Booth compositions (drawn through QCRende
 frame instead of about 1. Same pictures. So the queued mode has a slow path of its own, in
 the wait that follows a queued submit, and it has to be found before the mode can become the
 default.
+
+The slow wait, found (2026-11-25). Times of the kernel calls in the Photo Booth test on a
+boot with `ripple_async=1`: of 552 WAITs, 259 took 9 to 10 ms and the rest under 3 ms. A WAIT
+that has to wait sends an empty fenced command (`VirtioGPUDevice::sync`), and QEMU answers a
+fenced command when it next looks at its fences and finds that one retired. It looks right
+after handling a batch of commands, and otherwise on a 10 ms timer. With submits that wait
+for the host, the GPU has usually finished by the time the fenced command arrives, and the
+first look passes it (0.13 ms a WAIT). With queued submits the fenced command arrives right
+behind the work, the GPU is still busy at the first look, and the reply comes with the timer.
+
+Fix, in the kext: while it waits for a fenced reply, the waiter sends QEMU an empty command
+that nobody waits for, after 0.2 ms and then at doubling intervals up to 2 ms. Handling it
+makes QEMU look at its fences again, so the reply comes when the GPU is done instead of on
+the timer. One run each on the same VM:
+
+| | old kext | with the prod |
+|---|---|---|
+| 61 Photo Booth effects, sum, queued submits | 563.6 ms | 39.2 ms |
+| ...submits that wait for the host (the default) | 62.7 ms | 47.8 ms (45.1, 50.6 in two more runs) |
+| 24 Core Image filters, sum, queued | 74.1 ms | 77.5 ms |
+| ...the default | 78.6 ms | 85.3 ms (86.0, 80.1, 78.7, 82.3 in four more runs) |
+| gl-gears 400x400, the default | 59.5 frames/s | 59.5; 59.3 with Dashboard open over it |
+
+The filters do not move: their totals spread from 78.7 to 86.0 ms between runs of one boot
+and build. Same pictures in every run; desktop, Dashboard and the gl-gears window looked at
+on the new kext; no error from the kext or the host's renderer.
+
+This also bounds every other wait for the GPU (`glFinish`, fences, a read-back while the GPU
+is busy) at the GPU's own time plus a fraction of a millisecond, where it could be 10 ms.
+Queued submits themselves stay behind the flag: this was the one measured reason against
+them on the Core Image tests, and the checks on the other hosts are still to do.
