@@ -1120,3 +1120,43 @@ window moving, and the window moved at the old rate (37.3 and 37.6 updates a sec
 session, 28.2 in another shortly after a restart, where the unchanged driver had given 37.5
 before the swap). Such a VM gains nothing and loses nothing; the gain needs `-rtc
 driftfix=slew`.
+
+## Cached memory for allocations (2026-11-25)
+
+Where loading a game goes in UTM once the DXT decoder is in (`mesa-win7.md`, "A game in UTM:
+where the time goes"): in a Windows 7 loading screen the kernel has 30% of the guest's
+processor samples and the user-mode driver's decoder 7%. Half of the kernel's share is
+interrupts between processors. Kernel stacks, sampled through QEMU's monitor with the VM
+stopped for each sample, name what sends them: the page fault on the first write to a page
+of a new texture. `MmAccessFault` leads to `MiInitializePfn`, and from there to
+`KeInvalidateRangeAllCaches` (40% of those stacks) and to `MiAllocateWsle`, `KeFlushTb` and
+`KxFlushEntireTb` (50%). Windows maps the CPU's view of a graphics allocation
+write-combined unless the driver says otherwise, and a page whose caching changes is
+flushed on every processor. Where the processors are emulated each of those interrupts is
+slow, which is also why a guest with two processors loaded faster than one with four.
+
+A test build of the user-mode driver showed that the pages are the cost and the decoding is
+not. It uploaded DXT textures as a host with S3TC would get them: no decode, only the
+compressed bytes written and transferred (wrong pictures, on purpose). The copy fell from
+112 ms to 13 ms in a loading frame, but 40 ms came back in the kernel's render call, which
+still had to bring in the pages of the full-size texture. 3DMark06's two graphics tests took
+332 s against 375 s.
+
+The Vista build now asks for cached memory for its allocations
+(`DXGK_ALLOCATIONINFOFLAGS.Cached`); the aperture segment was described as cache-coherent
+already, and the host reads an allocation's pages only when a transfer command names them.
+Vista SP2 in UTM, one run each with the same user-mode driver:
+
+| 3DMark06, two graphics tests | Write-combined | Cached |
+| --- | ---: | ---: |
+| From the Run click to the end of the second test | 375 s | 319 s |
+| A loading-screen frame, first test | 183 ms | 124 ms |
+| of it copying texels into the texture | 112 ms | 61 ms |
+| of it creating resources | 59 ms | 9 ms |
+
+On Windows 7 the same flag left 3DMark06 with an error box at start in the one try made.
+That is not looked into yet, so the Windows 7 build keeps write-combined memory.
+
+With the cached build the Vista pixel tests pass (12 of 12) and the desktop draws as before.
+Window operations do not change: moving 56.1 updates a second (55.8 before), resizing 21.5
+(21.0), repainting 56.7 (56.4).
