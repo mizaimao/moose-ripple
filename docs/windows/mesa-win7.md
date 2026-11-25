@@ -970,6 +970,36 @@ Combining write-watch queries and resets gave 5.0 size changes per second
 against 5.1 on the release driver in an eight-round comparison. Both trials
 ran on the same boot and the release drivers were restored.
 
+### Where a resize frame goes (2026-11-24)
+
+A window resized every 16 ms (`tools/win7-hello/dwmtiming.c resize`) is drawn about 19 times
+a second on Vista and 30 on Windows 7 in UTM, and the kernel driver's 1 ms timer
+(`kmd-port-notes.md`, last section) does not change that. The timing report in the
+compositor (`RIPPLE_UMD_TIMES`, which now times each way a copy is done and the three steps of
+an upload) gives for one Vista resize frame of 49 ms:
+
+| Part of a resize frame on Vista | Time |
+| --- | ---: |
+| After the old surfaces are destroyed, outside the driver | 21 ms |
+| One upload of the window's picture into the new texture | 10.1 ms |
+| The 18 other copies (glass blur passes, screen buffer), all on the GPU | 0.09 ms |
+| Present | 4.9 ms |
+| 32 vertex buffer unlocks | 2.5 ms |
+
+The compositor makes the same 19 copies in every frame of a moving window, in 0.08 ms. The
+upload is the one cost inside the driver. Mapping and unmapping the texture take 0.04 ms each
+and reading the source pages beforehand 0.07 ms; the 10 ms are the copy of 1.2 MB into the new
+texture's own memory. Every size is a new texture, and Windows hands out new memory a page at
+a time as it is written, about 30 µs a page under processor emulation. The same upload into a
+texture that already exists (a window repainted at one size) takes 0.6 ms.
+
+Tried and not adopted: sending every texture upload through virgl's staging buffers, which
+are used over and over, where before only a busy texture went that way. On Vista it does
+nothing, because staging is switched off there (patch 0101: Vista needs a fresh lock for
+every access). On Windows 7, one boot, old and new user-mode driver in turn: 29.4 and 29.7
+resize updates a second, 55.0 and 54.9 for a moving window. What is left of a resize frame is
+Windows' own work for the new surfaces, in the resized program and in the compositor.
+
 ### White strip beside the search box
 
 A half-second resize exposed the previous search box beside a white strip
@@ -1892,3 +1922,42 @@ A quick check for a slow tick clock on any VM: start the program with
 `RIPPLE_UMD_LOG` and `RIPPLE_UMD_TIMES=1` set. Every 256 presented frames
 the driver log then says how far the tick clock moved against the
 performance counter, next to where the frame's time went.
+
+## A game in UTM: where the time goes (2026-11-25)
+
+3DMark06's two graphics tests on the Vista guest in UTM (processor emulated, four processors,
+the host renderer on ANGLE), with the driver's timing report (`RIPPLE_UMD_TIMES`), samples of
+where the guest's processors execute taken through QEMU's monitor, and the screen updates
+counted on the host.
+
+In a scene (Return to Proxycon at 4.4 frames a second) about one of the four processors is
+busy. The game's own code has about 45% of it, this driver about 18% (360 indexed draw calls
+a frame at 0.1 ms each), Direct3D's runtime about 8%. The other processors are idle or
+serving the 1 ms timer, whose interrupts on all four take 15% to 18% of all samples. A frame
+is bound by the emulated processor running the game, not by the driver.
+
+Loading is different. A test took about three and a half minutes to load, and a frame of
+its loading screen 730 to 820 ms, 585 to 634 ms of that inside the driver's `Unlock` of a
+texture. UTM's host renderer has no S3TC, so the driver keeps DXT textures as R8G8B8A8 and
+decompresses them on upload (`test-vms.md`, "In UTM"). It did that with Mesa's unpack
+functions, which fetch one texel at a time and work out the 4×4 block's colours again for
+each of its sixteen texels: right for sampling a texel now and then, slow for whole
+textures on an emulated processor.
+
+The driver now has its own decoder (`D3D9Dxt.h`) that works out a block's four colours and
+sixteen alpha values once. The arithmetic is Mesa's, and `windows/mesa/tests/dxt-decode-check.c`
+compares the two on the build host: 15,367,200 texels equal, for DXT1, DXT3 and DXT5, sizes
+that are not multiples of four and both orders of the two colours. One run each on the same
+VM with the same script:
+
+| Vista SP2 in UTM, 3DMark06 | Mesa's unpack | Block decoder |
+| --- | ---: | ---: |
+| From the Run click to the end of the second graphics test | 726 s | 433 s |
+| A loading-screen frame, first test | 822 ms | 259 ms |
+| of it inside `Unlock` | 634 ms | 112 ms |
+| A loading-screen frame, second test | 729 ms | 291 ms |
+| of it inside `Unlock` | 585 ms | 176 ms |
+
+What is left in a loading frame: 36 to 64 ms of first writes into the new textures' memory
+(the cost described under "Where a resize frame goes"), 57 to 68 ms in creating resources,
+and the rest of the decompression.

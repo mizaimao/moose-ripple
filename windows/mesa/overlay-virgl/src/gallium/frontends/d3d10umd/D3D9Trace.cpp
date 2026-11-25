@@ -49,7 +49,12 @@ static int d3d9_times = -1;
 static D3D9TimeStat *d3d9_time_stats[400];
 static unsigned d3d9_time_count;
 static D3D9TimeStat d3d9_time_callbacks[D3D9_TIMED_CALLBACKS] = {
-   {"lock"}, {"unlock"}, {"render"}, {"present"}, {"escape"},
+   {"kernel lock"}, {"kernel unlock"}, {"kernel render"}, {"kernel present"}, {"kernel escape"},
+   {"copy, texture read back to memory"}, {"copy, memory written to a texture"},
+   {"copy, memory drawn to a texture"}, {"copy within memory"}, {"copy skipped, source unchanged"},
+   {"copy with a resolve or conversion"}, {"copy scaled or converted on the GPU"},
+   {"copy on the GPU"},
+   {"upload, mapping the texture"}, {"upload, copying the pixels"}, {"upload, unmapping"},
 };
 static D3D9TimeStat *d3d9_time_last;
 static uint64_t d3d9_time_last_exit, d3d9_time_window;
@@ -145,7 +150,7 @@ D3D9TimesReport(uint64_t now)
    for (unsigned i = 0; i < D3D9_TIMED_CALLBACKS; ++i) {
       D3D9TimeStat *s = &d3d9_time_callbacks[i];
       if (s->calls)
-         ripple_logf("  kernel %s: %.1f calls and %.3f ms a frame, longest %.3f ms", s->name,
+         ripple_logf("  %s: %.1f calls and %.3f ms a frame, longest %.3f ms", s->name,
                      s->calls / frames, s->ticks * per_tick / frames, s->longest * per_tick);
       s->calls = s->ticks = s->longest = 0;
    }

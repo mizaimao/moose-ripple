@@ -278,7 +278,8 @@ Windows Basic as before. Chess Titans stopped at "Loading": the host renderer re
 textures (`Unknown format is 106` in the VM's debug log, then the context dropped). Format 106 is
 DXT1; ANGLE gives UTM's renderer no S3TC. The Direct3D 9 driver now asks the host for the DXT
 formats when a device is made, and where they are missing keeps DXT textures as R8G8B8A8 and
-decompresses them on upload with Mesa's own decoder (the program still sees DXT). Chess Titans
+decompresses them on upload (the program still sees DXT), since 2026-11-25 with a decoder of
+its own (`mesa-win7.md`, "A game in UTM: where the time goes"). Chess Titans
 then draws right, marble and reflections. Still open there: a DXT texture the program locks
 directly in video memory (rare; textures normally arrive by the runtime's upload) is mapped as
 R8G8B8A8, not converted.

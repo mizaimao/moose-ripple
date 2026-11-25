@@ -10,12 +10,14 @@
 #include "D3D9Host.h"
 #include "RippleLog.h"
 #include "D3D9Trace.h"
+#include "D3D9Dxt.h"
 
 #include "tgsi/tgsi_ureg.h"
 #include "util/format/u_format.h"
 #include "util/format_srgb.h"
 #include "util/u_draw.h"
 #include "util/u_sampler.h"
+#include "util/u_surface.h"
 #include "util/u_math.h"
 #include "util/u_threaded_context.h"
 #include "util/u_upload_mgr.h"
@@ -1101,12 +1103,14 @@ D3D9TextureSubdata(D3D9Device *device, D3D9Resource *resource,
       tight = (uint8_t *)malloc((size_t)upload_layer_stride * depth);
       if (!tight)
          return false;
+      const enum d3d9_dxt_kind kind =
+         resource->format == D3D9_FMT_DXT1 ? D3D9_DXT_KIND_1 :
+         resource->format == D3D9_FMT_DXT2 || resource->format == D3D9_FMT_DXT3 ? D3D9_DXT_KIND_3 :
+                                                                                   D3D9_DXT_KIND_5;
       for (UINT z = 0; z < depth; ++z)
-         util_format_unpack_rgba_8unorm_rect(D3D9DxtPipeFormat(resource->format),
-                                             tight + (size_t)z * upload_layer_stride,
-                                             upload_stride,
-                                             (const uint8_t *)data + (size_t)z * layer_stride,
-                                             stride, box->width, height);
+         d3d9_dxt_decode(kind, tight + (size_t)z * upload_layer_stride, upload_stride,
+                         (const uint8_t *)data + (size_t)z * layer_stride, stride, box->width,
+                         height);
       upload_data = tight;
    } else if (!pitched_bitmap && (stride != row_bytes || layer_stride != tight_layer_stride)) {
       if (depth > SIZE_MAX / tight_layer_stride)
@@ -1129,11 +1133,33 @@ D3D9TextureSubdata(D3D9Device *device, D3D9Resource *resource,
       upload_layer_stride = tight_layer_stride;
    }
 
-   device->pipe->texture_subdata(device->pipe, resource->pipe_resource,
-                                 D3D9PipeMipLevel(resource,
-                                                  subresource_index),
-                                 usage, box, upload_data, upload_stride,
-                                 upload_layer_stride);
+   /* The three steps of Gallium's default texture_subdata, so that the timing report can tell
+    * them apart: under processor emulation the copy pays for every page of memory that is new. */
+   struct pipe_context *pipe = device->pipe;
+   struct pipe_transfer *transfer = NULL;
+   const bool timed = D3D9TimesOn();
+   unsigned long long start = timed ? D3D9TimesNow() : 0;
+   void *map = pipe->texture_map(pipe, resource->pipe_resource,
+                                 D3D9PipeMipLevel(resource, subresource_index),
+                                 usage | PIPE_MAP_WRITE | PIPE_MAP_DISCARD_RANGE, box, &transfer);
+   if (!map) {
+      free(tight);
+      return false;
+   }
+   if (timed) {
+      D3D9TimesCallback(D3D9_TIMED_UPLOAD_MAP, start);
+      start = D3D9TimesNow();
+   }
+   util_copy_box((uint8_t *)map, resource->pipe_resource->format, transfer->stride,
+                 transfer->layer_stride, 0, 0, 0, box->width, box->height, box->depth,
+                 (const uint8_t *)upload_data, upload_stride, upload_layer_stride, 0, 0, 0);
+   if (timed) {
+      D3D9TimesCallback(D3D9_TIMED_UPLOAD_COPY, start);
+      start = D3D9TimesNow();
+   }
+   pipe->texture_unmap(pipe, transfer);
+   if (timed)
+      D3D9TimesCallback(D3D9_TIMED_UPLOAD_UNMAP, start);
    free(tight);
    return true;
 }
@@ -1898,25 +1924,33 @@ D3D9CopyRectPipe(D3D9Device *device, HANDLE dst_resource_handle,
    if (!dst_resource || !src_resource || !src_sub || !dst_sub)
       return false;
 
+   /* which way the copy went, for the timing report */
+   const unsigned long long timed = D3D9TimesOn() ? D3D9TimesNow() : 0;
+   const auto went = [timed](enum D3D9TimedCallback way) {
+      if (timed)
+         D3D9TimesCallback(way, timed);
+      return true;
+   };
+
    if (D3D9CopyTextureToCpuDestination(device, dst_resource, dst_sub,
                                        dst_subresource_index, dst_rect,
                                        src_resource, src_sub,
                                        src_subresource_index, src_rect))
-      return true;
+      return went(D3D9_TIMED_COPY_READBACK);
 
    if (D3D9CopyCpuSourceToTexture(device, dst_resource, dst_sub,
                                   dst_subresource_index, dst_rect,
                                   src_resource, src_sub, src_rect))
-      return true;
+      return went(D3D9_TIMED_COPY_UPLOAD);
 
    if (D3D9BlitCpuOnlySourceToTexture(device, dst_resource, dst_sub,
                                       dst_subresource_index, dst_rect,
                                       src_resource, src_sub, src_rect,
                                       filter))
-      return true;
+      return went(D3D9_TIMED_COPY_CPU_BLIT);
    if (D3D9CopyInMemory(dst_resource, dst_sub, dst_rect,
                         src_resource, src_sub, src_rect))
-      return true;
+      return went(D3D9_TIMED_COPY_MEMORY);
 
    if (!dst_resource->pipe_resource || !src_resource->pipe_resource)
       return false;
@@ -1938,12 +1972,12 @@ D3D9CopyRectPipe(D3D9Device *device, HANDLE dst_resource_handle,
    if (src_resource == device->last_systemmem_texture &&
        dst_resource->managed_upload_complete &&
        D3D9ManagedUploadSourceClean(src_resource, dst_resource))
-      return true;
+      return went(D3D9_TIMED_COPY_SKIPPED);
 
    if (D3D9ResolveThenConvertPipe(device, dst_resource, dst_sub,
                                   dst_subresource_index, &dst,
                                   src_resource, src_subresource_index, &src, filter))
-      return true;
+      return went(D3D9_TIMED_COPY_CONVERT);
 
    const bool dst_depth_or_stencil =
       util_format_is_depth_or_stencil(dst_resource->pipe_resource->format);
@@ -1972,7 +2006,7 @@ D3D9CopyRectPipe(D3D9Device *device, HANDLE dst_resource_handle,
       device->pipe->blit(device->pipe, &info);
       dst_sub->cpu_dirty = false;
       D3D9MarkAutogenMipmapsDirty(dst_resource, dst_subresource_index);
-      return true;
+      return went(D3D9_TIMED_COPY_SCALED);
    }
 
    const LONG width = dst.right - dst.left < src.right - src.left ?
@@ -2002,7 +2036,7 @@ D3D9CopyRectPipe(D3D9Device *device, HANDLE dst_resource_handle,
                                       &src_box);
    dst_sub->cpu_dirty = false;
    D3D9MarkAutogenMipmapsDirty(dst_resource, dst_subresource_index);
-   return true;
+   return went(D3D9_TIMED_COPY_REGION);
 }
 
 static bool

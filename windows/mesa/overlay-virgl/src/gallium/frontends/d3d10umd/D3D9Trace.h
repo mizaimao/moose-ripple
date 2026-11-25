@@ -23,7 +23,8 @@ D3D9TraceDeviceFuncs(D3DDDI_DEVICEFUNCS *funcs);
 /* RIPPLE_UMD_TIMES (any value, with RIPPLE_UMD_LOG): where a frame's time goes, written to the
  * driver log every 256 presents. For each entry point of the drawing thread: the time inside
  * it, and the time that passes outside the driver after it returns. The kernel callbacks that
- * can wait (lock, unlock, render, present, escape) are timed too. The first line also says how
+ * can wait (lock, unlock, render, present, escape) are timed too, and so are each way a copy
+ * between two surfaces is done and the three steps of an upload. The first line also says how
  * far Windows' tick clock moved against the performance counter. Under 100% the guest loses
  * timer ticks, and programs that time themselves by that clock run slow. */
 enum D3D9TimedCallback {
@@ -32,6 +33,19 @@ enum D3D9TimedCallback {
    D3D9_TIMED_RENDER,
    D3D9_TIMED_PRESENT,
    D3D9_TIMED_ESCAPE,
+   /* the ways one surface is copied to another (Blt and its relatives) */
+   D3D9_TIMED_COPY_READBACK,
+   D3D9_TIMED_COPY_UPLOAD,
+   D3D9_TIMED_COPY_CPU_BLIT,
+   D3D9_TIMED_COPY_MEMORY,
+   D3D9_TIMED_COPY_SKIPPED,
+   D3D9_TIMED_COPY_CONVERT,
+   D3D9_TIMED_COPY_SCALED,
+   D3D9_TIMED_COPY_REGION,
+   /* the steps of writing memory to a texture */
+   D3D9_TIMED_UPLOAD_MAP,
+   D3D9_TIMED_UPLOAD_COPY,
+   D3D9_TIMED_UPLOAD_UNMAP,
    D3D9_TIMED_CALLBACKS
 };
 
