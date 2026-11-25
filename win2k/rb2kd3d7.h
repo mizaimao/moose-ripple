@@ -111,6 +111,8 @@ typedef struct {
     /* State block operations by D3DHAL_STATESET* code (6 counts others), and
      * blocks that could not grow. */
     ULONG stateSets[7], blockFailures;
+    ULONG blockUploads;                 /* compressed textures sent as blocks for the host to decode */
+    ULONG blockStatus;                  /* the last failure status of such an upload */
 } RB2K_D7_DRAWSTATS;
 enum { RB2K_D7_FAIL_RANGE, RB2K_D7_FAIL_VBCAPS, RB2K_D7_FAIL_LINEAR, RB2K_D7_FAIL_ADDRESS,
        RB2K_D7_FAIL_PROBE, RB2K_D7_FAIL_IMMEDIATE, RB2K_D7_FAIL_LENGTH, RB2K_D7_FAIL_OTHER };

@@ -1845,3 +1845,26 @@ and show the alpha of a DXT3 and a DXT5 block as grey. All passed, with
 `d9pixels` at 34 of 34 with hardware vertex processing and 41 of 41 with
 software vertex processing. `d8pixels` (23 of 23), the Direct3D 7 checks
 and Direct3D 8 Quake (58.6 fps) were unchanged.
+
+### DXT blocks decoded by the host
+
+The miniport asks the host once, through its virgl capability set, which
+DXT formats it can sample. Where it can, compressed textures are created
+in that format and their levels go to the host as rows of 4x4 blocks,
+exactly as the program wrote them; the host GPU decodes them. Elsewhere,
+or with the `RippleHostDxt` registry value set to 0, the miniport answers
+texture id zero and the display driver decodes the blocks itself, as
+above. (The refusal cannot be an error code: the video port reports every
+failure status of a request as the same one.)
+
+`d9texload` creates 32 managed textures of 512x512 with every mipmap level
+in DXT1 and in DXT5, fills them, and times drawing each once. On XP under
+KVM on the Intel UHD 630 host (which samples DXT1, DXT3 and DXT5):
+
+| Path | DXT1, 32 textures | DXT5, 32 textures |
+| --- | --- | --- |
+| Blocks decoded by the host | 170 to 199 ms | 193 to 199 ms |
+| Decoded in the guest (`RippleHostDxt` 0) | 1995 to 1997 ms | 2011 to 2012 ms |
+
+`d9pixels`, including its DXT cases, passed all 34 cases on both paths.
+In a guest whose processor is emulated the difference is larger still.

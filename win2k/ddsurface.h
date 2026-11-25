@@ -163,7 +163,13 @@ typedef struct {
 #define RB2K_D7_TEXTURE_SIDE 1024
 #define RB2K_D7_UPLOAD_BYTES (256UL * 1024)
 #define RB2K_D7_LEVELS 11
-typedef struct { ULONG id, target, width, height, y, rows, levels, level; } RB2K_D3D7_TEXTURE;
+/* format: 0 for ARGB texels, or RB2K_D7_BLOCKS_DXT* for rows of 4x4 blocks as
+ * the program wrote them (y a multiple of 4; the miniport answers texture
+ * id zero when the host cannot sample that format). */
+typedef struct { ULONG id, target, width, height, y, rows, levels, level, format; } RB2K_D3D7_TEXTURE;
+#define RB2K_D7_BLOCKS_DXT1 1
+#define RB2K_D7_BLOCKS_DXT3 2
+#define RB2K_D7_BLOCKS_DXT5 3
 typedef struct { ULONG target, depth, flags, color, depthBits; } RB2K_D3D7_ZCLEAR;
 enum { RB2K_CLEAR_COLOR = 1, RB2K_CLEAR_DEPTH = 2 };
 typedef struct {

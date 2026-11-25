@@ -44,6 +44,7 @@ typedef struct RB2K_IMAGE {
  * is attached to each colour context that samples it. */
 typedef struct {
     ULONG id, width, height, levels, bytes;   /* bytes: counted against RB2K_D7_TEXEL_BUDGET */
+    ULONG format;                               /* host format; 0 for B8G8R8A8 */
     ULONG contexts[RB2K_DD_SLOTS];
 } RB2K_TEXTURE;
 #define RB2K_D7_TEXEL_BUDGET (64UL << 20)
@@ -109,6 +110,10 @@ typedef struct {
     BOOLEAN owned, ready, enabledMaster, tested;
     ULONG nextId, fence, imageCount, hostFills, readbacks, uploads, hostCopies;
     BOOLEAN ddGpuSurfaces, nativeD3D7, plainSurfaces, d3d8, vertexShaders;
+    /* DXT blocks as they are (RippleHostDxt), and the formats the host samples:
+     * bit n for RB2K_D7_BLOCKS_DXT* n, known after the first ask. */
+    BOOLEAN hostDxt, hostBlocksKnown;
+    ULONG hostBlocks;
     struct {
         RB2K_IMAGE *target;
         ULONG count;
@@ -187,6 +192,7 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image
                        RB2K_TEXTURE *const *textures);
 BOOLEAN rb_gpu_d7_samples(const RB2K_D3D7_DRAW *draw, ULONG stage);
 RB2K_TEXTURE *rb_gpu_texture(RB2K_GPU *gpu, ULONG id);
+ULONG rb_gpu_host_blocks(RB2K_GPU *gpu);
 BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture);
 BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture,
                               const RB2K_IMAGE *image);
