@@ -2850,8 +2850,8 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             for (k = 0, used = 0; k < n; ++k) {
                 const RB_DP2_CREATE_VERTEX_SHADER *r = (const RB_DP2_CREATE_VERTEX_SHADER *)(p + used);
                 RB2K_D7_DRAWSTATS *st = &c->display->d7draw;
-                if (st->vsCreated < 4) {
-                    ULONG *log = st->vsLog[st->vsCreated], words = (r->declBytes + r->codeBytes) / 4;
+                {   /* the last four */
+                    ULONG *log = st->vsLog[st->vsCreated % 4], words = (r->declBytes + r->codeBytes) / 4;
                     log[0] = r->handle; log[1] = r->declBytes; log[2] = r->codeBytes;
                     RtlCopyMemory(log + 3, p + used + sizeof(*r), min(words, 45UL) * 4);
                 }
