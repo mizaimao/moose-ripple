@@ -155,7 +155,9 @@ private:
                      unsigned async = kWait, volatile UInt32 *release = 0);
     enum { kWait = 0,          // wait for the reply
            kAsyncFence = 1,    // queue and return; its reply passes its fence (syncAsync)
-           kAsync = 2 };       // queue and return; the reply only frees what it used
+           kAsync = 2,         // queue and return; the reply only frees what it used
+           kWaitFence = 3 };   // wait for a fenced command's reply, prodding the host (sync)
+    void prodLocked(uint32_t ctx);
     bool cursorCommand(const void *req, uint32_t len);
     void drainControlLocked(bool fromInterrupt);
     bool setupInterrupts();
