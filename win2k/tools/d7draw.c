@@ -83,6 +83,8 @@ int main(void)
                    l[1] & 0xffff, l[2], l[3], l[4]);
         }
         printf("D7LOCK count=%lu\n", s.locks);
+        printf("D7RTT target_textures=%lu texture_skips=%lu,%lu,%lu,%lu\n", s.targetTextures, s.texSkips[0],
+               s.texSkips[1], s.texSkips[2], s.texSkips[3]);
         printf("D7FLIP targets");
         for (k = 0; k < 8 && k < (int)s.targets; ++k) printf(" %lx", s.targetLog[(s.targets - 1 - k) & 7]);
         printf("\n");
