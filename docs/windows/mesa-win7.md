@@ -1950,14 +1950,20 @@ compares the two on the build host: 15,367,200 texels equal, for DXT1, DXT3 and 
 that are not multiples of four and both orders of the two colours. One run each on the same
 VM with the same script:
 
-| Vista SP2 in UTM, 3DMark06 | Mesa's unpack | Block decoder |
-| --- | ---: | ---: |
-| From the Run click to the end of the second graphics test | 726 s | 433 s |
-| A loading-screen frame, first test | 822 ms | 259 ms |
-| of it inside `Unlock` | 634 ms | 112 ms |
-| A loading-screen frame, second test | 729 ms | 291 ms |
-| of it inside `Unlock` | 585 ms | 176 ms |
+| Vista SP2 in UTM, 3DMark06 | Mesa's unpack | Block decoder | Decoded into the texture |
+| --- | ---: | ---: | ---: |
+| From the Run click to the end of the second graphics test | 726 s | 433 s | 375 s |
+| A loading-screen frame, first test | 822 ms | 259 ms | 183 ms |
+| of it inside the driver | 763 ms | 192 ms | 140 ms |
+| A loading-screen frame, second test | 729 ms | 291 ms | 196 ms |
+| of it inside the driver | 687 ms | 245 ms | 139 ms |
 
-What is left in a loading frame: 36 to 64 ms of first writes into the new textures' memory
-(the cost described under "Where a resize frame goes"), 57 to 68 ms in creating resources,
-and the rest of the decompression.
+The third column is a second change. With the block decoder, a loading batch of processor
+samples was 41% kernel (address-cache flushes sent to every processor, 18% of all samples)
+and 2% driver: what was left was Windows handing out memory and taking it back. The driver
+asked for a block of memory for each texture's texels, wrote it once, copied it into the
+texture and gave it back. It now decodes straight into the texture's mapped memory.
+
+What is left in a loading frame is mostly the first write into each new texture's own memory
+(the cost described under "Where a resize frame goes"), now with the decompression in it,
+and 31 to 59 ms in creating resources.
