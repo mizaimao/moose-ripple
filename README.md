@@ -131,8 +131,8 @@ pixels.
   window (the Dock, for one), WindowServer draws it; the program no longer waits for that
   (OpenArena's timedemo in a window under the Dock: 144 frames/s, as with the Dock hidden).
 - Test programs on the Proxmox host (Intel UHD 630, 1280x800): Cinebench R11.5's OpenGL test
-  passes its reference check (99.4% match) with 33 frames/s; OpenArena 0.8.8's timedemo
-  (`demo088-test1`, 1024x768 window) runs at 141-144 frames/s.
+  passes its reference check (99.4% match) with 40 frames/s; OpenArena 0.8.8's timedemo
+  (`demo088-test1`, 1024x768 window) runs at 139-148 frames/s.
 - Video: Snow Leopard's Welcome movie (H.264, 1008x630, 24 frames/s) plays at its full
   24 frames/s in QuickTime Player with moose-ripple, on the Proxmox host and in UTM. With
   software rendering the same UTM guest gets about a tenth of the pixels to the screen (2.4

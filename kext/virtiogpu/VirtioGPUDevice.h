@@ -78,8 +78,8 @@ public:
                        volatile UInt32 *busy);
     bool waitRelease(volatile UInt32 *busy);     // false: gave up after 5 s, still busy
     void abandonRelease(volatile UInt32 *busy);  // the flag's memory is going away
-    // Boot flag ripple_async=1: clients queue their submits and frame copies instead of
-    // waiting for the host to run each one. Off unless asked for (kext README).
+    // Clients queue their submits and frame copies instead of waiting for the host to run
+    // each one. The boot flag ripple_async=0 switches that off (kext README).
     bool asyncSubmits() const { return fAsync; }
     bool transfer3D(bool toHost, uint32_t ctx, uint32_t id, uint32_t level, const uint32_t box[6],
                     uint32_t stride, uint32_t layerStride, uint64_t offset, uint64_t *fence);

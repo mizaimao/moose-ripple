@@ -374,10 +374,11 @@ IOReturn RippleGPUClient::submit(IOExternalMethodArguments *a, uint64_t *fence)
     }
 
     // The device reads commands from guest memory: copy them to one of this connection's
-    // contiguous command buffers (made at first use). With ripple_async=1 the submit is
-    // queued and not waited for, so the program goes on with its next frame while the host
+    // contiguous command buffers (made at first use). The submit is queued and not waited
+    // for (unless ripple_async=0), so the program goes on with its next frame while the host
     // runs this one; with both buffers at the device, wait here for the older one (the
-    // host is behind). Otherwise one buffer, and the host has run it when this returns.
+    // host is behind). With ripple_async=0 one buffer, and the host has run it when this
+    // returns.
     bool async = fDev->asyncSubmits();
     unsigned i = async ? fCmdNext : 0;
     if (!ensureCommandBuffer(i)) {

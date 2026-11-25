@@ -9,9 +9,10 @@ the GPU (showing a frame takes 4-5 ms at any size, where a 1280x800 window took 
 a composited frame needs one submit, one wait without a host round trip and one display call
 (it was five, four and one). Left:
 - A single Core Image filter is still slower than software rendering (1.2-12 ms against 0.8-4.5
-  for a 480x300 picture). Its textures are reused since 2026-11-25; what is left is two submits
-  per pass that each wait for the host (Core Image's flush when it unbinds a texture, and the
-  read-back). Queued submits would take the wait out of the first.
+  for a 480x300 picture). Its textures are reused and its submits are queued since 2026-11-25;
+  what is left is one trip to the host per pass (Core Image's flush when it unbinds a
+  texture), a new program compiled for every render, and the read-back
+  ([re/perf-notes.md](re/perf-notes.md), "Core Image after the texture cache").
 - Present the screen at most once per display refresh (60 Hz). Measured on 2026-11-12: the
   guest sends 45-100 whole-screen updates a second during effects, each 2-3 ms, so a cap would
   save little; low priority.
