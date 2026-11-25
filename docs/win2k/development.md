@@ -1909,3 +1909,24 @@ the back buffer's alpha, and tests depth on the 24-bit buffer.
 
 `d9pixels` (34 of 34), `d8pixels` (23 of 23), the Direct3D 7 checks and
 Direct3D 8 Quake (58.7 fps) were unchanged.
+
+## Cube textures
+
+Direct3D 8 and 9 programs can create cube maps in every texture format
+(the device reports cube maps with mipmaps). The display driver finds the
+six faces among the attachments of the top face, each with its mipmap
+sublevels, then reads, decodes and uploads every face; texture blits copy
+all six. The miniport makes a cube host texture of six layers, uploads
+each face into its layer, and gives its views all six layers. Pixel
+shaders sample cube maps: shader model 2 by its `dcl_cube` declaration,
+version 1 by the texture bound to the stage at the draw, which selects the
+translated variant. The fixed-function stages do not sample cube maps
+(generating their coordinates is not done); such draws are skipped.
+
+On XP SP3 under KVM on the Intel UHD 630 host, two new `d9pixels` cases
+draw six quads that look up a cube map with one colour per face in each of
+the six directions, with ps_2_0 and with ps_1_1. Both passed, `d9pixels`
+at 36 of 36 with hardware vertex processing and 43 of 43 with software
+vertex processing; `d9stencil` (5 of 5), `d8pixels` (23 of 23), the
+Direct3D 7 checks and Direct3D 8 Quake (58.6 fps) were unchanged.
+3DMark03 now starts without warnings and offers all four game tests.
