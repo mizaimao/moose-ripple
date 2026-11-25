@@ -1,0 +1,51 @@
+Subject: s3tc: unpack a block at a time in the compressed format fallback
+
+On a host without S3TC (UTM), Mesa keeps a DXT texture as RGBA8 and decodes each
+upload on the CPU, a texel at a time with the block colours worked out again for each
+texel. moose-ripple's ripple_s3tc.h (overlay) decodes a block at a time with the same
+arithmetic. Debug switches: /Library/Logs/RippleGL/dxtmesa (Mesa's unpack),
+/Library/Logs/RippleGL/dxtstats (count decode time per process).
+
+--- a/src/mesa/main/texcompress_s3tc.c
++++ b/src/mesa/main/texcompress_s3tc.c
+@@ -41,6 +41,7 @@
+ #include "format_unpack.h"
+ #include "util/format_srgb.h"
+ #include "util/format/u_format_s3tc.h"
++#include "util/format/ripple_s3tc.h"
+ 
+ 
+ /**
+@@ -393,6 +394,25 @@
+                   unsigned src_height,
+                   mesa_format format)
+ {
++   /* moose-ripple: a block at a time (ripple_s3tc.h), unless the dxtmesa switch asks for
++    * Mesa's texel-at-a-time unpack below; with the dxtstats switch the time is counted. */
++   struct ripple_s3tc_switches *switches = ripple_s3tc_switches();
++   const unsigned long long start = switches->stats ? ripple_s3tc_now() : 0;
++   enum ripple_s3tc_kind kind;
++   switch (format) {
++   case MESA_FORMAT_RGB_DXT1: case MESA_FORMAT_SRGB_DXT1: kind = RIPPLE_S3TC_DXT1_RGB; break;
++   case MESA_FORMAT_RGBA_DXT1: case MESA_FORMAT_SRGBA_DXT1: kind = RIPPLE_S3TC_DXT1_RGBA; break;
++   case MESA_FORMAT_RGBA_DXT3: case MESA_FORMAT_SRGBA_DXT3: kind = RIPPLE_S3TC_DXT3; break;
++   case MESA_FORMAT_RGBA_DXT5: case MESA_FORMAT_SRGBA_DXT5: kind = RIPPLE_S3TC_DXT5; break;
++   default: unreachable("unexpected format");
++   }
++   if (!switches->mesa) {
++      ripple_s3tc_decode(kind, dst_row, dst_stride, src_row, src_stride, src_width, src_height);
++      if (switches->stats)
++         ripple_s3tc_count(switches, src_width, src_height, ripple_s3tc_now() - start);
++      return;
++   }
++
+    /* We treat sRGB formats as RGB, because we're unpacking to another sRGB
+     * format.
+     */
+@@ -428,4 +448,6 @@
+    default:
+       unreachable("unexpected format");
+    }
++   if (switches->stats)
++      ripple_s3tc_count(switches, src_width, src_height, ripple_s3tc_now() - start);
+ }
