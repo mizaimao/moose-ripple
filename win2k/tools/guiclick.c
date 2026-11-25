@@ -1,7 +1,7 @@
 /* Press through a program's dialogs without a person, for installing test
  * programs in a test machine and for starting benchmarks from a script.
  *
- *   guiclick <seconds> [-press text]... [-check text]... [-until text] <program> [arguments]
+ *   guiclick <seconds> [-press text]... [-check text]... [-dismiss text]... [-until text] <program> [arguments]
  *
  * Every visible top-level window other than the shell's is reported when
  * its contents change: its title and class, then each control's class and
@@ -13,6 +13,9 @@
  *   - the first enabled button among the -press names, then Next, Install,
  *     Yes, Accept, Agree, Continue, Finish, OK and Close, is pressed. Cancel,
  *     Back, No and Browse never are. Each -press name is pressed once.
+ *   - a window showing a -dismiss text has its first enabled push button
+ *     pressed, whatever its label (owner-drawn buttons often have none).
+ * The screen saver is off while guiclick runs.
  * The run ends when the program has exited and no window has changed for
  * ten seconds, or when the time is up. With -until, a window showing that
  * text ends it too: ten seconds later every window of the run is asked to
@@ -25,11 +28,11 @@
 
 #define MaxNames 8
 #define MaxWindows 64
-static const char *press[MaxNames + 16], *checks[MaxNames], *until;
-static int pressCount, checkCount, userPress, pressed[MaxNames];
+static const char *press[MaxNames + 16], *checks[MaxNames], *dismiss[MaxNames], *until;
+static int pressCount, checkCount, dismissCount, userPress, pressed[MaxNames];
 static DWORD untilSeen;
 static DWORD shellPid, selfPid;
-static struct { HWND w; DWORD hash, acted; } seen[MaxWindows];
+static struct { HWND w; DWORD hash, changed, acted; } seen[MaxWindows];
 static DWORD lastChange;
 static BOOL closeAll;
 
@@ -67,7 +70,7 @@ static BOOL starts(const char *text, const char *part)
     return !strncmp(a, b, strlen(b));
 }
 
-typedef struct { HWND button[48]; char text[48][96]; LONG style[48]; int count; DWORD hash; int report; } CONTROLS;
+typedef struct { HWND button[48]; char text[48][96]; LONG style[48]; int count; DWORD hash; int report, dismiss; } CONTROLS;
 
 static BOOL CALLBACK child(HWND w, LPARAM arg)
 {
@@ -83,6 +86,10 @@ static BOOL CALLBACK child(HWND w, LPARAM arg)
     for (p = text; *p; ++p) c->hash = c->hash * 31 + (unsigned char)*p;
     c->hash = c->hash * 31 + (IsWindowEnabled(w) ? 1 : 0);
     if (until && !untilSeen && text[0] && contains(text, until)) untilSeen = GetTickCount() | 1;
+    {
+        int d;
+        for (d = 0; d < dismissCount; ++d) if (text[0] && contains(text, dismiss[d])) c->dismiss = 1;
+    }
     if (c->report) {
         if (!lstrcmpiA(name, "Edit"))
             _snprintf(line, sizeof(line), "GUICLICK   Edit (%d characters)", GetWindowTextLengthA(w));
@@ -137,6 +144,18 @@ static void act(CONTROLS *c)
             return;
         }
     }
+    if (c->dismiss)
+        for (i = 0; i < c->count; ++i) {
+            LONG kind = c->style[i] & 15;
+            if ((kind != BS_PUSHBUTTON && kind != BS_DEFPUSHBUTTON && kind != BS_OWNERDRAW) || !IsWindowEnabled(c->button[i]))
+                continue;
+            _snprintf(line, sizeof(line), "GUICLICK dismiss with \"%s\"", c->text[i]);
+            line[sizeof(line) - 1] = 0;
+            out(line);
+            PostMessageA(GetParent(c->button[i]), WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(c->button[i]), BN_CLICKED),
+                         (LPARAM)c->button[i]);
+            return;
+        }
     for (k = 0; k < pressCount; ++k)
         for (i = 0; i < c->count; ++i) {
             LONG kind = c->style[i] & 15;
@@ -184,7 +203,7 @@ static BOOL CALLBACK top(HWND w, LPARAM arg)
     if (seen[slot].hash != c.hash) {
         seen[slot].hash = c.hash;
         seen[slot].acted = 0;
-        lastChange = now;
+        seen[slot].changed = lastChange = now;
         _snprintf(line, sizeof(line), "GUICLICK window \"%s\" class %s", title, name);
         line[sizeof(line) - 1] = 0;
         out(line);
@@ -195,7 +214,7 @@ static BOOL CALLBACK top(HWND w, LPARAM arg)
     }
     /* Act once the window has stood still for a second, and at most every
      * three seconds while it does not change. */
-    if (now - lastChange > 1000 && now - seen[slot].acted > 3000) {
+    if (now - seen[slot].changed > 1000 && now - seen[slot].acted > 3000) {
         seen[slot].acted = now;
         act(&c);
     }
@@ -236,6 +255,7 @@ int main(void)
         if (!lstrcmpA(w, "-press") && pressCount < MaxNames) press[pressCount++] = word(&command);
         else if (!lstrcmpA(w, "-check") && checkCount < MaxNames) checks[checkCount++] = word(&command);
         else if (!lstrcmpA(w, "-until")) until = word(&command);
+        else if (!lstrcmpA(w, "-dismiss") && dismissCount < MaxNames) dismiss[dismissCount++] = word(&command);
         else {
             /* The program and its arguments, as given. */
             command = save;
@@ -246,6 +266,7 @@ int main(void)
     userPress = pressCount;
     for (i = 0; i < sizeof(defaults) / sizeof(*defaults); ++i) press[pressCount++] = defaults[i];
     if (!seconds || !*command) { out("GUICLICK usage: guiclick <seconds> [-press text] [-check text] <program> [arguments]"); return 2; }
+    SystemParametersInfoA(SPI_SETSCREENSAVEACTIVE, FALSE, NULL, 0);
     GetWindowThreadProcessId(GetShellWindow(), &shellPid);
     selfPid = GetCurrentProcessId();
     memset(&si, 0, sizeof(si));
