@@ -111,6 +111,8 @@ void GLAPIENTRY ripple_cgl_read_pixels(void *rend, GLint x, GLint y, GLsizei w, 
                                        GLenum format, GLenum type, GLvoid *pixels);
 void GLAPIENTRY ripple_cgl_copy_pixels(void *rend, GLint x, GLint y, GLsizei w, GLsizei h,
                                        GLenum type);
+void GLAPIENTRY ripple_cgl_get_tex_image(void *rend, GLenum target, GLint level, GLenum format,
+                                         GLenum type, GLvoid *pixels);
 void GLAPIENTRY ripple_cgl_copy_tex_image1D(void *rend, GLenum target, GLint level, GLenum ifmt,
                                             GLint x, GLint y, GLsizei w, GLint border);
 void GLAPIENTRY ripple_cgl_copy_tex_image2D(void *rend, GLenum target, GLint level, GLenum ifmt,

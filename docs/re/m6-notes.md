@@ -572,3 +572,42 @@ two screenshots of the preview no column step stands out (largest 0.21 against a
 a menu, Exposé and Dashboard look as before; `ci-check` gives the same pixels on the GPU as
 in software. Not run again in UTM: the fault and the fix are in the guest's part and the
 same on every host.
+
+## Cinebench R11.5's OpenGL check (2026-11-25, issue 154, open)
+
+`CINEBENCH OSX -cb_opengl` compares one frame of its scene (frame 710, 900x650, read back with
+`glGetTexImage`) with a reference picture it ships (`plugins/bench/ogl/oglref_710.tif`) and
+refuses to give a score when too many pixels differ. With the driver: 25,729 wrong pixels,
+"reference match 95.60%", test failed. The pictures were looked at through two new debug
+switches (`/Library/Logs/RippleGL/texdump`: what a program reads back with `glGetTexImage`,
+and the context's textures) and the existing call trace.
+
+First cause, fixed. Before the test Cinebench measures depth precision: it draws a slope of
+0.0001 into a depth texture of 32, 24 and 16 bits and reads it back as floats. Ours returned
+a 24-bit depth buffer with its low 8 bits lost, so 24 bits looked like 16, Cinebench took a
+16-bit depth buffer for its scene, and near surfaces fought along every edge. The buffer
+itself keeps 24 bits (a surface 0.000003 nearer shows); only the read-back is short. The
+value that comes back is the 24-bit depth with its low byte zero, on every path
+(`glGetTexImage` as floats or integers, `glReadPixels`), while the 32-bit format reads back
+whole: the loss is on the host renderer's side, in how it hands a 24-bit depth buffer back.
+Fix in the GL frontend: a program's 24-bit depth texture is kept in the 32-bit depth format,
+as Apple's software renderer does (it reports 32 bits for all three). `gl-feature-check depth`
+shows it: 7 different values in the row before, 64 after, like software.
+
+After it: 20,241 wrong pixels, 96.54%, still failed. Our frame now equals the reference
+exactly everywhere (compared pixel by pixel) except on the glass of one building: its window
+panes and shop front are black in the reference and carry an extra neutral grey in ours (84 to
+151 of 255, the same in every run, the same with the 16-bit buffer and with the texture cache
+off). What is known about how that glass is drawn:
+
+- in passes that peel layers by depth: each program samples the previous layer's depth
+  texture with `GL_DEPTH_TEXTURE_MODE` `GL_ALPHA` and discards with a margin of 1.2e-7
+  (`gl-feature-check peel` repeats that: right with 24 and 32 bits, half the pixels drawn
+  twice with 16);
+- highlights come from a 128x128 table per material (internal format 1, filled from `GL_RED`
+  bytes, clamped, read as `.r`, indexed with a coordinate that goes below 0) and are added as
+  grey (`gl-feature-check redlum`: same as software);
+- 1D lookup textures (`gl-feature-check tex1d`: same as software).
+
+Each of these alone behaves like the software renderer, so the fault is in a combination the
+scene uses. Next: the full call trace of one glass draw, replayed in a test.

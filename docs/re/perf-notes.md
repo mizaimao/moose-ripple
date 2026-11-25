@@ -921,3 +921,8 @@ above); a window clear of the Dock is the next thing to time.
 
 Cinebench R11.5's OpenGL test gives no score with the driver yet: it refuses its own picture
 ("OpenGL Reference Matching Test Failure", issue 154), with no GL error in the driver's log.
+
+The Dock's share, same boot, default mode, same 1024x768 window: 100.8 frames/s with the Dock
+shown (frame times 7.0 / 9.9 / 50 ms), 140.8 with the Dock hidden (4.0 / 7.1 / 50 ms; the
+bundle counts 3.0 ms per present). So a window that something is drawn over costs this game
+about 3 ms a frame, 40% of its frame rate.

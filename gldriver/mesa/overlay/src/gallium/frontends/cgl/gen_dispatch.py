@@ -92,6 +92,7 @@ CUSTOM = {
     'clear': 'ripple_cgl_clear',
     'get_integerv': 'ripple_cgl_get_integerv',
     'read_pixels': 'ripple_cgl_read_pixels',
+    'get_tex_image': 'ripple_cgl_get_tex_image',
     'copy_pixels': 'ripple_cgl_copy_pixels',
     'copy_tex_image1D': 'ripple_cgl_copy_tex_image1D',
     'copy_tex_image2D': 'ripple_cgl_copy_tex_image2D',

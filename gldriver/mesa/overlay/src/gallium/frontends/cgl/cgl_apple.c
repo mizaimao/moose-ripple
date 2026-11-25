@@ -602,6 +602,116 @@ fbo_dump(void *rend)
    g->Pack = saved;
 }
 
+/* /Library/Logs/RippleGL/texdump (debug switch, looked for once a second): what a program reads
+ * back with glGetTexImage as GL_RGB bytes from a 2D texture of 256x256 or more, as
+ * tex-PID-N.ppm (top row first), the first 8 of them; to see the frame a program compares
+ * with a reference of its own (Cinebench's OpenGL check). */
+static void
+tex_dump_list(void *data, void *user)
+{
+   struct gl_texture_object *t = data;
+   const struct gl_texture_image *img = t ? t->Image[0][0] : NULL;
+   if (img)
+      fprintf(user, "texture %u target 0x%x internal 0x%x base 0x%x mesa %s %ux%u levels %u "
+              "min 0x%x mag 0x%x wrap 0x%x 0x%x aniso %g\n", t->Name, t->Target,
+              img->InternalFormat, img->_BaseFormat, _mesa_get_format_name(img->TexFormat),
+              img->Width, img->Height, t->_MaxLevel + 1, t->Sampler.Attrib.MinFilter,
+              t->Sampler.Attrib.MagFilter, t->Sampler.Attrib.WrapS, t->Sampler.Attrib.WrapT,
+              t->Sampler.Attrib.MaxAnisotropy);
+}
+
+static void
+tex_dump_collect(void *data, void *user)
+{
+   struct gl_texture_object *t = data;
+   struct fbo_dump_list *list = user;
+   if (t && t->Name && t->Target == GL_TEXTURE_2D && t->Image[0][0] &&
+       t->Image[0][0]->_BaseFormat == GL_RGBA && list->n < 64)
+      list->names[list->n++] = t->Name;
+}
+
+void GLAPIENTRY
+ripple_cgl_get_tex_image(void *rend, GLenum target, GLint level, GLenum format, GLenum type,
+                         GLvoid *pixels)
+{
+   static time_t checked;
+   static bool on;
+   static unsigned count;
+   RIPPLE_CGL_ENTER(rend);
+   CALL_GetTexImage(GET_DISPATCH(), (target, level, format, type, pixels));
+
+   time_t now = time(NULL);
+   if (now != checked) {
+      checked = now;
+      on = access("/Library/Logs/RippleGL/texdump", F_OK) == 0;
+   }
+   GET_CURRENT_CONTEXT(g);
+   if (!on || !g || !pixels || count >= 8 || target != GL_TEXTURE_2D || format != GL_RGB ||
+       type != GL_UNSIGNED_BYTE || g->Pack.BufferObj)
+      return;
+   GLint w = 0, h = 0;
+   CALL_GetTexLevelParameteriv(GET_DISPATCH(), (target, level, GL_TEXTURE_WIDTH, &w));
+   CALL_GetTexLevelParameteriv(GET_DISPATCH(), (target, level, GL_TEXTURE_HEIGHT, &h));
+   if (w < 256 || h < 256)
+      return;
+   unsigned align = g->Pack.Alignment ? g->Pack.Alignment : 4;
+   unsigned row = g->Pack.RowLength ? g->Pack.RowLength : w;
+   size_t stride = ((size_t)row * 3 + align - 1) / align * align;
+   char path[160];
+   snprintf(path, sizeof(path), "/Library/Logs/RippleGL/tex-%d-%u.ppm", (int)getpid(), count++);
+   FILE *f = fopen(path, "wb");
+   if (!f)
+      return;
+   fprintf(f, "P6\n%d %d\n255\n", w, h);
+   for (int y = h - 1; y >= 0; y--)
+      fwrite((const uint8_t *)pixels + (size_t)y * stride, 1, (size_t)w * 3, f);
+   fclose(f);
+
+   /* With it, the context's textures at that moment (tex-PID-N.txt): which formats the
+    * program's pictures are kept in. */
+   snprintf(path, sizeof(path), "/Library/Logs/RippleGL/tex-%d-%u.txt", (int)getpid(), count - 1);
+   f = fopen(path, "w");
+   if (f) {
+      _mesa_HashWalk(&g->Shared->TexObjects, tex_dump_list, f);
+
+      /* And each 2D texture's alpha as it reads back: lowest, highest, and the share of texels
+       * under 0.2, which tells a picture with holes cut by the alpha test from a solid one. */
+      struct fbo_dump_list names = { 0 };
+      _mesa_HashWalk(&g->Shared->TexObjects, tex_dump_collect, &names);
+      struct gl_pixelstore_attrib saved = g->Pack;
+      GLint bound = 0;
+      memset(&g->Pack, 0, sizeof(g->Pack));
+      g->Pack.Alignment = 1;
+      CALL_GetIntegerv(GET_DISPATCH(), (GL_TEXTURE_BINDING_2D, &bound));
+      for (unsigned k = 0; k < names.n; k++) {
+         GLint tw = 0, th = 0;
+         CALL_BindTexture(GET_DISPATCH(), (GL_TEXTURE_2D, names.names[k]));
+         CALL_GetTexLevelParameteriv(GET_DISPATCH(), (GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &tw));
+         CALL_GetTexLevelParameteriv(GET_DISPATCH(), (GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &th));
+         uint8_t *px = tw > 0 && th > 0 && tw <= 4096 && th <= 4096 ?
+                       malloc((size_t)tw * th * 4) : NULL;
+         if (!px)
+            continue;
+         CALL_GetTexImage(GET_DISPATCH(), (GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, px));
+         unsigned lo = 255, hi = 0;
+         size_t under = 0, total = (size_t)tw * th;
+         for (size_t i = 0; i < total; i++) {
+            unsigned a = px[i * 4 + 3];
+            lo = a < lo ? a : lo;
+            hi = a > hi ? a : hi;
+            under += a < 51;
+         }
+         fprintf(f, "alpha of texture %u (%dx%d): %u to %u, %.1f%% under 0.2; first texel "
+                 "%u %u %u %u\n", names.names[k], tw, th, lo, hi, 100.0 * under / total,
+                 px[0], px[1], px[2], px[3]);
+         free(px);
+      }
+      CALL_BindTexture(GET_DISPATCH(), (GL_TEXTURE_2D, bound));
+      g->Pack = saved;
+      fclose(f);
+   }
+}
+
 void GLAPIENTRY
 ripple_cgl_bind_framebuffer(void *rend, GLenum target, GLuint framebuffer)
 {
@@ -1521,6 +1631,14 @@ ripple_cgl_tex_image2D(void *rend, GLenum target, GLint level, GLenum internalfo
    struct row_bytes_saved rbs = { false };
    if (ctx && glctx)
       row_bytes_apply(&glctx->Unpack, ctx->unpack_row_bytes, format, type, &rbs);
+   /* A 24-bit depth texture is kept in the 32-bit depth format, as Apple's software renderer
+    * does. Read back, a 24-bit depth buffer comes from the GPU side with its low 8 bits lost,
+    * while the 32-bit format comes back whole. Cinebench R11.5 measures depth precision by
+    * reading back, took 16 bits for its scene, and near surfaces fought (its reference check
+    * failed; `gl-feature-check depth` shows the read-back). Where the 32-bit format is not
+    * there, Mesa falls back to the 24-bit one as before. */
+   if (internalformat == GL_DEPTH_COMPONENT24)
+      internalformat = GL_DEPTH_COMPONENT32;
    tex_image2D_body(ctx, glctx, target, level, internalformat, width, height, border, format,
                     type, pixels);
    if (glctx)
