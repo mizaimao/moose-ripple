@@ -1980,3 +1980,22 @@ own buttons, and `-debug`, which runs the program under a debugger thread
 and reports its exceptions with the faulting memory, the frame chain and
 the code addresses on the stack. `d7draw` prints the last flips, locks and
 render target changes, and texture skips by reason.
+
+## Bump mapping in version 1 pixel shaders
+
+Version 1 pixel shaders may read a texture register with the sign scale
+(`t0_bx2`) in the `texm3x2`, `texm3x3` and `texdp3` instructions, as normal
+maps do; it is applied into a scratch register first. `texm3x3tex` looks up
+the third row's vector in a cube map or volume, and `texm3x3spec` and
+`texm3x3vspec` look up the reflection of the eye vector (a constant, or the
+w of the three rows' coordinates) about the bumped normal. All were refused
+before, and the draws using them skipped; each translation was checked
+with Mesa's TGSI parser.
+
+On XP SP3 under KVM on the Intel UHD 630 host, 3DMark03 now draws all of
+its 18.7 million triangles with no shader failures (4.8 million were skipped
+before) and still scores about 1158 3DMarks. `d9pixels` (40 of 40) and
+`d8pixels` (23 of 23) are unchanged. Its pictures are not right yet: the
+Proxycon and Troll scenes are very dark and the water in Mother Nature is
+mostly white; one volume texture is still refused by Direct3D before it
+reaches the driver.
