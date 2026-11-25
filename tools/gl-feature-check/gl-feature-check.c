@@ -660,6 +660,479 @@ static void run_vbo(const char *name, CGLPixelFormatAttribute renderer)
 }
 
 
+/* Depth peeling as Cinebench R11.5 draws its glass: a slanted surface is drawn into a depth
+ * texture, then drawn again into a second framebuffer with a program that samples the first
+ * depth texture (GL_DEPTH_TEXTURE_MODE GL_ALPHA) at its own pixel and discards the fragment
+ * unless it lies behind what is stored there, by more than 1.2e-7:
+ *     if (texture2D(peel, xy).a >= z - 1.2e-7) discard;
+ * The same surface must vanish entirely (0 pixels drawn); a surface 0.00001 farther must be
+ * drawn everywhere. Also prints the stored depth as the program sees it at one pixel. */
+static void run_peel(const char *name, CGLPixelFormatAttribute renderer)
+{
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
+                                        renderer, 0 };
+    if (!renderer)
+        attrs[3] = 0;
+    CGLPixelFormatObj pf;
+    GLint n;
+    CGLContextObj c;
+    if (CGLChoosePixelFormat(attrs, &pf, &n) || !pf || CGLCreateContext(pf, NULL, &c))
+        return;
+    CGLSetCurrentContext(c);
+    static const GLenum formats[] = { GL_DEPTH_COMPONENT32, GL_DEPTH_COMPONENT24,
+                                      GL_DEPTH_COMPONENT16 };
+    static const int bits[] = { 32, 24, 16 };
+    static const char *vs_src =
+        "void main() { gl_Position = ftransform(); }\n";
+    static const char *fs_src =
+        "uniform sampler2D peel;\n"
+        "uniform vec4 fragmenttransform;\n"
+        "uniform float show;\n"
+        "void main() {\n"
+        "  vec3 fc;\n"
+        "  fc.xy = (gl_FragCoord.xy - fragmenttransform.xy) * fragmenttransform.zw;\n"
+        "  fc.z = gl_FragCoord.z;\n"
+        "  float d = texture2D(peel, fc.xy).a;\n"
+        "  if (show > 0.5) { gl_FragColor = vec4(d, fc.z, abs(d - fc.z) * 1000000.0, 1.0); return; }\n"
+        "  if (d >= fc.z - 1.2e-7) discard;\n"
+        "  gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);\n"
+        "}\n";
+    GLhandleARB vs = glCreateShaderObjectARB(GL_VERTEX_SHADER_ARB);
+    GLhandleARB fs = glCreateShaderObjectARB(GL_FRAGMENT_SHADER_ARB);
+    GLhandleARB prog = glCreateProgramObjectARB();
+    glShaderSourceARB(vs, 1, &vs_src, NULL);
+    glShaderSourceARB(fs, 1, &fs_src, NULL);
+    glCompileShaderARB(vs);
+    glCompileShaderARB(fs);
+    glAttachObjectARB(prog, vs);
+    glAttachObjectARB(prog, fs);
+    glLinkProgramARB(prog);
+    printf("%s (%s):\n", name, glGetString(GL_RENDERER));
+    for (int f = 0; f < 3; f++) {
+        GLuint col[2], dep[2], fbo[2];
+        glGenTextures(2, col);
+        glGenTextures(2, dep);
+        glGenFramebuffersEXT(2, fbo);
+        for (int i = 0; i < 2; i++) {
+            glBindTexture(GL_TEXTURE_2D, col[i]);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glBindTexture(GL_TEXTURE_2D, dep[i]);
+            glTexImage2D(GL_TEXTURE_2D, 0, formats[f], W, H, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo[i]);
+            glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_2D,
+                                      col[i], 0);
+            glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_DEPTH_ATTACHMENT_EXT, GL_TEXTURE_2D,
+                                      dep[i], 0);
+        }
+        glViewport(0, 0, W, H);
+        glMatrixMode(GL_MODELVIEW);
+        glLoadIdentity();
+        glMatrixMode(GL_PROJECTION);
+        glLoadIdentity();
+        glDisable(GL_CULL_FACE);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
+        /* the first layer: a surface slanted in both directions */
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo[0]);
+        glClearColor(0, 0, 0, 1);
+        glClearDepth(1.0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glColor4f(0, 1, 0, 1);
+        glBegin(GL_QUADS);
+        glVertex3f(-1, -1, -0.31f);
+        glVertex3f(1, -1, 0.17f);
+        glVertex3f(1, 1, 0.43f);
+        glVertex3f(-1, 1, -0.05f);
+        glEnd();
+        int drawn[3] = { 0, 0, 0 };
+        unsigned char px[W * H * 4], seen[4] = { 0, 0, 0, 0 };
+        for (int pass = 0; pass < 3; pass++) {      /* same surface; one farther; what it sees */
+            float dz = pass == 1 ? 0.00002f : 0;
+            glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo[1]);
+            glClearColor(0, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, dep[0]);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+            glTexParameteri(GL_TEXTURE_2D, GL_DEPTH_TEXTURE_MODE, GL_ALPHA);
+            glUseProgramObjectARB(prog);
+            glUniform1iARB(glGetUniformLocationARB(prog, "peel"), 0);
+            glUniform4fARB(glGetUniformLocationARB(prog, "fragmenttransform"), -0.1f, -0.1f,
+                           1.0f / W, 1.0f / H);
+            glUniform1fARB(glGetUniformLocationARB(prog, "show"), pass == 2 ? 1.0f : 0.0f);
+            glBegin(GL_QUADS);
+            glVertex3f(-1, -1, -0.31f + dz);
+            glVertex3f(1, -1, 0.17f + dz);
+            glVertex3f(1, 1, 0.43f + dz);
+            glVertex3f(-1, 1, -0.05f + dz);
+            glEnd();
+            glUseProgramObjectARB(0);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            if (pass == 2)
+                memcpy(seen, px + (20 * W + 40) * 4, 4);
+            else
+                for (int i = 0; i < W * H; i++)
+                    drawn[pass] += px[i * 4] > 128;
+        }
+        GLint got = 0;
+        glBindTexture(GL_TEXTURE_2D, dep[0]);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_DEPTH_SIZE, &got);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        printf("  %2d bits asked, %2d given: the same surface drawn again in %4d of %d pixels, one "
+               "0.00001 farther in %4d; at pixel 40,20 stored %d, own %d, apart %d millionths; "
+               "GL error 0x%x\n", bits[f], got, drawn[0], W * H, drawn[1], seen[0], seen[1],
+               seen[2], glGetError());
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+        glDeleteFramebuffersEXT(2, fbo);
+        glDeleteTextures(2, col);
+        glDeleteTextures(2, dep);
+    }
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+    CGLDestroyPixelFormat(pf);
+}
+
+/* Cinebench R11.5's highlight tables: a 128x128 texture with internal format 1 (one component,
+ * that is luminance) filled from GL_RED bytes, linear, clamped to the edge, and looked up in a
+ * GLSL program as texture2D(t, st).r with s running below 0 and above 1. Texel (x, y) is 2 * x.
+ * Prints the texture as it reads back (as luminance and as RGBA) and five pixels of a row drawn
+ * with s from -0.5 to 1.5: with the clamp, 0 at the left and 254 at the right. */
+static void run_redlum(const char *name, CGLPixelFormatAttribute renderer)
+{
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
+                                        renderer, 0 };
+    if (!renderer)
+        attrs[3] = 0;
+    CGLPixelFormatObj pf;
+    GLint n;
+    CGLContextObj c;
+    if (CGLChoosePixelFormat(attrs, &pf, &n) || !pf || CGLCreateContext(pf, NULL, &c))
+        return;
+    CGLSetCurrentContext(c);
+    static unsigned char data[128 * 128], lum[128 * 128], rgba[128 * 128 * 4];
+    for (int y = 0; y < 128; y++)
+        for (int x = 0; x < 128; x++)
+            data[y * 128 + x] = 2 * x;
+    GLuint t, col, fbo;
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, 1, 128, 128, 0, GL_RED, GL_UNSIGNED_BYTE, data);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    GLint ifmt = 0;
+    glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &ifmt);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, lum);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    printf("%s (%s): internal format 0x%x\n  read back as luminance: texel 0 %d, 64 %d, 127 %d; "
+           "as RGBA: texel 64 %d %d %d %d\n", name, glGetString(GL_RENDERER), ifmt, lum[0],
+           lum[64], lum[127], rgba[256], rgba[257], rgba[258], rgba[259]);
+    glGenTextures(1, &col);
+    glBindTexture(GL_TEXTURE_2D, col);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glGenFramebuffersEXT(1, &fbo);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+    glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_2D, col, 0);
+    glViewport(0, 0, W, H);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    static const char *fs_src =
+        "uniform sampler2D t;\n"
+        "void main() { float v = texture2D(t, gl_TexCoord[0].xy).r; gl_FragColor = vec4(v, v, v, 1.0); }\n";
+    static const char *vs_src =
+        "void main() { gl_Position = ftransform(); gl_TexCoord[0] = gl_MultiTexCoord0; }\n";
+    GLhandleARB vs = glCreateShaderObjectARB(GL_VERTEX_SHADER_ARB);
+    GLhandleARB fs = glCreateShaderObjectARB(GL_FRAGMENT_SHADER_ARB);
+    GLhandleARB prog = glCreateProgramObjectARB();
+    glShaderSourceARB(vs, 1, &vs_src, NULL);
+    glShaderSourceARB(fs, 1, &fs_src, NULL);
+    glCompileShaderARB(vs);
+    glCompileShaderARB(fs);
+    glAttachObjectARB(prog, vs);
+    glAttachObjectARB(prog, fs);
+    glLinkProgramARB(prog);
+    glClearColor(0, 0, 1, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glUseProgramObjectARB(prog);
+    glUniform1iARB(glGetUniformLocationARB(prog, "t"), 0);
+    glBegin(GL_QUADS);
+    glTexCoord2f(-0.5f, 0.5f); glVertex2f(-1, -1);
+    glTexCoord2f(1.5f, 0.5f);  glVertex2f(1, -1);
+    glTexCoord2f(1.5f, 0.5f);  glVertex2f(1, 1);
+    glTexCoord2f(-0.5f, 0.5f); glVertex2f(-1, 1);
+    glEnd();
+    glUseProgramObjectARB(0);
+    unsigned char px[W * 4];
+    glReadPixels(0, H / 2, W, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    printf("  drawn, s from -0.5 to 1.5: x 0: %d %d %d, x 8: %d, x 16: %d, x 32: %d, x 48: %d, "
+           "x 56: %d, x 63: %d; GL error 0x%x\n", px[0], px[1], px[2], px[32], px[64], px[128],
+           px[192], px[224], px[252], glGetError());
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+    CGLDestroyPixelFormat(pf);
+}
+
+/* A 1D texture as a lookup table (Cinebench R11.5 keeps 17 of them, 256 texels of RGBA,
+ * linear, clamped to the edge): texel i is (i, 255 - i, i / 2, 255). Read back with
+ * glGetTexImage, then drawn across a 64-pixel row twice, by the fixed pipeline and by a GLSL
+ * program with a sampler1D; prints five pixels of each row. */
+static void run_tex1d(const char *name, CGLPixelFormatAttribute renderer)
+{
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
+                                        renderer, 0 };
+    if (!renderer)
+        attrs[3] = 0;
+    CGLPixelFormatObj pf;
+    GLint n;
+    CGLContextObj c;
+    if (CGLChoosePixelFormat(attrs, &pf, &n) || !pf || CGLCreateContext(pf, NULL, &c))
+        return;
+    CGLSetCurrentContext(c);
+    unsigned char lut[256 * 4], back[256 * 4];
+    for (int i = 0; i < 256; i++) {
+        lut[i * 4] = i; lut[i * 4 + 1] = 255 - i; lut[i * 4 + 2] = i / 2; lut[i * 4 + 3] = 255;
+    }
+    GLuint t1, col, fbo;
+    glGenTextures(1, &t1);
+    glBindTexture(GL_TEXTURE_1D, t1);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA8, 256, 0, GL_RGBA, GL_UNSIGNED_BYTE, lut);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    memset(back, 0, sizeof(back));
+    glGetTexImage(GL_TEXTURE_1D, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
+    printf("%s (%s):\n  read back: texel 0 %d %d %d %d, texel 128 %d %d %d %d, texel 255 "
+           "%d %d %d %d\n", name, glGetString(GL_RENDERER), back[0], back[1], back[2], back[3],
+           back[512], back[513], back[514], back[515], back[1020], back[1021], back[1022],
+           back[1023]);
+    glGenTextures(1, &col);
+    glBindTexture(GL_TEXTURE_2D, col);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glGenFramebuffersEXT(1, &fbo);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+    glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_2D, col, 0);
+    glViewport(0, 0, W, H);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    static const char *fs_src =
+        "uniform sampler1D lut;\n"
+        "void main() { gl_FragColor = texture1D(lut, gl_TexCoord[0].x); }\n";
+    static const char *vs_src =
+        "void main() { gl_Position = ftransform(); gl_TexCoord[0] = gl_MultiTexCoord0; }\n";
+    GLhandleARB vs = glCreateShaderObjectARB(GL_VERTEX_SHADER_ARB);
+    GLhandleARB fs = glCreateShaderObjectARB(GL_FRAGMENT_SHADER_ARB);
+    GLhandleARB prog = glCreateProgramObjectARB();
+    glShaderSourceARB(vs, 1, &vs_src, NULL);
+    glShaderSourceARB(fs, 1, &fs_src, NULL);
+    glCompileShaderARB(vs);
+    glCompileShaderARB(fs);
+    glAttachObjectARB(prog, vs);
+    glAttachObjectARB(prog, fs);
+    glLinkProgramARB(prog);
+    for (int pass = 0; pass < 2; pass++) {
+        unsigned char px[W * 4];
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_1D, t1);
+        if (pass) {
+            glUseProgramObjectARB(prog);
+            glUniform1iARB(glGetUniformLocationARB(prog, "lut"), 0);
+        } else {
+            glEnable(GL_TEXTURE_1D);
+            glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+        }
+        glBegin(GL_QUADS);
+        glTexCoord1f(0); glVertex2f(-1, -1);
+        glTexCoord1f(1); glVertex2f(1, -1);
+        glTexCoord1f(1); glVertex2f(1, 1);
+        glTexCoord1f(0); glVertex2f(-1, 1);
+        glEnd();
+        if (pass)
+            glUseProgramObjectARB(0);
+        else
+            glDisable(GL_TEXTURE_1D);
+        glReadPixels(0, H / 2, W, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        printf("  %s: x 0: %d %d %d, x 16: %d %d %d, x 32: %d %d %d, x 48: %d %d %d, x 63: "
+               "%d %d %d; GL error 0x%x\n", pass ? "sampler1D     " : "fixed pipeline",
+               px[0], px[1], px[2], px[64], px[65], px[66], px[128], px[129], px[130], px[192],
+               px[193], px[194], px[252], px[253], px[254], glGetError());
+    }
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+    CGLDestroyPixelFormat(pf);
+}
+
+/* Depth textures read back (Cinebench R11.5's probe before its OpenGL test): a 64x64 depth
+ * texture of 32, 24 and 16 bits on a framebuffer object, cleared to 0.75, then a quad whose
+ * depth runs from 0.5 at the left to 0.5001 at the right with the depth test at GL_ALWAYS,
+ * read back as floats with glGetTexImage. A format with enough bits shows the slope: many
+ * different values in a row; Cinebench takes the first format that does, and with 16 bits its
+ * scene's near surfaces fight. Prints the middle row's ends, extremes and how many different
+ * values it has. */
+static void run_depth(const char *name, CGLPixelFormatAttribute renderer)
+{
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
+                                        renderer, 0 };
+    if (!renderer)
+        attrs[3] = 0;
+    CGLPixelFormatObj pf;
+    GLint n;
+    CGLContextObj c;
+    if (CGLChoosePixelFormat(attrs, &pf, &n) || !pf || CGLCreateContext(pf, NULL, &c))
+        return;
+    CGLSetCurrentContext(c);
+    static const GLenum formats[] = { GL_DEPTH_COMPONENT32, GL_DEPTH_COMPONENT24,
+                                      GL_DEPTH_COMPONENT16 };
+    static const int bits[] = { 32, 24, 16 };
+    printf("%s (%s):\n", name, glGetString(GL_RENDERER));
+    for (int f = 0; f < 3; f++) {
+        GLuint col, dep, fbo;
+        glGenTextures(1, &col);
+        glBindTexture(GL_TEXTURE_2D, col);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, W, H, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glGenTextures(1, &dep);
+        glBindTexture(GL_TEXTURE_2D, dep);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, formats[f], W, H, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        GLint got = 0;
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_DEPTH_SIZE, &got);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glGenFramebuffersEXT(1, &fbo);
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_2D, col, 0);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_DEPTH_ATTACHMENT_EXT, GL_TEXTURE_2D, dep, 0);
+        GLenum status = glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT);
+        glDrawBuffer(GL_COLOR_ATTACHMENT0_EXT);
+        glViewport(0, 0, W, H);
+        glMatrixMode(GL_MODELVIEW);
+        glLoadIdentity();
+        glMatrixMode(GL_PROJECTION);
+        glLoadIdentity();
+        glClearColor(0, 1, 0, 1);
+        glClearDepth(0.75);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glDisable(GL_CULL_FACE);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_ALWAYS);
+        glColor4f(1, 0.5f, 0, 1);
+        glBegin(GL_QUADS);
+        glVertex3f(-1, -1, 0);
+        glVertex3f(1, -1, 0.0002f);
+        glVertex3f(1, 1, 0.0002f);
+        glVertex3f(-1, 1, 0);
+        glEnd();
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+        static float z[W * H];
+        static unsigned char rgb[W * H * 3];
+        memset(z, 0, sizeof(z));
+        glBindTexture(GL_TEXTURE_2D, dep);
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, GL_FLOAT, z);
+        glBindTexture(GL_TEXTURE_2D, col);
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_BYTE, rgb);
+        const float *row = z + (H / 2) * W;
+        int different = 1;
+        float lo = row[0], hi = row[0];
+        for (int x = 1; x < W; x++) {
+            if (row[x] != row[x - 1])
+                different++;
+            if (row[x] < lo) lo = row[x];
+            if (row[x] > hi) hi = row[x];
+        }
+        printf("  %2d bits asked, %2d given, framebuffer 0x%x: left %.7f right %.7f, lowest %.7f "
+               "highest %.7f, %2d different values in the row; colour %d %d %d; GL error 0x%x\n",
+               bits[f], got, status, row[0], row[W - 1], lo, hi, different,
+               rgb[(H / 2 * W + W / 2) * 3], rgb[(H / 2 * W + W / 2) * 3 + 1],
+               rgb[(H / 2 * W + W / 2) * 3 + 2], glGetError());
+
+        /* The same row by the other ways of reading depth: glReadPixels as floats, and
+         * glGetTexImage as 32-bit integers (one value in hex shows which bits are filled). */
+        {
+            static float rp[W];
+            static GLuint ui[W * H];
+            int rp_different = 1, ui_different = 1;
+            glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+            glReadPixels(0, H / 2, W, 1, GL_DEPTH_COMPONENT, GL_FLOAT, rp);
+            glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+            glBindTexture(GL_TEXTURE_2D, dep);
+            glGetTexImage(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, ui);
+            for (int x = 1; x < W; x++) {
+                if (rp[x] != rp[x - 1])
+                    rp_different++;
+                if (ui[H / 2 * W + x] != ui[H / 2 * W + x - 1])
+                    ui_different++;
+            }
+            printf("          glReadPixels floats: %2d different; glGetTexImage integers: %2d "
+                   "different, pixel 10 is 0x%08x\n", rp_different, ui_different,
+                   ui[H / 2 * W + 10]);
+        }
+
+        /* What the buffer itself keeps, without reading depth back: a red surface, then a blue
+         * one 0.000003 nearer with GL_LESS. 24 bits tell them apart (blue shows), 16 do not. */
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+        glClearDepth(1.0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glDepthFunc(GL_LESS);
+        for (int pass = 0; pass < 2; pass++) {
+            float zz = pass ? 0.00002f - 0.000006f : 0.00002f;
+            glColor4f(pass ? 0 : 1, 0, pass ? 1 : 0, 1);
+            glBegin(GL_QUADS);
+            glVertex3f(-1, -1, zz);
+            glVertex3f(1, -1, zz);
+            glVertex3f(1, 1, zz);
+            glVertex3f(-1, 1, zz);
+            glEnd();
+        }
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+        glBindTexture(GL_TEXTURE_2D, col);
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_BYTE, rgb);
+        printf("          a surface 0.000003 nearer: %s (colour %d %d %d)\n",
+               rgb[(H / 2 * W + W / 2) * 3 + 2] > 128 ? "shows" : "hidden",
+               rgb[(H / 2 * W + W / 2) * 3], rgb[(H / 2 * W + W / 2) * 3 + 1],
+               rgb[(H / 2 * W + W / 2) * 3 + 2]);
+        glDeleteFramebuffersEXT(1, &fbo);
+        glDeleteTextures(1, &col);
+        glDeleteTextures(1, &dep);
+    }
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+    CGLDestroyPixelFormat(pf);
+}
+
 /* Generic compression (M6): Real Racing 2 uploads RGBA bytes with internal format
  * GL_COMPRESSED_RGBA, 2048x2048 with mipmaps, and leaves the format to the driver. A 2048x2048
  * picture, red left half, green right half, blue bottom-right quarter; drawn scaled to 64x64. */
@@ -1190,6 +1663,26 @@ int main(int argc, char **argv)
 
         run_tex3d("ours", 0);
         run_tex3d("software", (CGLPixelFormatAttribute)0x00020400);
+        return 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "peel")) {
+        run_peel("ours", 0);
+        run_peel("software", (CGLPixelFormatAttribute)0x00020400);
+        return 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "redlum")) {
+        run_redlum("ours", 0);
+        run_redlum("software", (CGLPixelFormatAttribute)0x00020400);
+        return 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "tex1d")) {
+        run_tex1d("ours", 0);
+        run_tex1d("software", (CGLPixelFormatAttribute)0x00020400);
+        return 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "depth")) {
+        run_depth("ours", 0);
+        run_depth("software", (CGLPixelFormatAttribute)0x00020400);
         return 0;
     }
     if (argc > 1 && !strcmp(argv[1], "generic")) {
