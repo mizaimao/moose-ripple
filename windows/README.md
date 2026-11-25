@@ -1,17 +1,20 @@
-# Windows 7 on the host GPU
+# Windows Vista and Windows 7 on the host GPU
 
-Windows 7's desktop, Aero and Direct3D drawn by the host's graphics card in a QEMU virtual
-machine, through virtio-gpu and virglrenderer. Work in progress, not a release: the driver is
-test-signed, so Windows has to run in test mode.
+The desktop, Aero and Direct3D of 64-bit Windows Vista SP2 and Windows 7 drawn by the host's
+graphics card in a QEMU virtual machine, through virtio-gpu and virglrenderer. The driver is
+test-signed, so Windows has to run in test mode. Installing a release:
+[docs/windows/install.md](../docs/windows/install.md).
 
-- `kmd/`: the WDDM 1.1 kernel driver for QEMU's virtio-gpu.
-- `mesa/`: the user-mode driver, Mesa 24.3.4 built for Windows 7 with its Direct3D 10 and
-  Direct3D 9 parts on Mesa's virgl driver, as patches and added files.
-- `package/`: the INF that installs both.
+- `kmd/`: the WDDM kernel driver for QEMU's virtio-gpu (WDDM 1.1 on Windows 7, 1.0 on Vista).
+- `mesa/`: the user-mode driver, Mesa 24.3.4 built for Windows 7 and Vista with its
+  Direct3D 10 and Direct3D 9 parts on Mesa's virgl driver, as patches and added files.
+- `package/`: the INFs that install both (`vista/` for Vista), and `make-release.sh`, which
+  builds, signs and packs a release with its third-party notices (`notices.py`).
 - `umd9/`: the first, capability-only Direct3D 9 driver, kept for reference.
 
 How it was built and what was found on the way: `docs/windows/` (start with
-`kmd-port-notes.md` and `mesa-win7.md`). How the test machine is set up: `docs/windows/test-vms.md`.
+`kmd-port-notes.md` and `mesa-win7.md`; Vista: `vista-sp2-probe.md`). How the test machines
+are set up: `docs/windows/test-vms.md`.
 
 ## Credits
 
