@@ -790,3 +790,63 @@ The same start on the Proxmox host (KVM), driver on, two runs: no wake-up over 2
 (worst 17.9 and 5.2 ms). So the stall belongs to the emulated CPU in UTM, not to the driver's
 work as such: the next place to look is what QEMU's code translator does when a program loads
 the GL bundle (31 MB of code new to it).
+
+### Core Image: textures kept for reuse (2026-11-25)
+
+Where a Core Image render's time goes, counted with dtrace on `ci-effects filters` (480x300,
+the Proxmox host, 1280x800, 4 CPUs, GPU minimum clock 1200 MHz). A filter with one pass makes
+five kernel calls per render:
+
+- one BUFFER_CREATE and one BUFFER_DESTROY: Core Image attaches a new texture of the same size
+  to its buffer for every pass and deletes the old one (`fe_accel_buffer_attach`);
+- two SUBMITs: Core Image's own flush when it unbinds the texture
+  (`fe_gl_unbind_texture_object`), and the read-back of the result;
+- one WAIT, for the read-back.
+
+On average a SUBMIT takes 0.43 ms, a create 0.26, a destroy 0.27 and a WAIT 0.13. The filters
+with several passes make 7 to 25 calls per render. These calls are 60 to 90% of a render's
+time (ColorInvert: 1.4 of about 1.6 ms; ComicEffect: 8.9 of 13.3 ms with the tracer attached).
+The driver's own CPU time is small.
+
+Change: the winsys's buffer cache, which held vertex, index and staging buffers and plain
+render targets as Mesa's DRM winsys does, now holds textures too. A released texture waits
+up to a second for a request of the same size and format. Limits: 64 MB of textures, the ones
+waiting longest destroyed first; a buffer whose handle went to the kernel (a window's frame,
+the screen, WindowServer's texture of a surface) is never cached, because the kernel may
+still show it. `RIPPLE_GL_TEXCACHE=0` in a program's environment, or the file
+`/Library/Logs/RippleGL/no-texcache`, brings the old behaviour back.
+
+One run each on the same boot and build, cache off against on:
+
+| | cache off | cache on | Apple's software renderer |
+|---|---|---|---|
+| 24 Core Image filters, sum of the times per render | 98.4 ms | 78.6 ms | 51-52 ms |
+| ...fastest and slowest filter | 1.4 and 13.2 ms | 1.2 and 12.0 ms | 0.8 and 4.5 ms |
+| 61 Photo Booth effects, sum | 83.1 ms | 62.7 ms | not summed |
+| BUFFER_CREATE / BUFFER_DESTROY calls in the filter run | 467 / 439 | 373 / 234 | |
+| SUBMIT / WAIT calls | 421 / 99 | 421 / 99 | |
+
+The test is short (the 96 renders take about half a second), so 189 of its texture requests
+are served from the cache and the rest are Core Image filling its own store of intermediate
+images, which it only starts to give back late in the run. A program that renders for longer
+reuses more.
+
+Pictures: every filter and every Photo Booth effect compares with software rendering exactly
+as with the cache off (25 runs each way for the filters). Desktop, Exposé, Dashboard and a
+gl-gears window (59.5 frames/s, longest frame 17 ms) looked at on the same build; no error
+from the host's renderer.
+
+Seen on the way, not from this change:
+
+- The first run within two minutes of a boot is three to four times slower on the multi-pass
+  filters (ComicEffect 41.8 ms): WindowServer is still drawing at 33 frames/s then. Wait until
+  it is idle before timing.
+- In about one run in ten the reference picture of CISepiaTone (Apple's software renderer) has
+  four wrong pixels in a row at a random place; with the cache off 2 of 25 runs, with it on 4
+  of 25. Ours is right in those pixels. `CI_EFFECTS_WHERE=1` makes `ci-effects` print where
+  the differing pixels are.
+- On this build CIEdges differs from software on 3.9% of the pixels again and 55 of the 61
+  Photo Booth effects match, with the cache off and on; on 2026-11-14 it was 24 of 24 and 57
+  of 61. Not looked into yet.
+
+Left for Core Image: the two SUBMITs per pass, each of which waits for the host.
