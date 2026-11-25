@@ -1,6 +1,75 @@
 --- a/src/gallium/drivers/virgl/virgl_context.c
 +++ b/src/gallium/drivers/virgl/virgl_context.c
-@@ -1229,10 +1229,20 @@
+@@ -492,10 +492,28 @@
+    FREE(vrs);
+ }
+ 
++/* moose-ripple: virgl_bind_sampler_states skips sampler states that are bound already. This
++ * forgets what is bound, so the next bind goes out. It has to after new sampler views: the host
++ * binds a new view on whatever unit is active and puts every unit right again only when a
++ * sampler bind marks the slots (Cinebench R11.5 drew glass with another unit's texture). Mask in
++ * RIPPLE_GL_SAMPLER_FORGET: 1 shader bind, 2 views, 4 framebuffer, 8 blit, 16 clear, 32 flush. */
++static int ripple_forget_mask = -1;
++
++static void ripple_forget_samplers(struct virgl_context *vctx, int event)
++{
++   if (ripple_forget_mask < 0) {
++      const char *env = getenv("RIPPLE_GL_SAMPLER_FORGET");
++      ripple_forget_mask = env ? atoi(env) : 3;
++   }
++   if (ripple_forget_mask & event)
++      memset(vctx->bound_samplers, 0xff, sizeof(vctx->bound_samplers));
++}
++
+ static void virgl_set_framebuffer_state(struct pipe_context *ctx,
+                                                 const struct pipe_framebuffer_state *state)
+ {
+    struct virgl_context *vctx = virgl_context(ctx);
++   ripple_forget_samplers(vctx, 4);
+ 
+    vctx->framebuffer = *state;
+    virgl_encoder_set_framebuffer_state(vctx, state);
+@@ -857,6 +875,7 @@
+    struct virgl_context *vctx = virgl_context(ctx);
+ 
+    virgl_encode_bind_shader(vctx, handle, PIPE_SHADER_VERTEX);
++   ripple_forget_samplers(vctx, 1);
+ }
+ 
+ static void virgl_bind_tcs_state(struct pipe_context *ctx,
+@@ -894,6 +913,7 @@
+    struct virgl_context *vctx = virgl_context(ctx);
+ 
+    virgl_encode_bind_shader(vctx, handle, PIPE_SHADER_FRAGMENT);
++   ripple_forget_samplers(vctx, 1);
+ }
+ 
+ static void virgl_clear(struct pipe_context *ctx,
+@@ -903,6 +923,7 @@
+                                 double depth, unsigned stencil)
+ {
+    struct virgl_context *vctx = virgl_context(ctx);
++   ripple_forget_samplers(vctx, 16);
+ 
+    if (!vctx->num_draws)
+       virgl_reemit_draw_resources(vctx);
+@@ -1067,6 +1088,7 @@
+ void virgl_flush_eq(struct virgl_context *ctx, void *closure,
+                     struct pipe_fence_handle **fence)
+ {
++   ripple_forget_samplers(ctx, 32);
+    struct virgl_screen *rs = virgl_screen(ctx->base.screen);
+ 
+    /* skip empty cbuf */
+@@ -1147,6 +1169,7 @@
+                                    struct pipe_sampler_view **views)
+ {
+    struct virgl_context *vctx = virgl_context(ctx);
++   ripple_forget_samplers(vctx, 2);
+    struct virgl_shader_binding_state *binding =
+       &vctx->shader_bindings[shader_type];
+ 
+@@ -1229,10 +1252,22 @@
  {
     struct virgl_context *vctx = virgl_context(ctx);
     uint32_t handles[PIPE_MAX_SAMPLERS];
@@ -13,13 +82,31 @@
     }
 +   /* moose-ripple: the state tracker binds the sampler states again whenever a texture
 +    * changes, mostly the same ones (Real Racing 2: four of five binds), and the host goes
-+    * through its samplers again for each. What is bound already is not sent again. */
-+   if (same)
++    * through its samplers again for each. What is bound already is not sent again.
++    * ripple_forget_samplers says when the host needs them again. */
++   ripple_forget_samplers(vctx, 0);
++   if (same && ripple_forget_mask != 0)
 +      return;
 +   if (start_slot + num_samplers <= PIPE_MAX_SAMPLERS)
 +      memcpy(&vctx->bound_samplers[shader][start_slot], handles, num_samplers * sizeof(handles[0]));
     virgl_encode_bind_sampler_states(vctx, shader, start_slot, num_samplers, handles);
  }
+ 
+@@ -1305,6 +1340,7 @@
+                                       const struct pipe_box *src_box)
+ {
+    struct virgl_context *vctx = virgl_context(ctx);
++   ripple_forget_samplers(vctx, 8);
+    struct virgl_resource *dres = virgl_resource(dst);
+    struct virgl_resource *sres = virgl_resource(src);
+ 
+@@ -1328,6 +1364,7 @@
+                       const struct pipe_blit_info *blit)
+ {
+    struct virgl_context *vctx = virgl_context(ctx);
++   ripple_forget_samplers(vctx, 8);
+    struct virgl_resource *dres = virgl_resource(blit->dst.resource);
+    struct virgl_resource *sres = virgl_resource(blit->src.resource);
  
 --- a/src/gallium/drivers/virgl/virgl_context.h
 +++ b/src/gallium/drivers/virgl/virgl_context.h
