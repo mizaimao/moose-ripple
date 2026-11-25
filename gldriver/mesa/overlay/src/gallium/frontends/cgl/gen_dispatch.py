@@ -78,6 +78,8 @@ CUSTOM = {
     'get_object_parameteriv_APPLE': 'ripple_cgl_get_object_parameteriv',
     # Shader compile and link: failures logged with their info log (debug log on; M6).
     'compile_shader_ARB': 'ripple_cgl_compile_shader',
+    # Debug: text of a shader replaced before Mesa sees it (the shadersub switch, cgl_apple.c).
+    'shader_source_ARB': 'ripple_cgl_shader_source',
     'link_program_ARB': 'ripple_cgl_link_program',
     # ARB programs: Apple's ALIAS of a binding rewritten for Mesa's parser (M6).
     'program_string_ARB': 'ripple_cgl_program_string',

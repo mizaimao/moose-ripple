@@ -516,9 +516,10 @@ ripple_cgl_scissor(void *rend, GLint x, GLint y, GLsizei w, GLsizei h)
  * at the context's next framebuffer bind; for looking at what was drawn off screen. Checked
  * once a second. */
 #include "main/hash.h"
+#include "main/texobj.h"
 struct fbo_dump_list {
    unsigned n;
-   GLuint names[64];
+   GLuint names[256];
 };
 
 static void
@@ -526,7 +527,7 @@ fbo_dump_collect(void *data, void *user)
 {
    struct gl_framebuffer *fb = data;
    struct fbo_dump_list *list = user;
-   if (fb && fb->Name && list->n < 64)
+   if (fb && fb->Name && list->n < 256)
       list->names[list->n++] = fb->Name;
 }
 
@@ -620,13 +621,62 @@ tex_dump_list(void *data, void *user)
               t->Sampler.Attrib.MaxAnisotropy);
 }
 
+/* While the texdump switch is on, a checksum of what the program hands to glTexImage2D for
+ * level 0 of each RGBA byte texture, to compare with what the texture reads back as. */
+static struct { GLuint name; uint32_t sum; } tex_uploads[512];
+static unsigned tex_upload_count;
+
+static bool
+texdump_wanted(void)
+{
+   static time_t checked;
+   static bool on;
+   time_t now = time(NULL);
+   if (now != checked) {
+      checked = now;
+      on = access("/Library/Logs/RippleGL/texdump", F_OK) == 0;
+   }
+   return on;
+}
+
+static uint32_t
+tex_checksum(const uint8_t *p, size_t n)
+{
+   uint32_t h = 2166136261u;
+   for (size_t i = 0; i < n; i++)
+      h = (h ^ p[i]) * 16777619u;
+   return h;
+}
+
+static void
+tex_upload_note(struct gl_context *g, GLenum target, GLint level, GLsizei w, GLsizei h,
+                GLenum format, GLenum type, const GLvoid *pixels)
+{
+   if (!g || !pixels || target != GL_TEXTURE_2D || level != 0 || format != GL_RGBA ||
+       type != GL_UNSIGNED_BYTE || g->Unpack.BufferObj || g->Unpack.RowLength || w <= 0 ||
+       h <= 0 || !texdump_wanted())
+      return;
+   struct gl_texture_object *t = _mesa_get_current_tex_object(g, target);
+   if (!t || !t->Name)
+      return;
+   unsigned i = 0;
+   while (i < tex_upload_count && tex_uploads[i].name != t->Name)
+      i++;
+   if (i == 512)
+      return;
+   if (i == tex_upload_count)
+      tex_upload_count++;
+   tex_uploads[i].name = t->Name;
+   tex_uploads[i].sum = tex_checksum(pixels, (size_t)w * h * 4);
+}
+
 static void
 tex_dump_collect(void *data, void *user)
 {
    struct gl_texture_object *t = data;
    struct fbo_dump_list *list = user;
    if (t && t->Name && t->Target == GL_TEXTURE_2D && t->Image[0][0] &&
-       t->Image[0][0]->_BaseFormat == GL_RGBA && list->n < 64)
+       t->Image[0][0]->_BaseFormat == GL_RGBA && list->n < 256)
       list->names[list->n++] = t->Name;
 }
 
@@ -704,6 +754,28 @@ ripple_cgl_get_tex_image(void *rend, GLenum target, GLint level, GLenum format, 
          fprintf(f, "alpha of texture %u (%dx%d): %u to %u, %.1f%% under 0.2; first texel "
                  "%u %u %u %u\n", names.names[k], tw, th, lo, hi, 100.0 * under / total,
                  px[0], px[1], px[2], px[3]);
+         {  /* one texel by its coordinates, from the file texprobe ("s t"), default 0.5 0.5 */
+            float ps = 0.5f, pt = 0.5f;
+            FILE *pf = fopen("/Library/Logs/RippleGL/texprobe", "r");
+            if (pf) {
+               if (fscanf(pf, "%f %f", &ps, &pt) != 2)
+                  ps = pt = 0.5f;
+               fclose(pf);
+            }
+            int qx = (int)(ps * tw), qy = (int)(pt * th);
+            qx = qx < 0 ? 0 : qx >= tw ? tw - 1 : qx;
+            qy = qy < 0 ? 0 : qy >= th ? th - 1 : qy;
+            const uint8_t *q = px + ((size_t)qy * tw + qx) * 4;
+            fprintf(f, "texture %u texel at %.3f,%.3f: %u %u %u %u\n", names.names[k], ps, pt,
+                    q[0], q[1], q[2], q[3]);
+         }
+         for (unsigned u = 0; u < tex_upload_count; u++)
+            if (tex_uploads[u].name == names.names[k]) {
+               uint32_t back = tex_checksum(px, total * 4);
+               fprintf(f, "texture %u (%dx%d): handed over %08x, reads back %08x: %s\n",
+                       names.names[k], tw, th, tex_uploads[u].sum, back,
+                       back == tex_uploads[u].sum ? "the same" : "DIFFERENT");
+            }
          free(px);
       }
       CALL_BindTexture(GET_DISPATCH(), (GL_TEXTURE_2D, bound));
@@ -1274,7 +1346,6 @@ ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum 
 #include "main/context.h"
 #include "main/glformats.h"
 #include "main/image.h"
-#include "main/teximage.h"
 #include "main/texobj.h"
 #include "state_tracker/st_context.h"
 #include "pipe/p_context.h"
@@ -1652,6 +1723,7 @@ tex_image2D_body(struct ripple_cgl_context *ctx, struct gl_context *glctx, GLenu
 {
    CALL_TexImage2D(GET_DISPATCH(), (target, level, internalformat, width, height, border,
                                     format, type, pixels));
+   tex_upload_note(glctx, target, level, width, height, format, type, pixels);
    if (level != 0 || !cs_target(target))
       return;
    if (!glctx)
@@ -2213,6 +2285,76 @@ log_glsl_failure(const char *what, GLuint name, bool program)
       CALL_GetShaderInfoLog(GET_DISPATCH(), (name, sizeof(buf) - 1, &len, buf));
    buf[len > 0 && len < (GLsizei)sizeof(buf) ? len : 0] = 0;
    fprintf(f, "RippleGLDriver: %s %u failed: %s\n", what, name, buf);
+}
+
+/* /Library/Logs/RippleGL/shadersub (debug switch, read at every glShaderSource): pairs of lines,
+ * a text to find in each GLSL shader a program hands over and the text to put in its place
+ * (an empty second line takes the text out). To remove or change one term of a program's
+ * shaders and see what that does to its picture (Cinebench's glass, issue 154). */
+static char *
+shader_replace_all(char *text, const char *find, const char *with)
+{
+   size_t flen = strlen(find), wlen = strlen(with), hits = 0;
+   for (const char *p = strstr(text, find); p; p = strstr(p + flen, find))
+      hits++;
+   if (!hits)
+      return text;
+   char *out = malloc(strlen(text) + hits * wlen + 1), *o = out;
+   if (!out)
+      return text;
+   const char *s = text;
+   for (const char *p = strstr(s, find); p; p = strstr(s, find)) {
+      memcpy(o, s, (size_t)(p - s));
+      o += p - s;
+      memcpy(o, with, wlen);
+      o += wlen;
+      s = p + flen;
+   }
+   strcpy(o, s);
+   free(text);
+   return out;
+}
+
+void GLAPIENTRY
+ripple_cgl_shader_source(void *rend, GLhandleARB shader, GLsizei count,
+                         const GLcharARB **string, const GLint *length)
+{
+   RIPPLE_CGL_ENTER(rend);
+   FILE *f = count > 0 && string ? fopen("/Library/Logs/RippleGL/shadersub", "r") : NULL;
+   char *text = NULL;
+   if (f) {
+      static char lines[16][512];
+      unsigned n = 0;
+      while (n < 16 && fgets(lines[n], sizeof(lines[n]), f)) {
+         lines[n][strcspn(lines[n], "\r\n")] = 0;
+         n++;
+      }
+      fclose(f);
+      size_t total = 0;
+      for (GLsizei i = 0; i < count; i++)
+         total += !string[i] ? 0 : length && length[i] >= 0 ? (size_t)length[i] : strlen(string[i]);
+      text = malloc(total + 1);
+      if (text) {
+         char *o = text;
+         for (GLsizei i = 0; i < count; i++) {
+            size_t len = !string[i] ? 0 :
+                         length && length[i] >= 0 ? (size_t)length[i] : strlen(string[i]);
+            memcpy(o, string[i], len);
+            o += len;
+         }
+         *o = 0;
+         for (unsigned p = 0; p < n; p += 2)
+            if (lines[p][0])
+               text = shader_replace_all(text, lines[p], p + 1 < n ? lines[p + 1] : "");
+      }
+   }
+   if (text) {
+      const GLcharARB *one = text;
+      CALL_ShaderSource(GET_DISPATCH(), ((GLuint)(uintptr_t)shader, 1, &one, NULL));
+      free(text);
+   } else {
+      CALL_ShaderSource(GET_DISPATCH(), ((GLuint)(uintptr_t)shader, count, string, length));
+   }
 }
 
 void GLAPIENTRY

@@ -92,6 +92,8 @@ void GLAPIENTRY ripple_cgl_get_object_parameteriv(void *rend, GLenum objectType,
                                                   GLenum pname, GLint *params);
 /* Compile and link, with failures written to the debug log (cgl_apple.c). */
 void GLAPIENTRY ripple_cgl_compile_shader(void *rend, GLhandleARB shader);
+void GLAPIENTRY ripple_cgl_shader_source(void *rend, GLhandleARB shader, GLsizei count,
+                                         const GLcharARB **string, const GLint *length);
 void GLAPIENTRY ripple_cgl_link_program(void *rend, GLhandleARB program);
 void GLAPIENTRY ripple_cgl_program_string(void *rend, GLenum target, GLenum format, GLsizei len,
                                           const GLvoid *string);
