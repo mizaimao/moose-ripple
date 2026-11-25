@@ -956,3 +956,33 @@ Dock:
 
 So a covered window now costs this game nothing. Picture looked at: the game under the Dock
 with the Dock drawn over it.
+
+### UTM: what limits the frame rate (2026-11-25, issue 109)
+
+The Mac OS X part of issue 109's measurement: UTM 5 on an M1 Max, the guest with four emulated
+CPUs (multi-threaded translation), release 0.2.2 installed, 1280x800. Sampled on the host over
+60 s: CPU time of each QEMU thread (`ps -M`, the difference of two readings) and the GPU's
+`Device Utilization %` (`ioreg -c IOAccelerator`, every 5 s).
+
+| | guest frames/s | host GPU busy | QEMU, all threads | the four CPU threads | QEMU's main thread |
+|---|---|---|---|---|---|
+| idle desktop | | 0-1% | 25% of a core | 4-6% each | 7% |
+| gl-gears 1280x720 | 56.8 | 15-19% | 55% | 11-13% each | 5% |
+| OpenArena timedemo, 1024x768 | 14.9 (141 on the KVM host) | 5-7% | 108% | 23-27% each | 5% |
+
+gl-gears is no load test: it draws on a 60 Hz timer and reaches it. The timedemo is: it runs
+as fast as it can, and the four CPU threads together use one core's worth, which is one guest
+thread kept busy and moved between the guest's CPUs. The host's side of the renderer (QEMU's
+main thread) and the GPU are nearly idle. So of the issue's three candidates it is the first,
+the emulated CPU: a frame takes 67 ms of guest time where the KVM host needs 7.
+
+Where those 67 ms go, from a 10 s `sample` of the game in the guest (3485 samples of its main
+thread): 30% in the swap, nearly all of that blocked in a kernel call, waiting for the host;
+10% in the driver's draw path; the rest in the game's own code (its vertex maths, emulated).
+So the third candidate, waiting on round trips, is about a third of a frame here, and it is
+the part a driver can change. Release 0.2.2 does not have the fix for the wait on QEMU's
+10 ms fence timer (above, "The slow wait, found"), which is the likely cause.
+
+Open: the same run with the current kext. The guest did not come back after the drivers were
+installed in it for that run (it was restarted while its kext caches were still being
+rebuilt), so the after number is missing.
