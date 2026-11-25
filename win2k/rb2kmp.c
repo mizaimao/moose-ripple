@@ -141,6 +141,7 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
     VideoPortGetRegistryParameters(a, L"RippleNativeD3D7", FALSE, registry_flag, &a->gpu.nativeD3D7);
     VideoPortGetRegistryParameters(a, L"RippleD3D7WaitCurrent", FALSE, registry_flag, &a->gpu.d7WaitCurrent);
     VideoPortGetRegistryParameters(a, L"RippleD3D8", FALSE, registry_flag, &a->gpu.d3d8);
+    VideoPortGetRegistryParameters(a, L"RippleVertexShaders", FALSE, registry_flag, &a->gpu.vertexShaders);
     a->gpu.ddGpuSurfaces = a->gpu.plainSurfaces || a->gpu.nativeD3D7;
     /* Map the scanout pages during adapter discovery, cached like every other
      * view of the framebuffer (rb_map_cached). BAR0 is a PCI framebuffer; its

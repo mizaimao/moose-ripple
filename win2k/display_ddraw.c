@@ -775,6 +775,7 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
     /* Likewise the Direct3D 8 interface; its format list offers 3D only in
      * the 32-bit display format. */
     d->d3d8 = d->d3dDescribed && (caps.gpuSurfaces & RB2K_DD_D3D8) != 0;
+    d->vertexShaders = d->d3d8 && (caps.gpuSurfaces & RB2K_DD_VERTEX_SHADERS) != 0;
     if (d->mode.BitsPerPlane != 32) caps.gpuSurfaces = 0;
     RtlZeroMemory(info, sizeof(*info));
     info->dwSize = sizeof(*info);

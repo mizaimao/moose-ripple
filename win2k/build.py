@@ -130,6 +130,8 @@ def build_programs(work):
         ("zstore.exe", ["tools/zstore"], ["-lddraw", "-ldxguid", "-lgdi32", "-luser32"]),
         ("glpresent.exe", ["tools/glpresent"], ["-lopengl32", "-lgdi32", "-luser32"]),
         ("cursorqa.exe", ["tools/cursorqa"], ["-lgdi32", "-luser32"]),
+        ("rundiag.exe", ["tools/rundiag"], ["-luser32"]),
+        ("guiclick.exe", ["tools/guiclick"], ["-luser32"]),
     ]
     # Only Microsoft's headers declare the Direct3D 8 interfaces here.
     d3d = work / "d3d-include"

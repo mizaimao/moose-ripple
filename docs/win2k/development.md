@@ -1770,3 +1770,61 @@ t6, while sets 0 to 4 run the other way so that a wrong set would show.
 `d9pixels` passed all 31 cases with hardware and with software vertex
 processing, `d8pixels` its 23, the Direct3D 8 and 9 textured scenes
 passed, and Direct3D 8 Quake ran at 58.7 fps (58.6 before).
+
+## Vertex shaders on the host GPU
+
+With the `RippleVertexShaders` registry value set to 1, the driver reports
+vertex shader 2.0 to Direct3D 9 programs (256 constants) and 1.1 to
+Direct3D 8 programs (96), and runs the shaders on the host GPU instead of
+leaving them to the runtime's software vertex processing. The value is off
+by default until real programs have been checked with it.
+
+Microsoft's Direct3D 9 runtime passes vs_2_0 shaders through the Direct3D 8
+interface: each CreateVertexShader record holds a Direct3D 8 declaration
+(stream 0 only, the registers already assigned from the shader's `dcl`
+statements, which are removed from the code) followed by the code. The
+display driver keeps both and translates them at the first draw:
+
+- The vertices travel as the stream holds them. Each one is padded to whole
+  constants and placed after the shader's constants; the vertex program
+  fetches its inputs from those words itself, unpacking `D3DCOLOR`,
+  `UBYTE4`, `SHORT2` and `SHORT4` with integer operations, so the display
+  driver needs no floating point.
+- Instructions of vs_1_1 and vs_2_0 share the pixel shader 2.0 rules where
+  they agree; the vertex-only ones (`slt`, `sge`, `dst`, `lit`, `expp`,
+  `logp`, `sgn`, `mova`) translate to their TGSI counterparts. Relative
+  addressing (`c[a0.x + n]`) loads the address register just before the
+  read. Flow control (`rep`, `loop`, `if`, `call`) is not translated yet;
+  such shaders are refused and their draws skipped.
+- oPos goes through the Direct3D viewport into the render target's clip
+  space with w kept, so the host clips as Direct3D does. oD0 and oD1 are
+  saturated, oT0 to oT7 reach the pixel program as `GENERIC[2..9]`, and oFog
+  becomes the fog factor through the specular alpha when vertex fog is on.
+- Without a pixel shader, the texture stages after the vertex shader become
+  a pixel program of their own, made from the colour and alpha operations
+  and arguments of up to eight stages (bump mapping, premodulate and the
+  three-argument operations are not translated).
+
+State blocks are recorded and replayed as Direct3D expects: commands
+between STATESETBEGIN and STATESETEND go into the block instead of taking
+effect, STATESETEXECUTE replays them, CAPTURE refreshes their values from
+the current state, and CREATE makes a block of the whole current state.
+The driver used to skip these commands. Direct3D 9 effects (D3DX) keep the
+states of their passes in state blocks, so before this DirectQ drew its
+text, particles and screen flashes without blending.
+
+On XP SP3 under KVM on the Intel UHD 630 host, with `RippleVertexShaders`
+set:
+
+| Check | Result |
+| --- | --- |
+| `d9pixels`, hardware vertex processing: the pixel cases, five vertex shader cases (position and viewport, byte, short and colour inputs with relative addressing, oFog, the stages after a vertex shader) and blending after shaders | 38 of 38 |
+| The same with software vertex processing (Microsoft's runtime runs the shaders) | 38 of 38 |
+| DirectQ 1.5 (a Direct3D 9 Quake engine with vs_2_0 and ps_2_0 effects), `timedemo demo1` at 640x480 in a window | renders the scene, text, particles and flashes; 55.1 fps |
+
+Without the value, `d9pixels` passed its 31 cases, `d8pixels` its 23, the
+Direct3D 7 checks passed, and Direct3D 8 Quake ran at 58.7 fps, as before.
+DirectQ cannot run without hardware vertex shaders. 3DMark03 starts but
+refuses every game test: it needs cube textures, DXT1 and DXT3 compressed
+textures, a back buffer with alpha and a stencil buffer, none of which the
+device offers yet.

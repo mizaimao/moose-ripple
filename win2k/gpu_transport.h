@@ -27,6 +27,7 @@ typedef struct {
     /* Pixel shader draws: the texture in each stage's view, and their samplers. */
     ULONG psViews[RB2K_D8_STAGES];
     RB2K_D7_CACHE psSampler;
+    RB2K_D7_CACHE vsProgram;            /* vertex programs by id */
 } RB2K_D7_STATE;
 
 typedef struct RB2K_IMAGE {
@@ -107,7 +108,7 @@ typedef struct {
     LONG busy, barrier;
     BOOLEAN owned, ready, enabledMaster, tested;
     ULONG nextId, fence, imageCount, hostFills, readbacks, uploads, hostCopies;
-    BOOLEAN ddGpuSurfaces, nativeD3D7, plainSurfaces, d3d8;
+    BOOLEAN ddGpuSurfaces, nativeD3D7, plainSurfaces, d3d8, vertexShaders;
     struct {
         RB2K_IMAGE *target;
         ULONG count;
@@ -182,7 +183,8 @@ BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image
 BOOLEAN rb_gpu_d7_valid(const RB2K_D3D7_DRAW *draw);
 BOOLEAN rb_gpu_d8_valid(const RB2K_D3D8_DRAW *draw);
 BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image, const RB2K_D3D8_DRAW *draw,
-                       const char *program, ULONG programBytes, RB2K_TEXTURE *const *textures);
+                       const char *program, ULONG programBytes, const char *vertexProgram, ULONG vertexBytes,
+                       RB2K_TEXTURE *const *textures);
 BOOLEAN rb_gpu_d7_samples(const RB2K_D3D7_DRAW *draw, ULONG stage);
 RB2K_TEXTURE *rb_gpu_texture(RB2K_GPU *gpu, ULONG id);
 BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture);

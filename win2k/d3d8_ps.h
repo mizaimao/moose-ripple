@@ -17,7 +17,7 @@
 #define RB_PS2_SAMPLERS 8
 #define RB_PS_CONSTANTS 8
 #define RB_PS2_CONSTANTS 32     /* c0..c31 of shader model 2 */
-#define RB_PS_TEXT_BYTES 4096
+#define RB_PS_TEXT_BYTES 8192
 
 /* Why a shader was not translated, for diagnostics. */
 enum {
@@ -30,6 +30,7 @@ typedef struct {
     unsigned int coords;        /* texture coordinate sets it reads */
     unsigned int reason;        /* RbPs* */
     unsigned int detail;        /* the opcode or token behind the reason */
+    unsigned int constants;     /* vertex shaders: c0..c(n-1) are read (all for relative reads) */
 } RB_PS_INFO;
 
 /* Fog applied to the shader's result, encoded as RB2K_D3D7_DRAW.fog: the
@@ -49,5 +50,29 @@ typedef struct {
  * of the text written to out including the terminating zero, or 0. */
 unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, unsigned int fog, char *out,
                              unsigned int size, RB_PS_INFO *info);
+
+/* Vertex shaders (vs_1_1, vs_2_0) with their Direct3D 8 declaration (one
+ * stream), as a TGSI vertex shader for the layout in d3d8_ps.c: constants
+ * c0..c255 at CONST[RB_VS_CONST_BASE..], then up to RB_VS_VERTICES vertices
+ * of at most RB_VS_VERTEX_CONSTANTS constants each. RB_VS_FOG_ALPHA puts
+ * oFog into the specular alpha, where fog from the specular alpha finds it. */
+#define RB_VS_CONST_BASE 19
+#define RB_VS_CONSTANTS 256
+#define RB_VS_VERTICES 48
+#define RB_VS_VERTEX_CONSTANTS 16
+#define RB_VS_FOG_ALPHA 1
+unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, const unsigned int *decl,
+                             unsigned int declCount, unsigned int flags, char *out, unsigned int size, RB_PS_INFO *info);
+
+/* Fixed-function texture stages (D3DTSS colour and alpha operations and
+ * arguments, the coordinate index) as a TGSI pixel program with the inputs of
+ * translated pixel shaders, for draws with a vertex shader. CONST[0].x holds
+ * the texture factor as its ARGB word; fog uses CONST[8] and [9]. Stage n
+ * samples with sampler n. */
+typedef struct {
+    unsigned int colorOp, colorArg1, colorArg2, alphaOp, alphaArg1, alphaArg2, coordIndex;
+} RB_STAGE_STATE;
+unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count, unsigned int specular,
+                                unsigned int fog, char *out, unsigned int size, RB_PS_INFO *info);
 
 #endif

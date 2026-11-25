@@ -41,7 +41,7 @@ static VP_STATUS query(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         if (gpu->plainSurfaces) caps->gpuSurfaces |= RB2K_DD_PLAIN_SURFACES;
         if (gpu->nativeD3D7)
             caps->gpuSurfaces |= RB2K_DD_NATIVE_D3D7 | RB2K_DD_Z16_STORAGE | RB2K_DD_Z16_RENDER |
-                                 (gpu->d3d8 ? RB2K_DD_D3D8 : 0);
+                                 (gpu->d3d8 ? RB2K_DD_D3D8 : 0) | (gpu->d3d8 && gpu->vertexShaders ? RB2K_DD_VERTEX_SHADERS : 0);
     }
     packet->StatusBlock->Information = sizeof(*caps);
     return NO_ERROR;
@@ -227,16 +227,30 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
 {
     RB2K_IMAGE *depth = NULL;
     RB2K_TEXTURE *textures[RB2K_D8_STAGES];
-    ULONG i, program, header = FIELD_OFFSET(RB2K_D3D8_DRAW, vertices);
+    ULONG i, program, vertex = 0, header = FIELD_OFFSET(RB2K_D3D8_DRAW, vertices), words = 0;
     *status = ERROR_INVALID_PARAMETER;
-    if (!gpu->d3d8 || length < header || !d->count || d->count > RB2K_D8_VERTICES || d->count % 3 ||
-        d->coordSets > RB2K_D8_STAGES ||
-        length != header + d->count * RB2K_D8_VERTEX_WORDS(d->coordSets) * sizeof(ULONG) || d->target != image->id ||
+    if (length >= header) {
+        /* Vertices as the stream held them after the vertex shader's
+         * constants, or the fixed layout of RB2K_D3D8_VERTEX. */
+        if (d->transform == 2)
+            words = d->vertexConstants <= RB2K_D8_VS_CONSTANTS && d->vertexWords <= RB2K_D8_VS_VERTEX_WORDS &&
+                    d->count <= RB2K_D8_VERTICES ? 4 * d->vertexConstants + d->count * d->vertexWords : 0;
+        else words = d->coordSets <= RB2K_D8_STAGES && d->count <= RB2K_D8_VERTICES ?
+                     d->count * RB2K_D8_VERTEX_WORDS(d->coordSets) : 0;
+    }
+    if (!gpu->d3d8 || length < header || !d->count || d->count > RB2K_D8_VERTICES || d->count % 3 || !words ||
+        length != header + words * sizeof(ULONG) || d->target != image->id ||
         !rb_gpu_d8_valid(d) || image->depth16 || (d->depthState && !d->depth))
         return refuse(gpu, RB2K_D7_SITE_RECORD, *status, 0);
     *status = ERROR_INVALID_HANDLE;
     for (program = 0; program < RB2K_D8_PROGRAMS && (!d->program || gpu->programs[program].id != d->program); ++program) {}
-    if (program == RB2K_D8_PROGRAMS) return refuse(gpu, RB2K_D7_SITE_PROGRAM, *status, d->program);
+    if (program == RB2K_D8_PROGRAMS || gpu->programs[program].text[0] != 'F')
+        return refuse(gpu, RB2K_D7_SITE_PROGRAM, *status, d->program);
+    if (d->transform == 2) {
+        for (vertex = 0; vertex < RB2K_D8_PROGRAMS && gpu->programs[vertex].id != d->vertexProgram; ++vertex) {}
+        if (vertex == RB2K_D8_PROGRAMS || gpu->programs[vertex].text[0] != 'V')
+            return refuse(gpu, RB2K_D7_SITE_PROGRAM, *status, d->vertexProgram);
+    }
     if (d->depth) {
         depth = find_image(gpu, d->depth);
         if (!depth || !depth->depth16) return refuse(gpu, RB2K_D7_SITE_DEPTH, *status, 0);
@@ -253,7 +267,7 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
         textures[i] = t;
     }
     *status = ERROR_INVALID_PARAMETER;
-    for (i = 0; i < d->count; ++i) {
+    for (i = 0; d->transform != 2 && i < d->count; ++i) {
         const RB2K_D3D8_VERTEX *v = (const RB2K_D3D8_VERTEX *)(d->vertices + i * RB2K_D8_VERTEX_WORDS(d->coordSets));
         if ((v->x & 0x7fffffff) >= 0x7f800000 || (v->y & 0x7fffffff) >= 0x7f800000 ||
             (v->z & 0x7fffffff) >= 0x7f800000 || !(v->rhw & 0x7fffffff) ||
@@ -263,7 +277,9 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
     *status = NO_ERROR;
     gpu->d8Step = 0;
     if ((depth && !rb_gpu_depth_target(gpu, result, image, depth)) ||
-        !rb_gpu_d8_draw(gpu, result, image, d, gpu->programs[program].text, gpu->programs[program].bytes, textures)) {
+        !rb_gpu_d8_draw(gpu, result, image, d, gpu->programs[program].text, gpu->programs[program].bytes,
+                        d->transform == 2 ? gpu->programs[vertex].text : NULL,
+                        d->transform == 2 ? gpu->programs[vertex].bytes : 0, textures)) {
         refuse(gpu, RB2K_D7_SITE_STEP + gpu->d8Step, result->status, result->stage);
         *status = command_error(gpu, result);
         return FALSE;

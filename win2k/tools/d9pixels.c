@@ -2,7 +2,9 @@
  * transformed triangles from user memory, a vertex buffer, an index buffer
  * with and without a base vertex, a strip, a managed texture and untransformed
  * vertices, fourteen pixel shaders of versions 1.1 and 1.2, including fog
- * and lit untransformed vertices, and nine of shader model 2.0. Each case
+ * and lit untransformed vertices, nine of shader model 2.0, seven with
+ * vertex shaders 1.1 and 2.0 (hardware ones when offered) or blending
+ * after shaders. Each case
  * draws on a 128x128 lockable back buffer and inspects a few pixels well
  * inside the shapes. "sw" asks for software vertex
  * processing. Built against the Microsoft headers; d3d9.dll is loaded at
@@ -266,7 +268,7 @@ static void case_transform(void)
 enum { RR = 0, RV = 1, RC = 2, RT = 3 };
 enum { SwXYZW = 0xe4, SwA = 0xff };
 enum { MNone, MNeg, MBias, MBiasNeg, MBx2, MBx2Neg, MComp };
-enum { OMov = 1, OAdd = 2, OSub = 3, OMad = 4, OMul = 5, ODp3 = 8, OLrp = 18, OTexcoord = 64,
+enum { OMov = 1, OAdd = 2, OSub = 3, OMad = 4, OMul = 5, ODp3 = 8, ODp4 = 9, OLrp = 18, OTexcoord = 64,
        OTexkill = 65, OTex = 66, OCnd = 80, ODef = 81, OCmp = 88 };
 #define CO 0x40000000UL
 /* IEEE single bit patterns for def. */
@@ -762,6 +764,247 @@ static void pixel_shaders(int only, BOOL version2)
     }
 }
 
+/* ---- vertex shaders ---- */
+
+/* Register types and declaration usages of vertex shaders. */
+enum { VPos = 4, VAttr = 5, VTex = 6, VAddr = 3 };
+#define VDCL2(usage, reg) P2I(31, 2), (0x80000000UL | (usage)), P2D(RV, reg, 15)
+#define VDCL1(usage, reg) 31, (0x80000000UL | (usage)), P2D(RV, reg, 15)
+typedef struct { float x, y, z; DWORD color; } VSVERTEX;
+
+/* A quad in clip space (y up), as two triangles of a list, times w. */
+static void vs_quad(VSVERTEX *v, float x0, float y0, float x1, float y1, DWORD color)
+{
+    const float xs[6] = { x0, x1, x0, x0, x1, x1 }, ys[6] = { y0, y0, y1, y1, y0, y1 };
+    int i;
+    for (i = 0; i < 6; ++i) { v[i].x = xs[i]; v[i].y = ys[i]; v[i].z = 0.5f; v[i].color = color; }
+}
+
+static void vs_run(const char *name, const D3DVERTEXELEMENT9 *elements, const DWORD *vs, const DWORD *ps,
+                   const void *vertices, UINT stride, UINT triangles, const SAMPLE *s, int samples)
+{
+    IDirect3DVertexDeclaration9 *decl = NULL;
+    IDirect3DVertexShader9 *vsh = NULL;
+    IDirect3DPixelShader9 *psh = NULL;
+    HRESULT hr = IDirect3DDevice9_CreateVertexDeclaration(device, elements, &decl);
+    if (FAILED(hr)) { fail_hr(name, "declaration", hr); return; }
+    hr = IDirect3DDevice9_CreateVertexShader(device, vs, &vsh);
+    if (FAILED(hr)) fail_hr(name, "vertex shader", hr);
+    else {
+        hr = ps ? IDirect3DDevice9_CreatePixelShader(device, ps, &psh) : D3D_OK;
+        if (FAILED(hr)) fail_hr(name, "pixel shader", hr);
+        else if (begin(name)) {
+            IDirect3DDevice9_SetVertexDeclaration(device, decl);
+            IDirect3DDevice9_SetVertexShader(device, vsh);
+            IDirect3DDevice9_SetPixelShader(device, psh);
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, triangles, vertices, stride);
+            IDirect3DDevice9_SetVertexShader(device, NULL);
+            IDirect3DDevice9_SetPixelShader(device, NULL);
+            if (FAILED(hr)) { fail_hr(name, "draw", hr); IDirect3DDevice9_EndScene(device); }
+            else check(name, s, samples);
+        }
+    }
+    if (psh) IDirect3DPixelShader9_Release(psh);
+    if (vsh) IDirect3DVertexShader9_Release(vsh);
+    IDirect3DVertexDeclaration9_Release(decl);
+}
+
+/* only: run that case alone (30 and up), or all when zero. */
+static void vertex_shaders(int only)
+{
+    static const D3DVERTEXELEMENT9 colored[] = {
+        { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+        { 0, 12, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 }, D3DDECL_END() };
+    /* ps_2_0: mov oC0, v0 */
+    static const DWORD ps_color[] = { 0xffff0200, P2DCL_V(0), P2I(OMov, 2), P2D(8, 0, 15), P2SRC(RV, 0), PSEND };
+    VSVERTEX v[24];
+    if (!only || only == 30) {
+        /* vs_2_0: oPos = v0 times c0..c3, which doubles x, y, z and w; oD0 = v1. */
+        static const DWORD vs[] = { 0xfffe0200, VDCL2(0, 0), VDCL2(10, 1),
+            P2I(ODp4, 3), P2D(VPos, 0, 1), P2SRC(RV, 0), P2SRC(RC, 0),
+            P2I(ODp4, 3), P2D(VPos, 0, 2), P2SRC(RV, 0), P2SRC(RC, 1),
+            P2I(ODp4, 3), P2D(VPos, 0, 4), P2SRC(RV, 0), P2SRC(RC, 2),
+            P2I(ODp4, 3), P2D(VPos, 0, 8), P2SRC(RV, 0), P2SRC(RC, 3),
+            P2I(OMov, 2), P2D(VAttr, 0, 15), P2SRC(RV, 1), PSEND };
+        static const float m[16] = { 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2 };
+        static const SAMPLE s[] = { { 48, 48, 0xff0000 }, { 80, 48, 0x00ff00 }, { 48, 80, 0x0000ff },
+                                    { 80, 80, 0xffffff }, { 8, 8, CLEAR_COLOR }, { 120, 120, CLEAR_COLOR } };
+        vs_quad(v, -0.5f, 0.5f, 0, 0, 0xffff0000);
+        vs_quad(v + 6, 0, 0.5f, 0.5f, 0, 0xff00ff00);
+        vs_quad(v + 12, -0.5f, 0, 0, -0.5f, 0xff0000ff);
+        vs_quad(v + 18, 0, 0, 0.5f, -0.5f, 0xffffffff);
+        IDirect3DDevice9_SetVertexShaderConstantF(device, 0, m, 4);
+        vs_run("vs2_transform", colored, vs, ps_color, v, sizeof(v[0]), 8, s, 6);
+    }
+    if (!only || only == 31) {
+        /* The same shader through a viewport on the top right quarter. */
+        static const DWORD vs[] = { 0xfffe0200, VDCL2(0, 0), VDCL2(10, 1),
+            P2I(OMov, 2), P2D(VPos, 0, 15), P2SRC(RV, 0), P2I(OMov, 2), P2D(VAttr, 0, 15), P2SRC(RV, 1), PSEND };
+        static const SAMPLE s[] = { { 96, 32, 0xffff00 }, { 32, 32, CLEAR_COLOR }, { 96, 96, CLEAR_COLOR },
+                                    { 32, 96, CLEAR_COLOR } };
+        D3DVIEWPORT9 vp = { 64, 0, 64, 64, 0.0f, 1.0f }, full = { 0, 0, Side, Side, 0.0f, 1.0f };
+        vs_quad(v, -1, 1, 1, -1, 0xffffff00);
+        /* A clear covers only the viewport, so clear the whole target first. */
+        IDirect3DDevice9_Clear(device, 0, NULL, D3DCLEAR_TARGET, CLEAR_COLOR, 1.0f, 0);
+        IDirect3DDevice9_SetViewport(device, &vp);
+        vs_run("vs2_viewport", colored, vs, ps_color, v, sizeof(v[0]), 2, s, 4);
+        IDirect3DDevice9_SetViewport(device, &full);
+    }
+    if (!only || only == 32) {
+        /* vs_1_1: oPos = v0 (two floats); a0.x = the first byte of v1;
+         * oD0 = c[a0.x]; oT0 = v2 (two shorts) times c10. ps_2_0 adds them. */
+        typedef struct { float x, y; BYTE index[4]; short s[2]; } V1;
+        static const D3DVERTEXELEMENT9 decl[] = {
+            { 0, 0, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_POSITION, 0 },
+            { 0, 8, D3DDECLTYPE_UBYTE4, 0, D3DDECLUSAGE_BLENDINDICES, 0 },
+            { 0, 12, D3DDECLTYPE_SHORT2, 0, D3DDECLUSAGE_TEXCOORD, 0 }, D3DDECL_END() };
+        static const DWORD vs[] = { 0xfffe0101, VDCL1(0, 0), VDCL1(2, 1), VDCL1(5, 2),
+            OMov, P2D(VPos, 0, 15), P2SRC(RV, 0),
+            OMov, P2D(VAddr, 0, 1), P2S(RV, 1, 0x00, 0),
+            OMov, P2D(VAttr, 0, 15), P2SRC(RC, 0) | 0x2000,
+            OMul, P2D(VTex, 0, 15), P2SRC(RV, 2), P2SRC(RC, 10), PSEND };
+        static const DWORD ps[] = { 0xffff0200, P2DCL_V(0), P2DCL_T(0, 15),
+            P2I(OMov, 2), P2D(RR, 1, 15), P2SRC(RT, 0),
+            P2I(OAdd, 3), P2D(RR, 0, 15), P2SRC(RV, 0), P2SRC(RR, 1), P2I(OMov, 2), P2D(8, 0, 15), P2SRC(RR, 0), PSEND };
+        static const float c[44] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0.25f, 0.5f, 0, 1 };
+        static const float c10[4] = { 1.0f / 256, 1.0f / 256, 0, 0 };
+        const float xs[6] = { -0.5f, 0.5f, -0.5f, -0.5f, 0.5f, 0.5f }, ys[6] = { 0.5f, 0.5f, -0.5f, -0.5f, 0.5f, -0.5f };
+        V1 w[6];
+        SAMPLE s[2];
+        int i;
+        for (i = 0; i < 6; ++i) {
+            w[i].x = xs[i]; w[i].y = ys[i];
+            w[i].index[0] = 3; w[i].index[1] = w[i].index[2] = w[i].index[3] = 0;
+            w[i].s[0] = 64; w[i].s[1] = -32;
+        }
+        s[0].x = 64; s[0].y = 64; s[0].rgb = rgb(0.5f, 0.375f, 0);
+        s[1].x = 8; s[1].y = 8; s[1].rgb = CLEAR_COLOR;
+        IDirect3DDevice9_SetVertexShaderConstantF(device, 0, c, 4);
+        IDirect3DDevice9_SetVertexShaderConstantF(device, 10, c10, 1);
+        vs_run("vs1_inputs", decl, vs, ps, w, sizeof(w[0]), 2, s, 2);
+    }
+    if (!only || only == 33) {
+        /* vs_2_0 writing oFog = 0.25 with fog on: a quarter of the colour. */
+        static const DWORD vs[] = { 0xfffe0200, VDCL2(0, 0), VDCL2(10, 1),
+            P2I(OMov, 2), P2D(VPos, 0, 15), P2SRC(RV, 0), P2I(OMov, 2), P2D(VAttr, 0, 15), P2SRC(RV, 1),
+            P2I(OMov, 2), P2D(VPos, 1, 15), P2S(RC, 0, 0x00, 0), PSEND };
+        static const float c0[4] = { 0.25f, 0, 0, 0 };
+        SAMPLE s[2];
+        s[0].x = 64; s[0].y = 64; s[0].rgb = rgb(0.25f, 0, 0.75f);
+        s[1].x = 8; s[1].y = 8; s[1].rgb = CLEAR_COLOR;
+        vs_quad(v, -0.5f, 0.5f, 0.5f, -0.5f, 0xffff0000);
+        IDirect3DDevice9_SetVertexShaderConstantF(device, 0, c0, 1);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_FOGENABLE, TRUE);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_FOGCOLOR, 0x000000ff);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_FOGTABLEMODE, D3DFOG_NONE);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_FOGVERTEXMODE, D3DFOG_NONE);
+        vs_run("vs2_fog", colored, vs, ps_color, v, sizeof(v[0]), 2, s, 2);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_FOGENABLE, FALSE);
+    }
+    if (!only || only == 34) {
+        /* vs_2_0 without a pixel shader: oD0 = c0 (grey), oT0 = v1; stage 0
+         * modulates the texture by the diffuse colour, stage 1 adds the
+         * texture factor. */
+        typedef struct { float x, y, z, u, v; } TV;
+        static const D3DVERTEXELEMENT9 decl[] = {
+            { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+            { 0, 12, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0 }, D3DDECL_END() };
+        static const DWORD vs[] = { 0xfffe0200, VDCL2(0, 0), VDCL2(5, 1),
+            P2I(OMov, 2), P2D(VPos, 0, 15), P2SRC(RV, 0), P2I(OMov, 2), P2D(VAttr, 0, 15), P2SRC(RC, 0),
+            P2I(OMov, 2), P2D(VTex, 0, 15), P2SRC(RV, 1), PSEND };
+        static const float grey[4] = { 128.0f / 255, 128.0f / 255, 128.0f / 255, 1 };
+        const float xs[6] = { -0.5f, 0.5f, -0.5f, -0.5f, 0.5f, 0.5f }, ys[6] = { 0.5f, 0.5f, -0.5f, -0.5f, 0.5f, -0.5f };
+        IDirect3DTexture9 *t = texture2x2(texels0);
+        float want[4][3], c[3];
+        SAMPLE s[5];
+        TV w[6];
+        int i, k;
+        for (i = 0; i < 6; ++i) {
+            w[i].x = xs[i]; w[i].y = ys[i]; w[i].z = 0.5f;
+            w[i].u = xs[i] < 0 ? 0.0f : 1.0f; w[i].v = ys[i] > 0 ? 0.0f : 1.0f;
+        }
+        for (i = 0; i < 4; ++i) { texel(i, c); for (k = 0; k < 3; ++k) want[i][k] = c[k] * unit(0x80) + unit(0x20); }
+        quad_samples(s, want);
+        IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)t);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
+        IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_COLOROP, D3DTOP_ADD);
+        IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_COLORARG1, D3DTA_CURRENT);
+        IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_COLORARG2, D3DTA_TFACTOR);
+        IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_ALPHAARG1, D3DTA_CURRENT);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_TEXTUREFACTOR, 0xff202020);
+        IDirect3DDevice9_SetVertexShaderConstantF(device, 0, grey, 1);
+        vs_run("vs2_stages", decl, vs, NULL, w, sizeof(w[0]), 2, s, 5);
+        IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+        IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        if (t) IDirect3DTexture9_Release(t);
+    }
+    if (!only || only == 35 || only == 36) {
+        /* Alpha blending after shaders: an opaque red quad, then a quad of
+         * (0, 0, 1, 0.25) over it with SRCALPHA, INVSRCALPHA. 35 takes the
+         * colour from a vertex shader constant, 36 from a pixel shader alone
+         * on transformed vertices. */
+        static const DWORD vs[] = { 0xfffe0200, VDCL2(0, 0), VDCL2(10, 1),
+            P2I(OMov, 2), P2D(VPos, 0, 15), P2SRC(RV, 0), P2I(OMov, 2), P2D(VAttr, 0, 15), P2SRC(RC, 0), PSEND };
+        static const float red[4] = { 1, 0, 0, 1 }, blue[4] = { 0, 0, 1, 0.25f };
+        SAMPLE s[2];
+        int pass;
+        s[0].x = 64; s[0].y = 64; s[0].rgb = rgb(0.75f, 0, 0.25f);
+        s[1].x = 8; s[1].y = 8; s[1].rgb = CLEAR_COLOR;
+        for (pass = 35; pass <= 36; ++pass) {
+            IDirect3DVertexDeclaration9 *decl = NULL;
+            IDirect3DVertexShader9 *vsh = NULL;
+            IDirect3DPixelShader9 *psh = NULL;
+            const char *name = pass == 35 ? "vs2_blend" : "ps2_blend";
+            HRESULT hr;
+            if (only && only != pass) continue;
+            IDirect3DDevice9_CreateVertexDeclaration(device, colored, &decl);
+            IDirect3DDevice9_CreateVertexShader(device, vs, &vsh);
+            hr = IDirect3DDevice9_CreatePixelShader(device, ps_color, &psh);
+            if (FAILED(hr) || !decl || !vsh) { fail_hr(name, "create", hr); }
+            else if (begin(name)) {
+                int q;
+                for (q = 0; q < 2; ++q) {
+                    IDirect3DDevice9_SetRenderState(device, D3DRS_ALPHABLENDENABLE, q ? TRUE : FALSE);
+                    IDirect3DDevice9_SetRenderState(device, D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+                    IDirect3DDevice9_SetRenderState(device, D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+                    IDirect3DDevice9_SetPixelShader(device, psh);
+                    if (pass == 35) {
+                        vs_quad(v, -0.5f, 0.5f, 0.5f, -0.5f, 0);
+                        IDirect3DDevice9_SetVertexShaderConstantF(device, 0, q ? blue : red, 1);
+                        IDirect3DDevice9_SetVertexDeclaration(device, decl);
+                        IDirect3DDevice9_SetVertexShader(device, vsh);
+                        hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+                        IDirect3DDevice9_SetVertexShader(device, NULL);
+                    } else {
+                        TLVERTEX t[6];
+                        quad(t, 32, 32, 96, 96, q ? 0x400000ff : 0xffff0000);
+                        IDirect3DDevice9_SetFVF(device, TLFVF);
+                        hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, t, sizeof(t[0]));
+                    }
+                    IDirect3DDevice9_SetPixelShader(device, NULL);
+                    if (FAILED(hr)) break;
+                }
+                IDirect3DDevice9_SetRenderState(device, D3DRS_ALPHABLENDENABLE, FALSE);
+                if (FAILED(hr)) { fail_hr(name, "draw", hr); IDirect3DDevice9_EndScene(device); }
+                else check(name, s, 2);
+            }
+            if (psh) IDirect3DPixelShader9_Release(psh);
+            if (vsh) IDirect3DVertexShader9_Release(vsh);
+            if (decl) IDirect3DVertexDeclaration9_Release(decl);
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
     IDirect3D9 *(WINAPI *create)(UINT);
@@ -775,7 +1018,8 @@ int main(int argc, char **argv)
     int only = 0, a;
     HRESULT hr;
     setvbuf(stdout, NULL, _IONBF, 0);
-    /* "sw": software vertex processing; "ps=N": only pixel shader case N. */
+    /* "sw": software vertex processing; "ps=N": only case N of the shader
+     * cases (pixel shaders below 30, vertex shaders from 30). */
     for (a = 1; a < argc; ++a) {
         if (!lstrcmpiA(argv[a], "sw")) software = TRUE;
         else if (!strncmp(argv[a], "ps=", 3)) only = atoi(argv[a] + 3);
@@ -840,8 +1084,13 @@ int main(int argc, char **argv)
         case_texture();
         case_transform();
     }
-    if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 2)) pixel_shaders(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
-    else printf("D9PIX pixel shaders not offered\n");
+    if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 2) && (!only || only < 30))
+        pixel_shaders(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
+    else if (caps.PixelShaderVersion < D3DPS_VERSION(1, 2)) printf("D9PIX pixel shaders not offered\n");
+    if (caps.PixelShaderVersion < D3DPS_VERSION(2, 0)) printf("D9PIX vertex shader cases need pixel shader 2.0\n");
+    else if (flags == D3DCREATE_SOFTWARE_VERTEXPROCESSING || caps.VertexShaderVersion >= D3DVS_VERSION(2, 0)) {
+        if (!only || only >= 30) vertex_shaders(only);
+    } else printf("D9PIX vertex shaders not offered\n");
     IDirect3DDevice9_Release(device);
     IDirect3D9_Release(d3d);
     DestroyWindow(window);

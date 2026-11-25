@@ -36,8 +36,10 @@ typedef struct { char text[40]; int neg; } OPERAND;
 typedef struct {
     TEXT t;
     unsigned int minor;
-    unsigned int defined;           /* constants given by def */
-    unsigned int defImm[RB_PS2_CONSTANTS];
+    unsigned int defined[8];        /* constants given by def, one bit each */
+    unsigned char defImm[256];      /* the immediate holding each */
+    int vertex;                     /* translating a vertex shader */
+    unsigned int version;           /* major version of a vertex shader */
     unsigned char samplerKind[16];  /* shader model 2: D3DSAMPLER_TEXTURE_TYPE of each sampler */
     unsigned int written;           /* r0, r1 and t0..t3 written so far: bits 0-1, 8-11 */
     unsigned int pads;              /* texm3x2/texm3x3 dot products so far */
@@ -112,6 +114,9 @@ static unsigned int fail(PS *s, unsigned int reason, unsigned int detail)
     return 0;
 }
 
+static int defined(const PS *s, unsigned int c) { return c < 256 && (s->defined[c >> 5] >> (c & 31)) & 1; }
+static void define(PS *s, unsigned int c) { if (c < 256) s->defined[c >> 5] |= 1u << (c & 31); }
+
 static unsigned int reg_type(unsigned int token) { return (token >> 28) & 7; }
 static unsigned int reg_num(unsigned int token) { return token & 0x7ff; }
 
@@ -130,7 +135,7 @@ static int reg_name(PS *s, unsigned int type, unsigned int num, char *out, unsig
         return 1;
     case RegConst:
         if (num >= RB_PS_CONSTANTS) return 0;
-        if (s->defined & (1u << num)) { cat(out, size, "IMM["); cat_number(out, size, s->defImm[num]); }
+        if (defined(s, num)) { cat(out, size, "IMM["); cat_number(out, size, s->defImm[num]); }
         else { cat(out, size, "CONST["); cat_number(out, size, num); }
         cat(out, size, "]");
         return 1;
@@ -446,8 +451,8 @@ static int walk(PS *s, const unsigned int *tok, unsigned int count, int pass, un
             if (op == OpDef) {
                 unsigned int c = reg_num(tok[i + 1]);
                 if (reg_type(tok[i + 1]) != RegConst || c >= RB_PS_CONSTANTS) return fail(s, RbPsRegister, tok[i + 1]);
-                s->defined |= 1u << c;
-                s->defImm[c] = (*imm)++;
+                define(s, c);
+                s->defImm[c] = (unsigned char)(*imm)++;
                 put(&s->t, "IMM["); number(&s->t, s->defImm[c]); put(&s->t, "] FLT32 {");
                 hex(&s->t, tok[i + 2]); put(&s->t, ", "); hex(&s->t, tok[i + 3]); put(&s->t, ", ");
                 hex(&s->t, tok[i + 4]); put(&s->t, ", "); hex(&s->t, tok[i + 5]); put(&s->t, "}\n");
@@ -517,14 +522,19 @@ enum {
     Op2Abs = 35, Op2Nrm = 36, Op2Sincos = 37, Op2Dp2add = 90
 };
 enum { Reg2Temp = 0, Reg2Input = 1, Reg2Const = 2, Reg2Texture = 3, Reg2ColorOut = 8, Reg2Sampler = 10 };
+/* Vertex shader register types. */
+enum { RegVsAddr = 3, RegVsRastOut = 4, RegVsAttrOut = 5, RegVsTexOut = 6 };
 enum { Mod2Abs = 11, Mod2AbsNeg = 12 };
 
 static unsigned int reg2_type(unsigned int t) { return ((t >> 28) & 7) | ((t >> 8) & 0x18); }
+
+static int vreg_name(PS *s, unsigned int token, unsigned int add, char *out, unsigned int size);
 
 static int reg2_name(PS *s, unsigned int token, unsigned int add, char *out, unsigned int size)
 {
     unsigned int type = reg2_type(token), num = reg_num(token) + add;
     out[0] = 0;
+    if (s->vertex) return vreg_name(s, token, add, out, size);
     if (token & 0x2000) return fail(s, RbPsRegister, token);   /* relative addressing */
     switch (type) {
     case Reg2Temp:
@@ -537,7 +547,7 @@ static int reg2_name(PS *s, unsigned int token, unsigned int add, char *out, uns
         return 1;
     case Reg2Const:
         if (num >= RB_PS2_CONSTANTS) return fail(s, RbPsRegister, token);
-        if (s->defined & (1u << num)) { cat(out, size, "IMM["); cat_number(out, size, s->defImm[num]); }
+        if (defined(s, num)) { cat(out, size, "IMM["); cat_number(out, size, s->defImm[num]); }
         else { cat(out, size, "CONST["); cat_number(out, size, num); }
         cat(out, size, "]");
         return 1;
@@ -581,8 +591,9 @@ static int dest2(PS *s, unsigned int token, char *out, unsigned int size, const 
 {
     char mask[6];
     unsigned int type = reg2_type(token);
-    if (!(token & 0x80000000u) || ((token >> 24) & 15) || ((token >> 20) & 8) ||
-        (type != Reg2Temp && type != Reg2ColorOut)) return fail(s, RbPsRegister, token);
+    if (!(token & 0x80000000u) || ((token >> 24) & 15) || ((token >> 20) & 8) || (token & 0x2000) ||
+        (s->vertex ? type != Reg2Temp && type != RegVsRastOut && type != RegVsAttrOut && type != RegVsTexOut
+                   : type != Reg2Temp && type != Reg2ColorOut)) return fail(s, RbPsRegister, token);
     if (!reg2_name(s, token, 0, out, size)) return 0;
     mask_text((token >> 16) & 15 ? (token >> 16) & 15 : 15, mask, sizeof(mask));
     cat(out, size, mask);
@@ -599,11 +610,17 @@ static void absolute(const char *a, char *out, unsigned int size)
     else { cat(out, size, "|"); cat(out, size, x); cat(out, size, "|"); }
 }
 
+static int vertex_instruction(PS *s, unsigned int op, const unsigned int *p, unsigned int n);
+
 static int instruction2(PS *s, unsigned int op, unsigned int control, const unsigned int *p, unsigned int n)
 {
     char d[40], a[48], b[48], c[48], name[24];
     const char *sat = " ";
     unsigned int k, rows;
+    if (s->vertex) {
+        int done = vertex_instruction(s, op, p, n);
+        if (done >= 0) return done;
+    }
     switch (op) {
     case OpNop: case OpDef: case Op2Dcl: return 1;
     case OpTexkill:
@@ -732,8 +749,8 @@ static int walk2(PS *s, const unsigned int *tok, unsigned int count, int pass, u
                 unsigned int c = reg_num(tok[i + 1]);
                 if (n != 5 || reg2_type(tok[i + 1]) != Reg2Const || c >= RB_PS2_CONSTANTS)
                     return fail(s, RbPsRegister, tok[i + 1]);
-                s->defined |= 1u << c;
-                s->defImm[c] = (*imm)++;
+                define(s, c);
+                s->defImm[c] = (unsigned char)(*imm)++;
                 put(&s->t, "IMM["); number(&s->t, s->defImm[c]); put(&s->t, "] FLT32 {");
                 hex(&s->t, tok[i + 2]); put(&s->t, ", "); hex(&s->t, tok[i + 3]); put(&s->t, ", ");
                 hex(&s->t, tok[i + 4]); put(&s->t, ", "); hex(&s->t, tok[i + 5]); put(&s->t, "}\n");
@@ -789,7 +806,7 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
     unsigned int imm = 3, k, log2e;
     char *z = (char *)&s;
     for (k = 0; k < sizeof(s); ++k) z[k] = 0;
-    info->samplers = info->coords = info->reason = info->detail = 0;
+    info->samplers = info->coords = info->reason = info->detail = info->constants = 0;
     s.info = info;
     s.t.p = out; s.t.size = size;
     if (size) out[0] = 0;
@@ -821,6 +838,487 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
     line(&s, "MOV TEMP[1], IMM[2]", 0, 0, 0, 0, 0, 0);
     if (!walk(&s, tokens, count, 1, &imm)) return 0;
     flush(&s);
+    if (fog) fog_lines(&s, fog, log2e, "TEMP[0]", RB_PS_CONSTANTS);
+    line(&s, "MOV OUT[0], TEMP[0]", 0, 0, 0, 0, 0, 0);
+    line(&s, "END", 0, 0, 0, 0, 0, 0);
+    if (s.t.overflow) return fail(&s, RbPsOverflow, s.t.n);
+    return s.t.n + 1;
+}
+
+/* ---- vertex shaders 1.1 and 2.0 ----
+ * The vertex shader of a draw fetches its inputs itself: the draw's
+ * vertices are constants from CONST[0].w on, CONST[0].z constants apart
+ * (an integer), each holding the vertex's words as the declaration lays
+ * them out. Registers: r0..r11 are TEMP[0..11], v0..v15 TEMP[33..48],
+ * c# CONST[19+#] unless defined, a0 TEMP[55] (whole numbers; loaded into
+ * ADDR[0] before each relative read), oPos TEMP[20], oFog TEMP[21], oPts
+ * TEMP[22], oD0 and oD1 TEMP[23] and TEMP[24], oT0..oT7 TEMP[25..32].
+ * TEMP[17..19] hold intermediate values of expanded instructions, as in
+ * pixel shaders, and TEMP[49..54] those of the fetch and the position.
+ *
+ * CONST[0] holds the target's width and height (IEEE) and the two integers
+ * above, CONST[1] the viewport's x, y, width and height and CONST[2] its
+ * minimum and maximum z (all IEEE). oPos goes through the viewport to the
+ * target's clip space, keeping w, so the host clips as Direct3D does. */
+enum { VsPos = 20, VsFog = 21, VsColors = 23, VsTexOut = 25, VsInputs = 33, VsAddress = 55 };
+enum { OpVsSlt = 12, OpVsSge = 13, OpVsLit = 16, OpVsDst = 17, OpVsSgn = 34, OpVsMova = 46,
+       OpVsDefb = 47, OpVsDefi = 48, OpVsExpp = 78, OpVsLogp = 79 };
+
+static void reg_text(char *out, unsigned int size, const char *file, unsigned int n)
+{
+    cat(out, size, file); cat(out, size, "["); cat_number(out, size, n); cat(out, size, "]");
+}
+
+static int vreg_name(PS *s, unsigned int token, unsigned int add, char *out, unsigned int size)
+{
+    unsigned int type = reg2_type(token), num = reg_num(token) + add;
+    switch (type) {
+    case Reg2Temp:
+        if (num > 11) return fail(s, RbPsRegister, token);
+        reg_text(out, size, "TEMP", num);
+        return 1;
+    case Reg2Input:
+        if (num > 15) return fail(s, RbPsRegister, token);
+        reg_text(out, size, "TEMP", VsInputs + num);
+        return 1;
+    case Reg2Const:
+        if (num >= RB_VS_CONSTANTS) return fail(s, RbPsRegister, token);
+        if (token & 0x2000) {
+            /* c[a0.? + n]: the component is in bits 14-15 (see vertex_walk). */
+            static const char *const load[4] = { "ARL ADDR[0].x, TEMP[55].xxxx", "ARL ADDR[0].x, TEMP[55].yyyy",
+                                                 "ARL ADDR[0].x, TEMP[55].zzzz", "ARL ADDR[0].x, TEMP[55].wwww" };
+            line(s, load[(token >> 14) & 3], 0, 0, 0, 0, 0, 0);
+            cat(out, size, "CONST[ADDR[0].x+"); cat_number(out, size, RB_VS_CONST_BASE + num); cat(out, size, "]");
+            s->info->constants = RB_VS_CONSTANTS;
+            return 1;
+        }
+        if (defined(s, num)) { reg_text(out, size, "IMM", s->defImm[num]); return 1; }
+        reg_text(out, size, "CONST", RB_VS_CONST_BASE + num);
+        if (num + 1 > s->info->constants) s->info->constants = num + 1;
+        return 1;
+    case RegVsRastOut:
+        if (num > 2) return fail(s, RbPsRegister, token);
+        reg_text(out, size, "TEMP", VsPos + num);
+        return 1;
+    case RegVsAttrOut:
+        if (num > 1) return fail(s, RbPsRegister, token);
+        reg_text(out, size, "TEMP", VsColors + num);
+        return 1;
+    case RegVsTexOut:
+        if (num > 7) return fail(s, RbPsRegister, token);
+        reg_text(out, size, "TEMP", VsTexOut + num);
+        return 1;
+    }
+    return fail(s, RbPsRegister, token);
+}
+
+/* The instructions only vertex shaders have; -1 for the others. */
+static int vertex_instruction(PS *s, unsigned int op, const unsigned int *p, unsigned int n)
+{
+    char d[40], a[48], b[48], mask[6];
+    const char *sat = " ";
+    if ((op == OpMov || op == OpVsMova) && n >= 2 && reg2_type(p[0]) == RegVsAddr) {
+        /* a0: mov rounds toward minus infinity, mova to the nearest. */
+        if (reg_num(p[0]) || !source2(s, p[1], 0, 0, a, sizeof(a))) return fail(s, RbPsRegister, p[0]);
+        mask_text((p[0] >> 16) & 15 ? (p[0] >> 16) & 15 : 15, mask, sizeof(mask));
+        if (op == OpVsMova) {
+            line(s, "ADD TEMP[50], ", a, ", IMM[0].xxxx", 0, 0, 0, 0);
+            line(s, "FLR TEMP[55]", mask, ", TEMP[50]", 0, 0, 0, 0);
+        } else line(s, "FLR TEMP[55]", mask, ", ", a, 0, 0, 0);
+        return 1;
+    }
+    switch (op) {
+    case OpVsSlt: case OpVsSge: case OpVsDst:
+        if (n < 3 || !dest2(s, p[0], d, sizeof(d), &sat) || !source2(s, p[1], 0, 0, a, sizeof(a)) ||
+            !source2(s, p[2], 0, 0, b, sizeof(b))) return 0;
+        line(s, op == OpVsSlt ? "SLT" : op == OpVsSge ? "SGE" : "DST", sat, d, ", ", a, ", ", b);
+        return 1;
+    case OpVsLit: case OpVsSgn:
+        if (n < 2 || !dest2(s, p[0], d, sizeof(d), &sat) || !source2(s, p[1], 0, 0, a, sizeof(a))) return 0;
+        line(s, op == OpVsLit ? "LIT" : "SSG", sat, d, ", ", a, 0, 0);
+        return 1;
+    case OpVsExpp: case OpVsLogp:
+        /* Version 1: the four results of the partial-precision forms; 2: one value. */
+        if (n < 2 || !dest2(s, p[0], d, sizeof(d), &sat) || !source2(s, p[1], 0, 1, a, sizeof(a))) return 0;
+        if (op == OpVsLogp) absolute(a, b, sizeof(b));
+        line(s, op == OpVsExpp ? (s->version < 2 ? "EXP" : "EX2") : (s->version < 2 ? "LOG" : "LG2"), sat, d, ", ",
+             op == OpVsLogp ? b : a, 0, 0);
+        return 1;
+    case 25: case 26: case 27: case 28: case 29: case 30:    /* call, callnz, loop, ret, endloop, label */
+    case 38: case 39: case 40: case 41: case 42: case 43: case 44: case 45:   /* rep .. breakc */
+        return fail(s, RbPsOpcode, op);                       /* flow control: not yet */
+    }
+    return -1;
+}
+
+/* Operand count of a version 1 instruction, whose token carries none. */
+static int vertex1_length(unsigned int op)
+{
+    switch (op) {
+    case OpNop: return 0;
+    case OpMov: case Op2Rcp: case Op2Rsq: case Op2Exp: case Op2Log: case OpVsLit: case Op2Frc:
+    case OpVsExpp: case OpVsLogp: case Op2Dcl: return 2;
+    case OpAdd: case OpSub: case OpMul: case OpDp3: case OpDp4: case Op2Min: case Op2Max: case OpVsSlt:
+    case OpVsSge: case OpVsDst: case Op2M4x4: case Op2M4x3: case Op2M3x4: case Op2M3x3: case Op2M3x2: return 3;
+    case OpMad: return 4;
+    case OpDef: return 5;
+    }
+    return -1;
+}
+
+/* Pass 0: def constants; pass 1: instructions. A shader model 2 relative
+ * source is followed by its address token, whose component is kept in
+ * bits 14-15 of the source. */
+static int vertex_walk(PS *s, const unsigned int *tok, unsigned int count, int pass, unsigned int *imm)
+{
+    unsigned int i = 1;
+    while (i < count) {
+        unsigned int t = tok[i], op = t & 0xffff, n, k, m, ops[8];
+        if (t == OpEnd) return 1;
+        if (op == OpComment) { i += 1 + ((t >> 16) & 0x7fff); continue; }
+        if (t & 0x90000000u) return fail(s, RbPsOpcode, t);
+        if (s->version >= 2) n = (t >> 24) & 15;
+        else {
+            int len = vertex1_length(op);
+            if (len < 0) return fail(s, RbPsOpcode, t);
+            n = (unsigned int)len;
+        }
+        if (i + 1 + n > count) return fail(s, RbPsTruncated, i);
+        if (op == OpDef || op == OpVsDefb || op == OpVsDefi || op == Op2Dcl) {
+            if (pass == 0 && op == OpDef) {
+                unsigned int c = reg_num(tok[i + 1]);
+                if (n != 5 || reg2_type(tok[i + 1]) != Reg2Const || c >= RB_VS_CONSTANTS || *imm > 255)
+                    return fail(s, RbPsRegister, tok[i + 1]);
+                define(s, c);
+                s->defImm[c] = (unsigned char)(*imm)++;
+                put(&s->t, "IMM["); number(&s->t, s->defImm[c]); put(&s->t, "] FLT32 {");
+                hex(&s->t, tok[i + 2]); put(&s->t, ", "); hex(&s->t, tok[i + 3]); put(&s->t, ", ");
+                hex(&s->t, tok[i + 4]); put(&s->t, ", "); hex(&s->t, tok[i + 5]); put(&s->t, "}\n");
+            }
+        } else if (pass == 1) {
+            for (k = 0, m = 0; k < n && m < 8; ++k) {
+                unsigned int o = tok[i + 1 + k] & ~0xc000u;
+                if (s->version >= 2 && m > 0 && (o & 0x2000)) {
+                    if (k + 1 >= n || reg2_type(tok[i + 2 + k]) != RegVsAddr) return fail(s, RbPsRegister, o);
+                    o |= ((tok[i + 2 + k] >> 16) & 3) << 14;
+                    ++k;
+                }
+                ops[m++] = o;
+            }
+            if (!instruction2(s, op, 0, ops, m)) return 0;
+        }
+        i += 1 + n;
+    }
+    return fail(s, RbPsTruncated, count);
+}
+
+/* Fetch input register reg, of declaration type kind, from word offset k
+ * of the vertex. */
+static int fetch_one(PS *s, unsigned int reg, unsigned int kind, unsigned int k)
+{
+    static const char letters[] = "xyzw";
+    char dst[16], src[48], src2[48];
+    dst[0] = 0;
+    reg_text(dst, sizeof(dst), "TEMP", VsInputs + reg);
+    if (kind <= 3) {               /* FLOAT1..FLOAT4 */
+        unsigned int count = kind + 1, j = 0;
+        while (j < count) {
+            unsigned int q = (k + j) / 4, at;
+            char mask[6], sw[6];
+            mask[0] = sw[0] = '.';
+            for (at = 1; at < 5; ++at) sw[at] = letters[(k + j) % 4];
+            for (at = 1; j < count && (k + j) / 4 == q; ++j) {
+                mask[at++] = letters[j];
+                sw[1 + j] = letters[(k + j) % 4];
+            }
+            mask[at] = 0; sw[5] = 0;
+            src[0] = 0;
+            cat(src, sizeof(src), "CONST[ADDR[0].x+"); cat_number(src, sizeof(src), q); cat(src, sizeof(src), "]");
+            line(s, "MOV ", dst, mask, ", ", src, sw, 0);
+        }
+        return 1;
+    }
+    src[0] = src2[0] = 0;
+    {
+        static const char *const rep[4] = { "].xxxx", "].yyyy", "].zzzz", "].wwww" };
+        cat(src, sizeof(src), "CONST[ADDR[0].x+"); cat_number(src, sizeof(src), k / 4); cat(src, sizeof(src), rep[k % 4]);
+        cat(src2, sizeof(src2), "CONST[ADDR[0].x+"); cat_number(src2, sizeof(src2), (k + 1) / 4);
+        cat(src2, sizeof(src2), rep[(k + 1) % 4]);
+    }
+    switch (kind) {
+    case 4:                        /* D3DCOLOR: ARGB bytes to (r, g, b, a) in 0..1 */
+    case 5:                        /* UBYTE4: bytes 0..3 as they are */
+        line(s, "USHR TEMP[50], ", src, kind == 4 ? ", IMM[4]" : ", IMM[5]", 0, 0, 0, 0);
+        line(s, "AND TEMP[50], TEMP[50], IMM[6].xxxx", 0, 0, 0, 0, 0, 0);
+        if (kind == 4) {
+            line(s, "U2F TEMP[50], TEMP[50]", 0, 0, 0, 0, 0, 0);
+            line(s, "MUL ", dst, ", TEMP[50], IMM[7].xxxx", 0, 0, 0, 0);
+        } else line(s, "U2F ", dst, ", TEMP[50]", 0, 0, 0, 0);
+        return 1;
+    case 6: case 7:                /* SHORT2, SHORT4: signed halves */
+        line(s, "SHL TEMP[50].x, ", src, ", IMM[6].yyyy", 0, 0, 0, 0);
+        line(s, "ISHR TEMP[50].x, TEMP[50].xxxx, IMM[6].yyyy", 0, 0, 0, 0, 0, 0);
+        line(s, "ISHR TEMP[50].y, ", src, ", IMM[6].yyyy", 0, 0, 0, 0);
+        if (kind == 7) {
+            line(s, "SHL TEMP[50].z, ", src2, ", IMM[6].yyyy", 0, 0, 0, 0);
+            line(s, "ISHR TEMP[50].z, TEMP[50].zzzz, IMM[6].yyyy", 0, 0, 0, 0, 0, 0);
+            line(s, "ISHR TEMP[50].w, ", src2, ", IMM[6].yyyy", 0, 0, 0, 0);
+            line(s, "I2F ", dst, ", TEMP[50]", 0, 0, 0, 0);
+        } else line(s, "I2F ", dst, ".xy, TEMP[50].xyyy", 0, 0, 0, 0);
+        return 1;
+    }
+    return fail(s, RbPsRegister, kind);
+}
+
+/* The Direct3D 8 declaration tokens: one stream, registers and skips. */
+static int fetch(PS *s, const unsigned int *decl, unsigned int count)
+{
+    static const unsigned char words[8] = { 1, 2, 3, 4, 1, 1, 1, 2 };
+    unsigned int i, offset = 0;
+    for (i = 0; i < count; ++i) {
+        unsigned int t = decl[i];
+        if (t == 0xffffffffu) return 1;
+        switch (t >> 29) {
+        case 0: break;                                         /* NOP */
+        case 1:                                                /* STREAM */
+            if (t & 0x1fffffffu) return fail(s, RbPsRegister, t);
+            offset = 0;
+            break;
+        case 2:                                                /* STREAMDATA */
+            if (t & 0x10000000u) { offset += (t >> 16) & 0xf; break; }      /* SKIP */
+            if ((t & 0x1f) > 15 || ((t >> 16) & 0xf) > 7) return fail(s, RbPsRegister, t);
+            if (!fetch_one(s, t & 0x1f, (t >> 16) & 0xf, offset)) return 0;
+            offset += words[(t >> 16) & 7];
+            if (offset > s->info->coords) s->info->coords = offset;   /* words of the vertex read */
+            break;
+        default:                                               /* constants, tessellator */
+            return fail(s, RbPsRegister, t);
+        }
+        if (offset > 4 * RB_VS_VERTEX_CONSTANTS) return fail(s, RbPsRegister, t);
+    }
+    return fail(s, RbPsTruncated, count);
+}
+
+unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, const unsigned int *decl,
+                             unsigned int declCount, unsigned int flags, char *out, unsigned int size, RB_PS_INFO *info)
+{
+    static const char *const prologue[] = {
+        "UMAD TEMP[49].x, SV[0].xxxx, CONST[0].zzzz, CONST[0].wwww", "UARL ADDR[0].x, TEMP[49].xxxx",
+        "MOV TEMP[20], IMM[3]", "MOV TEMP[21], IMM[3].wwww", "MOV TEMP[22], IMM[2]", "MOV TEMP[23], IMM[3].wwww",
+        "MOV TEMP[24], IMM[2]", "MOV TEMP[55], IMM[2]"
+    };
+    static const char *const epilogue[] = {
+        "RCP TEMP[51].x, CONST[0].xxxx", "RCP TEMP[51].y, CONST[0].yyyy",
+        "MUL TEMP[52].xy, CONST[1].zwww, TEMP[51].xyyy",
+        "MAD TEMP[53].xy, CONST[1].xyyy, IMM[0].zzzz, CONST[1].zwww",
+        "ADD TEMP[53].xy, TEMP[53].xyyy, IMM[0].yyyy",
+        "MAD TEMP[53].xy, TEMP[53].xyyy, TEMP[51].xyyy, -IMM[0].yyyy",
+        "ADD TEMP[52].z, CONST[2].yyyy, -CONST[2].xxxx", "MUL TEMP[52].z, TEMP[52].zzzz, IMM[0].zzzz",
+        "MAD TEMP[53].z, CONST[2].xxxx, IMM[0].zzzz, -IMM[0].yyyy",
+        "MUL TEMP[54].xyz, TEMP[20].xyzz, TEMP[52].xyzz", "MOV TEMP[54].y, -TEMP[54].yyyy",
+        "MAD OUT[0].xyz, TEMP[20].wwww, TEMP[53].xyzz, TEMP[54].xyzz", "MOV OUT[0].w, TEMP[20].wwww",
+        "MOV_SAT OUT[1], TEMP[23]", "MOV_SAT OUT[2], TEMP[24]"
+    };
+    PS s;
+    unsigned int imm = 8, k;
+    char *z = (char *)&s, r[16];
+    for (k = 0; k < sizeof(s); ++k) z[k] = 0;
+    info->samplers = info->coords = info->reason = info->detail = info->constants = 0;
+    s.info = info;
+    s.vertex = 1;
+    s.t.p = out; s.t.size = size;
+    if (size) out[0] = 0;
+    if (!count || (tokens[0] & 0xffff0000u) != 0xfffe0000u ||
+        (tokens[0] != 0xfffe0101u && tokens[0] != 0xfffe0200u)) {
+        fail(&s, RbPsVersion, count ? tokens[0] : 0);
+        return 0;
+    }
+    s.version = (tokens[0] >> 8) & 0xff;
+    put(&s.t, "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..");
+    number(&s.t, RB_VS_CONST_BASE + RB_VS_CONSTANTS + RB_VS_VERTEX_CONSTANTS * RB_VS_VERTICES - 1);
+    put(&s.t, "]\nDCL ADDR[0]\nDCL TEMP[0..55]\nDCL OUT[0], POSITION\n");
+    for (k = 0; k < 11; ++k) {
+        put(&s.t, "DCL OUT["); number(&s.t, k + 1); put(&s.t, "], GENERIC["); number(&s.t, k); put(&s.t, "]\n");
+    }
+    put(&s.t, "IMM[0] FLT32 {0x3f000000, 0x3f800000, 0x40000000, 0x40800000}\n"
+              "IMM[1] FLT32 {0x41000000, 0x3e800000, 0x3e000000, 0xbf800000}\n"
+              "IMM[2] FLT32 {0x00000000, 0x00000000, 0x00000000, 0x00000000}\n"
+              "IMM[3] FLT32 {0x00000000, 0x00000000, 0x00000000, 0x3f800000}\n"
+              "IMM[4] UINT32 {16, 8, 0, 24}\n"
+              "IMM[5] UINT32 {0, 8, 16, 24}\n"
+              "IMM[6] UINT32 {255, 16, 0, 0}\n"
+              "IMM[7] FLT32 {0x3b808081, 0x00000000, 0x00000000, 0x00000000}\n");
+    if (!vertex_walk(&s, tokens, count, 0, &imm)) return 0;
+    for (k = 0; k < sizeof(prologue) / sizeof(*prologue); ++k) line(&s, prologue[k], 0, 0, 0, 0, 0, 0);
+    for (k = 0; k < 12; ++k) { r[0] = 0; reg_text(r, sizeof(r), "TEMP", k); line(&s, "MOV ", r, ", IMM[2]", 0, 0, 0, 0); }
+    for (k = 0; k < 8; ++k) { r[0] = 0; reg_text(r, sizeof(r), "TEMP", VsTexOut + k); line(&s, "MOV ", r, ", IMM[3]", 0, 0, 0, 0); }
+    for (k = 0; k < 16; ++k) { r[0] = 0; reg_text(r, sizeof(r), "TEMP", VsInputs + k); line(&s, "MOV ", r, ", IMM[3]", 0, 0, 0, 0); }
+    if (!fetch(&s, decl, declCount)) return 0;
+    if (!vertex_walk(&s, tokens, count, 1, &imm)) return 0;
+    for (k = 0; k < sizeof(epilogue) / sizeof(*epilogue); ++k) line(&s, epilogue[k], 0, 0, 0, 0, 0, 0);
+    if (flags & RB_VS_FOG_ALPHA) line(&s, "MOV_SAT OUT[2].w, TEMP[21].xxxx", 0, 0, 0, 0, 0, 0);
+    for (k = 0; k < 8; ++k) {
+        char o[16];
+        o[0] = r[0] = 0;
+        reg_text(o, sizeof(o), "OUT", 3 + k);
+        reg_text(r, sizeof(r), "TEMP", VsTexOut + k);
+        line(&s, "MOV ", o, ", ", r, 0, 0, 0);
+    }
+    line(&s, "MOV OUT[11], IMM[2]", 0, 0, 0, 0, 0, 0);
+    line(&s, "END", 0, 0, 0, 0, 0, 0);
+    if (s.t.overflow) return fail(&s, RbPsOverflow, s.t.n);
+    return s.t.n + 1;
+}
+
+/* ---- fixed-function texture stages as a pixel program ----
+ * For draws whose vertex shader feeds the fixed-function pixel stages. The
+ * inputs are those of translated pixel shaders. TEMP[0] is the current
+ * colour, TEMP[1] the stage's texel, TEMP[2] and TEMP[3] the two
+ * arguments, TEMP[4] the stage result, TEMP[5] the TEMP register of
+ * D3DTA_TEMP, TEMP[6] and TEMP[7] scratch, TEMP[9] the texture factor
+ * (unpacked from the ARGB word in CONST[0].x). Results are saturated. */
+enum { TaDiffuse, TaCurrent, TaTexture, TaFactor, TaSpecular, TaTemp, TaSelect = 15, TaComplement = 16,
+       TaReplicate = 32 };
+enum { TopDisable = 1, TopArg1, TopArg2, TopMod, TopMod2, TopMod4, TopAdd, TopAddSigned, TopAddSigned2,
+       TopSub, TopAddSmooth, TopBlendDiffuse, TopBlendTexture, TopBlendFactor, TopBlendTexturePm,
+       TopBlendCurrent, TopPremodulate, TopModAlphaAddColor, TopModColorAddAlpha, TopModInvAlphaAddColor,
+       TopModInvColorAddAlpha, TopBump, TopBumpLum, TopDot3 };
+
+/* Argument a into TEMP[slot]. */
+static int stage_arg(PS *s, unsigned int a, unsigned int stage, const char *slot)
+{
+    static const char *const src[6] = { "IN[0]", "TEMP[0]", "TEMP[1]", "TEMP[9]", "IN[1]", "TEMP[5]" };
+    const char *from = (a & TaSelect) == TaCurrent && !stage ? "IN[0]" : (a & TaSelect) < 6 ? src[a & TaSelect] : 0;
+    if (!from || (a & ~(TaSelect | TaComplement | TaReplicate))) return fail(s, RbPsRegister, a);
+    if (a & TaComplement) line(s, "ADD ", slot, ", IMM[0].yyyy, -", from, a & TaReplicate ? ".wwww" : "", 0, 0);
+    else line(s, "MOV ", slot, ", ", from, a & TaReplicate ? ".wwww" : "", 0, 0);
+    return 1;
+}
+
+static int uses_texture(unsigned int op, unsigned int a1, unsigned int a2)
+{
+    return op != TopDisable && ((a1 & TaSelect) == TaTexture || (op != TopArg1 && (a2 & TaSelect) == TaTexture) ||
+                                op == TopBlendTexture || op == TopBlendTexturePm);
+}
+
+/* One operation into TEMP[4] with the write mask m (".xyz" or ".w"). */
+static int stage_op(PS *s, unsigned int op, unsigned int stage, const char *m)
+{
+    switch (op) {
+    case TopArg1: line(s, "MOV_SAT TEMP[4]", m, ", TEMP[2]", 0, 0, 0, 0); return 1;
+    case TopArg2: line(s, "MOV_SAT TEMP[4]", m, ", TEMP[3]", 0, 0, 0, 0); return 1;
+    case TopMod: line(s, "MUL_SAT TEMP[4]", m, ", TEMP[2], TEMP[3]", 0, 0, 0, 0); return 1;
+    case TopMod2: case TopMod4:
+        line(s, "MUL TEMP[6], TEMP[2], TEMP[3]", 0, 0, 0, 0, 0, 0);
+        line(s, "MUL_SAT TEMP[4]", m, op == TopMod2 ? ", TEMP[6], IMM[0].zzzz" : ", TEMP[6], IMM[0].wwww", 0, 0, 0, 0);
+        return 1;
+    case TopAdd: line(s, "ADD_SAT TEMP[4]", m, ", TEMP[2], TEMP[3]", 0, 0, 0, 0); return 1;
+    case TopAddSigned: case TopAddSigned2:
+        line(s, "ADD TEMP[6], TEMP[2], TEMP[3]", 0, 0, 0, 0, 0, 0);
+        if (op == TopAddSigned) { line(s, "ADD_SAT TEMP[4]", m, ", TEMP[6], -IMM[0].xxxx", 0, 0, 0, 0); return 1; }
+        line(s, "ADD TEMP[6], TEMP[6], -IMM[0].xxxx", 0, 0, 0, 0, 0, 0);
+        line(s, "MUL_SAT TEMP[4]", m, ", TEMP[6], IMM[0].zzzz", 0, 0, 0, 0);
+        return 1;
+    case TopSub: line(s, "ADD_SAT TEMP[4]", m, ", TEMP[2], -TEMP[3]", 0, 0, 0, 0); return 1;
+    case TopAddSmooth:
+        line(s, "MAD TEMP[6], -TEMP[2], TEMP[3], TEMP[2]", 0, 0, 0, 0, 0, 0);
+        line(s, "ADD_SAT TEMP[4]", m, ", TEMP[6], TEMP[3]", 0, 0, 0, 0);
+        return 1;
+    case TopBlendDiffuse: case TopBlendTexture: case TopBlendFactor: case TopBlendCurrent: {
+        const char *w = op == TopBlendDiffuse ? ", IN[0].wwww, TEMP[2], TEMP[3]" :
+                        op == TopBlendTexture ? ", TEMP[1].wwww, TEMP[2], TEMP[3]" :
+                        op == TopBlendFactor ? ", TEMP[9].wwww, TEMP[2], TEMP[3]" :
+                        stage ? ", TEMP[0].wwww, TEMP[2], TEMP[3]" : ", IN[0].wwww, TEMP[2], TEMP[3]";
+        line(s, "LRP_SAT TEMP[4]", m, w, 0, 0, 0, 0);
+        return 1;
+    }
+    case TopBlendTexturePm:
+        line(s, "ADD TEMP[6], IMM[0].yyyy, -TEMP[1].wwww", 0, 0, 0, 0, 0, 0);
+        line(s, "MAD_SAT TEMP[4]", m, ", TEMP[3], TEMP[6], TEMP[2]", 0, 0, 0, 0);
+        return 1;
+    case TopModAlphaAddColor: line(s, "MAD_SAT TEMP[4]", m, ", TEMP[2].wwww, TEMP[3], TEMP[2]", 0, 0, 0, 0); return 1;
+    case TopModColorAddAlpha: line(s, "MAD_SAT TEMP[4]", m, ", TEMP[2], TEMP[3], TEMP[2].wwww", 0, 0, 0, 0); return 1;
+    case TopModInvAlphaAddColor:
+        line(s, "ADD TEMP[6], IMM[0].yyyy, -TEMP[2].wwww", 0, 0, 0, 0, 0, 0);
+        line(s, "MAD_SAT TEMP[4]", m, ", TEMP[6], TEMP[3], TEMP[2]", 0, 0, 0, 0);
+        return 1;
+    case TopModInvColorAddAlpha:
+        line(s, "ADD TEMP[6], IMM[0].yyyy, -TEMP[2]", 0, 0, 0, 0, 0, 0);
+        line(s, "MAD_SAT TEMP[4]", m, ", TEMP[6], TEMP[3], TEMP[2].wwww", 0, 0, 0, 0);
+        return 1;
+    case TopDot3:
+        line(s, "MAD TEMP[6], TEMP[2], IMM[0].zzzz, -IMM[0].yyyy", 0, 0, 0, 0, 0, 0);
+        line(s, "MAD TEMP[7], TEMP[3], IMM[0].zzzz, -IMM[0].yyyy", 0, 0, 0, 0, 0, 0);
+        line(s, "DP3_SAT TEMP[4]", m, ", TEMP[6], TEMP[7]", 0, 0, 0, 0);
+        return 1;
+    }
+    return fail(s, RbPsOpcode, op);
+}
+
+unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count, unsigned int specular,
+                                unsigned int fog, char *out, unsigned int size, RB_PS_INFO *info)
+{
+    PS s;
+    unsigned int i, k, log2e = 4, factor = 0;
+    char *z = (char *)&s, tex[64];
+    for (k = 0; k < sizeof(s); ++k) z[k] = 0;
+    info->samplers = info->coords = info->reason = info->detail = info->constants = 0;
+    s.info = info;
+    s.t.p = out; s.t.size = size;
+    if (size) out[0] = 0;
+    if (count > RB_PS2_SAMPLERS) count = RB_PS2_SAMPLERS;
+    for (i = 0; i < count && stages[i].colorOp != TopDisable; ++i) {
+        const RB_STAGE_STATE *st = &stages[i];
+        if ((st->colorArg1 & TaSelect) == TaFactor || (st->colorArg2 & TaSelect) == TaFactor ||
+            (st->alphaArg1 & TaSelect) == TaFactor || (st->alphaArg2 & TaSelect) == TaFactor ||
+            st->colorOp == TopBlendFactor || st->alphaOp == TopBlendFactor) factor = 1;
+    }
+    count = i;
+    put(&s.t, "FRAG\nDCL IN[0], GENERIC[0], LINEAR\nDCL IN[1], GENERIC[1], LINEAR\n");
+    for (k = 0; k < RB_PS2_COORD_SETS; ++k) {
+        put(&s.t, "DCL IN["); number(&s.t, 2 + k); put(&s.t, "], GENERIC["); number(&s.t, 2 + k);
+        put(&s.t, "], PERSPECTIVE\n");
+    }
+    if ((fog & 3) == RB_PS_FOG_VERTEX) put(&s.t, "DCL IN[10], GENERIC[10], PERSPECTIVE\n");
+    if ((fog & 3) == RB_PS_FOG_TABLE) put(&s.t, "DCL IN[10], POSITION, LINEAR\n");
+    put(&s.t, "DCL OUT[0], COLOR\n");
+    for (k = 0; k < RB_PS2_SAMPLERS; ++k) { put(&s.t, "DCL SAMP["); number(&s.t, k); put(&s.t, "]\n"); }
+    put(&s.t, fog ? "DCL CONST[0..9]\n" : "DCL CONST[0..7]\n");
+    put(&s.t, "DCL TEMP[0..9]\n"
+              "IMM[0] FLT32 {0x3f000000, 0x3f800000, 0x40000000, 0x40800000}\n"
+              "IMM[1] UINT32 {16, 8, 0, 24}\n"
+              "IMM[2] FLT32 {0x00000000, 0x00000000, 0x00000000, 0x3b808081}\n"
+              "IMM[3] UINT32 {255, 0, 0, 0}\n");
+    if (fog) put(&s.t, "IMM[4] FLT32 {0x3fb8aa3b, 0x00000000, 0x00000000, 0x00000000}\n");
+    line(&s, "MOV TEMP[0], IN[0]", 0, 0, 0, 0, 0, 0);
+    line(&s, "MOV TEMP[5], IMM[2].xxxx", 0, 0, 0, 0, 0, 0);
+    if (factor) {
+        line(&s, "USHR TEMP[9], CONST[0].xxxx, IMM[1]", 0, 0, 0, 0, 0, 0);
+        line(&s, "AND TEMP[9], TEMP[9], IMM[3].xxxx", 0, 0, 0, 0, 0, 0);
+        line(&s, "U2F TEMP[9], TEMP[9]", 0, 0, 0, 0, 0, 0);
+        line(&s, "MUL TEMP[9], TEMP[9], IMM[2].wwww", 0, 0, 0, 0, 0, 0);
+    }
+    for (i = 0; i < count; ++i) {
+        const RB_STAGE_STATE *st = &stages[i];
+        unsigned int set = st->coordIndex & 0xffff, alphaOp = st->alphaOp, a1 = st->alphaArg1, a2 = st->alphaArg2;
+        if (st->coordIndex >> 16 || set >= RB_PS2_COORD_SETS) return fail(&s, RbPsRegister, st->coordIndex);
+        if (alphaOp == TopDisable) { alphaOp = TopArg1; a1 = TaCurrent; a2 = TaCurrent; }
+        if (uses_texture(st->colorOp, st->colorArg1, st->colorArg2) || uses_texture(alphaOp, a1, a2)) {
+            tex[0] = 0;
+            cat(tex, sizeof(tex), "TEX TEMP[1], IN["); cat_number(tex, sizeof(tex), 2 + set);
+            cat(tex, sizeof(tex), "], SAMP["); cat_number(tex, sizeof(tex), i); cat(tex, sizeof(tex), "], 2D");
+            line(&s, tex, 0, 0, 0, 0, 0, 0);
+            info->samplers |= 1u << i;
+            info->coords |= 1u << set;
+        }
+        if (!stage_arg(&s, st->colorArg1, i, "TEMP[2]") || !stage_arg(&s, st->colorArg2, i, "TEMP[3]") ||
+            !stage_op(&s, st->colorOp, i, ".xyz")) return 0;
+        if (st->colorOp == TopDot3) line(&s, "MOV TEMP[4].w, TEMP[4].xxxx", 0, 0, 0, 0, 0, 0);
+        else if (!stage_arg(&s, a1, i, "TEMP[2]") || !stage_arg(&s, a2, i, "TEMP[3]") ||
+                 !stage_op(&s, alphaOp, i, ".w")) return 0;
+        line(&s, "MOV TEMP[0], TEMP[4]", 0, 0, 0, 0, 0, 0);
+    }
+    if (specular) line(&s, "ADD_SAT TEMP[0].xyz, TEMP[0], IN[1]", 0, 0, 0, 0, 0, 0);
     if (fog) fog_lines(&s, fog, log2e, "TEMP[0]", RB_PS_CONSTANTS);
     line(&s, "MOV OUT[0], TEMP[0]", 0, 0, 0, 0, 0, 0);
     line(&s, "END", 0, 0, 0, 0, 0, 0);
