@@ -1156,3 +1156,7 @@ Vista SP2 in UTM, one run each with the same user-mode driver:
 
 On Windows 7 the same flag left 3DMark06 with an error box at start in the one try made.
 That is not looked into yet, so the Windows 7 build keeps write-combined memory.
+
+With the cached build the Vista pixel tests pass (12 of 12) and the desktop draws as before.
+Window operations do not change: moving 56.1 updates a second (55.8 before), resizing 21.5
+(21.0), repainting 56.7 (56.4).
