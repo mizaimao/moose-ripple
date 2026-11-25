@@ -1970,3 +1970,28 @@ texture and gave it back. It now decodes straight into the texture's mapped memo
 What is left in a loading frame is mostly the first write into each new texture's own memory
 (the cost described under "Where a resize frame goes"), now with the decompression in it,
 and 31 to 59 ms in creating resources.
+
+The same two tests on the Windows 7 guest in UTM, one run with the driver as it was before
+the decoder and one with it (3DMark06's free edition, which runs the same tests):
+
+| Windows 7 SP1 in UTM, 3DMark06 | Mesa's unpack | Decoded into the texture |
+| --- | ---: | ---: |
+| From the Run click to the end of the second graphics test | 657 s | 354 s |
+| A loading-screen frame, first test | 782 ms | 273 ms |
+| A loading-screen frame, second test | 839 ms | 277 ms |
+
+A scene frame takes the same time on both systems (225 to 235 ms on Windows 7). Of 6,000
+samples in a Windows 7 scene, 65% are idle (51% on Vista), the game has 13.7%, this driver
+3.0%, Direct3D's runtime and D3DX 3.1%. The timer costs Windows 7 far less:
+`KiSecondaryClockInterrupt` has 0.7% of the samples against 10.9% on Vista, because Windows 7
+does not send every tick to its idle processors. The frame rate does not gain from that:
+each guest processor is emulated on a host thread of its own, so what the idle ones do costs
+the host and not the processor the game runs on.
+
+The Vista guest with two processors instead of four, one run with the same driver and
+script: the two tests take 329 s against 375 s, and a scene frame takes the same time
+(225 ms against 231 ms). The time to boot and install the driver was no longer (16 minutes
+against 17 and 20 in two sessions with four). During loading the processors spent a quarter
+of the time handling the flush requests they send each other (`KiIpiInterrupt`: 0.07 of a
+processor against 0.25). One run each: an indication, not a figure, and the test VMs stay at
+four processors.
