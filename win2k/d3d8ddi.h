@@ -29,7 +29,7 @@ typedef struct { RB_GDI2_HEADER gdi2; ULONG version, reserved; } RB_GDI2_DX_VERS
  * and the operations in the word that holds dwRBitMask for RGB formats. */
 #define RB_DDPF_D3DFORMAT 0x00200000UL
 enum {
-    RbFormatTexture = 0x1, RbFormatOffscreenTarget = 0x8, RbFormatSameTarget = 0x10,
+    RbFormatTexture = 0x1, RbFormatCubeTexture = 0x4, RbFormatOffscreenTarget = 0x8, RbFormatSameTarget = 0x10,
     RbFormatZStencil = 0x40, RbFormatSameTargetUpToAlpha = 0x100, RbFormatDisplayMode = 0x400,
     RbFormat3D = 0x800, RbFormatOffscreenPlain = 0x4000
 };

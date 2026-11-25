@@ -17,7 +17,7 @@
 
 enum {
     PixelSurface = 1, CreateWords = 1 + VIRGL_OBJ_SURFACE_SIZE,
-    PipeTexture2D = 2, PipeClearColor0 = 1 << 2
+    PipeTexture2D = 2, PipeTextureCube = 4, PipeClearColor0 = 1 << 2
 };
 
 /* Each texture has a private context, so its surface object is always 1. */
@@ -448,7 +448,7 @@ static void copy_rows(RB2K_GPU *gpu, PUCHAR pixels, ULONG pitch, ULONG rowBytes,
  * for 4x4 blocks. */
 static BOOLEAN transfer_rows(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG context, ULONG resource,
                              ULONG x, ULONG y, ULONG width, ULONG height, PVOID upload, ULONG pitch,
-                             ULONG rowBytes, BOOLEAN ordered, ULONG level, ULONG dataRows)
+                             ULONG rowBytes, BOOLEAN ordered, ULONG level, ULONG dataRows, ULONG layer)
 {
     PIXEL_REQUEST request;
     BACKING_REQUEST backing;
@@ -484,6 +484,7 @@ static BOOLEAN transfer_rows(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG conte
     request.transfer.box.y = y;
     request.transfer.box.w = width;
     request.transfer.box.h = height;
+    request.transfer.box.z = layer;
     request.transfer.box.d = 1;
     request.transfer.stride = rowBytes;
     if (ordered && !upload ? !send_request(gpu, result, &request.hdr, sizeof(request.transfer), RB2K_STAGE_TRANSFER) :
@@ -498,7 +499,7 @@ static BOOLEAN transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG contex
                             ULONG rowBytes, BOOLEAN ordered, ULONG level)
 {
     return transfer_rows(gpu, result, context, resource, x, y, width, height, upload, pitch, rowBytes, ordered,
-                         level, height);
+                         level, height, 0);
 }
 
 BOOLEAN rb_gpu_transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resource,
@@ -805,12 +806,13 @@ BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTU
     PIXEL_REQUEST request;
     begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D, 0);
     request.resource.resource_id = texture->id;
-    request.resource.target = PipeTexture2D;
+    request.resource.target = texture->faces == 6 ? PipeTextureCube : PipeTexture2D;
     request.resource.format = texture->format ? texture->format : VIRGL_FORMAT_B8G8R8A8_UNORM;
     request.resource.bind = VIRGL_BIND_SAMPLER_VIEW;
     request.resource.width = texture->width;
     request.resource.height = texture->height;
-    request.resource.depth = request.resource.array_size = 1;
+    request.resource.depth = 1;
+    request.resource.array_size = texture->faces == 6 ? 6 : 1;
     request.resource.last_level = texture->levels - 1;
     return send_request(gpu, result, &request, sizeof(request.resource), RB2K_STAGE_RESOURCE);
 }
@@ -839,7 +841,7 @@ BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTU
 
 /* Earlier draws in the open frame must reach the host before new texels. */
 BOOLEAN rb_gpu_texture_upload(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K_TEXTURE *texture,
-                              const RB2K_IMAGE *image, ULONG level, ULONG y, ULONG rows, PVOID texels)
+                              const RB2K_IMAGE *image, ULONG level, ULONG face, ULONG y, ULONG rows, PVOID texels)
 {
     ULONG width = texture->width >> level ? texture->width >> level : 1;
     ULONG rowBytes = width * sizeof(ULONG), bytes = rowBytes * rows;
@@ -848,7 +850,7 @@ BOOLEAN rb_gpu_texture_upload(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K
         /* Rows of 4x4 blocks: eight bytes each for DXT1, sixteen for the others. */
         rowBytes = (width + 3) / 4 * (texture->format == VIRGL_FORMAT_DXT1_RGBA ? 8 : 16);
         return transfer_rows(gpu, result, image->id, texture->id, 0, y, width, rows, texels, rowBytes, rowBytes,
-                             FALSE, level, (rows + 3) / 4);
+                             FALSE, level, (rows + 3) / 4, face);
     }
     if (bytes <= 16384) {
         ULONG count;
@@ -856,12 +858,13 @@ BOOLEAN rb_gpu_texture_upload(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K
         result->status = rb_gpu_reserve_staging(gpu, bytes + VIRGL_RESOURCE_IW_DATA_START*sizeof(ULONG));
         if (result->status) return FALSE;
         count = inline_write((PULONG)gpu->staging[0].data, texture->id, 0, y, width, rows, texels, width, level);
+        ((PULONG)gpu->staging[0].data)[VIRGL_RESOURCE_IW_Z] = face;   /* the cube face */
         result->stage = RB2K_STAGE_TRANSFER;
         result->status = submit_inline(gpu, image->id, count);
         return result->status == NO_ERROR;
     }
-    return transfer_box(gpu, result, image->id, texture->id, 0, y, width, rows,
-                        texels, rowBytes, rowBytes, FALSE, level);
+    return transfer_rows(gpu, result, image->id, texture->id, 0, y, width, rows,
+                        texels, rowBytes, rowBytes, FALSE, level, rows, face);
 }
 
 BOOLEAN rb_gpu_texture_free(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture)
