@@ -230,7 +230,13 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
         if (more && (more->ddsCapsEx.dwCaps2 & DDSCAPS2_VOLUME)) {
             /* A volume: its slices follow each other, a slice pitch apart. */
             depth = more->ddsCapsEx.dwCaps4;
-            if (!depth || depth > RB2K_D7_VOLUME_SIDE || format >= TexDxt1) {
+            if (!depth || depth > RB2K_D7_VOLUME_SIDE || format >= TexDxt1 || format == TexNone) {
+                /* counted for d7draw.exe: the count field holds the depth */
+                ++d->d7draw.surfaceRefused;
+                d->d7draw.refusedCaps = desc->ddsCaps.dwCaps; d->d7draw.refusedFlags = desc->dwFlags;
+                d->d7draw.refusedWidth = desc->dwWidth; d->d7draw.refusedHeight = desc->dwHeight;
+                d->d7draw.refusedFormat = desc->ddpfPixelFormat.dwFlags << 8 | desc->ddpfPixelFormat.dwRGBBitCount;
+                d->d7draw.refusedCount = 0x10000 | depth;
                 data->ddRVal = DDERR_INVALIDPARAMS;
                 return rc;
             }
