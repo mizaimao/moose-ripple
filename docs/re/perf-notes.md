@@ -1012,3 +1012,36 @@ OpenArena's timedemo 22.9 frames/s with submits that wait for the host (frame ti
 43.6 / 195 ms) and 24.8 with `ripple_async=1` (16.0 / 40.4 / 199 ms), 8% more; no error from
 the kext. The picture was not looked at in UTM (a capture inside the guest was not possible
 in this session); on the KVM host the queued mode draws the game right.
+
+### Core Image after the texture cache: what a render still costs (2026-11-25)
+
+Traced again on the Proxmox host with the drivers of this day (`ci-effects filters`, per
+render, mean of three):
+
+| filter | wall | buffer creates | submits | wait | outside kernel calls |
+|---|---|---|---|---|---|
+| ColorInvert (one pass) | 1.01 ms | none | 2, 0.69 ms | 0.07 ms | 0.26 ms |
+| ZoomBlur | 7.86 ms | 6, 1.50 ms | 6, 2.68 ms | 0.07 ms | 3.6 ms |
+| EdgeWork | 7.01 ms | 4, 1.64 ms | 4.7, 2.50 ms | 0.15 ms | 2.7 ms |
+| ComicEffect | 11.63 ms | 10, 3.18 ms | 12, 4.09 ms | 0.08 ms | 4.3 ms |
+| UnsharpMask | 7.67 ms | 0.7, 0.33 ms | 3, 2.19 ms | 0.15 ms | 5.0 ms |
+
+Three parts of about the same size in the filters with several passes:
+
+- **Submits**, one per pass: Core Image calls `glFlushRenderAPPLE` when it unbinds a texture
+  (545 times in the run of 96 renders). Each is a trip to the host.
+- **Programs.** Core Image makes a new program object for every render, gives it its text and
+  deletes it again (96 `glGenProgramsARB`, 226 `glProgramStringARB`, 96 deletes in 96
+  renders), and 188 of the 226 texts are different from every other: values are written into
+  the text. So every render compiles one to three ARB programs, in Mesa in the guest (the time
+  outside kernel calls) and again as a shader on the host (inside the submits). A cache by
+  program text would not help this test.
+- **Texture creates** that the cache does not serve in this short run, while Core Image is
+  still filling its own store of intermediate pictures.
+
+What could still be done: hold back the flushes of a context that has no window and send
+them with its next real submit, keeping their order among the process's contexts. That would
+take a filter with ten passes from twelve trips to one or two, about a quarter of its time.
+It changes when WindowServer's and Core Image's flushes reach the host, so it needs the full
+picture checks, and it does nothing for the compile. Not done; the one-pass filters are
+within 0.2 ms of the software renderer, and Photo Booth's effects are faster than it.
