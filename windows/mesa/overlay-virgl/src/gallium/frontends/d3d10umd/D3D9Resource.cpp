@@ -1081,6 +1081,8 @@ D3D9TextureSubdata(D3D9Device *device, D3D9Resource *resource,
    unsigned upload_stride = stride;
    uintptr_t upload_layer_stride = layer_stride;
    uint8_t *tight = NULL;
+   bool dxt = false;
+   enum d3d9_dxt_kind dxt_kind = D3D9_DXT_KIND_1;
    /* Gallium's 2D copy accepts the original row pitch as a signed int.
     * Window bitmaps often describe a rectangle inside a wider surface. */
    const bool pitched_bitmap = depth == 1 && stride <= INT_MAX &&
@@ -1097,21 +1099,14 @@ D3D9TextureSubdata(D3D9Device *device, D3D9Resource *resource,
    } else if (D3D9FormatIsEmulatedDxt(resource->format)) {
       /* moose-ripple: blocks to R8G8B8A8 texels (d3d9_dxt_emulated); a level smaller than a
        * block takes the part of the block it covers */
-      const UINT height = box->height ? (UINT)box->height : 1;
-      upload_stride = box->width * 4;
-      upload_layer_stride = (uintptr_t)upload_stride * height;
-      tight = (uint8_t *)malloc((size_t)upload_layer_stride * depth);
-      if (!tight)
-         return false;
-      const enum d3d9_dxt_kind kind =
+      /* decoded below, straight into the texture's memory: a buffer of its own for the texels
+       * would be new memory for every texture, written once and given back, and Windows hands
+       * out and takes back memory slowly where the processor is emulated */
+      dxt = true;
+      dxt_kind =
          resource->format == D3D9_FMT_DXT1 ? D3D9_DXT_KIND_1 :
          resource->format == D3D9_FMT_DXT2 || resource->format == D3D9_FMT_DXT3 ? D3D9_DXT_KIND_3 :
                                                                                    D3D9_DXT_KIND_5;
-      for (UINT z = 0; z < depth; ++z)
-         d3d9_dxt_decode(kind, tight + (size_t)z * upload_layer_stride, upload_stride,
-                         (const uint8_t *)data + (size_t)z * layer_stride, stride, box->width,
-                         height);
-      upload_data = tight;
    } else if (!pitched_bitmap && (stride != row_bytes || layer_stride != tight_layer_stride)) {
       if (depth > SIZE_MAX / tight_layer_stride)
          return false;
@@ -1150,9 +1145,17 @@ D3D9TextureSubdata(D3D9Device *device, D3D9Resource *resource,
       D3D9TimesCallback(D3D9_TIMED_UPLOAD_MAP, start);
       start = D3D9TimesNow();
    }
-   util_copy_box((uint8_t *)map, resource->pipe_resource->format, transfer->stride,
-                 transfer->layer_stride, 0, 0, 0, box->width, box->height, box->depth,
-                 (const uint8_t *)upload_data, upload_stride, upload_layer_stride, 0, 0, 0);
+   if (dxt) {
+      const UINT height = box->height ? (UINT)box->height : 1;
+      for (UINT z = 0; z < depth; ++z)
+         d3d9_dxt_decode(dxt_kind, (uint8_t *)map + (size_t)z * transfer->layer_stride,
+                         transfer->stride, (const uint8_t *)data + (size_t)z * layer_stride,
+                         stride, box->width, height);
+   } else {
+      util_copy_box((uint8_t *)map, resource->pipe_resource->format, transfer->stride,
+                    transfer->layer_stride, 0, 0, 0, box->width, box->height, box->depth,
+                    (const uint8_t *)upload_data, upload_stride, upload_layer_stride, 0, 0, 0);
+   }
    if (timed) {
       D3D9TimesCallback(D3D9_TIMED_UPLOAD_COPY, start);
       start = D3D9TimesNow();
