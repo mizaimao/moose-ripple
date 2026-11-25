@@ -845,8 +845,30 @@ Seen on the way, not from this change:
   four wrong pixels in a row at a random place; with the cache off 2 of 25 runs, with it on 4
   of 25. Ours is right in those pixels. `CI_EFFECTS_WHERE=1` makes `ci-effects` print where
   the differing pixels are.
-- On this build CIEdges differs from software on 3.9% of the pixels again and 55 of the 61
-  Photo Booth effects match, with the cache off and on; on 2026-11-14 it was 24 of 24 and 57
-  of 61. Not looked into yet.
+- CIEdges differs from software on 3.9% of the pixels and 55 of the 61 Photo Booth effects
+  match (Blue Print 4.3% and Comic Book 3.4% differ next to the four known ones), with the
+  cache off and on. The table of 2026-11-14 says 24 of 24 and 57 of 61. Looked for the change
+  that did it, one run per step on the same VM: the 0.2.1 release's GL bundle (built that day)
+  on today's kext, then that release's bundle and kext together. Both give 23 of 24 and 55 of
+  61, so no driver change since then is the cause, and the three values are the ones first
+  measured on 2026-11-11. The guest system is unchanged since 2026-11-10 and no debug switch
+  was changed around that day. The driver log of the run of 2026-11-14 shows Core Image
+  using three 517x323 pbuffers where it uses one now; what made it do so is not found.
+  `RIPPLE_FLOAT_PIXELS=1` does not bring it back (CIEdges stays, and a second filter differs).
+  Until the run of 2026-11-14 can be repeated, 23 of 24 and 55 of 61 are the numbers that hold.
 
 Left for Core Image: the two SUBMITs per pass, each of which waits for the host.
+
+Queued submits (`ripple_async=1`) on the same two tests, one run on a boot with the flag,
+texture cache on:
+
+| | waiting for the host | queued |
+|---|---|---|
+| 24 Core Image filters, sum | 78.6 ms | 74.1 ms (0.8 to 10.3 a filter) |
+| 61 Photo Booth effects, sum | 62.7 ms | 563.6 ms |
+
+The filters gain little, and the Photo Booth compositions (drawn through QCRenderer, with a
+`glFinish` after every frame) take about nine times as long: 20 of the 61 need 5 to 15 ms a
+frame instead of about 1. Same pictures. So the queued mode has a slow path of its own, in
+the wait that follows a queued submit, and it has to be found before the mode can become the
+default.
