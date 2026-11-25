@@ -926,3 +926,11 @@ The Dock's share, same boot, default mode, same 1024x768 window: 100.8 frames/s 
 shown (frame times 7.0 / 9.9 / 50 ms), 140.8 with the Dock hidden (4.0 / 7.1 / 50 ms; the
 bundle counts 3.0 ms per present). So a window that something is drawn over costs this game
 about 3 ms a frame, 40% of its frame rate.
+
+Correction to "Two per-draw trims" (2026-11-13), found 2026-11-25: the second trim (Mesa
+patch 0011, sampler-state binds that repeat what is bound are not sent) drew wrong textures.
+The host renderer needs that bind after every change of a program's textures
+(docs/re/m6-notes.md, Cinebench). The patch now sends it again in that case, so most of the
+62,114 to 12,115 saving in sampler binds is gone. On the Proxmox host nothing measured moved
+(OpenArena 99.6 against 99.8 frames/s, Core Image and Photo Booth within their spread); the
+UTM race numbers of that day were taken with the faulty trim and have to be measured again.

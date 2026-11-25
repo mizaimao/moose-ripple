@@ -573,7 +573,7 @@ a menu, Exposé and Dashboard look as before; `ci-check` gives the same pixels o
 in software. Not run again in UTM: the fault and the fix are in the guest's part and the
 same on every host.
 
-## Cinebench R11.5's OpenGL check (2026-11-25, issue 154, open)
+## Cinebench R11.5's OpenGL check (2026-11-25, issue 154)
 
 `CINEBENCH OSX -cb_opengl` compares one frame of its scene (frame 710, 900x650, read back with
 `glGetTexImage`) with a reference picture it ships (`plugins/bench/ogl/oglref_710.tif`) and
@@ -594,20 +594,38 @@ Fix in the GL frontend: a program's 24-bit depth texture is kept in the 32-bit d
 as Apple's software renderer does (it reports 32 bits for all three). `gl-feature-check depth`
 shows it: 7 different values in the row before, 64 after, like software.
 
-After it: 20,241 wrong pixels, 96.54%, still failed. Our frame now equals the reference
-exactly everywhere (compared pixel by pixel) except on the glass of one building: its window
-panes and shop front are black in the reference and carry an extra neutral grey in ours (84 to
-151 of 255, the same in every run, the same with the 16-bit buffer and with the texture cache
-off). What is known about how that glass is drawn:
+After it: 20,241 wrong pixels, 96.54%, still failed. Our frame now equalled the reference
+exactly everywhere (compared pixel by pixel) except on one building: its window panes and
+shop front are black in the reference and carried an extra neutral grey in ours (84 to 151 of
+255, the same in every run, the same with the texture cache off).
 
-- in passes that peel layers by depth: each program samples the previous layer's depth
-  texture with `GL_DEPTH_TEXTURE_MODE` `GL_ALPHA` and discards with a margin of 1.2e-7
-  (`gl-feature-check peel` repeats that: right with 24 and 32 bits, half the pixels drawn
-  twice with 16);
-- highlights come from a 128x128 table per material (internal format 1, filled from `GL_RED`
-  bytes, clamped, read as `.r`, indexed with a coordinate that goes below 0) and are added as
-  grey (`gl-feature-check redlum`: same as software);
-- 1D lookup textures (`gl-feature-check tex1d`: same as software).
+Second cause, fixed: one of our own speed trims. Found by editing the program's shaders at
+run time (new debug switch `/Library/Logs/RippleGL/shadersub`: a text to find in every GLSL
+shader and its replacement), one Cinebench run per question:
 
-Each of these alone behaves like the software renderer, so the fault is in a combination the
-scene uses. Next: the full call trace of one glass draw, replayed in a test.
+- the grey is the facade material's highlight term; with that one lookup forced to 0 the count
+  falls to 3,629. The facade program has three `sampler2D` uniforms (a highlight table on unit
+  0, two pictures on units 1 and 2), and the highlight lookup read a white mask picture instead
+  of its table;
+- every texture reads back exactly as Cinebench handed it over (checksums, `texdump`), and the
+  same three-sampler program alone draws right (`gl-feature-check samplers`), as do depth
+  peeling (`peel`), the highlight tables (`redlum`) and 1D lookups (`tex1d`);
+- Mesa patch 0011 (2026-11-13) made the virgl driver skip sampler-state binds that repeat
+  what is bound. With every bind sent again the count is 3,625. Tried one event at a time
+  (`RIPPLE_GL_SAMPLER_FORGET`): the host needs the bind after new sampler views, and after
+  nothing else (not after a shader bind, a framebuffer change, a blit, a clear or a flush).
+
+Why: when the host renderer (virglrenderer 0.10.4 here) gets a new sampler view it binds
+that texture on whichever texture unit happens to be active, which can be another sampler's
+unit, and it puts every unit right again at the next draw only for the slots a sampler-state
+bind has marked. Mesa sends such a bind after every change of textures, which is what the
+patch took out. The patch now forgets what is bound whenever sampler views or a shader are
+set, so those binds go out again; only binds with no texture change in between are still
+skipped, which is little.
+
+With both fixes: 3,625 wrong pixels, "reference match 99.38% (test successful)", and
+Cinebench's OpenGL score is 33.23 frames/s (Proxmox host, 1280x800, 4 CPUs). Checked on the
+same boot with the old behaviour switched back on for comparison (`RIPPLE_GL_SAMPLER_FORGET=1`):
+OpenArena's timedemo 99.6 against 99.8 frames/s, the 24 Core Image filters 85.9 and 76.8 ms
+against 78.9 and 78.1, the Photo Booth effects 47.8 against 48.3 ms. Programs that showed a
+wrong texture on some surface before may have had this cause.
