@@ -1006,3 +1006,9 @@ caches hangs in the boot loader at Extensions.mkext. After installing kexts ther
 `ps ax | grep [k]extcache` prints nothing. The guest was repaired from a second guest (its disk
 attached over QMP as a USB disk, `kextcache -u` on it), as docs/install.md describes for a new
 disk.
+
+Queued submits in UTM (2026-11-25, same guest, the drivers of this day, one boot each):
+OpenArena's timedemo 22.9 frames/s with submits that wait for the host (frame times 19.0 /
+43.6 / 195 ms) and 24.8 with `ripple_async=1` (16.0 / 40.4 / 199 ms), 8% more; no error from
+the kext. The picture was not looked at in UTM (a capture inside the guest was not possible
+in this session); on the KVM host the queued mode draws the game right.
