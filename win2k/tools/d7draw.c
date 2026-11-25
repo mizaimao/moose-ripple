@@ -83,6 +83,11 @@ int main(void)
                    l[1] & 0xffff, l[2], l[3], l[4]);
         }
         printf("D7LOCK count=%lu\n", s.locks);
+        for (k = 0; k < 8 && k < (int)s.creates; ++k) {
+            const ULONG *l = s.createLog[(s.creates - 1 - k) & 7];
+            printf("D7CREATE log-%d caps=%08lx size=%lux%lu count=%lu slots=%lu end=%lu hr=%08lx\n", k, l[0], l[1] >> 16,
+                   l[1] & 0xffff, l[2], l[3] >> 8, l[3] & 255, l[4]);
+        }
         printf("D7RTT target_textures=%lu texture_skips=%lu,%lu,%lu,%lu\n", s.targetTextures, s.texSkips[0],
                s.texSkips[1], s.texSkips[2], s.texSkips[3]);
         printf("D7FLIP targets");

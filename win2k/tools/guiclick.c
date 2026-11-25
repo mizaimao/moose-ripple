@@ -88,7 +88,7 @@ typedef struct { HWND top, button[48]; char text[48][96]; LONG style[48]; int co
 static BOOL CALLBACK child(HWND w, LPARAM arg)
 {
     CONTROLS *c = (CONTROLS *)arg;
-    char name[32], text[96], line[200];
+    char name[32], text[400], line[512];   /* messages may be long */
     const char *p;
     LONG style = GetWindowLongA(w, GWL_STYLE);
     if (!IsWindowVisible(w)) return TRUE;

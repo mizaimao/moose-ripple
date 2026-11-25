@@ -1137,6 +1137,50 @@ static void cube_cases(int only, BOOL version2)
     IDirect3DCubeTexture9_Release(cube);
 }
 
+/* ---- luminance and alpha formats ----
+ * 47: an L8 texture of 0x80 over the left half and an A8L8 one of 0x40
+ * (alpha 0xff) over the right, by a fixed-function stage. */
+static void luminance_case(int only)
+{
+    typedef struct { float x, y, z, rhw; DWORD diffuse; float u, v; } TV;
+    static const D3DFORMAT formats[2] = { D3DFMT_L8, D3DFMT_A8L8 };
+    static const SAMPLE s[] = { { 32, 64, 0x808080 }, { 96, 64, 0x404040 } };
+    IDirect3DTexture9 *tex[2] = { NULL, NULL };
+    int k;
+    if (only && only != 47) return;
+    for (k = 0; k < 2; ++k) {
+        D3DLOCKED_RECT r;
+        int y;
+        if (FAILED(IDirect3DDevice9_CreateTexture(device, 4, 4, 1, 0, formats[k], D3DPOOL_MANAGED, &tex[k], NULL))) {
+            printf("D9PIX luminance format %d not offered\n", (int)formats[k]);
+            if (tex[0]) IDirect3DTexture9_Release(tex[0]);
+            return;
+        }
+        IDirect3DTexture9_LockRect(tex[k], 0, &r, NULL, 0);
+        for (y = 0; y < 4; ++y) {
+            if (k) { WORD *row = (WORD *)((BYTE *)r.pBits + y * r.Pitch); int x; for (x = 0; x < 4; ++x) row[x] = 0xff40; }
+            else memset((BYTE *)r.pBits + y * r.Pitch, 0x80, 4);
+        }
+        IDirect3DTexture9_UnlockRect(tex[k], 0);
+    }
+    if (begin("luminance")) {
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+        IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1);
+        for (k = 0; k < 2; ++k) {
+            float x0 = k * 64.0f, x1 = x0 + 64;
+            TV v[4] = { { x0, 0, 0.5f, 1, 0xffffffff, 0, 0 }, { x1, 0, 0.5f, 1, 0xffffffff, 1, 0 },
+                        { x0, Side, 0.5f, 1, 0xffffffff, 0, 1 }, { x1, Side, 0.5f, 1, 0xffffffff, 1, 1 } };
+            IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)tex[k]);
+            IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+        }
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        check("luminance", s, 2);
+    }
+    for (k = 0; k < 2; ++k) IDirect3DTexture9_Release(tex[k]);
+}
+
 /* ---- volume textures ----
  * A 4x4x4 volume with one colour per slice (red, green, blue, yellow),
  * sampled at each slice's middle by four quads: 45 with ps_2_0
@@ -1352,6 +1396,7 @@ int main(int argc, char **argv)
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (caps.TextureCaps & D3DPTEXTURECAPS_CUBEMAP) && (!only || only >= 40))
         cube_cases(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (!only || only >= 43)) rt_cases(only);
+    luminance_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (caps.TextureCaps & D3DPTEXTURECAPS_VOLUMEMAP) && (!only || only >= 45))
         volume_cases(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
     if (caps.PixelShaderVersion < D3DPS_VERSION(2, 0)) printf("D9PIX vertex shader cases need pixel shader 2.0\n");

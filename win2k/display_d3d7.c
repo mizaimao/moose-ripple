@@ -136,7 +136,7 @@ typedef struct {
      * blits, which mark them dirty; others are checked once a scene. */
     BOOL tracked, dirty;
     ULONG host, sum, epoch;
-    ULONG targets[RB2K_DD_SLOTS];
+    ULONG targets[RB2K_ATTACH];
 } D7_TEXTURE;
 
 /* A Direct3D 8 vertex or index buffer registered through CreateSurfaceEx.
@@ -282,12 +282,21 @@ ULONG rb_d7_texture_format(const DDPIXELFORMAT *f, ULONG desktopBits)
         case RbFmtX1R5G5B5: return TexXrgb1555;
         case RbFmtA1R5G5B5: return TexArgb1555;
         case RbFmtA4R4G4B4: return TexArgb4444;
+        case RbFmtL8: return TexL8;
+        case RbFmtA8L8: return TexA8L8;
+        case RbFmtA8: return TexA8;
         case RbFmtDxt1: return TexDxt1;
         case RbFmtDxt2: case RbFmtDxt3: return TexDxt3;
         case RbFmtDxt4: case RbFmtDxt5: return TexDxt5;
         }
         return TexNone;
     }
+    /* Luminance and alpha-only formats, as the runtime describes L8, A8L8 and A8
+     * (the bit count and masks share their places with the RGB ones). */
+    if (f->dwFlags == 0x00020000 && f->dwRGBBitCount == 8 && f->dwRBitMask == 0xff) return TexL8;   /* DDPF_LUMINANCE */
+    if (f->dwFlags == (0x00020000 | DDPF_ALPHAPIXELS) && f->dwRGBBitCount == 16 && f->dwRBitMask == 0xff &&
+        f->dwRGBAlphaBitMask == 0xff00) return TexA8L8;
+    if (f->dwFlags == 0x00000002 && f->dwRGBBitCount == 8) return TexA8;   /* DDPF_ALPHA */
     if (!(f->dwFlags & DDPF_RGB) || !f->dwRGBBitCount) return desktopBits == 32 ? TexXrgb8888 : TexNone;
     if (f->dwFlags & ~(DDPF_RGB | DDPF_ALPHAPIXELS)) return TexNone;
     if (f->dwRGBBitCount == 32 && f->dwRBitMask == 0xff0000 && f->dwGBitMask == 0xff00 &&
@@ -305,10 +314,10 @@ ULONG rb_d7_texture_format(const DDPIXELFORMAT *f, ULONG desktopBits)
 
 ULONG rb_d7_texel_bytes(ULONG format)
 {
-    return format == TexArgb8888 || format == TexXrgb8888 ? 4 : 2;
+    return format == TexArgb8888 || format == TexXrgb8888 ? 4 : format == TexL8 || format == TexA8 ? 1 : 2;
 }
 
-static BOOL compressed(ULONG format) { return format >= TexDxt1 && format <= TexDxt5; }
+static BOOL compressed(ULONG format) { return RB_TEX_COMPRESSED(format); }
 
 ULONG rb_d7_row_bytes(ULONG format, ULONG width)
 {
@@ -412,6 +421,7 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
             slot->local = local;
             slot->d3dHandle = handle;
             ++d->d7draw.targetTextures;
+            ++d->d7draw.textures;
             return;
         }
     }
@@ -458,7 +468,7 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
         t->pitch < rb_d7_row_bytes(t->format, t->width))
         t->format = TexNone;
     ++d->d7draw.textures;
-    ++d->d7draw.registered[t->format < 7 ? t->format : 7];   /* 7: compressed */
+    ++d->d7draw.registered[t->format < 7 ? t->format : 7];   /* 7: compressed and the rest */
     if (!(l->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY)) ++d->d7draw.videoTextures;
 }
 
@@ -937,6 +947,10 @@ static ULONG convert(ULONG format, ULONG p)
     case TexArgb4444:
         return expand((p >> 12) & 15, 4) << 24 | expand((p >> 8) & 15, 4) << 16 |
                expand((p >> 4) & 15, 4) << 8 | expand(p & 15, 4);
+    /* Luminance is grey; an alpha-only texture samples as black with alpha. */
+    case TexL8: return 0xff000000 | (p & 255) * 0x010101;
+    case TexA8L8: return (p >> 8) << 24 | (p & 255) * 0x010101;
+    case TexA8: return (p & 255) << 24;
     }
     return 0;
 }
@@ -1184,7 +1198,7 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
                 for (r = 0; r < rows; ++r, src += width * bpp)
                     for (x = 0; x < width; ++x)
                         out[r * width + x] = convert(format, bpp == 4 ? ((const ULONG *)src)[x] :
-                                                                         ((const USHORT *)src)[x]);
+                                                     bpp == 2 ? ((const USHORT *)src)[x] : src[x]);
                 packet->id = plane || y ? id : t->host;
                 packet->face = t->depth > 1 ? slice : face;
                 packet->faces = t->faces;
@@ -1235,7 +1249,7 @@ static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
     BOOL attached = FALSE;
     /* A render target texture is sampled on the host, but never while it is the target. */
     if (t->image) return t->image == targetId ? 0 : RB2K_TEXTURE_IMAGE | t->image;
-    for (i = 0; i < RB2K_DD_SLOTS; ++i) if (t->targets[i] == targetId) attached = TRUE;
+    for (i = 0; i < RB2K_ATTACH; ++i) if (t->targets[i] == targetId) attached = TRUE;
     if (t->host && attached && t->tracked && !t->dirty) { ++c->display->d7draw.checksSkipped; return t->host; }
     if (t->host && attached && t->epoch == textureEpoch) return t->host;
     ++c->display->d7draw.checks;
@@ -1262,11 +1276,11 @@ static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
         if (!uploaded) return 0;
     }
     t->sum = sum;
-    for (i = 0; i < RB2K_DD_SLOTS && t->targets[i] != targetId; ++i) {}
-    if (i == RB2K_DD_SLOTS) {
+    for (i = 0; i < RB2K_ATTACH && t->targets[i] != targetId; ++i) {}
+    if (i == RB2K_ATTACH) {
         /* Reuse the entry of a target that no longer exists. */
-        for (i = 0; i < RB2K_DD_SLOTS && t->targets[i] && target(c, t->targets[i], FALSE); ++i) {}
-        if (i < RB2K_DD_SLOTS) t->targets[i] = targetId;
+        for (i = 0; i < RB2K_ATTACH && t->targets[i] && target(c, t->targets[i], FALSE); ++i) {}
+        if (i < RB2K_ATTACH) t->targets[i] = targetId;
     }
     return t->host;
 }
@@ -3457,6 +3471,10 @@ static const ULONG d8Formats[][2] = {
     { RbFmtA4R4G4B4, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     { RbFmtDxt1, RbFormatTexture | RbFormatCubeTexture }, { RbFmtDxt2, RbFormatTexture | RbFormatCubeTexture }, { RbFmtDxt3, RbFormatTexture | RbFormatCubeTexture },
     { RbFmtDxt4, RbFormatTexture | RbFormatCubeTexture }, { RbFmtDxt5, RbFormatTexture | RbFormatCubeTexture },
+    /* converted to 32 bits on upload */
+    { RbFmtL8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtA8L8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtA8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     /* last: only with depth rendering */
     { RbFmtD16, RbFormatZStencil }, { RbFmtD24S8, RbFormatZStencil }, { RbFmtD24X8, RbFormatZStencil }
 };

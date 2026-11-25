@@ -128,6 +128,10 @@ typedef struct {
     /* Texture skips by reason: no such handle, not usable (format, owner,
      * kind), the target itself, not ready (read or upload failed). */
     ULONG texSkips[4];
+    /* The last eight surface creations: caps, size (width << 16 | height),
+     * count, slots in use << 8 | where it ended (0 done, 1 no slot, 2 host
+     * image refused), result. */
+    ULONG creates, createLog[8][5];
 } RB2K_D7_DRAWSTATS;
 enum { RB2K_D7_FAIL_RANGE, RB2K_D7_FAIL_VBCAPS, RB2K_D7_FAIL_LINEAR, RB2K_D7_FAIL_ADDRESS,
        RB2K_D7_FAIL_PROBE, RB2K_D7_FAIL_IMMEDIATE, RB2K_D7_FAIL_LENGTH, RB2K_D7_FAIL_OTHER };

@@ -220,8 +220,8 @@ static BOOLEAN draw_one(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *imag
         t = rb_gpu_texture(gpu, i ? d->texture1 : d->texture);
         if (!t) return FALSE;
         /* The display DLL attaches a texture when it uploads it here. */
-        for (j = 0; j < RB2K_DD_SLOTS && t->contexts[j] != image->id; ++j) {}
-        if (j == RB2K_DD_SLOTS) return FALSE;
+        for (j = 0; j < RB2K_ATTACH && t->contexts[j] != image->id; ++j) {}
+        if (j == RB2K_ATTACH) return FALSE;
         if (i) texture1 = t; else texture = t;
     }
     *status = ERROR_INVALID_PARAMETER;
@@ -298,8 +298,8 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
         }
         t = rb_gpu_texture(gpu, d->textures[i]);
         if (!t) return refuse(gpu, RB2K_D7_SITE_TEXTURE, *status, i);
-        for (j = 0; j < RB2K_DD_SLOTS && t->contexts[j] != image->id; ++j) {}
-        if (j == RB2K_DD_SLOTS) return refuse(gpu, RB2K_D7_SITE_TEXTURE, *status, 16 + i);
+        for (j = 0; j < RB2K_ATTACH && t->contexts[j] != image->id; ++j) {}
+        if (j == RB2K_ATTACH) return refuse(gpu, RB2K_D7_SITE_TEXTURE, *status, 16 + i);
         textures[i] = t;
     }
     *status = ERROR_INVALID_PARAMETER;

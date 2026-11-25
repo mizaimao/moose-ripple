@@ -230,7 +230,7 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
         if (more && (more->ddsCapsEx.dwCaps2 & DDSCAPS2_VOLUME)) {
             /* A volume: its slices follow each other, a slice pitch apart. */
             depth = more->ddsCapsEx.dwCaps4;
-            if (!depth || depth > RB2K_D7_VOLUME_SIDE || format >= TexDxt1 || format == TexNone) {
+            if (!depth || depth > RB2K_D7_VOLUME_SIDE || RB_TEX_COMPRESSED(format) || format == TexNone) {
                 /* counted for d7draw.exe: the count field holds the depth */
                 ++d->d7draw.surfaceRefused;
                 d->d7draw.refusedCaps = desc->ddsCaps.dwCaps; d->d7draw.refusedFlags = desc->dwFlags;
@@ -342,6 +342,15 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
         data->ddRVal = DDERR_INVALIDPARAMS;
         return rc;
     }
+    {
+        ULONG *log = d->d7draw.createLog[d->d7draw.creates++ & 7], used = 0, k;
+        for (k = 0; k < RB2K_DD_SLOTS; ++k) if (d->slots[k].global) ++used;
+        log[0] = desc->ddsCaps.dwCaps;
+        log[1] = desc->dwWidth << 16 | (desc->dwHeight & 0xffff);
+        log[2] = data->dwSCnt;
+        log[3] = used << 8;
+        log[4] = 0;
+    }
     create.width = desc->dwWidth;
     create.height = desc->dwHeight;
     if (desc->ddsCaps.dwCaps & DDSCAPS_ZBUFFER)
@@ -352,8 +361,11 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
     if (!d->ddEnabled || rb_dd_slot(d, g))
         data->ddRVal = DDERR_SURFACELOST;
     else if (!slot || !request(d, createCode, &create, sizeof(create),
-                               &slot->id, sizeof(slot->id)))
+                               &slot->id, sizeof(slot->id))) {
         data->ddRVal = DDERR_OUTOFVIDEOMEMORY;
+        d->d7draw.createLog[(d->d7draw.creates - 1) & 7][3] |= slot ? 2 : 1;
+        d->d7draw.createLog[(d->d7draw.creates - 1) & 7][4] = data->ddRVal;
+    }
     else {
         slot->global = g;
         slot->owner = EngGetCurrentProcessId();
@@ -684,7 +696,7 @@ static DWORD APIENTRY lock_surface(PDD_LOCKDATA data)
                 else {
                     offset = front * g->dwBlockSizeY;   /* the slice pitch of a volume */
                     if (data->bHasRect) {
-                        if (format >= TexDxt1)   /* rows of 4x4 blocks */
+                        if (RB_TEX_COMPRESSED(format))   /* rows of 4x4 blocks */
                             offset += (area.top / 4) * g->lPitch + (area.left / 4) * (format == TexDxt1 ? 8 : 16);
                         else
                             offset += area.top * g->lPitch + area.left *
