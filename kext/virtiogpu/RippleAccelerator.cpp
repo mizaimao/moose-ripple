@@ -75,6 +75,7 @@ bool RippleAccelerator::start(IOService *provider)
         fQE = fGL && arg != 0;
     fQEDebug = fQE && PE_parse_boot_argn("ripple_qe", &arg, sizeof(arg)) && arg >= 2;
     setProperty("RippleQE", fQE ? "on" : "off");
+    setProperty("RippleSubmits", fDev->asyncSubmits() ? "queued" : "waiting");
     if (fQE) {
         // What NVIDIA's accelerator publishes (M1, docs/re/ioaccelerator-interface.md) and
         // VMsvga2 sets only with its QE option: candidates for WindowServer's QE check (R1).

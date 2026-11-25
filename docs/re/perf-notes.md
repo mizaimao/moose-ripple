@@ -1050,3 +1050,29 @@ Queued submits on the Proxmox host with the drivers of this day (one boot with
 `ripple_async=1`, against the runs of the same day without it): Cinebench R11.5's OpenGL test
 39.55 frames/s against 33.23 (the same 3,625 pixels off its reference, test successful);
 OpenArena's timedemo under the Dock 138.7 against 143.8 and 141.5. No error from the kext.
+
+### Queued submits are the default (2026-11-25)
+
+The last check before the change, Real Racing 2 on the Proxmox host with the drivers of this
+day (the scripted quick race, two minutes of it, one boot each):
+
+| | waiting for the host | queued |
+|---|---|---|
+| race, frames/s (24 windows of 5 s) | 60.1 (60.0-60.2) | 60.1 (60.0-60.2) |
+| time per present | 4.39 ms | 3.22 ms |
+
+The race now runs at the display's 60 frames/s in both modes (it was 52-58 on 13 Nov), so the
+gain shows only in the time a present takes. The picture is right in both, and neither the
+kext nor the host's renderer logged an error.
+
+The kext now queues unless the boot flag `ripple_async=0` is given, and the registry property
+`RippleSubmits` shows `queued` or `waiting`. With that kext and no flag, same host: OpenArena's
+timedemo 147.5 frames/s, Cinebench's OpenGL test 40.16 frames/s (the same 3,625 pixels off
+its reference, test successful); desktop with the menu bar, a window with its shadow, Exposé
+and Dashboard looked at. What the mode gave in today's like-for-like runs: Cinebench 33.2 to
+39.6 frames/s, OpenArena in UTM 22.9 to 24.8, the 61 Photo Booth effects 47.8 to 39.2 ms,
+OpenArena on the Proxmox host about the same (141.5 and 143.8 waiting, 138.7 and 147.5
+queued, each on its own boot).
+
+Not done: a long run (hours) in the queued mode, and the Windows host. The long run is due
+before the next release.

@@ -208,7 +208,8 @@ bool VirtioGPUDevice::init(IOPCIDevice *pci)
 
     fCmdLock = IOLockAlloc();
     uint32_t arg = 0;
-    fAsync = PE_parse_boot_argn("ripple_async", &arg, sizeof(arg)) && arg != 0;
+    // Queued submits are the default since 2026-11-25; ripple_async=0 switches them off.
+    fAsync = !(PE_parse_boot_argn("ripple_async", &arg, sizeof(arg)) && arg == 0);
     fCursorLock = IOLockAlloc();
     fSlotMem = contiguous(kSlots * (kSlotReq + kSlotResp));
     for (int i = 0; i < kCtrlQueueSize; i++)

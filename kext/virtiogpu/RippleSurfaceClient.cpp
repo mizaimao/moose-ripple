@@ -582,7 +582,7 @@ uint32_t RippleSurfaceClient::blitCommand(uint32_t *c, uint32_t dst, uint32_t ds
 // each visible rectangle of the surface when it is a plain region of the screen now (not when
 // WindowServer has shaped it non-simple or scaled it: it draws the window itself then). One
 // submit in the client's context, so after everything the client has submitted, then the
-// display is flushed. With ripple_async=1 nothing here waits for the host to do it: the
+// display is flushed. Nothing here waits for the host to do it (unless ripple_async=0): the
 // copies and the flush are queued behind the client's own commands, and the client draws
 // its next frame meanwhile. Its next present waits until the host has taken this one's
 // copies (fCmdBusy), so a client never gets more than one frame ahead of the host.
