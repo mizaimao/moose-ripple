@@ -5,7 +5,8 @@
  * c0..c7 CONST[0..7] unless a def gives the value, which becomes an IMM.
  * TEMP[12..14] hold modified sources, TEMP[15] a comparison, TEMP[16] and
  * TEMP[17] the results of an instruction and of the one co-issued with it,
- * and TEMP[18] the dot products of the texm3x2 and texm3x3 sequences.
+ * and TEMP[18] the dot products of the texm3x2 and texm3x3 sequences (with
+ * TEMP[13] the eye vector and TEMP[15] scratch of a texm3x3 reflection).
  *
  * Each arithmetic result is shifted, then saturated or clamped to [-1, 1]
  * (the device reports a MaxPixelShaderValue of 1), then written through the
@@ -338,6 +339,29 @@ static void names(unsigned int n, char *tex, char *coord, char *samp)
     cat(samp, 16, "SAMP["); cat_number(samp, 16, n); cat(samp, 16, "]");
 }
 
+/* The texture register a texm3x2, texm3x3 or texdp3 instruction reads.
+ * Version 1 allows the sign scale (_bx2) on it, applied into TEMP[12]. */
+static int texture_operand(PS *s, unsigned int token, unsigned int *m, char *texm, char *coordm, char *sampm)
+{
+    unsigned int mod = (token >> 24) & 15;
+    if (reg_type(token) != RegTexture || reg_num(token) >= RB_PS_COORD_SETS || (mod && mod != ModSign))
+        return fail(s, RbPsRegister, token);
+    *m = reg_num(token);
+    names(*m, texm, coordm, sampm);
+    if (mod == ModSign) {
+        line(s, "MAD TEMP[12], ", texm, ", IMM[0].zzzz, -IMM[0].yyyy", 0, 0, 0, 0);
+        texm[0] = 0;
+        cat(texm, 16, "TEMP[12]");
+    }
+    return 1;
+}
+
+/* The texture target of stage n: a cube map, a volume or a 2D texture. */
+static const char *stage_target(const PS *s, unsigned int n)
+{
+    return (s->cube >> n) & 1 ? ", CUBE" : (s->volume >> n) & 1 ? ", 3D" : ", 2D";
+}
+
 static int texture_op(PS *s, unsigned int op, const unsigned int *p)
 {
     unsigned int n = 0, m = 0;
@@ -370,8 +394,7 @@ static int texture_op(PS *s, unsigned int op, const unsigned int *p)
         break;
     case OpTexm3x2pad:
     case OpTexm3x3pad:
-        if (!texture_source(s, p[1], &m)) return 0;
-        names(m, texm, coordm, sampm);
+        if (!texture_operand(s, p[1], &m, texm, coordm, sampm)) return 0;
         s->info->coords |= 1u << n;
         if (s->pads > 1) return fail(s, RbPsOpcode, op);
         line(s, "DP3 TEMP[18].", s->pads ? "y" : "x", ", ", coord, ", ", texm, 0);
@@ -379,10 +402,9 @@ static int texture_op(PS *s, unsigned int op, const unsigned int *p)
         return 1;
     case OpTexm3x2tex:
     case OpTexdp3tex:
-        if (!texture_source(s, p[1], &m)) return 0;
         if (op == OpTexdp3tex && s->minor < 2) return fail(s, RbPsOpcode, op);
         if (op == OpTexm3x2tex && s->pads != 1) return fail(s, RbPsOpcode, op);
-        names(m, texm, coordm, sampm);
+        if (!texture_operand(s, p[1], &m, texm, coordm, sampm)) return 0;
         s->info->coords |= 1u << n; s->info->samplers |= 1u << n;
         if (op == OpTexdp3tex) {
             line(s, "DP3 TEMP[18].x, ", coord, ", ", texm, 0, 0, 0);
@@ -391,10 +413,51 @@ static int texture_op(PS *s, unsigned int op, const unsigned int *p)
         line(s, "TEX ", tex, ", TEMP[18], ", samp, (s->cube >> n) & 1 ? ", CUBE" : (s->volume >> n) & 1 ? ", 3D" : ", 2D", 0, 0);
         s->pads = 0;
         break;
+    case OpTexm3x3tex:
+        /* The third row, then a lookup with the vector (a cube map or a volume). */
+        if (s->pads != 2) return fail(s, RbPsOpcode, op);
+        if (!texture_operand(s, p[1], &m, texm, coordm, sampm)) return 0;
+        s->info->coords |= 1u << n; s->info->samplers |= 1u << n;
+        line(s, "DP3 TEMP[18].z, ", coord, ", ", texm, 0, 0, 0);
+        line(s, "TEX ", tex, ", TEMP[18], ", samp, stage_target(s, n), 0, 0);
+        s->pads = 0;
+        break;
+    case OpTexm3x3spec:
+    case OpTexm3x3vspec: {
+        /* The third row gives the normal N; the eye vector E is a constant
+         * (spec) or the w of the three rows' coordinates (vspec). The cube map
+         * is looked up with the reflection 2 N (N.E) / (N.N) - E. */
+        char eye[24];
+        if (s->pads != 2 || n < 2) return fail(s, RbPsOpcode, op);
+        if (!texture_operand(s, p[1], &m, texm, coordm, sampm)) return 0;
+        s->info->coords |= 1u << n; s->info->samplers |= 1u << n;
+        line(s, "DP3 TEMP[18].z, ", coord, ", ", texm, 0, 0, 0);
+        eye[0] = 0;
+        if (op == OpTexm3x3spec) {
+            if (reg_type(p[2]) != RegConst || ((p[2] >> 24) & 15) ||
+                !reg_name(s, RegConst, reg_num(p[2]), eye, sizeof(eye))) return fail(s, RbPsRegister, p[2]);
+        } else {
+            char c0[16], c1[16], t0[16], t1[16], s0[16], s1[16];
+            names(n - 2, t0, c0, s0);
+            names(n - 1, t1, c1, s1);
+            line(s, "MOV TEMP[13].x, ", c0, ".wwww", 0, 0, 0, 0);
+            line(s, "MOV TEMP[13].y, ", c1, ".wwww", 0, 0, 0, 0);
+            line(s, "MOV TEMP[13].z, ", coord, ".wwww", 0, 0, 0, 0);
+            cat(eye, sizeof(eye), "TEMP[13]");
+        }
+        line(s, "DP3 TEMP[15].x, TEMP[18], ", eye, 0, 0, 0, 0, 0);
+        line(s, "DP3 TEMP[15].y, TEMP[18], TEMP[18]", 0, 0, 0, 0, 0, 0);
+        line(s, "RCP TEMP[15].y, TEMP[15].yyyy", 0, 0, 0, 0, 0, 0);
+        line(s, "MUL TEMP[15].x, TEMP[15].xxxx, TEMP[15].yyyy", 0, 0, 0, 0, 0, 0);
+        line(s, "MUL TEMP[15].x, TEMP[15].xxxx, IMM[0].zzzz", 0, 0, 0, 0, 0, 0);
+        line(s, "MAD TEMP[18].xyz, TEMP[18], TEMP[15].xxxx, -", eye, 0, 0, 0, 0, 0);
+        line(s, "TEX ", tex, ", TEMP[18], ", samp, ", CUBE", 0, 0);
+        s->pads = 0;
+        break;
+    }
     case OpTexm3x3:
         if (s->minor < 2 || s->pads != 2) return fail(s, RbPsOpcode, op);
-        if (!texture_source(s, p[1], &m)) return 0;
-        names(m, texm, coordm, sampm);
+        if (!texture_operand(s, p[1], &m, texm, coordm, sampm)) return 0;
         s->info->coords |= 1u << n;
         line(s, "DP3 TEMP[18].z, ", coord, ", ", texm, 0, 0, 0);
         line(s, "MOV ", tex, ".xyz, TEMP[18]", 0, 0, 0, 0);
@@ -403,8 +466,7 @@ static int texture_op(PS *s, unsigned int op, const unsigned int *p)
         break;
     case OpTexdp3:
         if (s->minor < 2) return fail(s, RbPsOpcode, op);
-        if (!texture_source(s, p[1], &m)) return 0;
-        names(m, texm, coordm, sampm);
+        if (!texture_operand(s, p[1], &m, texm, coordm, sampm)) return 0;
         s->info->coords |= 1u << n;
         line(s, "DP3 ", tex, ", ", coord, ", ", texm, 0);
         break;
