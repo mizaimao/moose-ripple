@@ -983,6 +983,26 @@ So the third candidate, waiting on round trips, is about a third of a frame here
 the part a driver can change. Release 0.2.2 does not have the fix for the wait on QEMU's
 10 ms fence timer (above, "The slow wait, found"), which is the likely cause.
 
-Open: the same run with the current kext. The guest did not come back after the drivers were
-installed in it for that run (it was restarted while its kext caches were still being
-rebuilt), so the after number is missing.
+The same run with the drivers of this day in the guest (the kext that prods QEMU while it
+waits, the flush thread for covered windows, the texture cache, the corrected sampler binds):
+
+| OpenArena timedemo in UTM | release 0.2.2 | today's drivers |
+|---|---|---|
+| frames/s | 14.9 | 22.9 (22.2 in the run that was profiled) |
+| frame times, shortest / mean / longest | 37 / 66.9 / 240 ms | 18 / 43.7 / 214 ms |
+| the game's main thread: share in the swap | 30% | 4% |
+| ...in the driver's draw calls | 10% | 16% |
+| host GPU busy | 5-7% | 6-11% |
+| QEMU, all threads; the four CPU threads | 108%; 23-27% each | 145%; 31-36% each |
+
+The wait in the swap is gone and the game is half as fast again. Its window reaches under the
+Dock in both runs, so the flush thread has a part in that next to the kext's shorter wait.
+What is left on the game's thread is its own drawing code (three quarters of the samples) and
+kernel calls inside the frame (a fifth, in `mach_msg_trap`): the emulated CPU is the limit
+now, and queued submits are the next thing to try there.
+
+A trap met on the way: a UTM guest that is restarted while it is still rebuilding its kext
+caches hangs in the boot loader at Extensions.mkext. After installing kexts there, wait until
+`ps ax | grep [k]extcache` prints nothing. The guest was repaired from a second guest (its disk
+attached over QMP as a USB disk, `kextcache -u` on it), as docs/install.md describes for a new
+disk.
