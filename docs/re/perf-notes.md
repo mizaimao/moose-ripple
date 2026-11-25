@@ -934,3 +934,25 @@ The host renderer needs that bind after every change of a program's textures
 62,114 to 12,115 saving in sampler binds is gone. On the Proxmox host nothing measured moved
 (OpenArena 99.6 against 99.8 frames/s, Core Image and Photo Booth within their spread); the
 UTM race numbers of that day were taken with the faulty trim and have to be measured again.
+
+### Covered windows: the surface flush on a thread of its own (2026-11-25)
+
+A window that something is drawn over (the Dock, another window, Exposé) is drawn by
+WindowServer, and the driver tells it about each frame with a surface flush. The call returns
+when WindowServer has redrawn the window, and the program waited for that at every swap. A
+helper thread makes the call now; the program waits only while the flush for its previous
+frame is still on its way, so it is never more than one frame ahead. `RIPPLE_GL_FLUSH_THREAD=0`
+or the file `/Library/Logs/RippleGL/no-flush-thread` bring the old behaviour back.
+
+Same boot, the Proxmox host, OpenArena's timedemo in a 1024x768 window that reaches under the
+Dock:
+
+| | flush on the program's thread | on the helper thread |
+|---|---|---|
+| OpenArena timedemo, window under the Dock | 100.4 frames/s (7.0 / 10.0 / 54 ms) | 143.8 (4.0 / 7.0 / 48 ms); 141.5 in a second run |
+| the same with the Dock hidden (earlier boot) | 140.8 | |
+| gl-gears under the Dock with 10 ms of work a frame | 57.1, 59.5, 59.5 frames/s | 59.4, 59.5, 59.5 |
+| gl-gears crossed by another window | | 59.5 throughout, longest frame 17 ms |
+
+So a covered window now costs this game nothing. Picture looked at: the game under the Dock
+with the Dock drawn over it.

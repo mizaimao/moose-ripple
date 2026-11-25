@@ -8,9 +8,6 @@ Guided by what the real apps and games show. Done on 2026-11-12: apps' OpenGL wi
 the GPU (showing a frame takes 4-5 ms at any size, where a 1280x800 window took 20-30 ms), and
 a composited frame needs one submit, one wait without a host round trip and one display call
 (it was five, four and one). Left:
-- While something is drawn over an app's OpenGL window (the Dock, another window, Exposé),
-  WindowServer redraws it and the program's flush waits for that, about 7 ms a frame. A flush
-  from a second thread would take the wait off the program.
 - A single Core Image filter is still slower than software rendering (1.2-12 ms against 0.8-4.5
   for a 480x300 picture). Its textures are reused since 2026-11-25; what is left is two submits
   per pass that each wait for the host (Core Image's flush when it unbinds a texture, and the
