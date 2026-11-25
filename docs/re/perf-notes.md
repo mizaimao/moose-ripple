@@ -1045,3 +1045,8 @@ take a filter with ten passes from twelve trips to one or two, about a quarter o
 It changes when WindowServer's and Core Image's flushes reach the host, so it needs the full
 picture checks, and it does nothing for the compile. Not done; the one-pass filters are
 within 0.2 ms of the software renderer, and Photo Booth's effects are faster than it.
+
+Queued submits on the Proxmox host with the drivers of this day (one boot with
+`ripple_async=1`, against the runs of the same day without it): Cinebench R11.5's OpenGL test
+39.55 frames/s against 33.23 (the same 3,625 pixels off its reference, test successful);
+OpenArena's timedemo under the Dock 138.7 against 143.8 and 141.5. No error from the kext.
