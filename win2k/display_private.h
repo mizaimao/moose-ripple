@@ -10,6 +10,15 @@
 #include "rb2kcursor.h"
 #include "rb2kd3d7.h"
 
+/* Volume textures (newer DirectDraw headers name these; the build uses older ones):
+ * the depth is DDSCAPSEX.dwCaps4 and the slice pitch DD_SURFACE_GLOBAL.dwBlockSizeY. */
+#ifndef DDSCAPS2_VOLUME
+#define DDSCAPS2_VOLUME 0x00200000L
+#endif
+#ifndef DDLOCK_HASVOLUMETEXTUREBOXRECT
+#define DDLOCK_HASVOLUMETEXTUREBOXRECT 0x00008000L
+#endif
+
 typedef struct {
     PDD_SURFACE_GLOBAL global;
     HANDLE owner;
@@ -17,6 +26,8 @@ typedef struct {
     BOOL locked, writable, lost, depth16;
     BOOL stencil;               /* a depth buffer of 24 bits with 8 of stencil (depth16 set too) */
     BOOL alpha;                 /* a render target whose format keeps alpha */
+    BOOL chain;                 /* a full-screen back buffer: its memory is a page, each flip shows the image */
+    BOOL texture;               /* a render target texture: Direct3D also samples the image */
     PDD_DIRECTDRAW_LOCAL local;
     ULONG d3dHandle;
 } DD_SLOT;
@@ -71,6 +82,8 @@ BOOL rb_cursor_stats(DISPLAY *d, RB2K_CURSOR_STATS *stats);
 void rb_display_cursor_release(DISPLAY *d);
 DD_SLOT *rb_dd_slot(DISPLAY *display, PDD_SURFACE_GLOBAL surface);
 BOOL rb_dd_mapped_primary(const DISPLAY *display, const DD_SURFACE_LOCAL *surface);
+BOOL rb_dd_chain_front(const DISPLAY *display, const DD_SURFACE_LOCAL *surface);
+DD_SLOT *rb_dd_chain_front_slot(DISPLAY *display, const DD_SURFACE_LOCAL *surface);
 void rb_d7_init(void);
 void rb_d7_disable(DISPLAY *display);
 void rb_d7_caps(DD_HALINFO *info, BOOL depth);

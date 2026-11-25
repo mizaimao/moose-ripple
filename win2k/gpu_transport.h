@@ -39,6 +39,7 @@ typedef struct RB2K_IMAGE {
     BOOLEAN depth16;
     BOOLEAN stencil8;       /* a depth image of 24 bits with 8 of stencil (with depth16 set) */
     struct RB2K_IMAGE *depthBuffer, *depthOwner;
+    ULONG sampledBy[RB2K_DD_SLOTS];     /* contexts of the targets that sample this image */
     RB2K_D7_STATE d7;
 } RB2K_IMAGE;
 
@@ -48,6 +49,7 @@ typedef struct {
     ULONG id, width, height, levels, bytes;   /* bytes: counted against RB2K_D7_TEXEL_BUDGET */
     ULONG format;                               /* host format; 0 for B8G8R8A8 */
     ULONG faces;                                /* 1, or 6 for a cube map */
+    ULONG depth;                                /* a volume's slices; 1 otherwise */
     ULONG contexts[RB2K_DD_SLOTS];
 } RB2K_TEXTURE;
 #define RB2K_D7_TEXEL_BUDGET (64UL << 20)
@@ -148,6 +150,7 @@ typedef struct {
     /* The image whose whole readback staging holds for further presents;
      * zero once staging or any image may have changed. */
     ULONG presentCache;
+    ULONG imageSamples;                 /* draws that sampled a render target texture */
     RB2K_DMA_SEGMENT rvdStaging[RB2K_RVD_SEGMENTS];
     ULONG rvdContexts;
     /* Direct3D 8 pixel shader programs as TGSI text; an id is a serial
@@ -199,6 +202,7 @@ ULONG rb_gpu_host_blocks(RB2K_GPU *gpu);
 BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture);
 BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture,
                               const RB2K_IMAGE *image);
+BOOLEAN rb_gpu_image_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *source, const RB2K_IMAGE *target);
 BOOLEAN rb_gpu_texture_upload(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K_TEXTURE *texture,
                               const RB2K_IMAGE *image, ULONG level, ULONG face, ULONG y, ULONG rows, PVOID texels);
 BOOLEAN rb_gpu_texture_free(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture);

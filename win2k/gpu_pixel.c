@@ -17,7 +17,7 @@
 
 enum {
     PixelSurface = 1, CreateWords = 1 + VIRGL_OBJ_SURFACE_SIZE,
-    PipeTexture2D = 2, PipeTextureCube = 4, PipeClearColor0 = 1 << 2
+    PipeTexture2D = 2, PipeTexture3D = 3, PipeTextureCube = 4, PipeClearColor0 = 1 << 2
 };
 
 /* Each texture has a private context, so its surface object is always 1. */
@@ -117,7 +117,8 @@ BOOLEAN rb_gpu_create_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     request.resource.target = PipeTexture2D;
     request.resource.format = image->stencil8 ? VIRGL_FORMAT_S8_UINT_Z24_UNORM :
                               image->depth16 ? VIRGL_FORMAT_Z16_UNORM : VIRGL_FORMAT_B8G8R8A8_UNORM;
-    request.resource.bind = image->depth16 ? VIRGL_BIND_DEPTH_STENCIL : VIRGL_BIND_RENDER_TARGET;
+    /* Colour images may be render target textures, sampled by other targets. */
+    request.resource.bind = image->depth16 ? VIRGL_BIND_DEPTH_STENCIL : VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SAMPLER_VIEW;
     if (scanout) request.resource.bind |= VIRGL_BIND_SCANOUT;
     request.resource.width = image->width;
     request.resource.height = image->height;
@@ -289,7 +290,7 @@ BOOLEAN rb_gpu_depth_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *color
     RB2K_IMAGE *old = color->depthBuffer;
     ULONG count = sizeof(attach)/sizeof(*attach);
     if (color->depth16 || (depth && (!depth->depth16 || depth->frameFailed ||
-        color->width != depth->width || color->height != depth->height))) {
+        color->width > depth->width || color->height > depth->height))) {
         r->status = ERROR_INVALID_PARAMETER;
         r->stage = RB2K_STAGE_ATTACH;
         return FALSE;
@@ -806,12 +807,12 @@ BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTU
     PIXEL_REQUEST request;
     begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D, 0);
     request.resource.resource_id = texture->id;
-    request.resource.target = texture->faces == 6 ? PipeTextureCube : PipeTexture2D;
+    request.resource.target = texture->depth > 1 ? PipeTexture3D : texture->faces == 6 ? PipeTextureCube : PipeTexture2D;
     request.resource.format = texture->format ? texture->format : VIRGL_FORMAT_B8G8R8A8_UNORM;
     request.resource.bind = VIRGL_BIND_SAMPLER_VIEW;
     request.resource.width = texture->width;
     request.resource.height = texture->height;
-    request.resource.depth = 1;
+    request.resource.depth = texture->depth > 1 ? texture->depth : 1;
     request.resource.array_size = texture->faces == 6 ? 6 : 1;
     request.resource.last_level = texture->levels - 1;
     return send_request(gpu, result, &request, sizeof(request.resource), RB2K_STAGE_RESOURCE);
@@ -836,6 +837,27 @@ BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTU
     }
     if (!context_resource(gpu, result, image->id, texture->id, TRUE, RB2K_STAGE_ATTACH)) return FALSE;
     texture->contexts[free] = image->id;
+    return TRUE;
+}
+
+/* An image sampled by another target (a render target texture) is attached
+ * to that target's context too, like a texture. */
+BOOLEAN rb_gpu_image_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *source, const RB2K_IMAGE *target)
+{
+    ULONG i, free = RB2K_DD_SLOTS;
+    for (i = 0; i < RB2K_DD_SLOTS; ++i) {
+        ULONG j;
+        if (source->sampledBy[i] == target->id) return TRUE;
+        for (j = 0; j < RB2K_DD_SLOTS && gpu->images[j].id != source->sampledBy[i]; ++j) {}
+        if (free == RB2K_DD_SLOTS && (!source->sampledBy[i] || j == RB2K_DD_SLOTS)) free = i;
+    }
+    if (free == RB2K_DD_SLOTS) {
+        result->status = ERROR_NOT_ENOUGH_MEMORY;
+        result->stage = RB2K_STAGE_ATTACH;
+        return FALSE;
+    }
+    if (!context_resource(gpu, result, target->id, source->id, TRUE, RB2K_STAGE_ATTACH)) return FALSE;
+    source->sampledBy[free] = target->id;
     return TRUE;
 }
 

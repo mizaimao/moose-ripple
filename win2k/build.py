@@ -143,6 +143,7 @@ def build_programs(work):
     targets.append(("d9pixels.exe", ["tools/d9pixels"], ["-I", d3d, "-luser32"]))
     targets.append(("d9texload.exe", ["tools/d9texload"], ["-I", d3d, "-luser32"]))
     targets.append(("d9stencil.exe", ["tools/d9stencil"], ["-I", d3d, "-luser32"]))
+    targets.append(("d9full.exe", ["tools/d9full"], ["-I", d3d, "-luser32"]))
     args = [bin_dir / "i686-w64-mingw32-clang", "-O2", "-D_WIN32_WINNT=0x0500",
             "-I", source, "-I", repo / "win9x/minivdd",
             "-Wl,--major-subsystem-version,5,--minor-subsystem-version,0,--major-os-version,5,--minor-os-version,0,--no-insert-timestamp"]

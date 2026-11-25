@@ -40,6 +40,7 @@ typedef struct {
     unsigned char defImm[256];      /* the immediate holding each */
     int vertex;                     /* translating a vertex shader */
     unsigned int cube;              /* version 1: stages whose texture is a cube map */
+    unsigned int volume;            /* version 1: stages whose texture is a volume */
     unsigned int version;           /* major version of a vertex shader */
     unsigned char samplerKind[16];  /* shader model 2: D3DSAMPLER_TEXTURE_TYPE of each sampler */
     unsigned int written;           /* r0, r1 and t0..t3 written so far: bits 0-1, 8-11 */
@@ -346,7 +347,7 @@ static int texture_op(PS *s, unsigned int op, const unsigned int *p)
     switch (op) {
     case OpTex:
         s->info->samplers |= 1u << n; s->info->coords |= 1u << n;
-        line(s, "TEX ", tex, ", ", coord, ", ", samp, (s->cube >> n) & 1 ? ", CUBE" : ", 2D");
+        line(s, "TEX ", tex, ", ", coord, ", ", samp, (s->cube >> n) & 1 ? ", CUBE" : (s->volume >> n) & 1 ? ", 3D" : ", 2D");
         break;
     case OpTexcoord:
         s->info->coords |= 1u << n;
@@ -365,7 +366,7 @@ static int texture_op(PS *s, unsigned int op, const unsigned int *p)
         names(m, texm, coordm, sampm);
         s->info->samplers |= 1u << n;
         line(s, "MOV TEMP[18], ", texm, op == OpTexreg2ar ? ".wxxx" : op == OpTexreg2gb ? ".yzzz" : 0, 0, 0, 0, 0);
-        line(s, "TEX ", tex, ", TEMP[18], ", samp, (s->cube >> n) & 1 ? ", CUBE" : ", 2D", 0, 0);
+        line(s, "TEX ", tex, ", TEMP[18], ", samp, (s->cube >> n) & 1 ? ", CUBE" : (s->volume >> n) & 1 ? ", 3D" : ", 2D", 0, 0);
         break;
     case OpTexm3x2pad:
     case OpTexm3x3pad:
@@ -387,7 +388,7 @@ static int texture_op(PS *s, unsigned int op, const unsigned int *p)
             line(s, "DP3 TEMP[18].x, ", coord, ", ", texm, 0, 0, 0);
             line(s, "MOV TEMP[18].y, IMM[2].xxxx", 0, 0, 0, 0, 0, 0);
         } else line(s, "DP3 TEMP[18].y, ", coord, ", ", texm, 0, 0, 0);
-        line(s, "TEX ", tex, ", TEMP[18], ", samp, (s->cube >> n) & 1 ? ", CUBE" : ", 2D", 0, 0);
+        line(s, "TEX ", tex, ", TEMP[18], ", samp, (s->cube >> n) & 1 ? ", CUBE" : (s->volume >> n) & 1 ? ", 3D" : ", 2D", 0, 0);
         s->pads = 0;
         break;
     case OpTexm3x3:
@@ -631,7 +632,7 @@ static int instruction2(PS *s, unsigned int op, unsigned int control, const unsi
     case OpTex: {
         static const char *const ops[3] = { "TEX", "TXP", "TXB" };
         /* Only 2D textures exist on this device so far. */
-        static const char *const targets[5] = { 0, 0, "2D", "CUBE", 0 };   /* D3DSTT_2D, D3DSTT_CUBE */
+        static const char *const targets[5] = { 0, 0, "2D", "CUBE", "3D" };   /* D3DSTT_2D, CUBE, VOLUME */
         unsigned int sampler;
         if (n < 3 || control > 2 || reg2_type(p[2]) != Reg2Sampler) return fail(s, RbPsOpcode, op);
         sampler = reg_num(p[2]);
@@ -812,6 +813,7 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
     s.t.p = out; s.t.size = size;
     if (size) out[0] = 0;
     s.cube = (fog >> RB_PS_CUBE_SHIFT) & 255;
+    s.volume = (fog >> RB_PS_VOLUME_SHIFT) & 255;
     fog &= (1u << RB_PS_CUBE_SHIFT) - 1;
     if (count && tokens[0] == 0xffff0200u) return translate2(&s, tokens, count, fog);
     if (!count || (tokens[0] & 0xffffff00u) != 0xffff0100u || (tokens[0] & 0xff) < 1 || (tokens[0] & 0xff) > 3) {

@@ -37,6 +37,13 @@ static BOOL flip_caps(DWORD caps)
            (caps & (DDSCAPS_PRIMARYSURFACE | DDSCAPS_FRONTBUFFER | DDSCAPS_BACKBUFFER));
 }
 
+/* Native Direct3D draws the back buffer of a full-screen flip chain on the
+ * host GPU (in 32-bit modes), so such a chain may be a 3D device. */
+static DWORD chain_caps(const DISPLAY *d, DWORD caps)
+{
+    return d->nativeD3D7 && d->gpuSurfaces && d->mode.BitsPerPlane == 32 ? caps & ~DDSCAPS_3DDEVICE : caps;
+}
+
 static ULONG page_size(DISPLAY *d)
 {
     RB2K_DD_FLIP_INFO f;
@@ -76,6 +83,18 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
                     (d->z24s8 && depth_stencil(fmt)));
         return (desc->dwFlags & DDSD_ZBUFFERBITDEPTH) && desc->dwZBufferBitDepth == 16;
     }
+    if ((caps & DDSCAPS_TEXTURE) && (caps & DDSCAPS_3DDEVICE)) {
+        /* A render target texture: a host image that Direct3D draws into
+         * and samples (32-bit, one level). */
+        if (!d->nativeD3D7 || !d->gpuSurfaces || d->mode.BitsPerPlane != 32 ||
+            (caps & ~(DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM)) ||
+            !desc->dwWidth || desc->dwWidth > RB2K_DD_MAX_WIDTH ||
+            !desc->dwHeight || desc->dwHeight > RB2K_DD_MAX_HEIGHT) return FALSE;
+        if (!(desc->dwFlags & DDSD_PIXELFORMAT)) return TRUE;
+        return fmt->dwRGBBitCount == 32 && fmt->dwRBitMask == 0xff0000 && fmt->dwGBitMask == 0xff00 &&
+               fmt->dwBBitMask == 0xff && (fmt->dwFlags == DDPF_RGB ||
+               (fmt->dwFlags == (DDPF_RGB | DDPF_ALPHAPIXELS) && fmt->dwRGBAlphaBitMask == 0xff000000));
+    }
     if ((caps & DDSCAPS_TEXTURE) && !(caps & DDSCAPS_3DDEVICE)) {
         /* A Direct3D texture in runtime-allocated user memory; the native
          * path reads and uploads it at draw time (display_d3d7.c). */
@@ -87,8 +106,8 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
         return rb_d7_texture_format((desc->dwFlags & DDSD_PIXELFORMAT) ? fmt : &desktop,
                                     d->mode.BitsPerPlane) != TexNone;
     }
-    if (primary_caps(d, caps) || flip_caps(caps)) {
-        if (flip_caps(caps) && (!d->pageBytes ||
+    if (primary_caps(d, caps) || flip_caps(chain_caps(d, caps))) {
+        if (flip_caps(chain_caps(d, caps)) && (!d->pageBytes ||
             ((desc->dwFlags & DDSD_BACKBUFFERCOUNT) && desc->dwBackBufferCount > 1))) return FALSE;
         if (!d->mapping || !d->surface ||
             ((desc->dwFlags & DDSD_WIDTH) && desc->dwWidth != d->mode.VisScreenWidth) ||
@@ -122,7 +141,7 @@ static DWORD APIENTRY can_create(PDD_CANCREATESURFACEDATA data)
      * memory, where Windows' own blits are faster here. Native Direct3D
      * keeps only its render targets, depth buffers and textures on the
      * host; plain 2D surfaces stay in system memory unless asked for. */
-    if (!primary_caps(d, caps) && !flip_caps(caps) &&
+    if (!primary_caps(d, caps) && !flip_caps(chain_caps(d, caps)) &&
         (!d->gpuSurfaces ||
          (!d->plainSurfaces && !(caps & (DDSCAPS_3DDEVICE | DDSCAPS_TEXTURE | DDSCAPS_ZBUFFER)))))
         data->ddRVal = DDERR_OUTOFVIDEOMEMORY;
@@ -159,8 +178,13 @@ static BOOL desktop_page(DISPLAY *d)
     return !d->visiblePage || select_page(d, 0);
 }
 
+static void release_slot(DISPLAY *d, DD_SLOT *slot);
+
 static void release_chain(DISPLAY *d)
 {
+    ULONG i;
+    for (i = 0; i < RB2K_DD_SLOTS; ++i)
+        if (d->slots[i].global && d->slots[i].chain) release_slot(d, &d->slots[i]);
     if (d->flipBack && request(d, IOCTL_RB2K_DD_FLIP_RELEASE, NULL, 0, NULL, 0))
         d->visiblePage = 0;
     else desktop_page(d);
@@ -194,14 +218,23 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
         return rc;
     }
     g = data->lplpSList[0]->lpGbl;
-    if (desc->ddsCaps.dwCaps & DDSCAPS_TEXTURE) {
+    if ((desc->ddsCaps.dwCaps & DDSCAPS_TEXTURE) && !(desc->ddsCaps.dwCaps & DDSCAPS_3DDEVICE)) {
         DDPIXELFORMAT desktop = {0};
         ULONG format = rb_d7_texture_format((desc->dwFlags & DDSD_PIXELFORMAT) ? &desc->ddpfPixelFormat :
                                             &desktop, d->mode.BitsPerPlane);
-        ULONG i;
+        ULONG i, depth = 1;
+        PDD_SURFACE_MORE more = data->lplpSList[0]->lpSurfMore;
         /* NT creates a mipmap chain one level per call, each with the
          * top level's description; every level gets its own user memory
          * and the native path draws from the top level. */
+        if (more && (more->ddsCapsEx.dwCaps2 & DDSCAPS2_VOLUME)) {
+            /* A volume: its slices follow each other, a slice pitch apart. */
+            depth = more->ddsCapsEx.dwCaps4;
+            if (!depth || depth > RB2K_D7_VOLUME_SIDE || format >= TexDxt1) {
+                data->ddRVal = DDERR_INVALIDPARAMS;
+                return rc;
+            }
+        }
         if (!(desc->ddsCaps.dwCaps & DDSCAPS_MIPMAP) &&
             (g->wWidth != desc->dwWidth || g->wHeight != desc->dwHeight)) {
             data->ddRVal = DDERR_INVALIDPARAMS;
@@ -217,6 +250,13 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
             /* Compressed levels hold rows of 4x4 blocks. */
             level->lPitch = (rb_d7_row_bytes(format, level->wWidth) + 3) & ~3;
             level->dwUserMemSize = level->lPitch * rb_d7_rows(format, level->wHeight);
+            if (depth > 1) {
+                ULONG shift = 0, slices;
+                while (shift < 16 && (desc->dwWidth >> shift) > level->wWidth) ++shift;
+                slices = depth >> shift ? depth >> shift : 1;
+                level->dwBlockSizeY = level->dwUserMemSize;   /* the slice pitch */
+                level->dwUserMemSize *= slices;
+            }
             level->fpVidMem = DDHAL_PLEASEALLOC_USERMEM;
         }
         desc->lPitch = g->lPitch;
@@ -225,14 +265,32 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
         return DDHAL_DRIVER_NOTHANDLED;
     }
     if (data->lplpSList[0]->ddsCaps.dwCaps & DDSCAPS_BACKBUFFER) {
+        /* A Direct3D chain's back buffer is drawn in a host image as well,
+         * which each flip copies into the page about to be shown. */
+        BOOL three = (data->lplpSList[0]->ddsCaps.dwCaps & DDSCAPS_3DDEVICE) != 0;
         EngAcquireSemaphore(d->ddLock);
-        if (!d->ddEnabled || !d->pageBytes || !flip_caps(data->lplpSList[0]->ddsCaps.dwCaps) ||
+        slot = NULL;
+        if (!d->ddEnabled || !d->pageBytes || !flip_caps(chain_caps(d, data->lplpSList[0]->ddsCaps.dwCaps)) ||
             g->wWidth != d->mode.VisScreenWidth || g->wHeight != d->mode.VisScreenHeight)
             data->ddRVal = DDERR_INVALIDCAPS;
         else if (d->flipBack) data->ddRVal = DDERR_OUTOFVIDEOMEMORY;
-        else if (!request(d, IOCTL_RB2K_DD_FLIP_ACQUIRE, NULL, 0, NULL, 0))
+        else if (three && (rb_dd_slot(d, g) || !(slot = rb_dd_slot(d, NULL))))
+            data->ddRVal = DDERR_OUTOFVIDEOMEMORY;
+        else if (three && (create.width = g->wWidth, create.height = g->wHeight,
+                           !request(d, IOCTL_RB2K_DD_CREATE, &create, sizeof(create), &slot->id, sizeof(slot->id))))
+            data->ddRVal = DDERR_OUTOFVIDEOMEMORY;
+        else if (!request(d, IOCTL_RB2K_DD_FLIP_ACQUIRE, NULL, 0, NULL, 0)) {
+            if (three) request(d, IOCTL_RB2K_DD_DESTROY, &slot->id, sizeof(slot->id), NULL, 0);
             data->ddRVal = DDERR_SURFACEBUSY;
-        else {
+        } else {
+            if (three) {
+                slot->global = g;
+                slot->owner = EngGetCurrentProcessId();
+                slot->width = g->wWidth;
+                slot->height = g->wHeight;
+                slot->chain = TRUE;
+                slot->alpha = (desc->dwFlags & DDSD_PIXELFORMAT) && (desc->ddpfPixelFormat.dwFlags & DDPF_ALPHAPIXELS);
+            }
             g->lPitch = desc->lPitch = d->mode.ScreenStride;
             desc->dwFlags |= DDSD_PITCH;
             g->dwBlockSizeX = d->pageBytes;
@@ -299,6 +357,7 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
         slot->stencil = createCode == IOCTL_RB2K_DD_CREATE_Z24S8;
         slot->alpha = !slot->depth16 && (desc->dwFlags & DDSD_PIXELFORMAT) &&
                       (desc->ddpfPixelFormat.dwFlags & DDPF_ALPHAPIXELS);
+        slot->texture = (desc->ddsCaps.dwCaps & DDSCAPS_TEXTURE) != 0;
         g->lPitch = slot_pitch(slot);
         g->dwUserMemSize = g->lPitch * create.height;
         g->fpVidMem = DDHAL_PLEASEALLOC_USERMEM;
@@ -341,6 +400,40 @@ static BOOL full_rect(const RECTL *r, const DD_SLOT *s)
            r->bottom == (LONG)s->height;
 }
 
+/* The front buffer of a full-screen chain that Direct3D draws to. */
+BOOL rb_dd_chain_front(const DISPLAY *d, const DD_SURFACE_LOCAL *local)
+{
+    DWORD caps = local->ddsCaps.dwCaps;
+    return d->ddEnabled && (caps & DDSCAPS_PRIMARYSURFACE) && (caps & DDSCAPS_3DDEVICE) &&
+           flip_caps(chain_caps(d, caps));
+}
+
+/* The Direct3D 8 and 9 runtimes draw to both surfaces of a chain in turn
+ * (they swap the surfaces after each flip), so the front buffer gets a host
+ * image too, when Direct3D registers it. The caller holds ddLock. */
+DD_SLOT *rb_dd_chain_front_slot(DISPLAY *d, const DD_SURFACE_LOCAL *local)
+{
+    PDD_SURFACE_GLOBAL g = local->lpGbl;
+    RB2K_DD_CREATE create;
+    DD_SLOT *slot, *back;
+    if (!rb_dd_chain_front(d, local) || g->wWidth != d->mode.VisScreenWidth ||
+        g->wHeight != d->mode.VisScreenHeight) return NULL;
+    if ((slot = rb_dd_slot(d, g))) return slot;
+    if (!(slot = rb_dd_slot(d, NULL))) return NULL;
+    create.width = g->wWidth;
+    create.height = g->wHeight;
+    if (!request(d, IOCTL_RB2K_DD_CREATE, &create, sizeof(create), &slot->id, sizeof(slot->id))) return NULL;
+    back = d->flipBack ? rb_dd_slot(d, d->flipBack) : NULL;
+    slot->global = g;
+    slot->owner = EngGetCurrentProcessId();
+    slot->width = create.width;
+    slot->height = create.height;
+    slot->chain = TRUE;
+    slot->alpha = back ? back->alpha : FALSE;
+    ++d->d7draw.chainFronts;
+    return slot;
+}
+
 BOOL rb_dd_mapped_primary(const DISPLAY *d, const DD_SURFACE_LOCAL *local)
 {
     const DD_SURFACE_GLOBAL *g = local->lpGbl;
@@ -373,11 +466,17 @@ static BOOL surface_page(DISPLAY *d, const DD_SURFACE_LOCAL *l, ULONG *page)
     return TRUE;
 }
 
+static HRESULT present(DISPLAY *d, const DD_SLOT *src, const RECTL *from, const RECTL *to, ULONG page);
+
 static DWORD APIENTRY flip(PDD_FLIPDATA data)
 {
     DISPLAY *d = (DISPLAY *)data->lpDD->dhpdev;
-    ULONG current, target;
+    ULONG current, target, *log;
     EngAcquireSemaphore(d->ddLock);
+    log = d->d7draw.flipLog[d->d7draw.flips++ & 7];
+    log[0] = data->lpSurfCurr ? data->lpSurfCurr->lpGbl->fpVidMem : 0xffffffff;
+    log[1] = data->lpSurfTarg ? data->lpSurfTarg->lpGbl->fpVidMem : 0xffffffff;
+    log[2] = log[3] = 0;
     if (data->dwFlags & ~(DDFLIP_WAIT | DDFLIP_DONOTWAIT | DDFLIP_NOVSYNC))
         data->ddRVal = DDERR_UNSUPPORTED;
     else if (d->lockedPages) data->ddRVal = DDERR_SURFACEBUSY;
@@ -386,10 +485,25 @@ static DWORD APIENTRY flip(PDD_FLIPDATA data)
              (d->flipBack != data->lpSurfCurr->lpGbl && d->flipBack != data->lpSurfTarg->lpGbl))
         data->ddRVal = DDERR_SURFACELOST;
     else {
+        DD_SLOT *drawn = rb_dd_slot(d, data->lpSurfTarg->lpGbl), *shown = rb_dd_slot(d, data->lpSurfCurr->lpGbl);
+        HRESULT hr = DD_OK;
+        log[2] = shown ? shown->id : 0;
+        log[3] = drawn ? drawn->id : 0;
+        if (drawn && drawn->chain) {
+            /* What Direct3D drew goes into the page about to be shown. */
+            RECTL all;
+            all.left = all.top = 0;
+            all.right = d->mode.VisScreenWidth;
+            all.bottom = d->mode.VisScreenHeight;
+            if (drawn->lost || drawn->owner != EngGetCurrentProcessId()) hr = DDERR_SURFACELOST;
+            else hr = present(d, drawn, &all, &all, target);
+            ++d->d7draw.flipPresents;
+        }
         d->flipFront = d->flipBack == data->lpSurfTarg->lpGbl ?
                        data->lpSurfCurr->lpGbl : data->lpSurfTarg->lpGbl;
-        data->ddRVal = select_page(d, target) ? DD_OK : DDERR_GENERIC;
+        data->ddRVal = FAILED(hr) ? hr : select_page(d, target) ? DD_OK : DDERR_GENERIC;
     }
+    log[4] = data->ddRVal;
     EngReleaseSemaphore(d->ddLock);
     return DDHAL_DRIVER_HANDLED;
 }
@@ -425,7 +539,8 @@ static HRESULT fill_page(DISPLAY *d, ULONG page, const RECTL *r, ULONG color)
     return DD_OK;
 }
 
-static HRESULT present(DISPLAY *d, const DD_SLOT *src, const RECTL *from, const RECTL *to)
+/* Copy an image into the visible page, or the other one of a flip chain. */
+static HRESULT present(DISPLAY *d, const DD_SLOT *src, const RECTL *from, const RECTL *to, ULONG page)
 {
     RB2K_DD_PRESENT p;
     if (!rect_inside(from, src->width, src->height) ||
@@ -435,7 +550,7 @@ static HRESULT present(DISPLAY *d, const DD_SLOT *src, const RECTL *from, const 
         from->bottom - from->top != to->bottom - to->top) return DDERR_UNSUPPORTED;
     p.source = src->id;
     p.srcX = from->left; p.srcY = from->top;
-    p.dstX = to->left; p.dstY = to->top;
+    p.dstX = to->left; p.dstY = to->top + page * d->mode.VisScreenHeight;
     p.width = from->right - from->left; p.height = from->bottom - from->top;
     return request(d, IOCTL_RB2K_DD_PRESENT, &p, sizeof(p), NULL, 0)
          ? DD_OK : DDERR_GENERIC;
@@ -462,7 +577,8 @@ static DWORD APIENTRY blt(PDD_BLTDATA data)
     dst = rb_dd_slot(d, data->lpDDDestSurface->lpGbl);
     if (data->lpDDSrcSurface) src = rb_dd_slot(d, data->lpDDSrcSurface->lpGbl);
     primary = !dst && src && rb_dd_mapped_primary(d, data->lpDDDestSurface);
-    if (!data->lpDDSrcSurface && operation == DDBLT_COLORFILL && !data->IsClipped &&
+    if ((dst && dst->chain) || (src && src->chain)) ++d->d7draw.chainBlts;
+    if (!dst && !data->lpDDSrcSurface && operation == DDBLT_COLORFILL && !data->IsClipped &&
         surface_page(d, data->lpDDDestSurface, &page))
         data->ddRVal = fill_page(d, page, &data->rDest, data->bltFX.dwFillColor);
     else if (!dst && !src) rc = DDHAL_DRIVER_NOTHANDLED;
@@ -475,7 +591,7 @@ static DWORD APIENTRY blt(PDD_BLTDATA data)
      * Each callback describes one visible source/destination rectangle pair. */
     else if (data->IsClipped) data->ddRVal = DDERR_UNSUPPORTED;
     else if (primary)
-        data->ddRVal = sourceCopy ? present(d, src, &data->rSrc, &data->rDest) : DDERR_UNSUPPORTED;
+        data->ddRVal = sourceCopy ? present(d, src, &data->rSrc, &data->rDest, 0) : DDERR_UNSUPPORTED;
     else if (!full_rect(&data->rDest, dst))
         data->ddRVal = DDERR_UNSUPPORTED;
     else if (!src && operation == DDBLT_COLORFILL) {
@@ -540,9 +656,38 @@ static DWORD APIENTRY lock_surface(PDD_LOCKDATA data)
     if (data->lpDDSurface->ddsCaps.dwCaps & DDSCAPS_TEXTURE) rb_d7_texture_written(d, g);
     EngAcquireSemaphore(d->ddLock);
     s = rb_dd_slot(d, g);
+    if (s && s->chain) s = NULL;   /* a chain's back buffer locks its page */
     if (!s) {
         if (!surface_page(d, data->lpDDSurface, &page)) {
-            if (flip_caps(data->lpDDSurface->ddsCaps.dwCaps)) data->ddRVal = DDERR_SURFACELOST;
+            if (flip_caps(chain_caps(d, data->lpDDSurface->ddsCaps.dwCaps))) data->ddRVal = DDERR_SURFACELOST;
+            else if ((data->lpDDSurface->ddsCaps.dwCaps & DDSCAPS_TEXTURE) && g->fpVidMem && g->lPitch > 0) {
+                /* Video-memory textures live in user memory the runtime
+                 * allocated for us. Windows would add the process's view of
+                 * the frame buffer to that address once a full-screen chain
+                 * has mapped one, so the address is given here. */
+                ULONG format = rb_d7_texture_format(&g->ddpfSurface, d->mode.BitsPerPlane), front = 0;
+                RECTL area = data->rArea;
+                if (data->bHasRect && (data->dwFlags & DDLOCK_HASVOLUMETEXTUREBOXRECT)) {
+                    /* A box of a volume: front and back ride in the high words. */
+                    front = (ULONG)area.left >> 16;
+                    area.left &= 0xffff;
+                    area.right &= 0xffff;
+                }
+                if (data->bHasRect && !rect_inside(&area, g->wWidth, g->wHeight))
+                    data->ddRVal = DDERR_INVALIDRECT;
+                else {
+                    offset = front * g->dwBlockSizeY;   /* the slice pitch of a volume */
+                    if (data->bHasRect) {
+                        if (format >= TexDxt1)   /* rows of 4x4 blocks */
+                            offset += (area.top / 4) * g->lPitch + (area.left / 4) * (format == TexDxt1 ? 8 : 16);
+                        else
+                            offset += area.top * g->lPitch + area.left *
+                                      (format ? rb_d7_texel_bytes(format) : g->ddpfSurface.dwRGBBitCount / 8);
+                    }
+                    data->lpSurfData = (BYTE *)g->fpVidMem + offset;
+                    data->ddRVal = DD_OK;
+                }
+            }
             else rc = DDHAL_DRIVER_NOTHANDLED;
         } else if (!d->activeView || data->fpProcess != d->activeView->address)
             data->ddRVal = DDERR_CANTLOCKSURFACE;
@@ -597,6 +742,14 @@ static DWORD APIENTRY lock_surface(PDD_LOCKDATA data)
     data->lpSurfData = (BYTE *)g->fpVidMem + offset;
     data->ddRVal = DD_OK;
 done:
+    {
+        ULONG *log = d->d7draw.lockLog[d->d7draw.locks++ & 7];
+        log[0] = data->lpDDSurface->ddsCaps.dwCaps;
+        log[1] = (ULONG)g->wWidth << 16 | g->wHeight;
+        log[2] = g->fpVidMem;
+        log[3] = rc == DDHAL_DRIVER_HANDLED && data->ddRVal == DD_OK ? (ULONG)data->lpSurfData : 0;
+        log[4] = rc == DDHAL_DRIVER_HANDLED ? data->ddRVal : 0xffffffff;
+    }
     if (tmp) EngFreeMem(tmp);
     EngReleaseSemaphore(d->ddLock);
     return rc;
@@ -612,6 +765,7 @@ static DWORD APIENTRY unlock_surface(PDD_UNLOCKDATA data)
     if (data->lpDDSurface->ddsCaps.dwCaps & DDSCAPS_TEXTURE) rb_d7_texture_written(d, g);
     EngAcquireSemaphore(d->ddLock);
     s = rb_dd_slot(d, g);
+    if (s && s->chain) s = NULL;
     if (!s) {
         if (surface_page(d, data->lpDDSurface, &page) && (d->lockedPages & (1UL << page))) {
             d->lockedPages &= ~(1UL << page);

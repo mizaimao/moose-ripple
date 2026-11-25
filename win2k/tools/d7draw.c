@@ -69,6 +69,26 @@ int main(void)
                s.drawTicks * 1000000 / s.frequency);
     printf("D7REG mipmaps=%lu managed=%lu chains=%lu stops=%lu,%lu,%lu,%lu,%lu\n", s.regMipmaps, s.regManaged,
            s.mipChains, s.mipStops[0], s.mipStops[1], s.mipStops[2], s.mipStops[3], s.mipStops[4]);
+    {
+        int k;
+        printf("D7FLIP flips=%lu presents=%lu fronts=%lu backs=%lu chain_blts=%lu targets=%lu target_failures=%lu\n",
+               s.flips, s.flipPresents, s.chainFronts, s.chainBacks, s.chainBlts, s.targets, s.targetFailures);
+        for (k = 0; k < 8 && k < (int)s.flips; ++k) {
+            const ULONG *l = s.flipLog[(s.flips - 1 - k) & 7];
+            printf("D7FLIP log-%d curr=%08lx targ=%08lx shown=%lx drawn=%lx hr=%08lx\n", k, l[0], l[1], l[2], l[3], l[4]);
+        }
+        for (k = 0; k < 8 && k < (int)s.locks; ++k) {
+            const ULONG *l = s.lockLog[(s.locks - 1 - k) & 7];
+            printf("D7LOCK log-%d caps=%08lx size=%lux%lu vidmem=%08lx data=%08lx hr=%08lx\n", k, l[0], l[1] >> 16,
+                   l[1] & 0xffff, l[2], l[3], l[4]);
+        }
+        printf("D7LOCK count=%lu\n", s.locks);
+        printf("D7RTT target_textures=%lu texture_skips=%lu,%lu,%lu,%lu\n", s.targetTextures, s.texSkips[0],
+               s.texSkips[1], s.texSkips[2], s.texSkips[3]);
+        printf("D7FLIP targets");
+        for (k = 0; k < 8 && k < (int)s.targets; ++k) printf(" %lx", s.targetLog[(s.targets - 1 - k) & 7]);
+        printf("\n");
+    }
     printf("D7SURF refused=%lu caps=%08lx flags=%08lx size=%lux%lu format=%08lx count=%lu\n", s.surfaceRefused, s.refusedCaps,
            s.refusedFlags, s.refusedWidth, s.refusedHeight, s.refusedFormat, s.refusedCount);
     printf("D8INFO version=%lx buffers=%lu stream_draws=%lu requests", s.d8Version, s.d8Buffers, s.d8StreamDraws);

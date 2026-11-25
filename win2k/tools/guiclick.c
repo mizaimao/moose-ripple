@@ -2,7 +2,7 @@
  * programs in a test machine and for starting benchmarks from a script.
  *
  *   guiclick <seconds> [-press text]... [-check text]... [-dismiss text]... [-close text]... [-until text]
- *            <program> [arguments]
+ *            [-debug] <program> [arguments]
  *
  * Every visible top-level window other than the shell's is reported when
  * its contents change: its title and class, then each control's class and
@@ -19,6 +19,9 @@
  *   - a window showing a -close text is asked to close.
  *   - "-press #N" presses the enabled button whose control ID is N, owner-drawn
  *     or not; buttons are reported with their IDs and places for this.
+ * With -debug the program runs under guiclick as its debugger: its
+ * exceptions are reported with the module and offset, and for one that
+ * ends it, the registers and the code addresses found on its stack.
  * The screen saver is off while guiclick runs.
  * The run ends when the program has exited and no window has changed for
  * ten seconds, or when the time is up. With -until, a window showing that
@@ -26,6 +29,7 @@
  * close. Every line starts with GUICLICK. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <tlhelp32.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -38,13 +42,18 @@ static DWORD untilSeen;
 static DWORD shellPid, selfPid;
 static struct { HWND w; DWORD hash, changed, acted; } seen[MaxWindows];
 static DWORD lastChange;
-static BOOL closeAll;
+static BOOL closeAll, debugging;
 
 static void out(const char *s)
 {
+    char line[520];
     DWORD n;
-    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), s, lstrlenA(s), &n, NULL);
-    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), "\r\n", 2, &n, NULL);
+    int length = lstrlenA(s);
+    if (length > (int)sizeof(line) - 3) length = sizeof(line) - 3;
+    memcpy(line, s, length);
+    line[length] = '\r';
+    line[length + 1] = '\n';
+    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), line, length + 2, &n, NULL);   /* one write: two threads print */
 }
 
 /* Lower-case copy without the ampersands of keyboard accelerators. */
@@ -255,6 +264,175 @@ static BOOL CALLBACK top(HWND w, LPARAM arg)
     return TRUE;
 }
 
+/* The module holding an address, and the offset into it. */
+static BOOL where(DWORD pid, DWORD address, char *text, int size)
+{
+    MODULEENTRY32 m;
+    BOOL found = FALSE;
+    HANDLE list = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
+    _snprintf(text, size, "%08lx", address);
+    text[size - 1] = 0;
+    if (list == INVALID_HANDLE_VALUE) return FALSE;
+    m.dwSize = sizeof(m);
+    if (Module32First(list, &m)) do {
+        DWORD offset = address - (DWORD)m.modBaseAddr;
+        if (offset < m.modBaseSize) {
+            _snprintf(text, size, "%s+%lx", m.szModule, offset);
+            text[size - 1] = 0;
+            found = TRUE;
+            break;
+        }
+    } while (Module32Next(list, &m));
+    CloseHandle(list);
+    return found;
+}
+
+/* Handle the debugged program's events for up to the given time. */
+static void debug_events(HANDLE process, DWORD ms, BOOL *exited)
+{
+    static int exceptions, strings, loads;
+    DWORD until = GetTickCount() + ms;
+    char line[300], place[96];
+    for (;;) {
+        DEBUG_EVENT e;
+        DWORD now = GetTickCount(), action = DBG_CONTINUE;
+        if ((LONG)(until - now) <= 0 || !WaitForDebugEvent(&e, until - now)) return;
+        switch (e.dwDebugEventCode) {
+        case CREATE_PROCESS_DEBUG_EVENT:
+            if (e.u.CreateProcessInfo.hFile) CloseHandle(e.u.CreateProcessInfo.hFile);
+            break;
+        case LOAD_DLL_DEBUG_EVENT:
+            if (e.u.LoadDll.hFile) CloseHandle(e.u.LoadDll.hFile);
+            if (++loads <= 80) {
+                where(e.dwProcessId, (DWORD)e.u.LoadDll.lpBaseOfDll, place, sizeof(place));
+                _snprintf(line, sizeof(line), "GUICLICK load %08lx %s", (DWORD)e.u.LoadDll.lpBaseOfDll, place);
+                line[sizeof(line) - 1] = 0;
+                out(line);
+            }
+            break;
+        case OUTPUT_DEBUG_STRING_EVENT:
+            if (++strings <= 100 && !e.u.DebugString.fUnicode) {
+                char text[200];
+                SIZE_T got = 0;
+                DWORD n = e.u.DebugString.nDebugStringLength < sizeof(text) ? e.u.DebugString.nDebugStringLength : sizeof(text) - 1;
+                char *p;
+                ReadProcessMemory(process, e.u.DebugString.lpDebugStringData, text, n, &got);
+                text[got < sizeof(text) ? got : sizeof(text) - 1] = 0;
+                for (p = text; *p; ++p) if (*p == '\r' || *p == '\n') *p = ' ';
+                _snprintf(line, sizeof(line), "GUICLICK debug %s", text);
+                line[sizeof(line) - 1] = 0;
+                out(line);
+            }
+            break;
+        case EXCEPTION_DEBUG_EVENT: {
+            const EXCEPTION_RECORD *r = &e.u.Exception.ExceptionRecord;
+            if (r->ExceptionCode == EXCEPTION_BREAKPOINT && !exceptions) { ++exceptions; break; }
+            action = DBG_EXCEPTION_NOT_HANDLED;
+            if (++exceptions <= 30 || !e.u.Exception.dwFirstChance) {
+                where(e.dwProcessId, (DWORD)r->ExceptionAddress, place, sizeof(place));
+                _snprintf(line, sizeof(line), "GUICLICK exception %08lx at %s %s chance info %08lx %08lx",
+                          r->ExceptionCode, place, e.u.Exception.dwFirstChance ? "first" : "second",
+                          r->NumberParameters > 0 ? (DWORD)r->ExceptionInformation[0] : 0,
+                          r->NumberParameters > 1 ? (DWORD)r->ExceptionInformation[1] : 0);
+                line[sizeof(line) - 1] = 0;
+                out(line);
+            }
+            if (!e.u.Exception.dwFirstChance) {
+                /* It ends the program: its registers and the code addresses on its stack. */
+                HANDLE thread = OpenThread(THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, e.dwThreadId);
+                CONTEXT c;
+                c.ContextFlags = CONTEXT_FULL;
+                if (thread && GetThreadContext(thread, &c)) {
+                    DWORD stack[256];
+                    SIZE_T got = 0, n = 0;
+                    int i, shown = 0;
+                    _snprintf(line, sizeof(line), "GUICLICK registers eip=%08lx esp=%08lx ebp=%08lx eax=%08lx ebx=%08lx "
+                              "ecx=%08lx edx=%08lx esi=%08lx edi=%08lx", c.Eip, c.Esp, c.Ebp, c.Eax, c.Ebx, c.Ecx, c.Edx,
+                              c.Esi, c.Edi);
+                    line[sizeof(line) - 1] = 0;
+                    out(line);
+                    {   /* the memory the fault touched, and the code at the fault */
+                        MEMORY_BASIC_INFORMATION m;
+                        BYTE code[16];
+                        SIZE_T n = 0;
+                        DWORD at = r->NumberParameters > 1 ? (DWORD)r->ExceptionInformation[1] : 0;
+                        if (VirtualQueryEx(process, (PVOID)at, &m, sizeof(m))) {
+                            _snprintf(line, sizeof(line), "GUICLICK fault memory %08lx base %08lx allocation %08lx size %08lx "
+                                      "state %lx protect %lx type %lx", at, (DWORD)m.BaseAddress, (DWORD)m.AllocationBase,
+                                      (DWORD)m.RegionSize, m.State, m.Protect, m.Type);
+                            line[sizeof(line) - 1] = 0;
+                            out(line);
+                        }
+                        if (VirtualQueryEx(process, (PVOID)(at - 1), &m, sizeof(m))) {
+                            _snprintf(line, sizeof(line), "GUICLICK memory below base %08lx allocation %08lx size %08lx "
+                                      "state %lx protect %lx type %lx", (DWORD)m.BaseAddress, (DWORD)m.AllocationBase,
+                                      (DWORD)m.RegionSize, m.State, m.Protect, m.Type);
+                            line[sizeof(line) - 1] = 0;
+                            out(line);
+                        }
+                        if (ReadProcessMemory(process, (PVOID)(c.Eip - 8), code, sizeof(code), &n) && n == sizeof(code)) {
+                            _snprintf(line, sizeof(line), "GUICLICK code at eip-8 %02x %02x %02x %02x %02x %02x %02x %02x | "
+                                      "%02x %02x %02x %02x %02x %02x %02x %02x", code[0], code[1], code[2], code[3],
+                                      code[4], code[5], code[6], code[7], code[8], code[9], code[10], code[11], code[12],
+                                      code[13], code[14], code[15]);
+                            line[sizeof(line) - 1] = 0;
+                            out(line);
+                        }
+                    }
+                    {   /* the frame chain: each frame's return address */
+                        DWORD frame = c.Ebp, link[2];
+                        int depth;
+                        for (depth = 0; depth < 16 && frame; ++depth) {
+                            if (!ReadProcessMemory(process, (PVOID)frame, link, sizeof(link), &n) || n != sizeof(link)) break;
+                            where(e.dwProcessId, link[1], place, sizeof(place));
+                            _snprintf(line, sizeof(line), "GUICLICK frame %d %s", depth, place);
+                            line[sizeof(line) - 1] = 0;
+                            out(line);
+                            if (link[0] <= frame) break;
+                            frame = link[0];
+                        }
+                    }
+                    ReadProcessMemory(process, (PVOID)c.Esp, stack, sizeof(stack), &got);
+                    for (i = 0; i < (int)(got / sizeof(DWORD)) && shown < 24; ++i)
+                        if (where(e.dwProcessId, stack[i], place, sizeof(place))) {
+                            _snprintf(line, sizeof(line), "GUICLICK stack +%03x %s", i * 4, place);
+                            line[sizeof(line) - 1] = 0;
+                            out(line);
+                            ++shown;
+                        }
+                }
+                if (thread) CloseHandle(thread);
+            }
+            break;
+        }
+        case EXIT_PROCESS_DEBUG_EVENT:
+            _snprintf(line, sizeof(line), "GUICLICK debugged program exit %08lx", e.u.ExitProcess.dwExitCode);
+            line[sizeof(line) - 1] = 0;
+            out(line);
+            *exited = TRUE;
+            break;
+        }
+        ContinueDebugEvent(e.dwProcessId, e.dwThreadId, action);
+    }
+}
+
+/* With -debug a thread of its own starts the program and handles its debug
+ * events, so a window query by the main thread never waits on a program that
+ * is stopped at a debug event. */
+static struct { char *command; STARTUPINFOA *si; PROCESS_INFORMATION *pi; HANDLE started; BOOL ok; } debuggee;
+
+static DWORD WINAPI debugger(LPVOID unused)
+{
+    BOOL ended = FALSE;
+    debuggee.ok = CreateProcessA(NULL, debuggee.command, NULL, NULL, FALSE, DEBUG_ONLY_THIS_PROCESS, NULL, NULL,
+                                 debuggee.si, debuggee.pi);
+    SetEvent(debuggee.started);
+    if (!debuggee.ok) return 1;
+    while (!ended) debug_events(debuggee.pi->hProcess, 1000, &ended);
+    (void)unused;
+    return 0;
+}
+
 static char *word(char **p)
 {
     char *s = *p, *start;
@@ -290,6 +468,7 @@ int main(void)
         else if (!lstrcmpA(w, "-until")) until = word(&command);
         else if (!lstrcmpA(w, "-dismiss") && dismissCount < MaxNames) dismiss[dismissCount++] = word(&command);
         else if (!lstrcmpA(w, "-close") && closeCount < MaxNames) closes[closeCount++] = word(&command);
+        else if (!lstrcmpA(w, "-debug")) debugging = TRUE;
         else {
             /* The program and its arguments, as given. */
             command = save;
@@ -308,7 +487,17 @@ int main(void)
     _snprintf(line, sizeof(line), "GUICLICK start %s", command);
     line[sizeof(line) - 1] = 0;
     out(line);
-    if (!CreateProcessA(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+    if (debugging) {
+        DWORD id;
+        HANDLE thread;
+        debuggee.command = command;
+        debuggee.si = &si;
+        debuggee.pi = &pi;
+        debuggee.started = CreateEventA(NULL, TRUE, FALSE, NULL);
+        thread = CreateThread(NULL, 0, debugger, NULL, 0, &id);
+        if (thread) { WaitForSingleObject(debuggee.started, INFINITE); CloseHandle(thread); }
+    }
+    if (debugging ? !debuggee.ok : !CreateProcessA(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
         _snprintf(line, sizeof(line), "GUICLICK launch failed %lu", GetLastError());
         out(line);
         return 1;

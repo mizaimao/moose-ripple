@@ -1930,3 +1930,53 @@ at 36 of 36 with hardware vertex processing and 43 of 43 with software
 vertex processing; `d9stencil` (5 of 5), `d8pixels` (23 of 23), the
 Direct3D 7 checks and Direct3D 8 Quake (58.6 fps) were unchanged.
 3DMark03 now starts without warnings and offers all four game tests.
+
+## Full-screen devices, render target textures, volume textures: 3DMark03 completes
+
+**Full screen.** A flip chain that is a 3D device is accepted in 32-bit
+modes. Its two surfaces keep their frame buffer pages, and each also gets a
+host image, because the Direct3D 8 and 9 runtimes draw to the two surfaces
+in turn (they swap the surfaces after each flip, and NT does not swap their
+memory). Direct3D registers only the chain's front surface; the back
+buffer's handle is found among its attachments. A flip copies the image of
+the surface about to be shown into its page, then shows that page.
+
+Once a full-screen chain has mapped the frame buffer into a process,
+Windows adds that view's address to every lock it completes for the
+driver. That pointed texture locks at unmapped memory (3DMark03 crashed in
+d3d9.dll), so the driver now answers video-memory texture locks itself.
+
+**Render target textures.** A texture that is also a 3D device (32-bit,
+one level) is a host image: Direct3D draws into it by its handle and
+samples it as it is, through a texture id that names the image. The
+miniport attaches the image to each sampling target's context and submits
+its own draws first. A depth buffer may be larger than its target, as
+Direct3D 9 allows. Up to 16 host images may exist at once (was 4).
+
+**Volume textures** (uncompressed, up to 256 per side, with mipmaps) are
+read and uploaded slice by slice into 3D host textures, and copied for the
+volume blit command (managed volumes). Pixel shaders sample them (`dcl_volume`,
+or a version 1 stage bound to a volume); the fixed-function stages do not.
+
+Checked on XP SP3 under KVM on the Intel UHD 630 host:
+
+- `d9full` (new) opens full-screen X8R8G8B8 and A8R8G8B8 devices, draws
+  three frames and reads the front buffer back: both pass.
+- `d9pixels` gained render target texture cases (fixed function and
+  ps_1_1) and volume cases (ps_2_0 and ps_1_1): 40 of 40 with hardware
+  and 47 of 47 with software vertex processing.
+- Unchanged: `d9stencil` 5 of 5, `d8pixels` 23 of 23, the Direct3D 7
+  checks, 32 DXT textures in 170 to 200 ms, Direct3D 8 Quake 58.4 to
+  58.6 fps.
+- 3DMark03 3.60 runs to the end and scores **1157 3DMarks** at
+  1024x768. Most of its pictures are still wrong (white sky, black
+  characters): 4.8 million triangles were skipped because a shader or a
+  texture stage combination is not translated (most often `t0_bx2`, a
+  texture register with the sign-scale modifier), and one volume texture
+  could not be created. Those are the next fixes.
+
+`guiclick` gained `-press #ID` and `-close` for programs that draw their
+own buttons, and `-debug`, which runs the program under a debugger thread
+and reports its exceptions with the faulting memory, the frame chain and
+the code addresses on the stack. `d7draw` prints the last flips, locks and
+render target changes, and texture skips by reason.

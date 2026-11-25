@@ -29,7 +29,7 @@ typedef struct { RB_GDI2_HEADER gdi2; ULONG version, reserved; } RB_GDI2_DX_VERS
  * and the operations in the word that holds dwRBitMask for RGB formats. */
 #define RB_DDPF_D3DFORMAT 0x00200000UL
 enum {
-    RbFormatTexture = 0x1, RbFormatCubeTexture = 0x4, RbFormatOffscreenTarget = 0x8, RbFormatSameTarget = 0x10,
+    RbFormatTexture = 0x1, RbFormatVolumeTexture = 0x2, RbFormatCubeTexture = 0x4, RbFormatOffscreenTarget = 0x8, RbFormatSameTarget = 0x10,
     RbFormatZStencil = 0x40, RbFormatSameTargetUpToAlpha = 0x100, RbFormatDisplayMode = 0x400,
     RbFormat3D = 0x800, RbFormatOffscreenPlain = 0x4000
 };
@@ -84,6 +84,7 @@ typedef struct { ULONG type, firstOffset, count; } RB_DP2_DRAW_PRIMITIVE2;
 typedef struct { ULONG type; LONG baseOffset; ULONG minIndex, vertices, startOffset, count; } RB_DP2_DRAW_INDEXED2;
 typedef struct { ULONG handle, codeBytes; } RB_DP2_CREATE_PIXEL_SHADER;
 typedef struct { ULONG handle, flags; } RB_DP2_PATCH;
+/* box: left, top, right, bottom, front, back */
 typedef struct { ULONG dest, source, x, y, z, box[6], flags; } RB_DP2_VOLUME_BLT;
 typedef struct { ULONG dest, source, offset, range[2], flags; } RB_DP2_BUFFER_BLT;
 typedef struct { ULONG type, matrix[16]; } RB_DP2_MULTIPLY_TRANSFORM;
