@@ -903,3 +903,21 @@ This also bounds every other wait for the GPU (`glFinish`, fences, a read-back w
 is busy) at the GPU's own time plus a fraction of a millisecond, where it could be 10 ms.
 Queued submits themselves stay behind the flag: this was the one measured reason against
 them on the Core Image tests, and the checks on the other hosts are still to do.
+
+Queued submits with the test programs (2026-11-25, the Proxmox host, the kext with the prod):
+
+| | waiting for the host | queued (`ripple_async=1`) |
+|---|---|---|
+| OpenArena 0.8.8, timedemo of `demo088-test1`, 1024x768 window (3398 frames) | 99.8 and 100.7 frames/s | 102.5 and 102.0 |
+| ...frame times, shortest / mean / longest | 7.0 / 10.0 / 52 ms | 7.0 / 9.8 / 52-58 ms |
+
+Command: `openarena.ub +set fs_basepath DIR +set r_fullscreen 0 +set r_mode 6 +set s_initsound 0
++set com_introplayed 1 +timedemo 1 +demo demo088-test1 +set nextdemo quit` (with `+set timedemo
+1` in place of `+timedemo 1` the result line is not printed). The picture is right in both
+modes. Queued submits are worth about 2% here, so on this host the game is not held up by
+waiting for the host. No frame is shorter than 7 ms in either mode. The 1024x768 window
+reaches under the Dock at 1280x800, so WindowServer draws it (about 7 ms more a present, see
+above); a window clear of the Dock is the next thing to time.
+
+Cinebench R11.5's OpenGL test gives no score with the driver yet: it refuses its own picture
+("OpenGL Reference Matching Test Failure", issue 154), with no GL error in the driver's log.
