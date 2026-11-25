@@ -1936,9 +1936,8 @@ processor), this driver 3.1%, Direct3D's runtime and D3DX 1.9%. The driver's sha
 thin: its most sampled function has 0.4%, and a frame makes 360 indexed draw calls at 0.1 ms
 each. The largest item after the game is not in a program at all: the 1 ms timer that the
 benchmark asks for interrupts all four processors a thousand times a second, and handling
-it (with the counter read that goes with each tick) takes about 20% of all samples, a
-quarter of the time of the processor the game runs on. A frame is bound by the emulated
-processor running the game, not by the driver.
+it (with the counter read that goes with each tick) takes about 20% of all samples. A frame
+is bound by the emulated processor running the game, not by the driver.
 
 Loading is different. A test took about three and a half minutes to load, and a frame of
 its loading screen 730 to 820 ms, 585 to 634 ms of that inside the driver's `Unlock` of a
