@@ -8,6 +8,10 @@ plain QEMU command line is the same VM written out for QEMU without Proxmox; it 
 Windows 11 through WSL2, with the settings in "Windows 11 (WSL2)" below. In UTM the same disks
 ran with the settings in "UTM on an Apple-silicon Mac".
 
+Windows guests have their own guides: Windows 95, 98 and Me in
+[win9x/display-driver.md](win9x/display-driver.md), Windows 2000 and XP in
+[win2k/install.md](win2k/install.md).
+
 ## What you need
 
 - [ ] A Linux x86_64 host with KVM, Windows 11 with WSL2 (KVM inside WSL), or an Apple-silicon
