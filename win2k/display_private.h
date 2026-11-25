@@ -18,6 +18,7 @@ typedef struct {
     BOOL stencil;               /* a depth buffer of 24 bits with 8 of stencil (depth16 set too) */
     BOOL alpha;                 /* a render target whose format keeps alpha */
     BOOL chain;                 /* a full-screen back buffer: its memory is a page, each flip shows the image */
+    BOOL texture;               /* a render target texture: Direct3D also samples the image */
     PDD_DIRECTDRAW_LOCAL local;
     ULONG d3dHandle;
 } DD_SLOT;

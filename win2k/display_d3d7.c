@@ -130,6 +130,7 @@ typedef struct {
      * level zero of face zero being the above. */
     ULONG levels, faces, levelPitch[6][RB2K_D7_LEVELS];
     FLATPTR levelAddress[6][RB2K_D7_LEVELS];
+    ULONG image;    /* a render target texture: the image id (sampled as it is) */
     /* Video-memory textures are written only through DirectDraw locks and
      * blits, which mark them dirty; others are checked once a scene. */
     BOOL tracked, dirty;
@@ -396,6 +397,22 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
     t->tracked = !(l->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY);
     t->dirty = TRUE;
     t->faces = 1;
+    {
+        DD_SLOT *slot = rb_dd_slot(d, g);
+        if (slot && slot->texture && !slot->lost && slot->owner == t->owner) {
+            /* A render target texture: Direct3D draws into its image by the
+             * same handle, and samples the image as it is. */
+            t->image = slot->id;
+            t->format = slot->alpha ? TexArgb8888 : TexXrgb8888;
+            t->levels = 1;
+            t->mipmaps = FALSE;
+            t->dirty = FALSE;
+            slot->local = local;
+            slot->d3dHandle = handle;
+            ++d->d7draw.targetTextures;
+            return;
+        }
+    }
     if (l->lpSurfMore && (l->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_CUBEMAP)) {
         /* A cube map: the other five faces hang off this one. */
         PDD_SURFACE_LOCAL top[6];
@@ -658,7 +675,7 @@ static DWORD APIENTRY create_context(LPD3DNTHAL_CONTEXTCREATEDATA a)
     if (!d->ddEnabled || !s || s->depth16 || s->lost || s->owner != EngGetCurrentProcessId() ||
         (s->local && s->local != local) || (a->lpDDSZLcl && (!d->z16Render || !z || !z->depth16 ||
         z->lost || z->owner != s->owner || (z->local && z->local != local) ||
-        z->width != s->width || z->height != s->height))) a->ddrval = DDERR_SURFACELOST;
+        z->width < s->width || z->height < s->height))) a->ddrval = DDERR_SURFACELOST;
     else {
         a->ddrval = DDERR_OUTOFMEMORY;
         for (i = 0; lastContext != 0xffffffffUL && i < MaxContexts; ++i) {
@@ -812,7 +829,7 @@ static HRESULT render_surfaces(D7_CONTEXT *c, DD_SLOT **color, DD_SLOT **depth)
     DD_SLOT *s = target(c, c->target, FALSE);
     DD_SLOT *z = c->depth ? target(c, c->depth, FALSE) : NULL;
     if (!s || s->depth16 || (c->depth && (!z || !z->depth16 ||
-        z->width != s->width || z->height != s->height))) return DDERR_SURFACELOST;
+        z->width < s->width || z->height < s->height))) return DDERR_SURFACELOST;
     if (s->locked || (z && z->locked)) return DDERR_SURFACEBUSY;
     *color = s;
     *depth = z;
@@ -1156,6 +1173,8 @@ static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
 {
     ULONG sum, i;
     BOOL attached = FALSE;
+    /* A render target texture is sampled on the host, but never while it is the target. */
+    if (t->image) return t->image == targetId ? 0 : RB2K_TEXTURE_IMAGE | t->image;
     for (i = 0; i < RB2K_DD_SLOTS; ++i) if (t->targets[i] == targetId) attached = TRUE;
     if (t->host && attached && t->tracked && !t->dirty) { ++c->display->d7draw.checksSkipped; return t->host; }
     if (t->host && attached && t->epoch == textureEpoch) return t->host;
@@ -2291,7 +2310,7 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
     if (!b->dwDDSrcSurface) return;
     dst = find_texture(c->local, b->dwDDDestSurface);
     src = find_texture(c->local, b->dwDDSrcSurface);
-    if (!dst || !src || !dst->format || dst->format != src->format || dst->faces != src->faces ||
+    if (!dst || !src || !dst->format || dst->format != src->format || dst->faces != src->faces || dst->image || src->image ||
         dst->owner != c->owner || src->owner != c->owner) { ++d->d7draw.texBltFailures; return; }
     if (right <= left || bottom <= top) { left = top = 0; right = src->width; bottom = src->height; }
     if (left < 0 || top < 0 || (ULONG)right > src->width || (ULONG)bottom > src->height ||
@@ -2905,7 +2924,7 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
                 z = set->hZBuffer ? target(c, set->hZBuffer, TRUE) : NULL;
                 if (!s) ++c->display->d7draw.targetFailures;
                 if (!s || s->depth16 || (set->hZBuffer && (!z || !z->depth16 ||
-                    z->width != s->width || z->height != s->height))) return DDERR_SURFACELOST;
+                    z->width < s->width || z->height < s->height))) return DDERR_SURFACELOST;
                 if ((s->id != c->target || (z ? z->id : 0) != c->depth) && FAILED(finish_scene(c)))
                     return DDERR_SURFACELOST;
                 if (s->id != c->target) c->display->d7draw.targetLog[c->display->d7draw.targets++ & 7] = s->id;

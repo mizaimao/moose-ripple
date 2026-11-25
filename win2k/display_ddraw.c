@@ -83,6 +83,18 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
                     (d->z24s8 && depth_stencil(fmt)));
         return (desc->dwFlags & DDSD_ZBUFFERBITDEPTH) && desc->dwZBufferBitDepth == 16;
     }
+    if ((caps & DDSCAPS_TEXTURE) && (caps & DDSCAPS_3DDEVICE)) {
+        /* A render target texture: a host image that Direct3D draws into
+         * and samples (32-bit, one level). */
+        if (!d->nativeD3D7 || !d->gpuSurfaces || d->mode.BitsPerPlane != 32 ||
+            (caps & ~(DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM)) ||
+            !desc->dwWidth || desc->dwWidth > RB2K_DD_MAX_WIDTH ||
+            !desc->dwHeight || desc->dwHeight > RB2K_DD_MAX_HEIGHT) return FALSE;
+        if (!(desc->dwFlags & DDSD_PIXELFORMAT)) return TRUE;
+        return fmt->dwRGBBitCount == 32 && fmt->dwRBitMask == 0xff0000 && fmt->dwGBitMask == 0xff00 &&
+               fmt->dwBBitMask == 0xff && (fmt->dwFlags == DDPF_RGB ||
+               (fmt->dwFlags == (DDPF_RGB | DDPF_ALPHAPIXELS) && fmt->dwRGBAlphaBitMask == 0xff000000));
+    }
     if ((caps & DDSCAPS_TEXTURE) && !(caps & DDSCAPS_3DDEVICE)) {
         /* A Direct3D texture in runtime-allocated user memory; the native
          * path reads and uploads it at draw time (display_d3d7.c). */
@@ -206,7 +218,7 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
         return rc;
     }
     g = data->lplpSList[0]->lpGbl;
-    if (desc->ddsCaps.dwCaps & DDSCAPS_TEXTURE) {
+    if ((desc->ddsCaps.dwCaps & DDSCAPS_TEXTURE) && !(desc->ddsCaps.dwCaps & DDSCAPS_3DDEVICE)) {
         DDPIXELFORMAT desktop = {0};
         ULONG format = rb_d7_texture_format((desc->dwFlags & DDSD_PIXELFORMAT) ? &desc->ddpfPixelFormat :
                                             &desktop, d->mode.BitsPerPlane);
@@ -329,6 +341,7 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
         slot->stencil = createCode == IOCTL_RB2K_DD_CREATE_Z24S8;
         slot->alpha = !slot->depth16 && (desc->dwFlags & DDSD_PIXELFORMAT) &&
                       (desc->ddpfPixelFormat.dwFlags & DDPF_ALPHAPIXELS);
+        slot->texture = (desc->ddsCaps.dwCaps & DDSCAPS_TEXTURE) != 0;
         g->lPitch = slot_pitch(slot);
         g->dwUserMemSize = g->lPitch * create.height;
         g->fpVidMem = DDHAL_PLEASEALLOC_USERMEM;

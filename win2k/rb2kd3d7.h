@@ -123,6 +123,7 @@ typedef struct {
     /* The last eight DirectDraw locks: caps, size (width << 16 | height),
      * fpVidMem, the address returned (0 when Windows locks it), result. */
     ULONG locks, lockLog[8][5];
+    ULONG targetTextures;               /* render target textures registered */
 } RB2K_D7_DRAWSTATS;
 enum { RB2K_D7_FAIL_RANGE, RB2K_D7_FAIL_VBCAPS, RB2K_D7_FAIL_LINEAR, RB2K_D7_FAIL_ADDRESS,
        RB2K_D7_FAIL_PROBE, RB2K_D7_FAIL_IMMEDIATE, RB2K_D7_FAIL_LENGTH, RB2K_D7_FAIL_OTHER };

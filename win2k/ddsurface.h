@@ -7,7 +7,9 @@
 #define RB2K_DD_MAX_WIDTH 1680UL
 #define RB2K_DD_MAX_HEIGHT 1200UL
 #define RB2K_DD_MAX_BYTES (RB2K_DD_MAX_WIDTH * RB2K_DD_MAX_HEIGHT * 4)
-#define RB2K_DD_SLOTS 4
+/* Host images at once: render targets (a full-screen chain takes two),
+ * depth buffers and render target textures. Each is a virgl context. */
+#define RB2K_DD_SLOTS 16
 #define RB2K_DD_HOST_SURFACES 1
 #define RB2K_DD_NATIVE_D3D7 2
 #define RB2K_DD_Z16_STORAGE 4
@@ -175,6 +177,9 @@ typedef struct {
  * id zero when the host cannot sample that format). */
 /* faces: 1, or 6 for a cube map (square), face 0..5 in Direct3D's order. */
 typedef struct { ULONG id, target, width, height, y, rows, levels, level, format, face, faces; } RB2K_D3D7_TEXTURE;
+/* A texture id in a draw record with this bit names an image instead: a
+ * render target texture, sampled as it is on the host. */
+#define RB2K_TEXTURE_IMAGE 0x40000000UL
 #define RB2K_D7_BLOCKS_DXT1 1
 #define RB2K_D7_BLOCKS_DXT3 2
 #define RB2K_D7_BLOCKS_DXT5 3

@@ -170,13 +170,32 @@ static VP_STATUS present(RB2K_GPU *gpu, const RB2K_IMAGE *image, const RB2K_DD_P
     return NO_ERROR;
 }
 
+/* A texture id naming an image (a render target texture): the image's
+ * resource seen as a texture of one level, attached to the target's context.
+ * Its own draws are submitted first, as a frame for another target. */
+static RB2K_TEXTURE *image_texture(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K_IMAGE *target, ULONG id,
+                                   RB2K_TEXTURE *alias)
+{
+    RB2K_IMAGE *source = find_image(gpu, id & ~RB2K_TEXTURE_IMAGE);
+    if (!source || source == target || source->depth16 || source->frameFailed) return NULL;
+    if (!rb_gpu_image_attach(gpu, result, source, target) ||
+        (gpu->d7Frame.target == source && !rb_gpu_frame_flush(gpu, result))) return NULL;
+    VideoPortZeroMemory(alias, sizeof(*alias));
+    alias->id = source->id;
+    alias->width = source->width;
+    alias->height = source->height;
+    alias->levels = alias->faces = 1;
+    ++gpu->imageSamples;
+    return alias;
+}
+
 /* One native draw to the image: validate it, find its depth buffer and
  * textures, and queue its commands. length is the record's byte count. */
 static BOOLEAN draw_one(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image,
                         const RB2K_D3D7_DRAW *d, ULONG length, VP_STATUS *status)
 {
     RB2K_IMAGE *depth = NULL;
-    RB2K_TEXTURE *texture = NULL, *texture1 = NULL;
+    RB2K_TEXTURE *texture = NULL, *texture1 = NULL, alias[2];
     ULONG i, header = FIELD_OFFSET(RB2K_D3D7_DRAW, vertices);
     *status = ERROR_INVALID_PARAMETER;
     if (length < header || !d->count || d->count > RB2K_D3D7_VERTICES || d->count % 3 ||
@@ -192,6 +211,12 @@ static BOOLEAN draw_one(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *imag
         ULONG j;
         RB2K_TEXTURE *t;
         if (!rb_gpu_d7_samples(d, i)) continue;
+        if ((i ? d->texture1 : d->texture) & RB2K_TEXTURE_IMAGE) {
+            t = image_texture(gpu, result, image, i ? d->texture1 : d->texture, &alias[i]);
+            if (!t) return FALSE;
+            if (i) texture1 = t; else texture = t;
+            continue;
+        }
         t = rb_gpu_texture(gpu, i ? d->texture1 : d->texture);
         if (!t) return FALSE;
         /* The display DLL attaches a texture when it uploads it here. */
@@ -232,7 +257,7 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
                          const RB2K_D3D8_DRAW *d, ULONG length, VP_STATUS *status)
 {
     RB2K_IMAGE *depth = NULL;
-    RB2K_TEXTURE *textures[RB2K_D8_STAGES];
+    RB2K_TEXTURE *textures[RB2K_D8_STAGES], alias[RB2K_D8_STAGES];
     ULONG i, program, vertex = 0, header = FIELD_OFFSET(RB2K_D3D8_DRAW, vertices), words = 0;
     *status = ERROR_INVALID_PARAMETER;
     if (length >= header) {
@@ -266,6 +291,11 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
         RB2K_TEXTURE *t;
         textures[i] = NULL;
         if (!(gpu->programs[program].samplers & (1UL << i))) continue;
+        if (d->textures[i] & RB2K_TEXTURE_IMAGE) {
+            textures[i] = image_texture(gpu, result, image, d->textures[i], &alias[i]);
+            if (!textures[i]) return refuse(gpu, RB2K_D7_SITE_TEXTURE, *status, 32 + i);
+            continue;
+        }
         t = rb_gpu_texture(gpu, d->textures[i]);
         if (!t) return refuse(gpu, RB2K_D7_SITE_TEXTURE, *status, i);
         for (j = 0; j < RB2K_DD_SLOTS && t->contexts[j] != image->id; ++j) {}
