@@ -114,6 +114,15 @@ typedef struct {
     ULONG blockUploads;                 /* compressed textures sent as blocks for the host to decode */
     ULONG blockStatus;                  /* the last failure status of such an upload */
     ULONG cubeTextures;                 /* cube maps registered */
+    /* Full-screen chains: flips, those that showed a drawn image, chain
+     * front images made, blits touching a chain surface; the last eight flips
+     * (current and target page offsets, their image ids, result) and render
+     * target changes (image id). */
+    ULONG flips, flipPresents, chainFronts, chainBacks, chainBlts, flipLog[8][5], targets, targetLog[8];
+    ULONG targetFailures;               /* render targets set by a handle no image has */
+    /* The last eight DirectDraw locks: caps, size (width << 16 | height),
+     * fpVidMem, the address returned (0 when Windows locks it), result. */
+    ULONG locks, lockLog[8][5];
 } RB2K_D7_DRAWSTATS;
 enum { RB2K_D7_FAIL_RANGE, RB2K_D7_FAIL_VBCAPS, RB2K_D7_FAIL_LINEAR, RB2K_D7_FAIL_ADDRESS,
        RB2K_D7_FAIL_PROBE, RB2K_D7_FAIL_IMMEDIATE, RB2K_D7_FAIL_LENGTH, RB2K_D7_FAIL_OTHER };

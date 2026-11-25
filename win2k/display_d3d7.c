@@ -528,10 +528,11 @@ static DWORD APIENTRY register_surface(PDD_CREATESURFACEEXDATA a)
     EngAcquireSemaphore(d->ddLock);
     ++d->d7.surfaceCalls;
     slot = rb_dd_slot(d, l->lpGbl);
+    if (!slot && d->nativeD3D7 && rb_dd_chain_front(d, l)) slot = rb_dd_chain_front_slot(d, l);
     /* DirectDraw registers a 3D-tagged window primary before it will blit
      * to it. Its storage is the scanout mapping. Only offscreen targets
      * need a host image and a Direct3D surface handle. */
-    if (!slot && d->nativeD3D7 && rb_dd_mapped_primary(d, l))
+    if (!slot && d->nativeD3D7 && (rb_dd_mapped_primary(d, l) || rb_dd_chain_front(d, l)))
         a->ddRVal = a->dwFlags ? DDERR_UNSUPPORTED : DD_OK;
     else if (!d->ddEnabled || !slot || slot->lost || slot->owner != EngGetCurrentProcessId())
         a->ddRVal = DDERR_SURFACELOST;
@@ -542,6 +543,20 @@ static DWORD APIENTRY register_surface(PDD_CREATESURFACEEXDATA a)
     else {
         slot->local = a->lpDDLcl;
         slot->d3dHandle = l->lpSurfMore->dwSurfaceHandle;
+        if (slot->chain) {
+            /* Direct3D registers only the front of a full-screen chain; the
+             * back buffer hangs off it and has a handle of its own. */
+            PDD_ATTACHLIST at;
+            for (at = l->lpAttachList; at; at = at->lpLink) {
+                PDD_SURFACE_LOCAL b = at->lpAttached;
+                DD_SLOT *bs = b ? rb_dd_slot(d, b->lpGbl) : NULL;
+                if (!bs || !bs->chain || bs == slot || !b->lpSurfMore || !b->lpSurfMore->dwSurfaceHandle ||
+                    (bs->local && bs->local != a->lpDDLcl)) continue;
+                bs->local = a->lpDDLcl;
+                bs->d3dHandle = b->lpSurfMore->dwSurfaceHandle;
+                ++d->d7draw.chainBacks;
+            }
+        }
     }
     EngReleaseSemaphore(d->ddLock);
     return DDHAL_DRIVER_HANDLED;
@@ -2888,10 +2903,12 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             for (; n; --n, ++set) {
                 s = target(c, set->hRenderTarget, TRUE);
                 z = set->hZBuffer ? target(c, set->hZBuffer, TRUE) : NULL;
+                if (!s) ++c->display->d7draw.targetFailures;
                 if (!s || s->depth16 || (set->hZBuffer && (!z || !z->depth16 ||
                     z->width != s->width || z->height != s->height))) return DDERR_SURFACELOST;
                 if ((s->id != c->target || (z ? z->id : 0) != c->depth) && FAILED(finish_scene(c)))
                     return DDERR_SURFACELOST;
+                if (s->id != c->target) c->display->d7draw.targetLog[c->display->d7draw.targets++ & 7] = s->id;
                 c->target = s->id;
                 c->depth = z ? z->id : 0;
             }

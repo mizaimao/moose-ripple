@@ -122,14 +122,16 @@ static VP_STATUS present(RB2K_GPU *gpu, const RB2K_IMAGE *image, const RB2K_DD_P
     BOOLEAN solid = !image->defined || image->uniform;
     ULONG span[64], offset, y;
     const ULONG segmentPixels = RB2K_SEGMENT_BYTES / sizeof(ULONG);
+    ULONG rows;     /* in the whole mapping: a flip chain's second page lies below the first */
     if (primary->bitsPerPixel != 32 || !primary->pixels || !primary->height || !primary->width ||
         primary->pitchPixels < primary->width ||
         primary->pitchPixels > primary->bytes / sizeof(ULONG) / primary->height)
         return ERROR_NOT_READY;
+    rows = primary->bytes / sizeof(ULONG) / primary->pitchPixels;
     if (!p->width || !p->height || p->width > image->width || p->height > image->height ||
         p->srcX > image->width - p->width || p->srcY > image->height - p->height ||
         p->width > primary->width || p->height > primary->height ||
-        p->dstX > primary->width - p->width || p->dstY > primary->height - p->height)
+        p->dstX > primary->width - p->width || p->dstY > rows - p->height)
         return ERROR_INVALID_PARAMETER;
     if (solid) {
         ULONG i, color = image->defined ? image->color : 0;
