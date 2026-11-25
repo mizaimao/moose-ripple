@@ -531,7 +531,10 @@ static DWORD APIENTRY register_surface(PDD_CREATESURFACEEXDATA a)
         EngReleaseSemaphore(registry);
         return DDHAL_DRIVER_HANDLED;
     }
-    if ((l->ddsCaps.dwCaps & (DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE)) == DDSCAPS_TEXTURE) {
+    /* Textures, including render target textures (whose image is also a
+     * target: register_texture gives it its handle). */
+    if ((l->ddsCaps.dwCaps & DDSCAPS_TEXTURE) &&
+        (!(l->ddsCaps.dwCaps & DDSCAPS_3DDEVICE) || rb_dd_slot(d, l->lpGbl))) {
         EngAcquireSemaphore(registry);
         EngAcquireSemaphore(d->ddLock);
         ++d->d7.surfaceCalls;
@@ -1169,6 +1172,13 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
 
 /* The host texture for this draw, checked once a scene. The miniport
  * attaches a texture to the target it is uploaded for. */
+/* Why a texture cannot be used for a draw (counted in d7draw.texSkips). */
+static void texture_skip(D7_CONTEXT *c, const D7_TEXTURE *t, ULONG targetId)
+{
+    ULONG why = !t ? 0 : !t->format || t->owner != c->owner ? 1 : t->image && t->image == targetId ? 2 : 3;
+    ++c->display->d7draw.texSkips[why];
+}
+
 static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
 {
     ULONG sum, i;
@@ -1465,13 +1475,14 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     if (needTexture) {
         tex = find_texture(c->local, st->texture);
         if (!tex || !tex->format || tex->owner != c->owner || tex->faces != 1) {
+            texture_skip(c, tex, s->id);
             skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives);
             return DD_OK;
         }
         if (tex->mipmaps && tex->levels == 1 && st->mipFilter != D3DTFP_NONE)
             d->d7draw.ignored[RB2K_D7_IGNORED_MIPMAP] += p->primitives;
         draw->texture = texture_ready(c, tex, s->id);
-        if (!draw->texture) { skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives); return DD_OK; }
+        if (!draw->texture) { texture_skip(c, tex, s->id); skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives); return DD_OK; }
     }
     if (needTexture1) {
         tex1 = find_texture(c->local, st1->texture);
@@ -1902,6 +1913,7 @@ static BOOL pixel_states(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, const D8_SHADER *s
         if (!(sh->samplers & (1UL << k))) continue;
         tex = find_texture(c->local, st->texture);
         if (!tex || !tex->format || tex->owner != c->owner || !(draw->textures[k] = texture_ready(c, tex, s->id))) {
+            texture_skip(c, tex, s->id);
             skip(c, RB2K_D7_SKIP_TEXTURE, primitives);
             return FALSE;
         }
