@@ -946,7 +946,11 @@ static int vertex_instruction(PS *s, unsigned int op, const unsigned int *p, uns
         return 1;
     case 25: case 26: case 27: case 28: case 29: case 30:    /* call, callnz, loop, ret, endloop, label */
     case 38: case 39: case 40: case 41: case 42: case 43: case 44: case 45:   /* rep .. breakc */
-        return fail(s, RbPsOpcode, op);                       /* flow control: not yet */
+        /* Flow control cannot run here: for a driver of the Direct3D 8
+         * interface the Direct3D 9 runtime removes defi and defb from the
+         * code and passes no integer or boolean constants, so loop counts
+         * and branch conditions are unknown (if_comp and break are vs_2_x). */
+        return fail(s, RbPsOpcode, op);
     }
     return -1;
 }

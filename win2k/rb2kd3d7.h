@@ -97,7 +97,7 @@ typedef struct {
      * translator's codes; 7 counts other failures), the token behind the
      * last refusal, and pixel shader draw records queued. */
     ULONG psCreated, psFailed[8], psLastDetail, psDraws;
-    /* Vertex shaders created, and the first four: handle, declaration and
+    /* Vertex shaders created, and the last four (by creation count modulo 4): handle, declaration and
      * code bytes, then the first 45 words of declaration and code. */
     ULONG vsCreated, vsLog[4][48];
     /* Vertex programs made, shaders refused by reason, the token behind the

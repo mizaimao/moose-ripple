@@ -26,9 +26,9 @@ int main(void)
     for (i = 0; i < RB2K_D7_SKIPS; ++i) printf(" %s=%lu", skips[i], s.skipped[i]);
     printf(" ignored");
     for (i = 0; i < RB2K_D7_IGNORED; ++i) printf(" %s=%lu", ignored[i], s.ignored[i]);
-    printf("\nD7DRAW textures_by_format none=%lu argb8888=%lu xrgb8888=%lu rgb565=%lu argb1555=%lu xrgb1555=%lu argb4444=%lu video=%lu texblts=%lu texblt_failures=%lu\n",
+    printf("\nD7DRAW textures_by_format none=%lu argb8888=%lu xrgb8888=%lu rgb565=%lu argb1555=%lu xrgb1555=%lu argb4444=%lu compressed=%lu video=%lu texblts=%lu texblt_failures=%lu\n",
            s.registered[0], s.registered[1], s.registered[2], s.registered[3], s.registered[4],
-           s.registered[5], s.registered[6], s.videoTextures, s.texBlts, s.texBltFailures);
+           s.registered[5], s.registered[6], s.registered[7], s.videoTextures, s.texBlts, s.texBltFailures);
     printf("D7DRAW dp2_calls=%lu dp2_failures=%lu last_failure=%08lx last_failure_op=%lu draw_failures=%lu",
            s.dp2Calls, s.dp2Failures, s.lastFailure, s.lastFailureOp, s.drawFailures);
     printf("\nD7DRAW opcodes");

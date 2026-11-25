@@ -274,6 +274,9 @@ ULONG rb_d7_texture_format(const DDPIXELFORMAT *f, ULONG desktopBits)
         case RbFmtX1R5G5B5: return TexXrgb1555;
         case RbFmtA1R5G5B5: return TexArgb1555;
         case RbFmtA4R4G4B4: return TexArgb4444;
+        case RbFmtDxt1: return TexDxt1;
+        case RbFmtDxt2: case RbFmtDxt3: return TexDxt3;
+        case RbFmtDxt4: case RbFmtDxt5: return TexDxt5;
         }
         return TexNone;
     }
@@ -295,6 +298,18 @@ ULONG rb_d7_texture_format(const DDPIXELFORMAT *f, ULONG desktopBits)
 ULONG rb_d7_texel_bytes(ULONG format)
 {
     return format == TexArgb8888 || format == TexXrgb8888 ? 4 : 2;
+}
+
+static BOOL compressed(ULONG format) { return format >= TexDxt1 && format <= TexDxt5; }
+
+ULONG rb_d7_row_bytes(ULONG format, ULONG width)
+{
+    return compressed(format) ? (width + 3) / 4 * (format == TexDxt1 ? 8 : 16) : width * rb_d7_texel_bytes(format);
+}
+
+ULONG rb_d7_rows(ULONG format, ULONG height)
+{
+    return compressed(format) ? (height + 3) / 4 : height;
 }
 
 /* Record or forget a texture. System memory belongs to the application;
@@ -354,10 +369,10 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
     }
     if (l->lpSurfMore && (l->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_TEXTUREMANAGE)) ++d->d7draw.regManaged;
     if (!t->width || t->width > RB2K_D7_TEXTURE_SIDE || !t->height || t->height > RB2K_D7_TEXTURE_SIDE ||
-        t->pitch < t->width * rb_d7_texel_bytes(t->format))
+        t->pitch < rb_d7_row_bytes(t->format, t->width))
         t->format = TexNone;
     ++d->d7draw.textures;
-    ++d->d7draw.registered[t->format];
+    ++d->d7draw.registered[t->format < 7 ? t->format : 7];   /* 7: compressed */
     if (!(l->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY)) ++d->d7draw.videoTextures;
 }
 
@@ -817,10 +832,10 @@ static ULONG level_side(ULONG size, ULONG level) { return size >> level ? size >
 
 static BOOL read_texels(D7_TEXTURE *t, ULONG *sum)
 {
-    ULONG bpp = rb_d7_texel_bytes(t->format), bytes = 0, level, y, i, h = 0x811c9dc5;
+    ULONG bytes = 0, level, y, i, h = 0x811c9dc5;
     BYTE *out;
     for (level = 0; level < t->levels; ++level)
-        bytes += level_side(t->width, level) * bpp * level_side(t->height, level);
+        bytes += rb_d7_row_bytes(t->format, level_side(t->width, level)) * rb_d7_rows(t->format, level_side(t->height, level));
     if (bytes > texelScratchBytes) {
         if (texelScratch) EngFreeMem(texelScratch);
         texelScratch = EngAllocMem(0, bytes, 'r7bR');
@@ -830,7 +845,8 @@ static BOOL read_texels(D7_TEXTURE *t, ULONG *sum)
     out = texelScratch;
     __try {
         for (level = 0; level < t->levels; ++level) {
-            ULONG row = level_side(t->width, level) * bpp, rows = level_side(t->height, level);
+            ULONG row = rb_d7_row_bytes(t->format, level_side(t->width, level));
+            ULONG rows = rb_d7_rows(t->format, level_side(t->height, level));
             const BYTE *in = (const BYTE *)t->levelAddress[level];
             if (t->levelPitch[level] < row) return FALSE;
             EngProbeForRead((PVOID)in, t->levelPitch[level] * (rows - 1) + row, 1);
@@ -842,15 +858,103 @@ static BOOL read_texels(D7_TEXTURE *t, ULONG *sum)
     return TRUE;
 }
 
+/* The colours of a DXT colour block: two RGB565 ends and two between them,
+ * or one between and transparent black when the first end is not above the
+ * second (DXT1 only: four colours selects the four-colour form). */
+static void block_colors(const BYTE *b, BOOL four, ULONG *c)
+{
+    ULONG c0 = b[0] | b[1] << 8, c1 = b[2] | b[3] << 8, k, e[2][3];
+    e[0][0] = expand(c0 >> 11, 5); e[0][1] = expand((c0 >> 5) & 63, 6); e[0][2] = expand(c0 & 31, 5);
+    e[1][0] = expand(c1 >> 11, 5); e[1][1] = expand((c1 >> 5) & 63, 6); e[1][2] = expand(c1 & 31, 5);
+    c[0] = 0xff000000 | e[0][0] << 16 | e[0][1] << 8 | e[0][2];
+    c[1] = 0xff000000 | e[1][0] << 16 | e[1][1] << 8 | e[1][2];
+    if (four || c0 > c1) {
+        c[2] = c[3] = 0xff000000;
+        for (k = 0; k < 3; ++k) {
+            c[2] |= ((2 * e[0][k] + e[1][k]) / 3) << (16 - 8 * k);
+            c[3] |= ((e[0][k] + 2 * e[1][k]) / 3) << (16 - 8 * k);
+        }
+    } else {
+        c[2] = 0xff000000;
+        for (k = 0; k < 3; ++k) c[2] |= ((e[0][k] + e[1][k]) / 2) << (16 - 8 * k);
+        c[3] = 0;
+    }
+}
+
+/* Decode one level of 4x4 blocks into width x height ARGB texels. */
+static void decode_level(ULONG format, const BYTE *in, ULONG width, ULONG height, ULONG *out)
+{
+    ULONG bx, by, x, y, step = format == TexDxt1 ? 8 : 16;
+    for (by = 0; by < (height + 3) / 4; ++by)
+        for (bx = 0; bx < (width + 3) / 4; ++bx, in += step) {
+            const BYTE *colour = format == TexDxt1 ? in : in + 8;
+            ULONG c[4], a[8], bits = colour[4] | colour[5] << 8 | colour[6] << 16 | (ULONG)colour[7] << 24, k;
+            block_colors(colour, format != TexDxt1, c);
+            if (format == TexDxt5) {
+                a[0] = in[0]; a[1] = in[1];
+                if (a[0] > a[1]) for (k = 1; k < 7; ++k) a[k + 1] = ((7 - k) * a[0] + k * a[1]) / 7;
+                else {
+                    for (k = 1; k < 5; ++k) a[k + 1] = ((5 - k) * a[0] + k * a[1]) / 5;
+                    a[6] = 0; a[7] = 255;
+                }
+            }
+            for (y = 0; y < 4; ++y)
+                for (x = 0; x < 4; ++x) {
+                    ULONG i = 4 * y + x, texel = c[(bits >> (2 * i)) & 3];
+                    if (bx * 4 + x >= width || by * 4 + y >= height) continue;
+                    if (format == TexDxt3) texel = (texel & 0xffffff) | expand((in[i / 2] >> (4 * (i & 1))) & 15, 4) << 24;
+                    else if (format == TexDxt5) {
+                        ULONG at = 16 + 3 * i, index = ((in[at / 8] | in[at / 8 + 1] << 8) >> (at % 8)) & 7;
+                        texel = (texel & 0xffffff) | a[index] << 24;
+                    }
+                    out[(by * 4 + y) * width + bx * 4 + x] = texel;
+                }
+        }
+}
+
+static BYTE *decodeScratch;
+static ULONG decodeScratchBytes;
+
+/* Every level of a compressed texture from the scratch buffer, decoded. */
+static BOOL decode_texture(const D7_TEXTURE *t)
+{
+    ULONG bytes = 0, level;
+    const BYTE *in = texelScratch;
+    ULONG *out;
+    for (level = 0; level < t->levels; ++level) bytes += level_side(t->width, level) * level_side(t->height, level) * 4;
+    if (bytes > decodeScratchBytes) {
+        if (decodeScratch) EngFreeMem(decodeScratch);
+        decodeScratch = EngAllocMem(0, bytes, 'x7bR');
+        decodeScratchBytes = decodeScratch ? bytes : 0;
+        if (!decodeScratch) return FALSE;
+    }
+    out = (ULONG *)decodeScratch;
+    for (level = 0; level < t->levels; ++level) {
+        ULONG w = level_side(t->width, level), h = level_side(t->height, level);
+        decode_level(t->format, in, w, h, out);
+        in += rb_d7_row_bytes(t->format, w) * rb_d7_rows(t->format, h);
+        out += w * h;
+    }
+    return TRUE;
+}
+
 static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
 {
     RB2K_D3D7_TEXTURE *packet = (RB2K_D3D7_TEXTURE *)uploadScratch;
-    ULONG id = t->host, tries, bpp = rb_d7_texel_bytes(t->format), total = 0;
+    ULONG id = t->host, tries, format = t->format, bpp, total = 0;
     ULONG *out = (ULONG *)(packet + 1);
+    const BYTE *texels = texelScratch;
     if (!packet || t->width * 4 > RB2K_D7_UPLOAD_BYTES) return FALSE;
+    if (compressed(format)) {
+        /* Decoded here: the host gets the texels as ARGB. */
+        if (!decode_texture(t)) return FALSE;
+        texels = decodeScratch;
+        format = TexArgb8888;
+    }
+    bpp = rb_d7_texel_bytes(format);
     for (tries = 0; tries < 2; ++tries) {
         BOOL ok = TRUE;
-        const BYTE *src = texelScratch;
+        const BYTE *src = texels;
         ULONG level;
         total = 0;
         for (level = 0; ok && level < t->levels; ++level) {
@@ -860,7 +964,7 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
                 ULONG rows = min(chunk, height - y), x, r, newId = 0;
                 for (r = 0; r < rows; ++r, src += width * bpp)
                     for (x = 0; x < width; ++x)
-                        out[r * width + x] = convert(t->format, bpp == 4 ? ((const ULONG *)src)[x] :
+                        out[r * width + x] = convert(format, bpp == 4 ? ((const ULONG *)src)[x] :
                                                                          ((const USHORT *)src)[x]);
                 packet->id = level || y ? id : t->host;
                 packet->target = targetId;
@@ -2012,6 +2116,10 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
         b->pDest.x < 0 || b->pDest.y < 0 || (ULONG)(b->pDest.x + right - left) > dst->width ||
         (ULONG)(b->pDest.y + bottom - top) > dst->height) { ++d->d7draw.texBltFailures; return; }
     bpp = rb_d7_texel_bytes(src->format);
+    if (compressed(src->format) && (left % 4 || top % 4 || b->pDest.x % 4 || b->pDest.y % 4)) {
+        ++d->d7draw.texBltFailures;   /* only whole blocks */
+        return;
+    }
     __try {
         /* Mipmapped textures copy the matching rectangle of each level both have. */
         ULONG level, levels = min(src->levels, dst->levels);
@@ -2026,6 +2134,13 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
                 dx + x1 - x0 > level_side(dst->width, level) || dy + y1 - y0 > level_side(dst->height, level)) break;
             rows = y1 - y0;
             bytes = (x1 - x0) * bpp;
+            if (compressed(src->format)) {
+                /* In 4x4 blocks: positions are whole blocks (levels below them start at 0). */
+                x0 /= 4; y0 /= 4; dx /= 4; dy /= 4;
+                rows = rb_d7_rows(src->format, y1 - y0 * 4);
+                bytes = rb_d7_row_bytes(src->format, x1 - x0 * 4);
+                bpp = src->format == TexDxt1 ? 8 : 16;
+            }
             from = (const BYTE *)src->levelAddress[level] + y0 * src->levelPitch[level] + x0 * bpp;
             to = (BYTE *)dst->levelAddress[level] + dy * dst->levelPitch[level] + dx * bpp;
             EngProbeForRead((PVOID)from, (rows - 1) * src->levelPitch[level] + bytes, 1);
@@ -2735,8 +2850,8 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             for (k = 0, used = 0; k < n; ++k) {
                 const RB_DP2_CREATE_VERTEX_SHADER *r = (const RB_DP2_CREATE_VERTEX_SHADER *)(p + used);
                 RB2K_D7_DRAWSTATS *st = &c->display->d7draw;
-                if (st->vsCreated < 4) {
-                    ULONG *log = st->vsLog[st->vsCreated], words = (r->declBytes + r->codeBytes) / 4;
+                {   /* the last four */
+                    ULONG *log = st->vsLog[st->vsCreated % 4], words = (r->declBytes + r->codeBytes) / 4;
                     log[0] = r->handle; log[1] = r->declBytes; log[2] = r->codeBytes;
                     RtlCopyMemory(log + 3, p + used + sizeof(*r), min(words, 45UL) * 4);
                 }
@@ -3009,6 +3124,8 @@ static const ULONG d8Formats[][2] = {
     { RbFmtX1R5G5B5, RbFormatTexture },
     { RbFmtA1R5G5B5, RbFormatTexture },
     { RbFmtA4R4G4B4, RbFormatTexture },
+    { RbFmtDxt1, RbFormatTexture }, { RbFmtDxt2, RbFormatTexture }, { RbFmtDxt3, RbFormatTexture },
+    { RbFmtDxt4, RbFormatTexture }, { RbFmtDxt5, RbFormatTexture },
     { RbFmtD16, RbFormatZStencil }      /* last: only with depth rendering */
 };
 

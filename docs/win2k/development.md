@@ -1828,3 +1828,20 @@ DirectQ cannot run without hardware vertex shaders. 3DMark03 starts but
 refuses every game test: it needs cube textures, DXT1 and DXT3 compressed
 textures, a back buffer with alpha and a stencil buffer, none of which the
 device offers yet.
+
+## DXT compressed textures
+
+Direct3D 8 and 9 programs can create DXT1 to DXT5 textures. The device
+reports the five DXT FourCC codes and lists them as texture formats. A
+compressed level holds rows of 4x4 blocks: that is the pitch the driver
+gives video-memory levels, and how it reads them back. Before each upload
+the display driver decodes every level to ARGB with integer arithmetic,
+so the host needs no compressed formats. DXT2 and DXT4 decode as DXT3 and
+DXT5. Texture blits copy whole blocks.
+
+On XP SP3 under KVM on the Intel UHD 630 host, three new `d9pixels` cases
+draw a DXT1 texture with four solid blocks and one interpolated block,
+and show the alpha of a DXT3 and a DXT5 block as grey. All passed, with
+`d9pixels` at 34 of 34 with hardware vertex processing and 41 of 41 with
+software vertex processing. `d8pixels` (23 of 23), the Direct3D 7 checks
+and Direct3D 8 Quake (58.6 fps) were unchanged.
