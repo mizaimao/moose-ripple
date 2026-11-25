@@ -1868,3 +1868,44 @@ KVM on the Intel UHD 630 host (which samples DXT1, DXT3 and DXT5):
 
 `d9pixels`, including its DXT cases, passed all 34 cases on both paths.
 In a guest whose processor is emulated the difference is larger still.
+
+## Stencil, 24-bit depth and render targets with alpha
+
+Depth buffers can now have 24 bits of depth with 8 of stencil: Direct3D 8
+and 9 list D24S8 and D24X8 next to D16, and Direct3D 7 enumerates a 32-bit
+depth buffer with stencil. The host keeps them as S8_UINT_Z24_UNORM (the
+byte order of D24S8); the host's renderer here does not know the other
+order, Z24_UNORM_S8_UINT, and reports it as an unknown format. These
+buffers are not read by the processor (Direct3D does not offer locking
+them either).
+
+The stencil render states (enable, comparison, reference, read and write
+masks, and the fail, depth-fail and pass operations) travel with each draw
+of every path: fixed-function, pixel shader and vertex shader draws. The
+miniport puts them in the depth-stencil object, both faces alike (the
+one-sided stencil of Direct3D 7 to 9), and sets the reference value apart.
+Clears take the stencil value too. Draws with stencil on used to be
+skipped; now only a stencil test without a stencil buffer is ignored, as
+in Direct3D, where it always passes.
+
+A render target may keep alpha: an A8R8G8B8 back buffer is accepted over
+the X8R8G8B8 desktop. The host image always stored alpha; what changes is
+blending. Destination alpha, its inverse and the saturated source alpha
+now use the stored value on such targets, while targets without alpha
+keep Direct3D's rule that destination alpha reads as one.
+
+On XP SP3 under KVM on the Intel UHD 630 host, the new `d9stencil` draws
+through the Direct3D 9 hardware device with each back buffer and depth
+buffer: it marks an area in the stencil and draws only there, clears the
+stencil and draws everywhere, counts two passes with INCRSAT, blends with
+the back buffer's alpha, and tests depth on the 24-bit buffer.
+
+| Back buffer, depth buffer | Result |
+| --- | --- |
+| X8R8G8B8, D16 | 2 of 2 (destination alpha reads as one) |
+| X8R8G8B8, D24S8 | 5 of 5 |
+| A8R8G8B8, D16 | 2 of 2 (destination alpha from the clear) |
+| A8R8G8B8, D24S8 | 5 of 5 |
+
+`d9pixels` (34 of 34), `d8pixels` (23 of 23), the Direct3D 7 checks and
+Direct3D 8 Quake (58.7 fps) were unchanged.
