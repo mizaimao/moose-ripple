@@ -89,6 +89,18 @@ int main(void)
         for (k = 0; k < words && k < 45; ++k) printf("%s%lx", k ? "," : "", s.vsLog[i][3 + k]);
         printf("\n");
     }
+    for (i = 0; i < s.psLogCount && i < 6; ++i) {
+        ULONG k, words = s.psLog[i][1] / 4;
+        printf("D8PSLOG %lu handle=%lx bytes=%lu w=", i, s.psLog[i][0], s.psLog[i][1]);
+        for (k = 0; k < words && k < 42; ++k) printf("%s%lx", k ? "," : "", s.psLog[i][2 + k]);
+        printf("\n");
+    }
+    printf("D8STATESET begin=%lu end=%lu delete=%lu execute=%lu capture=%lu create=%lu other=%lu failures=%lu\n",
+           s.stateSets[0], s.stateSets[1], s.stateSets[2], s.stateSets[3], s.stateSets[4], s.stateSets[5], s.stateSets[6],
+           s.blockFailures);
+    for (i = 0; i < s.comboCount && i < 24; ++i)
+        printf("D8COMBO vs=%lx ps=%lx blend=%lx alphatest=%lx fog=%lx depth=%lx calls=%lu\n", s.combos[i][0],
+               s.combos[i][1], s.combos[i][2], s.combos[i][3], s.combos[i][4], s.combos[i][5], s.combos[i][6]);
     if (s.d8LogCount) {
         printf("D8GDI2");
         for (i = 0; i < s.d8LogCount && i < 24; ++i) printf(" %lx/%lu", s.d8Log[i][0], s.d8Log[i][1]);

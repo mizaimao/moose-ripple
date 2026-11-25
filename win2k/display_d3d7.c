@@ -59,6 +59,11 @@ typedef struct {
  * words a stage, then specular and fog), its program and what it samples. */
 enum { StagePrograms = 8, StageKey = 7 * 8 + 2 };
 typedef struct { ULONG key[StageKey], program, samplers; } D8_STAGE_PROGRAM;
+/* A state block: the state commands recorded between STATESETBEGIN and
+ * STATESETEND (or made from the current state by STATESETCREATE), replayed
+ * by STATESETEXECUTE and refreshed from the current state by CAPTURE. */
+enum { MaxStateBlocks = 256, RenderStates = 256, StageStates = 33 };
+typedef struct { ULONG handle, bytes, capacity; BYTE *data; } D8_STATEBLOCK;
 typedef char vs_layout_match[RB_VS_CONST_BASE == RB2K_D8_VS_CONST_BASE && RB_VS_CONSTANTS == RB2K_D8_VS_CONSTANTS &&
                              4 * RB_VS_VERTEX_CONSTANTS == RB2K_D8_VS_VERTEX_WORDS && RB_VS_VERTICES == RB2K_D8_VERTICES ? 1 : -1];
 typedef char fog_codes_match[RB_PS_FOG_ALPHA == RB2K_D7_FOG_ALPHA && RB_PS_FOG_VERTEX == RB2K_D7_FOG_VERTEX &&
@@ -100,6 +105,11 @@ typedef struct {
     ULONG vsConst[RB_VS_CONSTANTS][4];   /* vertex shader constants */
     D8_STAGE_PROGRAM stagePrograms[StagePrograms];
     ULONG stageNext;
+    /* Every render and texture stage state as last set, for state blocks;
+     * the block being recorded (its handle) and the blocks. */
+    ULONG rs[RenderStates], rsSet[RenderStates / 32], tss[TextureStages][StageStates], tssSet[TextureStages];
+    ULONG recording, replaying;
+    D8_STATEBLOCK *blocks;
     RB2K_D3D8_DRAW draw8;       /* the pixel shader batch being filled */
     D7_STAGE stages[TextureStages];
 } D7_CONTEXT;
@@ -134,6 +144,7 @@ typedef struct {
 } D8_BUFFER;
 
 static void release_shaders(D7_CONTEXT *c);
+static void release_blocks(D7_CONTEXT *c);
 static HSEMAPHORE registry;
 static D8_BUFFER *buffers;
 static WORD *indexScratch;      /* indices copied out of the process before use */
@@ -1427,6 +1438,7 @@ static void release_shaders(D7_CONTEXT *c)
         if (c->stagePrograms[i].program)
             request(c->display, IOCTL_RB2K_D3D8_PROGRAM_FREE, &c->stagePrograms[i].program, sizeof(ULONG), NULL, 0);
     RtlZeroMemory(c->stagePrograms, sizeof(c->stagePrograms));
+    release_blocks(c);
 }
 
 /* The pixel program for the current texture stages, specular and fog;
@@ -1541,6 +1553,11 @@ static void create_shader(D7_CONTEXT *c, ULONG handle, const BYTE *code, ULONG b
     RB_PS_INFO info;
     ULONG i;
     if (sh) release_shader(c, sh);
+    if (s->psLogCount < 6) {
+        ULONG *log = s->psLog[s->psLogCount++];
+        log[0] = handle; log[1] = bytes;
+        RtlCopyMemory(log + 2, code, min(bytes, 42UL * 4) & ~3UL);
+    }
     for (i = 0; i < MaxShaders && c->shaders[i].handle; ++i) {}
     if (!handle || i == MaxShaders) { ++s->psFailed[RbPsReasons]; return; }
     sh = &c->shaders[i];
@@ -1803,6 +1820,18 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
     RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices));
     if (!pixel_states(c, draw, sh, s, z, program, fog, p->primitives)) return DD_OK;
     if (sh == &stages) draw->constants[0][0] = c->factor;   /* the texture factor, unpacked by the program */
+    {
+        RB2K_D7_DRAWSTATS *st = &d->d7draw;
+        ULONG key[6], k, j;
+        key[0] = c->fvf; key[1] = c->pixelShader; key[2] = draw->blend; key[3] = draw->alphaTest;
+        key[4] = draw->fog; key[5] = draw->depthState;
+        for (k = 0; k < st->comboCount; ++k) {
+            for (j = 0; j < 6 && st->combos[k][j] == key[j]; ++j) {}
+            if (j == 6) break;
+        }
+        if (k == st->comboCount && k < 24) { RtlCopyMemory(st->combos[k], key, sizeof(key)); st->combos[k][6] = 0; ++st->comboCount; }
+        if (k < 24) ++st->combos[k][6];
+    }
     draw->transform = 2;
     draw->vertexProgram = vprogram;
     draw->vertexConstants = vs->constants;
@@ -2079,12 +2108,260 @@ static ULONG fixed_records(ULONG op, ULONG n)
         return sizeof(D3DNTHAL_DP2STARTVERTEX) + n * sizeof(D3DNTHAL_DP2INDEXEDLINELIST);
     case D3DNTDP2OP_WINFO: return n * sizeof(D3DNTHAL_DP2WINFO);
     case D3DNTDP2OP_SETPALETTE: return n * sizeof(D3DNTHAL_DP2SETPALETTE);
-    case D3DNTDP2OP_STATESET: return n * sizeof(D3DNTHAL_DP2STATESET);
     case D3DNTDP2OP_SETPRIORITY: return n * sizeof(D3DNTHAL_DP2SETPRIORITY);
     case D3DNTDP2OP_SETTEXLOD: return n * sizeof(D3DNTHAL_DP2SETTEXLOD);
     case D3DNTDP2OP_SETCLIPPLANE: return n * sizeof(D3DNTHAL_DP2SETCLIPPLANE);
     }
     return 0;
+}
+
+/* ---- state blocks ---- */
+
+enum { NotState = 0xffffffff };
+
+/* Bytes after the header of a state command, NotState for other commands. */
+static ULONG state_bytes(ULONG op, ULONG n, const BYTE *p, ULONG remaining)
+{
+    ULONG used = 0, k;
+    switch (op) {
+    case D3DNTDP2OP_RENDERSTATE: return n * sizeof(D3DNTHAL_DP2RENDERSTATE);
+    case D3DNTDP2OP_TEXTURESTAGESTATE: return n * sizeof(D3DNTHAL_DP2TEXTURESTAGESTATE);
+    case D3DNTDP2OP_SETTRANSFORM: return n * sizeof(D3DNTHAL_DP2SETTRANSFORM);
+    case D3DNTDP2OP_VIEWPORTINFO: return n * sizeof(D3DNTHAL_DP2VIEWPORTINFO);
+    case D3DNTDP2OP_WINFO: return n * sizeof(D3DNTHAL_DP2WINFO);
+    case D3DNTDP2OP_ZRANGE: return n * sizeof(D3DNTHAL_DP2ZRANGE);
+    case D3DNTDP2OP_SETMATERIAL: return n * sizeof(D3DNTHAL_DP2SETMATERIAL);
+    case D3DNTDP2OP_SETCLIPPLANE: return n * sizeof(D3DNTHAL_DP2SETCLIPPLANE);
+    case D3DNTDP2OP_SETTEXLOD: return n * sizeof(D3DNTHAL_DP2SETTEXLOD);
+    case RbDp2SetVertexShader: case RbDp2SetPixelShader: return n * sizeof(RB_DP2_HANDLE);
+    case RbDp2SetStreamSource: return n * sizeof(RB_DP2_STREAM_SOURCE);
+    case RbDp2SetIndices: return n * sizeof(RB_DP2_INDICES);
+    case D3DNTDP2OP_SETLIGHT:
+        for (k = 0; k < n; ++k) {
+            const D3DNTHAL_DP2SETLIGHT *l = (const D3DNTHAL_DP2SETLIGHT *)(p + used);
+            if (remaining - min(remaining, used) < sizeof(*l)) return remaining + 1;
+            used += sizeof(*l) + (l->lightData == SetLightData ? sizeof(D3DLIGHT7) : 0);
+        }
+        return used;
+    case RbDp2SetVertexShaderConst: case RbDp2SetPixelShaderConst:
+        for (k = 0; k < n; ++k) {
+            const RB_DP2_SHADER_CONST *r = (const RB_DP2_SHADER_CONST *)(p + used);
+            if (remaining - min(remaining, used) < sizeof(*r)) return remaining + 1;
+            used += sizeof(*r);
+            if (r->count > (remaining - used) / 16) return remaining + 1;
+            used += r->count * 16;
+        }
+        return used;
+    }
+    return NotState;
+}
+
+static D8_STATEBLOCK *find_block(D7_CONTEXT *c, ULONG handle, BOOL create)
+{
+    ULONG i, free = MaxStateBlocks;
+    if (!c->blocks && create) {
+        c->blocks = EngAllocMem(FL_ZERO_MEMORY, MaxStateBlocks * sizeof(D8_STATEBLOCK), 'b8bR');
+    }
+    if (!c->blocks) return NULL;
+    for (i = 0; i < MaxStateBlocks; ++i) {
+        if (c->blocks[i].handle == handle && handle) return &c->blocks[i];
+        if (!c->blocks[i].handle && free == MaxStateBlocks) free = i;
+    }
+    if (!create || free == MaxStateBlocks || !handle) return NULL;
+    c->blocks[free].handle = handle;
+    c->blocks[free].bytes = 0;
+    return &c->blocks[free];
+}
+
+static BOOL block_append(D8_STATEBLOCK *b, const void *data, ULONG bytes)
+{
+    if (b->bytes + bytes > b->capacity) {
+        ULONG capacity = max(b->capacity * 2, b->bytes + bytes + 256);
+        BYTE *grown = EngAllocMem(0, capacity, 'b8bR');
+        if (!grown) return FALSE;
+        if (b->data) { RtlCopyMemory(grown, b->data, b->bytes); EngFreeMem(b->data); }
+        b->data = grown;
+        b->capacity = capacity;
+    }
+    RtlCopyMemory(b->data + b->bytes, data, bytes);
+    b->bytes += bytes;
+    return TRUE;
+}
+
+static void record(D7_CONTEXT *c, const void *command, ULONG bytes)
+{
+    D8_STATEBLOCK *b = find_block(c, c->recording, FALSE);
+    if (b && !block_append(b, command, bytes)) ++c->display->d7draw.blockFailures;
+}
+
+/* A command header and count records, appended to the block. */
+static void block_command(D8_STATEBLOCK *b, ULONG op, ULONG count, const void *records, ULONG bytes)
+{
+    D3DNTHAL_DP2COMMAND h;
+    if (!count) return;
+    h.bCommand = (BYTE)op; h.bReserved = 0; h.wStateCount = (WORD)count;
+    if (block_append(b, &h, sizeof(h))) block_append(b, records, bytes);
+}
+
+/* STATESETCREATE: a block holding the whole current state. */
+static void create_block(D7_CONTEXT *c, D8_STATEBLOCK *b)
+{
+    /* The records are built on the heap: the kernel stack is small. */
+    BYTE *scratch = EngAllocMem(0, sizeof(RB_DP2_SHADER_CONST) + sizeof(c->vsConst) + RenderStates * 8, 's8bR');
+    D3DNTHAL_DP2RENDERSTATE *rs = (D3DNTHAL_DP2RENDERSTATE *)scratch;
+    D3DNTHAL_DP2TEXTURESTAGESTATE ts[StageStates];
+    D3DNTHAL_DP2SETTRANSFORM x;
+    D3DNTHAL_DP2VIEWPORTINFO v;
+    RB_DP2_HANDLE handle;
+    ULONG i, k, n = 0;
+    b->bytes = 0;
+    if (!scratch) { ++c->display->d7draw.blockFailures; return; }
+    for (i = 0; i < RenderStates; ++i)
+        if ((c->rsSet[i / 32] >> (i % 32)) & 1) { rs[n].RenderState = (D3DRENDERSTATETYPE)i; rs[n].dwState = c->rs[i]; ++n; }
+    block_command(b, D3DNTDP2OP_RENDERSTATE, n, rs, n * sizeof(rs[0]));
+    for (k = 0; k < TextureStages; ++k) {
+        for (i = 0, n = 0; i < StageStates; ++i)
+            if ((c->tssSet[k] >> i) & 1) { ts[n].wStage = (WORD)k; ts[n].TSState = (WORD)i; ts[n].dwValue = c->tss[k][i]; ++n; }
+        block_command(b, D3DNTDP2OP_TEXTURESTAGESTATE, n, ts, n * sizeof(ts[0]));
+    }
+    for (i = 0; i < 3; ++i) {
+        x.xfrmType = (D3DTRANSFORMSTATETYPE)(i ? D3DTRANSFORMSTATE_WORLD + i : (c->dx8 ? 256 : D3DTRANSFORMSTATE_WORLD));
+        RtlCopyMemory(&x.matrix, c->matrices[i], 64);
+        block_command(b, D3DNTDP2OP_SETTRANSFORM, 1, &x, sizeof(x));
+    }
+    v.dwX = c->viewport[0]; v.dwY = c->viewport[1]; v.dwWidth = c->viewport[2]; v.dwHeight = c->viewport[3];
+    block_command(b, D3DNTDP2OP_VIEWPORTINFO, 1, &v, sizeof(v));
+    block_command(b, D3DNTDP2OP_ZRANGE, 1, c->zRange, sizeof(c->zRange));
+    block_command(b, D3DNTDP2OP_SETMATERIAL, 1, c->material, sizeof(c->material));
+    if (c->dx8) {
+        BYTE *buffer = scratch;
+        RB_DP2_SHADER_CONST *r = (RB_DP2_SHADER_CONST *)buffer;
+        handle.handle = c->fvf;
+        block_command(b, RbDp2SetVertexShader, 1, &handle, sizeof(handle));
+        handle.handle = c->pixelShader;
+        block_command(b, RbDp2SetPixelShader, 1, &handle, sizeof(handle));
+        r->reg = 0; r->count = RB_VS_CONSTANTS;
+        RtlCopyMemory(r + 1, c->vsConst, sizeof(c->vsConst));
+        block_command(b, RbDp2SetVertexShaderConst, 1, buffer, sizeof(*r) + sizeof(c->vsConst));
+        r->count = 32;
+        RtlCopyMemory(r + 1, c->psConst, sizeof(c->psConst));
+        block_command(b, RbDp2SetPixelShaderConst, 1, buffer, sizeof(*r) + sizeof(c->psConst));
+    }
+    EngFreeMem(scratch);
+}
+
+/* STATESETCAPTURE: the recorded states take their current values. */
+static void capture_block(D7_CONTEXT *c, D8_STATEBLOCK *b)
+{
+    ULONG at = 0;
+    while (at + sizeof(D3DNTHAL_DP2COMMAND) <= b->bytes) {
+        D3DNTHAL_DP2COMMAND *h = (D3DNTHAL_DP2COMMAND *)(b->data + at);
+        BYTE *p = (BYTE *)(h + 1);
+        ULONG n = h->wStateCount, left = b->bytes - at - sizeof(*h), bytes = state_bytes(h->bCommand, n, p, left), k;
+        if (bytes == NotState || bytes > left) break;
+        switch (h->bCommand) {
+        case D3DNTDP2OP_RENDERSTATE: {
+            D3DNTHAL_DP2RENDERSTATE *r = (D3DNTHAL_DP2RENDERSTATE *)p;
+            for (k = 0; k < n; ++k, ++r) if (r->RenderState < RenderStates) r->dwState = c->rs[r->RenderState];
+            break;
+        }
+        case D3DNTDP2OP_TEXTURESTAGESTATE: {
+            D3DNTHAL_DP2TEXTURESTAGESTATE *t = (D3DNTHAL_DP2TEXTURESTAGESTATE *)p;
+            for (k = 0; k < n; ++k, ++t)
+                if (t->wStage < TextureStages && t->TSState < StageStates) t->dwValue = c->tss[t->wStage][t->TSState];
+            break;
+        }
+        case D3DNTDP2OP_SETTRANSFORM: {
+            D3DNTHAL_DP2SETTRANSFORM *x = (D3DNTHAL_DP2SETTRANSFORM *)p;
+            for (k = 0; k < n; ++k, ++x) {
+                ULONG type = x->xfrmType == 256 ? D3DTRANSFORMSTATE_WORLD : x->xfrmType;
+                if (type >= D3DTRANSFORMSTATE_WORLD && type <= D3DTRANSFORMSTATE_PROJECTION)
+                    RtlCopyMemory(&x->matrix, c->matrices[type - D3DTRANSFORMSTATE_WORLD], 64);
+            }
+            break;
+        }
+        case D3DNTDP2OP_VIEWPORTINFO: {
+            D3DNTHAL_DP2VIEWPORTINFO *v = (D3DNTHAL_DP2VIEWPORTINFO *)p;
+            for (k = 0; k < n; ++k, ++v) {
+                v->dwX = c->viewport[0]; v->dwY = c->viewport[1]; v->dwWidth = c->viewport[2]; v->dwHeight = c->viewport[3];
+            }
+            break;
+        }
+        case D3DNTDP2OP_ZRANGE: for (k = 0; k < n; ++k) RtlCopyMemory(p + 8 * k, c->zRange, 8); break;
+        case D3DNTDP2OP_SETMATERIAL: for (k = 0; k < n; ++k) RtlCopyMemory(p + 68 * k, c->material, 68); break;
+        case RbDp2SetVertexShader: case RbDp2SetPixelShader: {
+            RB_DP2_HANDLE *v = (RB_DP2_HANDLE *)p;
+            for (k = 0; k < n; ++k) v[k].handle = h->bCommand == RbDp2SetVertexShader ? c->fvf : c->pixelShader;
+            break;
+        }
+        case RbDp2SetVertexShaderConst: case RbDp2SetPixelShaderConst: {
+            ULONG used = 0, limit = h->bCommand == RbDp2SetVertexShaderConst ? RB_VS_CONSTANTS : 32;
+            for (k = 0; k < n; ++k) {
+                RB_DP2_SHADER_CONST *r = (RB_DP2_SHADER_CONST *)(p + used);
+                ULONG j;
+                used += sizeof(*r);
+                for (j = 0; j < r->count && r->reg + j < limit; ++j)
+                    RtlCopyMemory(p + used + 16 * j, h->bCommand == RbDp2SetVertexShaderConst ? c->vsConst[r->reg + j] :
+                                  c->psConst[r->reg + j], 16);
+                used += r->count * 16;
+            }
+            break;
+        }
+        }
+        at += sizeof(*h) + bytes;
+    }
+}
+
+static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG stride,
+                        const BYTE *bytes, ULONG length, ULONG origin, ULONG *offset);
+
+static HRESULT state_set(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG stride, ULONG operation, ULONG handle)
+{
+    D8_STATEBLOCK *b;
+    ++c->display->d7draw.stateSets[operation < 6 ? operation : 6];
+    switch (operation) {
+    case 0:     /* D3DHAL_STATESETBEGIN */
+        b = find_block(c, handle, TRUE);
+        if (b) b->bytes = 0;
+        c->recording = b ? handle : 0;
+        break;
+    case 1:     /* END */
+        c->recording = 0;
+        break;
+    case 2:     /* DELETE */
+        b = find_block(c, handle, FALSE);
+        if (b) { if (b->data) EngFreeMem(b->data); RtlZeroMemory(b, sizeof(*b)); }
+        break;
+    case 3: {   /* EXECUTE */
+        ULONG at = 0;
+        HRESULT hr;
+        b = find_block(c, handle, FALSE);
+        if (!b || !b->bytes || c->replaying) break;
+        c->replaying = TRUE;
+        hr = commands(c, a, stride, b->data, b->bytes, 0, &at);
+        c->replaying = FALSE;
+        return hr;
+    }
+    case 4:     /* CAPTURE */
+        b = find_block(c, handle, FALSE);
+        if (b) capture_block(c, b);
+        break;
+    case 5:     /* CREATE (Direct3D 8) */
+        b = find_block(c, handle, TRUE);
+        if (b) create_block(c, b);
+        break;
+    }
+    return DD_OK;
+}
+
+static void release_blocks(D7_CONTEXT *c)
+{
+    ULONG i;
+    if (!c->blocks) return;
+    for (i = 0; i < MaxStateBlocks; ++i) if (c->blocks[i].data) EngFreeMem(c->blocks[i].data);
+    EngFreeMem(c->blocks);
+    c->blocks = NULL;
+    c->recording = 0;
 }
 
 static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG stride,
@@ -2103,6 +2380,16 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
         n = h->wStateCount;
         p = (const BYTE *)(h + 1);
         remaining -= sizeof(*h);
+        if (c->recording && h->bCommand != D3DNTDP2OP_STATESET) {
+            /* Between STATESETBEGIN and END, state commands go into the block. */
+            ULONG bytes = state_bytes(h->bCommand, n, p, remaining);
+            if (bytes != NotState) {
+                if (bytes > remaining) return DDERR_INVALIDPARAMS;
+                record(c, h, sizeof(*h) + bytes);
+                *offset += sizeof(*h) + bytes;
+                continue;
+            }
+        }
         RtlZeroMemory(&prims, sizeof(prims));
         prims.primitives = n;
         switch (h->bCommand) {
@@ -2111,6 +2398,11 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             used = n*sizeof(*rs);
             if (used > remaining) return DDERR_INVALIDPARAMS;
             for (; n; --n, ++rs) {
+                if (rs->RenderState < RenderStates && rs->RenderState != D3DRENDERSTATE_SCENECAPTURE) {
+                    c->rs[rs->RenderState] = rs->dwState;
+                    c->rsSet[rs->RenderState / 32] |= 1UL << (rs->RenderState % 32);
+                }
+                if (rs->RenderState == D3DRENDERSTATE_SCENECAPTURE && c->replaying) continue;
                 if (rs->RenderState == D3DRENDERSTATE_SCENECAPTURE) {
                     c->inScene = rs->dwState != 0;
                     if (!c->inScene) {
@@ -2182,6 +2474,10 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             if (used > remaining) return DDERR_INVALIDPARAMS;
             for (; n; --n, ++st) {
                 ULONG value = st->dwValue;
+                if (st->wStage < TextureStages && st->TSState < StageStates) {
+                    c->tss[st->wStage][st->TSState] = value;
+                    c->tssSet[st->wStage] |= 1UL << st->TSState;
+                }
                 /* With pixel shader 2.0 the Direct3D 9 runtime also sets samplers
                  * 8 to 15, which no draw here uses. */
                 if (st->wStage >= TextureStages) continue;
@@ -2238,6 +2534,16 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             if (n) RtlCopyMemory(c->material, (const D3DNTHAL_DP2SETMATERIAL *)p + n - 1, sizeof(c->material));
             break;
         case D3DNTDP2OP_CREATELIGHT: used = n * sizeof(D3DNTHAL_DP2CREATELIGHT); break;
+        case D3DNTDP2OP_STATESET: {
+            const D3DNTHAL_DP2STATESET *ss = (const D3DNTHAL_DP2STATESET *)p;
+            used = n * sizeof(*ss);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            for (; n; --n, ++ss) {
+                hr = state_set(c, a, stride, ss->dwOperation, ss->dwParam);
+                if (FAILED(hr)) return hr;
+            }
+            break;
+        }
         case D3DNTDP2OP_SETLIGHT: {
             /* Enable, disable, or set the D3DLIGHT7 that follows the record.
              * Lights past MaxLights are not drawn. */

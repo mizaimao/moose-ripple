@@ -104,6 +104,13 @@ typedef struct {
      * last refusal, triangles drawn with a vertex program, those of them with
      * the texture stages as their pixel program, and stage programs refused. */
     ULONG vsTranslated, vsFailed[8], vsLastDetail, vsDraws, vsStageDraws, stageFailed;
+    /* The first six pixel shaders (handle, bytes, the first 42 words), and the
+     * state combinations of draws with a vertex program: vertex and pixel
+     * shader handles, blend, alpha test, fog, depth state, draw calls. */
+    ULONG psLogCount, psLog[6][44], comboCount, combos[24][7];
+    /* State block operations by D3DHAL_STATESET* code (6 counts others), and
+     * blocks that could not grow. */
+    ULONG stateSets[7], blockFailures;
 } RB2K_D7_DRAWSTATS;
 enum { RB2K_D7_FAIL_RANGE, RB2K_D7_FAIL_VBCAPS, RB2K_D7_FAIL_LINEAR, RB2K_D7_FAIL_ADDRESS,
        RB2K_D7_FAIL_PROBE, RB2K_D7_FAIL_IMMEDIATE, RB2K_D7_FAIL_LENGTH, RB2K_D7_FAIL_OTHER };
