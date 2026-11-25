@@ -125,9 +125,11 @@ typedef struct {
     HANDLE owner;
     ULONG handle, format, width, height, pitch, mipmaps;
     FLATPTR address;
-    /* Mipmap levels found on the attach chain, level zero being the above. */
-    ULONG levels, levelPitch[RB2K_D7_LEVELS];
-    FLATPTR levelAddress[RB2K_D7_LEVELS];
+    /* Mipmap levels found on the attach chains of each face (one face, or
+     * the six of a cube map in Direct3D's order +X, -X, +Y, -Y, +Z, -Z),
+     * level zero of face zero being the above. */
+    ULONG levels, faces, levelPitch[6][RB2K_D7_LEVELS];
+    FLATPTR levelAddress[6][RB2K_D7_LEVELS];
     /* Video-memory textures are written only through DirectDraw locks and
      * blits, which mark them dirty; others are checked once a scene. */
     BOOL tracked, dirty;
@@ -320,6 +322,53 @@ ULONG rb_d7_rows(ULONG format, ULONG height)
  * a video-memory texture is runtime-allocated user memory (display_ddraw.c).
  * The runtime calls this again with a zero address when a system-memory
  * surface is destroyed, and DestroySurface reports video-memory ones. */
+/* The cube face of a surface (0 for +X .. 5 for -Z), or -1. */
+static int cube_face(PDD_SURFACE_LOCAL s)
+{
+    ULONG caps2 = s && s->lpSurfMore ? s->lpSurfMore->ddsCapsEx.dwCaps2 : 0;
+    int k;
+    for (k = 0; k < 6; ++k) if (caps2 & (DDSCAPS2_CUBEMAP_POSITIVEX << k)) return k;
+    return -1;
+}
+
+/* The levels of one face below its top surface: each is attached to the
+ * one above and is half its size (a cube's top face also holds the other
+ * faces, so only mipmap sublevels count there). Returns the level count;
+ * stop gets why the chain ended early (5 when it did not). */
+static ULONG face_levels(D7_TEXTURE *t, ULONG face, PDD_SURFACE_LOCAL top, BOOL cube, ULONG *stop)
+{
+    PDD_SURFACE_LOCAL m = top;
+    ULONG levels = 1;
+    *stop = 5;
+    t->levelAddress[face][0] = top->lpGbl->fpVidMem;
+    t->levelPitch[face][0] = top->lpGbl->lPitch > 0 ? (ULONG)top->lpGbl->lPitch : 0;
+    while (t->mipmaps && levels < RB2K_D7_LEVELS) {
+        PDD_ATTACHLIST a;
+        PDD_SURFACE_GLOBAL mg;
+        PDD_SURFACE_LOCAL n = NULL;
+        if (!m->lpAttachList) { *stop = 0; break; }
+        for (a = m->lpAttachList; a && !n; a = a->lpLink) {
+            PDD_SURFACE_LOCAL c = a->lpAttached;
+            if (!c) continue;
+            if (!cube) { n = c; break; }
+            if ((c->ddsCaps.dwCaps & DDSCAPS_MIPMAP) && c->lpSurfMore &&
+                (c->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_MIPMAPSUBLEVEL)) n = c;
+        }
+        if (!(m = n)) { *stop = 1; break; }
+        if (!(m->ddsCaps.dwCaps & DDSCAPS_MIPMAP)) { *stop = 2; break; }
+        mg = m->lpGbl;
+        if (!mg || mg->wWidth != max(1, t->width >> levels) || mg->wHeight != max(1, t->height >> levels)) {
+            *stop = 3;
+            break;
+        }
+        if (!mg->fpVidMem || mg->lPitch <= 0) { *stop = 4; break; }
+        t->levelAddress[face][levels] = mg->fpVidMem;
+        t->levelPitch[face][levels] = (ULONG)mg->lPitch;
+        ++levels;
+    }
+    return levels;
+}
+
 static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE_LOCAL l)
 {
     PDD_SURFACE_GLOBAL g = l->lpGbl;
@@ -346,30 +395,38 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
     if (t->mipmaps) ++d->d7draw.regMipmaps;
     t->tracked = !(l->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY);
     t->dirty = TRUE;
-    t->levels = 1;
-    t->levelAddress[0] = t->address;
-    t->levelPitch[0] = t->pitch;
-    if (t->mipmaps) {
-        /* Each level is attached to the one above it and is half its size. */
-        PDD_SURFACE_LOCAL m = l;
-        ULONG stop = 5;
-        while (t->levels < RB2K_D7_LEVELS) {
-            PDD_SURFACE_GLOBAL mg;
-            if (!m->lpAttachList) { stop = 0; break; }
-            if (!(m = m->lpAttachList->lpAttached)) { stop = 1; break; }
-            if (!(m->ddsCaps.dwCaps & DDSCAPS_MIPMAP)) { stop = 2; break; }
-            mg = m->lpGbl;
-            if (!mg || mg->wWidth != max(1, t->width >> t->levels) || mg->wHeight != max(1, t->height >> t->levels)) {
-                stop = 3;
-                break;
-            }
-            if (!mg->fpVidMem || mg->lPitch <= 0) { stop = 4; break; }
-            t->levelAddress[t->levels] = mg->fpVidMem;
-            t->levelPitch[t->levels] = (ULONG)mg->lPitch;
-            ++t->levels;
+    t->faces = 1;
+    if (l->lpSurfMore && (l->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_CUBEMAP)) {
+        /* A cube map: the other five faces hang off this one. */
+        PDD_SURFACE_LOCAL top[6];
+        PDD_ATTACHLIST a;
+        ULONG k, stop;
+        int face = cube_face(l);
+        RtlZeroMemory(top, sizeof(top));
+        if (face >= 0) top[face] = l;
+        for (a = l->lpAttachList; a; a = a->lpLink) {
+            int f = cube_face(a->lpAttached);
+            if (f >= 0 && !top[f] && a->lpAttached->lpGbl && !(a->lpAttached->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_MIPMAPSUBLEVEL))
+                top[f] = a->lpAttached;
         }
-        if (stop < 5 && (t->width >> t->levels || t->height >> t->levels)) ++d->d7draw.mipStops[stop];
-        else ++d->d7draw.mipChains;
+        t->faces = 6;
+        t->levels = RB2K_D7_LEVELS;
+        for (k = 0; k < 6; ++k) {
+            ULONG levels;
+            if (!top[k] || top[k]->lpGbl->wWidth != t->width || top[k]->lpGbl->wHeight != t->height ||
+                !top[k]->lpGbl->fpVidMem) { t->format = TexNone; t->levels = 1; break; }
+            levels = face_levels(t, k, top[k], TRUE, &stop);
+            if (levels < t->levels) t->levels = levels;
+        }
+        if (t->width != t->height) t->format = TexNone;
+        ++d->d7draw.cubeTextures;
+    } else {
+        ULONG stop;
+        t->levels = face_levels(t, 0, l, FALSE, &stop);
+        if (t->mipmaps) {
+            if (stop < 5 && (t->width >> t->levels || t->height >> t->levels)) ++d->d7draw.mipStops[stop];
+            else ++d->d7draw.mipChains;
+        }
     }
     if (l->lpSurfMore && (l->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_TEXTUREMANAGE)) ++d->d7draw.regManaged;
     if (!t->width || t->width > RB2K_D7_TEXTURE_SIDE || !t->height || t->height > RB2K_D7_TEXTURE_SIDE ||
@@ -386,15 +443,16 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
  * registered meanwhile starts dirty anyway. */
 void rb_d7_texture_written(DISPLAY *d, PDD_SURFACE_GLOBAL g)
 {
-    ULONG i, level;
+    ULONG i, level, face;
     if (!textures || !g) return;
     ++d->d7draw.textureWrites;
     for (i = 0; i < MaxTextures; ++i) {
         D7_TEXTURE *t = &textures[i];
         if (!t->handle || t->display != d) continue;
         if (t->global == g) t->dirty = TRUE;
-        else for (level = 0; level < t->levels; ++level)
-            if (t->levelAddress[level] == g->fpVidMem) { t->dirty = TRUE; break; }
+        else for (face = 0; face < t->faces; ++face)
+            for (level = 0; level < t->levels; ++level)
+                if (t->levelAddress[face][level] == g->fpVidMem) t->dirty = TRUE;
     }
 }
 
@@ -846,10 +904,11 @@ static ULONG level_side(ULONG size, ULONG level) { return size >> level ? size >
 
 static BOOL read_texels(D7_TEXTURE *t, ULONG *sum)
 {
-    ULONG bytes = 0, level, y, i, h = 0x811c9dc5;
+    ULONG bytes = 0, level, face, y, i, h = 0x811c9dc5;
     BYTE *out;
     for (level = 0; level < t->levels; ++level)
         bytes += rb_d7_row_bytes(t->format, level_side(t->width, level)) * rb_d7_rows(t->format, level_side(t->height, level));
+    bytes *= t->faces;
     if (bytes > texelScratchBytes) {
         if (texelScratch) EngFreeMem(texelScratch);
         texelScratch = EngAllocMem(0, bytes, 'r7bR');
@@ -858,14 +917,15 @@ static BOOL read_texels(D7_TEXTURE *t, ULONG *sum)
     }
     out = texelScratch;
     __try {
-        for (level = 0; level < t->levels; ++level) {
-            ULONG row = rb_d7_row_bytes(t->format, level_side(t->width, level));
-            ULONG rows = rb_d7_rows(t->format, level_side(t->height, level));
-            const BYTE *in = (const BYTE *)t->levelAddress[level];
-            if (t->levelPitch[level] < row) return FALSE;
-            EngProbeForRead((PVOID)in, t->levelPitch[level] * (rows - 1) + row, 1);
-            for (y = 0; y < rows; ++y, out += row) RtlCopyMemory(out, in + y * t->levelPitch[level], row);
-        }
+        for (face = 0; face < t->faces; ++face)
+            for (level = 0; level < t->levels; ++level) {
+                ULONG row = rb_d7_row_bytes(t->format, level_side(t->width, level));
+                ULONG rows = rb_d7_rows(t->format, level_side(t->height, level)), pitch = t->levelPitch[face][level];
+                const BYTE *in = (const BYTE *)t->levelAddress[face][level];
+                if (pitch < row) return FALSE;
+                EngProbeForRead((PVOID)in, pitch * (rows - 1) + row, 1);
+                for (y = 0; y < rows; ++y, out += row) RtlCopyMemory(out, in + y * pitch, row);
+            }
     } __except (EXCEPTION_EXECUTE_HANDLER) { return FALSE; }
     for (i = 0; i + 4 <= bytes; i += 4) h = (h ^ *(const ULONG *)(texelScratch + i)) * 0x01000193;
     *sum = h ^ bytes;
@@ -932,10 +992,11 @@ static ULONG decodeScratchBytes;
 /* Every level of a compressed texture from the scratch buffer, decoded. */
 static BOOL decode_texture(const D7_TEXTURE *t)
 {
-    ULONG bytes = 0, level;
+    ULONG bytes = 0, level, face;
     const BYTE *in = texelScratch;
     ULONG *out;
     for (level = 0; level < t->levels; ++level) bytes += level_side(t->width, level) * level_side(t->height, level) * 4;
+    bytes *= t->faces;
     if (bytes > decodeScratchBytes) {
         if (decodeScratch) EngFreeMem(decodeScratch);
         decodeScratch = EngAllocMem(0, bytes, 'x7bR');
@@ -943,12 +1004,13 @@ static BOOL decode_texture(const D7_TEXTURE *t)
         if (!decodeScratch) return FALSE;
     }
     out = (ULONG *)decodeScratch;
-    for (level = 0; level < t->levels; ++level) {
-        ULONG w = level_side(t->width, level), h = level_side(t->height, level);
-        decode_level(t->format, in, w, h, out);
-        in += rb_d7_row_bytes(t->format, w) * rb_d7_rows(t->format, h);
-        out += w * h;
-    }
+    for (face = 0; face < t->faces; ++face)
+        for (level = 0; level < t->levels; ++level) {
+            ULONG w = level_side(t->width, level), h = level_side(t->height, level);
+            decode_level(t->format, in, w, h, out);
+            in += rb_d7_row_bytes(t->format, w) * rb_d7_rows(t->format, h);
+            out += w * h;
+        }
     return TRUE;
 }
 
@@ -962,9 +1024,10 @@ static BOOL upload_blocks(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
 {
     RB2K_D3D7_TEXTURE *packet = (RB2K_D3D7_TEXTURE *)uploadScratch;
     const BYTE *src = texelScratch;
-    ULONG id = t->host, level, total = 0, written, status;
+    ULONG id = t->host, level, face, total = 0, written, status;
     ULONG format = t->format == TexDxt1 ? RB2K_D7_BLOCKS_DXT1 : t->format == TexDxt3 ? RB2K_D7_BLOCKS_DXT3 :
                    RB2K_D7_BLOCKS_DXT5;
+    for (face = 0; face < t->faces; ++face)
     for (level = 0; level < t->levels; ++level) {
         ULONG width = level_side(t->width, level), height = level_side(t->height, level);
         ULONG rowBytes = rb_d7_row_bytes(t->format, width), blockRows = rb_d7_rows(t->format, height);
@@ -973,7 +1036,9 @@ static BOOL upload_blocks(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
             ULONG rows = min(chunk, blockRows - by), newId = 0;
             RtlCopyMemory(packet + 1, src, rows * rowBytes);
             src += rows * rowBytes;
-            packet->id = level || by ? id : t->host;
+            packet->id = face || level || by ? id : t->host;
+            packet->face = face;
+            packet->faces = t->faces;
             packet->target = targetId;
             packet->width = t->width;
             packet->height = t->height;
@@ -1026,6 +1091,8 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
         const BYTE *src = texels;
         ULONG level;
         total = 0;
+        ULONG face;
+        for (face = 0; ok && face < t->faces; ++face)
         for (level = 0; ok && level < t->levels; ++level) {
             ULONG width = level_side(t->width, level), height = level_side(t->height, level);
             ULONG chunk = RB2K_D7_UPLOAD_BYTES / (width * 4), y;
@@ -1035,7 +1102,9 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
                     for (x = 0; x < width; ++x)
                         out[r * width + x] = convert(format, bpp == 4 ? ((const ULONG *)src)[x] :
                                                                          ((const USHORT *)src)[x]);
-                packet->id = level || y ? id : t->host;
+                packet->id = face || level || y ? id : t->host;
+                packet->face = face;
+                packet->faces = t->faces;
                 packet->target = targetId;
                 packet->width = t->width;
                 packet->height = t->height;
@@ -1361,7 +1430,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     }
     if (needTexture) {
         tex = find_texture(c->local, st->texture);
-        if (!tex || !tex->format || tex->owner != c->owner) {
+        if (!tex || !tex->format || tex->owner != c->owner || tex->faces != 1) {
             skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives);
             return DD_OK;
         }
@@ -1372,7 +1441,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     }
     if (needTexture1) {
         tex1 = find_texture(c->local, st1->texture);
-        if (!tex1 || !tex1->format || tex1->owner != c->owner) {
+        if (!tex1 || !tex1->format || tex1->owner != c->owner || tex1->faces != 1) {
             skip(c, RB2K_D7_SKIP_TEXTURE, p->primitives);
             return DD_OK;
         }
@@ -1764,6 +1833,18 @@ static void create_shader(D7_CONTEXT *c, ULONG handle, const BYTE *code, ULONG b
     }
 }
 
+/* The stages among samplers whose texture is a cube map. */
+static ULONG cube_stages(D7_CONTEXT *c, ULONG samplers)
+{
+    ULONG k, mask = 0;
+    for (k = 0; k < RB2K_D8_STAGES; ++k)
+        if ((samplers >> k) & 1) {
+            D7_TEXTURE *tex = find_texture(c->local, c->stages[k].texture);
+            if (tex && tex->faces == 6) mask |= 1UL << k;
+        }
+    return mask;
+}
+
 static ULONG stage_sampler(const D7_STAGE *st, const D7_TEXTURE *tex)
 {
     return (st->addressU >= 1 && st->addressU <= 4 ? st->addressU : 1) |
@@ -1848,7 +1929,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
             fog = RB2K_D7_FOG_VERTEX | c->fogVertex << RB2K_D7_FOG_MODE_SHIFT | (c->rangeFog ? RB2K_D7_FOG_RANGE : 0);
         else fog = RB2K_D7_FOG_ALPHA;
     }
-    if (sh) program = shader_program(c, sh, fog);
+    if (sh) program = shader_program(c, sh, fog | cube_stages(c, sh->samplers) << RB_PS_CUBE_SHIFT);
     if (!program) { skip(c, RB2K_D7_SKIP_COMBINER, p->primitives); return DD_OK; }
     if (!p->stream || !position || (fvf & D3DFVF_RESERVED0) || (!objectSpace && (fvf & D3DFVF_NORMAL))) {
         skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
@@ -1993,10 +2074,12 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
         else { fog = RB2K_D7_FOG_ALPHA; flags = RB_VS_FOG_ALPHA; }
     }
     if (vs) vprogram = vertex_program(c, vs, flags);
-    if (sh) program = shader_program(c, sh, fog);
+    if (sh) program = shader_program(c, sh, fog | cube_stages(c, sh->samplers) << RB_PS_CUBE_SHIFT);
     else {
-        /* The fixed-function pixel stages after the vertex shader. */
+        /* The fixed-function pixel stages after the vertex shader (which do
+         * not sample cube maps). */
         program = stage_program(c, fog, &stages);
+        if (program && cube_stages(c, stages.samplers)) program = 0;
         sh = &stages;
         d->d7draw.vsStageDraws += p->primitives;
     }
@@ -2193,7 +2276,7 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
     if (!b->dwDDSrcSurface) return;
     dst = find_texture(c->local, b->dwDDDestSurface);
     src = find_texture(c->local, b->dwDDSrcSurface);
-    if (!dst || !src || !dst->format || dst->format != src->format ||
+    if (!dst || !src || !dst->format || dst->format != src->format || dst->faces != src->faces ||
         dst->owner != c->owner || src->owner != c->owner) { ++d->d7draw.texBltFailures; return; }
     if (right <= left || bottom <= top) { left = top = 0; right = src->width; bottom = src->height; }
     if (left < 0 || top < 0 || (ULONG)right > src->width || (ULONG)bottom > src->height ||
@@ -2205,9 +2288,11 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
         return;
     }
     __try {
-        /* Mipmapped textures copy the matching rectangle of each level both have. */
-        ULONG level, levels = min(src->levels, dst->levels);
+        /* Mipmapped textures copy the matching rectangle of each level both
+         * have, cube maps of each face. */
+        ULONG level, levels = min(src->levels, dst->levels), face;
         if (src->width != dst->width || src->height != dst->height) levels = 1;
+        for (face = 0; face < src->faces; ++face)
         for (level = 0; level < levels; ++level) {
             ULONG x0 = (ULONG)left >> level, y0 = (ULONG)top >> level, dx = (ULONG)b->pDest.x >> level;
             ULONG dy = (ULONG)b->pDest.y >> level;
@@ -2225,12 +2310,12 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
                 bytes = rb_d7_row_bytes(src->format, x1 - x0 * 4);
                 bpp = src->format == TexDxt1 ? 8 : 16;
             }
-            from = (const BYTE *)src->levelAddress[level] + y0 * src->levelPitch[level] + x0 * bpp;
-            to = (BYTE *)dst->levelAddress[level] + dy * dst->levelPitch[level] + dx * bpp;
-            EngProbeForRead((PVOID)from, (rows - 1) * src->levelPitch[level] + bytes, 1);
-            EngProbeForReadAndWrite(to, (rows - 1) * dst->levelPitch[level] + bytes, 1);
+            from = (const BYTE *)src->levelAddress[face][level] + y0 * src->levelPitch[face][level] + x0 * bpp;
+            to = (BYTE *)dst->levelAddress[face][level] + dy * dst->levelPitch[face][level] + dx * bpp;
+            EngProbeForRead((PVOID)from, (rows - 1) * src->levelPitch[face][level] + bytes, 1);
+            EngProbeForReadAndWrite(to, (rows - 1) * dst->levelPitch[face][level] + bytes, 1);
             for (y = 0; y < rows; ++y)
-                RtlCopyMemory(to + y * dst->levelPitch[level], from + y * src->levelPitch[level], bytes);
+                RtlCopyMemory(to + y * dst->levelPitch[face][level], from + y * src->levelPitch[face][level], bytes);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { ++d->d7draw.texBltFailures; return; }
     dst->epoch = 0;
@@ -3206,16 +3291,16 @@ void rb_d7_caps(DD_HALINFO *info, BOOL depth)
  * one vertex stream. Pixel shaders are offered (see below); the runtime
  * runs vertex shaders in software. */
 static const ULONG d8Formats[][2] = {
-    { RbFmtX8R8G8B8, RbFormatTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
+    { RbFmtX8R8G8B8, RbFormatTexture | RbFormatCubeTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
                      RbFormatDisplayMode | RbFormat3D },
     /* a back buffer with alpha over the X8R8G8B8 desktop, or a target */
-    { RbFmtA8R8G8B8, RbFormatTexture | RbFormatOffscreenTarget | RbFormatSameTargetUpToAlpha },
-    { RbFmtR5G6B5, RbFormatTexture | RbFormatDisplayMode },
-    { RbFmtX1R5G5B5, RbFormatTexture },
-    { RbFmtA1R5G5B5, RbFormatTexture },
-    { RbFmtA4R4G4B4, RbFormatTexture },
-    { RbFmtDxt1, RbFormatTexture }, { RbFmtDxt2, RbFormatTexture }, { RbFmtDxt3, RbFormatTexture },
-    { RbFmtDxt4, RbFormatTexture }, { RbFmtDxt5, RbFormatTexture },
+    { RbFmtA8R8G8B8, RbFormatTexture | RbFormatCubeTexture | RbFormatOffscreenTarget | RbFormatSameTargetUpToAlpha },
+    { RbFmtR5G6B5, RbFormatTexture | RbFormatCubeTexture | RbFormatDisplayMode },
+    { RbFmtX1R5G5B5, RbFormatTexture | RbFormatCubeTexture },
+    { RbFmtA1R5G5B5, RbFormatTexture | RbFormatCubeTexture },
+    { RbFmtA4R4G4B4, RbFormatTexture | RbFormatCubeTexture },
+    { RbFmtDxt1, RbFormatTexture | RbFormatCubeTexture }, { RbFmtDxt2, RbFormatTexture | RbFormatCubeTexture }, { RbFmtDxt3, RbFormatTexture | RbFormatCubeTexture },
+    { RbFmtDxt4, RbFormatTexture | RbFormatCubeTexture }, { RbFmtDxt5, RbFormatTexture | RbFormatCubeTexture },
     /* last: only with depth rendering */
     { RbFmtD16, RbFormatZStencil }, { RbFmtD24S8, RbFormatZStencil }, { RbFmtD24X8, RbFormatZStencil }
 };
@@ -3243,6 +3328,9 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     c->shadeCaps = tri->dwShadeCaps;
     c->textureCaps = tri->dwTextureCaps | 0x4000;     /* D3DPTEXTURECAPS_MIPMAP */
     c->textureFilterCaps = tri->dwTextureFilterCaps;
+    /* Cube maps, sampled by pixel shaders (the fixed-function stages do not). */
+    c->textureCaps |= 0x800 | 0x10000;   /* D3DPTEXTURECAPS_CUBEMAP, MIPCUBEMAP */
+    c->cubeTextureFilterCaps = c->textureFilterCaps;
     c->textureAddressCaps = tri->dwTextureAddressCaps;
     c->stencilCaps = d->z24s8 ? 0xff : 0;
     if (d->z16Render) {

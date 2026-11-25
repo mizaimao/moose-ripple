@@ -843,7 +843,8 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
                 words[n++] = CREATE(VIRGL_OBJECT_SAMPLER_VIEW, VIRGL_OBJ_SAMPLER_VIEW_SIZE);
                 words[n++] = TextureView; words[n++] = texture->id;
             words[n++] = texture->format ? texture->format : VIRGL_FORMAT_B8G8R8A8_UNORM;
-                words[n++] = 0; words[n++] = (texture->levels - 1) << 8;   /* all mipmap levels */
+                words[n++] = texture->faces == 6 ? 5UL << 16 : 0;   /* the six faces of a cube map */
+            words[n++] = (texture->levels - 1) << 8;   /* all mipmap levels */
                 words[n++] = 0x688; /* identity swizzle */
                 s->viewTexture = texture->id;
                 changed = TRUE;
@@ -860,7 +861,8 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
                 words[n++] = CREATE(VIRGL_OBJECT_SAMPLER_VIEW, VIRGL_OBJ_SAMPLER_VIEW_SIZE);
                 words[n++] = TextureView1; words[n++] = texture1->id;
             words[n++] = texture1->format ? texture1->format : VIRGL_FORMAT_B8G8R8A8_UNORM;
-                words[n++] = 0; words[n++] = (texture1->levels - 1) << 8;   /* all mipmap levels */
+                words[n++] = texture1->faces == 6 ? 5UL << 16 : 0;   /* the six faces of a cube map */
+            words[n++] = (texture1->levels - 1) << 8;   /* all mipmap levels */
                 words[n++] = 0x688; /* identity swizzle */
                 s->viewTexture1 = texture1->id;
                 changed = TRUE;
@@ -1283,7 +1285,8 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
             words[n++] = CREATE(VIRGL_OBJECT_SAMPLER_VIEW, VIRGL_OBJ_SAMPLER_VIEW_SIZE);
             words[n++] = PsViewBase + k; words[n++] = textures[k]->id;
             words[n++] = textures[k]->format ? textures[k]->format : VIRGL_FORMAT_B8G8R8A8_UNORM;
-            words[n++] = 0; words[n++] = (textures[k]->levels - 1) << 8;   /* all mipmap levels */
+            words[n++] = textures[k]->faces == 6 ? 5UL << 16 : 0;   /* the six faces of a cube map */
+            words[n++] = (textures[k]->levels - 1) << 8;   /* all mipmap levels */
             words[n++] = 0x688; /* identity swizzle */
             s->psViews[k] = textures[k]->id;
         }

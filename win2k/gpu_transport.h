@@ -47,6 +47,7 @@ typedef struct RB2K_IMAGE {
 typedef struct {
     ULONG id, width, height, levels, bytes;   /* bytes: counted against RB2K_D7_TEXEL_BUDGET */
     ULONG format;                               /* host format; 0 for B8G8R8A8 */
+    ULONG faces;                                /* 1, or 6 for a cube map */
     ULONG contexts[RB2K_DD_SLOTS];
 } RB2K_TEXTURE;
 #define RB2K_D7_TEXEL_BUDGET (64UL << 20)
@@ -199,7 +200,7 @@ BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTU
 BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture,
                               const RB2K_IMAGE *image);
 BOOLEAN rb_gpu_texture_upload(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K_TEXTURE *texture,
-                              const RB2K_IMAGE *image, ULONG level, ULONG y, ULONG rows, PVOID texels);
+                              const RB2K_IMAGE *image, ULONG level, ULONG face, ULONG y, ULONG rows, PVOID texels);
 BOOLEAN rb_gpu_texture_free(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture);
 void rb_gpu_texture_forget(RB2K_GPU *gpu);
 BOOLEAN rb_gpu_prepare_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image);

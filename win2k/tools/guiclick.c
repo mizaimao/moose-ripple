@@ -1,7 +1,8 @@
 /* Press through a program's dialogs without a person, for installing test
  * programs in a test machine and for starting benchmarks from a script.
  *
- *   guiclick <seconds> [-press text]... [-check text]... [-dismiss text]... [-until text] <program> [arguments]
+ *   guiclick <seconds> [-press text]... [-check text]... [-dismiss text]... [-close text]... [-until text]
+ *            <program> [arguments]
  *
  * Every visible top-level window other than the shell's is reported when
  * its contents change: its title and class, then each control's class and
@@ -15,6 +16,9 @@
  *     Back, No and Browse never are. Each -press name is pressed once.
  *   - a window showing a -dismiss text has its first enabled push button
  *     pressed, whatever its label (owner-drawn buttons often have none).
+ *   - a window showing a -close text is asked to close.
+ *   - "-press #N" presses the enabled button whose control ID is N, owner-drawn
+ *     or not; buttons are reported with their IDs and places for this.
  * The screen saver is off while guiclick runs.
  * The run ends when the program has exited and no window has changed for
  * ten seconds, or when the time is up. With -until, a window showing that
@@ -28,8 +32,8 @@
 
 #define MaxNames 8
 #define MaxWindows 64
-static const char *press[MaxNames + 16], *checks[MaxNames], *dismiss[MaxNames], *until;
-static int pressCount, checkCount, dismissCount, userPress, pressed[MaxNames];
+static const char *press[MaxNames + 16], *checks[MaxNames], *dismiss[MaxNames], *closes[MaxNames], *until;
+static int pressCount, checkCount, dismissCount, closeCount, userPress, pressed[MaxNames];
 static DWORD untilSeen;
 static DWORD shellPid, selfPid;
 static struct { HWND w; DWORD hash, changed, acted; } seen[MaxWindows];
@@ -70,7 +74,7 @@ static BOOL starts(const char *text, const char *part)
     return !strncmp(a, b, strlen(b));
 }
 
-typedef struct { HWND button[48]; char text[48][96]; LONG style[48]; int count; DWORD hash; int report, dismiss; } CONTROLS;
+typedef struct { HWND top, button[48]; char text[48][96]; LONG style[48]; int count; DWORD hash; int report, dismiss, close; } CONTROLS;
 
 static BOOL CALLBACK child(HWND w, LPARAM arg)
 {
@@ -89,6 +93,7 @@ static BOOL CALLBACK child(HWND w, LPARAM arg)
     {
         int d;
         for (d = 0; d < dismissCount; ++d) if (text[0] && contains(text, dismiss[d])) c->dismiss = 1;
+        for (d = 0; d < closeCount; ++d) if (text[0] && contains(text, closes[d])) c->close = 1;
     }
     if (c->report) {
         if (!lstrcmpiA(name, "Edit"))
@@ -98,6 +103,15 @@ static BOOL CALLBACK child(HWND w, LPARAM arg)
             for (q = text; *q; ++q) if (*q == '\r' || *q == '\n') *q = ' ';
             _snprintf(line, sizeof(line), "GUICLICK   %s \"%s\"%s%s", name, text, IsWindowEnabled(w) ? "" : " disabled",
                       !lstrcmpiA(name, "Button") && SendMessageA(w, BM_GETCHECK, 0, 0) == BST_CHECKED ? " checked" : "");
+            if (!lstrcmpiA(name, "Button")) {
+                /* Its control ID and its place in the window, for -press #N. */
+                RECT r, t;
+                size_t n = strlen(line);
+                GetWindowRect(w, &r);
+                GetWindowRect(c->top, &t);
+                _snprintf(line + n, sizeof(line) - n, " id=%d at %ld,%ld %ldx%ld", GetDlgCtrlID(w), r.left - t.left,
+                          r.top - t.top, r.right - r.left, r.bottom - r.top);
+            }
         }
         line[sizeof(line) - 1] = 0;
         out(line);
@@ -144,6 +158,23 @@ static void act(CONTROLS *c)
             return;
         }
     }
+    if (c->close) {
+        out("GUICLICK close");
+        PostMessageA(c->top, WM_CLOSE, 0, 0);
+        return;
+    }
+    for (k = 0; k < userPress; ++k)
+        if (press[k][0] == '#' && !pressed[k])
+            for (i = 0; i < c->count; ++i) {
+                int id = atoi(press[k] + 1);
+                if (GetDlgCtrlID(c->button[i]) != id || !IsWindowEnabled(c->button[i])) continue;
+                pressed[k] = 1;
+                _snprintf(line, sizeof(line), "GUICLICK press id=%d", id);
+                line[sizeof(line) - 1] = 0;
+                out(line);
+                PostMessageA(GetParent(c->button[i]), WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), (LPARAM)c->button[i]);
+                return;
+            }
     if (c->dismiss)
         for (i = 0; i < c->count; ++i) {
             LONG kind = c->style[i] & 15;
@@ -160,7 +191,7 @@ static void act(CONTROLS *c)
         for (i = 0; i < c->count; ++i) {
             LONG kind = c->style[i] & 15;
             if ((kind != BS_PUSHBUTTON && kind != BS_DEFPUSHBUTTON) || !IsWindowEnabled(c->button[i])) continue;
-            if (!starts(c->text[i], press[k]) || (k < userPress && pressed[k])) continue;
+            if (press[k][0] == '#' || !starts(c->text[i], press[k]) || (k < userPress && pressed[k])) continue;
             if (k < userPress) pressed[k] = 1;
             if (starts(c->text[i], "cancel") || starts(c->text[i], "< back") || starts(c->text[i], "back") ||
                 starts(c->text[i], "no") || starts(c->text[i], "browse")) continue;
@@ -187,6 +218,7 @@ static BOOL CALLBACK top(HWND w, LPARAM arg)
     if (closeAll) { PostMessageA(w, WM_CLOSE, 0, 0); return TRUE; }
     if (until && !untilSeen && title[0] && contains(title, until)) untilSeen = GetTickCount() | 1;
     memset(&c, 0, sizeof(c));
+    c.top = w;
     c.hash = 5381;
     {
         const char *p;
@@ -208,6 +240,7 @@ static BOOL CALLBACK top(HWND w, LPARAM arg)
         line[sizeof(line) - 1] = 0;
         out(line);
         memset(&c, 0, sizeof(c));
+        c.top = w;
         c.report = 1;
         EnumChildWindows(w, child, (LPARAM)&c);
         c.hash = seen[slot].hash;
@@ -256,6 +289,7 @@ int main(void)
         else if (!lstrcmpA(w, "-check") && checkCount < MaxNames) checks[checkCount++] = word(&command);
         else if (!lstrcmpA(w, "-until")) until = word(&command);
         else if (!lstrcmpA(w, "-dismiss") && dismissCount < MaxNames) dismiss[dismissCount++] = word(&command);
+        else if (!lstrcmpA(w, "-close") && closeCount < MaxNames) closes[closeCount++] = word(&command);
         else {
             /* The program and its arguments, as given. */
             command = save;

@@ -173,7 +173,8 @@ typedef struct {
 /* format: 0 for ARGB texels, or RB2K_D7_BLOCKS_DXT* for rows of 4x4 blocks as
  * the program wrote them (y a multiple of 4; the miniport answers texture
  * id zero when the host cannot sample that format). */
-typedef struct { ULONG id, target, width, height, y, rows, levels, level, format; } RB2K_D3D7_TEXTURE;
+/* faces: 1, or 6 for a cube map (square), face 0..5 in Direct3D's order. */
+typedef struct { ULONG id, target, width, height, y, rows, levels, level, format, face, faces; } RB2K_D3D7_TEXTURE;
 #define RB2K_D7_BLOCKS_DXT1 1
 #define RB2K_D7_BLOCKS_DXT3 2
 #define RB2K_D7_BLOCKS_DXT5 3
