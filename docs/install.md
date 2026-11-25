@@ -371,7 +371,8 @@ If one app's OpenGL window looks wrong, start that app from Terminal with
 `RIPPLE_GL_DIRECT=0` in front of its command (for example
 `RIPPLE_GL_DIRECT=0 /Applications/Chess.app/Contents/MacOS/Chess`). Its frames then go through
 WindowServer the older, slower way instead of straight to the screen. If that helps, please
-open an issue.
+open an issue. `RIPPLE_GL_TEXCACHE=0` in the same place makes the driver create every texture
+anew instead of reusing released ones; try it if textures show a wrong picture.
 
 ## Removing it
 
