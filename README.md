@@ -133,12 +133,14 @@ pixels.
   24 frames/s in QuickTime Player with moose-ripple, on the Proxmox host and in UTM. With
   software rendering the same UTM guest gets about a tenth of the pixels to the screen (2.4
   against 22.9 screens per second on WindowServer's frame meter) at more CPU.
-- Core Image: all 24 filters tested give the same picture as software rendering, and 57 of
-  Photo Booth's 61 effects do ("the same" means within 1-2 colour levels, or under 1% of the
-  pixels different). A single Core Image filter is slower than software rendering for now,
-  because each render makes a round trip through QEMU. The four effects that differ (Concert,
-  Neon, Pinch, Pointillize) differ on the 9600 GT too, so those differences come from how a
-  GPU computes them.
+- Core Image: 23 of the 24 filters tested give the same picture as software rendering, and 55
+  of Photo Booth's 61 effects do ("the same" means within 1-2 colour levels, or under 1% of the
+  pixels different). The filter that differs is CIEdges (3.9% of the pixels, where an edge is
+  just above or below the threshold), and Blue Print and Comic Book, which draw edges too,
+  differ on 3-4%. The other four effects (Concert, Neon, Pinch, Pointillize) differ on the
+  9600 GT too, so those differences come from how a GPU computes them. A single Core Image
+  filter still takes about 1.7 times as long as in software rendering, because each pass
+  waits for the host; Photo Booth's effects are faster than in software.
 - In UTM on an Apple M1 Max the guest's Intel CPU is emulated, and that CPU is the
   limit there: gl-gears runs at about 56 frames/s and Real Racing 2's menu at 59, but
   a race makes about 30 frames/s, with the game's drawing thread using a whole emulated

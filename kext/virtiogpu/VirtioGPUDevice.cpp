@@ -316,7 +316,7 @@ uint32_t VirtioGPUDevice::command(const void *req, uint32_t reqLen, void *resp, 
     fHeadSlot[head] = (int8_t)s;
     uint64_t t0 = mach_absolute_time(), timeout;
     nanoseconds_to_absolutetime(5000000000ULL, &timeout);
-    if (async) {
+    if (async == kAsync || async == kAsyncFence) {
         // Nobody waits: the drain frees the slot when the reply comes (and, for a fenced
         // command, passes its fence then).
         fSlot[s].async = true;
@@ -330,6 +330,14 @@ uint32_t VirtioGPUDevice::command(const void *req, uint32_t reqLen, void *resp, 
     }
     *q.notify = q.index;
 
+    // QEMU answers a fenced command when it next looks at its fences and finds this one
+    // retired. It looks right after handling a batch of commands, and otherwise on a 10 ms
+    // timer: if the GPU is still busy when the command arrives, the reply is up to 10 ms late
+    // (2026-11-25: 259 of 552 waits took 9-10 ms with queued submits). An empty command makes
+    // QEMU look again, so a waiter prods it after 0.2 ms and then at doubling intervals up to
+    // 2 ms.
+    const uint32_t ctx = ((const struct virtio_gpu_ctrl_hdr *)req)->ctx_id;
+    uint32_t prodUs = 200;
     while (!fSlot[s].done) {
         drainControlLocked(false);              // polling fallback
         if (fSlot[s].done)
@@ -337,8 +345,19 @@ uint32_t VirtioGPUDevice::command(const void *req, uint32_t reqLen, void *resp, 
         if (mach_absolute_time() - t0 > timeout)
             break;
         uint64_t deadline;
-        clock_interval_to_deadline(fIntEnabled ? 20 : 1, kMillisecondScale, &deadline);
-        IOLockSleepDeadline(fCmdLock, &fSlot[s], deadline, THREAD_UNINT);
+        if (async == kWaitFence)
+            clock_interval_to_deadline(prodUs, kMicrosecondScale, &deadline);
+        else
+            clock_interval_to_deadline(fIntEnabled ? 20 : 1, kMillisecondScale, &deadline);
+        int woke = IOLockSleepDeadline(fCmdLock, &fSlot[s], deadline, THREAD_UNINT);
+        if (async == kWaitFence && woke == THREAD_TIMED_OUT) {
+            drainControlLocked(false);
+            if (!fSlot[s].done) {
+                prodLocked(ctx);
+                if (prodUs < 2000)
+                    prodUs *= 2;
+            }
+        }
     }
 
     if (fSlot[s].done) {
@@ -403,6 +422,37 @@ void VirtioGPUDevice::drainControlLocked(bool fromInterrupt)
         if (fromInterrupt) fIntDone++; else fPollDone++;
         IOLockWakeup(fCmdLock, &fSlot[s], false);
     }
+}
+
+// Queue an empty, unfenced submit that nobody waits for: handling it makes QEMU look at its
+// fences (see command()). Hold fCmdLock. With every slot in flight QEMU has commands to handle
+// anyway, and nothing is sent.
+void VirtioGPUDevice::prodLocked(uint32_t ctx)
+{
+    int s = -1;
+    for (int i = 0; i < kSlots; i++)
+        if (!fSlot[i].busy) { s = i; break; }
+    if (s < 0 || !ctx)
+        return;
+    uint8_t *reqBuf = (uint8_t *)fSlotMem->getBytesNoCopy() + s * (kSlotReq + kSlotResp);
+    struct virtio_gpu_cmd_submit *c = (struct virtio_gpu_cmd_submit *)reqBuf;
+    bzero(c, sizeof(*c));
+    c->hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    c->hdr.ctx_id = ctx;
+    bzero(reqBuf + kSlotReq, sizeof(struct virtio_gpu_ctrl_hdr));
+    uint64_t pa[2] = { fSlotPA + s * (kSlotReq + kSlotResp), 0 };
+    uint32_t len[2] = { sizeof(*c), sizeof(struct virtio_gpu_ctrl_hdr) };
+    pa[1] = pa[0] + kSlotReq;
+    int head = ripple_vq_add(&fQueue[0].vq, pa, len, 1, 1);
+    if (head < 0)
+        return;
+    fHeadSlot[head] = (int8_t)s;
+    fSlot[s].busy = true;
+    fSlot[s].done = false;
+    fSlot[s].async = true;
+    fSlot[s].fence = 0;
+    fSlot[s].release = 0;
+    *fQueue[0].notify = fQueue[0].index;
 }
 
 bool VirtioGPUDevice::simple(const void *req, uint32_t reqLen, uint64_t extraPA, uint32_t extraLen,
@@ -900,8 +950,12 @@ bool VirtioGPUDevice::sync(uint32_t ctx)
     if (!c.hdr.ctx_id)
         return true;                     // nothing was ever submitted
     uint64_t id = 0;
-    if (!simple(&c, sizeof(c), 0, 0, &id))
+    struct virtio_gpu_ctrl_hdr resp;
+    uint32_t type = command(&c, sizeof(c), &resp, sizeof(resp), 0, 0, &id, kWaitFence);
+    if (type != VIRTIO_GPU_RESP_OK_NODATA) {
+        LOG("sync failed: 0x%x", type);
         return false;
+    }
     for (;;) {
         SInt64 old = fSignalled;
         if (old >= (SInt64)id ||

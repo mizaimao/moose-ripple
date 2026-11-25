@@ -845,8 +845,61 @@ Seen on the way, not from this change:
   four wrong pixels in a row at a random place; with the cache off 2 of 25 runs, with it on 4
   of 25. Ours is right in those pixels. `CI_EFFECTS_WHERE=1` makes `ci-effects` print where
   the differing pixels are.
-- On this build CIEdges differs from software on 3.9% of the pixels again and 55 of the 61
-  Photo Booth effects match, with the cache off and on; on 2026-11-14 it was 24 of 24 and 57
-  of 61. Not looked into yet.
+- CIEdges differs from software on 3.9% of the pixels and 55 of the 61 Photo Booth effects
+  match (Blue Print 4.3% and Comic Book 3.4% differ next to the four known ones), with the
+  cache off and on. The table of 2026-11-14 says 24 of 24 and 57 of 61. Looked for the change
+  that did it, one run per step on the same VM: the 0.2.1 release's GL bundle (built that day)
+  on today's kext, then that release's bundle and kext together. Both give 23 of 24 and 55 of
+  61, so no driver change since then is the cause, and the three values are the ones first
+  measured on 2026-11-11. The guest system is unchanged since 2026-11-10 and no debug switch
+  was changed around that day. The driver log of the run of 2026-11-14 shows Core Image
+  using three 517x323 pbuffers where it uses one now; what made it do so is not found.
+  `RIPPLE_FLOAT_PIXELS=1` does not bring it back (CIEdges stays, and a second filter differs).
+  Until the run of 2026-11-14 can be repeated, 23 of 24 and 55 of 61 are the numbers that hold.
 
 Left for Core Image: the two SUBMITs per pass, each of which waits for the host.
+
+Queued submits (`ripple_async=1`) on the same two tests, one run on a boot with the flag,
+texture cache on:
+
+| | waiting for the host | queued |
+|---|---|---|
+| 24 Core Image filters, sum | 78.6 ms | 74.1 ms (0.8 to 10.3 a filter) |
+| 61 Photo Booth effects, sum | 62.7 ms | 563.6 ms |
+
+The filters gain little, and the Photo Booth compositions (drawn through QCRenderer, with a
+`glFinish` after every frame) take about nine times as long: 20 of the 61 need 5 to 15 ms a
+frame instead of about 1. Same pictures. So the queued mode has a slow path of its own, in
+the wait that follows a queued submit, and it has to be found before the mode can become the
+default.
+
+The slow wait, found (2026-11-25). Times of the kernel calls in the Photo Booth test on a
+boot with `ripple_async=1`: of 552 WAITs, 259 took 9 to 10 ms and the rest under 3 ms. A WAIT
+that has to wait sends an empty fenced command (`VirtioGPUDevice::sync`), and QEMU answers a
+fenced command when it next looks at its fences and finds that one retired. It looks right
+after handling a batch of commands, and otherwise on a 10 ms timer. With submits that wait
+for the host, the GPU has usually finished by the time the fenced command arrives, and the
+first look passes it (0.13 ms a WAIT). With queued submits the fenced command arrives right
+behind the work, the GPU is still busy at the first look, and the reply comes with the timer.
+
+Fix, in the kext: while it waits for a fenced reply, the waiter sends QEMU an empty command
+that nobody waits for, after 0.2 ms and then at doubling intervals up to 2 ms. Handling it
+makes QEMU look at its fences again, so the reply comes when the GPU is done instead of on
+the timer. One run each on the same VM:
+
+| | old kext | with the prod |
+|---|---|---|
+| 61 Photo Booth effects, sum, queued submits | 563.6 ms | 39.2 ms |
+| ...submits that wait for the host (the default) | 62.7 ms | 47.8 ms (45.1, 50.6 in two more runs) |
+| 24 Core Image filters, sum, queued | 74.1 ms | 77.5 ms |
+| ...the default | 78.6 ms | 85.3 ms (86.0, 80.1, 78.7, 82.3 in four more runs) |
+| gl-gears 400x400, the default | 59.5 frames/s | 59.5; 59.3 with Dashboard open over it |
+
+The filters do not move: their totals spread from 78.7 to 86.0 ms between runs of one boot
+and build. Same pictures in every run; desktop, Dashboard and the gl-gears window looked at
+on the new kext; no error from the kext or the host's renderer.
+
+This also bounds every other wait for the GPU (`glFinish`, fences, a read-back while the GPU
+is busy) at the GPU's own time plus a fraction of a millisecond, where it could be 10 ms.
+Queued submits themselves stay behind the flag: this was the one measured reason against
+them on the Core Image tests, and the checks on the other hosts are still to do.
