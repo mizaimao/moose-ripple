@@ -29,6 +29,8 @@
 
 #include "rdd.h"
 #include "d3d8ddi.h"     /* the Direct3D 8 interface, shared with Windows 2000 (win2k/) */
+#include "d3d8_ps.h"      /* pixel shaders as TGSI text (win2k/), shared with Windows 2000 */
+#include "tgsi_arb.h"     /* that text as an ARB fragment program */
 #include "rippled3d.h"
 
 /* ---- No C run-time: what the compiler expects of it ------------------------------------------ */
@@ -230,6 +232,9 @@ static RDD_SHARED *shared;
 #define GL_ALPHA_SCALE                  0x0D1C
 #define GL_COLOR_SUM                    0x8458
 #define GL_SECONDARY_COLOR_ARRAY        0x845E
+#define GL_FRAGMENT_PROGRAM_ARB         0x8804
+#define GL_PROGRAM_FORMAT_ASCII_ARB     0x8875
+#define GL_PROGRAM_ERROR_STRING_ARB     0x8874
 #define GL_FOG_COORDINATE_SOURCE        0x8450
 #define GL_FOG_COORDINATE               0x8451
 #define GL_FRAGMENT_DEPTH               0x8452
@@ -332,6 +337,13 @@ typedef struct {
     void (APIENTRY *ProvokingVertex)(GLenum);
     void (APIENTRY *WindowPos2i)(GLint, GLint);
     void (APIENTRY *GetRenderbufferParameteriv)(GLenum, GLenum, GLint *);
+    /* ARB_fragment_program, for Direct3D 8 pixel shaders (optional) */
+    void (APIENTRY *GenProgramsARB)(GLsizei, GLuint *);
+    void (APIENTRY *DeleteProgramsARB)(GLsizei, const GLuint *);
+    void (APIENTRY *BindProgramARB)(GLenum, GLuint);
+    void (APIENTRY *ProgramStringARB)(GLenum, GLenum, GLsizei, const GLvoid *);
+    void (APIENTRY *ProgramEnvParameter4fvARB)(GLenum, GLuint, const GLfloat *);
+    void (APIENTRY *ProgramLocalParameter4fvARB)(GLenum, GLuint, const GLfloat *);
 } GLF;
 
 #define GL_CORE_COUNT 53            /* entries up to DrvGetProcAddress */
@@ -354,6 +366,8 @@ static const char *const gl_names[] = {
     "glActiveTextureARB", "glClientActiveTextureARB", "glSecondaryColorPointerEXT",
     "glFogCoordPointerEXT", "glProvokingVertexEXT", "glWindowPos2iARB",
     "glGetRenderbufferParameterivEXT",
+    "glGenProgramsARB", "glDeleteProgramsARB", "glBindProgramARB", "glProgramStringARB",
+    "glProgramEnvParameter4fvARB", "glProgramLocalParameter4fvARB",
 };
 #define GL_ALL_COUNT (sizeof gl_names / sizeof gl_names[0])
 typedef char c_gl_names[sizeof(GLF) == GL_ALL_COUNT * sizeof(PROC) ? 1 : -1];
@@ -866,6 +880,7 @@ int d3d_surface_format_ok(LPDDSURFACEDESC desc)
 }
 
 /* ---- Contexts ----------------------------------------------------------------------------------- */
+#define MAX_PS 64                       /* Direct3D 8 pixel shaders a context keeps */
 #define STAGES 2
 #define FOG_UNIT STAGES                 /* the OpenGL texture unit that does fog */
 
@@ -937,7 +952,25 @@ typedef struct {
     int stream_user;
     int dx8;                            /* made by the Direct3D 8 or 9 runtime */
     DWORD skipped8;                     /* Direct3D 8 draws not drawn (see stream_draw) */
+    /* Direct3D 8 pixel shaders: ARB fragment programs by shader handle, the one set (0: none,
+       the fixed-function stages), constants c0..c7 */
+    struct ps8 {
+        DWORD handle;
+        GLuint prog, prog_fog;          /* without and with fog after the shader (0: none yet) */
+        DWORD *code, bytes;             /* its tokens, for the fog program; process heap */
+        int failed;                     /* couldn't be translated: its draws are skipped */
+        DWORD fog_base;                 /* the fog constants' first program.env */
+    } ps[MAX_PS];
+    DWORD ps_bound;
+    GLuint fp_prog;                     /* bound to GL_FRAGMENT_PROGRAM_ARB */
+    int fp_on;                          /* GL_FRAGMENT_PROGRAM_ARB enabled */
+    float psc[RB_PS_CONSTANTS][4];
+    int psc_dirty;
 } RCTX;
+
+static long ps_program(RCTX *c);
+static void ps_apply(RCTX *c, long prog);
+static void skip8(RCTX *c, const char *why);
 
 #define MAX_CONTEXTS 64
 /* Direct3D's context handle is the slot number plus one. */
@@ -1444,6 +1477,8 @@ static void context_free(RCTX *c)
     GLF *gl = gl_of(c);
     DWORD i;
 
+    for (i = 0; i < MAX_PS; i++)
+        release(c->ps[i].code);         /* the programs go with the OpenGL context */
     if (c->rc) {
         make_current(c);
         for (i = 0; i < c->ntex; i++)
@@ -2094,6 +2129,23 @@ static void apply_stages(RCTX *c)
     factor[2] = (tf & 255) / 255.0f;
     factor[3] = ((tf >> 24) & 255) / 255.0f;
     c->keyed = 0;                       /* texture_bind sets it again */
+    if (c->dx8 && ps_program(c) > 0) {
+        /* a pixel shader: each stage's texture on its unit, for the program's samplers; the
+           stages' operations don't apply */
+        for (s = 0; s < STAGES; s++) {
+            DWORD map = c->tss[s][D3DTSS_TEXTUREMAP];
+            c->bound[s] = 0;
+            gl->ActiveTexture(GL_TEXTURE0 + s);
+            if (map && texture_bind(c, map, s))
+                c->bound[s] = map;
+            else
+                white_texture(c);
+        }
+        gl->ActiveTexture(GL_TEXTURE0);
+        apply_alpha_test(c);
+        c->stages_dirty = 0;
+        return;
+    }
     for (s = 0; s < STAGES; s++) {
         DWORD *st = c->tss[s];
         DWORD cop = st[D3DTSS_COLOROP], aop = st[D3DTSS_ALPHAOP];
@@ -2444,6 +2496,14 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
         rt_upload(c);
     if (c->stages_dirty || textures_changed(c))
         apply_stages(c);
+    if (c->dx8) {                       /* a pixel shader, or none */
+        long prog = ps_program(c);
+        if (prog < 0) {
+            skip8(c, "pixel shader");
+            return;
+        }
+        ps_apply(c, prog);
+    }
     if (!idx) {
         if (!convert(c, v, first, count))
             return;
@@ -2917,6 +2977,193 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
 #define CMD(p) ((LPD3DHAL_DP2COMMAND)(p))
 #define ALIGN4(p) ((BYTE *)(((DWORD)(p) + 3) & ~3))
 
+/* ---- Direct3D 8 pixel shaders ------------------------------------------------------------- */
+/* A shader is translated when the runtime creates it: its tokens to TGSI text by the Windows
+   2000 driver's translator (win2k/d3d8_ps.c), that to an ARB fragment program (tgsi_arb.c),
+   which Mesa compiles. Inputs: the diffuse and specular colours, texture coordinate sets 0..3;
+   c0..c7 are program.env[0..7]; the translator's immediates are program.local.
+   Fog after the shader: a second program, made when a draw first needs it. The HAL already
+   gives each vertex Direct3D's fog factor f as the coordinate 0.25 + 0.5 f of FOG_UNIT (the
+   fixed-function fog ramp); the translator is asked for linear fog from a vertex depth read
+   there, with start 0.75 and end 0.25, which gives back f. Not yet: more than the two texture
+   stages the HAL has. */
+#define PS_FOG (RB_PS_FOG_VERTEX | (3 << RB_PS_FOG_MODE_SHIFT))     /* linear, from IN[10] */
+
+static struct ps8 *ps_find(RCTX *c, DWORD handle, int create)
+{
+    int i, free = -1;
+    if (!handle)
+        return NULL;
+    for (i = 0; i < MAX_PS; i++) {
+        if (c->ps[i].handle == handle)
+            return &c->ps[i];
+        if (!c->ps[i].handle && free < 0)
+            free = i;
+    }
+    if (!create || free < 0)
+        return NULL;
+    memset(&c->ps[free], 0, sizeof c->ps[free]);
+    c->ps[free].handle = handle;
+    return &c->ps[free];
+}
+
+static void ps_delete(RCTX *c, DWORD handle)
+{
+    GLF *gl = gl_of(c);
+    struct ps8 *p = ps_find(c, handle, 0);
+    if (!p)
+        return;
+    if (gl->DeleteProgramsARB) {
+        if (p->prog)
+            gl->DeleteProgramsARB(1, &p->prog);
+        if (p->prog_fog)
+            gl->DeleteProgramsARB(1, &p->prog_fog);
+    }
+    if (c->fp_prog && (c->fp_prog == p->prog || c->fp_prog == p->prog_fog))
+        c->fp_prog = 0;
+    release(p->code);
+    memset(p, 0, sizeof *p);
+}
+
+/* The program for p, with or without fog; 0 if it can't be made (p->failed is then set). */
+static GLuint ps_compile(RCTX *c, struct ps8 *p, int fog)
+{
+    GLF *gl = gl_of(c);
+    char *tgsi, *arb;
+    RB_PS_INFO info;
+    TGSI_ARB ai;
+    DWORD n = 0, m = 0, i;
+    GLuint prog = 0;
+
+    if (p->failed)
+        return 0;
+    tgsi = (char *)alloc(RB_PS_TEXT_BYTES);
+    arb = (char *)alloc(TGSI_ARB_TEXT_BYTES);
+    memset(&info, 0, sizeof info);
+    memset(&ai, 0, sizeof ai);
+    ai.fog_unit = FOG_UNIT;
+    if (tgsi && arb && p->code)
+        n = rb_ps_translate((const unsigned int *)p->code, p->bytes / 4, fog ? PS_FOG : 0, tgsi,
+                            RB_PS_TEXT_BYTES, &info);
+    if (n)
+        m = tgsi_to_arb(tgsi, arb, TGSI_ARB_TEXT_BYTES, &ai);
+    if (!n || !m || !gl->GenProgramsARB || !gl->ProgramStringARB || !gl->BindProgramARB ||
+        !gl->ProgramLocalParameter4fvARB) {
+        tracef("rd3d: pixel shader %lx not translated: reason %lu, detail %lx, line %lu\r\n",
+               p->handle, (DWORD)info.reason, (DWORD)info.detail, n ? (DWORD)ai.line : 0);
+        dbg("rd3d: a pixel shader was not translated\r\n");
+        p->failed = 1;
+    } else {
+        gl->GetError();                 /* earlier errors aren't this one's */
+        gl->GenProgramsARB(1, &prog);
+        gl->BindProgramARB(GL_FRAGMENT_PROGRAM_ARB, prog);
+        c->fp_prog = prog;
+        gl->ProgramStringARB(GL_FRAGMENT_PROGRAM_ARB, GL_PROGRAM_FORMAT_ASCII_ARB, m - 1, arb);
+        if (gl->GetError() != GL_NO_ERROR) {
+            const char *e = (const char *)gl->GetString(GL_PROGRAM_ERROR_STRING_ARB);
+            dbg("rd3d: a pixel shader's program was refused: ");
+            dbg(e ? e : "?");
+            dbg("\r\n");
+            if (trace_on)
+                dbg(arb);
+            if (gl->DeleteProgramsARB)
+                gl->DeleteProgramsARB(1, &prog);
+            c->fp_prog = prog = 0;
+            p->failed = 1;
+        } else {
+            for (i = 0; i < ai.immediates; i++)
+                gl->ProgramLocalParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, i, (const GLfloat *)ai.imm[i]);
+            if (fog)
+                p->fog_base = ai.constants - 2;
+            tracef("rd3d: pixel shader %lx%s: program %lu, samplers %lx, coordinates %lx\r\n",
+                   p->handle, fog ? " with fog" : "", (DWORD)prog, (DWORD)info.samplers,
+                   (DWORD)info.coords);
+        }
+    }
+    release(tgsi);
+    release(arb);
+    return prog;
+}
+
+static void ps_create(RCTX *c, DWORD handle, const DWORD *code, DWORD bytes)
+{
+    struct ps8 *p;
+    ps_delete(c, handle);
+    p = ps_find(c, handle, 1);
+    if (!p) {
+        dbg("rd3d: too many pixel shaders\r\n");
+        return;
+    }
+    p->code = (DWORD *)alloc(bytes);
+    if (p->code) {
+        memcpy(p->code, code, bytes);
+        p->bytes = bytes;
+    }
+    p->prog = ps_compile(c, p, 0);      /* now, so a shader that can't be made says so early */
+}
+
+/* The program for the pixel shader set and the fog state, 0 for the fixed-function stages; -1
+   if a shader is set but couldn't be translated (its draws are skipped). */
+static long ps_program(RCTX *c)
+{
+    struct ps8 *p;
+    int fog = c->rs[D3DRENDERSTATE_FOGENABLE] != 0;
+    if (!c->ps_bound)
+        return 0;
+    p = ps_find(c, c->ps_bound, 0);
+    if (!p || p->failed)
+        return -1;
+    if (fog && !p->prog_fog)
+        p->prog_fog = ps_compile(c, p, 1);
+    if (fog)
+        return p->prog_fog ? (long)p->prog_fog : -1;
+    return p->prog ? (long)p->prog : -1;
+}
+
+/* Before a draw: the fragment program on or off, bound, its constants loaded. */
+static void ps_apply(RCTX *c, long prog)
+{
+    GLF *gl = gl_of(c);
+    struct ps8 *p;
+    DWORD i;
+    if (prog <= 0) {
+        if (c->fp_on) {
+            gl->Disable(GL_FRAGMENT_PROGRAM_ARB);
+            c->fp_on = 0;
+        }
+        return;
+    }
+    if (!c->fp_on) {
+        gl->Enable(GL_FRAGMENT_PROGRAM_ARB);
+        c->fp_on = 1;
+    }
+    if (c->fp_prog != (GLuint)prog) {
+        gl->BindProgramARB(GL_FRAGMENT_PROGRAM_ARB, (GLuint)prog);
+        c->fp_prog = (GLuint)prog;
+    }
+    if (!gl->ProgramEnvParameter4fvARB)
+        return;
+    if (c->psc_dirty) {
+        for (i = 0; i < RB_PS_CONSTANTS; i++)
+            gl->ProgramEnvParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, i, c->psc[i]);
+        c->psc_dirty = 0;
+    }
+    p = ps_find(c, c->ps_bound, 0);
+    if (p && (GLuint)prog == p->prog_fog) {
+        DWORD col = c->rs[D3DRENDERSTATE_FOGCOLOR];
+        GLfloat fc[4], range[4];
+        fc[0] = ((col >> 16) & 255) / 255.0f;
+        fc[1] = ((col >> 8) & 255) / 255.0f;
+        fc[2] = (col & 255) / 255.0f;
+        fc[3] = 1.0f;
+        range[0] = 0.75f;               /* start and end that turn 0.25 + 0.5 f back into f */
+        range[1] = 0.25f;
+        range[2] = range[3] = 0.0f;
+        gl->ProgramEnvParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, p->fog_base, fc);
+        gl->ProgramEnvParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, p->fog_base + 1, range);
+    }
+}
+
 /* ---- Direct3D 8 draws ----------------------------------------------------------------------- */
 /* Stream zero's vertices: a buffer surface named by its handle, or, for SETSTREAMSOURCEUM, the
    vertices that came with the command buffer. 0 when there is nothing usable. */
@@ -3267,6 +3514,13 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
                 goto bad;
             if (n && k->bCommand == RbDp2SetVertexShader)
                 c->fvf8 = h[n - 1].handle;
+            if (n && k->bCommand == RbDp2SetPixelShader && c->ps_bound != h[n - 1].handle) {
+                c->ps_bound = h[n - 1].handle;
+                c->stages_dirty = 1;        /* the stages are set up the other way */
+            }
+            if (k->bCommand == RbDp2DeletePixelShader)
+                for (i = 0; i < n; i++)
+                    ps_delete(c, h[i].handle);
             cmd = data + n * sizeof *h;
             break;
         }
@@ -3364,12 +3618,18 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
         }
         case RbDp2SetVertexShaderConst:
         case RbDp2SetPixelShaderConst: {
-            /* no shaders offered yet: skipped (each record: register, count, count vectors) */
-            DWORD used = 0, left = (DWORD)(end - data);
+            /* each record: register, count, count vectors; vertex shaders' are skipped */
+            DWORD used = 0, left = (DWORD)(end - data), j;
             for (i = 0; i < n; i++) {
                 const RB_DP2_SHADER_CONST *r = (const RB_DP2_SHADER_CONST *)(data + used);
+                const float *f = (const float *)(r + 1);
                 if (left - used < sizeof *r || r->count > (left - used - sizeof *r) / 16)
                     goto bad;
+                for (j = 0; k->bCommand == RbDp2SetPixelShaderConst && j < r->count; j++)
+                    if (r->reg + j < RB_PS_CONSTANTS) {
+                        memcpy(c->psc[r->reg + j], f + 4 * j, 16);
+                        c->psc_dirty = 1;
+                    }
                 used += sizeof *r + r->count * 16;
             }
             cmd = data + used;
@@ -3382,6 +3642,14 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
                 variable_records(data, end, n, sizeof(RB_DP2_CREATE_PIXEL_SHADER), 1, 0);
             if (used == 0xFFFFFFFFUL)
                 goto bad;
+            if (k->bCommand == RbDp2CreatePixelShader) {
+                DWORD at = 0;
+                for (i = 0; i < n; i++) {
+                    const RB_DP2_CREATE_PIXEL_SHADER *r = (const RB_DP2_CREATE_PIXEL_SHADER *)(data + at);
+                    ps_create(c, r->handle, (const DWORD *)(r + 1), r->codeBytes);
+                    at += sizeof *r + r->codeBytes;
+                }
+            }
             cmd = data + used;
             break;
         }
@@ -3652,7 +3920,8 @@ static void d8_caps(RB_D3DCAPS8 *c)
     c->maxStreams = 1;
     c->maxStreamStride = 255;
     c->vertexShaderVersion = 0xFFFE0000UL;  /* none: the runtime processes vertices */
-    c->pixelShaderVersion = 0xFFFF0000UL;   /* none yet */
+    c->pixelShaderVersion = 0xFFFF0103UL;   /* 1.3, as ARB fragment programs (ps_create) */
+    c->maxPixelShaderValue = fbits(1.0f);
 }
 
 /* Until the Direct3D 8 path has been through its tests it is offered only when the registry
