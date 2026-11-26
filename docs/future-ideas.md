@@ -21,8 +21,8 @@ nothing over its window; the same host's GeForce 9600 GT with Apple's driver doe
   not in the tree) gave about 6% there.
 - In UTM the emulated processor is the limit: the display limit, the helper thread and the two
   covered-window changes make no difference there. The second-thread trial does: 18 to 19%
-  more in OpenArena's timedemo on two boots (19.7 to 23.4 and 25.7 to 30.3 frames/s; the level
-  differs between boots of the guest for a reason not yet known). A version for the tree is
+  more in OpenArena's timedemo on two boots (19.7 to 23.4 and 25.7 to 30.3 frames/s; the guest
+  has two speed levels there, a factor of 1.4 apart, for a reason not yet known). A version for the tree is
   one to two days of work, mostly reading every frontend entry for state it touches while the
   worker runs
   ([re/perf-notes.md](re/perf-notes.md), "The second GL thread in UTM").

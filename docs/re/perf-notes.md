@@ -1549,7 +1549,7 @@ What is left to gain here is small whatever is built: skipping all of Mesa's com
 program seen before (a cache keyed on the program's text, with the state tracker's variants)
 could give at most the sixth above.
 
-### The second GL thread in UTM: 18 to 19% more in OpenArena (2026-11-26)
+### The second GL thread in UTM: 18 to 19% more in OpenArena; the guest has two speed levels (2026-11-26)
 
 The trial of Mesa's second GL thread ("The per-draw CPU cost, and a trial of a second GL
 thread" above) gave about 6% on the Intel host, where the host is the pacer. Under emulation
@@ -1575,23 +1575,36 @@ models, the text and the weapon are right in all of them.
 The four changes timed in UTM earlier (the display limit, the helper thread and the two for
 covered windows) made no difference there; this one does.
 
-**The level differs between boots of the guest, not between builds.** The second boot, three
-minutes after the first was shut down, ran the committed bundle at 25.4, 25.2 and 25.6
-frames/s and the trial bundle with the thread off at 25.7, 25.4 and 25.5. The first boot ran
+**The level differs between boots of the guest, and within one, not between builds.** The
+second boot, three minutes after the first was shut down, ran the committed bundle at 25.4,
+25.2 and 25.6 frames/s and the trial bundle with the thread off at 25.7, 25.4 and 25.5. The first boot ran
 that same trial bundle at 19.7, and every UTM run of the morning, on several boots with the
 committed bundles of the time, was at 19.6 to 20.0. On 2026-11-25 and in the night after it
 the level was 22.9 to 24.8. So the 20 of this morning is not a slower driver: today's build
 reaches 25.
 
-What was ruled out on the second boot, one run after each: gl-gears before the game (25.6),
-a swap of the bundle's binary while the guest runs (25.7), screen captures and a `sample`
-(25.4). The guest's clock is right there: one whole run took 152.4 s by the guest's clock and
-153.2 s by another machine's. Nothing in the guest was busy (`top`). What makes a boot slow
-is not known; the busy disk tool noted with the morning's table is not established as the
-reason either.
+A third boot, half an hour later, shows that it is a state of the whole guest with two sharp
+levels, and that it can change within a boot. A fixed loop (twelve million additions in perl,
+one thread) took 13.8 to 14.8 s at the fast level and 18.9 to 19.6 s at the slow one, a factor
+of 1.39, about the factor between the two boots' frame rates. On the second boot all four
+readings were fast. On the third, of 26 readings of one loop alone 20 were slow, 3 fast and 3 in
+between (a change during the loop). The emulator used one processor of the Mac (102%) for the loop at
+either level, so at the slow level the same processor time does less.
 
-For timing in UTM: only runs on one boot compare. A fixed loop tells a boot's level before a
-run (twelve million additions in perl: 14.6 to 14.8 s on the fast boot).
+Ruled out as the reason, each by a reading with and without it: a busy process in the guest
+(`top`: none); how many of the guest's processors are busy (one loop alone 19.2 s, two at once
+19.7, three 20.2, four 20.5, all at the slow level); the Mac drawing the guest's window (UTM
+and the Mac's WindowServer under 2% of a processor during slow readings); somebody at the
+Mac's desktop (no input for a day); memory pressure or swap on the Mac (none); another guest
+(none); and on the second boot gl-gears before the game (25.6), a swap of the bundle's binary
+while the guest runs (25.7), screen captures and a `sample` (25.4), and the guest's clock (one
+whole run took 152.4 s by the guest's clock and 153.2 s by another machine's). What sets the
+level is not known; the busy disk tool noted with the morning's table is not established as
+the reason either. Finding it needs the Mac's per-core frequency and scheduling figures, which
+need administrator rights there.
+
+For timing in UTM: take the loop's time right before and right after every timed run, and
+compare two runs only if all four readings are at the same level.
 
 What a version for the tree needs, which the trial does not have:
 
