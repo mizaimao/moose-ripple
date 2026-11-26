@@ -1,0 +1,48 @@
+OpenGL: a window's framebuffer through Direct3D 9Ex (d3d9ex_framebuffer.cpp, in the overlay).
+The OpenGL target chooses it for the virgl driver: Direct3D 9Ex is on Vista and Windows 7 and
+needs only the display driver's Direct3D 9 part. RIPPLE_GL_PRESENT=dxgi asks for the Direct3D 11
+swap chain instead.
+
+--- a/src/gallium/targets/wgl/wgl.c
++++ b/src/gallium/targets/wgl/wgl.c
+@@ -249,14 +249,27 @@
+ wgl_create_dxgi_framebuffer(struct pipe_screen *screen, HWND hWnd,
+                              int iPixelFormat);
+ 
++struct stw_winsys_framebuffer *
++wgl_create_d3d9ex_framebuffer(struct pipe_screen *screen, HWND hWnd,
++                              int iPixelFormat);
++
+ static struct stw_winsys_framebuffer *
+ wgl_create_framebuffer(struct pipe_screen *screen,
+                        HWND hWnd,
+                        int iPixelFormat)
+ {
+ #ifdef GALLIUM_VIRGL 
+-   if(use_virgl) {
+-      return wgl_create_dxgi_framebuffer(screen, hWnd, iPixelFormat);
++   if (use_virgl) {
++      /* Through Direct3D 9Ex (d3d9ex_framebuffer.cpp), which every system and host of this
++       * driver has; RIPPLE_GL_PRESENT=dxgi asks for the Direct3D 11 swap chain instead
++       * (Windows 7 on a host with Direct3D 10). */
++      const char *present = debug_get_option("RIPPLE_GL_PRESENT", "");
++      struct stw_winsys_framebuffer *fb = NULL;
++      if (strcmp(present, "dxgi") != 0)
++         fb = wgl_create_d3d9ex_framebuffer(screen, hWnd, iPixelFormat);
++      if (!fb)
++         fb = wgl_create_dxgi_framebuffer(screen, hWnd, iPixelFormat);
++      return fb;
+    }
+ #endif
+ #ifdef GALLIUM_D3D12
+--- a/src/gallium/targets/wgl/meson.build
++++ b/src/gallium/targets/wgl/meson.build
+@@ -13,7 +13,7 @@
+ gallium_wgl_name = get_option('gallium-wgl-dll-name')
+ libgallium_wgl = shared_library(
+   gallium_wgl_name,
+-  ['wgl.c', 'dxgi_framebuffer.cpp'],
++  ['wgl.c', 'dxgi_framebuffer.cpp', 'd3d9ex_framebuffer.cpp'],
+   vs_module_defs : wgl_def,
+   include_directories : [
+     inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux, inc_wgl, inc_gallium_winsys, inc_gallium_winsys_sw, inc_gallium_drivers,
