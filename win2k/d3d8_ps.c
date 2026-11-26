@@ -47,6 +47,7 @@ typedef struct {
     unsigned int written;           /* r0, r1 and t0..t3 written so far: bits 0-1, 8-11 */
     unsigned int pads;              /* texm3x2/texm3x3 dot products so far */
     unsigned int bump;              /* version 1: texbem or texbeml read the bump constants */
+    const unsigned int *streamBases;  /* vertex shaders: the word each stream starts at, or NULL */
     /* Results waiting to be written: register, write mask, result slot. */
     char pendDest[2][24];
     unsigned int pendMask[2], pending;
@@ -1185,7 +1186,7 @@ static int fetch_one(PS *s, unsigned int reg, unsigned int kind, unsigned int k)
     return fail(s, RbPsRegister, kind);
 }
 
-/* The Direct3D 8 declaration tokens: one stream, registers and skips. */
+/* The Direct3D 8 declaration tokens: streams, registers and skips. */
 static int fetch(PS *s, const unsigned int *decl, unsigned int count)
 {
     static const unsigned char words[8] = { 1, 2, 3, 4, 1, 1, 1, 2 };
@@ -1195,10 +1196,12 @@ static int fetch(PS *s, const unsigned int *decl, unsigned int count)
         if (t == 0xffffffffu) return 1;
         switch (t >> 29) {
         case 0: break;                                         /* NOP */
-        case 1:                                                /* STREAM */
-            if (t & 0x1fffffffu) return fail(s, RbPsRegister, t);
-            offset = 0;
+        case 1: {                                              /* STREAM n (not the tessellator) */
+            unsigned int stream = t & 0x1fffffffu;
+            if (stream >= RB_VS_STREAMS || (stream && !s->streamBases)) return fail(s, RbPsRegister, t);
+            offset = s->streamBases ? s->streamBases[stream] : 0;
             break;
+        }
         case 2:                                                /* STREAMDATA */
             if (t & 0x10000000u) { offset += (t >> 16) & 0xf; break; }      /* SKIP */
             if ((t & 0x1f) > 15 || ((t >> 16) & 0xf) > 7) return fail(s, RbPsRegister, t);
@@ -1215,7 +1218,8 @@ static int fetch(PS *s, const unsigned int *decl, unsigned int count)
 }
 
 unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, const unsigned int *decl,
-                             unsigned int declCount, unsigned int flags, char *out, unsigned int size, RB_PS_INFO *info)
+                             unsigned int declCount, const unsigned int *streamBases, unsigned int flags, char *out,
+                             unsigned int size, RB_PS_INFO *info)
 {
     static const char *const prologue[] = {
         "UMAD TEMP[49].x, SV[0].xxxx, CONST[0].zzzz, CONST[0].wwww", "UARL ADDR[0].x, TEMP[49].xxxx",
@@ -1241,6 +1245,7 @@ unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, con
     info->samplers = info->coords = info->reason = info->detail = info->constants = 0;
     s.info = info;
     s.vertex = 1;
+    s.streamBases = streamBases;
     s.t.p = out; s.t.size = size;
     if (size) out[0] = 0;
     if (!count || (tokens[0] & 0xffff0000u) != 0xfffe0000u ||

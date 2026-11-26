@@ -1858,8 +1858,9 @@ by default until real programs have been checked with it.
 
 Microsoft's Direct3D 9 runtime passes vs_2_0 shaders through the Direct3D 8
 interface: each CreateVertexShader record holds a Direct3D 8 declaration
-(stream 0 only, the registers already assigned from the shader's `dcl`
-statements, which are removed from the code) followed by the code. The
+(stream 0 only while the driver offered one stream, the registers already
+assigned from the shader's `dcl` statements, which are removed from the
+code) followed by the code. The
 display driver keeps both and translates them at the first draw:
 
 - The vertices travel as the stream holds them. Each one is padded to whole
@@ -2184,6 +2185,26 @@ encodes a vector along x with a texture factor along x (white) and along y
 On XP SP3 under KVM on the second Intel UHD 630 host, case 53 passes and
 `d9pixels` passes 43 of 43. 3DMark 2001 SE's DOT3 Bump Mapping test, which
 reported "Not supported by hardware", now runs.
+
+## Vertex shaders with several streams
+
+With vertex shaders on, Direct3D 8 and 9 programs are offered 8 vertex
+streams (`MaxStreams`; fixed-function draws still read stream 0, as their
+vertex formats only describe one). The display driver keeps each stream's
+buffer and stride. A draw gathers, for every vertex, the data of each stream
+the shader's declaration names, one after the other, into the record the
+vertex program reads; `rb_vs_translate` gets the word at which each stream
+starts, and a `STREAM` token moves the declaration there. A shader's program
+is made again when the streams' strides, and with them those places,
+change. Each stream is range-checked and read from the same first vertex.
+This is one of the requirements of the Direct3D 9 driver interface (8
+streams for version 2.0 vertex shaders).
+
+`d9pixels` case 33 draws two quads whose positions come from one vertex
+buffer (stream 0) and colours from another (stream 1), starting at vertex 6.
+On XP SP3 under KVM on the second Intel UHD 630 host, with vertex shaders on,
+case 33 passes and `d9pixels` passes 53 of 53. The translations of DirectQ's
+shaders with one and two streams pass Mesa's TGSI parser.
 
 ## Release package
 

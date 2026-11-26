@@ -851,6 +851,60 @@ static void vertex_shaders(int only)
         vs_run("vs2_viewport", colored, vs, ps_color, v, sizeof(v[0]), 2, s, 4);
         IDirect3DDevice9_SetViewport(device, &full);
     }
+    if (!only || only == 33) {
+        /* Two streams: positions in stream 0, colours in stream 1, both vertex
+         * buffers with six unused vertices first, drawn from vertex 6: a red
+         * quad on the left and a green one on the right. */
+        static const D3DVERTEXELEMENT9 split[] = {
+            { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+            { 1, 0, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 }, D3DDECL_END() };
+        static const DWORD vs[] = { 0xfffe0200, VDCL2(0, 0), VDCL2(10, 1),
+            P2I(OMov, 2), P2D(VPos, 0, 15), P2SRC(RV, 0), P2I(OMov, 2), P2D(VAttr, 0, 15), P2SRC(RV, 1), PSEND };
+        static const SAMPLE s[] = { { 48, 64, 0xff0000 }, { 80, 64, 0x00ff00 }, { 8, 8, CLEAR_COLOR },
+                                    { 120, 120, CLEAR_COLOR } };
+        float pos[18][3];
+        DWORD col[18];
+        IDirect3DVertexDeclaration9 *decl = NULL;
+        IDirect3DVertexShader9 *vsh = NULL;
+        IDirect3DPixelShader9 *psh = NULL;
+        IDirect3DVertexBuffer9 *pvb = NULL, *cvb = NULL;
+        D3DCAPS9 dc;
+        HRESULT hr;
+        int k;
+        IDirect3DDevice9_GetDeviceCaps(device, &dc);
+        if (dc.MaxStreams < 2) printf("D9PIX streams not offered (%lu)\n", (unsigned long)dc.MaxStreams);
+        else {
+            vs_quad(v, 1, 1, 1, 1, 0xff0000ff);                 /* unused */
+            vs_quad(v + 6, -0.5f, 0.5f, 0, -0.5f, 0xffff0000);
+            vs_quad(v + 12, 0, 0.5f, 0.5f, -0.5f, 0xff00ff00);
+            for (k = 0; k < 18; ++k) { pos[k][0] = v[k].x; pos[k][1] = v[k].y; pos[k][2] = v[k].z; col[k] = v[k].color; }
+            pvb = vertex_buffer(pos, sizeof(pos), 0);
+            cvb = vertex_buffer(col, sizeof(col), 0);
+            hr = pvb && cvb ? IDirect3DDevice9_CreateVertexDeclaration(device, split, &decl) : E_FAIL;
+            if (SUCCEEDED(hr)) hr = IDirect3DDevice9_CreateVertexShader(device, vs, &vsh);
+            if (SUCCEEDED(hr)) hr = IDirect3DDevice9_CreatePixelShader(device, ps_color, &psh);
+            if (FAILED(hr)) fail_hr("vs2_streams", "create", hr);
+            else if (begin("vs2_streams")) {
+                IDirect3DDevice9_SetVertexDeclaration(device, decl);
+                IDirect3DDevice9_SetVertexShader(device, vsh);
+                IDirect3DDevice9_SetPixelShader(device, psh);
+                IDirect3DDevice9_SetStreamSource(device, 0, pvb, 0, sizeof(pos[0]));
+                IDirect3DDevice9_SetStreamSource(device, 1, cvb, 0, sizeof(col[0]));
+                hr = IDirect3DDevice9_DrawPrimitive(device, D3DPT_TRIANGLELIST, 6, 4);
+                IDirect3DDevice9_SetStreamSource(device, 0, NULL, 0, 0);
+                IDirect3DDevice9_SetStreamSource(device, 1, NULL, 0, 0);
+                IDirect3DDevice9_SetVertexShader(device, NULL);
+                IDirect3DDevice9_SetPixelShader(device, NULL);
+                if (FAILED(hr)) { fail_hr("vs2_streams", "draw", hr); IDirect3DDevice9_EndScene(device); }
+                else check("vs2_streams", s, 4);
+            }
+            if (psh) IDirect3DPixelShader9_Release(psh);
+            if (vsh) IDirect3DVertexShader9_Release(vsh);
+            if (decl) IDirect3DVertexDeclaration9_Release(decl);
+            if (pvb) IDirect3DVertexBuffer9_Release(pvb);
+            if (cvb) IDirect3DVertexBuffer9_Release(cvb);
+        }
+    }
     if (!only || only == 32) {
         /* vs_1_1: oPos = v0 (two floats); a0.x = the first byte of v1;
          * oD0 = c[a0.x]; oT0 = v2 (two shorts) times c10. ps_2_0 adds them. */

@@ -53,6 +53,8 @@ typedef struct {
     ULONG *decl, *tokens;
     ULONG program[2];
     BOOL failed[2];
+    ULONG streams;                          /* the streams the declaration reads, one bit each */
+    ULONG bases[2][RB_VS_STREAMS];          /* where each program places them (words) */
 } D8_VSHADER;
 /* A pixel program made from the texture stage states, for draws with a
  * vertex shader and no pixel shader: the states it was made from (seven
@@ -99,6 +101,7 @@ typedef struct {
      * index buffer. Only stream zero is offered. */
     BOOL dx8, streamUser;
     ULONG fvf, pixelShader, streamHandle, streamStride, indexHandle, indexStride;
+    ULONG streamHandles[RB_VS_STREAMS], streamStrides[RB_VS_STREAMS];   /* each stream; 0 as above */
     BOOL inScene, queued;
     ULONG minStart, maxEnd;     /* diagnostics for one command buffer */
     RB2K_D3D7_DRAW draw;        /* the batch being filled */
@@ -1890,21 +1893,35 @@ static void create_vshader(D7_CONTEXT *c, ULONG handle, const BYTE *decl, ULONG 
     vs->declCount = declBytes / 4;
     vs->tokens = vs->decl + vs->declCount;
     vs->tokenCount = codeBytes / 4;
+    /* The streams named by STREAM tokens (stream 0 when there is none). */
+    vs->streams = 0;
+    for (i = 0; i < vs->declCount && vs->decl[i] != 0xffffffff; ++i)
+        if (vs->decl[i] >> 29 == 1 && (vs->decl[i] & 0x1fffffff) < RB_VS_STREAMS) vs->streams |= 1UL << (vs->decl[i] & 0x1fffffff);
+    if (!vs->streams) vs->streams = 1;
 }
 
 /* The miniport program of a vertex shader with or without fog in the
- * specular alpha; zero when it cannot be made. */
-static ULONG vertex_program(D7_CONTEXT *c, D8_VSHADER *vs, ULONG flags)
+ * specular alpha, for streams placed at bases (words, see rb_vs_translate);
+ * zero when it cannot be made. A program is made again when the bases change. */
+static ULONG vertex_program(D7_CONTEXT *c, D8_VSHADER *vs, ULONG flags, const ULONG *bases)
 {
     RB2K_D7_DRAWSTATS *st = &c->display->d7draw;
     ULONG k = flags & RB_VS_FOG_ALPHA ? 1 : 0, n = 0, id = 0, written;
     RB_PS_INFO info;
+    for (n = 0; n < RB_VS_STREAMS && vs->bases[k][n] == bases[n]; ++n) {}
+    if (n < RB_VS_STREAMS) {
+        if (vs->program[k]) request(c->display, IOCTL_RB2K_D3D8_PROGRAM_FREE, &vs->program[k], sizeof(ULONG), NULL, 0);
+        vs->program[k] = 0;
+        vs->failed[k] = FALSE;
+        RtlCopyMemory(vs->bases[k], bases, sizeof(vs->bases[k]));
+    }
+    n = 0;
     if (vs->program[k] || vs->failed[k]) return vs->program[k];
     info.reason = RbPsOverflow;
     info.detail = 0;
     if (programScratch)
         n = rb_vs_translate((const unsigned int *)vs->tokens, vs->tokenCount, (const unsigned int *)vs->decl,
-                            vs->declCount, flags, programScratch->text, sizeof(programScratch->text), &info);
+                            vs->declCount, (const unsigned int *)bases, flags, programScratch->text, sizeof(programScratch->text), &info);
     if (n) {
         programScratch->samplers = 0;
         if (miniport(c->display, IOCTL_RB2K_D3D8_PROGRAM, programScratch, sizeof(ULONG) + n, &id, sizeof(id),
@@ -2208,9 +2225,13 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
     D8_SHADER *sh = find_shader(c, c->pixelShader), stages;
     DD_SLOT *s, *z;
     ULONG program = 0, vprogram = 0, fog = 0, flags = 0, stride = p->streamStride, words, i, t, count = 0;
-    ULONG low = 0xffffffff, high = 0, flat;
+    ULONG low = 0xffffffff, high = 0, flat, n, total = 0, mask = vs ? vs->streams : 1;
     ULONG *out;
-    const BYTE *base;
+    /* Each stream the declaration reads: its data from vertex zero on, its
+     * size from there, stride, and the word of the record it starts at. */
+    const BYTE *from[RB_VS_STREAMS];
+    LONGLONG bytes[RB_VS_STREAMS];
+    ULONG strides[RB_VS_STREAMS], bases[RB_VS_STREAMS];
     LONGLONG lo, hi;
     HRESULT hr = render_surfaces(c, &s, &z);
     if (FAILED(hr)) return hr;
@@ -2221,7 +2242,31 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
             fog = RB2K_D7_FOG_TABLE | c->fogTable << RB2K_D7_FOG_MODE_SHIFT | (c->wNear != c->wFar ? RB2K_D7_FOG_W : 0);
         else { fog = RB2K_D7_FOG_ALPHA; flags = RB_VS_FOG_ALPHA; }
     }
-    if (vs) vprogram = vertex_program(c, vs, flags);
+    /* Stream 0 is the draw's (a buffer, or the program's memory for
+     * DrawPrimitiveUP); the others are buffers, read from the same vertex on. */
+    RtlZeroMemory(bases, sizeof(bases));
+    for (n = 0; n < RB_VS_STREAMS; ++n) {
+        if (!(mask & (1UL << n))) continue;
+        if (!n) {
+            from[0] = p->streamData + p->streamFirst;
+            bytes[0] = (LONGLONG)p->streamBytes - p->streamFirst;
+            strides[0] = stride;
+        } else {
+            D8_BUFFER *b = c->streamUser ? NULL : find_buffer(c->local, c->streamHandles[n]);
+            LONGLONG first = stride ? (LONGLONG)(p->streamFirst / (LONG)stride) * c->streamStrides[n] : 0;
+            if (!b || b->owner != c->owner || !b->global->fpVidMem || first < 0) {
+                skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+                return DD_OK;
+            }
+            from[n] = (const BYTE *)b->global->fpVidMem + first;
+            bytes[n] = (LONGLONG)b->global->dwLinearSize - first;
+            strides[n] = c->streamStrides[n];
+        }
+        if (!strides[n] || strides[n] % 4 || strides[n] > 256) { skip(c, RB2K_D7_SKIP_VERTEX, p->primitives); return DD_OK; }
+        bases[n] = total / 4;
+        total += strides[n];
+    }
+    if (vs) vprogram = vertex_program(c, vs, flags, bases);
     if (sh) program = shader_program(c, sh, stage_kinds(c, sh->samplers, fog));
     else {
         /* The fixed-function pixel stages after the vertex shader (which do
@@ -2231,8 +2276,8 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
         sh = &stages;
         d->d7draw.vsStageDraws += p->primitives;
     }
-    words = (stride + 15) / 16 * 4;
-    if (!vprogram || !program || !p->stream || stride % 4 || words > RB2K_D8_VS_VERTEX_WORDS || vs->words > stride / 4) {
+    words = (total + 15) / 16 * 4;
+    if (!vprogram || !program || !p->stream || words > RB2K_D8_VS_VERTEX_WORDS || vs->words > total / 4) {
         skip(c, vprogram && program ? RB2K_D7_SKIP_VERTEX : RB2K_D7_SKIP_COMBINER, p->primitives);
         return DD_OK;
     }
@@ -2266,22 +2311,26 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
             if (v < low) low = v;
             if (v > high) high = v;
         }
-    lo = p->streamFirst + (LONGLONG)low * stride;
-    hi = p->streamFirst + (LONGLONG)high * stride + stride;
-    if (lo < 0 || hi > p->streamBytes) {
-        ++d->d7draw.beyondCalls;
-        d->d7draw.beyondVertices += p->primitives;
-        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
-        return DD_OK;
+    for (n = 0; n < RB_VS_STREAMS; ++n) {
+        if (!(mask & (1UL << n))) continue;
+        lo = (LONGLONG)low * strides[n] + (n ? 0 : p->streamFirst);
+        hi = (LONGLONG)high * strides[n] + strides[n];
+        if (lo < 0 || hi > bytes[n]) {
+            ++d->d7draw.beyondCalls;
+            d->d7draw.beyondVertices += p->primitives;
+            skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+            return DD_OK;
+        }
     }
-    base = p->streamData + p->streamFirst;
     __try {
-        EngProbeForRead((PVOID)(base + low * stride), (high - low + 1) * stride, 1);
+        for (n = 0; n < RB_VS_STREAMS; ++n)
+            if (mask & (1UL << n)) EngProbeForRead((PVOID)(from[n] + low * strides[n]), (high - low + 1) * strides[n], 1);
         for (t = 0; t < p->primitives; ++t) {
             for (i = 0; i < 3; ++i) {
-                ULONG *o = out + (count + i) * words;
-                RtlCopyMemory(o, base + prim_vertex(p, t, i, &flat) * stride, stride);
-                RtlZeroMemory((BYTE *)o + stride, words * 4 - stride);
+                ULONG *o = out + (count + i) * words, v = prim_vertex(p, t, i, &flat);
+                for (n = 0; n < RB_VS_STREAMS; ++n)
+                    if (mask & (1UL << n)) RtlCopyMemory(o + bases[n], from[n] + v * strides[n], strides[n]);
+                RtlZeroMemory((BYTE *)o + total, words * 4 - total);
             }
             count += 3;
             if (count == RB2K_D8_VERTICES || t + 1 == p->primitives) {
@@ -3151,7 +3200,11 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             if (used > remaining) return DDERR_INVALIDPARAMS;
             trace8(c, a, h->bCommand, n, p, remaining);
             for (; n; --n, ++s)
-                if (!s->stream) { c->streamUser = FALSE; c->streamHandle = s->handle; c->streamStride = s->stride; }
+                if (s->stream < RB_VS_STREAMS) {
+                    c->streamHandles[s->stream] = s->handle;
+                    c->streamStrides[s->stream] = s->stride;
+                    if (!s->stream) { c->streamUser = FALSE; c->streamHandle = s->handle; c->streamStride = s->stride; }
+                }
             break;
         }
         case RbDp2SetStreamSourceUm: {
@@ -3160,7 +3213,7 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             if (used > remaining) return DDERR_INVALIDPARAMS;
             trace8(c, a, h->bCommand, n, p, remaining);
             for (; n; --n, ++s)
-                if (!s->stream) { c->streamUser = TRUE; c->streamHandle = 0; c->streamStride = s->stride; }
+                if (!s->stream) { c->streamUser = TRUE; c->streamHandle = 0; c->streamStride = s->stride; c->streamHandles[0] = 0; c->streamStrides[0] = s->stride; }
             break;
         }
         case RbDp2SetIndices: {
@@ -3586,7 +3639,8 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     c->maxPointSize = 0x3f800000;                       /* 1 */
     c->maxPrimitiveCount = 0xffff;
     c->maxVertexIndex = 0xffff;
-    c->maxStreams = 1;
+    /* More streams only for vertex shaders, whose declarations say where each is read. */
+    c->maxStreams = d->vertexShaders ? RB_VS_STREAMS : 1;
     c->maxStreamStride = 255;
     c->vertexShaderVersion = 0xfffe0000;            /* version 0.0 */
     if (d->vertexShaders) {

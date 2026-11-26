@@ -60,8 +60,8 @@ typedef struct {
 unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, unsigned int fog, char *out,
                              unsigned int size, RB_PS_INFO *info);
 
-/* Vertex shaders (vs_1_1, vs_2_0) with their Direct3D 8 declaration (one
- * stream), as a TGSI vertex shader for the layout in d3d8_ps.c: constants
+/* Vertex shaders (vs_1_1, vs_2_0) with their Direct3D 8 declaration, as a
+ * TGSI vertex shader for the layout in d3d8_ps.c: constants
  * c0..c255 at CONST[RB_VS_CONST_BASE..], then up to RB_VS_VERTICES vertices
  * of at most RB_VS_VERTEX_CONSTANTS constants each. RB_VS_FOG_ALPHA puts
  * oFog into the specular alpha, where fog from the specular alpha finds it. */
@@ -70,8 +70,13 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
 #define RB_VS_VERTICES 48
 #define RB_VS_VERTEX_CONSTANTS 16
 #define RB_VS_FOG_ALPHA 1
+/* A vertex holds the data of each stream the declaration reads, one after the
+ * other: streamBases[n] is the word at which stream n starts (NULL: stream 0
+ * only, at word 0). */
+#define RB_VS_STREAMS 8
 unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, const unsigned int *decl,
-                             unsigned int declCount, unsigned int flags, char *out, unsigned int size, RB_PS_INFO *info);
+                             unsigned int declCount, const unsigned int *streamBases, unsigned int flags, char *out,
+                             unsigned int size, RB_PS_INFO *info);
 
 /* Fixed-function texture stages (D3DTSS colour and alpha operations and
  * arguments, the coordinate index) as a TGSI pixel program with the inputs of
