@@ -231,6 +231,8 @@ BOOLEAN rb_gpu_transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resour
 BOOLEAN rb_gpu_copy_rects(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG destination,
                           ULONG source, const RB2K_RECT *rects, ULONG count,
                           LONG originX, LONG originY, RB2K_GL_PROFILE *profile);
+BOOLEAN rb_gpu_blit_rect(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG destination, ULONG source,
+                         const RB2K_RECT *to, const RB2K_RECT *from, BOOLEAN linear);
 BOOLEAN rb_gpu_primary_transfer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
                                 const RB2K_RECT *rect, BOOLEAN readback);
 VP_STATUS rb_gpu_inline_uploads(RB2K_GPU *gpu, const RB2K_RECT *rects, ULONG count);

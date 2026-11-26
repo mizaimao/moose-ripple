@@ -1721,6 +1721,43 @@ static void rt_cases(int only)
         if (back) { IDirect3DSurface9_Release(back); back = NULL; }
         if (whole) IDirect3DTexture9_Release(whole);
     }
+    /* 59: StretchRect of the whole back buffer (red left, green right) into the 64x64 texture with
+     * linear filtering, then the texture drawn over the back buffer. */
+    D3DCAPS9 dc;
+    if (FAILED(IDirect3DDevice9_GetDeviceCaps(device, &dc)) || (~dc.StretchRectFilterCaps & (D3DPTFILTERCAPS_MINFLINEAR | D3DPTFILTERCAPS_MAGFLINEAR)))
+        printf("D9PIX linear StretchRect not offered\n");
+    else if (!only || only == 59) {
+        static const SAMPLE h[] = { { 16, 64, 0xff0000 }, { 112, 64, 0x00ff00 }, { 8, 8, 0xff0000 }, { 120, 120, 0x00ff00 } };
+        IDirect3DTexture9_GetSurfaceLevel(texture, 0, &surface);
+        IDirect3DDevice9_GetRenderTarget(device, 0, &back);
+        if (begin("stretch_linear")) {
+            IDirect3DDevice9_SetTexture(device, 0, NULL);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+            IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+            quad(half, 0, 0, 64, Side, 0xffff0000);
+            IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, half, sizeof(half[0]));
+            quad(half, 64, 0, Side, Side, 0xff00ff00);
+            IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, half, sizeof(half[0]));
+            IDirect3DDevice9_EndScene(device);
+            hr = IDirect3DDevice9_StretchRect(device, back, NULL, surface, NULL, D3DTEXF_LINEAR);
+            if (FAILED(hr)) fail_hr("stretch_linear", "stretch", hr);
+            else if (begin("stretch_linear")) {
+                IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)texture);
+                IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+                IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+                IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+                IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1);
+                hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+                IDirect3DDevice9_SetTexture(device, 0, NULL);
+                IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+                if (FAILED(hr)) { fail_hr("stretch_linear", "draw", hr); IDirect3DDevice9_EndScene(device); }
+                else check("stretch_linear", h, 4);
+            }
+        }
+        if (surface) { IDirect3DSurface9_Release(surface); surface = NULL; }
+        if (back) { IDirect3DSurface9_Release(back); back = NULL; }
+    }
     IDirect3DTexture9_Release(texture);
 }
 
