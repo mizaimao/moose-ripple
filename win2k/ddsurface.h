@@ -92,6 +92,9 @@ typedef struct {
     ULONG transform;                /* 0 transformed, 1 object space, 2 vertex program */
     ULONG matrices[3][16];
     ULONG viewport[6];
+    /* The Direct3D 9 scissor test: when scissorOn, only pixels inside the rectangle (left, top,
+     * right, bottom, at most 8192) are drawn, as well as inside the viewport. */
+    ULONG scissorOn, scissor[4];
     ULONG vertexProgram, vertexConstants, vertexWords;   /* transform 2 */
     /* Lighting as in RB2K_D3D7_DRAW (object space only); specular adds
      * the lit specular colour. */
