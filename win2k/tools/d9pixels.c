@@ -1493,6 +1493,10 @@ int main(int argc, char **argv)
            (unsigned long)caps.MaxStreamStride, (unsigned long)caps.MaxPrimitiveCount,
            (unsigned long)caps.MaxVertexIndex, (unsigned long)caps.MaxTextureBlendStages,
            (unsigned long)caps.MaxSimultaneousTextures);
+    /* 69: the immediate present interval (the driver's D3DCAPS2_PRESENT_INTERVAL_IMMEDIATE). */
+    printf("D9PIX case=interval_immediate samples=1 mismatches=%d\n",
+           caps.PresentationIntervals & D3DPRESENT_INTERVAL_IMMEDIATE ? 0 : 1);
+    if (caps.PresentationIntervals & D3DPRESENT_INTERVAL_IMMEDIATE) ++passes; else ++failures;
     IDirect3D9_GetAdapterDisplayMode(d3d, D3DADAPTER_DEFAULT, &mode);
     window = CreateWindowA("STATIC", "d9pixels", WS_POPUP | WS_VISIBLE, 0, 0, Side, Side, NULL, NULL, NULL, NULL);
     memset(&pp, 0, sizeof(pp));
