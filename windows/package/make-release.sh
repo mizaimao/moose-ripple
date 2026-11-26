@@ -6,6 +6,9 @@
 #   WDK_VISTA_LIBS  the WDK's Vista import libraries (lib/wlh), when unpacked apart from the kit
 #   VISTA_WINDOWS   a Vista SP2 Windows directory: the Vista binaries' imports are checked
 #                   against it (tools/vista/audit-imports.py)
+#   REPACK=1        keep the binaries of an earlier run in OUT as built and signed (no build is
+#                   the same twice: the kernel driver has its build time inside) and make only
+#                   the INFs, the texts and the archive anew
 # Result: OUT/moose-ripple-vista7-VERSION.zip and OUT/SHA256SUMS.txt.
 #
 # Signing. 64-bit Windows loads a kernel driver only when it is signed. This package is signed
@@ -69,6 +72,9 @@ fetch compiler-rt.txt $llvm/compiler-rt/LICENSE.TXT 1a8f1058753f1ba890de984e48f0
 fetch blake3.txt https://raw.githubusercontent.com/BLAKE3-team/BLAKE3/1.5.1/LICENSE \
     6a94bedb8b707ed97f6e310d0d015ab14e0683ffa0a612b02958581b9cc9fc0e
 
+stage=$OUT/$name
+crlf() { sed -e 's/\r$//' -e 's/$/\r/' "$1" >"$2"; }
+if [ -z "${REPACK:-}" ]; then
 # 1. Build: the kernel driver and the user-mode driver (64-bit and 32-bit) for each system.
 echo "== kernel driver, Vista"
 if [ -n "$vista_libs" ]; then
@@ -87,12 +93,8 @@ for t in vista win7; do
 done
 
 # 2. The package folder.
-stage=$OUT/$name
 rm -rf "$stage"
 mkdir -p "$stage/vista" "$stage/win7"
-crlf() { sed -e 's/\r$//' -e 's/$/\r/' "$1" >"$2"; }
-crlf "$here/vista/viogpu3d.inf" "$stage/vista/viogpu3d.inf"
-crlf "$here/viogpu3d.inf" "$stage/win7/viogpu3d.inf"
 for t in vista win7; do
     cp "$OUT/kmd-$t/amd64/viogpu3d.sys" "$stage/$t/viogpu3d.sys"
     cp "$T/mesa/out-$t-x64-virgl/viogpu_d3d10.dll" "$stage/$t/viogpu_d3d10.dll"
@@ -103,12 +105,18 @@ if [ -n "${VISTA_WINDOWS:-}" ]; then
     "$PY" -I "$root/tools/vista/audit-imports.py" "$stage/vista" "$VISTA_WINDOWS" "$T/mesa/src-24.3.4-vista-virgl"
 fi
 
+fi
+crlf "$here/vista/viogpu3d.inf" "$stage/vista/viogpu3d.inf"
+crlf "$here/viogpu3d.inf" "$stage/win7/viogpu3d.inf"
+
 # 3. Sign the kernel drivers.
 for t in vista win7; do
     f=$stage/$t/viogpu3d.sys
+    if [ -z "${REPACK:-}" ]; then
     "$OSC" sign -certs "$C/cert.pem" -key "$C/key.pem" -h sha1 -n "moose-ripple display driver" \
         -i https://github.com/mizaimao/moose-ripple -in "$f" -out "$f.signed" >/dev/null
     mv "$f.signed" "$f"
+    fi
     "$OSC" verify -in "$f" -CAfile "$C/cert.pem" >"$OUT/verify-$t.txt" 2>&1 || true
     grep -q "^Signature verification: ok" "$OUT/verify-$t.txt" || { cat "$OUT/verify-$t.txt" >&2; die "$f: signature check failed"; }
     grep -q "Message digest algorithm *: SHA1" "$OUT/verify-$t.txt" || die "$f: the signature is not SHA-1"
