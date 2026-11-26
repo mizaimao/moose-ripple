@@ -258,6 +258,13 @@ The run is unattended, because the card's picture cannot be seen from the host:
   file, because Vista's PowerShell 1.0 does not run the script), writes everything to the first serial port
   and to R:, and shuts Windows down. The helpers it uses are the `bench-*.c` programs in the
   same folder (built with llvm-mingw like the other test programs).
+- `auto.cmd` calls `env.cmd` before the run and `post.cmd` after it when they are next to it on
+  the CD. The sets in `tools/win7-bench`: `timing` (the driver's timing report into a file of
+  the run's name on R:), `swap` (test builds of the user-mode driver, `umd32-test.dll` and
+  `umd64-test.dll` beside it, put in place of the installed files first, with the timing
+  report), `profile` (the timing report, the command statistics and the module lists for a
+  sampled run) and `pixeltests` (the Direct3D 9 pixel tests of the CD's `tests` folder
+  instead of the benchmark, then a shutdown; it takes the same test builds).
 - 3DMark06's free edition shows no score without the vendor's web site. With `key.txt` (a
   registration code, one line) beside the scripts, `bench-reg.exe` enters it through the
   program's own dialog; it prints window titles only. Keep that file off any shared medium
