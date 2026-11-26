@@ -1134,6 +1134,41 @@ static void cube_cases(int only, BOOL version2)
         }
         IDirect3DPixelShader9_Release(handle);
     }
+    /* 71: a render target cube map (64x64), each face cleared to its colour as a render target, then
+     * sampled the same way (3DMark05 draws its reflections into one). */
+    if ((!only || only == 71) && version2) {
+        IDirect3DCubeTexture9 *rt = NULL;
+        IDirect3DPixelShader9 *handle = NULL;
+        IDirect3DSurface9 *back = NULL;
+        HRESULT hr = IDirect3DDevice9_CreateCubeTexture(device, 64, 1, D3DUSAGE_RENDERTARGET, D3DFMT_X8R8G8B8,
+                                                        D3DPOOL_DEFAULT, &rt, NULL);
+        if (SUCCEEDED(hr)) hr = IDirect3DDevice9_CreatePixelShader(device, ps2, &handle);
+        if (FAILED(hr)) fail_hr("cube_rt", "create", hr);
+        else {
+            IDirect3DDevice9_GetRenderTarget(device, 0, &back);
+            for (face = 0; face < 6 && SUCCEEDED(hr); ++face) {
+                IDirect3DSurface9 *f = NULL;
+                hr = IDirect3DCubeTexture9_GetCubeMapSurface(rt, (D3DCUBEMAP_FACES)face, 0, &f);
+                if (SUCCEEDED(hr)) hr = IDirect3DDevice9_SetRenderTarget(device, 0, f);
+                if (SUCCEEDED(hr)) hr = IDirect3DDevice9_Clear(device, 0, NULL, D3DCLEAR_TARGET, colors[face], 1.0f, 0);
+                if (f) IDirect3DSurface9_Release(f);
+            }
+            IDirect3DDevice9_SetRenderTarget(device, 0, back);
+            if (FAILED(hr)) fail_hr("cube_rt", "face", hr);
+            else if (begin("cube_rt")) {
+                IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)rt);
+                IDirect3DDevice9_SetPixelShader(device, handle);
+                IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE3(0));
+                hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 12, v, sizeof(v[0]));
+                IDirect3DDevice9_SetPixelShader(device, NULL);
+                if (FAILED(hr)) { fail_hr("cube_rt", "draw", hr); IDirect3DDevice9_EndScene(device); }
+                else check("cube_rt", s, 7);
+            }
+            if (back) IDirect3DSurface9_Release(back);
+        }
+        if (handle) IDirect3DPixelShader9_Release(handle);
+        if (rt) { IDirect3DDevice9_SetTexture(device, 0, NULL); IDirect3DCubeTexture9_Release(rt); }
+    }
     IDirect3DDevice9_SetTexture(device, 0, NULL);
     IDirect3DCubeTexture9_Release(cube);
 }

@@ -749,6 +749,26 @@ BOOLEAN rb_gpu_copy_rects(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG destinat
     return ok;
 }
 
+/* A square colour image into layer (a cube face) of a host texture, in the image's own context, to
+ * which the texture is attached. */
+BOOLEAN rb_gpu_copy_layer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG image, ULONG texture, ULONG layer, ULONG side)
+{
+    COPY_PACKET *p = (COPY_PACKET *)gpu->copyPacket.bytes;
+    ULONG *w = p->command[0];
+    VideoPortZeroMemory(p, sizeof(p->submit) + sizeof(p->command[0]));
+    p->submit.hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    p->submit.hdr.ctx_id = image;
+    p->submit.size = sizeof(p->command[0]);
+    w[0] = VIRGL_CMD0(VIRGL_CCMD_RESOURCE_COPY_REGION, 0, VIRGL_CMD_RESOURCE_COPY_REGION_SIZE);
+    w[VIRGL_CMD_RCR_DST_RES_HANDLE] = texture;
+    w[VIRGL_CMD_RCR_DST_Z] = layer;
+    w[VIRGL_CMD_RCR_SRC_RES_HANDLE] = image;
+    w[VIRGL_CMD_RCR_SRC_W] = side;
+    w[VIRGL_CMD_RCR_SRC_H] = side;
+    w[VIRGL_CMD_RCR_SRC_D] = 1;
+    return fenced(gpu, result, &p->submit.hdr, sizeof(p->submit) + sizeof(p->command[0]), RB2K_STAGE_TRANSFER);
+}
+
 BOOLEAN rb_gpu_destroy_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id)
 {
     PIXEL_REQUEST request;

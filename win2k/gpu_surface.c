@@ -685,6 +685,59 @@ static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     return NO_ERROR;
 }
 
+/* IOCTL_RB2K_D7_CUBE_SYNC: the host cube texture of a cube map render target, made when asked for
+ * the first time, and the faces in mask copied into it from their images. */
+static VP_STATUS cube_sync(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
+{
+    const RB2K_D7_CUBE_SYNC *in = packet->InputBuffer;
+    RB2K_GPU_RESULT result;
+    RB2K_TEXTURE *t;
+    RB2K_IMAGE *faces[6];
+    ULONG f;
+    if (!gpu->nativeD3D7 || !gpu->ddGpuSurfaces) return ERROR_NOT_SUPPORTED;
+    if (packet->InputBufferLength != sizeof(*in) || packet->OutputBufferLength < sizeof(ULONG) ||
+        !in->side || in->side > RB2K_D7_TEXTURE_SIDE || in->mask > 63) return ERROR_INVALID_PARAMETER;
+    for (f = 0; f < 6; ++f) {
+        faces[f] = find_image(gpu, in->images[f]);
+        if (!faces[f] || faces[f]->depth16 || faces[f]->width != in->side || faces[f]->height != in->side)
+            return ERROR_INVALID_HANDLE;
+        if (faces[f]->frameFailed) return ERROR_INVALID_DATA;
+    }
+    if (in->texture) {
+        t = rb_gpu_texture(gpu, in->texture);
+        if (!t || t->faces != 6 || t->width != in->side || t->levels != 1 || t->format) return ERROR_INVALID_HANDLE;
+    } else {
+        ULONG i, size = in->side * in->side * 4 * 6;
+        if (gpu->nextId == 0xffffffffUL) return ERROR_NO_MORE_ITEMS;
+        for (i = 0; i < RB2K_D7_TEXTURES && gpu->textures[i].id; ++i) {}
+        if (i == RB2K_D7_TEXTURES || size > RB2K_D7_TEXEL_BUDGET - gpu->textureBytes) return ERROR_NOT_ENOUGH_MEMORY;
+        t = &gpu->textures[i];
+        t->id = ++gpu->nextId;
+        t->width = t->height = in->side;
+        t->levels = 1;
+        t->bytes = size;
+        t->format = 0;   /* B8G8R8A8, as the images */
+        t->faces = 6;
+        t->depth = 1;
+        if (!rb_gpu_texture_create(gpu, &result, t)) {
+            VideoPortZeroMemory(t, sizeof(*t));
+            return command_error(gpu, &result);
+        }
+        ++gpu->textureCount;
+        gpu->textureBytes += size;
+    }
+    for (f = 0; f < 6; ++f) {
+        if (!((in->mask >> f) & 1)) continue;
+        /* What was drawn into the face goes first, in the face's own context. */
+        if (gpu->d7Frame.target == faces[f] && !rb_gpu_frame_flush(gpu, &result)) return command_error(gpu, &result);
+        if (!rb_gpu_texture_attach(gpu, &result, t, faces[f]) ||
+            !rb_gpu_copy_layer(gpu, &result, faces[f]->id, t->id, f, in->side)) return command_error(gpu, &result);
+    }
+    *(PULONG)packet->OutputBuffer = t->id;
+    packet->StatusBlock->Information = sizeof(ULONG);
+    return NO_ERROR;
+}
+
 VP_STATUS rb_gpu_surface_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 {
     VP_STATUS status;
@@ -745,6 +798,7 @@ VP_STATUS rb_gpu_surface_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         }
         if (packet->IoControlCode == IOCTL_RB2K_D3D7_TEXTURE ||
             packet->IoControlCode == IOCTL_RB2K_D3D7_TEXTURE_FREE) status = texture_request(gpu, packet);
+        else if (packet->IoControlCode == IOCTL_RB2K_D7_CUBE_SYNC) status = cube_sync(gpu, packet);
         else if (packet->IoControlCode == IOCTL_RB2K_D3D8_PROGRAM ||
                  packet->IoControlCode == IOCTL_RB2K_D3D8_PROGRAM_FREE) status = program_request(gpu, packet);
         else status = image_request(gpu, packet);
