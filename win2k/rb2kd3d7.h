@@ -36,6 +36,7 @@ typedef struct {
      * host object destroyed and made again); host shaders made and their text. */
     ULONG caches[RB2K_CACHE_KINDS][3];
     ULONG shaders, shaderBytes;
+    ULONG codeAt;       /* where rb_gpu_frame_reserve was loaded, to place samples */
 } RB2K_D7_PROFILE;
 enum { RB2K_D7_SITE_RECORD = 1, RB2K_D7_SITE_PROGRAM, RB2K_D7_SITE_DEPTH, RB2K_D7_SITE_TEXTURE,
        RB2K_D7_SITE_VERTEX, RB2K_D7_SITE_COMMAND, RB2K_D7_SITE_STEP = 16 };   /* STEP + step in the draw */
@@ -168,6 +169,7 @@ typedef struct {
     /* Least-recently-used eviction: host textures freed to make room, new
      * textures that needed it, and the last refusal's status. */
     ULONG evictions, evictedCreates, roomStatus;
+    ULONG codeAt;       /* where rb_d7_drawstats was loaded, to place samples */
 } RB2K_D7_DRAWSTATS;
 enum { RB2K_D7_FAIL_RANGE, RB2K_D7_FAIL_VBCAPS, RB2K_D7_FAIL_LINEAR, RB2K_D7_FAIL_ADDRESS,
        RB2K_D7_FAIL_PROBE, RB2K_D7_FAIL_IMMEDIATE, RB2K_D7_FAIL_LENGTH, RB2K_D7_FAIL_OTHER };

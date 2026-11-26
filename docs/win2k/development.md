@@ -2648,6 +2648,17 @@ such as a Penryn model or TCG), can only skew the printed times. Spinning the
 wait loops on the cycle counter instead of the HAL's stall was tried and
 measured no faster (5911 to 5935), so the waits keep the HAL's stall.
 
+A guest profile: the host samples the guest's instruction addresses (`perf
+record -e cycles:G` on QEMU, read with `perf script --guestkallsyms` given an
+empty file), placed in the two drivers with link maps (`RIPPLE_LINK_MAP=1`
+for `build.py`) and the drivers' load addresses. In 3DMark 2001 SE the
+guest's time went to small per-vertex functions: `shader_triangles` 33%, the
+miniport's Direct3D 8 draw 13%, colour conversion 8%, `prim_vertex` 7%,
+`bad_position` 3%, memory copies 5%, the HAL and kernel about 12%. The drivers
+were built with `-Os`, which inlines almost nothing; with `-O2` 3DMark 2001 SE
+went from 5911 to 6311 (timed, host alone). The largest stack frames are the
+same either way (about 2.9 KB, in the miniport).
+
 
 ## Release package
 

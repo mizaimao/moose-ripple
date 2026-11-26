@@ -56,7 +56,7 @@ def header_overlay(work):
 
 
 def build_kernel(work, overlay, target, modules, includes, definitions, libraries, link_flags):
-    compiler = [bin_dir / "clang", "-target", "i686-pc-windows-msvc", "-std=gnu89", "-Os",
+    compiler = [bin_dir / "clang", "-target", "i686-pc-windows-msvc", "-std=gnu89", "-O2",
                 "-ffreestanding", "-fno-stack-protector", "-fms-extensions", "-fms-compatibility",
                 "-fms-compatibility-version=12", "-mno-sse", "-mno-sse2", "-mno-mmx",
                 "-Xclang", "-fdefault-calling-conv=stdcall", "-ivfsoverlay", overlay,
@@ -72,6 +72,7 @@ def build_kernel(work, overlay, target, modules, includes, definitions, librarie
     subprocess.run([bin_dir / "lld-link", "/machine:x86", "/subsystem:native,5.00", "/osversion:5.0",
                     "/nodefaultlib", "/safeseh:no", f"/timestamp:{stamp}", "/release",
                     "/libpath:" + str(ddk / "libfre/i386"), "/out:" + str(work / target)]
+                   + ([f"/map:{work / target}.map"] if os.environ.get("RIPPLE_LINK_MAP") else [])
                    + link_flags + objects + libraries, check=True)
 
 
@@ -184,6 +185,10 @@ def main():
         (work / "rb2k.inf").write_bytes((source / "rb2k.inf").read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
         for target in ["rb2kmp.sys", "rb2kdisp.dll", "rb2k.inf", *programs]:
             (work / target).replace(dest / target)
+        if os.environ.get("RIPPLE_LINK_MAP"):
+            # Link maps of the two drivers, to place guest samples (RIPPLE_LINK_MAP=1).
+            for target in ["rb2kmp.sys.map", "rb2kdisp.dll.map"]:
+                (work / target).replace(dest / target)
 
 
 if __name__ == "__main__":
