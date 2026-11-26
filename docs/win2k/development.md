@@ -2700,7 +2700,10 @@ turns instead of working at once. The reads were the driver's own time stamps
 (`KeQueryPerformanceCounter`, `EngQueryPerformanceCounter`). They now come
 from the processor's cycle counter (`rb_counter_ticks`, `cycles` in the
 display driver), whose rate is measured against the performance counter when
-the counters are reported. 3DMark 2001 SE went from 5446 to 5911 (timed, host
+the counters are reported. Once a second or more has been measured the rate
+is kept, and the first stamp is taken when the driver starts: `d3d7probe`
+compares the rates of two flight reports, and failed after its pixel checks
+while every report measured a slightly different rate. 3DMark 2001 SE went from 5446 to 5911 (timed, host
 alone); draw requests waited 15 s to queue in a run instead of 85 s.
 
 The time stamps decide nothing but these statistics: every timeout and wait
