@@ -18,7 +18,7 @@ and Direct3D 7-era programs through Windows' own layers, video playback
 (Windows Media Player, DreamScene on Vista), gamma ramps on Windows 7, and
 recovery after a GPU timeout. 3DMark06 runs all six of its tests on both.
 
-OpenGL, in the version after 0.4.0: 64-bit and 32-bit programs get Mesa's
+OpenGL, since 0.5.0: 64-bit and 32-bit programs get Mesa's
 OpenGL on the host's graphics card (OpenGL 4.3 on a Linux host with a desktop
 GPU, 2.1 on a host that offers OpenGL ES) in place of Windows' software
 OpenGL 1.1. OpenArena runs.
@@ -34,8 +34,6 @@ Not yet:
 - Sleep and hibernation: the picture does not come back. The Windows 7
   package switches both off for the machine; on Vista switch them off
   yourself.
-- On Windows 7, Direct3D 9 user clip planes (a program's own cut-off planes,
-  as some games use for water reflections) are not applied; Vista has them.
 - More than one screen.
 - 32-bit Windows.
 
@@ -104,7 +102,7 @@ certificate stores.
 5. Close the wizard and let Windows restart.
 
 After the restart Device Manager lists the adapter as "moose-ripple
-virtio-gpu 3D", version 0.4.0.0. In both test installs Aero came on by itself.
+virtio-gpu 3D", version 0.5.0.0. In both test installs Aero came on by itself.
 If it does not, choose an Aero theme in Personalization; on Windows 7,
 re-running the Windows Experience Index assessment also turns it on.
 
