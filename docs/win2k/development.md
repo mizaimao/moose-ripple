@@ -2151,6 +2151,25 @@ remains: the runtime refuses that volume before it reaches the display
 driver (no surface was refused), so its format or size is still another
 one the device does not offer.
 
+## Colour write mask: 3DMark03's shadow volumes
+
+Direct3D 8 and 9 programs draw stencil shadow volumes with
+`D3DRS_COLORWRITEENABLE` at zero: the volumes only count into the stencil
+buffer. The display driver ignored that state, so 3DMark03's game tests 2
+and 3 showed the volumes as large white and black polygons. The display
+driver now passes the channels not written in the blend word (bits 20 to 23),
+for fixed-function draws and draws with shaders alike, and the miniport turns
+them into the blend state's colour mask; the mask also applies without
+blending. Direct3D 8 and 9 are offered `D3DPMISCCAPS_COLORWRITEENABLE`.
+`d9pixels` case 50 draws white quads over the clear colour, one with only
+red written and one with nothing written, and checks that the first keeps
+the clear colour's green and blue and the second all of it.
+
+On XP SP3 under KVM on the second Intel UHD 630 host, case 50 passes and
+3DMark03's game tests 2 and 3 no longer show the polygons: the face in
+Troll's Lair is shaded by its shadows. Game test 2 is still darker than it
+should be, and the water in game test 4 is still white.
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:

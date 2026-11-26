@@ -561,8 +561,8 @@ BOOLEAN rb_gpu_d7_valid(const RB2K_D3D7_DRAW *d)
         d->depthState > (RB2K_Z_ENABLE | RB2K_Z_WRITE | 7))) return FALSE;
     if (d->alphaTest && ((d->alphaTest & ~(RB2K_D7_ON | 0xfff)) ||
         ((d->alphaTest >> 8) & 15) < 1 || ((d->alphaTest >> 8) & 15) > 8)) return FALSE;
-    if (d->blend && ((d->blend & ~(RB2K_D7_ON | RB2K_BLEND_DEST_ALPHA | 0xffff)) ||
-        !blend_valid((d->blend >> 8) & 255) || !blend_valid(d->blend & 255))) return FALSE;
+    if ((d->blend & ~(RB2K_D7_ON | RB2K_BLEND_DEST_ALPHA | RB2K_BLEND_NO_WRITE | 0xffff)) ||
+        ((d->blend & RB2K_D7_ON) && (!blend_valid((d->blend >> 8) & 255) || !blend_valid(d->blend & 255)))) return FALSE;
     if (d->cull < CullNone || d->cull > CullCcw || d->specular > 1) return FALSE;
     if (d->transform > 1 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
         d->viewport[0] > 8192 || d->viewport[1] > 8192 || d->viewport[2] > 8192 || d->viewport[3] > 8192)))
@@ -710,11 +710,12 @@ static BOOLEAN fixed_states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image
     key[0] = blend;
     slot = cache_slot(&s->blend, RB2K_D7_BLEND_KEYS, key, 1, &state);
     if (state != Hit) {
-        ULONG src = (blend >> 8) & 255, dst = blend & 255, rt = VIRGL_OBJ_BLEND_S2_RT_COLORMASK(15);
+        ULONG src = (blend >> 8) & 255, dst = blend & 255;
+        ULONG rt = VIRGL_OBJ_BLEND_S2_RT_COLORMASK(15 & ~(blend >> RB2K_BLEND_NO_WRITE_SHIFT));
         BOOLEAN alpha = (blend & RB2K_BLEND_DEST_ALPHA) != 0;
         if (src == 12) { src = 5; dst = 6; }        /* both source alpha */
         else if (src == 13) { src = 6; dst = 5; }   /* both inverse source alpha */
-        if (blend) rt |= VIRGL_OBJ_BLEND_S2_RT_BLEND_ENABLE(1) |
+        if (blend & RB2K_D7_ON) rt |= VIRGL_OBJ_BLEND_S2_RT_BLEND_ENABLE(1) |
             VIRGL_OBJ_BLEND_S2_RT_RGB_SRC_FACTOR(pipe_blend(src, alpha)) |
             VIRGL_OBJ_BLEND_S2_RT_RGB_DST_FACTOR(pipe_blend(dst, alpha)) |
             VIRGL_OBJ_BLEND_S2_RT_ALPHA_SRC_FACTOR(pipe_blend(src, alpha)) |
@@ -1143,8 +1144,8 @@ BOOLEAN rb_gpu_d8_valid(const RB2K_D3D8_DRAW *d)
         d->depthState > (RB2K_Z_ENABLE | RB2K_Z_WRITE | 7))) return FALSE;
     if (d->alphaTest && ((d->alphaTest & ~(RB2K_D7_ON | 0xfff)) ||
         ((d->alphaTest >> 8) & 15) < 1 || ((d->alphaTest >> 8) & 15) > 8)) return FALSE;
-    if (d->blend && ((d->blend & ~(RB2K_D7_ON | RB2K_BLEND_DEST_ALPHA | 0xffff)) ||
-        !blend_valid((d->blend >> 8) & 255) || !blend_valid(d->blend & 255))) return FALSE;
+    if ((d->blend & ~(RB2K_D7_ON | RB2K_BLEND_DEST_ALPHA | RB2K_BLEND_NO_WRITE | 0xffff)) ||
+        ((d->blend & RB2K_D7_ON) && (!blend_valid((d->blend >> 8) & 255) || !blend_valid(d->blend & 255)))) return FALSE;
     if (d->cull < CullNone || d->cull > CullCcw || (d->constantCount != 8 && d->constantCount != 16 && d->constantCount != 32)) return FALSE;
     if (d->transform == 2 && (d->lighting || !d->vertexProgram || d->vertexConstants > RB2K_D8_VS_CONSTANTS ||
         !d->vertexWords || d->vertexWords % 4 || d->vertexWords > RB2K_D8_VS_VERTEX_WORDS)) return FALSE;

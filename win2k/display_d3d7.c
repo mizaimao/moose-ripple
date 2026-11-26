@@ -1333,6 +1333,15 @@ static BOOL bad_position(const RB2K_D3D7_VERTEX *v)
            (v->z & 0x7fffffff) >= 0x7f800000 || !(v->rhw & 0x7fffffff) || (v->rhw & 0x7fffffff) >= 0x7f800000;
 }
 
+/* D3DRS_COLORWRITEENABLE (168) as the channels a draw does not write. Programs draw
+ * stencil shadow volumes with it at zero; all channels are written until it is set. */
+static ULONG no_write(const D7_CONTEXT *c)
+{
+    enum { ColorWriteEnable = 168 };
+    if (!((c->rsSet[ColorWriteEnable / 32] >> (ColorWriteEnable % 32)) & 1)) return 0;
+    return (~c->rs[ColorWriteEnable] & 15) << RB2K_BLEND_NO_WRITE_SHIFT;
+}
+
 static void skip(D7_CONTEXT *c, ULONG reason, ULONG primitives)
 {
     c->display->d7draw.skipped[reason] += primitives;
@@ -1576,6 +1585,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     if (c->blend && c->srcBlend >= D3DBLEND_ZERO && c->srcBlend <= D3DBLEND_BOTHINVSRCALPHA &&
         c->dstBlend >= D3DBLEND_ZERO && c->dstBlend <= D3DBLEND_BOTHINVSRCALPHA)
         draw->blend = RB2K_D7_ON | (c->srcBlend << 8) | c->dstBlend | (s->alpha ? RB2K_BLEND_DEST_ALPHA : 0);
+    draw->blend |= no_write(c);
     draw->cull = c->cull >= D3DCULL_NONE && c->cull <= D3DCULL_CCW ? c->cull : D3DCULL_NONE;
     draw->specular = c->specular ? 1 : 0;
     draw->factor = c->factor;
@@ -2004,6 +2014,7 @@ static BOOL pixel_states(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, const D8_SHADER *s
     if (c->blend && c->srcBlend >= D3DBLEND_ZERO && c->srcBlend <= D3DBLEND_BOTHINVSRCALPHA &&
         c->dstBlend >= D3DBLEND_ZERO && c->dstBlend <= D3DBLEND_BOTHINVSRCALPHA)
         draw->blend = RB2K_D7_ON | (c->srcBlend << 8) | c->dstBlend | (s->alpha ? RB2K_BLEND_DEST_ALPHA : 0);
+    draw->blend |= no_write(c);
     draw->cull = c->cull >= D3DCULL_NONE && c->cull <= D3DCULL_CCW ? c->cull : D3DCULL_NONE;
     draw->program = program;
     draw->fog = fog;
@@ -3532,7 +3543,7 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     c->caps2 = RB_D3DCAPS2_CANRENDERWINDOWED;
     c->presentationIntervals = RB_D3DPRESENT_INTERVAL_IMMEDIATE | RB_D3DPRESENT_INTERVAL_ONE;
     c->devCaps = hw->dwDevCaps & ~D3DDEVCAPS_FLOATTLVERTEX;
-    c->primitiveMiscCaps = tri->dwMiscCaps;
+    c->primitiveMiscCaps = tri->dwMiscCaps | 0x80;   /* D3DPMISCCAPS_COLORWRITEENABLE */
     c->rasterCaps = tri->dwRasterCaps & ~D3DPRASTERCAPS_SUBPIXEL;
     c->srcBlendCaps = tri->dwSrcBlendCaps;
     c->destBlendCaps = tri->dwDestBlendCaps;

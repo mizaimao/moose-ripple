@@ -5,7 +5,7 @@
  * and lit untransformed vertices, nine of shader model 2.0, seven with
  * vertex shaders 1.1 and 2.0 (hardware ones when offered) or blending
  * after shaders, two each of cube maps, render target textures and volumes,
- * luminance textures and a bump map read by texbem. Each case
+ * luminance textures, a bump map read by texbem and a colour write mask. Each case
  * draws on a 128x128 lockable back buffer and inspects a few pixels well
  * inside the shapes. "sw" asks for software vertex
  * processing. Built against the Microsoft headers; d3d9.dll is loaded at
@@ -1231,6 +1231,31 @@ static void bump_case(int only)
     IDirect3DTexture9_Release(colour);
 }
 
+/* ---- colour write mask ----
+ * 50: white quads over the clear colour, the left one with D3DRS_COLORWRITEENABLE red
+ * only, the right one with it zero (as for stencil shadow volumes): the left keeps the
+ * clear colour's green and blue, the right all of it. */
+static void colorwrite_case(int only)
+{
+    typedef struct { float x, y, z, rhw; DWORD diffuse; } CV;
+    static const SAMPLE s[] = { { 32, 64, 0xff0066 }, { 96, 64, CLEAR_COLOR & 0xffffff } };
+    int k;
+    if (only && only != 50) return;
+    if (!begin("colorwrite")) return;
+    IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+    for (k = 0; k < 2; ++k) {
+        float x0 = k * 64.0f, x1 = x0 + 64;
+        CV v[4] = { { x0, 0, 0.5f, 1, 0xffffffff }, { x1, 0, 0.5f, 1, 0xffffffff },
+                    { x0, Side, 0.5f, 1, 0xffffffff }, { x1, Side, 0.5f, 1, 0xffffffff } };
+        IDirect3DDevice9_SetRenderState(device, D3DRS_COLORWRITEENABLE, k ? 0 : D3DCOLORWRITEENABLE_RED);
+        IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+    }
+    IDirect3DDevice9_SetRenderState(device, D3DRS_COLORWRITEENABLE, 15);
+    check("colorwrite", s, 2);
+}
+
 /* ---- volume textures ----
  * A 4x4x4 volume with one colour per slice (red, green, blue, yellow),
  * sampled at each slice's middle by four quads: 45 with ps_2_0
@@ -1478,6 +1503,7 @@ int main(int argc, char **argv)
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (!only || only >= 43)) rt_cases(only);
     luminance_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
+    colorwrite_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (caps.TextureCaps & D3DPTEXTURECAPS_VOLUMEMAP) && (!only || only >= 45))
         volume_cases(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
     if (caps.PixelShaderVersion < D3DPS_VERSION(2, 0)) printf("D9PIX vertex shader cases need pixel shader 2.0\n");
