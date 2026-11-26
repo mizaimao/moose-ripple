@@ -2,8 +2,8 @@ moose-ripple display driver for Windows Vista and Windows 7, version @VERSION@
 
 A display driver for 64-bit Windows Vista SP2 and Windows 7 guests on QEMU's
 virtio-vga-gl device with host 3D acceleration (virglrenderer). The desktop,
-Aero and Direct3D 9 are drawn by the host's graphics card; on a host with
-OpenGL 3.3 or later, Windows 7 gets Direct3D 10 too.
+Aero, Direct3D 9 and OpenGL are drawn by the host's graphics card; on a host
+with OpenGL 3.3 or later, Windows 7 gets Direct3D 10 too.
 
   vista\   the driver for Windows Vista SP2 x64
   win7\    the driver for Windows 7 x64
