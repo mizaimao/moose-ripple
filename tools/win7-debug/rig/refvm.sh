@@ -10,6 +10,8 @@
 #   sh refvm.sh virgl NAME        start it with the virtio GPU (picture on NAME-vnc.sock)
 #   sh refvm.sh card NAME         start it with the card (no picture: keys through QMP only)
 #   sh refvm.sh kill NAME         end QEMU (only after a shutdown in the guest failed)
+# DISKOPT adds drive options to the guest disk (DISKOPT=,cache=unsafe: the host does not wait for
+# the disk on the guest's flushes; for throwaway overlays only).
 # Both starts refuse while any other guest runs on the host. Before "card": no guest on the
 # host for several minutes, and the kernel log streaming to another machine.
 set -eu
@@ -48,7 +50,7 @@ virgl|card)
         -smp 4,sockets=1,cores=4,maxcpus=4 -m 4096 \
         -nic none -vga none "$@" \
         -device ich9-usb-uhci1,id=uhci -device usb-tablet,bus=uhci.0 \
-        -drive "file=$here/$name.qcow2,format=qcow2,if=none,id=guestdisk" -device ide-hd,drive=guestdisk,bus=ide.0,bootindex=0 \
+        -drive "file=$here/$name.qcow2,format=qcow2,if=none,id=guestdisk${DISKOPT:-}" -device ide-hd,drive=guestdisk,bus=ide.0,bootindex=0 \
         -drive "file=$here/ref.iso,media=cdrom,readonly=on,if=none,id=labcd" -device ide-cd,drive=labcd,bus=ide.1,bootindex=1 \
         -drive "file=$here/w7ref-data.raw,format=raw,if=none,id=datadisk" -device ide-hd,drive=datadisk,bus=ide.2 \
         -serial "file:$here/$name-com1.log" -qmp "unix:$here/$name-qmp.sock,server=on,wait=off" \
