@@ -1364,3 +1364,56 @@ switched by boot flag and the bundle changes by environment variable on the same
 No difference in UTM, as expected: the emulated CPU is the limit there, the program presents
 far fewer than 66 times a second, and nothing waits for the host. Nothing got slower either.
 What would help under emulation is less work on the program's own thread.
+
+### Core Image: the gap to software is in a filter's first two renders (2026-11-26)
+
+`ci-effects filters` prints one time per filter, the mean of renders two to four of a
+filter. With `CI_EFFECTS_PASSES=8 CI_EFFECTS_EACH=1` (new) it prints every render, ours and
+the software renderer's. Sums over the 24 filters, 480x300, on the second Intel host (other
+guests were running; ours / software):
+
+| | first render | second render | each later render |
+|---|---|---|---|
+| all 24 filters | 353 / 84 ms | 119 / 54 ms | 32.6 / 34.8 ms |
+| one colour filter (ColorInvert) | 6.3 / 1.2 | 0.9 / 0.8 | 0.82 / 0.77 |
+| GaussianBlur | 26.9 / 6.1 | 6.2 / 3.3 | 1.72 / 1.12 |
+| ComicEffect | 43.8 / 7.9 | 18.7 / 4.3 | 3.80 / 3.62 |
+| UnsharpMask | 17.3 / 3.4 | 18.2 / 3.3 | 1.16 / 1.46 |
+
+From the third render on, ours is as fast as the software renderer over the 24 filters (the
+distortions and UnsharpMask faster, the blurs slower). The 1.2-12 ms against 0.8-4.5 quoted
+before came from the second render, which the tool's mean includes.
+
+This corrects the section "Core Image after the texture cache" above: Core Image does not
+compile programs in every render. The call trace of a run shows them only in a filter's
+first render and, for most filters with several passes, in its second, where Core Image
+builds new, joined programs; later renders set none. 188 of the 226 texts are different, so
+a cache by text has nothing to find in this run.
+
+Where the first two renders go (the test sampled while it does only those, 1 ms steps, three
+runs): of about 470 ms in ours, 142 ms are in `glProgramStringARB` (0.63 ms a text: parsing
+15, Mesa's NIR passes and the translation to TGSI about 95, the TGSI text for the host 21),
+about 100 ms in creating textures (a call to the kernel that waits for the host, which is
+busy compiling what was just sent), 42 ms in the read-back.
+
+**Change: an ARB program's shader is made at the first draw with it.** Mesa built a shader
+for every program when its text was set. Core Image sets three programs for a kernel and
+draws with two at most: of the 226 texts, 81 never see a draw (27 of 77 vertex programs, 54
+of 149 fragment programs), and each cost a compile in the guest and another on the host.
+Patch `0013` leaves the shader of an ARB program to its first draw (GLSL programs keep theirs
+at the link); `RIPPLE_GL_EAGER_PROGRAMS=1` in the environment brings the old behaviour back.
+Same host, one boot, alternating by that variable, sums over the 24 filters:
+
+| | first render | second render | each later render |
+|---|---|---|---|
+| shader when the text is set (before) | 352.7, 344.6 ms | 119.0, 117.1 ms | 32.6, 32.4 ms |
+| shader at the first draw (after) | 314.6, 314.6 | 94.5, 94.0 | 31.5, 32.0 |
+
+The first showing of a filter (two renders) goes from 467 to 409 ms over the 24, 12% less.
+The picture comparison is unchanged (1 of 24 filters and 6 of 61 Photo Booth effects differ,
+the same ones). Looked at after a restart with the new bundle: the desktop with the menu bar,
+a window with its shadow, Exposé, Dashboard. OpenArena's timedemo 284.6 frames/s with the
+change and 280.5 with the variable set, gl-gears 59.7 frames/s; no error from the kext.
+
+Left in the first two renders: the compile itself for the programs that are drawn with (Mesa
+runs its full set of NIR passes on programs of twenty instructions), and the texture creates.

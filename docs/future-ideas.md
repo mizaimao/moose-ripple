@@ -21,11 +21,12 @@ nothing over its window; the same host's GeForce 9600 GT with Apple's driver doe
   not in the tree) gave about 6% there. It may be worth more under emulation, where the
   program's thread is the limit ([re/perf-notes.md](re/perf-notes.md), "a second GL thread").
 - In UTM none of the changes of 2026-11-25 is timed yet; they are only checked to work.
-- A single Core Image filter is still slower than software rendering (1.2-12 ms against 0.8-4.5
-  for a 480x300 picture). Its textures are reused and its submits are queued since 2026-11-25;
-  what is left is one trip to the host per pass (Core Image's flush when it unbinds a
-  texture), a new program compiled for every render, and the read-back
-  ([re/perf-notes.md](re/perf-notes.md), "Core Image after the texture cache").
+- Core Image: from a filter's third render on, ours is as fast as software rendering (33 ms
+  against 35 for 24 filters on a 480x300 picture). The first two renders of a filter, where
+  Core Image sets its programs, take 409 ms against 138 for the 24: Mesa's compile of each
+  program (0.6 ms), texture creates that wait for the host, and the host's own compile. Still
+  one trip to the host per pass in every render (Core Image's flush when it unbinds a
+  texture) ([re/perf-notes.md](re/perf-notes.md), "Core Image: the gap to software").
 - Frames reach a VNC viewer unevenly (see [re/perf-notes.md](re/perf-notes.md)). Every open
   VNC viewer (a Proxmox web console, for example) makes QEMU encode each frame again, before the
   next viewer gets it: with one console open, a second viewer got whole-screen frames every
