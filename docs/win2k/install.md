@@ -69,6 +69,7 @@ change.
 | `RippleD3D8` | 1 | the Direct3D 8 and 9 driver interface |
 | `RippleHostDxt` | 1 | DXT textures decoded by the host GPU; 0 decodes them in the guest |
 | `RippleVertexShaders` | 0 | 1 runs vertex shaders on the host GPU (needed by DirectQ and 3DMark05) |
+| `RippleD3D9` | 0 | 1 offers the Direct3D 9 driver interface (with `RippleVertexShaders` 1; being completed) |
 
 `RippleHardwareCursor`, `RippleGpuDesktop`, `RippleDirectDrawGpuSurfaces` and
 `RippleD3D7WaitCurrent` are for tests and stay 0.
