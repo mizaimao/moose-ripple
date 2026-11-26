@@ -629,3 +629,21 @@ same boot with the old behaviour switched back on for comparison (`RIPPLE_GL_SAM
 OpenArena's timedemo 99.6 against 99.8 frames/s, the 24 Core Image filters 85.9 and 76.8 ms
 against 78.9 and 78.1, the Photo Booth effects 47.8 against 48.3 ms. Programs that showed a
 wrong texture on some surface before may have had this cause.
+
+## The two host behaviours behind the Cinebench fixes, on a newer host (2026-11-25)
+
+Checked once on a second Intel UHD 630 host with QEMU 10.0.13, virglrenderer 1.1.0 and Mesa
+25.0.7 (the Proxmox host has virglrenderer 0.10.4), with a copy of the same guest:
+
+- **Sampler views.** With the sampler binds as they were before the correction
+  (`RIPPLE_GL_SAMPLER_FORGET=1`) Cinebench's reference check gives the same picture as with
+  it: 3,625 pixels off, test successful. On the Proxmox host that setting draws the glass
+  with the wrong texture. So the newer renderer does not need the repeated bind.
+- **Depth read-back.** With the 24-bit depth format kept (`RIPPLE_GL_DEPTH24=1`, a debug
+  switch added for this check) a 24-bit depth texture still gets 32 bits there: the host does
+  not offer the 24-bit format for textures, and `gl-feature-check depth` reads 64 different
+  values back in both cases. On the Proxmox host the 24-bit format is offered and comes back
+  with its low 8 bits lost.
+
+Both workarounds stay: they cost nothing measurable and Proxmox 8 ships the old renderer.
+Neither behaviour is there to report against the current renderer.

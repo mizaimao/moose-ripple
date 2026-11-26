@@ -1710,8 +1710,14 @@ ripple_cgl_tex_image2D(void *rend, GLenum target, GLint level, GLenum internalfo
     * while the 32-bit format comes back whole. Cinebench R11.5 measures depth precision by
     * reading back, took 16 bits for its scene, and near surfaces fought (its reference check
     * failed; `gl-feature-check depth` shows the read-back). Where the 32-bit format is not
-    * there, Mesa falls back to the 24-bit one as before. */
-   if (internalformat == GL_DEPTH_COMPONENT24)
+    * there, Mesa falls back to the 24-bit one as before. Debug: RIPPLE_GL_DEPTH24=1 in the
+    * environment keeps the 24-bit format, to see what a host's read-back does. */
+   static int keep24 = -1;
+   if (keep24 < 0) {
+      const char *env = getenv("RIPPLE_GL_DEPTH24");
+      keep24 = env && atoi(env);
+   }
+   if (internalformat == GL_DEPTH_COMPONENT24 && !keep24)
       internalformat = GL_DEPTH_COMPONENT32;
    tex_image2D_body(ctx, glctx, target, level, internalformat, width, height, border, format,
                     type, pixels);
