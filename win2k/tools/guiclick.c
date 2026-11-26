@@ -17,6 +17,7 @@
  *   - a window showing a -dismiss text has its first enabled push button
  *     pressed, whatever its label (owner-drawn buttons often have none).
  *   - a window showing a -close text is asked to close.
+ *   - "-press @Title#N" does the same only in a window whose title contains Title.
  *   - "-press #N" presses the enabled button whose control ID is N, owner-drawn
  *     or not; buttons are reported with their IDs and places for this.
  * With -debug the program runs under guiclick as its debugger: its
@@ -172,10 +173,24 @@ static void act(CONTROLS *c)
         PostMessageA(c->top, WM_CLOSE, 0, 0);
         return;
     }
-    for (k = 0; k < userPress; ++k)
-        if (press[k][0] == '#' && !pressed[k])
+    for (k = 0; k < userPress; ++k) {
+        /* "#N", or "@Title#N": only in a window whose title contains Title. */
+        const char *p = press[k];
+        if (pressed[k]) continue;
+        if (p[0] == '@') {
+            const char *hash = strchr(p, '#');
+            char want[96], title[96];
+            int len = hash ? (int)(hash - p - 1) : 0;
+            if (!hash || len <= 0 || len >= (int)sizeof(want)) continue;
+            lstrcpynA(want, p + 1, len + 1);
+            title[0] = 0;
+            GetWindowTextA(c->top, title, sizeof(title));
+            if (!contains(title, want)) continue;
+            p = hash;
+        }
+        if (p[0] == '#')
             for (i = 0; i < c->count; ++i) {
-                int id = atoi(press[k] + 1);
+                int id = atoi(p + 1);
                 if (GetDlgCtrlID(c->button[i]) != id || !IsWindowEnabled(c->button[i])) continue;
                 pressed[k] = 1;
                 _snprintf(line, sizeof(line), "GUICLICK press id=%d", id);
@@ -184,6 +199,7 @@ static void act(CONTROLS *c)
                 PostMessageA(GetParent(c->button[i]), WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), (LPARAM)c->button[i]);
                 return;
             }
+    }
     if (c->dismiss)
         for (i = 0; i < c->count; ++i) {
             LONG kind = c->style[i] & 15;
@@ -200,7 +216,7 @@ static void act(CONTROLS *c)
         for (i = 0; i < c->count; ++i) {
             LONG kind = c->style[i] & 15;
             if ((kind != BS_PUSHBUTTON && kind != BS_DEFPUSHBUTTON) || !IsWindowEnabled(c->button[i])) continue;
-            if (press[k][0] == '#' || !starts(c->text[i], press[k]) || (k < userPress && pressed[k])) continue;
+            if (press[k][0] == '#' || press[k][0] == '@' || !starts(c->text[i], press[k]) || (k < userPress && pressed[k])) continue;
             if (k < userPress) pressed[k] = 1;
             if (starts(c->text[i], "cancel") || starts(c->text[i], "< back") || starts(c->text[i], "back") ||
                 starts(c->text[i], "no") || starts(c->text[i], "browse")) continue;
