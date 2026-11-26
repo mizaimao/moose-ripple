@@ -2185,6 +2185,31 @@ On XP SP3 under KVM on the second Intel UHD 630 host, case 53 passes and
 `d9pixels` passes 43 of 43. 3DMark 2001 SE's DOT3 Bump Mapping test, which
 reported "Not supported by hardware", now runs.
 
+## Texture transforms for Direct3D 8 and 9
+
+Fixed-function draws whose stages have `D3DTSS_TEXTURETRANSFORMFLAGS` were
+skipped: 3DMark 2001 SE lost 29 million triangles that way. They now go to
+the record path with a stage program that applies each stage's texture
+matrix per pixel. The matrix columns are in CONST[8+4k] to [11+4k],
+coordinates are padded to (u, v, 1, 0) as Direct3D transforms them, and with
+`D3DTTFF_PROJECTED` the result is divided by its last element. Direct3D
+applies no texture matrix to pretransformed (XYZRHW) vertices; for those only
+the projection divides. The driver offers `D3DPTEXTURECAPS_PROJECTED`:
+without it the runtime passed such draws as COUNT3 without the flag. The
+matrices are kept per stage, also in state blocks. Direct3D 8 and 9 are no
+longer offered texturing from system memory, because the driver registers
+only video-memory textures.
+
+`d9pixels` case 51 moves u by a half through the matrix on untransformed
+vertices; case 52 divides (2u, 2v, 0, 2) by its fourth element on
+pretransformed vertices. `d7draw` prints which check skipped a vertex
+(D7VERTEX) and texture registration details (D7REG).
+
+On XP SP3 under KVM on the second Intel UHD 630 host, cases 51 and 52 pass and
+`d9pixels` passes 47 of 47. In 3DMark 2001 SE the skipped vertices fell from
+29 million to 160. Still open there: 97.7 million triangles skipped for
+texture handles the driver never registered.
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:
