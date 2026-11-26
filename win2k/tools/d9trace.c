@@ -102,6 +102,16 @@ static HRESULT WINAPI get_caps(IDirect3D9 *d3d, UINT adapter, D3DDEVTYPE type, D
                   caps->TextureCaps, caps->MaxTextureWidth, caps->MaxTextureHeight, caps->MaxVertexShaderConst,
                   caps->MaxPixelShader30InstructionSlots);
         say(line);
+        {   /* the whole record, 16 words a line, for checks of fields not named above */
+            const DWORD *w = (const DWORD *)caps;
+            int k, j;
+            for (k = 0; k < (int)(sizeof(*caps) / 4); k += 16) {
+                int at = wsprintfA(line, "GetDeviceCaps type=%d words %03x:", (int)type, k * 4);
+                for (j = k; j < k + 16 && j < (int)(sizeof(*caps) / 4); ++j) at += wsprintfA(line + at, " %08lx", w[j]);
+                lstrcpyA(line + at, "\r\n");
+                say(line);
+            }
+        }
     }
     return hr;
 }
