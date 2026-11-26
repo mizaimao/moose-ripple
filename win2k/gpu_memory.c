@@ -14,10 +14,14 @@ typedef char run_matches_virtio_entry[sizeof(RB2K_PAGE_RUN) == 16 ? 1 : -1];
  * until the host finished a batch (4,500 reads a second while 3DMark 2001 SE
  * ran). The cycle counter is read without leaving the guest. Its rate is
  * measured against the performance counter only when a report asks for it,
- * over the whole time since the first stamp. */
+ * over the whole time since the first stamp. Once that time is a second or
+ * more, the rate is kept: every later report gives the same one, so the
+ * stamps of two reports convert alike (d3d7probe compares them). */
 LONGLONG rb_counter_ticks(LONGLONG *frequency)
 {
     static LONGLONG cycles0, counter0, counterHz;
+    static volatile LONGLONG rate;
+    static volatile LONG kept;   /* 1 while one caller stores the rate, 2 once it is there */
     LONGLONG cycles = (LONGLONG)__builtin_ia32_rdtsc();
     if (!counter0) {
         LARGE_INTEGER hz, now = KeQueryPerformanceCounter(&hz);
@@ -25,11 +29,17 @@ LONGLONG rb_counter_ticks(LONGLONG *frequency)
         counter0 = now.QuadPart;
         counterHz = hz.QuadPart;
     }
-    if (frequency) {
+    if (frequency && kept == 2) {
+        *frequency = rate;
+    } else if (frequency) {
         LARGE_INTEGER now = KeQueryPerformanceCounter(NULL);
         ULONGLONG c = (ULONGLONG)(cycles - cycles0), q = (ULONGLONG)(now.QuadPart - counter0);
         /* c / (q / counterHz), in two parts so that nothing overflows. */
         *frequency = q ? (LONGLONG)(c / q * (ULONGLONG)counterHz + c % q * (ULONGLONG)counterHz / q) : 0;
+        if (q >= (ULONGLONG)counterHz && __sync_bool_compare_and_swap(&kept, 0, 1)) {
+            rate = *frequency;
+            kept = 2;
+        }
     }
     return cycles;
 }

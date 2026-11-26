@@ -167,6 +167,7 @@ static BOOLEAN initialize(PVOID ext)
 {
     ADAPTER *a = ext;
     static WCHAR adapterName[] = L"moose-ripple virtio-vga";
+    rb_counter_ticks(NULL);   /* the first time stamp, so that a report measures the rate over a long time */
     VideoPortSetRegistryParameters(a, L"HardwareInformation.AdapterString",
                                    adapterName, sizeof(adapterName));
     VideoPortSetRegistryParameters(a, L"HardwareInformation.MemorySize",

@@ -191,10 +191,13 @@ static ULONG useClock = 1;
 static BYTE *texelScratch, *uploadScratch;
 static ULONG texelScratchBytes;
 
+static LONGLONG cycles(void);
+
 /* A context-only callback takes the registry first, then the display lock.
  * DrvDisableDirectDraw drops the display lock before retiring the contexts. */
 void rb_d7_init(void)
 {
+    cycles();   /* the first time stamp, so that a report measures the rate over a long time */
     if (!registry) registry = EngCreateSemaphore();
     if (!textures) textures = EngAllocMem(FL_ZERO_MEMORY, MaxTextures * sizeof(*textures), 't7bR');
     if (!buffers) buffers = EngAllocMem(FL_ZERO_MEMORY, MaxBuffers * sizeof(*buffers), 'b8bR');
@@ -224,8 +227,11 @@ static DISPLAY *drawQueueDisplay;
 /* Time stamps in processor cycles: EngQueryPerformanceCounter reads the ACPI
  * power management timer on these HALs, an emulated port that QEMU answers
  * under the lock its drawing thread holds (see rb_counter_ticks). The rate is
- * measured against the performance counter when the counters are reported. */
+ * measured against the performance counter when the counters are reported,
+ * and kept once a second or more has been measured, as in the miniport. */
 static LONGLONG cycles0, counter0;
+static volatile LONGLONG keptRate;
+static volatile LONG rateKept;   /* 1 while one caller stores the rate, 2 once it is there */
 static LONGLONG cycles(void)
 {
     LONGLONG now = (LONGLONG)__builtin_ia32_rdtsc();
@@ -237,11 +243,18 @@ static LONGLONG cycle_rate(void)
 {
     LONGLONG now = cycles(), counter, hz;
     ULONGLONG c, q;
+    LONGLONG rate;
+    if (rateKept == 2) return keptRate;
     EngQueryPerformanceCounter(&counter);
     EngQueryPerformanceFrequency(&hz);
     c = (ULONGLONG)(now - cycles0);
     q = (ULONGLONG)(counter - counter0);
-    return q ? (LONGLONG)(c / q * (ULONGLONG)hz + c % q * (ULONGLONG)hz / q) : 0;
+    rate = q ? (LONGLONG)(c / q * (ULONGLONG)hz + c % q * (ULONGLONG)hz / q) : 0;
+    if (q >= (ULONGLONG)hz && __sync_bool_compare_and_swap(&rateKept, 0, 1)) {
+        keptRate = rate;
+        rateKept = 2;
+    }
+    return rate;
 }
 
 static ULONG flush_draws(void)
