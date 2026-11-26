@@ -1425,11 +1425,14 @@ static HRESULT queue_record(D7_CONTEXT *c, const void *record, ULONG bytes, ULON
     return DD_OK;
 }
 
+/* Vertices per primitive of a draw packet's RB2K_PRIM_*. */
+#define PACKET_PER(primitive) ((primitive) == RB2K_PRIM_POINTS ? 1u : (primitive) == RB2K_PRIM_LINES ? 2u : 3u)
+
 static HRESULT send_batch(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, ULONG count)
 {
     draw->count = count;
     return queue_record(c, draw, FIELD_OFFSET(RB2K_D3D7_DRAW, vertices) + count * sizeof(draw->vertices[0]), 0,
-                        count / 3);
+                        count / PACKET_PER(draw->primitive));
 }
 
 static HRESULT send_batch8(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, ULONG count)
@@ -1439,7 +1442,7 @@ static HRESULT send_batch8(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, ULONG count)
     return queue_record(c, draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices) + sizeof(ULONG) *
                         (draw->transform == 2 ? 4 * draw->vertexConstants + count * draw->vertexWords :
                          count * RB2K_D8_VERTEX_WORDS(draw->coordSets)),
-                        RB2K_D8_RECORD, count / 3);
+                        RB2K_D8_RECORD, count / PACKET_PER(draw->primitive));
 }
 
 /* Choose the draw's fog: table fog when a table mode is set, else fog
@@ -2386,7 +2389,8 @@ static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULON
     prims.fvf = c->fvf;
     if (indexed) {
         D8_BUFFER *b = find_buffer(c->local, c->indexHandle);
-        ULONG indices = type == RbTriangleList ? 3 * count : count + 2, size;
+        ULONG indices = type == RbTriangleList ? 3 * count : type == RbLineList ? 2 * count :
+                        type == RbPointList ? count : type == RbLineStrip ? count + 1 : count + 2, size;
         if (!b || b->owner != c->owner || c->indexStride != 2 || !b->global->fpVidMem || count > 0xffff ||
             indexByte > (size = b->global->dwLinearSize) || indices > (size - indexByte) / 2) {
             skip(c, RB2K_D7_SKIP_VERTEX, count);
@@ -3520,7 +3524,7 @@ static const D3DNTHAL_GLOBALDRIVERDATA global = {
         .dlcLightingCaps = { .dwSize = sizeof(D3DLIGHTINGCAPS),
             .dwCaps = D3DLIGHTCAPS_POINT | D3DLIGHTCAPS_SPOT | D3DLIGHTCAPS_DIRECTIONAL,
             .dwLightingModel = D3DLIGHTINGMODEL_RGB, .dwNumLights = RB2K_D7_LIGHTS },
-        .dpcLineCaps = { .dwSize = sizeof(D3DPRIMCAPS) },
+        .dpcLineCaps = TRI_CAPS,   /* lines are drawn by the same pipeline */
         .dpcTriCaps = TRI_CAPS,
         .dwDeviceRenderBitDepth = DDBD_32
     }
@@ -3546,6 +3550,8 @@ void rb_d7_caps(DD_HALINFO *info, BOOL depth)
             withDepth.hwCaps.dpcTriCaps.dwZCmpCaps = D3DPCMPCAPS_NEVER | D3DPCMPCAPS_LESS |
                 D3DPCMPCAPS_EQUAL | D3DPCMPCAPS_LESSEQUAL | D3DPCMPCAPS_GREATER |
                 D3DPCMPCAPS_NOTEQUAL | D3DPCMPCAPS_GREATEREQUAL | D3DPCMPCAPS_ALWAYS;
+            withDepth.hwCaps.dpcLineCaps.dwRasterCaps = withDepth.hwCaps.dpcTriCaps.dwRasterCaps;
+            withDepth.hwCaps.dpcLineCaps.dwZCmpCaps = withDepth.hwCaps.dpcTriCaps.dwZCmpCaps;
         }
         EngReleaseSemaphore(registry);
         info->ddCaps.dwZBufferBitDepths = DDBD_16 | DDBD_32;
