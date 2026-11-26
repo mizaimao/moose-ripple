@@ -184,9 +184,14 @@ wgl_d3d9ex_framebuffer_present(struct stw_winsys_framebuffer *_fb, int interval,
    IDirect3DSurface9 *back = NULL, *source = NULL;
    bool shown = false;
 
-   (void)interval;
    if (!fb->device)
       return false;
+
+   /* The device presents at once (its interval cannot change without a reset, which would
+    * cost the shared textures); a program that asked for a swap interval waits for the
+    * display's next refresh here. */
+   if (interval > 0)
+      fb->device->WaitForVBlank(0);
 
    for (unsigned i = 0; i < D3D9EX_NUM_BUFFERS; ++i) {
       if (fb->textures[i] == res && fb->d3d_textures[i]) {
@@ -207,6 +212,17 @@ wgl_d3d9ex_framebuffer_present(struct stw_winsys_framebuffer *_fb, int interval,
    if (source)
       source->Release();
    return shown;
+}
+
+/* A program that draws to the front buffer of a single-buffered window: show it. */
+static void
+wgl_d3d9ex_framebuffer_flush_frontbuffer(struct stw_winsys_framebuffer *_fb, struct pipe_context *ctx)
+{
+   struct wgl_d3d9ex_framebuffer *fb = wgl_d3d9ex_framebuffer(_fb);
+
+   (void)ctx;
+   if (fb->textures[0])
+      wgl_d3d9ex_framebuffer_present(_fb, 0, fb->textures[0]);
 }
 
 static struct pipe_resource *
@@ -292,6 +308,7 @@ wgl_create_d3d9ex_framebuffer(struct pipe_screen *screen, HWND hWnd, int iPixelF
    fb->base.resize = wgl_d3d9ex_framebuffer_resize;
    fb->base.present = wgl_d3d9ex_framebuffer_present;
    fb->base.get_resource = wgl_d3d9ex_framebuffer_get_resource;
+   fb->base.flush_frontbuffer = wgl_d3d9ex_framebuffer_flush_frontbuffer;
 
    return &fb->base;
 }
