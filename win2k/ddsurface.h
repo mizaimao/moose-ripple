@@ -7,6 +7,11 @@
 #define RB2K_DD_MAX_WIDTH 1680UL
 #define RB2K_DD_MAX_HEIGHT 1200UL
 #define RB2K_DD_MAX_BYTES (RB2K_DD_MAX_WIDTH * RB2K_DD_MAX_HEIGHT * 4)
+/* Offscreen surfaces, render targets and depth buffers may be larger than the screen: Direct3D 9
+ * programs make 2048x2048 render target textures (3DMark05's shadow maps). Readback staging keeps
+ * the screen's size (its attach request fits one queue packet), so those larger than the screen
+ * are drawn into and sampled but cannot be locked. */
+#define RB2K_DD_TARGET_SIDE 2048UL
 /* Host images at once: render targets (a full-screen chain takes two),
  * depth buffers and render target textures (3DMark 2001 SE alone makes more
  * than a dozen small ones). Each is a virgl context. */
@@ -19,6 +24,16 @@
 #define RB2K_DD_D3D8 32             /* the Direct3D 8 driver interface */
 #define RB2K_DD_VERTEX_SHADERS 64   /* vertex shaders on the host GPU */
 #define RB2K_DD_Z24S8 128           /* depth buffers of 24 bits with 8 of stencil */
+/* What a draw packet's vertices are, taken in order: triangles, lines (two each) or points. */
+#define RB2K_PRIM_TRIANGLES 0
+#define RB2K_PRIM_LINES 1
+#define RB2K_PRIM_POINTS 2
+/* Point draws: sprites (texture coordinates replaced across the point), and a
+ * size per vertex from the vertex program in place of pointSize. */
+#define RB2K_POINT_SPRITE 1
+#define RB2K_POINT_PER_VERTEX 2
+#define RB2K_POINT_SIZE_MAX 0x42800000UL    /* 64.0 */
+#define RB2K_DD_D3D9_DDI 256        /* the Direct3D 9 driver interface (with vertex shaders) */
 #define RB2K_DD_IOCTL(n) CTL_CODE(FILE_DEVICE_VIDEO,n,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_RB2K_DD_QUERY   RB2K_DD_IOCTL(0x901)
 #define IOCTL_RB2K_DD_CREATE  RB2K_DD_IOCTL(0x902)
@@ -40,6 +55,7 @@
 #define IOCTL_RB2K_D3D7_FLIGHT RB2K_DD_IOCTL(0x917)
 #define IOCTL_RB2K_DD_CREATE_Z16 RB2K_DD_IOCTL(0x918)
 #define IOCTL_RB2K_DD_CREATE_Z24S8 RB2K_DD_IOCTL(0x922)
+#define IOCTL_RB2K_DD_STRETCH RB2K_DD_IOCTL(0x923)
 #define IOCTL_RB2K_D3D7_ZCLEAR RB2K_DD_IOCTL(0x919)
 #define IOCTL_RB2K_D3D7_DRAW RB2K_DD_IOCTL(0x91b)
 #define IOCTL_RB2K_D3D7_TEXTURE RB2K_DD_IOCTL(0x91c)
@@ -53,6 +69,10 @@
  * same queue as an RB2K_D3D8_DRAW whose byte count has RB2K_D8_RECORD set. */
 #define IOCTL_RB2K_D3D8_PROGRAM RB2K_DD_IOCTL(0x920)
 #define IOCTL_RB2K_D3D8_PROGRAM_FREE RB2K_DD_IOCTL(0x921)
+/* A cube map render target: its six faces are colour images, each drawn into like any target; the
+ * faces in mask are copied into the host cube texture (made when texture is 0), whose id comes back. */
+#define IOCTL_RB2K_D7_CUBE_SYNC RB2K_DD_IOCTL(0x924)
+typedef struct { ULONG texture, side, mask, images[6]; } RB2K_D7_CUBE_SYNC;
 #define RB2K_D8_PROGRAMS 48
 #define RB2K_D8_PROGRAM_BYTES 8192
 #define RB2K_D8_STAGES 8            /* samplers, and texture coordinate sets */
@@ -79,6 +99,8 @@ typedef struct { ULONG x, y, z, rhw, diffuse, specular, nx, ny, nz, tc[RB2K_D8_S
  * RB2K_D3D7_DRAW. */
 typedef struct {
     ULONG target, depth, count;
+    ULONG primitive;                /* RB2K_PRIM_*; count is a multiple of its vertices */
+    ULONG pointSize, pointFlags;    /* points: IEEE size, RB2K_POINT_* */
     ULONG depthState, alphaTest, blend, cull;
     ULONG stencil, stencilRef;      /* RB2K_STENCIL_ON etc.; reference, masks */
     ULONG program;
@@ -90,7 +112,16 @@ typedef struct {
     ULONG transform;                /* 0 transformed, 1 object space, 2 vertex program */
     ULONG matrices[3][16];
     ULONG viewport[6];
+    /* The Direct3D 9 scissor test: when scissorOn, only pixels inside the rectangle (left, top,
+     * right, bottom, at most 8192) are drawn, as well as inside the viewport. */
+    ULONG scissorOn, scissor[4];
     ULONG vertexProgram, vertexConstants, vertexWords;   /* transform 2 */
+    /* With RB_VS_FLOW programs: i0..i15 as floats (count, start, step) and b0..b15 as 1 or 0 in w,
+     * sent as CONST[3..18]. */
+    ULONG flowConstants[16][4];
+    /* User clip planes (D3DRS_CLIPPLANEENABLE bits, IEEE planes): in clip space for vertex programs
+     * (transform 2), in world space for object-space draws; pretransformed draws are not clipped. */
+    ULONG clipMask, clipPlanes[6][4];
     /* Lighting as in RB2K_D3D7_DRAW (object space only); specular adds
      * the lit specular colour. */
     ULONG lighting, lightCount, lightFlags, ambient, specular;
@@ -138,6 +169,8 @@ typedef struct { ULONG x, y, z, rhw, diffuse, specular, u, v, nx, ny, nz, u1, v1
 #define RB2K_BLEND_NO_WRITE (15UL << RB2K_BLEND_NO_WRITE_SHIFT)
 typedef struct {
     ULONG target, depth, count;
+    ULONG primitive;    /* RB2K_PRIM_*; count is a multiple of its vertices */
+    ULONG pointSize, pointFlags;    /* points: IEEE size (at most RB2K_POINT_SIZE_MAX), RB2K_POINT_* */
     ULONG depthState;
     ULONG alphaTest;    /* RB2K_D7_ON | D3DCMPFUNC << 8 | reference */
     ULONG blend;        /* RB2K_D7_ON | source D3DBLEND << 8 | destination D3DBLEND; channel mask bits */
@@ -156,6 +189,8 @@ typedef struct {
     ULONG transform;
     ULONG matrices[3][16];
     ULONG viewport[6];
+    ULONG scissorOn, scissor[4];   /* the Direct3D 9 scissor test, as in RB2K_D3D8_DRAW */
+    ULONG clipMask, clipPlanes[6][4];   /* user clip planes, as in RB2K_D3D8_DRAW */
     /* Nonzero with transform: light the vertices with the D3DMATERIAL7, the
      * D3DRENDERSTATE_AMBIENT colour and the first lightCount D3DLIGHT7s. */
     ULONG lighting, lightCount, lightFlags, ambient;
@@ -174,11 +209,11 @@ typedef struct {
  * id creates a texture of the given size and levels from row zero of level
  * zero; the reply is the texture id. */
 #define RB2K_D7_TEXTURES 1024
-#define RB2K_D7_TEXTURE_SIDE 1024
+#define RB2K_D7_TEXTURE_SIDE 2048
 /* The largest volume texture side (also its depth). */
 #define RB2K_D7_VOLUME_SIDE 256
 #define RB2K_D7_UPLOAD_BYTES (256UL * 1024)
-#define RB2K_D7_LEVELS 11
+#define RB2K_D7_LEVELS 12
 /* format: 0 for ARGB texels, RB2K_D7_BLOCKS_DXT* for rows of 4x4 blocks as
  * the program wrote them (y a multiple of 4), or RB2K_D7_TEXELS_* for signed
  * texels as they are (bump maps); the miniport answers texture id zero when
@@ -219,6 +254,9 @@ typedef struct { ULONG source, destination; } RB2K_DD_COPY;
 /* One visible rectangle, in source and primary pixel coordinates. */
 typedef struct { ULONG source, srcX, srcY, dstX, dstY, width, height; } RB2K_DD_PRESENT;
 typedef struct { ULONG left, top, right, bottom; } RB2K_RECT;
+/* A scaled copy of a rectangle of one colour image into a rectangle of another, point-sampled or
+ * linear (StretchRect of a Direct3D 9 runtime). Both rectangles lie inside their images. */
+typedef struct { ULONG source, destination; RB2K_RECT from, to; ULONG linear; } RB2K_DD_STRETCH;
 enum { RB2K_CPU_READ, RB2K_CPU_DRAW, RB2K_CPU_REPLACE };
 #define RB2K_GL_MAX_RECTS 32
 enum { RB2K_FRAME_BATCH, RB2K_FRAME_PER_RECT, RB2K_FRAME_INLINE_UPLOADS };

@@ -26,6 +26,8 @@ int main(void)
     for (i = 0; i < RB2K_D7_SKIPS; ++i) printf(" %s=%lu", skips[i], s.skipped[i]);
     printf(" ignored");
     for (i = 0; i < RB2K_D7_IGNORED; ++i) printf(" %s=%lu", ignored[i], s.ignored[i]);
+    printf("\nD7VERTEX last_fvf=%lx last_stride=%lu sites", s.vertexFvf, s.vertexStride);
+    for (i = 0; i < RB2K_D7_VERTEX_SITES; ++i) if (s.vertexSites[i]) printf(" %lu=%lu", i, s.vertexSites[i]);
     printf("\nD7DRAW textures_by_format none=%lu argb8888=%lu xrgb8888=%lu rgb565=%lu argb1555=%lu xrgb1555=%lu argb4444=%lu compressed=%lu video=%lu texblts=%lu texblt_failures=%lu\n",
            s.registered[0], s.registered[1], s.registered[2], s.registered[3], s.registered[4],
            s.registered[5], s.registered[6], s.registered[7], s.videoTextures, s.texBlts, s.texBltFailures);
@@ -68,8 +70,11 @@ int main(void)
                s.dp2Ticks * 1000000 / s.frequency, s.checkTicks * 1000000 / s.frequency,
                s.uploadTicks * 1000000 / s.frequency, s.copyTicks * 1000000 / s.frequency,
                s.drawTicks * 1000000 / s.frequency);
-    printf("D7REG mipmaps=%lu managed=%lu chains=%lu stops=%lu,%lu,%lu,%lu,%lu\n", s.regMipmaps, s.regManaged,
-           s.mipChains, s.mipStops[0], s.mipStops[1], s.mipStops[2], s.mipStops[3], s.mipStops[4]);
+    printf("D7REG mipmaps=%lu managed=%lu chains=%lu stops=%lu,%lu,%lu,%lu,%lu no_memory=%lu full=%lu peak=%lu\n",
+           s.regMipmaps, s.regManaged, s.mipChains, s.mipStops[0], s.mipStops[1], s.mipStops[2], s.mipStops[3],
+           s.mipStops[4], s.regNoMemory, s.regFull, s.regPeak);
+    printf("D7REG no_memory_caps=%08lx caps2=%08lx format=%08lx transform_flags=%08lx\n", s.noMemoryCaps,
+           s.noMemoryCaps2, s.noMemoryFormat, s.transformFlags);
     {
         int k;
         printf("D7FLIP flips=%lu presents=%lu fronts=%lu backs=%lu chain_blts=%lu targets=%lu target_failures=%lu\n",
@@ -89,6 +94,9 @@ int main(void)
             printf("D7CREATE log-%d caps=%08lx size=%lux%lu count=%lu slots=%lu end=%lu hr=%08lx\n", k, l[0], l[1] >> 16,
                    l[1] & 0xffff, l[2], l[3] >> 8, l[3] & 255, l[4]);
         }
+        printf("D9DDI unresolved=%lu ignored scissor=%lu targets=%lu blt=%lu fill=%lu query=%lu constants=%lu "
+               "frequency=%lu mips=%lu\n", s.d9Unresolved, s.d9Ignored[0], s.d9Ignored[1], s.d9Ignored[2],
+               s.d9Ignored[3], s.d9Ignored[4], s.d9Ignored[5], s.d9Ignored[6], s.d9Ignored[7]);
         printf("D7RTT target_textures=%lu texture_skips=%lu,%lu,%lu,%lu\n", s.targetTextures, s.texSkips[0],
                s.texSkips[1], s.texSkips[2], s.texSkips[3]);
         printf("D7FLIP targets");
@@ -122,6 +130,8 @@ int main(void)
         printf("\n");
     }
     printf("D8BLOCKS uploads=%lu last_status=%lu upload_failures=%lu\n", s.blockUploads, s.blockStatus, s.uploadFailures);
+    printf("D7EVICT evictions=%lu creates=%lu room_status=%lx textures=%lu\n", s.evictions, s.evictedCreates, s.roomStatus,
+           s.textures);
     printf("D8STATESET begin=%lu end=%lu delete=%lu execute=%lu capture=%lu create=%lu other=%lu failures=%lu\n",
            s.stateSets[0], s.stateSets[1], s.stateSets[2], s.stateSets[3], s.stateSets[4], s.stateSets[5], s.stateSets[6],
            s.blockFailures);
