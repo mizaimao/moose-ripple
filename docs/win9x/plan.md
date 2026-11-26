@@ -84,9 +84,11 @@ this project: nothing may look worse than without our driver).
    `HKLM\Software\moose-ripple`, `D3D8` = `"1"` ([directdraw.md](directdraw.md#direct3d-8-through-its-own-interface-stage-1-2026-11-26-off-by-default)):
    stream draws, pixel shaders 1.1 to 1.3 and 2.0 (the Windows 2000 driver's translator, its
    TGSI text turned into ARB fragment programs), fog after the shader, eight samplers, DXT,
-   cube and volume textures. `d8pixels` and `d9pixels` (DirectX 8.1 and 9.0c on Windows 98)
-   pass every case they run. Vertex processing stays the runtime's (on the CPU). Next: real
-   programs (3DMark 2001 SE, 3DMark03), then vertex shaders on the GPU.
+   cube, volume and bump map textures. `d8pixels` and `d9pixels` (DirectX 8.1 and 9.0c on
+   Windows 98) pass every case they run, and 3DMark 2001 SE runs every test with correct pictures
+   except Advanced Pixel Shader ([directdraw.md](directdraw.md#3dmark-2001-se-2026-11-26-rig-vm-230)).
+   Vertex processing stays the runtime's (on the CPU). Next: vertex processing on the GPU
+   (fixed function, then vertex shaders), 3DMark03.
 6. **Windows 2000:** miniport and display driver; the OpenGL and Direct3D parts reused.
 7. Later, maybe: Glide (3dfx games), Windows 95.
 

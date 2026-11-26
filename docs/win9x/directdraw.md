@@ -823,8 +823,34 @@ field that held the block height: the Direct3D 9 runtime fills a managed volume 
 reads its slice pitch there (`lSlicePitch` in DirectX 8 headers, `dwBlockSizeY` in the Me DDK).
 With 1 left there, its slices landed a byte apart; changing it inside Lock froze Windows. Also
 needed: the volume bit in the Direct3D 7-level texture caps and `DDSCAPS2_VOLUME` in
-`GUID_DDMoreSurfaceCaps`. DXT volumes are not offered. `d9pixels sw`: 47 of 47, both volume
-cases included; `d3dtest` (Direct3D 7) unchanged.
+`GUID_DDMoreSurfaceCaps`. `d9pixels sw`: 47 of 47, both volume cases included; `d3dtest`
+(Direct3D 7) unchanged.
+
+DXT volumes: sized in rows of 4x4 blocks, slice after slice, and decoded by the HAL to 32-bit
+texels at upload (OpenGL has no compressed 3D textures of this kind). `d9pixels` case
+`ps1_volume_dxt1` passes on the rig.
+
+Bump maps: V8U8 and Q8W8V8U8 textures, which the runtime describes as `DDPF_BUMPDUDV` with 16 and
+32 bits, go to OpenGL as `RG8_SNORM` (blue swizzled to 1: Direct3D reads V8U8 as du, dv, 1, 1)
+and `RGBA8_SNORM`. A version 1 shader with `texbem` or `texbeml` reads each stage's bump matrix
+and luminance scale and offset from c8..c15 (the Windows 2000 translator's layout), loaded from
+the stage states before each draw. 3DMark 2001 SE needs Q8W8V8U8 for Nature ("device does not
+support bump normal maps" with V8U8 alone). `d9pixels`: 49 of 49 on the rig, `ps_texbem`
+included.
+
+### 3DMark 2001 SE (2026-11-26, rig VM 230)
+
+Windows 98 SE with DirectX 9.0c, the Direct3D 8 interface on, 1024x768 32-bit, the runtime's
+software vertex processing; one untimed run per test, pictures checked through VNC. Car Chase
+192.2 and 55.7 fps (low and high detail), Dragothic 223.0 and 82.5, Lobby 320.4 and 71.3, High
+Polygon Count 40.0 and 20.3 MTriangles/s (one and eight lights), Vertex Shader 165.2 fps. With
+the bump map formats: Nature 145.6 fps, Environment Bump Mapping 558.4 fps, DOT3 Bump Mapping
+691.7, Pixel Shader 660.6, Advanced Pixel Shader 66.8, Point Sprites 8.6 MSprites/s; the fill-rate
+tests run too. All pictures look right except Advanced Pixel Shader: its boat and jetty are plain
+white and the water has no ripples (no shader was refused and no draw skipped; next to look at).
+Once, the multi-texturing fill-rate test made 3DMark quit without a message, on a second
+benchmark run in the same process after the game tests; two later fill-rate runs, one of them the
+second in its process, finished. Not explained.
 
 
 ## Changing a driver in the test VM
