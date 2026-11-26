@@ -51,6 +51,13 @@ typedef struct {
     /* Results waiting to be written: register, write mask, result slot. */
     char pendDest[2][24];
     unsigned int pendMask[2], pending;
+    /* Vertex shader flow control: whether integer and boolean constants are given (RB_VS_FLOW),
+     * where each label's code starts, the loops open (counter TEMP[56+n], aL TEMP[60+n]) with their
+     * kind and integer constant, the ifs open, the subroutines being inlined, whether the current
+     * instruction reads c[aL + n], and the defi and defb registers with their immediates. */
+    unsigned int flow, labelAt[16], loops, loopIsLoop[4], ifs, calls, relLoop, defInt, defBool;
+    char loopInt[4][24];
+    unsigned char defIntImm[16], defBoolImm[16];
     RB_PS_INFO *info;
 } PS;
 
@@ -612,7 +619,8 @@ enum {
 };
 enum { Reg2Temp = 0, Reg2Input = 1, Reg2Const = 2, Reg2Texture = 3, Reg2ColorOut = 8, Reg2Sampler = 10 };
 /* Vertex shader register types. */
-enum { RegVsAddr = 3, RegVsRastOut = 4, RegVsAttrOut = 5, RegVsTexOut = 6 };
+enum { RegVsAddr = 3, RegVsRastOut = 4, RegVsAttrOut = 5, RegVsTexOut = 6, RegVsConstInt = 7, RegVsConstBool = 14,
+       RegVsLoop = 15, RegVsLabel = 18 };
 enum { Mod2Abs = 11, Mod2AbsNeg = 12 };
 
 static unsigned int reg2_type(unsigned int t) { return ((t >> 28) & 7) | ((t >> 8) & 0x18); }
@@ -974,7 +982,21 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
  * target's clip space, keeping w, so the host clips as Direct3D does. */
 enum { VsPos = 20, VsFog = 21, VsColors = 23, VsTexOut = 25, VsInputs = 33, VsAddress = 55 };
 enum { OpVsSlt = 12, OpVsSge = 13, OpVsLit = 16, OpVsDst = 17, OpVsSgn = 34, OpVsMova = 46,
-       OpVsDefb = 47, OpVsDefi = 48, OpVsExpp = 78, OpVsLogp = 79 };
+       OpVsDefb = 47, OpVsDefi = 48, OpVsExpp = 78, OpVsLogp = 79, OpVsCall = 25, OpVsCallnz = 26, OpVsLoop = 27,
+       OpVsRet = 28, OpVsEndLoop = 29, OpVsLabel = 30, OpVsRep = 38, OpVsEndRep = 39, OpVsIf = 40, OpVsElse = 42,
+       OpVsEndif = 43 };
+enum { VsCounters = 56, VsLoopRegs = 60, VsMaxLoops = 4, VsMaxCalls = 4 };
+
+/* The IEEE single bits of a whole number (exact below 2^24 in magnitude). */
+unsigned int rb_float_bits(int v)
+{
+    unsigned int m = v < 0 ? 0u - (unsigned int)v : (unsigned int)v, e = 150, sign = v < 0 ? 0x80000000u : 0;
+    if (!m) return 0;
+    while (m >= 0x1000000u) { m >>= 1; ++e; }
+    while (!(m & 0x800000u)) { m <<= 1; --e; }
+    return sign | e << 23 | (m & 0x7fffffu);
+}
+
 
 static void reg_text(char *out, unsigned int size, const char *file, unsigned int n)
 {
@@ -999,7 +1021,12 @@ static int vreg_name(PS *s, unsigned int token, unsigned int add, char *out, uns
             /* c[a0.? + n]: the component is in bits 14-15 (see vertex_walk). */
             static const char *const load[4] = { "ARL ADDR[0].x, TEMP[55].xxxx", "ARL ADDR[0].x, TEMP[55].yyyy",
                                                  "ARL ADDR[0].x, TEMP[55].zzzz", "ARL ADDR[0].x, TEMP[55].wwww" };
-            line(s, load[(token >> 14) & 3], 0, 0, 0, 0, 0, 0);
+            if (s->relLoop) {   /* c[aL + n]: the innermost loop's register */
+                char r[16];
+                r[0] = 0;
+                reg_text(r, sizeof(r), "TEMP", VsLoopRegs + s->loops - 1);
+                line(s, "ARL ADDR[0].x, ", r, ".xxxx", 0, 0, 0, 0);
+            } else line(s, load[(token >> 14) & 3], 0, 0, 0, 0, 0, 0);
             cat(out, size, "CONST[ADDR[0].x+"); cat_number(out, size, RB_VS_CONST_BASE + num); cat(out, size, "]");
             s->info->constants = RB_VS_CONSTANTS;
             return 1;
@@ -1022,6 +1049,22 @@ static int vreg_name(PS *s, unsigned int token, unsigned int add, char *out, uns
         return 1;
     }
     return fail(s, RbPsRegister, token);
+}
+
+/* An integer constant i# (rep, loop) or a boolean b# (if, callnz) as a TGSI source. defi and defb
+ * values are immediates; the others are CONST[3 + n], whose x, y and z hold i#'s count, start and
+ * step and whose w holds b# (1 or 0), when the driver gives them (RB_VS_FLOW). */
+static int flow_const(PS *s, unsigned int token, int boolean, char *out, unsigned int size)
+{
+    unsigned int n = reg_num(token);
+    out[0] = 0;
+    if (reg2_type(token) != (boolean ? RegVsConstBool : RegVsConstInt) || n > 15) return fail(s, RbPsRegister, token);
+    if (boolean ? (s->defBool >> n) & 1 : (s->defInt >> n) & 1)
+        reg_text(out, size, "IMM", boolean ? s->defBoolImm[n] : s->defIntImm[n]);
+    else if (s->flow) reg_text(out, size, "CONST", 3 + n);
+    else return fail(s, RbPsOpcode, token);
+    if (boolean) cat(out, size, ".wwww");
+    return 1;
 }
 
 /* The instructions only vertex shaders have; -1 for the others. */
@@ -1056,12 +1099,55 @@ static int vertex_instruction(PS *s, unsigned int op, const unsigned int *p, uns
         line(s, op == OpVsExpp ? (s->version < 2 ? "EXP" : "EX2") : (s->version < 2 ? "LOG" : "LG2"), sat, d, ", ",
              op == OpVsLogp ? b : a, 0, 0);
         return 1;
-    case 25: case 26: case 27: case 28: case 29: case 30:    /* call, callnz, loop, ret, endloop, label */
-    case 38: case 39: case 40: case 41: case 42: case 43: case 44: case 45:   /* rep .. breakc */
-        /* Flow control cannot run here: for a driver of the Direct3D 8
-         * interface the Direct3D 9 runtime removes defi and defb from the
-         * code and passes no integer or boolean constants, so loop counts
-         * and branch conditions are unknown (if_comp and break are vs_2_x). */
+    case OpVsRep: case OpVsLoop: {
+        /* Static flow control of vs_2_0. Through the Direct3D 8 interface the Direct3D 9 runtime
+         * removes defi and defb and passes no integer or boolean constants, so counts and conditions
+         * are known only through the Direct3D 9 interface (RB_VS_FLOW). A loop counts down in
+         * TEMP[56+n]; loop also steps aL in TEMP[60+n]. */
+        unsigned int depth = s->loops;
+        char t[16], l[16];
+        if (depth >= VsMaxLoops || n < (op == OpVsLoop ? 2u : 1u)) return fail(s, RbPsOpcode, op);
+        if (op == OpVsLoop && reg2_type(p[0]) != RegVsLoop) return fail(s, RbPsRegister, p[0]);
+        if (!flow_const(s, p[op == OpVsLoop ? 1 : 0], 0, s->loopInt[depth], sizeof(s->loopInt[depth]))) return 0;
+        t[0] = l[0] = 0;
+        reg_text(t, sizeof(t), "TEMP", VsCounters + depth);
+        reg_text(l, sizeof(l), "TEMP", VsLoopRegs + depth);
+        line(s, "MOV ", t, ".x, ", s->loopInt[depth], ".xxxx", 0, 0);
+        if (op == OpVsLoop) line(s, "MOV ", l, ".x, ", s->loopInt[depth], ".yyyy", 0, 0);
+        line(s, "BGNLOOP", 0, 0, 0, 0, 0, 0);
+        line(s, "SGE ", t, ".y, IMM[2].xxxx, ", t, ".xxxx", 0, 0);
+        line(s, "IF ", t, ".yyyy", 0, 0, 0, 0);
+        line(s, "BRK", 0, 0, 0, 0, 0, 0);
+        line(s, "ENDIF", 0, 0, 0, 0, 0, 0);
+        s->loopIsLoop[depth] = op == OpVsLoop;
+        s->loops = depth + 1;
+        return 1;
+    }
+    case OpVsEndRep: case OpVsEndLoop: {
+        unsigned int depth;
+        char t[16], l[16];
+        if (!s->loops || s->loopIsLoop[s->loops - 1] != (op == OpVsEndLoop)) return fail(s, RbPsOpcode, op);
+        depth = --s->loops;
+        t[0] = l[0] = 0;
+        reg_text(t, sizeof(t), "TEMP", VsCounters + depth);
+        reg_text(l, sizeof(l), "TEMP", VsLoopRegs + depth);
+        if (op == OpVsEndLoop) line(s, "ADD ", l, ".x, ", l, ".xxxx, ", s->loopInt[depth], ".zzzz");
+        line(s, "ADD ", t, ".x, ", t, ".xxxx, IMM[1].wwww", 0, 0);
+        line(s, "ENDLOOP", 0, 0, 0, 0, 0, 0);
+        return 1;
+    }
+    case OpVsIf:
+        if (n < 1 || !flow_const(s, p[0], 1, a, sizeof(a))) return 0;
+        line(s, "IF ", a, 0, 0, 0, 0, 0);
+        ++s->ifs;
+        return 1;
+    case OpVsElse: case OpVsEndif:
+        if (!s->ifs) return fail(s, RbPsOpcode, op);
+        if (op == OpVsEndif) --s->ifs;
+        line(s, op == OpVsElse ? "ELSE" : "ENDIF", 0, 0, 0, 0, 0, 0);
+        return 1;
+    case OpVsCall: case OpVsCallnz: case OpVsRet: case OpVsLabel:   /* vertex_walk inlines subroutines */
+    case 41: case 44: case 45:   /* if_comp, break, breakc: vs_2_x */
         return fail(s, RbPsOpcode, op);
     }
     return -1;
@@ -1082,15 +1168,17 @@ static int vertex1_length(unsigned int op)
     return -1;
 }
 
-/* Pass 0: def constants; pass 1: instructions. A shader model 2 relative
- * source is followed by its address token, whose component is kept in
- * bits 14-15 of the source. */
-static int vertex_walk(PS *s, const unsigned int *tok, unsigned int count, int pass, unsigned int *imm)
+/* Pass 0: def, defi and defb constants, and where each label's code starts. Pass 1: the
+ * instructions from start to the end, or to a ret or label (the end of the main program), or for a
+ * subroutine (sub) to its ret; calls are inlined. A shader model 2 relative source is followed by
+ * its address token, whose component is kept in bits 14-15 of the source (aL sets relLoop). */
+static int vertex_walk(PS *s, const unsigned int *tok, unsigned int count, int pass, unsigned int *imm,
+                       unsigned int start, int sub)
 {
-    unsigned int i = 1;
+    unsigned int i = start, ifs = s->ifs, loops = s->loops;
     while (i < count) {
         unsigned int t = tok[i], op = t & 0xffff, n, k, m, ops[8];
-        if (t == OpEnd) return 1;
+        if (t == OpEnd) return pass == 0 || (!sub && !s->ifs && !s->loops) ? 1 : fail(s, RbPsOpcode, t);
         if (op == OpComment) { i += 1 + ((t >> 16) & 0x7fff); continue; }
         if (t & 0x90000000u) return fail(s, RbPsOpcode, t);
         if (s->version >= 2) n = (t >> 24) & 15;
@@ -1100,7 +1188,12 @@ static int vertex_walk(PS *s, const unsigned int *tok, unsigned int count, int p
             n = (unsigned int)len;
         }
         if (i + 1 + n > count) return fail(s, RbPsTruncated, i);
-        if (op == OpDef || op == OpVsDefb || op == OpVsDefi || op == Op2Dcl) {
+        if (pass == 1 && s->version >= 2 && (op == OpVsRet || op == OpVsLabel)) {
+            /* The end of the main program or of a subroutine, with all it opened closed. */
+            if (s->ifs != ifs || s->loops != loops || (sub && op == OpVsLabel)) return fail(s, RbPsOpcode, t);
+            return 1;
+        }
+        if (op == OpDef || op == OpVsDefb || op == OpVsDefi || op == Op2Dcl || op == OpVsLabel || op == OpVsRet) {
             if (pass == 0 && op == OpDef) {
                 unsigned int c = reg_num(tok[i + 1]);
                 if (n != 5 || reg2_type(tok[i + 1]) != Reg2Const || c >= RB_VS_CONSTANTS || *imm > 255)
@@ -1110,18 +1203,61 @@ static int vertex_walk(PS *s, const unsigned int *tok, unsigned int count, int p
                 put(&s->t, "IMM["); number(&s->t, s->defImm[c]); put(&s->t, "] FLT32 {");
                 hex(&s->t, tok[i + 2]); put(&s->t, ", "); hex(&s->t, tok[i + 3]); put(&s->t, ", ");
                 hex(&s->t, tok[i + 4]); put(&s->t, ", "); hex(&s->t, tok[i + 5]); put(&s->t, "}\n");
+            } else if (pass == 0 && (op == OpVsDefi || op == OpVsDefb) && s->version >= 2) {
+                /* i# as floats (count, start, step); b# in w as 1 or 0. */
+                unsigned int c = reg_num(tok[i + 1]);
+                if (n != (op == OpVsDefi ? 5u : 2u) || c > 15 || *imm > 255 ||
+                    reg2_type(tok[i + 1]) != (op == OpVsDefi ? RegVsConstInt : RegVsConstBool))
+                    return fail(s, RbPsRegister, tok[i + 1]);
+                put(&s->t, "IMM["); number(&s->t, *imm); put(&s->t, "] FLT32 {");
+                if (op == OpVsDefi) {
+                    s->defInt |= 1u << c;
+                    s->defIntImm[c] = (unsigned char)*imm;
+                    hex(&s->t, rb_float_bits((int)tok[i + 2])); put(&s->t, ", ");
+                    hex(&s->t, rb_float_bits((int)tok[i + 3])); put(&s->t, ", ");
+                    hex(&s->t, rb_float_bits((int)tok[i + 4])); put(&s->t, ", 0x00000000}\n");
+                } else {
+                    s->defBool |= 1u << c;
+                    s->defBoolImm[c] = (unsigned char)*imm;
+                    put(&s->t, "0x00000000, 0x00000000, 0x00000000, ");
+                    hex(&s->t, tok[i + 2] ? 0x3f800000u : 0); put(&s->t, "}\n");
+                }
+                ++*imm;
+            } else if (pass == 0 && op == OpVsLabel && s->version >= 2) {
+                unsigned int l = reg_num(tok[i + 1]);
+                if (n != 1 || l > 15 || reg2_type(tok[i + 1]) != RegVsLabel) return fail(s, RbPsRegister, tok[i + 1]);
+                s->labelAt[l] = i + 1 + n;
             }
         } else if (pass == 1) {
+            int a0 = 0;
+            s->relLoop = 0;
             for (k = 0, m = 0; k < n && m < 8; ++k) {
                 unsigned int o = tok[i + 1 + k] & ~0xc000u;
                 if (s->version >= 2 && m > 0 && (o & 0x2000)) {
-                    if (k + 1 >= n || reg2_type(tok[i + 2 + k]) != RegVsAddr) return fail(s, RbPsRegister, o);
+                    unsigned int at = k + 1 < n ? reg2_type(tok[i + 2 + k]) : ~0u;
+                    if (at == RegVsAddr) a0 = 1;
+                    else if (at == RegVsLoop && s->loops) s->relLoop = 1;
+                    else return fail(s, RbPsRegister, o);
+                    if (a0 && s->relLoop) return fail(s, RbPsRegister, o);   /* a0 and aL in one instruction */
                     o |= ((tok[i + 2 + k] >> 16) & 3) << 14;
                     ++k;
                 }
                 ops[m++] = o;
             }
-            if (!instruction2(s, op, 0, ops, m)) return 0;
+            if (op == OpVsCall || op == OpVsCallnz) {
+                /* Inlined: vs_2_0 has no recursion, and its calls nest at most VsMaxCalls deep. */
+                unsigned int l = m ? reg_num(ops[0]) : 16;
+                char b[48];
+                int ok;
+                if (s->version < 2 || l > 15 || reg2_type(ops[0]) != RegVsLabel || !s->labelAt[l] || s->calls >= VsMaxCalls ||
+                    (op == OpVsCallnz && (m < 2 || !flow_const(s, ops[1], 1, b, sizeof(b))))) return fail(s, RbPsOpcode, t);
+                if (op == OpVsCallnz) line(s, "IF ", b, 0, 0, 0, 0, 0);
+                ++s->calls;
+                ok = vertex_walk(s, tok, count, 1, imm, s->labelAt[l], 1);
+                --s->calls;
+                if (!ok) return 0;
+                if (op == OpVsCallnz) line(s, "ENDIF", 0, 0, 0, 0, 0, 0);
+            } else if (!instruction2(s, op, 0, ops, m)) return 0;
         }
         i += 1 + n;
     }
@@ -1246,6 +1382,7 @@ unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, con
     s.info = info;
     s.vertex = 1;
     s.streamBases = streamBases;
+    s.flow = (flags & RB_VS_FLOW) != 0;
     s.t.p = out; s.t.size = size;
     if (size) out[0] = 0;
     if (!count || (tokens[0] & 0xffff0000u) != 0xfffe0000u ||
@@ -1256,7 +1393,7 @@ unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, con
     s.version = (tokens[0] >> 8) & 0xff;
     put(&s.t, "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..");
     number(&s.t, RB_VS_CONST_BASE + RB_VS_CONSTANTS + RB_VS_VERTEX_CONSTANTS * RB_VS_VERTICES - 1);
-    put(&s.t, "]\nDCL ADDR[0]\nDCL TEMP[0..55]\nDCL OUT[0], POSITION\n");
+    put(&s.t, "]\nDCL ADDR[0]\nDCL TEMP[0..63]\nDCL OUT[0], POSITION\n");
     for (k = 0; k < 11; ++k) {
         put(&s.t, "DCL OUT["); number(&s.t, k + 1); put(&s.t, "], GENERIC["); number(&s.t, k); put(&s.t, "]\n");
     }
@@ -1268,13 +1405,13 @@ unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, con
               "IMM[5] UINT32 {0, 8, 16, 24}\n"
               "IMM[6] UINT32 {255, 16, 0, 0}\n"
               "IMM[7] FLT32 {0x3b808081, 0x00000000, 0x00000000, 0x00000000}\n");
-    if (!vertex_walk(&s, tokens, count, 0, &imm)) return 0;
+    if (!vertex_walk(&s, tokens, count, 0, &imm, 1, 0)) return 0;
     for (k = 0; k < sizeof(prologue) / sizeof(*prologue); ++k) line(&s, prologue[k], 0, 0, 0, 0, 0, 0);
     for (k = 0; k < 12; ++k) { r[0] = 0; reg_text(r, sizeof(r), "TEMP", k); line(&s, "MOV ", r, ", IMM[2]", 0, 0, 0, 0); }
     for (k = 0; k < 8; ++k) { r[0] = 0; reg_text(r, sizeof(r), "TEMP", VsTexOut + k); line(&s, "MOV ", r, ", IMM[3]", 0, 0, 0, 0); }
     for (k = 0; k < 16; ++k) { r[0] = 0; reg_text(r, sizeof(r), "TEMP", VsInputs + k); line(&s, "MOV ", r, ", IMM[3]", 0, 0, 0, 0); }
     if (!fetch(&s, decl, declCount)) return 0;
-    if (!vertex_walk(&s, tokens, count, 1, &imm)) return 0;
+    if (!vertex_walk(&s, tokens, count, 1, &imm, 1, 0)) return 0;
     for (k = 0; k < sizeof(epilogue) / sizeof(*epilogue); ++k) line(&s, epilogue[k], 0, 0, 0, 0, 0, 0);
     if (flags & RB_VS_FOG_ALPHA) line(&s, "MOV_SAT OUT[2].w, TEMP[21].xxxx", 0, 0, 0, 0, 0, 0);
     for (k = 0; k < 8; ++k) {

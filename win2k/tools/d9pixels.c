@@ -1060,6 +1060,77 @@ static void vertex_shaders(int only)
     }
 }
 
+/* ---- vertex shader static flow control ----
+ * Register types beyond those above: integer and boolean constants, aL and labels. */
+enum { RInt = 7, RBool = 14, RLoop = 15, RLabel = 18 };
+enum { OCall = 25, OCallnz = 26, OLoop = 27, ORet = 28, OEndLoop = 29, OLabel = 30, ORep = 38, OEndRep = 39,
+       OIf = 40, OElse = 42, OEndif = 43, ODefb = 47, ODefi = 48 };
+/* 61: rep i1 (count 4 from SetVertexShaderConstantI) adds a quarter of red four times; loop aL, i0
+ * (defi: 3 from 0 by 1) adds c[aL + 6] for green (a quarter, a quarter, a half). 62: if b0 (true)
+ * adds red; if b2 (defb false) would add blue, its else adds half of green; callnz l0, b1 (false)
+ * would add blue; call l1 adds the other half of green. Both are yellow when right. They need the
+ * Direct3D 9 driver interface, which alone passes integer and boolean constants (its sign is
+ * D3DDEVCAPS2_STREAMOFFSET). */
+static void vs_flow_cases(int only, BOOL offered)
+{
+    static const D3DVERTEXELEMENT9 colored[] = {
+        { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+        { 0, 12, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 }, D3DDECL_END() };
+    static const DWORD ps_color[] = { 0xffff0200, P2DCL_V(0), P2I(OMov, 2), P2D(8, 0, 15), P2SRC(RV, 0), PSEND };
+    static const SAMPLE s[] = { { 64, 64, 0xffff00 }, { 8, 8, CLEAR_COLOR } };
+    static const float c[8][4] = { { 0, 0, 0, 1 }, { 0.25f, 0, 0, 0 }, { 0, 0.25f, 0, 0 }, { 0, 0.25f, 0, 0 },
+                                   { 0, 0.5f, 0, 0 }, { 1, 0, 0, 0 }, { 0, 0, 1, 0 }, { 0, 0.5f, 0, 0 } };
+    static const int ints[2][4] = { { 0, 0, 0, 0 }, { 4, 0, 1, 0 } };
+    static const BOOL bools[2] = { TRUE, FALSE };
+    VSVERTEX v[6];
+    if (only && only != 61 && only != 62) return;
+    if (!offered) { printf("D9PIX vertex shader flow control not offered\n"); return; }
+    vs_quad(v, -0.5f, 0.5f, 0.5f, -0.5f, 0xff000000);
+    /* c4..c11 as above; i0, i1; b0, b1. */
+    IDirect3DDevice9_SetVertexShaderConstantF(device, 4, &c[0][0], 8);
+    IDirect3DDevice9_SetVertexShaderConstantI(device, 0, &ints[0][0], 2);
+    IDirect3DDevice9_SetVertexShaderConstantB(device, 0, bools, 2);
+    if (!only || only == 61) {
+        static const DWORD vs[] = { 0xfffe0200, VDCL2(0, 0), VDCL2(10, 1),
+            P2I(ODefi, 5), P2D(RInt, 0, 15), 3, 0, 1, 0,
+            P2I(OMov, 2), P2D(VPos, 0, 15), P2SRC(RV, 0),
+            P2I(OMov, 2), P2D(RR, 0, 15), P2SRC(RC, 4),
+            P2I(ORep, 1), P2SRC(RInt, 1),
+                P2I(OAdd, 3), P2D(RR, 0, 15), P2SRC(RR, 0), P2SRC(RC, 5),
+            P2I(OEndRep, 0),
+            P2I(OLoop, 2), P2SRC(RLoop, 0), P2SRC(RInt, 0),
+                P2I(OAdd, 4), P2D(RR, 0, 15), P2SRC(RR, 0), P2SRC(RC, 6) | 0x2000, P2S(RLoop, 0, 0, 0),
+            P2I(OEndLoop, 0),
+            P2I(OMov, 2), P2D(VAttr, 0, 15), P2SRC(RR, 0), PSEND };
+        vs_run("vs2_loops", colored, vs, ps_color, v, sizeof(v[0]), 2, s, 2);
+    }
+    if (!only || only == 62) {
+        static const DWORD vs[] = { 0xfffe0200, VDCL2(0, 0), VDCL2(10, 1),
+            P2I(ODefb, 2), P2D(RBool, 2, 15), 0,
+            P2I(OMov, 2), P2D(VPos, 0, 15), P2SRC(RV, 0),
+            P2I(OMov, 2), P2D(RR, 0, 15), P2SRC(RC, 4),
+            P2I(OIf, 1), P2SRC(RBool, 0),
+                P2I(OAdd, 3), P2D(RR, 0, 15), P2SRC(RR, 0), P2SRC(RC, 9),
+            P2I(OEndif, 0),
+            P2I(OIf, 1), P2SRC(RBool, 2),
+                P2I(OAdd, 3), P2D(RR, 0, 15), P2SRC(RR, 0), P2SRC(RC, 10),
+            P2I(OElse, 0),
+                P2I(OAdd, 3), P2D(RR, 0, 15), P2SRC(RR, 0), P2SRC(RC, 11),
+            P2I(OEndif, 0),
+            P2I(OCallnz, 2), P2SRC(RLabel, 0), P2SRC(RBool, 1),
+            P2I(OCall, 1), P2SRC(RLabel, 1),
+            P2I(OMov, 2), P2D(VAttr, 0, 15), P2SRC(RR, 0),
+            P2I(ORet, 0),
+            P2I(OLabel, 1), P2SRC(RLabel, 0),
+                P2I(OAdd, 3), P2D(RR, 0, 15), P2SRC(RR, 0), P2SRC(RC, 10),
+            P2I(ORet, 0),
+            P2I(OLabel, 1), P2SRC(RLabel, 1),
+                P2I(OAdd, 3), P2D(RR, 0, 15), P2SRC(RR, 0), P2SRC(RC, 11),
+            P2I(ORet, 0), PSEND };
+        vs_run("vs2_branches", colored, vs, ps_color, v, sizeof(v[0]), 2, s, 2);
+    }
+}
+
 /* ---- compressed textures ---- */
 
 /* A managed texture of the given format from raw blocks. */
@@ -1700,6 +1771,7 @@ int main(int argc, char **argv)
     if (caps.PixelShaderVersion < D3DPS_VERSION(2, 0)) printf("D9PIX vertex shader cases need pixel shader 2.0\n");
     else if (flags == D3DCREATE_SOFTWARE_VERTEXPROCESSING || caps.VertexShaderVersion >= D3DVS_VERSION(2, 0)) {
         if (!only || only >= 30) vertex_shaders(only);
+        if (!only || only >= 61) vs_flow_cases(only, (caps.DevCaps2 & D3DDEVCAPS2_STREAMOFFSET) != 0);
     } else printf("D9PIX vertex shaders not offered\n");
     IDirect3DDevice9_Release(device);
     IDirect3D9_Release(d3d);

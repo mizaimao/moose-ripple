@@ -96,6 +96,9 @@ typedef struct {
      * right, bottom, at most 8192) are drawn, as well as inside the viewport. */
     ULONG scissorOn, scissor[4];
     ULONG vertexProgram, vertexConstants, vertexWords;   /* transform 2 */
+    /* With RB_VS_FLOW programs: i0..i15 as floats (count, start, step) and b0..b15 as 1 or 0 in w,
+     * sent as CONST[3..18]. */
+    ULONG flowConstants[16][4];
     /* Lighting as in RB2K_D3D7_DRAW (object space only); specular adds
      * the lit specular colour. */
     ULONG lighting, lightCount, lightFlags, ambient, specular;
