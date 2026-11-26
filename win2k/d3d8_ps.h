@@ -74,6 +74,10 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
  * floats in x, y, z: count, start, step; b# as 1 or 0 in w), so vs_2_0 static flow control (rep, loop,
  * if, call, callnz) runs; without it only defi and defb values can drive it. */
 #define RB_VS_FLOW 2
+/* RB_VS_CLIP: the program also writes clip distances (OUT[12] and OUT[13], CLIPDIST[0] and [1])
+ * for six user clip planes in clip space, CONST[RB_VS_CONST_BASE + constants + 0..5] (constants as
+ * in info->constants), which the rasterizer enables by D3DRS_CLIPPLANEENABLE. */
+#define RB_VS_CLIP 4
 /* The IEEE single bits of a whole number (exact below 2^24 in magnitude). */
 unsigned int rb_float_bits(int v);
 /* A vertex holds the data of each stream the declaration reads, one after the

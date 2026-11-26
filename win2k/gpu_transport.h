@@ -18,7 +18,7 @@ typedef struct {
 typedef struct {
     BOOLEAN pipeline;
     ULONG vertexShaders, boundVertex;   /* bit and value: 1 transformed input, 2 object space */
-    ULONG rasters, boundRaster, viewTexture, viewTexture1;
+    ULONG rasters, boundRaster, clipRaster, viewTexture, viewTexture1;
     /* Samplers and views bound together from slot zero; the renderer drops
      * the slots past the last set. boundViews counts views, boundView0 is the
      * view handle in slot zero. */
