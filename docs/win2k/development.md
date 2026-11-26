@@ -2218,6 +2218,25 @@ locking it fails.
 buffer of its size, and draws it.
 
 
+## Cube map render targets
+
+3DMark05's run stopped next on "CreateCubeTexture failed: Driver internal
+error": it draws reflections into a 512x512 render target cube map, and
+render target textures were only flat images.
+
+Each face of a render target cube map is now an image of its own, drawn into
+like any target; Direct3D sets a face as the target by the face's surface
+handle, which `CreateSurfaceEx` records for each face. Sampling the cube
+needs a cube texture, so before a draw samples it, a miniport request
+(`IOCTL_RB2K_D7_CUBE_SYNC`) copies the faces drawn since the last time into a
+host cube texture, one region copy into each face's layer; it makes the cube
+texture the first time. Draws and clears count per image, so an unchanged
+face is not copied again.
+
+`d9pixels` case 71 clears each face of a 64x64 render target cube map to its
+own colour as a render target and samples the six directions.
+
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:
