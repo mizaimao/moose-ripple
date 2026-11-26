@@ -250,8 +250,10 @@ d3dkmt_open_allocation(struct gdikmt_device *dev, struct gdikmt_openallocation *
    arg.PrivateRuntimeDataSize = runtime ? open->RuntimeDataSize : 0;
 
    status = kmt[KMT_OPEN_RESOURCE](&arg);
-   if (KMT_SUCCESS(status))
+   if (KMT_SUCCESS(status)) {
       open->hResource = (HANDLE)(UINT_PTR)arg.hResource;
+      open->CallerCloses = true;
+   }
    kmt_log("open of shared handle 0x%x: 0x%08lx, resource 0x%x", (unsigned)open->hGlobalHandle,
            (unsigned long)status, (unsigned)arg.hResource);
    free(runtime);

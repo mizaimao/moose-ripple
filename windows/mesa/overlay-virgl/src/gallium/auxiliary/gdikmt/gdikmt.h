@@ -55,6 +55,8 @@ struct gdikmt_openallocation {
    UINT RuntimeDataSize;                       /* out of the query: what the runtime that made
                                                 * the resource stored with it */
    HANDLE hResource;                           /* out of the open */
+   bool CallerCloses;                          /* out of the open: nobody else owns hResource,
+                                                * the caller destroys it when it is done */
 };
 
 /* One submission of the context's command buffer. */
