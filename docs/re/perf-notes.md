@@ -1483,4 +1483,6 @@ and 1,903; each later render 147.7 and 147.4 against 137.0 and 137.5 ms (7% less
 two renders are the emulated CPU compiling and do not change. The software renderer there
 needs 3,330 ms for a later render of the 24, ours 137. With that picture 7 of the 24 filters
 differ from the software renderer in UTM, with either kext mode and with the shader made at
-load or at the first draw alike; which filters and why is not looked into yet.
+load or at the first draw alike. That is KI-12 in `docs/known-issues.md`: the host there has
+no sampler border colours, so a filter that reads outside the picture gets its edge pixels
+(the same picture on the second Intel host: 0 of 24 differ).
