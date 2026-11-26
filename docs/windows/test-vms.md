@@ -299,6 +299,12 @@ disk counters). What the storage driver waits for is not known yet; a flush of t
 overlay to the host's disk is the first thing to rule out (the guest's disk with
 `cache=unsafe`).
 
+One run with that option (`DISKOPT=,cache=unsafe` for `refvm.sh`, which makes the guest's
+flushes cost nothing on the host) was a quiet one: 191 s for the two SM2.0 tests and 41 s for
+the CPU tests, and the disk controller's registers were read at most 22,000 times a second,
+against 125,000 and more in the two disturbed runs before it. It fits a flush as the cause,
+but it is one run, and two of the six runs without the option were quiet too.
+
 Take a score only from a quiet run: the lengths of the parts are in the marks. The two runs of
 the table are of the quiet kind, and their parts agree within ten seconds.
 
