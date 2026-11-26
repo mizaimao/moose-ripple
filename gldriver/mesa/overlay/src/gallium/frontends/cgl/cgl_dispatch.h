@@ -40,6 +40,34 @@ void ripple_cgl_unsupported(const char *name);
          ripple_cgl_make_current_slow(rend);                                          \
    } while (0)
 
+/* ---- The second GL thread ------------------------------------------------------------------ *
+ * With Mesa's second GL thread on (its "glthread"; ripple_cgl_device_second_thread in
+ * cgl_device.c says when), GET_DISPATCH() on the program's thread is a table of functions that
+ * only queue the call, and a worker thread of the context runs the queue. A thunk that hands a
+ * call on needs nothing more. Frontend code that looks at or changes the context itself (struct
+ * gl_context, the st_context, the pipe context, a drawable's buffers) must not run next to the
+ * worker: it goes between RIPPLE_CGL_DIRECT_BEGIN and RIPPLE_CGL_DIRECT_END, after
+ * RIPPLE_CGL_ENTER. BEGIN waits until the worker has run everything queued and makes
+ * GET_DISPATCH() the table that runs a call at once, so the code in between sees the context as
+ * the program's calls left it and its own GL calls take effect when they return, as without
+ * the thread; END brings the queueing table back. They nest. Mesa keeps a few things in step
+ * on the program's thread as calls are queued (the framebuffer bindings, the attribute stacks,
+ * the pixel store, vertex arrays, the matrix mode): a call between BEGIN and END that leaves
+ * one of those changed has to say so (see ripple_cgl_bind_framebuffer). */
+extern int ripple_cgl_threaded;       /* a context of this process has the second thread */
+void ripple_cgl_direct_begin(void);
+void ripple_cgl_direct_end(void);
+#define RIPPLE_CGL_DIRECT_BEGIN()                                                     \
+   do {                                                                               \
+      if (unlikely(ripple_cgl_threaded))                                              \
+         ripple_cgl_direct_begin();                                                   \
+   } while (0)
+#define RIPPLE_CGL_DIRECT_END()                                                       \
+   do {                                                                               \
+      if (unlikely(ripple_cgl_threaded))                                              \
+         ripple_cgl_direct_end();                                                     \
+   } while (0)
+
 /* Apple-only entries the frontend implements (cgl_apple.c); gen_dispatch.py puts them in
  * the table. */
 void GLAPIENTRY ripple_cgl_gen_fences(void *rend, GLsizei n, GLuint *fences);

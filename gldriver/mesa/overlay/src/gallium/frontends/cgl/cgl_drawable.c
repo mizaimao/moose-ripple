@@ -23,6 +23,7 @@
 
 #include "cgl_context.h"
 #include "cgl_device.h"
+#include "cgl_dispatch.h"
 #include "cgl_drawable.h"
 #include "virgl/ripple/ripple_gpu_uapi.h"
 
@@ -467,6 +468,9 @@ ripple_cgl_context_swap(struct ripple_cgl_context *ctx)
       return;
    if (_glapi_get_context() != ctx->glctx)
       ripple_cgl_context_make_current(ctx);
+   /* The frame's calls first, if they are on the second GL thread; the flush and the present
+    * below use the context from this thread (cgl_dispatch.h). */
+   RIPPLE_CGL_DIRECT_BEGIN();
    swap_debug(ctx);
    ctx->present_ok = true;
    ctx->presented = false;
@@ -489,6 +493,7 @@ ripple_cgl_context_swap(struct ripple_cgl_context *ctx)
       d->textures[ST_ATTACHMENT_FRONT_LEFT] = t;
       p_atomic_inc(&d->base.stamp);
    }
+   RIPPLE_CGL_DIRECT_END();
 }
 
 struct pipe_resource *

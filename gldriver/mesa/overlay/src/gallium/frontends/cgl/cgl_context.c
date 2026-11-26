@@ -11,6 +11,7 @@
 
 #include "frontend/api.h"
 #include "main/framebuffer.h"
+#include "main/glthread.h"
 #include "main/mtypes.h"
 #include "pipe/p_screen.h"
 #include "state_tracker/st_context.h"
@@ -115,6 +116,12 @@ ripple_cgl_context_create(const struct ripple_cgl_pixel_format *pf,
    }
    ctx->st->frontend_context = ctx;
    ctx->glctx = ctx->st->ctx;
+   /* The second GL thread (cgl_dispatch.h), where it is wanted and the driver can do it. */
+   if (ripple_cgl_device_second_thread()) {
+      _mesa_glthread_init(ctx->glctx);
+      if (ctx->glctx->GLThread.enabled)
+         ripple_cgl_threaded = 1;
+   }
    return ctx;
 }
 
@@ -123,6 +130,7 @@ ripple_cgl_context_destroy(struct ripple_cgl_context *ctx)
 {
    if (!ctx)
       return;
+   ripple_cgl_quiesce(ctx);              /* Mesa ends the context's second thread itself */
    if (_glapi_get_context() == ctx->glctx)
       st_api_make_current(NULL, NULL, NULL);
    ripple_cgl_forget(ctx);
@@ -156,9 +164,35 @@ log_unbound(const struct ripple_cgl_context *ctx, bool ok)
            d->visual.depth_stencil_format, d->visual.samples);
 }
 
+/* The second GL thread of a context, if it has one, has to be done before the context is
+ * touched from here. */
+static inline void
+thread_finish(struct gl_context *gl)
+{
+   if (gl && gl->GLThread.enabled)
+      _mesa_glthread_finish(gl);
+}
+
+/* Making a context current leaves the calling thread with the table that queues calls. Inside
+ * RIPPLE_CGL_DIRECT_BEGIN/END it has to be the one that runs them again. */
+static void
+direct_again(struct ripple_cgl_context *ctx)
+{
+   struct gl_context *gl = ctx ? ctx->glctx : NULL;
+
+   if (gl && ctx->direct && gl->GLThread.enabled && _glapi_get_context() == gl) {
+      _mesa_glthread_finish(gl);
+      _glapi_set_dispatch(gl->Dispatch.Current);
+   }
+}
+
 bool
 ripple_cgl_context_make_current(struct ripple_cgl_context *ctx)
 {
+   /* Mesa flushes the context that was current and binds the new one's buffers, here on the
+    * calling thread: both contexts' second threads have to be done first. */
+   thread_finish(_glapi_get_context());
+   thread_finish(ctx ? ctx->glctx : NULL);
    /* Without a drawable the context is surfaceless and renders into FBOs only. */
    struct pipe_frontend_drawable *d = ctx && ctx->draw ? &ctx->draw->base : NULL;
    bool ok = st_api_make_current(ctx ? ctx->st : NULL, d, d);
@@ -166,6 +200,7 @@ ripple_cgl_context_make_current(struct ripple_cgl_context *ctx)
       log_unbound(ctx, ok);
    if (ok && ctx && unlikely(ctx->sync_gc))
       ripple_cgl_sync_from_glengine(ctx);
+   direct_again(ctx);
    return ok;
 }
 
@@ -184,12 +219,14 @@ ripple_cgl_context_set_read_drawable(struct ripple_cgl_context *ctx,
     * texture after reading a 551x551 buffer, drew its result 551/512 too large; the RSS
     * Visualizer saver's cloud pattern no longer tiled and showed a seam.) The borrowed
     * drawable is not the context's own: keep Mesa from taking it for that. */
+   thread_finish(ctx->glctx);
    GLboolean initialized = ctx->glctx->ViewportInitialized;
    if (!d)
       ctx->glctx->ViewportInitialized = GL_TRUE;
    st_api_make_current(ctx->st, d ? d : r, r);
    if (!d)
       ctx->glctx->ViewportInitialized = initialized;
+   direct_again(ctx);
 }
 
 /* From OpenGL.framework (CGLCurrent.h); declared here to keep Apple's GL headers out. */
@@ -200,6 +237,7 @@ ripple_cgl_context_set_drawable(struct ripple_cgl_context *ctx, struct ripple_cg
 {
    bool current = _glapi_get_context() == ctx->glctx;
 
+   thread_finish(ctx->glctx);            /* it draws into the drawable the context had */
    ctx->draw = d;
    if (current)
       ripple_cgl_context_make_current(ctx);
@@ -234,4 +272,44 @@ ripple_cgl_context_for(void *rend)
    if (ctx && ctx->magic == RIPPLE_CGL_MAGIC)
       return ctx;
    return ripple_cgl_rend_for(rend);
+}
+
+/* ---- The second GL thread (cgl_dispatch.h) ------------------------------------------------ */
+
+int ripple_cgl_threaded;
+
+void
+ripple_cgl_quiesce(struct ripple_cgl_context *ctx)
+{
+   if (!ripple_cgl_threaded)
+      return;
+   thread_finish(_glapi_get_context());
+   thread_finish(ctx ? ctx->glctx : NULL);
+}
+
+/* RIPPLE_CGL_DIRECT_BEGIN and END, for the context current on the calling thread. */
+void
+ripple_cgl_direct_begin(void)
+{
+   struct gl_context *gl = _glapi_get_context();
+   struct ripple_cgl_context *ctx = gl && gl->st ? gl->st->frontend_context : NULL;
+
+   if (!ctx || !gl->GLThread.enabled)
+      return;
+   /* The queued calls first: they can change which table runs a call (glBegin, glNewList). */
+   _mesa_glthread_finish(gl);
+   if (ctx->direct++ == 0)
+      _glapi_set_dispatch(gl->Dispatch.Current);
+}
+
+void
+ripple_cgl_direct_end(void)
+{
+   struct gl_context *gl = _glapi_get_context();
+   struct ripple_cgl_context *ctx = gl && gl->st ? gl->st->frontend_context : NULL;
+
+   if (!ctx || !gl->GLThread.enabled || !ctx->direct)
+      return;
+   if (--ctx->direct == 0)
+      _glapi_set_dispatch(gl->GLApi);
 }
