@@ -838,6 +838,30 @@ the stage states before each draw. 3DMark 2001 SE needs Q8W8V8U8 for Nature ("de
 support bump normal maps" with V8U8 alone). `d9pixels`: 49 of 49 on the rig, `ps_texbem`
 included.
 
+### Vertex processing on the GPU (2026-11-26, `D3D8` = `"2"`)
+
+With the registry value at `"2"` the Direct3D 8 and 9 devices report hardware transform and
+lighting (`D3DDEVCAPS_HWTRANSFORMANDLIGHT`, eight lights, Direct3D 7's vertex processing caps;
+no vertex shaders yet, so a device that wants them still gets the runtime's). The runtime then
+sends untransformed vertices, with the world, view and projection matrices (`SETTRANSFORM`,
+`MULTIPLYTRANSFORM`), the lights (`CREATELIGHT`, `SETLIGHT`), the material and the depth range,
+and the HAL draws them through an ARB vertex program made from that state (`tnl_arb.c`): the
+full transform, with OpenGL's y flip, z range and Direct3D's pixel centres folded into its matrix;
+Direct3D 7 lighting (directional, point and spot lights, attenuation, range, material sources,
+local viewer) with `LIT` for the specular term; vertex fog from view depth or range, table fog
+from the depth buffer's z; texture coordinates from the vertex or made in view space (normal,
+position, reflection vector), through the texture matrices, projected or not. Programs are made
+per state key and kept (16 a context); their state sits in `program.env`, reloaded only where it
+changed. While such programs draw, OpenGL's viewport and depth range are Direct3D's; transformed
+vertices get the whole target and 0..1 back. A check on the build host compiles 266 key
+variants with Mesa's parser. In UTM (DirectX 9.0c): `d9pixels` 42 of 42 and `d8pixels` 23 of 23
+with `vertex_processing=hardware`, `d8pixels`' lit case included; d9pixels' vertex shader and
+luminance cases report "not offered" there.
+
+Fixed-function stages also sample cube maps and volumes now: the unit enables OpenGL's cube map
+or 3D target for such a texture (OpenGL prefers them to 2D); before, the unit sampled whatever 2D
+texture it held.
+
 ### 3DMark 2001 SE (2026-11-26, rig VM 230)
 
 Windows 98 SE with DirectX 9.0c, the Direct3D 8 interface on, 1024x768 32-bit, the runtime's
