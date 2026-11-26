@@ -2063,3 +2063,34 @@ detail (8.6, 4.3, 27.1, 5.7, 16.1 and 10.3 fps, without the fence change
 of the previous section), with no failed request. It stops at Nature:
 "device does not support bump normal maps", the next fix. `d9pixels` (41
 of 41) and `tpixels hal` (18 of 18) pass.
+
+## Release package
+
+`win2k/package.sh` builds the package on the Linux build host:
+
+    VERSION=0.4.1 THIRDPTY=/path/to/THIRDPTY.TXT win2k/package.sh
+
+It makes `build/win2k-package/moose-ripple-win2k-VERSION.zip` and its
+`SHA256SUMS.txt`. The driver files come from `build.py`, with the INF's
+`DriverVer` set to the version and the build date, and `ripplegl.dll` is
+built from the same checkout's `win9x/mesa`. `README.TXT` is
+`win2k/package/README.TXT`; update its lists before a release.
+`THIRDPTY.TXT`, the notices for Mesa in `ripplegl.dll`, comes from the
+caller and must name the source of the build.
+
+Release 0.4.0 reused the Windows 9x 0.2.0 build of `ripplegl.dll`, which
+predates the Windows 2000/XP path in Mesa's winsys: on 2000 and XP its
+OpenGL fell back to Mesa's software renderer (`softpipe`), and the install
+test ran no OpenGL program. On XP under KVM on the Intel UHD 630 host, with
+the same driver build, that DLL reported `renderer=softpipe` and the
+current build `renderer=virgl`. The script now refuses a `ripplegl.dll`
+that does not import `ExtEscape`, the call that path uses.
+
+The install test is `win2k/tools/pkgtest.cmd`. Install the package on
+fresh Windows XP and Windows 2000 guests, restart, copy the package files
+and `build/win2k`'s test programs into one folder and run
+`pkgtest.cmd [output]` there. It compares the installed files with the
+package, runs `glpresent` and fails unless OpenGL's renderer is `virgl`,
+and runs the Direct3D checks (`d9pixels` with hardware and software vertex
+processing, `d9stencil`, `d8pixels`, `d9full`, `d3d7probe`, `tpixels`). It
+ends with `PKGTEST END failed=N`.
