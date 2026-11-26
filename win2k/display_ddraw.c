@@ -228,9 +228,10 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
          * top level's description; every level gets its own user memory
          * and the native path draws from the top level. */
         if (more && (more->ddsCapsEx.dwCaps2 & DDSCAPS2_VOLUME)) {
-            /* A volume: its slices follow each other, a slice pitch apart. */
+            /* A volume: its slices follow each other, a slice pitch apart (DXT ones too,
+             * in rows of 4x4 blocks). */
             depth = more->ddsCapsEx.dwCaps4;
-            if (!depth || depth > RB2K_D7_VOLUME_SIDE || RB_TEX_COMPRESSED(format) || format == TexNone) {
+            if (!depth || depth > RB2K_D7_VOLUME_SIDE || format == TexNone) {
                 /* counted for d7draw.exe: the count field holds the depth */
                 ++d->d7draw.surfaceRefused;
                 d->d7draw.refusedCaps = desc->ddsCaps.dwCaps; d->d7draw.refusedFlags = desc->dwFlags;
