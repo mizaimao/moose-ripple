@@ -162,6 +162,7 @@ ripple_cgl_swap(void *rend)
 #include <unistd.h>
 
 int ripple_cgl_tracing;
+int ripple_cgl_skip_draws;
 static FILE *trace_file;
 static unsigned long trace_counts[1024];
 static const char *trace_names[1024];
@@ -174,6 +175,8 @@ static simple_mtx_t trace_lock = SIMPLE_MTX_INITIALIZER;
 __attribute__((constructor)) static void
 ripple_cgl_trace_init(void)
 {
+   const char *skip = getenv("RIPPLE_GL_SKIP_DRAWS");
+   ripple_cgl_skip_draws = skip && atoi(skip);
    if (access("/Library/Logs/RippleGL/trace", F_OK) != 0)
       return;
    char path[256];

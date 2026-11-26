@@ -24,6 +24,7 @@ void ripple_cgl_make_current_slow(void *rend);
 
 /* Debug trace of GL calls (cgl_apple.c): on when /Library/Logs/RippleGL/trace exists at load. */
 extern int ripple_cgl_tracing;
+extern int ripple_cgl_skip_draws;   /* debug: RIPPLE_GL_SKIP_DRAWS=1, draws return at once */
 /* Returns whether the call was logged; the data loggers below follow a logged call. */
 int ripple_cgl_trace(unsigned index, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 void ripple_cgl_trace_text(const char *what, const void *text, int len);
