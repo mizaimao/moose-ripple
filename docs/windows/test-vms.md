@@ -258,6 +258,13 @@ The run is unattended, because the card's picture cannot be seen from the host:
   file, because Vista's PowerShell 1.0 does not run the script), writes everything to the first serial port
   and to R:, and shuts Windows down. The helpers it uses are the `bench-*.c` programs in the
   same folder (built with llvm-mingw like the other test programs).
+- `auto.cmd` calls `env.cmd` before the run and `post.cmd` after it when they are next to it on
+  the CD. The sets in `tools/win7-bench`: `timing` (the driver's timing report into a file of
+  the run's name on R:), `swap` (test builds of the user-mode driver, `umd32-test.dll` and
+  `umd64-test.dll` beside it, put in place of the installed files first, with the timing
+  report), `profile` (the timing report, the command statistics and the module lists for a
+  sampled run) and `pixeltests` (the Direct3D 9 pixel tests of the CD's `tests` folder
+  instead of the benchmark, then a shutdown; it takes the same test builds).
 - 3DMark06's free edition shows no score without the vendor's web site. With `key.txt` (a
   registration code, one line) beside the scripts, `bench-reg.exe` enters it through the
   program's own dialog; it prints window titles only. Keep that file off any shared medium
@@ -298,6 +305,12 @@ disturbed run than in a quiet one (`auto.cmd` ends with every process's processo
 disk counters). What the storage driver waits for is not known yet; a flush of the throwaway
 overlay to the host's disk is the first thing to rule out (the guest's disk with
 `cache=unsafe`).
+
+One run with that option (`DISKOPT=,cache=unsafe` for `refvm.sh`, which makes the guest's
+flushes cost nothing on the host) was a quiet one: 191 s for the two SM2.0 tests and 41 s for
+the CPU tests, and the disk controller's registers were read at most 22,000 times a second,
+against 125,000 and more in the two disturbed runs before it. It fits a flush as the cause,
+but it is one run, and two of the six runs without the option were quiet too.
 
 Take a score only from a quiet run: the lengths of the parts are in the marks. The two runs of
 the table are of the quiet kind, and their parts agree within ten seconds.

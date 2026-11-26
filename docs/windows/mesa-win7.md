@@ -2039,6 +2039,108 @@ most, on either system. Firefly Forest is the exception. The GPU idles half the 
 scene is held up on the way to the GPU: the guest's processor, the driver, or QEMU's drawing
 thread. Which of them is the next measurement (`rig/threads.sh` during that test).
 
+## 3DMark06's Firefly Forest: where a frame goes (2026-11-26)
+
+The section above left this test as the one that the host's GPU does not limit, and the rig's
+trace of QEMU's drawing thread (`test-vms.md`, "What QEMU's main thread does during a run")
+put the limit on the guest's side. A profile inside the guest, on the second Intel test
+machine (UHD 630, QEMU 10.0, virglrenderer 1.1; Windows 7 SP1 with four processors, the
+VM options of the reference runs). All of these runs shared the host with other guests, so
+the frame times are for comparing with each other, not scores.
+
+The tools: the user-mode driver's timing report (`RIPPLE_UMD_TIMES`, which now also times the
+steps of a buffer's `Unlock` and the kernel calls that make and free an allocation), and
+samples of where the guest's four processors are, about 70 of each a second for a minute of
+the test, given to modules and functions (`tools/win7-debug/rig/ripstream.sh`,
+`sm2sample.sh`, `attribute.pl`; `tools/win7-bench/profile` for the guest's side).
+
+A frame, from the timing report (the range over the test's blocks of 256 frames):
+
+| | Release 0.4.0 | Current driver (cached memory) |
+| --- | ---: | ---: |
+| A frame | 64 to 75 ms | 59 to 72 ms |
+| of it inside the user-mode driver | 53 to 62 ms | 50 to 56 ms |
+| `Unlock`, 17 calls a frame | 30 to 43 ms | 18 to 35 ms |
+| `Present` | 2 to 19 ms | 5 to 24 ms |
+| `DrawIndexedPrimitive`, 1,500 to 2,650 calls a frame | 6 to 10 ms | 8 to 11 ms |
+
+The first test of the run (Return to Proxycon) takes 18 to 38 ms a frame, 9 to 19 ms of it
+inside the driver, most of that in its 500 to 2,500 indexed draws (about 6 microseconds each).
+
+Where the processors are during Firefly Forest (current driver; shares of all samples, so 25%
+is one processor busy all the time):
+
+| | Share |
+| --- | ---: |
+| Idle (the halt in `intelppm.sys`) | 35.9% |
+| `hal.dll`, at its port read (port 0x71, the real-time clock's data register, in all 1,050 samples taken there with the port number in a later run) | 19.8% |
+| `ntoskrnl.exe` | 11.9% |
+| `viogpu3d.sys`, the write that notifies the virtio device | 8.2% |
+| `viogpu3d.sys`, the read of the device's interrupt status | 5.3% |
+| `viogpu3d.sys`, `memmove` and `memset` | 3.8% |
+| The benchmark's own code | 3.5% |
+| Our user-mode driver | 2.8% |
+| `d3d9.dll`, the C runtime and `ntdll.dll` | 3.5% |
+
+A third of all processor time is spent at three instructions that read or write a register of
+an emulated device: the real-time clock, which Windows 7 reads at every clock tick when the VM
+has no HPET, and the virtio GPU's notification and interrupt status registers. QEMU answers
+each of them in its own code, under the lock that its drawing thread holds while virglrenderer
+works through a batch of commands, so a guest processor that touches such a register stands
+still until the batch is done. The user-mode driver's own code is under 3%.
+
+What `Unlock` waits for is one Windows call. The game streams its vertices through one
+768 KB buffer: 17 locks a frame, most of them of 80 to 560 bytes with `NOOVERWRITE`, the rest
+of the whole buffer with `DISCARD`. The driver keeps such a buffer in a shadow that Windows
+watches for writes (`MEM_WRITE_WATCH`), and after each upload it sets the watch again
+(`ResetWriteWatch`). The steps of those 17 unlocks in one block of frames (of the run with
+`ioeventfd=on` below, the first that timed the last step): finding the written pages 0.06 ms, mapping 0.08 ms, copying 0.01 ms, unmapping 0.01 ms, and setting the watch
+again 32.6 ms of a 55.7 ms frame, 1.9 ms a call. Setting the watch makes every processor of
+the guest drop its address translations and waits until each has answered, and one that
+stands still at a device register does not answer.
+
+Five things tried, one run each:
+
+| Change | Result |
+| --- | --- |
+| The virtio GPU with `ioeventfd=on` (QEMU's default for this device is off) | The notification wait left the samples (8.2% to 0%); a frame took 54 to 70 ms as before |
+| The watch set again by the call that lists the pages (`WRITE_WATCH_FLAG_RESET`), for those pages only | The cost moved into that call: 17.9 ms a frame; frames as before |
+| Locks of a small range sent as they were locked, without the watch, and the watch set again only before a lock of the whole buffer that would otherwise send more than 16 pages | 17 calls became about 1 a frame, and that one took 10 to 23 ms; frames as before |
+| The same without any call that sets the watch again (a list long enough for the whole buffer) | `Unlock` fell to 1 to 7 ms a frame and `Present` rose to 30 to 37 ms; a frame took 60 to 75 ms |
+| Hyper-V's synthetic timers offered to the guest (`hv-synic`, `hv-stimer`) | Windows 7 keeps ticking from the real-time clock: port 0x71 at 16% of the samples in the first test (18% without) |
+
+So the watch is where the waiting shows, not what causes it. The fewer calls there are, the
+longer each one waits, and with none the same 30 ms a frame are spent in `Present`, which
+waits until the host has drawn the frame. The guest prepares a frame for about 30 ms and the
+host then draws it for about 30 ms (QEMU's drawing thread is on a processor half of the time
+in this test and asleep waiting for the guest a third of it), one after the other instead of
+at the same time: while the host draws, the guest's processors stand at device registers or
+the program waits in `Present`. None of the driver-side changes above is in the driver.
+
+What is left to try:
+
+- The time the host needs for a frame, which is also how long the lock is held. The command
+  stream of this scene is 250 KB a submit, 8 to 14 submits a frame, and 89% of it is vertex
+  shader constants: the whole constant array is sent again with each change, about 1,700
+  times and 3 MB in a frame of 14 submits. What QEMU's drawing thread spends its half
+  processor on (a host profile during this test) comes first.
+- The clock tick. Nothing in QEMU answers the real-time clock outside its lock, and with an
+  HPET the tick clock loses time (`test-vms.md`, "Guest clock on an emulated processor").
+- Whether `Present` has to wait for the frame before it. A guest that runs one frame ahead
+  would overlap its work with the host's, as far as its processors are not standing still.
+- Message-signalled interrupts are switched off in the driver's INF (`MSISupported` 0), so
+  every interrupt reads the status register. With them on there is no such read. Tried on the
+  rig by setting the value to 1 in the guest: Windows 7 then stops right after the display
+  driver is added, before its start routine logs anything, with all four processors busy
+  (two boots of two, the second with nothing else on the host). The driver has the code for
+  message interrupts, but its start does not work with them yet.
+- The kernel driver copies a command buffer that is reported early, and buffers over 64 KB
+  (this scene's are about 250 KB) got fresh, cleared memory for it on every submit; the two
+  routines take 3.8% of the processor time above. Reusing buffers of that size too did not
+  change the benchmark on the rig (11502 3DMarks without, 11450 with; SM2.0 3918 and 3879).
+- Fewer notifications: the device offers notification suppression (`event_idx`), and
+  `ioeventfd=on` on the host takes the wait out of the guest's processor.
+
 ## Clip planes, Fetch4 and points on Windows 7 (2026-11-25)
 
 The clean-install check of release 0.4.0 ran Vista's screen-space pixel tests

@@ -39,6 +39,12 @@ five values, usually a status code and the objects involved. The line number Win
 each report is the constant stored just before the call at that address in the listing.
 Close the stub afterwards (`gdbserver none`).
 
+`stuck.py`, run the same way, is for a guest that has stopped responding: for every processor
+it prints where it is and the code addresses on its kernel stack, named by module and
+function. A stop error early in the boot never reaches the screen of a virtio display and
+looks like a hang (all processors busy, no disk activity); this shows the stop and what led to
+it. Close the stub afterwards here too.
+
 `wdlog.py` does the same live, with a hardware breakpoint on the reporting function, for a
 guest without the registry values. `guestmods.py` finds the guest's loaded modules for both
 (the kernel's base from the interrupt table, the module list from the kernel's debugger data
@@ -94,6 +100,14 @@ only (4-level page tables, the summary bitmap layout of that version).
   thread, where virglrenderer draws) does, from the kernel's trace events: its share of the time on a
   processor and its system calls by kind; why the guest's processors leave guest mode; and both, over
   and over, while a guest runs.
+- `ripstream.sh NAME SECONDS`, `sm2sample.sh NAME` and `attribute.pl`: where a guest's processors are
+  during a benchmark. The first samples every processor's instruction pointer about 70 times a
+  second through QEMU's monitor (64-bit and 32-bit code), the second takes a minute of samples in
+  each of 3DMark06's first two graphics tests, and the third gives the samples to kernel modules,
+  to the modules of the benchmark's process and, with a symbol list, to functions. The module
+  lists come from `tools/vista/modlist.c` in the guest (`tools/win7-bench/profile`).
+  `portsample.sh NAME SECONDS` records RDX with each sample: at a port read or write that is
+  the port number, which names the emulated device a processor is waiting for.
 - `refvm.sh new|virgl|card|kill NAME` and `busylog.sh NAME`: the same Windows 7 disk, CPU model
   and memory with the virtio GPU or with a passed-through graphics card, for a like-for-like
   comparison, and a log of the GPU's busy share and QEMU's threads during a run. The guest's
