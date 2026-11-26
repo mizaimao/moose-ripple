@@ -1,14 +1,15 @@
 # 3DMark06's default run from start to score, for a like-for-like comparison of two display
-# adapters: start it, press Run, mark each change of the full-screen size on the first serial
-# port (with the guest's clock), and when the score window is up print what it and its Details
-# window say. The whole run is capped; bench-go.exe, bench-observe.exe, bench-score.exe and
-# bench-press.exe are next to this file.
+# adapters: start it, press Run, mark each change of the full-screen size (with the guest's
+# clock) in R:\marks-NAME.txt, NAME being auto.cmd's label, and when the score window is up
+# print what it and its Details window say. The marks do not go to the serial port: a write to
+# COM1 can block for good (auto.cmd has the story). The whole run is capped; bench-go.exe,
+# bench-observe.exe, bench-score.exe and bench-press.exe are next to this file.
 param([int]$CapMinutes = 50)
 $pkg = Split-Path -Parent $MyInvocation.MyCommand.Path
 $gameDir = 'C:\Program Files (x86)\Futuremark\3DMark06'
 function Mark($s) {
     $line = 'MARK ' + (Get-Date).ToString('HH:mm:ss') + ' ' + $s
-    & cmd /d /c ("echo " + $line + " >COM1")
+    if ($env:label) { Add-Content -Path ("R:\marks-" + $env:label + ".txt") -Value $line }
     Write-Output $line
 }
 if (!(Test-Path (Join-Path $gameDir '3DMark06.exe'))) { Mark 'not-installed'; exit 8 }
