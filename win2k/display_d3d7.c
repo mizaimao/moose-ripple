@@ -390,9 +390,20 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
     if (!textures || !handle) return;
     t = find_texture(local, handle);
     if (t) release_texture(t, TRUE);
-    if (!g->fpVidMem) return;
+    if (!g->fpVidMem) {
+        ++d->d7draw.regNoMemory;
+        d->d7draw.noMemoryCaps = l->ddsCaps.dwCaps;
+        d->d7draw.noMemoryCaps2 = l->lpSurfMore ? l->lpSurfMore->ddsCapsEx.dwCaps2 : 0;
+        d->d7draw.noMemoryFormat = g->ddpfSurface.dwFlags;
+        return;
+    }
     for (i = 0; i < MaxTextures && textures[i].handle; ++i) {}
-    if (i == MaxTextures) return;
+    if (i == MaxTextures) { ++d->d7draw.regFull; return; }
+    {
+        ULONG k, live = 1;
+        for (k = 0; k < MaxTextures; ++k) if (textures[k].handle) ++live;
+        if (live > d->d7draw.regPeak) d->d7draw.regPeak = live;
+    }
     t = &textures[i];
     t->local = local;
     t->global = g;
@@ -1352,6 +1363,16 @@ static void skip(D7_CONTEXT *c, ULONG reason, ULONG primitives)
     ++c->display->d7draw.skippedCalls;
 }
 
+/* A vertex skip at one of the checks, numbered in source order for d7draw. */
+static void skip_vertex(D7_CONTEXT *c, ULONG primitives, ULONG site)
+{
+    RB2K_D7_DRAWSTATS *s = &c->display->d7draw;
+    skip(c, RB2K_D7_SKIP_VERTEX, primitives);
+    if (site < RB2K_D7_VERTEX_SITES) s->vertexSites[site] += primitives;
+    s->vertexFvf = c->fvf;
+    s->vertexStride = c->streamStride;
+}
+
 /* Diagnostics: count each distinct drawn state, and keep the last refused
  * vertex window with the reason. */
 static void record_state(D7_CONTEXT *c, const RB2K_D3D7_DRAW *draw, ULONG fvf, ULONG format, ULONG primitives)
@@ -1528,10 +1549,18 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
      * fields in FVF order. */
     position = fvf & D3DFVF_POSITION_MASK;
     objectSpace = position != D3DFVF_XYZRHW;
-    if (!position || (fvf & D3DFVF_RESERVED0) || (!objectSpace && (fvf & D3DFVF_NORMAL)) ||
-        (st->coordIndex >> 16) || (needTexture && (st->transform & 0xff)) ||
-        (draw->stage1Color && ((st1->coordIndex >> 16) || (needTexture1 && (st1->transform & 0xff))))) {
-        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+    if (!position || (fvf & D3DFVF_RESERVED0) || (!objectSpace && (fvf & D3DFVF_NORMAL))) {
+        skip_vertex(c, p->primitives, 1);
+        return DD_OK;
+    }
+    /* Generated texture coordinates (site 18) and texture transforms (19). */
+    if ((st->coordIndex >> 16) || (draw->stage1Color && (st1->coordIndex >> 16))) {
+        skip_vertex(c, p->primitives, 18);
+        return DD_OK;
+    }
+    if ((needTexture && (st->transform & 0xff)) || (draw->stage1Color && needTexture1 && (st1->transform & 0xff))) {
+        d->d7draw.transformFlags = (st->transform & 0xff) | (st1->transform & 0xff) << 8 | fvf >> 16 << 16;
+        skip_vertex(c, p->primitives, 19);
         return DD_OK;
     }
     if (objectSpace) offset = 12 + (position >= D3DFVF_XYZB1 ? 4 * ((position - D3DFVF_XYZRHW) / 2) : 0);
@@ -1548,7 +1577,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         offset += 4 * n;
     }
     if (offset > stride || stride > 256) {
-        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+        skip_vertex(c, p->primitives, 2);
         return DD_OK;
     }
     if (needTexture) {
@@ -1635,7 +1664,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         if (lo < 0 || hi > p->streamBytes) {
             ++d->d7draw.beyondCalls;
             d->d7draw.beyondVertices += p->primitives;
-            skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+            skip_vertex(c, p->primitives, 3);
             return DD_OK;
         }
         base = p->streamData + p->streamFirst;
@@ -1660,7 +1689,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         if (p->first >= window || low > window - 1 - p->first) {
             ++d->d7draw.beyondCalls;
             d->d7draw.beyondVertices += p->primitives;
-            skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+            skip_vertex(c, p->primitives, 4);
             return DD_OK;
         }
         if (high > window - 1 - p->first) {
@@ -1680,7 +1709,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
                 for (i = 0; i < 3; ++i) worst = max(worst, prim_vertex(p, t, i, &flat));
                 if (worst > limit || flat > limit) {
                     ++d->d7draw.beyondVertices;
-                    skip(c, RB2K_D7_SKIP_VERTEX, 1);
+                    skip_vertex(c, 1, 5);
                     continue;
                 }
             }
@@ -1705,7 +1734,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
                 ULONG fs = specular ? *(const ULONG *)(v + specular) : 0;
                 for (i = 0; i < 3; ++i) { out[i].diffuse = fd; out[i].specular = fs; }
             }
-            if (bad) { ++d->d7draw.badPositions; skip(c, RB2K_D7_SKIP_VERTEX, 1); continue; }
+            if (bad) { ++d->d7draw.badPositions; skip_vertex(c, 1, 6); continue; }
             count += 3;
             if (count == RB2K_D3D7_VERTICES || t + 1 == p->primitives) {
                 hr = send_batch(c, draw, count);
@@ -2080,7 +2109,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     if (sh) program = shader_program(c, sh, stage_kinds(c, sh->samplers, fog));
     if (!program) { skip(c, RB2K_D7_SKIP_COMBINER, p->primitives); return DD_OK; }
     if (!p->stream || !position || (fvf & D3DFVF_RESERVED0) || (!objectSpace && (fvf & D3DFVF_NORMAL))) {
-        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+        skip_vertex(c, p->primitives, 7);
         return DD_OK;
     }
     if (objectSpace) offset = 12 + (position >= D3DFVF_XYZB1 ? 4 * ((position - D3DFVF_XYZRHW) / 2) : 0);
@@ -2104,7 +2133,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     for (k = 0; k < RB2K_D8_STAGES; ++k)
         if ((sh->coords & (1UL << k)) && ((c->stages[k].coordIndex >> 16) || (c->stages[k].transform & 0xff)))
             offset = 0xffffffff;
-    if (offset > stride || stride > 256) { skip(c, RB2K_D7_SKIP_VERTEX, p->primitives); return DD_OK; }
+    if (offset > stride || stride > 256) { skip_vertex(c, p->primitives, 8); return DD_OK; }
     RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices));
     for (k = 0; k < RB2K_D8_STAGES; ++k) if (sh->coords & (1UL << k)) used = k + 1;
     draw->coordSets = used;
@@ -2142,7 +2171,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     if (lo < 0 || hi > p->streamBytes) {
         ++d->d7draw.beyondCalls;
         d->d7draw.beyondVertices += p->primitives;
-        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+        skip_vertex(c, p->primitives, 9);
         return DD_OK;
     }
     base = p->streamData + p->streamFirst;
@@ -2178,7 +2207,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
                     o->specular = fs;
                 }
             }
-            if (bad) { ++d->d7draw.badPositions; skip(c, RB2K_D7_SKIP_VERTEX, 1); continue; }
+            if (bad) { ++d->d7draw.badPositions; skip_vertex(c, 1, 10); continue; }
             count += 3;
             if (count == RB2K_D8_VERTICES || t + 1 == p->primitives) {
                 hr = send_batch8(c, draw, count);
@@ -2188,7 +2217,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
         }
         if (SUCCEEDED(hr) && count) hr = send_batch8(c, draw, count);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+        skip_vertex(c, p->primitives, 11);
         hr = DD_OK;
     }
     return hr;
@@ -2233,7 +2262,8 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
     }
     words = (stride + 15) / 16 * 4;
     if (!vprogram || !program || !p->stream || stride % 4 || words > RB2K_D8_VS_VERTEX_WORDS || vs->words > stride / 4) {
-        skip(c, vprogram && program ? RB2K_D7_SKIP_VERTEX : RB2K_D7_SKIP_COMBINER, p->primitives);
+        if (vprogram && program) skip_vertex(c, p->primitives, 17);
+        else skip(c, RB2K_D7_SKIP_COMBINER, p->primitives);
         return DD_OK;
     }
     RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices));
@@ -2271,7 +2301,7 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
     if (lo < 0 || hi > p->streamBytes) {
         ++d->d7draw.beyondCalls;
         d->d7draw.beyondVertices += p->primitives;
-        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+        skip_vertex(c, p->primitives, 12);
         return DD_OK;
     }
     base = p->streamData + p->streamFirst;
@@ -2292,7 +2322,7 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+        skip_vertex(c, p->primitives, 13);
         hr = DD_OK;
     }
     return hr;
@@ -2364,7 +2394,7 @@ static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULON
     if (((c->fvf & 1) && !c->display->vertexShaders) || !c->streamStride || c->streamStride > 256 ||
         !stream_zero(c, a, &prims) ||
         first < -0x7fffffffLL || first > (LONGLONG)prims.streamBytes) {
-        skip(c, RB2K_D7_SKIP_VERTEX, count);
+        skip_vertex(c, count, 14);
         return DD_OK;
     }
     prims.stream = TRUE;
@@ -2376,7 +2406,7 @@ static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULON
         ULONG indices = type == RbTriangleList ? 3 * count : count + 2, size;
         if (!b || b->owner != c->owner || c->indexStride != 2 || !b->global->fpVidMem || count > 0xffff ||
             indexByte > (size = b->global->dwLinearSize) || indices > (size - indexByte) / 2) {
-            skip(c, RB2K_D7_SKIP_VERTEX, count);
+            skip_vertex(c, count, 15);
             return DD_OK;
         }
         if (!index_scratch(indices)) return DDERR_OUTOFMEMORY;
@@ -2385,7 +2415,7 @@ static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULON
             EngProbeForRead((PVOID)from, indices * sizeof(WORD), 1);
             RtlCopyMemory(indexScratch, from, indices * sizeof(WORD));
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            skip(c, RB2K_D7_SKIP_VERTEX, count);
+            skip_vertex(c, count, 16);
             return DD_OK;
         }
         prims.indices = indexScratch;
