@@ -569,7 +569,7 @@ static HRESULT fill_page(DISPLAY *d, ULONG page, const RECTL *r, ULONG color)
             for (x = 0; x < width; ++x) ((ULONG *)row)[x] = color;
         }
     }
-    if (d->memoryPrimary) rb_memory_primary_dirty(d, r);   /* written past GDI: send it */
+    if (d->memoryPrimary) rb_memory_primary_dirty(d, page, r);   /* written past GDI: send it */
     return DD_OK;
 }
 
@@ -803,6 +803,8 @@ static DWORD APIENTRY unlock_surface(PDD_UNLOCKDATA data)
     if (!s) {
         if (surface_page(d, data->lpDDSurface, &page) && (d->lockedPages & (1UL << page))) {
             d->lockedPages &= ~(1UL << page);
+            /* With the desktop in guest memory, what the program wrote goes to the host. */
+            if (d->memoryPrimary) rb_memory_primary_dirty(d, page, NULL);
             data->ddRVal = DD_OK;
         } else rc = DDHAL_DRIVER_NOTHANDLED;
     }

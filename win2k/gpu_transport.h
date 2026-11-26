@@ -177,6 +177,7 @@ typedef struct {
     PVOID memoryMdl;
     PULONG memoryPixels, vgaPixels;
     ULONG memoryBytes, vgaBytes, memoryResource, memoryWidth, memoryHeight;
+    ULONG memoryBack, memoryVisible;   /* a flip chain's second page's resource; the page on scanout 0 */
     ULONG memoryUploads, memoryPixelsSent, memoryFailures, memoryPresents;
 } RB2K_GPU;
 
@@ -184,10 +185,12 @@ typedef struct {
  * context, or the desktop in guest memory, whose scanout a reset would drop. */
 #define rb_gpu_held(gpu) ((gpu)->rvdContexts || (gpu)->memoryResource)
 
-/* The largest desktop in guest memory: 1920x1200 at 32 bits (rb2kmp.c). */
-#define RB2K_MEMORY_PRIMARY_BYTES (1920UL * 1200 * 4)
+/* The desktop in guest memory: two pages (a flip chain's) of 1920x1200 at 32 bits (rb2kmp.c). */
+#define RB2K_MEMORY_PRIMARY_BYTES (2 * 1920UL * 1200 * 4)
 VP_STATUS rb_memory_primary_show(RB2K_GPU *gpu, ULONG width, ULONG height, BOOLEAN clear);
-VP_STATUS rb_memory_primary_upload(RB2K_GPU *gpu, const RB2K_RECT *rect);
+VP_STATUS rb_memory_primary_upload(RB2K_GPU *gpu, ULONG page, const RB2K_RECT *rect);
+VP_STATUS rb_memory_primary_flip(RB2K_GPU *gpu, ULONG page);
+void rb_memory_primary_clear_back(RB2K_GPU *gpu);
 VP_STATUS rb_memory_primary_present(RB2K_GPU *gpu, ULONG image, ULONG srcX, ULONG srcY, const RB2K_RECT *to);
 void rb_memory_primary_hide(RB2K_GPU *gpu);
 

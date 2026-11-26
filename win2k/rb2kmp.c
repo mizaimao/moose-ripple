@@ -43,11 +43,14 @@ HANDLE rb_view_open(HANDLE supplied);
 void rb_view_close(HANDLE handle);
 PVOID rb_view_map(HANDLE process, unsigned __int64 physical, ULONG *bytes);
 LONG rb_view_unmap(HANDLE process, PVOID address); /* NTSTATUS */
+PVOID rb_view_map_pages(PVOID mdl);
+void rb_view_unmap_pages(PVOID owner, PVOID address, PVOID mdl);
 
 typedef struct {
     PVOID address, owner;
     HANDLE supplied, process;
     ULONG refs, bytes;
+    BOOLEAN pages;      /* mapped from the desktop's MDL (in guest memory), not a physical range */
 } FLIP_VIEW;
 
 typedef struct {
@@ -270,14 +273,14 @@ static VP_STATUS scanout_info(ADAPTER *a, RB2K_DD_FLIP_INFO *info)
 {
     ULONG virtualWidth;
     if (a->modeSet && a->gpu.memoryWidth) {
-        /* The desktop in guest memory has one page: no flip chain yet. */
+        /* The desktop in guest memory: two pages, each with its own host resource. */
         info->width = modes[a->mode].width;
         info->height = modes[a->mode].height;
         info->pitch = info->width * sizeof(ULONG);
         info->pageBytes = info->pitch * info->height;
-        info->pageCount = 1;
-        info->yOffset = 0;
-        info->visiblePage = 0;
+        info->pageCount = 2 * info->pageBytes <= a->gpu.memoryBytes ? 2 : 1;
+        info->visiblePage = a->gpu.memoryVisible;
+        info->yOffset = info->visiblePage * info->height;
         info->flips = a->flips;
         return NO_ERROR;
     }
@@ -305,6 +308,13 @@ static VP_STATUS select_page(ADAPTER *a, ULONG page, const RB2K_DD_FLIP_INFO *in
 {
     USHORT offset;
     if (page >= info->pageCount) return ERROR_INVALID_PARAMETER;
+    if (a->gpu.memoryWidth) {
+        VP_STATUS status;
+        if (page == info->visiblePage) return NO_ERROR;
+        status = rb_memory_primary_flip(&a->gpu, page);
+        if (!status) ++a->flips;
+        return status;
+    }
     offset = (USHORT)(page * info->height);
     if (offset == info->yOffset) return NO_ERROR;
     VideoPortWriteRegisterUshort(a->vbe + VbeOffsetY, offset);
@@ -317,7 +327,11 @@ static VP_STATUS revoke_view(ADAPTER *a)
 {
     VP_STATUS status;
     if (!a->view.address) return NO_ERROR;
-    status = rb_view_unmap(a->view.process, a->view.address) < 0 ? ERROR_INVALID_PARAMETER : NO_ERROR;
+    if (a->view.pages) {
+        rb_view_unmap_pages(a->view.owner, a->view.address, a->gpu.memoryMdl);
+        status = NO_ERROR;
+    } else
+        status = rb_view_unmap(a->view.process, a->view.address) < 0 ? ERROR_INVALID_PARAMETER : NO_ERROR;
     if (!status) {
         rb_view_close(a->view.process);
         VideoPortZeroMemory(&a->view, sizeof(a->view));
@@ -327,7 +341,8 @@ static VP_STATUS revoke_view(ADAPTER *a)
 
 static void clear_back_page(ADAPTER *a, const RB2K_DD_FLIP_INFO *info)
 {
-    if (info->pageCount == 2)
+    if (a->gpu.memoryWidth) rb_memory_primary_clear_back(&a->gpu);
+    else if (info->pageCount == 2)
         VideoPortZeroDeviceMemory((PUCHAR)a->gpu.primary.pixels + info->pageBytes,
                                   view_span(info->pageBytes) - info->pageBytes);
 }
@@ -458,8 +473,15 @@ static VP_STATUS share_pages(ADAPTER *a, PVIDEO_REQUEST_PACKET r)
     } else {
         process = rb_view_open(requested.ProcessHandle);
         if (!process) return ERROR_ACCESS_DENIED;
-        mapped = view_span(info.pageBytes);
-        address = rb_view_map(process, (unsigned __int64)a->fb.RangeStart.QuadPart, &mapped);
+        if (a->gpu.memoryWidth) {
+            /* The desktop in guest memory: all of its pages, into this process (the only
+             * one rb_view_open accepts). */
+            mapped = a->gpu.memoryBytes;
+            address = rb_view_map_pages(a->gpu.memoryMdl);
+        } else {
+            mapped = view_span(info.pageBytes);
+            address = rb_view_map(process, (unsigned __int64)a->fb.RangeStart.QuadPart, &mapped);
+        }
         if (!address) { rb_view_close(process); return ERROR_NOT_ENOUGH_MEMORY; }
         a->view.process = process;
         a->view.supplied = requested.ProcessHandle;
@@ -467,8 +489,9 @@ static VP_STATUS share_pages(ADAPTER *a, PVIDEO_REQUEST_PACKET r)
         a->view.address = address;
         a->view.bytes = bytes;
         a->view.refs = 1;
+        a->view.pages = a->gpu.memoryWidth != 0;
         /* Return only a complete user-space view of the declared pages. */
-        if (mapped < bytes || mapped > view_span(info.pageBytes) ||
+        if (mapped < bytes || (!a->view.pages && mapped > view_span(info.pageBytes)) ||
             (ULONG)address >= 0x80000000UL || mapped > 0x80000000UL - (ULONG)address) {
             revoke_view(a);
             return ERROR_INVALID_DATA;

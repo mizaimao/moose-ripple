@@ -122,6 +122,31 @@ PVOID rb_system_pages(ULONG bytes, PVOID *mdlOut)
     return system;
 }
 
+/* The physical runs of bytes of an MDL's pages from offset (neither need be whole
+ * pages: a flip chain's second page starts where the first ends); 0 if more than max. */
+ULONG rb_mdl_runs(PVOID mdl, ULONG offset, ULONG bytes, RB2K_PAGE_RUN *out, ULONG max)
+{
+    PPFN_NUMBER pfn = (PPFN_NUMBER)((PMDL)mdl + 1);
+    ULONG count = 0, end = offset + bytes;
+    if (!bytes || end < offset || end > MmGetMdlByteCount((PMDL)mdl)) return 0;
+    while (offset < end) {
+        ULONG inPage = offset & (PAGE_SIZE - 1), length = PAGE_SIZE - inPage;
+        ULONGLONG address = ((ULONGLONG)pfn[offset >> PAGE_SHIFT] << PAGE_SHIFT) + inPage;
+        if (length > end - offset) length = end - offset;
+        if (count && out[count - 1].address + out[count - 1].length == address) {
+            out[count - 1].length += length;
+        } else {
+            if (count == max) return 0;
+            out[count].address = address;
+            out[count].length = length;
+            out[count].padding = 0;
+            ++count;
+        }
+        offset += length;
+    }
+    return count;
+}
+
 /* Physical runs for VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING; 0 if more than max. */
 ULONG rb_pages_runs(const RB2K_PAGES *p, RB2K_PAGE_RUN *out, ULONG max)
 {

@@ -185,13 +185,15 @@ static VP_STATUS present(RB2K_GPU *gpu, const RB2K_IMAGE *image, const RB2K_DD_P
     }
     ++gpu->presents;
     if (gpu->memoryWidth) {
-        /* The desktop in guest memory shows what the host has been sent. */
+        /* The desktop in guest memory shows what the host has been sent. A flip
+         * chain's second page lies below the first. */
+        ULONG page = p->dstY >= gpu->memoryHeight ? 1 : 0;
         RB2K_RECT r;
         r.left = p->dstX;
-        r.top = p->dstY;
+        r.top = p->dstY - page * gpu->memoryHeight;
         r.right = p->dstX + p->width;
-        r.bottom = p->dstY + p->height;
-        return rb_memory_primary_upload(gpu, &r);
+        r.bottom = r.top + p->height;
+        return rb_memory_primary_upload(gpu, page, &r);
     }
     return NO_ERROR;
 }
