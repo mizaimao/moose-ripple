@@ -50,6 +50,13 @@ class RippleFramebuffer : public IOFramebuffer
     IOTimerEventSource *fRefresh;
     bool                fEnabled;
 
+    // The display flush is held to a least gap (flushDue): QEMU reads the whole screen back at
+    // every flush.
+    IOTimerEventSource *fFlushTimer;      // shows a frame that was held
+    uint64_t            fLastFlush;       // mach_absolute_time of the last flush
+    uint64_t            fFlushGap;        // least time between two, same units; 0: no limit
+    bool                fFlushHeld;       // a frame waits for fFlushTimer
+
     IOBufferMemoryDescriptor *fShadow;    // last frame sent to the host, for damage tracking
     bool                      fFullRefresh;
     uint32_t                  fStatTicks, fStatFrames;   // refresh statistics for the log
@@ -70,6 +77,8 @@ class RippleFramebuffer : public IOFramebuffer
     bool  applyMode(IODisplayModeID m);
     bool  refresh();             // send what changed since the last frame; false if nothing
     static void refreshAction(OSObject *owner, IOTimerEventSource *sender);
+    bool  flushDue();            // false: too soon after the last flush, the timer shows it
+    static void flushTimerAction(OSObject *owner, IOTimerEventSource *sender);
     static IOReturn showAction(OSObject *owner, void *id, void *rect, void *, void *);
     static IOReturn flushAction(OSObject *owner, void *id, void *queued, void *, void *);
     static IOReturn copyAction(OSObject *owner, void *args, void *, void *, void *);
