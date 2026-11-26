@@ -91,13 +91,11 @@ certificate stores.
    Graphics Adapter), Update Driver Software, Browse my computer for driver
    software, Let me pick from a list of device drivers on my computer, Have
    Disk, and choose `viogpu3d.inf` in the `vista` or the `win7` folder.
-3. Windows warns in red that it cannot verify the publisher of the driver
+3. The list shows "moose-ripple virtio-gpu 3D" with the remark that the
+   driver is not digitally signed. Select it and choose Next.
+4. Windows warns in red that it cannot verify the publisher of the driver
    software. Choose **Install this driver software anyway**.
-4. Restart Windows.
-
-From an administrator's Command Prompt the same is
-`pnputil -i -a win7\viogpu3d.inf` (or `vista\viogpu3d.inf`), with the same
-warning to confirm.
+5. Close the wizard and let Windows restart.
 
 After the restart Device Manager lists the adapter as "moose-ripple
 virtio-gpu 3D". Choose an Aero theme in Personalization if Windows did not
@@ -111,6 +109,7 @@ adapter with error code 52 and Windows stays on its VGA driver.
 
 1. Device Manager, Display adapters, right-click "moose-ripple virtio-gpu
    3D", Uninstall, tick **Delete the driver software for this device**, OK.
+   Display adapters disappears from the list until the restart.
 2. Restart Windows. It returns to the Standard VGA Graphics Adapter.
 3. Switch test mode off if nothing else needs it, and restart:
    `bcdedit /set testsigning off`.
@@ -120,6 +119,15 @@ adapter with error code 52 and Windows stays on its VGA driver.
    reg delete "HKLM\SOFTWARE\Policies\Microsoft\Power\PowerSettings\abfc2519-3608-4c2a-94ea-171b0ed546ab" /f
    powercfg -h on
    ```
+
+Windows leaves the driver's files and its stopped service entry behind. They
+do nothing without the device; to remove them too, as administrator:
+
+```
+sc delete viogpu3d
+del %windir%\system32\drivers\viogpu3d.sys
+del %windir%\system32\viogpu_d3d10.dll %windir%\SysWOW64\viogpu_d3d10.dll
+```
 
 If the screen stays black after an install, start Windows in Safe Mode (F8
 before Windows starts). Safe Mode uses the VGA driver; remove the driver
