@@ -39,6 +39,12 @@ five values, usually a status code and the objects involved. The line number Win
 each report is the constant stored just before the call at that address in the listing.
 Close the stub afterwards (`gdbserver none`).
 
+`stuck.py`, run the same way, is for a guest that has stopped responding: for every processor
+it prints where it is and the code addresses on its kernel stack, named by module and
+function. A stop error early in the boot never reaches the screen of a virtio display and
+looks like a hang (all processors busy, no disk activity); this shows the stop and what led to
+it. Close the stub afterwards here too.
+
 `wdlog.py` does the same live, with a hardware breakpoint on the reporting function, for a
 guest without the registry values. `guestmods.py` finds the guest's loaded modules for both
 (the kernel's base from the interrupt table, the module list from the kernel's debugger data
