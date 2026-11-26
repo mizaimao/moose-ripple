@@ -2230,6 +2230,27 @@ On XP SP3 under KVM on the second Intel UHD 630 host, case 54 passes, and
 "Not supported by hardware". Its Advanced Pixel Shader test still stops: it
 creates a 2048x2048 DXT5 texture, and the driver offers at most 1024.
 
+## Eight fixed-function stages for Direct3D 9 programs
+
+3DMark05 checks its hardware before it creates a device, and one of the
+checks it treats as fatal is "multitexturing with at least 8 textures":
+`MaxTextureBlendStages` and `MaxSimultaneousTextures` of at least 8. The
+driver offered four, the texture registers of version 1 pixel shaders.
+
+The stage program already emits shader model 2 programs with eight samplers
+and eight coordinate sets, and the Direct3D 8 draw packet carries eight
+(`RB2K_D8_STAGES`); only the stage check and the caps stopped at four. Once a
+runtime has announced Direct3D 9, the driver now offers eight stages and eight
+textures; Direct3D 8 programs keep four. Texture and bump matrices have
+constants for the first six stages (`RB_STAGE_TRANSFORMS`), so stages 6 and
+7 refuse them.
+
+`d9pixels` case 58 draws through all eight stages: stages 0 to 6 add a black
+texture each and stage 7 modulates with a texture read through coordinate set
+7. On XP SP3 under KVM (UHD 630 host) it passes, and `d9pixels` passes 56 of
+56.
+
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:

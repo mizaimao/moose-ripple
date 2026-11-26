@@ -833,18 +833,29 @@ static ULONG stage_words(const D7_CONTEXT *c, ULONG n, ULONG *color, ULONG *alph
     return StageOk;
 }
 
+/* The fixed-function stages a Direct3D 8 or 9 runtime is offered: four for Direct3D 8 (the
+ * texture registers of its version 1 shaders), eight once a runtime has announced Direct3D 9 (the
+ * samplers and coordinate sets of shader model 2, which the stage program uses). */
+static ULONG stage_limit(const DISPLAY *d)
+{
+    return d->d7draw.d8Version >= 0x900 ? RB2K_D8_STAGES : RB_PS_COORD_SETS;
+}
+
 /* Direct3D 8 fixed-function stages, drawn by the stage program (rb_stage_translate):
- * up to four, with any operation up to DOTPRODUCT3 except PREMODULATE, and bump
- * mapping only as a colour operation. */
+ * up to stage_limit, with any operation up to DOTPRODUCT3 except PREMODULATE, and bump
+ * mapping only as a colour operation. Texture matrices and bump matrices have constants
+ * for the first RB_STAGE_TRANSFORMS stages only. */
 static BOOL d3d8_stages_valid(const D7_CONTEXT *c)
 {
-    ULONG i, k;
+    ULONG i, k, limit = stage_limit(c->display);
     for (i = 0; i < TextureStages && c->stages[i].colorOp != D3DTOP_DISABLE; ++i) {
         const D7_STAGE *s = &c->stages[i];
         const ULONG args[4] = { s->colorArg1, s->colorArg2, s->alphaArg1, s->alphaArg2 };
-        if (i >= RB_PS_COORD_SETS || s->colorOp == D3DTOP_PREMODULATE || s->colorOp > D3DTOP_DOTPRODUCT3 ||
+        if (i >= limit || s->colorOp == D3DTOP_PREMODULATE || s->colorOp > D3DTOP_DOTPRODUCT3 ||
             s->alphaOp == D3DTOP_PREMODULATE || (s->alphaOp >= D3DTOP_BUMPENVMAP && s->alphaOp != D3DTOP_DOTPRODUCT3))
             return FALSE;
+        if (i >= RB_STAGE_TRANSFORMS && ((s->transform & (0xff | RB_TTFF_PROJECTED)) ||
+            s->colorOp == D3DTOP_BUMPENVMAP || s->colorOp == D3DTOP_BUMPENVMAPLUMINANCE)) return FALSE;
         for (k = 0; k < 4; ++k)
             if ((args[k] & D3DTA_SELECTMASK) > 5 /* D3DTA_TEMP */ ||
                 (args[k] & ~(D3DTA_SELECTMASK | D3DTA_COMPLEMENT | D3DTA_ALPHAREPLICATE))) return FALSE;
@@ -3738,10 +3749,10 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
      * announced itself as Direct3D 9, which uses this record for drivers of
      * the Direct3D 8 interface. */
     c->pixelShaderVersion = d->d7draw.d8Version >= 0x900 ? 0xffff0200 : 0xffff0103;
-    c->maxSimultaneousTextures = RB_PS_COORD_SETS;  /* t0..t3 of version 1 shaders */
+    c->maxSimultaneousTextures = stage_limit(d);
     /* The fixed-function stages run as a stage program (d3d8_stages_valid), which also
      * does bump mapping. */
-    c->maxTextureBlendStages = RB_PS_COORD_SETS;
+    c->maxTextureBlendStages = stage_limit(d);
     c->textureOpCaps |= D3DTEXOPCAPS_BUMPENVMAP | D3DTEXOPCAPS_BUMPENVMAPLUMINANCE;
     c->maxPixelShaderValue = 0x3f800000;            /* 1 */
 }
