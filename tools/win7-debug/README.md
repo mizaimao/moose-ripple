@@ -100,6 +100,8 @@ only (4-level page tables, the summary bitmap layout of that version).
   each of 3DMark06's first two graphics tests, and the third gives the samples to kernel modules,
   to the modules of the benchmark's process and, with a symbol list, to functions. The module
   lists come from `tools/vista/modlist.c` in the guest (`tools/win7-bench/profile`).
+  `portsample.sh NAME SECONDS` records RDX with each sample: at a port read or write that is
+  the port number, which names the emulated device a processor is waiting for.
 - `refvm.sh new|virgl|card|kill NAME` and `busylog.sh NAME`: the same Windows 7 disk, CPU model
   and memory with the virtio GPU or with a passed-through graphics card, for a like-for-like
   comparison, and a log of the GPU's busy share and QEMU's threads during a run. The guest's

@@ -54,7 +54,9 @@ for my $r (@rows) {
     if ($cpl != 3) {
         my $m = below(\@k, $rip);
         my $name = $m ? lc $m->[1] : "kernel ?";
-        $name = "idle (hal, intelppm)" if $name =~ /^(hal\.dll|intelppm\.sys|amdppm\.sys)$/;
+        # The processor driver's halt is idle time. hal.dll is not: a processor that waits there
+        # is at a port read or write (the clock, the timer), held up by the host.
+        $name = "idle (the halt in $name)" if $name =~ /^(intelppm\.sys|amdppm\.sys)$/;
         $mod{$name}++;
         if ($m && $sym{lc $m->[1]}) { my $s = below($sym{lc $m->[1]}, $rip - $m->[0]); $fn{lc($m->[1]) . "!" . ($s ? $s->[1] : "?")}++; }
     } elsif (defined $game && $c eq $game) {
