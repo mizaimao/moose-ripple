@@ -1,0 +1,322 @@
+--- a/src/mesa/program/prog_statevars.c
++++ b/src/mesa/program/prog_statevars.c
+@@ -783,6 +783,18 @@
+       value[0] = ctx->Color.AlphaRefUnclamped;
+       return;
+ 
++   case STATE_TEX_BORDER_COLOR:
++      {
++         /* state[1] is the texture unit */
++         const struct gl_sampler_object *samp =
++            _mesa_get_samplerobj(ctx, (GLuint) state[1]);
++         if (samp)
++            COPY_4V(value, samp->Attrib.state.border_color.f);
++         else
++            ASSIGN_4V(value, 0.0F, 0.0F, 0.0F, 0.0F);
++      }
++      return;
++
+    case STATE_CLIP_INTERNAL:
+       {
+          const GLuint plane = (GLuint) state[1];
+@@ -926,6 +938,9 @@
+    case STATE_ALPHA_REF:
+       return _NEW_COLOR;
+ 
++   case STATE_TEX_BORDER_COLOR:
++      return _NEW_TEXTURE_OBJECT;
++
+    case STATE_CLIP_INTERNAL:
+       return _NEW_TRANSFORM | _NEW_PROJECTION;
+ 
+@@ -1210,6 +1225,9 @@
+    case STATE_ALPHA_REF:
+       append(dst, "alphaRef");
+       break;
++   case STATE_TEX_BORDER_COLOR:
++      append(dst, "texBorder");
++      break;
+    case STATE_CLIP_INTERNAL:
+       append(dst, "clipInternal");
+       break;
+@@ -1364,6 +1382,9 @@
+    case STATE_ADVANCED_BLENDING_MODE:
+    case STATE_ALPHA_REF:
+       break;
++   case STATE_TEX_BORDER_COLOR:
++      append_index(str, state[1], true); /* tex unit [i] */
++      break;
+    case STATE_NOT_STATE_VAR:
+       append(str, "not_state");
+       break;
+--- a/src/mesa/program/prog_statevars.h
++++ b/src/mesa/program/prog_statevars.h
+@@ -141,6 +141,7 @@
+    STATE_ALPHA_REF,        /* alpha-test reference value */
+    STATE_CLIP_INTERNAL,    /* similar to STATE_CLIPPLANE, but in clip-space */
+    STATE_ATOMIC_COUNTER_OFFSET,    /* the byte offset to add to atomic counter bindings */
++   STATE_TEX_BORDER_COLOR, /* moose-ripple: border colour of the sampler on texture unit state[1] */
+ 
+    STATE_INTERNAL_DRIVER,	/* first available state index for drivers (must be last) */
+ 
+--- a/src/mesa/state_tracker/st_atom_shader.c
++++ b/src/mesa/state_tracker/st_atom_shader.c
+@@ -108,6 +108,43 @@
+ }
+ 
+ /**
++ * moose-ripple: which samplers of an ARB or fixed-function fragment program clamp to their
++ * border (bit per sampler unit: [0] in s, [1] in t) and filter linearly ([2]), for hosts
++ * without sampler border colours. Only 2D and rectangle textures.
++ */
++void
++st_get_tex_border(struct st_context *st, struct gl_program *prog, uint32_t *border)
++{
++   struct gl_context *ctx = st->ctx;
++
++   border[0] = border[1] = border[2] = 0;
++   if (!st->emulate_tex_border || !prog || prog->shader_program)
++      return;
++
++   GLbitfield samplers_used = prog->SamplersUsed;
++   for (unsigned unit = 0; samplers_used; unit++, samplers_used >>= 1) {
++      if (!(samplers_used & 1))
++         continue;
++
++      unsigned tex_unit = prog->SamplerUnits[unit];
++      const struct gl_texture_object *texobj = ctx->Texture.Unit[tex_unit]._Current;
++      if (!texobj ||
++          (texobj->Target != GL_TEXTURE_2D && texobj->Target != GL_TEXTURE_RECTANGLE))
++         continue;
++
++      const struct gl_sampler_object *msamp = _mesa_get_samplerobj(ctx, tex_unit);
++      if (msamp->Attrib.WrapS == GL_CLAMP_TO_BORDER)
++         border[0] |= BITFIELD_BIT(unit);
++      if (msamp->Attrib.WrapT == GL_CLAMP_TO_BORDER)
++         border[1] |= BITFIELD_BIT(unit);
++      if (((border[0] | border[1]) & BITFIELD_BIT(unit)) &&
++          msamp->Attrib.MagFilter == GL_LINEAR)
++         border[2] |= BITFIELD_BIT(unit);
++   }
++}
++
++
++/**
+  * Update fragment program state/atom.  This involves translating the
+  * Mesa fragment program into a gallium fragment program and binding it.
+  */
+@@ -181,6 +218,8 @@
+ 
+       key.external = st_get_external_sampler_key(st, fp);
+       update_gl_clamp(st, st->ctx->FragmentProgram._Current, key.gl_clamp);
++      st_get_tex_border(st, fp, key.tex_border);
++      memcpy(st->fp_tex_border, key.tex_border, sizeof(st->fp_tex_border));
+ 
+       simple_mtx_lock(&st->ctx->Shared->Mutex);
+       shader = st_get_fp_variant(st, fp, &key)->base.driver_shader;
+--- a/src/mesa/state_tracker/st_context.c
++++ b/src/mesa/state_tracker/st_context.c
+@@ -164,6 +164,16 @@
+          if (fp->ExternalSamplersUsed || fp->ati_fs ||
+             (!fp->shader_program && fp->ShadowSamplers))
+             ctx->NewDriverState |= ST_NEW_FS_STATE;
++
++         /* moose-ripple: a sampler of the program now clamps to its border, or no longer:
++          * another variant. */
++         if (st->emulate_tex_border && !fp->shader_program) {
++            uint32_t border[3];
++
++            st_get_tex_border(st, fp, border);
++            if (memcmp(border, st->fp_tex_border, sizeof(border)))
++               ctx->NewDriverState |= ST_NEW_FS_STATE;
++         }
+       }
+    }
+ }
+@@ -626,6 +636,14 @@
+       screen->get_param(screen, PIPE_CAP_CONDITIONAL_RENDER);
+    st->lower_rect_tex =
+       !screen->get_param(screen, PIPE_CAP_TEXRECT);
++   /* moose-ripple: of the hosts this build draws on, the one without rectangle textures is
++    * the one without sampler border colours (virglrenderer on OpenGL ES: "Sampler border
++    * color setting requested but not supported"), and a lookup outside a texture got its
++    * edge there. RIPPLE_GL_BORDER_TEST=1 or =0 in the environment forces the test in the
++    * fragment program on or off, for checking it against a host that has border colours. */
++   st->emulate_tex_border = st->lower_rect_tex;
++   if (getenv("RIPPLE_GL_BORDER_TEST"))
++      st->emulate_tex_border = atoi(getenv("RIPPLE_GL_BORDER_TEST")) != 0;
+    st->allow_st_finalize_nir_twice = screen->finalize_nir != NULL;
+ 
+    st->has_hw_atomics =
+--- a/src/mesa/state_tracker/st_context.h
++++ b/src/mesa/state_tracker/st_context.h
+@@ -210,6 +210,11 @@
+    bool use_format_with_border_color;
+    bool alpha_border_color_is_not_w;
+    bool emulate_gl_clamp;
++   /* moose-ripple: the host has no sampler border colours; fragment programs test for the
++    * border themselves (st_get_tex_border, st_create_fp_variant). fp_tex_border is the
++    * current fragment program's last key. */
++   bool emulate_tex_border;
++   uint32_t fp_tex_border[3];
+ 
+    bool draw_needs_minmax_index;
+    bool has_hw_atomics;
+--- a/src/mesa/state_tracker/st_program.c
++++ b/src/mesa/state_tracker/st_program.c
+@@ -44,6 +44,7 @@
+ #include "compiler/glsl/gl_nir.h"
+ #include "compiler/glsl/gl_nir_linker.h"
+ #include "compiler/nir/nir.h"
++#include "compiler/nir/nir_builtin_builder.h"
+ #include "compiler/nir/nir_serialize.h"
+ #include "draw/draw_context.h"
+ 
+@@ -931,6 +932,97 @@
+    return true;
+ }
+ 
++/**
++ * moose-ripple: the border colour for lookups outside a texture, done here for hosts whose
++ * samplers cannot (st_context::emulate_tex_border). The host clamps such a lookup to the
++ * texture's edge; this mixes the result with the sampler's border colour by how much of the
++ * lookup falls outside: all or nothing with nearest filtering, and with linear filtering the
++ * same half-texel ramp the filter itself gives at a border. border_s, border_t and linear are
++ * bitmasks of sampler units; the colours come in as state variables.
++ */
++struct lower_tex_border_state {
++   uint32_t border_s, border_t, linear;
++   nir_variable *color[32];
++};
++
++static bool
++lower_tex_border_instr(nir_builder *b, nir_instr *instr, void *data)
++{
++   struct lower_tex_border_state *s = data;
++
++   if (instr->type != nir_instr_type_tex)
++      return false;
++
++   nir_tex_instr *tex = nir_instr_as_tex(instr);
++   if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
++        tex->op != nir_texop_txl && tex->op != nir_texop_txd) ||
++       (tex->sampler_dim != GLSL_SAMPLER_DIM_2D &&
++        tex->sampler_dim != GLSL_SAMPLER_DIM_RECT) ||
++       tex->is_array || tex->is_shadow)
++      return false;
++
++   unsigned unit = tex->sampler_index;
++   int deref = nir_tex_instr_src_index(tex, nir_tex_src_sampler_deref);
++   if (deref < 0)
++      deref = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
++   if (deref >= 0) {
++      nir_variable *var =
++         nir_deref_instr_get_variable(nir_src_as_deref(tex->src[deref].src));
++      if (!var)
++         return false;
++      unit = var->data.binding;
++   }
++   if (unit >= 32 || !((s->border_s | s->border_t) & BITFIELD_BIT(unit)))
++      return false;
++
++   int coord_idx = nir_tex_instr_src_index(tex, nir_tex_src_coord);
++   if (coord_idx < 0)
++      return false;
++
++   /* in texels (this moves the cursor to before the lookup) */
++   nir_def *size = nir_i2f32(b, nir_get_texture_size(b, tex));
++
++   b->cursor = nir_after_instr(instr);
++   nir_def *coord = tex->src[coord_idx].src.ssa;
++   int proj_idx = nir_tex_instr_src_index(tex, nir_tex_src_projector);
++   nir_def *proj = proj_idx >= 0 ? tex->src[proj_idx].src.ssa : NULL;
++
++   nir_def *inside = nir_imm_float(b, 1.0);
++   for (unsigned axis = 0; axis < 2; axis++) {
++      if (!((axis ? s->border_t : s->border_s) & BITFIELD_BIT(unit)))
++         continue;
++
++      nir_def *extent = nir_channel(b, size, axis);
++      nir_def *t = nir_channel(b, coord, axis);
++      if (proj)
++         t = nir_fdiv(b, t, proj);
++      if (tex->sampler_dim != GLSL_SAMPLER_DIM_RECT)
++         t = nir_fmul(b, t, extent);
++
++      nir_def *w;
++      if (s->linear & BITFIELD_BIT(unit)) {
++         w = nir_fmul(b, nir_fsat(b, nir_fadd_imm(b, t, 0.5)),
++                      nir_fsat(b, nir_fadd_imm(b, nir_fsub(b, extent, t), 0.5)));
++      } else {
++         w = nir_b2f32(b, nir_iand(b, nir_fge(b, t, nir_imm_float(b, 0.0)),
++                                   nir_flt(b, t, extent)));
++      }
++      inside = nir_fmul(b, inside, w);
++   }
++
++   nir_def *border = nir_load_var(b, s->color[unit]);
++   nir_def *result = nir_flrp(b, border, &tex->def, inside);
++   nir_def_rewrite_uses_after(&tex->def, result, result->parent_instr);
++   return true;
++}
++
++static bool
++lower_tex_border(nir_shader *shader, struct lower_tex_border_state *state)
++{
++   return nir_shader_instructions_pass(shader, lower_tex_border_instr,
++                                       nir_metadata_control_flow, state);
++}
++
+ static struct st_fp_variant *
+ st_create_fp_variant(struct st_context *st,
+                      struct gl_program *fp,
+@@ -1028,6 +1120,26 @@
+       finalize = true;
+    }
+ 
++   /* moose-ripple: see lower_tex_border */
++   if (key->tex_border[0] || key->tex_border[1]) {
++      struct lower_tex_border_state border = {
++         key->tex_border[0], key->tex_border[1], key->tex_border[2],
++      };
++
++      u_foreach_bit(unit, key->tex_border[0] | key->tex_border[1]) {
++         const gl_state_index16 tokens[STATE_LENGTH] =
++            { STATE_TEX_BORDER_COLOR, fp->SamplerUnits[unit] };
++         char name[32];
++
++         _mesa_add_state_reference(params, tokens);
++         snprintf(name, sizeof(name), "gl_ripple_TexBorder%u", unit);
++         border.color[unit] = nir_state_variable_create(state.ir.nir, glsl_vec4_type(),
++                                                        name, tokens);
++      }
++      NIR_PASS(_, state.ir.nir, lower_tex_border, &border);
++      finalize = true;
++   }
++
+    assert(!(key->bitmap && key->drawpixels));
+ 
+    /* glBitmap */
+--- a/src/mesa/state_tracker/st_program.h
++++ b/src/mesa/state_tracker/st_program.h
+@@ -217,6 +217,10 @@
+    /* bitmask of sampler units; PIPE_CAP_GL_CLAMP */
+    uint32_t gl_clamp[3];
+ 
++   /* moose-ripple: bitmasks of sampler units that clamp to their border in s and in t, and
++    * of those among them that filter linearly (st_context::emulate_tex_border) */
++   uint32_t tex_border[3];
++
+    /* bitmask of shadow samplers with depth textures in them for ARB programs; */
+    GLbitfield depth_textures;
+ };
+@@ -358,6 +362,9 @@
+ extern void
+ st_finalize_program(struct st_context *st, struct gl_program *prog);
+ 
++extern void
++st_get_tex_border(struct st_context *st, struct gl_program *prog, uint32_t *border);
++
+ void *
+ st_create_nir_shader(struct st_context *st, struct pipe_shader_state *state);
+ 

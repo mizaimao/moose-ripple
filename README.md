@@ -154,7 +154,9 @@ pixels.
   a race makes about 30 frames/s, with the game's drawing thread using a whole emulated
   CPU. UTM's Force Multicore setting, which gives each emulated CPU its own thread of the
   Mac, made no difference we could measure ([install guide](docs/install.md#utm-on-an-apple-silicon-mac)). The M1's GPU path has no S3TC texture compression, which Mac games
-  take for granted, so such textures are decoded on the CPU when they are loaded.
+  take for granted, so such textures are decoded on the CPU when they are loaded. Core Image
+  there matches software rendering in 22 of the 24 filters and 56 of the 61 effects; the
+  driver does the textures' border colours itself, which that GPU path lacks too.
 - The host GPU's minimum clock was raised to 1200 MHz for these numbers
   (`/sys/class/drm/card0/gt_min_freq_mhz` on Intel). At the default 350 MHz each screen update
   takes about 5 ms longer.

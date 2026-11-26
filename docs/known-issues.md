@@ -224,9 +224,10 @@ back, no crash, the picture right each time.
 **Workaround for 0.2.2 (checked):** boot once without the two flags, choose the size (it works
 there), then put the flags back and restart. The size is kept, and Quartz Extreme runs at it.
 
-## KI-12: In UTM, Core Image fills the area outside a picture with its edge pixels
+## KI-12: In UTM, Core Image filled the area outside a picture with its edge pixels (fixed after 0.2.2)
 
-GitHub issue: [#206](https://github.com/mizaimao/moose-ripple/issues/206). Found on 2026-11-26; not new.
+GitHub issue: [#206](https://github.com/mizaimao/moose-ripple/issues/206). Found and fixed on 2026-11-26; release 0.2.2
+and earlier have it.
 
 **Symptom.** In UTM on an Apple silicon Mac, a Core Image filter that reads pixels from outside
 its input picture gets the picture's edge pixels there instead of transparent black: a pinch
@@ -241,5 +242,9 @@ textures. UTM's host renderer is OpenGL ES (ANGLE on Metal) and has no sampler b
 it logs "Sampler border color setting requested but not supported" for each such sampler, and
 lookups outside the picture fall back to its edge.
 
-**Not fixed.** The driver could do the border test in the fragment program on such hosts,
-where it already rewrites rectangle-texture lookups (Mesa patch `0008`).
+**Fix.** On such a host the driver now does the border in the fragment program itself (Mesa
+patch `0014`; [re/m6-notes.md](re/m6-notes.md), "Border colours on a host without them").
+With it the same run gives 1 of 24 (edge work, 1.5%), and UTM differs from the software
+renderer only where the Intel hosts do. It covers ARB and fixed-function fragment programs
+with 2D and rectangle textures, which is what Core Image and WindowServer use; a GLSL
+program that clamps to a border still gets the edge there.
