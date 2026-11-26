@@ -356,6 +356,39 @@ static void ps_run(const char *name, const DWORD *tokens, const PSVERTEX *v, UIN
     IDirect3DPixelShader9_Release(handle);
 }
 
+/* 72: ps_1_4. texld r0, t0 (sampler 0: red left, green right); texcrd r1.rgb, t1 (0.75, 0.25 at
+ * every vertex); phase; texld r3, r1 (sampler 3, a dependent read: blue at the top right texel);
+ * add r0, r0, r3: magenta on the left, cyan on the right. */
+static void ps14_case(int only)
+{
+    static const DWORD halves[4] = { 0xffff0000, 0xff00ff00, 0xffff0000, 0xff00ff00 };
+    static const DWORD corner[4] = { 0xff000000, 0xff0000ff, 0xff000000, 0xff000000 };
+    static const DWORD ps[] = { PSV(4), OTex, DST(RR, 0), SRC(RT, 0), OTexcoord, PD(RR, 1, 7, 0, 0), PS_(RT, 1, 0xa4, MNone),
+        0x0000fffdUL, OTex, DST(RR, 3), SRC(RR, 1), OAdd, DST(RR, 0), SRC(RR, 0), SRC(RR, 3), PSEND };
+    static const SAMPLE s[] = { { 48, 64, 0xff00ff }, { 80, 64, 0x00ffff }, { 8, 8, CLEAR_COLOR } };
+    IDirect3DTexture9 *t0, *t3;
+    PSVERTEX v[6];
+    int i, k;
+    if (only && only != 72) return;
+    t0 = texture2x2(halves);
+    t3 = texture2x2(corner);
+    if (!t0 || !t3) { printf("D9PIX case=ps14 textures failed\n"); goto done; }
+    ps_quad(v, 32, 32, 96, 96, 0xffffffff, 0, 0, 1, 1);
+    for (i = 0; i < 6; ++i) { v[i].u1 = 0.75f; v[i].v1 = 0.25f; }
+    for (k = 0; k < 4; ++k) {
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+    }
+    IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)t0);
+    IDirect3DDevice9_SetTexture(device, 3, (IDirect3DBaseTexture9 *)t3);
+    ps_run("ps14", ps, v, 1, s, 3);
+    IDirect3DDevice9_SetTexture(device, 0, NULL);
+    IDirect3DDevice9_SetTexture(device, 3, NULL);
+done:
+    if (t0) IDirect3DTexture9_Release(t0);
+    if (t3) IDirect3DTexture9_Release(t3);
+}
+
 static const DWORD texels0[4] = { 0xffff0000, 0xff00ff00, 0xff0000ff, 0xffffffff };
 static const DWORD texels1[4] = { 0xffffff00, 0xffffff00, 0xffffff00, 0xffffff00 };
 /* The four texel centres of a 2x2 texture over the quad 32..96. */
@@ -1525,6 +1558,7 @@ int main(int argc, char **argv)
     }
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 2) && (!only || only < 30))
         pixel_shaders(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
+    if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 4)) ps14_case(only);
     else if (caps.PixelShaderVersion < D3DPS_VERSION(1, 2)) printf("D9PIX pixel shaders not offered\n");
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (caps.TextureCaps & D3DPTEXTURECAPS_CUBEMAP) && (!only || only >= 40))
         cube_cases(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
