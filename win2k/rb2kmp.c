@@ -136,6 +136,9 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
     a->gpu.nativeD3D7 = TRUE;
     a->gpu.d3d8 = TRUE;
     a->gpu.hostDxt = TRUE;
+    /* Vertex shaders on the host GPU and the Direct3D 9 interface: on unless set to 0. */
+    a->gpu.vertexShaders = TRUE;
+    a->gpu.d3d9Ddi = TRUE;
     VideoPortGetRegistryParameters(a, L"RippleDirectDrawGpuSurfaces", FALSE, registry_flag, &a->gpu.plainSurfaces);
     VideoPortGetRegistryParameters(a, L"RippleGpuDesktop", FALSE, registry_flag, &a->gpu.glEnabled);
     VideoPortGetRegistryParameters(a, L"RippleHardwareCursor", FALSE, registry_flag, &a->gpu.cursorEnabled);

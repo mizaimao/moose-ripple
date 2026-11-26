@@ -2161,6 +2161,18 @@ static void release_shaders(D7_CONTEXT *c)
  * after a vertex shader, which outputs the sets the stages name. Direct3D does not transform the
  * coordinates of pretransformed vertices: only their projection (D3DTTFF_PROJECTED) divides, with an
  * identity matrix in the constants (shader_triangles). */
+/* A stage that would sample a texture but has none bound: like the combiner of the Direct3D 7
+ * draws (stage_words), the stage program ends before it, passing the current colour on. */
+static BOOL stage_lacks_texture(const D7_CONTEXT *c, ULONG n)
+{
+    const D7_STAGE *s = &c->stages[n];
+    BOOL ok = TRUE;
+    ULONG c1 = stage_argument(s->colorArg1, n, &ok), c2 = stage_argument(s->colorArg2, n, &ok);
+    ULONG a1 = stage_argument(s->alphaArg1, n, &ok), a2 = stage_argument(s->alphaArg2, n, &ok);
+    return !s->texture && (samples_texture(s->colorOp, c1, c2) ||
+                           (s->alphaOp != D3DTOP_DISABLE && samples_texture(s->alphaOp, a1, a2)));
+}
+
 static ULONG stage_program(D7_CONTEXT *c, ULONG fog, D8_SHADER *as, BOOL byStage, BOOL pretransformed)
 {
     RB_STAGE_STATE st[TextureStages];
@@ -2168,7 +2180,7 @@ static ULONG stage_program(D7_CONTEXT *c, ULONG fog, D8_SHADER *as, BOOL byStage
     D8_STAGE_PROGRAM *e;
     RB_PS_INFO info;
     RtlZeroMemory(key, sizeof(key));
-    for (i = 0; i < TextureStages && c->stages[i].colorOp != D3DTOP_DISABLE; ++i) {
+    for (i = 0; i < TextureStages && c->stages[i].colorOp != D3DTOP_DISABLE && !stage_lacks_texture(c, i); ++i) {
         const D7_STAGE *s = &c->stages[i];
         st[i].colorOp = s->colorOp; st[i].colorArg1 = s->colorArg1; st[i].colorArg2 = s->colorArg2;
         st[i].alphaOp = s->alphaOp; st[i].alphaArg1 = s->alphaArg1; st[i].alphaArg2 = s->alphaArg2;
