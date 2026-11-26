@@ -99,6 +99,25 @@ program ended. [The three captures](img/gl-fullscreen-rig.webp)
     gltest 10 full                   (the window covers the screen at its current mode)
     quake3.exe +set timedemo 1 +set r_fullscreen 1 +set r_mode 6 +set nextdemo quit +demo demo001
 
+### OpenGL in a window from the GPU (work in progress, 2026-11-26)
+
+Any other window has its frame copied on the host GPU into the desktop image that the mini-VDD
+shows, inside the rectangles GDI reports visible (patch 0015, `RVD_PRESENT_WINDOW`): a blit
+in the program's own context, no wait for the host, display updates paced at 60 a second.
+The card's memory under the window keeps an older GDI frame, so a frame still goes the GDI way
+at least every 200 ms (for GDI's own reads: a window dragged, a screen capture) and whenever
+the pointer is over or next to the window (the software pointer is drawn in that memory).
+Only Windows 98 and later (`GetCursorInfo`); `RIPPLE_GL_SCANOUT=0` turns it off with the
+full-screen path.
+
+Rows: the host's blit counts the desktop image's rows from the bottom of the screen, so Mesa
+turns the window's image over as it makes it and both rectangles are given counted from the
+bottom. Found with `glband` (a 640×480 window of four colour bands, red at the top, a white
+square in the top-left corner): every other combination put the bands upside down or 40 rows
+off. Checked on QEMU 10.0 with virglrenderer 1.1.0: one window, two overlapping windows (the
+lower one's visible part only), the Start menu over a window and a window partly under the
+taskbar.
+
 ## How a 2024 Mesa gets onto a 1998 Windows
 
 Mesa needs a C11 and C++17 compiler; the compilers of the time (Visual C++ 6) can't build it.

@@ -19,6 +19,7 @@ VxD, the test program and the winsys; this is version 2 of the interface.
 | `RVD_SUBMIT` | `struct rvd_submit`, commands | | a virgl command stream for a context |
 | `RVD_TRANSFER` | `struct rvd_transfer` | | copy between a buffer's memory and its GPU object, either way |
 | `RVD_PRESENT` | `struct rvd_present` | | show a scanout-capable GPU buffer owned by the caller's context and matching the current screen dimensions |
+| `RVD_PRESENT_WINDOW` | `struct rvd_window`, then 1 to `RVD_WINDOW_RECTS` `struct rvd_rect` | | copy an OpenGL window's image on the host into the desktop image, inside the given screen rectangles (GDI's visible region); `ERROR_NOT_READY` when the display shows something else (a full-screen image, DOS, a game flipping VGA pages): the frame then goes through GDI |
 | `RVD_DESKTOP` | 32-bit byte offset | | select and refresh the CPU-drawn page immediately. GDI uses offset zero |
 | `RVD_DESKTOP` | `struct rvd_desktop` | | select the CPU page at `offset`. With `flags = RVD_DESKTOP_FLIP`, successive DirectDraw flips may share a host display update. Zero flags request an immediate refresh |
 | `RVD_DESKTOP` | empty | 32-bit flag | query whether virtio owns the display. A newly loaded HAL uses this to resume CPU page flips |
