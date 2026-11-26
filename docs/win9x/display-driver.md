@@ -117,11 +117,24 @@ the driver has).
 
 ### One package for Windows 95 OSR2.5, Windows 98 SE and Windows Me
 
-Use the [Windows 9x 0.2.0 release](https://github.com/mizaimao/moose-ripple/releases/tag/win9x-v0.2.0)
+Use the [Windows 9x 0.6.0 release](https://github.com/mizaimao/moose-ripple/releases/tag/win9x-v0.6.0)
 for Windows 95 OSR2.5, Windows 98 Second Edition and Windows Me. The ISO and
 ZIP contain one INF and the same four driver files for all three systems.
 Select the **moose-ripple virtio-vga** model. The installer reports version
-`0.2.0.0`, including when updating the earlier Windows 98 SE 0.1.0 package.
+`0.6.0.0`. Since 0.6.0, Direct3D 8 and 9 are on by default
+([directdraw.md](directdraw.md#direct3d-8-through-its-own-interface-stage-1-2026-11-26-on-by-default-since-060)
+lists the registry values that turn them off). DirectDraw and Direct3D need DirectX 7 or later
+in the guest (below); 9.0c (December 2006) is the last that installs on 98 SE and Me.
+
+0.6.0 was checked on Windows 98 SE with DirectX 9.0c (2026-11-26):
+- **Clean install** from the release ISO on a fresh 98 SE disk, following the steps below:
+  the files matched the disc, and the GPU clear, `gltest`, `ddtest` (flips and restore),
+  `d3dtest`, `d8pixels` (23/23) and `d9pixels` (48/49, the known vertex declaration) passed.
+- **Upgrade** on the test VM: the same checks passed, and 3DMark 2001 SE ran every test with
+  correct pictures.
+
+Windows 95 OSR2.5 and Windows Me were not re-tested for 0.6.0; their OpenGL, DirectDraw and
+Direct3D 7 paths are those of 0.2.0.
 
 On a clean install, check Device Manager for the PCI bus before choosing **Have Disk**.
 If the only display adapter is the generic VGA device and the PCI bus is missing, use

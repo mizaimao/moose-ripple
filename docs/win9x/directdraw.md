@@ -970,6 +970,30 @@ A kept list of the lights that are on (instead of scanning the 128 light slots e
 measured on top of this and dropped: 30341 3DMarks, every test within 2% (eight lights 328.6
 against 334.0 MTriangles/s).
 
+**What limits Car Chase and Lobby now** (0.6.0, rig, untimed, 2026-11-26 17:40 EST). Both are
+still limited by the guest's processor, not the host. During 20 s of each high-detail test,
+QEMU's thread for the guest CPU was busy all the time (Car Chase 97% guest code, Lobby 96%), while
+its main thread, where virglrenderer and the host's OpenGL run, was busy 23% and 19%. About 220
+samples of the guest's instruction pointer each show no single hot spot:
+
+| Where the guest's time goes | Car Chase high | Lobby high |
+|---|---|---|
+| 3DMark's own code (its EXE and engine) | ~22% | ~25% |
+| Mesa in the guest (`ripplegl.dll`) | ~14% | ~10% |
+| KERNEL32 and MSVCRT | ~17% | ~10% |
+| Windows' ring 0 (VMM and VxDs) | ~8% | ~9% |
+| the HAL (`rippledd.dll`) | ~5% | ~10% |
+
+The HAL's share is almost all in `index_list`, which copies a draw's indices and rebases them to
+their smallest one. Draws whose vertices are in a buffer object skip it. It is still used for:
+- the runtime's dynamic buffers;
+- DrawPrimitiveUP data;
+- pre-transformed vertices.
+
+Keeping dynamic buffers on the GPU too (renaming on `DDLOCK_DISCARDCONTENTS` instead of
+uploading again) would remove most of it. The d9pixels cases that broke when dynamic buffers were
+first given buffer objects (`ps_lit_fog`, `vs2_*`) are the test for that.
+
 Advanced Pixel Shader's white boat and jetty: a trace with each draw's state (new trace lines)
 showed nine draws a frame with no texture on the stage their shader samples, and about one
 refused CanCreateSurface a frame. The refused format was FOURCC 63: for mipmapped Q8W8V8U8
