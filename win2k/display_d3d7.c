@@ -55,6 +55,7 @@ typedef struct {
     BOOL failed[4];
     ULONG streams;                          /* the streams the declaration reads, one bit each */
     ULONG bases[4][RB_VS_STREAMS];          /* where each program places them (words) */
+    BOOL pointSize;     /* it writes oPts */
 } D8_VSHADER;
 /* A pixel program made from the texture stage states, for draws with a
  * vertex shader and no pixel shader: the states it was made from (seven
@@ -1458,6 +1459,35 @@ typedef struct {
     LONG streamFirst;
 } PRIMS;
 
+/* A point draw's size and flags. Direct3D 8 and 9 draw points at
+ * D3DRS_POINTSIZE within POINTSIZE_MIN and POINTSIZE_MAX and the reported
+ * maximum, as sprites when POINTSPRITEENABLE is set; Direct3D 7 points are
+ * one pixel. The sizes are compared as IEEE bits, which order positive
+ * numbers as their values; a negative or not-a-number size counts as one.
+ * Not done: POINTSCALEENABLE and sizes in fixed-function vertices. */
+enum { RsPointSize = 154, RsPointSizeMin, RsPointSpriteEnable, RsPointSizeMax = 166 };
+static ULONG point_bits(const D7_CONTEXT *c, ULONG state, ULONG otherwise)
+{
+    ULONG v = ((c->rsSet[state / 32] >> (state % 32)) & 1) ? c->rs[state] : otherwise;
+    return v >= 0x7f800000UL ? otherwise : v;
+}
+
+static void point_state(const D7_CONTEXT *c, ULONG per, ULONG *size, ULONG *flags)
+{
+    ULONG s, lo, hi;
+    *size = 0x3f800000UL;
+    *flags = 0;
+    if (per != 1 || !c->dx8) return;
+    s = point_bits(c, RsPointSize, 0x3f800000UL);
+    lo = point_bits(c, RsPointSizeMin, 0x3f800000UL);
+    hi = min(point_bits(c, RsPointSizeMax, RB2K_POINT_SIZE_MAX), RB2K_POINT_SIZE_MAX);
+    if (s < lo) s = lo;
+    if (s > hi) s = hi;
+    *size = s;
+    if (((c->rsSet[RsPointSpriteEnable / 32] >> (RsPointSpriteEnable % 32)) & 1) && c->rs[RsPointSpriteEnable])
+        *flags = RB2K_POINT_SPRITE;
+}
+
 /* Vertices per primitive: three for triangles, two for lines, one for points. */
 static ULONG prim_per(const PRIMS *p) { return p->kind == Points ? 1 : p->kind == LineList || p->kind == LineStrip ? 2 : 3; }
 
@@ -1712,6 +1742,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     }
     RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D7_DRAW, vertices));
     draw->primitive = per == 3 ? RB2K_PRIM_TRIANGLES : per == 2 ? RB2K_PRIM_LINES : RB2K_PRIM_POINTS;
+    point_state(c, per, &draw->pointSize, &draw->pointFlags);
     scissor_words(c, &draw->scissorOn, draw->scissor);
     if (stage_words(c, 0, &draw->colorStage, &draw->alphaStage, &needTexture) == StageUnsupported) {
         skip(c, RB2K_D7_SKIP_COMBINER, p->primitives);
@@ -2159,6 +2190,7 @@ static ULONG vertex_program(D7_CONTEXT *c, D8_VSHADER *vs, ULONG flags, const UL
     ++st->vsTranslated;
     vs->constants = info.constants;
     vs->words = info.coords;
+    vs->pointSize = info.pointSize != 0;
     vs->program[k] = id;
     return id;
 }
@@ -2372,6 +2404,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     if (offset > stride || stride > 256) { skip_vertex(c, p->primitives, 8); return DD_OK; }
     RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices));
     draw->primitive = per == 3 ? RB2K_PRIM_TRIANGLES : per == 2 ? RB2K_PRIM_LINES : RB2K_PRIM_POINTS;
+    point_state(c, per, &draw->pointSize, &draw->pointFlags);
     for (k = 0; k < RB2K_D8_STAGES; ++k) if (sh->coords & (1UL << k)) used = k + 1;
     draw->coordSets = used;
     words = RB2K_D8_VERTEX_WORDS(used);
@@ -2553,6 +2586,8 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
     }
     RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices));
     draw->primitive = per == 3 ? RB2K_PRIM_TRIANGLES : per == 2 ? RB2K_PRIM_LINES : RB2K_PRIM_POINTS;
+    point_state(c, per, &draw->pointSize, &draw->pointFlags);
+    if (per == 1 && vs->pointSize) draw->pointFlags |= RB2K_POINT_PER_VERTEX;
     if (!pixel_states(c, draw, sh, s, z, program, fog, p->primitives)) return DD_OK;
     if (sh == &stages) {
         draw->constants[0][0] = c->factor;   /* the texture factor, unpacked by the program */
@@ -4501,7 +4536,7 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     c->vertexProcessingCaps = x->dwVertexProcessingCaps & ~D3DVTXPCAPS_VERTEXFOG;
     c->maxActiveLights = x->dwMaxActiveLights;
     c->maxUserClipPlanes = x->wMaxUserClipPlanes;   /* in world space for object-space draws, in clip space for vertex shaders */
-    c->maxPointSize = 0x3f800000;                       /* 1 */
+    c->maxPointSize = RB2K_POINT_SIZE_MAX;              /* 64 */
     c->maxPrimitiveCount = 0xffff;
     c->maxVertexIndex = 0xffff;
     /* More streams only for vertex shaders, whose declarations say where each is read. */

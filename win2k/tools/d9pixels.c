@@ -357,6 +357,92 @@ static void ps_run(const char *name, const DWORD *tokens, const PSVERTEX *v, UIN
     IDirect3DPixelShader9_Release(handle);
 }
 
+/* 75: point sizes. A sprite of 16 pixels at 64, 64 textured with a 2x2 texture (red, green over
+ * blue, white): each quarter shows its texel, top left red as in Direct3D. A point of 8 pixels
+ * at 32, 100 without sprites: yellow across it. The clear colour beside both. */
+static void point_case(int only)
+{
+    static const DWORD texels[4] = { 0xffff0000, 0xff00ff00, 0xff0000ff, 0xffffffff };
+    static const SAMPLE s[] = { { 60, 60, 0xff0000 }, { 68, 60, 0x00ff00 }, { 60, 68, 0x0000ff }, { 68, 68, 0xffffff },
+                                { 50, 64, CLEAR_COLOR }, { 78, 64, CLEAR_COLOR },
+                                { 30, 98, 0xffff00 }, { 34, 102, 0xffff00 }, { 40, 100, CLEAR_COLOR } };
+    TLTEXVERTEX sprite = { 64.0f, 64.0f, 0.5f, 1, 0xffffffff, 0, 0 };
+    TLVERTEX dot = { 32.0f, 100.0f, 0.5f, 1, 0xffffff00 };
+    IDirect3DTexture9 *t;
+    float size;
+    HRESULT hr;
+    if (only && only != 75) return;
+    t = texture2x2(texels);
+    if (!t) { printf("D9PIX case=points texture failed\n"); ++failures; return; }
+    if (begin("points")) {
+        IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)t);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        size = 16.0f;
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSIZE, *(DWORD *)&size);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSPRITEENABLE, TRUE);
+        IDirect3DDevice9_SetFVF(device, TLTEXFVF);
+        hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_POINTLIST, 1, &sprite, sizeof(sprite));
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        size = 8.0f;
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSIZE, *(DWORD *)&size);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSPRITEENABLE, FALSE);
+        IDirect3DDevice9_SetFVF(device, TLFVF);
+        if (SUCCEEDED(hr)) hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_POINTLIST, 1, &dot, sizeof(dot));
+        size = 1.0f;
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSIZE, *(DWORD *)&size);
+        if (FAILED(hr)) { fail_hr("points", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("points", s, 9);
+    }
+    IDirect3DTexture9_Release(t);
+}
+
+/* 76: a vs_1_1 program sets the point size: mov oPts, c0.x with c0.x 10, a green point at clip
+ * (0.5, -0.5), the target's 96, 96. */
+static void program_point_case(int only, BOOL offered)
+{
+    static const D3DVERTEXELEMENT9 elements[] = {
+        { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+        { 0, 12, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 }, D3DDECL_END() };
+    static const DWORD vs[] = { 0xfffe0101,
+        0x0000001f, 0x80000000, 0x900f0000,     /* dcl_position v0 */
+        0x0000001f, 0x8000000a, 0x900f0001,     /* dcl_color v1 */
+        0x00000001, 0xc00f0000, 0x90e40000,     /* mov oPos, v0 */
+        0x00000001, 0xd00f0000, 0x90e40001,     /* mov oD0, v1 */
+        0x00000001, 0xc00f0002, 0xa0000000,     /* mov oPts, c0.x (scalar outputs take the full mask) */
+        0x0000ffff };
+    static const float c0[4] = { 10.0f, 0, 0, 0 };
+    static const SAMPLE s[] = { { 93, 93, 0x00ff00 }, { 99, 99, 0x00ff00 }, { 106, 96, CLEAR_COLOR }, { 96, 86, CLEAR_COLOR } };
+    struct { float x, y, z; DWORD color; } v = { 0.5f, -0.5f, 0.5f, 0xff00ff00 };
+    IDirect3DVertexDeclaration9 *decl = NULL;
+    IDirect3DVertexShader9 *shader = NULL;
+    HRESULT hr;
+    if (only && only != 76) return;
+    if (!offered) { printf("D9PIX vertex shaders 1.1 not offered\n"); return; }
+    hr = IDirect3DDevice9_CreateVertexDeclaration(device, elements, &decl);
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice9_CreateVertexShader(device, vs, &shader);
+    if (FAILED(hr)) { fail_hr("program_point", "create", hr); goto done; }
+    if (begin("program_point")) {
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        IDirect3DDevice9_SetVertexDeclaration(device, decl);
+        IDirect3DDevice9_SetVertexShader(device, shader);
+        IDirect3DDevice9_SetVertexShaderConstantF(device, 0, c0, 1);
+        hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_POINTLIST, 1, &v, sizeof(v));
+        IDirect3DDevice9_SetVertexShader(device, NULL);
+        if (FAILED(hr)) { fail_hr("program_point", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("program_point", s, 4);
+    }
+done:
+    if (shader) IDirect3DVertexShader9_Release(shader);
+    if (decl) IDirect3DVertexDeclaration9_Release(decl);
+}
+
 /* 73: a line list (red lines at y 38 to 41 from x 8 to 120) and a point list (a 2x2 block of green
  * points at 95 and 96): pixels on them, and the clear colour beside. Then an indexed line list
  * (blue lines at y 86 to 89, the indices reversed in each line). The counts (8, 4 and 8
@@ -2266,6 +2352,9 @@ int main(int argc, char **argv)
     scissor_case(only, (caps.RasterCaps & D3DPRASTERCAPS_SCISSORTEST) != 0);
     luminance_case(only);
     lines_points_case(only);
+    printf("D9PIX max_point_size=%d\n", (int)caps.MaxPointSize);
+    point_case(only);
+    program_point_case(only, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1));
     l16_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
     colorwrite_case(only);

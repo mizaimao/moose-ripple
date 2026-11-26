@@ -2526,6 +2526,34 @@ face is not copied again.
 own colour as a render target and samples the six directions.
 
 
+## Point sizes and point sprites
+
+The driver reports a maximum point size of 64 (`RB2K_POINT_SIZE_MAX`; it was
+1). With a maximum of 1 the Direct3D runtime emulates point sprites itself,
+and programs that need them choose software vertex processing: 3DMark05
+created its device with `D3DCREATE_SOFTWARE_VERTEXPROCESSING`, so its vertex
+shaders ran on the guest processor in the runtime.
+
+- Direct3D 8 and 9 point draws carry `pointSize` and `pointFlags` in their
+  packet: the size is `D3DRS_POINTSIZE` within `POINTSIZE_MIN`,
+  `POINTSIZE_MAX` and the maximum (compared as IEEE bits, which order
+  positive numbers as their values, so the display driver needs no floating
+  point); `RB2K_POINT_SPRITE` when `POINTSPRITEENABLE` is set. Direct3D 7
+  points stay one pixel.
+- A vertex program that writes `oPts` gets a `PSIZE` output, and its point
+  draws carry `RB2K_POINT_PER_VERTEX`.
+- The miniport binds one point rasterizer (handle 160) for point draws, made
+  again when the size or flags change. Points are drawn as quads
+  (`point_quad_rasterization`, as Gallium Nine does); sprites replace the
+  texture coordinate inputs: `GENERIC[2]` in the fixed-function fragment
+  shaders, `GENERIC[2..9]` in the pixel shader and vertex program paths.
+
+Not done: `POINTSCALEENABLE` (sizes by distance) and point sizes in
+fixed-function vertices (`D3DFVF_PSIZE`, whose cap is not reported).
+`d9pixels` case 75 draws a textured sprite and a plain point of 8 pixels,
+case 76 a point sized by a vertex program.
+
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:
