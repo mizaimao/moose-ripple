@@ -2185,6 +2185,20 @@ On XP SP3 under KVM on the second Intel UHD 630 host, case 53 passes and
 `d9pixels` passes 43 of 43. 3DMark 2001 SE's DOT3 Bump Mapping test, which
 reported "Not supported by hardware", now runs.
 
+## The immediate present interval
+
+3DMark05 treats a device without `D3DPRESENT_INTERVAL_IMMEDIATE` as unable to
+run it. A Direct3D 9 runtime fills `D3DCAPS9.PresentationIntervals` itself: it
+always sets `D3DPRESENT_INTERVAL_ONE`, sets the immediate interval when the
+driver's `Caps2` has 0x00400000 (`D3DCAPS2_PRESENT_INTERVAL_IMMEDIATE` in
+`d3dhal.h`, a bit only drivers report), and the intervals two to four when it
+has 0x00200000. The driver's own `PresentationIntervals` is ignored. (Read in
+the runtime's debug build, where the copy of the driver's caps is built.)
+
+No present of this driver waits for the vertical blank, so it now reports the
+immediate interval. `d9pixels` case 69 checks that the device offers it.
+
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:
