@@ -2131,11 +2131,14 @@ interval 0 and 1. The game is OpenArena 0.8.8's timedemo of
 | the triangle read back, and on the screen; again after a resize | red, red | red, red (64-bit and 32-bit) |
 | 30 frames at swap interval 1; 300 at interval 0 | no such extension | 0.5 s; 0.03 s |
 | OpenArena timedemo | 1.9 frames/s (1818 s) | 324 frames/s (10.5 s) |
-| Windows 7 SP1 in UTM (a host that offers OpenGL ES) | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 2.1; the same GL test passes |
+| Windows 7 SP1 in UTM (a host that offers OpenGL ES) | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 2.1; the same GL test passes (64-bit and 32-bit) |
+| Windows Vista SP2 on the Linux host, installed through the INF | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 4.3; the same GL test passes (64-bit and 32-bit); OpenArena timedemo in a 640x480 window 258 frames/s |
 | Windows Vista SP2 in UTM, installed through the INF | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 2.1; the same GL test passes (64-bit and 32-bit) |
 
-The timedemo ran next to another guest that was not being measured, so its 324 is a floor
-rather than a best case. Before patch 0046 the same run gave 60.0 frames a second.
+The timedemos ran next to other guests that were not being measured, so 324 and 258 are floors
+rather than best cases. On both systems the Direct3D pixel tests of `tools/vista` give the same
+result with this build as before it (Vista 12 of 12; Windows 7 10 of 12, the other two being
+the Vista-only video-processor test). Before patch 0046 the same run gave 60.0 frames a second.
 
 Known gaps:
 
