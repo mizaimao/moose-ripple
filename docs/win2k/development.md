@@ -2064,6 +2064,37 @@ of the previous section), with no failed request. It stops at Nature:
 "device does not support bump normal maps", the next fix. `d9pixels` (41
 of 41) and `tpixels hal` (18 of 18) pass.
 
+## Bump maps: 3DMark 2001 SE runs its game tests
+
+Direct3D 8 and 9 programs are offered V8U8 and Q8W8V8U8 textures (also as
+cube maps and volumes). Their signed texels go to the host as they are, into
+`R8G8_SNORM` and `R8G8B8A8_SNORM` textures; the miniport offers them only
+where the host's capability set says it samples those formats, as for DXT.
+Version 1 pixel shaders translate `texbem` and `texbeml`: stage n's
+coordinates move by the bump map's du and dv through stage n's bump matrix,
+and `texbeml` then scales the colour by the luminance times the scale plus
+the offset. Such a program reads 16 constants: c0..c7, the four stages'
+matrices, then their luminance scales and offsets, filled by the display
+driver from the texture stage states; its fog constants follow. Version 1.0
+shaders, which Direct3D 8.0 programs use, translate like 1.1 (they were
+refused, and every 3DMark 2001 SE shader is 1.0).
+
+`d9pixels` case 48 draws through a V8U8 map whose du moves the next stage's
+lookup by a quarter of its texture, and checks that the left column shows
+the right one. The translations of `texbem`, `texbeml` (with and without
+fog) and 3DMark 2001 SE's first shader pass Mesa's TGSI parser.
+
+On XP SP3 under KVM on the second Intel UHD 630 host, with the fence change
+above, 3DMark 2001 SE now runs all four game tests: Car Chase 44.3 and 18.9
+fps, Dragothic 37.5 and 12.2, Lobby 71.1 and 45.2, Nature 29.0. Its feature
+tests run up to Advanced Pixel Shader, which stops the benchmark with
+"Could not create texture - D3DERR_INVALIDCALL" before a score; the
+environment and DOT3 bump mapping tests report "not supported by hardware"
+(the fixed-function stages have no bump operations yet). `d9pixels` (42 of
+42) and `tpixels hal` (18 of 18) pass. Many triangles are still skipped
+(vertex formats and textures the fixed-function path refuses), so the
+pictures are not right yet.
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:
