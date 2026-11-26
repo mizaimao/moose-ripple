@@ -881,9 +881,10 @@ int d3d_surface_format_ok(LPDDSURFACEDESC desc)
 
 /* ---- Contexts ----------------------------------------------------------------------------------- */
 #define MAX_PS 64                       /* Direct3D 8 pixel shaders a context keeps */
-#define STAGES 4                        /* texture stages kept: pixel shaders sample t0..t3 */
-#define FF_STAGES 2                     /* of those, offered to Direct3D 7 (Direct3D 8 gets all) */
-#define FOG_UNIT STAGES                 /* the OpenGL texture unit that does fog */
+#define STAGES 8                        /* texture stages kept: pixel shaders sample s0..s7 */
+#define FF_STAGES 2                     /* fixed-function stages offered to Direct3D 7 */
+#define FF8_STAGES 4                    /* and drawn for Direct3D 8 and 9, before FOG_UNIT */
+#define FOG_UNIT 4                      /* the OpenGL texture unit that does fixed-function fog */
 
 typedef struct {
     GLuint name;
@@ -965,7 +966,7 @@ typedef struct {
     DWORD ps_bound;
     GLuint fp_prog;                     /* bound to GL_FRAGMENT_PROGRAM_ARB */
     int fp_on;                          /* GL_FRAGMENT_PROGRAM_ARB enabled */
-    float psc[RB_PS_CONSTANTS][4];
+    float psc[RB_PS2_CONSTANTS][4];     /* c0..c7 for version 1, c0..c31 for 2.0 */
     int psc_dirty;
 } RCTX;
 
@@ -2154,8 +2155,8 @@ static void apply_stages(RCTX *c)
                    uses_texture(aop, st[D3DTSS_ALPHAARG1], st[D3DTSS_ALPHAARG2]);
         int on = 0;
 
-        if (s >= FF_STAGES && !c->dx8)
-            off = 1;                    /* Direct3D 7 is offered FF_STAGES */
+        if (s >= (c->dx8 ? FF8_STAGES : FF_STAGES))
+            off = 1;                    /* the stages after those are only for pixel shaders */
         c->bound[s] = 0;
         gl->ActiveTexture(GL_TEXTURE0 + s);
         if (off || cop == D3DTOP_DISABLE) {
@@ -2411,15 +2412,31 @@ static void arrays(RCTX *c, const VERTICES *v, DWORD first, DWORD count)
     } else {
         gl->DisableClientState(GL_SECONDARY_COLOR_ARRAY);
     }
-    gl->ClientActiveTexture(GL_TEXTURE0 + FOG_UNIT);
-    if (c->rs[D3DRENDERSTATE_FOGENABLE]) {
-        gl->EnableClientState(GL_TEXTURE_COORD_ARRAY);
-        gl->TexCoordPointer(1, GL_FLOAT, 0, c->pos + count * 4);
+    /* The fog values (0.25 + 0.5 f, see convert): the fixed-function fog unit's coordinates, or,
+       under a pixel shader, whose stages may use that unit, OpenGL's fog coordinate. */
+    if (c->fp_on && gl->FogCoordPointer) {
+        if (c->rs[D3DRENDERSTATE_FOGENABLE]) {
+            gl->Fogi(GL_FOG_COORDINATE_SOURCE, GL_FOG_COORDINATE);
+            gl->EnableClientState(GL_FOG_COORDINATE_ARRAY);
+            gl->FogCoordPointer(GL_FLOAT, 0, c->pos + count * 4);
+        } else {
+            gl->DisableClientState(GL_FOG_COORDINATE_ARRAY);
+        }
     } else {
-        gl->DisableClientState(GL_TEXTURE_COORD_ARRAY);
+        if (gl->FogCoordPointer)
+            gl->DisableClientState(GL_FOG_COORDINATE_ARRAY);
+        gl->ClientActiveTexture(GL_TEXTURE0 + FOG_UNIT);
+        if (c->rs[D3DRENDERSTATE_FOGENABLE]) {
+            gl->EnableClientState(GL_TEXTURE_COORD_ARRAY);
+            gl->TexCoordPointer(1, GL_FLOAT, 0, c->pos + count * 4);
+        } else {
+            gl->DisableClientState(GL_TEXTURE_COORD_ARRAY);
+        }
     }
     for (s = 0; s < STAGES; s++) {
         DWORD set = c->tss[s][D3DTSS_TEXCOORDINDEX] & 0xFFFF;
+        if (s == FOG_UNIT && !c->fp_on)
+            continue;                   /* the fog unit's, set above */
         gl->ClientActiveTexture(GL_TEXTURE0 + s);
         if (set < 8 && v->tex[set] >= 0) {
             gl->EnableClientState(GL_TEXTURE_COORD_ARRAY);
@@ -2983,12 +3000,14 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
 /* ---- Direct3D 8 pixel shaders ------------------------------------------------------------- */
 /* A shader is translated when the runtime creates it: its tokens to TGSI text by the Windows
    2000 driver's translator (win2k/d3d8_ps.c), that to an ARB fragment program (tgsi_arb.c),
-   which Mesa compiles. Inputs: the diffuse and specular colours, texture coordinate sets 0..3;
-   c0..c7 are program.env[0..7]; the translator's immediates are program.local.
+   which Mesa compiles. Inputs: the diffuse and specular colours, texture coordinate sets 0..7;
+   constants (c0..c7 of version 1, c0..c31 of 2.0) are program.env; the translator's
+   immediates are program.local.
    Fog after the shader: a second program, made when a draw first needs it. The HAL already
-   gives each vertex Direct3D's fog factor f as the coordinate 0.25 + 0.5 f of FOG_UNIT (the
-   fixed-function fog ramp); the translator is asked for linear fog from a vertex depth read
-   there, with start 0.75 and end 0.25, which gives back f. */
+   computes each vertex's Direct3D fog factor f as 0.25 + 0.5 f (for the fixed-function fog
+   ramp); under a shader it goes in as OpenGL's fog coordinate (arrays), and the translator is
+   asked for linear fog from a vertex depth read there, with start 0.75 and end 0.25, which
+   gives back f. */
 #define PS_FOG (RB_PS_FOG_VERTEX | (3 << RB_PS_FOG_MODE_SHIFT))     /* linear, from IN[10] */
 
 static struct ps8 *ps_find(RCTX *c, DWORD handle, int create)
@@ -3043,7 +3062,7 @@ static GLuint ps_compile(RCTX *c, struct ps8 *p, int fog)
     arb = (char *)alloc(TGSI_ARB_TEXT_BYTES);
     memset(&info, 0, sizeof info);
     memset(&ai, 0, sizeof ai);
-    ai.fog_unit = FOG_UNIT;
+    ai.fog_unit = TGSI_ARB_FOGCOORD;    /* fog values in OpenGL's fog coordinate (arrays) */
     if (tgsi && arb && p->code)
         n = rb_ps_translate((const unsigned int *)p->code, p->bytes / 4, fog ? PS_FOG : 0, tgsi,
                             RB_PS_TEXT_BYTES, &info);
@@ -3146,7 +3165,7 @@ static void ps_apply(RCTX *c, long prog)
     if (!gl->ProgramEnvParameter4fvARB)
         return;
     if (c->psc_dirty) {
-        for (i = 0; i < RB_PS_CONSTANTS; i++)
+        for (i = 0; i < RB_PS2_CONSTANTS; i++)
             gl->ProgramEnvParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, i, c->psc[i]);
         c->psc_dirty = 0;
     }
@@ -3163,6 +3182,7 @@ static void ps_apply(RCTX *c, long prog)
         range[2] = range[3] = 0.0f;
         gl->ProgramEnvParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, p->fog_base, fc);
         gl->ProgramEnvParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, p->fog_base + 1, range);
+        c->psc_dirty = 1;               /* those registers may be a later shader's constants */
     }
 }
 
@@ -3628,7 +3648,7 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
                 if (left - used < sizeof *r || r->count > (left - used - sizeof *r) / 16)
                     goto bad;
                 for (j = 0; k->bCommand == RbDp2SetPixelShaderConst && j < r->count; j++)
-                    if (r->reg + j < RB_PS_CONSTANTS) {
+                    if (r->reg + j < RB_PS2_CONSTANTS) {
                         memcpy(c->psc[r->reg + j], f + 4 * j, 16);
                         c->psc_dirty = 1;
                     }
@@ -3922,9 +3942,17 @@ static void d8_caps(RB_D3DCAPS8 *c)
     c->maxStreams = 1;
     c->maxStreamStride = 255;
     c->vertexShaderVersion = 0xFFFE0000UL;  /* none: the runtime processes vertices */
-    c->pixelShaderVersion = 0xFFFF0103UL;   /* 1.3, as ARB fragment programs (ps_create) */
-    c->maxSimultaneousTextures = STAGES;    /* t0..t3 */
-    c->maxTextureBlendStages = STAGES;      /* the runtime sends stage states for these only */
+    /* Pixel shaders as ARB fragment programs (ps_create): 1.3 for Direct3D 8, 2.0 with eight
+       samplers when the runtime that asks has announced itself as Direct3D 9 (it uses this record
+       for drivers of the Direct3D 8 interface). The runtime sends stage states only for the
+       blend stages reported, so those are as many as the samplers. */
+    if (d3d_version >= 0x900) {
+        c->pixelShaderVersion = 0xFFFF0200UL;
+        c->maxSimultaneousTextures = c->maxTextureBlendStages = RB_PS2_SAMPLERS;
+    } else {
+        c->pixelShaderVersion = 0xFFFF0103UL;
+        c->maxSimultaneousTextures = c->maxTextureBlendStages = RB_PS_COORD_SETS;
+    }
     c->fvfCaps = STAGES;                    /* texture coordinate sets */
     c->maxPixelShaderValue = fbits(1.0f);
 }
@@ -3992,7 +4020,10 @@ static int d8_info(LPDDHAL_GETDRIVERINFODATA d)
         RB_GDI2_DX_VERSION *v = (RB_GDI2_DX_VERSION *)h;
         if (room < sizeof *v)
             goto unavailable;
-        d3d_version = v->version;
+        /* The Direct3D 9 runtime says 0x902, then, after the Direct3D 9 caps go unanswered,
+           0x802 just before it asks for these: keep the highest */
+        if (v->version > d3d_version)
+            d3d_version = v->version;
         d->dwActualSize = sizeof *v;
         break;
     }

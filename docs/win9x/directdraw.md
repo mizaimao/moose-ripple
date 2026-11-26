@@ -761,9 +761,9 @@ fragment.color and fragment.texcoord); what ARB lacks is spelled out (`|x|` thro
 through two SLT, KILL_IF is KIL, scalar instructions take one component). Shaders are compiled
 when the runtime creates them; constants c0..c7 go to program.env before a draw; with a shader
 set, each stage's texture is bound on its unit and the stages' operations don't apply. The HAL
-keeps four texture stages: Direct3D 8 is offered all four (the runtime sends stage states only
-for the blend stages a device reports), Direct3D 7 still two, and fixed-function fog moved to
-the fifth OpenGL texture unit.
+keeps eight texture stages: Direct3D 8 is offered four (the runtime sends stage states only
+for the blend stages a device reports; Direct3D 9 gets eight, below), Direct3D 7 still two,
+and fixed-function fog moved to the fifth OpenGL texture unit.
 
 Fog after the shader: the HAL already gives each vertex Direct3D's fog factor f (from the
 specular alpha for vertex fog, from the depth for table fog) as the coordinate 0.25 + 0.5 f of
@@ -778,6 +778,25 @@ A shader adding four textures (t0..t3, `d8tex4`) reads back the expected sum. `d
 (Direct3D 7) in the same boot fails only the two mipmap LOD-bias checks it fails in UTM with
 the released driver. Not yet: the bump and matrix texture instructions of version 1 beyond
 what d8pixels covers, vertex shaders.
+
+### Direct3D 9 and pixel shader 2.0 (2026-11-26)
+
+The Direct3D 9 runtime drives this HAL through the same Direct3D 8 interface, as on Windows
+2000: it asks for the Direct3D 9 capabilities, gets no answer, and uses the Direct3D 8 ones. It
+announces itself twice, as version 0x902 and then, before asking for those capabilities, as
+0x802, so the HAL keeps the highest version it has been told. For a runtime of version 9 the
+capabilities say pixel shader 2.0 with eight samplers and eight blend stages (the runtime sends
+stage states only for those), and constants c0..c31 go to program.env. Shader model 2 reads up
+to eight texture coordinate sets, which would collide with the fixed-function fog unit, so under
+a shader the fog values go in as OpenGL's fog coordinate (`fragment.fogcoord`) instead.
+Fixed-function stages stay at four for Direct3D 8 and 9 (before the fog unit) and two for
+Direct3D 7.
+
+DirectX 9.0c from December 2006 is the last that installs on Windows 98 (download store:
+`runtimes/dx9c-dec2006`; extract with `/Q /T:dir /C`, then `DXSETUP.EXE /silent`, then
+restart). `d9pixels sw` on Windows 98 SE in UTM: 40 of 40 pass, the 24 fixed-function, version 1
+and render-to-texture cases and all 10 shader model 2 cases (texture, arithmetic, texkill, pow,
+rcp, rsq, nrm, dp2add, eight coordinate sets, blend). Untimed.
 
 
 ## Changing a driver in the test VM
