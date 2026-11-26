@@ -2185,6 +2185,24 @@ On XP SP3 under KVM on the second Intel UHD 630 host, case 53 passes and
 `d9pixels` passes 43 of 43. 3DMark 2001 SE's DOT3 Bump Mapping test, which
 reported "Not supported by hardware", now runs.
 
+## Trace tools: d9trace and d8trace
+
+`d9trace.dll` and `d8trace.dll` are logging stand-ins for `d3d9.dll` and
+`d3d8.dll`. Copied into a program's folder under the runtime's name, with the
+real runtime copied beside them as `d3d9real.dll` or `d3d8real.dll`, they
+pass every call on and log to `d9trace.log` (`d8trace.log`): format checks
+that fail and those of cube and volume textures, refused textures, devices
+made, and the caps the program reads, the whole record as hex words. They pin
+themselves, since a program that frees the runtime after probing would
+otherwise crash in the unloaded hooks. 3DMark03's refused volume texture and
+3DMark05's hardware check were found with them.
+
+`guiclick` drives a program's windows for unattended runs. `-press @Title#N`
+presses the button with control ID N only in a window whose title contains
+Title (3DMark05's owner-drawn buttons share IDs across windows), and nothing
+is pressed in a window a modal dialog has disabled.
+
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:
