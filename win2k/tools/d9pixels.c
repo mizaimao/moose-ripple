@@ -357,6 +357,41 @@ static void ps_run(const char *name, const DWORD *tokens, const PSVERTEX *v, UIN
     IDirect3DPixelShader9_Release(handle);
 }
 
+/* 73: a line list (red lines at y 38 to 41 from x 8 to 120) and a point list (a 2x2 block of green
+ * points at 95 and 96): pixels on them, and the clear colour beside. Then an indexed line list
+ * (blue lines at y 86 to 89, the indices reversed in each line). The counts (8, 4 and 8
+ * vertices) are not multiples of three. */
+static void lines_points_case(int only)
+{
+    static const SAMPLE s[] = { { 64, 40, 0xff0000 }, { 64, 64, CLEAR_COLOR }, { 96, 96, 0x00ff00 }, { 104, 104, CLEAR_COLOR },
+                                { 64, 88, 0x0000ff } };
+    static const WORD order[8] = { 1, 0, 3, 2, 5, 4, 7, 6 };
+    TLVERTEX lines[8], points[4], blue[8];
+    HRESULT hr;
+    int i;
+    if (only && only != 73) return;
+    for (i = 0; i < 8; ++i) {
+        lines[i].x = i & 1 ? 120.0f : 8.0f; lines[i].y = 38.0f + i / 2; lines[i].z = 0.5f; lines[i].rhw = 1;
+        lines[i].diffuse = 0xffff0000;
+        blue[i] = lines[i]; blue[i].y += 48.0f; blue[i].diffuse = 0xff0000ff;
+    }
+    for (i = 0; i < 4; ++i) {
+        points[i].x = 95.0f + i % 2; points[i].y = 95.0f + i / 2; points[i].z = 0.5f; points[i].rhw = 1;
+        points[i].diffuse = 0xff00ff00;
+    }
+    if (!begin("lines_points")) return;
+    IDirect3DDevice9_SetTexture(device, 0, NULL);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+    IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+    hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_LINELIST, 4, lines, sizeof(lines[0]));
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_POINTLIST, 4, points, sizeof(points[0]));
+    if (SUCCEEDED(hr))
+        hr = IDirect3DDevice9_DrawIndexedPrimitiveUP(device, D3DPT_LINELIST, 0, 8, 4, order, D3DFMT_INDEX16, blue, sizeof(blue[0]));
+    if (FAILED(hr)) { fail_hr("lines_points", "draw", hr); IDirect3DDevice9_EndScene(device); }
+    else check("lines_points", s, 5);
+}
+
 /* 72: ps_1_4. texcrd r1.rgb, t1 (0.75, 0.25 at every vertex); phase; texld r0, t0 (sampler 0: red
  * left, green right); texld r3, r1 (sampler 3, a dependent read: blue at the top right texel);
  * add r0, r0, r3: magenta on the left, cyan on the right. (Registers written before the phase
@@ -2230,6 +2265,7 @@ int main(int argc, char **argv)
     rt2048_case(only);
     scissor_case(only, (caps.RasterCaps & D3DPRASTERCAPS_SCISSORTEST) != 0);
     luminance_case(only);
+    lines_points_case(only);
     l16_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
     colorwrite_case(only);

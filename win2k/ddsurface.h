@@ -24,6 +24,10 @@
 #define RB2K_DD_D3D8 32             /* the Direct3D 8 driver interface */
 #define RB2K_DD_VERTEX_SHADERS 64   /* vertex shaders on the host GPU */
 #define RB2K_DD_Z24S8 128           /* depth buffers of 24 bits with 8 of stencil */
+/* What a draw packet's vertices are, taken in order: triangles, lines (two each) or points. */
+#define RB2K_PRIM_TRIANGLES 0
+#define RB2K_PRIM_LINES 1
+#define RB2K_PRIM_POINTS 2
 #define RB2K_DD_D3D9_DDI 256        /* the Direct3D 9 driver interface (with vertex shaders) */
 #define RB2K_DD_IOCTL(n) CTL_CODE(FILE_DEVICE_VIDEO,n,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_RB2K_DD_QUERY   RB2K_DD_IOCTL(0x901)
@@ -90,6 +94,7 @@ typedef struct { ULONG x, y, z, rhw, diffuse, specular, nx, ny, nz, tc[RB2K_D8_S
  * RB2K_D3D7_DRAW. */
 typedef struct {
     ULONG target, depth, count;
+    ULONG primitive;                /* RB2K_PRIM_*; count is a multiple of its vertices */
     ULONG depthState, alphaTest, blend, cull;
     ULONG stencil, stencilRef;      /* RB2K_STENCIL_ON etc.; reference, masks */
     ULONG program;
@@ -158,6 +163,7 @@ typedef struct { ULONG x, y, z, rhw, diffuse, specular, u, v, nx, ny, nz, u1, v1
 #define RB2K_BLEND_NO_WRITE (15UL << RB2K_BLEND_NO_WRITE_SHIFT)
 typedef struct {
     ULONG target, depth, count;
+    ULONG primitive;    /* RB2K_PRIM_*; count is a multiple of its vertices */
     ULONG depthState;
     ULONG alphaTest;    /* RB2K_D7_ON | D3DCMPFUNC << 8 | reference */
     ULONG blend;        /* RB2K_D7_ON | source D3DBLEND << 8 | destination D3DBLEND; channel mask bits */
