@@ -3948,7 +3948,11 @@ static void clear(RCTX *c, DWORD flags, DWORD color, float depth, DWORD stencil,
    makes that moot). The depth is the new z-buffer's own. */
 static int set_render_target(RCTX *c, LPDDRAWI_DDRAWSURFACE_LCL rt, LPDDRAWI_DDRAWSURFACE_LCL z)
 {
-    if (rt != c->rt && rt != c->front && rt != c->back && !end_chain(c))
+    /* A target outside the flip chain ends it (its pages go back into memory), unless it is a
+       texture: rendering into a texture between flips (3DMark 2001's Dragothic, ten a frame) is
+       part of the frame, and the chain goes on. */
+    if (rt != c->rt && rt != c->front && rt != c->back && !(rt->ddsCaps.dwCaps & DDSCAPS_TEXTURE) &&
+        !end_chain(c))
         return 0;
     finish_target(c);
     tracef("rd3d: render target: caps %08lx, memory %08lx, %lux%lu; z-buffer memory %08lx\r\n",
