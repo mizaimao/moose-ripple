@@ -743,11 +743,37 @@ Through the Direct3D 7 translation (switch off) all 8 pass too, as before. `d3dt
 driver in UTM (mipmap level with LOD bias +1: level 3's colour where level 4's is expected), so
 that one is the UTM host's and not this work's.
 
-Found on the way, not caused by this work: with the switch off (the released driver too), only
-the first Direct3D 8 program after a restart reaches the HAL. A second run of `d8pixels` in the
-same boot loads no driver code, makes no OpenGL context, and still passes its pixel checks, so
-something else draws it. With the Direct3D 8 interface on, every run reaches the HAL. To be
-looked into with a program whose speed shows which path it took.
+Seen twice and not explained, with the switch off (the released driver too): in two boots, a
+second run of `d8pixels` loaded no driver code, made no OpenGL context and still passed its
+pixel checks, so something else drew it. In a later boot it did not happen: three runs of a
+small frame-rate test (`d8fps`, 169 to 185 frames a second in UTM) and then two runs of
+`d8pixels` each reached the HAL. Not understood yet; watch for it.
+
+### Pixel shaders 1.1 to 1.3 (stage 2, 2026-11-26)
+
+With the Direct3D 8 interface on, the device reports pixel shader version 1.3. The HAL does not
+write its own translator: the Windows 2000 driver's (`win2k/d3d8_ps.c`, built unchanged with
+Visual C++ 6) turns a shader into Gallium TGSI text, and `win9x/ddraw/tgsi_arb.c` turns that
+text, line by line, into an OpenGL ARB fragment program, which Mesa compiles for the host.
+TGSI names become ARB ones (TEMP[n] is Tn, CONST[n] program.env[n], the translator's
+immediates program.local, SAMP[n] texture unit n, the colours and coordinate sets
+fragment.color and fragment.texcoord); what ARB lacks is spelled out (`|x|` through ABS, SSG
+through two SLT, KILL_IF is KIL, scalar instructions take one component). Shaders are compiled
+when the runtime creates them; constants c0..c7 go to program.env before a draw; with a shader
+set, each stage's texture is bound on its unit and the stages' operations don't apply.
+
+Fog after the shader: the HAL already gives each vertex Direct3D's fog factor f (from the
+specular alpha for vertex fog, from the depth for table fog) as the coordinate 0.25 + 0.5 f of
+the unit that does fixed-function fog. A shader gets a second program when a draw with fog
+first needs it: the translator's linear fog from a vertex depth, reading that coordinate, with
+start 0.75 and end 0.25, which gives back f.
+
+`d8pixels sw`, Windows 98 SE with DirectX 8.1 in UTM: 23 of 23 pass (the 8 fixed-function
+cases and 15 pixel shader cases: mov, texture, constants, modifiers, co-issue, cnd, cmp, dp3,
+texcoord, texkill, two textures, fog from the specular alpha, table fog, lit, lit with fog).
+Not yet: more than two textures (t2 and t3; the HAL has two stages), the bump and matrix
+texture instructions of version 1 beyond what d8pixels covers, vertex shaders.
+
 
 ## Changing a driver in the test VM
 
