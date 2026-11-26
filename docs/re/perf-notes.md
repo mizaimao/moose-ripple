@@ -1219,11 +1219,21 @@ switched by that variable, each host to itself:
 
 | | waiting (as before) | newest frame | the Dock hidden |
 |---|---|---|---|
-| Proxmox host (QEMU 9.2, virglrenderer 0.10.4) | 180.1 | 201.1 | 264.3 |
+| Proxmox host (QEMU 9.2, virglrenderer 0.10.4) | 190.0, 186.5 | 198.1 | 268.5 |
 | second Intel host (QEMU 10.0, virglrenderer 1.1.0), a copy of the same guest | 189.9 | 225.7 | 268.6 |
 
 The two hosts are not to be compared with each other; each row is its own before and after.
+On the Proxmox host the covered runs scatter by about 5% from run to run (all of that evening,
+several boots: waiting 180.1, 183.7, 186.5, 190.0; newest frame 182.4, 196.9, 198.1, 200.6,
+201.1, 202.9), so the gain there is about 6%; a first pair of 180.1 and 201.1 overstated it.
 A covered window still costs a quarter to a sixth of the frame rate: WindowServer's drawing
 shares the host's renderer with the game. gl-gears, which waits for the refresh, in a covered
 window: 59.5 frames/s, longest frame 17 ms, as before. Looked at: the game's picture advancing
 under the Dock in the guest, two captures a second apart.
+
+The helper-thread notify (`ripple_kick=1`) again with this change in, the Proxmox host to
+itself, one boot each: with nothing over the window 293.5 frames/s against 268.5 (290.9 and
+289.5 against 263.5 and 264.3 earlier that evening), so 9 to 10% there; with the Dock over the
+window 202.9 and 196.9 against 198.1 and 200.6, no difference left. The loss it showed for
+covered windows came from the waiting that is gone now. Still to check before it becomes the
+default: programs that wait for the refresh, and WindowServer's own animations.
