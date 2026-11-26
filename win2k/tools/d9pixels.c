@@ -5,7 +5,8 @@
  * and lit untransformed vertices, nine of shader model 2.0, seven with
  * vertex shaders 1.1 and 2.0 (hardware ones when offered) or blending
  * after shaders, two each of cube maps, render target textures and volumes,
- * luminance textures, a bump map read by texbem and a colour write mask. Each case
+ * luminance textures, a bump map read by texbem, a colour write mask, DOT3 and texture
+ * transforms. Each case
  * draws on a 128x128 lockable back buffer and inspects a few pixels well
  * inside the shapes. "sw" asks for software vertex
  * processing. Built against the Microsoft headers; d3d9.dll is loaded at
@@ -1284,6 +1285,72 @@ static void dot3_case(int only, BOOL offered)
     check("dot3", s, 2);
 }
 
+/* ---- texture transforms (fixed function) ----
+ * 51: D3DTTFF_COUNT2 with a matrix whose third row moves u by a half (Direct3D
+ * transforms (u, v, 1, 0)), on untransformed vertices with identity world, view and
+ * projection: the 2x2 texture's left column shows its right one.
+ * 52: pretransformed vertices with four coordinates (2u, 2v, 0, 2) and COUNT4 |
+ * PROJECTED: Direct3D applies no texture matrix to such vertices, but divided by the
+ * fourth they are the plain coordinates. */
+static void transform_cases(int only)
+{
+    typedef struct { float x, y, z, rhw; DWORD diffuse; float s, t, r, q; } TV;
+    IDirect3DTexture9 *tex;
+    D3DMATRIX m;
+    SAMPLE s[5];
+    float want[4][3];
+    int i, pass;
+    if (only && only != 51 && only != 52) return;
+    if (!(tex = texture2x2(texels0))) return;
+    IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)tex);
+    IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+    IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+    IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+    IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+    IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    for (pass = 51; pass <= 52; ++pass) {
+        const char *name = pass == 51 ? "tt_count2" : "tt_projected";
+        float k = pass == 51 ? 1.0f : 2.0f;
+        TV v[4] = { { 32, 32, 0.5f, 1, 0xffffffff, 0, 0, 0, k }, { 96, 32, 0.5f, 1, 0xffffffff, k, 0, 0, k },
+                    { 32, 96, 0.5f, 1, 0xffffffff, 0, k, 0, k }, { 96, 96, 0.5f, 1, 0xffffffff, k, k, 0, k } };
+        if (only && only != pass) continue;
+        memset(&m, 0, sizeof(m));
+        m._11 = m._22 = m._33 = m._44 = 1.0f;
+        if (pass == 51) m._31 = 0.5f;
+        IDirect3DDevice9_SetTransform(device, D3DTS_TEXTURE0, &m);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXTURETRANSFORMFLAGS,
+                                              pass == 51 ? D3DTTFF_COUNT2 : D3DTTFF_COUNT4 | D3DTTFF_PROJECTED);
+        for (i = 0; i < 4; ++i) texel(pass == 51 ? i | 1 : i, want[i]);
+        quad_samples(s, want);
+        if (begin(name)) {
+            IDirect3DDevice9_SetFVF(device, pass == 51 ? D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE2(0) :
+                                    D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE4(0));
+            if (pass == 51) {
+                /* the same quad, untransformed (the viewport maps -1..1 to 0..Side), with two
+                 * coordinates per vertex */
+                struct { float x, y, z; DWORD diffuse; float u, v; } w[4];
+                D3DMATRIX identity;
+                memset(&identity, 0, sizeof(identity));
+                identity._11 = identity._22 = identity._33 = identity._44 = 1.0f;
+                IDirect3DDevice9_SetTransform(device, D3DTS_WORLD, &identity);
+                IDirect3DDevice9_SetTransform(device, D3DTS_VIEW, &identity);
+                IDirect3DDevice9_SetTransform(device, D3DTS_PROJECTION, &identity);
+                for (i = 0; i < 4; ++i) {
+                    w[i].x = v[i].x / (Side / 2) - 1; w[i].y = 1 - v[i].y / (Side / 2); w[i].z = v[i].z;
+                    w[i].diffuse = v[i].diffuse; w[i].u = v[i].s; w[i].v = v[i].t;
+                }
+                IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, w, sizeof(w[0]));
+            } else IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+            check(name, s, 5);
+        }
+    }
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+    IDirect3DDevice9_SetTexture(device, 0, NULL);
+    IDirect3DTexture9_Release(tex);
+}
+
 /* ---- volume textures ----
  * A 4x4x4 volume with one colour per slice (red, green, blue, yellow),
  * sampled at each slice's middle by four quads: 45 with ps_2_0
@@ -1533,6 +1600,7 @@ int main(int argc, char **argv)
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
     colorwrite_case(only);
     dot3_case(only, (caps.TextureOpCaps & D3DTEXOPCAPS_DOTPRODUCT3) != 0);
+    transform_cases(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (caps.TextureCaps & D3DPTEXTURECAPS_VOLUMEMAP) && (!only || only >= 45))
         volume_cases(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
     if (caps.PixelShaderVersion < D3DPS_VERSION(2, 0)) printf("D9PIX vertex shader cases need pixel shader 2.0\n");
