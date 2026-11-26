@@ -223,7 +223,7 @@ static BOOLEAN draw_one(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *imag
     RB2K_TEXTURE *texture = NULL, *texture1 = NULL, alias[2];
     ULONG i, why, header = FIELD_OFFSET(RB2K_D3D7_DRAW, vertices);
     *status = ERROR_INVALID_PARAMETER;
-    if (length < header || !d->count || d->count > RB2K_D3D7_VERTICES || d->count % 3 ||
+    if (length < header || !d->count || d->count > RB2K_D3D7_VERTICES ||
         length != header + d->count*sizeof(d->vertices[0]) || d->target != image->id ||
         !rb_gpu_d7_valid(d) || image->depth16 || ((d->depthState || d->stencil) && !d->depth))
         return refuse(gpu, RB2K_D7_SITE_RECORD, *status, 0);
@@ -289,7 +289,7 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
         else words = d->coordSets <= RB2K_D8_STAGES && d->count <= RB2K_D8_VERTICES ?
                      d->count * RB2K_D8_VERTEX_WORDS(d->coordSets) : 0;
     }
-    if (!gpu->d3d8 || length < header || !d->count || d->count > RB2K_D8_VERTICES || d->count % 3 || !words ||
+    if (!gpu->d3d8 || length < header || !d->count || d->count > RB2K_D8_VERTICES || !words ||
         length != header + words * sizeof(ULONG) || d->target != image->id ||
         !rb_gpu_d8_valid(d) || image->depth16 || ((d->depthState || d->stencil) && !d->depth))
         return refuse(gpu, RB2K_D7_SITE_RECORD, *status, 0);
