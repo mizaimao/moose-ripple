@@ -1131,6 +1131,81 @@ static void vs_flow_cases(int only, BOOL offered)
     }
 }
 
+/* ---- user clip planes ----
+ * 64: a red quad over x -0.5..0.5 of untransformed vertices (identity matrices) with the plane
+ * (1, 0, 0, 0) in world space: only its right half, x >= 0, is drawn. 65: the same through a
+ * vertex shader, the plane in clip space.
+ * 66: 64 lit (emissive red, no lights). 67 and 68: 64 and 66 with a pixel shader (mov oC0, v0),
+ * whose fixed-function vertices take the object-space shaders of pixel shader draws. */
+static void clip_cases(int only, BOOL offered, BOOL shaders)
+{
+    static const D3DVERTEXELEMENT9 colored[] = {
+        { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+        { 0, 12, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 }, D3DDECL_END() };
+    static const DWORD ps_color[] = { 0xffff0200, P2DCL_V(0), P2I(OMov, 2), P2D(8, 0, 15), P2SRC(RV, 0), PSEND };
+    static const DWORD vs[] = { 0xfffe0200, VDCL2(0, 0), VDCL2(10, 1),
+        P2I(OMov, 2), P2D(VPos, 0, 15), P2SRC(RV, 0), P2I(OMov, 2), P2D(VAttr, 0, 15), P2SRC(RV, 1), PSEND };
+    static const SAMPLE s[] = { { 48, 64, CLEAR_COLOR }, { 80, 64, 0xff0000 }, { 8, 8, CLEAR_COLOR } };
+    static const float plane[4] = { 1, 0, 0, 0 };
+    VSVERTEX v[6];
+    HRESULT hr;
+    if (only && (only < 64 || only > 68)) return;
+    if (!offered) { printf("D9PIX user clip planes not offered\n"); return; }
+    vs_quad(v, -0.5f, 0.5f, 0.5f, -0.5f, 0xffff0000);
+    IDirect3DDevice9_SetClipPlane(device, 0, plane);
+    if (!only || only == 64) {
+        if (begin("clip_ff")) {
+            IDirect3DDevice9_SetRenderState(device, D3DRS_CLIPPLANEENABLE, 1);
+            IDirect3DDevice9_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+            IDirect3DDevice9_SetTexture(device, 0, NULL);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+            IDirect3DDevice9_SetFVF(device, D3DFVF_XYZ | D3DFVF_DIFFUSE);
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+            IDirect3DDevice9_SetRenderState(device, D3DRS_CLIPPLANEENABLE, 0);
+            if (FAILED(hr)) { fail_hr("clip_ff", "draw", hr); IDirect3DDevice9_EndScene(device); }
+            else check("clip_ff", s, 3);
+        }
+    }
+    {
+        static const DWORD ps_diffuse[] = { 0xffff0200, P2DCL_V(0), P2I(OMov, 2), P2D(8, 0, 15), P2SRC(RV, 0), PSEND };
+        IDirect3DPixelShader9 *psh = NULL;
+        D3DMATERIAL9 m;
+        int pass;
+        memset(&m, 0, sizeof(m));
+        m.Emissive.r = 1; m.Emissive.a = 1;
+        if (shaders) IDirect3DDevice9_CreatePixelShader(device, ps_diffuse, &psh);
+        for (pass = 66; pass <= 68; ++pass) {
+            const char *name = pass == 66 ? "clip_lit" : pass == 67 ? "clip_ps" : "clip_ps_lit";
+            if ((only && only != pass) || (pass > 66 && !psh)) continue;
+            if (!begin(name)) continue;
+            IDirect3DDevice9_SetMaterial(device, &m);
+            IDirect3DDevice9_SetRenderState(device, D3DRS_AMBIENT, 0);
+            IDirect3DDevice9_SetRenderState(device, D3DRS_COLORVERTEX, FALSE);
+            IDirect3DDevice9_SetRenderState(device, D3DRS_LIGHTING, pass != 67);
+            IDirect3DDevice9_SetRenderState(device, D3DRS_CLIPPLANEENABLE, 1);
+            IDirect3DDevice9_SetTexture(device, 0, NULL);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+            if (pass > 66) IDirect3DDevice9_SetPixelShader(device, psh);
+            IDirect3DDevice9_SetFVF(device, D3DFVF_XYZ | D3DFVF_DIFFUSE);
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+            IDirect3DDevice9_SetPixelShader(device, NULL);
+            IDirect3DDevice9_SetRenderState(device, D3DRS_CLIPPLANEENABLE, 0);
+            IDirect3DDevice9_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+            IDirect3DDevice9_SetRenderState(device, D3DRS_COLORVERTEX, TRUE);
+            if (FAILED(hr)) { fail_hr(name, "draw", hr); IDirect3DDevice9_EndScene(device); }
+            else check(name, s, 3);
+        }
+        if (psh) IDirect3DPixelShader9_Release(psh);
+    }
+    if ((!only || only == 65) && shaders) {
+        IDirect3DDevice9_SetRenderState(device, D3DRS_CLIPPLANEENABLE, 1);
+        vs_run("clip_vs", colored, vs, ps_color, v, sizeof(v[0]), 2, s, 3);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_CLIPPLANEENABLE, 0);
+    }
+}
+
 /* ---- compressed textures ---- */
 
 /* A managed texture of the given format from raw blocks. */
@@ -1773,6 +1848,7 @@ int main(int argc, char **argv)
         if (!only || only >= 30) vertex_shaders(only);
         if (!only || only >= 61) vs_flow_cases(only, (caps.DevCaps2 & D3DDEVCAPS2_STREAMOFFSET) != 0);
     } else printf("D9PIX vertex shaders not offered\n");
+    clip_cases(only, caps.MaxUserClipPlanes >= 1, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0) && (flags == D3DCREATE_SOFTWARE_VERTEXPROCESSING || caps.VertexShaderVersion >= D3DVS_VERSION(2, 0)));
     IDirect3DDevice9_Release(device);
     IDirect3D9_Release(d3d);
     DestroyWindow(window);
