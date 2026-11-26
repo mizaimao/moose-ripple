@@ -1824,8 +1824,9 @@ and 9 textured scenes passed, and Direct3D 8 Quake ran at 58.8 fps. The
 runtime refuses a shader that writes `oC0` with `_sat`, and a version 1.1
 shader in the Direct3D 8 test with `_bias` on a texture register and a
 negated `def` constant; `d9pixels` skips that one unless asked for it.
-Windows 2000 has no Direct3D 9 runtime and was not rerun; its Direct3D 7
-path is unchanged.
+Windows 2000 has no Direct3D 9 runtime of its own and was not rerun then; its
+Direct3D 7 path is unchanged. (Later, with the DirectX 9.0c runtime installed,
+Direct3D 8 and 9 pass there too: see "Direct3D 8 and 9 on Windows 2000".)
 
 ## Eight coordinate sets and samplers for pixel shader 2.0
 
@@ -2186,6 +2187,81 @@ On XP SP3 under KVM on the second Intel UHD 630 host, case 53 passes and
 `d9pixels` passes 43 of 43. 3DMark 2001 SE's DOT3 Bump Mapping test, which
 reported "Not supported by hardware", now runs.
 
+## Texture transforms for Direct3D 8 and 9
+
+Fixed-function draws whose stages have `D3DTSS_TEXTURETRANSFORMFLAGS` were
+skipped: 3DMark 2001 SE lost 29 million triangles that way. They now go to
+the record path with a stage program that applies each stage's texture
+matrix per pixel. The matrix columns are in CONST[8+4k] to [11+4k],
+coordinates are padded to (u, v, 1, 0) as Direct3D transforms them, and with
+`D3DTTFF_PROJECTED` the result is divided by its last element. Direct3D
+applies no texture matrix to pretransformed (XYZRHW) vertices; for those only
+the projection divides. The driver offers `D3DPTEXTURECAPS_PROJECTED`:
+without it the runtime passed such draws as COUNT3 without the flag. The
+matrices are kept per stage, also in state blocks. Direct3D 8 and 9 are no
+longer offered texturing from system memory, because the driver registers
+only video-memory textures.
+
+`d9pixels` case 51 moves u by a half through the matrix on untransformed
+vertices; case 52 divides (2u, 2v, 0, 2) by its fourth element on
+pretransformed vertices. `d7draw` prints which check skipped a vertex
+(D7VERTEX) and texture registration details (D7REG).
+
+On XP SP3 under KVM on the second Intel UHD 630 host, cases 51 and 52 pass and
+`d9pixels` passes 47 of 47. In 3DMark 2001 SE the skipped vertices fell from
+29 million to 160. Still open there: 97.7 million triangles skipped for
+texture handles the driver never registered.
+
+## Fixed-function bump mapping for Direct3D 8 and 9
+
+The two-stage combiner of the Direct3D 7 draws has no bump operations and no
+third stage. Direct3D 8 and 9 fixed-function draws that need either now go to
+the stage program of the record path, which handles up to four stages. A
+`D3DTOP_BUMPENVMAP` stage samples its bump map and moves the next stage's
+lookup by du and dv through its bump matrix (00, 01, 10, 11), which takes the
+place of its texture matrix in CONST[8+4n]; `BUMPENVMAPLUMINANCE` also scales
+the next stage's colour by the luminance times the scale plus the offset
+(CONST[9+4n]). The matrix belongs to the bump stage itself, unlike `texbem`
+in pixel shaders. ValidateDevice checks Direct3D 8 and 9 stages against what
+the stage program does, and the caps offer four blend stages and both bump
+operations. `d9pixels` case 54 moves the next stage's lookup by a quarter of
+its texture.
+
+On XP SP3 under KVM on the second Intel UHD 630 host, case 54 passes, and
+3DMark 2001 SE's Environment Bump Mapping test runs instead of reporting
+"Not supported by hardware". Its Advanced Pixel Shader test still stops: it
+creates a 2048x2048 DXT5 texture, and the driver offers at most 1024.
+
+## Eight fixed-function stages for Direct3D 9 programs
+
+3DMark05 checks its hardware before it creates a device, and one of the
+checks it treats as fatal is "multitexturing with at least 8 textures":
+`MaxTextureBlendStages` and `MaxSimultaneousTextures` of at least 8. The
+driver offered four, the texture registers of version 1 pixel shaders.
+
+The stage program already emits shader model 2 programs with eight samplers
+and eight coordinate sets, and the Direct3D 8 draw packet carries eight
+(`RB2K_D8_STAGES`); only the stage check and the caps stopped at four. Once a
+runtime has announced Direct3D 9, the driver now offers eight stages and eight
+textures; Direct3D 8 programs keep four. Texture and bump matrices have
+constants for the first six stages (`RB_STAGE_TRANSFORMS`), so stages 6 and
+7 refuse them.
+
+`d9pixels` case 58 draws through all eight stages: stages 0 to 6 add a black
+texture each and stage 7 modulates with a texture read through coordinate set
+7. On XP SP3 under KVM (UHD 630 host) it passes, and `d9pixels` passes 56 of
+56.
+
+## Direct3D 8 and 9 on Windows 2000
+
+Windows 2000 ships with DirectX 7. Microsoft's June 2010 DirectX
+redistributable no longer installs there; the February 2010 one does (any
+DirectX 9.0c redistributable from 2004 to February 2010 brings the same core
+runtime). After `directx_feb2010_redist.exe /Q /T:<folder>` and
+`DXSETUP.exe /silent` and a restart, the driver works unchanged.
+
+On Windows 2000 under KVM on the second Intel UHD 630 host, with the driver
+installed by `nt5inst`, `d9pixels` passes 44 of 44 and `d8pixels` 23 of 23.
 ## Vertex shaders with several streams
 
 With vertex shaders on, Direct3D 8 and 9 programs are offered 8 vertex

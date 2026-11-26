@@ -110,7 +110,10 @@ d3dddi_create_allocation(struct gdikmt_device *dev, struct gdikmt_createallocati
    arg.NumAllocations = create->NumAllocations;
    arg.pAllocationInfo = create->pAllocationInfo;
 
+   const unsigned long long timed = D3D9TimesOn() ? D3D9TimesNow() : 0;
    hr = ddi->KTCallbacks.pfnAllocateCb(ddi->hRTDevice, &arg);
+   if (timed)
+      D3D9TimesCallback(D3D9_TIMED_ALLOCATE, timed);
    for (UINT i = 0; i < ntagged; i++) {
       D3DDDI_ALLOCATIONINFO *info = &create->pAllocationInfo[i];
       if (info->pPrivateDriverData == &tagged[i]) {
@@ -148,7 +151,11 @@ d3dddi_destroy_allocation(struct gdikmt_device *dev, HANDLE hResource,
       arg.NumAllocations = 1;
       arg.HandleList = &hAllocation;
    }
-   return ddi->KTCallbacks.pfnDeallocateCb(ddi->hRTDevice, &arg);
+   const unsigned long long timed = D3D9TimesOn() ? D3D9TimesNow() : 0;
+   const HRESULT hr = ddi->KTCallbacks.pfnDeallocateCb(ddi->hRTDevice, &arg);
+   if (timed)
+      D3D9TimesCallback(D3D9_TIMED_DEALLOCATE, timed);
+   return hr;
 }
 
 /*

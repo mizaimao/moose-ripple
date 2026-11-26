@@ -23,8 +23,9 @@ through Windows' own `opengl32.dll`. 3DMark03 runs to the end on XP.
 
 Not yet: many 3DMark03 pictures are wrong (dark scenes, white water); vertex
 shaders are off by default and have no flow control when on; 1920x1080 at
-32 bits per pixel does not fit in 8 MB of video memory; Direct3D 8 and 9 on
-Windows 2000 are untested. Development notes: [development.md](development.md).
+32 bits per pixel does not fit in 8 MB of video memory. On Windows 2000,
+Direct3D 8 and 9 need the DirectX 9.0c runtime (its February 2010
+redistributable is the last that installs there). Development notes: [development.md](development.md).
 
 ## 1. Set up the VM
 
