@@ -465,7 +465,7 @@ ripple_cgl_context_swap(struct ripple_cgl_context *ctx)
 
    if (!d)
       return;
-   if (_glapi_get_context() != ctx->glctx)
+   if (!ripple_cgl_context_is_current(ctx))
       ripple_cgl_context_make_current(ctx);
    swap_debug(ctx);
    ctx->present_ok = true;

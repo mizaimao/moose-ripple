@@ -14,6 +14,8 @@
  *   gl-feature-check yuv        Core Video's 2vuy conversion program, whole and in steps
  *   gl-feature-check stencil    a drawable with depth and stencil buffers, both used
  *   gl-feature-check iosurface  a texture that is an IOSurface follows the surface's contents
+ *   gl-feature-check stale [N]  N contexts in turn, each drawn with on one thread and destroyed
+ *                               from another (software first: ours crashed here, issue 240)
  */
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl.h>
@@ -1905,8 +1907,121 @@ static void run_iosurface(const char *name, CGLPixelFormatAttribute renderer)
     CGLDestroyPixelFormat(pf);
 }
 
+/* ---- stale: a context destroyed from another thread ----------------------------------------- *
+ * A thread draws with a context and lets go of it; the main thread destroys that context and
+ * makes the next one, which the thread then draws with. A garbage-collected program does this
+ * all the time (the collector's thread destroys what the main thread used; ScreenSaverEngine).
+ * A driver that remembers "the context current on this thread" by its address goes wrong when
+ * the new context lands where the old one was. Each round clears a framebuffer object to a
+ * colour of its own and reads it back. */
+#include <pthread.h>
+
+static pthread_mutex_t stale_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t stale_cond = PTHREAD_COND_INITIALIZER;
+static int stale_step;                  /* odd: the drawing thread's turn; even: main's */
+static CGLContextObj stale_ctx;
+static unsigned stale_value, stale_read;
+static bool stale_quit;
+
+static void stale_wait(int parity)
+{
+    pthread_mutex_lock(&stale_lock);
+    while ((stale_step & 1) != parity)
+        pthread_cond_wait(&stale_cond, &stale_lock);
+    pthread_mutex_unlock(&stale_lock);
+}
+
+static void stale_next(void)
+{
+    pthread_mutex_lock(&stale_lock);
+    stale_step++;
+    pthread_cond_broadcast(&stale_cond);
+    pthread_mutex_unlock(&stale_lock);
+}
+
+static void *stale_thread(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        stale_wait(1);
+        if (stale_quit)
+            break;
+        GLuint fbo = 0, tex = 0;
+        GLubyte px[4] = { 0, 0, 0, 0 };
+        CGLSetCurrentContext(stale_ctx);
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 16, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glGenFramebuffersEXT(1, &fbo);
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_2D,
+                                  tex, 0);
+        glViewport(0, 0, 16, 16);
+        glClearColor(stale_value / 255.0f, 0.5f, 0.25f, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glReadPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        glFinish();
+        stale_read = px[0];
+        CGLSetCurrentContext(NULL);
+        stale_next();
+    }
+    return NULL;
+}
+
+static void run_stale(const char *name, CGLPixelFormatAttribute renderer, int rounds)
+{
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
+                                        renderer, 0 };
+    if (!renderer)
+        attrs[3] = 0;
+    CGLPixelFormatObj pf;
+    GLint npf;
+    pthread_t thread;
+    int wrong = 0, done = 0;
+    if (CGLChoosePixelFormat(attrs, &pf, &npf) || !pf) {
+        printf("%s: no pixel format\n", name);
+        return;
+    }
+    stale_quit = false;
+    stale_step = 0;                     /* main's turn: the thread waits for its first context */
+    if (pthread_create(&thread, NULL, stale_thread, NULL)) {
+        printf("%s: no thread\n", name);
+        return;
+    }
+    for (int r = 0; r < rounds; r++) {
+        CGLContextObj c;
+        if (CGLCreateContext(pf, NULL, &c)) {
+            printf("%s: no context in round %d\n", name, r);
+            break;
+        }
+        stale_ctx = c;
+        stale_value = 16 + (unsigned)(r * 37) % 224;
+        stale_read = 0;
+        stale_next();                   /* the thread draws with it and lets go */
+        stale_wait(0);
+        if (abs((int)stale_read - (int)stale_value) > 1)
+            wrong++;
+        CGLDestroyContext(c);           /* from here: the other thread used it last */
+        done++;
+    }
+    stale_quit = true;
+    stale_next();
+    pthread_join(thread, NULL);
+    CGLDestroyPixelFormat(pf);
+    printf("%s: %d rounds of a context drawn with on one thread and destroyed from another, "
+           "%d read back wrong\n", name, done, wrong);
+    fflush(stdout);
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 1 && !strcmp(argv[1], "stale")) {
+        int rounds = argc > 2 ? atoi(argv[2]) : 40;
+        run_stale("software", (CGLPixelFormatAttribute)0x00020400, rounds);
+        run_stale("ours", 0, rounds);
+        return 0;
+    }
     if (argc > 1 && !strcmp(argv[1], "iosurface")) {
         run_iosurface("ours", 0);
         run_iosurface("software", (CGLPixelFormatAttribute)0x00020400);
