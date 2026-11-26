@@ -101,7 +101,10 @@ typedef struct {
 #define RB2K_RVD_SEGMENTS 48
 #define RB2K_INLINE_PACKET_BYTES 2048
 /* Native Direct3D 7 command words gathered into one virgl submission. */
-#define RB2K_D7_FRAME_WORDS ((64UL * 1024 - 128) / sizeof(ULONG))
+/* A scene packet: 256 KB, as large as Mesa's own virgl command buffers. Each
+ * submit costs a fence, a host batch and a round trip; with draws carrying their
+ * vertices as constants, 64 KB held only about ten draws. */
+#define RB2K_D7_FRAME_WORDS ((256UL * 1024 - 128) / sizeof(ULONG))
 
 typedef struct {
     PVOID extension;

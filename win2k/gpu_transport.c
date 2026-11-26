@@ -39,7 +39,7 @@ typedef struct { USHORT flags, index, ring[QueueEntries]; } AVAILABLE;
 typedef struct { ULONG id, length; } USED_ENTRY;
 typedef struct { USHORT flags, index; USED_ENTRY ring[QueueEntries]; } USED_RING;
 /* Each scene slot holds one SUBMIT_3D packet and, at its end, the reply. */
-enum { FrameFirstDesc = QueueEntries - 2*RB2K_D7_FLIGHT_SLOTS, FramePacketBytes = 65536,
+enum { FrameFirstDesc = QueueEntries - 2*RB2K_D7_FLIGHT_SLOTS, FramePacketBytes = 262144,
        FrameReplyOffset = FramePacketBytes - 64, FrameDmaBytes = FramePacketBytes*RB2K_D7_FLIGHT_SLOTS };
 typedef char frame_fits[sizeof(struct virtio_gpu_cmd_submit) + RB2K_D7_FRAME_WORDS*sizeof(ULONG) <= FrameReplyOffset ? 1 : -1];
 typedef char check_desc_size[sizeof(DESCRIPTOR) == 16 ? 1 : -1];
