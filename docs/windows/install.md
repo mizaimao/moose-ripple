@@ -18,6 +18,11 @@ and Direct3D 7-era programs through Windows' own layers, video playback
 (Windows Media Player, DreamScene on Vista), gamma ramps on Windows 7, and
 recovery after a GPU timeout. 3DMark06 runs all six of its tests on both.
 
+OpenGL, in the version after 0.4.0: 64-bit and 32-bit programs get Mesa's
+OpenGL on the host's graphics card (OpenGL 4.3 on a Linux host with a desktop
+GPU, 2.1 on a host that offers OpenGL ES) in place of Windows' software
+OpenGL 1.1. OpenArena runs.
+
 Windows 7 also gets Direct3D 10 where the host's renderer offers OpenGL 3.2
 or later (a Linux host with a desktop GPU). On a host that offers OpenGL ES
 (UTM on Apple silicon) there is no Direct3D 10, and Aero runs on the
@@ -25,7 +30,6 @@ Direct3D 9 part. Vista has Direct3D 9 only.
 
 Not yet:
 
-- OpenGL: Windows' own software OpenGL 1.1 is all a program gets.
 - Direct3D 10 on Vista, Direct3D 11 on either.
 - Sleep and hibernation: the picture does not come back. The Windows 7
   package switches both off for the machine; on Vista switch them off
@@ -137,6 +141,8 @@ do nothing without the device; to remove them too, as administrator:
 sc delete viogpu3d
 del %windir%\system32\drivers\viogpu3d.sys
 del %windir%\system32\viogpu_d3d10.dll %windir%\SysWOW64\viogpu_d3d10.dll
+del %windir%\system32\viogpu_wgl.dll %windir%\SysWOW64\viogpu_wgl.dll
+del %windir%\system32\libglapi.dll %windir%\SysWOW64\libglapi.dll
 ```
 
 If the screen stays black after an install, start Windows in Safe Mode (F8
@@ -171,7 +177,7 @@ a file on the host, which is what a bug report needs.
 ## Licences
 
 The driver is MIT licensed (`LICENSE.txt`). The kernel driver is derived from
-virtio-win's `viogpu3d` (BSD-3-Clause). The user-mode driver is Mesa 24.3.4
+virtio-win's `viogpu3d` (BSD-3-Clause). The user-mode drivers are Mesa 24.3.4
 (MIT) with Direct3D 9 files from Yttrium's Mesa fork and vmlab-win3d (both
 MIT) and statically linked runtime code from MinGW-w64 and LLVM. Their
 notices are in `THIRD-PARTY-NOTICES.txt`. How the package is built, signed

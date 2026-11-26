@@ -25,7 +25,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-TARGET = 'src/gallium/targets/d3d10umd/viogpu_d3d10.dll'
+# The DLLs of a build directory whose sources count: the Direct3D driver and, where the build
+# has them, the OpenGL driver and the library it shares with opengl32.dll.
+TARGETS = ('src/gallium/targets/d3d10umd/viogpu_d3d10.dll',
+           'src/gallium/targets/wgl/viogpu_wgl.dll',
+           'src/mapi/shared-glapi/libglapi.dll')
 
 NEED = re.compile(
     r'copyright\s*(?:©|\(c\)|[0-9]|\(C\)|\(?[A-Z].*20[0-9][0-9])'
@@ -70,7 +74,10 @@ def mesa_files(src, build):
     """Every file under src or build that goes into the DLL."""
     def ninja(*args):
         return subprocess.check_output(['ninja', '-C', str(build), '-t', *args], text=True).splitlines()
-    inputs = ninja('inputs', TARGET)
+    inputs = []
+    for target in TARGETS:
+        if (build / target).is_file():
+            inputs += ninja('inputs', target)
     objects = {p for p in inputs if p.endswith(('.obj', '.o'))}
     files = set()
     take = False
@@ -118,11 +125,18 @@ def main():
 
     notices = collections.defaultdict(set)
     copyleft = collections.defaultdict(list)
+    unexpected = set()
     for label, p in sorted(files.items()):
-        for block in notices_of(read(p)):
+        text = read(p)
+        # Bison's parser skeleton: GPL with the exception, in the same file, that lets a parser
+        # made with it be distributed under any terms. Any other copyleft notice stops the run.
+        bison = 'Bison' in text and 'As a special exception' in text
+        for block in notices_of(text):
             notices[block].add(label)
             if COPYLEFT.search(block):
                 copyleft[label].append(' '.join(block.split())[:100])
+                if not bison:
+                    unexpected.add(label)
 
     # A notice is a heading (who holds the copyright) and usually a grant (the licence
     # paragraphs). Notices with the same grant are printed together, the grant once.
@@ -212,7 +226,6 @@ after them. The project's own licence is in LICENSE.txt.
           f'{len(notices)} notices, {len(text.splitlines())} lines', file=sys.stderr)
     for label, lines in sorted(copyleft.items()):
         print(f'notices.py: copyleft named in {label}: {lines[0]}', file=sys.stderr)
-    unexpected = [label for label in copyleft if not re.search(r'bison|\.tab\.|_parse\.|parser\.', label, re.I)]
     if unexpected:
         print('notices.py: a copyleft licence is named outside a Bison parser: ' + ', '.join(sorted(unexpected)),
               file=sys.stderr)

@@ -88,9 +88,21 @@ unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, con
  * arguments, the coordinate index) as a TGSI pixel program with the inputs of
  * translated pixel shaders, for draws with a vertex shader. CONST[0].x holds
  * the texture factor as its ARGB word; fog uses CONST[8] and [9]. Stage n
- * samples with sampler n. */
+ * samples with sampler n.
+ *
+ * transform is D3DTSS_TEXTURETRANSFORMFLAGS: the count of coordinates the
+ * texture matrix gives (bits 0-7, 0 for none) and D3DTTFF_PROJECTED (256),
+ * which divides them by the last one. The matrix of stage n (n below
+ * RB_STAGE_TRANSFORMS) applies per pixel, its columns in CONST[8+4n] to
+ * CONST[11+4n]; such a program reads 32 constants and its fog constants
+ * follow them (CONST[32] and [33]). A BUMPENVMAP or BUMPENVMAPLUMINANCE stage
+ * n (below RB_STAGE_TRANSFORMS, with no texture transform) has its bump matrix
+ * (00, 01, 10, 11) in CONST[8+4n] and its luminance scale and offset in
+ * CONST[9+4n].x and .y; it moves the next stage's lookup. */
+#define RB_STAGE_TRANSFORMS 6
+#define RB_TTFF_PROJECTED 256
 typedef struct {
-    unsigned int colorOp, colorArg1, colorArg2, alphaOp, alphaArg1, alphaArg2, coordIndex;
+    unsigned int colorOp, colorArg1, colorArg2, alphaOp, alphaArg1, alphaArg2, coordIndex, transform;
 } RB_STAGE_STATE;
 unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count, unsigned int specular,
                                 unsigned int fog, char *out, unsigned int size, RB_PS_INFO *info);

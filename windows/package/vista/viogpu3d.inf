@@ -22,6 +22,10 @@ DriverVer=11/25/2026,0.4.0.0
 viogpu3d.sys=1
 viogpu_d3d10.dll=1
 viogpu_d3d10.x86.dll=1
+viogpu_wgl.dll=1
+viogpu_wgl.x86.dll=1
+libglapi.dll=1
+libglapi.x86.dll=1
 
 [DestinationDirs]
 KernelFiles=12
@@ -33,9 +37,13 @@ viogpu3d.sys
 
 [Graphics64]
 viogpu_d3d10.dll
+viogpu_wgl.dll
+libglapi.dll
 
 [Graphics32]
 viogpu_d3d10.dll,viogpu_d3d10.x86.dll
+viogpu_wgl.dll,viogpu_wgl.x86.dll
+libglapi.dll,libglapi.x86.dll
 
 [DisplayInstall]
 FeatureScore=F6
@@ -50,6 +58,13 @@ HKR,,UserModeDriverName,0x00010000,viogpu_d3d10.dll
 HKR,,InstalledDisplayDrivers,0x00010000,viogpu_d3d10
 HKR,,UserModeDriverNameWow,0x00010000,viogpu_d3d10.dll
 HKR,,InstalledDisplayDriversWow,0x00010000,viogpu_d3d10
+; Mesa's OpenGL driver, which Windows' opengl32.dll loads for this adapter
+HKR,,OpenGLDriverName,0x00010000,viogpu_wgl.dll
+HKR,,OpenGLVersion,0x00010001,4096
+HKR,,OpenGLFlags,0x00010001,3
+HKR,,OpenGLDriverNameWow,0x00010000,viogpu_wgl.dll
+HKR,,OpenGLVersionWow,0x00010001,4096
+HKR,,OpenGLFlagsWow,0x00010001,3
 HKR,,HWCursor,0x00010001,1
 HKR,,FlexResolution,0x00010001,1
 HKR,,UsePhysicalMemory,0x00010001,0
