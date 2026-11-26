@@ -1,0 +1,47 @@
+OpenGL on Windows 7: the swap chain the OpenGL target presents through, as Windows 7's DXGI
+has it. The code was written for Windows 10: a flip-model swap chain with the tearing flag, a
+Direct3D 11 device with the debug layer (which needs the SDK installed) at feature level 10.0
+only. Here: the copying swap effect, no tearing flag, no debug layer, feature level 10.1 or 10.0,
+and the swap interval passed to Present.
+
+--- a/src/gallium/targets/wgl/dxgi_framebuffer.cpp
++++ b/src/gallium/targets/wgl/dxgi_framebuffer.cpp
+@@ -141,16 +141,17 @@
+    ZeroMemory(&desc, sizeof desc);
+    desc.BufferCount = NUM_BUFFERS;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+-   desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
++   /* Windows 7 has the copying swap effects only, and no tearing flag (both are Windows 10). */
++   desc.Flags = 0;
+    desc.BufferDesc.Format = DxgiFormatFromPipe(templ->format);
+    desc.BufferDesc.Width = templ->width0;
+    desc.BufferDesc.Height = templ->height0;
+    desc.SampleDesc.Count = 1;
+-   desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
++   desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    desc.Windowed = true;
+    desc.OutputWindow = fb->window;
+ 
+-   static const D3D_FEATURE_LEVEL FeatureLevels[] = {D3D_FEATURE_LEVEL_10_0};
++   static const D3D_FEATURE_LEVEL FeatureLevels[] = {D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
+ 
+    fb->pformat = templ->format;
+ 
+@@ -160,7 +161,7 @@
+             fb->d3d11, "D3D11CreateDeviceAndSwapChain");
+ 
+       HRESULT hr = createDeviceAndSwapchain(
+-         NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, D3D11_CREATE_DEVICE_DEBUG,
++         NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0,
+          FeatureLevels, _countof(FeatureLevels), D3D11_SDK_VERSION, &desc,
+          &fb->swapchain, &fb->device, NULL, &fb->context);
+ 
+@@ -211,7 +212,7 @@
+    }
+ 
+    return S_OK == fb->swapchain->Present(
+-                     0, interval < 1 ? DXGI_PRESENT_ALLOW_TEARING : 0);
++                     interval < 1 ? 0 : 1, 0);
+ }
+ 
+ static struct pipe_resource *

@@ -327,6 +327,8 @@ unsigned int tgsi_to_arb(const char *t, char *out, unsigned int size, TGSI_ARB *
                 emit(&o, " = fragment.texcoord[");
                 emit_u(&o, g - 2);
                 emit(&o, "];\n");
+            } else if (g == 10 && info->fog_unit >= TGSI_ARB_FOGCOORD) {
+                emit(&o, " = fragment.fogcoord;\n");
             } else if (g == 10) {
                 emit(&o, " = fragment.texcoord[");
                 emit_u(&o, info->fog_unit);
