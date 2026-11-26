@@ -152,7 +152,9 @@ stays on VGA. Until then the GPU path was opt-in with `RIPPLE_D3D_SCANOUT=1`, wh
 measurements below use. With a 16- or 32-bit flip chain, the HAL keeps the
 finished colour buffer on the GPU. It reads a page back when DirectDraw needs its pixels, for
 example when the game locks a surface to draw into it. Mesa converts the finished frame on
-the GPU into a reusable display image. Windowed OpenGL still uses GDI for clipping.
+the GPU into a reusable display image. Full-screen OpenGL windows use the same path since
+2026-11-26 ([mesa.md](mesa.md#full-screen-opengl-from-the-gpu-2026-11-26)); OpenGL in a
+smaller window still uses GDI for clipping.
 
 On Windows 98 SE with DirectX 7 and an Intel UHD 630, the same installed driver gave the
 following results with the option off and on. All tests ran at 1024×768. Each timed
