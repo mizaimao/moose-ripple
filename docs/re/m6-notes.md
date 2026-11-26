@@ -678,7 +678,12 @@ tracker already does `GL_CLAMP` for drivers without it:
   forces it on or off.
 
 Not covered: GLSL programs (their sampler units can change after the link), vertex programs,
-and 3D and cube textures.
+and 3D and cube textures. Whether a real program needs the GLSL case was looked at the same
+day with call traces from launch into play: Real Racing 2, Cinebench R11.5 and Angry Birds
+Rio all draw with GLSL programs and none of them ever sets `GL_CLAMP_TO_BORDER` or a border
+colour (they use repeat and clamp to edge). The system's own users of border colours, Core
+Image and WindowServer, draw with ARB programs. So the GLSL case is left open until a
+program shows it.
 
 UTM on an M1 Max, the fix off and on by that variable, ours against the software renderer,
 pixels off by more than 16 levels on more than 1% of the picture:
