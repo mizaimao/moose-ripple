@@ -369,7 +369,11 @@ lost from one run to the next.
   copies `GL_EXTENSIONS` into a buffer too small for a 2024 Mesa's list: Windows reported an
   invalid page fault at an address made of the letters of an extension name. With
   `MESA_EXTENSION_MAX_YEAR=2001` set before it starts, it runs (and still finds S3TC,
-  multitexture and compiled vertex arrays). Quake III does not need it. Its game folder is
+  multitexture and compiled vertex arrays). Quake III does not need it. Patch 0016 does that
+  for the game itself, as drivers of the time kept per-program settings: a program whose name
+  begins with `wolfsp` or `wolfmp` (the single- and multi-player programs, demo or not, long or
+  short file name) gets the extensions up to 2001, unless `MESA_EXTENSION_MAX_YEAR` says
+  otherwise. Its game folder is
   `demomain` and its log `wconsole.log` (`+set logfile 2`); the demo loads a level with
   `spmap escape1`, not `map`.
 

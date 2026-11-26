@@ -57,7 +57,7 @@ typedef struct {
 /* A pixel program made from the texture stage states, for draws with a
  * vertex shader and no pixel shader: the states it was made from (seven
  * words a stage, then specular and fog), its program and what it samples. */
-enum { StagePrograms = 8, StageKey = 7 * 8 + 2 };
+enum { StagePrograms = 8, StageKey = 8 * 8 + 2 };
 typedef struct { ULONG key[StageKey], program, samplers; } D8_STAGE_PROGRAM;
 /* A state block: the state commands recorded between STATESETBEGIN and
  * STATESETEND (or made from the current state by STATESETCREATE), replayed
@@ -82,6 +82,7 @@ typedef struct {
      * fail, depth fail and pass (D3D values). */
     ULONG stencilFunc, stencilRef, stencilMask, stencilWriteMask, stencilFail, stencilZFail, stencilPass;
     ULONG matrices[3][16];      /* world, view, projection */
+    ULONG texMatrices[TextureStages][16];   /* D3DTRANSFORMSTATE_TEXTURE0..7 */
     ULONG viewport[4], zRange[2];
     /* Lighting: D3DRENDERSTATE_AMBIENT, COLORVERTEX, LOCALVIEWER and
      * NORMALIZENORMALS, the diffuse, specular, ambient and emissive material
@@ -390,9 +391,20 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
     if (!textures || !handle) return;
     t = find_texture(local, handle);
     if (t) release_texture(t, TRUE);
-    if (!g->fpVidMem) return;
+    if (!g->fpVidMem) {
+        ++d->d7draw.regNoMemory;
+        d->d7draw.noMemoryCaps = l->ddsCaps.dwCaps;
+        d->d7draw.noMemoryCaps2 = l->lpSurfMore ? l->lpSurfMore->ddsCapsEx.dwCaps2 : 0;
+        d->d7draw.noMemoryFormat = g->ddpfSurface.dwFlags;
+        return;
+    }
     for (i = 0; i < MaxTextures && textures[i].handle; ++i) {}
-    if (i == MaxTextures) return;
+    if (i == MaxTextures) { ++d->d7draw.regFull; return; }
+    {
+        ULONG k, live = 1;
+        for (k = 0; k < MaxTextures; ++k) if (textures[k].handle) ++live;
+        if (live > d->d7draw.regPeak) d->d7draw.regPeak = live;
+    }
     t = &textures[i];
     t->local = local;
     t->global = g;
@@ -731,6 +743,8 @@ static DWORD APIENTRY create_context(LPD3DNTHAL_CONTEXTCREATEDATA a)
             c->fogEnd = c->fogDensity = c->wNear = c->wFar = 0x3f800000;
             for (m = 0; m < 3; ++m)
                 c->matrices[m][0] = c->matrices[m][5] = c->matrices[m][10] = c->matrices[m][15] = 0x3f800000;
+            for (m = 0; m < TextureStages; ++m)
+                c->texMatrices[m][0] = c->texMatrices[m][5] = c->texMatrices[m][10] = c->texMatrices[m][15] = 0x3f800000;
             c->viewport[2] = s->width;
             c->viewport[3] = s->height;
             c->zRange[1] = 0x3f800000;
@@ -819,6 +833,36 @@ static ULONG stage_words(const D7_CONTEXT *c, ULONG n, ULONG *color, ULONG *alph
     return StageOk;
 }
 
+/* The fixed-function stages a Direct3D 8 or 9 runtime is offered: four for Direct3D 8 (the
+ * texture registers of its version 1 shaders), eight once a runtime has announced Direct3D 9 (the
+ * samplers and coordinate sets of shader model 2, which the stage program uses). */
+static ULONG stage_limit(const DISPLAY *d)
+{
+    return d->d7draw.d8Version >= 0x900 ? RB2K_D8_STAGES : RB_PS_COORD_SETS;
+}
+
+/* Direct3D 8 fixed-function stages, drawn by the stage program (rb_stage_translate):
+ * up to stage_limit, with any operation up to DOTPRODUCT3 except PREMODULATE, and bump
+ * mapping only as a colour operation. Texture matrices and bump matrices have constants
+ * for the first RB_STAGE_TRANSFORMS stages only. */
+static BOOL d3d8_stages_valid(const D7_CONTEXT *c)
+{
+    ULONG i, k, limit = stage_limit(c->display);
+    for (i = 0; i < TextureStages && c->stages[i].colorOp != D3DTOP_DISABLE; ++i) {
+        const D7_STAGE *s = &c->stages[i];
+        const ULONG args[4] = { s->colorArg1, s->colorArg2, s->alphaArg1, s->alphaArg2 };
+        if (i >= limit || s->colorOp == D3DTOP_PREMODULATE || s->colorOp > D3DTOP_DOTPRODUCT3 ||
+            s->alphaOp == D3DTOP_PREMODULATE || (s->alphaOp >= D3DTOP_BUMPENVMAP && s->alphaOp != D3DTOP_DOTPRODUCT3))
+            return FALSE;
+        if (i >= RB_STAGE_TRANSFORMS && ((s->transform & (0xff | RB_TTFF_PROJECTED)) ||
+            s->colorOp == D3DTOP_BUMPENVMAP || s->colorOp == D3DTOP_BUMPENVMAPLUMINANCE)) return FALSE;
+        for (k = 0; k < 4; ++k)
+            if ((args[k] & D3DTA_SELECTMASK) > 5 /* D3DTA_TEMP */ ||
+                (args[k] & ~(D3DTA_SELECTMASK | D3DTA_COMPLEMENT | D3DTA_ALPHAREPLICATE))) return FALSE;
+    }
+    return TRUE;
+}
+
 static DWORD APIENTRY validate_stages(LPD3DNTHAL_VALIDATETEXTURESTAGESTATEDATA a)
 {
     D7_CONTEXT *c;
@@ -828,6 +872,7 @@ static DWORD APIENTRY validate_stages(LPD3DNTHAL_VALIDATETEXTURESTAGESTATEDATA a
     c = owned_context(a->dwhContext);
     if (!c) a->ddrval = DDERR_INVALIDOBJECT;
     else if (a->dwFlags) a->ddrval = DDERR_INVALIDPARAMS;
+    else if (c->dx8) a->ddrval = d3d8_stages_valid(c) ? DD_OK : D3DERR_UNSUPPORTEDCOLOROPERATION;
     else if (c->stages[1].colorOp != D3DTOP_DISABLE && c->stages[2].colorOp != D3DTOP_DISABLE)
         a->ddrval = D3DERR_TOOMANYOPERATIONS;
     else a->ddrval = stage_words(c, 0, &color, &alpha, &texture) == StageUnsupported ||
@@ -1352,6 +1397,16 @@ static void skip(D7_CONTEXT *c, ULONG reason, ULONG primitives)
     ++c->display->d7draw.skippedCalls;
 }
 
+/* A vertex skip at one of the checks, numbered in source order for d7draw. */
+static void skip_vertex(D7_CONTEXT *c, ULONG primitives, ULONG site)
+{
+    RB2K_D7_DRAWSTATS *s = &c->display->d7draw;
+    skip(c, RB2K_D7_SKIP_VERTEX, primitives);
+    if (site < RB2K_D7_VERTEX_SITES) s->vertexSites[site] += primitives;
+    s->vertexFvf = c->fvf;
+    s->vertexStride = c->streamStride;
+}
+
 /* Diagnostics: count each distinct drawn state, and keep the last refused
  * vertex window with the reason. */
 static void record_state(D7_CONTEXT *c, const RB2K_D3D7_DRAW *draw, ULONG fvf, ULONG format, ULONG primitives)
@@ -1489,6 +1544,19 @@ static void light_draw(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, BOOL hasDiffuse, BOO
     RtlCopyMemory(draw->material, c->material, sizeof(draw->material));
 }
 
+static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p);
+
+/* Whether the stages fit the two-stage combiner of the Direct3D 7 draws. */
+static BOOL d3d7_stages(const D7_CONTEXT *c)
+{
+    ULONG color, alpha;
+    BOOL texture;
+    if (c->stages[0].colorOp != D3DTOP_DISABLE && c->stages[1].colorOp != D3DTOP_DISABLE &&
+        c->stages[2].colorOp != D3DTOP_DISABLE) return FALSE;
+    return stage_words(c, 0, &color, &alpha, &texture) != StageUnsupported &&
+           (c->stages[0].colorOp == D3DTOP_DISABLE || stage_words(c, 1, &color, &alpha, &texture) != StageUnsupported);
+}
+
 static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG stride, const PRIMS *p)
 {
     DISPLAY *d = c->display;
@@ -1507,6 +1575,9 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     if (FAILED(hr)) return hr;
     if (!p->primitives) return DD_OK;
     if (c->fill != D3DFILL_SOLID) { skip(c, RB2K_D7_SKIP_FILL, p->primitives); return DD_OK; }
+    /* Direct3D 8 stages beyond these two (a third stage, bump mapping) go to the
+     * stage program of the shader path. */
+    if (p->stream && !c->pixelShader && !d3d7_stages(c)) return shader_triangles(c, p);
     /* Two stages are drawn; a third one counts as the stage-one skip. */
     if (st->colorOp != D3DTOP_DISABLE && st1->colorOp != D3DTOP_DISABLE && c->stages[2].colorOp != D3DTOP_DISABLE) {
         skip(c, RB2K_D7_SKIP_STAGE1, p->primitives);
@@ -1528,10 +1599,20 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
      * fields in FVF order. */
     position = fvf & D3DFVF_POSITION_MASK;
     objectSpace = position != D3DFVF_XYZRHW;
-    if (!position || (fvf & D3DFVF_RESERVED0) || (!objectSpace && (fvf & D3DFVF_NORMAL)) ||
-        (st->coordIndex >> 16) || (needTexture && (st->transform & 0xff)) ||
-        (draw->stage1Color && ((st1->coordIndex >> 16) || (needTexture1 && (st1->transform & 0xff))))) {
-        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+    if (!position || (fvf & D3DFVF_RESERVED0) || (!objectSpace && (fvf & D3DFVF_NORMAL))) {
+        skip_vertex(c, p->primitives, 1);
+        return DD_OK;
+    }
+    /* Generated texture coordinates (site 18) and texture transforms (19). */
+    if ((st->coordIndex >> 16) || (draw->stage1Color && (st1->coordIndex >> 16))) {
+        skip_vertex(c, p->primitives, 18);
+        return DD_OK;
+    }
+    if ((needTexture && (st->transform & 0xff)) || (draw->stage1Color && needTexture1 && (st1->transform & 0xff))) {
+        /* The fixed-function program of the Direct3D 8 path applies texture matrices. */
+        if (p->stream && !c->pixelShader) return shader_triangles(c, p);
+        d->d7draw.transformFlags = (st->transform & 0xff) | (st1->transform & 0xff) << 8 | fvf >> 16 << 16;
+        skip_vertex(c, p->primitives, 19);
         return DD_OK;
     }
     if (objectSpace) offset = 12 + (position >= D3DFVF_XYZB1 ? 4 * ((position - D3DFVF_XYZRHW) / 2) : 0);
@@ -1548,7 +1629,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         offset += 4 * n;
     }
     if (offset > stride || stride > 256) {
-        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+        skip_vertex(c, p->primitives, 2);
         return DD_OK;
     }
     if (needTexture) {
@@ -1635,7 +1716,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         if (lo < 0 || hi > p->streamBytes) {
             ++d->d7draw.beyondCalls;
             d->d7draw.beyondVertices += p->primitives;
-            skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+            skip_vertex(c, p->primitives, 3);
             return DD_OK;
         }
         base = p->streamData + p->streamFirst;
@@ -1660,7 +1741,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         if (p->first >= window || low > window - 1 - p->first) {
             ++d->d7draw.beyondCalls;
             d->d7draw.beyondVertices += p->primitives;
-            skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+            skip_vertex(c, p->primitives, 4);
             return DD_OK;
         }
         if (high > window - 1 - p->first) {
@@ -1680,7 +1761,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
                 for (i = 0; i < 3; ++i) worst = max(worst, prim_vertex(p, t, i, &flat));
                 if (worst > limit || flat > limit) {
                     ++d->d7draw.beyondVertices;
-                    skip(c, RB2K_D7_SKIP_VERTEX, 1);
+                    skip_vertex(c, 1, 5);
                     continue;
                 }
             }
@@ -1705,7 +1786,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
                 ULONG fs = specular ? *(const ULONG *)(v + specular) : 0;
                 for (i = 0; i < 3; ++i) { out[i].diffuse = fd; out[i].specular = fs; }
             }
-            if (bad) { ++d->d7draw.badPositions; skip(c, RB2K_D7_SKIP_VERTEX, 1); continue; }
+            if (bad) { ++d->d7draw.badPositions; skip_vertex(c, 1, 6); continue; }
             count += 3;
             if (count == RB2K_D3D7_VERTICES || t + 1 == p->primitives) {
                 hr = send_batch(c, draw, count);
@@ -1827,10 +1908,15 @@ static void release_shaders(D7_CONTEXT *c)
 /* The pixel program for the current texture stages, specular and fog;
  * as gets its samplers and constant count for pixel_states. Zero when the
  * stages cannot be translated. */
-static ULONG stage_program(D7_CONTEXT *c, ULONG fog, D8_SHADER *as)
+/* byStage: for fixed-function draws, whose stage n reads its coordinates from
+ * set n of the draw record, with the stages' texture transforms; otherwise
+ * after a vertex shader, which outputs the sets the stages name. Direct3D does not transform the
+ * coordinates of pretransformed vertices: only their projection (D3DTTFF_PROJECTED) divides, with an
+ * identity matrix in the constants (shader_triangles). */
+static ULONG stage_program(D7_CONTEXT *c, ULONG fog, D8_SHADER *as, BOOL byStage, BOOL pretransformed)
 {
     RB_STAGE_STATE st[TextureStages];
-    ULONG key[StageKey], i, k, n = 0, id = 0, written;
+    ULONG key[StageKey], i, k, n = 0, id = 0, written, transforms = 0;
     D8_STAGE_PROGRAM *e;
     RB_PS_INFO info;
     RtlZeroMemory(key, sizeof(key));
@@ -1838,19 +1924,25 @@ static ULONG stage_program(D7_CONTEXT *c, ULONG fog, D8_SHADER *as)
         const D7_STAGE *s = &c->stages[i];
         st[i].colorOp = s->colorOp; st[i].colorArg1 = s->colorArg1; st[i].colorArg2 = s->colorArg2;
         st[i].alphaOp = s->alphaOp; st[i].alphaArg1 = s->alphaArg1; st[i].alphaArg2 = s->alphaArg2;
-        st[i].coordIndex = s->coordIndex;
-        RtlCopyMemory(key + 7 * i, &st[i], 7 * sizeof(ULONG));
+        st[i].coordIndex = byStage ? i : s->coordIndex;
+        st[i].transform = byStage ? s->transform : 0;
+        if (pretransformed && !(st[i].transform & RB_TTFF_PROJECTED)) st[i].transform = 0;
+        if (st[i].transform & 0xff) transforms = 1;
+        if (s->colorOp == D3DTOP_BUMPENVMAP || s->colorOp == D3DTOP_BUMPENVMAPLUMINANCE) transforms = 1;
+        RtlCopyMemory(key + 8 * i, &st[i], 8 * sizeof(ULONG));
     }
-    key[7 * 8] = c->specular ? 1 : 0;
-    key[7 * 8 + 1] = fog;
+    key[8 * 8] = c->specular ? 1 : 0;
+    key[8 * 8 + 1] = fog;
     RtlZeroMemory(as, sizeof(*as));
-    as->constants = 8;
+    /* With texture matrices the program reads 32 constants (d3d8_ps.h). */
+    as->constants = transforms ? RB_PS2_CONSTANTS : 8;
     for (k = 0; k < StagePrograms; ++k) {
         e = &c->stagePrograms[k];
         ULONG w;
         for (w = 0; w < StageKey && e->key[w] == key[w]; ++w) {}
         if (e->program && w == StageKey) {
             as->samplers = e->samplers;
+            if (byStage) as->coords = as->samplers;   /* stage n reads set n */
             return e->program;
         }
     }
@@ -1868,6 +1960,7 @@ static ULONG stage_program(D7_CONTEXT *c, ULONG fog, D8_SHADER *as)
     RtlCopyMemory(e->key, key, sizeof(key));
     e->program = id;
     e->samplers = as->samplers = info.samplers;
+    if (byStage) as->coords = as->samplers;
     return id;
 }
 
@@ -2049,11 +2142,31 @@ static BOOL pixel_states(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, const D8_SHADER *s
  * one being 0 or, for the fourth, 1. Only the sets up to the last one the
  * program reads travel with the vertices. Untransformed vertices are lit and
  * fog blends the shader's result as for the fixed-function draws. */
+/* A bump stage's matrix and luminance scale and offset for the stage program
+ * (d3d8_ps.h), in the place of its texture matrix. */
+static void bump_constants(const D7_CONTEXT *c, RB2K_D3D8_DRAW *draw)
+{
+    ULONG k;
+    for (k = 0; k < RB_STAGE_TRANSFORMS && k < TextureStages && c->stages[k].colorOp != D3DTOP_DISABLE; ++k) {
+        if (c->stages[k].colorOp != D3DTOP_BUMPENVMAP && c->stages[k].colorOp != D3DTOP_BUMPENVMAPLUMINANCE) continue;
+        draw->constants[8 + 4 * k][0] = c->tss[k][D3DTSS_BUMPENVMAT00];
+        draw->constants[8 + 4 * k][1] = c->tss[k][D3DTSS_BUMPENVMAT01];
+        draw->constants[8 + 4 * k][2] = c->tss[k][D3DTSS_BUMPENVMAT10];
+        draw->constants[8 + 4 * k][3] = c->tss[k][D3DTSS_BUMPENVMAT11];
+        draw->constants[9 + 4 * k][0] = c->tss[k][D3DTSS_BUMPENVLSCALE];
+        draw->constants[9 + 4 * k][1] = c->tss[k][D3DTSS_BUMPENVLOFFSET];
+        draw->constants[9 + 4 * k][2] = draw->constants[9 + 4 * k][3] = 0;
+    }
+}
+
 static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
 {
     DISPLAY *d = c->display;
     RB2K_D3D8_DRAW *draw = &c->draw8;
-    D8_SHADER *sh = find_shader(c, c->pixelShader);
+    /* Without a pixel shader: fixed-function stages as a program, which also
+     * applies the stages' texture matrices (from triangle_list). */
+    D8_SHADER ff, *sh = c->pixelShader ? find_shader(c, c->pixelShader) : NULL;
+    BOOL fixed = !c->pixelShader;
     DD_SLOT *s, *z;
     ULONG program = 0, fog = 0;
     ULONG fvf = p->fvf, stride = p->streamStride, offset = 16, diffuse = 0, specular = 0, normal = 0, position, sets, i, t, k;
@@ -2078,9 +2191,14 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
         else fog = RB2K_D7_FOG_ALPHA;
     }
     if (sh) program = shader_program(c, sh, stage_kinds(c, sh->samplers, fog));
+    else if (fixed) {
+        program = stage_program(c, fog, &ff, TRUE, !objectSpace);
+        if (program && (cube_stages(c, ff.samplers, FALSE) || cube_stages(c, ff.samplers, TRUE))) program = 0;
+        sh = &ff;
+    }
     if (!program) { skip(c, RB2K_D7_SKIP_COMBINER, p->primitives); return DD_OK; }
     if (!p->stream || !position || (fvf & D3DFVF_RESERVED0) || (!objectSpace && (fvf & D3DFVF_NORMAL))) {
-        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+        skip_vertex(c, p->primitives, 7);
         return DD_OK;
     }
     if (objectSpace) offset = 12 + (position >= D3DFVF_XYZB1 ? 4 * ((position - D3DFVF_XYZRHW) / 2) : 0);
@@ -2100,16 +2218,30 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
             }
         offset += 4 * n;
     }
-    /* Generated coordinates and texture transforms are not applied yet. */
+    /* Generated coordinates are not applied yet, nor texture transforms with a
+     * pixel shader (the fixed-function program applies them). */
     for (k = 0; k < RB2K_D8_STAGES; ++k)
-        if ((sh->coords & (1UL << k)) && ((c->stages[k].coordIndex >> 16) || (c->stages[k].transform & 0xff)))
+        if ((sh->coords & (1UL << k)) && ((c->stages[k].coordIndex >> 16) || (!fixed && (c->stages[k].transform & 0xff))))
             offset = 0xffffffff;
-    if (offset > stride || stride > 256) { skip(c, RB2K_D7_SKIP_VERTEX, p->primitives); return DD_OK; }
+    if (offset > stride || stride > 256) { skip_vertex(c, p->primitives, 8); return DD_OK; }
     RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices));
     for (k = 0; k < RB2K_D8_STAGES; ++k) if (sh->coords & (1UL << k)) used = k + 1;
     draw->coordSets = used;
     words = RB2K_D8_VERTEX_WORDS(used);
     if (!pixel_states(c, draw, sh, s, z, program, fog, p->primitives)) return DD_OK;
+    if (fixed) {
+        draw->constants[0][0] = c->factor;   /* the texture factor, unpacked by the program */
+        /* Stage k's texture matrix as its columns, CONST[8+4k] to [11+4k] (d3d8_ps.h); the identity for
+         * pretransformed vertices, whose projection alone applies. */
+        for (k = 0; k < RB_STAGE_TRANSFORMS && k < TextureStages; ++k) {
+            ULONG col, row;
+            if (!(c->stages[k].transform & 0xff)) continue;
+            for (col = 0; col < 4; ++col)
+                for (row = 0; row < 4; ++row) draw->constants[8 + 4 * k + col][row] = 
+                    objectSpace ? c->texMatrices[k][4 * row + col] : col == row ? 0x3f800000 : 0;
+        }
+        bump_constants(c, draw);
+    }
     if (objectSpace) {
         draw->transform = 1;
         RtlCopyMemory(draw->matrices, c->matrices, sizeof(draw->matrices));
@@ -2142,7 +2274,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     if (lo < 0 || hi > p->streamBytes) {
         ++d->d7draw.beyondCalls;
         d->d7draw.beyondVertices += p->primitives;
-        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+        skip_vertex(c, p->primitives, 9);
         return DD_OK;
     }
     base = p->streamData + p->streamFirst;
@@ -2165,6 +2297,8 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
                 for (k = 0; k < used; ++k)
                     for (j = 0; j < 4; ++j)
                         o->tc[k][j] = j < coordFloats[k] ? *(const ULONG *)(v + coordOffset[k] + 4 * j) :
+                                      /* Direct3D transforms (u, v, 1, 0): a one after the last coordinate. */
+                                      (fixed && (c->stages[k].transform & 0xff)) ? (j == coordFloats[k] ? 0x3f800000 : 0) :
                                       j == 3 ? 0x3f800000 : 0;
                 bad |= bad_position((const RB2K_D3D7_VERTEX *)o);
             }
@@ -2178,7 +2312,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
                     o->specular = fs;
                 }
             }
-            if (bad) { ++d->d7draw.badPositions; skip(c, RB2K_D7_SKIP_VERTEX, 1); continue; }
+            if (bad) { ++d->d7draw.badPositions; skip_vertex(c, 1, 10); continue; }
             count += 3;
             if (count == RB2K_D8_VERTICES || t + 1 == p->primitives) {
                 hr = send_batch8(c, draw, count);
@@ -2188,7 +2322,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
         }
         if (SUCCEEDED(hr) && count) hr = send_batch8(c, draw, count);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+        skip_vertex(c, p->primitives, 11);
         hr = DD_OK;
     }
     return hr;
@@ -2226,19 +2360,23 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
     else {
         /* The fixed-function pixel stages after the vertex shader (which do
          * not sample cube maps). */
-        program = stage_program(c, fog, &stages);
+        program = stage_program(c, fog, &stages, FALSE, FALSE);
         if (program && (cube_stages(c, stages.samplers, FALSE) || cube_stages(c, stages.samplers, TRUE))) program = 0;
         sh = &stages;
         d->d7draw.vsStageDraws += p->primitives;
     }
     words = (stride + 15) / 16 * 4;
     if (!vprogram || !program || !p->stream || stride % 4 || words > RB2K_D8_VS_VERTEX_WORDS || vs->words > stride / 4) {
-        skip(c, vprogram && program ? RB2K_D7_SKIP_VERTEX : RB2K_D7_SKIP_COMBINER, p->primitives);
+        if (vprogram && program) skip_vertex(c, p->primitives, 17);
+        else skip(c, RB2K_D7_SKIP_COMBINER, p->primitives);
         return DD_OK;
     }
     RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices));
     if (!pixel_states(c, draw, sh, s, z, program, fog, p->primitives)) return DD_OK;
-    if (sh == &stages) draw->constants[0][0] = c->factor;   /* the texture factor, unpacked by the program */
+    if (sh == &stages) {
+        draw->constants[0][0] = c->factor;   /* the texture factor, unpacked by the program */
+        bump_constants(c, draw);
+    }
     {
         RB2K_D7_DRAWSTATS *st = &d->d7draw;
         ULONG key[6], k, j;
@@ -2271,7 +2409,7 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
     if (lo < 0 || hi > p->streamBytes) {
         ++d->d7draw.beyondCalls;
         d->d7draw.beyondVertices += p->primitives;
-        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+        skip_vertex(c, p->primitives, 12);
         return DD_OK;
     }
     base = p->streamData + p->streamFirst;
@@ -2292,7 +2430,7 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
+        skip_vertex(c, p->primitives, 13);
         hr = DD_OK;
     }
     return hr;
@@ -2364,7 +2502,7 @@ static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULON
     if (((c->fvf & 1) && !c->display->vertexShaders) || !c->streamStride || c->streamStride > 256 ||
         !stream_zero(c, a, &prims) ||
         first < -0x7fffffffLL || first > (LONGLONG)prims.streamBytes) {
-        skip(c, RB2K_D7_SKIP_VERTEX, count);
+        skip_vertex(c, count, 14);
         return DD_OK;
     }
     prims.stream = TRUE;
@@ -2376,7 +2514,7 @@ static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULON
         ULONG indices = type == RbTriangleList ? 3 * count : count + 2, size;
         if (!b || b->owner != c->owner || c->indexStride != 2 || !b->global->fpVidMem || count > 0xffff ||
             indexByte > (size = b->global->dwLinearSize) || indices > (size - indexByte) / 2) {
-            skip(c, RB2K_D7_SKIP_VERTEX, count);
+            skip_vertex(c, count, 15);
             return DD_OK;
         }
         if (!index_scratch(indices)) return DDERR_OUTOFMEMORY;
@@ -2385,7 +2523,7 @@ static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULON
             EngProbeForRead((PVOID)from, indices * sizeof(WORD), 1);
             RtlCopyMemory(indexScratch, from, indices * sizeof(WORD));
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            skip(c, RB2K_D7_SKIP_VERTEX, count);
+            skip_vertex(c, count, 16);
             return DD_OK;
         }
         prims.indices = indexScratch;
@@ -2727,6 +2865,11 @@ static void create_block(D7_CONTEXT *c, D8_STATEBLOCK *b)
         RtlCopyMemory(&x.matrix, c->matrices[i], 64);
         block_command(b, D3DNTDP2OP_SETTRANSFORM, 1, &x, sizeof(x));
     }
+    for (i = 0; i < TextureStages; ++i) {
+        x.xfrmType = (D3DTRANSFORMSTATETYPE)(D3DTRANSFORMSTATE_TEXTURE0 + i);
+        RtlCopyMemory(&x.matrix, c->texMatrices[i], 64);
+        block_command(b, D3DNTDP2OP_SETTRANSFORM, 1, &x, sizeof(x));
+    }
     v.dwX = c->viewport[0]; v.dwY = c->viewport[1]; v.dwWidth = c->viewport[2]; v.dwHeight = c->viewport[3];
     block_command(b, D3DNTDP2OP_VIEWPORTINFO, 1, &v, sizeof(v));
     block_command(b, D3DNTDP2OP_ZRANGE, 1, c->zRange, sizeof(c->zRange));
@@ -2775,6 +2918,8 @@ static void capture_block(D7_CONTEXT *c, D8_STATEBLOCK *b)
                 ULONG type = x->xfrmType == 256 ? D3DTRANSFORMSTATE_WORLD : x->xfrmType;
                 if (type >= D3DTRANSFORMSTATE_WORLD && type <= D3DTRANSFORMSTATE_PROJECTION)
                     RtlCopyMemory(&x->matrix, c->matrices[type - D3DTRANSFORMSTATE_WORLD], 64);
+                else if (type >= D3DTRANSFORMSTATE_TEXTURE0 && type < D3DTRANSFORMSTATE_TEXTURE0 + TextureStages)
+                    RtlCopyMemory(&x->matrix, c->texMatrices[type - D3DTRANSFORMSTATE_TEXTURE0], 64);
             }
             break;
         }
@@ -2988,7 +3133,7 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             break;
         }
         case D3DNTDP2OP_SETTRANSFORM: {
-            /* World, view and projection; texture matrices are not applied. */
+            /* World, view and projection, and the stages' texture matrices. */
             const D3DNTHAL_DP2SETTRANSFORM *x = (const D3DNTHAL_DP2SETTRANSFORM *)p;
             used = n * sizeof(*x);
             if (used > remaining) return DDERR_INVALIDPARAMS;
@@ -2998,6 +3143,8 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
                 ++c->display->d7draw.transformTypes[x->xfrmType < 31 ? x->xfrmType : 31];
                 if (type >= D3DTRANSFORMSTATE_WORLD && type <= D3DTRANSFORMSTATE_PROJECTION)
                     RtlCopyMemory(c->matrices[type - D3DTRANSFORMSTATE_WORLD], &x->matrix, 64);
+                else if (type >= D3DTRANSFORMSTATE_TEXTURE0 && type < D3DTRANSFORMSTATE_TEXTURE0 + TextureStages)
+                    RtlCopyMemory(c->texMatrices[type - D3DTRANSFORMSTATE_TEXTURE0], &x->matrix, 64);
             }
             break;
         }
@@ -3546,7 +3693,9 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     c->deviceType = 1;                  /* D3DDEVTYPE_HAL */
     c->caps2 = RB_D3DCAPS2_CANRENDERWINDOWED;
     c->presentationIntervals = RB_D3DPRESENT_INTERVAL_IMMEDIATE | RB_D3DPRESENT_INTERVAL_ONE;
-    c->devCaps = hw->dwDevCaps & ~D3DDEVCAPS_FLOATTLVERTEX;
+    /* Not texturing from system memory: only video-memory textures are registered
+     * and uploaded, so the runtime is to keep a video-memory copy of each. */
+    c->devCaps = hw->dwDevCaps & ~(D3DDEVCAPS_FLOATTLVERTEX | D3DDEVCAPS_TEXTURESYSTEMMEMORY);
     c->primitiveMiscCaps = tri->dwMiscCaps | 0x80;   /* D3DPMISCCAPS_COLORWRITEENABLE */
     c->rasterCaps = tri->dwRasterCaps & ~D3DPRASTERCAPS_SUBPIXEL;
     c->srcBlendCaps = tri->dwSrcBlendCaps;
@@ -3554,6 +3703,9 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     c->alphaCmpCaps = tri->dwAlphaCmpCaps;
     c->shadeCaps = tri->dwShadeCaps;
     c->textureCaps = tri->dwTextureCaps | 0x4000;     /* D3DPTEXTURECAPS_MIPMAP */
+    /* The stage programs divide per pixel for D3DTTFF_PROJECTED; without this cap the runtime
+     * hands pretransformed vertices over as COUNT3 without the flag. */
+    c->textureCaps |= 0x400;             /* D3DPTEXTURECAPS_PROJECTED */
     c->textureFilterCaps = tri->dwTextureFilterCaps;
     /* Cube maps, sampled by pixel shaders (the fixed-function stages do not). */
     c->textureCaps |= 0x800 | 0x10000;   /* D3DPTEXTURECAPS_CUBEMAP, MIPCUBEMAP */
@@ -3597,7 +3749,11 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
      * announced itself as Direct3D 9, which uses this record for drivers of
      * the Direct3D 8 interface. */
     c->pixelShaderVersion = d->d7draw.d8Version >= 0x900 ? 0xffff0200 : 0xffff0103;
-    c->maxSimultaneousTextures = RB_PS_COORD_SETS;  /* t0..t3 of version 1 shaders */
+    c->maxSimultaneousTextures = stage_limit(d);
+    /* The fixed-function stages run as a stage program (d3d8_stages_valid), which also
+     * does bump mapping. */
+    c->maxTextureBlendStages = stage_limit(d);
+    c->textureOpCaps |= D3DTEXOPCAPS_BUMPENVMAP | D3DTEXOPCAPS_BUMPENVMAPLUMINANCE;
     c->maxPixelShaderValue = 0x3f800000;            /* 1 */
 }
 

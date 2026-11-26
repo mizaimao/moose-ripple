@@ -54,11 +54,23 @@ def main():
     if not kmt:
         parser.error("could not find the required GDI entry points in the Mesa source")
     failed = False
-    for file, system, machine in [
-        ("viogpu3d.sys", "System32", "AMD64"),
-        ("viogpu_d3d10.dll", "System32", "AMD64"),
-        ("viogpu_d3d10.x86.dll", "SysWOW64", "I386"),
-    ]:
+    # File, where it is installed, its machine, an entry point it has to export.
+    files = [
+        ("viogpu3d.sys", "System32", "AMD64", None),
+        ("viogpu_d3d10.dll", "System32", "AMD64", "OpenAdapter"),
+        ("viogpu_d3d10.x86.dll", "SysWOW64", "I386", "OpenAdapter"),
+    ]
+    # The OpenGL driver and the library it shares with opengl32.dll, where the package has them.
+    if (args.package / "viogpu_wgl.dll").is_file():
+        files += [
+            ("viogpu_wgl.dll", "System32", "AMD64", "DrvCreateContext"),
+            ("viogpu_wgl.x86.dll", "SysWOW64", "I386", "DrvCreateContext"),
+            ("libglapi.dll", "System32", "AMD64", None),
+            ("libglapi.x86.dll", "SysWOW64", "I386", None),
+        ]
+    for file, system, machine, entry_point in files:
+        # A DLL of the package that another one imports from, under its installed name.
+        own = {"libglapi.dll": args.package / ("libglapi.x86.dll" if machine == "I386" else "libglapi.dll")}
         binary = args.package / file
         headers = readobj("--file-headers", binary)
         if not all(field in headers.splitlines() for field in ("  MajorSubsystemVersion: 6", "  MinorSubsystemVersion: 0")) or f"IMAGE_FILE_MACHINE_{machine} " not in headers:
@@ -71,14 +83,18 @@ def main():
         if not imports:
             raise ValueError(f"{file}: no imports found")
         required = list(imports)
-        if file.endswith(".dll"):
-            if "OpenAdapter" not in exports(binary):
-                raise ValueError(f"{file}: missing Direct3D 9 OpenAdapter export")
+        if entry_point:
+            if entry_point not in exports(binary):
+                raise ValueError(f"{file}: missing {entry_point} export")
             required.extend(("gdi32.dll", entry) for entry in kmt)
         missing = []
         for lib, symbol in required:
             try:
-                resolve(args.windows / system, lib, symbol)
+                if lib.lower() in own and own[lib.lower()].is_file():
+                    if symbol not in exports(own[lib.lower()]):
+                        raise ValueError("not exported by the package's own " + lib)
+                else:
+                    resolve(args.windows / system, lib, symbol)
             except ValueError as error:
                 missing.append(f"{lib}!{symbol}: {error}")
         print(f"{file}: {len(imports)} imports, {len(required) - len(imports)} GDI lookups, {len(missing)} unresolved")

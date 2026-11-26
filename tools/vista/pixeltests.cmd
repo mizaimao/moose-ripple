@@ -1,7 +1,8 @@
 @echo off
 rem The pixel tests of tools/vista at 32 and 64 bits (the six programs next to this script),
 rem results to the first serial port: a "VT RUN" and a "VT EXIT code" line for each, then its
-rem output; VT_END at the end. The clip-plane and video-processor tests pass on Vista only.
+rem output; VT_END at the end. The video-processor test passes on Vista only (Windows 7 offers
+rem no video processor through this interface).
 setlocal
 set "t=%~dp0"
 cd /d "%TEMP%" || goto failed
