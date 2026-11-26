@@ -2185,6 +2185,24 @@ On XP SP3 under KVM on the second Intel UHD 630 host, case 53 passes and
 `d9pixels` passes 43 of 43. 3DMark 2001 SE's DOT3 Bump Mapping test, which
 reported "Not supported by hardware", now runs.
 
+## L16 textures: 3DMark03's procedural volumes
+
+3DMark03 reported "Unable to create volume texture" and went on without the
+texture. Its code (`3DMark03.exe`, the constructor at 0x4f5e10) creates
+128x128x128 volume textures with one level in the managed pool: two
+`D3DFMT_A8R8G8B8` and two `D3DFMT_L16`, filled procedurally (its "Volume
+texture creation %d%%" progress). The driver did not offer L16 at all, so the
+L16 creations failed.
+
+L16 is now offered for textures, cube textures and volume textures. Like the
+other formats the host does not take as they are, its texels go to the host as
+B8G8R8A8: grey from the top eight bits of each one.
+
+`d9pixels` case 63 creates a 128x128x128 L16 volume texture and draws a 2x2
+L16 texture, white and half grey (0x8000); on XP SP3 under KVM (UHD 630 host)
+both work and `d9pixels` passes 53 of 53.
+
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:
