@@ -27,6 +27,13 @@ static struct pipe_frontend_screen *device_fscreen;
 static bool device_failed;
 static uint32_t device_backend;   /* RIPPLE_GPU_BACKEND_* of the screen */
 
+/* A reference to the accelerator service, kept for the life of the process. WindowServer drops
+ * its own when a display is reconfigured (a change of resolution) and looks the service up
+ * again, while its OpenGL side goes on using the port it had. With no other reference in the
+ * process that port name dies at that moment: every surface WindowServer then asks for fails,
+ * and it crashes in its fallback (known issue KI-11). */
+static io_service_t device_service;
+
 static int
 ripple_cgl_get_param(struct pipe_frontend_screen *fscreen, enum st_manager_param param)
 {
@@ -66,9 +73,14 @@ ripple_cgl_create_screen(void)
    if (!svc)
       return NULL;
    kern_return_t kr = IOServiceOpen(svc, mach_task_self(), RIPPLE_GPU_CLIENT_TYPE, &conn);
-   IOObjectRelease(svc);
-   if (kr != KERN_SUCCESS)
+   if (kr != KERN_SUCCESS) {
+      IOObjectRelease(svc);
       return NULL;
+   }
+   if (!device_service)
+      device_service = svc;             /* kept, see above */
+   else
+      IOObjectRelease(svc);
    if (IOConnectCallStructMethod(conn, RIPPLE_GPU_GET_INFO, NULL, 0, &info, &size)
        != KERN_SUCCESS || info.api_version != RIPPLE_GPU_API_VERSION) {
       IOServiceClose(conn);
