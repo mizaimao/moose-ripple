@@ -32,6 +32,7 @@
 #include "d3d8_ps.h"      /* pixel shaders as TGSI text (win2k/), shared with Windows 2000 */
 #include "tgsi_arb.h"     /* that text as an ARB fragment program */
 #include "tnl_arb.h"      /* fixed-function vertex processing as an ARB vertex program */
+#include "vs_arb.h"       /* vertex shaders as ARB vertex programs */
 #include "rippled3d.h"
 
 /* ---- No C run-time: what the compiler expects of it ------------------------------------------ */
@@ -369,6 +370,10 @@ typedef struct {
     /* hardware vertex processing (optional) */
     void (APIENTRY *NormalPointer)(GLenum, GLsizei, const GLvoid *);
     void (APIENTRY *DepthRange)(GLclampd, GLclampd);
+    /* vertex shaders: generic attributes (optional) */
+    void (APIENTRY *VertexAttribPointerARB)(GLuint, GLint, GLenum, GLboolean, GLsizei, const GLvoid *);
+    void (APIENTRY *EnableVertexAttribArrayARB)(GLuint);
+    void (APIENTRY *DisableVertexAttribArrayARB)(GLuint);
 } GLF;
 
 #define GL_CORE_COUNT 53            /* entries up to DrvGetProcAddress */
@@ -396,6 +401,7 @@ static const char *const gl_names[] = {
     "glCompressedTexImage2DARB", "glCompressedTexSubImage2DARB",
     "glTexImage3D",
     "glNormalPointer", "glDepthRange",
+    "glVertexAttribPointerARB", "glEnableVertexAttribArrayARB", "glDisableVertexAttribArrayARB",
 };
 #define GL_ALL_COUNT (sizeof gl_names / sizeof gl_names[0])
 typedef char c_gl_names[sizeof(GLF) == GL_ALL_COUNT * sizeof(PROC) ? 1 : -1];
@@ -1040,7 +1046,20 @@ int d3d_surface_format_ok(LPDDSURFACEDESC desc)
 #define FF_STAGES 2                     /* fixed-function stages offered to Direct3D 7 */
 #define FF8_STAGES 4                    /* and drawn for Direct3D 8 and 9, before FOG_UNIT */
 #define FOG_UNIT 4                      /* the OpenGL texture unit that does fixed-function fog */
+#define MAX_VS 64                       /* Direct3D 8 and 9 vertex shaders a context keeps */
+#define VS_VARIANTS 4                   /* programs a vertex shader keeps (fog) */
 #define MAX_LIGHTS 32                   /* light indices kept (Direct3D's may be any number) */
+
+/* A vertex shader: its declaration and code as the runtime gave them, the translator's layout
+   of its inputs, and its programs by fog key (vs_arb.c). */
+struct vs8 {
+    DWORD handle;
+    DWORD *decl, ndecl, *code, ncode;   /* words; process heap */
+    int failed;                         /* couldn't be translated: its draws are skipped */
+    VS_ARB info;
+    DWORD nvar;
+    struct { DWORD key; GLuint prog; } var[VS_VARIANTS];
+};
 #define VP_CACHE 16                     /* vertex programs a context keeps */
 #define TNL_DIRTY_XF    1               /* world, view, projection, viewport */
 #define TNL_DIRTY_LIGHT 2               /* lights, material, ambient */
@@ -1150,9 +1169,20 @@ typedef struct {
     GLuint vp_bound;
     struct { TNL_KEY key; GLuint prog; DWORD used; } vp[VP_CACHE];
     DWORD vp_clock;
+    /* vertex shaders on the GPU (vs_*, with tnl_on): their records, c0..c255; program.env is
+       shared with the fixed-function programs, so whose it holds is kept (ENV_*) */
+    struct vs8 *vs[MAX_VS];
+    float vsc[VS_ARB_CONSTANTS][4];
+    int vsc_dirty;
+    int env_owner;
+    DWORD vs_loaded;                    /* the shader whose def constants program.env holds */
+    DWORD attribs_on;                   /* generic attribute arrays enabled (bits) */
 } RCTX;
+#define ENV_TNL 1
+#define ENV_VS  2
 
 static long ps_program(RCTX *c);
+static void attribs_off(RCTX *c);
 static void ps_apply(RCTX *c, long prog);
 static void skip8(RCTX *c, const char *why);
 
@@ -1669,6 +1699,12 @@ static void context_free(RCTX *c)
 
     for (i = 0; i < MAX_PS; i++)
         release(c->ps[i].code);         /* the programs go with the OpenGL context */
+    for (i = 0; i < MAX_VS; i++)
+        if (c->vs[i]) {
+            release(c->vs[i]->decl);
+            release(c->vs[i]->code);
+            release(c->vs[i]);
+        }
     if (c->rc) {
         make_current(c);
         for (i = 0; i < c->ntex; i++)
@@ -2720,6 +2756,7 @@ typedef struct {
     int tex[8];                         /* byte offset of each texture coordinate set */
     int texsize[8];
     int xyz;                            /* untransformed (D3DFVF_XYZ..): the HAL transforms them */
+    int shader;                         /* laid out by the vertex shader's declaration (vs_begin) */
     int normal;                         /* their normal's byte offset, -1 if none */
 } VERTICES;
 
@@ -2870,6 +2907,7 @@ static void arrays(RCTX *c, const VERTICES *v, DWORD first, DWORD count)
     BYTE *b = v->base + first * v->stride;
     int s;
 
+    attribs_off(c);
     gl->EnableClientState(GL_VERTEX_ARRAY);
     gl->VertexPointer(4, GL_FLOAT, 0, c->pos);
     if (v->diffuse >= 0) {
@@ -3356,6 +3394,10 @@ static int tnl_begin(RCTX *c, const VERTICES *v)
     prog = tnl_program(c, &k);
     if (!prog)
         return 0;
+    if (c->env_owner != ENV_TNL) {      /* a vertex shader's constants were there */
+        c->tnl_dirty = TNL_DIRTY_ALL;
+        c->env_owner = ENV_TNL;
+    }
     if (c->vp_bound != prog) {
         gl->BindProgramARB(GL_VERTEX_PROGRAM_ARB, prog);
         c->vp_bound = prog;
@@ -3390,6 +3432,256 @@ static void tnl_end(RCTX *c)
     c->vp_on = 0;
 }
 
+/* The generic attribute arrays a vertex shader drew with, off (attribute 0 would stand for the
+   position of the other draws). */
+static void attribs_off(RCTX *c)
+{
+    GLF *gl = gl_of(c);
+    DWORD n;
+    for (n = 0; c->attribs_on && n < VS_ARB_INPUTS; n++)
+        if (c->attribs_on & (1UL << n)) {
+            gl->DisableVertexAttribArrayARB(n);
+            c->attribs_on &= ~(1UL << n);
+        }
+}
+
+/* ---- Vertex shaders on the GPU (with tnl_on) ---- */
+static struct vs8 *vs_find(RCTX *c, DWORD handle)
+{
+    DWORD i;
+    for (i = 0; handle && i < MAX_VS; i++)
+        if (c->vs[i] && c->vs[i]->handle == handle)
+            return c->vs[i];
+    return NULL;
+}
+
+static void vs_delete(RCTX *c, DWORD handle)
+{
+    GLF *gl = gl_of(c);
+    DWORD i, j;
+    for (i = 0; handle && i < MAX_VS; i++)
+        if (c->vs[i] && c->vs[i]->handle == handle) {
+            struct vs8 *s = c->vs[i];
+            for (j = 0; j < s->nvar; j++) {
+                if (s->var[j].prog && gl->DeleteProgramsARB)
+                    gl->DeleteProgramsARB(1, &s->var[j].prog);
+                if (c->vp_bound == s->var[j].prog)
+                    c->vp_bound = 0;
+            }
+            if (c->vs_loaded == handle)
+                c->vs_loaded = 0;
+            release(s->decl);
+            release(s->code);
+            release(s);
+            c->vs[i] = NULL;
+        }
+}
+
+/* The program for s with fog key key, made when first needed; 0 if it can't be made. */
+static GLuint vs_program(RCTX *c, struct vs8 *s, DWORD key)
+{
+    GLF *gl = gl_of(c);
+    DWORD i;
+    char *text;
+    unsigned int n;
+    GLuint prog = 0;
+
+    for (i = 0; i < s->nvar; i++)
+        if (s->var[i].key == key)
+            return s->var[i].prog;
+    if (s->failed)
+        return 0;
+    if (s->nvar == VS_VARIANTS) {       /* full: the last one makes room */
+        i = VS_VARIANTS - 1;
+        if (s->var[i].prog)
+            gl->DeleteProgramsARB(1, &s->var[i].prog);
+        if (c->vp_bound == s->var[i].prog)
+            c->vp_bound = 0;
+        s->nvar--;
+    }
+    text = (char *)alloc(VS_ARB_TEXT_BYTES);
+    n = text ? vs_to_arb((const unsigned int *)s->code, s->ncode, (const unsigned int *)s->decl,
+                         s->ndecl, key, text, VS_ARB_TEXT_BYTES, &s->info) : 0;
+    if (!n) {
+        tracef("rd3d: vertex shader %lx not translated: reason %lu, detail %lx\r\n", s->handle,
+               (DWORD)s->info.reason, (DWORD)s->info.detail);
+        dbg("rd3d: a vertex shader was not translated\r\n");
+        s->failed = 1;
+    } else {
+        gl->GetError();
+        gl->GenProgramsARB(1, &prog);
+        gl->BindProgramARB(GL_VERTEX_PROGRAM_ARB, prog);
+        c->vp_bound = prog;
+        gl->ProgramStringARB(GL_VERTEX_PROGRAM_ARB, GL_PROGRAM_FORMAT_ASCII_ARB, n - 1, text);
+        if (gl->GetError() != GL_NO_ERROR) {
+            const char *e = (const char *)gl->GetString(GL_PROGRAM_ERROR_STRING_ARB);
+            dbg("rd3d: a vertex shader's program was refused: ");
+            dbg(e ? e : "?");
+            dbg("\r\n");
+            if (trace_on)
+                dbg(text);
+            gl->DeleteProgramsARB(1, &prog);
+            c->vp_bound = prog = 0;
+            s->failed = 1;
+        } else {
+            tracef("rd3d: vertex shader %lx: program %lu, key %lx, inputs %lx\r\n", s->handle,
+                   (DWORD)prog, key, (DWORD)s->info.inputs);
+            i = s->nvar++;
+            s->var[i].key = key;
+            s->var[i].prog = prog;
+        }
+    }
+    release(text);
+    return prog;
+}
+
+static void vs_create(RCTX *c, const RB_DP2_CREATE_VERTEX_SHADER *r)
+{
+    const BYTE *p = (const BYTE *)(r + 1);
+    struct vs8 *s;
+    DWORD i;
+
+    vs_delete(c, r->handle);
+    for (i = 0; i < MAX_VS && c->vs[i]; i++)
+        ;
+    if (i == MAX_VS || !(s = (struct vs8 *)alloc(sizeof *s))) {
+        dbg("rd3d: too many vertex shaders\r\n");
+        return;
+    }
+    s->handle = r->handle;
+    s->decl = (DWORD *)alloc(r->declBytes + 4);
+    s->code = (DWORD *)alloc(r->codeBytes + 4);
+    if (!s->decl || !s->code) {
+        release(s->decl);
+        release(s->code);
+        release(s);
+        return;
+    }
+    memcpy(s->decl, p, r->declBytes);
+    memcpy(s->code, p + r->declBytes, r->codeBytes);
+    s->ndecl = r->declBytes / 4;
+    s->ncode = r->codeBytes / 4;
+    c->vs[i] = s;
+    vs_program(c, s, 0);                /* now, so a shader that can't be made says so early */
+}
+
+/* Before a draw through a vertex shader: its program bound and on, c0..c255 and its def
+   constants in program.env, OpenGL's viewport Direct3D's. 0 if it can't be drawn. */
+static int vs_begin(RCTX *c)
+{
+    GLF *gl = gl_of(c);
+    struct vs8 *s = vs_find(c, c->fvf8);
+    DWORD key = 0, i, table = c->rs[D3DRENDERSTATE_FOGTABLEMODE];
+    GLuint prog;
+    GLfloat v[4];
+
+    if (!s || !gl->VertexAttribPointerARB || !gl->EnableVertexAttribArrayARB ||
+        !gl->DisableVertexAttribArrayARB || !gl->ProgramLocalParameter4fvARB || !gl->DepthRange)
+        return 0;
+    if (c->rs[D3DRENDERSTATE_FOGENABLE]) {
+        key = VS_ARB_FOG | (FOG_UNIT << VS_ARB_UNIT_SHIFT);
+        if (c->fp_on)
+            key |= VS_ARB_FOG_COORD;
+        if (table >= D3DFOG_EXP && table <= D3DFOG_LINEAR)
+            key |= table << VS_ARB_TABLE_SHIFT;
+        if (c->rs[D3DRENDERSTATE_SPECULARENABLE])
+            key |= VS_ARB_FOG_SPEC;
+    }
+    prog = vs_program(c, s, key);
+    if (!prog)
+        return 0;
+    if (c->vp_bound != prog) {
+        gl->BindProgramARB(GL_VERTEX_PROGRAM_ARB, prog);
+        c->vp_bound = prog;
+    }
+    if (!c->vp_on) {
+        gl->Enable(GL_VERTEX_PROGRAM_ARB);
+        c->vp_on = 1;
+        c->tnl_dirty |= TNL_DIRTY_XF;
+    }
+    if (c->tnl_dirty & TNL_DIRTY_XF) {  /* the viewport (cleared by tnl_load) */
+        if (c->vp_w)
+            gl->Viewport(c->vp_x, c->vp_y, c->vp_w, c->vp_h);
+        else
+            gl->Viewport(0, 0, c->fb_w, c->fb_h);
+        gl->DepthRange(c->zmin, c->zmax);
+    }
+    if (c->env_owner != ENV_VS) {       /* the fixed-function programs' state was there */
+        c->env_owner = ENV_VS;
+        c->vsc_dirty = 1;
+    }
+    if (c->vsc_dirty || c->vs_loaded != s->handle) {
+        for (i = 0; i < VS_ARB_CONSTANTS; i++)
+            gl->ProgramEnvParameter4fvARB(GL_VERTEX_PROGRAM_ARB, i, c->vsc[i]);
+        for (i = 0; i < s->info.defs; i++)
+            gl->ProgramEnvParameter4fvARB(GL_VERTEX_PROGRAM_ARB, s->info.def[i].reg, s->info.def[i].v);
+        c->vsc_dirty = 0;
+        c->vs_loaded = s->handle;
+    }
+    /* the half pixel, and table fog's constants (as tnl_load's) */
+    v[0] = 1.0f / (float)(c->vp_w ? c->vp_w : c->fb_w);
+    v[1] = 1.0f / (float)(c->vp_w ? c->vp_h : c->fb_h);
+    v[2] = v[3] = 0.0f;
+    gl->ProgramLocalParameter4fvARB(GL_VERTEX_PROGRAM_ARB, 0, v);
+    if (key & VS_ARB_FOG) {
+        float fs = *(float *)&c->rs[D3DRENDERSTATE_FOGSTART], fe = *(float *)&c->rs[D3DRENDERSTATE_FOGEND];
+        v[0] = fe != fs ? fe / (fe - fs) : 1.0f;
+        v[1] = fe != fs ? 1.0f / (fe - fs) : 0.0f;
+        v[2] = *(float *)&c->rs[D3DRENDERSTATE_FOGDENSITY];
+        gl->ProgramLocalParameter4fvARB(GL_VERTEX_PROGRAM_ARB, 1, v);
+    }
+    c->tnl_dirty &= ~TNL_DIRTY_XF;      /* the viewport is set; the fixed-function matrices are
+                                           reloaded anyway when they get program.env back */
+    return 1;
+}
+
+/* The shader's inputs as generic attribute arrays from vertex first on; the conventional
+   arrays off. */
+static void vs_arrays(RCTX *c, const VERTICES *v, DWORD first)
+{
+    GLF *gl = gl_of(c);
+    struct vs8 *s = vs_find(c, c->fvf8);
+    BYTE *b = v->base + first * v->stride;
+    DWORD n, u;
+
+    gl->DisableClientState(GL_VERTEX_ARRAY);
+    gl->DisableClientState(GL_COLOR_ARRAY);
+    if (gl->NormalPointer)
+        gl->DisableClientState(GL_NORMAL_ARRAY);
+    if (gl->SecondaryColorPointer)
+        gl->DisableClientState(GL_SECONDARY_COLOR_ARRAY);
+    if (gl->FogCoordPointer)
+        gl->DisableClientState(GL_FOG_COORDINATE_ARRAY);
+    for (u = 0; u < STAGES; u++) {
+        gl->ClientActiveTexture(GL_TEXTURE0 + u);
+        gl->DisableClientState(GL_TEXTURE_COORD_ARRAY);
+    }
+    gl->ClientActiveTexture(GL_TEXTURE0);
+    for (n = 0; n < VS_ARB_INPUTS; n++) {
+        DWORD bit = 1UL << n;
+        if (s && (s->info.inputs & bit)) {
+            DWORD type = s->info.type[n];
+            const BYTE *at = b + s->info.offset[n];
+            if (type <= VS_ARB_FLOAT4)
+                gl->VertexAttribPointerARB(n, type + 1, GL_FLOAT, GL_FALSE, v->stride, at);
+            else if (type == VS_ARB_COLOR)
+                gl->VertexAttribPointerARB(n, 4, GL_UNSIGNED_BYTE, GL_TRUE, v->stride, at);
+            else if (type == VS_ARB_UBYTE4)
+                gl->VertexAttribPointerARB(n, 4, GL_UNSIGNED_BYTE, GL_FALSE, v->stride, at);
+            else
+                gl->VertexAttribPointerARB(n, type == VS_ARB_SHORT2 ? 2 : 4, GL_SHORT, GL_FALSE,
+                                           v->stride, at);
+            if (!(c->attribs_on & bit)) {
+                gl->EnableVertexAttribArrayARB(n);
+                c->attribs_on |= bit;
+            }
+        } else if (c->attribs_on & bit) {
+            gl->DisableVertexAttribArrayARB(n);
+            c->attribs_on &= ~bit;
+        }
+    }
+}
+
 /* The arrays of untransformed vertices first..first+count: as the program reads them, each set
    of texture coordinates in its own unit's array. */
 static void tnl_arrays(RCTX *c, const VERTICES *v, DWORD first)
@@ -3398,6 +3690,7 @@ static void tnl_arrays(RCTX *c, const VERTICES *v, DWORD first)
     BYTE *b = v->base + first * v->stride;
     DWORD u;
 
+    attribs_off(c);
     gl->EnableClientState(GL_VERTEX_ARRAY);
     gl->VertexPointer(3, GL_FLOAT, v->stride, b);
     if (v->normal >= 0) {
@@ -3456,6 +3749,19 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
             return;
         }
         ps_apply(c, prog);
+    }
+    if (v->shader) {                    /* through the vertex shader's program */
+        if (!vs_begin(c)) {
+            skip8(c, "vertex shader");
+            return;
+        }
+        vs_arrays(c, v, first);
+        if (!idx)
+            gl->DrawArrays(mode, 0, count);
+        else
+            gl->DrawElements(mode, nidx, GL_UNSIGNED_SHORT, idx);
+        c->dirty = 1;
+        return;
     }
     if (v->xyz) {                       /* untransformed: through a vertex program */
         if (!tnl_begin(c, v)) {
@@ -4285,8 +4591,14 @@ static int stream_vertices(RCTX *c, LPD3DHAL_DRAWPRIMITIVES2DATA d, VERTICES *v)
     DWORD bytes;
 
     memset(v, 0, sizeof *v);
-    if (!parse_fvf(c->fvf8, v) || !c->stream_stride || c->stream_stride < v->stride)
+    if (c->fvf8 & 1) {                  /* a vertex shader's handle: its declaration lays it out */
+        if (!tnl_on || !c->stream_stride)
+            return 0;
+        v->shader = 1;
+        v->diffuse = v->specular = v->normal = -1;
+    } else if (!parse_fvf(c->fvf8, v) || !c->stream_stride || c->stream_stride < v->stride) {
         return 0;
+    }
     v->stride = c->stream_stride;       /* the stream's own (fields may be followed by padding) */
     if (c->stream_user) {
         if (d->dwFlags & D3DHALDP2_USERMEMVERTICES) {
@@ -4366,7 +4678,7 @@ static void stream_draw(RCTX *c, LPD3DHAL_DRAWPRIMITIVES2DATA d, DWORD type, lon
         skip8(c, "primitive type");
         return;
     }
-    if (c->fvf8 & 1) {                  /* a vertex shader's handle, not a vertex format */
+    if ((c->fvf8 & 1) && !tnl_on) {     /* a vertex shader's handle, without hardware vertex processing */
         skip8(c, "vertex shader");
         return;
     }
@@ -4700,6 +5012,9 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
             if (k->bCommand == RbDp2DeletePixelShader)
                 for (i = 0; i < n; i++)
                     ps_delete(c, h[i].handle);
+            if (k->bCommand == RbDp2DeleteVertexShader)
+                for (i = 0; i < n; i++)
+                    vs_delete(c, h[i].handle);
             cmd = data + n * sizeof *h;
             break;
         }
@@ -4809,6 +5124,11 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
                         memcpy(c->psc[r->reg + j], f + 4 * j, 16);
                         c->psc_dirty = 1;
                     }
+                for (j = 0; k->bCommand == RbDp2SetVertexShaderConst && j < r->count; j++)
+                    if (r->reg + j < VS_ARB_CONSTANTS) {
+                        memcpy(c->vsc[r->reg + j], f + 4 * j, 16);
+                        c->vsc_dirty = 1;
+                    }
                 used += sizeof *r + r->count * 16;
             }
             cmd = data + used;
@@ -4827,6 +5147,14 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
                     const RB_DP2_CREATE_PIXEL_SHADER *r = (const RB_DP2_CREATE_PIXEL_SHADER *)(data + at);
                     ps_create(c, r->handle, (const DWORD *)(r + 1), r->codeBytes);
                     at += sizeof *r + r->codeBytes;
+                }
+            } else {
+                DWORD at = 0;
+                for (i = 0; i < n; i++) {
+                    const RB_DP2_CREATE_VERTEX_SHADER *r = (const RB_DP2_CREATE_VERTEX_SHADER *)(data + at);
+                    if (tnl_on)
+                        vs_create(c, r);
+                    at += sizeof *r + r->declBytes + r->codeBytes;
                 }
             }
             cmd = data + used;
@@ -5089,6 +5417,7 @@ static void d8_caps(RB_D3DCAPS8 *c)
 
     extended_caps(&x);
     memset(c, 0, sizeof *c);
+    p = process();                      /* the runtime version it announced (RbGdi2DxVersion) */
     c->deviceType = 1;                  /* D3DDEVTYPE_HAL */
     c->caps2 = RB_D3DCAPS2_CANRENDERWINDOWED;
     c->presentationIntervals = RB_D3DPRESENT_INTERVAL_IMMEDIATE | RB_D3DPRESENT_INTERVAL_ONE;
@@ -5140,12 +5469,20 @@ static void d8_caps(RB_D3DCAPS8 *c)
         c->maxActiveLights = TNL_LIGHTS;
         c->maxVertexBlendMatrices = 1;      /* the world matrix alone: no vertex blending */
         c->maxUserClipPlanes = 0;
+        /* vertex shaders as ARB vertex programs (vs_arb.c): vs_1_1 for Direct3D 8, vs_2_0
+           (without flow control) for a Direct3D 9 runtime */
+        if (p && p->d3d_version >= 0x900) {
+            c->vertexShaderVersion = 0xFFFE0200UL;
+            c->maxVertexShaderConst = VS_ARB_CONSTANTS;
+        } else {
+            c->vertexShaderVersion = 0xFFFE0101UL;
+            c->maxVertexShaderConst = 96;
+        }
     }
     /* Pixel shaders as ARB fragment programs (ps_create): 1.3 for Direct3D 8, 2.0 with eight
        samplers when the runtime that asks has announced itself as Direct3D 9 (it uses this record
        for drivers of the Direct3D 8 interface). The runtime sends stage states only for the
        blend stages reported, so those are as many as the samplers. */
-    p = process();
     if (p && p->d3d_version >= 0x900) {
         c->pixelShaderVersion = 0xFFFF0200UL;
         c->maxSimultaneousTextures = c->maxTextureBlendStages = RB_PS2_SAMPLERS;
