@@ -26,8 +26,9 @@ case $TARGET in
 esac
 OUT=${1:-$MAIN/build/$TARGET-kmd}
 ARCHS=${ARCHS:-amd64}
-# DEBUG=1 (the default while the driver is being brought up): the driver's messages go to the
-# first serial port (COM1), which the test VM writes to a file on the host. DEBUG=0: no messages.
+# DEBUG=1 (the default while the driver is being brought up): the driver's messages can go to
+# the first serial port (COM1), which the test VM writes to a file on the host; they do when the
+# service's SerialLog value is 1 (driver.cpp). DEBUG=0: no messages in the driver at all.
 DEBUG=${DEBUG:-1}
 # LEVEL: how much the driver says, 1 (fatal only) to 5 (every call); 3, warnings, by default.
 LEVEL=${LEVEL:-3}

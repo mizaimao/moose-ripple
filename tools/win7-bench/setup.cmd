@@ -4,6 +4,8 @@ rem - the second disk becomes R: (FAT32) when it has no volume yet: results and 
 rem - a crash stops the guest (no automatic restart) and leaves a small dump in R:\Minidump;
 rem   a program that crashes leaves a dump in R:\dumps and no dialog
 rem - a task at logon runs auto.cmd from the CD's 3dm folder (which does nothing without go.txt)
+rem - the kernel driver's log to the first serial port is switched on (it is off unless the
+rem   service's SerialLog value asks for it); the host keeps that port in a file
 echo SETUP_BEGIN >COM1
 if not exist R:\ (
   (echo select disk 1& echo clean& echo create partition primary& echo format fs=fat32 quick label=RWDATA& echo assign letter=R) >"%TEMP%\rw-dp.txt"
@@ -21,6 +23,7 @@ type "%TEMP%\rw-wmic.txt" >COM1
 reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting" /v DontShowUI /t REG_DWORD /d 1 /f >nul
 reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps" /v DumpFolder /t REG_EXPAND_SZ /d R:\dumps /f >nul
 reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps" /v DumpType /t REG_DWORD /d 1 /f >nul
+reg add HKLM\SYSTEM\CurrentControlSet\Services\viogpu3d\Parameters /v SerialLog /t REG_DWORD /d 1 /f >nul
 powercfg -change -monitor-timeout-ac 0
 powercfg -change -standby-timeout-ac 0
 schtasks /create /tn rw7auto /tr "cmd /c if exist D:\3dm\auto.cmd call D:\3dm\auto.cmd" /sc onlogon /rl highest /f >COM1 2>&1
