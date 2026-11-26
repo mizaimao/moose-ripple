@@ -185,6 +185,17 @@ struct D3D9Device
       /* the video processor's conversion draw (D3D9VideoDrawNv12) shares the rest */
       void *video_fs, *video_sampler;
    } key_blit;
+   /* Shaders the driver writes itself (D3D9KeepGeneratedShader): the vertex shaders for
+    * vertices that are already transformed and the geometry shaders that widen points. They
+    * are kept by their code, so a draw that needs one again gets the same shader. */
+   struct {
+      const void *tokens;
+      unsigned count;
+      unsigned stage;
+      void *cso;
+   } generated_shaders[64];
+   unsigned generated_shader_count;
+   unsigned generated_shader_next;
    HANDLE render_targets[4];
    UINT render_target_subresources[4];
    HANDLE depth_stencil;
@@ -535,3 +546,4 @@ D3D9ReleaseKept(D3D9Resource *resource)
    pipe_surface_reference(&resource->kept_surface, NULL);
 }
 void D3D9DestroyKeyBlitState(D3D9Device *device);
+void D3D9DestroyGeneratedShaders(D3D9Device *device);

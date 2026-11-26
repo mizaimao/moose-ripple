@@ -2141,6 +2141,67 @@ What is left to try:
 - Fewer notifications: the device offers notification suppression (`event_idx`), and
   `ioeventfd=on` on the host takes the wait out of the guest's processor.
 
+## Shaders made for every draw (2026-11-26)
+
+Firefly Forest was the one 3DMark06 test that the host's GPU did not limit (the section
+above). What limited it was the host's processor time for each frame, and that was our own
+doing. A profile of QEMU's drawing thread during the test on the second Intel test machine
+(`perf`, Mesa 25.0 on the host) showed 45% of its time in Mesa, 26% in the kernel and 21% in
+the C library, and the kernel's share was file handling: the thread opened files 30,000
+times a second. They are the files of Mesa's shader cache, which is asked whenever a program
+is linked, so programs were being linked all the time.
+
+The driver's command statistics (`RIPPLE_CMD_STATS`) said which objects it creates: two
+shaders of about 3 KB in every submit of that test, and four small ones in every frame of a
+loading screen. Two kinds of draw built a shader, used it once and deleted it:
+
+- A draw of vertices that are already transformed (`POSITIONT`: the loading screens and every
+  full-screen pass) gets a vertex shader written by the driver, with the viewport and a few
+  render states in its code.
+- A draw of points wider than a pixel gets a geometry shader that makes two triangles of each
+  point, and it had the point size, its limits and the viewport in its code. The fireflies of
+  that test are such points, and their size changes from draw to draw.
+
+Both kinds are now kept in a table on the device, found again by their code (64 entries, the
+oldest making room), and the point shader reads its sizes from a constant that the draw sets,
+so only three flags decide its code.
+
+3DMark06 on Windows 7, one run each on a host that three or four other guests were using at
+the same time, by the driver's own frame timing (`RIPPLE_UMD_TIMES`; the benchmark's own
+counter cannot be used on a shared host, where the guest's tick clock loses time):
+
+| | Before | Shaders kept | And the sizes in a constant |
+| --- | ---: | ---: | ---: |
+| A loading-screen frame | 5 to 9 ms | 0.8 ms | 0.8 ms |
+| A frame of Firefly Forest | 59 to 72 ms | 44 to 52 ms | 26 to 34 ms |
+| Shaders made in a submit of Firefly Forest | 2.0 to 2.4 | 0.7 to 1.6 | none |
+
+The first test and the two HDR tests did not change: the host's GPU limits them.
+
+On the reference rig with no other guest running (`test-vms.md`, "3DMark06 against the GeForce
+9600 GT, like for like": the same guest, processor model and memory, the registered edition,
+both runs of the quiet kind, the timing report on), one run each, the same disk with the
+driver of this branch's base and only the user-mode driver changed:
+
+| | Before | After |
+| --- | ---: | ---: |
+| 3DMarks | 10829 | 11502 |
+| SM2.0 score | 3391 | 3918 |
+| HDR/SM3.0 score | 4591 | 4600 |
+| CPU score | 8394 | 8426 |
+| A frame of Firefly Forest | 43 to 77 ms | 17 to 48 ms |
+| Frames drawn in Firefly Forest | 1024 | 1792 |
+| Host GPU busy in Firefly Forest | about 50% | about 82% |
+
+Firefly Forest goes from about 17 to 28 frames a second and is now close to what the host's
+GPU can do; the SM2.0 score, of which it is half, rises by 15%, to 94% of the GeForce 9600 GT's
+on the same rig (4165) from 81%. The guest's tick clock kept time in both runs, so the
+benchmark's own figures hold there.
+
+The pixel tests give the same results before and after at both bit widths (Windows 7: all but
+the video-processor test, which passes on Vista only; Vista: all twelve), the points test
+among them, and pictures of Firefly Forest at the same moment show the same fireflies.
+
 ## Clip planes, Fetch4 and points on Windows 7 (2026-11-25)
 
 The clean-install check of release 0.4.0 ran Vista's screen-space pixel tests

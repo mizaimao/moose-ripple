@@ -1171,6 +1171,83 @@ D3D9EmitFixedPointSize(struct ureg_program *ureg, const D3D9Device *device)
             ureg_imm1f(ureg, D3D9PointSize(device)));
 }
 
+/* The vertex or geometry shader of a finished ureg program, from the device's table when a
+ * shader with the same code was made before. A draw of vertices that are already transformed
+ * needs a vertex shader with the viewport and a few render states written into its code, and
+ * a draw of points wider than a pixel a geometry shader with the point size written into it.
+ * Making one for every such draw and deleting it afterwards had the host compile and link a
+ * program each time. When the table is full the oldest entry makes room. */
+static void
+D3D9DeleteGeneratedShader(D3D9Device *device, unsigned slot)
+{
+   struct pipe_context *pipe = device->pipe;
+   void *cso = device->generated_shaders[slot].cso;
+   if (pipe && device->generated_shaders[slot].stage == PIPE_SHADER_GEOMETRY) {
+      /* off the context before it goes, and out of the record of what is bound */
+      if (device->bound.gs == cso) {
+         pipe->bind_gs_state(pipe, NULL);
+         device->bound.gs = NULL;
+      }
+      pipe->delete_gs_state(pipe, cso);
+   } else if (pipe) {
+      if (device->bound.vs == cso) {
+         pipe->bind_vs_state(pipe, NULL);
+         device->bound.vs = NULL;
+      }
+      pipe->delete_vs_state(pipe, cso);
+   }
+   ureg_free_tokens((const struct tgsi_token *)device->generated_shaders[slot].tokens);
+}
+
+static void *
+D3D9KeepGeneratedShader(D3D9Device *device, struct ureg_program *ureg, unsigned stage)
+{
+   unsigned count = 0;
+   const struct tgsi_token *tokens = ureg_get_tokens(ureg, &count);
+   ureg_destroy(ureg);
+   if (!tokens)
+      return NULL;
+   const size_t bytes = (size_t)count * sizeof(*tokens);
+   for (unsigned i = 0; i < device->generated_shader_count; ++i) {
+      if (device->generated_shaders[i].stage == stage &&
+          device->generated_shaders[i].count == count &&
+          !memcmp(device->generated_shaders[i].tokens, tokens, bytes)) {
+         ureg_free_tokens(tokens);
+         return device->generated_shaders[i].cso;
+      }
+   }
+
+   struct pipe_context *pipe = device->pipe;
+   struct pipe_shader_state state;
+   pipe_shader_state_from_tgsi(&state, tokens);
+   void *cso = stage == PIPE_SHADER_GEOMETRY ? pipe->create_gs_state(pipe, &state) :
+                                               pipe->create_vs_state(pipe, &state);
+   if (!cso) {
+      ureg_free_tokens(tokens);
+      return NULL;
+   }
+   unsigned slot;
+   if (device->generated_shader_count < ARRAYSIZE(device->generated_shaders)) {
+      slot = device->generated_shader_count++;
+   } else {
+      slot = device->generated_shader_next++ % ARRAYSIZE(device->generated_shaders);
+      D3D9DeleteGeneratedShader(device, slot);
+   }
+   device->generated_shaders[slot].tokens = tokens;
+   device->generated_shaders[slot].count = count;
+   device->generated_shaders[slot].stage = stage;
+   device->generated_shaders[slot].cso = cso;
+   return cso;
+}
+
+void
+D3D9DestroyGeneratedShaders(D3D9Device *device)
+{
+   for (unsigned i = 0; i < device->generated_shader_count; ++i)
+      D3D9DeleteGeneratedShader(device, i);
+   device->generated_shader_count = device->generated_shader_next = 0;
+}
+
 static void *
 D3D9CreatePositionTPsInputFixedFunctionVs(D3D9Device *device,
                                          const D3D9Object *shader, bool native_points)
@@ -1278,7 +1355,7 @@ D3D9CreatePositionTPsInputFixedFunctionVs(D3D9Device *device,
    ureg_release_temporary(ureg, tmp);
    ureg_END(ureg);
 
-   return ureg_create_shader_and_destroy(ureg, device->pipe);
+   return D3D9KeepGeneratedShader(device, ureg, PIPE_SHADER_VERTEX);
 }
 
 static UINT
@@ -1515,37 +1592,17 @@ D3D9CreatePositionTDiffuseFixedFunctionVs(D3D9Device *device, bool native_points
    ureg_release_temporary(ureg, tmp);
    ureg_END(ureg);
 
-   return ureg_create_shader_and_destroy(ureg, device->pipe);
+   return D3D9KeepGeneratedShader(device, ureg, PIPE_SHADER_VERTEX);
 }
-
-struct D3D9AutoShaderState
-{
-   struct pipe_context *pipe = NULL;
-   D3D9Device *device = NULL;
-   void *vs = NULL;
-
-   ~D3D9AutoShaderState()
-   {
-      if (!pipe)
-         return;
-      if (vs) {
-         /* off the context before it goes, and out of the record of what is bound */
-         if (!device || device->bound.vs == vs) {
-            pipe->bind_vs_state(pipe, NULL);
-            if (device)
-               device->bound.vs = NULL;
-         }
-         pipe->delete_vs_state(pipe, vs);
-      }
-   }
-};
 
 /*
  * D3D9 points wider than one pixel are expanded to two triangles here.  The
  * size is in pixels: the vertex shader's point size when it writes one,
- * otherwise D3DRS_POINTSIZE (x_scale and y_scale then already hold
- * size / viewport extent).  The offsets are scaled by the clip-space w, so
- * points keep their pixel size under a perspective projection.
+ * otherwise D3DRS_POINTSIZE.  The sizes come in the shader's first constant
+ * (set by the draw: x scale, y scale, smallest and largest size), not
+ * in its code, so one shader serves every size and viewport.  The offsets are
+ * scaled by the clip-space w, so points keep their pixel size under a
+ * perspective projection.
  *
  * Every varying a D3D9 pixel shader can read from fixed-function or sm1-3
  * vertex processing is passed through: COLOR0, COLOR1 (GENERIC 8), the
@@ -1556,13 +1613,9 @@ struct D3D9AutoShaderState
  * size > 1 with the vertex's attributes.
  */
 static void *
-D3D9CreatePointPositionGs(D3D9Device *device, float x_scale,
-                          float y_scale, bool use_input_point_size,
-                          bool use_generic_point_size,
-                          float point_size_min, float point_size_max,
-                          bool sprite)
+D3D9CreatePointPositionGs(D3D9Device *device, bool use_input_point_size,
+                          bool use_generic_point_size, bool sprite)
 {
-   struct pipe_context *pipe = device->pipe;
    struct ureg_program *ureg = ureg_create(MESA_SHADER_GEOMETRY);
    if (!ureg)
       return NULL;
@@ -1620,23 +1673,25 @@ D3D9CreatePointPositionGs(D3D9Device *device, float x_scale,
    ureg_property(ureg, TGSI_PROPERTY_GS_MAX_OUTPUT_VERTICES, 4);
    ureg_property(ureg, TGSI_PROPERTY_GS_INVOCATIONS, 1);
 
+   /* x scale, y scale, smallest size, largest size */
+   struct ureg_src sizes = ureg_DECL_constant(ureg, 0);
+
    /* size.xy = clamped point size * (x_scale, y_scale) * w */
    ureg_MOV(ureg, ureg_writemask(size, TGSI_WRITEMASK_X),
             ureg_scalar(point_size, TGSI_SWIZZLE_X));
    if (use_input_point_size) {
       ureg_MAX(ureg, ureg_writemask(size, TGSI_WRITEMASK_X),
                ureg_scalar(ureg_src(size), TGSI_SWIZZLE_X),
-               ureg_imm1f(ureg, point_size_min));
+               ureg_scalar(sizes, TGSI_SWIZZLE_Z));
       ureg_MIN(ureg, ureg_writemask(size, TGSI_WRITEMASK_X),
                ureg_scalar(ureg_src(size), TGSI_SWIZZLE_X),
-               ureg_imm1f(ureg, point_size_max));
+               ureg_scalar(sizes, TGSI_SWIZZLE_W));
    }
    ureg_MUL(ureg, ureg_writemask(size, TGSI_WRITEMASK_X),
             ureg_scalar(ureg_src(size), TGSI_SWIZZLE_X),
             ureg_scalar(pos, TGSI_SWIZZLE_W));
    ureg_MUL(ureg, ureg_writemask(size, TGSI_WRITEMASK_XY),
-            ureg_scalar(ureg_src(size), TGSI_SWIZZLE_X),
-            ureg_imm4f(ureg, x_scale, y_scale, 0.0f, 0.0f));
+            ureg_scalar(ureg_src(size), TGSI_SWIZZLE_X), sizes);
 
    for (UINT i = 0; i < 4; ++i) {
       const float x_sign = (i & 1) ? 1.0f : -1.0f;
@@ -1661,7 +1716,7 @@ D3D9CreatePointPositionGs(D3D9Device *device, float x_scale,
    ureg_release_temporary(ureg, delta);
    ureg_release_temporary(ureg, size);
    ureg_END(ureg);
-   return ureg_create_shader_and_destroy(ureg, pipe);
+   return D3D9KeepGeneratedShader(device, ureg, PIPE_SHADER_GEOMETRY);
 }
 
 static unsigned
@@ -3413,9 +3468,6 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       return D3D9DrawRefused(__LINE__, E_INVALIDARG);
 
    D3D9Object fixed_function_vs_shader;
-   D3D9AutoShaderState fixed_function_shaders;
-   fixed_function_shaders.pipe = device->pipe;
-   fixed_function_shaders.device = device;
    if (device->vertex_shader_func || device->pixel_shader) {
       HRESULT shader_state_hr = D3D9UpdateTranslatedShaderState(device);
       if (FAILED(shader_state_hr))
@@ -3572,16 +3624,16 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
        generate_position_t_runtime_processed_diffuse_vs ||
        generate_position_t_runtime_processed_vs ||
        replace_position_t_vs) {
-      fixed_function_shaders.vs =
+      /* kept on the device (D3D9KeepGeneratedShader), not deleted after the draw */
+      translated_vs =
          (generate_position_t_ps_input_vs ||
           replace_position_t_vs ||
           generate_position_t_runtime_processed_vs ||
           generate_position_t_runtime_ps_vs) ?
          D3D9CreatePositionTPsInputFixedFunctionVs(device, &fixed_function_vs_shader, native_points) :
          D3D9CreatePositionTDiffuseFixedFunctionVs(device, native_points);
-      if (!fixed_function_shaders.vs)
+      if (!translated_vs)
          return D3D9DrawRefused(__LINE__, E_FAIL);
-      translated_vs = fixed_function_shaders.vs;
       fixed_function_vs_shader.translated_vs_cso = translated_vs;
    }
    void *blend = D3D9CreateBlendState(device);
@@ -3605,13 +3657,18 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
 
       const bool sprite =
          device->render_states[D3DRS_POINTSPRITEENABLE] != 0;
-      point_gs = translated_vs_point_size || generated_vs_point_size ?
-         D3D9CreatePointPositionGs(device, 1.0f / width, 1.0f / height, true,
-                                   true,
-                                   point_size_min, point_size_max, sprite) :
-         D3D9CreatePointPositionGs(device, point_size / width,
-                                   point_size / height, false, false,
-                                   point_size_min, point_size_max, sprite);
+      const bool vs_size = translated_vs_point_size || generated_vs_point_size;
+      point_gs = D3D9CreatePointPositionGs(device, vs_size, vs_size, sprite);
+      /* its constant: a pixel of the vertex shader's size, or D3DRS_POINTSIZE, as a share
+       * of the viewport, and the smallest and largest size */
+      const float sizes[4] = {
+         (vs_size ? 1.0f : point_size) / width, (vs_size ? 1.0f : point_size) / height,
+         point_size_min, point_size_max,
+      };
+      struct pipe_constant_buffer cb = {};
+      cb.user_buffer = sizes;
+      cb.buffer_size = sizeof(sizes);
+      pipe->set_constant_buffer(pipe, MESA_SHADER_GEOMETRY, 0, false, &cb);
    }
 
    unsigned constants_size = 0;
@@ -3625,8 +3682,6 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
          D3D9KeptRelease(rasterizer);
       if (dsa)
          D3D9KeptRelease(dsa);
-      if (point_gs)
-         pipe->delete_gs_state(pipe, point_gs);
       free(constants);
       return D3D9DrawRefused(__LINE__, E_FAIL);
    }
@@ -3647,8 +3702,6 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
          D3D9KeptRelease(dsa);
          D3D9KeptRelease(rasterizer);
          D3D9KeptRelease(blend);
-         if (point_gs)
-            pipe->delete_gs_state(pipe, point_gs);
          free(constants);
          return D3D9DrawRefused(__LINE__, E_FAIL);
       }
@@ -3672,8 +3725,6 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       D3D9KeptRelease(rasterizer);
       D3D9KeptRelease(blend);
       free(fs_constants);
-      if (point_gs)
-         pipe->delete_gs_state(pipe, point_gs);
       free(constants);
       return D3D9DrawRefused(__LINE__, E_FAIL);
    }
@@ -3685,8 +3736,6 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
       D3D9KeptRelease(blend);
       D3D9KeptRelease(dynamic_vertex_elements);
       free(fs_constants);
-      if (point_gs)
-         pipe->delete_gs_state(pipe, point_gs);
       free(constants);
       return D3D9DrawRefused(__LINE__, E_INVALIDARG);
    }
@@ -3727,8 +3776,6 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
                                    &translated_ps_texture_count,
                                    &translated_vs_texture_count)) {
       D3D9SettleDrawState(device);
-      if (point_gs)
-         pipe->delete_gs_state(pipe, point_gs);
       return D3D9DrawRefused(__LINE__, E_FAIL);
    }
    D3D9Bind(device, D3D9_BOUND_VERTEX_ELEMENTS, dynamic_vertex_elements);
@@ -3819,14 +3866,12 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
 #endif
 
    /* The vertex buffers come off (they may be the program's own memory); this draw's
-    * references to its texture views and its point shader go. The rest stays bound for the
-    * next draw (D3D9Bind). */
+    * references to its texture views go and its point shader comes off (it stays on the
+    * device, D3D9KeepGeneratedShader). The rest stays bound for the next draw (D3D9Bind). */
    pipe->set_vertex_buffers(pipe, 0, NULL);
    D3D9ReleaseTranslatedTextures(device, translated_texture_views);
    if (point_position_gs)
       D3D9Bind(device, D3D9_BOUND_GS, NULL);
-   if (point_gs)
-      pipe->delete_gs_state(pipe, point_gs);
 
    return D3D9ConsumeBackendDrawFailure(device) ? E_FAIL : S_OK;
 }
