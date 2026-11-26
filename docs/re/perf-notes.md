@@ -1548,3 +1548,41 @@ stale or damaged entry to give a wrong picture. It is not in the tree.
 What is left to gain here is small whatever is built: skipping all of Mesa's compile for a
 program seen before (a cache keyed on the program's text, with the state tracker's variants)
 could give at most the sixth above.
+
+### The second GL thread in UTM: 19.7 to 23.4 frames/s (2026-11-26)
+
+The trial of Mesa's second GL thread ("The per-draw CPU cost, and a trial of a second GL
+thread" above) gave about 6% on the Intel host, where the host is the pacer. Under emulation
+the program's own thread is the limit, so the same trial was run in UTM. Its two patch files
+apply unchanged to the tree of today; the bundle was built aside, put into the guest for the
+test and taken out again. It is still not in the tree.
+
+UTM 5 on an M1 Max, no other guest running. OpenArena's timedemo, 1024x768 window under the
+Dock, one run each on one boot, the same bundle both times, switched by `RIPPLE_GL_THREAD=1`
+in the game's environment:
+
+| second GL thread | frames/s | run | a frame on average |
+|---|---|---|---|
+| off | 19.7 | 172.9 s | 50.9 ms |
+| on | 23.4 | 145.3 s | 42.8 ms |
+
+19% more. (The check run before it, thread on, with four captures and a two-second profile
+in it, came to 23.2.) Looked at before timing, from inside the guest: gl-gears, 56.6 frames/s
+with the thread as without, and four captures of the timedemo with the thread on; textures,
+models, the text and the weapon are right in all of them.
+
+The four changes timed in UTM earlier (the display limit, the helper thread and the two for
+covered windows) made no difference there; this one does. Open: the level without the thread,
+19.7, is the level of every run in UTM today (19.6 to 20.0), but on 2026-11-25 and in the
+night after it the same timedemo ran at 22.9 to 24.8 there. The pair above is on one boot and
+one build, so it stands whatever the reason is.
+
+What a version for the tree needs, which the trial does not have:
+
+- The trial was only ever run with one program at a time that has one context. WindowServer,
+  Core Image and programs with several contexts or surface textures are untested; the
+  frontend's entries that touch a context directly (about sixty) wait for the worker, and each
+  has to be read for state it uses without waiting.
+- The upload range goes from Mesa's upload function to the virgl driver through two plain
+  functions and a fixed table of 32 buffers. That has to become a proper part of the driver.
+- A way to choose it: by program at first (the environment variable), not for WindowServer.

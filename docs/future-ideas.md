@@ -18,9 +18,12 @@ nothing over its window; the same host's GeForce 9600 GT with Apple's driver doe
 - At about 300 frames/s the host is the pacer on the Intel hosts: QEMU's main thread runs the
   guest's GL commands and waits for the GPU in between. In the guest the driver's own work is
   1.2 ms a frame, spread thin; putting it on a second thread (Mesa's glthread, a trial that is
-  not in the tree) gave about 6% there. It may be worth more under emulation, where the
-  program's thread is the limit ([re/perf-notes.md](re/perf-notes.md), "a second GL thread").
-- In UTM none of the changes of 2026-11-25 is timed yet; they are only checked to work.
+  not in the tree) gave about 6% there.
+- In UTM the emulated processor is the limit: the display limit, the helper thread and the two
+  covered-window changes make no difference there. The second-thread trial does: 19.7 to
+  23.4 frames/s in OpenArena's timedemo. A version for the tree is one to two days of work,
+  mostly reading every frontend entry for state it touches while the worker runs
+  ([re/perf-notes.md](re/perf-notes.md), "The second GL thread in UTM").
 - Core Image: from a filter's third render on, ours is faster than software rendering (26 ms
   against 34 for 24 filters on a 480x300 picture). The first two renders of a filter, where
   Core Image sets its programs, take 353 ms against 138 for the 24: Mesa's compile of each
