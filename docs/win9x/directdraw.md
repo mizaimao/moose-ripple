@@ -702,6 +702,53 @@ The context is made with Mesa's `DrvCreateContext` and every OpenGL function com
 when the context is made. The game then plays its title flyby and its demo level, and exits
 cleanly. d3dtest: 1085 frames/s (1040 before); Re-Volt's race still draws.
 
+## Direct3D 8 through its own interface (stage 1, 2026-11-26, off by default)
+
+The Direct3D 8 runtime drives a driver that only has the Direct3D 7 interface by translating
+(it runs the vertex processing and sends Direct3D 7 commands), which is how Direct3D 8 programs
+have run on this driver so far. Shaders need the Direct3D 8 interface itself: the same
+GetDriverInfo2 requests and DrawPrimitives2 commands as on Windows 2000 (`win2k/d3d8ddi.h` is
+shared). Stage 1 answers GetDriverInfo2 (D3DCAPS8 without shaders or hardware vertex
+processing, the format list, the runtime's version) and draws from streams: SETVERTEXSHADER
+with a vertex format, SETSTREAMSOURCE and its user-memory form, SETINDICES, DRAWPRIMITIVE,
+DRAWPRIMITIVE2, DRAWINDEXEDPRIMITIVE and its second form, CLIPPEDTRIANGLEFAN and BUFFERBLT;
+shader and patch commands are stepped over. It is offered only when the registry value
+`HKLM\Software\moose-ripple`, `D3D8` is `"1"` (a `.reg` file on the test CD sets it).
+
+Learnt on Windows 98 SE with DirectX 8.1 (UTM):
+
+- **The runtime asks once per boot.** The first program that uses Direct3D 8 decides, for every
+  program until the next restart, whether the driver has the Direct3D 8 interface; that is why
+  the switch is in the registry and not in a program's environment.
+- **Its surface records for buffers live only during CreateSurfaceEx.** The runtime's
+  `DDRAWI_DDRAWSURFACE_LCL` for a vertex or index buffer is freed when the call returns and its
+  memory is soon reused: the HAL read a "global" pointer of `00810800` from it at the first draw,
+  faulted while DirectDraw held Windows' 16-bit lock, and Windows stopped answering (no crash
+  dialog can show then). The HAL now copies each buffer's address and size into its own table
+  when the runtime names it (`buffer_set`), and never looks at that record again.
+- **A draw can start at any byte.** The runtime packs vertices of different formats into one
+  buffer and gives DRAWPRIMITIVE2 a byte offset that need not be a whole vertex.
+- **Texture records are just as short-lived.** For textures named in a session with a
+  Direct3D 8 context, the HAL keeps its own copy of each level's records (`shadow_make`: the
+  LCL, its MORE, the GBL with the GBL_MORE pointer just before it, and attach lists linking the
+  levels) and the handle table points at the copy; the memory stays the runtime's. Writes
+  still reach the texture by its memory address (Lock and texture blits mark it). Cube maps
+  aren't offered yet and get no copy.
+
+`d8pixels sw` (software vertex processing), Windows 98 SE with DirectX 8.1 in UTM: all 8 cases
+pass through the new interface (clear, user memory, vertex buffer, strip, indexed, base vertex,
+managed texture, untransformed vertices), in the first program of the boot and in a second one.
+Through the Direct3D 7 translation (switch off) all 8 pass too, as before. `d3dtest`
+(Direct3D 7) in the same boot with the switch on fails the same two checks as with the released
+driver in UTM (mipmap level with LOD bias +1: level 3's colour where level 4's is expected), so
+that one is the UTM host's and not this work's.
+
+Found on the way, not caused by this work: with the switch off (the released driver too), only
+the first Direct3D 8 program after a restart reaches the HAL. A second run of `d8pixels` in the
+same boot loads no driver code, makes no OpenGL context, and still passes its pixel checks, so
+something else draws it. With the Direct3D 8 interface on, every run reaches the HAL. To be
+looked into with a program whose speed shows which path it took.
+
 ## Changing a driver in the test VM
 
 Copying a new `rippledd.dll` or `ripplevd.vxd` over the old one fails while Windows has it
