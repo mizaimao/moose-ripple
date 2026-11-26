@@ -145,8 +145,11 @@ environment (the second run of a program failed before that).
 
 ### Full-screen GPU presentation
 
-Set `RIPPLE_D3D_SCANOUT=1` before starting a full-screen Direct3D game to try the GPU display
-path. The default is the existing VGA path. With a 16- or 32-bit flip chain, the HAL keeps the
+Since 2026-11-26 full-screen Direct3D games use the GPU display path by default on a host with
+virgl. Set `RIPPLE_D3D_SCANOUT=0` before starting a game to use the VGA path instead (every
+frame read back into the card's memory). Without virgl (Mesa's software renderer) the display
+stays on VGA. Until then the GPU path was opt-in with `RIPPLE_D3D_SCANOUT=1`, which the
+measurements below use. With a 16- or 32-bit flip chain, the HAL keeps the
 finished colour buffer on the GPU. It reads a page back when DirectDraw needs its pixels, for
 example when the game locks a surface to draw into it. Mesa converts the finished frame on
 the GPU into a reusable display image. Windowed OpenGL still uses GDI for clipping.
@@ -500,6 +503,63 @@ measure the rate of distinct frames in UTM's viewer. A separate eight-second
 GPU race with QEMU's SPICE update trace enabled produced no new VM log records.
 Full-screen GPU presentation remains opt-in pending a check of the UTM window.
 [QEMU captures before and after GPU takeover](img/utm-qmp-scanout.webp)
+
+#### Frames reaching the UTM window (2026-11-26)
+
+UTM's own log (`Data/debug.log` in the VM's bundle, with debug logging on) has one
+`gl draw` line for every picture QEMU hands its window, with a millisecond time stamp.
+Counting them over the timed part of a test gives the rate of pictures the viewer received,
+apart from the guest's own flip rate. Same UTM 5.0.8 guest and boot, the driver with GPU
+presentation as the default; the VGA runs set `RIPPLE_D3D_SCANOUT=0`, and came first, before
+anything had used the GPU path:
+
+| Test | Path | Guest flips/s | Read-backs per flip | Pictures to the window/s | Gap median / 95th percentile |
+|---|---|---:|---:|---:|---:|
+| `d3dtest` 1024×768×16, 5 s | VGA | 190.0 | 1 | 30.6 | 33 / 34 ms |
+| | GPU (default) | 1,993.0 | 0 | 58.8 | 17 / 18 ms |
+| Re-Volt race, 8 s of throttle | VGA | about 33 | 1 | 28.3 | 33 / 42 ms |
+| | GPU (default) | about 50 | 0 | 47.4 | 20 / 30 ms |
+
+On the VGA path QEMU samples the card's memory on its own display timer, about every 30 ms.
+On the GPU path the mini-VDD sends each new frame, at most one every 16.7 ms, so in Re-Volt
+nearly every frame the game made reached the window. During the 10-second hold after the
+scene, with an unchanged picture, no picture was sent. A live look at the UTM window on
+2026-11-19 had found the same coloured test pattern on both paths, the desktop between
+tests, and the front-buffer update without a flip.
+
+After the first GPU frame of a session the desktop stays on the mini-VDD's copy of the card's
+memory (see below). That copy has a cost when nothing moves: on an idle desktop QEMU used 10%
+of a host core before the GPU scene and 31% after it, the mini-VDD comparing the whole
+1280×720 screen every 32 ms. The cheaper copy described under "The desktop after GPU
+presentation" brought that to 20%.
+
+#### The desktop after GPU presentation
+
+QEMU can't go back to showing the VGA memory once a virtio image was on screen, so after the
+first GPU frame the mini-VDD shows the Windows desktop itself: every 32 ms it compares the
+card's memory with its own 32-bit copy, and sends what changed to the host
+(`desktop_refresh` in `win9x/minivdd/vgpu.c`). Until 2026-11-26 it compared every pixel each
+time, uploaded the whole screen when anything had changed, and counted the next 32 ms from the
+end of that work. In UTM a window being moved reached the viewer 17.8 times a second (median
+gap 50 ms): not Windows 98's slow timer (the guest counted 30,017 ms over 30.06 real seconds
+during the test), but 32 ms plus the comparison and the full-screen upload.
+
+Now the comparison has a loop for each colour depth, an unchanged desktop is compared one
+row in four (a different set each time, so every row is looked at within four samples, and a
+difference anywhere makes it a full comparison), only the changed rows go to the host, and
+the next sample is due 32 ms after the start of this one. Changes shorter than four rows can
+show up to about 100 ms late; the pointer, a text caret and a line of text are taller.
+
+Same UTM guest and procedure before and after (1280×720×32 desktop, a GPU-presented
+`d3dtest` scene first, then `w98move`: a 320×240 window moved back and forth 40 pixels as fast
+as it goes for 30 seconds):
+
+| | Before | After |
+|---|---:|---:|
+| Pictures to the UTM window while the window moves, per second | 17.8 | 26.6 |
+| Gap between them, median / 95th percentile | 50 / 94 ms | 35 / 69 ms |
+| Window moves the program made in 30 s | 51,285 | 60,571 |
+| QEMU's host CPU with the desktop idle (10% before any GPU frame) | 31% | 20% |
 
 ### 3DMark 2000 (2026-11-16)
 
