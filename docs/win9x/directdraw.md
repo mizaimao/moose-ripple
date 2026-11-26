@@ -964,6 +964,10 @@ not seen (d9pixels lost four cases until only static buffers went to buffer obje
 the rig: d9pixels 48/49 (the one failure is the known `vs1_inputs` declaration the runtime
 refuses with hardware vertex processing), d8pixels 23/23, Dragothic at both details through VNC.
 
+A kept list of the lights that are on (instead of scanning the 128 light slots each draw) was
+measured on top of this and dropped: 30341 3DMarks, every test within 2% (eight lights 328.6
+against 334.0 MTriangles/s).
+
 Advanced Pixel Shader's white boat and jetty: a trace with each draw's state (new trace lines)
 showed nine draws a frame with no texture on the stage their shader samples, and about one
 refused CanCreateSurface a frame. The refused format was FOURCC 63: for mipmapped Q8W8V8U8
