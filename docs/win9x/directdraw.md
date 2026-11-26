@@ -891,7 +891,15 @@ Bump Mapping 735.3, DOT3 673.9, Advanced Pixel Shader 99.9, Point Sprites 4.2 MS
 rate 10066.3 and 14673.8 MTexels/s (the Car Chase lines did not scroll into view in the
 results dialog). Pictures checked through VNC; Car Chase's ground was dark until lights got
 slots by Direct3D's index (3DMark's indices go far beyond 32), and its vertex shaders are vs_1_0.
-Advanced Pixel Shader's boat and jetty are still white.
+
+Advanced Pixel Shader's white boat and jetty: a trace with each draw's state (new trace lines)
+showed nine draws a frame with no texture on the stage their shader samples, and about one
+refused CanCreateSurface a frame. The refused format was FOURCC 63: for mipmapped Q8W8V8U8
+textures the runtime names the format by its D3DFORMAT number instead of `DDPF_BUMPDUDV`. Such
+surfaces have no bit count, so CreateSurface sizes them itself, and Lock and texture blits take
+the texel size from the format. Since then the boat and jetty are shaded dark grey in the dusk
+scene and the water shows its ripples; whether their flat look is right needs a reference
+picture.
 
 ### 3DMark 2001 SE (2026-11-26, rig VM 230)
 
