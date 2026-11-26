@@ -11,6 +11,8 @@
  * With "single" as the last word it asks for a pixel format without a back buffer and draws
  * straight to the window (glFlush instead of SwapBuffers), as Windows' OpenGL screen savers do.
  * With "text" it also draws text through wglUseFontBitmaps and wglUseFontOutlines.
+ * With "full" the window is a popup covering the whole screen at its current mode, with the pointer
+ * hidden, as a full-screen game makes it.
  *
  * Exit status 0 when every pixel check passed. Output goes to standard output; run it as
  *   gltest > out.txt
@@ -198,8 +200,9 @@ int main(int argc, char **argv)
     /* "nullpfd": SetPixelFormat without a descriptor, as Windows' OpenGL screen savers call it */
     int nullpfd = argc > 1 && !strcmp(argv[argc - 1], "nullpfd");
     int text = argc > 1 && !strcmp(argv[argc - 1], "text");
+    int full = argc > 1 && !strcmp(argv[argc - 1], "full");
     int single = argc > 1 && (nullpfd || !strcmp(argv[argc - 1], "single"));
-    int seconds = argc > 1 && !((single || text) && argc == 2) ? atoi(argv[1]) : 3;
+    int seconds = argc > 1 && !((single || text || full) && argc == 2) ? atoi(argv[1]) : 3;
     int w = argc > 3 ? atoi(argv[2]) : 320, h = argc > 3 ? atoi(argv[3]) : 240;
     WNDCLASS wc;
     PIXELFORMATDESCRIPTOR pfd;
@@ -213,6 +216,10 @@ int main(int argc, char **argv)
     MSG msg;
 
     resources("at the start");
+    if (full) {
+        w = GetSystemMetrics(SM_CXSCREEN);
+        h = GetSystemMetrics(SM_CYSCREEN);
+    }
     memset(&wc, 0, sizeof wc);
     wc.style = CS_OWNDC;
     wc.lpfnWndProc = wndproc;
@@ -222,13 +229,19 @@ int main(int argc, char **argv)
     RegisterClass(&wc);
     SetRect(&r, 0, 0, w, h);
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-    win = CreateWindow("gltest", "gltest", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-                       40, 40, r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
+    if (full)
+        win = CreateWindow("gltest", "gltest", WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                           0, 0, w, h, NULL, NULL, wc.hInstance, NULL);
+    else
+        win = CreateWindow("gltest", "gltest", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                           40, 40, r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
     if (!win) {
         printf("CreateWindow failed, error %lu\n", GetLastError());
         return 2;
     }
     ShowWindow(win, SW_SHOWNORMAL);
+    if (full)
+        ShowCursor(FALSE);
     UpdateWindow(win);
     dc = GetDC(win);
 
