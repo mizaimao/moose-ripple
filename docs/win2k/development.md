@@ -2219,6 +2219,24 @@ an unfenced packet reports at once. 3DMark 2001 SE went from 5122 to 5446
 (timed, host alone), and fence waits during draws from 11.6 s to 0.01 s.
 Presents still wait 58 s on their fences in a run: the next lead.
 
+The guest read port 0x608, the ACPI power management timer, about 4,500
+times a second (KVM's `kvm_pio` trace events on the host); it was nearly all
+its VM exits. QEMU answers that port under the lock its drawing thread holds,
+so a read can stop the guest until a batch is done, and guest and host took
+turns instead of working at once. The reads were the driver's own time stamps
+(`KeQueryPerformanceCounter`, `EngQueryPerformanceCounter`). They now come
+from the processor's cycle counter (`rb_counter_ticks`, `cycles` in the
+display driver), whose rate is measured against the performance counter when
+the counters are reported. 3DMark 2001 SE went from 5446 to 5911 (timed, host
+alone); draw requests waited 15 s to queue in a run instead of 85 s.
+
+The time stamps decide nothing but these statistics: every timeout and wait
+counts polls of `VideoPortStallExecution`. A cycle counter that differs
+between processors, or changes rate (guests without an invariant counter,
+such as a Penryn model or TCG), can only skew the printed times. Spinning the
+wait loops on the cycle counter instead of the HAL's stall was tried and
+measured no faster (5911 to 5935), so the waits keep the HAL's stall.
+
 
 ## Release package
 
