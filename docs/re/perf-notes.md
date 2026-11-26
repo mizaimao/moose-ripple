@@ -1318,3 +1318,30 @@ second apart.
 
 A covered window now costs about 7% of the frame rate on the Proxmox host, where it cost a
 quarter the evening before.
+
+### A two-hour stability run (2026-11-26)
+
+On the Proxmox host, to itself, GPU clock at 1200 MHz, with the kext and bundle of 2026-11-25
+(queued submits, the display limit, the helper thread, covered windows without the wait, the
+accelerator reference; the redraw limit above came after). `tools/soak/soak.sh` ran detached
+in the guest for 122 minutes, 22 rounds of: OpenArena's timedemo in a covered and in an
+uncovered window, Cinebench's OpenGL test with its reference check, Real Racing 2 started and
+taken into a quick race for two minutes, the two Core Image comparisons, gl-gears in a covered
+window, Exposé and Dashboard.
+
+| step, 22 times each | result |
+|---|---|
+| OpenArena, 1024x768 window under the Dock | 185.8 to 207.4 frames/s, mean 193.5 |
+| OpenArena, 800x600 window, nothing over it | 288.4 to 307.1, mean 299.8 |
+| Cinebench OpenGL test | 34.9 to 39.2 frames/s; reference check passed every time, the same 3,625 pixels off |
+| Real Racing 2, two minutes of a race | 60.1 frames/s every time, no 5 s window under 60.0; menu reached after 65 to 70 s |
+| Core Image: 24 filters, 61 Photo Booth effects | 1 and 6 differ from the software renderer, every time |
+| gl-gears, covered | 59.4 frames/s or more, longest frame 20 ms |
+
+No drift in any of them from the first round to the last. Health line after each round: no
+error from the kext, no crash report, no command over 100 ms; WindowServer 58 to 62 MB, wired
+memory 732 to 734 MB. On the host: no message from the renderer in the journal, QEMU's memory
+3.4 GB after five minutes and 3.6 GB at most. The guest shut itself down cleanly at the end.
+
+Cinebench is slower inside the run (36 frames/s) than started alone after a boot (46); the
+order of the programs was not varied, so this is noted, not explained.
