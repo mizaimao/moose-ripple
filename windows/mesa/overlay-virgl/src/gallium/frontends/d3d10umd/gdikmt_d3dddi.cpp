@@ -12,10 +12,8 @@
 
 #include "gdikmt_d3dddi.h"
 #include "D3D9Trace.h"
-#ifdef RIPPLE_VISTA
 #include "RippleLog.h"
 #include "virtio/wddm/viogpu_wddm_driver.h"
-#endif
 
 #define DDI_INVALID_PARAMETER ((NTSTATUS)0xC000000DL)
 #define DDI_NO_MEMORY         ((NTSTATUS)0xC0000017L)
@@ -86,10 +84,11 @@ d3dddi_create_allocation(struct gdikmt_device *dev, struct gdikmt_createallocati
       }
    }
 
-#ifdef RIPPLE_VISTA
-   /* Vista refuses a primary (E_INVALIDARG) that can live only in the aperture segment. The
-    * tag has the kernel driver put it in its desktop segment, as it does the desktop's own
-    * primary (viogpum.h, VIOGPU_VISTA_PRIMARY). */
+   /* A primary goes to the kernel driver tagged (viogpum.h, VIOGPU_VISTA_PRIMARY). On Vista,
+    * which refuses a primary (E_INVALIDARG) that can live only in the aperture segment, the
+    * kernel driver puts it in its desktop segment, as it does the desktop's own primary. On
+    * both systems it leaves a primary's memory write-combined: Windows takes no cached
+    * primary. */
    VIOGPU_VISTA_PRIMARY tagged[4];
    void *untagged[4];
    const UINT ntagged = !ddi->isPrimary ? 0 : create->NumAllocations < 4 ? create->NumAllocations : 4;
@@ -103,7 +102,6 @@ d3dddi_create_allocation(struct gdikmt_device *dev, struct gdikmt_createallocati
       info->pPrivateDriverData = &tagged[i];
       info->PrivateDriverDataSize = sizeof(tagged[i]);
    }
-#endif
 
    memset(&arg, 0, sizeof(arg));
    arg.pPrivateDriverData = create->pPrivateDriverData;
@@ -113,7 +111,6 @@ d3dddi_create_allocation(struct gdikmt_device *dev, struct gdikmt_createallocati
    arg.pAllocationInfo = create->pAllocationInfo;
 
    hr = ddi->KTCallbacks.pfnAllocateCb(ddi->hRTDevice, &arg);
-#ifdef RIPPLE_VISTA
    for (UINT i = 0; i < ntagged; i++) {
       D3DDDI_ALLOCATIONINFO *info = &create->pAllocationInfo[i];
       if (info->pPrivateDriverData == &tagged[i]) {
@@ -125,7 +122,6 @@ d3dddi_create_allocation(struct gdikmt_device *dev, struct gdikmt_createallocati
       ripple_logf("Windows refused an allocation: 0x%08lx, primary %u, display %u, %u allocations",
                   (unsigned long)hr, (unsigned)ddi->isPrimary, (unsigned)ddi->allocationVidPn,
                   (unsigned)create->NumAllocations);
-#endif
    if (SUCCEEDED(hr)) {
       /* Allocations of a runtime resource are given back through that resource. */
       create->hResource = ddi->hRTResource;
