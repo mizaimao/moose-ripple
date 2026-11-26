@@ -561,6 +561,14 @@ as it goes for 30 seconds):
 | Window moves the program made in 30 s | 51,285 | 60,571 |
 | QEMU's host CPU with the desktop idle (10% before any GPU frame) | 31% | 20% |
 
+The picture, on the Intel host (VM 230, the same driver files, captures from QEMU's VNC server
+because its screendump has no picture once a virtio image is shown): the 1280×720×32 desktop
+shown through the copy after a GPU-presented program matched the desktop captured before any
+GPU frame at all 921,600 pixels (the tray clock left out), and again after `w98move` had moved
+its window 635,018 times and closed it. The default Direct3D scene took the GPU path with no
+variable set and passed every pixel check, and its held frame looked as before.
+[Desktop before and after the GPU frame, and the scene](img/desktop-copy-rig.webp)
+
 ### 3DMark 2000 (2026-11-16)
 
 3DMark 2000 1.1 runs its default benchmark to the end on Windows 98 SE in VM 230 (DirectX 7,
