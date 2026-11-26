@@ -2132,6 +2132,7 @@ interval 0 and 1. The game is OpenArena 0.8.8's timedemo of
 | 30 frames at swap interval 1; 300 at interval 0 | no such extension | 0.5 s; 0.03 s |
 | OpenArena timedemo | 1.9 frames/s (1818 s) | 324 frames/s (10.5 s) |
 | the same, full screen at 1024x768 (a display mode change and back) | | 431 frames/s (7.9 s), right picture |
+| a single-buffered window drawn to and flushed (`tools/win7-hello/glsingle.c`) | | red read back and on the screen (64-bit and 32-bit) |
 | Windows 7 SP1 in UTM (a host that offers OpenGL ES) | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 2.1; the same GL test passes (64-bit and 32-bit) |
 | Windows Vista SP2 on the Linux host, installed through the INF | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 4.3; the same GL test passes (64-bit and 32-bit); OpenArena timedemo in a 640x480 window 258 frames/s |
 | Windows Vista SP2 in UTM, installed through the INF | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 2.1; the same GL test passes (64-bit and 32-bit) |
@@ -2146,7 +2147,4 @@ Known gaps:
 - **The DXGI swap chain way does not work on Windows 7** (`RIPPLE_GL_PRESENT=dxgi`): the
   window stays black and the program ends with an access violation. The Direct3D 9Ex way is
   the default on both systems and keeps the frame on the GPU just the same.
-- A window with a single-buffered pixel format does not get this framebuffer (Mesa marks
-  those formats as GDI-compatible); it falls back to the read-back path, which has not been
-  tried here.
 - Only this one game and the test program have run.
