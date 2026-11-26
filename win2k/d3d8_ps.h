@@ -16,6 +16,10 @@
 #define RB_PS2_COORD_SETS 8
 #define RB_PS2_SAMPLERS 8
 #define RB_PS_CONSTANTS 8
+/* A version 1 program with texbem or texbeml: c0..c7, then each stage n's
+ * bump matrix (00, 01, 10, 11) in CONST[8+n] and its luminance scale and
+ * offset in CONST[12+n]; the fog constants follow at CONST[16] and [17]. */
+#define RB_PS_BUMP_CONSTANTS 16
 #define RB_PS2_CONSTANTS 32     /* c0..c31 of shader model 2 */
 #define RB_PS_TEXT_BYTES 8192
 
