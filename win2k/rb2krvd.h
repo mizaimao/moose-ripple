@@ -40,7 +40,8 @@ enum {
     RB2K_RVD_OP_GL_PROFILE,         /* out: RB2K_GL_PROFILE */
     RB2K_RVD_OP_SCANOUT,            /* context, a: buffer, b: width, bytes: height: show it full screen */
     RB2K_RVD_OP_DESKTOP,            /* show the desktop again after RB2K_RVD_OP_SCANOUT */
-    RB2K_RVD_OP_PRIMARY_DIRTY       /* a: page, u.rect: send that part of the desktop in guest memory */
+    RB2K_RVD_OP_PRIMARY_DIRTY,      /* a: page, u.rect: send that part of the desktop in guest memory */
+    RB2K_RVD_OP_PRIMARY_READ        /* a: page: bring it up to date from the host before a lock */
 };
 
 #define RB2K_RVD_STAGING_SEGMENTS 48

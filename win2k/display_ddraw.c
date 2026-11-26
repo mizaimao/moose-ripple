@@ -731,6 +731,8 @@ static DWORD APIENTRY lock_surface(PDD_LOCKDATA data)
         else {
             if (data->bHasRect)
                 offset = data->rArea.top * g->lPitch + data->rArea.left * (d->mode.BitsPerPlane / 8);
+            /* With the desktop in guest memory, presents may have left the page stale. */
+            if (d->memoryPrimary) rb_memory_primary_read(d, page);
             /* NT supplies the user-mode view created by our DdMapMemory. */
             data->lpSurfData = (BYTE *)data->fpProcess + page * d->pageBytes + offset;
             d->lockedPages |= 1UL << page;

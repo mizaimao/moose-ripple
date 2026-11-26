@@ -758,9 +758,11 @@ BOOLEAN rb_gpu_copy_layer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG image, U
 
 /* A rectangle of an image into another resource (the desktop in guest memory,
  * gpu_primary.c), in the image's own context, to which the destination is
- * attached for the copy. */
+ * attached for the copy. wait: until the host GPU has done it (fenced); otherwise
+ * the host has only queued it, after the image's own drawing. */
 BOOLEAN rb_gpu_copy_image_rect(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG image, ULONG destination,
-                               ULONG srcX, ULONG srcY, ULONG dstX, ULONG dstY, ULONG width, ULONG height)
+                               ULONG srcX, ULONG srcY, ULONG dstX, ULONG dstY, ULONG width, ULONG height,
+                               BOOLEAN wait)
 {
     COPY_PACKET *p = (COPY_PACKET *)gpu->copyPacket.bytes;
     RB2K_GPU_RESULT cleanup;
@@ -780,7 +782,8 @@ BOOLEAN rb_gpu_copy_image_rect(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG ima
     w[VIRGL_CMD_RCR_SRC_H] = height;
     w[VIRGL_CMD_RCR_SRC_D] = 1;
     if (!context_resource(gpu, result, image, destination, TRUE, RB2K_STAGE_ATTACH)) return FALSE;
-    if (!fenced(gpu, result, &p->submit.hdr, sizeof(p->submit) + sizeof(p->command[0]), RB2K_STAGE_TRANSFER)) {
+    if (wait ? !fenced(gpu, result, &p->submit.hdr, sizeof(p->submit) + sizeof(p->command[0]), RB2K_STAGE_TRANSFER) :
+               !send_request(gpu, result, p, sizeof(p->submit) + sizeof(p->command[0]), RB2K_STAGE_TRANSFER)) {
         if (gpu->ready) context_resource(gpu, &cleanup, image, destination, FALSE, RB2K_STAGE_CLEANUP);
         return FALSE;
     }

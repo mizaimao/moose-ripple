@@ -211,9 +211,56 @@ VP_STATUS rb_memory_primary_upload(RB2K_GPU *gpu, ULONG page, const RB2K_RECT *r
     return NO_ERROR;
 }
 
+/* GDI's pending changes to the desktop's page, sent now: before anything else reads or
+ * writes the page's resource, so that the order of drawing holds. */
+static void send_pending(RB2K_GPU *gpu)
+{
+    RB2K_RECT r;
+    if (!gpu->memoryPendingSet) return;
+    r = gpu->memoryPending;
+    gpu->memoryPendingSet = FALSE;
+    if (gpu->memoryWidth) rb_memory_primary_upload(gpu, 0, &r);
+}
+
+/* A change GDI made to the desktop's page: recorded, and sent with the others a few
+ * milliseconds later (rb_memory_primary_deferred). Each upload waits for the host,
+ * so a burst of drawing costs one instead of one per call. */
+void rb_memory_primary_defer(RB2K_GPU *gpu, const RB2K_RECT *rect)
+{
+    RB2K_RECT *p = &gpu->memoryPending;
+    if (!gpu->memoryWidth || rect->left >= rect->right || rect->top >= rect->bottom) return;
+    ++gpu->memoryDeferred;
+    if (!gpu->memoryDefer) { rb_memory_primary_upload(gpu, 0, rect); return; }
+    if (!gpu->memoryPendingSet) {
+        *p = *rect;
+        gpu->memoryPendingSet = TRUE;
+    } else {
+        if (rect->left < p->left) p->left = rect->left;
+        if (rect->top < p->top) p->top = rect->top;
+        if (rect->right > p->right) p->right = rect->right;
+        if (rect->bottom > p->bottom) p->bottom = rect->bottom;
+    }
+    if (!gpu->memoryArmed) {
+        gpu->memoryArmed = TRUE;
+        rb_defer_arm(gpu->memoryDefer, 8);
+    }
+}
+
+/* The deferred worker, in a system thread: the transport's lock orders it with requests. */
+void rb_memory_primary_deferred(PVOID context)
+{
+    RB2K_GPU *gpu = context;
+    rb_lock(gpu->lock);
+    gpu->memoryArmed = FALSE;
+    send_pending(gpu);
+    rb_unlock(gpu->lock);
+}
+
 /* A Direct3D present to the desktop in memory: the host copies the frame's rectangle
- * into the page's resource, which shows it, and the same pixels come back into the
- * page for GDI (which reads them for screen copies and window moves) and for locks.
+ * into the page's resource, which shows it. Outside a flip chain the same pixels come
+ * back into the page for GDI (which reads them for screen copies and window moves).
+ * A live chain's pages are only marked stale: read back when the program locks one
+ * (rb_memory_primary_read) and when the chain ends, and the copy is not waited for.
  * No staging, so no limit below the desktop's own size, and no copy or upload in the
  * guest. to: in the pages' rows, the second page below the first. */
 VP_STATUS rb_memory_primary_present(RB2K_GPU *gpu, ULONG image, ULONG srcX, ULONG srcY, const RB2K_RECT *to)
@@ -228,18 +275,53 @@ VP_STATUS rb_memory_primary_present(RB2K_GPU *gpu, ULONG image, ULONG srcX, ULON
     r.bottom -= page * gpu->memoryHeight;
     if (r.left >= r.right || r.top >= r.bottom || r.right > gpu->memoryWidth || r.bottom > gpu->memoryHeight)
         return ERROR_INVALID_PARAMETER;
+    send_pending(gpu);
     status = ensure(gpu, page);
     if (status) return status;
     if (!rb_gpu_copy_image_rect(gpu, &result, image, *page_resource(gpu, page), srcX, srcY, r.left, r.top,
-                                r.right - r.left, r.bottom - r.top)) {
+                                r.right - r.left, r.bottom - r.top, (BOOLEAN)!gpu->memoryChain)) {
         ++gpu->memoryFailures;
         return result.status;
     }
-    status = transfer(gpu, VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, page, &r);
+    if (gpu->memoryChain) {
+        gpu->memoryStale |= 1UL << page;
+        status = NO_ERROR;
+    } else {
+        status = transfer(gpu, VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, page, &r);
+    }
     if (!status) status = flush(gpu, page, &r);
     if (status) { ++gpu->memoryFailures; return status; }
     ++gpu->memoryPresents;
     return NO_ERROR;
+}
+
+/* A page made current again from its resource, if presents left it stale. */
+VP_STATUS rb_memory_primary_read(RB2K_GPU *gpu, ULONG page)
+{
+    RB2K_RECT all;
+    VP_STATUS status;
+    if (!gpu->memoryWidth || page > 1 || !(gpu->memoryStale & (1UL << page))) return NO_ERROR;
+    if (!page) send_pending(gpu);
+    if (!*page_resource(gpu, page) || !gpu->ready) {
+        gpu->memoryStale &= ~(1UL << page);   /* the resource went with a reset */
+        return NO_ERROR;
+    }
+    all.left = all.top = 0;
+    all.right = gpu->memoryWidth;
+    all.bottom = gpu->memoryHeight;
+    status = transfer(gpu, VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, page, &all);
+    if (status) { ++gpu->memoryFailures; return status; }
+    gpu->memoryStale &= ~(1UL << page);
+    return NO_ERROR;
+}
+
+/* A flip chain starts or ends. At its end the desktop's page is read back: GDI draws
+ * on it again. */
+void rb_memory_primary_chain(RB2K_GPU *gpu, BOOLEAN live)
+{
+    if (!live) rb_memory_primary_read(gpu, 0);
+    gpu->memoryChain = live;
+    if (!live) gpu->memoryStale = 0;
 }
 
 /* A flip: the page's resource on scanout 0. */
@@ -249,6 +331,7 @@ VP_STATUS rb_memory_primary_flip(RB2K_GPU *gpu, ULONG page)
     VP_STATUS status;
     if (!gpu->memoryWidth) return ERROR_NOT_READY;
     if (page > 1) return ERROR_INVALID_PARAMETER;
+    send_pending(gpu);
     status = ensure(gpu, page);
     if (status) return status;
     if (page == gpu->memoryVisible) return NO_ERROR;
@@ -266,6 +349,7 @@ VP_STATUS rb_memory_primary_flip(RB2K_GPU *gpu, ULONG page)
 void rb_memory_primary_clear_back(RB2K_GPU *gpu)
 {
     if (!gpu->memoryWidth || gpu->memoryVisible) return;
+    gpu->memoryStale &= ~2UL;
     VideoPortZeroMemory((PUCHAR)gpu->memoryPixels + page_bytes(gpu), page_bytes(gpu));
     if (gpu->memoryBack && gpu->ready) unref(gpu, gpu->memoryBack);
     gpu->memoryBack = 0;   /* made again, with all of the page, when it is used */
@@ -293,6 +377,8 @@ VP_STATUS rb_memory_primary_show(RB2K_GPU *gpu, ULONG width, ULONG height, BOOLE
     gpu->memoryResource = gpu->memoryBack = 0;
     gpu->memoryVisible = 0;
     gpu->memoryWidth = width;
+    gpu->memoryStale = 0;
+    gpu->memoryPendingSet = FALSE;   /* all of the page goes with the new resource */
     gpu->memoryHeight = height;
     status = rb_memory_primary_upload(gpu, 0, NULL);
     if (gpu->ready && old) unref(gpu, old);
@@ -310,6 +396,7 @@ void rb_memory_primary_hide(RB2K_GPU *gpu)
         else unref(gpu, gpu->memoryResource);
     }
     if (gpu->memoryBack && gpu->ready) unref(gpu, gpu->memoryBack);
+    gpu->memoryPendingSet = FALSE;
     gpu->memoryResource = gpu->memoryBack = 0;
     gpu->memoryVisible = 0;
     gpu->memoryWidth = gpu->memoryHeight = 0;

@@ -571,6 +571,58 @@ On Windows 2000 SP4 and XP SP3 under KVM on the Intel host:
 | Direct3D pixel tests on a 1280×1024×32 desktop, HAL and T&L | pass | pass |
 | Quake 0.73 `demo1` in an 800×600 window on that desktop | 103.7 fps | 98.9 fps |
 
+## The desktop in guest memory
+
+`RipplePrimaryInMemory` = 1 (off by default) lifts the 8 MB limit above
+for 32-bit desktops: every 32-bit desktop lives in guest pages instead of
+the framebuffer, and 1920×1080 and 1920×1200 join the mode list
+(`win2k/gpu_primary.c`).
+
+- **Pages and resources.** The miniport allocates 18 MB of pages below
+  4 GB once, mapped cached into system space: two pages (a flip chain's) of
+  the largest mode. They are never freed, because a display driver surface
+  may refer to them after a mode change. Each page backs its own virgl
+  resource (B8G8R8A8, as the frame images), made for each mode. Scanout 0
+  shows the visible page's resource. A transport reset drops the resources
+  and the scanout, and they are made again with the next upload. The desktop
+  counts as a holder of the transport (`rb_gpu_held`), so the idle stops
+  leave it running.
+- **GDI.** The desktop is a device-managed surface whose hooks
+  (`display_gdi.c`) draw into the pages and record the area each call
+  changed. A worker, queued by a kernel timer's DPC 8 ms after the first
+  change, sends the union (`TRANSFER_TO_HOST_3D` from the pages, then
+  `RESOURCE_FLUSH`). A synchronization event orders the transport between
+  that worker and the miniport's requests. A present, a read or a flip
+  sends the pending changes first, so the order of drawing holds.
+- **Presents.** The host copies the frame's rectangle into the page's
+  resource (`RESOURCE_COPY_REGION` in the frame's own context). Outside a
+  flip chain, the same rectangle is transferred back into the pages for
+  GDI, which reads them for screen copies and window moves. Inside a live
+  chain, the copy is only queued and the page is marked stale. A stale page
+  is read back when a program locks it, and the desktop's page is read back
+  when the chain ends. No staging is used, so full-screen frames up to the
+  desktop's size are presented.
+- **Flips.** A flip puts the other page's resource on scanout 0. A flip
+  chain's view of the pages is mapped from their MDL into the program and
+  unmapped in its address space; the driver attaches to the program
+  (`KeStackAttachProcess`) when another process revokes the view. A program
+  that has ended takes the view with it. What a program writes through a
+  lock goes to the host when it unlocks.
+- **Leaving it.** A 16-bit or 8-bit mode, or text mode, unrefs the
+  resources and resets the transport, which returns virtio-vga to VGA.
+  While OpenGL contexts hold the transport, that reset waits until they end.
+
+On XP under KVM on the Intel host, with the host alone:
+
+| | desktop in guest memory | VGA memory |
+| --- | --- | --- |
+| 3DMark 2001 SE (defaults off) | 6565 | 6442 |
+| memtest: 200 full-screen GDI fills | 47 ms | 47 ms |
+| memtest: 50 full-screen scrolls | 16 ms | 16 ms |
+| d9full, flip probe, d3d7probe window, OpenGL presents at 1920×1080 | pass | mode not offered |
+
+Windows 2000 has not been checked with the switch on yet.
+
 ## Experimental GPU presentation for OpenGL
 
 The ordinary renderer downloads a completed frame and passes it to GDI.
@@ -1764,6 +1816,16 @@ Quake 0.73 `demo1` in a 640×480 window, three runs on each build:
 Direct3D 8 Quake (0.81) ran at 57.9 and 58.7 fps with pixel shaders
 offered, as before.
 
+A shader may sample a stage with no texture bound; Direct3D reads
+(0,0,0,1) there. A 1x1 host texture of that colour stands in (`blank_texture`
+in `display_d3d7.c`), and `d7draw` counts these draws as `blank_samples`.
+Until this was added such draws were dropped: one of 3DMark 2001 SE's ps.1.4
+shaders samples stage 4 with nothing bound, 2,509 draw calls of 21 to 22
+million primitives a run (`d8pixels` case `ps_unbound_stage`).
+With the Direct3D 9 defaults on and this, 3DMark 2001 SE skips nothing and
+scores 5649 (timed, host alone): 1.3% below the 5723 it scored while those
+draws were dropped.
+
 ### Fog and lighting with pixel shaders
 
 Fog now blends the result of a version 1 pixel shader as it does the
@@ -1907,6 +1969,27 @@ DirectQ cannot run without hardware vertex shaders. 3DMark03 starts but
 refuses every game test: it needs cube textures, DXT1 and DXT3 compressed
 textures, a back buffer with alpha and a stencil buffer, none of which the
 device offers yet.
+
+### On by default
+
+`RippleVertexShaders` and `RippleD3D9` (the Direct3D 9 driver interface) now
+default to 1. Setting either to 0 turns it off. Turning
+them on found two bugs:
+
+- **vs.1.0 refused.** Direct3D 8.0's vertex shaders, version 1.0
+  (`0xfffe0100`), were refused; 3DMark 2001 SE has 11 of them.
+- **Draws skipped at a stage with no texture.** A vertex-program draw
+  without a pixel shader runs the stage program. Where a stage would
+  sample a texture and none is bound (the default stage states), the stage
+  program kept that stage and the draw was skipped for the missing texture.
+  The Direct3D 7 combiner already passes over such a stage
+  (`stage_words`); the stage program now does the same
+  (`stage_lacks_texture`).
+
+`d8pixels` checks vertex programs vs.1.1 and vs.1.0, drawn from user memory
+and from a vertex buffer (`vs11`, `vs11_buffer`, `vs10`). With both on, the
+XP and Windows 2000 suites pass, and 3DMark 2001 SE, 03 and 05 run to the
+end on XP.
 
 ## DXT compressed textures
 
@@ -2638,7 +2721,10 @@ turns instead of working at once. The reads were the driver's own time stamps
 (`KeQueryPerformanceCounter`, `EngQueryPerformanceCounter`). They now come
 from the processor's cycle counter (`rb_counter_ticks`, `cycles` in the
 display driver), whose rate is measured against the performance counter when
-the counters are reported. 3DMark 2001 SE went from 5446 to 5911 (timed, host
+the counters are reported. Once a second or more has been measured the rate
+is kept, and the first stamp is taken when the driver starts: `d3d7probe`
+compares the rates of two flight reports, and failed after its pixel checks
+while every report measured a slightly different rate. 3DMark 2001 SE went from 5446 to 5911 (timed, host
 alone); draw requests waited 15 s to queue in a run instead of 85 s.
 
 The time stamps decide nothing but these statistics: every timeout and wait
@@ -2664,6 +2750,17 @@ of a vertex's eight colour channels) was still a call into another file, 13%
 of the guest's time. It is now a lookup in a constant table of the same 256
 values (`rbChannelBits`): 3DMark 2001 SE went from 6311 to 7204 (timed, host
 alone).
+
+These scores (3696 to 7204) were measured with the Direct3D 9 interface and
+vertex shaders switched on before they drew everything. In a run, 11 vs.1.0
+shaders were refused, 268 million primitives were skipped in the stage
+combiner and 40 million for textures. The scores compare with one another,
+which all skipped the same draws, but not with later ones. With both on by
+default and those draws drawn, 3DMark 2001 SE scored 5723 (timed, host
+alone); 22 million primitives were still skipped where a pixel shader samples
+a stage with no texture bound, a separate fix. Before quoting a score, read
+`D7DRAW skipped`, `D7RTT texture_skips` and `D8VS ... failed` in `d7draw`'s
+output.
 
 
 ## Release package

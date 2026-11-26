@@ -23,6 +23,11 @@ ULONG rb_pages_runs(const RB2K_PAGES *pages, RB2K_PAGE_RUN *out, ULONG max);
 void rb_pages_free(RB2K_PAGES *pages);
 PVOID rb_system_pages(ULONG bytes, PVOID *mdl);
 ULONG rb_mdl_runs(PVOID mdl, ULONG offset, ULONG bytes, RB2K_PAGE_RUN *out, ULONG max);
+PVOID rb_lock_create(void);
+void rb_lock(PVOID lock);
+void rb_unlock(PVOID lock);
+PVOID rb_defer_create(void (*callback)(PVOID), PVOID context);
+void rb_defer_arm(PVOID defer, ULONG ms);
 PVOID rb_map_cached(unsigned __int64 physical, ULONG bytes);
 void rb_unmap_cached(PVOID address, ULONG bytes);
 
