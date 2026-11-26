@@ -24,6 +24,7 @@
 #define RB2K_DD_D3D8 32             /* the Direct3D 8 driver interface */
 #define RB2K_DD_VERTEX_SHADERS 64   /* vertex shaders on the host GPU */
 #define RB2K_DD_Z24S8 128           /* depth buffers of 24 bits with 8 of stencil */
+#define RB2K_DD_D3D9_DDI 256        /* the Direct3D 9 driver interface (with vertex shaders) */
 #define RB2K_DD_IOCTL(n) CTL_CODE(FILE_DEVICE_VIDEO,n,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_RB2K_DD_QUERY   RB2K_DD_IOCTL(0x901)
 #define IOCTL_RB2K_DD_CREATE  RB2K_DD_IOCTL(0x902)
@@ -45,6 +46,7 @@
 #define IOCTL_RB2K_D3D7_FLIGHT RB2K_DD_IOCTL(0x917)
 #define IOCTL_RB2K_DD_CREATE_Z16 RB2K_DD_IOCTL(0x918)
 #define IOCTL_RB2K_DD_CREATE_Z24S8 RB2K_DD_IOCTL(0x922)
+#define IOCTL_RB2K_DD_STRETCH RB2K_DD_IOCTL(0x923)
 #define IOCTL_RB2K_D3D7_ZCLEAR RB2K_DD_IOCTL(0x919)
 #define IOCTL_RB2K_D3D7_DRAW RB2K_DD_IOCTL(0x91b)
 #define IOCTL_RB2K_D3D7_TEXTURE RB2K_DD_IOCTL(0x91c)
@@ -95,7 +97,16 @@ typedef struct {
     ULONG transform;                /* 0 transformed, 1 object space, 2 vertex program */
     ULONG matrices[3][16];
     ULONG viewport[6];
+    /* The Direct3D 9 scissor test: when scissorOn, only pixels inside the rectangle (left, top,
+     * right, bottom, at most 8192) are drawn, as well as inside the viewport. */
+    ULONG scissorOn, scissor[4];
     ULONG vertexProgram, vertexConstants, vertexWords;   /* transform 2 */
+    /* With RB_VS_FLOW programs: i0..i15 as floats (count, start, step) and b0..b15 as 1 or 0 in w,
+     * sent as CONST[3..18]. */
+    ULONG flowConstants[16][4];
+    /* User clip planes (D3DRS_CLIPPLANEENABLE bits, IEEE planes): in clip space for vertex programs
+     * (transform 2), in world space for object-space draws; pretransformed draws are not clipped. */
+    ULONG clipMask, clipPlanes[6][4];
     /* Lighting as in RB2K_D3D7_DRAW (object space only); specular adds
      * the lit specular colour. */
     ULONG lighting, lightCount, lightFlags, ambient, specular;
@@ -161,6 +172,8 @@ typedef struct {
     ULONG transform;
     ULONG matrices[3][16];
     ULONG viewport[6];
+    ULONG scissorOn, scissor[4];   /* the Direct3D 9 scissor test, as in RB2K_D3D8_DRAW */
+    ULONG clipMask, clipPlanes[6][4];   /* user clip planes, as in RB2K_D3D8_DRAW */
     /* Nonzero with transform: light the vertices with the D3DMATERIAL7, the
      * D3DRENDERSTATE_AMBIENT colour and the first lightCount D3DLIGHT7s. */
     ULONG lighting, lightCount, lightFlags, ambient;
@@ -224,6 +237,9 @@ typedef struct { ULONG source, destination; } RB2K_DD_COPY;
 /* One visible rectangle, in source and primary pixel coordinates. */
 typedef struct { ULONG source, srcX, srcY, dstX, dstY, width, height; } RB2K_DD_PRESENT;
 typedef struct { ULONG left, top, right, bottom; } RB2K_RECT;
+/* A scaled copy of a rectangle of one colour image into a rectangle of another, point-sampled or
+ * linear (StretchRect of a Direct3D 9 runtime). Both rectangles lie inside their images. */
+typedef struct { ULONG source, destination; RB2K_RECT from, to; ULONG linear; } RB2K_DD_STRETCH;
 enum { RB2K_CPU_READ, RB2K_CPU_DRAW, RB2K_CPU_REPLACE };
 #define RB2K_GL_MAX_RECTS 32
 enum { RB2K_FRAME_BATCH, RB2K_FRAME_PER_RECT, RB2K_FRAME_INLINE_UPLOADS };

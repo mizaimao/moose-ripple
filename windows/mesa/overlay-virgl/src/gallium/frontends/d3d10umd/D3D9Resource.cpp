@@ -4156,6 +4156,8 @@ D3D9UploadWatchedBuffer(D3D9Device *device, D3D9Resource *resource, size_t size)
    ULONG_PTR count = ARRAYSIZE(pages);
    ULONG granularity = 0;
    size_t first = 0, end = size;
+   const bool timed = D3D9TimesOn();
+   unsigned long long start = timed ? D3D9TimesNow() : 0;
    if (GetWriteWatch(0, base, size, pages, &count, &granularity) == 0 &&
        count < ARRAYSIZE(pages)) {
       if (!count)
@@ -4170,6 +4172,10 @@ D3D9UploadWatchedBuffer(D3D9Device *device, D3D9Resource *resource, size_t size)
       end = MIN2(end, size);
    }
    /* A full page list or a failed query falls back to the entire buffer. */
+   if (timed) {
+      D3D9TimesCallback(D3D9_TIMED_BUFFER_PAGES, start);
+      start = D3D9TimesNow();
+   }
    struct pipe_context *pipe = device->pipe;
    unsigned usage = PIPE_MAP_WRITE;
    if ((!first && end == size) || resource->watched_discard)
@@ -4183,13 +4189,27 @@ D3D9UploadWatchedBuffer(D3D9Device *device, D3D9Resource *resource, size_t size)
                                      (unsigned)(end - first), usage, &transfer);
    if (!map)
       return E_OUTOFMEMORY;
+   if (timed) {
+      D3D9TimesCallback(D3D9_TIMED_BUFFER_MAP, start);
+      start = D3D9TimesNow();
+   }
    memcpy(map, base + first, end - first);
+   if (timed) {
+      D3D9TimesCallback(D3D9_TIMED_BUFFER_COPY, start);
+      start = D3D9TimesNow();
+   }
    pipe_buffer_unmap(pipe, transfer);
+   if (timed)
+      D3D9TimesCallback(D3D9_TIMED_BUFFER_UNMAP, start);
    if (usage & PIPE_MAP_DISCARD_WHOLE_RESOURCE)
       resource->watched_discard = resource->watched_ordered = false;
    else if (!(usage & PIPE_MAP_UNSYNCHRONIZED))
       resource->watched_ordered = true;
+   if (timed)
+      start = D3D9TimesNow();
    ResetWriteWatch(base, size);
+   if (timed)
+      D3D9TimesCallback(D3D9_TIMED_BUFFER_REWATCH, start);
    return S_OK;
 }
 
@@ -4283,12 +4303,18 @@ D3D9Unlock(HANDLE hDevice, const D3DDDIARG_UNLOCK *data)
       if (sub->transfer_write && resource->flags.VertexBuffer &&
           D3D9OrderedContextWorkerEnabled())
          worker_upload_ok = D3D9CaptureWorkerBufferUpload(device, sub);
+      const unsigned long long timed = D3D9TimesOn() ? D3D9TimesNow() : 0;
       device->pipe->buffer_unmap(device->pipe, sub->transfer);
+      if (timed)
+         D3D9TimesCallback(D3D9_TIMED_BUFFER_DIRECT_UNMAP, timed);
       sub->transfer = NULL;
    } else {
       if (!device->pipe->texture_unmap)
          return E_NOTIMPL;
+      const unsigned long long timed = D3D9TimesOn() ? D3D9TimesNow() : 0;
       device->pipe->texture_unmap(device->pipe, sub->transfer);
+      if (timed)
+         D3D9TimesCallback(D3D9_TIMED_TEXTURE_DIRECT_UNMAP, timed);
       sub->transfer = NULL;
    }
    sub->transfer_on_readback = false;

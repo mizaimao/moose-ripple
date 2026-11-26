@@ -1,0 +1,22 @@
+On Windows, WGL_EXT_swap_control is named in the GL extension list as well as in the WGL
+one. Programs look for it there: SDL 1.2 (under the Quake III engine games, OpenArena among
+them) looks nowhere else, as the graphics vendors' drivers name it in both lists. A program
+that does not find it never asks for a swap interval, so it could not turn off the default
+interval of 1: OpenArena's timedemo ran at the display's 60 frames a second, and at 340 with
+the name in the list.
+
+--- a/src/mesa/main/extensions.c
++++ b/src/mesa/main/extensions.c
+@@ -169,6 +169,12 @@
+    memset(&_mesa_extension_override_enables, 0, sizeof(struct gl_extensions));
+    memset(&_mesa_extension_override_disables, 0, sizeof(struct gl_extensions));
+ 
++#ifdef _WIN32
++   /* Windows programs look for the swap interval extension in this list too (SDL 1.2 looks
++    * nowhere else), and the graphics vendors' drivers name it here. */
++   unrecognized_extensions.names[unknown_ext++] = "WGL_EXT_swap_control";
++#endif
++
+    if (override == NULL || override[0] == '\0') {
+       return;
+    }
