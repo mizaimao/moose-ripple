@@ -1155,7 +1155,29 @@ Vista SP2 in UTM, one run each with the same user-mode driver:
 | of it creating resources | 59 ms | 9 ms |
 
 On Windows 7 the same flag left 3DMark06 with an error box at start in the one try made.
-That is not looked into yet, so the Windows 7 build keeps write-combined memory.
+That try set the flag on every allocation. Microsoft's description of the flag says the
+driver must not set it on the primary surface, and a full-screen program's first allocations
+are primaries. (The Vista build never did: its primaries live in the desktop segment, which
+is not cache-coherent, and were left write-combined for that reason.)
+
+Since 2026-11-26 both builds ask for cached memory for everything but primaries. The
+user-mode driver tags a primary's private data on both systems, as it did on Vista, where
+the kernel driver places primaries by that tag (`VIOGPU_VISTA_PRIMARY`); the Windows 7
+kernel driver tags the desktop's own primary the same way and leaves a tagged allocation
+write-combined. Windows 7 SP1 in UTM, one disposable session each, 3DMark06's two graphics
+tests from the Run click to the end of the second test:
+
+| | Write-combined (release 0.4.0) | Cached except primaries |
+| --- | ---: | ---: |
+| From the Run click to the end of the second test | 350 s | 296 s |
+| A loading-screen frame, first test | 233 ms | 115 ms |
+| of it writing texels into textures (Unlock) | 119 ms | 59 ms |
+| of it creating resources | 14.7 ms | 7.2 ms |
+
+With that build 3DMark06 starts and runs, and the Direct3D 9 probes pass at both bitnesses
+(12 of 12; six of them full-screen, each with primaries of its own).
+The Vista build of the same source (the tag code is now common to both) passes its pixel
+tests (12 of 12) with the compositor running.
 
 With the cached build the Vista pixel tests pass (12 of 12) and the desktop draws as before.
 Window operations do not change: moving 56.1 updates a second (55.8 before), resizing 21.5

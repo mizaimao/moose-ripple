@@ -227,10 +227,8 @@ NTSTATUS VioGpuAllocation::GetStandardAllocationDriverData(DXGKARG_GETSTANDARDAL
     {
         pStandardAllocation->ResourcePrivateDriverDataSize = sizeof(VIOGPU_CREATE_RESOURCE_EXCHANGE);
         pStandardAllocation->AllocationPrivateDriverDataSize = sizeof(VIOGPU_CREATE_ALLOCATION_EXCHANGE);
-#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
         if (pStandardAllocation->StandardAllocationType == D3DKMDT_STANDARDALLOCATION_SHAREDPRIMARYSURFACE)
             pStandardAllocation->AllocationPrivateDriverDataSize = sizeof(VIOGPU_VISTA_PRIMARY);
-#endif
         return STATUS_SUCCESS;
     }
 
@@ -257,11 +255,9 @@ NTSTATUS VioGpuAllocation::GetStandardAllocationDriverData(DXGKARG_GETSTANDARDAL
     {
         case D3DKMDT_STANDARDALLOCATION_SHAREDPRIMARYSURFACE:
             {
-#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
                 if (pStandardAllocation->AllocationPrivateDriverDataSize < sizeof(VIOGPU_VISTA_PRIMARY))
                     return STATUS_BUFFER_TOO_SMALL;
                 static_cast<VIOGPU_VISTA_PRIMARY *>(pStandardAllocation->pAllocationPrivateDriverData)->tag = VIOGPU_VISTA_PRIMARY_TAG;
-#endif
                 D3DKMDT_SHAREDPRIMARYSURFACEDATA *surfaceData = pStandardAllocation->pCreateSharedPrimarySurfaceData;
                 //[in] UINT                           Width;
                 //[in] UINT                           Height;
@@ -375,16 +371,15 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
     allocationInfo->PreferredSegment.Direction0 = 0;
 
     allocationInfo->Flags.CpuVisible = TRUE;
-#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
     // The CPU's view of an allocation is mapped cached, not write-combined. For every page it
     // maps write-combined Windows changes the page's caching and interrupts all processors to
     // tell them, which is most of the cost of writing a new texture where the processors are
     // emulated. The aperture segment is cache-coherent (DxgkDdiQueryAdapterInfo), and the host
-    // reads an allocation's pages only when a transfer command names them. Vista only so far:
-    // on Windows 7 the first try left Direct3D 9 programs unable to start
+    // reads an allocation's pages only when a transfer command names them. Not for a primary
+    // (below): Windows does not take a cached primary, and with the flag on every allocation
+    // Windows 7 left full-screen Direct3D 9 programs unable to start
     // (docs/windows/kmd-port-notes.md, "Cached memory for allocations").
     allocationInfo->Flags.Cached = TRUE;
-#endif
 
     allocationInfo->HintedBank.Value = 0;
     allocationInfo->MaximumRenamingListLength = 0;
@@ -393,9 +388,16 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
 
     allocationInfo->SupportedReadSegmentSet = 0b1;
     allocationInfo->SupportedWriteSegmentSet = 0b1;
-#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+    // A primary comes tagged: the desktop's own by GetStandardAllocationDriverData, a Direct3D
+    // program's (the compositor's, a full-screen game's) by the user-mode driver.
     const ULONG vistaTag = allocationInfo->PrivateDriverDataSize == sizeof(VIOGPU_VISTA_PRIMARY)
         ? static_cast<const VIOGPU_VISTA_PRIMARY *>(allocationInfo->pPrivateDriverData)->tag : 0;
+#if DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN7
+    if (vistaTag == VIOGPU_VISTA_PRIMARY_TAG || vistaTag == VIOGPU_VISTA_DRAWN_PRIMARY_TAG)
+    {
+        allocationInfo->Flags.Cached = FALSE;
+    }
+#else
     if (vistaTag == VIOGPU_VISTA_PRIMARY_TAG || vistaTag == VIOGPU_VISTA_DRAWN_PRIMARY_TAG)
     {
         // The compositor draws its primary on the host GPU. A CPU reader needs a
