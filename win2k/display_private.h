@@ -96,7 +96,7 @@ ULONG rb_d7_drawstats(DISPLAY *display, ULONG size, PVOID out);
 /* Texture formats; the DXT ones are stored as 4x4 blocks (DXT2 and DXT4
  * decode as DXT3 and DXT5). */
 enum { TexNone, TexArgb8888, TexXrgb8888, TexRgb565, TexArgb1555, TexXrgb1555, TexArgb4444, TexDxt1, TexDxt3,
-       TexDxt5, TexL8, TexA8L8, TexA8, TexV8U8, TexQ8W8V8U8, TexFormats };
+       TexDxt5, TexL8, TexA8L8, TexA8, TexV8U8, TexQ8W8V8U8, TexL16, TexFormats };
 #define RB_TEX_COMPRESSED(f) ((f) >= TexDxt1 && (f) <= TexDxt5)
 /* Bump maps: signed texels, sent to the host as they are. */
 #define RB_TEX_SIGNED(f) ((f) == TexV8U8 || (f) == TexQ8W8V8U8)
