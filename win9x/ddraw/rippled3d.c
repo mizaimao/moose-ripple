@@ -407,6 +407,7 @@ typedef struct {
     GLF gl;
     BOOL (WINAPI *present_color)(void); /* optional in ripplegl.dll */
     ATOM wndclass;
+    DWORD d3d_version;                  /* the highest the runtime announced in this process (RbGdi2DxVersion) */
 } RPROC;
 
 /* The tables below are in the DLL's shared data, the same in every process; the records they
@@ -5047,7 +5048,6 @@ static void extended_caps(D3DHAL_D3DEXTENDEDCAPS *x)
    runtime (no hardware transform and lighting), and no shaders are offered yet. */
 static const GUID guid_gdi2 =
     {0xf828169c, 0xa8e8, 0x11d2, {0xa1, 0xf2, 0x00, 0xa0, 0xc9, 0x83, 0xea, 0xf6}};
-static DWORD d3d_version;              /* what the runtime announced (RbGdi2DxVersion) */
 
 static ULONG fbits(float f)
 {
@@ -5085,6 +5085,7 @@ static void d8_caps(RB_D3DCAPS8 *c)
     const D3DDEVICEDESC_V1 *hw = &global_data.hwCaps;
     const D3DPRIMCAPS *tri = &hw->dpcTriCaps;
     D3DHAL_D3DEXTENDEDCAPS x;
+    RPROC *p;
 
     extended_caps(&x);
     memset(c, 0, sizeof *c);
@@ -5144,7 +5145,8 @@ static void d8_caps(RB_D3DCAPS8 *c)
        samplers when the runtime that asks has announced itself as Direct3D 9 (it uses this record
        for drivers of the Direct3D 8 interface). The runtime sends stage states only for the
        blend stages reported, so those are as many as the samplers. */
-    if (d3d_version >= 0x900) {
+    p = process();
+    if (p && p->d3d_version >= 0x900) {
         c->pixelShaderVersion = 0xFFFF0200UL;
         c->maxSimultaneousTextures = c->maxTextureBlendStages = RB_PS2_SAMPLERS;
     } else {
@@ -5218,12 +5220,14 @@ static int d8_info(LPDDHAL_GETDRIVERINFODATA d)
     }
     case RbGdi2DxVersion: {
         RB_GDI2_DX_VERSION *v = (RB_GDI2_DX_VERSION *)h;
+        RPROC *p = process();
         if (room < sizeof *v)
             goto unavailable;
         /* The Direct3D 9 runtime says 0x902, then, after the Direct3D 9 caps go unanswered,
-           0x802 just before it asks for these: keep the highest */
-        if (v->version > d3d_version)
-            d3d_version = v->version;
+           0x802 just before it asks for these: keep the highest, per process (the DLL's data is
+           shared, and a Direct3D 8 program after a Direct3D 9 one was offered shader model 2) */
+        if (p && v->version > p->d3d_version)
+            p->d3d_version = v->version;
         d->dwActualSize = sizeof *v;
         break;
     }
