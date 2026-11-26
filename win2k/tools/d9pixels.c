@@ -1983,6 +1983,10 @@ int main(int argc, char **argv)
            (unsigned long)caps.MaxStreamStride, (unsigned long)caps.MaxPrimitiveCount,
            (unsigned long)caps.MaxVertexIndex, (unsigned long)caps.MaxTextureBlendStages,
            (unsigned long)caps.MaxSimultaneousTextures);
+    /* 69: the immediate present interval (the driver's D3DCAPS2_PRESENT_INTERVAL_IMMEDIATE). */
+    printf("D9PIX case=interval_immediate samples=1 mismatches=%d\n",
+           caps.PresentationIntervals & D3DPRESENT_INTERVAL_IMMEDIATE ? 0 : 1);
+    if (caps.PresentationIntervals & D3DPRESENT_INTERVAL_IMMEDIATE) ++passes; else ++failures;
     printf("D9PIX caps9 ps20=%d,%d,%d vs20=%d,%d executed=%lu,%lu rts=%lu decltypes=%lx stretch=%lx group=%lu\n",
            caps.PS20Caps.NumTemps, caps.PS20Caps.NumInstructionSlots, caps.PS20Caps.StaticFlowControlDepth,
            caps.VS20Caps.NumTemps, caps.VS20Caps.StaticFlowControlDepth,
