@@ -1999,3 +1999,31 @@ before) and still scores about 1158 3DMarks. `d9pixels` (40 of 40) and
 Proxycon and Troll scenes are very dark and the water in Mother Nature is
 mostly white; one volume texture is still refused by Direct3D before it
 reaches the driver.
+
+## Textures in many render targets: 3DMark 2001 SE
+
+A texture, or a render target texture, was attached to at most 16 colour
+contexts at once. 3DMark 2001 SE draws one texture into more than 16 of
+its render targets: the 17th attach failed with `ERROR_NOT_ENOUGH_MEMORY`,
+the miniport took that for a host error and stopped the GPU, and every
+later request failed. The benchmark reported `Present:
+D3DERR_DRIVERINTERNALERROR` after Car Chase at low detail. Each texture and
+host image now keeps a bit per image slot instead of a list; a draw
+attaches its textures to its target on first use, and destroying an image
+clears its slot's bits. The display DLL no longer keeps its own list of
+targets per texture, which made it upload a texture again for each new
+target.
+
+`d7draw` found it: its `D7REFUSED` line now covers fixed-function draw
+records too and gives the first refusal (a refused render target texture
+says which step failed), and a new `D7FIRST` line names the first failed
+request (IOCTL, status, image or texture id) and the first failed host
+command (stage and status). Here the first failure was the texture upload
+request, at the attach stage, with status 8.
+
+On XP SP3 under KVM on the second Intel UHD 630 host (QEMU 10.0), 3DMark
+2001 SE now completes Car Chase, Dragothic and Lobby at low and high
+detail (8.6, 4.3, 27.1, 5.7, 16.1 and 10.3 fps, without the fence change
+of the previous section), with no failed request. It stops at Nature:
+"device does not support bump normal maps", the next fix. `d9pixels` (41
+of 41) and `tpixels hal` (18 of 18) pass.
