@@ -37,7 +37,9 @@ enum {
     RB2K_RVD_OP_GL_STATS,           /* out: RB2K_GL_STATS over the lifetime of the driver */
     RB2K_RVD_OP_GL_OPTION,          /* out: ULONG, allow device-managed 32-bit desktop */
     RB2K_RVD_OP_GL_TIMING,          /* out: RB2K_GL_TIMING */
-    RB2K_RVD_OP_GL_PROFILE          /* out: RB2K_GL_PROFILE */
+    RB2K_RVD_OP_GL_PROFILE,         /* out: RB2K_GL_PROFILE */
+    RB2K_RVD_OP_SCANOUT,            /* context, a: buffer, b: width, bytes: height: show it full screen */
+    RB2K_RVD_OP_DESKTOP             /* show the desktop again after RB2K_RVD_OP_SCANOUT */
 };
 
 #define RB2K_RVD_STAGING_SEGMENTS 48

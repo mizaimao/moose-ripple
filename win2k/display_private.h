@@ -30,6 +30,7 @@ typedef struct {
     BOOL texture;               /* a render target texture: Direct3D also samples the image */
     PDD_DIRECTDRAW_LOCAL local;
     ULONG d3dHandle;
+    ULONG draws;                /* draws and clears into it, so a cube map face is copied again only when drawn */
 } DD_SLOT;
 
 typedef struct DD_FLIP_VIEW {
@@ -63,6 +64,7 @@ typedef struct {
     BOOL plainSurfaces;         /* plain 2D ones too, not only Direct3D's */
     BOOL d3d8;                  /* the Direct3D 8 driver interface is offered */
     BOOL vertexShaders;         /* and vertex shaders run on the host GPU */
+    BOOL d3d9Ddi;               /* and the Direct3D 9 driver interface is offered */
     BOOL d3dDescribed;          /* the Direct3D HAL description is given in every depth */
     BOOL nativeD3D7;
     BOOL z16Storage, z16Render;
@@ -94,8 +96,10 @@ ULONG rb_d7_drawstats(DISPLAY *display, ULONG size, PVOID out);
 /* Texture formats; the DXT ones are stored as 4x4 blocks (DXT2 and DXT4
  * decode as DXT3 and DXT5). */
 enum { TexNone, TexArgb8888, TexXrgb8888, TexRgb565, TexArgb1555, TexXrgb1555, TexArgb4444, TexDxt1, TexDxt3,
-       TexDxt5, TexL8, TexA8L8, TexA8, TexFormats };
+       TexDxt5, TexL8, TexA8L8, TexA8, TexV8U8, TexQ8W8V8U8, TexL16, TexFormats };
 #define RB_TEX_COMPRESSED(f) ((f) >= TexDxt1 && (f) <= TexDxt5)
+/* Bump maps: signed texels, sent to the host as they are. */
+#define RB_TEX_SIGNED(f) ((f) == TexV8U8 || (f) == TexQ8W8V8U8)
 ULONG rb_d7_texture_format(const DDPIXELFORMAT *format, ULONG desktopBits);
 ULONG rb_d7_texel_bytes(ULONG format);
 /* A level's bytes per row (of texels, or of 4x4 blocks) and its rows. */

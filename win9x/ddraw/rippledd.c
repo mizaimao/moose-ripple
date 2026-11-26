@@ -34,6 +34,8 @@ CHECK(c_caps, FIELD_OFFSET(RDD_HALINFO, ddCaps) == FIELD_OFFSET(DDHALINFO, ddCap
 CHECK(c_heaps, FIELD_OFFSET(RDD_HALINFO, dwNumHeaps) == FIELD_OFFSET(DDHALINFO, vmiData) + FIELD_OFFSET(VIDMEMINFO, dwNumHeaps));
 CHECK(c_modeidx, FIELD_OFFSET(RDD_HALINFO, dwModeIndex) == FIELD_OFFSET(DDHALINFO, dwModeIndex));
 CHECK(c_hinst, FIELD_OFFSET(RDD_HALINFO, hInstance) == FIELD_OFFSET(DDHALINFO, hInstance));
+CHECK(c_exebuf, FIELD_OFFSET(RDD_HALINFO, lpDDExeBufCallbacks) == FIELD_OFFSET(DDHALINFO, lpDDExeBufCallbacks));
+CHECK(c_exebufcb, sizeof(((RDD_SHARED *)0)->exebufcb) == sizeof(DDHAL_DDEXEBUFCALLBACKS));
 CHECK(c_ddcb, sizeof(((RDD_SHARED *)0)->ddcb) == sizeof(DDHAL_DDCALLBACKS));
 CHECK(c_surfcb, sizeof(((RDD_SHARED *)0)->surfcb) == sizeof(DDHAL_DDSURFACECALLBACKS));
 CHECK(c_palcb, sizeof(((RDD_SHARED *)0)->palcb) == sizeof(DDHAL_DDPALETTECALLBACKS));
@@ -209,6 +211,13 @@ static DWORD WINAPI CanCreateSurface(LPDDHAL_CANCREATESURFACEDATA d)
        the formats Direct3D was offered. */
     d->ddRVal = !d->bIsDifferentPixelFormat || d3d_surface_format_ok(d->lpDDSurfaceDesc) ?
                 DD_OK : DDERR_INVALIDPIXELFORMAT;
+    d3d_trace("can create: caps, result", d->lpDDSurfaceDesc->ddsCaps.dwCaps, d->ddRVal);
+    if (d->ddRVal != DD_OK) {           /* which format was refused */
+        const DDPIXELFORMAT *pf = &d->lpDDSurfaceDesc->ddpfPixelFormat;
+        d3d_trace("refused format: flags, fourcc", pf->dwFlags, pf->dwFourCC);
+        d3d_trace("refused format: bits, red mask", pf->dwRGBBitCount, pf->dwRBitMask);
+        d3d_trace("refused format: green mask, alpha mask", pf->dwGBitMask, pf->dwRGBAlphaBitMask);
+    }
     return DDHAL_DRIVER_HANDLED;
 }
 
@@ -217,7 +226,53 @@ static DWORD WINAPI CanCreateSurface(LPDDHAL_CANCREATESURFACEDATA d)
    Let it assign the primary and allocate the attached pages on create and restore. */
 static DWORD WINAPI CreateSurface(LPDDHAL_CREATESURFACEDATA d)
 {
-    (void)d;
+    DWORD i;
+
+    if (d->dwSCnt)
+        d3d_trace("create: surfaces, caps", d->dwSCnt, d->lplpSList[0]->ddsCaps.dwCaps);
+    /* DXT surfaces in video memory have no pitch DirectDraw could size them by: ask it for a
+       block of the bytes their 4x4 blocks take (each level is a surface of its own). */
+    for (i = 0; i < d->dwSCnt; i++) {
+        LPDDRAWI_DDRAWSURFACE_LCL s = d->lplpSList[i];
+        LPDDRAWI_DDRAWSURFACE_GBL g = s->lpGbl;
+        DWORD block = (s->dwFlags & DDRAWISURF_HASPIXELFORMAT) ? d3d_dxt_block(&g->ddpfSurface) : 0;
+        DWORD texel = (s->dwFlags & DDRAWISURF_HASPIXELFORMAT) ? d3d_fourcc_bytes(&g->ddpfSurface) : 0;
+        if (s->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY)
+            continue;
+        if (s->lpSurfMore && (s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_VOLUME) &&
+            (s->dwFlags & DDRAWISURF_HASPIXELFORMAT)) {
+            /* A volume level (Direct3D 8 and 9): its slices one after another, rows tight (DXT:
+               rows of 4x4 blocks); the list holds the levels in order, each with half the slices
+               of the one above. */
+            LPDDRAWI_DDRAWSURFACE_LCL top = d->lplpSList[0];
+            DWORD depth = top->lpSurfMore ? top->lpSurfMore->ddsCapsEx.dwCaps4 >> i : 1;
+            DWORD pitch = block ? ((g->wWidth + 3) / 4) * block :
+                          g->wWidth * (texel ? texel : g->ddpfSurface.dwRGBBitCount / 8);
+            DWORD rows = block ? (g->wHeight + 3) / 4 : g->wHeight;
+            if (!depth)
+                depth = 1;
+            g->lPitch = (LONG)pitch;
+            g->dwBlockSizeX = pitch * rows * depth;
+            g->dwBlockSizeY = 1;
+            g->fpVidMem = DDHAL_PLEASEALLOC_BLOCKSIZE;
+            continue;
+        }
+        if (texel) {                    /* an uncompressed format named by FOURCC (Q8W8V8U8): no bit
+                                           count for DirectDraw to size it by; rows tight */
+            g->lPitch = (LONG)(g->wWidth * texel);
+            g->dwBlockSizeX = g->wWidth * texel * g->wHeight;
+            g->dwBlockSizeY = 1;
+            g->fpVidMem = DDHAL_PLEASEALLOC_BLOCKSIZE;
+            continue;
+        }
+        if (!block)
+            continue;
+        g->dwBlockSizeX = ((g->wWidth + 3) / 4) * ((g->wHeight + 3) / 4) * block;
+        g->dwBlockSizeY = 1;
+        g->dwLinearSize = g->dwBlockSizeX;
+        g->fpVidMem = DDHAL_PLEASEALLOC_BLOCKSIZE;
+    }
+    d->ddRVal = DD_OK;
     return DDHAL_DRIVER_NOTHANDLED;
 }
 
@@ -318,6 +373,7 @@ static DWORD WINAPI Lock(LPDDHAL_LOCKDATA d)
     LPDDRAWI_DDRAWSURFACE_LCL s = d->lpDDSurface;
     LPDDRAWI_DDRAWSURFACE_GBL g = s->lpGbl;
     DWORD p = g->fpVidMem, bits = shared->bpp;
+    DWORD block = 0;
 
     d3d_trace("lock: memory, flags", g->fpVidMem, d->dwFlags);
     if (!d3d_surface_access(s) || (p && p == gpu_page && gpu_mode == shared->mode_serial &&
@@ -328,11 +384,85 @@ static DWORD WINAPI Lock(LPDDHAL_LOCKDATA d)
     }
     if (!(d->dwFlags & DDLOCK_READONLY))
         d3d_surface_written(s);         /* textures made from it are out of date */
-    if (s->dwFlags & DDRAWISURF_HASPIXELFORMAT)
+    if (s->dwFlags & DDRAWISURF_HASPIXELFORMAT) {
+        block = d3d_dxt_block(&g->ddpfSurface);
         bits = g->ddpfSurface.dwRGBBitCount;
-    if (d->bHasRect)
+        if (d3d_fourcc_bytes(&g->ddpfSurface))
+            bits = 8 * d3d_fourcc_bytes(&g->ddpfSurface);
+    }
+    if (block && d->bHasRect)           /* DXT: rows of 4x4 blocks */
+        p += (d->rArea.top / 4) * (((DWORD)g->wWidth + 3) / 4) * block + (d->rArea.left / 4) * block;
+    else if (d->bHasRect)
         p += d->rArea.top * g->lPitch + d->rArea.left * (bits / 8);
     d->lpSurfData = (LPVOID)p;
+    d->ddRVal = DD_OK;
+    return DDHAL_DRIVER_HANDLED;
+}
+
+/* ---- Direct3D 8 vertex and index buffers the driver allocates (d3d_buffers_on) ---------------
+   DirectDraw calls these for execute buffers in video memory, which the Direct3D 8 runtime
+   makes its vertex and index buffers when the device reports D3DDEVCAPS_HWVERTEXBUFFER and
+   D3DDEVCAPS_HWINDEXBUFFER. Each Lock that may write marks the buffer for the GPU again. */
+static DWORD WINAPI CanCreateExecuteBuffer(LPDDHAL_CANCREATESURFACEDATA d)
+{
+    d->ddRVal = DD_OK;
+    return DDHAL_DRIVER_HANDLED;
+}
+
+static DWORD WINAPI CreateExecuteBuffer(LPDDHAL_CREATESURFACEDATA d)
+{
+    DWORD i, j;
+
+    for (i = 0; i < d->dwSCnt; i++) {
+        LPDDRAWI_DDRAWSURFACE_GBL g = d->lplpSList[i]->lpGbl;
+        DWORD size = g->dwLinearSize ? g->dwLinearSize : d->lpDDSurfaceDesc->dwLinearSize;
+        void *p = size ? d3d_buffer_new(size) : NULL;
+        d3d_trace("buffer create: bytes, memory", size, (DWORD)p);
+        if (!p) {
+            for (j = 0; j < i; j++) {
+                d3d_buffer_free(d->lplpSList[j]->lpGbl->fpVidMem);
+                d->lplpSList[j]->lpGbl->fpVidMem = 0;
+                d->lplpSList[j]->lpGbl->dwReserved1 = 0;
+            }
+            d->ddRVal = DDERR_OUTOFVIDEOMEMORY;
+            return DDHAL_DRIVER_HANDLED;
+        }
+        g->fpVidMem = (FLATPTR)p;
+        g->dwLinearSize = size;
+        g->dwReserved1 = D3D_BUFFER_MARK;
+    }
+    d->ddRVal = DD_OK;
+    return DDHAL_DRIVER_HANDLED;
+}
+
+static DWORD WINAPI DestroyExecuteBuffer(LPDDHAL_DESTROYSURFACEDATA d)
+{
+    LPDDRAWI_DDRAWSURFACE_GBL g = d->lpDDSurface->lpGbl;
+    if (g->dwReserved1 == D3D_BUFFER_MARK) {
+        d3d_buffer_free(g->fpVidMem);
+        g->fpVidMem = 0;
+        g->dwReserved1 = 0;
+    }
+    d->ddRVal = DD_OK;
+    return DDHAL_DRIVER_HANDLED;
+}
+
+/* The whole buffer, whatever range is asked for: the runtime adds the offset. */
+static DWORD WINAPI LockExecuteBuffer(LPDDHAL_LOCKDATA d)
+{
+    LPDDRAWI_DDRAWSURFACE_GBL g = d->lpDDSurface->lpGbl;
+    d3d_trace("buffer lock: memory, flags", g->fpVidMem, d->dwFlags);
+    if (d->bHasRect)
+        d3d_trace("buffer lock: from, to", d->rArea.left, d->rArea.right);
+    if (!(d->dwFlags & DDLOCK_READONLY) && g->dwReserved1 == D3D_BUFFER_MARK)
+        d3d_buffer_written(g->fpVidMem);
+    d->lpSurfData = (LPVOID)g->fpVidMem;
+    d->ddRVal = DD_OK;
+    return DDHAL_DRIVER_HANDLED;
+}
+
+static DWORD WINAPI UnlockExecuteBuffer(LPDDHAL_UNLOCKDATA d)
+{
     d->ddRVal = DD_OK;
     return DDHAL_DRIVER_HANDLED;
 }
@@ -476,7 +606,32 @@ DWORD WINAPI DriverInit(DWORD context)
     s->hal.GetDriverInfo = (DWORD)GetDriverInfo;
     s->hal.dwFlags |= RDD_HALINFO_GETDRIVERINFOSET;
     s->hal.lpDDExeBufCallbacks = 0;
+    d3d8_enabled();                     /* first: d3d_init's capabilities depend on it */
     d3d_init(s, (DDCORECAPS *)s->hal.ddCaps);
+    if (d3d8_enabled()) {
+        s->hal.dwFlags |= RDD_HALINFO_GETDRIVERINFO2;
+        ((DDCORECAPS *)s->hal.ddCaps)->dwNumFourCCCodes = RDD_FOURCCS;  /* DXT1..5 (ddraw16.c) */
+        if (d3d_buffers_on()) {
+            LPDDHAL_DDEXEBUFCALLBACKS x = (LPDDHAL_DDEXEBUFCALLBACKS)s->exebufcb;
+            zero(x, sizeof *x);
+            x->dwSize = sizeof *x;
+            x->dwFlags = DDHAL_EXEBUFCB32_CANCREATEEXEBUF | DDHAL_EXEBUFCB32_CREATEEXEBUF |
+                         DDHAL_EXEBUFCB32_DESTROYEXEBUF | DDHAL_EXEBUFCB32_LOCKEXEBUF |
+                         DDHAL_EXEBUFCB32_UNLOCKEXEBUF;
+            x->CanCreateExecuteBuffer = CanCreateExecuteBuffer;
+            x->CreateExecuteBuffer = CreateExecuteBuffer;
+            x->DestroyExecuteBuffer = DestroyExecuteBuffer;
+            x->LockExecuteBuffer = LockExecuteBuffer;
+            x->UnlockExecuteBuffer = UnlockExecuteBuffer;
+            s->hal.lpDDExeBufCallbacks = s->self16 + FIELD_OFFSET(RDD_SHARED, exebufcb);
+            /* DirectDraw offers execute buffers in video memory only on hardware that has them */
+            ((DDCORECAPS *)s->hal.ddCaps)->ddsCaps.dwCaps |= DDSCAPS_EXECUTEBUFFER;
+            dbg("rdd: Direct3D 8 buffers in memory the driver allocates\r\n");
+        }
+    } else {
+        s->hal.dwFlags &= ~RDD_HALINFO_GETDRIVERINFO2;
+        ((DDCORECAPS *)s->hal.ddCaps)->dwNumFourCCCodes = 0;
+    }
     s->dll_ready = 1;
     dbg("rdd: DirectDraw HAL DLL ready, loaded at "); dbg_hex((DWORD)dll_instance);
     dbg(", process "); dbg_hex(GetCurrentProcessId()); dbg("\r\n");

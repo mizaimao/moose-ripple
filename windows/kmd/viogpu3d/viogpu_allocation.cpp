@@ -86,12 +86,67 @@ void VioGpuAllocation::MarkBusy()
     KeClearEvent(&m_busyNotification);
 }
 
+// A thread that waits for the host GPU makes the host look. QEMU answers a finished fence when
+// it next handles a notification from the guest, and otherwise on a 10 ms timer. The work
+// thread's nudges (viogpu_command.cpp) come with the system timer: half a millisecond to a
+// millisecond after the buffer when the fine timer is held, one to two under processor
+// emulation, and not before QEMU's own timer when it is not held. So before it sleeps, the
+// waiter stays awake for up to 3 ms and nudges the queue after 0.2 ms, then at doubling
+// intervals (0.4, 0.8, 1.6 ms), as the Mac OS X driver does (VirtioGPUDevice::command).
+void VioGpuAllocation::ProdHost()
+{
+    PAGED_CODE();
+
+#ifndef RIPPLE_NO_WAIT_PROD
+    for (ULONG interval = 200; interval <= 1600 && m_busy != 0; interval *= 2)
+    {
+        for (ULONG waited = 0; waited < interval && m_busy != 0; waited += 50)
+        {
+            KeStallExecutionProcessor(50);
+        }
+        if (m_busy != 0)
+        {
+            m_adapter->ctrlQueue.Nudge();
+        }
+    }
+#endif
+}
+
+// TRACE_WAITS=1 (windows/kmd/build.sh): how many waits for the host GPU there were and how long
+// they took, a line in the driver's log every 256 waits
+void VioGpuAllocation::WaitCounted(LONGLONG since)
+{
+    PAGED_CODE();
+
+#ifdef RIPPLE_TRACE_WAITS
+    static volatile LONG waits, longWaits;
+    static volatile LONGLONG ticks;
+    LARGE_INTEGER frequency;
+    LONGLONG took = KeQueryPerformanceCounter(&frequency).QuadPart - since;
+    InterlockedExchangeAdd64(&ticks, took);
+    if (took * 1000 >= frequency.QuadPart * 5)
+    {
+        InterlockedIncrement(&longWaits);
+    }
+    LONG n = InterlockedIncrement(&waits);
+    if ((n & 255) == 0)
+    {
+        DbgPrint(TRACE_LEVEL_FATAL,
+                 ("waits for the GPU: %d, of them %d of 5 ms or more, %u us on average\n",
+                  n, longWaits, (UINT)(ticks * 1000000 / frequency.QuadPart / n)));
+    }
+#else
+    UNREFERENCED_PARAMETER(since);
+#endif
+}
+
 void VioGpuAllocation::WaitIdle()
 {
     PAGED_CODE();
 
     LARGE_INTEGER timeout;
     timeout.QuadPart = -20000000LL;
+    ProdHost();
     while (m_busy != 0)
     {
         if (KeWaitForSingleObject(&m_busyNotification, Executive, KernelMode, FALSE, &timeout) == STATUS_TIMEOUT)
@@ -172,10 +227,8 @@ NTSTATUS VioGpuAllocation::GetStandardAllocationDriverData(DXGKARG_GETSTANDARDAL
     {
         pStandardAllocation->ResourcePrivateDriverDataSize = sizeof(VIOGPU_CREATE_RESOURCE_EXCHANGE);
         pStandardAllocation->AllocationPrivateDriverDataSize = sizeof(VIOGPU_CREATE_ALLOCATION_EXCHANGE);
-#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
         if (pStandardAllocation->StandardAllocationType == D3DKMDT_STANDARDALLOCATION_SHAREDPRIMARYSURFACE)
             pStandardAllocation->AllocationPrivateDriverDataSize = sizeof(VIOGPU_VISTA_PRIMARY);
-#endif
         return STATUS_SUCCESS;
     }
 
@@ -202,11 +255,9 @@ NTSTATUS VioGpuAllocation::GetStandardAllocationDriverData(DXGKARG_GETSTANDARDAL
     {
         case D3DKMDT_STANDARDALLOCATION_SHAREDPRIMARYSURFACE:
             {
-#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
                 if (pStandardAllocation->AllocationPrivateDriverDataSize < sizeof(VIOGPU_VISTA_PRIMARY))
                     return STATUS_BUFFER_TOO_SMALL;
                 static_cast<VIOGPU_VISTA_PRIMARY *>(pStandardAllocation->pAllocationPrivateDriverData)->tag = VIOGPU_VISTA_PRIMARY_TAG;
-#endif
                 D3DKMDT_SHAREDPRIMARYSURFACEDATA *surfaceData = pStandardAllocation->pCreateSharedPrimarySurfaceData;
                 //[in] UINT                           Width;
                 //[in] UINT                           Height;
@@ -320,16 +371,15 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
     allocationInfo->PreferredSegment.Direction0 = 0;
 
     allocationInfo->Flags.CpuVisible = TRUE;
-#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
     // The CPU's view of an allocation is mapped cached, not write-combined. For every page it
     // maps write-combined Windows changes the page's caching and interrupts all processors to
     // tell them, which is most of the cost of writing a new texture where the processors are
     // emulated. The aperture segment is cache-coherent (DxgkDdiQueryAdapterInfo), and the host
-    // reads an allocation's pages only when a transfer command names them. Vista only so far:
-    // on Windows 7 the first try left Direct3D 9 programs unable to start
+    // reads an allocation's pages only when a transfer command names them. Not for a primary
+    // (below): Windows does not take a cached primary, and with the flag on every allocation
+    // Windows 7 left full-screen Direct3D 9 programs unable to start
     // (docs/windows/kmd-port-notes.md, "Cached memory for allocations").
     allocationInfo->Flags.Cached = TRUE;
-#endif
 
     allocationInfo->HintedBank.Value = 0;
     allocationInfo->MaximumRenamingListLength = 0;
@@ -338,9 +388,16 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
 
     allocationInfo->SupportedReadSegmentSet = 0b1;
     allocationInfo->SupportedWriteSegmentSet = 0b1;
-#if DXGKDDI_INTERFACE_VERSION < DXGKDDI_INTERFACE_VERSION_WIN7
+    // A primary comes tagged: the desktop's own by GetStandardAllocationDriverData, a Direct3D
+    // program's (the compositor's, a full-screen game's) by the user-mode driver.
     const ULONG vistaTag = allocationInfo->PrivateDriverDataSize == sizeof(VIOGPU_VISTA_PRIMARY)
         ? static_cast<const VIOGPU_VISTA_PRIMARY *>(allocationInfo->pPrivateDriverData)->tag : 0;
+#if DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN7
+    if (vistaTag == VIOGPU_VISTA_PRIMARY_TAG || vistaTag == VIOGPU_VISTA_DRAWN_PRIMARY_TAG)
+    {
+        allocationInfo->Flags.Cached = FALSE;
+    }
+#else
     if (vistaTag == VIOGPU_VISTA_PRIMARY_TAG || vistaTag == VIOGPU_VISTA_DRAWN_PRIMARY_TAG)
     {
         // The compositor draws its primary on the host GPU. A CPU reader needs a
@@ -423,13 +480,19 @@ NTSTATUS VioGpuAllocation::EscapeResourceBusy(VIOGPU_RES_BUSY_REQ *resBusy)
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s res_id=%d\n", __FUNCTION__, m_Id));
 
-    while (resBusy->Wait && m_busy != 0)
+    if (resBusy->Wait && m_busy != 0)
     {
-        KeWaitForSingleObject(&m_busyNotification, UserRequest, KernelMode, FALSE, NULL);
+        LONGLONG since = KeQueryPerformanceCounter(NULL).QuadPart;
+        ProdHost();
+        while (m_busy != 0)
+        {
+            KeWaitForSingleObject(&m_busyNotification, UserRequest, KernelMode, FALSE, NULL);
 
-        LARGE_INTEGER wait;
-        wait.QuadPart = -10LL;
-        KeDelayExecutionThread(KernelMode, FALSE, &wait);
+            LARGE_INTEGER wait;
+            wait.QuadPart = -10LL;
+            KeDelayExecutionThread(KernelMode, FALSE, &wait);
+        }
+        WaitCounted(since);
     }
 
     resBusy->IsBusy = m_busy != 0;

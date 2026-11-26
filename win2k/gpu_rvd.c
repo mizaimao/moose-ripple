@@ -138,6 +138,8 @@ static void release_buffer(RB2K_GPU *gpu, RVD_BUFFER *b)
 {
     RVD_COMMAND c;
     if (gpu->ready) {
+        /* The display must not keep showing an image that goes. */
+        if (gpu->glDesktop.scanout == b->handle) rb_gl_desktop(gpu);
         begin(&c, VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE, b->context);
         c.ctxResource.resource_id = b->handle;
         simple(gpu, &c, sizeof(c.ctxResource));
@@ -468,6 +470,18 @@ static VP_STATUS transfer(RB2K_GPU *gpu, const RB2K_RVD_REQUEST *r)
     return send(gpu, &c, sizeof(c.transfer), NULL, 0, from, NULL, 0, VIRTIO_GPU_RESP_OK_NODATA);
 }
 
+/* A program's full-screen frame, already in its own 32-bit scanout image
+ * (Mesa's RVD_PRESENT). */
+static VP_STATUS scanout(RB2K_GPU *gpu, const RB2K_RVD_REQUEST *r)
+{
+    RVD_BUFFER *b = own_buffer(r->a);
+    if (!gpu->ready) return ERROR_NOT_READY;
+    if (!b || b->context != r->context || !own_context(r->context) || !b->frameWidth ||
+        b->frameWidth != r->b || b->frameHeight != r->bytes)
+        return ERROR_INVALID_PARAMETER;
+    return rb_gl_scanout(gpu, b->handle, r->b, r->bytes);
+}
+
 static VP_STATUS present_frame(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 {
     const RB2K_GL_FRAME *f = packet->InputBuffer;
@@ -506,6 +520,8 @@ VP_STATUS rb_gpu_rvd_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     case RB2K_RVD_OP_BUFFER_DESTROY: status = buffer_destroy(gpu, r); break;
     case RB2K_RVD_OP_SUBMIT: status = submit(gpu, r); break;
     case RB2K_RVD_OP_TRANSFER: status = transfer(gpu, r); break;
+    case RB2K_RVD_OP_SCANOUT: status = scanout(gpu, r); break;
+    case RB2K_RVD_OP_DESKTOP: status = gpu->ready ? rb_gl_desktop(gpu) : NO_ERROR; break;
     case RB2K_RVD_OP_HELD: status = held(gpu, packet); break;
     case RB2K_RVD_OP_GDI_ACCESS:
     case RB2K_RVD_OP_GDI_FLUSH: {

@@ -56,7 +56,7 @@ def header_overlay(work):
 
 
 def build_kernel(work, overlay, target, modules, includes, definitions, libraries, link_flags):
-    compiler = [bin_dir / "clang", "-target", "i686-pc-windows-msvc", "-std=gnu89", "-Os",
+    compiler = [bin_dir / "clang", "-target", "i686-pc-windows-msvc", "-std=gnu89", "-O2",
                 "-ffreestanding", "-fno-stack-protector", "-fms-extensions", "-fms-compatibility",
                 "-fms-compatibility-version=12", "-mno-sse", "-mno-sse2", "-mno-mmx",
                 "-Xclang", "-fdefault-calling-conv=stdcall", "-ivfsoverlay", overlay,
@@ -72,6 +72,7 @@ def build_kernel(work, overlay, target, modules, includes, definitions, librarie
     subprocess.run([bin_dir / "lld-link", "/machine:x86", "/subsystem:native,5.00", "/osversion:5.0",
                     "/nodefaultlib", "/safeseh:no", f"/timestamp:{stamp}", "/release",
                     "/libpath:" + str(ddk / "libfre/i386"), "/out:" + str(work / target)]
+                   + ([f"/map:{work / target}.map"] if os.environ.get("RIPPLE_LINK_MAP") else [])
                    + link_flags + objects + libraries, check=True)
 
 
@@ -144,6 +145,19 @@ def build_programs(work):
     targets.append(("d9texload.exe", ["tools/d9texload"], ["-I", d3d, "-luser32"]))
     targets.append(("d9stencil.exe", ["tools/d9stencil"], ["-I", d3d, "-luser32"]))
     targets.append(("d9full.exe", ["tools/d9full"], ["-I", d3d, "-luser32"]))
+    # Logging stand-ins for d3d9.dll and d3d8.dll; the exports they do not handle go to d3d9real.dll
+    # and d3d8real.dll.
+    trace = work / "d9trace.def"
+    trace.write_text("LIBRARY d3d9\nEXPORTS\nDirect3DCreate9=Direct3DCreate9@4\n" + "".join(
+        f"{name}=d3d9real.{name}\n" for name in (
+            "D3DPERF_BeginEvent", "D3DPERF_EndEvent", "D3DPERF_GetStatus", "D3DPERF_QueryRepeatFrame",
+            "D3DPERF_SetMarker", "D3DPERF_SetOptions", "D3DPERF_SetRegion", "DebugSetLevel", "DebugSetMute",
+            "Direct3DShaderValidatorCreate9", "PSGPError", "PSGPSampleTexture")))
+    targets.append(("d9trace.dll", ["tools/d9trace"], ["-shared", trace, "-I", d3d, "-luser32"]))
+    trace8 = work / "d8trace.def"
+    trace8.write_text("LIBRARY d3d8\nEXPORTS\nDirect3DCreate8=Direct3DCreate8@4\n" + "".join(
+        f"{name}=d3d8real.{name}\n" for name in ("DebugSetMute", "ValidatePixelShader", "ValidateVertexShader")))
+    targets.append(("d8trace.dll", ["tools/d8trace"], ["-shared", trace8, "-I", d3d, "-luser32"]))
     args = [bin_dir / "i686-w64-mingw32-clang", "-O2", "-D_WIN32_WINNT=0x0500",
             "-I", source, "-I", repo / "win9x/minivdd",
             "-Wl,--major-subsystem-version,5,--minor-subsystem-version,0,--major-os-version,5,--minor-os-version,0,--no-insert-timestamp"]
@@ -171,6 +185,10 @@ def main():
         (work / "rb2k.inf").write_bytes((source / "rb2k.inf").read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
         for target in ["rb2kmp.sys", "rb2kdisp.dll", "rb2k.inf", *programs]:
             (work / target).replace(dest / target)
+        if os.environ.get("RIPPLE_LINK_MAP"):
+            # Link maps of the two drivers, to place guest samples (RIPPLE_LINK_MAP=1).
+            for target in ["rb2kmp.sys.map", "rb2kdisp.dll.map"]:
+                (work / target).replace(dest / target)
 
 
 if __name__ == "__main__":

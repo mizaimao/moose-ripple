@@ -26,6 +26,8 @@ int main(void)
     for (i = 0; i < RB2K_D7_SKIPS; ++i) printf(" %s=%lu", skips[i], s.skipped[i]);
     printf(" ignored");
     for (i = 0; i < RB2K_D7_IGNORED; ++i) printf(" %s=%lu", ignored[i], s.ignored[i]);
+    printf("\nD7VERTEX last_fvf=%lx last_stride=%lu sites", s.vertexFvf, s.vertexStride);
+    for (i = 0; i < RB2K_D7_VERTEX_SITES; ++i) if (s.vertexSites[i]) printf(" %lu=%lu", i, s.vertexSites[i]);
     printf("\nD7DRAW textures_by_format none=%lu argb8888=%lu xrgb8888=%lu rgb565=%lu argb1555=%lu xrgb1555=%lu argb4444=%lu compressed=%lu video=%lu texblts=%lu texblt_failures=%lu\n",
            s.registered[0], s.registered[1], s.registered[2], s.registered[3], s.registered[4],
            s.registered[5], s.registered[6], s.registered[7], s.videoTextures, s.texBlts, s.texBltFailures);
@@ -62,13 +64,17 @@ int main(void)
             printf("D7DDMODE bpp=%d info=%lu info_failed=%lu reason=%lu enable_failed=%lu\n", depth[m],
                    s.ddModes[m][0], s.ddModes[m][1], s.ddModes[m][2], s.ddModes[m][3]);
     }
+    printf("D7CODE display_drawstats=%08lx\n", s.codeAt);
     if (s.frequency > 0)
         printf("D7TIME requests=%lu dp2_us=%I64d check_us=%I64d upload_us=%I64d copy_us=%I64d draw_us=%I64d\n", s.drawRequests,
                s.dp2Ticks * 1000000 / s.frequency, s.checkTicks * 1000000 / s.frequency,
                s.uploadTicks * 1000000 / s.frequency, s.copyTicks * 1000000 / s.frequency,
                s.drawTicks * 1000000 / s.frequency);
-    printf("D7REG mipmaps=%lu managed=%lu chains=%lu stops=%lu,%lu,%lu,%lu,%lu\n", s.regMipmaps, s.regManaged,
-           s.mipChains, s.mipStops[0], s.mipStops[1], s.mipStops[2], s.mipStops[3], s.mipStops[4]);
+    printf("D7REG mipmaps=%lu managed=%lu chains=%lu stops=%lu,%lu,%lu,%lu,%lu no_memory=%lu full=%lu peak=%lu\n",
+           s.regMipmaps, s.regManaged, s.mipChains, s.mipStops[0], s.mipStops[1], s.mipStops[2], s.mipStops[3],
+           s.mipStops[4], s.regNoMemory, s.regFull, s.regPeak);
+    printf("D7REG no_memory_caps=%08lx caps2=%08lx format=%08lx transform_flags=%08lx\n", s.noMemoryCaps,
+           s.noMemoryCaps2, s.noMemoryFormat, s.transformFlags);
     {
         int k;
         printf("D7FLIP flips=%lu presents=%lu fronts=%lu backs=%lu chain_blts=%lu targets=%lu target_failures=%lu\n",
@@ -88,6 +94,9 @@ int main(void)
             printf("D7CREATE log-%d caps=%08lx size=%lux%lu count=%lu slots=%lu end=%lu hr=%08lx\n", k, l[0], l[1] >> 16,
                    l[1] & 0xffff, l[2], l[3] >> 8, l[3] & 255, l[4]);
         }
+        printf("D9DDI unresolved=%lu ignored scissor=%lu targets=%lu blt=%lu fill=%lu query=%lu constants=%lu "
+               "frequency=%lu mips=%lu\n", s.d9Unresolved, s.d9Ignored[0], s.d9Ignored[1], s.d9Ignored[2],
+               s.d9Ignored[3], s.d9Ignored[4], s.d9Ignored[5], s.d9Ignored[6], s.d9Ignored[7]);
         printf("D7RTT target_textures=%lu texture_skips=%lu,%lu,%lu,%lu\n", s.targetTextures, s.texSkips[0],
                s.texSkips[1], s.texSkips[2], s.texSkips[3]);
         printf("D7FLIP targets");
@@ -121,6 +130,8 @@ int main(void)
         printf("\n");
     }
     printf("D8BLOCKS uploads=%lu last_status=%lu upload_failures=%lu\n", s.blockUploads, s.blockStatus, s.uploadFailures);
+    printf("D7EVICT evictions=%lu creates=%lu room_status=%lx textures=%lu\n", s.evictions, s.evictedCreates, s.roomStatus,
+           s.textures);
     printf("D8STATESET begin=%lu end=%lu delete=%lu execute=%lu capture=%lu create=%lu other=%lu failures=%lu\n",
            s.stateSets[0], s.stateSets[1], s.stateSets[2], s.stateSets[3], s.stateSets[4], s.stateSets[5], s.stateSets[6],
            s.blockFailures);
@@ -155,6 +166,15 @@ int main(void)
                        "fence_us=%I64d\n", names[i], p.op[i].calls, p.op[i].submits, p.op[i].bytes, p.op[i].failed,
                        p.op[i].ticks * 1000000 / p.frequency, p.op[i].queueTicks * 1000000 / p.frequency,
                        p.op[i].fenceTicks * 1000000 / p.frequency);
+        if (ExtEscape(dc, RB2K_D3D7_PROFILE_ESCAPE, 0, NULL, sizeof(p), (LPSTR)&p) > 0) {
+            static const char *const kinds[RB2K_CACHE_KINDS] = { "dsa", "blend", "shader", "sampler", "sampler1",
+                                                                 "vs_program", "ps_shader", "ps_sampler" };
+            for (i = 0; i < RB2K_CACHE_KINDS; ++i)
+                printf("D7CACHE kind=%s hits=%lu new=%lu replaced=%lu\n", kinds[i], p.caches[i][0], p.caches[i][1],
+                       p.caches[i][2]);
+            printf("D7SHADERS made=%lu text_bytes=%lu\n", p.shaders, p.shaderBytes);
+            printf("D7CODE miniport_frame_reserve=%08lx\n", p.codeAt);
+        }
         if (ExtEscape(dc, RB2K_D3D7_PROFILE_ESCAPE, 0, NULL, sizeof(p), (LPSTR)&p) > 0)
             printf("D7REFUSED site=%lu status=%lu stage=%lu count=%lu first_site=%lu first_status=%lu first_stage=%lu\n",
                    p.failSite, p.failStatus, p.failStage, p.failCount, p.firstSite, p.firstStatus, p.firstStage);

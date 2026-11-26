@@ -69,22 +69,16 @@ d3d10_create_screen(gdikmt_device *device);
 static inline bool
 D3D9CanExpandPointsWithGs(struct pipe_screen *screen)
 {
-#ifdef RIPPLE_VISTA
    /* A rejected geometry shader invalidates the whole virgl context. */
    return screen->get_param(screen, PIPE_CAP_GLSL_FEATURE_LEVEL) >= 150 &&
           screen->get_param(screen, PIPE_CAP_MAX_GEOMETRY_OUTPUT_VERTICES) >= 4;
-#else
-   return true;
-#endif
 }
 
 static inline uint8_t
 D3D9FragmentClipPlaneMask(struct pipe_screen *screen, uint8_t mask)
 {
-#ifdef RIPPLE_VISTA
    if (mask && screen->get_param(screen, PIPE_CAP_GLSL_FEATURE_LEVEL) < 150)
       return mask;
-#endif
    return 0;
 }
 
@@ -191,6 +185,17 @@ struct D3D9Device
       /* the video processor's conversion draw (D3D9VideoDrawNv12) shares the rest */
       void *video_fs, *video_sampler;
    } key_blit;
+   /* Shaders the driver writes itself (D3D9KeepGeneratedShader): the vertex shaders for
+    * vertices that are already transformed and the geometry shaders that widen points. They
+    * are kept by their code, so a draw that needs one again gets the same shader. */
+   struct {
+      const void *tokens;
+      unsigned count;
+      unsigned stage;
+      void *cso;
+   } generated_shaders[64];
+   unsigned generated_shader_count;
+   unsigned generated_shader_next;
    HANDLE render_targets[4];
    UINT render_target_subresources[4];
    HANDLE depth_stencil;
@@ -541,3 +546,4 @@ D3D9ReleaseKept(D3D9Resource *resource)
    pipe_surface_reference(&resource->kept_surface, NULL);
 }
 void D3D9DestroyKeyBlitState(D3D9Device *device);
+void D3D9DestroyGeneratedShaders(D3D9Device *device);

@@ -1,5 +1,5 @@
 /* Virtio commands for the pixel diagnostic, DirectDraw textures and the
- * optional OpenGL desktop. Only rb_gpu_show_desktop selects a scanout. */
+ * optional OpenGL desktop. Only rb_gpu_show_image selects a scanout. */
 #include <miniport.h>
 #include <devioctl.h>
 #include <winerror.h>
@@ -142,19 +142,6 @@ BOOLEAN rb_gpu_create_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     return FALSE;
 }
 
-/* IEEE single-precision encoding of channel/255 rounded to the nearest
- * representable value, without using the kernel thread's floating-point state. */
-ULONG rb_gpu_channel(ULONG channel)
-{
-    ULONG exponent = 127;
-    if (!channel) return 0;
-    while (channel < 255) {
-        channel <<= 1;
-        --exponent;
-    }
-    return (exponent << 23) | (((channel - 255) << 23) + 127) / 255;
-}
-
 static BOOLEAN fenced(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
                       struct virtio_gpu_ctrl_hdr *header, ULONG bytes, ULONG stage)
 {
@@ -181,7 +168,7 @@ static BOOLEAN submit_frame(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, BOOLEAN last)
     if (!gpu->d7Frame.count) return TRUE;
     r->stage = RB2K_STAGE_TRANSFER;
     r->status = rb_gpu_submit_scene(gpu, gpu->d7Frame.words, gpu->d7Frame.count,
-                                    last ? &gpu->d7Frame.pending : &none);
+                                    last ? &gpu->d7Frame.pending : &none, last);
     ok = r->status == NO_ERROR;
     if (ok && last && gpu->d7WaitCurrent) {
         r->status = rb_gpu_wait_image(gpu, target);
@@ -640,27 +627,35 @@ BOOLEAN rb_gpu_primary_transfer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     return rb_gl_record_time(gpu, operation, start, TRUE);
 }
 
-BOOLEAN rb_gpu_show_desktop(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, BOOLEAN select)
+/* Put a resource on scanout 0 (select) and show its latest contents. */
+BOOLEAN rb_gpu_show_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resource, ULONG width, ULONG height,
+                          BOOLEAN select)
 {
     PIXEL_REQUEST request;
-    RB2K_IMAGE *image = &gpu->glDesktop.image;
     LONGLONG start = rb_counter_ticks(NULL);
     BOOLEAN ok;
     if (select) {
         begin_request(&request, VIRTIO_GPU_CMD_SET_SCANOUT, 0);
-        request.scanout.resource_id = image->id;
-        request.scanout.r.width = image->width;
-        request.scanout.r.height = image->height;
+        request.scanout.resource_id = resource;
+        request.scanout.r.width = width;
+        request.scanout.r.height = height;
         if (!send_request(gpu, result, &request, sizeof(request.scanout), RB2K_STAGE_TRANSFER))
             return rb_gl_record_time(gpu, RB2K_GL_FLUSH, start, FALSE);
-        gpu->glDesktop.visible = TRUE;
     }
     begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_FLUSH, 0);
-    request.flush.resource_id = image->id;
-    request.flush.r.width = image->width;
-    request.flush.r.height = image->height;
+    request.flush.resource_id = resource;
+    request.flush.r.width = width;
+    request.flush.r.height = height;
     ok = send_request(gpu, result, &request, sizeof(request.flush), RB2K_STAGE_TRANSFER);
     return rb_gl_record_time(gpu, RB2K_GL_FLUSH, start, ok);
+}
+
+BOOLEAN rb_gpu_show_desktop(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, BOOLEAN select)
+{
+    RB2K_IMAGE *image = &gpu->glDesktop.image;
+    if (!rb_gpu_show_image(gpu, result, image->id, image->width, image->height, select)) return FALSE;
+    if (select) gpu->glDesktop.visible = TRUE;
+    return TRUE;
 }
 
 BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
@@ -741,6 +736,72 @@ BOOLEAN rb_gpu_copy_rects(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG destinat
     return ok;
 }
 
+/* A square colour image into layer (a cube face) of a host texture, in the image's own context, to
+ * which the texture is attached. */
+BOOLEAN rb_gpu_copy_layer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG image, ULONG texture, ULONG layer, ULONG side)
+{
+    COPY_PACKET *p = (COPY_PACKET *)gpu->copyPacket.bytes;
+    ULONG *w = p->command[0];
+    VideoPortZeroMemory(p, sizeof(p->submit) + sizeof(p->command[0]));
+    p->submit.hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    p->submit.hdr.ctx_id = image;
+    p->submit.size = sizeof(p->command[0]);
+    w[0] = VIRGL_CMD0(VIRGL_CCMD_RESOURCE_COPY_REGION, 0, VIRGL_CMD_RESOURCE_COPY_REGION_SIZE);
+    w[VIRGL_CMD_RCR_DST_RES_HANDLE] = texture;
+    w[VIRGL_CMD_RCR_DST_Z] = layer;
+    w[VIRGL_CMD_RCR_SRC_RES_HANDLE] = image;
+    w[VIRGL_CMD_RCR_SRC_W] = side;
+    w[VIRGL_CMD_RCR_SRC_H] = side;
+    w[VIRGL_CMD_RCR_SRC_D] = 1;
+    return fenced(gpu, result, &p->submit.hdr, sizeof(p->submit) + sizeof(p->command[0]), RB2K_STAGE_TRANSFER);
+}
+
+enum { BlitWords = 1 + VIRGL_CMD_BLIT_SIZE };
+typedef struct {
+    struct virtio_gpu_cmd_submit submit;
+    ULONG command[BlitWords];
+} BLIT_PACKET;
+typedef char blit_fits_inline[sizeof(BLIT_PACKET) <= RB2K_INLINE_PACKET_BYTES ? 1 : -1];
+
+/* A scaled copy of one rectangle of a colour image into a rectangle of another, both already
+ * inside their images, point-sampled or linear: the host blits it in the destination's context. */
+BOOLEAN rb_gpu_blit_rect(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG destination, ULONG source,
+                         const RB2K_RECT *to, const RB2K_RECT *from, BOOLEAN linear)
+{
+    BLIT_PACKET *p = (BLIT_PACKET *)gpu->copyPacket.bytes;
+    RB2K_GPU_RESULT cleanup;
+    ULONG *w = p->command;
+    BOOLEAN ok;
+    VideoPortZeroMemory(p, sizeof(*p));
+    p->submit.hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    p->submit.hdr.ctx_id = destination;
+    p->submit.size = sizeof(p->command);
+    w[0] = VIRGL_CMD0(VIRGL_CCMD_BLIT, 0, VIRGL_CMD_BLIT_SIZE);
+    /* All four channels; filter 1 is linear, 0 nearest (Gallium's PIPE_TEX_FILTER_*). */
+    w[VIRGL_CMD_BLIT_S0] = VIRGL_CMD_BLIT_S0_MASK(0xf) | VIRGL_CMD_BLIT_S0_FILTER(linear ? 1 : 0);
+    w[VIRGL_CMD_BLIT_DST_RES_HANDLE] = destination;
+    w[VIRGL_CMD_BLIT_DST_FORMAT] = VIRGL_FORMAT_B8G8R8A8_UNORM;
+    w[VIRGL_CMD_BLIT_DST_X] = to->left;
+    w[VIRGL_CMD_BLIT_DST_Y] = to->top;
+    w[VIRGL_CMD_BLIT_DST_W] = to->right - to->left;
+    w[VIRGL_CMD_BLIT_DST_H] = to->bottom - to->top;
+    w[VIRGL_CMD_BLIT_DST_D] = 1;
+    w[VIRGL_CMD_BLIT_SRC_RES_HANDLE] = source;
+    w[VIRGL_CMD_BLIT_SRC_FORMAT] = VIRGL_FORMAT_B8G8R8A8_UNORM;
+    w[VIRGL_CMD_BLIT_SRC_X] = from->left;
+    w[VIRGL_CMD_BLIT_SRC_Y] = from->top;
+    w[VIRGL_CMD_BLIT_SRC_W] = from->right - from->left;
+    w[VIRGL_CMD_BLIT_SRC_H] = from->bottom - from->top;
+    w[VIRGL_CMD_BLIT_SRC_D] = 1;
+    if (!context_resource(gpu, result, destination, source, TRUE, RB2K_STAGE_ATTACH)) return FALSE;
+    ok = fenced(gpu, result, &p->submit.hdr, sizeof(*p), RB2K_STAGE_TRANSFER);
+    if (!ok) {
+        if (gpu->ready) context_resource(gpu, &cleanup, destination, source, FALSE, RB2K_STAGE_CLEANUP);
+        return FALSE;
+    }
+    return context_resource(gpu, result, destination, source, FALSE, RB2K_STAGE_CLEANUP);
+}
+
 BOOLEAN rb_gpu_destroy_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id)
 {
     PIXEL_REQUEST request;
@@ -780,13 +841,14 @@ RB2K_TEXTURE *rb_gpu_texture(RB2K_GPU *gpu, ULONG id)
     return NULL;
 }
 
-/* The DXT formats the host samples, from its virgl capability set (bit n
- * for RB2K_D7_BLOCKS_DXT* n), asked once. */
+/* The upload formats the host samples, from its virgl capability set (bit n
+ * for upload format n: RB2K_D7_BLOCKS_DXT*, RB2K_D7_TEXELS_*), asked once. */
 ULONG rb_gpu_host_blocks(RB2K_GPU *gpu)
 {
     struct virtio_gpu_get_capset request;
     struct { struct virtio_gpu_ctrl_hdr hdr; ULONG maxVersion, sampler[16], rest[110]; } reply;
-    static const ULONG formats[4] = { 0, VIRGL_FORMAT_DXT1_RGBA, VIRGL_FORMAT_DXT3_RGBA, VIRGL_FORMAT_DXT5_RGBA };
+    static const ULONG formats[RB2K_D7_UPLOAD_FORMATS] = { 0, VIRGL_FORMAT_DXT1_RGBA, VIRGL_FORMAT_DXT3_RGBA,
+        VIRGL_FORMAT_DXT5_RGBA, VIRGL_FORMAT_R8G8_SNORM, VIRGL_FORMAT_R8G8B8A8_SNORM };
     ULONG received = 0, k;
     if (gpu->hostBlocksKnown || !gpu->ready) return gpu->hostBlocks;
     gpu->hostBlocksKnown = TRUE;
@@ -797,7 +859,7 @@ ULONG rb_gpu_host_blocks(RB2K_GPU *gpu)
     if (rb_gpu_submit(gpu, &request, sizeof(request), &reply, sizeof(reply), &received) ||
         received < sizeof(reply.hdr) + sizeof(ULONG) * 17 || reply.hdr.type != VIRTIO_GPU_RESP_OK_CAPSET)
         return 0;
-    for (k = 1; k < 4; ++k)
+    for (k = 1; k < RB2K_D7_UPLOAD_FORMATS; ++k)
         if ((reply.sampler[formats[k] / 32] >> (formats[k] % 32)) & 1) gpu->hostBlocks |= 1UL << k;
     return gpu->hostBlocks;
 }
@@ -872,10 +934,14 @@ BOOLEAN rb_gpu_texture_upload(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K
     ULONG rowBytes = width * sizeof(ULONG), bytes = rowBytes * rows;
     if (gpu->d7Frame.target && gpu->d7Frame.count && !submit_frame(gpu, result, FALSE)) return FALSE;
     if (texture->format) {
-        /* Rows of 4x4 blocks: eight bytes each for DXT1, sixteen for the others. */
-        rowBytes = (width + 3) / 4 * (texture->format == VIRGL_FORMAT_DXT1_RGBA ? 8 : 16);
+        /* Rows of 4x4 DXT blocks (eight bytes each for DXT1, sixteen for the
+         * others), or rows of signed texels of two or four bytes. */
+        ULONG side = texture->format == VIRGL_FORMAT_R8G8_SNORM || texture->format == VIRGL_FORMAT_R8G8B8A8_SNORM ? 1 : 4;
+        ULONG block = texture->format == VIRGL_FORMAT_DXT1_RGBA ? 8 : side == 4 ? 16 :
+                      texture->format == VIRGL_FORMAT_R8G8_SNORM ? 2 : 4;
+        rowBytes = (width + side - 1) / side * block;
         return transfer_rows(gpu, result, image->id, texture->id, 0, y, width, rows, texels, rowBytes, rowBytes,
-                             FALSE, level, (rows + 3) / 4, face);
+                             FALSE, level, (rows + side - 1) / side, face);
     }
     if (bytes <= 16384) {
         ULONG count;

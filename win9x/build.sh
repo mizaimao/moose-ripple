@@ -69,15 +69,16 @@ ls -l "$OUT"/ripple9x.* "$OUT"/ripplevd.vxd
 # based above 2 GB. Direct3D draws through OpenGL (opengl32.dll, loaded when first needed).
 D=$OUT/obj-ddraw
 rm -rf "$D" && mkdir -p "$D"
-cp "$here"/ddraw/* "$here"/display/rdd.h "$here"/minivdd/rvd.h "$D/"
+cp "$here"/ddraw/* "$here"/display/rdd.h "$here"/minivdd/rvd.h "$here"/../win2k/d3d8ddi.h \
+   "$here"/../win2k/d3d8_ps.c "$here"/../win2k/d3d8_ps.h "$D/"
 cd "$D"
 (
     export INCLUDE="$(W "$T/ddkme/ddk/inc/win_me");$(W "$T/vc6/VC98/Include")" LIB="$(W "$T/vc6/VC98/Lib")"
     export WINEPATH="$(W "$T/vc6/VC98/Bin");$(W "$T/vc6/Common/MSDev98/Bin")"
-    wine cl.exe /nologo /c /W3 /WX /O1 /Oy- /Zl /Gs /GF rippledd.c rippled3d.c
+    wine cl.exe /nologo /c /W3 /WX /O1 /Oy- /Zl /Gs /GF rippledd.c rippled3d.c tgsi_arb.c tnl_arb.c vs_arb.c d3d8_ps.c
     wine link.exe /NOLOGO /DLL /NODEFAULTLIB /ENTRY:DllMain /BASE:0xB00B0000 /DEF:rippledd.def \
-        /OUT:rippledd.dll /MAP:rippledd.map rippledd.obj rippled3d.obj \
-        kernel32.lib user32.lib gdi32.lib > link.log 2>&1 || { cat link.log; exit 1; }
+        /OUT:rippledd.dll /MAP:rippledd.map rippledd.obj rippled3d.obj tgsi_arb.obj tnl_arb.obj vs_arb.obj d3d8_ps.obj \
+        kernel32.lib user32.lib gdi32.lib advapi32.lib > link.log 2>&1 || { cat link.log; exit 1; }
 )
 cp rippledd.dll "$OUT/"
 ls -l "$OUT"/rippledd.dll

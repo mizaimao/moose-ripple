@@ -53,6 +53,10 @@ COMMON="/nologo /c /O2 /W3 /Zp8 /GS- /Gy /kernel /Gz -fms-compatibility-version=
 [ -z "${TEST_TDR:-}" ] || COMMON="$COMMON /DRIPPLE_TEST_TDR"
 # TRACE_TIMING=1: where command buffers' time goes, written to the driver's log
 [ -z "${TRACE_TIMING:-}" ] || COMMON="$COMMON /DRIPPLE_TRACE_TIMING"
+# TRACE_WAITS=1: how many waits for the host GPU and how long, a log line every 256 waits.
+# NO_WAIT_PROD=1: a comparison build whose waiters do not nudge the host (viogpu_allocation.cpp)
+[ -z "${TRACE_WAITS:-}" ] || COMMON="$COMMON /DRIPPLE_TRACE_WAITS"
+[ -z "${NO_WAIT_PROD:-}" ] || COMMON="$COMMON /DRIPPLE_NO_WAIT_PROD"
 CXX="/GR- /EHs-c- /std:c++17"
 C_SRC="compat/intrinsics.c VirtIO/VirtIOPCICommon.c VirtIO/VirtIOPCILegacy.c VirtIO/VirtIOPCIModern.c VirtIO/VirtIORing.c VirtIO/VirtIORing-Packed.c"
 CXX_SRC="common/edid.cpp common/viogpu_idr.cpp common/ripple_pci.cpp common/viogpu_queue.cpp common/baseobj.cpp
