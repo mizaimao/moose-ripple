@@ -144,6 +144,9 @@ typedef struct {
      * count, slots in use << 8 | where it ended (0 done, 1 no slot, 2 host
      * image refused), result. */
     ULONG creates, createLog[8][5];
+    /* Least-recently-used eviction: host textures freed to make room, new
+     * textures that needed it, and the last refusal's status. */
+    ULONG evictions, evictedCreates, roomStatus;
 } RB2K_D7_DRAWSTATS;
 enum { RB2K_D7_FAIL_RANGE, RB2K_D7_FAIL_VBCAPS, RB2K_D7_FAIL_LINEAR, RB2K_D7_FAIL_ADDRESS,
        RB2K_D7_FAIL_PROBE, RB2K_D7_FAIL_IMMEDIATE, RB2K_D7_FAIL_LENGTH, RB2K_D7_FAIL_OTHER };
