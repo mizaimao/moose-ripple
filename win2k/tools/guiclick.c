@@ -17,9 +17,10 @@
  *   - a window showing a -dismiss text has its first enabled push button
  *     pressed, whatever its label (owner-drawn buttons often have none).
  *   - a window showing a -close text is asked to close.
- *   - "-press @Title#N" does the same only in a window whose title contains Title.
  *   - "-press #N" presses the enabled button whose control ID is N, owner-drawn
  *     or not; buttons are reported with their IDs and places for this.
+ *   - "-press @Title#N" does the same only in a window whose title contains Title.
+ *   - Nothing is pressed in a window a modal dialog has disabled.
  * With -debug the program runs under guiclick as its debugger: its
  * exceptions are reported with the module and offset, and for one that
  * ends it, the registers and the code addresses found on its stack.
@@ -173,6 +174,8 @@ static void act(CONTROLS *c)
         PostMessageA(c->top, WM_CLOSE, 0, 0);
         return;
     }
+    /* A window a modal dialog has disabled would drop the click. */
+    if (!IsWindowEnabled(c->top)) return;
     for (k = 0; k < userPress; ++k) {
         /* "#N", or "@Title#N": only in a window whose title contains Title. */
         const char *p = press[k];
