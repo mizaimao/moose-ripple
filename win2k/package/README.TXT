@@ -10,6 +10,8 @@ What works
   shaders 1.1 to 1.3 and 2.0, fixed-function stages, stencil, 24-bit depth,
   back buffers with alpha, full-screen devices, render target textures,
   DXT textures (decoded by the host GPU), cube and volume textures.
+  On Windows 2000 they need the DirectX 9.0c runtime; the last DirectX
+  redistributable that installs there is the one of February 2010.
 - OpenGL through Windows' own opengl32.dll (Mesa 24.3.4).
 - 3DMark03 runs to the end on Windows XP.
 
@@ -17,7 +19,6 @@ Not yet
 - Many 3DMark03 pictures are still wrong (dark scenes, white water).
 - Vertex shaders are off by default; when on, they have no flow control.
 - 1920x1080 at 32 bits per pixel does not fit in 8 MB of video memory.
-- Direct3D 8 and 9 on Windows 2000 are untested.
 
 Install
 1. Start the guest with a virtio-vga-gl device and a display with OpenGL
