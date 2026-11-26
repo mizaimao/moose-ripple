@@ -1,0 +1,163 @@
+--- a/src/gallium/targets/wgl/wgl.c
++++ b/src/gallium/targets/wgl/wgl.c
+@@ -112,9 +112,24 @@
+ }
+ 
+ #ifdef GALLIUM_VIRGL
+-/* GetCursorInfo's CURSORINFO; flags bit 0: CURSOR_SHOWING. */
++/* GetCursorInfo's CURSORINFO; flags bit 0: CURSOR_SHOWING. Windows 98 and later: on Windows 95
++ * every frame takes the GDI path. */
+ struct ripple_cursor_info { DWORD cbSize, flags; HCURSOR cursor; POINT position; };
+ 
++static bool
++ripple_cursor(struct ripple_cursor_info *c)
++{
++   static BOOL (WINAPI *get_cursor_info)(struct ripple_cursor_info *);
++   static bool looked;
++   if (!looked) {
++      get_cursor_info = (BOOL (WINAPI *)(struct ripple_cursor_info *))
++         GetProcAddress(GetModuleHandleA("user32.dll"), "GetCursorInfo");
++      looked = true;
++   }
++   c->cbSize = sizeof(*c);
++   return get_cursor_info && get_cursor_info(c);
++}
++
+ /* A full-screen OpenGL window is shown the way Direct3D's flip chain is: copied on the host
+  * GPU into a display image, with no read-back into the card's memory. Only while its client
+  * area is the whole screen, nothing covers it and the pointer is hidden: the software pointer
+@@ -123,8 +138,6 @@
+ static bool
+ ripple_whole_screen(HDC hdc, const struct pipe_resource *res)
+ {
+-   static BOOL (WINAPI *get_cursor_info)(struct ripple_cursor_info *);
+-   static bool looked;
+    struct ripple_cursor_info cursor;
+    HWND wnd = WindowFromDC(hdc);
+    RECT client, clip;
+@@ -139,13 +152,75 @@
+    if (GetClipBox(hdc, &clip) != SIMPLEREGION || clip.left || clip.top ||
+        clip.right != client.right || clip.bottom != client.bottom)
+       return false;
+-   if (!looked) {             /* Windows 98 and later; on Windows 95 the GDI path stays */
+-      get_cursor_info = (BOOL (WINAPI *)(struct ripple_cursor_info *))
+-         GetProcAddress(GetModuleHandleA("user32.dll"), "GetCursorInfo");
++   return ripple_cursor(&cursor) && !(cursor.flags & 1);
++}
++
++/* Any other window is copied on the host into the desktop image inside its visible rectangles
++ * (RVD_PRESENT_WINDOW). The card's memory under it then keeps an older frame, which GDI reads
++ * when the window is dragged or the screen captured, and the software pointer is drawn there:
++ * a frame goes the GDI way at least every RIPPLE_GDI_EVERY_MS and whenever the pointer is over
++ * or next to the window. */
++#define RIPPLE_WINDOW_RECTS 16
++#define RIPPLE_GDI_EVERY_MS 200
++
++static bool
++ripple_window_rects(HDC hdc, const struct pipe_resource *res, POINT *origin, long *rects,
++                    unsigned *count)
++{
++   static int (WINAPI *get_random_rgn)(HDC, HRGN, INT);
++   static bool looked;
++   struct { RGNDATAHEADER h; RECT r[RIPPLE_WINDOW_RECTS]; } data;
++   struct ripple_cursor_info cursor;
++   HWND wnd = WindowFromDC(hdc);
++   RECT client, clip, box;
++   HRGN rgn;
++   long dx, dy;
++   unsigned i;
++   bool ok = false;
++
++   origin->x = origin->y = 0;
++   if (!wnd || !GetClientRect(wnd, &client) || !ClientToScreen(wnd, origin) ||
++       res->width0 != (unsigned)client.right || res->height0 != (unsigned)client.bottom ||
++       GetClipBox(hdc, &clip) == ERROR || IsRectEmpty(&clip))
++      return false;
++   if (!ripple_cursor(&cursor) ||
++       ((cursor.flags & 1) && cursor.position.x > origin->x - 32 &&
++        cursor.position.x < origin->x + client.right + 32 &&
++        cursor.position.y > origin->y - 32 && cursor.position.y < origin->y + client.bottom + 32))
++      return false;
++   if (!looked) {
++      get_random_rgn = (int (WINAPI *)(HDC, HRGN, INT))
++         GetProcAddress(GetModuleHandleA("gdi32.dll"), "GetRandomRgn");
+       looked = true;
+    }
+-   cursor.cbSize = sizeof(cursor);
+-   return get_cursor_info && get_cursor_info(&cursor) && !(cursor.flags & 1);
++   if (!get_random_rgn || !(rgn = CreateRectRgn(0, 0, 0, 0)))
++      return false;
++   if (get_random_rgn(hdc, rgn, 4 /* SYSRGN, the visible region */) == 1 &&
++       GetRgnBox(rgn, &box) != ERROR) {
++      /* Screen coordinates (as NT gives them) or the client area's: whichever matches the clip
++       * box, which is in the client area's. Anything else: the GDI path. */
++      if (box.left == clip.left + origin->x && box.top == clip.top + origin->y &&
++          box.right == clip.right + origin->x && box.bottom == clip.bottom + origin->y)
++         dx = dy = 0;
++      else if (EqualRect(&box, &clip))
++         dx = origin->x, dy = origin->y;
++      else
++         goto out;
++      if (GetRegionData(rgn, sizeof(data), (RGNDATA *)&data) && data.h.nCount &&
++          data.h.nCount <= RIPPLE_WINDOW_RECTS) {
++         for (i = 0; i < data.h.nCount; i++) {
++            rects[4 * i] = data.r[i].left + dx;
++            rects[4 * i + 1] = data.r[i].top + dy;
++            rects[4 * i + 2] = data.r[i].right + dx;
++            rects[4 * i + 3] = data.r[i].bottom + dy;
++         }
++         *count = data.h.nCount;
++         ok = true;
++      }
++   }
++out:
++   DeleteObject(rgn);
++   return ok;
+ }
+ 
+ static void
+@@ -153,15 +228,20 @@
+                       struct pipe_resource *res, HDC hdc)
+ {
+    static int enabled = -1;
+-   static unsigned skip;      /* presents left before trying again after a refusal */
++   static unsigned skip, skip_window; /* presents left before trying again after a refusal */
+    static bool on_gpu;
++   static DWORD last_gdi;
+    struct stw_context *ctx = stw_current_context();
++   long rects[4 * RIPPLE_WINDOW_RECTS];
++   unsigned count;
++   POINT origin;
++   bool usable;
+ 
+    if (enabled < 0)
+       enabled = debug_get_bool_option("RIPPLE_GL_SCANOUT", true) &&
+                 rvd_virgl_window_scanout(screen);
+-   if (enabled && !skip && ctx && pipe && ctx->st->pipe == pipe &&
+-       res->target == PIPE_TEXTURE_2D && ripple_whole_screen(hdc, res)) {
++   usable = enabled && ctx && pipe && ctx->st->pipe == pipe && res->target == PIPE_TEXTURE_2D;
++   if (usable && !skip && ripple_whole_screen(hdc, res)) {
+       if (rvd_virgl_present_color(pipe, res, &ctx->ripple_scanout)) {
+          on_gpu = true;
+          return;
+@@ -169,7 +249,20 @@
+       skip = 60;
+    } else if (skip)
+       skip--;
++   /* After full-screen frames the first GDI frame gives the display back to the desktop. */
++   if (usable && !on_gpu) {
++      if (skip_window)
++         skip_window--;
++      else if (GetTickCount() - last_gdi < RIPPLE_GDI_EVERY_MS &&
++               ripple_window_rects(hdc, res, &origin, rects, &count)) {
++         if (rvd_virgl_present_window(pipe, res, &ctx->ripple_scanout, origin.x, origin.y,
++                                      rects, count))
++            return;
++         skip_window = 60;
++      }
++   }
+    screen->flush_frontbuffer(screen, pipe, res, 0, 0, hdc, 0, NULL);
++   last_gdi = GetTickCount();
+    if (on_gpu) {              /* the frame is in the card's memory now: show the desktop */
+       on_gpu = false;
+       rvd_virgl_show_desktop(screen);

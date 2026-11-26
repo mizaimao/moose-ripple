@@ -69,22 +69,16 @@ d3d10_create_screen(gdikmt_device *device);
 static inline bool
 D3D9CanExpandPointsWithGs(struct pipe_screen *screen)
 {
-#ifdef RIPPLE_VISTA
    /* A rejected geometry shader invalidates the whole virgl context. */
    return screen->get_param(screen, PIPE_CAP_GLSL_FEATURE_LEVEL) >= 150 &&
           screen->get_param(screen, PIPE_CAP_MAX_GEOMETRY_OUTPUT_VERTICES) >= 4;
-#else
-   return true;
-#endif
 }
 
 static inline uint8_t
 D3D9FragmentClipPlaneMask(struct pipe_screen *screen, uint8_t mask)
 {
-#ifdef RIPPLE_VISTA
    if (mask && screen->get_param(screen, PIPE_CAP_GLSL_FEATURE_LEVEL) < 150)
       return mask;
-#endif
    return 0;
 }
 

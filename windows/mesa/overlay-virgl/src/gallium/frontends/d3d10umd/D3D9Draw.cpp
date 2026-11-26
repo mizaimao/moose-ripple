@@ -33,12 +33,10 @@ static bool D3D9ActiveDeclHasUsage(const D3D9Device *device, uint16_t usage);
 static uint8_t
 D3D9NativeClipPlaneMask(const D3D9Device *device)
 {
-#ifdef RIPPLE_VISTA
    const uint8_t mask = (uint8_t)device->render_states[D3DRS_CLIPPLANEENABLE];
    if (mask && device->vertex_shader_func && !D3D9ActiveVertexDeclHasPositionT(device) &&
        !D3D9FragmentClipPlaneMask(device->screen, mask))
       return mask;
-#endif
    return 0;
 }
 
@@ -640,9 +638,7 @@ D3D9UpdateTranslatedShaderState(D3D9Device *device)
    const UINT fog_mode = device->render_states[D3DRS_FOGTABLEMODE] & 0x3;
    const uint8_t projected = D3D9TranslatedPsProjected(device);
    const uint8_t clip_plane_mask =
-#ifdef RIPPLE_VISTA
       position_t ? 0 :
-#endif
       (uint8_t)(device->render_states[D3DRS_CLIPPLANEENABLE] & 0xff);
 
    D3D9Object *vs = (D3D9Object *)device->vertex_shader_func;
@@ -1130,11 +1126,9 @@ D3D9InitPositionTPsInputFixedFunctionVsInfo(const D3D9Device *device, D3D9Object
          return false;
    }
 
-#ifdef RIPPLE_VISTA
    /* Point size is consumed by the rasterizer even when the PS has no input for it. */
    if (D3D9ActiveDeclHasUsage(device, NINE_DECLUSAGE_PSIZE))
       return D3D9AppendUniqueVsInput(shader, NINE_DECLUSAGE_PSIZE);
-#endif
    return true;
 }
 
@@ -3497,9 +3491,7 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
    const bool translated_vs_point_size =
       translated_vs && !generate_position_t_runtime_processed_diffuse_vs &&
       !generate_position_t_runtime_processed_vs &&
-#ifdef RIPPLE_VISTA
       !replace_position_t_vs &&
-#endif
       D3D9TranslatedVsOutputsPointSize(device);
 
    struct pipe_vertex_element elements[PIPE_MAX_ATTRIBS];

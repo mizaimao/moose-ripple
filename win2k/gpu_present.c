@@ -119,32 +119,19 @@ VP_STATUS rb_gl_flush(RB2K_GPU *gpu)
     return rb_gpu_show_desktop(gpu, &result, FALSE) ? NO_ERROR : result.status;
 }
 
-VP_STATUS rb_gl_present(RB2K_GPU *gpu, const RB2K_GL_FRAME *f)
+/* The desktop image, made with the first frame shown from the GPU: a copy
+ * of the 32-bit VGA desktop that the display shows from then on. */
+static VP_STATUS desktop_image(RB2K_GPU *gpu)
 {
     static const char name[] = "rb2k-desktop";
     RB2K_GL_DESKTOP *d = &gpu->glDesktop;
     RB2K_PRIMARY *vga = &gpu->primary;
     RB2K_GPU_RESULT result;
-    RB2K_RECT next;
-    ULONG i, batch;
-    VP_STATUS status;
     if (!gpu->glEnabled || !gpu->ready || !vga->pixels || vga->bitsPerPixel != 32 ||
         !vga->width || vga->width > RB2K_DD_MAX_WIDTH || !vga->height ||
         vga->height > RB2K_DD_MAX_HEIGHT || vga->pitchPixels < vga->width ||
         vga->pitchPixels > vga->bytes / sizeof(ULONG) / vga->height)
         return ERROR_NOT_SUPPORTED;
-    next = f->rects[0];
-    for (i = 0; i < f->count; ++i) {
-        const RB2K_RECT *r = &f->rects[i];
-        if (!area(r) || r->right > vga->width || r->bottom > vga->height ||
-            (__int64)r->left < f->originX || (__int64)r->top < f->originY ||
-            (__int64)r->right - f->originX > f->width || (__int64)r->bottom - f->originY > f->height)
-            return ERROR_INVALID_PARAMETER;
-        if (r->left < next.left) next.left = r->left;
-        if (r->top < next.top) next.top = r->top;
-        if (r->right > next.right) next.right = r->right;
-        if (r->bottom > next.bottom) next.bottom = r->bottom;
-    }
     if (!d->image.id) {
         if (gpu->nextId == 0xffffffffUL) return ERROR_NO_MORE_ITEMS;
         d->image.id = ++gpu->nextId;
@@ -160,6 +147,30 @@ VP_STATUS rb_gl_present(RB2K_GPU *gpu, const RB2K_GL_FRAME *f)
         d->writeCount = 1;
     }
     if (d->image.width != vga->width || d->image.height != vga->height) return ERROR_NOT_READY;
+    return NO_ERROR;
+}
+
+VP_STATUS rb_gl_present(RB2K_GPU *gpu, const RB2K_GL_FRAME *f)
+{
+    RB2K_GL_DESKTOP *d = &gpu->glDesktop;
+    RB2K_PRIMARY *vga = &gpu->primary;
+    RB2K_GPU_RESULT result;
+    RB2K_RECT next;
+    ULONG i, batch;
+    VP_STATUS status = desktop_image(gpu);
+    if (status) return status;
+    next = f->rects[0];
+    for (i = 0; i < f->count; ++i) {
+        const RB2K_RECT *r = &f->rects[i];
+        if (!area(r) || r->right > vga->width || r->bottom > vga->height ||
+            (__int64)r->left < f->originX || (__int64)r->top < f->originY ||
+            (__int64)r->right - f->originX > f->width || (__int64)r->bottom - f->originY > f->height)
+            return ERROR_INVALID_PARAMETER;
+        if (r->left < next.left) next.left = r->left;
+        if (r->top < next.top) next.top = r->top;
+        if (r->right > next.right) next.right = r->right;
+        if (r->bottom > next.bottom) next.bottom = r->bottom;
+    }
     if (area(&d->gpuPixels) && (next.left != d->gpuPixels.left || next.top != d->gpuPixels.top ||
         next.right != d->gpuPixels.right || next.bottom != d->gpuPixels.bottom)) {
         status = read_gpu_pixels(gpu);
@@ -179,8 +190,42 @@ VP_STATUS rb_gl_present(RB2K_GPU *gpu, const RB2K_GL_FRAME *f)
     VideoPortMoveMemory(d->clip, (PVOID)f->rects, f->count * sizeof(d->clip[0]));
     d->clipCount = f->count;
     if (!rb_gpu_show_desktop(gpu, &result, (BOOLEAN)!d->visible)) return result.status;
+    d->scanout = 0;
     ++gpu->glStats.frames;
     return NO_ERROR;
+}
+
+/* A full-screen OpenGL frame from the program's own scanout image: the
+ * display shows that image instead of the desktop one, with no copy and no
+ * wait. Only with the desktop image, which the display returns to at
+ * rb_gl_desktop (virtio-vga shows VGA again only after a reset). GDI's
+ * writes keep going to the desktop image meanwhile. */
+VP_STATUS rb_gl_scanout(RB2K_GPU *gpu, ULONG resource, ULONG width, ULONG height)
+{
+    RB2K_GL_DESKTOP *d = &gpu->glDesktop;
+    RB2K_GPU_RESULT result;
+    VP_STATUS status = desktop_image(gpu);
+    if (status) return status;
+    if (width != d->image.width || height != d->image.height) return ERROR_INVALID_PARAMETER;
+    if (!rb_gpu_show_image(gpu, &result, resource, width, height, (BOOLEAN)(d->scanout != resource)))
+        return result.status;
+    d->scanout = resource;
+    d->visible = FALSE;
+    ++gpu->glStats.frames;
+    return NO_ERROR;
+}
+
+/* Back to the desktop image after full-screen frames. */
+VP_STATUS rb_gl_desktop(RB2K_GPU *gpu)
+{
+    RB2K_GL_DESKTOP *d = &gpu->glDesktop;
+    RB2K_GPU_RESULT result;
+    VP_STATUS status;
+    if (!d->scanout) return NO_ERROR;
+    status = upload_gdi(gpu);
+    if (status) return status;
+    d->scanout = 0;
+    return rb_gpu_show_desktop(gpu, &result, TRUE) ? NO_ERROR : result.status;
 }
 
 /* The transport reset drops native scanout and returns virtio-vga to VGA. */
