@@ -96,7 +96,7 @@ static VP_STATUS create(RB2K_GPU *gpu)
     begin(&c, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D);
     c.create.resource_id = id;
     c.create.target = PipeTexture2D;
-    c.create.format = VIRGL_FORMAT_B8G8R8X8_UNORM;
+    c.create.format = VIRGL_FORMAT_B8G8R8A8_UNORM;   /* as the frame images, which presents copy */
     c.create.bind = VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SAMPLER_VIEW | VIRGL_BIND_SCANOUT;
     c.create.width = gpu->memoryWidth;
     c.create.height = gpu->memoryHeight;
@@ -119,10 +119,37 @@ static VP_STATUS create(RB2K_GPU *gpu)
     return NO_ERROR;
 }
 
+/* Between the pages and the resource: the pages are its backing, rows of memoryWidth pixels. */
+static VP_STATUS transfer(RB2K_GPU *gpu, ULONG type, const RB2K_RECT *r)
+{
+    PRIMARY_COMMAND c;
+    begin(&c, type);
+    c.transfer.resource_id = gpu->memoryResource;
+    c.transfer.box.x = r->left;
+    c.transfer.box.y = r->top;
+    c.transfer.box.w = r->right - r->left;
+    c.transfer.box.h = r->bottom - r->top;
+    c.transfer.box.d = 1;
+    c.transfer.offset = ((ULONGLONG)r->top * gpu->memoryWidth + r->left) * sizeof(ULONG);
+    c.transfer.stride = gpu->memoryWidth * sizeof(ULONG);
+    return send(gpu, &c, sizeof(c.transfer), NULL);
+}
+
+static VP_STATUS flush(RB2K_GPU *gpu, const RB2K_RECT *r)
+{
+    PRIMARY_COMMAND c;
+    begin(&c, VIRTIO_GPU_CMD_RESOURCE_FLUSH);
+    c.flush.resource_id = gpu->memoryResource;
+    c.flush.r.x = r->left;
+    c.flush.r.y = r->top;
+    c.flush.r.width = r->right - r->left;
+    c.flush.r.height = r->bottom - r->top;
+    return send(gpu, &c, sizeof(c.flush), NULL);
+}
+
 /* Send a changed rectangle of the desktop (NULL: all of it) and show it. */
 VP_STATUS rb_memory_primary_upload(RB2K_GPU *gpu, const RB2K_RECT *rect)
 {
-    PRIMARY_COMMAND c;
     RB2K_RECT r;
     VP_STATUS status;
     if (!gpu->memoryWidth) return ERROR_NOT_READY;
@@ -142,28 +169,38 @@ VP_STATUS rb_memory_primary_upload(RB2K_GPU *gpu, const RB2K_RECT *rect)
         if (rect->bottom < r.bottom) r.bottom = rect->bottom;
     }
     if (r.left >= r.right || r.top >= r.bottom) return NO_ERROR;
-    begin(&c, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D);
-    c.transfer.resource_id = gpu->memoryResource;
-    c.transfer.box.x = r.left;
-    c.transfer.box.y = r.top;
-    c.transfer.box.w = r.right - r.left;
-    c.transfer.box.h = r.bottom - r.top;
-    c.transfer.box.d = 1;
-    c.transfer.offset = ((ULONGLONG)r.top * gpu->memoryWidth + r.left) * sizeof(ULONG);
-    c.transfer.stride = gpu->memoryWidth * sizeof(ULONG);
-    status = send(gpu, &c, sizeof(c.transfer), NULL);
-    if (!status) {
-        begin(&c, VIRTIO_GPU_CMD_RESOURCE_FLUSH);
-        c.flush.resource_id = gpu->memoryResource;
-        c.flush.r.x = r.left;
-        c.flush.r.y = r.top;
-        c.flush.r.width = r.right - r.left;
-        c.flush.r.height = r.bottom - r.top;
-        status = send(gpu, &c, sizeof(c.flush), NULL);
-    }
+    status = transfer(gpu, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D, &r);
+    if (!status) status = flush(gpu, &r);
     if (status) { ++gpu->memoryFailures; return status; }
     ++gpu->memoryUploads;
     gpu->memoryPixelsSent += (r.right - r.left) * (r.bottom - r.top);
+    return NO_ERROR;
+}
+
+/* A Direct3D present to the desktop in memory: the host copies the frame's rectangle
+ * into the desktop resource, which shows it, and the same pixels come back into the
+ * pages for GDI (which reads them for screen copies and window moves). No staging,
+ * so no limit below the desktop's own size, and no copy or upload in the guest. */
+VP_STATUS rb_memory_primary_present(RB2K_GPU *gpu, ULONG image, ULONG srcX, ULONG srcY, const RB2K_RECT *to)
+{
+    RB2K_GPU_RESULT result;
+    VP_STATUS status;
+    if (!gpu->memoryWidth) return ERROR_NOT_READY;
+    if (to->left >= to->right || to->top >= to->bottom ||
+        to->right > gpu->memoryWidth || to->bottom > gpu->memoryHeight) return ERROR_INVALID_PARAMETER;
+    if (!gpu->memoryResource || !gpu->ready) {
+        status = rb_memory_primary_upload(gpu, NULL);
+        if (status) return status;
+    }
+    if (!rb_gpu_copy_image_rect(gpu, &result, image, gpu->memoryResource, srcX, srcY, to->left, to->top,
+                                to->right - to->left, to->bottom - to->top)) {
+        ++gpu->memoryFailures;
+        return result.status;
+    }
+    status = transfer(gpu, VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, to);
+    if (!status) status = flush(gpu, to);
+    if (status) { ++gpu->memoryFailures; return status; }
+    ++gpu->memoryPresents;
     return NO_ERROR;
 }
 

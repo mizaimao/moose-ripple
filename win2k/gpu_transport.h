@@ -177,7 +177,7 @@ typedef struct {
     PVOID memoryMdl;
     PULONG memoryPixels, vgaPixels;
     ULONG memoryBytes, vgaBytes, memoryResource, memoryWidth, memoryHeight;
-    ULONG memoryUploads, memoryPixelsSent, memoryFailures;
+    ULONG memoryUploads, memoryPixelsSent, memoryFailures, memoryPresents;
 } RB2K_GPU;
 
 /* Something other than a DirectDraw image keeps the transport running: an OpenGL
@@ -188,6 +188,7 @@ typedef struct {
 #define RB2K_MEMORY_PRIMARY_BYTES (1920UL * 1200 * 4)
 VP_STATUS rb_memory_primary_show(RB2K_GPU *gpu, ULONG width, ULONG height, BOOLEAN clear);
 VP_STATUS rb_memory_primary_upload(RB2K_GPU *gpu, const RB2K_RECT *rect);
+VP_STATUS rb_memory_primary_present(RB2K_GPU *gpu, ULONG image, ULONG srcX, ULONG srcY, const RB2K_RECT *to);
 void rb_memory_primary_hide(RB2K_GPU *gpu);
 
 void rb_gpu_find(RB2K_GPU *gpu, PVOID extension, ULONG slot,
@@ -279,6 +280,8 @@ RB2K_TEXTURE *rb_gpu_texture(RB2K_GPU *gpu, ULONG id);
 ULONG rb_gpu_host_blocks(RB2K_GPU *gpu);
 BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture);
 BOOLEAN rb_gpu_copy_layer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG image, ULONG texture, ULONG layer, ULONG side);
+BOOLEAN rb_gpu_copy_image_rect(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG image, ULONG destination,
+                               ULONG srcX, ULONG srcY, ULONG dstX, ULONG dstY, ULONG width, ULONG height);
 BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture,
                               const RB2K_IMAGE *image);
 BOOLEAN rb_gpu_image_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *source, const RB2K_IMAGE *target);
