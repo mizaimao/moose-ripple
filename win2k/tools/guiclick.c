@@ -19,6 +19,8 @@
  *   - a window showing a -close text is asked to close.
  *   - "-press #N" presses the enabled button whose control ID is N, owner-drawn
  *     or not; buttons are reported with their IDs and places for this.
+ *   - "-press @Title#N" does the same only in a window whose title contains Title.
+ *   - Nothing is pressed in a window a modal dialog has disabled.
  * With -debug the program runs under guiclick as its debugger: its
  * exceptions are reported with the module and offset, and for one that
  * ends it, the registers and the code addresses found on its stack.
@@ -172,10 +174,26 @@ static void act(CONTROLS *c)
         PostMessageA(c->top, WM_CLOSE, 0, 0);
         return;
     }
-    for (k = 0; k < userPress; ++k)
-        if (press[k][0] == '#' && !pressed[k])
+    /* A window a modal dialog has disabled would drop the click. */
+    if (!IsWindowEnabled(c->top)) return;
+    for (k = 0; k < userPress; ++k) {
+        /* "#N", or "@Title#N": only in a window whose title contains Title. */
+        const char *p = press[k];
+        if (pressed[k]) continue;
+        if (p[0] == '@') {
+            const char *hash = strchr(p, '#');
+            char want[96], title[96];
+            int len = hash ? (int)(hash - p - 1) : 0;
+            if (!hash || len <= 0 || len >= (int)sizeof(want)) continue;
+            lstrcpynA(want, p + 1, len + 1);
+            title[0] = 0;
+            GetWindowTextA(c->top, title, sizeof(title));
+            if (!contains(title, want)) continue;
+            p = hash;
+        }
+        if (p[0] == '#')
             for (i = 0; i < c->count; ++i) {
-                int id = atoi(press[k] + 1);
+                int id = atoi(p + 1);
                 if (GetDlgCtrlID(c->button[i]) != id || !IsWindowEnabled(c->button[i])) continue;
                 pressed[k] = 1;
                 _snprintf(line, sizeof(line), "GUICLICK press id=%d", id);
@@ -184,6 +202,7 @@ static void act(CONTROLS *c)
                 PostMessageA(GetParent(c->button[i]), WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), (LPARAM)c->button[i]);
                 return;
             }
+    }
     if (c->dismiss)
         for (i = 0; i < c->count; ++i) {
             LONG kind = c->style[i] & 15;
@@ -200,7 +219,7 @@ static void act(CONTROLS *c)
         for (i = 0; i < c->count; ++i) {
             LONG kind = c->style[i] & 15;
             if ((kind != BS_PUSHBUTTON && kind != BS_DEFPUSHBUTTON) || !IsWindowEnabled(c->button[i])) continue;
-            if (press[k][0] == '#' || !starts(c->text[i], press[k]) || (k < userPress && pressed[k])) continue;
+            if (press[k][0] == '#' || press[k][0] == '@' || !starts(c->text[i], press[k]) || (k < userPress && pressed[k])) continue;
             if (k < userPress) pressed[k] = 1;
             if (starts(c->text[i], "cancel") || starts(c->text[i], "< back") || starts(c->text[i], "back") ||
                 starts(c->text[i], "no") || starts(c->text[i], "browse")) continue;
@@ -292,7 +311,7 @@ static void debug_events(HANDLE process, DWORD ms, BOOL *exited)
 {
     static int exceptions, strings, loads;
     DWORD until = GetTickCount() + ms;
-    char line[300], place[96];
+    char line[460], place[96];
     for (;;) {
         DEBUG_EVENT e;
         DWORD now = GetTickCount(), action = DBG_CONTINUE;
@@ -311,8 +330,8 @@ static void debug_events(HANDLE process, DWORD ms, BOOL *exited)
             }
             break;
         case OUTPUT_DEBUG_STRING_EVENT:
-            if (++strings <= 100 && !e.u.DebugString.fUnicode) {
-                char text[200];
+            if (++strings <= 2000 && !e.u.DebugString.fUnicode) {   /* a debug runtime says a lot */
+                char text[400];
                 SIZE_T got = 0;
                 DWORD n = e.u.DebugString.nDebugStringLength < sizeof(text) ? e.u.DebugString.nDebugStringLength : sizeof(text) - 1;
                 char *p;
