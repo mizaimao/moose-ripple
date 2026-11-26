@@ -84,7 +84,7 @@ typedef struct {
     ULONG program;
     ULONG coordSets;                /* 0..RB2K_D8_STAGES */
     ULONG textures[RB2K_D8_STAGES], samplers[RB2K_D8_STAGES], borders[RB2K_D8_STAGES];
-    ULONG constantCount;            /* 8 for version 1 programs, 32 for shader model 2 */
+    ULONG constantCount;            /* 8 for version 1 programs (16 with texbem), 32 for shader model 2 */
     ULONG constants[32][4];
     ULONG fog, fogColor, fogStart, fogEnd, fogDensity;   /* as in RB2K_D3D7_DRAW */
     ULONG transform;                /* 0 transformed, 1 object space, 2 vertex program */
@@ -175,9 +175,10 @@ typedef struct {
 #define RB2K_D7_VOLUME_SIDE 256
 #define RB2K_D7_UPLOAD_BYTES (256UL * 1024)
 #define RB2K_D7_LEVELS 11
-/* format: 0 for ARGB texels, or RB2K_D7_BLOCKS_DXT* for rows of 4x4 blocks as
- * the program wrote them (y a multiple of 4; the miniport answers texture
- * id zero when the host cannot sample that format). */
+/* format: 0 for ARGB texels, RB2K_D7_BLOCKS_DXT* for rows of 4x4 blocks as
+ * the program wrote them (y a multiple of 4), or RB2K_D7_TEXELS_* for signed
+ * texels as they are (bump maps); the miniport answers texture id zero when
+ * the host cannot sample that format. */
 /* faces: 1, or 6 for a cube map (square), face 0..5 in Direct3D's order.
  * depth: a volume's slices at level zero (each level has half as many, at
  * least one), with face the slice; 0 or 1 otherwise. */
@@ -188,6 +189,13 @@ typedef struct { ULONG id, target, width, height, y, rows, levels, level, format
 #define RB2K_D7_BLOCKS_DXT1 1
 #define RB2K_D7_BLOCKS_DXT3 2
 #define RB2K_D7_BLOCKS_DXT5 3
+#define RB2K_D7_TEXELS_V8U8 4       /* two signed bytes, u then v */
+#define RB2K_D7_TEXELS_Q8W8V8U8 5   /* four signed bytes, u v w q */
+#define RB2K_D7_UPLOAD_FORMATS 6
+/* An upload format's block: its side in texels, and its bytes. */
+#define RB2K_D7_BLOCK_SIDE(f) ((f) >= RB2K_D7_BLOCKS_DXT1 && (f) <= RB2K_D7_BLOCKS_DXT5 ? 4 : 1)
+#define RB2K_D7_BLOCK_BYTES(f) ((f) == RB2K_D7_BLOCKS_DXT1 ? 8 : (f) == RB2K_D7_BLOCKS_DXT3 || (f) == RB2K_D7_BLOCKS_DXT5 ? 16 : \
+                                (f) == RB2K_D7_TEXELS_V8U8 ? 2 : 4)
 typedef struct { ULONG target, depth, flags, color, depthBits, stencil; } RB2K_D3D7_ZCLEAR;
 enum { RB2K_CLEAR_COLOR = 1, RB2K_CLEAR_DEPTH = 2, RB2K_CLEAR_STENCIL = 4 };
 /* Stencil state of a draw (both faces): RB2K_STENCIL_ON, the comparison

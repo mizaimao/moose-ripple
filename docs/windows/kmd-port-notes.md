@@ -1160,3 +1160,35 @@ That is not looked into yet, so the Windows 7 build keeps write-combined memory.
 With the cached build the Vista pixel tests pass (12 of 12) and the desktop draws as before.
 Window operations do not change: moving 56.1 updates a second (55.8 before), resizing 21.5
 (21.0), repainting 56.7 (56.4).
+
+## A waiter that nudges the host (2026-11-26)
+
+The Mac OS X kernel driver found that a thread waiting for the host GPU could sit out QEMU's
+10 ms fence timer, and now sends the host a nudge while it waits (after 0.2 ms, then at
+doubling intervals). The same idea, checked here.
+
+This driver had most of it. A program polling a fence nudges the device from user mode, spaced
+by what a nudge costs (rounds five and six above), and the work thread nudges every half
+millisecond while buffers are with the host (every millisecond where the processor is
+emulated). One wait had no nudge of its own: a thread that asks for an allocation the GPU is
+still busy with (`VioGpuAllocation::EscapeResourceBusy`, the user-mode driver's "wait until the
+host has finished with this resource") slept until the buffer came back, which hangs on the
+work thread's timer and, while the fine timer is not held, on QEMU's own. That waiter now
+stays awake for up to 3 ms and nudges the queue after 0.2, 0.4, 0.8 and 1.6 ms before it
+sleeps (`VioGpuAllocation::ProdHost`).
+
+Counted with two `TRACE_WAITS=1` builds, one of them with `NO_WAIT_PROD=1`, on Vista SP2 in
+UTM, one disposable session each:
+
+| | Waiter sleeps | Waiter nudges |
+| --- | ---: | ---: |
+| Window operations and the pixel tests, a whole session: waits | under 256 | not run |
+| 3DMark06, two graphics tests: of the first 256 waits, 5 ms or longer | 68 | 28 |
+| average of those 256 waits | 6.9 ms | 3.3 ms |
+| from the Run click to the end of the second test | 339 s | 340 s |
+
+The wait is halved where it happens, and it happens too seldom to show: under 512 waits in a
+run of 340 s, two or three seconds in all, and none worth counting while windows are moved,
+resized and repainted (55.8, 23.0 and 56.2 updates a second in that session, as before).
+Neither yardstick moves. The change costs nothing that was measured and stays for programs
+that wait on the GPU more often than these two; none has been measured yet.

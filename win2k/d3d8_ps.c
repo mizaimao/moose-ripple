@@ -1,4 +1,4 @@
-/* Direct3D pixel shaders 1.1 to 1.3 and 2.0 as Gallium TGSI text.
+/* Direct3D pixel shaders 1.0 to 1.3 and 2.0 as Gallium TGSI text.
  *
  * Registers: r0 and r1 are TEMP[0] and TEMP[1], texture registers t0..t3
  * TEMP[8..11], v0 and v1 IN[0] and IN[1], texture coordinate set n IN[2+n],
@@ -46,6 +46,7 @@ typedef struct {
     unsigned char samplerKind[16];  /* shader model 2: D3DSAMPLER_TEXTURE_TYPE of each sampler */
     unsigned int written;           /* r0, r1 and t0..t3 written so far: bits 0-1, 8-11 */
     unsigned int pads;              /* texm3x2/texm3x3 dot products so far */
+    unsigned int bump;              /* version 1: texbem or texbeml read the bump constants */
     /* Results waiting to be written: register, write mask, result slot. */
     char pendDest[2][24];
     unsigned int pendMask[2], pending;
@@ -470,9 +471,32 @@ static int texture_op(PS *s, unsigned int op, const unsigned int *p)
         s->info->coords |= 1u << n;
         line(s, "DP3 ", tex, ", ", coord, ", ", texm, 0);
         break;
+    case OpTexbem:
+    case OpTexbeml: {
+        /* Stage n's coordinates moved by stage m's du and dv through stage n's
+         * bump matrix (CONST[8+n]: 00, 01, 10, 11): u + du 00 + dv 10,
+         * v + du 01 + dv 11. texbeml then scales the colour by m's
+         * luminance times the scale plus the offset (CONST[12+n]). */
+        char mat[16], lum[16];
+        if (!texture_source(s, p[1], &m)) return 0;
+        if (m >= n) return fail(s, RbPsRegister, p[1]);
+        names(m, texm, coordm, sampm);
+        mat[0] = lum[0] = 0;
+        cat(mat, 16, "CONST["); cat_number(mat, 16, RB_PS_CONSTANTS + n); cat(mat, 16, "]");
+        cat(lum, 16, "CONST["); cat_number(lum, 16, RB_PS_CONSTANTS + 4 + n); cat(lum, 16, "]");
+        s->info->coords |= 1u << n; s->info->samplers |= 1u << n;
+        line(s, "MAD TEMP[18], ", texm, ".xxxx, ", mat, ".xyxy, ", coord, 0);
+        line(s, "MAD TEMP[18].xy, ", texm, ".yyyy, ", mat, ".zwzw, TEMP[18]", 0, 0);
+        line(s, "TEX ", tex, ", TEMP[18], ", samp, stage_target(s, n), 0, 0);
+        if (op == OpTexbeml) {
+            line(s, "MAD_SAT TEMP[15].x, ", texm, ".zzzz, ", lum, ".xxxx, ", lum, ".yyyy");
+            line(s, "MUL ", tex, ".xyz, ", tex, ", TEMP[15].xxxx", 0, 0);
+        }
+        break;
+    }
     default:
-        /* Bump mapping, cube and depth lookups need texture kinds or
-         * states this device does not offer. */
+        /* Cube and depth lookups need texture kinds or states this
+         * device does not offer. */
         return fail(s, RbPsOpcode, op);
     }
     s->written |= 1u << (8 + n);
@@ -863,11 +887,27 @@ static unsigned int translate2(PS *s, const unsigned int *tokens, unsigned int c
     return s->t.n + 1;
 }
 
+/* Whether a version 1 program has texbem or texbeml, which read the bump
+ * constants after c7 (the fog constants then follow those). */
+static int uses_bump(const unsigned int *tokens, unsigned int count)
+{
+    unsigned int i;
+    for (i = 1; i < count; ++i) {
+        unsigned int op = tokens[i] & 0xffff;
+        if (tokens[i] & 0x80000000u) continue;          /* a parameter */
+        if (op == OpEnd) break;
+        if (op == OpComment) { i += (tokens[i] >> 16) & 0x7fff; continue; }
+        if (op == OpDef) { i += 5; continue; }
+        if (op == OpTexbem || op == OpTexbeml) return 1;
+    }
+    return 0;
+}
+
 unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, unsigned int fog, char *out,
                              unsigned int size, RB_PS_INFO *info)
 {
     PS s;
-    unsigned int imm = 3, k, log2e;
+    unsigned int imm = 3, k, log2e, base;
     char *z = (char *)&s;
     for (k = 0; k < sizeof(s); ++k) z[k] = 0;
     info->samplers = info->coords = info->reason = info->detail = info->constants = 0;
@@ -878,11 +918,15 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
     s.volume = (fog >> RB_PS_VOLUME_SHIFT) & 255;
     fog &= (1u << RB_PS_CUBE_SHIFT) - 1;
     if (count && tokens[0] == 0xffff0200u) return translate2(&s, tokens, count, fog);
-    if (!count || (tokens[0] & 0xffffff00u) != 0xffff0100u || (tokens[0] & 0xff) < 1 || (tokens[0] & 0xff) > 3) {
+    /* 1.0, which Direct3D 8.0 programs use, has the instructions of 1.1. */
+    if (!count || (tokens[0] & 0xffffff00u) != 0xffff0100u || (tokens[0] & 0xff) > 3) {
         fail(&s, RbPsVersion, count ? tokens[0] : 0);
         return 0;
     }
-    s.minor = tokens[0] & 0xff;
+    s.minor = tokens[0] & 0xff ? tokens[0] & 0xff : 1;
+    s.bump = uses_bump(tokens, count);
+    base = s.bump ? RB_PS_BUMP_CONSTANTS : RB_PS_CONSTANTS;
+    if (s.bump) info->constants = RB_PS_BUMP_CONSTANTS;
     put(&s.t, "FRAG\nDCL IN[0], GENERIC[0], LINEAR\nDCL IN[1], GENERIC[1], LINEAR\n");
     for (k = 0; k < RB_PS_COORD_SETS; ++k) {
         put(&s.t, "DCL IN["); number(&s.t, 2 + k); put(&s.t, "], GENERIC["); number(&s.t, 2 + k);
@@ -892,7 +936,7 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
     if ((fog & 3) == RB_PS_FOG_TABLE) put(&s.t, "DCL IN[10], POSITION, LINEAR\n");
     put(&s.t, "DCL OUT[0], COLOR\n");
     for (k = 0; k < RB_PS_COORD_SETS; ++k) { put(&s.t, "DCL SAMP["); number(&s.t, k); put(&s.t, "]\n"); }
-    put(&s.t, fog ? "DCL CONST[0..9]\n" : "DCL CONST[0..7]\n");
+    put(&s.t, "DCL CONST[0.."); number(&s.t, base - 1 + (fog ? 2 : 0)); put(&s.t, "]\n");
     put(&s.t, "DCL TEMP[0..18]\n"
               "IMM[0] FLT32 {0x3f000000, 0x3f800000, 0x40000000, 0x40800000}\n"
               "IMM[1] FLT32 {0x41000000, 0x3e800000, 0x3e000000, 0xbf800000}\n"
@@ -905,7 +949,7 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
     line(&s, "MOV TEMP[1], IMM[2]", 0, 0, 0, 0, 0, 0);
     if (!walk(&s, tokens, count, 1, &imm)) return 0;
     flush(&s);
-    if (fog) fog_lines(&s, fog, log2e, "TEMP[0]", RB_PS_CONSTANTS);
+    if (fog) fog_lines(&s, fog, log2e, "TEMP[0]", base);
     line(&s, "MOV OUT[0], TEMP[0]", 0, 0, 0, 0, 0, 0);
     line(&s, "END", 0, 0, 0, 0, 0, 0);
     if (s.t.overflow) return fail(&s, RbPsOverflow, s.t.n);
