@@ -1417,3 +1417,14 @@ change and 280.5 with the variable set, gl-gears 59.7 frames/s; no error from th
 
 Left in the first two renders: the compile itself for the programs that are drawn with (Mesa
 runs its full set of NIR passes on programs of twenty instructions), and the texture creates.
+
+### Core Image's flush per pass costs nothing any more (2026-11-26)
+
+Core Image calls `glFlushRenderAPPLE` when it unbinds a texture, once or twice a pass, and
+each is a submit. The idea on the list was to hold these back until the context's next real
+submit. Its upper bound, tried with a switch that drops the call altogether (a trial build,
+not in the tree; the read-back at the end of a render still submits everything): the 24
+filters, alternating on one boot on the second Intel host, each later render in sum 34.4 and
+30.7 ms with the flushes, 33.6 and 33.5 ms without; first and second renders the same within
+their scatter; the picture comparison unchanged. With queued submits a flush is a call into
+the kernel that returns at once, so there is nothing left to gain here. Not built.
