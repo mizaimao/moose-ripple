@@ -969,6 +969,10 @@ static PIXFMT gl_format(const DDPIXELFORMAT *pf)
         case 0x33545844UL: f.block = 16; f.internal = GL_COMPRESSED_RGBA_S3TC_DXT3_EXT; break;
         case 0x34545844UL:
         case 0x35545844UL: f.block = 16; f.internal = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT; break;
+        /* signed formats the runtime also names by their D3DFORMAT (it does for mipmapped
+           Q8W8V8U8 textures, which DirectDraw then can't size: CreateSurface does) */
+        case 60: f.bytes = 2; f.format = GL_RG; f.type = GL_BYTE; f.internal = GL_RG8_SNORM; f.bump = 1; break;
+        case 63: f.bytes = 4; f.format = GL_RGBA; f.type = GL_BYTE; f.internal = GL_RGBA8_SNORM; break;
         }
         return f;
     }
@@ -1023,6 +1027,11 @@ static DWORD dxt_bytes(const PIXFMT *f, DWORD w, DWORD h)
 DWORD d3d_dxt_block(const DDPIXELFORMAT *pf)
 {
     return gl_format(pf).block;
+}
+
+DWORD d3d_fourcc_bytes(const DDPIXELFORMAT *pf)
+{
+    return (pf->dwFlags & DDPF_FOURCC) ? gl_format(pf).bytes : 0;
 }
 
 int d3d_surface_format_ok(LPDDSURFACEDESC desc)
@@ -4178,9 +4187,10 @@ static void surface_handles(DDLOCAL *l, LPDDRAWI_DDRAWSURFACE_LCL root,
             int k;
             for (k = 0; m && k < MAX_LEVELS; k++) {
                 LPDDRAWI_DDRAWSURFACE_GBL g = m->lpGbl;
-                DWORD block = gl_format(&g->ddpfSurface).block;     /* DXT: rows of 4x4 blocks */
+                PIXFMT vf = gl_format(&g->ddpfSurface);
+                DWORD block = vf.block;         /* DXT: rows of 4x4 blocks */
                 g->lPitch = block ? (LONG)(((g->wWidth + 3) / 4) * block) :
-                                    (LONG)(g->wWidth * (g->ddpfSurface.dwRGBBitCount / 8));
+                                    (LONG)(g->wWidth * (vf.bytes ? vf.bytes : g->ddpfSurface.dwRGBBitCount / 8));
                 g->dwBlockSizeY = (DWORD)g->lPitch * (block ? (g->wHeight + 3) / 4 : g->wHeight);
                 m = (m->ddsCaps.dwCaps & DDSCAPS_MIPMAP) && m->lpAttachList ? m->lpAttachList->lpAttached : NULL;
                 if (m == s)
@@ -4263,8 +4273,8 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
     if (!ds || !ss || !ds->lpGbl->fpVidMem || !ss->lpGbl->fpVidMem)
         return;
     surface_format(ss, &pf);
-    bytes = pf.dwRGBBitCount / 8;
     f = gl_format(&pf);
+    bytes = f.bytes ? f.bytes : pf.dwRGBBitCount / 8;   /* FOURCC-named formats have no bit count */
     if (!bytes && !f.block)
         return;
     if (r.right <= r.left || r.bottom <= r.top) {

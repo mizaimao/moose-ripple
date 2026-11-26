@@ -18,6 +18,8 @@ int d3d_driver_info(LPDDHAL_GETDRIVERINFODATA d);
 int d3d8_enabled(void);
 /* A DXT format's 4x4 block bytes (8 or 16) when Direct3D 8 is on, else 0. */
 DWORD d3d_dxt_block(const DDPIXELFORMAT *pf);
+/* An uncompressed format named by FOURCC (a D3DFORMAT): its bytes a texel, else 0. */
+DWORD d3d_fourcc_bytes(const DDPIXELFORMAT *pf);
 
 /* A surface is about to be read or shown (Lock, Flip): rendering still on the GPU for it goes
    into its memory first. */
