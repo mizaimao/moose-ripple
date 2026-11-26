@@ -1126,11 +1126,9 @@ D3D9InitPositionTPsInputFixedFunctionVsInfo(const D3D9Device *device, D3D9Object
          return false;
    }
 
-#ifdef RIPPLE_VISTA
    /* Point size is consumed by the rasterizer even when the PS has no input for it. */
    if (D3D9ActiveDeclHasUsage(device, NINE_DECLUSAGE_PSIZE))
       return D3D9AppendUniqueVsInput(shader, NINE_DECLUSAGE_PSIZE);
-#endif
    return true;
 }
 
@@ -3493,9 +3491,7 @@ D3D9DrawDiffuse(D3D9Device *device, D3DPRIMITIVETYPE primitive_type,
    const bool translated_vs_point_size =
       translated_vs && !generate_position_t_runtime_processed_diffuse_vs &&
       !generate_position_t_runtime_processed_vs &&
-#ifdef RIPPLE_VISTA
       !replace_position_t_vs &&
-#endif
       D3D9TranslatedVsOutputsPointSize(device);
 
    struct pipe_vertex_element elements[PIPE_MAX_ATTRIBS];
