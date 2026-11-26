@@ -235,6 +235,9 @@ static RDD_SHARED *shared;
 #define GL_FRAGMENT_PROGRAM_ARB         0x8804
 #define GL_PROGRAM_FORMAT_ASCII_ARB     0x8875
 #define GL_PROGRAM_ERROR_STRING_ARB     0x8874
+#define GL_COMPRESSED_RGBA_S3TC_DXT1_EXT 0x83F1
+#define GL_COMPRESSED_RGBA_S3TC_DXT3_EXT 0x83F2
+#define GL_COMPRESSED_RGBA_S3TC_DXT5_EXT 0x83F3
 #define GL_FOG_COORDINATE_SOURCE        0x8450
 #define GL_FOG_COORDINATE               0x8451
 #define GL_FRAGMENT_DEPTH               0x8452
@@ -344,6 +347,11 @@ typedef struct {
     void (APIENTRY *ProgramStringARB)(GLenum, GLenum, GLsizei, const GLvoid *);
     void (APIENTRY *ProgramEnvParameter4fvARB)(GLenum, GLuint, const GLfloat *);
     void (APIENTRY *ProgramLocalParameter4fvARB)(GLenum, GLuint, const GLfloat *);
+    /* compressed textures (DXT), for Direct3D 8 and 9 (optional) */
+    void (APIENTRY *CompressedTexImage2D)(GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei,
+                                          const GLvoid *);
+    void (APIENTRY *CompressedTexSubImage2D)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum,
+                                             GLsizei, const GLvoid *);
 } GLF;
 
 #define GL_CORE_COUNT 53            /* entries up to DrvGetProcAddress */
@@ -368,6 +376,7 @@ static const char *const gl_names[] = {
     "glGetRenderbufferParameterivEXT",
     "glGenProgramsARB", "glDeleteProgramsARB", "glBindProgramARB", "glProgramStringARB",
     "glProgramEnvParameter4fvARB", "glProgramLocalParameter4fvARB",
+    "glCompressedTexImage2DARB", "glCompressedTexSubImage2DARB",
 };
 #define GL_ALL_COUNT (sizeof gl_names / sizeof gl_names[0])
 typedef char c_gl_names[sizeof(GLF) == GL_ALL_COUNT * sizeof(PROC) ? 1 : -1];
@@ -806,8 +815,9 @@ static LPDDRAWI_DDRAWSURFACE_LCL handle_get(LPDDRAWI_DIRECTDRAW_LCL lcl, DWORD h
 
 /* ---- Pixel formats ----------------------------------------------------------------------------- */
 typedef struct {
-    DWORD bytes;
+    DWORD bytes;                        /* a texel's; 0 for block-compressed formats */
     GLenum format, type, internal;
+    DWORD block;                        /* DXT: a 4x4 block's bytes (8 or 16), else 0 */
 } PIXFMT;
 
 static void display_format(DDPIXELFORMAT *pf)
@@ -838,6 +848,16 @@ static PIXFMT gl_format(const DDPIXELFORMAT *pf)
     int alpha = (pf->dwFlags & DDPF_ALPHAPIXELS) != 0;
 
     memset(&f, 0, sizeof f);
+    if ((pf->dwFlags & DDPF_FOURCC) && d8_on) {    /* DXT, offered with Direct3D 8 */
+        switch (pf->dwFourCC) {
+        case 0x31545844UL: f.block = 8; f.internal = GL_COMPRESSED_RGBA_S3TC_DXT1_EXT; break;
+        case 0x32545844UL:              /* DXT2 and DXT4 are premultiplied DXT3 and DXT5 */
+        case 0x33545844UL: f.block = 16; f.internal = GL_COMPRESSED_RGBA_S3TC_DXT3_EXT; break;
+        case 0x34545844UL:
+        case 0x35545844UL: f.block = 16; f.internal = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT; break;
+        }
+        return f;
+    }
     if (!(pf->dwFlags & DDPF_RGB))
         return f;
     switch (pf->dwRGBBitCount) {
@@ -867,6 +887,17 @@ static PIXFMT gl_format(const DDPIXELFORMAT *pf)
     return f;
 }
 
+/* A DXT surface's bytes: whole 4x4 blocks, row after row. */
+static DWORD dxt_bytes(const PIXFMT *f, DWORD w, DWORD h)
+{
+    return ((w + 3) / 4) * ((h + 3) / 4) * f->block;
+}
+
+DWORD d3d_dxt_block(const DDPIXELFORMAT *pf)
+{
+    return gl_format(pf).block;
+}
+
 int d3d_surface_format_ok(LPDDSURFACEDESC desc)
 {
     DDPIXELFORMAT *pf = &desc->ddpfPixelFormat;
@@ -874,8 +905,10 @@ int d3d_surface_format_ok(LPDDSURFACEDESC desc)
     if (desc->ddsCaps.dwCaps & DDSCAPS_ZBUFFER)
         return (pf->dwFlags & DDPF_ZBUFFER) &&
                (pf->dwZBufferBitDepth == 16 || pf->dwZBufferBitDepth == 32);
-    if (desc->ddsCaps.dwCaps & DDSCAPS_TEXTURE)
-        return gl_format(pf).bytes != 0;
+    if (desc->ddsCaps.dwCaps & DDSCAPS_TEXTURE) {
+        PIXFMT f = gl_format(pf);
+        return f.bytes != 0 || f.block != 0;
+    }
     return 0;
 }
 
@@ -1858,6 +1891,19 @@ static void texture_upload(GLF *gl, const PIXFMT *f, const DDPIXELFORMAT *pf,
 {
     DWORD l;
 
+    if (f->block) {                     /* DXT: each level's blocks as they are, row after row */
+        for (l = 0; l < levels && gl->CompressedTexImage2D; l++) {
+            LPDDRAWI_DDRAWSURFACE_GBL g = lv[l]->lpGbl;
+            DWORD bytes = dxt_bytes(f, g->wWidth, g->wHeight);
+            if (fresh || !gl->CompressedTexSubImage2D)
+                gl->CompressedTexImage2D(GL_TEXTURE_2D, l, f->internal, g->wWidth, g->wHeight, 0,
+                                         bytes, (const GLvoid *)g->fpVidMem);
+            else
+                gl->CompressedTexSubImage2D(GL_TEXTURE_2D, l, 0, 0, g->wWidth, g->wHeight,
+                                            f->internal, bytes, (const GLvoid *)g->fpVidMem);
+        }
+        return;
+    }
     gl->PixelStorei(GL_UNPACK_ALIGNMENT, 1);
     for (l = 0; l < levels; l++) {
         LPDDRAWI_DDRAWSURFACE_GBL g = lv[l]->lpGbl;
@@ -1922,7 +1968,9 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
         return 0;
     surface_format(s, &pf);
     f = gl_format(&pf);
-    if (!f.bytes)
+    if (!f.bytes && !f.block)
+        return 0;
+    if (f.block && !gl->CompressedTexImage2D)
         return 0;
     if (!t->name) {
         if (c->ntextures >= TEXTURE_BUDGET)
@@ -1935,7 +1983,8 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
     stamp = chain_stamp(lv, levels);
     /* The colour key, if the program turned it on and the texture has one: the key's colour
        is uploaded as transparent, so a change of either is a new upload (fmt) */
-    keyed = c->rs[D3DRENDERSTATE_COLORKEYENABLE] && (s->dwFlags & DDRAWISURF_HASCKEYSRCBLT);
+    keyed = c->rs[D3DRENDERSTATE_COLORKEYENABLE] && (s->dwFlags & DDRAWISURF_HASCKEYSRCBLT) &&
+            !f.block;
     fmt = f.internal ^ (f.format << 8) ^ (f.type << 16) ^
           (keyed ? 0x80000000UL ^ s->ddckCKSrcBlt.dwColorSpaceLowValue : 0);
     if (keyed)
@@ -1957,13 +2006,13 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
         tracef("rd3d: texture %lx new: %lux%lu, %lu levels, %lu bits, caps %08lx, memory %08lx, "
                "pitch %ld, stamp %lx, sum %08lx\r\n", h, (DWORD)g->wWidth, (DWORD)g->wHeight,
                levels, pf.dwRGBBitCount, s->ddsCaps.dwCaps, g->fpVidMem, g->lPitch, stamp,
-               trace_on ? sum_rows((BYTE *)g->fpVidMem, g->lPitch, g->wWidth * f.bytes,
+               trace_on && !f.block ? sum_rows((BYTE *)g->fpVidMem, g->lPitch, g->wWidth * f.bytes,
                                    g->wHeight) : 0);
     } else if (texture_changed(c, t, s, stamp)) {
         /* written since: the contents again, into the same storage */
         tracef("rd3d: texture %lx again: dirty %d, stamp %lx (was %lx), scene %lu (was %lu), "
                "sum %08lx\r\n", h, t->dirty, stamp, t->stamp, c->scene, t->scene,
-               trace_on ? sum_rows((BYTE *)g->fpVidMem, g->lPitch, g->wWidth * f.bytes,
+               trace_on && !f.block ? sum_rows((BYTE *)g->fpVidMem, g->lPitch, g->wWidth * f.bytes,
                                    g->wHeight) : 0);
         texture_upload(gl, &f, &pf, lv, levels, 0, keyed);
     }
@@ -2936,6 +2985,7 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
     LPDDRAWI_DDRAWSURFACE_LCL ss = handle_get(c->ddl, b->dwDDSrcSurface);
     LPDDRAWI_DDRAWSURFACE_LCL dl[MAX_LEVELS], sl[MAX_LEVELS];
     DDPIXELFORMAT pf;
+    PIXFMT f;
     DWORD bytes, levels, n, l;
     RECTL r = b->rSrc;
 
@@ -2946,7 +2996,8 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
         return;
     surface_format(ss, &pf);
     bytes = pf.dwRGBBitCount / 8;
-    if (!bytes)
+    f = gl_format(&pf);
+    if (!bytes && !f.block)
         return;
     if (r.right <= r.left || r.bottom <= r.top) {
         r.left = r.top = 0;
@@ -2984,9 +3035,18 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
            one current. */
         if (!d3d_surface_access(sl[l]) || !d3d_surface_access(dl[l]) || !make_current(c))
             return;
-        for (i = 0; i < h; i++)
-            memcpy((BYTE *)dg->fpVidMem + (y + i) * dg->lPitch + x * bytes,
-                   (BYTE *)sg->fpVidMem + (top + i) * sg->lPitch + left * bytes, w * bytes);
+        if (f.block) {                  /* DXT: whole 4x4 blocks, rows of blocks */
+            DWORD sp = ((sg->wWidth + 3) / 4) * f.block, dp = ((dg->wWidth + 3) / 4) * f.block;
+            LONG bw = (w + 3) / 4, bh = (h + 3) / 4;
+            for (i = 0; i < bh; i++)
+                memcpy((BYTE *)dg->fpVidMem + (y / 4 + i) * dp + (x / 4) * f.block,
+                       (BYTE *)sg->fpVidMem + (top / 4 + i) * sp + (left / 4) * f.block,
+                       bw * f.block);
+        } else {
+            for (i = 0; i < h; i++)
+                memcpy((BYTE *)dg->fpVidMem + (y + i) * dg->lPitch + x * bytes,
+                       (BYTE *)sg->fpVidMem + (top + i) * sg->lPitch + left * bytes, w * bytes);
+        }
         d3d_surface_written(dl[l]);     /* a render target too: its GPU picture is older now */
     }
     if (b->dwDDDestSurface < c->ntex)
@@ -3896,6 +3956,11 @@ static const ULONG d8_formats[][2] = {
     { RbFmtD16, RbFormatZStencil },
     { RbFmtD24S8, RbFormatZStencil },
     { RbFmtD24X8, RbFormatZStencil },
+    { RbFmtDxt1, RbFormatTexture },     /* DXT: CreateSurface sizes them, gl_format uploads them */
+    { RbFmtDxt2, RbFormatTexture },
+    { RbFmtDxt3, RbFormatTexture },
+    { RbFmtDxt4, RbFormatTexture },
+    { RbFmtDxt5, RbFormatTexture },
 };
 #define D8_FORMATS (sizeof d8_formats / sizeof d8_formats[0])
 

@@ -798,6 +798,14 @@ restart). `d9pixels sw` on Windows 98 SE in UTM: 40 of 40 pass, the 24 fixed-fun
 and render-to-texture cases and all 10 shader model 2 cases (texture, arithmetic, texkill, pow,
 rcp, rsq, nrm, dp2add, eight coordinate sets, blend). Untimed.
 
+DXT textures (with the Direct3D 8 interface on): DirectDraw is given the FourCC codes DXT1 to DXT5
+(the 16-bit driver points HALINFO at them, the DLL says how many), CreateSurface asks DirectDraw
+for a block of the bytes a DXT surface's 4x4 blocks take (`DDHAL_PLEASEALLOC_BLOCKSIZE`; there
+is no pitch to size it by), Lock offsets count in blocks, texture blits copy rows of blocks, and
+the blocks go to the host as they are (`glCompressedTexImage2D`, DXT2 and DXT4 as DXT3 and DXT5).
+On a host without S3TC (UTM) Mesa decodes them (see mesa.md). `d9pixels sw`: 43 of 43, the
+three DXT cases (DXT1, DXT3 and DXT5 alpha) included.
+
 
 ## Changing a driver in the test VM
 

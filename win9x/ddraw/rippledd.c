@@ -217,7 +217,22 @@ static DWORD WINAPI CanCreateSurface(LPDDHAL_CANCREATESURFACEDATA d)
    Let it assign the primary and allocate the attached pages on create and restore. */
 static DWORD WINAPI CreateSurface(LPDDHAL_CREATESURFACEDATA d)
 {
-    (void)d;
+    DWORD i;
+
+    /* DXT surfaces in video memory have no pitch DirectDraw could size them by: ask it for a
+       block of the bytes their 4x4 blocks take (each level is a surface of its own). */
+    for (i = 0; i < d->dwSCnt; i++) {
+        LPDDRAWI_DDRAWSURFACE_LCL s = d->lplpSList[i];
+        LPDDRAWI_DDRAWSURFACE_GBL g = s->lpGbl;
+        DWORD block = (s->dwFlags & DDRAWISURF_HASPIXELFORMAT) ? d3d_dxt_block(&g->ddpfSurface) : 0;
+        if (!block || (s->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY))
+            continue;
+        g->dwBlockSizeX = ((g->wWidth + 3) / 4) * ((g->wHeight + 3) / 4) * block;
+        g->dwBlockSizeY = 1;
+        g->dwLinearSize = g->dwBlockSizeX;
+        g->fpVidMem = DDHAL_PLEASEALLOC_BLOCKSIZE;
+    }
+    d->ddRVal = DD_OK;
     return DDHAL_DRIVER_NOTHANDLED;
 }
 
@@ -318,6 +333,7 @@ static DWORD WINAPI Lock(LPDDHAL_LOCKDATA d)
     LPDDRAWI_DDRAWSURFACE_LCL s = d->lpDDSurface;
     LPDDRAWI_DDRAWSURFACE_GBL g = s->lpGbl;
     DWORD p = g->fpVidMem, bits = shared->bpp;
+    DWORD block = 0;
 
     d3d_trace("lock: memory, flags", g->fpVidMem, d->dwFlags);
     if (!d3d_surface_access(s) || (p && p == gpu_page && gpu_mode == shared->mode_serial &&
@@ -328,9 +344,13 @@ static DWORD WINAPI Lock(LPDDHAL_LOCKDATA d)
     }
     if (!(d->dwFlags & DDLOCK_READONLY))
         d3d_surface_written(s);         /* textures made from it are out of date */
-    if (s->dwFlags & DDRAWISURF_HASPIXELFORMAT)
+    if (s->dwFlags & DDRAWISURF_HASPIXELFORMAT) {
+        block = d3d_dxt_block(&g->ddpfSurface);
         bits = g->ddpfSurface.dwRGBBitCount;
-    if (d->bHasRect)
+    }
+    if (block && d->bHasRect)           /* DXT: rows of 4x4 blocks */
+        p += (d->rArea.top / 4) * (((DWORD)g->wWidth + 3) / 4) * block + (d->rArea.left / 4) * block;
+    else if (d->bHasRect)
         p += d->rArea.top * g->lPitch + d->rArea.left * (bits / 8);
     d->lpSurfData = (LPVOID)p;
     d->ddRVal = DD_OK;
@@ -477,10 +497,13 @@ DWORD WINAPI DriverInit(DWORD context)
     s->hal.dwFlags |= RDD_HALINFO_GETDRIVERINFOSET;
     s->hal.lpDDExeBufCallbacks = 0;
     d3d_init(s, (DDCORECAPS *)s->hal.ddCaps);
-    if (d3d8_enabled())
+    if (d3d8_enabled()) {
         s->hal.dwFlags |= RDD_HALINFO_GETDRIVERINFO2;
-    else
+        ((DDCORECAPS *)s->hal.ddCaps)->dwNumFourCCCodes = RDD_FOURCCS;  /* DXT1..5 (ddraw16.c) */
+    } else {
         s->hal.dwFlags &= ~RDD_HALINFO_GETDRIVERINFO2;
+        ((DDCORECAPS *)s->hal.ddCaps)->dwNumFourCCCodes = 0;
+    }
     s->dll_ready = 1;
     dbg("rdd: DirectDraw HAL DLL ready, loaded at "); dbg_hex((DWORD)dll_instance);
     dbg(", process "); dbg_hex(GetCurrentProcessId()); dbg("\r\n");
