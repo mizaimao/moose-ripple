@@ -154,7 +154,41 @@ HTTP server that writes the request body to a file, run from `REPO/.venv`):
 
 and `certutil -hashfile C:\path\NAME SHA256` in the guest checks the copy.
 
+## Clean-install check of a release package (2026-11-26)
+
+How release 0.4.0 of the Vista and Windows 7 driver was checked on systems that had never had
+the driver, a test certificate or test mode. On the Proxmox host, in a folder of its own
+(its `/tmp` is emptied at a restart):
+
+- `tools/win7-debug/rig/cleanvm.sh vista|win7 prep|boot|reset|kill` starts a throwaway
+  guest as a QEMU process of its own, with the clock and CPU options Proxmox gives its Windows
+  VMs, `virtio-vga-gl`, a USB tablet for clicks, COM1 in a file, QMP and VNC on sockets and no
+  network. Vista runs in an overlay over VM 101's disk, Windows 7 in an overlay over a copy
+  of VM 220's snapshot `clone-fresh`; neither VM is touched. It refuses to start while
+  another guest runs. A guest started this way does not show in `qm list`.
+- `rel.iso` next to it is the guest's CD: the unpacked release archive plus a `tests` folder
+  with `tools/win7-debug/guest/relcheck.cmd`, `tools/vista/pixeltests.cmd` and the six
+  pixel-test programs (`genisoimage -J -r -o rel.iso cd`).
+- `rig/guestctl.pl OS key|type|line|run|click|shot ...` presses keys, types, clicks and saves
+  the screen. Once the driver draws through the host GPU QEMU has no picture to save; read
+  the VNC socket then (`tools/vncgrab/vncgrab.py`, which also takes a server without a
+  password).
+
+The check itself follows `docs/windows/install.md` by hand, a screenshot after each step:
+an administrator Command Prompt from the Start menu (type `cmd`, Ctrl+Shift+Enter, Alt+C on
+Vista or Alt+Y on Windows 7 for the permission question), `D:\tests\relcheck.cmd before`,
+`bcdedit /set testsigning on`, restart, the install through Device Manager (Alt+N for Next,
+Alt+I for "Install this driver software anyway"), restart, `relcheck.cmd after` and
+`pixeltests.cmd`, the uninstall, restart, `relcheck.cmd removed`. Wait for a script's end
+marker on COM1 before typing the next line: keys typed while a full-screen test has the
+keyboard are lost. One more guest installs with test mode left off, to see the driver refused
+(code 52) and the desktop stay on VGA.
+
 ## Reference pictures on the GeForce 9600 GT
+
+**2026-11-26: starting a VM with the card froze the host twice that day (a hard reset each
+time). No passthrough runs until that is understood.**
+
 
 For the side-by-side pictures of a milestone (first used for Aero, 2026-11-15). VM 220's disk
 still has NVIDIA's driver from the machine it was cloned from, so the reference is VM 220
