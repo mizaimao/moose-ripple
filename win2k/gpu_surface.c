@@ -64,8 +64,8 @@ static VP_STATUS create(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         return ERROR_INVALID_PARAMETER;
     if (gpu->primary.bitsPerPixel != 32 || (depth16 && (!gpu->nativeD3D7 || !gpu->ddGpuSurfaces)))
         return ERROR_NOT_SUPPORTED;
-    if (!size->width || size->width > RB2K_DD_MAX_WIDTH ||
-        !size->height || size->height > RB2K_DD_MAX_HEIGHT)
+    if (!size->width || size->width > RB2K_DD_TARGET_SIDE ||
+        !size->height || size->height > RB2K_DD_TARGET_SIDE)
         return ERROR_INVALID_PARAMETER;
     if (gpu->nextId == 0xffffffffUL) return ERROR_NO_MORE_ITEMS;
     for (slot = 0; slot < RB2K_DD_SLOTS; ++slot) if (!gpu->images[slot].id) break;

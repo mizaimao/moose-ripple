@@ -7,6 +7,11 @@
 #define RB2K_DD_MAX_WIDTH 1680UL
 #define RB2K_DD_MAX_HEIGHT 1200UL
 #define RB2K_DD_MAX_BYTES (RB2K_DD_MAX_WIDTH * RB2K_DD_MAX_HEIGHT * 4)
+/* Offscreen surfaces, render targets and depth buffers may be larger than the screen: Direct3D 9
+ * programs make 2048x2048 render target textures (3DMark05's shadow maps). Readback staging keeps
+ * the screen's size (its attach request fits one queue packet), so those larger than the screen
+ * are drawn into and sampled but cannot be locked. */
+#define RB2K_DD_TARGET_SIDE 2048UL
 /* Host images at once: render targets (a full-screen chain takes two),
  * depth buffers and render target textures (3DMark 2001 SE alone makes more
  * than a dozen small ones). Each is a virgl context. */
