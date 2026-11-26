@@ -2212,6 +2212,13 @@ of contiguous memory for both slots was refused at the first scene. 3DMark
 from 1.95 million to 648 thousand, and the same fixed-length tests drew 721
 million primitives against 515 million.
 
+Only a frame's last packet carries a fence now. QEMU answers a fenced packet
+only once the host GPU has finished it, noticed on a 10 ms timer or a
+notification; a packet slot needs only that QEMU has read the packet, which
+an unfenced packet reports at once. 3DMark 2001 SE went from 5122 to 5446
+(timed, host alone), and fence waits during draws from 11.6 s to 0.01 s.
+Presents still wait 58 s on their fences in a run: the next lead.
+
 
 ## Release package
 
