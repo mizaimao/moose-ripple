@@ -1,0 +1,15 @@
+Vista: the OpenGL driver linked without its unused code. LLVM's static C++ runtime holds a
+reference to TryAcquireSRWLockExclusive, which Vista lacks, in a function nothing calls;
+discarding unused sections removes it (as patch 0100 does for the Direct3D driver).
+
+--- a/src/gallium/targets/wgl/meson.build
++++ b/src/gallium/targets/wgl/meson.build
+@@ -1,7 +1,7 @@
+ # Copyright © Microsoft Corporation
+ # SPDX-License-Identifier: MIT
+ 
+-gallium_wgl_link_args = []
++gallium_wgl_link_args = ['-Wl,--gc-sections']
+ 
+ wgl_def = custom_target(
+   'gallium_wgl.def',
