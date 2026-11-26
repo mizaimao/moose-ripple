@@ -1235,6 +1235,58 @@ static void bump_case(int only)
  * 50: white quads over the clear colour, the left one with D3DRS_COLORWRITEENABLE red
  * only, the right one with it zero (as for stencil shadow volumes): the left keeps the
  * clear colour's green and blue, the right all of it. */
+/* 74: more texture memory than the driver keeps on the host at once: 24
+ * textures of 1024x1024 ARGB (96 MB, past its 64 MB), each its own colour,
+ * a quad each in a 6x4 grid. Two scenes, so the second draws textures the
+ * first one's later textures pushed out. */
+static void eviction_case(int only)
+{
+    enum { Count = 24, TexSide = 1024 };
+    IDirect3DTexture9 *tex[Count];
+    SAMPLE s[Count];
+    int i, scene, made = 0;
+    if (only && only != 74) return;
+    for (i = 0; i < Count; ++i) {
+        DWORD color = 0xff000000UL | (DWORD)(10 + 10 * i) << 16 | (DWORD)(250 - 10 * i) << 8 | (i & 1 ? 0x40 : 0xc0);
+        D3DLOCKED_RECT r;
+        int x, y;
+        tex[i] = NULL;
+        if (FAILED(IDirect3DDevice9_CreateTexture(device, TexSide, TexSide, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED,
+                                                  &tex[i], NULL))) break;
+        ++made;
+        if (FAILED(IDirect3DTexture9_LockRect(tex[i], 0, &r, NULL, 0))) break;
+        for (y = 0; y < TexSide; ++y)
+            for (x = 0; x < TexSide; ++x) ((DWORD *)((BYTE *)r.pBits + y * r.Pitch))[x] = color;
+        IDirect3DTexture9_UnlockRect(tex[i], 0);
+        s[i].x = 8 + 20 * (i % 6);
+        s[i].y = 8 + 20 * (i / 6);
+        s[i].rgb = color;
+    }
+    if (made < Count || i < Count) fail_hr("eviction", "create", E_OUTOFMEMORY);
+    else for (scene = 0; scene < 2; ++scene) {
+        HRESULT hr = S_OK;
+        if (!begin("eviction")) break;
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        IDirect3DDevice9_SetFVF(device, TLTEXFVF);
+        for (i = 0; SUCCEEDED(hr) && i < Count; ++i) {
+            float x0 = 2.0f + 20 * (i % 6), y0 = 2.0f + 20 * (i / 6);
+            TLTEXVERTEX v[4] = {
+                { x0, y0, 0.5f, 1, 0xffffffff, 0, 0 }, { x0 + 14, y0, 0.5f, 1, 0xffffffff, 1, 0 },
+                { x0, y0 + 14, 0.5f, 1, 0xffffffff, 0, 1 }, { x0 + 14, y0 + 14, 0.5f, 1, 0xffffffff, 1, 1 } };
+            IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)tex[i]);
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+        }
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        if (FAILED(hr)) { fail_hr("eviction", "draw", hr); IDirect3DDevice9_EndScene(device); break; }
+        check(scene ? "eviction_again" : "eviction", s, Count);
+    }
+    for (i = 0; i < made; ++i) IDirect3DTexture9_Release(tex[i]);
+}
+
 static void colorwrite_case(int only)
 {
     typedef struct { float x, y, z, rhw; DWORD diffuse; } CV;
@@ -1532,6 +1584,7 @@ int main(int argc, char **argv)
     luminance_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
     colorwrite_case(only);
+    eviction_case(only);
     dot3_case(only, (caps.TextureOpCaps & D3DTEXOPCAPS_DOTPRODUCT3) != 0);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (caps.TextureCaps & D3DPTEXTURECAPS_VOLUMEMAP) && (!only || only >= 45))
         volume_cases(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
