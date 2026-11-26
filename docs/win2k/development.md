@@ -2211,6 +2211,22 @@ the maximum point size stays 1.0. `d9pixels` case 73 draws three lines and a
 block of nine points.
 
 
+## 32-bit index buffers
+
+The driver reported a maximum vertex index of `0xffff`. On hardware vertex
+processing the Direct3D 8 and 9 runtimes then refuse `D3DFMT_INDEX32` index
+buffers, and an indexed stream draw with 4-byte indices was skipped. With
+software vertex processing the runtime's own caps allow them, so a program
+could take a different path depending on which it chose.
+
+The maximum is now `0xffffff`. An indexed stream draw copies its 2- or 4-byte
+indices out of the index buffer (`indexScratch`, sized in bytes) and
+`prim_vertex` reads them through `indices` or `indices32`. The vertex range
+they reach is checked against the vertex buffer with 64-bit arithmetic, as for
+16-bit indices, so an index past the buffer skips the draw. `d9pixels`
+case 77 draws a quad from vertices 65536 to 65539 of a 65540-vertex buffer.
+
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:
