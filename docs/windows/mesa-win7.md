@@ -2202,6 +2202,74 @@ The pixel tests give the same results before and after at both bit widths (Windo
 the video-processor test, which passes on Vista only; Vista: all twelve), the points test
 among them, and pictures of Firefly Forest at the same moment show the same fireflies.
 
+## After the shader fix: the host's drawing thread, and what did not help (2026-11-26)
+
+With the shaders kept, the host is the limit in all four of 3DMark06's graphics tests on the
+first Intel host: its GPU is 85 to 95% busy and QEMU's drawing thread is on a processor all the
+time. What that thread does, sampled for ten seconds in each of the first two tests on the
+second Intel host (`perf record -t`, QEMU 10.0, virglrenderer 1.1, Mesa 25.0; that host has
+`perf`, the first has only the kernel's trace events):
+
+| share of the drawing thread's time | Return to Proxycon | Firefly Forest |
+| --- | ---: | ---: |
+| Mesa (the host's OpenGL driver) | 42% | 39% |
+| virglrenderer | 19% | 14% |
+| the C library | 17% | 20% |
+| the kernel, with the GPU's kernel driver | 13% | 19% |
+| QEMU's own code | 3% | 3% |
+
+By function there is one large entry and a long tail:
+
+- `memmove` (the C library's copy): 10% and 12%.
+- virglrenderer's choice of a shader variant for every draw (`vrend_fill_shader_key`,
+  `vrend_shader_select`, its hash lookups and the C library's `memcmp`): 6 to 8% together.
+- Everything else is under 1.3% a function: binding textures, samplers and vertex buffers in
+  virglrenderer and again in Mesa, setting uniforms, building the GPU's command batches.
+
+The copy is the only cost that is concentrated. The samples have no call chains (the
+distribution's libraries are built without frame pointers), so who copies is an inference:
+the command stream is 89% vertex shader constants, and each set is copied into
+virglrenderer's array, into Mesa's uniform storage and into the driver's upload buffer. The
+guest already sends only the registers a shader uses and skips a set that equals the last
+one; what is left is a real change for almost every draw, sent whole because the protocol's
+constant command has no offset. A way that stays inside the protocol would be to keep the
+registers that rarely change in a uniform buffer and send only the others with the draw.
+That is a larger piece of work and is not started.
+
+Function names in such a profile need the libraries' debug files. Debian's symbol server has
+them by build ID (`perf buildid-list -i FILE`); fetched into a folder laid out as
+`usr/lib/debug/.build-id/xx/rest.debug` with links to the libraries at their own paths, they
+are used with `perf report --symfs=FOLDER`. Nothing is installed for it.
+
+Three things were tried on the guest's side and changed nothing in this benchmark:
+
+| 3DMark06, frames of 10 ms or more (timing report), first host | frames a second |
+| --- | ---: |
+| the driver as it is, host alone | 41.0 |
+| a host fence only for buffers that present, flip or page (`FenceRenders` 0) | 40.7 |
+| no half-millisecond system timer for the driver's reminders (`FineTimer` 0) | 40.9 |
+
+The two switches were DWORD values of a test build, read from the adapter's driver key; their
+runs were untimed and shared the host with another guest, so they say "no large effect", not
+more. Window by window the frame times follow the same curve. The pixel tests pass with a
+fence only for presenting buffers. The switches are not merged.
+
+The third is the interrupt. Windows 7's display kernel starts a device that asks for more
+than one interrupt message without any resources and stops on that, so the driver has to share
+one message between its two queues and the configuration (`MessageNumberLimit` 1). A driver
+that does ran the whole benchmark at its usual pace on both hosts (first two tests 200 s, CPU
+tests 48 s on the first host, next to another guest). The slow run reported earlier with
+message interrupts was a disturbed run of the kind described in `test-vms.md`, not an effect
+of the interrupts. A timed pair is still to be made; until then the change stays out.
+
+What the guest's processors do at the host's device registers was counted again for one
+guest alone (`tools/win7-debug/rig/pioports.sh` with the guest's processor threads): 6,700
+port accesses a second while the benchmark draws, 6,100 of them the real-time clock's two
+ports, three for each of 2,049 clock interrupts a second, and 600 to 800 the ACPI timer. The
+2,049 is the driver's own half-millisecond timer. A count over the whole host had shown
+68,000 to 216,000; that was another guest. A trace of this kind has to be limited to the
+guest's own threads (`set_event_pid`).
+
 ## Clip planes, Fetch4 and points on Windows 7 (2026-11-25)
 
 The clean-install check of release 0.4.0 ran Vista's screen-space pixel tests
