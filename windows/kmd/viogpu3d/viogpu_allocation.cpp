@@ -86,12 +86,67 @@ void VioGpuAllocation::MarkBusy()
     KeClearEvent(&m_busyNotification);
 }
 
+// A thread that waits for the host GPU makes the host look. QEMU answers a finished fence when
+// it next handles a notification from the guest, and otherwise on a 10 ms timer. The work
+// thread's nudges (viogpu_command.cpp) come with the system timer: half a millisecond to a
+// millisecond after the buffer when the fine timer is held, one to two under processor
+// emulation, and not before QEMU's own timer when it is not held. So before it sleeps, the
+// waiter stays awake for up to 3 ms and nudges the queue after 0.2 ms, then at doubling
+// intervals (0.4, 0.8, 1.6 ms), as the Mac OS X driver does (VirtioGPUDevice::command).
+void VioGpuAllocation::ProdHost()
+{
+    PAGED_CODE();
+
+#ifndef RIPPLE_NO_WAIT_PROD
+    for (ULONG interval = 200; interval <= 1600 && m_busy != 0; interval *= 2)
+    {
+        for (ULONG waited = 0; waited < interval && m_busy != 0; waited += 50)
+        {
+            KeStallExecutionProcessor(50);
+        }
+        if (m_busy != 0)
+        {
+            m_adapter->ctrlQueue.Nudge();
+        }
+    }
+#endif
+}
+
+// TRACE_WAITS=1 (windows/kmd/build.sh): how many waits for the host GPU there were and how long
+// they took, a line in the driver's log every 256 waits
+void VioGpuAllocation::WaitCounted(LONGLONG since)
+{
+    PAGED_CODE();
+
+#ifdef RIPPLE_TRACE_WAITS
+    static volatile LONG waits, longWaits;
+    static volatile LONGLONG ticks;
+    LARGE_INTEGER frequency;
+    LONGLONG took = KeQueryPerformanceCounter(&frequency).QuadPart - since;
+    InterlockedExchangeAdd64(&ticks, took);
+    if (took * 1000 >= frequency.QuadPart * 5)
+    {
+        InterlockedIncrement(&longWaits);
+    }
+    LONG n = InterlockedIncrement(&waits);
+    if ((n & 255) == 0)
+    {
+        DbgPrint(TRACE_LEVEL_FATAL,
+                 ("waits for the GPU: %d, of them %d of 5 ms or more, %u us on average\n",
+                  n, longWaits, (UINT)(ticks * 1000000 / frequency.QuadPart / n)));
+    }
+#else
+    UNREFERENCED_PARAMETER(since);
+#endif
+}
+
 void VioGpuAllocation::WaitIdle()
 {
     PAGED_CODE();
 
     LARGE_INTEGER timeout;
     timeout.QuadPart = -20000000LL;
+    ProdHost();
     while (m_busy != 0)
     {
         if (KeWaitForSingleObject(&m_busyNotification, Executive, KernelMode, FALSE, &timeout) == STATUS_TIMEOUT)
@@ -425,13 +480,19 @@ NTSTATUS VioGpuAllocation::EscapeResourceBusy(VIOGPU_RES_BUSY_REQ *resBusy)
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s res_id=%d\n", __FUNCTION__, m_Id));
 
-    while (resBusy->Wait && m_busy != 0)
+    if (resBusy->Wait && m_busy != 0)
     {
-        KeWaitForSingleObject(&m_busyNotification, UserRequest, KernelMode, FALSE, NULL);
+        LONGLONG since = KeQueryPerformanceCounter(NULL).QuadPart;
+        ProdHost();
+        while (m_busy != 0)
+        {
+            KeWaitForSingleObject(&m_busyNotification, UserRequest, KernelMode, FALSE, NULL);
 
-        LARGE_INTEGER wait;
-        wait.QuadPart = -10LL;
-        KeDelayExecutionThread(KernelMode, FALSE, &wait);
+            LARGE_INTEGER wait;
+            wait.QuadPart = -10LL;
+            KeDelayExecutionThread(KernelMode, FALSE, &wait);
+        }
+        WaitCounted(since);
     }
 
     resBusy->IsBusy = m_busy != 0;

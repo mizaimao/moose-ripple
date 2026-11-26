@@ -68,8 +68,36 @@ on the host GPU's path and on Mesa's software renderer, so that is the old VM's 
 `gltest text` checks the font helpers (`wglUseFontBitmaps` too, which many programs use for
 text).
 
-Not there yet: a faster way to the screen than the read-back (it is what limits the frame
-rate above), a comparison against a real card of the time, and more programs.
+Not there yet: a faster way to the screen than the read-back for windows that don't cover
+the whole screen (full-screen windows have one since 2026-11-26, below), a comparison against
+a real card of the time, and more programs.
+
+### Full-screen OpenGL from the GPU (2026-11-26)
+
+A window whose client area is the whole screen, with nothing over it and the pointer hidden
+(a full-screen game, a screen saver), is no longer read back for GDI. Its finished frame is
+copied on the host GPU into a display image and handed to the mini-VDD, the way Direct3D's
+flip chain is shown ([directdraw.md](directdraw.md#full-screen-gpu-presentation)); patch 0014
+does it in Mesa's WGL target. Any frame that doesn't qualify (a menu or the taskbar over the
+window, the pointer shown, Windows 95, which lacks `GetCursorInfo`) takes the GDI path, and
+the first such frame after GPU ones gives the display back to the desktop. `RIPPLE_GL_SCANOUT=0`
+keeps every frame on the GDI path.
+
+Intel host (VM 230 alone, one boot, the same driver files; the first two rows with
+`RIPPLE_GL_SCANOUT=0`):
+
+| Test | GDI path | From the GPU |
+|---|---:|---:|
+| `gltest 10 full`, 1280×720×32, frames a second | 520.4 | 3,409.1 |
+| Quake III demo, `timedemo demo001`, 1024×768 full screen, fps | 293.7 | 617.1 |
+
+Both `gltest` runs passed their pixel checks. Captures from QEMU's VNC server showed the
+`gltest` scene and Quake III upright and in their colours; with the Start menu opened over the
+running `gltest`, the menu showed over the live scene, and the desktop came back when each
+program ended. [The three captures](img/gl-fullscreen-rig.webp)
+
+    gltest 10 full                   (the window covers the screen at its current mode)
+    quake3.exe +set timedemo 1 +set r_fullscreen 1 +set r_mode 6 +set nextdemo quit +demo demo001
 
 ## How a 2024 Mesa gets onto a 1998 Windows
 
@@ -279,4 +307,5 @@ Environment variables, set before the program starts (in a batch file: `set NAME
 | `RIPPLE_GL_TRACE=file` | one line for every call Windows' `opengl32.dll` makes into the driver (pixel formats asked for and set, contexts made and made current, buffer swaps, extension functions looked up): shows where a program gives up |
 | `RVD_LOG=file` | the winsys' first few thousand requests to the VxD (buffers made, transfers, frames presented, and for each submission the virgl commands in it by number and how much its transfers move) |
 | `LIBGL_ALWAYS_SOFTWARE=1` | Mesa's software renderer instead of the host GPU: is the fault in the GPU path? |
+| `RIPPLE_GL_SCANOUT=0` | a full-screen window read back for GDI like any other: is the fault in the GPU display path? |
 | `MESA_EXTENSION_MAX_YEAR=2000` | hide OpenGL extensions newer than that year, for programs that copy the extension list into a small buffer |

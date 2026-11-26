@@ -2514,8 +2514,14 @@ static DWORD WINAPI ContextCreate(LPD3DHAL_CONTEXTCREATEDATA d)
         trace_on = GetEnvironmentVariable("RIPPLE_D3D_TRACE", v, sizeof v) > 0;
         profile_on = GetEnvironmentVariable("RIPPLE_D3D_PROFILE", v, sizeof v) > 0;
         flip_start.QuadPart = 0;
-        c->scanout_enabled = GetEnvironmentVariable("RIPPLE_D3D_SCANOUT", v, sizeof v) == 1 &&
-                             v[0] == '1' && p->present_color != NULL;
+        /* GPU presentation is the default on a virgl host; RIPPLE_D3D_SCANOUT=0 keeps the
+           read-back path. Without virgl (Mesa's software renderer) the display stays VGA. */
+        {
+            const char *r = (const char *)p->gl.GetString(GL_RENDERER);
+            c->scanout_enabled = !(GetEnvironmentVariable("RIPPLE_D3D_SCANOUT", v, sizeof v) == 1 &&
+                                   v[0] == '0') &&
+                                 p->present_color != NULL && r && memcmp(r, "virgl", 5) == 0;
+        }
     }
     /* Multiple devices can share a surface. Resolve it in its original context before a
        second device can draw there, and leave such sessions on the coherent CPU path. */

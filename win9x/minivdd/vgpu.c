@@ -1283,34 +1283,87 @@ static int valid_page(u32 w, u32 h, u32 bpp, u32 offset)
     return offset <= vram_bytes && offset % row == 0 && h <= (vram_bytes - offset) / row;
 }
 
-/* The DIB engine, DirectDraw locks and the software cursor all write these same VGA bytes.
-   Sample them at a desktop event so writes without any later driver call remain visible.
-   Compare the shadow as we copy. A still desktop generates no device commands. */
-static int mirror_pixels(struct desktop_image *d, u32 bpp, u32 offset)
+/* One row of VGA pixels into the shadow, compared as it is copied: 1 if it changed. */
+static int mirror_row(u32 *dst, const u8 *src, u32 w, u32 bpp)
 {
-    const u8 *src = vram + offset;
-    u32 *dst = (u32 *)d->mem;
-    u32 n = d->w * d->h, pixel;
     int changed = 0;
-    while (n--) {
-        switch (bpp) {
-        case 32: pixel = *(const u32 *)src; src += 4; break;
-        case 24: pixel = src[0] | ((u32)src[1] << 8) | ((u32)src[2] << 16); src += 3; break;
-        case 16: {
-            u32 p = *(const u16 *)src, r = p >> 11, g = (p >> 5) & 63, b = p & 31;
+    u32 pixel;
+    if (bpp == 32) {
+        const u32 *s = (const u32 *)src;
+        for (; w--; dst++, s++)
+            if (*dst != *s) {
+                *dst = *s;
+                changed = 1;
+            }
+        return changed;
+    }
+    if (bpp == 16) {
+        const u16 *s = (const u16 *)src;
+        for (; w--; dst++, s++) {
+            u32 p = *s, r = p >> 11, g = (p >> 5) & 63, b = p & 31;
             pixel = ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
-            src += 2;
-            break;
+            if (*dst != pixel) {
+                *dst = pixel;
+                changed = 1;
+            }
         }
-        default: pixel = palette[*src++]; break;
-        }
+        return changed;
+    }
+    for (; w--; dst++) {
+        if (bpp == 24) {
+            pixel = src[0] | ((u32)src[1] << 8) | ((u32)src[2] << 16);
+            src += 3;
+        } else
+            pixel = palette[*src++];
         if (*dst != pixel) {
             *dst = pixel;
             changed = 1;
         }
-        dst++;
     }
     return changed;
+}
+
+/* A quiet desktop is sampled one row in QUIET_ROWS, a different set each time, so every row
+   is looked at within QUIET_ROWS refreshes; a difference anywhere makes it a full pass. The
+   software pointer, a text caret and a line of text are taller than that and show at once. */
+#define QUIET_ROWS 4
+
+/* The DIB engine, DirectDraw locks and the software cursor all write these same VGA bytes.
+   Sample them at a desktop event so writes without any later driver call remain visible.
+   Compare the shadow as we copy; *damage gets the changed rows. A still desktop generates no
+   device commands. */
+static int mirror_pixels(struct desktop_image *d, u32 bpp, u32 offset, struct gpu_rect *damage,
+                         int quiet)
+{
+    static u32 phase;
+    const u8 *src = vram + offset;
+    u32 *dst = (u32 *)d->mem;
+    u32 w = d->w, h = d->h, pitch = w * (bpp / 8), y, first = h, last = 0;
+    if (quiet) {
+        for (y = phase; y < h; y += QUIET_ROWS)
+            if (mirror_row(dst + y * w, src + y * pitch, w, bpp)) {
+                if (first == h)
+                    first = y;
+                last = y;
+            }
+        phase = (phase + 1) % QUIET_ROWS;
+        if (first == h)
+            return 0;
+    }
+    for (y = 0; y < h; y++)
+        if (mirror_row(dst + y * w, src + y * pitch, w, bpp)) {
+            if (y < first)
+                first = y;
+            if (y > last)
+                last = y;
+        }
+    if (first == h)
+        return 0;
+    damage->x = 0;
+    damage->y = first;
+    damage->w = w;
+    damage->h = last - first + 1;
+    return 1;
 }
 
 /* The virtio-vga BAR0 is the VGA's raw RAM. Text characters, attributes and the
@@ -1738,8 +1791,13 @@ static int desktop_refresh(int paced)
         changed = mirror_mode13(d, &damage, generation);
         if (changed > 0 && !d->upload && last_mode13_palette == generation)
             region = &damage;
-    } else
-        changed = mirror_pixels(d, bpp, offset);
+    } else {
+        /* The host already holds this image's earlier pixels: send only the changed rows. */
+        int same = !d->upload && slot == desktop_slot && visible == id;
+        changed = mirror_pixels(d, bpp, offset, &damage, same && !cpu_owner);
+        if (changed && same)
+            region = &damage;
+    }
     if (changed)
         d->upload = 1;
     if (changed < 0) {
@@ -1901,7 +1959,7 @@ static int publish_gpu(u32 id, struct buffer *b)
 
 void __cdecl vgpu_desktop_tick(void)
 {
-    u32 age;
+    u32 age, start = vmm_time_ms();
     refresh_pending = 0;
     if (!takeover || (!upload.head && ((!display_bpp && !dos_active) || (gpu_page && !pending_gpu))))
         return;
@@ -1925,8 +1983,14 @@ void __cdecl vgpu_desktop_tick(void)
         if (!gpu_page && !cpu_owner) {
             if (dos_active && pal.valid && pal.serial == display_serial && visible == PAL_TARGET)
                 queue_refresh(DOS13_PERIOD_MS);
-            else
-                queue_refresh(dos_active ? 50 : 32);
+            else if (dos_active)
+                queue_refresh(50);
+            else {
+                /* Every 32 ms from the start of this sample, not from its end: the compare
+                   and upload of a busy desktop count against the period. */
+                age = vmm_time_ms() - start;
+                queue_refresh(age < 32 - 8 ? 32 - age : 8);
+            }
         }
         else if (!gpu_page || pending_gpu) {
             age = vmm_time_ms() - (gpu_page ? last_gpu_update : last_cpu_sample);

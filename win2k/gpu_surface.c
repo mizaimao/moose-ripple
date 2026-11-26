@@ -106,6 +106,10 @@ static RB2K_IMAGE *find_image(RB2K_GPU *gpu, ULONG id)
 
 static VP_STATUS command_error(RB2K_GPU *gpu, const RB2K_GPU_RESULT *result)
 {
+    if (!gpu->d7Profile.commandFailures++) {
+        gpu->d7Profile.firstCommandStage = result->stage;
+        gpu->d7Profile.firstCommandStatus = result->status;
+    }
     /* Staging allocation precedes submission and leaves other images usable. */
     /* A late completion must not touch recycled storage. A host error
      * reply leaves no command outstanding, so OpenGL contexts may stay. */
@@ -170,16 +174,37 @@ static VP_STATUS present(RB2K_GPU *gpu, const RB2K_IMAGE *image, const RB2K_DD_P
     return NO_ERROR;
 }
 
+/* Record a refused draw for d7draw: the step (RB2K_D7_SITE_*), its status
+ * and a detail (a stage, see RB2K_D7_REFUSE_IMAGE, or a vertex index). */
+static BOOLEAN refuse(RB2K_GPU *gpu, ULONG site, VP_STATUS status, ULONG stage)
+{
+    gpu->d7Profile.failSite = site;
+    gpu->d7Profile.failStatus = status;
+    gpu->d7Profile.failStage = stage;
+    if (!gpu->d7Profile.failCount++) {
+        gpu->d7Profile.firstSite = site;
+        gpu->d7Profile.firstStatus = status;
+        gpu->d7Profile.firstStage = stage;
+    }
+    return FALSE;
+}
+
 /* A texture id naming an image (a render target texture): the image's
  * resource seen as a texture of one level, attached to the target's context.
- * Its own draws are submitted first, as a frame for another target. */
+ * Its own draws are submitted first, as a frame for another target. On a
+ * refusal, *why says which step (RB2K_D7_IMAGE_*). */
 static RB2K_TEXTURE *image_texture(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K_IMAGE *target, ULONG id,
-                                   RB2K_TEXTURE *alias)
+                                   RB2K_TEXTURE *alias, PULONG why)
 {
     RB2K_IMAGE *source = find_image(gpu, id & ~RB2K_TEXTURE_IMAGE);
-    if (!source || source == target || source->depth16 || source->frameFailed) return NULL;
-    if (!rb_gpu_image_attach(gpu, result, source, target) ||
-        (gpu->d7Frame.target == source && !rb_gpu_frame_flush(gpu, result))) return NULL;
+    *why = RB2K_D7_IMAGE_MISSING;
+    if (!source || source == target || source->depth16) return NULL;
+    *why = RB2K_D7_IMAGE_FAILED;
+    if (source->frameFailed) return NULL;
+    *why = RB2K_D7_IMAGE_ATTACH;
+    if (!rb_gpu_image_attach(gpu, result, source, target)) return NULL;
+    *why = RB2K_D7_IMAGE_FLUSH;
+    if (gpu->d7Frame.target == source && !rb_gpu_frame_flush(gpu, result)) return NULL;
     VideoPortZeroMemory(alias, sizeof(*alias));
     alias->id = source->id;
     alias->width = source->width;
@@ -196,32 +221,35 @@ static BOOLEAN draw_one(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *imag
 {
     RB2K_IMAGE *depth = NULL;
     RB2K_TEXTURE *texture = NULL, *texture1 = NULL, alias[2];
-    ULONG i, header = FIELD_OFFSET(RB2K_D3D7_DRAW, vertices);
+    ULONG i, why, header = FIELD_OFFSET(RB2K_D3D7_DRAW, vertices);
     *status = ERROR_INVALID_PARAMETER;
     if (length < header || !d->count || d->count > RB2K_D3D7_VERTICES || d->count % 3 ||
         length != header + d->count*sizeof(d->vertices[0]) || d->target != image->id ||
         !rb_gpu_d7_valid(d) || image->depth16 || ((d->depthState || d->stencil) && !d->depth))
-        return FALSE;
+        return refuse(gpu, RB2K_D7_SITE_RECORD, *status, 0);
     *status = ERROR_INVALID_HANDLE;
     if (d->depth) {
         depth = find_image(gpu, d->depth);
-        if (!depth || !depth->depth16 || (d->stencil && !depth->stencil8)) return FALSE;
+        if (!depth || !depth->depth16 || (d->stencil && !depth->stencil8))
+            return refuse(gpu, RB2K_D7_SITE_DEPTH, *status, 0);
     }
     for (i = 0; i < 2; ++i) {
-        ULONG j;
         RB2K_TEXTURE *t;
         if (!rb_gpu_d7_samples(d, i)) continue;
         if ((i ? d->texture1 : d->texture) & RB2K_TEXTURE_IMAGE) {
-            t = image_texture(gpu, result, image, i ? d->texture1 : d->texture, &alias[i]);
-            if (!t) return FALSE;
+            t = image_texture(gpu, result, image, i ? d->texture1 : d->texture, &alias[i], &why);
+            if (!t) return refuse(gpu, RB2K_D7_SITE_TEXTURE, *status, RB2K_D7_REFUSE_IMAGE(why, i));
             if (i) texture1 = t; else texture = t;
             continue;
         }
         t = rb_gpu_texture(gpu, i ? d->texture1 : d->texture);
-        if (!t) return FALSE;
-        /* The display DLL attaches a texture when it uploads it here. */
-        for (j = 0; j < RB2K_ATTACH && t->contexts[j] != image->id; ++j) {}
-        if (j == RB2K_ATTACH) return FALSE;
+        if (!t) return refuse(gpu, RB2K_D7_SITE_TEXTURE, *status, i);
+        /* Attached to this target's context on its first use here. */
+        if (!rb_gpu_texture_attach(gpu, result, t, image)) {
+            refuse(gpu, RB2K_D7_SITE_TEXTURE, result->status, 16 + i);
+            *status = command_error(gpu, result);
+            return FALSE;
+        }
         if (i) texture1 = t; else texture = t;
     }
     *status = ERROR_INVALID_PARAMETER;
@@ -230,11 +258,12 @@ static BOOLEAN draw_one(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *imag
         if ((v->x & 0x7fffffff) >= 0x7f800000 || (v->y & 0x7fffffff) >= 0x7f800000 ||
             (v->z & 0x7fffffff) >= 0x7f800000 || !(v->rhw & 0x7fffffff) ||
             (v->rhw & 0x7fffffff) >= 0x7f800000)
-            return FALSE;
+            return refuse(gpu, RB2K_D7_SITE_VERTEX, *status, i);
     }
     *status = NO_ERROR;
     if ((depth && !rb_gpu_depth_target(gpu, result, image, depth)) ||
         !rb_gpu_d7_draw(gpu, result, image, d, texture, texture1)) {
+        refuse(gpu, RB2K_D7_SITE_COMMAND, result->status, result->stage);
         *status = command_error(gpu, result);
         return FALSE;
     }
@@ -244,15 +273,6 @@ static BOOLEAN draw_one(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *imag
 
 /* One pixel shader draw: validate it, find its program, depth buffer and
  * textures, and queue its commands. */
-static BOOLEAN refuse(RB2K_GPU *gpu, ULONG site, VP_STATUS status, ULONG stage)
-{
-    gpu->d7Profile.failSite = site;
-    gpu->d7Profile.failStatus = status;
-    gpu->d7Profile.failStage = stage;
-    ++gpu->d7Profile.failCount;
-    return FALSE;
-}
-
 static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image,
                          const RB2K_D3D8_DRAW *d, ULONG length, VP_STATUS *status)
 {
@@ -287,19 +307,22 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
         if (!depth || !depth->depth16 || (d->stencil && !depth->stencil8)) return refuse(gpu, RB2K_D7_SITE_DEPTH, *status, 0);
     }
     for (i = 0; i < RB2K_D8_STAGES; ++i) {
-        ULONG j;
         RB2K_TEXTURE *t;
         textures[i] = NULL;
         if (!(gpu->programs[program].samplers & (1UL << i))) continue;
         if (d->textures[i] & RB2K_TEXTURE_IMAGE) {
-            textures[i] = image_texture(gpu, result, image, d->textures[i], &alias[i]);
-            if (!textures[i]) return refuse(gpu, RB2K_D7_SITE_TEXTURE, *status, 32 + i);
+            ULONG why;
+            textures[i] = image_texture(gpu, result, image, d->textures[i], &alias[i], &why);
+            if (!textures[i]) return refuse(gpu, RB2K_D7_SITE_TEXTURE, *status, RB2K_D7_REFUSE_IMAGE(why, i));
             continue;
         }
         t = rb_gpu_texture(gpu, d->textures[i]);
         if (!t) return refuse(gpu, RB2K_D7_SITE_TEXTURE, *status, i);
-        for (j = 0; j < RB2K_ATTACH && t->contexts[j] != image->id; ++j) {}
-        if (j == RB2K_ATTACH) return refuse(gpu, RB2K_D7_SITE_TEXTURE, *status, 16 + i);
+        if (!rb_gpu_texture_attach(gpu, result, t, image)) {
+            refuse(gpu, RB2K_D7_SITE_TEXTURE, result->status, 16 + i);
+            *status = command_error(gpu, result);
+            return FALSE;
+        }
         textures[i] = t;
     }
     *status = ERROR_INVALID_PARAMETER;
@@ -545,6 +568,7 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
             return command_error(gpu, &result);
         success = rb_gpu_destroy_image(gpu, &result, id);
         if (success) {
+            rb_gpu_slot_forget(gpu, image);
             VideoPortZeroMemory(image, sizeof(*image));
             if (!--gpu->imageCount && !gpu->rvdContexts) return rb_gpu_stop(gpu);
         }
@@ -559,7 +583,10 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 /* Create a Direct3D texture or replace rows of one, attached to the target
  * that will sample it. Texture ids share the image counter. */
 /* Host formats of the upload formats of RB2K_D3D7_TEXTURE. */
-static const ULONG block_formats[4] = { 0, VIRGL_FORMAT_DXT1_RGBA, VIRGL_FORMAT_DXT3_RGBA, VIRGL_FORMAT_DXT5_RGBA };
+static const ULONG block_formats[RB2K_D7_UPLOAD_FORMATS] = {
+    0, VIRGL_FORMAT_DXT1_RGBA, VIRGL_FORMAT_DXT3_RGBA, VIRGL_FORMAT_DXT5_RGBA,
+    VIRGL_FORMAT_R8G8_SNORM, VIRGL_FORMAT_R8G8B8A8_SNORM
+};
 
 static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 {
@@ -567,7 +594,7 @@ static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     RB2K_TEXTURE *t;
     const RB2K_D3D7_TEXTURE *in = packet->InputBuffer;
     RB2K_IMAGE *image;
-    ULONG bytes;
+    ULONG bytes, side, block;
     if (!gpu->nativeD3D7 || !gpu->ddGpuSurfaces) return ERROR_NOT_SUPPORTED;
     if (packet->IoControlCode == IOCTL_RB2K_D3D7_TEXTURE_FREE) {
         if (packet->InputBufferLength != sizeof(ULONG) || packet->OutputBufferLength)
@@ -585,27 +612,30 @@ static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         return ERROR_INVALID_PARAMETER;
     {
         ULONG depth = in->depth > 1 ? in->depth : 1, slices = depth >> in->level ? depth >> in->level : 1;
-        if (in->format > RB2K_D7_BLOCKS_DXT5 || (in->faces != 1 && in->faces != 6) ||
+        if (in->format >= RB2K_D7_UPLOAD_FORMATS || (in->faces != 1 && in->faces != 6) ||
             (in->faces == 6 && in->width != in->height) || depth > RB2K_D7_VOLUME_SIDE ||
-            (depth > 1 && (in->faces != 1 || in->format || in->width > RB2K_D7_VOLUME_SIDE ||
+            (depth > 1 && (in->faces != 1 || RB2K_D7_BLOCK_SIDE(in->format) > 1 || in->width > RB2K_D7_VOLUME_SIDE ||
                            in->height > RB2K_D7_VOLUME_SIDE)) ||
             in->face >= (depth > 1 ? slices : in->faces)) return ERROR_INVALID_PARAMETER;
     }
-    /* Blocks as they are only where the host samples them; otherwise the
-     * answer is texture id zero (the video port reports every failure alike). */
-    if (in->format && (!gpu->hostDxt || !((rb_gpu_host_blocks(gpu) >> in->format) & 1))) {
+    /* Blocks and signed texels as they are only where the host samples them
+     * (DXT also only with RippleHostDxt); otherwise the answer is texture id
+     * zero (the video port reports every failure alike). */
+    if (in->format && ((in->format <= RB2K_D7_BLOCKS_DXT5 && !gpu->hostDxt) ||
+                       !((rb_gpu_host_blocks(gpu) >> in->format) & 1))) {
         *(PULONG)packet->OutputBuffer = 0;
         packet->StatusBlock->Information = sizeof(ULONG);
         return NO_ERROR;
     }
+    side = RB2K_D7_BLOCK_SIDE(in->format);
+    block = in->format ? RB2K_D7_BLOCK_BYTES(in->format) : sizeof(ULONG);
     {
         /* Rows of one level, each level half the one above, at least one. */
         ULONG width = in->width >> in->level ? in->width >> in->level : 1;
         ULONG height = in->height >> in->level ? in->height >> in->level : 1;
-        if (!in->rows || in->y >= height || in->rows > height - in->y || (in->format && in->y % 4))
+        if (!in->rows || in->y >= height || in->rows > height - in->y || in->y % side)
             return ERROR_INVALID_PARAMETER;
-        bytes = in->format ? (width + 3) / 4 * (in->format == RB2K_D7_BLOCKS_DXT1 ? 8 : 16) * ((in->rows + 3) / 4) :
-                width * in->rows * sizeof(ULONG);
+        bytes = (width + side - 1) / side * block * ((in->rows + side - 1) / side);
     }
     if (bytes > RB2K_D7_UPLOAD_BYTES || packet->InputBufferLength != sizeof(*in) + bytes)
         return ERROR_INVALID_PARAMETER;
@@ -621,8 +651,7 @@ static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
             return ERROR_INVALID_PARAMETER;
     } else {
         /* Levels below the top add up to under a third of it. */
-        ULONG i, size = in->format ? (in->width + 3) / 4 * ((in->height + 3) / 4) * (in->format == RB2K_D7_BLOCKS_DXT1 ? 8 : 16) :
-                        in->width * in->height * sizeof(ULONG);
+        ULONG i, size = (in->width + side - 1) / side * ((in->height + side - 1) / side) * block;
         if (in->levels > 1) size += size / 3 + 4 * sizeof(ULONG);
         if (in->y || in->level || in->face) return ERROR_INVALID_PARAMETER;
         size *= in->faces;
@@ -719,6 +748,11 @@ VP_STATUS rb_gpu_surface_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         else if (packet->IoControlCode == IOCTL_RB2K_D3D8_PROGRAM ||
                  packet->IoControlCode == IOCTL_RB2K_D3D8_PROGRAM_FREE) status = program_request(gpu, packet);
         else status = image_request(gpu, packet);
+        if (status && !gpu->d7Profile.requestFailures++) {
+            gpu->d7Profile.firstRequest = packet->IoControlCode;
+            gpu->d7Profile.firstRequestStatus = status;
+            gpu->d7Profile.firstRequestId = packet->InputBufferLength >= sizeof(ULONG) ? *(PULONG)packet->InputBuffer : 0;
+        }
         if (gpu->d7Measure) {
             gpu->d7Measure->ticks += rb_counter_ticks(NULL)-start;
             ++gpu->d7Measure->calls;

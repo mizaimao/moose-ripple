@@ -780,13 +780,14 @@ RB2K_TEXTURE *rb_gpu_texture(RB2K_GPU *gpu, ULONG id)
     return NULL;
 }
 
-/* The DXT formats the host samples, from its virgl capability set (bit n
- * for RB2K_D7_BLOCKS_DXT* n), asked once. */
+/* The upload formats the host samples, from its virgl capability set (bit n
+ * for upload format n: RB2K_D7_BLOCKS_DXT*, RB2K_D7_TEXELS_*), asked once. */
 ULONG rb_gpu_host_blocks(RB2K_GPU *gpu)
 {
     struct virtio_gpu_get_capset request;
     struct { struct virtio_gpu_ctrl_hdr hdr; ULONG maxVersion, sampler[16], rest[110]; } reply;
-    static const ULONG formats[4] = { 0, VIRGL_FORMAT_DXT1_RGBA, VIRGL_FORMAT_DXT3_RGBA, VIRGL_FORMAT_DXT5_RGBA };
+    static const ULONG formats[RB2K_D7_UPLOAD_FORMATS] = { 0, VIRGL_FORMAT_DXT1_RGBA, VIRGL_FORMAT_DXT3_RGBA,
+        VIRGL_FORMAT_DXT5_RGBA, VIRGL_FORMAT_R8G8_SNORM, VIRGL_FORMAT_R8G8B8A8_SNORM };
     ULONG received = 0, k;
     if (gpu->hostBlocksKnown || !gpu->ready) return gpu->hostBlocks;
     gpu->hostBlocksKnown = TRUE;
@@ -797,7 +798,7 @@ ULONG rb_gpu_host_blocks(RB2K_GPU *gpu)
     if (rb_gpu_submit(gpu, &request, sizeof(request), &reply, sizeof(reply), &received) ||
         received < sizeof(reply.hdr) + sizeof(ULONG) * 17 || reply.hdr.type != VIRTIO_GPU_RESP_OK_CAPSET)
         return 0;
-    for (k = 1; k < 4; ++k)
+    for (k = 1; k < RB2K_D7_UPLOAD_FORMATS; ++k)
         if ((reply.sampler[formats[k] / 32] >> (formats[k] % 32)) & 1) gpu->hostBlocks |= 1UL << k;
     return gpu->hostBlocks;
 }
@@ -818,47 +819,50 @@ BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTU
     return send_request(gpu, result, &request, sizeof(request.resource), RB2K_STAGE_RESOURCE);
 }
 
-/* A texture is attached to each colour context that samples it. Context ids
- * are never reused, so an entry for a destroyed target is only stale. */
-BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture,
-                              const RB2K_IMAGE *image)
+/* The image's slot in gpu->images, or RB2K_DD_SLOTS for any other image. */
+static ULONG image_slot(const RB2K_GPU *gpu, const RB2K_IMAGE *image)
 {
-    ULONG i, free = RB2K_ATTACH;
-    for (i = 0; i < RB2K_ATTACH; ++i) {
-        ULONG j;
-        if (texture->contexts[i] == image->id) return TRUE;
-        for (j = 0; j < RB2K_DD_SLOTS && gpu->images[j].id != texture->contexts[i]; ++j) {}
-        if (free == RB2K_ATTACH && (!texture->contexts[i] || j == RB2K_DD_SLOTS)) free = i;
-    }
-    if (free == RB2K_ATTACH) {
-        result->status = ERROR_NOT_ENOUGH_MEMORY;
+    return image >= gpu->images && image < gpu->images + RB2K_DD_SLOTS ? (ULONG)(image - gpu->images) : RB2K_DD_SLOTS;
+}
+
+/* Attach a resource to the target's context once; bits (a bit per image
+ * slot) remembers the contexts it is attached to. */
+static BOOLEAN attach_once(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, PULONG bits, ULONG resource,
+                           const RB2K_IMAGE *target)
+{
+    ULONG slot = image_slot(gpu, target), bit = 1UL << (slot & 31);
+    if (slot == RB2K_DD_SLOTS) {
+        result->status = ERROR_INVALID_PARAMETER;
         result->stage = RB2K_STAGE_ATTACH;
         return FALSE;
     }
-    if (!context_resource(gpu, result, image->id, texture->id, TRUE, RB2K_STAGE_ATTACH)) return FALSE;
-    texture->contexts[free] = image->id;
+    if (bits[slot / 32] & bit) return TRUE;
+    if (!context_resource(gpu, result, target->id, resource, TRUE, RB2K_STAGE_ATTACH)) return FALSE;
+    bits[slot / 32] |= bit;
     return TRUE;
+}
+
+/* A texture is attached to each colour context that samples it. */
+BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture,
+                              const RB2K_IMAGE *image)
+{
+    return attach_once(gpu, result, texture->attached, texture->id, image);
 }
 
 /* An image sampled by another target (a render target texture) is attached
  * to that target's context too, like a texture. */
 BOOLEAN rb_gpu_image_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *source, const RB2K_IMAGE *target)
 {
-    ULONG i, free = RB2K_ATTACH;
-    for (i = 0; i < RB2K_ATTACH; ++i) {
-        ULONG j;
-        if (source->sampledBy[i] == target->id) return TRUE;
-        for (j = 0; j < RB2K_DD_SLOTS && gpu->images[j].id != source->sampledBy[i]; ++j) {}
-        if (free == RB2K_ATTACH && (!source->sampledBy[i] || j == RB2K_DD_SLOTS)) free = i;
-    }
-    if (free == RB2K_ATTACH) {
-        result->status = ERROR_NOT_ENOUGH_MEMORY;
-        result->stage = RB2K_STAGE_ATTACH;
-        return FALSE;
-    }
-    if (!context_resource(gpu, result, target->id, source->id, TRUE, RB2K_STAGE_ATTACH)) return FALSE;
-    source->sampledBy[free] = target->id;
-    return TRUE;
+    return attach_once(gpu, result, source->sampledBy, source->id, target);
+}
+
+/* The image is going: the next image in its slot has a new context. */
+void rb_gpu_slot_forget(RB2K_GPU *gpu, const RB2K_IMAGE *image)
+{
+    ULONG slot = image_slot(gpu, image), i, bit = ~(1UL << (slot & 31));
+    if (slot == RB2K_DD_SLOTS) return;
+    for (i = 0; i < RB2K_D7_TEXTURES; ++i) gpu->textures[i].attached[slot / 32] &= bit;
+    for (i = 0; i < RB2K_DD_SLOTS; ++i) gpu->images[i].sampledBy[slot / 32] &= bit;
 }
 
 /* Earlier draws in the open frame must reach the host before new texels. */
@@ -869,10 +873,14 @@ BOOLEAN rb_gpu_texture_upload(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K
     ULONG rowBytes = width * sizeof(ULONG), bytes = rowBytes * rows;
     if (gpu->d7Frame.target && gpu->d7Frame.count && !submit_frame(gpu, result, FALSE)) return FALSE;
     if (texture->format) {
-        /* Rows of 4x4 blocks: eight bytes each for DXT1, sixteen for the others. */
-        rowBytes = (width + 3) / 4 * (texture->format == VIRGL_FORMAT_DXT1_RGBA ? 8 : 16);
+        /* Rows of 4x4 DXT blocks (eight bytes each for DXT1, sixteen for the
+         * others), or rows of signed texels of two or four bytes. */
+        ULONG side = texture->format == VIRGL_FORMAT_R8G8_SNORM || texture->format == VIRGL_FORMAT_R8G8B8A8_SNORM ? 1 : 4;
+        ULONG block = texture->format == VIRGL_FORMAT_DXT1_RGBA ? 8 : side == 4 ? 16 :
+                      texture->format == VIRGL_FORMAT_R8G8_SNORM ? 2 : 4;
+        rowBytes = (width + side - 1) / side * block;
         return transfer_rows(gpu, result, image->id, texture->id, 0, y, width, rows, texels, rowBytes, rowBytes,
-                             FALSE, level, (rows + 3) / 4, face);
+                             FALSE, level, (rows + side - 1) / side, face);
     }
     if (bytes <= 16384) {
         ULONG count;

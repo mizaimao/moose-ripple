@@ -156,7 +156,12 @@ int main(void)
                        p.op[i].ticks * 1000000 / p.frequency, p.op[i].queueTicks * 1000000 / p.frequency,
                        p.op[i].fenceTicks * 1000000 / p.frequency);
         if (ExtEscape(dc, RB2K_D3D7_PROFILE_ESCAPE, 0, NULL, sizeof(p), (LPSTR)&p) > 0)
-            printf("D7REFUSED site=%lu status=%lu stage=%lu count=%lu\n", p.failSite, p.failStatus, p.failStage, p.failCount);
+            printf("D7REFUSED site=%lu status=%lu stage=%lu count=%lu first_site=%lu first_status=%lu first_stage=%lu\n",
+                   p.failSite, p.failStatus, p.failStage, p.failCount, p.firstSite, p.firstStatus, p.firstStage);
+        if (ExtEscape(dc, RB2K_D3D7_PROFILE_ESCAPE, 0, NULL, sizeof(p), (LPSTR)&p) > 0)
+            printf("D7FIRST requests_failed=%lu ioctl=%08lx status=%lu id=%lx commands_failed=%lu stage=%lu status=%lu\n",
+                   p.requestFailures, p.firstRequest, p.firstRequestStatus, p.firstRequestId,
+                   p.commandFailures, p.firstCommandStage, p.firstCommandStatus);
         if (ExtEscape(dc, RB2K_D3D7_FLIGHT_ESCAPE, 0, NULL, sizeof(f), (LPSTR)&f) > 0 && f.frequency > 0)
             printf("D7FLIGHT queued=%lu completed=%lu peak=%lu throttle_waits=%lu throttle_us=%I64d "
                    "access_waits=%lu access_us=%I64d\n", f.queued, f.completed, f.peak, f.throttleWaits,

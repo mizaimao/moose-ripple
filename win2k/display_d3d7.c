@@ -136,7 +136,6 @@ typedef struct {
      * blits, which mark them dirty; others are checked once a scene. */
     BOOL tracked, dirty;
     ULONG host, sum, epoch;
-    ULONG targets[RB2K_ATTACH];
 } D7_TEXTURE;
 
 /* A Direct3D 8 vertex or index buffer registered through CreateSurfaceEx.
@@ -213,10 +212,7 @@ static ULONG flush_draws(void)
         d->d7draw.lastDrawError = error;
         /* A transport reset releases the host textures: upload them again. */
         for (i = 0; textures && i < MaxTextures; ++i)
-            if (textures[i].display == d) {
-                textures[i].host = 0;
-                RtlZeroMemory(textures[i].targets, sizeof(textures[i].targets));
-            }
+            if (textures[i].display == d) textures[i].host = 0;
     }
     return error;
 }
@@ -285,6 +281,8 @@ ULONG rb_d7_texture_format(const DDPIXELFORMAT *f, ULONG desktopBits)
         case RbFmtL8: return TexL8;
         case RbFmtA8L8: return TexA8L8;
         case RbFmtA8: return TexA8;
+        case RbFmtV8U8: return TexV8U8;
+        case RbFmtQ8W8V8U8: return TexQ8W8V8U8;
         case RbFmtDxt1: return TexDxt1;
         case RbFmtDxt2: case RbFmtDxt3: return TexDxt3;
         case RbFmtDxt4: case RbFmtDxt5: return TexDxt5;
@@ -297,6 +295,9 @@ ULONG rb_d7_texture_format(const DDPIXELFORMAT *f, ULONG desktopBits)
     if (f->dwFlags == (0x00020000 | DDPF_ALPHAPIXELS) && f->dwRGBBitCount == 16 && f->dwRBitMask == 0xff &&
         f->dwRGBAlphaBitMask == 0xff00) return TexA8L8;
     if (f->dwFlags == 0x00000002 && f->dwRGBBitCount == 8) return TexA8;   /* DDPF_ALPHA */
+    /* Bump maps (DDPF_BUMPDUDV): du in the red mask's place, dv in the green's. */
+    if (f->dwFlags == 0x00080000 && f->dwRBitMask == 0xff && f->dwGBitMask == 0xff00)
+        return f->dwRGBBitCount == 16 ? TexV8U8 : f->dwRGBBitCount == 32 ? TexQ8W8V8U8 : TexNone;
     if (!(f->dwFlags & DDPF_RGB) || !f->dwRGBBitCount) return desktopBits == 32 ? TexXrgb8888 : TexNone;
     if (f->dwFlags & ~(DDPF_RGB | DDPF_ALPHAPIXELS)) return TexNone;
     if (f->dwRGBBitCount == 32 && f->dwRBitMask == 0xff0000 && f->dwGBitMask == 0xff00 &&
@@ -314,7 +315,8 @@ ULONG rb_d7_texture_format(const DDPIXELFORMAT *f, ULONG desktopBits)
 
 ULONG rb_d7_texel_bytes(ULONG format)
 {
-    return format == TexArgb8888 || format == TexXrgb8888 ? 4 : format == TexL8 || format == TexA8 ? 1 : 2;
+    return format == TexArgb8888 || format == TexXrgb8888 || format == TexQ8W8V8U8 ? 4 :
+           format == TexL8 || format == TexA8 ? 1 : 2;
 }
 
 static BOOL compressed(ULONG format) { return RB_TEX_COMPRESSED(format); }
@@ -1151,7 +1153,6 @@ static BOOL upload_blocks(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
             total += rows * rowBytes;
         }
     }
-    if (t->host != id) RtlZeroMemory(t->targets, sizeof(t->targets));
     t->host = id;
     ++d->d7draw.uploads;
     ++d->d7draw.blockUploads;
@@ -1162,7 +1163,7 @@ static BOOL upload_blocks(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
 static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
 {
     RB2K_D3D7_TEXTURE *packet = (RB2K_D3D7_TEXTURE *)uploadScratch;
-    ULONG id = t->host, tries, format = t->format, bpp, total = 0;
+    ULONG id = t->host, tries, format = t->format, bpp, hostBpp, total = 0;
     ULONG *out = (ULONG *)(packet + 1);
     const BYTE *texels = texelScratch;
     if (!packet || t->width * 4 > RB2K_D7_UPLOAD_BYTES) return FALSE;
@@ -1181,6 +1182,8 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
         format = TexArgb8888;
     }
     bpp = rb_d7_texel_bytes(format);
+    /* Signed texels go as they are; the rest as ARGB. */
+    hostBpp = RB_TEX_SIGNED(format) ? bpp : 4;
     for (tries = 0; tries < 2; ++tries) {
         BOOL ok = TRUE;
         const BYTE *src = texels;
@@ -1191,14 +1194,19 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
             plane_at(t, plane, &face, &level, &slice);
             width = level_side(t->width, level);
             height = level_side(t->height, level);
-            chunk = RB2K_D7_UPLOAD_BYTES / (width * 4);
+            chunk = RB2K_D7_UPLOAD_BYTES / (width * hostBpp);
             {
             for (y = 0; ok && y < height; y += chunk) {
                 ULONG rows = min(chunk, height - y), x, r, newId = 0;
-                for (r = 0; r < rows; ++r, src += width * bpp)
-                    for (x = 0; x < width; ++x)
-                        out[r * width + x] = convert(format, bpp == 4 ? ((const ULONG *)src)[x] :
-                                                     bpp == 2 ? ((const USHORT *)src)[x] : src[x]);
+                if (RB_TEX_SIGNED(format)) {
+                    RtlCopyMemory(out, src, rows * width * bpp);
+                    src += rows * width * bpp;
+                } else {
+                    for (r = 0; r < rows; ++r, src += width * bpp)
+                        for (x = 0; x < width; ++x)
+                            out[r * width + x] = convert(format, bpp == 4 ? ((const ULONG *)src)[x] :
+                                                         bpp == 2 ? ((const USHORT *)src)[x] : src[x]);
+                }
                 packet->id = plane || y ? id : t->host;
                 packet->face = t->depth > 1 ? slice : face;
                 packet->faces = t->faces;
@@ -1210,16 +1218,17 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
                 packet->rows = rows;
                 packet->levels = t->levels;
                 packet->level = level;
-                packet->format = 0;
-                ok = request(d, IOCTL_RB2K_D3D7_TEXTURE, packet, sizeof(*packet) + rows * width * 4,
+                packet->format = format == TexV8U8 ? RB2K_D7_TEXELS_V8U8 : format == TexQ8W8V8U8 ? RB2K_D7_TEXELS_Q8W8V8U8 : 0;
+                ok = request(d, IOCTL_RB2K_D3D7_TEXTURE, packet, sizeof(*packet) + rows * width * hostBpp,
                              &newId, sizeof(newId));
+                /* Texture id zero: the host cannot sample these signed texels. */
+                if (ok && !newId) ok = FALSE;
                 if (ok) id = newId;
-                total += rows * width * 4;
+                total += rows * width * hostBpp;
             }
             }
         }
         if (ok) {
-            if (t->host != id) RtlZeroMemory(t->targets, sizeof(t->targets));
             t->host = id;
             ++d->d7draw.uploads;
             d->d7draw.uploadBytes += total;
@@ -1228,7 +1237,6 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
         /* A transport reset releases every host texture; make a new one. */
         if (!t->host) break;
         t->host = id = 0;
-        RtlZeroMemory(t->targets, sizeof(t->targets));
     }
     ++d->d7draw.uploadFailures;
     return FALSE;
@@ -1245,13 +1253,12 @@ static void texture_skip(D7_CONTEXT *c, const D7_TEXTURE *t, ULONG targetId)
 
 static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
 {
-    ULONG sum, i;
-    BOOL attached = FALSE;
+    ULONG sum;
     /* A render target texture is sampled on the host, but never while it is the target. */
     if (t->image) return t->image == targetId ? 0 : RB2K_TEXTURE_IMAGE | t->image;
-    for (i = 0; i < RB2K_ATTACH; ++i) if (t->targets[i] == targetId) attached = TRUE;
-    if (t->host && attached && t->tracked && !t->dirty) { ++c->display->d7draw.checksSkipped; return t->host; }
-    if (t->host && attached && t->epoch == textureEpoch) return t->host;
+    /* The miniport attaches the host texture to each target that draws with it. */
+    if (t->host && t->tracked && !t->dirty) { ++c->display->d7draw.checksSkipped; return t->host; }
+    if (t->host && t->epoch == textureEpoch) return t->host;
     ++c->display->d7draw.checks;
     /* Cleared before reading, so a write during the read marks it again. */
     t->dirty = FALSE;
@@ -1265,7 +1272,7 @@ static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
         if (!read) { ++c->display->d7draw.checkFailures; return 0; }
     }
     t->epoch = textureEpoch;
-    if (t->host && attached && sum == t->sum) return t->host;
+    if (t->host && sum == t->sum) return t->host;
     {
         LONGLONG start, end;
         BOOL uploaded;
@@ -1276,12 +1283,6 @@ static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
         if (!uploaded) return 0;
     }
     t->sum = sum;
-    for (i = 0; i < RB2K_ATTACH && t->targets[i] != targetId; ++i) {}
-    if (i == RB2K_ATTACH) {
-        /* Reuse the entry of a target that no longer exists. */
-        for (i = 0; i < RB2K_ATTACH && t->targets[i] && target(c, t->targets[i], FALSE); ++i) {}
-        if (i < RB2K_ATTACH) t->targets[i] = targetId;
-    }
     return t->host;
 }
 
@@ -1935,6 +1936,8 @@ static void create_shader(D7_CONTEXT *c, ULONG handle, const BYTE *code, ULONG b
     sh->tokens = sh->tokenCount ? EngAllocMem(0, sh->tokenCount * sizeof(ULONG), 'k8bR') : NULL;
     if (sh->tokens) RtlCopyMemory(sh->tokens, code, sh->tokenCount * sizeof(ULONG));
     sh->variants[0].program = translate_program(c, sh, 0, &info);
+    /* A version 1 program with texbem also reads the stages' bump constants. */
+    if (info.constants > sh->constants) sh->constants = info.constants;
     if (sh->variants[0].program) ++s->psCreated;
     else {
         ++s->psFailed[info.reason < RbPsReasons ? info.reason : RbPsReasons];
@@ -2008,7 +2011,20 @@ static BOOL pixel_states(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, const D8_SHADER *s
     draw->fogEnd = c->fogEnd;
     draw->fogDensity = c->fogDensity;
     draw->constantCount = sh->constants;
-    RtlCopyMemory(draw->constants, c->psConst, sh->constants * 16);
+    RtlCopyMemory(draw->constants, c->psConst, min(sh->constants, (ULONG)RB_PS2_CONSTANTS) * 16);
+    if (sh->constants == RB_PS_BUMP_CONSTANTS) {
+        /* Stage n's bump matrix, then its luminance scale and offset (d3d8_ps.h). */
+        ULONG n;
+        for (n = 0; n < 4; ++n) {
+            draw->constants[RB_PS_CONSTANTS + n][0] = c->tss[n][D3DTSS_BUMPENVMAT00];
+            draw->constants[RB_PS_CONSTANTS + n][1] = c->tss[n][D3DTSS_BUMPENVMAT01];
+            draw->constants[RB_PS_CONSTANTS + n][2] = c->tss[n][D3DTSS_BUMPENVMAT10];
+            draw->constants[RB_PS_CONSTANTS + n][3] = c->tss[n][D3DTSS_BUMPENVMAT11];
+            draw->constants[RB_PS_CONSTANTS + 4 + n][0] = c->tss[n][D3DTSS_BUMPENVLSCALE];
+            draw->constants[RB_PS_CONSTANTS + 4 + n][1] = c->tss[n][D3DTSS_BUMPENVLOFFSET];
+            draw->constants[RB_PS_CONSTANTS + 4 + n][2] = draw->constants[RB_PS_CONSTANTS + 4 + n][3] = 0;
+        }
+    }
     return TRUE;
 }
 
@@ -3475,6 +3491,9 @@ static const ULONG d8Formats[][2] = {
     { RbFmtL8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     { RbFmtA8L8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     { RbFmtA8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    /* bump maps, sampled as signed texels */
+    { RbFmtV8U8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture | RbFormatBumpMap },
+    { RbFmtQ8W8V8U8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture | RbFormatBumpMap },
     /* last: only with depth rendering */
     { RbFmtD16, RbFormatZStencil }, { RbFmtD24S8, RbFormatZStencil }, { RbFmtD24X8, RbFormatZStencil }
 };

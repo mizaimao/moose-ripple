@@ -20,11 +20,23 @@ typedef struct {
     LONGLONG frequency;
     RB2K_D7_TIME op[RB2K_D7_OPS];
     /* The last refused draw record: the step (RB2K_D7_SITE_*), its status,
-     * the transport stage of a command failure, and refusals so far. */
+     * the transport stage of a command failure, and refusals so far; then
+     * the same for the first refusal. */
     ULONG failSite, failStatus, failStage, failCount;
+    ULONG firstSite, firstStatus, firstStage;
+    /* The first failed surface request (its IOCTL code, status and the image
+     * or texture id it named) and the first failed host command (transport
+     * stage and status), with the number of each. */
+    ULONG requestFailures, firstRequest, firstRequestStatus, firstRequestId;
+    ULONG commandFailures, firstCommandStage, firstCommandStatus;
 } RB2K_D7_PROFILE;
 enum { RB2K_D7_SITE_RECORD = 1, RB2K_D7_SITE_PROGRAM, RB2K_D7_SITE_DEPTH, RB2K_D7_SITE_TEXTURE,
        RB2K_D7_SITE_VERTEX, RB2K_D7_SITE_COMMAND, RB2K_D7_SITE_STEP = 16 };   /* STEP + step in the draw */
+/* A refused render target texture (site TEXTURE): the detail is 32 + 8*why
+ * + stage. why: no such image (or the target itself), the image's own frame
+ * failed, attaching it to the target failed, submitting its frame failed. */
+enum { RB2K_D7_IMAGE_MISSING, RB2K_D7_IMAGE_FAILED, RB2K_D7_IMAGE_ATTACH, RB2K_D7_IMAGE_FLUSH };
+#define RB2K_D7_REFUSE_IMAGE(why, stage) (32 + 8*(why) + (stage))
 #define RB2K_D3D7_FLIGHT_ESCAPE 0x52420022
 typedef struct {
     LONGLONG frequency, throttleTicks, accessTicks;
