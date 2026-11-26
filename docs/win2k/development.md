@@ -1770,6 +1770,9 @@ in `display_d3d7.c`), and `d7draw` counts these draws as `blank_samples`.
 Until this was added such draws were dropped: one of 3DMark 2001 SE's ps.1.4
 shaders samples stage 4 with nothing bound, 2,509 draw calls of 21 to 22
 million primitives a run (`d8pixels` case `ps_unbound_stage`).
+With the Direct3D 9 defaults on and this, 3DMark 2001 SE skips nothing and
+scores 5649 (timed, host alone): 1.3% below the 5723 it scored while those
+draws were dropped.
 
 ### Fog and lighting with pixel shaders
 
