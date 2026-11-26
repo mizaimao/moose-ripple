@@ -142,19 +142,6 @@ BOOLEAN rb_gpu_create_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     return FALSE;
 }
 
-/* IEEE single-precision encoding of channel/255 rounded to the nearest
- * representable value, without using the kernel thread's floating-point state. */
-ULONG rb_gpu_channel(ULONG channel)
-{
-    ULONG exponent = 127;
-    if (!channel) return 0;
-    while (channel < 255) {
-        channel <<= 1;
-        --exponent;
-    }
-    return (exponent << 23) | (((channel - 255) << 23) + 127) / 255;
-}
-
 static BOOLEAN fenced(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
                       struct virtio_gpu_ctrl_hdr *header, ULONG bytes, ULONG stage)
 {
