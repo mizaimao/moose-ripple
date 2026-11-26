@@ -70,6 +70,12 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
 #define RB_VS_VERTICES 48
 #define RB_VS_VERTEX_CONSTANTS 16
 #define RB_VS_FOG_ALPHA 1
+/* RB_VS_FLOW: the integer and boolean constants i0..i15 and b0..b15 are in CONST[3..18] (i# as
+ * floats in x, y, z: count, start, step; b# as 1 or 0 in w), so vs_2_0 static flow control (rep, loop,
+ * if, call, callnz) runs; without it only defi and defb values can drive it. */
+#define RB_VS_FLOW 2
+/* The IEEE single bits of a whole number (exact below 2^24 in magnitude). */
+unsigned int rb_float_bits(int v);
 /* A vertex holds the data of each stream the declaration reads, one after the
  * other: streamBases[n] is the word at which stream n starts (NULL: stream 0
  * only, at word 0). */

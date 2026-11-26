@@ -1363,11 +1363,11 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
     *p++ = VertexStage; *p++ = 0;
     *p++ = width; *p++ = height; *p++ = stride; *p++ = shaded ? RB2K_D8_VS_CONST_BASE + d->vertexConstants : 0;
     if (shaded) {
-        /* The viewport, its depth range, no integer constants yet, then the
-         * shader's constants and the vertices as they came. */
+        /* The viewport, its depth range, the integer and boolean constants of static flow control
+         * (CONST[3..18]), then the shader's constants and the vertices as they came. */
         for (i = 0; i < 4; ++i) *p++ = integer_bits(d->viewport[i]);
         *p++ = d->viewport[4]; *p++ = d->viewport[5]; *p++ = 0; *p++ = 0;
-        for (i = 0; i < 4 * (RB2K_D8_VS_CONST_BASE - 3); ++i) *p++ = 0;
+        for (i = 0; i < 4 * (RB2K_D8_VS_CONST_BASE - 3); ++i) *p++ = d->flowConstants[i / 4][i % 4];
         for (i = 0; i < 4 * d->vertexConstants + count * d->vertexWords; ++i) *p++ = d->vertices[i];
     } else if (d->transform) {
         ULONG m, row, col;

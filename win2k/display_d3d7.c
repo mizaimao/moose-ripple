@@ -106,6 +106,8 @@ typedef struct {
     /* The Direct3D 9 interface: stream offsets (bytes), the current declaration (or vertex format)
      * and shader function handles, the scissor rectangle, and the declarations and functions made. */
     ULONG streamOffsets[RB_VS_STREAMS], declHandle, funcHandle;
+    LONG vsInt[16][4];   /* SETVERTEXSHADERCONSTI: i0..i15 */
+    ULONG vsBool;        /* SETVERTEXSHADERCONSTB: b0..b15, a bit each */
     RECTL scissor;
     struct D9_DECL *decls;
     struct D9_FUNC *funcs;
@@ -2445,7 +2447,8 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
         bases[n] = total / 4;
         total += strides[n];
     }
-    if (vs) vprogram = vertex_program(c, vs, flags, bases);
+    /* Through the Direct3D 9 interface the integer and boolean constants come too (flowConstants). */
+    if (vs) vprogram = vertex_program(c, vs, flags | (c->dx9Ddi ? RB_VS_FLOW : 0), bases);
     if (sh) program = shader_program(c, sh, stage_kinds(c, sh->samplers, fog));
     else {
         /* The fixed-function pixel stages after the vertex shader (which do
@@ -2482,6 +2485,15 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
     draw->transform = 2;
     draw->vertexProgram = vprogram;
     draw->vertexConstants = vs->constants;
+    if (c->dx9Ddi) {   /* i# and b# for static flow control (RB_VS_FLOW) */
+        ULONG r;
+        for (r = 0; r < 16; ++r) {
+            draw->flowConstants[r][0] = rb_float_bits(c->vsInt[r][0]);
+            draw->flowConstants[r][1] = rb_float_bits(c->vsInt[r][1]);
+            draw->flowConstants[r][2] = rb_float_bits(c->vsInt[r][2]);
+            draw->flowConstants[r][3] = (c->vsBool >> r) & 1 ? 0x3f800000 : 0;
+        }
+    }
     draw->vertexWords = words;
     RtlCopyMemory(draw->viewport, c->viewport, sizeof(c->viewport));
     draw->viewport[4] = c->zRange[0];
@@ -3985,9 +3997,16 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             for (k = 0; k < n; ++k) {
                 const ULONG *r = (const ULONG *)(p + used);
                 if (remaining < used + 8 || r[1] > (remaining - used - 8) / per) return DDERR_INVALIDPARAMS;
+                if (h->bCommand == RbDp2SetVertexShaderConstI) {
+                    ULONG j;
+                    for (j = 0; j < r[1] && r[0] + j < 16; ++j) RtlCopyMemory(c->vsInt[r[0] + j], r + 2 + 4 * j, 16);
+                } else if (h->bCommand == RbDp2SetVertexShaderConstB) {
+                    ULONG j;
+                    for (j = 0; j < r[1] && r[0] + j < 16; ++j)
+                        c->vsBool = r[2 + j] ? c->vsBool | 1UL << (r[0] + j) : c->vsBool & ~(1UL << (r[0] + j));
+                } else ++c->display->d7draw.d9Ignored[RB2K_D9_IGNORED_CONSTANTS];   /* pixel shader ones */
                 used += 8 + r[1] * per;
             }
-            ++c->display->d7draw.d9Ignored[RB2K_D9_IGNORED_CONSTANTS];
             break;
         }
         case RbDp2Blt: case RbDp2SurfaceBlt: {
