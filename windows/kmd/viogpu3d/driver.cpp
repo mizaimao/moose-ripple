@@ -47,15 +47,58 @@ int bBreakAlways;
 tDebugPrintFunc VirtioDebugPrintProc;
 
 #ifdef DBG
+#if defined(COM_DEBUG)
+// Whether the log to the first serial port is asked for: the DWORD value SerialLog in the
+// service's Parameters key, absent or 0 for no. The messages are written to the port's
+// address directly, beside Windows' own serial driver, so they are off unless someone who
+// keeps COM1 free for them switches them on (a test VM, a bug report).
+static ULONG SerialLogWanted(IN PUNICODE_STRING RegistryPath)
+{
+    static const WCHAR parameters[] = L"\\Parameters";
+    WCHAR path[260];
+    ULONG value = 0;
+    ULONG none = 0;
+    RTL_QUERY_REGISTRY_TABLE table[2];
+
+    if (RegistryPath == NULL || RegistryPath->Buffer == NULL ||
+        RegistryPath->Length + sizeof(parameters) > sizeof(path))
+    {
+        return 0;
+    }
+    RtlCopyMemory(path, RegistryPath->Buffer, RegistryPath->Length);
+    RtlCopyMemory((PUCHAR)path + RegistryPath->Length, parameters, sizeof(parameters));
+    RtlZeroMemory(table, sizeof(table));
+    table[0].Flags = RTL_QUERY_REGISTRY_DIRECT;
+    table[0].Name = (PWSTR)L"SerialLog";
+    table[0].EntryContext = &value;
+    table[0].DefaultType = REG_DWORD;
+    table[0].DefaultData = &none;
+    table[0].DefaultLength = sizeof(none);
+    RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE, path, table, NULL, NULL);
+    return value;
+}
+#endif
+
 void InitializeDebugPrints(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING RegistryPath)
 {
     UNREFERENCED_PARAMETER(DriverObject);
-    UNREFERENCED_PARAMETER(RegistryPath);
     bDebugPrint = 0;
     virtioDebugLevel = 0;
     nDebugLevel = TRACE_LEVEL_NONE;
     bBreakAlways = 0;
 
+#if defined(COM_DEBUG)
+    VirtioDebugPrintProc = DebugPrintFuncSerial;
+    if (SerialLogWanted(RegistryPath) == 0)
+    {
+        return;
+    }
+#elif defined(PRINT_DEBUG)
+    UNREFERENCED_PARAMETER(RegistryPath);
+    VirtioDebugPrintProc = DebugPrintFuncKdPrint;
+#else
+    UNREFERENCED_PARAMETER(RegistryPath);
+#endif
     bDebugPrint = 1;
     virtioDebugLevel = 0x5;
     bBreakAlways = 1;
@@ -63,11 +106,6 @@ void InitializeDebugPrints(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING Re
     nDebugLevel = RIPPLE_DEBUG_LEVEL;
 #else
     nDebugLevel = TRACE_LEVEL_WARNING;
-#endif
-#if defined(COM_DEBUG)
-    VirtioDebugPrintProc = DebugPrintFuncSerial;
-#elif defined(PRINT_DEBUG)
-    VirtioDebugPrintProc = DebugPrintFuncKdPrint;
 #endif
 }
 #endif

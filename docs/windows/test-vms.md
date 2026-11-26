@@ -299,6 +299,10 @@ The run is unattended, because the card's picture cannot be seen from the host:
   the same port directly, beside Windows' own serial driver. While the guest runs, the host
   reads the marks from the data disk's image, mounted read-only for a moment:
   `mount -o loop,offset=65536,ro vref-data.raw DIR; cat DIR/marks-NAME.txt; umount DIR`.
+- The kernel driver's own lines reach the serial port only when the service's `SerialLog`
+  value is 1 (`setup.cmd` sets it). A disk prepared before that switch existed stays silent
+  with a newer driver until the value is added:
+  `reg add HKLM\SYSTEM\CurrentControlSet\Services\viogpu3d\Parameters /v SerialLog /t REG_DWORD /d 1 /f`.
 - `auto.cmd` calls `env.cmd` before the run and `post.cmd` after it when they are next to it on
   the CD. The sets in `tools/win7-bench`: `timing` (the driver's timing report into a file of
   the run's name on R:), `swap` (test builds of the user-mode driver, `umd32-test.dll` and

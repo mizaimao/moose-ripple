@@ -169,11 +169,19 @@ The user-mode driver reads environment variables, for finding faults:
 | `RIPPLE_NO_D3D10` | 1: no Direct3D 10 device (Windows 7) |
 | `RIPPLE_NO_MSAA` | 1: no multisampling |
 
-The kernel driver writes its warnings to the guest's first serial port
-(COM1). `-serial file:ripple-com1.log` on QEMU's command line keeps them in
-a file on the host, which is what a bug report needs. It writes to the port
-directly, beside Windows' own serial driver: use COM1 for nothing else in the
-guest ([issue 231](https://github.com/mizaimao/moose-ripple/issues/231)).
+The kernel driver can write its warnings to the guest's first serial port
+(COM1), which is what a bug report needs. That log is off unless it is asked
+for, because the driver writes to the port directly, beside Windows' own
+serial driver: switch it on only in a guest that uses COM1 for nothing else.
+As administrator, then restart:
+
+```
+reg add HKLM\SYSTEM\CurrentControlSet\Services\viogpu3d\Parameters /v SerialLog /t REG_DWORD /d 1 /f
+```
+
+`-serial file:ripple-com1.log` on QEMU's command line keeps the lines in a
+file on the host. Up to version 0.5.0 the log was always on
+([issue 231](https://github.com/mizaimao/moose-ripple/issues/231)).
 
 ## Licences
 

@@ -19,8 +19,8 @@
 # or packed. The signature is inside viogpu3d.sys; there is no catalog, which Windows needs only
 # to name a publisher it trusts, and it does not trust a test certificate.
 #
-# The kernel driver is built as in every test so far: with its warnings written to the first
-# serial port (DEBUG=1 LEVEL=3 in windows/kmd/build.sh).
+# The kernel driver is built as in every test so far (DEBUG=1 LEVEL=3 in windows/kmd/build.sh):
+# it can write its warnings to the first serial port, and does when its SerialLog value asks.
 set -eu
 ver=${1:?usage: make-release.sh VERSION [OUT]}
 here=$(cd "$(dirname "$0")" && pwd)
