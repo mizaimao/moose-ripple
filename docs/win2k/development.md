@@ -2187,6 +2187,21 @@ On XP SP3 under KVM on the second Intel UHD 630 host, case 53 passes and
 `d9pixels` passes 43 of 43. 3DMark 2001 SE's DOT3 Bump Mapping test, which
 reported "Not supported by hardware", now runs.
 
+## Textures up to 2048x2048
+
+The driver offered textures up to 1024x1024 (11 mip levels). 3DMark 2001
+SE's Advanced Pixel Shader test creates a 2048x2048 DXT5 texture with 12
+levels; the runtime refused it with `D3DERR_INVALIDCALL` and the benchmark
+stopped before its score. The limit is now 2048 (12 levels) for Direct3D 7, 8
+and 9: in the caps, for video-memory surfaces, for texture registration, and
+in the miniport. Uploads were already split into rows, and the texel budget
+is counted per texture (a 2048x2048 DXT5 texture with its mipmaps is about
+5 MB of 64).
+
+`d9pixels` case 55 draws a 2048x2048 texture, red on its left half and green
+on its right. On XP SP3 under KVM on the second Intel UHD 630 host, case 55
+passes and `d9pixels` passes 46 of 46, and 3DMark 2001 SE runs all its tests
+to a final score for the first time.
 ## The immediate present interval
 
 3DMark05 treats a device without `D3DPRESENT_INTERVAL_IMMEDIATE` as unable to

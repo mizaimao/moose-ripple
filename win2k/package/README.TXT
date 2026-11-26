@@ -13,7 +13,7 @@ What works
   On Windows 2000 they need the DirectX 9.0c runtime; the last DirectX
   redistributable that installs there is the one of February 2010.
 - OpenGL through Windows' own opengl32.dll (Mesa 24.3.4).
-- 3DMark03 runs to the end on Windows XP.
+- 3DMark03 and 3DMark 2001 SE run to the end on Windows XP.
 
 Not yet
 - Many 3DMark03 pictures are still wrong (dark scenes, white water).

@@ -187,11 +187,11 @@ typedef struct {
  * id creates a texture of the given size and levels from row zero of level
  * zero; the reply is the texture id. */
 #define RB2K_D7_TEXTURES 1024
-#define RB2K_D7_TEXTURE_SIDE 1024
+#define RB2K_D7_TEXTURE_SIDE 2048
 /* The largest volume texture side (also its depth). */
 #define RB2K_D7_VOLUME_SIDE 256
 #define RB2K_D7_UPLOAD_BYTES (256UL * 1024)
-#define RB2K_D7_LEVELS 11
+#define RB2K_D7_LEVELS 12
 /* format: 0 for ARGB texels, RB2K_D7_BLOCKS_DXT* for rows of 4x4 blocks as
  * the program wrote them (y a multiple of 4), or RB2K_D7_TEXELS_* for signed
  * texels as they are (bump maps); the miniport answers texture id zero when

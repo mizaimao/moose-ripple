@@ -1485,6 +1485,47 @@ static void dot3_case(int only, BOOL offered)
     check("dot3", s, 2);
 }
 
+/* ---- large textures ----
+ * 55: a 2048x2048 texture, red on its left half and green on its right, drawn
+ * over the quad 32..96 (3DMark 2001 SE creates 2048x2048 textures). */
+static void large_texture_case(int only, DWORD side)
+{
+    static const SAMPLE s[] = { { 48, 64, 0xff0000 }, { 80, 64, 0x00ff00 }, { 8, 8, CLEAR_COLOR } };
+    TLTEXVERTEX v[4] = {
+        { 32, 32, 0.5f, 1, 0xffffffff, 0, 0 }, { 96, 32, 0.5f, 1, 0xffffffff, 1, 0 },
+        { 32, 96, 0.5f, 1, 0xffffffff, 0, 1 }, { 96, 96, 0.5f, 1, 0xffffffff, 1, 1 } };
+    IDirect3DTexture9 *t = NULL;
+    D3DLOCKED_RECT r;
+    HRESULT hr;
+    int x, y;
+    if (only && only != 55) return;
+    if (side < 2048) { printf("D9PIX textures of 2048 not offered (%lu)\n", (unsigned long)side); return; }
+    hr = IDirect3DDevice9_CreateTexture(device, 2048, 2048, 1, 0, D3DFMT_X8R8G8B8, D3DPOOL_MANAGED, &t, NULL);
+    if (FAILED(hr)) { fail_hr("texture2048", "create", hr); return; }
+    if (SUCCEEDED(IDirect3DTexture9_LockRect(t, 0, &r, NULL, 0))) {
+        for (y = 0; y < 2048; ++y) {
+            DWORD *row = (DWORD *)((BYTE *)r.pBits + y * r.Pitch);
+            for (x = 0; x < 2048; ++x) row[x] = x < 1024 ? 0xffff0000 : 0xff00ff00;
+        }
+        IDirect3DTexture9_UnlockRect(t, 0);
+    }
+    if (begin("texture2048")) {
+        IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)t);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        IDirect3DDevice9_SetFVF(device, TLTEXFVF);
+        hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+        if (FAILED(hr)) { fail_hr("texture2048", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("texture2048", s, 3);
+    }
+    IDirect3DDevice9_SetTexture(device, 0, NULL);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    IDirect3DTexture9_Release(t);
+}
+
 /* ---- fixed-function bump mapping ----
  * 54: stage 0 is D3DTOP_BUMPENVMAP with the bump map of case 48 and its matrix
  * (on the bump stage itself, unlike texbem); stage 1 shows its texture at the
@@ -2034,6 +2075,7 @@ int main(int argc, char **argv)
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
     colorwrite_case(only);
     dot3_case(only, (caps.TextureOpCaps & D3DTEXOPCAPS_DOTPRODUCT3) != 0);
+    large_texture_case(only, caps.MaxTextureWidth < caps.MaxTextureHeight ? caps.MaxTextureWidth : caps.MaxTextureHeight);
     embm_case(only, (caps.TextureOpCaps & D3DTEXOPCAPS_BUMPENVMAP) != 0);
     stages8_case(only, caps.MaxTextureBlendStages >= 8 && caps.MaxSimultaneousTextures >= 8);
     transform_cases(only);
