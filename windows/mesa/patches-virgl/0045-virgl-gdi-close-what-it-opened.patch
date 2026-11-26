@@ -1,0 +1,50 @@
+The winsys closes a shared resource that it opened itself. In the Direct3D driver the runtime
+opens a shared resource and owns what it opened, so the winsys leaves every shared resource
+alone when its last reference goes. The OpenGL driver has no runtime: its bridge to the
+kernel opens the resource (D3DKMTOpenResource) and says so (CallerCloses), and the winsys
+then destroys that opened instance. Without this each resize of an OpenGL window left its
+two colour buffers open, and with them the host's textures.
+
+--- a/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
++++ b/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.c
+@@ -132,7 +132,7 @@
+       return;
+    }
+ 
+-   if (!p_atomic_read(&res->shared)) {
++   if (!p_atomic_read(&res->shared) || res->opened) {
+       NTSTATUS Status = qdws->device->destroyAllocation(
+          qdws->device, res->hResource, res->hAllocation);
+       if (!NT_SUCCESS(Status)) {
+@@ -371,6 +371,7 @@
+    struct virgl_hw_res *res = NULL;
+ 
+    struct gdikmt_openallocation openAllocation;
++   memset(&openAllocation, 0, sizeof(openAllocation));
+    openAllocation.hGlobalHandle = (D3DKMT_HANDLE)whandle->handle;
+ 
+    NTSTATUS Status =
+@@ -416,6 +417,10 @@
+    *modifier = whandle->modifier;
+ 
+    res->hAllocation = openAllocationInfo[0].hAllocation;
++   if (openAllocation.CallerCloses) {
++      res->hResource = openAllocation.hResource;
++      res->opened = true;
++   }
+ 
+    VIOGPU_ESCAPE resid_escape;
+    resid_escape.Type = VIOGPU_RES_INFO;
+--- a/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.h
++++ b/src/gallium/winsys/virgl/gdi/virgl_gdi_winsys.h
+@@ -61,6 +61,10 @@
+    /* true when the resource is imported or exported */
+    int shared;
+ 
++   /* true when this winsys opened the resource from a shared handle itself (the OpenGL
++    * driver, with no Direct3D runtime to own what it opens): it closes it too */
++   bool opened;
++
+    /* false when the resource is known to be idle */
+    int maybe_busy;
+    uint32_t blob_mem;

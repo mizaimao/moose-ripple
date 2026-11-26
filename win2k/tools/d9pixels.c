@@ -5,7 +5,8 @@
  * and lit untransformed vertices, nine of shader model 2.0, seven with
  * vertex shaders 1.1 and 2.0 (hardware ones when offered) or blending
  * after shaders, two each of cube maps, render target textures and volumes,
- * luminance textures, a bump map read by texbem and a colour write mask. Each case
+ * luminance textures, a bump map read by texbem, a colour write mask, DOT3 and texture
+ * transforms. Each case
  * draws on a 128x128 lockable back buffer and inspects a few pixels well
  * inside the shapes. "sw" asks for software vertex
  * processing. Built against the Microsoft headers; d3d9.dll is loaded at
@@ -1338,6 +1339,194 @@ static void dot3_case(int only, BOOL offered)
     check("dot3", s, 2);
 }
 
+/* ---- fixed-function bump mapping ----
+ * 54: stage 0 is D3DTOP_BUMPENVMAP with the bump map of case 48 and its matrix
+ * (on the bump stage itself, unlike texbem); stage 1 shows its texture at the
+ * moved coordinates: the right column. */
+static void embm_case(int only, BOOL offered)
+{
+    union { float f; DWORD d; } half;
+    IDirect3DTexture9 *bump = NULL, *colour;
+    D3DLOCKED_RECT r;
+    PSVERTEX v[6];
+    SAMPLE s[5];
+    float want[4][3];
+    int i, y;
+    HRESULT hr;
+    if (only && only != 54) return;
+    if (!offered) { printf("D9PIX BUMPENVMAP not offered\n"); return; }
+    if (FAILED(IDirect3DDevice9_CreateTexture(device, 2, 2, 1, 0, D3DFMT_V8U8, D3DPOOL_MANAGED, &bump, NULL))) {
+        printf("D9PIX bump map format V8U8 not offered\n");
+        return;
+    }
+    IDirect3DTexture9_LockRect(bump, 0, &r, NULL, 0);
+    for (y = 0; y < 2; ++y) { WORD *row = (WORD *)((BYTE *)r.pBits + y * r.Pitch); row[0] = row[1] = 0x0040; }
+    IDirect3DTexture9_UnlockRect(bump, 0);
+    colour = texture2x2(texels0);
+    if (!colour) { IDirect3DTexture9_Release(bump); return; }
+    IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)bump);
+    IDirect3DDevice9_SetTexture(device, 1, (IDirect3DBaseTexture9 *)colour);
+    for (i = 0; i < 2; ++i) {
+        IDirect3DDevice9_SetSamplerState(device, i, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, i, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, i, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        IDirect3DDevice9_SetSamplerState(device, i, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetSamplerState(device, i, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    }
+    half.f = 0.5f;
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_BUMPENVMAT00, half.d);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_BUMPENVMAT01, 0);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_BUMPENVMAT10, 0);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_BUMPENVMAT11, 0);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_BUMPENVMAP);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG2, D3DTA_CURRENT);
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_TEXCOORDINDEX, 1);
+    ps_quad(v, 32, 32, 96, 96, 0xffffffff, 0, 0, 1, 1);
+    for (i = 0; i < 4; ++i) texel(i | 1, want[i]);   /* the right column: green, white */
+    quad_samples(s, want);
+    if (begin("embm")) {
+        IDirect3DDevice9_SetFVF(device, PSFVF);
+        hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+        if (FAILED(hr)) { fail_hr("embm", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("embm", s, 5);
+    }
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_TEXCOORDINDEX, 1);
+    IDirect3DDevice9_SetTexture(device, 0, NULL);
+    IDirect3DDevice9_SetTexture(device, 1, NULL);
+    IDirect3DTexture9_Release(bump);
+    IDirect3DTexture9_Release(colour);
+}
+
+/* ---- eight fixed-function stages ----
+ * 58: stages 0 to 6 add a black texture each (their coordinate sets are all 0), stage 7 modulates
+ * the diffuse white by a texture red on its left and green on its right, read with coordinate set 7. */
+static void stages8_case(int only, BOOL offered)
+{
+    typedef struct { float x, y, z, rhw; DWORD diffuse; float st[8][2]; } V8;
+    static const DWORD black[4] = { 0xff000000, 0xff000000, 0xff000000, 0xff000000 };
+    static const DWORD halves[4] = { 0xffff0000, 0xff00ff00, 0xffff0000, 0xff00ff00 };
+    static const SAMPLE s[] = { { 48, 64, 0xff0000 }, { 80, 64, 0x00ff00 }, { 8, 8, CLEAR_COLOR } };
+    IDirect3DTexture9 *dark, *last;
+    V8 v[4];
+    HRESULT hr;
+    int i, k;
+    if (only && only != 58) return;
+    if (!offered) { printf("D9PIX eight texture stages not offered\n"); return; }
+    dark = texture2x2(black);
+    last = texture2x2(halves);
+    if (!dark || !last) { printf("D9PIX case=stages8 textures failed\n"); goto done; }
+    memset(v, 0, sizeof(v));
+    for (i = 0; i < 4; ++i) {
+        v[i].x = i & 1 ? 96.0f : 32.0f;
+        v[i].y = i & 2 ? 96.0f : 32.0f;
+        v[i].z = 0.5f; v[i].rhw = 1; v[i].diffuse = 0xffffffff;
+        v[i].st[7][0] = i & 1 ? 1.0f : 0.0f;
+        v[i].st[7][1] = i & 2 ? 1.0f : 0.0f;
+    }
+    for (k = 0; k < 8; ++k) {
+        IDirect3DDevice9_SetTexture(device, k, (IDirect3DBaseTexture9 *)(k < 7 ? dark : last));
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_COLOROP, k < 7 ? D3DTOP_ADD : D3DTOP_MODULATE);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_COLORARG2, k ? D3DTA_CURRENT : D3DTA_DIFFUSE);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_ALPHAARG1, k ? D3DTA_CURRENT : D3DTA_DIFFUSE);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_TEXCOORDINDEX, k);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+    }
+    if (begin("stages8")) {
+        IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX8);
+        hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+        if (FAILED(hr)) { fail_hr("stages8", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("stages8", s, 3);
+    }
+done:
+    for (k = 7; k >= 0; --k) {
+        IDirect3DDevice9_SetTexture(device, k, NULL);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_COLOROP, k ? D3DTOP_DISABLE : D3DTOP_MODULATE);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_COLORARG2, D3DTA_CURRENT);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_ALPHAOP, k ? D3DTOP_DISABLE : D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_TEXCOORDINDEX, k);
+    }
+    if (dark) IDirect3DTexture9_Release(dark);
+    if (last) IDirect3DTexture9_Release(last);
+}
+
+/* ---- texture transforms (fixed function) ----
+ * 51: D3DTTFF_COUNT2 with a matrix whose third row moves u by a half (Direct3D
+ * transforms (u, v, 1, 0)), on untransformed vertices with identity world, view and
+ * projection: the 2x2 texture's left column shows its right one.
+ * 52: pretransformed vertices with four coordinates (2u, 2v, 0, 2) and COUNT4 |
+ * PROJECTED: Direct3D applies no texture matrix to such vertices, but divided by the
+ * fourth they are the plain coordinates. */
+static void transform_cases(int only)
+{
+    typedef struct { float x, y, z, rhw; DWORD diffuse; float s, t, r, q; } TV;
+    IDirect3DTexture9 *tex;
+    D3DMATRIX m;
+    SAMPLE s[5];
+    float want[4][3];
+    int i, pass;
+    if (only && only != 51 && only != 52) return;
+    if (!(tex = texture2x2(texels0))) return;
+    IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)tex);
+    IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+    IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+    IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+    IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+    IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    for (pass = 51; pass <= 52; ++pass) {
+        const char *name = pass == 51 ? "tt_count2" : "tt_projected";
+        float k = pass == 51 ? 1.0f : 2.0f;
+        TV v[4] = { { 32, 32, 0.5f, 1, 0xffffffff, 0, 0, 0, k }, { 96, 32, 0.5f, 1, 0xffffffff, k, 0, 0, k },
+                    { 32, 96, 0.5f, 1, 0xffffffff, 0, k, 0, k }, { 96, 96, 0.5f, 1, 0xffffffff, k, k, 0, k } };
+        if (only && only != pass) continue;
+        memset(&m, 0, sizeof(m));
+        m._11 = m._22 = m._33 = m._44 = 1.0f;
+        if (pass == 51) m._31 = 0.5f;
+        IDirect3DDevice9_SetTransform(device, D3DTS_TEXTURE0, &m);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXTURETRANSFORMFLAGS,
+                                              pass == 51 ? D3DTTFF_COUNT2 : D3DTTFF_COUNT4 | D3DTTFF_PROJECTED);
+        for (i = 0; i < 4; ++i) texel(pass == 51 ? i | 1 : i, want[i]);
+        quad_samples(s, want);
+        if (begin(name)) {
+            IDirect3DDevice9_SetFVF(device, pass == 51 ? D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE2(0) :
+                                    D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE4(0));
+            if (pass == 51) {
+                /* the same quad, untransformed (the viewport maps -1..1 to 0..Side), with two
+                 * coordinates per vertex */
+                struct { float x, y, z; DWORD diffuse; float u, v; } w[4];
+                D3DMATRIX identity;
+                memset(&identity, 0, sizeof(identity));
+                identity._11 = identity._22 = identity._33 = identity._44 = 1.0f;
+                IDirect3DDevice9_SetTransform(device, D3DTS_WORLD, &identity);
+                IDirect3DDevice9_SetTransform(device, D3DTS_VIEW, &identity);
+                IDirect3DDevice9_SetTransform(device, D3DTS_PROJECTION, &identity);
+                for (i = 0; i < 4; ++i) {
+                    w[i].x = v[i].x / (Side / 2) - 1; w[i].y = 1 - v[i].y / (Side / 2); w[i].z = v[i].z;
+                    w[i].diffuse = v[i].diffuse; w[i].u = v[i].s; w[i].v = v[i].t;
+                }
+                IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, w, sizeof(w[0]));
+            } else IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+            check(name, s, 5);
+        }
+    }
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+    IDirect3DDevice9_SetTexture(device, 0, NULL);
+    IDirect3DTexture9_Release(tex);
+}
+
 /* ---- volume textures ----
  * A 4x4x4 volume with one colour per slice (red, green, blue, yellow),
  * sampled at each slice's middle by four quads: 45 with ps_2_0
@@ -1695,6 +1884,9 @@ int main(int argc, char **argv)
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
     colorwrite_case(only);
     dot3_case(only, (caps.TextureOpCaps & D3DTEXOPCAPS_DOTPRODUCT3) != 0);
+    embm_case(only, (caps.TextureOpCaps & D3DTEXOPCAPS_BUMPENVMAP) != 0);
+    stages8_case(only, caps.MaxTextureBlendStages >= 8 && caps.MaxSimultaneousTextures >= 8);
+    transform_cases(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (caps.TextureCaps & D3DPTEXTURECAPS_VOLUMEMAP) && (!only || only >= 45))
         volume_cases(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
     if (caps.PixelShaderVersion < D3DPS_VERSION(2, 0)) printf("D9PIX vertex shader cases need pixel shader 2.0\n");

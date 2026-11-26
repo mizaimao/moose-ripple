@@ -1689,11 +1689,25 @@ int VioGpuVidPN::ProcessEdid(void)
     return AddEdidModes();
 }
 
+// Whether a 32-bit picture of this size fits the frame memory the driver has
+BOOLEAN VioGpuVidPN::FitsFrameMemory(USHORT xres, USHORT yres)
+{
+    SIZE_T have = m_pAdapter->frameSegment.GetSize();
+    return have == 0 || (SIZE_T)xres * yres * 4 <= have;
+}
+
 BOOLEAN VioGpuVidPN::UpdateModes(USHORT xres, USHORT yres, int &cnt)
 {
     int idx = 0;
 
     if ((xres < MIN_WIDTH_SIZE) || (yres < MIN_HEIGHT_SIZE))
+    {
+        return FALSE;
+    }
+    // A mode whose picture does not fit the frame memory cannot be set (its frame buffer
+    // object is made there, CreateFrameBufferObj), so it is not offered. Windows has set
+    // 3840x2160 at boot when the host's display description listed it.
+    if (!FitsFrameMemory(xres, yres))
     {
         return FALSE;
     }
@@ -1953,6 +1967,12 @@ void VioGpuVidPN::SetCustomDisplay(_In_ USHORT xres, _In_ USHORT yres)
     PAGED_CODE();
 
     VIOGPU_DISP_MODE tmpModeInfo = {0};
+
+    if (!FitsFrameMemory(xres, yres))
+    {
+        DbgPrint(TRACE_LEVEL_WARNING, ("%s: (%dx%d) does not fit the frame memory\n", __FUNCTION__, xres, yres));
+        return;
+    }
 
     if (xres < MIN_WIDTH_SIZE || yres < MIN_HEIGHT_SIZE)
     {
