@@ -3,12 +3,15 @@
  * d3d9.dll, with the system's d3d9.dll beside it as d3d9real.dll; every other
  * export is forwarded there. It writes d9trace.log in the current folder:
  * format checks for volume and cube textures and all failed ones, every volume
- * texture created, and every texture or cube texture that could not be. */
+ * texture created, every texture or cube texture that could not be, and the
+ * first few device caps the program reads (the ones programs test for shader
+ * model 2). */
 #include <windows.h>
 #include <d3d9.h>
 
 static HANDLE logFile = INVALID_HANDLE_VALUE;
 static HRESULT (WINAPI *realCheckFormat)(IDirect3D9 *, UINT, D3DDEVTYPE, D3DFORMAT, DWORD, D3DRESOURCETYPE, D3DFORMAT);
+static HRESULT (WINAPI *realGetCaps)(IDirect3D9 *, UINT, D3DDEVTYPE, D3DCAPS9 *);
 static HRESULT (WINAPI *realCreateDevice)(IDirect3D9 *, UINT, D3DDEVTYPE, HWND, DWORD, D3DPRESENT_PARAMETERS *,
                                          IDirect3DDevice9 **);
 static HRESULT (WINAPI *realCreateTexture)(IDirect3DDevice9 *, UINT, UINT, UINT, DWORD, D3DFORMAT, D3DPOOL,
@@ -59,6 +62,28 @@ static HRESULT WINAPI check_format(IDirect3D9 *d3d, UINT adapter, D3DDEVTYPE typ
         format_name(name, format);
         wsprintfA(line, "CheckDeviceFormat resource=%d usage=0x%lx format=%s -> 0x%08lx\r\n", (int)resource,
                   usage, name, (DWORD)hr);
+        say(line);
+    }
+    return hr;
+}
+
+static HRESULT WINAPI get_caps(IDirect3D9 *d3d, UINT adapter, D3DDEVTYPE type, D3DCAPS9 *caps)
+{
+    static int logged;
+    HRESULT hr = realGetCaps(d3d, adapter, type, caps);
+    if (logged < 4 && SUCCEEDED(hr) && caps) {
+        char line[480];
+        ++logged;
+        wsprintfA(line, "GetDeviceCaps type=%d ps=%08lx vs=%08lx ps20=%lx,%d,%d,%d,%d vs20=%lx,%d,%d,%d "
+                  "textures=%lu rts=%lu stages=%lu decltypes=%lx caps2=%lx devcaps=%lx devcaps2=%lx texcaps=%lx "
+                  "maxtex=%lux%lu vsconst=%lu psmax=%lu\r\n", (int)type, caps->PixelShaderVersion,
+                  caps->VertexShaderVersion, caps->PS20Caps.Caps, caps->PS20Caps.DynamicFlowControlDepth,
+                  caps->PS20Caps.NumTemps, caps->PS20Caps.StaticFlowControlDepth, caps->PS20Caps.NumInstructionSlots,
+                  caps->VS20Caps.Caps, caps->VS20Caps.DynamicFlowControlDepth, caps->VS20Caps.NumTemps,
+                  caps->VS20Caps.StaticFlowControlDepth, caps->MaxSimultaneousTextures, caps->NumSimultaneousRTs,
+                  caps->MaxTextureBlendStages, caps->DeclTypes, caps->Caps2, caps->DevCaps, caps->DevCaps2,
+                  caps->TextureCaps, caps->MaxTextureWidth, caps->MaxTextureHeight, caps->MaxVertexShaderConst,
+                  caps->MaxPixelShader30InstructionSlots);
         say(line);
     }
     return hr;
@@ -137,6 +162,7 @@ IDirect3D9 *WINAPI Direct3DCreate9(UINT version)
     if (d3d) {
         IDirect3D9Vtbl *v = d3d->lpVtbl;
         patch((void **)&v->CheckDeviceFormat, (void *)check_format, (void **)&realCheckFormat);
+        patch((void **)&v->GetDeviceCaps, (void *)get_caps, (void **)&realGetCaps);
         patch((void **)&v->CreateDevice, (void *)create_device, (void **)&realCreateDevice);
     }
     return d3d;
