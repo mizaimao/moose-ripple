@@ -8,11 +8,30 @@
 
 typedef char run_matches_virtio_entry[sizeof(RB2K_PAGE_RUN) == 16 ? 1 : -1];
 
+/* Time stamps in processor cycles. KeQueryPerformanceCounter reads the ACPI
+ * power management timer on these HALs, an emulated port that QEMU answers
+ * under the lock its drawing thread holds, so every read could stop the guest
+ * until the host finished a batch (4,500 reads a second while 3DMark 2001 SE
+ * ran). The cycle counter is read without leaving the guest. Its rate is
+ * measured against the performance counter only when a report asks for it,
+ * over the whole time since the first stamp. */
 LONGLONG rb_counter_ticks(LONGLONG *frequency)
 {
-    LARGE_INTEGER hz, ticks = KeQueryPerformanceCounter(frequency ? &hz : NULL);
-    if (frequency) *frequency = hz.QuadPart;
-    return ticks.QuadPart;
+    static LONGLONG cycles0, counter0, counterHz;
+    LONGLONG cycles = (LONGLONG)__builtin_ia32_rdtsc();
+    if (!counter0) {
+        LARGE_INTEGER hz, now = KeQueryPerformanceCounter(&hz);
+        cycles0 = cycles;
+        counter0 = now.QuadPart;
+        counterHz = hz.QuadPart;
+    }
+    if (frequency) {
+        LARGE_INTEGER now = KeQueryPerformanceCounter(NULL);
+        ULONGLONG c = (ULONGLONG)(cycles - cycles0), q = (ULONGLONG)(now.QuadPart - counter0);
+        /* c / (q / counterHz), in two parts so that nothing overflows. */
+        *frequency = q ? (LONGLONG)(c / q * (ULONGLONG)counterHz + c % q * (ULONGLONG)counterHz / q) : 0;
+    }
+    return cycles;
 }
 
 PVOID rb_process_ref(void)

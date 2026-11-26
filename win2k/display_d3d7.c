@@ -221,15 +221,38 @@ static BYTE *drawQueue;
 static ULONG drawQueueBytes;
 static DISPLAY *drawQueueDisplay;
 
+/* Time stamps in processor cycles: EngQueryPerformanceCounter reads the ACPI
+ * power management timer on these HALs, an emulated port that QEMU answers
+ * under the lock its drawing thread holds (see rb_counter_ticks). The rate is
+ * measured against the performance counter when the counters are reported. */
+static LONGLONG cycles0, counter0;
+static LONGLONG cycles(void)
+{
+    LONGLONG now = (LONGLONG)__builtin_ia32_rdtsc();
+    if (!counter0) { cycles0 = now; EngQueryPerformanceCounter(&counter0); }
+    return now;
+}
+
+static LONGLONG cycle_rate(void)
+{
+    LONGLONG now = cycles(), counter, hz;
+    ULONGLONG c, q;
+    EngQueryPerformanceCounter(&counter);
+    EngQueryPerformanceFrequency(&hz);
+    c = (ULONGLONG)(now - cycles0);
+    q = (ULONGLONG)(counter - counter0);
+    return q ? (LONGLONG)(c / q * (ULONGLONG)hz + c % q * (ULONGLONG)hz / q) : 0;
+}
+
 static ULONG flush_draws(void)
 {
     DISPLAY *d = drawQueueDisplay;
     ULONG written = 0, error;
     LONGLONG start, end;
     if (!drawQueueBytes) return 0;
-    EngQueryPerformanceCounter(&start);
+    start = cycles();
     error = EngDeviceIoControl(d->miniport, IOCTL_RB2K_D3D7_DRAWS, drawQueue, drawQueueBytes, NULL, 0, &written);
-    EngQueryPerformanceCounter(&end);
+    end = cycles();
     d->d7draw.drawTicks += end - start;
     ++d->d7draw.drawRequests;
     drawQueueBytes = 0;
@@ -1469,9 +1492,9 @@ static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
     {
         LONGLONG start, end;
         BOOL read;
-        EngQueryPerformanceCounter(&start);
+        start = cycles();
         read = read_texels(t, &sum);
-        EngQueryPerformanceCounter(&end);
+        end = cycles();
         c->display->d7draw.checkTicks += end - start;
         if (!read) { ++c->display->d7draw.checkFailures; return 0; }
     }
@@ -1480,9 +1503,9 @@ static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
     {
         LONGLONG start, end;
         BOOL uploaded;
-        EngQueryPerformanceCounter(&start);
+        start = cycles();
         uploaded = upload_texture(c->display, t, targetId);
-        EngQueryPerformanceCounter(&end);
+        end = cycles();
         c->display->d7draw.uploadTicks += end - start;
         if (!uploaded) return 0;
     }
@@ -4318,7 +4341,7 @@ static DWORD APIENTRY dp2(LPD3DNTHAL_DRAWPRIMITIVES2DATA a)
     LONGLONG start, end;
     a->dwErrorOffset = 0;
     a->ddrval = DDERR_INVALIDOBJECT;
-    EngQueryPerformanceCounter(&start);
+    start = cycles();
     EngAcquireSemaphore(registry);
     c = owned_context(a->dwhContext);
     if (c) {
@@ -4335,7 +4358,7 @@ static DWORD APIENTRY dp2(LPD3DNTHAL_DRAWPRIMITIVES2DATA a)
             BOOL ok;
             copy = EngAllocMem(0, a->dwCommandLength, '72bR');
             ok = copy && copy_commands(a, copy, &origin);
-            EngQueryPerformanceCounter(&copied);
+            copied = cycles();
             c->display->d7draw.copyTicks += copied - start;
             if (!copy) a->ddrval = DDERR_OUTOFMEMORY;
             else if (ok) {
@@ -4369,9 +4392,8 @@ static DWORD APIENTRY dp2(LPD3DNTHAL_DRAWPRIMITIVES2DATA a)
             c->display->d7draw.lastFailureOp = c->display->d7.lastCommand;
             c->display->d7.errorOffset = a->dwErrorOffset;
         }
-        EngQueryPerformanceCounter(&end);
+        end = cycles();
         c->display->d7draw.dp2Ticks += end - start;
-        if (!c->display->d7draw.frequency) EngQueryPerformanceFrequency(&c->display->d7draw.frequency);
         EngReleaseSemaphore(c->display->ddLock);
     }
     if (copy) EngFreeMem(copy);
@@ -4867,6 +4889,7 @@ ULONG rb_d7_drawstats(DISPLAY *d, ULONG bytes, PVOID out)
     EngAcquireSemaphore(registry);
     EngAcquireSemaphore(d->ddLock);
     d->d7draw.version = RB2K_D7_DRAWSTATS_VERSION;
+    d->d7draw.frequency = cycle_rate();
     RtlCopyMemory(d->d7draw.ddModes, rb_dd_mode_stats, sizeof(rb_dd_mode_stats));
     RtlCopyMemory(out, &d->d7draw, bytes);
     EngReleaseSemaphore(d->ddLock);
