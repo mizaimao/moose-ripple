@@ -356,6 +356,55 @@ static void ps_run(const char *name, const DWORD *tokens, const PSVERTEX *v, UIN
     IDirect3DPixelShader9_Release(handle);
 }
 
+/* 77: a 32-bit index buffer naming vertices past 65535: a vertex buffer of 65540 vertices, white
+ * but for a magenta quad in its last four, drawn through indices 65536 to 65539. */
+static void index32_case(int only, BOOL offered)
+{
+    enum { Vertices = 65540 };
+    static const SAMPLE s[] = { { 64, 64, 0xff00ff }, { 36, 92, 0xff00ff }, { 120, 120, CLEAR_COLOR } };
+    static const DWORD idx[6] = { 65536, 65537, 65538, 65538, 65537, 65539 };
+    IDirect3DVertexBuffer9 *vb = NULL;
+    IDirect3DIndexBuffer9 *ib = NULL;
+    TLVERTEX *v;
+    BYTE *p;
+    HRESULT hr;
+    UINT i;
+    if (only && only != 77) return;
+    if (!offered) { printf("D9PIX 32-bit indices not offered\n"); return; }
+    hr = IDirect3DDevice9_CreateVertexBuffer(device, Vertices * sizeof(TLVERTEX), D3DUSAGE_WRITEONLY, TLFVF,
+                                             D3DPOOL_DEFAULT, &vb, NULL);
+    if (SUCCEEDED(hr)) hr = IDirect3DVertexBuffer9_Lock(vb, 0, 0, (void **)&v, 0);
+    if (FAILED(hr)) { fail_hr("index32", "vertex buffer", hr); goto done; }
+    for (i = 0; i < Vertices; ++i) {
+        UINT k = i >= Vertices - 4 ? i - (Vertices - 4) : 0;
+        v[i].x = (k & 1) ? 96.0f : 32.0f; v[i].y = (k & 2) ? 96.0f : 32.0f;
+        v[i].z = 0.5f; v[i].rhw = 1.0f; v[i].diffuse = i >= Vertices - 4 ? 0xffff00ff : 0xffffffff;
+    }
+    IDirect3DVertexBuffer9_Unlock(vb);
+    hr = IDirect3DDevice9_CreateIndexBuffer(device, sizeof(idx), D3DUSAGE_WRITEONLY, D3DFMT_INDEX32, D3DPOOL_DEFAULT,
+                                            &ib, NULL);
+    if (SUCCEEDED(hr)) hr = IDirect3DIndexBuffer9_Lock(ib, 0, 0, (void **)&p, 0);
+    if (FAILED(hr)) { fail_hr("index32", "index buffer", hr); goto done; }
+    memcpy(p, idx, sizeof(idx));
+    IDirect3DIndexBuffer9_Unlock(ib);
+    if (begin("index32")) {
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        IDirect3DDevice9_SetFVF(device, TLFVF);
+        IDirect3DDevice9_SetStreamSource(device, 0, vb, 0, sizeof(TLVERTEX));
+        IDirect3DDevice9_SetIndices(device, ib);
+        hr = IDirect3DDevice9_DrawIndexedPrimitive(device, D3DPT_TRIANGLELIST, 0, 65536, 4, 0, 2);
+        if (FAILED(hr)) { fail_hr("index32", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("index32", s, 3);
+        IDirect3DDevice9_SetIndices(device, NULL);
+        IDirect3DDevice9_SetStreamSource(device, 0, NULL, 0, 0);
+    }
+done:
+    if (ib) IDirect3DIndexBuffer9_Release(ib);
+    if (vb) IDirect3DVertexBuffer9_Release(vb);
+}
+
 /* 73: a line list (red lines at y 38 to 41 from x 8 to 120) and a point list (a 2x2 block of green
  * points at 95 and 96): pixels on them, and the clear colour beside. Then an indexed line list
  * (blue lines at y 86 to 89, the indices reversed in each line). The counts (8, 4 and 8
@@ -1566,6 +1615,7 @@ int main(int argc, char **argv)
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (!only || only >= 43)) rt_cases(only);
     luminance_case(only);
     lines_points_case(only);
+    index32_case(only, caps.MaxVertexIndex > 0xffff);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
     colorwrite_case(only);
     dot3_case(only, (caps.TextureOpCaps & D3DTEXOPCAPS_DOTPRODUCT3) != 0);
