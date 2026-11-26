@@ -364,7 +364,7 @@ static void texel(int i, float *c)
 
 /* A vertex program (vs.1.1, or Direct3D 8.0s vs.1.0 that 3DMark 2001 SE uses): mov oPos, v0; mov oD0, v5,
  * an orange quad over clip -0.5..0.5, the target's 32..96. */
-static void vs_case(const char *name, DWORD version, BOOL offered)
+static void vs_case(const char *name, DWORD version, BOOL offered, BOOL buffer)
 {
     static const DWORD decl[] = { D3DVSD_STREAM(0), D3DVSD_REG(D3DVSDE_POSITION, D3DVSDT_FLOAT3),
                                   D3DVSD_REG(D3DVSDE_DIFFUSE, D3DVSDT_D3DCOLOR), D3DVSD_END() };
@@ -388,7 +388,13 @@ static void vs_case(const char *name, DWORD version, BOOL offered)
         IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
         IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
         IDirect3DDevice8_SetVertexShader(device, shader);
-        hr = IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+        if (buffer) {
+            IDirect3DVertexBuffer8 *vb = vertex_buffer(v, sizeof(v), 0);
+            hr = vb ? IDirect3DDevice8_SetStreamSource(device, 0, vb, sizeof(v[0])) : E_FAIL;
+            if (SUCCEEDED(hr)) hr = IDirect3DDevice8_DrawPrimitive(device, D3DPT_TRIANGLESTRIP, 0, 2);
+            IDirect3DDevice8_SetStreamSource(device, 0, NULL, 0);
+            if (vb) IDirect3DVertexBuffer8_Release(vb);
+        } else hr = IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
         if (FAILED(hr)) { fail_hr(name, "draw", hr); IDirect3DDevice8_EndScene(device); }
         else check(name, s, 3);
         IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_CCW);
@@ -736,8 +742,9 @@ int main(int argc, char **argv)
         indexed("base", 3, 0xff8000);
         case_texture();
         case_transform();
-        vs_case("vs11", 0xfffe0101, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1) && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT));
-        vs_case("vs10", 0xfffe0100, caps.VertexShaderVersion >= D3DVS_VERSION(1, 0) && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT));
+        vs_case("vs11", 0xfffe0101, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1) && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT), FALSE);
+        vs_case("vs11_buffer", 0xfffe0101, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1) && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT), TRUE);
+        vs_case("vs10", 0xfffe0100, caps.VertexShaderVersion >= D3DVS_VERSION(1, 0) && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT), FALSE);
     }
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 2)) pixel_shaders(only);
     else printf("D8PIX pixel shaders not offered\n");
