@@ -1816,6 +1816,16 @@ Quake 0.73 `demo1` in a 640×480 window, three runs on each build:
 Direct3D 8 Quake (0.81) ran at 57.9 and 58.7 fps with pixel shaders
 offered, as before.
 
+A shader may sample a stage with no texture bound; Direct3D reads
+(0,0,0,1) there. A 1x1 host texture of that colour stands in (`blank_texture`
+in `display_d3d7.c`), and `d7draw` counts these draws as `blank_samples`.
+Until this was added such draws were dropped: one of 3DMark 2001 SE's ps.1.4
+shaders samples stage 4 with nothing bound, 2,509 draw calls of 21 to 22
+million primitives a run (`d8pixels` case `ps_unbound_stage`).
+With the Direct3D 9 defaults on and this, 3DMark 2001 SE skips nothing and
+scores 5649 (timed, host alone): 1.3% below the 5723 it scored while those
+draws were dropped.
+
 ### Fog and lighting with pixel shaders
 
 Fog now blends the result of a version 1 pixel shader as it does the
