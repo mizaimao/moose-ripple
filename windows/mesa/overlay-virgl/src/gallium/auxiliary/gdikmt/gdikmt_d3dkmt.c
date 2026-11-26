@@ -17,6 +17,27 @@
 
 #include "gdikmt.h"
 
+#include <stdarg.h>
+#include <stdio.h>
+
+/* RIPPLE_GL_LOG names a file: what failed on the way to the kernel, a line each. */
+static void
+kmt_log(const char *format, ...)
+{
+   const char *path = getenv("RIPPLE_GL_LOG");
+   if (!path || !*path)
+      return;
+   FILE *f = fopen(path, "a");
+   if (!f)
+      return;
+   va_list args;
+   va_start(args, format);
+   vfprintf(f, format, args);
+   va_end(args);
+   fputc('\n', f);
+   fclose(f);
+}
+
 #define KMT_UNSUCCESSFUL      ((NTSTATUS)0xC0000001L)
 #define KMT_NO_MEMORY         ((NTSTATUS)0xC0000017L)
 #define KMT_INVALID_PARAMETER ((NTSTATUS)0xC000000DL)
@@ -138,7 +159,11 @@ d3dkmt_escape(struct gdikmt_device *dev, void *data, UINT size)
    arg.Type = D3DKMT_ESCAPE_DRIVERPRIVATE;
    arg.pPrivateDriverData = data;
    arg.PrivateDriverDataSize = size;
-   return kmt[KMT_ESCAPE](&arg);
+   NTSTATUS status = kmt[KMT_ESCAPE](&arg);
+   if (!KMT_SUCCESS(status))
+      kmt_log("escape of %u bytes, first word 0x%x: 0x%08lx", size, size >= 4 ? *(const unsigned *)data : 0,
+              (unsigned long)status);
+   return status;
 }
 
 static NTSTATUS
@@ -194,7 +219,12 @@ d3dkmt_query_allocation(struct gdikmt_device *dev, struct gdikmt_openallocation 
       open->NumAllocations = arg.NumAllocations;
       open->PrivateDriverDataSize = arg.ResourcePrivateDriverDataSize;
       open->TotalBufferSize = arg.TotalPrivateDriverDataSize;
+      open->RuntimeDataSize = arg.PrivateRuntimeDataSize;
    }
+   kmt_log("query of shared handle 0x%x: 0x%08lx, %u allocations, runtime data %u, resource data %u, total %u",
+           (unsigned)open->hGlobalHandle, (unsigned long)status, (unsigned)arg.NumAllocations,
+           (unsigned)arg.PrivateRuntimeDataSize, (unsigned)arg.ResourcePrivateDriverDataSize,
+           (unsigned)arg.TotalPrivateDriverDataSize);
    return status;
 }
 
@@ -213,10 +243,18 @@ d3dkmt_open_allocation(struct gdikmt_device *dev, struct gdikmt_openallocation *
    arg.ResourcePrivateDriverDataSize = open->PrivateDriverDataSize;
    arg.pTotalPrivateDriverDataBuffer = open->pTotalBuffer;
    arg.TotalPrivateDriverDataBufferSize = open->TotalBufferSize;
+   /* What the runtime that made the resource stored with it (Direct3D keeps a description
+    * there). Nobody here reads it, but the open is refused without room for it. */
+   void *runtime = open->RuntimeDataSize ? calloc(1, open->RuntimeDataSize) : NULL;
+   arg.pPrivateRuntimeData = runtime;
+   arg.PrivateRuntimeDataSize = runtime ? open->RuntimeDataSize : 0;
 
    status = kmt[KMT_OPEN_RESOURCE](&arg);
    if (KMT_SUCCESS(status))
       open->hResource = (HANDLE)(UINT_PTR)arg.hResource;
+   kmt_log("open of shared handle 0x%x: 0x%08lx, resource 0x%x", (unsigned)open->hGlobalHandle,
+           (unsigned long)status, (unsigned)arg.hResource);
+   free(runtime);
    return status;
 }
 
