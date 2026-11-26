@@ -1824,8 +1824,9 @@ and 9 textured scenes passed, and Direct3D 8 Quake ran at 58.8 fps. The
 runtime refuses a shader that writes `oC0` with `_sat`, and a version 1.1
 shader in the Direct3D 8 test with `_bias` on a texture register and a
 negated `def` constant; `d9pixels` skips that one unless asked for it.
-Windows 2000 has no Direct3D 9 runtime and was not rerun; its Direct3D 7
-path is unchanged.
+Windows 2000 has no Direct3D 9 runtime of its own and was not rerun then; its
+Direct3D 7 path is unchanged. (Later, with the DirectX 9.0c runtime installed,
+Direct3D 8 and 9 pass there too: see "Direct3D 8 and 9 on Windows 2000".)
 
 ## Eight coordinate sets and samplers for pixel shader 2.0
 
@@ -1858,8 +1859,9 @@ by default until real programs have been checked with it.
 
 Microsoft's Direct3D 9 runtime passes vs_2_0 shaders through the Direct3D 8
 interface: each CreateVertexShader record holds a Direct3D 8 declaration
-(stream 0 only, the registers already assigned from the shader's `dcl`
-statements, which are removed from the code) followed by the code. The
+(stream 0 only while the driver offered one stream, the registers already
+assigned from the shader's `dcl` statements, which are removed from the
+code) followed by the code. The
 display driver keeps both and translates them at the first draw:
 
 - The vertices travel as the stream holds them. Each one is padded to whole
@@ -2201,6 +2203,261 @@ B8G8R8A8: grey from the top eight bits of each one.
 `d9pixels` case 63 creates a 128x128x128 L16 volume texture and draws a 2x2
 L16 texture, white and half grey (0x8000); on XP SP3 under KVM (UHD 630 host)
 both work and `d9pixels` passes 53 of 53.
+## Textures up to 2048x2048
+
+The driver offered textures up to 1024x1024 (11 mip levels). 3DMark 2001
+SE's Advanced Pixel Shader test creates a 2048x2048 DXT5 texture with 12
+levels; the runtime refused it with `D3DERR_INVALIDCALL` and the benchmark
+stopped before its score. The limit is now 2048 (12 levels) for Direct3D 7, 8
+and 9: in the caps, for video-memory surfaces, for texture registration, and
+in the miniport. Uploads were already split into rows, and the texel budget
+is counted per texture (a 2048x2048 DXT5 texture with its mipmaps is about
+5 MB of 64).
+
+`d9pixels` case 55 draws a 2048x2048 texture, red on its left half and green
+on its right. On XP SP3 under KVM on the second Intel UHD 630 host, case 55
+passes and `d9pixels` passes 46 of 46, and 3DMark 2001 SE runs all its tests
+to a final score for the first time.
+## The immediate present interval
+
+3DMark05 treats a device without `D3DPRESENT_INTERVAL_IMMEDIATE` as unable to
+run it. A Direct3D 9 runtime fills `D3DCAPS9.PresentationIntervals` itself: it
+always sets `D3DPRESENT_INTERVAL_ONE`, sets the immediate interval when the
+driver's `Caps2` has 0x00400000 (`D3DCAPS2_PRESENT_INTERVAL_IMMEDIATE` in
+`d3dhal.h`, a bit only drivers report), and the intervals two to four when it
+has 0x00200000. The driver's own `PresentationIntervals` is ignored. (Read in
+the runtime's debug build, where the copy of the driver's caps is built.)
+
+No present of this driver waits for the vertical blank, so it now reports the
+immediate interval. `d9pixels` case 69 checks that the device offers it.
+## Texture transforms for Direct3D 8 and 9
+
+Fixed-function draws whose stages have `D3DTSS_TEXTURETRANSFORMFLAGS` were
+skipped: 3DMark 2001 SE lost 29 million triangles that way. They now go to
+the record path with a stage program that applies each stage's texture
+matrix per pixel. The matrix columns are in CONST[8+4k] to [11+4k],
+coordinates are padded to (u, v, 1, 0) as Direct3D transforms them, and with
+`D3DTTFF_PROJECTED` the result is divided by its last element. Direct3D
+applies no texture matrix to pretransformed (XYZRHW) vertices; for those only
+the projection divides. The driver offers `D3DPTEXTURECAPS_PROJECTED`:
+without it the runtime passed such draws as COUNT3 without the flag. The
+matrices are kept per stage, also in state blocks. Direct3D 8 and 9 are no
+longer offered texturing from system memory, because the driver registers
+only video-memory textures.
+
+`d9pixels` case 51 moves u by a half through the matrix on untransformed
+vertices; case 52 divides (2u, 2v, 0, 2) by its fourth element on
+pretransformed vertices. `d7draw` prints which check skipped a vertex
+(D7VERTEX) and texture registration details (D7REG).
+
+On XP SP3 under KVM on the second Intel UHD 630 host, cases 51 and 52 pass and
+`d9pixels` passes 47 of 47. In 3DMark 2001 SE the skipped vertices fell from
+29 million to 160. Still open there: 97.7 million triangles skipped for
+texture handles the driver never registered.
+
+## Fixed-function bump mapping for Direct3D 8 and 9
+
+The two-stage combiner of the Direct3D 7 draws has no bump operations and no
+third stage. Direct3D 8 and 9 fixed-function draws that need either now go to
+the stage program of the record path, which handles up to four stages. A
+`D3DTOP_BUMPENVMAP` stage samples its bump map and moves the next stage's
+lookup by du and dv through its bump matrix (00, 01, 10, 11), which takes the
+place of its texture matrix in CONST[8+4n]; `BUMPENVMAPLUMINANCE` also scales
+the next stage's colour by the luminance times the scale plus the offset
+(CONST[9+4n]). The matrix belongs to the bump stage itself, unlike `texbem`
+in pixel shaders. ValidateDevice checks Direct3D 8 and 9 stages against what
+the stage program does, and the caps offer four blend stages and both bump
+operations. `d9pixels` case 54 moves the next stage's lookup by a quarter of
+its texture.
+
+On XP SP3 under KVM on the second Intel UHD 630 host, case 54 passes, and
+3DMark 2001 SE's Environment Bump Mapping test runs instead of reporting
+"Not supported by hardware". Its Advanced Pixel Shader test still stops: it
+creates a 2048x2048 DXT5 texture, and the driver offers at most 1024.
+
+## Eight fixed-function stages for Direct3D 9 programs
+
+3DMark05 checks its hardware before it creates a device, and one of the
+checks it treats as fatal is "multitexturing with at least 8 textures":
+`MaxTextureBlendStages` and `MaxSimultaneousTextures` of at least 8. The
+driver offered four, the texture registers of version 1 pixel shaders.
+
+The stage program already emits shader model 2 programs with eight samplers
+and eight coordinate sets, and the Direct3D 8 draw packet carries eight
+(`RB2K_D8_STAGES`); only the stage check and the caps stopped at four. Once a
+runtime has announced Direct3D 9, the driver now offers eight stages and eight
+textures; Direct3D 8 programs keep four. Texture and bump matrices have
+constants for the first six stages (`RB_STAGE_TRANSFORMS`), so stages 6 and
+7 refuse them.
+
+`d9pixels` case 58 draws through all eight stages: stages 0 to 6 add a black
+texture each and stage 7 modulates with a texture read through coordinate set
+7. On XP SP3 under KVM (UHD 630 host) it passes, and `d9pixels` passes 56 of
+56.
+
+## Direct3D 8 and 9 on Windows 2000
+
+Windows 2000 ships with DirectX 7. Microsoft's June 2010 DirectX
+redistributable no longer installs there; the February 2010 one does (any
+DirectX 9.0c redistributable from 2004 to February 2010 brings the same core
+runtime). After `directx_feb2010_redist.exe /Q /T:<folder>` and
+`DXSETUP.exe /silent` and a restart, the driver works unchanged.
+
+On Windows 2000 under KVM on the second Intel UHD 630 host, with the driver
+installed by `nt5inst`, `d9pixels` passes 44 of 44 and `d8pixels` 23 of 23.
+## Vertex shaders with several streams
+
+With vertex shaders on, Direct3D 8 and 9 programs are offered 8 vertex
+streams (`MaxStreams`; fixed-function draws still read stream 0, as their
+vertex formats only describe one). The display driver keeps each stream's
+buffer and stride. A draw gathers, for every vertex, the data of each stream
+the shader's declaration names, one after the other, into the record the
+vertex program reads; `rb_vs_translate` gets the word at which each stream
+starts, and a `STREAM` token moves the declaration there. A shader's program
+is made again when the streams' strides, and with them those places,
+change. Each stream is range-checked and read from the same first vertex.
+This is one of the requirements of the Direct3D 9 driver interface (8
+streams for version 2.0 vertex shaders).
+
+`d9pixels` case 33 draws two quads whose positions come from one vertex
+buffer (stream 0) and colours from another (stream 1), starting at vertex 6.
+On XP SP3 under KVM on the second Intel UHD 630 host, with vertex shaders on,
+case 33 passes and `d9pixels` passes 53 of 53. The translations of DirectQ's
+shaders with one and two streams pass Mesa's TGSI parser.
+
+## The Direct3D 9 driver interface
+
+3DMark05 asks for a Direct3D 9 driver: the runtime has to see the DirectX 9
+driver interface, not only Direct3D 9 capabilities reported through the
+Direct3D 8 one. The display DLL offers it when the `RippleD3D9` registry value
+is 1 (with `RippleVertexShaders` also 1); it is off by default while it is
+being completed.
+
+With the switch on, the driver answers the runtime's interface-version query
+with the DirectX 9 version (4), and the runtime then reads the `D3DCAPS9`
+answer. The runtime's debug build (`d3d9d.dll` from the June 2010 SDK) shows
+what it requires before it offers a hardware device; without any one of these
+it falls back silently to "no hardware acceleration":
+
+- `D3DPMISCCAPS_FOGINFVF` set and `D3DPMISCCAPS_LINEPATTERNREP` clear;
+- at least 8 vertex streams, `D3DDEVCAPS2_STREAMOFFSET`, and no
+  `D3DVTXPCAPS_NO_VSDT_UBYTE4`;
+- `D3DPRASTERCAPS_SCISSORTEST` and `D3DCAPS2_DYNAMICTEXTURES`;
+- the shader model 2 details (`VS20Caps`, `PS20Caps`) within their ranges.
+
+After a successful `DrawPrimitives2` the driver must leave `dwErrorOffset` at
+0: a Direct3D 9 runtime reads it as the size of a reply, and anything else
+sends it into a loop of assertions. The driver reports no query types, so the
+runtime issues no queries.
+
+What changes in the command stream:
+
+- A vertex shader arrives as two objects, a declaration and a function, set
+  separately. The driver pairs each declaration with each function into the
+  Direct3D 8 shaders it already runs on the host, and an FVF code (a handle
+  with bit 0 clear) stands for stream 0 alone.
+- `SETSTREAMSOURCE2` gives each stream a byte offset; the draws add it.
+- `SETRENDERTARGET2` and `SETDEPTHSTENCIL` replace `SETRENDERTARGET`
+  (one render target).
+- `BLT`, `SURFACEBLT` (StretchRect) and `COLORFILL` come as commands. A whole
+  surface into another of its size is a host copy; any other pair of
+  rectangles is a host blit (virgl's `BLIT`, through the miniport request
+  `IOCTL_RB2K_DD_STRETCH`), point-sampled or linear as the runtime asks, so
+  the driver reports linear filtering for StretchRect, which 3DMark05
+  requires. `COLORFILL` fills whole surfaces; other fills are counted in
+  `d7draw`'s `D9DDI` line.
+- The scissor test is applied on the host: the miniport intersects the
+  rectangle with the viewport and sets it as virgl's scissor, also for
+  pretransformed vertices. Setting a render target resets the rectangle to all
+  of it, as Direct3D 9 does. `d9pixels` case 60 checks it.
+- Vertex shader 2.0 static flow control runs: the runtime keeps `defi` and
+  `defb` in the code and passes the integer and boolean constants
+  (`SETVERTEXSHADERCONSTI` and `...CONSTB`), which the Direct3D 8 interface
+  does not. The driver sends `i0`..`i15` and `b0`..`b15` in `CONST[3..18]`,
+  slots the vertex program layout had reserved for them (i# as floats in x,
+  y, z: count, start, step; b# as 1 or 0 in w). The translator turns `rep` and
+  `loop` into TGSI loops counting down in a temporary (`loop` also steps `aL`,
+  which `c[aL + n]` reads), `if b#` and `else` into TGSI `IF`s, and inlines
+  `call` and `callnz` (vs_2_0 has no recursion). `if_comp`, `break` and
+  predicates are vs_2_x and are still refused. `d9pixels` cases 61 and 62
+  check loops and branches. Pixel shader integer and boolean constants are
+  counted in `d7draw`, not used (pixel shader 2.0 has no flow control).
+
+Two surface descriptions differ from a Direct3D 8 runtime's. A system-memory
+DXT texture is described by its blocks: an 8x8 DXT1 arrives as 16x2 (the
+bytes of a block row by the block rows), so the driver takes its size from the
+texture it is copied into. A cube map's faces each have a handle, and the
+runtime copies one face by that face's handle.
+
+`d9pixels` passes all 55 of its cases on the interface on XP SP3 (UHD 630
+host), the same as with the switch off; cases 56 and 57 cover `ColorFill` and
+`StretchRect`.
+Case 59 stretches the back buffer into a texture of half its size with linear
+filtering; with it, `d9pixels` passes 56 of 56 on the interface (it skips the
+case when linear StretchRect is not offered, as with the switch off).
+
+
+## User clip planes
+
+The driver offered no user clip planes (`MaxUserClipPlanes` 0). Among the
+checks 3DMark05 makes before it creates a device, a missing plane sends it to
+a test of software vertex processing instead of hardware; Direct3D 7 to 9
+games use the planes for reflections and portals. Six are offered now.
+
+The planes (`SETCLIPPLANE`) are kept with the context and its state blocks,
+and a draw that `D3DRS_CLIPPLANEENABLE` asks to clip carries them in its
+packet. The host clips with clip distances:
+
+- A vertex shader's planes are in clip space. Its translated program
+  (`RB_VS_CLIP`) writes `dot(plane, oPos)` for each into two `CLIPDIST`
+  outputs; the planes follow the shader's constants.
+- Object-space draws (fixed-function vertices transformed by the pipeline)
+  have their planes in world space. Each of the miniport's four object-space
+  vertex shaders (Direct3D 7 draws and pixel shader draws, lit or not) has a
+  clip variant that measures the world position once its world transform is
+  done; the planes come before the vertices.
+- A rasterizer with the planes' bits (`clip_plane_enable`) turns the
+  distances on. Pretransformed vertices are not clipped, as in Direct3D.
+
+`d9pixels` cases 64 to 68 clip a quad with one plane through each path: fixed
+function, lit, with a pixel shader, lit with a pixel shader, and a vertex
+shader.
+
+
+## Render targets up to 2048x2048
+
+3DMark05's first run stopped on "CreateTexture failed: Driver internal error"
+when it made its shadow map, a 2048x2048 render target texture. Offscreen
+surfaces, render targets and depth buffers shared the screen's limit
+(`RB2K_DD_MAX_WIDTH` by `RB2K_DD_MAX_HEIGHT`, 1680x1200), so DirectDraw
+refused the surface. They may now be 2048 on a side (`RB2K_DD_TARGET_SIDE`);
+display modes keep their limit.
+
+Readback staging keeps the screen's size: its attach request has to fit one
+queue packet. A target larger than the screen is drawn into and sampled, but
+locking it fails.
+
+`d9pixels` case 70 clears a 2048x2048 render target texture, with a depth
+buffer of its size, and draws it.
+
+
+## Cube map render targets
+
+3DMark05's run stopped next on "CreateCubeTexture failed: Driver internal
+error": it draws reflections into a 512x512 render target cube map, and
+render target textures were only flat images.
+
+Each face of a render target cube map is now an image of its own, drawn into
+like any target; Direct3D sets a face as the target by the face's surface
+handle, which `CreateSurfaceEx` records for each face. Sampling the cube
+needs a cube texture, so before a draw samples it, a miniport request
+(`IOCTL_RB2K_D7_CUBE_SYNC`) copies the faces drawn since the last time into a
+host cube texture, one region copy into each face's layer; it makes the cube
+texture the first time. Draws and clears count per image, so an unchanged
+face is not copied again.
+
+`d9pixels` case 71 clears each face of a 64x64 render target cube map to its
+own colour as a render target and samples the six directions.
 
 
 ## Release package

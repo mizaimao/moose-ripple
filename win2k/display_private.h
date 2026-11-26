@@ -30,6 +30,7 @@ typedef struct {
     BOOL texture;               /* a render target texture: Direct3D also samples the image */
     PDD_DIRECTDRAW_LOCAL local;
     ULONG d3dHandle;
+    ULONG draws;                /* draws and clears into it, so a cube map face is copied again only when drawn */
 } DD_SLOT;
 
 typedef struct DD_FLIP_VIEW {
@@ -63,6 +64,7 @@ typedef struct {
     BOOL plainSurfaces;         /* plain 2D ones too, not only Direct3D's */
     BOOL d3d8;                  /* the Direct3D 8 driver interface is offered */
     BOOL vertexShaders;         /* and vertex shaders run on the host GPU */
+    BOOL d3d9Ddi;               /* and the Direct3D 9 driver interface is offered */
     BOOL d3dDescribed;          /* the Direct3D HAL description is given in every depth */
     BOOL nativeD3D7;
     BOOL z16Storage, z16Render;
