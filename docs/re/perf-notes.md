@@ -1486,3 +1486,18 @@ differ from the software renderer in UTM, with either kext mode and with the sha
 load or at the first draw alike. That is KI-12 in `docs/known-issues.md`: the host there has
 no sampler border colours, so a filter that reads outside the picture gets its edge pixels
 (the same picture on the second Intel host: 0 of 24 differ).
+
+The same pair on the Proxmox host (its QEMU is 9.2; rig to itself, GPU clock at 1200 MHz, one
+boot each, three runs; the software renderer's sums there are 90, 58 and 37 ms):
+
+| | first render | second render | each later render | `ci-effects`' own line, summed |
+|---|---|---|---|---|
+| creates waited for | 334.0, 323.2, 326.6 ms | 107.7, 99.2, 98.2 ms | 42.9, 39.9, 39.0 ms | 62.2 ms (software 44.4) |
+| creates queued | 247.2, 235.3, 236.0 | 77.4, 74.1, 72.0 | 32.8, 30.2, 31.0 | 45.0 ms (software 44.5) |
+
+First showing 430 to 314 ms (27% less), each later render 40.6 to 31.3 ms (23% less). The
+picture comparisons are unchanged there too (1 of 24, 6 of 61), no error from the kext, no
+refused command, nothing from the host's renderer in the journal; desktop, a window's shadow,
+Exposé and Dashboard looked at. A third trap: the boot after a kext install rebuilds the kext
+cache for eight minutes in the background, and the first "waited for" runs on this host fell
+into it (537 ms for a first render); they were repeated on a boot without it.

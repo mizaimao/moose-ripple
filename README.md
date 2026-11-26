@@ -144,9 +144,11 @@ pixels.
   pixels different). The filter that differs is CIEdges (3.9% of the pixels, where an edge is
   just above or below the threshold), and Blue Print and Comic Book, which draw edges too,
   differ on 3-4%. The other four effects (Concert, Neon, Pinch, Pointillize) differ on the
-  9600 GT too, so those differences come from how a GPU computes them. A single Core Image
-  filter still takes about 1.7 times as long as in software rendering, because each pass
-  waits for the host; Photo Booth's effects are faster than in software.
+  9600 GT too, so those differences come from how a GPU computes them. Once a filter has
+  been shown twice, a render of it is faster than in software rendering (31 ms against 37
+  for the 24 filters together); its first two renders, where its programs are compiled, take
+  about twice as long as in software (314 ms against 148). Photo Booth's effects are
+  faster than in software.
 - In UTM on an Apple M1 Max the guest's Intel CPU is emulated, and that CPU is the
   limit there: gl-gears runs at about 56 frames/s and Real Racing 2's menu at 59, but
   a race makes about 30 frames/s, with the game's drawing thread using a whole emulated
