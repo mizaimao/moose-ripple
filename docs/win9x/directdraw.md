@@ -743,11 +743,11 @@ Through the Direct3D 7 translation (switch off) all 8 pass too, as before. `d3dt
 driver in UTM (mipmap level with LOD bias +1: level 3's colour where level 4's is expected), so
 that one is the UTM host's and not this work's.
 
-Found on the way, not caused by this work: with the switch off (the released driver too), only
-the first Direct3D 8 program after a restart reaches the HAL. A second run of `d8pixels` in the
-same boot loads no driver code, makes no OpenGL context, and still passes its pixel checks, so
-something else draws it. With the Direct3D 8 interface on, every run reaches the HAL. To be
-looked into with a program whose speed shows which path it took.
+Seen twice and not explained, with the switch off (the released driver too): in two boots, a
+second run of `d8pixels` loaded no driver code, made no OpenGL context and still passed its
+pixel checks, so something else drew it. In a later boot it did not happen: three runs of a
+small frame-rate test (`d8fps`, 169 to 185 frames a second in UTM) and then two runs of
+`d8pixels` each reached the HAL. Not understood yet; watch for it.
 
 ## Changing a driver in the test VM
 
