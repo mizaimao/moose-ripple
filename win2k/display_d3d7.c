@@ -3626,7 +3626,9 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     c->deviceType = 1;                  /* D3DDEVTYPE_HAL */
     c->caps2 = RB_D3DCAPS2_CANRENDERWINDOWED;
     c->presentationIntervals = RB_D3DPRESENT_INTERVAL_IMMEDIATE | RB_D3DPRESENT_INTERVAL_ONE;
-    c->devCaps = hw->dwDevCaps & ~D3DDEVCAPS_FLOATTLVERTEX;
+    /* Not texturing from system memory: only video-memory textures are registered
+     * and uploaded, so the runtime is to keep a video-memory copy of each. */
+    c->devCaps = hw->dwDevCaps & ~(D3DDEVCAPS_FLOATTLVERTEX | D3DDEVCAPS_TEXTURESYSTEMMEMORY);
     c->primitiveMiscCaps = tri->dwMiscCaps | 0x80;   /* D3DPMISCCAPS_COLORWRITEENABLE */
     c->rasterCaps = tri->dwRasterCaps & ~D3DPRASTERCAPS_SUBPIXEL;
     c->srcBlendCaps = tri->dwSrcBlendCaps;
