@@ -99,6 +99,43 @@ program ended. [The three captures](img/gl-fullscreen-rig.webp)
     gltest 10 full                   (the window covers the screen at its current mode)
     quake3.exe +set timedemo 1 +set r_fullscreen 1 +set r_mode 6 +set nextdemo quit +demo demo001
 
+### OpenGL in a window from the GPU (2026-11-26)
+
+Any other window has its frame copied on the host GPU into the desktop image that the mini-VDD
+shows, inside the rectangles GDI reports visible (patch 0015, `RVD_PRESENT_WINDOW`): a blit
+in the program's own context, no wait for the host, display updates paced at 60 a second.
+The card's memory under the window keeps an older GDI frame, so a frame still goes the GDI way
+at least every 200 ms (for GDI's own reads: a window dragged, a screen capture) and whenever
+the pointer is over or next to the window (the software pointer is drawn in that memory).
+Only Windows 98 and later (`GetCursorInfo`); `RIPPLE_GL_SCANOUT=0` turns it off with the
+full-screen path.
+
+Rows: the host's blit counts the desktop image's rows from the bottom of the screen, so Mesa
+turns the window's image over as it makes it and both rectangles are given counted from the
+bottom. Found with `glband` (a 640×480 window of four colour bands, red at the top, a white
+square in the top-left corner): every other combination put the bands upside down or 40 rows
+off. The Intel host (QEMU 9.2, virglrenderer 0.10.4) and QEMU 10.0 with virglrenderer 1.1.0
+behave the same here. Pictures checked: one window, a window moved with the keyboard while it
+draws (nothing left at the old place), two overlapping windows (the lower one shows only its
+visible part), the Start menu over a window and a window partly under the taskbar.
+[Captures](img/gl-window-rig.webp)
+
+Intel host, VM 230 alone, one boot each pair, the same driver files; GDI path with
+`RIPPLE_GL_SCANOUT=0`, run first while nothing had used the GPU display yet:
+
+| Test | GDI path | From the GPU |
+|---|---:|---:|
+| `glband 10` (640×480 window), frames a second | 1,552 | 4,946 |
+| Quake III demo, `timedemo demo001`, 800×600 window, fps | 386.7 | 588.8 |
+
+Quake III hides the pointer while it plays in a window. A program that shows it over its
+window keeps the GDI path for those frames; `glband` moves the pointer away for that reason.
+
+    quake3.exe +set timedemo 1 +set r_fullscreen 0 +set r_mode 4 +set nextdemo quit +demo demo001
+
+Not checked yet: the pointer over a window (QEMU's relative mouse would not put it there in
+the test guests), and UTM.
+
 ## How a 2024 Mesa gets onto a 1998 Windows
 
 Mesa needs a C11 and C++17 compiler; the compilers of the time (Visual C++ 6) can't build it.

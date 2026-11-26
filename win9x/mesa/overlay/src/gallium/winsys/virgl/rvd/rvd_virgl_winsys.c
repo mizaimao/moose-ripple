@@ -637,22 +637,21 @@ static int rvd_submit_cmd(struct virgl_winsys *vws, struct virgl_cmd_buf *_cbuf,
    return ret;
 }
 
-/* DirectDraw can show its full-screen render target without a guest-memory copy. The separate
- * scanout texture lets the HAL keep drawing or reading back its original 565 or RGBA surface.
- * Keep the old image alive across a resize until its replacement is on the display. */
-bool rvd_virgl_present_color(struct pipe_context *pipe, struct pipe_resource *color,
-                             struct pipe_resource **image)
+/* The colour buffer copied on the host into a reusable 32-bit image, made (again) at its size,
+ * and the commands sent. Returns the image or NULL; a new one is in *replacement until the
+ * caller keeps it. The copy keeps row order: Direct3D's HAL draws its top row into FBO row
+ * zero, and Mesa keeps window frames top row first. */
+static struct pipe_resource *
+copy_to_image(struct pipe_context *pipe, struct pipe_resource *color, struct pipe_resource *dest,
+              struct pipe_resource **replacement, bool flip)
 {
    struct pipe_screen *screen = pipe->screen;
-   struct rvd_winsys *ws = rvd_winsys(virgl_screen(screen)->vws);
-   struct pipe_resource *dest = *image;
-   struct pipe_resource *replacement = NULL;
    struct pipe_fence_handle *submitted = NULL;
    struct pipe_blit_info blit = {0};
-   bool shown = false;
 
+   *replacement = NULL;
    if (color->screen != screen || color->target != PIPE_TEXTURE_2D || color->nr_samples > 1)
-      return false;
+      return NULL;
    if (!dest || dest->width0 != color->width0 || dest->height0 != color->height0) {
       struct pipe_resource templ = {
          .target = PIPE_TEXTURE_2D,
@@ -663,30 +662,91 @@ bool rvd_virgl_present_color(struct pipe_context *pipe, struct pipe_resource *co
       if (!screen->is_format_supported(screen, templ.format, templ.target, 0, 0, templ.bind))
          templ.format = PIPE_FORMAT_B8G8R8A8_UNORM;
       if (!screen->is_format_supported(screen, templ.format, templ.target, 0, 0, templ.bind))
-         return false;
-      dest = replacement = screen->resource_create(screen, &templ);
+         return NULL;
+      dest = *replacement = screen->resource_create(screen, &templ);
       if (!dest)
-         return false;
+         return NULL;
    }
-
-   /* The HAL projects Direct3D's top row onto FBO row zero. Both the host blit and scanout
-    * use that row first, so the copy preserves row order. */
    blit.src.resource = color;
    blit.src.format = color->format;
    u_box_2d(0, 0, color->width0, color->height0, &blit.src.box);
    blit.dst.resource = dest;
    blit.dst.format = dest->format;
    blit.dst.box = blit.src.box;
+   if (flip) {               /* rows turned over for the desktop image: see present_window */
+      blit.src.box.y = color->height0;
+      blit.src.box.height = -(int)color->height0;
+   }
    blit.mask = PIPE_MASK_RGBA;
    blit.filter = PIPE_TEX_FILTER_NEAREST;
    pipe->blit(pipe, &blit);
    pipe->flush(pipe, &submitted, 0);
-   if (submitted) { /* rvd_submit_cmd only returns a fence after the VxD accepts the commands */
+   if (!submitted) {        /* rvd_submit_cmd only returns a fence after the VxD accepts the commands */
+      pipe_resource_reference(replacement, NULL);
+      return NULL;
+   }
+   screen->fence_reference(screen, &submitted, NULL);
+   return dest;
+}
+
+/* DirectDraw can show its full-screen render target without a guest-memory copy. The separate
+ * scanout texture lets the HAL keep drawing or reading back its original 565 or RGBA surface.
+ * Keep the old image alive across a resize until its replacement is on the display. */
+bool rvd_virgl_present_color(struct pipe_context *pipe, struct pipe_resource *color,
+                             struct pipe_resource **image)
+{
+   struct rvd_winsys *ws = rvd_winsys(virgl_screen(pipe->screen)->vws);
+   struct pipe_resource *replacement, *dest = copy_to_image(pipe, color, *image, &replacement, false);
+   bool shown = false;
+
+   if (dest) {
       struct rvd_present present = {
          ws->ctx, virgl_resource(dest)->hw_res->res_handle, dest->width0, dest->height0
       };
-      screen->fence_reference(screen, &submitted, NULL);
       shown = rvd_call(ws, RVD_PRESENT, &present, sizeof(present), NULL, 0);
+      if (shown && replacement)
+         pipe_resource_reference(image, replacement);
+   }
+   pipe_resource_reference(&replacement, NULL);
+   return shown;
+}
+
+/* Windows 9x: a window's frame copied on the host into the desktop image, inside the given
+ * screen rectangles (four longs each, GDI's visible region), the client area's top-left at x, y.
+ * false: the caller shows the frame with GDI. */
+bool rvd_virgl_present_window(struct pipe_context *pipe, struct pipe_resource *color,
+                              struct pipe_resource **image, long x, long y,
+                              const long *rects, unsigned count)
+{
+   struct rvd_winsys *ws = rvd_winsys(virgl_screen(pipe->screen)->vws);
+   struct {
+      struct rvd_window w;
+      struct rvd_rect r[RVD_WINDOW_RECTS];
+   } call;
+   struct pipe_resource *replacement, *dest;
+   bool shown = false;
+   unsigned i;
+
+   if (ws->nt || !count || count > RVD_WINDOW_RECTS)
+      return false;
+   dest = copy_to_image(pipe, color, *image, &replacement, true);
+   if (dest) {
+      call.w.context = ws->ctx;
+      call.w.buffer = virgl_resource(dest)->hw_res->res_handle;
+      call.w.width = dest->width0;
+      call.w.height = dest->height0;
+      call.w.x = (rvd_u32)x;
+      call.w.y = (rvd_u32)y;
+      call.w.format = virgl_resource(dest)->hw_res->format;
+      call.w.count = count;
+      for (i = 0; i < count; i++) {
+         call.r[i].left = (rvd_u32)rects[4 * i];
+         call.r[i].top = (rvd_u32)rects[4 * i + 1];
+         call.r[i].right = (rvd_u32)rects[4 * i + 2];
+         call.r[i].bottom = (rvd_u32)rects[4 * i + 3];
+      }
+      shown = rvd_call(ws, RVD_PRESENT_WINDOW, &call,
+                       sizeof(call.w) + count * sizeof(call.r[0]), NULL, 0);
       if (shown && replacement)
          pipe_resource_reference(image, replacement);
    }

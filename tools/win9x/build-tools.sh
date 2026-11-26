@@ -18,7 +18,7 @@ W() { winepath -w "$1"; }
 mkdir -p "$OUT" && cd "$OUT"
 export WINEPATH="$(W "$T/vc6/VC98/Bin");$(W "$T/vc6/Common/MSDev98/Bin")"
 export INCLUDE="$(W "$T/vc6/VC98/Include")" LIB="$(W "$T/vc6/VC98/Lib")"
-for src in "$here"/rvdtest.c "$here"/gltest.c "$here"/threadtest.c "$here"/pftest.c "$here"/modeset.c "$here"/dbgrun.c "$here"/setini.c "$here"/memlog.c; do
+for src in "$here"/rvdtest.c "$here"/gltest.c "$here"/glband.c "$here"/threadtest.c "$here"/pftest.c "$here"/modeset.c "$here"/dbgrun.c "$here"/setini.c "$here"/memlog.c; do
     cp "$src" "$here/../../win9x/minivdd/rvd.h" .
     # /MT: the C run-time linked in, so the program needs nothing but Windows itself
     wine cl.exe /nologo /W3 /O2 /MT "$(basename "$src")" /link /SUBSYSTEM:CONSOLE gdi32.lib user32.lib advapi32.lib opengl32.lib ddraw.lib
