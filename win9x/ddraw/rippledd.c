@@ -210,6 +210,12 @@ static DWORD WINAPI CanCreateSurface(LPDDHAL_CANCREATESURFACEDATA d)
     d->ddRVal = !d->bIsDifferentPixelFormat || d3d_surface_format_ok(d->lpDDSurfaceDesc) ?
                 DD_OK : DDERR_INVALIDPIXELFORMAT;
     d3d_trace("can create: caps, result", d->lpDDSurfaceDesc->ddsCaps.dwCaps, d->ddRVal);
+    if (d->ddRVal != DD_OK) {           /* which format was refused */
+        const DDPIXELFORMAT *pf = &d->lpDDSurfaceDesc->ddpfPixelFormat;
+        d3d_trace("refused format: flags, fourcc", pf->dwFlags, pf->dwFourCC);
+        d3d_trace("refused format: bits, red mask", pf->dwRGBBitCount, pf->dwRBitMask);
+        d3d_trace("refused format: green mask, alpha mask", pf->dwGBitMask, pf->dwRGBAlphaBitMask);
+    }
     return DDHAL_DRIVER_HANDLED;
 }
 
@@ -228,6 +234,7 @@ static DWORD WINAPI CreateSurface(LPDDHAL_CREATESURFACEDATA d)
         LPDDRAWI_DDRAWSURFACE_LCL s = d->lplpSList[i];
         LPDDRAWI_DDRAWSURFACE_GBL g = s->lpGbl;
         DWORD block = (s->dwFlags & DDRAWISURF_HASPIXELFORMAT) ? d3d_dxt_block(&g->ddpfSurface) : 0;
+        DWORD texel = (s->dwFlags & DDRAWISURF_HASPIXELFORMAT) ? d3d_fourcc_bytes(&g->ddpfSurface) : 0;
         if (s->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY)
             continue;
         if (s->lpSurfMore && (s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_VOLUME) &&
@@ -237,12 +244,21 @@ static DWORD WINAPI CreateSurface(LPDDHAL_CREATESURFACEDATA d)
                of the one above. */
             LPDDRAWI_DDRAWSURFACE_LCL top = d->lplpSList[0];
             DWORD depth = top->lpSurfMore ? top->lpSurfMore->ddsCapsEx.dwCaps4 >> i : 1;
-            DWORD pitch = block ? ((g->wWidth + 3) / 4) * block : g->wWidth * (g->ddpfSurface.dwRGBBitCount / 8);
+            DWORD pitch = block ? ((g->wWidth + 3) / 4) * block :
+                          g->wWidth * (texel ? texel : g->ddpfSurface.dwRGBBitCount / 8);
             DWORD rows = block ? (g->wHeight + 3) / 4 : g->wHeight;
             if (!depth)
                 depth = 1;
             g->lPitch = (LONG)pitch;
             g->dwBlockSizeX = pitch * rows * depth;
+            g->dwBlockSizeY = 1;
+            g->fpVidMem = DDHAL_PLEASEALLOC_BLOCKSIZE;
+            continue;
+        }
+        if (texel) {                    /* an uncompressed format named by FOURCC (Q8W8V8U8): no bit
+                                           count for DirectDraw to size it by; rows tight */
+            g->lPitch = (LONG)(g->wWidth * texel);
+            g->dwBlockSizeX = g->wWidth * texel * g->wHeight;
             g->dwBlockSizeY = 1;
             g->fpVidMem = DDHAL_PLEASEALLOC_BLOCKSIZE;
             continue;
@@ -369,6 +385,8 @@ static DWORD WINAPI Lock(LPDDHAL_LOCKDATA d)
     if (s->dwFlags & DDRAWISURF_HASPIXELFORMAT) {
         block = d3d_dxt_block(&g->ddpfSurface);
         bits = g->ddpfSurface.dwRGBBitCount;
+        if (d3d_fourcc_bytes(&g->ddpfSurface))
+            bits = 8 * d3d_fourcc_bytes(&g->ddpfSurface);
     }
     if (block && d->bHasRect)           /* DXT: rows of 4x4 blocks */
         p += (d->rArea.top / 4) * (((DWORD)g->wWidth + 3) / 4) * block + (d->rArea.left / 4) * block;

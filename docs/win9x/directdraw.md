@@ -838,6 +838,69 @@ the stage states before each draw. 3DMark 2001 SE needs Q8W8V8U8 for Nature ("de
 support bump normal maps" with V8U8 alone). `d9pixels`: 49 of 49 on the rig, `ps_texbem`
 included.
 
+### Vertex processing on the GPU (2026-11-26, `D3D8` = `"2"`)
+
+With the registry value at `"2"` the Direct3D 8 and 9 devices report hardware transform and
+lighting (`D3DDEVCAPS_HWTRANSFORMANDLIGHT`, eight lights, Direct3D 7's vertex processing caps;
+no vertex shaders yet, so a device that wants them still gets the runtime's). The runtime then
+sends untransformed vertices, with the world, view and projection matrices (`SETTRANSFORM`,
+`MULTIPLYTRANSFORM`), the lights (`CREATELIGHT`, `SETLIGHT`), the material and the depth range,
+and the HAL draws them through an ARB vertex program made from that state (`tnl_arb.c`): the
+full transform, with OpenGL's y flip, z range and Direct3D's pixel centres folded into its matrix;
+Direct3D 7 lighting (directional, point and spot lights, attenuation, range, material sources,
+local viewer) with `LIT` for the specular term; vertex fog from view depth or range, table fog
+from the depth buffer's z; texture coordinates from the vertex or made in view space (normal,
+position, reflection vector), through the texture matrices, projected or not. Programs are made
+per state key and kept (16 a context); their state sits in `program.env`, reloaded only where it
+changed. While such programs draw, OpenGL's viewport and depth range are Direct3D's; transformed
+vertices get the whole target and 0..1 back. A check on the build host compiles 266 key
+variants with Mesa's parser. In UTM (DirectX 9.0c): `d9pixels` 42 of 42 and `d8pixels` 23 of 23
+with `vertex_processing=hardware`, `d8pixels`' lit case included; d9pixels' vertex shader and
+luminance cases report "not offered" there.
+
+Fixed-function stages also sample cube maps and volumes now: the unit enables OpenGL's cube map
+or 3D target for such a texture (OpenGL prefers them to 2D); before, the unit sampled whatever 2D
+texture it held.
+
+Vertex shaders, also with `"2"`: vs_1_1 for Direct3D 8 and vs_2_0 without flow control when the
+runtime has announced version 9 (`vs_arb.c`). ARB vertex programs were modelled on Direct3D 8's
+vertex shaders, so most instructions keep their names. The Direct3D 8 declaration that comes with
+each shader (one stream: registers, types and skips) becomes generic attribute arrays: floats as
+floats, D3DCOLOR as normalised bytes swapped from BGRA in the program, UBYTE4 and shorts as
+integers. c0..c255 live in `program.env`, with the shader's `def` constants loaded over them;
+`program.env` is shared with the fixed-function programs, so the HAL tracks whose state it holds.
+a0 is kept as whole numbers in a temporary and loaded with ARL before each relative read (vs_2_0's
+a0 has four components). ARB lacks |x|, `_sat`, `lrp`, `nrm`, `sgn` and `mova`'s rounding to the
+nearest, so those are spelt out; `sincos` and flow control are refused. oPos becomes OpenGL's clip
+position the way the fixed-function programs make it; oFog (or table fog from z / w) goes to the
+fog unit or the fog coordinate. Test shaders using every vs_1_1 instruction and the vs_2_0
+additions compile with Mesa on the build host.
+
+Also: the runtime version that picks the shader caps is kept per process. In the DLL's shared
+data, a Direct3D 8 program run after a Direct3D 9 one in the same boot was offered shader model 2.
+
+On the rig (VM 230, DirectX 9.0c, `"2"`, untimed): `d9pixels` 48 of 49 with
+`vertex_processing=hardware`, its five vs_2_0 cases on the GPU included; `vs1_inputs` fails
+because the runtime refuses that case's declaration (UBYTE4 and SHORT2 inputs) when vertices are
+processed in hardware, before the HAL sees it (open). `d8pixels` 23 of 23, offered vs_1_1 and
+ps_1_3 after a Direct3D 9 program in the same boot. 3DMark 2001 SE picks "D3D Hardware T&L"
+itself and runs to its score: **12066 3DMarks** at 1024x768x32. Dragothic 139.8 and 35.9 fps,
+Lobby 298.3 and 69.3, Nature 119.5, High Polygon Count 52.9 and 49.1 MTriangles/s (40.0 and 20.3
+with the runtime's vertex processing), Vertex Shader 172.1 fps, Pixel Shader 673.7, Environment
+Bump Mapping 735.3, DOT3 673.9, Advanced Pixel Shader 99.9, Point Sprites 4.2 MSprites/s, fill
+rate 10066.3 and 14673.8 MTexels/s (the Car Chase lines did not scroll into view in the
+results dialog). Pictures checked through VNC; Car Chase's ground was dark until lights got
+slots by Direct3D's index (3DMark's indices go far beyond 32), and its vertex shaders are vs_1_0.
+
+Advanced Pixel Shader's white boat and jetty: a trace with each draw's state (new trace lines)
+showed nine draws a frame with no texture on the stage their shader samples, and about one
+refused CanCreateSurface a frame. The refused format was FOURCC 63: for mipmapped Q8W8V8U8
+textures the runtime names the format by its D3DFORMAT number instead of `DDPF_BUMPDUDV`. Such
+surfaces have no bit count, so CreateSurface sizes them itself, and Lock and texture blits take
+the texel size from the format. Since then the boat and jetty are shaded dark grey in the dusk
+scene and the water shows its ripples; whether their flat look is right needs a reference
+picture.
+
 ### 3DMark 2001 SE (2026-11-26, rig VM 230)
 
 Windows 98 SE with DirectX 9.0c, the Direct3D 8 interface on, 1024x768 32-bit, the runtime's
