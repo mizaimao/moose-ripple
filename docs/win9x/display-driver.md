@@ -162,6 +162,18 @@ page flipping and Direct3D with host presentation both enabled and disabled.
 Windows Me also passed surface restoration and completed two full Quake III
 timedemos.
 
+### No 3dfx Glide
+
+The driver doesn't implement 3dfx Glide, and won't (decided 2026-11-26). Games whose only 3D
+renderer is Glide, mostly from 1996 to 1998, run in software mode or not at all. Most games
+that support Glide also have a Direct3D or OpenGL renderer, which the driver accelerates; pick
+that one in the game's video options.
+
+For a game that needs Glide on Windows, install a separate wrapper that translates Glide to
+OpenGL, such as [OpenGlide](https://sourceforge.net/projects/openglide/), and it draws through
+this driver's OpenGL. It is not bundled and none of its code is used here: OpenGlide is LGPL,
+and this project stays MIT. DOS Glide games are out of reach of a Windows wrapper.
+
 ## Things learnt the hard way
 
 - **A selector for the frame buffer:** `AllocSelector(0)` gives an empty descriptor that can't

@@ -94,7 +94,8 @@ this project: nothing may look worse than without our driver).
    buffer objects). On by default since 0.6.0 (`D3D8` = `"0"` turns it off). Next: 3DMark03
    (parked: its installers need a newer Windows or fail on 98).
 6. **Windows 2000:** miniport and display driver; the OpenGL and Direct3D parts reused.
-7. Later, maybe: Glide (3dfx games), Windows 95.
+7. Glide stays out (2026-11-26): games that need it can use a separate wrapper such as OpenGlide
+   ([display-driver.md](display-driver.md#no-3dfx-glide)). Windows 95 OSR2.5 is supported since 0.2.0.
 
 ## Windows 98 direct scanout
 
