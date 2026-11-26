@@ -40,7 +40,7 @@ typedef struct { ULONG id, length; } USED_ENTRY;
 typedef struct { USHORT flags, index; USED_ENTRY ring[QueueEntries]; } USED_RING;
 /* Each scene slot holds one SUBMIT_3D packet and, at its end, the reply. */
 enum { FrameFirstDesc = QueueEntries - 2*RB2K_D7_FLIGHT_SLOTS, FramePacketBytes = 262144,
-       FrameReplyOffset = FramePacketBytes - 64, FrameDmaBytes = FramePacketBytes*RB2K_D7_FLIGHT_SLOTS };
+       FrameReplyOffset = FramePacketBytes - 64 };
 typedef char frame_fits[sizeof(struct virtio_gpu_cmd_submit) + RB2K_D7_FRAME_WORDS*sizeof(ULONG) <= FrameReplyOffset ? 1 : -1];
 typedef char check_desc_size[sizeof(DESCRIPTOR) == 16 ? 1 : -1];
 
@@ -355,8 +355,8 @@ static VP_STATUS collect_control(RB2K_GPU *gpu, ULONG capacity, PULONG received,
             return control_error(gpu, ERROR_INVALID_DATA);
         slot = (id-FrameFirstDesc)/2;
         job = &gpu->d7Submitted[slot];
-        if (!job->image || !gpu->d7Packets.data) return control_error(gpu, ERROR_INVALID_DATA);
-        reply = (struct virtio_gpu_ctrl_hdr *)(gpu->d7Packets.data + slot*FramePacketBytes + FrameReplyOffset);
+        if (!job->image || !gpu->d7Packets[slot].data) return control_error(gpu, ERROR_INVALID_DATA);
+        reply = (struct virtio_gpu_ctrl_hdr *)(gpu->d7Packets[slot].data + FrameReplyOffset);
         if (length != sizeof(*reply) || reply->type != VIRTIO_GPU_RESP_OK_NODATA ||
             !(reply->flags & VIRTIO_GPU_FLAG_FENCE) || reply->fence_id != job->fence) {
             job->image->frameFailed = TRUE;
@@ -427,8 +427,8 @@ VP_STATUS rb_gpu_wait_image(RB2K_GPU *gpu, const RB2K_IMAGE *image)
  * waiting for it. The host runs control requests in queue order. */
 VP_STATUS rb_gpu_submit_scene(RB2K_GPU *gpu, const ULONG *words, ULONG count, const RB2K_D3D7_COMPLETED *work)
 {
-    RB2K_DMA_SEGMENT *dma = &gpu->d7Packets;
-    ULONG slot = gpu->d7Next, offset = slot*FramePacketBytes;
+    ULONG slot = gpu->d7Next, offset = 0;
+    RB2K_DMA_SEGMENT *dma = &gpu->d7Packets[slot];   /* contiguous per slot, not for all slots at once */
     ULONG bytes = sizeof(struct virtio_gpu_cmd_submit) + count*sizeof(ULONG);
     USHORT head = (USHORT)(FrameFirstDesc + 2*slot);
     RB2K_D7_SUBMISSION *job = &gpu->d7Submitted[slot];
@@ -440,10 +440,10 @@ VP_STATUS rb_gpu_submit_scene(RB2K_GPU *gpu, const ULONG *words, ULONG count, co
     if (!count || count > RB2K_D7_FRAME_WORDS) return ERROR_INVALID_PARAMETER;
     if (gpu->fence == 0xffffffffUL) return ERROR_NO_MORE_ITEMS;
     if (!dma->data) {
-        dma->data = VideoPortGetCommonBuffer(gpu->extension, FrameDmaBytes, 4096,
+        dma->data = VideoPortGetCommonBuffer(gpu->extension, FramePacketBytes, 4096,
                                               &dma->bus, &dma->allocated, TRUE);
         if (!dma->data) return ERROR_NOT_ENOUGH_MEMORY;
-        if (dma->allocated < FrameDmaBytes) {
+        if (dma->allocated < FramePacketBytes) {
             VideoPortFreeCommonBuffer(gpu->extension, dma->allocated, dma->data, dma->bus, TRUE);
             dma->data = NULL;
             return ERROR_NOT_ENOUGH_MEMORY;
@@ -598,8 +598,9 @@ VP_STATUS rb_gpu_stop(RB2K_GPU *gpu)
     VideoPortZeroMemory(&gpu->d7Frame, sizeof(gpu->d7Frame));
     VideoPortZeroMemory(gpu->d7Submitted, sizeof(gpu->d7Submitted));
     gpu->d7Flight.pending = 0;
-    if (!cleanup && gpu->d7Packets.data) {
-        RB2K_DMA_SEGMENT *dma = &gpu->d7Packets;
+    for (i = 0; !cleanup && i < RB2K_D7_FLIGHT_SLOTS; ++i) {
+        RB2K_DMA_SEGMENT *dma = &gpu->d7Packets[i];
+        if (!dma->data) continue;
         VideoPortFreeCommonBuffer(gpu->extension, dma->allocated, dma->data, dma->bus, TRUE);
         dma->data = NULL;
     }

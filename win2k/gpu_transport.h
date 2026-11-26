@@ -137,7 +137,7 @@ typedef struct {
     } d7Frame;
     RB2K_D3D7_COMPLETED d7Completed;
     RB2K_D7_SUBMISSION d7Submitted[RB2K_D7_FLIGHT_SLOTS];
-    RB2K_DMA_SEGMENT d7Packets;
+    RB2K_DMA_SEGMENT d7Packets[RB2K_D7_FLIGHT_SLOTS];   /* one buffer per packet slot */
     RB2K_D7_FLIGHT d7Flight;
     ULONG d7Next;
     BOOLEAN d7WaitCurrent;
