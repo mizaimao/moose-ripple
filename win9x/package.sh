@@ -1,8 +1,9 @@
 #!/bin/sh
 # Build the Windows 95/98/Me package on the Linux build host:
 #   VERSION=0.6.0 THIRDPTY=/path/to/THIRDPTY.TXT win9x/package.sh
-# makes OUT/moose-ripple-win9x-VERSION.zip and .iso (OUT defaults to build/win9x-package) and
-# their SHA256SUMS.txt. The driver files and the INF come from win9x/build.sh, with the INF's
+# makes OUT/moose-ripple-win9x-VERSION.zip and .iso (OUT defaults to build/win9x-package; the
+# ISO only where genisoimage is installed, else it says how to make it elsewhere) and their
+# SHA256SUMS.txt. The driver files and the INF come from win9x/build.sh, with the INF's
 # DriverVer set to VERSION.0 and the build date; ripplegl.dll is built from this checkout's
 # win9x/mesa (TOOLS chooses the folder that holds its source and build trees, .tools by
 # default). THIRDPTY.TXT, the notices for ripplegl.dll, comes from the caller and must name
@@ -16,7 +17,6 @@ root=$(cd "$here/.." && pwd)
 case "$VERSION" in *[!0-9.]*|"") echo "package.sh: VERSION is digits and dots" >&2; exit 1 ;; esac
 [ -f "$THIRDPTY" ] || { echo "package.sh: no $THIRDPTY" >&2; exit 1; }
 grep -q "$VERSION" "$THIRDPTY" || { echo "package.sh: $THIRDPTY does not name $VERSION" >&2; exit 1; }
-command -v genisoimage >/dev/null || { echo "package.sh: genisoimage is needed for the ISO" >&2; exit 1; }
 T=${TOOLS:-$root/.tools}
 export WIN9X_TOOLS=${WIN9X_TOOLS:-$root/.tools/win9x}
 out=${OUT:-$root/build/win9x-package}
@@ -41,6 +41,11 @@ grep -q "^DriverVer=.*,$VERSION\.0" "$pkg/RIPPLE9X.INF" || { echo "package.sh: I
 
 touch -d "$(date -u +%Y-%m-%d) 00:00:00" "$pkg"/*
 (cd "$pkg" && zip -q -X -9 "$out/$name.zip" *)
-genisoimage -quiet -J -r -V RIPPLE9X -o "$out/$name.iso" "$pkg"
-(cd "$out" && sha256sum "$name.iso" "$name.zip" > SHA256SUMS.txt)
+if command -v genisoimage >/dev/null; then
+    genisoimage -quiet -J -r -V RIPPLE9X -o "$out/$name.iso" "$pkg"
+else
+    echo "package.sh: no genisoimage here; make the ISO elsewhere from $pkg:" >&2
+    echo "  genisoimage -quiet -J -r -V RIPPLE9X -o $name.iso $name/" >&2
+fi
+(cd "$out" && sha256sum $(ls "$name.iso" 2>/dev/null) "$name.zip" > SHA256SUMS.txt)
 cat "$out/SHA256SUMS.txt"

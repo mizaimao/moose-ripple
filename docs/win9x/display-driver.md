@@ -130,6 +130,19 @@ Restart when prompted. Select the PCI display adapter with vendor ID `1AF4` and
 device ID `1050`, install the driver from the CD root, then restart and select
 16-bit or 32-bit colour in Display Properties.
 
+Learnt in the 0.6.0 clean install (2026-11-26):
+- **Fresh Windows 98 SE disk on the Intel host.** Windows took a few restarts to add the PCI
+  bus's devices, and asked for its own CD for some of them; `C:\WIN98` had the files.
+- **Windows protection error.** One boot stopped with a Windows protection error, the fault of
+  Windows 98 on fast processors. Patching the disk with patcher9x fixed it; the rig's VM 230 has
+  the patcher9x boot floppy for this.
+- **Adapter conflict.** If Windows reports that the display adapter conflicts with another
+  device, Device Manager still lists the adapter from before the VM's display changed (Cirrus
+  Logic on that disk). Remove it and restart.
+- **DirectX 7 or later.** With the DirectX 6.1 that Windows 98 SE ships, DirectDraw gets no video
+  memory or flips from the HAL (ddtest in software, also with `D3D8` = `"0"`), while OpenGL works.
+  Install DirectX 9.0c (December 2006) on 98 SE and Me, DirectX 7 or 8.1 on 95.
+
 On Windows 95, the bundled IE4 installation supplies `MSVCRT.DLL` for OpenGL.
 Microsoft's DirectX 7 runtime also supplies that library and the Direct3D 7 and
 DirectInput interfaces used by the game tests. Install it for those games and restart.

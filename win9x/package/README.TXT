@@ -21,6 +21,11 @@ Install or update
    32-bit colour. If only 640x480 appears, check the monitor type.
    The INF reports version @VERSION@.0.
 
+If Windows reports that the display adapter conflicts with another
+device, Device Manager still lists an earlier display adapter, for
+example Cirrus Logic from before the VM's display was changed. Remove
+that entry under Display adapters and restart.
+
 Direct3D 8 and 9
 
 Since 0.6.0 the driver offers the Direct3D 8 and 9 driver interface by
@@ -40,12 +45,15 @@ set this registry value and restart Windows:
 "1" offers the Direct3D 8 interface with the runtime's vertex
 processing; "2", or no value, is the default.
 
-Windows 95 runtime
+DirectX runtime
 
-For Direct3D 7 games on Windows 95 OSR2.5, install Microsoft's DirectX 7
-runtime from your installation media and restart. It supplies Direct3D 7,
-DirectInput and MSVCRT.DLL. The Internet Explorer 4 installation included
-with OSR2.5 also supplies MSVCRT.DLL for OpenGL.
+DirectDraw and Direct3D acceleration need DirectX 7 or later. With the
+DirectX 6.1 that ships with Windows 98 SE, DirectDraw offers no video
+memory or page flipping. On Windows 98 SE and Me, install DirectX 9.0c
+(December 2006) and restart. On Windows 95 OSR2.5, install DirectX 7 or
+8.1 and restart; it also supplies DirectInput and MSVCRT.DLL. The
+Internet Explorer 4 installation included with OSR2.5 also supplies
+MSVCRT.DLL for OpenGL. OpenGL itself needs no DirectX.
 
 Full-screen Direct3D games
 
