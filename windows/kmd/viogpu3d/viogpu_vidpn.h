@@ -74,6 +74,7 @@ class VioGpuVidPN
     BOOLEAN GetEdids(void);
     int AddEdidModes(void);
     BOOLEAN UpdateModes(USHORT xres, USHORT yres, int &cnt);
+    BOOLEAN FitsFrameMemory(USHORT xres, USHORT yres);
     void SetCustomDisplay(_In_ USHORT xres, _In_ USHORT yres);
 
     NTSTATUS EscapeCustomResoulution(VIOGPU_DISP_MODE *resolution);
