@@ -2108,11 +2108,82 @@ static int cube_bind(RCTX *c, DWORD h, int stage, const struct shadow *sh)
     return 1;
 }
 
+/* ---- DXT decoding (volumes: OpenGL has no 3D S3TC) -------------------------------------------- */
+static DWORD dxt_expand(DWORD v, int bits)
+{
+    return bits == 5 ? (v << 3) | (v >> 2) : bits == 6 ? (v << 2) | (v >> 4) : (v << 4) | v;
+}
+
+/* The colours of a DXT colour block: two RGB565 ends and two between them, or one between and
+   transparent black when the first end is not above the second (DXT1 only: four selects the
+   four-colour form). */
+static void dxt_colours(const BYTE *b, int four, DWORD *c)
+{
+    DWORD c0 = b[0] | b[1] << 8, c1 = b[2] | b[3] << 8, e[2][3], k;
+    e[0][0] = dxt_expand(c0 >> 11, 5); e[0][1] = dxt_expand((c0 >> 5) & 63, 6); e[0][2] = dxt_expand(c0 & 31, 5);
+    e[1][0] = dxt_expand(c1 >> 11, 5); e[1][1] = dxt_expand((c1 >> 5) & 63, 6); e[1][2] = dxt_expand(c1 & 31, 5);
+    c[0] = 0xff000000UL | e[0][0] << 16 | e[0][1] << 8 | e[0][2];
+    c[1] = 0xff000000UL | e[1][0] << 16 | e[1][1] << 8 | e[1][2];
+    if (four || c0 > c1) {
+        c[2] = c[3] = 0xff000000UL;
+        for (k = 0; k < 3; k++) {
+            c[2] |= ((2 * e[0][k] + e[1][k]) / 3) << (16 - 8 * k);
+            c[3] |= ((e[0][k] + 2 * e[1][k]) / 3) << (16 - 8 * k);
+        }
+    } else {
+        c[2] = 0xff000000UL;
+        for (k = 0; k < 3; k++)
+            c[2] |= ((e[0][k] + e[1][k]) / 2) << (16 - 8 * k);
+        c[3] = 0;
+    }
+}
+
+/* One slice of 4x4 blocks (block bytes 8: DXT1, else DXT3 or DXT5 by internal) into width x
+   height ARGB texels. */
+static void dxt_decode(GLenum internal, const BYTE *in, DWORD width, DWORD height, DWORD *out)
+{
+    DWORD bx, by, x, y, step = internal == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT ? 8 : 16;
+    int dxt1 = step == 8, dxt5 = internal == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+    for (by = 0; by < (height + 3) / 4; by++)
+        for (bx = 0; bx < (width + 3) / 4; bx++, in += step) {
+            const BYTE *colour = dxt1 ? in : in + 8;
+            DWORD c[4], a[8], k;
+            DWORD bits = colour[4] | colour[5] << 8 | colour[6] << 16 | (DWORD)colour[7] << 24;
+            dxt_colours(colour, !dxt1, c);
+            if (dxt5) {
+                a[0] = in[0];
+                a[1] = in[1];
+                if (a[0] > a[1]) {
+                    for (k = 1; k < 7; k++)
+                        a[k + 1] = ((7 - k) * a[0] + k * a[1]) / 7;
+                } else {
+                    for (k = 1; k < 5; k++)
+                        a[k + 1] = ((5 - k) * a[0] + k * a[1]) / 5;
+                    a[6] = 0;
+                    a[7] = 255;
+                }
+            }
+            for (y = 0; y < 4; y++)
+                for (x = 0; x < 4; x++) {
+                    DWORD i = 4 * y + x, texel = c[(bits >> (2 * i)) & 3];
+                    if (bx * 4 + x >= width || by * 4 + y >= height)
+                        continue;
+                    if (!dxt1 && !dxt5)
+                        texel = (texel & 0xffffff) | dxt_expand((in[i / 2] >> (4 * (i & 1))) & 15, 4) << 24;
+                    else if (dxt5) {
+                        DWORD at = 16 + 3 * i, index = ((in[at / 8] | in[at / 8 + 1] << 8) >> (at % 8)) & 7;
+                        texel = (texel & 0xffffff) | a[index] << 24;
+                    }
+                    out[(by * 4 + y) * width + bx * 4 + x] = texel;
+                }
+        }
+}
+
 /* A volume's level: its slices one after another, rows as tight as the texel size allows
    (CreateSurface sizes video memory volumes so). */
 static DWORD volume_pitch(const DDRAWI_DDRAWSURFACE_GBL *g, const PIXFMT *f)
 {
-    DWORD tight = g->wWidth * f->bytes;
+    DWORD tight = f->block ? ((g->wWidth + 3) / 4) * f->block : g->wWidth * f->bytes;
     return g->lPitch >= (LONG)tight && g->lPitch < (LONG)(tight + 4) ? (DWORD)g->lPitch : tight;
 }
 
@@ -2132,7 +2203,7 @@ static int volume_bind(RCTX *c, DWORD h, int stage, const struct shadow *sh)
         return 0;
     surface_format((LPDDRAWI_DDRAWSURFACE_LCL)&sh[0].l, &pf);
     f = gl_format(&pf);
-    if (!f.bytes)                       /* DXT volumes aren't offered */
+    if (!f.bytes && !f.block)
         return 0;
     if (!t->name) {
         if (c->ntextures >= TEXTURE_BUDGET)
@@ -2147,6 +2218,21 @@ static int volume_bind(RCTX *c, DWORD h, int stage, const struct shadow *sh)
         for (l = 0; l < levels; l++) {
             const DDRAWI_DDRAWSURFACE_GBL *g = &sh[l].g;
             DWORD d = depth >> l ? depth >> l : 1;
+            if (f.block) {              /* DXT: decoded here, slice by slice, to 32-bit ARGB */
+                DWORD slice = volume_pitch(g, &f) * ((g->wHeight + 3) / 4), z;
+                DWORD *texels = (DWORD *)alloc(g->wWidth * g->wHeight * d * 4);
+                if (!texels)
+                    continue;
+                for (z = 0; z < d; z++)
+                    dxt_decode(f.internal, (const BYTE *)g->fpVidMem + z * slice, g->wWidth,
+                               g->wHeight, texels + z * g->wWidth * g->wHeight);
+                gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+                gl->PixelStorei(GL_UNPACK_IMAGE_HEIGHT, 0);
+                gl->TexImage3D(GL_TEXTURE_3D, l, GL_RGBA8, g->wWidth, g->wHeight, d, 0, GL_BGRA,
+                               GL_UNSIGNED_BYTE, texels);
+                release(texels);
+                continue;
+            }
             gl->PixelStorei(GL_UNPACK_ROW_LENGTH, volume_pitch(g, &f) / f.bytes);
             gl->PixelStorei(GL_UNPACK_IMAGE_HEIGHT, g->wHeight);
             gl->TexImage3D(GL_TEXTURE_3D, l, f.internal, g->wWidth, g->wHeight, d, 0, f.format,
@@ -3163,8 +3249,10 @@ static void surface_handles(DDLOCAL *l, LPDDRAWI_DDRAWSURFACE_LCL root,
             int k;
             for (k = 0; m && k < MAX_LEVELS; k++) {
                 LPDDRAWI_DDRAWSURFACE_GBL g = m->lpGbl;
-                g->lPitch = (LONG)(g->wWidth * (g->ddpfSurface.dwRGBBitCount / 8));
-                g->dwBlockSizeY = (DWORD)g->lPitch * g->wHeight;
+                DWORD block = gl_format(&g->ddpfSurface).block;     /* DXT: rows of 4x4 blocks */
+                g->lPitch = block ? (LONG)(((g->wWidth + 3) / 4) * block) :
+                                    (LONG)(g->wWidth * (g->ddpfSurface.dwRGBBitCount / 8));
+                g->dwBlockSizeY = (DWORD)g->lPitch * (block ? (g->wHeight + 3) / 4 : g->wHeight);
                 m = (m->ddsCaps.dwCaps & DDSCAPS_MIPMAP) && m->lpAttachList ? m->lpAttachList->lpAttached : NULL;
                 if (m == s)
                     break;
@@ -4310,11 +4398,11 @@ static const ULONG d8_formats[][2] = {
     { RbFmtD16, RbFormatZStencil },
     { RbFmtD24S8, RbFormatZStencil },
     { RbFmtD24X8, RbFormatZStencil },
-    { RbFmtDxt1, RbFormatTexture | RbFormatCubeTexture },     /* DXT: CreateSurface sizes them, gl_format uploads them */
-    { RbFmtDxt2, RbFormatTexture | RbFormatCubeTexture },
-    { RbFmtDxt3, RbFormatTexture | RbFormatCubeTexture },
-    { RbFmtDxt4, RbFormatTexture | RbFormatCubeTexture },
-    { RbFmtDxt5, RbFormatTexture | RbFormatCubeTexture },
+    { RbFmtDxt1, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },     /* DXT: CreateSurface sizes them, gl_format uploads them */
+    { RbFmtDxt2, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtDxt3, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtDxt4, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtDxt5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
 };
 #define D8_FORMATS (sizeof d8_formats / sizeof d8_formats[0])
 
