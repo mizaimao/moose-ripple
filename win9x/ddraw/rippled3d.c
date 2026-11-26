@@ -1102,6 +1102,7 @@ typedef struct {
     DWORD scene;                        /* scenes ended so far */
     DWORD bound[STAGES];                /* surface handle of each stage's texture, 0 if none */
     int keyed;                          /* a bound texture is drawn with its colour key */
+    BYTE ff_kind[STAGES];               /* each unit's enabled cube (1) or 3D (2) target (ff_target) */
     TEXTURE *tex;                       /* by surface handle */
     DWORD ntex;
     DWORD ntextures;                    /* OpenGL textures made (see TEXTURE_BUDGET) */
@@ -2547,6 +2548,33 @@ static void apply_fog_unit(RCTX *c)
 
 /* Set up OpenGL's texture units from the stage states, before drawing. A stage without a
    texture whose operation needs one passes the colour on, as the hardware of the time did. */
+/* What kind of texture a handle names: 0 plain, 1 cube map, 2 volume. */
+static int texture_kind(RCTX *c, DWORD h)
+{
+    LPDDRAWI_DDRAWSURFACE_LCL s = handle_get(c->ddl, h);
+    if (!c->dx8 || !s)
+        return 0;
+    return is_cube(s) ? 1 : is_volume(s) ? 2 : 0;
+}
+
+/* The fixed-function unit's cube map and 3D targets on or off for a texture of that kind (the
+   2D target is the caller's). */
+static void ff_target(RCTX *c, int unit, int kind)
+{
+    GLF *gl = gl_of(c);
+    if (c->ff_kind[unit] == kind)
+        return;
+    if (c->ff_kind[unit] == 1)
+        gl->Disable(GL_TEXTURE_CUBE_MAP);
+    else if (c->ff_kind[unit] == 2)
+        gl->Disable(GL_TEXTURE_3D);
+    if (kind == 1)
+        gl->Enable(GL_TEXTURE_CUBE_MAP);
+    else if (kind == 2)
+        gl->Enable(GL_TEXTURE_3D);
+    c->ff_kind[unit] = (BYTE)kind;
+}
+
 static void apply_stages(RCTX *c)
 {
     GLF *gl = gl_of(c);
@@ -2599,9 +2627,13 @@ static void apply_stages(RCTX *c)
         }
         if (!on) {
             gl->Disable(GL_TEXTURE_2D);
+            ff_target(c, s, 0);
             continue;
         }
         gl->Enable(GL_TEXTURE_2D);
+        /* a cube map or volume (Direct3D 8 and 9) samples through its own target, which
+           OpenGL's fixed-function units prefer to 2D while it is enabled */
+        ff_target(c, s, c->bound[s] ? texture_kind(c, c->bound[s]) : 0);
         gl->TexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
         gl->TexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, factor);
         combine(gl, s, 0, cop, st[D3DTSS_COLORARG1], st[D3DTSS_COLORARG2]);
@@ -2925,6 +2957,7 @@ static void rt_upload(RCTX *c)
     for (u = 0; u <= FOG_UNIT; u++) {
         gl->ActiveTexture(GL_TEXTURE0 + u);
         gl->Disable(GL_TEXTURE_2D);
+        ff_target(c, u, 0);
     }
     gl->ActiveTexture(GL_TEXTURE0);
     gl->WindowPos2i(0, 0);              /* row 0 of the memory is the GPU's row 0 (see framebuffer) */
@@ -5067,7 +5100,7 @@ static void d8_caps(RB_D3DCAPS8 *c)
     c->alphaCmpCaps = tri->dwAlphaCmpCaps;
     c->shadeCaps = tri->dwShadeCaps;
     c->textureCaps = tri->dwTextureCaps | 0x4000;      /* D3DPTEXTURECAPS_MIPMAP */
-    /* Cube maps and volumes, sampled by pixel shaders (the fixed-function stages do not). */
+    /* Cube maps and volumes, for pixel shaders and the fixed-function stages (ff_target). */
     c->textureCaps |= 0x800 | 0x10000;  /* D3DPTEXTURECAPS_CUBEMAP, MIPCUBEMAP */
     c->cubeTextureFilterCaps = tri->dwTextureFilterCaps;
     c->textureCaps |= 0x2000 | 0x8000;  /* D3DPTEXTURECAPS_VOLUMEMAP, MIPVOLUMEMAP */
