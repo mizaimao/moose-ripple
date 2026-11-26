@@ -559,6 +559,9 @@ static int gl_load_ext(RPROC *p)
     return ok;
 }
 
+#define MAX_LEVELS 12                   /* mipmap levels of a 2048x2048 texture */
+static int d8_on;                       /* the Direct3D 8 interface is offered (d3d8_enabled) */
+
 /* ---- Surface handles: DirectX 7 names surfaces in the command stream by handle --------------- */
 typedef struct {
     OWNER o;
@@ -569,7 +572,24 @@ typedef struct {
        records for them live only during CreateSurfaceEx, so their memory and size are kept here */
     struct buf8 { FLATPTR mem; DWORD size; } *buf;
     DWORD nbuf;
+    /* Direct3D 8 textures: copies of the runtime's records (struct shadow), by handle */
+    struct shadow **shadow;
+    DWORD nshadow;
+    int dx8;                            /* a Direct3D 8 context was made on it */
 } DDLOCAL;
+
+/* The runtime's surface records for Direct3D 8 textures live only during CreateSurfaceEx too.
+   A copy of each level's records, linked the way DirectDraw links them, stands in for them;
+   the memory they name stays the runtime's. DirectDraw finds a surface's GBL_MORE through the
+   pointer just before its GBL (GET_LPDDRAWSURFACE_GBL_MORE), so the copy keeps that layout. */
+struct shadow {
+    DDRAWI_DDRAWSURFACE_LCL l;
+    DDRAWI_DDRAWSURFACE_MORE m;
+    DDRAWI_DDRAWSURFACE_GBL_MORE gm;
+    ATTACHLIST a;
+    LPDDRAWI_DDRAWSURFACE_GBL_MORE gmp; /* just before g */
+    DDRAWI_DDRAWSURFACE_GBL g;
+};
 
 #define MAX_DDLOCALS 32
 static DDLOCAL ddlocals[MAX_DDLOCALS];
@@ -596,6 +616,9 @@ static DDLOCAL *ddlocal(LPDDRAWI_DIRECTDRAW_LCL lcl, int create)
     ddlocals[free].n = 0;
     ddlocals[free].buf = NULL;
     ddlocals[free].nbuf = 0;
+    ddlocals[free].shadow = NULL;
+    ddlocals[free].nshadow = 0;
+    ddlocals[free].dx8 = 0;
     return &ddlocals[free];
 }
 
@@ -633,6 +656,79 @@ static void buffer_set(DDLOCAL *d, DWORD h, FLATPTR mem, DWORD size)
     }
     d->buf[h].mem = mem;
     d->buf[h].size = size;
+}
+
+typedef char c_shadow_layout[FIELD_OFFSET(struct shadow, g) ==
+                             FIELD_OFFSET(struct shadow, gmp) + sizeof(void *) ? 1 : -1];
+
+/* Copies of a texture's records, its levels linked through their attach lists: an array of
+   as many as it has levels (MAX_LEVELS at most), or NULL. Only for plain 2D textures. */
+static struct shadow *shadow_make(LPDDRAWI_DDRAWSURFACE_LCL s)
+{
+    LPDDRAWI_DDRAWSURFACE_LCL lv[MAX_LEVELS];
+    struct shadow *sh;
+    DWORD n = 1, i;
+
+    lv[0] = s;
+    while (n < MAX_LEVELS && (s->ddsCaps.dwCaps & DDSCAPS_MIPMAP) && s->lpAttachList &&
+           s->lpAttachList->lpAttached && s->lpAttachList->lpAttached != lv[0] &&
+           s->lpAttachList->lpAttached->lpGbl && s->lpAttachList->lpAttached->lpSurfMore)
+        lv[n++] = s = s->lpAttachList->lpAttached;
+    sh = (struct shadow *)alloc(n * sizeof *sh);
+    if (!sh)
+        return NULL;
+    for (i = 0; i < n; i++) {
+        LPDDRAWI_DDRAWSURFACE_GBL_MORE gm = GET_LPDDRAWSURFACE_GBL_MORE(lv[i]->lpGbl);
+        sh[i].l = *lv[i];
+        sh[i].m = *lv[i]->lpSurfMore;
+        sh[i].g = *lv[i]->lpGbl;
+        if (gm)
+            sh[i].gm = *gm;
+        sh[i].gm.dwContentsStamp = 0;   /* the runtime's stamp isn't kept: writes mark textures */
+        sh[i].gmp = &sh[i].gm;
+        sh[i].l.lpGbl = &sh[i].g;
+        sh[i].l.lpSurfMore = &sh[i].m;
+        sh[i].l.lpAttachList = NULL;
+        sh[i].l.lpAttachListFrom = NULL;
+        if (i + 1 < n) {
+            sh[i].a.dwFlags = DDAL_IMPLICIT;
+            sh[i].a.lpLink = NULL;
+            sh[i].a.lpAttached = &sh[i + 1].l;
+            sh[i].a.lpIAttached = NULL;
+            sh[i].l.lpAttachList = &sh[i].a;
+        }
+    }
+    return sh;
+}
+
+static void shadow_set(DDLOCAL *d, DWORD h, struct shadow *sh)
+{
+    if (h >= d->nshadow) {
+        DWORD n = h + 64 > d->nshadow * 2 ? h + 64 : d->nshadow * 2;
+        struct shadow **a = (struct shadow **)alloc(n * sizeof(*a));
+        if (!a) {
+            release(sh);
+            return;
+        }
+        if (d->shadow) {
+            memcpy(a, d->shadow, d->nshadow * sizeof(*a));
+            release(d->shadow);
+        }
+        d->shadow = a;
+        d->nshadow = n;
+    }
+    release(d->shadow[h]);
+    d->shadow[h] = sh;
+}
+
+static void shadows_free(DDLOCAL *d)
+{
+    DWORD i;
+    for (i = 0; d->shadow && i < d->nshadow; i++)
+        release(d->shadow[i]);
+    release(d->shadow);
+    d->shadow = NULL;
+    d->nshadow = 0;
 }
 
 static BYTE *buffer_get(LPDDRAWI_DIRECTDRAW_LCL lcl, DWORD h, DWORD *size)
@@ -772,8 +868,6 @@ int d3d_surface_format_ok(LPDDSURFACEDESC desc)
 /* ---- Contexts ----------------------------------------------------------------------------------- */
 #define STAGES 2
 #define FOG_UNIT STAGES                 /* the OpenGL texture unit that does fog */
-
-#define MAX_LEVELS 12                   /* mipmap levels of a 2048x2048 texture */
 
 typedef struct {
     GLuint name;
@@ -2600,6 +2694,11 @@ static DWORD WINAPI ContextCreate(LPD3DHAL_CONTEXTCREATEDATA d)
         }
     }
     c->ddl = d->lpDDLcl;
+    if (c->dx8 && d8_on) {              /* its textures' records are copied from now on */
+        DDLOCAL *l = ddlocal(c->ddl, 1);
+        if (l)
+            l->dx8 = 1;
+    }
     c->rt = d->lpDDSLcl;
     c->z = d->lpDDSZLcl;
     if (!framebuffer(c)) {
@@ -2690,6 +2789,18 @@ static void surface_handles(DDLOCAL *l, LPDDRAWI_DDRAWSURFACE_LCL root,
                s->lpGbl ? s->lpGbl->fpVidMem : 0, s->lpGbl ? s->lpGbl->dwLinearSize : 0);
         return;
     }
+    if (l->dx8 && depth == 0 && (s->ddsCaps.dwCaps & DDSCAPS_TEXTURE) &&
+        !(s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_CUBEMAP)) {
+        struct shadow *sh = s->lpGbl && s->lpGbl->fpVidMem ? shadow_make(s) : NULL;
+        handle_set(l, h, sh ? &sh->l : NULL);
+        shadow_set(l, h, sh);
+        texture_forget(h);              /* a handle may come back with other memory */
+        tracef("rd3d: texture handle %lx: caps %08lx, memory %08lx, %lux%lu, copied %d\r\n", h,
+               s->ddsCaps.dwCaps, s->lpGbl ? s->lpGbl->fpVidMem : 0,
+               s->lpGbl ? (DWORD)s->lpGbl->wWidth : 0, s->lpGbl ? (DWORD)s->lpGbl->wHeight : 0,
+               sh != NULL);
+        return;
+    }
     handle_set(l, h, s->lpGbl && s->lpGbl->fpVidMem ? s : NULL);
     if (!s->lpGbl || !s->lpGbl->fpVidMem)
         texture_forget(h);
@@ -2731,6 +2842,7 @@ static DWORD WINAPI DestroyDDLocal(LPDDHAL_DESTROYDDLOCALDATA d)
     if (l) {
         release(l->surf);
         release(l->buf);
+        shadows_free(l);
         memset(l, 0, sizeof *l);
     }
     d->ddRVal = DD_OK;
@@ -3547,8 +3659,6 @@ static void d8_caps(RB_D3DCAPS8 *c)
    value HKLM\Software\moose-ripple, D3D8 is "1"; otherwise the runtime gets no answer and drives
    the HAL through the Direct3D 7 interface, as before. Not an environment variable: the runtime
    asks once per boot, in the first program that uses it, and keeps the answer for all others. */
-static int d8_on;
-
 int d3d8_enabled(void)
 {
     HKEY k;

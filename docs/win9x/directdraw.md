@@ -728,17 +728,26 @@ Learnt on Windows 98 SE with DirectX 8.1 (UTM):
   when the runtime names it (`buffer_set`), and never looks at that record again.
 - **A draw can start at any byte.** The runtime packs vertices of different formats into one
   buffer and gives DRAWPRIMITIVE2 a byte offset that need not be a whole vertex.
+- **Texture records are just as short-lived.** For textures named in a session with a
+  Direct3D 8 context, the HAL keeps its own copy of each level's records (`shadow_make`: the
+  LCL, its MORE, the GBL with the GBL_MORE pointer just before it, and attach lists linking the
+  levels) and the handle table points at the copy; the memory stays the runtime's. Writes
+  still reach the texture by its memory address (Lock and texture blits mark it). Cube maps
+  aren't offered yet and get no copy.
 
-`d8pixels sw` (software vertex processing): 7 of 8 cases pass through the new interface (clear,
-user memory, vertex buffer, strip, indexed, base vertex, untransformed vertices). The managed
-texture case draws its quad without the texture: texture records are as short-lived as buffer
-records, and the texture code still reads them later. Through the Direct3D 7 translation all 8
-pass, as before.
+`d8pixels sw` (software vertex processing), Windows 98 SE with DirectX 8.1 in UTM: all 8 cases
+pass through the new interface (clear, user memory, vertex buffer, strip, indexed, base vertex,
+managed texture, untransformed vertices), in the first program of the boot and in a second one.
+Through the Direct3D 7 translation (switch off) all 8 pass too, as before. `d3dtest`
+(Direct3D 7) in the same boot with the switch on fails the same two checks as with the released
+driver in UTM (mipmap level with LOD bias +1: level 3's colour where level 4's is expected), so
+that one is the UTM host's and not this work's.
 
-Found on the way, not caused by this work: with the released driver too, only the first
-Direct3D 8 program after a restart reaches the HAL. A second run of `d8pixels` in the same boot
-loads no driver code, makes no OpenGL context, and still passes its pixel checks, so something
-else draws it. To be looked into with a program whose speed shows which path it took.
+Found on the way, not caused by this work: with the switch off (the released driver too), only
+the first Direct3D 8 program after a restart reaches the HAL. A second run of `d8pixels` in the
+same boot loads no driver code, makes no OpenGL context, and still passes its pixel checks, so
+something else draws it. With the Direct3D 8 interface on, every run reaches the HAL. To be
+looked into with a program whose speed shows which path it took.
 
 ## Changing a driver in the test VM
 
