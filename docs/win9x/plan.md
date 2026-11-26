@@ -87,8 +87,9 @@ this project: nothing may look worse than without our driver).
 
 Full-screen Direct3D games can keep the finished picture on the GPU. Mesa copies it into a
 display image on the host. The mini-VDD shows the latest frame at the console and switches
-back to a CPU-drawn desktop when the game gives up the screen. The first implementation is
-opt-in. The pixel checks, frame counts and benchmark results are in
+back to a CPU-drawn desktop when the game gives up the screen. It was opt-in at first and is
+the default since 2026-11-26 (`RIPPLE_D3D_SCANOUT=0` switches it off), after the check in UTM
+on Apple silicon. The pixel checks, frame counts and benchmark results are in
 [DirectDraw and Direct3D](directdraw.md#full-screen-gpu-presentation).
 
 On the test host's QEMU version (9.2.0), selecting a virtio display resource switches the
