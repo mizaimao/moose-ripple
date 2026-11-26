@@ -180,6 +180,13 @@ typedef struct {
     ULONG memoryBack, memoryVisible;   /* a flip chain's second page's resource; the page on scanout 0 */
     BOOLEAN memoryChain;   /* a flip chain is live: its presents are not read back into the pages */
     ULONG memoryStale;     /* pages (bit 0, bit 1) older than their resources until read back */
+    /* GDI's changes to the desktop's page, sent by a deferred worker (rb_memory_primary_defer)
+     * a few milliseconds later as one rectangle; lock orders the transport between that
+     * worker and the miniport's requests. */
+    PVOID lock, memoryDefer;
+    RB2K_RECT memoryPending;
+    BOOLEAN memoryPendingSet, memoryArmed;
+    ULONG memoryDeferred;  /* changes recorded, against memoryUploads sent */
     ULONG memoryUploads, memoryPixelsSent, memoryFailures, memoryPresents;
 } RB2K_GPU;
 
@@ -194,6 +201,8 @@ VP_STATUS rb_memory_primary_upload(RB2K_GPU *gpu, ULONG page, const RB2K_RECT *r
 VP_STATUS rb_memory_primary_flip(RB2K_GPU *gpu, ULONG page);
 void rb_memory_primary_clear_back(RB2K_GPU *gpu);
 VP_STATUS rb_memory_primary_read(RB2K_GPU *gpu, ULONG page);
+void rb_memory_primary_defer(RB2K_GPU *gpu, const RB2K_RECT *rect);
+void rb_memory_primary_deferred(PVOID gpu);
 void rb_memory_primary_chain(RB2K_GPU *gpu, BOOLEAN live);
 VP_STATUS rb_memory_primary_present(RB2K_GPU *gpu, ULONG image, ULONG srcX, ULONG srcY, const RB2K_RECT *to);
 void rb_memory_primary_hide(RB2K_GPU *gpu);

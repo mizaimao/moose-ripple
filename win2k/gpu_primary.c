@@ -211,6 +211,51 @@ VP_STATUS rb_memory_primary_upload(RB2K_GPU *gpu, ULONG page, const RB2K_RECT *r
     return NO_ERROR;
 }
 
+/* GDI's pending changes to the desktop's page, sent now: before anything else reads or
+ * writes the page's resource, so that the order of drawing holds. */
+static void send_pending(RB2K_GPU *gpu)
+{
+    RB2K_RECT r;
+    if (!gpu->memoryPendingSet) return;
+    r = gpu->memoryPending;
+    gpu->memoryPendingSet = FALSE;
+    if (gpu->memoryWidth) rb_memory_primary_upload(gpu, 0, &r);
+}
+
+/* A change GDI made to the desktop's page: recorded, and sent with the others a few
+ * milliseconds later (rb_memory_primary_deferred). Each upload waits for the host,
+ * so a burst of drawing costs one instead of one per call. */
+void rb_memory_primary_defer(RB2K_GPU *gpu, const RB2K_RECT *rect)
+{
+    RB2K_RECT *p = &gpu->memoryPending;
+    if (!gpu->memoryWidth || rect->left >= rect->right || rect->top >= rect->bottom) return;
+    ++gpu->memoryDeferred;
+    if (!gpu->memoryDefer) { rb_memory_primary_upload(gpu, 0, rect); return; }
+    if (!gpu->memoryPendingSet) {
+        *p = *rect;
+        gpu->memoryPendingSet = TRUE;
+    } else {
+        if (rect->left < p->left) p->left = rect->left;
+        if (rect->top < p->top) p->top = rect->top;
+        if (rect->right > p->right) p->right = rect->right;
+        if (rect->bottom > p->bottom) p->bottom = rect->bottom;
+    }
+    if (!gpu->memoryArmed) {
+        gpu->memoryArmed = TRUE;
+        rb_defer_arm(gpu->memoryDefer, 8);
+    }
+}
+
+/* The deferred worker, in a system thread: the transport's lock orders it with requests. */
+void rb_memory_primary_deferred(PVOID context)
+{
+    RB2K_GPU *gpu = context;
+    rb_lock(gpu->lock);
+    gpu->memoryArmed = FALSE;
+    send_pending(gpu);
+    rb_unlock(gpu->lock);
+}
+
 /* A Direct3D present to the desktop in memory: the host copies the frame's rectangle
  * into the page's resource, which shows it. Outside a flip chain the same pixels come
  * back into the page for GDI (which reads them for screen copies and window moves).
@@ -230,6 +275,7 @@ VP_STATUS rb_memory_primary_present(RB2K_GPU *gpu, ULONG image, ULONG srcX, ULON
     r.bottom -= page * gpu->memoryHeight;
     if (r.left >= r.right || r.top >= r.bottom || r.right > gpu->memoryWidth || r.bottom > gpu->memoryHeight)
         return ERROR_INVALID_PARAMETER;
+    send_pending(gpu);
     status = ensure(gpu, page);
     if (status) return status;
     if (!rb_gpu_copy_image_rect(gpu, &result, image, *page_resource(gpu, page), srcX, srcY, r.left, r.top,
@@ -255,6 +301,7 @@ VP_STATUS rb_memory_primary_read(RB2K_GPU *gpu, ULONG page)
     RB2K_RECT all;
     VP_STATUS status;
     if (!gpu->memoryWidth || page > 1 || !(gpu->memoryStale & (1UL << page))) return NO_ERROR;
+    if (!page) send_pending(gpu);
     if (!*page_resource(gpu, page) || !gpu->ready) {
         gpu->memoryStale &= ~(1UL << page);   /* the resource went with a reset */
         return NO_ERROR;
@@ -284,6 +331,7 @@ VP_STATUS rb_memory_primary_flip(RB2K_GPU *gpu, ULONG page)
     VP_STATUS status;
     if (!gpu->memoryWidth) return ERROR_NOT_READY;
     if (page > 1) return ERROR_INVALID_PARAMETER;
+    send_pending(gpu);
     status = ensure(gpu, page);
     if (status) return status;
     if (page == gpu->memoryVisible) return NO_ERROR;
@@ -330,6 +378,7 @@ VP_STATUS rb_memory_primary_show(RB2K_GPU *gpu, ULONG width, ULONG height, BOOLE
     gpu->memoryVisible = 0;
     gpu->memoryWidth = width;
     gpu->memoryStale = 0;
+    gpu->memoryPendingSet = FALSE;   /* all of the page goes with the new resource */
     gpu->memoryHeight = height;
     status = rb_memory_primary_upload(gpu, 0, NULL);
     if (gpu->ready && old) unref(gpu, old);
@@ -347,6 +396,7 @@ void rb_memory_primary_hide(RB2K_GPU *gpu)
         else unref(gpu, gpu->memoryResource);
     }
     if (gpu->memoryBack && gpu->ready) unref(gpu, gpu->memoryBack);
+    gpu->memoryPendingSet = FALSE;
     gpu->memoryResource = gpu->memoryBack = 0;
     gpu->memoryVisible = 0;
     gpu->memoryWidth = gpu->memoryHeight = 0;
