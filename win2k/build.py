@@ -56,7 +56,7 @@ def header_overlay(work):
 
 
 def build_kernel(work, overlay, target, modules, includes, definitions, libraries, link_flags):
-    compiler = [bin_dir / "clang", "-target", "i686-pc-windows-msvc", "-std=gnu89", "-Os",
+    compiler = [bin_dir / "clang", "-target", "i686-pc-windows-msvc", "-std=gnu89", "-O2",
                 "-ffreestanding", "-fno-stack-protector", "-fms-extensions", "-fms-compatibility",
                 "-fms-compatibility-version=12", "-mno-sse", "-mno-sse2", "-mno-mmx",
                 "-Xclang", "-fdefault-calling-conv=stdcall", "-ivfsoverlay", overlay,
