@@ -2093,20 +2093,52 @@ along and never installed or run. What it took to make it draw and show a frame:
   (`gdikmt_d3dkmt.c`) had an open path that had never run. `D3DKMTOpenResource` refused it:
   Direct3D stores a description with a resource it shares (68 bytes here), and the open has
   to offer room for it.
+- **The swap interval where programs look for it.** Mesa names `WGL_EXT_swap_control` in the
+  WGL extension list only. SDL 1.2, which the Quake III engine games use, looks for it in the
+  GL extension list and nowhere else, as the graphics vendors' drivers name it in both. Not
+  finding it, such a game never asks for a swap interval and keeps the default of 1: a
+  timedemo then runs at the display's 60 frames a second whatever the GPU could do. Patch
+  `patches-virgl/0046` adds the name to the GL list on Windows. (The framebuffer keeps an
+  interval above 0 by waiting for the display's next refresh before it presents; the
+  Direct3D device itself presents at once, because changing its interval would cost a device
+  reset and with it the shared textures.)
+- **Closing what the bridge opened.** The winsys left every shared resource alone when its
+  last reference went, because in the Direct3D driver the runtime owns what it opens. The
+  OpenGL bridge opens for itself, so each window resize left two textures open. Patch
+  `patches-virgl/0045` closes those.
 
-`RIPPLE_GL_LOG=FILE` makes the framebuffer and the bridge say what they made and what
-failed.
+`RIPPLE_GL_LOG=FILE` makes the framebuffer and the bridge say what they made, what failed
+and, when a window goes, how its presents' time split between waiting for the display, the
+copy and the present.
 
-First results, Windows 7 SP1 in UTM (a host that offers OpenGL ES; `tools/win7-hello/gltest.c`
-with a frame count, which draws a triangle, reads its pixel back and then reads the same
-pixel off the screen):
+Results (2026-11-26). `tools/win7-hello/gltest.c` with a frame count draws a triangle, reads
+its pixel back, reads the same pixel off the screen, does both again after resizing its
+window, and times frames at swap interval 0 and 1. The game is OpenArena 0.8.8's timedemo of
+`demo088-test1` in a 1024x768 window (`+timedemo 1 +demo demo088-test1 +set nextdemo quit`,
+3398 frames).
 
 | | Windows' software OpenGL | Mesa on the host GPU |
 | --- | --- | --- |
-| Renderer | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 2.1 Mesa 24.3.4 |
-| Triangle pixel read back, and on the screen | red, red | red, red (64-bit and 32-bit) |
+| Windows 7 SP1, Linux host with an Intel UHD 630 (desktop OpenGL), installed through the INF | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 4.3 (Compatibility Profile) Mesa 24.3.4 |
+| the triangle read back, and on the screen; again after a resize | red, red | red, red (64-bit and 32-bit) |
+| 30 frames at swap interval 1; 300 at interval 0 | no such extension | 0.5 s; 0.03 s |
+| OpenArena timedemo | 1.9 frames/s (1818 s) | 324 frames/s (10.5 s) |
+| Windows 7 SP1 in UTM (a host that offers OpenGL ES) | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 2.1; the same GL test passes |
+| Windows Vista SP2 in UTM, installed through the INF | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 2.1; right on the screen, also after a resize; swap interval 1 paces |
 
-Still to do before it goes into a release: a game's timedemo against the software renderer,
-Windows 7 on a host with desktop OpenGL, Vista (its DLLs build, with the unused-code and
-PSAPI changes of patch `patches-vista/0108`), window resizing, the swap interval, and an
-install through the INF instead of by hand.
+The timedemo ran next to another guest that was not being measured, so its 324 is a floor
+rather than a best case. Before patch 0046 the same run gave 60.0 frames a second.
+
+Known gaps:
+
+- **Vista: `glReadPixels` of the window's own buffers returns black** (the picture on the
+  screen is right). Windows 7 reads back correctly. Not yet looked at; the Vista kernel
+  driver treats the storage of an opened allocation differently.
+- **The DXGI swap chain way does not work on Windows 7** (`RIPPLE_GL_PRESENT=dxgi`): the
+  window stays black and the program ends with an access violation. The Direct3D 9Ex way is
+  the default on both systems and keeps the frame on the GPU just the same.
+- A window with a single-buffered pixel format does not get this framebuffer (Mesa marks
+  those formats as GDI-compatible); it falls back to the read-back path, which has not been
+  tried here.
+- Only this one game and the test program have run. Full-screen mode changes have not been
+  tried.
