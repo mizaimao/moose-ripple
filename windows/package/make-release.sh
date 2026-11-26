@@ -100,6 +100,11 @@ for t in vista win7; do
     cp "$T/mesa/out-$t-x64-virgl/viogpu_d3d10.dll" "$stage/$t/viogpu_d3d10.dll"
     cp "$T/mesa/out-$t-x86-virgl/viogpu_d3d10.dll" "$stage/$t/viogpu_d3d10.x86.dll"
 done
+# Windows 7 also gets Mesa's OpenGL driver and the library it shares with opengl32.dll
+cp "$T/mesa/out-win7-x64-virgl/viogpu_wgl.dll" "$stage/win7/viogpu_wgl.dll"
+cp "$T/mesa/out-win7-x86-virgl/viogpu_wgl.dll" "$stage/win7/viogpu_wgl.x86.dll"
+cp "$T/mesa/out-win7-x64-virgl/libglapi.dll" "$stage/win7/libglapi.dll"
+cp "$T/mesa/out-win7-x86-virgl/libglapi.dll" "$stage/win7/libglapi.x86.dll"
 if [ -n "${VISTA_WINDOWS:-}" ]; then
     echo "== Vista imports"
     "$PY" -I "$root/tools/vista/audit-imports.py" "$stage/vista" "$VISTA_WINDOWS" "$T/mesa/src-24.3.4-vista-virgl"
