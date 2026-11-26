@@ -87,8 +87,12 @@ this project: nothing may look worse than without our driver).
    cube, volume and bump map textures. `d8pixels` and `d9pixels` (DirectX 8.1 and 9.0c on
    Windows 98) pass every case they run, and 3DMark 2001 SE runs every test with correct pictures
    except Advanced Pixel Shader ([directdraw.md](directdraw.md#3dmark-2001-se-2026-11-26-rig-vm-230)).
-   Vertex processing stays the runtime's (on the CPU). Next: vertex processing on the GPU
-   (fixed function, then vertex shaders), 3DMark03.
+   Since then (same day, `D3D8` = `"2"`): vertex processing on the GPU, fixed function and
+   vertex shaders 1.1 and 2.0 ([directdraw.md](directdraw.md#vertex-processing-on-the-gpu-2026-11-26-d3d8--2)),
+   and the first speed work, timed on the rig: 3DMark 2001 SE 12134, then 14716 (rendered textures
+   stay on the GPU), then 30226 (vertex and index buffers in the driver's memory, kept in OpenGL
+   buffer objects). Next: what limits Car Chase and Lobby now; 3DMark03 (parked: its installers
+   need a newer Windows or fail on 98).
 6. **Windows 2000:** miniport and display driver; the OpenGL and Direct3D parts reused.
 7. Later, maybe: Glide (3dfx games), Windows 95.
 

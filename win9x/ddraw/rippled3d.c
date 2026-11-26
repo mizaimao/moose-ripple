@@ -221,6 +221,10 @@ static RDD_SHARED *shared;
 #define GL_CLAMP_TO_BORDER              0x812D
 #define GL_MIRRORED_REPEAT              0x8370
 #define GL_TEXTURE0                     0x84C0
+#define GL_ARRAY_BUFFER_ARB             0x8892
+#define GL_ELEMENT_ARRAY_BUFFER_ARB     0x8893
+#define GL_STATIC_DRAW_ARB              0x88E4
+#define GL_DYNAMIC_DRAW_ARB             0x88E8
 #define GL_COMBINE                      0x8570
 #define GL_COMBINE_RGB                  0x8571
 #define GL_COMBINE_ALPHA                0x8572
@@ -376,6 +380,11 @@ typedef struct {
     void (APIENTRY *DisableVertexAttribArrayARB)(GLuint);
     /* render-to-texture on the GPU (optional) */
     void (APIENTRY *CopyTexSubImage2D)(GLenum, GLint, GLint, GLint, GLint, GLint, GLsizei, GLsizei);
+    /* Direct3D 8 buffers as buffer objects (optional, buffer_object) */
+    void (APIENTRY *GenBuffersARB)(GLsizei, GLuint *);
+    void (APIENTRY *DeleteBuffersARB)(GLsizei, const GLuint *);
+    void (APIENTRY *BindBufferARB)(GLenum, GLuint);
+    void (APIENTRY *BufferDataARB)(GLenum, int, const GLvoid *, GLenum);
 } GLF;
 
 #define GL_CORE_COUNT 53            /* entries up to DrvGetProcAddress */
@@ -405,6 +414,7 @@ static const char *const gl_names[] = {
     "glNormalPointer", "glDepthRange",
     "glVertexAttribPointerARB", "glEnableVertexAttribArrayARB", "glDisableVertexAttribArrayARB",
     "glCopyTexSubImage2D",
+    "glGenBuffersARB", "glDeleteBuffersARB", "glBindBufferARB", "glBufferDataARB",
 };
 #define GL_ALL_COUNT (sizeof gl_names / sizeof gl_names[0])
 typedef char c_gl_names[sizeof(GLF) == GL_ALL_COUNT * sizeof(PROC) ? 1 : -1];
@@ -614,6 +624,7 @@ static int gl_load_ext(RPROC *p)
 #define MAX_LEVELS 12                   /* mipmap levels of a 2048x2048 texture */
 static int d8_on;                       /* the Direct3D 8 interface is offered (d3d8_enabled) */
 static int tnl_on;                      /* with hardware vertex processing (D3D8 is "2") */
+static int buf_on;                      /* and buffers the driver allocates (unless D3D8Buffers is "0") */
 
 /* ---- Surface handles: DirectX 7 names surfaces in the command stream by handle --------------- */
 typedef struct {
@@ -622,9 +633,20 @@ typedef struct {
     LPDDRAWI_DDRAWSURFACE_LCL *surf;    /* by handle; process heap */
     DWORD n;
     /* Direct3D 8 vertex and index buffers (execute buffers), by handle: the runtime's surface
-       records for them live only during CreateSurfaceEx, so their memory and size are kept here */
-    struct buf8 { FLATPTR mem; DWORD size; } *buf;
+       records for them live only during CreateSurfaceEx, so their memory and size are kept here.
+       A buffer the driver allocated (ours, d3d_buffer_new) may have a copy in an OpenGL buffer
+       object of one context (buffer_object), as of the writes count in its header. */
+    struct buf8 {
+        FLATPTR mem;
+        DWORD size;
+        int ours, fixed;                /* allocated by the driver; written once (HINTSTATIC) */
+        GLuint name;                    /* the buffer object, in context ctx */
+        void *ctx;
+        DWORD writes;                   /* the header's count when it was uploaded */
+    } *buf;
     DWORD nbuf;
+    struct trash { GLuint name; void *ctx; } *trash;    /* buffer objects to delete */
+    DWORD ntrash, maxtrash;
     /* Direct3D 8 textures: copies of the runtime's records (struct shadow), by handle */
     struct shadow **shadow;
     DWORD nshadow;
@@ -671,6 +693,8 @@ static DDLOCAL *ddlocal(LPDDRAWI_DIRECTDRAW_LCL lcl, int create)
     ddlocals[free].n = 0;
     ddlocals[free].buf = NULL;
     ddlocals[free].nbuf = 0;
+    ddlocals[free].trash = NULL;
+    ddlocals[free].ntrash = ddlocals[free].maxtrash = 0;
     ddlocals[free].shadow = NULL;
     ddlocals[free].nshadow = 0;
     ddlocals[free].dx8 = 0;
@@ -694,9 +718,92 @@ static void handle_set(DDLOCAL *d, DWORD h, LPDDRAWI_DDRAWSURFACE_LCL s)
     d->surf[h] = s;
 }
 
-/* A Direct3D 8 buffer's memory and size (mem 0: destroyed). */
-static void buffer_set(DDLOCAL *d, DWORD h, FLATPTR mem, DWORD size)
+/* ---- Direct3D 8 buffers the driver allocates ------------------------------------------------ */
+/* With hardware vertex processing the runtime allocates its vertex and index buffers through the
+   driver (D3DDEVCAPS_HWVERTEXBUFFER and rippledd.c's execute-buffer callbacks), so every Lock of
+   one comes through the driver. Each is ordinary memory in a heap in the shared arena (DirectDraw
+   may free it from another process), after a header that counts the writes: a draw uploads a
+   buffer into its OpenGL buffer object only when it was written since (buffer_object), where
+   vertices in the runtime's own memory went to the host again with every draw. */
+#define HEAP_SHARED_9X 0x04000000UL     /* Windows 9x: a heap in the shared arena */
+#define BUF_MAGIC 0x46554252UL          /* "RBUF" */
+struct bufhead { DWORD magic, size, writes, pad; };
+static HANDLE buf_heap;
+
+int d3d_buffers_on(void)
 {
+    return buf_on;
+}
+
+void *d3d_buffer_new(DWORD size)
+{
+    struct bufhead *h;
+    if (!buf_heap)
+        buf_heap = HeapCreate(HEAP_SHARED_9X, 0x10000, 0);
+    if (!buf_heap || size > 0x4000000UL)
+        return NULL;
+    h = (struct bufhead *)HeapAlloc(buf_heap, HEAP_ZERO_MEMORY, sizeof *h + size);
+    if (!h)
+        return NULL;
+    h->magic = BUF_MAGIC;
+    h->size = size;
+    h->writes = 1;
+    return h + 1;
+}
+
+static struct bufhead *buffer_head(FLATPTR mem)
+{
+    struct bufhead *h = (struct bufhead *)mem - 1;
+    return mem && h->magic == BUF_MAGIC ? h : NULL;
+}
+
+void d3d_buffer_free(FLATPTR mem)
+{
+    struct bufhead *h = buffer_head(mem);
+    if (h) {
+        h->magic = 0;
+        HeapFree(buf_heap, 0, h);
+    }
+}
+
+/* The program (Lock) or the runtime (BUFFER_BLT) writes the buffer. */
+void d3d_buffer_written(FLATPTR mem)
+{
+    struct bufhead *h = buffer_head(mem);
+    if (h)
+        h->writes++;
+}
+
+/* A buffer object to delete when its context is current again (buffer_object). */
+static void buffer_trash(DDLOCAL *d, struct buf8 *b)
+{
+    if (!b->name)
+        return;
+    if (d->ntrash == d->maxtrash) {
+        DWORD n = d->maxtrash ? d->maxtrash * 2 : 64;
+        struct trash *a = (struct trash *)alloc(n * sizeof(*a));
+        if (!a)
+            return;                     /* the name is lost; the context frees it at its end */
+        if (d->trash) {
+            memcpy(a, d->trash, d->ntrash * sizeof(*a));
+            release(d->trash);
+        }
+        d->trash = a;
+        d->maxtrash = n;
+    }
+    d->trash[d->ntrash].name = b->name;
+    d->trash[d->ntrash].ctx = b->ctx;
+    d->ntrash++;
+    b->name = 0;
+    b->ctx = NULL;
+}
+
+/* A Direct3D 8 buffer's memory and size (mem 0: destroyed); ours if the driver allocated it,
+   fixed if the program means to write it once. */
+static void buffer_set(DDLOCAL *d, DWORD h, FLATPTR mem, DWORD size, int ours, int fixed)
+{
+    if (h < d->nbuf && d->buf[h].name && d->buf[h].mem != mem)
+        buffer_trash(d, &d->buf[h]);
     if (h >= d->nbuf) {
         DWORD n = h + 64 > d->nbuf * 2 ? h + 64 : d->nbuf * 2;
         struct buf8 *a = (struct buf8 *)alloc(n * sizeof(*a));
@@ -711,6 +818,8 @@ static void buffer_set(DDLOCAL *d, DWORD h, FLATPTR mem, DWORD size)
     }
     d->buf[h].mem = mem;
     d->buf[h].size = size;
+    d->buf[h].ours = ours && mem;      /* (CreateSurfaceEx checked its mark) */
+    d->buf[h].fixed = fixed;
 }
 
 typedef char c_shadow_layout[FIELD_OFFSET(struct shadow, g) ==
@@ -1158,6 +1267,7 @@ typedef struct {
     int stream_user;
     int dx8;                            /* made by the Direct3D 8 or 9 runtime */
     DWORD skipped8;                     /* Direct3D 8 draws not drawn (see stream_draw) */
+    GLuint array_bound, element_bound;  /* buffer objects bound for vertices and indices (bind_buffer) */
     /* Direct3D 8 pixel shaders: ARB fragment programs by shader handle, the one set (0: none,
        the fixed-function stages), constants c0..c7 */
     struct ps8 {
@@ -1756,6 +1866,19 @@ static void context_free(RCTX *c)
             release(c->vs[i]->code);
             release(c->vs[i]);
         }
+    {
+        DDLOCAL *d = ddlocal(c->ddl, 0);    /* its buffer objects go with the OpenGL context */
+        for (i = 0; d && i < d->nbuf; i++)
+            if (d->buf[i].ctx == (void *)c) {
+                d->buf[i].name = 0;
+                d->buf[i].ctx = NULL;
+            }
+        for (i = 0; d && i < d->ntrash; )
+            if (d->trash[i].ctx == (void *)c)
+                d->trash[i] = d->trash[--d->ntrash];
+            else
+                i++;
+    }
     if (c->rc) {
         make_current(c);
         for (i = 0; i < c->ntex; i++)
@@ -2881,7 +3004,30 @@ typedef struct {
     int xyz;                            /* untransformed (D3DFVF_XYZ..): the HAL transforms them */
     int shader;                         /* laid out by the vertex shader's declaration (vs_begin) */
     int normal;                         /* their normal's byte offset, -1 if none */
+    GLuint vbo;                         /* the buffer object holding them (base is in start's copy), or 0 */
+    BYTE *start;
+    GLuint ibo;                         /* indices: the buffer object holding them, or 0 */
 } VERTICES;
+
+/* Bind a buffer object (0: none, for arrays and indices in memory) for vertices or indices. */
+static void bind_buffer(RCTX *c, GLenum target, GLuint name)
+{
+    GLF *gl = gl_of(c);
+    GLuint *bound = target == GL_ARRAY_BUFFER_ARB ? &c->array_bound : &c->element_bound;
+    if (*bound != name && gl->BindBufferARB) {
+        gl->BindBufferARB(target, name);
+        *bound = name;
+    }
+}
+
+/* Where an array of v starts: in its buffer object (an offset) or in memory. */
+static const BYTE *vertex_data(RCTX *c, const VERTICES *v, DWORD first)
+{
+    bind_buffer(c, GL_ARRAY_BUFFER_ARB, v->vbo);
+    if (v->vbo)
+        return (const BYTE *)(DWORD)(v->base - v->start) + first * v->stride;
+    return v->base + first * v->stride;
+}
 
 static int parse_fvf(DWORD fvf, VERTICES *v)
 {
@@ -3027,7 +3173,7 @@ static float *convert(RCTX *c, const VERTICES *v, DWORD first, DWORD count)
 static void arrays(RCTX *c, const VERTICES *v, DWORD first, DWORD count)
 {
     GLF *gl = gl_of(c);
-    BYTE *b = v->base + first * v->stride;
+    const BYTE *b = vertex_data(c, v, first);
     int s;
 
     attribs_off(c);
@@ -3806,7 +3952,7 @@ static void vs_arrays(RCTX *c, const VERTICES *v, DWORD first)
 {
     GLF *gl = gl_of(c);
     struct vs8 *s = vs_find(c, c->fvf8);
-    BYTE *b = v->base + first * v->stride;
+    const BYTE *b = vertex_data(c, v, first);
     DWORD n, u;
 
     gl->DisableClientState(GL_VERTEX_ARRAY);
@@ -3852,7 +3998,7 @@ static void vs_arrays(RCTX *c, const VERTICES *v, DWORD first)
 static void tnl_arrays(RCTX *c, const VERTICES *v, DWORD first)
 {
     GLF *gl = gl_of(c);
-    BYTE *b = v->base + first * v->stride;
+    const BYTE *b = vertex_data(c, v, first);
     DWORD u;
 
     attribs_off(c);
@@ -3933,6 +4079,7 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
         if (!idx)
             gl->DrawArrays(mode, 0, count);
         else
+            bind_buffer(c, GL_ELEMENT_ARRAY_BUFFER_ARB, v->ibo);
             gl->DrawElements(mode, nidx, GL_UNSIGNED_SHORT, idx);
         c->dirty = 1;
         return;
@@ -3946,6 +4093,7 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
         if (!idx)
             gl->DrawArrays(mode, 0, count);
         else
+            bind_buffer(c, GL_ELEMENT_ARRAY_BUFFER_ARB, v->ibo);
             gl->DrawElements(mode, nidx, GL_UNSIGNED_SHORT, idx);
         c->dirty = 1;
         return;
@@ -3960,6 +4108,7 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
         if (!convert(c, v, first, span))
             return;
         arrays(c, v, first, span);
+        bind_buffer(c, GL_ELEMENT_ARRAY_BUFFER_ARB, v->ibo);
         gl->DrawElements(mode, nidx, GL_UNSIGNED_SHORT, idx);
     }
     c->dirty = 1;
@@ -4296,7 +4445,9 @@ static void surface_handles(DDLOCAL *l, LPDDRAWI_DDRAWSURFACE_LCL root,
         return;
     if (s->ddsCaps.dwCaps & DDSCAPS_EXECUTEBUFFER) {    /* a Direct3D 8 vertex or index buffer */
         handle_set(l, h, NULL);         /* never dereference the record later */
-        buffer_set(l, h, s->lpGbl ? s->lpGbl->fpVidMem : 0, s->lpGbl ? s->lpGbl->dwLinearSize : 0);
+        buffer_set(l, h, s->lpGbl ? s->lpGbl->fpVidMem : 0, s->lpGbl ? s->lpGbl->dwLinearSize : 0,
+                   buf_on && s->lpGbl && s->lpGbl->dwReserved1 == D3D_BUFFER_MARK,
+                   (s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_HINTSTATIC) != 0);
         tracef("rd3d: buffer %lx: caps %08lx, caps2 %08lx, memory %08lx, %lu bytes\r\n", h,
                s->ddsCaps.dwCaps, s->lpSurfMore->ddsCapsEx.dwCaps2,
                s->lpGbl ? s->lpGbl->fpVidMem : 0, s->lpGbl ? s->lpGbl->dwLinearSize : 0);
@@ -4373,7 +4524,8 @@ static DWORD WINAPI DestroyDDLocal(LPDDHAL_DESTROYDDLOCALDATA d)
     DDLOCAL *l = ddlocal(d->pDDLcl, 0);
     if (l) {
         release(l->surf);
-        release(l->buf);
+        release(l->buf);                /* buffer objects go with their contexts */
+        release(l->trash);
         shadows_free(l);
         memset(l, 0, sizeof *l);
     }
@@ -4767,6 +4919,48 @@ static void ps_apply(RCTX *c, long prog)
     }
 }
 
+/* The buffer object holding buffer h, bound to target (GL_ARRAY_BUFFER_ARB for vertices,
+   GL_ELEMENT_ARRAY_BUFFER_ARB for indices): made on first use and uploaded again only after
+   the buffer was written. 0 when the buffer is the runtime's (or another context has it). */
+static GLuint buffer_object(RCTX *c, DWORD h, GLenum target)
+{
+    GLF *gl = gl_of(c);
+    DDLOCAL *d = ddlocal(c->ddl, 0);
+    struct buf8 *b;
+    struct bufhead *head;
+    DWORD i;
+
+    if (!d || !h || h >= d->nbuf || !gl->BufferDataARB || !gl->GenBuffersARB)
+        return 0;
+    for (i = 0; i < d->ntrash; )        /* names this context let go of */
+        if (d->trash[i].ctx == (void *)c) {
+            gl->DeleteBuffersARB(1, &d->trash[i].name);
+            d->trash[i] = d->trash[--d->ntrash];
+        } else {
+            i++;
+        }
+    b = &d->buf[h];
+    /* Only buffers the program fills once (HINTSTATIC): the runtime appends to its dynamic ones
+       (DrawPrimitiveUP's) after a single Lock, so their writes are not all seen here. */
+    if (!b->ours || !b->fixed || !(head = buffer_head(b->mem)) || (b->name && b->ctx != (void *)c))
+        return 0;
+    if (!b->name) {
+        gl->GenBuffersARB(1, &b->name);
+        if (!b->name)
+            return 0;
+        b->ctx = c;
+        b->writes = head->writes - 1;
+    }
+    bind_buffer(c, target, b->name);
+    if (b->writes != head->writes) {
+        gl->BufferDataARB(target, (int)b->size, (const void *)b->mem,
+                          b->fixed ? GL_STATIC_DRAW_ARB : GL_DYNAMIC_DRAW_ARB);
+        b->writes = head->writes;
+        tracef("rd3d: buffer %lx to the GPU, %lu bytes\r\n", h, b->size);
+    }
+    return b->name;
+}
+
 /* ---- Direct3D 8 draws ----------------------------------------------------------------------- */
 /* Stream zero's vertices: a buffer surface named by its handle, or, for SETSTREAMSOURCEUM, the
    vertices that came with the command buffer. 0 when there is nothing usable. */
@@ -4802,6 +4996,10 @@ static int stream_vertices(RCTX *c, LPD3DHAL_DRAWPRIMITIVES2DATA d, VERTICES *v)
         data = buffer_get(c->ddl, c->stream_handle, &bytes);
         if (!data)
             return 0;
+        if (v->shader || v->xyz) {      /* drawn by a vertex program: from a buffer object */
+            v->vbo = buffer_object(c, c->stream_handle, GL_ARRAY_BUFFER_ARB);
+            v->start = data;
+        }
     }
     v->base = data;
     v->count = bytes / c->stream_stride;
@@ -4889,6 +5087,14 @@ static void stream_draw(RCTX *c, LPD3DHAL_DRAWPRIMITIVES2DATA d, DWORD type, lon
             skip8(c, "index range");
             return;
         }
+        if (v.vbo && stream_from(&v, first)) {
+            /* vertices on the GPU: the indices as they are, from vertex zero on, from their own
+               buffer object if they have one (no copy, no scan for their range) */
+            v.ibo = buffer_object(c, c->index_handle, GL_ELEMENT_ARRAY_BUFFER_ARB);
+            draw(c, &v, mode, 0, 0, v.ibo ? (const WORD *)index_byte : (const WORD *)(ib + index_byte),
+                 verts, 0);
+            return;
+        }
         idx = index_list(c, (const WORD *)(ib + index_byte), verts, 1, 1,
                          &lo, &span);
         if (!idx) {
@@ -4915,6 +5121,11 @@ static void buffer_blt(RCTX *c, const RB_DP2_BUFFER_BLT *b)
         return;
     }
     memmove(dst + b->offset, src + offset, size);
+    {
+        DDLOCAL *d = ddlocal(c->ddl, 0);
+        if (d && b->dest < d->nbuf && d->buf[b->dest].ours)
+            d3d_buffer_written(d->buf[b->dest].mem);    /* its buffer object is out of date */
+    }
 }
 
 /* Commands that carry n records of size bytes, each followed by a variable part of the length
@@ -5652,6 +5863,9 @@ static void d8_caps(RB_D3DCAPS8 *c)
         c->vertexProcessingCaps = D3DVTXPCAPS_TEXGEN | D3DVTXPCAPS_MATERIALSOURCE7 |
                                   D3DVTXPCAPS_DIRECTIONALLIGHTS | D3DVTXPCAPS_POSITIONALLIGHTS |
                                   D3DVTXPCAPS_LOCALVIEWER;
+        if (buf_on)                     /* vertex and index buffers in memory the driver allocates
+                                           (rippledd.c), so that it sees their Locks */
+            c->devCaps |= 0x02000000UL | 0x04000000UL;     /* D3DDEVCAPS_HWVERTEXBUFFER, HWINDEXBUFFER */
         c->maxActiveLights = TNL_LIGHTS;
         c->maxVertexBlendMatrices = 1;      /* the world matrix alone: no vertex blending */
         c->maxUserClipPlanes = 0;
@@ -5678,6 +5892,8 @@ static void d8_caps(RB_D3DCAPS8 *c)
     }
     c->fvfCaps = STAGES;                    /* texture coordinate sets */
     c->maxPixelShaderValue = fbits(1.0f);
+    tracef("rd3d: Direct3D 8 device caps %08lx, vertex shaders %08lx\r\n", c->devCaps,
+           c->vertexShaderVersion);
 }
 
 /* Until the Direct3D 8 path has been through its tests it is offered only when the registry
@@ -5690,12 +5906,17 @@ int d3d8_enabled(void)
     char v[4];
     DWORD n = sizeof v, type;
 
-    d8_on = tnl_on = 0;
+    d8_on = tnl_on = buf_on = 0;
     if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, "Software\\moose-ripple", 0, KEY_READ, &k) == ERROR_SUCCESS) {
         if (RegQueryValueEx(k, "D3D8", NULL, &type, (BYTE *)v, &n) == ERROR_SUCCESS &&
             type == REG_SZ && (v[0] == '1' || v[0] == '2')) {
             d8_on = 1;
             tnl_on = v[0] == '2';       /* and vertices processed on the GPU (tnl_begin) */
+            buf_on = tnl_on;            /* in buffers the driver allocates, unless D3D8Buffers is "0" */
+            n = sizeof v;
+            if (RegQueryValueEx(k, "D3D8Buffers", NULL, &type, (BYTE *)v, &n) == ERROR_SUCCESS &&
+                type == REG_SZ && v[0] == '0')
+                buf_on = 0;
         }
         RegCloseKey(k);
     }
