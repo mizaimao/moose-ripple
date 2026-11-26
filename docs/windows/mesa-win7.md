@@ -2038,3 +2038,31 @@ It is the limit there: a driver that never kept it waiting could gain a tenth to
 most, on either system. Firefly Forest is the exception. The GPU idles half the time, so that
 scene is held up on the way to the GPU: the guest's processor, the driver, or QEMU's drawing
 thread. Which of them is the next measurement (`rig/threads.sh` during that test).
+
+## Clip planes, Fetch4 and points on Windows 7 (2026-11-25)
+
+The clean-install check of release 0.4.0 ran Vista's screen-space pixel tests
+(`tools/vista/positiont.c`) on Windows 7 too, and three of its four parts failed there in one
+place or another. The Vista port had fixed all three in the Direct3D 9 driver, but compiled
+the fixes for Vista only:
+
+| What | Without it |
+| --- | --- |
+| User clip planes switched on in the rasterizer, or cut in the pixel shader where the host has no clip distances | A program's clip planes did nothing, on every host. |
+| Fetch4 lowered to four reads where the host has no `textureGather` | An OpenGL ES host (UTM on Apple silicon) rejected the shader and the draws were lost. |
+| Points drawn natively where the host has no geometry shaders | The same host rejected the geometry shader, which costs the whole context. |
+
+They are common to both systems now. `positiont` (plain, `--fetch4`, `--points`,
+`--clip-planes`, at 32 and 64 bits) on Windows 7 SP1 in UTM, one session, the driver swapped
+in place between the two rounds:
+
+| | Release 0.4.0 | Common code |
+| --- | ---: | ---: |
+| Parts that pass, of 8 | 2 | 8 |
+
+On the Intel host release 0.4.0 passes the Fetch4 and points parts already (it has both
+features) and fails only the clip planes.
+
+The Direct3D 9 probes pass with it in UTM as before (12 of 12, six of them full-screen). On
+a desktop OpenGL host the common code is what Vista runs already (its 12 pixel tests pass on
+the Intel host); Windows 7 on such a host has not run it yet.

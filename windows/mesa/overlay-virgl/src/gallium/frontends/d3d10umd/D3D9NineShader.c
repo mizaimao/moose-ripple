@@ -3859,10 +3859,8 @@ tx_ctor(struct shader_translator *tx, struct pipe_screen *screen, struct nine_sh
     tx->face_is_sysval_integer = GET_CAP(FS_FACE_IS_INTEGER_SYSVAL);
     tx->no_vs_window_space = !GET_CAP(VS_WINDOW_SPACE_POSITION);
     tx->mul_zero_wins = GET_CAP(LEGACY_MATH_RULES);
-#ifdef RIPPLE_VISTA
     /* The virgl ES 3.0 profile emits GLSL ES 3.00, which has no textureGather. */
     tx->lower_fetch4 = !GET_CAP(MAX_TEXTURE_GATHER_COMPONENTS) || GET_CAP(GLSL_FEATURE_LEVEL) < 150;
-#endif
 
     if (info->emulate_features) {
         tx->shift_wpos = true;
@@ -4227,11 +4225,9 @@ static void parse_shader(struct shader_translator *tx)
             if (tx->info->clip_plane_emulation & (1 << i))
                 num_clipdist = i + 1;
         }
-#ifdef RIPPLE_VISTA
         /* virgl reads a whole vec4 from each geometry-shader clip-distance
          * input. Supply zeroes for inactive lanes so that read is in bounds. */
         num_clipdist = (num_clipdist + 3) & ~3;
-#endif
         /* TODO: handle undefined channels of oPos (w is not always written to I think. default is 1) *
          * Note in d3d9 it's not possible to output clipvert, so we don't need to check
          * for its existence */
