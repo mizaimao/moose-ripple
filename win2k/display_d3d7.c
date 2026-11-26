@@ -807,8 +807,12 @@ static ULONG stage_words(const D7_CONTEXT *c, ULONG n, ULONG *color, ULONG *alph
         return StageDisabled;
     }
     if (alphaOp == D3DTOP_DISABLE) { alphaOp = D3DTOP_SELECTARG1; a1 = current; }
-    if (!ok || colorOp < D3DTOP_SELECTARG1 || colorOp > D3DTOP_BLENDCURRENTALPHA ||
-        alphaOp < D3DTOP_SELECTARG1 || alphaOp > D3DTOP_BLENDCURRENTALPHA) return StageUnsupported;
+    /* DOTPRODUCT3 puts its result in all four channels: the alpha does the same. */
+    if (colorOp == D3DTOP_DOTPRODUCT3) { alphaOp = colorOp; a1 = c1; a2 = c2; }
+    if (!ok || colorOp < D3DTOP_SELECTARG1 ||
+        (colorOp > D3DTOP_BLENDCURRENTALPHA && colorOp != D3DTOP_DOTPRODUCT3) ||
+        alphaOp < D3DTOP_SELECTARG1 ||
+        (alphaOp > D3DTOP_BLENDCURRENTALPHA && alphaOp != D3DTOP_DOTPRODUCT3)) return StageUnsupported;
     *color = colorOp | (c1 << 8) | (c2 << 16);
     *alpha = alphaOp | (a1 << 8) | (a2 << 16);
     *texture = samples_texture(colorOp, c1, c2) || samples_texture(alphaOp, a1, a2);
@@ -1333,6 +1337,15 @@ static BOOL bad_position(const RB2K_D3D7_VERTEX *v)
            (v->z & 0x7fffffff) >= 0x7f800000 || !(v->rhw & 0x7fffffff) || (v->rhw & 0x7fffffff) >= 0x7f800000;
 }
 
+/* D3DRS_COLORWRITEENABLE (168) as the channels a draw does not write. Programs draw
+ * stencil shadow volumes with it at zero; all channels are written until it is set. */
+static ULONG no_write(const D7_CONTEXT *c)
+{
+    enum { ColorWriteEnable = 168 };
+    if (!((c->rsSet[ColorWriteEnable / 32] >> (ColorWriteEnable % 32)) & 1)) return 0;
+    return (~c->rs[ColorWriteEnable] & 15) << RB2K_BLEND_NO_WRITE_SHIFT;
+}
+
 static void skip(D7_CONTEXT *c, ULONG reason, ULONG primitives)
 {
     c->display->d7draw.skipped[reason] += primitives;
@@ -1576,6 +1589,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     if (c->blend && c->srcBlend >= D3DBLEND_ZERO && c->srcBlend <= D3DBLEND_BOTHINVSRCALPHA &&
         c->dstBlend >= D3DBLEND_ZERO && c->dstBlend <= D3DBLEND_BOTHINVSRCALPHA)
         draw->blend = RB2K_D7_ON | (c->srcBlend << 8) | c->dstBlend | (s->alpha ? RB2K_BLEND_DEST_ALPHA : 0);
+    draw->blend |= no_write(c);
     draw->cull = c->cull >= D3DCULL_NONE && c->cull <= D3DCULL_CCW ? c->cull : D3DCULL_NONE;
     draw->specular = c->specular ? 1 : 0;
     draw->factor = c->factor;
@@ -2004,6 +2018,7 @@ static BOOL pixel_states(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, const D8_SHADER *s
     if (c->blend && c->srcBlend >= D3DBLEND_ZERO && c->srcBlend <= D3DBLEND_BOTHINVSRCALPHA &&
         c->dstBlend >= D3DBLEND_ZERO && c->dstBlend <= D3DBLEND_BOTHINVSRCALPHA)
         draw->blend = RB2K_D7_ON | (c->srcBlend << 8) | c->dstBlend | (s->alpha ? RB2K_BLEND_DEST_ALPHA : 0);
+    draw->blend |= no_write(c);
     draw->cull = c->cull >= D3DCULL_NONE && c->cull <= D3DCULL_CCW ? c->cull : D3DCULL_NONE;
     draw->program = program;
     draw->fog = fog;
@@ -3532,7 +3547,7 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     c->caps2 = RB_D3DCAPS2_CANRENDERWINDOWED;
     c->presentationIntervals = RB_D3DPRESENT_INTERVAL_IMMEDIATE | RB_D3DPRESENT_INTERVAL_ONE;
     c->devCaps = hw->dwDevCaps & ~D3DDEVCAPS_FLOATTLVERTEX;
-    c->primitiveMiscCaps = tri->dwMiscCaps;
+    c->primitiveMiscCaps = tri->dwMiscCaps | 0x80;   /* D3DPMISCCAPS_COLORWRITEENABLE */
     c->rasterCaps = tri->dwRasterCaps & ~D3DPRASTERCAPS_SUBPIXEL;
     c->srcBlendCaps = tri->dwSrcBlendCaps;
     c->destBlendCaps = tri->dwDestBlendCaps;
@@ -3696,7 +3711,7 @@ BOOL rb_d7_info(PDD_GETDRIVERINFODATA a)
             D3DTEXOPCAPS_ADD | D3DTEXOPCAPS_ADDSIGNED | D3DTEXOPCAPS_ADDSIGNED2X |
             D3DTEXOPCAPS_SUBTRACT | D3DTEXOPCAPS_ADDSMOOTH | D3DTEXOPCAPS_BLENDDIFFUSEALPHA |
             D3DTEXOPCAPS_BLENDTEXTUREALPHA | D3DTEXOPCAPS_BLENDFACTORALPHA |
-            D3DTEXOPCAPS_BLENDTEXTUREALPHAPM | D3DTEXOPCAPS_BLENDCURRENTALPHA,
+            D3DTEXOPCAPS_BLENDTEXTUREALPHAPM | D3DTEXOPCAPS_BLENDCURRENTALPHA | D3DTEXOPCAPS_DOTPRODUCT3,
         .wMaxTextureBlendStages = 2, .wMaxSimultaneousTextures = 2, .wMaxVertexBlendMatrices = 1,
         .dvMaxVertexW = 1.0e10f, .dwMaxActiveLights = RB2K_D7_LIGHTS,
         .dwVertexProcessingCaps = D3DVTXPCAPS_MATERIALSOURCE7 | D3DVTXPCAPS_DIRECTIONALLIGHTS |

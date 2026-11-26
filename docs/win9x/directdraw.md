@@ -702,6 +702,79 @@ The context is made with Mesa's `DrvCreateContext` and every OpenGL function com
 when the context is made. The game then plays its title flyby and its demo level, and exits
 cleanly. d3dtest: 1085 frames/s (1040 before); Re-Volt's race still draws.
 
+## Direct3D 8 through its own interface (stage 1, 2026-11-26, off by default)
+
+The Direct3D 8 runtime drives a driver that only has the Direct3D 7 interface by translating
+(it runs the vertex processing and sends Direct3D 7 commands), which is how Direct3D 8 programs
+have run on this driver so far. Shaders need the Direct3D 8 interface itself: the same
+GetDriverInfo2 requests and DrawPrimitives2 commands as on Windows 2000 (`win2k/d3d8ddi.h` is
+shared). Stage 1 answers GetDriverInfo2 (D3DCAPS8 without shaders or hardware vertex
+processing, the format list, the runtime's version) and draws from streams: SETVERTEXSHADER
+with a vertex format, SETSTREAMSOURCE and its user-memory form, SETINDICES, DRAWPRIMITIVE,
+DRAWPRIMITIVE2, DRAWINDEXEDPRIMITIVE and its second form, CLIPPEDTRIANGLEFAN and BUFFERBLT;
+shader and patch commands are stepped over. It is offered only when the registry value
+`HKLM\Software\moose-ripple`, `D3D8` is `"1"` (a `.reg` file on the test CD sets it).
+
+Learnt on Windows 98 SE with DirectX 8.1 (UTM):
+
+- **The runtime asks once per boot.** The first program that uses Direct3D 8 decides, for every
+  program until the next restart, whether the driver has the Direct3D 8 interface; that is why
+  the switch is in the registry and not in a program's environment.
+- **Its surface records for buffers live only during CreateSurfaceEx.** The runtime's
+  `DDRAWI_DDRAWSURFACE_LCL` for a vertex or index buffer is freed when the call returns and its
+  memory is soon reused: the HAL read a "global" pointer of `00810800` from it at the first draw,
+  faulted while DirectDraw held Windows' 16-bit lock, and Windows stopped answering (no crash
+  dialog can show then). The HAL now copies each buffer's address and size into its own table
+  when the runtime names it (`buffer_set`), and never looks at that record again.
+- **A draw can start at any byte.** The runtime packs vertices of different formats into one
+  buffer and gives DRAWPRIMITIVE2 a byte offset that need not be a whole vertex.
+- **Texture records are just as short-lived.** For textures named in a session with a
+  Direct3D 8 context, the HAL keeps its own copy of each level's records (`shadow_make`: the
+  LCL, its MORE, the GBL with the GBL_MORE pointer just before it, and attach lists linking the
+  levels) and the handle table points at the copy; the memory stays the runtime's. Writes
+  still reach the texture by its memory address (Lock and texture blits mark it). Cube maps
+  aren't offered yet and get no copy.
+
+`d8pixels sw` (software vertex processing), Windows 98 SE with DirectX 8.1 in UTM: all 8 cases
+pass through the new interface (clear, user memory, vertex buffer, strip, indexed, base vertex,
+managed texture, untransformed vertices), in the first program of the boot and in a second one.
+Through the Direct3D 7 translation (switch off) all 8 pass too, as before. `d3dtest`
+(Direct3D 7) in the same boot with the switch on fails the same two checks as with the released
+driver in UTM (mipmap level with LOD bias +1: level 3's colour where level 4's is expected), so
+that one is the UTM host's and not this work's.
+
+Seen twice and not explained, with the switch off (the released driver too): in two boots, a
+second run of `d8pixels` loaded no driver code, made no OpenGL context and still passed its
+pixel checks, so something else drew it. In a later boot it did not happen: three runs of a
+small frame-rate test (`d8fps`, 169 to 185 frames a second in UTM) and then two runs of
+`d8pixels` each reached the HAL. Not understood yet; watch for it.
+
+### Pixel shaders 1.1 to 1.3 (stage 2, 2026-11-26)
+
+With the Direct3D 8 interface on, the device reports pixel shader version 1.3. The HAL does not
+write its own translator: the Windows 2000 driver's (`win2k/d3d8_ps.c`, built unchanged with
+Visual C++ 6) turns a shader into Gallium TGSI text, and `win9x/ddraw/tgsi_arb.c` turns that
+text, line by line, into an OpenGL ARB fragment program, which Mesa compiles for the host.
+TGSI names become ARB ones (TEMP[n] is Tn, CONST[n] program.env[n], the translator's
+immediates program.local, SAMP[n] texture unit n, the colours and coordinate sets
+fragment.color and fragment.texcoord); what ARB lacks is spelled out (`|x|` through ABS, SSG
+through two SLT, KILL_IF is KIL, scalar instructions take one component). Shaders are compiled
+when the runtime creates them; constants c0..c7 go to program.env before a draw; with a shader
+set, each stage's texture is bound on its unit and the stages' operations don't apply.
+
+Fog after the shader: the HAL already gives each vertex Direct3D's fog factor f (from the
+specular alpha for vertex fog, from the depth for table fog) as the coordinate 0.25 + 0.5 f of
+the unit that does fixed-function fog. A shader gets a second program when a draw with fog
+first needs it: the translator's linear fog from a vertex depth, reading that coordinate, with
+start 0.75 and end 0.25, which gives back f.
+
+`d8pixels sw`, Windows 98 SE with DirectX 8.1 in UTM: 23 of 23 pass (the 8 fixed-function
+cases and 15 pixel shader cases: mov, texture, constants, modifiers, co-issue, cnd, cmp, dp3,
+texcoord, texkill, two textures, fog from the specular alpha, table fog, lit, lit with fog).
+Not yet: more than two textures (t2 and t3; the HAL has two stages), the bump and matrix
+texture instructions of version 1 beyond what d8pixels covers, vertex shaders.
+
+
 ## Changing a driver in the test VM
 
 Copying a new `rippledd.dll` or `ripplevd.vxd` over the old one fails while Windows has it

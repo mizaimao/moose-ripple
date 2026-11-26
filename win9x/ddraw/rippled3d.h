@@ -10,6 +10,8 @@ void d3d_init(RDD_SHARED *s, DDCORECAPS *caps);
 
 /* GetDriverInfo's Direct3D GUIDs: returns 1 if it answered. */
 int d3d_driver_info(LPDDHAL_GETDRIVERINFODATA d);
+/* Whether the HAL offers the Direct3D 8 interface (GetDriverInfo2); read at d3d_init. */
+int d3d8_enabled(void);
 
 /* A surface is about to be read or shown (Lock, Flip): rendering still on the GPU for it goes
    into its memory first. */

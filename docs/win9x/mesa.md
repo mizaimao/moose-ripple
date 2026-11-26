@@ -134,7 +134,29 @@ window keeps the GDI path for those frames; `glband` moves the pointer away for 
     quake3.exe +set timedemo 1 +set r_fullscreen 0 +set r_mode 4 +set nextdemo quit +demo demo001
 
 Not checked yet: the pointer over a window (QEMU's relative mouse would not put it there in
-the test guests), and UTM.
+the test guests).
+
+### Both paths in UTM (2026-11-26)
+
+UTM on an Apple silicon Mac (ANGLE on Metal under virglrenderer), the `rb-win98` guest alone,
+one disposable boot, the same driver files; each pair run back to back, GDI path first. "Shown"
+counts the pictures UTM's own window received (its `debug.log` has one `gl draw` line for each):
+its display takes at most about 60 a second.
+
+| Test | GDI path | From the GPU |
+|---|---:|---:|
+| `gltest 10 full`, 1280×720×32, frames a second | 151.4 | 1,779.1 |
+| the same, shown a second | 27.8 | 55.9 |
+| `glband 10` (640×480 window), frames a second | 503.6 | 1,756.7 |
+| Quake III demo, `timedemo demo001`, 1024×768 full screen, fps | 71.3 | 104.8 |
+| the same, shown a second | 19.8 | 39.4 |
+| Quake III demo, `timedemo demo001`, 800×600 window, fps | 75.3 | 98.0 |
+| the same, shown a second | 20.6 | 37.4 |
+
+`glband` draws the same picture every frame, so on the GDI path the desktop copy has nothing
+new to send and UTM's count says nothing there. UTM's own screen capture shows only the
+emulated VGA picture, not the GPU's, so the picture checks of both paths were made on the
+Intel host (above).
 
 ## How a 2024 Mesa gets onto a 1998 Windows
 
@@ -334,6 +356,22 @@ lost from one run to the next.
   colour during the copy. CPU access to a DirectDraw surface can still require a read-back.
 - **The host's log** is where rendering errors show (`journalctl` on Proxmox VE, lines from
   `QEMU[pid]`).
+- **S3TC on a host without it (UTM) comes from Mesa's CPU fallback, already on.** Mesa's
+  option `allow_compressed_fallback` defaults to true for every frontend that reads Mesa's
+  options, WGL included, so the driver offers `GL_EXT_texture_compression_s3tc` there and
+  decodes DXT on the CPU. Checked in UTM on Windows 98 (2026-11-26) with a probe that uploads
+  a DXT1 texture and reads it back: offered, and the colours come back right; with
+  `allow_compressed_fallback=false` set, not offered. Return to Castle Wolfenstein's
+  single-player demo checks for the extension and uses it: loading the level `escape1` took
+  11.86 s with it (`CL_InitCGame`) and 9.43 s with the fallback switched off (it then keeps
+  its textures uncompressed), one run each in the same boot.
+- **Return to Castle Wolfenstein (2001) crashes at start on the full extension list.** It
+  copies `GL_EXTENSIONS` into a buffer too small for a 2024 Mesa's list: Windows reported an
+  invalid page fault at an address made of the letters of an extension name. With
+  `MESA_EXTENSION_MAX_YEAR=2001` set before it starts, it runs (and still finds S3TC,
+  multitexture and compiled vertex arrays). Quake III does not need it. Its game folder is
+  `demomain` and its log `wconsole.log` (`+set logfile 2`); the demo loads a level with
+  `spmap escape1`, not `map`.
 
 ## Finding out why a program doesn't work
 

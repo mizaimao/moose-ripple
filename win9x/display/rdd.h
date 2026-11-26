@@ -67,6 +67,7 @@ typedef struct {
 #define RDD_HALINFO_ISPRIMARYDISPLAY 0x1
 #define RDD_HALINFO_MODEXILLEGAL     0x2
 #define RDD_HALINFO_GETDRIVERINFOSET 0x4
+#define RDD_HALINFO_GETDRIVERINFO2   0x8   /* Direct3D 8 and 9 ask with GetDriverInfo2 */
 
 /* VIDMEM: one heap of video memory. A rectangular heap here, as wide as the screen's lines:
    DirectDraw places full-width surfaces (back buffers) at the start of a line, which is where
