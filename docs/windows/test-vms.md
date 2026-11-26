@@ -184,6 +184,21 @@ marker on COM1 before typing the next line: keys typed while a full-screen test 
 keyboard are lost. One more guest installs with test mode left off, to see the driver refused
 (code 52) and the desktop stay on VGA.
 
+Release 0.5.0 was checked the same way on both systems, with two additions on the CD's
+`tests` folder: `tools/win7-debug/guest/glrun.cmd` and `glsingle.cmd` run the OpenGL tests of
+`tools/win7-hello` (`gltest`, `glsingle`) for 64-bit and 32-bit programs after the pixel tests.
+Results: Windows 7 ten of twelve pixel tests (the video processor test is Vista's), Vista
+twelve of twelve, the OpenGL tests pass on both at both widths with OpenGL 4.3. What helped:
+
+- `SHARED=1 sh cleanvm.sh ...` starts the guest next to another untimed guest on the host.
+- Device Manager's wizard is laid out alike on both systems at 800x600: "Browse my computer"
+  at 307,334, "Let me pick" at 360,377, "Have Disk" at 630,431 on Windows 7 and 560,403 on
+  Vista; Alt+N, then Alt+I for "Install this driver software anyway", Alt+C, Alt+Y.
+- The uninstall needs no coordinates that depend on the desktop's size: click the display
+  adapter in Device Manager's list, Delete, Space (ticks "Delete the driver software for this
+  device"), Enter.
+- The code 52 check was not repeated: nothing about the signature changed.
+
 ## Reference pictures on the GeForce 9600 GT
 
 **One boot of the card per power-on of the host, and a restart of the host after every card

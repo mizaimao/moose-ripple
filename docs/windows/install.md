@@ -106,13 +106,14 @@ virtio-gpu 3D", version 0.5.0.0. In both test installs Aero came on by itself.
 If it does not, choose an Aero theme in Personalization; on Windows 7,
 re-running the Windows Experience Index assessment also turns it on.
 
-What was tested for 0.4.0: an install by these steps, the pixel tests of
-`tools/vista` and the uninstall on a Windows Vista SP2 and a Windows 7 SP1
-guest that had never had the driver, a test certificate or test mode (QEMU 9.2
-with KVM, virglrenderer 0.10.4, Intel UHD Graphics 630). On Vista all twelve
-tests pass. On Windows 7 eight pass; the four that fail test what its build
-does not have (user clip planes, and the video processor formats Vista's
-video wallpaper needs).
+What was tested for 0.5.0: an install by these steps, the pixel tests of
+`tools/vista`, an OpenGL test for 64-bit and 32-bit programs, and the
+uninstall, on a Windows Vista SP2 and a Windows 7 SP1 guest that had never
+had the driver, a test certificate or test mode (QEMU 9.2 with KVM,
+virglrenderer 0.10.4, Intel UHD Graphics 630). On Vista all twelve pixel
+tests pass. On Windows 7 ten pass; the two that fail are the video processor
+test at both widths, which asks for the formats Vista's video wallpaper
+needs. The OpenGL test reports OpenGL 4.3 on both systems.
 
 If test mode is off, the driver does not start: Device Manager shows the
 adapter with error code 52 and Windows stays on its VGA driver.
@@ -170,7 +171,9 @@ The user-mode driver reads environment variables, for finding faults:
 
 The kernel driver writes its warnings to the guest's first serial port
 (COM1). `-serial file:ripple-com1.log` on QEMU's command line keeps them in
-a file on the host, which is what a bug report needs.
+a file on the host, which is what a bug report needs. It writes to the port
+directly, beside Windows' own serial driver: use COM1 for nothing else in the
+guest ([issue 231](https://github.com/mizaimao/moose-ripple/issues/231)).
 
 ## Licences
 
