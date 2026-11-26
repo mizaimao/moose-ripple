@@ -2278,6 +2278,33 @@ filtering; with it, `d9pixels` passes 56 of 56 on the interface (it skips the
 case when linear StretchRect is not offered, as with the switch off).
 
 
+## User clip planes
+
+The driver offered no user clip planes (`MaxUserClipPlanes` 0). Among the
+checks 3DMark05 makes before it creates a device, a missing plane sends it to
+a test of software vertex processing instead of hardware; Direct3D 7 to 9
+games use the planes for reflections and portals. Six are offered now.
+
+The planes (`SETCLIPPLANE`) are kept with the context and its state blocks,
+and a draw that `D3DRS_CLIPPLANEENABLE` asks to clip carries them in its
+packet. The host clips with clip distances:
+
+- A vertex shader's planes are in clip space. Its translated program
+  (`RB_VS_CLIP`) writes `dot(plane, oPos)` for each into two `CLIPDIST`
+  outputs; the planes follow the shader's constants.
+- Object-space draws (fixed-function vertices transformed by the pipeline)
+  have their planes in world space. Each of the miniport's four object-space
+  vertex shaders (Direct3D 7 draws and pixel shader draws, lit or not) has a
+  clip variant that measures the world position once its world transform is
+  done; the planes come before the vertices.
+- A rasterizer with the planes' bits (`clip_plane_enable`) turns the
+  distances on. Pretransformed vertices are not clipped, as in Direct3D.
+
+`d9pixels` cases 64 to 68 clip a quad with one plane through each path: fixed
+function, lit, with a pixel shader, lit with a pixel shader, and a vertex
+shader.
+
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:
