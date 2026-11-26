@@ -51,6 +51,11 @@ class RippleGPUClient : public IOUserClient
     uint64_t           fCmdPA[kCmdBuffers];
     volatile UInt32    fCmdBusy[kCmdBuffers];
     unsigned           fCmdNext;
+    // Where submit() spends its time, summed over this connection's life: calls, handles
+    // named, calls that found the command buffer still at the device, command bytes, then
+    // time (mach_absolute_time units) checking handles, waiting for the buffer, copying,
+    // queueing. Published as the property RippleSubmitStats every 512 calls.
+    uint64_t           fSub[8];
     uint32_t           fShown;                   // buffer this connection shows on the display
 
     int  contextSlot(uint32_t ctx) const;

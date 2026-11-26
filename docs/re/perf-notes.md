@@ -1160,3 +1160,45 @@ after Dashboard opens and closes. No error from the kext or the host's renderer.
 
 The gain is for hosts whose display reads the screen back (QEMU's headless display). Not
 measured in UTM, where the display works differently.
+
+### The hand-off to the kernel, the draws, and covered windows again (2026-11-26)
+
+With the display limit in, the Proxmox host to itself, OpenArena's timedemo (423 draws a
+frame, one submit of 73 KB naming 104 buffers), 1024x768 window:
+
+| run | frames/s |
+|---|---|
+| window under the Dock (as in every run above) | 188.0, 194.0, 198.2 on three boots |
+| the Dock hidden, so nothing covers the window | 263.5 |
+| window under the Dock, draws skipped (`RIPPLE_GL_SKIP_DRAWS=1`) | 299.2 |
+
+- **A covered window costs a quarter of the frame rate again.** At 140 frames/s it made no
+  difference (the display flush set the pace then); at these rates WindowServer drawing every
+  frame of the covered window is what the game waits for. Open: let a program that does not
+  wait for the refresh hand WindowServer only its newest frame.
+- **The draws** cost 2.0 ms of a 5.3 ms frame in all. Of that, 0.8 ms is the driver's work in
+  `glDrawElements` on the CPU (1.9 µs a draw: uploading the client arrays 0.19 ms, texture and
+  sampler state 0.2 ms, the rest spread thin); the remainder is the host running them.
+- **The submit call.** The kext now times its four parts per connection (registry property
+  `RippleSubmitStats` on each `RippleGPUClient`, every 512 submits): checking the 104 handles
+  46 µs, waiting for a free command buffer 0.1 µs, copying 73 KB 9 µs, and queueing the
+  command 298 µs. The last is the write that tells the host to look at the queue: it leaves
+  the guest and returns only when QEMU's main thread lets go of its lock, which it holds
+  while it runs GL commands. A program pays it twice a frame (submit and present).
+
+Tried: making that write from a kernel helper thread for queued commands (boot flag
+`ripple_kick=1`). The queueing step falls to 34 µs. One boot each, same kext:
+
+| | write from the caller | from the helper thread |
+|---|---|---|
+| window under the Dock | 194.0, 198.2 | 183.9, 186.3, 185.6 |
+| the Dock hidden | 263.5 | 290.9, 289.5 |
+
+Faster by 10% where nothing covers the window, slower by 6% where WindowServer draws it, so
+it stays off by default until the covered case is understood. QEMU's main thread during the
+covered run with the helper, sampled 300 times on the host: idle in its event loop 36%,
+waiting for the GPU 26%, running 19%, in other kernel calls 16%. Neither side is busy all the
+time; they wait for each other.
+
+For scale: the GeForce 9600 GT reference ran this timedemo at 351 frames/s (its window not
+covered, on a 1920x1080 screen).

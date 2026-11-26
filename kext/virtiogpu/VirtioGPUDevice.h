@@ -120,6 +120,9 @@ private:
     uint64_t fSlowestAbs;               // slowest command (absolute time) and its type
     uint32_t fSlowestType, fOver100ms, fAsyncFailed;
     bool     fAsync;
+    void    *fKickCall;                  // thread_call_t; 0: queued commands kick inline
+    volatile UInt32 fKickPending;
+    static void kickAction(void *self, void *);
     Queue fQueue[2];               // 0 control, 1 cursor
 
     IOLock *fCmdLock, *fCursorLock;        // fCmdLock: control ring and slots
