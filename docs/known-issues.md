@@ -192,3 +192,20 @@ keeps the quotes as part of the value. Curly quotes from a copied web page do th
 
 **Fix:** write the key exactly; in UTM without quotes
 ([docs/install.md](install.md#utm-on-an-apple-silicon-mac)).
+
+## KI-11: Changing the resolution with Quartz Extreme on crashes WindowServer
+
+GitHub issue: [#161](https://github.com/mizaimao/moose-ripple/issues/161)
+
+**Symptom.** With `ripple_gl=1 ripple_qe=1`, a switch from 1280x800 to 1920x1080
+(`tools/setmode 1920x1080`) crashes WindowServer: the user is logged out and the screen comes
+back at the old size. Found on 2026-11-25 on the Proxmox host; the same with release 0.2.2,
+and with queued submits on or off. Other sizes and System Preferences are not tried yet.
+
+**What is known.** WindowServer's main thread overflows its stack inside QuartzCore
+(`fe_gl_texture_load` calling itself through `fe_buffer_texture`), after the driver refused a
+pbuffer (`fe_cgls_set_pbuffer: failed: 10005`) and reported an incomplete framebuffer. The
+driver's log ends with textures asked from surfaces it no longer knows.
+
+**Workaround:** set the resolution without the two flags (boot once without them, choose the
+size, then put them back). Not tried yet either: whether the size chosen that way is kept.
