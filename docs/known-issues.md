@@ -269,3 +269,26 @@ would show the stale part.
 **Workaround.** `RIPPLE_GL_DIRECT=0` in the program's environment shows its window the older
 way (each frame read back into a private window), which applies the rectangle (checked
 2026-11-26: `swaprect-check` then shows what it should); it is slower.
+
+## KI-14: A GL call could crash after a context was destroyed from another thread (fixed after 0.6.0)
+
+GitHub issue: [#240](https://github.com/mizaimao/moose-ripple/issues/240). Found and fixed on 2026-11-26; releases
+0.6.0 and earlier have it.
+
+**Symptom.** A program crashes inside the OpenGL driver at the first GL call on a new context,
+or when it switches contexts. Seen once: ScreenSaverEngine, as the screen saver started
+(`EXC_BAD_ACCESS` in `update_framebuffer`, called from `glClear`).
+
+**Cause.** The driver makes a context current for Mesa lazily, and Mesa's pointer to it stays
+in the thread after the program has stopped using the context. A program that destroys the
+context from another thread leaves the first thread pointing at freed memory; garbage-collected
+programs do that all the time (the collector's thread destroys what the main thread used:
+ScreenSaverEngine, System Preferences). The next context can be given the same address and
+then looked "already current" without ever having been bound, and at the next switch Mesa
+flushed the context it believed current, which was gone.
+
+**Fix.** A context notes the thread it is current on, and an entry takes "already current"
+only if both the address and the thread match; before a switch, a pointer that is not a living
+context of this thread is dropped unfollowed. `tools/gl-feature-check stale` draws with a
+context on one thread and destroys it from another, a hundred times: Apple's software renderer
+passes, release 0.6.0 crashes in the second round, the fixed driver passes.
