@@ -2201,6 +2201,23 @@ on its right. On XP SP3 under KVM on the second Intel UHD 630 host, case 55
 passes and `d9pixels` passes 46 of 46, and 3DMark 2001 SE runs all its tests
 to a final score for the first time.
 
+## Render targets up to 2048x2048
+
+3DMark05's first run stopped on "CreateTexture failed: Driver internal error"
+when it made its shadow map, a 2048x2048 render target texture. Offscreen
+surfaces, render targets and depth buffers shared the screen's limit
+(`RB2K_DD_MAX_WIDTH` by `RB2K_DD_MAX_HEIGHT`, 1680x1200), so DirectDraw
+refused the surface. They may now be 2048 on a side (`RB2K_DD_TARGET_SIDE`);
+display modes keep their limit.
+
+Readback staging keeps the screen's size: its attach request has to fit one
+queue packet. A target larger than the screen is drawn into and sampled, but
+locking it fails.
+
+`d9pixels` case 70 clears a 2048x2048 render target texture, with a depth
+buffer of its size, and draws it.
+
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:
