@@ -3544,7 +3544,10 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     const D3DPRIMCAPS *tri = &hw->dpcTriCaps;
     RtlZeroMemory(c, sizeof(*c));
     c->deviceType = 1;                  /* D3DDEVTYPE_HAL */
-    c->caps2 = RB_D3DCAPS2_CANRENDERWINDOWED;
+    /* D3DCAPS2_PRESENT_INTERVAL_IMMEDIATE (d3dhal.h, for drivers): a Direct3D 8 or 9 runtime derives
+     * D3DPRESENT_INTERVAL_IMMEDIATE from it, and no present here waits for the vertical blank.
+     * 3DMark05 refuses hardware without that interval. */
+    c->caps2 = RB_D3DCAPS2_CANRENDERWINDOWED | 0x00400000;
     c->presentationIntervals = RB_D3DPRESENT_INTERVAL_IMMEDIATE | RB_D3DPRESENT_INTERVAL_ONE;
     c->devCaps = hw->dwDevCaps & ~D3DDEVCAPS_FLOATTLVERTEX;
     c->primitiveMiscCaps = tri->dwMiscCaps | 0x80;   /* D3DPMISCCAPS_COLORWRITEENABLE */
