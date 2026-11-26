@@ -80,6 +80,13 @@ this project: nothing may look worse than without our driver).
    in a system memory heap; 3DMark 99 Max makes 21969 at 800x600. Restart and Shut Down work
    again ([display-driver.md](display-driver.md)). Next: a comparison against a card of the
    time, games.
+   *State 2026-11-26:* the DirectX 8 and 9 driver interface, behind the registry switch
+   `HKLM\Software\moose-ripple`, `D3D8` = `"1"` ([directdraw.md](directdraw.md#direct3d-8-through-its-own-interface-stage-1-2026-11-26-off-by-default)):
+   stream draws, pixel shaders 1.1 to 1.3 and 2.0 (the Windows 2000 driver's translator, its
+   TGSI text turned into ARB fragment programs), fog after the shader, eight samplers, DXT,
+   cube and volume textures. `d8pixels` and `d9pixels` (DirectX 8.1 and 9.0c on Windows 98)
+   pass every case they run. Vertex processing stays the runtime's (on the CPU). Next: real
+   programs (3DMark 2001 SE, 3DMark03), then vertex shaders on the GPU.
 6. **Windows 2000:** miniport and display driver; the OpenGL and Direct3D parts reused.
 7. Later, maybe: Glide (3dfx games), Windows 95.
 
