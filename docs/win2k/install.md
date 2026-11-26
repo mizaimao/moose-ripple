@@ -77,8 +77,8 @@ change.
 
 `RipplePrimaryInMemory` 1 (being built, issue 121) keeps every 32-bit desktop in
 guest memory instead of the 8 MB of VGA memory, which adds 1920x1080 and
-1920x1200. DirectDraw page flipping is not there yet: full-screen programs
-present by copying.
+1920x1200 (with page flipping, for full-screen programs, at every size). It
+takes 18 MB of the guest's memory.
 
 ## Licences
 
