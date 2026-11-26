@@ -154,6 +154,7 @@ Direct3D 8 test program uses the DirectX headers of the Windows 7 WDK. Set
 
     win2k/build.sh                  # build/win2k: the driver files, the INF and the tools
     win9x/mesa/build.sh             # ripplegl.dll (docs/win9x/mesa.md)
+    VERSION=x.y.z THIRDPTY=... win2k/package.sh   # the release zip (docs/win2k/development.md)
 
 ## Tools
 

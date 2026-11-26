@@ -131,7 +131,6 @@ Limits: 63 contexts, 4096 buffers, 32 MB behind one buffer, 511 KB of commands p
 Run `rvdtest async` after a full-screen program has presented a GPU frame in the same
 boot. This sequence runs the check from a Windows command prompt.
 
-    set RIPPLE_D3D_SCANOUT=1
     d3dtest 640 480 16 1
     rvdtest async
 
@@ -160,4 +159,5 @@ On a host without virgl (`-device virtio-vga` without `-gl`) the VxD still loads
 
 - Completion interrupts. The VxD polls for ordinary requests.
 - The cursor queue is set up and unused.
-- Windowed OpenGL still reads frames back for GDI to draw and clip.
+- OpenGL in a window that doesn't cover the whole screen still reads frames back for GDI to
+  draw and clip (full-screen windows use `RVD_PRESENT` since 2026-11-26).

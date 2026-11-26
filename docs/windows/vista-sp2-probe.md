@@ -371,6 +371,12 @@ seconds with capture on demand.
 
 ## Rebuild and signing handoff
 
+Since release 0.4.0 the package is built, signed and packed on the Linux
+builder by `windows/package/make-release.sh`: the kernel driver carries a
+SHA-1 test signature made there with osslsigncode, and the package has no
+catalog, so neither Inf2Cat nor a Windows signing machine is needed. What
+follows is how the lab packages before it were made.
+
 From the Vista worktree on the Linux builder, set `MAIN` to the checkout
 holding the existing WDK, llvm-mingw, Mesa tarball and Python environment.
 The WDK's Vista x64 import libraries come from `vistalibs_x64fre.msi`.

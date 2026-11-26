@@ -1,9 +1,12 @@
 ;
-; viogpu3d.inf: Windows 7 x64 test package for the virtio-gpu WDDM 1.1 driver (windows/kmd).
+; viogpu3d.inf: the moose-ripple display driver for Windows 7 x64 on QEMU's virtio-gpu (kernel
+; driver windows/kmd, user-mode driver windows/mesa). How to install and remove it:
+; docs/windows/install.md.
 ; Made from virtio-win's viogpu3d.inx (windows/kmd/viogpu3d/viogpu3d.inx, BSD-3-Clause, see
 ; windows/kmd/LICENSE) for Windows 7: x64 decoration, user-mode drivers in System32 (Windows 7
-; has no DriverStore directory id 13), no msdv.inf, no PnpLockdown, FeatureScore F8 (WDDM 1.0/1.1), no catalog
-; yet (Windows asks to confirm the unsigned package; the kernel driver itself is test-signed).
+; has no DriverStore directory id 13), no msdv.inf, no PnpLockdown, FeatureScore F8 (WDDM 1.0/1.1).
+; No catalog: the kernel driver carries its test signature itself, and Windows asks to confirm
+; the package when it is installed.
 ; One user-mode driver DLL with both the Direct3D 9 and the Direct3D 10 part, in a 64-bit and a
 ; 32-bit build; no OpenGL yet.
 ;
@@ -13,7 +16,7 @@ Signature="$Windows NT$"
 Class=Display
 ClassGUID={4d36e968-e325-11ce-bfc1-08002be10318}
 Provider=%Provider%
-DriverVer=11/15/2026,0.0.2.0
+DriverVer=11/25/2026,0.4.0.0
 
 [DestinationDirs]
 VioGpu3D_Files.Driver   = 12   ; System32\drivers
@@ -117,8 +120,8 @@ HKR, "Interrupt Management\MessageSignaledInterruptProperties", MessageNumberLim
 
 [Strings]
 Provider = "moose-ripple"
-DiskId1 = "moose-ripple virtio-gpu test package"
-VioGpu3D.DeviceDesc = "virtio-gpu 3D (moose-ripple test)"
+DiskId1 = "moose-ripple display driver for Windows 7"
+VioGpu3D.DeviceDesc = "moose-ripple virtio-gpu 3D"
 
 SERVICE_KERNEL_DRIVER = 0x1
 SERVICE_DEMAND_START  = 0x3

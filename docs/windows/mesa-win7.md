@@ -2013,3 +2013,28 @@ in `dxt1`, `dxt3` and `dxt5`. With that check widened the host would take the bl
 are: nothing to decode on the emulated processor, and an eighth to a quarter of the bytes to
 write into new texture memory, which is most of what a loading frame still costs. Not tried:
 it needs a virglrenderer built for UTM.
+
+## Is the Intel host's GPU the limit? (2026-11-26)
+
+One 3DMark06 run each on Vista SP2 and Windows 7 on the Intel test machine (UHD 630 held at
+its full clock of 1200 MHz, the VM options of "3DMark06 with a guest clock that keeps real
+time", 1280x1024, the driver builds of 23 November, which draw these scenes as release 0.4.0
+does). During the run the host read, every 5 s, the share of time the GPU's render engine was
+executing requests, from the i915 driver's own counter (`tools/win7-debug/rig/rcsbusy.sh`):
+
+| Test | Vista, frames a second | Render engine busy, Vista | Windows 7 |
+| --- | ---: | ---: | ---: |
+| Return to Proxycon | 36.7 | 89% | 91% |
+| Firefly Forest | 14.6 | 46% | 50% |
+| Red Valley (the two processor tests, 640x480) | 2.5 and 3.5 | 5% | 5% |
+| Canyon Flight | 37.7 | 78% | 81% |
+| Deep Freeze | 53.8 | 84% | 84% |
+
+(The Windows 7 run drew all six tests but its launcher did not save the result file, so its
+frame rates are not in the table; the Windows 7 rates of the section named above stand.)
+
+In three of the four graphics tests the host GPU is working eight or nine tenths of the time.
+It is the limit there: a driver that never kept it waiting could gain a tenth to a quarter at
+most, on either system. Firefly Forest is the exception. The GPU idles half the time, so that
+scene is held up on the way to the GPU: the guest's processor, the driver, or QEMU's drawing
+thread. Which of them is the next measurement (`rig/threads.sh` during that test).

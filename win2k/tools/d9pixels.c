@@ -4,7 +4,8 @@
  * vertices, fourteen pixel shaders of versions 1.1 and 1.2, including fog
  * and lit untransformed vertices, nine of shader model 2.0, seven with
  * vertex shaders 1.1 and 2.0 (hardware ones when offered) or blending
- * after shaders, two each of cube maps, render target textures and volumes. Each case
+ * after shaders, two each of cube maps, render target textures and volumes,
+ * luminance textures and a bump map read by texbem. Each case
  * draws on a 128x128 lockable back buffer and inspects a few pixels well
  * inside the shapes. "sw" asks for software vertex
  * processing. Built against the Microsoft headers; d3d9.dll is loaded at
@@ -269,7 +270,7 @@ enum { RR = 0, RV = 1, RC = 2, RT = 3 };
 enum { SwXYZW = 0xe4, SwA = 0xff };
 enum { MNone, MNeg, MBias, MBiasNeg, MBx2, MBx2Neg, MComp };
 enum { OMov = 1, OAdd = 2, OSub = 3, OMad = 4, OMul = 5, ODp3 = 8, ODp4 = 9, OLrp = 18, OTexcoord = 64,
-       OTexkill = 65, OTex = 66, OCnd = 80, ODef = 81, OCmp = 88 };
+       OTexkill = 65, OTex = 66, OTexbem = 67, OCnd = 80, ODef = 81, OCmp = 88 };
 #define CO 0x40000000UL
 /* IEEE single bit patterns for def. */
 enum { F0 = 0, F01 = 0x3dcccccd, F02 = 0x3e4ccccd, F025 = 0x3e800000, F05 = 0x3f000000, F06 = 0x3f19999a,
@@ -1181,6 +1182,55 @@ static void luminance_case(int only)
     for (k = 0; k < 2; ++k) IDirect3DTexture9_Release(tex[k]);
 }
 
+/* ---- bump maps ----
+ * 48: tex t0 reads a V8U8 bump map whose texels are all du 64/127, dv 0;
+ * texbem t1, t0 moves stage 1's lookup by du times BUMPENVMAT00 = 0.5, a
+ * quarter of the 2x2 texture, so its left column shows its right one. */
+static void bump_case(int only)
+{
+    union { float f; DWORD d; } half;
+    IDirect3DTexture9 *bump = NULL, *colour;
+    D3DLOCKED_RECT r;
+    PSVERTEX v[6];
+    SAMPLE s[5];
+    float want[4][3];
+    int i, y;
+    static const DWORD ps[] = { PSV(1), OTex, DST(RT, 0), OTexbem, DST(RT, 1), SRC(RT, 0),
+        OMov, DST(RR, 0), SRC(RT, 1), PSEND };
+    if (only && only != 48) return;
+    if (FAILED(IDirect3DDevice9_CreateTexture(device, 2, 2, 1, 0, D3DFMT_V8U8, D3DPOOL_MANAGED, &bump, NULL))) {
+        printf("D9PIX bump map format V8U8 not offered\n");
+        return;
+    }
+    IDirect3DTexture9_LockRect(bump, 0, &r, NULL, 0);
+    for (y = 0; y < 2; ++y) { WORD *row = (WORD *)((BYTE *)r.pBits + y * r.Pitch); row[0] = row[1] = 0x0040; }
+    IDirect3DTexture9_UnlockRect(bump, 0);
+    colour = texture2x2(texels0);
+    if (!colour) { IDirect3DTexture9_Release(bump); return; }
+    IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)bump);
+    IDirect3DDevice9_SetTexture(device, 1, (IDirect3DBaseTexture9 *)colour);
+    for (i = 0; i < 2; ++i) {
+        IDirect3DDevice9_SetSamplerState(device, i, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, i, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, i, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        IDirect3DDevice9_SetSamplerState(device, i, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetSamplerState(device, i, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    }
+    half.f = 0.5f;
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_BUMPENVMAT00, half.d);
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_BUMPENVMAT01, 0);
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_BUMPENVMAT10, 0);
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_BUMPENVMAT11, 0);
+    ps_quad(v, 32, 32, 96, 96, 0xffffffff, 0, 0, 1, 1);
+    for (i = 0; i < 4; ++i) texel(i | 1, want[i]);   /* the right column: green, white */
+    quad_samples(s, want);
+    ps_run("ps_texbem", ps, v, 1, s, 5);
+    IDirect3DDevice9_SetTexture(device, 0, NULL);
+    IDirect3DDevice9_SetTexture(device, 1, NULL);
+    IDirect3DTexture9_Release(bump);
+    IDirect3DTexture9_Release(colour);
+}
+
 /* ---- volume textures ----
  * A 4x4x4 volume with one colour per slice (red, green, blue, yellow),
  * sampled at each slice's middle by four quads: 45 with ps_2_0
@@ -1397,6 +1447,7 @@ int main(int argc, char **argv)
         cube_cases(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (!only || only >= 43)) rt_cases(only);
     luminance_case(only);
+    if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (caps.TextureCaps & D3DPTEXTURECAPS_VOLUMEMAP) && (!only || only >= 45))
         volume_cases(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
     if (caps.PixelShaderVersion < D3DPS_VERSION(2, 0)) printf("D9PIX vertex shader cases need pixel shader 2.0\n");

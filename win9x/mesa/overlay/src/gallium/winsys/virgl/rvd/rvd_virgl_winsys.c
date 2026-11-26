@@ -694,6 +694,20 @@ bool rvd_virgl_present_color(struct pipe_context *pipe, struct pipe_resource *co
    return shown;
 }
 
+bool rvd_virgl_window_scanout(struct pipe_screen *screen)
+{
+   return !rvd_winsys(virgl_screen(screen)->vws)->nt;
+}
+
+/* The mini-VDD shows the GDI desktop (display start 0) again instead of the last GPU image. */
+void rvd_virgl_show_desktop(struct pipe_screen *screen)
+{
+   struct rvd_winsys *ws = rvd_winsys(virgl_screen(screen)->vws);
+   rvd_u32 offset = 0;
+   if (!ws->nt)
+      rvd_call(ws, RVD_DESKTOP, &offset, sizeof(offset), NULL, 0);
+}
+
 /* ---- A finished frame goes on the window ----------------------------------------------------- */
 /* DrawEscape can present an NT5 window from its GPU resource. The GDI path
  * reads top-down rows into guest memory and paints the window's visible region. */

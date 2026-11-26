@@ -89,4 +89,7 @@ class VioGpuAllocation
 
     KEVENT m_busyNotification;
     volatile LONG m_busy;
+
+    void ProdHost();
+    void WaitCounted(LONGLONG since);
 };

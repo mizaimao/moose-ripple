@@ -87,6 +87,9 @@ only (4-level page tables, the summary bitmap layout of that version).
   frequent address is the idle loop.
 - `modbase.sh VMID [ADDRESS]`: where the guest kernel (or the module below ADDRESS) is loaded,
   for naming kernel samples with the module's `.map`; the HAL sits just below the kernel.
+- `cleanvm.sh vista|win7 prep|boot|reset|kill` and `guestctl.pl`: a throwaway guest on a disk
+  that never had the driver, and its keys, clicks and screenshots, for the clean-install check
+  of a release package (`docs/windows/test-vms.md`).
 
 In the guest, `guest/timerres.ps1 [SECONDS]` samples Windows' timer resolution and says how
 much of the time it ran fine (under 1 ms): the kernel driver takes the half-millisecond timer
