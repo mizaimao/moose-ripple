@@ -7,7 +7,7 @@ Signature="$Windows NT$"
 Class=Display
 ClassGUID={4d36e968-e325-11ce-bfc1-08002be10318}
 Provider=%Provider%
-DriverVer=11/25/2026,0.4.0.0
+DriverVer=11/26/2026,0.5.0.0
 
 [Manufacturer]
 %Provider%=Ripple,NTamd64.6.0

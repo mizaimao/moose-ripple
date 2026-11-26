@@ -56,7 +56,7 @@ int main(void)
     printf("D7XFORM types");
     for (i = 0; i < 32; ++i) if (s.transformTypes[i]) printf(" %lu=%lu", i, s.transformTypes[i]);
     putchar('\n');
-    printf("D7TEXW writes=%lu checks_skipped=%lu\n", s.textureWrites, s.checksSkipped);
+    printf("D7TEXW writes=%lu checks_skipped=%lu blank_samples=%lu\n", s.textureWrites, s.checksSkipped, s.blankSamples);
     {
         static const int depth[3] = { 8, 16, 32 };
         int m;

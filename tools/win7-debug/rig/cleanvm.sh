@@ -7,7 +7,8 @@
 # Vista runs in an overlay over VM 101's disk (read only), Windows 7 in an overlay over a copy
 # of VM 220's snapshot clone-fresh (the disk as cloned, before its first boot).
 #   sh cleanvm.sh vista|win7 prep    the disk          sh cleanvm.sh OS reset   a fresh overlay
-#   sh cleanvm.sh vista|win7 boot    start the guest (refuses while any other guest runs)
+#   sh cleanvm.sh vista|win7 boot    start the guest (refuses while any other guest runs;
+#                                    SHARED=1 starts it next to another untimed guest)
 #   sh cleanvm.sh vista|win7 kill    end QEMU (only after a shutdown in the guest failed)
 # VISTA_DISK, WIN7_DISK and WIN7_SNAPSHOT name other sources.
 set -eu
@@ -23,6 +24,7 @@ case "$os" in
     *) exit 2 ;;
 esac
 occupied() {
+    test -z "${SHARED:-}" || return 1
     qm list | awk 'NR>1 && $3=="running"{n++} END{exit !n}' || ps -eo comm= | grep -Eq '^(kvm$|qemu-system-)'
 }
 case "$step" in

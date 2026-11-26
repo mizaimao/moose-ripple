@@ -39,7 +39,8 @@ enum {
     RB2K_RVD_OP_GL_TIMING,          /* out: RB2K_GL_TIMING */
     RB2K_RVD_OP_GL_PROFILE,         /* out: RB2K_GL_PROFILE */
     RB2K_RVD_OP_SCANOUT,            /* context, a: buffer, b: width, bytes: height: show it full screen */
-    RB2K_RVD_OP_DESKTOP             /* show the desktop again after RB2K_RVD_OP_SCANOUT */
+    RB2K_RVD_OP_DESKTOP,            /* show the desktop again after RB2K_RVD_OP_SCANOUT */
+    RB2K_RVD_OP_PRIMARY_DIRTY       /* a: page, u.rect: send that part of the desktop in guest memory */
 };
 
 #define RB2K_RVD_STAGING_SEGMENTS 48

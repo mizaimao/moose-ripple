@@ -21,6 +21,8 @@ LONGLONG rb_counter_ticks(LONGLONG *frequency);
 BOOLEAN rb_pages_alloc(RB2K_PAGES *pages, ULONG bytes);
 ULONG rb_pages_runs(const RB2K_PAGES *pages, RB2K_PAGE_RUN *out, ULONG max);
 void rb_pages_free(RB2K_PAGES *pages);
+PVOID rb_system_pages(ULONG bytes, PVOID *mdl);
+ULONG rb_mdl_runs(PVOID mdl, ULONG offset, ULONG bytes, RB2K_PAGE_RUN *out, ULONG max);
 PVOID rb_map_cached(unsigned __int64 physical, ULONG bytes);
 void rb_unmap_cached(PVOID address, ULONG bytes);
 

@@ -1467,7 +1467,7 @@ unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, con
     s.t.p = out; s.t.size = size;
     if (size) out[0] = 0;
     if (!count || (tokens[0] & 0xffff0000u) != 0xfffe0000u ||
-        (tokens[0] != 0xfffe0101u && tokens[0] != 0xfffe0200u)) {
+        (tokens[0] != 0xfffe0100u && tokens[0] != 0xfffe0101u && tokens[0] != 0xfffe0200u)) {
         fail(&s, RbPsVersion, count ? tokens[0] : 0);
         return 0;
     }

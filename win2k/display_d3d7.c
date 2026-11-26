@@ -191,10 +191,13 @@ static ULONG useClock = 1;
 static BYTE *texelScratch, *uploadScratch;
 static ULONG texelScratchBytes;
 
+static LONGLONG cycles(void);
+
 /* A context-only callback takes the registry first, then the display lock.
  * DrvDisableDirectDraw drops the display lock before retiring the contexts. */
 void rb_d7_init(void)
 {
+    cycles();   /* the first time stamp, so that a report measures the rate over a long time */
     if (!registry) registry = EngCreateSemaphore();
     if (!textures) textures = EngAllocMem(FL_ZERO_MEMORY, MaxTextures * sizeof(*textures), 't7bR');
     if (!buffers) buffers = EngAllocMem(FL_ZERO_MEMORY, MaxBuffers * sizeof(*buffers), 'b8bR');
@@ -224,8 +227,11 @@ static DISPLAY *drawQueueDisplay;
 /* Time stamps in processor cycles: EngQueryPerformanceCounter reads the ACPI
  * power management timer on these HALs, an emulated port that QEMU answers
  * under the lock its drawing thread holds (see rb_counter_ticks). The rate is
- * measured against the performance counter when the counters are reported. */
+ * measured against the performance counter when the counters are reported,
+ * and kept once a second or more has been measured, as in the miniport. */
 static LONGLONG cycles0, counter0;
+static volatile LONGLONG keptRate;
+static volatile LONG rateKept;   /* 1 while one caller stores the rate, 2 once it is there */
 static LONGLONG cycles(void)
 {
     LONGLONG now = (LONGLONG)__builtin_ia32_rdtsc();
@@ -237,11 +243,18 @@ static LONGLONG cycle_rate(void)
 {
     LONGLONG now = cycles(), counter, hz;
     ULONGLONG c, q;
+    LONGLONG rate;
+    if (rateKept == 2) return keptRate;
     EngQueryPerformanceCounter(&counter);
     EngQueryPerformanceFrequency(&hz);
     c = (ULONGLONG)(now - cycles0);
     q = (ULONGLONG)(counter - counter0);
-    return q ? (LONGLONG)(c / q * (ULONGLONG)hz + c % q * (ULONGLONG)hz / q) : 0;
+    rate = q ? (LONGLONG)(c / q * (ULONGLONG)hz + c % q * (ULONGLONG)hz / q) : 0;
+    if (q >= (ULONGLONG)hz && __sync_bool_compare_and_swap(&rateKept, 0, 1)) {
+        keptRate = rate;
+        rateKept = 2;
+    }
+    return rate;
 }
 
 static ULONG flush_draws(void)
@@ -1445,6 +1458,35 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
 
 /* The host texture for this draw, checked once a scene. The miniport
  * attaches a texture to the target it is uploaded for. */
+/* A stage the shader samples with no texture bound reads (0,0,0,1): a 1x1 host texture of
+ * that colour stands in. It is sent again into the same host texture once a scene epoch,
+ * and made anew when a transport reset has released it. */
+static ULONG blankHost, blankEpoch;
+static ULONG blank_texture(DISPLAY *d, ULONG targetId)
+{
+    RB2K_D3D7_TEXTURE *packet = (RB2K_D3D7_TEXTURE *)uploadScratch;
+    ULONG tries, newId;
+    if (blankHost && blankEpoch == textureEpoch) return blankHost;
+    if (!packet) return 0;
+    for (tries = 0; tries < 2; ++tries) {
+        RtlZeroMemory(packet, sizeof(*packet));
+        packet->id = blankHost;
+        packet->faces = packet->depth = packet->levels = 1;
+        packet->target = targetId;
+        packet->width = packet->height = packet->rows = 1;
+        *(PULONG)(packet + 1) = 0xff000000;
+        newId = 0;
+        if (!texture_send(d, packet, sizeof(*packet) + sizeof(ULONG), &newId) && newId) {
+            blankHost = newId;
+            blankEpoch = textureEpoch;
+            return blankHost;
+        }
+        if (!blankHost) break;
+        blankHost = 0;
+    }
+    return 0;
+}
+
 /* Why a texture cannot be used for a draw (counted in d7draw.texSkips). */
 static void texture_skip(D7_CONTEXT *c, const D7_TEXTURE *t, ULONG targetId)
 {
@@ -2148,6 +2190,18 @@ static void release_shaders(D7_CONTEXT *c)
  * after a vertex shader, which outputs the sets the stages name. Direct3D does not transform the
  * coordinates of pretransformed vertices: only their projection (D3DTTFF_PROJECTED) divides, with an
  * identity matrix in the constants (shader_triangles). */
+/* A stage that would sample a texture but has none bound: like the combiner of the Direct3D 7
+ * draws (stage_words), the stage program ends before it, passing the current colour on. */
+static BOOL stage_lacks_texture(const D7_CONTEXT *c, ULONG n)
+{
+    const D7_STAGE *s = &c->stages[n];
+    BOOL ok = TRUE;
+    ULONG c1 = stage_argument(s->colorArg1, n, &ok), c2 = stage_argument(s->colorArg2, n, &ok);
+    ULONG a1 = stage_argument(s->alphaArg1, n, &ok), a2 = stage_argument(s->alphaArg2, n, &ok);
+    return !s->texture && (samples_texture(s->colorOp, c1, c2) ||
+                           (s->alphaOp != D3DTOP_DISABLE && samples_texture(s->alphaOp, a1, a2)));
+}
+
 static ULONG stage_program(D7_CONTEXT *c, ULONG fog, D8_SHADER *as, BOOL byStage, BOOL pretransformed)
 {
     RB_STAGE_STATE st[TextureStages];
@@ -2155,7 +2209,7 @@ static ULONG stage_program(D7_CONTEXT *c, ULONG fog, D8_SHADER *as, BOOL byStage
     D8_STAGE_PROGRAM *e;
     RB_PS_INFO info;
     RtlZeroMemory(key, sizeof(key));
-    for (i = 0; i < TextureStages && c->stages[i].colorOp != D3DTOP_DISABLE; ++i) {
+    for (i = 0; i < TextureStages && c->stages[i].colorOp != D3DTOP_DISABLE && !stage_lacks_texture(c, i); ++i) {
         const D7_STAGE *s = &c->stages[i];
         st[i].colorOp = s->colorOp; st[i].colorArg1 = s->colorArg1; st[i].colorArg2 = s->colorArg2;
         st[i].alphaOp = s->alphaOp; st[i].alphaArg1 = s->alphaArg1; st[i].alphaArg2 = s->alphaArg2;
@@ -2344,6 +2398,18 @@ static BOOL pixel_states(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, const D8_SHADER *s
         D7_TEXTURE *tex;
         if (!(sh->samplers & (1UL << k))) continue;
         tex = find_texture(c->local, st->texture);
+        if (!st->texture) {
+            /* No texture on a stage the shader samples: Direct3D reads (0,0,0,1) there. */
+            if (!(draw->textures[k] = blank_texture(c->display, s->id))) {
+                texture_skip(c, NULL, s->id);
+                skip(c, RB2K_D7_SKIP_TEXTURE, primitives);
+                return FALSE;
+            }
+            draw->samplers[k] = stage_sampler(st, NULL);
+            draw->borders[k] = st->border;
+            ++c->display->d7draw.blankSamples;
+            continue;
+        }
         if (!tex || !tex->format || tex->owner != c->owner || !(draw->textures[k] = texture_ready(c, tex, s->id))) {
             texture_skip(c, tex, s->id);
             skip(c, RB2K_D7_SKIP_TEXTURE, primitives);
