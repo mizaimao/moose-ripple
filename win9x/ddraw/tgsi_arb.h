@@ -5,6 +5,7 @@
 
 #define TGSI_ARB_IMMEDIATES 32
 #define TGSI_ARB_TEXT_BYTES 12288
+#define TGSI_ARB_FOGCOORD 8
 
 /* Where the inputs come from. The translator's GENERIC[0] and [1] are the diffuse and specular
    colours, GENERIC[2+n] texture coordinate set n, GENERIC[10] the fog depths. */
@@ -14,7 +15,8 @@ typedef struct {
     unsigned int constants;                     /* CONST[0..n-1], read from program.env[0..n-1] */
     unsigned int line;                          /* where a failure was, counted from 1 */
     unsigned int fog_unit;                      /* in: the texture coordinate set that carries
-                                                   GENERIC[10], the fog depth */
+                                                   GENERIC[10], the fog depth, or
+                                                   TGSI_ARB_FOGCOORD: fragment.fogcoord */
 } TGSI_ARB;
 
 /* 0 if a line could not be converted (info->line says which), else the length of the text
