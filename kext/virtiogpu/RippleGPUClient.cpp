@@ -350,6 +350,7 @@ IOReturn RippleGPUClient::submit(IOExternalMethodArguments *a, uint64_t *fence)
         s.cmd_size > kMaxCommandBytes || (s.cmd_size & 3) || need != inSize)
         return kIOReturnBadArgument;
 
+    uint64_t t0 = mach_absolute_time();
     // Make the buffers the commands use visible to the context.
     if (s.num_handles) {
         uint32_t bytes = s.num_handles * 4;
@@ -379,6 +380,7 @@ IOReturn RippleGPUClient::submit(IOExternalMethodArguments *a, uint64_t *fence)
     // runs this one; with both buffers at the device, wait here for the older one (the
     // host is behind). With ripple_async=0 one buffer, and the host has run it when this
     // returns.
+    uint64_t t1 = mach_absolute_time();
     bool async = fDev->asyncSubmits();
     unsigned i = async ? fCmdNext : 0;
     if (!ensureCommandBuffer(i)) {
@@ -386,17 +388,42 @@ IOReturn RippleGPUClient::submit(IOExternalMethodArguments *a, uint64_t *fence)
         if (!ensureCommandBuffer(i))
             return kIOReturnNoMemory;
     }
+    const bool hadToWait = fCmdBusy[i] != 0;
     if (!fDev->waitRelease(&fCmdBusy[i]))
         return kIOReturnTimeout;
+    uint64_t t2 = mach_absolute_time();
     if (readInput(a, sizeof(s) + s.num_handles * 4, fCmd[i]->getBytesNoCopy(), s.cmd_size)
         != kIOReturnSuccess)
         return kIOReturnBadArgument;
-    if (!async)
-        return fDev->submit3D(s.context, fCmdPA[i], s.cmd_size, fence) ? kIOReturnSuccess
-                                                                        : kIOReturnError;
-    fCmdNext = (i + 1) % kCmdBuffers;
-    return fDev->submit3DAsync(s.context, fCmdPA[i], s.cmd_size, fence, &fCmdBusy[i])
-        ? kIOReturnSuccess : kIOReturnError;
+    uint64_t t3 = mach_absolute_time();
+    bool ok;
+    if (!async) {
+        ok = fDev->submit3D(s.context, fCmdPA[i], s.cmd_size, fence);
+    } else {
+        fCmdNext = (i + 1) % kCmdBuffers;
+        ok = fDev->submit3DAsync(s.context, fCmdPA[i], s.cmd_size, fence, &fCmdBusy[i]);
+    }
+    fSub[0]++;
+    fSub[1] += s.num_handles;
+    fSub[2] += hadToWait;
+    fSub[3] += s.cmd_size;
+    fSub[4] += t1 - t0;
+    fSub[5] += t2 - t1;
+    fSub[6] += t3 - t2;
+    fSub[7] += mach_absolute_time() - t3;
+    if ((fSub[0] & 511) == 0) {
+        uint64_t us[4];
+        for (unsigned k = 0; k < 4; k++) {
+            absolutetime_to_nanoseconds(fSub[4 + k], &us[k]);
+            us[k] /= 1000;
+        }
+        char text[200];
+        snprintf(text, sizeof(text), "calls %llu handles %llu waited %llu bytes %llu us: handles %llu "
+                 "wait %llu copy %llu queue %llu", fSub[0], fSub[1], fSub[2], fSub[3], us[0], us[1],
+                 us[2], us[3]);
+        setProperty("RippleSubmitStats", text);
+    }
+    return ok ? kIOReturnSuccess : kIOReturnError;
 }
 
 IOReturn RippleGPUClient::transfer(const struct ripple_gpu_transfer *t, uint64_t *fence)

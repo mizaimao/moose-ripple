@@ -159,6 +159,10 @@ def parse_api(path):
 
 FLOATS = ('GLfloat', 'GLclampf', 'GLdouble', 'GLclampd')
 
+# Debug: with RIPPLE_GL_SKIP_DRAWS=1 in a program's environment these entries return without
+# drawing (state calls still run): what is left of a frame's time is everything but the draws.
+DEBUG_SKIP_DRAWS = ('draw_elements', 'draw_arrays', 'draw_range_elements')
+
 # Entries whose data the debug trace also logs (program and shader text, small images),
 # after the call line. C statements; the parameters are in scope.
 TRACE_DATA = {
@@ -229,9 +233,11 @@ def main():
                             '' if ret == 'void' else 'return ', CUSTOM[name],
                             ', '.join(['rend'] + [p[1] for p in params])))
         elif target:
-            lines.append('static %s GLAPIENTRY %s(%s)\n{\n%s   RIPPLE_CGL_ENTER(rend);\n'
+            skip = ('   if (unlikely(ripple_cgl_skip_draws))\n      return;\n'
+                    if name in DEBUG_SKIP_DRAWS else '')
+            lines.append('static %s GLAPIENTRY %s(%s)\n{\n%s   RIPPLE_CGL_ENTER(rend);\n%s'
                          '   %sCALL_%s(GET_DISPATCH(), (%s));\n}\n'
-                         % (ret, fn, decl, trace_call(index, name, params),
+                         % (ret, fn, decl, trace_call(index, name, params), skip,
                             '' if ret == 'void' else 'return ', target, call))
         else:
             missing.append(name)

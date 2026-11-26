@@ -6,6 +6,7 @@
 
 #include <IOKit/IOLib.h>
 #include <kern/clock.h>
+#include <kern/thread_call.h>
 #include <pexpert/pexpert.h>
 
 #include <linux/virtio_config.h>
@@ -210,6 +211,12 @@ bool VirtioGPUDevice::init(IOPCIDevice *pci)
     uint32_t arg = 0;
     // Queued submits are the default since 2026-11-25; ripple_async=0 switches them off.
     fAsync = !(PE_parse_boot_argn("ripple_async", &arg, sizeof(arg)) && arg == 0);
+    // Boot flag ripple_kick=1 (experimental): queued commands are announced to the host from a
+    // helper thread (kickAction) instead of the caller's. Off by default: measured faster for
+    // a window nothing covers and slower for a covered one (docs/re/perf-notes.md).
+    arg = 0;
+    PE_parse_boot_argn("ripple_kick", &arg, sizeof(arg));
+    fKickCall = arg ? thread_call_allocate(kickAction, this) : 0;
     fCursorLock = IOLockAlloc();
     fSlotMem = contiguous(kSlots * (kSlotReq + kSlotResp));
     for (int i = 0; i < kCtrlQueueSize; i++)
@@ -229,6 +236,11 @@ bool VirtioGPUDevice::init(IOPCIDevice *pci)
 void VirtioGPUDevice::free()
 {
     reset();
+    if (fKickCall) {
+        thread_call_cancel((thread_call_t)fKickCall);
+        thread_call_free((thread_call_t)fKickCall);
+        fKickCall = 0;
+    }
     if (fIntSrc) {                      // before the rings it reads go away
         fIntSrc->disable();
         if (fWorkLoop)
@@ -325,8 +337,19 @@ uint32_t VirtioGPUDevice::command(const void *req, uint32_t reqLen, void *resp, 
         fSlot[s].release = release;
         if (release)
             *release = 1;
-        *q.notify = q.index;
-        IOLockUnlock(fCmdLock);
+        // The notify write leaves the guest and comes back only when QEMU has taken its big
+        // lock, which its main thread holds while it runs GL commands: measured at 0.28 ms a
+        // write under load, twice a frame for a program (its submit and its present). Nobody
+        // waits for a queued command, so a helper thread makes the write and the caller goes
+        // on. One pending kick covers every command queued before it runs.
+        if (fKickCall) {
+            IOLockUnlock(fCmdLock);
+            if (OSCompareAndSwap(0, 1, &fKickPending))
+                thread_call_enter((thread_call_t)fKickCall);
+        } else {
+            *q.notify = q.index;
+            IOLockUnlock(fCmdLock);
+        }
         return VIRTIO_GPU_RESP_OK_NODATA;
     }
     *q.notify = q.index;
@@ -990,4 +1013,13 @@ bool VirtioGPUDevice::transfer3D(bool toHost, uint32_t ctx, uint32_t id, uint32_
     if (fence)
         *fence = n;
     return ok;
+}
+
+// The helper thread's part of a queued command: tell the host to look at the control queue.
+// The flag is cleared first, so a command queued while the write is under way asks again.
+void VirtioGPUDevice::kickAction(void *self, void *)
+{
+    VirtioGPUDevice *dev = (VirtioGPUDevice *)self;
+    dev->fKickPending = 0;
+    *dev->fQueue[0].notify = dev->fQueue[0].index;
 }
