@@ -28,7 +28,7 @@ typedef char sampler_handles_fit[Sampler1Base + RB2K_D7_SAMPLER_KEYS <= ShaderBa
 enum {
     TopDisable = 1, TopSelect1, TopSelect2, TopModulate, TopModulate2x, TopModulate4x, TopAdd,
     TopAddSigned, TopAddSigned2x, TopSubtract, TopAddSmooth, TopBlendDiffuse, TopBlendTexture,
-    TopBlendFactor, TopBlendTexturePm, TopBlendCurrent
+    TopBlendFactor, TopBlendTexturePm, TopBlendCurrent, TopDot3 = 24
 };
 enum { ArgDiffuse = 0, ArgCurrent, ArgTexture, ArgFactor, ArgSpecular, ArgSelect = 15,
        ArgComplement = 0x10, ArgAlphaReplicate = 0x20 };
@@ -272,6 +272,13 @@ static void combine(TEXT *t, ULONG top, const char *mask, ULONG stage)
     case TopBlendTexturePm:
         op(t, stage ? "ADD TEMP[4], IMM[0].xxxx, -TEMP[5].wwww" : "ADD TEMP[4], IMM[0].xxxx, -TEMP[0].wwww", 0, 0, 0);
         op(t, "MAD_SAT ", d, ", TEMP[2], TEMP[4], TEMP[1]", 0); break;
+    case TopDot3:
+        /* 4 ((a1 - 0.5) . (a2 - 0.5)) over red, green and blue, saturated, in every
+         * channel written (the display driver gives the alpha the same operation). */
+        op(t, "ADD TEMP[4], TEMP[1], -IMM[0].wwww", 0, 0, 0);
+        op(t, "ADD TEMP[1], TEMP[2], -IMM[0].wwww", 0, 0, 0);
+        op(t, "DP3 TEMP[4].x, TEMP[4], TEMP[1]", 0, 0, 0);
+        op(t, "MUL_SAT ", d, ", TEMP[4].xxxx, IMM[0].zzzz", 0); break;
     }
 }
 
@@ -297,7 +304,7 @@ BOOLEAN rb_gpu_d7_samples(const RB2K_D3D7_DRAW *d, ULONG stage)
 static BOOLEAN stage_valid(ULONG stage, BOOLEAN current)
 {
     ULONG top = stage & 255, i;
-    if (stage >> 24 || top < TopSelect1 || top > TopBlendCurrent) return FALSE;
+    if (stage >> 24 || top < TopSelect1 || (top > TopBlendCurrent && top != TopDot3)) return FALSE;
     for (i = 8; i <= 16; i += 8) {
         ULONG arg = (stage >> i) & 255;
         if ((arg & ~(ArgSelect | ArgComplement | ArgAlphaReplicate)) ||

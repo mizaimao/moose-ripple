@@ -1256,6 +1256,34 @@ static void colorwrite_case(int only)
     check("colorwrite", s, 2);
 }
 
+/* ---- DOT3 ----
+ * 53: D3DTOP_DOTPRODUCT3 of the diffuse colour (1, 0.5, 0.5), a vector along x,
+ * with the texture factor: along x as well on the left (white), along y on the
+ * right (black). */
+static void dot3_case(int only, BOOL offered)
+{
+    typedef struct { float x, y, z, rhw; DWORD diffuse; } DV;
+    static const SAMPLE s[] = { { 32, 64, 0xffffff }, { 96, 64, 0x000000 } };
+    int k;
+    if (only && only != 53) return;
+    if (!offered) { printf("D9PIX DOT3 not offered\n"); return; }
+    if (!begin("dot3")) return;
+    IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_DOTPRODUCT3);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG2, D3DTA_TFACTOR);
+    for (k = 0; k < 2; ++k) {
+        float x0 = k * 64.0f, x1 = x0 + 64;
+        DV v[4] = { { x0, 0, 0.5f, 1, 0xffff8080 }, { x1, 0, 0.5f, 1, 0xffff8080 },
+                    { x0, Side, 0.5f, 1, 0xffff8080 }, { x1, Side, 0.5f, 1, 0xffff8080 } };
+        IDirect3DDevice9_SetRenderState(device, D3DRS_TEXTUREFACTOR, k ? 0xff80ff80 : 0xffff8080);
+        IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+    }
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG2, D3DTA_CURRENT);
+    check("dot3", s, 2);
+}
+
 /* ---- volume textures ----
  * A 4x4x4 volume with one colour per slice (red, green, blue, yellow),
  * sampled at each slice's middle by four quads: 45 with ps_2_0
@@ -1504,6 +1532,7 @@ int main(int argc, char **argv)
     luminance_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
     colorwrite_case(only);
+    dot3_case(only, (caps.TextureOpCaps & D3DTEXOPCAPS_DOTPRODUCT3) != 0);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (caps.TextureCaps & D3DPTEXTURECAPS_VOLUMEMAP) && (!only || only >= 45))
         volume_cases(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
     if (caps.PixelShaderVersion < D3DPS_VERSION(2, 0)) printf("D9PIX vertex shader cases need pixel shader 2.0\n");

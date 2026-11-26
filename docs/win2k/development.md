@@ -2170,6 +2170,21 @@ On XP SP3 under KVM on the second Intel UHD 630 host, case 50 passes and
 Troll's Lair is shaded by its shadows. Game test 2 is still darker than it
 should be, and the water in game test 4 is still white.
 
+## DOT3 in the Direct3D 7 stages
+
+The two-stage combiner of the Direct3D 7 draws now does
+`D3DTOP_DOTPRODUCT3`: both arguments go from 0..1 to -1..1, and four times
+their dot product over red, green and blue, saturated, goes to every channel.
+Direct3D puts that result in the alpha as well, so the display driver gives
+the alpha the same operation. Direct3D 7, 8 and 9 programs are offered
+`D3DTEXOPCAPS_DOTPRODUCT3`. `d9pixels` case 53 dots a diffuse colour that
+encodes a vector along x with a texture factor along x (white) and along y
+(black).
+
+On XP SP3 under KVM on the second Intel UHD 630 host, case 53 passes and
+`d9pixels` passes 43 of 43. 3DMark 2001 SE's DOT3 Bump Mapping test, which
+reported "Not supported by hardware", now runs.
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:

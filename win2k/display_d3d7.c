@@ -807,8 +807,12 @@ static ULONG stage_words(const D7_CONTEXT *c, ULONG n, ULONG *color, ULONG *alph
         return StageDisabled;
     }
     if (alphaOp == D3DTOP_DISABLE) { alphaOp = D3DTOP_SELECTARG1; a1 = current; }
-    if (!ok || colorOp < D3DTOP_SELECTARG1 || colorOp > D3DTOP_BLENDCURRENTALPHA ||
-        alphaOp < D3DTOP_SELECTARG1 || alphaOp > D3DTOP_BLENDCURRENTALPHA) return StageUnsupported;
+    /* DOTPRODUCT3 puts its result in all four channels: the alpha does the same. */
+    if (colorOp == D3DTOP_DOTPRODUCT3) { alphaOp = colorOp; a1 = c1; a2 = c2; }
+    if (!ok || colorOp < D3DTOP_SELECTARG1 ||
+        (colorOp > D3DTOP_BLENDCURRENTALPHA && colorOp != D3DTOP_DOTPRODUCT3) ||
+        alphaOp < D3DTOP_SELECTARG1 ||
+        (alphaOp > D3DTOP_BLENDCURRENTALPHA && alphaOp != D3DTOP_DOTPRODUCT3)) return StageUnsupported;
     *color = colorOp | (c1 << 8) | (c2 << 16);
     *alpha = alphaOp | (a1 << 8) | (a2 << 16);
     *texture = samples_texture(colorOp, c1, c2) || samples_texture(alphaOp, a1, a2);
@@ -3707,7 +3711,7 @@ BOOL rb_d7_info(PDD_GETDRIVERINFODATA a)
             D3DTEXOPCAPS_ADD | D3DTEXOPCAPS_ADDSIGNED | D3DTEXOPCAPS_ADDSIGNED2X |
             D3DTEXOPCAPS_SUBTRACT | D3DTEXOPCAPS_ADDSMOOTH | D3DTEXOPCAPS_BLENDDIFFUSEALPHA |
             D3DTEXOPCAPS_BLENDTEXTUREALPHA | D3DTEXOPCAPS_BLENDFACTORALPHA |
-            D3DTEXOPCAPS_BLENDTEXTUREALPHAPM | D3DTEXOPCAPS_BLENDCURRENTALPHA,
+            D3DTEXOPCAPS_BLENDTEXTUREALPHAPM | D3DTEXOPCAPS_BLENDCURRENTALPHA | D3DTEXOPCAPS_DOTPRODUCT3,
         .wMaxTextureBlendStages = 2, .wMaxSimultaneousTextures = 2, .wMaxVertexBlendMatrices = 1,
         .dvMaxVertexW = 1.0e10f, .dwMaxActiveLights = RB2K_D7_LIGHTS,
         .dwVertexProcessingCaps = D3DVTXPCAPS_MATERIALSOURCE7 | D3DVTXPCAPS_DIRECTIONALLIGHTS |
