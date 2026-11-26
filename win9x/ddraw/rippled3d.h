@@ -10,6 +10,10 @@ void d3d_init(RDD_SHARED *s, DDCORECAPS *caps);
 
 /* GetDriverInfo's Direct3D GUIDs: returns 1 if it answered. */
 int d3d_driver_info(LPDDHAL_GETDRIVERINFODATA d);
+#ifndef DDSCAPS2_VOLUME
+#define DDSCAPS2_VOLUME 0x00200000L     /* DirectX 8: a volume texture (the Me DDK predates it) */
+#endif
+
 /* Whether the HAL offers the Direct3D 8 interface (GetDriverInfo2); read at d3d_init. */
 int d3d8_enabled(void);
 /* A DXT format's 4x4 block bytes (8 or 16) when Direct3D 8 is on, else 0. */

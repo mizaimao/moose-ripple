@@ -815,6 +815,17 @@ Direct3D 7-level texture caps must list cube maps, and DirectDraw must be told t
 runtime keeps a managed cube map in system memory only and draws nothing from it. `d9pixels
 sw`: 45 of 45, both cube cases (shader model 2 and version 1) included.
 
+Volume textures likewise: each level a surface with its slices one after another, uploaded to
+OpenGL's 3D target, copied by VOLUMEBLT box by box, and version 1 shader variants per set of
+volume stages. CreateSurface asks DirectDraw for a block of the bytes a level's slices take
+(rows tight), and once DirectDraw has allocated it, CreateSurfaceEx puts the slice pitch into the
+field that held the block height: the Direct3D 9 runtime fills a managed volume through Lock and
+reads its slice pitch there (`lSlicePitch` in DirectX 8 headers, `dwBlockSizeY` in the Me DDK).
+With 1 left there, its slices landed a byte apart; changing it inside Lock froze Windows. Also
+needed: the volume bit in the Direct3D 7-level texture caps and `DDSCAPS2_VOLUME` in
+`GUID_DDMoreSurfaceCaps`. DXT volumes are not offered. `d9pixels sw`: 47 of 47, both volume
+cases included; `d3dtest` (Direct3D 7) unchanged.
+
 
 ## Changing a driver in the test VM
 

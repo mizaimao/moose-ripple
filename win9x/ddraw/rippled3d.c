@@ -213,6 +213,9 @@ static RDD_SHARED *shared;
 #define GL_CLAMP_TO_EDGE                0x812F
 #define GL_TEXTURE_CUBE_MAP             0x8513
 #define GL_TEXTURE_CUBE_MAP_POSITIVE_X  0x8515
+#define GL_TEXTURE_3D                   0x806F
+#define GL_TEXTURE_WRAP_R               0x8072
+#define GL_UNPACK_IMAGE_HEIGHT          0x806E
 #define GL_CLAMP_TO_BORDER              0x812D
 #define GL_MIRRORED_REPEAT              0x8370
 #define GL_TEXTURE0                     0x84C0
@@ -354,6 +357,8 @@ typedef struct {
                                           const GLvoid *);
     void (APIENTRY *CompressedTexSubImage2D)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum,
                                              GLsizei, const GLvoid *);
+    void (APIENTRY *TexImage3D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum,
+                                const GLvoid *);  /* volume textures (optional) */
 } GLF;
 
 #define GL_CORE_COUNT 53            /* entries up to DrvGetProcAddress */
@@ -379,6 +384,7 @@ static const char *const gl_names[] = {
     "glGenProgramsARB", "glDeleteProgramsARB", "glBindProgramARB", "glProgramStringARB",
     "glProgramEnvParameter4fvARB", "glProgramLocalParameter4fvARB",
     "glCompressedTexImage2DARB", "glCompressedTexSubImage2DARB",
+    "glTexImage3D",
 };
 #define GL_ALL_COUNT (sizeof gl_names / sizeof gl_names[0])
 typedef char c_gl_names[sizeof(GLF) == GL_ALL_COUNT * sizeof(PROC) ? 1 : -1];
@@ -615,6 +621,7 @@ struct shadow {
     LPDDRAWI_DDRAWSURFACE_GBL_MORE gmp; /* just before g */
     DDRAWI_DDRAWSURFACE_GBL g;
     DWORD faces, levels;                /* in the first: 1 or 6 faces, each with this many levels */
+    DWORD depth;                        /* in the first: a volume's slices at level 0 (else 1) */
 };
 
 #define MAX_DDLOCALS 32
@@ -789,6 +796,9 @@ static struct shadow *shadow_make(LPDDRAWI_DDRAWSURFACE_LCL s)
         }
     sh[0].faces = faces;
     sh[0].levels = levels;
+    sh[0].depth = 1;
+    if (s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_VOLUME)    /* slices one after another */
+        sh[0].depth = s->lpSurfMore->ddsCapsEx.dwCaps4 ? s->lpSurfMore->ddsCapsEx.dwCaps4 : 1;
     if (cube)
         sh[0].m.ddsCapsEx.dwCaps2 |= DDSCAPS2_CUBEMAP;
     return sh;
@@ -799,6 +809,13 @@ static int is_cube(LPDDRAWI_DDRAWSURFACE_LCL s)
 {
     return s->lpSurfMore && (s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_CUBEMAP) &&
            ((const struct shadow *)s)->faces == 6;
+}
+
+/* A volume texture's copy (likewise). */
+static int is_volume(LPDDRAWI_DDRAWSURFACE_LCL s)
+{
+    return s->lpSurfMore && (s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_VOLUME) &&
+           ((const struct shadow *)s)->faces == 1;
 }
 
 static void shadow_set(DDLOCAL *d, DWORD h, struct shadow *sh)
@@ -2091,6 +2108,73 @@ static int cube_bind(RCTX *c, DWORD h, int stage, const struct shadow *sh)
     return 1;
 }
 
+/* A volume's level: its slices one after another, rows as tight as the texel size allows
+   (CreateSurface sizes video memory volumes so). */
+static DWORD volume_pitch(const DDRAWI_DDRAWSURFACE_GBL *g, const PIXFMT *f)
+{
+    DWORD tight = g->wWidth * f->bytes;
+    return g->lPitch >= (LONG)tight && g->lPitch < (LONG)(tight + 4) ? (DWORD)g->lPitch : tight;
+}
+
+/* A Direct3D 8/9 volume texture (the HAL's copy, shadow_make) on the stage's unit: each level
+   with half the slices of the one above, on OpenGL's 3D target. Sampled by pixel shaders. */
+static int volume_bind(RCTX *c, DWORD h, int stage, const struct shadow *sh)
+{
+    GLF *gl = gl_of(c);
+    DWORD *st = c->tss[stage];
+    DWORD levels = sh[0].levels, depth = sh[0].depth, l;
+    const DDRAWI_DDRAWSURFACE_GBL *g0 = &sh[0].g;
+    TEXTURE *t = texture_slot(c, h);
+    DDPIXELFORMAT pf;
+    PIXFMT f;
+
+    if (!t || !gl->TexImage3D || !levels || !g0->fpVidMem)
+        return 0;
+    surface_format((LPDDRAWI_DDRAWSURFACE_LCL)&sh[0].l, &pf);
+    f = gl_format(&pf);
+    if (!f.bytes)                       /* DXT volumes aren't offered */
+        return 0;
+    if (!t->name) {
+        if (c->ntextures >= TEXTURE_BUDGET)
+            texture_evict(c, h);
+        gl->GenTextures(1, &t->name);
+        c->ntextures++;
+    }
+    gl->BindTexture(GL_TEXTURE_3D, t->name);
+    if (t->mem != g0->fpVidMem || t->w != g0->wWidth || t->levels != levels ||
+        t->fmt != f.internal || t->dirty) {
+        gl->PixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        for (l = 0; l < levels; l++) {
+            const DDRAWI_DDRAWSURFACE_GBL *g = &sh[l].g;
+            DWORD d = depth >> l ? depth >> l : 1;
+            gl->PixelStorei(GL_UNPACK_ROW_LENGTH, volume_pitch(g, &f) / f.bytes);
+            gl->PixelStorei(GL_UNPACK_IMAGE_HEIGHT, g->wHeight);
+            gl->TexImage3D(GL_TEXTURE_3D, l, f.internal, g->wWidth, g->wHeight, d, 0, f.format,
+                           f.type, (const GLvoid *)g->fpVidMem);
+        }
+        gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        gl->PixelStorei(GL_UNPACK_IMAGE_HEIGHT, 0);
+        gl->TexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAX_LEVEL, levels - 1);
+        t->mem = g0->fpVidMem;
+        t->w = g0->wWidth;
+        t->h = g0->wHeight;
+        t->fmt = f.internal;
+        t->levels = levels;
+        t->lmem[0] = g0->fpVidMem;
+        tracef("rd3d: volume %lx: %lux%lux%lu, %lu levels\r\n", h, (DWORD)g0->wWidth,
+               (DWORD)g0->wHeight, depth, levels);
+    }
+    t->dirty = 0;
+    t->scene = c->scene;
+    gl->TexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER,
+                      st[D3DTSS_MAGFILTER] == D3DTFG_POINT ? GL_NEAREST : GL_LINEAR);
+    gl->TexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, min_filter(st, levels));
+    gl->TexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, gl_address(st[D3DTSS_ADDRESSU]));
+    gl->TexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, gl_address(st[D3DTSS_ADDRESSV]));
+    gl->TexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, gl_address(st[25]));  /* D3DTSS_ADDRESSW */
+    return 1;
+}
+
 /* Bind the texture behind a surface handle, uploading it if it is new or has changed. 0 if
    there is no usable texture. */
 static int texture_bind(RCTX *c, DWORD h, int stage)
@@ -2111,6 +2195,8 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
         return 0;
     if (c->dx8 && s->lpSurfMore && (s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_CUBEMAP))
         return cube_bind(c, h, stage, (const struct shadow *)s);    /* the copy (shadow_make) */
+    if (c->dx8 && is_volume(s))
+        return volume_bind(c, h, stage, (const struct shadow *)s);
     t = texture_slot(c, h);
     if (!t)
         return 0;
@@ -3067,7 +3153,24 @@ static void surface_handles(DDLOCAL *l, LPDDRAWI_DDRAWSURFACE_LCL root,
         return;
     }
     if (l->dx8 && depth == 0 && (s->ddsCaps.dwCaps & DDSCAPS_TEXTURE)) {    /* cube maps too */
-        struct shadow *sh = s->lpGbl && s->lpGbl->fpVidMem ? shadow_make(s) : NULL;
+        struct shadow *sh;
+        if ((s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_VOLUME) &&
+            !(s->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY) && (s->dwFlags & DDRAWISURF_HASPIXELFORMAT)) {
+            /* A video memory volume, allocated by now (CreateSurface: rows tight, slices one
+               after another). The runtime reads each level's slice pitch from the field that
+               held the allocation's block height (lSlicePitch in DirectX 8, dwBlockSizeY here). */
+            LPDDRAWI_DDRAWSURFACE_LCL m = s;
+            int k;
+            for (k = 0; m && k < MAX_LEVELS; k++) {
+                LPDDRAWI_DDRAWSURFACE_GBL g = m->lpGbl;
+                g->lPitch = (LONG)(g->wWidth * (g->ddpfSurface.dwRGBBitCount / 8));
+                g->dwBlockSizeY = (DWORD)g->lPitch * g->wHeight;
+                m = (m->ddsCaps.dwCaps & DDSCAPS_MIPMAP) && m->lpAttachList ? m->lpAttachList->lpAttached : NULL;
+                if (m == s)
+                    break;
+            }
+        }
+        sh = s->lpGbl && s->lpGbl->fpVidMem ? shadow_make(s) : NULL;
         handle_set(l, h, sh ? &sh->l : NULL);
         shadow_set(l, h, sh);
         texture_forget(h);              /* a handle may come back with other memory */
@@ -3208,6 +3311,57 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
     c->stages_dirty = 1;
 }
 
+/* A box of one volume copied into another (the runtime's managed volumes), at each level both
+   have, the box and the point scaled to it. Both are the HAL's copies (shadow_make). */
+static void volume_blt(RCTX *c, const RB_DP2_VOLUME_BLT *b)
+{
+    LPDDRAWI_DDRAWSURFACE_LCL ds = handle_get(c->ddl, b->dest), ss = handle_get(c->ddl, b->source);
+    const struct shadow *dsh, *ssh;
+    DDPIXELFORMAT pf;
+    PIXFMT f;
+    DWORD levels, l;
+
+    tracef("rd3d: volume blit %lx -> %lx, box %lu,%lu,%lu-%lu,%lu,%lu\r\n", b->source, b->dest,
+           b->box[0], b->box[1], b->box[4], b->box[2], b->box[3], b->box[5]);
+    if (!c->dx8 || !ds || !ss || !is_volume(ds) || !is_volume(ss))
+        return;
+    dsh = (const struct shadow *)ds;
+    ssh = (const struct shadow *)ss;
+    surface_format(ss, &pf);
+    f = gl_format(&pf);
+    if (!f.bytes)
+        return;
+    levels = dsh->levels < ssh->levels ? dsh->levels : ssh->levels;
+    for (l = 0; l < levels; l++) {
+        const DDRAWI_DDRAWSURFACE_GBL *sg = &ssh[l].g, *dg = &dsh[l].g;
+        DWORD sd = ssh->depth >> l ? ssh->depth >> l : 1, dd = dsh->depth >> l ? dsh->depth >> l : 1;
+        DWORD x0 = b->box[0] >> l, y0 = b->box[1] >> l, x1 = b->box[2] >> l, y1 = b->box[3] >> l;
+        DWORD z0 = b->box[4] >> l, z1 = b->box[5] >> l, dx = b->x >> l, dy = b->y >> l, dz = b->z >> l;
+        DWORD sp = sg->lPitch > 0 ? (DWORD)sg->lPitch : sg->wWidth * f.bytes, dp = volume_pitch(dg, &f);
+        DWORD y, z;
+        if (b->box[2] <= b->box[0] || b->box[3] <= b->box[1] || b->box[5] <= b->box[4]) {
+            x0 = y0 = z0 = 0;           /* no box: all of it */
+            x1 = sg->wWidth;
+            y1 = sg->wHeight;
+            z1 = sd;
+        }
+        if (x1 <= x0) x1 = x0 + 1;
+        if (y1 <= y0) y1 = y0 + 1;
+        if (z1 <= z0) z1 = z0 + 1;
+        if (x1 > sg->wWidth || y1 > sg->wHeight || z1 > sd || dx + x1 - x0 > dg->wWidth ||
+            dy + y1 - y0 > dg->wHeight || dz + z1 - z0 > dd || !sg->fpVidMem || !dg->fpVidMem)
+            break;
+        for (z = z0; z < z1; z++)
+            for (y = y0; y < y1; y++)
+                memcpy((BYTE *)dg->fpVidMem + (dz + z - z0) * dp * dg->wHeight + (dy + y - y0) * dp + dx * f.bytes,
+                       (const BYTE *)sg->fpVidMem + z * sp * sg->wHeight + y * sp + x0 * f.bytes,
+                       (x1 - x0) * f.bytes);
+    }
+    if (b->dest < c->ntex)
+        c->tex[b->dest].dirty = 1;      /* upload again */
+    c->stages_dirty = 1;
+}
+
 #define CMD(p) ((LPD3DHAL_DP2COMMAND)(p))
 #define ALIGN4(p) ((BYTE *)(((DWORD)(p) + 3) & ~3))
 
@@ -3340,7 +3494,8 @@ static void ps_create(RCTX *c, DWORD handle, const DWORD *code, DWORD bytes)
     p->nvar = 1;
 }
 
-/* The stages t0..t3 whose texture is a cube map: a version 1 shader's tex reads them as such. */
+/* The stages t0..t3 whose texture is a cube map (bits 0-3) or a volume (bits 8-11): a version 1
+   shader's tex reads them as such. Shifted by RB_PS_CUBE_SHIFT, the translator's argument. */
 static DWORD cube_stages(RCTX *c)
 {
     DWORD s, mask = 0;
@@ -3349,6 +3504,8 @@ static DWORD cube_stages(RCTX *c)
         LPDDRAWI_DDRAWSURFACE_LCL l = map ? handle_get(c->ddl, map) : NULL;
         if (l && is_cube(l))
             mask |= 1UL << s;
+        if (l && is_volume(l))
+            mask |= 1UL << (RB_PS_VOLUME_SHIFT - RB_PS_CUBE_SHIFT + s);
     }
     return mask;
 }
@@ -3930,9 +4087,15 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
         case RbDp2AddDirtyBox:
             cmd = data + n * sizeof(RB_DP2_DIRTY_BOX);
             break;
-        case RbDp2VolumeBlt:            /* no volume textures offered */
-            cmd = data + n * sizeof(RB_DP2_VOLUME_BLT);
+        case RbDp2VolumeBlt: {
+            const RB_DP2_VOLUME_BLT *vb = (const RB_DP2_VOLUME_BLT *)data;
+            if (data + n * sizeof *vb > end)
+                goto bad;
+            for (i = 0; i < n; i++)
+                volume_blt(c, &vb[i]);
+            cmd = data + n * sizeof *vb;
             break;
+        }
         case D3DDP2OP_TEXBLT: {
             LPD3DHAL_DP2TEXBLT b = (LPD3DHAL_DP2TEXBLT)data;
             for (i = 0; i < n; i++)
@@ -4024,7 +4187,7 @@ static void prim_caps(D3DPRIMCAPS *p)
        runtimes on Windows 98 decide from this record whether a cube map may go to video
        memory, whatever D3DCAPS8 says. */
     if (d8_on)
-        p->dwTextureCaps |= 0x800;      /* D3DPTEXTURECAPS_CUBEMAP */
+        p->dwTextureCaps |= 0x800 | 0x2000;     /* D3DPTEXTURECAPS_CUBEMAP, VOLUMEMAP */
     p->dwTextureFilterCaps = D3DPTFILTERCAPS_NEAREST | D3DPTFILTERCAPS_LINEAR |
         D3DPTFILTERCAPS_MIPNEAREST | D3DPTFILTERCAPS_MIPLINEAR |
         D3DPTFILTERCAPS_LINEARMIPNEAREST | D3DPTFILTERCAPS_LINEARMIPLINEAR |
@@ -4136,14 +4299,14 @@ static ULONG fbits(float f)
 
 /* Formats and what each can be used for (the operations in the word of dwRBitMask). */
 static const ULONG d8_formats[][2] = {
-    { RbFmtX8R8G8B8, RbFormatTexture | RbFormatCubeTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
+    { RbFmtX8R8G8B8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
                      RbFormatDisplayMode | RbFormat3D },
-    { RbFmtA8R8G8B8, RbFormatTexture | RbFormatCubeTexture | RbFormatOffscreenTarget | RbFormatSameTargetUpToAlpha },
-    { RbFmtR5G6B5, RbFormatTexture | RbFormatCubeTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
+    { RbFmtA8R8G8B8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture | RbFormatOffscreenTarget | RbFormatSameTargetUpToAlpha },
+    { RbFmtR5G6B5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
                    RbFormatDisplayMode | RbFormat3D },
-    { RbFmtX1R5G5B5, RbFormatTexture | RbFormatCubeTexture },
-    { RbFmtA1R5G5B5, RbFormatTexture | RbFormatCubeTexture },
-    { RbFmtA4R4G4B4, RbFormatTexture | RbFormatCubeTexture },
+    { RbFmtX1R5G5B5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtA1R5G5B5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtA4R4G4B4, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     { RbFmtD16, RbFormatZStencil },
     { RbFmtD24S8, RbFormatZStencil },
     { RbFmtD24X8, RbFormatZStencil },
@@ -4175,9 +4338,13 @@ static void d8_caps(RB_D3DCAPS8 *c)
     c->alphaCmpCaps = tri->dwAlphaCmpCaps;
     c->shadeCaps = tri->dwShadeCaps;
     c->textureCaps = tri->dwTextureCaps | 0x4000;      /* D3DPTEXTURECAPS_MIPMAP */
-    /* Cube maps, sampled by pixel shaders (the fixed-function stages do not). */
+    /* Cube maps and volumes, sampled by pixel shaders (the fixed-function stages do not). */
     c->textureCaps |= 0x800 | 0x10000;  /* D3DPTEXTURECAPS_CUBEMAP, MIPCUBEMAP */
     c->cubeTextureFilterCaps = tri->dwTextureFilterCaps;
+    c->textureCaps |= 0x2000 | 0x8000;  /* D3DPTEXTURECAPS_VOLUMEMAP, MIPVOLUMEMAP */
+    c->volumeTextureFilterCaps = tri->dwTextureFilterCaps;
+    c->volumeTextureAddressCaps = tri->dwTextureAddressCaps;
+    c->maxVolumeExtent = 256;
     c->textureFilterCaps = tri->dwTextureFilterCaps;
     c->textureAddressCaps = tri->dwTextureAddressCaps;
     c->stencilCaps = x.dwStencilCaps;
@@ -4314,7 +4481,7 @@ int d3d_driver_info(LPDDHAL_GETDRIVERINFODATA d)
             heaps = 5;
         memset(&m, 0, sizeof m);
         m.c.dwSize = sizeof(DDMORESURFACECAPS) + (heaps ? heaps - 1 : 0) * 2 * sizeof(DDSCAPSEX);
-        m.c.ddsCapsMore.dwCaps2 = DDSCAPS2_CUBEMAP;
+        m.c.ddsCapsMore.dwCaps2 = DDSCAPS2_CUBEMAP | DDSCAPS2_VOLUME;
         return copy_answer(d, &m, m.c.dwSize);
     }
     if (IsEqualGUID(&d->guidInfo, &GUID_D3DCallbacks3)) {

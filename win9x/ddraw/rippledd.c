@@ -228,7 +228,24 @@ static DWORD WINAPI CreateSurface(LPDDHAL_CREATESURFACEDATA d)
         LPDDRAWI_DDRAWSURFACE_LCL s = d->lplpSList[i];
         LPDDRAWI_DDRAWSURFACE_GBL g = s->lpGbl;
         DWORD block = (s->dwFlags & DDRAWISURF_HASPIXELFORMAT) ? d3d_dxt_block(&g->ddpfSurface) : 0;
-        if (!block || (s->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY))
+        if (s->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY)
+            continue;
+        if (!block && s->lpSurfMore && (s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_VOLUME) &&
+            (s->dwFlags & DDRAWISURF_HASPIXELFORMAT)) {
+            /* A volume level (Direct3D 8 and 9): its slices one after another, rows tight; the
+               list holds the levels in order, each with half the slices of the one above. */
+            LPDDRAWI_DDRAWSURFACE_LCL top = d->lplpSList[0];
+            DWORD depth = top->lpSurfMore ? top->lpSurfMore->ddsCapsEx.dwCaps4 >> i : 1;
+            DWORD pitch = g->wWidth * (g->ddpfSurface.dwRGBBitCount / 8);
+            if (!depth)
+                depth = 1;
+            g->lPitch = (LONG)pitch;
+            g->dwBlockSizeX = pitch * g->wHeight * depth;
+            g->dwBlockSizeY = 1;
+            g->fpVidMem = DDHAL_PLEASEALLOC_BLOCKSIZE;
+            continue;
+        }
+        if (!block)
             continue;
         g->dwBlockSizeX = ((g->wWidth + 3) / 4) * ((g->wHeight + 3) / 4) * block;
         g->dwBlockSizeY = 1;
