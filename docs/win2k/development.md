@@ -729,6 +729,42 @@ the Start menu holding the focus. To make the GPU path worth turning on,
 its present would first have to stop waiting for each frame's fence, as
 the native Direct3D 7 present does.
 
+### Waits no longer sit out the fence timer
+
+QEMU answers a fenced request when it next looks at its fences: right
+after it handles a notification of the control queue, or on its 10 ms
+timer. A notification with no new request is enough to make it look
+again, so while the miniport waits for a reply it rings the control
+queue's doorbell again after 0.2 ms, then at doubling intervals up to
+2 ms. [QEMU control handler](https://github.com/qemu/qemu/blob/v10.0.0/hw/display/virtio-gpu-gl.c) · [QEMU fence timer](https://github.com/qemu/qemu/blob/v9.2.0/hw/display/virtio-gpu-virgl.c)
+
+One run each on XP SP3 under KVM on a second Intel UHD 630 host (QEMU
+10.0, virglrenderer 1.1.0, Mesa 25.0; its numbers are not comparable with
+the table above), only the miniport changed. The OpenGL runs set
+`RippleGpuDesktop=1`; 3DMark03 ran with the default settings, and in both
+of its runs its message about a volume texture it could not create was
+answered from the host:
+
+| Test | before | after |
+| --- | ---: | ---: |
+| Quake III, 640×480 window, GPU path (fps) | 28.8 | 158.5 |
+| Quake III, 640×480 window, ordinary path (fps) | 509.7 | 519.9 |
+| Quake III, 1024×768 full screen, GPU path (fps) | 83.1 | 290.7 |
+| Quake III, 1024×768 full screen, ordinary path (fps) | 379.7 | 384.9 |
+| 240 swaps, 640×480 window, GPU path (ms) | 8,306 | 1,282 |
+| 240 swaps, full screen, GPU path (ms) | 2,695 | 454 |
+| 240 swaps, full screen, ordinary path (ms) | 378 | 378 |
+| 3DMark03 3.60, 1024×768, Direct3D (3DMarks) | 1,133 | 2,099 |
+| 3DMark03: time waiting for frame N−2 (s) | 143.1 | 9.8 |
+
+Direct3D gains as well: a draw that finds both frame slots in flight
+waits for the older one, and those waits no longer last until the timer.
+The GPU path is five times faster in a window and three and a half times
+at full screen, but still slower than the ordinary path, so it stays
+opt-in. On the ordinary path the window swaps took 174 ms before; after,
+the warm-up run took 171 ms and the timed one 279 ms in the same boot.
+`d9pixels` (41 of 41) and `tpixels hal` (18 of 18) pass with both builds.
+
 ### Small desktop writes and the hardware pointer
 
 `RIPPLE_GL_PRESENT=inline` uses the same per-frame copy as `1`.
