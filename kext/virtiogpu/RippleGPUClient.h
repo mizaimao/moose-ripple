@@ -56,6 +56,9 @@ class RippleGPUClient : public IOUserClient
     // time (mach_absolute_time units) checking handles, waiting for the buffer, copying,
     // queueing. Published as the property RippleSubmitStats every 512 calls.
     uint64_t           fSub[8];
+    // Buffer creates: calls, bytes, and time in getting the memory, the host's create and
+    // the host's attach. Published as RippleCreateStats every 16 calls.
+    uint64_t           fCre[5];
     uint32_t           fShown;                   // buffer this connection shows on the display
 
     int  contextSlot(uint32_t ctx) const;

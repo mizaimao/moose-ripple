@@ -1263,3 +1263,288 @@ covered windows without the wait, the accelerator reference):
   the display limit: nothing is held back at the display's rate.
 - No error from the kext. The timedemo ran at 24.5 frames/s next to the other guests (22.9 to
   24.8 alone on 2026-11-25).
+
+### The per-draw CPU cost, and a trial of a second GL thread (2026-11-26)
+
+Looked at first on the kept profile of the timedemo (5,463 samples of the game's thread):
+locks 1.3%, thread-local lookups under 1%, so nothing to win there. The 1.2 ms a frame in
+OpenGL calls is spread: copying the game's vertex arrays 2%, the bookkeeping of each upload
+(map, transfer, unmap) 3%, texture and sampler state per draw 5%, the fixed-function program
+lookup 2%, encoding the draw 3%. No single piece can be told from run-to-run scatter.
+
+Tried instead, as a feasibility build that is not in the tree: Mesa's own second GL thread
+("glthread"), which hands the GL calls to a worker thread. It needs two things virgl does not
+offer: buffer maps that are safe from the application's thread, and buffers that stay mapped
+while they are drawn from. Both were given for the trial: the upload buffer is mapped straight
+from its guest memory, Mesa's upload function tells the driver how far it has written, and
+before each draw the driver puts a transfer command for the new range into the stream. In the
+frontend the entries that touch the context directly (about sixty overrides, the swap, the
+drawable changes) wait for the worker first.
+
+Result on the second Intel host, OpenArena's timedemo, alternating runs on one boot, another
+guest running (so not a clean timing): with the Dock over the window 224 frames/s against 211,
+with the Dock hidden 302 and 321 against 282 and 303. About 6%. The picture is right in both
+(a first build that drew garbage ran at 370 and is not a result). gl-gears runs with it too.
+
+Why not more: the worker takes the driver's work (it is busy 15% of the time), but the game's
+thread keeps the copy of the vertex arrays (0.2 ms a frame), waits for the worker at every
+`glClear`, and then waits in the present for the host, which becomes the pacer at 300
+frames/s. Not pursued for now: a correct version means auditing every override for state it
+reads, for a gain of this size on these hosts. It may be worth more under emulation (UTM),
+where the game's thread is the limit and the host has time to spare; not tried there. The two
+patch files of the trial are kept outside the tree.
+
+### A covered window asks WindowServer at most 66 times a second (2026-11-26)
+
+After the change above, a program that does not wait for the refresh left word with
+WindowServer after every frame, and WindowServer redrew the covered window as often as it
+could, about 200 times a second, on the host renderer the program itself draws with. The flush
+thread now waits out a gap of 15 ms between two requests (`RIPPLE_GL_FLUSH_HZ` in the
+environment, default 66, 0 for no limit); a frame that comes meanwhile takes the place of the
+queued one, so WindowServer always gets the newest. A program that waits for the refresh is
+not held.
+
+OpenArena's timedemo, 1024x768 window with the Dock over its lower edge, alternating on one
+boot, switched by that variable:
+
+| | no limit | 66 a second | for scale: the Dock hidden |
+|---|---|---|---|
+| second Intel host (another guest was running) | 191.2, 192.9 | 277.6, 275.7 | about 300 |
+| Proxmox host, to itself | 198.3, 192.2 | 264.7, 267.5 | 285.2 |
+
+gl-gears, which waits for the refresh, in a covered window: 59.8 frames/s, longest frame
+17 ms, as before. Looked at: the game's picture advancing under the Dock, two captures a
+second apart.
+
+A covered window now costs about 7% of the frame rate on the Proxmox host, where it cost a
+quarter the evening before.
+
+### A two-hour stability run (2026-11-26)
+
+On the Proxmox host, to itself, GPU clock at 1200 MHz, with the kext and bundle of 2026-11-25
+(queued submits, the display limit, the helper thread, covered windows without the wait, the
+accelerator reference; the redraw limit above came after). `tools/soak/soak.sh` ran detached
+in the guest for 122 minutes, 22 rounds of: OpenArena's timedemo in a covered and in an
+uncovered window, Cinebench's OpenGL test with its reference check, Real Racing 2 started and
+taken into a quick race for two minutes, the two Core Image comparisons, gl-gears in a covered
+window, Exposé and Dashboard.
+
+| step, 22 times each | result |
+|---|---|
+| OpenArena, 1024x768 window under the Dock | 185.8 to 207.4 frames/s, mean 193.5 |
+| OpenArena, 800x600 window, nothing over it | 288.4 to 307.1, mean 299.8 |
+| Cinebench OpenGL test | 34.9 to 39.2 frames/s; reference check passed every time, the same 3,625 pixels off |
+| Real Racing 2, two minutes of a race | 60.1 frames/s every time, no 5 s window under 60.0; menu reached after 65 to 70 s |
+| Core Image: 24 filters, 61 Photo Booth effects | 1 and 6 differ from the software renderer, every time |
+| gl-gears, covered | 59.4 frames/s or more, longest frame 20 ms |
+
+No drift in any of them from the first round to the last. Health line after each round: no
+error from the kext, no crash report, no command over 100 ms; WindowServer 58 to 62 MB, wired
+memory 732 to 734 MB. On the host: no message from the renderer in the journal, QEMU's memory
+3.4 GB after five minutes and 3.6 GB at most. The guest shut itself down cleanly at the end.
+
+Cinebench is slower inside the run (36 frames/s) than started alone after a boot (46); the
+order of the programs was not varied, so this is noted, not explained.
+
+### The changes of 2026-11-25 timed in UTM (2026-11-26)
+
+UTM 5 on an M1 Max, no other guest running (a disk tool was busy on the host, and the level
+is lower than the 22.9 to 24.8 frames/s of the day before, so only this table's rows compare
+with each other). OpenArena's timedemo, window under the Dock, one run each, the kext changes
+switched by boot flag and the bundle changes by environment variable on the same builds:
+
+| display limit and helper thread (kext) | newest frame and redraw limit (bundle) | frames/s |
+|---|---|---|
+| off | off | 19.8 |
+| off | on | 19.6 |
+| on | off | 20.0 |
+| on | on | 19.9 |
+| on | on, the Dock hidden | 20.8 |
+
+No difference in UTM, as expected: the emulated CPU is the limit there, the program presents
+far fewer than 66 times a second, and nothing waits for the host. Nothing got slower either.
+What would help under emulation is less work on the program's own thread.
+
+### Core Image: the gap to software is in a filter's first two renders (2026-11-26)
+
+`ci-effects filters` prints one time per filter, the mean of renders two to four of a
+filter. With `CI_EFFECTS_PASSES=8 CI_EFFECTS_EACH=1` (new) it prints every render, ours and
+the software renderer's. Sums over the 24 filters, 480x300, on the second Intel host (other
+guests were running; ours / software):
+
+| | first render | second render | each later render |
+|---|---|---|---|
+| all 24 filters | 353 / 84 ms | 119 / 54 ms | 32.6 / 34.8 ms |
+| one colour filter (ColorInvert) | 6.3 / 1.2 | 0.9 / 0.8 | 0.82 / 0.77 |
+| GaussianBlur | 26.9 / 6.1 | 6.2 / 3.3 | 1.72 / 1.12 |
+| ComicEffect | 43.8 / 7.9 | 18.7 / 4.3 | 3.80 / 3.62 |
+| UnsharpMask | 17.3 / 3.4 | 18.2 / 3.3 | 1.16 / 1.46 |
+
+From the third render on, ours is as fast as the software renderer over the 24 filters (the
+distortions and UnsharpMask faster, the blurs slower). The 1.2-12 ms against 0.8-4.5 quoted
+before came from the second render, which the tool's mean includes.
+
+This corrects the section "Core Image after the texture cache" above: Core Image does not
+compile programs in every render. The call trace of a run shows them only in a filter's
+first render and, for most filters with several passes, in its second, where Core Image
+builds new, joined programs; later renders set none. 188 of the 226 texts are different, so
+a cache by text has nothing to find in this run.
+
+Where the first two renders go (the test sampled while it does only those, 1 ms steps, three
+runs): of about 470 ms in ours, 142 ms are in `glProgramStringARB` (0.63 ms a text: parsing
+15, Mesa's NIR passes and the translation to TGSI about 95, the TGSI text for the host 21),
+about 100 ms in creating textures (a call to the kernel that waits for the host, which is
+busy compiling what was just sent), 42 ms in the read-back.
+
+**Change: an ARB program's shader is made at the first draw with it.** Mesa built a shader
+for every program when its text was set. Core Image sets three programs for a kernel and
+draws with two at most: of the 226 texts, 81 never see a draw (27 of 77 vertex programs, 54
+of 149 fragment programs), and each cost a compile in the guest and another on the host.
+Patch `0013` leaves the shader of an ARB program to its first draw (GLSL programs keep theirs
+at the link); `RIPPLE_GL_EAGER_PROGRAMS=1` in the environment brings the old behaviour back.
+Same host, one boot, alternating by that variable, sums over the 24 filters:
+
+| | first render | second render | each later render |
+|---|---|---|---|
+| shader when the text is set (before) | 352.7, 344.6 ms | 119.0, 117.1 ms | 32.6, 32.4 ms |
+| shader at the first draw (after) | 314.6, 314.6 | 94.5, 94.0 | 31.5, 32.0 |
+| the same pair later, the host quiet, creates queued (below): before | 324.6, 325.0 | 102.9, 104.3 | 27.6, 27.4 |
+| after | 268.2, 278.0 | 81.5, 82.1 | 27.1, 27.3 |
+
+The first showing of a filter (two renders) goes from 467 to 409 ms over the 24, 12% less,
+and from 428 to 355 ms (17% less) in the second pair.
+The picture comparison is unchanged (1 of 24 filters and 6 of 61 Photo Booth effects differ,
+the same ones). Looked at after a restart with the new bundle: the desktop with the menu bar,
+a window with its shadow, Exposé, Dashboard. OpenArena's timedemo 284.6 frames/s with the
+change and 280.5 with the variable set, gl-gears 59.7 frames/s; no error from the kext.
+
+Left in the first two renders: the compile itself for the programs that are drawn with (Mesa
+runs its full set of NIR passes on programs of twenty instructions), and the texture creates.
+
+### Core Image's flush per pass costs nothing any more (2026-11-26)
+
+Core Image calls `glFlushRenderAPPLE` when it unbinds a texture, once or twice a pass, and
+each is a submit. The idea on the list was to hold these back until the context's next real
+submit. Its upper bound, tried with a switch that drops the call altogether (a trial build,
+not in the tree; the read-back at the end of a render still submits everything): the 24
+filters, alternating on one boot on the second Intel host, each later render in sum 34.4 and
+30.7 ms with the flushes, 33.6 and 33.5 ms without; first and second renders the same within
+their scatter; the picture comparison unchanged. With queued submits a flush is a call into
+the kernel that returns at once, so there is nothing left to gain here. Not built.
+
+### A buffer is created without waiting for the host (2026-11-26)
+
+Timers in the kext's buffer create (`RippleCreateStats` on the connection: calls, bytes, time
+getting the memory, in the host's create, in the host's attach) for the filter test's first
+two renders, 288 buffers: 4 ms for the memory, 127 ms waiting for the host's answer to the
+create and 25 ms for the attach. The create itself is nothing to the host; the answer comes
+when the host has worked through what was queued before it, the programs it was just sent
+among them. With queued submits these were the waits left in a render besides its read-back.
+
+The kext now puts a 3D client's create, attach and context attach in the queue and returns
+(`ripple_create=0` at boot: wait for each as before). The queue keeps the order, so a later
+command finds the buffer. The attach's list of memory runs goes into the request itself, up
+to 254 runs; a longer list still waits. A refusal by the host is no longer returned to the
+caller: it shows in the kernel log ("queued command failed"). The framebuffer's and
+WindowServer's own surfaces are created as before.
+
+Second Intel host, no other guest busy, the same kext and bundle, one boot each, `ci-effects`
+with eight renders a filter, sums over the 24 filters (ours; the software renderer's are 84,
+54 and 34 ms):
+
+| | first render | second render | each later render |
+|---|---|---|---|
+| creates waited for (`ripple_create=0`) | 330.8, 306.4, 314.7 ms | 98.3, 93.9, 95.9 ms | 33.5, 31.2, 31.8 ms |
+| creates queued | 263.2, 271.6, 287.9, 277.7, 268.3 | 77.3, 77.6, 80.7, 79.7, 79.5 | 25.4, 25.8, 26.8, 26.7, 27.2 |
+
+The first showing of the 24 filters goes from 413 to 353 ms (15% less), each later render
+from 32.2 to 26.4 ms (18% less; a later render still creates the buffers the texture cache
+does not hold). With the queue the timers show 0.7 ms in the creates and 37 to 52 ms in the
+attaches: when the host is behind, the sixteen command slots fill and the next command waits
+for one, so part of the wait has only moved. OpenArena's timedemo on the same two boots:
+276.3, 275.6, 267.4 frames/s waited for, 283.0, 269.1, 288.4 queued, no difference.
+
+The picture comparison is unchanged in both modes (1 of 24 filters, 6 of 61 effects, the same
+ones). Looked at with the queue: desktop with the menu bar, a window with its shadow, Exposé,
+Dashboard; gl-gears 58.7 frames/s; no error from the kext and no refused command.
+
+Two traps of this measurement, for the next one. A run while another guest used the host's
+GPU came out five times slower (530 ms for the first renders), and the software renderer's
+column, which only needs the CPU, hardly showed it: on a shared host, look at the other
+guests' GPU use before and after a run. And the first "before" was no before: the restart
+that should have set the boot flag had been skipped, so both runs were on one boot (the five
+values of the queued row). The kernel's own `kern.bootargs` and the boot time are checked
+after each restart now.
+
+The same pair in UTM on an M1 Max (no other guest; a different picture, a scaled system
+desktop picture, so these compare only with each other; six renders a filter): first render
+7,282 and 7,217 ms waited for, 8,013 and 7,254 queued; second 1,910 and 1,908 against 2,074
+and 1,903; each later render 147.7 and 147.4 against 137.0 and 137.5 ms (7% less). The first
+two renders are the emulated CPU compiling and do not change. The software renderer there
+needs 3,330 ms for a later render of the 24, ours 137. With that picture 7 of the 24 filters
+differ from the software renderer in UTM, with either kext mode and with the shader made at
+load or at the first draw alike. That is KI-12 in `docs/known-issues.md`: the host there has
+no sampler border colours, so a filter that reads outside the picture gets its edge pixels
+(the same picture on the second Intel host: 0 of 24 differ).
+
+The same pair on the Proxmox host (its QEMU is 9.2; rig to itself, GPU clock at 1200 MHz, one
+boot each, three runs; the software renderer's sums there are 90, 58 and 37 ms):
+
+| | first render | second render | each later render | `ci-effects`' own line, summed |
+|---|---|---|---|---|
+| creates waited for | 334.0, 323.2, 326.6 ms | 107.7, 99.2, 98.2 ms | 42.9, 39.9, 39.0 ms | 62.2 ms (software 44.4) |
+| creates queued | 247.2, 235.3, 236.0 | 77.4, 74.1, 72.0 | 32.8, 30.2, 31.0 | 45.0 ms (software 44.5) |
+
+First showing 430 to 314 ms (27% less), each later render 40.6 to 31.3 ms (23% less). The
+picture comparisons are unchanged there too (1 of 24, 6 of 61), no error from the kext, no
+refused command, nothing from the host's renderer in the journal; desktop, a window's shadow,
+Exposé and Dashboard looked at. A third trap: the boot after a kext install rebuilds the kext
+cache for eight minutes in the background, and the first "waited for" runs on this host fell
+into it (537 ms for a first render); they were repeated on a boot without it.
+
+### The guest's compile of a filter's programs in UTM: a sixth of a first showing (2026-11-26)
+
+The question was how much of a filter's first showing in UTM is the driver's compile of its
+programs. `ci-effects` sampled there while it does only the first two renders of each filter
+(the sampler slows the guest, so the counts are scaled by the test's own times): of about 10 s
+for the 24 filters in ours, Mesa's compile is about 1.6 s, a sixth.
+
+| part of Mesa's compile | share |
+|---|---|
+| NIR to TGSI in the virgl driver (`nir_to_tgsi_options`), at the first draw | 36% |
+| NIR optimisation when the text is set (`gl_nir_opts`) | 17% |
+| the TGSI text for the host (`tgsi_dump_str`, nearly all of it in `vsnprintf`) | 16% |
+| parsing the ARB text | 9% |
+| the rest (clone, finalize, encode) | 22% |
+
+`nir_opt_algebraic` alone, inside the first two, is a quarter of the compile. The other five
+sixths of a first showing are not the driver's: Core Image builds the filter's kernel itself,
+on the emulated CPU. Its software renderer needs as long for a first render as ours (9.6 s
+against 8.7 s for the 24), and it does not touch the driver at all. An earlier section calls
+the first two renders in UTM "the emulated CPU compiling"; that is Core Image's compiling for
+the most part.
+
+**Tried, not kept: a cache on disk of the translation.** The translation to TGSI gives the same
+tokens for the same NIR, options and host, so the virgl driver looked it up first under a
+SHA-1 of the three, one small file per shader in the user's `Library/Caches`, in a directory
+named after the bundle's UUID so a new build never reads an old build's entries. It worked: a
+second run of the test found all 153 shaders (37 of them already repeat within one run; the
+Photo Booth effects compile 1,240 shaders of which 168 differ), and the picture comparisons
+were the same with the cache cold, warm and off. What it gave, the cache off against filled,
+alternating on one boot, sums over the 24 filters:
+
+| | first render | second render |
+|---|---|---|
+| UTM on an M1 Max, off | 8,674, 8,809 ms | 1,302, 1,304 ms |
+| filled | 8,294, 8,326 | 1,184, 1,210 |
+| second Intel host (another guest was active), off | 278.0, 283.7 | 84.0, 81.8 |
+| filled | 257.1, 276.3 | 75.3, 81.3 |
+
+A first showing in UTM goes from 10.0 to 9.5 s for the 24 filters, 5%, and about as much on
+the Intel host; the whole run of the 61 Photo Booth effects takes 7.5 s both ways. That is too
+little for what it costs: files written from every program that draws, and a new way for a
+stale or damaged entry to give a wrong picture. It is not in the tree.
+
+What is left to gain here is small whatever is built: skipping all of Mesa's compile for a
+program seen before (a cache keyed on the program's text, with the state tracker's variants)
+could give at most the sixth above.

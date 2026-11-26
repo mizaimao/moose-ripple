@@ -9,15 +9,29 @@ the GPU (showing a frame takes 4-5 ms at any size, where a 1280x800 window took 
 a composited frame needs one submit, one wait without a host round trip and one display call
 (it was five, four and one). Since 2026-11-26 the host is asked to show the screen at most 66 times
 a second (it reads the whole screen back each time): OpenArena's timedemo went from 148 to 192
-frames/s on the Proxmox host. Left:
-- A single Core Image filter is still slower than software rendering (1.2-12 ms against 0.8-4.5
-  for a 480x300 picture). Its textures are reused and its submits are queued since 2026-11-25;
-  what is left is one trip to the host per pass (Core Image's flush when it unbinds a
-  texture), a new program compiled for every render, and the read-back
-  ([re/perf-notes.md](re/perf-notes.md), "Core Image after the texture cache").
-- A stall of about 170 ms every few seconds while something animates, below the driver (a
-  runnable thread in the guest is not run), on the KVM host only: see
-  [re/perf-notes.md](re/perf-notes.md).
+frames/s on the Proxmox host. With queued submits, the notify from a helper thread and covered
+windows that no longer wait (all 2026-11-25) the same timedemo runs at about 280 frames/s with
+nothing over its window; the same host's GeForce 9600 GT with Apple's driver does 351. Left:
+- A window with something drawn over it (the Dock, another window) still costs a program a
+  quarter of its frame rate (about 200 frames/s against 280): WindowServer draws such a window,
+  and its drawing shares the host's renderer with the program.
+- At about 300 frames/s the host is the pacer on the Intel hosts: QEMU's main thread runs the
+  guest's GL commands and waits for the GPU in between. In the guest the driver's own work is
+  1.2 ms a frame, spread thin; putting it on a second thread (Mesa's glthread, a trial that is
+  not in the tree) gave about 6% there. It may be worth more under emulation, where the
+  program's thread is the limit ([re/perf-notes.md](re/perf-notes.md), "a second GL thread").
+- In UTM none of the changes of 2026-11-25 is timed yet; they are only checked to work.
+- Core Image: from a filter's third render on, ours is faster than software rendering (26 ms
+  against 34 for 24 filters on a 480x300 picture). The first two renders of a filter, where
+  Core Image sets its programs, take 353 ms against 138 for the 24: Mesa's compile of each
+  program that is drawn with (0.6 ms, most of it NIR passes on programs of twenty
+  instructions), the host's own compile, and the read-back that waits for both. A buffer's
+  create still walks its memory page by page for the attach (0.1 ms), and with sixteen
+  command slots a client waits when the host is behind
+  ([re/perf-notes.md](re/perf-notes.md), "Core Image: the gap to software" and after).
+  In UTM the driver's compile is about a sixth of a first showing (the rest is Core Image's
+  own work on the emulated CPU); a cache on disk of the translation to TGSI gave 5% there and
+  was not kept.
 - Frames reach a VNC viewer unevenly (see [re/perf-notes.md](re/perf-notes.md)). Every open
   VNC viewer (a Proxmox web console, for example) makes QEMU encode each frame again, before the
   next viewer gets it: with one console open, a second viewer got whole-screen frames every

@@ -1,0 +1,23 @@
+35:#include "main/errors.h"
+--- a/src/mesa/state_tracker/st_program.c
++++ b/src/mesa/state_tracker/st_program.c
+@@ -1441,8 +1441,17 @@
+       st_serialize_nir(prog);
+    }
+ 
+-   /* Always create the default variant of the program. */
+-   st_precompile_shader_variant(st, prog);
++   /* moose-ripple: an ARB program gets its shader at the first draw with it, not when its
++    * text is set. Core Image sets three programs for every kernel and draws with two of
++    * them at most (in a run of 24 filters, 81 of 226 texts were never drawn with); each
++    * one cost a compile here and another on the host. RIPPLE_GL_EAGER_PROGRAMS=1 in the
++    * environment brings the shader at load back. GLSL programs keep it: their callers
++    * expect a shader after the link. */
++   static int eager = -1;
++   if (eager < 0)
++      eager = getenv("RIPPLE_GL_EAGER_PROGRAMS") != NULL;
++   if (prog->shader_program || eager)
++      st_precompile_shader_variant(st, prog);
+ }
+ 
+ /**

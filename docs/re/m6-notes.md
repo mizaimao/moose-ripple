@@ -647,3 +647,60 @@ Checked once on a second Intel UHD 630 host with QEMU 10.0.13, virglrenderer 1.1
 
 Both workarounds stay: they cost nothing measurable and Proxmox 8 ships the old renderer.
 Neither behaviour is there to report against the current renderer.
+
+## Border colours on a host without them (2026-11-26, issue 206)
+
+Core Image gives its rectangle textures `GL_CLAMP_TO_BORDER` and a border colour, mostly
+transparent black: a filter that reads outside its input picture gets nothing there. UTM's
+host renderer is OpenGL ES through ANGLE, and virglrenderer logs "Sampler border color setting
+requested but not supported" for every such sampler; the lookup falls back to the texture's
+edge. Seen with `ci-effects` and a picture larger than the 480x300 it renders (a filter then
+reads past the edge on two sides only, which the usual picture hides less well): blurs stayed
+opaque at the edge, a twirl or pinch smeared the edge pixels into the area that should be
+empty. The same run on a host with desktop OpenGL has none of it.
+
+Mesa patch `0014` does the border in the fragment program on such hosts, the way Mesa's state
+tracker already does `GL_CLAMP` for drivers without it:
+
+- `st_get_tex_border` finds, for an ARB or fixed-function fragment program, the sampler units
+  that clamp to their border in s and in t, and those among them that filter linearly. The
+  three bitmasks are part of the fragment variant's key. A texture or sampler change that
+  alters them asks for another variant (`st_invalidate_state`).
+- The variant gets a pass (`lower_tex_border` in `st_program.c`) that, after each lookup of
+  such a sampler, mixes the result with the border colour by how much of the lookup lies
+  outside the texture: all or nothing with nearest filtering, and with linear filtering the
+  half-texel ramp the filter itself gives at a border (the host's clamp to the edge supplies
+  the texel side of that mix). The texture's size comes from a size query in the shader.
+- The border colour comes in as a new state variable, `STATE_TEX_BORDER_COLOR` with the
+  texture unit, so a changed colour is a changed constant and not another variant.
+- It is on when the host has no rectangle textures, which among the hosts this build draws
+  on is the OpenGL ES one. `RIPPLE_GL_BORDER_TEST=1` or `=0` in a program's environment
+  forces it on or off.
+
+Not covered: GLSL programs (their sampler units can change after the link), vertex programs,
+and 3D and cube textures. Whether a real program needs the GLSL case was looked at the same
+day with call traces from launch into play: Real Racing 2, Cinebench R11.5 and Angry Birds
+Rio all draw with GLSL programs and none of them ever sets `GL_CLAMP_TO_BORDER` or a border
+colour (they use repeat and clamp to edge). The system's own users of border colours, Core
+Image and WindowServer, draw with ARB programs. So the GLSL case is left open until a
+program shows it.
+
+UTM on an M1 Max, the fix off and on by that variable, ours against the software renderer,
+pixels off by more than 16 levels on more than 1% of the picture:
+
+| | off | on |
+|---|---|---|
+| 24 filters, 960x600 picture | 7 differ (twirl 10.9%, pinch 9.4%, Gaussian blur and gloom 8.0%, motion blur 6.2%, edge work 1.7%, pointillize 1.5%) | 1 (edge work 1.5%) |
+| 24 filters, the usual picture | 9 | 2 (edges 3.9%, edge work 1.8%) |
+| 61 Photo Booth effects | 9 | 5 (Blue Print, Comic Book, Concert, Neon, Pinch) |
+
+With it on, UTM shows the differences the Intel hosts show (the edge filters, and the effects
+that differ on a real GeForce too) and no others. Looked at: the paired twirl and pinch
+pictures, and after a restart the desktop with the menu bar, a window with its shadow and
+Dashboard. OpenArena's timedemo in UTM: 20.0 frames/s with the test off and 20.0 with it on.
+
+Checked against real border colours on the second Intel host by forcing the test on there:
+the counts stay as they are (0 of 24 with the larger picture, 1 of 24 and 6 of 61 with the
+usual one). The test is not bit-identical to the host's own border: a twirl and a pinch then
+differ from the software renderer on 0.2 to 0.3% of the pixels (by up to 65 levels) where
+they did not before.

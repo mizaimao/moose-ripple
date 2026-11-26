@@ -129,10 +129,11 @@ pixels.
 - Showing a frame of an app's OpenGL window takes 4-5 ms at any size up to the full screen
   (gl-gears: 59 frames/s at 800x600 and at 1280x720). While something is drawn over the
   window (the Dock, for one), WindowServer draws it. A program that does not wait for the
-  display's refresh does not wait for that either: WindowServer is handed its newest frame.
+  display's refresh does not wait for that either: WindowServer is handed its newest frame,
+  at most 66 times a second.
 - Test programs on the Proxmox host (Intel UHD 630, 1280x800): Cinebench R11.5's OpenGL test
   passes its reference check (99.4% match) with 46 frames/s; OpenArena 0.8.8's timedemo
-  (`demo088-test1`, 1024x768 window) runs at about 280 frames/s, and at about 200 with the
+  (`demo088-test1`, 1024x768 window) runs at about 280 frames/s, and at about 265 with the
   Dock drawn over its window.
 - Video: Snow Leopard's Welcome movie (H.264, 1008x630, 24 frames/s) plays at its full
   24 frames/s in QuickTime Player with moose-ripple, on the Proxmox host and in UTM. With
@@ -143,15 +144,19 @@ pixels.
   pixels different). The filter that differs is CIEdges (3.9% of the pixels, where an edge is
   just above or below the threshold), and Blue Print and Comic Book, which draw edges too,
   differ on 3-4%. The other four effects (Concert, Neon, Pinch, Pointillize) differ on the
-  9600 GT too, so those differences come from how a GPU computes them. A single Core Image
-  filter still takes about 1.7 times as long as in software rendering, because each pass
-  waits for the host; Photo Booth's effects are faster than in software.
+  9600 GT too, so those differences come from how a GPU computes them. Once a filter has
+  been shown twice, a render of it is faster than in software rendering (31 ms against 37
+  for the 24 filters together); its first two renders, where its programs are compiled, take
+  about twice as long as in software (314 ms against 148). Photo Booth's effects are
+  faster than in software.
 - In UTM on an Apple M1 Max the guest's Intel CPU is emulated, and that CPU is the
   limit there: gl-gears runs at about 56 frames/s and Real Racing 2's menu at 59, but
   a race makes about 30 frames/s, with the game's drawing thread using a whole emulated
   CPU. UTM's Force Multicore setting, which gives each emulated CPU its own thread of the
   Mac, made no difference we could measure ([install guide](docs/install.md#utm-on-an-apple-silicon-mac)). The M1's GPU path has no S3TC texture compression, which Mac games
-  take for granted, so such textures are decoded on the CPU when they are loaded.
+  take for granted, so such textures are decoded on the CPU when they are loaded. Core Image
+  there matches software rendering in 22 of the 24 filters and 56 of the 61 effects; the
+  driver does the textures' border colours itself, which that GPU path lacks too.
 - The host GPU's minimum clock was raised to 1200 MHz for these numbers
   (`/sys/class/drm/card0/gt_min_freq_mhz` on Intel). At the default 350 MHz each screen update
   takes about 5 ms longer.

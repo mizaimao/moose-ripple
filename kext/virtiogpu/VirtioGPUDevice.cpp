@@ -216,6 +216,10 @@ bool VirtioGPUDevice::init(IOPCIDevice *pci)
     arg = 1;
     PE_parse_boot_argn("ripple_kick", &arg, sizeof(arg));
     fKickCall = arg ? thread_call_allocate(kickAction, this) : 0;
+    // A 3D client's buffer is created, given its memory and attached to a context without
+    // waiting for the host's three answers (0.4 ms a buffer, more while the host is busy).
+    // Boot flag ripple_create=0: wait for each, as before 2026-11-26.
+    fQueueCreates = !(PE_parse_boot_argn("ripple_create", &arg, sizeof(arg)) && arg == 0);
     fCursorLock = IOLockAlloc();
     fSlotMem = contiguous(kSlots * (kSlotReq + kSlotResp));
     for (int i = 0; i < kCtrlQueueSize; i++)
@@ -490,6 +494,12 @@ bool VirtioGPUDevice::simple(const void *req, uint32_t reqLen, uint64_t extraPA,
     return true;
 }
 
+bool VirtioGPUDevice::queue(const void *req, uint32_t reqLen)
+{
+    struct virtio_gpu_ctrl_hdr resp;
+    return command(req, reqLen, &resp, sizeof(resp), 0, 0, 0, kAsync) == VIRTIO_GPU_RESP_OK_NODATA;
+}
+
 bool VirtioGPUDevice::getDisplayInfo(DisplayInfo *out, unsigned count)
 {
     struct virtio_gpu_ctrl_hdr req;
@@ -534,7 +544,8 @@ bool VirtioGPUDevice::resourceUnref(uint32_t id)
     return simple(&c, sizeof(c));
 }
 
-bool VirtioGPUDevice::attachBacking(uint32_t id, IOMemoryDescriptor *md, IOByteCount length)
+bool VirtioGPUDevice::attachBacking(uint32_t id, IOMemoryDescriptor *md, IOByteCount length,
+                                    bool queued)
 {
     // One mem_entry per physically contiguous run of the descriptor.
     unsigned maxEntries = (unsigned)(length / PAGE_SIZE) + 2;
@@ -571,7 +582,20 @@ bool VirtioGPUDevice::attachBacking(uint32_t id, IOMemoryDescriptor *md, IOByteC
         c.hdr.type = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
         c.resource_id = id;
         c.nr_entries = n;
-        ok = simple(&c, sizeof(c), physAddr(entries), n * sizeof(struct virtio_gpu_mem_entry));
+        uint32_t entLen = n * sizeof(struct virtio_gpu_mem_entry);
+        uint8_t *both = 0;
+        // Queued: the list goes into the request itself, which command() copies, so nothing
+        // of ours has to outlive this call. The host reads the request as one run of bytes.
+        if (queued && fQueueCreates && sizeof(c) + entLen <= kSlotReq)
+            both = (uint8_t *)IOMalloc(sizeof(c) + entLen);
+        if (both) {
+            memcpy(both, &c, sizeof(c));
+            memcpy(both + sizeof(c), ent, entLen);
+            ok = queue(both, sizeof(c) + entLen);
+            IOFree(both, sizeof(c) + entLen);
+        } else {
+            ok = simple(&c, sizeof(c), physAddr(entries), entLen);
+        }
     }
     entries->complete();
     entries->release();
@@ -832,14 +856,14 @@ bool VirtioGPUDevice::ctxDestroy(uint32_t ctx)
     return simple(&c, sizeof(c));
 }
 
-bool VirtioGPUDevice::ctxAttachResource(uint32_t ctx, uint32_t id)
+bool VirtioGPUDevice::ctxAttachResource(uint32_t ctx, uint32_t id, bool queued)
 {
     struct virtio_gpu_ctx_resource c;
     bzero(&c, sizeof(c));
     c.hdr.type = VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE;
     c.hdr.ctx_id = ctx;
     c.resource_id = id;
-    return simple(&c, sizeof(c));
+    return queued && fQueueCreates ? queue(&c, sizeof(c)) : simple(&c, sizeof(c));
 }
 
 bool VirtioGPUDevice::ctxDetachResource(uint32_t ctx, uint32_t id)
@@ -855,7 +879,7 @@ bool VirtioGPUDevice::ctxDetachResource(uint32_t ctx, uint32_t id)
 bool VirtioGPUDevice::resourceCreate3D(uint32_t id, uint32_t target, uint32_t format, uint32_t bind,
                                        uint32_t width, uint32_t height, uint32_t depth,
                                        uint32_t arraySize, uint32_t lastLevel, uint32_t nrSamples,
-                                       uint32_t flags)
+                                       uint32_t flags, bool queued)
 {
     struct virtio_gpu_resource_create_3d c;
     bzero(&c, sizeof(c));
@@ -871,7 +895,7 @@ bool VirtioGPUDevice::resourceCreate3D(uint32_t id, uint32_t target, uint32_t fo
     c.last_level = lastLevel;
     c.nr_samples = nrSamples;
     c.flags = flags;
-    return simple(&c, sizeof(c));
+    return queued && fQueueCreates ? queue(&c, sizeof(c)) : simple(&c, sizeof(c));
 }
 
 bool VirtioGPUDevice::submit3D(uint32_t ctx, uint64_t pa, uint32_t size, uint64_t *fence)

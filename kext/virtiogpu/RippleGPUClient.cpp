@@ -258,6 +258,7 @@ IOReturn RippleGPUClient::bufferCreate(const struct ripple_gpu_buffer_create *in
 
     const struct ripple_virgl_buffer_params *p = (const struct ripple_virgl_buffer_params *)in->params;
     uint64_t bytes = round_page(in->size);
+    uint64_t t0 = mach_absolute_time();
     IOBufferMemoryDescriptor *mem = IOBufferMemoryDescriptor::withOptions(
         kIODirectionInOut | kIOMemoryKernelUserShared, bytes, PAGE_SIZE);
     if (!mem)
@@ -267,19 +268,37 @@ IOReturn RippleGPUClient::bufferCreate(const struct ripple_gpu_buffer_create *in
         return kIOReturnNoMemory;
     }
     bzero(mem->getBytesNoCopy(), bytes);
+    uint64_t t1 = mach_absolute_time();
 
     uint32_t id = fDev->allocResourceId();
     if (!fDev->resourceCreate3D(id, p->target, p->format, p->bind, p->width, p->height, p->depth,
-                                p->array_size, p->last_level, p->nr_samples, p->flags)) {
+                                p->array_size, p->last_level, p->nr_samples, p->flags, true)) {
         mem->complete();
         mem->release();
         return kIOReturnError;
     }
-    if (!fDev->attachBacking(id, mem, bytes)) {
+    uint64_t t2 = mach_absolute_time();
+    if (!fDev->attachBacking(id, mem, bytes, true)) {
         fDev->resourceUnref(id);
         mem->complete();
         mem->release();
         return kIOReturnError;
+    }
+    fCre[0]++;
+    fCre[1] += bytes;
+    fCre[2] += t1 - t0;
+    fCre[3] += t2 - t1;
+    fCre[4] += mach_absolute_time() - t2;
+    if ((fCre[0] & 15) == 0) {
+        uint64_t us[3];
+        for (unsigned k = 0; k < 3; k++) {
+            absolutetime_to_nanoseconds(fCre[2 + k], &us[k]);
+            us[k] /= 1000;
+        }
+        char text[160];
+        snprintf(text, sizeof(text), "calls %llu bytes %llu us: memory %llu create %llu attach %llu",
+                 fCre[0], fCre[1], us[0], us[1], us[2]);
+        setProperty("RippleCreateStats", text);
     }
     Buffer *b = insertBuffer(id);
     b->mem = mem;
@@ -363,7 +382,7 @@ IOReturn RippleGPUClient::submit(IOExternalMethodArguments *a, uint64_t *fence)
             if (!b)
                 r = kIOReturnBadArgument;
             else if (!(b->attached & (1u << slot))) {
-                if (fDev->ctxAttachResource(s.context, b->handle))
+                if (fDev->ctxAttachResource(s.context, b->handle, true))
                     b->attached |= 1u << slot;
                 else
                     r = kIOReturnError;
@@ -435,7 +454,7 @@ IOReturn RippleGPUClient::transfer(const struct ripple_gpu_transfer *t, uint64_t
     // The host refuses a transfer for a buffer its context has not seen, without saying so: a
     // buffer that no submit has named yet is attached here.
     if (!(b->attached & (1u << slot))) {
-        if (!fDev->ctxAttachResource(t->context, b->handle))
+        if (!fDev->ctxAttachResource(t->context, b->handle, true))
             return kIOReturnError;
         b->attached |= 1u << slot;
     }
@@ -485,7 +504,7 @@ IOReturn RippleGPUClient::surfacePresent(uint32_t surface, uint32_t handle, uint
         return kIOReturnBadArgument;
     // The copies run in the caller's context and read this buffer.
     if (!(b->attached & (1u << slot))) {
-        if (!fDev->ctxAttachResource(context, b->handle))
+        if (!fDev->ctxAttachResource(context, b->handle, true))
             return kIOReturnError;
         b->attached |= 1u << slot;
     }

@@ -7,7 +7,9 @@
  *                                         software renderer
  *   ci-effects booth IMAGE OUT.png        /System/Library/Compositions effects through
  *                                         QCRenderer: our renderer vs Apple's software renderer
- * A line per effect: max channel difference, share of pixels off by more than 16, ms per frame.
+ * A line per effect: max channel difference, share of pixels off by more than 16, ms per frame
+ * (filters: the mean of renders two to four; the second render still builds programs, so see
+ * CI_EFFECTS_PASSES and CI_EFFECTS_EACH below for the renders one by one).
  */
 #import <Foundation/Foundation.h>
 #import <QuartzCore/QuartzCore.h>
@@ -187,26 +189,41 @@ static int run_filters(CIImage *src, const char *out)
     CGContextFillRect(sheet, CGRectMake(0, 0, 2 * TW + 8, (TH + 16) * [names count]));
     static uint8_t a[W * H * 4], b[W * H * 4];
     int row = 0, worst_bad = 0;
+    /* CI_EFFECTS_ONLY=name: that filter alone; CI_EFFECTS_PASSES=n: n renders of each (default
+     * 4, the first is not timed); CI_EFFECTS_EACH=1: print the time of every render. */
+    const char *only = getenv("CI_EFFECTS_ONLY");
+    int passes = getenv("CI_EFFECTS_PASSES") ? atoi(getenv("CI_EFFECTS_PASSES")) : 4;
+    bool each = getenv("CI_EFFECTS_EACH") != NULL;
+    if (passes < 2)
+        passes = 2;
     for (NSString *name in names) {
+        if (only && strcmp(only, [name UTF8String]))
+            continue;
         CIImage *img = filtered(src, name);
         if (!img) {
             printf("  %-20s not available\n", [name UTF8String]);
             continue;
         }
         double tg = 0, ts = 0;
-        for (int pass = 0; pass < 4; pass++) {          /* the first pass compiles kernels */
+        for (int pass = 0; pass < passes; pass++) {     /* the first pass compiles kernels */
             uint64_t t0 = mach_absolute_time();
             /* a slightly different image each pass, so neither context answers from its cache */
             CIImage *pi = [img imageByApplyingTransform:CGAffineTransformMakeTranslation(0, pass * 0.001)];
             [gpu render:pi toBitmap:a rowBytes:W * 4 bounds:CGRectMake(0, 0, W, H)
                  format:kCIFormatARGB8 colorSpace:NULL];
+            double t = ms_since(t0);
+            if (each)
+                printf("  %s render %d: %.2f ms\n", [name UTF8String], pass, t);
             if (pass)
-                tg += ms_since(t0);
+                tg += t;
             t0 = mach_absolute_time();
             [sw render:pi toBitmap:b rowBytes:W * 4 bounds:CGRectMake(0, 0, W, H)
                 format:kCIFormatARGB8 colorSpace:NULL];
+            t = ms_since(t0);
+            if (each)
+                printf("  %s render %d, software: %.2f ms\n", [name UTF8String], pass, t);
             if (pass)
-                ts += ms_since(t0);
+                ts += t;
         }
         argb_to_rgba(a);
         argb_to_rgba(b);
@@ -214,7 +231,8 @@ static int run_filters(CIImage *src, const char *out)
         double off;
         compare(a, b, &maxd, &off);
         printf("  %-20s max diff %3d, %5.1f%% of pixels off by >16; ms per frame: ours %6.1f, "
-               "software %6.1f\n", [name UTF8String], maxd, off, tg / 3, ts / 3);
+               "software %6.1f\n", [name UTF8String], maxd, off, tg / (passes - 1),
+               ts / (passes - 1));
         if (off > 1.0)
             worst_bad++;
         char label[96];

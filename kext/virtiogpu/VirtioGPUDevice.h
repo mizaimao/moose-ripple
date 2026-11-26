@@ -47,7 +47,7 @@ public:
     bool getDisplayInfo(DisplayInfo *out, unsigned count);
     bool resourceCreate2D(uint32_t id, uint32_t format, uint32_t width, uint32_t height);
     bool resourceUnref(uint32_t id);
-    bool attachBacking(uint32_t id, IOMemoryDescriptor *md, IOByteCount length);
+    bool attachBacking(uint32_t id, IOMemoryDescriptor *md, IOByteCount length, bool queued = false);
     bool detachBacking(uint32_t id);
     bool setScanout(uint32_t scanout, uint32_t id, const Rect &r);
     bool transferToHost2D(uint32_t id, const Rect &r, uint64_t offset);
@@ -65,11 +65,15 @@ public:
     // (performance stage, 2026-11-11: fencing every submit made each flush wait for the GPU).
     bool ctxCreate(uint32_t ctx, const char *name);
     bool ctxDestroy(uint32_t ctx);
-    bool ctxAttachResource(uint32_t ctx, uint32_t id);
+    // queued (here, in resourceCreate3D and in attachBacking): put in the queue and not waited
+    // for, unless the boot flag ripple_create=0 is given. The queue keeps the order, so a later
+    // command finds the resource; a refusal by the host shows in the kernel log only.
+    bool ctxAttachResource(uint32_t ctx, uint32_t id, bool queued = false);
     bool ctxDetachResource(uint32_t ctx, uint32_t id);
     bool resourceCreate3D(uint32_t id, uint32_t target, uint32_t format, uint32_t bind,
                           uint32_t width, uint32_t height, uint32_t depth, uint32_t arraySize,
-                          uint32_t lastLevel, uint32_t nrSamples, uint32_t flags);
+                          uint32_t lastLevel, uint32_t nrSamples, uint32_t flags,
+                          bool queued = false);
     bool submit3D(uint32_t ctx, uint64_t pa, uint32_t size, uint64_t *fence);
     // The same without waiting for the host to run the commands: queued, and `*busy` stays 1
     // until the host has taken them (the memory at `pa` must not change before that; wait
@@ -120,6 +124,7 @@ private:
     uint64_t fSlowestAbs;               // slowest command (absolute time) and its type
     uint32_t fSlowestType, fOver100ms, fAsyncFailed;
     bool     fAsync;
+    bool     fQueueCreates;
     void    *fKickCall;                  // thread_call_t; 0: queued commands kick inline
     volatile UInt32 fKickPending;
     static void kickAction(void *self, void *);
@@ -150,6 +155,7 @@ private:
     bool negotiate();
     uint8_t status();
     void setStatus(uint8_t s);
+    bool queue(const void *req, uint32_t reqLen);   // sent, not waited for
     bool simple(const void *req, uint32_t reqLen,
                 uint64_t extraPA = 0, uint32_t extraLen = 0, uint64_t *fence = 0);
     // fence: give the request the next fence number as it is queued (queue order = number order)
