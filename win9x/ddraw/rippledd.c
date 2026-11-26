@@ -477,6 +477,10 @@ DWORD WINAPI DriverInit(DWORD context)
     s->hal.dwFlags |= RDD_HALINFO_GETDRIVERINFOSET;
     s->hal.lpDDExeBufCallbacks = 0;
     d3d_init(s, (DDCORECAPS *)s->hal.ddCaps);
+    if (d3d8_enabled())
+        s->hal.dwFlags |= RDD_HALINFO_GETDRIVERINFO2;
+    else
+        s->hal.dwFlags &= ~RDD_HALINFO_GETDRIVERINFO2;
     s->dll_ready = 1;
     dbg("rdd: DirectDraw HAL DLL ready, loaded at "); dbg_hex((DWORD)dll_instance);
     dbg(", process "); dbg_hex(GetCurrentProcessId()); dbg("\r\n");
