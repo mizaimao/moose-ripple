@@ -211,6 +211,11 @@ static RDD_SHARED *shared;
 #define GL_UNSIGNED_SHORT_4_4_4_4_REV   0x8365
 #define GL_UNSIGNED_SHORT_1_5_5_5_REV   0x8366
 #define GL_CLAMP_TO_EDGE                0x812F
+#define GL_TEXTURE_CUBE_MAP             0x8513
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_X  0x8515
+#define GL_TEXTURE_3D                   0x806F
+#define GL_TEXTURE_WRAP_R               0x8072
+#define GL_UNPACK_IMAGE_HEIGHT          0x806E
 #define GL_CLAMP_TO_BORDER              0x812D
 #define GL_MIRRORED_REPEAT              0x8370
 #define GL_TEXTURE0                     0x84C0
@@ -235,10 +240,19 @@ static RDD_SHARED *shared;
 #define GL_FRAGMENT_PROGRAM_ARB         0x8804
 #define GL_PROGRAM_FORMAT_ASCII_ARB     0x8875
 #define GL_PROGRAM_ERROR_STRING_ARB     0x8874
+#define GL_COMPRESSED_RGBA_S3TC_DXT1_EXT 0x83F1
+#define GL_COMPRESSED_RGBA_S3TC_DXT3_EXT 0x83F2
+#define GL_COMPRESSED_RGBA_S3TC_DXT5_EXT 0x83F3
 #define GL_FOG_COORDINATE_SOURCE        0x8450
 #define GL_FOG_COORDINATE               0x8451
 #define GL_FRAGMENT_DEPTH               0x8452
 #define GL_FOG_COORDINATE_ARRAY         0x8457
+#define GL_VERTEX_PROGRAM_ARB           0x8620
+#define GL_NORMAL_ARRAY                 0x8075
+#define GL_RG                           0x8227
+#define GL_RG8_SNORM                    0x8F95
+#define GL_RGBA8_SNORM                  0x8F97
+#define GL_TEXTURE_SWIZZLE_B            0x8E44
 #define GL_FIRST_VERTEX_CONVENTION      0x8E4D
 #define GL_FRAMEBUFFER                  0x8D40
 #define GL_RENDERBUFFER                 0x8D41
@@ -344,6 +358,13 @@ typedef struct {
     void (APIENTRY *ProgramStringARB)(GLenum, GLenum, GLsizei, const GLvoid *);
     void (APIENTRY *ProgramEnvParameter4fvARB)(GLenum, GLuint, const GLfloat *);
     void (APIENTRY *ProgramLocalParameter4fvARB)(GLenum, GLuint, const GLfloat *);
+    /* compressed textures (DXT), for Direct3D 8 and 9 (optional) */
+    void (APIENTRY *CompressedTexImage2D)(GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei,
+                                          const GLvoid *);
+    void (APIENTRY *CompressedTexSubImage2D)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum,
+                                             GLsizei, const GLvoid *);
+    void (APIENTRY *TexImage3D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum,
+                                const GLvoid *);  /* volume textures (optional) */
 } GLF;
 
 #define GL_CORE_COUNT 53            /* entries up to DrvGetProcAddress */
@@ -368,6 +389,8 @@ static const char *const gl_names[] = {
     "glGetRenderbufferParameterivEXT",
     "glGenProgramsARB", "glDeleteProgramsARB", "glBindProgramARB", "glProgramStringARB",
     "glProgramEnvParameter4fvARB", "glProgramLocalParameter4fvARB",
+    "glCompressedTexImage2DARB", "glCompressedTexSubImage2DARB",
+    "glTexImage3D",
 };
 #define GL_ALL_COUNT (sizeof gl_names / sizeof gl_names[0])
 typedef char c_gl_names[sizeof(GLF) == GL_ALL_COUNT * sizeof(PROC) ? 1 : -1];
@@ -603,6 +626,8 @@ struct shadow {
     ATTACHLIST a;
     LPDDRAWI_DDRAWSURFACE_GBL_MORE gmp; /* just before g */
     DDRAWI_DDRAWSURFACE_GBL g;
+    DWORD faces, levels;                /* in the first: 1 or 6 faces, each with this many levels */
+    DWORD depth;                        /* in the first: a volume's slices at level 0 (else 1) */
 };
 
 #define MAX_DDLOCALS 32
@@ -675,44 +700,128 @@ static void buffer_set(DDLOCAL *d, DWORD h, FLATPTR mem, DWORD size)
 typedef char c_shadow_layout[FIELD_OFFSET(struct shadow, g) ==
                              FIELD_OFFSET(struct shadow, gmp) + sizeof(void *) ? 1 : -1];
 
-/* Copies of a texture's records, its levels linked through their attach lists: an array of
-   as many as it has levels (MAX_LEVELS at most), or NULL. Only for plain 2D textures. */
+/* The cube face of a surface (0 for +X .. 5 for -Z), or -1. */
+static int cube_face(LPDDRAWI_DDRAWSURFACE_LCL s)
+{
+    DWORD caps2 = s && s->lpSurfMore ? s->lpSurfMore->ddsCapsEx.dwCaps2 : 0;
+    int k;
+    for (k = 0; k < 6; k++)
+        if (caps2 & (DDSCAPS2_CUBEMAP_POSITIVEX << k))
+            return k;
+    return -1;
+}
+
+/* A face's levels from its top surface down: each attached to the one above (a cube's top
+   face also holds the other faces, so there only mipmap sublevels count). */
+static DWORD face_chain(LPDDRAWI_DDRAWSURFACE_LCL top, int cube, LPDDRAWI_DDRAWSURFACE_LCL *lv)
+{
+    LPDDRAWI_DDRAWSURFACE_LCL m = top;
+    DWORD n = 1;
+
+    lv[0] = top;
+    while (n < MAX_LEVELS && (m->ddsCaps.dwCaps & DDSCAPS_MIPMAP)) {
+        LPATTACHLIST a;
+        LPDDRAWI_DDRAWSURFACE_LCL next = NULL;
+        for (a = m->lpAttachList; a && !next; a = a->lpLink) {
+            LPDDRAWI_DDRAWSURFACE_LCL x = a->lpAttached;
+            if (!x || x == top || !x->lpGbl || !x->lpSurfMore || !(x->ddsCaps.dwCaps & DDSCAPS_MIPMAP))
+                continue;
+            if (cube && !(x->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_MIPMAPSUBLEVEL))
+                continue;
+            next = x;
+        }
+        if (!next)
+            break;
+        lv[n++] = m = next;
+    }
+    return n;
+}
+
+/* Copies of a texture's records: for each face (six for a cube map, in Direct3D's order +X,
+   -X, +Y, -Y, +Z, -Z), its levels, linked through their attach lists; sh[face * levels +
+   level], sh[0] saying how many faces and levels. NULL if it can't be made. */
 static struct shadow *shadow_make(LPDDRAWI_DDRAWSURFACE_LCL s)
 {
-    LPDDRAWI_DDRAWSURFACE_LCL lv[MAX_LEVELS];
+    LPDDRAWI_DDRAWSURFACE_LCL top[6], lv[6][MAX_LEVELS];
+    DWORD n, faces = 1, levels = MAX_LEVELS, f, i;
     struct shadow *sh;
-    DWORD n = 1, i;
+    int cube = (s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_CUBEMAP) != 0;
 
-    lv[0] = s;
-    while (n < MAX_LEVELS && (s->ddsCaps.dwCaps & DDSCAPS_MIPMAP) && s->lpAttachList &&
-           s->lpAttachList->lpAttached && s->lpAttachList->lpAttached != lv[0] &&
-           s->lpAttachList->lpAttached->lpGbl && s->lpAttachList->lpAttached->lpSurfMore)
-        lv[n++] = s = s->lpAttachList->lpAttached;
-    sh = (struct shadow *)alloc(n * sizeof *sh);
+    memset(top, 0, sizeof top);
+    top[0] = s;
+    if (cube) {
+        LPATTACHLIST a;
+        int k = cube_face(s);
+        if (k < 0)
+            return NULL;
+        top[0] = NULL;
+        top[k] = s;
+        for (a = s->lpAttachList; a; a = a->lpLink) {
+            LPDDRAWI_DDRAWSURFACE_LCL x = a->lpAttached;
+            int fk = cube_face(x);
+            if (fk >= 0 && !top[fk] && x->lpGbl &&
+                !(x->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_MIPMAPSUBLEVEL))
+                top[fk] = x;
+        }
+        faces = 6;
+    }
+    for (f = 0; f < faces; f++) {
+        if (!top[f] || !top[f]->lpGbl || top[f]->lpGbl->wWidth != s->lpGbl->wWidth ||
+            top[f]->lpGbl->wHeight != s->lpGbl->wHeight)
+            return NULL;
+        n = face_chain(top[f], cube, lv[f]);
+        if (n < levels)
+            levels = n;
+    }
+    sh = (struct shadow *)alloc(faces * levels * sizeof *sh);
     if (!sh)
         return NULL;
-    for (i = 0; i < n; i++) {
-        LPDDRAWI_DDRAWSURFACE_GBL_MORE gm = GET_LPDDRAWSURFACE_GBL_MORE(lv[i]->lpGbl);
-        sh[i].l = *lv[i];
-        sh[i].m = *lv[i]->lpSurfMore;
-        sh[i].g = *lv[i]->lpGbl;
-        if (gm)
-            sh[i].gm = *gm;
-        sh[i].gm.dwContentsStamp = 0;   /* the runtime's stamp isn't kept: writes mark textures */
-        sh[i].gmp = &sh[i].gm;
-        sh[i].l.lpGbl = &sh[i].g;
-        sh[i].l.lpSurfMore = &sh[i].m;
-        sh[i].l.lpAttachList = NULL;
-        sh[i].l.lpAttachListFrom = NULL;
-        if (i + 1 < n) {
-            sh[i].a.dwFlags = DDAL_IMPLICIT;
-            sh[i].a.lpLink = NULL;
-            sh[i].a.lpAttached = &sh[i + 1].l;
-            sh[i].a.lpIAttached = NULL;
-            sh[i].l.lpAttachList = &sh[i].a;
+    for (f = 0; f < faces; f++)
+        for (i = 0; i < levels; i++) {
+            struct shadow *o = &sh[f * levels + i];
+            LPDDRAWI_DDRAWSURFACE_LCL from = lv[f][i];
+            LPDDRAWI_DDRAWSURFACE_GBL_MORE gm = GET_LPDDRAWSURFACE_GBL_MORE(from->lpGbl);
+            o->l = *from;
+            o->m = *from->lpSurfMore;
+            o->g = *from->lpGbl;
+            if (gm)
+                o->gm = *gm;
+            o->gm.dwContentsStamp = 0;  /* the runtime's stamp isn't kept: writes mark textures */
+            o->gmp = &o->gm;
+            o->l.lpGbl = &o->g;
+            o->l.lpSurfMore = &o->m;
+            o->l.lpAttachList = NULL;
+            o->l.lpAttachListFrom = NULL;
+            if (i + 1 < levels) {
+                o->a.dwFlags = DDAL_IMPLICIT;
+                o->a.lpLink = NULL;
+                o->a.lpAttached = &sh[f * levels + i + 1].l;
+                o->a.lpIAttached = NULL;
+                o->l.lpAttachList = &o->a;
+            }
         }
-    }
+    sh[0].faces = faces;
+    sh[0].levels = levels;
+    sh[0].depth = 1;
+    if (s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_VOLUME)    /* slices one after another */
+        sh[0].depth = s->lpSurfMore->ddsCapsEx.dwCaps4 ? s->lpSurfMore->ddsCapsEx.dwCaps4 : 1;
+    if (cube)
+        sh[0].m.ddsCapsEx.dwCaps2 |= DDSCAPS2_CUBEMAP;
     return sh;
+}
+
+/* A cube map's copy (only for surfaces of a Direct3D 8 session, which are copies). */
+static int is_cube(LPDDRAWI_DDRAWSURFACE_LCL s)
+{
+    return s->lpSurfMore && (s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_CUBEMAP) &&
+           ((const struct shadow *)s)->faces == 6;
+}
+
+/* A volume texture's copy (likewise). */
+static int is_volume(LPDDRAWI_DDRAWSURFACE_LCL s)
+{
+    return s->lpSurfMore && (s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_VOLUME) &&
+           ((const struct shadow *)s)->faces == 1;
 }
 
 static void shadow_set(DDLOCAL *d, DWORD h, struct shadow *sh)
@@ -806,8 +915,10 @@ static LPDDRAWI_DDRAWSURFACE_LCL handle_get(LPDDRAWI_DIRECTDRAW_LCL lcl, DWORD h
 
 /* ---- Pixel formats ----------------------------------------------------------------------------- */
 typedef struct {
-    DWORD bytes;
+    DWORD bytes;                        /* a texel's; 0 for block-compressed formats */
     GLenum format, type, internal;
+    DWORD block;                        /* DXT: a 4x4 block's bytes (8 or 16), else 0 */
+    int bump;                           /* V8U8: two channels, blue reads as 1 */
 } PIXFMT;
 
 static void display_format(DDPIXELFORMAT *pf)
@@ -838,6 +949,29 @@ static PIXFMT gl_format(const DDPIXELFORMAT *pf)
     int alpha = (pf->dwFlags & DDPF_ALPHAPIXELS) != 0;
 
     memset(&f, 0, sizeof f);
+    if ((pf->dwFlags & DDPF_FOURCC) && d8_on) {    /* DXT, offered with Direct3D 8 */
+        switch (pf->dwFourCC) {
+        case 0x31545844UL: f.block = 8; f.internal = GL_COMPRESSED_RGBA_S3TC_DXT1_EXT; break;
+        case 0x32545844UL:              /* DXT2 and DXT4 are premultiplied DXT3 and DXT5 */
+        case 0x33545844UL: f.block = 16; f.internal = GL_COMPRESSED_RGBA_S3TC_DXT3_EXT; break;
+        case 0x34545844UL:
+        case 0x35545844UL: f.block = 16; f.internal = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT; break;
+        }
+        return f;
+    }
+    if ((pf->dwFlags & DDPF_BUMPDUDV) && d8_on) {
+        /* Direct3D 8 and 9's bump maps, signed, sampled as -1..1: V8U8 (du, dv) and Q8W8V8U8
+           (signed normal maps, as the runtime describes them: 32 bits with du and dv's masks) */
+        if (!(pf->dwFlags & DDPF_BUMPLUMINANCE) && pf->dwBumpDuBitMask == 0xFF &&
+            pf->dwBumpDvBitMask == 0xFF00) {
+            if (pf->dwBumpBitCount == 16) {
+                f.bytes = 2; f.format = GL_RG; f.type = GL_BYTE; f.internal = GL_RG8_SNORM; f.bump = 1;
+            } else if (pf->dwBumpBitCount == 32) {
+                f.bytes = 4; f.format = GL_RGBA; f.type = GL_BYTE; f.internal = GL_RGBA8_SNORM;
+            }
+        }
+        return f;
+    }
     if (!(pf->dwFlags & DDPF_RGB))
         return f;
     switch (pf->dwRGBBitCount) {
@@ -867,6 +1001,17 @@ static PIXFMT gl_format(const DDPIXELFORMAT *pf)
     return f;
 }
 
+/* A DXT surface's bytes: whole 4x4 blocks, row after row. */
+static DWORD dxt_bytes(const PIXFMT *f, DWORD w, DWORD h)
+{
+    return ((w + 3) / 4) * ((h + 3) / 4) * f->block;
+}
+
+DWORD d3d_dxt_block(const DDPIXELFORMAT *pf)
+{
+    return gl_format(pf).block;
+}
+
 int d3d_surface_format_ok(LPDDSURFACEDESC desc)
 {
     DDPIXELFORMAT *pf = &desc->ddpfPixelFormat;
@@ -874,16 +1019,20 @@ int d3d_surface_format_ok(LPDDSURFACEDESC desc)
     if (desc->ddsCaps.dwCaps & DDSCAPS_ZBUFFER)
         return (pf->dwFlags & DDPF_ZBUFFER) &&
                (pf->dwZBufferBitDepth == 16 || pf->dwZBufferBitDepth == 32);
-    if (desc->ddsCaps.dwCaps & DDSCAPS_TEXTURE)
-        return gl_format(pf).bytes != 0;
+    if (desc->ddsCaps.dwCaps & DDSCAPS_TEXTURE) {
+        PIXFMT f = gl_format(pf);
+        return f.bytes != 0 || f.block != 0;
+    }
     return 0;
 }
 
 /* ---- Contexts ----------------------------------------------------------------------------------- */
 #define MAX_PS 64                       /* Direct3D 8 pixel shaders a context keeps */
-#define STAGES 4                        /* texture stages kept: pixel shaders sample t0..t3 */
-#define FF_STAGES 2                     /* of those, offered to Direct3D 7 (Direct3D 8 gets all) */
-#define FOG_UNIT STAGES                 /* the OpenGL texture unit that does fog */
+#define PS_VARIANTS 4                   /* programs a pixel shader keeps (fog, cube map stages) */
+#define STAGES 8                        /* texture stages kept: pixel shaders sample s0..s7 */
+#define FF_STAGES 2                     /* fixed-function stages offered to Direct3D 7 */
+#define FF8_STAGES 4                    /* and drawn for Direct3D 8 and 9, before FOG_UNIT */
+#define FOG_UNIT 4                      /* the OpenGL texture unit that does fixed-function fog */
 
 typedef struct {
     GLuint name;
@@ -957,15 +1106,20 @@ typedef struct {
        the fixed-function stages), constants c0..c7 */
     struct ps8 {
         DWORD handle;
-        GLuint prog, prog_fog;          /* without and with fog after the shader (0: none yet) */
-        DWORD *code, bytes;             /* its tokens, for the fog program; process heap */
+        DWORD *code, bytes;             /* its tokens, for more variants; process heap */
         int failed;                     /* couldn't be translated: its draws are skipped */
+        int version2;                   /* shader model 2: it declares its samplers' kinds */
+        int bump;                       /* version 1 with texbem: the stages' bump matrices */
         DWORD fog_base;                 /* the fog constants' first program.env */
+        DWORD nvar;                     /* programs made: by fog, and the cube map stages of a
+                                           version 1 shader (the translator's fog argument) */
+        struct { DWORD key; GLuint prog; } var[PS_VARIANTS];
     } ps[MAX_PS];
+    int fp_fog;                         /* the bound program blends fog: load its constants */
     DWORD ps_bound;
     GLuint fp_prog;                     /* bound to GL_FRAGMENT_PROGRAM_ARB */
     int fp_on;                          /* GL_FRAGMENT_PROGRAM_ARB enabled */
-    float psc[RB_PS_CONSTANTS][4];
+    float psc[RB_PS2_CONSTANTS][4];     /* c0..c7 for version 1, c0..c31 for 2.0 */
     int psc_dirty;
 } RCTX;
 
@@ -1857,6 +2011,19 @@ static void texture_upload(GLF *gl, const PIXFMT *f, const DDPIXELFORMAT *pf,
 {
     DWORD l;
 
+    if (f->block) {                     /* DXT: each level's blocks as they are, row after row */
+        for (l = 0; l < levels && gl->CompressedTexImage2D; l++) {
+            LPDDRAWI_DDRAWSURFACE_GBL g = lv[l]->lpGbl;
+            DWORD bytes = dxt_bytes(f, g->wWidth, g->wHeight);
+            if (fresh || !gl->CompressedTexSubImage2D)
+                gl->CompressedTexImage2D(GL_TEXTURE_2D, l, f->internal, g->wWidth, g->wHeight, 0,
+                                         bytes, (const GLvoid *)g->fpVidMem);
+            else
+                gl->CompressedTexSubImage2D(GL_TEXTURE_2D, l, 0, 0, g->wWidth, g->wHeight,
+                                            f->internal, bytes, (const GLvoid *)g->fpVidMem);
+        }
+        return;
+    }
     gl->PixelStorei(GL_UNPACK_ALIGNMENT, 1);
     for (l = 0; l < levels; l++) {
         LPDDRAWI_DDRAWSURFACE_GBL g = lv[l]->lpGbl;
@@ -1875,6 +2042,10 @@ static void texture_upload(GLF *gl, const PIXFMT *f, const DDPIXELFORMAT *pf,
             continue;
         }
         gl->PixelStorei(GL_UNPACK_ROW_LENGTH, g->lPitch / f->bytes);
+        if (fresh && !l && f->bump)     /* Direct3D reads V8U8 as (du, dv, 1, 1) */
+            gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_ONE);
+        else if (fresh && !l)           /* the name may have held a bump map before */
+            gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_BLUE);
         if (fresh)
             gl->TexImage2D(GL_TEXTURE_2D, l, f->internal, g->wWidth, g->wHeight, 0, f->format,
                            f->type, (const GLvoid *)g->fpVidMem);
@@ -1898,6 +2069,224 @@ static GLint min_filter(const DWORD *st, DWORD levels)
     return linear ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_LINEAR;
 }
 
+/* A Direct3D 8/9 cube map (the HAL's copy of its records, shadow_make) on the stage's unit:
+   six faces, each with its levels, on OpenGL's cube map target. Sampled by pixel shaders; the
+   fixed-function stages don't (as on Windows 2000). */
+static int cube_bind(RCTX *c, DWORD h, int stage, const struct shadow *sh)
+{
+    GLF *gl = gl_of(c);
+    DWORD *st = c->tss[stage];
+    DWORD levels = sh[0].levels, face, l;
+    const DDRAWI_DDRAWSURFACE_GBL *g0 = &sh[0].g;
+    TEXTURE *t = texture_slot(c, h);
+    DDPIXELFORMAT pf;
+    PIXFMT f;
+
+    if (!t || sh[0].faces != 6 || !levels || !g0->fpVidMem)
+        return 0;
+    surface_format((LPDDRAWI_DDRAWSURFACE_LCL)&sh[0].l, &pf);
+    f = gl_format(&pf);
+    if ((!f.bytes && !f.block) || (f.block && !gl->CompressedTexImage2D))
+        return 0;
+    if (!t->name) {
+        if (c->ntextures >= TEXTURE_BUDGET)
+            texture_evict(c, h);
+        gl->GenTextures(1, &t->name);
+        c->ntextures++;
+    }
+    gl->BindTexture(GL_TEXTURE_CUBE_MAP, t->name);
+    if (t->mem != g0->fpVidMem || t->w != g0->wWidth || t->levels != levels ||
+        t->fmt != f.internal || t->dirty) {
+        gl->PixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        for (face = 0; face < 6; face++)
+            for (l = 0; l < levels; l++) {
+                const DDRAWI_DDRAWSURFACE_GBL *g = &sh[face * levels + l].g;
+                GLenum target = GL_TEXTURE_CUBE_MAP_POSITIVE_X + face;
+                if (f.block) {
+                    gl->CompressedTexImage2D(target, l, f.internal, g->wWidth, g->wHeight, 0,
+                                             dxt_bytes(&f, g->wWidth, g->wHeight),
+                                             (const GLvoid *)g->fpVidMem);
+                } else {
+                    gl->PixelStorei(GL_UNPACK_ROW_LENGTH, g->lPitch / f.bytes);
+                    gl->TexImage2D(target, l, f.internal, g->wWidth, g->wHeight, 0, f.format,
+                                   f.type, (const GLvoid *)g->fpVidMem);
+                }
+            }
+        gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        gl->TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_LEVEL, levels - 1);
+        gl->TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_SWIZZLE_B, f.bump ? GL_ONE : GL_BLUE);
+        t->mem = g0->fpVidMem;
+        t->w = g0->wWidth;
+        t->h = g0->wHeight;
+        t->fmt = f.internal;
+        t->levels = levels;
+        t->lmem[0] = g0->fpVidMem;
+        tracef("rd3d: cube map %lx: %lux%lu, %lu levels\r\n", h, (DWORD)g0->wWidth,
+               (DWORD)g0->wHeight, levels);
+    }
+    t->dirty = 0;
+    t->scene = c->scene;
+    gl->TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER,
+                      st[D3DTSS_MAGFILTER] == D3DTFG_POINT ? GL_NEAREST : GL_LINEAR);
+    gl->TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, min_filter(st, levels));
+    gl->TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl->TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    return 1;
+}
+
+/* ---- DXT decoding (volumes: OpenGL has no 3D S3TC) -------------------------------------------- */
+static DWORD dxt_expand(DWORD v, int bits)
+{
+    return bits == 5 ? (v << 3) | (v >> 2) : bits == 6 ? (v << 2) | (v >> 4) : (v << 4) | v;
+}
+
+/* The colours of a DXT colour block: two RGB565 ends and two between them, or one between and
+   transparent black when the first end is not above the second (DXT1 only: four selects the
+   four-colour form). */
+static void dxt_colours(const BYTE *b, int four, DWORD *c)
+{
+    DWORD c0 = b[0] | b[1] << 8, c1 = b[2] | b[3] << 8, e[2][3], k;
+    e[0][0] = dxt_expand(c0 >> 11, 5); e[0][1] = dxt_expand((c0 >> 5) & 63, 6); e[0][2] = dxt_expand(c0 & 31, 5);
+    e[1][0] = dxt_expand(c1 >> 11, 5); e[1][1] = dxt_expand((c1 >> 5) & 63, 6); e[1][2] = dxt_expand(c1 & 31, 5);
+    c[0] = 0xff000000UL | e[0][0] << 16 | e[0][1] << 8 | e[0][2];
+    c[1] = 0xff000000UL | e[1][0] << 16 | e[1][1] << 8 | e[1][2];
+    if (four || c0 > c1) {
+        c[2] = c[3] = 0xff000000UL;
+        for (k = 0; k < 3; k++) {
+            c[2] |= ((2 * e[0][k] + e[1][k]) / 3) << (16 - 8 * k);
+            c[3] |= ((e[0][k] + 2 * e[1][k]) / 3) << (16 - 8 * k);
+        }
+    } else {
+        c[2] = 0xff000000UL;
+        for (k = 0; k < 3; k++)
+            c[2] |= ((e[0][k] + e[1][k]) / 2) << (16 - 8 * k);
+        c[3] = 0;
+    }
+}
+
+/* One slice of 4x4 blocks (block bytes 8: DXT1, else DXT3 or DXT5 by internal) into width x
+   height ARGB texels. */
+static void dxt_decode(GLenum internal, const BYTE *in, DWORD width, DWORD height, DWORD *out)
+{
+    DWORD bx, by, x, y, step = internal == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT ? 8 : 16;
+    int dxt1 = step == 8, dxt5 = internal == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+    for (by = 0; by < (height + 3) / 4; by++)
+        for (bx = 0; bx < (width + 3) / 4; bx++, in += step) {
+            const BYTE *colour = dxt1 ? in : in + 8;
+            DWORD c[4], a[8], k;
+            DWORD bits = colour[4] | colour[5] << 8 | colour[6] << 16 | (DWORD)colour[7] << 24;
+            dxt_colours(colour, !dxt1, c);
+            if (dxt5) {
+                a[0] = in[0];
+                a[1] = in[1];
+                if (a[0] > a[1]) {
+                    for (k = 1; k < 7; k++)
+                        a[k + 1] = ((7 - k) * a[0] + k * a[1]) / 7;
+                } else {
+                    for (k = 1; k < 5; k++)
+                        a[k + 1] = ((5 - k) * a[0] + k * a[1]) / 5;
+                    a[6] = 0;
+                    a[7] = 255;
+                }
+            }
+            for (y = 0; y < 4; y++)
+                for (x = 0; x < 4; x++) {
+                    DWORD i = 4 * y + x, texel = c[(bits >> (2 * i)) & 3];
+                    if (bx * 4 + x >= width || by * 4 + y >= height)
+                        continue;
+                    if (!dxt1 && !dxt5)
+                        texel = (texel & 0xffffff) | dxt_expand((in[i / 2] >> (4 * (i & 1))) & 15, 4) << 24;
+                    else if (dxt5) {
+                        DWORD at = 16 + 3 * i, index = ((in[at / 8] | in[at / 8 + 1] << 8) >> (at % 8)) & 7;
+                        texel = (texel & 0xffffff) | a[index] << 24;
+                    }
+                    out[(by * 4 + y) * width + bx * 4 + x] = texel;
+                }
+        }
+}
+
+/* A volume's level: its slices one after another, rows as tight as the texel size allows
+   (CreateSurface sizes video memory volumes so). */
+static DWORD volume_pitch(const DDRAWI_DDRAWSURFACE_GBL *g, const PIXFMT *f)
+{
+    DWORD tight = f->block ? ((g->wWidth + 3) / 4) * f->block : g->wWidth * f->bytes;
+    return g->lPitch >= (LONG)tight && g->lPitch < (LONG)(tight + 4) ? (DWORD)g->lPitch : tight;
+}
+
+/* A Direct3D 8/9 volume texture (the HAL's copy, shadow_make) on the stage's unit: each level
+   with half the slices of the one above, on OpenGL's 3D target. Sampled by pixel shaders. */
+static int volume_bind(RCTX *c, DWORD h, int stage, const struct shadow *sh)
+{
+    GLF *gl = gl_of(c);
+    DWORD *st = c->tss[stage];
+    DWORD levels = sh[0].levels, depth = sh[0].depth, l;
+    const DDRAWI_DDRAWSURFACE_GBL *g0 = &sh[0].g;
+    TEXTURE *t = texture_slot(c, h);
+    DDPIXELFORMAT pf;
+    PIXFMT f;
+
+    if (!t || !gl->TexImage3D || !levels || !g0->fpVidMem)
+        return 0;
+    surface_format((LPDDRAWI_DDRAWSURFACE_LCL)&sh[0].l, &pf);
+    f = gl_format(&pf);
+    if (!f.bytes && !f.block)
+        return 0;
+    if (!t->name) {
+        if (c->ntextures >= TEXTURE_BUDGET)
+            texture_evict(c, h);
+        gl->GenTextures(1, &t->name);
+        c->ntextures++;
+    }
+    gl->BindTexture(GL_TEXTURE_3D, t->name);
+    if (t->mem != g0->fpVidMem || t->w != g0->wWidth || t->levels != levels ||
+        t->fmt != f.internal || t->dirty) {
+        gl->PixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        for (l = 0; l < levels; l++) {
+            const DDRAWI_DDRAWSURFACE_GBL *g = &sh[l].g;
+            DWORD d = depth >> l ? depth >> l : 1;
+            if (f.block) {              /* DXT: decoded here, slice by slice, to 32-bit ARGB */
+                DWORD slice = volume_pitch(g, &f) * ((g->wHeight + 3) / 4), z;
+                DWORD *texels = (DWORD *)alloc(g->wWidth * g->wHeight * d * 4);
+                if (!texels)
+                    continue;
+                for (z = 0; z < d; z++)
+                    dxt_decode(f.internal, (const BYTE *)g->fpVidMem + z * slice, g->wWidth,
+                               g->wHeight, texels + z * g->wWidth * g->wHeight);
+                gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+                gl->PixelStorei(GL_UNPACK_IMAGE_HEIGHT, 0);
+                gl->TexImage3D(GL_TEXTURE_3D, l, GL_RGBA8, g->wWidth, g->wHeight, d, 0, GL_BGRA,
+                               GL_UNSIGNED_BYTE, texels);
+                release(texels);
+                continue;
+            }
+            gl->PixelStorei(GL_UNPACK_ROW_LENGTH, volume_pitch(g, &f) / f.bytes);
+            gl->PixelStorei(GL_UNPACK_IMAGE_HEIGHT, g->wHeight);
+            gl->TexImage3D(GL_TEXTURE_3D, l, f.internal, g->wWidth, g->wHeight, d, 0, f.format,
+                           f.type, (const GLvoid *)g->fpVidMem);
+        }
+        gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        gl->PixelStorei(GL_UNPACK_IMAGE_HEIGHT, 0);
+        gl->TexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAX_LEVEL, levels - 1);
+        t->mem = g0->fpVidMem;
+        t->w = g0->wWidth;
+        t->h = g0->wHeight;
+        t->fmt = f.internal;
+        t->levels = levels;
+        t->lmem[0] = g0->fpVidMem;
+        tracef("rd3d: volume %lx: %lux%lux%lu, %lu levels\r\n", h, (DWORD)g0->wWidth,
+               (DWORD)g0->wHeight, depth, levels);
+    }
+    t->dirty = 0;
+    t->scene = c->scene;
+    gl->TexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER,
+                      st[D3DTSS_MAGFILTER] == D3DTFG_POINT ? GL_NEAREST : GL_LINEAR);
+    gl->TexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, min_filter(st, levels));
+    gl->TexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, gl_address(st[D3DTSS_ADDRESSU]));
+    gl->TexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, gl_address(st[D3DTSS_ADDRESSV]));
+    gl->TexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, gl_address(st[25]));  /* D3DTSS_ADDRESSW */
+    return 1;
+}
+
 /* Bind the texture behind a surface handle, uploading it if it is new or has changed. 0 if
    there is no usable texture. */
 static int texture_bind(RCTX *c, DWORD h, int stage)
@@ -1916,12 +2305,18 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
 
     if (!s || !(g = s->lpGbl) || !g->fpVidMem)
         return 0;
+    if (c->dx8 && s->lpSurfMore && (s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_CUBEMAP))
+        return cube_bind(c, h, stage, (const struct shadow *)s);    /* the copy (shadow_make) */
+    if (c->dx8 && is_volume(s))
+        return volume_bind(c, h, stage, (const struct shadow *)s);
     t = texture_slot(c, h);
     if (!t)
         return 0;
     surface_format(s, &pf);
     f = gl_format(&pf);
-    if (!f.bytes)
+    if (!f.bytes && !f.block)
+        return 0;
+    if (f.block && !gl->CompressedTexImage2D)
         return 0;
     if (!t->name) {
         if (c->ntextures >= TEXTURE_BUDGET)
@@ -1934,7 +2329,8 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
     stamp = chain_stamp(lv, levels);
     /* The colour key, if the program turned it on and the texture has one: the key's colour
        is uploaded as transparent, so a change of either is a new upload (fmt) */
-    keyed = c->rs[D3DRENDERSTATE_COLORKEYENABLE] && (s->dwFlags & DDRAWISURF_HASCKEYSRCBLT);
+    keyed = c->rs[D3DRENDERSTATE_COLORKEYENABLE] && (s->dwFlags & DDRAWISURF_HASCKEYSRCBLT) &&
+            !f.block;
     fmt = f.internal ^ (f.format << 8) ^ (f.type << 16) ^
           (keyed ? 0x80000000UL ^ s->ddckCKSrcBlt.dwColorSpaceLowValue : 0);
     if (keyed)
@@ -1956,13 +2352,13 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
         tracef("rd3d: texture %lx new: %lux%lu, %lu levels, %lu bits, caps %08lx, memory %08lx, "
                "pitch %ld, stamp %lx, sum %08lx\r\n", h, (DWORD)g->wWidth, (DWORD)g->wHeight,
                levels, pf.dwRGBBitCount, s->ddsCaps.dwCaps, g->fpVidMem, g->lPitch, stamp,
-               trace_on ? sum_rows((BYTE *)g->fpVidMem, g->lPitch, g->wWidth * f.bytes,
+               trace_on && !f.block ? sum_rows((BYTE *)g->fpVidMem, g->lPitch, g->wWidth * f.bytes,
                                    g->wHeight) : 0);
     } else if (texture_changed(c, t, s, stamp)) {
         /* written since: the contents again, into the same storage */
         tracef("rd3d: texture %lx again: dirty %d, stamp %lx (was %lx), scene %lu (was %lu), "
                "sum %08lx\r\n", h, t->dirty, stamp, t->stamp, c->scene, t->scene,
-               trace_on ? sum_rows((BYTE *)g->fpVidMem, g->lPitch, g->wWidth * f.bytes,
+               trace_on && !f.block ? sum_rows((BYTE *)g->fpVidMem, g->lPitch, g->wWidth * f.bytes,
                                    g->wHeight) : 0);
         texture_upload(gl, &f, &pf, lv, levels, 0, keyed);
     }
@@ -2154,8 +2550,8 @@ static void apply_stages(RCTX *c)
                    uses_texture(aop, st[D3DTSS_ALPHAARG1], st[D3DTSS_ALPHAARG2]);
         int on = 0;
 
-        if (s >= FF_STAGES && !c->dx8)
-            off = 1;                    /* Direct3D 7 is offered FF_STAGES */
+        if (s >= (c->dx8 ? FF8_STAGES : FF_STAGES))
+            off = 1;                    /* the stages after those are only for pixel shaders */
         c->bound[s] = 0;
         gl->ActiveTexture(GL_TEXTURE0 + s);
         if (off || cop == D3DTOP_DISABLE) {
@@ -2411,15 +2807,31 @@ static void arrays(RCTX *c, const VERTICES *v, DWORD first, DWORD count)
     } else {
         gl->DisableClientState(GL_SECONDARY_COLOR_ARRAY);
     }
-    gl->ClientActiveTexture(GL_TEXTURE0 + FOG_UNIT);
-    if (c->rs[D3DRENDERSTATE_FOGENABLE]) {
-        gl->EnableClientState(GL_TEXTURE_COORD_ARRAY);
-        gl->TexCoordPointer(1, GL_FLOAT, 0, c->pos + count * 4);
+    /* The fog values (0.25 + 0.5 f, see convert): the fixed-function fog unit's coordinates, or,
+       under a pixel shader, whose stages may use that unit, OpenGL's fog coordinate. */
+    if (c->fp_on && gl->FogCoordPointer) {
+        if (c->rs[D3DRENDERSTATE_FOGENABLE]) {
+            gl->Fogi(GL_FOG_COORDINATE_SOURCE, GL_FOG_COORDINATE);
+            gl->EnableClientState(GL_FOG_COORDINATE_ARRAY);
+            gl->FogCoordPointer(GL_FLOAT, 0, c->pos + count * 4);
+        } else {
+            gl->DisableClientState(GL_FOG_COORDINATE_ARRAY);
+        }
     } else {
-        gl->DisableClientState(GL_TEXTURE_COORD_ARRAY);
+        if (gl->FogCoordPointer)
+            gl->DisableClientState(GL_FOG_COORDINATE_ARRAY);
+        gl->ClientActiveTexture(GL_TEXTURE0 + FOG_UNIT);
+        if (c->rs[D3DRENDERSTATE_FOGENABLE]) {
+            gl->EnableClientState(GL_TEXTURE_COORD_ARRAY);
+            gl->TexCoordPointer(1, GL_FLOAT, 0, c->pos + count * 4);
+        } else {
+            gl->DisableClientState(GL_TEXTURE_COORD_ARRAY);
+        }
     }
     for (s = 0; s < STAGES; s++) {
         DWORD set = c->tss[s][D3DTSS_TEXCOORDINDEX] & 0xFFFF;
+        if (s == FOG_UNIT && !c->fp_on)
+            continue;                   /* the fog unit's, set above */
         gl->ClientActiveTexture(GL_TEXTURE0 + s);
         if (set < 8 && v->tex[set] >= 0) {
             gl->EnableClientState(GL_TEXTURE_COORD_ARRAY);
@@ -2852,9 +3264,27 @@ static void surface_handles(DDLOCAL *l, LPDDRAWI_DDRAWSURFACE_LCL root,
                s->lpGbl ? s->lpGbl->fpVidMem : 0, s->lpGbl ? s->lpGbl->dwLinearSize : 0);
         return;
     }
-    if (l->dx8 && depth == 0 && (s->ddsCaps.dwCaps & DDSCAPS_TEXTURE) &&
-        !(s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_CUBEMAP)) {
-        struct shadow *sh = s->lpGbl && s->lpGbl->fpVidMem ? shadow_make(s) : NULL;
+    if (l->dx8 && depth == 0 && (s->ddsCaps.dwCaps & DDSCAPS_TEXTURE)) {    /* cube maps too */
+        struct shadow *sh;
+        if ((s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_VOLUME) &&
+            !(s->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY) && (s->dwFlags & DDRAWISURF_HASPIXELFORMAT)) {
+            /* A video memory volume, allocated by now (CreateSurface: rows tight, slices one
+               after another). The runtime reads each level's slice pitch from the field that
+               held the allocation's block height (lSlicePitch in DirectX 8, dwBlockSizeY here). */
+            LPDDRAWI_DDRAWSURFACE_LCL m = s;
+            int k;
+            for (k = 0; m && k < MAX_LEVELS; k++) {
+                LPDDRAWI_DDRAWSURFACE_GBL g = m->lpGbl;
+                DWORD block = gl_format(&g->ddpfSurface).block;     /* DXT: rows of 4x4 blocks */
+                g->lPitch = block ? (LONG)(((g->wWidth + 3) / 4) * block) :
+                                    (LONG)(g->wWidth * (g->ddpfSurface.dwRGBBitCount / 8));
+                g->dwBlockSizeY = (DWORD)g->lPitch * (block ? (g->wHeight + 3) / 4 : g->wHeight);
+                m = (m->ddsCaps.dwCaps & DDSCAPS_MIPMAP) && m->lpAttachList ? m->lpAttachList->lpAttached : NULL;
+                if (m == s)
+                    break;
+            }
+        }
+        sh = s->lpGbl && s->lpGbl->fpVidMem ? shadow_make(s) : NULL;
         handle_set(l, h, sh ? &sh->l : NULL);
         shadow_set(l, h, sh);
         texture_forget(h);              /* a handle may come back with other memory */
@@ -2919,7 +3349,9 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
     LPDDRAWI_DDRAWSURFACE_LCL ss = handle_get(c->ddl, b->dwDDSrcSurface);
     LPDDRAWI_DDRAWSURFACE_LCL dl[MAX_LEVELS], sl[MAX_LEVELS];
     DDPIXELFORMAT pf;
+    PIXFMT f;
     DWORD bytes, levels, n, l;
+    DWORD faces, face;
     RECTL r = b->rSrc;
 
     tracef("rd3d: texture blit %lx -> %lx, %ld,%ld-%ld,%ld to %ld,%ld, flags %lx%s\r\n",
@@ -2929,7 +3361,8 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
         return;
     surface_format(ss, &pf);
     bytes = pf.dwRGBBitCount / 8;
-    if (!bytes)
+    f = gl_format(&pf);
+    if (!bytes && !f.block)
         return;
     if (r.right <= r.left || r.bottom <= r.top) {
         r.left = r.top = 0;
@@ -2938,8 +3371,13 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
     }
     /* Mipmapped textures: every level the two have in common, with the rectangle and the
        point scaled to it (the DDK's rule for this command). */
-    levels = mip_chain(ds, dl);
-    n = mip_chain(ss, sl);
+    /* A cube map (Direct3D 8 and 9: the HAL's copies, shadow_make): each of its six faces. */
+    faces = c->dx8 && is_cube(ds) && is_cube(ss) ? 6 : 1;
+    for (face = 0; face < faces; face++) {
+    LPDDRAWI_DDRAWSURFACE_LCL dtop = faces > 1 ? &((struct shadow *)ds)[face * ((struct shadow *)ds)->levels].l : ds;
+    LPDDRAWI_DDRAWSURFACE_LCL stop = faces > 1 ? &((struct shadow *)ss)[face * ((struct shadow *)ss)->levels].l : ss;
+    levels = mip_chain(dtop, dl);
+    n = mip_chain(stop, sl);
     if (n < levels)
         levels = n;
     for (l = 0; l < levels; l++) {
@@ -2967,13 +3405,74 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
            one current. */
         if (!d3d_surface_access(sl[l]) || !d3d_surface_access(dl[l]) || !make_current(c))
             return;
-        for (i = 0; i < h; i++)
-            memcpy((BYTE *)dg->fpVidMem + (y + i) * dg->lPitch + x * bytes,
-                   (BYTE *)sg->fpVidMem + (top + i) * sg->lPitch + left * bytes, w * bytes);
+        if (f.block) {                  /* DXT: whole 4x4 blocks, rows of blocks */
+            DWORD sp = ((sg->wWidth + 3) / 4) * f.block, dp = ((dg->wWidth + 3) / 4) * f.block;
+            LONG bw = (w + 3) / 4, bh = (h + 3) / 4;
+            for (i = 0; i < bh; i++)
+                memcpy((BYTE *)dg->fpVidMem + (y / 4 + i) * dp + (x / 4) * f.block,
+                       (BYTE *)sg->fpVidMem + (top / 4 + i) * sp + (left / 4) * f.block,
+                       bw * f.block);
+        } else {
+            for (i = 0; i < h; i++)
+                memcpy((BYTE *)dg->fpVidMem + (y + i) * dg->lPitch + x * bytes,
+                       (BYTE *)sg->fpVidMem + (top + i) * sg->lPitch + left * bytes, w * bytes);
+        }
         d3d_surface_written(dl[l]);     /* a render target too: its GPU picture is older now */
     }
+    }                                   /* faces */
     if (b->dwDDDestSurface < c->ntex)
         c->tex[b->dwDDDestSurface].dirty = 1;            /* upload again */
+    c->stages_dirty = 1;
+}
+
+/* A box of one volume copied into another (the runtime's managed volumes), at each level both
+   have, the box and the point scaled to it. Both are the HAL's copies (shadow_make). */
+static void volume_blt(RCTX *c, const RB_DP2_VOLUME_BLT *b)
+{
+    LPDDRAWI_DDRAWSURFACE_LCL ds = handle_get(c->ddl, b->dest), ss = handle_get(c->ddl, b->source);
+    const struct shadow *dsh, *ssh;
+    DDPIXELFORMAT pf;
+    PIXFMT f;
+    DWORD levels, l;
+
+    tracef("rd3d: volume blit %lx -> %lx, box %lu,%lu,%lu-%lu,%lu,%lu\r\n", b->source, b->dest,
+           b->box[0], b->box[1], b->box[4], b->box[2], b->box[3], b->box[5]);
+    if (!c->dx8 || !ds || !ss || !is_volume(ds) || !is_volume(ss))
+        return;
+    dsh = (const struct shadow *)ds;
+    ssh = (const struct shadow *)ss;
+    surface_format(ss, &pf);
+    f = gl_format(&pf);
+    if (!f.bytes)
+        return;
+    levels = dsh->levels < ssh->levels ? dsh->levels : ssh->levels;
+    for (l = 0; l < levels; l++) {
+        const DDRAWI_DDRAWSURFACE_GBL *sg = &ssh[l].g, *dg = &dsh[l].g;
+        DWORD sd = ssh->depth >> l ? ssh->depth >> l : 1, dd = dsh->depth >> l ? dsh->depth >> l : 1;
+        DWORD x0 = b->box[0] >> l, y0 = b->box[1] >> l, x1 = b->box[2] >> l, y1 = b->box[3] >> l;
+        DWORD z0 = b->box[4] >> l, z1 = b->box[5] >> l, dx = b->x >> l, dy = b->y >> l, dz = b->z >> l;
+        DWORD sp = sg->lPitch > 0 ? (DWORD)sg->lPitch : sg->wWidth * f.bytes, dp = volume_pitch(dg, &f);
+        DWORD y, z;
+        if (b->box[2] <= b->box[0] || b->box[3] <= b->box[1] || b->box[5] <= b->box[4]) {
+            x0 = y0 = z0 = 0;           /* no box: all of it */
+            x1 = sg->wWidth;
+            y1 = sg->wHeight;
+            z1 = sd;
+        }
+        if (x1 <= x0) x1 = x0 + 1;
+        if (y1 <= y0) y1 = y0 + 1;
+        if (z1 <= z0) z1 = z0 + 1;
+        if (x1 > sg->wWidth || y1 > sg->wHeight || z1 > sd || dx + x1 - x0 > dg->wWidth ||
+            dy + y1 - y0 > dg->wHeight || dz + z1 - z0 > dd || !sg->fpVidMem || !dg->fpVidMem)
+            break;
+        for (z = z0; z < z1; z++)
+            for (y = y0; y < y1; y++)
+                memcpy((BYTE *)dg->fpVidMem + (dz + z - z0) * dp * dg->wHeight + (dy + y - y0) * dp + dx * f.bytes,
+                       (const BYTE *)sg->fpVidMem + z * sp * sg->wHeight + y * sp + x0 * f.bytes,
+                       (x1 - x0) * f.bytes);
+    }
+    if (b->dest < c->ntex)
+        c->tex[b->dest].dirty = 1;      /* upload again */
     c->stages_dirty = 1;
 }
 
@@ -2983,12 +3482,14 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
 /* ---- Direct3D 8 pixel shaders ------------------------------------------------------------- */
 /* A shader is translated when the runtime creates it: its tokens to TGSI text by the Windows
    2000 driver's translator (win2k/d3d8_ps.c), that to an ARB fragment program (tgsi_arb.c),
-   which Mesa compiles. Inputs: the diffuse and specular colours, texture coordinate sets 0..3;
-   c0..c7 are program.env[0..7]; the translator's immediates are program.local.
+   which Mesa compiles. Inputs: the diffuse and specular colours, texture coordinate sets 0..7;
+   constants (c0..c7 of version 1, c0..c31 of 2.0) are program.env; the translator's
+   immediates are program.local.
    Fog after the shader: a second program, made when a draw first needs it. The HAL already
-   gives each vertex Direct3D's fog factor f as the coordinate 0.25 + 0.5 f of FOG_UNIT (the
-   fixed-function fog ramp); the translator is asked for linear fog from a vertex depth read
-   there, with start 0.75 and end 0.25, which gives back f. */
+   computes each vertex's Direct3D fog factor f as 0.25 + 0.5 f (for the fixed-function fog
+   ramp); under a shader it goes in as OpenGL's fog coordinate (arrays), and the translator is
+   asked for linear fog from a vertex depth read there, with start 0.75 and end 0.25, which
+   gives back f. */
 #define PS_FOG (RB_PS_FOG_VERTEX | (3 << RB_PS_FOG_MODE_SHIFT))     /* linear, from IN[10] */
 
 static struct ps8 *ps_find(RCTX *c, DWORD handle, int create)
@@ -3013,22 +3514,22 @@ static void ps_delete(RCTX *c, DWORD handle)
 {
     GLF *gl = gl_of(c);
     struct ps8 *p = ps_find(c, handle, 0);
+    DWORD i;
     if (!p)
         return;
-    if (gl->DeleteProgramsARB) {
-        if (p->prog)
-            gl->DeleteProgramsARB(1, &p->prog);
-        if (p->prog_fog)
-            gl->DeleteProgramsARB(1, &p->prog_fog);
+    for (i = 0; i < p->nvar; i++) {
+        if (p->var[i].prog && gl->DeleteProgramsARB)
+            gl->DeleteProgramsARB(1, &p->var[i].prog);
+        if (c->fp_prog == p->var[i].prog)
+            c->fp_prog = 0;
     }
-    if (c->fp_prog && (c->fp_prog == p->prog || c->fp_prog == p->prog_fog))
-        c->fp_prog = 0;
     release(p->code);
     memset(p, 0, sizeof *p);
 }
 
 /* The program for p, with or without fog; 0 if it can't be made (p->failed is then set). */
-static GLuint ps_compile(RCTX *c, struct ps8 *p, int fog)
+/* key: the translator's fog argument (fog, and the cube map stages of a version 1 shader). */
+static GLuint ps_compile(RCTX *c, struct ps8 *p, DWORD key)
 {
     GLF *gl = gl_of(c);
     char *tgsi, *arb;
@@ -3043,9 +3544,9 @@ static GLuint ps_compile(RCTX *c, struct ps8 *p, int fog)
     arb = (char *)alloc(TGSI_ARB_TEXT_BYTES);
     memset(&info, 0, sizeof info);
     memset(&ai, 0, sizeof ai);
-    ai.fog_unit = FOG_UNIT;
+    ai.fog_unit = TGSI_ARB_FOGCOORD;    /* fog values in OpenGL's fog coordinate (arrays) */
     if (tgsi && arb && p->code)
-        n = rb_ps_translate((const unsigned int *)p->code, p->bytes / 4, fog ? PS_FOG : 0, tgsi,
+        n = rb_ps_translate((const unsigned int *)p->code, p->bytes / 4, key, tgsi,
                             RB_PS_TEXT_BYTES, &info);
     if (n)
         m = tgsi_to_arb(tgsi, arb, TGSI_ARB_TEXT_BYTES, &ai);
@@ -3075,10 +3576,11 @@ static GLuint ps_compile(RCTX *c, struct ps8 *p, int fog)
         } else {
             for (i = 0; i < ai.immediates; i++)
                 gl->ProgramLocalParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, i, (const GLfloat *)ai.imm[i]);
-            if (fog)
+            if (key & 3)
                 p->fog_base = ai.constants - 2;
+            p->bump = !p->version2 && info.constants == RB_PS_BUMP_CONSTANTS;
             tracef("rd3d: pixel shader %lx%s: program %lu, samplers %lx, coordinates %lx\r\n",
-                   p->handle, fog ? " with fog" : "", (DWORD)prog, (DWORD)info.samplers,
+                   p->handle, key ? " (variant)" : "", (DWORD)prog, (DWORD)info.samplers,
                    (DWORD)info.coords);
         }
     }
@@ -3101,25 +3603,60 @@ static void ps_create(RCTX *c, DWORD handle, const DWORD *code, DWORD bytes)
         memcpy(p->code, code, bytes);
         p->bytes = bytes;
     }
-    p->prog = ps_compile(c, p, 0);      /* now, so a shader that can't be made says so early */
+    p->version2 = bytes >= 4 && code[0] >= 0xFFFF0200UL;
+    p->var[0].key = 0;
+    p->var[0].prog = ps_compile(c, p, 0);   /* now, so a shader that can't be made says so early */
+    p->nvar = 1;
 }
 
-/* The program for the pixel shader set and the fog state, 0 for the fixed-function stages; -1
-   if a shader is set but couldn't be translated (its draws are skipped). */
+/* The stages t0..t3 whose texture is a cube map (bits 0-3) or a volume (bits 8-11): a version 1
+   shader's tex reads them as such. Shifted by RB_PS_CUBE_SHIFT, the translator's argument. */
+static DWORD cube_stages(RCTX *c)
+{
+    DWORD s, mask = 0;
+    for (s = 0; s < RB_PS_COORD_SETS; s++) {
+        DWORD map = c->tss[s][D3DTSS_TEXTUREMAP];
+        LPDDRAWI_DDRAWSURFACE_LCL l = map ? handle_get(c->ddl, map) : NULL;
+        if (l && is_cube(l))
+            mask |= 1UL << s;
+        if (l && is_volume(l))
+            mask |= 1UL << (RB_PS_VOLUME_SHIFT - RB_PS_CUBE_SHIFT + s);
+    }
+    return mask;
+}
+
+/* The program for the pixel shader set, the fog state and (version 1) the cube map stages, 0
+   for the fixed-function stages; -1 if a shader is set but its program couldn't be made (its
+   draws are skipped). Programs are made when first needed and kept, PS_VARIANTS a shader. */
 static long ps_program(RCTX *c)
 {
     struct ps8 *p;
-    int fog = c->rs[D3DRENDERSTATE_FOGENABLE] != 0;
+    DWORD key, i;
     if (!c->ps_bound)
         return 0;
     p = ps_find(c, c->ps_bound, 0);
     if (!p || p->failed)
         return -1;
-    if (fog && !p->prog_fog)
-        p->prog_fog = ps_compile(c, p, 1);
-    if (fog)
-        return p->prog_fog ? (long)p->prog_fog : -1;
-    return p->prog ? (long)p->prog : -1;
+    key = c->rs[D3DRENDERSTATE_FOGENABLE] ? PS_FOG : 0;
+    if (!p->version2)
+        key |= cube_stages(c) << RB_PS_CUBE_SHIFT;
+    c->fp_fog = (key & 3) != 0;
+    for (i = 0; i < p->nvar; i++)
+        if (p->var[i].key == key)
+            return p->var[i].prog ? (long)p->var[i].prog : -1;
+    if (p->nvar == PS_VARIANTS) {       /* full: the last one makes room */
+        GLF *gl = gl_of(c);
+        i = PS_VARIANTS - 1;
+        if (p->var[i].prog && gl->DeleteProgramsARB)
+            gl->DeleteProgramsARB(1, &p->var[i].prog);
+        if (c->fp_prog == p->var[i].prog)
+            c->fp_prog = 0;
+        p->nvar--;
+    }
+    i = p->nvar++;
+    p->var[i].key = key;
+    p->var[i].prog = ps_compile(c, p, key);
+    return p->var[i].prog ? (long)p->var[i].prog : -1;
 }
 
 /* Before a draw: the fragment program on or off, bound, its constants loaded. */
@@ -3146,12 +3683,31 @@ static void ps_apply(RCTX *c, long prog)
     if (!gl->ProgramEnvParameter4fvARB)
         return;
     if (c->psc_dirty) {
-        for (i = 0; i < RB_PS_CONSTANTS; i++)
+        for (i = 0; i < RB_PS2_CONSTANTS; i++)
             gl->ProgramEnvParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, i, c->psc[i]);
         c->psc_dirty = 0;
     }
     p = ps_find(c, c->ps_bound, 0);
-    if (p && (GLuint)prog == p->prog_fog) {
+    if (p && p->bump) {
+        /* texbem's c8..c11: each stage's bump matrix; c12..c15: its luminance scale and offset */
+        DWORD s;
+        for (s = 0; s < RB_PS_COORD_SETS; s++) {
+            const DWORD *t = c->tss[s];
+            GLfloat m[4], lum[4];
+            m[0] = *(const float *)&t[D3DTSS_BUMPENVMAT00];
+            m[1] = *(const float *)&t[D3DTSS_BUMPENVMAT01];
+            m[2] = *(const float *)&t[D3DTSS_BUMPENVMAT10];
+            m[3] = *(const float *)&t[D3DTSS_BUMPENVMAT11];
+            lum[0] = *(const float *)&t[D3DTSS_BUMPENVLSCALE];
+            lum[1] = *(const float *)&t[D3DTSS_BUMPENVLOFFSET];
+            lum[2] = lum[3] = 0.0f;
+            gl->ProgramEnvParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, RB_PS_CONSTANTS + s, m);
+            gl->ProgramEnvParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, RB_PS_CONSTANTS + 4 + s, lum);
+        }
+        c->psc_dirty = 1;               /* those registers may be a later shader's constants */
+    }
+    p = ps_find(c, c->ps_bound, 0);
+    if (p && c->fp_fog) {
         DWORD col = c->rs[D3DRENDERSTATE_FOGCOLOR];
         GLfloat fc[4], range[4];
         fc[0] = ((col >> 16) & 255) / 255.0f;
@@ -3163,6 +3719,7 @@ static void ps_apply(RCTX *c, long prog)
         range[2] = range[3] = 0.0f;
         gl->ProgramEnvParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, p->fog_base, fc);
         gl->ProgramEnvParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, p->fog_base + 1, range);
+        c->psc_dirty = 1;               /* those registers may be a later shader's constants */
     }
 }
 
@@ -3628,7 +4185,7 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
                 if (left - used < sizeof *r || r->count > (left - used - sizeof *r) / 16)
                     goto bad;
                 for (j = 0; k->bCommand == RbDp2SetPixelShaderConst && j < r->count; j++)
-                    if (r->reg + j < RB_PS_CONSTANTS) {
+                    if (r->reg + j < RB_PS2_CONSTANTS) {
                         memcpy(c->psc[r->reg + j], f + 4 * j, 16);
                         c->psc_dirty = 1;
                     }
@@ -3664,9 +4221,15 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
         case RbDp2AddDirtyBox:
             cmd = data + n * sizeof(RB_DP2_DIRTY_BOX);
             break;
-        case RbDp2VolumeBlt:            /* no volume textures offered */
-            cmd = data + n * sizeof(RB_DP2_VOLUME_BLT);
+        case RbDp2VolumeBlt: {
+            const RB_DP2_VOLUME_BLT *vb = (const RB_DP2_VOLUME_BLT *)data;
+            if (data + n * sizeof *vb > end)
+                goto bad;
+            for (i = 0; i < n; i++)
+                volume_blt(c, &vb[i]);
+            cmd = data + n * sizeof *vb;
             break;
+        }
         case D3DDP2OP_TEXBLT: {
             LPD3DHAL_DP2TEXBLT b = (LPD3DHAL_DP2TEXBLT)data;
             for (i = 0; i < n; i++)
@@ -3754,6 +4317,11 @@ static void prim_caps(D3DPRIMCAPS *p)
         D3DPSHADECAPS_FOGFLAT | D3DPSHADECAPS_FOGGOURAUD;
     p->dwTextureCaps = D3DPTEXTURECAPS_PERSPECTIVE | D3DPTEXTURECAPS_ALPHA |
                        D3DPTEXTURECAPS_POW2 | D3DPTEXTURECAPS_TRANSPARENCY;
+    /* With the Direct3D 8 interface on: cube maps (for pixel shaders). The Direct3D 8 and 9
+       runtimes on Windows 98 decide from this record whether a cube map may go to video
+       memory, whatever D3DCAPS8 says. */
+    if (d8_on)
+        p->dwTextureCaps |= 0x800 | 0x2000;     /* D3DPTEXTURECAPS_CUBEMAP, VOLUMEMAP */
     p->dwTextureFilterCaps = D3DPTFILTERCAPS_NEAREST | D3DPTFILTERCAPS_LINEAR |
         D3DPTFILTERCAPS_MIPNEAREST | D3DPTFILTERCAPS_MIPLINEAR |
         D3DPTFILTERCAPS_LINEARMIPNEAREST | D3DPTFILTERCAPS_LINEARMIPLINEAR |
@@ -3865,17 +4433,25 @@ static ULONG fbits(float f)
 
 /* Formats and what each can be used for (the operations in the word of dwRBitMask). */
 static const ULONG d8_formats[][2] = {
-    { RbFmtX8R8G8B8, RbFormatTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
+    { RbFmtX8R8G8B8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
                      RbFormatDisplayMode | RbFormat3D },
-    { RbFmtA8R8G8B8, RbFormatTexture | RbFormatOffscreenTarget | RbFormatSameTargetUpToAlpha },
-    { RbFmtR5G6B5, RbFormatTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
+    { RbFmtA8R8G8B8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture | RbFormatOffscreenTarget | RbFormatSameTargetUpToAlpha },
+    { RbFmtR5G6B5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
                    RbFormatDisplayMode | RbFormat3D },
-    { RbFmtX1R5G5B5, RbFormatTexture },
-    { RbFmtA1R5G5B5, RbFormatTexture },
-    { RbFmtA4R4G4B4, RbFormatTexture },
+    { RbFmtX1R5G5B5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtA1R5G5B5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtA4R4G4B4, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     { RbFmtD16, RbFormatZStencil },
     { RbFmtD24S8, RbFormatZStencil },
     { RbFmtD24X8, RbFormatZStencil },
+    { RbFmtDxt1, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },     /* DXT: CreateSurface sizes them, gl_format uploads them */
+    { RbFmtDxt2, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtDxt3, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtDxt4, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtDxt5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    /* bump maps for texbem and texbeml: signed (gl_format) */
+    { RbFmtV8U8, RbFormatTexture | RbFormatCubeTexture | RbFormatBumpMap },
+    { RbFmtQ8W8V8U8, RbFormatTexture | RbFormatCubeTexture | RbFormatBumpMap },
 };
 #define D8_FORMATS (sizeof d8_formats / sizeof d8_formats[0])
 
@@ -3899,6 +4475,13 @@ static void d8_caps(RB_D3DCAPS8 *c)
     c->alphaCmpCaps = tri->dwAlphaCmpCaps;
     c->shadeCaps = tri->dwShadeCaps;
     c->textureCaps = tri->dwTextureCaps | 0x4000;      /* D3DPTEXTURECAPS_MIPMAP */
+    /* Cube maps and volumes, sampled by pixel shaders (the fixed-function stages do not). */
+    c->textureCaps |= 0x800 | 0x10000;  /* D3DPTEXTURECAPS_CUBEMAP, MIPCUBEMAP */
+    c->cubeTextureFilterCaps = tri->dwTextureFilterCaps;
+    c->textureCaps |= 0x2000 | 0x8000;  /* D3DPTEXTURECAPS_VOLUMEMAP, MIPVOLUMEMAP */
+    c->volumeTextureFilterCaps = tri->dwTextureFilterCaps;
+    c->volumeTextureAddressCaps = tri->dwTextureAddressCaps;
+    c->maxVolumeExtent = 256;
     c->textureFilterCaps = tri->dwTextureFilterCaps;
     c->textureAddressCaps = tri->dwTextureAddressCaps;
     c->stencilCaps = x.dwStencilCaps;
@@ -3922,9 +4505,17 @@ static void d8_caps(RB_D3DCAPS8 *c)
     c->maxStreams = 1;
     c->maxStreamStride = 255;
     c->vertexShaderVersion = 0xFFFE0000UL;  /* none: the runtime processes vertices */
-    c->pixelShaderVersion = 0xFFFF0103UL;   /* 1.3, as ARB fragment programs (ps_create) */
-    c->maxSimultaneousTextures = STAGES;    /* t0..t3 */
-    c->maxTextureBlendStages = STAGES;      /* the runtime sends stage states for these only */
+    /* Pixel shaders as ARB fragment programs (ps_create): 1.3 for Direct3D 8, 2.0 with eight
+       samplers when the runtime that asks has announced itself as Direct3D 9 (it uses this record
+       for drivers of the Direct3D 8 interface). The runtime sends stage states only for the
+       blend stages reported, so those are as many as the samplers. */
+    if (d3d_version >= 0x900) {
+        c->pixelShaderVersion = 0xFFFF0200UL;
+        c->maxSimultaneousTextures = c->maxTextureBlendStages = RB_PS2_SAMPLERS;
+    } else {
+        c->pixelShaderVersion = 0xFFFF0103UL;
+        c->maxSimultaneousTextures = c->maxTextureBlendStages = RB_PS_COORD_SETS;
+    }
     c->fvfCaps = STAGES;                    /* texture coordinate sets */
     c->maxPixelShaderValue = fbits(1.0f);
 }
@@ -3992,7 +4583,10 @@ static int d8_info(LPDDHAL_GETDRIVERINFODATA d)
         RB_GDI2_DX_VERSION *v = (RB_GDI2_DX_VERSION *)h;
         if (room < sizeof *v)
             goto unavailable;
-        d3d_version = v->version;
+        /* The Direct3D 9 runtime says 0x902, then, after the Direct3D 9 caps go unanswered,
+           0x802 just before it asks for these: keep the highest */
+        if (v->version > d3d_version)
+            d3d_version = v->version;
         d->dwActualSize = sizeof *v;
         break;
     }
@@ -4011,6 +4605,22 @@ int d3d_driver_info(LPDDHAL_GETDRIVERINFODATA d)
 {
     if (IsEqualGUID(&d->guidInfo, &guid_gdi2) && d8_info(d))
         return 1;
+    if (d8_on && IsEqualGUID(&d->guidInfo, &GUID_DDMoreSurfaceCaps)) {
+        /* Surface kinds beyond DDSCAPS that video memory takes: cube maps, for the Direct3D 8
+           and 9 runtimes (without this they keep cube maps in system memory only). One pair of
+           heap restrictions per heap, none of them restricting. */
+        struct {
+            DDMORESURFACECAPS c;
+            DDSCAPSEX more[2 * 4];
+        } m;
+        DWORD heaps = shared->hal.dwNumHeaps;
+        if (heaps > 5)
+            heaps = 5;
+        memset(&m, 0, sizeof m);
+        m.c.dwSize = sizeof(DDMORESURFACECAPS) + (heaps ? heaps - 1 : 0) * 2 * sizeof(DDSCAPSEX);
+        m.c.ddsCapsMore.dwCaps2 = DDSCAPS2_CUBEMAP | DDSCAPS2_VOLUME;
+        return copy_answer(d, &m, m.c.dwSize);
+    }
     if (IsEqualGUID(&d->guidInfo, &GUID_D3DCallbacks3)) {
         D3DHAL_CALLBACKS3 cb;
         memset(&cb, 0, sizeof cb);
