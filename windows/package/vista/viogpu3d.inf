@@ -1,11 +1,13 @@
-; Ripple's Vista SP2 x64 display probe. Vista's compositor uses Direct3D 9Ex.
+; viogpu3d.inf: the moose-ripple display driver for Windows Vista SP2 x64 on QEMU's virtio-gpu.
+; Vista's compositor uses Direct3D 9Ex. How to install and remove it: docs/windows/install.md.
+; No catalog: the kernel driver carries its test signature itself, and Windows asks to confirm
+; the package when it is installed.
 [Version]
 Signature="$Windows NT$"
 Class=Display
 ClassGUID={4d36e968-e325-11ce-bfc1-08002be10318}
 Provider=%Provider%
-DriverVer=11/23/2026,7.14.1.20
-CatalogFile=viogpu3d.cat
+DriverVer=11/25/2026,0.4.0.0
 
 [Manufacturer]
 %Provider%=Ripple,NTamd64.6.0
@@ -72,5 +74,5 @@ ServiceBinary=%12%\viogpu3d.sys
 
 [Strings]
 Provider="moose-ripple"
-Device="Ripple virtio-gpu 3D (Vista probe)"
-Disk="Ripple Vista display driver"
+Device="moose-ripple virtio-gpu 3D"
+Disk="moose-ripple display driver for Windows Vista"

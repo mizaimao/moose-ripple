@@ -11,8 +11,6 @@
  * depth buffers and render target textures (3DMark 2001 SE alone makes more
  * than a dozen small ones). Each is a virgl context. */
 #define RB2K_DD_SLOTS 256
-/* The targets one texture is attached to at once (stale ones are reused). */
-#define RB2K_ATTACH 16
 #define RB2K_DD_HOST_SURFACES 1
 #define RB2K_DD_NATIVE_D3D7 2
 #define RB2K_DD_Z16_STORAGE 4

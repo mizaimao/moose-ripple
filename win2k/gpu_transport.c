@@ -46,6 +46,28 @@ typedef char check_desc_size[sizeof(DESCRIPTOR) == 16 ? 1 : -1];
 
 typedef struct { ULONG start, bytes; } REGION;
 
+/* QEMU answers a fenced request once it finds that fence retired. It looks
+ * after handling each notification of the control queue, and otherwise on
+ * a 10 ms timer, so a request whose GPU work is still running when QEMU
+ * handles it waits for that timer. A notification with no new request
+ * makes QEMU look again, so a waiter rings the doorbell after 0.2 ms and
+ * then at doubling intervals up to 2 ms. Counted in 10 us polls. */
+enum { NudgeFirst = 20, NudgeLongest = 200 };
+typedef struct { ULONG at, step; } NUDGE;
+
+static void nudge_start(NUDGE *n)
+{
+    n->at = n->step = NudgeFirst;
+}
+
+static void nudge(RB2K_GPU *gpu, NUDGE *n, ULONG polls)
+{
+    if (polls != n->at) return;
+    VideoPortWriteRegisterUshort(gpu->doorbell, 0);
+    if (n->step < NudgeLongest) n->step = n->step*2 < NudgeLongest ? n->step*2 : NudgeLongest;
+    n->at += n->step;
+}
+
 void rb_gpu_find(RB2K_GPU *gpu, PVOID extension, ULONG slot,
                  PVIDEO_ACCESS_RANGE registers, PVIDEO_PORT_CONFIG_INFO config)
 {
@@ -254,14 +276,17 @@ static VP_STATUS submit_chain(RB2K_GPU *gpu, ULONG offset, USHORT number, USHORT
     volatile USED_RING *used = (USED_RING *)(gpu->dma + offset + Used);
     USHORT slot = *index % entries, next = (USHORT)(*index + 1);
     ULONG i;
+    NUDGE n;
     available->ring[slot] = 0;
     VideoPortInterlockedExchange(&gpu->barrier, 0);
     available->index = next;
     VideoPortInterlockedExchange(&gpu->barrier, 0);
     VideoPortWriteRegisterUshort(doorbell, number);
+    nudge_start(&n);
     for (i = 0; used->index == *index; ++i) {
         if (i == 1000000) { gpu->ready = FALSE; return ERROR_TIMEOUT; }
         VideoPortStallExecution(10);
+        if (doorbell == gpu->doorbell) nudge(gpu, &n, i+1);
     }
     VideoPortInterlockedExchange(&gpu->barrier, 0);
     if (used->index != next || used->ring[slot].id != 0 || used->ring[slot].length > capacity) {
@@ -357,14 +382,17 @@ static VP_STATUS wait_job(RB2K_GPU *gpu, RB2K_D7_SUBMISSION *job, BOOLEAN thrott
 {
     LONGLONG start, elapsed;
     ULONG polls;
+    NUDGE n;
     VP_STATUS status;
     if (!job->image) return NO_ERROR;
     status = collect_control(gpu, 0, NULL, NULL);
     if (status || !job->image) return status;
     start = rb_counter_ticks(NULL);
+    nudge_start(&n);
     for (polls = 0; job->image; ++polls) {
         if (polls == 1000000) return control_error(gpu, ERROR_TIMEOUT);
         VideoPortStallExecution(10);
+        nudge(gpu, &n, polls+1);
         status = collect_control(gpu, 0, NULL, NULL);
         if (status) return status;
     }
@@ -504,12 +532,15 @@ VP_STATUS rb_gpu_submit_extents(RB2K_GPU *gpu, const void *request, ULONG bytes,
         status = submit_chain(gpu, 0, 0, QueueEntries, &gpu->index, gpu->doorbell, capacity, received);
         gpu->usedIndex = gpu->index;
     } else {
+        NUDGE n;
         publish_control(gpu, 0);
+        nudge_start(&n);
         for (polls = 0; ; ++polls) {
             status = collect_control(gpu, capacity, received, &done);
             if (status || done) break;
             if (polls == 1000000) { status = control_error(gpu, ERROR_TIMEOUT); break; }
             VideoPortStallExecution(10);
+            nudge(gpu, &n, polls+1);
         }
     }
     if (gpu->d7Measure) {
