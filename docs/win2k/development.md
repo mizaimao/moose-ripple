@@ -2185,6 +2185,32 @@ On XP SP3 under KVM on the second Intel UHD 630 host, case 53 passes and
 `d9pixels` passes 43 of 43. 3DMark 2001 SE's DOT3 Bump Mapping test, which
 reported "Not supported by hardware", now runs.
 
+## Lines and points
+
+Line lists, line strips and point lists used to be skipped in every path:
+the Direct3D 7 commands (`POINTS`, `LINELIST`, `LINESTRIP`, `INDEXEDLINELIST`,
+`INDEXEDLINELIST2`, `INDEXEDLINESTRIP`, `LINELIST_IMM`) and the Direct3D 8
+and 9 stream draws. Programs use them for HUDs, maps, wireframes and
+particles.
+
+- A draw packet (`RB2K_D3D7_DRAW` and `RB2K_D3D8_DRAW`) says what its
+  vertices are in `primitive`: `RB2K_PRIM_TRIANGLES`, `RB2K_PRIM_LINES` (two
+  vertices a line) or `RB2K_PRIM_POINTS`. The display driver emits two or one
+  vertices a primitive; strips become separate lines.
+- The miniport refuses a packet whose vertex count is not a multiple of its
+  primitive's, and draws Gallium lines or points. The rasterizer's line width
+  and point size are 1.0: Direct3D draws lines one pixel wide and, without
+  point sprites, points as one pixel.
+- An indexed stream draw reads `2 * n` indices for a line list, `n + 1` for a
+  line strip and `n` for a point list.
+- Direct3D 7 line caps are the triangle caps, so programs that check them
+  find texturing and the depth test for lines.
+
+Point sprites (`D3DRS_POINTSPRITEENABLE`, point sizes above one) are not done:
+the maximum point size stays 1.0. `d9pixels` case 73 draws three lines and a
+block of nine points.
+
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:
