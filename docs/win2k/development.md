@@ -2659,6 +2659,12 @@ were built with `-Os`, which inlines almost nothing; with `-O2` 3DMark 2001 SE
 went from 5911 to 6311 (timed, host alone). The largest stack frames are the
 same either way (about 2.9 KB, in the miniport).
 
+At -O2 the colour conversion (`rb_gpu_channel`, a loop and a division for each
+of a vertex's eight colour channels) was still a call into another file, 13%
+of the guest's time. It is now a lookup in a constant table of the same 256
+values (`rbChannelBits`): 3DMark 2001 SE went from 6311 to 7204 (timed, host
+alone).
+
 
 ## Release package
 
