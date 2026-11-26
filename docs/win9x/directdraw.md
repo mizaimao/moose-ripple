@@ -892,6 +892,15 @@ rate 10066.3 and 14673.8 MTexels/s (the Car Chase lines did not scroll into view
 results dialog). Pictures checked through VNC; Car Chase's ground was dark until lights got
 slots by Direct3D's index (3DMark's indices go far beyond 32), and its vertex shaders are vs_1_0.
 
+**Timed baseline** (2026-11-26 09:40 EST, rig VM 230 alone, Windows 98 SE, DirectX 9.0c,
+`D3D8` = `"2"`, the PR #209 build with the FOURCC fix, GPU minimum clock 1200 MHz with the
+performance governor, no trace, one run, default settings 1024x768x32 "D3D Hardware T&L"):
+**12134 3DMarks**. Car Chase 221.5 / 48.7 fps, Dragothic 140.0 / 35.6, Lobby 299.7 / 69.8,
+Nature 122.1, fill rate 9986.6 / 14558.6 MTexels/s, High Polygon Count 53.6 / 49.0 MTriangles/s,
+EMBM 734.3, DOT3 681.1, Vertex Shader 170.0, Pixel Shader 671.1, Advanced Pixel Shader 98.3,
+Point Sprites 4.2 MSprites/s. The number later 9x speed work has to beat. Note Dragothic high
+detail: 82.5 fps with the runtime's vertex processing, 35.6 with the GPU's.
+
 Advanced Pixel Shader's white boat and jetty: a trace with each draw's state (new trace lines)
 showed nine draws a frame with no texture on the stage their shader samples, and about one
 refused CanCreateSurface a frame. The refused format was FOURCC 63: for mipmapped Q8W8V8U8
