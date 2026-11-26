@@ -91,8 +91,10 @@ this project: nothing may look worse than without our driver).
    vertex shaders 1.1 and 2.0 ([directdraw.md](directdraw.md#vertex-processing-on-the-gpu-2026-11-26-d3d8--2)),
    and the first speed work, timed on the rig: 3DMark 2001 SE 12134, then 14716 (rendered textures
    stay on the GPU), then 30226 (vertex and index buffers in the driver's memory, kept in OpenGL
-   buffer objects). On by default since 0.6.0 (`D3D8` = `"0"` turns it off). Next: 3DMark03
-   (parked: its installers need a newer Windows or fail on 98).
+   buffer objects). On by default since 0.6.0 (`D3D8` = `"0"` turns it off), released
+   2026-11-26 as `win9x-v0.6.0`. Next: the dynamic-buffer path (`index_list` is the HAL's share of
+   what limits Car Chase and Lobby, [directdraw.md](directdraw.md#vertex-processing-on-the-gpu-2026-11-26-d3d8--2));
+   3DMark03 stays parked (its installers need a newer Windows or fail on 98).
 6. **Windows 2000:** miniport and display driver; the OpenGL and Direct3D parts reused.
 7. Glide stays out (2026-11-26): games that need it can use a separate wrapper such as OpenGlide
    ([display-driver.md](display-driver.md#no-3dfx-glide)). Windows 95 OSR2.5 is supported since 0.2.0.
