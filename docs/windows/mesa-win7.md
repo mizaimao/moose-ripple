@@ -2066,3 +2066,85 @@ features) and fails only the clip planes.
 The Direct3D 9 probes pass with it in UTM as before (12 of 12, six of them full-screen). On
 a desktop OpenGL host the common code is what Vista runs already (its 12 pixel tests pass on
 the Intel host); Windows 7 on such a host has not run it yet.
+
+## OpenGL (2026-11-25)
+
+Release 0.4.0 installs no OpenGL driver: a program gets Windows' own software OpenGL 1.1.
+Mesa's OpenGL part for the virgl driver (`viogpu_wgl.dll`, with `libglapi.dll`) was built all
+along and never installed or run. What it took to make it draw and show a frame:
+
+- **The driver's name in the adapter's driver key.** Windows' `opengl32.dll` asks the
+  graphics kernel which OpenGL driver an adapter has; the kernel reads `OpenGLDriverName`,
+  `OpenGLVersion` and `OpenGLFlags` (and the three `...Wow` values for 32-bit programs) from
+  the key where `UserModeDriverName` is. Both INFs set them and copy the two DLLs, 64-bit and
+  32-bit.
+- **A way to the screen that Vista and Windows 7 have.** The upstream code shows a window's
+  frame through a Direct3D 11 device and a DXGI swap chain as Windows 10 has them (flip
+  model, tearing flag, the debug layer), at feature level 10 only. Patch `patches-win7/0043`
+  makes that swap chain one Windows 7 can create. It still needs Direct3D 10 from our
+  driver, which Vista's build and a host without desktop OpenGL do not have. So there is a
+  second way, `d3d9ex_framebuffer.cpp` (ours; patch `patches-virgl/0044` chooses it by
+  default, `RIPPLE_GL_PRESENT=dxgi` asks for the swap chain): a Direct3D 9Ex device on the
+  window, the colour buffers as shareable Direct3D render-target textures which the OpenGL
+  driver opens by their shared handle and draws into, and at a swap a copy of the back
+  buffer's texture to the window's Direct3D back buffer and a present. The frame stays on the
+  GPU.
+- **Opening a shared resource from the OpenGL side.** Our bridge to the kernel
+  (`gdikmt_d3dkmt.c`) had an open path that had never run. `D3DKMTOpenResource` refused it:
+  Direct3D stores a description with a resource it shares (68 bytes here), and the open has
+  to offer room for it.
+- **The swap interval where programs look for it.** Mesa names `WGL_EXT_swap_control` in the
+  WGL extension list only. SDL 1.2, which the Quake III engine games use, looks for it in the
+  GL extension list and nowhere else, as the graphics vendors' drivers name it in both. Not
+  finding it, such a game never asks for a swap interval and keeps the default of 1: a
+  timedemo then runs at the display's 60 frames a second whatever the GPU could do. Patch
+  `patches-virgl/0046` adds the name to the GL list on Windows. (The framebuffer keeps an
+  interval above 0 by waiting for the display's next refresh before it presents; the
+  Direct3D device itself presents at once, because changing its interval would cost a device
+  reset and with it the shared textures.)
+- **Closing what the bridge opened.** The winsys left every shared resource alone when its
+  last reference went, because in the Direct3D driver the runtime owns what it opens. The
+  OpenGL bridge opens for itself, so each window resize left two textures open. Patch
+  `patches-virgl/0045` closes those.
+- **Reading a window's pixels back on Vista.** Vista refuses a CPU lock of the allocation
+  behind a window buffer once the OpenGL side has opened it (`STATUS_INVALID_PARAMETER`;
+  Windows 7 grants it), so `glReadPixels` on the window got zeros while the screen was right.
+  The framebuffer now imports its buffers as framebuffers, and on Vista the driver maps such a
+  resource through a copy, as it maps a multisampled one: a blit of the wanted part to a
+  texture of its own, which locks as usual, and a blit back after a write (patch
+  `patches-vista/0109`).
+
+`RIPPLE_GL_LOG=FILE` makes the framebuffer and the bridge say what they made, what failed
+and, when a window goes, how its presents' time split between waiting for the display, the
+copy and the present.
+
+Results (2026-11-26). `tools/win7-hello/gltest.c` with a frame count draws a triangle, reads
+its pixel back, reads the same pixel off the screen, reads a small texture and the front
+buffer back, does the first two again after resizing its window, and times frames at swap
+interval 0 and 1. The game is OpenArena 0.8.8's timedemo of
+`demo088-test1` in a 1024x768 window (`+timedemo 1 +demo demo088-test1 +set nextdemo quit`,
+3398 frames).
+
+| | Windows' software OpenGL | Mesa on the host GPU |
+| --- | --- | --- |
+| Windows 7 SP1, Linux host with an Intel UHD 630 (desktop OpenGL), installed through the INF | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 4.3 (Compatibility Profile) Mesa 24.3.4 |
+| the triangle read back, and on the screen; again after a resize | red, red | red, red (64-bit and 32-bit) |
+| 30 frames at swap interval 1; 300 at interval 0 | no such extension | 0.5 s; 0.03 s |
+| OpenArena timedemo | 1.9 frames/s (1818 s) | 324 frames/s (10.5 s) |
+| the same, full screen at 1024x768 (a display mode change and back) | | 431 frames/s (7.9 s), right picture |
+| a single-buffered window drawn to and flushed (`tools/win7-hello/glsingle.c`) | | red read back and on the screen (64-bit and 32-bit) |
+| Windows 7 SP1 in UTM (a host that offers OpenGL ES) | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 2.1; the same GL test passes (64-bit and 32-bit) |
+| Windows Vista SP2 on the Linux host, installed through the INF | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 4.3; the same GL test passes (64-bit and 32-bit); OpenArena timedemo in a 640x480 window 258 frames/s |
+| Windows Vista SP2 in UTM, installed through the INF | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 2.1; the same GL test passes (64-bit and 32-bit) |
+
+The timedemos ran next to other guests that were not being measured, so these frame rates are
+floors rather than best cases. On both systems the Direct3D pixel tests of `tools/vista` give the same
+result with this build as before it (Vista 12 of 12; Windows 7 10 of 12, the other two being
+the Vista-only video-processor test). Before patch 0046 the same run gave 60.0 frames a second.
+
+Known gaps:
+
+- **The DXGI swap chain way does not work on Windows 7** (`RIPPLE_GL_PRESENT=dxgi`): the
+  window stays black and the program ends with an access violation. The Direct3D 9Ex way is
+  the default on both systems and keeps the frame on the GPU just the same.
+- Only this one game and the test program have run.
