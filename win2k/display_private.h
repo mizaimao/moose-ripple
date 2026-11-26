@@ -121,5 +121,6 @@ void rb_gl_cpu_unlock(void);
 BOOL rb_gl_cpu_access(DISPLAY *d, const RECTL *rect, ULONG access);
 BOOL rb_gl_cpu_flush(DISPLAY *d);
 BOOL rb_memory_primary_dirty(DISPLAY *d, ULONG page, const RECTL *rect);
+BOOL rb_memory_primary_read(DISPLAY *d, ULONG page);
 void rb_dd_free_views(DISPLAY *display);
 #endif

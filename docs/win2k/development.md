@@ -571,6 +571,58 @@ On Windows 2000 SP4 and XP SP3 under KVM on the Intel host:
 | Direct3D pixel tests on a 1280×1024×32 desktop, HAL and T&L | pass | pass |
 | Quake 0.73 `demo1` in an 800×600 window on that desktop | 103.7 fps | 98.9 fps |
 
+## The desktop in guest memory
+
+`RipplePrimaryInMemory` = 1 (off by default) lifts the 8 MB limit above
+for 32-bit desktops: every 32-bit desktop lives in guest pages instead of
+the framebuffer, and 1920×1080 and 1920×1200 join the mode list
+(`win2k/gpu_primary.c`).
+
+- **Pages and resources.** The miniport allocates 18 MB of pages below
+  4 GB once, mapped cached into system space: two pages (a flip chain's) of
+  the largest mode. They are never freed, because a display driver surface
+  may refer to them after a mode change. Each page backs its own virgl
+  resource (B8G8R8A8, as the frame images), made for each mode. Scanout 0
+  shows the visible page's resource. A transport reset drops the resources
+  and the scanout, and they are made again with the next upload. The desktop
+  counts as a holder of the transport (`rb_gpu_held`), so the idle stops
+  leave it running.
+- **GDI.** The desktop is a device-managed surface whose hooks
+  (`display_gdi.c`) draw into the pages and record the area each call
+  changed. A worker, queued by a kernel timer's DPC 8 ms after the first
+  change, sends the union (`TRANSFER_TO_HOST_3D` from the pages, then
+  `RESOURCE_FLUSH`). A synchronization event orders the transport between
+  that worker and the miniport's requests. A present, a read or a flip
+  sends the pending changes first, so the order of drawing holds.
+- **Presents.** The host copies the frame's rectangle into the page's
+  resource (`RESOURCE_COPY_REGION` in the frame's own context). Outside a
+  flip chain, the same rectangle is transferred back into the pages for
+  GDI, which reads them for screen copies and window moves. Inside a live
+  chain, the copy is only queued and the page is marked stale. A stale page
+  is read back when a program locks it, and the desktop's page is read back
+  when the chain ends. No staging is used, so full-screen frames up to the
+  desktop's size are presented.
+- **Flips.** A flip puts the other page's resource on scanout 0. A flip
+  chain's view of the pages is mapped from their MDL into the program and
+  unmapped in its address space; the driver attaches to the program
+  (`KeStackAttachProcess`) when another process revokes the view. A program
+  that has ended takes the view with it. What a program writes through a
+  lock goes to the host when it unlocks.
+- **Leaving it.** A 16-bit or 8-bit mode, or text mode, unrefs the
+  resources and resets the transport, which returns virtio-vga to VGA.
+  While OpenGL contexts hold the transport, that reset waits until they end.
+
+On XP under KVM on the Intel host, with the host alone:
+
+| | desktop in guest memory | VGA memory |
+| --- | --- | --- |
+| 3DMark 2001 SE (defaults off) | 6565 | 6442 |
+| memtest: 200 full-screen GDI fills | 47 ms | 47 ms |
+| memtest: 50 full-screen scrolls | 16 ms | 16 ms |
+| d9full, flip probe, d3d7probe window, OpenGL presents at 1920×1080 | pass | mode not offered |
+
+Windows 2000 has not been checked with the switch on yet.
+
 ## Experimental GPU presentation for OpenGL
 
 The ordinary renderer downloads a completed frame and passes it to GDI.

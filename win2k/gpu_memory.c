@@ -206,3 +206,66 @@ void rb_unmap_cached(PVOID address, ULONG bytes)
 {
     if (address) MmUnmapIoSpace(address, bytes);
 }
+
+/* A lock for the transport, which the miniport's requests and a deferred upload (below)
+ * share: a synchronization event, so that its holder stays at PASSIVE_LEVEL. */
+PVOID rb_lock_create(void)
+{
+    PKEVENT event = ExAllocatePoolWithTag(NonPagedPool, sizeof(*event), 'kLbR');
+    if (event) KeInitializeEvent(event, SynchronizationEvent, TRUE);
+    return event;
+}
+
+void rb_lock(PVOID lock)
+{
+    if (lock) KeWaitForSingleObject(lock, Executive, KernelMode, FALSE, NULL);
+}
+
+void rb_unlock(PVOID lock)
+{
+    if (lock) KeSetEvent(lock, IO_NO_INCREMENT, FALSE);
+}
+
+/* Work done once, ms after rb_defer_arm, in a system worker thread: a timer's DPC queues it. */
+typedef struct {
+    KTIMER timer;
+    KDPC dpc;
+    WORK_QUEUE_ITEM item;
+    void (*callback)(PVOID);
+    PVOID context;
+} RB_DEFER;
+
+static void defer_work(PVOID context)
+{
+    RB_DEFER *d = context;
+    d->callback(d->context);
+}
+
+static void defer_dpc(PKDPC dpc, PVOID context, PVOID a, PVOID b)
+{
+    RB_DEFER *d = context;
+    (void)dpc; (void)a; (void)b;
+    ExQueueWorkItem(&d->item, DelayedWorkQueue);
+}
+
+PVOID rb_defer_create(void (*callback)(PVOID), PVOID context)
+{
+    RB_DEFER *d = ExAllocatePoolWithTag(NonPagedPool, sizeof(*d), 'dDbR');
+    if (!d) return NULL;
+    RtlZeroMemory(d, sizeof(*d));
+    d->callback = callback;
+    d->context = context;
+    KeInitializeTimer(&d->timer);
+    KeInitializeDpc(&d->dpc, defer_dpc, d);
+    ExInitializeWorkItem(&d->item, defer_work, d);
+    return d;
+}
+
+/* The caller arms it again only after its callback has begun. */
+void rb_defer_arm(PVOID defer, ULONG ms)
+{
+    RB_DEFER *d = defer;
+    LARGE_INTEGER due;
+    due.QuadPart = -(LONGLONG)ms * 10000;
+    if (d) KeSetTimer(&d->timer, due, &d->dpc);
+}

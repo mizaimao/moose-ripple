@@ -155,6 +155,10 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
     VideoPortGetRegistryParameters(a, L"RippleVertexShaders", FALSE, registry_flag, &a->gpu.vertexShaders);
     VideoPortGetRegistryParameters(a, L"RippleD3D9", FALSE, registry_flag, &a->gpu.d3d9Ddi);
     VideoPortGetRegistryParameters(a, L"RipplePrimaryInMemory", FALSE, registry_flag, &a->gpu.primaryInMemory);
+    a->gpu.lock = rb_lock_create();
+    /* GDI's drawing on a desktop in memory is sent by a worker a few milliseconds later. */
+    if (a->gpu.primaryInMemory && a->gpu.lock)
+        a->gpu.memoryDefer = rb_defer_create(rb_memory_primary_deferred, &a->gpu);
     /* The GPU desktop composes into the VGA desktop; the two do not mix. */
     if (a->gpu.primaryInMemory) a->gpu.glEnabled = FALSE;
     a->gpu.ddGpuSurfaces = a->gpu.plainSurfaces || a->gpu.nativeD3D7;
@@ -369,6 +373,7 @@ static VP_STATUS acquire_pages(ADAPTER *a)
     if (!a->chainProcess) return ERROR_ACCESS_DENIED;
     a->chainOwner = owner;
     clear_back_page(a, &info);
+    if (a->gpu.memoryWidth) rb_memory_primary_chain(&a->gpu, TRUE);
     return NO_ERROR;
 }
 
@@ -381,6 +386,7 @@ static VP_STATUS release_pages(ADAPTER *a, BOOLEAN keepView)
         status = select_page(a, 0, &info);
         if (!status) clear_back_page(a, &info);
     }
+    if (!status && a->gpu.memoryWidth) rb_memory_primary_chain(&a->gpu, FALSE);
     if (!status && a->chainProcess) {
         rb_view_close(a->chainProcess);
         a->chainProcess = NULL;
@@ -573,6 +579,8 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
     ADAPTER *a = ext;
     ULONG i;
     VP_STATUS status = ERROR_INSUFFICIENT_BUFFER;
+    /* The transport is shared with the deferred upload of a desktop in memory. */
+    rb_lock(a->gpu.lock);
     r->StatusBlock->Information = 0;
     switch (r->IoControlCode) {
     case IOCTL_RB2K_DD_FLIP_INFO:
@@ -709,6 +717,7 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
         status = ERROR_INVALID_FUNCTION;
     }
     r->StatusBlock->Status = status;
+    rb_unlock(a->gpu.lock);
     return TRUE;
 }
 
