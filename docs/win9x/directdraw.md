@@ -760,7 +760,10 @@ immediates program.local, SAMP[n] texture unit n, the colours and coordinate set
 fragment.color and fragment.texcoord); what ARB lacks is spelled out (`|x|` through ABS, SSG
 through two SLT, KILL_IF is KIL, scalar instructions take one component). Shaders are compiled
 when the runtime creates them; constants c0..c7 go to program.env before a draw; with a shader
-set, each stage's texture is bound on its unit and the stages' operations don't apply.
+set, each stage's texture is bound on its unit and the stages' operations don't apply. The HAL
+keeps eight texture stages: Direct3D 8 is offered four (the runtime sends stage states only
+for the blend stages a device reports; Direct3D 9 gets eight, below), Direct3D 7 still two,
+and fixed-function fog moved to the fifth OpenGL texture unit.
 
 Fog after the shader: the HAL already gives each vertex Direct3D's fog factor f (from the
 specular alpha for vertex fog, from the depth for table fog) as the coordinate 0.25 + 0.5 f of
@@ -771,8 +774,174 @@ start 0.75 and end 0.25, which gives back f.
 `d8pixels sw`, Windows 98 SE with DirectX 8.1 in UTM: 23 of 23 pass (the 8 fixed-function
 cases and 15 pixel shader cases: mov, texture, constants, modifiers, co-issue, cnd, cmp, dp3,
 texcoord, texkill, two textures, fog from the specular alpha, table fog, lit, lit with fog).
-Not yet: more than two textures (t2 and t3; the HAL has two stages), the bump and matrix
-texture instructions of version 1 beyond what d8pixels covers, vertex shaders.
+A shader adding four textures (t0..t3, `d8tex4`) reads back the expected sum. `d3dtest`
+(Direct3D 7) in the same boot fails only the two mipmap LOD-bias checks it fails in UTM with
+the released driver. Not yet: the bump and matrix texture instructions of version 1 beyond
+what d8pixels covers, vertex shaders.
+
+### Direct3D 9 and pixel shader 2.0 (2026-11-26)
+
+The Direct3D 9 runtime drives this HAL through the same Direct3D 8 interface, as on Windows
+2000: it asks for the Direct3D 9 capabilities, gets no answer, and uses the Direct3D 8 ones. It
+announces itself twice, as version 0x902 and then, before asking for those capabilities, as
+0x802, so the HAL keeps the highest version it has been told. For a runtime of version 9 the
+capabilities say pixel shader 2.0 with eight samplers and eight blend stages (the runtime sends
+stage states only for those), and constants c0..c31 go to program.env. Shader model 2 reads up
+to eight texture coordinate sets, which would collide with the fixed-function fog unit, so under
+a shader the fog values go in as OpenGL's fog coordinate (`fragment.fogcoord`) instead.
+Fixed-function stages stay at four for Direct3D 8 and 9 (before the fog unit) and two for
+Direct3D 7.
+
+DirectX 9.0c from December 2006 is the last that installs on Windows 98 (download store:
+`runtimes/dx9c-dec2006`; extract with `/Q /T:dir /C`, then `DXSETUP.EXE /silent`, then
+restart). `d9pixels sw` on Windows 98 SE in UTM: 40 of 40 pass, the 24 fixed-function, version 1
+and render-to-texture cases and all 10 shader model 2 cases (texture, arithmetic, texkill, pow,
+rcp, rsq, nrm, dp2add, eight coordinate sets, blend). Untimed.
+
+DXT textures (with the Direct3D 8 interface on): DirectDraw is given the FourCC codes DXT1 to DXT5
+(the 16-bit driver points HALINFO at them, the DLL says how many), CreateSurface asks DirectDraw
+for a block of the bytes a DXT surface's 4x4 blocks take (`DDHAL_PLEASEALLOC_BLOCKSIZE`; there
+is no pitch to size it by), Lock offsets count in blocks, texture blits copy rows of blocks, and
+the blocks go to the host as they are (`glCompressedTexImage2D`, DXT2 and DXT4 as DXT3 and DXT5).
+On a host without S3TC (UTM) Mesa decodes them (see mesa.md). `d9pixels sw`: 43 of 43, the
+three DXT cases (DXT1, DXT3 and DXT5 alpha) included.
+
+Cube maps (with the Direct3D 8 interface on), sampled by pixel shaders as on Windows 2000: the
+HAL's copy of a cube map's records holds all six faces with their levels, texture blits copy
+every face, and a version 1 shader gets a program per set of stages holding cube maps (shader
+model 2 declares its samplers). Two things the Windows 98 runtimes need besides D3DCAPS8: the
+Direct3D 7-level texture caps must list cube maps, and DirectDraw must be told through
+`GUID_DDMoreSurfaceCaps` that video memory takes them (`DDSCAPS2_CUBEMAP`); without either the
+runtime keeps a managed cube map in system memory only and draws nothing from it. `d9pixels
+sw`: 45 of 45, both cube cases (shader model 2 and version 1) included.
+
+Volume textures likewise: each level a surface with its slices one after another, uploaded to
+OpenGL's 3D target, copied by VOLUMEBLT box by box, and version 1 shader variants per set of
+volume stages. CreateSurface asks DirectDraw for a block of the bytes a level's slices take
+(rows tight), and once DirectDraw has allocated it, CreateSurfaceEx puts the slice pitch into the
+field that held the block height: the Direct3D 9 runtime fills a managed volume through Lock and
+reads its slice pitch there (`lSlicePitch` in DirectX 8 headers, `dwBlockSizeY` in the Me DDK).
+With 1 left there, its slices landed a byte apart; changing it inside Lock froze Windows. Also
+needed: the volume bit in the Direct3D 7-level texture caps and `DDSCAPS2_VOLUME` in
+`GUID_DDMoreSurfaceCaps`. `d9pixels sw`: 47 of 47, both volume cases included; `d3dtest`
+(Direct3D 7) unchanged.
+
+DXT volumes: sized in rows of 4x4 blocks, slice after slice, and decoded by the HAL to 32-bit
+texels at upload (OpenGL has no compressed 3D textures of this kind). `d9pixels` case
+`ps1_volume_dxt1` passes on the rig.
+
+Bump maps: V8U8 and Q8W8V8U8 textures, which the runtime describes as `DDPF_BUMPDUDV` with 16 and
+32 bits, go to OpenGL as `RG8_SNORM` (blue swizzled to 1: Direct3D reads V8U8 as du, dv, 1, 1)
+and `RGBA8_SNORM`. A version 1 shader with `texbem` or `texbeml` reads each stage's bump matrix
+and luminance scale and offset from c8..c15 (the Windows 2000 translator's layout), loaded from
+the stage states before each draw. 3DMark 2001 SE needs Q8W8V8U8 for Nature ("device does not
+support bump normal maps" with V8U8 alone). `d9pixels`: 49 of 49 on the rig, `ps_texbem`
+included.
+
+### Vertex processing on the GPU (2026-11-26, `D3D8` = `"2"`)
+
+With the registry value at `"2"` the Direct3D 8 and 9 devices report hardware transform and
+lighting (`D3DDEVCAPS_HWTRANSFORMANDLIGHT`, eight lights, Direct3D 7's vertex processing caps;
+no vertex shaders yet, so a device that wants them still gets the runtime's). The runtime then
+sends untransformed vertices, with the world, view and projection matrices (`SETTRANSFORM`,
+`MULTIPLYTRANSFORM`), the lights (`CREATELIGHT`, `SETLIGHT`), the material and the depth range,
+and the HAL draws them through an ARB vertex program made from that state (`tnl_arb.c`): the
+full transform, with OpenGL's y flip, z range and Direct3D's pixel centres folded into its matrix;
+Direct3D 7 lighting (directional, point and spot lights, attenuation, range, material sources,
+local viewer) with `LIT` for the specular term; vertex fog from view depth or range, table fog
+from the depth buffer's z; texture coordinates from the vertex or made in view space (normal,
+position, reflection vector), through the texture matrices, projected or not. Programs are made
+per state key and kept (16 a context); their state sits in `program.env`, reloaded only where it
+changed. While such programs draw, OpenGL's viewport and depth range are Direct3D's; transformed
+vertices get the whole target and 0..1 back. A check on the build host compiles 266 key
+variants with Mesa's parser. In UTM (DirectX 9.0c): `d9pixels` 42 of 42 and `d8pixels` 23 of 23
+with `vertex_processing=hardware`, `d8pixels`' lit case included; d9pixels' vertex shader and
+luminance cases report "not offered" there.
+
+Fixed-function stages also sample cube maps and volumes now: the unit enables OpenGL's cube map
+or 3D target for such a texture (OpenGL prefers them to 2D); before, the unit sampled whatever 2D
+texture it held.
+
+Vertex shaders, also with `"2"`: vs_1_1 for Direct3D 8 and vs_2_0 without flow control when the
+runtime has announced version 9 (`vs_arb.c`). ARB vertex programs were modelled on Direct3D 8's
+vertex shaders, so most instructions keep their names. The Direct3D 8 declaration that comes with
+each shader (one stream: registers, types and skips) becomes generic attribute arrays: floats as
+floats, D3DCOLOR as normalised bytes swapped from BGRA in the program, UBYTE4 and shorts as
+integers. c0..c255 live in `program.env`, with the shader's `def` constants loaded over them;
+`program.env` is shared with the fixed-function programs, so the HAL tracks whose state it holds.
+a0 is kept as whole numbers in a temporary and loaded with ARL before each relative read (vs_2_0's
+a0 has four components). ARB lacks |x|, `_sat`, `lrp`, `nrm`, `sgn` and `mova`'s rounding to the
+nearest, so those are spelt out; `sincos` and flow control are refused. oPos becomes OpenGL's clip
+position the way the fixed-function programs make it; oFog (or table fog from z / w) goes to the
+fog unit or the fog coordinate. Test shaders using every vs_1_1 instruction and the vs_2_0
+additions compile with Mesa on the build host.
+
+Also: the runtime version that picks the shader caps is kept per process. In the DLL's shared
+data, a Direct3D 8 program run after a Direct3D 9 one in the same boot was offered shader model 2.
+
+On the rig (VM 230, DirectX 9.0c, `"2"`, untimed): `d9pixels` 48 of 49 with
+`vertex_processing=hardware`, its five vs_2_0 cases on the GPU included; `vs1_inputs` fails
+because the runtime refuses that case's declaration (UBYTE4 and SHORT2 inputs) when vertices are
+processed in hardware, before the HAL sees it (open). `d8pixels` 23 of 23, offered vs_1_1 and
+ps_1_3 after a Direct3D 9 program in the same boot. 3DMark 2001 SE picks "D3D Hardware T&L"
+itself and runs to its score: **12066 3DMarks** at 1024x768x32. Dragothic 139.8 and 35.9 fps,
+Lobby 298.3 and 69.3, Nature 119.5, High Polygon Count 52.9 and 49.1 MTriangles/s (40.0 and 20.3
+with the runtime's vertex processing), Vertex Shader 172.1 fps, Pixel Shader 673.7, Environment
+Bump Mapping 735.3, DOT3 673.9, Advanced Pixel Shader 99.9, Point Sprites 4.2 MSprites/s, fill
+rate 10066.3 and 14673.8 MTexels/s (the Car Chase lines did not scroll into view in the
+results dialog). Pictures checked through VNC; Car Chase's ground was dark until lights got
+slots by Direct3D's index (3DMark's indices go far beyond 32), and its vertex shaders are vs_1_0.
+
+**Timed baseline** (2026-11-26 09:40 EST, rig VM 230 alone, Windows 98 SE, DirectX 9.0c,
+`D3D8` = `"2"`, the PR #209 build with the FOURCC fix, GPU minimum clock 1200 MHz with the
+performance governor, no trace, one run, default settings 1024x768x32 "D3D Hardware T&L"):
+**12134 3DMarks**. Car Chase 221.5 / 48.7 fps, Dragothic 140.0 / 35.6, Lobby 299.7 / 69.8,
+Nature 122.1, fill rate 9986.6 / 14558.6 MTexels/s, High Polygon Count 53.6 / 49.0 MTriangles/s,
+EMBM 734.3, DOT3 681.1, Vertex Shader 170.0, Pixel Shader 671.1, Advanced Pixel Shader 98.3,
+Point Sprites 4.2 MSprites/s. The number later 9x speed work has to beat. Note Dragothic high
+detail: 82.5 fps with the runtime's vertex processing, 35.6 with the GPU's.
+
+**First speed changes** (same rig, VM and settings, one timed run each, each on top of the one
+before; 2026-11-26 10:19 to 11:26 EST):
+
+| Change | 3DMarks | Car Chase high | Dragothic high | Lobby high | Vertex Shader | Adv. Pixel Shader |
+|---|---|---|---|---|---|---|
+| Baseline | 12134 | 48.7 | 35.6 | 69.8 | 170.0 | 98.3 |
+| 1: fixed-function state above c0..c95 | 12220 | 49.5 | 36.0 | 70.2 | 183.7 | 99.7 |
+| A: a texture target keeps the flip chain | 12469 | 59.9 | 35.8 | 73.4 | 183.0 | 198.1 |
+| B: textures rendered into stay on the GPU | **14716** | 75.5 | 54.9 | 150.3 | 183.9 | 605.9 |
+
+The other tests stayed within a few percent. A per-draw trace of Dragothic found the cause: at
+high detail it renders into ten 128x128 textures a frame, and each switch away from the flip
+chain read both 3 MB chain pages back into memory (fixed by A), while each rendered texture was
+read back and uploaded again (fixed by B: `glCopyTexSubImage2D` on the GPU, memory only when the
+program locks the surface). A context now keeps 16 colour buffers so a frame's targets fit.
+Pictures checked through VNC after B: Car Chase, Dragothic and Lobby at high detail and the
+Advanced Pixel Shader lake (its reflections are such textures) look as before. Dragothic high is
+still below the 82.5 fps of the runtime's own vertex processing.
+
+Advanced Pixel Shader's white boat and jetty: a trace with each draw's state (new trace lines)
+showed nine draws a frame with no texture on the stage their shader samples, and about one
+refused CanCreateSurface a frame. The refused format was FOURCC 63: for mipmapped Q8W8V8U8
+textures the runtime names the format by its D3DFORMAT number instead of `DDPF_BUMPDUDV`. Such
+surfaces have no bit count, so CreateSurface sizes them itself, and Lock and texture blits take
+the texel size from the format. Since then the boat and jetty are shaded dark grey in the dusk
+scene and the water shows its ripples; whether their flat look is right needs a reference
+picture.
+
+### 3DMark 2001 SE (2026-11-26, rig VM 230)
+
+Windows 98 SE with DirectX 9.0c, the Direct3D 8 interface on, 1024x768 32-bit, the runtime's
+software vertex processing; one untimed run per test, pictures checked through VNC. Car Chase
+192.2 and 55.7 fps (low and high detail), Dragothic 223.0 and 82.5, Lobby 320.4 and 71.3, High
+Polygon Count 40.0 and 20.3 MTriangles/s (one and eight lights), Vertex Shader 165.2 fps. With
+the bump map formats: Nature 145.6 fps, Environment Bump Mapping 558.4 fps, DOT3 Bump Mapping
+691.7, Pixel Shader 660.6, Advanced Pixel Shader 66.8, Point Sprites 8.6 MSprites/s; the fill-rate
+tests run too. All pictures look right except Advanced Pixel Shader: its boat and jetty are plain
+white and the water has no ripples (no shader was refused and no draw skipped; next to look at).
+Once, the multi-texturing fill-rate test made 3DMark quit without a message, on a second
+benchmark run in the same process after the game tests; two later fill-rate runs, one of them the
+second in its process, finished. Not explained.
 
 
 ## Changing a driver in the test VM
