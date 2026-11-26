@@ -760,7 +760,10 @@ immediates program.local, SAMP[n] texture unit n, the colours and coordinate set
 fragment.color and fragment.texcoord); what ARB lacks is spelled out (`|x|` through ABS, SSG
 through two SLT, KILL_IF is KIL, scalar instructions take one component). Shaders are compiled
 when the runtime creates them; constants c0..c7 go to program.env before a draw; with a shader
-set, each stage's texture is bound on its unit and the stages' operations don't apply.
+set, each stage's texture is bound on its unit and the stages' operations don't apply. The HAL
+keeps four texture stages: Direct3D 8 is offered all four (the runtime sends stage states only
+for the blend stages a device reports), Direct3D 7 still two, and fixed-function fog moved to
+the fifth OpenGL texture unit.
 
 Fog after the shader: the HAL already gives each vertex Direct3D's fog factor f (from the
 specular alpha for vertex fog, from the depth for table fog) as the coordinate 0.25 + 0.5 f of
