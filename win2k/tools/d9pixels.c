@@ -1141,6 +1141,51 @@ static void cube_cases(int only, BOOL version2)
 /* ---- luminance and alpha formats ----
  * 47: an L8 texture of 0x80 over the left half and an A8L8 one of 0x40
  * (alpha 0xff) over the right, by a fixed-function stage. */
+/* 63: a 2x2 L16 texture, white on the left and half grey (0x8000) on the right; and a 128x128x128 L16
+ * volume texture, which 3DMark03 makes for its procedural volumes. */
+static void l16_case(int only)
+{
+    static const SAMPLE s[] = { { 48, 64, 0xffffff }, { 80, 64, 0x808080 }, { 8, 8, CLEAR_COLOR } };
+    IDirect3DTexture9 *t = NULL;
+    IDirect3DVolumeTexture9 *vol = NULL;
+    D3DLOCKED_RECT r;
+    TLTEXVERTEX v[4] = {
+        { 32, 32, 0.5f, 1, 0xffffffff, 0, 0 }, { 96, 32, 0.5f, 1, 0xffffffff, 1, 0 },
+        { 32, 96, 0.5f, 1, 0xffffffff, 0, 1 }, { 96, 96, 0.5f, 1, 0xffffffff, 1, 1 } };
+    HRESULT hr;
+    int y;
+    if (only && only != 63) return;
+    if (FAILED(IDirect3D9_CheckDeviceFormat(d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, D3DFMT_X8R8G8B8, 0, D3DRTYPE_TEXTURE, D3DFMT_L16))) {
+        printf("D9PIX L16 textures not offered\n");
+        return;
+    }
+    hr = IDirect3DDevice9_CreateVolumeTexture(device, 128, 128, 128, 1, 0, D3DFMT_L16, D3DPOOL_MANAGED, &vol, NULL);
+    printf("D9PIX case=l16 volume128 hr=%08lx\n", (unsigned long)hr);
+    if (vol) IDirect3DVolumeTexture9_Release(vol);
+    if (FAILED(hr = IDirect3DDevice9_CreateTexture(device, 2, 2, 1, 0, D3DFMT_L16, D3DPOOL_MANAGED, &t, NULL))) {
+        fail_hr("l16", "create", hr);
+        return;
+    }
+    if (SUCCEEDED(IDirect3DTexture9_LockRect(t, 0, &r, NULL, 0))) {
+        for (y = 0; y < 2; ++y) { USHORT *row = (USHORT *)((BYTE *)r.pBits + y * r.Pitch); row[0] = 0xffff; row[1] = 0x8000; }
+        IDirect3DTexture9_UnlockRect(t, 0);
+    }
+    if (begin("l16")) {
+        IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)t);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetFVF(device, TLTEXFVF);
+        hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+        if (FAILED(hr)) { fail_hr("l16", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("l16", s, 3);
+    }
+    IDirect3DDevice9_SetTexture(device, 0, NULL);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    IDirect3DTexture9_Release(t);
+}
+
 static void luminance_case(int only)
 {
     typedef struct { float x, y, z, rhw; DWORD diffuse; float u, v; } TV;
@@ -1530,6 +1575,7 @@ int main(int argc, char **argv)
         cube_cases(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (!only || only >= 43)) rt_cases(only);
     luminance_case(only);
+    l16_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
     colorwrite_case(only);
     dot3_case(only, (caps.TextureOpCaps & D3DTEXOPCAPS_DOTPRODUCT3) != 0);

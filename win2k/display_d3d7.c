@@ -280,6 +280,7 @@ ULONG rb_d7_texture_format(const DDPIXELFORMAT *f, ULONG desktopBits)
         case RbFmtA4R4G4B4: return TexArgb4444;
         case RbFmtL8: return TexL8;
         case RbFmtA8L8: return TexA8L8;
+        case RbFmtL16: return TexL16;
         case RbFmtA8: return TexA8;
         case RbFmtV8U8: return TexV8U8;
         case RbFmtQ8W8V8U8: return TexQ8W8V8U8;
@@ -292,6 +293,7 @@ ULONG rb_d7_texture_format(const DDPIXELFORMAT *f, ULONG desktopBits)
     /* Luminance and alpha-only formats, as the runtime describes L8, A8L8 and A8
      * (the bit count and masks share their places with the RGB ones). */
     if (f->dwFlags == 0x00020000 && f->dwRGBBitCount == 8 && f->dwRBitMask == 0xff) return TexL8;   /* DDPF_LUMINANCE */
+    if (f->dwFlags == 0x00020000 && f->dwRGBBitCount == 16 && f->dwRBitMask == 0xffff) return TexL16;
     if (f->dwFlags == (0x00020000 | DDPF_ALPHAPIXELS) && f->dwRGBBitCount == 16 && f->dwRBitMask == 0xff &&
         f->dwRGBAlphaBitMask == 0xff00) return TexA8L8;
     if (f->dwFlags == 0x00000002 && f->dwRGBBitCount == 8) return TexA8;   /* DDPF_ALPHA */
@@ -955,6 +957,7 @@ static ULONG convert(ULONG format, ULONG p)
                expand((p >> 4) & 15, 4) << 8 | expand(p & 15, 4);
     /* Luminance is grey; an alpha-only texture samples as black with alpha. */
     case TexL8: return 0xff000000 | (p & 255) * 0x010101;
+    case TexL16: return 0xff000000 | ((p >> 8) & 255) * 0x010101;   /* the top eight bits */
     case TexA8L8: return (p >> 8) << 24 | (p & 255) * 0x010101;
     case TexA8: return (p & 255) << 24;
     }
@@ -3523,6 +3526,7 @@ static const ULONG d8Formats[][2] = {
     { RbFmtDxt5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     /* converted to 32 bits on upload */
     { RbFmtL8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtL16, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     { RbFmtA8L8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     { RbFmtA8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     /* bump maps, sampled as signed texels */
