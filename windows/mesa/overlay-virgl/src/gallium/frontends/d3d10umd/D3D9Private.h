@@ -81,10 +81,8 @@ D3D9CanExpandPointsWithGs(struct pipe_screen *screen)
 static inline uint8_t
 D3D9FragmentClipPlaneMask(struct pipe_screen *screen, uint8_t mask)
 {
-#ifdef RIPPLE_VISTA
    if (mask && screen->get_param(screen, PIPE_CAP_GLSL_FEATURE_LEVEL) < 150)
       return mask;
-#endif
    return 0;
 }
 
