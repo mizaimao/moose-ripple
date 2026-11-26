@@ -292,7 +292,7 @@ static void debug_events(HANDLE process, DWORD ms, BOOL *exited)
 {
     static int exceptions, strings, loads;
     DWORD until = GetTickCount() + ms;
-    char line[300], place[96];
+    char line[460], place[96];
     for (;;) {
         DEBUG_EVENT e;
         DWORD now = GetTickCount(), action = DBG_CONTINUE;
@@ -311,8 +311,8 @@ static void debug_events(HANDLE process, DWORD ms, BOOL *exited)
             }
             break;
         case OUTPUT_DEBUG_STRING_EVENT:
-            if (++strings <= 100 && !e.u.DebugString.fUnicode) {
-                char text[200];
+            if (++strings <= 2000 && !e.u.DebugString.fUnicode) {   /* a debug runtime says a lot */
+                char text[400];
                 SIZE_T got = 0;
                 DWORD n = e.u.DebugString.nDebugStringLength < sizeof(text) ? e.u.DebugString.nDebugStringLength : sizeof(text) - 1;
                 char *p;
