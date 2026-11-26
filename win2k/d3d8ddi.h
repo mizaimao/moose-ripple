@@ -24,6 +24,9 @@ typedef struct { ULONG reserved, magic, type, expectedSize; } RB_GDI2_HEADER;
 typedef struct { RB_GDI2_HEADER gdi2; ULONG count, reserved; } RB_GDI2_FORMAT_COUNT;
 typedef struct { RB_GDI2_HEADER gdi2; ULONG index; DDPIXELFORMAT format; } RB_GDI2_FORMAT;
 typedef struct { RB_GDI2_HEADER gdi2; ULONG version, reserved; } RB_GDI2_DX_VERSION;
+/* D3DGDI2_TYPE_GETDDIVERSION: the runtime's DirectX version in, the driver interface out. */
+typedef struct { RB_GDI2_HEADER gdi2; ULONG dxVersion, ddiVersion; } RB_GDI2_DDI_VERSION;
+#define RB_DX9_DDI_VERSION 4
 
 /* A format-list entry: dwFlags RB_DDPF_D3DFORMAT, dwFourCC the D3DFORMAT,
  * and the operations in the word that holds dwRBitMask for RGB formats. */
@@ -69,10 +72,35 @@ typedef struct {
 typedef char rb_d3dcaps9_size[sizeof(RB_D3DCAPS9) == 76 * 4 ? 1 : -1];
 #define RB_D3DCAPS2_CANRENDERWINDOWED 0x00080000UL
 #define RB_D3DDTCAPS_UBYTE4 0x00000001UL
+#define RB_D3DPMISCCAPS_LINEPATTERNREP 0x00000004UL
+#define RB_D3DPMISCCAPS_FOGINFVF 0x00002000UL
+#define RB_D3DPRASTERCAPS_SCISSORTEST 0x01000000UL
+#define RB_D3DCAPS2_DYNAMICTEXTURES 0x20000000UL
+#define RB_D3DVTXPCAPS_NO_VSDT_UBYTE4 0x00000080UL
+#define RB_D3DDEVCAPS2_STREAMOFFSET 0x00000001UL
 #define RB_D3DPTFILTERCAPS_MINFPOINT 0x00000100UL
 #define RB_D3DPTFILTERCAPS_MAGFPOINT 0x01000000UL
 #define RB_D3DPRESENT_INTERVAL_ONE 0x00000001UL
 #define RB_D3DPRESENT_INTERVAL_IMMEDIATE 0x80000000UL
+
+/* D3DVERTEXELEMENT9, and the Direct3D 9 commands this driver reads. */
+typedef struct { USHORT stream, offset; UCHAR type, method, usage, usageIndex; } RB_VERTEX_ELEMENT9;
+enum {
+    RbDp2CreateVertexShaderDecl = 71, RbDp2DeleteVertexShaderDecl = 72, RbDp2SetVertexShaderDecl = 73,
+    RbDp2CreateVertexShaderFunc = 74, RbDp2DeleteVertexShaderFunc = 75, RbDp2SetVertexShaderFunc = 76,
+    RbDp2SetVertexShaderConstI = 77, RbDp2SetScissorRect = 79, RbDp2SetStreamSource2 = 80, RbDp2Blt = 81,
+    RbDp2ColorFill = 82, RbDp2SetVertexShaderConstB = 83, RbDp2CreateQuery = 84, RbDp2SetRenderTarget2 = 85,
+    RbDp2SetDepthStencil = 86, RbDp2GenerateMipSubLevels = 89, RbDp2DeleteQuery = 90, RbDp2IssueQuery = 91,
+    RbDp2SetPixelShaderConstI = 93, RbDp2SetPixelShaderConstB = 94, RbDp2SetStreamSourceFreq = 95,
+    RbDp2SurfaceBlt = 96
+};
+typedef struct { ULONG handle, count; } RB_DP2_CREATE_DECL;      /* elements follow */
+typedef struct { ULONG handle, bytes; } RB_DP2_CREATE_FUNC;      /* code follows */
+typedef struct { ULONG stream, handle, offset, stride; } RB_DP2_STREAM_SOURCE2;
+typedef struct { ULONG index, handle; } RB_DP2_RENDER_TARGET2;
+/* BLT and SURFACEBLT (StretchRect, UpdateSurface), and COLORFILL. */
+typedef struct { ULONG source; RECTL sourceRect; ULONG sourceLevel; ULONG dest; RECTL destRect; ULONG destLevel; ULONG flags; } RB_DP2_BLT9;
+typedef struct { ULONG surface; RECTL rect; ULONG color; } RB_DP2_COLOR_FILL;
 
 /* DrawPrimitives2 commands added in DirectX 8. */
 enum {

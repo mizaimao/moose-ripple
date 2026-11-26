@@ -19,6 +19,7 @@
 #define RB2K_DD_D3D8 32             /* the Direct3D 8 driver interface */
 #define RB2K_DD_VERTEX_SHADERS 64   /* vertex shaders on the host GPU */
 #define RB2K_DD_Z24S8 128           /* depth buffers of 24 bits with 8 of stencil */
+#define RB2K_DD_D3D9_DDI 256        /* the Direct3D 9 driver interface (with vertex shaders) */
 #define RB2K_DD_IOCTL(n) CTL_CODE(FILE_DEVICE_VIDEO,n,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_RB2K_DD_QUERY   RB2K_DD_IOCTL(0x901)
 #define IOCTL_RB2K_DD_CREATE  RB2K_DD_IOCTL(0x902)
