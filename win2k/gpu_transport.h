@@ -88,7 +88,7 @@ enum { RB2K_D7_FLIGHT_SLOTS = 2 };
 typedef struct {
     RB2K_IMAGE *image;
     RB2K_D3D7_COMPLETED work;
-    ULONG fence;
+    ULONG fence;   /* zero: an unfenced packet, done once the host has read it */
 } RB2K_D7_SUBMISSION;
 
 /* Device-readable data chained after a request (at most RB2K_GPU_MAX_EXTENTS). */
@@ -103,7 +103,10 @@ typedef struct {
 #define RB2K_RVD_SEGMENTS 48
 #define RB2K_INLINE_PACKET_BYTES 2048
 /* Native Direct3D 7 command words gathered into one virgl submission. */
-#define RB2K_D7_FRAME_WORDS ((64UL * 1024 - 128) / sizeof(ULONG))
+/* A scene packet: 256 KB, as large as Mesa's own virgl command buffers. Each
+ * submit costs a fence, a host batch and a round trip; with draws carrying their
+ * vertices as constants, 64 KB held only about ten draws. */
+#define RB2K_D7_FRAME_WORDS ((256UL * 1024 - 128) / sizeof(ULONG))
 
 typedef struct {
     PVOID extension;
@@ -136,7 +139,7 @@ typedef struct {
     } d7Frame;
     RB2K_D3D7_COMPLETED d7Completed;
     RB2K_D7_SUBMISSION d7Submitted[RB2K_D7_FLIGHT_SLOTS];
-    RB2K_DMA_SEGMENT d7Packets;
+    RB2K_DMA_SEGMENT d7Packets[RB2K_D7_FLIGHT_SLOTS];   /* one buffer per packet slot */
     RB2K_D7_FLIGHT d7Flight;
     ULONG d7Next;
     BOOLEAN d7WaitCurrent;
@@ -178,7 +181,8 @@ VP_STATUS rb_gpu_submit(RB2K_GPU *gpu, const void *request, ULONG bytes,
 VP_STATUS rb_gpu_submit_extents(RB2K_GPU *gpu, const void *request, ULONG bytes,
                                 const RB2K_GPU_EXTENT *extents, ULONG count,
                                 void *reply, ULONG capacity, PULONG received);
-VP_STATUS rb_gpu_submit_scene(RB2K_GPU *gpu, const ULONG *words, ULONG count, const RB2K_D3D7_COMPLETED *work);
+VP_STATUS rb_gpu_submit_scene(RB2K_GPU *gpu, const ULONG *words, ULONG count, const RB2K_D3D7_COMPLETED *work,
+                              BOOLEAN fenced);
 VP_STATUS rb_gpu_poll_scenes(RB2K_GPU *gpu);
 VP_STATUS rb_gpu_wait_image(RB2K_GPU *gpu, const RB2K_IMAGE *image);
 VP_STATUS rb_gpu_reserve_staging(RB2K_GPU *gpu, ULONG bytes);

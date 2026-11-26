@@ -165,6 +165,14 @@ int main(void)
                        "fence_us=%I64d\n", names[i], p.op[i].calls, p.op[i].submits, p.op[i].bytes, p.op[i].failed,
                        p.op[i].ticks * 1000000 / p.frequency, p.op[i].queueTicks * 1000000 / p.frequency,
                        p.op[i].fenceTicks * 1000000 / p.frequency);
+        if (ExtEscape(dc, RB2K_D3D7_PROFILE_ESCAPE, 0, NULL, sizeof(p), (LPSTR)&p) > 0) {
+            static const char *const kinds[RB2K_CACHE_KINDS] = { "dsa", "blend", "shader", "sampler", "sampler1",
+                                                                 "vs_program", "ps_shader", "ps_sampler" };
+            for (i = 0; i < RB2K_CACHE_KINDS; ++i)
+                printf("D7CACHE kind=%s hits=%lu new=%lu replaced=%lu\n", kinds[i], p.caches[i][0], p.caches[i][1],
+                       p.caches[i][2]);
+            printf("D7SHADERS made=%lu text_bytes=%lu\n", p.shaders, p.shaderBytes);
+        }
         if (ExtEscape(dc, RB2K_D3D7_PROFILE_ESCAPE, 0, NULL, sizeof(p), (LPSTR)&p) > 0)
             printf("D7REFUSED site=%lu status=%lu stage=%lu count=%lu first_site=%lu first_status=%lu first_stage=%lu\n",
                    p.failSite, p.failStatus, p.failStage, p.failCount, p.firstSite, p.firstStatus, p.firstStage);

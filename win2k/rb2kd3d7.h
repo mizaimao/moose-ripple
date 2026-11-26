@@ -12,6 +12,9 @@ typedef struct {
 /* A present's fenceTicks is its readback from the host; the rest is the copy
  * to the screen. */
 enum { RB2K_D7_CLEAR, RB2K_D7_DRAW, RB2K_D7_READ, RB2K_D7_UPLOAD, RB2K_D7_FLUSH, RB2K_D7_PRESENT, RB2K_D7_OPS };
+/* The miniport's host object caches per render target, by kind. */
+enum { RB2K_CACHE_DSA, RB2K_CACHE_BLEND, RB2K_CACHE_SHADER, RB2K_CACHE_SAMPLER, RB2K_CACHE_SAMPLER1,
+       RB2K_CACHE_VS_PROGRAM, RB2K_CACHE_PS_SHADER, RB2K_CACHE_PS_SAMPLER, RB2K_CACHE_KINDS };
 typedef struct {
     LONGLONG ticks, queueTicks, fenceTicks;
     ULONG calls, submits, fences, bytes, failed;
@@ -29,6 +32,10 @@ typedef struct {
      * stage and status), with the number of each. */
     ULONG requestFailures, firstRequest, firstRequestStatus, firstRequestId;
     ULONG commandFailures, firstCommandStage, firstCommandStatus;
+    /* Cache lookups by kind: found, a free handle, an old entry replaced (its
+     * host object destroyed and made again); host shaders made and their text. */
+    ULONG caches[RB2K_CACHE_KINDS][3];
+    ULONG shaders, shaderBytes;
 } RB2K_D7_PROFILE;
 enum { RB2K_D7_SITE_RECORD = 1, RB2K_D7_SITE_PROGRAM, RB2K_D7_SITE_DEPTH, RB2K_D7_SITE_TEXTURE,
        RB2K_D7_SITE_VERTEX, RB2K_D7_SITE_COMMAND, RB2K_D7_SITE_STEP = 16 };   /* STEP + step in the draw */

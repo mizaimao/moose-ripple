@@ -2187,6 +2187,39 @@ On XP SP3 under KVM on the second Intel UHD 630 host, case 53 passes and
 `d9pixels` passes 43 of 43. 3DMark 2001 SE's DOT3 Bump Mapping test, which
 reported "Not supported by hardware", now runs.
 
+## Speed: scene packets
+
+How a Direct3D frame's time is spent, measured on 3DMark 2001 SE (XP SP3 under
+KVM on an Intel UHD 630 host, the host otherwise idle). `d7draw` prints the
+display driver's time (`D7TIME`), the miniport's per operation (`D7PROFILE`:
+calls, host submits, queueing and fence waits) and the miniport's host
+object caches (`D7CACHE`: hits, new entries, entries replaced; `D7SHADERS`:
+host shaders made). `D7PROFILE`'s byte counts wrap at 4 GB.
+
+Baseline, a 7.7-minute benchmark run: the caches never replaced an entry
+(268 fragment shaders made in all), so host shaders were not remade per
+draw. The guest spent 295 s in DrawPrimitives2, 238 s of it in draw requests
+to the miniport, and the miniport made 1.95 million host submits. A scene
+packet held 64 KB, about ten draws, since a draw carries its vertices as
+constants (16 words a transformed vertex). Each submit costs a fence, a
+batch in the host's GPU driver and a round trip, with two packets in flight.
+On the host, QEMU's virtual processor thread ran at 60% (mostly VM exits)
+and its drawing thread at 41% (Mesa 24%, copies in the C library 20%, the
+kernel and i915 33%): the two take turns waiting.
+
+Scene packets are now 256 KB (`RB2K_D7_FRAME_WORDS`), as large as Mesa's own
+virgl command buffers, each slot in its own common buffer: one 512 KB block
+of contiguous memory for both slots was refused at the first scene. 3DMark
+2001 SE went from 3696 to 5122 (timed, host alone); submits during draws
+from 1.95 million to 648 thousand, and the same fixed-length tests drew 721
+million primitives against 515 million.
+
+Only a frame's last packet carries a fence now. QEMU answers a fenced packet
+only once the host GPU has finished it, noticed on a 10 ms timer or a
+notification; a packet slot needs only that QEMU has read the packet, which
+an unfenced packet reports at once. 3DMark 2001 SE went from 5122 to 5446
+(timed, host alone), and fence waits during draws from 11.6 s to 0.01 s.
+Presents still wait 58 s on their fences in a run: the next lead.
 ## Texture eviction
 
 The miniport keeps Direct3D textures on the host within a texel budget
