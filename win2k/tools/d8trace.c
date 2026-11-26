@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <d3d8.h>
 
+static HMODULE self;
 static HANDLE logFile = INVALID_HANDLE_VALUE;
 static HRESULT (WINAPI *realCheckFormat)(IDirect3D8 *, UINT, D3DDEVTYPE, D3DFORMAT, DWORD, D3DRESOURCETYPE, D3DFORMAT);
 static HRESULT (WINAPI *realCreateDevice)(IDirect3D8 *, UINT, D3DDEVTYPE, HWND, DWORD, D3DPRESENT_PARAMETERS *,
@@ -37,6 +38,22 @@ static void format_name(char *out, D3DFORMAT f)
     if (v > 255 && ((v & 0xff) >= ' ' && (v >> 24) >= ' '))
         wsprintfA(out, "'%c%c%c%c'", (int)(v & 0xff), (int)((v >> 8) & 0xff), (int)((v >> 16) & 0xff), (int)(v >> 24));
     else wsprintfA(out, "%lu", v);
+}
+
+BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID reserved)
+{
+    (void)reserved;
+    if (reason == DLL_PROCESS_ATTACH) self = module;
+    return TRUE;
+}
+
+/* The hooks stay in the runtime's vtables: a program that frees this DLL after
+ * probing it must not unload them (one reference more, never released). */
+static void pin(void)
+{
+    static int pinned;
+    char path[MAX_PATH];
+    if (!pinned && self && GetModuleFileNameA(self, path, sizeof(path))) pinned = LoadLibraryA(path) != NULL;
 }
 
 static void patch(void **slot, void *hook, void **real)
@@ -125,6 +142,7 @@ IDirect3D8 *WINAPI Direct3DCreate8(UINT version)
     static IDirect3D8 *(WINAPI *real)(UINT);
     IDirect3D8 *d3d;
     char line[64];
+    pin();
     if (!real) {
         HMODULE m = LoadLibraryA("d3d8real.dll");
         real = m ? (IDirect3D8 *(WINAPI *)(UINT))GetProcAddress(m, "Direct3DCreate8") : NULL;
