@@ -13,15 +13,18 @@
 #define TNL_LIGHTS 8                    /* lights at once (D3DCAPS8.MaxActiveLights) */
 #define TNL_STAGES 8                    /* texture coordinate outputs */
 
-/* program.env */
-#define TNL_ENV_MVP     0   /* 4: world x view x projection, with OpenGL's adjustments: columns */
-#define TNL_ENV_MV      4   /* 4: world x view: columns (positions in view space) */
-#define TNL_ENV_NORMAL  8   /* 3: the normals' matrix (inverse transpose of world x view): columns */
-#define TNL_ENV_MAT     11  /* 4: the material's diffuse, ambient, specular and emissive colours */
-#define TNL_ENV_POWER   15  /* x: the material's specular power */
-#define TNL_ENV_AMBIENT 16  /* the ambient light (D3DRS_AMBIENT) */
-#define TNL_ENV_FOG     17  /* end / (end - start), 1 / (end - start), density */
-#define TNL_ENV_LIGHT   18  /* TNL_LIGHT_SIZE a light, see below */
+/* program.env, from TNL_ENV_BASE on: above Direct3D 8's vertex shader constants c0..c95, so the
+   two kinds of programs can share program.env without reloading it (Direct3D 9's c0..c255 do
+   collide: the HAL tracks that) */
+#define TNL_ENV_BASE    128
+#define TNL_ENV_MVP     (TNL_ENV_BASE + 0)  /* 4: world x view x projection, with OpenGL's adjustments: columns */
+#define TNL_ENV_MV      (TNL_ENV_BASE + 4)  /* 4: world x view: columns (positions in view space) */
+#define TNL_ENV_NORMAL  (TNL_ENV_BASE + 8)  /* 3: the normals' matrix (inverse transpose of world x view): columns */
+#define TNL_ENV_MAT     (TNL_ENV_BASE + 11) /* 4: the material's diffuse, ambient, specular and emissive colours */
+#define TNL_ENV_POWER   (TNL_ENV_BASE + 15) /* x: the material's specular power */
+#define TNL_ENV_AMBIENT (TNL_ENV_BASE + 16) /* the ambient light (D3DRS_AMBIENT) */
+#define TNL_ENV_FOG     (TNL_ENV_BASE + 17) /* end / (end - start), 1 / (end - start), density */
+#define TNL_ENV_LIGHT   (TNL_ENV_BASE + 18) /* TNL_LIGHT_SIZE a light, see below */
 #define TNL_LIGHT_SIZE  7   /* diffuse, specular, ambient, position (w: range), direction (to the
                                light for a directional one, the spot's own for a spot), attenuation
                                0, 1, 2 (w: falloff), spot (cos theta/2, cos phi/2, 1 / their

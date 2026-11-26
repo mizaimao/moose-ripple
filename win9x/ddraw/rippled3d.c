@@ -374,6 +374,8 @@ typedef struct {
     void (APIENTRY *VertexAttribPointerARB)(GLuint, GLint, GLenum, GLboolean, GLsizei, const GLvoid *);
     void (APIENTRY *EnableVertexAttribArrayARB)(GLuint);
     void (APIENTRY *DisableVertexAttribArrayARB)(GLuint);
+    /* render-to-texture on the GPU (optional) */
+    void (APIENTRY *CopyTexSubImage2D)(GLenum, GLint, GLint, GLint, GLint, GLint, GLsizei, GLsizei);
 } GLF;
 
 #define GL_CORE_COUNT 53            /* entries up to DrvGetProcAddress */
@@ -402,6 +404,7 @@ static const char *const gl_names[] = {
     "glTexImage3D",
     "glNormalPointer", "glDepthRange",
     "glVertexAttribPointerARB", "glEnableVertexAttribArrayARB", "glDisableVertexAttribArrayARB",
+    "glCopyTexSubImage2D",
 };
 #define GL_ALL_COUNT (sizeof gl_names / sizeof gl_names[0])
 typedef char c_gl_names[sizeof(GLF) == GL_ALL_COUNT * sizeof(PROC) ? 1 : -1];
@@ -1084,11 +1087,14 @@ typedef struct {
     DWORD levels;                       /* mipmap levels uploaded (1: the top level only) */
     FLATPTR lmem[MAX_LEVELS];           /* each level's memory (lmem[0] is mem) */
     DWORD stamp;                        /* DirectDraw's contents stamps then (0: none kept) */
+    DWORD gpu_gen;                      /* the render-target picture copied in (texture_from_gpu) */
     DWORD scene;                        /* the scene it was uploaded in */
     int dirty;                          /* written since (Lock, texture blit) */
 } TEXTURE;
 
-#define TARGETS  4                      /* colour buffers a context keeps (gpu_buffer) */
+#define TARGETS  16                     /* colour buffers a context keeps (gpu_buffer): a flip chain
+                                           and the textures a frame renders into (3DMark 2001's
+                                           Dragothic: ten), so their pictures can stay on the GPU */
 #define ZBUFFERS 4                      /* depth buffers a context keeps */
 
 /* A surface's picture on the GPU: a render target's colour or a z-buffer's depth, kept by the
@@ -1102,6 +1108,12 @@ typedef struct {
     GLenum format;                      /* rb's: colour_format, or depth and stencil */
     DWORD serial;                       /* display mode in which this page was attached */
     int deferred;                       /* exclusive flip-chain page newer on the GPU */
+    int tex;                            /* deferred holds a texture's picture (finish_target): its
+                                           format, pitch and size below, not the screen's */
+    DDPIXELFORMAT pf;
+    LONG pitch;
+    DWORD tw, th;
+    DWORD gen;                          /* texture pictures deferred so far */
     int written;                        /* colour: the memory is newer than rb's picture (the
                                            program wrote it, or rb is new): it goes to the GPU
                                            before the next draw (rt_upload) */
@@ -1187,6 +1199,8 @@ typedef struct {
     struct vs8 *vs[MAX_VS];
     float vsc[VS_ARB_CONSTANTS][4];
     int vsc_dirty;
+    DWORD vsc_lo, vsc_hi;               /* the constants the program set since the last load */
+    DWORD vs_limit;                     /* how many it has: 96 (Direct3D 8) or 256 (9) */
     int env_owner;
     DWORD vs_loaded;                    /* the shader whose def constants program.env holds */
     DWORD attribs_on;                   /* generic attribute arrays enabled (bits) */
@@ -1342,7 +1356,13 @@ static int read_pixels(RCTX *c, GPUBUF *b)
             c->dirty = 0;
         return 1;
     }
-    if (b->deferred) {
+    if (b->deferred && b->tex) {        /* a texture's picture kept on the GPU (finish_target) */
+        pf = b->pf;
+        pitch = (DWORD)b->pitch;
+        if (w > b->tw) w = b->tw;
+        if (h > b->th) h = b->th;
+        texture = 1;
+    } else if (b->deferred) {
         display_format(&pf);
         pitch = shared->pitch;
     } else {
@@ -1390,6 +1410,7 @@ static int read_pixels(RCTX *c, GPUBUF *b)
     else
         c->dirty = 0;
     b->deferred = 0;
+    b->tex = 0;
     targets_written(b->mem, b);
     if (texture)
         textures_written(b->mem);
@@ -1432,6 +1453,22 @@ static void finish_target(RCTX *c)
         c->cur->serial == shared->mode_serial && screen_page(c->rt)) {
         c->cur->deferred = 1;
         c->dirty = 0;
+    } else if (c->rt && c->cur && (c->rt->ddsCaps.dwCaps & DDSCAPS_TEXTURE) && !c->cur->written &&
+               c->cur->mem == c->rt->lpGbl->fpVidMem && gl_of(c)->CopyTexSubImage2D) {
+        /* A texture rendered into: its picture stays on the GPU and goes into the texture there
+           when a draw uses it (texture_from_gpu); memory gets it only when the program locks
+           the surface (d3d_surface_access) or a texture blit reads it (gpu_sync). */
+        LPDDRAWI_DDRAWSURFACE_GBL g = c->rt->lpGbl;
+        GPUBUF *b = c->cur;
+        b->deferred = 1;
+        b->tex = 1;
+        surface_format(c->rt, &b->pf);
+        b->pitch = g->lPitch;
+        b->tw = g->wWidth;
+        b->th = g->wHeight;
+        b->gen++;
+        c->dirty = 0;
+        textures_written(b->mem);       /* their stages bind them again */
     } else {
         read_back(c);
     }
@@ -1444,8 +1481,8 @@ int d3d_surface_access(LPDDRAWI_DDRAWSURFACE_LCL s)
 
     for (i = 0; i < MAX_CONTEXTS; i++) {
         RCTX *c = mine(&contexts[i].o, &m) ? contexts[i].c : NULL;
-        if (!c || (!c->dirty && !c->chain_active))
-            continue;
+        if (!c)
+            continue;                   /* (a texture's picture may wait without a flip chain) */
         for (j = 0; j < TARGETS; j++) {
             GPUBUF *b = &c->cb[j];
             if (b->mem == s->lpGbl->fpVidMem && (b->deferred || (b == c->cur && c->dirty))) {
@@ -1562,6 +1599,7 @@ static GPUBUF *gpu_buffer(RCTX *c, GPUBUF *t, DWORD n, FLATPTR mem, DWORD w, DWO
     if (b->mem != mem || b->serial != shared->mode_serial) {
         b->written = 1;
         b->deferred = 0;
+        b->tex = 0;
     }
     b->serial = shared->mode_serial;
     if (!b->rb)
@@ -2373,6 +2411,88 @@ static int volume_bind(RCTX *c, DWORD h, int stage, const struct shadow *sh)
 
 /* Bind the texture behind a surface handle, uploading it if it is new or has changed. 0 if
    there is no usable texture. */
+/* A 2D texture's filters, levels, addressing and border colour from its stage's states. */
+static void sampler_2d(GLF *gl, const DWORD *st, DWORD levels)
+{
+    GLfloat border[4], bias;
+
+    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+                      st[D3DTSS_MAGFILTER] == D3DTFG_POINT ? GL_NEAREST : GL_LINEAR);
+    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, min_filter(st, levels));
+    /* MAXMIPLEVEL is the largest level the program allows (0: the top) */
+    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL,
+                      st[D3DTSS_MAXMIPLEVEL] < levels ? st[D3DTSS_MAXMIPLEVEL] : levels - 1);
+    bias = *(const float *)&st[D3DTSS_MIPMAPLODBIAS];
+    gl->TexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, &bias);
+    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl_address(st[D3DTSS_ADDRESSU]));
+    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl_address(st[D3DTSS_ADDRESSV]));
+    border[0] = ((st[D3DTSS_BORDERCOLOR] >> 16) & 255) / 255.0f;
+    border[1] = ((st[D3DTSS_BORDERCOLOR] >> 8) & 255) / 255.0f;
+    border[2] = (st[D3DTSS_BORDERCOLOR] & 255) / 255.0f;
+    border[3] = ((st[D3DTSS_BORDERCOLOR] >> 24) & 255) / 255.0f;
+    gl->TexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+}
+
+/* The picture rendered into the texture at mem and kept on the GPU (finish_target), if any. */
+static GPUBUF *gpu_picture(RCTX *c, FLATPTR mem)
+{
+    int i;
+    for (i = 0; i < TARGETS; i++)
+        if (c->cb[i].mem == mem && c->cb[i].deferred && c->cb[i].tex)
+            return &c->cb[i];
+    return NULL;
+}
+
+/* A texture rendered into: its picture copied into the OpenGL texture on the GPU, once for
+   each picture (b->gen), instead of read back into memory and uploaded again. Only the top
+   level: such textures are drawn with one. */
+static int texture_from_gpu(RCTX *c, DWORD h, TEXTURE *t, LPDDRAWI_DDRAWSURFACE_LCL s, GPUBUF *b,
+                            const DWORD *st)
+{
+    GLF *gl = gl_of(c);
+    LPDDRAWI_DDRAWSURFACE_GBL g = s->lpGbl;
+    LPDDRAWI_DDRAWSURFACE_LCL lv[MAX_LEVELS];
+    PIXFMT f = gl_format(&b->pf);
+    DWORD w = g->wWidth, ht = g->wHeight, fmt = f.internal | 0x40000000UL;  /* made on the GPU */
+
+    if (!f.bytes)
+        return 0;
+    if (!t->name) {
+        if (c->ntextures >= TEXTURE_BUDGET)
+            texture_evict(c, h);
+        gl->GenTextures(1, &t->name);
+        c->ntextures++;
+    }
+    gl->BindTexture(GL_TEXTURE_2D, t->name);
+    if (t->mem != g->fpVidMem || t->w != w || t->h != ht || t->fmt != fmt || t->levels != 1) {
+        gl->TexImage2D(GL_TEXTURE_2D, 0, f.internal, w, ht, 0, f.format, f.type, NULL);
+        gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        t->mem = g->fpVidMem;
+        t->w = w;
+        t->h = ht;
+        t->fmt = fmt;
+        t->levels = 1;
+        t->lmem[0] = g->fpVidMem;
+        t->gpu_gen = b->gen - 1;
+    }
+    if (t->gpu_gen != b->gen) {
+        if (!c->read_fbo)
+            gl->GenFramebuffers(1, &c->read_fbo);
+        gl->BindFramebuffer(GL_FRAMEBUFFER, c->read_fbo);
+        gl->FramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, b->rb);
+        gl->CopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, w < b->w ? w : b->w, ht < b->h ? ht : b->h);
+        gl->BindFramebuffer(GL_FRAMEBUFFER, c->fbo);
+        t->gpu_gen = b->gen;
+        tracef("rd3d: texture %lx from its render-target picture on the GPU (%lu)\r\n", h, b->gen);
+    }
+    mip_chain(s, lv);
+    t->stamp = chain_stamp(lv, 1);
+    t->scene = c->scene;
+    t->dirty = 0;
+    sampler_2d(gl, st, 1);
+    return 1;
+}
+
 static int texture_bind(RCTX *c, DWORD h, int stage)
 {
     GLF *gl = gl_of(c);
@@ -2385,7 +2505,6 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
     DWORD stamp, fmt, levels, l;
     int keyed;
     DWORD *st = c->tss[stage];
-    GLfloat border[4], bias;
 
     if (!s || !(g = s->lpGbl) || !g->fpVidMem)
         return 0;
@@ -2396,6 +2515,11 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
     t = texture_slot(c, h);
     if (!t)
         return 0;
+    {
+        GPUBUF *b = gpu_picture(c, g->fpVidMem);     /* rendered into, still on the GPU */
+        if (b)
+            return texture_from_gpu(c, h, t, s, b, st);
+    }
     surface_format(s, &pf);
     f = gl_format(&pf);
     if (!f.bytes && !f.block)
@@ -2449,21 +2573,7 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
     t->stamp = stamp;
     t->scene = c->scene;
     t->dirty = 0;
-    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
-                      st[D3DTSS_MAGFILTER] == D3DTFG_POINT ? GL_NEAREST : GL_LINEAR);
-    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, min_filter(st, levels));
-    /* MAXMIPLEVEL is the largest level the program allows (0: the top) */
-    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL,
-                      st[D3DTSS_MAXMIPLEVEL] < levels ? st[D3DTSS_MAXMIPLEVEL] : levels - 1);
-    bias = *(const float *)&st[D3DTSS_MIPMAPLODBIAS];
-    gl->TexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, &bias);
-    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl_address(st[D3DTSS_ADDRESSU]));
-    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl_address(st[D3DTSS_ADDRESSV]));
-    border[0] = ((st[D3DTSS_BORDERCOLOR] >> 16) & 255) / 255.0f;
-    border[1] = ((st[D3DTSS_BORDERCOLOR] >> 8) & 255) / 255.0f;
-    border[2] = (st[D3DTSS_BORDERCOLOR] & 255) / 255.0f;
-    border[3] = ((st[D3DTSS_BORDERCOLOR] >> 24) & 255) / 255.0f;
-    gl->TexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+    sampler_2d(gl, st, levels);
     return 1;
 }
 
@@ -3434,7 +3544,7 @@ static int tnl_begin(RCTX *c, const VERTICES *v)
     prog = tnl_program(c, &k);
     if (!prog)
         return 0;
-    if (c->env_owner != ENV_TNL) {      /* a vertex shader's constants were there */
+    if (c->env_owner == ENV_VS) {       /* a Direct3D 9 shader's constants were over this state */
         c->tnl_dirty = TNL_DIRTY_ALL;
         c->env_owner = ENV_TNL;
     }
@@ -3615,7 +3725,7 @@ static int vs_begin(RCTX *c)
 {
     GLF *gl = gl_of(c);
     struct vs8 *s = vs_find(c, c->fvf8);
-    DWORD key = 0, i, table = c->rs[D3DRENDERSTATE_FOGTABLEMODE];
+    DWORD key = 0, i, lo, hi, table = c->rs[D3DRENDERSTATE_FOGTABLEMODE];
     GLuint prog;
     GLfloat v[4];
 
@@ -3650,18 +3760,29 @@ static int vs_begin(RCTX *c)
             gl->Viewport(0, 0, c->fb_w, c->fb_h);
         gl->DepthRange(c->zmin, c->zmax);
     }
-    if (c->env_owner != ENV_VS) {       /* the fixed-function programs' state was there */
+    /* c0..c95 for Direct3D 8 lie below the fixed-function programs' state (TNL_ENV_BASE); only
+       Direct3D 9's c0..c255 reach into it, so only they take it over (env_owner) */
+    if (c->vs_limit > TNL_ENV_BASE && c->env_owner != ENV_VS) {
         c->env_owner = ENV_VS;
         c->vsc_dirty = 1;
     }
     if (c->vsc_dirty || c->vs_loaded != s->handle) {
-        for (i = 0; i < VS_ARB_CONSTANTS; i++)
+        lo = 0;                         /* all of them, and this shader's def constants */
+        hi = c->vs_limit;
+    } else {
+        lo = c->vsc_lo;                 /* the ones the program changed since */
+        hi = c->vsc_hi < c->vs_limit ? c->vsc_hi : c->vs_limit;
+    }
+    if (lo < hi) {
+        for (i = lo; i < hi; i++)
             gl->ProgramEnvParameter4fvARB(GL_VERTEX_PROGRAM_ARB, i, c->vsc[i]);
         for (i = 0; i < s->info.defs; i++)
-            gl->ProgramEnvParameter4fvARB(GL_VERTEX_PROGRAM_ARB, s->info.def[i].reg, s->info.def[i].v);
-        c->vsc_dirty = 0;
-        c->vs_loaded = s->handle;
+            if (s->info.def[i].reg >= lo && s->info.def[i].reg < hi)
+                gl->ProgramEnvParameter4fvARB(GL_VERTEX_PROGRAM_ARB, s->info.def[i].reg, s->info.def[i].v);
     }
+    c->vsc_dirty = 0;
+    c->vsc_lo = c->vsc_hi = 0;
+    c->vs_loaded = s->handle;
     /* the half pixel, and table fog's constants (as tnl_load's) */
     v[0] = 1.0f / (float)(c->vp_w ? c->vp_w : c->fb_w);
     v[1] = 1.0f / (float)(c->vp_w ? c->vp_h : c->fb_h);
@@ -3935,7 +4056,11 @@ static void clear(RCTX *c, DWORD flags, DWORD color, float depth, DWORD stencil,
    makes that moot). The depth is the new z-buffer's own. */
 static int set_render_target(RCTX *c, LPDDRAWI_DDRAWSURFACE_LCL rt, LPDDRAWI_DDRAWSURFACE_LCL z)
 {
-    if (rt != c->rt && rt != c->front && rt != c->back && !end_chain(c))
+    /* A target outside the flip chain ends it (its pages go back into memory), unless it is a
+       texture: rendering into a texture between flips (3DMark 2001's Dragothic, ten a frame) is
+       part of the frame, and the chain goes on. */
+    if (rt != c->rt && rt != c->front && rt != c->back && !(rt->ddsCaps.dwCaps & DDSCAPS_TEXTURE) &&
+        !end_chain(c))
         return 0;
     finish_target(c);
     tracef("rd3d: render target: caps %08lx, memory %08lx, %lux%lu; z-buffer memory %08lx\r\n",
@@ -4011,6 +4136,7 @@ static DWORD WINAPI ContextCreate(LPD3DHAL_CONTEXTCREATEDATA d)
         return DDHAL_DRIVER_HANDLED;
     c->p = p;
     c->dx8 = kind >= 4;
+    c->vs_limit = p->d3d_version >= 0x900 ? VS_ARB_CONSTANTS : 96;    /* vertex shader constants */
     tnl_reset(c);
     if (!p->wndclass) {
         WNDCLASS wc;
@@ -4272,6 +4398,11 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
            b->pDest.x, b->pDest.y, b->dwFlags, ds && ss ? "" : " (unknown handle)");
     if (!ds || !ss || !ds->lpGbl->fpVidMem || !ss->lpGbl->fpVidMem)
         return;
+    {
+        GPUBUF *pic = gpu_picture(c, ss->lpGbl->fpVidMem);  /* the source was rendered into */
+        if (pic)
+            read_pixels(c, pic);
+    }
     surface_format(ss, &pf);
     f = gl_format(&pf);
     bytes = f.bytes ? f.bytes : pf.dwRGBBitCount / 8;   /* FOURCC-named formats have no bit count */
@@ -5177,8 +5308,12 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
                     }
                 for (j = 0; k->bCommand == RbDp2SetVertexShaderConst && j < r->count; j++)
                     if (r->reg + j < VS_ARB_CONSTANTS) {
-                        memcpy(c->vsc[r->reg + j], f + 4 * j, 16);
-                        c->vsc_dirty = 1;
+                        DWORD reg = r->reg + j;
+                        memcpy(c->vsc[reg], f + 4 * j, 16);
+                        if (c->vsc_lo == c->vsc_hi || reg < c->vsc_lo)
+                            c->vsc_lo = reg;
+                        if (reg + 1 > c->vsc_hi)
+                            c->vsc_hi = reg + 1;
                     }
                 used += sizeof *r + r->count * 16;
             }

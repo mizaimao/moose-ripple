@@ -892,6 +892,34 @@ rate 10066.3 and 14673.8 MTexels/s (the Car Chase lines did not scroll into view
 results dialog). Pictures checked through VNC; Car Chase's ground was dark until lights got
 slots by Direct3D's index (3DMark's indices go far beyond 32), and its vertex shaders are vs_1_0.
 
+**Timed baseline** (2026-11-26 09:40 EST, rig VM 230 alone, Windows 98 SE, DirectX 9.0c,
+`D3D8` = `"2"`, the PR #209 build with the FOURCC fix, GPU minimum clock 1200 MHz with the
+performance governor, no trace, one run, default settings 1024x768x32 "D3D Hardware T&L"):
+**12134 3DMarks**. Car Chase 221.5 / 48.7 fps, Dragothic 140.0 / 35.6, Lobby 299.7 / 69.8,
+Nature 122.1, fill rate 9986.6 / 14558.6 MTexels/s, High Polygon Count 53.6 / 49.0 MTriangles/s,
+EMBM 734.3, DOT3 681.1, Vertex Shader 170.0, Pixel Shader 671.1, Advanced Pixel Shader 98.3,
+Point Sprites 4.2 MSprites/s. The number later 9x speed work has to beat. Note Dragothic high
+detail: 82.5 fps with the runtime's vertex processing, 35.6 with the GPU's.
+
+**First speed changes** (same rig, VM and settings, one timed run each, each on top of the one
+before; 2026-11-26 10:19 to 11:26 EST):
+
+| Change | 3DMarks | Car Chase high | Dragothic high | Lobby high | Vertex Shader | Adv. Pixel Shader |
+|---|---|---|---|---|---|---|
+| Baseline | 12134 | 48.7 | 35.6 | 69.8 | 170.0 | 98.3 |
+| 1: fixed-function state above c0..c95 | 12220 | 49.5 | 36.0 | 70.2 | 183.7 | 99.7 |
+| A: a texture target keeps the flip chain | 12469 | 59.9 | 35.8 | 73.4 | 183.0 | 198.1 |
+| B: textures rendered into stay on the GPU | **14716** | 75.5 | 54.9 | 150.3 | 183.9 | 605.9 |
+
+The other tests stayed within a few percent. A per-draw trace of Dragothic found the cause: at
+high detail it renders into ten 128x128 textures a frame, and each switch away from the flip
+chain read both 3 MB chain pages back into memory (fixed by A), while each rendered texture was
+read back and uploaded again (fixed by B: `glCopyTexSubImage2D` on the GPU, memory only when the
+program locks the surface). A context now keeps 16 colour buffers so a frame's targets fit.
+Pictures checked through VNC after B: Car Chase, Dragothic and Lobby at high detail and the
+Advanced Pixel Shader lake (its reflections are such textures) look as before. Dragothic high is
+still below the 82.5 fps of the runtime's own vertex processing.
+
 Advanced Pixel Shader's white boat and jetty: a trace with each draw's state (new trace lines)
 showed nine draws a frame with no texture on the stage their shader samples, and about one
 refused CanCreateSurface a frame. The refused format was FOURCC 63: for mipmapped Q8W8V8U8
