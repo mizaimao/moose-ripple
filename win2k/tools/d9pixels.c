@@ -356,15 +356,16 @@ static void ps_run(const char *name, const DWORD *tokens, const PSVERTEX *v, UIN
     IDirect3DPixelShader9_Release(handle);
 }
 
-/* 72: ps_1_4. texld r0, t0 (sampler 0: red left, green right); texcrd r1.rgb, t1 (0.75, 0.25 at
- * every vertex); phase; texld r3, r1 (sampler 3, a dependent read: blue at the top right texel);
- * add r0, r0, r3: magenta on the left, cyan on the right. */
+/* 72: ps_1_4. texcrd r1.rgb, t1 (0.75, 0.25 at every vertex); phase; texld r0, t0 (sampler 0: red
+ * left, green right); texld r3, r1 (sampler 3, a dependent read: blue at the top right texel);
+ * add r0, r0, r3: magenta on the left, cyan on the right. (Registers written before the phase
+ * lose their alpha.) */
 static void ps14_case(int only)
 {
     static const DWORD halves[4] = { 0xffff0000, 0xff00ff00, 0xffff0000, 0xff00ff00 };
     static const DWORD corner[4] = { 0xff000000, 0xff0000ff, 0xff000000, 0xff000000 };
-    static const DWORD ps[] = { PSV(4), OTex, DST(RR, 0), SRC(RT, 0), OTexcoord, PD(RR, 1, 7, 0, 0), PS_(RT, 1, 0xa4, MNone),
-        0x0000fffdUL, OTex, DST(RR, 3), SRC(RR, 1), OAdd, DST(RR, 0), SRC(RR, 0), SRC(RR, 3), PSEND };
+    static const DWORD ps[] = { PSV(4), OTexcoord, PD(RR, 1, 7, 0, 0), PS_(RT, 1, 0xa4, MNone), 0x0000fffdUL,
+        OTex, DST(RR, 0), SRC(RT, 0), OTex, DST(RR, 3), SRC(RR, 1), OAdd, DST(RR, 0), SRC(RR, 0), SRC(RR, 3), PSEND };
     static const SAMPLE s[] = { { 48, 64, 0xff00ff }, { 80, 64, 0x00ffff }, { 8, 8, CLEAR_COLOR } };
     IDirect3DTexture9 *t0, *t3;
     PSVERTEX v[6];
