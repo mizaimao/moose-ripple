@@ -1135,7 +1135,7 @@ static int flow_const(PS *s, unsigned int token, int boolean, char *out, unsigne
 {
     unsigned int n = reg_num(token);
     out[0] = 0;
-    if (reg2_type(token) != (boolean ? RegVsConstBool : RegVsConstInt) || n > 15) return fail(s, RbPsRegister, token);
+    if (reg2_type(token) != (unsigned int)(boolean ? RegVsConstBool : RegVsConstInt) || n > 15) return fail(s, RbPsRegister, token);
     if (boolean ? (s->defBool >> n) & 1 : (s->defInt >> n) & 1)
         reg_text(out, size, "IMM", boolean ? s->defBoolImm[n] : s->defIntImm[n]);
     else if (s->flow) reg_text(out, size, "CONST", 3 + n);
@@ -1203,7 +1203,7 @@ static int vertex_instruction(PS *s, unsigned int op, const unsigned int *p, uns
     case OpVsEndRep: case OpVsEndLoop: {
         unsigned int depth;
         char t[16], l[16];
-        if (!s->loops || s->loopIsLoop[s->loops - 1] != (op == OpVsEndLoop)) return fail(s, RbPsOpcode, op);
+        if (!s->loops || s->loopIsLoop[s->loops - 1] != (unsigned int)(op == OpVsEndLoop)) return fail(s, RbPsOpcode, op);
         depth = --s->loops;
         t[0] = l[0] = 0;
         reg_text(t, sizeof(t), "TEMP", VsCounters + depth);
@@ -1288,7 +1288,7 @@ static int vertex_walk(PS *s, const unsigned int *tok, unsigned int count, int p
                 /* i# as floats (count, start, step); b# in w as 1 or 0. */
                 unsigned int c = reg_num(tok[i + 1]);
                 if (n != (op == OpVsDefi ? 5u : 2u) || c > 15 || *imm > 255 ||
-                    reg2_type(tok[i + 1]) != (op == OpVsDefi ? RegVsConstInt : RegVsConstBool))
+                    reg2_type(tok[i + 1]) != (unsigned int)(op == OpVsDefi ? RegVsConstInt : RegVsConstBool))
                     return fail(s, RbPsRegister, tok[i + 1]);
                 put(&s->t, "IMM["); number(&s->t, *imm); put(&s->t, "] FLT32 {");
                 if (op == OpVsDefi) {
