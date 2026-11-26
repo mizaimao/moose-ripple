@@ -2251,8 +2251,18 @@ What changes in the command stream:
   rectangle with the viewport and sets it as virgl's scissor, also for
   pretransformed vertices. Setting a render target resets the rectangle to all
   of it, as Direct3D 9 does. `d9pixels` case 60 checks it.
-- The integer and boolean shader constants are recorded but not applied yet;
-  `d7draw` counts them.
+- Vertex shader 2.0 static flow control runs: the runtime keeps `defi` and
+  `defb` in the code and passes the integer and boolean constants
+  (`SETVERTEXSHADERCONSTI` and `...CONSTB`), which the Direct3D 8 interface
+  does not. The driver sends `i0`..`i15` and `b0`..`b15` in `CONST[3..18]`,
+  slots the vertex program layout had reserved for them (i# as floats in x,
+  y, z: count, start, step; b# as 1 or 0 in w). The translator turns `rep` and
+  `loop` into TGSI loops counting down in a temporary (`loop` also steps `aL`,
+  which `c[aL + n]` reads), `if b#` and `else` into TGSI `IF`s, and inlines
+  `call` and `callnz` (vs_2_0 has no recursion). `if_comp`, `break` and
+  predicates are vs_2_x and are still refused. `d9pixels` cases 61 and 62
+  check loops and branches. Pixel shader integer and boolean constants are
+  counted in `d7draw`, not used (pixel shader 2.0 has no flow control).
 
 Two surface descriptions differ from a Direct3D 8 runtime's. A system-memory
 DXT texture is described by its blocks: an 8x8 DXT1 arrives as 16x2 (the
