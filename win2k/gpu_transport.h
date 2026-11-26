@@ -18,7 +18,7 @@ typedef struct {
 typedef struct {
     BOOLEAN pipeline;
     ULONG vertexShaders, boundVertex;   /* bit and value: 1 transformed input, 2 object space */
-    ULONG rasters, boundRaster, viewTexture, viewTexture1;
+    ULONG rasters, boundRaster, clipRaster, viewTexture, viewTexture1;
     /* Samplers and views bound together from slot zero; the renderer drops
      * the slots past the last set. boundViews counts views, boundView0 is the
      * view handle in slot zero. */
@@ -121,7 +121,7 @@ typedef struct {
     LONG busy, barrier;
     BOOLEAN owned, ready, enabledMaster, tested;
     ULONG nextId, fence, imageCount, hostFills, readbacks, uploads, hostCopies;
-    BOOLEAN ddGpuSurfaces, nativeD3D7, plainSurfaces, d3d8, vertexShaders;
+    BOOLEAN ddGpuSurfaces, nativeD3D7, plainSurfaces, d3d8, vertexShaders, d3d9Ddi;
     /* DXT blocks as they are (RippleHostDxt), and the formats the host samples:
      * bit n for upload format n (RB2K_D7_BLOCKS_DXT*, RB2K_D7_TEXELS_*), known after the first ask. */
     BOOLEAN hostDxt, hostBlocksKnown;
@@ -232,6 +232,8 @@ BOOLEAN rb_gpu_transfer_box(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resour
 BOOLEAN rb_gpu_copy_rects(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG destination,
                           ULONG source, const RB2K_RECT *rects, ULONG count,
                           LONG originX, LONG originY, RB2K_GL_PROFILE *profile);
+BOOLEAN rb_gpu_blit_rect(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG destination, ULONG source,
+                         const RB2K_RECT *to, const RB2K_RECT *from, BOOLEAN linear);
 BOOLEAN rb_gpu_primary_transfer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
                                 const RB2K_RECT *rect, BOOLEAN readback);
 VP_STATUS rb_gpu_inline_uploads(RB2K_GPU *gpu, const RB2K_RECT *rects, ULONG count);

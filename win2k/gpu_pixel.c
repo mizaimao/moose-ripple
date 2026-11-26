@@ -769,6 +769,52 @@ BOOLEAN rb_gpu_copy_layer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG image, U
     return fenced(gpu, result, &p->submit.hdr, sizeof(p->submit) + sizeof(p->command[0]), RB2K_STAGE_TRANSFER);
 }
 
+enum { BlitWords = 1 + VIRGL_CMD_BLIT_SIZE };
+typedef struct {
+    struct virtio_gpu_cmd_submit submit;
+    ULONG command[BlitWords];
+} BLIT_PACKET;
+typedef char blit_fits_inline[sizeof(BLIT_PACKET) <= RB2K_INLINE_PACKET_BYTES ? 1 : -1];
+
+/* A scaled copy of one rectangle of a colour image into a rectangle of another, both already
+ * inside their images, point-sampled or linear: the host blits it in the destination's context. */
+BOOLEAN rb_gpu_blit_rect(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG destination, ULONG source,
+                         const RB2K_RECT *to, const RB2K_RECT *from, BOOLEAN linear)
+{
+    BLIT_PACKET *p = (BLIT_PACKET *)gpu->copyPacket.bytes;
+    RB2K_GPU_RESULT cleanup;
+    ULONG *w = p->command;
+    BOOLEAN ok;
+    VideoPortZeroMemory(p, sizeof(*p));
+    p->submit.hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    p->submit.hdr.ctx_id = destination;
+    p->submit.size = sizeof(p->command);
+    w[0] = VIRGL_CMD0(VIRGL_CCMD_BLIT, 0, VIRGL_CMD_BLIT_SIZE);
+    /* All four channels; filter 1 is linear, 0 nearest (Gallium's PIPE_TEX_FILTER_*). */
+    w[VIRGL_CMD_BLIT_S0] = VIRGL_CMD_BLIT_S0_MASK(0xf) | VIRGL_CMD_BLIT_S0_FILTER(linear ? 1 : 0);
+    w[VIRGL_CMD_BLIT_DST_RES_HANDLE] = destination;
+    w[VIRGL_CMD_BLIT_DST_FORMAT] = VIRGL_FORMAT_B8G8R8A8_UNORM;
+    w[VIRGL_CMD_BLIT_DST_X] = to->left;
+    w[VIRGL_CMD_BLIT_DST_Y] = to->top;
+    w[VIRGL_CMD_BLIT_DST_W] = to->right - to->left;
+    w[VIRGL_CMD_BLIT_DST_H] = to->bottom - to->top;
+    w[VIRGL_CMD_BLIT_DST_D] = 1;
+    w[VIRGL_CMD_BLIT_SRC_RES_HANDLE] = source;
+    w[VIRGL_CMD_BLIT_SRC_FORMAT] = VIRGL_FORMAT_B8G8R8A8_UNORM;
+    w[VIRGL_CMD_BLIT_SRC_X] = from->left;
+    w[VIRGL_CMD_BLIT_SRC_Y] = from->top;
+    w[VIRGL_CMD_BLIT_SRC_W] = from->right - from->left;
+    w[VIRGL_CMD_BLIT_SRC_H] = from->bottom - from->top;
+    w[VIRGL_CMD_BLIT_SRC_D] = 1;
+    if (!context_resource(gpu, result, destination, source, TRUE, RB2K_STAGE_ATTACH)) return FALSE;
+    ok = fenced(gpu, result, &p->submit.hdr, sizeof(*p), RB2K_STAGE_TRANSFER);
+    if (!ok) {
+        if (gpu->ready) context_resource(gpu, &cleanup, destination, source, FALSE, RB2K_STAGE_CLEANUP);
+        return FALSE;
+    }
+    return context_resource(gpu, result, destination, source, FALSE, RB2K_STAGE_CLEANUP);
+}
+
 BOOLEAN rb_gpu_destroy_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id)
 {
     PIXEL_REQUEST request;

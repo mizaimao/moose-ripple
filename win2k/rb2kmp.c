@@ -144,6 +144,7 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
     VideoPortGetRegistryParameters(a, L"RippleD3D8", FALSE, registry_flag, &a->gpu.d3d8);
     VideoPortGetRegistryParameters(a, L"RippleHostDxt", FALSE, registry_flag, &a->gpu.hostDxt);
     VideoPortGetRegistryParameters(a, L"RippleVertexShaders", FALSE, registry_flag, &a->gpu.vertexShaders);
+    VideoPortGetRegistryParameters(a, L"RippleD3D9", FALSE, registry_flag, &a->gpu.d3d9Ddi);
     a->gpu.ddGpuSurfaces = a->gpu.plainSurfaces || a->gpu.nativeD3D7;
     /* Map the scanout pages during adapter discovery, cached like every other
      * view of the framebuffer (rb_map_cached). BAR0 is a PCI framebuffer; its
@@ -542,6 +543,7 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
     case IOCTL_RB2K_DD_WRITE:
     case IOCTL_RB2K_DD_DESTROY:
     case IOCTL_RB2K_DD_COPY:
+    case IOCTL_RB2K_DD_STRETCH:
     case IOCTL_RB2K_DD_PRESENT:
     case IOCTL_RB2K_DD_UNIFORM:
         status = rb_gpu_surface_io(&a->gpu, r);

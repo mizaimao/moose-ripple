@@ -991,6 +991,7 @@ BOOL APIENTRY DrvGetDirectDrawInfo(DHPDEV pdev, DD_HALINFO *info, DWORD *heapCou
         if (fourCC) for (k = 0; k < *fourCount; ++k) fourCC[k] = codes[k];
     }
     d->vertexShaders = d->d3d8 && (caps.gpuSurfaces & RB2K_DD_VERTEX_SHADERS) != 0;
+    d->d3d9Ddi = d->vertexShaders && (caps.gpuSurfaces & RB2K_DD_D3D9_DDI) != 0;
     if (d->mode.BitsPerPlane != 32) caps.gpuSurfaces = 0;
     RtlZeroMemory(info, sizeof(*info));
     info->dwSize = sizeof(*info);
