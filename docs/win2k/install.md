@@ -19,12 +19,13 @@ Direct3D 8 and 9 through the DirectX 8 level interface with pixel shaders
 1.1 to 1.3 and 2.0, fixed-function stages, stencil, 24-bit depth, back buffers
 with alpha, full-screen devices, render target textures, DXT textures (decoded
 by the host GPU), cube and volume textures, L8, A8L8 and A8 textures; OpenGL
-through Windows' own `opengl32.dll`. 3DMark03 runs to the end on XP.
+through Windows' own `opengl32.dll`. 3DMark03 and 3DMark 2001 SE run to the end on XP.
 
 Not yet: many 3DMark03 pictures are wrong (dark scenes, white water); vertex
 shaders are off by default and have no flow control when on; 1920x1080 at
-32 bits per pixel does not fit in 8 MB of video memory; Direct3D 8 and 9 on
-Windows 2000 are untested. Development notes: [development.md](development.md).
+32 bits per pixel does not fit in 8 MB of video memory. On Windows 2000,
+Direct3D 8 and 9 need the DirectX 9.0c runtime (its February 2010
+redistributable is the last that installs there). Development notes: [development.md](development.md).
 
 ## 1. Set up the VM
 
@@ -69,6 +70,7 @@ change.
 | `RippleD3D8` | 1 | the Direct3D 8 and 9 driver interface |
 | `RippleHostDxt` | 1 | DXT textures decoded by the host GPU; 0 decodes them in the guest |
 | `RippleVertexShaders` | 0 | 1 runs vertex shaders on the host GPU (needed by DirectQ and 3DMark05) |
+| `RippleD3D9` | 0 | 1 offers the Direct3D 9 driver interface (with `RippleVertexShaders` 1; being completed) |
 
 `RippleHardwareCursor`, `RippleGpuDesktop`, `RippleDirectDrawGpuSurfaces` and
 `RippleD3D7WaitCurrent` are for tests and stay 0.

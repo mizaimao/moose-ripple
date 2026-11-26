@@ -145,10 +145,11 @@ if [ ! -f "$BUILD/build.ninja" ]; then
         "-Dc_args=[$c_args]"
 fi
 if [ "$TARGET" = vista ]; then
-    dll=src/gallium/targets/d3d10umd/viogpu_d3d10.dll
-    ninja -C "$BUILD" "$dll"
+    # The Direct3D driver, the OpenGL driver and the library it shares with opengl32.dll
+    dlls="src/gallium/targets/d3d10umd/viogpu_d3d10.dll src/gallium/targets/wgl/viogpu_wgl.dll src/mapi/shared-glapi/libglapi.dll"
+    ninja -C "$BUILD" $dlls
     mkdir -p "$OUT"
-    cp "$BUILD/$dll" "$OUT/"
+    for dll in $dlls; do cp "$BUILD/$dll" "$OUT/"; done
     exit
 fi
 ninja -C "$BUILD"

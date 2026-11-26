@@ -2039,6 +2039,108 @@ most, on either system. Firefly Forest is the exception. The GPU idles half the 
 scene is held up on the way to the GPU: the guest's processor, the driver, or QEMU's drawing
 thread. Which of them is the next measurement (`rig/threads.sh` during that test).
 
+## 3DMark06's Firefly Forest: where a frame goes (2026-11-26)
+
+The section above left this test as the one that the host's GPU does not limit, and the rig's
+trace of QEMU's drawing thread (`test-vms.md`, "What QEMU's main thread does during a run")
+put the limit on the guest's side. A profile inside the guest, on the second Intel test
+machine (UHD 630, QEMU 10.0, virglrenderer 1.1; Windows 7 SP1 with four processors, the
+VM options of the reference runs). All of these runs shared the host with other guests, so
+the frame times are for comparing with each other, not scores.
+
+The tools: the user-mode driver's timing report (`RIPPLE_UMD_TIMES`, which now also times the
+steps of a buffer's `Unlock` and the kernel calls that make and free an allocation), and
+samples of where the guest's four processors are, about 70 of each a second for a minute of
+the test, given to modules and functions (`tools/win7-debug/rig/ripstream.sh`,
+`sm2sample.sh`, `attribute.pl`; `tools/win7-bench/profile` for the guest's side).
+
+A frame, from the timing report (the range over the test's blocks of 256 frames):
+
+| | Release 0.4.0 | Current driver (cached memory) |
+| --- | ---: | ---: |
+| A frame | 64 to 75 ms | 59 to 72 ms |
+| of it inside the user-mode driver | 53 to 62 ms | 50 to 56 ms |
+| `Unlock`, 17 calls a frame | 30 to 43 ms | 18 to 35 ms |
+| `Present` | 2 to 19 ms | 5 to 24 ms |
+| `DrawIndexedPrimitive`, 1,500 to 2,650 calls a frame | 6 to 10 ms | 8 to 11 ms |
+
+The first test of the run (Return to Proxycon) takes 18 to 38 ms a frame, 9 to 19 ms of it
+inside the driver, most of that in its 500 to 2,500 indexed draws (about 6 microseconds each).
+
+Where the processors are during Firefly Forest (current driver; shares of all samples, so 25%
+is one processor busy all the time):
+
+| | Share |
+| --- | ---: |
+| Idle (the halt in `intelppm.sys`) | 35.9% |
+| `hal.dll`, at its port read (port 0x71, the real-time clock's data register, in all 1,050 samples taken there with the port number in a later run) | 19.8% |
+| `ntoskrnl.exe` | 11.9% |
+| `viogpu3d.sys`, the write that notifies the virtio device | 8.2% |
+| `viogpu3d.sys`, the read of the device's interrupt status | 5.3% |
+| `viogpu3d.sys`, `memmove` and `memset` | 3.8% |
+| The benchmark's own code | 3.5% |
+| Our user-mode driver | 2.8% |
+| `d3d9.dll`, the C runtime and `ntdll.dll` | 3.5% |
+
+A third of all processor time is spent at three instructions that read or write a register of
+an emulated device: the real-time clock, which Windows 7 reads at every clock tick when the VM
+has no HPET, and the virtio GPU's notification and interrupt status registers. QEMU answers
+each of them in its own code, under the lock that its drawing thread holds while virglrenderer
+works through a batch of commands, so a guest processor that touches such a register stands
+still until the batch is done. The user-mode driver's own code is under 3%.
+
+What `Unlock` waits for is one Windows call. The game streams its vertices through one
+768 KB buffer: 17 locks a frame, most of them of 80 to 560 bytes with `NOOVERWRITE`, the rest
+of the whole buffer with `DISCARD`. The driver keeps such a buffer in a shadow that Windows
+watches for writes (`MEM_WRITE_WATCH`), and after each upload it sets the watch again
+(`ResetWriteWatch`). The steps of those 17 unlocks in one block of frames (of the run with
+`ioeventfd=on` below, the first that timed the last step): finding the written pages 0.06 ms, mapping 0.08 ms, copying 0.01 ms, unmapping 0.01 ms, and setting the watch
+again 32.6 ms of a 55.7 ms frame, 1.9 ms a call. Setting the watch makes every processor of
+the guest drop its address translations and waits until each has answered, and one that
+stands still at a device register does not answer.
+
+Five things tried, one run each:
+
+| Change | Result |
+| --- | --- |
+| The virtio GPU with `ioeventfd=on` (QEMU's default for this device is off) | The notification wait left the samples (8.2% to 0%); a frame took 54 to 70 ms as before |
+| The watch set again by the call that lists the pages (`WRITE_WATCH_FLAG_RESET`), for those pages only | The cost moved into that call: 17.9 ms a frame; frames as before |
+| Locks of a small range sent as they were locked, without the watch, and the watch set again only before a lock of the whole buffer that would otherwise send more than 16 pages | 17 calls became about 1 a frame, and that one took 10 to 23 ms; frames as before |
+| The same without any call that sets the watch again (a list long enough for the whole buffer) | `Unlock` fell to 1 to 7 ms a frame and `Present` rose to 30 to 37 ms; a frame took 60 to 75 ms |
+| Hyper-V's synthetic timers offered to the guest (`hv-synic`, `hv-stimer`) | Windows 7 keeps ticking from the real-time clock: port 0x71 at 16% of the samples in the first test (18% without) |
+
+So the watch is where the waiting shows, not what causes it. The fewer calls there are, the
+longer each one waits, and with none the same 30 ms a frame are spent in `Present`, which
+waits until the host has drawn the frame. The guest prepares a frame for about 30 ms and the
+host then draws it for about 30 ms (QEMU's drawing thread is on a processor half of the time
+in this test and asleep waiting for the guest a third of it), one after the other instead of
+at the same time: while the host draws, the guest's processors stand at device registers or
+the program waits in `Present`. None of the driver-side changes above is in the driver.
+
+What is left to try:
+
+- The time the host needs for a frame, which is also how long the lock is held. The command
+  stream of this scene is 250 KB a submit, 8 to 14 submits a frame, and 89% of it is vertex
+  shader constants: the whole constant array is sent again with each change, about 1,700
+  times and 3 MB in a frame of 14 submits. What QEMU's drawing thread spends its half
+  processor on (a host profile during this test) comes first.
+- The clock tick. Nothing in QEMU answers the real-time clock outside its lock, and with an
+  HPET the tick clock loses time (`test-vms.md`, "Guest clock on an emulated processor").
+- Whether `Present` has to wait for the frame before it. A guest that runs one frame ahead
+  would overlap its work with the host's, as far as its processors are not standing still.
+- Message-signalled interrupts are switched off in the driver's INF (`MSISupported` 0), so
+  every interrupt reads the status register. With them on there is no such read. Tried on the
+  rig by setting the value to 1 in the guest: Windows 7 then stops right after the display
+  driver is added, before its start routine logs anything, with all four processors busy
+  (two boots of two, the second with nothing else on the host). The driver has the code for
+  message interrupts, but its start does not work with them yet.
+- The kernel driver copies a command buffer that is reported early, and buffers over 64 KB
+  (this scene's are about 250 KB) got fresh, cleared memory for it on every submit; the two
+  routines take 3.8% of the processor time above. Reusing buffers of that size too did not
+  change the benchmark on the rig (11502 3DMarks without, 11450 with; SM2.0 3918 and 3879).
+- Fewer notifications: the device offers notification suppression (`event_idx`), and
+  `ioeventfd=on` on the host takes the wait out of the guest's processor.
+
 ## Clip planes, Fetch4 and points on Windows 7 (2026-11-25)
 
 The clean-install check of release 0.4.0 ran Vista's screen-space pixel tests
@@ -2066,3 +2168,85 @@ features) and fails only the clip planes.
 The Direct3D 9 probes pass with it in UTM as before (12 of 12, six of them full-screen). On
 a desktop OpenGL host the common code is what Vista runs already (its 12 pixel tests pass on
 the Intel host); Windows 7 on such a host has not run it yet.
+
+## OpenGL (2026-11-25)
+
+Release 0.4.0 installs no OpenGL driver: a program gets Windows' own software OpenGL 1.1.
+Mesa's OpenGL part for the virgl driver (`viogpu_wgl.dll`, with `libglapi.dll`) was built all
+along and never installed or run. What it took to make it draw and show a frame:
+
+- **The driver's name in the adapter's driver key.** Windows' `opengl32.dll` asks the
+  graphics kernel which OpenGL driver an adapter has; the kernel reads `OpenGLDriverName`,
+  `OpenGLVersion` and `OpenGLFlags` (and the three `...Wow` values for 32-bit programs) from
+  the key where `UserModeDriverName` is. Both INFs set them and copy the two DLLs, 64-bit and
+  32-bit.
+- **A way to the screen that Vista and Windows 7 have.** The upstream code shows a window's
+  frame through a Direct3D 11 device and a DXGI swap chain as Windows 10 has them (flip
+  model, tearing flag, the debug layer), at feature level 10 only. Patch `patches-win7/0043`
+  makes that swap chain one Windows 7 can create. It still needs Direct3D 10 from our
+  driver, which Vista's build and a host without desktop OpenGL do not have. So there is a
+  second way, `d3d9ex_framebuffer.cpp` (ours; patch `patches-virgl/0044` chooses it by
+  default, `RIPPLE_GL_PRESENT=dxgi` asks for the swap chain): a Direct3D 9Ex device on the
+  window, the colour buffers as shareable Direct3D render-target textures which the OpenGL
+  driver opens by their shared handle and draws into, and at a swap a copy of the back
+  buffer's texture to the window's Direct3D back buffer and a present. The frame stays on the
+  GPU.
+- **Opening a shared resource from the OpenGL side.** Our bridge to the kernel
+  (`gdikmt_d3dkmt.c`) had an open path that had never run. `D3DKMTOpenResource` refused it:
+  Direct3D stores a description with a resource it shares (68 bytes here), and the open has
+  to offer room for it.
+- **The swap interval where programs look for it.** Mesa names `WGL_EXT_swap_control` in the
+  WGL extension list only. SDL 1.2, which the Quake III engine games use, looks for it in the
+  GL extension list and nowhere else, as the graphics vendors' drivers name it in both. Not
+  finding it, such a game never asks for a swap interval and keeps the default of 1: a
+  timedemo then runs at the display's 60 frames a second whatever the GPU could do. Patch
+  `patches-virgl/0046` adds the name to the GL list on Windows. (The framebuffer keeps an
+  interval above 0 by waiting for the display's next refresh before it presents; the
+  Direct3D device itself presents at once, because changing its interval would cost a device
+  reset and with it the shared textures.)
+- **Closing what the bridge opened.** The winsys left every shared resource alone when its
+  last reference went, because in the Direct3D driver the runtime owns what it opens. The
+  OpenGL bridge opens for itself, so each window resize left two textures open. Patch
+  `patches-virgl/0045` closes those.
+- **Reading a window's pixels back on Vista.** Vista refuses a CPU lock of the allocation
+  behind a window buffer once the OpenGL side has opened it (`STATUS_INVALID_PARAMETER`;
+  Windows 7 grants it), so `glReadPixels` on the window got zeros while the screen was right.
+  The framebuffer now imports its buffers as framebuffers, and on Vista the driver maps such a
+  resource through a copy, as it maps a multisampled one: a blit of the wanted part to a
+  texture of its own, which locks as usual, and a blit back after a write (patch
+  `patches-vista/0109`).
+
+`RIPPLE_GL_LOG=FILE` makes the framebuffer and the bridge say what they made, what failed
+and, when a window goes, how its presents' time split between waiting for the display, the
+copy and the present.
+
+Results (2026-11-26). `tools/win7-hello/gltest.c` with a frame count draws a triangle, reads
+its pixel back, reads the same pixel off the screen, reads a small texture and the front
+buffer back, does the first two again after resizing its window, and times frames at swap
+interval 0 and 1. The game is OpenArena 0.8.8's timedemo of
+`demo088-test1` in a 1024x768 window (`+timedemo 1 +demo demo088-test1 +set nextdemo quit`,
+3398 frames).
+
+| | Windows' software OpenGL | Mesa on the host GPU |
+| --- | --- | --- |
+| Windows 7 SP1, Linux host with an Intel UHD 630 (desktop OpenGL), installed through the INF | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 4.3 (Compatibility Profile) Mesa 24.3.4 |
+| the triangle read back, and on the screen; again after a resize | red, red | red, red (64-bit and 32-bit) |
+| 30 frames at swap interval 1; 300 at interval 0 | no such extension | 0.5 s; 0.03 s |
+| OpenArena timedemo | 1.9 frames/s (1818 s) | 324 frames/s (10.5 s) |
+| the same, full screen at 1024x768 (a display mode change and back) | | 431 frames/s (7.9 s), right picture |
+| a single-buffered window drawn to and flushed (`tools/win7-hello/glsingle.c`) | | red read back and on the screen (64-bit and 32-bit) |
+| Windows 7 SP1 in UTM (a host that offers OpenGL ES) | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 2.1; the same GL test passes (64-bit and 32-bit) |
+| Windows Vista SP2 on the Linux host, installed through the INF | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 4.3; the same GL test passes (64-bit and 32-bit); OpenArena timedemo in a 640x480 window 258 frames/s |
+| Windows Vista SP2 in UTM, installed through the INF | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 2.1; the same GL test passes (64-bit and 32-bit) |
+
+The timedemos ran next to other guests that were not being measured, so these frame rates are
+floors rather than best cases. On both systems the Direct3D pixel tests of `tools/vista` give the same
+result with this build as before it (Vista 12 of 12; Windows 7 10 of 12, the other two being
+the Vista-only video-processor test). Before patch 0046 the same run gave 60.0 frames a second.
+
+Known gaps:
+
+- **The DXGI swap chain way does not work on Windows 7** (`RIPPLE_GL_PRESENT=dxgi`): the
+  window stays black and the program ends with an access violation. The Direct3D 9Ex way is
+  the default on both systems and keeps the frame on the GPU just the same.
+- Only this one game and the test program have run.

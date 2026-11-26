@@ -185,7 +185,13 @@ static void fill_halinfo(void)
         cur = add_mode((WORD)shared.width, (WORD)shared.height, (WORD)shared.bpp);
     h->dwModeIndex = cur;
     h->lpModeInfo = far16(shared.modes);
-    h->lpdwFourCC = 0;
+    shared.fourcc[0] = 0x31545844UL;        /* DXT1 .. DXT5: the DLL offers them (DDCORECAPS) only
+                                           with the Direct3D 8 interface on */
+    shared.fourcc[1] = 0x32545844UL;
+    shared.fourcc[2] = 0x33545844UL;
+    shared.fourcc[3] = 0x34545844UL;
+    shared.fourcc[4] = 0x35545844UL;
+    h->lpdwFourCC = far16(shared.fourcc);
     h->dwFlags |= RDD_HALINFO_ISPRIMARYDISPLAY | RDD_HALINFO_MODEXILLEGAL;
     {
         FARP dgroup;                        /* "the base display driver's instance": DGROUP */
