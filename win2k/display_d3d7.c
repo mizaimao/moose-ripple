@@ -178,9 +178,9 @@ static void release_blocks(D7_CONTEXT *c);
 static void stencil_state(const D7_CONTEXT *c, const DD_SLOT *z, ULONG *stencil, ULONG *ref);
 static HSEMAPHORE registry;
 static D8_BUFFER *buffers;
-static WORD *indexScratch;      /* indices copied out of the process before use */
+static BYTE *indexScratch;      /* indices copied out of the process before use (16- or 32-bit) */
 static RB2K_D3D8_PROGRAM *programScratch;   /* a translated pixel shader on its way */
-static ULONG indexScratchCount;
+static ULONG indexScratchCount;   /* bytes */
 static D7_CONTEXT contexts[MaxContexts];
 static ULONG lastContext;
 static D7_TEXTURE *textures;
@@ -1450,6 +1450,7 @@ typedef struct {
     const BYTE *inline_;   /* immediate vertices in the command snapshot */
     ULONG first, primitives, kind;
     const WORD *indices;   /* relative to first, or NULL */
+    const ULONG *indices32;   /* 32-bit indices of a Direct3D 8 or 9 draw, in place of indices */
     ULONG indexStride;     /* WORDs per triangle record for INDEXEDTRIANGLELIST */
     /* A DirectX 8 draw from stream zero: its data and size in the process,
      * the signed byte offset of vertex zero, the stride and vertex format. */
@@ -1514,6 +1515,7 @@ static ULONG prim_vertex(const PRIMS *p, ULONG t, ULONG corner, ULONG *flat)
         break;
     }
     if (p->indices) { *flat = p->indices[*flat]; n = p->indices[n]; }
+    else if (p->indices32) { *flat = p->indices32[*flat]; n = p->indices32[n]; }
     return n;
 }
 
@@ -3003,14 +3005,14 @@ static void trace8(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG op, UL
     }
 }
 
-static BOOL index_scratch(ULONG count)
+static BOOL index_scratch(ULONG bytes)
 {
-    if (count <= indexScratchCount) return TRUE;
+    if (bytes <= indexScratchCount) return TRUE;
     if (indexScratch) EngFreeMem(indexScratch);
     indexScratchCount = 0;
-    indexScratch = EngAllocMem(0, count * sizeof(WORD), 'i8bR');
+    indexScratch = EngAllocMem(0, bytes, 'i8bR');
     if (!indexScratch) return FALSE;
-    indexScratchCount = count;
+    indexScratchCount = bytes;
     return TRUE;
 }
 
@@ -3067,21 +3069,23 @@ static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULON
         D8_BUFFER *b = find_buffer(c->local, c->indexHandle);
         ULONG indices = type == RbTriangleList ? 3 * count : type == RbLineList ? 2 * count :
                         type == RbPointList ? count : type == RbLineStrip ? count + 1 : count + 2, size;
-        if (!b || b->owner != c->owner || c->indexStride != 2 || !b->global->fpVidMem || count > 0xffff ||
-            indexByte > (size = b->global->dwLinearSize) || indices > (size - indexByte) / 2) {
+        ULONG width = c->indexStride;   /* bytes an index: 2, or 4 for 32-bit index buffers */
+        if (!b || b->owner != c->owner || (width != 2 && width != 4) || !b->global->fpVidMem || count > 0xffff ||
+            indexByte > (size = b->global->dwLinearSize) || indices > (size - indexByte) / width) {
             skip_vertex(c, count, 15);
             return DD_OK;
         }
-        if (!index_scratch(indices)) return DDERR_OUTOFMEMORY;
+        if (!index_scratch(indices * width)) return DDERR_OUTOFMEMORY;
         __try {
             const BYTE *from = (const BYTE *)b->global->fpVidMem + indexByte;
-            EngProbeForRead((PVOID)from, indices * sizeof(WORD), 1);
-            RtlCopyMemory(indexScratch, from, indices * sizeof(WORD));
+            EngProbeForRead((PVOID)from, indices * width, 1);
+            RtlCopyMemory(indexScratch, from, indices * width);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             skip_vertex(c, count, 16);
             return DD_OK;
         }
-        prims.indices = indexScratch;
+        if (width == 4) prims.indices32 = (const ULONG *)indexScratch;
+        else prims.indices = (const WORD *)indexScratch;
     }
     if (c->fvf & 1) return program_triangles(c, &prims);
     if (c->pixelShader) return shader_triangles(c, &prims);
@@ -4538,7 +4542,7 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     c->maxUserClipPlanes = x->wMaxUserClipPlanes;   /* in world space for object-space draws, in clip space for vertex shaders */
     c->maxPointSize = RB2K_POINT_SIZE_MAX;              /* 64 */
     c->maxPrimitiveCount = 0xffff;
-    c->maxVertexIndex = 0xffff;
+    c->maxVertexIndex = 0xffffff;   /* past 0xffff: 32-bit index buffers */
     /* More streams only for vertex shaders, whose declarations say where each is read. */
     c->maxStreams = d->vertexShaders ? RB_VS_STREAMS : 1;
     c->maxStreamStride = 255;
