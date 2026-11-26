@@ -2260,7 +2260,43 @@ one message between its two queues and the configuration (`MessageNumberLimit` 1
 that does ran the whole benchmark at its usual pace on both hosts (first two tests 200 s, CPU
 tests 48 s on the first host, next to another guest). The slow run reported earlier with
 message interrupts was a disturbed run of the kind described in `test-vms.md`, not an effect
-of the interrupts. A timed pair is still to be made; until then the change stays out.
+of the interrupts. The timed runs are below.
+
+Four timed runs on the first host alone, the same disk and driver files, 3DMark06 registered,
+the timing report on. "Real frame rate" is frames of 10 ms or more over the performance
+counter's time; "tick clock" is how far Windows' tick clock moved in that time (the timing
+report compares the two for every 256 frames):
+
+| interrupt | half-millisecond timer | 3DMarks | SM2.0 | HDR/SM3.0 | CPU | real frame rate | tick clock |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| line (as released) | on | 11738 | 4111 | 4598 | 8434 | 41.5 | 98% |
+| one message | on | 12461 | 5061 | 4729 | 5562 | 44.2 | 92% |
+| one message | off (`FineTimer` 0) | 12344 | 4454 | 4757 | 8354 | 44.1 | 97% |
+| one message, kept off the first processor | on | 12476 | 4987 | 4729 | 5905 | 44.0 | 87% |
+
+- The message interrupt gives 6% more frames a second by real time, the same in all three
+  runs.
+- With the driver's half-millisecond timer on, the guest's tick clock then loses most of its
+  ticks during the first two tests (it moves 21 to 63% of real time for minutes) and makes
+  them up during the CPU tests (at two to six times real time). 3DMark06 measures by that clock: its SM2.0
+  score comes out too high and its CPU score too low, and the first two tests last 221
+  seconds of the host's time instead of 185. Those two rows' scores are not measurements.
+- Keeping the message off the processor that takes the clock interrupt (an affinity policy
+  in the device's registry key) changes nothing, so it is not that one processor is kept busy.
+- With the half-millisecond timer off the clock holds much better (the CPU score is right
+  again), though it still dips in the first test; the scores of that row are plausible, and
+  5% above the line interrupt's.
+
+Why the clock suffers: every clock interrupt is acknowledged at the real-time clock's port,
+which waits for QEMU's lock; with the message interrupt the guest keeps QEMU's drawing
+thread busier (the host GPU is 93 to 96% busy instead of 88 to 92%), the lock is free less
+often, and at 2,049 interrupts a second the acknowledgements no longer get through. On the
+second host (QEMU 10.0) a run with the message interrupt kept its usual timing, so this is
+also a matter of the host. As it stands the message interrupt is not safe to switch on by
+default: a clock that loses time shows as slow motion and wrong timing in games. What would
+make it safe is the driver giving up its half-millisecond timer whenever the tick clock
+falls behind, which it already does on an emulated processor; that is the next step, and the
+change stays out until then.
 
 What the guest's processors do at the host's device registers was counted again for one
 guest alone (`tools/win7-debug/rig/pioports.sh` with the guest's processor threads): 6,700
