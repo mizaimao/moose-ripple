@@ -1,5 +1,7 @@
-Vista: the private data that marks an allocation as a display primary, as the kernel
-driver's copy of this header defines it (windows/kmd/shared/viogpum.h).
+The private data that marks an allocation as a display primary, as the kernel driver's
+copy of this header defines it (windows/kmd/shared/viogpum.h). First for Vista, whose kernel
+driver places a primary by it; since the cached-memory change also for Windows 7, where it
+keeps a primary's memory write-combined.
 
 --- a/src/virtio/wddm/viogpu_wddm_driver.h
 +++ b/src/virtio/wddm/viogpu_wddm_driver.h
