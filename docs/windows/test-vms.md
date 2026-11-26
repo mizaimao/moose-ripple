@@ -224,20 +224,36 @@ from the Run box (`shutdown /s /t 0`), roll back, and run a load test to return 
 ## 3DMark06 against the GeForce 9600 GT, like for like (2026-11-26)
 
 How far our driver on the host's Intel GPU is from a real card of the period, with everything
-else the same: one Windows 7 disk, the CPU model, four cores and 4 GB that Proxmox gives VM
-100, and 3DMark06's default run (1280x1024, no anti-aliasing), once on the virtio GPU and once
-on the card.
+else the same: one disk for each system, the CPU model, four cores and 4 GB of the owner's VM
+of that system (VM 100 for Windows 7, VM 101 for Vista), and 3DMark06's default run
+(1280x1024, no anti-aliasing), once on the virtio GPU and once on the card.
 
-| 3DMark06 1.2.1, default run | 3DMarks | SM2.0 score | HDR/SM3.0 score | CPU score |
+| Windows 7: 3DMark06 1.2.1, default run | 3DMarks | SM2.0 score | HDR/SM3.0 score | CPU score |
 | --- | --- | --- | --- | --- |
 | release 0.4.0 on the host's Intel UHD 630 (virgl) | 10881 | 3480 | 4554 | 8261 |
+| the driver with its shaders kept (`mesa-win7.md`, "Shaders made for every draw") | 11502 | 3918 | 4600 | 8426 |
 | GeForce 9600 GT, NVIDIA's driver 341.92 | 9655 | 4165 | 2892 | 8317 |
 
 The SM2.0 score is 120 times the mean frame rate of the first two graphics tests, the HDR/SM3.0
-score 100 times that of the last two: 29.0 against 34.7 frames a second in the first pair
-(84% of the card), 45.5 against 28.9 in the second (157%). The CPU scores agree, as they must.
-One run each. During the virgl run the host GPU's render engine was 85 to 95% busy in the
-first test, about 50% in the second (Firefly Forest), and 75 to 90% in the last two.
+score 100 times that of the last two. Release 0.4.0: 29.0 against 34.7 frames a second in the
+first pair (84% of the card), 45.5 against 28.9 in the second (157%). With the shaders kept:
+32.7 frames a second in the first pair (94%), 46.0 in the second (159%). The CPU scores agree,
+as they must. One run each. During release 0.4.0's run the host GPU's render engine was 85 to
+95% busy in the first test, about 50% in the second (Firefly Forest), and 75 to 90% in the
+last two.
+
+| Vista SP2: 3DMark06 1.2.1, default run | 3DMarks | SM2.0 score | HDR/SM3.0 score | CPU score |
+| --- | --- | --- | --- | --- |
+| the driver with its shaders kept, on the host's Intel UHD 630 (virgl) | 11016 | 3776 | 4462 | 7292 |
+| GeForce 9600 GT, NVIDIA's driver 341.92 | 10145 | 4448 | 3033 | 7823 |
+
+Vista, the same day, the same driver sources as the second Windows 7 row: 31.5 against 37.1
+frames a second in the first pair (85% of the card), 44.6 against 30.3 in the second (147%).
+The card is 5 to 7% faster on Vista than on Windows 7 in both pairs, our driver 3 to 4% slower,
+so the gap in the first pair is wider there. A first virgl run with the driver's timing report on
+scored 11184 (SM2.0 3776, HDR/SM3.0 4562, CPU 7626): the same SM2.0 score, and a CPU score 4%
+apart, which is how much that test varies on Vista between runs. The host GPU was 85 to 90%
+busy in the first test, 65 to 90% in Firefly Forest and 70 to 90% in the last two.
 
 The same prepared disk and guest shape on a second host with the same GPU model but QEMU 10.0
 and virglrenderer 1.1 (the first has QEMU 9.2 and virglrenderer 0.10.4) scored 10728 3DMarks
@@ -247,17 +263,27 @@ the table.
 The run is unattended, because the card's picture cannot be seen from the host:
 
 - `tools/win7-debug/rig/refvm.sh` starts the guest as a private QEMU, with the virtio GPU or
-  with the card as VM 100 has it, on a throwaway overlay over one prepared disk. No VM
-  configuration changes. `busylog.sh` beside it logs the GPU's busy share and QEMU's threads.
+  with the card as the owner's VM has it, on a throwaway overlay over one prepared disk
+  (`REF=vref` for Vista: VM 101's CPU flags, and the card behind the first PCIe root port as
+  Proxmox places it there, so that Vista finds the card where its installed driver expects
+  it). No VM configuration changes. `busylog.sh` beside it logs the GPU's busy share and
+  QEMU's threads.
 - The prepared disk: test mode, the driver, 3DMark06, and `tools/win7-bench/setup.cmd` run once
   elevated. That makes a second disk the volume R: (results, crash dumps), turns off the
   automatic restart after a crash, and adds a logon task that runs `auto.cmd` from the CD's
   `3dm` folder. `auto.cmd` does nothing unless `go.txt` there names a run; it then runs
   `3dmfull.ps1` once for that name (start, press Run, a mark at each change of the full-screen
   size, the score window's text, a 50-minute cap; on Vista `3dmfull.cmd`, the same in a batch
-  file, because Vista's PowerShell 1.0 does not run the script), writes everything to the first serial port
-  and to R:, and shuts Windows down. The helpers it uses are the `bench-*.c` programs in the
-  same folder (built with llvm-mingw like the other test programs).
+  file, because Vista's PowerShell 1.0 does not run the script), writes everything to R:
+  (`marks-NAME.txt`, `run-NAME.txt`, `run-NAME-3dm.txt`), and shuts Windows down. The helpers
+  it uses are the `bench-*.c` programs in the same folder (built with llvm-mingw like the
+  other test programs).
+- The marks are not written to the serial port. They were, and on Vista's first run a write to
+  COM1 never returned: the launcher stood still holding the port, 3DMark06 waited at its main
+  window, and Windows could not shut down either. The debug kernel driver writes its log to
+  the same port directly, beside Windows' own serial driver. While the guest runs, the host
+  reads the marks from the data disk's image, mounted read-only for a moment:
+  `mount -o loop,offset=65536,ro vref-data.raw DIR; cat DIR/marks-NAME.txt; umount DIR`.
 - `auto.cmd` calls `env.cmd` before the run and `post.cmd` after it when they are next to it on
   the CD. The sets in `tools/win7-bench`: `timing` (the driver's timing report into a file of
   the run's name on R:), `swap` (test builds of the user-mode driver, `umd32-test.dll` and
@@ -273,10 +299,19 @@ The run is unattended, because the card's picture cannot be seen from the host:
   a new device there and gives it the Standard VGA driver, because a test-signed driver loses
   the automatic ranking against a signed one. Boot it once with the virtio GPU, install our
   driver again through Device Manager (Have Disk, from a copy of the driver store folder),
-  restart, shut down, and take the overlays from that.
+  restart, shut down, and take the overlays from that. Without the clicks:
+  `tools/win7-bench/forcedrv.c` (`forcedrv.exe INF`, run elevated) puts the driver of a setup
+  file on the virtio GPU whatever Windows ranks higher, and asks for nothing when the
+  publisher was trusted at the first install. Windows then takes the files of the package it
+  already holds under that name, so newer driver files go in after it. The settling can be
+  done on another host when QEMU there is started with the same machine type and devices
+  (`refvm.sh` with `SHARED=1 ISO=...`): Vista's disk was settled on the second host, copied to
+  the first as one image and started there with our driver at once.
 
 The order that worked: the virgl run first, then ten minutes with no guest on the host, then
 the card's one boot (kernel log streaming to another machine), then a restart of the host.
+Before the card's boot, see the launcher through one whole unattended run on the virtio GPU
+with the same CD: the card's boot cannot be watched or repeated.
 
 ### Quiet runs and disturbed runs
 

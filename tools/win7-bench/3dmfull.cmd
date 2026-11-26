@@ -1,7 +1,8 @@
 @echo off
 rem 3DMark06's default run from start to score without PowerShell (Vista has none unless it
 rem was added): the same steps and marks as 3dmfull.ps1, with the helper programs next to this
-rem file. Marks go to the first serial port and to standard output.   3dmfull.cmd [CAP_MINUTES]
+rem file. Marks go to R:\marks-NAME.txt (NAME is auto.cmd's label) and to standard output.
+rem 3dmfull.cmd [CAP_MINUTES]
 setlocal enabledelayedexpansion
 set "pkg=%~dp0"
 set "game=C:\Program Files (x86)\Futuremark\3DMark06"
@@ -90,6 +91,6 @@ call :launch started-again
 exit /b 0
 
 :mark
-echo MARK !time:~0,8! %1 >COM1
+if defined label echo MARK !time:~0,8! %1 >>"R:\marks-%label%.txt"
 echo MARK !time:~0,8! %1
 exit /b 0
