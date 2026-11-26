@@ -920,6 +920,41 @@ Pictures checked through VNC after B: Car Chase, Dragothic and Lobby at high det
 Advanced Pixel Shader lake (its reflections are such textures) look as before. Dragothic high is
 still below the 82.5 fps of the runtime's own vertex processing.
 
+**Vertex and index buffers in the driver's memory** (2026-11-26, timed 13:13 EST, same setup):
+**30226 3DMarks** (14716 before). Car Chase 297.9 / 95.3 fps, Dragothic 534.4 / 271.6, Lobby
+403.0 / 180.6, Nature 346.1, fill rate 10136.4 / 14293.2 MTexels/s, High Polygon Count 556.8 /
+334.0 MTriangles/s (53.2 / 48.4 before), EMBM 938.0, DOT3 666.2, Vertex Shader 421.8, Pixel
+Shader 661.2, Advanced Pixel Shader 749.7, Point Sprites 4.2 MSprites/s.
+
+How it was found, without a profiler on the host: during Dragothic high detail the guest's
+processor ran guest code 91% of the time while QEMU's main thread (virglrenderer and the host's
+OpenGL) was busy only 47% (`/proc/<pid>/task/*/stat`), so the guest was the limit. Samples of the
+guest's instruction pointer (`info registers` through `qm monitor`) put 27% in one `rep movsd` of
+`msvcrt.dll`'s memcpy; stack samples (`stop`, `x /64wx $esp`, `cont`) and the code around the
+return addresses in `ripplegl.dll` named the caller: Mesa's `u_vbuf_upload_buffers`, copying the
+client-side vertex arrays of every draw, 170 KB to 1 MB a call. The draw trace showed why: the
+runtime kept every vertex and index buffer in its own system memory (caps `DDSCAPS_SYSTEMMEMORY`),
+so the HAL could not know when one changed and handed each draw's whole vertex range to OpenGL
+again, about 4 MB a frame, mostly from buffers the program fills once.
+
+Now, with hardware vertex processing (`D3D8` = `"2"`), the device reports driver-allocated
+buffers (`D3DDEVCAPS_HWVERTEXBUFFER`, `D3DDEVCAPS_HWINDEXBUFFER`, and `DDSCAPS_EXECUTEBUFFER` in
+DirectDraw's surface caps), and DirectDraw creates them through the driver's execute-buffer
+callbacks (`DDHALINFO.lpDDExeBufCallbacks`). The driver allocates them in a heap in the shared
+arena (DirectDraw may free one from another process), marks their surface records and counts
+the Locks that may write. A draw from a buffer marked static (`DDSCAPS2_HINTSTATIC`) uses its
+OpenGL buffer object, uploaded again only after a write; an indexed draw reads its indices from
+the index buffer's object as they are. In the Dragothic run that is 12.7 MB uploaded in all, where
+the old path copied about 1.9 GB. `D3D8Buffers` = `"0"` (same key) turns it off.
+
+Traps: the callback table pointer in the HAL description is 16:16 like the other tables (a flat
+address made DirectDraw allocate execute buffers in video memory itself, and reading before such
+a buffer for a header faulted). Dynamic buffers stay on the old path: the runtime appends
+DrawPrimitiveUP vertices to its own dynamic buffers after a single Lock, so their later writes are
+not seen (d9pixels lost four cases until only static buffers went to buffer objects). Checked on
+the rig: d9pixels 48/49 (the one failure is the known `vs1_inputs` declaration the runtime
+refuses with hardware vertex processing), d8pixels 23/23, Dragothic at both details through VNC.
+
 Advanced Pixel Shader's white boat and jetty: a trace with each draw's state (new trace lines)
 showed nine draws a frame with no texture on the stage their shader samples, and about one
 refused CanCreateSurface a frame. The refused format was FOURCC 63: for mipmapped Q8W8V8U8
