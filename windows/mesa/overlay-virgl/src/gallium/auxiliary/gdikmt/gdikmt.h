@@ -52,7 +52,11 @@ struct gdikmt_openallocation {
    UINT PrivateDriverDataSize;                 /* out of the query */
    void *pTotalBuffer;                         /* holds the private data of all allocations */
    UINT TotalBufferSize;                       /* out of the query */
+   UINT RuntimeDataSize;                       /* out of the query: what the runtime that made
+                                                * the resource stored with it */
    HANDLE hResource;                           /* out of the open */
+   bool CallerCloses;                          /* out of the open: nobody else owns hResource,
+                                                * the caller destroys it when it is done */
 };
 
 /* One submission of the context's command buffer. */

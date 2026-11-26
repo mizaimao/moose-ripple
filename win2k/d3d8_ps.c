@@ -47,9 +47,17 @@ typedef struct {
     unsigned int written;           /* r0, r1 and t0..t3 written so far: bits 0-1, 8-11 */
     unsigned int pads;              /* texm3x2/texm3x3 dot products so far */
     unsigned int bump;              /* version 1: texbem or texbeml read the bump constants */
+    const unsigned int *streamBases;  /* vertex shaders: the word each stream starts at, or NULL */
     /* Results waiting to be written: register, write mask, result slot. */
     char pendDest[2][24];
     unsigned int pendMask[2], pending;
+    /* Vertex shader flow control: whether integer and boolean constants are given (RB_VS_FLOW),
+     * where each label's code starts, the loops open (counter TEMP[56+n], aL TEMP[60+n]) with their
+     * kind and integer constant, the ifs open, the subroutines being inlined, whether the current
+     * instruction reads c[aL + n], and the defi and defb registers with their immediates. */
+    unsigned int flow, labelAt[16], loops, loopIsLoop[4], ifs, calls, relLoop, defInt, defBool;
+    char loopInt[4][24];
+    unsigned char defIntImm[16], defBoolImm[16];
     RB_PS_INFO *info;
 } PS;
 
@@ -130,7 +138,7 @@ static int reg_name(PS *s, unsigned int type, unsigned int num, char *out, unsig
     out[0] = 0;
     switch (type) {
     case RegTemp:
-        if (num > 1) return 0;
+        if (num > (s->minor == 4 ? 5u : 1u)) return 0;   /* r0..r5 in version 1.4 */
         cat(out, size, "TEMP["); cat_number(out, size, num); cat(out, size, "]");
         return 1;
     case RegInput:
@@ -144,7 +152,8 @@ static int reg_name(PS *s, unsigned int type, unsigned int num, char *out, unsig
         cat(out, size, "]");
         return 1;
     case RegTexture:
-        if (num >= RB_PS_COORD_SETS) return 0;
+        /* Version 1.4 reads t# only as texld and texcrd coordinates (texture14). */
+        if (num >= RB_PS_COORD_SETS || s->minor == 4) return 0;
         cat(out, size, "TEMP["); cat_number(out, size, 8 + num); cat(out, size, "]");
         return 1;
     }
@@ -503,11 +512,80 @@ static int texture_op(PS *s, unsigned int op, const unsigned int *p)
     return 1;
 }
 
-static int parameters(unsigned int op)
+/* Version 1.4 texture instructions. texld rN, src samples sampler N at src: a coordinate set t#,
+ * or in the second phase a register r# (a dependent read); texcrd rN, t# copies the coordinates;
+ * texkill takes r# or t#. A t# source may be divided by its z or w (_dz, _dw), and selects xyz or
+ * xyw by its swizzle. */
+enum { ModDz = 9, ModDw = 10 };
+static int texture14(PS *s, unsigned int op, const unsigned int *p)
+{
+    unsigned int n = reg_num(p[0]), m, mod;
+    char dst[16], src[32], samp[16], mask[6];
+    dst[0] = src[0] = samp[0] = 0;
+    if (op == OpTexkill) {
+        if (reg_type(p[0]) == RegTexture && n < 6) {
+            s->info->coords |= 1u << n;
+            cat(src, sizeof(src), "IN["); cat_number(src, sizeof(src), 2 + n); cat(src, sizeof(src), "]");
+        } else if (reg_type(p[0]) == RegTemp && n < 6) {
+            cat(src, sizeof(src), "TEMP["); cat_number(src, sizeof(src), n); cat(src, sizeof(src), "]");
+        } else return fail(s, RbPsRegister, p[0]);
+        line(s, "KILL_IF ", src, ".xyzz", 0, 0, 0, 0);
+        return 1;
+    }
+    m = reg_num(p[1]);
+    mod = (p[1] >> 24) & 15;
+    if (reg_type(p[0]) != RegTemp || n > 5 || (p[0] & 0x0ff00000u)) return fail(s, RbPsRegister, p[0]);
+    cat(dst, sizeof(dst), "TEMP["); cat_number(dst, sizeof(dst), n); cat(dst, sizeof(dst), "]");
+    if (reg_type(p[1]) == RegTexture && m < 6) {
+        s->info->coords |= 1u << m;
+        cat(src, sizeof(src), "IN["); cat_number(src, sizeof(src), 2 + m); cat(src, sizeof(src), "]");
+    } else if (reg_type(p[1]) == RegTemp && m < 6 && op == OpTex && !mod) {
+        cat(src, sizeof(src), "TEMP["); cat_number(src, sizeof(src), m); cat(src, sizeof(src), "]");
+    } else return fail(s, RbPsRegister, p[1]);
+    if (mod == ModDz || mod == ModDw) {
+        /* x and y divided by z or w, into TEMP[12]. */
+        line(s, "RCP TEMP[13].x, ", src, mod == ModDz ? ".zzzz" : ".wwww", 0, 0, 0, 0);
+        line(s, "MUL TEMP[12].xy, ", src, ".xyyy, TEMP[13].xxxx", 0, 0, 0, 0);
+        line(s, "MOV TEMP[12].zw, IMM[0].yyyy", 0, 0, 0, 0, 0, 0);
+        src[0] = 0;
+        cat(src, sizeof(src), "TEMP[12]");
+    } else if (mod) return fail(s, RbPsModifier, p[1]);
+    else swizzle(p[1], src, sizeof(src));
+    if (op == OpTex) {
+        s->info->samplers |= 1u << n;
+        cat(samp, sizeof(samp), "SAMP["); cat_number(samp, sizeof(samp), n); cat(samp, sizeof(samp), "]");
+        line(s, "TEX ", dst, ", ", src, ", ", samp, stage_target(s, n));
+    } else {
+        mask_text((p[0] >> 16) & 15 ? (p[0] >> 16) & 15 : 15, mask, sizeof(mask));
+        line(s, "MOV ", dst, mask, ", ", src, 0, 0);
+    }
+    return 1;
+}
+
+/* Version 1.4 bem rN.xy, src0, src1 (first phase): src0 moved by the bump matrix of stage N times
+ * src1, the matrix (00, 01, 10, 11) in CONST[RB_PS_CONSTANTS + N] as for texbem. */
+static int bem(PS *s, const unsigned int *p)
+{
+    OPERAND a, b;
+    char ba[48], bb[48], m[16];
+    unsigned int n = reg_num(p[0]);
+    if (reg_type(p[0]) != RegTemp || n >= RB_PS_COORD_SETS) return fail(s, RbPsRegister, p[0]);
+    if (!source(s, p[1], 0, &a) || !source(s, p[2], 1, &b)) return 0;
+    m[0] = 0;
+    cat(m, sizeof(m), "CONST["); cat_number(m, sizeof(m), RB_PS_CONSTANTS + n); cat(m, sizeof(m), "]");
+    line(s, "MOV TEMP[14], ", render(&b, bb, sizeof(bb)), 0, 0, 0, 0, 0);   /* src1 may carry a swizzle */
+    line(s, "MUL TEMP[15].xy, ", m, ".xyyy, TEMP[14].xxxx", 0, 0, 0, 0);
+    line(s, "MAD TEMP[15].xy, ", m, ".zwww, TEMP[14].yyyy, TEMP[15]", 0, 0, 0, 0);
+    line(s, "ADD TEMP[16].xy, ", render(&a, ba, sizeof(ba)), ", TEMP[15]", 0, 0, 0, 0);
+    return finish(s, p[0], 0);
+}
+
+static int parameters(unsigned int op, unsigned int minor)
 {
     switch (op) {
     case OpNop: case OpPhase: return 0;
-    case OpTexcoord: case OpTexkill: case OpTex: case OpTexdepth: return 1;
+    case OpTexcoord: case OpTex: return minor == 4 ? 2 : 1;   /* texcrd and texld in version 1.4 */
+    case OpTexkill: case OpTexdepth: return 1;
     case OpMov: case OpTexbem: case OpTexbeml: case OpTexreg2ar: case OpTexreg2gb: case OpTexm3x2pad:
     case OpTexm3x2tex: case OpTexm3x3pad: case OpTexm3x3tex: case OpTexm3x3vspec: case OpTexreg2rgb:
     case OpTexdp3tex: case OpTexm3x2depth: case OpTexdp3: case OpTexm3x3: return 2;
@@ -531,7 +609,7 @@ static int walk(PS *s, const unsigned int *tok, unsigned int count, int pass, un
         int n;
         if (t == OpEnd) return 1;
         if (op == OpComment) { i += 1 + ((t >> 16) & 0x7fff); continue; }
-        n = parameters(op);
+        n = parameters(op, s->minor);
         if (n < 0 || (t & 0x80000000u) || ((t & COISSUE) && texture_family(op)))
             return fail(s, RbPsOpcode, t);
         if (i + 1 + (unsigned int)n > count) return fail(s, RbPsTruncated, i);
@@ -548,8 +626,12 @@ static int walk(PS *s, const unsigned int *tok, unsigned int count, int pass, un
         } else if (op != OpDef && op != OpNop) {
             const unsigned int *p = tok + i + 1;
             if (!(t & COISSUE)) flush(s);
+            if (s->minor == 4 && op == OpPhase) { i += 1; continue; }   /* registers simply carry over */
+            if (s->minor == 4 && op == OpBem) { if (!bem(s, p)) return 0; i += 4; continue; }
             if (op == OpPhase || op == OpBem || op == OpTexdepth) return fail(s, RbPsOpcode, op);
-            if (texture_family(op)) { if (!texture_op(s, op, p)) return 0; }
+            if (s->minor == 4 && (op == OpTex || op == OpTexcoord || op == OpTexkill)) { if (!texture14(s, op, p)) return 0; }
+            else if (s->minor == 4 && texture_family(op)) return fail(s, RbPsOpcode, op);
+            else if (texture_family(op)) { if (!texture_op(s, op, p)) return 0; }
             else {
                 if (!arithmetic(s, op, p, (t & COISSUE) ? 1 : 0)) return 0;
                 if (reg_type(p[0]) == RegTemp) s->written |= 1u << reg_num(p[0]);
@@ -611,7 +693,8 @@ enum {
 };
 enum { Reg2Temp = 0, Reg2Input = 1, Reg2Const = 2, Reg2Texture = 3, Reg2ColorOut = 8, Reg2Sampler = 10 };
 /* Vertex shader register types. */
-enum { RegVsAddr = 3, RegVsRastOut = 4, RegVsAttrOut = 5, RegVsTexOut = 6 };
+enum { RegVsAddr = 3, RegVsRastOut = 4, RegVsAttrOut = 5, RegVsTexOut = 6, RegVsConstInt = 7, RegVsConstBool = 14,
+       RegVsLoop = 15, RegVsLabel = 18 };
 enum { Mod2Abs = 11, Mod2AbsNeg = 12 };
 
 static unsigned int reg2_type(unsigned int t) { return ((t >> 28) & 7) | ((t >> 8) & 0x18); }
@@ -898,7 +981,7 @@ static int uses_bump(const unsigned int *tokens, unsigned int count)
         if (op == OpEnd) break;
         if (op == OpComment) { i += (tokens[i] >> 16) & 0x7fff; continue; }
         if (op == OpDef) { i += 5; continue; }
-        if (op == OpTexbem || op == OpTexbeml) return 1;
+        if (op == OpTexbem || op == OpTexbeml || op == OpBem) return 1;
     }
     return 0;
 }
@@ -918,8 +1001,9 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
     s.volume = (fog >> RB_PS_VOLUME_SHIFT) & 255;
     fog &= (1u << RB_PS_CUBE_SHIFT) - 1;
     if (count && tokens[0] == 0xffff0200u) return translate2(&s, tokens, count, fog);
-    /* 1.0, which Direct3D 8.0 programs use, has the instructions of 1.1. */
-    if (!count || (tokens[0] & 0xffffff00u) != 0xffff0100u || (tokens[0] & 0xff) > 3) {
+    /* 1.0, which Direct3D 8.0 programs use, has the instructions of 1.1; 1.4 has six registers r0..r5,
+     * six coordinate sets and samplers, texld and texcrd, and a second phase. */
+    if (!count || (tokens[0] & 0xffffff00u) != 0xffff0100u || (tokens[0] & 0xff) > 4) {
         fail(&s, RbPsVersion, count ? tokens[0] : 0);
         return 0;
     }
@@ -928,14 +1012,14 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
     base = s.bump ? RB_PS_BUMP_CONSTANTS : RB_PS_CONSTANTS;
     if (s.bump) info->constants = RB_PS_BUMP_CONSTANTS;
     put(&s.t, "FRAG\nDCL IN[0], GENERIC[0], LINEAR\nDCL IN[1], GENERIC[1], LINEAR\n");
-    for (k = 0; k < RB_PS_COORD_SETS; ++k) {
+    for (k = 0; k < (s.minor == 4 ? 6u : RB_PS_COORD_SETS); ++k) {
         put(&s.t, "DCL IN["); number(&s.t, 2 + k); put(&s.t, "], GENERIC["); number(&s.t, 2 + k);
         put(&s.t, "], PERSPECTIVE\n");
     }
     if ((fog & 3) == RB_PS_FOG_VERTEX) put(&s.t, "DCL IN[10], GENERIC[10], PERSPECTIVE\n");
     if ((fog & 3) == RB_PS_FOG_TABLE) put(&s.t, "DCL IN[10], POSITION, LINEAR\n");
     put(&s.t, "DCL OUT[0], COLOR\n");
-    for (k = 0; k < RB_PS_COORD_SETS; ++k) { put(&s.t, "DCL SAMP["); number(&s.t, k); put(&s.t, "]\n"); }
+    for (k = 0; k < (s.minor == 4 ? 6u : RB_PS_COORD_SETS); ++k) { put(&s.t, "DCL SAMP["); number(&s.t, k); put(&s.t, "]\n"); }
     put(&s.t, "DCL CONST[0.."); number(&s.t, base - 1 + (fog ? 2 : 0)); put(&s.t, "]\n");
     put(&s.t, "DCL TEMP[0..18]\n"
               "IMM[0] FLT32 {0x3f000000, 0x3f800000, 0x40000000, 0x40800000}\n"
@@ -947,6 +1031,8 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
     /* Registers start at zero, so a shader never reads undefined values. */
     line(&s, "MOV TEMP[0], IMM[2]", 0, 0, 0, 0, 0, 0);
     line(&s, "MOV TEMP[1], IMM[2]", 0, 0, 0, 0, 0, 0);
+    if (s.minor == 4)
+        for (k = 2; k < 6; ++k) { char r[16]; r[0] = 0; cat(r, sizeof(r), "TEMP["); cat_number(r, sizeof(r), k); cat(r, sizeof(r), "]"); line(&s, "MOV ", r, ", IMM[2]", 0, 0, 0, 0); }
     if (!walk(&s, tokens, count, 1, &imm)) return 0;
     flush(&s);
     if (fog) fog_lines(&s, fog, log2e, "TEMP[0]", base);
@@ -973,7 +1059,21 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
  * target's clip space, keeping w, so the host clips as Direct3D does. */
 enum { VsPos = 20, VsFog = 21, VsColors = 23, VsTexOut = 25, VsInputs = 33, VsAddress = 55 };
 enum { OpVsSlt = 12, OpVsSge = 13, OpVsLit = 16, OpVsDst = 17, OpVsSgn = 34, OpVsMova = 46,
-       OpVsDefb = 47, OpVsDefi = 48, OpVsExpp = 78, OpVsLogp = 79 };
+       OpVsDefb = 47, OpVsDefi = 48, OpVsExpp = 78, OpVsLogp = 79, OpVsCall = 25, OpVsCallnz = 26, OpVsLoop = 27,
+       OpVsRet = 28, OpVsEndLoop = 29, OpVsLabel = 30, OpVsRep = 38, OpVsEndRep = 39, OpVsIf = 40, OpVsElse = 42,
+       OpVsEndif = 43 };
+enum { VsCounters = 56, VsLoopRegs = 60, VsMaxLoops = 4, VsMaxCalls = 4 };
+
+/* The IEEE single bits of a whole number (exact below 2^24 in magnitude). */
+unsigned int rb_float_bits(int v)
+{
+    unsigned int m = v < 0 ? 0u - (unsigned int)v : (unsigned int)v, e = 150, sign = v < 0 ? 0x80000000u : 0;
+    if (!m) return 0;
+    while (m >= 0x1000000u) { m >>= 1; ++e; }
+    while (!(m & 0x800000u)) { m <<= 1; --e; }
+    return sign | e << 23 | (m & 0x7fffffu);
+}
+
 
 static void reg_text(char *out, unsigned int size, const char *file, unsigned int n)
 {
@@ -998,7 +1098,12 @@ static int vreg_name(PS *s, unsigned int token, unsigned int add, char *out, uns
             /* c[a0.? + n]: the component is in bits 14-15 (see vertex_walk). */
             static const char *const load[4] = { "ARL ADDR[0].x, TEMP[55].xxxx", "ARL ADDR[0].x, TEMP[55].yyyy",
                                                  "ARL ADDR[0].x, TEMP[55].zzzz", "ARL ADDR[0].x, TEMP[55].wwww" };
-            line(s, load[(token >> 14) & 3], 0, 0, 0, 0, 0, 0);
+            if (s->relLoop) {   /* c[aL + n]: the innermost loop's register */
+                char r[16];
+                r[0] = 0;
+                reg_text(r, sizeof(r), "TEMP", VsLoopRegs + s->loops - 1);
+                line(s, "ARL ADDR[0].x, ", r, ".xxxx", 0, 0, 0, 0);
+            } else line(s, load[(token >> 14) & 3], 0, 0, 0, 0, 0, 0);
             cat(out, size, "CONST[ADDR[0].x+"); cat_number(out, size, RB_VS_CONST_BASE + num); cat(out, size, "]");
             s->info->constants = RB_VS_CONSTANTS;
             return 1;
@@ -1021,6 +1126,22 @@ static int vreg_name(PS *s, unsigned int token, unsigned int add, char *out, uns
         return 1;
     }
     return fail(s, RbPsRegister, token);
+}
+
+/* An integer constant i# (rep, loop) or a boolean b# (if, callnz) as a TGSI source. defi and defb
+ * values are immediates; the others are CONST[3 + n], whose x, y and z hold i#'s count, start and
+ * step and whose w holds b# (1 or 0), when the driver gives them (RB_VS_FLOW). */
+static int flow_const(PS *s, unsigned int token, int boolean, char *out, unsigned int size)
+{
+    unsigned int n = reg_num(token);
+    out[0] = 0;
+    if (reg2_type(token) != (boolean ? RegVsConstBool : RegVsConstInt) || n > 15) return fail(s, RbPsRegister, token);
+    if (boolean ? (s->defBool >> n) & 1 : (s->defInt >> n) & 1)
+        reg_text(out, size, "IMM", boolean ? s->defBoolImm[n] : s->defIntImm[n]);
+    else if (s->flow) reg_text(out, size, "CONST", 3 + n);
+    else return fail(s, RbPsOpcode, token);
+    if (boolean) cat(out, size, ".wwww");
+    return 1;
 }
 
 /* The instructions only vertex shaders have; -1 for the others. */
@@ -1055,12 +1176,55 @@ static int vertex_instruction(PS *s, unsigned int op, const unsigned int *p, uns
         line(s, op == OpVsExpp ? (s->version < 2 ? "EXP" : "EX2") : (s->version < 2 ? "LOG" : "LG2"), sat, d, ", ",
              op == OpVsLogp ? b : a, 0, 0);
         return 1;
-    case 25: case 26: case 27: case 28: case 29: case 30:    /* call, callnz, loop, ret, endloop, label */
-    case 38: case 39: case 40: case 41: case 42: case 43: case 44: case 45:   /* rep .. breakc */
-        /* Flow control cannot run here: for a driver of the Direct3D 8
-         * interface the Direct3D 9 runtime removes defi and defb from the
-         * code and passes no integer or boolean constants, so loop counts
-         * and branch conditions are unknown (if_comp and break are vs_2_x). */
+    case OpVsRep: case OpVsLoop: {
+        /* Static flow control of vs_2_0. Through the Direct3D 8 interface the Direct3D 9 runtime
+         * removes defi and defb and passes no integer or boolean constants, so counts and conditions
+         * are known only through the Direct3D 9 interface (RB_VS_FLOW). A loop counts down in
+         * TEMP[56+n]; loop also steps aL in TEMP[60+n]. */
+        unsigned int depth = s->loops;
+        char t[16], l[16];
+        if (depth >= VsMaxLoops || n < (op == OpVsLoop ? 2u : 1u)) return fail(s, RbPsOpcode, op);
+        if (op == OpVsLoop && reg2_type(p[0]) != RegVsLoop) return fail(s, RbPsRegister, p[0]);
+        if (!flow_const(s, p[op == OpVsLoop ? 1 : 0], 0, s->loopInt[depth], sizeof(s->loopInt[depth]))) return 0;
+        t[0] = l[0] = 0;
+        reg_text(t, sizeof(t), "TEMP", VsCounters + depth);
+        reg_text(l, sizeof(l), "TEMP", VsLoopRegs + depth);
+        line(s, "MOV ", t, ".x, ", s->loopInt[depth], ".xxxx", 0, 0);
+        if (op == OpVsLoop) line(s, "MOV ", l, ".x, ", s->loopInt[depth], ".yyyy", 0, 0);
+        line(s, "BGNLOOP", 0, 0, 0, 0, 0, 0);
+        line(s, "SGE ", t, ".y, IMM[2].xxxx, ", t, ".xxxx", 0, 0);
+        line(s, "IF ", t, ".yyyy", 0, 0, 0, 0);
+        line(s, "BRK", 0, 0, 0, 0, 0, 0);
+        line(s, "ENDIF", 0, 0, 0, 0, 0, 0);
+        s->loopIsLoop[depth] = op == OpVsLoop;
+        s->loops = depth + 1;
+        return 1;
+    }
+    case OpVsEndRep: case OpVsEndLoop: {
+        unsigned int depth;
+        char t[16], l[16];
+        if (!s->loops || s->loopIsLoop[s->loops - 1] != (op == OpVsEndLoop)) return fail(s, RbPsOpcode, op);
+        depth = --s->loops;
+        t[0] = l[0] = 0;
+        reg_text(t, sizeof(t), "TEMP", VsCounters + depth);
+        reg_text(l, sizeof(l), "TEMP", VsLoopRegs + depth);
+        if (op == OpVsEndLoop) line(s, "ADD ", l, ".x, ", l, ".xxxx, ", s->loopInt[depth], ".zzzz");
+        line(s, "ADD ", t, ".x, ", t, ".xxxx, IMM[1].wwww", 0, 0);
+        line(s, "ENDLOOP", 0, 0, 0, 0, 0, 0);
+        return 1;
+    }
+    case OpVsIf:
+        if (n < 1 || !flow_const(s, p[0], 1, a, sizeof(a))) return 0;
+        line(s, "IF ", a, 0, 0, 0, 0, 0);
+        ++s->ifs;
+        return 1;
+    case OpVsElse: case OpVsEndif:
+        if (!s->ifs) return fail(s, RbPsOpcode, op);
+        if (op == OpVsEndif) --s->ifs;
+        line(s, op == OpVsElse ? "ELSE" : "ENDIF", 0, 0, 0, 0, 0, 0);
+        return 1;
+    case OpVsCall: case OpVsCallnz: case OpVsRet: case OpVsLabel:   /* vertex_walk inlines subroutines */
+    case 41: case 44: case 45:   /* if_comp, break, breakc: vs_2_x */
         return fail(s, RbPsOpcode, op);
     }
     return -1;
@@ -1081,15 +1245,17 @@ static int vertex1_length(unsigned int op)
     return -1;
 }
 
-/* Pass 0: def constants; pass 1: instructions. A shader model 2 relative
- * source is followed by its address token, whose component is kept in
- * bits 14-15 of the source. */
-static int vertex_walk(PS *s, const unsigned int *tok, unsigned int count, int pass, unsigned int *imm)
+/* Pass 0: def, defi and defb constants, and where each label's code starts. Pass 1: the
+ * instructions from start to the end, or to a ret or label (the end of the main program), or for a
+ * subroutine (sub) to its ret; calls are inlined. A shader model 2 relative source is followed by
+ * its address token, whose component is kept in bits 14-15 of the source (aL sets relLoop). */
+static int vertex_walk(PS *s, const unsigned int *tok, unsigned int count, int pass, unsigned int *imm,
+                       unsigned int start, int sub)
 {
-    unsigned int i = 1;
+    unsigned int i = start, ifs = s->ifs, loops = s->loops;
     while (i < count) {
         unsigned int t = tok[i], op = t & 0xffff, n, k, m, ops[8];
-        if (t == OpEnd) return 1;
+        if (t == OpEnd) return pass == 0 || (!sub && !s->ifs && !s->loops) ? 1 : fail(s, RbPsOpcode, t);
         if (op == OpComment) { i += 1 + ((t >> 16) & 0x7fff); continue; }
         if (t & 0x90000000u) return fail(s, RbPsOpcode, t);
         if (s->version >= 2) n = (t >> 24) & 15;
@@ -1101,9 +1267,14 @@ static int vertex_walk(PS *s, const unsigned int *tok, unsigned int count, int p
         if (i + 1 + n > count) return fail(s, RbPsTruncated, i);
         /* oPts as a destination: the program sets the point size. */
         if (pass == 0 && n && reg2_type(tok[i + 1]) == RegVsRastOut && reg_num(tok[i + 1]) == 2 &&
-            op != OpDef && op != OpVsDefb && op != OpVsDefi && op != Op2Dcl)
+            op != OpDef && op != OpVsDefb && op != OpVsDefi && op != Op2Dcl && op != OpVsLabel && op != OpVsRet)
             s->info->pointSize = 1;
-        if (op == OpDef || op == OpVsDefb || op == OpVsDefi || op == Op2Dcl) {
+        if (pass == 1 && s->version >= 2 && (op == OpVsRet || op == OpVsLabel)) {
+            /* The end of the main program or of a subroutine, with all it opened closed. */
+            if (s->ifs != ifs || s->loops != loops || (sub && op == OpVsLabel)) return fail(s, RbPsOpcode, t);
+            return 1;
+        }
+        if (op == OpDef || op == OpVsDefb || op == OpVsDefi || op == Op2Dcl || op == OpVsLabel || op == OpVsRet) {
             if (pass == 0 && op == OpDef) {
                 unsigned int c = reg_num(tok[i + 1]);
                 if (n != 5 || reg2_type(tok[i + 1]) != Reg2Const || c >= RB_VS_CONSTANTS || *imm > 255)
@@ -1113,18 +1284,61 @@ static int vertex_walk(PS *s, const unsigned int *tok, unsigned int count, int p
                 put(&s->t, "IMM["); number(&s->t, s->defImm[c]); put(&s->t, "] FLT32 {");
                 hex(&s->t, tok[i + 2]); put(&s->t, ", "); hex(&s->t, tok[i + 3]); put(&s->t, ", ");
                 hex(&s->t, tok[i + 4]); put(&s->t, ", "); hex(&s->t, tok[i + 5]); put(&s->t, "}\n");
+            } else if (pass == 0 && (op == OpVsDefi || op == OpVsDefb) && s->version >= 2) {
+                /* i# as floats (count, start, step); b# in w as 1 or 0. */
+                unsigned int c = reg_num(tok[i + 1]);
+                if (n != (op == OpVsDefi ? 5u : 2u) || c > 15 || *imm > 255 ||
+                    reg2_type(tok[i + 1]) != (op == OpVsDefi ? RegVsConstInt : RegVsConstBool))
+                    return fail(s, RbPsRegister, tok[i + 1]);
+                put(&s->t, "IMM["); number(&s->t, *imm); put(&s->t, "] FLT32 {");
+                if (op == OpVsDefi) {
+                    s->defInt |= 1u << c;
+                    s->defIntImm[c] = (unsigned char)*imm;
+                    hex(&s->t, rb_float_bits((int)tok[i + 2])); put(&s->t, ", ");
+                    hex(&s->t, rb_float_bits((int)tok[i + 3])); put(&s->t, ", ");
+                    hex(&s->t, rb_float_bits((int)tok[i + 4])); put(&s->t, ", 0x00000000}\n");
+                } else {
+                    s->defBool |= 1u << c;
+                    s->defBoolImm[c] = (unsigned char)*imm;
+                    put(&s->t, "0x00000000, 0x00000000, 0x00000000, ");
+                    hex(&s->t, tok[i + 2] ? 0x3f800000u : 0); put(&s->t, "}\n");
+                }
+                ++*imm;
+            } else if (pass == 0 && op == OpVsLabel && s->version >= 2) {
+                unsigned int l = reg_num(tok[i + 1]);
+                if (n != 1 || l > 15 || reg2_type(tok[i + 1]) != RegVsLabel) return fail(s, RbPsRegister, tok[i + 1]);
+                s->labelAt[l] = i + 1 + n;
             }
         } else if (pass == 1) {
+            int a0 = 0;
+            s->relLoop = 0;
             for (k = 0, m = 0; k < n && m < 8; ++k) {
                 unsigned int o = tok[i + 1 + k] & ~0xc000u;
                 if (s->version >= 2 && m > 0 && (o & 0x2000)) {
-                    if (k + 1 >= n || reg2_type(tok[i + 2 + k]) != RegVsAddr) return fail(s, RbPsRegister, o);
+                    unsigned int at = k + 1 < n ? reg2_type(tok[i + 2 + k]) : ~0u;
+                    if (at == RegVsAddr) a0 = 1;
+                    else if (at == RegVsLoop && s->loops) s->relLoop = 1;
+                    else return fail(s, RbPsRegister, o);
+                    if (a0 && s->relLoop) return fail(s, RbPsRegister, o);   /* a0 and aL in one instruction */
                     o |= ((tok[i + 2 + k] >> 16) & 3) << 14;
                     ++k;
                 }
                 ops[m++] = o;
             }
-            if (!instruction2(s, op, 0, ops, m)) return 0;
+            if (op == OpVsCall || op == OpVsCallnz) {
+                /* Inlined: vs_2_0 has no recursion, and its calls nest at most VsMaxCalls deep. */
+                unsigned int l = m ? reg_num(ops[0]) : 16;
+                char b[48];
+                int ok;
+                if (s->version < 2 || l > 15 || reg2_type(ops[0]) != RegVsLabel || !s->labelAt[l] || s->calls >= VsMaxCalls ||
+                    (op == OpVsCallnz && (m < 2 || !flow_const(s, ops[1], 1, b, sizeof(b))))) return fail(s, RbPsOpcode, t);
+                if (op == OpVsCallnz) line(s, "IF ", b, 0, 0, 0, 0, 0);
+                ++s->calls;
+                ok = vertex_walk(s, tok, count, 1, imm, s->labelAt[l], 1);
+                --s->calls;
+                if (!ok) return 0;
+                if (op == OpVsCallnz) line(s, "ENDIF", 0, 0, 0, 0, 0, 0);
+            } else if (!instruction2(s, op, 0, ops, m)) return 0;
         }
         i += 1 + n;
     }
@@ -1189,7 +1403,7 @@ static int fetch_one(PS *s, unsigned int reg, unsigned int kind, unsigned int k)
     return fail(s, RbPsRegister, kind);
 }
 
-/* The Direct3D 8 declaration tokens: one stream, registers and skips. */
+/* The Direct3D 8 declaration tokens: streams, registers and skips. */
 static int fetch(PS *s, const unsigned int *decl, unsigned int count)
 {
     static const unsigned char words[8] = { 1, 2, 3, 4, 1, 1, 1, 2 };
@@ -1199,10 +1413,12 @@ static int fetch(PS *s, const unsigned int *decl, unsigned int count)
         if (t == 0xffffffffu) return 1;
         switch (t >> 29) {
         case 0: break;                                         /* NOP */
-        case 1:                                                /* STREAM */
-            if (t & 0x1fffffffu) return fail(s, RbPsRegister, t);
-            offset = 0;
+        case 1: {                                              /* STREAM n (not the tessellator) */
+            unsigned int stream = t & 0x1fffffffu;
+            if (stream >= RB_VS_STREAMS || (stream && !s->streamBases)) return fail(s, RbPsRegister, t);
+            offset = s->streamBases ? s->streamBases[stream] : 0;
             break;
+        }
         case 2:                                                /* STREAMDATA */
             if (t & 0x10000000u) { offset += (t >> 16) & 0xf; break; }      /* SKIP */
             if ((t & 0x1f) > 15 || ((t >> 16) & 0xf) > 7) return fail(s, RbPsRegister, t);
@@ -1219,7 +1435,8 @@ static int fetch(PS *s, const unsigned int *decl, unsigned int count)
 }
 
 unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, const unsigned int *decl,
-                             unsigned int declCount, unsigned int flags, char *out, unsigned int size, RB_PS_INFO *info)
+                             unsigned int declCount, const unsigned int *streamBases, unsigned int flags, char *out,
+                             unsigned int size, RB_PS_INFO *info)
 {
     static const char *const prologue[] = {
         "UMAD TEMP[49].x, SV[0].xxxx, CONST[0].zzzz, CONST[0].wwww", "UARL ADDR[0].x, TEMP[49].xxxx",
@@ -1245,6 +1462,8 @@ unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, con
     info->samplers = info->coords = info->reason = info->detail = info->constants = info->pointSize = 0;
     s.info = info;
     s.vertex = 1;
+    s.streamBases = streamBases;
+    s.flow = (flags & RB_VS_FLOW) != 0;
     s.t.p = out; s.t.size = size;
     if (size) out[0] = 0;
     if (!count || (tokens[0] & 0xffff0000u) != 0xfffe0000u ||
@@ -1255,10 +1474,11 @@ unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, con
     s.version = (tokens[0] >> 8) & 0xff;
     put(&s.t, "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..");
     number(&s.t, RB_VS_CONST_BASE + RB_VS_CONSTANTS + RB_VS_VERTEX_CONSTANTS * RB_VS_VERTICES - 1);
-    put(&s.t, "]\nDCL ADDR[0]\nDCL TEMP[0..55]\nDCL OUT[0], POSITION\n");
+    put(&s.t, "]\nDCL ADDR[0]\nDCL TEMP[0..63]\nDCL OUT[0], POSITION\n");
     for (k = 0; k < 11; ++k) {
         put(&s.t, "DCL OUT["); number(&s.t, k + 1); put(&s.t, "], GENERIC["); number(&s.t, k); put(&s.t, "]\n");
     }
+    if (flags & RB_VS_CLIP) put(&s.t, "DCL OUT[12], CLIPDIST[0]\nDCL OUT[13], CLIPDIST[1]\n");
     put(&s.t, "IMM[0] FLT32 {0x3f000000, 0x3f800000, 0x40000000, 0x40800000}\n"
               "IMM[1] FLT32 {0x41000000, 0x3e800000, 0x3e000000, 0xbf800000}\n"
               "IMM[2] FLT32 {0x00000000, 0x00000000, 0x00000000, 0x00000000}\n"
@@ -1267,14 +1487,14 @@ unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, con
               "IMM[5] UINT32 {0, 8, 16, 24}\n"
               "IMM[6] UINT32 {255, 16, 0, 0}\n"
               "IMM[7] FLT32 {0x3b808081, 0x00000000, 0x00000000, 0x00000000}\n");
-    if (!vertex_walk(&s, tokens, count, 0, &imm)) return 0;
-    if (info->pointSize) put(&s.t, "DCL OUT[12], PSIZE\n");
+    if (!vertex_walk(&s, tokens, count, 0, &imm, 1, 0)) return 0;
+    if (info->pointSize) put(&s.t, "DCL OUT[14], PSIZE\n");
     for (k = 0; k < sizeof(prologue) / sizeof(*prologue); ++k) line(&s, prologue[k], 0, 0, 0, 0, 0, 0);
     for (k = 0; k < 12; ++k) { r[0] = 0; reg_text(r, sizeof(r), "TEMP", k); line(&s, "MOV ", r, ", IMM[2]", 0, 0, 0, 0); }
     for (k = 0; k < 8; ++k) { r[0] = 0; reg_text(r, sizeof(r), "TEMP", VsTexOut + k); line(&s, "MOV ", r, ", IMM[3]", 0, 0, 0, 0); }
     for (k = 0; k < 16; ++k) { r[0] = 0; reg_text(r, sizeof(r), "TEMP", VsInputs + k); line(&s, "MOV ", r, ", IMM[3]", 0, 0, 0, 0); }
     if (!fetch(&s, decl, declCount)) return 0;
-    if (!vertex_walk(&s, tokens, count, 1, &imm)) return 0;
+    if (!vertex_walk(&s, tokens, count, 1, &imm, 1, 0)) return 0;
     for (k = 0; k < sizeof(epilogue) / sizeof(*epilogue); ++k) line(&s, epilogue[k], 0, 0, 0, 0, 0, 0);
     if (flags & RB_VS_FOG_ALPHA) line(&s, "MOV_SAT OUT[2].w, TEMP[21].xxxx", 0, 0, 0, 0, 0, 0);
     for (k = 0; k < 8; ++k) {
@@ -1285,7 +1505,18 @@ unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, con
         line(&s, "MOV ", o, ", ", r, 0, 0, 0);
     }
     line(&s, "MOV OUT[11], IMM[2]", 0, 0, 0, 0, 0, 0);
-    if (info->pointSize) line(&s, "MOV OUT[12].x, TEMP[22].xxxx", 0, 0, 0, 0, 0, 0);
+    if (flags & RB_VS_CLIP) {
+        /* dot(plane, oPos) for each plane, after the shader's constants (the miniport puts them there). */
+        static const char *const dist[6] = { "OUT[12].x", "OUT[12].y", "OUT[12].z", "OUT[12].w", "OUT[13].x", "OUT[13].y" };
+        char cst[16];
+        for (k = 0; k < 6; ++k) {
+            cst[0] = 0;
+            reg_text(cst, sizeof(cst), "CONST", RB_VS_CONST_BASE + info->constants + k);
+            line(&s, "DP4 ", dist[k], ", TEMP[20], ", cst, 0, 0, 0);
+        }
+        line(&s, "MOV OUT[13].zw, IMM[2]", 0, 0, 0, 0, 0, 0);
+    }
+    if (info->pointSize) line(&s, "MOV OUT[14].x, TEMP[22].xxxx", 0, 0, 0, 0, 0, 0);
     line(&s, "END", 0, 0, 0, 0, 0, 0);
     if (s.t.overflow) return fail(&s, RbPsOverflow, s.t.n);
     return s.t.n + 1;
@@ -1380,7 +1611,7 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
                                 unsigned int fog, char *out, unsigned int size, RB_PS_INFO *info)
 {
     PS s;
-    unsigned int i, k, log2e = 4, factor = 0;
+    unsigned int i, k, log2e = 4, factor = 0, transforms = 0, base, bump = ~0u, bumpLum = 0;
     char *z = (char *)&s, tex[64];
     for (k = 0; k < sizeof(s); ++k) z[k] = 0;
     info->samplers = info->coords = info->reason = info->detail = info->constants = info->pointSize = 0;
@@ -1393,8 +1624,20 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
         if ((st->colorArg1 & TaSelect) == TaFactor || (st->colorArg2 & TaSelect) == TaFactor ||
             (st->alphaArg1 & TaSelect) == TaFactor || (st->alphaArg2 & TaSelect) == TaFactor ||
             st->colorOp == TopBlendFactor || st->alphaOp == TopBlendFactor) factor = 1;
+        if (st->transform & 0xff) {
+            if (i >= RB_STAGE_TRANSFORMS || (st->transform & 0xff) > 4 || (st->transform & ~(0xffu | RB_TTFF_PROJECTED)))
+                return fail(&s, RbPsRegister, st->transform);
+            transforms = 1;
+        }
+        /* A bump stage keeps its matrix where its texture matrix would be. */
+        if (st->colorOp == TopBump || st->colorOp == TopBumpLum) {
+            if (i >= RB_STAGE_TRANSFORMS || (st->transform & 0xff)) return fail(&s, RbPsOpcode, st->colorOp);
+            transforms = 1;
+        }
     }
     count = i;
+    base = transforms ? RB_PS2_CONSTANTS : RB_PS_CONSTANTS;
+    if (transforms) info->constants = RB_PS2_CONSTANTS;
     put(&s.t, "FRAG\nDCL IN[0], GENERIC[0], LINEAR\nDCL IN[1], GENERIC[1], LINEAR\n");
     for (k = 0; k < RB_PS2_COORD_SETS; ++k) {
         put(&s.t, "DCL IN["); number(&s.t, 2 + k); put(&s.t, "], GENERIC["); number(&s.t, 2 + k);
@@ -1404,8 +1647,8 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
     if ((fog & 3) == RB_PS_FOG_TABLE) put(&s.t, "DCL IN[10], POSITION, LINEAR\n");
     put(&s.t, "DCL OUT[0], COLOR\n");
     for (k = 0; k < RB_PS2_SAMPLERS; ++k) { put(&s.t, "DCL SAMP["); number(&s.t, k); put(&s.t, "]\n"); }
-    put(&s.t, fog ? "DCL CONST[0..9]\n" : "DCL CONST[0..7]\n");
-    put(&s.t, "DCL TEMP[0..9]\n"
+    put(&s.t, "DCL CONST[0.."); number(&s.t, base - 1 + (fog ? 2 : 0)); put(&s.t, "]\n");
+    put(&s.t, "DCL TEMP[0..11]\n"
               "IMM[0] FLT32 {0x3f000000, 0x3f800000, 0x40000000, 0x40800000}\n"
               "IMM[1] UINT32 {16, 8, 0, 24}\n"
               "IMM[2] FLT32 {0x00000000, 0x00000000, 0x00000000, 0x3b808081}\n"
@@ -1424,11 +1667,66 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
         unsigned int set = st->coordIndex & 0xffff, alphaOp = st->alphaOp, a1 = st->alphaArg1, a2 = st->alphaArg2;
         if (st->coordIndex >> 16 || set >= RB_PS2_COORD_SETS) return fail(&s, RbPsRegister, st->coordIndex);
         if (alphaOp == TopDisable) { alphaOp = TopArg1; a1 = TaCurrent; a2 = TaCurrent; }
-        if (uses_texture(st->colorOp, st->colorArg1, st->colorArg2) || uses_texture(alphaOp, a1, a2)) {
+        if (st->colorOp == TopBump || st->colorOp == TopBumpLum) {
+            /* The bump map: du, dv and a luminance for the next stage's lookup;
+             * the current colour goes on unchanged. */
             tex[0] = 0;
-            cat(tex, sizeof(tex), "TEX TEMP[1], IN["); cat_number(tex, sizeof(tex), 2 + set);
+            cat(tex, sizeof(tex), "TEX TEMP[8], IN["); cat_number(tex, sizeof(tex), 2 + set);
             cat(tex, sizeof(tex), "], SAMP["); cat_number(tex, sizeof(tex), i); cat(tex, sizeof(tex), "], 2D");
             line(&s, tex, 0, 0, 0, 0, 0, 0);
+            info->samplers |= 1u << i;
+            info->coords |= 1u << set;
+            bump = i;
+            bumpLum = st->colorOp == TopBumpLum;
+            continue;
+        }
+        if (uses_texture(st->colorOp, st->colorArg1, st->colorArg2) || uses_texture(alphaOp, a1, a2)) {
+            char in[16];
+            in[0] = 0;
+            cat(in, sizeof(in), "IN["); cat_number(in, sizeof(in), 2 + set); cat(in, sizeof(in), "]");
+            if (st->transform & 0xff) {
+                /* The stage's texture matrix (columns in CONST[8+4i]), then the
+                 * division by the last coordinate it gives. */
+                static const char *const comp[4] = { ".x", ".y", ".z", ".w" };
+                static const char *const last[4] = { ".xxxx", ".yyyy", ".zzzz", ".wwww" };
+                unsigned int n = st->transform & 0xff, j;
+                char c[16];
+                line(&s, "MOV TEMP[10], IMM[2].xxxx", 0, 0, 0, 0, 0, 0);
+                for (j = 0; j < n; ++j) {
+                    c[0] = 0;
+                    cat(c, sizeof(c), "CONST["); cat_number(c, sizeof(c), 8 + 4 * i + j); cat(c, sizeof(c), "]");
+                    line(&s, "DP4 TEMP[10]", comp[j], ", ", in, ", ", c, 0);
+                }
+                if (st->transform & RB_TTFF_PROJECTED) {
+                    line(&s, "RCP TEMP[11].x, TEMP[10]", last[n - 1], 0, 0, 0, 0, 0);
+                    line(&s, "MUL TEMP[10], TEMP[10], TEMP[11].xxxx", 0, 0, 0, 0, 0, 0);
+                }
+                in[0] = 0;
+                cat(in, sizeof(in), "TEMP[10]");
+            }
+            if (bump != ~0u && bump + 1 == i) {
+                /* Moved by the bump stage's du and dv through its matrix (00, 01, 10, 11). */
+                char m[16];
+                m[0] = 0;
+                cat(m, sizeof(m), "CONST["); cat_number(m, sizeof(m), 8 + 4 * bump); cat(m, sizeof(m), "]");
+                if (!(st->transform & 0xff)) line(&s, "MOV TEMP[10], ", in, 0, 0, 0, 0, 0);
+                line(&s, "MAD TEMP[10].xy, TEMP[8].xxxx, ", m, ".xyxy, TEMP[10]", 0, 0, 0, 0);
+                line(&s, "MAD TEMP[10].xy, TEMP[8].yyyy, ", m, ".zwzw, TEMP[10]", 0, 0, 0, 0);
+                in[0] = 0;
+                cat(in, sizeof(in), "TEMP[10]");
+            }
+            tex[0] = 0;
+            cat(tex, sizeof(tex), "TEX TEMP[1], "); cat(tex, sizeof(tex), in);
+            cat(tex, sizeof(tex), ", SAMP["); cat_number(tex, sizeof(tex), i); cat(tex, sizeof(tex), "], 2D");
+            line(&s, tex, 0, 0, 0, 0, 0, 0);
+            if (bump != ~0u && bump + 1 == i && bumpLum) {
+                /* BUMPENVMAPLUMINANCE: times the luminance times the scale plus the offset. */
+                char l[16];
+                l[0] = 0;
+                cat(l, sizeof(l), "CONST["); cat_number(l, sizeof(l), 9 + 4 * bump); cat(l, sizeof(l), "]");
+                line(&s, "MAD_SAT TEMP[11].x, TEMP[8].zzzz, ", l, ".xxxx, ", l, ".yyyy", 0, 0);
+                line(&s, "MUL TEMP[1].xyz, TEMP[1], TEMP[11].xxxx", 0, 0, 0, 0, 0, 0);
+            }
             info->samplers |= 1u << i;
             info->coords |= 1u << set;
         }
@@ -1440,7 +1738,7 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
         line(&s, "MOV TEMP[0], TEMP[4]", 0, 0, 0, 0, 0, 0);
     }
     if (specular) line(&s, "ADD_SAT TEMP[0].xyz, TEMP[0], IN[1]", 0, 0, 0, 0, 0, 0);
-    if (fog) fog_lines(&s, fog, log2e, "TEMP[0]", RB_PS_CONSTANTS);
+    if (fog) fog_lines(&s, fog, log2e, "TEMP[0]", base);
     line(&s, "MOV OUT[0], TEMP[0]", 0, 0, 0, 0, 0, 0);
     line(&s, "END", 0, 0, 0, 0, 0, 0);
     if (s.t.overflow) return fail(&s, RbPsOverflow, s.t.n);

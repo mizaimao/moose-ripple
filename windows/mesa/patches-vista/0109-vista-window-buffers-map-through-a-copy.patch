@@ -1,0 +1,44 @@
+Vista: the CPU reads and writes an imported window buffer through a copy. The OpenGL driver
+draws a window's frames into Direct3D render-target textures that it opens by their shared
+handle. Vista refuses a lock of such an opened allocation (STATUS_INVALID_PARAMETER), so
+glReadPixels on the window's buffers got zeros. A resource imported for use as a framebuffer
+(PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE) is now mapped the way a multisampled one is: a blit
+of the wanted part to a temporary texture of the driver's own, which locks as usual, and a
+blit back after a write.
+
+--- a/src/gallium/drivers/virgl/virgl_resource.c
++++ b/src/gallium/drivers/virgl/virgl_resource.c
+@@ -747,6 +747,7 @@
+       res->b = *templ;
+    res->b.screen = &vs->base;
+    pipe_reference_init(&res->b.reference, 1);
++   res->map_through_copy = (usage & PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE) != 0;
+ 
+    plane = winsys_stride = plane_offset = modifier = 0;
+    res->hw_res = vs->vws->resource_create_from_handle(vs->vws, whandle,
+--- a/src/gallium/drivers/virgl/virgl_resource.h
++++ b/src/gallium/drivers/virgl/virgl_resource.h
+@@ -70,7 +70,10 @@
+ 
+    uint16_t clean_mask;
+    uint16_t use_staging : 1;
+-   uint16_t reserved : 15;
++   /* An imported window buffer: the CPU reads and writes it through a copy of the
++    * mapped part, because Vista refuses a lock of the allocation behind it. */
++   uint16_t map_through_copy : 1;
++   uint16_t reserved : 14;
+ };
+ 
+ struct virgl_transfer {
+--- a/src/gallium/drivers/virgl/virgl_texture.c
++++ b/src/gallium/drivers/virgl/virgl_texture.c
+@@ -230,6 +230,9 @@
+    if (resource->nr_samples > 1)
+       return true;
+ 
++   if (virgl_resource(resource)->map_through_copy)
++      return true;
++
+    if (usage & PIPE_MAP_READ)
+       return !util_format_is_depth_or_stencil(resource->format) &&
+              !virgl_has_readback_format(screen, pipe_to_virgl_format(resource->format), true);

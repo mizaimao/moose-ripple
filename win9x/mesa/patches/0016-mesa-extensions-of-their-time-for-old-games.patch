@@ -1,0 +1,34 @@
+--- a/src/mesa/main/extensions.c
++++ b/src/mesa/main/extensions.c
+@@ -30,6 +30,7 @@
+  */
+ 
+ #include "util/os_misc.h"
++#include "util/u_process.h"
+ 
+ #include "util/glheader.h"
+ 
+@@ -374,6 +375,23 @@
+          _mesa_debug(ctx, "Note: limiting GL extensions to %u or earlier\n",
+                      maxYear);
+       }
++#ifdef _WIN32
++      /* moose-ripple, Windows 9x: games of 2001 that copy the list into a
++       * buffer too small for it (Return to Castle Wolfenstein crashes at start)
++       * get the extensions of their own time, as drivers of the time had
++       * per-program settings. MESA_EXTENSION_MAX_YEAR still decides. */
++      else {
++         static const char *const old_programs[] = { "wolfsp", "wolfmp" };
++         const char *name = util_get_process_name();
++         unsigned p;
++         for (p = 0; name && p < ARRAY_SIZE(old_programs); p++) {
++            if (!strncasecmp(name, old_programs[p], strlen(old_programs[p]))) {
++               maxYear = 2001;
++               break;
++            }
++         }
++      }
++#endif
+    }
+ 
+    /* Compute length of the extension string. */
