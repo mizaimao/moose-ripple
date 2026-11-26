@@ -34,6 +34,8 @@ CHECK(c_caps, FIELD_OFFSET(RDD_HALINFO, ddCaps) == FIELD_OFFSET(DDHALINFO, ddCap
 CHECK(c_heaps, FIELD_OFFSET(RDD_HALINFO, dwNumHeaps) == FIELD_OFFSET(DDHALINFO, vmiData) + FIELD_OFFSET(VIDMEMINFO, dwNumHeaps));
 CHECK(c_modeidx, FIELD_OFFSET(RDD_HALINFO, dwModeIndex) == FIELD_OFFSET(DDHALINFO, dwModeIndex));
 CHECK(c_hinst, FIELD_OFFSET(RDD_HALINFO, hInstance) == FIELD_OFFSET(DDHALINFO, hInstance));
+CHECK(c_exebuf, FIELD_OFFSET(RDD_HALINFO, lpDDExeBufCallbacks) == FIELD_OFFSET(DDHALINFO, lpDDExeBufCallbacks));
+CHECK(c_exebufcb, sizeof(((RDD_SHARED *)0)->exebufcb) == sizeof(DDHAL_DDEXEBUFCALLBACKS));
 CHECK(c_ddcb, sizeof(((RDD_SHARED *)0)->ddcb) == sizeof(DDHAL_DDCALLBACKS));
 CHECK(c_surfcb, sizeof(((RDD_SHARED *)0)->surfcb) == sizeof(DDHAL_DDSURFACECALLBACKS));
 CHECK(c_palcb, sizeof(((RDD_SHARED *)0)->palcb) == sizeof(DDHAL_DDPALETTECALLBACKS));
@@ -397,6 +399,74 @@ static DWORD WINAPI Lock(LPDDHAL_LOCKDATA d)
     return DDHAL_DRIVER_HANDLED;
 }
 
+/* ---- Direct3D 8 vertex and index buffers the driver allocates (d3d_buffers_on) ---------------
+   DirectDraw calls these for execute buffers in video memory, which the Direct3D 8 runtime
+   makes its vertex and index buffers when the device reports D3DDEVCAPS_HWVERTEXBUFFER and
+   D3DDEVCAPS_HWINDEXBUFFER. Each Lock that may write marks the buffer for the GPU again. */
+static DWORD WINAPI CanCreateExecuteBuffer(LPDDHAL_CANCREATESURFACEDATA d)
+{
+    d->ddRVal = DD_OK;
+    return DDHAL_DRIVER_HANDLED;
+}
+
+static DWORD WINAPI CreateExecuteBuffer(LPDDHAL_CREATESURFACEDATA d)
+{
+    DWORD i, j;
+
+    for (i = 0; i < d->dwSCnt; i++) {
+        LPDDRAWI_DDRAWSURFACE_GBL g = d->lplpSList[i]->lpGbl;
+        DWORD size = g->dwLinearSize ? g->dwLinearSize : d->lpDDSurfaceDesc->dwLinearSize;
+        void *p = size ? d3d_buffer_new(size) : NULL;
+        d3d_trace("buffer create: bytes, memory", size, (DWORD)p);
+        if (!p) {
+            for (j = 0; j < i; j++) {
+                d3d_buffer_free(d->lplpSList[j]->lpGbl->fpVidMem);
+                d->lplpSList[j]->lpGbl->fpVidMem = 0;
+                d->lplpSList[j]->lpGbl->dwReserved1 = 0;
+            }
+            d->ddRVal = DDERR_OUTOFVIDEOMEMORY;
+            return DDHAL_DRIVER_HANDLED;
+        }
+        g->fpVidMem = (FLATPTR)p;
+        g->dwLinearSize = size;
+        g->dwReserved1 = D3D_BUFFER_MARK;
+    }
+    d->ddRVal = DD_OK;
+    return DDHAL_DRIVER_HANDLED;
+}
+
+static DWORD WINAPI DestroyExecuteBuffer(LPDDHAL_DESTROYSURFACEDATA d)
+{
+    LPDDRAWI_DDRAWSURFACE_GBL g = d->lpDDSurface->lpGbl;
+    if (g->dwReserved1 == D3D_BUFFER_MARK) {
+        d3d_buffer_free(g->fpVidMem);
+        g->fpVidMem = 0;
+        g->dwReserved1 = 0;
+    }
+    d->ddRVal = DD_OK;
+    return DDHAL_DRIVER_HANDLED;
+}
+
+/* The whole buffer, whatever range is asked for: the runtime adds the offset. */
+static DWORD WINAPI LockExecuteBuffer(LPDDHAL_LOCKDATA d)
+{
+    LPDDRAWI_DDRAWSURFACE_GBL g = d->lpDDSurface->lpGbl;
+    d3d_trace("buffer lock: memory, flags", g->fpVidMem, d->dwFlags);
+    if (d->bHasRect)
+        d3d_trace("buffer lock: from, to", d->rArea.left, d->rArea.right);
+    if (!(d->dwFlags & DDLOCK_READONLY) && g->dwReserved1 == D3D_BUFFER_MARK)
+        d3d_buffer_written(g->fpVidMem);
+    d->lpSurfData = (LPVOID)g->fpVidMem;
+    d->ddRVal = DD_OK;
+    return DDHAL_DRIVER_HANDLED;
+}
+
+static DWORD WINAPI UnlockExecuteBuffer(LPDDHAL_UNLOCKDATA d)
+{
+    d->ddRVal = DD_OK;
+    return DDHAL_DRIVER_HANDLED;
+}
+
 static DWORD WINAPI GetBltStatus(LPDDHAL_GETBLTSTATUSDATA d)
 {
     d->ddRVal = DD_OK;
@@ -541,6 +611,23 @@ DWORD WINAPI DriverInit(DWORD context)
     if (d3d8_enabled()) {
         s->hal.dwFlags |= RDD_HALINFO_GETDRIVERINFO2;
         ((DDCORECAPS *)s->hal.ddCaps)->dwNumFourCCCodes = RDD_FOURCCS;  /* DXT1..5 (ddraw16.c) */
+        if (d3d_buffers_on()) {
+            LPDDHAL_DDEXEBUFCALLBACKS x = (LPDDHAL_DDEXEBUFCALLBACKS)s->exebufcb;
+            zero(x, sizeof *x);
+            x->dwSize = sizeof *x;
+            x->dwFlags = DDHAL_EXEBUFCB32_CANCREATEEXEBUF | DDHAL_EXEBUFCB32_CREATEEXEBUF |
+                         DDHAL_EXEBUFCB32_DESTROYEXEBUF | DDHAL_EXEBUFCB32_LOCKEXEBUF |
+                         DDHAL_EXEBUFCB32_UNLOCKEXEBUF;
+            x->CanCreateExecuteBuffer = CanCreateExecuteBuffer;
+            x->CreateExecuteBuffer = CreateExecuteBuffer;
+            x->DestroyExecuteBuffer = DestroyExecuteBuffer;
+            x->LockExecuteBuffer = LockExecuteBuffer;
+            x->UnlockExecuteBuffer = UnlockExecuteBuffer;
+            s->hal.lpDDExeBufCallbacks = s->self16 + FIELD_OFFSET(RDD_SHARED, exebufcb);
+            /* DirectDraw offers execute buffers in video memory only on hardware that has them */
+            ((DDCORECAPS *)s->hal.ddCaps)->ddsCaps.dwCaps |= DDSCAPS_EXECUTEBUFFER;
+            dbg("rdd: Direct3D 8 buffers in memory the driver allocates\r\n");
+        }
     } else {
         s->hal.dwFlags &= ~RDD_HALINFO_GETDRIVERINFO2;
         ((DDCORECAPS *)s->hal.ddCaps)->dwNumFourCCCodes = 0;

@@ -21,6 +21,15 @@ DWORD d3d_dxt_block(const DDPIXELFORMAT *pf);
 /* An uncompressed format named by FOURCC (a D3DFORMAT): its bytes a texel, else 0. */
 DWORD d3d_fourcc_bytes(const DDPIXELFORMAT *pf);
 
+/* Direct3D 8 vertex and index buffers the driver allocates (with hardware vertex processing,
+   unless D3D8Buffers is "0"): memory for one (NULL if none is left), its end, and a write to
+   it (Lock), after which a draw uploads it to the GPU again. */
+#define D3D_BUFFER_MARK 0x46554252UL    /* a buffer surface's GBL dwReserved1: the driver allocated it */
+int d3d_buffers_on(void);
+void *d3d_buffer_new(DWORD size);
+void d3d_buffer_free(FLATPTR mem);
+void d3d_buffer_written(FLATPTR mem);
+
 /* A surface is about to be read or shown (Lock, Flip): rendering still on the GPU for it goes
    into its memory first. */
 int d3d_surface_access(LPDDRAWI_DDRAWSURFACE_LCL s);

@@ -59,7 +59,8 @@ typedef struct {
     rdd_u32 dwFlags;
     rdd_u32 lpPDevice;                  /* 16:16: the 16-bit driver's PDEVICE */
     rdd_u32 hInstance;
-    rdd_u32 lpD3DGlobalDriverData, lpD3DHALCallbacks, lpDDExeBufCallbacks;  /* flat */
+    rdd_u32 lpD3DGlobalDriverData, lpD3DHALCallbacks;   /* flat */
+    rdd_u32 lpDDExeBufCallbacks;        /* 16:16, like the other callback tables (exebufcb) */
 } RDD_HALINFO;
 
 #define RDD_PF_PALETTEINDEXED8  0x20
@@ -134,6 +135,8 @@ typedef struct {
     RDD_MODEINFO modes[RDD_MAX_MODES];
     rdd_u32      fourcc[RDD_FOURCCS];   /* DXT1..5, for HALINFO.lpdwFourCC (16-bit side); the DLL
                                            says how many in DDCORECAPS */
+    rdd_u32      exebufcb[7];           /* DDHAL_DDEXEBUFCALLBACKS: the DLL fills it in when Direct3D 8
+                                           buffers are the driver's (d3d_buffers_on) */
 } RDD_SHARED;
 
 #endif
