@@ -46,6 +46,7 @@ typedef struct {
  * unless named otherwise. A skipped draw is consumed and leaves the target
  * unchanged; the reason is the first unsupported feature found. */
 #define RB2K_D3D7_DRAW_ESCAPE 0x52420023
+#define RB2K_D7_VERTEX_SITES 20
 enum { RB2K_D7_SKIP_FILL, RB2K_D7_SKIP_STENCIL, RB2K_D7_SKIP_STAGE1, RB2K_D7_SKIP_VERTEX,
        RB2K_D7_SKIP_TEXTURE, RB2K_D7_SKIP_COMBINER, RB2K_D7_SKIP_PRIMITIVE, RB2K_D7_SKIP_CLEAR,
        RB2K_D7_SKIPS };
@@ -55,6 +56,15 @@ enum { RB2K_D7_IGNORED_FOG, RB2K_D7_IGNORED_COLORKEY, RB2K_D7_IGNORED_CLIPPLANE,
 typedef struct {
     ULONG version, drawn, drawCalls, skippedCalls;
     ULONG skipped[RB2K_D7_SKIPS], ignored[RB2K_D7_IGNORED];
+    /* Vertex skips by the check that made them (in source order), and the
+     * vertex format and stream stride of the last one. */
+    ULONG vertexSites[RB2K_D7_VERTEX_SITES], vertexFvf, vertexStride;
+    /* Textures not registered: no video memory at creation, the table full;
+     * and the most registered at once. */
+    ULONG regNoMemory, regFull, regPeak;
+    /* The last texture registered without memory: its caps, caps2 and format flags; and the
+     * texture transform flags (D3DTSS_TEXTURETRANSFORMFLAGS) of the last texture-transform skip. */
+    ULONG noMemoryCaps, noMemoryCaps2, noMemoryFormat, transformFlags;
     ULONG textures, uploads, uploadBytes, checks, uploadFailures, checkFailures;
     ULONG opcodes[RB2K_D7_OPCODES];
     ULONG registered[8];        /* texture registrations by decoded format, zero unsupported */
@@ -140,6 +150,10 @@ typedef struct {
     /* Texture skips by reason: no such handle, not usable (format, owner,
      * kind), the target itself, not ready (read or upload failed). */
     ULONG texSkips[4];
+    /* The Direct3D 9 interface: draws whose declaration and shader could not be made into
+     * a Direct3D 8 shader or vertex format, and commands accepted but not carried out
+     * (RB2K_D9_IGNORED_...). */
+    ULONG d9Unresolved, d9Ignored[8];
     /* The last eight surface creations: caps, size (width << 16 | height),
      * count, slots in use << 8 | where it ended (0 done, 1 no slot, 2 host
      * image refused), result. */
@@ -150,7 +164,9 @@ typedef struct {
 } RB2K_D7_DRAWSTATS;
 enum { RB2K_D7_FAIL_RANGE, RB2K_D7_FAIL_VBCAPS, RB2K_D7_FAIL_LINEAR, RB2K_D7_FAIL_ADDRESS,
        RB2K_D7_FAIL_PROBE, RB2K_D7_FAIL_IMMEDIATE, RB2K_D7_FAIL_LENGTH, RB2K_D7_FAIL_OTHER };
-#define RB2K_D7_DRAWSTATS_VERSION 3
+#define RB2K_D7_DRAWSTATS_VERSION 4
+enum { RB2K_D9_IGNORED_SCISSOR, RB2K_D9_IGNORED_TARGETS, RB2K_D9_IGNORED_BLT, RB2K_D9_IGNORED_FILL,
+       RB2K_D9_IGNORED_QUERY, RB2K_D9_IGNORED_CONSTANTS, RB2K_D9_IGNORED_FREQUENCY, RB2K_D9_IGNORED_MIPS };
 #define RB2K_D3D7_QUERY_LIMIT 24
 typedef struct {
     RB2K_D3D7_STATS totals;

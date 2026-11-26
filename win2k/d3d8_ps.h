@@ -35,6 +35,7 @@ typedef struct {
     unsigned int reason;        /* RbPs* */
     unsigned int detail;        /* the opcode or token behind the reason */
     unsigned int constants;     /* vertex shaders: c0..c(n-1) are read (all for relative reads) */
+    unsigned int pointSize;     /* vertex shaders: oPts is written (a PSIZE output) */
 } RB_PS_INFO;
 
 /* Fog applied to the shader's result, encoded as RB2K_D3D7_DRAW.fog: the
@@ -60,8 +61,8 @@ typedef struct {
 unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, unsigned int fog, char *out,
                              unsigned int size, RB_PS_INFO *info);
 
-/* Vertex shaders (vs_1_1, vs_2_0) with their Direct3D 8 declaration (one
- * stream), as a TGSI vertex shader for the layout in d3d8_ps.c: constants
+/* Vertex shaders (vs_1_1, vs_2_0) with their Direct3D 8 declaration, as a
+ * TGSI vertex shader for the layout in d3d8_ps.c: constants
  * c0..c255 at CONST[RB_VS_CONST_BASE..], then up to RB_VS_VERTICES vertices
  * of at most RB_VS_VERTEX_CONSTANTS constants each. RB_VS_FOG_ALPHA puts
  * oFog into the specular alpha, where fog from the specular alpha finds it. */
@@ -70,16 +71,43 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
 #define RB_VS_VERTICES 48
 #define RB_VS_VERTEX_CONSTANTS 16
 #define RB_VS_FOG_ALPHA 1
+/* RB_VS_FLOW: the integer and boolean constants i0..i15 and b0..b15 are in CONST[3..18] (i# as
+ * floats in x, y, z: count, start, step; b# as 1 or 0 in w), so vs_2_0 static flow control (rep, loop,
+ * if, call, callnz) runs; without it only defi and defb values can drive it. */
+#define RB_VS_FLOW 2
+/* RB_VS_CLIP: the program also writes clip distances (OUT[12] and OUT[13], CLIPDIST[0] and [1])
+ * for six user clip planes in clip space, CONST[RB_VS_CONST_BASE + constants + 0..5] (constants as
+ * in info->constants), which the rasterizer enables by D3DRS_CLIPPLANEENABLE. */
+#define RB_VS_CLIP 4
+/* The IEEE single bits of a whole number (exact below 2^24 in magnitude). */
+unsigned int rb_float_bits(int v);
+/* A vertex holds the data of each stream the declaration reads, one after the
+ * other: streamBases[n] is the word at which stream n starts (NULL: stream 0
+ * only, at word 0). */
+#define RB_VS_STREAMS 8
 unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, const unsigned int *decl,
-                             unsigned int declCount, unsigned int flags, char *out, unsigned int size, RB_PS_INFO *info);
+                             unsigned int declCount, const unsigned int *streamBases, unsigned int flags, char *out,
+                             unsigned int size, RB_PS_INFO *info);
 
 /* Fixed-function texture stages (D3DTSS colour and alpha operations and
  * arguments, the coordinate index) as a TGSI pixel program with the inputs of
  * translated pixel shaders, for draws with a vertex shader. CONST[0].x holds
  * the texture factor as its ARGB word; fog uses CONST[8] and [9]. Stage n
- * samples with sampler n. */
+ * samples with sampler n.
+ *
+ * transform is D3DTSS_TEXTURETRANSFORMFLAGS: the count of coordinates the
+ * texture matrix gives (bits 0-7, 0 for none) and D3DTTFF_PROJECTED (256),
+ * which divides them by the last one. The matrix of stage n (n below
+ * RB_STAGE_TRANSFORMS) applies per pixel, its columns in CONST[8+4n] to
+ * CONST[11+4n]; such a program reads 32 constants and its fog constants
+ * follow them (CONST[32] and [33]). A BUMPENVMAP or BUMPENVMAPLUMINANCE stage
+ * n (below RB_STAGE_TRANSFORMS, with no texture transform) has its bump matrix
+ * (00, 01, 10, 11) in CONST[8+4n] and its luminance scale and offset in
+ * CONST[9+4n].x and .y; it moves the next stage's lookup. */
+#define RB_STAGE_TRANSFORMS 6
+#define RB_TTFF_PROJECTED 256
 typedef struct {
-    unsigned int colorOp, colorArg1, colorArg2, alphaOp, alphaArg1, alphaArg2, coordIndex;
+    unsigned int colorOp, colorArg1, colorArg2, alphaOp, alphaArg1, alphaArg2, coordIndex, transform;
 } RB_STAGE_STATE;
 unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count, unsigned int specular,
                                 unsigned int fog, char *out, unsigned int size, RB_PS_INFO *info);
