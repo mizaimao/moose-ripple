@@ -765,6 +765,47 @@ opt-in. On the ordinary path the window swaps took 174 ms before; after,
 the warm-up run took 171 ms and the timed one 279 ms in the same boot.
 `d9pixels` (41 of 41) and `tpixels hal` (18 of 18) pass with both builds.
 
+### Full-screen windows shown from the GPU
+
+As on Windows 9x (`docs/win9x/mesa.md`), a full-screen OpenGL window can be
+shown the way a Direct3D flip chain is: when its client area is the whole
+screen, nothing covers it and the pointer is hidden, Mesa copies the frame
+on the host GPU into a scanout image of its own and asks the display driver
+to show that image (`RVD_PRESENT`). The miniport puts the image on the
+display and flushes it, with no copy into the desktop image and no wait for
+a fence. When a frame does not qualify, or the program lets go of the image,
+the display returns to the desktop image (`RVD_DESKTOP`), which kept
+receiving GDI's writes meanwhile.
+
+On Windows 2000 and XP this needs the GPU desktop (`RippleGpuDesktop=1`):
+once a guest has shown a resource, virtio-vga keeps the display on
+virtio-gpu until a reset, so the display can only come back to the desktop
+image, not to VGA. `RVD_DESKTOP` without input tells Mesa whether that
+desktop is on; without it every frame stays on the ordinary path.
+`RIPPLE_GL_SCANOUT=0` keeps every frame on the ordinary path too.
+
+One boot of XP SP3 under KVM on the second Intel UHD 630 host (QEMU 10.0),
+with `RippleGpuDesktop=1`; only the program's environment changed between
+the Quake III runs (`timedemo demo001`, 1024×768 full screen):
+
+| Path | fps |
+| --- | ---: |
+| Ordinary (download, GDI) | 370.4 |
+| GPU presentation (`RIPPLE_GL_PRESENT=1`) | 285.4 |
+| Scanout (on by default with the GPU desktop) | 414.2 |
+
+All 1,346 frames of the scanout run went through the scanout path (one
+flush each, no rectangle copies). Each costs about 1.8 ms in the flush,
+which here includes QEMU's egl-headless display reading the image back for
+its VNC view. In a 640×480 window the frames are not eligible and take the
+ordinary path (484.2 fps).
+Picture check: QEMU's egl-headless display cannot dump the screen while a
+program's image is shown ("no surface"), so the demo was played at normal
+speed in a second boot with an SDL window on the host instead; captures of
+that window during the scanout frames show the game correctly (level,
+lighting, status bar, the right way up), and after the game the display is
+back on the desktop.
+
 ### Small desktop writes and the hardware pointer
 
 `RIPPLE_GL_PRESENT=inline` uses the same per-frame copy as `1`.
