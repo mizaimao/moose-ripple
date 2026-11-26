@@ -1345,3 +1345,22 @@ memory 732 to 734 MB. On the host: no message from the renderer in the journal, 
 
 Cinebench is slower inside the run (36 frames/s) than started alone after a boot (46); the
 order of the programs was not varied, so this is noted, not explained.
+
+### The changes of 2026-11-25 timed in UTM (2026-11-26)
+
+UTM 5 on an M1 Max, no other guest running (a disk tool was busy on the host, and the level
+is lower than the 22.9 to 24.8 frames/s of the day before, so only this table's rows compare
+with each other). OpenArena's timedemo, window under the Dock, one run each, the kext changes
+switched by boot flag and the bundle changes by environment variable on the same builds:
+
+| display limit and helper thread (kext) | newest frame and redraw limit (bundle) | frames/s |
+|---|---|---|
+| off | off | 19.8 |
+| off | on | 19.6 |
+| on | off | 20.0 |
+| on | on | 19.9 |
+| on | on, the Dock hidden | 20.8 |
+
+No difference in UTM, as expected: the emulated CPU is the limit there, the program presents
+far fewer than 66 times a second, and nothing waits for the host. Nothing got slower either.
+What would help under emulation is less work on the program's own thread.
