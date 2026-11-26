@@ -621,6 +621,8 @@ On XP under KVM on the Intel host, with the host alone:
 | memtest: 50 full-screen scrolls | 16 ms | 16 ms |
 | d9full, flip probe, d3d7probe window, OpenGL presents at 1920×1080 | pass | mode not offered |
 
+Windows 2000 has not been checked with the switch on yet.
+
 ## Experimental GPU presentation for OpenGL
 
 The ordinary renderer downloads a completed frame and passes it to GDI.
