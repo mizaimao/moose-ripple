@@ -374,6 +374,8 @@ typedef struct {
     void (APIENTRY *VertexAttribPointerARB)(GLuint, GLint, GLenum, GLboolean, GLsizei, const GLvoid *);
     void (APIENTRY *EnableVertexAttribArrayARB)(GLuint);
     void (APIENTRY *DisableVertexAttribArrayARB)(GLuint);
+    /* render-to-texture on the GPU (optional) */
+    void (APIENTRY *CopyTexSubImage2D)(GLenum, GLint, GLint, GLint, GLint, GLint, GLsizei, GLsizei);
 } GLF;
 
 #define GL_CORE_COUNT 53            /* entries up to DrvGetProcAddress */
@@ -402,6 +404,7 @@ static const char *const gl_names[] = {
     "glTexImage3D",
     "glNormalPointer", "glDepthRange",
     "glVertexAttribPointerARB", "glEnableVertexAttribArrayARB", "glDisableVertexAttribArrayARB",
+    "glCopyTexSubImage2D",
 };
 #define GL_ALL_COUNT (sizeof gl_names / sizeof gl_names[0])
 typedef char c_gl_names[sizeof(GLF) == GL_ALL_COUNT * sizeof(PROC) ? 1 : -1];
@@ -1084,11 +1087,14 @@ typedef struct {
     DWORD levels;                       /* mipmap levels uploaded (1: the top level only) */
     FLATPTR lmem[MAX_LEVELS];           /* each level's memory (lmem[0] is mem) */
     DWORD stamp;                        /* DirectDraw's contents stamps then (0: none kept) */
+    DWORD gpu_gen;                      /* the render-target picture copied in (texture_from_gpu) */
     DWORD scene;                        /* the scene it was uploaded in */
     int dirty;                          /* written since (Lock, texture blit) */
 } TEXTURE;
 
-#define TARGETS  4                      /* colour buffers a context keeps (gpu_buffer) */
+#define TARGETS  16                     /* colour buffers a context keeps (gpu_buffer): a flip chain
+                                           and the textures a frame renders into (3DMark 2001's
+                                           Dragothic: ten), so their pictures can stay on the GPU */
 #define ZBUFFERS 4                      /* depth buffers a context keeps */
 
 /* A surface's picture on the GPU: a render target's colour or a z-buffer's depth, kept by the
@@ -1102,6 +1108,12 @@ typedef struct {
     GLenum format;                      /* rb's: colour_format, or depth and stencil */
     DWORD serial;                       /* display mode in which this page was attached */
     int deferred;                       /* exclusive flip-chain page newer on the GPU */
+    int tex;                            /* deferred holds a texture's picture (finish_target): its
+                                           format, pitch and size below, not the screen's */
+    DDPIXELFORMAT pf;
+    LONG pitch;
+    DWORD tw, th;
+    DWORD gen;                          /* texture pictures deferred so far */
     int written;                        /* colour: the memory is newer than rb's picture (the
                                            program wrote it, or rb is new): it goes to the GPU
                                            before the next draw (rt_upload) */
@@ -1344,7 +1356,13 @@ static int read_pixels(RCTX *c, GPUBUF *b)
             c->dirty = 0;
         return 1;
     }
-    if (b->deferred) {
+    if (b->deferred && b->tex) {        /* a texture's picture kept on the GPU (finish_target) */
+        pf = b->pf;
+        pitch = (DWORD)b->pitch;
+        if (w > b->tw) w = b->tw;
+        if (h > b->th) h = b->th;
+        texture = 1;
+    } else if (b->deferred) {
         display_format(&pf);
         pitch = shared->pitch;
     } else {
@@ -1392,6 +1410,7 @@ static int read_pixels(RCTX *c, GPUBUF *b)
     else
         c->dirty = 0;
     b->deferred = 0;
+    b->tex = 0;
     targets_written(b->mem, b);
     if (texture)
         textures_written(b->mem);
@@ -1434,6 +1453,22 @@ static void finish_target(RCTX *c)
         c->cur->serial == shared->mode_serial && screen_page(c->rt)) {
         c->cur->deferred = 1;
         c->dirty = 0;
+    } else if (c->rt && c->cur && (c->rt->ddsCaps.dwCaps & DDSCAPS_TEXTURE) && !c->cur->written &&
+               c->cur->mem == c->rt->lpGbl->fpVidMem && gl_of(c)->CopyTexSubImage2D) {
+        /* A texture rendered into: its picture stays on the GPU and goes into the texture there
+           when a draw uses it (texture_from_gpu); memory gets it only when the program locks
+           the surface (d3d_surface_access) or a texture blit reads it (gpu_sync). */
+        LPDDRAWI_DDRAWSURFACE_GBL g = c->rt->lpGbl;
+        GPUBUF *b = c->cur;
+        b->deferred = 1;
+        b->tex = 1;
+        surface_format(c->rt, &b->pf);
+        b->pitch = g->lPitch;
+        b->tw = g->wWidth;
+        b->th = g->wHeight;
+        b->gen++;
+        c->dirty = 0;
+        textures_written(b->mem);       /* their stages bind them again */
     } else {
         read_back(c);
     }
@@ -1446,8 +1481,8 @@ int d3d_surface_access(LPDDRAWI_DDRAWSURFACE_LCL s)
 
     for (i = 0; i < MAX_CONTEXTS; i++) {
         RCTX *c = mine(&contexts[i].o, &m) ? contexts[i].c : NULL;
-        if (!c || (!c->dirty && !c->chain_active))
-            continue;
+        if (!c)
+            continue;                   /* (a texture's picture may wait without a flip chain) */
         for (j = 0; j < TARGETS; j++) {
             GPUBUF *b = &c->cb[j];
             if (b->mem == s->lpGbl->fpVidMem && (b->deferred || (b == c->cur && c->dirty))) {
@@ -1564,6 +1599,7 @@ static GPUBUF *gpu_buffer(RCTX *c, GPUBUF *t, DWORD n, FLATPTR mem, DWORD w, DWO
     if (b->mem != mem || b->serial != shared->mode_serial) {
         b->written = 1;
         b->deferred = 0;
+        b->tex = 0;
     }
     b->serial = shared->mode_serial;
     if (!b->rb)
@@ -2375,6 +2411,88 @@ static int volume_bind(RCTX *c, DWORD h, int stage, const struct shadow *sh)
 
 /* Bind the texture behind a surface handle, uploading it if it is new or has changed. 0 if
    there is no usable texture. */
+/* A 2D texture's filters, levels, addressing and border colour from its stage's states. */
+static void sampler_2d(GLF *gl, const DWORD *st, DWORD levels)
+{
+    GLfloat border[4], bias;
+
+    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+                      st[D3DTSS_MAGFILTER] == D3DTFG_POINT ? GL_NEAREST : GL_LINEAR);
+    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, min_filter(st, levels));
+    /* MAXMIPLEVEL is the largest level the program allows (0: the top) */
+    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL,
+                      st[D3DTSS_MAXMIPLEVEL] < levels ? st[D3DTSS_MAXMIPLEVEL] : levels - 1);
+    bias = *(const float *)&st[D3DTSS_MIPMAPLODBIAS];
+    gl->TexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, &bias);
+    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl_address(st[D3DTSS_ADDRESSU]));
+    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl_address(st[D3DTSS_ADDRESSV]));
+    border[0] = ((st[D3DTSS_BORDERCOLOR] >> 16) & 255) / 255.0f;
+    border[1] = ((st[D3DTSS_BORDERCOLOR] >> 8) & 255) / 255.0f;
+    border[2] = (st[D3DTSS_BORDERCOLOR] & 255) / 255.0f;
+    border[3] = ((st[D3DTSS_BORDERCOLOR] >> 24) & 255) / 255.0f;
+    gl->TexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+}
+
+/* The picture rendered into the texture at mem and kept on the GPU (finish_target), if any. */
+static GPUBUF *gpu_picture(RCTX *c, FLATPTR mem)
+{
+    int i;
+    for (i = 0; i < TARGETS; i++)
+        if (c->cb[i].mem == mem && c->cb[i].deferred && c->cb[i].tex)
+            return &c->cb[i];
+    return NULL;
+}
+
+/* A texture rendered into: its picture copied into the OpenGL texture on the GPU, once for
+   each picture (b->gen), instead of read back into memory and uploaded again. Only the top
+   level: such textures are drawn with one. */
+static int texture_from_gpu(RCTX *c, DWORD h, TEXTURE *t, LPDDRAWI_DDRAWSURFACE_LCL s, GPUBUF *b,
+                            const DWORD *st)
+{
+    GLF *gl = gl_of(c);
+    LPDDRAWI_DDRAWSURFACE_GBL g = s->lpGbl;
+    LPDDRAWI_DDRAWSURFACE_LCL lv[MAX_LEVELS];
+    PIXFMT f = gl_format(&b->pf);
+    DWORD w = g->wWidth, ht = g->wHeight, fmt = f.internal | 0x40000000UL;  /* made on the GPU */
+
+    if (!f.bytes)
+        return 0;
+    if (!t->name) {
+        if (c->ntextures >= TEXTURE_BUDGET)
+            texture_evict(c, h);
+        gl->GenTextures(1, &t->name);
+        c->ntextures++;
+    }
+    gl->BindTexture(GL_TEXTURE_2D, t->name);
+    if (t->mem != g->fpVidMem || t->w != w || t->h != ht || t->fmt != fmt || t->levels != 1) {
+        gl->TexImage2D(GL_TEXTURE_2D, 0, f.internal, w, ht, 0, f.format, f.type, NULL);
+        gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        t->mem = g->fpVidMem;
+        t->w = w;
+        t->h = ht;
+        t->fmt = fmt;
+        t->levels = 1;
+        t->lmem[0] = g->fpVidMem;
+        t->gpu_gen = b->gen - 1;
+    }
+    if (t->gpu_gen != b->gen) {
+        if (!c->read_fbo)
+            gl->GenFramebuffers(1, &c->read_fbo);
+        gl->BindFramebuffer(GL_FRAMEBUFFER, c->read_fbo);
+        gl->FramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, b->rb);
+        gl->CopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, w < b->w ? w : b->w, ht < b->h ? ht : b->h);
+        gl->BindFramebuffer(GL_FRAMEBUFFER, c->fbo);
+        t->gpu_gen = b->gen;
+        tracef("rd3d: texture %lx from its render-target picture on the GPU (%lu)\r\n", h, b->gen);
+    }
+    mip_chain(s, lv);
+    t->stamp = chain_stamp(lv, 1);
+    t->scene = c->scene;
+    t->dirty = 0;
+    sampler_2d(gl, st, 1);
+    return 1;
+}
+
 static int texture_bind(RCTX *c, DWORD h, int stage)
 {
     GLF *gl = gl_of(c);
@@ -2387,7 +2505,6 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
     DWORD stamp, fmt, levels, l;
     int keyed;
     DWORD *st = c->tss[stage];
-    GLfloat border[4], bias;
 
     if (!s || !(g = s->lpGbl) || !g->fpVidMem)
         return 0;
@@ -2398,6 +2515,11 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
     t = texture_slot(c, h);
     if (!t)
         return 0;
+    {
+        GPUBUF *b = gpu_picture(c, g->fpVidMem);     /* rendered into, still on the GPU */
+        if (b)
+            return texture_from_gpu(c, h, t, s, b, st);
+    }
     surface_format(s, &pf);
     f = gl_format(&pf);
     if (!f.bytes && !f.block)
@@ -2451,21 +2573,7 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
     t->stamp = stamp;
     t->scene = c->scene;
     t->dirty = 0;
-    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
-                      st[D3DTSS_MAGFILTER] == D3DTFG_POINT ? GL_NEAREST : GL_LINEAR);
-    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, min_filter(st, levels));
-    /* MAXMIPLEVEL is the largest level the program allows (0: the top) */
-    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL,
-                      st[D3DTSS_MAXMIPLEVEL] < levels ? st[D3DTSS_MAXMIPLEVEL] : levels - 1);
-    bias = *(const float *)&st[D3DTSS_MIPMAPLODBIAS];
-    gl->TexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, &bias);
-    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gl_address(st[D3DTSS_ADDRESSU]));
-    gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gl_address(st[D3DTSS_ADDRESSV]));
-    border[0] = ((st[D3DTSS_BORDERCOLOR] >> 16) & 255) / 255.0f;
-    border[1] = ((st[D3DTSS_BORDERCOLOR] >> 8) & 255) / 255.0f;
-    border[2] = (st[D3DTSS_BORDERCOLOR] & 255) / 255.0f;
-    border[3] = ((st[D3DTSS_BORDERCOLOR] >> 24) & 255) / 255.0f;
-    gl->TexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+    sampler_2d(gl, st, levels);
     return 1;
 }
 
@@ -4290,6 +4398,11 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
            b->pDest.x, b->pDest.y, b->dwFlags, ds && ss ? "" : " (unknown handle)");
     if (!ds || !ss || !ds->lpGbl->fpVidMem || !ss->lpGbl->fpVidMem)
         return;
+    {
+        GPUBUF *pic = gpu_picture(c, ss->lpGbl->fpVidMem);  /* the source was rendered into */
+        if (pic)
+            read_pixels(c, pic);
+    }
     surface_format(ss, &pf);
     f = gl_format(&pf);
     bytes = f.bytes ? f.bytes : pf.dwRGBBitCount / 8;   /* FOURCC-named formats have no bit count */
