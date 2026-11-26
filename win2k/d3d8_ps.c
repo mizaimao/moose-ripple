@@ -1374,7 +1374,7 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
                                 unsigned int fog, char *out, unsigned int size, RB_PS_INFO *info)
 {
     PS s;
-    unsigned int i, k, log2e = 4, factor = 0, transforms = 0, base;
+    unsigned int i, k, log2e = 4, factor = 0, transforms = 0, base, bump = ~0u, bumpLum = 0;
     char *z = (char *)&s, tex[64];
     for (k = 0; k < sizeof(s); ++k) z[k] = 0;
     info->samplers = info->coords = info->reason = info->detail = info->constants = 0;
@@ -1390,6 +1390,11 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
         if (st->transform & 0xff) {
             if (i >= RB_STAGE_TRANSFORMS || (st->transform & 0xff) > 4 || (st->transform & ~(0xffu | RB_TTFF_PROJECTED)))
                 return fail(&s, RbPsRegister, st->transform);
+            transforms = 1;
+        }
+        /* A bump stage keeps its matrix where its texture matrix would be. */
+        if (st->colorOp == TopBump || st->colorOp == TopBumpLum) {
+            if (i >= RB_STAGE_TRANSFORMS || (st->transform & 0xff)) return fail(&s, RbPsOpcode, st->colorOp);
             transforms = 1;
         }
     }
@@ -1425,6 +1430,19 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
         unsigned int set = st->coordIndex & 0xffff, alphaOp = st->alphaOp, a1 = st->alphaArg1, a2 = st->alphaArg2;
         if (st->coordIndex >> 16 || set >= RB_PS2_COORD_SETS) return fail(&s, RbPsRegister, st->coordIndex);
         if (alphaOp == TopDisable) { alphaOp = TopArg1; a1 = TaCurrent; a2 = TaCurrent; }
+        if (st->colorOp == TopBump || st->colorOp == TopBumpLum) {
+            /* The bump map: du, dv and a luminance for the next stage's lookup;
+             * the current colour goes on unchanged. */
+            tex[0] = 0;
+            cat(tex, sizeof(tex), "TEX TEMP[8], IN["); cat_number(tex, sizeof(tex), 2 + set);
+            cat(tex, sizeof(tex), "], SAMP["); cat_number(tex, sizeof(tex), i); cat(tex, sizeof(tex), "], 2D");
+            line(&s, tex, 0, 0, 0, 0, 0, 0);
+            info->samplers |= 1u << i;
+            info->coords |= 1u << set;
+            bump = i;
+            bumpLum = st->colorOp == TopBumpLum;
+            continue;
+        }
         if (uses_texture(st->colorOp, st->colorArg1, st->colorArg2) || uses_texture(alphaOp, a1, a2)) {
             char in[16];
             in[0] = 0;
@@ -1449,10 +1467,29 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
                 in[0] = 0;
                 cat(in, sizeof(in), "TEMP[10]");
             }
+            if (bump != ~0u && bump + 1 == i) {
+                /* Moved by the bump stage's du and dv through its matrix (00, 01, 10, 11). */
+                char m[16];
+                m[0] = 0;
+                cat(m, sizeof(m), "CONST["); cat_number(m, sizeof(m), 8 + 4 * bump); cat(m, sizeof(m), "]");
+                if (!(st->transform & 0xff)) line(&s, "MOV TEMP[10], ", in, 0, 0, 0, 0, 0);
+                line(&s, "MAD TEMP[10].xy, TEMP[8].xxxx, ", m, ".xyxy, TEMP[10]", 0, 0, 0, 0);
+                line(&s, "MAD TEMP[10].xy, TEMP[8].yyyy, ", m, ".zwzw, TEMP[10]", 0, 0, 0, 0);
+                in[0] = 0;
+                cat(in, sizeof(in), "TEMP[10]");
+            }
             tex[0] = 0;
             cat(tex, sizeof(tex), "TEX TEMP[1], "); cat(tex, sizeof(tex), in);
             cat(tex, sizeof(tex), ", SAMP["); cat_number(tex, sizeof(tex), i); cat(tex, sizeof(tex), "], 2D");
             line(&s, tex, 0, 0, 0, 0, 0, 0);
+            if (bump != ~0u && bump + 1 == i && bumpLum) {
+                /* BUMPENVMAPLUMINANCE: times the luminance times the scale plus the offset. */
+                char l[16];
+                l[0] = 0;
+                cat(l, sizeof(l), "CONST["); cat_number(l, sizeof(l), 9 + 4 * bump); cat(l, sizeof(l), "]");
+                line(&s, "MAD_SAT TEMP[11].x, TEMP[8].zzzz, ", l, ".xxxx, ", l, ".yyyy", 0, 0);
+                line(&s, "MUL TEMP[1].xyz, TEMP[1], TEMP[11].xxxx", 0, 0, 0, 0, 0, 0);
+            }
             info->samplers |= 1u << i;
             info->coords |= 1u << set;
         }
