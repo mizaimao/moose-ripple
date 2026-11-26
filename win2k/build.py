@@ -144,6 +144,14 @@ def build_programs(work):
     targets.append(("d9texload.exe", ["tools/d9texload"], ["-I", d3d, "-luser32"]))
     targets.append(("d9stencil.exe", ["tools/d9stencil"], ["-I", d3d, "-luser32"]))
     targets.append(("d9full.exe", ["tools/d9full"], ["-I", d3d, "-luser32"]))
+    # A logging stand-in for d3d9.dll; the exports it does not handle go to d3d9real.dll.
+    trace = work / "d9trace.def"
+    trace.write_text("LIBRARY d3d9\nEXPORTS\nDirect3DCreate9=Direct3DCreate9@4\n" + "".join(
+        f"{name}=d3d9real.{name}\n" for name in (
+            "D3DPERF_BeginEvent", "D3DPERF_EndEvent", "D3DPERF_GetStatus", "D3DPERF_QueryRepeatFrame",
+            "D3DPERF_SetMarker", "D3DPERF_SetOptions", "D3DPERF_SetRegion", "DebugSetLevel", "DebugSetMute",
+            "Direct3DShaderValidatorCreate9", "PSGPError", "PSGPSampleTexture")))
+    targets.append(("d9trace.dll", ["tools/d9trace"], ["-shared", trace, "-I", d3d, "-luser32"]))
     args = [bin_dir / "i686-w64-mingw32-clang", "-O2", "-D_WIN32_WINNT=0x0500",
             "-I", source, "-I", repo / "win9x/minivdd",
             "-Wl,--major-subsystem-version,5,--minor-subsystem-version,0,--major-os-version,5,--minor-os-version,0,--no-insert-timestamp"]
