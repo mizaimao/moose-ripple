@@ -248,7 +248,7 @@ class VioGpuAdapter : IVioGpuPCI
     void static ThreadWork(_In_ PVOID Context);
     void ThreadWorkRoutine(void);
 
-    void ConfigChanged(void);
+    BOOLEAN ConfigChanged(void);
 
     VOID CreateResolutionEvent(VOID);
     VOID NotifyResolutionEvent(VOID);

@@ -169,13 +169,17 @@ MapAddressRange(void *context, int bar, size_t offset, size_t maxlen)
     return PciOf(context)->GetPciResources()->GetMappedAddress((UINT)bar, (ULONG)offset);
 }
 
-/* With message-signalled interrupts: message 0 is the configuration change, message n + 1
- * belongs to queue n (the order the adapter's interrupt routine reads them in). */
+/* With message-signalled interrupts and a message for each: message 0 is the configuration
+ * change, message n + 1 belongs to queue n (the order the adapter's interrupt routine reads
+ * them in). With fewer messages than that, which is what Windows 7 allows a display adapter,
+ * everything uses message 0. */
 static u16
 GetMsixVector(void *context, int queue)
 {
     if (!PciOf(context)->IsMSIEnabled())
         return VIRTIO_MSI_NO_VECTOR;
+    if (PciOf(context)->GetPciResources()->IsSharedMessage())
+        return (u16)VIRTIO_GPU_MSIX_CONFIG_VECTOR;
     return queue < 0 ? (u16)VIRTIO_GPU_MSIX_CONFIG_VECTOR : (u16)(queue + 1);
 }
 
@@ -306,6 +310,7 @@ CPciResources::Init(PDXGKRNL_INTERFACE pDxgkInterface, PCM_RESOURCE_LIST pResLis
 
     bool used[PCI_TYPE0_ADDRESSES] = {};
     bool any = false;
+    m_Messages = 0;
     PCM_PARTIAL_RESOURCE_LIST list = &pResList->List[0].PartialResourceList;
     for (ULONG i = 0; i < list->Count; i++)
     {
@@ -314,6 +319,9 @@ CPciResources::Init(PDXGKRNL_INTERFACE pDxgkInterface, PCM_RESOURCE_LIST pResLis
         {
             case CmResourceTypeInterrupt:
                 m_InterruptFlags = d->Flags;
+                // the translated list has one descriptor for each message
+                if (d->Flags & CM_RESOURCE_INTERRUPT_MESSAGE)
+                    m_Messages++;
                 break;
             case CmResourceTypePort:
             case CmResourceTypeMemory:

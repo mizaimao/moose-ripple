@@ -55,7 +55,7 @@ class CPciBar
 class CPciResources
 {
   public:
-    CPciResources() : m_pDxgkInterface(nullptr), m_InterruptFlags(0)
+    CPciResources() : m_pDxgkInterface(nullptr), m_InterruptFlags(0), m_Messages(0)
     {
     }
 
@@ -85,6 +85,18 @@ class CPciResources
         return (m_InterruptFlags & CM_RESOURCE_INTERRUPT_MESSAGE);
     }
 
+    // How many interrupt messages Windows gave the device. Windows 7's display kernel starts a
+    // device that asks for more than one without any resources (and stops on that), so the INF
+    // asks for one, which the configuration and both queues then share.
+    ULONG GetMessageCount()
+    {
+        return m_Messages;
+    }
+    BOOLEAN IsSharedMessage()
+    {
+        return IsMSIEnabled() && m_Messages < 3;
+    }
+
     CPciBar *GetPciBar(UINT bar)
     {
         ASSERT(bar < PCI_TYPE0_ADDRESSES);
@@ -100,6 +112,7 @@ class CPciResources
   private:
     PDXGKRNL_INTERFACE m_pDxgkInterface;
     USHORT m_InterruptFlags;
+    ULONG m_Messages;
     CPciBar m_Bars[PCI_TYPE0_ADDRESSES];
 };
 

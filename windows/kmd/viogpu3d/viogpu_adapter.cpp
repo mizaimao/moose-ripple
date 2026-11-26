@@ -1534,7 +1534,14 @@ BOOLEAN VioGpuAdapter::InterruptRoutine(_In_ ULONG MessageNumber)
     BOOLEAN serviced = TRUE;
     ULONG intReason = 0;
     // return FALSE;
-    if (m_PciResources.IsMSIEnabled())
+    if (m_PciResources.IsSharedMessage())
+    {
+        // One message for everything (viogpu_pci.h): both queues are looked at. Reading the
+        // device to learn whether it was the configuration instead would cost what message
+        // interrupts are there to save; the worker thread asks for that now and then.
+        intReason = ISR_REASON_DISPLAY | ISR_REASON_CURSOR;
+    }
+    else if (m_PciResources.IsMSIEnabled())
     {
         switch (MessageNumber)
         {
@@ -1594,7 +1601,15 @@ void VioGpuAdapter::ThreadWorkRoutine(void)
 
     for (;;)
     {
-        KeWaitForSingleObject(&m_ConfigUpdateEvent, Executive, KernelMode, FALSE, NULL);
+        // With one interrupt message for everything no interrupt says that the configuration
+        // changed (the host's window got another size): the device is asked twice a second.
+        LARGE_INTEGER poll;
+        poll.QuadPart = -5000000LL;
+        KeWaitForSingleObject(&m_ConfigUpdateEvent,
+                              Executive,
+                              KernelMode,
+                              FALSE,
+                              m_PciResources.IsSharedMessage() ? &poll : NULL);
 
         if (m_bStopWorkThread)
         {
@@ -1602,25 +1617,30 @@ void VioGpuAdapter::ThreadWorkRoutine(void)
             break;
         }
 
-        ConfigChanged();
-        NotifyResolutionEvent();
+        if (ConfigChanged())
+        {
+            NotifyResolutionEvent();
+        }
     }
 }
 
-void VioGpuAdapter::ConfigChanged(void)
+// Whether the device reported a change of its displays (and what follows from one is done)
+BOOLEAN VioGpuAdapter::ConfigChanged(void)
 {
-    DbgPrint(TRACE_LEVEL_FATAL, ("<--> %s\n", __FUNCTION__));
     UINT32 events_read, events_clear = 0;
     virtio_get_config(&m_VioDev, FIELD_OFFSET(GPU_CONFIG, events_read), &events_read, sizeof(m_u32NumScanouts));
     if (events_read & VIRTIO_GPU_EVENT_DISPLAY)
     {
+        DbgPrint(TRACE_LEVEL_FATAL, ("<--> %s\n", __FUNCTION__));
         vidpn.GetDisplayInfo();
         events_clear |= VIRTIO_GPU_EVENT_DISPLAY;
         virtio_set_config(&m_VioDev, FIELD_OFFSET(GPU_CONFIG, events_clear), &events_clear, sizeof(m_u32NumScanouts));
         //        UpdateChildStatus(FALSE);
         //        ProcessEdid();
         UpdateChildStatus(TRUE);
+        return TRUE;
     }
+    return FALSE;
 }
 
 VioGpuAllocation *VioGpuAdapter::AllocationFromHandle(D3DKMT_HANDLE handle)
