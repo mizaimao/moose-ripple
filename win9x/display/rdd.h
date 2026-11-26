@@ -106,6 +106,7 @@ typedef struct {
     rdd_u32 dwRBitMask, dwGBitMask, dwBBitMask, dwAlphaBitMask;
 } RDD_MODEINFO;
 #define RDD_MODEINFO_PALETTIZED 0x1
+#define RDD_FOURCCS 5
 
 /* The DDHAL_DDCALLBACKS table: dwSize, dwFlags, then the functions in this order. */
 #define RDD_CB_DESTROYDRIVER 2          /* index of DestroyDriver: the one 16-bit callback */
@@ -131,6 +132,8 @@ typedef struct {
     RDD_VIDMEM   heap[3];               /* the card's memory below the screen; sysheap; the
                                            card's memory past the lines a flip can show */
     RDD_MODEINFO modes[RDD_MAX_MODES];
+    rdd_u32      fourcc[RDD_FOURCCS];   /* DXT1..5, for HALINFO.lpdwFourCC (16-bit side); the DLL
+                                           says how many in DDCORECAPS */
 } RDD_SHARED;
 
 #endif

@@ -50,11 +50,14 @@ static D3D9TimeStat *d3d9_time_stats[400];
 static unsigned d3d9_time_count;
 static D3D9TimeStat d3d9_time_callbacks[D3D9_TIMED_CALLBACKS] = {
    {"kernel lock"}, {"kernel unlock"}, {"kernel render"}, {"kernel present"}, {"kernel escape"},
+   {"kernel allocate"}, {"kernel deallocate"},
    {"copy, texture read back to memory"}, {"copy, memory written to a texture"},
    {"copy, memory drawn to a texture"}, {"copy within memory"}, {"copy skipped, source unchanged"},
    {"copy with a resolve or conversion"}, {"copy scaled or converted on the GPU"},
    {"copy on the GPU"},
    {"upload, mapping the texture"}, {"upload, copying the pixels"}, {"upload, unmapping"},
+   {"buffer, finding the written pages"}, {"buffer, mapping"}, {"buffer, copying"},
+   {"buffer, unmapping"}, {"buffer, watching its pages again"}, {"unlock of a mapped buffer"}, {"unlock of a mapped texture"},
 };
 static D3D9TimeStat *d3d9_time_last;
 static uint64_t d3d9_time_last_exit, d3d9_time_window;
