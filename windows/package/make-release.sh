@@ -31,7 +31,7 @@ T=$MAIN/.tools
 OSC=${OSSLSIGNCODE:-$T/osslsigncode/build/osslsigncode}
 PY=$MAIN/.venv/bin/python
 C=$T/vista7-testcert
-LIC=$T/src/vista7-licenses
+LIC=$T/downloads/sdk/vista7-licenses
 LLVM_MINGW=${LLVM_MINGW:-$T/llvm-mingw/llvm-mingw-20261104-msvcrt-ubuntu-22.04-x86_64}
 # The LLVM commit llvm-mingw 20261104 was built from (clang --version), for its licence files.
 LLVM_COMMIT=392dfff97d29b59d77e5cac6d4b6ef2585fe7117
