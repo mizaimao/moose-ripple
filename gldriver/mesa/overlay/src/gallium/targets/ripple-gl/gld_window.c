@@ -11,6 +11,7 @@
 #include <dlfcn.h>
 #include <mach/mach_time.h>
 #include <pthread.h>
+#include <sys/time.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -415,14 +416,40 @@ static pthread_cond_t flush_done = PTHREAD_COND_INITIALIZER;
 static struct { uint32_t cid, wid, sid; bool vsync; } flush_job;
 static bool flush_queued, flush_busy, flush_thread_up;
 
+static uint64_t
+flush_now_us(void)
+{
+   struct timeval tv;
+   gettimeofday(&tv, NULL);
+   return (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec;
+}
+
 static void *
 flush_main(void *arg)
 {
    (void)arg;
+   /* A program that does not wait for the refresh hands over frames as fast as it draws them,
+    * and WindowServer would redraw the covered window for each, some 200 times a second, on
+    * the host renderer the program itself draws with. It is asked no more often than the
+    * display shows (RIPPLE_GL_FLUSH_HZ in the environment, default 66, 0 for no limit): while
+    * this thread waits out the gap, a newer frame simply takes the place of the queued one. */
+   const char *env = getenv("RIPPLE_GL_FLUSH_HZ");
+   int hz = env ? atoi(env) : 66;
+   uint64_t gap = hz > 0 ? 1000000 / hz : 0, last = 0;
+
    pthread_mutex_lock(&flush_lock);
    for (;;) {
       while (!flush_queued)
          pthread_cond_wait(&flush_wake, &flush_lock);
+      if (gap && !flush_job.vsync) {
+         uint64_t now = flush_now_us();
+         if (now - last < gap) {
+            pthread_mutex_unlock(&flush_lock);
+            usleep((useconds_t)(gap - (now - last)));
+            pthread_mutex_lock(&flush_lock);
+         }
+      }
+      last = flush_now_us();
       uint32_t cid = flush_job.cid, wid = flush_job.wid, sid = flush_job.sid;
       bool vsync = flush_job.vsync;
       flush_queued = false;

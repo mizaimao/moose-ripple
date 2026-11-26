@@ -1293,3 +1293,28 @@ frames/s. Not pursued for now: a correct version means auditing every override f
 reads, for a gain of this size on these hosts. It may be worth more under emulation (UTM),
 where the game's thread is the limit and the host has time to spare; not tried there. The two
 patch files of the trial are kept outside the tree.
+
+### A covered window asks WindowServer at most 66 times a second (2026-11-26)
+
+After the change above, a program that does not wait for the refresh left word with
+WindowServer after every frame, and WindowServer redrew the covered window as often as it
+could, about 200 times a second, on the host renderer the program itself draws with. The flush
+thread now waits out a gap of 15 ms between two requests (`RIPPLE_GL_FLUSH_HZ` in the
+environment, default 66, 0 for no limit); a frame that comes meanwhile takes the place of the
+queued one, so WindowServer always gets the newest. A program that waits for the refresh is
+not held.
+
+OpenArena's timedemo, 1024x768 window with the Dock over its lower edge, alternating on one
+boot, switched by that variable:
+
+| | no limit | 66 a second | for scale: the Dock hidden |
+|---|---|---|---|
+| second Intel host (another guest was running) | 191.2, 192.9 | 277.6, 275.7 | about 300 |
+| Proxmox host, to itself | 198.3, 192.2 | 264.7, 267.5 | 285.2 |
+
+gl-gears, which waits for the refresh, in a covered window: 59.8 frames/s, longest frame
+17 ms, as before. Looked at: the game's picture advancing under the Dock, two captures a
+second apart.
+
+A covered window now costs about 7% of the frame rate on the Proxmox host, where it cost a
+quarter the evening before.
