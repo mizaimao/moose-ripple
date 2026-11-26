@@ -6,8 +6,10 @@
  * Opens a 640x480 OpenGL window (client area at x, y; default 100, 100) and presents the same
  * picture as fast as it can for the given seconds (default 10): four horizontal bands, red at
  * the top, then green, blue and yellow at the bottom, with a white 64x64 square in the top-left
- * corner. A capture of the screen shows at a glance whether the frames are in place and upright
- * (docs/win9x/mesa.md). Prints the frame count to standard output and to QEMU's debug port
+ * corner. It moves the pointer to the top-right corner first, as frames go through GDI while the
+ * pointer is near the window. A capture of the screen shows at a glance whether the frames are in
+ * place and upright (docs/win9x/mesa.md). Prints the frame count to standard output and to QEMU's
+ * debug port
  * (0xE9), where nothing listens on a real PC.
  *
  * Built by tools/win9x/build-tools.sh.
@@ -75,6 +77,7 @@ int main(int argc, char **argv)
         say("glband: no OpenGL context\r\n");
         return 2;
     }
+    SetCursorPos(GetSystemMetrics(SM_CXSCREEN) - 1, 0);   /* the pointer away from the window */
     glViewport(0, 0, 640, 480);
     glEnable(GL_SCISSOR_TEST);
     say("glband: begin\r\n");
