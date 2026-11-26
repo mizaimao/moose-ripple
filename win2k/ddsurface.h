@@ -132,11 +132,15 @@ typedef struct { ULONG x, y, z, rhw, diffuse, specular, u, v, nx, ny, nz, u1, v1
 /* In a blend word: the render target keeps alpha, so destination alpha is
  * its own (without it, Direct3D reads it as one). */
 #define RB2K_BLEND_DEST_ALPHA 0x10000UL
+/* In a blend word: the colour channels not written (D3DRS_COLORWRITEENABLE inverted:
+ * red, green, blue, alpha from bit 20), with or without RB2K_D7_ON. */
+#define RB2K_BLEND_NO_WRITE_SHIFT 20
+#define RB2K_BLEND_NO_WRITE (15UL << RB2K_BLEND_NO_WRITE_SHIFT)
 typedef struct {
     ULONG target, depth, count;
     ULONG depthState;
     ULONG alphaTest;    /* RB2K_D7_ON | D3DCMPFUNC << 8 | reference */
-    ULONG blend;        /* RB2K_D7_ON | source D3DBLEND << 8 | destination D3DBLEND */
+    ULONG blend;        /* RB2K_D7_ON | source D3DBLEND << 8 | destination D3DBLEND; channel mask bits */
     ULONG cull;         /* D3DCULL */
     ULONG stencil, stencilRef;  /* see RB2K_STENCIL_ON */
     ULONG colorStage;   /* D3DTEXTUREOP | first argument << 8 | second argument << 16 */
