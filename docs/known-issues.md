@@ -197,15 +197,19 @@ keeps the quotes as part of the value. Curly quotes from a copied web page do th
 
 GitHub issue: [#161](https://github.com/mizaimao/moose-ripple/issues/161)
 
-**Symptom.** With `ripple_gl=1 ripple_qe=1`, a switch from 1280x800 to 1920x1080
-(`tools/setmode 1920x1080`) crashes WindowServer: the user is logged out and the screen comes
-back at the old size. Found on 2026-11-25 on the Proxmox host; the same with release 0.2.2,
-and with queued submits on or off. Other sizes and System Preferences are not tried yet.
+**Symptom.** With `ripple_gl=1 ripple_qe=1`, changing the display size while the system runs
+(`tools/setmode`, from 1280x800 to 1920x1080 and to 1024x768) crashes WindowServer: the user is
+logged out and the screen comes back at the old size. Found on 2026-11-25 on the Proxmox host;
+the same with release 0.2.2, and with queued submits on or off. System Preferences is not
+tried yet.
 
 **What is known.** WindowServer's main thread overflows its stack inside QuartzCore
-(`fe_gl_texture_load` calling itself through `fe_buffer_texture`), after the driver refused a
-pbuffer (`fe_cgls_set_pbuffer: failed: 10005`) and reported an incomplete framebuffer. The
-driver's log ends with textures asked from surfaces it no longer knows.
+(`fe_gl_texture_load` calling itself through `fe_buffer_texture`). Traced with dtrace over the
+change: right after WindowServer has reconfigured its displays, attaching a new pbuffer fails
+with 10005, the texture from that pbuffer with 10008 and a new context with 10007. All three
+fail inside CoreGraphics before the driver is asked; the driver only sees its drawable taken
+away. The context call fails where CoreGraphics finds no accelerator for any display in its
+own table, so the open question is why that table comes out empty after the change.
 
-**Workaround:** set the resolution without the two flags (boot once without them, choose the
-size, then put them back). Not tried yet either: whether the size chosen that way is kept.
+**Workaround (checked):** boot once without the two flags, choose the size (it works there),
+then put the flags back and restart. The size is kept, and Quartz Extreme runs at it.
