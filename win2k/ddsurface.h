@@ -23,6 +23,11 @@
 #define RB2K_PRIM_TRIANGLES 0
 #define RB2K_PRIM_LINES 1
 #define RB2K_PRIM_POINTS 2
+/* Point draws: sprites (texture coordinates replaced across the point), and a
+ * size per vertex from the vertex program in place of pointSize. */
+#define RB2K_POINT_SPRITE 1
+#define RB2K_POINT_PER_VERTEX 2
+#define RB2K_POINT_SIZE_MAX 0x42800000UL    /* 64.0 */
 #define RB2K_DD_IOCTL(n) CTL_CODE(FILE_DEVICE_VIDEO,n,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_RB2K_DD_QUERY   RB2K_DD_IOCTL(0x901)
 #define IOCTL_RB2K_DD_CREATE  RB2K_DD_IOCTL(0x902)
@@ -84,6 +89,7 @@ typedef struct { ULONG x, y, z, rhw, diffuse, specular, nx, ny, nz, tc[RB2K_D8_S
 typedef struct {
     ULONG target, depth, count;
     ULONG primitive;                /* RB2K_PRIM_*; count is a multiple of its vertices */
+    ULONG pointSize, pointFlags;    /* points: IEEE size, RB2K_POINT_* */
     ULONG depthState, alphaTest, blend, cull;
     ULONG stencil, stencilRef;      /* RB2K_STENCIL_ON etc.; reference, masks */
     ULONG program;
@@ -144,6 +150,7 @@ typedef struct { ULONG x, y, z, rhw, diffuse, specular, u, v, nx, ny, nz, u1, v1
 typedef struct {
     ULONG target, depth, count;
     ULONG primitive;    /* RB2K_PRIM_*; count is a multiple of its vertices */
+    ULONG pointSize, pointFlags;    /* points: IEEE size (at most RB2K_POINT_SIZE_MAX), RB2K_POINT_* */
     ULONG depthState;
     ULONG alphaTest;    /* RB2K_D7_ON | D3DCMPFUNC << 8 | reference */
     ULONG blend;        /* RB2K_D7_ON | source D3DBLEND << 8 | destination D3DBLEND; channel mask bits */

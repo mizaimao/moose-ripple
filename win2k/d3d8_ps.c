@@ -910,7 +910,7 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
     unsigned int imm = 3, k, log2e, base;
     char *z = (char *)&s;
     for (k = 0; k < sizeof(s); ++k) z[k] = 0;
-    info->samplers = info->coords = info->reason = info->detail = info->constants = 0;
+    info->samplers = info->coords = info->reason = info->detail = info->constants = info->pointSize = 0;
     s.info = info;
     s.t.p = out; s.t.size = size;
     if (size) out[0] = 0;
@@ -1099,6 +1099,10 @@ static int vertex_walk(PS *s, const unsigned int *tok, unsigned int count, int p
             n = (unsigned int)len;
         }
         if (i + 1 + n > count) return fail(s, RbPsTruncated, i);
+        /* oPts as a destination: the program sets the point size. */
+        if (pass == 0 && n && reg2_type(tok[i + 1]) == RegVsRastOut && reg_num(tok[i + 1]) == 2 &&
+            op != OpDef && op != OpVsDefb && op != OpVsDefi && op != Op2Dcl)
+            s->info->pointSize = 1;
         if (op == OpDef || op == OpVsDefb || op == OpVsDefi || op == Op2Dcl) {
             if (pass == 0 && op == OpDef) {
                 unsigned int c = reg_num(tok[i + 1]);
@@ -1238,7 +1242,7 @@ unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, con
     unsigned int imm = 8, k;
     char *z = (char *)&s, r[16];
     for (k = 0; k < sizeof(s); ++k) z[k] = 0;
-    info->samplers = info->coords = info->reason = info->detail = info->constants = 0;
+    info->samplers = info->coords = info->reason = info->detail = info->constants = info->pointSize = 0;
     s.info = info;
     s.vertex = 1;
     s.t.p = out; s.t.size = size;
@@ -1264,6 +1268,7 @@ unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, con
               "IMM[6] UINT32 {255, 16, 0, 0}\n"
               "IMM[7] FLT32 {0x3b808081, 0x00000000, 0x00000000, 0x00000000}\n");
     if (!vertex_walk(&s, tokens, count, 0, &imm)) return 0;
+    if (info->pointSize) put(&s.t, "DCL OUT[12], PSIZE\n");
     for (k = 0; k < sizeof(prologue) / sizeof(*prologue); ++k) line(&s, prologue[k], 0, 0, 0, 0, 0, 0);
     for (k = 0; k < 12; ++k) { r[0] = 0; reg_text(r, sizeof(r), "TEMP", k); line(&s, "MOV ", r, ", IMM[2]", 0, 0, 0, 0); }
     for (k = 0; k < 8; ++k) { r[0] = 0; reg_text(r, sizeof(r), "TEMP", VsTexOut + k); line(&s, "MOV ", r, ", IMM[3]", 0, 0, 0, 0); }
@@ -1280,6 +1285,7 @@ unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, con
         line(&s, "MOV ", o, ", ", r, 0, 0, 0);
     }
     line(&s, "MOV OUT[11], IMM[2]", 0, 0, 0, 0, 0, 0);
+    if (info->pointSize) line(&s, "MOV OUT[12].x, TEMP[22].xxxx", 0, 0, 0, 0, 0, 0);
     line(&s, "END", 0, 0, 0, 0, 0, 0);
     if (s.t.overflow) return fail(&s, RbPsOverflow, s.t.n);
     return s.t.n + 1;
@@ -1377,7 +1383,7 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
     unsigned int i, k, log2e = 4, factor = 0;
     char *z = (char *)&s, tex[64];
     for (k = 0; k < sizeof(s); ++k) z[k] = 0;
-    info->samplers = info->coords = info->reason = info->detail = info->constants = 0;
+    info->samplers = info->coords = info->reason = info->detail = info->constants = info->pointSize = 0;
     s.info = info;
     s.t.p = out; s.t.size = size;
     if (size) out[0] = 0;

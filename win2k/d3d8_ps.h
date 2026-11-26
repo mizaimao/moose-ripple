@@ -35,6 +35,7 @@ typedef struct {
     unsigned int reason;        /* RbPs* */
     unsigned int detail;        /* the opcode or token behind the reason */
     unsigned int constants;     /* vertex shaders: c0..c(n-1) are read (all for relative reads) */
+    unsigned int pointSize;     /* vertex shaders: oPts is written (a PSIZE output) */
 } RB_PS_INFO;
 
 /* Fog applied to the shader's result, encoded as RB2K_D3D7_DRAW.fog: the

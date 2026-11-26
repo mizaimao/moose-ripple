@@ -18,8 +18,9 @@ enum {
     Raster = 9, Elements = 5, VertexShader = 6, ObjectShader = 7, LitShader = 8, DsaBase = 16, BlendBase = 32,
     SamplerBase = 48, Sampler1Base = 56, ShaderBase = 64, TextureView = 80, TextureView1 = 81,
     PsVertexShader = 82, PsObjectShader = 83, PsViewBase = 84, PsSamplerBase = 96, PsLitShader = 112,
-    VsProgramBase = 128, VsProgramKeys = 16
+    VsProgramBase = 128, VsProgramKeys = 16, PointRaster = 160
 };
+enum { PointBound = 0x100 };   /* boundRaster while the point rasterizer is bound */
 enum { VertexStage = 0, FragmentStage = 1, PipePoints = 0, PipeLines = 1, PipeTriangles = 4, ShaderText = 2400, LitText = 8192 };
 /* Gallium's primitive for a packet's RB2K_PRIM_*, and its vertices each. */
 #define PIPE_MODE(primitive) ((primitive) == RB2K_PRIM_POINTS ? PipePoints : (primitive) == RB2K_PRIM_LINES ? PipeLines : PipeTriangles)
@@ -575,6 +576,7 @@ BOOLEAN rb_gpu_d7_valid(const RB2K_D3D7_DRAW *d)
         ((d->blend & RB2K_D7_ON) && (!blend_valid((d->blend >> 8) & 255) || !blend_valid(d->blend & 255)))) return FALSE;
     if (d->cull < CullNone || d->cull > CullCcw || d->specular > 1) return FALSE;
     if (d->primitive > RB2K_PRIM_POINTS || d->count % PRIM_VERTICES(d->primitive) ||
+        d->pointFlags > (RB2K_POINT_SPRITE | RB2K_POINT_PER_VERTEX) || d->pointSize > RB2K_POINT_SIZE_MAX ||
         d->transform > 1 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
         d->viewport[0] > 8192 || d->viewport[1] > 8192 || d->viewport[2] > 8192 || d->viewport[3] > 8192)))
         return FALSE;
@@ -678,7 +680,8 @@ static ULONG sampler_words(ULONG *words, ULONG handle, ULONG state, ULONG sample
 /* Depth and alpha test, blend and rasterizer objects, shared by the
  * fixed-function and the pixel shader draws. */
 static BOOLEAN fixed_states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, ULONG depthState,
-                            ULONG alphaTest, ULONG blend, ULONG cull, ULONG transform, ULONG stencil, ULONG stencilRef)
+                            ULONG alphaTest, ULONG blend, ULONG cull, ULONG transform, ULONG stencil, ULONG stencilRef,
+                            ULONG primitive, ULONG pointSize, ULONG pointFlags, ULONG spriteInputs)
 {
     RB2K_D7_STATE *s = &image->d7;
     ULONG words[64], n = 0, slot, key[3], state, i;
@@ -741,7 +744,33 @@ static BOOLEAN fixed_states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image
         words[n++] = BIND(VIRGL_OBJECT_BLEND); words[n++] = BlendBase + slot;
         s->blend.bound = slot + 1;
     }
-    if (s->boundRaster != cull + 3 * transform) {
+    if (primitive == RB2K_PRIM_POINTS) {
+        /* One point rasterizer, made again when its size or flags change.
+         * Points are drawn as quads, as Direct3D draws them (Gallium Nine does
+         * the same); sprites replace the texture coordinate inputs. */
+        ULONG flags = pointFlags | transform << 8;
+        if (!s->pointMade || s->pointSize != pointSize || s->pointFlags != flags) {
+            if (s->pointMade) { words[n++] = DESTROY(VIRGL_OBJECT_RASTERIZER); words[n++] = PointRaster; }
+            words[n++] = CREATE(VIRGL_OBJECT_RASTERIZER, VIRGL_OBJ_RS_SIZE);
+            words[n++] = PointRaster;
+            words[n++] = VIRGL_OBJ_RS_S0_DEPTH_CLIP(1) | VIRGL_OBJ_RS_S0_HALF_PIXEL_CENTER(1) |
+                         VIRGL_OBJ_RS_S0_SCISSOR(transform) | VIRGL_OBJ_RS_S0_BOTTOM_EDGE_RULE(1) |
+                         VIRGL_OBJ_RS_S0_POINT_QUAD_RASTERIZATION(1) |
+                         VIRGL_OBJ_RS_S0_POINT_SIZE_PER_VERTEX((pointFlags & RB2K_POINT_PER_VERTEX) != 0);
+            words[n++] = pointSize;
+            words[n++] = pointFlags & RB2K_POINT_SPRITE ? spriteInputs : 0;
+            words[n++] = 0;
+            words[n++] = 0x3f800000; words[n++] = 0; words[n++] = 0; words[n++] = 0;
+            s->pointMade = TRUE;
+            s->pointSize = pointSize;
+            s->pointFlags = flags;
+            s->boundRaster = ~0UL;
+        }
+        if (s->boundRaster != PointBound) {
+            words[n++] = BIND(VIRGL_OBJECT_RASTERIZER); words[n++] = PointRaster;
+            s->boundRaster = PointBound;
+        }
+    } else if (s->boundRaster != cull + 3 * transform) {
         ULONG key = cull + 3 * transform, bit = 1UL << key;
         if (!(s->rasters & bit)) {
             /* Window coordinates follow the Direct3D screen (y down), so a
@@ -801,7 +830,8 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
         }
     }
     if (!fixed_states(gpu, r, image, d->depthState, d->alphaTest, d->blend, d->cull, d->transform, d->stencil,
-                      d->stencilRef)) return FALSE;
+                      d->stencilRef,
+                      d->primitive, d->pointSize, d->pointFlags, 1u << 2)) return FALSE;   /* coordinates: GENERIC[2] */
 
     key[0] = d->colorStage; key[1] = d->alphaStage; key[2] = d->specular; key[3] = d->fog;
     key[4] = d->stage1Color; key[5] = d->stage1Alpha;
@@ -1161,6 +1191,7 @@ BOOLEAN rb_gpu_d8_valid(const RB2K_D3D8_DRAW *d)
     if (d->transform == 2 && (d->lighting || !d->vertexProgram || d->vertexConstants > RB2K_D8_VS_CONSTANTS ||
         !d->vertexWords || d->vertexWords % 4 || d->vertexWords > RB2K_D8_VS_VERTEX_WORDS)) return FALSE;
     if (d->primitive > RB2K_PRIM_POINTS || d->count % PRIM_VERTICES(d->primitive) ||
+        d->pointFlags > (RB2K_POINT_SPRITE | RB2K_POINT_PER_VERTEX) || d->pointSize > RB2K_POINT_SIZE_MAX ||
         d->transform > 2 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
         d->viewport[0] > 8192 || d->viewport[1] > 8192 || d->viewport[2] > 8192 || d->viewport[3] > 8192)))
         return FALSE;
@@ -1248,7 +1279,8 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
     }
     gpu->d8Step = 3;
     if (!fixed_states(gpu, r, image, d->depthState, d->alphaTest, d->blend, d->cull, d->transform != 0, d->stencil,
-                      d->stencilRef)) return FALSE;
+                      d->stencilRef,
+                      d->primitive, d->pointSize, d->pointFlags, 0xffu << 2)) return FALSE;   /* sets: GENERIC[2..9] */
     /* The program shares the fragment shader table; its key cannot be a
      * fixed-function one, whose colour stage word is never all ones. */
     gpu->d8Step = 4;
