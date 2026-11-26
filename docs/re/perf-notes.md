@@ -1501,3 +1501,50 @@ refused command, nothing from the host's renderer in the journal; desktop, a win
 Exposé and Dashboard looked at. A third trap: the boot after a kext install rebuilds the kext
 cache for eight minutes in the background, and the first "waited for" runs on this host fell
 into it (537 ms for a first render); they were repeated on a boot without it.
+
+### The guest's compile of a filter's programs in UTM: a sixth of a first showing (2026-11-26)
+
+The question was how much of a filter's first showing in UTM is the driver's compile of its
+programs. `ci-effects` sampled there while it does only the first two renders of each filter
+(the sampler slows the guest, so the counts are scaled by the test's own times): of about 10 s
+for the 24 filters in ours, Mesa's compile is about 1.6 s, a sixth.
+
+| part of Mesa's compile | share |
+|---|---|
+| NIR to TGSI in the virgl driver (`nir_to_tgsi_options`), at the first draw | 36% |
+| NIR optimisation when the text is set (`gl_nir_opts`) | 17% |
+| the TGSI text for the host (`tgsi_dump_str`, nearly all of it in `vsnprintf`) | 16% |
+| parsing the ARB text | 9% |
+| the rest (clone, finalize, encode) | 22% |
+
+`nir_opt_algebraic` alone, inside the first two, is a quarter of the compile. The other five
+sixths of a first showing are not the driver's: Core Image builds the filter's kernel itself,
+on the emulated CPU. Its software renderer needs as long for a first render as ours (9.6 s
+against 8.7 s for the 24), and it does not touch the driver at all. An earlier section calls
+the first two renders in UTM "the emulated CPU compiling"; that is Core Image's compiling for
+the most part.
+
+**Tried, not kept: a cache on disk of the translation.** The translation to TGSI gives the same
+tokens for the same NIR, options and host, so the virgl driver looked it up first under a
+SHA-1 of the three, one small file per shader in the user's `Library/Caches`, in a directory
+named after the bundle's UUID so a new build never reads an old build's entries. It worked: a
+second run of the test found all 153 shaders (37 of them already repeat within one run; the
+Photo Booth effects compile 1,240 shaders of which 168 differ), and the picture comparisons
+were the same with the cache cold, warm and off. What it gave, the cache off against filled,
+alternating on one boot, sums over the 24 filters:
+
+| | first render | second render |
+|---|---|---|
+| UTM on an M1 Max, off | 8,674, 8,809 ms | 1,302, 1,304 ms |
+| filled | 8,294, 8,326 | 1,184, 1,210 |
+| second Intel host (another guest was active), off | 278.0, 283.7 | 84.0, 81.8 |
+| filled | 257.1, 276.3 | 75.3, 81.3 |
+
+A first showing in UTM goes from 10.0 to 9.5 s for the 24 filters, 5%, and about as much on
+the Intel host; the whole run of the 61 Photo Booth effects takes 7.5 s both ways. That is too
+little for what it costs: files written from every program that draws, and a new way for a
+stale or damaged entry to give a wrong picture. It is not in the tree.
+
+What is left to gain here is small whatever is built: skipping all of Mesa's compile for a
+program seen before (a cache keyed on the program's text, with the state tracker's variants)
+could give at most the sixth above.

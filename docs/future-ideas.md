@@ -29,6 +29,9 @@ nothing over its window; the same host's GeForce 9600 GT with Apple's driver doe
   create still walks its memory page by page for the attach (0.1 ms), and with sixteen
   command slots a client waits when the host is behind
   ([re/perf-notes.md](re/perf-notes.md), "Core Image: the gap to software" and after).
+  In UTM the driver's compile is about a sixth of a first showing (the rest is Core Image's
+  own work on the emulated CPU); a cache on disk of the translation to TGSI gave 5% there and
+  was not kept.
 - Frames reach a VNC viewer unevenly (see [re/perf-notes.md](re/perf-notes.md)). Every open
   VNC viewer (a Proxmox web console, for example) makes QEMU encode each frame again, before the
   next viewer gets it: with one console open, a second viewer got whole-screen frames every
