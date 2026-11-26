@@ -3636,6 +3636,9 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     c->alphaCmpCaps = tri->dwAlphaCmpCaps;
     c->shadeCaps = tri->dwShadeCaps;
     c->textureCaps = tri->dwTextureCaps | 0x4000;     /* D3DPTEXTURECAPS_MIPMAP */
+    /* The stage programs divide per pixel for D3DTTFF_PROJECTED; without this cap the runtime
+     * hands pretransformed vertices over as COUNT3 without the flag. */
+    c->textureCaps |= 0x400;             /* D3DPTEXTURECAPS_PROJECTED */
     c->textureFilterCaps = tri->dwTextureFilterCaps;
     /* Cube maps, sampled by pixel shaders (the fixed-function stages do not). */
     c->textureCaps |= 0x800 | 0x10000;   /* D3DPTEXTURECAPS_CUBEMAP, MIPCUBEMAP */
