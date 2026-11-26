@@ -146,6 +146,10 @@ typedef struct {
     ULONG depth;    /* a volume's slices at level zero (each level has half as many); 1 otherwise */
     FLATPTR levelAddress[6][RB2K_D7_LEVELS];
     ULONG image;    /* a render target texture: the image id (sampled as it is) */
+    /* A cube map render target: the image of each face, and its draw count when last copied into
+     * the host cube texture (host) that sampling uses. */
+    BOOL rtCube;
+    ULONG cubeImages[6], cubeDraws[6];
     /* A system-memory DXT texture that a Direct3D 9 runtime described by its bytes (adopt_blocks):
      * the format its FourCC names, while it is registered with none. */
     ULONG blocks;
@@ -456,6 +460,42 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
     {
         DD_SLOT *slot = rb_dd_slot(d, g);
         if (slot && slot->texture && !slot->lost && slot->owner == t->owner) {
+            if (l->lpSurfMore && (l->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_CUBEMAP)) {
+                /* A cube map render target: Direct3D draws into each face's image by the face's own
+                 * handle; sampling copies the faces drawn since into a host cube texture (cube_ready). */
+                PDD_SURFACE_LOCAL top[6];
+                PDD_ATTACHLIST a;
+                int f = cube_face(l);
+                ULONG k;
+                RtlZeroMemory(top, sizeof(top));
+                if (f >= 0) top[f] = l;
+                for (a = l->lpAttachList; a; a = a->lpLink) {
+                    int af = a->lpAttached ? cube_face(a->lpAttached) : -1;
+                    if (af >= 0 && !top[af]) top[af] = a->lpAttached;
+                }
+                for (k = 0; k < 6; ++k) {
+                    DD_SLOT *fs = top[k] && top[k]->lpGbl && top[k]->lpSurfMore ? rb_dd_slot(d, top[k]->lpGbl) : NULL;
+                    if (!fs || !fs->texture || fs->lost || fs->owner != t->owner || fs->width != slot->width ||
+                        fs->height != slot->width) {
+                        t->format = TexNone;
+                        ++d->d7draw.textures;
+                        return;
+                    }
+                    fs->local = local;
+                    fs->d3dHandle = top[k]->lpSurfMore->dwSurfaceHandle;
+                    t->cubeImages[k] = fs->id;
+                    t->cubeDraws[k] = ~0UL;
+                }
+                t->rtCube = TRUE;
+                t->faces = 6;
+                t->format = slot->alpha ? TexArgb8888 : TexXrgb8888;
+                t->levels = 1;
+                t->mipmaps = FALSE;
+                t->dirty = FALSE;
+                ++d->d7draw.targetTextures;
+                ++d->d7draw.textures;
+                return;
+            }
             /* A render target texture: Direct3D draws into its image by the
              * same handle, and samples the image as it is. */
             t->image = slot->id;
@@ -941,6 +981,7 @@ static HRESULT render_surfaces(D7_CONTEXT *c, DD_SLOT **color, DD_SLOT **depth)
     if (s->locked || (z && z->locked)) return DDERR_SURFACEBUSY;
     *color = s;
     *depth = z;
+    ++s->draws;   /* a cube map face is copied again when sampled (cube_ready) */
     return DD_OK;
 }
 
@@ -1337,9 +1378,34 @@ static void texture_skip(D7_CONTEXT *c, const D7_TEXTURE *t, ULONG targetId)
     ++c->display->d7draw.texSkips[why];
 }
 
+/* The host cube texture of a cube map render target, with the faces drawn since the last call copied
+ * into it; zero while one of its faces is the target. */
+static ULONG cube_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
+{
+    RB2K_D7_CUBE_SYNC s;
+    DD_SLOT *faces[6];
+    ULONG k, id = 0, written;
+    s.mask = 0;
+    for (k = 0; k < 6; ++k) {
+        faces[k] = target(c, t->cubeImages[k], FALSE);
+        if (!faces[k] || faces[k]->id == targetId) return 0;
+        if (!t->host || faces[k]->draws != t->cubeDraws[k]) s.mask |= 1UL << k;
+        s.images[k] = faces[k]->id;
+    }
+    if (!s.mask) return t->host;
+    s.texture = t->host;
+    s.side = t->width;
+    if (miniport(c->display, IOCTL_RB2K_D7_CUBE_SYNC, &s, sizeof(s), &id, sizeof(id), &written) ||
+        written != sizeof(id) || !id) return 0;
+    t->host = id;
+    for (k = 0; k < 6; ++k) t->cubeDraws[k] = faces[k]->draws;
+    return id;
+}
+
 static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
 {
     ULONG sum;
+    if (t->rtCube) return cube_ready(c, t, targetId);
     /* A render target texture is sampled on the host, but never while it is the target. */
     if (t->image) return t->image == targetId ? 0 : RB2K_TEXTURE_IMAGE | t->image;
     /* The miniport attaches the host texture to each target that draws with it. */
@@ -3078,6 +3144,7 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
     if (!src) src = find_face(c->local, b->dwDDSrcSurface, &srcFace);
     adopt_blocks(src, dst);
     if (!dst || !src || !dst->format || dst->format != src->format || dst->faces != src->faces || dst->image || src->image ||
+        dst->rtCube || src->rtCube ||
         (srcFace == ~0UL) != (dstFace == ~0UL) ||
         dst->depth > 1 || src->depth > 1 ||
         dst->owner != c->owner || src->owner != c->owner) { ++d->d7draw.texBltFailures; return; }

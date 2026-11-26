@@ -85,9 +85,14 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
     }
     if ((caps & DDSCAPS_TEXTURE) && (caps & DDSCAPS_3DDEVICE)) {
         /* A render target texture: a host image that Direct3D draws into
-         * and samples (32-bit, one level). */
+         * and samples (32-bit, one level). A cube map one (COMPLEX, DDSCAPS2_CUBEMAP in a
+         * DDSURFACEDESC2) is six of them, one per face. */
+        BOOL cube = desc->dwSize >= sizeof(DDSURFACEDESC2) &&
+                    (((const DDSURFACEDESC2 *)desc)->ddsCaps.dwCaps2 & DDSCAPS2_CUBEMAP);
         if (!d->nativeD3D7 || !d->gpuSurfaces || d->mode.BitsPerPlane != 32 ||
-            (caps & ~(DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM)) ||
+            (caps & ~(DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM |
+                      (cube ? DDSCAPS_COMPLEX : 0))) ||
+            (cube && desc->dwWidth != desc->dwHeight) ||
             !desc->dwWidth || desc->dwWidth > RB2K_DD_TARGET_SIDE ||
             !desc->dwHeight || desc->dwHeight > RB2K_DD_TARGET_SIDE) return FALSE;
         if (!(desc->dwFlags & DDSD_PIXELFORMAT)) return TRUE;
@@ -208,8 +213,11 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
     DD_SLOT *slot;
     ULONG createCode = IOCTL_RB2K_DD_CREATE;
     DWORD rc = DDHAL_DRIVER_HANDLED;
+    BOOL cubeTarget = (desc->ddsCaps.dwCaps & (DDSCAPS_COMPLEX | DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE)) ==
+                      (DDSCAPS_COMPLEX | DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE);
+    ULONG i, count = 1;
     if (!supported(d, desc) || !data->dwSCnt ||
-        (data->dwSCnt != 1 && !(desc->ddsCaps.dwCaps & DDSCAPS_MIPMAP))) {
+        (data->dwSCnt != 1 && !(desc->ddsCaps.dwCaps & DDSCAPS_MIPMAP) && !(cubeTarget && data->dwSCnt == 6))) {
         ++d->d7draw.surfaceRefused;
         d->d7draw.refusedCaps = desc->ddsCaps.dwCaps; d->d7draw.refusedFlags = desc->dwFlags;
         d->d7draw.refusedWidth = desc->dwWidth; d->d7draw.refusedHeight = desc->dwHeight;
@@ -357,7 +365,11 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
     if (desc->ddsCaps.dwCaps & DDSCAPS_ZBUFFER)
         createCode = (desc->dwFlags & DDSD_PIXELFORMAT) && depth_stencil(&desc->ddpfPixelFormat) ?
                      IOCTL_RB2K_DD_CREATE_Z24S8 : IOCTL_RB2K_DD_CREATE_Z16;
+    /* A cube map render target may come with its six faces in one call: an image for each. */
+    if (cubeTarget) count = data->dwSCnt;
     EngAcquireSemaphore(d->ddLock);
+    for (i = 0; i < count; ++i) {
+    g = data->lplpSList[i]->lpGbl;
     slot = rb_dd_slot(d, NULL);
     if (!d->ddEnabled || rb_dd_slot(d, g))
         data->ddRVal = DDERR_SURFACELOST;
@@ -385,6 +397,8 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
         data->ddRVal = DD_OK;
         /* NT completes the requested allocation after this return. */
         rc = DDHAL_DRIVER_NOTHANDLED;
+    }
+    if (data->ddRVal != DD_OK) break;
     }
     EngReleaseSemaphore(d->ddLock);
     return rc;

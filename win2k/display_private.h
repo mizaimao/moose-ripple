@@ -30,6 +30,7 @@ typedef struct {
     BOOL texture;               /* a render target texture: Direct3D also samples the image */
     PDD_DIRECTDRAW_LOCAL local;
     ULONG d3dHandle;
+    ULONG draws;                /* draws and clears into it, so a cube map face is copied again only when drawn */
 } DD_SLOT;
 
 typedef struct DD_FLIP_VIEW {

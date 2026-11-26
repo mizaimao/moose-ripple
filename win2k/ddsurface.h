@@ -60,6 +60,10 @@
  * same queue as an RB2K_D3D8_DRAW whose byte count has RB2K_D8_RECORD set. */
 #define IOCTL_RB2K_D3D8_PROGRAM RB2K_DD_IOCTL(0x920)
 #define IOCTL_RB2K_D3D8_PROGRAM_FREE RB2K_DD_IOCTL(0x921)
+/* A cube map render target: its six faces are colour images, each drawn into like any target; the
+ * faces in mask are copied into the host cube texture (made when texture is 0), whose id comes back. */
+#define IOCTL_RB2K_D7_CUBE_SYNC RB2K_DD_IOCTL(0x924)
+typedef struct { ULONG texture, side, mask, images[6]; } RB2K_D7_CUBE_SYNC;
 #define RB2K_D8_PROGRAMS 48
 #define RB2K_D8_PROGRAM_BYTES 8192
 #define RB2K_D8_STAGES 8            /* samplers, and texture coordinate sets */

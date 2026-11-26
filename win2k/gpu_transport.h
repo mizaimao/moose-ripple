@@ -207,6 +207,7 @@ BOOLEAN rb_gpu_d7_samples(const RB2K_D3D7_DRAW *draw, ULONG stage);
 RB2K_TEXTURE *rb_gpu_texture(RB2K_GPU *gpu, ULONG id);
 ULONG rb_gpu_host_blocks(RB2K_GPU *gpu);
 BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture);
+BOOLEAN rb_gpu_copy_layer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG image, ULONG texture, ULONG layer, ULONG side);
 BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture,
                               const RB2K_IMAGE *image);
 BOOLEAN rb_gpu_image_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *source, const RB2K_IMAGE *target);
