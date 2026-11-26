@@ -862,6 +862,23 @@ Fixed-function stages also sample cube maps and volumes now: the unit enables Op
 or 3D target for such a texture (OpenGL prefers them to 2D); before, the unit sampled whatever 2D
 texture it held.
 
+Vertex shaders, also with `"2"`: vs_1_1 for Direct3D 8 and vs_2_0 without flow control when the
+runtime has announced version 9 (`vs_arb.c`). ARB vertex programs were modelled on Direct3D 8's
+vertex shaders, so most instructions keep their names. The Direct3D 8 declaration that comes with
+each shader (one stream: registers, types and skips) becomes generic attribute arrays: floats as
+floats, D3DCOLOR as normalised bytes swapped from BGRA in the program, UBYTE4 and shorts as
+integers. c0..c255 live in `program.env`, with the shader's `def` constants loaded over them;
+`program.env` is shared with the fixed-function programs, so the HAL tracks whose state it holds.
+a0 is kept as whole numbers in a temporary and loaded with ARL before each relative read (vs_2_0's
+a0 has four components). ARB lacks |x|, `_sat`, `lrp`, `nrm`, `sgn` and `mova`'s rounding to the
+nearest, so those are spelt out; `sincos` and flow control are refused. oPos becomes OpenGL's clip
+position the way the fixed-function programs make it; oFog (or table fog from z / w) goes to the
+fog unit or the fog coordinate. Test shaders using every vs_1_1 instruction and the vs_2_0
+additions compile with Mesa on the build host.
+
+Also: the runtime version that picks the shader caps is kept per process. In the DLL's shared
+data, a Direct3D 8 program run after a Direct3D 9 one in the same boot was offered shader model 2.
+
 ### 3DMark 2001 SE (2026-11-26, rig VM 230)
 
 Windows 98 SE with DirectX 9.0c, the Direct3D 8 interface on, 1024x768 32-bit, the runtime's
