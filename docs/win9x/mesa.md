@@ -133,8 +133,16 @@ window keeps the GDI path for those frames; `glband` moves the pointer away for 
 
     quake3.exe +set timedemo 1 +set r_fullscreen 0 +set r_mode 4 +set nextdemo quit +demo demo001
 
-Not checked yet: the pointer over a window (QEMU's relative mouse would not put it there in
-the test guests), and UTM.
+The pointer over a window: frames switch to GDI as soon as the program's thread sees the
+pointer there (`glband` with the pointer moved over its window by mouse input: its frame rate
+fell to the GDI path's, and a debug build logged the pointer over the window from that moment).
+A program on Windows 9x sees the pointer through its own input, so a pointer placed with
+`SetCursorPos` from another program without any movement goes unnoticed until the mouse moves.
+Over a window that redraws through GDI a thousand times a second the software pointer is
+rarely on the screen, because every frame hides it and Windows redraws it on a timer; the GDI
+path did the same before this change.
+
+Not checked yet: UTM.
 
 ## How a 2024 Mesa gets onto a 1998 Windows
 
