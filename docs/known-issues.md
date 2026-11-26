@@ -193,13 +193,14 @@ keeps the quotes as part of the value. Curly quotes from a copied web page do th
 **Fix:** write the key exactly; in UTM without quotes
 ([docs/install.md](install.md#utm-on-an-apple-silicon-mac)).
 
-## KI-11: Changing the resolution with Quartz Extreme on crashes WindowServer
+## KI-11: Changing the resolution with Quartz Extreme on crashed WindowServer (fixed after 0.2.2)
 
-GitHub issue: [#161](https://github.com/mizaimao/moose-ripple/issues/161)
+GitHub issue: [#161](https://github.com/mizaimao/moose-ripple/issues/161). Fixed on 2026-11-26; release 0.2.2
+and earlier have it.
 
 **Symptom.** With `ripple_gl=1 ripple_qe=1`, changing the display size while the system runs
-(`tools/setmode`, from 1280x800 to 1920x1080 and to 1024x768) crashes WindowServer: the user is
-logged out and the screen comes back at the old size. Found on 2026-11-25 on the Proxmox host;
+(`tools/setmode`, from 1280x800 to 1920x1080 and to 1024x768) crashed WindowServer: the user was
+logged out and the screen came back at the old size. Found on 2026-11-25 on the Proxmox host;
 the same with release 0.2.2, and with queued submits on or off. System Preferences is not
 tried yet.
 
@@ -208,8 +209,17 @@ tried yet.
 change: right after WindowServer has reconfigured its displays, attaching a new pbuffer fails
 with 10005, the texture from that pbuffer with 10008 and a new context with 10007. All three
 fail inside CoreGraphics before the driver is asked; the driver only sees its drawable taken
-away. The context call fails where CoreGraphics finds no accelerator for any display in its
-own table, so the open question is why that table comes out empty after the change.
+away.
 
-**Workaround (checked):** boot once without the two flags, choose the size (it works there),
-then put the flags back and restart. The size is kept, and Quartz Extreme runs at it.
+**Cause.** While it reconfigures a display, WindowServer gives up its reference to the
+accelerator service and looks the service up again, but its OpenGL side goes on using the port
+it had. Nothing else in the process held a reference, so that port name died, and every
+surface WindowServer asked for afterwards failed (`IOAccelCreateSurface` returned
+0x10000003, an invalid destination).
+
+**Fix.** The GL bundle keeps a reference to the accelerator service for as long as the process
+lives (`cgl_device.c`). Checked with Quartz Extreme on: 1280x800 to 1920x1080, to 1024x768 and
+back, no crash, the picture right each time.
+
+**Workaround for 0.2.2 (checked):** boot once without the two flags, choose the size (it works
+there), then put the flags back and restart. The size is kept, and Quartz Extreme runs at it.
