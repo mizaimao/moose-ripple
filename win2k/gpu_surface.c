@@ -318,12 +318,14 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
         !rb_gpu_d8_valid(d) || image->depth16 || ((d->depthState || d->stencil) && !d->depth))
         return refuse(gpu, RB2K_D7_SITE_RECORD, *status, 0);
     *status = ERROR_INVALID_HANDLE;
-    for (program = 0; program < RB2K_D8_PROGRAMS && (!d->program || gpu->programs[program].id != d->program); ++program) {}
-    if (program == RB2K_D8_PROGRAMS || gpu->programs[program].text[0] != 'F')
+    program = RB2K_D8_PROGRAM_SLOT(d->program);
+    if (!d->program || program >= RB2K_D8_PROGRAMS || gpu->programs[program].id != d->program ||
+        gpu->programs[program].text[0] != 'F')
         return refuse(gpu, RB2K_D7_SITE_PROGRAM, *status, d->program);
     if (d->transform == 2) {
-        for (vertex = 0; vertex < RB2K_D8_PROGRAMS && gpu->programs[vertex].id != d->vertexProgram; ++vertex) {}
-        if (vertex == RB2K_D8_PROGRAMS || gpu->programs[vertex].text[0] != 'V')
+        vertex = RB2K_D8_PROGRAM_SLOT(d->vertexProgram);
+        if (!d->vertexProgram || vertex >= RB2K_D8_PROGRAMS || gpu->programs[vertex].id != d->vertexProgram ||
+            gpu->programs[vertex].text[0] != 'V')
             return refuse(gpu, RB2K_D7_SITE_PROGRAM, *status, d->vertexProgram);
     }
     if (d->depth) {
@@ -371,7 +373,7 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
     return TRUE;
 }
 
-/* Keep or forget the TGSI text of a pixel shader program. */
+/* Keep or forget the TGSI text of a vertex or pixel program. */
 static VP_STATUS program_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 {
     const RB2K_D3D8_PROGRAM *in = packet->InputBuffer;
@@ -381,8 +383,14 @@ static VP_STATUS program_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         ULONG id;
         if (packet->InputBufferLength != sizeof(ULONG) || packet->OutputBufferLength) return ERROR_INVALID_PARAMETER;
         id = *(PULONG)packet->InputBuffer;
-        for (i = 0; i < RB2K_D8_PROGRAMS; ++i)
-            if (id && gpu->programs[i].id == id) gpu->programs[i].id = 0;
+        i = RB2K_D8_PROGRAM_SLOT(id);
+        if (id && i < RB2K_D8_PROGRAMS && gpu->programs[i].id == id) {
+            /* A colour context that made a host shader of it destroys that when it draws the
+             * slot's next program (rb_gpu_d8_draw). */
+            rb_pool_free(gpu->programs[i].text);
+            gpu->programs[i].text = NULL;
+            gpu->programs[i].id = 0;
+        }
         return NO_ERROR;
     }
     if (packet->InputBufferLength <= sizeof(ULONG) || packet->InputBufferLength > sizeof(*in) ||
@@ -391,10 +399,17 @@ static VP_STATUS program_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     for (i = 0; i < bytes && in->text[i]; ++i) {}
     if (i == bytes || i < 4) return ERROR_INVALID_PARAMETER;
     bytes = i + 1;
-    for (i = 0; i < RB2K_D8_PROGRAMS && free == RB2K_D8_PROGRAMS; ++i) if (!gpu->programs[i].id) free = i;
+    /* The first free slot at or after the last one given: a short search while slots remain. */
+    for (i = 0; i < RB2K_D8_PROGRAMS && free == RB2K_D8_PROGRAMS; ++i) {
+        ULONG slot = (gpu->programNext + i) % RB2K_D8_PROGRAMS;
+        if (!gpu->programs[slot].id) free = slot;
+    }
     if (free == RB2K_D8_PROGRAMS) return ERROR_NOT_ENOUGH_MEMORY;
-    if (!(++gpu->programSerial & 0xffffff)) ++gpu->programSerial;
-    gpu->programs[free].id = (gpu->programSerial << 8) | (free + 1);
+    gpu->programs[free].text = rb_pool_alloc(bytes);
+    if (!gpu->programs[free].text) return ERROR_NOT_ENOUGH_MEMORY;
+    gpu->programNext = (free + 1) % RB2K_D8_PROGRAMS;
+    if (!(++gpu->programSerial & (0xffffffffUL >> RB2K_D8_PROGRAM_SLOT_BITS))) ++gpu->programSerial;
+    gpu->programs[free].id = (gpu->programSerial << RB2K_D8_PROGRAM_SLOT_BITS) | (free + 1);
     gpu->programs[free].samplers = in->samplers;
     gpu->programs[free].bytes = bytes;
     VideoPortMoveMemory(gpu->programs[free].text, (PVOID)in->text, bytes);

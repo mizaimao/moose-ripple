@@ -30,5 +30,7 @@ PVOID rb_defer_create(void (*callback)(PVOID), PVOID context);
 void rb_defer_arm(PVOID defer, ULONG ms);
 PVOID rb_map_cached(unsigned __int64 physical, ULONG bytes);
 void rb_unmap_cached(PVOID address, ULONG bytes);
+PVOID rb_pool_alloc(ULONG bytes);
+void rb_pool_free(PVOID memory);
 
 #endif
