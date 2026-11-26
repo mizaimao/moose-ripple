@@ -583,7 +583,10 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 /* Create a Direct3D texture or replace rows of one, attached to the target
  * that will sample it. Texture ids share the image counter. */
 /* Host formats of the upload formats of RB2K_D3D7_TEXTURE. */
-static const ULONG block_formats[4] = { 0, VIRGL_FORMAT_DXT1_RGBA, VIRGL_FORMAT_DXT3_RGBA, VIRGL_FORMAT_DXT5_RGBA };
+static const ULONG block_formats[RB2K_D7_UPLOAD_FORMATS] = {
+    0, VIRGL_FORMAT_DXT1_RGBA, VIRGL_FORMAT_DXT3_RGBA, VIRGL_FORMAT_DXT5_RGBA,
+    VIRGL_FORMAT_R8G8_SNORM, VIRGL_FORMAT_R8G8B8A8_SNORM
+};
 
 static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
 {
@@ -591,7 +594,7 @@ static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     RB2K_TEXTURE *t;
     const RB2K_D3D7_TEXTURE *in = packet->InputBuffer;
     RB2K_IMAGE *image;
-    ULONG bytes;
+    ULONG bytes, side, block;
     if (!gpu->nativeD3D7 || !gpu->ddGpuSurfaces) return ERROR_NOT_SUPPORTED;
     if (packet->IoControlCode == IOCTL_RB2K_D3D7_TEXTURE_FREE) {
         if (packet->InputBufferLength != sizeof(ULONG) || packet->OutputBufferLength)
@@ -609,27 +612,30 @@ static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         return ERROR_INVALID_PARAMETER;
     {
         ULONG depth = in->depth > 1 ? in->depth : 1, slices = depth >> in->level ? depth >> in->level : 1;
-        if (in->format > RB2K_D7_BLOCKS_DXT5 || (in->faces != 1 && in->faces != 6) ||
+        if (in->format >= RB2K_D7_UPLOAD_FORMATS || (in->faces != 1 && in->faces != 6) ||
             (in->faces == 6 && in->width != in->height) || depth > RB2K_D7_VOLUME_SIDE ||
-            (depth > 1 && (in->faces != 1 || in->format || in->width > RB2K_D7_VOLUME_SIDE ||
+            (depth > 1 && (in->faces != 1 || RB2K_D7_BLOCK_SIDE(in->format) > 1 || in->width > RB2K_D7_VOLUME_SIDE ||
                            in->height > RB2K_D7_VOLUME_SIDE)) ||
             in->face >= (depth > 1 ? slices : in->faces)) return ERROR_INVALID_PARAMETER;
     }
-    /* Blocks as they are only where the host samples them; otherwise the
-     * answer is texture id zero (the video port reports every failure alike). */
-    if (in->format && (!gpu->hostDxt || !((rb_gpu_host_blocks(gpu) >> in->format) & 1))) {
+    /* Blocks and signed texels as they are only where the host samples them
+     * (DXT also only with RippleHostDxt); otherwise the answer is texture id
+     * zero (the video port reports every failure alike). */
+    if (in->format && ((in->format <= RB2K_D7_BLOCKS_DXT5 && !gpu->hostDxt) ||
+                       !((rb_gpu_host_blocks(gpu) >> in->format) & 1))) {
         *(PULONG)packet->OutputBuffer = 0;
         packet->StatusBlock->Information = sizeof(ULONG);
         return NO_ERROR;
     }
+    side = RB2K_D7_BLOCK_SIDE(in->format);
+    block = in->format ? RB2K_D7_BLOCK_BYTES(in->format) : sizeof(ULONG);
     {
         /* Rows of one level, each level half the one above, at least one. */
         ULONG width = in->width >> in->level ? in->width >> in->level : 1;
         ULONG height = in->height >> in->level ? in->height >> in->level : 1;
-        if (!in->rows || in->y >= height || in->rows > height - in->y || (in->format && in->y % 4))
+        if (!in->rows || in->y >= height || in->rows > height - in->y || in->y % side)
             return ERROR_INVALID_PARAMETER;
-        bytes = in->format ? (width + 3) / 4 * (in->format == RB2K_D7_BLOCKS_DXT1 ? 8 : 16) * ((in->rows + 3) / 4) :
-                width * in->rows * sizeof(ULONG);
+        bytes = (width + side - 1) / side * block * ((in->rows + side - 1) / side);
     }
     if (bytes > RB2K_D7_UPLOAD_BYTES || packet->InputBufferLength != sizeof(*in) + bytes)
         return ERROR_INVALID_PARAMETER;
@@ -645,8 +651,7 @@ static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
             return ERROR_INVALID_PARAMETER;
     } else {
         /* Levels below the top add up to under a third of it. */
-        ULONG i, size = in->format ? (in->width + 3) / 4 * ((in->height + 3) / 4) * (in->format == RB2K_D7_BLOCKS_DXT1 ? 8 : 16) :
-                        in->width * in->height * sizeof(ULONG);
+        ULONG i, size = (in->width + side - 1) / side * ((in->height + side - 1) / side) * block;
         if (in->levels > 1) size += size / 3 + 4 * sizeof(ULONG);
         if (in->y || in->level || in->face) return ERROR_INVALID_PARAMETER;
         size *= in->faces;

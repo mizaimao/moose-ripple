@@ -780,13 +780,14 @@ RB2K_TEXTURE *rb_gpu_texture(RB2K_GPU *gpu, ULONG id)
     return NULL;
 }
 
-/* The DXT formats the host samples, from its virgl capability set (bit n
- * for RB2K_D7_BLOCKS_DXT* n), asked once. */
+/* The upload formats the host samples, from its virgl capability set (bit n
+ * for upload format n: RB2K_D7_BLOCKS_DXT*, RB2K_D7_TEXELS_*), asked once. */
 ULONG rb_gpu_host_blocks(RB2K_GPU *gpu)
 {
     struct virtio_gpu_get_capset request;
     struct { struct virtio_gpu_ctrl_hdr hdr; ULONG maxVersion, sampler[16], rest[110]; } reply;
-    static const ULONG formats[4] = { 0, VIRGL_FORMAT_DXT1_RGBA, VIRGL_FORMAT_DXT3_RGBA, VIRGL_FORMAT_DXT5_RGBA };
+    static const ULONG formats[RB2K_D7_UPLOAD_FORMATS] = { 0, VIRGL_FORMAT_DXT1_RGBA, VIRGL_FORMAT_DXT3_RGBA,
+        VIRGL_FORMAT_DXT5_RGBA, VIRGL_FORMAT_R8G8_SNORM, VIRGL_FORMAT_R8G8B8A8_SNORM };
     ULONG received = 0, k;
     if (gpu->hostBlocksKnown || !gpu->ready) return gpu->hostBlocks;
     gpu->hostBlocksKnown = TRUE;
@@ -797,7 +798,7 @@ ULONG rb_gpu_host_blocks(RB2K_GPU *gpu)
     if (rb_gpu_submit(gpu, &request, sizeof(request), &reply, sizeof(reply), &received) ||
         received < sizeof(reply.hdr) + sizeof(ULONG) * 17 || reply.hdr.type != VIRTIO_GPU_RESP_OK_CAPSET)
         return 0;
-    for (k = 1; k < 4; ++k)
+    for (k = 1; k < RB2K_D7_UPLOAD_FORMATS; ++k)
         if ((reply.sampler[formats[k] / 32] >> (formats[k] % 32)) & 1) gpu->hostBlocks |= 1UL << k;
     return gpu->hostBlocks;
 }
@@ -872,10 +873,14 @@ BOOLEAN rb_gpu_texture_upload(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K
     ULONG rowBytes = width * sizeof(ULONG), bytes = rowBytes * rows;
     if (gpu->d7Frame.target && gpu->d7Frame.count && !submit_frame(gpu, result, FALSE)) return FALSE;
     if (texture->format) {
-        /* Rows of 4x4 blocks: eight bytes each for DXT1, sixteen for the others. */
-        rowBytes = (width + 3) / 4 * (texture->format == VIRGL_FORMAT_DXT1_RGBA ? 8 : 16);
+        /* Rows of 4x4 DXT blocks (eight bytes each for DXT1, sixteen for the
+         * others), or rows of signed texels of two or four bytes. */
+        ULONG side = texture->format == VIRGL_FORMAT_R8G8_SNORM || texture->format == VIRGL_FORMAT_R8G8B8A8_SNORM ? 1 : 4;
+        ULONG block = texture->format == VIRGL_FORMAT_DXT1_RGBA ? 8 : side == 4 ? 16 :
+                      texture->format == VIRGL_FORMAT_R8G8_SNORM ? 2 : 4;
+        rowBytes = (width + side - 1) / side * block;
         return transfer_rows(gpu, result, image->id, texture->id, 0, y, width, rows, texels, rowBytes, rowBytes,
-                             FALSE, level, (rows + 3) / 4, face);
+                             FALSE, level, (rows + side - 1) / side, face);
     }
     if (bytes <= 16384) {
         ULONG count;

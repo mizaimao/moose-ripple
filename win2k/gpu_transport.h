@@ -120,7 +120,7 @@ typedef struct {
     ULONG nextId, fence, imageCount, hostFills, readbacks, uploads, hostCopies;
     BOOLEAN ddGpuSurfaces, nativeD3D7, plainSurfaces, d3d8, vertexShaders;
     /* DXT blocks as they are (RippleHostDxt), and the formats the host samples:
-     * bit n for RB2K_D7_BLOCKS_DXT* n, known after the first ask. */
+     * bit n for upload format n (RB2K_D7_BLOCKS_DXT*, RB2K_D7_TEXELS_*), known after the first ask. */
     BOOLEAN hostDxt, hostBlocksKnown;
     ULONG hostBlocks;
     struct {

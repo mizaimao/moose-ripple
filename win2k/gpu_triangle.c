@@ -1145,7 +1145,7 @@ BOOLEAN rb_gpu_d8_valid(const RB2K_D3D8_DRAW *d)
         ((d->alphaTest >> 8) & 15) < 1 || ((d->alphaTest >> 8) & 15) > 8)) return FALSE;
     if (d->blend && ((d->blend & ~(RB2K_D7_ON | RB2K_BLEND_DEST_ALPHA | 0xffff)) ||
         !blend_valid((d->blend >> 8) & 255) || !blend_valid(d->blend & 255))) return FALSE;
-    if (d->cull < CullNone || d->cull > CullCcw || (d->constantCount != 8 && d->constantCount != 32)) return FALSE;
+    if (d->cull < CullNone || d->cull > CullCcw || (d->constantCount != 8 && d->constantCount != 16 && d->constantCount != 32)) return FALSE;
     if (d->transform == 2 && (d->lighting || !d->vertexProgram || d->vertexConstants > RB2K_D8_VS_CONSTANTS ||
         !d->vertexWords || d->vertexWords % 4 || d->vertexWords > RB2K_D8_VS_VERTEX_WORDS)) return FALSE;
     if (d->transform > 2 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
