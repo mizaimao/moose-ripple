@@ -1202,3 +1202,28 @@ time; they wait for each other.
 
 For scale: the GeForce 9600 GT reference ran this timedemo at 351 frames/s (its window not
 covered, on a 1920x1080 screen).
+
+### A covered window: WindowServer gets the newest frame (2026-11-25, late)
+
+While something is drawn over a program's window, WindowServer draws the window, and the
+program's flush thread asks it to at every frame. The program waited whenever the flush for
+its previous frame was still on its way, which at these frame rates was most of the time.
+Now a program with swap interval 0 does not wait: it leaves word and draws on, and when
+WindowServer has finished one redraw the flush thread asks for one more, which shows the
+newest frame (the frames are in the surface's texture already). A program that waits for the
+refresh keeps the old behaviour. `RIPPLE_GL_FLUSH_WAIT=1` in the environment brings the wait
+back for every program.
+
+OpenArena's timedemo, 1024x768 window with the Dock drawn over its lower edge, same boot,
+switched by that variable, each host to itself:
+
+| | waiting (as before) | newest frame | the Dock hidden |
+|---|---|---|---|
+| Proxmox host (QEMU 9.2, virglrenderer 0.10.4) | 180.1 | 201.1 | 264.3 |
+| second Intel host (QEMU 10.0, virglrenderer 1.1.0), a copy of the same guest | 189.9 | 225.7 | 268.6 |
+
+The two hosts are not to be compared with each other; each row is its own before and after.
+A covered window still costs a quarter to a sixth of the frame rate: WindowServer's drawing
+shares the host's renderer with the game. gl-gears, which waits for the refresh, in a covered
+window: 59.5 frames/s, longest frame 17 ms, as before. Looked at: the game's picture advancing
+under the Dock in the guest, two captures a second apart.

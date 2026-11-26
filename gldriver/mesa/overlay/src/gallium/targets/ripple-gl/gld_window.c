@@ -466,7 +466,18 @@ gld_window_direct_flush(void *data)
          pthread_attr_destroy(&attr);
       }
       if (flush_thread_up) {
-         while (flush_queued || flush_busy)
+         /* A program that waits for the refresh keeps WindowServer's pace: it waits while the
+          * flush for its previous frame is on its way. One that does not (swap interval 0)
+          * only leaves word and goes on: its frames are in the surface's texture already, and
+          * when WindowServer has finished one redraw it is asked for one more, which shows
+          * the newest (since 2026-11-26; at 190 frames/s the wait cost a quarter of the frame
+          * rate). RIPPLE_GL_FLUSH_WAIT=1 in the environment: always wait, as before. */
+         static int always_wait = -1;
+         if (always_wait < 0) {
+            const char *env = getenv("RIPPLE_GL_FLUSH_WAIT");
+            always_wait = env && !strcmp(env, "1");
+         }
+         while ((w->vsync || always_wait) && (flush_queued || flush_busy))
             pthread_cond_wait(&flush_done, &flush_lock);
          flush_job.cid = w->cid;
          flush_job.wid = w->wid;
