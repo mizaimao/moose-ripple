@@ -356,6 +356,34 @@ static void ps_run(const char *name, const DWORD *tokens, const PSVERTEX *v, UIN
     IDirect3DPixelShader9_Release(handle);
 }
 
+/* 73: a line list (red lines at y 39, 40 and 41 from x 8 to 120) and a point list (a 3x3 block of
+ * green points around 96, 96): pixels on them, and the clear colour beside. */
+static void lines_points_case(int only)
+{
+    static const SAMPLE s[] = { { 64, 40, 0xff0000 }, { 64, 64, CLEAR_COLOR }, { 96, 96, 0x00ff00 }, { 104, 104, CLEAR_COLOR } };
+    TLVERTEX lines[6], points[9];
+    HRESULT hr;
+    int i;
+    if (only && only != 73) return;
+    for (i = 0; i < 6; ++i) {
+        lines[i].x = i & 1 ? 120.0f : 8.0f; lines[i].y = 39.0f + i / 2; lines[i].z = 0.5f; lines[i].rhw = 1;
+        lines[i].diffuse = 0xffff0000;
+    }
+    for (i = 0; i < 9; ++i) {
+        points[i].x = 95.0f + i % 3; points[i].y = 95.0f + i / 3; points[i].z = 0.5f; points[i].rhw = 1;
+        points[i].diffuse = 0xff00ff00;
+    }
+    if (!begin("lines_points")) return;
+    IDirect3DDevice9_SetTexture(device, 0, NULL);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+    IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+    hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_LINELIST, 3, lines, sizeof(lines[0]));
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_POINTLIST, 9, points, sizeof(points[0]));
+    if (FAILED(hr)) { fail_hr("lines_points", "draw", hr); IDirect3DDevice9_EndScene(device); }
+    else check("lines_points", s, 4);
+}
+
 static const DWORD texels0[4] = { 0xffff0000, 0xff00ff00, 0xff0000ff, 0xffffffff };
 static const DWORD texels1[4] = { 0xffffff00, 0xffffff00, 0xffffff00, 0xffffff00 };
 /* The four texel centres of a 2x2 texture over the quad 32..96. */
@@ -1530,6 +1558,7 @@ int main(int argc, char **argv)
         cube_cases(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (!only || only >= 43)) rt_cases(only);
     luminance_case(only);
+    lines_points_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
     colorwrite_case(only);
     dot3_case(only, (caps.TextureOpCaps & D3DTEXOPCAPS_DOTPRODUCT3) != 0);
