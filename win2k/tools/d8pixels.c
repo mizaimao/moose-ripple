@@ -622,6 +622,16 @@ static void pixel_shaders(int only)
             IDirect3DDevice8_SetRenderState(device, D3DRS_FOGENABLE, FALSE);
         }
     }
+    if (!only || only == 21) {   /* tex t1; add r0, t1, v0 with no texture on stage 1: an unbound stage
+         * samples (0,0,0,1), so the quad is the vertex colour (the draw must not be dropped) */
+        static const DWORD ps[] = { PSV(1), OTex, DST(RT, 1), OAdd, DST(RR, 0), SRC(RT, 1), SRC(RV, 0), PSEND };
+        IDirect3DDevice8_SetTexture(device, 1, NULL);
+        ps_quad(v, 32, 32, 96, 96, 0xff4080c0, 0, 0, 1, 1);
+        for (i = 0; i < 4; ++i) { want[i][0] = unit(0x40); want[i][1] = unit(0x80); want[i][2] = unit(0xc0); }
+        quad_samples(s, want);
+        ps_run("ps_unbound_stage", ps, v, 1, s, 5);
+        IDirect3DDevice8_SetTexture(device, 1, (IDirect3DBaseTexture8 *)ps_textures[1]);
+    }
     if (only == 12) {   /* tex t0; add r0, t0_bias, c0 */
         static const DWORD ps[] = { PSV(1), DEF(0, F05, F05, F05, F05), OTex, DST(RT, 0),
             OAdd, DST(RR, 0), PS_(RT, 0, SwXYZW, MBias), SRC(RC, 0), PSEND };

@@ -1458,6 +1458,35 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
 
 /* The host texture for this draw, checked once a scene. The miniport
  * attaches a texture to the target it is uploaded for. */
+/* A stage the shader samples with no texture bound reads (0,0,0,1): a 1x1 host texture of
+ * that colour stands in. It is sent again into the same host texture once a scene epoch,
+ * and made anew when a transport reset has released it. */
+static ULONG blankHost, blankEpoch;
+static ULONG blank_texture(DISPLAY *d, ULONG targetId)
+{
+    RB2K_D3D7_TEXTURE *packet = (RB2K_D3D7_TEXTURE *)uploadScratch;
+    ULONG tries, newId;
+    if (blankHost && blankEpoch == textureEpoch) return blankHost;
+    if (!packet) return 0;
+    for (tries = 0; tries < 2; ++tries) {
+        RtlZeroMemory(packet, sizeof(*packet));
+        packet->id = blankHost;
+        packet->faces = packet->depth = packet->levels = 1;
+        packet->target = targetId;
+        packet->width = packet->height = packet->rows = 1;
+        *(PULONG)(packet + 1) = 0xff000000;
+        newId = 0;
+        if (!texture_send(d, packet, sizeof(*packet) + sizeof(ULONG), &newId) && newId) {
+            blankHost = newId;
+            blankEpoch = textureEpoch;
+            return blankHost;
+        }
+        if (!blankHost) break;
+        blankHost = 0;
+    }
+    return 0;
+}
+
 /* Why a texture cannot be used for a draw (counted in d7draw.texSkips). */
 static void texture_skip(D7_CONTEXT *c, const D7_TEXTURE *t, ULONG targetId)
 {
@@ -2369,6 +2398,18 @@ static BOOL pixel_states(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, const D8_SHADER *s
         D7_TEXTURE *tex;
         if (!(sh->samplers & (1UL << k))) continue;
         tex = find_texture(c->local, st->texture);
+        if (!st->texture) {
+            /* No texture on a stage the shader samples: Direct3D reads (0,0,0,1) there. */
+            if (!(draw->textures[k] = blank_texture(c->display, s->id))) {
+                texture_skip(c, NULL, s->id);
+                skip(c, RB2K_D7_SKIP_TEXTURE, primitives);
+                return FALSE;
+            }
+            draw->samplers[k] = stage_sampler(st, NULL);
+            draw->borders[k] = st->border;
+            ++c->display->d7draw.blankSamples;
+            continue;
+        }
         if (!tex || !tex->format || tex->owner != c->owner || !(draw->textures[k] = texture_ready(c, tex, s->id))) {
             texture_skip(c, tex, s->id);
             skip(c, RB2K_D7_SKIP_TEXTURE, primitives);
