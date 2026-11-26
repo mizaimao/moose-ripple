@@ -41,6 +41,7 @@
 #define IOCTL_RB2K_D3D7_FLIGHT RB2K_DD_IOCTL(0x917)
 #define IOCTL_RB2K_DD_CREATE_Z16 RB2K_DD_IOCTL(0x918)
 #define IOCTL_RB2K_DD_CREATE_Z24S8 RB2K_DD_IOCTL(0x922)
+#define IOCTL_RB2K_DD_STRETCH RB2K_DD_IOCTL(0x923)
 #define IOCTL_RB2K_D3D7_ZCLEAR RB2K_DD_IOCTL(0x919)
 #define IOCTL_RB2K_D3D7_DRAW RB2K_DD_IOCTL(0x91b)
 #define IOCTL_RB2K_D3D7_TEXTURE RB2K_DD_IOCTL(0x91c)
@@ -220,6 +221,9 @@ typedef struct { ULONG source, destination; } RB2K_DD_COPY;
 /* One visible rectangle, in source and primary pixel coordinates. */
 typedef struct { ULONG source, srcX, srcY, dstX, dstY, width, height; } RB2K_DD_PRESENT;
 typedef struct { ULONG left, top, right, bottom; } RB2K_RECT;
+/* A scaled copy of a rectangle of one colour image into a rectangle of another, point-sampled or
+ * linear (StretchRect of a Direct3D 9 runtime). Both rectangles lie inside their images. */
+typedef struct { ULONG source, destination; RB2K_RECT from, to; ULONG linear; } RB2K_DD_STRETCH;
 enum { RB2K_CPU_READ, RB2K_CPU_DRAW, RB2K_CPU_REPLACE };
 #define RB2K_GL_MAX_RECTS 32
 enum { RB2K_FRAME_BATCH, RB2K_FRAME_PER_RECT, RB2K_FRAME_INLINE_UPLOADS };

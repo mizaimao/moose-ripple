@@ -2622,23 +2622,46 @@ static BOOL whole_rect(const RECTL *r, const DD_SLOT *s)
            (!r->left && !r->top && r->right == (LONG)s->width && r->bottom == (LONG)s->height);
 }
 
-/* BLT and SURFACEBLT: a whole target copied on the host into another of its size. The rest (parts,
- * stretches, mip levels) are counted in d9Ignored. */
+/* A rectangle of a target as the miniport takes it: an empty one stands for all of it. FALSE when it
+ * does not lie inside the target. */
+static BOOL target_rect(const RECTL *r, const DD_SLOT *s, RB2K_RECT *out)
+{
+    if (r->right <= r->left || r->bottom <= r->top) {
+        out->left = out->top = 0; out->right = s->width; out->bottom = s->height;
+        return TRUE;
+    }
+    if (r->left < 0 || r->top < 0 || r->right > (LONG)s->width || r->bottom > (LONG)s->height) return FALSE;
+    out->left = r->left; out->top = r->top; out->right = r->right; out->bottom = r->bottom;
+    return TRUE;
+}
+
+/* BLT and SURFACEBLT (StretchRect): a whole target into another of its size is a host copy; any
+ * other pair of rectangles a host blit, linear when the runtime asks (DP2BLT_LINEAR, 2). Mip levels
+ * of render targets are not offered, so a level other than 0 is counted in d9Ignored. */
 static void d9_blt(D7_CONTEXT *c, const RB_DP2_BLT9 *b)
 {
     DD_SLOT *src = target(c, b->source, TRUE), *dst = target(c, b->dest, TRUE);
-    RB2K_DD_COPY copy;
-    ULONG written;
+    ULONG written, failed;
     if (!src || !dst || src == dst || src->depth16 || dst->depth16 || src->locked || dst->locked ||
-        b->sourceLevel || b->destLevel || src->width != dst->width || src->height != dst->height ||
-        !whole_rect(&b->sourceRect, src) || !whole_rect(&b->destRect, dst)) {
+        b->sourceLevel || b->destLevel) {
         ++c->display->d7draw.d9Ignored[RB2K_D9_IGNORED_BLT];
         return;
     }
-    copy.source = src->id;
-    copy.destination = dst->id;
-    if (miniport(c->display, IOCTL_RB2K_DD_COPY, &copy, sizeof(copy), NULL, 0, &written))
-        ++c->display->d7draw.d9Ignored[RB2K_D9_IGNORED_BLT];
+    if (src->width == dst->width && src->height == dst->height &&
+        whole_rect(&b->sourceRect, src) && whole_rect(&b->destRect, dst)) {
+        RB2K_DD_COPY copy;
+        copy.source = src->id;
+        copy.destination = dst->id;
+        failed = miniport(c->display, IOCTL_RB2K_DD_COPY, &copy, sizeof(copy), NULL, 0, &written);
+    } else {
+        RB2K_DD_STRETCH s;
+        s.source = src->id;
+        s.destination = dst->id;
+        s.linear = (b->flags & 2) != 0;
+        failed = !target_rect(&b->sourceRect, src, &s.from) || !target_rect(&b->destRect, dst, &s.to) ||
+                 miniport(c->display, IOCTL_RB2K_DD_STRETCH, &s, sizeof(s), NULL, 0, &written);
+    }
+    if (failed) ++c->display->d7draw.d9Ignored[RB2K_D9_IGNORED_BLT];
     c->queued = TRUE;
 }
 
@@ -4163,6 +4186,8 @@ static void d9_caps(const DISPLAY *d, RB_D3DCAPS9 *c, const D3DNTHAL_D3DEXTENDED
     /* SETSTREAMSOURCE2 offsets are applied; the runtime requires this of a DirectX 9 driver. */
     if (d->d3d9Ddi) c->devCaps2 |= RB_D3DDEVCAPS2_STREAMOFFSET;
     c->stretchRectFilterCaps = RB_D3DPTFILTERCAPS_MINFPOINT | RB_D3DPTFILTERCAPS_MAGFPOINT;
+    /* The Direct3D 9 interface blits any rectangles on the host, point-sampled or linear. */
+    if (d->d3d9Ddi) c->stretchRectFilterCaps |= RB_D3DPTFILTERCAPS_MINFLINEAR | RB_D3DPTFILTERCAPS_MAGFLINEAR;
     if (c->caps8.vertexShaderVersion >= 0xfffe0200) {
         c->declTypes = RB_D3DDTCAPS_UBYTE4;
         c->vs20NumTemps = 12;

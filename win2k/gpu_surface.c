@@ -556,6 +556,34 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         }
         break;
     }
+    case IOCTL_RB2K_DD_STRETCH: {
+        RB2K_DD_STRETCH *s = packet->InputBuffer;
+        RB2K_IMAGE *destination;
+        if (packet->InputBufferLength != sizeof(*s) || packet->OutputBufferLength)
+            return ERROR_INVALID_PARAMETER;
+        destination = find_image(gpu, s->destination);
+        if (!destination) return ERROR_INVALID_HANDLE;
+        if (destination->depth16 || destination == image) return ERROR_NOT_SUPPORTED;
+        if (s->from.left >= s->from.right || s->from.top >= s->from.bottom || s->from.right > image->width ||
+            s->from.bottom > image->height || s->to.left >= s->to.right || s->to.top >= s->to.bottom ||
+            s->to.right > destination->width || s->to.bottom > destination->height)
+            return ERROR_INVALID_PARAMETER;
+        if (gpu->d7Frame.target == destination && !rb_gpu_frame_flush(gpu, &result))
+            return command_error(gpu, &result);
+        result.status = rb_gpu_wait_image(gpu, destination);
+        if (result.status) {
+            result.stage = RB2K_STAGE_TRANSFER;
+            return command_error(gpu, &result);
+        }
+        if (destination->frameFailed) return ERROR_INVALID_DATA;
+        success = rb_gpu_blit_rect(gpu, &result, destination->id, image->id, &s->to, &s->from, s->linear != 0);
+        if (success) {
+            destination->defined = TRUE;
+            destination->uniform = FALSE;
+            ++gpu->hostCopies;
+        }
+        break;
+    }
     case IOCTL_RB2K_DD_PRESENT:
         if (packet->InputBufferLength != sizeof(RB2K_DD_PRESENT) || packet->OutputBufferLength)
             return ERROR_INVALID_PARAMETER;
