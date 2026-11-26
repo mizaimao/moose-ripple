@@ -29,12 +29,33 @@
 
 #include <windows.h>
 #include <d3d9.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* The front and the back colour buffer (ST_ATTACHMENT_FRONT_LEFT, ST_ATTACHMENT_BACK_LEFT) */
 #define D3D9EX_NUM_BUFFERS 2
 
 typedef HRESULT(WINAPI *direct3d_create9ex_t)(UINT, IDirect3D9Ex **);
+
+/* RIPPLE_GL_LOG names a file: what this framebuffer made and what failed, a line each. */
+static void
+gl_log(const char *format, ...)
+{
+   const char *path = getenv("RIPPLE_GL_LOG");
+   if (!path || !*path)
+      return;
+   FILE *f = fopen(path, "a");
+   if (!f)
+      return;
+   va_list args;
+   va_start(args, format);
+   vfprintf(f, format, args);
+   va_end(args);
+   fputc('\n', f);
+   fclose(f);
+}
 
 struct wgl_d3d9ex_framebuffer {
    struct stw_winsys_framebuffer base;
@@ -48,6 +69,7 @@ struct wgl_d3d9ex_framebuffer {
 
    D3DFORMAT format;
    unsigned width, height;
+   unsigned presents, refused;
    IDirect3DTexture9 *d3d_textures[D3D9EX_NUM_BUFFERS];
    struct pipe_resource *textures[D3D9EX_NUM_BUFFERS];
 };
@@ -144,15 +166,13 @@ wgl_d3d9ex_framebuffer_resize(struct stw_winsys_framebuffer *_fb, struct pipe_co
                                            D3DCREATE_FPU_PRESERVE | D3DCREATE_MULTITHREADED |
                                            D3DCREATE_NOWINDOWCHANGES,
                                            &pp, NULL, &fb->device);
-      if (FAILED(hr)) {
-         _debug_printf("OpenGL window: no Direct3D 9Ex device: %lx\n", (unsigned long)hr);
+      gl_log("device for %ux%u, format %u: 0x%08lx", fb->width, fb->height, (unsigned)fb->format,
+             (unsigned long)hr);
+      if (FAILED(hr))
          fb->device = NULL;
-      }
    } else {
       HRESULT hr = fb->device->ResetEx(&pp, NULL);
-      if (FAILED(hr))
-         _debug_printf("OpenGL window: the Direct3D 9Ex device did not take %ux%u: %lx\n",
-                       fb->width, fb->height, (unsigned long)hr);
+      gl_log("device reset to %ux%u: 0x%08lx", fb->width, fb->height, (unsigned long)hr);
    }
 }
 
@@ -174,9 +194,14 @@ wgl_d3d9ex_framebuffer_present(struct stw_winsys_framebuffer *_fb, int interval,
          break;
       }
    }
-   if (source && SUCCEEDED(fb->device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &back)) &&
-       SUCCEEDED(fb->device->StretchRect(source, NULL, back, NULL, D3DTEXF_NONE)))
-      shown = SUCCEEDED(fb->device->PresentEx(NULL, NULL, NULL, NULL, 0));
+   HRESULT hr_back = E_FAIL, hr_copy = E_FAIL, hr_present = E_FAIL;
+   if (source && SUCCEEDED(hr_back = fb->device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &back)) &&
+       SUCCEEDED(hr_copy = fb->device->StretchRect(source, NULL, back, NULL, D3DTEXF_NONE)))
+      shown = SUCCEEDED(hr_present = fb->device->PresentEx(NULL, NULL, NULL, NULL, 0));
+   if (fb->presents++ < 3 || !shown)
+      if (fb->presents < 20)
+         gl_log("present %u: source %p, back buffer 0x%08lx, copy 0x%08lx, present 0x%08lx", fb->presents,
+                (void *)source, (unsigned long)hr_back, (unsigned long)hr_copy, (unsigned long)hr_present);
    if (back)
       back->Release();
    if (source)
@@ -192,8 +217,11 @@ wgl_d3d9ex_framebuffer_get_resource(struct stw_winsys_framebuffer *_fb,
    const unsigned index = statt;
    HANDLE shared = NULL;
 
-   if (!fb->device || index >= D3D9EX_NUM_BUFFERS || fb->format == D3DFMT_UNKNOWN)
+   if (!fb->device || index >= D3D9EX_NUM_BUFFERS || fb->format == D3DFMT_UNKNOWN) {
+      if (fb->refused++ < 4)
+         gl_log("buffer %u refused: device %p, format %u", index, (void *)fb->device, (unsigned)fb->format);
       return NULL;
+   }
 
    if (fb->textures[index]) {
       pipe_reference(NULL, &fb->textures[index]->reference);
@@ -203,9 +231,9 @@ wgl_d3d9ex_framebuffer_get_resource(struct stw_winsys_framebuffer *_fb,
    HRESULT hr = fb->device->CreateTexture(fb->width, fb->height, 1, D3DUSAGE_RENDERTARGET,
                                           fb->format, D3DPOOL_DEFAULT,
                                           &fb->d3d_textures[index], &shared);
+   gl_log("buffer %u: shared texture %ux%u format %u: 0x%08lx, handle %p", index, fb->width,
+          fb->height, (unsigned)fb->format, (unsigned long)hr, (void *)shared);
    if (FAILED(hr) || !shared) {
-      _debug_printf("OpenGL window: no shared Direct3D 9Ex texture %ux%u: %lx\n", fb->width,
-                    fb->height, (unsigned long)hr);
       if (fb->d3d_textures[index]) {
          fb->d3d_textures[index]->Release();
          fb->d3d_textures[index] = NULL;
@@ -219,8 +247,12 @@ wgl_d3d9ex_framebuffer_get_resource(struct stw_winsys_framebuffer *_fb,
    whandle.handle = shared;
 
    fb->textures[index] = fb->screen->resource_from_handle(fb->screen, NULL, &whandle, 0);
+   if (fb->textures[index])
+      gl_log("buffer %u: opened as %ux%u, pipe format %u, bind 0x%x", index,
+             fb->textures[index]->width0, fb->textures[index]->height0,
+             (unsigned)fb->textures[index]->format, fb->textures[index]->bind);
    if (!fb->textures[index]) {
-      _debug_printf("OpenGL window: the OpenGL driver could not open the shared texture\n");
+      gl_log("buffer %u: the OpenGL driver could not open the shared texture", index);
       fb->d3d_textures[index]->Release();
       fb->d3d_textures[index] = NULL;
       return NULL;
