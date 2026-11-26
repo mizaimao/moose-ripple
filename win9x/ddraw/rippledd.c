@@ -210,6 +210,12 @@ static DWORD WINAPI CanCreateSurface(LPDDHAL_CANCREATESURFACEDATA d)
     d->ddRVal = !d->bIsDifferentPixelFormat || d3d_surface_format_ok(d->lpDDSurfaceDesc) ?
                 DD_OK : DDERR_INVALIDPIXELFORMAT;
     d3d_trace("can create: caps, result", d->lpDDSurfaceDesc->ddsCaps.dwCaps, d->ddRVal);
+    if (d->ddRVal != DD_OK) {           /* which format was refused */
+        const DDPIXELFORMAT *pf = &d->lpDDSurfaceDesc->ddpfPixelFormat;
+        d3d_trace("refused format: flags, fourcc", pf->dwFlags, pf->dwFourCC);
+        d3d_trace("refused format: bits, red mask", pf->dwRGBBitCount, pf->dwRBitMask);
+        d3d_trace("refused format: green mask, alpha mask", pf->dwGBitMask, pf->dwRGBAlphaBitMask);
+    }
     return DDHAL_DRIVER_HANDLED;
 }
 

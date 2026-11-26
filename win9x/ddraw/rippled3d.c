@@ -3775,6 +3775,15 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
     }
     if (c->cur && c->cur->written)
         rt_upload(c);
+    if (trace_on)                       /* what the draw uses: shader, textures, stage 0 and 1 */
+        tracef("rd3d: draw state: ps %lx, fvf %lx, maps %lx %lx %lx %lx, op %lu(%lx,%lx) %lu(%lx,%lx), "
+               "aop %lu, light %lu, tf %08lx, blend %lu %lu %lu, n %lu\r\n", c->ps_bound, c->fvf8,
+               c->tss[0][D3DTSS_TEXTUREMAP], c->tss[1][D3DTSS_TEXTUREMAP], c->tss[2][D3DTSS_TEXTUREMAP],
+               c->tss[3][D3DTSS_TEXTUREMAP], c->tss[0][D3DTSS_COLOROP], c->tss[0][D3DTSS_COLORARG1],
+               c->tss[0][D3DTSS_COLORARG2], c->tss[1][D3DTSS_COLOROP], c->tss[1][D3DTSS_COLORARG1],
+               c->tss[1][D3DTSS_COLORARG2], c->tss[0][D3DTSS_ALPHAOP], c->rs[D3DRENDERSTATE_LIGHTING],
+               c->rs[D3DRENDERSTATE_TEXTUREFACTOR], c->rs[D3DRENDERSTATE_ALPHABLENDENABLE],
+               c->rs[D3DRENDERSTATE_SRCBLEND], c->rs[D3DRENDERSTATE_DESTBLEND], n);
     if (c->stages_dirty || textures_changed(c))
         apply_stages(c);
     if (c->dx8) {                       /* a pixel shader, or none */
