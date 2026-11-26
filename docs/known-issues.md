@@ -193,7 +193,7 @@ keeps the quotes as part of the value. Curly quotes from a copied web page do th
 **Fix:** write the key exactly; in UTM without quotes
 ([docs/install.md](install.md#utm-on-an-apple-silicon-mac)).
 
-## KI-11: Changing the resolution with Quartz Extreme on crashed WindowServer (fixed after 0.2.2)
+## KI-11: Changing the resolution with Quartz Extreme on crashed WindowServer (fixed in 0.6.0)
 
 GitHub issue: [#161](https://github.com/mizaimao/moose-ripple/issues/161). Fixed on 2026-11-26; release 0.2.2
 and earlier have it.
@@ -224,7 +224,7 @@ back, no crash, the picture right each time.
 **Workaround for 0.2.2 (checked):** boot once without the two flags, choose the size (it works
 there), then put the flags back and restart. The size is kept, and Quartz Extreme runs at it.
 
-## KI-12: In UTM, Core Image filled the area outside a picture with its edge pixels (fixed after 0.2.2)
+## KI-12: In UTM, Core Image filled the area outside a picture with its edge pixels (fixed in 0.6.0)
 
 GitHub issue: [#206](https://github.com/mizaimao/moose-ripple/issues/206). Found and fixed on 2026-11-26; release 0.2.2
 and earlier have it.
@@ -248,3 +248,47 @@ With it the same run gives 1 of 24 (edge work, 1.5%), and UTM differs from the s
 renderer only where the Intel hosts do. It covers ARB and fixed-function fragment programs
 with 2D and rectangle textures, which is what Core Image and WindowServer use; a GLSL
 program that clamps to a border still gets the edge there.
+
+## KI-13: A swap rectangle is ignored for windows the kernel shows
+
+GitHub issue: [#235](https://github.com/mizaimao/moose-ripple/issues/235). Found on 2026-11-26; release 0.6.0 and
+earlier have it.
+
+**Symptom.** A program can ask that a swap shows only part of its window (`kCGLCPSwapRectangle`
+with `kCGLCESwapRectangle` on; Core Animation presents only the changed part of a view that
+way). With Quartz Extreme on, a GL window is shown by the kernel straight from the GPU, and
+there the rectangle is ignored: every swap shows the whole back buffer.
+`tools/gl-feature-check/swaprect-check` should end with a red window whose bottom quarter is
+green and whose top right corner is blue; on this driver the window is blue all over.
+
+**Who sees it.** No real program is known to show a difference: Photo Booth, the Finder's
+animations and Real Racing 2, which all draw through Core Animation, looked right in earlier
+checks. A program that leaves the rest of its back buffer stale and counts on the rectangle
+would show the stale part.
+
+**Workaround.** `RIPPLE_GL_DIRECT=0` in the program's environment shows its window the older
+way (each frame read back into a private window), which applies the rectangle (checked
+2026-11-26: `swaprect-check` then shows what it should); it is slower.
+
+## KI-14: A GL call could crash after a context was destroyed from another thread (fixed after 0.6.0)
+
+GitHub issue: [#240](https://github.com/mizaimao/moose-ripple/issues/240). Found and fixed on 2026-11-26; releases
+0.6.0 and earlier have it.
+
+**Symptom.** A program crashes inside the OpenGL driver at the first GL call on a new context,
+or when it switches contexts. Seen once: ScreenSaverEngine, as the screen saver started
+(`EXC_BAD_ACCESS` in `update_framebuffer`, called from `glClear`).
+
+**Cause.** The driver makes a context current for Mesa lazily, and Mesa's pointer to it stays
+in the thread after the program has stopped using the context. A program that destroys the
+context from another thread leaves the first thread pointing at freed memory; garbage-collected
+programs do that all the time (the collector's thread destroys what the main thread used:
+ScreenSaverEngine, System Preferences). The next context can be given the same address and
+then looked "already current" without ever having been bound, and at the next switch Mesa
+flushed the context it believed current, which was gone.
+
+**Fix.** A context notes the thread it is current on, and an entry takes "already current"
+only if both the address and the thread match; before a switch, a pointer that is not a living
+context of this thread is dropped unfollowed. `tools/gl-feature-check stale` draws with a
+context on one thread and destroys it from another, a hundred times: Apple's software renderer
+passes, release 0.6.0 crashes in the second round, the fixed driver passes.

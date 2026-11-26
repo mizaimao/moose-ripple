@@ -8,6 +8,8 @@
 #ifndef CGL_DISPATCH_H
 #define CGL_DISPATCH_H
 
+#include <pthread.h>
+
 #include "util/glheader.h"
 #include "util/macros.h"
 #include "glapi/glapi.h"
@@ -18,6 +20,8 @@ struct gl_context;
 /* The start of struct ripple_cgl_context (cgl_context.h), all a thunk needs. */
 struct ripple_cgl_rend {
    struct gl_context *glctx;
+   unsigned magic;
+   void *thread;                 /* the thread Mesa has it current on (pthread_self), or NULL */
 };
 
 void ripple_cgl_make_current_slow(void *rend);
@@ -34,9 +38,18 @@ void ripple_cgl_trace_pixels(GLsizei w, GLsizei h, GLenum format, GLenum type,
                              const void *pixels);
 void ripple_cgl_unsupported(const char *name);
 
+/* "Already current" takes both: Mesa's current context of this thread is the call's, and the
+ * context says this thread is the one it is current on. The address alone is not enough. Mesa
+ * keeps its pointer in the thread after the program has stopped using a context, and when
+ * another thread destroys that context (a garbage collector's does), the next context can be
+ * given the same address: its first call looked current and ran in a context that had never
+ * been bound (ScreenSaverEngine crashed in glClear, issue 240). The second test is only made
+ * when the first passes, so a `rend` that is not ours is never read past its first word. */
 #define RIPPLE_CGL_ENTER(rend)                                                        \
    do {                                                                               \
-      if (unlikely(_glapi_get_context() != ((struct ripple_cgl_rend *)(rend))->glctx)) \
+      const struct ripple_cgl_rend *rend_ = (const struct ripple_cgl_rend *)(rend);   \
+      if (unlikely(_glapi_get_context() != rend_->glctx ||                            \
+                   rend_->thread != (void *)pthread_self()))                          \
          ripple_cgl_make_current_slow(rend);                                          \
    } while (0)
 

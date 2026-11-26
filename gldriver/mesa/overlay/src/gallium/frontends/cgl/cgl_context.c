@@ -4,7 +4,9 @@
  * framebuffer objects (no window drawable yet): the first M4 target is a program that
  * draws into an FBO and reads the pixels back.
  */
+#include <pthread.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <string.h>
 
 #include <stdio.h>
@@ -15,6 +17,7 @@
 #include "main/mtypes.h"
 #include "pipe/p_screen.h"
 #include "state_tracker/st_context.h"
+#include "util/simple_mtx.h"
 #include "util/u_memory.h"
 
 #include "cgl_context.h"
@@ -72,6 +75,84 @@ accum_format(struct pipe_screen *screen, const struct ripple_cgl_pixel_format *p
                          : PIPE_FORMAT_NONE;
 }
 
+/* ---- Whose context is current ------------------------------------------------------------- *
+ * A context is made current for Mesa lazily, at the first GL call that comes for it on a
+ * thread (RIPPLE_CGL_ENTER), and Mesa keeps its pointer to it in that thread until another
+ * context of ours is called there. The program meanwhile may have destroyed the context from
+ * another thread: a garbage-collected program's collector does (ScreenSaverEngine, System
+ * Preferences). The first thread is then left with a pointer to freed memory, which Mesa
+ * follows at the next switch (it flushes the context it believes current), and which the next
+ * context created can be given as its own address (issue 240: a crash in glClear, in a context
+ * that looked current and had never been bound).
+ *
+ * So a context notes the thread it is current on, and there is a list of the contexts that
+ * exist. Mesa's pointer in a thread counts only if it is in the list and its context names
+ * this thread; anything else is taken out of the thread, unfollowed, before Mesa sees it. */
+#define LIVE_MAX 512
+static struct ripple_cgl_context *live[LIVE_MAX];
+static unsigned live_used;               /* entries in use are below this */
+static simple_mtx_t live_lock = SIMPLE_MTX_INITIALIZER;
+
+_Static_assert(offsetof(struct ripple_cgl_context, thread) ==
+               offsetof(struct ripple_cgl_rend, thread), "the thunks read the thread note");
+
+static void
+live_add(struct ripple_cgl_context *ctx)
+{
+   simple_mtx_lock(&live_lock);
+   unsigned i = 0;
+   while (i < live_used && live[i])
+      i++;
+   if (i < LIVE_MAX) {                   /* past the limit: never "already current", only slower */
+      live[i] = ctx;
+      if (i == live_used)
+         live_used++;
+   }
+   simple_mtx_unlock(&live_lock);
+}
+
+static void
+live_remove(struct ripple_cgl_context *ctx)
+{
+   simple_mtx_lock(&live_lock);
+   for (unsigned i = 0; i < live_used; i++)
+      if (live[i] == ctx)
+         live[i] = NULL;
+   while (live_used && !live[live_used - 1])
+      live_used--;
+   ctx->thread = NULL;
+   simple_mtx_unlock(&live_lock);
+}
+
+/* The context Mesa has current on the calling thread, if it is a living one that names this
+ * thread. A pointer that is anything else is dropped from the thread here, with the dispatch
+ * table that went with it. */
+static struct ripple_cgl_context *
+thread_current(void)
+{
+   struct gl_context *gl = _glapi_get_context();
+   struct ripple_cgl_context *ctx = NULL;
+
+   if (!gl)
+      return NULL;
+   simple_mtx_lock(&live_lock);
+   for (unsigned i = 0; i < live_used && !ctx; i++)
+      if (live[i] && live[i]->glctx == gl && live[i]->thread == (void *)pthread_self())
+         ctx = live[i];
+   simple_mtx_unlock(&live_lock);
+   if (!ctx) {
+      _glapi_set_context(NULL);
+      _glapi_set_dispatch(NULL);         /* Mesa's table of no-ops */
+   }
+   return ctx;
+}
+
+bool
+ripple_cgl_context_is_current(const struct ripple_cgl_context *ctx)
+{
+   return ctx && _glapi_get_context() == ctx->glctx && ctx->thread == (void *)pthread_self();
+}
+
 struct ripple_cgl_context *
 ripple_cgl_context_create(const struct ripple_cgl_pixel_format *pf,
                           struct ripple_cgl_context *share)
@@ -116,6 +197,7 @@ ripple_cgl_context_create(const struct ripple_cgl_pixel_format *pf,
    }
    ctx->st->frontend_context = ctx;
    ctx->glctx = ctx->st->ctx;
+   live_add(ctx);
    /* The second GL thread (cgl_dispatch.h), where it is wanted and the driver can do it. */
    if (ripple_cgl_device_second_thread()) {
       _mesa_glthread_init(ctx->glctx);
@@ -130,9 +212,13 @@ ripple_cgl_context_destroy(struct ripple_cgl_context *ctx)
 {
    if (!ctx)
       return;
+   /* Mesa saves and restores the calling thread's current context around the destruction:
+    * a pointer left over in this thread must be gone before that. */
+   thread_current();
    ripple_cgl_quiesce(ctx);              /* Mesa ends the context's second thread itself */
    if (_glapi_get_context() == ctx->glctx)
       st_api_make_current(NULL, NULL, NULL);
+   live_remove(ctx);
    ripple_cgl_forget(ctx);
    ripple_cgl_client_storage_context_gone(ctx->glctx);
    st_destroy_context(ctx->st);
@@ -189,13 +275,26 @@ direct_again(struct ripple_cgl_context *ctx)
 bool
 ripple_cgl_context_make_current(struct ripple_cgl_context *ctx)
 {
-   /* Mesa flushes the context that was current and binds the new one's buffers, here on the
-    * calling thread: both contexts' second threads have to be done first. */
-   thread_finish(_glapi_get_context());
+   /* What this thread had current, checked: Mesa flushes it on the way out, and binds the
+    * new one's buffers, here on the calling thread. Both contexts' second GL threads have to
+    * be done first. */
+   struct ripple_cgl_context *prev = thread_current();
+   thread_finish(prev ? prev->glctx : NULL);
    thread_finish(ctx ? ctx->glctx : NULL);
    /* Without a drawable the context is surfaceless and renders into FBOs only. */
    struct pipe_frontend_drawable *d = ctx && ctx->draw ? &ctx->draw->base : NULL;
    bool ok = st_api_make_current(ctx ? ctx->st : NULL, d, d);
+   if (ok) {
+      /* The thread notes. `prev` may have been destroyed from another thread meanwhile: it
+       * is only touched if it is still in the list. */
+      simple_mtx_lock(&live_lock);
+      for (unsigned i = 0; prev && prev != ctx && i < live_used; i++)
+         if (live[i] == prev && prev->thread == (void *)pthread_self())
+            prev->thread = NULL;
+      if (ctx)
+         ctx->thread = (void *)pthread_self();
+      simple_mtx_unlock(&live_lock);
+   }
    if (d && (!ok || ctx->glctx->WinSysDrawBuffer == _mesa_get_incomplete_framebuffer()))
       log_unbound(ctx, ok);
    if (ok && ctx && unlikely(ctx->sync_gc))
@@ -235,7 +334,7 @@ extern void *CGLGetCurrentContext(void);
 void
 ripple_cgl_context_set_drawable(struct ripple_cgl_context *ctx, struct ripple_cgl_drawable *d)
 {
-   bool current = _glapi_get_context() == ctx->glctx;
+   bool current = ripple_cgl_context_is_current(ctx);
 
    thread_finish(ctx->glctx);            /* it draws into the drawable the context had */
    ctx->draw = d;
@@ -255,9 +354,13 @@ ripple_cgl_make_current_slow(void *rend)
       void **cur = ctx ? NULL : CGLGetCurrentContext();
       if (cur)
          ctx = cur[0];
-      if (!ctx || ctx->magic != RIPPLE_CGL_MAGIC)
-         return;              /* nothing of ours current: Mesa's no-op dispatch answers */
-      if (_glapi_get_context() == ctx->glctx)
+      if (!ctx || ctx->magic != RIPPLE_CGL_MAGIC) {
+         /* Nothing of ours is current: Mesa's no-op dispatch answers, once a pointer this
+          * thread may still hold to a context that is gone has been dropped. */
+         thread_current();
+         return;
+      }
+      if (ripple_cgl_context_is_current(ctx))
          return;
    }
    if (unlikely(ripple_cgl_tracing))      /* which context the next calls belong to */
@@ -283,7 +386,8 @@ ripple_cgl_quiesce(struct ripple_cgl_context *ctx)
 {
    if (!ripple_cgl_threaded)
       return;
-   thread_finish(_glapi_get_context());
+   struct ripple_cgl_context *cur = thread_current();   /* never a pointer that is gone */
+   thread_finish(cur ? cur->glctx : NULL);
    thread_finish(ctx ? ctx->glctx : NULL);
 }
 

@@ -25,8 +25,10 @@ struct ripple_cgl_pixel_format {
 #define RIPPLE_CGL_MAGIC 0x52434758u   /* "RCGX" */
 
 struct ripple_cgl_context {
-   struct gl_context *glctx;     /* first: struct ripple_cgl_rend in cgl_dispatch.h */
+   struct gl_context *glctx;     /* these three first: struct ripple_cgl_rend in cgl_dispatch.h */
    unsigned magic;               /* RIPPLE_CGL_MAGIC: thunks can be handed a foreign rend */
+   void *thread;                 /* the thread Mesa has it current on, or NULL (cgl_context.c,
+                                  * "Whose context is current") */
    struct st_context *st;
    struct ripple_cgl_pixel_format pf;
    struct st_visual visual;      /* what its drawables are made of */
@@ -86,6 +88,8 @@ void ripple_cgl_context_destroy(struct ripple_cgl_context *ctx);
 
 /* Make `ctx` (or nothing) current for Mesa on the calling thread. */
 bool ripple_cgl_context_make_current(struct ripple_cgl_context *ctx);
+/* Is `ctx` the context Mesa has current on the calling thread? */
+bool ripple_cgl_context_is_current(const struct ripple_cgl_context *ctx);
 
 /* Before code outside the GL entries touches `ctx` or a drawable (attach, destroy): wait until
  * the second GL thread, if there is one, has run everything queued for `ctx` (may be NULL) and
