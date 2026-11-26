@@ -289,6 +289,23 @@ BOOL rb_gl_cpu_access(DISPLAY *d, const RECTL *rect, ULONG access)
     return cpu_request(d, &r);
 }
 
+/* The desktop in guest memory: send what a drawing changed (NULL: all of it) to the
+ * host, which shows it. The request uses no staging, so it needs no lock. */
+BOOL rb_memory_primary_dirty(DISPLAY *d, const RECTL *rect)
+{
+    RB2K_RVD_REQUEST r;
+    LONG w, h;
+    if (!d || !d->memoryPrimary) return TRUE;
+    w = (LONG)d->mode.VisScreenWidth; h = (LONG)d->mode.VisScreenHeight;
+    begin(&r, RB2K_RVD_OP_PRIMARY_DIRTY);
+    r.u.rect.left = rect && rect->left > 0 ? rect->left : 0;
+    r.u.rect.top = rect && rect->top > 0 ? rect->top : 0;
+    r.u.rect.right = rect && rect->right < w ? rect->right : w;
+    r.u.rect.bottom = rect && rect->bottom < h ? rect->bottom : h;
+    if ((LONG)r.u.rect.left >= (LONG)r.u.rect.right || (LONG)r.u.rect.top >= (LONG)r.u.rect.bottom) return TRUE;
+    return request(d, &r, NULL, 0);
+}
+
 BOOL rb_gl_cpu_flush(DISPLAY *d)
 {
     RB2K_RVD_REQUEST r;
