@@ -1235,5 +1235,15 @@ The helper-thread notify (`ripple_kick=1`) again with this change in, the Proxmo
 itself, one boot each: with nothing over the window 293.5 frames/s against 268.5 (290.9 and
 289.5 against 263.5 and 264.3 earlier that evening), so 9 to 10% there; with the Dock over the
 window 202.9 and 196.9 against 198.1 and 200.6, no difference left. The loss it showed for
-covered windows came from the waiting that is gone now. Still to check before it becomes the
-default: programs that wait for the refresh, and WindowServer's own animations.
+covered windows came from the waiting that is gone now.
+
+**The helper thread is the default** (same evening; `ripple_kick=0` switches it off). The two
+checks that were open, one boot each way on the Proxmox host: WindowServer's frame meter over
+Exposé and Dashboard, screens per second, mean of two runs each: 1.0 and 15.6 without the
+helper, 1.1 and 15.6 with it (no window was open, so Exposé moves little); gl-gears 59.5
+frames/s with a longest frame of 17 ms both ways, in a window of its own and in a covered one.
+With the kext that has it as its default, no flag: OpenArena's timedemo 273 to 279 frames/s
+with the Dock hidden (five runs on two boots; the three runs with the flag earlier gave 290 to
+294, and 264 to 269 without the helper), 203.6 with the Dock over the window, and Cinebench's
+OpenGL test 45.7 frames/s against 40.2 and 40.7 before (reference check passes, the same 3,625
+pixels off). The per-submit queueing step is 12 to 17 µs with it.

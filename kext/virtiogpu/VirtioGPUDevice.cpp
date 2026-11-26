@@ -211,10 +211,9 @@ bool VirtioGPUDevice::init(IOPCIDevice *pci)
     uint32_t arg = 0;
     // Queued submits are the default since 2026-11-25; ripple_async=0 switches them off.
     fAsync = !(PE_parse_boot_argn("ripple_async", &arg, sizeof(arg)) && arg == 0);
-    // Boot flag ripple_kick=1 (experimental): queued commands are announced to the host from a
-    // helper thread (kickAction) instead of the caller's. Off by default: measured faster for
-    // a window nothing covers and slower for a covered one (docs/re/perf-notes.md).
-    arg = 0;
+    // Queued commands are announced to the host from a helper thread (kickAction), not from
+    // the caller's. Boot flag ripple_kick=0: from the caller's thread, as before 2026-11-25.
+    arg = 1;
     PE_parse_boot_argn("ripple_kick", &arg, sizeof(arg));
     fKickCall = arg ? thread_call_allocate(kickAction, this) : 0;
     fCursorLock = IOLockAlloc();
