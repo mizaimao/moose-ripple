@@ -1187,6 +1187,8 @@ typedef struct {
     struct vs8 *vs[MAX_VS];
     float vsc[VS_ARB_CONSTANTS][4];
     int vsc_dirty;
+    DWORD vsc_lo, vsc_hi;               /* the constants the program set since the last load */
+    DWORD vs_limit;                     /* how many it has: 96 (Direct3D 8) or 256 (9) */
     int env_owner;
     DWORD vs_loaded;                    /* the shader whose def constants program.env holds */
     DWORD attribs_on;                   /* generic attribute arrays enabled (bits) */
@@ -3434,7 +3436,7 @@ static int tnl_begin(RCTX *c, const VERTICES *v)
     prog = tnl_program(c, &k);
     if (!prog)
         return 0;
-    if (c->env_owner != ENV_TNL) {      /* a vertex shader's constants were there */
+    if (c->env_owner == ENV_VS) {       /* a Direct3D 9 shader's constants were over this state */
         c->tnl_dirty = TNL_DIRTY_ALL;
         c->env_owner = ENV_TNL;
     }
@@ -3615,7 +3617,7 @@ static int vs_begin(RCTX *c)
 {
     GLF *gl = gl_of(c);
     struct vs8 *s = vs_find(c, c->fvf8);
-    DWORD key = 0, i, table = c->rs[D3DRENDERSTATE_FOGTABLEMODE];
+    DWORD key = 0, i, lo, hi, table = c->rs[D3DRENDERSTATE_FOGTABLEMODE];
     GLuint prog;
     GLfloat v[4];
 
@@ -3650,18 +3652,29 @@ static int vs_begin(RCTX *c)
             gl->Viewport(0, 0, c->fb_w, c->fb_h);
         gl->DepthRange(c->zmin, c->zmax);
     }
-    if (c->env_owner != ENV_VS) {       /* the fixed-function programs' state was there */
+    /* c0..c95 for Direct3D 8 lie below the fixed-function programs' state (TNL_ENV_BASE); only
+       Direct3D 9's c0..c255 reach into it, so only they take it over (env_owner) */
+    if (c->vs_limit > TNL_ENV_BASE && c->env_owner != ENV_VS) {
         c->env_owner = ENV_VS;
         c->vsc_dirty = 1;
     }
     if (c->vsc_dirty || c->vs_loaded != s->handle) {
-        for (i = 0; i < VS_ARB_CONSTANTS; i++)
+        lo = 0;                         /* all of them, and this shader's def constants */
+        hi = c->vs_limit;
+    } else {
+        lo = c->vsc_lo;                 /* the ones the program changed since */
+        hi = c->vsc_hi < c->vs_limit ? c->vsc_hi : c->vs_limit;
+    }
+    if (lo < hi) {
+        for (i = lo; i < hi; i++)
             gl->ProgramEnvParameter4fvARB(GL_VERTEX_PROGRAM_ARB, i, c->vsc[i]);
         for (i = 0; i < s->info.defs; i++)
-            gl->ProgramEnvParameter4fvARB(GL_VERTEX_PROGRAM_ARB, s->info.def[i].reg, s->info.def[i].v);
-        c->vsc_dirty = 0;
-        c->vs_loaded = s->handle;
+            if (s->info.def[i].reg >= lo && s->info.def[i].reg < hi)
+                gl->ProgramEnvParameter4fvARB(GL_VERTEX_PROGRAM_ARB, s->info.def[i].reg, s->info.def[i].v);
     }
+    c->vsc_dirty = 0;
+    c->vsc_lo = c->vsc_hi = 0;
+    c->vs_loaded = s->handle;
     /* the half pixel, and table fog's constants (as tnl_load's) */
     v[0] = 1.0f / (float)(c->vp_w ? c->vp_w : c->fb_w);
     v[1] = 1.0f / (float)(c->vp_w ? c->vp_h : c->fb_h);
@@ -4011,6 +4024,7 @@ static DWORD WINAPI ContextCreate(LPD3DHAL_CONTEXTCREATEDATA d)
         return DDHAL_DRIVER_HANDLED;
     c->p = p;
     c->dx8 = kind >= 4;
+    c->vs_limit = p->d3d_version >= 0x900 ? VS_ARB_CONSTANTS : 96;    /* vertex shader constants */
     tnl_reset(c);
     if (!p->wndclass) {
         WNDCLASS wc;
@@ -5177,8 +5191,12 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
                     }
                 for (j = 0; k->bCommand == RbDp2SetVertexShaderConst && j < r->count; j++)
                     if (r->reg + j < VS_ARB_CONSTANTS) {
-                        memcpy(c->vsc[r->reg + j], f + 4 * j, 16);
-                        c->vsc_dirty = 1;
+                        DWORD reg = r->reg + j;
+                        memcpy(c->vsc[reg], f + 4 * j, 16);
+                        if (c->vsc_lo == c->vsc_hi || reg < c->vsc_lo)
+                            c->vsc_lo = reg;
+                        if (reg + 1 > c->vsc_hi)
+                            c->vsc_hi = reg + 1;
                     }
                 used += sizeof *r + r->count * 16;
             }
