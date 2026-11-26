@@ -20,7 +20,10 @@ enum {
     PsVertexShader = 82, PsObjectShader = 83, PsViewBase = 84, PsSamplerBase = 96, PsLitShader = 112,
     VsProgramBase = 128, VsProgramKeys = 16
 };
-enum { VertexStage = 0, FragmentStage = 1, PipeTriangles = 4, ShaderText = 2400, LitText = 8192 };
+enum { VertexStage = 0, FragmentStage = 1, PipePoints = 0, PipeLines = 1, PipeTriangles = 4, ShaderText = 2400, LitText = 8192 };
+/* Gallium's primitive for a packet's RB2K_PRIM_*, and its vertices each. */
+#define PIPE_MODE(primitive) ((primitive) == RB2K_PRIM_POINTS ? PipePoints : (primitive) == RB2K_PRIM_LINES ? PipeLines : PipeTriangles)
+#define PRIM_VERTICES(primitive) ((primitive) == RB2K_PRIM_POINTS ? 1u : (primitive) == RB2K_PRIM_LINES ? 2u : 3u)
 typedef char sampler_handles_fit[Sampler1Base + RB2K_D7_SAMPLER_KEYS <= ShaderBase &&
                                  SamplerBase + RB2K_D7_SAMPLER_KEYS <= Sampler1Base ? 1 : -1];
 
@@ -571,7 +574,8 @@ BOOLEAN rb_gpu_d7_valid(const RB2K_D3D7_DRAW *d)
     if ((d->blend & ~(RB2K_D7_ON | RB2K_BLEND_DEST_ALPHA | RB2K_BLEND_NO_WRITE | 0xffff)) ||
         ((d->blend & RB2K_D7_ON) && (!blend_valid((d->blend >> 8) & 255) || !blend_valid(d->blend & 255)))) return FALSE;
     if (d->cull < CullNone || d->cull > CullCcw || d->specular > 1) return FALSE;
-    if (d->transform > 1 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
+    if (d->primitive > RB2K_PRIM_POINTS || d->count % PRIM_VERTICES(d->primitive) ||
+        d->transform > 1 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
         d->viewport[0] > 8192 || d->viewport[1] > 8192 || d->viewport[2] > 8192 || d->viewport[3] > 8192)))
         return FALSE;
     if (d->fog) {
@@ -987,7 +991,7 @@ BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
     *p++ = VIRGL_CMD0(VIRGL_CCMD_DRAW_VBO,0,VIRGL_DRAW_VBO_SIZE);
     *p++ = 0;                  /* first vertex */
     *p++ = count;
-    *p++ = PipeTriangles;
+    *p++ = PIPE_MODE(d->primitive);
     *p++ = 0;                  /* unindexed */
     *p++ = 1;                  /* one instance */
     *p++ = 0;                  /* index bias */
@@ -1156,7 +1160,8 @@ BOOLEAN rb_gpu_d8_valid(const RB2K_D3D8_DRAW *d)
     if (d->cull < CullNone || d->cull > CullCcw || (d->constantCount != 8 && d->constantCount != 16 && d->constantCount != 32)) return FALSE;
     if (d->transform == 2 && (d->lighting || !d->vertexProgram || d->vertexConstants > RB2K_D8_VS_CONSTANTS ||
         !d->vertexWords || d->vertexWords % 4 || d->vertexWords > RB2K_D8_VS_VERTEX_WORDS)) return FALSE;
-    if (d->transform > 2 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
+    if (d->primitive > RB2K_PRIM_POINTS || d->count % PRIM_VERTICES(d->primitive) ||
+        d->transform > 2 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
         d->viewport[0] > 8192 || d->viewport[1] > 8192 || d->viewport[2] > 8192 || d->viewport[3] > 8192)))
         return FALSE;
     for (k = 0; k < RB2K_D8_STAGES; ++k)
@@ -1407,7 +1412,7 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
         *p++ = l[0] == 3 ? 0x3f800000 : 0; *p++ = l[0] == 2 ? 0x3f800000 : 0; *p++ = 0; *p++ = 0;
     }
     *p++ = VIRGL_CMD0(VIRGL_CCMD_DRAW_VBO,0,VIRGL_DRAW_VBO_SIZE);
-    *p++ = 0; *p++ = count; *p++ = PipeTriangles; *p++ = 0; *p++ = 1; *p++ = 0; *p++ = 0;
+    *p++ = 0; *p++ = count; *p++ = PIPE_MODE(d->primitive); *p++ = 0; *p++ = 1; *p++ = 0; *p++ = 0;
     *p++ = 0; *p++ = 0; *p++ = 0; *p++ = count - 1; *p++ = 0;
     image->uniform = FALSE;
     return TRUE;

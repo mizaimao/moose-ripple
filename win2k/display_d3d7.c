@@ -1293,7 +1293,7 @@ static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
 
 /* ---- triangles ---- */
 
-enum { List, Strip, Fan };
+enum { List, Strip, Fan, LineList, LineStrip, Points };
 /* The source of one primitive command's vertices. */
 typedef struct {
     const BYTE *inline_;   /* immediate vertices in the command snapshot */
@@ -1308,10 +1308,16 @@ typedef struct {
     LONG streamFirst;
 } PRIMS;
 
+/* Vertices per primitive: three for triangles, two for lines, one for points. */
+static ULONG prim_per(const PRIMS *p) { return p->kind == Points ? 1 : p->kind == LineList || p->kind == LineStrip ? 2 : 3; }
+
 static ULONG prim_vertex(const PRIMS *p, ULONG t, ULONG corner, ULONG *flat)
 {
     ULONG n;
     switch (p->kind) {
+    case LineList: n = t * 2 + corner; *flat = t * 2; break;
+    case LineStrip: n = t + corner; *flat = t; break;
+    case Points: n = t; *flat = t; break;
     case Strip:
         /* Odd strip triangles swap their first two vertices to keep the winding. */
         n = t + ((t & 1) && corner < 2 ? 1 - corner : corner);
@@ -1491,6 +1497,7 @@ static void light_draw(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, BOOL hasDiffuse, BOO
 
 static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG stride, const PRIMS *p)
 {
+    ULONG per = prim_per(p);   /* vertices a primitive has: 3, 2 for lines, 1 for points */
     DISPLAY *d = c->display;
     DD_SLOT *s, *z;
     RB2K_D3D7_DRAW *draw = &c->draw;   /* too large for the kernel stack */
@@ -1513,6 +1520,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         return DD_OK;
     }
     RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D7_DRAW, vertices));
+    draw->primitive = per == 3 ? RB2K_PRIM_TRIANGLES : per == 2 ? RB2K_PRIM_LINES : RB2K_PRIM_POINTS;
     if (stage_words(c, 0, &draw->colorStage, &draw->alphaStage, &needTexture) == StageUnsupported) {
         skip(c, RB2K_D7_SKIP_COMBINER, p->primitives);
         return DD_OK;
@@ -1618,7 +1626,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
 
     /* Check the whole vertex window before the first host draw. */
     for (t = 0; t < p->primitives; ++t) {
-        for (i = 0; i < 3; ++i) {
+        for (i = 0; i < per; ++i) {
             ULONG v = prim_vertex(p, t, i, &flatSource);
             if (v < low) low = v;
             if (v > high) high = v;
@@ -1677,14 +1685,14 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
             BOOL bad = FALSE;
             if (limit != 0xffffffff) {
                 ULONG worst = 0;
-                for (i = 0; i < 3; ++i) worst = max(worst, prim_vertex(p, t, i, &flat));
+                for (i = 0; i < per; ++i) worst = max(worst, prim_vertex(p, t, i, &flat));
                 if (worst > limit || flat > limit) {
                     ++d->d7draw.beyondVertices;
                     skip(c, RB2K_D7_SKIP_VERTEX, 1);
                     continue;
                 }
             }
-            for (i = 0; i < 3; ++i) {
+            for (i = 0; i < per; ++i) {
                 const BYTE *v = base + prim_vertex(p, t, i, &flat) * stride;
                 RB2K_D3D7_VERTEX *o = out + i;
                 RtlCopyMemory(o, v, objectSpace ? 12 : 16);
@@ -1703,10 +1711,10 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
                 const BYTE *v = base + flat * stride;
                 ULONG fd = diffuse ? *(const ULONG *)(v + diffuse) : 0xffffffff;
                 ULONG fs = specular ? *(const ULONG *)(v + specular) : 0;
-                for (i = 0; i < 3; ++i) { out[i].diffuse = fd; out[i].specular = fs; }
+                for (i = 0; i < per; ++i) { out[i].diffuse = fd; out[i].specular = fs; }
             }
             if (bad) { ++d->d7draw.badPositions; skip(c, RB2K_D7_SKIP_VERTEX, 1); continue; }
-            count += 3;
+            count += per;
             if (count == RB2K_D3D7_VERTICES || t + 1 == p->primitives) {
                 hr = send_batch(c, draw, count);
                 if (FAILED(hr)) break;
@@ -2051,6 +2059,7 @@ static BOOL pixel_states(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, const D8_SHADER *s
  * fog blends the shader's result as for the fixed-function draws. */
 static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
 {
+    ULONG per = prim_per(p);   /* vertices a primitive has: 3, 2 for lines, 1 for points */
     DISPLAY *d = c->display;
     RB2K_D3D8_DRAW *draw = &c->draw8;
     D8_SHADER *sh = find_shader(c, c->pixelShader);
@@ -2106,6 +2115,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
             offset = 0xffffffff;
     if (offset > stride || stride > 256) { skip(c, RB2K_D7_SKIP_VERTEX, p->primitives); return DD_OK; }
     RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices));
+    draw->primitive = per == 3 ? RB2K_PRIM_TRIANGLES : per == 2 ? RB2K_PRIM_LINES : RB2K_PRIM_POINTS;
     for (k = 0; k < RB2K_D8_STAGES; ++k) if (sh->coords & (1UL << k)) used = k + 1;
     draw->coordSets = used;
     words = RB2K_D8_VERTEX_WORDS(used);
@@ -2132,7 +2142,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
         }
     }
     for (t = 0; t < p->primitives; ++t)
-        for (i = 0; i < 3; ++i) {
+        for (i = 0; i < per; ++i) {
             ULONG v = prim_vertex(p, t, i, &flatSource);
             if (v < low) low = v;
             if (v > high) high = v;
@@ -2152,7 +2162,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
             ULONG *out = draw->vertices + count * words;
             ULONG flat;
             BOOL bad = FALSE;
-            for (i = 0; i < 3; ++i) {
+            for (i = 0; i < per; ++i) {
                 const BYTE *v = base + prim_vertex(p, t, i, &flat) * stride;
                 RB2K_D3D8_VERTEX *o = (RB2K_D3D8_VERTEX *)(out + i * words);
                 ULONG j;
@@ -2172,14 +2182,14 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
                 const BYTE *v = base + flat * stride;
                 ULONG fd = diffuse ? *(const ULONG *)(v + diffuse) : 0xffffffff;
                 ULONG fs = specular ? *(const ULONG *)(v + specular) : 0;
-                for (i = 0; i < 3; ++i) {
+                for (i = 0; i < per; ++i) {
                     RB2K_D3D8_VERTEX *o = (RB2K_D3D8_VERTEX *)(out + i * words);
                     o->diffuse = fd;
                     o->specular = fs;
                 }
             }
             if (bad) { ++d->d7draw.badPositions; skip(c, RB2K_D7_SKIP_VERTEX, 1); continue; }
-            count += 3;
+            count += per;
             if (count == RB2K_D8_VERTICES || t + 1 == p->primitives) {
                 hr = send_batch8(c, draw, count);
                 if (FAILED(hr)) break;
@@ -2202,6 +2212,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
  * program of their own. Flat shading is not applied. */
 static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
 {
+    ULONG per = prim_per(p);   /* vertices a primitive has: 3, 2 for lines, 1 for points */
     DISPLAY *d = c->display;
     RB2K_D3D8_DRAW *draw = &c->draw8;
     D8_VSHADER *vs = find_vshader(c, c->fvf);
@@ -2237,6 +2248,7 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
         return DD_OK;
     }
     RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices));
+    draw->primitive = per == 3 ? RB2K_PRIM_TRIANGLES : per == 2 ? RB2K_PRIM_LINES : RB2K_PRIM_POINTS;
     if (!pixel_states(c, draw, sh, s, z, program, fog, p->primitives)) return DD_OK;
     if (sh == &stages) draw->constants[0][0] = c->factor;   /* the texture factor, unpacked by the program */
     {
@@ -2261,7 +2273,7 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
     RtlCopyMemory(draw->vertices, c->vsConst, vs->constants * 16);
     out = draw->vertices + 4 * vs->constants;
     for (t = 0; t < p->primitives; ++t)
-        for (i = 0; i < 3; ++i) {
+        for (i = 0; i < per; ++i) {
             ULONG v = prim_vertex(p, t, i, &flat);
             if (v < low) low = v;
             if (v > high) high = v;
@@ -2278,14 +2290,14 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
     __try {
         EngProbeForRead((PVOID)(base + low * stride), (high - low + 1) * stride, 1);
         for (t = 0; t < p->primitives; ++t) {
-            for (i = 0; i < 3; ++i) {
+            for (i = 0; i < per; ++i) {
                 ULONG *o = out + (count + i) * words;
                 RtlCopyMemory(o, base + prim_vertex(p, t, i, &flat) * stride, stride);
                 RtlZeroMemory((BYTE *)o + stride, words * 4 - stride);
             }
-            count += 3;
+            count += per;
             if (count == RB2K_D8_VERTICES || t + 1 == p->primitives) {
-                d->d7draw.vsDraws += count / 3;
+                d->d7draw.vsDraws += count / per;
                 hr = send_batch8(c, draw, count);
                 if (FAILED(hr)) break;
                 count = 0;
@@ -2359,8 +2371,9 @@ static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULON
     prims.primitives = count;
     ++c->display->d7draw.d8StreamDraws;
     if (!count) return DD_OK;
-    if (type < RbTriangleList || type > RbTriangleFan) { skip(c, RB2K_D7_SKIP_PRIMITIVE, count); return DD_OK; }
-    prims.kind = type == RbTriangleList ? List : type == RbTriangleStrip ? Strip : Fan;
+    if (type < RbPointList || type > RbTriangleFan) { skip(c, RB2K_D7_SKIP_PRIMITIVE, count); return DD_OK; }
+    prims.kind = type == RbPointList ? Points : type == RbLineList ? LineList : type == RbLineStrip ? LineStrip :
+                 type == RbTriangleList ? List : type == RbTriangleStrip ? Strip : Fan;
     if (((c->fvf & 1) && !c->display->vertexShaders) || !c->streamStride || c->streamStride > 256 ||
         !stream_zero(c, a, &prims) ||
         first < -0x7fffffffLL || first > (LONGLONG)prims.streamBytes) {
@@ -2938,6 +2951,50 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             }
             break;
         }
+        case D3DNTDP2OP_POINTS: {
+            /* Runs of points, each a first vertex and a count. */
+            const D3DNTHAL_DP2POINTS *r = (const D3DNTHAL_DP2POINTS *)p;
+            ULONG k;
+            used = n * sizeof(*r);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            for (k = 0; k < n; ++k) {
+                PRIMS q = prims;
+                q.first = r[k].wVStart;
+                q.primitives = r[k].wCount;
+                q.kind = Points;
+                if (q.primitives) { hr = triangles(c, a, stride, &q); if (FAILED(hr)) return hr; }
+            }
+            break;
+        }
+        case D3DNTDP2OP_LINELIST:
+        case D3DNTDP2OP_LINESTRIP:
+            used = sizeof(D3DNTHAL_DP2STARTVERTEX);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            prims.first = ((const D3DNTHAL_DP2STARTVERTEX *)p)->wVStart;
+            prims.kind = h->bCommand == D3DNTDP2OP_LINELIST ? LineList : LineStrip;
+            hr = triangles(c, a, stride, &prims);
+            if (FAILED(hr)) return hr;
+            break;
+        case D3DNTDP2OP_INDEXEDLINELIST:
+            /* Absolute indices, two a line. */
+            used = n * sizeof(D3DNTHAL_DP2INDEXEDLINELIST);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            prims.indices = (const WORD *)p;
+            prims.kind = LineList;
+            hr = triangles(c, a, stride, &prims);
+            if (FAILED(hr)) return hr;
+            break;
+        case D3DNTDP2OP_INDEXEDLINELIST2:
+        case D3DNTDP2OP_INDEXEDLINESTRIP: {
+            ULONG indices = h->bCommand == D3DNTDP2OP_INDEXEDLINELIST2 ? 2 * n : n + 1;
+            used = sizeof(D3DNTHAL_DP2STARTVERTEX) + indices * sizeof(WORD);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            prims.first = ((const D3DNTHAL_DP2STARTVERTEX *)p)->wVStart;
+            prims.indices = (const WORD *)(p + sizeof(D3DNTHAL_DP2STARTVERTEX));
+            prims.kind = h->bCommand == D3DNTDP2OP_INDEXEDLINELIST2 ? LineList : LineStrip;
+            if (n) { hr = triangles(c, a, stride, &prims); if (FAILED(hr)) return hr; }
+            break;
+        }
         case D3DNTDP2OP_INDEXEDTRIANGLELIST:
             /* Absolute indices with an edge-flag word per triangle. */
             used = n * sizeof(D3DNTHAL_DP2INDEXEDTRIANGLELIST);
@@ -2959,9 +3016,8 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
                 return DDERR_INVALIDPARAMS;
             }
             used = head + pad + vertices * stride;
-            if (h->bCommand == D3DNTDP2OP_LINELIST_IMM) { skip(c, RB2K_D7_SKIP_PRIMITIVE, n); break; }
             prims.inline_ = p + head + pad;
-            prims.kind = Fan;
+            prims.kind = h->bCommand == D3DNTDP2OP_LINELIST_IMM ? LineList : Fan;
             hr = triangles(c, a, stride, &prims);
             if (FAILED(hr)) return hr;
             break;
@@ -3298,10 +3354,6 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             used = fixed_records(h->bCommand, n);
             if (!used && n) return D3DNTERR_COMMAND_UNPARSED;
             if (used > remaining) return DDERR_INVALIDPARAMS;
-            if (h->bCommand == D3DNTDP2OP_POINTS || h->bCommand == D3DNTDP2OP_INDEXEDLINELIST ||
-                h->bCommand == D3DNTDP2OP_LINELIST || h->bCommand == D3DNTDP2OP_LINESTRIP ||
-                h->bCommand == D3DNTDP2OP_INDEXEDLINESTRIP || h->bCommand == D3DNTDP2OP_INDEXEDLINELIST2)
-                skip(c, RB2K_D7_SKIP_PRIMITIVE, n);
         }
         if (used > remaining) return DDERR_INVALIDPARAMS;
         *offset += sizeof(*h) + used;
