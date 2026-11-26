@@ -237,13 +237,12 @@ The SM2.0 score is 120 times the mean frame rate of the first two graphics tests
 score 100 times that of the last two: 29.0 against 34.7 frames a second in the first pair
 (84% of the card), 45.5 against 28.9 in the second (157%). The CPU scores agree, as they must.
 One run each. During the virgl run the host GPU's render engine was 85 to 95% busy in the
-first test, about 50% in the second (Firefly Forest), and 75 to 90% in the last two, with
-QEMU's main thread at a full core throughout.
+first test, about 50% in the second (Firefly Forest), and 75 to 90% in the last two.
 
 The same prepared disk and guest shape on a second host with the same GPU model but QEMU 10.0
 and virglrenderer 1.1 (the first has QEMU 9.2 and virglrenderer 0.10.4) scored 10728 3DMarks
 (SM2.0 3618, HDR/SM3.0 4267, CPU 8604): a baseline of that host's own, not to be mixed with
-the table. There QEMU's main thread was 10 to 90% busy during the run.
+the table.
 
 The run is unattended, because the card's picture cannot be seen from the host:
 
@@ -255,7 +254,8 @@ The run is unattended, because the card's picture cannot be seen from the host:
   automatic restart after a crash, and adds a logon task that runs `auto.cmd` from the CD's
   `3dm` folder. `auto.cmd` does nothing unless `go.txt` there names a run; it then runs
   `3dmfull.ps1` once for that name (start, press Run, a mark at each change of the full-screen
-  size, the score window's text, a 50-minute cap), writes everything to the first serial port
+  size, the score window's text, a 50-minute cap; on Vista `3dmfull.cmd`, the same in a batch
+  file, because Vista's PowerShell 1.0 does not run the script), writes everything to the first serial port
   and to R:, and shuts Windows down. The helpers it uses are the `bench-*.c` programs in the
   same folder (built with llvm-mingw like the other test programs).
 - 3DMark06's free edition shows no score without the vendor's web site. With `key.txt` (a
@@ -270,6 +270,51 @@ The run is unattended, because the card's picture cannot be seen from the host:
 
 The order that worked: the virgl run first, then ten minutes with no guest on the host, then
 the card's one boot (kernel log streaming to another machine), then a restart of the host.
+
+### Quiet runs and disturbed runs
+
+Of four runs of this guest on the virtio GPU on this host, two took 40% longer than the other
+two, with the same disk, settings and commands:
+
+| run | the two SM2.0 tests | the CPU tests | the two HDR tests |
+| --- | --- | --- | --- |
+| quiet (the virgl run of the table, a later one, and the card run) | 183 to 193 s | 41 to 44 s | 165 to 167 s |
+| disturbed (two runs) | 268 and 272 s | 105 and 124 s | 220 and 226 s |
+
+The graphics tests last a fixed time, so their parts differ by the loading between them (45
+seconds without GPU work in a disturbed run, none visible in a quiet one); the CPU tests draw a
+fixed number of frames and took two and a half times as long. During loading and the CPU tests
+of a disturbed run the guest's processors left guest mode 58,000 to 136,000 times a second for
+a device register (the kernel's `kvm_exit` event, reason EPT_MISCONFIG; 200 to 9,000 in a
+quiet run) and were 30 to 50% busy instead of all four at full load. Which device was not
+recorded; the disk controller is the likely one, with something else in the guest reading the
+disk at the same time. `auto.cmd` now ends with every guest process's processor time and disk
+reads, to name it at the next such run.
+
+Take a score only from a quiet run: the lengths of the parts are in the marks. The two runs of
+the table are of the quiet kind, and their parts agree within ten seconds.
+
+### What QEMU's main thread does during a run
+
+virglrenderer draws on QEMU's main thread. `tools/win7-debug/rig/maintrace.sh` traces one
+thread with the kernel's own events (scheduler switches and system calls, nothing to install)
+and says how much of the time it was on a processor and which system calls took the rest;
+`kvmexits.sh` counts the guest's exits by reason; `prof.sh` runs both, over and over, for as
+long as a guest lives.
+
+| | on a processor | waiting in `ppoll` | in `DRM_IOCTL_SYNCOBJ_WAIT` |
+| --- | --- | --- | --- |
+| desktop, nothing drawing | 2% | 98% (woken about 2,000 times a second) | 1% |
+| first SM2.0 test (GPU 85 to 95% busy), two runs | 27% and 59% | 27% and 17% | 47% in the run where it was split out (13,450 waits in ten seconds, 0.35 ms each) |
+| first HDR test (GPU 80 to 90% busy) | 31% | 15% | 56% |
+| loading between two tests (no GPU work), two samples | 12% and 25% | 83% and 92% | 6% and none |
+
+In the tests where the GPU is nearly always busy the thread spends half of its time waiting
+for the GPU, as it should: the GPU is the limit there. Firefly Forest, the test where the GPU
+is only half busy, was missed twice by samples taken at fixed times into the run (they fell
+into loading and into the CPU tests), which is why `prof.sh` now samples all the time.
+(A `top -H -b -n1` taken every few seconds had shown this thread at 100% in every test, the
+CPU tests too. That first sample of `top` is no measure.)
 
 ## Crash dumps
 

@@ -22,8 +22,16 @@ type "%TEMP%\auto-mem.txt" >COM1
 "%~dp0keep-awake.exe" >nul 2>&1
 powercfg -change -monitor-timeout-ac 0
 powercfg -change -standby-timeout-ac 0
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp03dmfull.ps1" >"R:\run-%label%-3dm.txt" 2>&1
+rem Vista has PowerShell 1.0 at best, which the script does not fit: the batch file there.
+ver | findstr /c:"Version 6.0" >nul
+if not errorlevel 1 (call "%~dp03dmfull.cmd" >"R:\run-%label%-3dm.txt" 2>&1) else (powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp03dmfull.ps1" >"R:\run-%label%-3dm.txt" 2>&1)
 echo AUTO launcher exit %errorlevel% >COM1
+rem What else was busy in the guest during the run: every process with its processor time
+rem (100 ns units) and its disk reads, for telling a quiet run from a disturbed one.
+wmic process get Name,KernelModeTime,UserModeTime,ReadOperationCount,ReadTransferCount /format:csv >"%TEMP%\auto-procs.txt" 2>&1
+echo AUTO_PROCS_BEGIN >COM1
+type "%TEMP%\auto-procs.txt" >COM1
+echo AUTO_PROCS_END >COM1
 type "R:\run-%label%-3dm.txt" >COM1
 echo AUTO_END %label% %date% %time% >COM1
 shutdown /s /t 15

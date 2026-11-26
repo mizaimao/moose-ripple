@@ -90,6 +90,10 @@ only (4-level page tables, the summary bitmap layout of that version).
 - `cleanvm.sh vista|win7 prep|boot|reset|kill` and `guestctl.pl`: a throwaway guest on a disk
   that never had the driver, and its keys, clicks and screenshots, for the clean-install check
   of a release package (`docs/windows/test-vms.md`).
+- `maintrace.sh TID SECONDS`, `kvmexits.sh SECONDS` and `prof.sh NAME`: what one thread (QEMU's main
+  thread, where virglrenderer draws) does, from the kernel's trace events: its share of the time on a
+  processor and its system calls by kind; why the guest's processors leave guest mode; and both, over
+  and over, while a guest runs.
 - `refvm.sh new|virgl|card|kill NAME` and `busylog.sh NAME`: the same Windows 7 disk, CPU model
   and memory with the virtio GPU or with a passed-through graphics card, for a like-for-like
   comparison, and a log of the GPU's busy share and QEMU's threads during a run. The guest's
