@@ -1522,6 +1522,18 @@ static void light_draw(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, BOOL hasDiffuse, BOO
     RtlCopyMemory(draw->material, c->material, sizeof(draw->material));
 }
 
+/* The scissor test of a draw packet: on with D3DRS_SCISSORTESTENABLE on the Direct3D 9 interface,
+ * the rectangle clamped to 0..8192. */
+static void scissor_words(const D7_CONTEXT *c, ULONG *on, ULONG *rect)
+{
+    if (!c->dx9Ddi || !c->rs[174]) return;
+    *on = 1;
+    rect[0] = (ULONG)min(max(c->scissor.left, 0), 8192);
+    rect[1] = (ULONG)min(max(c->scissor.top, 0), 8192);
+    rect[2] = (ULONG)min(max(c->scissor.right, 0), 8192);
+    rect[3] = (ULONG)min(max(c->scissor.bottom, 0), 8192);
+}
+
 static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG stride, const PRIMS *p)
 {
     DISPLAY *d = c->display;
@@ -1546,6 +1558,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         return DD_OK;
     }
     RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D7_DRAW, vertices));
+    scissor_words(c, &draw->scissorOn, draw->scissor);
     if (stage_words(c, 0, &draw->colorStage, &draw->alphaStage, &needTexture) == StageUnsupported) {
         skip(c, RB2K_D7_SKIP_COMBINER, p->primitives);
         return DD_OK;
@@ -2042,13 +2055,7 @@ static BOOL pixel_states(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, const D8_SHADER *s
                          ULONG program, ULONG fog, ULONG primitives)
 {
     ULONG k;
-    if (c->dx9Ddi && c->rs[174]) {   /* D3DRS_SCISSORTESTENABLE */
-        draw->scissorOn = 1;
-        draw->scissor[0] = (ULONG)min(max(c->scissor.left, 0), 8192);
-        draw->scissor[1] = (ULONG)min(max(c->scissor.top, 0), 8192);
-        draw->scissor[2] = (ULONG)min(max(c->scissor.right, 0), 8192);
-        draw->scissor[3] = (ULONG)min(max(c->scissor.bottom, 0), 8192);
-    }
+    scissor_words(c, &draw->scissorOn, draw->scissor);
     for (k = 0; k < RB2K_D8_STAGES; ++k) {
         D7_STAGE *st = &c->stages[k];
         D7_TEXTURE *tex;

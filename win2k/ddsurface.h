@@ -161,6 +161,7 @@ typedef struct {
     ULONG transform;
     ULONG matrices[3][16];
     ULONG viewport[6];
+    ULONG scissorOn, scissor[4];   /* the Direct3D 9 scissor test, as in RB2K_D3D8_DRAW */
     /* Nonzero with transform: light the vertices with the D3DMATERIAL7, the
      * D3DRENDERSTATE_AMBIENT colour and the first lightCount D3DLIGHT7s. */
     ULONG lighting, lightCount, lightFlags, ambient;
