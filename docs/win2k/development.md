@@ -2210,6 +2210,26 @@ On XP SP3 under KVM on the second Intel UHD 630 host, cases 51 and 52 pass and
 29 million to 160. Still open there: 97.7 million triangles skipped for
 texture handles the driver never registered.
 
+## Fixed-function bump mapping for Direct3D 8 and 9
+
+The two-stage combiner of the Direct3D 7 draws has no bump operations and no
+third stage. Direct3D 8 and 9 fixed-function draws that need either now go to
+the stage program of the record path, which handles up to four stages. A
+`D3DTOP_BUMPENVMAP` stage samples its bump map and moves the next stage's
+lookup by du and dv through its bump matrix (00, 01, 10, 11), which takes the
+place of its texture matrix in CONST[8+4n]; `BUMPENVMAPLUMINANCE` also scales
+the next stage's colour by the luminance times the scale plus the offset
+(CONST[9+4n]). The matrix belongs to the bump stage itself, unlike `texbem`
+in pixel shaders. ValidateDevice checks Direct3D 8 and 9 stages against what
+the stage program does, and the caps offer four blend stages and both bump
+operations. `d9pixels` case 54 moves the next stage's lookup by a quarter of
+its texture.
+
+On XP SP3 under KVM on the second Intel UHD 630 host, case 54 passes, and
+3DMark 2001 SE's Environment Bump Mapping test runs instead of reporting
+"Not supported by hardware". Its Advanced Pixel Shader test still stops: it
+creates a 2048x2048 DXT5 texture, and the driver offers at most 1024.
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:
