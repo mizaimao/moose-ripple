@@ -3825,6 +3825,7 @@ ULONG rb_d7_drawstats(DISPLAY *d, ULONG bytes, PVOID out)
     EngAcquireSemaphore(d->ddLock);
     d->d7draw.version = RB2K_D7_DRAWSTATS_VERSION;
     d->d7draw.frequency = cycle_rate();
+    d->d7draw.codeAt = (ULONG)(ULONG_PTR)rb_d7_drawstats;
     RtlCopyMemory(d->d7draw.ddModes, rb_dd_mode_stats, sizeof(rb_dd_mode_stats));
     RtlCopyMemory(out, &d->d7draw, bytes);
     EngReleaseSemaphore(d->ddLock);

@@ -716,6 +716,7 @@ VP_STATUS rb_gpu_surface_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         status = ERROR_INVALID_PARAMETER;
         if (!packet->InputBufferLength && packet->OutputBufferLength == sizeof(gpu->d7Profile)) {
             rb_counter_ticks(&gpu->d7Profile.frequency);
+            gpu->d7Profile.codeAt = (ULONG)(ULONG_PTR)rb_gpu_frame_reserve;
             VideoPortMoveMemory(packet->OutputBuffer, &gpu->d7Profile, sizeof(gpu->d7Profile));
             packet->StatusBlock->Information = sizeof(gpu->d7Profile);
             status = NO_ERROR;

@@ -62,6 +62,7 @@ int main(void)
             printf("D7DDMODE bpp=%d info=%lu info_failed=%lu reason=%lu enable_failed=%lu\n", depth[m],
                    s.ddModes[m][0], s.ddModes[m][1], s.ddModes[m][2], s.ddModes[m][3]);
     }
+    printf("D7CODE display_drawstats=%08lx\n", s.codeAt);
     if (s.frequency > 0)
         printf("D7TIME requests=%lu dp2_us=%I64d check_us=%I64d upload_us=%I64d copy_us=%I64d draw_us=%I64d\n", s.drawRequests,
                s.dp2Ticks * 1000000 / s.frequency, s.checkTicks * 1000000 / s.frequency,
@@ -162,6 +163,7 @@ int main(void)
                 printf("D7CACHE kind=%s hits=%lu new=%lu replaced=%lu\n", kinds[i], p.caches[i][0], p.caches[i][1],
                        p.caches[i][2]);
             printf("D7SHADERS made=%lu text_bytes=%lu\n", p.shaders, p.shaderBytes);
+            printf("D7CODE miniport_frame_reserve=%08lx\n", p.codeAt);
         }
         if (ExtEscape(dc, RB2K_D3D7_PROFILE_ESCAPE, 0, NULL, sizeof(p), (LPSTR)&p) > 0)
             printf("D7REFUSED site=%lu status=%lu stage=%lu count=%lu first_site=%lu first_status=%lu first_stage=%lu\n",
