@@ -186,9 +186,14 @@ keyboard are lost. One more guest installs with test mode left off, to see the d
 
 ## Reference pictures on the GeForce 9600 GT
 
-**2026-11-26: starting a VM with the card froze the host twice that day (a hard reset each
-time). No passthrough runs until that is understood.**
-
+**One boot of the card per power-on of the host, and a restart of the host after every card
+test.** Starting a VM with the card has frozen the host four times (2026-11-10, 2026-11-14 and
+twice on 2026-11-26), a hard reset each time: once with a virgl VM running beside it, once
+seconds after a virgl VM had been stopped, and twice at a second card boot with no restart of
+the host in between. The first card boot after a restart has always worked, also when virgl
+guests had run and been stopped ten minutes before. Run nothing else on the host meanwhile,
+keep its kernel log streaming to another machine, and turn off the automatic restart after a
+crash in the guest, so that a crashing guest stops instead of resetting the card again.
 
 For the side-by-side pictures of a milestone (first used for Aero, 2026-11-15). VM 220's disk
 still has NVIDIA's driver from the machine it was cloned from, so the reference is VM 220
@@ -215,6 +220,51 @@ Several of these with growing delays, then `exit`, and the scenes are set up fro
 the gaps (Win+E for a window, the pointer on a taskbar button for a thumbnail, Ctrl+Win+Tab
 for Flip 3D, the pointer on the right end of the taskbar for desktop peek). Shut Windows down
 from the Run box (`shutdown /s /t 0`), roll back, and run a load test to return to our driver.
+
+## 3DMark06 against the GeForce 9600 GT, like for like (2026-11-26)
+
+How far our driver on the host's Intel GPU is from a real card of the period, with everything
+else the same: one Windows 7 disk, the CPU model, four cores and 4 GB that Proxmox gives VM
+100, and 3DMark06's default run (1280x1024, no anti-aliasing), once on the virtio GPU and once
+on the card.
+
+| 3DMark06 1.2.1, default run | 3DMarks | SM2.0 score | HDR/SM3.0 score | CPU score |
+| --- | --- | --- | --- | --- |
+| release 0.4.0 on the host's Intel UHD 630 (virgl) | 10881 | 3480 | 4554 | 8261 |
+| GeForce 9600 GT, NVIDIA's driver 341.92 | 9655 | 4165 | 2892 | 8317 |
+
+The SM2.0 score is 120 times the mean frame rate of the first two graphics tests, the HDR/SM3.0
+score 100 times that of the last two: 29.0 against 34.7 frames a second in the first pair
+(84% of the card), 45.5 against 28.9 in the second (157%). The CPU scores agree, as they must.
+One run each. During the virgl run the host GPU's render engine was 85 to 95% busy in the
+first test, about 50% in the second (Firefly Forest), and 75 to 90% in the last two, with
+QEMU's main thread at a full core throughout.
+
+The run is unattended, because the card's picture cannot be seen from the host:
+
+- `tools/win7-debug/rig/refvm.sh` starts the guest as a private QEMU, with the virtio GPU or
+  with the card as VM 100 has it, on a throwaway overlay over one prepared disk. No VM
+  configuration changes. `busylog.sh` beside it logs the GPU's busy share and QEMU's threads.
+- The prepared disk: test mode, the driver, 3DMark06, and `tools/win7-bench/setup.cmd` run once
+  elevated. That makes a second disk the volume R: (results, crash dumps), turns off the
+  automatic restart after a crash, and adds a logon task that runs `auto.cmd` from the CD's
+  `3dm` folder. `auto.cmd` does nothing unless `go.txt` there names a run; it then runs
+  `3dmfull.ps1` once for that name (start, press Run, a mark at each change of the full-screen
+  size, the score window's text, a 50-minute cap), writes everything to the first serial port
+  and to R:, and shuts Windows down. The helpers it uses are the `bench-*.c` programs in the
+  same folder (built with llvm-mingw like the other test programs).
+- 3DMark06's free edition shows no score without the vendor's web site. With `key.txt` (a
+  registration code, one line) beside the scripts, `bench-reg.exe` enters it through the
+  program's own dialog; it prints window titles only. Keep that file off any shared medium
+  and delete it with the CD image afterwards.
+- A disk prepared on another machine type has to settle first: Windows sees the virtio GPU as
+  a new device there and gives it the Standard VGA driver, because a test-signed driver loses
+  the automatic ranking against a signed one. Boot it once with the virtio GPU, install our
+  driver again through Device Manager (Have Disk, from a copy of the driver store folder),
+  restart, shut down, and take the overlays from that.
+
+The order that worked: the virgl run first, then ten minutes with no guest on the host, then
+the card's one boot (kernel log streaming to another machine), then a restart of the host.
 
 ## Crash dumps
 
