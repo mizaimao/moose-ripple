@@ -84,7 +84,10 @@ unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, con
  * which divides them by the last one. The matrix of stage n (n below
  * RB_STAGE_TRANSFORMS) applies per pixel, its columns in CONST[8+4n] to
  * CONST[11+4n]; such a program reads 32 constants and its fog constants
- * follow them (CONST[32] and [33]). */
+ * follow them (CONST[32] and [33]). A BUMPENVMAP or BUMPENVMAPLUMINANCE stage
+ * n (below RB_STAGE_TRANSFORMS, with no texture transform) has its bump matrix
+ * (00, 01, 10, 11) in CONST[8+4n] and its luminance scale and offset in
+ * CONST[9+4n].x and .y; it moves the next stage's lookup. */
 #define RB_STAGE_TRANSFORMS 6
 #define RB_TTFF_PROJECTED 256
 typedef struct {

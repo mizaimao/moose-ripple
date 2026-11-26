@@ -1285,6 +1285,72 @@ static void dot3_case(int only, BOOL offered)
     check("dot3", s, 2);
 }
 
+/* ---- fixed-function bump mapping ----
+ * 54: stage 0 is D3DTOP_BUMPENVMAP with the bump map of case 48 and its matrix
+ * (on the bump stage itself, unlike texbem); stage 1 shows its texture at the
+ * moved coordinates: the right column. */
+static void embm_case(int only, BOOL offered)
+{
+    union { float f; DWORD d; } half;
+    IDirect3DTexture9 *bump = NULL, *colour;
+    D3DLOCKED_RECT r;
+    PSVERTEX v[6];
+    SAMPLE s[5];
+    float want[4][3];
+    int i, y;
+    HRESULT hr;
+    if (only && only != 54) return;
+    if (!offered) { printf("D9PIX BUMPENVMAP not offered\n"); return; }
+    if (FAILED(IDirect3DDevice9_CreateTexture(device, 2, 2, 1, 0, D3DFMT_V8U8, D3DPOOL_MANAGED, &bump, NULL))) {
+        printf("D9PIX bump map format V8U8 not offered\n");
+        return;
+    }
+    IDirect3DTexture9_LockRect(bump, 0, &r, NULL, 0);
+    for (y = 0; y < 2; ++y) { WORD *row = (WORD *)((BYTE *)r.pBits + y * r.Pitch); row[0] = row[1] = 0x0040; }
+    IDirect3DTexture9_UnlockRect(bump, 0);
+    colour = texture2x2(texels0);
+    if (!colour) { IDirect3DTexture9_Release(bump); return; }
+    IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)bump);
+    IDirect3DDevice9_SetTexture(device, 1, (IDirect3DBaseTexture9 *)colour);
+    for (i = 0; i < 2; ++i) {
+        IDirect3DDevice9_SetSamplerState(device, i, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, i, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, i, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        IDirect3DDevice9_SetSamplerState(device, i, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetSamplerState(device, i, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    }
+    half.f = 0.5f;
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_BUMPENVMAT00, half.d);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_BUMPENVMAT01, 0);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_BUMPENVMAT10, 0);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_BUMPENVMAT11, 0);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_BUMPENVMAP);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG2, D3DTA_CURRENT);
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_TEXCOORDINDEX, 1);
+    ps_quad(v, 32, 32, 96, 96, 0xffffffff, 0, 0, 1, 1);
+    for (i = 0; i < 4; ++i) texel(i | 1, want[i]);   /* the right column: green, white */
+    quad_samples(s, want);
+    if (begin("embm")) {
+        IDirect3DDevice9_SetFVF(device, PSFVF);
+        hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+        if (FAILED(hr)) { fail_hr("embm", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("embm", s, 5);
+    }
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+    IDirect3DDevice9_SetTextureStageState(device, 1, D3DTSS_TEXCOORDINDEX, 1);
+    IDirect3DDevice9_SetTexture(device, 0, NULL);
+    IDirect3DDevice9_SetTexture(device, 1, NULL);
+    IDirect3DTexture9_Release(bump);
+    IDirect3DTexture9_Release(colour);
+}
+
 /* ---- texture transforms (fixed function) ----
  * 51: D3DTTFF_COUNT2 with a matrix whose third row moves u by a half (Direct3D
  * transforms (u, v, 1, 0)), on untransformed vertices with identity world, view and
@@ -1600,6 +1666,7 @@ int main(int argc, char **argv)
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
     colorwrite_case(only);
     dot3_case(only, (caps.TextureOpCaps & D3DTEXOPCAPS_DOTPRODUCT3) != 0);
+    embm_case(only, (caps.TextureOpCaps & D3DTEXOPCAPS_BUMPENVMAP) != 0);
     transform_cases(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (caps.TextureCaps & D3DPTEXTURECAPS_VOLUMEMAP) && (!only || only >= 45))
         volume_cases(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
