@@ -8,7 +8,7 @@
 ; No catalog: the kernel driver carries its test signature itself, and Windows asks to confirm
 ; the package when it is installed.
 ; One user-mode driver DLL with both the Direct3D 9 and the Direct3D 10 part, in a 64-bit and a
-; 32-bit build; no OpenGL yet.
+; 32-bit build, and Mesa's OpenGL driver (viogpu_wgl.dll with libglapi.dll), also in both.
 ;
 
 [Version]
@@ -30,6 +30,10 @@ VioGpu3D_Files.Usermode32 = 10,SysWOW64   ; the same for 32-bit programs
 viogpu3d.sys = 1,,
 viogpu_d3d10.dll = 1,,
 viogpu_d3d10.x86.dll = 1,,
+viogpu_wgl.dll = 1,,
+viogpu_wgl.x86.dll = 1,,
+libglapi.dll = 1,,
+libglapi.x86.dll = 1,,
 
 [Manufacturer]
 %Provider%=Ripple,NTamd64
@@ -42,10 +46,14 @@ viogpu3d.sys
 
 [VioGpu3D_Files.Usermode]
 viogpu_d3d10.dll
+viogpu_wgl.dll
+libglapi.dll
 
 ; The 32-bit build, under the same name in SysWOW64 (destination name, source name)
 [VioGpu3D_Files.Usermode32]
 viogpu_d3d10.dll,viogpu_d3d10.x86.dll
+viogpu_wgl.dll,viogpu_wgl.x86.dll
+libglapi.dll,libglapi.x86.dll
 
 [VioGpu3D_Inst]
 ; The display class installer refuses a display INF without FeatureScore ("does not support this
@@ -94,6 +102,14 @@ HKR,, InstalledDisplayDrivers, %REG_MULTI_SZ%, viogpu_d3d10, viogpu_d3d10
 ; diagnostics too): without these they get no Direct3D or DirectDraw acceleration at all.
 HKR,, UserModeDriverNameWow,  %REG_MULTI_SZ%, viogpu_d3d10.dll, viogpu_d3d10.dll
 HKR,, InstalledDisplayDriversWow, %REG_MULTI_SZ%, viogpu_d3d10, viogpu_d3d10
+; The OpenGL driver Windows' opengl32.dll loads for this adapter (Mesa, with its libglapi.dll),
+; for 64-bit and for 32-bit programs. Version and flags as virtio-win's INF has them.
+HKR,, OpenGLDriverName,       %REG_MULTI_SZ%, viogpu_wgl.dll
+HKR,, OpenGLVersion,          %REG_DWORD%, 4096
+HKR,, OpenGLFlags,            %REG_DWORD%, 3
+HKR,, OpenGLDriverNameWow,    %REG_MULTI_SZ%, viogpu_wgl.dll
+HKR,, OpenGLVersionWow,       %REG_DWORD%, 4096
+HKR,, OpenGLFlagsWow,         %REG_DWORD%, 3
 HKR,, VgaCompatible,          %REG_DWORD%, 0
 ; No machine-wide scheduler or timeout settings: the driver reports preemption itself
 ; (VioGpuCommander::Preempt), and Windows' timeout detection stays as it is.

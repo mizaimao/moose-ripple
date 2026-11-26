@@ -31,7 +31,7 @@ T=$MAIN/.tools
 OSC=${OSSLSIGNCODE:-$T/osslsigncode/build/osslsigncode}
 PY=$MAIN/.venv/bin/python
 C=$T/vista7-testcert
-LIC=$T/src/vista7-licenses
+LIC=$T/downloads/sdk/vista7-licenses
 LLVM_MINGW=${LLVM_MINGW:-$T/llvm-mingw/llvm-mingw-20261104-msvcrt-ubuntu-22.04-x86_64}
 # The LLVM commit llvm-mingw 20261104 was built from (clang --version), for its licence files.
 LLVM_COMMIT=392dfff97d29b59d77e5cac6d4b6ef2585fe7117
@@ -99,6 +99,13 @@ for t in vista win7; do
     cp "$OUT/kmd-$t/amd64/viogpu3d.sys" "$stage/$t/viogpu3d.sys"
     cp "$T/mesa/out-$t-x64-virgl/viogpu_d3d10.dll" "$stage/$t/viogpu_d3d10.dll"
     cp "$T/mesa/out-$t-x86-virgl/viogpu_d3d10.dll" "$stage/$t/viogpu_d3d10.x86.dll"
+done
+# Mesa's OpenGL driver and the library it shares with opengl32.dll
+for t in vista win7; do
+    cp "$T/mesa/out-$t-x64-virgl/viogpu_wgl.dll" "$stage/$t/viogpu_wgl.dll"
+    cp "$T/mesa/out-$t-x86-virgl/viogpu_wgl.dll" "$stage/$t/viogpu_wgl.x86.dll"
+    cp "$T/mesa/out-$t-x64-virgl/libglapi.dll" "$stage/$t/libglapi.dll"
+    cp "$T/mesa/out-$t-x86-virgl/libglapi.dll" "$stage/$t/libglapi.x86.dll"
 done
 if [ -n "${VISTA_WINDOWS:-}" ]; then
     echo "== Vista imports"
