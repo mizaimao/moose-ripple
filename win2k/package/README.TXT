@@ -11,7 +11,7 @@ What works
   back buffers with alpha, full-screen devices, render target textures,
   DXT textures (decoded by the host GPU), cube and volume textures.
 - OpenGL through Windows' own opengl32.dll (Mesa 24.3.4).
-- 3DMark03 runs to the end on Windows XP.
+- 3DMark03 and 3DMark 2001 SE run to the end on Windows XP.
 
 Not yet
 - Many 3DMark03 pictures are still wrong (dark scenes, white water).

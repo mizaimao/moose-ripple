@@ -19,7 +19,7 @@ Direct3D 8 and 9 through the DirectX 8 level interface with pixel shaders
 1.1 to 1.3 and 2.0, fixed-function stages, stencil, 24-bit depth, back buffers
 with alpha, full-screen devices, render target textures, DXT textures (decoded
 by the host GPU), cube and volume textures, L8, A8L8 and A8 textures; OpenGL
-through Windows' own `opengl32.dll`. 3DMark03 runs to the end on XP.
+through Windows' own `opengl32.dll`. 3DMark03 and 3DMark 2001 SE run to the end on XP.
 
 Not yet: many 3DMark03 pictures are wrong (dark scenes, white water); vertex
 shaders are off by default and have no flow control when on; 1920x1080 at
