@@ -1598,6 +1598,7 @@ D3D9DestroyDevice(HANDLE hDevice)
 
    D3D9DestroyDrawState(device);
    D3D9DestroyKeyBlitState(device);
+   D3D9DestroyGeneratedShaders(device);
    for (UINT i = 0; i < ARRAYSIZE(device->null_textures); ++i)
       pipe_resource_reference(&device->null_textures[i], NULL);
    if (device->pipe)
