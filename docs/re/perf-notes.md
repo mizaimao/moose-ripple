@@ -1247,3 +1247,19 @@ with the Dock hidden (five runs on two boots; the three runs with the flag earli
 294, and 264 to 269 without the helper), 203.6 with the Dock over the window, and Cinebench's
 OpenGL test 45.7 frames/s against 40.2 and 40.7 before (reference check passes, the same 3,625
 pixels off). The per-submit queueing step is 12 to 17 µs with it.
+
+### The same drivers in UTM, checked without timing (2026-11-26)
+
+UTM 5 on an M1 Max, other guests running, so no frame rate is quoted as a measurement. With
+the kext and bundle of 2026-11-25 (queued submits, the display limit, the helper thread,
+covered windows without the wait, the accelerator reference):
+
+- The guest restarts with them (kext caches rebuilt and waited for first), Quartz Extreme on.
+- The picture in the queued mode is right: the desktop, and OpenArena's timedemo at two moments
+  with the Dock over its window (captures of the guest's own screen).
+- Changing the resolution while the system runs works (1280x800 to 1024x768 and back,
+  WindowServer keeps running), as on the Proxmox host since the fix for KI-11.
+- gl-gears, which waits for the refresh, 56.5 frames/s with a longest frame of 19 ms, as before
+  the display limit: nothing is held back at the display's rate.
+- No error from the kext. The timedemo ran at 24.5 frames/s next to the other guests (22.9 to
+  24.8 alone on 2026-11-25).
