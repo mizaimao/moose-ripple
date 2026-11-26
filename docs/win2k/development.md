@@ -2185,6 +2185,36 @@ On XP SP3 under KVM on the second Intel UHD 630 host, case 53 passes and
 `d9pixels` passes 43 of 43. 3DMark 2001 SE's DOT3 Bump Mapping test, which
 reported "Not supported by hardware", now runs.
 
+## Texture eviction
+
+The miniport keeps Direct3D textures on the host within a texel budget
+(`RB2K_D7_TEXEL_BUDGET`, 64 MB) and 1024 slots. Host textures have no guest
+backing; the budget guards the host's memory. Past it, the miniport refuses a
+new texture, and the draws that use it used to be skipped.
+
+The display driver now evicts the least recently used texture instead:
+
+- Each texture carries the draw clock (`used`) of the last draw that chose
+  it. The clock advances after every queued draw, so all textures of the draw
+  being built carry the current value.
+- When a new texture is refused for room, the host copy of the texture with
+  the oldest stamp is freed (`IOCTL_RB2K_D3D7_TEXTURE_FREE`) and the request
+  is sent again, until it fits or nothing is left to free. Textures the
+  current draw has chosen and render target textures are never freed.
+- Freeing goes through the same request path as everything else, which sends
+  the queued draws first, so no queued draw names a freed texture.
+- An evicted texture has no host copy (`host` 0), so it is read and uploaded
+  again from its surface the next time it is drawn.
+
+The refusal reaches the display driver as the miniport's
+`ERROR_NOT_ENOUGH_MEMORY` or as one of its translations by the video port and
+GDI; all are accepted. `d7draw` prints `D7EVICT` with the evictions, the new
+textures that needed them and the last refusal's status. A scene that needs
+more than the budget evicts and uploads again every frame: correct, but slow.
+
+`d9pixels` case 74 draws 24 textures of 1024x1024 (96 MB) in two scenes.
+
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:
