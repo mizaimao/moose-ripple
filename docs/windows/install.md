@@ -30,6 +30,8 @@ Not yet:
 - Sleep and hibernation: the picture does not come back. The Windows 7
   package switches both off for the machine; on Vista switch them off
   yourself.
+- On Windows 7, Direct3D 9 user clip planes (a program's own cut-off planes,
+  as some games use for water reflections) are not applied; Vista has them.
 - More than one screen.
 - 32-bit Windows.
 
@@ -98,9 +100,17 @@ certificate stores.
 5. Close the wizard and let Windows restart.
 
 After the restart Device Manager lists the adapter as "moose-ripple
-virtio-gpu 3D". Choose an Aero theme in Personalization if Windows did not
-switch to one itself; on Windows 7, re-running the Windows Experience Index
-assessment turns Aero on.
+virtio-gpu 3D", version 0.4.0.0. In both test installs Aero came on by itself.
+If it does not, choose an Aero theme in Personalization; on Windows 7,
+re-running the Windows Experience Index assessment also turns it on.
+
+What was tested for 0.4.0: an install by these steps, the pixel tests of
+`tools/vista` and the uninstall on a Windows Vista SP2 and a Windows 7 SP1
+guest that had never had the driver, a test certificate or test mode (QEMU 9.2
+with KVM, virglrenderer 0.10.4, Intel UHD Graphics 630). On Vista all twelve
+tests pass. On Windows 7 eight pass; the four that fail test what its build
+does not have (user clip planes, and the video processor formats Vista's
+video wallpaper needs).
 
 If test mode is off, the driver does not start: Device Manager shows the
 adapter with error code 52 and Windows stays on its VGA driver.
