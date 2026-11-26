@@ -2240,9 +2240,13 @@ What changes in the command stream:
 - `SETSTREAMSOURCE2` gives each stream a byte offset; the draws add it.
 - `SETRENDERTARGET2` and `SETDEPTHSTENCIL` replace `SETRENDERTARGET`
   (one render target).
-- `BLT`, `SURFACEBLT` (StretchRect) and `COLORFILL` come as commands. Whole
-  surfaces of the same size are copied or filled on the host; other blits are
-  counted in `d7draw`'s `D9DDI` line.
+- `BLT`, `SURFACEBLT` (StretchRect) and `COLORFILL` come as commands. A whole
+  surface into another of its size is a host copy; any other pair of
+  rectangles is a host blit (virgl's `BLIT`, through the miniport request
+  `IOCTL_RB2K_DD_STRETCH`), point-sampled or linear as the runtime asks, so
+  the driver reports linear filtering for StretchRect, which 3DMark05
+  requires. `COLORFILL` fills whole surfaces; other fills are counted in
+  `d7draw`'s `D9DDI` line.
 - The scissor rectangle and the integer and boolean shader constants are
   recorded but not applied yet; `d7draw` counts draws that would need them.
 
@@ -2255,6 +2259,9 @@ runtime copies one face by that face's handle.
 `d9pixels` passes all 55 of its cases on the interface on XP SP3 (UHD 630
 host), the same as with the switch off; cases 56 and 57 cover `ColorFill` and
 `StretchRect`.
+Case 59 stretches the back buffer into a texture of half its size with linear
+filtering; with it, `d9pixels` passes 56 of 56 on the interface (it skips the
+case when linear StretchRect is not offered, as with the switch off).
 
 
 ## Release package
