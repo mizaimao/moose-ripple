@@ -1,4 +1,5 @@
-/* Direct3D vertex shaders as ARB vertex programs (vs_arb.h). ARB_vertex_program was made after
+/* Direct3D vertex shaders as ARB vertex programs (vs_arb.h): vs_1_0 (Direct3D 8.0's, a subset
+   of vs_1_1), vs_1_1 and vs_2_0 without flow control. ARB_vertex_program was made after
    Direct3D 8's vertex shaders, so most instructions keep their names; what it lacks is spelled
    out: |x| through ABS into a scratch register, _sat through MAX and MIN, lrp, nrm, sgn, mova
    (rounding to nearest), and relative reads through ARL from a copy of a0 (vs_2_0's a0 has four
@@ -575,7 +576,7 @@ unsigned int vs_to_arb(const unsigned int *code, unsigned int codeWords, const u
     s.o.overflow = 0;
     s.info = info;
     s.scratch = 0;
-    if (!codeWords || (code[0] != 0xFFFE0101u && code[0] != 0xFFFE0200u))
+    if (!codeWords || (code[0] != 0xFFFE0100u && code[0] != 0xFFFE0101u && code[0] != 0xFFFE0200u))
         return fail(&s, VS_ARB_VERSION, codeWords ? code[0] : 0);
     s.version = (code[0] >> 8) & 0xFF;
     if (!declaration(&s, decl, declWords) || !walk(&s, code, codeWords, 0))

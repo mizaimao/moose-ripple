@@ -1048,7 +1048,8 @@ int d3d_surface_format_ok(LPDDSURFACEDESC desc)
 #define FOG_UNIT 4                      /* the OpenGL texture unit that does fixed-function fog */
 #define MAX_VS 64                       /* Direct3D 8 and 9 vertex shaders a context keeps */
 #define VS_VARIANTS 4                   /* programs a vertex shader keeps (fog) */
-#define MAX_LIGHTS 32                   /* light indices kept (Direct3D's may be any number) */
+#define MAX_LIGHTS 128                  /* lights kept, by slot (light_slot: Direct3D's indices may be
+                                           any number) */
 
 /* A vertex shader: its declaration and code as the runtime gave them, the translator's layout
    of its inputs, and its programs by fog key (vs_arb.c). */
@@ -1160,6 +1161,9 @@ typedef struct {
     float xf_world[16], xf_view[16], xf_proj[16], xf_tex[TNL_STAGES][16];
     D3DLIGHT7 light[MAX_LIGHTS];
     BYTE light_on[MAX_LIGHTS];
+    DWORD light_index[MAX_LIGHTS];      /* Direct3D's index of each slot in use */
+    BYTE light_used[MAX_LIGHTS];
+    int lights_full;                    /* said once that a light found no slot */
     BYTE light_place[TNL_LIGHTS];       /* the light in each of the program's places */
     DWORD lights_loaded;                /* how many places those fill */
     D3DMATERIAL7 material;
@@ -3118,13 +3122,40 @@ static void tnl_transform(RCTX *c, DWORD type, const float *m, int multiply)
         c->tnl_dirty |= TNL_DIRTY_TEX;
 }
 
+/* The slot of Direct3D's light index, made if create (a free one, else one whose light is
+   off); -1 if there is none. */
+static int light_slot(RCTX *c, DWORD index, int create)
+{
+    int i, free = -1, off = -1;
+    for (i = 0; i < MAX_LIGHTS; i++) {
+        if (c->light_used[i] && c->light_index[i] == index)
+            return i;
+        if (!c->light_used[i] && free < 0)
+            free = i;
+        else if (c->light_used[i] && !c->light_on[i] && off < 0)
+            off = i;
+    }
+    if (!create)
+        return -1;
+    if (free < 0)
+        free = off;
+    if (free < 0) {
+        if (!c->lights_full++)
+            dbg("rd3d: more lights on than the HAL keeps\r\n");
+        return -1;
+    }
+    memset(&c->light[free], 0, sizeof c->light[0]);
+    c->light_on[free] = 0;
+    c->light_used[free] = 1;
+    c->light_index[free] = index;
+    return free;
+}
+
 static void tnl_light(RCTX *c, const D3DHAL_DP2SETLIGHT *l, const D3DLIGHT7 *data)
 {
-    DWORD i = l->dwIndex;
-    if (i >= MAX_LIGHTS) {
-        dbg("rd3d: a light index beyond the HAL's\r\n");
+    int i = light_slot(c, l->dwIndex, 1);
+    if (i < 0)
         return;
-    }
     if (l->dwDataType == D3DHAL_SETLIGHT_ENABLE)
         c->light_on[i] = 1;
     else if (l->dwDataType == D3DHAL_SETLIGHT_DISABLE)
@@ -3505,7 +3536,11 @@ static GLuint vs_program(RCTX *c, struct vs8 *s, DWORD key)
     if (!n) {
         tracef("rd3d: vertex shader %lx not translated: reason %lu, detail %lx\r\n", s->handle,
                (DWORD)s->info.reason, (DWORD)s->info.detail);
-        dbg("rd3d: a vertex shader was not translated\r\n");
+        dbg("rd3d: a vertex shader was not translated, reason ");
+        dbg_hex(s->info.reason);
+        dbg(", detail ");
+        dbg_hex(s->info.detail);
+        dbg("\r\n");
         s->failed = 1;
     } else {
         gl->GetError();
@@ -4876,10 +4911,7 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
             if (data + n * sizeof *l > end)
                 goto bad;
             for (i = 0; i < n; i++)
-                if (l[i].dwIndex < MAX_LIGHTS) {
-                    memset(&c->light[l[i].dwIndex], 0, sizeof c->light[0]);
-                    c->light_on[l[i].dwIndex] = 0;
-                }
+                light_slot(c, l[i].dwIndex, 1);     /* a new light: off, no data yet */
             cmd = data + n * sizeof *l;
             break;
         }

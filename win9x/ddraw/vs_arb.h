@@ -1,5 +1,5 @@
 /*
- * Direct3D vertex shaders (vs_1_1, and vs_2_0 without flow control) with their Direct3D 8
+ * Direct3D vertex shaders (vs_1_0 and vs_1_1, and vs_2_0 without flow control) with their Direct3D 8
  * vertex declaration, as an ARB vertex program. MIT licence, see LICENSE.
  *
  * The program reads the declared registers v0..v15 from generic attributes (vertex.attrib[n]),
