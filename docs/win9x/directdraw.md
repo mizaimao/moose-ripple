@@ -715,6 +715,15 @@ DRAWPRIMITIVE2, DRAWINDEXEDPRIMITIVE and its second form, CLIPPEDTRIANGLEFAN and
 shader and patch commands are stepped over. It is offered only when the registry value
 `HKLM\Software\moose-ripple`, `D3D8` is `"1"` (a `.reg` file on the test CD sets it).
 
+The values under that key, as of 2026-11-26 (read when DirectDraw loads the HAL, so a change
+needs a restart):
+
+| Value | Meaning |
+|---|---|
+| `D3D8` = `"1"` | the Direct3D 8 interface; the runtime processes vertices on the CPU |
+| `D3D8` = `"2"` | and vertex processing on the GPU (fixed function, vertex shaders), with vertex and index buffers in the driver's memory |
+| `D3D8Buffers` = `"0"` | with `"2"`: buffers stay in the runtime's system memory (the path before 2026-11-26 13:00) |
+
 Learnt on Windows 98 SE with DirectX 8.1 (UTM):
 
 - **The runtime asks once per boot.** The first program that uses Direct3D 8 decides, for every
