@@ -3655,6 +3655,30 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     c->maxPixelShaderValue = 0x3f800000;            /* 1 */
 }
 
+/* D3DCAPS9 for a runtime that has announced Direct3D 9: the Direct3D 8 record and the parts of the
+ * DirectX 9 one that the runtime otherwise leaves at zero, among them the shader model 2 details
+ * (the minimums of versions 2.0, which the translators meet) that programs such as 3DMark05 test.
+ * One render target; of the DirectX 9 vertex types, the vertex shaders read UBYTE4. */
+static void d9_caps(const DISPLAY *d, RB_D3DCAPS9 *c, const D3DNTHAL_D3DEXTENDEDCAPS *x)
+{
+    RtlZeroMemory(c, sizeof(*c));
+    d8_caps(d, &c->caps8, x);
+    c->numberOfAdaptersInGroup = 1;
+    c->numSimultaneousRTs = 1;
+    c->stretchRectFilterCaps = RB_D3DPTFILTERCAPS_MINFPOINT | RB_D3DPTFILTERCAPS_MAGFPOINT;
+    if (c->caps8.vertexShaderVersion >= 0xfffe0200) {
+        c->declTypes = RB_D3DDTCAPS_UBYTE4;
+        c->vs20NumTemps = 12;
+        c->vs20StaticFlowControlDepth = 1;
+        c->maxVShaderInstructionsExecuted = 65535;
+    }
+    if (c->caps8.pixelShaderVersion >= 0xffff0200) {
+        c->ps20NumTemps = 12;
+        c->ps20NumInstructionSlots = 96;
+        c->maxPShaderInstructionsExecuted = 96;
+    }
+}
+
 /* GetDriverInfo2 requests arrive with the stereo-mode GUID. The size of the
  * reply buffer is the one in the request; the outer size is not used. */
 static BOOL d8_info(DISPLAY *d, PDD_GETDRIVERINFODATA a, const D3DNTHAL_D3DEXTENDEDCAPS *x)
@@ -3674,6 +3698,15 @@ static BOOL d8_info(DISPLAY *d, PDD_GETDRIVERINFODATA a, const D3DNTHAL_D3DEXTEN
     case RbGdi2Caps8: {
         RB_D3DCAPS8 caps;
         d8_caps(d, &caps, x);
+        size = sizeof(caps);
+        size = min(size, room);
+        RtlCopyMemory(h, &caps, size);
+        break;
+    }
+    case RbGdi2Caps9: {
+        RB_D3DCAPS9 caps;
+        if (d->d7draw.d8Version < 0x900) goto unavailable;
+        d9_caps(d, &caps, x);
         size = sizeof(caps);
         size = min(size, room);
         RtlCopyMemory(h, &caps, size);
@@ -3713,7 +3746,7 @@ static BOOL d8_info(DISPLAY *d, PDD_GETDRIVERINFODATA a, const D3DNTHAL_D3DEXTEN
     a->ddRVal = DD_OK;
     return TRUE;
 unavailable:
-    /* Requests this driver does not answer, such as the Direct3D 9 ones. */
+    /* Requests this driver does not answer, such as most of the Direct3D 9 ones. */
     a->dwActualSize = 0;
     a->ddRVal = DDERR_CURRENTLYNOTAVAIL;
     return TRUE;

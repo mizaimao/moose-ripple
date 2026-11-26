@@ -56,7 +56,21 @@ typedef struct {
     ULONG pixelShaderVersion, maxPixelShaderValue;
 } RB_D3DCAPS8;
 typedef char rb_d3dcaps8_size[sizeof(RB_D3DCAPS8) == 53 * 4 ? 1 : -1];
+/* D3DCAPS9: D3DCAPS8 (whose last word is PixelShader1xMaxValue there), then the DirectX 9 part. */
+typedef struct {
+    RB_D3DCAPS8 caps8;
+    ULONG devCaps2, maxNpatchTessellationLevel, reserved5, masterAdapterOrdinal, adapterOrdinalInGroup;
+    ULONG numberOfAdaptersInGroup, declTypes, numSimultaneousRTs, stretchRectFilterCaps;
+    ULONG vs20Caps, vs20DynamicFlowControlDepth, vs20NumTemps, vs20StaticFlowControlDepth;
+    ULONG ps20Caps, ps20DynamicFlowControlDepth, ps20NumTemps, ps20StaticFlowControlDepth, ps20NumInstructionSlots;
+    ULONG vertexTextureFilterCaps, maxVShaderInstructionsExecuted, maxPShaderInstructionsExecuted;
+    ULONG maxVertexShader30InstructionSlots, maxPixelShader30InstructionSlots;
+} RB_D3DCAPS9;
+typedef char rb_d3dcaps9_size[sizeof(RB_D3DCAPS9) == 76 * 4 ? 1 : -1];
 #define RB_D3DCAPS2_CANRENDERWINDOWED 0x00080000UL
+#define RB_D3DDTCAPS_UBYTE4 0x00000001UL
+#define RB_D3DPTFILTERCAPS_MINFPOINT 0x00000100UL
+#define RB_D3DPTFILTERCAPS_MAGFPOINT 0x01000000UL
 #define RB_D3DPRESENT_INTERVAL_ONE 0x00000001UL
 #define RB_D3DPRESENT_INTERVAL_IMMEDIATE 0x80000000UL
 

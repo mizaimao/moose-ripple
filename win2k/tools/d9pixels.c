@@ -1547,6 +1547,12 @@ int main(int argc, char **argv)
            (unsigned long)caps.MaxStreamStride, (unsigned long)caps.MaxPrimitiveCount,
            (unsigned long)caps.MaxVertexIndex, (unsigned long)caps.MaxTextureBlendStages,
            (unsigned long)caps.MaxSimultaneousTextures);
+    printf("D9PIX caps9 ps20=%d,%d,%d vs20=%d,%d executed=%lu,%lu rts=%lu decltypes=%lx stretch=%lx group=%lu\n",
+           caps.PS20Caps.NumTemps, caps.PS20Caps.NumInstructionSlots, caps.PS20Caps.StaticFlowControlDepth,
+           caps.VS20Caps.NumTemps, caps.VS20Caps.StaticFlowControlDepth,
+           (unsigned long)caps.MaxPShaderInstructionsExecuted, (unsigned long)caps.MaxVShaderInstructionsExecuted,
+           (unsigned long)caps.NumSimultaneousRTs, (unsigned long)caps.DeclTypes,
+           (unsigned long)caps.StretchRectFilterCaps, (unsigned long)caps.NumberOfAdaptersInGroup);
     IDirect3D9_GetAdapterDisplayMode(d3d, D3DADAPTER_DEFAULT, &mode);
     window = CreateWindowA("STATIC", "d9pixels", WS_POPUP | WS_VISIBLE, 0, 0, Side, Side, NULL, NULL, NULL, NULL);
     memset(&pp, 0, sizeof(pp));
