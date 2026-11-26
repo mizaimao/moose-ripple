@@ -165,6 +165,22 @@ IOReturn RippleFramebuffer::enableController(void)
         LOG("no refresh timer");
         return kIOReturnError;
     }
+    // Boot flag ripple_flush_hz: the host is asked to show the screen at most this many times
+    // a second (0: at every present, as before 2026-11-26). The default is a little above the
+    // refresh tick's 62.5 Hz, so a program that draws once per tick is never held.
+    uint32_t flushHz = 66;
+    PE_parse_boot_argn("ripple_flush_hz", &flushHz, sizeof(flushHz));
+    fFlushGap = 0;
+    if (flushHz && !fFlushTimer) {
+        fFlushTimer = IOTimerEventSource::timerEventSource(this, flushTimerAction);
+        if (fFlushTimer && getWorkLoop()->addEventSource(fFlushTimer) != kIOReturnSuccess) {
+            fFlushTimer->release();
+            fFlushTimer = 0;
+        }
+    }
+    if (flushHz && fFlushTimer)
+        nanoseconds_to_absolutetime(1000000000ULL / flushHz, &fFlushGap);
+    setProperty("RippleFlushHz", fFlushGap ? flushHz : 0, 32);
     fEnabled = true;
     fRefresh->setTimeoutMS(kRefreshMS);
     LOG("enabled at %ux%u", mode(fCurMode).width, mode(fCurMode).height);
@@ -298,12 +314,17 @@ void RippleFramebuffer::stop(IOService *provider)
         fRefresh->cancelTimeout();
         getWorkLoop()->removeEventSource(fRefresh);
     }
+    if (fFlushTimer) {
+        fFlushTimer->cancelTimeout();
+        getWorkLoop()->removeEventSource(fFlushTimer);
+    }
     super::stop(provider);
 }
 
 void RippleFramebuffer::free()
 {
     if (fRefresh)    fRefresh->release();
+    if (fFlushTimer) fFlushTimer->release();
     if (fDev)        fGamma.free();
     if (fDev)        fDev->release();
     if (fVRAM)       { fVRAM->complete();      fVRAM->release(); }
@@ -717,6 +738,12 @@ IOReturn RippleFramebuffer::showAction(OSObject *owner, void *idp, void *rectp, 
         (uint64_t)r->y + r->height > md.height)
         return kIOReturnBadArgument;
     const bool changed = fb->fShownRes != id || memcmp(&fb->fShownRect, r, sizeof(*r)) != 0;
+    if (changed) {                            // a new buffer or place: shown at once
+        fb->fLastFlush = mach_absolute_time();
+        fb->fFlushHeld = false;
+    } else if (!fb->flushDue()) {
+        return kIOReturnSuccess;              // held: the timer shows it
+    }
     if (fb->fGamma.active()) {
         // A gamma table is set: the buffer is drawn through it, and that image is the scanout.
         const uint32_t oldRes = fb->fShownRes;
@@ -738,6 +765,43 @@ IOReturn RippleFramebuffer::showAction(OSObject *owner, void *idp, void *rectp, 
     return fb->fDev->resourceFlush(id, *r) ? kIOReturnSuccess : kIOReturnError;
 }
 
+// At most one display flush per gap. QEMU's headless display reads the whole screen back from
+// the GPU at every flush, on the thread that also runs the guest's GL commands, so a program
+// that draws 150 frames a second made the host do that 150 times a second. A frame that comes
+// sooner than the gap after the last flush is held: the buffer on the host is current already,
+// and the timer flushes it when the gap is over, so the last frame is always shown. Called on
+// the work loop.
+bool RippleFramebuffer::flushDue()
+{
+    if (!fFlushGap || !fFlushTimer)
+        return true;
+    uint64_t now = mach_absolute_time();
+    if (now - fLastFlush >= fFlushGap) {
+        fLastFlush = now;
+        fFlushHeld = false;
+        return true;
+    }
+    if (!fFlushHeld) {
+        uint64_t ns;
+        absolutetime_to_nanoseconds(fFlushGap - (now - fLastFlush), &ns);
+        fFlushHeld = true;
+        fFlushTimer->setTimeoutUS((UInt32)(ns / 1000) + 1);
+    }
+    return false;
+}
+
+void RippleFramebuffer::flushTimerAction(OSObject *owner, IOTimerEventSource *)
+{
+    RippleFramebuffer *fb = OSDynamicCast(RippleFramebuffer, owner);
+    if (!fb || !fb->fEnabled || !fb->fFlushHeld)
+        return;
+    fb->fFlushHeld = false;
+    fb->fLastFlush = mach_absolute_time();
+    if (!fb->fShownRes || fb->gammaPresent())
+        return;
+    fb->fDev->resourceFlushAsync(fb->fShownRes, fb->fShownRect);
+}
+
 // The whole buffer again: QEMU reads the whole screen back at a flush in any case.
 IOReturn RippleFramebuffer::flushAction(OSObject *owner, void *idp, void *queued, void *, void *)
 {
@@ -746,6 +810,8 @@ IOReturn RippleFramebuffer::flushAction(OSObject *owner, void *idp, void *queued
 
     if (!id || fb->fShownRes != id)
         return kIOReturnNotReady;
+    if (!fb->flushDue())
+        return kIOReturnSuccess;              // held: the timer shows it
     if (fb->gammaPresent())
         return kIOReturnSuccess;
     bool ok = queued ? fb->fDev->resourceFlushAsync(id, fb->fShownRect)

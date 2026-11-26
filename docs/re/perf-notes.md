@@ -1108,3 +1108,55 @@ with the same CPU model and count and Apple's own driver:
   same number of pixels.
 - Cinebench shows its licence window over the test window in every run on both VMs; the four
   runs on the 9600 GT were 32.94 to 32.99 frames/s.
+
+### Where a frame of OpenArena goes, and the display flush held to the refresh rate (2026-11-26)
+
+The 9600 GT reference runs the timedemo 2.4 times as fast with the same CPUs, so the frame
+was profiled (`sample` on the game for 9 s, the kext that queues, the window under the Dock;
+other VMs were running on the host, so these are shares, not timings). The game's main thread,
+6.9 ms a frame:
+
+| | share | per frame |
+|---|---|---|
+| the game's own code | 46% | 3.2 ms |
+| inside OpenGL calls (the driver's work on the CPU; `glDrawElements` 14%) | 21% | 1.4 ms |
+| swap: waiting until the previous frame has been shown | 16% | 1.1 ms |
+| swap: handing the frame's commands to the kernel | 11% | 0.7 ms |
+| swap: the present call and the rest | 5% | 0.3 ms |
+
+The thread that shows the frames (the flush thread) was inside `CGSFlushSurfaceWithOptions`
+95% of the time: showing a frame took as long as drawing one, and the game is never allowed
+more than one frame ahead. So the pace was set by showing, not by drawing.
+
+What makes showing slow on this host: every display flush makes QEMU's headless display
+(Proxmox uses it for `vga: virtio-gl`) read the whole screen back from the GPU, on the thread
+that also runs the guest's OpenGL commands, and the guest asked for a flush at every present,
+146 times a second here.
+
+**Change.** The kext asks for a flush at most 66 times a second (boot flag `ripple_flush_hz`,
+0 for the old behaviour). A frame that comes sooner is held: the buffer on the host is
+current already, and a timer flushes it when the gap is over, so the last frame always
+reaches the screen. 66 is just above the 62.5 Hz of the driver's refresh tick, so a program
+that draws once per tick is never held.
+
+Same kext, the host to itself, one boot each:
+
+| OpenArena timedemo, window under the Dock | `ripple_flush_hz=0` | default (66) |
+|---|---|---|
+| frames/s | 147.8 | 192.4 |
+| frame times, shortest / mean / longest | 4.0 / 6.8 / 49 ms | 2.0 / 5.2 / 52 ms |
+| time per present (the driver's count) | 1.2-2.5 ms | 0.51 ms |
+| host GPU busy | 46-50% | 43-48% |
+| QEMU's main thread | 31-35% | 33-40% |
+| the guest's CPU threads, sum | 63-90% | 91-101% |
+
+With the limit the guest's CPUs are fully used: the game's thread is the limit now, and what
+is left to gain is the driver's CPU time per frame (1.4 ms in OpenGL calls, 0.7 ms handing
+over the commands). Not slower elsewhere, same boot: gl-gears 59.5 frames/s with a longest
+frame of 17 ms, Cinebench's OpenGL test 40.7 frames/s (reference check passes; it presents
+fewer than 66 times a second, so nothing is held). Looked at: the game, the desktop, Exposé
+and Dashboard in the guest, and through VNC that the host's display shows the last frame
+after Dashboard opens and closes. No error from the kext or the host's renderer.
+
+The gain is for hosts whose display reads the screen back (QEMU's headless display). Not
+measured in UTM, where the display works differently.

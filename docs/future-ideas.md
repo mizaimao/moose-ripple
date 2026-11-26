@@ -7,15 +7,14 @@ Not scheduled; recorded so they aren't lost. The README's "Ideas for later" list
 Guided by what the real apps and games show. Done on 2026-11-12: apps' OpenGL windows stay on
 the GPU (showing a frame takes 4-5 ms at any size, where a 1280x800 window took 20-30 ms), and
 a composited frame needs one submit, one wait without a host round trip and one display call
-(it was five, four and one). Left:
+(it was five, four and one). Since 2026-11-26 the host is asked to show the screen at most 66 times
+a second (it reads the whole screen back each time): OpenArena's timedemo went from 148 to 192
+frames/s on the Proxmox host. Left:
 - A single Core Image filter is still slower than software rendering (1.2-12 ms against 0.8-4.5
   for a 480x300 picture). Its textures are reused and its submits are queued since 2026-11-25;
   what is left is one trip to the host per pass (Core Image's flush when it unbinds a
   texture), a new program compiled for every render, and the read-back
   ([re/perf-notes.md](re/perf-notes.md), "Core Image after the texture cache").
-- Present the screen at most once per display refresh (60 Hz). Measured on 2026-11-12: the
-  guest sends 45-100 whole-screen updates a second during effects, each 2-3 ms, so a cap would
-  save little; low priority.
 - A stall of about 170 ms every few seconds while something animates, below the driver (a
   runnable thread in the guest is not run), on the KVM host only: see
   [re/perf-notes.md](re/perf-notes.md).
