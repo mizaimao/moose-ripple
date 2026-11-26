@@ -247,6 +247,12 @@ static RDD_SHARED *shared;
 #define GL_FOG_COORDINATE               0x8451
 #define GL_FRAGMENT_DEPTH               0x8452
 #define GL_FOG_COORDINATE_ARRAY         0x8457
+#define GL_VERTEX_PROGRAM_ARB           0x8620
+#define GL_NORMAL_ARRAY                 0x8075
+#define GL_RG                           0x8227
+#define GL_RG8_SNORM                    0x8F95
+#define GL_RGBA8_SNORM                  0x8F97
+#define GL_TEXTURE_SWIZZLE_B            0x8E44
 #define GL_FIRST_VERTEX_CONVENTION      0x8E4D
 #define GL_FRAMEBUFFER                  0x8D40
 #define GL_RENDERBUFFER                 0x8D41
@@ -912,6 +918,7 @@ typedef struct {
     DWORD bytes;                        /* a texel's; 0 for block-compressed formats */
     GLenum format, type, internal;
     DWORD block;                        /* DXT: a 4x4 block's bytes (8 or 16), else 0 */
+    int bump;                           /* V8U8: two channels, blue reads as 1 */
 } PIXFMT;
 
 static void display_format(DDPIXELFORMAT *pf)
@@ -949,6 +956,19 @@ static PIXFMT gl_format(const DDPIXELFORMAT *pf)
         case 0x33545844UL: f.block = 16; f.internal = GL_COMPRESSED_RGBA_S3TC_DXT3_EXT; break;
         case 0x34545844UL:
         case 0x35545844UL: f.block = 16; f.internal = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT; break;
+        }
+        return f;
+    }
+    if ((pf->dwFlags & DDPF_BUMPDUDV) && d8_on) {
+        /* Direct3D 8 and 9's bump maps, signed, sampled as -1..1: V8U8 (du, dv) and Q8W8V8U8
+           (signed normal maps, as the runtime describes them: 32 bits with du and dv's masks) */
+        if (!(pf->dwFlags & DDPF_BUMPLUMINANCE) && pf->dwBumpDuBitMask == 0xFF &&
+            pf->dwBumpDvBitMask == 0xFF00) {
+            if (pf->dwBumpBitCount == 16) {
+                f.bytes = 2; f.format = GL_RG; f.type = GL_BYTE; f.internal = GL_RG8_SNORM; f.bump = 1;
+            } else if (pf->dwBumpBitCount == 32) {
+                f.bytes = 4; f.format = GL_RGBA; f.type = GL_BYTE; f.internal = GL_RGBA8_SNORM;
+            }
         }
         return f;
     }
@@ -1089,6 +1109,7 @@ typedef struct {
         DWORD *code, bytes;             /* its tokens, for more variants; process heap */
         int failed;                     /* couldn't be translated: its draws are skipped */
         int version2;                   /* shader model 2: it declares its samplers' kinds */
+        int bump;                       /* version 1 with texbem: the stages' bump matrices */
         DWORD fog_base;                 /* the fog constants' first program.env */
         DWORD nvar;                     /* programs made: by fog, and the cube map stages of a
                                            version 1 shader (the translator's fog argument) */
@@ -2021,6 +2042,10 @@ static void texture_upload(GLF *gl, const PIXFMT *f, const DDPIXELFORMAT *pf,
             continue;
         }
         gl->PixelStorei(GL_UNPACK_ROW_LENGTH, g->lPitch / f->bytes);
+        if (fresh && !l && f->bump)     /* Direct3D reads V8U8 as (du, dv, 1, 1) */
+            gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_ONE);
+        else if (fresh && !l)           /* the name may have held a bump map before */
+            gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_BLUE);
         if (fresh)
             gl->TexImage2D(GL_TEXTURE_2D, l, f->internal, g->wWidth, g->wHeight, 0, f->format,
                            f->type, (const GLvoid *)g->fpVidMem);
@@ -2089,6 +2114,7 @@ static int cube_bind(RCTX *c, DWORD h, int stage, const struct shadow *sh)
             }
         gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
         gl->TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_LEVEL, levels - 1);
+        gl->TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_SWIZZLE_B, f.bump ? GL_ONE : GL_BLUE);
         t->mem = g0->fpVidMem;
         t->w = g0->wWidth;
         t->h = g0->wHeight;
@@ -3552,6 +3578,7 @@ static GLuint ps_compile(RCTX *c, struct ps8 *p, DWORD key)
                 gl->ProgramLocalParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, i, (const GLfloat *)ai.imm[i]);
             if (key & 3)
                 p->fog_base = ai.constants - 2;
+            p->bump = !p->version2 && info.constants == RB_PS_BUMP_CONSTANTS;
             tracef("rd3d: pixel shader %lx%s: program %lu, samplers %lx, coordinates %lx\r\n",
                    p->handle, key ? " (variant)" : "", (DWORD)prog, (DWORD)info.samplers,
                    (DWORD)info.coords);
@@ -3659,6 +3686,25 @@ static void ps_apply(RCTX *c, long prog)
         for (i = 0; i < RB_PS2_CONSTANTS; i++)
             gl->ProgramEnvParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, i, c->psc[i]);
         c->psc_dirty = 0;
+    }
+    p = ps_find(c, c->ps_bound, 0);
+    if (p && p->bump) {
+        /* texbem's c8..c11: each stage's bump matrix; c12..c15: its luminance scale and offset */
+        DWORD s;
+        for (s = 0; s < RB_PS_COORD_SETS; s++) {
+            const DWORD *t = c->tss[s];
+            GLfloat m[4], lum[4];
+            m[0] = *(const float *)&t[D3DTSS_BUMPENVMAT00];
+            m[1] = *(const float *)&t[D3DTSS_BUMPENVMAT01];
+            m[2] = *(const float *)&t[D3DTSS_BUMPENVMAT10];
+            m[3] = *(const float *)&t[D3DTSS_BUMPENVMAT11];
+            lum[0] = *(const float *)&t[D3DTSS_BUMPENVLSCALE];
+            lum[1] = *(const float *)&t[D3DTSS_BUMPENVLOFFSET];
+            lum[2] = lum[3] = 0.0f;
+            gl->ProgramEnvParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, RB_PS_CONSTANTS + s, m);
+            gl->ProgramEnvParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, RB_PS_CONSTANTS + 4 + s, lum);
+        }
+        c->psc_dirty = 1;               /* those registers may be a later shader's constants */
     }
     p = ps_find(c, c->ps_bound, 0);
     if (p && c->fp_fog) {
@@ -4403,6 +4449,9 @@ static const ULONG d8_formats[][2] = {
     { RbFmtDxt3, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     { RbFmtDxt4, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     { RbFmtDxt5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    /* bump maps for texbem and texbeml: signed (gl_format) */
+    { RbFmtV8U8, RbFormatTexture | RbFormatCubeTexture | RbFormatBumpMap },
+    { RbFmtQ8W8V8U8, RbFormatTexture | RbFormatCubeTexture | RbFormatBumpMap },
 };
 #define D8_FORMATS (sizeof d8_formats / sizeof d8_formats[0])
 
