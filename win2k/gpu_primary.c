@@ -212,8 +212,10 @@ VP_STATUS rb_memory_primary_upload(RB2K_GPU *gpu, ULONG page, const RB2K_RECT *r
 }
 
 /* A Direct3D present to the desktop in memory: the host copies the frame's rectangle
- * into the page's resource, which shows it, and the same pixels come back into the
- * page for GDI (which reads them for screen copies and window moves) and for locks.
+ * into the page's resource, which shows it. Outside a flip chain the same pixels come
+ * back into the page for GDI (which reads them for screen copies and window moves).
+ * A live chain's pages are only marked stale: read back when the program locks one
+ * (rb_memory_primary_read) and when the chain ends, and the copy is not waited for.
  * No staging, so no limit below the desktop's own size, and no copy or upload in the
  * guest. to: in the pages' rows, the second page below the first. */
 VP_STATUS rb_memory_primary_present(RB2K_GPU *gpu, ULONG image, ULONG srcX, ULONG srcY, const RB2K_RECT *to)
@@ -231,15 +233,48 @@ VP_STATUS rb_memory_primary_present(RB2K_GPU *gpu, ULONG image, ULONG srcX, ULON
     status = ensure(gpu, page);
     if (status) return status;
     if (!rb_gpu_copy_image_rect(gpu, &result, image, *page_resource(gpu, page), srcX, srcY, r.left, r.top,
-                                r.right - r.left, r.bottom - r.top)) {
+                                r.right - r.left, r.bottom - r.top, (BOOLEAN)!gpu->memoryChain)) {
         ++gpu->memoryFailures;
         return result.status;
     }
-    status = transfer(gpu, VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, page, &r);
+    if (gpu->memoryChain) {
+        gpu->memoryStale |= 1UL << page;
+        status = NO_ERROR;
+    } else {
+        status = transfer(gpu, VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, page, &r);
+    }
     if (!status) status = flush(gpu, page, &r);
     if (status) { ++gpu->memoryFailures; return status; }
     ++gpu->memoryPresents;
     return NO_ERROR;
+}
+
+/* A page made current again from its resource, if presents left it stale. */
+VP_STATUS rb_memory_primary_read(RB2K_GPU *gpu, ULONG page)
+{
+    RB2K_RECT all;
+    VP_STATUS status;
+    if (!gpu->memoryWidth || page > 1 || !(gpu->memoryStale & (1UL << page))) return NO_ERROR;
+    if (!*page_resource(gpu, page) || !gpu->ready) {
+        gpu->memoryStale &= ~(1UL << page);   /* the resource went with a reset */
+        return NO_ERROR;
+    }
+    all.left = all.top = 0;
+    all.right = gpu->memoryWidth;
+    all.bottom = gpu->memoryHeight;
+    status = transfer(gpu, VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, page, &all);
+    if (status) { ++gpu->memoryFailures; return status; }
+    gpu->memoryStale &= ~(1UL << page);
+    return NO_ERROR;
+}
+
+/* A flip chain starts or ends. At its end the desktop's page is read back: GDI draws
+ * on it again. */
+void rb_memory_primary_chain(RB2K_GPU *gpu, BOOLEAN live)
+{
+    if (!live) rb_memory_primary_read(gpu, 0);
+    gpu->memoryChain = live;
+    if (!live) gpu->memoryStale = 0;
 }
 
 /* A flip: the page's resource on scanout 0. */
@@ -266,6 +301,7 @@ VP_STATUS rb_memory_primary_flip(RB2K_GPU *gpu, ULONG page)
 void rb_memory_primary_clear_back(RB2K_GPU *gpu)
 {
     if (!gpu->memoryWidth || gpu->memoryVisible) return;
+    gpu->memoryStale &= ~2UL;
     VideoPortZeroMemory((PUCHAR)gpu->memoryPixels + page_bytes(gpu), page_bytes(gpu));
     if (gpu->memoryBack && gpu->ready) unref(gpu, gpu->memoryBack);
     gpu->memoryBack = 0;   /* made again, with all of the page, when it is used */
@@ -293,6 +329,7 @@ VP_STATUS rb_memory_primary_show(RB2K_GPU *gpu, ULONG width, ULONG height, BOOLE
     gpu->memoryResource = gpu->memoryBack = 0;
     gpu->memoryVisible = 0;
     gpu->memoryWidth = width;
+    gpu->memoryStale = 0;
     gpu->memoryHeight = height;
     status = rb_memory_primary_upload(gpu, 0, NULL);
     if (gpu->ready && old) unref(gpu, old);

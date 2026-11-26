@@ -292,6 +292,17 @@ BOOL rb_gl_cpu_access(DISPLAY *d, const RECTL *rect, ULONG access)
 /* The desktop in guest memory: send what a drawing changed in a page (0, or a flip
  * chain's second page; rect NULL: all of it) to the host, which shows it. The request
  * uses no staging, so it needs no lock. */
+/* The desktop in guest memory: a flip chain's page brought up to date before a lock
+ * (presents in a live chain are not read back into the pages). */
+BOOL rb_memory_primary_read(DISPLAY *d, ULONG page)
+{
+    RB2K_RVD_REQUEST r;
+    if (!d || !d->memoryPrimary) return TRUE;
+    begin(&r, RB2K_RVD_OP_PRIMARY_READ);
+    r.a = page;
+    return request(d, &r, NULL, 0);
+}
+
 BOOL rb_memory_primary_dirty(DISPLAY *d, ULONG page, const RECTL *rect)
 {
     RB2K_RVD_REQUEST r;

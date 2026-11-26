@@ -178,6 +178,8 @@ typedef struct {
     PULONG memoryPixels, vgaPixels;
     ULONG memoryBytes, vgaBytes, memoryResource, memoryWidth, memoryHeight;
     ULONG memoryBack, memoryVisible;   /* a flip chain's second page's resource; the page on scanout 0 */
+    BOOLEAN memoryChain;   /* a flip chain is live: its presents are not read back into the pages */
+    ULONG memoryStale;     /* pages (bit 0, bit 1) older than their resources until read back */
     ULONG memoryUploads, memoryPixelsSent, memoryFailures, memoryPresents;
 } RB2K_GPU;
 
@@ -191,6 +193,8 @@ VP_STATUS rb_memory_primary_show(RB2K_GPU *gpu, ULONG width, ULONG height, BOOLE
 VP_STATUS rb_memory_primary_upload(RB2K_GPU *gpu, ULONG page, const RB2K_RECT *rect);
 VP_STATUS rb_memory_primary_flip(RB2K_GPU *gpu, ULONG page);
 void rb_memory_primary_clear_back(RB2K_GPU *gpu);
+VP_STATUS rb_memory_primary_read(RB2K_GPU *gpu, ULONG page);
+void rb_memory_primary_chain(RB2K_GPU *gpu, BOOLEAN live);
 VP_STATUS rb_memory_primary_present(RB2K_GPU *gpu, ULONG image, ULONG srcX, ULONG srcY, const RB2K_RECT *to);
 void rb_memory_primary_hide(RB2K_GPU *gpu);
 
@@ -284,7 +288,8 @@ ULONG rb_gpu_host_blocks(RB2K_GPU *gpu);
 BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture);
 BOOLEAN rb_gpu_copy_layer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG image, ULONG texture, ULONG layer, ULONG side);
 BOOLEAN rb_gpu_copy_image_rect(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG image, ULONG destination,
-                               ULONG srcX, ULONG srcY, ULONG dstX, ULONG dstY, ULONG width, ULONG height);
+                               ULONG srcX, ULONG srcY, ULONG dstX, ULONG dstY, ULONG width, ULONG height,
+                               BOOLEAN wait);
 BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture,
                               const RB2K_IMAGE *image);
 BOOLEAN rb_gpu_image_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *source, const RB2K_IMAGE *target);

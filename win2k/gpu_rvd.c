@@ -526,6 +526,9 @@ VP_STATUS rb_gpu_rvd_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     case RB2K_RVD_OP_PRIMARY_DIRTY:
         status = gpu->memoryWidth ? rb_memory_primary_upload(gpu, r->a, &r->u.rect) : NO_ERROR;
         break;
+    case RB2K_RVD_OP_PRIMARY_READ:
+        status = rb_memory_primary_read(gpu, r->a);
+        break;
     case RB2K_RVD_OP_GDI_ACCESS:
     case RB2K_RVD_OP_GDI_FLUSH: {
         ULONG active;

@@ -365,6 +365,7 @@ static VP_STATUS acquire_pages(ADAPTER *a)
     if (!a->chainProcess) return ERROR_ACCESS_DENIED;
     a->chainOwner = owner;
     clear_back_page(a, &info);
+    if (a->gpu.memoryWidth) rb_memory_primary_chain(&a->gpu, TRUE);
     return NO_ERROR;
 }
 
@@ -377,6 +378,7 @@ static VP_STATUS release_pages(ADAPTER *a, BOOLEAN keepView)
         status = select_page(a, 0, &info);
         if (!status) clear_back_page(a, &info);
     }
+    if (!status && a->gpu.memoryWidth) rb_memory_primary_chain(&a->gpu, FALSE);
     if (!status && a->chainProcess) {
         rb_view_close(a->chainProcess);
         a->chainProcess = NULL;
