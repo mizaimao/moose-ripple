@@ -28,7 +28,8 @@ if not errorlevel 1 (call "%~dp03dmfull.cmd" >"R:\run-%label%-3dm.txt" 2>&1) els
 echo AUTO launcher exit %errorlevel% >COM1
 rem What else was busy in the guest during the run: every process with its processor time
 rem (100 ns units) and its disk reads, for telling a quiet run from a disturbed one.
-wmic process get Name,KernelModeTime,UserModeTime,ReadOperationCount,ReadTransferCount /format:csv >"%TEMP%\auto-procs.txt" 2>&1
+wmic process get ProcessId,Name,KernelModeTime,UserModeTime,PageFaults,ReadOperationCount,ReadTransferCount,WriteTransferCount /format:csv >"%TEMP%\auto-procs.txt" 2>&1
+tasklist /svc /fi "imagename eq svchost.exe" >>"%TEMP%\auto-procs.txt" 2>&1
 echo AUTO_PROCS_BEGIN >COM1
 type "%TEMP%\auto-procs.txt" >COM1
 echo AUTO_PROCS_END >COM1

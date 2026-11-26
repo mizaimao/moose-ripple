@@ -273,23 +273,31 @@ the card's one boot (kernel log streaming to another machine), then a restart of
 
 ### Quiet runs and disturbed runs
 
-Of four runs of this guest on the virtio GPU on this host, two took 40% longer than the other
-two, with the same disk, settings and commands:
+Of six runs of this guest on the virtio GPU on this host, four took 30 to 40% longer than the
+other two, with the same disk, settings and commands:
 
 | run | the two SM2.0 tests | the CPU tests | the two HDR tests |
 | --- | --- | --- | --- |
 | quiet (the virgl run of the table, a later one, and the card run) | 183 to 193 s | 41 to 44 s | 165 to 167 s |
-| disturbed (two runs) | 268 and 272 s | 105 and 124 s | 220 and 226 s |
+| disturbed (four runs) | 250 to 272 s | 105 to 124 s | 220 to 226 s |
 
 The graphics tests last a fixed time, so their parts differ by the loading between them (45
 seconds without GPU work in a disturbed run, none visible in a quiet one); the CPU tests draw a
 fixed number of frames and took two and a half times as long. During loading and the CPU tests
 of a disturbed run the guest's processors left guest mode 58,000 to 136,000 times a second for
 a device register (the kernel's `kvm_exit` event, reason EPT_MISCONFIG; 200 to 9,000 in a
-quiet run) and were 30 to 50% busy instead of all four at full load. Which device was not
-recorded; the disk controller is the likely one, with something else in the guest reading the
-disk at the same time. `auto.cmd` now ends with every guest process's processor time and disk
-reads, to name it at the next such run.
+quiet run) and were 30 to 50% busy instead of all four at full load.
+
+The registers are the disk controller's: three registers of AHCI port 0 (command issue, SATA
+active and command, at 0x138, 0x134 and 0x118 of its memory range), read 12,000 to 25,000
+times a second each from one place in the guest's storage driver, with no matching interrupt
+status reads: a polling loop, not a flood of finished commands. Our own driver's notifications
+to the virtio GPU were about 800 a second at the same time, so it is not the display driver
+that keeps the processors out of the guest. No guest process read more from the disk in a
+disturbed run than in a quiet one (`auto.cmd` ends with every process's processor time and
+disk counters). What the storage driver waits for is not known yet; a flush of the throwaway
+overlay to the host's disk is the first thing to rule out (the guest's disk with
+`cache=unsafe`).
 
 Take a score only from a quiet run: the lengths of the parts are in the marks. The two runs of
 the table are of the quiet kind, and their parts agree within ten seconds.
@@ -307,12 +315,20 @@ long as a guest lives.
 | desktop, nothing drawing | 2% | 98% (woken about 2,000 times a second) | 1% |
 | first SM2.0 test (GPU 85 to 95% busy), two runs | 27% and 59% | 27% and 17% | 47% in the run where it was split out (13,450 waits in ten seconds, 0.35 ms each) |
 | first HDR test (GPU 80 to 90% busy) | 31% | 15% | 56% |
+| Firefly Forest, the second SM2.0 test (GPU 41 to 49% busy), three samples | 45 to 57% | 29 to 43% | 4 to 5% |
 | loading between two tests (no GPU work), two samples | 12% and 25% | 83% and 92% | 6% and none |
 
 In the tests where the GPU is nearly always busy the thread spends half of its time waiting
-for the GPU, as it should: the GPU is the limit there. Firefly Forest, the test where the GPU
-is only half busy, was missed twice by samples taken at fixed times into the run (they fell
-into loading and into the CPU tests), which is why `prof.sh` now samples all the time.
+for the GPU, as it should: the GPU is the limit there.
+
+Firefly Forest is different. The GPU is half idle, the thread hardly waits for it, is on a
+processor only half of the time itself, and sleeps a third of the time until the guest sends
+more. So neither the host's GPU nor QEMU's thread holds that test back: the work does not
+arrive fast enough. That leaves the guest's side of the pipe: the processor time the guest
+spends on each draw (the program, Direct3D and our user-mode driver, on one thread), or round
+trips in which the guest waits for an answer from the host. A profile inside the guest tells
+which. (Samples taken at fixed times into the run missed this test twice, falling into
+loading and into the CPU tests; `prof.sh` now samples all the time.)
 (A `top -H -b -n1` taken every few seconds had shown this thread at 100% in every test, the
 CPU tests too. That first sample of `top` is no measure.)
 
