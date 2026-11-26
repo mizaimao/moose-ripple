@@ -2323,8 +2323,12 @@ What changes in the command stream:
   the driver reports linear filtering for StretchRect, which 3DMark05
   requires. `COLORFILL` fills whole surfaces; other fills are counted in
   `d7draw`'s `D9DDI` line.
-- The scissor rectangle and the integer and boolean shader constants are
-  recorded but not applied yet; `d7draw` counts draws that would need them.
+- The scissor test is applied on the host: the miniport intersects the
+  rectangle with the viewport and sets it as virgl's scissor, also for
+  pretransformed vertices. Setting a render target resets the rectangle to all
+  of it, as Direct3D 9 does. `d9pixels` case 60 checks it.
+- The integer and boolean shader constants are recorded but not applied yet;
+  `d7draw` counts them.
 
 Two surface descriptions differ from a Direct3D 8 runtime's. A system-memory
 DXT texture is described by its blocks: an 8x8 DXT1 arrives as 16x2 (the

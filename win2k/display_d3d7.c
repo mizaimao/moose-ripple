@@ -781,6 +781,8 @@ static DWORD APIENTRY create_context(LPD3DNTHAL_CONTEXTCREATEDATA a)
             /* The Direct3D 8 and 9 runtimes pass 4 here; Direct3D 7 passes 3. */
             c->dx8 = kind >= 4;
             c->dx9Ddi = c->dx8 && d->d3d9Ddi && d->d7draw.d8Version >= 0x900;
+            c->scissor.left = c->scissor.top = 0;
+            c->scissor.right = c->scissor.bottom = 8192;
             c->id = ++lastContext;
             a->dwhContext = c->id;
             a->ddrval = DD_OK;
@@ -1575,6 +1577,18 @@ static void light_draw(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, BOOL hasDiffuse, BOO
     RtlCopyMemory(draw->material, c->material, sizeof(draw->material));
 }
 
+/* The scissor test of a draw packet: on with D3DRS_SCISSORTESTENABLE on the Direct3D 9 interface,
+ * the rectangle clamped to 0..8192. */
+static void scissor_words(const D7_CONTEXT *c, ULONG *on, ULONG *rect)
+{
+    if (!c->dx9Ddi || !c->rs[174]) return;
+    *on = 1;
+    rect[0] = (ULONG)min(max(c->scissor.left, 0), 8192);
+    rect[1] = (ULONG)min(max(c->scissor.top, 0), 8192);
+    rect[2] = (ULONG)min(max(c->scissor.right, 0), 8192);
+    rect[3] = (ULONG)min(max(c->scissor.bottom, 0), 8192);
+}
+
 static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p);
 
 /* Whether the stages fit the two-stage combiner of the Direct3D 7 draws. */
@@ -1615,6 +1629,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         return DD_OK;
     }
     RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D7_DRAW, vertices));
+    scissor_words(c, &draw->scissorOn, draw->scissor);
     if (stage_words(c, 0, &draw->colorStage, &draw->alphaStage, &needTexture) == StageUnsupported) {
         skip(c, RB2K_D7_SKIP_COMBINER, p->primitives);
         return DD_OK;
@@ -2133,6 +2148,7 @@ static BOOL pixel_states(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, const D8_SHADER *s
                          ULONG program, ULONG fog, ULONG primitives)
 {
     ULONG k;
+    scissor_words(c, &draw->scissorOn, draw->scissor);
     for (k = 0; k < RB2K_D8_STAGES; ++k) {
         D7_STAGE *st = &c->stages[k];
         D7_TEXTURE *tex;
@@ -2898,8 +2914,6 @@ static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULON
     if (type < RbTriangleList || type > RbTriangleFan) { skip(c, RB2K_D7_SKIP_PRIMITIVE, count); return DD_OK; }
     prims.kind = type == RbTriangleList ? List : type == RbTriangleStrip ? Strip : Fan;
     if (c->dx9Ddi && !d9_resolve(c)) { skip(c, RB2K_D7_SKIP_VERTEX, count); return DD_OK; }
-    /* D3DRS_SCISSORTESTENABLE: the rectangle is kept but not applied yet. */
-    if (c->dx9Ddi && c->rs[174]) ++c->display->d7draw.d9Ignored[RB2K_D9_IGNORED_SCISSOR];
     if (((c->fvf & 1) && !c->display->vertexShaders) || !c->streamStride || c->streamStride > 256 ||
         !stream_zero(c, a, &prims) ||
         first < -0x7fffffffLL || first > (LONGLONG)prims.streamBytes) {
@@ -3945,6 +3959,10 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
                     if (!s) ++c->display->d7draw.targetFailures;
                     if (!s || s->depth16) return DDERR_SURFACELOST;
                     targetId = s->id;
+                    /* Setting a render target resets the scissor rectangle to all of it. */
+                    c->scissor.left = c->scissor.top = 0;
+                    c->scissor.right = s->width;
+                    c->scissor.bottom = s->height;
                 } else {
                     ULONG handle = *(const ULONG *)(p + k * size);
                     DD_SLOT *z = handle ? target(c, handle, TRUE) : NULL;

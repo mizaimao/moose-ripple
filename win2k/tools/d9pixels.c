@@ -1625,6 +1625,32 @@ static void volume_cases(int only, BOOL version2)
  * A 64x64 render target texture is cleared blue with a red left half drawn
  * into it, then drawn over the back buffer: 43 by a fixed-function stage,
  * 44 by a ps_1_1 shader. */
+/* ---- the scissor test ----
+ * 60: a red quad over the whole back buffer with the scissor rectangle 32,32 to 96,96: red
+ * inside it, the clear colour outside. */
+static void scissor_case(int only, BOOL offered)
+{
+    static const SAMPLE s[] = { { 64, 64, 0xff0000 }, { 40, 88, 0xff0000 }, { 8, 8, CLEAR_COLOR }, { 120, 64, CLEAR_COLOR },
+                                { 64, 120, CLEAR_COLOR } };
+    RECT r = { 32, 32, 96, 96 };
+    TLVERTEX v[6];
+    HRESULT hr;
+    if (only && only != 60) return;
+    if (!offered) { printf("D9PIX scissor test not offered\n"); return; }
+    if (!begin("scissor")) return;
+    IDirect3DDevice9_SetScissorRect(device, &r);
+    IDirect3DDevice9_SetRenderState(device, D3DRS_SCISSORTESTENABLE, TRUE);
+    IDirect3DDevice9_SetTexture(device, 0, NULL);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+    IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+    quad(v, 0, 0, Side, Side, 0xffff0000);
+    hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+    IDirect3DDevice9_SetRenderState(device, D3DRS_SCISSORTESTENABLE, FALSE);
+    if (FAILED(hr)) { fail_hr("scissor", "draw", hr); IDirect3DDevice9_EndScene(device); }
+    else check("scissor", s, 5);
+}
+
 static void rt_cases(int only)
 {
     typedef struct { float x, y, z, rhw; DWORD diffuse; float u, v; } TV;
@@ -1853,6 +1879,7 @@ int main(int argc, char **argv)
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (caps.TextureCaps & D3DPTEXTURECAPS_CUBEMAP) && (!only || only >= 40))
         cube_cases(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (!only || only >= 43)) rt_cases(only);
+    scissor_case(only, (caps.RasterCaps & D3DPRASTERCAPS_SCISSORTEST) != 0);
     luminance_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
     colorwrite_case(only);

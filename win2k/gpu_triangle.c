@@ -571,7 +571,9 @@ BOOLEAN rb_gpu_d7_valid(const RB2K_D3D7_DRAW *d)
     if ((d->blend & ~(RB2K_D7_ON | RB2K_BLEND_DEST_ALPHA | RB2K_BLEND_NO_WRITE | 0xffff)) ||
         ((d->blend & RB2K_D7_ON) && (!blend_valid((d->blend >> 8) & 255) || !blend_valid(d->blend & 255)))) return FALSE;
     if (d->cull < CullNone || d->cull > CullCcw || d->specular > 1) return FALSE;
-    if (d->transform > 1 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
+    if (d->scissorOn > 1 || (d->scissorOn && (d->scissor[0] > 8192 || d->scissor[1] > 8192 || d->scissor[2] > 8192 ||
+        d->scissor[3] > 8192)) ||
+        d->transform > 1 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
         d->viewport[0] > 8192 || d->viewport[1] > 8192 || d->viewport[2] > 8192 || d->viewport[3] > 8192)))
         return FALSE;
     if (d->fog) {
@@ -796,7 +798,7 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
             s->boundVertex = want;
         }
     }
-    if (!fixed_states(gpu, r, image, d->depthState, d->alphaTest, d->blend, d->cull, d->transform, d->stencil,
+    if (!fixed_states(gpu, r, image, d->depthState, d->alphaTest, d->blend, d->cull, d->transform || d->scissorOn, d->stencil,
                       d->stencilRef)) return FALSE;
 
     key[0] = d->colorStage; key[1] = d->alphaStage; key[2] = d->specular; key[3] = d->fog;
@@ -901,7 +903,7 @@ BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
      * (+ 32 per light), draw 13. */
     ULONG lit = d->lighting != 0, lights = lit ? d->lightCount : 0, perVertex = lit ? 20 : 16;
     ULONG extra = (d->transform ? 56 : 0) + (lit ? 36 + 32*lights : 0);
-    ULONG i, count = d->count, total = 28 + (d->transform ? 4 : 0) + extra + perVertex*count, *p;
+    ULONG i, count = d->count, total = 28 + (d->transform || d->scissorOn ? 4 : 0) + extra + perVertex*count, *p;
     ULONG width = dimension_bits(image->width), height = dimension_bits(image->height);
     if (!rb_gpu_prepare_target(gpu, r, image) || !states(gpu, r, image, d, texture, texture1)) return FALSE;
     p = rb_gpu_frame_reserve(gpu, r, image, total);
@@ -915,11 +917,20 @@ BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
     *p++ = width - (1UL << 23);
     *p++ = height - (1UL << 23);
     *p++ = 0x3f000000;
-    if (d->transform) {
-        ULONG x0 = d->viewport[0], y0 = d->viewport[1];
-        ULONG x1 = d->viewport[0] + d->viewport[2], y1 = d->viewport[1] + d->viewport[3];
-        if (x1 > image->width) x1 = image->width;
-        if (y1 > image->height) y1 = image->height;
+    if (d->transform || d->scissorOn) {
+        /* Transformed draws are clipped to the viewport, and with the scissor test to its rectangle too. */
+        ULONG x0 = 0, y0 = 0, x1 = image->width, y1 = image->height;
+        if (d->transform) {
+            x0 = d->viewport[0]; y0 = d->viewport[1];
+            if (x1 > d->viewport[0] + d->viewport[2]) x1 = d->viewport[0] + d->viewport[2];
+            if (y1 > d->viewport[1] + d->viewport[3]) y1 = d->viewport[1] + d->viewport[3];
+        }
+        if (d->scissorOn) {
+            if (x0 < d->scissor[0]) x0 = d->scissor[0];
+            if (y0 < d->scissor[1]) y0 = d->scissor[1];
+            if (x1 > d->scissor[2]) x1 = d->scissor[2];
+            if (y1 > d->scissor[3]) y1 = d->scissor[3];
+        }
         if (x0 > x1) x0 = x1;
         if (y0 > y1) y0 = y1;
         *p++ = VIRGL_CMD0(VIRGL_CCMD_SET_SCISSOR_STATE,0,VIRGL_SET_SCISSOR_STATE_SIZE(1));
@@ -1156,7 +1167,9 @@ BOOLEAN rb_gpu_d8_valid(const RB2K_D3D8_DRAW *d)
     if (d->cull < CullNone || d->cull > CullCcw || (d->constantCount != 8 && d->constantCount != 16 && d->constantCount != 32)) return FALSE;
     if (d->transform == 2 && (d->lighting || !d->vertexProgram || d->vertexConstants > RB2K_D8_VS_CONSTANTS ||
         !d->vertexWords || d->vertexWords % 4 || d->vertexWords > RB2K_D8_VS_VERTEX_WORDS)) return FALSE;
-    if (d->transform > 2 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
+    if (d->scissorOn > 1 || (d->scissorOn && (d->scissor[0] > 8192 || d->scissor[1] > 8192 || d->scissor[2] > 8192 ||
+        d->scissor[3] > 8192)) ||
+        d->transform > 2 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
         d->viewport[0] > 8192 || d->viewport[1] > 8192 || d->viewport[2] > 8192 || d->viewport[3] > 8192)))
         return FALSE;
     for (k = 0; k < RB2K_D8_STAGES; ++k)
@@ -1196,7 +1209,7 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
                   (d->transform ? 56 : 0) + (lit ? 36 + 32 * lights : 0);
     ULONG sets = d->coordSets, words8 = RB2K_D8_VERTEX_WORDS(sets);
     ULONG stride = shaded ? d->vertexWords / 4 : lit ? 4 + (sets ? sets : 1) : 3 + sets, perVertex = 4 * stride;
-    ULONG total = 28 + (d->transform ? 4 : 0) + extra + perVertex * count, *p;
+    ULONG total = 28 + (d->transform || d->scissorOn ? 4 : 0) + extra + perVertex * count, *p;
     ULONG width = dimension_bits(image->width), height = dimension_bits(image->height);
     gpu->d8Step = 1;
     if (!rb_gpu_prepare_target(gpu, r, image)) return FALSE;
@@ -1242,7 +1255,7 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
         }
     }
     gpu->d8Step = 3;
-    if (!fixed_states(gpu, r, image, d->depthState, d->alphaTest, d->blend, d->cull, d->transform != 0, d->stencil,
+    if (!fixed_states(gpu, r, image, d->depthState, d->alphaTest, d->blend, d->cull, d->transform || d->scissorOn, d->stencil,
                       d->stencilRef)) return FALSE;
     /* The program shares the fragment shader table; its key cannot be a
      * fixed-function one, whose colour stage word is never all ones. */
@@ -1327,11 +1340,20 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
     *p++ = width - (1UL << 23);
     *p++ = height - (1UL << 23);
     *p++ = 0x3f000000;
-    if (d->transform) {
-        ULONG x0 = d->viewport[0], y0 = d->viewport[1];
-        ULONG x1 = d->viewport[0] + d->viewport[2], y1 = d->viewport[1] + d->viewport[3];
-        if (x1 > image->width) x1 = image->width;
-        if (y1 > image->height) y1 = image->height;
+    if (d->transform || d->scissorOn) {
+        /* Transformed draws are clipped to the viewport, and with the scissor test to its rectangle too. */
+        ULONG x0 = 0, y0 = 0, x1 = image->width, y1 = image->height;
+        if (d->transform) {
+            x0 = d->viewport[0]; y0 = d->viewport[1];
+            if (x1 > d->viewport[0] + d->viewport[2]) x1 = d->viewport[0] + d->viewport[2];
+            if (y1 > d->viewport[1] + d->viewport[3]) y1 = d->viewport[1] + d->viewport[3];
+        }
+        if (d->scissorOn) {
+            if (x0 < d->scissor[0]) x0 = d->scissor[0];
+            if (y0 < d->scissor[1]) y0 = d->scissor[1];
+            if (x1 > d->scissor[2]) x1 = d->scissor[2];
+            if (y1 > d->scissor[3]) y1 = d->scissor[3];
+        }
         if (x0 > x1) x0 = x1;
         if (y0 > y1) y0 = y1;
         *p++ = VIRGL_CMD0(VIRGL_CCMD_SET_SCISSOR_STATE,0,VIRGL_SET_SCISSOR_STATE_SIZE(1));
