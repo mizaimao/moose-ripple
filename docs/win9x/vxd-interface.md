@@ -159,4 +159,5 @@ On a host without virgl (`-device virtio-vga` without `-gl`) the VxD still loads
 
 - Completion interrupts. The VxD polls for ordinary requests.
 - The cursor queue is set up and unused.
-- Windowed OpenGL still reads frames back for GDI to draw and clip.
+- OpenGL in a window that doesn't cover the whole screen still reads frames back for GDI to
+  draw and clip (full-screen windows use `RVD_PRESENT` since 2026-11-26).
