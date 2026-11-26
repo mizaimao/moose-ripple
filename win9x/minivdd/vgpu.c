@@ -334,6 +334,7 @@ struct buffer {
     u32 width, height, scanout;
 };
 static u32 ctx_owner[MAX_CONTEXTS] = { 0 };
+static u32 win_attached[MAX_CONTEXTS];       /* the desktop image a context may copy into (RVD_PRESENT_WINDOW) */
 static struct buffer *buffers = 0;
 static u32 *page_table = 0;                     /* scratch: one entry per page of a new buffer */
 static u32 next_buffer = 0;
@@ -763,6 +764,7 @@ int __cdecl vgpu_init(void)
 #define ERROR_NOT_ENOUGH_MEMORY 8
 #define ERROR_GEN_FAILURE       31
 #define ERROR_NOT_SUPPORTED     50
+#define ERROR_NOT_READY         21              /* RVD_PRESENT_WINDOW: show this frame with GDI */
 #define ERROR_INVALID_PARAMETER 87
 #define ERROR_NO_MORE_ITEMS     259
 #define ERROR_TIMEOUT           1460            /* the device is stalled (see `stalled`) */
@@ -950,6 +952,7 @@ static void context_destroy(u32 ctx)
         request(GPU_CMD_CTX_DESTROY, ctx, sizeof(struct gpu_ctrl_hdr));
         simple(sizeof(struct gpu_ctrl_hdr));
     }
+    win_attached[ctx] = 0;
     ctx_owner[ctx] = stalled ? ZOMBIE : 0;
 }
 
@@ -1283,44 +1286,54 @@ static int valid_page(u32 w, u32 h, u32 bpp, u32 offset)
     return offset <= vram_bytes && offset % row == 0 && h <= (vram_bytes - offset) / row;
 }
 
-/* One row of VGA pixels into the shadow, compared as it is copied: 1 if it changed. */
-static int mirror_row(u32 *dst, const u8 *src, u32 w, u32 bpp)
+/* One row of VGA pixels into the shadow, compared as it is copied: 1 if it changed, and the
+   changed columns widen *lo..*hi. */
+static int mirror_row(u32 *dst, const u8 *src, u32 w, u32 bpp, u32 *lo, u32 *hi)
 {
-    int changed = 0;
-    u32 pixel;
+    u32 i, pixel, first = w, last = 0;
     if (bpp == 32) {
         const u32 *s = (const u32 *)src;
-        for (; w--; dst++, s++)
-            if (*dst != *s) {
-                *dst = *s;
-                changed = 1;
+        for (i = 0; i < w; i++)
+            if (dst[i] != s[i]) {
+                dst[i] = s[i];
+                if (first == w)
+                    first = i;
+                last = i;
             }
-        return changed;
-    }
-    if (bpp == 16) {
+    } else if (bpp == 16) {
         const u16 *s = (const u16 *)src;
-        for (; w--; dst++, s++) {
-            u32 p = *s, r = p >> 11, g = (p >> 5) & 63, b = p & 31;
+        for (i = 0; i < w; i++) {
+            u32 p = s[i], r = p >> 11, g = (p >> 5) & 63, b = p & 31;
             pixel = ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
-            if (*dst != pixel) {
-                *dst = pixel;
-                changed = 1;
+            if (dst[i] != pixel) {
+                dst[i] = pixel;
+                if (first == w)
+                    first = i;
+                last = i;
             }
         }
-        return changed;
-    }
-    for (; w--; dst++) {
-        if (bpp == 24) {
-            pixel = src[0] | ((u32)src[1] << 8) | ((u32)src[2] << 16);
-            src += 3;
-        } else
-            pixel = palette[*src++];
-        if (*dst != pixel) {
-            *dst = pixel;
-            changed = 1;
+    } else {
+        for (i = 0; i < w; i++) {
+            if (bpp == 24) {
+                pixel = src[0] | ((u32)src[1] << 8) | ((u32)src[2] << 16);
+                src += 3;
+            } else
+                pixel = palette[*src++];
+            if (dst[i] != pixel) {
+                dst[i] = pixel;
+                if (first == w)
+                    first = i;
+                last = i;
+            }
         }
     }
-    return changed;
+    if (first == w)
+        return 0;
+    if (first < *lo)
+        *lo = first;
+    if (last > *hi)
+        *hi = last;
+    return 1;
 }
 
 /* A quiet desktop is sampled one row in QUIET_ROWS, a different set each time, so every row
@@ -1330,7 +1343,7 @@ static int mirror_row(u32 *dst, const u8 *src, u32 w, u32 bpp)
 
 /* The DIB engine, DirectDraw locks and the software cursor all write these same VGA bytes.
    Sample them at a desktop event so writes without any later driver call remain visible.
-   Compare the shadow as we copy; *damage gets the changed rows. A still desktop generates no
+   Compare the shadow as we copy; *damage gets the changed rectangle. A still desktop generates no
    device commands. */
 static int mirror_pixels(struct desktop_image *d, u32 bpp, u32 offset, struct gpu_rect *damage,
                          int quiet)
@@ -1338,10 +1351,10 @@ static int mirror_pixels(struct desktop_image *d, u32 bpp, u32 offset, struct gp
     static u32 phase;
     const u8 *src = vram + offset;
     u32 *dst = (u32 *)d->mem;
-    u32 w = d->w, h = d->h, pitch = w * (bpp / 8), y, first = h, last = 0;
+    u32 w = d->w, h = d->h, pitch = w * (bpp / 8), y, first = h, last = 0, lo = w, hi = 0;
     if (quiet) {
         for (y = phase; y < h; y += QUIET_ROWS)
-            if (mirror_row(dst + y * w, src + y * pitch, w, bpp)) {
+            if (mirror_row(dst + y * w, src + y * pitch, w, bpp, &lo, &hi)) {
                 if (first == h)
                     first = y;
                 last = y;
@@ -1351,7 +1364,7 @@ static int mirror_pixels(struct desktop_image *d, u32 bpp, u32 offset, struct gp
             return 0;
     }
     for (y = 0; y < h; y++)
-        if (mirror_row(dst + y * w, src + y * pitch, w, bpp)) {
+        if (mirror_row(dst + y * w, src + y * pitch, w, bpp, &lo, &hi)) {
             if (y < first)
                 first = y;
             if (y > last)
@@ -1359,9 +1372,9 @@ static int mirror_pixels(struct desktop_image *d, u32 bpp, u32 offset, struct gp
         }
     if (first == h)
         return 0;
-    damage->x = 0;
+    damage->x = lo;
     damage->y = first;
-    damage->w = w;
+    damage->w = hi - lo + 1;
     damage->h = last - first + 1;
     return 1;
 }
@@ -1957,6 +1970,9 @@ static int publish_gpu(u32 id, struct buffer *b)
     return 0;
 }
 
+static struct gpu_rect win_damage;       /* RVD_PRESENT_WINDOW: copied, not yet flushed */
+static void win_flush(void);
+
 void __cdecl vgpu_desktop_tick(void)
 {
     u32 age, start = vmm_time_ms();
@@ -1971,6 +1987,8 @@ void __cdecl vgpu_desktop_tick(void)
             if (!gpu_page) {
                 if (!cpu_owner || vmm_time_ms() - last_cpu_sample >= DISPLAY_PERIOD_MS)
                     desktop_refresh(cpu_owner != 0);
+                if (win_damage.w)
+                    win_flush();         /* an OpenGL window's last frame */
             } else if (pending_gpu == gpu_page && vmm_time_ms() - last_gpu_update >= DISPLAY_PERIOD_MS &&
                      publish_gpu(gpu_page, find_buffer(gpu_page)))
                 timer_updates++;
@@ -2043,6 +2061,137 @@ static u32 present_image(const struct rvd_present *p, u32 process)
         }
     }
     return publish_gpu(p->buffer, b) ? 0 : failure();
+}
+
+/* ---- An OpenGL window shown from the GPU (RVD_PRESENT_WINDOW) -------------------------------- */
+/* The window's image is copied on the host into the desktop image, inside the rectangles GDI
+   reports visible, in the program's own context right after its drawing. The card's memory
+   under the window keeps what GDI last drew there: Mesa sends a GDI frame now and then and
+   whenever the pointer is over the window, so GDI's own reads (a window dragged, a screen
+   capture) find a recent picture, and the desktop copy only sends rows where that memory
+   changed, which the next window frame covers again. Display updates are paced like
+   full-screen ones; the desktop tick sends what is left when the program stops. */
+/* VIRGL_CCMD_BLIT. Rows, as seen with QEMU 10.0 and virglrenderer 1.1.0: the host's blit counts
+   the desktop image's rows from the bottom of the screen, so a straight copy of a picture comes
+   out upside down. Mesa therefore turns the window's image over as it makes it (top row last),
+   and both rectangles are given counted from the bottom. Checked with a banded test picture. */
+#define VIRGL_BLIT          16
+#define VIRGL_BLIT_WORDS    21      /* mask/filter, scissor x2, then dst and src: res, level, format,
+                                       x, y, z, w, h, d */
+#define DESKTOP_FORMAT      2       /* VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM, as make_desktop creates it */
+static u32 win_image, last_win_flush, window_frames, win_logged_ctx, win_logged_count;
+
+static void win_flush(void)
+{
+    if (win_damage.w && win_image == MAX_BUFFERS + 1 + desktop_slot && visible == win_image &&
+        !gpu_page && !dos_active && flush_scanout(win_image, display_w, display_h, &win_damage))
+        last_win_flush = vmm_time_ms();
+    win_damage.w = win_damage.h = 0;
+}
+
+static void win_union(u32 l, u32 t, u32 r, u32 b)
+{
+    if (win_damage.w) {
+        if (win_damage.x < l) l = win_damage.x;
+        if (win_damage.y < t) t = win_damage.y;
+        if (win_damage.x + win_damage.w > r) r = win_damage.x + win_damage.w;
+        if (win_damage.y + win_damage.h > b) b = win_damage.y + win_damage.h;
+    }
+    win_damage.x = l;
+    win_damage.y = t;
+    win_damage.w = r - l;
+    win_damage.h = b - t;
+}
+
+static u32 present_window(const struct rvd_window *p, u32 in_len, u32 process)
+{
+    const struct rvd_rect *rect = (const struct rvd_rect *)(p + 1);
+    struct buffer *b = find_buffer(p->buffer);
+    struct gpu_submit *s;
+    u32 *w, *words, id, i, age;
+    long x0 = (long)p->x, y0 = (long)p->y;
+
+    if (!lock)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    if (!p->count || p->count > RVD_WINDOW_RECTS ||
+        in_len < sizeof(*p) + p->count * sizeof(*rect) || !b || b->context != p->context ||
+        !valid_context(p->context) || ctx_owner[p->context] != process ||
+        b->width != p->width || b->height != p->height)
+        return ERROR_INVALID_PARAMETER;
+    if (stalled)
+        return ERROR_TIMEOUT;
+    /* A full-screen image, a DOS session or a game flipping VGA pages owns the display:
+       the program shows this frame through GDI instead. */
+    if (gpu_page || dos_active || cpu_owner || display_bpp < 16 ||
+        !valid_page(display_w, display_h, display_bpp, display_offset))
+        return ERROR_NOT_READY;
+    id = MAX_BUFFERS + 1 + desktop_slot;
+    if (!takeover || visible != id) {
+        if (!queue_refresh(1) || !desktop_refresh(0))
+            return failure();
+        if (!takeover)
+            return ERROR_NOT_READY;
+        id = MAX_BUFFERS + 1 + desktop_slot;
+        if (visible != id)
+            return ERROR_NOT_READY;
+        dbg("rvd: desktop scanout ready for an OpenGL window\r\n");
+    }
+    if (p->context != win_logged_ctx || p->count != win_logged_count) {  /* a new window or shape */
+        win_logged_ctx = p->context;
+        win_logged_count = p->count;
+        dbg("rvd: window at "); dbg_hex(p->x); dbg(" "); dbg_hex(p->y); dbg(", image ");
+        dbg_hex(p->width); dbg(" x "); dbg_hex(p->height); dbg(", rectangles "); dbg_hex(p->count);
+        for (i = 0; i < p->count && i < 4; i++) {
+            dbg(", "); dbg_hex(rect[i].left); dbg(" "); dbg_hex(rect[i].top); dbg(" ");
+            dbg_hex(rect[i].right); dbg(" "); dbg_hex(rect[i].bottom);
+        }
+        dbg("\r\n");
+    }
+    if (win_attached[p->context] != id) {
+        if (!one_id(GPU_CMD_CTX_ATTACH_RESOURCE, p->context, id))
+            return failure();
+        win_attached[p->context] = id;
+    }
+    s = (struct gpu_submit *)request(GPU_CMD_SUBMIT_3D, p->context, sizeof(*s));
+    w = words = (u32 *)(s + 1);
+    for (i = 0; i < p->count; i++) {
+        long l = (long)rect[i].left, t = (long)rect[i].top;
+        long r = (long)rect[i].right, bt = (long)rect[i].bottom;
+        if (l < x0) l = x0;
+        if (t < y0) t = y0;
+        if (r > x0 + (long)p->width) r = x0 + (long)p->width;
+        if (bt > y0 + (long)p->height) bt = y0 + (long)p->height;
+        if (l < 0) l = 0;
+        if (t < 0) t = 0;
+        if (r > (long)display_w) r = (long)display_w;
+        if (bt > (long)display_h) bt = (long)display_h;
+        if (l >= r || t >= bt)
+            continue;
+        *w++ = VIRGL_BLIT | ((u32)VIRGL_BLIT_WORDS << 16);
+        *w++ = 0xf;                              /* RGBA, nearest, no scissor */
+        *w++ = 0; *w++ = 0;
+        *w++ = id; *w++ = 0; *w++ = DESKTOP_FORMAT;
+        *w++ = (u32)l; *w++ = display_h - (u32)bt; *w++ = 0;
+        *w++ = (u32)(r - l); *w++ = (u32)(bt - t); *w++ = 1;
+        *w++ = p->buffer; *w++ = 0; *w++ = p->format;
+        *w++ = (u32)(l - x0); *w++ = p->height - (u32)(bt - y0); *w++ = 0;
+        *w++ = (u32)(r - l); *w++ = (u32)(bt - t);
+        *w++ = 1;
+        win_union((u32)l, (u32)t, (u32)r, (u32)bt);
+    }
+    if (w == words)
+        return 0;                                /* nothing of the window is on the screen */
+    s->size = (u32)((u8 *)w - (u8 *)words);
+    if (!simple(sizeof(*s) + s->size) || !render_fence(p->context))
+        return failure();
+    if (!window_frames++)
+        dbg("rvd: OpenGL window shown from the GPU\r\n");
+    win_image = id;
+    age = vmm_time_ms() - last_win_flush;
+    if (age < DISPLAY_PERIOD_MS && queue_refresh(DISPLAY_PERIOD_MS - age))
+        return 0;
+    win_flush();
+    return 0;
 }
 
 /* ---- The interface for user-mode drivers: DeviceIoControl on \\.\RIPPLEVD (rvd.h) ------------- */
@@ -2412,6 +2561,13 @@ static u32 dispatch(struct dioc *p)
         if (p->in_len < sizeof(struct rvd_present))
             return ERROR_INVALID_PARAMETER;
         err = present_image((const struct rvd_present *)p->in, p->process);
+        if (err)
+            return err;
+        break;
+    case RVD_PRESENT_WINDOW:
+        if (p->in_len < sizeof(struct rvd_window))
+            return ERROR_INVALID_PARAMETER;
+        err = present_window((const struct rvd_window *)p->in, p->in_len, p->process);
         if (err)
             return err;
         break;

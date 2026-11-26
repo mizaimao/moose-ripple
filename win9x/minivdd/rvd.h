@@ -42,6 +42,7 @@ struct rvd_upload_test { rvd_u32 ms, action; }; /* ms must be zero; output is a 
 #define RVD_GET_STATS           11  /* out: struct rvd_stats. No GPU needed */
 #define RVD_PRESENT             12  /* in: struct rvd_present; publish the latest GPU image */
 #define RVD_DESKTOP             13  /* in: offset or struct rvd_desktop; no input: out u32 takeover */
+#define RVD_PRESENT_WINDOW      14  /* in: struct rvd_window, then its rectangles: copy on the host */
 
 #define RVD_DESKTOP_FLIP        1   /* select the CPU page now; its display update may coalesce */
 struct rvd_desktop {
@@ -51,6 +52,20 @@ struct rvd_desktop {
 struct rvd_present {
     rvd_u32 context, buffer;    /* its scanout resource; updates to the same one coalesce */
     rvd_u32 width, height;      /* must match the current display mode and resource */
+};
+
+/* An OpenGL window's frame copied into the desktop's image on the host, inside the given
+   screen rectangles (GDI's visible region of the window). ERROR_NOT_READY: show it with GDI. */
+#define RVD_WINDOW_RECTS        16
+struct rvd_rect {
+    rvd_u32 left, top, right, bottom;   /* screen pixels, signed */
+};
+struct rvd_window {
+    rvd_u32 context, buffer;    /* the window's image; its top-left pixel is the client area's */
+    rvd_u32 width, height;      /* of that image */
+    rvd_u32 x, y;               /* the client area's top-left on the screen, signed */
+    rvd_u32 format;             /* the image's virgl format */
+    rvd_u32 count;              /* rectangles that follow, 1 to RVD_WINDOW_RECTS */
 };
 
 #define RVD_MAX_CAPS            8
