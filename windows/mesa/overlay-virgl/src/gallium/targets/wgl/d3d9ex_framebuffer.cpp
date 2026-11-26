@@ -70,6 +70,10 @@ struct wgl_d3d9ex_framebuffer {
    D3DFORMAT format;
    unsigned width, height;
    unsigned presents, refused;
+   /* Where the presents' time went, for RIPPLE_GL_LOG: waiting for the display, the copy, the
+    * present itself (microseconds), and how many presents asked to wait. */
+   uint64_t wait_us, copy_us, present_us;
+   unsigned waited;
    IDirect3DTexture9 *d3d_textures[D3D9EX_NUM_BUFFERS];
    struct pipe_resource *textures[D3D9EX_NUM_BUFFERS];
 };
@@ -78,6 +82,15 @@ static struct wgl_d3d9ex_framebuffer *
 wgl_d3d9ex_framebuffer(struct stw_winsys_framebuffer *fb)
 {
    return (struct wgl_d3d9ex_framebuffer *)fb;
+}
+
+static uint64_t
+d3d9ex_now_us(void)
+{
+   LARGE_INTEGER now, frequency;
+   QueryPerformanceCounter(&now);
+   QueryPerformanceFrequency(&frequency);
+   return (uint64_t)(now.QuadPart * 1000000.0 / frequency.QuadPart);
 }
 
 static D3DFORMAT
@@ -124,6 +137,9 @@ wgl_d3d9ex_framebuffer_destroy(struct stw_winsys_framebuffer *_fb, struct pipe_c
       }
    }
 
+   gl_log("%u presents, %u waited for the display: %llu ms waiting, %llu ms copying, %llu ms presenting",
+          fb->presents, fb->waited, (unsigned long long)(fb->wait_us / 1000),
+          (unsigned long long)(fb->copy_us / 1000), (unsigned long long)(fb->present_us / 1000));
    d3d9ex_release_buffers(fb);
    if (fb->device)
       fb->device->Release();
@@ -190,8 +206,13 @@ wgl_d3d9ex_framebuffer_present(struct stw_winsys_framebuffer *_fb, int interval,
    /* The device presents at once (its interval cannot change without a reset, which would
     * cost the shared textures); a program that asked for a swap interval waits for the
     * display's next refresh here. */
-   if (interval > 0)
+   uint64_t t0 = d3d9ex_now_us();
+   if (interval > 0) {
       fb->device->WaitForVBlank(0);
+      fb->waited++;
+   }
+   uint64_t t1 = d3d9ex_now_us();
+   fb->wait_us += t1 - t0;
 
    for (unsigned i = 0; i < D3D9EX_NUM_BUFFERS; ++i) {
       if (fb->textures[i] == res && fb->d3d_textures[i]) {
@@ -201,12 +222,16 @@ wgl_d3d9ex_framebuffer_present(struct stw_winsys_framebuffer *_fb, int interval,
    }
    HRESULT hr_back = E_FAIL, hr_copy = E_FAIL, hr_present = E_FAIL;
    if (source && SUCCEEDED(hr_back = fb->device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &back)) &&
-       SUCCEEDED(hr_copy = fb->device->StretchRect(source, NULL, back, NULL, D3DTEXF_NONE)))
+       SUCCEEDED(hr_copy = fb->device->StretchRect(source, NULL, back, NULL, D3DTEXF_NONE))) {
+      uint64_t t2 = d3d9ex_now_us();
+      fb->copy_us += t2 - t1;
       shown = SUCCEEDED(hr_present = fb->device->PresentEx(NULL, NULL, NULL, NULL, 0));
+      fb->present_us += d3d9ex_now_us() - t2;
+   }
    if (fb->presents++ < 3 || !shown)
       if (fb->presents < 20)
-         gl_log("present %u: source %p, back buffer 0x%08lx, copy 0x%08lx, present 0x%08lx", fb->presents,
-                (void *)source, (unsigned long)hr_back, (unsigned long)hr_copy, (unsigned long)hr_present);
+         gl_log("present %u (interval %d): source %p, back buffer 0x%08lx, copy 0x%08lx, present 0x%08lx", fb->presents,
+                interval, (void *)source, (unsigned long)hr_back, (unsigned long)hr_copy, (unsigned long)hr_present);
    if (back)
       back->Release();
    if (source)

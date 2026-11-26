@@ -37,6 +37,7 @@ static void add(const char *format, ...)
 static void frame(HDC dc)
 {
     MSG m;
+    (void)dc;
     while (PeekMessageA(&m, 0, 0, 0, PM_REMOVE)) DispatchMessageA(&m);
     glViewport(0, 0, 64, 64);
     glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
@@ -129,7 +130,12 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
             (unsigned)GetRValue(c), (unsigned)GetGValue(c), (unsigned)GetBValue(c));
 
         if (swap_interval) {
-            CreateThread(0, 0, watchdog, (void *)"swap interval 1", 0, 0);
+            CreateThread(0, 0, watchdog, (void *)"swap interval", 0, 0);
+            swap_interval(0);
+            t0 = GetTickCount();
+            for (i = 0; i < 300; i++) { frame(dc); SwapBuffers(dc); }
+            t0 = GetTickCount() - t0;
+            add("300 frames at swap interval 0 in %lu ms\r\n", (unsigned long)t0);
             swap_interval(1);
             t0 = GetTickCount();
             for (i = 0; i < 30; i++) { frame(dc); SwapBuffers(dc); }
