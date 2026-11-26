@@ -74,8 +74,8 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
     if (caps & DDSCAPS_ZBUFFER) {
         if (!d->z16Storage || !d->nativeD3D7 || !d->gpuSurfaces ||
             (caps & ~(DDSCAPS_ZBUFFER | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM)) ||
-            !desc->dwWidth || desc->dwWidth > RB2K_DD_MAX_WIDTH ||
-            !desc->dwHeight || desc->dwHeight > RB2K_DD_MAX_HEIGHT)
+            !desc->dwWidth || desc->dwWidth > RB2K_DD_TARGET_SIDE ||
+            !desc->dwHeight || desc->dwHeight > RB2K_DD_TARGET_SIDE)
             return FALSE;
         if (desc->dwFlags & DDSD_PIXELFORMAT)
             return fmt->dwSize == sizeof(*fmt) &&
@@ -88,8 +88,8 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
          * and samples (32-bit, one level). */
         if (!d->nativeD3D7 || !d->gpuSurfaces || d->mode.BitsPerPlane != 32 ||
             (caps & ~(DDSCAPS_TEXTURE | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM)) ||
-            !desc->dwWidth || desc->dwWidth > RB2K_DD_MAX_WIDTH ||
-            !desc->dwHeight || desc->dwHeight > RB2K_DD_MAX_HEIGHT) return FALSE;
+            !desc->dwWidth || desc->dwWidth > RB2K_DD_TARGET_SIDE ||
+            !desc->dwHeight || desc->dwHeight > RB2K_DD_TARGET_SIDE) return FALSE;
         if (!(desc->dwFlags & DDSD_PIXELFORMAT)) return TRUE;
         return fmt->dwRGBBitCount == 32 && fmt->dwRBitMask == 0xff0000 && fmt->dwGBitMask == 0xff00 &&
                fmt->dwBBitMask == 0xff && (fmt->dwFlags == DDPF_RGB ||
@@ -118,8 +118,8 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
                /* Textures returned above; render-to-texture is not offered. */
                (caps & ~(DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM |
                          DDSCAPS_3DDEVICE)) ||
-               !desc->dwWidth || desc->dwWidth > RB2K_DD_MAX_WIDTH ||
-               !desc->dwHeight || desc->dwHeight > RB2K_DD_MAX_HEIGHT) return FALSE;
+               !desc->dwWidth || desc->dwWidth > RB2K_DD_TARGET_SIDE ||
+               !desc->dwHeight || desc->dwHeight > RB2K_DD_TARGET_SIDE) return FALSE;
     if (!(desc->dwFlags & DDSD_PIXELFORMAT)) return TRUE;
     if (fmt->dwRGBBitCount != d->mode.BitsPerPlane) return FALSE;
     if (d->mode.BitsPerPlane == 8)

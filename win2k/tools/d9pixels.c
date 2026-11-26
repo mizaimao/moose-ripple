@@ -1423,6 +1423,48 @@ static void volume_cases(int only, BOOL version2)
  * A 64x64 render target texture is cleared blue with a red left half drawn
  * into it, then drawn over the back buffer: 43 by a fixed-function stage,
  * 44 by a ps_1_1 shader. */
+/* 70: a 2048x2048 render target texture with a depth buffer of its size (3DMark05's shadow maps),
+ * cleared green, then drawn over the back buffer. */
+static void rt2048_case(int only)
+{
+    typedef struct { float x, y, z, rhw; DWORD diffuse; float u, v; } TV;
+    static const SAMPLE s[] = { { 32, 64, 0x00ff00 }, { 96, 64, 0x00ff00 } };
+    TV v[4] = { { 0, 0, 0.5f, 1, 0xffffffff, 0, 0 }, { Side, 0, 0.5f, 1, 0xffffffff, 1, 0 },
+                { 0, Side, 0.5f, 1, 0xffffffff, 0, 1 }, { Side, Side, 0.5f, 1, 0xffffffff, 1, 1 } };
+    IDirect3DTexture9 *t = NULL;
+    IDirect3DSurface9 *surface = NULL, *back = NULL, *depth = NULL, *oldDepth = NULL;
+    HRESULT hr;
+    if (only && only != 70) return;
+    hr = IDirect3DDevice9_CreateTexture(device, 2048, 2048, 1, D3DUSAGE_RENDERTARGET, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, &t, NULL);
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice9_CreateDepthStencilSurface(device, 2048, 2048, D3DFMT_D16, D3DMULTISAMPLE_NONE, 0, TRUE, &depth, NULL);
+    if (FAILED(hr)) { fail_hr("rt2048", "create", hr); if (t) IDirect3DTexture9_Release(t); return; }
+    IDirect3DTexture9_GetSurfaceLevel(t, 0, &surface);
+    IDirect3DDevice9_GetRenderTarget(device, 0, &back);
+    IDirect3DDevice9_GetDepthStencilSurface(device, &oldDepth);
+    hr = IDirect3DDevice9_SetRenderTarget(device, 0, surface);
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice9_SetDepthStencilSurface(device, depth);
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice9_Clear(device, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xff00ff00, 1.0f, 0);
+    IDirect3DDevice9_SetRenderTarget(device, 0, back);
+    IDirect3DDevice9_SetDepthStencilSurface(device, oldDepth);
+    if (FAILED(hr)) fail_hr("rt2048", "target", hr);
+    else if (begin("rt2048")) {
+        IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)t);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+        IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1);
+        hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        if (FAILED(hr)) { fail_hr("rt2048", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("rt2048", s, 2);
+    }
+    if (oldDepth) IDirect3DSurface9_Release(oldDepth);
+    IDirect3DSurface9_Release(depth);
+    IDirect3DSurface9_Release(surface);
+    if (back) IDirect3DSurface9_Release(back);
+    IDirect3DTexture9_Release(t);
+}
+
 static void rt_cases(int only)
 {
     typedef struct { float x, y, z, rhw; DWORD diffuse; float u, v; } TV;
@@ -1570,6 +1612,7 @@ int main(int argc, char **argv)
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (caps.TextureCaps & D3DPTEXTURECAPS_CUBEMAP) && (!only || only >= 40))
         cube_cases(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (!only || only >= 43)) rt_cases(only);
+    rt2048_case(only);
     luminance_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
     colorwrite_case(only);
