@@ -1076,3 +1076,35 @@ queued, each on its own boot).
 
 Not done: a long run (hours) in the queued mode, and the Windows host. The long run is due
 before the next release.
+
+### Is the Proxmox host at its limit? (2026-11-25)
+
+The two test programs with the kext that queues by default, sampled on the host while they
+ran (read-only: the i915 busy time of QEMU's render node, CPU time of QEMU's threads), and
+one run of each on the same host's GeForce 9600 GT, passed through to a second 10.6.8 VM
+with the same CPU model and count and Apple's own driver:
+
+| | ours (Intel UHD 630 through virgl) | GeForce 9600 GT, Apple's driver |
+|---|---|---|
+| OpenArena timedemo, 1024x768 window | 147.5 frames/s | 351.1 frames/s |
+| ...host GPU busy | 47-51%, at its top clock (1200 MHz) | |
+| ...QEMU's main thread (the host's renderer) | 31-40% of a core | |
+| ...the guest's CPU threads, sum | 65-82% of a core | |
+| Cinebench R11.5 OpenGL test | 40.2 frames/s, window 1280x708 (37.7 in a second run) | 33.0 frames/s, window 1920x967 |
+| ...reference check | 99.38%, 3,625 pixels off | 99.41%, 3,442 pixels off |
+| ...host GPU busy | 65-88%, about 70% | |
+| ...QEMU's main thread | 14-22% | |
+| ...the guest's CPU threads, sum | 135-177% | |
+
+- **OpenArena is not at the host's limit.** No part is busy all the time: the GPU half, the
+  host's renderer a third, the guest's CPUs three quarters of one core. With the same CPUs the
+  game runs 2.4 times as fast on the 9600 GT, so a frame of the game itself needs under 2.9 ms
+  and ours takes 6.8 ms. The difference is time in our path on the CPU (the driver in the
+  guest, the translation on the host) and waiting between the two, not the Intel GPU.
+- **Cinebench is close to the Intel GPU's limit**: about 70% busy, up to 88%. The two frame
+  rates are not like for like: the window on the 9600 GT has twice the pixels, because its
+  monitor offers no 1280x800 and a switch of our VM to 1920x1080 crashed WindowServer
+  (docs/known-issues.md, KI-11). Both pictures differ from Cinebench's reference by nearly the
+  same number of pixels.
+- Cinebench shows its licence window over the test window in every run on both VMs; the four
+  runs on the 9600 GT were 32.94 to 32.99 frames/s.
