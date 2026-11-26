@@ -252,7 +252,7 @@ program that clamps to a border still gets the edge there.
 ## KI-13: A swap rectangle is ignored for windows the kernel shows
 
 GitHub issue: [#235](https://github.com/mizaimao/moose-ripple/issues/235). Found on 2026-11-26; release 0.6.0 and
-earlier have it (KI-13 is not fixed yet).
+earlier have it.
 
 **Symptom.** A program can ask that a swap shows only part of its window (`kCGLCPSwapRectangle`
 with `kCGLCESwapRectangle` on; Core Animation presents only the changed part of a view that
