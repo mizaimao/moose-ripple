@@ -76,7 +76,7 @@ static RECTL *path_area(PATHOBJ *path, RECTL *r)
 static BOOL finish(DISPLAY *d, BOOL painted, const RECTL *dirty)
 {
     BOOL flushed = rb_gl_cpu_flush(d);
-    if (painted && d && d->memoryPrimary) rb_memory_primary_dirty(d, dirty);
+    if (painted && d && d->memoryPrimary) rb_memory_primary_dirty(d, 0, dirty);
     rb_gl_cpu_unlock();
     return painted && flushed;
 }

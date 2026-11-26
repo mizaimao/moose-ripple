@@ -524,7 +524,7 @@ VP_STATUS rb_gpu_rvd_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     case RB2K_RVD_OP_DESKTOP: status = gpu->ready ? rb_gl_desktop(gpu) : NO_ERROR; break;
     case RB2K_RVD_OP_HELD: status = held(gpu, packet); break;
     case RB2K_RVD_OP_PRIMARY_DIRTY:
-        status = gpu->memoryWidth ? rb_memory_primary_upload(gpu, &r->u.rect) : NO_ERROR;
+        status = gpu->memoryWidth ? rb_memory_primary_upload(gpu, r->a, &r->u.rect) : NO_ERROR;
         break;
     case RB2K_RVD_OP_GDI_ACCESS:
     case RB2K_RVD_OP_GDI_FLUSH: {

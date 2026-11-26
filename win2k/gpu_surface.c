@@ -138,6 +138,18 @@ static VP_STATUS present(RB2K_GPU *gpu, const RB2K_IMAGE *image, const RB2K_DD_P
         p->width > primary->width || p->height > primary->height ||
         p->dstX > primary->width - p->width || p->dstY > rows - p->height)
         return ERROR_INVALID_PARAMETER;
+    if (gpu->memoryWidth && !solid) {
+        /* The desktop in guest memory: the host copies the frame (gpu_primary.c). */
+        RB2K_RECT to;
+        VP_STATUS status;
+        to.left = p->dstX;
+        to.top = p->dstY;
+        to.right = p->dstX + p->width;
+        to.bottom = p->dstY + p->height;
+        status = rb_memory_primary_present(gpu, image->id, p->srcX, p->srcY, &to);
+        if (!status) ++gpu->presents;
+        return status;
+    }
     if (solid) {
         ULONG i, color = image->defined ? image->color : 0;
         for (i = 0; i < sizeof(span) / sizeof(span[0]); ++i) span[i] = color;
@@ -173,13 +185,15 @@ static VP_STATUS present(RB2K_GPU *gpu, const RB2K_IMAGE *image, const RB2K_DD_P
     }
     ++gpu->presents;
     if (gpu->memoryWidth) {
-        /* The desktop in guest memory shows what the host has been sent. */
+        /* The desktop in guest memory shows what the host has been sent. A flip
+         * chain's second page lies below the first. */
+        ULONG page = p->dstY >= gpu->memoryHeight ? 1 : 0;
         RB2K_RECT r;
         r.left = p->dstX;
-        r.top = p->dstY;
+        r.top = p->dstY - page * gpu->memoryHeight;
         r.right = p->dstX + p->width;
-        r.bottom = p->dstY + p->height;
-        return rb_memory_primary_upload(gpu, &r);
+        r.bottom = r.top + p->height;
+        return rb_memory_primary_upload(gpu, page, &r);
     }
     return NO_ERROR;
 }

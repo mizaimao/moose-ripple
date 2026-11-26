@@ -756,6 +756,37 @@ BOOLEAN rb_gpu_copy_layer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG image, U
     return fenced(gpu, result, &p->submit.hdr, sizeof(p->submit) + sizeof(p->command[0]), RB2K_STAGE_TRANSFER);
 }
 
+/* A rectangle of an image into another resource (the desktop in guest memory,
+ * gpu_primary.c), in the image's own context, to which the destination is
+ * attached for the copy. */
+BOOLEAN rb_gpu_copy_image_rect(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG image, ULONG destination,
+                               ULONG srcX, ULONG srcY, ULONG dstX, ULONG dstY, ULONG width, ULONG height)
+{
+    COPY_PACKET *p = (COPY_PACKET *)gpu->copyPacket.bytes;
+    RB2K_GPU_RESULT cleanup;
+    ULONG *w = p->command[0];
+    VideoPortZeroMemory(p, sizeof(p->submit) + sizeof(p->command[0]));
+    p->submit.hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    p->submit.hdr.ctx_id = image;
+    p->submit.size = sizeof(p->command[0]);
+    w[0] = VIRGL_CMD0(VIRGL_CCMD_RESOURCE_COPY_REGION, 0, VIRGL_CMD_RESOURCE_COPY_REGION_SIZE);
+    w[VIRGL_CMD_RCR_DST_RES_HANDLE] = destination;
+    w[VIRGL_CMD_RCR_DST_X] = dstX;
+    w[VIRGL_CMD_RCR_DST_Y] = dstY;
+    w[VIRGL_CMD_RCR_SRC_RES_HANDLE] = image;
+    w[VIRGL_CMD_RCR_SRC_X] = srcX;
+    w[VIRGL_CMD_RCR_SRC_Y] = srcY;
+    w[VIRGL_CMD_RCR_SRC_W] = width;
+    w[VIRGL_CMD_RCR_SRC_H] = height;
+    w[VIRGL_CMD_RCR_SRC_D] = 1;
+    if (!context_resource(gpu, result, image, destination, TRUE, RB2K_STAGE_ATTACH)) return FALSE;
+    if (!fenced(gpu, result, &p->submit.hdr, sizeof(p->submit) + sizeof(p->command[0]), RB2K_STAGE_TRANSFER)) {
+        if (gpu->ready) context_resource(gpu, &cleanup, image, destination, FALSE, RB2K_STAGE_CLEANUP);
+        return FALSE;
+    }
+    return context_resource(gpu, result, image, destination, FALSE, RB2K_STAGE_CLEANUP);
+}
+
 enum { BlitWords = 1 + VIRGL_CMD_BLIT_SIZE };
 typedef struct {
     struct virtio_gpu_cmd_submit submit;
