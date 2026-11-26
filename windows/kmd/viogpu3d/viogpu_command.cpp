@@ -504,8 +504,8 @@ void VioGpuCommander::ThreadWork(PVOID Context)
     pdev->ThreadWorkRoutine();
 }
 
-// Under CPU emulation, with the fine timer held: did the tick clock keep up with the performance
-// counter since the marks were set? Two spans in a row under 85% say no. A host that stalls for
+// With the fine timer held: did the tick clock keep up with the performance counter since the
+// marks were set? Two spans in a row under 85% say no. A host that stalls for
 // a moment delivers the ticks afterwards and must not cost the fine timer for the rest of the
 // session.
 static BOOLEAN TickClockKeepsUp(ULONGLONG *tickMark, LONGLONG *counterMark, UINT *failed)
@@ -546,6 +546,14 @@ void VioGpuCommander::ThreadWorkRoutine(void)
     // (The RTC with -rtc driftfix=slew does not.) So while the fine timer is held there,
     // the tick clock is compared with the performance counter, and if it falls behind, the
     // fine timer is given up until the driver is loaded again.
+    //
+    // A real processor can lose ticks too: every clock interrupt is acknowledged at the
+    // real-time clock's port, which waits for QEMU's lock, and a guest that keeps QEMU's drawing
+    // thread busy leaves the lock free too seldom for 2,048 of them a second. Seen with the
+    // message-signalled interrupt on QEMU 9.2: the tick clock moved a quarter to a half of real
+    // time through two benchmark tests and made it up afterwards, so the benchmark timed itself
+    // wrongly. The same comparison runs there, and the fine timer is given up for ten seconds
+    // the first time and twice as long each time after, up to five minutes.
     UINT cpu[4];
     __asm__ volatile("cpuid"
                      : "=a"(cpu[0]), "=b"(cpu[1]), "=c"(cpu[2]), "=d"(cpu[3])
@@ -574,6 +582,7 @@ void VioGpuCommander::ThreadWorkRoutine(void)
     LONGLONG checkCounter = 0;
     UINT checkFailed = 0;
     BOOLEAN fineTimer = FALSE, fineAllowed = TRUE;
+    ULONGLONG fineBlockedUntil = 0, fineBackoff = 10 * 10000000ULL;
     for (;;)
     {
         LARGE_INTEGER nudge, idle;
@@ -588,19 +597,28 @@ void VioGpuCommander::ThreadWorkRoutine(void)
                 streamStart = now;
             }
             lastWork = now;
-            if (fineAllowed && !fineTimer && now - streamStart >= streamMin)
+            if (fineAllowed && !fineTimer && now >= fineBlockedUntil && now - streamStart >= streamMin)
             {
                 ExSetTimerResolution(fineResolution, TRUE);
                 fineTimer = TRUE;
                 checkTick = now;
                 checkCounter = KeQueryPerformanceCounter(NULL).QuadPart;
             }
-            else if (emulatedCpu && fineTimer && now - checkTick >= checkSpan &&
+            else if (fineTimer && now - checkTick >= checkSpan &&
                      !TickClockKeepsUp(&checkTick, &checkCounter, &checkFailed))
             {
                 ExSetTimerResolution(0, FALSE);
                 fineTimer = FALSE;
-                fineAllowed = FALSE;
+                if (emulatedCpu)
+                {
+                    fineAllowed = FALSE;
+                }
+                else
+                {
+                    fineBlockedUntil = now + fineBackoff;
+                    fineBackoff = min(fineBackoff * 2, 300 * 10000000ULL);
+                    checkFailed = 0;
+                }
             }
         }
         NTSTATUS wait = KeWaitForSingleObject(&m_QueueEvent,
@@ -627,10 +645,19 @@ void VioGpuCommander::ThreadWorkRoutine(void)
             else if (m_running == 0)
             {
                 // a stream shorter than the span is checked as it ends
-                if (emulatedCpu && fineTimer && KeQueryInterruptTime() - checkTick >= checkSpan / 5 &&
+                if (fineTimer && KeQueryInterruptTime() - checkTick >= checkSpan / 5 &&
                     !TickClockKeepsUp(&checkTick, &checkCounter, &checkFailed))
                 {
-                    fineAllowed = FALSE;
+                    if (emulatedCpu)
+                    {
+                        fineAllowed = FALSE;
+                    }
+                    else
+                    {
+                        fineBlockedUntil = KeQueryInterruptTime() + fineBackoff;
+                        fineBackoff = min(fineBackoff * 2, 300 * 10000000ULL);
+                        checkFailed = 0;
+                    }
                 }
                 ExSetTimerResolution(0, FALSE);
                 fineTimer = FALSE;
