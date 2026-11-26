@@ -1234,7 +1234,7 @@ static void bump_case(int only)
 /* ---- volume textures ----
  * A 4x4x4 volume with one colour per slice (red, green, blue, yellow),
  * sampled at each slice's middle by four quads: 45 with ps_2_0
- * (dcl_volume), 46 with ps_1_1 (tex). */
+ * (dcl_volume), 46 with ps_1_1 (tex), 49 with ps_1_1 from a DXT1 volume. */
 static void volume_cases(int only, BOOL version2)
 {
     typedef struct { float x, y, z, rhw; DWORD diffuse; float u, v, w; } VV;
@@ -1293,6 +1293,36 @@ static void volume_cases(int only, BOOL version2)
     }
     IDirect3DDevice9_SetTexture(device, 0, NULL);
     IDirect3DVolumeTexture9_Release(volume);
+    /* 49: the same slices in a DXT1 volume, one block each (565 colours, both ends alike). */
+    if ((!only || only == 49) &&
+        SUCCEEDED(IDirect3DDevice9_CreateVolumeTexture(device, 4, 4, 4, 1, 0, D3DFMT_DXT1, D3DPOOL_MANAGED, &volume, NULL))) {
+        static const WORD ends[4] = { 0xf800, 0x07e0, 0x001f, 0xffe0 };
+        IDirect3DPixelShader9 *handle = NULL;
+        if (SUCCEEDED(IDirect3DVolumeTexture9_LockBox(volume, 0, &box, NULL, 0))) {
+            for (slice = 0; slice < 4; ++slice) {
+                WORD *b = (WORD *)((BYTE *)box.pBits + slice * box.SlicePitch);
+                b[0] = b[1] = ends[slice];
+                b[2] = b[3] = 0;
+            }
+            IDirect3DVolumeTexture9_UnlockBox(volume, 0);
+        }
+        IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)volume);
+        if (FAILED(IDirect3DDevice9_CreatePixelShader(device, ps1, &handle))) fail_hr("ps1_volume_dxt1", "create", E_FAIL);
+        else {
+            if (begin("ps1_volume_dxt1")) {
+                HRESULT hr;
+                IDirect3DDevice9_SetPixelShader(device, handle);
+                IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE3(0));
+                hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 8, v, sizeof(v[0]));
+                IDirect3DDevice9_SetPixelShader(device, NULL);
+                if (FAILED(hr)) { fail_hr("ps1_volume_dxt1", "draw", hr); IDirect3DDevice9_EndScene(device); }
+                else check("ps1_volume_dxt1", s, 5);
+            }
+            IDirect3DPixelShader9_Release(handle);
+        }
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        IDirect3DVolumeTexture9_Release(volume);
+    } else if (!only || only == 49) printf("D9PIX DXT1 volume textures not offered\n");
 }
 
 /* ---- render target textures ----

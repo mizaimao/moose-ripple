@@ -2095,6 +2095,21 @@ environment and DOT3 bump mapping tests report "not supported by hardware"
 (vertex formats and textures the fixed-function path refuses), so the
 pictures are not right yet.
 
+## DXT volume textures
+
+DXT1 to DXT5 were offered as 2D and cube textures only, and the display
+driver refused to allocate a compressed volume. They are now offered as volumes too. The
+driver allocates them in rows of 4x4 blocks, slice after slice, copies them
+block row by block row for the runtime's managed volumes, and decodes them
+to 32-bit texels on the way to the host (the host DXT path has no slices). `d9pixels` case 49 reads a 4x4x4 DXT1 volume with one solid
+colour per slice through a version 1 shader.
+
+On XP SP3 under KVM on the second Intel UHD 630 host, case 49 passes and
+`d9pixels` passes 43 of 43. 3DMark03's "Unable to create volume texture"
+remains: the runtime refuses that volume before it reaches the display
+driver (no surface was refused), so its format or size is still another
+one the device does not offer.
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:

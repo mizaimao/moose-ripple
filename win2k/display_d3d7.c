@@ -456,7 +456,7 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
         if (l->lpSurfMore && (l->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_VOLUME)) {
             /* A volume: its slices follow each other in each level's memory. */
             t->depth = l->lpSurfMore->ddsCapsEx.dwCaps4;   /* the depth */
-            if (!t->depth || t->depth > RB2K_D7_VOLUME_SIDE || compressed(t->format)) t->format = TexNone;
+            if (!t->depth || t->depth > RB2K_D7_VOLUME_SIDE) t->format = TexNone;
             ++d->d7draw.volumeTextures;
         }
         t->levels = face_levels(t, 0, l, FALSE, &stop);
@@ -1167,7 +1167,8 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
     ULONG *out = (ULONG *)(packet + 1);
     const BYTE *texels = texelScratch;
     if (!packet || t->width * 4 > RB2K_D7_UPLOAD_BYTES) return FALSE;
-    if (compressed(format) && !hostBlocksRefused) {
+    /* DXT volumes are decoded here: the host blocks path has no slices. */
+    if (compressed(format) && t->depth <= 1 && !hostBlocksRefused) {
         /* The host decodes them when it can: a reset releases the texture
          * like any other, so try once more with a new one. */
         if (upload_blocks(d, t, targetId)) return TRUE;
@@ -2406,7 +2407,7 @@ static void volume_blt(D7_CONTEXT *c, const RB_DP2_VOLUME_BLT *b)
     D7_TEXTURE *dst = find_texture(c->local, b->dest), *src = find_texture(c->local, b->source);
     ULONG left = b->box[0], top = b->box[1], right = b->box[2], bottom = b->box[3], front = b->box[4], back = b->box[5];
     ULONG bpp, level, levels;
-    if (!dst || !src || !dst->format || dst->format != src->format || compressed(src->format) ||
+    if (!dst || !src || !dst->format || dst->format != src->format ||
         dst->depth < 2 || src->depth < 2 || dst->owner != c->owner || src->owner != c->owner) {
         ++d->d7draw.texBltFailures;
         return;
@@ -2431,6 +2432,20 @@ static void volume_blt(D7_CONTEXT *c, const RB_DP2_VOLUME_BLT *b)
             if (x1 > level_side(src->width, level) || y1 > level_side(src->height, level) || z1 > level_depth(src, level) ||
                 dx + x1 - x0 > level_side(dst->width, level) || dy + y1 - y0 > level_side(dst->height, level) ||
                 dz + z1 - z0 > level_depth(dst, level)) break;
+            if (compressed(src->format)) {
+                /* Blocks: whole slices at the same place, as the texture manager copies a volume. */
+                ULONG row = rb_d7_row_bytes(src->format, level_side(src->width, level));
+                if (x0 || y0 || dx || dy || x1 != level_side(src->width, level) || y1 != level_side(src->height, level))
+                    break;
+                for (z = 0; z < z1 - z0; ++z) {
+                    const BYTE *from = (const BYTE *)src->levelAddress[0][level] + (z0 + z) * sp * rows;
+                    BYTE *to = (BYTE *)dst->levelAddress[0][level] + (dz + z) * dp * rows;
+                    EngProbeForRead((PVOID)from, (rows - 1) * sp + row, 1);
+                    EngProbeForReadAndWrite(to, (rows - 1) * dp + row, 1);
+                    for (y = 0; y < rows; ++y) RtlCopyMemory(to + y * dp, from + y * sp, row);
+                }
+                continue;
+            }
             for (z = 0; z < z1 - z0; ++z) {
                 const BYTE *from = (const BYTE *)src->levelAddress[0][level] + (z0 + z) * sp * rows + y0 * sp + x0 * bpp;
                 BYTE *to = (BYTE *)dst->levelAddress[0][level] + (dz + z) * dp * rows + dy * dp + dx * bpp;
@@ -3485,8 +3500,12 @@ static const ULONG d8Formats[][2] = {
     { RbFmtX1R5G5B5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     { RbFmtA1R5G5B5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     { RbFmtA4R4G4B4, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
-    { RbFmtDxt1, RbFormatTexture | RbFormatCubeTexture }, { RbFmtDxt2, RbFormatTexture | RbFormatCubeTexture }, { RbFmtDxt3, RbFormatTexture | RbFormatCubeTexture },
-    { RbFmtDxt4, RbFormatTexture | RbFormatCubeTexture }, { RbFmtDxt5, RbFormatTexture | RbFormatCubeTexture },
+    /* DXT: also volumes, which are decoded here */
+    { RbFmtDxt1, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtDxt2, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtDxt3, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtDxt4, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtDxt5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     /* converted to 32 bits on upload */
     { RbFmtL8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     { RbFmtA8L8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
