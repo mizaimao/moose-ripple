@@ -2066,3 +2066,47 @@ features) and fails only the clip planes.
 The Direct3D 9 probes pass with it in UTM as before (12 of 12, six of them full-screen). On
 a desktop OpenGL host the common code is what Vista runs already (its 12 pixel tests pass on
 the Intel host); Windows 7 on such a host has not run it yet.
+
+## OpenGL (2026-11-25)
+
+Release 0.4.0 installs no OpenGL driver: a program gets Windows' own software OpenGL 1.1.
+Mesa's OpenGL part for the virgl driver (`viogpu_wgl.dll`, with `libglapi.dll`) was built all
+along and never installed or run. What it took to make it draw and show a frame:
+
+- **The driver's name in the adapter's driver key.** Windows' `opengl32.dll` asks the
+  graphics kernel which OpenGL driver an adapter has; the kernel reads `OpenGLDriverName`,
+  `OpenGLVersion` and `OpenGLFlags` (and the three `...Wow` values for 32-bit programs) from
+  the key where `UserModeDriverName` is. Both INFs set them and copy the two DLLs, 64-bit and
+  32-bit.
+- **A way to the screen that Vista and Windows 7 have.** The upstream code shows a window's
+  frame through a Direct3D 11 device and a DXGI swap chain as Windows 10 has them (flip
+  model, tearing flag, the debug layer), at feature level 10 only. Patch `patches-win7/0043`
+  makes that swap chain one Windows 7 can create. It still needs Direct3D 10 from our
+  driver, which Vista's build and a host without desktop OpenGL do not have. So there is a
+  second way, `d3d9ex_framebuffer.cpp` (ours; patch `patches-virgl/0044` chooses it by
+  default, `RIPPLE_GL_PRESENT=dxgi` asks for the swap chain): a Direct3D 9Ex device on the
+  window, the colour buffers as shareable Direct3D render-target textures which the OpenGL
+  driver opens by their shared handle and draws into, and at a swap a copy of the back
+  buffer's texture to the window's Direct3D back buffer and a present. The frame stays on the
+  GPU.
+- **Opening a shared resource from the OpenGL side.** Our bridge to the kernel
+  (`gdikmt_d3dkmt.c`) had an open path that had never run. `D3DKMTOpenResource` refused it:
+  Direct3D stores a description with a resource it shares (68 bytes here), and the open has
+  to offer room for it.
+
+`RIPPLE_GL_LOG=FILE` makes the framebuffer and the bridge say what they made and what
+failed.
+
+First results, Windows 7 SP1 in UTM (a host that offers OpenGL ES; `tools/win7-hello/gltest.c`
+with a frame count, which draws a triangle, reads its pixel back and then reads the same
+pixel off the screen):
+
+| | Windows' software OpenGL | Mesa on the host GPU |
+| --- | --- | --- |
+| Renderer | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 2.1 Mesa 24.3.4 |
+| Triangle pixel read back, and on the screen | red, red | red, red (64-bit and 32-bit) |
+
+Still to do before it goes into a release: a game's timedemo against the software renderer,
+Windows 7 on a host with desktop OpenGL, Vista (its DLLs build, with the unused-code and
+PSAPI changes of patch `patches-vista/0108`), window resizing, the swap interval, and an
+install through the INF instead of by hand.
