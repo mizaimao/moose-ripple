@@ -111,6 +111,30 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
              "pixel in the triangle: %u %u %u (red expected: 255 0 0)\r\n",
              (const char *)glGetString(GL_VENDOR), (const char *)glGetString(GL_RENDERER),
              (const char *)glGetString(GL_VERSION), px[0], px[1], px[2]);
+    {
+        /* The same question for memory that never was a window buffer: a small texture, set
+         * and read back. */
+        static const unsigned char red[4 * 4 * 4] = {
+            255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+            255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+            255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+            255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255 };
+        unsigned char back[4 * 4 * 4] = { 0 };
+        GLuint tex = 0;
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, red);
+        glFinish();
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
+        glReadBuffer(GL_FRONT);
+        memset(px, 0, sizeof(px));
+        glReadPixels(32, 20, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        glReadBuffer(GL_BACK);
+        add("a texture read back: %u %u %u; the front buffer after the swaps: %u %u %u\r\n",
+            back[0], back[1], back[2], px[0], px[1], px[2]);
+        glDeleteTextures(1, &tex);
+    }
     if (quiet) {
         typedef BOOL (WINAPI *swap_interval_t)(int);
         swap_interval_t swap_interval = (swap_interval_t)(void *)wglGetProcAddress("wglSwapIntervalEXT");

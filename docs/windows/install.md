@@ -21,8 +21,7 @@ recovery after a GPU timeout. 3DMark06 runs all six of its tests on both.
 OpenGL, in the version after 0.4.0: 64-bit and 32-bit programs get Mesa's
 OpenGL on the host's graphics card (OpenGL 4.3 on a Linux host with a desktop
 GPU, 2.1 on a host that offers OpenGL ES) in place of Windows' software
-OpenGL 1.1. OpenArena runs. On Vista a program that reads its own window's
-pixels back (`glReadPixels`) gets black; the picture on the screen is right.
+OpenGL 1.1. OpenArena runs.
 
 Windows 7 also gets Direct3D 10 where the host's renderer offers OpenGL 3.2
 or later (a Linux host with a desktop GPU). On a host that offers OpenGL ES

@@ -287,7 +287,10 @@ wgl_d3d9ex_framebuffer_get_resource(struct stw_winsys_framebuffer *_fb,
    whandle.type = WINSYS_HANDLE_TYPE_WIN32_HANDLE;
    whandle.handle = shared;
 
-   fb->textures[index] = fb->screen->resource_from_handle(fb->screen, NULL, &whandle, 0);
+   /* Said to be a framebuffer: on Vista the driver then maps it through a copy, because the
+    * allocation behind it cannot be locked from here. */
+   fb->textures[index] = fb->screen->resource_from_handle(fb->screen, NULL, &whandle,
+                                                          PIPE_HANDLE_USAGE_FRAMEBUFFER_WRITE);
    if (fb->textures[index])
       gl_log("buffer %u: opened as %ux%u, pipe format %u, bind 0x%x", index,
              fb->textures[index]->width0, fb->textures[index]->height0,

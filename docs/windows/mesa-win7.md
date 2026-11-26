@@ -2106,14 +2106,22 @@ along and never installed or run. What it took to make it draw and show a frame:
   last reference went, because in the Direct3D driver the runtime owns what it opens. The
   OpenGL bridge opens for itself, so each window resize left two textures open. Patch
   `patches-virgl/0045` closes those.
+- **Reading a window's pixels back on Vista.** Vista refuses a CPU lock of the allocation
+  behind a window buffer once the OpenGL side has opened it (`STATUS_INVALID_PARAMETER`;
+  Windows 7 grants it), so `glReadPixels` on the window got zeros while the screen was right.
+  The framebuffer now imports its buffers as framebuffers, and on Vista the driver maps such a
+  resource through a copy, as it maps a multisampled one: a blit of the wanted part to a
+  texture of its own, which locks as usual, and a blit back after a write (patch
+  `patches-vista/0109`).
 
 `RIPPLE_GL_LOG=FILE` makes the framebuffer and the bridge say what they made, what failed
 and, when a window goes, how its presents' time split between waiting for the display, the
 copy and the present.
 
 Results (2026-11-26). `tools/win7-hello/gltest.c` with a frame count draws a triangle, reads
-its pixel back, reads the same pixel off the screen, does both again after resizing its
-window, and times frames at swap interval 0 and 1. The game is OpenArena 0.8.8's timedemo of
+its pixel back, reads the same pixel off the screen, reads a small texture and the front
+buffer back, does the first two again after resizing its window, and times frames at swap
+interval 0 and 1. The game is OpenArena 0.8.8's timedemo of
 `demo088-test1` in a 1024x768 window (`+timedemo 1 +demo demo088-test1 +set nextdemo quit`,
 3398 frames).
 
@@ -2124,16 +2132,13 @@ window, and times frames at swap interval 0 and 1. The game is OpenArena 0.8.8's
 | 30 frames at swap interval 1; 300 at interval 0 | no such extension | 0.5 s; 0.03 s |
 | OpenArena timedemo | 1.9 frames/s (1818 s) | 324 frames/s (10.5 s) |
 | Windows 7 SP1 in UTM (a host that offers OpenGL ES) | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 2.1; the same GL test passes |
-| Windows Vista SP2 in UTM, installed through the INF | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 2.1; right on the screen, also after a resize; swap interval 1 paces |
+| Windows Vista SP2 in UTM, installed through the INF | GDI Generic, OpenGL 1.1.0 | virgl, OpenGL 2.1; the same GL test passes (64-bit and 32-bit) |
 
 The timedemo ran next to another guest that was not being measured, so its 324 is a floor
 rather than a best case. Before patch 0046 the same run gave 60.0 frames a second.
 
 Known gaps:
 
-- **Vista: `glReadPixels` of the window's own buffers returns black** (the picture on the
-  screen is right). Windows 7 reads back correctly. Not yet looked at; the Vista kernel
-  driver treats the storage of an opened allocation differently.
 - **The DXGI swap chain way does not work on Windows 7** (`RIPPLE_GL_PRESENT=dxgi`): the
   window stays black and the program ends with an access violation. The Direct3D 9Ex way is
   the default on both systems and keeps the frame on the GPU just the same.

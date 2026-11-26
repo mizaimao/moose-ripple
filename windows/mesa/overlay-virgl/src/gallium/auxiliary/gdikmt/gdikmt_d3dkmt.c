@@ -275,6 +275,13 @@ d3dkmt_lock_allocation(struct gdikmt_device *dev, D3DKMT_HANDLE hAllocation,
    status = kmt[KMT_LOCK](&arg);
    if (KMT_SUCCESS(status))
       *ptr = arg.pData;
+   static unsigned logged;
+   if (logged < 16) {
+      logged++;
+      kmt_log("lock of allocation 0x%x: 0x%08lx, data %p, first word 0x%08x", (unsigned)hAllocation,
+              (unsigned long)status, KMT_SUCCESS(status) ? arg.pData : NULL,
+              KMT_SUCCESS(status) && arg.pData ? *(const unsigned *)arg.pData : 0);
+   }
    return status;
 }
 
