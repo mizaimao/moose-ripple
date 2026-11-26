@@ -1263,3 +1263,33 @@ covered windows without the wait, the accelerator reference):
   the display limit: nothing is held back at the display's rate.
 - No error from the kext. The timedemo ran at 24.5 frames/s next to the other guests (22.9 to
   24.8 alone on 2026-11-25).
+
+### The per-draw CPU cost, and a trial of a second GL thread (2026-11-26)
+
+Looked at first on the kept profile of the timedemo (5,463 samples of the game's thread):
+locks 1.3%, thread-local lookups under 1%, so nothing to win there. The 1.2 ms a frame in
+OpenGL calls is spread: copying the game's vertex arrays 2%, the bookkeeping of each upload
+(map, transfer, unmap) 3%, texture and sampler state per draw 5%, the fixed-function program
+lookup 2%, encoding the draw 3%. No single piece can be told from run-to-run scatter.
+
+Tried instead, as a feasibility build that is not in the tree: Mesa's own second GL thread
+("glthread"), which hands the GL calls to a worker thread. It needs two things virgl does not
+offer: buffer maps that are safe from the application's thread, and buffers that stay mapped
+while they are drawn from. Both were given for the trial: the upload buffer is mapped straight
+from its guest memory, Mesa's upload function tells the driver how far it has written, and
+before each draw the driver puts a transfer command for the new range into the stream. In the
+frontend the entries that touch the context directly (about sixty overrides, the swap, the
+drawable changes) wait for the worker first.
+
+Result on the second Intel host, OpenArena's timedemo, alternating runs on one boot, another
+guest running (so not a clean timing): with the Dock over the window 224 frames/s against 211,
+with the Dock hidden 302 and 321 against 282 and 303. About 6%. The picture is right in both
+(a first build that drew garbage ran at 370 and is not a result). gl-gears runs with it too.
+
+Why not more: the worker takes the driver's work (it is busy 15% of the time), but the game's
+thread keeps the copy of the vertex arrays (0.2 ms a frame), waits for the worker at every
+`glClear`, and then waits in the present for the host, which becomes the pacer at 300
+frames/s. Not pursued for now: a correct version means auditing every override for state it
+reads, for a gain of this size on these hosts. It may be worth more under emulation (UTM),
+where the game's thread is the limit and the host has time to spare; not tried there. The two
+patch files of the trial are kept outside the tree.
