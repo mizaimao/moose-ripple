@@ -1408,8 +1408,11 @@ Same host, one boot, alternating by that variable, sums over the 24 filters:
 |---|---|---|---|
 | shader when the text is set (before) | 352.7, 344.6 ms | 119.0, 117.1 ms | 32.6, 32.4 ms |
 | shader at the first draw (after) | 314.6, 314.6 | 94.5, 94.0 | 31.5, 32.0 |
+| the same pair later, the host quiet, creates queued (below): before | 324.6, 325.0 | 102.9, 104.3 | 27.6, 27.4 |
+| after | 268.2, 278.0 | 81.5, 82.1 | 27.1, 27.3 |
 
-The first showing of a filter (two renders) goes from 467 to 409 ms over the 24, 12% less.
+The first showing of a filter (two renders) goes from 467 to 409 ms over the 24, 12% less,
+and from 428 to 355 ms (17% less) in the second pair.
 The picture comparison is unchanged (1 of 24 filters and 6 of 61 Photo Booth effects differ,
 the same ones). Looked at after a restart with the new bundle: the desktop with the menu bar,
 a window with its shadow, Exposé, Dashboard. OpenArena's timedemo 284.6 frames/s with the
@@ -1428,3 +1431,56 @@ filters, alternating on one boot on the second Intel host, each later render in 
 30.7 ms with the flushes, 33.6 and 33.5 ms without; first and second renders the same within
 their scatter; the picture comparison unchanged. With queued submits a flush is a call into
 the kernel that returns at once, so there is nothing left to gain here. Not built.
+
+### A buffer is created without waiting for the host (2026-11-26)
+
+Timers in the kext's buffer create (`RippleCreateStats` on the connection: calls, bytes, time
+getting the memory, in the host's create, in the host's attach) for the filter test's first
+two renders, 288 buffers: 4 ms for the memory, 127 ms waiting for the host's answer to the
+create and 25 ms for the attach. The create itself is nothing to the host; the answer comes
+when the host has worked through what was queued before it, the programs it was just sent
+among them. With queued submits these were the waits left in a render besides its read-back.
+
+The kext now puts a 3D client's create, attach and context attach in the queue and returns
+(`ripple_create=0` at boot: wait for each as before). The queue keeps the order, so a later
+command finds the buffer. The attach's list of memory runs goes into the request itself, up
+to 254 runs; a longer list still waits. A refusal by the host is no longer returned to the
+caller: it shows in the kernel log ("queued command failed"). The framebuffer's and
+WindowServer's own surfaces are created as before.
+
+Second Intel host, no other guest busy, the same kext and bundle, one boot each, `ci-effects`
+with eight renders a filter, sums over the 24 filters (ours; the software renderer's are 84,
+54 and 34 ms):
+
+| | first render | second render | each later render |
+|---|---|---|---|
+| creates waited for (`ripple_create=0`) | 330.8, 306.4, 314.7 ms | 98.3, 93.9, 95.9 ms | 33.5, 31.2, 31.8 ms |
+| creates queued | 263.2, 271.6, 287.9, 277.7, 268.3 | 77.3, 77.6, 80.7, 79.7, 79.5 | 25.4, 25.8, 26.8, 26.7, 27.2 |
+
+The first showing of the 24 filters goes from 413 to 353 ms (15% less), each later render
+from 32.2 to 26.4 ms (18% less; a later render still creates the buffers the texture cache
+does not hold). With the queue the timers show 0.7 ms in the creates and 37 to 52 ms in the
+attaches: when the host is behind, the sixteen command slots fill and the next command waits
+for one, so part of the wait has only moved. OpenArena's timedemo on the same two boots:
+276.3, 275.6, 267.4 frames/s waited for, 283.0, 269.1, 288.4 queued, no difference.
+
+The picture comparison is unchanged in both modes (1 of 24 filters, 6 of 61 effects, the same
+ones). Looked at with the queue: desktop with the menu bar, a window with its shadow, Exposé,
+Dashboard; gl-gears 58.7 frames/s; no error from the kext and no refused command.
+
+Two traps of this measurement, for the next one. A run while another guest used the host's
+GPU came out five times slower (530 ms for the first renders), and the software renderer's
+column, which only needs the CPU, hardly showed it: on a shared host, look at the other
+guests' GPU use before and after a run. And the first "before" was no before: the restart
+that should have set the boot flag had been skipped, so both runs were on one boot (the five
+values of the queued row). The kernel's own `kern.bootargs` and the boot time are checked
+after each restart now.
+
+The same pair in UTM on an M1 Max (no other guest; a different picture, a scaled system
+desktop picture, so these compare only with each other; six renders a filter): first render
+7,282 and 7,217 ms waited for, 8,013 and 7,254 queued; second 1,910 and 1,908 against 2,074
+and 1,903; each later render 147.7 and 147.4 against 137.0 and 137.5 ms (7% less). The first
+two renders are the emulated CPU compiling and do not change. The software renderer there
+needs 3,330 ms for a later render of the 24, ours 137. With that picture 7 of the 24 filters
+differ from the software renderer in UTM, with either kext mode and with the shader made at
+load or at the first draw alike; which filters and why is not looked into yet.

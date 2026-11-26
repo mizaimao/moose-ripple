@@ -19,6 +19,11 @@ Find the `RippleAccelerator` service (`IOServiceMatching("RippleAccelerator")`) 
 clients (0 = surface, and vendor conventions for GL and 2D contexts), which M5 needs. Contexts
 and buffers belong to the connection and are destroyed when it closes or its task dies.
 
+`BUFFER_CREATE` returns when the buffer exists for the caller and its memory can be mapped;
+the GPU side may still be making it. Calls that come after it on any connection are carried
+out after it, so nothing has to wait for it. A refusal by the GPU side comes too late for the
+call's result: the call has returned success, and the refusal is in the kernel log.
+
 ## Methods (`IOConnectCallMethod` selectors)
 
 | # | Method | Input | Output |
