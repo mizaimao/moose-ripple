@@ -1970,6 +1970,27 @@ refuses every game test: it needs cube textures, DXT1 and DXT3 compressed
 textures, a back buffer with alpha and a stencil buffer, none of which the
 device offers yet.
 
+### On by default
+
+`RippleVertexShaders` and `RippleD3D9` (the Direct3D 9 driver interface) now
+default to 1. Setting either to 0 turns it off. Turning
+them on found two bugs:
+
+- **vs.1.0 refused.** Direct3D 8.0's vertex shaders, version 1.0
+  (`0xfffe0100`), were refused; 3DMark 2001 SE has 11 of them.
+- **Draws skipped at a stage with no texture.** A vertex-program draw
+  without a pixel shader runs the stage program. Where a stage would
+  sample a texture and none is bound (the default stage states), the stage
+  program kept that stage and the draw was skipped for the missing texture.
+  The Direct3D 7 combiner already passes over such a stage
+  (`stage_words`); the stage program now does the same
+  (`stage_lacks_texture`).
+
+`d8pixels` checks vertex programs vs.1.1 and vs.1.0, drawn from user memory
+and from a vertex buffer (`vs11`, `vs11_buffer`, `vs10`). With both on, the
+XP and Windows 2000 suites pass, and 3DMark 2001 SE, 03 and 05 run to the
+end on XP.
+
 ## DXT compressed textures
 
 Direct3D 8 and 9 programs can create DXT1 to DXT5 textures. The device
@@ -2729,6 +2750,17 @@ of a vertex's eight colour channels) was still a call into another file, 13%
 of the guest's time. It is now a lookup in a constant table of the same 256
 values (`rbChannelBits`): 3DMark 2001 SE went from 6311 to 7204 (timed, host
 alone).
+
+These scores (3696 to 7204) were measured with the Direct3D 9 interface and
+vertex shaders switched on before they drew everything. In a run, 11 vs.1.0
+shaders were refused, 268 million primitives were skipped in the stage
+combiner and 40 million for textures. The scores compare with one another,
+which all skipped the same draws, but not with later ones. With both on by
+default and those draws drawn, 3DMark 2001 SE scored 5723 (timed, host
+alone); 22 million primitives were still skipped where a pixel shader samples
+a stage with no texture bound, a separate fix. Before quoting a score, read
+`D7DRAW skipped`, `D7RTT texture_skips` and `D8VS ... failed` in `d7draw`'s
+output.
 
 
 ## Release package
