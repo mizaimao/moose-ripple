@@ -702,7 +702,7 @@ The context is made with Mesa's `DrvCreateContext` and every OpenGL function com
 when the context is made. The game then plays its title flyby and its demo level, and exits
 cleanly. d3dtest: 1085 frames/s (1040 before); Re-Volt's race still draws.
 
-## Direct3D 8 through its own interface (stage 1, 2026-11-26, off by default)
+## Direct3D 8 through its own interface (stage 1, 2026-11-26; on by default since 0.6.0)
 
 The Direct3D 8 runtime drives a driver that only has the Direct3D 7 interface by translating
 (it runs the vertex processing and sends Direct3D 7 commands), which is how Direct3D 8 programs
@@ -712,16 +712,18 @@ shared). Stage 1 answers GetDriverInfo2 (D3DCAPS8 without shaders or hardware ve
 processing, the format list, the runtime's version) and draws from streams: SETVERTEXSHADER
 with a vertex format, SETSTREAMSOURCE and its user-memory form, SETINDICES, DRAWPRIMITIVE,
 DRAWPRIMITIVE2, DRAWINDEXEDPRIMITIVE and its second form, CLIPPEDTRIANGLEFAN and BUFFERBLT;
-shader and patch commands are stepped over. It is offered only when the registry value
-`HKLM\Software\moose-ripple`, `D3D8` is `"1"` (a `.reg` file on the test CD sets it).
+shader and patch commands are stepped over. At first it was offered only when the registry
+value `HKLM\Software\moose-ripple`, `D3D8` was `"1"` (a `.reg` file on the test CD set it).
 
-The values under that key, as of 2026-11-26 (read when DirectDraw loads the HAL, so a change
-needs a restart):
+**On by default since 0.6.0** (2026-11-26): without a `D3D8` value the driver behaves as with
+`"2"`. The values under that key are read when DirectDraw loads the HAL, so a change needs a
+restart:
 
 | Value | Meaning |
 |---|---|
+| `D3D8` = `"0"` | no Direct3D 8 interface: the runtime drives the HAL through Direct3D 7 and processes vertices itself (the behaviour before 0.6.0) |
 | `D3D8` = `"1"` | the Direct3D 8 interface; the runtime processes vertices on the CPU |
-| `D3D8` = `"2"` | and vertex processing on the GPU (fixed function, vertex shaders), with vertex and index buffers in the driver's memory |
+| `D3D8` = `"2"` or no value | and vertex processing on the GPU (fixed function, vertex shaders), with vertex and index buffers in the driver's memory |
 | `D3D8Buffers` = `"0"` | with `"2"`: buffers stay in the runtime's system memory (the path before 2026-11-26 13:00) |
 
 Learnt on Windows 98 SE with DirectX 8.1 (UTM):
@@ -963,6 +965,10 @@ DrawPrimitiveUP vertices to its own dynamic buffers after a single Lock, so thei
 not seen (d9pixels lost four cases until only static buffers went to buffer objects). Checked on
 the rig: d9pixels 48/49 (the one failure is the known `vs1_inputs` declaration the runtime
 refuses with hardware vertex processing), d8pixels 23/23, Dragothic at both details through VNC.
+
+A kept list of the lights that are on (instead of scanning the 128 light slots each draw) was
+measured on top of this and dropped: 30341 3DMarks, every test within 2% (eight lights 328.6
+against 334.0 MTriangles/s).
 
 Advanced Pixel Shader's white boat and jetty: a trace with each draw's state (new trace lines)
 showed nine draws a frame with no texture on the stage their shader samples, and about one

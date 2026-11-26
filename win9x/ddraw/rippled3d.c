@@ -5896,30 +5896,34 @@ static void d8_caps(RB_D3DCAPS8 *c)
            c->vertexShaderVersion);
 }
 
-/* Until the Direct3D 8 path has been through its tests it is offered only when the registry
-   value HKLM\Software\moose-ripple, D3D8 is "1"; otherwise the runtime gets no answer and drives
-   the HAL through the Direct3D 7 interface, as before. Not an environment variable: the runtime
-   asks once per boot, in the first program that uses it, and keeps the answer for all others. */
+/* The Direct3D 8 and 9 interface, on by default since 0.6.0: vertices processed on the GPU, in
+   buffers the driver allocates. The registry value HKLM\Software\moose-ripple, D3D8 chooses
+   otherwise: "0" gives the runtime no answer, so it drives the HAL through the Direct3D 7
+   interface and processes vertices itself; "1" offers the interface with the runtime's vertex
+   processing; "2" is the default. D3D8Buffers "0" keeps buffers in the runtime's memory. Not an
+   environment variable: the runtime asks once per boot, in the first program that uses it, and
+   keeps the answer for all others. */
 int d3d8_enabled(void)
 {
     HKEY k;
     char v[4];
     DWORD n = sizeof v, type;
+    char mode = '2';
+    int buffers = 1;
 
-    d8_on = tnl_on = buf_on = 0;
     if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, "Software\\moose-ripple", 0, KEY_READ, &k) == ERROR_SUCCESS) {
         if (RegQueryValueEx(k, "D3D8", NULL, &type, (BYTE *)v, &n) == ERROR_SUCCESS &&
-            type == REG_SZ && (v[0] == '1' || v[0] == '2')) {
-            d8_on = 1;
-            tnl_on = v[0] == '2';       /* and vertices processed on the GPU (tnl_begin) */
-            buf_on = tnl_on;            /* in buffers the driver allocates, unless D3D8Buffers is "0" */
-            n = sizeof v;
-            if (RegQueryValueEx(k, "D3D8Buffers", NULL, &type, (BYTE *)v, &n) == ERROR_SUCCESS &&
-                type == REG_SZ && v[0] == '0')
-                buf_on = 0;
-        }
+            type == REG_SZ && v[0] >= '0' && v[0] <= '2')
+            mode = v[0];
+        n = sizeof v;
+        if (RegQueryValueEx(k, "D3D8Buffers", NULL, &type, (BYTE *)v, &n) == ERROR_SUCCESS &&
+            type == REG_SZ && v[0] == '0')
+            buffers = 0;
         RegCloseKey(k);
     }
+    d8_on = mode != '0';
+    tnl_on = mode == '2';               /* and vertices processed on the GPU (tnl_begin) */
+    buf_on = tnl_on && buffers;         /* in buffers the driver allocates */
     return d8_on;
 }
 
