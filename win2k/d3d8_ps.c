@@ -1379,7 +1379,7 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
                                 unsigned int fog, char *out, unsigned int size, RB_PS_INFO *info)
 {
     PS s;
-    unsigned int i, k, log2e = 4, factor = 0;
+    unsigned int i, k, log2e = 4, factor = 0, transforms = 0, base, bump = ~0u, bumpLum = 0;
     char *z = (char *)&s, tex[64];
     for (k = 0; k < sizeof(s); ++k) z[k] = 0;
     info->samplers = info->coords = info->reason = info->detail = info->constants = 0;
@@ -1392,8 +1392,20 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
         if ((st->colorArg1 & TaSelect) == TaFactor || (st->colorArg2 & TaSelect) == TaFactor ||
             (st->alphaArg1 & TaSelect) == TaFactor || (st->alphaArg2 & TaSelect) == TaFactor ||
             st->colorOp == TopBlendFactor || st->alphaOp == TopBlendFactor) factor = 1;
+        if (st->transform & 0xff) {
+            if (i >= RB_STAGE_TRANSFORMS || (st->transform & 0xff) > 4 || (st->transform & ~(0xffu | RB_TTFF_PROJECTED)))
+                return fail(&s, RbPsRegister, st->transform);
+            transforms = 1;
+        }
+        /* A bump stage keeps its matrix where its texture matrix would be. */
+        if (st->colorOp == TopBump || st->colorOp == TopBumpLum) {
+            if (i >= RB_STAGE_TRANSFORMS || (st->transform & 0xff)) return fail(&s, RbPsOpcode, st->colorOp);
+            transforms = 1;
+        }
     }
     count = i;
+    base = transforms ? RB_PS2_CONSTANTS : RB_PS_CONSTANTS;
+    if (transforms) info->constants = RB_PS2_CONSTANTS;
     put(&s.t, "FRAG\nDCL IN[0], GENERIC[0], LINEAR\nDCL IN[1], GENERIC[1], LINEAR\n");
     for (k = 0; k < RB_PS2_COORD_SETS; ++k) {
         put(&s.t, "DCL IN["); number(&s.t, 2 + k); put(&s.t, "], GENERIC["); number(&s.t, 2 + k);
@@ -1403,8 +1415,8 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
     if ((fog & 3) == RB_PS_FOG_TABLE) put(&s.t, "DCL IN[10], POSITION, LINEAR\n");
     put(&s.t, "DCL OUT[0], COLOR\n");
     for (k = 0; k < RB_PS2_SAMPLERS; ++k) { put(&s.t, "DCL SAMP["); number(&s.t, k); put(&s.t, "]\n"); }
-    put(&s.t, fog ? "DCL CONST[0..9]\n" : "DCL CONST[0..7]\n");
-    put(&s.t, "DCL TEMP[0..9]\n"
+    put(&s.t, "DCL CONST[0.."); number(&s.t, base - 1 + (fog ? 2 : 0)); put(&s.t, "]\n");
+    put(&s.t, "DCL TEMP[0..11]\n"
               "IMM[0] FLT32 {0x3f000000, 0x3f800000, 0x40000000, 0x40800000}\n"
               "IMM[1] UINT32 {16, 8, 0, 24}\n"
               "IMM[2] FLT32 {0x00000000, 0x00000000, 0x00000000, 0x3b808081}\n"
@@ -1423,11 +1435,66 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
         unsigned int set = st->coordIndex & 0xffff, alphaOp = st->alphaOp, a1 = st->alphaArg1, a2 = st->alphaArg2;
         if (st->coordIndex >> 16 || set >= RB_PS2_COORD_SETS) return fail(&s, RbPsRegister, st->coordIndex);
         if (alphaOp == TopDisable) { alphaOp = TopArg1; a1 = TaCurrent; a2 = TaCurrent; }
-        if (uses_texture(st->colorOp, st->colorArg1, st->colorArg2) || uses_texture(alphaOp, a1, a2)) {
+        if (st->colorOp == TopBump || st->colorOp == TopBumpLum) {
+            /* The bump map: du, dv and a luminance for the next stage's lookup;
+             * the current colour goes on unchanged. */
             tex[0] = 0;
-            cat(tex, sizeof(tex), "TEX TEMP[1], IN["); cat_number(tex, sizeof(tex), 2 + set);
+            cat(tex, sizeof(tex), "TEX TEMP[8], IN["); cat_number(tex, sizeof(tex), 2 + set);
             cat(tex, sizeof(tex), "], SAMP["); cat_number(tex, sizeof(tex), i); cat(tex, sizeof(tex), "], 2D");
             line(&s, tex, 0, 0, 0, 0, 0, 0);
+            info->samplers |= 1u << i;
+            info->coords |= 1u << set;
+            bump = i;
+            bumpLum = st->colorOp == TopBumpLum;
+            continue;
+        }
+        if (uses_texture(st->colorOp, st->colorArg1, st->colorArg2) || uses_texture(alphaOp, a1, a2)) {
+            char in[16];
+            in[0] = 0;
+            cat(in, sizeof(in), "IN["); cat_number(in, sizeof(in), 2 + set); cat(in, sizeof(in), "]");
+            if (st->transform & 0xff) {
+                /* The stage's texture matrix (columns in CONST[8+4i]), then the
+                 * division by the last coordinate it gives. */
+                static const char *const comp[4] = { ".x", ".y", ".z", ".w" };
+                static const char *const last[4] = { ".xxxx", ".yyyy", ".zzzz", ".wwww" };
+                unsigned int n = st->transform & 0xff, j;
+                char c[16];
+                line(&s, "MOV TEMP[10], IMM[2].xxxx", 0, 0, 0, 0, 0, 0);
+                for (j = 0; j < n; ++j) {
+                    c[0] = 0;
+                    cat(c, sizeof(c), "CONST["); cat_number(c, sizeof(c), 8 + 4 * i + j); cat(c, sizeof(c), "]");
+                    line(&s, "DP4 TEMP[10]", comp[j], ", ", in, ", ", c, 0);
+                }
+                if (st->transform & RB_TTFF_PROJECTED) {
+                    line(&s, "RCP TEMP[11].x, TEMP[10]", last[n - 1], 0, 0, 0, 0, 0);
+                    line(&s, "MUL TEMP[10], TEMP[10], TEMP[11].xxxx", 0, 0, 0, 0, 0, 0);
+                }
+                in[0] = 0;
+                cat(in, sizeof(in), "TEMP[10]");
+            }
+            if (bump != ~0u && bump + 1 == i) {
+                /* Moved by the bump stage's du and dv through its matrix (00, 01, 10, 11). */
+                char m[16];
+                m[0] = 0;
+                cat(m, sizeof(m), "CONST["); cat_number(m, sizeof(m), 8 + 4 * bump); cat(m, sizeof(m), "]");
+                if (!(st->transform & 0xff)) line(&s, "MOV TEMP[10], ", in, 0, 0, 0, 0, 0);
+                line(&s, "MAD TEMP[10].xy, TEMP[8].xxxx, ", m, ".xyxy, TEMP[10]", 0, 0, 0, 0);
+                line(&s, "MAD TEMP[10].xy, TEMP[8].yyyy, ", m, ".zwzw, TEMP[10]", 0, 0, 0, 0);
+                in[0] = 0;
+                cat(in, sizeof(in), "TEMP[10]");
+            }
+            tex[0] = 0;
+            cat(tex, sizeof(tex), "TEX TEMP[1], "); cat(tex, sizeof(tex), in);
+            cat(tex, sizeof(tex), ", SAMP["); cat_number(tex, sizeof(tex), i); cat(tex, sizeof(tex), "], 2D");
+            line(&s, tex, 0, 0, 0, 0, 0, 0);
+            if (bump != ~0u && bump + 1 == i && bumpLum) {
+                /* BUMPENVMAPLUMINANCE: times the luminance times the scale plus the offset. */
+                char l[16];
+                l[0] = 0;
+                cat(l, sizeof(l), "CONST["); cat_number(l, sizeof(l), 9 + 4 * bump); cat(l, sizeof(l), "]");
+                line(&s, "MAD_SAT TEMP[11].x, TEMP[8].zzzz, ", l, ".xxxx, ", l, ".yyyy", 0, 0);
+                line(&s, "MUL TEMP[1].xyz, TEMP[1], TEMP[11].xxxx", 0, 0, 0, 0, 0, 0);
+            }
             info->samplers |= 1u << i;
             info->coords |= 1u << set;
         }
@@ -1439,7 +1506,7 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
         line(&s, "MOV TEMP[0], TEMP[4]", 0, 0, 0, 0, 0, 0);
     }
     if (specular) line(&s, "ADD_SAT TEMP[0].xyz, TEMP[0], IN[1]", 0, 0, 0, 0, 0, 0);
-    if (fog) fog_lines(&s, fog, log2e, "TEMP[0]", RB_PS_CONSTANTS);
+    if (fog) fog_lines(&s, fog, log2e, "TEMP[0]", base);
     line(&s, "MOV OUT[0], TEMP[0]", 0, 0, 0, 0, 0, 0);
     line(&s, "END", 0, 0, 0, 0, 0, 0);
     if (s.t.overflow) return fail(&s, RbPsOverflow, s.t.n);
