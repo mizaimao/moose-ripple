@@ -1549,7 +1549,7 @@ What is left to gain here is small whatever is built: skipping all of Mesa's com
 program seen before (a cache keyed on the program's text, with the state tracker's variants)
 could give at most the sixth above.
 
-### The second GL thread in UTM: 19.7 to 23.4 frames/s (2026-11-26)
+### The second GL thread in UTM: 18 to 19% more in OpenArena (2026-11-26)
 
 The trial of Mesa's second GL thread ("The per-draw CPU cost, and a trial of a second GL
 thread" above) gave about 6% on the Intel host, where the host is the pacer. Under emulation
@@ -1557,25 +1557,41 @@ the program's own thread is the limit, so the same trial was run in UTM. Its two
 apply unchanged to the tree of today; the bundle was built aside, put into the guest for the
 test and taken out again. It is still not in the tree.
 
-UTM 5 on an M1 Max, no other guest running. OpenArena's timedemo, 1024x768 window under the
-Dock, one run each on one boot, the same bundle both times, switched by `RIPPLE_GL_THREAD=1`
-in the game's environment:
+UTM 5 on an M1 Max, no other guest running, four emulated processors, each on its own thread
+of the Mac (UTM's Force Multicore). OpenArena's timedemo, 1024x768 window under the Dock, the
+same bundle in every run, switched by `RIPPLE_GL_THREAD=1` in the game's environment. Two
+boots of the guest, a pair on each:
 
-| second GL thread | frames/s | run | a frame on average |
+| | second GL thread off | on | gain |
 |---|---|---|---|
-| off | 19.7 | 172.9 s | 50.9 ms |
-| on | 23.4 | 145.3 s | 42.8 ms |
+| first boot | 19.7 frames/s (a frame 50.9 ms on average) | 23.4 (42.8 ms) | 19% |
+| second boot | 25.7 (39.0 ms) | 30.3 (33.0 ms) | 18% |
 
-19% more. (The check run before it, thread on, with four captures and a two-second profile
-in it, came to 23.2.) Looked at before timing, from inside the guest: gl-gears, 56.6 frames/s
+On the first boot the order was on, off, on: 23.2 (with four captures and a two-second profile
+in it), 19.7, 23.4. Looked at before timing, from inside the guest: gl-gears, 56.6 frames/s
 with the thread as without, and four captures of the timedemo with the thread on; textures,
 models, the text and the weapon are right in all of them.
 
 The four changes timed in UTM earlier (the display limit, the helper thread and the two for
-covered windows) made no difference there; this one does. Open: the level without the thread,
-19.7, is the level of every run in UTM today (19.6 to 20.0), but on 2026-11-25 and in the
-night after it the same timedemo ran at 22.9 to 24.8 there. The pair above is on one boot and
-one build, so it stands whatever the reason is.
+covered windows) made no difference there; this one does.
+
+**The level differs between boots of the guest, not between builds.** The second boot, three
+minutes after the first was shut down, ran the committed bundle at 25.4, 25.2 and 25.6
+frames/s and the trial bundle with the thread off at 25.7, 25.4 and 25.5. The first boot ran
+that same trial bundle at 19.7, and every UTM run of the morning, on several boots with the
+committed bundles of the time, was at 19.6 to 20.0. On 2026-11-25 and in the night after it
+the level was 22.9 to 24.8. So the 20 of this morning is not a slower driver: today's build
+reaches 25.
+
+What was ruled out on the second boot, one run after each: gl-gears before the game (25.6),
+a swap of the bundle's binary while the guest runs (25.7), screen captures and a `sample`
+(25.4). The guest's clock is right there: one whole run took 152.4 s by the guest's clock and
+153.2 s by another machine's. Nothing in the guest was busy (`top`). What makes a boot slow
+is not known; the busy disk tool noted with the morning's table is not established as the
+reason either.
+
+For timing in UTM: only runs on one boot compare. A fixed loop tells a boot's level before a
+run (twelve million additions in perl: 14.6 to 14.8 s on the fast boot).
 
 What a version for the tree needs, which the trial does not have:
 

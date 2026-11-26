@@ -20,9 +20,11 @@ nothing over its window; the same host's GeForce 9600 GT with Apple's driver doe
   1.2 ms a frame, spread thin; putting it on a second thread (Mesa's glthread, a trial that is
   not in the tree) gave about 6% there.
 - In UTM the emulated processor is the limit: the display limit, the helper thread and the two
-  covered-window changes make no difference there. The second-thread trial does: 19.7 to
-  23.4 frames/s in OpenArena's timedemo. A version for the tree is one to two days of work,
-  mostly reading every frontend entry for state it touches while the worker runs
+  covered-window changes make no difference there. The second-thread trial does: 18 to 19%
+  more in OpenArena's timedemo on two boots (19.7 to 23.4 and 25.7 to 30.3 frames/s; the level
+  differs between boots of the guest for a reason not yet known). A version for the tree is
+  one to two days of work, mostly reading every frontend entry for state it touches while the
+  worker runs
   ([re/perf-notes.md](re/perf-notes.md), "The second GL thread in UTM").
 - Core Image: from a filter's third render on, ours is faster than software rendering (26 ms
   against 34 for 24 filters on a 480x300 picture). The first two renders of a filter, where
