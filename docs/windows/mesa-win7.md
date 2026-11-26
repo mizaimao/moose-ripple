@@ -2129,7 +2129,15 @@ What is left to try:
 - Whether `Present` has to wait for the frame before it. A guest that runs one frame ahead
   would overlap its work with the host's, as far as its processors are not standing still.
 - Message-signalled interrupts are switched off in the driver's INF (`MSISupported` 0), so
-  every interrupt reads the status register. With them on there is no such read.
+  every interrupt reads the status register. With them on there is no such read. Tried on the
+  rig by setting the value to 1 in the guest: Windows 7 then stops right after the display
+  driver is added, before its start routine logs anything, with all four processors busy
+  (two boots of two, the second with nothing else on the host). The driver has the code for
+  message interrupts, but its start does not work with them yet.
+- The kernel driver copies a command buffer that is reported early, and buffers over 64 KB
+  (this scene's are about 250 KB) got fresh, cleared memory for it on every submit; the two
+  routines take 3.8% of the processor time above. Reusing buffers of that size too did not
+  change the benchmark on the rig (11502 3DMarks without, 11450 with; SM2.0 3918 and 3879).
 - Fewer notifications: the device offers notification suppression (`event_idx`), and
   `ioeventfd=on` on the host takes the wait out of the guest's processor.
 
