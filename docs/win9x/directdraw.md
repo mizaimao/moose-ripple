@@ -771,8 +771,10 @@ start 0.75 and end 0.25, which gives back f.
 `d8pixels sw`, Windows 98 SE with DirectX 8.1 in UTM: 23 of 23 pass (the 8 fixed-function
 cases and 15 pixel shader cases: mov, texture, constants, modifiers, co-issue, cnd, cmp, dp3,
 texcoord, texkill, two textures, fog from the specular alpha, table fog, lit, lit with fog).
-Not yet: more than two textures (t2 and t3; the HAL has two stages), the bump and matrix
-texture instructions of version 1 beyond what d8pixels covers, vertex shaders.
+A shader adding four textures (t0..t3, `d8tex4`) reads back the expected sum. `d3dtest`
+(Direct3D 7) in the same boot fails only the two mipmap LOD-bias checks it fails in UTM with
+the released driver. Not yet: the bump and matrix texture instructions of version 1 beyond
+what d8pixels covers, vertex shaders.
 
 
 ## Changing a driver in the test VM

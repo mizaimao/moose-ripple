@@ -881,7 +881,8 @@ int d3d_surface_format_ok(LPDDSURFACEDESC desc)
 
 /* ---- Contexts ----------------------------------------------------------------------------------- */
 #define MAX_PS 64                       /* Direct3D 8 pixel shaders a context keeps */
-#define STAGES 2
+#define STAGES 4                        /* texture stages kept: pixel shaders sample t0..t3 */
+#define FF_STAGES 2                     /* of those, offered to Direct3D 7 (Direct3D 8 gets all) */
 #define FOG_UNIT STAGES                 /* the OpenGL texture unit that does fog */
 
 typedef struct {
@@ -2153,6 +2154,8 @@ static void apply_stages(RCTX *c)
                    uses_texture(aop, st[D3DTSS_ALPHAARG1], st[D3DTSS_ALPHAARG2]);
         int on = 0;
 
+        if (s >= FF_STAGES && !c->dx8)
+            off = 1;                    /* Direct3D 7 is offered FF_STAGES */
         c->bound[s] = 0;
         gl->ActiveTexture(GL_TEXTURE0 + s);
         if (off || cop == D3DTOP_DISABLE) {
@@ -2985,8 +2988,7 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
    Fog after the shader: a second program, made when a draw first needs it. The HAL already
    gives each vertex Direct3D's fog factor f as the coordinate 0.25 + 0.5 f of FOG_UNIT (the
    fixed-function fog ramp); the translator is asked for linear fog from a vertex depth read
-   there, with start 0.75 and end 0.25, which gives back f. Not yet: more than the two texture
-   stages the HAL has. */
+   there, with start 0.75 and end 0.25, which gives back f. */
 #define PS_FOG (RB_PS_FOG_VERTEX | (3 << RB_PS_FOG_MODE_SHIFT))     /* linear, from IN[10] */
 
 static struct ps8 *ps_find(RCTX *c, DWORD handle, int create)
@@ -3830,7 +3832,7 @@ static void extended_caps(D3DHAL_D3DEXTENDEDCAPS *x)
     x->dvGuardBandTop = -4096.0f;
     x->dvGuardBandRight = 4095.0f;
     x->dvGuardBandBottom = 4095.0f;
-    x->dwFVFCaps = STAGES;
+    x->dwFVFCaps = FF_STAGES;
     x->dwTextureOpCaps = D3DTEXOPCAPS_DISABLE | D3DTEXOPCAPS_SELECTARG1 |
         D3DTEXOPCAPS_SELECTARG2 | D3DTEXOPCAPS_MODULATE | D3DTEXOPCAPS_MODULATE2X |
         D3DTEXOPCAPS_MODULATE4X | D3DTEXOPCAPS_ADD | D3DTEXOPCAPS_ADDSIGNED |
@@ -3840,8 +3842,8 @@ static void extended_caps(D3DHAL_D3DEXTENDEDCAPS *x)
     x->dwStencilCaps = D3DSTENCILCAPS_KEEP | D3DSTENCILCAPS_ZERO | D3DSTENCILCAPS_REPLACE |
         D3DSTENCILCAPS_INCRSAT | D3DSTENCILCAPS_DECRSAT | D3DSTENCILCAPS_INVERT |
         D3DSTENCILCAPS_INCR | D3DSTENCILCAPS_DECR;
-    x->wMaxTextureBlendStages = STAGES;
-    x->wMaxSimultaneousTextures = STAGES;
+    x->wMaxTextureBlendStages = FF_STAGES;
+    x->wMaxSimultaneousTextures = FF_STAGES;
     x->dvMaxVertexW = 1.0e10f;
 }
 
@@ -3921,6 +3923,9 @@ static void d8_caps(RB_D3DCAPS8 *c)
     c->maxStreamStride = 255;
     c->vertexShaderVersion = 0xFFFE0000UL;  /* none: the runtime processes vertices */
     c->pixelShaderVersion = 0xFFFF0103UL;   /* 1.3, as ARB fragment programs (ps_create) */
+    c->maxSimultaneousTextures = STAGES;    /* t0..t3 */
+    c->maxTextureBlendStages = STAGES;      /* the runtime sends stage states for these only */
+    c->fvfCaps = STAGES;                    /* texture coordinate sets */
     c->maxPixelShaderValue = fbits(1.0f);
 }
 
