@@ -131,6 +131,8 @@ static BOOLEAN shader(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, ULON
     words = rb_gpu_frame_reserve(gpu, r, image, 6+n);
     if (!words) return FALSE;
     words[0] = CREATE(VIRGL_OBJECT_SHADER,5+n);
+    ++gpu->d7Profile.shaders;
+    gpu->d7Profile.shaderBytes += size;
     words[1] = handle;
     words[2] = stage;
     words[3] = size;
@@ -609,12 +611,13 @@ BOOLEAN rb_gpu_d7_valid(const RB2K_D3D7_DRAW *d)
 /* Find or make room for a key. The state is Hit, Fresh (an unused handle)
  * or Replaced (the caller destroys that handle's old object first). */
 enum { Hit, Fresh, Replaced };
-static ULONG cache_slot(RB2K_D7_CACHE *c, ULONG limit, const ULONG *key, ULONG words, ULONG *state)
+static ULONG cache_slot(RB2K_GPU *gpu, ULONG kind, RB2K_D7_CACHE *c, ULONG limit, const ULONG *key, ULONG words,
+                        ULONG *state)
 {
     ULONG i, j;
     for (i = 0; i < c->used; ++i) {
         for (j = 0; j < words && c->keys[i][j] == key[j]; ++j) {}
-        if (j == words) { *state = Hit; return i; }
+        if (j == words) { *state = Hit; ++gpu->d7Profile.caches[kind][Hit]; return i; }
     }
     if (c->used < limit) { i = c->used++; *state = Fresh; }
     else {
@@ -623,6 +626,7 @@ static ULONG cache_slot(RB2K_D7_CACHE *c, ULONG limit, const ULONG *key, ULONG w
         *state = Replaced;
         if (c->bound == i + 1) c->bound = 0;
     }
+    ++gpu->d7Profile.caches[kind][*state];
     for (j = 0; j < words; ++j) c->keys[i][j] = key[j];
     return i;
 }
@@ -683,7 +687,7 @@ static BOOLEAN fixed_states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image
     key[0] = depthState | (alphaTest << 8);
     key[1] = stencil;
     key[2] = stencil ? stencilRef & 0xffff00 : 0;
-    slot = cache_slot(&s->dsa, RB2K_D7_DSA_KEYS, key, 3, &state);
+    slot = cache_slot(gpu, RB2K_CACHE_DSA, &s->dsa, RB2K_D7_DSA_KEYS, key, 3, &state);
     if (state != Hit) {
         ULONG z = depthState, face = 0;
         if (stencil)
@@ -715,7 +719,7 @@ static BOOLEAN fixed_states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image
         s->stencilRef = 0x100 | (stencilRef & 255);
     }
     key[0] = blend;
-    slot = cache_slot(&s->blend, RB2K_D7_BLEND_KEYS, key, 1, &state);
+    slot = cache_slot(gpu, RB2K_CACHE_BLEND, &s->blend, RB2K_D7_BLEND_KEYS, key, 1, &state);
     if (state != Hit) {
         ULONG src = (blend >> 8) & 255, dst = blend & 255;
         ULONG rt = VIRGL_OBJ_BLEND_S2_RT_COLORMASK(15 & ~(blend >> RB2K_BLEND_NO_WRITE_SHIFT));
@@ -801,7 +805,7 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
 
     key[0] = d->colorStage; key[1] = d->alphaStage; key[2] = d->specular; key[3] = d->fog;
     key[4] = d->stage1Color; key[5] = d->stage1Alpha;
-    slot = cache_slot(&s->shader, RB2K_D7_SHADER_KEYS, key, 6, &state);
+    slot = cache_slot(gpu, RB2K_CACHE_SHADER, &s->shader, RB2K_D7_SHADER_KEYS, key, 6, &state);
     if (state != Hit) {
         ULONG size = fragment_text(text, d->colorStage, d->alphaStage, d->specular, d->fog,
                                    d->stage1Color, d->stage1Alpha);
@@ -843,7 +847,7 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
         BOOLEAN changed = FALSE;
         if (texture) {
             key[0] = d->sampler; key[1] = d->border;
-            slot = cache_slot(&s->sampler, RB2K_D7_SAMPLER_KEYS, key, 2, &state);
+            slot = cache_slot(gpu, RB2K_CACHE_SAMPLER, &s->sampler, RB2K_D7_SAMPLER_KEYS, key, 2, &state);
             if (state != Hit) { n += sampler_words(words + n, SamplerBase + slot, state, d->sampler, d->border); changed = TRUE; }
             h[0] = SamplerBase + slot;
             if (s->viewTexture != texture->id) {
@@ -860,7 +864,7 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
         }
         if (texture1) {
             key[0] = d->sampler1; key[1] = d->border1;
-            slot = cache_slot(&s->sampler1, RB2K_D7_SAMPLER_KEYS, key, 2, &state);
+            slot = cache_slot(gpu, RB2K_CACHE_SAMPLER1, &s->sampler1, RB2K_D7_SAMPLER_KEYS, key, 2, &state);
             if (state != Hit) { n += sampler_words(words + n, Sampler1Base + slot, state, d->sampler1, d->border1); changed = TRUE; }
             h[1] = Sampler1Base + slot;
             if (!texture) h[0] = h[1];
@@ -1208,7 +1212,7 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
     if (shaded) {
         /* The vertex program, kept per colour context by its id. */
         key[0] = d->vertexProgram;
-        slot = cache_slot(&s->vsProgram, VsProgramKeys, key, 1, &state);
+        slot = cache_slot(gpu, RB2K_CACHE_VS_PROGRAM, &s->vsProgram, VsProgramKeys, key, 1, &state);
         if (state != Hit) {
             if (state == Replaced) {
                 words[0] = DESTROY(VIRGL_OBJECT_SHADER); words[1] = VsProgramBase + slot;
@@ -1248,7 +1252,7 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
      * fixed-function one, whose colour stage word is never all ones. */
     gpu->d8Step = 4;
     key[0] = 0xffffffff; key[1] = d->program; key[2] = key[3] = key[4] = key[5] = 0;
-    slot = cache_slot(&s->shader, RB2K_D7_SHADER_KEYS, key, 6, &state);
+    slot = cache_slot(gpu, RB2K_CACHE_PS_SHADER, &s->shader, RB2K_D7_SHADER_KEYS, key, 6, &state);
     if (state != Hit) {
         if (state == Replaced) {
             words[0] = DESTROY(VIRGL_OBJECT_SHADER); words[1] = ShaderBase + slot;
@@ -1284,7 +1288,7 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
         stages = k + 1;
         fill = k;
         key[0] = d->samplers[k]; key[1] = d->borders[k];
-        slot = cache_slot(&s->psSampler, RB2K_D8_SAMPLER_KEYS, key, 2, &state);
+        slot = cache_slot(gpu, RB2K_CACHE_PS_SAMPLER, &s->psSampler, RB2K_D8_SAMPLER_KEYS, key, 2, &state);
         if (state != Hit) n += sampler_words(words + n, PsSamplerBase + slot, state, d->samplers[k], d->borders[k]);
         h[k] = PsSamplerBase + slot;
         views[k] = PsViewBase + k;
