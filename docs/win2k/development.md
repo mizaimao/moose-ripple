@@ -1705,7 +1705,7 @@ Windows 7 WDK (`WDK_ROOT`).
 
 ## Direct3D 8 pixel shaders
 
-The device reports pixel shader version 1.3. The display driver
+The device reports pixel shader version 1.4 (2.0 to a Direct3D 9 runtime). The display driver
 translates each shader into Gallium TGSI text (`d3d8_ps.c`) when the
 runtime creates it, and the miniport keeps the text and creates the host
 shader in each render target's context on first use. A pixel shader draw
@@ -2189,7 +2189,8 @@ reported "Not supported by hardware", now runs.
 
 A Direct3D 9 runtime offers the programs pixel shader 2.0, which includes
 1.4, but the translator refused version 1.4 and the driver skipped those
-draws. 3DMark03 uses 1.4 for its per-pixel lighting when it is offered: in one
+draws. Direct3D 8 programs were offered 1.3, so 3DMark 2001 SE ran its
+Advanced Pixel Shader test in its fallback; they are now offered 1.4. 3DMark03 uses 1.4 for its per-pixel lighting when it is offered: in one
 run the driver skipped 6.1 million of its primitives (11,475 shader
 failures, all `ffff0104`), and its game tests 2 to 4 came out dark.
 
