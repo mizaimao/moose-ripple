@@ -31,6 +31,10 @@ typedef struct {
     ULONG stencilRef;                   /* the reference value sent, plus 0x100 once sent */
 } RB2K_D7_STATE;
 
+/* Attachment to the colour contexts of images, one bit per slot of
+ * RB2K_GPU.images. Destroying an image clears its bit everywhere, since the
+ * next image in that slot has a context of its own. */
+#define RB2K_SLOT_WORDS (RB2K_DD_SLOTS / 32)
 typedef struct RB2K_IMAGE {
     ULONG id, width, height;
     BOOLEAN defined, hasSurface, uniform;
@@ -39,7 +43,7 @@ typedef struct RB2K_IMAGE {
     BOOLEAN depth16;
     BOOLEAN stencil8;       /* a depth image of 24 bits with 8 of stencil (with depth16 set) */
     struct RB2K_IMAGE *depthBuffer, *depthOwner;
-    ULONG sampledBy[RB2K_ATTACH];       /* contexts of the targets that sample this image */
+    ULONG sampledBy[RB2K_SLOT_WORDS];   /* targets that sample this image, a bit per image slot */
     RB2K_D7_STATE d7;
 } RB2K_IMAGE;
 
@@ -50,7 +54,7 @@ typedef struct {
     ULONG format;                               /* host format; 0 for B8G8R8A8 */
     ULONG faces;                                /* 1, or 6 for a cube map */
     ULONG depth;                                /* a volume's slices; 1 otherwise */
-    ULONG contexts[RB2K_ATTACH];
+    ULONG attached[RB2K_SLOT_WORDS];    /* the colour contexts it is attached to, a bit per image slot */
 } RB2K_TEXTURE;
 #define RB2K_D7_TEXEL_BUDGET (64UL << 20)
 typedef struct {
@@ -207,6 +211,7 @@ BOOLEAN rb_gpu_texture_upload(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K
                               const RB2K_IMAGE *image, ULONG level, ULONG face, ULONG y, ULONG rows, PVOID texels);
 BOOLEAN rb_gpu_texture_free(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture);
 void rb_gpu_texture_forget(RB2K_GPU *gpu);
+void rb_gpu_slot_forget(RB2K_GPU *gpu, const RB2K_IMAGE *image);
 BOOLEAN rb_gpu_prepare_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image);
 BOOLEAN rb_gpu_depth_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *color, RB2K_IMAGE *depth);
 BOOLEAN rb_gpu_clear_buffers(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image,

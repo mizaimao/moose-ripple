@@ -729,6 +729,42 @@ the Start menu holding the focus. To make the GPU path worth turning on,
 its present would first have to stop waiting for each frame's fence, as
 the native Direct3D 7 present does.
 
+### Waits no longer sit out the fence timer
+
+QEMU answers a fenced request when it next looks at its fences: right
+after it handles a notification of the control queue, or on its 10 ms
+timer. A notification with no new request is enough to make it look
+again, so while the miniport waits for a reply it rings the control
+queue's doorbell again after 0.2 ms, then at doubling intervals up to
+2 ms. [QEMU control handler](https://github.com/qemu/qemu/blob/v10.0.0/hw/display/virtio-gpu-gl.c) · [QEMU fence timer](https://github.com/qemu/qemu/blob/v9.2.0/hw/display/virtio-gpu-virgl.c)
+
+One run each on XP SP3 under KVM on a second Intel UHD 630 host (QEMU
+10.0, virglrenderer 1.1.0, Mesa 25.0; its numbers are not comparable with
+the table above), only the miniport changed. The OpenGL runs set
+`RippleGpuDesktop=1`; 3DMark03 ran with the default settings, and in both
+of its runs its message about a volume texture it could not create was
+answered from the host:
+
+| Test | before | after |
+| --- | ---: | ---: |
+| Quake III, 640×480 window, GPU path (fps) | 28.8 | 158.5 |
+| Quake III, 640×480 window, ordinary path (fps) | 509.7 | 519.9 |
+| Quake III, 1024×768 full screen, GPU path (fps) | 83.1 | 290.7 |
+| Quake III, 1024×768 full screen, ordinary path (fps) | 379.7 | 384.9 |
+| 240 swaps, 640×480 window, GPU path (ms) | 8,306 | 1,282 |
+| 240 swaps, full screen, GPU path (ms) | 2,695 | 454 |
+| 240 swaps, full screen, ordinary path (ms) | 378 | 378 |
+| 3DMark03 3.60, 1024×768, Direct3D (3DMarks) | 1,133 | 2,099 |
+| 3DMark03: time waiting for frame N−2 (s) | 143.1 | 9.8 |
+
+Direct3D gains as well: a draw that finds both frame slots in flight
+waits for the older one, and those waits no longer last until the timer.
+The GPU path is five times faster in a window and three and a half times
+at full screen, but still slower than the ordinary path, so it stays
+opt-in. On the ordinary path the window swaps took 174 ms before; after,
+the warm-up run took 171 ms and the timed one 279 ms in the same boot.
+`d9pixels` (41 of 41) and `tpixels hal` (18 of 18) pass with both builds.
+
 ### Small desktop writes and the hardware pointer
 
 `RIPPLE_GL_PRESENT=inline` uses the same per-frame copy as `1`.
@@ -1999,3 +2035,62 @@ before) and still scores about 1158 3DMarks. `d9pixels` (40 of 40) and
 Proxycon and Troll scenes are very dark and the water in Mother Nature is
 mostly white; one volume texture is still refused by Direct3D before it
 reaches the driver.
+
+## Textures in many render targets: 3DMark 2001 SE
+
+A texture, or a render target texture, was attached to at most 16 colour
+contexts at once. 3DMark 2001 SE draws one texture into more than 16 of
+its render targets: the 17th attach failed with `ERROR_NOT_ENOUGH_MEMORY`,
+the miniport took that for a host error and stopped the GPU, and every
+later request failed. The benchmark reported `Present:
+D3DERR_DRIVERINTERNALERROR` after Car Chase at low detail. Each texture and
+host image now keeps a bit per image slot instead of a list; a draw
+attaches its textures to its target on first use, and destroying an image
+clears its slot's bits. The display DLL no longer keeps its own list of
+targets per texture, which made it upload a texture again for each new
+target.
+
+`d7draw` found it: its `D7REFUSED` line now covers fixed-function draw
+records too and gives the first refusal (a refused render target texture
+says which step failed), and a new `D7FIRST` line names the first failed
+request (IOCTL, status, image or texture id) and the first failed host
+command (stage and status). Here the first failure was the texture upload
+request, at the attach stage, with status 8.
+
+On XP SP3 under KVM on the second Intel UHD 630 host (QEMU 10.0), 3DMark
+2001 SE now completes Car Chase, Dragothic and Lobby at low and high
+detail (8.6, 4.3, 27.1, 5.7, 16.1 and 10.3 fps, without the fence change
+of the previous section), with no failed request. It stops at Nature:
+"device does not support bump normal maps", the next fix. `d9pixels` (41
+of 41) and `tpixels hal` (18 of 18) pass.
+
+## Release package
+
+`win2k/package.sh` builds the package on the Linux build host:
+
+    VERSION=0.4.1 THIRDPTY=/path/to/THIRDPTY.TXT win2k/package.sh
+
+It makes `build/win2k-package/moose-ripple-win2k-VERSION.zip` and its
+`SHA256SUMS.txt`. The driver files come from `build.py`, with the INF's
+`DriverVer` set to the version and the build date, and `ripplegl.dll` is
+built from the same checkout's `win9x/mesa`. `README.TXT` is
+`win2k/package/README.TXT`; update its lists before a release.
+`THIRDPTY.TXT`, the notices for Mesa in `ripplegl.dll`, comes from the
+caller and must name the source of the build.
+
+Release 0.4.0 reused the Windows 9x 0.2.0 build of `ripplegl.dll`, which
+predates the Windows 2000/XP path in Mesa's winsys: on 2000 and XP its
+OpenGL fell back to Mesa's software renderer (`softpipe`), and the install
+test ran no OpenGL program. On XP under KVM on the Intel UHD 630 host, with
+the same driver build, that DLL reported `renderer=softpipe` and the
+current build `renderer=virgl`. The script now refuses a `ripplegl.dll`
+that does not import `ExtEscape`, the call that path uses.
+
+The install test is `win2k/tools/pkgtest.cmd`. Install the package on
+fresh Windows XP and Windows 2000 guests, restart, copy the package files
+and `build/win2k`'s test programs into one folder and run
+`pkgtest.cmd [output]` there. It compares the installed files with the
+package, runs `glpresent` and fails unless OpenGL's renderer is `virgl`,
+and runs the Direct3D checks (`d9pixels` with hardware and software vertex
+processing, `d9stencil`, `d8pixels`, `d9full`, `d3d7probe`, `tpixels`). It
+ends with `PKGTEST END failed=N`.

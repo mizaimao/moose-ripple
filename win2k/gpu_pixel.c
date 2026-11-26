@@ -818,47 +818,50 @@ BOOLEAN rb_gpu_texture_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTU
     return send_request(gpu, result, &request, sizeof(request.resource), RB2K_STAGE_RESOURCE);
 }
 
-/* A texture is attached to each colour context that samples it. Context ids
- * are never reused, so an entry for a destroyed target is only stale. */
-BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture,
-                              const RB2K_IMAGE *image)
+/* The image's slot in gpu->images, or RB2K_DD_SLOTS for any other image. */
+static ULONG image_slot(const RB2K_GPU *gpu, const RB2K_IMAGE *image)
 {
-    ULONG i, free = RB2K_ATTACH;
-    for (i = 0; i < RB2K_ATTACH; ++i) {
-        ULONG j;
-        if (texture->contexts[i] == image->id) return TRUE;
-        for (j = 0; j < RB2K_DD_SLOTS && gpu->images[j].id != texture->contexts[i]; ++j) {}
-        if (free == RB2K_ATTACH && (!texture->contexts[i] || j == RB2K_DD_SLOTS)) free = i;
-    }
-    if (free == RB2K_ATTACH) {
-        result->status = ERROR_NOT_ENOUGH_MEMORY;
+    return image >= gpu->images && image < gpu->images + RB2K_DD_SLOTS ? (ULONG)(image - gpu->images) : RB2K_DD_SLOTS;
+}
+
+/* Attach a resource to the target's context once; bits (a bit per image
+ * slot) remembers the contexts it is attached to. */
+static BOOLEAN attach_once(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, PULONG bits, ULONG resource,
+                           const RB2K_IMAGE *target)
+{
+    ULONG slot = image_slot(gpu, target), bit = 1UL << (slot & 31);
+    if (slot == RB2K_DD_SLOTS) {
+        result->status = ERROR_INVALID_PARAMETER;
         result->stage = RB2K_STAGE_ATTACH;
         return FALSE;
     }
-    if (!context_resource(gpu, result, image->id, texture->id, TRUE, RB2K_STAGE_ATTACH)) return FALSE;
-    texture->contexts[free] = image->id;
+    if (bits[slot / 32] & bit) return TRUE;
+    if (!context_resource(gpu, result, target->id, resource, TRUE, RB2K_STAGE_ATTACH)) return FALSE;
+    bits[slot / 32] |= bit;
     return TRUE;
+}
+
+/* A texture is attached to each colour context that samples it. */
+BOOLEAN rb_gpu_texture_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture,
+                              const RB2K_IMAGE *image)
+{
+    return attach_once(gpu, result, texture->attached, texture->id, image);
 }
 
 /* An image sampled by another target (a render target texture) is attached
  * to that target's context too, like a texture. */
 BOOLEAN rb_gpu_image_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *source, const RB2K_IMAGE *target)
 {
-    ULONG i, free = RB2K_ATTACH;
-    for (i = 0; i < RB2K_ATTACH; ++i) {
-        ULONG j;
-        if (source->sampledBy[i] == target->id) return TRUE;
-        for (j = 0; j < RB2K_DD_SLOTS && gpu->images[j].id != source->sampledBy[i]; ++j) {}
-        if (free == RB2K_ATTACH && (!source->sampledBy[i] || j == RB2K_DD_SLOTS)) free = i;
-    }
-    if (free == RB2K_ATTACH) {
-        result->status = ERROR_NOT_ENOUGH_MEMORY;
-        result->stage = RB2K_STAGE_ATTACH;
-        return FALSE;
-    }
-    if (!context_resource(gpu, result, target->id, source->id, TRUE, RB2K_STAGE_ATTACH)) return FALSE;
-    source->sampledBy[free] = target->id;
-    return TRUE;
+    return attach_once(gpu, result, source->sampledBy, source->id, target);
+}
+
+/* The image is going: the next image in its slot has a new context. */
+void rb_gpu_slot_forget(RB2K_GPU *gpu, const RB2K_IMAGE *image)
+{
+    ULONG slot = image_slot(gpu, image), i, bit = ~(1UL << (slot & 31));
+    if (slot == RB2K_DD_SLOTS) return;
+    for (i = 0; i < RB2K_D7_TEXTURES; ++i) gpu->textures[i].attached[slot / 32] &= bit;
+    for (i = 0; i < RB2K_DD_SLOTS; ++i) gpu->images[i].sampledBy[slot / 32] &= bit;
 }
 
 /* Earlier draws in the open frame must reach the host before new texels. */

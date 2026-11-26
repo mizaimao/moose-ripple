@@ -117,10 +117,13 @@ def handshake(c, password, cursor=False):
     if n == 0:
         raise RuntimeError("server refused: " + c.read(struct.unpack(">I", c.read(4))[0]).decode())
     types = c.read(n)
-    if 2 not in types:
+    if 2 in types:
+        c.write(b"\x02")
+        c.write(vnc_response(password, c.read(16)))
+    elif 1 in types:
+        c.write(b"\x01")       # no authentication: a QEMU started by hand on a Unix socket
+    else:
         raise RuntimeError("no VNC authentication offered: %r" % list(types))
-    c.write(b"\x02")
-    c.write(vnc_response(password, c.read(16)))
     if struct.unpack(">I", c.read(4))[0] != 0:
         raise RuntimeError("VNC authentication failed")
     c.write(b"\x01")                              # ClientInit, shared

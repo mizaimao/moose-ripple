@@ -1,0 +1,86 @@
+--- a/src/gallium/targets/wgl/wgl.c
++++ b/src/gallium/targets/wgl/wgl.c
+@@ -109,8 +109,74 @@
+ #else
+    return false;
+ #endif
++}
++
++#ifdef GALLIUM_VIRGL
++/* GetCursorInfo's CURSORINFO; flags bit 0: CURSOR_SHOWING. */
++struct ripple_cursor_info { DWORD cbSize, flags; HCURSOR cursor; POINT position; };
++
++/* A full-screen OpenGL window is shown the way Direct3D's flip chain is: copied on the host
++ * GPU into a display image, with no read-back into the card's memory. Only while its client
++ * area is the whole screen, nothing covers it and the pointer is hidden: the software pointer
++ * and anything GDI draws live in the card's memory, which the display then doesn't show.
++ * RIPPLE_GL_SCANOUT=0 keeps every frame on the GDI path. */
++static bool
++ripple_whole_screen(HDC hdc, const struct pipe_resource *res)
++{
++   static BOOL (WINAPI *get_cursor_info)(struct ripple_cursor_info *);
++   static bool looked;
++   struct ripple_cursor_info cursor;
++   HWND wnd = WindowFromDC(hdc);
++   RECT client, clip;
++   POINT origin = {0, 0};
++
++   if (!wnd || !GetClientRect(wnd, &client) || !ClientToScreen(wnd, &origin))
++      return false;
++   if (origin.x || origin.y || client.right != GetSystemMetrics(SM_CXSCREEN) ||
++       client.bottom != GetSystemMetrics(SM_CYSCREEN) ||
++       res->width0 != (unsigned)client.right || res->height0 != (unsigned)client.bottom)
++      return false;
++   if (GetClipBox(hdc, &clip) != SIMPLEREGION || clip.left || clip.top ||
++       clip.right != client.right || clip.bottom != client.bottom)
++      return false;
++   if (!looked) {             /* Windows 98 and later; on Windows 95 the GDI path stays */
++      get_cursor_info = (BOOL (WINAPI *)(struct ripple_cursor_info *))
++         GetProcAddress(GetModuleHandleA("user32.dll"), "GetCursorInfo");
++      looked = true;
++   }
++   cursor.cbSize = sizeof(cursor);
++   return get_cursor_info && get_cursor_info(&cursor) && !(cursor.flags & 1);
+ }
+ 
++static void
++ripple_window_scanout(struct pipe_screen *screen, struct pipe_context *pipe,
++                      struct pipe_resource *res, HDC hdc)
++{
++   static int enabled = -1;
++   static unsigned skip;      /* presents left before trying again after a refusal */
++   static bool on_gpu;
++   struct stw_context *ctx = stw_current_context();
++
++   if (enabled < 0)
++      enabled = debug_get_bool_option("RIPPLE_GL_SCANOUT", true) &&
++                rvd_virgl_window_scanout(screen);
++   if (enabled && !skip && ctx && pipe && ctx->st->pipe == pipe &&
++       res->target == PIPE_TEXTURE_2D && ripple_whole_screen(hdc, res)) {
++      if (rvd_virgl_present_color(pipe, res, &ctx->ripple_scanout)) {
++         on_gpu = true;
++         return;
++      }
++      skip = 60;
++   } else if (skip)
++      skip--;
++   screen->flush_frontbuffer(screen, pipe, res, 0, 0, hdc, 0, NULL);
++   if (on_gpu) {              /* the frame is in the card's memory now: show the desktop */
++      on_gpu = false;
++      rvd_virgl_show_desktop(screen);
++   }
++}
++#endif
++
+ static const char *created_driver_name = NULL;
+ 
+ static struct pipe_screen *
+@@ -249,7 +315,7 @@
+ 
+ #ifdef GALLIUM_VIRGL
+    if (use_virgl) {
+-      screen->flush_frontbuffer(screen, ctx, res, 0, 0, hDC, 0, NULL);
++      ripple_window_scanout(screen, ctx, res, hDC);
+       return;
+    }
+ #endif

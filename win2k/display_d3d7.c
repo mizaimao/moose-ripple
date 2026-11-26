@@ -136,7 +136,6 @@ typedef struct {
      * blits, which mark them dirty; others are checked once a scene. */
     BOOL tracked, dirty;
     ULONG host, sum, epoch;
-    ULONG targets[RB2K_ATTACH];
 } D7_TEXTURE;
 
 /* A Direct3D 8 vertex or index buffer registered through CreateSurfaceEx.
@@ -213,10 +212,7 @@ static ULONG flush_draws(void)
         d->d7draw.lastDrawError = error;
         /* A transport reset releases the host textures: upload them again. */
         for (i = 0; textures && i < MaxTextures; ++i)
-            if (textures[i].display == d) {
-                textures[i].host = 0;
-                RtlZeroMemory(textures[i].targets, sizeof(textures[i].targets));
-            }
+            if (textures[i].display == d) textures[i].host = 0;
     }
     return error;
 }
@@ -1151,7 +1147,6 @@ static BOOL upload_blocks(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
             total += rows * rowBytes;
         }
     }
-    if (t->host != id) RtlZeroMemory(t->targets, sizeof(t->targets));
     t->host = id;
     ++d->d7draw.uploads;
     ++d->d7draw.blockUploads;
@@ -1219,7 +1214,6 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
             }
         }
         if (ok) {
-            if (t->host != id) RtlZeroMemory(t->targets, sizeof(t->targets));
             t->host = id;
             ++d->d7draw.uploads;
             d->d7draw.uploadBytes += total;
@@ -1228,7 +1222,6 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
         /* A transport reset releases every host texture; make a new one. */
         if (!t->host) break;
         t->host = id = 0;
-        RtlZeroMemory(t->targets, sizeof(t->targets));
     }
     ++d->d7draw.uploadFailures;
     return FALSE;
@@ -1245,13 +1238,12 @@ static void texture_skip(D7_CONTEXT *c, const D7_TEXTURE *t, ULONG targetId)
 
 static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
 {
-    ULONG sum, i;
-    BOOL attached = FALSE;
+    ULONG sum;
     /* A render target texture is sampled on the host, but never while it is the target. */
     if (t->image) return t->image == targetId ? 0 : RB2K_TEXTURE_IMAGE | t->image;
-    for (i = 0; i < RB2K_ATTACH; ++i) if (t->targets[i] == targetId) attached = TRUE;
-    if (t->host && attached && t->tracked && !t->dirty) { ++c->display->d7draw.checksSkipped; return t->host; }
-    if (t->host && attached && t->epoch == textureEpoch) return t->host;
+    /* The miniport attaches the host texture to each target that draws with it. */
+    if (t->host && t->tracked && !t->dirty) { ++c->display->d7draw.checksSkipped; return t->host; }
+    if (t->host && t->epoch == textureEpoch) return t->host;
     ++c->display->d7draw.checks;
     /* Cleared before reading, so a write during the read marks it again. */
     t->dirty = FALSE;
@@ -1265,7 +1257,7 @@ static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
         if (!read) { ++c->display->d7draw.checkFailures; return 0; }
     }
     t->epoch = textureEpoch;
-    if (t->host && attached && sum == t->sum) return t->host;
+    if (t->host && sum == t->sum) return t->host;
     {
         LONGLONG start, end;
         BOOL uploaded;
@@ -1276,12 +1268,6 @@ static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
         if (!uploaded) return 0;
     }
     t->sum = sum;
-    for (i = 0; i < RB2K_ATTACH && t->targets[i] != targetId; ++i) {}
-    if (i == RB2K_ATTACH) {
-        /* Reuse the entry of a target that no longer exists. */
-        for (i = 0; i < RB2K_ATTACH && t->targets[i] && target(c, t->targets[i], FALSE); ++i) {}
-        if (i < RB2K_ATTACH) t->targets[i] = targetId;
-    }
     return t->host;
 }
 
