@@ -150,6 +150,10 @@ typedef struct {
     /* Texture skips by reason: no such handle, not usable (format, owner,
      * kind), the target itself, not ready (read or upload failed). */
     ULONG texSkips[4];
+    /* The Direct3D 9 interface: draws whose declaration and shader could not be made into
+     * a Direct3D 8 shader or vertex format, and commands accepted but not carried out
+     * (RB2K_D9_IGNORED_...). */
+    ULONG d9Unresolved, d9Ignored[8];
     /* The last eight surface creations: caps, size (width << 16 | height),
      * count, slots in use << 8 | where it ended (0 done, 1 no slot, 2 host
      * image refused), result. */
@@ -158,6 +162,8 @@ typedef struct {
 enum { RB2K_D7_FAIL_RANGE, RB2K_D7_FAIL_VBCAPS, RB2K_D7_FAIL_LINEAR, RB2K_D7_FAIL_ADDRESS,
        RB2K_D7_FAIL_PROBE, RB2K_D7_FAIL_IMMEDIATE, RB2K_D7_FAIL_LENGTH, RB2K_D7_FAIL_OTHER };
 #define RB2K_D7_DRAWSTATS_VERSION 4
+enum { RB2K_D9_IGNORED_SCISSOR, RB2K_D9_IGNORED_TARGETS, RB2K_D9_IGNORED_BLT, RB2K_D9_IGNORED_FILL,
+       RB2K_D9_IGNORED_QUERY, RB2K_D9_IGNORED_CONSTANTS, RB2K_D9_IGNORED_FREQUENCY, RB2K_D9_IGNORED_MIPS };
 #define RB2K_D3D7_QUERY_LIMIT 24
 typedef struct {
     RB2K_D3D7_STATS totals;

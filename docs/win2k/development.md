@@ -2282,6 +2282,57 @@ On XP SP3 under KVM on the second Intel UHD 630 host, with vertex shaders on,
 case 33 passes and `d9pixels` passes 53 of 53. The translations of DirectQ's
 shaders with one and two streams pass Mesa's TGSI parser.
 
+## The Direct3D 9 driver interface
+
+3DMark05 asks for a Direct3D 9 driver: the runtime has to see the DirectX 9
+driver interface, not only Direct3D 9 capabilities reported through the
+Direct3D 8 one. The display DLL offers it when the `RippleD3D9` registry value
+is 1 (with `RippleVertexShaders` also 1); it is off by default while it is
+being completed.
+
+With the switch on, the driver answers the runtime's interface-version query
+with the DirectX 9 version (4), and the runtime then reads the `D3DCAPS9`
+answer. The runtime's debug build (`d3d9d.dll` from the June 2010 SDK) shows
+what it requires before it offers a hardware device; without any one of these
+it falls back silently to "no hardware acceleration":
+
+- `D3DPMISCCAPS_FOGINFVF` set and `D3DPMISCCAPS_LINEPATTERNREP` clear;
+- at least 8 vertex streams, `D3DDEVCAPS2_STREAMOFFSET`, and no
+  `D3DVTXPCAPS_NO_VSDT_UBYTE4`;
+- `D3DPRASTERCAPS_SCISSORTEST` and `D3DCAPS2_DYNAMICTEXTURES`;
+- the shader model 2 details (`VS20Caps`, `PS20Caps`) within their ranges.
+
+After a successful `DrawPrimitives2` the driver must leave `dwErrorOffset` at
+0: a Direct3D 9 runtime reads it as the size of a reply, and anything else
+sends it into a loop of assertions. The driver reports no query types, so the
+runtime issues no queries.
+
+What changes in the command stream:
+
+- A vertex shader arrives as two objects, a declaration and a function, set
+  separately. The driver pairs each declaration with each function into the
+  Direct3D 8 shaders it already runs on the host, and an FVF code (a handle
+  with bit 0 clear) stands for stream 0 alone.
+- `SETSTREAMSOURCE2` gives each stream a byte offset; the draws add it.
+- `SETRENDERTARGET2` and `SETDEPTHSTENCIL` replace `SETRENDERTARGET`
+  (one render target).
+- `BLT`, `SURFACEBLT` (StretchRect) and `COLORFILL` come as commands. Whole
+  surfaces of the same size are copied or filled on the host; other blits are
+  counted in `d7draw`'s `D9DDI` line.
+- The scissor rectangle and the integer and boolean shader constants are
+  recorded but not applied yet; `d7draw` counts draws that would need them.
+
+Two surface descriptions differ from a Direct3D 8 runtime's. A system-memory
+DXT texture is described by its blocks: an 8x8 DXT1 arrives as 16x2 (the
+bytes of a block row by the block rows), so the driver takes its size from the
+texture it is copied into. A cube map's faces each have a handle, and the
+runtime copies one face by that face's handle.
+
+`d9pixels` passes all 55 of its cases on the interface on XP SP3 (UHD 630
+host), the same as with the switch off; cases 56 and 57 cover `ColorFill` and
+`StretchRect`.
+
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:

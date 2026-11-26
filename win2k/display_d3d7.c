@@ -100,9 +100,16 @@ typedef struct {
      * handle has its low bit set), the pixel shader, stream zero (a
      * registered buffer, or the user memory of DrawPrimitiveUP) and the
      * index buffer. Only stream zero is offered. */
-    BOOL dx8, streamUser;
+    BOOL dx8, streamUser, dx9Ddi;   /* dx9Ddi: a DirectX 9 runtime on the Direct3D 9 interface */
     ULONG fvf, pixelShader, streamHandle, streamStride, indexHandle, indexStride;
     ULONG streamHandles[RB_VS_STREAMS], streamStrides[RB_VS_STREAMS];   /* each stream; 0 as above */
+    /* The Direct3D 9 interface: stream offsets (bytes), the current declaration (or vertex format)
+     * and shader function handles, the scissor rectangle, and the declarations and functions made. */
+    ULONG streamOffsets[RB_VS_STREAMS], declHandle, funcHandle;
+    RECTL scissor;
+    struct D9_DECL *decls;
+    struct D9_FUNC *funcs;
+    struct D9_PAIR *pairs;
     BOOL inScene, queued;
     ULONG minStart, maxEnd;     /* diagnostics for one command buffer */
     RB2K_D3D7_DRAW draw;        /* the batch being filled */
@@ -136,6 +143,10 @@ typedef struct {
     ULONG depth;    /* a volume's slices at level zero (each level has half as many); 1 otherwise */
     FLATPTR levelAddress[6][RB2K_D7_LEVELS];
     ULONG image;    /* a render target texture: the image id (sampled as it is) */
+    /* A system-memory DXT texture that a Direct3D 9 runtime described by its bytes (adopt_blocks):
+     * the format its FourCC names, while it is registered with none. */
+    ULONG blocks;
+    ULONG faceHandles[6];   /* a cube map: each face's own surface handle (a Direct3D 9 runtime copies faces by them) */
     /* Video-memory textures are written only through DirectDraw locks and
      * blits, which mark them dirty; others are checked once a scene. */
     BOOL tracked, dirty;
@@ -154,6 +165,7 @@ typedef struct {
 } D8_BUFFER;
 
 static void release_shaders(D7_CONTEXT *c);
+static void d9_release(D7_CONTEXT *c);
 static void release_blocks(D7_CONTEXT *c);
 static void stencil_state(const D7_CONTEXT *c, const DD_SLOT *z, ULONG *stencil, ULONG *ref);
 static HSEMAPHORE registry;
@@ -265,6 +277,17 @@ static D7_TEXTURE *find_texture(PDD_DIRECTDRAW_LOCAL local, ULONG handle)
     ULONG i;
     for (i = 0; textures && handle && i < MaxTextures; ++i)
         if (textures[i].handle == handle && textures[i].local == local) return &textures[i];
+    return NULL;
+}
+
+/* A cube map one of whose faces has this handle; face gets which. */
+static D7_TEXTURE *find_face(PDD_DIRECTDRAW_LOCAL local, ULONG handle, ULONG *face)
+{
+    ULONG i, k;
+    for (i = 0; textures && handle && i < MaxTextures; ++i)
+        if (textures[i].handle && textures[i].local == local && textures[i].faces == 6)
+            for (k = 0; k < 6; ++k)
+                if (textures[i].faceHandles[k] == handle) { *face = k; return &textures[i]; }
     return NULL;
 }
 
@@ -420,6 +443,8 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
     t->height = g->wHeight;
     t->format = rb_d7_texture_format(&g->ddpfSurface, d->mode.BitsPerPlane);
     t->mipmaps = (l->ddsCaps.dwCaps & DDSCAPS_MIPMAP) != 0;
+    t->blocks = (l->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY) && compressed(t->format) ? t->format : 0;
+    RtlZeroMemory(t->faceHandles, sizeof(t->faceHandles));
     if (t->mipmaps) ++d->d7draw.regMipmaps;
     t->tracked = !(l->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY);
     t->dirty = TRUE;
@@ -461,6 +486,7 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
             ULONG levels;
             if (!top[k] || top[k]->lpGbl->wWidth != t->width || top[k]->lpGbl->wHeight != t->height ||
                 !top[k]->lpGbl->fpVidMem) { t->format = TexNone; t->levels = 1; break; }
+            t->faceHandles[k] = top[k]->lpSurfMore ? top[k]->lpSurfMore->dwSurfaceHandle : 0;
             levels = face_levels(t, k, top[k], TRUE, &stop);
             if (levels < t->levels) t->levels = levels;
         }
@@ -754,6 +780,7 @@ static DWORD APIENTRY create_context(LPD3DNTHAL_CONTEXTCREATEDATA a)
             default_stages(c);
             /* The Direct3D 8 and 9 runtimes pass 4 here; Direct3D 7 passes 3. */
             c->dx8 = kind >= 4;
+            c->dx9Ddi = c->dx8 && d->d3d9Ddi && d->d7draw.d8Version >= 0x900;
             c->id = ++lastContext;
             a->dwhContext = c->id;
             a->ddrval = DD_OK;
@@ -777,6 +804,7 @@ static DWORD APIENTRY destroy_context(LPD3DNTHAL_CONTEXTDESTROYDATA a)
         EngAcquireSemaphore(d->ddLock);
         a->ddrval = finish_scene(c);
         release_shaders(c);
+        d9_release(c);
         RtlZeroMemory(c, sizeof(*c));
         EngReleaseSemaphore(d->ddLock);
     }
@@ -2388,6 +2416,7 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
         } else {
             D8_BUFFER *b = c->streamUser ? NULL : find_buffer(c->local, c->streamHandles[n]);
             LONGLONG first = stride ? (LONGLONG)(p->streamFirst / (LONG)stride) * c->streamStrides[n] : 0;
+            first += c->streamOffsets[n];
             if (!b || b->owner != c->owner || !b->global->fpVidMem || first < 0) {
                 skip(c, RB2K_D7_SKIP_VERTEX, p->primitives);
                 return DD_OK;
@@ -2485,6 +2514,302 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
     return hr;
 }
 
+/* ---- The Direct3D 9 driver interface ----
+ *
+ * A DirectX 9 runtime on this interface creates vertex declarations
+ * (D3DVERTEXELEMENT9) and shader functions separately and makes one of each
+ * current; a declaration handle has bit 0 set, any other handle is a
+ * fixed-function vertex format for stream 0. For a draw with a shader, the
+ * pair becomes a Direct3D 8 vertex shader of the kind the rest of this file
+ * draws: Direct3D 8 declaration tokens, which map each element to the input
+ * register the shader's dcl statement gives its usage, and the code without
+ * those statements. */
+enum { MaxDecls = 64, MaxFuncs = 64, MaxPairs = 32, D9PairHandle = 0x40000001 };
+struct D9_DECL { ULONG handle, count; RB_VERTEX_ELEMENT9 *elements; };
+struct D9_FUNC { ULONG handle, count; ULONG *tokens; };
+struct D9_PAIR { ULONG decl, func, vs; };
+
+static BOOL d9_tables(D7_CONTEXT *c)
+{
+    if (!c->decls) c->decls = EngAllocMem(FL_ZERO_MEMORY, MaxDecls * sizeof(*c->decls), 'd9bR');
+    if (!c->funcs) c->funcs = EngAllocMem(FL_ZERO_MEMORY, MaxFuncs * sizeof(*c->funcs), 'f9bR');
+    if (!c->pairs) c->pairs = EngAllocMem(FL_ZERO_MEMORY, MaxPairs * sizeof(*c->pairs), 'p9bR');
+    return c->decls && c->funcs && c->pairs;
+}
+
+/* Forget the shaders made from a declaration or function handle (0 matches none). */
+static void d9_forget(D7_CONTEXT *c, ULONG decl, ULONG func)
+{
+    ULONG i;
+    for (i = 0; c->pairs && i < MaxPairs; ++i) {
+        struct D9_PAIR *q = &c->pairs[i];
+        if (!q->vs || ((!decl || q->decl != decl) && (!func || q->func != func))) continue;
+        {
+            D8_VSHADER *vs = find_vshader(c, q->vs);
+            if (vs) release_vshader(c, vs);
+        }
+        RtlZeroMemory(q, sizeof(*q));
+    }
+}
+
+static struct D9_DECL *d9_decl(D7_CONTEXT *c, ULONG handle)
+{
+    ULONG i;
+    for (i = 0; c->decls && handle && i < MaxDecls; ++i) if (c->decls[i].handle == handle) return &c->decls[i];
+    return NULL;
+}
+
+static struct D9_FUNC *d9_func(D7_CONTEXT *c, ULONG handle)
+{
+    ULONG i;
+    for (i = 0; c->funcs && handle && i < MaxFuncs; ++i) if (c->funcs[i].handle == handle) return &c->funcs[i];
+    return NULL;
+}
+
+static void d9_delete_decl(D7_CONTEXT *c, ULONG handle)
+{
+    struct D9_DECL *e = d9_decl(c, handle);
+    d9_forget(c, handle, 0);
+    if (!e) return;
+    if (e->elements) EngFreeMem(e->elements);
+    RtlZeroMemory(e, sizeof(*e));
+}
+
+static void d9_delete_func(D7_CONTEXT *c, ULONG handle)
+{
+    struct D9_FUNC *f = d9_func(c, handle);
+    d9_forget(c, 0, handle);
+    if (!f) return;
+    if (f->tokens) EngFreeMem(f->tokens);
+    RtlZeroMemory(f, sizeof(*f));
+}
+
+static void d9_create_decl(D7_CONTEXT *c, ULONG handle, const RB_VERTEX_ELEMENT9 *elements, ULONG count)
+{
+    struct D9_DECL *e;
+    ULONG i;
+    if (!d9_tables(c) || !handle) return;
+    d9_delete_decl(c, handle);
+    for (i = 0; i < MaxDecls && c->decls[i].handle; ++i) {}
+    if (i == MaxDecls || !count) return;
+    e = &c->decls[i];
+    e->elements = EngAllocMem(0, count * sizeof(*elements), 'e9bR');
+    if (!e->elements) return;
+    RtlCopyMemory(e->elements, elements, count * sizeof(*elements));
+    e->handle = handle;
+    e->count = count;
+}
+
+static void d9_create_func(D7_CONTEXT *c, ULONG handle, const ULONG *tokens, ULONG bytes)
+{
+    struct D9_FUNC *f;
+    ULONG i;
+    if (!d9_tables(c) || !handle) return;
+    d9_delete_func(c, handle);
+    for (i = 0; i < MaxFuncs && c->funcs[i].handle; ++i) {}
+    if (i == MaxFuncs || bytes < 8 || bytes % 4) return;
+    f = &c->funcs[i];
+    f->tokens = EngAllocMem(0, bytes, 'c9bR');
+    if (!f->tokens) return;
+    RtlCopyMemory(f->tokens, tokens, bytes);
+    f->handle = handle;
+    f->count = bytes / 4;
+}
+
+/* The Direct3D 8 declaration and code for a declaration and a shader function, into out:
+ * declaration tokens, then the code without its input dcl statements. Returns the words of
+ * each, or FALSE when the pair has something Direct3D 8 cannot say. */
+static BOOL d9_translate(const struct D9_DECL *dl, const struct D9_FUNC *fn, ULONG *out, ULONG room,
+                         ULONG *declWords, ULONG *codeWords)
+{
+    static const UCHAR dwords[8] = { 1, 2, 3, 4, 1, 1, 1, 2 };   /* FLOAT1..4, D3DCOLOR, UBYTE4, SHORT2, SHORT4 */
+    UCHAR reg[14][16];
+    ULONG i = 1, n = 0, s, k, start;
+    if (fn->count < 2 || (fn->tokens[0] & 0xffff0000) != 0xfffe0000 || (fn->tokens[0] & 0xffff) > 0x0200) return FALSE;
+    RtlFillMemory(reg, sizeof(reg), 0xff);
+    /* The input dcl statements, which come before the other instructions. */
+    while (i < fn->count) {
+        ULONG t = fn->tokens[i];
+        if ((t & 0xffff) == 0xfffe) { i += 1 + ((t >> 16) & 0x7fff); continue; }     /* comment */
+        if ((t & 0xffff) != 0x1f || i + 2 >= fn->count) break;                       /* not a dcl */
+        {
+            ULONG usage = fn->tokens[i + 1] & 0x1f, index = (fn->tokens[i + 1] >> 16) & 0xf, dst = fn->tokens[i + 2];
+            ULONG type = ((dst >> 28) & 7) | ((dst >> 8) & 0x18);
+            if (type == 1 && usage < 14) reg[usage][index] = (UCHAR)(dst & 0x7ff);      /* D3DSPR_INPUT */
+        }
+        i += 3;
+    }
+    start = i;
+    /* Declaration tokens, stream by stream in offset order, with skips (at most 15 words each)
+     * over gaps and over elements the shader does not read. */
+    for (s = 0; s < RB_VS_STREAMS; ++s) {
+        ULONG idx[64], m = 0, cursor = 0, j;
+        for (k = 0; k < dl->count && dl->elements[k].stream != 0xff && m < 64; ++k) {
+            if (dl->elements[k].stream != s) continue;
+            for (j = m; j > 0 && dl->elements[idx[j - 1]].offset > dl->elements[k].offset; --j) idx[j] = idx[j - 1];
+            idx[j] = k;
+            ++m;
+        }
+        if (!m) continue;
+        if (n + 1 >= room) return FALSE;
+        out[n++] = (1UL << 29) | s;
+        for (j = 0; j < m; ++j) {
+            const RB_VERTEX_ELEMENT9 *e = &dl->elements[idx[j]];
+            ULONG gap, r;
+            if (e->type > 7 || e->method || e->offset % 4 || e->offset < cursor) return FALSE;
+            for (gap = (e->offset - cursor) / 4; gap; gap -= min(gap, 15)) {
+                if (n + 1 >= room) return FALSE;
+                out[n++] = (2UL << 29) | (1UL << 28) | min(gap, 15) << 16;
+            }
+            if (n + 1 >= room) return FALSE;
+            r = e->usage < 14 ? reg[e->usage][e->usageIndex & 15] : 0xff;
+            out[n++] = r != 0xff ? (2UL << 29) | ((ULONG)e->type << 16) | r : (2UL << 29) | (1UL << 28) | ((ULONG)dwords[e->type] << 16);
+            cursor = e->offset + 4 * dwords[e->type];
+        }
+    }
+    if (n + 1 + 1 + fn->count - start > room) return FALSE;
+    out[n++] = 0xffffffff;
+    *declWords = n;
+    out[n++] = fn->tokens[0];
+    for (i = start; i < fn->count; ++i) out[n++] = fn->tokens[i];
+    *codeWords = n - *declWords;
+    return TRUE;
+}
+
+/* The Direct3D 8 vertex shader handle for the current declaration and function, made on first
+ * use; 0 when they cannot be drawn. */
+static ULONG d9_vshader(D7_CONTEXT *c)
+{
+    struct D9_DECL *dl = d9_decl(c, c->declHandle);
+    struct D9_FUNC *fn = d9_func(c, c->funcHandle);
+    ULONG i, free = MaxPairs, declWords, codeWords, *buffer;
+    if (!dl || !fn || !d9_tables(c)) return 0;
+    for (i = 0; i < MaxPairs; ++i) {
+        if (c->pairs[i].vs && c->pairs[i].decl == dl->handle && c->pairs[i].func == fn->handle) return c->pairs[i].vs;
+        if (!c->pairs[i].vs && free == MaxPairs) free = i;
+    }
+    if (free == MaxPairs) { d9_forget(c, c->pairs[0].decl, 0); free = 0; }
+    buffer = EngAllocMem(0, (64 + fn->count + 2) * sizeof(ULONG), 't9bR');
+    if (!buffer) return 0;
+    if (d9_translate(dl, fn, buffer, 64 + fn->count + 2, &declWords, &codeWords)) {
+        ULONG handle = D9PairHandle + 2 * free;
+        create_vshader(c, handle, (const BYTE *)buffer, declWords * 4, codeWords * 4);
+        if (find_vshader(c, handle)) {
+            c->pairs[free].decl = dl->handle;
+            c->pairs[free].func = fn->handle;
+            c->pairs[free].vs = handle;
+        }
+    }
+    EngFreeMem(buffer);
+    return c->pairs[free].vs;
+}
+
+/* A declaration a fixed-function draw can read as a vertex format: stream 0 only, in the order
+ * and sizes of the vertex format. 0 when it is not one. */
+static ULONG d9_decl_fvf(const struct D9_DECL *dl)
+{
+    static const ULONG sizeCode[4] = { 3, 0, 1, 2 };   /* FLOAT1..4 as D3DFVF_TEXCOORDSIZE codes */
+    ULONG fvf = 0, offset = 0, stage = 0, tex = 0, k;
+    for (;;) {
+        const RB_VERTEX_ELEMENT9 *e = NULL;
+        for (k = 0; k < dl->count && dl->elements[k].stream != 0xff; ++k)
+            if (dl->elements[k].offset == offset) e = &dl->elements[k];
+        if (!e) break;
+        if (e->stream || e->method) return 0;
+        if (e->usage == 0 && !e->usageIndex && e->type == 2 && stage < 1) { fvf |= D3DFVF_XYZ; stage = 1; offset += 12; }
+        else if (e->usage == 9 && !e->usageIndex && e->type == 3 && stage < 1) { fvf |= D3DFVF_XYZRHW; stage = 1; offset += 16; }
+        else if (e->usage == 3 && !e->usageIndex && e->type == 2 && stage == 1 && (fvf & D3DFVF_XYZ)) { fvf |= D3DFVF_NORMAL; stage = 2; offset += 12; }
+        else if (e->usage == 10 && e->usageIndex == 0 && e->type == 4 && stage >= 1 && stage < 3) { fvf |= D3DFVF_DIFFUSE; stage = 3; offset += 4; }
+        else if (e->usage == 10 && e->usageIndex == 1 && e->type == 4 && stage >= 1 && stage < 4) { fvf |= D3DFVF_SPECULAR; stage = 4; offset += 4; }
+        else if (e->usage == 5 && e->usageIndex == tex && e->type <= 3 && stage >= 1 && tex < 8) {
+            fvf |= sizeCode[e->type] << (16 + 2 * tex);
+            ++tex;
+            stage = 5;
+            offset += 4 * (e->type + 1);
+        } else return 0;
+    }
+    for (k = 0; k < dl->count && dl->elements[k].stream != 0xff; ++k)
+        if (dl->elements[k].offset >= offset || dl->elements[k].stream) return 0;   /* something left over */
+    return stage ? fvf | (tex << D3DFVF_TEXCOUNT_SHIFT) : 0;
+}
+
+/* Before a draw on the Direct3D 9 interface: the vertex format, or the Direct3D 8 shader made
+ * from the current declaration and function, as c->fvf. FALSE when the draw cannot be done. */
+static BOOL d9_resolve(D7_CONTEXT *c)
+{
+    if (c->funcHandle) {
+        ULONG vs = d9_vshader(c);
+        if (!vs) { ++c->display->d7draw.d9Unresolved; return FALSE; }
+        c->fvf = vs;
+        return TRUE;
+    }
+    if (!(c->declHandle & 1)) { c->fvf = c->declHandle; return c->fvf != 0; }
+    {
+        struct D9_DECL *dl = d9_decl(c, c->declHandle);
+        ULONG fvf = dl ? d9_decl_fvf(dl) : 0;
+        if (!fvf) { ++c->display->d7draw.d9Unresolved; return FALSE; }
+        c->fvf = fvf;
+        return TRUE;
+    }
+}
+
+/* A rectangle covering a whole target (an empty one stands for all of it). */
+static BOOL whole_rect(const RECTL *r, const DD_SLOT *s)
+{
+    return r->right <= r->left || r->bottom <= r->top ||
+           (!r->left && !r->top && r->right == (LONG)s->width && r->bottom == (LONG)s->height);
+}
+
+/* BLT and SURFACEBLT: a whole target copied on the host into another of its size. The rest (parts,
+ * stretches, mip levels) are counted in d9Ignored. */
+static void d9_blt(D7_CONTEXT *c, const RB_DP2_BLT9 *b)
+{
+    DD_SLOT *src = target(c, b->source, TRUE), *dst = target(c, b->dest, TRUE);
+    RB2K_DD_COPY copy;
+    ULONG written;
+    if (!src || !dst || src == dst || src->depth16 || dst->depth16 || src->locked || dst->locked ||
+        b->sourceLevel || b->destLevel || src->width != dst->width || src->height != dst->height ||
+        !whole_rect(&b->sourceRect, src) || !whole_rect(&b->destRect, dst)) {
+        ++c->display->d7draw.d9Ignored[RB2K_D9_IGNORED_BLT];
+        return;
+    }
+    copy.source = src->id;
+    copy.destination = dst->id;
+    if (miniport(c->display, IOCTL_RB2K_DD_COPY, &copy, sizeof(copy), NULL, 0, &written))
+        ++c->display->d7draw.d9Ignored[RB2K_D9_IGNORED_BLT];
+    c->queued = TRUE;
+}
+
+/* COLORFILL: a whole target filled with a D3DCOLOR, as a clear of it. */
+static void d9_fill(D7_CONTEXT *c, const RB_DP2_COLOR_FILL *f)
+{
+    DD_SLOT *s = target(c, f->surface, TRUE);
+    RB2K_DD_FILL fill;
+    ULONG written;
+    if (!s || s->depth16 || s->locked || !whole_rect(&f->rect, s)) {
+        ++c->display->d7draw.d9Ignored[RB2K_D9_IGNORED_FILL];
+        return;
+    }
+    fill.id = s->id;
+    fill.color = f->color;
+    if (miniport(c->display, IOCTL_RB2K_D3D7_CLEAR, &fill, sizeof(fill), NULL, 0, &written))
+        ++c->display->d7draw.d9Ignored[RB2K_D9_IGNORED_FILL];
+    c->queued = TRUE;
+}
+
+static void d9_release(D7_CONTEXT *c)
+{
+    ULONG i;
+    for (i = 0; c->decls && i < MaxDecls; ++i) if (c->decls[i].elements) EngFreeMem(c->decls[i].elements);
+    for (i = 0; c->funcs && i < MaxFuncs; ++i) if (c->funcs[i].tokens) EngFreeMem(c->funcs[i].tokens);
+    if (c->decls) EngFreeMem(c->decls);
+    if (c->funcs) EngFreeMem(c->funcs);
+    if (c->pairs) EngFreeMem(c->pairs);
+    c->decls = NULL;
+    c->funcs = NULL;
+    c->pairs = NULL;
+}
+
 /* ---- Direct3D 8 streams ---- */
 
 static void trace8(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG op, ULONG n, const BYTE *p, ULONG avail)
@@ -2530,8 +2855,9 @@ static BOOL stream_zero(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, PRIMS *
     } else {
         D8_BUFFER *b = find_buffer(c->local, c->streamHandle);
         if (!b || b->owner != c->owner || !b->global->fpVidMem) return FALSE;
-        p->streamData = (const BYTE *)b->global->fpVidMem;
-        p->streamBytes = b->global->dwLinearSize;
+        if (c->streamOffsets[0] > b->global->dwLinearSize) return FALSE;
+        p->streamData = (const BYTE *)b->global->fpVidMem + c->streamOffsets[0];
+        p->streamBytes = b->global->dwLinearSize - c->streamOffsets[0];
     }
     return TRUE;
 }
@@ -2548,6 +2874,9 @@ static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULON
     if (!count) return DD_OK;
     if (type < RbTriangleList || type > RbTriangleFan) { skip(c, RB2K_D7_SKIP_PRIMITIVE, count); return DD_OK; }
     prims.kind = type == RbTriangleList ? List : type == RbTriangleStrip ? Strip : Fan;
+    if (c->dx9Ddi && !d9_resolve(c)) { skip(c, RB2K_D7_SKIP_VERTEX, count); return DD_OK; }
+    /* D3DRS_SCISSORTESTENABLE: the rectangle is kept but not applied yet. */
+    if (c->dx9Ddi && c->rs[174]) ++c->display->d7draw.d9Ignored[RB2K_D9_IGNORED_SCISSOR];
     if (((c->fvf & 1) && !c->display->vertexShaders) || !c->streamStride || c->streamStride > 256 ||
         !stream_zero(c, a, &prims) ||
         first < -0x7fffffffLL || first > (LONGLONG)prims.streamBytes) {
@@ -2603,12 +2932,29 @@ static ULONG variable_records(const BYTE *p, ULONG remaining, ULONG count, ULONG
  * level directly; the next draw compares and uploads it. A null source only
  * asks for the destination to be loaded, which the next draw does anyway. */
 /* A box of a volume copied into another volume, at each level both have. */
+/* A Direct3D 9 runtime describes a system-memory DXT texture by its bytes (a 4x4 DXT5 as 16x1), so
+ * it registers with no format. Its blocks follow each other row by row, so a blit into a texture of
+ * the format its FourCC names gives it that texture's size. */
+static void adopt_blocks(D7_TEXTURE *src, const D7_TEXTURE *dst)
+{
+    ULONG face, level;
+    if (!src || !dst || src->format || !src->blocks || src->blocks != dst->format || src->faces != dst->faces) return;
+    src->format = dst->format;
+    src->width = dst->width;
+    src->height = dst->height;
+    src->pitch = rb_d7_row_bytes(src->format, src->width);
+    for (face = 0; face < src->faces; ++face)
+        for (level = 0; level < src->levels; ++level)
+            src->levelPitch[face][level] = rb_d7_row_bytes(src->format, max(1, src->width >> level));
+}
+
 static void volume_blt(D7_CONTEXT *c, const RB_DP2_VOLUME_BLT *b)
 {
     DISPLAY *d = c->display;
     D7_TEXTURE *dst = find_texture(c->local, b->dest), *src = find_texture(c->local, b->source);
     ULONG left = b->box[0], top = b->box[1], right = b->box[2], bottom = b->box[3], front = b->box[4], back = b->box[5];
     ULONG bpp, level, levels;
+    adopt_blocks(src, dst);
     if (!dst || !src || !dst->format || dst->format != src->format ||
         dst->depth < 2 || src->depth < 2 || dst->owner != c->owner || src->owner != c->owner) {
         ++d->d7draw.texBltFailures;
@@ -2668,10 +3014,15 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
     D7_TEXTURE *dst, *src;
     LONG left = b->rSrc.left, top = b->rSrc.top, right = b->rSrc.right, bottom = b->rSrc.bottom;
     ULONG bpp, y, rows, bytes;
+    ULONG srcFace = ~0UL, dstFace = ~0UL;   /* one face of a cube map, by that face's handle */
     if (!b->dwDDSrcSurface) return;
     dst = find_texture(c->local, b->dwDDDestSurface);
     src = find_texture(c->local, b->dwDDSrcSurface);
+    if (!dst) dst = find_face(c->local, b->dwDDDestSurface, &dstFace);
+    if (!src) src = find_face(c->local, b->dwDDSrcSurface, &srcFace);
+    adopt_blocks(src, dst);
     if (!dst || !src || !dst->format || dst->format != src->format || dst->faces != src->faces || dst->image || src->image ||
+        (srcFace == ~0UL) != (dstFace == ~0UL) ||
         dst->depth > 1 || src->depth > 1 ||
         dst->owner != c->owner || src->owner != c->owner) { ++d->d7draw.texBltFailures; return; }
     if (right <= left || bottom <= top) { left = top = 0; right = src->width; bottom = src->height; }
@@ -2686,10 +3037,11 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
     __try {
         /* Mipmapped textures copy the matching rectangle of each level both
          * have, cube maps of each face. */
-        ULONG level, levels = min(src->levels, dst->levels), face;
+        ULONG level, levels = min(src->levels, dst->levels), face, faces = srcFace == ~0UL ? src->faces : 1;
         if (src->width != dst->width || src->height != dst->height) levels = 1;
-        for (face = 0; face < src->faces; ++face)
+        for (face = 0; face < faces; ++face)
         for (level = 0; level < levels; ++level) {
+            ULONG sf = srcFace == ~0UL ? face : srcFace, df = dstFace == ~0UL ? face : dstFace;
             ULONG x0 = (ULONG)left >> level, y0 = (ULONG)top >> level, dx = (ULONG)b->pDest.x >> level;
             ULONG dy = (ULONG)b->pDest.y >> level;
             ULONG x1 = max(x0 + 1, (ULONG)right >> level), y1 = max(y0 + 1, (ULONG)bottom >> level);
@@ -2706,12 +3058,12 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
                 bytes = rb_d7_row_bytes(src->format, x1 - x0 * 4);
                 bpp = src->format == TexDxt1 ? 8 : 16;
             }
-            from = (const BYTE *)src->levelAddress[face][level] + y0 * src->levelPitch[face][level] + x0 * bpp;
-            to = (BYTE *)dst->levelAddress[face][level] + dy * dst->levelPitch[face][level] + dx * bpp;
-            EngProbeForRead((PVOID)from, (rows - 1) * src->levelPitch[face][level] + bytes, 1);
-            EngProbeForReadAndWrite(to, (rows - 1) * dst->levelPitch[face][level] + bytes, 1);
+            from = (const BYTE *)src->levelAddress[sf][level] + y0 * src->levelPitch[sf][level] + x0 * bpp;
+            to = (BYTE *)dst->levelAddress[df][level] + dy * dst->levelPitch[df][level] + dx * bpp;
+            EngProbeForRead((PVOID)from, (rows - 1) * src->levelPitch[sf][level] + bytes, 1);
+            EngProbeForReadAndWrite(to, (rows - 1) * dst->levelPitch[df][level] + bytes, 1);
             for (y = 0; y < rows; ++y)
-                RtlCopyMemory(to + y * dst->levelPitch[face][level], from + y * src->levelPitch[face][level], bytes);
+                RtlCopyMemory(to + y * dst->levelPitch[df][level], from + y * src->levelPitch[sf][level], bytes);
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) { ++d->d7draw.texBltFailures; return; }
     dst->epoch = 0;
@@ -2821,6 +3173,20 @@ static ULONG state_bytes(ULONG op, ULONG n, const BYTE *p, ULONG remaining)
     case RbDp2SetVertexShader: case RbDp2SetPixelShader: return n * sizeof(RB_DP2_HANDLE);
     case RbDp2SetStreamSource: return n * sizeof(RB_DP2_STREAM_SOURCE);
     case RbDp2SetIndices: return n * sizeof(RB_DP2_INDICES);
+    case RbDp2SetStreamSource2: return n * sizeof(RB_DP2_STREAM_SOURCE2);
+    case RbDp2SetVertexShaderDecl: case RbDp2SetVertexShaderFunc: return n * sizeof(RB_DP2_HANDLE);
+    case RbDp2SetScissorRect: return n * sizeof(RECTL);
+    case RbDp2SetVertexShaderConstI: case RbDp2SetPixelShaderConstI:
+    case RbDp2SetVertexShaderConstB: case RbDp2SetPixelShaderConstB:
+        for (k = 0; k < n; ++k) {
+            const ULONG *r = (const ULONG *)(p + used);
+            ULONG per = op == RbDp2SetVertexShaderConstI || op == RbDp2SetPixelShaderConstI ? 16 : 4;
+            if (remaining - min(remaining, used) < 8) return remaining + 1;
+            used += 8;
+            if (r[1] > (remaining - used) / per) return remaining + 1;
+            used += r[1] * per;
+        }
+        return used;
     case D3DNTDP2OP_SETLIGHT:
         for (k = 0; k < n; ++k) {
             const D3DNTHAL_DP2SETLIGHT *l = (const D3DNTHAL_DP2SETLIGHT *)(p + used);
@@ -3494,6 +3860,117 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
                 for (k = 0; k < n; ++k) volume_blt(c, b + k);
             }
             break;
+        /* ---- the Direct3D 9 interface ---- */
+        case RbDp2SetStreamSource2: {
+            const RB_DP2_STREAM_SOURCE2 *s = (const RB_DP2_STREAM_SOURCE2 *)p;
+            used = n * sizeof(*s);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            for (; n; --n, ++s)
+                if (s->stream < RB_VS_STREAMS) {
+                    c->streamHandles[s->stream] = s->handle;
+                    c->streamStrides[s->stream] = s->stride;
+                    c->streamOffsets[s->stream] = s->offset;
+                    if (!s->stream) { c->streamUser = FALSE; c->streamHandle = s->handle; c->streamStride = s->stride; }
+                }
+            break;
+        }
+        case RbDp2SetScissorRect:
+            used = n * sizeof(RECTL);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            if (n) RtlCopyMemory(&c->scissor, p + used - sizeof(RECTL), sizeof(RECTL));
+            break;
+        case RbDp2CreateVertexShaderDecl: case RbDp2CreateVertexShaderFunc: {
+            ULONG k, per = h->bCommand == RbDp2CreateVertexShaderDecl ? sizeof(RB_VERTEX_ELEMENT9) : 1;
+            used = 0;
+            for (k = 0; k < n; ++k) {
+                const ULONG *r = (const ULONG *)(p + used);
+                if (remaining < used + 8 || r[1] > (remaining - used - 8) / per) return DDERR_INVALIDPARAMS;
+                if (h->bCommand == RbDp2CreateVertexShaderDecl) d9_create_decl(c, r[0], (const RB_VERTEX_ELEMENT9 *)(r + 2), r[1]);
+                else d9_create_func(c, r[0], r + 2, r[1]);
+                used += 8 + r[1] * per;
+            }
+            break;
+        }
+        case RbDp2DeleteVertexShaderDecl: case RbDp2SetVertexShaderDecl:
+        case RbDp2DeleteVertexShaderFunc: case RbDp2SetVertexShaderFunc: {
+            const RB_DP2_HANDLE *s = (const RB_DP2_HANDLE *)p;
+            used = n * sizeof(*s);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            for (; n; --n, ++s)
+                switch (h->bCommand) {
+                case RbDp2DeleteVertexShaderDecl: d9_delete_decl(c, s->handle); break;
+                case RbDp2SetVertexShaderDecl: c->declHandle = s->handle; break;
+                case RbDp2DeleteVertexShaderFunc: d9_delete_func(c, s->handle); break;
+                default: c->funcHandle = s->handle; break;
+                }
+            break;
+        }
+        case RbDp2SetRenderTarget2: case RbDp2SetDepthStencil: {
+            ULONG size = h->bCommand == RbDp2SetRenderTarget2 ? sizeof(RB_DP2_RENDER_TARGET2) : sizeof(ULONG), k;
+            used = n * size;
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            for (k = 0; k < n; ++k) {
+                ULONG targetId = c->target, depthId = c->depth;
+                if (h->bCommand == RbDp2SetRenderTarget2) {
+                    const RB_DP2_RENDER_TARGET2 *t = (const RB_DP2_RENDER_TARGET2 *)(p + k * size);
+                    DD_SLOT *s;
+                    if (t->index) {                  /* one render target only */
+                        if (t->handle) ++c->display->d7draw.d9Ignored[RB2K_D9_IGNORED_TARGETS];
+                        continue;
+                    }
+                    s = target(c, t->handle, TRUE);
+                    if (!s) ++c->display->d7draw.targetFailures;
+                    if (!s || s->depth16) return DDERR_SURFACELOST;
+                    targetId = s->id;
+                } else {
+                    ULONG handle = *(const ULONG *)(p + k * size);
+                    DD_SLOT *z = handle ? target(c, handle, TRUE) : NULL;
+                    if (handle && (!z || !z->depth16)) return DDERR_SURFACELOST;
+                    depthId = z ? z->id : 0;
+                }
+                if ((targetId != c->target || depthId != c->depth) && FAILED(finish_scene(c))) return DDERR_SURFACELOST;
+                if (targetId != c->target) c->display->d7draw.targetLog[c->display->d7draw.targets++ & 7] = targetId;
+                c->target = targetId;
+                c->depth = depthId;
+            }
+            break;
+        }
+        /* Accepted and counted, not carried out yet: integer and boolean constants (no flow
+         * control), blits and fills, queries (none are offered), mipmap generation, instancing. */
+        case RbDp2SetVertexShaderConstI: case RbDp2SetPixelShaderConstI:
+        case RbDp2SetVertexShaderConstB: case RbDp2SetPixelShaderConstB: {
+            ULONG k, per = h->bCommand == RbDp2SetVertexShaderConstI || h->bCommand == RbDp2SetPixelShaderConstI ? 16 : 4;
+            used = 0;
+            for (k = 0; k < n; ++k) {
+                const ULONG *r = (const ULONG *)(p + used);
+                if (remaining < used + 8 || r[1] > (remaining - used - 8) / per) return DDERR_INVALIDPARAMS;
+                used += 8 + r[1] * per;
+            }
+            ++c->display->d7draw.d9Ignored[RB2K_D9_IGNORED_CONSTANTS];
+            break;
+        }
+        case RbDp2Blt: case RbDp2SurfaceBlt: {
+            const RB_DP2_BLT9 *b = (const RB_DP2_BLT9 *)p;
+            used = n * sizeof(*b);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            for (; n; --n, ++b) d9_blt(c, b);
+            break;
+        }
+        case RbDp2ColorFill: {
+            const RB_DP2_COLOR_FILL *f = (const RB_DP2_COLOR_FILL *)p;
+            used = n * sizeof(*f);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            for (; n; --n, ++f) d9_fill(c, f);
+            break;
+        }
+        case RbDp2CreateQuery: case RbDp2DeleteQuery: case RbDp2IssueQuery:
+        case RbDp2GenerateMipSubLevels: case RbDp2SetStreamSourceFreq:
+            used = n * (h->bCommand == RbDp2DeleteQuery ? 4 : 8);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            c->display->d7draw.d9Ignored[h->bCommand == RbDp2GenerateMipSubLevels ? RB2K_D9_IGNORED_MIPS :
+                                         h->bCommand == RbDp2SetStreamSourceFreq ? RB2K_D9_IGNORED_FREQUENCY :
+                                         RB2K_D9_IGNORED_QUERY] += n;
+            break;
         default:
             used = fixed_records(h->bCommand, n);
             if (!used && n) return D3DNTERR_COMMAND_UNPARSED;
@@ -3582,6 +4059,9 @@ static DWORD APIENTRY dp2(LPD3DNTHAL_DRAWPRIMITIVES2DATA a)
         if ((!c->inScene || FAILED(a->ddrval)) && FAILED(finish_scene(c)) && SUCCEEDED(a->ddrval))
             a->ddrval = DDERR_SURFACELOST;
         if (flush_draws() && SUCCEEDED(a->ddrval)) a->ddrval = DDERR_GENERIC;
+        /* A DirectX 9 runtime reads dwErrorOffset after success as the size of the driver's
+         * responses, which this driver does not write. */
+        if (SUCCEEDED(a->ddrval) && c->dx9Ddi) a->dwErrorOffset = 0;
         if (FAILED(a->ddrval)) {
             c->display->d7.lastError = a->ddrval;
             ++c->display->d7draw.dp2Failures;
@@ -3738,6 +4218,20 @@ static ULONG d8_format_count(const DISPLAY *d)
     return d->z16Render ? n : n - 3;
 }
 
+/* With the Direct3D 9 driver interface: what the runtime requires of a DirectX 9 driver before
+ * it offers its hardware device (the debug runtime names each check), in both caps records: 8
+ * streams, separate fog in the vertex format, no line patterns, the scissor test, dynamic
+ * textures, no power-of-two-only textures, UBYTE4 vertex data. */
+static void d9_ddi_caps(RB_D3DCAPS8 *c)
+{
+    c->maxStreams = RB_VS_STREAMS;
+    c->primitiveMiscCaps = (c->primitiveMiscCaps | RB_D3DPMISCCAPS_FOGINFVF) & ~RB_D3DPMISCCAPS_LINEPATTERNREP;
+    c->rasterCaps = (c->rasterCaps | RB_D3DPRASTERCAPS_SCISSORTEST) & ~D3DPRASTERCAPS_PAT;
+    c->caps2 |= RB_D3DCAPS2_DYNAMICTEXTURES;
+    if (c->textureCaps & D3DPTEXTURECAPS_POW2) c->textureCaps |= D3DPTEXTURECAPS_NONPOW2CONDITIONAL;
+    c->vertexProcessingCaps &= ~RB_D3DVTXPCAPS_NO_VSDT_UBYTE4;
+}
+
 static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDEDCAPS *x)
 {
     const D3DNTHALDEVICEDESC_V1 *hw = &global.hwCaps;
@@ -3809,6 +4303,33 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     c->maxTextureBlendStages = stage_limit(d);
     c->textureOpCaps |= D3DTEXOPCAPS_BUMPENVMAP | D3DTEXOPCAPS_BUMPENVMAPLUMINANCE;
     c->maxPixelShaderValue = 0x3f800000;            /* 1 */
+    if (d->d3d9Ddi && d->d7draw.d8Version >= 0x900) d9_ddi_caps(c);
+}
+
+/* D3DCAPS9 for a runtime that has announced Direct3D 9: the Direct3D 8 record and the parts of the
+ * DirectX 9 one that the runtime otherwise leaves at zero, among them the shader model 2 details
+ * (the minimums of versions 2.0, which the translators meet) that programs such as 3DMark05 test.
+ * One render target; of the DirectX 9 vertex types, the vertex shaders read UBYTE4. */
+static void d9_caps(const DISPLAY *d, RB_D3DCAPS9 *c, const D3DNTHAL_D3DEXTENDEDCAPS *x)
+{
+    RtlZeroMemory(c, sizeof(*c));
+    d8_caps(d, &c->caps8, x);
+    c->numberOfAdaptersInGroup = 1;
+    c->numSimultaneousRTs = 1;
+    /* SETSTREAMSOURCE2 offsets are applied; the runtime requires this of a DirectX 9 driver. */
+    if (d->d3d9Ddi) c->devCaps2 |= RB_D3DDEVCAPS2_STREAMOFFSET;
+    c->stretchRectFilterCaps = RB_D3DPTFILTERCAPS_MINFPOINT | RB_D3DPTFILTERCAPS_MAGFPOINT;
+    if (c->caps8.vertexShaderVersion >= 0xfffe0200) {
+        c->declTypes = RB_D3DDTCAPS_UBYTE4;
+        c->vs20NumTemps = 12;
+        c->vs20StaticFlowControlDepth = 1;
+        c->maxVShaderInstructionsExecuted = 65535;
+    }
+    if (c->caps8.pixelShaderVersion >= 0xffff0200) {
+        c->ps20NumTemps = 12;
+        c->ps20NumInstructionSlots = 96;
+        c->maxPShaderInstructionsExecuted = 96;
+    }
 }
 
 /* GetDriverInfo2 requests arrive with the stereo-mode GUID. The size of the
@@ -3833,6 +4354,31 @@ static BOOL d8_info(DISPLAY *d, PDD_GETDRIVERINFODATA a, const D3DNTHAL_D3DEXTEN
         size = sizeof(caps);
         size = min(size, room);
         RtlCopyMemory(h, &caps, size);
+        break;
+    }
+    case RbGdi2Caps9: {
+        RB_D3DCAPS9 caps;
+        if (!d->d3d9Ddi || d->d7draw.d8Version < 0x900) goto unavailable;
+        d9_caps(d, &caps, x);
+        size = sizeof(caps);
+        size = min(size, room);
+        RtlCopyMemory(h, &caps, size);
+        break;
+    }
+    case RbGdi2QueryCount: {
+        /* The Direct3D 9 interface: no query types (the runtime then issues none). */
+        ULONG *count = (ULONG *)(h + 1);
+        if (!d->d3d9Ddi || room < sizeof(*h) + sizeof(ULONG)) goto unavailable;
+        *count = 0;
+        size = sizeof(*h) + sizeof(ULONG);
+        break;
+    }
+    case RbGdi2DdiVersion: {
+        /* The Direct3D 9 interface for a DirectX 9 runtime, when it is switched on. */
+        RB_GDI2_DDI_VERSION *v = (RB_GDI2_DDI_VERSION *)h;
+        if (!d->d3d9Ddi || room < sizeof(*v)) goto unavailable;
+        v->ddiVersion = v->dxVersion >= 9 ? RB_DX9_DDI_VERSION : 0;
+        size = sizeof(*v);
         break;
     }
     case RbGdi2FormatCount: {
@@ -3869,7 +4415,7 @@ static BOOL d8_info(DISPLAY *d, PDD_GETDRIVERINFODATA a, const D3DNTHAL_D3DEXTEN
     a->ddRVal = DD_OK;
     return TRUE;
 unavailable:
-    /* Requests this driver does not answer, such as the Direct3D 9 ones. */
+    /* Requests this driver does not answer, such as most of the Direct3D 9 ones. */
     a->dwActualSize = 0;
     a->ddRVal = DDERR_CURRENTLYNOTAVAIL;
     return TRUE;

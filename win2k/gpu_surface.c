@@ -43,6 +43,7 @@ static VP_STATUS query(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         if (gpu->nativeD3D7)
             caps->gpuSurfaces |= RB2K_DD_NATIVE_D3D7 | RB2K_DD_Z16_STORAGE | RB2K_DD_Z16_RENDER |
                                  (gpu->d3d8 ? RB2K_DD_D3D8 : 0) | (gpu->d3d8 && gpu->vertexShaders ? RB2K_DD_VERTEX_SHADERS : 0) |
+                                 (gpu->d3d8 && gpu->vertexShaders && gpu->d3d9Ddi ? RB2K_DD_D3D9_DDI : 0) |
                                  RB2K_DD_Z24S8;
     }
     packet->StatusBlock->Information = sizeof(*caps);

@@ -93,6 +93,9 @@ int main(void)
             printf("D7CREATE log-%d caps=%08lx size=%lux%lu count=%lu slots=%lu end=%lu hr=%08lx\n", k, l[0], l[1] >> 16,
                    l[1] & 0xffff, l[2], l[3] >> 8, l[3] & 255, l[4]);
         }
+        printf("D9DDI unresolved=%lu ignored scissor=%lu targets=%lu blt=%lu fill=%lu query=%lu constants=%lu "
+               "frequency=%lu mips=%lu\n", s.d9Unresolved, s.d9Ignored[0], s.d9Ignored[1], s.d9Ignored[2],
+               s.d9Ignored[3], s.d9Ignored[4], s.d9Ignored[5], s.d9Ignored[6], s.d9Ignored[7]);
         printf("D7RTT target_textures=%lu texture_skips=%lu,%lu,%lu,%lu\n", s.targetTextures, s.texSkips[0],
                s.texSkips[1], s.texSkips[2], s.texSkips[3]);
         printf("D7FLIP targets");

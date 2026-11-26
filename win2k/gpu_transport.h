@@ -121,7 +121,7 @@ typedef struct {
     LONG busy, barrier;
     BOOLEAN owned, ready, enabledMaster, tested;
     ULONG nextId, fence, imageCount, hostFills, readbacks, uploads, hostCopies;
-    BOOLEAN ddGpuSurfaces, nativeD3D7, plainSurfaces, d3d8, vertexShaders;
+    BOOLEAN ddGpuSurfaces, nativeD3D7, plainSurfaces, d3d8, vertexShaders, d3d9Ddi;
     /* DXT blocks as they are (RippleHostDxt), and the formats the host samples:
      * bit n for upload format n (RB2K_D7_BLOCKS_DXT*, RB2K_D7_TEXELS_*), known after the first ask. */
     BOOLEAN hostDxt, hostBlocksKnown;
