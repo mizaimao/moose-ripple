@@ -1099,7 +1099,7 @@ static void vs_flow_cases(int only, BOOL offered)
                 P2I(OAdd, 3), P2D(RR, 0, 15), P2SRC(RR, 0), P2SRC(RC, 5),
             P2I(OEndRep, 0),
             P2I(OLoop, 2), P2SRC(RLoop, 0), P2SRC(RInt, 0),
-                P2I(OAdd, 4), P2D(RR, 0, 15), P2SRC(RR, 0), P2SRC(RC, 6) | 0x2000, P2S(RLoop, 0, 0, 0),
+                P2I(OAdd, 4), P2D(RR, 0, 15), P2SRC(RR, 0), P2SRC(RC, 6) | 0x2000, P2SRC(RLoop, 0),
             P2I(OEndLoop, 0),
             P2I(OMov, 2), P2D(VAttr, 0, 15), P2SRC(RR, 0), PSEND };
         vs_run("vs2_loops", colored, vs, ps_color, v, sizeof(v[0]), 2, s, 2);
