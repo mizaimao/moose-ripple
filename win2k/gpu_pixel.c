@@ -1,5 +1,5 @@
 /* Virtio commands for the pixel diagnostic, DirectDraw textures and the
- * optional OpenGL desktop. Only rb_gpu_show_desktop selects a scanout. */
+ * optional OpenGL desktop. Only rb_gpu_show_image selects a scanout. */
 #include <miniport.h>
 #include <devioctl.h>
 #include <winerror.h>
@@ -640,27 +640,35 @@ BOOLEAN rb_gpu_primary_transfer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
     return rb_gl_record_time(gpu, operation, start, TRUE);
 }
 
-BOOLEAN rb_gpu_show_desktop(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, BOOLEAN select)
+/* Put a resource on scanout 0 (select) and show its latest contents. */
+BOOLEAN rb_gpu_show_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resource, ULONG width, ULONG height,
+                          BOOLEAN select)
 {
     PIXEL_REQUEST request;
-    RB2K_IMAGE *image = &gpu->glDesktop.image;
     LONGLONG start = rb_counter_ticks(NULL);
     BOOLEAN ok;
     if (select) {
         begin_request(&request, VIRTIO_GPU_CMD_SET_SCANOUT, 0);
-        request.scanout.resource_id = image->id;
-        request.scanout.r.width = image->width;
-        request.scanout.r.height = image->height;
+        request.scanout.resource_id = resource;
+        request.scanout.r.width = width;
+        request.scanout.r.height = height;
         if (!send_request(gpu, result, &request, sizeof(request.scanout), RB2K_STAGE_TRANSFER))
             return rb_gl_record_time(gpu, RB2K_GL_FLUSH, start, FALSE);
-        gpu->glDesktop.visible = TRUE;
     }
     begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_FLUSH, 0);
-    request.flush.resource_id = image->id;
-    request.flush.r.width = image->width;
-    request.flush.r.height = image->height;
+    request.flush.resource_id = resource;
+    request.flush.r.width = width;
+    request.flush.r.height = height;
     ok = send_request(gpu, result, &request, sizeof(request.flush), RB2K_STAGE_TRANSFER);
     return rb_gl_record_time(gpu, RB2K_GL_FLUSH, start, ok);
+}
+
+BOOLEAN rb_gpu_show_desktop(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, BOOLEAN select)
+{
+    RB2K_IMAGE *image = &gpu->glDesktop.image;
+    if (!rb_gpu_show_image(gpu, result, image->id, image->width, image->height, select)) return FALSE;
+    if (select) gpu->glDesktop.visible = TRUE;
+    return TRUE;
 }
 
 BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,

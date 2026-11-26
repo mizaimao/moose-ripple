@@ -756,16 +756,22 @@ bool rvd_virgl_present_window(struct pipe_context *pipe, struct pipe_resource *c
 
 bool rvd_virgl_window_scanout(struct pipe_screen *screen)
 {
-   return !rvd_winsys(virgl_screen(screen)->vws)->nt;
+   struct rvd_winsys *ws = rvd_winsys(virgl_screen(screen)->vws);
+   rvd_u32 on = 0;
+   /* Windows 2000 and XP: only with the display driver's 32-bit GPU desktop, which the display
+    * returns to (RVD_DESKTOP without input answers whether it is on). */
+   if (ws->nt)
+      return rvd_call(ws, RVD_DESKTOP, NULL, 0, &on, sizeof(on)) && on;
+   return true;
 }
 
-/* The mini-VDD shows the GDI desktop (display start 0) again instead of the last GPU image. */
+/* The display shows the GDI desktop again instead of the last GPU image: on Windows 9x the
+ * mini-VDD's display start 0, on Windows 2000 and XP the display driver's GPU desktop. */
 void rvd_virgl_show_desktop(struct pipe_screen *screen)
 {
    struct rvd_winsys *ws = rvd_winsys(virgl_screen(screen)->vws);
    rvd_u32 offset = 0;
-   if (!ws->nt)
-      rvd_call(ws, RVD_DESKTOP, &offset, sizeof(offset), NULL, 0);
+   rvd_call(ws, RVD_DESKTOP, &offset, sizeof(offset), NULL, 0);
 }
 
 /* ---- A finished frame goes on the window ----------------------------------------------------- */

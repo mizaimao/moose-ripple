@@ -106,6 +106,32 @@ static BOOL dispatch(DISPLAY *d, ULONG code, const UCHAR *in, ULONG inSize, PVOI
         begin(&r, RB2K_RVD_OP_TRANSFER);
         r.u.transfer = *(const struct rvd_transfer *)in;
         return request(d, &r, NULL, 0);
+    case RVD_PRESENT: {
+        /* A full-screen frame in the program's own scanout image, of the mode's size. */
+        const struct rvd_present *p = (const struct rvd_present *)in;
+        if (inSize != sizeof(*p) || outSize || p->width != d->mode.VisScreenWidth ||
+            p->height != d->mode.VisScreenHeight) return FALSE;
+        begin(&r, RB2K_RVD_OP_SCANOUT);
+        r.context = p->context;
+        r.a = p->buffer;
+        r.b = p->width;
+        r.bytes = p->height;
+        return request(d, &r, NULL, 0);
+    }
+    case RVD_DESKTOP:
+        if (!inSize) {
+            /* Whether full-screen frames may be shown from the GPU: only with the
+             * 32-bit GPU desktop (RippleGpuDesktop), which the display returns to. */
+            ULONG on = 0;
+            if (outSize != sizeof(ULONG)) return FALSE;
+            begin(&r, RB2K_RVD_OP_GL_OPTION);
+            if (!request(d, &r, &on, sizeof(on))) return FALSE;
+            *(PULONG)out = on && d->mode.BitsPerPlane * d->mode.NumberOfPlanes == 32;
+            return TRUE;
+        }
+        if (outSize) return FALSE;
+        begin(&r, RB2K_RVD_OP_DESKTOP);
+        return request(d, &r, NULL, 0);
     default:
         return FALSE;
     }

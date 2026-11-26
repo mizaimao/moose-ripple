@@ -64,6 +64,9 @@ typedef struct {
     RB2K_RECT clip[RB2K_GL_MAX_RECTS];
     ULONG clipCount;
     BOOLEAN visible, inlineUploads;
+    /* A program's full-screen image on the display instead of this one
+     * (RB2K_RVD_OP_SCANOUT), until RB2K_RVD_OP_DESKTOP or until it goes. */
+    ULONG scanout;
 } RB2K_GL_DESKTOP;
 
 typedef struct {
@@ -231,10 +234,14 @@ BOOLEAN rb_gpu_copy_rects(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG destinat
 BOOLEAN rb_gpu_primary_transfer(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
                                 const RB2K_RECT *rect, BOOLEAN readback);
 VP_STATUS rb_gpu_inline_uploads(RB2K_GPU *gpu, const RB2K_RECT *rects, ULONG count);
+BOOLEAN rb_gpu_show_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG resource, ULONG width, ULONG height,
+                          BOOLEAN select);
 BOOLEAN rb_gpu_show_desktop(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, BOOLEAN select);
 VP_STATUS rb_gl_present(RB2K_GPU *gpu, const RB2K_GL_FRAME *frame);
 VP_STATUS rb_gl_access(RB2K_GPU *gpu, const RB2K_RECT *rect, ULONG access, ULONG tag);
 VP_STATUS rb_gl_flush(RB2K_GPU *gpu);
+VP_STATUS rb_gl_scanout(RB2K_GPU *gpu, ULONG resource, ULONG width, ULONG height);
+VP_STATUS rb_gl_desktop(RB2K_GPU *gpu);
 VP_STATUS rb_gl_finish(RB2K_GPU *gpu);
 BOOLEAN rb_gpu_destroy_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id);
 VP_STATUS rb_gpu_surface_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet);
