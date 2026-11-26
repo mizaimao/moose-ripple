@@ -252,7 +252,7 @@ program that clamps to a border still gets the edge there.
 ## KI-13: A swap rectangle is ignored for windows the kernel shows
 
 GitHub issue: [#235](https://github.com/mizaimao/moose-ripple/issues/235). Found on 2026-11-26; release 0.6.0 and
-earlier have it.
+earlier have it (KI-13 is not fixed yet).
 
 **Symptom.** A program can ask that a swap shows only part of its window (`kCGLCPSwapRectangle`
 with `kCGLCESwapRectangle` on; Core Animation presents only the changed part of a view that
@@ -270,10 +270,10 @@ would show the stale part.
 way (each frame read back into a private window), which applies the rectangle (checked
 2026-11-26: `swaprect-check` then shows what it should); it is slower.
 
-## KI-14: A GL call could crash after a context was destroyed from another thread (fixed after 0.6.0)
+## KI-14: A GL call could crash after a context was destroyed from another thread (fixed in 0.6.0)
 
-GitHub issue: [#240](https://github.com/mizaimao/moose-ripple/issues/240). Found and fixed on 2026-11-26; releases
-0.6.0 and earlier have it.
+GitHub issue: [#240](https://github.com/mizaimao/moose-ripple/issues/240). Found and fixed on 2026-11-26; release
+0.2.2 and earlier have it.
 
 **Symptom.** A program crashes inside the OpenGL driver at the first GL call on a new context,
 or when it switches contexts. Seen once: ScreenSaverEngine, as the screen saver started
@@ -291,4 +291,5 @@ flushed the context it believed current, which was gone.
 only if both the address and the thread match; before a switch, a pointer that is not a living
 context of this thread is dropped unfollowed. `tools/gl-feature-check stale` draws with a
 context on one thread and destroys it from another, a hundred times: Apple's software renderer
-passes, release 0.6.0 crashes in the second round, the fixed driver passes.
+passes, the driver as it was before the fix crashes in the second round, the fixed driver
+passes.
