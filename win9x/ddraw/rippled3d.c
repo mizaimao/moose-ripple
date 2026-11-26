@@ -211,6 +211,8 @@ static RDD_SHARED *shared;
 #define GL_UNSIGNED_SHORT_4_4_4_4_REV   0x8365
 #define GL_UNSIGNED_SHORT_1_5_5_5_REV   0x8366
 #define GL_CLAMP_TO_EDGE                0x812F
+#define GL_TEXTURE_CUBE_MAP             0x8513
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_X  0x8515
 #define GL_CLAMP_TO_BORDER              0x812D
 #define GL_MIRRORED_REPEAT              0x8370
 #define GL_TEXTURE0                     0x84C0
@@ -612,6 +614,7 @@ struct shadow {
     ATTACHLIST a;
     LPDDRAWI_DDRAWSURFACE_GBL_MORE gmp; /* just before g */
     DDRAWI_DDRAWSURFACE_GBL g;
+    DWORD faces, levels;                /* in the first: 1 or 6 faces, each with this many levels */
 };
 
 #define MAX_DDLOCALS 32
@@ -684,44 +687,118 @@ static void buffer_set(DDLOCAL *d, DWORD h, FLATPTR mem, DWORD size)
 typedef char c_shadow_layout[FIELD_OFFSET(struct shadow, g) ==
                              FIELD_OFFSET(struct shadow, gmp) + sizeof(void *) ? 1 : -1];
 
-/* Copies of a texture's records, its levels linked through their attach lists: an array of
-   as many as it has levels (MAX_LEVELS at most), or NULL. Only for plain 2D textures. */
+/* The cube face of a surface (0 for +X .. 5 for -Z), or -1. */
+static int cube_face(LPDDRAWI_DDRAWSURFACE_LCL s)
+{
+    DWORD caps2 = s && s->lpSurfMore ? s->lpSurfMore->ddsCapsEx.dwCaps2 : 0;
+    int k;
+    for (k = 0; k < 6; k++)
+        if (caps2 & (DDSCAPS2_CUBEMAP_POSITIVEX << k))
+            return k;
+    return -1;
+}
+
+/* A face's levels from its top surface down: each attached to the one above (a cube's top
+   face also holds the other faces, so there only mipmap sublevels count). */
+static DWORD face_chain(LPDDRAWI_DDRAWSURFACE_LCL top, int cube, LPDDRAWI_DDRAWSURFACE_LCL *lv)
+{
+    LPDDRAWI_DDRAWSURFACE_LCL m = top;
+    DWORD n = 1;
+
+    lv[0] = top;
+    while (n < MAX_LEVELS && (m->ddsCaps.dwCaps & DDSCAPS_MIPMAP)) {
+        LPATTACHLIST a;
+        LPDDRAWI_DDRAWSURFACE_LCL next = NULL;
+        for (a = m->lpAttachList; a && !next; a = a->lpLink) {
+            LPDDRAWI_DDRAWSURFACE_LCL x = a->lpAttached;
+            if (!x || x == top || !x->lpGbl || !x->lpSurfMore || !(x->ddsCaps.dwCaps & DDSCAPS_MIPMAP))
+                continue;
+            if (cube && !(x->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_MIPMAPSUBLEVEL))
+                continue;
+            next = x;
+        }
+        if (!next)
+            break;
+        lv[n++] = m = next;
+    }
+    return n;
+}
+
+/* Copies of a texture's records: for each face (six for a cube map, in Direct3D's order +X,
+   -X, +Y, -Y, +Z, -Z), its levels, linked through their attach lists; sh[face * levels +
+   level], sh[0] saying how many faces and levels. NULL if it can't be made. */
 static struct shadow *shadow_make(LPDDRAWI_DDRAWSURFACE_LCL s)
 {
-    LPDDRAWI_DDRAWSURFACE_LCL lv[MAX_LEVELS];
+    LPDDRAWI_DDRAWSURFACE_LCL top[6], lv[6][MAX_LEVELS];
+    DWORD n, faces = 1, levels = MAX_LEVELS, f, i;
     struct shadow *sh;
-    DWORD n = 1, i;
+    int cube = (s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_CUBEMAP) != 0;
 
-    lv[0] = s;
-    while (n < MAX_LEVELS && (s->ddsCaps.dwCaps & DDSCAPS_MIPMAP) && s->lpAttachList &&
-           s->lpAttachList->lpAttached && s->lpAttachList->lpAttached != lv[0] &&
-           s->lpAttachList->lpAttached->lpGbl && s->lpAttachList->lpAttached->lpSurfMore)
-        lv[n++] = s = s->lpAttachList->lpAttached;
-    sh = (struct shadow *)alloc(n * sizeof *sh);
+    memset(top, 0, sizeof top);
+    top[0] = s;
+    if (cube) {
+        LPATTACHLIST a;
+        int k = cube_face(s);
+        if (k < 0)
+            return NULL;
+        top[0] = NULL;
+        top[k] = s;
+        for (a = s->lpAttachList; a; a = a->lpLink) {
+            LPDDRAWI_DDRAWSURFACE_LCL x = a->lpAttached;
+            int fk = cube_face(x);
+            if (fk >= 0 && !top[fk] && x->lpGbl &&
+                !(x->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_MIPMAPSUBLEVEL))
+                top[fk] = x;
+        }
+        faces = 6;
+    }
+    for (f = 0; f < faces; f++) {
+        if (!top[f] || !top[f]->lpGbl || top[f]->lpGbl->wWidth != s->lpGbl->wWidth ||
+            top[f]->lpGbl->wHeight != s->lpGbl->wHeight)
+            return NULL;
+        n = face_chain(top[f], cube, lv[f]);
+        if (n < levels)
+            levels = n;
+    }
+    sh = (struct shadow *)alloc(faces * levels * sizeof *sh);
     if (!sh)
         return NULL;
-    for (i = 0; i < n; i++) {
-        LPDDRAWI_DDRAWSURFACE_GBL_MORE gm = GET_LPDDRAWSURFACE_GBL_MORE(lv[i]->lpGbl);
-        sh[i].l = *lv[i];
-        sh[i].m = *lv[i]->lpSurfMore;
-        sh[i].g = *lv[i]->lpGbl;
-        if (gm)
-            sh[i].gm = *gm;
-        sh[i].gm.dwContentsStamp = 0;   /* the runtime's stamp isn't kept: writes mark textures */
-        sh[i].gmp = &sh[i].gm;
-        sh[i].l.lpGbl = &sh[i].g;
-        sh[i].l.lpSurfMore = &sh[i].m;
-        sh[i].l.lpAttachList = NULL;
-        sh[i].l.lpAttachListFrom = NULL;
-        if (i + 1 < n) {
-            sh[i].a.dwFlags = DDAL_IMPLICIT;
-            sh[i].a.lpLink = NULL;
-            sh[i].a.lpAttached = &sh[i + 1].l;
-            sh[i].a.lpIAttached = NULL;
-            sh[i].l.lpAttachList = &sh[i].a;
+    for (f = 0; f < faces; f++)
+        for (i = 0; i < levels; i++) {
+            struct shadow *o = &sh[f * levels + i];
+            LPDDRAWI_DDRAWSURFACE_LCL from = lv[f][i];
+            LPDDRAWI_DDRAWSURFACE_GBL_MORE gm = GET_LPDDRAWSURFACE_GBL_MORE(from->lpGbl);
+            o->l = *from;
+            o->m = *from->lpSurfMore;
+            o->g = *from->lpGbl;
+            if (gm)
+                o->gm = *gm;
+            o->gm.dwContentsStamp = 0;  /* the runtime's stamp isn't kept: writes mark textures */
+            o->gmp = &o->gm;
+            o->l.lpGbl = &o->g;
+            o->l.lpSurfMore = &o->m;
+            o->l.lpAttachList = NULL;
+            o->l.lpAttachListFrom = NULL;
+            if (i + 1 < levels) {
+                o->a.dwFlags = DDAL_IMPLICIT;
+                o->a.lpLink = NULL;
+                o->a.lpAttached = &sh[f * levels + i + 1].l;
+                o->a.lpIAttached = NULL;
+                o->l.lpAttachList = &o->a;
+            }
         }
-    }
+    sh[0].faces = faces;
+    sh[0].levels = levels;
+    if (cube)
+        sh[0].m.ddsCapsEx.dwCaps2 |= DDSCAPS2_CUBEMAP;
     return sh;
+}
+
+/* A cube map's copy (only for surfaces of a Direct3D 8 session, which are copies). */
+static int is_cube(LPDDRAWI_DDRAWSURFACE_LCL s)
+{
+    return s->lpSurfMore && (s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_CUBEMAP) &&
+           ((const struct shadow *)s)->faces == 6;
 }
 
 static void shadow_set(DDLOCAL *d, DWORD h, struct shadow *sh)
@@ -914,6 +991,7 @@ int d3d_surface_format_ok(LPDDSURFACEDESC desc)
 
 /* ---- Contexts ----------------------------------------------------------------------------------- */
 #define MAX_PS 64                       /* Direct3D 8 pixel shaders a context keeps */
+#define PS_VARIANTS 4                   /* programs a pixel shader keeps (fog, cube map stages) */
 #define STAGES 8                        /* texture stages kept: pixel shaders sample s0..s7 */
 #define FF_STAGES 2                     /* fixed-function stages offered to Direct3D 7 */
 #define FF8_STAGES 4                    /* and drawn for Direct3D 8 and 9, before FOG_UNIT */
@@ -991,11 +1069,15 @@ typedef struct {
        the fixed-function stages), constants c0..c7 */
     struct ps8 {
         DWORD handle;
-        GLuint prog, prog_fog;          /* without and with fog after the shader (0: none yet) */
-        DWORD *code, bytes;             /* its tokens, for the fog program; process heap */
+        DWORD *code, bytes;             /* its tokens, for more variants; process heap */
         int failed;                     /* couldn't be translated: its draws are skipped */
+        int version2;                   /* shader model 2: it declares its samplers' kinds */
         DWORD fog_base;                 /* the fog constants' first program.env */
+        DWORD nvar;                     /* programs made: by fog, and the cube map stages of a
+                                           version 1 shader (the translator's fog argument) */
+        struct { DWORD key; GLuint prog; } var[PS_VARIANTS];
     } ps[MAX_PS];
+    int fp_fog;                         /* the bound program blends fog: load its constants */
     DWORD ps_bound;
     GLuint fp_prog;                     /* bound to GL_FRAGMENT_PROGRAM_ARB */
     int fp_on;                          /* GL_FRAGMENT_PROGRAM_ARB enabled */
@@ -1945,6 +2027,70 @@ static GLint min_filter(const DWORD *st, DWORD levels)
     return linear ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_LINEAR;
 }
 
+/* A Direct3D 8/9 cube map (the HAL's copy of its records, shadow_make) on the stage's unit:
+   six faces, each with its levels, on OpenGL's cube map target. Sampled by pixel shaders; the
+   fixed-function stages don't (as on Windows 2000). */
+static int cube_bind(RCTX *c, DWORD h, int stage, const struct shadow *sh)
+{
+    GLF *gl = gl_of(c);
+    DWORD *st = c->tss[stage];
+    DWORD levels = sh[0].levels, face, l;
+    const DDRAWI_DDRAWSURFACE_GBL *g0 = &sh[0].g;
+    TEXTURE *t = texture_slot(c, h);
+    DDPIXELFORMAT pf;
+    PIXFMT f;
+
+    if (!t || sh[0].faces != 6 || !levels || !g0->fpVidMem)
+        return 0;
+    surface_format((LPDDRAWI_DDRAWSURFACE_LCL)&sh[0].l, &pf);
+    f = gl_format(&pf);
+    if ((!f.bytes && !f.block) || (f.block && !gl->CompressedTexImage2D))
+        return 0;
+    if (!t->name) {
+        if (c->ntextures >= TEXTURE_BUDGET)
+            texture_evict(c, h);
+        gl->GenTextures(1, &t->name);
+        c->ntextures++;
+    }
+    gl->BindTexture(GL_TEXTURE_CUBE_MAP, t->name);
+    if (t->mem != g0->fpVidMem || t->w != g0->wWidth || t->levels != levels ||
+        t->fmt != f.internal || t->dirty) {
+        gl->PixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        for (face = 0; face < 6; face++)
+            for (l = 0; l < levels; l++) {
+                const DDRAWI_DDRAWSURFACE_GBL *g = &sh[face * levels + l].g;
+                GLenum target = GL_TEXTURE_CUBE_MAP_POSITIVE_X + face;
+                if (f.block) {
+                    gl->CompressedTexImage2D(target, l, f.internal, g->wWidth, g->wHeight, 0,
+                                             dxt_bytes(&f, g->wWidth, g->wHeight),
+                                             (const GLvoid *)g->fpVidMem);
+                } else {
+                    gl->PixelStorei(GL_UNPACK_ROW_LENGTH, g->lPitch / f.bytes);
+                    gl->TexImage2D(target, l, f.internal, g->wWidth, g->wHeight, 0, f.format,
+                                   f.type, (const GLvoid *)g->fpVidMem);
+                }
+            }
+        gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        gl->TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_LEVEL, levels - 1);
+        t->mem = g0->fpVidMem;
+        t->w = g0->wWidth;
+        t->h = g0->wHeight;
+        t->fmt = f.internal;
+        t->levels = levels;
+        t->lmem[0] = g0->fpVidMem;
+        tracef("rd3d: cube map %lx: %lux%lu, %lu levels\r\n", h, (DWORD)g0->wWidth,
+               (DWORD)g0->wHeight, levels);
+    }
+    t->dirty = 0;
+    t->scene = c->scene;
+    gl->TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER,
+                      st[D3DTSS_MAGFILTER] == D3DTFG_POINT ? GL_NEAREST : GL_LINEAR);
+    gl->TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, min_filter(st, levels));
+    gl->TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl->TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    return 1;
+}
+
 /* Bind the texture behind a surface handle, uploading it if it is new or has changed. 0 if
    there is no usable texture. */
 static int texture_bind(RCTX *c, DWORD h, int stage)
@@ -1963,6 +2109,8 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
 
     if (!s || !(g = s->lpGbl) || !g->fpVidMem)
         return 0;
+    if (c->dx8 && s->lpSurfMore && (s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_CUBEMAP))
+        return cube_bind(c, h, stage, (const struct shadow *)s);    /* the copy (shadow_make) */
     t = texture_slot(c, h);
     if (!t)
         return 0;
@@ -2918,8 +3066,7 @@ static void surface_handles(DDLOCAL *l, LPDDRAWI_DDRAWSURFACE_LCL root,
                s->lpGbl ? s->lpGbl->fpVidMem : 0, s->lpGbl ? s->lpGbl->dwLinearSize : 0);
         return;
     }
-    if (l->dx8 && depth == 0 && (s->ddsCaps.dwCaps & DDSCAPS_TEXTURE) &&
-        !(s->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_CUBEMAP)) {
+    if (l->dx8 && depth == 0 && (s->ddsCaps.dwCaps & DDSCAPS_TEXTURE)) {    /* cube maps too */
         struct shadow *sh = s->lpGbl && s->lpGbl->fpVidMem ? shadow_make(s) : NULL;
         handle_set(l, h, sh ? &sh->l : NULL);
         shadow_set(l, h, sh);
@@ -2987,6 +3134,7 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
     DDPIXELFORMAT pf;
     PIXFMT f;
     DWORD bytes, levels, n, l;
+    DWORD faces, face;
     RECTL r = b->rSrc;
 
     tracef("rd3d: texture blit %lx -> %lx, %ld,%ld-%ld,%ld to %ld,%ld, flags %lx%s\r\n",
@@ -3006,8 +3154,13 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
     }
     /* Mipmapped textures: every level the two have in common, with the rectangle and the
        point scaled to it (the DDK's rule for this command). */
-    levels = mip_chain(ds, dl);
-    n = mip_chain(ss, sl);
+    /* A cube map (Direct3D 8 and 9: the HAL's copies, shadow_make): each of its six faces. */
+    faces = c->dx8 && is_cube(ds) && is_cube(ss) ? 6 : 1;
+    for (face = 0; face < faces; face++) {
+    LPDDRAWI_DDRAWSURFACE_LCL dtop = faces > 1 ? &((struct shadow *)ds)[face * ((struct shadow *)ds)->levels].l : ds;
+    LPDDRAWI_DDRAWSURFACE_LCL stop = faces > 1 ? &((struct shadow *)ss)[face * ((struct shadow *)ss)->levels].l : ss;
+    levels = mip_chain(dtop, dl);
+    n = mip_chain(stop, sl);
     if (n < levels)
         levels = n;
     for (l = 0; l < levels; l++) {
@@ -3049,6 +3202,7 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
         }
         d3d_surface_written(dl[l]);     /* a render target too: its GPU picture is older now */
     }
+    }                                   /* faces */
     if (b->dwDDDestSurface < c->ntex)
         c->tex[b->dwDDDestSurface].dirty = 1;            /* upload again */
     c->stages_dirty = 1;
@@ -3092,22 +3246,22 @@ static void ps_delete(RCTX *c, DWORD handle)
 {
     GLF *gl = gl_of(c);
     struct ps8 *p = ps_find(c, handle, 0);
+    DWORD i;
     if (!p)
         return;
-    if (gl->DeleteProgramsARB) {
-        if (p->prog)
-            gl->DeleteProgramsARB(1, &p->prog);
-        if (p->prog_fog)
-            gl->DeleteProgramsARB(1, &p->prog_fog);
+    for (i = 0; i < p->nvar; i++) {
+        if (p->var[i].prog && gl->DeleteProgramsARB)
+            gl->DeleteProgramsARB(1, &p->var[i].prog);
+        if (c->fp_prog == p->var[i].prog)
+            c->fp_prog = 0;
     }
-    if (c->fp_prog && (c->fp_prog == p->prog || c->fp_prog == p->prog_fog))
-        c->fp_prog = 0;
     release(p->code);
     memset(p, 0, sizeof *p);
 }
 
 /* The program for p, with or without fog; 0 if it can't be made (p->failed is then set). */
-static GLuint ps_compile(RCTX *c, struct ps8 *p, int fog)
+/* key: the translator's fog argument (fog, and the cube map stages of a version 1 shader). */
+static GLuint ps_compile(RCTX *c, struct ps8 *p, DWORD key)
 {
     GLF *gl = gl_of(c);
     char *tgsi, *arb;
@@ -3124,7 +3278,7 @@ static GLuint ps_compile(RCTX *c, struct ps8 *p, int fog)
     memset(&ai, 0, sizeof ai);
     ai.fog_unit = TGSI_ARB_FOGCOORD;    /* fog values in OpenGL's fog coordinate (arrays) */
     if (tgsi && arb && p->code)
-        n = rb_ps_translate((const unsigned int *)p->code, p->bytes / 4, fog ? PS_FOG : 0, tgsi,
+        n = rb_ps_translate((const unsigned int *)p->code, p->bytes / 4, key, tgsi,
                             RB_PS_TEXT_BYTES, &info);
     if (n)
         m = tgsi_to_arb(tgsi, arb, TGSI_ARB_TEXT_BYTES, &ai);
@@ -3154,10 +3308,10 @@ static GLuint ps_compile(RCTX *c, struct ps8 *p, int fog)
         } else {
             for (i = 0; i < ai.immediates; i++)
                 gl->ProgramLocalParameter4fvARB(GL_FRAGMENT_PROGRAM_ARB, i, (const GLfloat *)ai.imm[i]);
-            if (fog)
+            if (key & 3)
                 p->fog_base = ai.constants - 2;
             tracef("rd3d: pixel shader %lx%s: program %lu, samplers %lx, coordinates %lx\r\n",
-                   p->handle, fog ? " with fog" : "", (DWORD)prog, (DWORD)info.samplers,
+                   p->handle, key ? " (variant)" : "", (DWORD)prog, (DWORD)info.samplers,
                    (DWORD)info.coords);
         }
     }
@@ -3180,25 +3334,57 @@ static void ps_create(RCTX *c, DWORD handle, const DWORD *code, DWORD bytes)
         memcpy(p->code, code, bytes);
         p->bytes = bytes;
     }
-    p->prog = ps_compile(c, p, 0);      /* now, so a shader that can't be made says so early */
+    p->version2 = bytes >= 4 && code[0] >= 0xFFFF0200UL;
+    p->var[0].key = 0;
+    p->var[0].prog = ps_compile(c, p, 0);   /* now, so a shader that can't be made says so early */
+    p->nvar = 1;
 }
 
-/* The program for the pixel shader set and the fog state, 0 for the fixed-function stages; -1
-   if a shader is set but couldn't be translated (its draws are skipped). */
+/* The stages t0..t3 whose texture is a cube map: a version 1 shader's tex reads them as such. */
+static DWORD cube_stages(RCTX *c)
+{
+    DWORD s, mask = 0;
+    for (s = 0; s < RB_PS_COORD_SETS; s++) {
+        DWORD map = c->tss[s][D3DTSS_TEXTUREMAP];
+        LPDDRAWI_DDRAWSURFACE_LCL l = map ? handle_get(c->ddl, map) : NULL;
+        if (l && is_cube(l))
+            mask |= 1UL << s;
+    }
+    return mask;
+}
+
+/* The program for the pixel shader set, the fog state and (version 1) the cube map stages, 0
+   for the fixed-function stages; -1 if a shader is set but its program couldn't be made (its
+   draws are skipped). Programs are made when first needed and kept, PS_VARIANTS a shader. */
 static long ps_program(RCTX *c)
 {
     struct ps8 *p;
-    int fog = c->rs[D3DRENDERSTATE_FOGENABLE] != 0;
+    DWORD key, i;
     if (!c->ps_bound)
         return 0;
     p = ps_find(c, c->ps_bound, 0);
     if (!p || p->failed)
         return -1;
-    if (fog && !p->prog_fog)
-        p->prog_fog = ps_compile(c, p, 1);
-    if (fog)
-        return p->prog_fog ? (long)p->prog_fog : -1;
-    return p->prog ? (long)p->prog : -1;
+    key = c->rs[D3DRENDERSTATE_FOGENABLE] ? PS_FOG : 0;
+    if (!p->version2)
+        key |= cube_stages(c) << RB_PS_CUBE_SHIFT;
+    c->fp_fog = (key & 3) != 0;
+    for (i = 0; i < p->nvar; i++)
+        if (p->var[i].key == key)
+            return p->var[i].prog ? (long)p->var[i].prog : -1;
+    if (p->nvar == PS_VARIANTS) {       /* full: the last one makes room */
+        GLF *gl = gl_of(c);
+        i = PS_VARIANTS - 1;
+        if (p->var[i].prog && gl->DeleteProgramsARB)
+            gl->DeleteProgramsARB(1, &p->var[i].prog);
+        if (c->fp_prog == p->var[i].prog)
+            c->fp_prog = 0;
+        p->nvar--;
+    }
+    i = p->nvar++;
+    p->var[i].key = key;
+    p->var[i].prog = ps_compile(c, p, key);
+    return p->var[i].prog ? (long)p->var[i].prog : -1;
 }
 
 /* Before a draw: the fragment program on or off, bound, its constants loaded. */
@@ -3230,7 +3416,7 @@ static void ps_apply(RCTX *c, long prog)
         c->psc_dirty = 0;
     }
     p = ps_find(c, c->ps_bound, 0);
-    if (p && (GLuint)prog == p->prog_fog) {
+    if (p && c->fp_fog) {
         DWORD col = c->rs[D3DRENDERSTATE_FOGCOLOR];
         GLfloat fc[4], range[4];
         fc[0] = ((col >> 16) & 255) / 255.0f;
@@ -3834,6 +4020,11 @@ static void prim_caps(D3DPRIMCAPS *p)
         D3DPSHADECAPS_FOGFLAT | D3DPSHADECAPS_FOGGOURAUD;
     p->dwTextureCaps = D3DPTEXTURECAPS_PERSPECTIVE | D3DPTEXTURECAPS_ALPHA |
                        D3DPTEXTURECAPS_POW2 | D3DPTEXTURECAPS_TRANSPARENCY;
+    /* With the Direct3D 8 interface on: cube maps (for pixel shaders). The Direct3D 8 and 9
+       runtimes on Windows 98 decide from this record whether a cube map may go to video
+       memory, whatever D3DCAPS8 says. */
+    if (d8_on)
+        p->dwTextureCaps |= 0x800;      /* D3DPTEXTURECAPS_CUBEMAP */
     p->dwTextureFilterCaps = D3DPTFILTERCAPS_NEAREST | D3DPTFILTERCAPS_LINEAR |
         D3DPTFILTERCAPS_MIPNEAREST | D3DPTFILTERCAPS_MIPLINEAR |
         D3DPTFILTERCAPS_LINEARMIPNEAREST | D3DPTFILTERCAPS_LINEARMIPLINEAR |
@@ -3945,22 +4136,22 @@ static ULONG fbits(float f)
 
 /* Formats and what each can be used for (the operations in the word of dwRBitMask). */
 static const ULONG d8_formats[][2] = {
-    { RbFmtX8R8G8B8, RbFormatTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
+    { RbFmtX8R8G8B8, RbFormatTexture | RbFormatCubeTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
                      RbFormatDisplayMode | RbFormat3D },
-    { RbFmtA8R8G8B8, RbFormatTexture | RbFormatOffscreenTarget | RbFormatSameTargetUpToAlpha },
-    { RbFmtR5G6B5, RbFormatTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
+    { RbFmtA8R8G8B8, RbFormatTexture | RbFormatCubeTexture | RbFormatOffscreenTarget | RbFormatSameTargetUpToAlpha },
+    { RbFmtR5G6B5, RbFormatTexture | RbFormatCubeTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
                    RbFormatDisplayMode | RbFormat3D },
-    { RbFmtX1R5G5B5, RbFormatTexture },
-    { RbFmtA1R5G5B5, RbFormatTexture },
-    { RbFmtA4R4G4B4, RbFormatTexture },
+    { RbFmtX1R5G5B5, RbFormatTexture | RbFormatCubeTexture },
+    { RbFmtA1R5G5B5, RbFormatTexture | RbFormatCubeTexture },
+    { RbFmtA4R4G4B4, RbFormatTexture | RbFormatCubeTexture },
     { RbFmtD16, RbFormatZStencil },
     { RbFmtD24S8, RbFormatZStencil },
     { RbFmtD24X8, RbFormatZStencil },
-    { RbFmtDxt1, RbFormatTexture },     /* DXT: CreateSurface sizes them, gl_format uploads them */
-    { RbFmtDxt2, RbFormatTexture },
-    { RbFmtDxt3, RbFormatTexture },
-    { RbFmtDxt4, RbFormatTexture },
-    { RbFmtDxt5, RbFormatTexture },
+    { RbFmtDxt1, RbFormatTexture | RbFormatCubeTexture },     /* DXT: CreateSurface sizes them, gl_format uploads them */
+    { RbFmtDxt2, RbFormatTexture | RbFormatCubeTexture },
+    { RbFmtDxt3, RbFormatTexture | RbFormatCubeTexture },
+    { RbFmtDxt4, RbFormatTexture | RbFormatCubeTexture },
+    { RbFmtDxt5, RbFormatTexture | RbFormatCubeTexture },
 };
 #define D8_FORMATS (sizeof d8_formats / sizeof d8_formats[0])
 
@@ -3984,6 +4175,9 @@ static void d8_caps(RB_D3DCAPS8 *c)
     c->alphaCmpCaps = tri->dwAlphaCmpCaps;
     c->shadeCaps = tri->dwShadeCaps;
     c->textureCaps = tri->dwTextureCaps | 0x4000;      /* D3DPTEXTURECAPS_MIPMAP */
+    /* Cube maps, sampled by pixel shaders (the fixed-function stages do not). */
+    c->textureCaps |= 0x800 | 0x10000;  /* D3DPTEXTURECAPS_CUBEMAP, MIPCUBEMAP */
+    c->cubeTextureFilterCaps = tri->dwTextureFilterCaps;
     c->textureFilterCaps = tri->dwTextureFilterCaps;
     c->textureAddressCaps = tri->dwTextureAddressCaps;
     c->stencilCaps = x.dwStencilCaps;
@@ -4107,6 +4301,22 @@ int d3d_driver_info(LPDDHAL_GETDRIVERINFODATA d)
 {
     if (IsEqualGUID(&d->guidInfo, &guid_gdi2) && d8_info(d))
         return 1;
+    if (d8_on && IsEqualGUID(&d->guidInfo, &GUID_DDMoreSurfaceCaps)) {
+        /* Surface kinds beyond DDSCAPS that video memory takes: cube maps, for the Direct3D 8
+           and 9 runtimes (without this they keep cube maps in system memory only). One pair of
+           heap restrictions per heap, none of them restricting. */
+        struct {
+            DDMORESURFACECAPS c;
+            DDSCAPSEX more[2 * 4];
+        } m;
+        DWORD heaps = shared->hal.dwNumHeaps;
+        if (heaps > 5)
+            heaps = 5;
+        memset(&m, 0, sizeof m);
+        m.c.dwSize = sizeof(DDMORESURFACECAPS) + (heaps ? heaps - 1 : 0) * 2 * sizeof(DDSCAPSEX);
+        m.c.ddsCapsMore.dwCaps2 = DDSCAPS2_CUBEMAP;
+        return copy_answer(d, &m, m.c.dwSize);
+    }
     if (IsEqualGUID(&d->guidInfo, &GUID_D3DCallbacks3)) {
         D3DHAL_CALLBACKS3 cb;
         memset(&cb, 0, sizeof cb);

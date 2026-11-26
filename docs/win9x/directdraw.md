@@ -806,6 +806,15 @@ the blocks go to the host as they are (`glCompressedTexImage2D`, DXT2 and DXT4 a
 On a host without S3TC (UTM) Mesa decodes them (see mesa.md). `d9pixels sw`: 43 of 43, the
 three DXT cases (DXT1, DXT3 and DXT5 alpha) included.
 
+Cube maps (with the Direct3D 8 interface on), sampled by pixel shaders as on Windows 2000: the
+HAL's copy of a cube map's records holds all six faces with their levels, texture blits copy
+every face, and a version 1 shader gets a program per set of stages holding cube maps (shader
+model 2 declares its samplers). Two things the Windows 98 runtimes need besides D3DCAPS8: the
+Direct3D 7-level texture caps must list cube maps, and DirectDraw must be told through
+`GUID_DDMoreSurfaceCaps` that video memory takes them (`DDSCAPS2_CUBEMAP`); without either the
+runtime keeps a managed cube map in system memory only and draws nothing from it. `d9pixels
+sw`: 45 of 45, both cube cases (shader model 2 and version 1) included.
+
 
 ## Changing a driver in the test VM
 

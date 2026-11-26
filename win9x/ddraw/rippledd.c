@@ -209,6 +209,7 @@ static DWORD WINAPI CanCreateSurface(LPDDHAL_CANCREATESURFACEDATA d)
        the formats Direct3D was offered. */
     d->ddRVal = !d->bIsDifferentPixelFormat || d3d_surface_format_ok(d->lpDDSurfaceDesc) ?
                 DD_OK : DDERR_INVALIDPIXELFORMAT;
+    d3d_trace("can create: caps, result", d->lpDDSurfaceDesc->ddsCaps.dwCaps, d->ddRVal);
     return DDHAL_DRIVER_HANDLED;
 }
 
@@ -219,6 +220,8 @@ static DWORD WINAPI CreateSurface(LPDDHAL_CREATESURFACEDATA d)
 {
     DWORD i;
 
+    if (d->dwSCnt)
+        d3d_trace("create: surfaces, caps", d->dwSCnt, d->lplpSList[0]->ddsCaps.dwCaps);
     /* DXT surfaces in video memory have no pitch DirectDraw could size them by: ask it for a
        block of the bytes their 4x4 blocks take (each level is a surface of its own). */
     for (i = 0; i < d->dwSCnt; i++) {
@@ -496,6 +499,7 @@ DWORD WINAPI DriverInit(DWORD context)
     s->hal.GetDriverInfo = (DWORD)GetDriverInfo;
     s->hal.dwFlags |= RDD_HALINFO_GETDRIVERINFOSET;
     s->hal.lpDDExeBufCallbacks = 0;
+    d3d8_enabled();                     /* first: d3d_init's capabilities depend on it */
     d3d_init(s, (DDCORECAPS *)s->hal.ddCaps);
     if (d3d8_enabled()) {
         s->hal.dwFlags |= RDD_HALINFO_GETDRIVERINFO2;
