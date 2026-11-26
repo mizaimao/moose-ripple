@@ -81,7 +81,7 @@ this project: nothing may look worse than without our driver).
    again ([display-driver.md](display-driver.md)). Next: a comparison against a card of the
    time, games.
    *State 2026-11-26:* the DirectX 8 and 9 driver interface, behind the registry switch
-   `HKLM\Software\moose-ripple`, `D3D8` = `"1"` ([directdraw.md](directdraw.md#direct3d-8-through-its-own-interface-stage-1-2026-11-26-off-by-default)):
+   `HKLM\Software\moose-ripple`, `D3D8` = `"1"` ([directdraw.md](directdraw.md#direct3d-8-through-its-own-interface-stage-1-2026-11-26-on-by-default-since-060)):
    stream draws, pixel shaders 1.1 to 1.3 and 2.0 (the Windows 2000 driver's translator, its
    TGSI text turned into ARB fragment programs), fog after the shader, eight samplers, DXT,
    cube, volume and bump map textures. `d8pixels` and `d9pixels` (DirectX 8.1 and 9.0c on
@@ -91,8 +91,8 @@ this project: nothing may look worse than without our driver).
    vertex shaders 1.1 and 2.0 ([directdraw.md](directdraw.md#vertex-processing-on-the-gpu-2026-11-26-d3d8--2)),
    and the first speed work, timed on the rig: 3DMark 2001 SE 12134, then 14716 (rendered textures
    stay on the GPU), then 30226 (vertex and index buffers in the driver's memory, kept in OpenGL
-   buffer objects). Next: what limits Car Chase and Lobby now; 3DMark03 (parked: its installers
-   need a newer Windows or fail on 98).
+   buffer objects). On by default since 0.6.0 (`D3D8` = `"0"` turns it off). Next: 3DMark03
+   (parked: its installers need a newer Windows or fail on 98).
 6. **Windows 2000:** miniport and display driver; the OpenGL and Direct3D parts reused.
 7. Later, maybe: Glide (3dfx games), Windows 95.
 
