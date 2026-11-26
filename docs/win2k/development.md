@@ -1824,8 +1824,9 @@ and 9 textured scenes passed, and Direct3D 8 Quake ran at 58.8 fps. The
 runtime refuses a shader that writes `oC0` with `_sat`, and a version 1.1
 shader in the Direct3D 8 test with `_bias` on a texture register and a
 negated `def` constant; `d9pixels` skips that one unless asked for it.
-Windows 2000 has no Direct3D 9 runtime and was not rerun; its Direct3D 7
-path is unchanged.
+Windows 2000 has no Direct3D 9 runtime of its own and was not rerun then; its
+Direct3D 7 path is unchanged. (Later, with the DirectX 9.0c runtime installed,
+Direct3D 8 and 9 pass there too: see "Direct3D 8 and 9 on Windows 2000".)
 
 ## Eight coordinate sets and samplers for pixel shader 2.0
 
@@ -2184,6 +2185,17 @@ encodes a vector along x with a texture factor along x (white) and along y
 On XP SP3 under KVM on the second Intel UHD 630 host, case 53 passes and
 `d9pixels` passes 43 of 43. 3DMark 2001 SE's DOT3 Bump Mapping test, which
 reported "Not supported by hardware", now runs.
+
+## Direct3D 8 and 9 on Windows 2000
+
+Windows 2000 ships with DirectX 7. Microsoft's June 2010 DirectX
+redistributable no longer installs there; the February 2010 one does (any
+DirectX 9.0c redistributable from 2004 to February 2010 brings the same core
+runtime). After `directx_feb2010_redist.exe /Q /T:<folder>` and
+`DXSETUP.exe /silent` and a restart, the driver works unchanged.
+
+On Windows 2000 under KVM on the second Intel UHD 630 host, with the driver
+installed by `nt5inst`, `d9pixels` passes 44 of 44 and `d8pixels` 23 of 23.
 
 ## Release package
 
