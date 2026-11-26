@@ -99,6 +99,9 @@ typedef struct {
     /* With RB_VS_FLOW programs: i0..i15 as floats (count, start, step) and b0..b15 as 1 or 0 in w,
      * sent as CONST[3..18]. */
     ULONG flowConstants[16][4];
+    /* User clip planes (D3DRS_CLIPPLANEENABLE bits, IEEE planes): in clip space for vertex programs
+     * (transform 2), in world space for object-space draws; pretransformed draws are not clipped. */
+    ULONG clipMask, clipPlanes[6][4];
     /* Lighting as in RB2K_D3D7_DRAW (object space only); specular adds
      * the lit specular colour. */
     ULONG lighting, lightCount, lightFlags, ambient, specular;
@@ -165,6 +168,7 @@ typedef struct {
     ULONG matrices[3][16];
     ULONG viewport[6];
     ULONG scissorOn, scissor[4];   /* the Direct3D 9 scissor test, as in RB2K_D3D8_DRAW */
+    ULONG clipMask, clipPlanes[6][4];   /* user clip planes, as in RB2K_D3D8_DRAW */
     /* Nonzero with transform: light the vertices with the D3DMATERIAL7, the
      * D3DRENDERSTATE_AMBIENT colour and the first lightCount D3DLIGHT7s. */
     ULONG lighting, lightCount, lightFlags, ambient;

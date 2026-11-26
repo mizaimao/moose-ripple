@@ -18,6 +18,7 @@ enum {
     Raster = 9, Elements = 5, VertexShader = 6, ObjectShader = 7, LitShader = 8, DsaBase = 16, BlendBase = 32,
     SamplerBase = 48, Sampler1Base = 56, ShaderBase = 64, TextureView = 80, TextureView1 = 81,
     PsVertexShader = 82, PsObjectShader = 83, PsViewBase = 84, PsSamplerBase = 96, PsLitShader = 112,
+    ObjectClipShader = 113, LitClipShader = 114, PsObjectClipShader = 115, PsLitClipShader = 116,
     VsProgramBase = 128, VsProgramKeys = 16
 };
 enum { VertexStage = 0, FragmentStage = 1, PipeTriangles = 4, ShaderText = 2400, LitText = 8192 };
@@ -522,35 +523,71 @@ static const char *const lit_lines[] = {
     "END"
 };
 
-static ULONG lit_text(char *out)
+/* User clip planes in world space, for the object-space shaders: the six planes follow their fixed
+ * constants at planes and the vertices start six constants later. The world position is TEMP[2]
+ * once its fourth DP4 is done; the distances wait in TEMP[dist] and TEMP[dist + 1] and go out as
+ * CLIPDIST[0] and [1] (OUT[out] and OUT[out + 1]) before END. */
+static BOOLEAN text_is(const char *a, const char *b)
+{
+    while (*a && *a == *b) { ++a; ++b; }
+    return *a == *b;
+}
+
+static void clip_op(TEXT *t, const char *line, ULONG planes, ULONG dist, ULONG out)
+{
+    static const char *const comp[6] = { "].x", "].y", "].z", "].w", "].x", "].y" };
+    ULONG k;
+    if (text_is(line, "END"))
+        for (k = 0; k < 2; ++k) {
+            number(t, t->line++); put(t, ": MOV OUT["); number(t, out + k); put(t, "], TEMP["); number(t, dist + k);
+            put(t, "]\n");
+        }
+    op(t, line, 0, 0, 0);
+    if (text_is(line, "DP4 TEMP[2].w, TEMP[1], CONST[4]")) {
+        for (k = 0; k < 6; ++k) {
+            number(t, t->line++); put(t, ": DP4 TEMP["); number(t, dist + k / 4); put(t, comp[k]);
+            put(t, ", TEMP[2], CONST["); number(t, planes + k); put(t, "]\n");
+        }
+        number(t, t->line++); put(t, ": MOV TEMP["); number(t, dist + 1); put(t, "].zw, IMM[0].zzzz\n");
+    }
+}
+
+static ULONG lit_text(char *out, BOOLEAN clip)
 {
     TEXT t;
     ULONG i;
     t.p = out; t.n = 0; t.line = 0; t.size = LitText; t.overflow = FALSE;
     put(&t, "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..");
-    number(&t, LitConstants - 1);
-    put(&t, "]\nDCL ADDR[0]\nDCL TEMP[0..29]\nDCL OUT[0], POSITION\nDCL OUT[1], GENERIC[0]\n"
-            "DCL OUT[2], GENERIC[1]\nDCL OUT[3], GENERIC[2]\nDCL OUT[4], GENERIC[3]\n"
-            "IMM[0] FLT32 {0x3f800000, 0x40000000, 0x00000000, 0x3f000000}\n"
-            "IMM[1] UINT32 {5, 24, 8, 1}\n"
+    number(&t, LitConstants - 1 + (clip ? 6 : 0));
+    put(&t, clip ? "]\nDCL ADDR[0]\nDCL TEMP[0..31]\n" : "]\nDCL ADDR[0]\nDCL TEMP[0..29]\n");
+    put(&t, "DCL OUT[0], POSITION\nDCL OUT[1], GENERIC[0]\n"
+            "DCL OUT[2], GENERIC[1]\nDCL OUT[3], GENERIC[2]\nDCL OUT[4], GENERIC[3]\n");
+    if (clip) put(&t, "DCL OUT[5], CLIPDIST[0]\nDCL OUT[6], CLIPDIST[1]\n");
+    put(&t, "IMM[0] FLT32 {0x3f800000, 0x40000000, 0x00000000, 0x3f000000}\n");
+    put(&t, clip ? "IMM[1] UINT32 {5, 30, 8, 1}\n" : "IMM[1] UINT32 {5, 24, 8, 1}\n");
+    put(&t, ""
             "IMM[2] FLT32 {0x00000000, 0x00000000, 0xbf800000, 0x0d800000}\n"
             "IMM[3] UINT32 {0, 0, 0, 0}\n");
-    for (i = 0; i < sizeof(lit_lines)/sizeof(*lit_lines); ++i) op(&t, lit_lines[i], 0, 0, 0);
+    for (i = 0; i < sizeof(lit_lines)/sizeof(*lit_lines); ++i) 
+        if (clip) clip_op(&t, lit_lines[i], LitVertexBase, 30, 5); else op(&t, lit_lines[i], 0, 0, 0);
     return t.overflow ? 0 : t.n + 1;
 }
 typedef char lit_layout[LitVertexBase == 24 && LitVertexConstants == 5 && LitLightConstants == 8 ? 1 : -1];
 
-static ULONG object_text(char *out)
+static ULONG object_text(char *out, BOOLEAN clip)
 {
     TEXT t;
     ULONG i;
     t.p = out; t.n = 0; t.line = 0; t.size = LitText; t.overflow = FALSE;
-    put(&t, "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..398]\nDCL ADDR[0]\n"
-            "DCL TEMP[0..5]\nDCL OUT[0], POSITION\nDCL OUT[1], GENERIC[0]\n"
-            "DCL OUT[2], GENERIC[1]\nDCL OUT[3], GENERIC[2]\nDCL OUT[4], GENERIC[3]\n"
-            "IMM[0] FLT32 {0x3f800000, 0x40000000, 0x00000000, 0x00000000}\n"
-            "IMM[1] UINT32 {15, 0, 0, 0}\n");
-    for (i = 0; i < sizeof(object_lines)/sizeof(*object_lines); ++i) op(&t, object_lines[i], 0, 0, 0);
+    put(&t, clip ? "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..404]\nDCL ADDR[0]\nDCL TEMP[0..7]\n"
+                 : "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..398]\nDCL ADDR[0]\nDCL TEMP[0..5]\n");
+    put(&t, "DCL OUT[0], POSITION\nDCL OUT[1], GENERIC[0]\n"
+            "DCL OUT[2], GENERIC[1]\nDCL OUT[3], GENERIC[2]\nDCL OUT[4], GENERIC[3]\n");
+    if (clip) put(&t, "DCL OUT[5], CLIPDIST[0]\nDCL OUT[6], CLIPDIST[1]\n");
+    put(&t, "IMM[0] FLT32 {0x3f800000, 0x40000000, 0x00000000, 0x00000000}\n");
+    put(&t, clip ? "IMM[1] UINT32 {21, 0, 0, 0}\n" : "IMM[1] UINT32 {15, 0, 0, 0}\n");
+    for (i = 0; i < sizeof(object_lines)/sizeof(*object_lines); ++i)
+        if (clip) clip_op(&t, object_lines[i], 15, 6, 5); else op(&t, object_lines[i], 0, 0, 0);
     return t.overflow ? 0 : t.n + 1;
 }
 
@@ -571,7 +608,7 @@ BOOLEAN rb_gpu_d7_valid(const RB2K_D3D7_DRAW *d)
     if ((d->blend & ~(RB2K_D7_ON | RB2K_BLEND_DEST_ALPHA | RB2K_BLEND_NO_WRITE | 0xffff)) ||
         ((d->blend & RB2K_D7_ON) && (!blend_valid((d->blend >> 8) & 255) || !blend_valid(d->blend & 255)))) return FALSE;
     if (d->cull < CullNone || d->cull > CullCcw || d->specular > 1) return FALSE;
-    if (d->scissorOn > 1 || (d->scissorOn && (d->scissor[0] > 8192 || d->scissor[1] > 8192 || d->scissor[2] > 8192 ||
+    if (d->clipMask > 63 || d->scissorOn > 1 || (d->scissorOn && (d->scissor[0] > 8192 || d->scissor[1] > 8192 || d->scissor[2] > 8192 ||
         d->scissor[3] > 8192)) ||
         d->transform > 1 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
         d->viewport[0] > 8192 || d->viewport[1] > 8192 || d->viewport[2] > 8192 || d->viewport[3] > 8192)))
@@ -676,7 +713,7 @@ static ULONG sampler_words(ULONG *words, ULONG handle, ULONG state, ULONG sample
 /* Depth and alpha test, blend and rasterizer objects, shared by the
  * fixed-function and the pixel shader draws. */
 static BOOLEAN fixed_states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, ULONG depthState,
-                            ULONG alphaTest, ULONG blend, ULONG cull, ULONG transform, ULONG stencil, ULONG stencilRef)
+                            ULONG alphaTest, ULONG blend, ULONG cull, ULONG transform, ULONG stencil, ULONG stencilRef, ULONG clipMask)
 {
     RB2K_D7_STATE *s = &image->d7;
     ULONG words[64], n = 0, slot, key[3], state, i;
@@ -739,24 +776,29 @@ static BOOLEAN fixed_states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image
         words[n++] = BIND(VIRGL_OBJECT_BLEND); words[n++] = BlendBase + slot;
         s->blend.bound = slot + 1;
     }
-    if (s->boundRaster != cull + 3 * transform) {
-        ULONG key = cull + 3 * transform, bit = 1UL << key;
-        if (!(s->rasters & bit)) {
+    /* Without user clip planes one rasterizer per culling and scissor (Raster + key, made once);
+     * with them a seventh, Raster + 6, made again when its planes or key change. */
+    if (s->boundRaster != (clipMask ? 0x100 | clipMask << 3 | (cull + 3 * transform) : cull + 3 * transform)) {
+        ULONG key = cull + 3 * transform, bit = 1UL << key, want = clipMask ? 0x100 | clipMask << 3 | key : key;
+        ULONG handle = clipMask ? Raster + 6 : Raster + key;
+        if (clipMask ? s->clipRaster != want : !(s->rasters & bit)) {
+            if (clipMask && s->clipRaster) { words[n++] = DESTROY(VIRGL_OBJECT_RASTERIZER); words[n++] = handle; }
             /* Window coordinates follow the Direct3D screen (y down), so a
              * clockwise triangle faces the front, as in Gallium Nine.
              * Transformed draws are clipped to the Direct3D viewport. */
             words[n++] = CREATE(VIRGL_OBJECT_RASTERIZER, VIRGL_OBJ_RS_SIZE);
-            words[n++] = Raster + key;
+            words[n++] = handle;
             words[n++] = VIRGL_OBJ_RS_S0_DEPTH_CLIP(1) | VIRGL_OBJ_RS_S0_HALF_PIXEL_CENTER(1) |
                          VIRGL_OBJ_RS_S0_SCISSOR(transform) |
                          VIRGL_OBJ_RS_S0_BOTTOM_EDGE_RULE(1) |
                          VIRGL_OBJ_RS_S0_CULL_FACE(cull == CullCw ? 1 : cull == CullCcw ? 2 : 0);
-            words[n++] = 0x3f800000; words[n++] = 0; words[n++] = 0;
+            words[n++] = 0x3f800000; words[n++] = 0;
+            words[n++] = VIRGL_OBJ_RS_S3_CLIP_PLANE_ENABLE(clipMask);
             words[n++] = 0x3f800000; words[n++] = 0; words[n++] = 0; words[n++] = 0;
-            s->rasters |= bit;
+            if (clipMask) s->clipRaster = want; else s->rasters |= bit;
         }
-        words[n++] = BIND(VIRGL_OBJECT_RASTERIZER); words[n++] = Raster + key;
-        s->boundRaster = key;
+        words[n++] = BIND(VIRGL_OBJECT_RASTERIZER); words[n++] = handle;
+        s->boundRaster = want;
     }
     return !n || rb_gpu_frame_words(gpu, r, image, words, n);
 }
@@ -774,20 +816,23 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
         s->pipeline = TRUE;
     }
     {
-        static char litText[LitText], objectText[LitText];
-        static ULONG litSize, objectSize;
-        ULONG want = d->lighting ? 4 : d->transform ? 2 : 1;
-        ULONG handle = d->lighting ? LitShader : d->transform ? ObjectShader : VertexShader;
+        /* Index 1: the clip variants, which write the distances of user clip planes. */
+        static char litText[2][LitText], objectText[2][LitText];
+        static ULONG litSize[2], objectSize[2];
+        ULONG clip = d->transform && d->clipMask ? 1 : 0;
+        ULONG want = d->lighting ? (clip ? 128 : 4) : d->transform ? (clip ? 64 : 2) : 1;
+        ULONG handle = d->lighting ? (clip ? LitClipShader : LitShader) :
+                       d->transform ? (clip ? ObjectClipShader : ObjectShader) : VertexShader;
         if (!(s->vertexShaders & want)) {
             BOOLEAN ok;
             if (d->lighting) {
-                if (!litSize) litSize = lit_text(litText);
-                ok = litSize && shader(gpu,r,image,handle,VertexStage,litText,litSize);
-                if (!litSize) { r->status = ERROR_INVALID_DATA; r->stage = RB2K_STAGE_TRANSFER; }
+                if (!litSize[clip]) litSize[clip] = lit_text(litText[clip], clip != 0);
+                ok = litSize[clip] && shader(gpu,r,image,handle,VertexStage,litText[clip],litSize[clip]);
+                if (!litSize[clip]) { r->status = ERROR_INVALID_DATA; r->stage = RB2K_STAGE_TRANSFER; }
             } else if (d->transform) {
-                if (!objectSize) objectSize = object_text(objectText);
-                ok = objectSize && shader(gpu,r,image,handle,VertexStage,objectText,objectSize);
-                if (!objectSize) { r->status = ERROR_INVALID_DATA; r->stage = RB2K_STAGE_TRANSFER; }
+                if (!objectSize[clip]) objectSize[clip] = object_text(objectText[clip], clip != 0);
+                ok = objectSize[clip] && shader(gpu,r,image,handle,VertexStage,objectText[clip],objectSize[clip]);
+                if (!objectSize[clip]) { r->status = ERROR_INVALID_DATA; r->stage = RB2K_STAGE_TRANSFER; }
             } else ok = shader(gpu,r,image,handle,VertexStage,vertex_shader,sizeof(vertex_shader));
             if (!ok) return FALSE;
             s->vertexShaders |= want;
@@ -799,7 +844,7 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
         }
     }
     if (!fixed_states(gpu, r, image, d->depthState, d->alphaTest, d->blend, d->cull, d->transform || d->scissorOn, d->stencil,
-                      d->stencilRef)) return FALSE;
+                      d->stencilRef, d->transform ? d->clipMask : 0)) return FALSE;
 
     key[0] = d->colorStage; key[1] = d->alphaStage; key[2] = d->specular; key[3] = d->fog;
     key[4] = d->stage1Color; key[5] = d->stage1Alpha;
@@ -902,7 +947,8 @@ BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
     /* Viewport 8, scissor 4, constants 7 + 56 (+ 36 lit) + 16 (20 lit) per vertex
      * (+ 32 per light), draw 13. */
     ULONG lit = d->lighting != 0, lights = lit ? d->lightCount : 0, perVertex = lit ? 20 : 16;
-    ULONG extra = (d->transform ? 56 : 0) + (lit ? 36 + 32*lights : 0);
+    ULONG clip = d->transform && d->clipMask ? 6 : 0;   /* user clip planes before the vertices */
+    ULONG extra = (d->transform ? 56 : 0) + (lit ? 36 + 32*lights : 0) + 4*clip;
     ULONG i, count = d->count, total = 28 + (d->transform || d->scissorOn ? 4 : 0) + extra + perVertex*count, *p;
     ULONG width = dimension_bits(image->width), height = dimension_bits(image->height);
     if (!rb_gpu_prepare_target(gpu, r, image) || !states(gpu, r, image, d, texture, texture1)) return FALSE;
@@ -967,8 +1013,9 @@ BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
             *p++ = ((sources >> 2*k) & 3) == 1 ? one : 0;
             *p++ = ((sources >> 2*k) & 3) == 2 ? one : 0;
         }
-        *p++ = lights; *p++ = LitVertexBase + LitVertexConstants*count; *p++ = 0; *p++ = 0;
+        *p++ = lights; *p++ = LitVertexBase + clip + LitVertexConstants*count; *p++ = 0; *p++ = 0;
     }
+    for (i = 0; i < 4*clip; ++i) *p++ = d->clipPlanes[i / 4][i % 4];
     for (i = 0; i < count; ++i) {
         const RB2K_D3D7_VERTEX *v = d->vertices + i;
         *p++ = v->x; *p++ = v->y; *p++ = v->z; *p++ = v->rhw;
@@ -1050,17 +1097,18 @@ static void move_line(char *line, const char *a, ULONG m, const char *b, ULONG n
     *line = 0;
 }
 
-static ULONG ps_vertex_text(char *out, BOOLEAN object)
+static ULONG ps_vertex_text(char *out, BOOLEAN object, BOOLEAN clip)
 {
     TEXT t;
-    ULONG i, base = object ? 15 : 1;
+    ULONG i, base = object ? (clip ? 21 : 15) : 1;
     t.p = out; t.n = 0; t.line = 0; t.size = LitText; t.overflow = FALSE;
     put(&t, "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..");
     number(&t, base + PsVertexConstants * RB2K_D8_VERTICES - 1);
-    put(&t, "]\nDCL ADDR[0]\nDCL TEMP[0..5]\nDCL OUT[0], POSITION\n");
+    put(&t, clip ? "]\nDCL ADDR[0]\nDCL TEMP[0..7]\nDCL OUT[0], POSITION\n" : "]\nDCL ADDR[0]\nDCL TEMP[0..5]\nDCL OUT[0], POSITION\n");
     for (i = 0; i < PsOutputs + (object ? 1 : 0); ++i) {
         put(&t, "DCL OUT["); number(&t, i + 1); put(&t, "], GENERIC["); number(&t, i); put(&t, "]\n");
     }
+    if (clip) put(&t, "DCL OUT[12], CLIPDIST[0]\nDCL OUT[13], CLIPDIST[1]\n");
     put(&t, object ? "IMM[0] FLT32 {0x3f800000, 0x40000000, 0x00000000, 0x00000000}\n"
                    : "IMM[0] FLT32 {0x3f000000, 0x3f800000, 0x40000000, 0x00000000}\n");
     put(&t, "IMM[1] UINT32 {");
@@ -1071,7 +1119,8 @@ static ULONG ps_vertex_text(char *out, BOOLEAN object)
          * fog depths (17..21) go to GENERIC[10]. */
         op(&t, ps_transformed_lines[0], 0, 0, 0);
         op(&t, ps_transformed_lines[1], 0, 0, 0);
-        for (i = 4; i <= 21; ++i) op(&t, object_lines[i], 0, 0, 0);
+        for (i = 4; i <= 21; ++i)
+            if (clip) clip_op(&t, object_lines[i], 15, 6, 12); else op(&t, object_lines[i], 0, 0, 0);
         op(&t, "MOV OUT[11], TEMP[5]", 0, 0, 0);
         for (i = 23; i <= 38; ++i) op(&t, object_lines[i], 0, 0, 0);
     } else {
@@ -1083,7 +1132,7 @@ static ULONG ps_vertex_text(char *out, BOOLEAN object)
         move_line(line, "MOV OUT[", i, "], CONST[ADDR[0].x+", i);
         op(&t, line, 0, 0, 0);
     }
-    op(&t, "END", 0, 0, 0);
+    if (clip) clip_op(&t, "END", 15, 6, 12); else op(&t, "END", 0, 0, 0);
     return t.overflow ? 0 : t.n + 1;
 }
 typedef char object_lines_layout[sizeof(object_lines) / sizeof(*object_lines) == 43 ? 1 : -1];
@@ -1099,19 +1148,21 @@ static BOOLEAN same(const char *a, const char *b)
     return !*a && !*b;
 }
 
-static ULONG ps_lit_text(char *out)
+static ULONG ps_lit_text(char *out, BOOLEAN clip)
 {
     TEXT t;
     ULONG i, found = 0;
     t.p = out; t.n = 0; t.line = 0; t.size = LitText; t.overflow = FALSE;
     put(&t, "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..");
-    number(&t, LitVertexBase + PsLitVertexConstants * RB2K_D8_VERTICES + LitLightConstants * RB2K_D7_LIGHTS - 1);
-    put(&t, "]\nDCL ADDR[0]\nDCL TEMP[0..36]\nDCL OUT[0], POSITION\n");
+    number(&t, LitVertexBase + (clip ? 6 : 0) + PsLitVertexConstants * RB2K_D8_VERTICES + LitLightConstants * RB2K_D7_LIGHTS - 1);
+    put(&t, clip ? "]\nDCL ADDR[0]\nDCL TEMP[0..38]\nDCL OUT[0], POSITION\n" : "]\nDCL ADDR[0]\nDCL TEMP[0..36]\nDCL OUT[0], POSITION\n");
     for (i = 0; i <= PsOutputs; ++i) {
         put(&t, "DCL OUT["); number(&t, i + 1); put(&t, "], GENERIC["); number(&t, i); put(&t, "]\n");
     }
-    put(&t, "IMM[0] FLT32 {0x3f800000, 0x40000000, 0x00000000, 0x3f000000}\n"
-            "IMM[1] UINT32 {8, 24, 8, 1}\n"
+    if (clip) put(&t, "DCL OUT[12], CLIPDIST[0]\nDCL OUT[13], CLIPDIST[1]\n");
+    put(&t, "IMM[0] FLT32 {0x3f800000, 0x40000000, 0x00000000, 0x3f000000}\n");
+    put(&t, clip ? "IMM[1] UINT32 {8, 30, 8, 1}\n" : "IMM[1] UINT32 {8, 24, 8, 1}\n");
+    put(&t, ""
             "IMM[2] FLT32 {0x00000000, 0x00000000, 0xbf800000, 0x0d800000}\n"
             "IMM[3] UINT32 {0, 0, 0, 0}\n");
     for (i = 0; i < sizeof(lit_lines)/sizeof(*lit_lines); ++i) {
@@ -1133,7 +1184,7 @@ static ULONG ps_lit_text(char *out)
             found |= 1;
             continue;
         }
-        op(&t, l, 0, 0, 0);
+        if (clip) clip_op(&t, l, LitVertexBase, 37, 12); else op(&t, l, 0, 0, 0);
         if (same(l, coordIn)) {
             for (k = 1; k < RB2K_D8_STAGES; ++k) {
                 move_line(line, "MOV TEMP[", 29 + k, "], CONST[ADDR[0].x+", 4 + k);
@@ -1167,7 +1218,7 @@ BOOLEAN rb_gpu_d8_valid(const RB2K_D3D8_DRAW *d)
     if (d->cull < CullNone || d->cull > CullCcw || (d->constantCount != 8 && d->constantCount != 16 && d->constantCount != 32)) return FALSE;
     if (d->transform == 2 && (d->lighting || !d->vertexProgram || d->vertexConstants > RB2K_D8_VS_CONSTANTS ||
         !d->vertexWords || d->vertexWords % 4 || d->vertexWords > RB2K_D8_VS_VERTEX_WORDS)) return FALSE;
-    if (d->scissorOn > 1 || (d->scissorOn && (d->scissor[0] > 8192 || d->scissor[1] > 8192 || d->scissor[2] > 8192 ||
+    if (d->clipMask > 63 || d->scissorOn > 1 || (d->scissorOn && (d->scissor[0] > 8192 || d->scissor[1] > 8192 || d->scissor[2] > 8192 ||
         d->scissor[3] > 8192)) ||
         d->transform > 2 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
         d->viewport[0] > 8192 || d->viewport[1] > 8192 || d->viewport[2] > 8192 || d->viewport[3] > 8192)))
@@ -1205,8 +1256,11 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
     BOOLEAN shaded = d->transform == 2;
     ULONG lit = !shaded && d->lighting != 0, lights = lit ? d->lightCount : 0;
     ULONG stages = 0, fill = 0, count = d->count;
-    ULONG extra = shaded ? 4 * (RB2K_D8_VS_CONST_BASE - 1) + 4 * d->vertexConstants :
-                  (d->transform ? 56 : 0) + (lit ? 36 + 32 * lights : 0);
+    /* User clip planes: after the shader's constants (planes), or before the vertices of object-space
+     * draws (ffPlanes). */
+    ULONG planes = shaded && d->clipMask ? 6 : 0, ffPlanes = !shaded && d->transform && d->clipMask ? 6 : 0;
+    ULONG extra = shaded ? 4 * (RB2K_D8_VS_CONST_BASE - 1) + 4 * d->vertexConstants + 4 * planes :
+                  (d->transform ? 56 : 0) + (lit ? 36 + 32 * lights : 0) + 4 * ffPlanes;
     ULONG sets = d->coordSets, words8 = RB2K_D8_VERTEX_WORDS(sets);
     ULONG stride = shaded ? d->vertexWords / 4 : lit ? 4 + (sets ? sets : 1) : 3 + sets, perVertex = 4 * stride;
     ULONG total = 28 + (d->transform || d->scissorOn ? 4 : 0) + extra + perVertex * count, *p;
@@ -1236,14 +1290,17 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
             s->boundVertex = 0x100 + slot;
         }
     } else {
-        static char transformedText[LitText], objectText[LitText], litText[LitText];
-        static ULONG transformedSize, objectSize, litSize;
-        ULONG want = d->lighting ? 32 : d->transform ? 16 : 8;
-        ULONG handle = d->lighting ? PsLitShader : d->transform ? PsObjectShader : PsVertexShader;
+        /* Index 1: the clip variants of the object-space shaders (user clip planes). */
+        static char transformedText[LitText], objectText[2][LitText], litText[2][LitText];
+        static ULONG transformedSize, objectSize[2], litSize[2];
+        ULONG clip = d->transform && d->clipMask ? 1 : 0;
+        ULONG want = d->lighting ? (clip ? 512 : 32) : d->transform ? (clip ? 256 : 16) : 8;
+        ULONG handle = d->lighting ? (clip ? PsLitClipShader : PsLitShader) :
+                       d->transform ? (clip ? PsObjectClipShader : PsObjectShader) : PsVertexShader;
         if (!(s->vertexShaders & want)) {
-            ULONG *size = d->lighting ? &litSize : d->transform ? &objectSize : &transformedSize;
-            char *text = d->lighting ? litText : d->transform ? objectText : transformedText;
-            if (!*size) *size = d->lighting ? ps_lit_text(text) : ps_vertex_text(text, d->transform != 0);
+            ULONG *size = d->lighting ? &litSize[clip] : d->transform ? &objectSize[clip] : &transformedSize;
+            char *text = d->lighting ? litText[clip] : d->transform ? objectText[clip] : transformedText;
+            if (!*size) *size = d->lighting ? ps_lit_text(text, clip != 0) : ps_vertex_text(text, d->transform != 0, clip != 0);
             if (!*size) { r->status = ERROR_INVALID_DATA; r->stage = RB2K_STAGE_TRANSFER; return FALSE; }
             if (!shader(gpu, r, image, handle, VertexStage, text, *size)) return FALSE;
             s->vertexShaders |= want;
@@ -1256,7 +1313,7 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
     }
     gpu->d8Step = 3;
     if (!fixed_states(gpu, r, image, d->depthState, d->alphaTest, d->blend, d->cull, d->transform || d->scissorOn, d->stencil,
-                      d->stencilRef)) return FALSE;
+                      d->stencilRef, d->transform ? d->clipMask : 0)) return FALSE;
     /* The program shares the fragment shader table; its key cannot be a
      * fixed-function one, whose colour stage word is never all ones. */
     gpu->d8Step = 4;
@@ -1361,14 +1418,16 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
     }
     *p++ = VIRGL_CMD0(VIRGL_CCMD_SET_CONSTANT_BUFFER,0,6+extra+perVertex*count);
     *p++ = VertexStage; *p++ = 0;
-    *p++ = width; *p++ = height; *p++ = stride; *p++ = shaded ? RB2K_D8_VS_CONST_BASE + d->vertexConstants : 0;
+    *p++ = width; *p++ = height; *p++ = stride; *p++ = shaded ? RB2K_D8_VS_CONST_BASE + d->vertexConstants + planes : 0;
     if (shaded) {
         /* The viewport, its depth range, the integer and boolean constants of static flow control
          * (CONST[3..18]), then the shader's constants and the vertices as they came. */
         for (i = 0; i < 4; ++i) *p++ = integer_bits(d->viewport[i]);
         *p++ = d->viewport[4]; *p++ = d->viewport[5]; *p++ = 0; *p++ = 0;
         for (i = 0; i < 4 * (RB2K_D8_VS_CONST_BASE - 3); ++i) *p++ = d->flowConstants[i / 4][i % 4];
-        for (i = 0; i < 4 * d->vertexConstants + count * d->vertexWords; ++i) *p++ = d->vertices[i];
+        for (i = 0; i < 4 * d->vertexConstants; ++i) *p++ = d->vertices[i];
+        for (i = 0; i < 4 * planes; ++i) *p++ = d->clipPlanes[i / 4][i % 4];
+        for (i = 4 * d->vertexConstants; i < 4 * d->vertexConstants + count * d->vertexWords; ++i) *p++ = d->vertices[i];
     } else if (d->transform) {
         ULONG m, row, col;
         for (m = 0; m < 3; ++m)
@@ -1393,8 +1452,9 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
             *p++ = ((sources >> 2*k) & 3) == 1 ? one : 0;
             *p++ = ((sources >> 2*k) & 3) == 2 ? one : 0;
         }
-        *p++ = lights; *p++ = LitVertexBase + stride * count; *p++ = 0; *p++ = 0;
+        *p++ = lights; *p++ = LitVertexBase + ffPlanes + stride * count; *p++ = 0; *p++ = 0;
     }
+    for (i = 0; i < 4 * ffPlanes; ++i) *p++ = d->clipPlanes[i / 4][i % 4];
     for (i = 0; !shaded && i < count; ++i) {
         const RB2K_D3D8_VERTEX *v = (const RB2K_D3D8_VERTEX *)(d->vertices + i * words8);
         *p++ = v->x; *p++ = v->y; *p++ = v->z; *p++ = v->rhw;

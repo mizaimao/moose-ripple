@@ -1397,6 +1397,7 @@ unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, con
     for (k = 0; k < 11; ++k) {
         put(&s.t, "DCL OUT["); number(&s.t, k + 1); put(&s.t, "], GENERIC["); number(&s.t, k); put(&s.t, "]\n");
     }
+    if (flags & RB_VS_CLIP) put(&s.t, "DCL OUT[12], CLIPDIST[0]\nDCL OUT[13], CLIPDIST[1]\n");
     put(&s.t, "IMM[0] FLT32 {0x3f000000, 0x3f800000, 0x40000000, 0x40800000}\n"
               "IMM[1] FLT32 {0x41000000, 0x3e800000, 0x3e000000, 0xbf800000}\n"
               "IMM[2] FLT32 {0x00000000, 0x00000000, 0x00000000, 0x00000000}\n"
@@ -1422,6 +1423,17 @@ unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, con
         line(&s, "MOV ", o, ", ", r, 0, 0, 0);
     }
     line(&s, "MOV OUT[11], IMM[2]", 0, 0, 0, 0, 0, 0);
+    if (flags & RB_VS_CLIP) {
+        /* dot(plane, oPos) for each plane, after the shader's constants (the miniport puts them there). */
+        static const char *const dist[6] = { "OUT[12].x", "OUT[12].y", "OUT[12].z", "OUT[12].w", "OUT[13].x", "OUT[13].y" };
+        char cst[16];
+        for (k = 0; k < 6; ++k) {
+            cst[0] = 0;
+            reg_text(cst, sizeof(cst), "CONST", RB_VS_CONST_BASE + info->constants + k);
+            line(&s, "DP4 ", dist[k], ", TEMP[20], ", cst, 0, 0, 0);
+        }
+        line(&s, "MOV OUT[13].zw, IMM[2]", 0, 0, 0, 0, 0, 0);
+    }
     line(&s, "END", 0, 0, 0, 0, 0, 0);
     if (s.t.overflow) return fail(&s, RbPsOverflow, s.t.n);
     return s.t.n + 1;

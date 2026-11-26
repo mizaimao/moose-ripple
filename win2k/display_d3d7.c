@@ -46,15 +46,15 @@ typedef struct {
 } D8_SHADER;
 /* A vertex shader of a context: its handle, its declaration and code (one
  * allocation), the constants and vertex words it reads, and its miniport
- * programs without and with oFog in the specular alpha (zero until made;
- * failed when it cannot be translated). */
+ * programs without and with oFog in the specular alpha, each without and with clip distances
+ * (index: 1 fog, 2 clip; zero until made; failed when it cannot be translated). */
 typedef struct {
     ULONG handle, declCount, tokenCount, constants, words;
     ULONG *decl, *tokens;
-    ULONG program[2];
-    BOOL failed[2];
+    ULONG program[4];
+    BOOL failed[4];
     ULONG streams;                          /* the streams the declaration reads, one bit each */
-    ULONG bases[2][RB_VS_STREAMS];          /* where each program places them (words) */
+    ULONG bases[4][RB_VS_STREAMS];          /* where each program places them (words) */
 } D8_VSHADER;
 /* A pixel program made from the texture stage states, for draws with a
  * vertex shader and no pixel shader: the states it was made from (seven
@@ -106,6 +106,7 @@ typedef struct {
      * and shader function handles, the scissor rectangle, and the declarations and functions made. */
     ULONG streamOffsets[RB_VS_STREAMS], declHandle, funcHandle;
     LONG vsInt[16][4];   /* SETVERTEXSHADERCONSTI: i0..i15 */
+    ULONG planes[6][4];   /* SETCLIPPLANE: the user clip planes (IEEE), enabled by clipPlanes */
     ULONG vsBool;        /* SETVERTEXSHADERCONSTB: b0..b15, a bit each */
     RECTL scissor;
     struct D9_DECL *decls;
@@ -1625,7 +1626,6 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     texture = needTexture;
     if (c->fog) fog_draw(c, draw, objectSpace);
     if (c->colorKey) d->d7draw.ignored[RB2K_D7_IGNORED_COLORKEY] += p->primitives;
-    if (c->clipPlanes) d->d7draw.ignored[RB2K_D7_IGNORED_CLIPPLANE] += p->primitives;
 
     draw->target = s->id;
     draw->depth = z ? z->id : 0;
@@ -1658,6 +1658,8 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     if (objectSpace) {
         draw->transform = 1;
         if (c->lighting) light_draw(c, draw, diffuse != 0, specular != 0, p->primitives);
+        draw->clipMask = c->clipPlanes & 63;   /* user clip planes, in world space */
+        if (draw->clipMask) RtlCopyMemory(draw->clipPlanes, c->planes, sizeof(draw->clipPlanes));
         RtlCopyMemory(draw->matrices, c->matrices, sizeof(draw->matrices));
         RtlCopyMemory(draw->viewport, c->viewport, sizeof(c->viewport));
         draw->viewport[4] = c->zRange[0];
@@ -1846,7 +1848,7 @@ static ULONG shader_program(D7_CONTEXT *c, D8_SHADER *sh, ULONG fog)
 static void release_vshader(D7_CONTEXT *c, D8_VSHADER *vs)
 {
     ULONG k;
-    for (k = 0; k < 2; ++k)
+    for (k = 0; k < 4; ++k)
         if (vs->program[k]) request(c->display, IOCTL_RB2K_D3D8_PROGRAM_FREE, &vs->program[k], sizeof(ULONG), NULL, 0);
     if (vs->decl) EngFreeMem(vs->decl);
     RtlZeroMemory(vs, sizeof(*vs));
@@ -1951,7 +1953,7 @@ static void create_vshader(D7_CONTEXT *c, ULONG handle, const BYTE *decl, ULONG 
 static ULONG vertex_program(D7_CONTEXT *c, D8_VSHADER *vs, ULONG flags, const ULONG *bases)
 {
     RB2K_D7_DRAWSTATS *st = &c->display->d7draw;
-    ULONG k = flags & RB_VS_FOG_ALPHA ? 1 : 0, n = 0, id = 0, written;
+    ULONG k = (flags & RB_VS_FOG_ALPHA ? 1 : 0) | (flags & RB_VS_CLIP ? 2 : 0), n = 0, id = 0, written;
     RB_PS_INFO info;
     for (n = 0; n < RB_VS_STREAMS && vs->bases[k][n] == bases[n]; ++n) {}
     if (n < RB_VS_STREAMS) {
@@ -2176,6 +2178,8 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     if (objectSpace) {
         draw->transform = 1;
         RtlCopyMemory(draw->matrices, c->matrices, sizeof(draw->matrices));
+        draw->clipMask = c->clipPlanes & 63;   /* user clip planes, in world space */
+        if (draw->clipMask) RtlCopyMemory(draw->clipPlanes, c->planes, sizeof(draw->clipPlanes));
         RtlCopyMemory(draw->viewport, c->viewport, sizeof(c->viewport));
         draw->viewport[4] = c->zRange[0];
         draw->viewport[5] = c->zRange[1];
@@ -2314,7 +2318,7 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
         total += strides[n];
     }
     /* Through the Direct3D 9 interface the integer and boolean constants come too (flowConstants). */
-    if (vs) vprogram = vertex_program(c, vs, flags | (c->dx9Ddi ? RB_VS_FLOW : 0), bases);
+    if (vs) vprogram = vertex_program(c, vs, flags | (c->dx9Ddi ? RB_VS_FLOW : 0) | (c->clipPlanes & 63 ? RB_VS_CLIP : 0), bases);
     if (sh) program = shader_program(c, sh, stage_kinds(c, sh->samplers, fog));
     else {
         /* The fixed-function pixel stages after the vertex shader (which do
@@ -2347,6 +2351,9 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
     draw->transform = 2;
     draw->vertexProgram = vprogram;
     draw->vertexConstants = vs->constants;
+    /* User clip planes, in clip space with a vertex shader (RB_VS_CLIP). */
+    draw->clipMask = c->clipPlanes & 63;
+    if (draw->clipMask) RtlCopyMemory(draw->clipPlanes, c->planes, sizeof(draw->clipPlanes));
     if (c->dx9Ddi) {   /* i# and b# for static flow control (RB_VS_FLOW) */
         ULONG r;
         for (r = 0; r < 16; ++r) {
@@ -3195,6 +3202,12 @@ static void create_block(D7_CONTEXT *c, D8_STATEBLOCK *b)
     block_command(b, D3DNTDP2OP_VIEWPORTINFO, 1, &v, sizeof(v));
     block_command(b, D3DNTDP2OP_ZRANGE, 1, c->zRange, sizeof(c->zRange));
     block_command(b, D3DNTDP2OP_SETMATERIAL, 1, c->material, sizeof(c->material));
+    for (i = 0; i < 6; ++i) {
+        D3DNTHAL_DP2SETCLIPPLANE cp;
+        cp.dwIndex = i;
+        RtlCopyMemory(cp.plane, c->planes[i], 16);
+        block_command(b, D3DNTDP2OP_SETCLIPPLANE, 1, &cp, sizeof(cp));
+    }
     if (c->dx8) {
         BYTE *buffer = scratch;
         RB_DP2_SHADER_CONST *r = (RB_DP2_SHADER_CONST *)buffer;
@@ -3251,6 +3264,12 @@ static void capture_block(D7_CONTEXT *c, D8_STATEBLOCK *b)
         }
         case D3DNTDP2OP_ZRANGE: for (k = 0; k < n; ++k) RtlCopyMemory(p + 8 * k, c->zRange, 8); break;
         case D3DNTDP2OP_SETMATERIAL: for (k = 0; k < n; ++k) RtlCopyMemory(p + 68 * k, c->material, 68); break;
+        case D3DNTDP2OP_SETCLIPPLANE:
+            for (k = 0; k < n; ++k) {
+                D3DNTHAL_DP2SETCLIPPLANE *cp = (D3DNTHAL_DP2SETCLIPPLANE *)p + k;
+                if (cp->dwIndex < 6) RtlCopyMemory(cp->plane, c->planes[cp->dwIndex], 16);
+            }
+            break;
         case RbDp2SetVertexShader: case RbDp2SetPixelShader: {
             RB_DP2_HANDLE *v = (RB_DP2_HANDLE *)p;
             for (k = 0; k < n; ++k) v[k].handle = h->bCommand == RbDp2SetVertexShader ? c->fvf : c->pixelShader;
@@ -3495,6 +3514,13 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             if (used > remaining) return DDERR_INVALIDPARAMS;
             if (n) RtlCopyMemory(c->material, (const D3DNTHAL_DP2SETMATERIAL *)p + n - 1, sizeof(c->material));
             break;
+        case D3DNTDP2OP_SETCLIPPLANE: {
+            const D3DNTHAL_DP2SETCLIPPLANE *cp = (const D3DNTHAL_DP2SETCLIPPLANE *)p;
+            used = n * sizeof(*cp);
+            if (used > remaining) return DDERR_INVALIDPARAMS;
+            for (; n; --n, ++cp) if (cp->dwIndex < 6) RtlCopyMemory(c->planes[cp->dwIndex], cp->plane, 16);
+            break;
+        }
         case D3DNTDP2OP_CREATELIGHT: used = n * sizeof(D3DNTHAL_DP2CREATELIGHT); break;
         case D3DNTDP2OP_STATESET: {
             const D3DNTHAL_DP2STATESET *ss = (const D3DNTHAL_DP2STATESET *)p;
@@ -4190,6 +4216,7 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     c->maxSimultaneousTextures = x->wMaxSimultaneousTextures;
     c->vertexProcessingCaps = x->dwVertexProcessingCaps & ~D3DVTXPCAPS_VERTEXFOG;
     c->maxActiveLights = x->dwMaxActiveLights;
+    c->maxUserClipPlanes = x->wMaxUserClipPlanes;   /* in world space for object-space draws, in clip space for vertex shaders */
     c->maxPointSize = 0x3f800000;                       /* 1 */
     c->maxPrimitiveCount = 0xffff;
     c->maxVertexIndex = 0xffff;
@@ -4375,7 +4402,7 @@ BOOL rb_d7_info(PDD_GETDRIVERINFODATA a)
             D3DTEXOPCAPS_BLENDTEXTUREALPHA | D3DTEXOPCAPS_BLENDFACTORALPHA |
             D3DTEXOPCAPS_BLENDTEXTUREALPHAPM | D3DTEXOPCAPS_BLENDCURRENTALPHA | D3DTEXOPCAPS_DOTPRODUCT3,
         .wMaxTextureBlendStages = 2, .wMaxSimultaneousTextures = 2, .wMaxVertexBlendMatrices = 1,
-        .dvMaxVertexW = 1.0e10f, .dwMaxActiveLights = RB2K_D7_LIGHTS,
+        .dvMaxVertexW = 1.0e10f, .dwMaxActiveLights = RB2K_D7_LIGHTS, .wMaxUserClipPlanes = 6,
         .dwVertexProcessingCaps = D3DVTXPCAPS_MATERIALSOURCE7 | D3DVTXPCAPS_DIRECTIONALLIGHTS |
                                   D3DVTXPCAPS_POSITIONALLIGHTS | D3DVTXPCAPS_LOCALVIEWER | D3DVTXPCAPS_VERTEXFOG
     };
