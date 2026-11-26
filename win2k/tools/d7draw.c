@@ -129,6 +129,8 @@ int main(void)
         printf("\n");
     }
     printf("D8BLOCKS uploads=%lu last_status=%lu upload_failures=%lu\n", s.blockUploads, s.blockStatus, s.uploadFailures);
+    printf("D7EVICT evictions=%lu creates=%lu room_status=%lx textures=%lu\n", s.evictions, s.evictedCreates, s.roomStatus,
+           s.textures);
     printf("D8STATESET begin=%lu end=%lu delete=%lu execute=%lu capture=%lu create=%lu other=%lu failures=%lu\n",
            s.stateSets[0], s.stateSets[1], s.stateSets[2], s.stateSets[3], s.stateSets[4], s.stateSets[5], s.stateSets[6],
            s.blockFailures);

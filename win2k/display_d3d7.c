@@ -159,6 +159,7 @@ typedef struct {
      * blits, which mark them dirty; others are checked once a scene. */
     BOOL tracked, dirty;
     ULONG host, sum, epoch;
+    ULONG used;     /* useClock when a draw last chose it, for least-recently-used eviction */
 } D7_TEXTURE;
 
 /* A Direct3D 8 vertex or index buffer registered through CreateSurfaceEx.
@@ -185,6 +186,8 @@ static D7_CONTEXT contexts[MaxContexts];
 static ULONG lastContext;
 static D7_TEXTURE *textures;
 static ULONG textureEpoch = 1;
+/* Advanced after each queued draw: textures a draw chooses carry the same stamp. */
+static ULONG useClock = 1;
 static BYTE *texelScratch, *uploadScratch;
 static ULONG texelScratchBytes;
 
@@ -1243,6 +1246,53 @@ static BOOL decode_texture(const D7_TEXTURE *t)
 /* Set once the miniport answers that the host cannot sample DXT blocks. */
 static BOOL hostBlocksRefused;
 
+/* Least-recently-used eviction. The miniport keeps host textures within a
+ * fixed texel budget and slot count and refuses a new one past them. Then
+ * the host copy of the texture drawn longest ago is freed, never one the
+ * draw being built has chosen; it is uploaded again from its surface when
+ * next drawn. Freeing goes through miniport(), which sends the queued draws
+ * first, so no queued draw names a freed texture. */
+static BOOL evict_one(DISPLAY *d)
+{
+    D7_TEXTURE *oldest = NULL;
+    ULONG i;
+    for (i = 0; textures && i < MaxTextures; ++i) {
+        D7_TEXTURE *t = &textures[i];
+        if (t->display != d || !t->host || t->image || t->rtCube || t->used == useClock) continue;
+        if (!oldest || (LONG)(t->used - oldest->used) < 0) oldest = t;
+    }
+    if (!oldest) return FALSE;
+    request(d, IOCTL_RB2K_D3D7_TEXTURE_FREE, &oldest->host, sizeof(oldest->host), NULL, 0);
+    oldest->host = 0;
+    ++d->d7draw.evictions;
+    return TRUE;
+}
+
+/* The statuses a refusal for room arrives as, depending on how the video
+ * port and GDI translate the miniport's ERROR_NOT_ENOUGH_MEMORY. */
+static BOOL no_room(ULONG status)
+{
+    return status == ERROR_NOT_ENOUGH_MEMORY || status == ERROR_OUTOFMEMORY ||
+           status == ERROR_NO_SYSTEM_RESOURCES || status == 0xc000009aUL || status == 0xc0000017UL;
+}
+
+/* One texture upload request. A new texture (packet id zero) refused for
+ * room is retried after each eviction until it fits or nothing is left. */
+static ULONG texture_send(DISPLAY *d, RB2K_D3D7_TEXTURE *packet, ULONG bytes, ULONG *newId)
+{
+    ULONG status, written, evicted = 0;
+    for (;;) {
+        status = miniport(d, IOCTL_RB2K_D3D7_TEXTURE, packet, bytes, newId, sizeof(*newId), &written);
+        if (!status || packet->id) break;
+        d->d7draw.roomStatus = status;
+        if (!no_room(status) || evicted == MaxTextures || !evict_one(d)) break;
+        ++evicted;
+    }
+    if (evicted) ++d->d7draw.evictedCreates;
+    if (!status && written != sizeof(*newId)) status = ERROR_INVALID_DATA;
+    return status;
+}
+
 /* A compressed texture's blocks as they are, level by level in whole block
  * rows. FALSE when they could not be sent; hostBlocksRefused tells a host
  * without the format from other failures. */
@@ -1250,7 +1300,7 @@ static BOOL upload_blocks(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
 {
     RB2K_D3D7_TEXTURE *packet = (RB2K_D3D7_TEXTURE *)uploadScratch;
     const BYTE *src = texelScratch;
-    ULONG id = t->host, level, face, total = 0, written, status;
+    ULONG id = t->host, level, face, total = 0, status;
     ULONG format = t->format == TexDxt1 ? RB2K_D7_BLOCKS_DXT1 : t->format == TexDxt3 ? RB2K_D7_BLOCKS_DXT3 :
                    RB2K_D7_BLOCKS_DXT5;
     for (face = 0; face < t->faces; ++face)
@@ -1274,10 +1324,8 @@ static BOOL upload_blocks(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
             packet->levels = t->levels;
             packet->level = level;
             packet->format = format;
-            status = miniport(d, IOCTL_RB2K_D3D7_TEXTURE, packet, sizeof(*packet) + rows * rowBytes, &newId,
-                              sizeof(newId), &written);
-            if (status) d->d7draw.blockStatus = status;
-            if (status || written != sizeof(newId)) return FALSE;
+            status = texture_send(d, packet, sizeof(*packet) + rows * rowBytes, &newId);
+            if (status) { d->d7draw.blockStatus = status; return FALSE; }
             if (!newId) { hostBlocksRefused = TRUE; return FALSE; }   /* the host cannot sample these */
             id = newId;
             total += rows * rowBytes;
@@ -1350,8 +1398,7 @@ static BOOL upload_texture(DISPLAY *d, D7_TEXTURE *t, ULONG targetId)
                 packet->levels = t->levels;
                 packet->level = level;
                 packet->format = format == TexV8U8 ? RB2K_D7_TEXELS_V8U8 : format == TexQ8W8V8U8 ? RB2K_D7_TEXELS_Q8W8V8U8 : 0;
-                ok = request(d, IOCTL_RB2K_D3D7_TEXTURE, packet, sizeof(*packet) + rows * width * hostBpp,
-                             &newId, sizeof(newId));
+                ok = !texture_send(d, packet, sizeof(*packet) + rows * width * hostBpp, &newId);
                 /* Texture id zero: the host cannot sample these signed texels. */
                 if (ok && !newId) ok = FALSE;
                 if (ok) id = newId;
@@ -1409,6 +1456,7 @@ static ULONG cube_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
 static ULONG texture_ready(D7_CONTEXT *c, D7_TEXTURE *t, ULONG targetId)
 {
     ULONG sum;
+    t->used = useClock;
     if (t->rtCube) return cube_ready(c, t, targetId);
     /* A render target texture is sampled on the host, but never while it is the target. */
     if (t->image) return t->image == targetId ? 0 : RB2K_TEXTURE_IMAGE | t->image;
@@ -1613,6 +1661,7 @@ static HRESULT queue_record(D7_CONTEXT *c, const void *record, ULONG bytes, ULON
     drawQueueBytes += sizeof(ULONG) + bytes;
     c->queued = TRUE;
     d->d7draw.drawn += triangles;
+    ++useClock;
     ++d->d7draw.drawCalls;
     return DD_OK;
 }
