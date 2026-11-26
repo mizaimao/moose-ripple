@@ -1705,7 +1705,7 @@ Windows 7 WDK (`WDK_ROOT`).
 
 ## Direct3D 8 pixel shaders
 
-The device reports pixel shader version 1.3. The display driver
+The device reports pixel shader version 1.4 (2.0 to a Direct3D 9 runtime). The display driver
 translates each shader into Gallium TGSI text (`d3d8_ps.c`) when the
 runtime creates it, and the miniport keeps the text and creates the host
 shader in each render target's context on first use. A pixel shader draw
@@ -2187,6 +2187,32 @@ On XP SP3 under KVM on the second Intel UHD 630 host, case 53 passes and
 `d9pixels` passes 43 of 43. 3DMark 2001 SE's DOT3 Bump Mapping test, which
 reported "Not supported by hardware", now runs.
 
+## Pixel shader 1.4
+
+A Direct3D 9 runtime offers the programs pixel shader 2.0, which includes
+1.4, but the translator refused version 1.4 and the driver skipped those
+draws. Direct3D 8 programs were offered 1.3, so 3DMark 2001 SE ran its
+Advanced Pixel Shader test in its fallback; they are now offered 1.4. 3DMark03 uses 1.4 for its per-pixel lighting when it is offered: in one
+run the driver skipped 6.1 million of its primitives (11,475 shader
+failures, all `ffff0104`), and its game tests 2 to 4 came out dark.
+
+Version 1.4 is translated by the version 1 translator:
+
+- Six registers r0 to r5 (`TEMP[0..5]`), six coordinate sets and samplers.
+  A t# register is read only by `texld` and `texcrd`.
+- `texld rN, src` samples sampler N (the destination's number) at a
+  coordinate set, or after `phase` at a register (a dependent read).
+  `texcrd rN, t#` copies the coordinates. A t# source may be divided by its z
+  or w (`_dz`, `_dw`) and selects xyz or xyw.
+- `phase` only separates the two halves: the registers carry over.
+- `bem rN.xy` moves its first source by stage N's bump matrix times its
+  second, with the constants `texbem` uses.
+- `texkill` takes r# or t#, and the `_x2` source and `_x8`/`_d8` result
+  modifiers of 1.4 are accepted.
+
+`d9pixels` case 72 copies a coordinate set into a register with `texcrd`,
+then after the phase samples a texture at t0 and another through that
+register, and adds them.
 ## L16 textures: 3DMark03's procedural volumes
 
 3DMark03 reported "Unable to create volume texture" and went on without the

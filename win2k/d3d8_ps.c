@@ -138,7 +138,7 @@ static int reg_name(PS *s, unsigned int type, unsigned int num, char *out, unsig
     out[0] = 0;
     switch (type) {
     case RegTemp:
-        if (num > 1) return 0;
+        if (num > (s->minor == 4 ? 5u : 1u)) return 0;   /* r0..r5 in version 1.4 */
         cat(out, size, "TEMP["); cat_number(out, size, num); cat(out, size, "]");
         return 1;
     case RegInput:
@@ -152,7 +152,8 @@ static int reg_name(PS *s, unsigned int type, unsigned int num, char *out, unsig
         cat(out, size, "]");
         return 1;
     case RegTexture:
-        if (num >= RB_PS_COORD_SETS) return 0;
+        /* Version 1.4 reads t# only as texld and texcrd coordinates (texture14). */
+        if (num >= RB_PS_COORD_SETS || s->minor == 4) return 0;
         cat(out, size, "TEMP["); cat_number(out, size, 8 + num); cat(out, size, "]");
         return 1;
     }
@@ -511,11 +512,80 @@ static int texture_op(PS *s, unsigned int op, const unsigned int *p)
     return 1;
 }
 
-static int parameters(unsigned int op)
+/* Version 1.4 texture instructions. texld rN, src samples sampler N at src: a coordinate set t#,
+ * or in the second phase a register r# (a dependent read); texcrd rN, t# copies the coordinates;
+ * texkill takes r# or t#. A t# source may be divided by its z or w (_dz, _dw), and selects xyz or
+ * xyw by its swizzle. */
+enum { ModDz = 9, ModDw = 10 };
+static int texture14(PS *s, unsigned int op, const unsigned int *p)
+{
+    unsigned int n = reg_num(p[0]), m, mod;
+    char dst[16], src[32], samp[16], mask[6];
+    dst[0] = src[0] = samp[0] = 0;
+    if (op == OpTexkill) {
+        if (reg_type(p[0]) == RegTexture && n < 6) {
+            s->info->coords |= 1u << n;
+            cat(src, sizeof(src), "IN["); cat_number(src, sizeof(src), 2 + n); cat(src, sizeof(src), "]");
+        } else if (reg_type(p[0]) == RegTemp && n < 6) {
+            cat(src, sizeof(src), "TEMP["); cat_number(src, sizeof(src), n); cat(src, sizeof(src), "]");
+        } else return fail(s, RbPsRegister, p[0]);
+        line(s, "KILL_IF ", src, ".xyzz", 0, 0, 0, 0);
+        return 1;
+    }
+    m = reg_num(p[1]);
+    mod = (p[1] >> 24) & 15;
+    if (reg_type(p[0]) != RegTemp || n > 5 || (p[0] & 0x0ff00000u)) return fail(s, RbPsRegister, p[0]);
+    cat(dst, sizeof(dst), "TEMP["); cat_number(dst, sizeof(dst), n); cat(dst, sizeof(dst), "]");
+    if (reg_type(p[1]) == RegTexture && m < 6) {
+        s->info->coords |= 1u << m;
+        cat(src, sizeof(src), "IN["); cat_number(src, sizeof(src), 2 + m); cat(src, sizeof(src), "]");
+    } else if (reg_type(p[1]) == RegTemp && m < 6 && op == OpTex && !mod) {
+        cat(src, sizeof(src), "TEMP["); cat_number(src, sizeof(src), m); cat(src, sizeof(src), "]");
+    } else return fail(s, RbPsRegister, p[1]);
+    if (mod == ModDz || mod == ModDw) {
+        /* x and y divided by z or w, into TEMP[12]. */
+        line(s, "RCP TEMP[13].x, ", src, mod == ModDz ? ".zzzz" : ".wwww", 0, 0, 0, 0);
+        line(s, "MUL TEMP[12].xy, ", src, ".xyyy, TEMP[13].xxxx", 0, 0, 0, 0);
+        line(s, "MOV TEMP[12].zw, IMM[0].yyyy", 0, 0, 0, 0, 0, 0);
+        src[0] = 0;
+        cat(src, sizeof(src), "TEMP[12]");
+    } else if (mod) return fail(s, RbPsModifier, p[1]);
+    else swizzle(p[1], src, sizeof(src));
+    if (op == OpTex) {
+        s->info->samplers |= 1u << n;
+        cat(samp, sizeof(samp), "SAMP["); cat_number(samp, sizeof(samp), n); cat(samp, sizeof(samp), "]");
+        line(s, "TEX ", dst, ", ", src, ", ", samp, stage_target(s, n));
+    } else {
+        mask_text((p[0] >> 16) & 15 ? (p[0] >> 16) & 15 : 15, mask, sizeof(mask));
+        line(s, "MOV ", dst, mask, ", ", src, 0, 0);
+    }
+    return 1;
+}
+
+/* Version 1.4 bem rN.xy, src0, src1 (first phase): src0 moved by the bump matrix of stage N times
+ * src1, the matrix (00, 01, 10, 11) in CONST[RB_PS_CONSTANTS + N] as for texbem. */
+static int bem(PS *s, const unsigned int *p)
+{
+    OPERAND a, b;
+    char ba[48], bb[48], m[16];
+    unsigned int n = reg_num(p[0]);
+    if (reg_type(p[0]) != RegTemp || n >= RB_PS_COORD_SETS) return fail(s, RbPsRegister, p[0]);
+    if (!source(s, p[1], 0, &a) || !source(s, p[2], 1, &b)) return 0;
+    m[0] = 0;
+    cat(m, sizeof(m), "CONST["); cat_number(m, sizeof(m), RB_PS_CONSTANTS + n); cat(m, sizeof(m), "]");
+    line(s, "MOV TEMP[14], ", render(&b, bb, sizeof(bb)), 0, 0, 0, 0, 0);   /* src1 may carry a swizzle */
+    line(s, "MUL TEMP[15].xy, ", m, ".xyyy, TEMP[14].xxxx", 0, 0, 0, 0);
+    line(s, "MAD TEMP[15].xy, ", m, ".zwww, TEMP[14].yyyy, TEMP[15]", 0, 0, 0, 0);
+    line(s, "ADD TEMP[16].xy, ", render(&a, ba, sizeof(ba)), ", TEMP[15]", 0, 0, 0, 0);
+    return finish(s, p[0], 0);
+}
+
+static int parameters(unsigned int op, unsigned int minor)
 {
     switch (op) {
     case OpNop: case OpPhase: return 0;
-    case OpTexcoord: case OpTexkill: case OpTex: case OpTexdepth: return 1;
+    case OpTexcoord: case OpTex: return minor == 4 ? 2 : 1;   /* texcrd and texld in version 1.4 */
+    case OpTexkill: case OpTexdepth: return 1;
     case OpMov: case OpTexbem: case OpTexbeml: case OpTexreg2ar: case OpTexreg2gb: case OpTexm3x2pad:
     case OpTexm3x2tex: case OpTexm3x3pad: case OpTexm3x3tex: case OpTexm3x3vspec: case OpTexreg2rgb:
     case OpTexdp3tex: case OpTexm3x2depth: case OpTexdp3: case OpTexm3x3: return 2;
@@ -539,7 +609,7 @@ static int walk(PS *s, const unsigned int *tok, unsigned int count, int pass, un
         int n;
         if (t == OpEnd) return 1;
         if (op == OpComment) { i += 1 + ((t >> 16) & 0x7fff); continue; }
-        n = parameters(op);
+        n = parameters(op, s->minor);
         if (n < 0 || (t & 0x80000000u) || ((t & COISSUE) && texture_family(op)))
             return fail(s, RbPsOpcode, t);
         if (i + 1 + (unsigned int)n > count) return fail(s, RbPsTruncated, i);
@@ -556,8 +626,12 @@ static int walk(PS *s, const unsigned int *tok, unsigned int count, int pass, un
         } else if (op != OpDef && op != OpNop) {
             const unsigned int *p = tok + i + 1;
             if (!(t & COISSUE)) flush(s);
+            if (s->minor == 4 && op == OpPhase) { i += 1; continue; }   /* registers simply carry over */
+            if (s->minor == 4 && op == OpBem) { if (!bem(s, p)) return 0; i += 4; continue; }
             if (op == OpPhase || op == OpBem || op == OpTexdepth) return fail(s, RbPsOpcode, op);
-            if (texture_family(op)) { if (!texture_op(s, op, p)) return 0; }
+            if (s->minor == 4 && (op == OpTex || op == OpTexcoord || op == OpTexkill)) { if (!texture14(s, op, p)) return 0; }
+            else if (s->minor == 4 && texture_family(op)) return fail(s, RbPsOpcode, op);
+            else if (texture_family(op)) { if (!texture_op(s, op, p)) return 0; }
             else {
                 if (!arithmetic(s, op, p, (t & COISSUE) ? 1 : 0)) return 0;
                 if (reg_type(p[0]) == RegTemp) s->written |= 1u << reg_num(p[0]);
@@ -907,7 +981,7 @@ static int uses_bump(const unsigned int *tokens, unsigned int count)
         if (op == OpEnd) break;
         if (op == OpComment) { i += (tokens[i] >> 16) & 0x7fff; continue; }
         if (op == OpDef) { i += 5; continue; }
-        if (op == OpTexbem || op == OpTexbeml) return 1;
+        if (op == OpTexbem || op == OpTexbeml || op == OpBem) return 1;
     }
     return 0;
 }
@@ -927,8 +1001,9 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
     s.volume = (fog >> RB_PS_VOLUME_SHIFT) & 255;
     fog &= (1u << RB_PS_CUBE_SHIFT) - 1;
     if (count && tokens[0] == 0xffff0200u) return translate2(&s, tokens, count, fog);
-    /* 1.0, which Direct3D 8.0 programs use, has the instructions of 1.1. */
-    if (!count || (tokens[0] & 0xffffff00u) != 0xffff0100u || (tokens[0] & 0xff) > 3) {
+    /* 1.0, which Direct3D 8.0 programs use, has the instructions of 1.1; 1.4 has six registers r0..r5,
+     * six coordinate sets and samplers, texld and texcrd, and a second phase. */
+    if (!count || (tokens[0] & 0xffffff00u) != 0xffff0100u || (tokens[0] & 0xff) > 4) {
         fail(&s, RbPsVersion, count ? tokens[0] : 0);
         return 0;
     }
@@ -937,14 +1012,14 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
     base = s.bump ? RB_PS_BUMP_CONSTANTS : RB_PS_CONSTANTS;
     if (s.bump) info->constants = RB_PS_BUMP_CONSTANTS;
     put(&s.t, "FRAG\nDCL IN[0], GENERIC[0], LINEAR\nDCL IN[1], GENERIC[1], LINEAR\n");
-    for (k = 0; k < RB_PS_COORD_SETS; ++k) {
+    for (k = 0; k < (s.minor == 4 ? 6u : RB_PS_COORD_SETS); ++k) {
         put(&s.t, "DCL IN["); number(&s.t, 2 + k); put(&s.t, "], GENERIC["); number(&s.t, 2 + k);
         put(&s.t, "], PERSPECTIVE\n");
     }
     if ((fog & 3) == RB_PS_FOG_VERTEX) put(&s.t, "DCL IN[10], GENERIC[10], PERSPECTIVE\n");
     if ((fog & 3) == RB_PS_FOG_TABLE) put(&s.t, "DCL IN[10], POSITION, LINEAR\n");
     put(&s.t, "DCL OUT[0], COLOR\n");
-    for (k = 0; k < RB_PS_COORD_SETS; ++k) { put(&s.t, "DCL SAMP["); number(&s.t, k); put(&s.t, "]\n"); }
+    for (k = 0; k < (s.minor == 4 ? 6u : RB_PS_COORD_SETS); ++k) { put(&s.t, "DCL SAMP["); number(&s.t, k); put(&s.t, "]\n"); }
     put(&s.t, "DCL CONST[0.."); number(&s.t, base - 1 + (fog ? 2 : 0)); put(&s.t, "]\n");
     put(&s.t, "DCL TEMP[0..18]\n"
               "IMM[0] FLT32 {0x3f000000, 0x3f800000, 0x40000000, 0x40800000}\n"
@@ -956,6 +1031,8 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
     /* Registers start at zero, so a shader never reads undefined values. */
     line(&s, "MOV TEMP[0], IMM[2]", 0, 0, 0, 0, 0, 0);
     line(&s, "MOV TEMP[1], IMM[2]", 0, 0, 0, 0, 0, 0);
+    if (s.minor == 4)
+        for (k = 2; k < 6; ++k) { char r[16]; r[0] = 0; cat(r, sizeof(r), "TEMP["); cat_number(r, sizeof(r), k); cat(r, sizeof(r), "]"); line(&s, "MOV ", r, ", IMM[2]", 0, 0, 0, 0); }
     if (!walk(&s, tokens, count, 1, &imm)) return 0;
     flush(&s);
     if (fog) fog_lines(&s, fog, log2e, "TEMP[0]", base);

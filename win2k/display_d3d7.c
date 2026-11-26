@@ -4457,8 +4457,8 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
     /* 1.3 for Direct3D 8; shader model 2 when the runtime that asks has
      * announced itself as Direct3D 9, which uses this record for drivers of
      * the Direct3D 8 interface. */
-    c->pixelShaderVersion = d->d7draw.d8Version >= 0x900 ? 0xffff0200 : 0xffff0103;
-    c->maxSimultaneousTextures = stage_limit(d);
+    c->pixelShaderVersion = d->d7draw.d8Version >= 0x900 ? 0xffff0200 : 0xffff0104;   /* 1.4 for Direct3D 8 programs */
+    c->maxSimultaneousTextures = max(stage_limit(d), 6UL);   /* pixel shader 1.4 samples six */
     /* The fixed-function stages run as a stage program (d3d8_stages_valid), which also
      * does bump mapping. */
     c->maxTextureBlendStages = stage_limit(d);
