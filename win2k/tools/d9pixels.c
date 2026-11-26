@@ -1351,6 +1351,62 @@ static void embm_case(int only, BOOL offered)
     IDirect3DTexture9_Release(colour);
 }
 
+/* ---- eight fixed-function stages ----
+ * 58: stages 0 to 6 add a black texture each (their coordinate sets are all 0), stage 7 modulates
+ * the diffuse white by a texture red on its left and green on its right, read with coordinate set 7. */
+static void stages8_case(int only, BOOL offered)
+{
+    typedef struct { float x, y, z, rhw; DWORD diffuse; float st[8][2]; } V8;
+    static const DWORD black[4] = { 0xff000000, 0xff000000, 0xff000000, 0xff000000 };
+    static const DWORD halves[4] = { 0xffff0000, 0xff00ff00, 0xffff0000, 0xff00ff00 };
+    static const SAMPLE s[] = { { 48, 64, 0xff0000 }, { 80, 64, 0x00ff00 }, { 8, 8, CLEAR_COLOR } };
+    IDirect3DTexture9 *dark, *last;
+    V8 v[4];
+    HRESULT hr;
+    int i, k;
+    if (only && only != 58) return;
+    if (!offered) { printf("D9PIX eight texture stages not offered\n"); return; }
+    dark = texture2x2(black);
+    last = texture2x2(halves);
+    if (!dark || !last) { printf("D9PIX case=stages8 textures failed\n"); goto done; }
+    memset(v, 0, sizeof(v));
+    for (i = 0; i < 4; ++i) {
+        v[i].x = i & 1 ? 96.0f : 32.0f;
+        v[i].y = i & 2 ? 96.0f : 32.0f;
+        v[i].z = 0.5f; v[i].rhw = 1; v[i].diffuse = 0xffffffff;
+        v[i].st[7][0] = i & 1 ? 1.0f : 0.0f;
+        v[i].st[7][1] = i & 2 ? 1.0f : 0.0f;
+    }
+    for (k = 0; k < 8; ++k) {
+        IDirect3DDevice9_SetTexture(device, k, (IDirect3DBaseTexture9 *)(k < 7 ? dark : last));
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_COLOROP, k < 7 ? D3DTOP_ADD : D3DTOP_MODULATE);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_COLORARG2, k ? D3DTA_CURRENT : D3DTA_DIFFUSE);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_ALPHAARG1, k ? D3DTA_CURRENT : D3DTA_DIFFUSE);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_TEXCOORDINDEX, k);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+    }
+    if (begin("stages8")) {
+        IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX8);
+        hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+        if (FAILED(hr)) { fail_hr("stages8", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("stages8", s, 3);
+    }
+done:
+    for (k = 7; k >= 0; --k) {
+        IDirect3DDevice9_SetTexture(device, k, NULL);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_COLOROP, k ? D3DTOP_DISABLE : D3DTOP_MODULATE);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_COLORARG2, D3DTA_CURRENT);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_ALPHAOP, k ? D3DTOP_DISABLE : D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+        IDirect3DDevice9_SetTextureStageState(device, k, D3DTSS_TEXCOORDINDEX, k);
+    }
+    if (dark) IDirect3DTexture9_Release(dark);
+    if (last) IDirect3DTexture9_Release(last);
+}
+
 /* ---- texture transforms (fixed function) ----
  * 51: D3DTTFF_COUNT2 with a matrix whose third row moves u by a half (Direct3D
  * transforms (u, v, 1, 0)), on untransformed vertices with identity world, view and
@@ -1667,6 +1723,7 @@ int main(int argc, char **argv)
     colorwrite_case(only);
     dot3_case(only, (caps.TextureOpCaps & D3DTEXOPCAPS_DOTPRODUCT3) != 0);
     embm_case(only, (caps.TextureOpCaps & D3DTEXOPCAPS_BUMPENVMAP) != 0);
+    stages8_case(only, caps.MaxTextureBlendStages >= 8 && caps.MaxSimultaneousTextures >= 8);
     transform_cases(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (caps.TextureCaps & D3DPTEXTURECAPS_VOLUMEMAP) && (!only || only >= 45))
         volume_cases(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
