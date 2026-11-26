@@ -234,7 +234,6 @@ static BOOLEAN draw_one(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *imag
             return refuse(gpu, RB2K_D7_SITE_DEPTH, *status, 0);
     }
     for (i = 0; i < 2; ++i) {
-        ULONG j;
         RB2K_TEXTURE *t;
         if (!rb_gpu_d7_samples(d, i)) continue;
         if ((i ? d->texture1 : d->texture) & RB2K_TEXTURE_IMAGE) {
@@ -245,9 +244,12 @@ static BOOLEAN draw_one(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *imag
         }
         t = rb_gpu_texture(gpu, i ? d->texture1 : d->texture);
         if (!t) return refuse(gpu, RB2K_D7_SITE_TEXTURE, *status, i);
-        /* The display DLL attaches a texture when it uploads it here. */
-        for (j = 0; j < RB2K_ATTACH && t->contexts[j] != image->id; ++j) {}
-        if (j == RB2K_ATTACH) return refuse(gpu, RB2K_D7_SITE_TEXTURE, *status, 16 + i);
+        /* Attached to this target's context on its first use here. */
+        if (!rb_gpu_texture_attach(gpu, result, t, image)) {
+            refuse(gpu, RB2K_D7_SITE_TEXTURE, result->status, 16 + i);
+            *status = command_error(gpu, result);
+            return FALSE;
+        }
         if (i) texture1 = t; else texture = t;
     }
     *status = ERROR_INVALID_PARAMETER;
@@ -305,7 +307,6 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
         if (!depth || !depth->depth16 || (d->stencil && !depth->stencil8)) return refuse(gpu, RB2K_D7_SITE_DEPTH, *status, 0);
     }
     for (i = 0; i < RB2K_D8_STAGES; ++i) {
-        ULONG j;
         RB2K_TEXTURE *t;
         textures[i] = NULL;
         if (!(gpu->programs[program].samplers & (1UL << i))) continue;
@@ -317,8 +318,11 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
         }
         t = rb_gpu_texture(gpu, d->textures[i]);
         if (!t) return refuse(gpu, RB2K_D7_SITE_TEXTURE, *status, i);
-        for (j = 0; j < RB2K_ATTACH && t->contexts[j] != image->id; ++j) {}
-        if (j == RB2K_ATTACH) return refuse(gpu, RB2K_D7_SITE_TEXTURE, *status, 16 + i);
+        if (!rb_gpu_texture_attach(gpu, result, t, image)) {
+            refuse(gpu, RB2K_D7_SITE_TEXTURE, result->status, 16 + i);
+            *status = command_error(gpu, result);
+            return FALSE;
+        }
         textures[i] = t;
     }
     *status = ERROR_INVALID_PARAMETER;
@@ -564,6 +568,7 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
             return command_error(gpu, &result);
         success = rb_gpu_destroy_image(gpu, &result, id);
         if (success) {
+            rb_gpu_slot_forget(gpu, image);
             VideoPortZeroMemory(image, sizeof(*image));
             if (!--gpu->imageCount && !gpu->rvdContexts) return rb_gpu_stop(gpu);
         }
