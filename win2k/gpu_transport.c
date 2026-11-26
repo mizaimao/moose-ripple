@@ -358,7 +358,8 @@ static VP_STATUS collect_control(RB2K_GPU *gpu, ULONG capacity, PULONG received,
         if (!job->image || !gpu->d7Packets[slot].data) return control_error(gpu, ERROR_INVALID_DATA);
         reply = (struct virtio_gpu_ctrl_hdr *)(gpu->d7Packets[slot].data + FrameReplyOffset);
         if (length != sizeof(*reply) || reply->type != VIRTIO_GPU_RESP_OK_NODATA ||
-            !(reply->flags & VIRTIO_GPU_FLAG_FENCE) || reply->fence_id != job->fence) {
+            (job->fence ? !(reply->flags & VIRTIO_GPU_FLAG_FENCE) || reply->fence_id != job->fence
+                        : (reply->flags & VIRTIO_GPU_FLAG_FENCE) != 0)) {
             job->image->frameFailed = TRUE;
             return control_error(gpu, ERROR_INVALID_DATA);
         }
@@ -423,9 +424,14 @@ VP_STATUS rb_gpu_wait_image(RB2K_GPU *gpu, const RB2K_IMAGE *image)
     return NO_ERROR;
 }
 
-/* Queue the open frame's command words as one fenced SUBMIT_3D without
- * waiting for it. The host runs control requests in queue order. */
-VP_STATUS rb_gpu_submit_scene(RB2K_GPU *gpu, const ULONG *words, ULONG count, const RB2K_D3D7_COMPLETED *work)
+/* Queue the open frame's command words as one SUBMIT_3D without waiting for
+ * it. The host runs control requests in queue order. A fenced packet is
+ * answered once the host GPU has finished it, which QEMU notices on a 10 ms
+ * timer or a notification; an unfenced one as soon as QEMU has read it, which
+ * is all a packet slot needs before it is used again. Only a frame's last
+ * packet is fenced. */
+VP_STATUS rb_gpu_submit_scene(RB2K_GPU *gpu, const ULONG *words, ULONG count, const RB2K_D3D7_COMPLETED *work,
+                              BOOLEAN fenced)
 {
     ULONG slot = gpu->d7Next, offset = 0;
     RB2K_DMA_SEGMENT *dma = &gpu->d7Packets[slot];   /* contiguous per slot, not for all slots at once */
@@ -438,7 +444,7 @@ VP_STATUS rb_gpu_submit_scene(RB2K_GPU *gpu, const ULONG *words, ULONG count, co
     VP_STATUS status;
     if (!gpu->ready || !gpu->d7Frame.target) return ERROR_NOT_READY;
     if (!count || count > RB2K_D7_FRAME_WORDS) return ERROR_INVALID_PARAMETER;
-    if (gpu->fence == 0xffffffffUL) return ERROR_NO_MORE_ITEMS;
+    if (fenced && gpu->fence == 0xffffffffUL) return ERROR_NO_MORE_ITEMS;
     if (!dma->data) {
         dma->data = VideoPortGetCommonBuffer(gpu->extension, FramePacketBytes, 4096,
                                               &dma->bus, &dma->allocated, TRUE);
@@ -458,8 +464,8 @@ VP_STATUS rb_gpu_submit_scene(RB2K_GPU *gpu, const ULONG *words, ULONG count, co
     VideoPortZeroMemory(packet, sizeof(*packet));
     packet->hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
     packet->hdr.ctx_id = gpu->d7Frame.target->id;
-    packet->hdr.flags = VIRTIO_GPU_FLAG_FENCE;
-    packet->hdr.fence_id = ++gpu->fence;
+    packet->hdr.flags = fenced ? VIRTIO_GPU_FLAG_FENCE : 0;
+    packet->hdr.fence_id = fenced ? ++gpu->fence : 0;
     packet->size = count*sizeof(ULONG);
     VideoPortMoveMemory(packet+1, (PVOID)words, count*sizeof(ULONG));
     VideoPortZeroMemory(dma->data + offset + FrameReplyOffset, sizeof(struct virtio_gpu_ctrl_hdr));
@@ -474,14 +480,14 @@ VP_STATUS rb_gpu_submit_scene(RB2K_GPU *gpu, const ULONG *words, ULONG count, co
     desc[head+1].next = 0;
     job->image = gpu->d7Frame.target;
     job->work = *work;
-    job->fence = gpu->fence;
+    job->fence = fenced ? gpu->fence : 0;
     gpu->d7Next = (slot+1) % RB2K_D7_FLIGHT_SLOTS;
     ++gpu->d7Flight.queued;
     if (++gpu->d7Flight.pending > gpu->d7Flight.peak) gpu->d7Flight.peak = gpu->d7Flight.pending;
     publish_control(gpu, head);
     if (gpu->d7Measure) {
         ++gpu->d7Measure->submits;
-        ++gpu->d7Measure->fences;
+        if (fenced) ++gpu->d7Measure->fences;
         gpu->d7Measure->bytes += bytes;
         gpu->d7Measure->queueTicks += rb_counter_ticks(NULL)-start;
     }

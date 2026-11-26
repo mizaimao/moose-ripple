@@ -86,7 +86,7 @@ enum { RB2K_D7_FLIGHT_SLOTS = 2 };
 typedef struct {
     RB2K_IMAGE *image;
     RB2K_D3D7_COMPLETED work;
-    ULONG fence;
+    ULONG fence;   /* zero: an unfenced packet, done once the host has read it */
 } RB2K_D7_SUBMISSION;
 
 /* Device-readable data chained after a request (at most RB2K_GPU_MAX_EXTENTS). */
@@ -179,7 +179,8 @@ VP_STATUS rb_gpu_submit(RB2K_GPU *gpu, const void *request, ULONG bytes,
 VP_STATUS rb_gpu_submit_extents(RB2K_GPU *gpu, const void *request, ULONG bytes,
                                 const RB2K_GPU_EXTENT *extents, ULONG count,
                                 void *reply, ULONG capacity, PULONG received);
-VP_STATUS rb_gpu_submit_scene(RB2K_GPU *gpu, const ULONG *words, ULONG count, const RB2K_D3D7_COMPLETED *work);
+VP_STATUS rb_gpu_submit_scene(RB2K_GPU *gpu, const ULONG *words, ULONG count, const RB2K_D3D7_COMPLETED *work,
+                              BOOLEAN fenced);
 VP_STATUS rb_gpu_poll_scenes(RB2K_GPU *gpu);
 VP_STATUS rb_gpu_wait_image(RB2K_GPU *gpu, const RB2K_IMAGE *image);
 VP_STATUS rb_gpu_reserve_staging(RB2K_GPU *gpu, ULONG bytes);

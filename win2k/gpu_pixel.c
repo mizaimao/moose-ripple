@@ -181,7 +181,7 @@ static BOOLEAN submit_frame(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, BOOLEAN last)
     if (!gpu->d7Frame.count) return TRUE;
     r->stage = RB2K_STAGE_TRANSFER;
     r->status = rb_gpu_submit_scene(gpu, gpu->d7Frame.words, gpu->d7Frame.count,
-                                    last ? &gpu->d7Frame.pending : &none);
+                                    last ? &gpu->d7Frame.pending : &none, last);
     ok = r->status == NO_ERROR;
     if (ok && last && gpu->d7WaitCurrent) {
         r->status = rb_gpu_wait_image(gpu, target);
