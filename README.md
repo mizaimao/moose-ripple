@@ -131,8 +131,8 @@ pixels.
   window (the Dock, for one), WindowServer draws it. A program that does not wait for the
   display's refresh does not wait for that either: WindowServer is handed its newest frame.
 - Test programs on the Proxmox host (Intel UHD 630, 1280x800): Cinebench R11.5's OpenGL test
-  passes its reference check (99.4% match) with 40 frames/s; OpenArena 0.8.8's timedemo
-  (`demo088-test1`, 1024x768 window) runs at about 260 frames/s, and at about 200 with the
+  passes its reference check (99.4% match) with 46 frames/s; OpenArena 0.8.8's timedemo
+  (`demo088-test1`, 1024x768 window) runs at about 280 frames/s, and at about 200 with the
   Dock drawn over its window.
 - Video: Snow Leopard's Welcome movie (H.264, 1008x630, 24 frames/s) plays at its full
   24 frames/s in QuickTime Player with moose-ripple, on the Proxmox host and in UTM. With
