@@ -75,6 +75,11 @@ change.
 `RippleHardwareCursor`, `RippleGpuDesktop`, `RippleDirectDrawGpuSurfaces` and
 `RippleD3D7WaitCurrent` are for tests and stay 0.
 
+`RipplePrimaryInMemory` 1 (being built, issue 121) keeps every 32-bit desktop in
+guest memory instead of the 8 MB of VGA memory, which adds 1920x1080 and
+1920x1200. DirectDraw page flipping is not there yet: full-screen programs
+present by copying.
+
 ## Licences
 
 The driver is MIT licensed (`LICENSE.TXT`). `ripplegl.dll` is Mesa 24.3.4,

@@ -170,7 +170,25 @@ typedef struct {
     struct { ULONG id, samplers, bytes; char text[RB2K_D8_PROGRAM_BYTES]; } programs[RB2K_D8_PROGRAMS];
     ULONG programSerial;
     ULONG d8Step;       /* the step of a pixel shader draw being queued, for failures */
+    /* The 32-bit desktop in guest memory (RipplePrimaryInMemory, gpu_primary.c): pages
+     * made once and kept, and the host resource that scanout 0 shows (0 when none).
+     * vgaPixels and vgaBytes keep the VGA view while the primary is elsewhere. */
+    BOOLEAN primaryInMemory;
+    PVOID memoryMdl;
+    PULONG memoryPixels, vgaPixels;
+    ULONG memoryBytes, vgaBytes, memoryResource, memoryWidth, memoryHeight;
+    ULONG memoryUploads, memoryPixelsSent, memoryFailures;
 } RB2K_GPU;
+
+/* Something other than a DirectDraw image keeps the transport running: an OpenGL
+ * context, or the desktop in guest memory, whose scanout a reset would drop. */
+#define rb_gpu_held(gpu) ((gpu)->rvdContexts || (gpu)->memoryResource)
+
+/* The largest desktop in guest memory: 1920x1200 at 32 bits (rb2kmp.c). */
+#define RB2K_MEMORY_PRIMARY_BYTES (1920UL * 1200 * 4)
+VP_STATUS rb_memory_primary_show(RB2K_GPU *gpu, ULONG width, ULONG height, BOOLEAN clear);
+VP_STATUS rb_memory_primary_upload(RB2K_GPU *gpu, const RB2K_RECT *rect);
+void rb_memory_primary_hide(RB2K_GPU *gpu);
 
 void rb_gpu_find(RB2K_GPU *gpu, PVOID extension, ULONG slot,
                  PVIDEO_ACCESS_RANGE registers, PVIDEO_PORT_CONFIG_INFO config);

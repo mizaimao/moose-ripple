@@ -95,6 +95,33 @@ BOOLEAN rb_pages_alloc(RB2K_PAGES *p, ULONG bytes)
     return TRUE;
 }
 
+/* Pages below 4 GiB for the driver itself (the desktop in guest memory, gpu_primary.c),
+ * zeroed and mapped cached into system space. They are never freed: a display
+ * driver surface may still refer to them after a mode change. */
+PVOID rb_system_pages(ULONG bytes, PVOID *mdlOut)
+{
+    PHYSICAL_ADDRESS low, high, skip;
+    PMDL mdl;
+    PVOID system = NULL;
+    *mdlOut = NULL;
+    if (!bytes || (bytes & (PAGE_SIZE - 1))) return NULL;
+    low.QuadPart = 0;
+    high.QuadPart = 0xffffffff;
+    skip.QuadPart = 0;
+    mdl = MmAllocatePagesForMdl(low, high, skip, bytes);
+    if (!mdl) return NULL;
+    if (MmGetMdlByteCount(mdl) == bytes)
+        system = MmMapLockedPagesSpecifyCache(mdl, KernelMode, MmCached, NULL, FALSE, NormalPagePriority);
+    if (!system) {
+        MmFreePagesFromMdl(mdl);
+        ExFreePool(mdl);
+        return NULL;
+    }
+    RtlZeroMemory(system, bytes);
+    *mdlOut = mdl;
+    return system;
+}
+
 /* Physical runs for VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING; 0 if more than max. */
 ULONG rb_pages_runs(const RB2K_PAGES *p, RB2K_PAGE_RUN *out, ULONG max)
 {

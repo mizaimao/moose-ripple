@@ -60,6 +60,7 @@ typedef struct {
     RB2K_CURSOR_SOURCE cursorSource;
     BOOL ddEnabled;
     BOOL glActive;
+    BOOL memoryPrimary;         /* the desktop is in guest memory (RB2K_MODE_PRIMARY_IN_MEMORY) */
     BOOL gpuSurfaces;           /* offscreen surfaces as host textures (RB2K_DD_CAPS) */
     BOOL plainSurfaces;         /* plain 2D ones too, not only Direct3D's */
     BOOL d3d8;                  /* the Direct3D 8 driver interface is offered */
@@ -119,5 +120,6 @@ void rb_gl_cpu_lock(ULONG writer, ULONG rop);
 void rb_gl_cpu_unlock(void);
 BOOL rb_gl_cpu_access(DISPLAY *d, const RECTL *rect, ULONG access);
 BOOL rb_gl_cpu_flush(DISPLAY *d);
+BOOL rb_memory_primary_dirty(DISPLAY *d, const RECTL *rect);
 void rb_dd_free_views(DISPLAY *display);
 #endif

@@ -86,7 +86,7 @@ static VP_STATUS create(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     image->stencil8 = stencil8;
     if (!rb_gpu_create_image(gpu, &result, image, name, sizeof(name) - 1, FALSE)) {
         VideoPortZeroMemory(image, sizeof(*image));
-        if (!gpu->ready || (!gpu->imageCount && !gpu->rvdContexts)) rb_gpu_stop(gpu);
+        if (!gpu->ready || (!gpu->imageCount && !rb_gpu_held(gpu))) rb_gpu_stop(gpu);
         return result.status;
     }
     ++gpu->imageCount;
@@ -115,7 +115,7 @@ static VP_STATUS command_error(RB2K_GPU *gpu, const RB2K_GPU_RESULT *result)
     /* A late completion must not touch recycled storage. A host error
      * reply leaves no command outstanding, so OpenGL contexts may stay. */
     if ((result->stage != RB2K_STAGE_BACKING || result->status != ERROR_NOT_ENOUGH_MEMORY) &&
-        (!gpu->rvdContexts || !gpu->ready))
+        (!rb_gpu_held(gpu) || !gpu->ready))
         rb_gpu_stop(gpu);
     return result->status;
 }
@@ -172,6 +172,15 @@ static VP_STATUS present(RB2K_GPU *gpu, const RB2K_IMAGE *image, const RB2K_DD_P
         }
     }
     ++gpu->presents;
+    if (gpu->memoryWidth) {
+        /* The desktop in guest memory shows what the host has been sent. */
+        RB2K_RECT r;
+        r.left = p->dstX;
+        r.top = p->dstY;
+        r.right = p->dstX + p->width;
+        r.bottom = p->dstY + p->height;
+        return rb_memory_primary_upload(gpu, &r);
+    }
     return NO_ERROR;
 }
 
@@ -599,7 +608,7 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         if (success) {
             rb_gpu_slot_forget(gpu, image);
             VideoPortZeroMemory(image, sizeof(*image));
-            if (!--gpu->imageCount && !gpu->rvdContexts) return rb_gpu_stop(gpu);
+            if (!--gpu->imageCount && !rb_gpu_held(gpu)) return rb_gpu_stop(gpu);
         }
         break;
     default:
@@ -860,9 +869,10 @@ VP_STATUS rb_gpu_surface_reset(RB2K_GPU *gpu)
     }
     if (!frameStatus) frameStatus = rb_gpu_wait_image(gpu, NULL);
     rb_cursor_forget(gpu);
-    if (gpu->rvdContexts && gpu->ready) {
+    if (rb_gpu_held(gpu) && gpu->ready) {
         /* A mode change loses the DirectDraw surfaces but not OpenGL's
-         * contexts: free the surfaces one by one and keep the transport. */
+         * contexts or the desktop in memory: free the surfaces one by one
+         * and keep the transport. */
         RB2K_GPU_RESULT result;
         ULONG slot;
         for (slot = 0; slot < RB2K_DD_SLOTS && gpu->ready; ++slot) {

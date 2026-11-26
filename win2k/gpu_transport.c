@@ -151,6 +151,7 @@ static VP_STATUS stop(RB2K_GPU *gpu)
         gpu->owned = FALSE;
     }
     gpu->cursorResource = 0;
+    gpu->memoryResource = 0;   /* the host has dropped it, and the scanout with it */
     gpu->cursorDoorbell = NULL;
     gpu->cursorVisible = FALSE;
     return NO_ERROR;

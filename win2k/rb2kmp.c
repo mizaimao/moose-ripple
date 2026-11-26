@@ -31,6 +31,9 @@ static const struct { USHORT width, height, bpp; } modes[] = {
     {1440, 900, 16}, {1600, 900, 16}, {1600, 1200, 16}, {1680, 1050, 16},
     {1152, 864, 8}, {1280, 720, 8}, {1280, 800, 8}, {1280, 960, 8}, {1280, 1024, 8},
     {1440, 900, 8}, {1600, 900, 8}, {1600, 1200, 8}, {1680, 1050, 8}
+,
+    /* Only with the desktop in guest memory (RipplePrimaryInMemory): too big for VGA memory. */
+    {1920, 1080, 32}, {1920, 1200, 32}
 };
 /* The largest page in the table, in bytes (1600x1200 at 32 bits). */
 #define MAX_PAGE_BYTES (1600UL * 1200 * 4)
@@ -145,6 +148,9 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
     VideoPortGetRegistryParameters(a, L"RippleHostDxt", FALSE, registry_flag, &a->gpu.hostDxt);
     VideoPortGetRegistryParameters(a, L"RippleVertexShaders", FALSE, registry_flag, &a->gpu.vertexShaders);
     VideoPortGetRegistryParameters(a, L"RippleD3D9", FALSE, registry_flag, &a->gpu.d3d9Ddi);
+    VideoPortGetRegistryParameters(a, L"RipplePrimaryInMemory", FALSE, registry_flag, &a->gpu.primaryInMemory);
+    /* The GPU desktop composes into the VGA desktop; the two do not mix. */
+    if (a->gpu.primaryInMemory) a->gpu.glEnabled = FALSE;
     a->gpu.ddGpuSurfaces = a->gpu.plainSurfaces || a->gpu.nativeD3D7;
     /* Map the scanout pages during adapter discovery, cached like every other
      * view of the framebuffer (rb_map_cached). BAR0 is a PCI framebuffer; its
@@ -157,6 +163,8 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
             a->gpu.primary.pixels = rb_map_cached((unsigned __int64)a->fb.RangeStart.QuadPart, bytes);
         }
         if (a->gpu.primary.pixels) a->gpu.primary.bytes = bytes;
+        a->gpu.vgaPixels = a->gpu.primary.pixels;
+        a->gpu.vgaBytes = a->gpu.primary.bytes;
     }
     config->NumEmulatorAccessEntries = 0;
     config->HardwareStateSize = 0;
@@ -179,15 +187,24 @@ static BOOLEAN initialize(PVOID ext)
  * page flipping needs a second page, and scanout_info reports one page
  * where it does not fit: QEMU's virtio-vga has 8 MB, so 32-bit modes above
  * 1280x800 have a desktop but no flip chain. */
+/* With RipplePrimaryInMemory, every 32-bit desktop lives in guest memory
+ * (gpu_primary.c), up to 1920x1200; the others stay in VGA memory. */
+static BOOLEAN in_memory(const ADAPTER *a, ULONG index)
+{
+    return a->gpu.primaryInMemory && a->gpu.common && index < ARRAY_COUNT(modes) && modes[index].bpp == 32 &&
+           (ULONG)modes[index].width * modes[index].height * 4 <= RB2K_MEMORY_PRIMARY_BYTES;
+}
+
 static BOOLEAN mode_fits(const ADAPTER *a, ULONG index)
 {
     ULONG page;
     if (index >= ARRAY_COUNT(modes)) return FALSE;
+    if (in_memory(a, index)) return TRUE;
     if (index < 9) return TRUE;
     page = (ULONG)modes[index].width * modes[index].height * (modes[index].bpp / 8);
     if (page > a->fb.RangeLength) return FALSE;
     return modes[index].bpp != 32 ||
-           (page <= RB2K_DD_MAX_BYTES && (!a->gpu.primary.pixels || page <= a->gpu.primary.bytes));
+           (page <= RB2K_DD_MAX_BYTES && (!a->gpu.vgaPixels || page <= a->gpu.vgaBytes));
 }
 
 static ULONG fitting_modes(const ADAPTER *a)
@@ -197,9 +214,10 @@ static ULONG fitting_modes(const ADAPTER *a)
     return n;
 }
 
-static void mode_info(ULONG index, PVIDEO_MODE_INFORMATION m)
+static void mode_info(const ADAPTER *a, ULONG index, PVIDEO_MODE_INFORMATION m)
 {
     VideoPortZeroMemory(m, sizeof(*m));
+    if (in_memory(a, index)) m->DriverSpecificAttributeFlags = RB2K_MODE_PRIMARY_IN_MEMORY;
     m->Length = sizeof(*m);
     m->ModeIndex = index;
     m->VisScreenWidth = m->VideoMemoryBitmapWidth = modes[index].width;
@@ -251,6 +269,18 @@ static ULONG view_span(ULONG pageBytes)
 static VP_STATUS scanout_info(ADAPTER *a, RB2K_DD_FLIP_INFO *info)
 {
     ULONG virtualWidth;
+    if (a->modeSet && a->gpu.memoryWidth) {
+        /* The desktop in guest memory has one page: no flip chain yet. */
+        info->width = modes[a->mode].width;
+        info->height = modes[a->mode].height;
+        info->pitch = info->width * sizeof(ULONG);
+        info->pageBytes = info->pitch * info->height;
+        info->pageCount = 1;
+        info->yOffset = 0;
+        info->visiblePage = 0;
+        info->flips = a->flips;
+        return NO_ERROR;
+    }
     if (!a->modeSet || !(VideoPortReadRegisterUshort(a->vbe + VbeEnable) & 1) ||
         VideoPortReadRegisterUshort(a->vbe + VbeBpp) != modes[a->mode].bpp ||
         VideoPortReadRegisterUshort(a->vbe + VbeOffsetX)) return ERROR_NOT_READY;
@@ -343,6 +373,7 @@ static VP_STATUS release_pages(ADAPTER *a, BOOLEAN keepView)
 static VP_STATUS set_mode(ADAPTER *a, ULONG request)
 {
     RB2K_DD_FLIP_INFO info;
+    BOOLEAN memory;
     ULONG index = request & ~(VIDEO_MODE_NO_ZERO_MEMORY | VIDEO_MODE_MAP_MEM_LINEAR);
     USHORT enable = (request & VIDEO_MODE_NO_ZERO_MEMORY) ? 0xc1 : 0x41;
     VP_STATUS status;
@@ -350,9 +381,30 @@ static VP_STATUS set_mode(ADAPTER *a, ULONG request)
     if (modes[index].bpp == 8) enable |= VBE_8BIT_DAC;
     status = release_pages(a, FALSE);
     if (status) return status;
+    memory = in_memory(a, index);
+    /* Leaving the desktop in memory: the transport reset in rb_gpu_surface_reset
+     * returns scanout 0 to VGA (unless OpenGL holds the transport). */
+    if (!memory && a->gpu.memoryWidth) rb_memory_primary_hide(&a->gpu);
     status = rb_gpu_surface_reset(&a->gpu);
     if (status) return status;
     a->modeSet = FALSE;
+    if (memory) {
+        /* Scanout 0 shows the host resource; VGA output is not used. */
+        VideoPortWriteRegisterUshort(a->vbe + VbeEnable, 0);
+        status = rb_memory_primary_show(&a->gpu, modes[index].width, modes[index].height,
+                                        (BOOLEAN)!(request & VIDEO_MODE_NO_ZERO_MEMORY));
+        if (status) return status;
+        a->mode = index;
+        a->modeSet = TRUE;
+        a->gpu.primary.pixels = a->gpu.memoryPixels;
+        a->gpu.primary.bytes = a->gpu.memoryBytes;
+        a->gpu.primary.bitsPerPixel = 32;
+        a->gpu.primary.width = a->gpu.primary.pitchPixels = modes[index].width;
+        a->gpu.primary.height = modes[index].height;
+        return NO_ERROR;
+    }
+    a->gpu.primary.pixels = a->gpu.vgaPixels;
+    a->gpu.primary.bytes = a->gpu.vgaBytes;
     VideoPortWriteRegisterUshort(a->vbe + VbeEnable, 0);
     VideoPortWriteRegisterUshort(a->vbe + VbeX, modes[index].width);
     VideoPortWriteRegisterUshort(a->vbe + VbeY, modes[index].height);
@@ -453,6 +505,13 @@ static VP_STATUS map_frame(ADAPTER *a, PVIDEO_REQUEST_PACKET r)
         return ERROR_INSUFFICIENT_BUFFER;
     if (((PVIDEO_MEMORY)r->InputBuffer)->RequestedVirtualAddress)
         return ERROR_INVALID_PARAMETER;
+    if (a->modeSet && a->gpu.memoryWidth) {
+        /* The desktop in guest memory: its pages are mapped once, in system space. */
+        m->VideoRamBase = m->FrameBufferBase = a->gpu.memoryPixels;
+        m->VideoRamLength = m->FrameBufferLength = a->gpu.memoryBytes;
+        r->StatusBlock->Information = sizeof(*m);
+        return NO_ERROR;
+    }
     for (i = 0; i < ARRAY_COUNT(a->mappings); ++i) if (!a->mappings[i]) break;
     if (i == ARRAY_COUNT(a->mappings)) return ERROR_NOT_ENOUGH_MEMORY;
     base = rb_map_cached((unsigned __int64)a->fb.RangeStart.QuadPart, size);
@@ -471,6 +530,7 @@ static VP_STATUS unmap_frame(ADAPTER *a, PVIDEO_REQUEST_PACKET r)
     if (r->InputBufferLength < sizeof(VIDEO_MEMORY)) return ERROR_INSUFFICIENT_BUFFER;
     base = ((PVIDEO_MEMORY)r->InputBuffer)->RequestedVirtualAddress;
     if (!base) return ERROR_INVALID_PARAMETER;
+    if (base == (PVOID)a->gpu.memoryPixels) return NO_ERROR;   /* kept for good (map_frame) */
     for (i = 0; i < ARRAY_COUNT(a->mappings); ++i) {
         if (a->mappings[i] == base) {
             rb_unmap_cached(base, a->fb.RangeLength);
@@ -576,7 +636,7 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
         if (r->OutputBufferLength >= fitting_modes(a) * sizeof(VIDEO_MODE_INFORMATION)) {
             ULONG n = 0;
             for (i = 0; i < ARRAY_COUNT(modes); ++i)
-                if (mode_fits(a, i)) mode_info(i, (PVIDEO_MODE_INFORMATION)r->OutputBuffer + n++);
+                if (mode_fits(a, i)) mode_info(a, i, (PVIDEO_MODE_INFORMATION)r->OutputBuffer + n++);
             r->StatusBlock->Information = n * sizeof(VIDEO_MODE_INFORMATION);
             status = NO_ERROR;
         }
@@ -584,7 +644,7 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
     case IOCTL_VIDEO_QUERY_CURRENT_MODE:
         if (!a->modeSet) status = ERROR_INVALID_FUNCTION;
         else if (r->OutputBufferLength >= sizeof(VIDEO_MODE_INFORMATION)) {
-            mode_info(a->mode, r->OutputBuffer);
+            mode_info(a, a->mode, r->OutputBuffer);
             r->StatusBlock->Information = sizeof(VIDEO_MODE_INFORMATION);
             status = NO_ERROR;
         }
@@ -606,6 +666,10 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
         VIDEO_X86_BIOS_ARGUMENTS bios;
         status = release_pages(a, FALSE);
         if (status) break;
+        /* Text mode shows on VGA only after the transport reset. */
+        if (a->gpu.memoryWidth) rb_memory_primary_hide(&a->gpu);
+        a->gpu.primary.pixels = a->gpu.vgaPixels;
+        a->gpu.primary.bytes = a->gpu.vgaBytes;
         status = rb_gpu_surface_reset(&a->gpu);
         if (status) break;
         VideoPortZeroMemory(&bios, sizeof(bios));

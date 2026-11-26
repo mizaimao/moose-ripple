@@ -569,6 +569,7 @@ static HRESULT fill_page(DISPLAY *d, ULONG page, const RECTL *r, ULONG color)
             for (x = 0; x < width; ++x) ((ULONG *)row)[x] = color;
         }
     }
+    if (d->memoryPrimary) rb_memory_primary_dirty(d, r);   /* written past GDI: send it */
     return DD_OK;
 }
 

@@ -215,6 +215,7 @@ VOID DrvDisableSurface(DHPDEV pdev)
     if (display->cpuSurface) { EngUnlockSurface(display->cpuSurface); display->cpuSurface = NULL; }
     if (display->bitmap) { EngDeleteSurface(display->bitmap); display->bitmap = NULL; }
     display->glActive = FALSE;
+    display->memoryPrimary = FALSE;
     if (display->mapping) {
         request.RequestedVirtualAddress = display->mapping;
         EngDeviceIoControl(display->miniport, IOCTL_VIDEO_UNMAP_VIDEO_MEMORY,
@@ -248,7 +249,11 @@ HSURF DrvEnableSurface(DHPDEV pdev)
     display->bitmap = (HSURF)EngCreateBitmap(size, display->mode.ScreenStride,
         display->bitmapFormat, BMF_TOPDOWN, mem.FrameBufferBase);
     if (!display->bitmap) goto failed;
-    if (display->bitmapFormat == BMF_32BPP && rb_gl_device_surface(display)) {
+    /* A desktop in guest memory is device-managed too: the hooked calls (display_gdi.c)
+     * send what they change to the host. */
+    display->memoryPrimary = display->bitmapFormat == BMF_32BPP &&
+        (display->mode.DriverSpecificAttributeFlags & RB2K_MODE_PRIMARY_IN_MEMORY) != 0;
+    if (display->bitmapFormat == BMF_32BPP && (display->memoryPrimary || rb_gl_device_surface(display))) {
         display->cpuSurface = EngLockSurface(display->bitmap);
         display->surface = EngCreateDeviceSurface((DHSURF)display, size, display->bitmapFormat);
         if (!display->cpuSurface || !display->surface ||
