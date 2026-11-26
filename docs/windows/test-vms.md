@@ -240,6 +240,11 @@ One run each. During the virgl run the host GPU's render engine was 85 to 95% bu
 first test, about 50% in the second (Firefly Forest), and 75 to 90% in the last two, with
 QEMU's main thread at a full core throughout.
 
+The same prepared disk and guest shape on a second host with the same GPU model but QEMU 10.0
+and virglrenderer 1.1 (the first has QEMU 9.2 and virglrenderer 0.10.4) scored 10728 3DMarks
+(SM2.0 3618, HDR/SM3.0 4267, CPU 8604): a baseline of that host's own, not to be mixed with
+the table. There QEMU's main thread was 10 to 90% busy during the run.
+
 The run is unattended, because the card's picture cannot be seen from the host:
 
 - `tools/win7-debug/rig/refvm.sh` starts the guest as a private QEMU, with the virtio GPU or
