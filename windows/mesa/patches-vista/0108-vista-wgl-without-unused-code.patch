@@ -1,15 +1,30 @@
-Vista: the OpenGL driver linked without its unused code. LLVM's static C++ runtime holds a
-reference to TryAcquireSRWLockExclusive, which Vista lacks, in a function nothing calls;
-discarding unused sections removes it (as patch 0100 does for the Direct3D driver).
+Vista: the OpenGL driver linked without its unused code, and with the PSAPI name of
+EnumProcessModules on x86. LLVM's static C++ runtime holds a reference to
+TryAcquireSRWLockExclusive, which Vista lacks, in a function nothing calls; discarding unused
+sections removes it. The x86 unwind runtime asks for K32EnumProcessModules, which Vista has
+only as PSAPI's EnumProcessModules (vista_psapi.c of patch 0100, shared with this target).
 
 --- a/src/gallium/targets/wgl/meson.build
 +++ b/src/gallium/targets/wgl/meson.build
-@@ -1,7 +1,7 @@
+@@ -1,7 +1,11 @@
  # Copyright © Microsoft Corporation
  # SPDX-License-Identifier: MIT
  
 -gallium_wgl_link_args = []
-+gallium_wgl_link_args = ['-Wl,--gc-sections']
++gallium_wgl_link_args = ['-Wl,--gc-sections', '-lpsapi']
++vista_wgl_sources = []
++if host_machine.cpu_family() == 'x86'
++  vista_wgl_sources += files('../d3d10umd/vista_psapi.c')
++endif
  
  wgl_def = custom_target(
    'gallium_wgl.def',
+@@ -13,7 +17,7 @@
+ gallium_wgl_name = get_option('gallium-wgl-dll-name')
+ libgallium_wgl = shared_library(
+   gallium_wgl_name,
+-  ['wgl.c', 'dxgi_framebuffer.cpp', 'd3d9ex_framebuffer.cpp'],
++  ['wgl.c', 'dxgi_framebuffer.cpp', 'd3d9ex_framebuffer.cpp'] + vista_wgl_sources,
+   vs_module_defs : wgl_def,
+   include_directories : [
+     inc_include, inc_src, inc_mapi, inc_mesa, inc_gallium, inc_gallium_aux, inc_wgl, inc_gallium_winsys, inc_gallium_winsys_sw, inc_gallium_drivers,
