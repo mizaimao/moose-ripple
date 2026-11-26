@@ -1176,6 +1176,8 @@ tests from the Run click to the end of the second test:
 
 With that build 3DMark06 starts and runs, and the Direct3D 9 probes pass at both bitnesses
 (12 of 12; six of them full-screen, each with primaries of its own).
+The Vista build of the same source (the tag code is now common to both) passes its pixel
+tests (12 of 12) with the compositor running.
 
 With the cached build the Vista pixel tests pass (12 of 12) and the desktop draws as before.
 Window operations do not change: moving 56.1 updates a second (55.8 before), resizing 21.5
