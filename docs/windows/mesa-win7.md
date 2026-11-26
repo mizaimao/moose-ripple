@@ -2062,3 +2062,7 @@ in place between the two rounds:
 
 On the Intel host release 0.4.0 passes the Fetch4 and points parts already (it has both
 features) and fails only the clip planes.
+
+The Direct3D 9 probes pass with it in UTM as before (12 of 12, six of them full-screen). On
+a desktop OpenGL host the common code is what Vista runs already (its 12 pixel tests pass on
+the Intel host); Windows 7 on such a host has not run it yet.
