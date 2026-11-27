@@ -201,19 +201,70 @@ static HRESULT WINAPI create_pixel_shader(IDirect3DDevice9 *device, const DWORD 
     return hr;
 }
 
+static HRESULT (WINAPI *realCheckType)(IDirect3D9 *, UINT, D3DDEVTYPE, D3DFORMAT, D3DFORMAT, BOOL);
+static HRESULT (WINAPI *realSetRenderState)(IDirect3DDevice9 *, D3DRENDERSTATETYPE, DWORD);
+
+static HRESULT WINAPI check_type(IDirect3D9 *d3d, UINT adapter, D3DDEVTYPE type, D3DFORMAT display,
+                                 D3DFORMAT backBuffer, BOOL windowed)
+{
+    HRESULT hr = realCheckType(d3d, adapter, type, display, backBuffer, windowed);
+    char line[128];
+    wsprintfA(line, "CheckDeviceType type=%d display=%lu back=%lu windowed=%d -> 0x%08lx\r\n", (int)type,
+              (DWORD)display, (DWORD)backBuffer, (int)windowed, (DWORD)hr);
+    say(line);
+    return hr;
+}
+
+/* The blend factors, the colour write mask and the blend switch a device sets, each value once:
+ * they show a program that lights through the destination alpha. */
+static DWORD statesSeen[96][2];
+static int statesSeenCount;
+
+static HRESULT WINAPI set_render_state(IDirect3DDevice9 *device, D3DRENDERSTATETYPE state, DWORD value)
+{
+    if (state == D3DRS_SRCBLEND || state == D3DRS_DESTBLEND || state == D3DRS_COLORWRITEENABLE ||
+        state == D3DRS_SEPARATEALPHABLENDENABLE || state == D3DRS_FOGENABLE) {
+        int i;
+        for (i = 0; i < statesSeenCount; ++i) if (statesSeen[i][0] == (DWORD)state && statesSeen[i][1] == value) break;
+        if (i == statesSeenCount && statesSeenCount < 96) {
+            char line[64];
+            statesSeen[statesSeenCount][0] = (DWORD)state; statesSeen[statesSeenCount++][1] = value;
+            wsprintfA(line, "SetRenderState %lu = 0x%lx\r\n", (DWORD)state, value);
+            say(line);
+        }
+    }
+    return realSetRenderState(device, state, value);
+}
+
+static void say_present(const char *when, const D3DPRESENT_PARAMETERS *p)
+{
+    char line[256];
+    if (!p) return;
+    wsprintfA(line, "  present %s: %ux%u back=%lu count=%u multisample=%d swap=%d windowed=%d depth=%d/%lu flags=0x%lx hz=%u interval=0x%x\r\n",
+              when, p->BackBufferWidth, p->BackBufferHeight, (DWORD)p->BackBufferFormat, p->BackBufferCount,
+              (int)p->MultiSampleType, (int)p->SwapEffect, (int)p->Windowed, (int)p->EnableAutoDepthStencil,
+              (DWORD)p->AutoDepthStencilFormat, p->Flags, p->FullScreen_RefreshRateInHz, p->PresentationInterval);
+    say(line);
+}
+
 static HRESULT WINAPI create_device(IDirect3D9 *d3d, UINT adapter, D3DDEVTYPE type, HWND window, DWORD flags,
                                     D3DPRESENT_PARAMETERS *params, IDirect3DDevice9 **device)
 {
-    HRESULT hr = realCreateDevice(d3d, adapter, type, window, flags, params, device);
+    HRESULT hr;
     char line[96];
+    say_present("asked", params);
+    hr = realCreateDevice(d3d, adapter, type, window, flags, params, device);
     wsprintfA(line, "CreateDevice type=%d flags=0x%lx -> 0x%08lx\r\n", (int)type, flags, (DWORD)hr);
     say(line);
+    say_present("given", params);
+    statesSeenCount = 0;
     if (SUCCEEDED(hr) && *device) {
         IDirect3DDevice9Vtbl *v = (*device)->lpVtbl;
         patch((void **)&v->CreateTexture, (void *)create_texture, (void **)&realCreateTexture);
         patch((void **)&v->CreateVolumeTexture, (void *)create_volume, (void **)&realCreateVolume);
         patch((void **)&v->CreateCubeTexture, (void *)create_cube, (void **)&realCreateCube);
         patch((void **)&v->CreatePixelShader, (void *)create_pixel_shader, (void **)&realCreatePixelShader);
+        patch((void **)&v->SetRenderState, (void *)set_render_state, (void **)&realSetRenderState);
     }
     return hr;
 }
@@ -237,6 +288,7 @@ IDirect3D9 *WINAPI Direct3DCreate9(UINT version)
         patch((void **)&v->CheckDeviceFormat, (void *)check_format, (void **)&realCheckFormat);
         patch((void **)&v->GetDeviceCaps, (void *)get_caps, (void **)&realGetCaps);
         patch((void **)&v->CreateDevice, (void *)create_device, (void **)&realCreateDevice);
+        patch((void **)&v->CheckDeviceType, (void *)check_type, (void **)&realCheckType);
     }
     return d3d;
 }

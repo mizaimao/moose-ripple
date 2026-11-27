@@ -5763,11 +5763,14 @@ void rb_d7_caps(DD_HALINFO *info, BOOL depth)
  * one vertex stream. Pixel shaders are offered (see below); the runtime
  * runs vertex shaders in software. */
 static const ULONG d8Formats[][2] = {
+    /* RbFormatOffscreenPlain: a Direct3D 9 runtime on the Direct3D 9 interface makes no plain surface,
+     * not even one in system memory, of a format that lacks it (CreateOffscreenPlainSurface fails). */
     { RbFmtX8R8G8B8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture | RbFormatOffscreenTarget | RbFormatSameTarget |
-                     RbFormatDisplayMode | RbFormat3D },
+                     RbFormatDisplayMode | RbFormat3D | RbFormatOffscreenPlain },
     /* a back buffer with alpha over the X8R8G8B8 desktop, or a target */
-    { RbFmtA8R8G8B8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture | RbFormatOffscreenTarget | RbFormatSameTargetUpToAlpha },
-    { RbFmtR5G6B5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture | RbFormatDisplayMode },
+    { RbFmtA8R8G8B8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture | RbFormatOffscreenTarget | RbFormatSameTargetUpToAlpha |
+                     RbFormatOffscreenPlain },
+    { RbFmtR5G6B5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture | RbFormatDisplayMode | RbFormatOffscreenPlain },
     { RbFmtX1R5G5B5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     { RbFmtA1R5G5B5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     { RbFmtA4R4G4B4, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
