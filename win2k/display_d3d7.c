@@ -13,6 +13,7 @@
 #include "display_private.h"
 #include <d3dnthal.h>
 #include "rb2kd3d7.h"
+#include "rbskips.h"
 #include "d3d8ddi.h"
 #include "d3d8_ps.h"
 #include "d3d9_decl.h"
@@ -106,7 +107,9 @@ typedef struct {
      * equal ends for an affine projection). */
     ULONG fogColor, fogTable, fogVertex, fogStart, fogEnd, fogDensity, rangeFog, wNear, wFar;
     ULONG material[17];
-    ULONG lightOn;
+    /* The lights, in slots: a program numbers its lights as it likes (any 32-bit number), so each
+     * slot in use (lightUsed) remembers its light's number; lightOn: the slots switched on. */
+    ULONG lightOn, lightUsed, lightIndex[MaxLights];
     ULONG lights[MaxLights][26];
     /* Direct3D 8: the vertex format given as the vertex shader (a shader
      * handle has its low bit set), the pixel shader, stream zero (a
@@ -125,7 +128,8 @@ typedef struct {
     struct D9_DECL *decls;
     struct D9_FUNC *funcs;
     struct D9_PAIR *pairs;
-    ULONG pairLast;      /* the pair the last draw used, tried first */
+    ULONG declRoom, funcRoom;            /* the records the two tables hold now */
+    ULONG pairDecl, pairFunc, pairVs;    /* the last draw's declaration and function and the shader made from them, tried first */
     /* The buffer records of the streams and (last) the index buffer, found once and kept while
      * no buffer comes or goes (bufferEpoch). */
     struct D8_BUFFER *bufferCache[RB_VS_STREAMS + 1];
@@ -1076,25 +1080,18 @@ static ULONG stage_words(const D7_CONTEXT *c, ULONG n, ULONG *color, ULONG *alph
     return StageOk;
 }
 
-/* The fixed-function stages a Direct3D 8 or 9 runtime is offered: four for Direct3D 8 (the
- * texture registers of its version 1 shaders), eight once a runtime has announced Direct3D 9 (the
- * samplers and coordinate sets of shader model 2, which the stage program uses). */
-static ULONG stage_limit(const DISPLAY *d)
-{
-    return d->d7draw.d8Version >= 0x900 ? RB2K_D8_STAGES : RB_PS_COORD_SETS;
-}
-
-/* Direct3D 8 fixed-function stages, drawn by the stage program (rb_stage_translate):
- * up to stage_limit, with any operation up to DOTPRODUCT3 except PREMODULATE, and bump
- * mapping only as a colour operation. Texture matrices and bump matrices have constants
- * for the first RB_STAGE_TRANSFORMS stages only. */
+/* Direct3D 8 and 9 fixed-function stages, drawn by the stage program (rb_stage_translate):
+ * all eight (TextureStages, the samplers and coordinate sets of the shader model 2 programs it
+ * emits), with any operation up to DOTPRODUCT3 except PREMODULATE, and bump mapping only as a
+ * colour operation. Texture matrices and bump matrices have constants for the first
+ * RB_STAGE_TRANSFORMS stages only. */
 static BOOL d3d8_stages_valid(const D7_CONTEXT *c)
 {
-    ULONG i, k, limit = stage_limit(c->display);
+    ULONG i, k;
     for (i = 0; i < TextureStages && c->stages[i].colorOp != D3DTOP_DISABLE; ++i) {
         const D7_STAGE *s = &c->stages[i];
         const ULONG args[4] = { s->colorArg1, s->colorArg2, s->alphaArg1, s->alphaArg2 };
-        if (i >= limit || s->colorOp == D3DTOP_PREMODULATE || s->colorOp > D3DTOP_DOTPRODUCT3 ||
+        if (s->colorOp == D3DTOP_PREMODULATE || s->colorOp > D3DTOP_DOTPRODUCT3 ||
             s->alphaOp == D3DTOP_PREMODULATE || (s->alphaOp >= D3DTOP_BUMPENVMAP && s->alphaOp != D3DTOP_DOTPRODUCT3))
             return FALSE;
         if (i >= RB_STAGE_TRANSFORMS && ((s->transform & (0xff | RB_TTFF_PROJECTED)) ||
@@ -1760,7 +1757,11 @@ static BOOL scaled_points(const D7_CONTEXT *c, ULONG fvf)
  * them (D3DFVF_PSIZE, which Direct3D 7 has as a reserved word), or they are scaled. */
 static BOOL sized_points(const D7_CONTEXT *c, const PRIMS *p)
 {
-    return p->kind == Points && c->dx8 && !(p->fvf & 1) && ((p->fvf & D3DFVF_RESERVED1) || scaled_points(c, p->fvf));
+    /* Transformed points all go that way too: its shader places them as Direct3D does (origin_bits
+     * in the miniport says how; object-space points get that through their viewport constant). */
+    return p->kind == Points && c->dx8 && !(p->fvf & 1) &&
+           ((p->fvf & D3DFVF_RESERVED1) || scaled_points(c, p->fvf) ||
+            (p->fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZRHW);
 }
 
 static void point_state(const D7_CONTEXT *c, ULONG per, ULONG *size, ULONG *flags)
@@ -1955,6 +1956,28 @@ static void fog_draw(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, BOOL objectSpace)
  * another type, or past the eighth, is left out and its draw counted. A
  * material source falls back to the material when the vertex lacks that
  * colour, as Direct3D does. */
+/* The slot of the light a program numbered index: the slot that has it; else, when make, a free
+ * slot, or one whose light is switched off (that light's data is forgotten). MaxLights when there
+ * is none: more lights than slots are switched on at once. */
+static ULONG light_slot(D7_CONTEXT *c, ULONG index, BOOL make)
+{
+    ULONG k, off = MaxLights;
+    for (k = 0; k < MaxLights; ++k)
+        if ((c->lightUsed & (1UL << k)) && c->lightIndex[k] == index) return k;
+    if (!make) return MaxLights;
+    for (k = 0; k < MaxLights; ++k) {
+        if (!(c->lightUsed & (1UL << k))) break;
+        if (off == MaxLights && !(c->lightOn & (1UL << k))) off = k;
+    }
+    if (k == MaxLights) k = off;
+    if (k == MaxLights) return MaxLights;
+    c->lightUsed |= 1UL << k;
+    c->lightOn &= ~(1UL << k);
+    c->lightIndex[k] = index;
+    RtlZeroMemory(c->lights[k], sizeof(c->lights[k]));
+    return k;
+}
+
 static void light_draw(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, BOOL hasDiffuse, BOOL hasSpecular, ULONG primitives)
 {
     ULONG k, flags = 0;
@@ -2078,8 +2101,11 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         skip_vertex(c, p->primitives, 1);
         return DD_OK;
     }
-    /* Generated texture coordinates (site 18) and texture transforms (19). */
-    if ((st->coordIndex >> 16) || (draw->stage1Color && (st1->coordIndex >> 16))) {
+    /* Generated texture coordinates (site 18) and texture transforms (19). Direct3D generates
+     * coordinates while it transforms vertices: a transformed vertex keeps its own, and a stage
+     * that reads no texture needs none. */
+    if (objectSpace && ((needTexture && (st->coordIndex >> 16)) ||
+                        (draw->stage1Color && needTexture1 && (st1->coordIndex >> 16)))) {
         skip_vertex(c, p->primitives, 18);
         return DD_OK;
     }
@@ -2842,9 +2868,11 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
             }
         offset += 4 * n;
     }
-    /* Generated coordinates are not applied yet, nor texture transforms with a
-     * pixel shader (the fixed-function program applies them). */
-    for (k = 0; k < RB2K_D8_STAGES; ++k)
+    /* Generated coordinates are not applied yet, nor texture transforms with a pixel shader (the
+     * fixed-function program applies them). Both are part of Direct3D's own vertex processing: a
+     * transformed vertex, the program's or one the runtime shaded in software, keeps the
+     * coordinates it has, whatever the stages still say. */
+    for (k = 0; objectSpace && k < RB2K_D8_STAGES; ++k)
         if ((sh->coords & (1UL << k)) && ((c->stages[k].coordIndex >> 16) || (!fixed && (c->stages[k].transform & 0xff))))
             offset = 0xffffffff;
     if (offset > stride || stride > 256) { skip_vertex(c, p->primitives, 8); return DD_OK; }
@@ -3145,24 +3173,51 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
  * draws: Direct3D 8 declaration tokens, which map each element to the input
  * register the shader's dcl statement gives its usage, and the code without
  * those statements. */
-enum { MaxDecls = 256, MaxFuncs = 512, MaxPairs = 512, D9PairHandle = 0x40000001 };
-struct D9_DECL { ULONG handle, count; RB_VERTEX_ELEMENT9 *elements; };
+enum { TableStart = 256, TableMost = 1 << 16, MaxPairs = 512, D9PairHandle = 0x40000001 };
+/* same: the handle of the first declaration made with these very elements (its own when it is
+ * that first one). A program makes a declaration for every mesh, hundreds of them with a few
+ * layouts between them; the shaders made from a declaration and a function are kept under the
+ * first, so that they are made once for a layout. */
+struct D9_DECL { ULONG handle, count, same; RB_VERTEX_ELEMENT9 *elements; };
 typedef char rb_d9_element_layout[sizeof(RB_VERTEX_ELEMENT9) == sizeof(RB_D9_ELEMENT) ? 1 : -1];
+typedef char rb_d9_element_words[sizeof(RB_VERTEX_ELEMENT9) == 2 * sizeof(ULONG) ? 1 : -1];
 struct D9_FUNC { ULONG handle, count; ULONG *tokens; };
-struct D9_PAIR { ULONG decl, func, vs; };
+struct D9_PAIR { ULONG decl, func, vs; };   /* decl: a declaration's same */
 
 static BOOL d9_tables(D7_CONTEXT *c)
 {
-    if (!c->decls) c->decls = EngAllocMem(FL_ZERO_MEMORY, MaxDecls * sizeof(*c->decls), 'd9bR');
-    if (!c->funcs) c->funcs = EngAllocMem(FL_ZERO_MEMORY, MaxFuncs * sizeof(*c->funcs), 'f9bR');
     if (!c->pairs) c->pairs = EngAllocMem(FL_ZERO_MEMORY, MaxPairs * sizeof(*c->pairs), 'p9bR');
-    return c->decls && c->funcs && c->pairs;
+    return c->pairs != NULL;
 }
 
-/* Forget the shaders made from a declaration or function handle (0 matches none). */
+/* A free record (its first word, the handle, is 0) of a table that doubles when it is full, from
+ * TableStart records up to TableMost; ~0 without room or memory. Tables of a fixed size were too
+ * small: the 257th declaration of a device was dropped and every draw with it left out, and
+ * 3DMark03's Mother Nature makes more than 500. */
+static ULONG d9_slot(void **table, ULONG *room, ULONG size, ULONG tag)
+{
+    ULONG i, more;
+    void *bigger;
+    for (i = 0; i < *room; ++i) if (!*(const ULONG *)((const BYTE *)*table + i * size)) return i;
+    more = *room ? *room * 2 : TableStart;
+    if (more > TableMost) return ~0UL;
+    bigger = EngAllocMem(FL_ZERO_MEMORY, more * size, tag);
+    if (!bigger) return ~0UL;
+    if (*table) {
+        RtlCopyMemory(bigger, *table, *room * size);
+        EngFreeMem(*table);
+    }
+    *table = bigger;
+    i = *room;
+    *room = more;
+    return i;
+}
+
+/* Forget the shaders made from a declaration (by its same) or function handle (0 matches none). */
 static void d9_forget(D7_CONTEXT *c, ULONG decl, ULONG func)
 {
     ULONG i;
+    c->pairVs = 0;
     for (i = 0; c->pairs && i < MaxPairs; ++i) {
         struct D9_PAIR *q = &c->pairs[i];
         if (!q->vs || ((!decl || q->decl != decl) && (!func || q->func != func))) continue;
@@ -3177,22 +3232,35 @@ static void d9_forget(D7_CONTEXT *c, ULONG decl, ULONG func)
 static struct D9_DECL *d9_decl(D7_CONTEXT *c, ULONG handle)
 {
     ULONG i;
-    for (i = 0; c->decls && handle && i < MaxDecls; ++i) if (c->decls[i].handle == handle) return &c->decls[i];
+    for (i = 0; handle && i < c->declRoom; ++i) if (c->decls[i].handle == handle) return &c->decls[i];
     return NULL;
 }
 
 static struct D9_FUNC *d9_func(D7_CONTEXT *c, ULONG handle)
 {
     ULONG i;
-    for (i = 0; c->funcs && handle && i < MaxFuncs; ++i) if (c->funcs[i].handle == handle) return &c->funcs[i];
+    for (i = 0; handle && i < c->funcRoom; ++i) if (c->funcs[i].handle == handle) return &c->funcs[i];
     return NULL;
 }
 
 static void d9_delete_decl(D7_CONTEXT *c, ULONG handle)
 {
-    struct D9_DECL *e = d9_decl(c, handle);
-    d9_forget(c, handle, 0);
+    struct D9_DECL *e = d9_decl(c, handle), *heir = NULL;
+    ULONG i;
+    c->pairVs = 0;
     if (!e) return;
+    if (e->same == handle) {
+        /* The first of its layout: the next one with it takes over, and the shaders with it. */
+        for (i = 0; i < c->declRoom; ++i) {
+            struct D9_DECL *o = &c->decls[i];
+            if (o == e || !o->handle || o->same != handle) continue;
+            if (!heir) heir = o;
+            o->same = heir->handle;
+        }
+        if (!heir) d9_forget(c, handle, 0);
+        else for (i = 0; c->pairs && i < MaxPairs; ++i)
+            if (c->pairs[i].vs && c->pairs[i].decl == handle) c->pairs[i].decl = heir->handle;
+    }
     if (e->elements) EngFreeMem(e->elements);
     RtlZeroMemory(e, sizeof(*e));
 }
@@ -3209,27 +3277,42 @@ static void d9_delete_func(D7_CONTEXT *c, ULONG handle)
 static void d9_create_decl(D7_CONTEXT *c, ULONG handle, const RB_VERTEX_ELEMENT9 *elements, ULONG count)
 {
     struct D9_DECL *e;
-    ULONG i;
+    void *table;
+    ULONG i, k, w;
     if (!d9_tables(c) || !handle) return;
     d9_delete_decl(c, handle);
-    for (i = 0; i < MaxDecls && c->decls[i].handle; ++i) {}
-    if (i == MaxDecls || !count) return;
+    if (!count) return;
+    table = c->decls;
+    i = d9_slot(&table, &c->declRoom, sizeof(*c->decls), 'd9bR');
+    c->decls = table;
+    if (i == ~0UL) return;
     e = &c->decls[i];
     e->elements = EngAllocMem(0, count * sizeof(*elements), 'e9bR');
     if (!e->elements) return;
     RtlCopyMemory(e->elements, elements, count * sizeof(*elements));
-    e->handle = handle;
     e->count = count;
+    e->same = handle;
+    for (k = 0; k < c->declRoom; ++k) {
+        const struct D9_DECL *o = &c->decls[k];
+        if (!o->handle || o->count != count) continue;
+        for (w = 0; w < 2 * count && ((const ULONG *)o->elements)[w] == ((const ULONG *)elements)[w]; ++w) {}
+        if (w == 2 * count) { e->same = o->same; break; }
+    }
+    e->handle = handle;
 }
 
 static void d9_create_func(D7_CONTEXT *c, ULONG handle, const ULONG *tokens, ULONG bytes)
 {
     struct D9_FUNC *f;
+    void *table;
     ULONG i;
     if (!d9_tables(c) || !handle) return;
     d9_delete_func(c, handle);
-    for (i = 0; i < MaxFuncs && c->funcs[i].handle; ++i) {}
-    if (i == MaxFuncs || bytes < 8 || bytes % 4) return;
+    if (bytes < 8 || bytes % 4) return;
+    table = c->funcs;
+    i = d9_slot(&table, &c->funcRoom, sizeof(*c->funcs), 'f9bR');
+    c->funcs = table;
+    if (i == ~0UL) return;
     f = &c->funcs[i];
     f->tokens = EngAllocMem(0, bytes, 'c9bR');
     if (!f->tokens) return;
@@ -3257,16 +3340,15 @@ static ULONG d9_vshader(D7_CONTEXT *c)
     struct D9_FUNC *fn;
     ULONG i, free = MaxPairs, declWords, codeWords, *buffer;
     /* The pair of the last draw: a pair lives only while its declaration and function do. */
-    if (c->pairs && c->declHandle && c->funcHandle && c->pairs[c->pairLast].vs &&
-        c->pairs[c->pairLast].decl == c->declHandle && c->pairs[c->pairLast].func == c->funcHandle)
-        return c->pairs[c->pairLast].vs;
+    if (c->pairVs && c->pairDecl == c->declHandle && c->pairFunc == c->funcHandle) return c->pairVs;
     dl = d9_decl(c, c->declHandle);
     fn = d9_func(c, c->funcHandle);
     if (!dl || !fn || !d9_tables(c)) return 0;
     for (i = 0; i < MaxPairs; ++i) {
-        if (c->pairs[i].vs && c->pairs[i].decl == dl->handle && c->pairs[i].func == fn->handle) {
-            c->pairLast = i;
-            return c->pairs[i].vs;
+        if (c->pairs[i].vs && c->pairs[i].decl == dl->same && c->pairs[i].func == fn->handle) {
+            c->pairDecl = c->declHandle;
+            c->pairFunc = c->funcHandle;
+            return c->pairVs = c->pairs[i].vs;
         }
         if (!c->pairs[i].vs && free == MaxPairs) free = i;
     }
@@ -3277,9 +3359,12 @@ static ULONG d9_vshader(D7_CONTEXT *c)
         ULONG handle = D9PairHandle + 2 * free;
         create_vshader(c, handle, (const BYTE *)buffer, declWords * 4, codeWords * 4);
         if (find_vshader(c, handle)) {
-            c->pairs[free].decl = dl->handle;
+            c->pairs[free].decl = dl->same;
             c->pairs[free].func = fn->handle;
             c->pairs[free].vs = handle;
+            c->pairDecl = c->declHandle;
+            c->pairFunc = c->funcHandle;
+            c->pairVs = handle;
         }
     }
     EngFreeMem(buffer);
@@ -3383,14 +3468,15 @@ static void d9_fill(D7_CONTEXT *c, const RB_DP2_COLOR_FILL *f)
 static void d9_release(D7_CONTEXT *c)
 {
     ULONG i;
-    for (i = 0; c->decls && i < MaxDecls; ++i) if (c->decls[i].elements) EngFreeMem(c->decls[i].elements);
-    for (i = 0; c->funcs && i < MaxFuncs; ++i) if (c->funcs[i].tokens) EngFreeMem(c->funcs[i].tokens);
+    for (i = 0; i < c->declRoom; ++i) if (c->decls[i].elements) EngFreeMem(c->decls[i].elements);
+    for (i = 0; i < c->funcRoom; ++i) if (c->funcs[i].tokens) EngFreeMem(c->funcs[i].tokens);
     if (c->decls) EngFreeMem(c->decls);
     if (c->funcs) EngFreeMem(c->funcs);
     if (c->pairs) EngFreeMem(c->pairs);
     c->decls = NULL;
     c->funcs = NULL;
     c->pairs = NULL;
+    c->declRoom = c->funcRoom = c->pairVs = 0;
 }
 
 /* ---- Direct3D 8 streams ---- */
@@ -4341,6 +4427,59 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
     ++d->d7draw.texBlts;
 }
 
+/* A whole number below 2^24 as an IEEE single (the display driver uses no floating point). */
+static ULONG whole_bits(ULONG v)
+{
+    ULONG shift = 0, t = v;
+    if (!v) return 0;
+    while (t >>= 1) ++shift;
+    return ((127 + shift) << 23) | ((v ^ (1UL << shift)) << (23 - shift));
+}
+
+/* A clear of part of the target. The host's clear always covers a whole target (virglrenderer
+ * switches the scissor test off for it), so the part is drawn: one rectangle over the whole
+ * target in the clear's colour and depth, cut to the part by the scissor rectangle, with the
+ * depth test passing always and the stencil value replaced whatever the stencil test says. */
+static HRESULT part_clear(D7_CONTEXT *c, const DD_SLOT *s, const DD_SLOT *z, ULONG flags, ULONG color,
+                          ULONG depthBits, ULONG stencil, LONG x0, LONG y0, LONG x1, LONG y1)
+{
+    static const UCHAR right[6] = { 0, 1, 0, 0, 1, 1 }, low[6] = { 0, 0, 1, 1, 0, 1 };
+    RB2K_D3D7_DRAW *draw = &c->draw;
+    ULONG i;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (LONG)s->width) x1 = s->width;
+    if (y1 > (LONG)s->height) y1 = s->height;
+    if (x1 <= x0 || y1 <= y0) return DD_OK;     /* nothing of the target */
+    RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D7_DRAW, vertices));
+    draw->target = s->id;
+    draw->depth = (flags & (D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL)) && z ? z->id : 0;
+    draw->primitive = RB2K_PRIM_TRIANGLES;
+    draw->pointSize = 0x3f800000UL;
+    draw->cull = D3DCULL_NONE;
+    draw->colorStage = draw->alphaStage = D3DTOP_SELECTARG1 | D3DTA_DIFFUSE << 8;
+    draw->sampler = draw->sampler1 = 0x1111;    /* no texture; the packet still wants valid sampler words */
+    if (!(flags & D3DCLEAR_TARGET)) draw->blend = RB2K_BLEND_NO_WRITE;
+    if (flags & D3DCLEAR_ZBUFFER) draw->depthState = RB2K_Z_ENABLE | RB2K_Z_WRITE | (D3DCMP_ALWAYS - 1);
+    if (flags & D3DCLEAR_STENCIL) {
+        /* Always passes; fail, depth-fail and pass all replace (Gallium's operation 2). */
+        draw->stencil = RB2K_STENCIL_ON | (D3DCMP_ALWAYS - 1) | 2UL << 4 | 2UL << 8 | 2UL << 12;
+        draw->stencilRef = (stencil & 255) | 0xffUL << 8 | 0xffUL << 16;
+    }
+    draw->scissorOn = 1;
+    draw->scissor[0] = x0; draw->scissor[1] = y0; draw->scissor[2] = x1; draw->scissor[3] = y1;
+    for (i = 0; i < 6; ++i) {
+        RB2K_D3D7_VERTEX *v = &draw->vertices[i];
+        RtlZeroMemory(v, sizeof(*v));
+        v->x = right[i] ? whole_bits(s->width) : 0;
+        v->y = low[i] ? whole_bits(s->height) : 0;
+        v->z = flags & D3DCLEAR_ZBUFFER ? depthBits : 0;
+        v->rhw = 0x3f800000UL;
+        v->diffuse = color;
+    }
+    return send_batch(c, draw, 6);
+}
+
 static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, ULONG depthBits, ULONG stencil, const RECT *rects,
                      ULONG count)
 {
@@ -4348,6 +4487,7 @@ static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, ULONG depthBits, U
     RB2K_DD_FILL f;
     ULONG written;
     BOOL small;
+    ULONG cut = 0, cutRect[4];
     HRESULT hr = target_surfaces(c, &s, &z, &small);
     if (FAILED(hr)) return hr;
     /* A depth buffer smaller than the target is not cleared with it: the colour clear goes
@@ -4360,11 +4500,29 @@ static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, ULONG depthBits, U
     /* Without a stencil buffer a stencil clear has nothing to clear. */
     if ((flags & D3DCLEAR_STENCIL) && (!z || !z->stencil)) flags &= ~D3DCLEAR_STENCIL;
     if (!flags) return DD_OK;
-    /* Part-target clears are not drawn yet. */
+    /* Flags this driver does not know, a depth clear without a depth buffer, or no rectangle. */
     if ((flags & ~(D3DCLEAR_TARGET|D3DCLEAR_ZBUFFER|D3DCLEAR_STENCIL)) || ((flags & D3DCLEAR_ZBUFFER) && !z) ||
-        count != 1 || !rects || rects->left || rects->top ||
-        rects->right != (LONG)s->width || rects->bottom != (LONG)s->height) {
+        !count || !rects) {
         ++c->display->d7draw.skipped[RB2K_D7_SKIP_CLEAR];
+        return DD_OK;
+    }
+    /* A part of the target (a smaller viewport, rectangles, or the Direct3D 9 scissor test, which
+     * cuts clears too) is drawn. */
+    scissor_words(c, &cut, cutRect);
+    if (count != 1 || cut || rects->left > 0 || rects->top > 0 ||
+        rects->right < (LONG)s->width || rects->bottom < (LONG)s->height) {
+        ULONG i;
+        for (i = 0; i < count; ++i) {
+            LONG x0 = rects[i].left, y0 = rects[i].top, x1 = rects[i].right, y1 = rects[i].bottom;
+            if (cut) {
+                if (x0 < (LONG)cutRect[0]) x0 = cutRect[0];
+                if (y0 < (LONG)cutRect[1]) y0 = cutRect[1];
+                if (x1 > (LONG)cutRect[2]) x1 = cutRect[2];
+                if (y1 > (LONG)cutRect[3]) y1 = cutRect[3];
+            }
+            hr = part_clear(c, s, z, flags, color, depthBits, stencil, x0, y0, x1, y1);
+            if (FAILED(hr)) return hr;
+        }
         return DD_OK;
     }
     if (z) {
@@ -4945,22 +5103,24 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
         }
         case D3DNTDP2OP_SETLIGHT: {
             /* Enable, disable, or set the D3DLIGHT7 that follows the record.
-             * Lights past MaxLights are not drawn. */
+             * A light is kept by its number in one of MaxLights slots (light_slot); a light that
+             * finds no slot is counted (lightsBeyond) and not drawn. */
             ULONG k;
             used = 0;
             for (k = 0; k < n; ++k) {
                 const D3DNTHAL_DP2SETLIGHT *l = (const D3DNTHAL_DP2SETLIGHT *)(p + used);
-                ULONG index;
+                ULONG index, slot;
                 if (remaining - min(remaining, used) < sizeof(*l)) return DDERR_INVALIDPARAMS;
                 used += sizeof(*l);
                 index = l->dwIndex;
+                slot = light_slot(c, index, l->lightData != SetLightDisable);
                 if (l->lightData == SetLightData) {
                     if (remaining - min(remaining, used) < sizeof(D3DLIGHT7)) return DDERR_INVALIDPARAMS;
-                    if (index < MaxLights) RtlCopyMemory(c->lights[index], p + used, sizeof(c->lights[index]));
+                    if (slot < MaxLights) RtlCopyMemory(c->lights[slot], p + used, sizeof(c->lights[slot]));
                     used += sizeof(D3DLIGHT7);
-                } else if (index < MaxLights && l->lightData == SetLightEnable) c->lightOn |= 1UL << index;
-                else if (index < MaxLights && l->lightData == SetLightDisable) c->lightOn &= ~(1UL << index);
-                if (index >= MaxLights) ++c->display->d7draw.lightsBeyond;
+                } else if (slot < MaxLights && l->lightData == SetLightEnable) c->lightOn |= 1UL << slot;
+                else if (slot < MaxLights && l->lightData == SetLightDisable) c->lightOn &= ~(1UL << slot);
+                if (slot == MaxLights && l->lightData != SetLightDisable) ++c->display->d7draw.lightsBeyond;
             }
             break;
         }
@@ -5650,10 +5810,12 @@ static void d8_caps(const DISPLAY *d, RB_D3DCAPS8 *c, const D3DNTHAL_D3DEXTENDED
      * announced itself as Direct3D 9, which uses this record for drivers of
      * the Direct3D 8 interface. */
     c->pixelShaderVersion = d->d7draw.d8Version >= 0x900 ? 0xffff0200 : 0xffff0104;   /* 1.4 for Direct3D 8 programs */
-    c->maxSimultaneousTextures = max(stage_limit(d), 6UL);   /* pixel shader 1.4 samples six */
     /* The fixed-function stages run as a stage program (d3d8_stages_valid), which also
-     * does bump mapping. */
-    c->maxTextureBlendStages = stage_limit(d);
+     * does bump mapping. Eight stages for every runtime: the Direct3D 8 runtime hands the driver
+     * no texture for a stage at or past the blend stages offered, and a version 1.4 pixel shader
+     * reads six. */
+    c->maxSimultaneousTextures = RB2K_D8_STAGES;
+    c->maxTextureBlendStages = RB2K_D8_STAGES;
     c->textureOpCaps |= D3DTEXOPCAPS_BUMPENVMAP | D3DTEXOPCAPS_BUMPENVMAPLUMINANCE;
     c->maxPixelShaderValue = 0x3f800000;            /* 1 */
     if (d->d3d9Ddi && d->d7draw.d8Version >= 0x900) d9_ddi_caps(c);
@@ -5907,6 +6069,62 @@ ULONG rb_d7_stats(DISPLAY *d, ULONG bytes, PVOID out)
     return 1;
 }
 
+/* The counts a test or benchmark run fails on (rbskips.h), summed from the draw statistics. A
+ * development check: a build with RB2K_DEVCHECKS=0 (release packages) has no such query. */
+#if RB2K_DEVCHECKS
+/* What displays that are gone had skipped. Windows makes a new display record at every mode
+ * change, and a benchmark that changes modes between its tests would otherwise forget what its
+ * earlier tests skipped. */
+static ULONG skipsGone[RB2K_SKIP_KINDS], skippedGone[RB2K_D7_SKIPS], sitesGone[RB2K_D7_VERTEX_SITES];
+
+/* A display's own counts by kind, added to count. */
+static void skips_add(const RB2K_D7_DRAWSTATS *t, ULONG *count)
+{
+    ULONG i;
+    for (i = 0; i < RB2K_D7_SKIPS; ++i)
+        count[i == RB2K_D7_SKIP_CLEAR ? RB2K_SKIP_KIND_CLEARS : RB2K_SKIP_KIND_DRAWS] += t->skipped[i];
+    for (i = 0; i < RB2K_D7_IGNORED; ++i) count[RB2K_SKIP_KIND_STATES] += t->ignored[i];
+    for (i = 0; i < 8; ++i) {
+        count[RB2K_SKIP_KIND_STATES] += t->d9Ignored[i];
+        count[RB2K_SKIP_KIND_SHADERS] += t->psFailed[i] + t->vsFailed[i];
+    }
+    count[RB2K_SKIP_KIND_STATES] += t->lightsBeyond;      /* lights that found no slot */
+    count[RB2K_SKIP_KIND_SHADERS] += t->stageFailed;
+    count[RB2K_SKIP_KIND_FORMATS] += t->d9Unresolved;
+    count[RB2K_SKIP_KIND_SURFACES] += t->surfaceRefusals + t->texBltFailures + t->uploadFailures + t->checkFailures;
+    count[RB2K_SKIP_KIND_CALLS] += t->dp2Failures + t->drawFailures;
+}
+
+/* A display record is going (DrvDisablePDEV): keep its counts, and the reasons and places of its
+ * skipped draws for d7draw.exe (rb_d7_drawstats adds them to the display's own). */
+void rb_d7_skips_keep(DISPLAY *d)
+{
+    skips_add(&d->d7draw, skipsGone);
+    {
+        ULONG i;
+        for (i = 0; i < RB2K_D7_SKIPS; ++i) skippedGone[i] += d->d7draw.skipped[i];
+        for (i = 0; i < RB2K_D7_VERTEX_SITES; ++i) sitesGone[i] += d->d7draw.vertexSites[i];
+    }
+}
+
+ULONG rb_d7_skips(DISPLAY *d, ULONG bytes, PVOID out)
+{
+    RB2K_SKIPS s;
+    ULONG count[RB2K_SKIP_KINDS], i;
+    if (!d->ddLock || bytes != sizeof(s) || !out) return 0;
+    RtlZeroMemory(&s, sizeof(s));
+    s.version = RB2K_SKIPS_VERSION;
+    EngAcquireSemaphore(d->ddLock);
+    RtlCopyMemory(count, skipsGone, sizeof(count));
+    skips_add(&d->d7draw, count);
+    count[RB2K_SKIP_KIND_SHADERS] += hostProgramFails.count;
+    EngReleaseSemaphore(d->ddLock);
+    for (i = 0; i < RB2K_SKIP_KINDS; ++i) s.count[i] = count[i];
+    RtlCopyMemory(out, &s, sizeof(s));
+    return 1;
+}
+#endif
+
 ULONG rb_d7_drawstats(DISPLAY *d, ULONG bytes, PVOID out)
 {
     if (!registry || !d->ddLock || bytes != sizeof(RB2K_D7_DRAWSTATS)) return 0;
@@ -5920,6 +6138,10 @@ ULONG rb_d7_drawstats(DISPLAY *d, ULONG bytes, PVOID out)
     {
         RB2K_D7_DRAWSTATS *o = out;
         ULONG i;
+#if RB2K_DEVCHECKS
+        for (i = 0; i < RB2K_D7_SKIPS; ++i) o->skipped[i] += skippedGone[i];
+        for (i = 0; i < RB2K_D7_VERTEX_SITES; ++i) o->vertexSites[i] += sitesGone[i];
+#endif
         o->hostDraws += hostGone.draws; o->hostBuffers += hostGone.buffers; o->hostSummed += hostGone.summed;
         o->hostUploads += hostGone.uploads; o->hostUploadBytes += hostGone.uploadBytes; o->hostScans += hostGone.scans;
         o->hostScanHits += hostGone.scanHits; o->hostRewrites += hostGone.rewrites; o->hostStreamed += hostGone.streamed;

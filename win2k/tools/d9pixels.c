@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "drvcheck.h"
 
 enum { Side = 128 };
 #define CLEAR_COLOR 0xff000066UL
@@ -31,6 +32,9 @@ typedef struct { int x, y; DWORD rgb; } SAMPLE;
 static IDirect3D9 *d3d;
 static IDirect3DDevice9 *device;
 static int passes, failures;
+/* Pixels of a case that may differ from the reference picture: 1 in 1000. On the first run 99 of 107
+ * cases differed in no pixel at all; a shape that is one pixel off differs in about 30. */
+enum { RefLimit = Side * Side / 1000 };
 
 static void fail_hr(const char *name, const char *what, HRESULT hr)
 {
@@ -63,7 +67,9 @@ static void check(const char *name, const SAMPLE *s, int count)
     IDirect3DSurface9 *back = NULL;
     D3DLOCKED_RECT r;
     HRESULT hr = IDirect3DDevice9_EndScene(device);
-    int i, bad = 0;
+    int i, bad = 0, worst = 0;
+    long differ;
+    unsigned long skipped;
     if (FAILED(hr)) { fail_hr(name, "end", hr); return; }
     hr = IDirect3DDevice9_GetBackBuffer(device, 0, 0, D3DBACKBUFFER_TYPE_MONO, &back);
     if (FAILED(hr)) { fail_hr(name, "backbuffer", hr); return; }
@@ -83,10 +89,20 @@ static void check(const char *name, const SAMPLE *s, int count)
             ++bad;
         }
     }
+    /* The automatic checks (drvcheck.h): the picture against the reference rasterizer's, and what
+     * the driver skipped while the case ran. Either fails the case. */
+    differ = ref_case(name, r.pBits, r.Pitch, Side, &worst);
     IDirect3DSurface9_UnlockRect(back);
     IDirect3DSurface9_Release(back);
-    printf("D9PIX case=%s samples=%d mismatches=%d\n", name, count, bad);
-    if (bad) ++failures; else ++passes;
+    skipped = skips_case("D9PIX", name);
+    if (refMode == RefCompare && differ >= 0) {
+        printf("D9PIX case=%s samples=%d mismatches=%d ref_differ=%ld ref_worst=%d\n", name, count, bad, differ, worst);
+        if (differ > RefLimit) {
+            ++refFailed;
+            printf("D9PIX case=%s differs first at=%d,%d ours=%06lx reference=%06lx\n", name, refAtX, refAtY, refMine, refTheirs);
+        }
+    } else printf("D9PIX case=%s samples=%d mismatches=%d\n", name, count, bad);
+    if (bad || skipped || (refMode == RefCompare && differ > RefLimit)) ++failures; else ++passes;
 }
 
 static void case_clear(void)
@@ -693,7 +709,7 @@ static void point_variant_cases(int only, BOOL offered, BOOL planes)
     }
 }
 
-/* 96: depth bias (D3DRS_DEPTHBIAS, a float added to a polygon's depth in units of the depth
+/* 106: depth bias (D3DRS_DEPTHBIAS, a float added to a polygon's depth in units of the depth
  * range). A red quad; then a green one in the same plane with a bias of -0.0005, which the depth
  * test LESS would refuse everywhere without it; then a blue one a little nearer without bias,
  * which must still cover the green: the bias is small beside any real distance. */
@@ -705,7 +721,7 @@ static void depth_bias_case(int only, BOOL offered)
     HRESULT hr;
     float f;
     int i;
-    if (only && only != 96) return;
+    if (only && only != 106) return;
     if (!offered) { printf("D9PIX depth bias not offered\n"); return; }
     hr = IDirect3DDevice9_CreateDepthStencilSurface(device, Side, Side, D3DFMT_D16, D3DMULTISAMPLE_NONE, 0, TRUE, &depth, NULL);
     if (FAILED(hr)) { fail_hr("depth_bias", "create", hr); return; }
@@ -741,7 +757,7 @@ static void depth_bias_case(int only, BOOL offered)
     IDirect3DSurface9_Release(depth);
 }
 
-/* 97: blend operations (D3DRS_BLENDOP): over a quad of (c0, 40, 20) four strips of grey
+/* 107: blend operations (D3DRS_BLENDOP): over a quad of (c0, 40, 20) four strips of grey
  * (80, 80, 80) with both blend factors ONE: source minus destination, destination minus source,
  * the minimum and the maximum of the two. */
 static void blend_op_case(int only, BOOL offered)
@@ -752,7 +768,7 @@ static void blend_op_case(int only, BOOL offered)
     TLVERTEX v[6];
     HRESULT hr;
     int i;
-    if (only && only != 97) return;
+    if (only && only != 107) return;
     if (!offered) { printf("D9PIX blend operations not offered\n"); return; }
     if (!begin("blend_op")) return;
     IDirect3DDevice9_SetTexture(device, 0, NULL);
@@ -773,6 +789,60 @@ static void blend_op_case(int only, BOOL offered)
     IDirect3DDevice9_SetRenderState(device, D3DRS_ALPHABLENDENABLE, FALSE);
     if (FAILED(hr)) { fail_hr("blend_op", "draw", hr); IDirect3DDevice9_EndScene(device); }
     else check("blend_op", s, 6);
+}
+
+/* 96: lights with numbers of the program's own choosing (1000, and one at 2000000 that is switched
+ * off again): Direct3D lets a program number its lights as it likes, and some count far past the
+ * first few. An untransformed quad lit from the material by a white directional light at number
+ * 1000: half red, a quarter green, full blue. */
+static void far_light_case(int only)
+{
+    static const struct { float x, y, z, nx, ny, nz; } q[6] = {
+        { -0.5f, 0.5f, 0.5f, 0, 0, -1 }, { 0.5f, 0.5f, 0.5f, 0, 0, -1 }, { -0.5f, -0.5f, 0.5f, 0, 0, -1 },
+        { -0.5f, -0.5f, 0.5f, 0, 0, -1 }, { 0.5f, 0.5f, 0.5f, 0, 0, -1 }, { 0.5f, -0.5f, 0.5f, 0, 0, -1 } };
+    SAMPLE s[4];
+    D3DMATERIAL9 m;
+    D3DLIGHT9 l;
+    D3DMATRIX identity;
+    HRESULT hr;
+    int i;
+    if (only && only != 96) return;
+    for (i = 0; i < 3; ++i) { s[i].x = s[i].y = 48 + 16 * i; s[i].rgb = rgb(0.5f, 0.25f, 1.0f); }
+    s[3].x = s[3].y = 8; s[3].rgb = CLEAR_COLOR;
+    memset(&m, 0, sizeof(m));
+    m.Diffuse.r = 0.5f; m.Diffuse.g = 0.25f; m.Diffuse.b = 1.0f; m.Diffuse.a = 1.0f;
+    memset(&l, 0, sizeof(l));
+    l.Type = D3DLIGHT_DIRECTIONAL;
+    l.Diffuse.r = l.Diffuse.g = l.Diffuse.b = l.Diffuse.a = 1.0f;
+    l.Direction.z = 1.0f;
+    memset(&identity, 0, sizeof(identity));
+    identity._11 = identity._22 = identity._33 = identity._44 = 1.0f;
+    IDirect3DDevice9_SetTransform(device, D3DTS_WORLD, &identity);
+    IDirect3DDevice9_SetTransform(device, D3DTS_VIEW, &identity);
+    IDirect3DDevice9_SetTransform(device, D3DTS_PROJECTION, &identity);
+    IDirect3DDevice9_SetMaterial(device, &m);
+    IDirect3DDevice9_LightEnable(device, 0, FALSE);     /* an earlier case leaves light 0 on */
+    IDirect3DDevice9_SetLight(device, 1000, &l);
+    IDirect3DDevice9_LightEnable(device, 1000, TRUE);
+    l.Diffuse.g = l.Diffuse.b = 0.0f;       /* a red one that must not light anything */
+    IDirect3DDevice9_SetLight(device, 2000000, &l);
+    IDirect3DDevice9_LightEnable(device, 2000000, TRUE);
+    IDirect3DDevice9_LightEnable(device, 2000000, FALSE);
+    IDirect3DDevice9_SetRenderState(device, D3DRS_LIGHTING, TRUE);
+    IDirect3DDevice9_SetRenderState(device, D3DRS_AMBIENT, 0);
+    IDirect3DDevice9_SetRenderState(device, D3DRS_COLORVERTEX, FALSE);
+    if (begin("lit_far_light")) {
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        IDirect3DDevice9_SetFVF(device, D3DFVF_XYZ | D3DFVF_NORMAL);
+        hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, q, sizeof(q[0]));
+        if (FAILED(hr)) { fail_hr("lit_far_light", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("lit_far_light", s, 4);
+    }
+    IDirect3DDevice9_LightEnable(device, 1000, FALSE);
+    IDirect3DDevice9_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+    IDirect3DDevice9_SetRenderState(device, D3DRS_COLORVERTEX, TRUE);
 }
 
 /* 80: the fixed-function pipeline through a declaration with two streams (no vertex shader):
@@ -1008,6 +1078,18 @@ static void pixel_shaders(int only, BOOL version2)
         quad_samples(s, want);
         ps_run("ps_mov", ps, v, 1, s, 5);
     }
+    if (!only || only == 97) {
+        /* tex t0; mov r0, t0 with no texture on stage 0: a pixel shader reads black from an empty
+         * stage (the reference rasterizers of Direct3D 8 and 9 both say so), not the white of a
+         * fixed-function stage without a texture. */
+        static const DWORD ps[] = { PSV(1), OTex, DST(RT, 0), OMov, DST(RR, 0), SRC(RT, 0), PSEND };
+        ps_quad(v, 32, 32, 96, 96, 0xff4080c0, 0, 0, 1, 1);
+        for (i = 0; i < 4; ++i) want[i][0] = want[i][1] = want[i][2] = 0.0f;
+        quad_samples(s, want);
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        ps_run("ps_empty_stage", ps, v, 1, s, 5);
+        IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)ps_textures[0]);
+    }
     if (!only || only == 2) {   /* tex t0; mul r0, t0, v0 */
         static const DWORD ps[] = { PSV(1), OTex, DST(RT, 0), OMul, DST(RR, 0), SRC(RT, 0), SRC(RV, 0), PSEND };
         ps_quad(v, 32, 32, 96, 96, 0x80808080, 0, 0, 1, 1);
@@ -1015,6 +1097,21 @@ static void pixel_shaders(int only, BOOL version2)
         for (i = 0; i < 4; ++i) { texel(i, t); for (k = 0; k < 3; ++k) want[i][k] = t[k] * d; }
         quad_samples(s, want);
         ps_run("ps_texture", ps, v, 1, s, 5);
+    }
+    if (!only || only == 104) {
+        /* tex t0 with transformed vertices while stage 0 asks for generated coordinates and a
+         * texture transform. Both belong to Direct3D's own vertex processing, which transformed
+         * vertices (a program's, or those the runtime shaded in software) do not go through: the
+         * texture shows as the vertices map it. */
+        static const DWORD ps[] = { PSV(1), OTex, DST(RT, 0), OMov, DST(RR, 0), SRC(RT, 0), PSEND };
+        ps_quad(v, 32, 32, 96, 96, 0xffffffff, 0, 0, 1, 1);
+        for (i = 0; i < 4; ++i) texel(i, want[i]);
+        quad_samples(s, want);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_CAMERASPACEPOSITION);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_COUNT2);
+        ps_run("ps_rhw_texgen", ps, v, 1, s, 5);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXCOORDINDEX, 0);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
     }
     if (!only || only == 3) {   /* def c0; mad r0, v0, c1, c0 with c1 set by the program; the blue sum clamps */
         static const DWORD ps[] = { PSV(1), DEF(0, F025, F05, F075, F1),
@@ -2904,6 +3001,237 @@ static void rt_small_depth_case(int only)
     IDirect3DTexture9_Release(t);
 }
 
+/* 98: the lake of 3DMark03's Mother Nature test, its ps_2_0 pixel shader token for token:
+ *   texld r0, t0, s3; texld r4, t3, s3; texld r3, t0, s0; mad r3, c1.x, r3, c1.y; rcp r2.w, t1.w;
+ *   mul r2, t1, r2.w; mad r2, c0, r3, r2; mad r0, c1.x, r0, c1.y; mad r4, c1.x, r4, c1.y;
+ *   add r0, r4, r0; mul r0, c2.x, r0; dp3 r4.x, t2, r0; add r3.x, r4.x, r4.x; mad r0, r0, r3.x, -t2;
+ *   add r1.x, r4, -c1.w; pow r1.x, r1.x, c1.z; texld r0, r0, s4 (a cube map); texld r4, r2, s1;
+ *   texld r3, r2, s2; texld r2, t4, s5; mul r1.x, r2.w, r1.x; add r0, r4, r0; lrp r0, r1.x, r0, r3;
+ *   mul r0, r2, r0; mov oC0, r0
+ * Both normal maps hold (0, 0, 1) and the view vector t2 is (0, 0, 1), so the reflected vector
+ * reads the cube's +Z face (grey 0x20). t1 = (0.5, 0.5, 0, 2) reads the top left texel of the
+ * reflection (s1, red) and of the refraction (s2, blue). The Fresnel term is (1 - 0.5)^2 times the
+ * alpha 0x80 of s5: about an eighth of red plus grey over seven eighths of blue. */
+static void ps2_water_case(int only, BOOL version2)
+{
+    typedef struct { float x, y, z, rhw, t0[2], t1[4], t2[3], t3[2], t4[2]; } WV;
+    static const DWORD ps[] = {
+        0xffff0200UL, 0x200001fUL, 0x80000000UL, 0xb00f0000UL, 0x200001fUL, 0x80000000UL, 0xb00f0001UL, 0x200001fUL,
+        0x80000000UL, 0xb00f0002UL, 0x200001fUL, 0x80000000UL, 0xb00f0003UL, 0x200001fUL, 0x80000000UL, 0xb00f0004UL,
+        0x200001fUL, 0x90000000UL, 0xa00f0800UL, 0x200001fUL, 0x90000000UL, 0xa00f0801UL, 0x200001fUL, 0x90000000UL,
+        0xa00f0802UL, 0x200001fUL, 0x90000000UL, 0xa00f0803UL, 0x200001fUL, 0x98000000UL, 0xa00f0804UL, 0x200001fUL,
+        0x90000000UL, 0xa00f0805UL, 0x3000042UL, 0x800f0000UL, 0xb0e40000UL, 0xa0e40803UL, 0x3000042UL, 0x800f0004UL,
+        0xb0e40003UL, 0xa0e40803UL, 0x3000042UL, 0x800f0003UL, 0xb0e40000UL, 0xa0e40800UL, 0x4000004UL, 0x800f0003UL,
+        0xa0000001UL, 0x80e40003UL, 0xa0550001UL, 0x2000006UL, 0x80080002UL, 0xb0ff0001UL, 0x3000005UL, 0x800f0002UL,
+        0xb0e40001UL, 0x80ff0002UL, 0x4000004UL, 0x800f0002UL, 0xa0e40000UL, 0x80e40003UL, 0x80e40002UL, 0x4000004UL,
+        0x800f0000UL, 0xa0000001UL, 0x80e40000UL, 0xa0550001UL, 0x4000004UL, 0x800f0004UL, 0xa0000001UL, 0x80e40004UL,
+        0xa0550001UL, 0x3000002UL, 0x800f0000UL, 0x80e40004UL, 0x80e40000UL, 0x3000005UL, 0x800f0000UL, 0xa0000002UL,
+        0x80e40000UL, 0x3000008UL, 0x80010004UL, 0xb0e40002UL, 0x80e40000UL, 0x3000002UL, 0x80010003UL, 0x80000004UL,
+        0x80000004UL, 0x4000004UL, 0x800f0000UL, 0x80e40000UL, 0x80000003UL, 0xb1e40002UL, 0x3000002UL, 0x80010001UL,
+        0x80e40004UL, 0xa1ff0001UL, 0x3000020UL, 0x80010001UL, 0x80000001UL, 0xa0aa0001UL, 0x3000042UL, 0x800f0000UL,
+        0x80e40000UL, 0xa0e40804UL, 0x3000042UL, 0x800f0004UL, 0x80e40002UL, 0xa0e40801UL, 0x3000042UL, 0x800f0003UL,
+        0x80e40002UL, 0xa0e40802UL, 0x3000042UL, 0x800f0002UL, 0xb0e40004UL, 0xa0e40805UL, 0x3000005UL, 0x80010001UL,
+        0x80ff0002UL, 0x80000001UL, 0x3000002UL, 0x800f0000UL, 0x80e40004UL, 0x80e40000UL, 0x4000012UL, 0x800f0000UL,
+        0x80000001UL, 0x80e40000UL, 0x80e40003UL, 0x3000005UL, 0x800f0000UL, 0x80e40002UL, 0x80e40000UL, 0x2000001UL,
+        0x800f0800UL, 0x80e40000UL, 0xffffUL,
+    };
+    static const DWORD faces[6] = { 0xffff0000, 0xff00ff00, 0xff0000ff, 0xffffff00, 0xff202020, 0xffff00ff };
+    static const DWORD normal[4] = { 0xff8080ff, 0xff8080ff, 0xff8080ff, 0xff8080ff };
+    static const DWORD below[4] = { 0xff0000ff, 0xff000000, 0xff000000, 0xff000000 };
+    static const DWORD tint[4] = { 0x80ffffff, 0x80ffffff, 0x80ffffff, 0x80ffffff };
+    static const float constants[12] = { 0.25f, 0.25f, 0, 0, 2.0f, -1.0f, 2.0f, 0.5f, 0.5f, 0, 0, 0 };
+    static const float xs[6] = { 32, 96, 32, 32, 96, 96 }, ys[6] = { 32, 32, 96, 96, 32, 96 };
+    static const SAMPLE s[] = { { 48, 48, 0x2404e3 }, { 80, 48, 0x2404e3 }, { 48, 80, 0x2404e3 }, { 80, 80, 0x2404e3 },
+                                { 64, 64, 0x2404e3 }, { 8, 8, CLEAR_COLOR } };
+    IDirect3DTexture9 *t[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
+    IDirect3DCubeTexture9 *cube = NULL;
+    IDirect3DPixelShader9 *handle = NULL;
+    WV v[6];
+    HRESULT hr;
+    int face, i, k;
+    if (only && only != 98) return;
+    if (!version2) { printf("D9PIX shader model 2 not offered\n"); return; }
+    if (FAILED(IDirect3DDevice9_CreateCubeTexture(device, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &cube, NULL))) {
+        printf("D9PIX cube textures not offered\n");
+        return;
+    }
+    for (face = 0; face < 6; ++face) {
+        D3DLOCKED_RECT r;
+        int y, x;
+        if (FAILED(IDirect3DCubeTexture9_LockRect(cube, (D3DCUBEMAP_FACES)face, 0, &r, NULL, 0))) continue;
+        for (y = 0; y < 4; ++y) for (x = 0; x < 4; ++x) ((DWORD *)((BYTE *)r.pBits + y * r.Pitch))[x] = faces[face];
+        IDirect3DCubeTexture9_UnlockRect(cube, (D3DCUBEMAP_FACES)face, 0);
+    }
+    t[0] = texture2x2(normal); t[1] = texture2x2(texels0); t[2] = texture2x2(below);
+    t[3] = texture2x2(normal); t[5] = texture2x2(tint);
+    memset(v, 0, sizeof(v));
+    for (i = 0; i < 6; ++i) {
+        v[i].x = xs[i]; v[i].y = ys[i]; v[i].z = 0.5f; v[i].rhw = 1.0f;
+        v[i].t0[0] = v[i].t0[1] = v[i].t3[0] = v[i].t3[1] = v[i].t4[0] = v[i].t4[1] = 0.5f;
+        v[i].t1[0] = v[i].t1[1] = 0.5f; v[i].t1[3] = 2.0f;
+        v[i].t2[2] = 1.0f;
+    }
+    for (k = 0; k < 6; ++k) {
+        IDirect3DDevice9_SetTexture(device, k, k == 4 ? (IDirect3DBaseTexture9 *)cube : (IDirect3DBaseTexture9 *)t[k]);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    }
+    hr = IDirect3DDevice9_CreatePixelShader(device, ps, &handle);
+    if (FAILED(hr)) fail_hr("ps2_water", "create", hr);
+    else {
+        if (begin("ps2_water")) {
+            IDirect3DDevice9_SetPixelShader(device, handle);
+            IDirect3DDevice9_SetPixelShaderConstantF(device, 0, constants, 3);
+            IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_TEX5 | D3DFVF_TEXCOORDSIZE2(0) | D3DFVF_TEXCOORDSIZE4(1) |
+                                            D3DFVF_TEXCOORDSIZE3(2) | D3DFVF_TEXCOORDSIZE2(3) | D3DFVF_TEXCOORDSIZE2(4));
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+            IDirect3DDevice9_SetPixelShader(device, NULL);
+            if (FAILED(hr)) { fail_hr("ps2_water", "draw", hr); IDirect3DDevice9_EndScene(device); }
+            else check("ps2_water", s, 6);
+        }
+        IDirect3DPixelShader9_Release(handle);
+    }
+    for (k = 0; k < 6; ++k) {
+        IDirect3DDevice9_SetTexture(device, k, NULL);
+        if (t[k]) IDirect3DTexture9_Release(t[k]);
+    }
+    IDirect3DCubeTexture9_Release(cube);
+}
+
+/* 99: six hundred vertex declarations alive at once, as a program has that makes one for every
+ * mesh (3DMark03's Mother Nature makes more than 500), in two layouts by turns. Three quads through
+ * mov oPos, v0; mov oD0, v1: red with the first declaration, then, after the first is released,
+ * green with the 300th and blue with the 600th. */
+static void many_declarations_case(int only, BOOL offered)
+{
+    enum { Count = 600 };
+    static const D3DVERTEXELEMENT9 plain[] = {
+        { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+        { 0, 12, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 }, D3DDECL_END() };
+    static const D3DVERTEXELEMENT9 wide[] = {
+        { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+        { 0, 12, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 },
+        { 0, 16, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0 }, D3DDECL_END() };
+    static const DWORD vs[] = { 0xfffe0101,
+        0x0000001f, 0x80000000, 0x900f0000,     /* dcl_position v0 */
+        0x0000001f, 0x8000000a, 0x900f0001,     /* dcl_color v1 */
+        0x00000001, 0xc00f0000, 0x90e40000,     /* mov oPos, v0 */
+        0x00000001, 0xd00f0000, 0x90e40001,     /* mov oD0, v1 */
+        0x0000ffff };
+    static const SAMPLE s[] = { { 32, 64, 0xff0000 }, { 64, 64, 0x00ff00 }, { 96, 64, 0x0000ff }, { 8, 8, CLEAR_COLOR } };
+    static const DWORD colors[3] = { 0xffff0000, 0xff00ff00, 0xff0000ff };
+    static const int which[3] = { 0, 299, Count - 1 };
+    static IDirect3DVertexDeclaration9 *decls[Count];
+    struct { float x, y, z; DWORD color; float u, v; } v[4];
+    IDirect3DVertexShader9 *shader = NULL;
+    HRESULT hr = D3D_OK;
+    int i, k;
+    if (only && only != 99) return;
+    if (!offered) { printf("D9PIX vertex shaders 1.1 not offered\n"); return; }
+    memset(decls, 0, sizeof(decls));
+    for (i = 0; i < Count && SUCCEEDED(hr); ++i)
+        hr = IDirect3DDevice9_CreateVertexDeclaration(device, i & 1 ? wide : plain, &decls[i]);
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice9_CreateVertexShader(device, vs, &shader);
+    if (FAILED(hr)) { fail_hr("many_declarations", "create", hr); goto done; }
+    if (begin("many_declarations")) {
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        IDirect3DDevice9_SetVertexShader(device, shader);
+        for (k = 0; k < 3 && SUCCEEDED(hr); ++k) {
+            /* a quad 24 pixels wide and 32 high around x = 32, 64, 96 */
+            float x0 = (20.0f + 32 * k) / 64 - 1, x1 = (44.0f + 32 * k) / 64 - 1;
+            memset(v, 0, sizeof(v));
+            for (i = 0; i < 4; ++i) {
+                v[i].x = i & 1 ? x1 : x0;
+                v[i].y = i & 2 ? -0.25f : 0.25f;
+                v[i].z = 0.5f;
+                v[i].color = colors[k];
+            }
+            IDirect3DDevice9_SetVertexDeclaration(device, decls[which[k]]);
+            if (k == 1) { IDirect3DVertexDeclaration9_Release(decls[0]); decls[0] = NULL; }   /* the first of its layout goes */
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+        }
+        IDirect3DDevice9_SetVertexShader(device, NULL);
+        IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+        if (FAILED(hr)) { fail_hr("many_declarations", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("many_declarations", s, 4);
+    }
+done:
+    if (shader) IDirect3DVertexShader9_Release(shader);
+    for (i = 0; i < Count; ++i) if (decls[i]) IDirect3DVertexDeclaration9_Release(decls[i]);
+}
+
+/* 105: the coordinates a vertex shader writes are final as well: mov oPos, v0; mov oT0, v1 and
+ * tex t0, while stage 0 asks for generated coordinates and a texture transform (state a program
+ * may leave behind; a vertex shader takes no notice). With software vertex processing the driver
+ * gets these vertices already transformed, as 3DMark03's CPU tests send theirs. */
+static void vs_texgen_case(int only, BOOL offered)
+{
+    static const D3DVERTEXELEMENT9 elements[] = {
+        { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+        { 0, 12, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0 }, D3DDECL_END() };
+    static const DWORD vs[] = { 0xfffe0101,
+        0x0000001f, 0x80000000, 0x900f0000,     /* dcl_position v0 */
+        0x0000001f, 0x80000005, 0x900f0001,     /* dcl_texcoord v1 */
+        0x00000001, 0xc00f0000, 0x90e40000,     /* mov oPos, v0 */
+        0x00000001, 0xe00f0000, 0x90e40001,     /* mov oT0, v1 */
+        0x0000ffff };
+    static const DWORD ps[] = { PSV(1), OTex, DST(RT, 0), OMov, DST(RR, 0), SRC(RT, 0), PSEND };
+    static const SAMPLE s[] = { { 48, 48, 0xff0000 }, { 80, 48, 0x00ff00 }, { 48, 80, 0x0000ff }, { 80, 80, 0xffffff },
+                                { 8, 8, CLEAR_COLOR } };
+    struct { float x, y, z, u, v; } v[4];
+    IDirect3DVertexDeclaration9 *decl = NULL;
+    IDirect3DVertexShader9 *shader = NULL;
+    IDirect3DPixelShader9 *pixel = NULL;
+    IDirect3DTexture9 *t = NULL;
+    HRESULT hr;
+    int i;
+    if (only && only != 105) return;
+    if (!offered) { printf("D9PIX vertex shaders 1.1 not offered\n"); return; }
+    t = texture2x2(texels0);
+    hr = t ? IDirect3DDevice9_CreateVertexDeclaration(device, elements, &decl) : E_FAIL;
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice9_CreateVertexShader(device, vs, &shader);
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice9_CreatePixelShader(device, ps, &pixel);
+    if (FAILED(hr)) { fail_hr("vs_texgen_ignored", "create", hr); goto done; }
+    for (i = 0; i < 4; ++i) {
+        v[i].x = i & 1 ? 0.5f : -0.5f;
+        v[i].y = i & 2 ? -0.5f : 0.5f;
+        v[i].z = 0.5f;
+        v[i].u = i & 1 ? 1.0f : 0.0f;
+        v[i].v = i & 2 ? 1.0f : 0.0f;
+    }
+    if (begin("vs_texgen_ignored")) {
+        IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)t);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_CAMERASPACEPOSITION);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_COUNT2);
+        IDirect3DDevice9_SetVertexDeclaration(device, decl);
+        IDirect3DDevice9_SetVertexShader(device, shader);
+        IDirect3DDevice9_SetPixelShader(device, pixel);
+        hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+        IDirect3DDevice9_SetPixelShader(device, NULL);
+        IDirect3DDevice9_SetVertexShader(device, NULL);
+        IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXCOORDINDEX, 0);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        if (FAILED(hr)) { fail_hr("vs_texgen_ignored", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("vs_texgen_ignored", s, 5);
+    }
+done:
+    if (pixel) IDirect3DPixelShader9_Release(pixel);
+    if (shader) IDirect3DVertexShader9_Release(shader);
+    if (decl) IDirect3DVertexDeclaration9_Release(decl);
+    if (t) IDirect3DTexture9_Release(t);
+}
+
 /* 83: a ps_2_0 shader that reads samplers 9 and 15 (shader model 2 has sixteen; 3DMark05's third
  * game test draws its water with a ninth one): texld r0, t0, s9; texld r1, t0, s15;
  * add r0, r0, r1. A green texture on sampler 9 and a blue one on sampler 15 give cyan. */
@@ -3127,7 +3455,8 @@ int main(int argc, char **argv)
     D3DCAPS9 caps;
     HWND window;
     DWORD flags;
-    BOOL software = FALSE;
+    BOOL software = FALSE, reference = FALSE, noref = FALSE;
+    char refText[40];
     int only = 0, a;
     HRESULT hr;
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -3135,6 +3464,11 @@ int main(int argc, char **argv)
      * cases (pixel shaders below 30, vertex shaders from 30). */
     for (a = 1; a < argc; ++a) {
         if (!lstrcmpiA(argv[a], "sw")) software = TRUE;
+        /* "ref": draw on the reference rasterizer and keep the pictures; "-noref" and "-noskips":
+         * leave the automatic checks out (drvcheck.h). */
+        else if (!lstrcmpiA(argv[a], "ref")) reference = TRUE;
+        else if (!lstrcmpiA(argv[a], "-noref")) noref = TRUE;
+        else if (!lstrcmpiA(argv[a], "-noskips")) skipsOff = 1;
         else if (!strncmp(argv[a], "ps=", 3)) only = atoi(argv[a] + 3);
     }
     create = lib ? (IDirect3D9 *(WINAPI *)(UINT))GetProcAddress(lib, "Direct3DCreate9") : NULL;
@@ -3190,10 +3524,39 @@ int main(int argc, char **argv)
     pp.Flags = D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
     flags = !software && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT) ?
             D3DCREATE_HARDWARE_VERTEXPROCESSING : D3DCREATE_SOFTWARE_VERTEXPROCESSING;
-    hr = IDirect3D9_CreateDevice(d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, window, flags, &pp, &device);
+    hr = IDirect3D9_CreateDevice(d3d, D3DADAPTER_DEFAULT, reference ? D3DDEVTYPE_REF : D3DDEVTYPE_HAL, window, flags, &pp, &device);
+    if (reference && FAILED(hr)) {
+        /* Without d3dref9.dll, or on a runtime without it: no reference pictures, and no failure. */
+        printf("D9PIX reference not available hr=%08lx\nD9PIX end result=NOREFERENCE\n", (unsigned long)hr);
+        return 0;
+    }
     printf("D9PIX device hr=%08lx vertex_processing=%s format=%lu\n", (unsigned long)hr,
            flags == D3DCREATE_HARDWARE_VERTEXPROCESSING ? "hardware" : "software", (unsigned long)mode.Format);
     if (FAILED(hr)) { printf("D9PIX end result=UNAVAILABLE\n"); return 2; }
+    if (reference) {
+        /* A runtime without the reference rasterizer still makes the device, and it draws nothing:
+         * clear to a colour of our own and read it back before trusting its pictures. */
+        IDirect3DSurface9 *probe = NULL;
+        D3DLOCKED_RECT lr;
+        DWORD seen = 0;
+        IDirect3DDevice9_Clear(device, 0, NULL, D3DCLEAR_TARGET, 0xff123456UL, 1.0f, 0);
+        if (SUCCEEDED(IDirect3DDevice9_GetBackBuffer(device, 0, 0, D3DBACKBUFFER_TYPE_MONO, &probe))) {
+            if (SUCCEEDED(IDirect3DSurface9_LockRect(probe, &lr, NULL, D3DLOCK_READONLY))) {
+                seen = *(const DWORD *)lr.pBits & 0xffffff;
+                IDirect3DSurface9_UnlockRect(probe);
+            }
+            IDirect3DSurface9_Release(probe);
+        }
+        if (seen != 0x123456) {
+            printf("D9PIX reference not available: its device draws nothing (%06lx)\nD9PIX end result=NOREFERENCE\n", (unsigned long)seen);
+            return 0;
+        }
+        printf("D9PIX reference rasterizer: pictures kept in refpix9\n");
+    }
+    refFolder = "refpix9";
+    refMode = reference ? RefWrite : noref ? RefOff : RefCompare;
+    if (reference) skipsOff = 1;
+    skips_start();
     IDirect3DDevice9_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_NONE);
     IDirect3DDevice9_SetRenderState(device, D3DRS_ZENABLE, D3DZB_FALSE);
     IDirect3DDevice9_SetRenderState(device, D3DRS_LIGHTING, FALSE);
@@ -3218,6 +3581,7 @@ int main(int argc, char **argv)
     rt2048_case(only);
     rt_small_depth_case(only);
     ps2_sixteen_samplers_case(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
+    ps2_water_case(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0) && (caps.TextureCaps & D3DPTEXTURECAPS_CUBEMAP));
     scissor_case(only, (caps.RasterCaps & D3DPRASTERCAPS_SCISSORTEST) != 0);
     luminance_case(only);
     lines_points_case(only);
@@ -3225,10 +3589,13 @@ int main(int argc, char **argv)
     printf("D9PIX max_point_size=%d\n", (int)caps.MaxPointSize);
     point_case(only);
     program_point_case(only, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1));
+    many_declarations_case(only, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1));
+    vs_texgen_case(only, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1) && caps.PixelShaderVersion >= D3DPS_VERSION(1, 1));
     static_indexed_case(only);
     scaled_point_case(only, caps.MaxPointSize >= 16.0f);
     vertex_point_case(only, caps.MaxPointSize >= 16.0f && flags == D3DCREATE_HARDWARE_VERTEXPROCESSING);
     point_variant_cases(only, caps.MaxPointSize >= 16.0f, caps.MaxUserClipPlanes >= 1);
+    far_light_case(only);
     ff_streams_case(only, flags == D3DCREATE_HARDWARE_VERTEXPROCESSING);
     depth_bias_case(only, (caps.RasterCaps & D3DPRASTERCAPS_DEPTHBIAS) != 0);
     blend_op_case(only, (caps.PrimitiveMiscCaps & D3DPMISCCAPS_BLENDOP) != 0);
@@ -3263,6 +3630,12 @@ int main(int argc, char **argv)
     IDirect3DDevice9_Release(device);
     IDirect3D9_Release(d3d);
     DestroyWindow(window);
-    printf("D9PIX end pass=%d fail=%d result=%s\n", passes, failures, failures ? "FAIL" : "PASS");
+    refText[0] = 0;
+    if (refMode == RefCompare) {
+        if (refCompared) sprintf(refText, " ref_compared=%d ref_failed=%d", refCompared, refFailed);
+        else strcpy(refText, " ref=unavailable");
+    }
+    printf("D9PIX end pass=%d fail=%d%s%s result=%s\n", passes, failures, skips_summary(), refText,
+           reference ? "REFERENCE" : failures ? "FAIL" : "PASS");
     return failures ? 1 : 0;
 }

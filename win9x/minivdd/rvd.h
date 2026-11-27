@@ -44,6 +44,7 @@ struct rvd_upload_test { rvd_u32 ms, action; }; /* ms must be zero; output is a 
 #define RVD_DESKTOP             13  /* in: offset or struct rvd_desktop; no input: out u32 takeover,
                                        and, with room for a second u32, the flags it knows */
 #define RVD_PRESENT_WINDOW      14  /* in: struct rvd_window, then its rectangles: copy on the host */
+#define RVD_GAMMA               15  /* out: struct rvd_gamma, the gamma ramp in force. No GPU needed */
 
 #define RVD_DESKTOP_FLIP        1   /* select the CPU page now; its display update may coalesce */
 #define RVD_DESKTOP_HEAP        2   /* the page lies in the RVD_HEAP block, offset bytes from its
@@ -75,6 +76,15 @@ struct rvd_window {
 #define RVD_MAX_CAPS            8
 
 /* What the VxD holds now, for tests that look for memory a long session loses. */
+/* The gamma ramp the display driver was given, 8 bits a value: ramp[0] red, [1] green, [2] blue.
+   on: it is not the identity. serial counts its changes since Windows started: who applies the
+   ramp to pictures of its own (the OpenGL driver's presents) asks again when it may have
+   changed and compares. The first four bytes alone may be asked for. */
+struct rvd_gamma {
+    rvd_u32 serial, on;
+    unsigned char ramp[3][256];
+};
+
 struct rvd_stats {
     rvd_u32 contexts;           /* contexts in use */
     rvd_u32 buffers;            /* buffers in use */

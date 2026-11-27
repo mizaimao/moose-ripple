@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "rb2kd3d7.h"
+#include "drvcheck.h"
 
 enum { Side = 128 };
 #define CLEAR_COLOR 0xff000066UL
@@ -31,6 +32,10 @@ static IDirect3DDevice7 *device;
 static IDirectDrawSurface7 *target;
 static HDC displayDc;
 static int passed, failed;
+/* Pixels of a case that may differ from the picture of the DirectX 7 software device: 2 in 100 of
+ * 128x128. That device breaks ties on texel borders the other way (182 pixels, one row and one
+ * column, in every textured case), which the Direct3D 9 reference rasterizer does not. */
+enum { RefLimit = 328 };
 static BOOL xyz, perspective;
 
 /* Draw a triangle list, in object space in xyz mode: the projection set in
@@ -116,7 +121,9 @@ static void report(const char *name, const SAMPLE *s, int count)
 {
     DDSURFACEDESC2 d = {0};
     RB2K_D7_DRAWSTATS stats = {0};
-    int i, good = 0, bad = -1;
+    int i, good = 0, bad = -1, worst = 0;
+    long differ = -1;
+    unsigned long skipped;
     DWORD got = 0, first = 0;
     d.dwSize = sizeof(d);
     if (call("lock target", IDirectDrawSurface7_Lock(target, NULL, &d, DDLOCK_READONLY | DDLOCK_WAIT, NULL))) {
@@ -128,13 +135,23 @@ static void report(const char *name, const SAMPLE *s, int count)
             if (dr <= s[i].tolerance && dg <= s[i].tolerance && db <= s[i].tolerance) ++good;
             else if (bad < 0) { bad = i; got = v; first = s[i].rgb; }
         }
+        /* The automatic checks (drvcheck.h): the picture against the one Microsoft's software
+         * device drew in the "rgb" run, and below what the driver skipped. */
+        if (d.dwWidth == d.dwHeight && d.ddpfPixelFormat.dwRGBBitCount == 32)
+            differ = ref_case(name, d.lpSurface, d.lPitch, (int)d.dwWidth, &worst);
         IDirectDrawSurface7_Unlock(target, NULL);
     }
     if (displayDc) ExtEscape(displayDc, RB2K_D3D7_DRAW_ESCAPE, 0, NULL, sizeof(stats), (LPSTR)&stats);
     printf("TPIX case=%s samples=%d/%d", name, good, count);
     if (bad >= 0) printf(" first_bad=%d,%d expected=%06lx got=%06lx", s[bad].x, s[bad].y, first, got);
-    printf(" drawn=%lu skipped_calls=%lu uploads=%lu\n", stats.drawn, stats.skippedCalls, stats.uploads);
-    if (good == count) ++passed; else ++failed;
+    printf(" drawn=%lu skipped_calls=%lu uploads=%lu", stats.drawn, stats.skippedCalls, stats.uploads);
+    if (refMode == RefCompare && differ >= 0) {
+        printf(" ref_differ=%ld ref_worst=%d", differ, worst);
+        if (differ > RefLimit) ++refFailed;
+    }
+    printf("\n");
+    skipped = skips_case("TPIX", name);
+    if (good == count && !skipped && !(refMode == RefCompare && differ > RefLimit)) ++passed; else ++failed;
 }
 
 static DWORD pack(int format, DWORD argb)
@@ -407,6 +424,12 @@ int main(int argc, char **argv)
         !call("CreateDevice", IDirect3D7_CreateDevice(d3d, e.wanted, target, &device)) ||
         !call("device caps", IDirect3DDevice7_GetCaps(device, &caps)) ||
         !call("viewport", IDirect3DDevice7_SetViewport(device, &vp))) goto done;
+    /* The automatic checks (drvcheck.h): the "rgb" run on Microsoft's software device keeps its
+     * pictures as the reference; the hardware runs compare with them and watch what the driver skips. */
+    refFolder = !xyz ? "refpix7" : perspective ? "refpix7p" : "refpix7x";
+    refMode = hal ? RefCompare : RefWrite;
+    if (!hal) skipsOff = 1;
+    skips_start();
     if (xyz) {
         /* Object x and y in pixels: clip x = x/64 - 1, clip y = 1 - y/64. */
         D3DMATRIX identity = {0}, projection = {0};
@@ -445,7 +468,15 @@ done:
     if (dd) IDirectDraw7_Release(dd);
     if (displayDc) DeleteDC(displayDc);
     DestroyWindow(window);
-    printf("TPIX end path=%s%s pass=%d fail=%d result=%s\n", argv[1], perspective ? " persp" : xyz ? " xyz" : "", passed, failed,
-           passed && !failed ? "PASS" : "FAIL");
+    {
+        char refText[40];
+        refText[0] = 0;
+        if (refMode == RefCompare) {
+            if (refCompared) sprintf(refText, " ref_compared=%d ref_failed=%d", refCompared, refFailed);
+            else strcpy(refText, " ref=unavailable");
+        }
+        printf("TPIX end path=%s%s pass=%d fail=%d%s%s result=%s\n", argv[1], perspective ? " persp" : xyz ? " xyz" : "", passed, failed,
+               skips_summary(), refText, refMode == RefWrite ? "REFERENCE" : passed && !failed ? "PASS" : "FAIL");
+    }
     return passed && !failed ? 0 : 1;
 }
