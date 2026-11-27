@@ -259,7 +259,7 @@ renderer only where the Intel hosts do. It covers ARB and fixed-function fragmen
 with 2D and rectangle textures, which is what Core Image and WindowServer use; a GLSL
 program that clamps to a border still gets the edge there.
 
-## KI-13: A swap rectangle was ignored for windows the kernel shows (fixed after 0.6.0)
+## KI-13: A swap rectangle was ignored for windows the kernel shows (fixed in 0.6.2)
 
 GitHub issue: [#235](https://github.com/mizaimao/moose-ripple/issues/235). Found on 2026-11-26; release 0.6.0 and
 earlier have it.
@@ -329,7 +329,7 @@ tried on a real Mac). The OpenGL driver is not involved.
 (until the next restart; it also takes away the VM's USB sound output). The guest has no other
 sound input to choose instead.
 
-## KI-16: Photo Booth's live view was black (fixed after 0.6.0)
+## KI-16: Photo Booth's live view was black (fixed in 0.6.2)
 
 GitHub issue: [#11](https://github.com/mizaimao/moose-ripple/issues/11). Found and fixed on 2026-11-26; release
 0.6.0 and earlier have it.
@@ -349,7 +349,7 @@ process share one GPU image (`gl-feature-check iosurface`, the two-context case)
 UTM: the live view, the nine colour effects, the eight distortions and the backdrop pages all
 draw live.
 
-## KI-17: The screen could flash an older picture while WindowServer animated (fixed after 0.6.0)
+## KI-17: The screen could flash an older picture while WindowServer animated (fixed in 0.6.2)
 
 Found on 2026-11-26 (reported in testing: adding a Dashboard widget flickered); release 0.6.0
 has it.
@@ -372,7 +372,7 @@ added: 7 frames flipped back with 0.6.0's kext and with main's, 0 with the fix (
 with the limit off, `ripple_flush_hz=0`). OpenArena's timedemo on the same host: 305.7 frames/s
 before, 307.5 after.
 
-## KI-18: Flash in Safari stayed blank, and Chrome 49 composited in software (fixed after 0.6.0)
+## KI-18: Flash in Safari stayed blank, and Chrome 49 composited in software (fixed in 0.6.2)
 
 GitHub issues: [#298](https://github.com/mizaimao/moose-ripple/issues/298) and
 [#299](https://github.com/mizaimao/moose-ripple/issues/299). Found and fixed on 2026-11-27;
@@ -400,3 +400,30 @@ iosurface-xproc` reads the other process's drawing (grey without sharing); Flash
 plays (three screenshots a second apart all differ; blank with sharing off); Chrome's
 `chrome://gpu` reports compositing and WebGL hardware accelerated, and a spinning CSS box
 moves.
+
+## KI-19: In UTM, depth values read back as 0
+
+GitHub issue: [#318](https://github.com/mizaimao/moose-ripple/issues/318). Found on 2026-11-27, on an
+Apple-silicon Mac in UTM; Intel hosts with KVM don't have it.
+
+**Symptom.** A program that reads depth values back to the CPU (`glReadPixels` with
+`GL_DEPTH_COMPONENT`, or `glGetTexImage` of a depth texture) gets 0 everywhere. Drawing is not
+affected: the depth test works. `gl-feature-check depth` shows it.
+
+**Cause.** UTM draws through OpenGL ES on Metal, and OpenGL ES can't read depth with
+`glReadPixels`; UTM's log has `glReadPixels failed: GL error 1282` for each read.
+
+**Workaround.** None. No program is known yet that needs it.
+
+## KI-20: No multisampling, and auxiliary buffers share the drawable's depth buffer
+
+GitHub issue: [#325](https://github.com/mizaimao/moose-ripple/issues/325). Found on 2026-11-27.
+
+**Symptom.** A program that asks for a multisampled pixel format (`kCGLPFAMultisample`,
+`kCGLPFASampleBuffers`) gets none and falls back to one without multisampling, so edges are
+not smoothed. A program that asks for auxiliary buffers with their own depth and stencil
+buffers (`kCGLPFAAuxDepthStencil`) gets the auxiliary buffers, but they share the drawable's
+depth and stencil. Cinebench R11.5 asks for both; its OpenGL test still passes its own
+picture check. The driver counts both requests as skips in its development builds.
+
+**Workaround.** None needed for the programs tried so far.

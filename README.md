@@ -80,6 +80,9 @@ The boundary between the GL bundle and the kernel is small, versioned and GPU-ne
 - OpenGL 2.1 for apps, 32- and 64-bit, through Mesa's virgl driver. Apps see the renderer as
   `virgl (Mesa Intel(R) UHD Graphics 630 (CFL GT2))` on the test host. Quartz Composer, Front Row,
   the Flurry screen saver, Chess and games such as Angry Birds Rio and Real Racing 2 run on it.
+  Full-screen games of the time run too: Halo, the BioShock and Quake 4 demos, Nexuiz,
+  Neverball, Hedgewars. So do Blender 2.49, Stellarium, VLC, Google Chrome 49 (with its GPU
+  compositing and WebGL) and Flash in Safari, whose picture another process draws on the GPU.
 - Apps' OpenGL windows stay on the GPU: the kernel driver puts each frame on the screen itself,
   as Apple's own drivers do, and WindowServer draws such a window only while something is drawn
   over it (the Dock, another window, Exposé).
@@ -102,6 +105,7 @@ translucent menu bar with the desktop showing through. Both from the same VM.*
 | Linux: Proxmox VE 8.4 | with KVM | Intel UHD Graphics 630 | everything in this README, and the numbers below |
 | Windows 11 | with KVM, inside WSL2 | NVIDIA GeForce RTX 4090, through Direct3D 12 | Quartz Extreme, the translucent menu bar, the Dashboard ripple, gl-gears at about 55 frames/s |
 | macOS 26 on Apple silicon | in UTM 5.0.8, x86 emulation | Apple M1 Max, through Metal | Quartz Extreme, the translucent menu bar, gl-gears at about 56 frames/s, Chess, Real Racing 2 (playable: its menu at 59 frames/s, a race at about 30) |
+| Linux: Fedora 45 | with KVM, QEMU 11.1.3, virglrenderer 1.3.0 | Intel Iris Xe | the development checks (21 of 22 picture checks the same as software rendering), and games and programs of the time; Cinebench R11.5's OpenGL test hangs the guest there (not on the Proxmox host; cause not found) |
 
 How to set up each: [docs/install.md](docs/install.md#2-set-up-the-vm).
 
@@ -133,8 +137,8 @@ pixels.
   at most 66 times a second.
 - Test programs on the Proxmox host (Intel UHD 630, 1280x800): Cinebench R11.5's OpenGL test
   passes its reference check (99.4% match) with 46 frames/s; OpenArena 0.8.8's timedemo
-  (`demo088-test1`, 1024x768 window) runs at about 280 frames/s, and at about 265 with the
-  Dock drawn over its window.
+  (`demo088-test1`, 1024x768 window) runs at about 300 frames/s (297 and 300 in two timed runs
+  on 2026-11-27), and at about 265 with the Dock drawn over its window (measured earlier).
 - Video: Snow Leopard's Welcome movie (H.264, 1008x630, 24 frames/s) plays at its full
   24 frames/s in QuickTime Player with moose-ripple, on the Proxmox host and in UTM. With
   software rendering the same UTM guest gets about a tenth of the pixels to the screen (2.4
@@ -165,8 +169,15 @@ Details: [docs/re/perf-notes.md](docs/re/perf-notes.md) and [docs/re/m6-notes.md
 
 ### Not working yet
 
-- iMovie hasn't been tried yet. Photo Booth's live effects need a camera, which the test VM
-  doesn't have, so the effects were tested on a still photo ([#11](https://github.com/mizaimao/moose-ripple/issues/11)).
+- iMovie hasn't been tried yet. In UTM a USB webcam works for Photo Booth's live effects, but
+  its microphone can't be opened ([#284](https://github.com/mizaimao/moose-ripple/issues/284),
+  KI-15).
+- PowerPC programs under Rosetta draw nothing (the Doom 3 and UT2004 Mac demos;
+  [#311](https://github.com/mizaimao/moose-ripple/issues/311)). The Call of Duty 2 demo gives up
+  because it doesn't know the GPU ([#314](https://github.com/mizaimao/moose-ripple/issues/314)).
+- No multisampling: programs that ask for it fall back to drawing without it
+  ([#325](https://github.com/mizaimao/moose-ripple/issues/325), KI-20). In UTM, depth values read
+  back as 0 (KI-19).
 - Through QEMU's VNC display, a key press takes about 0.1 s to show on screen, and every extra
   VNC viewer (another Proxmox console tab, for example) makes the picture less smooth for all
   of them ([#10](https://github.com/mizaimao/moose-ripple/issues/10)).
