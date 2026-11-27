@@ -146,6 +146,7 @@ def build_programs(work):
     targets.append(("d9pixels.exe", ["tools/d9pixels"], ["-I", d3d, "-luser32", "-lgdi32"]))
     targets.append(("d9texload.exe", ["tools/d9texload"], ["-I", d3d, "-luser32"]))
     targets.append(("d9stencil.exe", ["tools/d9stencil"], ["-I", d3d, "-luser32"]))
+    targets.append(("d9plain.exe", ["tools/d9plain"], ["-I", d3d, "-luser32"]))
     targets.append(("d9full.exe", ["tools/d9full"], ["-I", d3d, "-luser32"]))
     # Logging stand-ins for d3d9.dll and d3d8.dll; the exports they do not handle go to d3d9real.dll
     # and d3d8real.dll.

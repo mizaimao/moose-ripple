@@ -85,13 +85,14 @@ static void run(IDirect3D9 *d3d, HWND window, D3DFORMAT back, const char *name, 
         IDirect3DSurface9_UnlockRect(front);
         if (ok) ++passes; else ++failures;
     }
-    {   /* a plain surface in video memory (the default pool), filled and released: noted, not counted */
+    {   /* a plain surface in video memory (the default pool), filled and released */
         IDirect3DSurface9 *plain = NULL;
         HRESULT ph = IDirect3DDevice9_CreateOffscreenPlainSurface(device, 64, 64, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT,
                                                                   &plain, NULL);
         HRESULT fh = plain ? IDirect3DDevice9_ColorFill(device, plain, NULL, 0xff102030) : E_FAIL;
-        printf("D9FS case=%s default_pool_plain create=%08lx fill=%08lx (not counted)\n", name, (unsigned long)ph,
-               (unsigned long)fh);
+        printf("D9FS case=%s default_pool_plain create=%08lx fill=%08lx %s\n", name, (unsigned long)ph,
+               (unsigned long)fh, SUCCEEDED(ph) && SUCCEEDED(fh) ? "ok" : "WRONG");
+        if (SUCCEEDED(ph) && SUCCEEDED(fh)) ++passes; else ++failures;
         if (plain) IDirect3DSurface9_Release(plain);
     }
     /* The back buffer's own alpha: a clear to blue with alpha 0x40, then white scaled by the

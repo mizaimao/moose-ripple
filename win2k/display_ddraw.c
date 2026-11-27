@@ -119,7 +119,7 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
             ((desc->dwFlags & DDSD_HEIGHT) && desc->dwHeight != d->mode.VisScreenHeight))
             return FALSE;
     } else if (!d->gpuSurfaces || storage != DDSCAPS_OFFSCREENPLAIN ||
-               (!d->plainSurfaces && !(caps & DDSCAPS_3DDEVICE)) ||
+               (!d->plainSurfaces && !(caps & DDSCAPS_3DDEVICE) && !rb_d7_runtime8(d)) ||
                /* Textures returned above; render-to-texture is not offered. */
                (caps & ~(DDSCAPS_OFFSCREENPLAIN | DDSCAPS_VIDEOMEMORY | DDSCAPS_LOCALVIDMEM |
                          DDSCAPS_3DDEVICE)) ||
@@ -130,8 +130,10 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
     if (d->mode.BitsPerPlane == 8)
         return (fmt->dwFlags & DDPF_PALETTEINDEXED8) &&
                !(fmt->dwFlags & ~(DDPF_PALETTEINDEXED8 | DDPF_RGB));
-    /* A 32-bit render target may keep alpha: the host image stores it. */
-    if (fmt->dwFlags == (DDPF_RGB | DDPF_ALPHAPIXELS) && d->mode.BitsPerPlane == 32 && (caps & DDSCAPS_3DDEVICE) &&
+    /* A 32-bit render target may keep alpha, and so may a Direct3D 8 or 9 plain surface: the
+     * host image stores it. */
+    if (fmt->dwFlags == (DDPF_RGB | DDPF_ALPHAPIXELS) && d->mode.BitsPerPlane == 32 &&
+        ((caps & DDSCAPS_3DDEVICE) || rb_d7_runtime8(d)) &&
         fmt->dwRGBAlphaBitMask == 0xff000000 && fmt->dwRBitMask == d->mode.RedMask &&
         fmt->dwGBitMask == d->mode.GreenMask && fmt->dwBBitMask == d->mode.BlueMask) return TRUE;
     return fmt->dwFlags == DDPF_RGB && fmt->dwRBitMask == d->mode.RedMask &&
@@ -152,10 +154,13 @@ static DWORD APIENTRY can_create(PDD_CANCREATESURFACEDATA data)
     /* Without host-texture surfaces an offscreen surface goes to system
      * memory, where Windows' own blits are faster here. Native Direct3D
      * keeps only its render targets, depth buffers and textures on the
-     * host; plain 2D surfaces stay in system memory unless asked for. */
+     * host; plain 2D surfaces stay in system memory unless asked for. A process with a
+     * Direct3D 8 or 9 device is the exception: its runtime has no such fallback for a plain
+     * surface of the default pool, which it copies with StretchRect and fills with ColorFill. */
     if (!primary_caps(d, caps) && !flip_caps(chain_caps(d, caps)) &&
         (!d->gpuSurfaces ||
-         (!d->plainSurfaces && !(caps & (DDSCAPS_3DDEVICE | DDSCAPS_TEXTURE | DDSCAPS_ZBUFFER)))))
+         (!d->plainSurfaces && !(caps & (DDSCAPS_3DDEVICE | DDSCAPS_TEXTURE | DDSCAPS_ZBUFFER)) &&
+          !rb_d7_runtime8(d))))
         data->ddRVal = DDERR_OUTOFVIDEOMEMORY;
     else
         data->ddRVal = supported(d, data->lpDDSurfaceDesc) ? DD_OK : DDERR_INVALIDCAPS;

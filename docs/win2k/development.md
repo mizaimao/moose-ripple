@@ -3177,10 +3177,37 @@ picture into a surface. `d9full` had passed when it was written, on the Direct3D
 and was not run again when the Direct3D 9 interface became the default.
 
 X8R8G8B8, A8R8G8B8 and R5G6B5 have the operation now, and a plain surface in system memory can
-be made. One in the default pool, which is video memory, is still refused: the driver makes
-plain surfaces on the host only with `RippleDirectDrawGpuSurfaces` set (`supported` in
-`display_ddraw.c`), so the program gets `D3DERR_OUTOFVIDEOMEMORY`. `d9full` prints that
-(`default_pool_plain`) without counting it.
+be made.
+
+### Plain surfaces in the default pool
+
+A DirectDraw program that asks for a plain surface in video memory and is turned down gets one
+in system memory, where Windows' own copies are quicker than a trip to the host; so the driver
+turns such surfaces down (`can_create` in `display_ddraw.c`). A Direct3D 8 or 9 runtime has no
+such fallback. `CreateOffscreenPlainSurface` in the default pool failed with
+`D3DERR_OUTOFVIDEOMEMORY`, and a program that shows a video or a loading picture through such a
+surface had nothing to copy from.
+
+A process that has a device of a Direct3D 8 or 9 runtime now gets its plain surfaces as host
+images (`rb_d7_runtime8`), of the desktop's depth: X8R8G8B8 or A8R8G8B8 on a 32-bit desktop.
+They work as the images of render targets do:
+
+- The surface is registered with its Direct3D handle like a target, so `StretchRect` (a host
+  copy or blit) and `ColorFill` find it. `ColorFill` with a rectangle is drawn, as a clear of
+  part of a target is.
+- A lock reads the image back and an unlock writes it, as for any host image.
+- `UpdateSurface` from a system-memory plain surface arrives as a copy command whose source is
+  no host image. The source's memory is kept at registration, as a texture's is, and its rows
+  are put into the image (`memory_blt`): the image is read, changed and written back, or only
+  written when the copy covers all of it. There is no stretching and the source must be 32-bit;
+  anything else is counted as a copy passed over, so a run fails on it.
+
+`d9plain` checks this in a window, on the driver and, with `ref`, on the reference rasterizer:
+a default pool surface of each format made, filled and copied into the back buffer, a rectangle
+of it filled, the surface written through a lock, and updated from system memory. All six cases
+pass on both. Two things the test first tried are not in it because the reference rasterizer
+refuses them: a stretching copy from a plain surface to the back buffer, and a copy from the
+back buffer into a plain surface. `d9full` makes and fills one in full-screen as well.
 
 ## Checking a benchmark run: pictures, counters, frame pacing
 
