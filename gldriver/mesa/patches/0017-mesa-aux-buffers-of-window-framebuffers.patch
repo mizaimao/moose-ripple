@@ -1,0 +1,61 @@
+--- a/src/mesa/main/buffers.c
++++ b/src/mesa/main/buffers.c
+@@ -82,6 +82,13 @@
+       else if (fb->Visual.doubleBufferMode) {
+          mask |= BUFFER_BIT_BACK_LEFT;
+       }
++      /* moose-ripple: the auxiliary buffers (GL_AUX0..3) of a window-system framebuffer
++       * are renderbuffers the CGL frontend attaches in color attachment slots 0..3, which
++       * such a framebuffer otherwise never uses. Apple's GL offers them, and programs of
++       * the time ask for them (issue 303). */
++      for (unsigned i = 0; i < 4; i++)
++         if (fb->Attachment[BUFFER_COLOR0 + i].Renderbuffer)
++            mask |= BUFFER_BIT_COLOR0 << i;
+    }
+ 
+    return mask;
+@@ -140,6 +147,12 @@
+ {
+    buffer = _mesa_back_to_front_if_single_buffered(ctx->DrawBuffer, buffer);
+ 
++   /* moose-ripple: color attachments name nothing in a window-system framebuffer, whose
++    * slots 0..3 hold its auxiliary buffers (supported_buffer_bitmask). */
++   if (buffer >= GL_COLOR_ATTACHMENT0 && buffer <= GL_COLOR_ATTACHMENT7 &&
++       ctx->DrawBuffer && _mesa_is_winsys_fbo(ctx->DrawBuffer))
++      return 1 << BUFFER_COUNT;
++
+    switch (buffer) {
+       case GL_NONE:
+          return 0;
+@@ -166,6 +179,9 @@
+       case GL_AUX1:
+       case GL_AUX2:
+       case GL_AUX3:
++         /* moose-ripple: a window-system framebuffer's auxiliary buffers */
++         if (ctx->DrawBuffer && _mesa_is_winsys_fbo(ctx->DrawBuffer))
++            return BUFFER_BIT_COLOR0 << (buffer - GL_AUX0);
+          return 1 << BUFFER_COUNT; /* invalid, but not BAD_MASK */
+       case GL_COLOR_ATTACHMENT0_EXT:
+          return BUFFER_BIT_COLOR0;
+@@ -204,6 +220,11 @@
+ {
+    buffer = _mesa_back_to_front_if_single_buffered(ctx->ReadBuffer, buffer);
+ 
++   /* moose-ripple: as in draw_buffer_enum_to_bitmask */
++   if (buffer >= GL_COLOR_ATTACHMENT0 && buffer <= GL_COLOR_ATTACHMENT7 &&
++       ctx->ReadBuffer && _mesa_is_winsys_fbo(ctx->ReadBuffer))
++      return BUFFER_COUNT;
++
+    switch (buffer) {
+       case GL_FRONT:
+          return BUFFER_FRONT_LEFT;
+@@ -227,6 +248,9 @@
+       case GL_AUX1:
+       case GL_AUX2:
+       case GL_AUX3:
++         /* moose-ripple: a window-system framebuffer's auxiliary buffers */
++         if (ctx->ReadBuffer && _mesa_is_winsys_fbo(ctx->ReadBuffer))
++            return BUFFER_COLOR0 + (buffer - GL_AUX0);
+          return BUFFER_COUNT; /* invalid, but not -1 */
+       case GL_COLOR_ATTACHMENT0_EXT:
+          return BUFFER_COLOR0;

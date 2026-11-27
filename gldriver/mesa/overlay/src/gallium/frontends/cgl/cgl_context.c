@@ -14,6 +14,8 @@
 #include "frontend/api.h"
 #include "main/framebuffer.h"
 #include "main/glthread.h"
+#include "main/fbobject.h"
+#include "main/renderbuffer.h"
 #include "main/mtypes.h"
 #include "pipe/p_screen.h"
 #include "state_tracker/st_context.h"
@@ -303,6 +305,44 @@ direct_again(struct ripple_cgl_context *ctx)
    }
 }
 
+/* Auxiliary buffers (issue 303): Apple's GL gives a drawable the GL_AUX0.. buffers its pixel
+ * format asked for, and programs of the time draw into them (Blender saves and restores window
+ * contents there). Mesa has none; Mesa patch 0017 lets a window-system framebuffer name its
+ * color attachment slots 0..3 as GL_AUX0..3, and they are filled here: RGBA8 renderbuffers,
+ * which Mesa resizes with the drawable. The drawable's depth and stencil buffers are shared. */
+static void
+attach_aux_buffers(struct ripple_cgl_context *ctx)
+{
+   struct gl_context *gl = ctx->glctx;
+   unsigned n = MIN2(ctx->pf.aux_buffers, 4);
+   struct gl_framebuffer *fbs[2] = { gl->WinSysDrawBuffer, gl->WinSysReadBuffer };
+
+   for (unsigned f = 0; n && f < 2; f++) {
+      struct gl_framebuffer *fb = fbs[f];
+      if (!fb || (f == 1 && fb == fbs[0]) || !_mesa_is_winsys_fbo(fb) ||
+          fb == _mesa_get_incomplete_framebuffer())
+         continue;
+      bool added = false;
+      for (unsigned i = 0; i < n; i++) {
+         if (fb->Attachment[BUFFER_COLOR0 + i].Renderbuffer)
+            continue;
+         struct gl_renderbuffer *rb = CALLOC_STRUCT(gl_renderbuffer);
+         if (!rb)
+            break;
+         _mesa_init_renderbuffer(rb, 0);  /* name 0, as a window's own; GPU storage */
+         rb->InternalFormat = GL_RGBA8;   /* what a resize allocates again */
+         if (fb->Width && fb->Height && !rb->AllocStorage(gl, rb, GL_RGBA8, fb->Width, fb->Height)) {
+            _mesa_reference_renderbuffer(&rb, NULL);
+            break;
+         }
+         _mesa_attach_and_own_rb(fb, BUFFER_COLOR0 + i, rb);
+         added = true;
+      }
+      if (added)
+         gl->NewState |= _NEW_BUFFERS;
+   }
+}
+
 bool
 ripple_cgl_context_make_current(struct ripple_cgl_context *ctx)
 {
@@ -328,6 +368,8 @@ ripple_cgl_context_make_current(struct ripple_cgl_context *ctx)
    }
    if (d && (!ok || ctx->glctx->WinSysDrawBuffer == _mesa_get_incomplete_framebuffer()))
       log_unbound(ctx, ok);
+   if (ok && ctx && d && ctx->pf.aux_buffers)
+      attach_aux_buffers(ctx);
    if (ok && ctx && unlikely(ctx->sync_gc))
       ripple_cgl_sync_from_glengine(ctx);
    direct_again(ctx);

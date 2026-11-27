@@ -21,10 +21,11 @@ Two checks make a test or benchmark run fail on its own, without anyone looking 
    255); a mode fails when ours differs, apart from a short list of reads where Apple's
    renderer is the wrong one (`rec_known`, each with its reason).
    First results (2026-11-27, an Intel Iris Xe host): 16 of 19 modes agree; the three that
-   differ are issues 306, 307 and 308. `gl-feature-check aux` asks for an auxiliary buffer and
-   reports one skip on purpose: the driver accepts the request but has none to give (issue
-   303); leave it out of a run whose skip count should be 0. In UTM, depth read-back also differs: the host's renderer there can't read depth
-   (`host-errors.sh` shows its `glReadPixels failed` lines).
+   differ are issues 306, 307 and 308. In UTM, depth read-back also differs: the host's renderer there
+   can't read depth (issue 318; `host-errors.sh` shows its `glReadPixels failed` lines).
+   `gl-feature-check aux` is checked against the colours each read should have instead: Apple's
+   software renderer crashes in its first clear of a pbuffer with an auxiliary buffer (issue
+   303). Since 2026-11-27 the driver gives auxiliary buffers, and the mode reports no skip.
 
 Not covered yet: what Mesa itself leaves out below our code (formats and shader features it
 falls back on), and fixed frames of benchmarks against the software renderer.

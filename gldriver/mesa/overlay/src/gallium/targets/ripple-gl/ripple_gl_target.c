@@ -323,6 +323,7 @@ gldGetRendererInfo(struct gld_renderer_info *rec, uint32_t display_mask)
    if (lib_qe)
       rec->flags |= GLD_FLAG_QUARTZ_EXTREME;
    rec->buffer_modes = kCGLMonoscopicBit | kCGLSingleBufferBit | kCGLDoubleBufferBit;
+   rec->max_aux_buffers = 4;            /* issue 303 */
    rec->color_modes = kCGLARGB8888Bit;
    rec->depth_modes = kCGL0Bit | kCGL16Bit | kCGL24Bit;
    rec->stencil_modes = kCGL0Bit | kCGL8Bit;
@@ -377,11 +378,15 @@ gldChoosePixelFormat(struct gld_pixel_format **out, const uint32_t *attrs)
       case kCGLPFAAlphaSize:    ok = *++a <= 8; break;
       case kCGLPFADepthSize:    depth = *++a; ok = !minimum || depth <= 24; break;
       case kCGLPFAStencilSize:  stencil = *++a; ok = stencil <= 8; break;
-      /* Auxiliary buffers (Blender 2.49, Call of Duty 2): Mesa has none, so none are given,
-       * but the format still matches, and the request counts as a skip below (issue 303).
-       * Refusing it left these programs with no context at all. */
+      /* Auxiliary buffers (Blender 2.49, Halo, Call of Duty 2): up to 4, given as
+       * renderbuffers on the drawable's framebuffer (cgl_context.c, Mesa patch 0017; issue
+       * 303). Their own depth and stencil buffers are not given: the drawable's are shared,
+       * and asking for them counts as a skip. */
       case kCGLPFAAuxBuffers:   aux = *++a; break;
-      case kCGLPFAAuxDepthStencil: break;
+      case kCGLPFAAuxDepthStencil:
+         ripple_gl_skip("auxiliary buffers' own depth and stencil asked, shared given",
+                        "kCGLPFAAuxDepthStencil");
+         break;
       case kCGLPFAAccumSize:    ok = *++a == 0; break;
       case kCGLPFASampleBuffers: ok = *++a == 0; break;
       case kCGLPFASamples:      ok = *++a == 0; break;
@@ -425,9 +430,11 @@ gldChoosePixelFormat(struct gld_pixel_format **out, const uint32_t *attrs)
    pf->color_mode = kCGLARGB8888Bit;
    pf->depth_mode = !depth ? kCGL0Bit : depth <= 16 ? kCGL16Bit : kCGL24Bit;
    pf->stencil_mode = stencil ? kCGL8Bit : kCGL0Bit;
-   pf->aux_buffers = (uint16_t)aux;     /* as asked, so OpenGL keeps the format */
-   if (aux)
-      ripple_gl_skip("auxiliary buffers asked, none given", "kCGLPFAAuxBuffers");
+   if (aux > 4) {
+      ripple_gl_skip("more than 4 auxiliary buffers asked, 4 given", "kCGLPFAAuxBuffers");
+      aux = 4;
+   }
+   pf->aux_buffers = (uint16_t)aux;
    pf->display_mask = mask;
    *out = pf;
    return 0;
@@ -638,6 +645,7 @@ gldCreateContext(struct gld_context **out, const struct gld_pixel_format *pf,
    rpf.depth_bits = pf->depth_mode & kCGL24Bit ? 24 : pf->depth_mode & kCGL16Bit ? 16 : 0;
    rpf.stencil_bits = pf->stencil_mode & kCGL8Bit ? 8 : 0;
    rpf.double_buffer = pf->buffer_mode == kCGLDoubleBufferBit;
+   rpf.aux_buffers = pf->aux_buffers;
 
    if (shared)
       simple_mtx_lock(&shared->lock);

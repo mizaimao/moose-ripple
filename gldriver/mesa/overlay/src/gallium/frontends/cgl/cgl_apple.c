@@ -956,11 +956,18 @@ ripple_cgl_get_integerv(void *rend, GLenum pname, GLint *params)
 {
    struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
    RIPPLE_CGL_ENTER(rend);
-   /* GL_AUX_BUFFERS: Mesa dropped auxiliary buffers and refuses the name, leaving the variable
-    * unwritten; Apple's GL answers it, and programs that asked for auxiliary buffers read it
-    * to see what they got (issue 303). None are given. */
+   /* GL_AUX_BUFFERS: Mesa dropped auxiliary buffers and answers 0; Apple's GL answers how many
+    * the drawable has, and programs that asked for some read it to see what they got. Ours are
+    * renderbuffers in a window framebuffer's color attachment slots 0..3 (cgl_context.c, Mesa
+    * patch 0017; issue 303). */
    if (pname == 0x0C00 /* GL_AUX_BUFFERS */ && params) {
-      *params = 0;
+      GET_CURRENT_CONTEXT(gl);
+      struct gl_framebuffer *fb = gl ? gl->DrawBuffer : NULL;
+      GLint n = 0;
+      while (fb && _mesa_is_winsys_fbo(fb) && n < 4 &&
+             fb->Attachment[BUFFER_COLOR0 + n].Renderbuffer)
+         n++;
+      *params = n;
       return;
    }
    /* GL_UNPACK_CLIENT_STORAGE_APPLE: WindowServer gets no answer, the value stays unwritten as
