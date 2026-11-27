@@ -347,7 +347,11 @@ BOOLEAN rb_gpu_clear_buffers(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE 
                              ULONG flags, ULONG color, ULONG depthBits, ULONG stencil);
 BOOLEAN rb_gpu_sync_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image);
 BOOLEAN rb_gpu_order_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image);
-enum { RB2K_D7_COLOR_VIEW = 1, RB2K_D7_DEPTH_VIEW = 8 };
+/* The surface objects of a colour context: its image and the depth buffer attached to it. The
+ * host keeps every kind of object of a context under one set of numbers (a second object made
+ * with a number replaces the first, and destroying a number destroys whatever has it), so
+ * these two share the numbering of the shaders and state objects in gpu_triangle.c. */
+enum { RB2K_D7_COLOR_VIEW = 1, RB2K_D7_DEPTH_VIEW = 2 };
 BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
                           ULONG color, BOOLEAN createSurface, RB2K_IMAGE *frameTarget, ULONG depthView);
 BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,
