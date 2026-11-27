@@ -1485,8 +1485,11 @@ typedef struct {
        that interface. */
     struct d9_decl *decls;
     struct d9_func *funcs;
+    DWORD decls_n, funcs_n;             /* the room in those two tables now (d9_grow) */
     struct d9_pair *pairs;
     DWORD decl9, func9, pair_last, vs_hit;
+    DWORD pair_decl;                    /* the declaration handle pair_last was found for */
+    DWORD pair_next;                    /* the pair to give up next when the table is full */
     DWORD rt9, z9;                      /* the render target's and the depth buffer's handles, as
                                            SETRENDERTARGET2 and SETDEPTHSTENCIL named them */
     int z9_set;
@@ -4552,22 +4555,50 @@ static void vs_create(RCTX *c, const RB_DP2_CREATE_VERTEX_SHADER *r)
    tokens that give each element the input register the function's dcl statement names for its
    usage, and the code. A declaration without a function is a vertex format code where it is
    one, else a Direct3D 8 declaration without code (decl_vertices). */
-#define D9_DECLS 256
+#define D9_DECLS 256                    /* the tables' first size, */
 #define D9_FUNCS 512
+#define D9_TABLE_MAX 16384              /* and how far d9_grow takes them */
 #define D9_PAIRS 256
 #define D9_PAIR_HANDLE 0x40000001UL     /* the shaders made here: odd, as the runtime's are */
 #define D9_DECL_WORDS (4 * 65 + 2 * VS_ARB_STREAMS + 2)
 
+/* elements: one copy for all the declarations that say the same (d9_create_decl), with the number
+   of them in the DWORD before it; d9_shader keeps its shaders by that copy's address. */
 struct d9_decl { DWORD handle, count, fvf; RB_D9_ELEMENT *elements; };
 struct d9_func { DWORD handle, words; DWORD *tokens; };
 struct d9_pair { DWORD decl, func, vs; };
 
 static int d9_tables(RCTX *c)
 {
-    if (!c->decls) c->decls = (struct d9_decl *)alloc(D9_DECLS * sizeof *c->decls);
-    if (!c->funcs) c->funcs = (struct d9_func *)alloc(D9_FUNCS * sizeof *c->funcs);
+    if (!c->decls) {
+        c->decls = (struct d9_decl *)alloc(D9_DECLS * sizeof *c->decls);
+        c->decls_n = c->decls ? D9_DECLS : 0;
+    }
+    if (!c->funcs) {
+        c->funcs = (struct d9_func *)alloc(D9_FUNCS * sizeof *c->funcs);
+        c->funcs_n = c->funcs ? D9_FUNCS : 0;
+    }
     if (!c->pairs) c->pairs = (struct d9_pair *)alloc(D9_PAIRS * sizeof *c->pairs);
     return c->decls && c->funcs && c->pairs;
+}
+
+/* Twice the room in a full table of declarations or functions. A program may make many: the
+   fourth game test of 3DMark03 makes more than 500 declarations, and with a table of 256 the
+   rest were not kept and their draws left out (its water came out white). 0: no more room. */
+static int d9_grow(void **table, DWORD *n, DWORD size)
+{
+    void *t;
+
+    if (!*table || *n * 2 > D9_TABLE_MAX)
+        return 0;
+    t = alloc(*n * 2 * size);
+    if (!t)
+        return 0;
+    memcpy(t, *table, *n * size);
+    release(*table);
+    *table = t;
+    *n *= 2;
+    return 1;
 }
 
 /* Forget the shaders made from a declaration or a function handle (0 matches none). */
@@ -4586,7 +4617,7 @@ static void d9_forget(RCTX *c, DWORD decl, DWORD func)
 static struct d9_decl *d9_decl(RCTX *c, DWORD handle)
 {
     DWORD i;
-    for (i = 0; c->decls && handle && i < D9_DECLS; i++)
+    for (i = 0; c->decls && handle && i < c->decls_n; i++)
         if (c->decls[i].handle == handle)
             return &c->decls[i];
     return NULL;
@@ -4595,7 +4626,7 @@ static struct d9_decl *d9_decl(RCTX *c, DWORD handle)
 static struct d9_func *d9_func(RCTX *c, DWORD handle)
 {
     DWORD i;
-    for (i = 0; c->funcs && handle && i < D9_FUNCS; i++)
+    for (i = 0; c->funcs && handle && i < c->funcs_n; i++)
         if (c->funcs[i].handle == handle)
             return &c->funcs[i];
     return NULL;
@@ -4604,10 +4635,17 @@ static struct d9_func *d9_func(RCTX *c, DWORD handle)
 static void d9_delete_decl(RCTX *c, DWORD handle)
 {
     struct d9_decl *e = d9_decl(c, handle);
-    d9_forget(c, handle, 0);
+    DWORD *users;
+
+    if (handle && c->pair_decl == handle)
+        c->pair_decl = 0;
     if (!e)
         return;
-    release(e->elements);
+    users = (DWORD *)e->elements - 1;
+    if (--*users == 0) {                /* the last declaration that said this */
+        d9_forget(c, (DWORD)e->elements, 0);
+        release(users);
+    }
     memset(e, 0, sizeof *e);
 }
 
@@ -4624,26 +4662,43 @@ static void d9_delete_func(RCTX *c, DWORD handle)
 static void d9_create_decl(RCTX *c, DWORD handle, const RB_D9_ELEMENT *elements, DWORD count)
 {
     struct d9_decl *e;
-    DWORD i;
+    DWORD i, j;
 
     if (!d9_tables(c) || !handle)
         return;
     d9_delete_decl(c, handle);
-    for (i = 0; i < D9_DECLS && c->decls[i].handle; i++)
+    for (i = 0; i < c->decls_n && c->decls[i].handle; i++)
         ;
-    if (i == D9_DECLS || !count || count > 65) {
+    if (!count || count > 65 ||
+        (i == c->decls_n && !d9_grow((void **)&c->decls, &c->decls_n, sizeof *c->decls))) {
         SKIPPED(SKIP_SHADER);
         dbg("rd3d: a vertex declaration is not kept\r\n");
         return;
     }
     e = &c->decls[i];
-    e->elements = (RB_D9_ELEMENT *)alloc(count * sizeof *elements);
-    if (!e->elements)
-        return;
-    memcpy(e->elements, elements, count * sizeof *elements);
+    /* A program may make a declaration for every mesh (the fourth game test of 3DMark03: more
+       than 500), most of them saying the same few things. Those share one copy of their
+       elements, and so the shaders made from it: a shader for each handle overflowed the table
+       of pairs and was made again at every draw. */
+    for (j = 0; j < c->decls_n; j++)
+        if (c->decls[j].handle && c->decls[j].count == count &&
+            !memcmp(c->decls[j].elements, elements, count * sizeof *elements))
+            break;
+    if (j < c->decls_n) {
+        e->elements = c->decls[j].elements;
+        ++((DWORD *)e->elements)[-1];
+        e->fvf = c->decls[j].fvf;
+    } else {
+        DWORD *users = (DWORD *)alloc(sizeof *users + count * sizeof *elements);
+        if (!users)
+            return;
+        *users = 1;
+        e->elements = (RB_D9_ELEMENT *)(users + 1);
+        memcpy(e->elements, elements, count * sizeof *elements);
+        e->fvf = rb_d9_decl_fvf(e->elements, count);
+    }
     e->handle = handle;
     e->count = count;
-    e->fvf = rb_d9_decl_fvf(e->elements, count);
     tracef("rd3d: vertex declaration %lx: %lu elements, vertex format %lx\r\n", handle, count, e->fvf);
 }
 
@@ -4655,9 +4710,10 @@ static void d9_create_func(RCTX *c, DWORD handle, const DWORD *tokens, DWORD byt
     if (!d9_tables(c) || !handle)
         return;
     d9_delete_func(c, handle);
-    for (i = 0; i < D9_FUNCS && c->funcs[i].handle; i++)
+    for (i = 0; i < c->funcs_n && c->funcs[i].handle; i++)
         ;
-    if (i == D9_FUNCS || bytes < 8 || bytes % 4) {
+    if (bytes < 8 || bytes % 4 ||
+        (i == c->funcs_n && !d9_grow((void **)&c->funcs, &c->funcs_n, sizeof *c->funcs))) {
         SKIPPED(SKIP_SHADER);
         dbg("rd3d: a vertex shader function is not kept\r\n");
         return;
@@ -4680,27 +4736,29 @@ static DWORD d9_shader(RCTX *c, DWORD decl, DWORD func)
     struct d9_func *fn = NULL;
     RB_DP2_CREATE_VERTEX_SHADER *r;
     unsigned long *out, dw = 0, cw = 0;
-    DWORD i, at = D9_PAIRS, room;
+    DWORD i, at = D9_PAIRS, room, key;
 
-    if (c->pairs && c->pairs[c->pair_last].vs && c->pairs[c->pair_last].decl == decl &&
-        c->pairs[c->pair_last].func == func)
+    if (c->pairs && c->pair_decl == decl && c->pairs[c->pair_last].vs && c->pairs[c->pair_last].func == func)
         return c->pairs[c->pair_last].vs;
     dl = d9_decl(c, decl);
     if (func)
         fn = d9_func(c, func);
     if (!dl || (func && !fn) || !d9_tables(c))
         return 0;
+    key = (DWORD)dl->elements;          /* the same for every declaration that says the same */
     for (i = 0; i < D9_PAIRS; i++) {
-        if (c->pairs[i].vs && c->pairs[i].decl == decl && c->pairs[i].func == func) {
+        if (c->pairs[i].vs && c->pairs[i].decl == key && c->pairs[i].func == func) {
             c->pair_last = i;
+            c->pair_decl = decl;
             return c->pairs[i].vs;
         }
         if (!c->pairs[i].vs && at == D9_PAIRS)
             at = i;
     }
-    if (at == D9_PAIRS) {               /* full: the oldest slot's declaration gives up its pairs */
-        d9_forget(c, c->pairs[0].decl, 0);
-        at = 0;
+    if (at == D9_PAIRS) {               /* full: one pair gives up its shader, each in its turn */
+        at = c->pair_next++ % D9_PAIRS;
+        vs_delete(c, c->pairs[at].vs);
+        memset(&c->pairs[at], 0, sizeof c->pairs[at]);
     }
     room = D9_DECL_WORDS + (fn ? fn->words : 0);
     r = (RB_DP2_CREATE_VERTEX_SHADER *)alloc(sizeof *r + room * 4);
@@ -4720,10 +4778,11 @@ static DWORD d9_shader(RCTX *c, DWORD decl, DWORD func)
     }
     tracef("rd3d: declaration %lx with function %lx: shader %lx, %lu declaration words, %lu of code\r\n",
            decl, func, r->handle, (DWORD)dw, (DWORD)cw);
-    c->pairs[at].decl = decl;
+    c->pairs[at].decl = key;
     c->pairs[at].func = func;
     c->pairs[at].vs = r->handle;
     c->pair_last = at;
+    c->pair_decl = decl;
     release(r);
     return c->pairs[at].vs;
 }
@@ -4752,9 +4811,10 @@ static int d9_resolve(RCTX *c)
 static void d9_release(RCTX *c)
 {
     DWORD i;
-    for (i = 0; c->decls && i < D9_DECLS; i++)
-        release(c->decls[i].elements);
-    for (i = 0; c->funcs && i < D9_FUNCS; i++)
+    for (i = 0; c->decls && i < c->decls_n; i++)
+        if (c->decls[i].handle && --((DWORD *)c->decls[i].elements)[-1] == 0)
+            release((DWORD *)c->decls[i].elements - 1);
+    for (i = 0; c->funcs && i < c->funcs_n; i++)
         release(c->funcs[i].tokens);
     release(c->decls);
     release(c->funcs);
@@ -4762,6 +4822,8 @@ static void d9_release(RCTX *c)
     c->decls = NULL;
     c->funcs = NULL;
     c->pairs = NULL;
+    c->decls_n = c->funcs_n = 0;
+    c->pair_decl = 0;
 }
 
 /* Before a draw through a vertex shader: its program bound and on, c0..c255 and its def
