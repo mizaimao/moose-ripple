@@ -463,6 +463,86 @@ static void ff_streams_case(BOOL offered)
     if (cvb) IDirect3DVertexBuffer8_Release(cvb);
 }
 
+/* One quad of a user clip plane case: red, over clip x -0.5..0.5 (the target's 32..96), with
+ * plane 0 set and switched on or left off. x0: the left edge in the vertices' own space. */
+static void clip_draw(const char *name, DWORD shader, const float *plane, BOOL on, float x0)
+{
+    static const SAMPLE cut[] = { { 40, 64, CLEAR_COLOR }, { 56, 64, CLEAR_COLOR }, { 72, 64, 0xff0000 },
+                                  { 8, 8, CLEAR_COLOR } };
+    static const SAMPLE whole[] = { { 40, 64, 0xff0000 }, { 56, 64, 0xff0000 }, { 72, 64, 0xff0000 },
+                                    { 8, 8, CLEAR_COLOR } };
+    struct { float x, y, z; DWORD color; } v[4];
+    HRESULT hr;
+    int i;
+    for (i = 0; i < 4; ++i) {
+        v[i].x = (i & 1) ? 0.5f : x0;
+        v[i].y = (i & 2) ? -0.5f : 0.5f;
+        v[i].z = 0.5f;
+        v[i].color = 0xffff0000;
+    }
+    if (!begin(name)) return;
+    IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_NONE);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+    IDirect3DDevice8_SetTexture(device, 0, NULL);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+    IDirect3DDevice8_SetVertexShader(device, shader);
+    IDirect3DDevice8_SetClipPlane(device, 0, plane);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_CLIPPLANEENABLE, on ? D3DCLIPPLANE0 : 0);
+    hr = IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+    IDirect3DDevice8_SetRenderState(device, D3DRS_CLIPPLANEENABLE, 0);
+    if (FAILED(hr)) { fail_hr(name, "draw", hr); IDirect3DDevice8_EndScene(device); }
+    else check(name, on ? cut : whole, 4);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_CCW);
+    IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+}
+
+/* User clip planes.
+ * clip_ff: fixed-function vertices, whose plane is in world space. The view moves the world right
+ * by 0.5 and the projection halves x, so the quad over world x -1.5..0.5 covers clip -0.5..0.5,
+ * and the plane (1, 0, 0, 0.5), world x >= -0.5, keeps its right half. A driver that takes the
+ * plane for one in clip space draws the whole quad.
+ * clip_off: the same with the plane switched off again: the whole quad.
+ * clip_vs: through a vertex shader (mov oPos, v0; mov oD0, v5) the plane is in clip space:
+ * (1, 0, 0, 0) keeps the right half. The matrices stay set, so a driver that takes it for a
+ * world space plane cuts elsewhere. */
+static void clip_case(BOOL offered, BOOL shaders)
+{
+    static const DWORD decl[] = { D3DVSD_STREAM(0), D3DVSD_REG(D3DVSDE_POSITION, D3DVSDT_FLOAT3),
+                                  D3DVSD_REG(D3DVSDE_DIFFUSE, D3DVSDT_D3DCOLOR), D3DVSD_END() };
+    static const DWORD code[] = { 0xfffe0101,
+        0x00000001, 0xc00f0000, 0x90e40000,     /* mov oPos, v0 */
+        0x00000001, 0xd00f0000, 0x90e40005,     /* mov oD0, v5 */
+        0x0000ffff };
+    static const float world_plane[4] = { 1, 0, 0, 0.5f }, clip_plane[4] = { 1, 0, 0, 0 };
+    D3DMATRIX m;
+    DWORD shader = 0;
+    HRESULT hr;
+    if (!offered) { printf("D8PIX user clip planes not offered\n"); return; }
+    memset(&m, 0, sizeof(m));
+    m._11 = m._22 = m._33 = m._44 = 1.0f;
+    IDirect3DDevice8_SetTransform(device, D3DTS_WORLD, &m);
+    m._41 = 0.5f;
+    IDirect3DDevice8_SetTransform(device, D3DTS_VIEW, &m);
+    m._41 = 0.0f;
+    m._11 = 0.5f;
+    IDirect3DDevice8_SetTransform(device, D3DTS_PROJECTION, &m);
+    clip_draw("clip_ff", D3DFVF_XYZ | D3DFVF_DIFFUSE, world_plane, TRUE, -1.5f);
+    clip_draw("clip_off", D3DFVF_XYZ | D3DFVF_DIFFUSE, world_plane, FALSE, -1.5f);
+    if (!shaders) printf("D8PIX clip_vs: vertex shaders not offered\n");
+    else {
+        hr = IDirect3DDevice8_CreateVertexShader(device, decl, code, &shader, 0);
+        if (FAILED(hr)) fail_hr("clip_vs", "create", hr);
+        else {
+            clip_draw("clip_vs", shader, clip_plane, TRUE, -0.5f);
+            IDirect3DDevice8_DeleteVertexShader(device, shader);
+        }
+    }
+    m._11 = 1.0f;
+    IDirect3DDevice8_SetTransform(device, D3DTS_VIEW, &m);
+    IDirect3DDevice8_SetTransform(device, D3DTS_PROJECTION, &m);
+}
+
 /* only: run that case alone (numbered from 1), or all when zero. */
 static void pixel_shaders(int only)
 {
@@ -816,6 +896,7 @@ int main(int argc, char **argv)
         vs_case("vs11_buffer", 0xfffe0101, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1) && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT), TRUE);
         vs_case("vs10", 0xfffe0100, caps.VertexShaderVersion >= D3DVS_VERSION(1, 0) && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT), FALSE);
         ff_streams_case(caps.MaxStreams >= 2 && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT));
+        clip_case(caps.MaxUserClipPlanes >= 1, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1) && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT));
     }
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 2)) pixel_shaders(only);
     else printf("D8PIX pixel shaders not offered\n");
