@@ -1327,6 +1327,8 @@ typedef struct {
     /* Direct3D 8: the vertex format (SETVERTEXSHADER with an FVF code), stream zero (a buffer
        surface's handle, or the command buffer's own vertices) and the index buffer. */
     DWORD fvf8, stream_handle, stream_stride, index_handle, index_stride;
+    DWORD sx_handle[VS_ARB_STREAMS], sx_stride[VS_ARB_STREAMS];    /* streams 1 and up: their vertex
+                                           buffers (a vertex shader's declaration reads them) */
     int stream_user;
     int dx8;                            /* made by the Direct3D 8 or 9 runtime */
     DWORD skipped8;                     /* Direct3D 8 draws not drawn (see stream_draw) */
@@ -3159,6 +3161,12 @@ typedef struct {
     GLuint vbo;                         /* the buffer object holding them (base is in start's copy), or 0 */
     BYTE *start;
     GLuint ibo;                         /* indices: the buffer object holding them, or 0 */
+    long first_vertex;                  /* the vertex of stream 0 that base is at, for the other
+                                           streams of the draw; -1: not a whole vertex */
+    int pos;                            /* the position's byte offset (0 but for a declaration) */
+    BYTE src[12];                       /* the stream each attribute comes from, 0 but for a
+                                           declaration: position, normal, diffuse, specular,
+                                           texture coordinate sets 0..7 */
 } VERTICES;
 
 /* Bind a buffer object (0: none, for arrays and indices in memory) for vertices or indices. */
@@ -4030,6 +4038,14 @@ static void vs_create(RCTX *c, const RB_DP2_CREATE_VERTEX_SHADER *r)
     s->ndecl = r->declBytes / 4;
     s->ncode = r->codeBytes / 4;
     c->vs[i] = s;
+    if (!s->ncode) {                    /* a declaration alone, for the fixed-function pipeline
+                                           (decl_vertices) */
+        if (!vs_declared((const unsigned int *)s->decl, s->ndecl, &s->info)) {
+            s->failed = 1;
+            dbg("rd3d: a vertex declaration can't be read\r\n");
+        }
+        return;
+    }
     vs_program(c, s, 0);                /* now, so a shader that can't be made says so early */
 }
 
@@ -4114,14 +4130,71 @@ static int vs_begin(RCTX *c)
     return 1;
 }
 
+static GLuint buffer_object(RCTX *c, DWORD h, GLenum target);
+
+/* Where one attribute of a draw lies: stream st's data for vertex first, plus offset, with that
+   stream's buffer object bound (or none: its memory). Stream 0 is v's; the others are the
+   vertex buffers set for streams 1 and up, read at the same vertex. *stride: that stream's. */
+static const BYTE *stream_at(RCTX *c, const VERTICES *v, DWORD first, DWORD st, DWORD offset,
+                             DWORD *stride)
+{
+    DWORD bytes;
+    const BYTE *mem;
+    GLuint vbo;
+
+    if (!st) {
+        *stride = v->stride;
+        return vertex_data(c, v, first) + offset;
+    }
+    mem = buffer_get(c->ddl, c->sx_handle[st], &bytes);
+    vbo = buffer_object(c, c->sx_handle[st], GL_ARRAY_BUFFER_ARB);
+    *stride = c->sx_stride[st];
+    bind_buffer(c, GL_ARRAY_BUFFER_ARB, vbo);
+    tracef("rd3d: stream %lu: buffer %lx stride %lu, object %lu, vertex %ld + %lu, offset %lu\r\n", st,
+           c->sx_handle[st], *stride, (DWORD)vbo, v->first_vertex, first, offset);
+    return (vbo ? (const BYTE *)0 : mem) + ((DWORD)v->first_vertex + first) * *stride + offset;
+}
+
+/* The streams a declaration's fixed-function attributes come from, as bits. */
+static DWORD src_streams(const VERTICES *v)
+{
+    DWORD i, streams = 0;
+    for (i = 0; i < sizeof v->src; i++)
+        streams |= 1UL << v->src[i];
+    return streams;
+}
+
+/* The streams a draw reads besides stream 0 (bit n: stream n) have vertex buffers that reach
+   count vertices from first on (count 0: an indexed draw from buffer objects, range unknown). */
+static int streams_ok(RCTX *c, const VERTICES *v, DWORD first, DWORD count, DWORD streams)
+{
+    DWORD st, bytes;
+
+    for (st = 1; st < VS_ARB_STREAMS; st++) {
+        if (!(streams & (1UL << st)))
+            continue;
+        if (v->first_vertex < 0 || !c->sx_stride[st] || !buffer_get(c->ddl, c->sx_handle[st], &bytes) ||
+            ((DWORD)v->first_vertex + first + count) * c->sx_stride[st] > bytes)
+            return 0;
+    }
+    return 1;
+}
+
 /* The shader's inputs as generic attribute arrays from vertex first on; the conventional
-   arrays off. */
-static void vs_arrays(RCTX *c, const VERTICES *v, DWORD first)
+   arrays off. An input may come from another stream than stream 0 (v): that stream's vertex
+   buffer, from its buffer object or its memory, at the same vertex. 0 if such a stream has no
+   buffer or the draw reaches past its end. */
+static int vs_arrays(RCTX *c, const VERTICES *v, DWORD first, DWORD count)
 {
     GLF *gl = gl_of(c);
     struct vs8 *s = vs_find(c, c->fvf8);
-    const BYTE *b = vertex_data(c, v, first);
-    DWORD n, u;
+    DWORD n, u, streams = 0;
+
+    for (n = 0; s && n < VS_ARB_INPUTS; n++)
+        if (s->info.inputs & (1UL << n))
+            streams |= 1UL << s->info.stream[n];
+    if (!streams_ok(c, v, first, count, streams))
+        return 0;
 
     gl->DisableClientState(GL_VERTEX_ARRAY);
     gl->DisableClientState(GL_COLOR_ARRAY);
@@ -4139,17 +4212,17 @@ static void vs_arrays(RCTX *c, const VERTICES *v, DWORD first)
     for (n = 0; n < VS_ARB_INPUTS; n++) {
         DWORD bit = 1UL << n;
         if (s && (s->info.inputs & bit)) {
-            DWORD type = s->info.type[n];
-            const BYTE *at = b + s->info.offset[n];
+            DWORD type = s->info.type[n], stride;
+            const BYTE *at = stream_at(c, v, first, s->info.stream[n], s->info.offset[n], &stride);
             if (type <= VS_ARB_FLOAT4)
-                gl->VertexAttribPointerARB(n, type + 1, GL_FLOAT, GL_FALSE, v->stride, at);
+                gl->VertexAttribPointerARB(n, type + 1, GL_FLOAT, GL_FALSE, stride, at);
             else if (type == VS_ARB_COLOR)
-                gl->VertexAttribPointerARB(n, 4, GL_UNSIGNED_BYTE, GL_TRUE, v->stride, at);
+                gl->VertexAttribPointerARB(n, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, at);
             else if (type == VS_ARB_UBYTE4)
-                gl->VertexAttribPointerARB(n, 4, GL_UNSIGNED_BYTE, GL_FALSE, v->stride, at);
+                gl->VertexAttribPointerARB(n, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, at);
             else
                 gl->VertexAttribPointerARB(n, type == VS_ARB_SHORT2 ? 2 : 4, GL_SHORT, GL_FALSE,
-                                           v->stride, at);
+                                           stride, at);
             if (!(c->attribs_on & bit)) {
                 gl->EnableVertexAttribArrayARB(n);
                 c->attribs_on |= bit;
@@ -4159,6 +4232,7 @@ static void vs_arrays(RCTX *c, const VERTICES *v, DWORD first)
             c->attribs_on &= ~bit;
         }
     }
+    return 1;
 }
 
 /* The arrays of untransformed vertices first..first+count: as the program reads them, each set
@@ -4166,28 +4240,32 @@ static void vs_arrays(RCTX *c, const VERTICES *v, DWORD first)
 static void tnl_arrays(RCTX *c, const VERTICES *v, DWORD first)
 {
     GLF *gl = gl_of(c);
-    const BYTE *b = vertex_data(c, v, first);
-    DWORD u;
+    const BYTE *b;
+    DWORD u, stride;
 
     attribs_off(c);
     gl->EnableClientState(GL_VERTEX_ARRAY);
-    gl->VertexPointer(3, GL_FLOAT, v->stride, b);
+    b = stream_at(c, v, first, v->src[0], v->pos, &stride);
+    gl->VertexPointer(3, GL_FLOAT, stride, b);
     if (v->normal >= 0) {
         gl->EnableClientState(GL_NORMAL_ARRAY);
-        gl->NormalPointer(GL_FLOAT, v->stride, b + v->normal);
+        b = stream_at(c, v, first, v->src[1], v->normal, &stride);
+        gl->NormalPointer(GL_FLOAT, stride, b);
     } else {
         gl->DisableClientState(GL_NORMAL_ARRAY);
     }
     if (v->diffuse >= 0) {
         gl->EnableClientState(GL_COLOR_ARRAY);
-        gl->ColorPointer(GL_BGRA, GL_UNSIGNED_BYTE, v->stride, b + v->diffuse);
+        b = stream_at(c, v, first, v->src[2], v->diffuse, &stride);
+        gl->ColorPointer(GL_BGRA, GL_UNSIGNED_BYTE, stride, b);
     } else {
         gl->DisableClientState(GL_COLOR_ARRAY);
     }
     if (gl->SecondaryColorPointer) {
         if (v->specular >= 0) {
             gl->EnableClientState(GL_SECONDARY_COLOR_ARRAY);
-            gl->SecondaryColorPointer(GL_BGRA, GL_UNSIGNED_BYTE, v->stride, b + v->specular);
+            b = stream_at(c, v, first, v->src[3], v->specular, &stride);
+            gl->SecondaryColorPointer(GL_BGRA, GL_UNSIGNED_BYTE, stride, b);
         } else {
             gl->DisableClientState(GL_SECONDARY_COLOR_ARRAY);
         }
@@ -4198,7 +4276,8 @@ static void tnl_arrays(RCTX *c, const VERTICES *v, DWORD first)
         gl->ClientActiveTexture(GL_TEXTURE0 + u);
         if (v->tex[u] >= 0) {
             gl->EnableClientState(GL_TEXTURE_COORD_ARRAY);
-            gl->TexCoordPointer(v->texsize[u], GL_FLOAT, v->stride, b + v->tex[u]);
+            b = stream_at(c, v, first, v->src[4 + u], v->tex[u], &stride);
+            gl->TexCoordPointer(v->texsize[u], GL_FLOAT, stride, b);
         } else {
             gl->DisableClientState(GL_TEXTURE_COORD_ARRAY);
         }
@@ -4246,7 +4325,10 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
         }
         if (mode == GL_POINTS)
             point_state(c, vs_find(c, c->fvf8) && vs_find(c, c->fvf8)->info.psize);
-        vs_arrays(c, v, first);
+        if (!vs_arrays(c, v, first, n)) {
+            skip8(c, "vertex stream");
+            return;
+        }
         if (!nidx)
             gl->DrawArrays(mode, 0, count);
         else {
@@ -4262,8 +4344,16 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
             skip8(c, "vertex processing");
             return;
         }
+        if (!streams_ok(c, v, first, n, src_streams(v))) {
+            skip8(c, "vertex stream");
+            return;
+        }
         if (mode == GL_POINTS)
             point_state(c, c->rs[RS_POINTSCALEENABLE] != 0);
+        if (trace_on && src_streams(v) > 1)
+            tracef("rd3d: declaration draw: position %d, normal %d, diffuse %d (stream %lu), specular %d, "
+                   "stream 0 object %lu at %lu, %lu vertices\r\n", v->pos, v->normal, v->diffuse,
+                   (DWORD)v->src[2], v->specular, (DWORD)v->vbo, (DWORD)(v->base - v->start), count);
         tnl_arrays(c, v, first);
         if (!nidx)
             gl->DrawArrays(mode, 0, count);
@@ -5147,6 +5237,55 @@ static GLuint buffer_object(RCTX *c, DWORD h, GLenum target)
 }
 
 /* ---- Direct3D 8 draws ----------------------------------------------------------------------- */
+/* The vertices of a declaration that came without code: the fixed-function pipeline reads them
+   through it, each register a fixed attribute (Direct3D 8's D3DVSDE_*: 0 position, 3 normal,
+   5 diffuse, 6 specular, 7 to 14 texture coordinate sets; blend weights and indices, point size
+   and the tweening inputs are not read), each from its own stream. 0 if the position or a type
+   is not what the pipeline's program reads. */
+static int decl_vertices(const struct vs8 *s, VERTICES *v)
+{
+    const VS_ARB *d = &s->info;
+    DWORD i;
+
+    if (s->failed || !(d->inputs & 1) || d->type[0] != 2)   /* the position: three floats */
+        return 0;
+    v->xyz = 1;
+    v->pos = d->offset[0];
+    v->src[0] = d->stream[0];
+    v->normal = v->diffuse = v->specular = -1;
+    for (i = 0; i < 8; i++) {
+        v->tex[i] = -1;
+        v->texsize[i] = 0;
+    }
+    if (d->inputs & (1UL << 3)) {
+        if (d->type[3] != 2)
+            return 0;
+        v->normal = d->offset[3];
+        v->src[1] = d->stream[3];
+    }
+    if (d->inputs & (1UL << 5)) {
+        if (d->type[5] != VS_ARB_COLOR)
+            return 0;
+        v->diffuse = d->offset[5];
+        v->src[2] = d->stream[5];
+    }
+    if (d->inputs & (1UL << 6)) {
+        if (d->type[6] != VS_ARB_COLOR)
+            return 0;
+        v->specular = d->offset[6];
+        v->src[3] = d->stream[6];
+    }
+    for (i = 0; i < 8; i++)
+        if (d->inputs & (1UL << (7 + i))) {
+            if (d->type[7 + i] > VS_ARB_FLOAT4)
+                return 0;
+            v->tex[i] = d->offset[7 + i];
+            v->texsize[i] = d->type[7 + i] + 1;
+            v->src[4 + i] = d->stream[7 + i];
+        }
+    return 1;
+}
+
 /* Stream zero's vertices: a buffer surface named by its handle, or, for SETSTREAMSOURCEUM, the
    vertices that came with the command buffer. 0 when there is nothing usable. */
 static int stream_vertices(RCTX *c, LPD3DHAL_DRAWPRIMITIVES2DATA d, VERTICES *v)
@@ -5156,10 +5295,16 @@ static int stream_vertices(RCTX *c, LPD3DHAL_DRAWPRIMITIVES2DATA d, VERTICES *v)
 
     memset(v, 0, sizeof *v);
     if (c->fvf8 & 1) {                  /* a vertex shader's handle: its declaration lays it out */
+        struct vs8 *s = vs_find(c, c->fvf8);
         if (!tnl_on || !c->stream_stride)
             return 0;
-        v->shader = 1;
-        v->diffuse = v->specular = v->normal = -1;
+        if (s && !s->ncode) {           /* no code: the fixed-function pipeline, through it */
+            if (!decl_vertices(s, v))
+                return 0;
+        } else {
+            v->shader = 1;
+            v->diffuse = v->specular = v->normal = -1;
+        }
     } else if (!parse_fvf(c->fvf8, v) || !c->stream_stride || c->stream_stride < v->stride) {
         return 0;
     }
@@ -5224,6 +5369,9 @@ static int stream_from(VERTICES *v, long start)
     v->base += start;
     if (v->count)
         v->count = (bytes - (DWORD)start) / v->stride;
+    /* the same vertex in the draw's other streams (vs_arrays) */
+    v->first_vertex = v->first_vertex >= 0 && v->stride && start % (long)v->stride == 0 ?
+                      v->first_vertex + start / (long)v->stride : -1;
     return 1;
 }
 
@@ -5605,6 +5753,9 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
                     c->stream_user = 0;
                     c->stream_handle = s[i].handle;
                     c->stream_stride = s[i].stride;
+                } else if (s[i].stream < VS_ARB_STREAMS) {
+                    c->sx_handle[s[i].stream] = s[i].handle;
+                    c->sx_stride[s[i].stream] = s[i].stride;
                 }
             cmd = data + n * sizeof *s;
             break;
@@ -6043,7 +6194,7 @@ static void d8_caps(RB_D3DCAPS8 *c)
     c->maxPointSize = fbits(MAX_POINT_SIZE);       /* and point sprites (point_state) */
     c->maxPrimitiveCount = 0xFFFF;
     c->maxVertexIndex = 0xFFFF;         /* 16-bit index buffers only */
-    c->maxStreams = 1;
+    c->maxStreams = 1;                  /* (more with hardware vertex processing, below) */
     c->maxStreamStride = 255;
     c->vertexShaderVersion = 0xFFFE0000UL;  /* none: the runtime runs vertex shaders */
     if (tnl_on) {
@@ -6060,6 +6211,9 @@ static void d8_caps(RB_D3DCAPS8 *c)
         c->maxUserClipPlanes = 0;
         /* vertex shaders as ARB vertex programs (vs_arb.c): vs_1_1 for Direct3D 8, vs_2_0
            (without flow control) for a Direct3D 9 runtime */
+        c->maxStreams = VS_ARB_STREAMS;     /* a declaration may read several: a vertex shader's
+                                               inputs (vs_arrays), the fixed-function attributes of
+                                               one without code (decl_vertices) */
         if (p && p->d3d_version >= 0x900) {
             c->vertexShaderVersion = 0xFFFE0200UL;
             c->maxVertexShaderConst = VS_ARB_CONSTANTS;
