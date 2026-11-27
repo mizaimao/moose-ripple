@@ -2355,6 +2355,78 @@ static void cube_cases(int only, BOOL version2)
     IDirect3DCubeTexture9_Release(cube);
 }
 
+/* 111: 28800 pairs of points, untransformed, from user memory in four vertex formats (a texture
+ * coordinate set of one, two, three or four parts), in an order that keeps changing. With
+ * software vertex processing the runtime writes each draw's transformed vertices into one
+ * buffer of its own, behind the last draw's at whatever byte comes next, and goes back to the
+ * front when the buffer is full. A draw that ends in the buffer's last bytes must still get all
+ * its vertices: a driver that counts what is left in whole vertices from the buffer's start
+ * loses the last one there and leaves the draw out (3DMark03's CPU tests ran into that). Four
+ * passes over a square of 120 by 120 pixels, red, blue, red and then green: green at the end,
+ * and no draw skipped. With hardware vertex processing the draws reach the driver as they are. */
+static void up_buffer_end_case(int only)
+{
+    enum { Edge = 4, Span = Side - 2 * Edge };
+    static const DWORD white[4] = { 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff };
+    static const DWORD colors[4] = { 0xffff0000, 0xff0000ff, 0xffff0000, 0xff00ff00 };
+    static const DWORD fvf[4] = { D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE1(0),
+                                  D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE2(0),
+                                  D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE3(0),
+                                  D3DFVF_XYZ | D3DFVF_DIFFUSE | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE4(0) };
+    static const SAMPLE s[] = { { 4, 4, 0x00ff00 }, { 5, 4, 0x00ff00 }, { 64, 64, 0x00ff00 }, { 37, 91, 0x00ff00 },
+                                { 123, 123, 0x00ff00 }, { 2, 2, CLEAR_COLOR }, { 125, 64, CLEAR_COLOR } };
+    struct { float x, y, z; DWORD diffuse; float t[4]; } point;
+    BYTE pair[2 * 32];
+    IDirect3DTexture9 *t;
+    D3DMATRIX identity;
+    DWORD seed = 12345;
+    HRESULT hr = D3D_OK;
+    float one = 1.0f;
+    int pass, p, k;
+    if (only && only != 111) return;
+    t = texture2x2(white);
+    if (!t) { fail_hr("up_buffer_end", "texture", E_FAIL); return; }
+    memset(&identity, 0, sizeof(identity));
+    identity._11 = identity._22 = identity._33 = identity._44 = 1.0f;
+    IDirect3DDevice9_SetTransform(device, D3DTS_WORLD, &identity);
+    IDirect3DDevice9_SetTransform(device, D3DTS_VIEW, &identity);
+    IDirect3DDevice9_SetTransform(device, D3DTS_PROJECTION, &identity);
+    if (begin("up_buffer_end")) {
+        IDirect3DDevice9_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSIZE, *(DWORD *)&one);
+        IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)t);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+        point.z = 0.5f;
+        point.t[0] = point.t[1] = point.t[2] = 0.5f;
+        point.t[3] = 1.0f;
+        for (pass = 0; pass < 4 && SUCCEEDED(hr); ++pass)
+            for (p = 0; p < Span * Span / 2 && SUCCEEDED(hr); ++p) {
+                /* the pixel at (px, py): a pixel's centre is at whole screen coordinates */
+                int px = Edge + p % (Span / 2) * 2, py = Edge + p / (Span / 2);
+                UINT form, size;
+                seed = seed * 1103515245UL + 12345UL;
+                form = (seed >> 16) % 4;
+                size = 16 + 4 * (form + 1);
+                point.y = 1.0f - (float)py / (Side / 2);
+                point.diffuse = colors[pass];
+                for (k = 0; k < 2; ++k) {
+                    point.x = (float)(px + k) / (Side / 2) - 1.0f;
+                    memcpy(pair + k * size, &point, size);
+                }
+                IDirect3DDevice9_SetFVF(device, fvf[form]);
+                hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_POINTLIST, 2, pair, size);
+            }
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        if (FAILED(hr)) { fail_hr("up_buffer_end", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("up_buffer_end", s, 7);
+    }
+    IDirect3DTexture9_Release(t);
+}
+
 /* ---- luminance and alpha formats ----
  * 47: an L8 texture of 0x80 over the left half and an A8L8 one of 0x40
  * (alpha 0xff) over the right, by a fixed-function stage. */
@@ -3631,6 +3703,7 @@ int main(int argc, char **argv)
     depth_bias_case(only, (caps.RasterCaps & D3DPRASTERCAPS_DEPTHBIAS) != 0);
     blend_op_case(only, (caps.PrimitiveMiscCaps & D3DPMISCCAPS_BLENDOP) != 0);
     l16_case(only);
+    up_buffer_end_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
     colorwrite_case(only);
     eviction_case(only);
