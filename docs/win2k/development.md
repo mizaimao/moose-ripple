@@ -3100,6 +3100,60 @@ texture stage), unlit and lit; and `lit_depth_switch`, where the depth buffer go
 target texture and back between a lit, an unlit and a lit draw. That last one fails before
 the change.
 
+## Automatic checks in the pixel tests
+
+Two checks make a test run fail on its own, without anyone looking at pictures. Both are for
+development: they live in the test tools (`win2k/tools/drvcheck.h`, included by `d8pixels`,
+`d9pixels` and `tpixels`), and the one thing they need from the driver can be built out.
+
+### What the driver skipped
+
+The display driver has long counted what it leaves out. `rbskips.h` puts those counts behind one
+small query, `ExtEscape(dc, RB2K_D3D7_SKIPS_ESCAPE, ...)`, by kind: draws left out (fill mode,
+stencil, texture stages, vertex format, texture, primitive kind), clears left out, states with no
+effect and Direct3D 9 commands passed over, shaders and stage programs not translated, vertex
+declarations not resolved, surfaces refused and texture copies that failed, and driver calls that
+failed. A test reads the counts after each case; a case during which one rose prints
+`case=NAME skips=N kind=N` and fails, and the end line carries `skips=TOTAL`. `-noskips` turns
+the check off. The driver answers the query only when built with `RB2K_DEVCHECKS` (the default of
+`build.py`; `DEVCHECKS=0` leaves it out, and `package.sh` builds releases that way). The same
+tests read the Windows 9x driver's counts through `RippleSkips()` of its `rippledd.dll`.
+
+### The picture of a reference rasterizer
+
+`d9pixels ref` and `d8pixels ref` draw every case on `D3DDEVTYPE_REF`, Microsoft's reference
+rasterizer, and keep each case's 128x128 picture (`refpix9`, `refpix8`). The later runs on the
+hardware device compare their picture of each case with it and print `ref_differ=N`, the number of
+pixels that differ by more than 16 in a colour channel; more than 16 such pixels (1 in 1000) fail
+the case, and a failing case says where it first differs. `-noref` turns the comparison off. The
+reference rasterizer is `d3dref9.dll` and `d3dref8.dll` from a DirectX SDK, put beside the tests on
+the test disk; they are Microsoft's files and never go into this repository. Without them a
+reference device is still made, but it draws nothing: the tests clear it to a colour of their own
+and read that back before they trust it, and say "reference not available" otherwise, which is no
+failure. `tpixels rgb` does the same for Direct3D 7 with the runtime's own software device; that
+one breaks ties on texel borders the other way (182 pixels, one row and one column, in every
+textured case), so `tpixels` allows 2 pixels in 100.
+
+On the first runs (XP SP3 under KVM, Intel UHD 630 host) the reference rasterizer agreed with all
+108 expected results of `d9pixels` and all 44 of `d8pixels`, and 99 of the 107 compared `d9pixels`
+pictures matched it in every pixel. The checks found two things the sampled pixels had not:
+
+- **Clears of part of a target were skipped** (a smaller viewport, clear rectangles; the skip check
+  caught it in `vs2_viewport`). The host's clear always covers a whole target, since virglrenderer
+  switches the scissor test off for it, so `part_clear` draws the part: one rectangle over the
+  target in the clear's colour and depth, cut by the scissor rectangle, depth test always passing,
+  stencil replaced. The Direct3D 9 scissor test now cuts clears as well, as Direct3D has it.
+- **Points sat one column and one row off** (seven cases, 20 to 48 pixels each). Direct3D gives a
+  point's square the pixels whose middles its left and top edges pass through; the host puts a
+  square of even size one pixel further right and down. The host's viewport takes whole pixels
+  only, so the correction is a quarter of a pixel in what the vertex shaders place the picture
+  with: the viewport origin constant of point draws (`origin_bits`, object-space vertices and
+  vertex programs) and the half-pixel constant of the transformed point shader, through which all
+  transformed Direct3D 8 and 9 points now go.
+
+With both fixed every case passes both checks: `d9pixels` 109 of 109 with hardware and 107 of 107
+with software vertex processing, `d8pixels` 44 of 44, `tpixels` 18 of 18, no skips.
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:

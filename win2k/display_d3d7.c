@@ -1761,7 +1761,11 @@ static BOOL scaled_points(const D7_CONTEXT *c, ULONG fvf)
  * them (D3DFVF_PSIZE, which Direct3D 7 has as a reserved word), or they are scaled. */
 static BOOL sized_points(const D7_CONTEXT *c, const PRIMS *p)
 {
-    return p->kind == Points && c->dx8 && !(p->fvf & 1) && ((p->fvf & D3DFVF_RESERVED1) || scaled_points(c, p->fvf));
+    /* Transformed points all go that way too: its shader places them as Direct3D does (origin_bits
+     * in the miniport says how; object-space points get that through their viewport constant). */
+    return p->kind == Points && c->dx8 && !(p->fvf & 1) &&
+           ((p->fvf & D3DFVF_RESERVED1) || scaled_points(c, p->fvf) ||
+            (p->fvf & D3DFVF_POSITION_MASK) == D3DFVF_XYZRHW);
 }
 
 static void point_state(const D7_CONTEXT *c, ULONG per, ULONG *size, ULONG *flags)
@@ -4342,6 +4346,59 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
     ++d->d7draw.texBlts;
 }
 
+/* A whole number below 2^24 as an IEEE single (the display driver uses no floating point). */
+static ULONG whole_bits(ULONG v)
+{
+    ULONG shift = 0, t = v;
+    if (!v) return 0;
+    while (t >>= 1) ++shift;
+    return ((127 + shift) << 23) | ((v ^ (1UL << shift)) << (23 - shift));
+}
+
+/* A clear of part of the target. The host's clear always covers a whole target (virglrenderer
+ * switches the scissor test off for it), so the part is drawn: one rectangle over the whole
+ * target in the clear's colour and depth, cut to the part by the scissor rectangle, with the
+ * depth test passing always and the stencil value replaced whatever the stencil test says. */
+static HRESULT part_clear(D7_CONTEXT *c, const DD_SLOT *s, const DD_SLOT *z, ULONG flags, ULONG color,
+                          ULONG depthBits, ULONG stencil, LONG x0, LONG y0, LONG x1, LONG y1)
+{
+    static const UCHAR right[6] = { 0, 1, 0, 0, 1, 1 }, low[6] = { 0, 0, 1, 1, 0, 1 };
+    RB2K_D3D7_DRAW *draw = &c->draw;
+    ULONG i;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (LONG)s->width) x1 = s->width;
+    if (y1 > (LONG)s->height) y1 = s->height;
+    if (x1 <= x0 || y1 <= y0) return DD_OK;     /* nothing of the target */
+    RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D7_DRAW, vertices));
+    draw->target = s->id;
+    draw->depth = (flags & (D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL)) && z ? z->id : 0;
+    draw->primitive = RB2K_PRIM_TRIANGLES;
+    draw->pointSize = 0x3f800000UL;
+    draw->cull = D3DCULL_NONE;
+    draw->colorStage = draw->alphaStage = D3DTOP_SELECTARG1 | D3DTA_DIFFUSE << 8;
+    draw->sampler = draw->sampler1 = 0x1111;    /* no texture; the packet still wants valid sampler words */
+    if (!(flags & D3DCLEAR_TARGET)) draw->blend = RB2K_BLEND_NO_WRITE;
+    if (flags & D3DCLEAR_ZBUFFER) draw->depthState = RB2K_Z_ENABLE | RB2K_Z_WRITE | (D3DCMP_ALWAYS - 1);
+    if (flags & D3DCLEAR_STENCIL) {
+        /* Always passes; fail, depth-fail and pass all replace (Gallium's operation 2). */
+        draw->stencil = RB2K_STENCIL_ON | (D3DCMP_ALWAYS - 1) | 2UL << 4 | 2UL << 8 | 2UL << 12;
+        draw->stencilRef = (stencil & 255) | 0xffUL << 8 | 0xffUL << 16;
+    }
+    draw->scissorOn = 1;
+    draw->scissor[0] = x0; draw->scissor[1] = y0; draw->scissor[2] = x1; draw->scissor[3] = y1;
+    for (i = 0; i < 6; ++i) {
+        RB2K_D3D7_VERTEX *v = &draw->vertices[i];
+        RtlZeroMemory(v, sizeof(*v));
+        v->x = right[i] ? whole_bits(s->width) : 0;
+        v->y = low[i] ? whole_bits(s->height) : 0;
+        v->z = flags & D3DCLEAR_ZBUFFER ? depthBits : 0;
+        v->rhw = 0x3f800000UL;
+        v->diffuse = color;
+    }
+    return send_batch(c, draw, 6);
+}
+
 static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, ULONG depthBits, ULONG stencil, const RECT *rects,
                      ULONG count)
 {
@@ -4349,6 +4406,7 @@ static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, ULONG depthBits, U
     RB2K_DD_FILL f;
     ULONG written;
     BOOL small;
+    ULONG cut = 0, cutRect[4];
     HRESULT hr = target_surfaces(c, &s, &z, &small);
     if (FAILED(hr)) return hr;
     /* A depth buffer smaller than the target is not cleared with it: the colour clear goes
@@ -4361,11 +4419,29 @@ static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, ULONG depthBits, U
     /* Without a stencil buffer a stencil clear has nothing to clear. */
     if ((flags & D3DCLEAR_STENCIL) && (!z || !z->stencil)) flags &= ~D3DCLEAR_STENCIL;
     if (!flags) return DD_OK;
-    /* Part-target clears are not drawn yet. */
+    /* Flags this driver does not know, a depth clear without a depth buffer, or no rectangle. */
     if ((flags & ~(D3DCLEAR_TARGET|D3DCLEAR_ZBUFFER|D3DCLEAR_STENCIL)) || ((flags & D3DCLEAR_ZBUFFER) && !z) ||
-        count != 1 || !rects || rects->left || rects->top ||
-        rects->right != (LONG)s->width || rects->bottom != (LONG)s->height) {
+        !count || !rects) {
         ++c->display->d7draw.skipped[RB2K_D7_SKIP_CLEAR];
+        return DD_OK;
+    }
+    /* A part of the target (a smaller viewport, rectangles, or the Direct3D 9 scissor test, which
+     * cuts clears too) is drawn. */
+    scissor_words(c, &cut, cutRect);
+    if (count != 1 || cut || rects->left > 0 || rects->top > 0 ||
+        rects->right < (LONG)s->width || rects->bottom < (LONG)s->height) {
+        ULONG i;
+        for (i = 0; i < count; ++i) {
+            LONG x0 = rects[i].left, y0 = rects[i].top, x1 = rects[i].right, y1 = rects[i].bottom;
+            if (cut) {
+                if (x0 < (LONG)cutRect[0]) x0 = cutRect[0];
+                if (y0 < (LONG)cutRect[1]) y0 = cutRect[1];
+                if (x1 > (LONG)cutRect[2]) x1 = cutRect[2];
+                if (y1 > (LONG)cutRect[3]) y1 = cutRect[3];
+            }
+            hr = part_clear(c, s, z, flags, color, depthBits, stencil, x0, y0, x1, y1);
+            if (FAILED(hr)) return hr;
+        }
         return DD_OK;
     }
     if (z) {

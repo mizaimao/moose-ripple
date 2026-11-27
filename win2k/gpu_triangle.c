@@ -178,6 +178,17 @@ static ULONG integer_bits(ULONG value)
     return value ? dimension_bits(value) : 0;
 }
 
+/* A viewport origin for the vertex shaders. For points it is a quarter of a pixel less. Direct3D
+ * gives a point's square the pixels whose middles its left and top edges pass through; the host
+ * gives a square of even size the right and bottom ones, one column and one row off. The host's
+ * own viewport takes whole pixels only, so the shift is made in the constant the shaders place
+ * the picture with; a quarter pixel keeps the edges of every whole size clear of the middles. */
+static ULONG origin_bits(ULONG v, BOOLEAN points)
+{
+    if (!points) return integer_bits(v);
+    return v ? integer_bits(4 * v - 1) - (2UL << 23) : 0xbe800000UL;
+}
+
 BOOLEAN rb_gpu_prepare_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image)
 {
     ULONG fb[] = {
@@ -1059,7 +1070,8 @@ BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
         for (m = 0; m < 3; ++m)
             for (col = 0; col < 4; ++col)
                 for (row = 0; row < 4; ++row) *p++ = d->matrices[m][row * 4 + col];
-        for (i = 0; i < 4; ++i) *p++ = integer_bits(d->viewport[i]);
+        for (i = 0; i < 4; ++i)
+            *p++ = i < 2 ? origin_bits(d->viewport[i], d->primitive == RB2K_PRIM_POINTS) : integer_bits(d->viewport[i]);
         *p++ = d->viewport[4]; *p++ = d->viewport[5]; *p++ = 0; *p++ = 0;
     }
     if (lit) {
@@ -1216,6 +1228,8 @@ static ULONG ps_vertex_text(char *out, BOOLEAN object, BOOLEAN clip, BOOLEAN siz
     if (clip) put(&t, "DCL OUT[12], CLIPDIST[0]\nDCL OUT[13], CLIPDIST[1]\n");
     if (sized) { put(&t, "DCL OUT["); number(&t, psize); put(&t, "], PSIZE\n"); }
     put(&t, object ? "IMM[0] FLT32 {0x3f800000, 0x40000000, 0x00000000, 0x00000000}\n"
+                   /* x: the half pixel of Direct3D's pixel middles; a quarter for points (origin_bits). */
+                   : sized ? "IMM[0] FLT32 {0x3e800000, 0x3f800000, 0x40000000, 0x00000000}\n"
                    : "IMM[0] FLT32 {0x3f000000, 0x3f800000, 0x40000000, 0x00000000}\n");
     put(&t, "IMM[1] UINT32 {");
     number(&t, base);
@@ -1637,7 +1651,8 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
     if (shaded) {
         /* The viewport, its depth range, the integer and boolean constants of static flow control
          * (CONST[3..18]), then the shader's constants and the vertices as they came. */
-        for (i = 0; i < 4; ++i) *p++ = integer_bits(d->viewport[i]);
+        for (i = 0; i < 4; ++i)
+            *p++ = i < 2 ? origin_bits(d->viewport[i], d->primitive == RB2K_PRIM_POINTS) : integer_bits(d->viewport[i]);
         *p++ = d->viewport[4]; *p++ = d->viewport[5]; *p++ = 0; *p++ = 0;
         for (i = 0; i < 4 * (RB2K_D8_VS_CONST_BASE - 3); ++i) *p++ = d->flowConstants[i / 4][i % 4];
         for (i = 0; i < 4 * d->vertexConstants; ++i) *p++ = d->vertices[i];
@@ -1649,7 +1664,8 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
         for (m = 0; m < 3; ++m)
             for (col = 0; col < 4; ++col)
                 for (row = 0; row < 4; ++row) *p++ = d->matrices[m][row * 4 + col];
-        for (i = 0; i < 4; ++i) *p++ = integer_bits(d->viewport[i]);
+        for (i = 0; i < 4; ++i)
+            *p++ = i < 2 ? origin_bits(d->viewport[i], d->primitive == RB2K_PRIM_POINTS) : integer_bits(d->viewport[i]);
         *p++ = d->viewport[4]; *p++ = d->viewport[5]; *p++ = 0; *p++ = 0;
     }
     if (lit) {
