@@ -112,6 +112,7 @@ ULONG rb_d7_rows(ULONG format, ULONG height);
 void rb_d7_texture_written(DISPLAY *d, PDD_SURFACE_GLOBAL g);
 extern ULONG rb_dd_mode_stats[3][4];
 void rb_d7_surface_destroyed(DISPLAY *display, PDD_SURFACE_GLOBAL surface);
+BOOL rb_d7_runtime8(const DISPLAY *display);
 HPALETTE rb_create_palette(DISPLAY *display);
 BOOL rb_restore_palette(DISPLAY *display);
 void rb_rvd_init(void);

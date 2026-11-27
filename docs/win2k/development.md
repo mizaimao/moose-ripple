@@ -3177,10 +3177,37 @@ picture into a surface. `d9full` had passed when it was written, on the Direct3D
 and was not run again when the Direct3D 9 interface became the default.
 
 X8R8G8B8, A8R8G8B8 and R5G6B5 have the operation now, and a plain surface in system memory can
-be made. One in the default pool, which is video memory, is still refused: the driver makes
-plain surfaces on the host only with `RippleDirectDrawGpuSurfaces` set (`supported` in
-`display_ddraw.c`), so the program gets `D3DERR_OUTOFVIDEOMEMORY`. `d9full` prints that
-(`default_pool_plain`) without counting it.
+be made.
+
+### Plain surfaces in the default pool
+
+A DirectDraw program that asks for a plain surface in video memory and is turned down gets one
+in system memory, where Windows' own copies are quicker than a trip to the host; so the driver
+turns such surfaces down (`can_create` in `display_ddraw.c`). A Direct3D 8 or 9 runtime has no
+such fallback. `CreateOffscreenPlainSurface` in the default pool failed with
+`D3DERR_OUTOFVIDEOMEMORY`, and a program that shows a video or a loading picture through such a
+surface had nothing to copy from.
+
+A process that has a device of a Direct3D 8 or 9 runtime now gets its plain surfaces as host
+images (`rb_d7_runtime8`), of the desktop's depth: X8R8G8B8 or A8R8G8B8 on a 32-bit desktop.
+They work as the images of render targets do:
+
+- The surface is registered with its Direct3D handle like a target, so `StretchRect` (a host
+  copy or blit) and `ColorFill` find it. `ColorFill` with a rectangle is drawn, as a clear of
+  part of a target is.
+- A lock reads the image back and an unlock writes it, as for any host image.
+- `UpdateSurface` from a system-memory plain surface arrives as a copy command whose source is
+  no host image. The source's memory is kept at registration, as a texture's is, and its rows
+  are put into the image (`memory_blt`): the image is read, changed and written back, or only
+  written when the copy covers all of it. There is no stretching and the source must be 32-bit;
+  anything else is counted as a copy passed over, so a run fails on it.
+
+`d9plain` checks this in a window, on the driver and, with `ref`, on the reference rasterizer:
+a default pool surface of each format made, filled and copied into the back buffer, a rectangle
+of it filled, the surface written through a lock, and updated from system memory. All six cases
+pass on both. Two things the test first tried are not in it because the reference rasterizer
+refuses them: a stretching copy from a plain surface to the back buffer, and a copy from the
+back buffer into a plain surface. `d9full` makes and fills one in full-screen as well.
 
 ## Checking a benchmark run: pictures, counters, frame pacing
 
@@ -3446,6 +3473,52 @@ had failed three of them, and each failure was a fault of the driver: the tree c
 Nature (5.83 percent of the blocks) and the Ragtroll frame (3.42 percent) were the mipmap levels
 missing from managed textures, and the Pixel Shader 2.0 frame (4.42 percent) the address mode of
 the third texture coordinate.
+
+## Measured against a graphics card of the time
+
+One host has a GeForce 9600 GT that is passed through to a guest, so the same benchmarks can be
+run on NVIDIA's own driver in the same kind of guest. Both columns are Windows XP SP3 at
+1024x768 with one processor, each guest alone on its host, measured on 2026-11-27. This driver's
+runs had no captures and QEMU's clock option (`-rtc base=localtime,driftfix=slew`; a run's span
+was 556 s by the host and by the guest), on the source release 0.4.4 is built from.
+
+| 3DMark03 | this driver, Intel UHD 630 host | GeForce 9600 GT, passed through |
+| --- | --- | --- |
+| 3DMarks | 11009 | 33348 |
+| GT1 Wings of Fury | 187.2 fps | 974.0 |
+| GT2 Battle of Proxycon | 113.4 | 290.6 |
+| GT3 Troll's Lair | 76.4 | 194.9 |
+| GT4 Mother Nature | 47.8 | 163.1 |
+| CPU Test 1 | 64.5 | 462.7 |
+| CPU Test 2 | 10.5 | 101.4 |
+| Fill rate, multi-texturing | 8922.9 MTexels/s | 10643.0 |
+| Vertex Shader | 83.7 fps | 95.8 |
+| Pixel Shader 2.0 | 160.1 | 344.2 |
+| Ragtroll | 72.7 | 103.8 |
+
+3DMark 2001 SE: 7220 on this driver, 53913 on the card.
+
+What differs between the columns besides the driver: the card's host has an Intel Core
+i9-9900K, this driver's an i9-10900K (QEMU 10.0 with KVM, virglrenderer 1.1.0, Mesa 25.0); the
+card's guest had a Penryn processor model and 2 GB of memory with NVIDIA's driver 6.14.13.4052,
+this driver's a Pentium III model and 512 MB; and the card's 3DMark03 run had a small screen
+capture every second running in the guest (`scap`), which costs it a little. During this
+driver's 3DMark03 run another job copied 16 MB to the host for two seconds, in the first game
+test.
+
+What the numbers say. Where the host GPU does the work, in the multi-texturing fill rate and
+the Vertex Shader test, the driver is near the card. The game tests are 2.5 to 5 times behind
+and the CPU tests 7 to 10 times. So the time is probably lost in the guest's draw path and
+not on the host GPU; that is a reading of these numbers, not a profile. The CPU tests use
+software vertex processing, whose draws are sent with their vertices every time (see "Vertex
+and index buffers on the host").
+Two numbers are not in the table. The single-texturing fill rate came out above the card's
+(4990 against 2871 MTexels/s), which is not believable until that one test's guest clock has
+been checked: from captures the benchmark's own time display kept pace in the multi-texturing
+and Vertex Shader tests, ran at about 97 percent in Pixel Shader 2.0, and the single-texturing
+test is too short to tell. And every 3DMark03 score of this driver from before 2026-11-27 was
+measured without the clock option and is about 29 percent too high (see "Checking a benchmark
+run", the guest's clock).
 
 ## Release package
 

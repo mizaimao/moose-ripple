@@ -737,6 +737,18 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
  * Mark every registered texture with that surface as a level dirty. This
  * runs without the registry semaphore: it only sets flags, and a texture
  * registered meanwhile starts dirty anyway. */
+/* Whether the calling process has a device of a Direct3D 8 or 9 runtime on this display. Those
+ * runtimes have no system-memory fallback for a plain surface of the default pool, so such a
+ * process gets its plain surfaces on the host (display_ddraw.c). */
+BOOL rb_d7_runtime8(const DISPLAY *d)
+{
+    HANDLE owner = EngGetCurrentProcessId();
+    ULONG i;
+    for (i = 0; i < MaxContexts; ++i)
+        if (contexts[i].id && contexts[i].display == d && contexts[i].owner == owner && contexts[i].dx8) return TRUE;
+    return FALSE;
+}
+
 void rb_d7_texture_written(DISPLAY *d, PDD_SURFACE_GLOBAL g)
 {
     ULONG i, level, face;
@@ -832,7 +844,21 @@ static DWORD APIENTRY register_surface(PDD_CREATESURFACEEXDATA a)
         EngReleaseSemaphore(registry);
         return DDHAL_DRIVER_HANDLED;
     }
-    if (!(l->ddsCaps.dwCaps & (DDSCAPS_3DDEVICE | (d->z16Render ? DDSCAPS_ZBUFFER : 0))) ||
+    /* A plain surface of a Direct3D 8 or 9 runtime. One in system memory is kept the way a
+     * texture's memory is, as the source of UpdateSurface (memory_blt); one on the host goes on
+     * below like a target, for the handle that StretchRect and ColorFill name it by. */
+    if ((l->ddsCaps.dwCaps & (DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY | DDSCAPS_3DDEVICE | DDSCAPS_ZBUFFER)) ==
+        (DDSCAPS_OFFSCREENPLAIN | DDSCAPS_SYSTEMMEMORY) && d->nativeD3D7 && l->lpSurfMore &&
+        (rb_d7_runtime8(d) || find_texture(a->lpDDLcl, l->lpSurfMore->dwSurfaceHandle))) {
+        EngAcquireSemaphore(registry);
+        EngAcquireSemaphore(d->ddLock);
+        ++d->d7.surfaceCalls;
+        register_texture(d, a->lpDDLcl, l);
+        EngReleaseSemaphore(d->ddLock);
+        EngReleaseSemaphore(registry);
+        return DDHAL_DRIVER_HANDLED;
+    }
+    if ((!(l->ddsCaps.dwCaps & (DDSCAPS_3DDEVICE | (d->z16Render ? DDSCAPS_ZBUFFER : 0))) && !rb_dd_slot(d, l->lpGbl)) ||
         (l->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY)) return DDHAL_DRIVER_HANDLED;
     EngAcquireSemaphore(d->ddLock);
     ++d->d7.surfaceCalls;
@@ -3471,10 +3497,51 @@ static BOOL target_rect(const RECTL *r, const DD_SLOT *s, RB2K_RECT *out)
 /* BLT and SURFACEBLT (StretchRect): a whole target into another of its size is a host copy; any
  * other pair of rectangles a host blit, linear when the runtime asks (DP2BLT_LINEAR, 2). Mip levels
  * of render targets are not offered, so a level other than 0 is counted in d9Ignored. */
+/* UpdateSurface: a rectangle of a system-memory plain surface (its memory is kept at registration,
+ * as a texture's is) into a host image at a point, without stretching. The image is read, the
+ * rows are put in and it is written back; a copy over the whole image skips the read. FALSE
+ * when the command is no such copy. */
+static BOOL memory_blt(D7_CONTEXT *c, const RB_DP2_BLT9 *b, DD_SLOT *dst)
+{
+    D7_TEXTURE *m = find_texture(c->local, b->source);
+    DISPLAY *d = c->display;
+    LONG left = b->sourceRect.left, top = b->sourceRect.top, right = b->sourceRect.right, bottom = b->sourceRect.bottom;
+    LONG dx = b->destRect.left, dy = b->destRect.top, w, h, y;
+    ULONG pitch = dst->width * 4, bytes = pitch * dst->height, *packet;
+    BOOL ok = TRUE;
+    if (!m || m->image || m->rtCube || m->owner != c->owner || m->faces != 1 || m->depth > 1 || !m->address ||
+        (m->format != TexXrgb8888 && m->format != TexArgb8888) || dst->depth16 || dst->locked ||
+        b->sourceLevel || b->destLevel) return FALSE;
+    if (right <= left || bottom <= top) { left = top = 0; right = m->width; bottom = m->height; }
+    w = right - left; h = bottom - top;
+    if (b->destRect.right <= b->destRect.left || b->destRect.bottom <= b->destRect.top) dx = dy = 0;
+    else if (b->destRect.right - dx != w || b->destRect.bottom - dy != h) return FALSE;     /* no stretching */
+    if (left < 0 || top < 0 || right > (LONG)m->width || bottom > (LONG)m->height || dx < 0 || dy < 0 ||
+        dx + w > (LONG)dst->width || dy + h > (LONG)dst->height) return FALSE;
+    packet = EngAllocMem(0, sizeof(ULONG) + bytes, 'b9bR');
+    if (!packet) return FALSE;
+    *packet = dst->id;
+    if ((w != (LONG)dst->width || h != (LONG)dst->height) &&
+        !request(d, IOCTL_RB2K_DD_READ, &dst->id, sizeof(dst->id), packet + 1, bytes)) ok = FALSE;
+    if (ok) {
+        __try {
+            for (y = 0; y < h; ++y) {
+                const BYTE *from = (const BYTE *)m->address + (top + y) * m->pitch + left * 4;
+                EngProbeForRead((PVOID)from, w * 4, 1);
+                RtlCopyMemory((BYTE *)(packet + 1) + (dy + y) * pitch + dx * 4, from, w * 4);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { ok = FALSE; }
+    }
+    if (ok) ok = request(d, IOCTL_RB2K_DD_WRITE, packet, sizeof(ULONG) + bytes, NULL, 0);
+    EngFreeMem(packet);
+    return ok;
+}
+
 static void d9_blt(D7_CONTEXT *c, const RB_DP2_BLT9 *b)
 {
     DD_SLOT *src = target(c, b->source, TRUE), *dst = target(c, b->dest, TRUE);
     ULONG written, failed;
+    if (!src && dst && memory_blt(c, b, dst)) { c->queued = TRUE; return; }
     if (!src || !dst || src == dst || src->depth16 || dst->depth16 || src->locked || dst->locked ||
         b->sourceLevel || b->destLevel) {
         ++c->display->d7draw.d9Ignored[RB2K_D9_IGNORED_BLT];
@@ -3498,14 +3565,24 @@ static void d9_blt(D7_CONTEXT *c, const RB_DP2_BLT9 *b)
     c->queued = TRUE;
 }
 
-/* COLORFILL: a whole target filled with a D3DCOLOR, as a clear of it. */
+static HRESULT part_clear(D7_CONTEXT *c, const DD_SLOT *s, const DD_SLOT *z, ULONG flags, ULONG color,
+                          ULONG depthBits, ULONG stencil, LONG x0, LONG y0, LONG x1, LONG y1);
+
+/* COLORFILL: a target or a plain surface filled with a D3DCOLOR, as a clear of it. */
 static void d9_fill(D7_CONTEXT *c, const RB_DP2_COLOR_FILL *f)
 {
     DD_SLOT *s = target(c, f->surface, TRUE);
     RB2K_DD_FILL fill;
     ULONG written;
-    if (!s || s->depth16 || s->locked || !whole_rect(&f->rect, s)) {
+    if (!s || s->depth16 || s->locked) {
         ++c->display->d7draw.d9Ignored[RB2K_D9_IGNORED_FILL];
+        return;
+    }
+    if (!whole_rect(&f->rect, s)) {
+        /* a rectangle of it: drawn, as a clear of part of a target is */
+        if (FAILED(part_clear(c, s, NULL, D3DCLEAR_TARGET, f->color, 0, 0, f->rect.left, f->rect.top, f->rect.right,
+                              f->rect.bottom))) ++c->display->d7draw.d9Ignored[RB2K_D9_IGNORED_FILL];
+        c->queued = TRUE;
         return;
     }
     fill.id = s->id;

@@ -165,6 +165,24 @@ Some problems of 10.6 in QEMU show up without moose-ripple too: a panic when the
 sleep (KI-6), live snapshots that panic it (KI-5) and the pointer drifting with QEMU's USB tablet
 (KI-1). They are in [docs/known-issues.md](docs/known-issues.md), with workarounds.
 
+## Windows 2000 and XP guests
+
+This branch also holds a display driver for x86 Windows 2000 and Windows XP guests on the same
+kind of virtual GPU (QEMU's `virtio-vga-gl`): the desktop, DirectDraw, Direct3D 7, 8 and 9 and
+OpenGL, drawn by the host GPU. Its releases are tagged `win2k-vX.Y.Z`.
+
+- **Works:** Direct3D 7 with hardware transform and lighting; Direct3D 8 and 9 with pixel
+  shaders up to 2.0 and vertex shaders on the host GPU. 3DMark 2001 SE, 3DMark03 and 3DMark05
+  run to the end on XP, and every 3DMark03 test draws the right picture (checked against
+  Microsoft's reference rasterizer and against a GeForce 9600 GT).
+- **Measured** (XP SP3, 1024x768, Intel UHD 630 host, 2026-11-27): 3DMark03 11009 and 3DMark
+  2001 SE 7220, where a GeForce 9600 GT passed through to the same kind of guest scores 33348
+  and 53913.
+- **Not yet:** that speed gap, shader model 3.0, wireframe drawing, and desktops that need more
+  than 8 MB of video memory (1920x1080 at 32 bits).
+
+Everything in detail, and how to install it: [docs/win2k/install.md](docs/win2k/install.md).
+
 ## Getting started
 
 Mac OS X must come from your own copy; the rest is one download.
