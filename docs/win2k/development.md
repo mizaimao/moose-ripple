@@ -2102,8 +2102,20 @@ all six. The miniport makes a cube host texture of six layers, uploads
 each face into its layer, and gives its views all six layers. Pixel
 shaders sample cube maps: shader model 2 by its `dcl_cube` declaration,
 version 1 by the texture bound to the stage at the draw, which selects the
-translated variant. The fixed-function stages do not sample cube maps
-(generating their coordinates is not done); such draws are skipped.
+translated variant.
+
+The fixed-function stages sample cube maps and volumes as well: the stage program takes the
+kind of each stage's texture (the cube and volume masks version 1 shaders use, in the fog
+argument of `rb_stage_translate`) and looks the texture up with the three coordinates of the
+stage's set. The coordinates come from the vertices or from a vertex shader: 3DMark03's first
+game test draws its planes with a vertex shader that passes the reflection vector to a
+fixed-function stage with a cube map, and until this such draws were left out (a quarter of
+that test's draw calls; the planes went missing while their propellers were drawn).
+Generated coordinates (`D3DTSS_TCI_CAMERASPACENORMAL` and the like, without a vertex shader)
+are still not done; those draws are skipped. After a vertex shader the high word of
+`D3DTSS_TEXCOORDINDEX` is ignored: the shader supplies the coordinates. `d9pixels` cases 90
+(`ff_cube`) and 91 (`vs_ff_cube`) draw the six faces through the stage alone and after a
+vertex shader.
 
 On XP SP3 under KVM on the Intel UHD 630 host, two new `d9pixels` cases
 draw six quads that look up a cube map with one colour per face in each of

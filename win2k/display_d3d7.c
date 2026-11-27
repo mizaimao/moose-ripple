@@ -1976,6 +1976,7 @@ static void scissor_words(const D7_CONTEXT *c, ULONG *on, ULONG *rect)
 }
 
 static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p);
+static ULONG cube_stages(D7_CONTEXT *c, ULONG samplers, BOOL volume);
 
 /* Whether the stages fit the two-stage combiner of the Direct3D 7 draws. */
 static BOOL d3d7_stages(const D7_CONTEXT *c)
@@ -2010,7 +2011,8 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     if (c->fill != D3DFILL_SOLID) { skip(c, RB2K_D7_SKIP_FILL, p->primitives); return DD_OK; }
     /* Direct3D 8 stages beyond these two (a third stage, bump mapping) go to the
      * stage program of the shader path. */
-    if (p->stream && !c->pixelShader && !d3d7_stages(c)) return shader_triangles(c, p);
+    if (p->stream && !c->pixelShader && (!d3d7_stages(c) || cube_stages(c, 3, FALSE) || cube_stages(c, 3, TRUE)))
+        return shader_triangles(c, p);
     /* Two stages are drawn; a third one counts as the stage-one skip. */
     if (st->colorOp != D3DTOP_DISABLE && st1->colorOp != D3DTOP_DISABLE && c->stages[2].colorOp != D3DTOP_DISABLE) {
         skip(c, RB2K_D7_SKIP_STAGE1, p->primitives);
@@ -2409,12 +2411,19 @@ static ULONG stage_program(D7_CONTEXT *c, ULONG fog, D8_SHADER *as, BOOL byStage
         const D7_STAGE *s = &c->stages[i];
         st[i].colorOp = s->colorOp; st[i].colorArg1 = s->colorArg1; st[i].colorArg2 = s->colorArg2;
         st[i].alphaOp = s->alphaOp; st[i].alphaArg1 = s->alphaArg1; st[i].alphaArg2 = s->alphaArg2;
-        st[i].coordIndex = byStage ? i : s->coordIndex;
+        /* After a vertex shader the set is the one named; generated coordinates are the shader's business. */
+        st[i].coordIndex = byStage ? i : s->coordIndex & 0xffff;
         st[i].transform = byStage ? s->transform : 0;
         if (pretransformed && !(st[i].transform & RB_TTFF_PROJECTED)) st[i].transform = 0;
         if (st[i].transform & 0xff) transforms = 1;
         if (s->colorOp == D3DTOP_BUMPENVMAP || s->colorOp == D3DTOP_BUMPENVMAPLUMINANCE) transforms = 1;
         RtlCopyMemory(key + 8 * i, &st[i], 8 * sizeof(ULONG));
+    }
+    /* The stages whose texture is a cube map or a volume choose the program too (d3d8_ps.h). */
+    for (k = 0; k < i; ++k) {
+        const D7_TEXTURE *tex = find_texture(c->local, c->stages[k].texture);
+        if (tex && tex->faces == 6) fog |= 1UL << (RB_PS_CUBE_SHIFT + k);
+        else if (tex && tex->depth > 1) fog |= 1UL << (RB_PS_VOLUME_SHIFT + k);
     }
     key[8 * 8] = c->specular ? 1 : 0;
     key[8 * 8 + 1] = fog;
@@ -2765,7 +2774,6 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     if (sh) program = shader_program(c, sh, stage_kinds(c, sh->samplers, fog));
     else if (fixed) {
         program = stage_program(c, fog, &ff, TRUE, !objectSpace);
-        if (program && (cube_stages(c, ff.samplers, FALSE) || cube_stages(c, ff.samplers, TRUE))) program = 0;
         sh = &ff;
     }
     if (!program) { skip(c, RB2K_D7_SKIP_COMBINER, p->primitives); return DD_OK; }
@@ -2966,10 +2974,8 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
     if (vs) vprogram = vertex_program(c, vs, flags | (c->dx9Ddi ? RB_VS_FLOW : 0) | (c->clipPlanes & 63 ? RB_VS_CLIP : 0), bases);
     if (sh) program = shader_program(c, sh, stage_kinds(c, sh->samplers, fog));
     else {
-        /* The fixed-function pixel stages after the vertex shader (which do
-         * not sample cube maps). */
+        /* The fixed-function pixel stages after the vertex shader. */
         program = stage_program(c, fog, &stages, FALSE, FALSE);
-        if (program && (cube_stages(c, stages.samplers, FALSE) || cube_stages(c, stages.samplers, TRUE))) program = 0;
         sh = &stages;
         d->d7draw.vsStageDraws += p->primitives;
     }
@@ -3790,7 +3796,6 @@ static BOOL buffer_draw(D7_CONTEXT *c, ULONG type, LONGLONG first, ULONG count, 
     if (sh) program = shader_program(c, sh, stage_kinds(c, sh->samplers, fog));
     else {
         program = stage_program(c, fog, &stages, FALSE, FALSE);
-        if (program && (cube_stages(c, stages.samplers, FALSE) || cube_stages(c, stages.samplers, TRUE))) program = 0;
         sh = &stages;
     }
     if (!vprogram || !program) { ++st->hostLeft[RB2K_HOST_LEFT_PROGRAM]; return FALSE; }
