@@ -41,10 +41,14 @@ struct rvd_upload_test { rvd_u32 ms, action; }; /* ms must be zero; output is a 
 #define RVD_UPLOAD_SUPPORTED 0x80000000UL /* older VxDs return only a small zombie count */
 #define RVD_GET_STATS           11  /* out: struct rvd_stats. No GPU needed */
 #define RVD_PRESENT             12  /* in: struct rvd_present; publish the latest GPU image */
-#define RVD_DESKTOP             13  /* in: offset or struct rvd_desktop; no input: out u32 takeover */
+#define RVD_DESKTOP             13  /* in: offset or struct rvd_desktop; no input: out u32 takeover,
+                                       and, with room for a second u32, the flags it knows */
 #define RVD_PRESENT_WINDOW      14  /* in: struct rvd_window, then its rectangles: copy on the host */
 
 #define RVD_DESKTOP_FLIP        1   /* select the CPU page now; its display update may coalesce */
+#define RVD_DESKTOP_HEAP        2   /* the page lies in the RVD_HEAP block, offset bytes from its
+                                       start (a back buffer the card's memory had no room for);
+                                       the display leaves VGA for it if it had not yet */
 struct rvd_desktop {
     rvd_u32 offset, flags;
 };

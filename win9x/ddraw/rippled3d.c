@@ -1536,15 +1536,14 @@ static void read_back(RCTX *c)
 static int screen_page(LPDDRAWI_DDRAWSURFACE_LCL s)
 {
     LPDDRAWI_DDRAWSURFACE_GBL g = s->lpGbl;
-    DWORD caps = s->ddsCaps.dwCaps, off = g->fpVidMem - shared->lfb;
+    DWORD caps = s->ddsCaps.dwCaps;
     DDPIXELFORMAT pf, screen;
 
     if (!(caps & DDSCAPS_FLIP) || !(caps & DDSCAPS_VIDEOMEMORY) ||
         (caps & (DDSCAPS_TEXTURE | DDSCAPS_OVERLAY | DDSCAPS_SYSTEMMEMORY)) ||
         (shared->bpp != 16 && shared->bpp != 32) || !shared->pitch ||
         g->wWidth != shared->width || g->wHeight != shared->height ||
-        g->lPitch != (LONG)shared->pitch || off % shared->pitch ||
-        off / shared->pitch > RDD_MAX_Y_OFFSET || off / shared->pitch + shared->height > shared->lines)
+        g->lPitch != (LONG)shared->pitch || !rdd_shown_page(g->fpVidMem))
         return 0;
     surface_format(s, &pf);
     display_format(&screen);

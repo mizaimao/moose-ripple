@@ -99,6 +99,9 @@ typedef struct {
 /* Surfaces that may be shown on the screen: only in the card's memory. */
 #define RDD_DDSCAPS_SHOWN (RDD_DDSCAPS_PRIMARY | RDD_DDSCAPS_FRONTBUFFER | RDD_DDSCAPS_BACKBUFFER | \
                            RDD_DDSCAPS_FLIP | RDD_DDSCAPS_OVERLAY | RDD_DDSCAPS_VISIBLE)
+/* The back buffers of a flip chain: when the card's memory has no room for them, the system
+   heap takes them (sysheap_flip). */
+#define RDD_DDSCAPS_CHAIN (RDD_DDSCAPS_BACKBUFFER | RDD_DDSCAPS_FLIP)
 
 /* DDHALMODEINFO */
 typedef struct {
@@ -119,6 +122,8 @@ typedef struct {
     rdd_u32 setinfo16;                  /* DDRAW16's SetInfo, from DDNEWCALLBACKFNS */
     rdd_u32 dll_ready;                  /* DriverInit has filled in its part */
     rdd_u32 sysheap, sysheap_size;      /* DLL: system memory for surfaces never shown (flat) */
+    rdd_u32 sysheap_flip;               /* DLL: the mini-VDD can show a page that lies there, so a
+                                           flip chain's back buffers may go there too */
     rdd_u32 mode_serial;                /* counts mode sets, so the DLL can notice them */
     /* the screen mode (16-bit side, at every mode set) */
     rdd_u32 lfb;                        /* flat address of the frame buffer */

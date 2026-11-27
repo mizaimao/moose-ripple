@@ -46,7 +46,8 @@ CHECK(c_destroy, FIELD_OFFSET(DDHAL_DDCALLBACKS, DestroyDriver) == RDD_CB_DESTRO
 static HINSTANCE dll_instance;
 static RDD_SHARED *shared;             /* the 16-bit driver's block, flat */
 static int scanout_used;
-static FLATPTR gpu_page;               /* LFB address of the page currently presented from the GPU */
+static int heap_pages;                 /* the mini-VDD shows pages of the system heap (RVD_DESKTOP_HEAP) */
+static FLATPTR gpu_page;               /* address of the page currently presented from the GPU */
 static DWORD gpu_mode;
 
 /* ---- Small things ---------------------------------------------------------------------------- */
@@ -278,7 +279,7 @@ static DWORD WINAPI CreateSurface(LPDDHAL_CREATESURFACEDATA d)
 
 /* Select the CPU's page when GDI or DirectDraw will draw directly into its memory. The VxD
    follows writes from then on, including ones which bypass the DirectDraw HAL. */
-static int select_cpu_page(DWORD offset, int flip)
+static int select_cpu_page(DWORD offset, int flip, int heap)
 {
     HANDLE h;
     DWORD got;
@@ -288,8 +289,8 @@ static int select_cpu_page(DWORD offset, int flip)
     if (h == INVALID_HANDLE_VALUE)
         return 0;
     page.offset = offset;
-    page.flags = flip ? RVD_DESKTOP_FLIP : 0;
-    ok = DeviceIoControl(h, RVD_DESKTOP, &page, flip ? sizeof page : sizeof page.offset,
+    page.flags = (flip ? RVD_DESKTOP_FLIP : 0) | (heap ? RVD_DESKTOP_HEAP : 0);
+    ok = DeviceIoControl(h, RVD_DESKTOP, &page, page.flags ? sizeof page : sizeof page.offset,
                          NULL, 0, &got, NULL);
     CloseHandle(h);
     if (ok)
@@ -297,18 +298,50 @@ static int select_cpu_page(DWORD offset, int flip)
     return ok;
 }
 
+/* Where the memory of a surface that may be shown lies. In the card's memory it starts a line
+   the display can start at (QEMU takes none past RDD_MAX_Y_OFFSET). In the system heap it is a
+   back buffer the card's 8 MB had no room for (ddraw16.c), which the card can't show: the GPU
+   or the mini-VDD does. *off: bytes from the start of the one or the other. */
+#define PAGE_CARD 1
+#define PAGE_HEAP 2
+static int page_place(FLATPTR mem, DWORD *off)
+{
+    DWORD o = mem - shared->lfb;
+
+    if (shared->pitch && mem >= shared->lfb && o % shared->pitch == 0 &&
+        o / shared->pitch <= RDD_MAX_Y_OFFSET && o / shared->pitch + shared->height <= shared->lines) {
+        *off = o;
+        return PAGE_CARD;
+    }
+    o = mem - shared->sysheap;
+    if (heap_pages && shared->sysheap && mem >= shared->sysheap && o < shared->sysheap_size &&
+        shared->pitch * shared->height <= shared->sysheap_size - o) {
+        *off = o;
+        return PAGE_HEAP;
+    }
+    return 0;
+}
+
+int rdd_shown_page(FLATPTR mem)
+{
+    DWORD off;
+    return page_place(mem, &off) != 0;
+}
+
 /* DDHELP can unload this DLL while the mini-VDD is still displaying the GDI mirror.
    Query that state at DriverInit without changing the page an application is showing. */
 static void query_scanout(void)
 {
-    DWORD got, active;
+    DWORD got, active[2];               /* taken over; the request flags the VxD knows */
     HANDLE h = CreateFile(RVD_DEVICE_NAME, 0, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (h != INVALID_HANDLE_VALUE) {
-        if (DeviceIoControl(h, RVD_DESKTOP, NULL, 0, &active, sizeof active, &got, NULL) &&
-            got == sizeof active) {
-            scanout_used = active != 0;
+        active[1] = 0;
+        if (DeviceIoControl(h, RVD_DESKTOP, NULL, 0, active, sizeof active, &got, NULL) &&
+            got >= sizeof active[0]) {
+            scanout_used = active[0] != 0;
             if (scanout_used)
                 dbg("rdd: existing desktop scanout found\r\n");
+            heap_pages = got == sizeof active && (active[1] & RVD_DESKTOP_HEAP);
         }
         CloseHandle(h);
     }
@@ -319,40 +352,60 @@ int rdd_prepare_scanout(void)
     /* A previous VxD may lack both requests. Confirm the CPU path before the first GPU flip.
        The new VxD leaves VGA alone until that flip. */
     if (!scanout_used)
-        scanout_used = select_cpu_page(0, 0);
+        scanout_used = select_cpu_page(0, 0, 0);
     return scanout_used;
 }
 
 int rdd_desktop(DWORD offset)
 {
-    return !scanout_used || select_cpu_page(offset, 0);
+    return !scanout_used || select_cpu_page(offset, 0, 0);
 }
 
-/* Show another surface: point the start of the display at it. DirectDraw places back buffers
-   in the heap below the screen at the start of a line, so a line number is all the card needs;
-   QEMU takes none past line RDD_MAX_Y_OFFSET, and the 16-bit driver's heap puts no back
-   buffer below it. */
+/* The display shows the CPU's side of the page at mem: in the card's memory, or in the system
+   heap, which only the mini-VDD can show (it takes the display from VGA for it). */
+static int show_cpu_page(FLATPTR mem, int flip)
+{
+    DWORD off;
+
+    switch (page_place(mem, &off)) {
+    case PAGE_CARD:
+        return !scanout_used || select_cpu_page(off, flip, 0);
+    case PAGE_HEAP:
+        if (!select_cpu_page(off, flip, 1))
+            return 0;
+        scanout_used = 1;
+        return 1;
+    }
+    return 0;
+}
+
+/* Show another surface. In the card's memory DirectDraw places back buffers in the heap below
+   the screen at the start of a line, so a line number is all the card needs to start the
+   display there. A back buffer in the system heap (the card's memory was full) is shown from
+   the GPU when Direct3D drew it, and otherwise by the mini-VDD, from its memory. */
 static DWORD WINAPI Flip(LPDDHAL_FLIPDATA d)
 {
-    DWORD off = d->lpSurfTarg->lpGbl->fpVidMem - shared->lfb;
+    FLATPTR mem = d->lpSurfTarg->lpGbl->fpVidMem;
+    DWORD off = 0;
+    int place = page_place(mem, &off);
 
-    d3d_trace("flip: from, to", d->lpSurfCurr->lpGbl->fpVidMem, d->lpSurfTarg->lpGbl->fpVidMem);
-    if (!shared->pitch || off % shared->pitch || off / shared->pitch > RDD_MAX_Y_OFFSET ||
-        off / shared->pitch + shared->height > shared->lines) {
-        dbg("rdd: can't show a surface at offset "); dbg_hex(off); dbg("\r\n");
+    d3d_trace("flip: from, to", d->lpSurfCurr->lpGbl->fpVidMem, mem);
+    if (!place) {
+        dbg("rdd: can't show a surface at "); dbg_hex(mem); dbg("\r\n");
         d->ddRVal = DDERR_GENERIC;
         return DDHAL_DRIVER_HANDLED;
     }
     if (d3d_present(d->lpSurfCurr, d->lpSurfTarg)) {
-        gpu_page = d->lpSurfTarg->lpGbl->fpVidMem;
+        gpu_page = mem;
         gpu_mode = shared->mode_serial;
         d3d_profile_flip(1);
     } else {
-        if (!d3d_surface_access(d->lpSurfTarg) || (scanout_used && !select_cpu_page(off, 1))) {
+        if (!d3d_surface_access(d->lpSurfTarg) || !show_cpu_page(mem, 1)) {
             d->ddRVal = DDERR_GENERIC;
             return DDHAL_DRIVER_HANDLED;
         }
-        vbe_write(VBE_Y_OFFSET, (WORD)(off / shared->pitch));
+        if (place == PAGE_CARD)
+            vbe_write(VBE_Y_OFFSET, (WORD)(off / shared->pitch));
         d3d_profile_flip(0);
     }
     d->ddRVal = DD_OK;
@@ -378,7 +431,7 @@ static DWORD WINAPI Lock(LPDDHAL_LOCKDATA d)
     d3d_trace("lock: memory, flags", g->fpVidMem, d->dwFlags);
     if (!d3d_surface_access(s) || (p && p == gpu_page && gpu_mode == shared->mode_serial &&
         !(d->dwFlags & DDLOCK_READONLY) &&
-        !rdd_desktop(p - shared->lfb))) {
+        !show_cpu_page(p, 0))) {
         d->ddRVal = DDERR_GENERIC;
         return DDHAL_DRIVER_HANDLED;
     }
@@ -549,6 +602,15 @@ static void sys_heap(RDD_SHARED *s)
     }
 }
 
+/* Back buffers may go to the system heap too when the mini-VDD can show a page there
+   (query_scanout); the 16-bit side opens the heap to them (ddraw16.c). */
+static void sys_heap_flip(RDD_SHARED *s)
+{
+    s->sysheap_flip = s->sysheap && heap_pages;
+    if (s->sysheap_flip)
+        dbg("rdd: back buffers the card has no room for go to system memory\r\n");
+}
+
 typedef LPVOID (WINAPI *MAPSL)(DWORD);
 
 /* DirectDraw calls this once, with the context the 16-bit driver gave it (rdd.h). The answer
@@ -572,6 +634,7 @@ DWORD WINAPI DriverInit(DWORD context)
     query_scanout();
     clock_init();
     sys_heap(s);
+    sys_heap_flip(s);
 
     cb = (LPDDHAL_DDCALLBACKS)s->ddcb;
     zero(cb, sizeof *cb);
