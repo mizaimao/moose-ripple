@@ -15,6 +15,7 @@
 #include "rb2kd3d7.h"
 #include "d3d8ddi.h"
 #include "d3d8_ps.h"
+#include "d3d9_decl.h"
 
 /* These Direct3D 7 HRESULTs are declared only in the user-side d3d.h. */
 #ifndef D3DERR_UNSUPPORTEDCOLOROPERATION
@@ -2895,6 +2896,7 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
  * those statements. */
 enum { MaxDecls = 256, MaxFuncs = 512, MaxPairs = 512, D9PairHandle = 0x40000001 };
 struct D9_DECL { ULONG handle, count; RB_VERTEX_ELEMENT9 *elements; };
+typedef char rb_d9_element_layout[sizeof(RB_VERTEX_ELEMENT9) == sizeof(RB_D9_ELEMENT) ? 1 : -1];
 struct D9_FUNC { ULONG handle, count; ULONG *tokens; };
 struct D9_PAIR { ULONG decl, func, vs; };
 
@@ -2991,70 +2993,9 @@ static void d9_create_func(D7_CONTEXT *c, ULONG handle, const ULONG *tokens, ULO
 static BOOL d9_translate(const struct D9_DECL *dl, const struct D9_FUNC *fn, ULONG *out, ULONG room,
                          ULONG *declWords, ULONG *codeWords)
 {
-    static const UCHAR dwords[8] = { 1, 2, 3, 4, 1, 1, 1, 2 };   /* FLOAT1..4, D3DCOLOR, UBYTE4, SHORT2, SHORT4 */
-    UCHAR reg[14][16];
-    ULONG i = 1, n = 0, s, k, start;
-    if (fn->count < 2 || (fn->tokens[0] & 0xffff0000) != 0xfffe0000 || (fn->tokens[0] & 0xffff) > 0x0200) return FALSE;
-    RtlFillMemory(reg, sizeof(reg), 0xff);
-    /* The input dcl statements. They stand before the first instruction, among comments and
-     * the def, defi and defb statements: a compiled HLSL shader has its def statements first,
-     * and stopping at them left every element of the declaration unread (3DMark05 then drew
-     * most of its scenes from vertices at the origin). start: the first instruction. */
-    while (i < fn->count) {
-        ULONG t = fn->tokens[i], op = t & 0xffff;
-        if (op == 0xfffe) { i += 1 + ((t >> 16) & 0x7fff); continue; }                /* comment */
-        if (op == 81 || op == 48) { i += 6; continue; }                               /* def, defi: a register and four values */
-        if (op == 47) { i += 3; continue; }                                           /* defb: a register and a value */
-        if (op != 0x1f || i + 2 >= fn->count) break;                                  /* not a dcl */
-        {
-            ULONG usage = fn->tokens[i + 1] & 0x1f, index = (fn->tokens[i + 1] >> 16) & 0xf, dst = fn->tokens[i + 2];
-            ULONG type = ((dst >> 28) & 7) | ((dst >> 8) & 0x18);
-            if (type == 1 && usage < 14) reg[usage][index] = (UCHAR)(dst & 0x7ff);      /* D3DSPR_INPUT */
-        }
-        i += 3;
-    }
-    start = min(i, fn->count);
-    /* Declaration tokens, stream by stream in offset order, with skips (at most 15 words each)
-     * over gaps and over elements the shader does not read. */
-    for (s = 0; s < RB_VS_STREAMS; ++s) {
-        ULONG idx[64], m = 0, cursor = 0, j;
-        for (k = 0; k < dl->count && dl->elements[k].stream != 0xff && m < 64; ++k) {
-            if (dl->elements[k].stream != s) continue;
-            for (j = m; j > 0 && dl->elements[idx[j - 1]].offset > dl->elements[k].offset; --j) idx[j] = idx[j - 1];
-            idx[j] = k;
-            ++m;
-        }
-        if (!m) continue;
-        if (n + 1 >= room) return FALSE;
-        out[n++] = (1UL << 29) | s;
-        for (j = 0; j < m; ++j) {
-            const RB_VERTEX_ELEMENT9 *e = &dl->elements[idx[j]];
-            ULONG gap, r;
-            if (e->type > 7 || e->method || e->offset % 4 || e->offset < cursor) return FALSE;
-            for (gap = (e->offset - cursor) / 4; gap; gap -= min(gap, 15)) {
-                if (n + 1 >= room) return FALSE;
-                out[n++] = (2UL << 29) | (1UL << 28) | min(gap, 15) << 16;
-            }
-            if (n + 1 >= room) return FALSE;
-            r = e->usage < 14 ? reg[e->usage][e->usageIndex & 15] : 0xff;
-            out[n++] = r != 0xff ? (2UL << 29) | ((ULONG)e->type << 16) | r : (2UL << 29) | (1UL << 28) | ((ULONG)dwords[e->type] << 16);
-            cursor = e->offset + 4 * dwords[e->type];
-        }
-    }
-    if (n + 1 + fn->count > room) return FALSE;
-    out[n++] = 0xffffffff;
-    *declWords = n;
-    out[n++] = fn->tokens[0];
-    /* The statements before the first instruction without the dcl ones, then the instructions. */
-    for (i = 1; i < start; ) {
-        ULONG t = fn->tokens[i], op = t & 0xffff, words = op == 0xfffe ? 1 + ((t >> 16) & 0x7fff) : op == 47 || op == 0x1f ? 3 : 6;
-        if (words > start - i) words = start - i;
-        if (op != 0x1f) for (k = 0; k < words; ++k) out[n++] = fn->tokens[i + k];
-        i += words;
-    }
-    for (i = start; i < fn->count; ++i) out[n++] = fn->tokens[i];
-    *codeWords = n - *declWords;
-    return TRUE;
+    /* (d3d9_decl.c, shared with the Windows 9x driver) */
+    return rb_d9_translate((const RB_D9_ELEMENT *)dl->elements, dl->count, fn->tokens, fn->count, RB_VS_STREAMS,
+                           out, room, declWords, codeWords) != 0;
 }
 
 /* The Direct3D 8 vertex shader handle for the current declaration and function, made on first
@@ -3098,29 +3039,7 @@ static ULONG d9_vshader(D7_CONTEXT *c)
  * and sizes of the vertex format. 0 when it is not one. */
 static ULONG d9_decl_fvf(const struct D9_DECL *dl)
 {
-    static const ULONG sizeCode[4] = { 3, 0, 1, 2 };   /* FLOAT1..4 as D3DFVF_TEXCOORDSIZE codes */
-    ULONG fvf = 0, offset = 0, stage = 0, tex = 0, k;
-    for (;;) {
-        const RB_VERTEX_ELEMENT9 *e = NULL;
-        for (k = 0; k < dl->count && dl->elements[k].stream != 0xff; ++k)
-            if (dl->elements[k].offset == offset) e = &dl->elements[k];
-        if (!e) break;
-        if (e->stream || e->method) return 0;
-        if (e->usage == 0 && !e->usageIndex && e->type == 2 && stage < 1) { fvf |= D3DFVF_XYZ; stage = 1; offset += 12; }
-        else if (e->usage == 9 && !e->usageIndex && e->type == 3 && stage < 1) { fvf |= D3DFVF_XYZRHW; stage = 1; offset += 16; }
-        else if (e->usage == 3 && !e->usageIndex && e->type == 2 && stage == 1 && (fvf & D3DFVF_XYZ)) { fvf |= D3DFVF_NORMAL; stage = 2; offset += 12; }
-        else if (e->usage == 10 && e->usageIndex == 0 && e->type == 4 && stage >= 1 && stage < 3) { fvf |= D3DFVF_DIFFUSE; stage = 3; offset += 4; }
-        else if (e->usage == 10 && e->usageIndex == 1 && e->type == 4 && stage >= 1 && stage < 4) { fvf |= D3DFVF_SPECULAR; stage = 4; offset += 4; }
-        else if (e->usage == 5 && e->usageIndex == tex && e->type <= 3 && stage >= 1 && tex < 8) {
-            fvf |= sizeCode[e->type] << (16 + 2 * tex);
-            ++tex;
-            stage = 5;
-            offset += 4 * (e->type + 1);
-        } else return 0;
-    }
-    for (k = 0; k < dl->count && dl->elements[k].stream != 0xff; ++k)
-        if (dl->elements[k].offset >= offset || dl->elements[k].stream) return 0;   /* something left over */
-    return stage ? fvf | (tex << D3DFVF_TEXCOUNT_SHIFT) : 0;
+    return rb_d9_decl_fvf((const RB_D9_ELEMENT *)dl->elements, dl->count);
 }
 
 /* Before a draw on the Direct3D 9 interface: the vertex format, or the Direct3D 8 shader made
