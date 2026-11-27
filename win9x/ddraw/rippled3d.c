@@ -3474,6 +3474,8 @@ static void stage_state(RCTX *c, DWORD stage, DWORD state, DWORD v)
 typedef struct {
     BYTE *base;                         /* the vertex data */
     DWORD stride, count;
+    DWORD bytes;                        /* a stream's size from base on where it is known, else 0:
+                                           not always a whole number of vertices */
     int diffuse, specular;              /* byte offsets, -1 if none */
     int tex[8];                         /* byte offset of each texture coordinate set */
     int texsize[8];
@@ -6355,6 +6357,7 @@ static int stream_vertices(RCTX *c, LPD3DHAL_DRAWPRIMITIVES2DATA d, VERTICES *v)
     }
     v->base = data;
     v->count = bytes / c->stream_stride;
+    v->bytes = bytes;
     return 1;
 }
 
@@ -6383,15 +6386,23 @@ static void skip8(RCTX *c, const char *why)
 
 /* Make v start at byte offset start of the stream. The runtime packs vertices of different
    formats into one buffer, so a draw may start at any byte, not only at a whole vertex. 0 if
-   that is outside the stream. */
+   that is outside the stream. The vertices left are counted from the stream's size in bytes, not
+   from its whole vertices: the runtime fills its buffer to the last byte, and a draw that began
+   at an odd byte and ended there was one vertex short by the rounding (3DMark03's CPU tests). */
 static int stream_from(VERTICES *v, long start)
 {
-    DWORD bytes = v->count * v->stride;
+    DWORD bytes = v->bytes ? v->bytes : v->count * v->stride;
     if (start < 0 || (v->count && (DWORD)start >= bytes))
         return 0;
+    if (v->count) {
+        DWORD left = (bytes - (DWORD)start) / v->stride;
+        if (!left)                      /* (0 would read as "not known") */
+            return 0;
+        v->count = left;
+        if (v->bytes)
+            v->bytes = bytes - (DWORD)start;
+    }
     v->base += start;
-    if (v->count)
-        v->count = (bytes - (DWORD)start) / v->stride;
     /* the same vertex in the draw's other streams (vs_arrays) */
     v->first_vertex = v->first_vertex >= 0 && v->stride && start % (long)v->stride == 0 ?
                       v->first_vertex + start / (long)v->stride : -1;
