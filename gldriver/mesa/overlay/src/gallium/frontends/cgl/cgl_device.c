@@ -46,9 +46,17 @@ ripple_cgl_get_param(struct pipe_frontend_screen *fscreen, enum st_manager_param
  * emulation, where the program's thread is the limit, OpenArena's timedemo ran 18 to 19%
  * faster with it (2026-11-26). What the frontend does about it is in cgl_dispatch.h.
  *
- * Off unless asked for, for now: RIPPLE_GL_THREAD=1 in a program's environment, or the file
- * /Library/Logs/RippleGL/gl-thread for programs that are not started from a shell
- * (WindowServer). RIPPLE_GL_THREAD=0 keeps it off whatever the file says. */
+ * On by default for every program but WindowServer, in a guest with two processors or more
+ * (the second thread needs one of its own). WindowServer keeps its calls on its own thread:
+ * it gained nothing measurable from the second one, and it is the one process whose failure
+ * takes the desktop with it. Switches, read once when a process makes its first context:
+ *   RIPPLE_GL_THREAD=0 or 1 in a program's environment: off or on for that program;
+ *   the file /Library/Logs/RippleGL/no-gl-thread: off for every program started after it;
+ *   the file /Library/Logs/RippleGL/gl-thread: on for every program, WindowServer included
+ *   (at its next start).
+ * The environment wins over the files, no-gl-thread over gl-thread. */
+#include <sys/sysctl.h>
+
 bool
 ripple_cgl_device_second_thread(void)
 {
@@ -56,7 +64,18 @@ ripple_cgl_device_second_thread(void)
 
    if (wanted < 0) {
       const char *env = getenv("RIPPLE_GL_THREAD");
-      wanted = env ? atoi(env) != 0 : access("/Library/Logs/RippleGL/gl-thread", F_OK) == 0;
+      int cpus = 0;
+      size_t size = sizeof(cpus);
+      if (sysctlbyname("hw.activecpu", &cpus, &size, NULL, 0) != 0)
+         cpus = 1;
+      if (env)
+         wanted = atoi(env) != 0;
+      else if (access("/Library/Logs/RippleGL/no-gl-thread", F_OK) == 0)
+         wanted = 0;
+      else if (access("/Library/Logs/RippleGL/gl-thread", F_OK) == 0)
+         wanted = 1;
+      else
+         wanted = cpus >= 2 && strcmp(getprogname(), "WindowServer") != 0;
    }
    return wanted;
 }
