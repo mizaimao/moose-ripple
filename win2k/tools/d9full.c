@@ -2,7 +2,8 @@
  * mode (one back buffer, flipped), cleared and drawn for a few frames, then
  * the front buffer read back. Tries X8R8G8B8 and A8R8G8B8 back buffers with
  * a D24S8 depth buffer; with "hold" each keeps its last frame on the screen
- * for ten seconds (for a picture from outside).
+ * for ten seconds (for a picture from outside). Each also checks the back buffer's alpha:
+ * white blended by the destination alpha after a clear with alpha 0x40, read from the back buffer.
  * Prints D9FS lines and D9FS end ... result=PASS or FAIL. */
 #define COBJMACROS
 #include <windows.h>
@@ -66,7 +67,11 @@ static void run(IDirect3D9 *d3d, HWND window, D3DFORMAT back, const char *name, 
     }
     hr = IDirect3DDevice9_CreateOffscreenPlainSurface(device, mode.Width, mode.Height, D3DFMT_A8R8G8B8,
                                                       D3DPOOL_SYSTEMMEM, &front, NULL);
-    if (SUCCEEDED(hr)) hr = IDirect3DDevice9_GetFrontBufferData(device, 0, front);
+    if (FAILED(hr)) printf("D9FS case=%s plain surface hr=%08lx\n", name, (unsigned long)hr);
+    if (SUCCEEDED(hr)) {
+        hr = IDirect3DDevice9_GetFrontBufferData(device, 0, front);
+        if (FAILED(hr)) printf("D9FS case=%s GetFrontBufferData hr=%08lx\n", name, (unsigned long)hr);
+    }
     if (SUCCEEDED(hr)) hr = IDirect3DSurface9_LockRect(front, &r, NULL, D3DLOCK_READONLY);
     if (FAILED(hr)) {
         printf("D9FS case=%s front buffer read hr=%08lx\n", name, (unsigned long)hr);
@@ -79,6 +84,68 @@ static void run(IDirect3D9 *d3d, HWND window, D3DFORMAT back, const char *name, 
                ok ? "ok" : "WRONG");
         IDirect3DSurface9_UnlockRect(front);
         if (ok) ++passes; else ++failures;
+    }
+    {   /* a plain surface in video memory (the default pool), filled and released: noted, not counted */
+        IDirect3DSurface9 *plain = NULL;
+        HRESULT ph = IDirect3DDevice9_CreateOffscreenPlainSurface(device, 64, 64, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT,
+                                                                  &plain, NULL);
+        HRESULT fh = plain ? IDirect3DDevice9_ColorFill(device, plain, NULL, 0xff102030) : E_FAIL;
+        printf("D9FS case=%s default_pool_plain create=%08lx fill=%08lx (not counted)\n", name, (unsigned long)ph,
+               (unsigned long)fh);
+        if (plain) IDirect3DSurface9_Release(plain);
+    }
+    /* The back buffer's own alpha: a clear to blue with alpha 0x40, then white scaled by the
+     * destination alpha on the right half, read from the back buffer before it is presented.
+     * A back buffer without alpha reads its alpha as one. */
+    {
+        float w = (float)mode.Width, h = (float)mode.Height;
+        V v[4] = { { w / 2, 0, 0.5f, 1, 0xffffffff }, { w, 0, 0.5f, 1, 0xffffffff },
+                   { w / 2, h, 0.5f, 1, 0xffffffff }, { w, h, 0.5f, 1, 0xffffffff } };
+        DWORD want = back == D3DFMT_A8R8G8B8 ? 0x404040 : 0xffffff;
+        IDirect3DSurface9 *target = NULL, *copy = NULL;
+        IDirect3DDevice9_Clear(device, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL, 0x400000ff, 1.0f, 0);
+        IDirect3DDevice9_BeginScene(device);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_ALPHABLENDENABLE, TRUE);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_SRCBLEND, D3DBLEND_DESTALPHA);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_DESTBLEND, D3DBLEND_ZERO);
+        IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+        IDirect3DDevice9_SetRenderState(device, D3DRS_ALPHABLENDENABLE, FALSE);
+        IDirect3DDevice9_EndScene(device);
+        hr = IDirect3DDevice9_GetBackBuffer(device, 0, 0, D3DBACKBUFFER_TYPE_MONO, &target);
+        if (SUCCEEDED(hr)) hr = IDirect3DDevice9_CreateOffscreenPlainSurface(device, mode.Width, mode.Height, back,
+                                                                             D3DPOOL_SYSTEMMEM, &copy, NULL);
+        if (SUCCEEDED(hr)) hr = IDirect3DDevice9_GetRenderTargetData(device, target, copy);
+        if (SUCCEEDED(hr)) hr = IDirect3DSurface9_LockRect(copy, &r, NULL, D3DLOCK_READONLY);
+        if (FAILED(hr)) {
+            printf("D9FS case=%s back_buffer_read hr=%08lx (not counted)\n", name, (unsigned long)hr);
+        } else {
+            const DWORD *row = (const DWORD *)((const BYTE *)r.pBits + (mode.Height / 2) * r.Pitch);
+            DWORD left = row[mode.Width / 4] & 0xffffff, right = row[mode.Width * 3 / 4] & 0xffffff;
+            BOOL ok = near_rgb(left, 0x0000ff) && near_rgb(right, want);
+            /* Not counted (issue 327): the driver gives a full-screen back buffer's page as it is, and what
+             * Direct3D drew reaches the page only when the frame is shown. */
+            printf("D9FS case=%s back_buffer_read left=%06lx right=%06lx want=%06lx %s\n", name, (unsigned long)left,
+                   (unsigned long)right, (unsigned long)want, ok ? "ok" : "STALE (not counted)");
+            IDirect3DSurface9_UnlockRect(copy);
+        }
+        if (copy) IDirect3DSurface9_Release(copy);
+        if (target) IDirect3DSurface9_Release(target);
+        IDirect3DDevice9_Present(device, NULL, NULL, NULL, NULL);
+        /* and the same picture once it is shown */
+        hr = front ? IDirect3DDevice9_GetFrontBufferData(device, 0, front) : E_FAIL;
+        if (SUCCEEDED(hr)) hr = IDirect3DSurface9_LockRect(front, &r, NULL, D3DLOCK_READONLY);
+        if (FAILED(hr)) {
+            printf("D9FS case=%s dest_alpha front buffer read hr=%08lx\n", name, (unsigned long)hr);
+            ++failures;
+        } else {
+            const DWORD *row = (const DWORD *)((const BYTE *)r.pBits + (mode.Height / 2) * r.Pitch);
+            DWORD left = row[mode.Width / 4] & 0xffffff, right = row[mode.Width * 3 / 4] & 0xffffff;
+            BOOL ok = near_rgb(left, 0x0000ff) && near_rgb(right, want);
+            printf("D9FS case=%s dest_alpha left=%06lx right=%06lx want=%06lx %s\n", name, (unsigned long)left,
+                   (unsigned long)right, (unsigned long)want, ok ? "ok" : "WRONG");
+            IDirect3DSurface9_UnlockRect(front);
+            if (ok) ++passes; else ++failures;
+        }
     }
     if (front) IDirect3DSurface9_Release(front);
     if (hold) { printf("D9FS case=%s holding\n", name); Sleep(10000); }

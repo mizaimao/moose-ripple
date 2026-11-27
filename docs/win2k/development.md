@@ -3120,6 +3120,23 @@ under the two rules goes to the stage program instead of the combiner
 Direct3D 9 reference rasterizer only; Direct3D 8 draws get it too, which is a guess until a
 `d8pixels` case measures it.
 
+## Plain surfaces on the Direct3D 9 interface
+
+On the Direct3D 9 driver interface the runtime makes an offscreen plain surface only of a
+format whose entry in the driver's format list has the plain surface operation
+(`D3DFORMAT_OP_OFFSCREENPLAIN`, `RbFormatOffscreenPlain`), also when the surface is in system
+memory and the driver has no part in it. No format had it, so `CreateOffscreenPlainSurface`
+failed with `D3DERR_INVALIDCALL` for every format and pool, and with it whatever a program does
+through such a surface: `GetFrontBufferData` for a screenshot, `GetRenderTargetData`, loading a
+picture into a surface. `d9full` had passed when it was written, on the Direct3D 8 interface,
+and was not run again when the Direct3D 9 interface became the default.
+
+X8R8G8B8, A8R8G8B8 and R5G6B5 have the operation now, and a plain surface in system memory can
+be made. One in the default pool, which is video memory, is still refused: the driver makes
+plain surfaces on the host only with `RippleDirectDrawGpuSurfaces` set (`supported` in
+`display_ddraw.c`), so the program gets `D3DERR_OUTOFVIDEOMEMORY`. `d9full` prints that
+(`default_pool_plain`) without counting it.
+
 ## Checking a benchmark run: pictures, counters, frame pacing
 
 A frame count says nothing about what was drawn. A run of 3DMark05 once counted 30 frames a
