@@ -21,6 +21,7 @@
  *   gl-feature-check stale [N]  N contexts in turn, each drawn with on one thread and destroyed
  *                               from another (software first: ours crashed here, issue 240)
  *   gl-feature-check proxy      proxy textures of the iTunes visualizer's size (issue 304)
+ *   gl-feature-check strings    the renderer's strings and how long the extension list is
  *   gl-feature-check fullscreen [W H [HOLD]]  a full-screen context as games start one (issue 312)
  * Every mode ends with "against Apple's software renderer: ... PASS" or FAIL: each pixel read
  * on ours is compared with the same read on the software renderer (rec_report), and the exit
@@ -2601,6 +2602,38 @@ static void run_nearclip(const char *name, CGLPixelFormatAttribute renderer)
 /* The iTunes visualizer's first check (breadth pass, 2026-11-27): a proxy rectangle texture of
  * the view's size, RGBA with 8888_REV, then its width read back; the visualizer draws nothing
  * when the answer is 0. A few sizes and formats, ours against Apple's software renderer. */
+/* The strings a program reads first. Games of the time copy the extension list into a fixed-size
+ * buffer, so its length matters as much as its contents. */
+static void run_strings(const char *name, CGLPixelFormatAttribute renderer)
+{
+    CGLContextObj c = xproc_context(renderer);
+    if (!c) {
+        printf("%s: no context\n", name);
+        return;
+    }
+    CGLSetCurrentContext(c);
+    const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+    int count = 0, longest = 0, run = 0;
+    for (const char *p = ext; p && *p; p++) {
+        if (*p == ' ') {
+            if (run) count++;
+            if (run > longest) longest = run;
+            run = 0;
+        } else {
+            run++;
+        }
+    }
+    if (run) count++;
+    if (run > longest) longest = run;
+    printf("%s: vendor \"%s\", renderer \"%s\", version \"%s\"\n", name,
+           (const char *)glGetString(GL_VENDOR), (const char *)glGetString(GL_RENDERER),
+           (const char *)glGetString(GL_VERSION));
+    printf("  extensions: %d, %lu characters, longest name %d\n", count,
+           (unsigned long)(ext ? strlen(ext) : 0), longest);
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+}
+
 static void run_proxy(const char *name, CGLPixelFormatAttribute renderer)
 {
     rec_begin(__func__, name);
@@ -2764,6 +2797,11 @@ int main(int argc, char **argv)
         run_aux("ours", 0);
         run_aux("software", (CGLPixelFormatAttribute)0x00020400);
         return rec_report();
+    }
+    if (argc > 1 && !strcmp(argv[1], "strings")) {
+        run_strings("ours", 0);
+        run_strings("software", (CGLPixelFormatAttribute)0x00020400);
+        return 0;
     }
     if (argc > 1 && !strcmp(argv[1], "proxy")) {
         run_proxy("ours", 0);

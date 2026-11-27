@@ -2360,10 +2360,11 @@ reachable_extensions(const char *mesa, char *out)
    }
    extern FILE *ripple_gld_dbg_file(void);
    static bool logged;
-   if (!logged && hidden && ripple_gld_dbg_file()) {
+   if (!logged && ripple_gld_dbg_file()) {
       logged = true;
-      fprintf(ripple_gld_dbg_file(), "RippleGLDriver: %u extensions left out (no entry point in "
-              "this program):%s\n", hidden, names);
+      /* The length matters too: games of the time copy the list into a fixed-size buffer. */
+      fprintf(ripple_gld_dbg_file(), "RippleGLDriver: extension list %zu characters; %u left out "
+              "(no entry point in this program):%s\n", strlen(out), hidden, names);
    }
 }
 
