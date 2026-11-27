@@ -11,10 +11,14 @@
  * GENERIC[0] the diffuse and GENERIC[1] the specular colour, GENERIC[2+n]
  * texture coordinate set n (t0..t3 for version 1, t0..t7 for shader model
  * 2), GENERIC[10] the fog depths. Constants c0..c7 are CONST[0..7]; texture
- * stage n is sampler n (s0..s7 for shader model 2). */
+ * stage n is sampler n. A shader model 2 shader may read RB_PS2_SAMPLERS samplers: the driver
+ * that builds this file says how many it binds (16 in the Windows 2000 and XP driver), eight
+ * otherwise. The stage programs of the fixed-function pipeline have eight stages. */
 #define RB_PS_COORD_SETS 4
 #define RB_PS2_COORD_SETS 8
+#ifndef RB_PS2_SAMPLERS
 #define RB_PS2_SAMPLERS 8
+#endif
 #define RB_PS_CONSTANTS 8
 /* A version 1 program with texbem or texbeml: c0..c7, then each stage n's
  * bump matrix (00, 01, 10, 11) in CONST[8+n] and its luminance scale and

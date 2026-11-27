@@ -1661,7 +1661,7 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
     s.info = info;
     s.t.p = out; s.t.size = size;
     if (size) out[0] = 0;
-    if (count > RB_PS2_SAMPLERS) count = RB_PS2_SAMPLERS;
+    if (count > RB_PS2_COORD_SETS) count = RB_PS2_COORD_SETS;   /* a stage has a sampler and a coordinate set */
     for (i = 0; i < count && stages[i].colorOp != TopDisable; ++i) {
         const RB_STAGE_STATE *st = &stages[i];
         if ((st->colorArg1 & TaSelect) == TaFactor || (st->colorArg2 & TaSelect) == TaFactor ||
@@ -1689,7 +1689,7 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
     if ((fog & 3) == RB_PS_FOG_VERTEX) put(&s.t, "DCL IN[10], GENERIC[10], PERSPECTIVE\n");
     if ((fog & 3) == RB_PS_FOG_TABLE) put(&s.t, "DCL IN[10], POSITION, LINEAR\n");
     put(&s.t, "DCL OUT[0], COLOR\n");
-    for (k = 0; k < RB_PS2_SAMPLERS; ++k) { put(&s.t, "DCL SAMP["); number(&s.t, k); put(&s.t, "]\n"); }
+    for (k = 0; k < RB_PS2_COORD_SETS; ++k) { put(&s.t, "DCL SAMP["); number(&s.t, k); put(&s.t, "]\n"); }
     put(&s.t, "DCL CONST[0.."); number(&s.t, base - 1 + (fog ? 2 : 0)); put(&s.t, "]\n");
     put(&s.t, "DCL TEMP[0..11]\n"
               "IMM[0] FLT32 {0x3f000000, 0x3f800000, 0x40000000, 0x40800000}\n"

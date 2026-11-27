@@ -380,7 +380,7 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
                          const RB2K_D3D8_DRAW *d, ULONG length, VP_STATUS *status)
 {
     RB2K_IMAGE *depth = NULL;
-    RB2K_TEXTURE *textures[RB2K_D8_STAGES], alias[RB2K_D8_STAGES];
+    RB2K_TEXTURE *textures[RB2K_D8_SAMPLERS], alias[RB2K_D8_SAMPLERS];
     ULONG i, program, vertex = 0, header = FIELD_OFFSET(RB2K_D3D8_DRAW, vertices), words = 0;
     *status = ERROR_INVALID_PARAMETER;
     if (length >= header) {
@@ -418,7 +418,7 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
         depth = find_image(gpu, d->depth);
         if (!depth || !depth->depth16 || (d->stencil && !depth->stencil8)) return refuse(gpu, RB2K_D7_SITE_DEPTH, *status, 0);
     }
-    for (i = 0; i < RB2K_D8_STAGES; ++i) {
+    for (i = 0; i < RB2K_D8_SAMPLERS; ++i) {
         RB2K_TEXTURE *t;
         textures[i] = NULL;
         if (!(gpu->programs[program].samplers & (1UL << i))) continue;
@@ -518,7 +518,7 @@ static VP_STATUS program_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         if (text[0] != 'V') return ERROR_INVALID_PARAMETER;
     } else {
         if (packet->InputBufferLength <= sizeof(ULONG) || packet->InputBufferLength > sizeof(*in) ||
-            packet->OutputBufferLength < sizeof(ULONG) || in->samplers >> RB2K_D8_STAGES) return ERROR_INVALID_PARAMETER;
+            packet->OutputBufferLength < sizeof(ULONG) || in->samplers >> RB2K_D8_SAMPLERS) return ERROR_INVALID_PARAMETER;
         text = in->text;
         bytes = packet->InputBufferLength - sizeof(ULONG);
     }

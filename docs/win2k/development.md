@@ -1911,6 +1911,26 @@ t6, while sets 0 to 4 run the other way so that a wrong set would show.
 processing, `d8pixels` its 23, the Direct3D 8 and 9 textured scenes
 passed, and Direct3D 8 Quake ran at 58.7 fps (58.6 before).
 
+### Sixteen samplers
+
+Shader model 2 has sixteen samplers, s0 to s15, whatever the number of coordinate sets, and
+3DMark05's third game test draws its water with a ninth. With eight, the translator refused
+such a shader and its draws were left out (a black sea). Now:
+
+- the translator takes s0 to s15 when it is built with `RB_PS2_SAMPLERS=16`, as the Windows
+  2000 and XP driver builds it (`win2k/build.py`); built without, as in the Windows 9x driver,
+  it keeps eight. The stage programs of the fixed-function pipeline keep their eight stages;
+- the display driver keeps the texture and the sampler states of sixteen stages
+  (`SamplerStages`; the fixed-function stages are the first eight), and a pixel program draw
+  carries sixteen textures, sampler states and border colours (`RB2K_D8_SAMPLERS`);
+- the miniport makes a sampler view for each of the sixteen (host handles 128 to 143), and its
+  cache of sampler states no longer replaces a state that an earlier sampler of the same draw
+  uses (`cache_slot_busy`): with a draw's samplers now as many as the cache's slots, a state
+  found in the cache could be replaced by a later sampler's new one.
+
+`d9pixels` case 83 (`ps2_sixteen_samplers`) adds a green texture on s9 and a blue one on s15:
+nothing was drawn before, cyan after.
+
 ## Vertex shaders on the host GPU
 
 With the `RippleVertexShaders` registry value set to 1, the driver reports
