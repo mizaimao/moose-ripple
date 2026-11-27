@@ -1020,16 +1020,51 @@ static DD_SLOT *target(D7_CONTEXT *c, ULONG key, BOOL byHandle)
     return NULL;
 }
 
-static HRESULT render_surfaces(D7_CONTEXT *c, DD_SLOT **color, DD_SLOT **depth)
+/* The render target and depth buffer a draw or clear goes to. Direct3D 9 sets the two
+ * separately, and programs leave the scene's depth buffer set while a full-screen pass fills a
+ * larger texture with the depth test off. So a depth buffer smaller than the target is not an
+ * error: *small is set and *depth is NULL, and the caller decides (render_surfaces for draws). */
+static HRESULT target_surfaces(D7_CONTEXT *c, DD_SLOT **color, DD_SLOT **depth, BOOL *small)
 {
     DD_SLOT *s = target(c, c->target, FALSE);
     DD_SLOT *z = c->depth ? target(c, c->depth, FALSE) : NULL;
-    if (!s || s->depth16 || (c->depth && (!z || !z->depth16 ||
-        z->width < s->width || z->height < s->height))) return DDERR_SURFACELOST;
+    ULONG why = !s ? 1 : s->depth16 ? 2 : !c->depth ? 0 : !z ? 3 : !z->depth16 ? 4 : 0;
+    RB2K_D7_DRAWSTATS *st = &c->display->d7draw;
+    *small = !why && z && (z->width < s->width || z->height < s->height);
+    if (why || *small) {
+        st->surfaceRefusal[0] = why ? why : 5;
+        st->surfaceRefusal[1] = s ? s->id : 0;
+        st->surfaceRefusal[2] = s ? s->width << 16 | s->height : 0;
+        st->surfaceRefusal[3] = z ? z->id : 0;
+        st->surfaceRefusal[4] = z ? z->width << 16 | z->height : 0;
+        st->surfaceRefusal[5] = (c->zEnable ? 1 : 0) | (c->zWrite ? 2 : 0) | (c->stencil ? 4 : 0);
+    }
+    if (why) {
+        ++st->surfaceRefusals;
+        return DDERR_SURFACELOST;
+    }
+    if (*small) z = NULL;
     if (s->locked || (z && z->locked)) return DDERR_SURFACEBUSY;
     *color = s;
     *depth = z;
     ++s->draws;   /* a cube map face is copied again when sampled (cube_ready) */
+    return DD_OK;
+}
+
+/* The surfaces of a draw. With a depth buffer smaller than the target the draw goes ahead
+ * without one when it uses neither the depth test nor the stencil (smallDepthDraws). With one of
+ * them on, what Direct3D draws is undefined: the draw is left out (S_FALSE, a surface refusal),
+ * not failed, because a failed draw makes the runtime drop the rest of its command batch. */
+static HRESULT render_surfaces(D7_CONTEXT *c, DD_SLOT **color, DD_SLOT **depth)
+{
+    BOOL small;
+    HRESULT hr = target_surfaces(c, color, depth, &small);
+    if (FAILED(hr) || !small) return hr;
+    if (c->zEnable || c->stencil) {
+        ++c->display->d7draw.surfaceRefusals;
+        return S_FALSE;
+    }
+    ++c->display->d7draw.smallDepthDraws;
     return DD_OK;
 }
 
@@ -1852,6 +1887,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     HRESULT hr = render_surfaces(c, &s, &z);
     const BYTE *base = NULL;
     if (FAILED(hr)) return hr;
+    if (hr != DD_OK) return DD_OK;      /* left out: see render_surfaces */
     if (!p->primitives) return DD_OK;
     if (c->fill != D3DFILL_SOLID) { skip(c, RB2K_D7_SKIP_FILL, p->primitives); return DD_OK; }
     /* Direct3D 8 stages beyond these two (a third stage, bump mapping) go to the
@@ -2533,6 +2569,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     LONGLONG lo, hi;
     HRESULT hr = render_surfaces(c, &s, &z);
     if (FAILED(hr)) return hr;
+    if (hr != DD_OK) return DD_OK;      /* left out: see render_surfaces */
     if (!p->primitives) return DD_OK;
     if (c->fill != D3DFILL_SOLID) { skip(c, RB2K_D7_SKIP_FILL, p->primitives); return DD_OK; }
     position = fvf & D3DFVF_POSITION_MASK;
@@ -2712,6 +2749,7 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
     LONGLONG lo, hi;
     HRESULT hr = render_surfaces(c, &s, &z);
     if (FAILED(hr)) return hr;
+    if (hr != DD_OK) return DD_OK;      /* left out: see render_surfaces */
     if (!p->primitives) return DD_OK;
     if (c->fill != D3DFILL_SOLID) { skip(c, RB2K_D7_SKIP_FILL, p->primitives); return DD_OK; }
     if (c->fog) {
@@ -3455,8 +3493,15 @@ static HRESULT clear(D7_CONTEXT *c, ULONG flags, ULONG color, ULONG depthBits, U
     DD_SLOT *s, *z;
     RB2K_DD_FILL f;
     ULONG written;
-    HRESULT hr = render_surfaces(c, &s, &z);
+    BOOL small;
+    HRESULT hr = target_surfaces(c, &s, &z, &small);
     if (FAILED(hr)) return hr;
+    /* A depth buffer smaller than the target is not cleared with it: the colour clear goes
+     * ahead alone, and the depth part counts as a surface refusal. */
+    if (small && (flags & (D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL))) {
+        ++c->display->d7draw.surfaceRefusals;
+        flags &= ~(D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL);
+    }
     if (!flags) return DD_OK;
     /* Without a stencil buffer a stencil clear has nothing to clear. */
     if ((flags & D3DCLEAR_STENCIL) && (!z || !z->stencil)) flags &= ~D3DCLEAR_STENCIL;

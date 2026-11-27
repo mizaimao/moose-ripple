@@ -171,10 +171,20 @@ typedef struct {
      * textures that needed it, and the last refusal's status. */
     ULONG evictions, evictedCreates, roomStatus;
     ULONG codeAt;       /* where rb_d7_drawstats was loaded, to place samples */
+    /* Draws and clears refused for their surfaces: how many, and the last one: why (1 no render
+     * target, 2 the target is a depth buffer, 3 no such depth buffer, 4 it is not a depth
+     * buffer, 5 it is smaller than the target), the target image and its size (width << 16 |
+     * height), the depth buffer and its size, and the depth states then (depth test, depth
+     * write << 1, stencil << 2). */
+    ULONG surfaceRefusals, surfaceRefusal[6];
+    /* Draws that went ahead without their depth buffer because it is smaller than the target and
+     * they use neither the depth test nor the stencil (then the record above is theirs too, and
+     * a refusal with why 5 is a draw or the depth part of a clear that was left out). */
+    ULONG smallDepthDraws;
 } RB2K_D7_DRAWSTATS;
 enum { RB2K_D7_FAIL_RANGE, RB2K_D7_FAIL_VBCAPS, RB2K_D7_FAIL_LINEAR, RB2K_D7_FAIL_ADDRESS,
        RB2K_D7_FAIL_PROBE, RB2K_D7_FAIL_IMMEDIATE, RB2K_D7_FAIL_LENGTH, RB2K_D7_FAIL_OTHER };
-#define RB2K_D7_DRAWSTATS_VERSION 4
+#define RB2K_D7_DRAWSTATS_VERSION 6
 enum { RB2K_D9_IGNORED_SCISSOR, RB2K_D9_IGNORED_TARGETS, RB2K_D9_IGNORED_BLT, RB2K_D9_IGNORED_FILL,
        RB2K_D9_IGNORED_QUERY, RB2K_D9_IGNORED_CONSTANTS, RB2K_D9_IGNORED_FREQUENCY, RB2K_D9_IGNORED_MIPS };
 #define RB2K_D3D7_QUERY_LIMIT 24
