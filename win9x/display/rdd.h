@@ -23,7 +23,7 @@ typedef unsigned short rdd_u16;
 #define RDD_MAGIC       0x31444452UL    /* "RDD1" */
 #define RDD_DLL_NAME    "rippledd.dll"
 #define RDD_DLL_ENTRY   "DriverInit"
-#define RDD_MAX_MODES   48
+#define RDD_MAX_MODES   64
 
 /* The escape and its sub-commands (lpInput points to a DCICMD). */
 #define RDD_DCICOMMAND          3075

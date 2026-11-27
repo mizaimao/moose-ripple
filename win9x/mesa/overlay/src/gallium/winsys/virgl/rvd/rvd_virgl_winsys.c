@@ -51,6 +51,11 @@
 #include "util/u_debug.h"
 #include "util/u_inlines.h"
 #include "util/u_memory.h"
+#include "cso_cache/cso_context.h"
+#include "tgsi/tgsi_ureg.h"
+#include "util/u_draw_quad.h"
+#include "util/u_sampler.h"
+#include "util/u_simple_shaders.h"
 #include "virgl/virgl_public.h"
 #include "virgl/virgl_resource.h"
 #include "virgl/virgl_winsys.h"
@@ -80,6 +85,17 @@ struct rvd_winsys {
 
    struct virgl_resource_cache cache;
    simple_mtx_t cache_mutex;
+
+   /* The gamma ramp's lookup pass (copy_through_ramp): a context of its own, made when a ramp
+    * is first in force. */
+   simple_mtx_t gamma_mutex;
+   struct pipe_context *gamma_pipe;
+   struct cso_context *gamma_cso;
+   void *gamma_vs, *gamma_fs;
+   struct pipe_resource *gamma_lut;            /* 256 x 1: the ramp */
+   struct pipe_sampler_view *gamma_lut_view;
+   uint32_t gamma_serial;                      /* the ramp the texture holds (rvd_gamma.serial) */
+   bool gamma_made, gamma_failed;
 };
 
 struct virgl_hw_res {
@@ -637,6 +653,183 @@ static int rvd_submit_cmd(struct virgl_winsys *vws, struct virgl_cmd_buf *_cbuf,
    return ret;
 }
 
+/* ---- The gamma ramp ------------------------------------------------------------------------
+ * Windows hands the display driver a gamma ramp (a game's brightness setting, Quake III's
+ * overbright lighting). The card has no lookup table for a true-colour picture, so the mini-VDD
+ * keeps the ramp (RVD_GAMMA) and a picture presented from the GPU goes through it here: the
+ * copy into the shown image becomes a draw that looks each colour up in a 256 x 1 texture of
+ * the ramp. A context of its own draws it, so none of the program's state has to be kept. */
+
+/* The ramp in force, if it is not the identity. */
+static bool gamma_ramp(struct rvd_winsys *ws, struct rvd_gamma *g)
+{
+   g->on = 0;
+   return !ws->nt && rvd_call(ws, RVD_GAMMA, NULL, 0, g, sizeof(*g)) && g->on;
+}
+
+/* The context, its shaders and states, once. */
+static bool ramp_setup(struct rvd_winsys *ws, struct pipe_screen *screen)
+{
+   static const enum tgsi_semantic names[2] = { TGSI_SEMANTIC_POSITION, TGSI_SEMANTIC_GENERIC };
+   static const unsigned indexes[2] = { 0, 0 };
+   struct pipe_resource templ = {
+      .target = PIPE_TEXTURE_2D,
+      .format = PIPE_FORMAT_B8G8R8A8_UNORM,
+      .width0 = 256, .height0 = 1, .depth0 = 1, .array_size = 1,
+      .bind = PIPE_BIND_SAMPLER_VIEW,
+   };
+   struct pipe_blend_state blend = {0};
+   struct pipe_depth_stencil_alpha_state dsa = {0};
+   struct pipe_rasterizer_state rast = {0};
+   struct pipe_sampler_state sampler = {0};
+   struct pipe_sampler_view view;
+   struct pipe_context *pipe;
+   struct ureg_program *ureg;
+   struct ureg_src coord, image, lut;
+   struct ureg_dst out, c, t, r;
+   int i;
+
+   if (ws->gamma_made || ws->gamma_failed)
+      return ws->gamma_made;
+   ws->gamma_failed = true;                    /* until all of it is there */
+   pipe = ws->gamma_pipe = screen->context_create(screen, NULL, 0);
+   if (!pipe)
+      return false;
+   ws->gamma_cso = cso_create_context(pipe, 0);     /* 0: it may translate the quad's user buffer */
+   ws->gamma_lut = screen->resource_create(screen, &templ);
+   if (!ws->gamma_cso || !ws->gamma_lut)
+      return false;
+   u_sampler_view_default_template(&view, ws->gamma_lut, templ.format);
+   ws->gamma_lut_view = pipe->create_sampler_view(pipe, ws->gamma_lut, &view);
+   ws->gamma_vs = util_make_vertex_passthrough_shader(pipe, 2, names, indexes, false);
+   ureg = ureg_create(PIPE_SHADER_FRAGMENT);
+   if (!ws->gamma_lut_view || !ws->gamma_vs || !ureg)
+      return false;
+
+   /* colour = the picture's; each channel is then the ramp's entry for it */
+   coord = ureg_DECL_fs_input(ureg, TGSI_SEMANTIC_GENERIC, 0, TGSI_INTERPOLATE_LINEAR);
+   image = ureg_DECL_sampler(ureg, 0);
+   lut = ureg_DECL_sampler(ureg, 1);
+   for (i = 0; i < 2; i++)
+      ureg_DECL_sampler_view(ureg, i, TGSI_TEXTURE_2D, TGSI_RETURN_TYPE_FLOAT,
+                             TGSI_RETURN_TYPE_FLOAT, TGSI_RETURN_TYPE_FLOAT,
+                             TGSI_RETURN_TYPE_FLOAT);
+   out = ureg_DECL_output(ureg, TGSI_SEMANTIC_COLOR, 0);
+   c = ureg_DECL_temporary(ureg);
+   t = ureg_DECL_temporary(ureg);
+   r = ureg_DECL_temporary(ureg);
+   ureg_TEX(ureg, c, TGSI_TEXTURE_2D, coord, image);
+   /* the middle of each of the ramp's 256 texels */
+   ureg_MAD(ureg, c, ureg_src(c), ureg_imm1f(ureg, 255.0f / 256.0f),
+            ureg_imm1f(ureg, 0.5f / 256.0f));
+   for (i = 0; i < 3; i++) {
+      ureg_MOV(ureg, t, ureg_scalar(ureg_src(c), i));
+      ureg_TEX(ureg, r, TGSI_TEXTURE_2D, ureg_src(t), lut);
+      ureg_MOV(ureg, ureg_writemask(out, 1u << i), ureg_src(r));
+   }
+   ureg_MOV(ureg, ureg_writemask(out, TGSI_WRITEMASK_W), ureg_imm1f(ureg, 1.0f));
+   ureg_END(ureg);
+   ws->gamma_fs = ureg_create_shader_and_destroy(ureg, pipe);
+   if (!ws->gamma_fs)
+      return false;
+
+   blend.rt[0].colormask = PIPE_MASK_RGBA;
+   cso_set_blend(ws->gamma_cso, &blend);
+   cso_set_depth_stencil_alpha(ws->gamma_cso, &dsa);
+   rast.half_pixel_center = 1;
+   rast.bottom_edge_rule = 1;
+   rast.depth_clip_near = rast.depth_clip_far = 1;
+   rast.line_width = 1.0f;
+   rast.point_size = 1.0f;
+   cso_set_rasterizer(ws->gamma_cso, &rast);
+   cso_set_sample_mask(ws->gamma_cso, ~0u);
+   sampler.wrap_s = sampler.wrap_t = sampler.wrap_r = PIPE_TEX_WRAP_CLAMP_TO_EDGE;
+   sampler.min_img_filter = sampler.mag_img_filter = PIPE_TEX_FILTER_NEAREST;
+   sampler.min_mip_filter = PIPE_TEX_MIPFILTER_NONE;
+   cso_single_sampler(ws->gamma_cso, PIPE_SHADER_FRAGMENT, 0, &sampler);
+   cso_single_sampler(ws->gamma_cso, PIPE_SHADER_FRAGMENT, 1, &sampler);
+   cso_single_sampler_done(ws->gamma_cso, PIPE_SHADER_FRAGMENT);
+   cso_set_vertex_shader_handle(ws->gamma_cso, ws->gamma_vs);
+   cso_set_fragment_shader_handle(ws->gamma_cso, ws->gamma_fs);
+   ws->gamma_failed = false;
+   ws->gamma_made = true;
+   return true;
+}
+
+/* color into dest through the ramp, rows as copy_to_image's blit puts them; the commands are
+ * sent and *submitted gets their fence. false: nothing shown this way, do the plain copy. */
+static bool
+copy_through_ramp(struct rvd_winsys *ws, struct pipe_context *app, struct pipe_resource *color,
+                  struct pipe_resource *dest, bool flip, const struct rvd_gamma *g,
+                  struct pipe_fence_handle **submitted)
+{
+   const float v0 = flip ? 1.0f : 0.0f, v1 = 1.0f - v0;
+   float verts[4][2][4] = {            /* position, then the picture's coordinates */
+      { { -1.0f, -1.0f, 0.0f, 1.0f }, { 0.0f, v0, 0.0f, 1.0f } },
+      { {  1.0f, -1.0f, 0.0f, 1.0f }, { 1.0f, v0, 0.0f, 1.0f } },
+      { {  1.0f,  1.0f, 0.0f, 1.0f }, { 1.0f, v1, 0.0f, 1.0f } },
+      { { -1.0f,  1.0f, 0.0f, 1.0f }, { 0.0f, v1, 0.0f, 1.0f } },
+   };
+   struct pipe_framebuffer_state fb = {0}, none = {0};
+   struct cso_velems_state ve = {0};
+   struct pipe_surface surf = {0}, *target = NULL;
+   struct pipe_sampler_view templ, *views[2] = { NULL, NULL };
+   struct pipe_context *pipe;
+   bool ok = false;
+   int i;
+
+   simple_mtx_lock(&ws->gamma_mutex);
+   if (!ramp_setup(ws, app->screen))
+      goto out;
+   pipe = ws->gamma_pipe;
+   if (ws->gamma_serial != g->serial) {        /* a new ramp into its texture: B, G, R, A bytes */
+      uint8_t texels[256][4];
+      struct pipe_box box;
+
+      for (i = 0; i < 256; i++) {
+         texels[i][0] = g->ramp[2][i];
+         texels[i][1] = g->ramp[1][i];
+         texels[i][2] = g->ramp[0][i];
+         texels[i][3] = 255;
+      }
+      u_box_2d(0, 0, 256, 1, &box);
+      pipe->texture_subdata(pipe, ws->gamma_lut, 0, PIPE_MAP_WRITE, &box, texels, 256 * 4, 0);
+      ws->gamma_serial = g->serial;
+   }
+   app->flush(app, NULL, 0);                   /* the program's drawing reaches the host first */
+   u_sampler_view_default_template(&templ, color, color->format);
+   views[0] = pipe->create_sampler_view(pipe, color, &templ);
+   views[1] = ws->gamma_lut_view;
+   surf.format = dest->format;
+   target = pipe->create_surface(pipe, dest, &surf);
+   if (views[0] && target) {
+      fb.width = dest->width0;
+      fb.height = dest->height0;
+      fb.nr_cbufs = 1;
+      fb.cbufs[0] = target;
+      cso_set_framebuffer(ws->gamma_cso, &fb);
+      cso_set_viewport_dims(ws->gamma_cso, (float)dest->width0, (float)dest->height0, false);
+      pipe->set_sampler_views(pipe, PIPE_SHADER_FRAGMENT, 0, 2, 0, false, views);
+      ve.count = 2;
+      for (i = 0; i < 2; i++) {
+         ve.velems[i].src_offset = i * 4 * sizeof(float);
+         ve.velems[i].src_stride = 8 * sizeof(float);
+         ve.velems[i].src_format = PIPE_FORMAT_R32G32B32A32_FLOAT;
+      }
+      util_draw_user_vertices(ws->gamma_cso, &ve, verts, MESA_PRIM_TRIANGLE_FAN, 4);
+      pipe->flush(pipe, submitted, 0);
+      ok = *submitted != NULL;
+      /* keep no hold on the picture or the image between presents */
+      pipe->set_sampler_views(pipe, PIPE_SHADER_FRAGMENT, 0, 0, 2, false, NULL);
+      cso_set_framebuffer(ws->gamma_cso, &none);
+   }
+   pipe_sampler_view_reference(&views[0], NULL);
+   pipe_surface_reference(&target, NULL);
+out:
+   simple_mtx_unlock(&ws->gamma_mutex);
+   return ok;
+}
+
 /* The colour buffer copied on the host into a reusable 32-bit image, made (again) at its size,
  * and the commands sent. Returns the image or NULL; a new one is in *replacement until the
  * caller keeps it. The copy keeps row order: Direct3D's HAL draws its top row into FBO row
@@ -646,8 +839,10 @@ copy_to_image(struct pipe_context *pipe, struct pipe_resource *color, struct pip
               struct pipe_resource **replacement, bool flip)
 {
    struct pipe_screen *screen = pipe->screen;
+   struct rvd_winsys *ws = rvd_winsys(virgl_screen(screen)->vws);
    struct pipe_fence_handle *submitted = NULL;
    struct pipe_blit_info blit = {0};
+   struct rvd_gamma ramp;
 
    *replacement = NULL;
    if (color->screen != screen || color->target != PIPE_TEXTURE_2D || color->nr_samples > 1)
@@ -679,8 +874,12 @@ copy_to_image(struct pipe_context *pipe, struct pipe_resource *color, struct pip
    }
    blit.mask = PIPE_MASK_RGBA;
    blit.filter = PIPE_TEX_FILTER_NEAREST;
-   pipe->blit(pipe, &blit);
-   pipe->flush(pipe, &submitted, 0);
+   /* through the gamma ramp while one is in force, else the plain copy */
+   if (!gamma_ramp(ws, &ramp) ||
+       !copy_through_ramp(ws, pipe, color, dest, flip, &ramp, &submitted)) {
+      pipe->blit(pipe, &blit);
+      pipe->flush(pipe, &submitted, 0);
+   }
    if (!submitted) {        /* rvd_submit_cmd only returns a fence after the VxD accepts the commands */
       pipe_resource_reference(replacement, NULL);
       return NULL;
@@ -876,10 +1075,13 @@ static void rvd_winsys_destroy(struct virgl_winsys *vws)
    struct rvd_winsys *ws = rvd_winsys(vws);
    rvd_u32 ctx = ws->ctx;
 
+   /* The gamma pass's context goes with the screen that made it (the process is ending or the
+    * driver is unloading): its objects are the host context's, which is destroyed below. */
    virgl_resource_cache_flush(&ws->cache);
    rvd_call(ws, RVD_CONTEXT_DESTROY, &ctx, sizeof(ctx), NULL, 0);
    rvd_close(ws->dev);
    simple_mtx_destroy(&ws->call_mutex);
+   simple_mtx_destroy(&ws->gamma_mutex);
    simple_mtx_destroy(&ws->cache_mutex);
    FREE(ws);
 }
@@ -929,6 +1131,7 @@ static struct virgl_winsys *rvd_winsys_create(void)
          ws->draw_escape = (void *)GetProcAddress(GetModuleHandleA("gdi32.dll"), "DrawEscape");
    }
    simple_mtx_init(&ws->call_mutex, mtx_plain);
+   simple_mtx_init(&ws->gamma_mutex, mtx_plain);
    if (!rvd_call(ws, RVD_GET_INFO, NULL, 0, &ws->info, sizeof(ws->info)) ||
        ws->info.version != RVD_INTERFACE_VERSION || !ws->info.virgl) {
       rvd_close(dev);

@@ -42,6 +42,7 @@ typedef struct {
 #define RC_SAVEBITMAP   0x0040
 #define RC_PALETTE      0x0100
 #define RC_DIBTODEV     0x0200
+#define C1_GAMMA_RAMP   0x0020      /* GDI may call DDIGammaRamp (ordinal 32) */
 #define C1_REINIT_ABLE  0x0080
 #define C1_BYTE_PACKED  0x0400
 #define C1_COLORCURSOR  0x0800
@@ -116,6 +117,13 @@ typedef struct {
 #define RVD_SCANOUT_REPLY  0x32445652UL
 #define RVD_DISPLAY_MODE   0x52564400UL
 #define RVD_DISPLAY_COLOR  0x52565000UL
+/* The gamma ramp for the mini-VDD: an entry at a time (low byte: its index, EDX: 00RRGGBB), then
+   SET puts the collected ramp in force. QUERY asks whether the mini-VDD takes ramps: it answers
+   RVD_SCANOUT_REPLY. (Its low bit is set because a mini-VDD from before this code reads an
+   unknown code's low bit as "the driver's mode is on or off".) */
+#define RVD_DISPLAY_GAMMA        0x52564700UL
+#define RVD_DISPLAY_GAMMA_SET    0x52564800UL
+#define RVD_DISPLAY_GAMMA_QUERY  0x52564901UL
 
 /* ---- Escapes -------------------------------------------------------------------------------- */
 #define QUERYESCSUPPORT 8

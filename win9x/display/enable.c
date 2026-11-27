@@ -20,6 +20,7 @@ static DWORD dwVramSize;
 static DWORD dwLinear;              /* flat address of the frame buffer */
 static BYTE  bReEnable;
 static BYTE  bScanoutVdd;           /* mini-VDD accepts desktop mode and palette updates */
+static WORD  gamma_vdd(void);       /* does the mini-VDD take gamma ramps (below) */
 static BYTE  bRepaintOff, bRepaintPending;
 static void (__far __pascal *lpRepaint)(void);  /* USER's "repaint the whole screen" */
 static BYTE __far *lpColorTable;    /* the screen's colour table inside the PDEVICE (8 bpp) */
@@ -422,6 +423,8 @@ WORD DDI Enable(LPVOID lpDevice, WORD style, LPVOID lpDeviceType, LPVOID lpOutpu
         g->dpDCManage   = DC_IgnoreDFNP;
         /* no hardware drawing yet: the engine does it all (C1_SLOW_CARD) */
         g->dpCaps1 |= C1_REINIT_ABLE | C1_BYTE_PACKED | C1_COLORCURSOR | C1_SLOW_CARD;
+        if (wBpp != 8 && gamma_vdd())
+            g->dpCaps1 |= C1_GAMMA_RAMP;    /* GDI calls DDIGammaRamp */
 
         if (wBpp == 8) {
             g->dpNumPens     = 16;
@@ -654,4 +657,56 @@ void DDI UserRepaintDisable(WORD off)
         bRepaintPending = 0;
         repaint();
     }
+}
+
+/* ---- The gamma ramp ------------------------------------------------------------------------- */
+/* GDI's SetDeviceGammaRamp and GetDeviceGammaRamp end here (DirectDraw's gamma control and
+   OpenGL games' brightness go through them) when the capabilities say C1_GAMMA_RAMP: ramp is
+   256 words each of red, green and blue. The card has no lookup table for a true-colour
+   picture, so the ramp goes to the mini-VDD, which applies it where it copies the desktop's
+   picture and hands it to the OpenGL driver for the pictures that one presents. */
+static WORD wGamma[3][256];
+static BYTE bGammaSet;
+
+/* Does the mini-VDD take gamma ramps? Asked until it says yes (GDI asks for the capabilities
+   before the driver has registered with the VDD, and again at each change of mode). */
+static WORD gamma_vdd(void)
+{
+    static BYTE yes, said;
+
+    if (!yes)
+        yes = vdd_call(VDD_REGISTER_DISPLAY_DRIVER_INFO, RVD_DISPLAY_GAMMA_QUERY, 0, 0, 0) ==
+              RVD_SCANOUT_REPLY;
+    if (said != (BYTE)(yes + 1)) {
+        said = (BYTE)(yes + 1);
+        dbg(yes ? "r9x: gamma ramps through the mini-VDD\r\n" : "r9x: no gamma ramps (yet)\r\n");
+    }
+    return yes;
+}
+
+WORD DDI DDIGammaRamp(LPVOID lpDevice, WORD set, WORD __far *ramp)
+{
+    WORD i, c;
+
+    (void)lpDevice;
+    TRACEC('y');
+    if (wBpp == 8 || !ramp || !gamma_vdd())
+        return 0;
+    if (!set) {
+        for (c = 0; c < 3; c++)
+            for (i = 0; i < 256; i++)
+                ramp[c * 256 + i] = bGammaSet ? wGamma[c][i] : (WORD)(i * 257);
+        return 1;
+    }
+    for (c = 0; c < 3; c++)
+        for (i = 0; i < 256; i++)
+            wGamma[c][i] = ramp[c * 256 + i];
+    bGammaSet = 1;
+    for (i = 0; i < 256; i++) {
+        DWORD rgb = ((DWORD)(wGamma[0][i] >> 8) << 16) | ((wGamma[1][i] >> 8) << 8) |
+                    (wGamma[2][i] >> 8);
+        vdd_call(VDD_REGISTER_DISPLAY_DRIVER_INFO, RVD_DISPLAY_GAMMA | i, rgb, 0, 0);
+    }
+    vdd_call(VDD_REGISTER_DISPLAY_DRIVER_INFO, RVD_DISPLAY_GAMMA_SET, 0, 0, 0);
+    return 1;
 }
