@@ -23,6 +23,9 @@ struct ripple_cgl_drawable {
    ripple_cgl_present_fn present;
    void *present_data;
    bool gpu_display;                        /* present by putting the texture on the display */
+   bool swap_rect_on;                       /* kCGLCESwapRectangle: a swap shows only swap_rect */
+   int swap_rect[4];                        /* x, y (from the bottom), width, height */
+   struct pipe_resource *shown;             /* the picture last shown, kept for swap rectangles */
    bool front_unfilled;                     /* front texture made after a swap, not yet given the
                                              * back buffer's picture (issue 306) */
    bool screen_region;                      /* present into the screen texture at region */
@@ -48,6 +51,7 @@ void ripple_cgl_drawable_set_present(struct ripple_cgl_drawable *d, ripple_cgl_p
  * surface WindowServer composites into) instead of reading it back. */
 void ripple_cgl_drawable_set_gpu_display(struct ripple_cgl_drawable *d, bool on);
 void ripple_cgl_drawable_fill_front(struct ripple_cgl_context *ctx);
+void ripple_cgl_drawable_set_swap_rect(struct ripple_cgl_drawable *d, bool on, const int rect[4]);
 /* The drawable's color buffer for GL_FRONT or GL_BACK (the other if it has only one), or NULL
  * before its first use. */
 struct pipe_resource *ripple_cgl_drawable_color(struct ripple_cgl_drawable *d, unsigned source);
