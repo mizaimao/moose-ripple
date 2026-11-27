@@ -21,6 +21,7 @@
  *   gl-feature-check stale [N]  N contexts in turn, each drawn with on one thread and destroyed
  *                               from another (software first: ours crashed here, issue 240)
  *   gl-feature-check proxy      proxy textures of the iTunes visualizer's size (issue 304)
+ *   gl-feature-check fullscreen [W H [HOLD]]  a full-screen context as games start one (issue 312)
  * Every mode ends with "against Apple's software renderer: ... PASS" or FAIL: each pixel read
  * on ours is compared with the same read on the software renderer (rec_report), and the exit
  * status is 1 when one differs by more than 3 of 255, apart from the reads listed in rec_known
@@ -32,6 +33,8 @@
 #include <OpenGL/CGLIOSurface.h>
 #include <IOSurface/IOSurface.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <ApplicationServices/ApplicationServices.h>
+#include <unistd.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2467,6 +2470,69 @@ static void run_aux(const char *name, CGLPixelFormatAttribute renderer)
     if (pf)
         CGLDestroyPixelFormat(pf);
 }
+
+/* Full screen as games of the time start (issue 312): capture the main display, switch it to
+ * WxH if asked (Doom 3: 640x480), choose a full-screen pixel format for it, CGLSetFullScreen,
+ * clear to orange and flush, read the centre back, and hold HOLD seconds so the host can look
+ * at the display; then give everything back. Apple's software renderer offers no full screen,
+ * so only ours runs. */
+static void run_fullscreen(const char *name, int want_w, int want_h, int hold)
+{
+    rec_begin(__func__, name);
+    CGDirectDisplayID disp = CGMainDisplayID();
+    CGOpenGLDisplayMask mask = CGDisplayIDToOpenGLDisplayMask(disp);
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAFullScreen, kCGLPFADisplayMask, (CGLPixelFormatAttribute)mask,
+                                        kCGLPFADoubleBuffer, kCGLPFAColorSize, 32, kCGLPFADepthSize, 24,
+                                        kCGLPFAAccelerated, 0 };
+    CGLPixelFormatObj pf = NULL;
+    GLint npix = 0;
+    CGLError e = CGLChoosePixelFormat(attrs, &pf, &npix);
+    if (!pf) {
+        printf("%s: no full-screen pixel format (error %d)\n", name, (int)e);
+        return;
+    }
+    CGLContextObj c = NULL;
+    e = CGLCreateContext(pf, NULL, &c);
+    CGLDestroyPixelFormat(pf);
+    if (!c) {
+        printf("%s: no context (error %d)\n", name, (int)e);
+        return;
+    }
+    if (CGDisplayCapture(disp) != kCGErrorSuccess) {
+        printf("%s: the display could not be captured\n", name);
+        CGLDestroyContext(c);
+        return;
+    }
+    size_t was_w = CGDisplayPixelsWide(disp), was_h = CGDisplayPixelsHigh(disp);
+    if (want_w && want_h) {
+        boolean_t exact = 0;
+        CFDictionaryRef mode = CGDisplayBestModeForParameters(disp, 32, want_w, want_h, &exact);
+        CGError ce = mode ? CGDisplaySwitchToMode(disp, mode) : kCGErrorFailure;
+        printf("%s: display %zux%zu, switch to %dx%d: %s (exact %d)\n", name, was_w, was_h, want_w,
+               want_h, ce == kCGErrorSuccess ? "done" : "failed", (int)exact);
+    }
+    size_t w = CGDisplayPixelsWide(disp), h = CGDisplayPixelsHigh(disp);
+    CGLSetCurrentContext(c);
+    e = CGLSetFullScreen(c);
+    glViewport(0, 0, (GLsizei)w, (GLsizei)h);
+    glClearColor(1.0f, 0.5f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    unsigned char px[4] = { 0 };
+    glReadBuffer(GL_BACK);                  /* the front buffer after a swap is issue 306 */
+    glReadPixels((GLint)w / 2, (GLint)h / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    CGLFlushDrawable(c);
+    printf("%s: CGLSetFullScreen %d on %zux%zu; back buffer centre RGBA %3d %3d %3d %3d (want 255 128 0 255), "
+           "GL error 0x%x\n", name, (int)e, w, h, px[0], px[1], px[2], px[3], glGetError());
+    fflush(stdout);
+    if (hold > 0)
+        sleep((unsigned)hold);
+    CGLClearDrawable(c);
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+    CGDisplayRelease(disp);                 /* the display mode comes back with the release */
+    printf("%s: released; display %zux%zu again\n", name, CGDisplayPixelsWide(disp),
+           CGDisplayPixelsHigh(disp));
+}
 /* The iTunes visualizer's first check (breadth pass, 2026-11-27): a proxy rectangle texture of
  * the view's size, RGBA with 8888_REV, then its width read back; the visualizer draws nothing
  * when the answer is 0. A few sizes and formats, ours against Apple's software renderer. */
@@ -2618,6 +2684,12 @@ int main(int argc, char **argv)
     if (argc > 4 && !strcmp(argv[1], "iosurface-xproc-child"))
         return run_iosurface_xproc_child(argv[4], (CGLPixelFormatAttribute)strtoul(argv[3], NULL, 0),
                                          (uint32_t)strtoul(argv[2], NULL, 0));
+    if (argc > 1 && !strcmp(argv[1], "fullscreen")) {
+        /* gl-feature-check fullscreen [W H [HOLD]] */
+        run_fullscreen("ours", argc > 3 ? atoi(argv[2]) : 0, argc > 3 ? atoi(argv[3]) : 0,
+                       argc > 4 ? atoi(argv[4]) : 4);
+        return rec_report();
+    }
     if (argc > 1 && !strcmp(argv[1], "aux")) {
         run_aux("ours", 0);
         run_aux("software", (CGLPixelFormatAttribute)0x00020400);
