@@ -2422,7 +2422,13 @@ otherwise crash in the unloaded hooks. 3DMark03's refused volume texture and
 `guiclick` drives a program's windows for unattended runs. `-press @Title#N`
 presses the button with control ID N only in a window whose title contains
 Title (3DMark05's owner-drawn buttons share IDs across windows), and nothing
-is pressed in a window a modal dialog has disabled.
+is pressed in a window a modal dialog has disabled. List boxes, list views, tree views and
+read-only edit controls are reported with what they show (a list view's and a tree view's
+items are read out of the program's memory), so a benchmark's result details reach the log:
+3DMark03's per-test results come from `-press "@3DMark Score#4"`, which opens its details
+window. Before the `-until` close the windows are looked at once more and acted on whatever
+the clock says, so a press that was waiting for a window to stand still is not lost.
+
 ## Pixel shader 1.4
 
 A Direct3D 9 runtime offers the programs pixel shader 2.0, which includes
