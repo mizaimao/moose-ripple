@@ -8,7 +8,11 @@ set -eu
 
 DEV=${DEV:-dev.lan}
 cd "$ROOT"
-rsync -a --delete --exclude .git --exclude .secrets --exclude .tools --exclude .venv --exclude build --exclude 'tmp-*' \
+# By content, not by time (-c, and no -t): a file that differs gets the copy time on dev.lan,
+# so make rebuilds it. With -a the file kept its own time, and going from one branch or worktree
+# to another with an older copy of a file left make with the newer objects of the other one: a
+# build of main once came back with a branch's kext (2026-11-26).
+rsync -rlpD -c --delete --exclude .git --exclude .secrets --exclude .tools --exclude .venv --exclude build --exclude 'tmp-*' \
     ./ "$DEV:Projects/moose-ripple/"
 ssh $SSH_OPTS "$DEV" "cd ~/Projects/moose-ripple && make -j4 $*"
 mkdir -p build
