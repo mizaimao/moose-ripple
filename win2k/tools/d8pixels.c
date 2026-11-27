@@ -13,8 +13,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "drvcheck.h"
 
 enum { Side = 128 };
+enum { RefLimit = Side * Side / 1000 };   /* pixels of a case that may differ from the reference picture (as in d9pixels) */
 #define CLEAR_COLOR 0xff000066UL
 typedef struct { float x, y, z, rhw; DWORD diffuse; } TLVERTEX;
 #define TLFVF (D3DFVF_XYZRHW | D3DFVF_DIFFUSE)
@@ -59,7 +61,9 @@ static void check(const char *name, const SAMPLE *s, int count)
     IDirect3DSurface8 *back = NULL;
     D3DLOCKED_RECT r;
     HRESULT hr = IDirect3DDevice8_EndScene(device);
-    int i, bad = 0;
+    int i, bad = 0, worst = 0;
+    long differ;
+    unsigned long skipped;
     if (FAILED(hr)) { fail_hr(name, "end", hr); return; }
     hr = IDirect3DDevice8_GetBackBuffer(device, 0, D3DBACKBUFFER_TYPE_MONO, &back);
     if (FAILED(hr)) { fail_hr(name, "backbuffer", hr); return; }
@@ -79,10 +83,19 @@ static void check(const char *name, const SAMPLE *s, int count)
             ++bad;
         }
     }
+    /* The automatic checks (drvcheck.h), as in d9pixels. */
+    differ = ref_case(name, r.pBits, r.Pitch, Side, &worst);
     IDirect3DSurface8_UnlockRect(back);
     IDirect3DSurface8_Release(back);
-    printf("D8PIX case=%s samples=%d mismatches=%d\n", name, count, bad);
-    if (bad) ++failures; else ++passes;
+    skipped = skips_case("D8PIX", name);
+    if (refMode == RefCompare && differ >= 0) {
+        printf("D8PIX case=%s samples=%d mismatches=%d ref_differ=%ld ref_worst=%d\n", name, count, bad, differ, worst);
+        if (differ > RefLimit) {
+            ++refFailed;
+            printf("D8PIX case=%s differs first at=%d,%d ours=%06lx reference=%06lx\n", name, refAtX, refAtY, refMine, refTheirs);
+        }
+    } else printf("D8PIX case=%s samples=%d mismatches=%d\n", name, count, bad);
+    if (bad || skipped || (refMode == RefCompare && differ > RefLimit)) ++failures; else ++passes;
 }
 
 static void case_clear(void)
@@ -673,7 +686,9 @@ static void check_covered(const char *name, const SAMPLE *s, int count)
     IDirect3DSurface8 *back = NULL;
     D3DLOCKED_RECT r;
     HRESULT hr = IDirect3DDevice8_EndScene(device);
-    int i, bad = 0;
+    int i, bad = 0, worst = 0;
+    long differ;
+    unsigned long skipped;
     if (FAILED(hr)) { fail_hr(name, "end", hr); return; }
     hr = IDirect3DDevice8_GetBackBuffer(device, 0, D3DBACKBUFFER_TYPE_MONO, &back);
     if (FAILED(hr)) { fail_hr(name, "backbuffer", hr); return; }
@@ -688,10 +703,19 @@ static void check_covered(const char *name, const SAMPLE *s, int count)
             ++bad;
         }
     }
+    /* The automatic checks (drvcheck.h), as in d9pixels. */
+    differ = ref_case(name, r.pBits, r.Pitch, Side, &worst);
     IDirect3DSurface8_UnlockRect(back);
     IDirect3DSurface8_Release(back);
-    printf("D8PIX case=%s samples=%d mismatches=%d\n", name, count, bad);
-    if (bad) ++failures; else ++passes;
+    skipped = skips_case("D8PIX", name);
+    if (refMode == RefCompare && differ >= 0) {
+        printf("D8PIX case=%s samples=%d mismatches=%d ref_differ=%ld ref_worst=%d\n", name, count, bad, differ, worst);
+        if (differ > RefLimit) {
+            ++refFailed;
+            printf("D8PIX case=%s differs first at=%d,%d ours=%06lx reference=%06lx\n", name, refAtX, refAtY, refMine, refTheirs);
+        }
+    } else printf("D8PIX case=%s samples=%d mismatches=%d\n", name, count, bad);
+    if (bad || skipped || (refMode == RefCompare && differ > RefLimit)) ++failures; else ++passes;
 }
 
 /* A lit draw as 3DMark 2001 SE's Car Chase makes them, with the matrices, light, material, fog
@@ -1082,6 +1106,18 @@ static void pixel_shaders(int only)
         quad_samples(s, want);
         ps_run("ps_mov", ps, v, 1, s, 5);
     }
+    if (!only || only == 97) {
+        /* tex t0; mov r0, t0 with no texture on stage 0: a pixel shader reads black from an empty
+         * stage (the reference rasterizers of Direct3D 8 and 9 both say so), not the white of a
+         * fixed-function stage without a texture. */
+        static const DWORD ps[] = { PSV(1), OTex, DST(RT, 0), OMov, DST(RR, 0), SRC(RT, 0), PSEND };
+        ps_quad(v, 32, 32, 96, 96, 0xff4080c0, 0, 0, 1, 1);
+        for (i = 0; i < 4; ++i) want[i][0] = want[i][1] = want[i][2] = 0.0f;
+        quad_samples(s, want);
+        IDirect3DDevice8_SetTexture(device, 0, NULL);
+        ps_run("ps_empty_stage", ps, v, 1, s, 5);
+        IDirect3DDevice8_SetTexture(device, 0, (IDirect3DBaseTexture8 *)ps_textures[0]);
+    }
     if (!only || only == 2) {   /* tex t0; mul r0, t0, v0 */
         static const DWORD ps[] = { PSV(1), OTex, DST(RT, 0), OMul, DST(RR, 0), SRC(RT, 0), SRC(RV, 0), PSEND };
         ps_quad(v, 32, 32, 96, 96, 0x80808080, 0, 0, 1, 1);
@@ -1089,6 +1125,21 @@ static void pixel_shaders(int only)
         for (i = 0; i < 4; ++i) { texel(i, t); for (k = 0; k < 3; ++k) want[i][k] = t[k] * d; }
         quad_samples(s, want);
         ps_run("ps_texture", ps, v, 1, s, 5);
+    }
+    if (!only || only == 104) {
+        /* tex t0 with transformed vertices while stage 0 asks for generated coordinates and a
+         * texture transform. Both belong to Direct3D's own vertex processing, which transformed
+         * vertices (a program's, or those the runtime shaded in software) do not go through: the
+         * texture shows as the vertices map it. */
+        static const DWORD ps[] = { PSV(1), OTex, DST(RT, 0), OMov, DST(RR, 0), SRC(RT, 0), PSEND };
+        ps_quad(v, 32, 32, 96, 96, 0xffffffff, 0, 0, 1, 1);
+        for (i = 0; i < 4; ++i) texel(i, want[i]);
+        quad_samples(s, want);
+        IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_CAMERASPACEPOSITION);
+        IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_COUNT2);
+        ps_run("ps_rhw_texgen", ps, v, 1, s, 5);
+        IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_TEXCOORDINDEX, 0);
+        IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
     }
     if (!only || only == 3) {   /* def c0; mad r0, v0, c1, c0 with c1 set by the program; the blue sum clamps */
         static const DWORD ps[] = { PSV(1), DEF(0, F025, F05, F075, F1),
@@ -1330,6 +1381,235 @@ static void pixel_shaders(int only)
     }
 }
 
+/* Version 1.4 pixel shaders on the Direct3D 8 interface. They read six stages, two more than the
+ * four fixed-function stages a Direct3D 8 program is offered. */
+typedef struct { float x, y, z, rhw, t0[2], t1[4], t2[3], t3[2], t4[2]; } WATERVERTEX;
+#define WATERFVF (D3DFVF_XYZRHW | D3DFVF_TEX5 | D3DFVF_TEXCOORDSIZE2(0) | D3DFVF_TEXCOORDSIZE4(1) | \
+                  D3DFVF_TEXCOORDSIZE3(2) | D3DFVF_TEXCOORDSIZE2(3) | D3DFVF_TEXCOORDSIZE2(4))
+
+static IDirect3DTexture8 *plain2x2(DWORD colour)
+{
+    DWORD texels[4];
+    texels[0] = texels[1] = texels[2] = texels[3] = colour;
+    return texture2x2(texels);
+}
+
+static void ps14_cases(int only)
+{
+    static const SAMPLE inside[5] = { { 48, 48, 0 }, { 80, 48, 0 }, { 48, 80, 0 }, { 80, 80, 0 }, { 64, 64, 0 } };
+    IDirect3DTexture8 *t[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
+    SAMPLE s[6];
+    HRESULT hr, set4, set5;
+    DWORD handle;
+    int i, k;
+    for (k = 0; k < 6; ++k) {
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_MINFILTER, D3DTEXF_POINT);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_MIPFILTER, D3DTEXF_NONE);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_ADDRESSU, D3DTADDRESS_CLAMP);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_ADDRESSV, D3DTADDRESS_CLAMP);
+    }
+    if (!only || only == 98) {
+        /* texld r0, t0; texld r4, t0; texld r5, t0; add r0, r0, r4; add r0, r0, r5: stage 0 holds
+         * red 0x40, stage 4 green 0x80 and stage 5 blue 0xc0. */
+        static const DWORD ps[] = { PSV(4), OTex, DST(RR, 0), SRC(RT, 0), OTex, DST(RR, 4), SRC(RT, 0),
+            OTex, DST(RR, 5), SRC(RT, 0), OAdd, DST(RR, 0), SRC(RR, 0), SRC(RR, 4),
+            OAdd, DST(RR, 0), SRC(RR, 0), SRC(RR, 5), PSEND };
+        PSVERTEX v[6];
+        t[0] = plain2x2(0xff400000); t[4] = plain2x2(0xff008000); t[5] = plain2x2(0xff0000c0);
+        ps_quad(v, 32, 32, 96, 96, 0xffffffff, 0, 0, 1, 1);
+        for (i = 0; i < 5; ++i) { s[i] = inside[i]; s[i].rgb = 0x4080c0; }
+        s[5].x = s[5].y = 8; s[5].rgb = CLEAR_COLOR;
+        IDirect3DDevice8_SetTexture(device, 0, (IDirect3DBaseTexture8 *)t[0]);
+        set4 = IDirect3DDevice8_SetTexture(device, 4, (IDirect3DBaseTexture8 *)t[4]);
+        set5 = IDirect3DDevice8_SetTexture(device, 5, (IDirect3DBaseTexture8 *)t[5]);
+        if (FAILED(set4) || FAILED(set5))
+            printf("D8PIX case=ps14_six_stages set_texture stage4=%08lx stage5=%08lx\n", (unsigned long)set4, (unsigned long)set5);
+        ps_run("ps14_six_stages", ps, v, 1, s, 6);
+        for (k = 0; k < 6; ++k) {
+            IDirect3DDevice8_SetTexture(device, k, NULL);
+            if (t[k]) { IDirect3DTexture8_Release(t[k]); t[k] = NULL; }
+        }
+    }
+    if (!only || only == 99) {
+        /* The water of 3DMark 2001 SE's Advanced Pixel Shader test, token for token:
+         *   texld r0, t0; texcrd r1.xy, t1_dw.xyw; texcrd r2.xyz, t2; bem r1.xy, r1, r0; mov r1.z, r2.z;
+         *   add r2.xyz, r1, r2; phase; texld r1, r1; texld r2, r2; texld r3, t3; texld r4, t4;
+         *   mul r3, r3, r4; lrp r0, r3, r2, r1; mul r0, r0, c0
+         * Stage 0 holds red, so the bump matrix of stage 1 (0.5, 0, 0, 0) moves r1 = (0.6, 0.6) / 2 to
+         * (0.8, 0.3): the green texel of stage 1. r2 = r1 + (0, 0.5) reads the blue texel of stage 2.
+         * Stage 3 holds 0x80 and stage 4 white, so the result is half blue, half green, times
+         * c0 = (1, 1, 0.5, 1). */
+        static const DWORD ps[] = { 0xffff0104UL, 0x42, 0x800f0000UL, 0xb0e40000UL, 0x40, 0x80030001UL, 0xbaf40001UL,
+            0x40, 0x80070002UL, 0xb0e40002UL, 0x59, 0x80030001UL, 0x80e40001UL, 0x80e40000UL,
+            0x1, 0x80040001UL, 0x80aa0002UL, 0x2, 0x80070002UL, 0x80e40001UL, 0x80e40002UL, 0xfffd,
+            0x42, 0x800f0001UL, 0x80e40001UL, 0x42, 0x800f0002UL, 0x80e40002UL, 0x42, 0x800f0003UL, 0xb0e40003UL,
+            0x42, 0x800f0004UL, 0xb0e40004UL, 0x5, 0x800f0003UL, 0x80e40003UL, 0x80e40004UL,
+            0x12, 0x800f0000UL, 0x80e40003UL, 0x80e40002UL, 0x80e40001UL, 0x5, 0x800f0000UL, 0x80e40000UL, 0xa0e40000UL,
+            0xffff };
+        static const DWORD corner[4] = { 0xff000000, 0xff000000, 0xff000000, 0xff0000ff };
+        static const float c0[4] = { 1.0f, 1.0f, 0.5f, 1.0f };
+        static const float xs[6] = { 32, 96, 32, 32, 96, 96 }, ys[6] = { 32, 32, 96, 96, 32, 96 };
+        const float half = 0.5f, zero = 0.0f;
+        WATERVERTEX v[6];
+        memset(v, 0, sizeof(v));
+        for (i = 0; i < 6; ++i) {
+            v[i].x = xs[i]; v[i].y = ys[i]; v[i].z = 0.5f; v[i].rhw = 1.0f;
+            v[i].t0[0] = v[i].t0[1] = 0.5f;
+            v[i].t1[0] = v[i].t1[1] = 0.6f; v[i].t1[3] = 2.0f;
+            v[i].t2[1] = 0.5f;
+            v[i].t3[0] = v[i].t3[1] = v[i].t4[0] = v[i].t4[1] = 0.5f;
+        }
+        t[0] = plain2x2(0xffff0000); t[1] = texture2x2(texels0); t[2] = texture2x2(corner);
+        t[3] = plain2x2(0xff808080); t[4] = plain2x2(0xffffffff);
+        for (i = 0; i < 5; ++i) { s[i] = inside[i]; s[i].rgb = 0x007f40; }
+        s[5].x = s[5].y = 8; s[5].rgb = CLEAR_COLOR;
+        for (k = 0; k < 5; ++k) IDirect3DDevice8_SetTexture(device, k, (IDirect3DBaseTexture8 *)t[k]);
+        IDirect3DDevice8_SetTextureStageState(device, 1, D3DTSS_BUMPENVMAT00, *(const DWORD *)&half);
+        IDirect3DDevice8_SetTextureStageState(device, 1, D3DTSS_BUMPENVMAT01, *(const DWORD *)&zero);
+        IDirect3DDevice8_SetTextureStageState(device, 1, D3DTSS_BUMPENVMAT10, *(const DWORD *)&zero);
+        IDirect3DDevice8_SetTextureStageState(device, 1, D3DTSS_BUMPENVMAT11, *(const DWORD *)&zero);
+        handle = 0;
+        hr = IDirect3DDevice8_CreatePixelShader(device, ps, &handle);
+        if (FAILED(hr)) fail_hr("ps14_water", "create", hr);
+        else {
+            if (begin("ps14_water")) {
+                IDirect3DDevice8_SetPixelShader(device, handle);
+                IDirect3DDevice8_SetPixelShaderConstant(device, 0, c0, 1);
+                IDirect3DDevice8_SetVertexShader(device, WATERFVF);
+                hr = IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+                IDirect3DDevice8_SetPixelShader(device, 0);
+                if (FAILED(hr)) { fail_hr("ps14_water", "draw", hr); IDirect3DDevice8_EndScene(device); }
+                else check("ps14_water", s, 6);
+            }
+            IDirect3DDevice8_DeletePixelShader(device, handle);
+        }
+        IDirect3DDevice8_SetTextureStageState(device, 1, D3DTSS_BUMPENVMAT00, *(const DWORD *)&zero);
+        for (k = 0; k < 6; ++k) {
+            IDirect3DDevice8_SetTexture(device, k, NULL);
+            if (t[k]) { IDirect3DTexture8_Release(t[k]); t[k] = NULL; }
+        }
+    }
+}
+
+/* 100: eight fixed-function stages on the Direct3D 8 interface. Stages 0 to 6 add a black texture
+ * each (their coordinate sets are all 0), stage 7 modulates the diffuse white by a texture red on
+ * its left and green on its right, read with coordinate set 7. */
+static void stages8_case(int only, BOOL offered)
+{
+    typedef struct { float x, y, z, rhw; DWORD diffuse; float st[8][2]; } V8;
+    static const DWORD black[4] = { 0xff000000, 0xff000000, 0xff000000, 0xff000000 };
+    static const DWORD halves[4] = { 0xffff0000, 0xff00ff00, 0xffff0000, 0xff00ff00 };
+    static const SAMPLE s[] = { { 48, 64, 0xff0000 }, { 80, 64, 0x00ff00 }, { 8, 8, CLEAR_COLOR } };
+    IDirect3DTexture8 *dark, *last;
+    V8 v[4];
+    HRESULT hr;
+    int i, k;
+    if (only && only != 100) return;
+    if (!offered) { printf("D8PIX eight texture stages not offered\n"); return; }
+    dark = texture2x2(black);
+    last = texture2x2(halves);
+    if (!dark || !last) { printf("D8PIX case=stages8 textures failed\n"); ++failures; goto done; }
+    memset(v, 0, sizeof(v));
+    for (i = 0; i < 4; ++i) {
+        v[i].x = i & 1 ? 96.0f : 32.0f;
+        v[i].y = i & 2 ? 96.0f : 32.0f;
+        v[i].z = 0.5f; v[i].rhw = 1; v[i].diffuse = 0xffffffff;
+        v[i].st[7][0] = i & 1 ? 1.0f : 0.0f;
+        v[i].st[7][1] = i & 2 ? 1.0f : 0.0f;
+    }
+    for (k = 0; k < 8; ++k) {
+        IDirect3DDevice8_SetTexture(device, k, (IDirect3DBaseTexture8 *)(k < 7 ? dark : last));
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_COLOROP, k < 7 ? D3DTOP_ADD : D3DTOP_MODULATE);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_COLORARG2, k ? D3DTA_CURRENT : D3DTA_DIFFUSE);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_ALPHAARG1, k ? D3DTA_CURRENT : D3DTA_DIFFUSE);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_TEXCOORDINDEX, k);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_MINFILTER, D3DTEXF_POINT);
+    }
+    if (begin("stages8")) {
+        IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX8);
+        hr = IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+        if (FAILED(hr)) { fail_hr("stages8", "draw", hr); IDirect3DDevice8_EndScene(device); }
+        else check("stages8", s, 3);
+    }
+done:
+    for (k = 7; k >= 0; --k) {
+        IDirect3DDevice8_SetTexture(device, k, NULL);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_COLOROP, k ? D3DTOP_DISABLE : D3DTOP_MODULATE);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_COLORARG2, D3DTA_CURRENT);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_ALPHAOP, k ? D3DTOP_DISABLE : D3DTOP_SELECTARG1);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+        IDirect3DDevice8_SetTextureStageState(device, k, D3DTSS_TEXCOORDINDEX, k);
+    }
+    if (dark) IDirect3DTexture8_Release(dark);
+    if (last) IDirect3DTexture8_Release(last);
+}
+
+/* 101 to 103: transformed vertices on a stage that asks for generated texture coordinates
+ * (D3DTSS_TCI_CAMERASPACEPOSITION in D3DTSS_TEXCOORDINDEX). Direct3D generates coordinates while
+ * it transforms vertices; a transformed vertex keeps its own.
+ * rhw_texgen: the vertex's own coordinates read a texture red on its left and green on its right.
+ * rhw_texgen_diffuse: the stage reads no texture at all, the vertex has no coordinates.
+ * rhw_texgen_no_coords: the stage reads the texture, the vertex has no coordinates. */
+static void rhw_texgen_cases(int only)
+{
+    typedef struct { float x, y, z, rhw; DWORD diffuse; float u, v; } VT;
+    typedef struct { float x, y, z, rhw; DWORD diffuse; } VD;
+    static const DWORD halves[4] = { 0xffff0000, 0xff00ff00, 0xffff0000, 0xff00ff00 };
+    static const SAMPLE split[] = { { 48, 64, 0xff0000 }, { 80, 64, 0x00ff00 }, { 8, 8, CLEAR_COLOR } };
+    static const SAMPLE plain[] = { { 48, 64, 0x4080c0 }, { 80, 64, 0x4080c0 }, { 8, 8, CLEAR_COLOR } };
+    static const SAMPLE first[] = { { 48, 64, 0xff0000 }, { 80, 64, 0xff0000 }, { 8, 8, CLEAR_COLOR } };
+    static const char *const names[3] = { "rhw_texgen", "rhw_texgen_diffuse", "rhw_texgen_no_coords" };
+    const SAMPLE *const want[3] = { split, plain, first };
+    IDirect3DTexture8 *t;
+    VT vt[4];
+    VD vd[4];
+    HRESULT hr;
+    int i, k;
+    if (only && (only < 101 || only > 103)) return;
+    t = texture2x2(halves);
+    if (!t) { printf("D8PIX case=rhw_texgen texture failed\n"); ++failures; return; }
+    for (i = 0; i < 4; ++i) {
+        vt[i].x = vd[i].x = i & 1 ? 96.0f : 32.0f;
+        vt[i].y = vd[i].y = i & 2 ? 96.0f : 32.0f;
+        vt[i].z = vd[i].z = 0.5f; vt[i].rhw = vd[i].rhw = 1.0f;
+        vt[i].diffuse = vd[i].diffuse = 0xff4080c0;
+        vt[i].u = i & 1 ? 1.0f : 0.0f;
+        vt[i].v = i & 2 ? 1.0f : 0.0f;
+    }
+    IDirect3DDevice8_SetTexture(device, 0, (IDirect3DBaseTexture8 *)t);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_MAGFILTER, D3DTEXF_POINT);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_MINFILTER, D3DTEXF_POINT);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_CAMERASPACEPOSITION);
+    for (k = 0; k < 3; ++k) {
+        if (only && only != 101 + k) continue;
+        IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLOROP, k == 1 ? D3DTOP_SELECTARG2 : D3DTOP_SELECTARG1);
+        if (!begin(names[k])) continue;
+        if (k == 0) {
+            IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1);
+            hr = IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, vt, sizeof(vt[0]));
+        } else {
+            IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+            hr = IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, vd, sizeof(vd[0]));
+        }
+        if (FAILED(hr)) { fail_hr(names[k], "draw", hr); IDirect3DDevice8_EndScene(device); }
+        else check(names[k], want[k], 3);
+    }
+    IDirect3DDevice8_SetTexture(device, 0, NULL);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_TEXCOORDINDEX, 0);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLORARG2, D3DTA_CURRENT);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+    IDirect3DTexture8_Release(t);
+}
+
 int main(int argc, char **argv)
 {
     IDirect3D8 *(WINAPI *create)(UINT);
@@ -1339,13 +1619,18 @@ int main(int argc, char **argv)
     D3DCAPS8 caps;
     HWND window;
     DWORD flags;
-    BOOL software = FALSE;
+    BOOL software = FALSE, reference = FALSE, noref = FALSE;
+    char refText[40];
     int only = 0, a;
     HRESULT hr;
     setvbuf(stdout, NULL, _IONBF, 0);
     /* "sw": software vertex processing; "ps=N": only pixel shader case N. */
     for (a = 1; a < argc; ++a) {
         if (!lstrcmpiA(argv[a], "sw")) software = TRUE;
+        /* "ref", "-noref", "-noskips": the automatic checks, as in d9pixels (drvcheck.h). */
+        else if (!lstrcmpiA(argv[a], "ref")) reference = TRUE;
+        else if (!lstrcmpiA(argv[a], "-noref")) noref = TRUE;
+        else if (!lstrcmpiA(argv[a], "-noskips")) skipsOff = 1;
         else if (!strncmp(argv[a], "ps=", 3)) only = atoi(argv[a] + 3);
     }
     create = lib ? (IDirect3D8 *(WINAPI *)(UINT))GetProcAddress(lib, "Direct3DCreate8") : NULL;
@@ -1397,10 +1682,38 @@ int main(int argc, char **argv)
     pp.Flags = D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
     flags = !software && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT) ?
             D3DCREATE_HARDWARE_VERTEXPROCESSING : D3DCREATE_SOFTWARE_VERTEXPROCESSING;
-    hr = IDirect3D8_CreateDevice(d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, window, flags, &pp, &device);
+    hr = IDirect3D8_CreateDevice(d3d, D3DADAPTER_DEFAULT, reference ? D3DDEVTYPE_REF : D3DDEVTYPE_HAL, window, flags, &pp, &device);
+    if (reference && FAILED(hr)) {
+        printf("D8PIX reference not available hr=%08lx\nD8PIX end result=NOREFERENCE\n", (unsigned long)hr);
+        return 0;
+    }
     printf("D8PIX device hr=%08lx vertex_processing=%s format=%lu\n", (unsigned long)hr,
            flags == D3DCREATE_HARDWARE_VERTEXPROCESSING ? "hardware" : "software", (unsigned long)mode.Format);
     if (FAILED(hr)) { printf("D8PIX end result=UNAVAILABLE\n"); return 2; }
+    if (reference) {
+        /* A runtime without the reference rasterizer still makes the device, and it draws nothing:
+         * clear to a colour of our own and read it back before trusting its pictures. */
+        IDirect3DSurface8 *probe = NULL;
+        D3DLOCKED_RECT lr;
+        DWORD seen = 0;
+        IDirect3DDevice8_Clear(device, 0, NULL, D3DCLEAR_TARGET, 0xff123456UL, 1.0f, 0);
+        if (SUCCEEDED(IDirect3DDevice8_GetBackBuffer(device, 0, D3DBACKBUFFER_TYPE_MONO, &probe))) {
+            if (SUCCEEDED(IDirect3DSurface8_LockRect(probe, &lr, NULL, D3DLOCK_READONLY))) {
+                seen = *(const DWORD *)lr.pBits & 0xffffff;
+                IDirect3DSurface8_UnlockRect(probe);
+            }
+            IDirect3DSurface8_Release(probe);
+        }
+        if (seen != 0x123456) {
+            printf("D8PIX reference not available: its device draws nothing (%06lx)\nD8PIX end result=NOREFERENCE\n", (unsigned long)seen);
+            return 0;
+        }
+        printf("D8PIX reference rasterizer: pictures kept in refpix8\n");
+    }
+    refFolder = "refpix8";
+    refMode = reference ? RefWrite : noref ? RefOff : RefCompare;
+    if (reference) skipsOff = 1;
+    skips_start();
     IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_NONE);
     IDirect3DDevice8_SetRenderState(device, D3DRS_ZENABLE, D3DZB_FALSE);
     IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, FALSE);
@@ -1422,9 +1735,18 @@ int main(int argc, char **argv)
     }
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 2)) pixel_shaders(only);
     else printf("D8PIX pixel shaders not offered\n");
+    if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 4)) ps14_cases(only);
+    stages8_case(only, caps.MaxTextureBlendStages >= 8 && caps.MaxSimultaneousTextures >= 8);
+    rhw_texgen_cases(only);
     IDirect3DDevice8_Release(device);
     IDirect3D8_Release(d3d);
     DestroyWindow(window);
-    printf("D8PIX end pass=%d fail=%d result=%s\n", passes, failures, failures ? "FAIL" : "PASS");
+    refText[0] = 0;
+    if (refMode == RefCompare) {
+        if (refCompared) sprintf(refText, " ref_compared=%d ref_failed=%d", refCompared, refFailed);
+        else strcpy(refText, " ref=unavailable");
+    }
+    printf("D8PIX end pass=%d fail=%d%s%s result=%s\n", passes, failures, skips_summary(), refText,
+           reference ? "REFERENCE" : failures ? "FAIL" : "PASS");
     return failures ? 1 : 0;
 }
