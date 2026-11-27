@@ -492,7 +492,7 @@ done:
     if (decl) IDirect3DVertexDeclaration9_Release(decl);
 }
 
-/* 78: an indexed draw of untransformed vertices from a write-only vertex buffer and index buffer,
+/* 82: an indexed draw of untransformed vertices from a write-only vertex buffer and index buffer,
  * the indices from the buffer's start. With hardware vertex processing a driver may keep both on
  * the GPU, where the draw's index "pointer" is the offset zero. */
 static void static_indexed_case(int only)
@@ -507,7 +507,7 @@ static void static_indexed_case(int only)
     D3DMATRIX m;
     BYTE *p;
     HRESULT hr;
-    if (only && only != 78) return;
+    if (only && only != 82) return;
     vb = vertex_buffer(v, sizeof(v), XYZFVF);
     if (!vb) { fail_hr("static_indexed", "create", E_FAIL); return; }
     hr = IDirect3DDevice9_CreateIndexBuffer(device, sizeof(idx), D3DUSAGE_WRITEONLY, D3DFMT_INDEX16,
