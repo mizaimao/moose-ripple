@@ -2782,8 +2782,9 @@ ripple_cgl_link_program(void *rend, GLhandleARB program)
 /* ARB programs. Apple's parser takes "ALIAS name = fragment.texcoord[5];", an alias of a
  * binding; the ARB specs (and Mesa) only alias a declared name, so Mesa refused the program
  * and every draw with it failed (Core Animation's YUV video programs, Real Racing 2's intro,
- * M6). Such an ALIAS is the same as ATTRIB (fragment.*, vertex.*) or PARAM (program.*,
- * state.*, a constant {...}): rewritten to that before Mesa parses the text. NULL if nothing changed. */
+ * M6). Such an ALIAS is the same as ATTRIB (fragment.*, vertex.*), PARAM (program.*, state.*,
+ * a constant {...}) or OUTPUT (result.*, as Halo's vertex programs alias their outputs):
+ * rewritten to that before Mesa parses the text. NULL if nothing changed. */
 static bool
 arb_word_at(const char *s, GLsizei len, GLsizei i, const char *word)
 {
@@ -2813,6 +2814,8 @@ arb_fix_alias(const char *s, GLsizei len, GLsizei *out_len)
             else if (arb_word_at(s, len, j, "program.") || arb_word_at(s, len, j, "state.") ||
                      arb_word_at(s, len, j, "{"))
                with = "PARAM";
+            else if (arb_word_at(s, len, j, "result."))
+               with = "OUTPUT";
             if (with) {
                if (!out) {
                   out = malloc((size_t)len * 2 + 16);
@@ -2856,14 +2859,31 @@ ripple_cgl_program_string(void *rend, GLenum target, GLenum format, GLsizei len,
       fixed = arb_fix_alias(string, len, &fixed_len);
    CALL_ProgramStringARB(GET_DISPATCH(), (target, format, fixed ? fixed_len : len,
                                           fixed ? fixed : string));
-   free(fixed);
-   /* Debug log: a sampler the program uses without a texture target recorded for its unit
-    * (Mesa then indexes CurrentTex[-1] at the next draw; Core Image crashed so, M6). */
    extern FILE *ripple_gld_dbg_file(void);
-   if (!ripple_gld_dbg_file())
-      return;
    RIPPLE_CGL_DIRECT_BEGIN();           /* the program as the call above has left it */
    GET_CURRENT_CONTEXT(gl);
+   /* A program Mesa's parser refused: the program draws without it (Halo quit after one).
+    * Counted for the development checks; its text and Mesa's message go to the debug log. The
+    * GL error itself stays for the program to read. */
+   if (gl && gl->Program.ErrorPos != -1) {
+      ripple_gl_skip("ARB program refused", target == GL_FRAGMENT_PROGRAM_ARB ? "fragment" :
+                     target == GL_VERTEX_PROGRAM_ARB ? "vertex" : "other");
+      if (ripple_gld_dbg_file()) {
+         const char *text = fixed ? fixed : (const char *)string;
+         GLsizei n = fixed ? fixed_len : len;
+         fprintf(ripple_gld_dbg_file(), "RippleGLDriver: ARB program refused at byte %d: %s\n"
+                 "  ---- program, %d bytes ----\n%.*s\n  ---- end ----\n", gl->Program.ErrorPos,
+                 gl->Program.ErrorString ? gl->Program.ErrorString : "", (int)n,
+                 n > 16384 ? 16384 : (int)n, text ? text : "");
+      }
+   }
+   free(fixed);
+   if (!ripple_gld_dbg_file()) {
+      RIPPLE_CGL_DIRECT_END();
+      return;
+   }
+   /* Debug log: a sampler the program uses without a texture target recorded for its unit
+    * (Mesa then indexes CurrentTex[-1] at the next draw; Core Image crashed so, M6). */
    struct gl_program *prog = !gl ? NULL : target == GL_FRAGMENT_PROGRAM_ARB ?
       gl->FragmentProgram.Current : target == GL_VERTEX_PROGRAM_ARB ? gl->VertexProgram.Current : NULL;
    if (prog) {
