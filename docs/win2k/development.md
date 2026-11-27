@@ -3145,6 +3145,21 @@ newest flip, and the miniport's draws, clears, presents and failures. Once a min
 the whole report. A call that fails matters more than it looks: the runtime drops the rest of
 that command batch.
 
+**The guest's clock.** A benchmark divides its frames by the guest's time, so a guest clock that
+loses time gives numbers that are too high. Windows XP keeps time by counting timer interrupts.
+A QEMU guest that cannot take them in time, because the host is busy drawing for it, loses them
+for good unless QEMU is started with `-rtc base=localtime,driftfix=slew`. Without the option an
+XP guest ran at 66 to 77 percent of real time through 3DMark03's game tests (a whole run took
+696 s by the host and 553 s by the guest), and the scores it printed were nearly 30 percent too
+high. With it the benchmark's time display moves 20.0 s in 20 s, and a run takes 554 s by the
+host and 553 s by the guest. 3DMark 2001 SE kept time on the same guest without the option.
+So a timed run's launcher writes the guest's time at the start and at the end
+(`echo %TIME%`), the host notes its own time for both, and the two spans must agree before a
+number is used. That checks a whole run, not each test: on a Windows 98 guest one fill rate
+test still ran a quarter slow with the option set while the run as a whole kept time, and the
+same has not been checked test by test on XP. The frame pacing lines below are timed by the
+processor's cycle counter and do not depend on the guest's clock.
+
 **Frame pacing.** The miniport times every present against the one before it and counts the
 times by size (`RB2K_PACE_SEGMENT` in `rb2kd3d7.h`), for each stretch of presents: a new
 stretch starts after two seconds without a present and when a program closes its Direct3D
@@ -3360,16 +3375,15 @@ averaged over 8x8 blocks. Edges and texture filtering put a few percent into the
 between two correct pictures; a missing object or a wrong colour moves the second, and the
 comparison fails when that is above 2 percent.
 
-First results (XP SP3 under KVM, Intel UHD 630 host, 1024x768):
-
-| frame | pixels | blocks | result | reference rasterizer took |
-| --- | --- | --- | --- | --- |
-| Wings of Fury, frame 1038 | 1.26% | 0.01% | pass | under a minute |
-| Mother Nature, frame 600 | 8.00% | 3.61% | fail | 24 minutes |
-
-In the Mother Nature frame every differing block lies in the tree canopy against the sky, where
-the driver's picture is a little lighter; the stream, the grass, the rocks and the butterfly
-agree. Not looked into yet.
+Seven frames are compared at 640x480 (`-pick 1=0`; the reference rasterizer needs many minutes
+for one frame of a game test at 1024x768): frame 1038 of Wings of Fury, frame 600 of the other
+three game tests, and frame 300 of Vertex Shader, Pixel Shader 2.0 and Ragtroll. On XP SP3 under
+KVM (Intel UHD 630 host) all seven pass, none with more than 0.00 percent of its blocks apart;
+the numbers are in "Mipmaps of the textures a Direct3D 9 runtime manages". The first comparison
+had failed three of them, and each failure was a fault of the driver: the tree canopy of Mother
+Nature (5.83 percent of the blocks) and the Ragtroll frame (3.42 percent) were the mipmap levels
+missing from managed textures, and the Pixel Shader 2.0 frame (4.42 percent) the address mode of
+the third texture coordinate.
 
 ## Release package
 
