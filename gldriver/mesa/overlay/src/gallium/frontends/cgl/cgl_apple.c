@@ -1774,6 +1774,123 @@ static void tex_image2D_body(struct ripple_cgl_context *ctx, struct gl_context *
                              GLint level, GLenum internalformat, GLsizei width, GLsizei height,
                              GLint border, GLenum format, GLenum type, const GLvoid *pixels);
 
+/* ---- GL_APPLE_ycbcr_422 ------------------------------------------------------------------ *
+ * Photo Booth uploads every camera frame as a 4:2:2 YCbCr rectangle texture (format
+ * GL_YCBCR_422_APPLE, internal format GL_RGB) without looking for the extension, which every
+ * Apple driver has. Mesa doesn't know the format: the upload failed (GL_INVALID_ENUM), the
+ * texture stayed empty and the live view black (issue 11). Such uploads are turned into RGBA
+ * here, with the BT.601 video-range matrix Mesa uses for its own YCbCr formats.
+ * GL_UNSIGNED_SHORT_8_8_APPLE holds luma in the high byte of each 16-bit value, so on this
+ * little-endian machine the bytes are Cb Y0 Cr Y1 ('2vuy'); the _REV type holds Y0 Cb Y1 Cr
+ * ('yuvs'). `gl-feature-check ycbcr` compares the result with Apple's software renderer. Not
+ * covered: a pixel unpack buffer (left to Mesa, which refuses it as before), client storage
+ * (the converted copy is uploaded once; later changes to the program's memory are not seen),
+ * IOSurface textures in this format. The extension is not added to the extension string: Core
+ * Video converts video frames on the GPU itself when it is missing, which is quicker than
+ * this conversion on the processor. */
+#ifndef GL_YCBCR_422_APPLE
+#define GL_YCBCR_422_APPLE 0x85B9
+#endif
+#ifndef GL_UNSIGNED_SHORT_8_8_APPLE
+#define GL_UNSIGNED_SHORT_8_8_APPLE 0x85BA
+#define GL_UNSIGNED_SHORT_8_8_REV_APPLE 0x85BB
+#endif
+
+static inline uint8_t
+ycbcr_clamp(int v)
+{
+   return v < 0 ? 0 : v > 255 ? 255 : (uint8_t)v;
+}
+
+/* `w` x `h` texels of a YCbCr upload as packed RGBA bytes (malloc'd), or NULL when this upload
+ * isn't one to convert. */
+static uint8_t *
+ycbcr_to_rgba(const struct gl_pixelstore_attrib *unpack, int row_bytes, GLsizei w, GLsizei h,
+              GLenum type, const GLvoid *pixels)
+{
+   if (w <= 0 || h <= 0 || !pixels || unpack->BufferObj ||
+       (type != GL_UNSIGNED_SHORT_8_8_APPLE && type != GL_UNSIGNED_SHORT_8_8_REV_APPLE))
+      return NULL;
+   size_t stride;
+   if (row_bytes > 0) {
+      stride = (size_t)row_bytes;
+   } else {
+      size_t len = unpack->RowLength > 0 ? (size_t)unpack->RowLength : (size_t)w;
+      size_t align = unpack->Alignment > 0 ? (size_t)unpack->Alignment : 1;
+      stride = (len * 2 + align - 1) / align * align;
+   }
+   const uint8_t *src = (const uint8_t *)pixels + (size_t)unpack->SkipRows * stride +
+                        (size_t)unpack->SkipPixels * 2;
+   uint8_t *out = malloc((size_t)w * h * 4);
+   if (!out)
+      return NULL;
+   bool rev = (type == GL_UNSIGNED_SHORT_8_8_REV_APPLE) != (unpack->SwapBytes != 0);
+   for (GLsizei y = 0; y < h; y++) {
+      const uint8_t *s = src + (size_t)y * stride;
+      uint8_t *d = out + (size_t)y * w * 4;
+      for (GLsizei x = 0; x < w; x++, d += 4) {
+         const uint8_t *p = s + (size_t)(x & ~1) * 2;   /* the four bytes of the pair */
+         bool whole = (x | 1) < w;                      /* an odd width's last pair is half */
+         int luma, cb, cr;
+         if (!rev) {
+            cb = p[0];
+            luma = p[1 + (x & 1) * 2];
+            cr = whole ? p[2] : 128;
+         } else {
+            luma = p[(x & 1) * 2];
+            cb = p[1];
+            cr = whole ? p[3] : 128;
+         }
+         int c = 298 * (luma - 16) + 128;
+         d[0] = ycbcr_clamp((c + 409 * (cr - 128)) >> 8);
+         d[1] = ycbcr_clamp((c - 100 * (cb - 128) - 208 * (cr - 128)) >> 8);
+         d[2] = ycbcr_clamp((c + 516 * (cb - 128)) >> 8);
+         d[3] = 255;
+      }
+   }
+   static bool logged;
+   extern FILE *ripple_gld_dbg_file(void);
+   if (!logged && ripple_gld_dbg_file()) {
+      logged = true;
+      fprintf(ripple_gld_dbg_file(), "RippleGLDriver: YCbCr 4:2:2 upload (%s, %dx%d, %zu bytes a "
+              "row) turned into RGBA\n", rev ? "Y0 Cb Y1 Cr" : "Cb Y0 Cr Y1", w, h, stride);
+   }
+   return out;
+}
+
+/* glTexImage2D or, with `sub`, glTexSubImage2D of a YCbCr image, converted. False: not such
+ * an upload, or one left to Mesa. */
+static bool
+ycbcr_upload(struct ripple_cgl_context *ctx, struct gl_context *glctx, bool sub, GLenum target,
+             GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height,
+             GLint border, GLenum format, GLenum type, const GLvoid *pixels)
+{
+   if (format != GL_YCBCR_422_APPLE || !glctx || glctx->Unpack.BufferObj)
+      return false;
+   uint8_t *rgba = ycbcr_to_rgba(&glctx->Unpack, ctx ? ctx->unpack_row_bytes : 0, width,
+                                 height, type, pixels);
+   if (!rgba && pixels)
+      return false;                     /* a type that isn't 4:2:2: Mesa's error, as before */
+   struct gl_pixelstore_attrib saved = glctx->Unpack;
+   memset(&glctx->Unpack, 0, sizeof(glctx->Unpack));
+   glctx->Unpack.Alignment = 1;
+   if (sub) {
+      CALL_TexSubImage2D(GET_DISPATCH(), (target, level, x, y, width, height, GL_RGBA,
+                                          GL_UNSIGNED_BYTE, rgba));
+   } else {
+      bool cs = ctx && ctx->client_storage;
+      if (ctx)
+         ctx->client_storage = false;   /* the copy goes away: nothing to read again */
+      tex_image2D_body(ctx, glctx, target, level, internalformat, width, height, border, GL_RGBA,
+                       GL_UNSIGNED_BYTE, rgba);
+      if (ctx)
+         ctx->client_storage = cs;
+   }
+   glctx->Unpack = saved;
+   free(rgba);
+   return true;
+}
+
 void GLAPIENTRY
 ripple_cgl_tex_image2D(void *rend, GLenum target, GLint level, GLenum internalformat,
                        GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type,
@@ -1782,6 +1899,9 @@ ripple_cgl_tex_image2D(void *rend, GLenum target, GLint level, GLenum internalfo
    struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
    RIPPLE_CGL_ENTER(rend);
    GET_CURRENT_CONTEXT(glctx);
+   if (ycbcr_upload(ctx, glctx, false, target, level, internalformat, 0, 0, width, height,
+                    border, format, type, pixels))
+      return;
    struct row_bytes_saved rbs = { false };
    if (ctx && glctx)
       row_bytes_apply(&glctx->Unpack, ctx->unpack_row_bytes, format, type, &rbs);
@@ -1940,6 +2060,9 @@ ripple_cgl_tex_sub_image2D(void *rend, GLenum target, GLint level, GLint xoffset
    }
    struct ripple_cgl_context *rctx = ripple_cgl_context_for(rend);
    GET_CURRENT_CONTEXT(gl);
+   if (ycbcr_upload(rctx, gl, true, target, level, 0, xoffset, yoffset, width, height, 0, format,
+                    type, pixels))
+      return;
    struct row_bytes_saved rbs = { false };
    if (rctx && gl)
       row_bytes_apply(&gl->Unpack, rctx->unpack_row_bytes, format, type, &rbs);

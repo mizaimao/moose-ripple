@@ -12,6 +12,8 @@
  *   gl-feature-check generic    RGBA uploaded as GL_COMPRESSED_RGBA (driver picks the format)
  *   gl-feature-check tex3d      a 32x32x32 3D texture with client storage, every slice checked
  *   gl-feature-check yuv        Core Video's 2vuy conversion program, whole and in steps
+ *   gl-feature-check ycbcr      YCbCr 4:2:2 textures (GL_APPLE_ycbcr_422), as Photo Booth's
+ *                               camera frames
  *   gl-feature-check stencil    a drawable with depth and stencil buffers, both used
  *   gl-feature-check iosurface  a texture that is an IOSurface follows the surface's contents
  *   gl-feature-check stale [N]  N contexts in turn, each drawn with on one thread and destroyed
@@ -1731,6 +1733,111 @@ static void run_yuv(const char *name, CGLPixelFormatAttribute renderer, bool pbu
     CGLDestroyPixelFormat(pf);
 }
 
+/* Photo Booth's camera frames: 4:2:2 YCbCr uploaded with GL_YCBCR_422_APPLE into a GL_RGB
+ * rectangle texture, rows given in bytes (issue 11), drawn 1:1. Both byte orders, an update
+ * through glTexSubImage2D, and a 2D texture. Prints every texel drawn; the two renderers should
+ * agree to a step or two. (Odd widths are left out: Apple's software renderer gives other values
+ * than ours from the fifth texel of a 7-wide row on.) */
+#ifndef GL_YCBCR_422_APPLE
+#define GL_YCBCR_422_APPLE 0x85B9
+#define GL_UNSIGNED_SHORT_8_8_APPLE 0x85BA
+#define GL_UNSIGNED_SHORT_8_8_REV_APPLE 0x85BB
+#endif
+#ifndef GL_UNPACK_ROW_BYTES_APPLE
+#define GL_UNPACK_ROW_BYTES_APPLE 0x8A16
+#endif
+static void run_ycbcr(const char *name, CGLPixelFormatAttribute renderer)
+{
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32, kCGLPFAPBuffer,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
+                                        renderer, 0 };
+    if (!renderer)
+        attrs[4] = 0;
+    CGLPixelFormatObj pf;
+    GLint npf;
+    CGLContextObj c;
+    if (CGLChoosePixelFormat(attrs, &pf, &npf) || !pf || CGLCreateContext(pf, NULL, &c))
+        return;
+    CGLSetCurrentContext(c);
+    enum { TW = 8, TH = 2, ROW = TW * 2 + 6 };
+    /* Pairs as Cb Y0 Cr Y1: black and white, then red, green, blue, grey and two skin-ish
+     * tones from a camera, and a pair at the ends of the range. */
+    static const uint8_t pairs[TH][TW / 2][4] = {
+        { { 128, 16, 128, 235 }, { 90, 81, 240, 82 }, { 54, 145, 34, 146 }, { 240, 41, 110, 42 } },
+        { { 128, 126, 128, 127 }, { 110, 150, 160, 152 }, { 120, 90, 145, 95 }, { 0, 255, 255, 0 } },
+    };
+    static uint8_t vuy[TH * ROW], yuvs[TH * ROW];
+    for (int y = 0; y < TH; y++)
+        for (int p = 0; p < TW / 2; p++) {
+            const uint8_t *q = pairs[y][p];
+            uint8_t *a = vuy + y * ROW + p * 4, *b = yuvs + y * ROW + p * 4;
+            a[0] = q[0]; a[1] = q[1]; a[2] = q[2]; a[3] = q[3];
+            b[0] = q[1]; b[1] = q[0]; b[2] = q[3]; b[3] = q[2];
+        }
+    GLuint fbo, rb, tex;
+    glGenFramebuffersEXT(1, &fbo);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+    glGenRenderbuffersEXT(1, &rb);
+    glBindRenderbufferEXT(GL_RENDERBUFFER_EXT, rb);
+    glRenderbufferStorageEXT(GL_RENDERBUFFER_EXT, GL_RGBA8, TW, TH);
+    glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT,
+                                 GL_RENDERBUFFER_EXT, rb);
+    glViewport(0, 0, TW, TH);
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, TW, 0, TH, -1, 1);
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    static const struct { const char *what; GLenum target, type; bool sub; int w; } cases[] = {
+        { "rectangle, Cb Y0 Cr Y1 (2vuy)", GL_TEXTURE_RECTANGLE_ARB, GL_UNSIGNED_SHORT_8_8_APPLE, false, TW },
+        { "rectangle, Y0 Cb Y1 Cr (yuvs)", GL_TEXTURE_RECTANGLE_ARB, GL_UNSIGNED_SHORT_8_8_REV_APPLE, false, TW },
+        { "rectangle, 2vuy by glTexSubImage2D", GL_TEXTURE_RECTANGLE_ARB, GL_UNSIGNED_SHORT_8_8_APPLE, true, TW },
+        { "2D, 2vuy", GL_TEXTURE_2D, GL_UNSIGNED_SHORT_8_8_APPLE, false, TW },
+    };
+    printf("%s: YCbCr 4:2:2 textures (GL_APPLE_ycbcr_422), every texel R G B\n", name);
+    for (unsigned k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+        GLenum t = cases[k].target;
+        int w = cases[k].w;
+        const uint8_t *src = cases[k].type == GL_UNSIGNED_SHORT_8_8_APPLE ? vuy : yuvs;
+        glGenTextures(1, &tex);
+        glBindTexture(t, tex);
+        glTexParameteri(t, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(t, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glPixelStorei(GL_UNPACK_ROW_BYTES_APPLE, ROW);
+        if (cases[k].sub) {
+            glTexImage2D(t, 0, GL_RGB, w, TH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+            glTexSubImage2D(t, 0, 0, 0, w, TH, GL_YCBCR_422_APPLE, cases[k].type, src);
+        } else {
+            glTexImage2D(t, 0, GL_RGB, w, TH, 0, GL_YCBCR_422_APPLE, cases[k].type, src);
+        }
+        GLenum err = glGetError();
+        glPixelStorei(GL_UNPACK_ROW_BYTES_APPLE, 0);
+        glClearColor(1, 0, 1, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glEnable(t);
+        float sw = t == GL_TEXTURE_2D ? 1 : w, sh = t == GL_TEXTURE_2D ? 1 : TH;
+        glBegin(GL_QUADS);
+        glTexCoord2f(0, 0); glVertex2f(0, 0);
+        glTexCoord2f(sw, 0); glVertex2f(w, 0);
+        glTexCoord2f(sw, sh); glVertex2f(w, TH);
+        glTexCoord2f(0, sh); glVertex2f(0, TH);
+        glEnd();
+        glDisable(t);
+        unsigned char px[TH][TW][4];
+        memset(px, 0, sizeof(px));
+        glReadPixels(0, 0, TW, TH, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        printf("  %-36s upload error 0x%x\n", cases[k].what, err);
+        for (int y = 0; y < TH; y++) {
+            printf("    row %d:", y);
+            for (int x = 0; x < w; x++)
+                printf(" %3d %3d %3d |", px[y][x][0], px[y][x][1], px[y][x][2]);
+            printf("\n");
+        }
+        glDeleteTextures(1, &tex);
+    }
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+    CGLDestroyPixelFormat(pf);
+}
+
 /* A drawable with a stencil buffer (24-bit depth, 8-bit stencil), as Real Racing 2 and Chess
  * ask for. Our frontend once gave such drawables a depth buffer format the host could not
  * make, and everything the context drew after its first use was lost (2026-11-12). The left
@@ -2030,6 +2137,11 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "stencil")) {
         run_stencil("ours", 0);
         run_stencil("software", (CGLPixelFormatAttribute)0x00020400);
+        return 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "ycbcr")) {
+        run_ycbcr("ours", 0);
+        run_ycbcr("software", (CGLPixelFormatAttribute)0x00020400);
         return 0;
     }
     if (argc > 1 && !strcmp(argv[1], "yuv")) {
