@@ -24,8 +24,9 @@ CDEF= ADEF= DEVDEF= DEVLINK=
 [ -z "${TRACE:-}" ] || { CDEF=/DTRACE; ADEF=-DTRACE; }
 [ -z "${DDTRACE:-}" ] || CDEF="$CDEF /DDDTRACE"      # DirectDraw's escapes on the debug port
 # Development checks (on unless DEVCHECKS=0, which a release build sets): rippledd.dll counts what
-# it skips and exports the counts (RippleSkips in ddraw/rippled3d.c).
-[ "${DEVCHECKS:-1}" = 0 ] || { DEVDEF=/DRIPPLE_DEV_CHECKS; DEVLINK=/EXPORT:RippleSkips=_RippleSkips@8; }
+# it skips and the pages it flips to, and exports the counts (RippleSkips and RippleFrames in
+# ddraw/rippled3d.c).
+[ "${DEVCHECKS:-1}" = 0 ] || { DEVDEF=/DRIPPLE_DEV_CHECKS; DEVLINK="/EXPORT:RippleSkips=_RippleSkips@8 /EXPORT:RippleFrames=_RippleFrames@0"; }
 B=$OUT/obj-display
 rm -rf "$B" && mkdir -p "$B"
 cp "$here"/display/*.c "$here"/display/*.h "$here"/display/*.asm "$here"/display/*.def "$here"/display/*.rc "$B/"

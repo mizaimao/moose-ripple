@@ -140,11 +140,25 @@ static void profile_read_back(LARGE_INTEGER t0, LARGE_INTEGER t1)
     prof_last.QuadPart = 0;
 }
 
+#ifdef RIPPLE_DEV_CHECKS
+/* Development check: the pages Flip has shown since Windows started, for holding a benchmark's
+   own frame count against what was shown (export RippleFrames; see the skip counters below). */
+static DWORD dev_flips;
+
+DWORD WINAPI RippleFrames(void)
+{
+    return dev_flips;
+}
+#endif
+
 /* Measure presents independently: a GPU flip normally has no read-back to sample. */
 void d3d_profile_flip(int gpu)
 {
     LARGE_INTEGER t;
     char line[160];
+#ifdef RIPPLE_DEV_CHECKS
+    dev_flips++;
+#endif
     if (!profile_on || !QueryPerformanceCounter(&t))
         return;
     if (!flip_start.QuadPart) {
@@ -2266,12 +2280,49 @@ static void point_state(RCTX *c, int program_size)
     }
 }
 
+#ifdef RIPPLE_DEV_CHECKS
+/* Render states the driver does not apply, each with the value that asks for nothing: a program
+   that sets another value is counted as a skipped state. None of them is in the capabilities
+   the driver reports, but programs set them without asking. */
+static void unapplied_state(DWORD state, DWORD v)
+{
+    static const struct { BYTE state, neutral; } t[] = {
+        { 10, 0 },                      /* LINEPATTERN */
+        { 33, 0 },                      /* STIPPLEDALPHA */
+        { 40, 0 },                      /* EDGEANTIALIAS */
+        { 47, 0 },                      /* ZBIAS */
+        { 128, 0 }, { 129, 0 }, { 130, 0 }, { 131, 0 },     /* WRAP0 to WRAP7 */
+        { 132, 0 }, { 133, 0 }, { 134, 0 }, { 135, 0 },
+        { 151, 0 },                     /* VERTEXBLEND */
+        { 167, 0 },                     /* INDEXEDVERTEXBLENDENABLE */
+        { 171, 1 },                     /* BLENDOP: D3DBLENDOP_ADD */
+        { 175, 0 },                     /* SLOPESCALEDEPTHBIAS */
+        { 176, 0 },                     /* ANTIALIASEDLINEENABLE */
+        { 185, 0 },                     /* TWOSIDEDSTENCILMODE */
+        { 194, 0 },                     /* SRGBWRITEENABLE */
+        { 195, 0 },                     /* DEPTHBIAS */
+        { 206, 0 },                     /* SEPARATEALPHABLENDENABLE */
+    };
+    int i;
+
+    for (i = 0; i < (int)(sizeof t / sizeof t[0]); i++)
+        if (t[i].state == state) {
+            if (v && v != t[i].neutral)
+                SKIPPED(SKIP_STATE);
+            return;
+        }
+}
+#else
+#define unapplied_state(state, v) ((void)0)
+#endif
+
 static void render_state(RCTX *c, DWORD state, DWORD v)
 {
     GLF *gl = gl_of(c);
 
     if (state < 256)
         c->rs[state] = v;
+    unapplied_state(state, v);
     switch (state) {
     case D3DRENDERSTATE_ZENABLE:
         apply_depth_test(c);

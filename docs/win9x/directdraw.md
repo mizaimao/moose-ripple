@@ -1294,17 +1294,21 @@ Windows started, one set for all processes (the DLL's data is shared):
 | 4 | target | a render target, a depth buffer or the OpenGL context cannot be drawn into |
 | 5 | texture | a texture's format has no upload |
 | 6 | copy | a copy or fill between surfaces or buffers is not done |
-| 7 | state | a fixed-function stage operation without an OpenGL combine mode (drawn as `MODULATE`), a stage argument without a source (specular, the temporary register), more lights on than the driver keeps |
+| 7 | state | a fixed-function stage operation without an OpenGL combine mode (drawn as `MODULATE`), a stage argument without a source (specular, the temporary register), more lights on than the driver keeps, a render state the driver does not apply set to a value that asks for something (depth bias, the blend operation, texture wrapping, vertex blending, two-sided stencil, sRGB writes, separate alpha blending, line patterns, antialiased lines and edges) |
 
 `RippleSkips(DWORD *out, DWORD count)`, exported by name, copies up to `count` of them and
 returns how many it filled in. A program reads them with `LoadLibrary("rippledd.dll")` and
 `GetProcAddress`, before and after what it wants checked.
 
+`RippleFrames(void)`, exported the same way, returns how many pages `Flip` has shown since Windows
+started. A benchmark's own frame rate can be held against it: read it once a second during a run
+and the pages shown in a test's seconds must be the frames the program says it drew.
+
 Counting and the export are built in unless `DEVCHECKS=0` is set for `win9x/build.sh`.
 `win9x/package.sh` sets it: a release carries neither.
 
-Not counted: what the driver passes over without a message of its own, such as a render state it
-has no code for or a texture handle whose surface is gone. A count of zero says none of the
+Not counted: what the driver passes over without a message of its own, such as a render state
+outside that list or a texture handle whose surface is gone. A count of zero says none of the
 cases in the table happened, not that everything was drawn.
 
 ## Changing a driver in the test VM
