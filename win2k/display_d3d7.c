@@ -2054,6 +2054,8 @@ static ULONG fog_alpha(ULONG specular, ULONG factor)
     return (specular & 0x00ffffffUL) | a << 24;
 }
 
+static BOOL missing_texture_differs(const D7_CONTEXT *c);
+
 static BOOL d3d7_stages(const D7_CONTEXT *c)
 {
     ULONG color, alpha;
@@ -2086,10 +2088,12 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     if (c->fill != D3DFILL_SOLID) { skip(c, RB2K_D7_SKIP_FILL, p->primitives); return DD_OK; }
     /* Direct3D 8 stages beyond these two (a third stage, bump mapping) go to the
      * stage program of the shader path. */
-    /* So do the stages with a cube map or a volume, and the points whose sizes the vertex shader
-     * works out. */
+    /* So do the stages with a cube map or a volume, the points whose sizes the vertex shader
+     * works out, and stages without a texture where Direct3D 8 and 9 draw them differently
+     * from Direct3D 7 (stage_left_out). */
     if (p->stream && !c->pixelShader &&
-        (!d3d7_stages(c) || cube_stages(c, 3, FALSE) || cube_stages(c, 3, TRUE) || sized_points(c, p)))
+        (!d3d7_stages(c) || cube_stages(c, 3, FALSE) || cube_stages(c, 3, TRUE) || sized_points(c, p) ||
+         missing_texture_differs(c)))
         return shader_triangles(c, p);
     /* Two stages are drawn; a third one counts as the stage-one skip. */
     if (st->colorOp != D3DTOP_DISABLE && st1->colorOp != D3DTOP_DISABLE && c->stages[2].colorOp != D3DTOP_DISABLE) {
@@ -2484,6 +2488,30 @@ static BOOL stage_lacks_texture(const D7_CONTEXT *c, ULONG n)
                            (s->alphaOp != D3DTOP_DISABLE && samples_texture(s->alphaOp, a1, a2)));
 }
 
+/* Direct3D 8 and 9 draw a stage without a texture the way their reference rasterizer does
+ * (d9pixels case 116): the stage is left out, with the ones after it, only when its first colour
+ * argument is the texture itself; any other read of the missing texture gives opaque black
+ * (blank_texture). */
+static BOOL stage_left_out(const D7_CONTEXT *c, ULONG n)
+{
+    const D7_STAGE *s = &c->stages[n];
+    return s->colorOp == D3DTOP_DISABLE || (!s->texture && s->colorArg1 == D3DTA_TEXTURE);
+}
+
+/* Whether the two-stage combiner of the Direct3D 7 draws, which ends at any stage that reads a
+ * missing texture (stage_words), would draw stages 0 and 1 differently from that. */
+static BOOL missing_texture_differs(const D7_CONTEXT *c)
+{
+    ULONG n;
+    for (n = 0; n < 2; ++n) {
+        BOOL out = stage_left_out(c, n);
+        BOOL ends = c->stages[n].colorOp == D3DTOP_DISABLE || stage_lacks_texture(c, n);
+        if (out != ends) return TRUE;
+        if (out) break;
+    }
+    return FALSE;
+}
+
 static ULONG stage_program(D7_CONTEXT *c, ULONG fog, D8_SHADER *as, BOOL byStage, BOOL pretransformed)
 {
     RB_STAGE_STATE st[TextureStages];
@@ -2491,7 +2519,7 @@ static ULONG stage_program(D7_CONTEXT *c, ULONG fog, D8_SHADER *as, BOOL byStage
     D8_STAGE_PROGRAM *e;
     RB_PS_INFO info;
     RtlZeroMemory(key, sizeof(key));
-    for (i = 0; i < TextureStages && c->stages[i].colorOp != D3DTOP_DISABLE && !stage_lacks_texture(c, i); ++i) {
+    for (i = 0; i < TextureStages && !stage_left_out(c, i); ++i) {
         const D7_STAGE *s = &c->stages[i];
         st[i].colorOp = s->colorOp; st[i].colorArg1 = s->colorArg1; st[i].colorArg2 = s->colorArg2;
         st[i].alphaOp = s->alphaOp; st[i].alphaArg1 = s->alphaArg1; st[i].alphaArg2 = s->alphaArg2;

@@ -3087,6 +3087,33 @@ pixels more than 16 apart, share of 8x8 blocks; XP SP3 under KVM, Intel UHD 630 
 | Pixel Shader 2.0, frame 300 | 0.04%, 0.00% | 0.03%, 0.00% |
 | Ragtroll, frame 300 | 11.86%, 3.42% (fail) | 0.43%, 0.00% |
 
+## Stages without a texture under Direct3D 8 and 9
+
+What a fixed-function stage gives when it reads a texture and none is set depends on the
+Direct3D version. The two-stage combiner of the Direct3D 7 draws ends at such a stage and
+passes the current colour on, as the 9x HAL and Microsoft's RGB device do (`stage_words`). The
+Direct3D 9 reference rasterizer does it differently, measured with `d9pixels` case 116
+(`stage_without_texture`, eight quads):
+
+- A stage is left out, with the stages after it, only when its first colour argument is exactly
+  `D3DTA_TEXTURE`. That holds even when the operation does not read that argument
+  (`D3DTOP_SELECTARG2`).
+- Any other read of the missing texture gives opaque black, and the stage is drawn: the second
+  colour argument, an alpha argument, or the first colour argument with a modifier
+  (`D3DTA_TEXTURE | D3DTA_COMPLEMENT` gives white).
+
+Direct3D's default alpha argument of stage 0 is the texture. A program that draws without a
+texture and sets only the colour operation, for example a flat colour from the texture factor,
+had its stage dropped by the driver's rule and got the vertex colour instead. It showed when a
+new test case left the alpha argument at its default and the dot product case after it failed.
+
+The stage program of the Direct3D 8 and 9 path now follows the reference rasterizer
+(`stage_left_out`), and a draw of those versions whose first two stages come out differently
+under the two rules goes to the stage program instead of the combiner
+(`missing_texture_differs`). Direct3D 7 draws keep their rule. The rule was measured with the
+Direct3D 9 reference rasterizer only; Direct3D 8 draws get it too, which is a guess until a
+`d8pixels` case measures it.
+
 ## Checking a benchmark run: pictures, counters, frame pacing
 
 A frame count says nothing about what was drawn. A run of 3DMark05 once counted 30 frames a
