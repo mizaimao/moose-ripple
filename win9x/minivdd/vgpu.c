@@ -368,6 +368,14 @@ static u32 display_w, display_h, display_bpp, vram_bytes, display_offset;
 static int display_heap;                        /* display_offset counts from the DirectDraw heap's
                                                    start, not the card's memory (RVD_DESKTOP_HEAP) */
 static u32 palette[256];
+/* The gamma ramp the display driver was given (GDI's SetDeviceGammaRamp, DirectDraw's gamma
+   control), 8 bits a value: red, green, blue. gamma_next collects a new one entry by entry
+   (vgpu_display_gamma); gamma is the one in force, gamma_on says it is not the identity, and
+   gamma_serial counts its changes for the OpenGL driver (RVD_GAMMA). QEMU puts no lookup table
+   on a true-colour picture, so the ramp is applied here, where the desktop's pixels are copied
+   (mirror_row), and by the OpenGL driver where it presents a picture from the GPU. */
+static u8 gamma[3][256], gamma_next[3][256];
+static u32 gamma_on, gamma_serial;
 static u8 *vram;
 /* The DirectDraw heap (RVD_HEAP): made at the first call, kept until Windows ends. */
 static struct rvd_heap heap = { 0 };
@@ -1310,10 +1318,40 @@ static const u8 *page_source(u32 offset, int in_heap)
 
 /* One row of VGA pixels into the shadow, compared as it is copied: 1 if it changed, and the
    changed columns widen *lo..*hi. */
+/* A pixel (00RRGGBB) through the gamma ramp. */
+static u32 ramp_pixel(u32 p)
+{
+    return ((u32)gamma[0][(p >> 16) & 255] << 16) | ((u32)gamma[1][(p >> 8) & 255] << 8) |
+           gamma[2][p & 255];
+}
+
 static int mirror_row(u32 *dst, const u8 *src, u32 w, u32 bpp, u32 *lo, u32 *hi)
 {
     u32 i, pixel, first = w, last = 0;
-    if (bpp == 32) {
+    if (gamma_on) {                     /* each pixel as 00RRGGBB, then through the ramp */
+        const u16 *s16 = (const u16 *)src;
+        const u32 *s32 = (const u32 *)src;
+        for (i = 0; i < w; i++) {
+            if (bpp == 32) {
+                pixel = s32[i];
+            } else if (bpp == 16) {
+                u32 p = s16[i], r = p >> 11, g = (p >> 5) & 63, b = p & 31;
+                pixel = ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
+            } else if (bpp == 24) {
+                pixel = src[0] | ((u32)src[1] << 8) | ((u32)src[2] << 16);
+                src += 3;
+            } else {
+                pixel = palette[*src++];
+            }
+            pixel = ramp_pixel(pixel);
+            if (dst[i] != pixel) {
+                dst[i] = pixel;
+                if (first == w)
+                    first = i;
+                last = i;
+            }
+        }
+    } else if (bpp == 32) {
         const u32 *s = (const u32 *)src;
         for (i = 0; i < w; i++)
             if (dst[i] != s[i]) {
@@ -1934,6 +1972,30 @@ void __cdecl vgpu_display_colour(u32 index, u32 colour)
     palette[index] = colour & 0xffffff;
 }
 
+/* The display driver's gamma ramp, an entry at a time: index 0 to 255 with the entry's values
+   as 00RRGGBB, then index 256, which puts the collected ramp in force. Only recorded here (the
+   caller holds the Win16 lock): the next refresh finds every pixel of the mirror changed, and
+   the OpenGL driver sees a new serial at its next present. */
+void __cdecl vgpu_display_gamma(u32 index, u32 value)
+{
+    u32 i, on = 0;
+    if (index < 256) {
+        gamma_next[0][index] = (u8)(value >> 16);
+        gamma_next[1][index] = (u8)(value >> 8);
+        gamma_next[2][index] = (u8)value;
+        return;
+    }
+    for (i = 0; i < 256; i++) {
+        gamma[0][i] = gamma_next[0][i];
+        gamma[1][i] = gamma_next[1][i];
+        gamma[2][i] = gamma_next[2][i];
+        if (gamma[0][i] != i || gamma[1][i] != i || gamma[2][i] != i)
+            on = 1;
+    }
+    gamma_on = on;
+    gamma_serial++;
+}
+
 /* SET_SCANOUT takes the console from VGA for this boot. The DOS image uses the same
    transport so the GPU contexts and display resources stay valid across a switch. */
 u32 __cdecl vgpu_show_dos(u32 vm)
@@ -2400,6 +2462,17 @@ static u32 dispatch(struct dioc *p)
         st.heap_bytes = heap.size;
         n = p->out_len < sizeof(st) ? p->out_len : sizeof(st);
         copy(p->out, &st, n);
+        if (p->returned)
+            *p->returned = n;
+        return 0;
+    }
+    if (p->code == RVD_GAMMA) {                 /* the ramp in force: no device needed */
+        struct rvd_gamma g;
+        g.serial = gamma_serial;
+        g.on = gamma_on;
+        copy(g.ramp, gamma, sizeof(g.ramp));
+        n = p->out_len < sizeof(g) ? p->out_len : sizeof(g);
+        copy(p->out, &g, n);
         if (p->returned)
             *p->returned = n;
         return 0;
