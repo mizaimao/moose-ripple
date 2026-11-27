@@ -9,6 +9,9 @@
  *    Microsoft's d3dref9.dll or d3dref8.dll from the DirectX SDK beside the test) keeps every case's
  *    picture in a folder. Later runs on the hardware device compare their pictures with those:
  *    ref_case() counts the pixels that differ by more than RefTolerance in a colour channel.
+ *    A case whose own samples fail on the reference rasterizer has no reference there: the
+ *    "ref" run keeps no picture for it, later runs do not compare it, and both say how many
+ *    such cases there are in their end line (ref_not_kept).
  *
  * Plain C89; included once by each test, which is why everything here is static. */
 #ifndef DRVCHECK_H
@@ -87,7 +90,7 @@ static const char *skips_summary(void)
 
 /* ---- reference pictures ---- */
 enum { RefOff, RefWrite, RefCompare };
-static int refMode, refCompared, refFailed, refMissing;
+static int refMode, refCompared, refFailed, refMissing, refNotKept;
 static int refAtX, refAtY;                 /* the first pixel of the last compared case that differed */
 static unsigned long refMine, refTheirs;     /* and its two colours */
 static const char *refFolder;
@@ -111,10 +114,13 @@ static void ref_path(char *path, const char *name)
 /* pixels: side rows of side 32-bit pixels, pitch bytes apart. Writing: keeps the picture, returns
  * 0. Comparing: returns how many pixels differ from the reference picture by more than
  * RefTolerance in a channel (alpha is not compared), or -1 when the reference run kept none for
- * this case. worst gets the largest channel difference found. */
-static long ref_case(const char *name, const void *pixels, int pitch, int side, int *worst)
+ * this case. worst gets the largest channel difference found.
+ * failed: the case's own samples did not pass in this run. A reference run then keeps no picture
+ * (-1) and leaves a note in its place; a comparing run that finds the note does not compare (-1).
+ * Both count the case in refNotKept and say so on a line of its own. tag: the test's line prefix. */
+static long ref_case(const char *tag, const char *name, const void *pixels, int pitch, int side, int *worst, int failed)
 {
-    char path[MAX_PATH];
+    char path[MAX_PATH], note[MAX_PATH];
     HANDLE h;
     DWORD done = 0;
     long differ = 0;
@@ -122,13 +128,29 @@ static long ref_case(const char *name, const void *pixels, int pitch, int side, 
     *worst = 0;
     if (refMode == RefOff) return -1;
     ref_path(path, name);
+    strcpy(note, path);
+    strcpy(note + strlen(note) - 3, "not");     /* name.pix: the picture; name.not: none was kept */
     if (refMode == RefWrite) {
         CreateDirectoryA(refFolder, NULL);
+        if (failed) {
+            DeleteFileA(path);
+            h = CreateFileA(note, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+            ++refNotKept;
+            printf("%s case=%s reference not kept: the case's samples fail on this device\n", tag, name);
+            return -1;
+        }
+        DeleteFileA(note);
         h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h == INVALID_HANDLE_VALUE) return -1;
         for (y = 0; y < side; ++y) WriteFile(h, (const BYTE *)pixels + y * pitch, side * 4, &done, NULL);
         CloseHandle(h);
         return 0;
+    }
+    if (GetFileAttributesA(note) != 0xFFFFFFFF) {
+        ++refNotKept;
+        printf("%s case=%s not compared: the reference run kept no picture (its samples failed there)\n", tag, name);
+        return -1;
     }
     h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) { ++refMissing; return -1; }
@@ -151,6 +173,20 @@ static long ref_case(const char *name, const void *pixels, int pitch, int side, 
     CloseHandle(h);
     if (differ >= 0) ++refCompared;
     return differ;
+}
+
+/* The reference part of a test's end line; empty when this check is off. */
+static const char *ref_summary(void)
+{
+    static char text[96];
+    text[0] = 0;
+    if (refMode == RefWrite) sprintf(text, " ref_not_kept=%d", refNotKept);
+    else if (refMode == RefCompare) {
+        if (refCompared || refNotKept)
+            sprintf(text, " ref_compared=%d ref_failed=%d ref_not_kept=%d", refCompared, refFailed, refNotKept);
+        else strcpy(text, " ref=unavailable");
+    }
+    return text;
 }
 
 #endif

@@ -138,7 +138,7 @@ static void report(const char *name, const SAMPLE *s, int count)
         /* The automatic checks (drvcheck.h): the picture against the one Microsoft's software
          * device drew in the "rgb" run, and below what the driver skipped. */
         if (d.dwWidth == d.dwHeight && d.ddpfPixelFormat.dwRGBBitCount == 32)
-            differ = ref_case(name, d.lpSurface, d.lPitch, (int)d.dwWidth, &worst);
+            differ = ref_case("TPIX", name, d.lpSurface, d.lPitch, (int)d.dwWidth, &worst, bad >= 0);
         IDirectDrawSurface7_Unlock(target, NULL);
     }
     if (displayDc) ExtEscape(displayDc, RB2K_D3D7_DRAW_ESCAPE, 0, NULL, sizeof(stats), (LPSTR)&stats);
@@ -468,15 +468,7 @@ done:
     if (dd) IDirectDraw7_Release(dd);
     if (displayDc) DeleteDC(displayDc);
     DestroyWindow(window);
-    {
-        char refText[40];
-        refText[0] = 0;
-        if (refMode == RefCompare) {
-            if (refCompared) sprintf(refText, " ref_compared=%d ref_failed=%d", refCompared, refFailed);
-            else strcpy(refText, " ref=unavailable");
-        }
-        printf("TPIX end path=%s%s pass=%d fail=%d%s%s result=%s\n", argv[1], perspective ? " persp" : xyz ? " xyz" : "", passed, failed,
-               skips_summary(), refText, refMode == RefWrite ? "REFERENCE" : passed && !failed ? "PASS" : "FAIL");
-    }
+    printf("TPIX end path=%s%s pass=%d fail=%d%s%s result=%s\n", argv[1], perspective ? " persp" : xyz ? " xyz" : "", passed, failed,
+           skips_summary(), ref_summary(), refMode == RefWrite ? "REFERENCE" : passed && !failed ? "PASS" : "FAIL");
     return passed && !failed ? 0 : 1;
 }
