@@ -1382,7 +1382,36 @@ before, skips 0. The two that fail are among the new cases and show older faults
 driver: `mip_levels_managed` (a managed texture with mipmaps is drawn from its top level only)
 and `stage_without_texture` (fixed-function stages that read a texture that is not set).
 
+**Both fixed the same day (2026-11-27).**
 
+- *Mipmaps of managed textures.* A Direct3D 9 runtime makes the video-memory copy of a mipmapped
+  texture it manages as one surface (`DDSCAPS3_LIGHTWEIGHTMIPMAP` in the surface's third caps
+  word) and leaves the levels below the top to the driver. The driver saw a texture of one
+  level, so every managed texture, which is most textures of a Direct3D 9 program, was drawn
+  without its mipmaps. The levels below are now read from the system-memory texture the runtime
+  fills the copy from (`texture_levels`; noted at the texture blit, and kept when the OpenGL
+  copy is given up for room). A trace of `mip_levels_managed` on Windows 98 shows the blit's
+  target with the mark and the texture made with 7 levels; the case passes.
+- *A stage without its texture.* A fixed-function stage that named a texture while none was set
+  was switched off by itself and the stages after it went on. Direct3D 8 and 9 now follow
+  their reference rasterizer: the stage is left out, with the ones after it, when its first
+  colour argument is the texture itself, even if the operation does not read it; any other
+  read of the missing texture gives opaque black. Direct3D 7 keeps its behaviour (its own tests
+  pass with it). `stage_without_texture` had 6 of 8 samples wrong and passes.
+
+The shared tests on the build with both (the same host and guest, the automatic checks on):
+`d9pixels` 122 of 122 with hardware vertex processing and 120 of 120 with software vertex
+processing (no cases new since 120 of 122 and 118 of 120), `d8pixels` 51 of 51, `tpixels` 18
+of 18 cases with 14 of 14 pictures through the HAL device and the T&L HAL device, `tfog` 10 of
+10 on both and 9 of 9 on the RGB device, `tlight` 15 of 15, `tstage` 9 of 9 on both (none new
+in these), skips 0.
+One 3DMark03 pass on that build with a capture every ten seconds (untimed, guest of 256 MB):
+the four game tests, both CPU tests, both fill rate tests, the pixel shader test and Ragtroll
+draw as in the pass before the two fixes, the skip counts are 0 after it, and it ends at 17111
+3DMarks against 16637 in that earlier pass (both with captures running, so neither is a timed
+result; no slowdown shows). The vertex shader test fell
+into the gap between two series of captures: the driver's log has it running in its own device
+and making its shaders, but its picture was not looked at in this pass.
 
 Tests on Windows 98 SE (DirectX 9.0c) on the build with the last fix, with the automatic checks
 of the shared tests on (skip counts, and each picture against Microsoft's reference rasterizer):
