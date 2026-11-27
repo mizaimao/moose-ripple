@@ -633,6 +633,10 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
             return command_error(gpu, &result);
         if (image->depthBuffer && !rb_gpu_depth_target(gpu, &result, image, NULL))
             return command_error(gpu, &result);
+        /* Another target's open frame may sample this image as a texture: its draws go to the
+         * host before the image does (as in rb_gpu_texture_free). */
+        if (gpu->d7Frame.target && gpu->d7Frame.target != image && !rb_gpu_frame_flush(gpu, &result))
+            return command_error(gpu, &result);
         success = rb_gpu_destroy_image(gpu, &result, id);
         if (success) {
             rb_gpu_slot_forget(gpu, image);
@@ -669,7 +673,7 @@ static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         t = rb_gpu_texture(gpu, *(PULONG)packet->InputBuffer);
         /* A transport reset has already released it. */
         if (!t) return NO_ERROR;
-        return rb_gpu_texture_free(gpu, &result, t) ? NO_ERROR : command_error(gpu, &result);
+        return rb_gpu_texture_free(gpu, &result, t, TRUE) ? NO_ERROR : command_error(gpu, &result);
     }
     if (packet->InputBufferLength < sizeof(*in) || packet->OutputBufferLength < sizeof(ULONG))
         return ERROR_INVALID_PARAMETER;
@@ -917,7 +921,7 @@ VP_STATUS rb_gpu_surface_reset(RB2K_GPU *gpu)
         }
         gpu->imageCount = 0;
         for (slot = 0; slot < RB2K_D7_TEXTURES; ++slot)
-            if (gpu->ready && gpu->textures[slot].id) rb_gpu_texture_free(gpu, &result, &gpu->textures[slot]);
+            if (gpu->ready && gpu->textures[slot].id) rb_gpu_texture_free(gpu, &result, &gpu->textures[slot], FALSE);
         rb_gpu_texture_forget(gpu);
         /* Only a transport timeout leaves a reset to do. */
         status = gpu->ready ? NO_ERROR : rb_gpu_stop(gpu);
