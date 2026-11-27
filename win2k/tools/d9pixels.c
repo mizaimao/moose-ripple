@@ -1042,6 +1042,20 @@ static void vertex_shaders(int only)
         IDirect3DDevice9_SetVertexShaderConstantF(device, 0, m, 4);
         vs_run("vs2_transform", colored, vs, ps_color, v, sizeof(v[0]), 8, s, 6);
     }
+    if (!only || only == 38) {
+        /* def statements before the dcl statements, as a compiled HLSL shader has them:
+         * oPos = v0 + c5 (zero), oD0 = v1 * c6 (one). A driver that looks for the dcl statements
+         * only at the start reads no vertex data, and nothing is drawn. */
+        static const DWORD vs[] = { 0xfffe0200,
+            P2I(ODef, 5), P2D(RC, 5, 15), 0, 0, 0, 0,
+            P2I(ODef, 5), P2D(RC, 6, 15), 0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000,
+            VDCL2(0, 0), VDCL2(10, 1),
+            P2I(OAdd, 3), P2D(VPos, 0, 15), P2SRC(RV, 0), P2SRC(RC, 5),
+            P2I(OMul, 3), P2D(VAttr, 0, 15), P2SRC(RV, 1), P2SRC(RC, 6), PSEND };
+        static const SAMPLE s[] = { { 64, 64, 0xffff00 }, { 40, 40, 0xffff00 }, { 8, 8, CLEAR_COLOR } };
+        vs_quad(v, -0.5f, 0.5f, 0.5f, -0.5f, 0xffffff00);
+        vs_run("vs2_def_first", colored, vs, ps_color, v, sizeof(v[0]), 2, s, 3);
+    }
     if (!only || only == 31) {
         /* The same shader through a viewport on the top right quarter. */
         static const DWORD vs[] = { 0xfffe0200, VDCL2(0, 0), VDCL2(10, 1),
