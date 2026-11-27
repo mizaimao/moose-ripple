@@ -5435,8 +5435,8 @@ static GLuint buffer_object(RCTX *c, DWORD h, GLenum target)
 /* ---- Direct3D 8 draws ----------------------------------------------------------------------- */
 /* The vertices of a declaration that came without code: the fixed-function pipeline reads them
    through it, each register a fixed attribute (Direct3D 8's D3DVSDE_*: 0 position, 3 normal,
-   5 diffuse, 6 specular, 7 to 14 texture coordinate sets; blend weights and indices, point size
-   and the tweening inputs are not read), each from its own stream. 0 if the position or a type
+   4 a point's size, 5 diffuse, 6 specular, 7 to 14 texture coordinate sets; blend weights and
+   indices and the tweening inputs are not read), each from its own stream. 0 if the position or a type
    is not what the pipeline's program reads. */
 static int decl_vertices(const struct vs8 *s, VERTICES *v)
 {
@@ -5479,6 +5479,8 @@ static int decl_vertices(const struct vs8 *s, VERTICES *v)
             v->texsize[i] = d->type[7 + i] + 1;
             v->src[4 + i] = d->stream[7 + i];
         }
+    if ((d->inputs & (1UL << 4)) && d->type[4] == 0 && !d->stream[4])
+        v->psize_at = (int)d->offset[4] + 1;    /* each point's size: one float, from stream 0 */
     return 1;
 }
 
