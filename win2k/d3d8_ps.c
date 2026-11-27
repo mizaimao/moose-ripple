@@ -48,6 +48,8 @@ typedef struct {
     unsigned int pads;              /* texm3x2/texm3x3 dot products so far */
     unsigned int bump;              /* version 1: texbem or texbeml read the bump constants */
     const unsigned int *streamBases;  /* vertex shaders: the word each stream starts at, or NULL */
+    unsigned int attributes;          /* vertex shaders: inputs are vertex attributes (RB_VS_ATTRIBUTES) */
+    unsigned int stream;              /* the stream the declaration is at */
     /* Results waiting to be written: register, write mask, result slot. */
     char pendDest[2][24];
     unsigned int pendMask[2], pending;
@@ -1403,6 +1405,32 @@ static int fetch_one(PS *s, unsigned int reg, unsigned int kind, unsigned int k)
     return fail(s, RbPsRegister, kind);
 }
 
+/* With RB_VS_ATTRIBUTES: input register reg, of declaration type kind at word k of its stream's
+ * vertex, is the next vertex attribute. The host's vertex fetch converts it (and fills what a
+ * short element leaves out with 0, 0, 0, 1, as Direct3D does); a D3DCOLOR comes as its bytes. */
+static int attribute_one(PS *s, unsigned int reg, unsigned int kind, unsigned int k)
+{
+    char dst[16], src[16];
+    unsigned int n = s->info->elementCount;
+    if (n >= RB_VS_ELEMENTS) return fail(s, RbPsRegister, reg);
+    dst[0] = src[0] = 0;
+    reg_text(dst, sizeof(dst), "TEMP", VsInputs + reg);
+    reg_text(src, sizeof(src), "IN", n);
+    s->info->elements[n] = RB_VS_ELEMENT(kind, s->stream, k * 4);
+    s->info->elementCount = n + 1;
+    line(s, "MOV ", dst, ", ", src, kind == 4 ? ".zyxw" : 0, 0, 0);
+    return 1;
+}
+
+/* The registers a declaration feeds (its STREAMDATA tokens that are not skips). */
+static unsigned int decl_registers(const unsigned int *decl, unsigned int count)
+{
+    unsigned int i, n = 0;
+    for (i = 0; i < count && decl[i] != 0xffffffffu; ++i)
+        if (decl[i] >> 29 == 2 && !(decl[i] & 0x10000000u)) ++n;
+    return n;
+}
+
 /* The Direct3D 8 declaration tokens: streams, registers and skips. */
 static int fetch(PS *s, const unsigned int *decl, unsigned int count)
 {
@@ -1415,14 +1443,16 @@ static int fetch(PS *s, const unsigned int *decl, unsigned int count)
         case 0: break;                                         /* NOP */
         case 1: {                                              /* STREAM n (not the tessellator) */
             unsigned int stream = t & 0x1fffffffu;
-            if (stream >= RB_VS_STREAMS || (stream && !s->streamBases)) return fail(s, RbPsRegister, t);
-            offset = s->streamBases ? s->streamBases[stream] : 0;
+            if (stream >= RB_VS_STREAMS || (stream && !s->streamBases && !s->attributes)) return fail(s, RbPsRegister, t);
+            s->stream = stream;
+            offset = s->attributes ? 0 : s->streamBases ? s->streamBases[stream] : 0;
             break;
         }
         case 2:                                                /* STREAMDATA */
             if (t & 0x10000000u) { offset += (t >> 16) & 0xf; break; }      /* SKIP */
             if ((t & 0x1f) > 15 || ((t >> 16) & 0xf) > 7) return fail(s, RbPsRegister, t);
-            if (!fetch_one(s, t & 0x1f, (t >> 16) & 0xf, offset)) return 0;
+            if (s->attributes ? !attribute_one(s, t & 0x1f, (t >> 16) & 0xf, offset)
+                              : !fetch_one(s, t & 0x1f, (t >> 16) & 0xf, offset)) return 0;
             offset += words[(t >> 16) & 7];
             if (offset > s->info->coords) s->info->coords = offset;   /* words of the vertex read */
             break;
@@ -1460,9 +1490,11 @@ unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, con
     char *z = (char *)&s, r[16];
     for (k = 0; k < sizeof(s); ++k) z[k] = 0;
     info->samplers = info->coords = info->reason = info->detail = info->constants = info->pointSize = 0;
+    info->elementCount = 0;
     s.info = info;
     s.vertex = 1;
     s.streamBases = streamBases;
+    s.attributes = (flags & RB_VS_ATTRIBUTES) != 0;
     s.flow = (flags & RB_VS_FLOW) != 0;
     s.t.p = out; s.t.size = size;
     if (size) out[0] = 0;
@@ -1472,8 +1504,18 @@ unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, con
         return 0;
     }
     s.version = (tokens[0] >> 8) & 0xff;
-    put(&s.t, "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..");
-    number(&s.t, RB_VS_CONST_BASE + RB_VS_CONSTANTS + RB_VS_VERTEX_CONSTANTS * RB_VS_VERTICES - 1);
+    if (s.attributes) {
+        /* The attributes, then the constants: the shader's and the six clip planes after them. */
+        unsigned int inputs = decl_registers(decl, declCount);
+        if (inputs > RB_VS_ELEMENTS) { fail(&s, RbPsRegister, inputs); return 0; }
+        put(&s.t, "VERT\n");
+        for (k = 0; k < inputs; ++k) { put(&s.t, "DCL IN["); number(&s.t, k); put(&s.t, "]\n"); }
+        put(&s.t, "DCL CONST[0..");
+        number(&s.t, RB_VS_CONST_BASE + RB_VS_CONSTANTS + 6 - 1);
+    } else {
+        put(&s.t, "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..");
+        number(&s.t, RB_VS_CONST_BASE + RB_VS_CONSTANTS + RB_VS_VERTEX_CONSTANTS * RB_VS_VERTICES - 1);
+    }
     put(&s.t, "]\nDCL ADDR[0]\nDCL TEMP[0..63]\nDCL OUT[0], POSITION\n");
     for (k = 0; k < 11; ++k) {
         put(&s.t, "DCL OUT["); number(&s.t, k + 1); put(&s.t, "], GENERIC["); number(&s.t, k); put(&s.t, "]\n");
@@ -1489,7 +1531,8 @@ unsigned int rb_vs_translate(const unsigned int *tokens, unsigned int count, con
               "IMM[7] FLT32 {0x3b808081, 0x00000000, 0x00000000, 0x00000000}\n");
     if (!vertex_walk(&s, tokens, count, 0, &imm, 1, 0)) return 0;
     if (info->pointSize) put(&s.t, "DCL OUT[14], PSIZE\n");
-    for (k = 0; k < sizeof(prologue) / sizeof(*prologue); ++k) line(&s, prologue[k], 0, 0, 0, 0, 0, 0);
+    /* The first two lines find the vertex in the constants; attributes need neither. */
+    for (k = s.attributes ? 2 : 0; k < sizeof(prologue) / sizeof(*prologue); ++k) line(&s, prologue[k], 0, 0, 0, 0, 0, 0);
     for (k = 0; k < 12; ++k) { r[0] = 0; reg_text(r, sizeof(r), "TEMP", k); line(&s, "MOV ", r, ", IMM[2]", 0, 0, 0, 0); }
     for (k = 0; k < 8; ++k) { r[0] = 0; reg_text(r, sizeof(r), "TEMP", VsTexOut + k); line(&s, "MOV ", r, ", IMM[3]", 0, 0, 0, 0); }
     for (k = 0; k < 16; ++k) { r[0] = 0; reg_text(r, sizeof(r), "TEMP", VsInputs + k); line(&s, "MOV ", r, ", IMM[3]", 0, 0, 0, 0); }
@@ -1618,7 +1661,7 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
     s.info = info;
     s.t.p = out; s.t.size = size;
     if (size) out[0] = 0;
-    if (count > RB_PS2_SAMPLERS) count = RB_PS2_SAMPLERS;
+    if (count > RB_PS2_COORD_SETS) count = RB_PS2_COORD_SETS;   /* a stage has a sampler and a coordinate set */
     for (i = 0; i < count && stages[i].colorOp != TopDisable; ++i) {
         const RB_STAGE_STATE *st = &stages[i];
         if ((st->colorArg1 & TaSelect) == TaFactor || (st->colorArg2 & TaSelect) == TaFactor ||
@@ -1646,7 +1689,7 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
     if ((fog & 3) == RB_PS_FOG_VERTEX) put(&s.t, "DCL IN[10], GENERIC[10], PERSPECTIVE\n");
     if ((fog & 3) == RB_PS_FOG_TABLE) put(&s.t, "DCL IN[10], POSITION, LINEAR\n");
     put(&s.t, "DCL OUT[0], COLOR\n");
-    for (k = 0; k < RB_PS2_SAMPLERS; ++k) { put(&s.t, "DCL SAMP["); number(&s.t, k); put(&s.t, "]\n"); }
+    for (k = 0; k < RB_PS2_COORD_SETS; ++k) { put(&s.t, "DCL SAMP["); number(&s.t, k); put(&s.t, "]\n"); }
     put(&s.t, "DCL CONST[0.."); number(&s.t, base - 1 + (fog ? 2 : 0)); put(&s.t, "]\n");
     put(&s.t, "DCL TEMP[0..11]\n"
               "IMM[0] FLT32 {0x3f000000, 0x3f800000, 0x40000000, 0x40800000}\n"

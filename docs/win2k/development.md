@@ -1911,6 +1911,26 @@ t6, while sets 0 to 4 run the other way so that a wrong set would show.
 processing, `d8pixels` its 23, the Direct3D 8 and 9 textured scenes
 passed, and Direct3D 8 Quake ran at 58.7 fps (58.6 before).
 
+### Sixteen samplers
+
+Shader model 2 has sixteen samplers, s0 to s15, whatever the number of coordinate sets, and
+3DMark05's third game test draws its water with a ninth. With eight, the translator refused
+such a shader and its draws were left out (a black sea). Now:
+
+- the translator takes s0 to s15 when it is built with `RB_PS2_SAMPLERS=16`, as the Windows
+  2000 and XP driver builds it (`win2k/build.py`); built without, as in the Windows 9x driver,
+  it keeps eight. The stage programs of the fixed-function pipeline keep their eight stages;
+- the display driver keeps the texture and the sampler states of sixteen stages
+  (`SamplerStages`; the fixed-function stages are the first eight), and a pixel program draw
+  carries sixteen textures, sampler states and border colours (`RB2K_D8_SAMPLERS`);
+- the miniport makes a sampler view for each of the sixteen (host handles 128 to 143), and its
+  cache of sampler states no longer replaces a state that an earlier sampler of the same draw
+  uses (`cache_slot_busy`): with a draw's samplers now as many as the cache's slots, a state
+  found in the cache could be replaced by a later sampler's new one.
+
+`d9pixels` case 83 (`ps2_sixteen_samplers`) adds a green texture on s9 and a blue one on s15:
+nothing was drawn before, cyan after.
+
 ## Vertex shaders on the host GPU
 
 With the `RippleVertexShaders` registry value set to 1, the driver reports
@@ -2305,10 +2325,10 @@ an unfenced packet reports at once. 3DMark 2001 SE went from 5122 to 5446
 Presents still wait 58 s on their fences in a run: the next lead.
 ## Texture eviction
 
-The miniport keeps Direct3D textures on the host within a texel budget
-(`RB2K_D7_TEXEL_BUDGET`, 64 MB) and 1024 slots. Host textures have no guest
-backing; the budget guards the host's memory. Past it, the miniport refuses a
-new texture, and the draws that use it used to be skipped.
+The miniport keeps Direct3D textures on the host within a budget of host memory
+(256 MB, or the megabytes in the registry value `RippleTextureMB`, 16 to 1024) and 1024
+slots. Host textures have no guest backing; the budget guards the host's memory. Past it, the
+miniport refuses a new texture, and the draws that use it used to be skipped.
 
 The display driver now evicts the least recently used texture instead:
 
@@ -2329,6 +2349,14 @@ The refusal reaches the display driver as the miniport's
 GDI; all are accepted. `d7draw` prints `D7EVICT` with the evictions, the new
 textures that needed them and the last refusal's status. A scene that needs
 more than the budget evicts and uploads again every frame: correct, but slow.
+
+The budget was 64 MB at first. 3DMark05's first game test needs more: with 64 MB a run made
+12,092 texture uploads, 4,039 of its requests for a new texture were refused for room, and 53
+of that test's scene frames of 100 ms and more had texture uploads in them (frame pacing
+counters, `D7PACE`). With 256 MB the same run makes 1,282 uploads, none is refused, and 4 such
+frames are left; the frame rates of the three game tests stay as they were (22, 13 and 27
+frames a second on the measuring host). The pixel test of eviction needs `RippleTextureMB` 64
+to evict at all now.
 
 `d9pixels` case 74 draws 24 textures of 1024x1024 (96 MB) in two scenes.
 ## Lines and points
@@ -2797,6 +2825,85 @@ that are drawn now sample more textures).
 `tpixels` 18 of 18.
 
 
+## Vertex and index buffers on the host
+
+Until now every draw carried its vertices: the display driver copied them out of the program's
+buffer, three for each triangle whatever the indices shared, into records of at most 48, each
+with all the vertex shader's constants, and the host's vertex program read them back as
+constants. A draw of a few thousand triangles became hundreds of host draws, and the guest's
+processor spent the frame copying vertices.
+
+With `RippleHostBuffers` (on by default, with vertex shaders), a draw with a vertex shader whose
+streams are vertex buffers names host buffers instead (`buffer_draw` in `display_d3d7.c`):
+
+- The vertex shader is translated a second way (`RB_VS_ATTRIBUTES`): its inputs
+  are vertex attributes `IN[k]`, one for each register the declaration feeds, and the translator
+  returns where each is fetched from (stream, byte offset, declaration type). The miniport makes
+  a vertex elements object from that list for each such program: `FLOAT1` to `FLOAT4` as floats,
+  `D3DCOLOR` as four normalized bytes that the program puts in order, `UBYTE4`, `SHORT2` and
+  `SHORT4` as numbers. The host's vertex fetch fills what a short element leaves out with 0, 0,
+  0, 1, as Direct3D does.
+- The draw record holds the states of any shader draw, the shader's constants, and in
+  place of vertices the streams (host buffer, stride, offset of vertex zero), the index buffer
+  (host buffer, index size, offset of the first index) and Direct3D's primitive type and count.
+  Lists, strips and fans are drawn as they are, indexed draws with their indices. A base vertex
+  that is not negative goes into the streams' offsets; a negative one stays an index bias. The
+  host has no first index of its own: virglrenderer reads indices from the index buffer's offset
+  on, as Mesa's virgl driver sends it, so the first index goes into that offset.
+- The Direct3D runtime keeps vertex and index buffers in the program's memory and
+  does not tell the driver when the program writes them. Each buffer a draw reads has a copy on
+  the host, made at its first draw. The draw sums every kilobyte it reads (two 32-bit sums a
+  chunk) and uploads the chunks the host does not hold yet, as upload records in the draw queue
+  before the draw; the miniport turns them into inline writes in the scene packet. An indexed
+  draw's vertex range comes from a scan of its indices, kept for the next draw of the same range
+  while those chunks stay.
+- The host writes uploaded bytes into its buffer at once, not in order
+  with the draws sent before: virglrenderer maps a buffer unsynchronized for such writes, as
+  Mesa's virgl driver expects (it renames or waits on its own side). Bytes that an earlier draw
+  may still read must therefore never be written again. A chunk the host holds that has changed
+  is not uploaded: the buffer counts as rewritten, and for its next draws (64, then twice as
+  many each time it happens again) the bytes each draw reads go to a stream arena instead: an
+  8 MB host buffer of the context that takes each draw's bytes after the last one's and is
+  replaced by a new one when full. After those draws the mirror is made anew, as a new host
+  buffer, and summed again. Buffers a program fills once stay mirrored; buffers it refills
+  every frame are streamed and not summed. The Direct3D 8 runtime's own buffers, which hold
+  the vertices of `DrawPrimitiveUP`, are of the second kind.
+
+Draws left to the old path: fixed-function vertices (no vertex shader), vertices in the
+program's memory with the Direct3D 9 runtime, flat shading, and streams whose stride is not a
+multiple of four. `d7draw` prints `D8HOST` (draws, buffers, chunks summed, uploads, index scans,
+rewrites, streams of draws that were streamed, arenas, and the draws left by reason), the last
+events as `D8HOSTLOG`, and the miniport's `D7BUFFERS`.
+
+`d9pixels` gained fifteen cases for this: every vertex shader case drawn a second time from a
+vertex buffer (`_vb`: the element types, flow control, fog, the stages, a clip plane), and six
+cases with a buffer rewritten between two draws of a scene, vertices appended without
+overwriting, indices rewritten, a positive and a negative base vertex with a first index, a
+strip and a fan, and a stream offset. The first run of the rewritten cases found the host's
+unordered writes: the earlier draw showed the later bytes.
+
+Measured with 3DMark05 on Windows XP at 1024x768, on one host (Intel UHD 630) with the guest
+alone on it and no screen captures; scene frames from the miniport's frame pacing counters, the
+same driver build with `RippleHostBuffers` in it and without:
+
+| 3DMark05 | without | with host buffers |
+| --- | --- | --- |
+| Game Test 1 | 2.3 fps, half of the frames within 435 ms | 22.3 fps, within 54 ms |
+| Game Test 2 | 1.3 fps, within 871 ms | 12.8 fps, within 108 ms |
+| Game Test 3 | 2.5 fps, within 435 ms | 28.8 fps, within 36 ms |
+| CPU Tests 1 and 2 | 2.9 and 3.4 fps | 2.9 and 3.3 fps |
+
+The CPU tests use software vertex processing, which this does not touch. The pictures were
+checked in a run of their own, with a screen capture a second (see "Checking a benchmark run"):
+526 of 576 captures are new pictures, the ones seen earlier are a loading screen and the desktop
+after the last test, and the frames looked at show Game Tests 1 and 2 as they should be.
+Game Test 3 lacks its water and the textures of its cliffs with and without host buffers (its
+pixel shaders read more than eight samplers; see "Sixteen samplers").
+
+What is left to gain: the sums (283 million chunks in a run, each a kilobyte read once more),
+the stream arenas of the buffers a program rewrites (3,711 of 8 MB each in a run), and the
+draws whose pixel shader the driver cannot translate yet.
+
 ## Checking a benchmark run: pictures, counters, frame pacing
 
 A frame count says nothing about what was drawn. A run of 3DMark05 once counted 30 frames a
@@ -2881,6 +2988,39 @@ After the change the 11 captures seen earlier are all of the desktop after the l
 the captures of one colour fall at the changes between tests: no capture of a test shows an
 earlier frame. A shorter run of Game Test 1 on a second host, with the draw calls counted every
 second: 1,736 refused calls and 67 of 269 captures seen earlier before, none of either after.
+
+## One numbering for the host objects of a colour context
+
+The host renderer keeps all the objects a context makes (surfaces, shaders, state objects,
+sampler views) in one table by their number: an object made with a number that is in use
+replaces the one that had it, and destroying a number destroys whatever has it, of any kind
+(`vrend_object.c` in virglrenderer). The miniport gave the depth buffer's view the number 8,
+which was also the lit vertex shader's (`LitShader` in `gpu_triangle.c`).
+
+A depth buffer is attached to one colour context at a time. In a full-screen program the two
+back buffers take turns, so the depth buffer leaves a context every frame, and its view is
+destroyed there: with it went that context's lit vertex shader. The miniport still believed
+the shader was made. Its next "bind shader 8" found a surface under that number and did
+nothing, the vertex shader of the draw before stayed bound, and the lit vertices (five
+constants each) went through a shader that reads four. 3DMark 2001 SE drew Car Chase, Nature
+and High Polygon Count as large flat polygons across the screen; tests in a window, with no
+depth buffer or one that never moves, passed.
+
+The depth view now has the number 2, and a compile-time check keeps the two surface numbers
+below the first shader and state number (`views_apart`).
+
+How it was found: the capture check cannot see it (every garbage frame is a new picture), the
+contact sheets of the captures did. Builds with one part of the path switched off showed that
+only lighting mattered; a recorder kept one real lit draw of the game, which was sound and
+drew right when replayed in a test; reading the numbers of the objects found the clash.
+
+`d8pixels` gained 13 cases on the way: a lit mesh of many vertices, plain and indexed; the lit
+shader with no light, a point light, a spot light, eight lights, and eight with specular,
+normalized normals and a local viewer; the mesh through real world, view and perspective
+matrices, unlit and lit; a replay of one Car Chase draw (its matrices, light, material, fog and
+texture stage), unlit and lit; and `lit_depth_switch`, where the depth buffer goes to a render
+target texture and back between a lit, an unlit and a lit draw. That last one fails before
+the change.
 
 ## Release package
 

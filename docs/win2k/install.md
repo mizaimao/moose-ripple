@@ -78,6 +78,8 @@ change.
 | `RippleHostDxt` | 1 | DXT textures decoded by the host GPU; 0 decodes them in the guest |
 | `RippleVertexShaders` | 1 | vertex shaders on the host GPU (DirectQ and 3DMark05 need them); 0 leaves them to the runtime |
 | `RippleD3D9` | 1 | the Direct3D 9 driver interface (with `RippleVertexShaders` 1); 0 leaves Direct3D 9 programs on the DirectX 8 level interface |
+| `RippleHostBuffers` | 1 | vertex and index buffers kept on the host GPU for draws with a vertex shader (with `RippleVertexShaders` 1); 0 sends the vertices with every draw |
+| `RippleTextureMB` | 256 | host memory for Direct3D textures, in megabytes (16 to 1024); past it the textures drawn longest ago are freed and uploaded again when next drawn |
 
 `RippleHardwareCursor`, `RippleGpuDesktop`, `RippleDirectDrawGpuSurfaces` and
 `RippleD3D7WaitCurrent` are for tests and stay 0.

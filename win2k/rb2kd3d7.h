@@ -58,6 +58,9 @@ typedef struct {
     ULONG caches[RB2K_CACHE_KINDS][3];
     ULONG shaders, shaderBytes;
     ULONG codeAt;       /* where rb_gpu_frame_reserve was loaded, to place samples */
+    /* Host vertex and index buffers: made, freed, upload records and their bytes (which wrap at
+     * 4 GB), and the draws that read their vertices from them. */
+    ULONG buffersMade, buffersFreed, bufferUploads, bufferBytes, bufferDraws;
     /* Frame pacing by stretch (the last one takes what comes after it is reached). */
     LONGLONG paceLast;
     ULONG paceSegment;
@@ -71,11 +74,11 @@ typedef struct {
 } RB2K_D7_PROFILE;
 enum { RB2K_D7_SITE_RECORD = 1, RB2K_D7_SITE_PROGRAM, RB2K_D7_SITE_DEPTH, RB2K_D7_SITE_TEXTURE,
        RB2K_D7_SITE_VERTEX, RB2K_D7_SITE_COMMAND, RB2K_D7_SITE_STEP = 16 };   /* STEP + step in the draw */
-/* A refused render target texture (site TEXTURE): the detail is 32 + 8*why
+/* A refused render target texture (site TEXTURE): the detail is 32 + 16*why
  * + stage. why: no such image (or the target itself), the image's own frame
  * failed, attaching it to the target failed, submitting its frame failed. */
 enum { RB2K_D7_IMAGE_MISSING, RB2K_D7_IMAGE_FAILED, RB2K_D7_IMAGE_ATTACH, RB2K_D7_IMAGE_FLUSH };
-#define RB2K_D7_REFUSE_IMAGE(why, stage) (32 + 8*(why) + (stage))
+#define RB2K_D7_REFUSE_IMAGE(why, stage) (32 + 16*(why) + (stage))
 #define RB2K_D3D7_FLIGHT_ESCAPE 0x52420022
 typedef struct {
     LONGLONG frequency, throttleTicks, accessTicks;
@@ -202,6 +205,23 @@ typedef struct {
      * textures that needed it, and the last refusal's status. */
     ULONG evictions, evictedCreates, roomStatus;
     ULONG codeAt;       /* where rb_d7_drawstats was loaded, to place samples */
+    /* Draws from host buffers (RippleHostBuffers): taken; left to the draws that carry their
+     * vertices, by reason (RB2K_HOST_LEFT_*); buffers made; chunks summed; upload records and
+     * their bytes (which wrap at 4 GB); index ranges scanned and taken from the last scan. */
+    ULONG hostDraws, hostLeft[8], hostBuffers, hostSummed, hostUploads, hostUploadBytes, hostScans, hostScanHits;
+    /* The last events of the host buffers, oldest overwritten first: a kind (RB2K_HOST_LOG_*) and
+     * seven words (see host_log in display_d3d7.c); hostLogCount counts all of them. */
+    ULONG hostLogCount, hostLog[48][8];
+    /* Times a buffer was found rewritten, streams of draws that went to a stream arena, and
+     * arenas made. */
+    ULONG hostRewrites, hostStreamed, hostArenas;
+    /* Ranges not summed and not streamed again because the same call of DrawPrimitives2 had done it. */
+    ULONG hostSumSkips, hostStreamHits;
+    /* Vertex shaders that could not be made into programs for host buffers: how many, by the
+     * translator's reason (then: refused by the miniport or without elements), the last one's
+     * detail, elements and text bytes, and the declarations of the first four. */
+    ULONG hostProgramFails, hostProgramReasons[9], hostProgramDetail, hostProgramElements, hostProgramBytes;
+    ULONG hostProgramDecl[4][24];
     /* Draws and clears refused for their surfaces: how many, and the last one: why (1 no render
      * target, 2 the target is a depth buffer, 3 no such depth buffer, 4 it is not a depth
      * buffer, 5 it is smaller than the target), the target image and its size (width << 16 |
@@ -215,7 +235,11 @@ typedef struct {
 } RB2K_D7_DRAWSTATS;
 enum { RB2K_D7_FAIL_RANGE, RB2K_D7_FAIL_VBCAPS, RB2K_D7_FAIL_LINEAR, RB2K_D7_FAIL_ADDRESS,
        RB2K_D7_FAIL_PROBE, RB2K_D7_FAIL_IMMEDIATE, RB2K_D7_FAIL_LENGTH, RB2K_D7_FAIL_OTHER };
-#define RB2K_D7_DRAWSTATS_VERSION 6
+#define RB2K_D7_DRAWSTATS_VERSION 7
+enum { RB2K_HOST_LOG_REGISTER = 1, RB2K_HOST_LOG_RELEASE, RB2K_HOST_LOG_MADE, RB2K_HOST_LOG_UPLOAD, RB2K_HOST_LOG_DRAW,
+       RB2K_HOST_LOG_REWRITTEN };
+enum { RB2K_HOST_LEFT_SHADE, RB2K_HOST_LEFT_PROGRAM, RB2K_HOST_LEFT_STREAM, RB2K_HOST_LEFT_BUFFER, RB2K_HOST_LEFT_INDEX,
+       RB2K_HOST_LEFT_RANGE, RB2K_HOST_LEFT_READ, RB2K_HOST_LEFT_USER };
 enum { RB2K_D9_IGNORED_SCISSOR, RB2K_D9_IGNORED_TARGETS, RB2K_D9_IGNORED_BLT, RB2K_D9_IGNORED_FILL,
        RB2K_D9_IGNORED_QUERY, RB2K_D9_IGNORED_CONSTANTS, RB2K_D9_IGNORED_FREQUENCY, RB2K_D9_IGNORED_MIPS };
 #define RB2K_D3D7_QUERY_LIMIT 24

@@ -27,13 +27,17 @@ typedef struct {
     ULONG boundSampler[2], boundSamplers, boundViews, boundView0;
     RB2K_D7_CACHE dsa, blend, sampler, sampler1, shader;   /* sampler1: texture stage one */
     /* Pixel shader draws: the texture in each stage's view, and their samplers. */
-    ULONG psViews[RB2K_D8_STAGES];
+    ULONG psViews[RB2K_D8_SAMPLERS];
     RB2K_D7_CACHE psSampler;
     /* Vertex and pixel programs: the id of the program whose host shader this colour context
      * holds at ProgramBase plus the program's slot (0: none), and the pixel program bound
      * (its slot plus one; 0 after a fixed-function fragment shader). */
     ULONG programMade[RB2K_D8_PROGRAMS];
     ULONG boundProgram;
+    /* Draws from host buffers: a vertex program's elements are an object of their own at
+     * ElementsBase plus its slot (elementsMade, a bit a slot); boundElements is the slot plus
+     * one of the object bound, 0 for the empty one of the draws that carry their vertices. */
+    ULONG elementsMade[RB2K_D8_PROGRAMS / 32], boundElements;
     ULONG stencilRef;                   /* the reference value sent, plus 0x100 once sent */
 } RB2K_D7_STATE;
 
@@ -56,13 +60,24 @@ typedef struct RB2K_IMAGE {
 /* A Direct3D texture is a host resource without a context of its own. It
  * is attached to each colour context that samples it. */
 typedef struct {
-    ULONG id, width, height, levels, bytes;   /* bytes: counted against RB2K_D7_TEXEL_BUDGET */
+    ULONG id, width, height, levels, bytes;   /* bytes: counted against the texture budget */
     ULONG format;                               /* host format; 0 for B8G8R8A8 */
     ULONG faces;                                /* 1, or 6 for a cube map */
     ULONG depth;                                /* a volume's slices; 1 otherwise */
     ULONG attached[RB2K_SLOT_WORDS];    /* the colour contexts it is attached to, a bit per image slot */
 } RB2K_TEXTURE;
-#define RB2K_D7_TEXEL_BUDGET (64UL << 20)
+/* A vertex or index buffer of a Direct3D 8 or 9 program: a host buffer resource, attached like
+ * a texture to each colour context that draws from it. handle is what the display driver
+ * names it by (RB2K_D8_BUFFER_SLOT), id the host resource. */
+typedef struct {
+    ULONG handle, id, bytes, kind;
+    ULONG attached[RB2K_SLOT_WORDS];
+} RB2K_BUFFER;
+/* The host memory textures may take together (gpu->textureBudget): megabytes from the registry
+ * value RippleTextureMB, within these limits, RB2K_D7_TEXTURE_MB when it is not set. */
+#define RB2K_D7_TEXTURE_MB 256
+#define RB2K_D7_TEXTURE_MB_LEAST 16
+#define RB2K_D7_TEXTURE_MB_MOST 1024
 typedef struct {
     RB2K_IMAGE image;
     RB2K_RECT gpuPixels, gdiWrites[3];
@@ -130,7 +145,7 @@ typedef struct {
     LONG busy, barrier;
     BOOLEAN owned, ready, enabledMaster, tested;
     ULONG nextId, fence, imageCount, hostFills, readbacks, uploads, hostCopies;
-    BOOLEAN ddGpuSurfaces, nativeD3D7, plainSurfaces, d3d8, vertexShaders, d3d9Ddi;
+    BOOLEAN ddGpuSurfaces, nativeD3D7, plainSurfaces, d3d8, vertexShaders, d3d9Ddi, hostBuffers;
     /* DXT blocks as they are (RippleHostDxt), and the formats the host samples:
      * bit n for upload format n (RB2K_D7_BLOCKS_DXT*, RB2K_D7_TEXELS_*), known after the first ask. */
     BOOLEAN hostDxt, hostBlocksKnown;
@@ -161,7 +176,7 @@ typedef struct {
     union { ULONGLONG aligned; UCHAR bytes[RB2K_INLINE_PACKET_BYTES]; } copyPacket;
     RB2K_IMAGE images[RB2K_DD_SLOTS];
     RB2K_TEXTURE textures[RB2K_D7_TEXTURES];
-    ULONG textureCount, textureBytes;
+    ULONG textureCount, textureBytes, textureBudget;
     RB2K_DMA_SEGMENT staging[RB2K_MAX_SEGMENTS];
     /* The image whose whole readback staging holds for further presents;
      * zero once staging or any image may have changed. */
@@ -172,7 +187,14 @@ typedef struct {
     /* Direct3D 8 and 9 vertex and pixel programs as TGSI text, each in pool memory of its own
      * size; an id is a serial number and the slot (RB2K_D8_PROGRAM_SLOT), so a freed id is
      * never reused. programNext: where the search for a free slot starts. */
-    struct { ULONG id, samplers, bytes; char *text; } programs[RB2K_D8_PROGRAMS];
+    struct {
+        ULONG id, samplers, bytes;
+        char *text;
+        ULONG elementCount, elements[RB2K_D8_ELEMENTS];   /* a vertex program for host buffers (VPROGRAM) */
+    } programs[RB2K_D8_PROGRAMS];
+    /* Host vertex and index buffers, and counts for d7draw: made, bytes uploaded, draws. */
+    RB2K_BUFFER buffers[RB2K_D8_BUFFERS];
+    ULONG bufferSerial, bufferNext;
     ULONG programSerial, programNext;
     ULONG d8Step;       /* the step of a pixel shader draw being queued, for failures */
     /* The 32-bit desktop in guest memory (RipplePrimaryInMemory, gpu_primary.c): pages
@@ -312,13 +334,24 @@ BOOLEAN rb_gpu_texture_upload(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K
 BOOLEAN rb_gpu_texture_free(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture, BOOLEAN flush);
 void rb_gpu_texture_forget(RB2K_GPU *gpu);
 void rb_gpu_slot_forget(RB2K_GPU *gpu, const RB2K_IMAGE *image);
+RB2K_BUFFER *rb_gpu_buffer(RB2K_GPU *gpu, ULONG handle);
+BOOLEAN rb_gpu_buffer_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_BUFFER *buffer);
+BOOLEAN rb_gpu_buffer_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_BUFFER *buffer, const RB2K_IMAGE *image);
+BOOLEAN rb_gpu_buffer_free(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_BUFFER *buffer, BOOLEAN flush);
+void rb_gpu_buffer_forget(RB2K_GPU *gpu);
+BOOLEAN rb_gpu_buffer_write(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image, RB2K_BUFFER *buffer,
+                            ULONG offset, ULONG bytes, const UCHAR *data);
 BOOLEAN rb_gpu_prepare_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image);
 BOOLEAN rb_gpu_depth_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *color, RB2K_IMAGE *depth);
 BOOLEAN rb_gpu_clear_buffers(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image,
                              ULONG flags, ULONG color, ULONG depthBits, ULONG stencil);
 BOOLEAN rb_gpu_sync_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image);
 BOOLEAN rb_gpu_order_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image);
-enum { RB2K_D7_COLOR_VIEW = 1, RB2K_D7_DEPTH_VIEW = 8 };
+/* The surface objects of a colour context: its image and the depth buffer attached to it. The
+ * host keeps every kind of object of a context under one set of numbers (a second object made
+ * with a number replaces the first, and destroying a number destroys whatever has it), so
+ * these two share the numbering of the shaders and state objects in gpu_triangle.c. */
+enum { RB2K_D7_COLOR_VIEW = 1, RB2K_D7_DEPTH_VIEW = 2 };
 BOOLEAN rb_gpu_draw_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id,
                           ULONG color, BOOLEAN createSurface, RB2K_IMAGE *frameTarget, ULONG depthView);
 BOOLEAN rb_gpu_transfer_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result,

@@ -403,6 +403,521 @@ static void vs_case(const char *name, DWORD version, BOOL offered, BOOL buffer)
     IDirect3DDevice8_DeleteVertexShader(device, shader);
 }
 
+/* A lit fixed-function mesh of many vertices (a 12 by 12 grid of quads facing a white
+ * directional light, material diffuse (0.5, 0.25, 1)): drawn as a list of 864 vertices from a
+ * vertex buffer (lit_grid), then as 169 vertices with 864 indices (lit_grid_indexed). The other
+ * lit cases draw a single quad. */
+static void lit_grid_case(void)
+{
+    enum { N = 12 };
+    typedef struct { float x, y, z, nx, ny, nz; } LITVERTEX;
+    static const SAMPLE s[] = { { 40, 40, 0x8040ff }, { 64, 64, 0x8040ff }, { 88, 88, 0x8040ff }, { 60, 90, 0x8040ff },
+                                { 8, 8, CLEAR_COLOR }, { 120, 120, CLEAR_COLOR } };
+    static LITVERTEX list[N * N * 6], grid[(N + 1) * (N + 1)];
+    static WORD index[N * N * 6];
+    IDirect3DVertexBuffer8 *vb = NULL;
+    IDirect3DIndexBuffer8 *ib = NULL;
+    D3DMATERIAL8 m;
+    D3DLIGHT8 l;
+    D3DMATRIX identity;
+    BYTE *p;
+    HRESULT hr;
+    int x, y, k, pass;
+    for (y = 0; y <= N; ++y)
+        for (x = 0; x <= N; ++x) {
+            LITVERTEX *v = &grid[y * (N + 1) + x];
+            v->x = -0.5f + (float)x / N; v->y = 0.5f - (float)y / N; v->z = 0.5f;
+            v->nx = v->ny = 0; v->nz = -1;
+        }
+    for (y = 0, k = 0; y < N; ++y)
+        for (x = 0; x < N; ++x) {
+            const WORD a = (WORD)(y * (N + 1) + x), b = (WORD)(a + 1), c = (WORD)(a + N + 1), d = (WORD)(c + 1);
+            const WORD six[6] = { a, b, c, c, b, d };
+            int j;
+            for (j = 0; j < 6; ++j, ++k) { index[k] = six[j]; list[k] = grid[six[j]]; }
+        }
+    memset(&m, 0, sizeof(m));
+    m.Diffuse.r = 0.5f; m.Diffuse.g = 0.25f; m.Diffuse.b = 1.0f; m.Diffuse.a = 1.0f;
+    memset(&l, 0, sizeof(l));
+    l.Type = D3DLIGHT_DIRECTIONAL;
+    l.Diffuse.r = l.Diffuse.g = l.Diffuse.b = l.Diffuse.a = 1.0f;
+    l.Direction.z = 1.0f;
+    memset(&identity, 0, sizeof(identity));
+    identity._11 = identity._22 = identity._33 = identity._44 = 1.0f;
+    for (pass = 0; pass < 2; ++pass) {
+        const char *name = pass ? "lit_grid_indexed" : "lit_grid";
+        vb = pass ? vertex_buffer(grid, sizeof(grid), D3DFVF_XYZ | D3DFVF_NORMAL)
+                  : vertex_buffer(list, sizeof(list), D3DFVF_XYZ | D3DFVF_NORMAL);
+        ib = NULL;
+        hr = vb ? D3D_OK : E_FAIL;
+        if (SUCCEEDED(hr) && pass) {
+            hr = IDirect3DDevice8_CreateIndexBuffer(device, sizeof(index), D3DUSAGE_WRITEONLY, D3DFMT_INDEX16, D3DPOOL_DEFAULT, &ib);
+            if (SUCCEEDED(hr) && SUCCEEDED(hr = IDirect3DIndexBuffer8_Lock(ib, 0, 0, &p, 0))) {
+                memcpy(p, index, sizeof(index));
+                IDirect3DIndexBuffer8_Unlock(ib);
+            }
+        }
+        if (FAILED(hr)) fail_hr(name, "buffers", hr);
+        else {
+            IDirect3DDevice8_SetTransform(device, D3DTS_WORLD, &identity);
+            IDirect3DDevice8_SetTransform(device, D3DTS_VIEW, &identity);
+            IDirect3DDevice8_SetTransform(device, D3DTS_PROJECTION, &identity);
+            IDirect3DDevice8_SetMaterial(device, &m);
+            IDirect3DDevice8_SetLight(device, 0, &l);
+            IDirect3DDevice8_LightEnable(device, 0, TRUE);
+            IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, TRUE);
+            IDirect3DDevice8_SetRenderState(device, D3DRS_AMBIENT, 0);
+            IDirect3DDevice8_SetRenderState(device, D3DRS_COLORVERTEX, FALSE);
+            if (begin(name)) {
+                IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_NONE);
+                IDirect3DDevice8_SetTexture(device, 0, NULL);
+                IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+                IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+                IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZ | D3DFVF_NORMAL);
+                IDirect3DDevice8_SetStreamSource(device, 0, vb, sizeof(LITVERTEX));
+                if (pass) {
+                    IDirect3DDevice8_SetIndices(device, ib, 0);
+                    hr = IDirect3DDevice8_DrawIndexedPrimitive(device, D3DPT_TRIANGLELIST, 0, (N + 1) * (N + 1), 0, N * N * 2);
+                } else hr = IDirect3DDevice8_DrawPrimitive(device, D3DPT_TRIANGLELIST, 0, N * N * 2);
+                IDirect3DDevice8_SetStreamSource(device, 0, NULL, 0);
+                if (pass) IDirect3DDevice8_SetIndices(device, NULL, 0);
+                if (FAILED(hr)) { fail_hr(name, "draw", hr); IDirect3DDevice8_EndScene(device); }
+                else check(name, s, 6);
+                IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_CCW);
+            }
+            IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+            IDirect3DDevice8_LightEnable(device, 0, FALSE);
+        }
+        if (ib) IDirect3DIndexBuffer8_Release(ib);
+        if (vb) IDirect3DVertexBuffer8_Release(vb);
+    }
+    IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+}
+
+/* The lit mesh of lit_grid_case with the material's emissive colour only (its other colours
+ * are black, so no light adds anything and the result is (0.5, 0.25, 1) whatever the lights
+ * are), under the lighting set-ups a game uses: no light enabled, a point light, a spot light,
+ * eight lights of all kinds, and the same eight with specular, normalized normals and a local
+ * viewer. What is checked is the geometry: the lit vertex shader runs its light loop and must
+ * leave the positions alone. */
+static void lit_variants_case(void)
+{
+    enum { N = 12 };
+    typedef struct { float x, y, z, nx, ny, nz; } LITVERTEX;
+    static const SAMPLE s[] = { { 40, 40, 0x8040ff }, { 64, 64, 0x8040ff }, { 88, 88, 0x8040ff }, { 60, 90, 0x8040ff },
+                                { 8, 8, CLEAR_COLOR }, { 120, 120, CLEAR_COLOR } };
+    static const char *const names[5] = { "lit_no_lights", "lit_point", "lit_spot", "lit_eight", "lit_eight_specular" };
+    static LITVERTEX list[N * N * 6];
+    IDirect3DVertexBuffer8 *vb;
+    D3DMATERIAL8 m;
+    D3DMATRIX identity;
+    HRESULT hr;
+    int x, y, k, pass, i;
+    for (y = 0, k = 0; y < N; ++y)
+        for (x = 0; x < N; ++x) {
+            static const int cx[6] = { 0, 1, 0, 0, 1, 1 }, cy[6] = { 0, 0, 1, 1, 0, 1 };
+            int j;
+            for (j = 0; j < 6; ++j, ++k) {
+                list[k].x = -0.5f + (float)(x + cx[j]) / N; list[k].y = 0.5f - (float)(y + cy[j]) / N; list[k].z = 0.5f;
+                list[k].nx = list[k].ny = 0; list[k].nz = -1;
+            }
+        }
+    vb = vertex_buffer(list, sizeof(list), D3DFVF_XYZ | D3DFVF_NORMAL);
+    if (!vb) { fail_hr("lit_variants", "buffer", E_FAIL); return; }
+    memset(&m, 0, sizeof(m));
+    m.Emissive.r = 0.5f; m.Emissive.g = 0.25f; m.Emissive.b = 1.0f; m.Emissive.a = 1.0f;
+    m.Diffuse.a = 1.0f; m.Power = 20.0f;
+    memset(&identity, 0, sizeof(identity));
+    identity._11 = identity._22 = identity._33 = identity._44 = 1.0f;
+    for (pass = 0; pass < 5; ++pass) {
+        const int count = pass == 0 ? 0 : pass < 3 ? 1 : 8;
+        for (i = 0; i < 8; ++i) {
+            D3DLIGHT8 l;
+            int kind = pass == 1 ? 0 : pass == 2 ? 1 : i % 3;      /* point, spot, directional */
+            memset(&l, 0, sizeof(l));
+            l.Type = kind == 0 ? D3DLIGHT_POINT : kind == 1 ? D3DLIGHT_SPOT : D3DLIGHT_DIRECTIONAL;
+            l.Diffuse.r = l.Diffuse.g = l.Diffuse.b = l.Diffuse.a = 1.0f;
+            l.Specular = l.Diffuse; l.Ambient = l.Diffuse;
+            l.Position.x = 0.1f * i; l.Position.y = 0.2f; l.Position.z = -1.0f;
+            l.Direction.x = 0.1f; l.Direction.z = 1.0f;
+            l.Range = 100.0f; l.Falloff = 1.0f;
+            l.Attenuation0 = 0.0f; l.Attenuation1 = 0.5f; l.Attenuation2 = 0.01f * i;
+            l.Theta = 0.3f; l.Phi = 0.9f;
+            IDirect3DDevice8_SetLight(device, i, &l);
+            IDirect3DDevice8_LightEnable(device, i, i < count);
+        }
+        IDirect3DDevice8_SetTransform(device, D3DTS_WORLD, &identity);
+        IDirect3DDevice8_SetTransform(device, D3DTS_VIEW, &identity);
+        IDirect3DDevice8_SetTransform(device, D3DTS_PROJECTION, &identity);
+        IDirect3DDevice8_SetMaterial(device, &m);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, TRUE);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_AMBIENT, 0);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_COLORVERTEX, FALSE);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_SPECULARENABLE, pass == 4);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_NORMALIZENORMALS, pass == 4);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_LOCALVIEWER, pass == 4);
+        if (begin(names[pass])) {
+            IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_NONE);
+            IDirect3DDevice8_SetTexture(device, 0, NULL);
+            IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+            IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+            IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZ | D3DFVF_NORMAL);
+            IDirect3DDevice8_SetStreamSource(device, 0, vb, sizeof(LITVERTEX));
+            hr = IDirect3DDevice8_DrawPrimitive(device, D3DPT_TRIANGLELIST, 0, N * N * 2);
+            IDirect3DDevice8_SetStreamSource(device, 0, NULL, 0);
+            if (FAILED(hr)) { fail_hr(names[pass], "draw", hr); IDirect3DDevice8_EndScene(device); }
+            else check(names[pass], s, 6);
+            IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_CCW);
+        }
+    }
+    for (i = 0; i < 8; ++i) IDirect3DDevice8_LightEnable(device, i, FALSE);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_SPECULARENABLE, FALSE);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_NORMALIZENORMALS, FALSE);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_LOCALVIEWER, TRUE);
+    IDirect3DVertexBuffer8_Release(vb);
+    IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+}
+
+/* The same mesh through a world, a view and a perspective projection matrix that are not the
+ * identity (scaled by 3, moved 3 back, a 90 degree perspective: it covers the same pixels as
+ * the cases above): unlit with the texture factor as its colour (persp_unlit), then lit with
+ * the emissive material and no light (persp_lit) and with eight lights (persp_lit_eight). */
+static void lit_perspective_case(void)
+{
+    enum { N = 12 };
+    typedef struct { float x, y, z, nx, ny, nz; } LITVERTEX;
+    static const SAMPLE s[] = { { 40, 40, 0x8040ff }, { 64, 64, 0x8040ff }, { 88, 88, 0x8040ff }, { 60, 90, 0x8040ff },
+                                { 8, 8, CLEAR_COLOR }, { 120, 120, CLEAR_COLOR } };
+    static const char *const names[3] = { "persp_unlit", "persp_lit", "persp_lit_eight" };
+    static LITVERTEX list[N * N * 6];
+    IDirect3DVertexBuffer8 *vb;
+    D3DMATERIAL8 m;
+    D3DMATRIX world, view, proj, identity;
+    HRESULT hr;
+    int x, y, k, pass, i;
+    for (y = 0, k = 0; y < N; ++y)
+        for (x = 0; x < N; ++x) {
+            static const int cx[6] = { 0, 1, 0, 0, 1, 1 }, cy[6] = { 0, 0, 1, 1, 0, 1 };
+            int j;
+            for (j = 0; j < 6; ++j, ++k) {
+                list[k].x = (-0.5f + (float)(x + cx[j]) / N) / 3.0f * 3.0f;
+                list[k].y = (0.5f - (float)(y + cy[j]) / N) / 3.0f * 3.0f;
+                list[k].z = 0.0f;
+                list[k].nx = list[k].ny = 0; list[k].nz = -1;
+            }
+        }
+    vb = vertex_buffer(list, sizeof(list), D3DFVF_XYZ | D3DFVF_NORMAL);
+    if (!vb) { fail_hr("lit_perspective", "buffer", E_FAIL); return; }
+    memset(&identity, 0, sizeof(identity));
+    identity._11 = identity._22 = identity._33 = identity._44 = 1.0f;
+    world = identity; world._11 = world._22 = world._33 = 3.0f;        /* x and y from -1.5 to 1.5 */
+    view = identity; view._43 = 3.0f;                                  /* 3 in front of the camera */
+    memset(&proj, 0, sizeof(proj));                                    /* 90 degrees, near 1, far 100 */
+    proj._11 = proj._22 = 1.0f; proj._33 = 100.0f / 99.0f; proj._34 = 1.0f; proj._43 = -100.0f / 99.0f;
+    memset(&m, 0, sizeof(m));
+    m.Emissive.r = 0.5f; m.Emissive.g = 0.25f; m.Emissive.b = 1.0f; m.Emissive.a = 1.0f;
+    m.Diffuse.a = 1.0f; m.Power = 20.0f;
+    for (pass = 0; pass < 3; ++pass) {
+        for (i = 0; i < 8; ++i) {
+            D3DLIGHT8 l;
+            memset(&l, 0, sizeof(l));
+            l.Type = i % 3 == 0 ? D3DLIGHT_POINT : i % 3 == 1 ? D3DLIGHT_SPOT : D3DLIGHT_DIRECTIONAL;
+            l.Diffuse.r = l.Diffuse.g = l.Diffuse.b = l.Diffuse.a = 1.0f;
+            l.Position.x = 0.1f * i; l.Position.y = 0.2f; l.Position.z = -1.0f;
+            l.Direction.x = 0.1f; l.Direction.z = 1.0f;
+            l.Range = 100.0f; l.Falloff = 1.0f; l.Attenuation1 = 0.5f; l.Theta = 0.3f; l.Phi = 0.9f;
+            IDirect3DDevice8_SetLight(device, i, &l);
+            IDirect3DDevice8_LightEnable(device, i, pass == 2);
+        }
+        IDirect3DDevice8_SetTransform(device, D3DTS_WORLD, &world);
+        IDirect3DDevice8_SetTransform(device, D3DTS_VIEW, &view);
+        IDirect3DDevice8_SetTransform(device, D3DTS_PROJECTION, &proj);
+        IDirect3DDevice8_SetMaterial(device, &m);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, pass != 0);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_AMBIENT, 0);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_COLORVERTEX, FALSE);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_TEXTUREFACTOR, 0xff8040ff);
+        if (begin(names[pass])) {
+            IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_NONE);
+            IDirect3DDevice8_SetTexture(device, 0, NULL);
+            IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+            IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLORARG1, pass ? D3DTA_DIFFUSE : D3DTA_TFACTOR);
+            /* The alpha comes from the same place: no argument of the stage names its (missing) texture. */
+            IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+            IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_ALPHAARG1, pass ? D3DTA_DIFFUSE : D3DTA_TFACTOR);
+            IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZ | D3DFVF_NORMAL);
+            IDirect3DDevice8_SetStreamSource(device, 0, vb, sizeof(LITVERTEX));
+            hr = IDirect3DDevice8_DrawPrimitive(device, D3DPT_TRIANGLELIST, 0, N * N * 2);
+            IDirect3DDevice8_SetStreamSource(device, 0, NULL, 0);
+            IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+            IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+            if (FAILED(hr)) { fail_hr(names[pass], "draw", hr); IDirect3DDevice8_EndScene(device); }
+            else check(names[pass], s, 6);
+            IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_CCW);
+        }
+    }
+    for (i = 0; i < 8; ++i) IDirect3DDevice8_LightEnable(device, i, FALSE);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+    IDirect3DDevice8_SetTransform(device, D3DTS_WORLD, &identity);
+    IDirect3DDevice8_SetTransform(device, D3DTS_VIEW, &identity);
+    IDirect3DDevice8_SetTransform(device, D3DTS_PROJECTION, &identity);
+    IDirect3DVertexBuffer8_Release(vb);
+    IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+}
+
+/* Coverage check: a sample whose colour is CLEAR_COLOR must still be the clear colour, any
+ * other sample must have been drawn over (whatever the colour). */
+static void check_covered(const char *name, const SAMPLE *s, int count)
+{
+    IDirect3DSurface8 *back = NULL;
+    D3DLOCKED_RECT r;
+    HRESULT hr = IDirect3DDevice8_EndScene(device);
+    int i, bad = 0;
+    if (FAILED(hr)) { fail_hr(name, "end", hr); return; }
+    hr = IDirect3DDevice8_GetBackBuffer(device, 0, D3DBACKBUFFER_TYPE_MONO, &back);
+    if (FAILED(hr)) { fail_hr(name, "backbuffer", hr); return; }
+    hr = IDirect3DSurface8_LockRect(back, &r, NULL, D3DLOCK_READONLY);
+    if (FAILED(hr)) { fail_hr(name, "lock", hr); IDirect3DSurface8_Release(back); return; }
+    for (i = 0; i < count; ++i) {
+        DWORD got = ((const DWORD *)((const BYTE *)r.pBits + s[i].y * r.Pitch))[s[i].x] & 0xffffff;
+        BOOL clear = got == (CLEAR_COLOR & 0xffffff), wantClear = (s[i].rgb & 0xffffff) == (CLEAR_COLOR & 0xffffff);
+        if (clear != wantClear) {
+            printf("D8PIX case=%s sample=%d at=%d,%d got=%06lx want=%s\n", name, i, s[i].x, s[i].y,
+                   (unsigned long)got, wantClear ? "clear" : "drawn");
+            ++bad;
+        }
+    }
+    IDirect3DSurface8_UnlockRect(back);
+    IDirect3DSurface8_Release(back);
+    printf("D8PIX case=%s samples=%d mismatches=%d\n", name, count, bad);
+    if (bad) ++failures; else ++passes;
+}
+
+/* A lit draw as 3DMark 2001 SE's Car Chase makes them, with the matrices, light, material, fog
+ * and texture stage of one of its draws: a mesh that covers the middle of the screen (x and y
+ * from a quarter to three quarters), unlit (replay_unlit) and lit (replay_lit). */
+static void lit_replay_case(void)
+{
+    enum { N = 12 };
+    typedef struct { float x, y, z, nx, ny, nz, u, v; } TEXLIT;
+    static const SAMPLE s[] = { { 40, 40, 0x123456 }, { 64, 64, 0x123456 }, { 88, 88, 0x123456 }, { 60, 90, 0x123456 },
+                                { 8, 8, CLEAR_COLOR }, { 120, 120, CLEAR_COLOR }, { 8, 120, CLEAR_COLOR }, { 120, 8, CLEAR_COLOR } };
+    static const float worldm[16] = { -3.3717e-06f, -4.3711e-08f, 1, 0,  -1, -4.3711e-08f, -3.3717e-06f, 0,
+                                      4.3711e-08f, -1, -4.3711e-08f, 0,  -61.495f, 19.041f, 58.149f, 1 };
+    static const float viewm[16] = { 0, -0.25882f, -0.96593f, 0,  0, 0.96593f, -0.25882f, 0,  1, 0, 0, 0,
+                                     -74.012f, -4.1603f, 80, 1 };
+    static const float projm[16] = { 1.3032f, 0, 0, 0,  0, 1.7376f, 0, 0,  0, -7.9473e-08f, 1.0019f, 1,  0, 0, -0.50096f, 0 };
+    static const DWORD white[4] = { 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff };
+    static TEXLIT list[N * N * 6];
+    IDirect3DVertexBuffer8 *vb;
+    IDirect3DTexture8 *t = NULL;
+    D3DLOCKED_RECT lr;
+    D3DMATERIAL8 m;
+    D3DLIGHT8 l;
+    D3DMATRIX identity;
+    HRESULT hr;
+    float fogStart = 125.0f, fogEnd = 250.0f;
+    int x, y, k, pass;
+    /* In the camera's space the mesh is the plane z = 142.55 with x and y from -a to a and -b to b. */
+    for (y = 0, k = 0; y < N; ++y)
+        for (x = 0; x < N; ++x) {
+            static const int cx[6] = { 0, 1, 0, 0, 1, 1 }, cy[6] = { 0, 0, 1, 1, 0, 1 };
+            int j;
+            for (j = 0; j < 6; ++j, ++k) {
+                float a = (-0.5f + (float)(x + cx[j]) / N) * 2.0f * 54.69f;
+                float b = (0.5f - (float)(y + cy[j]) / N) * 2.0f * 41.02f;
+                list[k].x = 15.863f + a;
+                list[k].y = 0.25882f * b;
+                list[k].z = 31.211f - 0.96593f * b;
+                list[k].nx = -1; list[k].ny = 0; list[k].nz = 0;
+                list[k].u = (float)(x + cx[j]) / N; list[k].v = (float)(y + cy[j]) / N;
+            }
+        }
+    vb = vertex_buffer(list, sizeof(list), D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_TEX1);
+    if (vb && SUCCEEDED(IDirect3DDevice8_CreateTexture(device, 2, 2, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &t)) &&
+        SUCCEEDED(IDirect3DTexture8_LockRect(t, 0, &lr, NULL, 0))) {
+        memcpy(lr.pBits, white, 8);
+        memcpy((BYTE *)lr.pBits + lr.Pitch, white + 2, 8);
+        IDirect3DTexture8_UnlockRect(t, 0);
+    }
+    if (!vb || !t) { fail_hr("lit_replay", "create", E_FAIL); if (vb) IDirect3DVertexBuffer8_Release(vb); return; }
+    memset(&m, 0, sizeof(m));
+    m.Diffuse.r = m.Diffuse.g = m.Diffuse.b = m.Diffuse.a = 1.0f;
+    m.Ambient = m.Diffuse; m.Specular = m.Diffuse; m.Emissive.a = 1.0f; m.Power = 8.0f;
+    memset(&l, 0, sizeof(l));
+    l.Type = D3DLIGHT_DIRECTIONAL;
+    l.Diffuse.r = l.Diffuse.g = 0.698f; l.Diffuse.b = 0.7529f; l.Diffuse.a = 1.0f;
+    l.Specular.r = l.Specular.g = l.Specular.b = l.Specular.a = 1.0f;
+    l.Direction.x = -0.6109f; l.Direction.y = -0.506f; l.Direction.z = -0.609f;
+    l.Range = 1.0e19f; l.Attenuation0 = 1.0f;
+    memset(&identity, 0, sizeof(identity));
+    identity._11 = identity._22 = identity._33 = identity._44 = 1.0f;
+    for (pass = 0; pass < 2; ++pass) {
+        const char *name = pass ? "replay_lit" : "replay_unlit";
+        IDirect3DDevice8_SetTransform(device, D3DTS_WORLD, (const D3DMATRIX *)worldm);
+        IDirect3DDevice8_SetTransform(device, D3DTS_VIEW, (const D3DMATRIX *)viewm);
+        IDirect3DDevice8_SetTransform(device, D3DTS_PROJECTION, (const D3DMATRIX *)projm);
+        IDirect3DDevice8_SetMaterial(device, &m);
+        IDirect3DDevice8_SetLight(device, 0, &l);
+        IDirect3DDevice8_LightEnable(device, 0, TRUE);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, pass);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_AMBIENT, 0x00202020);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_COLORVERTEX, FALSE);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_NORMALIZENORMALS, TRUE);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_LOCALVIEWER, TRUE);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_FOGENABLE, TRUE);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_FOGCOLOR, 0x00081010);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_FOGVERTEXMODE, D3DFOG_LINEAR);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_FOGTABLEMODE, D3DFOG_NONE);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_FOGSTART, *(DWORD *)&fogStart);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_FOGEND, *(DWORD *)&fogEnd);
+        if (begin(name)) {
+            IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_NONE);
+            IDirect3DDevice8_SetTexture(device, 0, (IDirect3DBaseTexture8 *)t);
+            IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+            IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+            IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+            IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZ | D3DFVF_NORMAL | D3DFVF_TEX1);
+            IDirect3DDevice8_SetStreamSource(device, 0, vb, sizeof(TEXLIT));
+            hr = IDirect3DDevice8_DrawPrimitive(device, D3DPT_TRIANGLELIST, 0, N * N * 2);
+            IDirect3DDevice8_SetStreamSource(device, 0, NULL, 0);
+            IDirect3DDevice8_SetTexture(device, 0, NULL);
+            IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+            IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+            if (FAILED(hr)) { fail_hr(name, "draw", hr); IDirect3DDevice8_EndScene(device); }
+            else check_covered(name, s, 8);
+            IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_CCW);
+        }
+    }
+    IDirect3DDevice8_LightEnable(device, 0, FALSE);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_NORMALIZENORMALS, FALSE);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_FOGENABLE, FALSE);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_FOGVERTEXMODE, D3DFOG_NONE);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_AMBIENT, 0);
+    IDirect3DDevice8_SetTransform(device, D3DTS_WORLD, &identity);
+    IDirect3DDevice8_SetTransform(device, D3DTS_VIEW, &identity);
+    IDirect3DDevice8_SetTransform(device, D3DTS_PROJECTION, &identity);
+    IDirect3DTexture8_Release(t);
+    IDirect3DVertexBuffer8_Release(vb);
+    IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+}
+
+/* Lit and unlit draws with a depth buffer that moves between two render targets, as in a
+ * full-screen game whose back buffers take turns: a lit mesh on the left; then the depth buffer
+ * goes to a render target texture and comes back; then an unlit quad and a lit mesh on the
+ * right. (The depth buffer's view and the lit vertex shader once had the same host object
+ * number: taking the view away took the shader with it, and the next lit vertices went through
+ * the unlit shader. 3DMark 2001 SE's Car Chase, Nature and High Polygon Count were garbage.) */
+static void lit_depth_switch_case(void)
+{
+    enum { N = 10 };
+    typedef struct { float x, y, z, nx, ny, nz; } LITVERTEX;
+    typedef struct { float x, y, z; DWORD diffuse; } FLATVERTEX;
+    static const SAMPLE s[] = { { 40, 40, 0x8040ff }, { 48, 64, 0x8040ff }, { 80, 64, 0x8040ff }, { 88, 88, 0x8040ff },
+                                { 9, 118, 0x00ff00 }, { 120, 8, CLEAR_COLOR }, { 120, 120, CLEAR_COLOR }, { 8, 8, CLEAR_COLOR } };
+    static const FLATVERTEX flat[6] = {
+        { -0.9f, -0.8f, 0.5f, 0xff00ff00 }, { -0.8f, -0.8f, 0.5f, 0xff00ff00 }, { -0.9f, -0.9f, 0.5f, 0xff00ff00 },
+        { -0.9f, -0.9f, 0.5f, 0xff00ff00 }, { -0.8f, -0.8f, 0.5f, 0xff00ff00 }, { -0.8f, -0.9f, 0.5f, 0xff00ff00 } };
+    static LITVERTEX half[2][N * N * 6];
+    IDirect3DVertexBuffer8 *vb[2] = { NULL, NULL }, *fvb = NULL;
+    IDirect3DTexture8 *rt = NULL;
+    IDirect3DSurface8 *rts = NULL, *back = NULL, *depth = NULL, *oldDepth = NULL;
+    D3DMATERIAL8 m;
+    D3DLIGHT8 l;
+    D3DMATRIX identity;
+    HRESULT hr;
+    int x, y, k, h;
+    for (h = 0; h < 2; ++h)
+        for (y = 0, k = 0; y < N; ++y)
+            for (x = 0; x < N; ++x) {
+                static const int cx[6] = { 0, 1, 0, 0, 1, 1 }, cy[6] = { 0, 0, 1, 1, 0, 1 };
+                int j;
+                for (j = 0; j < 6; ++j, ++k) {
+                    half[h][k].x = (h ? 0.0f : -0.5f) + 0.5f * (float)(x + cx[j]) / N;
+                    half[h][k].y = 0.5f - (float)(y + cy[j]) / N;
+                    half[h][k].z = 0.5f;
+                    half[h][k].nx = half[h][k].ny = 0; half[h][k].nz = -1;
+                }
+            }
+    vb[0] = vertex_buffer(half[0], sizeof(half[0]), D3DFVF_XYZ | D3DFVF_NORMAL);
+    vb[1] = vertex_buffer(half[1], sizeof(half[1]), D3DFVF_XYZ | D3DFVF_NORMAL);
+    fvb = vertex_buffer(flat, sizeof(flat), D3DFVF_XYZ | D3DFVF_DIFFUSE);
+    hr = vb[0] && vb[1] && fvb ? D3D_OK : E_FAIL;
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice8_CreateDepthStencilSurface(device, Side, Side, D3DFMT_D16, D3DMULTISAMPLE_NONE, &depth);
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice8_CreateTexture(device, Side, Side, 1, D3DUSAGE_RENDERTARGET, D3DFMT_X8R8G8B8,
+                                                           D3DPOOL_DEFAULT, &rt);
+    if (SUCCEEDED(hr)) hr = IDirect3DTexture8_GetSurfaceLevel(rt, 0, &rts);
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice8_GetRenderTarget(device, &back);
+    if (FAILED(hr)) { fail_hr("lit_depth_switch", "create", hr); goto done; }
+    IDirect3DDevice8_GetDepthStencilSurface(device, &oldDepth);
+    memset(&m, 0, sizeof(m));
+    m.Emissive.r = 0.5f; m.Emissive.g = 0.25f; m.Emissive.b = 1.0f; m.Emissive.a = 1.0f; m.Diffuse.a = 1.0f;
+    memset(&l, 0, sizeof(l));
+    l.Type = D3DLIGHT_DIRECTIONAL;
+    l.Diffuse.r = l.Diffuse.g = l.Diffuse.b = l.Diffuse.a = 1.0f;
+    l.Direction.z = 1.0f;
+    memset(&identity, 0, sizeof(identity));
+    identity._11 = identity._22 = identity._33 = identity._44 = 1.0f;
+    IDirect3DDevice8_SetTransform(device, D3DTS_WORLD, &identity);
+    IDirect3DDevice8_SetTransform(device, D3DTS_VIEW, &identity);
+    IDirect3DDevice8_SetTransform(device, D3DTS_PROJECTION, &identity);
+    IDirect3DDevice8_SetMaterial(device, &m);
+    IDirect3DDevice8_SetLight(device, 0, &l);
+    IDirect3DDevice8_LightEnable(device, 0, TRUE);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_AMBIENT, 0);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_COLORVERTEX, FALSE);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_NONE);
+    IDirect3DDevice8_SetTexture(device, 0, NULL);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+    hr = IDirect3DDevice8_SetRenderTarget(device, back, depth);
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice8_Clear(device, 0, NULL, D3DCLEAR_ZBUFFER, 0, 1.0f, 0);
+    if (FAILED(hr)) fail_hr("lit_depth_switch", "target", hr);
+    else if (begin("lit_depth_switch")) {
+        IDirect3DDevice8_SetRenderState(device, D3DRS_ZENABLE, D3DZB_TRUE);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, TRUE);
+        IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZ | D3DFVF_NORMAL);
+        IDirect3DDevice8_SetStreamSource(device, 0, vb[0], sizeof(LITVERTEX));
+        hr = IDirect3DDevice8_DrawPrimitive(device, D3DPT_TRIANGLELIST, 0, N * N * 2);
+        IDirect3DDevice8_EndScene(device);
+        /* The depth buffer serves the texture, then the back buffer again. */
+        if (SUCCEEDED(hr)) hr = IDirect3DDevice8_SetRenderTarget(device, rts, depth);
+        if (SUCCEEDED(hr)) hr = IDirect3DDevice8_Clear(device, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0xff000000, 1.0f, 0);
+        if (SUCCEEDED(hr)) hr = IDirect3DDevice8_SetRenderTarget(device, back, depth);
+        if (SUCCEEDED(hr)) hr = IDirect3DDevice8_Clear(device, 0, NULL, D3DCLEAR_ZBUFFER, 0, 1.0f, 0);
+        if (SUCCEEDED(hr)) hr = IDirect3DDevice8_BeginScene(device);
+        if (SUCCEEDED(hr)) {
+            IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+            IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZ | D3DFVF_DIFFUSE);
+            IDirect3DDevice8_SetStreamSource(device, 0, fvb, sizeof(FLATVERTEX));
+            hr = IDirect3DDevice8_DrawPrimitive(device, D3DPT_TRIANGLELIST, 0, 2);
+            IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, TRUE);
+            IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZ | D3DFVF_NORMAL);
+            IDirect3DDevice8_SetStreamSource(device, 0, vb[1], sizeof(LITVERTEX));
+            if (SUCCEEDED(hr)) hr = IDirect3DDevice8_DrawPrimitive(device, D3DPT_TRIANGLELIST, 0, N * N * 2);
+            IDirect3DDevice8_SetStreamSource(device, 0, NULL, 0);
+            if (FAILED(hr)) { fail_hr("lit_depth_switch", "draw", hr); IDirect3DDevice8_EndScene(device); }
+            else check("lit_depth_switch", s, 8);
+        } else fail_hr("lit_depth_switch", "second scene", hr);
+    }
+    IDirect3DDevice8_SetRenderState(device, D3DRS_ZENABLE, D3DZB_FALSE);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+    IDirect3DDevice8_LightEnable(device, 0, FALSE);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_CCW);
+    IDirect3DDevice8_SetRenderTarget(device, back, oldDepth);
+done:
+    if (oldDepth) IDirect3DSurface8_Release(oldDepth);
+    if (back) IDirect3DSurface8_Release(back);
+    if (rts) IDirect3DSurface8_Release(rts);
+    if (rt) IDirect3DTexture8_Release(rt);
+    if (depth) IDirect3DSurface8_Release(depth);
+    for (h = 0; h < 2; ++h) if (vb[h]) IDirect3DVertexBuffer8_Release(vb[h]);
+    if (fvb) IDirect3DVertexBuffer8_Release(fvb);
+    IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+}
+
 /* The fixed-function pipeline through a declaration with two streams and no shader code
  * (Direct3D 8's way to several streams): positions in stream 0, colours in stream 1, six unused
  * vertices first in both, drawn from vertex 6: a red quad on the left, a green one on the right. */
@@ -902,6 +1417,7 @@ int main(int argc, char **argv)
         vs_case("vs11_buffer", 0xfffe0101, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1) && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT), TRUE);
         vs_case("vs10", 0xfffe0100, caps.VertexShaderVersion >= D3DVS_VERSION(1, 0) && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT), FALSE);
         ff_streams_case(caps.MaxStreams >= 2 && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT));
+        if (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT) { lit_grid_case(); lit_variants_case(); lit_perspective_case(); lit_replay_case(); lit_depth_switch_case(); }
         clip_case(caps.MaxUserClipPlanes >= 1, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1) && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT));
     }
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 2)) pixel_shaders(only);

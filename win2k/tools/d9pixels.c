@@ -1176,14 +1176,35 @@ static void vs_quad(VSVERTEX *v, float x0, float y0, float x1, float y1, DWORD c
     for (i = 0; i < 6; ++i) { v[i].x = xs[i]; v[i].y = ys[i]; v[i].z = 0.5f; v[i].color = color; }
 }
 
+/* Set for a second pass over the vertex shader cases: vs_run then draws from a vertex buffer
+ * (with eight unused bytes before the vertices) instead of the program's memory, and the case
+ * names end in "_vb". A driver that keeps vertex buffers on the GPU reads them there. */
+static BOOL vsFromBuffer;
+static UINT vsLead;     /* the unused bytes: 8 where stream offsets are offered, else none */
+
 static void vs_run(const char *name, const D3DVERTEXELEMENT9 *elements, const DWORD *vs, const DWORD *ps,
                    const void *vertices, UINT stride, UINT triangles, const SAMPLE *s, int samples)
 {
     IDirect3DVertexDeclaration9 *decl = NULL;
     IDirect3DVertexShader9 *vsh = NULL;
     IDirect3DPixelShader9 *psh = NULL;
+    IDirect3DVertexBuffer9 *vb = NULL;
+    char named[64];
     HRESULT hr = IDirect3DDevice9_CreateVertexDeclaration(device, elements, &decl);
-    if (FAILED(hr)) { fail_hr(name, "declaration", hr); return; }
+    if (vsFromBuffer) {
+        BYTE *p;
+        sprintf(named, "%.50s_vb", name);
+        name = named;
+        if (SUCCEEDED(hr)) hr = IDirect3DDevice9_CreateVertexBuffer(device, vsLead + triangles * 3 * stride, D3DUSAGE_WRITEONLY, 0,
+                                                                    D3DPOOL_DEFAULT, &vb, NULL);
+        if (SUCCEEDED(hr)) hr = IDirect3DVertexBuffer9_Lock(vb, 0, 0, (void **)&p, 0);
+        if (SUCCEEDED(hr)) {
+            memset(p, 0xee, vsLead);
+            memcpy(p + vsLead, vertices, triangles * 3 * stride);
+            IDirect3DVertexBuffer9_Unlock(vb);
+        }
+    }
+    if (FAILED(hr)) { fail_hr(name, "declaration", hr); if (vb) IDirect3DVertexBuffer9_Release(vb); if (decl) IDirect3DVertexDeclaration9_Release(decl); return; }
     hr = IDirect3DDevice9_CreateVertexShader(device, vs, &vsh);
     if (FAILED(hr)) fail_hr(name, "vertex shader", hr);
     else {
@@ -1193,7 +1214,11 @@ static void vs_run(const char *name, const D3DVERTEXELEMENT9 *elements, const DW
             IDirect3DDevice9_SetVertexDeclaration(device, decl);
             IDirect3DDevice9_SetVertexShader(device, vsh);
             IDirect3DDevice9_SetPixelShader(device, psh);
-            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, triangles, vertices, stride);
+            if (vb) {
+                IDirect3DDevice9_SetStreamSource(device, 0, vb, vsLead, stride);
+                hr = IDirect3DDevice9_DrawPrimitive(device, D3DPT_TRIANGLELIST, 0, triangles);
+                IDirect3DDevice9_SetStreamSource(device, 0, NULL, 0, 0);
+            } else hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, triangles, vertices, stride);
             IDirect3DDevice9_SetVertexShader(device, NULL);
             IDirect3DDevice9_SetPixelShader(device, NULL);
             if (FAILED(hr)) { fail_hr(name, "draw", hr); IDirect3DDevice9_EndScene(device); }
@@ -1202,6 +1227,7 @@ static void vs_run(const char *name, const D3DVERTEXELEMENT9 *elements, const DW
     }
     if (psh) IDirect3DPixelShader9_Release(psh);
     if (vsh) IDirect3DVertexShader9_Release(vsh);
+    if (vb) IDirect3DVertexBuffer9_Release(vb);
     IDirect3DVertexDeclaration9_Release(decl);
 }
 
@@ -1260,7 +1286,7 @@ static void vertex_shaders(int only)
         vs_run("vs2_viewport", colored, vs, ps_color, v, sizeof(v[0]), 2, s, 4);
         IDirect3DDevice9_SetViewport(device, &full);
     }
-    if (!only || only == 33) {
+    if ((!only || only == 33) && !vsFromBuffer) {   /* draws from vertex buffers in both passes */
         /* Two streams: positions in stream 0, colours in stream 1, both vertex
          * buffers with six unused vertices first, drawn from vertex 6: a red
          * quad on the left and a green one on the right. */
@@ -1412,7 +1438,7 @@ static void vertex_shaders(int only)
         IDirect3DDevice9_SetTexture(device, 0, NULL);
         if (t) IDirect3DTexture9_Release(t);
     }
-    if (!only || only == 35 || only == 36) {
+    if ((!only || only == 35 || only == 36) && !vsFromBuffer) {
         /* Alpha blending after shaders: an opaque red quad, then a quad of
          * (0, 0, 1, 0.25) over it with SRCALPHA, INVSRCALPHA. 35 takes the
          * colour from a vertex shader constant, 36 from a pixel shader alone
@@ -1613,6 +1639,157 @@ static void clip_cases(int only, BOOL offered, BOOL shaders)
         vs_run("clip_vs", colored, vs, ps_color, v, sizeof(v[0]), 2, s, 3);
         IDirect3DDevice9_SetRenderState(device, D3DRS_CLIPPLANEENABLE, 0);
     }
+}
+
+/* ---- vertex and index buffers through a vertex shader (cases 84 to 89) ----
+ * What a driver that keeps the buffers on the GPU has to get right: a buffer rewritten between
+ * two draws of one scene (each draw shows what the buffer held when it was drawn), vertices
+ * appended without overwriting, indices rewritten, a base vertex (also a negative one) with a
+ * start index, strips and fans, and a stream offset. */
+static void four_corners(VSVERTEX *v, float x0, float y0, float x1, float y1, DWORD color, BOOL fan)
+{
+    const float xs[4] = { x0, x1, fan ? x1 : x0, fan ? x0 : x1 }, ys[4] = { y0, y0, y1, y1 };
+    int i;
+    for (i = 0; i < 4; ++i) { v[i].x = xs[i]; v[i].y = ys[i]; v[i].z = 0.5f; v[i].color = color; }
+}
+
+static void buffer_cases(int only, BOOL streamOffset)
+{
+    static const D3DVERTEXELEMENT9 colored[] = {
+        { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+        { 0, 12, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 }, D3DDECL_END() };
+    static const DWORD vs[] = { 0xfffe0200, VDCL2(0, 0), VDCL2(10, 1),
+        P2I(OMov, 2), P2D(VPos, 0, 15), P2SRC(RV, 0), P2I(OMov, 2), P2D(VAttr, 0, 15), P2SRC(RV, 1), PSEND };
+    static const DWORD ps_color[] = { 0xffff0200, P2DCL_V(0), P2I(OMov, 2), P2D(8, 0, 15), P2SRC(RV, 0), PSEND };
+    /* Left and right halves of the middle, and the corners that stay clear. */
+    static const SAMPLE two[] = { { 48, 64, 0xff0000 }, { 80, 64, 0x00ff00 }, { 8, 8, CLEAR_COLOR }, { 120, 120, CLEAR_COLOR } };
+    static const WORD list[6] = { 0, 1, 2, 2, 1, 3 };
+    IDirect3DVertexDeclaration9 *decl = NULL;
+    IDirect3DVertexShader9 *vsh = NULL;
+    IDirect3DPixelShader9 *psh = NULL;
+    IDirect3DVertexBuffer9 *vb = NULL;
+    IDirect3DIndexBuffer9 *ib = NULL;
+    VSVERTEX v[18], *p;
+    WORD *x;
+    DWORD cull = D3DCULL_CCW;
+    HRESULT hr = IDirect3DDevice9_CreateVertexDeclaration(device, colored, &decl);
+    int pass, k;
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice9_CreateVertexShader(device, vs, &vsh);
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice9_CreatePixelShader(device, ps_color, &psh);
+    if (FAILED(hr)) { fail_hr("buffers", "create", hr); goto done; }
+    IDirect3DDevice9_GetRenderState(device, D3DRS_CULLMODE, &cull);
+    IDirect3DDevice9_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_NONE);
+    for (pass = 84; pass <= 89; ++pass) {
+        static const char *const names[6] = { "vb_rewrite", "vb_append", "ib_rewrite", "vb_base", "vb_strip_fan", "vb_offset" };
+        const char *name = names[pass - 84];
+        if (only && only != pass) continue;
+        if (pass == 89 && !streamOffset) { printf("D9PIX stream offsets not offered\n"); continue; }
+        vb = NULL; ib = NULL;
+        hr = IDirect3DDevice9_CreateVertexBuffer(device, sizeof(v), D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, 0, D3DPOOL_DEFAULT, &vb, NULL);
+        if (SUCCEEDED(hr) && (pass == 86 || pass == 87))
+            hr = IDirect3DDevice9_CreateIndexBuffer(device, 12 * sizeof(WORD), D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY, D3DFMT_INDEX16,
+                                                    D3DPOOL_DEFAULT, &ib, NULL);
+        if (FAILED(hr)) { fail_hr(name, "buffer", hr); goto next; }
+        if (!begin(name)) goto next;
+        IDirect3DDevice9_SetVertexDeclaration(device, decl);
+        IDirect3DDevice9_SetVertexShader(device, vsh);
+        IDirect3DDevice9_SetPixelShader(device, psh);
+        IDirect3DDevice9_SetStreamSource(device, 0, vb, pass == 89 ? 6 * sizeof(v[0]) : 0, sizeof(v[0]));
+        if (ib) IDirect3DDevice9_SetIndices(device, ib);
+        switch (pass) {
+        case 84:
+            /* The same six vertices twice: a red quad on the left, then a green one on the right. */
+            for (k = 0; k < 2 && SUCCEEDED(hr); ++k) {
+                hr = IDirect3DVertexBuffer9_Lock(vb, 0, 0, (void **)&p, D3DLOCK_DISCARD);
+                if (FAILED(hr)) break;
+                if (k) vs_quad(p, 0, 0.5f, 0.5f, -0.5f, 0xff00ff00); else vs_quad(p, -0.5f, 0.5f, 0, -0.5f, 0xffff0000);
+                IDirect3DVertexBuffer9_Unlock(vb);
+                hr = IDirect3DDevice9_DrawPrimitive(device, D3DPT_TRIANGLELIST, 0, 2);
+            }
+            break;
+        case 85:
+            /* Six vertices, drawn; six more after them without overwriting, drawn from vertex 6. */
+            for (k = 0; k < 2 && SUCCEEDED(hr); ++k) {
+                hr = IDirect3DVertexBuffer9_Lock(vb, k * 6 * sizeof(v[0]), 6 * sizeof(v[0]), (void **)&p, k ? D3DLOCK_NOOVERWRITE : D3DLOCK_DISCARD);
+                if (FAILED(hr)) break;
+                if (k) vs_quad(p, 0, 0.5f, 0.5f, -0.5f, 0xff00ff00); else vs_quad(p, -0.5f, 0.5f, 0, -0.5f, 0xffff0000);
+                IDirect3DVertexBuffer9_Unlock(vb);
+                hr = IDirect3DDevice9_DrawPrimitive(device, D3DPT_TRIANGLELIST, k * 6, 2);
+            }
+            break;
+        case 86:
+            /* Eight corners that stay; the six indices name the left quad, then the right one. */
+            four_corners(v, -0.5f, 0.5f, 0, -0.5f, 0xffff0000, FALSE);
+            four_corners(v + 4, 0, 0.5f, 0.5f, -0.5f, 0xff00ff00, FALSE);
+            hr = IDirect3DVertexBuffer9_Lock(vb, 0, 0, (void **)&p, D3DLOCK_DISCARD);
+            if (FAILED(hr)) break;
+            memcpy(p, v, 8 * sizeof(v[0]));
+            IDirect3DVertexBuffer9_Unlock(vb);
+            for (k = 0; k < 2 && SUCCEEDED(hr); ++k) {
+                int i;
+                hr = IDirect3DIndexBuffer9_Lock(ib, 0, 0, (void **)&x, D3DLOCK_DISCARD);
+                if (FAILED(hr)) break;
+                for (i = 0; i < 6; ++i) x[i] = (WORD)(list[i] + 4 * k);
+                IDirect3DIndexBuffer9_Unlock(ib);
+                hr = IDirect3DDevice9_DrawIndexedPrimitive(device, D3DPT_TRIANGLELIST, 0, 4 * k, 4, 0, 2);
+            }
+            break;
+        case 87:
+            /* Corners 4 to 7 are the left quad and 8 to 11 the right one. The left is drawn with
+             * base vertex 4 from index 6 on (indices 0 to 3); the right with base vertex -4 from
+             * index 0 on (indices 12 to 15). */
+            four_corners(v, 1, 1, 1, 1, 0xff0000ff, FALSE);
+            four_corners(v + 4, -0.5f, 0.5f, 0, -0.5f, 0xffff0000, FALSE);
+            four_corners(v + 8, 0, 0.5f, 0.5f, -0.5f, 0xff00ff00, FALSE);
+            hr = IDirect3DVertexBuffer9_Lock(vb, 0, 0, (void **)&p, D3DLOCK_DISCARD);
+            if (FAILED(hr)) break;
+            memcpy(p, v, 12 * sizeof(v[0]));
+            IDirect3DVertexBuffer9_Unlock(vb);
+            hr = IDirect3DIndexBuffer9_Lock(ib, 0, 0, (void **)&x, D3DLOCK_DISCARD);
+            if (FAILED(hr)) break;
+            for (k = 0; k < 6; ++k) { x[k] = (WORD)(list[k] + 12); x[6 + k] = list[k]; }
+            IDirect3DIndexBuffer9_Unlock(ib);
+            hr = IDirect3DDevice9_DrawIndexedPrimitive(device, D3DPT_TRIANGLELIST, 4, 0, 4, 6, 2);
+            if (SUCCEEDED(hr)) hr = IDirect3DDevice9_DrawIndexedPrimitive(device, D3DPT_TRIANGLELIST, -4, 12, 4, 0, 2);
+            break;
+        case 88:
+            /* The left quad as a strip of four corners, the right one as a fan. */
+            four_corners(v, -0.5f, 0.5f, 0, -0.5f, 0xffff0000, FALSE);
+            four_corners(v + 4, 0, 0.5f, 0.5f, -0.5f, 0xff00ff00, TRUE);
+            hr = IDirect3DVertexBuffer9_Lock(vb, 0, 0, (void **)&p, D3DLOCK_DISCARD);
+            if (FAILED(hr)) break;
+            memcpy(p, v, 8 * sizeof(v[0]));
+            IDirect3DVertexBuffer9_Unlock(vb);
+            hr = IDirect3DDevice9_DrawPrimitive(device, D3DPT_TRIANGLESTRIP, 0, 2);
+            if (SUCCEEDED(hr)) hr = IDirect3DDevice9_DrawPrimitive(device, D3DPT_TRIANGLEFAN, 4, 2);
+            break;
+        case 89:
+            /* The stream starts six vertices into the buffer: both quads follow them. */
+            vs_quad(v, 1, 1, 1, 1, 0xff0000ff);
+            hr = IDirect3DVertexBuffer9_Lock(vb, 0, 0, (void **)&p, D3DLOCK_DISCARD);
+            if (FAILED(hr)) break;
+            memcpy(p, v, 6 * sizeof(v[0]));
+            vs_quad(p + 6, -0.5f, 0.5f, 0, -0.5f, 0xffff0000);
+            vs_quad(p + 12, 0, 0.5f, 0.5f, -0.5f, 0xff00ff00);
+            IDirect3DVertexBuffer9_Unlock(vb);
+            hr = IDirect3DDevice9_DrawPrimitive(device, D3DPT_TRIANGLELIST, 0, 4);
+            break;
+        }
+        IDirect3DDevice9_SetStreamSource(device, 0, NULL, 0, 0);
+        IDirect3DDevice9_SetIndices(device, NULL);
+        IDirect3DDevice9_SetVertexShader(device, NULL);
+        IDirect3DDevice9_SetPixelShader(device, NULL);
+        if (FAILED(hr)) { fail_hr(name, "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check(name, two, 4);
+    next:
+        if (ib) IDirect3DIndexBuffer9_Release(ib);
+        if (vb) IDirect3DVertexBuffer9_Release(vb);
+    }
+    IDirect3DDevice9_SetRenderState(device, D3DRS_CULLMODE, cull);
+done:
+    if (psh) IDirect3DPixelShader9_Release(psh);
+    if (vsh) IDirect3DVertexShader9_Release(vsh);
+    if (decl) IDirect3DVertexDeclaration9_Release(decl);
 }
 
 /* ---- compressed textures ---- */
@@ -2460,6 +2637,58 @@ static void rt_small_depth_case(int only)
     IDirect3DTexture9_Release(t);
 }
 
+/* 83: a ps_2_0 shader that reads samplers 9 and 15 (shader model 2 has sixteen; 3DMark05's third
+ * game test draws its water with a ninth one): texld r0, t0, s9; texld r1, t0, s15;
+ * add r0, r0, r1. A green texture on sampler 9 and a blue one on sampler 15 give cyan. */
+static void ps2_sixteen_samplers_case(int only, BOOL version2)
+{
+    typedef struct { float x, y, z, rhw; DWORD diffuse; float u, v; } TV;
+    static const DWORD ps[] = { 0xffff0200, P2DCL_T(0, 3), P2DCL_S(9), P2DCL_S(15),
+        P2I(OTex, 3), P2D(RR, 0, 15), P2SRC(RT, 0), P2SRC(10, 9),
+        P2I(OTex, 3), P2D(RR, 1, 15), P2SRC(RT, 0), P2SRC(10, 15),
+        P2I(OAdd, 3), P2D(RR, 0, 15), P2SRC(RR, 0), P2SRC(RR, 1),
+        P2I(OMov, 2), P2D(8, 0, 15), P2SRC(RR, 0), PSEND };
+    static const DWORD green[4] = { 0xff00ff00, 0xff00ff00, 0xff00ff00, 0xff00ff00 };
+    static const DWORD blue[4] = { 0xff0000ff, 0xff0000ff, 0xff0000ff, 0xff0000ff };
+    static const SAMPLE s[] = { { 16, 16, 0x00ffff }, { 96, 32, 0x00ffff }, { 32, 96, 0x00ffff }, { 112, 112, 0x00ffff } };
+    TV v[4] = { { 0, 0, 0.5f, 1, 0xffffffff, 0, 0 }, { Side, 0, 0.5f, 1, 0xffffffff, 1, 0 },
+                { 0, Side, 0.5f, 1, 0xffffffff, 0, 1 }, { Side, Side, 0.5f, 1, 0xffffffff, 1, 1 } };
+    IDirect3DTexture9 *g, *b;
+    IDirect3DPixelShader9 *handle = NULL;
+    HRESULT hr;
+    int k;
+    if (!version2 || (only && only != 83)) return;
+    g = texture2x2(green);
+    b = texture2x2(blue);
+    if (!g || !b) { fail_hr("ps2_sixteen_samplers", "texture", E_FAIL); if (g) IDirect3DTexture9_Release(g); if (b) IDirect3DTexture9_Release(b); return; }
+    IDirect3DDevice9_SetTexture(device, 9, (IDirect3DBaseTexture9 *)g);
+    IDirect3DDevice9_SetTexture(device, 15, (IDirect3DBaseTexture9 *)b);
+    for (k = 9; k < 16; k += 6) {
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    }
+    hr = IDirect3DDevice9_CreatePixelShader(device, ps, &handle);
+    if (FAILED(hr)) fail_hr("ps2_sixteen_samplers", "create", hr);
+    else {
+        if (begin("ps2_sixteen_samplers")) {
+            IDirect3DDevice9_SetPixelShader(device, handle);
+            IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1);
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+            IDirect3DDevice9_SetPixelShader(device, NULL);
+            if (FAILED(hr)) { fail_hr("ps2_sixteen_samplers", "draw", hr); IDirect3DDevice9_EndScene(device); }
+            else check("ps2_sixteen_samplers", s, 4);
+        }
+        IDirect3DPixelShader9_Release(handle);
+    }
+    IDirect3DDevice9_SetTexture(device, 9, NULL);
+    IDirect3DDevice9_SetTexture(device, 15, NULL);
+    IDirect3DTexture9_Release(g);
+    IDirect3DTexture9_Release(b);
+}
+
 /* ---- the scissor test ----
  * 60: a red quad over the whole back buffer with the scissor rectangle 32,32 to 96,96: red
  * inside it, the clear colour outside. */
@@ -2721,6 +2950,7 @@ int main(int argc, char **argv)
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (!only || only >= 43)) rt_cases(only);
     rt2048_case(only);
     rt_small_depth_case(only);
+    ps2_sixteen_samplers_case(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
     scissor_case(only, (caps.RasterCaps & D3DPRASTERCAPS_SCISSORTEST) != 0);
     luminance_case(only);
     lines_points_case(only);
@@ -2745,8 +2975,19 @@ int main(int argc, char **argv)
         volume_cases(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
     if (caps.PixelShaderVersion < D3DPS_VERSION(2, 0)) printf("D9PIX vertex shader cases need pixel shader 2.0\n");
     else if (flags == D3DCREATE_SOFTWARE_VERTEXPROCESSING || caps.VertexShaderVersion >= D3DVS_VERSION(2, 0)) {
+        BOOL offsets = (caps.DevCaps2 & D3DDEVCAPS2_STREAMOFFSET) != 0;
         if (!only || only >= 30) vertex_shaders(only);
-        if (!only || only >= 61) vs_flow_cases(only, (caps.DevCaps2 & D3DDEVCAPS2_STREAMOFFSET) != 0);
+        if (!only || only >= 61) vs_flow_cases(only, offsets);
+        if (!only || only >= 84) buffer_cases(only, offsets);
+        if (!only) {
+            /* The vertex shader cases once more, drawn from vertex buffers ("_vb"). */
+            vsFromBuffer = TRUE;
+            vsLead = offsets ? 8 : 0;
+            vertex_shaders(0);
+            vs_flow_cases(0, offsets);
+            if (caps.MaxUserClipPlanes >= 1) clip_cases(65, TRUE, TRUE);
+            vsFromBuffer = FALSE;
+        }
     } else printf("D9PIX vertex shaders not offered\n");
     clip_cases(only, caps.MaxUserClipPlanes >= 1, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0) && (flags == D3DCREATE_SOFTWARE_VERTEXPROCESSING || caps.VertexShaderVersion >= D3DVS_VERSION(2, 0)));
     IDirect3DDevice9_Release(device);

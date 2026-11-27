@@ -178,7 +178,7 @@ def main():
                      [ddk_headers, video_headers, public_headers, vc_headers], ["-Di386=1"],
                      ["videoprt.lib", "ntoskrnl.lib", "hal.lib"], ["/driver", "/entry:DriverEntry@8"])
         build_kernel(work, overlay, "rb2kdisp.dll", "display display_ddraw display_palette display_rvd display_gdi display_cursor display_d3d7 d3d8_ps d3d9_decl",
-                     [public_headers, video_headers, vc_headers], ["-DUNICODE", "-D_UNICODE", "-DWINVER=0x0500"],
+                     [public_headers, video_headers, vc_headers], ["-DUNICODE", "-D_UNICODE", "-DWINVER=0x0500", "-DRB_PS2_SAMPLERS=16"],
                      ["win32k.lib", "libcntpr.lib"], ["/dll", "/entry:DrvEnableDriver@12",
                                                       "/export:DrvEnableDriver=_DrvEnableDriver@12"])
         programs = build_programs(work)
