@@ -3161,6 +3161,7 @@ typedef struct {
     GLuint vbo;                         /* the buffer object holding them (base is in start's copy), or 0 */
     BYTE *start;
     GLuint ibo;                         /* indices: the buffer object holding them, or 0 */
+    GLenum itype;                       /* their type if not 16-bit ones (GL_UNSIGNED_INT), else 0 */
     long first_vertex;                  /* the vertex of stream 0 that base is at, for the other
                                            streams of the draw; -1: not a whole vertex */
     int pos;                            /* the position's byte offset (0 but for a declaration) */
@@ -4333,7 +4334,7 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
             gl->DrawArrays(mode, 0, count);
         else {
             bind_buffer(c, GL_ELEMENT_ARRAY_BUFFER_ARB, v->ibo);
-            gl->DrawElements(mode, nidx, GL_UNSIGNED_SHORT, idx);
+            gl->DrawElements(mode, nidx, v->itype ? v->itype : GL_UNSIGNED_SHORT, idx);
         }
         c->dirty = 1;
         return;
@@ -4359,7 +4360,7 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
             gl->DrawArrays(mode, 0, count);
         else {
             bind_buffer(c, GL_ELEMENT_ARRAY_BUFFER_ARB, v->ibo);
-            gl->DrawElements(mode, nidx, GL_UNSIGNED_SHORT, idx);
+            gl->DrawElements(mode, nidx, v->itype ? v->itype : GL_UNSIGNED_SHORT, idx);
         }
         c->dirty = 1;
         return;
@@ -4377,7 +4378,7 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
             return;
         arrays(c, v, first, span);
         bind_buffer(c, GL_ELEMENT_ARRAY_BUFFER_ARB, v->ibo);
-        gl->DrawElements(mode, nidx, GL_UNSIGNED_SHORT, idx);
+        gl->DrawElements(mode, nidx, v->itype ? v->itype : GL_UNSIGNED_SHORT, idx);
     }
     c->dirty = 1;
 }
@@ -4413,6 +4414,40 @@ static WORD *index_list(RCTX *c, const WORD *src, DWORD n, DWORD step, DWORD kee
     *lo = n ? mn : 0;
     *span = n ? mx - mn + 1 : 0;
     return buf;
+}
+
+/* The same for 32-bit indices (Direct3D 8 and 9's D3DFMT_INDEX32), made relative to their
+   smallest one: as 16-bit indices when they then fit, which a draw's range mostly does, else as
+   32-bit ones (*wide). */
+static void *index_list32(RCTX *c, const DWORD *src, DWORD n, DWORD *lo, DWORD *span, int *wide)
+{
+    DWORD i, mn = 0xFFFFFFFFUL, mx = 0;
+
+    if (!c->ibuf || n * 2 > c->nibuf) {
+        release(c->ibuf);
+        c->nibuf = n * 2 + 1024;
+        c->ibuf = (WORD *)alloc(c->nibuf * sizeof(WORD));
+        if (!c->ibuf) {
+            c->nibuf = 0;
+            return NULL;
+        }
+    }
+    for (i = 0; i < n; i++) {
+        if (src[i] < mn) mn = src[i];
+        if (src[i] > mx) mx = src[i];
+    }
+    *wide = n && mx - mn > 0xFFFFUL;
+    if (*wide) {
+        DWORD *b = (DWORD *)c->ibuf;
+        for (i = 0; i < n; i++)
+            b[i] = src[i] - mn;
+    } else {
+        for (i = 0; i < n; i++)
+            c->ibuf[i] = (WORD)(src[i] - mn);
+    }
+    *lo = n ? mn : 0;
+    *span = n ? mx - mn + 1 : 0;
+    return c->ibuf;
 }
 
 /* ---- Clear ------------------------------------------------------------------------------------ */
@@ -5412,11 +5447,13 @@ static void stream_draw(RCTX *c, LPD3DHAL_DRAWPRIMITIVES2DATA d, DWORD type, lon
         DWORD size = 0;
         BYTE *ib = buffer_get(c->ddl, c->index_handle, &size);
         WORD *idx;
-        if (!ib || c->index_stride != 2) {
+        DWORD isz = c->index_stride;    /* 16-bit indices, or 32-bit ones */
+        int wide = 0;
+        if (!ib || (isz != 2 && isz != 4)) {
             skip8(c, "index buffer");
             return;
         }
-        if (index_byte > size || verts > (size - index_byte) / 2) {
+        if (index_byte > size || verts > (size - index_byte) / isz) {
             skip8(c, "index range");
             return;
         }
@@ -5424,12 +5461,17 @@ static void stream_draw(RCTX *c, LPD3DHAL_DRAWPRIMITIVES2DATA d, DWORD type, lon
             /* vertices on the GPU: the indices as they are, from vertex zero on, from their own
                buffer object if they have one (no copy, no scan for their range) */
             v.ibo = buffer_object(c, c->index_handle, GL_ELEMENT_ARRAY_BUFFER_ARB);
+            v.itype = isz == 4 ? GL_UNSIGNED_INT : 0;
             draw(c, &v, mode, 0, 0, v.ibo ? (const WORD *)index_byte : (const WORD *)(ib + index_byte),
                  verts, 0);
             return;
         }
-        idx = index_list(c, (const WORD *)(ib + index_byte), verts, 1, 1,
-                         &lo, &span);
+        if (isz == 4) {
+            idx = (WORD *)index_list32(c, (const DWORD *)(ib + index_byte), verts, &lo, &span, &wide);
+            v.itype = wide ? GL_UNSIGNED_INT : 0;
+        } else {
+            idx = index_list(c, (const WORD *)(ib + index_byte), verts, 1, 1, &lo, &span);
+        }
         if (!idx) {
             dbg("rd3d: no memory for the indices of a draw\r\n");
             return;
@@ -6193,7 +6235,7 @@ static void d8_caps(RB_D3DCAPS8 *c)
     c->maxSimultaneousTextures = x.wMaxSimultaneousTextures;
     c->maxPointSize = fbits(MAX_POINT_SIZE);       /* and point sprites (point_state) */
     c->maxPrimitiveCount = 0xFFFF;
-    c->maxVertexIndex = 0xFFFF;         /* 16-bit index buffers only */
+    c->maxVertexIndex = 0xFFFFFF;       /* 32-bit index buffers too (index_list32) */
     c->maxStreams = 1;                  /* (more with hardware vertex processing, below) */
     c->maxStreamStride = 255;
     c->vertexShaderVersion = 0xFFFE0000UL;  /* none: the runtime runs vertex shaders */
