@@ -5197,8 +5197,11 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
                                            buffer object (testing idx drew nothing of those) */
 
     if (!v->base || (v->count && first + n > v->count)) {
+        char b[200];
         SKIPPED(SKIP_DRAW);
-        dbg("rd3d: vertices out of range\r\n");
+        wsprintf(b, "rd3d: vertices out of range: %lu from %lu of %lu, stride %lu, %lu indices, buffer object %lu, "
+                 "base %08lx\r\n", n, first, v->count, v->stride, nidx, (DWORD)v->vbo, (DWORD)v->base);
+        dbg(b);
         return;
     }
     c->points_now = mode == GL_POINTS;
