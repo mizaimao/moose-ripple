@@ -83,6 +83,7 @@ class RippleFramebuffer : public IOFramebuffer
     static IOReturn flushAction(OSObject *owner, void *id, void *queued, void *, void *);
     static IOReturn copyAction(OSObject *owner, void *args, void *, void *, void *);
     static IOReturn gammaAction(OSObject *owner, void *changed, void *, void *, void *);
+    static IOReturn probeAction(OSObject *owner, void *row, void *, void *, void *);
     bool  gammaPresent();        // what is on the display, drawn through the gamma table
     void  showCursor();
     void  publishCapsets();     // host GPU capability sets into the registry (diagnostics)
@@ -148,6 +149,7 @@ public:
     virtual IOReturn setCursorState(SInt32 x, SInt32 y, bool visible);
     virtual IOReturn setGammaTable(UInt32 channelCount, UInt32 dataCount, UInt32 dataWidth,
                                    void *data);
+    virtual IOReturn setProperties(OSObject *properties);   // the gamma check (RippleGammaProbe)
 };
 
 #endif

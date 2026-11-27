@@ -243,7 +243,7 @@ $(OUT)/%/gamma-test/gamma-test.o: tools/gamma-test/gamma-test.c
 	@mkdir -p $(dir $@)
 	$(CC) $(call target,$*) $(UCFLAGS) -c $< -o $@
 $(OUT)/%/gamma-test/gamma-test: $(OUT)/%/gamma-test/gamma-test.o
-	$(call link_tool,$*,$@,$^,-framework ApplicationServices -framework CoreFoundation)
+	$(call link_tool,$*,$@,$^,-framework ApplicationServices -framework CoreFoundation -framework IOKit)
 gammatest: $(OUT)/gamma-test
 $(OUT)/gamma-test: $(OUT)/i386/gamma-test/gamma-test $(OUT)/x86_64/gamma-test/gamma-test
 	$(LIPO) -create $^ -output $@

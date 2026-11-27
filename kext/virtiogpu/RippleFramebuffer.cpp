@@ -7,6 +7,7 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOSubMemoryDescriptor.h>
+#include <IOKit/IOUserClient.h>
 #include <kern/clock.h>
 #include <pexpert/pexpert.h>
 #include <linux/virtio_gpu.h>
@@ -707,6 +708,34 @@ IOReturn RippleFramebuffer::setGammaTable(UInt32 channelCount, UInt32 dataCount,
         return kIOReturnUnsupported;
     GammaArgs a = { channelCount, dataCount, dataWidth, data };
     return getWorkLoop()->runAction(&RippleFramebuffer::gammaAction, this, &a);
+}
+
+// The gamma check: an administrator sets the property RippleGammaProbe to a row number
+// (`sudo gamma-test probe ROW`), and RippleGammaProbeResult then describes that row of the
+// image on the display as the host holds it (RippleGamma::probe), or says why there is none.
+IOReturn RippleFramebuffer::setProperties(OSObject *properties)
+{
+    OSDictionary *d = OSDynamicCast(OSDictionary, properties);
+    OSNumber *row = d ? OSDynamicCast(OSNumber, d->getObject("RippleGammaProbe")) : NULL;
+    if (!row)
+        return super::setProperties(properties);
+    IOReturn r = IOUserClient::clientHasPrivilege(current_task(), kIOClientPrivilegeAdministrator);
+    if (r != kIOReturnSuccess)
+        return r;
+    return getWorkLoop()->runAction(&RippleFramebuffer::probeAction, this,
+                                    (void *)(uintptr_t)row->unsigned32BitValue());
+}
+
+IOReturn RippleFramebuffer::probeAction(OSObject *owner, void *row, void *, void *, void *)
+{
+    RippleFramebuffer *fb = (RippleFramebuffer *)owner;
+    char buf[512];
+    if (!fb->fGamma.active() || !fb->fGammaShown)
+        snprintf(buf, sizeof(buf), "no table being applied");
+    else if (!fb->fGamma.probe((uint32_t)(uintptr_t)row, buf, sizeof(buf)))
+        snprintf(buf, sizeof(buf), "the read failed");
+    fb->setProperty("RippleGammaProbeResult", buf);
+    return kIOReturnSuccess;
 }
 
 // ---- A GPU buffer on the display (uapi DISPLAY) ---------------------------------------------
