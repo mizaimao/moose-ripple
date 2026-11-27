@@ -1080,9 +1080,11 @@ failed one of 27. What was wrong, in the order it was fixed:
 | `index32` | 16-bit indices only | index buffers of 32-bit indices were refused | drawn; turned into 16-bit indices where a draw's range fits them |
 | `ff_streams`, only in a full run | nothing drawn | the runtime gives a freed vertex buffer's handle to the next one, and the heap gives it the freed block: same handle, same address, and after one fill the same count of writes, so the old buffer's contents stayed on the GPU | a buffer announced again under a known handle is uploaded again |
 
-With those: Direct3D 9 69 pass and 2 fail, Direct3D 8 28 of 28. The totals grew because cases
+With those: Direct3D 9 71 pass and 2 fail, Direct3D 8 28 of 28. The totals grew because cases
 that were skipped as not offered run now, and because the tests gained cases on the way:
-`static_indexed`, `scaled_point` and `ff_streams` in `d9pixels`, `ff_streams` in `d8pixels`.
+`static_indexed`, `scaled_point` and `ff_streams` in `d9pixels`, `ff_streams` in `d8pixels`,
+and two from the Windows 2000/XP side (`vs2_def_first`, `eviction_in_scene`), which pass here
+as they came.
 Still failing: the caps lack the immediate presentation interval (the runtime
 drops it from what the driver reports; not understood yet), and the `vs1_inputs` declaration.
 Not offered, and next: user clip planes, the scissor test, L16, bump environment mapping in the
