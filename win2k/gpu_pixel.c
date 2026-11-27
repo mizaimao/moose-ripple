@@ -992,9 +992,13 @@ BOOLEAN rb_gpu_texture_upload(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K
                         texels, rowBytes, rowBytes, FALSE, level, rows, face);
 }
 
-BOOLEAN rb_gpu_texture_free(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture)
+/* flush: draws of the open frame may sample the texture (its view is made by commands that have
+ * not gone to the host yet): they go first. Unreferencing takes effect at once, and a view made
+ * of a resource that is gone is an error that makes the host drop the rest of that packet. */
+BOOLEAN rb_gpu_texture_free(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture, BOOLEAN flush)
 {
     PIXEL_REQUEST request;
+    if (flush && gpu->d7Frame.target && gpu->d7Frame.count && !submit_frame(gpu, result, FALSE)) return FALSE;
     /* Unreferencing detaches the resource from every context. A bound view
      * keeps the host storage alive until that context replaces it. */
     begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_UNREF, 0);

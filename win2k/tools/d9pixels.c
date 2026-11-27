@@ -1196,6 +1196,20 @@ static void vertex_shaders(int only)
         IDirect3DDevice9_SetVertexShaderConstantF(device, 0, m, 4);
         vs_run("vs2_transform", colored, vs, ps_color, v, sizeof(v[0]), 8, s, 6);
     }
+    if (!only || only == 38) {
+        /* def statements before the dcl statements, as a compiled HLSL shader has them:
+         * oPos = v0 + c5 (zero), oD0 = v1 * c6 (one). A driver that looks for the dcl statements
+         * only at the start reads no vertex data, and nothing is drawn. */
+        static const DWORD vs[] = { 0xfffe0200,
+            P2I(ODef, 5), P2D(RC, 5, 15), 0, 0, 0, 0,
+            P2I(ODef, 5), P2D(RC, 6, 15), 0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000,
+            VDCL2(0, 0), VDCL2(10, 1),
+            P2I(OAdd, 3), P2D(VPos, 0, 15), P2SRC(RV, 0), P2SRC(RC, 5),
+            P2I(OMul, 3), P2D(VAttr, 0, 15), P2SRC(RV, 1), P2SRC(RC, 6), PSEND };
+        static const SAMPLE s[] = { { 64, 64, 0xffff00 }, { 40, 40, 0xffff00 }, { 8, 8, CLEAR_COLOR } };
+        vs_quad(v, -0.5f, 0.5f, 0.5f, -0.5f, 0xffffff00);
+        vs_run("vs2_def_first", colored, vs, ps_color, v, sizeof(v[0]), 2, s, 3);
+    }
     if (!only || only == 31) {
         /* The same shader through a viewport on the top right quarter. */
         static const DWORD vs[] = { 0xfffe0200, VDCL2(0, 0), VDCL2(10, 1),
@@ -1902,7 +1916,11 @@ static void eviction_case(int only)
         s[i].rgb = color;
     }
     if (made < Count || i < Count) fail_hr("eviction", "create", E_OUTOFMEMORY);
-    else for (scene = 0; scene < 2; ++scene) {
+    /* The third scene: the sixteen textures the host still holds (the last sixteen drawn) and then
+     * the first one, which needs the room of the one drawn first in this scene. That one is freed
+     * while its draw has not gone to the host yet; a driver that frees it there too early loses
+     * the draws that follow it. The eight textures not drawn leave the clear colour. */
+    else for (scene = 0; scene < 3; ++scene) {
         HRESULT hr = S_OK;
         if (!begin("eviction")) break;
         IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
@@ -1911,17 +1929,22 @@ static void eviction_case(int only)
         IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
         IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
         IDirect3DDevice9_SetFVF(device, TLTEXFVF);
-        for (i = 0; SUCCEEDED(hr) && i < Count; ++i) {
-            float x0 = 2.0f + 20 * (i % 6), y0 = 2.0f + 20 * (i / 6);
+        for (i = 0; SUCCEEDED(hr) && i < (scene == 2 ? 17 : Count); ++i) {
+            int t = scene == 2 ? (i < 16 ? Count - 16 + i : 0) : i;
+            float x0 = 2.0f + 20 * (t % 6), y0 = 2.0f + 20 * (t / 6);
             TLTEXVERTEX v[4] = {
                 { x0, y0, 0.5f, 1, 0xffffffff, 0, 0 }, { x0 + 14, y0, 0.5f, 1, 0xffffffff, 1, 0 },
                 { x0, y0 + 14, 0.5f, 1, 0xffffffff, 0, 1 }, { x0 + 14, y0 + 14, 0.5f, 1, 0xffffffff, 1, 1 } };
-            IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)tex[i]);
+            IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)tex[t]);
             hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
         }
         IDirect3DDevice9_SetTexture(device, 0, NULL);
         if (FAILED(hr)) { fail_hr("eviction", "draw", hr); IDirect3DDevice9_EndScene(device); break; }
-        check(scene ? "eviction_again" : "eviction", s, Count);
+        if (scene == 2) {
+            SAMPLE in[Count];
+            for (i = 0; i < Count; ++i) { in[i] = s[i]; if (i >= 1 && i < Count - 16) in[i].rgb = CLEAR_COLOR; }
+            check("eviction_in_scene", in, Count);
+        } else check(scene ? "eviction_again" : "eviction", s, Count);
     }
     for (i = 0; i < made; ++i) IDirect3DTexture9_Release(tex[i]);
 }
