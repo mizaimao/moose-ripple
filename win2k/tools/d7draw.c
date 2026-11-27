@@ -179,6 +179,38 @@ int main(void)
                        p.caches[i][2]);
             printf("D7SHADERS made=%lu text_bytes=%lu\n", p.shaders, p.shaderBytes);
             printf("D7CODE miniport_frame_reserve=%08lx\n", p.codeAt);
+            /* Frame pacing: for each stretch of presents that followed one another (a test of a
+             * benchmark), the frames, the average rate, and how long the frames took: half of
+             * them at most median, 95% and 99% at most those times (upper ends of the counting
+             * buckets), the longest, and how many took more than about 33 and 100 ms. */
+            if (p.frequency > 0) {
+                ULONG seg, k;
+                for (seg = 0; seg <= p.paceSegment && seg < RB2K_PACE_SEGMENTS; ++seg) {
+                    const RB2K_PACE_SEGMENT *s = &p.pace[seg];
+                    ULONG times = s->frames ? s->frames - 1 : 0, sum = 0, over33 = 0, over100 = 0;
+                    LONGLONG at[3] = { 0, 0, 0 };
+                    if (times < 20) continue;   /* a loading screen, a menu */
+                    for (k = 0; k < RB2K_PACE_BUCKETS; ++k) {
+                        ULONG h = RB2K_PACE_FIRST_SHIFT + (k ? (k - 1) / 2 : 0), half = k ? (k - 1) & 1 : 0;
+                        LONGLONG lower = !k ? 0 : half ? (LONGLONG)3 << (h - 1) : (LONGLONG)1 << h;
+                        LONGLONG upper = !k ? (LONGLONG)1 << h : half ? (LONGLONG)2 << h : (LONGLONG)3 << (h - 1);
+                        LONGLONG lowerUs = lower * 1000000 / p.frequency;
+                        sum += s->buckets[k];
+                        if (!at[0] && sum * 2 >= times) at[0] = upper;
+                        if (!at[1] && (LONGLONG)sum * 100 >= (LONGLONG)times * 95) at[1] = upper;
+                        if (!at[2] && (LONGLONG)sum * 100 >= (LONGLONG)times * 99) at[2] = upper;
+                        if (lowerUs >= 33000) over33 += s->buckets[k];
+                        if (lowerUs >= 100000) over100 += s->buckets[k];
+                    }
+                    printf("D7PACE stretch=%lu at_s=%I64d frames=%lu seconds=%I64d.%I64d fps_x10=%I64d median_ms<=%I64d "
+                           "p95_ms<=%I64d p99_ms<=%I64d longest_ms=%I64d over_33ms=%lu over_100ms=%lu\n", seg,
+                           (s->start - p.pace[0].start) / p.frequency, s->frames,
+                           s->total / p.frequency, s->total * 10 / p.frequency % 10,
+                           s->total ? (LONGLONG)times * 10 * p.frequency / s->total : 0,
+                           at[0] * 1000 / p.frequency, at[1] * 1000 / p.frequency, at[2] * 1000 / p.frequency,
+                           s->longest * 1000 / p.frequency, over33, over100);
+                }
+            }
         }
         if (ExtEscape(dc, RB2K_D3D7_PROFILE_ESCAPE, 0, NULL, sizeof(p), (LPSTR)&p) > 0)
             printf("D7REFUSED site=%lu status=%lu stage=%lu count=%lu first_site=%lu first_status=%lu first_stage=%lu\n",

@@ -19,6 +19,19 @@ typedef struct {
     LONGLONG ticks, queueTicks, fenceTicks;
     ULONG calls, submits, fences, bytes, failed;
 } RB2K_D7_TIME;
+/* Frame pacing: the time from each present to the next, counted by size, for each stretch of
+ * presents that follow one another within about two seconds (2^RB2K_PACE_GAP_SHIFT counter
+ * ticks): a test of a benchmark, as loading screens part the tests. Times are counter ticks.
+ * Bucket 0 holds times under 2^RB2K_PACE_FIRST_SHIFT ticks; from there on two buckets cover
+ * each doubling (from 2^k and from 1.5 times 2^k). */
+#define RB2K_PACE_SEGMENTS 32
+#define RB2K_PACE_BUCKETS 23
+#define RB2K_PACE_FIRST_SHIFT 22
+#define RB2K_PACE_GAP_SHIFT 33
+typedef struct {
+    LONGLONG start, total, longest;     /* its first present; the sum of its times; the longest */
+    ULONG frames, buckets[RB2K_PACE_BUCKETS];
+} RB2K_PACE_SEGMENT;
 typedef struct {
     LONGLONG frequency;
     RB2K_D7_TIME op[RB2K_D7_OPS];
@@ -37,6 +50,10 @@ typedef struct {
     ULONG caches[RB2K_CACHE_KINDS][3];
     ULONG shaders, shaderBytes;
     ULONG codeAt;       /* where rb_gpu_frame_reserve was loaded, to place samples */
+    /* Frame pacing by stretch (the last one takes what comes after it is reached). */
+    LONGLONG paceLast;
+    ULONG paceSegment;
+    RB2K_PACE_SEGMENT pace[RB2K_PACE_SEGMENTS];
 } RB2K_D7_PROFILE;
 enum { RB2K_D7_SITE_RECORD = 1, RB2K_D7_SITE_PROGRAM, RB2K_D7_SITE_DEPTH, RB2K_D7_SITE_TEXTURE,
        RB2K_D7_SITE_VERTEX, RB2K_D7_SITE_COMMAND, RB2K_D7_SITE_STEP = 16 };   /* STEP + step in the draw */

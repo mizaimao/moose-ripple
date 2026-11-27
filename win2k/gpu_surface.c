@@ -120,6 +120,29 @@ static VP_STATUS command_error(RB2K_GPU *gpu, const RB2K_GPU_RESULT *result)
     return result->status;
 }
 
+/* Frame pacing (RB2K_PACE_SEGMENT): one present has reached the screen. */
+static void pace(RB2K_GPU *gpu)
+{
+    RB2K_D7_PROFILE *p = &gpu->d7Profile;
+    RB2K_PACE_SEGMENT *s = &p->pace[p->paceSegment];
+    LONGLONG now = rb_counter_ticks(NULL), dt = now - p->paceLast;
+    ULONG high, bucket = 0;
+    if (!p->paceLast || dt < 0 || (dt >> RB2K_PACE_GAP_SHIFT)) {
+        /* The first present of a stretch. */
+        if (s->frames && p->paceSegment + 1 < RB2K_PACE_SEGMENTS) s = &p->pace[++p->paceSegment];
+        if (!s->frames) s->start = now;
+    } else {
+        for (high = RB2K_PACE_GAP_SHIFT - 1; high >= RB2K_PACE_FIRST_SHIFT && !(dt >> high); --high) {}
+        if (high >= RB2K_PACE_FIRST_SHIFT)
+            bucket = 1 + 2 * (high - RB2K_PACE_FIRST_SHIFT) + (ULONG)((dt >> (high - 1)) & 1);
+        ++s->buckets[bucket < RB2K_PACE_BUCKETS ? bucket : RB2K_PACE_BUCKETS - 1];
+        s->total += dt;
+        if (dt > s->longest) s->longest = dt;
+    }
+    ++s->frames;
+    p->paceLast = now;
+}
+
 static VP_STATUS present(RB2K_GPU *gpu, const RB2K_IMAGE *image, const RB2K_DD_PRESENT *p)
 {
     RB2K_PRIMARY *primary = &gpu->primary;
@@ -625,7 +648,11 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     case IOCTL_RB2K_DD_PRESENT:
         if (packet->InputBufferLength != sizeof(RB2K_DD_PRESENT) || packet->OutputBufferLength)
             return ERROR_INVALID_PARAMETER;
-        return present(gpu, image, packet->InputBuffer);
+        {
+            VP_STATUS shown = present(gpu, image, packet->InputBuffer);
+            if (!shown) pace(gpu);
+            return shown;
+        }
     case IOCTL_RB2K_DD_DESTROY:
         if (packet->InputBufferLength != sizeof(id) || packet->OutputBufferLength)
             return ERROR_INVALID_PARAMETER;
