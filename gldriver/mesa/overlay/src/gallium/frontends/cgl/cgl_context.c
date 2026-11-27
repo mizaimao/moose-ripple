@@ -124,6 +124,8 @@ live_remove(struct ripple_cgl_context *ctx)
    simple_mtx_unlock(&live_lock);
 }
 
+static inline void thread_finish(struct gl_context *gl);
+
 /* The context Mesa has current on the calling thread, if it is a living one that names this
  * thread. A pointer that is anything else is dropped from the thread here, with the dispatch
  * table that went with it. */
@@ -133,14 +135,24 @@ thread_current(void)
    struct gl_context *gl = _glapi_get_context();
    struct ripple_cgl_context *ctx = NULL;
 
+   bool alive = false;
+
    if (!gl)
       return NULL;
    simple_mtx_lock(&live_lock);
-   for (unsigned i = 0; i < live_used && !ctx; i++)
-      if (live[i] && live[i]->glctx == gl && live[i]->thread == (void *)pthread_self())
-         ctx = live[i];
+   for (unsigned i = 0; i < live_used && !ctx; i++) {
+      if (live[i] && live[i]->glctx == gl) {
+         alive = true;
+         if (live[i]->thread == (void *)pthread_self())
+            ctx = live[i];
+      }
+   }
    simple_mtx_unlock(&live_lock);
    if (!ctx) {
+      /* A context that still exists but has moved to another thread may have calls queued
+       * here for its second GL thread: they run now, while it is still current here. */
+      if (alive)
+         thread_finish(gl);
       _glapi_set_context(NULL);
       _glapi_set_dispatch(NULL);         /* Mesa's table of no-ops */
    }
@@ -251,12 +263,19 @@ log_unbound(const struct ripple_cgl_context *ctx, bool ok)
 }
 
 /* The second GL thread of a context, if it has one, has to be done before the context is
- * touched from here. */
+ * touched from here. Mesa's finish runs the calls still waiting in the context's open batch
+ * right here, on the calling thread, where they act on whatever context is current: for a
+ * context that is not the current one they have to go to its own worker first (Photo Booth
+ * crashed in glDeleteTextures run against another context when its live view switched
+ * contexts). */
 static inline void
 thread_finish(struct gl_context *gl)
 {
-   if (gl && gl->GLThread.enabled)
-      _mesa_glthread_finish(gl);
+   if (!gl || !gl->GLThread.enabled)
+      return;
+   if (gl != _glapi_get_context())
+      _mesa_glthread_flush_batch(gl);
+   _mesa_glthread_finish(gl);
 }
 
 /* Making a context current leaves the calling thread with the table that queues calls. Inside
