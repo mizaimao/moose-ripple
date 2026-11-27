@@ -3177,6 +3177,16 @@ failure. `tpixels rgb` does the same for Direct3D 7 with the runtime's own softw
 one breaks ties on texel borders the other way (182 pixels, one row and one column, in every
 textured case), so `tpixels` allows 2 pixels in 100.
 
+A case whose own samples fail on the reference rasterizer has no reference there. The `ref` run
+keeps no picture for such a case and says "reference not kept"; the later runs do not compare
+it, so it is judged by its samples and the skip counts alone. Both kinds of run count these
+cases in their end line (`ref_not_kept=N`), so a reference that stops judging cases shows in
+every report. On Windows XP the reference run of `d9pixels` passes every case. On Windows 98 SE
+(DirectX 9.0c) two cases are not kept:
+`lit_far_light` of `d9pixels`, whose lit quad the reference rasterizer draws black there, and
+`zbias` of `d8pixels`, whose biased quad it leaves behind the one in the same plane
+(2026-11-27; why it differs on Windows 98 is not known).
+
 On the first runs (XP SP3 under KVM, Intel UHD 630 host) the reference rasterizer agreed with all
 108 expected results of `d9pixels` and all 44 of `d8pixels`, and 99 of the 107 compared `d9pixels`
 pictures matched it in every pixel. The checks found two things the sampled pixels had not:
