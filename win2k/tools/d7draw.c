@@ -260,12 +260,13 @@ static int report(void)
                     }
                     printf("D7PACE stretch=%lu at_s=%I64d presents=%lu scene_frames=%lu scene_s=%I64d.%I64d fps_x10=%I64d "
                            "median_ms<=%I64d p95_ms<=%I64d p99_ms<=%I64d longest_ms=%I64d over_33ms=%lu over_100ms=%lu "
-                           "light_frames=%lu light_s=%I64d.%I64d\n", seg,
+                           "long_with_uploads=%lu long_with_shaders=%lu long_other=%lu light_frames=%lu light_s=%I64d.%I64d\n", seg,
                            (s->start - p.pace[0].start) / p.frequency, s->frames, times,
                            s->total / p.frequency, s->total * 10 / p.frequency % 10,
                            s->total ? (LONGLONG)times * 10 * p.frequency / s->total : 0,
                            at[0] * 1000 / p.frequency, at[1] * 1000 / p.frequency, at[2] * 1000 / p.frequency,
-                           s->longest * 1000 / p.frequency, over33, over100, s->lightFrames,
+                           s->longest * 1000 / p.frequency, over33, over100, s->longUploads, s->longShaders, s->longOther,
+                           s->lightFrames,
                            s->lightTotal / p.frequency, s->lightTotal * 10 / p.frequency % 10);
                 }
             }

@@ -36,6 +36,9 @@ typedef struct {
     LONGLONG start, total, longest;     /* its first present; the scene frames' times summed; the longest */
     LONGLONG lightTotal;                /* the light frames' times summed */
     ULONG frames, lightFrames, buckets[RB2K_PACE_BUCKETS];     /* all presents; the light ones; scene frames by time */
+    /* Scene frames of 100 ms and more: those with a texture upload in them, those with a host
+     * shader made in them (a frame may be in both), and those with neither. */
+    ULONG longUploads, longShaders, longOther;
 } RB2K_PACE_SEGMENT;
 typedef struct {
     LONGLONG frequency;
@@ -60,6 +63,7 @@ typedef struct {
     ULONG paceSegment;
     /* Draw records so far, their count at the last present, and whether that frame was light. */
     ULONG paceRecords, paceDraws, paceLight;
+    ULONG paceUploads, paceShaders;     /* texture uploads and host shaders made at the last present */
     RB2K_PACE_SEGMENT pace[RB2K_PACE_SEGMENTS];
     /* The desktop in guest memory: frames copied into its pages, copies that failed, the pages
      * older than their host resources (bit 0, bit 1), and whether a flip chain is live. */

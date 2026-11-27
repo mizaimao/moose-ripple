@@ -125,10 +125,15 @@ static void pace(RB2K_GPU *gpu)
 {
     RB2K_D7_PROFILE *p = &gpu->d7Profile;
     RB2K_PACE_SEGMENT *s = &p->pace[p->paceSegment];
-    LONGLONG now = rb_counter_ticks(NULL), dt = now - p->paceLast;
+    LONGLONG second, now = rb_counter_ticks(&second), dt = now - p->paceLast;
     ULONG high, bucket = 0, draws = p->paceRecords - p->paceDraws;
     BOOLEAN light = draws < RB2K_PACE_SCENE_DRAWS;
+    ULONG uploads, shaders;
     p->paceDraws = p->paceRecords;
+    uploads = p->op[RB2K_D7_UPLOAD].calls - p->paceUploads;
+    shaders = p->shaders - p->paceShaders;
+    p->paceUploads = p->op[RB2K_D7_UPLOAD].calls;
+    p->paceShaders = p->shaders;
     if (!p->paceLast || dt < 0 || (dt >> RB2K_PACE_GAP_SHIFT)) {
         /* The first present of a stretch. */
         if (s->frames && p->paceSegment + 1 < RB2K_PACE_SEGMENTS) s = &p->pace[++p->paceSegment];
@@ -143,6 +148,11 @@ static void pace(RB2K_GPU *gpu)
         ++s->buckets[bucket < RB2K_PACE_BUCKETS ? bucket : RB2K_PACE_BUCKETS - 1];
         s->total += dt;
         if (dt > s->longest) s->longest = dt;
+        if (dt * 10 >= second) {
+            if (uploads) ++s->longUploads;
+            if (shaders) ++s->longShaders;
+            if (!uploads && !shaders) ++s->longOther;
+        }
     }
     ++s->frames;
     p->paceLast = now;
