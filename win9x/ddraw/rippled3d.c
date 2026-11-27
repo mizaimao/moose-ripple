@@ -6337,7 +6337,11 @@ static void d8_caps(RB_D3DCAPS8 *c)
     memset(c, 0, sizeof *c);
     p = process();                      /* the runtime version it announced (RbGdi2DxVersion) */
     c->deviceType = 1;                  /* D3DDEVTYPE_HAL */
-    c->caps2 = RB_D3DCAPS2_CANRENDERWINDOWED;
+    /* 0x00400000: D3DCAPS2_PRESENT_INTERVAL_IMMEDIATE (d3dhal.h, for drivers). A Direct3D 8 or 9
+       runtime takes D3DPRESENT_INTERVAL_IMMEDIATE from this bit, not from presentationIntervals,
+       and without it refuses a device that asks for that interval. No present here waits for
+       the vertical blank. */
+    c->caps2 = RB_D3DCAPS2_CANRENDERWINDOWED | 0x00400000UL;
     c->presentationIntervals = RB_D3DPRESENT_INTERVAL_IMMEDIATE | RB_D3DPRESENT_INTERVAL_ONE;
     c->devCaps = hw->dwDevCaps & ~D3DDEVCAPS_FLOATTLVERTEX;
     c->primitiveMiscCaps = tri->dwMiscCaps | 0x80;     /* D3DPMISCCAPS_COLORWRITEENABLE (colour_mask) */
