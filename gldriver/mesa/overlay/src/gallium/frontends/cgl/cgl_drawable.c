@@ -118,6 +118,7 @@ present_stats(const char *how, int64_t t0)
       fprintf(f, "stats: %s: %u presents in %.1f s, %.1f frames/s while moving, %.2f ms per "
               "present\n", how, n, (now - start) / 1e9,
               intervals && moving ? intervals * 1e9 / moving : 0.0, busy / 1e6 / n);
+      ripple_gl_skips_print(f);
       start = now;
       n = intervals = 0;
       busy = moving = 0;

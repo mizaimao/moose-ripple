@@ -121,6 +121,12 @@ _Static_assert(offsetof(struct gld_pixel_format, display_mask) == 0x30, "pixel f
 /* ---- Library ------------------------------------------------------------------------- */
 
 FILE *ripple_gld_dbg_file(void);
+#ifndef RIPPLE_GL_CHECKS
+#define RIPPLE_GL_CHECKS 1
+#endif
+#if RIPPLE_GL_CHECKS
+static void skips_at_exit(void);
+#endif
 
 /* Debug log of the management calls: RIPPLE_GL_DEBUG=1 sends it to stderr; for processes
  * started without our environment (WindowServer, at boot), the directory /Library/Logs/RippleGL
@@ -141,10 +147,85 @@ ripple_gld_dbg_file(void)
          if (f)
             setvbuf(f, NULL, _IOLBF, 0);
       }
+#if RIPPLE_GL_CHECKS
+      if (f)
+         atexit(skips_at_exit);          /* "skips: N" when the process ends */
+#endif
    }
    return f;
 }
 #define DBG(...) do { FILE *df_ = ripple_gld_dbg_file(); if (df_) fprintf(df_, "RippleGLDriver: " __VA_ARGS__); } while (0)
+
+/* ---- What the driver leaves out (development check, 2026-11-27) ----------------------------
+ * Every place that skips part of what a program asked for, or can't handle it, calls
+ * ripple_gl_skip(kind, detail): a GL call we don't implement, a pixel format attribute we
+ * don't offer, an IOSurface texture we can't make. Each kind and detail is counted; its first
+ * time goes to the debug log as a "SKIP" line, and every count in a "skips:" line when the
+ * process exits and with the frame statistics. Test and benchmark scripts fail a run whose
+ * processes report any (tools/sl-checks/run-checks.sh). Written only where the debug log is
+ * (RIPPLE_GL_DEBUG=1, or /Library/Logs/RippleGL existing), so an installed release says nothing;
+ * compiled out with -DRIPPLE_GL_CHECKS=0. */
+#define SKIP_KINDS 64
+static struct { const char *kind; char detail[48]; unsigned count; } skips[SKIP_KINDS];
+static unsigned skip_kinds, skip_total, skip_lost;
+static simple_mtx_t skip_lock = SIMPLE_MTX_INITIALIZER;
+
+void
+ripple_gl_skip(const char *kind, const char *detail)
+{
+#if RIPPLE_GL_CHECKS
+   FILE *f = ripple_gld_dbg_file();
+   if (!f)
+      return;
+   bool first = false;
+   simple_mtx_lock(&skip_lock);
+   skip_total++;
+   unsigned i;
+   for (i = 0; i < skip_kinds; i++)
+      if (skips[i].kind == kind && !strncmp(skips[i].detail, detail ? detail : "",
+                                            sizeof(skips[i].detail) - 1))
+         break;
+   if (i == skip_kinds && skip_kinds < SKIP_KINDS) {
+      skips[i].kind = kind;
+      snprintf(skips[i].detail, sizeof(skips[i].detail), "%s", detail ? detail : "");
+      skip_kinds++;
+      first = true;
+   }
+   if (i < skip_kinds)
+      skips[i].count++;
+   else
+      skip_lost++;
+   simple_mtx_unlock(&skip_lock);
+   if (first)
+      fprintf(f, "RippleGLDriver: SKIP %s: %s\n", kind, detail ? detail : "");
+#endif
+}
+
+/* "skips: N" and the counts by kind, for the log. */
+void
+ripple_gl_skips_print(FILE *f)
+{
+#if RIPPLE_GL_CHECKS
+   if (!f)
+      return;
+   simple_mtx_lock(&skip_lock);
+   fprintf(f, "skips: %u", skip_total);
+   for (unsigned i = 0; i < skip_kinds; i++)
+      fprintf(f, "%s%s %s x%u", i ? "; " : " (", skips[i].kind, skips[i].detail, skips[i].count);
+   if (skip_lost)
+      fprintf(f, "; %u more of other kinds", skip_lost);
+   fprintf(f, "%s\n", skip_kinds ? ")" : "");
+   simple_mtx_unlock(&skip_lock);
+#endif
+}
+
+#if RIPPLE_GL_CHECKS
+static void
+skips_at_exit(void)
+{
+   ripple_gl_skips_print(ripple_gld_dbg_file());
+}
+#endif
 
 static simple_mtx_t lib_lock = SIMPLE_MTX_INITIALIZER;
 static uint32_t lib_display_mask;
@@ -275,7 +356,9 @@ gldChoosePixelFormat(struct gld_pixel_format **out, const uint32_t *attrs)
       fprintf(ripple_gld_dbg_file(), "\n");
    }
    *out = NULL;
+   const uint32_t *refused = NULL;
    for (const uint32_t *a = attrs; a && *a && ok; a++) {
+      refused = a;
       switch (*a) {
       case kCGLPFADoubleBuffer: buffer_mode = kCGLDoubleBufferBit; break;
       case kCGLPFAWindow:       flags |= GLD_FLAG_WINDOW; break;
@@ -305,6 +388,18 @@ gldChoosePixelFormat(struct gld_pixel_format **out, const uint32_t *attrs)
       }
    }
    DBG("gldChoosePixelFormat: %s (mask 0x%x)\n", ok && mask ? "match" : "no match", mask);
+   if (!ok && refused) {                /* something asked for that we don't offer */
+      char detail[48];
+      bool valued = *refused != kCGLPFAStereo && *refused != kCGLPFAFullScreen &&
+                    *refused != kCGLPFAColorFloat && *refused != kCGLPFAMultisample &&
+                    *refused != kCGLPFASupersample && *refused != kCGLPFASampleAlpha &&
+                    *refused != kCGLPFAAuxDepthStencil;
+      if (valued)
+         snprintf(detail, sizeof(detail), "attribute %u value %u", refused[0], refused[1]);
+      else
+         snprintf(detail, sizeof(detail), "attribute %u", refused[0]);
+      ripple_gl_skip("pixel format attribute not offered", detail);
+   }
    /* Window-capable unless off-screen was asked for, as GLRendererFloat does: OpenGL requires
     * the Window bit whenever an app names none of Window, FullScreen, OffScreen, PBuffer. */
    if (!(flags & GLD_FLAG_OFFSCREEN))

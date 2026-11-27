@@ -36,6 +36,7 @@ ripple_cgl_unsupported(const char *name)
       seen[nseen++] = name;
    simple_mtx_unlock(&lock);
    fprintf(stderr, "RippleGLDriver: unsupported GL call %s (ignored)\n", name);
+   ripple_gl_skip("GL call not implemented", name);
 }
 
 void GLAPIENTRY
@@ -3080,6 +3081,12 @@ ripple_cgl_iosurface_texture(struct ripple_cgl_context *ctx, const uint32_t *v)
               plane, ret ? "refused" : opened ? "opens another process's image" :
               shared ? "shares the image" : "copied", shared && copy ? ", copied in again" : "",
               exported ? ", shared with other processes" : "", kept ? ", followed from now on" : "");
+   if (ret) {
+      char detail[48];
+      snprintf(detail, sizeof(detail), "target 0x%x format 0x%x/0x%x plane %u", target, format,
+               type, plane);
+      ripple_gl_skip("IOSurface texture refused", detail);
+   }
    RIPPLE_CGL_DIRECT_END();
    return ret;
 }
