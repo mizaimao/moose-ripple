@@ -5,8 +5,8 @@
 
 enum {
     UsagePosition = 0, UsageBlendWeight = 1, UsageBlendIndices = 2, UsageNormal = 3, UsagePSize = 4,
-    UsageTexCoord = 5, UsagePositionT = 9, UsageColor = 10, Usages = 14,
-    TypeFloat3 = 2, TypeFloat4 = 3, TypeColor = 4, TypeShort4 = 7,
+    UsageTexCoord = 5, UsagePositionT = 9, UsageColor = 10, UsageFog = 11, Usages = 14,
+    TypeFloat1 = 0, TypeFloat3 = 2, TypeFloat4 = 3, TypeColor = 4, TypeShort4 = 7,
     OpDcl = 0x1f, OpDefB = 47, OpDefI = 48, OpDef = 81, OpComment = 0xfffe,
     MaxStreamElements = 64
 };
@@ -119,8 +119,9 @@ int rb_d9_translate(const RB_D9_ELEMENT *elements, unsigned long count,
 
 unsigned long rb_d9_decl_fvf(const RB_D9_ELEMENT *elements, unsigned long count)
 {
-    /* D3DFVF_XYZ 0x002, XYZRHW 0x004, NORMAL 0x010, DIFFUSE 0x040, SPECULAR 0x080, the count of
-     * texture coordinate sets from bit 8, their sizes two bits a set from bit 16 */
+    /* D3DFVF_XYZ 0x002, XYZRHW 0x004, NORMAL 0x010, PSIZE 0x020, DIFFUSE 0x040, SPECULAR 0x080, the
+     * driver-only FOG 0x2000, the count of texture coordinate sets from bit 8, their sizes two bits
+     * a set from bit 16 */
     static const unsigned long size_code[4] = { 3, 0, 1, 2 };   /* FLOAT1..4 as D3DFVF_TEXCOORDSIZE codes */
     unsigned long fvf = 0, offset = 0, stage = 0, tex = 0, k;
 
@@ -136,10 +137,19 @@ unsigned long rb_d9_decl_fvf(const RB_D9_ELEMENT *elements, unsigned long count)
             fvf |= 0x004; stage = 1; offset += 16;
         } else if (e->usage == UsageNormal && !e->usageIndex && e->type == TypeFloat3 && stage == 1 && (fvf & 0x002)) {
             fvf |= 0x010; stage = 2; offset += 12;
+        } else if (e->usage == UsagePSize && !e->usageIndex && e->type == TypeFloat1 && stage >= 1 && stage < 3 &&
+                   !(fvf & 0x020)) {
+            /* a point size (D3DFVF_PSIZE): after the normal, before the colours */
+            fvf |= 0x020; if (stage < 2) stage = 2; offset += 4;
         } else if (e->usage == UsageColor && e->usageIndex == 0 && e->type == TypeColor && stage >= 1 && stage < 3) {
             fvf |= 0x040; stage = 3; offset += 4;
         } else if (e->usage == UsageColor && e->usageIndex == 1 && e->type == TypeColor && stage >= 1 && stage < 4) {
             fvf |= 0x080; stage = 4; offset += 4;
+        } else if (e->usage == UsageFog && !e->usageIndex && e->type == TypeFloat1 && stage >= 1 && stage < 5 &&
+                   (fvf & 0x004) && !(fvf & 0x2000)) {
+            /* the separate fog value of a transformed vertex (d3dhal.h's D3DFVF_FOG): after the
+               colours */
+            fvf |= 0x2000; stage = 4; offset += 4;
         } else if (e->usage == UsageTexCoord && e->usageIndex == tex && e->type <= TypeFloat4 && stage >= 1 && tex < 8) {
             fvf |= size_code[e->type] << (16 + 2 * tex);
             ++tex;

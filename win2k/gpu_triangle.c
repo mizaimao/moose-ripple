@@ -19,6 +19,9 @@ enum {
     SamplerBase = 48, Sampler1Base = 56, ShaderBase = 64, TextureView = 80, TextureView1 = 81,
     PsVertexShader = 82, PsObjectShader = 83, PsSamplerBase = 96, PsLitShader = 112,
     ObjectClipShader = 113, LitClipShader = 114, PsObjectClipShader = 115, PsLitClipShader = 116,
+    /* The same five shaders for points whose sizes they work out (RB2K_POINT_SIZED): transformed,
+     * object space, object space with clip planes, lit, lit with clip planes. */
+    PsPointShaderBase = 117, PsPointShaders = 5,
     PsViewBase = 128,       /* a view for each sampler of a pixel program: 128..143 */
     PointRaster = 160,
     /* Vertex and pixel programs: a host shader for each program slot, and boundVertex's value
@@ -27,7 +30,9 @@ enum {
     ElementsBase = 0x20000      /* the vertex elements of a vertex program for host buffers, by its slot */
 };
 enum { PointBound = 0x10000 };   /* boundRaster while the point rasterizer is bound */
-enum { VertexStage = 0, FragmentStage = 1, PipePoints = 0, PipeLines = 1, PipeTriangles = 4, ShaderText = 2400, LitText = 8192 };
+/* SizedText: room for a vertex shader text with point_lines after it. */
+enum { VertexStage = 0, FragmentStage = 1, PipePoints = 0, PipeLines = 1, PipeTriangles = 4, ShaderText = 2400, LitText = 8192,
+       SizedText = LitText + 2048 };
 /* Gallium's primitive for a packet's RB2K_PRIM_*, and its vertices each. */
 #define PIPE_MODE(primitive) ((primitive) == RB2K_PRIM_POINTS ? PipePoints : (primitive) == RB2K_PRIM_LINES ? PipeLines : PipeTriangles)
 #define PRIM_VERTICES(primitive) ((primitive) == RB2K_PRIM_POINTS ? 1u : (primitive) == RB2K_PRIM_LINES ? 2u : 3u)
@@ -138,7 +143,7 @@ static BOOLEAN shader(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, ULON
                       ULONG stage, const char *text, ULONG size)
 {
     ULONG n = (size+3)/4, *words;
-    if (!size || size > LitText) {
+    if (!size || size > SizedText) {
         r->status = ERROR_INVALID_DATA;
         r->stage = RB2K_STAGE_TRANSFER;
         return FALSE;
@@ -1130,7 +1135,8 @@ BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
  * inputs of the translated pixel shader; a set the draw does not carry reads
  * words of the next vertex, which the program does not use. */
 enum { PsVertexConstants = 3 + RB2K_D8_STAGES, PsOutputs = 2 + RB2K_D8_STAGES };
-typedef char ps_handles[PsViewBase + RB2K_D8_SAMPLERS <= PointRaster && PsViewBase > PsLitClipShader &&
+typedef char ps_handles[PsViewBase + RB2K_D8_SAMPLERS <= PointRaster && PsViewBase >= PsPointShaderBase + PsPointShaders &&
+                        PsPointShaderBase > PsLitClipShader &&
                         PsSamplerBase + RB2K_D8_SAMPLER_KEYS <= PsLitShader && PsOutputs < 11 ? 1 : -1];
 static const char *const ps_transformed_lines[] = {
     "UMAD TEMP[0].x, SV[0].xxxx, CONST[0].zzzz, IMM[1].xxxx",
@@ -1159,23 +1165,62 @@ static void move_line(char *line, const char *a, ULONG m, const char *b, ULONG n
     *line = 0;
 }
 
-static ULONG ps_vertex_text(char *out, BOOLEAN object, BOOLEAN clip)
+/* ---- point sizes worked out by the fixed-function vertex shaders (RB2K_POINT_SIZED) ----
+ * The size a vertex brings is the x of its last constant. Two constants after the draw's vertices
+ * (and lights), found through the integer CONST[0].w, hold (viewport height or 1, smallest size,
+ * largest size) and the scale factors A, B and C (1, 0, 0 without scaling). distance: the
+ * register component with the vertex's distance from the eye, or NULL for transformed vertices,
+ * which are not scaled. one, below: integer immediates holding 1 and the first vertex constant
+ * less 1. first: the first of four free temporaries; out: the PSIZE output. */
+enum { PointConstants = 2 };
+static void temp(TEXT *t, const char *before, ULONG n, const char *after)
+{
+    put(t, before); put(t, "TEMP["); number(t, n); put(t, after);
+}
+
+static void point_lines(TEXT *t, const char *distance, const char *one, const char *below, ULONG first, ULONG out)
+{
+    ULONG a = first, b = first + 1, c = first + 2, d = first + 3;
+    /* The last constant of this vertex: (vertex + 1) x stride + the first vertex constant - 1. */
+    number(t, t->line++); temp(t, ": UADD ", a, "].x, SV[0].xxxx, "); put(t, one); put(t, "\n");
+    number(t, t->line++); temp(t, ": UMAD ", a, "].x, "); temp(t, "", a, "].xxxx, CONST[0].zzzz, "); put(t, below); put(t, "\n");
+    number(t, t->line++); temp(t, ": UARL ADDR[1].x, ", a, "].xxxx\n");
+    number(t, t->line++); temp(t, ": MOV ", b, "], CONST[ADDR[1].x]\n");
+    number(t, t->line++); put(t, ": UARL ADDR[1].x, CONST[0].wwww\n");
+    number(t, t->line++); temp(t, ": MOV ", c, "], CONST[ADDR[1].x]\n");
+    number(t, t->line++); temp(t, ": MOV ", d, "], CONST[ADDR[1].x+1]\n");
+    if (distance) {
+        number(t, t->line++); temp(t, ": MAD ", b, "].y, "); temp(t, "", d, "].zzzz, "); put(t, distance); temp(t, ", ", d, "].yyyy\n");
+        number(t, t->line++); temp(t, ": MAD ", b, "].y, "); temp(t, "", b, "].yyyy, "); put(t, distance); temp(t, ", ", d, "].xxxx\n");
+        number(t, t->line++); temp(t, ": RSQ ", b, "].y, "); temp(t, "", b, "].yyyy\n");
+        number(t, t->line++); temp(t, ": MUL ", b, "].x, "); temp(t, "", b, "].xxxx, "); temp(t, "", b, "].yyyy\n");
+        number(t, t->line++); temp(t, ": MUL ", b, "].x, "); temp(t, "", b, "].xxxx, "); temp(t, "", c, "].xxxx\n");
+    }
+    number(t, t->line++); temp(t, ": MAX ", b, "].x, "); temp(t, "", b, "].xxxx, "); temp(t, "", c, "].yyyy\n");
+    number(t, t->line++); put(t, ": MIN OUT["); number(t, out); temp(t, "].x, ", b, "].xxxx, "); temp(t, "", c, "].zzzz\n");
+}
+
+static ULONG ps_vertex_text(char *out, BOOLEAN object, BOOLEAN clip, BOOLEAN sized)
 {
     TEXT t;
     ULONG i, base = object ? (clip ? 21 : 15) : 1;
-    t.p = out; t.n = 0; t.line = 0; t.size = LitText; t.overflow = FALSE;
+    ULONG psize = PsOutputs + 1 + (object ? 1 : 0) + (clip ? 2 : 0);   /* the output after the others */
+    t.p = out; t.n = 0; t.line = 0; t.size = sized ? SizedText : LitText; t.overflow = FALSE;
     put(&t, "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..");
-    number(&t, base + PsVertexConstants * RB2K_D8_VERTICES - 1);
-    put(&t, clip ? "]\nDCL ADDR[0]\nDCL TEMP[0..7]\nDCL OUT[0], POSITION\n" : "]\nDCL ADDR[0]\nDCL TEMP[0..5]\nDCL OUT[0], POSITION\n");
+    number(&t, base + PsVertexConstants * RB2K_D8_VERTICES - 1 + (sized ? PointConstants : 0));
+    put(&t, sized ? "]\nDCL ADDR[0..1]\nDCL TEMP[0..11]\nDCL OUT[0], POSITION\n" :
+            clip ? "]\nDCL ADDR[0]\nDCL TEMP[0..7]\nDCL OUT[0], POSITION\n" : "]\nDCL ADDR[0]\nDCL TEMP[0..5]\nDCL OUT[0], POSITION\n");
     for (i = 0; i < PsOutputs + (object ? 1 : 0); ++i) {
         put(&t, "DCL OUT["); number(&t, i + 1); put(&t, "], GENERIC["); number(&t, i); put(&t, "]\n");
     }
     if (clip) put(&t, "DCL OUT[12], CLIPDIST[0]\nDCL OUT[13], CLIPDIST[1]\n");
+    if (sized) { put(&t, "DCL OUT["); number(&t, psize); put(&t, "], PSIZE\n"); }
     put(&t, object ? "IMM[0] FLT32 {0x3f800000, 0x40000000, 0x00000000, 0x00000000}\n"
                    : "IMM[0] FLT32 {0x3f000000, 0x3f800000, 0x40000000, 0x00000000}\n");
     put(&t, "IMM[1] UINT32 {");
     number(&t, base);
-    put(&t, ", 0, 0, 0}\n");
+    if (sized) { put(&t, ", 1, "); number(&t, base - 1); put(&t, ", 0}\n"); }
+    else put(&t, ", 0, 0, 0}\n");
     if (object) {
         /* object_lines without its addressing (0..3) and outputs (39..); its
          * fog depths (17..21) go to GENERIC[10]. */
@@ -1194,6 +1239,7 @@ static ULONG ps_vertex_text(char *out, BOOLEAN object, BOOLEAN clip)
         move_line(line, "MOV OUT[", i, "], CONST[ADDR[0].x+", i);
         op(&t, line, 0, 0, 0);
     }
+    if (sized) point_lines(&t, object ? "TEMP[5].yyyy" : NULL, "IMM[1].yyyy", "IMM[1].zzzz", 8, psize);
     if (clip) clip_op(&t, "END", 15, 6, 12); else op(&t, "END", 0, 0, 0);
     return t.overflow ? 0 : t.n + 1;
 }
@@ -1210,23 +1256,26 @@ static BOOLEAN same(const char *a, const char *b)
     return !*a && !*b;
 }
 
-static ULONG ps_lit_text(char *out, BOOLEAN clip)
+static ULONG ps_lit_text(char *out, BOOLEAN clip, BOOLEAN sized)
 {
     TEXT t;
-    ULONG i, found = 0;
-    t.p = out; t.n = 0; t.line = 0; t.size = LitText; t.overflow = FALSE;
+    ULONG i, found = 0, psize = clip ? 14 : 12;     /* the output after the others */
+    t.p = out; t.n = 0; t.line = 0; t.size = sized ? SizedText : LitText; t.overflow = FALSE;
     put(&t, "VERT\nDCL SV[0], VERTEXID\nDCL CONST[0..");
-    number(&t, LitVertexBase + (clip ? 6 : 0) + PsLitVertexConstants * RB2K_D8_VERTICES + LitLightConstants * RB2K_D7_LIGHTS - 1);
-    put(&t, clip ? "]\nDCL ADDR[0]\nDCL TEMP[0..38]\nDCL OUT[0], POSITION\n" : "]\nDCL ADDR[0]\nDCL TEMP[0..36]\nDCL OUT[0], POSITION\n");
+    number(&t, LitVertexBase + (clip ? 6 : 0) + PsLitVertexConstants * RB2K_D8_VERTICES + LitLightConstants * RB2K_D7_LIGHTS - 1 +
+               (sized ? PointConstants : 0));
+    put(&t, sized ? "]\nDCL ADDR[0..1]\nDCL TEMP[0..42]\nDCL OUT[0], POSITION\n" :
+            clip ? "]\nDCL ADDR[0]\nDCL TEMP[0..38]\nDCL OUT[0], POSITION\n" : "]\nDCL ADDR[0]\nDCL TEMP[0..36]\nDCL OUT[0], POSITION\n");
     for (i = 0; i <= PsOutputs; ++i) {
         put(&t, "DCL OUT["); number(&t, i + 1); put(&t, "], GENERIC["); number(&t, i); put(&t, "]\n");
     }
     if (clip) put(&t, "DCL OUT[12], CLIPDIST[0]\nDCL OUT[13], CLIPDIST[1]\n");
+    if (sized) { put(&t, "DCL OUT["); number(&t, psize); put(&t, "], PSIZE\n"); }
     put(&t, "IMM[0] FLT32 {0x3f800000, 0x40000000, 0x00000000, 0x3f000000}\n");
     put(&t, clip ? "IMM[1] UINT32 {8, 30, 8, 1}\n" : "IMM[1] UINT32 {8, 24, 8, 1}\n");
-    put(&t, ""
-            "IMM[2] FLT32 {0x00000000, 0x00000000, 0xbf800000, 0x0d800000}\n"
-            "IMM[3] UINT32 {0, 0, 0, 0}\n");
+    put(&t, "IMM[2] FLT32 {0x00000000, 0x00000000, 0xbf800000, 0x0d800000}\n");
+    /* y: the first vertex constant less 1, for point_lines. */
+    put(&t, !sized ? "IMM[3] UINT32 {0, 0, 0, 0}\n" : clip ? "IMM[3] UINT32 {0, 29, 0, 0}\n" : "IMM[3] UINT32 {0, 23, 0, 0}\n");
     for (i = 0; i < sizeof(lit_lines)/sizeof(*lit_lines); ++i) {
         const char *l = lit_lines[i], *fogOut = "MOV OUT[4], TEMP[14]", *coordIn = "MOV TEMP[26], CONST[ADDR[0].x+3]";
         const char *address = "UMAD TEMP[0].x, SV[0].xxxx, IMM[1].xxxx, IMM[1].yyyy";
@@ -1246,6 +1295,8 @@ static ULONG ps_lit_text(char *out, BOOLEAN clip)
             found |= 1;
             continue;
         }
+        /* The distance from the eye is still in TEMP[14].y (the fog depths). */
+        if (sized && same(l, "END")) point_lines(&t, "TEMP[14].yyyy", "IMM[1].wwww", "IMM[3].yyyy", 39, psize);
         if (clip) clip_op(&t, l, LitVertexBase, 37, 12); else op(&t, l, 0, 0, 0);
         if (same(l, coordIn)) {
             for (k = 1; k < RB2K_D8_STAGES; ++k) {
@@ -1282,7 +1333,13 @@ BOOLEAN rb_gpu_d8_valid(const RB2K_D3D8_DRAW *d)
     if (d->transform == 2 && (d->lighting || !d->vertexProgram || d->vertexConstants > RB2K_D8_VS_CONSTANTS ||
         !d->vertexWords || d->vertexWords % 4 || d->vertexWords > RB2K_D8_VS_VERTEX_WORDS)) return FALSE;
     if (d->primitive > RB2K_PRIM_POINTS || (d->transform != 3 && d->count % PRIM_VERTICES(d->primitive)) ||
-        d->pointFlags > (RB2K_POINT_SPRITE | RB2K_POINT_PER_VERTEX) || d->pointSize > RB2K_POINT_SIZE_MAX ||
+        d->pointFlags > (RB2K_POINT_SPRITE | RB2K_POINT_PER_VERTEX | RB2K_POINT_SIZED | RB2K_POINT_SCALED) ||
+        d->pointSize > RB2K_POINT_SIZE_MAX ||
+        /* Sizes worked out by the fixed-function vertex shaders: points, with the size in the last of at
+         * least two coordinate sets; scaled by distance only in object space. */
+        ((d->pointFlags & RB2K_POINT_SIZED) && (d->primitive != RB2K_PRIM_POINTS || d->transform > 1 || d->coordSets < 2 ||
+                                                d->coordSets > RB2K_D8_STAGES || !(d->pointFlags & RB2K_POINT_PER_VERTEX))) ||
+        ((d->pointFlags & RB2K_POINT_SCALED) && (!(d->pointFlags & RB2K_POINT_SIZED) || d->transform != 1)) ||
         d->clipMask > 63 || d->scissorOn > 1 || (d->scissorOn && (d->scissor[0] > 8192 || d->scissor[1] > 8192 || d->scissor[2] > 8192 ||
         d->scissor[3] > 8192)) ||
         d->transform > 3 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
@@ -1396,6 +1453,8 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
     ULONG words[192], n = 0, slot, key[6], state, i, k, h[RB2K_D8_SAMPLERS], views[RB2K_D8_SAMPLERS], busy = 0;
     /* buffered: the vertices are in host buffers named by the RB2K_D8_BUFFER_DRAW after the constants. */
     BOOLEAN shaded = d->transform >= 2, buffered = d->transform == 3;
+    /* sized: the fixed-function vertex shader works out each point's size (point_lines). */
+    BOOLEAN sized = d->transform < 2 && (d->pointFlags & RB2K_POINT_SIZED) != 0;
     const RB2K_D8_BUFFER_DRAW *bd = (const RB2K_D8_BUFFER_DRAW *)(d->vertices + 4 * d->vertexConstants);
     ULONG lit = !shaded && d->lighting != 0, lights = lit ? d->lightCount : 0;
     ULONG stages = 0, fill = 0, count = buffered ? 0 : d->count, streams = 0;
@@ -1403,7 +1462,7 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
      * draws (ffPlanes). */
     ULONG planes = shaded && d->clipMask ? 6 : 0, ffPlanes = !shaded && d->transform && d->clipMask ? 6 : 0;
     ULONG extra = shaded ? 4 * (RB2K_D8_VS_CONST_BASE - 1) + 4 * d->vertexConstants + 4 * planes :
-                  (d->transform ? 56 : 0) + (lit ? 36 + 32 * lights : 0) + 4 * ffPlanes;
+                  (d->transform ? 56 : 0) + (lit ? 36 + 32 * lights : 0) + 4 * ffPlanes + (sized ? 4 * PointConstants : 0);
     ULONG sets = d->coordSets, words8 = RB2K_D8_VERTEX_WORDS(sets);
     ULONG stride = shaded ? d->vertexWords / 4 : lit ? 4 + (sets ? sets : 1) : 3 + sets, perVertex = 4 * stride;
     ULONG total = 28 + (d->transform || d->scissorOn ? 4 : 0) + extra + perVertex * count, *p;
@@ -1442,16 +1501,22 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
     if (!buffered && !plain_elements(gpu, r, image)) return FALSE;
     if (!shaded) {
         /* Index 1: the clip variants of the object-space shaders (user clip planes). */
-        static char transformedText[LitText], objectText[2][LitText], litText[2][LitText];
+        static char transformedText[LitText], objectText[2][LitText], litText[2][LitText], sizedText[SizedText];
         static ULONG transformedSize, objectSize[2], litSize[2];
         ULONG clip = d->transform && d->clipMask ? 1 : 0;
         ULONG want = d->lighting ? (clip ? 512 : 32) : d->transform ? (clip ? 256 : 16) : 8;
         ULONG handle = d->lighting ? (clip ? PsLitClipShader : PsLitShader) :
                        d->transform ? (clip ? PsObjectClipShader : PsObjectShader) : PsVertexShader;
+        if (sized) {    /* the same five shaders with point_lines; their bits lie above the others' */
+            ULONG which = d->lighting ? 3 + clip : d->transform ? 1 + clip : 0;
+            want = 1024UL << which;
+            handle = PsPointShaderBase + which;
+        }
         if (!(s->vertexShaders & want)) {
-            ULONG *size = d->lighting ? &litSize[clip] : d->transform ? &objectSize[clip] : &transformedSize;
-            char *text = d->lighting ? litText[clip] : d->transform ? objectText[clip] : transformedText;
-            if (!*size) *size = d->lighting ? ps_lit_text(text, clip != 0) : ps_vertex_text(text, d->transform != 0, clip != 0);
+            ULONG made = 0;     /* the sized texts are made each time: a colour context needs each once */
+            ULONG *size = sized ? &made : d->lighting ? &litSize[clip] : d->transform ? &objectSize[clip] : &transformedSize;
+            char *text = sized ? sizedText : d->lighting ? litText[clip] : d->transform ? objectText[clip] : transformedText;
+            if (!*size) *size = d->lighting ? ps_lit_text(text, clip != 0, sized) : ps_vertex_text(text, d->transform != 0, clip != 0, sized);
             if (!*size) { r->status = ERROR_INVALID_DATA; r->stage = RB2K_STAGE_TRANSFER; return FALSE; }
             if (!shader(gpu, r, image, handle, VertexStage, text, *size)) return FALSE;
             s->vertexShaders |= want;
@@ -1565,7 +1630,10 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
     }
     *p++ = VIRGL_CMD0(VIRGL_CCMD_SET_CONSTANT_BUFFER,0,6+extra+perVertex*count);
     *p++ = VertexStage; *p++ = 0;
-    *p++ = width; *p++ = height; *p++ = stride; *p++ = shaded ? RB2K_D8_VS_CONST_BASE + d->vertexConstants + planes : 0;
+    /* w: where a vertex program's vertices start, or the point constants after the vertices and lights. */
+    *p++ = width; *p++ = height; *p++ = stride;
+    *p++ = shaded ? RB2K_D8_VS_CONST_BASE + d->vertexConstants + planes :
+           sized ? (lit ? LitVertexBase : d->transform ? 15 : 1) + ffPlanes + stride * count + LitLightConstants * lights : 0;
     if (shaded) {
         /* The viewport, its depth range, the integer and boolean constants of static flow control
          * (CONST[3..18]), then the shader's constants and the vertices as they came. */
@@ -1635,6 +1703,13 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
         *p++ = l[19]; *p++ = l[21]; *p++ = l[22]; *p++ = l[23];
         *p++ = l[24]; *p++ = l[25]; *p++ = l[20]; *p++ = 0;
         *p++ = l[0] == 3 ? 0x3f800000 : 0; *p++ = l[0] == 2 ? 0x3f800000 : 0; *p++ = 0; *p++ = 0;
+    }
+    if (sized) {
+        /* point_lines: the viewport height (or 1), the smallest and largest size; then A, B and C. */
+        BOOLEAN scaled = (d->pointFlags & RB2K_POINT_SCALED) != 0;
+        *p++ = scaled ? integer_bits(d->viewport[3]) : 0x3f800000; *p++ = d->pointRange[0]; *p++ = d->pointRange[1]; *p++ = 0;
+        *p++ = scaled ? d->pointScale[0] : 0x3f800000; *p++ = scaled ? d->pointScale[1] : 0;
+        *p++ = scaled ? d->pointScale[2] : 0; *p++ = 0;
     }
     if (buffered) {
         /* Each stream's buffer with its stride and the offset of vertex zero (a stream not given
