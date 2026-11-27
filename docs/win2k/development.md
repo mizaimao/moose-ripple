@@ -2797,6 +2797,50 @@ that are drawn now sample more textures).
 `tpixels` 18 of 18.
 
 
+## Checking a benchmark run: pictures, counters, frame pacing
+
+A frame count says nothing about what was drawn. A run of 3DMark05 once counted 30 frames a
+second while most of its frames drew almost nothing and the screen went back and forth between
+two old pictures (see "A depth buffer smaller than the render target"). So a frame rate or a
+score from this driver counts only with a check of the pictures, made in a run of its own.
+
+**The pictures.** Take a capture of the guest's screen every second through the run (QEMU's
+monitor command `screendump FILE -f png`), named in order, and run
+`win2k/tools/framecheck.sh DIR` over them. It compares every capture with all earlier ones and
+counts new pictures, pictures that stand still, pictures seen earlier with others in between
+(the display went back to an old frame) and pictures of one colour, with the place of each
+run of them. A test that is drawn and shown gives a new picture at every capture. Captures
+seen earlier at the very end of a run are the desktop after the last test. Then look at a few
+captures: a benchmark's own overlay must be on them, and the scene must be the scene.
+
+**The counters while it runs.** The display driver's counters belong to a display mode and are
+gone when a full-screen program leaves it. `d7draw -watch FILE SECONDS`, started beside the
+program (`start "" /b d7draw.exe -watch ...` in a command file), appends a line a second to
+FILE until `FILE.stop` exists: DrawPrimitives2 calls and the ones that failed with the last
+failure and its opcode, flips, the flips that copied a frame into the page they show, the
+newest flip, and the miniport's draws, clears, presents and failures. Once a minute it adds
+the whole report. A call that fails matters more than it looks: the runtime drops the rest of
+that command batch.
+
+**Frame pacing.** The miniport times every present against the one before it and counts the
+times by size (`RB2K_PACE_SEGMENT` in `rb2kd3d7.h`), for each stretch of presents: a new
+stretch starts after two seconds without a present and when a program closes its Direct3D
+device, so each test of a benchmark is a stretch. A frame with fewer than 16 draw records is a
+light frame (a loading screen is drawn by the same device as its test, hundreds of times a
+second); light frames are only counted. `d7draw` prints one line for each stretch:
+
+    D7PACE stretch=0 at_s=0 presents=3352 scene_frames=2393 scene_s=106.9 fps_x10=223
+           median_ms<=47 p95_ms<=95 p99_ms<=190 longest_ms=333 over_33ms=627 over_100ms=39
+           long_with_uploads=... long_with_shaders=... long_other=... light_frames=958 light_s=7.3
+
+The times are upper ends of the counting buckets (two for each doubling). The three `long_`
+counts say what happened in the scene frames of 100 ms and more: a texture upload, a host
+shader made, or neither.
+
+Pacing is measured in a run without captures and without the watch: a capture a second shows
+up as about one frame over 100 ms a second. With captures, 3DMark05's three game tests had
+146, 81 and 61 frames over 100 ms (loading screens counted in); without them, scene frames
+only, 40, 4 and 1 on the same host.
 ## A depth buffer smaller than the render target
 
 Direct3D 9 sets the render target and the depth buffer in separate calls, and a program may
