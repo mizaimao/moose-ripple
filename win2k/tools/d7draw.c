@@ -176,6 +176,35 @@ static int report(void)
            s.vsCreated, s.vsTranslated, s.vsDraws, s.vsStageDraws, s.stageFailed, s.vsLastDetail);
     for (i = 0; i < 8; ++i) printf(" %lu", s.vsFailed[i]);
     printf("\n");
+    /* Draws from host buffers; left: shade, program, stream, buffer, index, range, read, user memory. */
+    printf("D8HOST draws=%lu buffers=%lu summed_chunks=%lu uploads=%lu upload_bytes=%lu scans=%lu scan_hits=%lu "
+           "rewrites=%lu streamed=%lu arenas=%lu sum_skips=%lu stream_hits=%lu left",
+           s.hostDraws, s.hostBuffers, s.hostSummed, s.hostUploads, s.hostUploadBytes, s.hostScans, s.hostScanHits,
+           s.hostRewrites, s.hostStreamed, s.hostArenas, s.hostSumSkips, s.hostStreamHits);
+    for (i = 0; i < 8; ++i) printf(" %lu", s.hostLeft[i]);
+    printf("\n");
+    {
+        /* Vertex shaders with no program for host buffers: by the translator's reason (version, truncated,
+         * opcode, register, modifier, overflow, other), then refused by the miniport or without elements. */
+        ULONG k;
+        printf("D8HOSTPROG fails=%lu last_detail=%lx last_elements=%lu last_bytes=%lu reasons", s.hostProgramFails,
+               s.hostProgramDetail, s.hostProgramElements, s.hostProgramBytes);
+        for (i = 0; i < 9; ++i) printf(" %lu", s.hostProgramReasons[i]);
+        printf("\n");
+        for (i = 0; i < s.hostProgramFails && i < 4; ++i) {
+            printf("D8HOSTPROG %lu decl", i);
+            for (k = 0; k < 24 && s.hostProgramDecl[i][k] != 0xffffffff; ++k) printf(" %08lx", s.hostProgramDecl[i][k]);
+            printf("\n");
+        }
+        /* The last events, oldest first: what each word is, is in host_log (display_d3d7.c). */
+        static const char *const kinds[7] = { "?", "register", "release", "made", "upload", "draw", "rewritten" };
+        ULONG n = s.hostLogCount < 48 ? s.hostLogCount : 48, first = s.hostLogCount - n;
+        for (i = 0; i < n; ++i) {
+            const ULONG *t = s.hostLog[(first + i) % 48];
+            printf("D8HOSTLOG %lu %s %lx %lx %lx %lx %lx %lx %lx\n", first + i, kinds[t[0] < 7 ? t[0] : 0],
+                   t[1], t[2], t[3], t[4], t[5], t[6], t[7]);
+        }
+    }
     for (i = 0; i < s.vsCreated && i < 4; ++i) {
         ULONG k, words = (s.vsLog[i][1] + s.vsLog[i][2]) / 4;
         printf("D8VS %lu handle=%lx decl=%lu code=%lu w=", i, s.vsLog[i][0], s.vsLog[i][1], s.vsLog[i][2]);
@@ -233,6 +262,8 @@ static int report(void)
                        p.caches[i][2]);
             printf("D7SHADERS made=%lu text_bytes=%lu\n", p.shaders, p.shaderBytes);
             printf("D7CODE miniport_frame_reserve=%08lx\n", p.codeAt);
+            printf("D7BUFFERS made=%lu freed=%lu uploads=%lu upload_bytes=%lu draws=%lu\n", p.buffersMade, p.buffersFreed,
+                   p.bufferUploads, p.bufferBytes, p.bufferDraws);
             /* Frame pacing: for each stretch of presents (a test of a benchmark), its scene frames,
              * their average rate, and how long they took: half of them at most median, 95% and 99%
              * at most those times (upper ends of the counting buckets), the longest, and how many
