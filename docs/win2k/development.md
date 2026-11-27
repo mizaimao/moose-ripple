@@ -2417,7 +2417,11 @@ that fail and those of cube and volume textures, refused textures, devices
 made, and the caps the program reads, the whole record as hex words. They pin
 themselves, since a program that frees the runtime after probing would
 otherwise crash in the unloaded hooks. 3DMark03's refused volume texture and
-3DMark05's hardware check were found with them.
+3DMark05's hardware check were found with them. `d9trace` also logs each device with the
+presentation settings asked for and given (size, back buffer format, depth format, flags), the
+device type checks, and each new value a device sets for the blend factors, the colour write
+mask and fog: enough to see which test of a benchmark asks for a back buffer with alpha and
+blends by it.
 
 `guiclick` drives a program's windows for unattended runs. `-press @Title#N`
 presses the button with control ID N only in a window whose title contains
@@ -2428,6 +2432,10 @@ items are read out of the program's memory), so a benchmark's result details rea
 3DMark03's per-test results come from `-press "@3DMark Score#4"`, which opens its details
 window. Before the `-until` close the windows are looked at once more and acted on whatever
 the clock says, so a press that was waiting for a window to stand still is not lost.
+`-pick @Title#N=K`, `-set @Title#N=text` and `-check @Title#text` act only in a window whose
+title contains Title, for a run that goes through several dialogs with controls of the same
+kind (3DMark03's Benchmark Settings, button 13 of the main window, whose button 4 is OK, and
+its Image Quality tool both have a resolution box and the same check boxes).
 
 ## Pixel shader 1.4
 
