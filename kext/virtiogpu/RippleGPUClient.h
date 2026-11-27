@@ -12,6 +12,8 @@
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include "ripple_gpu_uapi.h"
 
+struct RippleShare;
+
 class RippleAccelerator;
 class VirtioGPUDevice;
 
@@ -31,9 +33,14 @@ class RippleGPUClient : public IOUserClient
         uint32_t attached;               // bit i: attached to fContext[i]
         uint32_t format, width, height;  // as created (for SURFACE_PRESENT)
         uint32_t flags;                  // as created (bit 0: rows top first)
+        struct ripple_virgl_buffer_params params;   // as created (for BUFFER_OPEN)
+        struct RippleShare *share;       // held with other connections (BUFFER_SHARE/OPEN), or 0
+        uint32_t opens;                  // a buffer this connection opened: BUFFER_DESTROYs it
+                                         // takes to let go
     };
 
     task_t             fTask;
+    uint32_t           fUid;                     // the opener's user: who may open its shares
     RippleAccelerator *fAccel;
     VirtioGPUDevice   *fDev;
     IOLock            *fLock;
@@ -82,6 +89,9 @@ class RippleGPUClient : public IOUserClient
     IOReturn contextDestroy(uint32_t ctx);
     IOReturn bufferCreate(const struct ripple_gpu_buffer_create *in, uint64_t *handle, uint64_t *size);
     IOReturn bufferDestroy(uint32_t handle);
+    IOReturn bufferShare(uint32_t handle, uint64_t key);
+    IOReturn bufferOpen(uint64_t key, uint64_t *handle, uint64_t *size,
+                        struct ripple_gpu_buffer_create *out);
     IOReturn submit(IOExternalMethodArguments *a, uint64_t *fence);
     IOReturn transfer(const struct ripple_gpu_transfer *in, uint64_t *fence);
     IOReturn display(uint32_t handle, uint32_t x, uint32_t y, uint32_t w, uint32_t h);

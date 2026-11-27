@@ -45,6 +45,12 @@ enum ripple_gpu_method {
                                         top row first (one buffer per surface; with ONCE it only
                                         copies the frame there now). out scalar: 1 it holds a
                                         frame now, 0 none presented yet */
+    RIPPLE_GPU_BUFFER_SHARE    = 13, /* in scalars: buffer handle, key (not 0). Other connections of the
+                                        same user can now open the buffer by that key; a newer
+                                        buffer shared under the same key takes it over */
+    RIPPLE_GPU_BUFFER_OPEN     = 14, /* in scalar: key; out scalars: buffer handle, backing size;
+                                        out struct: ripple_gpu_buffer_create (size, params as
+                                        created). BUFFER_DESTROY lets go of it again */
     RIPPLE_GPU_METHOD_COUNT
 };
 

@@ -7,6 +7,7 @@
 #include "VirtioGPUDevice.h"
 
 #include <IOKit/IOLib.h>
+#include <sys/kauth.h>
 
 #define super IOUserClient
 OSDefineMetaClassAndStructors(RippleGPUClient, IOUserClient)
@@ -20,6 +21,7 @@ bool RippleGPUClient::initWithTask(task_t owningTask, void *securityID, UInt32 t
     if (!super::initWithTask(owningTask, securityID, type))
         return false;
     fTask = owningTask;
+    fUid = kauth_cred_getuid(kauth_cred_get());     // IOServiceOpen runs on the opener's thread
     fLock = IOLockAlloc();
     return fLock != 0;
 }
@@ -37,10 +39,21 @@ void RippleGPUClient::destroyBuffer(Buffer &b)
 {
     if (!b.handle)
         return;
-    // Never leave a buffer that is going away on the display, whatever fShown says, nor as a
-    // surface's frame.
-    fAccel->framebuffer()->releaseResource(b.handle);
+    // No surface may keep using it in this connection's contexts.
     fAccel->forgetSurfaceFrames(b.handle, 0);
+    // Shared with other connections: this one lets go, and the last holder destroys it. The
+    // buffer leaves this connection's contexts, so that its commands can't reach it any more.
+    if (b.share) {
+        for (int i = 0; i < kMaxContexts; i++)
+            if (fContext[i] && (b.attached & (1u << i)))
+                fDev->ctxDetachResource(fContext[i], b.handle);
+        if (!fAccel->releaseShare(b.share)) {
+            bzero(&b, sizeof(b));
+            return;
+        }
+    }
+    // Never leave a buffer that is going away on the display, whatever fShown says.
+    fAccel->framebuffer()->releaseResource(b.handle);
     bool detached = fDev->detachBacking(b.handle);
     bool gone = fDev->resourceUnref(b.handle);      // also drops it from any context
     if (b.mem) {
@@ -307,6 +320,7 @@ IOReturn RippleGPUClient::bufferCreate(const struct ripple_gpu_buffer_create *in
     b->width = p->width;
     b->height = p->height;
     b->flags = p->flags;
+    b->params = *p;
     *handle = id;
     *size = bytes;
     return kIOReturnSuccess;
@@ -317,10 +331,72 @@ IOReturn RippleGPUClient::bufferDestroy(uint32_t handle)
     Buffer *b = findBuffer(handle);
     if (!b)
         return kIOReturnBadArgument;
+    if (b->opens > 1) {                     // opened again by this connection: still held
+        b->opens--;
+        return kIOReturnSuccess;
+    }
     if (fShown == handle)
         fShown = 0;
     destroyBuffer(*b);                      // takes it off the display first
     removeBuffer(b);
+    return kIOReturnSuccess;
+}
+
+// Other connections of the same user may open the buffer by `key` from now on (docs/kext-uapi.md).
+// The buffer then belongs to every holder; the last one destroys it (destroyBuffer).
+IOReturn RippleGPUClient::bufferShare(uint32_t handle, uint64_t key)
+{
+    Buffer *b = findBuffer(handle);
+    if (!b || !key || !b->mem)
+        return kIOReturnBadArgument;
+    if (b->share) {
+        fAccel->rekeyShare(b->share, key);
+        return kIOReturnSuccess;
+    }
+    b->share = fAccel->addShare(key, b->handle, fUid, b->mem, b->size, b->params);
+    if (!b->share)
+        return kIOReturnNoResources;
+    b->opens = 1;
+    return kIOReturnSuccess;
+}
+
+IOReturn RippleGPUClient::bufferOpen(uint64_t key, uint64_t *handle, uint64_t *size,
+                                     struct ripple_gpu_buffer_create *out)
+{
+    RippleShare *s = fAccel->openShare(key, fUid);
+    if (!s)
+        return kIOReturnNotFound;
+    Buffer *b = findBuffer(s->handle);
+    if (b && b->share == s) {
+        b->opens++;                         // this connection holds it already
+        fAccel->releaseShare(s);            // one holder per connection: not the last
+    } else if (b || fBufferCount >= kMaxBuffers || !growBuffers()) {
+        Buffer gone;                        // the others may have let go meanwhile
+        bzero(&gone, sizeof(gone));
+        gone.handle = s->handle;
+        gone.mem = s->mem;
+        gone.size = s->size;
+        if (fAccel->releaseShare(s))        // nobody holds it now: destroy it
+            destroyBuffer(gone);
+        return b ? kIOReturnError : kIOReturnNoResources;
+    } else {
+        b = insertBuffer(s->handle);
+        b->mem = s->mem;
+        b->size = s->size;
+        b->params = s->params;
+        b->format = s->params.format;
+        b->width = s->params.width;
+        b->height = s->params.height;
+        b->flags = s->params.flags;
+        b->share = s;
+        b->opens = 1;
+    }
+    *handle = b->handle;
+    *size = b->size;
+    bzero(out, sizeof(*out));
+    out->size = b->size;
+    out->params_size = sizeof(b->params);
+    memcpy(out->params, &b->params, sizeof(b->params));
     return kIOReturnSuccess;
 }
 
@@ -554,6 +630,8 @@ static const IOExternalMethodDispatch sDispatch[RIPPLE_GPU_METHOD_COUNT] = {
     /* SURFACE_INFO */    { 0, 1, 0, 0, sizeof(struct ripple_gpu_surface_info) },
     /* SURFACE_PRESENT */ { 0, 4, 0, 1, 0 },
     /* SURFACE_TEXTURE */ { 0, 3, 0, 1, 0 },
+    /* BUFFER_SHARE */    { 0, 2, 0, 0, 0 },
+    /* BUFFER_OPEN */     { 0, 1, 0, 2, sizeof(struct ripple_gpu_buffer_create) },
 };
 
 IOReturn RippleGPUClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
@@ -606,6 +684,13 @@ IOReturn RippleGPUClient::sMethod(OSObject *target, void *reference, IOExternalM
         break;
     case RIPPLE_GPU_BUFFER_DESTROY:
         r = c->bufferDestroy((uint32_t)a->scalarInput[0]);
+        break;
+    case RIPPLE_GPU_BUFFER_SHARE:
+        r = c->bufferShare((uint32_t)a->scalarInput[0], a->scalarInput[1]);
+        break;
+    case RIPPLE_GPU_BUFFER_OPEN:
+        r = c->bufferOpen(a->scalarInput[0], &a->scalarOutput[0], &a->scalarOutput[1],
+                          (struct ripple_gpu_buffer_create *)a->structureOutput);
         break;
     case RIPPLE_GPU_SUBMIT:
         r = c->submit(a, &a->scalarOutput[0]);

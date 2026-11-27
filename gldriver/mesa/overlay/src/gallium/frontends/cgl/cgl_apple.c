@@ -2737,9 +2737,17 @@ ripple_cgl_program_string(void *rend, GLenum target, GLenum format, GLsizei len,
  * (issue 11). So the first texture tied to a surface gets the copy from its memory, the image
  * is remembered (ios_images), and later textures tied to the same surface, size and target
  * share that image as Mesa shares an EGL image; the memory is copied in again only when the
- * surface's seed has moved since the last copy. Not shared: other processes (a drawing on the
- * GPU never reaches the surface's memory), and surfaces with planes. */
+ * surface's seed has moved since the last copy. Surfaces with planes are not shared.
+ *
+ * The same between processes (issue 298): Safari shows a plug-in's drawing, and Chrome its GPU
+ * process's, through surfaces the other process draws into on the GPU, and that drawing never
+ * reaches the surface's memory. So a new image is also shared with the kernel under the
+ * surface's ID (BUFFER_SHARE, docs/kext-uapi.md), and a process that has no image of a surface
+ * yet opens the one another process shared, if target and size fit; only then does it make
+ * its own. An opened image is not copied into from memory (the other process's drawing is
+ * there); a later change of the memory is, as above. */
 #include "main/image.h"
+#include "virgl/ripple/ripple_virgl_public.h"
 #include "main/teximage.h"
 #include "state_tracker/st_cb_eglimage.h"
 #include "frontend/api.h"
@@ -2813,8 +2821,25 @@ ripple_cgl_iosurface_texture(struct ripple_cgl_context *ctx, const uint32_t *v)
       }
       simple_mtx_unlock(&cs_lock);
    }
+   /* Not yet: the image another process shared under the surface's ID, if it fits. */
+   bool opened = false;
+   if (!share && obj && obj->Name && !planar && !getenv("RIPPLE_GL_NO_IOSURFACE_SHARING")) {
+      struct pipe_resource templ;
+      memset(&templ, 0, sizeof(templ));
+      templ.target = gl_target_to_pipe(target);
+      templ.format = PIPE_FORMAT_NONE;           /* the shared image's own */
+      templ.width0 = w;
+      templ.height0 = h;
+      templ.depth0 = 1;
+      templ.array_size = 1;
+      templ.bind = PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET;
+      share = ripple_virgl_resource_open(ctx->st->pipe->screen, id, &templ);
+      opened = share != NULL;
+      share_seed = seed;                         /* its drawing is on the GPU: no copy now */
+   }
    bool shared = share && ios_image_bind(gl, obj, target, ifmt, share);
    pipe_resource_reference(&share, NULL);
+   opened = opened && shared;
    bool copy = !shared || seed != share_seed;
 
    if (copy && ios.lock(s, 1 /* kIOSurfaceLockReadOnly */, NULL) == 0) {
@@ -2840,10 +2865,21 @@ ripple_cgl_iosurface_texture(struct ripple_cgl_context *ctx, const uint32_t *v)
       GLint bpp = _mesa_bytes_per_pixel(format, type);
       unpack.RowLength = bpp > 0 ? (GLint)(ios.row_bytes(s) / bpp) : 0;
    }
-   /* A new image: it must exist on the GPU before another context can share it. */
-   if (ret == 0 && !shared && obj && obj->Name && !planar && !obj->pt) {
-      _mesa_test_texobj_completeness(gl, obj);
-      st_finalize_texture(gl, ctx->st->pipe, obj, 0);
+   /* A new image: it must exist on the GPU before another context can share it, and other
+    * processes get it under the surface's ID, with the copy from memory sent ahead. */
+   bool exported = false;
+   if (ret == 0 && !shared && obj && obj->Name && !planar) {
+      if (!obj->pt) {
+         _mesa_test_texobj_completeness(gl, obj);
+         st_finalize_texture(gl, ctx->st->pipe, obj, 0);
+      }
+      if (obj->pt && obj->pt->target == gl_target_to_pipe(target) &&
+          obj->pt->width0 == (unsigned)w && obj->pt->height0 == (unsigned)h &&
+          !getenv("RIPPLE_GL_NO_IOSURFACE_SHARING")) {
+         exported = ripple_virgl_resource_share(obj->pt, id);
+         if (exported)
+            ctx->st->pipe->flush(ctx->st->pipe, NULL, 0);
+      }
    }
 
    /* Remember the pair (the reference from the lookup is kept with it). */
@@ -2904,9 +2940,10 @@ ripple_cgl_iosurface_texture(struct ripple_cgl_context *ctx, const uint32_t *v)
    extern FILE *ripple_gld_dbg_file(void);
    if (ripple_gld_dbg_file() && logged++ < 20)
       fprintf(ripple_gld_dbg_file(), "RippleGLDriver: IOSurface %u texture: target 0x%x format "
-              "0x%x/0x%x/0x%x %dx%d plane %u: %s%s%s\n", id, target, ifmt, format, type, w, h,
-              plane, ret ? "refused" : shared ? "shares the image" : "copied",
-              shared && copy ? ", copied in again" : "", kept ? ", followed from now on" : "");
+              "0x%x/0x%x/0x%x %dx%d plane %u: %s%s%s%s\n", id, target, ifmt, format, type, w, h,
+              plane, ret ? "refused" : opened ? "opens another process's image" :
+              shared ? "shares the image" : "copied", shared && copy ? ", copied in again" : "",
+              exported ? ", shared with other processes" : "", kept ? ", followed from now on" : "");
    RIPPLE_CGL_DIRECT_END();
    return ret;
 }

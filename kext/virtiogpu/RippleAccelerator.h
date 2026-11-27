@@ -9,11 +9,25 @@
 #include <IOKit/graphics/IOAccelerator.h>
 #include <IOKit/graphics/IOAccelTypes.h>
 #include <IOKit/IOUserClient.h>
+#include <IOKit/IOBufferMemoryDescriptor.h>
 #include "VirtioGPUDevice.h"
 #include "ripple_gpu_uapi.h"
 
 class RippleFramebuffer;
 class RippleSurfaceClient;
+
+// A GPU buffer that several GPU connections hold (BUFFER_SHARE, BUFFER_OPEN; docs/kext-uapi.md).
+// Only key and holders change after it is made, under the accelerator's shares lock.
+struct RippleShare {
+    RippleShare *next;
+    uint64_t key;                       // 0 once a newer buffer has taken the key over
+    uint32_t handle;
+    uint32_t uid;                       // only connections of this user may open it
+    uint32_t holders;                   // connections that hold it
+    IOBufferMemoryDescriptor *mem;      // its backing, released by the last holder
+    uint64_t size;
+    struct ripple_virgl_buffer_params params;
+};
 
 class RippleAccelerator : public IOAccelerator
 {
@@ -29,6 +43,9 @@ class RippleAccelerator : public IOAccelerator
     uint32_t           fKernelContext;   // made at first use (kernelContext())
     OSArray           *fSurfaces;    // RippleSurfaceClients, for lookups by surface id
     RippleSurfaceClient *retainSurface(uint32_t id);    // retained, or 0
+    IOLock            *fSharesLock;
+    RippleShare       *fShares;
+    uint32_t           fShareCount;
 
 public:
     VirtioGPUDevice *device() const { return fDev; }
@@ -52,6 +69,16 @@ public:
     // (RippleSurfaceClient::setTexture); false if there is no such surface.
     bool setSurfaceTexture(uint32_t id, uint32_t handle, uint32_t format, uint32_t width,
                            uint32_t height, bool once, bool *filled);
+
+    // Buffers shared between connections. addShare: a new share with one holder (a share
+    // already under `key` loses it); 0 when there are too many. openShare: one more holder of
+    // the share under `key` made by `uid`, or 0. releaseShare: one holder fewer; true when that
+    // was the last, and the share is freed (the caller destroys the buffer).
+    RippleShare *addShare(uint64_t key, uint32_t handle, uint32_t uid, IOBufferMemoryDescriptor *mem,
+                          uint64_t size, const struct ripple_virgl_buffer_params &params);
+    void rekeyShare(RippleShare *s, uint64_t key);
+    RippleShare *openShare(uint64_t key, uint32_t uid);
+    bool releaseShare(RippleShare *s);
 
     virtual bool start(IOService *provider);
     virtual void stop(IOService *provider);

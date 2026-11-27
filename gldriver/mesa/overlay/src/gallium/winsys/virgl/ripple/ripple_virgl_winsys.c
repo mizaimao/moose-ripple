@@ -526,14 +526,63 @@ static uint32_t ripple_resource_get_storage_size(struct virgl_winsys *vws,
    return res->size;
 }
 
-/* Sharing resources between processes isn't supported (yet). */
+/* A buffer another process shared under a key (WINSYS_HANDLE_TYPE_SHARED, the handle is the
+ * key; BUFFER_OPEN in docs/kext-uapi.md). It takes the buffer's own description from the
+ * kernel: target, format and size, with the size checked against `templ` when it gives one.
+ * Bind flags stay as `templ` asks. */
 static struct virgl_hw_res *
 ripple_resource_create_from_handle(struct virgl_winsys *vws, struct winsys_handle *whandle,
                                    struct pipe_resource *templ, uint32_t *plane,
                                    uint32_t *stride, uint32_t *plane_offset,
                                    uint64_t *modifier, uint32_t *blob_mem)
 {
-   return NULL;
+   struct ripple_winsys *ws = ripple_winsys(vws);
+   struct ripple_gpu_buffer_create bc;
+   const struct ripple_virgl_buffer_params *p = (const struct ripple_virgl_buffer_params *)bc.params;
+   uint64_t in = whandle->handle, out[2];
+   uint32_t out_cnt = 2;
+   size_t bc_size = sizeof(bc);
+
+   if (whandle->type != WINSYS_HANDLE_TYPE_SHARED || !whandle->handle)
+      return NULL;
+   if (IOConnectCallMethod(ws->conn, RIPPLE_GPU_BUFFER_OPEN, &in, 1, NULL, 0, out, &out_cnt,
+                           &bc, &bc_size) != KERN_SUCCESS)
+      return NULL;
+   uint32_t handle = (uint32_t)out[0];
+   bool fits = bc.params_size == sizeof(*p) && p->target == (uint32_t)templ->target &&
+               (!templ->width0 || p->width == templ->width0) &&
+               (!templ->height0 || p->height == templ->height0) &&
+               virgl_to_pipe_format(p->format) != PIPE_FORMAT_NONE;
+   if (!fits) {
+      in = handle;
+      IOConnectCallScalarMethod(ws->conn, RIPPLE_GPU_BUFFER_DESTROY, &in, 1, NULL, NULL);
+      return NULL;
+   }
+   struct virgl_hw_res *res = CALLOC_STRUCT(virgl_hw_res);
+   if (!res) {
+      in = handle;
+      IOConnectCallScalarMethod(ws->conn, RIPPLE_GPU_BUFFER_DESTROY, &in, 1, NULL, NULL);
+      return NULL;
+   }
+   templ->format = virgl_to_pipe_format(p->format);
+   templ->width0 = p->width;
+   templ->height0 = p->height;
+   templ->depth0 = p->depth;
+   templ->array_size = p->array_size;
+   templ->last_level = p->last_level;
+   templ->nr_samples = p->nr_samples;
+
+   pipe_reference_init(&res->reference, 1);
+   res->target = templ->target;
+   res->res_handle = handle;
+   res->bind = p->bind;
+   res->size = (uint32_t)MIN2(out[1], UINT32_MAX);
+   res->external = true;                /* other processes hold it: never cached */
+   p_atomic_set(&res->num_cs_references, 0);
+   if (res_log())
+      fprintf(res_log(), "RippleGLDriver: buffer %u opened by key %u: target %d format %d %ux%u\n",
+              handle, whandle->handle, p->target, p->format, p->width, p->height);
+   return res;
 }
 
 static void ripple_resource_set_type(struct virgl_winsys *vws, struct virgl_hw_res *res,
@@ -969,4 +1018,37 @@ uint32_t ripple_virgl_resource_handle(struct pipe_resource *res)
       return 0;
    vres->hw_res->external = true;
    return vres->hw_res->res_handle;
+}
+
+/* Let other processes of this user open the resource by `key` (BUFFER_SHARE). From here on it
+ * is destroyed when released, never cached. */
+bool ripple_virgl_resource_share(struct pipe_resource *res, uint32_t key)
+{
+   struct virgl_resource *vres = virgl_resource(res);
+
+   if (!vres || !vres->hw_res || !key)
+      return false;
+   struct ripple_winsys *ws = ripple_winsys(virgl_screen(res->screen)->vws);
+   uint64_t in[2] = { vres->hw_res->res_handle, key };
+
+   vres->hw_res->external = true;
+   bool ok = IOConnectCallScalarMethod(ws->conn, RIPPLE_GPU_BUFFER_SHARE, in, 2, NULL, NULL)
+             == KERN_SUCCESS;
+   if (res_log())
+      fprintf(res_log(), "RippleGLDriver: buffer %u %s under key %u\n", vres->hw_res->res_handle,
+              ok ? "shared" : "NOT shared", key);
+   return ok;
+}
+
+/* The resource another process shared under `key`, described by `templ` (target and size;
+ * format NONE takes the buffer's own), or NULL. */
+struct pipe_resource *ripple_virgl_resource_open(struct pipe_screen *screen, uint32_t key,
+                                                 const struct pipe_resource *templ)
+{
+   struct winsys_handle wh;
+
+   memset(&wh, 0, sizeof(wh));
+   wh.type = WINSYS_HANDLE_TYPE_SHARED;
+   wh.handle = key;
+   return screen->resource_from_handle(screen, templ, &wh, 0);
 }

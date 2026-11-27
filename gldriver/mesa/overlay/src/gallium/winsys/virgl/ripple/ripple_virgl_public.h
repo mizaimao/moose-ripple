@@ -27,6 +27,12 @@ struct pipe_screen *ripple_virgl_screen_create(io_connect_t conn,
 io_connect_t ripple_virgl_screen_connection(struct pipe_screen *screen);
 struct pipe_resource;
 uint32_t ripple_virgl_resource_handle(struct pipe_resource *res);
+/* Resources shared between processes (BUFFER_SHARE, BUFFER_OPEN): share one under a key, and
+ * open one that another process of this user shared, described by `templ` (target and size;
+ * format NONE takes the buffer's own). NULL when there is none, or it doesn't fit. */
+bool ripple_virgl_resource_share(struct pipe_resource *res, uint32_t key);
+struct pipe_resource *ripple_virgl_resource_open(struct pipe_screen *screen, uint32_t key,
+                                                 const struct pipe_resource *templ);
 /* The kernel context this screen's commands run in. */
 uint32_t ripple_virgl_screen_context(struct pipe_screen *screen);
 
