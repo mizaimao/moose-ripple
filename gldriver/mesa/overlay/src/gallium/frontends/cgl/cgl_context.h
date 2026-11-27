@@ -33,6 +33,7 @@ struct ripple_cgl_context {
    struct ripple_cgl_pixel_format pf;
    struct st_visual visual;      /* what its drawables are made of */
    struct ripple_cgl_drawable *draw;   /* window drawable, or NULL (FBOs only) */
+   unsigned direct;              /* depth of RIPPLE_CGL_DIRECT_BEGIN (cgl_dispatch.h) */
    unsigned next_fence;          /* GL_APPLE_fence names (cgl_apple.c) */
    /* The program's own glFlush, glFinish or swap is running: the only moments a single-buffered
     * drawable is shown (cgl_drawable.c, drawable_flush_front). `presented` is set when that
@@ -89,6 +90,11 @@ void ripple_cgl_context_destroy(struct ripple_cgl_context *ctx);
 bool ripple_cgl_context_make_current(struct ripple_cgl_context *ctx);
 /* Is `ctx` the context Mesa has current on the calling thread? */
 bool ripple_cgl_context_is_current(const struct ripple_cgl_context *ctx);
+
+/* Before code outside the GL entries touches `ctx` or a drawable (attach, destroy): wait until
+ * the second GL thread, if there is one, has run everything queued for `ctx` (may be NULL) and
+ * for the context current on the calling thread. */
+void ripple_cgl_quiesce(struct ripple_cgl_context *ctx);
 
 /* The context for `rend` as libGL or CoreGraphics passes it (ours or GLEngine's), or NULL. */
 struct ripple_cgl_context *ripple_cgl_context_for(void *rend);

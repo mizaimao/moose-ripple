@@ -420,6 +420,7 @@ ripple_cgl_hint(void *rend, GLenum target, GLenum mode)
  * are shifted only when they read the window. */
 #include "main/mtypes.h"
 #include "main/fbobject.h"
+#include "main/glthread_marshal.h"      /* _mesa_glthread_BindFramebuffer */
 #include "cgl_device.h"
 #include "virgl/ripple/ripple_gpu_uapi.h"
 
@@ -433,6 +434,16 @@ ripple_cgl_refresh_window_offset(struct ripple_cgl_context *ctx)
    ctx->win_oy = (int)si.screen_height - si.y - (int)si.height;
    ctx->win_w = si.width;
    ctx->win_h = si.height;
+}
+
+/* Does the window offset apply to `ctx` at all (the contexts of WindowServer's compositor)?
+ * Only then do the entries below look at the context, which with the second GL thread on
+ * means waiting for it (RIPPLE_CGL_DIRECT_BEGIN, cgl_dispatch.h). For every other context
+ * they only hand the call on. */
+static inline bool
+has_offset(const struct ripple_cgl_context *ctx)
+{
+   return ctx && (ctx->win_surface || ctx->surf_h);
 }
 
 /* The context if the window offset applies to the framebuffer it draws into (read: reads
@@ -483,6 +494,9 @@ ripple_cgl_viewport(void *rend, GLint x, GLint y, GLsizei w, GLsizei h)
 {
    struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
    RIPPLE_CGL_ENTER(rend);
+   bool direct = has_offset(ctx);
+   if (direct)
+      RIPPLE_CGL_DIRECT_BEGIN();
    if (ctx && w >= 0 && h >= 0) {
       ctx->lv[0] = x, ctx->lv[1] = y, ctx->lv[2] = w, ctx->lv[3] = h;
       ctx->lv_set = true;
@@ -495,6 +509,8 @@ ripple_cgl_viewport(void *rend, GLint x, GLint y, GLsizei w, GLsizei h)
       }
    }
    CALL_Viewport(GET_DISPATCH(), (x, y, w, h));
+   if (direct)
+      RIPPLE_CGL_DIRECT_END();
 }
 
 void GLAPIENTRY
@@ -502,6 +518,9 @@ ripple_cgl_scissor(void *rend, GLint x, GLint y, GLsizei w, GLsizei h)
 {
    struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
    RIPPLE_CGL_ENTER(rend);
+   bool direct = has_offset(ctx);
+   if (direct)
+      RIPPLE_CGL_DIRECT_BEGIN();
    if (ctx && w >= 0 && h >= 0) {
       ctx->ls[0] = x, ctx->ls[1] = y, ctx->ls[2] = w, ctx->ls[3] = h;
       ctx->ls_set = true;
@@ -512,6 +531,8 @@ ripple_cgl_scissor(void *rend, GLint x, GLint y, GLsizei w, GLsizei h)
       }
    }
    CALL_Scissor(GET_DISPATCH(), (x, y, w, h));
+   if (direct)
+      RIPPLE_CGL_DIRECT_END();
 }
 
 /* /Library/Logs/RippleGL/fbodump (debug switch): every complete framebuffer object of a
@@ -534,14 +555,12 @@ fbo_dump_collect(void *data, void *user)
       list->names[list->n++] = fb->Name;
 }
 
-static void
-fbo_dump(void *rend)
+/* Is a dump due for this context (the switch file is new to it)? Looks at no GL state. */
+static bool
+fbo_dump_due(void *rend)
 {
    static time_t checked, mtime;
    static struct { void *ctx; time_t done; } seen[16];
-   GET_CURRENT_CONTEXT(g);
-   if (!g)
-      return;
    time_t now = time(NULL);
    if (now != checked) {
       struct stat st;
@@ -549,14 +568,23 @@ fbo_dump(void *rend)
       mtime = stat("/Library/Logs/RippleGL/fbodump", &st) == 0 ? st.st_mtime : 0;
    }
    if (!mtime)
-      return;
+      return false;
    unsigned i = 0;
    while (i < 15 && seen[i].ctx && seen[i].ctx != rend)
       i++;
    if (seen[i].ctx == rend && seen[i].done == mtime)
-      return;
+      return false;
    seen[i].ctx = rend;
    seen[i].done = mtime;
+   return true;
+}
+
+static void
+fbo_dump(void *rend)
+{
+   GET_CURRENT_CONTEXT(g);
+   if (!g)
+      return;
 
    struct fbo_dump_list list = { 0 };
    _mesa_HashWalk(&g->Shared->FrameBuffers, fbo_dump_collect, &list);
@@ -792,23 +820,40 @@ ripple_cgl_bind_framebuffer(void *rend, GLenum target, GLuint framebuffer)
 {
    struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
    RIPPLE_CGL_ENTER(rend);
-   if (target != GL_READ_FRAMEBUFFER_EXT)
+   bool dump = target != GL_READ_FRAMEBUFFER_EXT && fbo_dump_due(rend);
+   if (!dump && !has_offset(ctx)) {
+      CALL_BindFramebufferEXT(GET_DISPATCH(), (target, framebuffer));
+      return;
+   }
+   RIPPLE_CGL_DIRECT_BEGIN();
+   if (dump)
       fbo_dump(rend);
    bool before = ctx && offset_ctx(rend, false);
    CALL_BindFramebufferEXT(GET_DISPATCH(), (target, framebuffer));
-   if (!ctx || (!ctx->win_surface && !ctx->surf_h))
-      return;
-   bool after = offset_ctx(rend, false) != NULL;
-   if (before != after)
-      apply_viewport_scissor(ctx, after);
+   /* Run at once here, not queued: Mesa's note of the bindings on this thread, which the
+    * queueing call would have updated, is brought up to date by hand. */
+   GET_CURRENT_CONTEXT(gl);
+   if (gl && gl->GLThread.enabled)
+      _mesa_glthread_BindFramebuffer(gl, target, framebuffer);
+   if (has_offset(ctx)) {
+      bool after = offset_ctx(rend, false) != NULL;
+      if (before != after)
+         apply_viewport_scissor(ctx, after);
+   }
+   RIPPLE_CGL_DIRECT_END();
 }
 
 void GLAPIENTRY
 ripple_cgl_clear(void *rend, GLbitfield mask)
 {
-   struct ripple_cgl_context *ctx = offset_ctx(rend, false);
+   struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
    RIPPLE_CGL_ENTER(rend);
-   struct gl_context *gl = ctx && ctx->win_surface ? ctx->glctx : NULL;
+   if (!ctx || !ctx->win_surface) {     /* only a screen region needs a look at the context */
+      CALL_Clear(GET_DISPATCH(), (mask));
+      return;
+   }
+   RIPPLE_CGL_DIRECT_BEGIN();
+   struct gl_context *gl = offset_ctx(rend, false) ? ctx->glctx : NULL;
    if (gl && !(gl->Scissor.EnableFlags & 1)) {
       /* Clearing "the window" means the rectangle, not the screen. */
       struct gl_scissor_rect saved = gl->Scissor.ScissorArray[0];
@@ -817,9 +862,10 @@ ripple_cgl_clear(void *rend, GLbitfield mask)
       CALL_Clear(GET_DISPATCH(), (mask));
       CALL_Disable(GET_DISPATCH(), (GL_SCISSOR_TEST));
       CALL_Scissor(GET_DISPATCH(), (saved.X, saved.Y, saved.Width, saved.Height));
-      return;
+   } else {
+      CALL_Clear(GET_DISPATCH(), (mask));
    }
-   CALL_Clear(GET_DISPATCH(), (mask));
+   RIPPLE_CGL_DIRECT_END();
 }
 
 #include "main/glformats.h"
@@ -954,12 +1000,28 @@ ripple_cgl_read_pixels(void *rend, GLint x, GLint y, GLsizei w, GLsizei h, GLenu
       row_bytes_restore(&gl->Pack, &rbs);
 }
 
+/* The copies: the same mapping, for the contexts it can apply to; these wait for the second GL
+ * thread first (READ_OFFSET looks at the context), every other context only hands the call
+ * on. COPY_OFFSET_END after the call. */
+#define COPY_OFFSET_BEGIN(rend, x, y, h)                                                 \
+   bool copy_direct_ = has_offset(ripple_cgl_context_for(rend));                         \
+   if (copy_direct_) {                                                                   \
+      RIPPLE_CGL_DIRECT_BEGIN();                                                         \
+      READ_OFFSET(rend, x, y, h);                                                        \
+   }
+#define COPY_OFFSET_END()                                                                \
+   do {                                                                                  \
+      if (copy_direct_)                                                                  \
+         RIPPLE_CGL_DIRECT_END();                                                        \
+   } while (0)
+
 void GLAPIENTRY
 ripple_cgl_copy_pixels(void *rend, GLint x, GLint y, GLsizei w, GLsizei h, GLenum type)
 {
    RIPPLE_CGL_ENTER(rend);
-   READ_OFFSET(rend, x, y, h);   /* the destination (raster position) is already shifted */
+   COPY_OFFSET_BEGIN(rend, x, y, h);   /* the destination (raster position) is already shifted */
    CALL_CopyPixels(GET_DISPATCH(), (x, y, w, h, type));
+   COPY_OFFSET_END();
 }
 
 void GLAPIENTRY
@@ -967,8 +1029,9 @@ ripple_cgl_copy_tex_image1D(void *rend, GLenum target, GLint level, GLenum ifmt,
                             GLint y, GLsizei w, GLint border)
 {
    RIPPLE_CGL_ENTER(rend);
-   READ_OFFSET(rend, x, y, 1);
+   COPY_OFFSET_BEGIN(rend, x, y, 1);
    CALL_CopyTexImage1D(GET_DISPATCH(), (target, level, ifmt, x, y, w, border));
+   COPY_OFFSET_END();
 }
 
 void GLAPIENTRY
@@ -976,8 +1039,9 @@ ripple_cgl_copy_tex_image2D(void *rend, GLenum target, GLint level, GLenum ifmt,
                             GLint y, GLsizei w, GLsizei h, GLint border)
 {
    RIPPLE_CGL_ENTER(rend);
-   READ_OFFSET(rend, x, y, h);
+   COPY_OFFSET_BEGIN(rend, x, y, h);
    CALL_CopyTexImage2D(GET_DISPATCH(), (target, level, ifmt, x, y, w, h, border));
+   COPY_OFFSET_END();
 }
 
 void GLAPIENTRY
@@ -985,8 +1049,9 @@ ripple_cgl_copy_tex_sub_image1D(void *rend, GLenum target, GLint level, GLint xo
                                 GLint y, GLsizei w)
 {
    RIPPLE_CGL_ENTER(rend);
-   READ_OFFSET(rend, x, y, 1);
+   COPY_OFFSET_BEGIN(rend, x, y, 1);
    CALL_CopyTexSubImage1D(GET_DISPATCH(), (target, level, xoff, x, y, w));
+   COPY_OFFSET_END();
 }
 
 void GLAPIENTRY
@@ -994,8 +1059,9 @@ ripple_cgl_copy_tex_sub_image2D(void *rend, GLenum target, GLint level, GLint xo
                                 GLint x, GLint y, GLsizei w, GLsizei h)
 {
    RIPPLE_CGL_ENTER(rend);
-   READ_OFFSET(rend, x, y, h);
+   COPY_OFFSET_BEGIN(rend, x, y, h);
    CALL_CopyTexSubImage2D(GET_DISPATCH(), (target, level, xoff, yoff, x, y, w, h));
+   COPY_OFFSET_END();
 }
 
 void GLAPIENTRY
@@ -1003,8 +1069,9 @@ ripple_cgl_copy_tex_sub_image3D(void *rend, GLenum target, GLint level, GLint xo
                                 GLint zoff, GLint x, GLint y, GLsizei w, GLsizei h)
 {
    RIPPLE_CGL_ENTER(rend);
-   READ_OFFSET(rend, x, y, h);
+   COPY_OFFSET_BEGIN(rend, x, y, h);
    CALL_CopyTexSubImage3D(GET_DISPATCH(), (target, level, xoff, yoff, zoff, x, y, w, h));
+   COPY_OFFSET_END();
 }
 
 /* ---- Surface textures (GLI parameters 997-999) ------------------------------------------- *
@@ -1119,9 +1186,25 @@ pbuffer_tie_debug(void)
    return on;
 }
 
+static int surface_texture_now(struct ripple_cgl_context *ctx, uint32_t sid, GLenum target,
+                               GLenum ifmt, GLsizei w, GLsizei h, bool bind, GLenum source);
+
 int
 ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum target,
                            GLenum ifmt, GLsizei w, GLsizei h, bool bind, GLenum source)
+{
+   if (unlikely(ripple_cgl_tracing))      /* in the GL trace too (index past the table's) */
+      ripple_cgl_trace(1000, "surface_texture(%u, %#x, %#x, %d, %d)", sid, target, ifmt, w, h);
+   RIPPLE_CGL_ENTER(ctx);
+   RIPPLE_CGL_DIRECT_BEGIN();           /* it works on the context itself */
+   int ret = surface_texture_now(ctx, sid, target, ifmt, w, h, bind, source);
+   RIPPLE_CGL_DIRECT_END();
+   return ret;
+}
+
+static int
+surface_texture_now(struct ripple_cgl_context *ctx, uint32_t sid, GLenum target, GLenum ifmt,
+                    GLsizei w, GLsizei h, bool bind, GLenum source)
 {
    extern FILE *ripple_gld_dbg_file(void);
    FILE *log = surface_texture_logs < 300 ? ripple_gld_dbg_file() : NULL;
@@ -1130,9 +1213,6 @@ ripple_cgl_surface_texture(struct ripple_cgl_context *ctx, uint32_t sid, GLenum 
    int ret = 10008;                     /* kCGLBadValue */
    unsigned pw = 0, ph = 0;
 
-   if (unlikely(ripple_cgl_tracing))      /* in the GL trace too (index past the table's) */
-      ripple_cgl_trace(1000, "surface_texture(%u, %#x, %#x, %d, %d)", sid, target, ifmt, w, h);
-   RIPPLE_CGL_ENTER(ctx);
    struct gl_context *gl = ctx->glctx;
    GLenum error = gl->ErrorValue;
    gl->ErrorValue = GL_NO_ERROR;
@@ -1876,6 +1956,9 @@ ripple_cgl_bind_texture(void *rend, GLenum target, GLuint texture)
    CALL_BindTexture(GET_DISPATCH(), (target, texture));
    if (!cs_used || !texture || !cs_target(target))
       return;
+   /* From here on the context is looked at, and the bind has to have happened: with the
+    * second GL thread on, wait for it (a process without such textures never comes here). */
+   RIPPLE_CGL_DIRECT_BEGIN();
    GET_CURRENT_CONTEXT(glctx);
    struct gl_texture_object *obj = _mesa_get_current_tex_object(glctx, target);
    simple_mtx_lock(&cs_lock);
@@ -1889,6 +1972,7 @@ ripple_cgl_bind_texture(void *rend, GLenum target, GLuint texture)
          cs_forget(obj);
    }
    simple_mtx_unlock(&cs_lock);
+   RIPPLE_CGL_DIRECT_END();
 }
 
 void GLAPIENTRY
@@ -1896,12 +1980,14 @@ ripple_cgl_delete_textures(void *rend, GLsizei n, const GLuint *textures)
 {
    RIPPLE_CGL_ENTER(rend);
    if (cs_used && n > 0 && textures) {
+      RIPPLE_CGL_DIRECT_BEGIN();        /* the names are looked up in the context */
       GET_CURRENT_CONTEXT(glctx);
       simple_mtx_lock(&cs_lock);
       for (GLsizei i = 0; i < n; i++)
          if (textures[i])
             cs_forget(_mesa_lookup_texture(glctx, textures[i]));
       simple_mtx_unlock(&cs_lock);
+      RIPPLE_CGL_DIRECT_END();
    }
    CALL_DeleteTextures(GET_DISPATCH(), (n, textures));
 }
@@ -2238,8 +2324,11 @@ ripple_cgl_pop_attrib(void *rend)
    }
    /* Mesa put back whatever it had then (shifted or not, for the framebuffer bound at the
     * push); put the program's values in again for the framebuffer bound now. */
-   if (restored && (ctx->win_surface || ctx->surf_h))
+   if (restored && has_offset(ctx)) {
+      RIPPLE_CGL_DIRECT_BEGIN();        /* after the pop itself, and looking at the context */
       apply_viewport_scissor(ctx, offset_ctx(rend, false) != NULL);
+      RIPPLE_CGL_DIRECT_END();
+   }
 }
 
 /* GL_APPLE_object_purgeable. Quartz Composer marks its cached image textures purgeable and
@@ -2463,10 +2552,13 @@ ripple_cgl_program_string(void *rend, GLenum target, GLenum format, GLsizei len,
    /* Debug log: a sampler the program uses without a texture target recorded for its unit
     * (Mesa then indexes CurrentTex[-1] at the next draw; Core Image crashed so, M6). */
    extern FILE *ripple_gld_dbg_file(void);
+   if (!ripple_gld_dbg_file())
+      return;
+   RIPPLE_CGL_DIRECT_BEGIN();           /* the program as the call above has left it */
    GET_CURRENT_CONTEXT(gl);
    struct gl_program *prog = !gl ? NULL : target == GL_FRAGMENT_PROGRAM_ARB ?
       gl->FragmentProgram.Current : target == GL_VERTEX_PROGRAM_ARB ? gl->VertexProgram.Current : NULL;
-   if (prog && ripple_gld_dbg_file()) {
+   if (prog) {
       GLbitfield used = prog->SamplersUsed;
       while (used) {
          unsigned s = u_bit_scan(&used);
@@ -2477,6 +2569,7 @@ ripple_cgl_program_string(void *rend, GLenum target, GLenum format, GLsizei len,
                     s, unit, prog->SamplersUsed);
       }
    }
+   RIPPLE_CGL_DIRECT_END();
 }
 
 /* CGLTexImageIOSurface2D: gliSetInteger(910, {IOSurface ID, target, internal format, width,
@@ -2505,6 +2598,7 @@ ripple_cgl_iosurface_texture(struct ripple_cgl_context *ctx, const uint32_t *v)
    if (!s)
       return 10008;
    RIPPLE_CGL_ENTER(ctx);
+   RIPPLE_CGL_DIRECT_BEGIN();           /* it works on the context itself; END at the return */
    struct gl_context *gl = ctx->glctx;
    bool planar = ios.plane_count(s) > 0;
    int ret = 10008;
@@ -2566,5 +2660,6 @@ ripple_cgl_iosurface_texture(struct ripple_cgl_context *ctx, const uint32_t *v)
       fprintf(ripple_gld_dbg_file(), "RippleGLDriver: IOSurface %u texture: target 0x%x format "
               "0x%x/0x%x/0x%x %dx%d plane %u: %s%s\n", id, target, ifmt, format, type, w, h, plane,
               ret ? "refused" : "copied", kept ? ", followed from now on" : "");
+   RIPPLE_CGL_DIRECT_END();
    return ret;
 }

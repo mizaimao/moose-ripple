@@ -1616,6 +1616,71 @@ What a version for the tree needs, which the trial does not have:
   functions and a fixed table of 32 buffers. That has to become a proper part of the driver.
 - A way to choose it: by program at first (the environment variable), not for WindowServer.
 
+### The second GL thread, made safe and on by default (2026-11-26, issue 230)
+
+The trial above, turned into a version for the tree. Mesa's second GL thread ("glthread")
+queues a context's GL calls on the program's thread and runs them on a worker thread of the
+context.
+
+**What changed.**
+- Mesa patch `0015`: the virgl driver gets buffers another thread can fill. Mesa's second
+  thread copies a program's client vertex arrays and indices into a buffer it keeps mapped,
+  from the program's thread, while the context draws on the worker. Such a map is the buffer's
+  guest memory and touches nothing of the context; each buffer keeps a mark of how far it has
+  been written (Mesa's upload functions set it once the bytes are in place) and how far the
+  host has it, and before a draw or copy that reads the buffer, the new part goes into the
+  command stream ahead of it. The two capabilities Mesa asks for are only offered when the
+  frontend wants the second thread.
+- Mesa patch `0016`: Mesa 24.3.4 starts its second thread's note of the matrix mode at 0, so
+  `glGetIntegerv(GL_MATRIX_MODE)` answered 0 until a program's first `glMatrixMode`. Quartz
+  Composer reads the mode of a new context and sets it again: `GL_INVALID_ENUM`, and with the
+  thread on all 61 Photo Booth effects rendered nothing. Now it starts as `GL_MODELVIEW`.
+- The frontend: every entry was gone through for state it touches while the worker runs.
+  Code that looks at or changes the context itself (the flushes and fences, the swap, texture
+  uploads and read-backs, surface and IOSurface textures, the client-storage refresh, the
+  window offset of WindowServer's contexts, attaching and destroying) waits for the worker
+  first and runs its own GL calls at once (`RIPPLE_CGL_DIRECT_BEGIN/END`, `cgl_dispatch.h`).
+  Entries that only hand a call on are left alone.
+- The default: on for every program but WindowServer, when the guest has two processors or
+  more. WindowServer ran on it without a fault (desktop, Dashboard, Exposé, menus, a GL window
+  under the Dock looked right), but showed no gain, and it is the one process whose failure
+  takes the desktop with it. `RIPPLE_GL_THREAD=0` or `1` in a program's environment, or the
+  files `/Library/Logs/RippleGL/no-gl-thread` and `gl-thread`, override it.
+
+**Pictures, thread off against on, same build.** In UTM: the twelve pixel tests (`gl-check`,
+every mode of `gl-feature-check`, `window-check`) give byte-identical output; the 24 Core
+Image filters and the 61 Photo Booth effects give identical per-filter figures;
+`gl-feature-check stale` passes; gl-gears and its window variants run at 56 frames/s both
+ways. OpenArena, Real Racing 2 (intro, menu, race) and Cinebench looked right on both hosts.
+
+**Numbers, one run each way on one boot.**
+
+| | thread off | thread on | |
+|---|---|---|---|
+| UTM 5 on an M1 Max: OpenArena timedemo | 25.1 frames/s | 30.3 | +21% |
+| UTM: Real Racing 2, a minute of a quick race | 33.6 frames/s | 37.8 | +12% |
+| Proxmox host, Intel UHD 630, to itself: OpenArena timedemo | 254.3 frames/s | 289.6 | +14% |
+| Proxmox host: Cinebench R11.5 OpenGL, two pairs | 38.30, 39.78 frames/s | 38.37, 38.13 | no difference |
+| Proxmox host: Real Racing 2 race | 60.1 frames/s | 60.1 | the display's limit |
+
+Cinebench passed its reference check in every run (99.38%, the same 3,625 pixels off). In UTM
+the guest's speed level read 11.2 to 13.2 s on the fixed loop around the OpenArena pair, which
+is the fast level (section "two speed levels" above).
+
+How these numbers were checked: during each timed run the guest's screen was captured once
+a second, and each capture's checksum compared with the ones before. No run repeated an
+earlier picture except one Cinebench run, which did so twice in its first ten seconds while the
+visible part of its window still showed the scene's opening frame; the unchanged neighbours are
+loading screens at the start and end. The driver's own count of presents was set against each
+program's frame count: OpenArena's 3,398 frames against 3,395, 3,381 and 3,416 counted presents
+(the run that finished inside a counting window shows fewer, as it should). The captures cost
+about 4% on the Proxmox host (OpenArena 266.3 and 296.0 frames/s without them, the same gain).
+
+**Left as known soft spots:** a read map of the upload buffer (u_vbuf converting `GL_DOUBLE`
+arrays, which Core Animation sends) goes through virgl's ordinary path and may flush and wait
+each time; a process with client-storage textures waits for the worker at every
+`glBindTexture` of a 2D or rectangle texture. Neither showed in the programs measured.
+
 ### Real Racing 2: the slow intro, the logo wait and the sound (2026-11-26, issue 255)
 
 Reported in testing: in UTM the game's intro video plays at about 0.4 frames a second, the
