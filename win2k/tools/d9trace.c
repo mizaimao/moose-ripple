@@ -5,7 +5,8 @@
  * format checks for volume and cube textures and all failed ones, every volume
  * texture created, every texture or cube texture that could not be, and the
  * first few device caps the program reads (the ones programs test for shader
- * model 2). */
+ * model 2), and every pixel shader the program creates, as its tokens in
+ * hexadecimal without the comments ("PS n: ...", 16 tokens to a line). */
 #include <windows.h>
 #include <d3d9.h>
 
@@ -21,6 +22,8 @@ static HRESULT (WINAPI *realCreateVolume)(IDirect3DDevice9 *, UINT, UINT, UINT, 
                                          IDirect3DVolumeTexture9 **, HANDLE *);
 static HRESULT (WINAPI *realCreateCube)(IDirect3DDevice9 *, UINT, UINT, DWORD, D3DFORMAT, D3DPOOL,
                                        IDirect3DCubeTexture9 **, HANDLE *);
+
+static HRESULT (WINAPI *realCreatePixelShader)(IDirect3DDevice9 *, const DWORD *, IDirect3DPixelShader9 **);
 
 static void say(const char *text)
 {
@@ -157,6 +160,34 @@ static HRESULT WINAPI create_cube(IDirect3DDevice9 *device, UINT edge, UINT leve
     return hr;
 }
 
+static HRESULT WINAPI create_pixel_shader(IDirect3DDevice9 *device, const DWORD *tokens, IDirect3DPixelShader9 **shader)
+{
+    static int number;
+    HRESULT hr = realCreatePixelShader(device, tokens, shader);
+    char line[240];
+    UINT i = 0, on = 0;
+    int at;
+    ++number;
+    wsprintfA(line, "CreatePixelShader %d version=%08lx -> 0x%08lx\r\n", number, tokens ? tokens[0] : 0UL, (DWORD)hr);
+    say(line);
+    if (!tokens) return hr;
+    at = wsprintfA(line, "PS %d:", number);
+    while (i < 4096) {
+        DWORD t = tokens[i];
+        if ((t & 0xffff) == 0xfffe && i) { i += 1 + ((t >> 16) & 0x7fff); continue; }   /* a comment */
+        at += wsprintfA(line + at, " %lx", t);
+        if (++on == 16 || t == 0x0000ffff) {
+            lstrcatA(line, "\r\n");
+            say(line);
+            at = wsprintfA(line, "PS %d:", number);
+            on = 0;
+        }
+        if (t == 0x0000ffff) break;
+        ++i;
+    }
+    return hr;
+}
+
 static HRESULT WINAPI create_device(IDirect3D9 *d3d, UINT adapter, D3DDEVTYPE type, HWND window, DWORD flags,
                                     D3DPRESENT_PARAMETERS *params, IDirect3DDevice9 **device)
 {
@@ -169,6 +200,7 @@ static HRESULT WINAPI create_device(IDirect3D9 *d3d, UINT adapter, D3DDEVTYPE ty
         patch((void **)&v->CreateTexture, (void *)create_texture, (void **)&realCreateTexture);
         patch((void **)&v->CreateVolumeTexture, (void *)create_volume, (void **)&realCreateVolume);
         patch((void **)&v->CreateCubeTexture, (void *)create_cube, (void **)&realCreateCube);
+        patch((void **)&v->CreatePixelShader, (void *)create_pixel_shader, (void **)&realCreatePixelShader);
     }
     return hr;
 }

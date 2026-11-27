@@ -474,7 +474,7 @@ int main(void)
     char *command = GetCommandLineA(), *w, line[400];
     STARTUPINFOA si;
     PROCESS_INFORMATION pi;
-    DWORD seconds, start, i;
+    DWORD seconds, start, began, i;
     BOOL quoted = FALSE, exited = FALSE;
     while (*command && (quoted || (*command != ' ' && *command != '\t'))) { if (*command == '"') quoted = !quoted; ++command; }
     seconds = strtoul(command, &command, 10);
@@ -521,14 +521,14 @@ int main(void)
         out(line);
         return 1;
     }
-    start = lastChange = GetTickCount();
+    began = start = lastChange = GetTickCount();   /* start moves when the -until text is seen; began does not */
     for (;;) {
         DWORD code;
         Sleep(400);
         EnumWindows(top, 0);
         if (!exited && WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0) {
             GetExitCodeProcess(pi.hProcess, &code);
-            _snprintf(line, sizeof(line), "GUICLICK program exit %lu after %lu s", code, (GetTickCount() - start) / 1000);
+            _snprintf(line, sizeof(line), "GUICLICK program exit %lu after %lu s", code, (GetTickCount() - began) / 1000);
             out(line);
             exited = TRUE;
         }

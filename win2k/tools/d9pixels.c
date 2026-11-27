@@ -2904,6 +2904,106 @@ static void rt_small_depth_case(int only)
     IDirect3DTexture9_Release(t);
 }
 
+/* 98: the lake of 3DMark03's Mother Nature test, its ps_2_0 pixel shader token for token:
+ *   texld r0, t0, s3; texld r4, t3, s3; texld r3, t0, s0; mad r3, c1.x, r3, c1.y; rcp r2.w, t1.w;
+ *   mul r2, t1, r2.w; mad r2, c0, r3, r2; mad r0, c1.x, r0, c1.y; mad r4, c1.x, r4, c1.y;
+ *   add r0, r4, r0; mul r0, c2.x, r0; dp3 r4.x, t2, r0; add r3.x, r4.x, r4.x; mad r0, r0, r3.x, -t2;
+ *   add r1.x, r4, -c1.w; pow r1.x, r1.x, c1.z; texld r0, r0, s4 (a cube map); texld r4, r2, s1;
+ *   texld r3, r2, s2; texld r2, t4, s5; mul r1.x, r2.w, r1.x; add r0, r4, r0; lrp r0, r1.x, r0, r3;
+ *   mul r0, r2, r0; mov oC0, r0
+ * Both normal maps hold (0, 0, 1) and the view vector t2 is (0, 0, 1), so the reflected vector
+ * reads the cube's +Z face (grey 0x20). t1 = (0.5, 0.5, 0, 2) reads the top left texel of the
+ * reflection (s1, red) and of the refraction (s2, blue). The Fresnel term is (1 - 0.5)^2 times the
+ * alpha 0x80 of s5: about an eighth of red plus grey over seven eighths of blue. */
+static void ps2_water_case(int only, BOOL version2)
+{
+    typedef struct { float x, y, z, rhw, t0[2], t1[4], t2[3], t3[2], t4[2]; } WV;
+    static const DWORD ps[] = {
+        0xffff0200UL, 0x200001fUL, 0x80000000UL, 0xb00f0000UL, 0x200001fUL, 0x80000000UL, 0xb00f0001UL, 0x200001fUL,
+        0x80000000UL, 0xb00f0002UL, 0x200001fUL, 0x80000000UL, 0xb00f0003UL, 0x200001fUL, 0x80000000UL, 0xb00f0004UL,
+        0x200001fUL, 0x90000000UL, 0xa00f0800UL, 0x200001fUL, 0x90000000UL, 0xa00f0801UL, 0x200001fUL, 0x90000000UL,
+        0xa00f0802UL, 0x200001fUL, 0x90000000UL, 0xa00f0803UL, 0x200001fUL, 0x98000000UL, 0xa00f0804UL, 0x200001fUL,
+        0x90000000UL, 0xa00f0805UL, 0x3000042UL, 0x800f0000UL, 0xb0e40000UL, 0xa0e40803UL, 0x3000042UL, 0x800f0004UL,
+        0xb0e40003UL, 0xa0e40803UL, 0x3000042UL, 0x800f0003UL, 0xb0e40000UL, 0xa0e40800UL, 0x4000004UL, 0x800f0003UL,
+        0xa0000001UL, 0x80e40003UL, 0xa0550001UL, 0x2000006UL, 0x80080002UL, 0xb0ff0001UL, 0x3000005UL, 0x800f0002UL,
+        0xb0e40001UL, 0x80ff0002UL, 0x4000004UL, 0x800f0002UL, 0xa0e40000UL, 0x80e40003UL, 0x80e40002UL, 0x4000004UL,
+        0x800f0000UL, 0xa0000001UL, 0x80e40000UL, 0xa0550001UL, 0x4000004UL, 0x800f0004UL, 0xa0000001UL, 0x80e40004UL,
+        0xa0550001UL, 0x3000002UL, 0x800f0000UL, 0x80e40004UL, 0x80e40000UL, 0x3000005UL, 0x800f0000UL, 0xa0000002UL,
+        0x80e40000UL, 0x3000008UL, 0x80010004UL, 0xb0e40002UL, 0x80e40000UL, 0x3000002UL, 0x80010003UL, 0x80000004UL,
+        0x80000004UL, 0x4000004UL, 0x800f0000UL, 0x80e40000UL, 0x80000003UL, 0xb1e40002UL, 0x3000002UL, 0x80010001UL,
+        0x80e40004UL, 0xa1ff0001UL, 0x3000020UL, 0x80010001UL, 0x80000001UL, 0xa0aa0001UL, 0x3000042UL, 0x800f0000UL,
+        0x80e40000UL, 0xa0e40804UL, 0x3000042UL, 0x800f0004UL, 0x80e40002UL, 0xa0e40801UL, 0x3000042UL, 0x800f0003UL,
+        0x80e40002UL, 0xa0e40802UL, 0x3000042UL, 0x800f0002UL, 0xb0e40004UL, 0xa0e40805UL, 0x3000005UL, 0x80010001UL,
+        0x80ff0002UL, 0x80000001UL, 0x3000002UL, 0x800f0000UL, 0x80e40004UL, 0x80e40000UL, 0x4000012UL, 0x800f0000UL,
+        0x80000001UL, 0x80e40000UL, 0x80e40003UL, 0x3000005UL, 0x800f0000UL, 0x80e40002UL, 0x80e40000UL, 0x2000001UL,
+        0x800f0800UL, 0x80e40000UL, 0xffffUL,
+    };
+    static const DWORD faces[6] = { 0xffff0000, 0xff00ff00, 0xff0000ff, 0xffffff00, 0xff202020, 0xffff00ff };
+    static const DWORD normal[4] = { 0xff8080ff, 0xff8080ff, 0xff8080ff, 0xff8080ff };
+    static const DWORD below[4] = { 0xff0000ff, 0xff000000, 0xff000000, 0xff000000 };
+    static const DWORD tint[4] = { 0x80ffffff, 0x80ffffff, 0x80ffffff, 0x80ffffff };
+    static const float constants[12] = { 0.25f, 0.25f, 0, 0, 2.0f, -1.0f, 2.0f, 0.5f, 0.5f, 0, 0, 0 };
+    static const float xs[6] = { 32, 96, 32, 32, 96, 96 }, ys[6] = { 32, 32, 96, 96, 32, 96 };
+    static const SAMPLE s[] = { { 48, 48, 0x2404e3 }, { 80, 48, 0x2404e3 }, { 48, 80, 0x2404e3 }, { 80, 80, 0x2404e3 },
+                                { 64, 64, 0x2404e3 }, { 8, 8, CLEAR_COLOR } };
+    IDirect3DTexture9 *t[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
+    IDirect3DCubeTexture9 *cube = NULL;
+    IDirect3DPixelShader9 *handle = NULL;
+    WV v[6];
+    HRESULT hr;
+    int face, i, k;
+    if (only && only != 98) return;
+    if (!version2) { printf("D9PIX shader model 2 not offered\n"); return; }
+    if (FAILED(IDirect3DDevice9_CreateCubeTexture(device, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &cube, NULL))) {
+        printf("D9PIX cube textures not offered\n");
+        return;
+    }
+    for (face = 0; face < 6; ++face) {
+        D3DLOCKED_RECT r;
+        int y, x;
+        if (FAILED(IDirect3DCubeTexture9_LockRect(cube, (D3DCUBEMAP_FACES)face, 0, &r, NULL, 0))) continue;
+        for (y = 0; y < 4; ++y) for (x = 0; x < 4; ++x) ((DWORD *)((BYTE *)r.pBits + y * r.Pitch))[x] = faces[face];
+        IDirect3DCubeTexture9_UnlockRect(cube, (D3DCUBEMAP_FACES)face, 0);
+    }
+    t[0] = texture2x2(normal); t[1] = texture2x2(texels0); t[2] = texture2x2(below);
+    t[3] = texture2x2(normal); t[5] = texture2x2(tint);
+    memset(v, 0, sizeof(v));
+    for (i = 0; i < 6; ++i) {
+        v[i].x = xs[i]; v[i].y = ys[i]; v[i].z = 0.5f; v[i].rhw = 1.0f;
+        v[i].t0[0] = v[i].t0[1] = v[i].t3[0] = v[i].t3[1] = v[i].t4[0] = v[i].t4[1] = 0.5f;
+        v[i].t1[0] = v[i].t1[1] = 0.5f; v[i].t1[3] = 2.0f;
+        v[i].t2[2] = 1.0f;
+    }
+    for (k = 0; k < 6; ++k) {
+        IDirect3DDevice9_SetTexture(device, k, k == 4 ? (IDirect3DBaseTexture9 *)cube : (IDirect3DBaseTexture9 *)t[k]);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    }
+    hr = IDirect3DDevice9_CreatePixelShader(device, ps, &handle);
+    if (FAILED(hr)) fail_hr("ps2_water", "create", hr);
+    else {
+        if (begin("ps2_water")) {
+            IDirect3DDevice9_SetPixelShader(device, handle);
+            IDirect3DDevice9_SetPixelShaderConstantF(device, 0, constants, 3);
+            IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_TEX5 | D3DFVF_TEXCOORDSIZE2(0) | D3DFVF_TEXCOORDSIZE4(1) |
+                                            D3DFVF_TEXCOORDSIZE3(2) | D3DFVF_TEXCOORDSIZE2(3) | D3DFVF_TEXCOORDSIZE2(4));
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+            IDirect3DDevice9_SetPixelShader(device, NULL);
+            if (FAILED(hr)) { fail_hr("ps2_water", "draw", hr); IDirect3DDevice9_EndScene(device); }
+            else check("ps2_water", s, 6);
+        }
+        IDirect3DPixelShader9_Release(handle);
+    }
+    for (k = 0; k < 6; ++k) {
+        IDirect3DDevice9_SetTexture(device, k, NULL);
+        if (t[k]) IDirect3DTexture9_Release(t[k]);
+    }
+    IDirect3DCubeTexture9_Release(cube);
+}
+
 /* 83: a ps_2_0 shader that reads samplers 9 and 15 (shader model 2 has sixteen; 3DMark05's third
  * game test draws its water with a ninth one): texld r0, t0, s9; texld r1, t0, s15;
  * add r0, r0, r1. A green texture on sampler 9 and a blue one on sampler 15 give cyan. */
@@ -3253,6 +3353,7 @@ int main(int argc, char **argv)
     rt2048_case(only);
     rt_small_depth_case(only);
     ps2_sixteen_samplers_case(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
+    ps2_water_case(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0) && (caps.TextureCaps & D3DPTEXTURECAPS_CUBEMAP));
     scissor_case(only, (caps.RasterCaps & D3DPRASTERCAPS_SCISSORTEST) != 0);
     luminance_case(only);
     lines_points_case(only);
