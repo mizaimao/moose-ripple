@@ -2213,6 +2213,63 @@ static void rt2048_case(int only)
     IDirect3DTexture9_Release(t);
 }
 
+/* 78: a render target texture larger than the depth buffer that stays set, drawn into with the
+ * depth test off (3DMark05 fills its 2048x2048 shadow textures this way while the 1024x768
+ * depth buffer of the scene is set). In one scene: the texture is cleared blue, a red quad
+ * covers its left half, and it is drawn over the back buffer. */
+static void rt_small_depth_case(int only)
+{
+    typedef struct { float x, y, z, rhw; DWORD diffuse; float u, v; } TV;
+    enum { Big = 512 };
+    static const SAMPLE s[] = { { 32, 64, 0xff0000 }, { 96, 64, 0x0000ff }, { 16, 16, 0xff0000 }, { 112, 112, 0x0000ff } };
+    TV q[4] = { { 0, 0, 0.5f, 1, 0xffff0000, 0, 0 }, { Big / 2, 0, 0.5f, 1, 0xffff0000, 0, 0 },
+                { 0, Big, 0.5f, 1, 0xffff0000, 0, 0 }, { Big / 2, Big, 0.5f, 1, 0xffff0000, 0, 0 } };
+    TV v[4] = { { 0, 0, 0.5f, 1, 0xffffffff, 0, 0 }, { Side, 0, 0.5f, 1, 0xffffffff, 1, 0 },
+                { 0, Side, 0.5f, 1, 0xffffffff, 0, 1 }, { Side, Side, 0.5f, 1, 0xffffffff, 1, 1 } };
+    IDirect3DTexture9 *t = NULL;
+    IDirect3DSurface9 *surface = NULL, *back = NULL, *depth = NULL, *oldDepth = NULL;
+    DWORD oldZ = D3DZB_FALSE;
+    HRESULT hr;
+    if (only && only != 78) return;
+    hr = IDirect3DDevice9_CreateTexture(device, Big, Big, 1, D3DUSAGE_RENDERTARGET, D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, &t, NULL);
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice9_CreateDepthStencilSurface(device, Side, Side, D3DFMT_D16, D3DMULTISAMPLE_NONE, 0, TRUE, &depth, NULL);
+    if (FAILED(hr)) { fail_hr("rt_small_depth", "create", hr); if (t) IDirect3DTexture9_Release(t); return; }
+    IDirect3DTexture9_GetSurfaceLevel(t, 0, &surface);
+    IDirect3DDevice9_GetRenderTarget(device, 0, &back);
+    IDirect3DDevice9_GetDepthStencilSurface(device, &oldDepth);
+    IDirect3DDevice9_GetRenderState(device, D3DRS_ZENABLE, &oldZ);
+    hr = IDirect3DDevice9_SetDepthStencilSurface(device, depth);    /* the back buffer's size */
+    if (FAILED(hr)) fail_hr("rt_small_depth", "depth", hr);
+    else if (begin("rt_small_depth")) {
+        IDirect3DDevice9_SetRenderState(device, D3DRS_ZENABLE, D3DZB_FALSE);
+        hr = IDirect3DDevice9_SetRenderTarget(device, 0, surface);  /* larger than the depth buffer */
+        if (SUCCEEDED(hr)) hr = IDirect3DDevice9_Clear(device, 0, NULL, D3DCLEAR_TARGET, 0xff0000ff, 1.0f, 0);
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1);
+        if (SUCCEEDED(hr)) hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, q, sizeof(q[0]));
+        IDirect3DDevice9_SetRenderTarget(device, 0, back);
+        if (SUCCEEDED(hr)) {
+            IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)t);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+            IDirect3DDevice9_SetTexture(device, 0, NULL);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        }
+        if (FAILED(hr)) { fail_hr("rt_small_depth", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("rt_small_depth", s, 4);
+    }
+    IDirect3DDevice9_SetRenderTarget(device, 0, back);
+    IDirect3DDevice9_SetDepthStencilSurface(device, oldDepth);
+    IDirect3DDevice9_SetRenderState(device, D3DRS_ZENABLE, oldZ);
+    if (oldDepth) IDirect3DSurface9_Release(oldDepth);
+    IDirect3DSurface9_Release(depth);
+    IDirect3DSurface9_Release(surface);
+    if (back) IDirect3DSurface9_Release(back);
+    IDirect3DTexture9_Release(t);
+}
+
 /* ---- the scissor test ----
  * 60: a red quad over the whole back buffer with the scissor rectangle 32,32 to 96,96: red
  * inside it, the clear colour outside. */
@@ -2473,6 +2530,7 @@ int main(int argc, char **argv)
         cube_cases(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (!only || only >= 43)) rt_cases(only);
     rt2048_case(only);
+    rt_small_depth_case(only);
     scissor_case(only, (caps.RasterCaps & D3DPRASTERCAPS_SCISSORTEST) != 0);
     luminance_case(only);
     lines_points_case(only);

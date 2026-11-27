@@ -2797,6 +2797,47 @@ that are drawn now sample more textures).
 `tpixels` 18 of 18.
 
 
+## A depth buffer smaller than the render target
+
+Direct3D 9 sets the render target and the depth buffer in separate calls, and a program may
+leave a depth buffer set that is smaller than the target as long as it draws without it.
+3DMark05 does so once a frame: a full-screen pass fills each 2048x2048 shadow texture while
+the 1024x768 depth buffer of the scene stays set, with the depth test and the stencil off.
+
+The driver refused such a draw with "surface lost". A refused draw fails its whole
+DrawPrimitives2 call, and the runtime then drops the rest of that command batch, which here
+held the rest of the frame. Most frames of Game Tests 1 and 2 never reached the back buffers,
+and the flips went on showing the last two frames that had: for up to a minute the picture
+went back and forth between two old frames. The benchmark's own overlay (frame rate, time,
+frame number) was among the draws that were dropped. The frame counter still ran, at the rate
+of frames that drew next to nothing, so every frame rate measured in these tests was too high.
+
+Now (`target_surfaces` and `render_surfaces` in `display_d3d7.c`):
+
+- a draw that uses neither the depth test nor the stencil goes ahead without a depth buffer;
+- with one of them on, what Direct3D draws is undefined: the draw is left out and counted, and
+  its call does not fail;
+- a clear clears the colour; the depth part of a clear over a smaller depth buffer is left out
+  and counted.
+
+`d7draw` prints both counts and the surfaces of the last case
+(`D7DRAW surface_refusals=... small_depth_draws=... target=... depth=...`).
+
+Checks: `d9pixels` case 78 (`rt_small_depth`) draws into a 512x512 render target texture with
+a 128x128 depth buffer set; it fails before the change and passes after. 3DMark05 on Windows XP
+at 1024x768, one screen capture a second through the whole run, each capture compared with all
+earlier ones:
+
+| 3DMark05, captures | all | new picture | same as the one before | seen earlier | one colour |
+| --- | --- | --- | --- | --- | --- |
+| before | 570 | 299 | 87 | 64 | 120 |
+| after | 579 | 518 | 29 | 11 | 21 |
+
+After the change the 11 captures seen earlier are all of the desktop after the last test, and
+the captures of one colour fall at the changes between tests: no capture of a test shows an
+earlier frame. A shorter run of Game Test 1 on a second host, with the draw calls counted every
+second: 1,736 refused calls and 67 of 269 captures seen earlier before, none of either after.
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:
