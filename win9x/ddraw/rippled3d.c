@@ -811,8 +811,15 @@ static void buffer_trash(DDLOCAL *d, struct buf8 *b)
    fixed if the program means to write it once. */
 static void buffer_set(DDLOCAL *d, DWORD h, FLATPTR mem, DWORD size, int ours, int fixed)
 {
-    if (h < d->nbuf && d->buf[h].name && d->buf[h].mem != mem)
-        buffer_trash(d, &d->buf[h]);
+    if (h < d->nbuf && d->buf[h].name) {
+        if (d->buf[h].mem != mem)
+            buffer_trash(d, &d->buf[h]);
+        else                            /* The same handle at the same address: it may be a new buffer.
+                                           The runtime gives a freed handle out again without a
+                                           word, and the heap the freed block; with the same count of
+                                           writes the old contents stayed on the GPU. Upload anew. */
+            d->buf[h].writes = 0xFFFFFFFFUL;
+    }
     if (h >= d->nbuf) {
         DWORD n = h + 64 > d->nbuf * 2 ? h + 64 : d->nbuf * 2;
         struct buf8 *a = (struct buf8 *)alloc(n * sizeof(*a));
