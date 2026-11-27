@@ -908,7 +908,7 @@ static VP_STATUS texture_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         if (in->depth > 1) size *= in->depth;
         if (gpu->nextId == 0xffffffffUL) return ERROR_NO_MORE_ITEMS;
         for (i = 0; i < RB2K_D7_TEXTURES && gpu->textures[i].id; ++i) {}
-        if (i == RB2K_D7_TEXTURES || size > RB2K_D7_TEXEL_BUDGET - gpu->textureBytes)
+        if (i == RB2K_D7_TEXTURES || size > gpu->textureBudget - gpu->textureBytes)
             return ERROR_NOT_ENOUGH_MEMORY;
         t = &gpu->textures[i];
         t->id = ++gpu->nextId;
@@ -960,7 +960,7 @@ static VP_STATUS cube_sync(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         ULONG i, size = in->side * in->side * 4 * 6;
         if (gpu->nextId == 0xffffffffUL) return ERROR_NO_MORE_ITEMS;
         for (i = 0; i < RB2K_D7_TEXTURES && gpu->textures[i].id; ++i) {}
-        if (i == RB2K_D7_TEXTURES || size > RB2K_D7_TEXEL_BUDGET - gpu->textureBytes) return ERROR_NOT_ENOUGH_MEMORY;
+        if (i == RB2K_D7_TEXTURES || size > gpu->textureBudget - gpu->textureBytes) return ERROR_NOT_ENOUGH_MEMORY;
         t = &gpu->textures[i];
         t->id = ++gpu->nextId;
         t->width = t->height = in->side;

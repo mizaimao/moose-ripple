@@ -81,6 +81,13 @@ static VP_STATUS registry_flag(PVOID ext, PVOID context, PWSTR name, PVOID data,
     return NO_ERROR;
 }
 
+static VP_STATUS registry_number(PVOID ext, PVOID context, PWSTR name, PVOID data, ULONG bytes)
+{
+    (void)ext; (void)name;
+    if (bytes == sizeof(ULONG)) *(PULONG)context = *(PULONG)data;
+    return NO_ERROR;
+}
+
 static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
                               PVIDEO_PORT_CONFIG_INFO config, PUCHAR again)
 {
@@ -89,7 +96,7 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
     VIDEO_ACCESS_RANGE ranges[16];
     VIDEO_ACCESS_RANGE *registers = NULL;
     PHYSICAL_ADDRESS regs, bar2Address;
-    ULONG slot = 0, i, bar0, bar2, bar2Type;
+    ULONG slot = 0, i, bar0, bar2, bar2Type, megabytes;
     VP_STATUS status;
     USHORT id;
     (void)context; (void)args;
@@ -157,6 +164,11 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
     VideoPortGetRegistryParameters(a, L"RippleD3D9", FALSE, registry_flag, &a->gpu.d3d9Ddi);
     VideoPortGetRegistryParameters(a, L"RippleHostBuffers", FALSE, registry_flag, &a->gpu.hostBuffers);
     VideoPortGetRegistryParameters(a, L"RipplePrimaryInMemory", FALSE, registry_flag, &a->gpu.primaryInMemory);
+    megabytes = RB2K_D7_TEXTURE_MB;
+    VideoPortGetRegistryParameters(a, L"RippleTextureMB", FALSE, registry_number, &megabytes);
+    if (megabytes < RB2K_D7_TEXTURE_MB_LEAST) megabytes = RB2K_D7_TEXTURE_MB_LEAST;
+    if (megabytes > RB2K_D7_TEXTURE_MB_MOST) megabytes = RB2K_D7_TEXTURE_MB_MOST;
+    a->gpu.textureBudget = megabytes << 20;
     a->gpu.lock = rb_lock_create();
     /* GDI's drawing on a desktop in memory is sent by a worker a few milliseconds later. */
     if (a->gpu.primaryInMemory && a->gpu.lock)

@@ -60,13 +60,12 @@ typedef struct RB2K_IMAGE {
 /* A Direct3D texture is a host resource without a context of its own. It
  * is attached to each colour context that samples it. */
 typedef struct {
-    ULONG id, width, height, levels, bytes;   /* bytes: counted against RB2K_D7_TEXEL_BUDGET */
+    ULONG id, width, height, levels, bytes;   /* bytes: counted against the texture budget */
     ULONG format;                               /* host format; 0 for B8G8R8A8 */
     ULONG faces;                                /* 1, or 6 for a cube map */
     ULONG depth;                                /* a volume's slices; 1 otherwise */
     ULONG attached[RB2K_SLOT_WORDS];    /* the colour contexts it is attached to, a bit per image slot */
 } RB2K_TEXTURE;
-#define RB2K_D7_TEXEL_BUDGET (64UL << 20)
 /* A vertex or index buffer of a Direct3D 8 or 9 program: a host buffer resource, attached like
  * a texture to each colour context that draws from it. handle is what the display driver
  * names it by (RB2K_D8_BUFFER_SLOT), id the host resource. */
@@ -74,6 +73,11 @@ typedef struct {
     ULONG handle, id, bytes, kind;
     ULONG attached[RB2K_SLOT_WORDS];
 } RB2K_BUFFER;
+/* The host memory textures may take together (gpu->textureBudget): megabytes from the registry
+ * value RippleTextureMB, within these limits, RB2K_D7_TEXTURE_MB when it is not set. */
+#define RB2K_D7_TEXTURE_MB 256
+#define RB2K_D7_TEXTURE_MB_LEAST 16
+#define RB2K_D7_TEXTURE_MB_MOST 1024
 typedef struct {
     RB2K_IMAGE image;
     RB2K_RECT gpuPixels, gdiWrites[3];
@@ -172,7 +176,7 @@ typedef struct {
     union { ULONGLONG aligned; UCHAR bytes[RB2K_INLINE_PACKET_BYTES]; } copyPacket;
     RB2K_IMAGE images[RB2K_DD_SLOTS];
     RB2K_TEXTURE textures[RB2K_D7_TEXTURES];
-    ULONG textureCount, textureBytes;
+    ULONG textureCount, textureBytes, textureBudget;
     RB2K_DMA_SEGMENT staging[RB2K_MAX_SEGMENTS];
     /* The image whose whole readback staging holds for further presents;
      * zero once staging or any image may have changed. */
