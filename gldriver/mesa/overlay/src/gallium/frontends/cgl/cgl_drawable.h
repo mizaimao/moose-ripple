@@ -23,6 +23,8 @@ struct ripple_cgl_drawable {
    ripple_cgl_present_fn present;
    void *present_data;
    bool gpu_display;                        /* present by putting the texture on the display */
+   bool front_unfilled;                     /* front texture made after a swap, not yet given the
+                                             * back buffer's picture (issue 306) */
    bool screen_region;                      /* present into the screen texture at region */
    uint32_t region_surface;                 /* its accelerator surface: region read at present */
    uint32_t present_surface;                /* a window's accelerator surface: the kernel puts
@@ -45,6 +47,7 @@ void ripple_cgl_drawable_set_present(struct ripple_cgl_drawable *d, ripple_cgl_p
 /* Present by showing the colour texture itself on the display (zero copy; for the display
  * surface WindowServer composites into) instead of reading it back. */
 void ripple_cgl_drawable_set_gpu_display(struct ripple_cgl_drawable *d, bool on);
+void ripple_cgl_drawable_fill_front(struct ripple_cgl_context *ctx);
 /* The drawable's color buffer for GL_FRONT or GL_BACK (the other if it has only one), or NULL
  * before its first use. */
 struct pipe_resource *ripple_cgl_drawable_color(struct ripple_cgl_drawable *d, unsigned source);

@@ -78,6 +78,7 @@ static const struct { const char *prefix; const char *why; } rec_known[] = {
     { "run#0/3", "the software renderer draws nothing from a pbuffer tied with CGLTexImagePBuffer" },
     { "run#0/4", "the software renderer draws nothing from a pbuffer tied with CGLTexImagePBuffer" },
     { "run#0/5", "the software renderer draws nothing from a pbuffer tied with CGLTexImagePBuffer" },
+    { "run#0/6", "the software renderer draws nothing from a pbuffer tied with CGLTexImagePBuffer" },
     { "run_sequence#0/", "the software renderer shows a tied pbuffer's previous frame" },
     { "run_iosurface#0/2", "the software renderer doesn't follow a change of the IOSurface's memory" },
     { "run_iosurface#0/3", "the software renderer doesn't follow a change of the IOSurface's memory" },
@@ -2523,6 +2524,11 @@ static void run_fullscreen(const char *name, int want_w, int want_h, int hold)
     CGLFlushDrawable(c);
     printf("%s: CGLSetFullScreen %d on %zux%zu; back buffer centre RGBA %3d %3d %3d %3d (want 255 128 0 255), "
            "GL error 0x%x\n", name, (int)e, w, h, px[0], px[1], px[2], px[3], glGetError());
+    unsigned char fr[4] = { 0 };
+    glReadBuffer(GL_FRONT);                 /* the picture just swapped (issue 306) */
+    glReadPixels((GLint)w / 2, (GLint)h / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, fr);
+    printf("%s: front buffer after the flush: centre RGBA %3d %3d %3d %3d (want 255 128 0 255)\n",
+           name, fr[0], fr[1], fr[2], fr[3]);
     fflush(stdout);
     if (hold > 0)
         sleep((unsigned)hold);

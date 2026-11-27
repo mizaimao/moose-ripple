@@ -1004,6 +1004,9 @@ ripple_cgl_read_pixels(void *rend, GLint x, GLint y, GLsizei w, GLsizei h, GLenu
    struct ripple_cgl_context *rctx = ripple_cgl_context_for(rend);
    GET_CURRENT_CONTEXT(gl);
    struct row_bytes_saved rbs = { false };
+   if (rctx && gl && gl->ReadBuffer && gl->ReadBuffer == gl->WinSysReadBuffer &&
+       gl->ReadBuffer->_ColorReadBufferIndex == BUFFER_FRONT_LEFT)
+      ripple_cgl_drawable_fill_front(rctx);
    if (rctx && gl)
       row_bytes_apply(&gl->Pack, rctx->pack_row_bytes, format, type, &rbs);
    CALL_ReadPixels(GET_DISPATCH(), (x, y, w, h, format, type, pixels));
