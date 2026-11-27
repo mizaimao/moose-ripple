@@ -1085,7 +1085,8 @@ Two numbers of the second run need a word:
 What to know with a small guest: on a guest of 256 MB 3DMark 2000's 64 MB texture test reports
 0.0 fps on the device, for the reason measured above (its first frame needs all 384 textures at
 once and the guest pages for 29 seconds). Give the guest 512 MB, or set `D3D7TnL` = `"0"` for
-that test. Its other texture tests are slower on the device than with the guest's vertex code
+that test. (That was measured with 32 MB of surface memory on that guest; it has 64 MB since
+the change described under "3DMark03 on Windows 98", and the test was not run again.) Its other texture tests are slower on the device than with the guest's vertex code
 (more draws for the same picture, above); the benchmark's score is higher all the same.
 
 ### Three Direct3D 7 era demos, and table fog by w (2026-11-27)
@@ -1309,28 +1310,78 @@ What the fourth run's count led to:
 in the fifth run and in a timed one after it. That is not the same as right or fast, and three
 things are open:
 
-- **The fill rate tests are nearly black.** Captures of a real card of the time (GeForce 9600
+- **The fill rate tests are nearly black** (gone with the same fix, below). Captures of a real card of the time (GeForce 9600
   GT, Windows XP) show both as bright streaks of white, light blue and yellow over the whole
   screen; on this driver they are almost black with faint bands, and the benchmark's bar at
   the bottom is missing in them. Nothing is skipped while they run. Not looked into yet.
-- **Game test 4 crawls.** The pages flipped each second (the driver's own count) show about
+- **Game test 4 crawls** (found and fixed the same day, below). The pages flipped each second (the driver's own count) show about
   2,000 pages in its first six seconds and about 80 in the seventy seconds after that, in the
   timed run and in the third run alike. The third run was first noted here with "about 116
   frames a second" for this test; that number came from its first seconds and was wrong for
   the test as a whole.
-- **Game tests 2 and 3 are uneven.** In the timed run game test 2 flips 50 pages or more in
+- **Game tests 2 and 3 are uneven** (the same cause). In the timed run game test 2 flips 50 pages or more in
   only 14 of its seconds and stays under 50 for the rest; game test 3 is under 50 for 36 of
   its 75 seconds, most of them at its start.
 
-A guess for the slow stretches, not checked: shaders made again and again because more pairs
-of declaration and function are in use than the table of 256 keeps. A count of the pairs given
-up each second during game test 4 would settle it.
+A first guess for the slow stretches was shaders made again and again, because more pairs of
+declaration and function are in use than the table of 256 keeps. A count settled it the same
+day, and the guess was wrong (next paragraph).
 
 The timed run (the host to itself, no captures during the game tests) ended at 8409 3DMarks.
 With game test 4 at a frame a second that number says little, and it is written down only as
 the starting point. The guest's clock was checked against the host's for it: in the fifth
 run's captures, taken exactly twenty seconds apart by the host, the benchmark's own time
 display advances 20.01 seconds in game test 1 and 39.83 of 40 in game test 3.
+
+**The slow game tests were the size of the surface memory (2026-11-27).** A development build
+now counts what costs time without showing as a skip: programs compiled, shader pairs given
+up, pictures read back, textures and buffers uploaded, one line a second on the debug port
+while any of it happens. A run with it showed no pair given up and 24 read-backs in the whole
+benchmark, but 46,508 texture uploads and 77,932 buffer uploads carrying 4.1 GB. In game test
+4's slow stretch every ten seconds brought 2 to 4 pages, about 100 texture uploads and 350 to
+740 buffer uploads.
+
+A Direct3D 8 or 9 runtime keeps the working copies of its managed textures and vertex buffers
+in the driver's surface memory, and its size is the texture memory the runtime believes in.
+On this driver that is a block of pageable system memory (`sys_heap` in `rippledd.c`), and it
+was 32 MB on a guest of 256 MB. When a scene needs more, the runtime throws copies out and
+loads them again, frame after frame. Two more runs with the counting build, one with a guest
+of 512 MB (64 MB of surface memory) and one with the block doubled on the guest of 256 MB:
+
+| 3DMark03, counting build, untimed | 256 MB guest, 32 MB (before) | 256 MB guest, 64 MB (now) | 512 MB guest, 64 MB |
+|---|---:|---:|---:|
+| Texture uploads, whole benchmark | 46,508 | 2,051 | 1,970 |
+| Buffer uploads, whole benchmark | 77,932 (4,158 MB) | 2,198 (110 MB) | 3,237 (142 MB) |
+| Game test 4, pages in each ten seconds | 1032, 2, 3, 3, 1, 4 | 438, 571, 161, 748, 826, 673 | 372, 640, 1153, 1542, 2181, 1101 |
+| Game test 2, fewest pages in ten seconds | 20 | 780 | 1468 |
+| The benchmark's own result | 10063 | 16881 | 21987 |
+
+The block is now about a quarter of the guest's memory: 128 MB from 384 MB up, 64 MB from 192
+MB, 32 MB from 96 MB, else 16 MB. It is pageable and costs only what the surfaces in it use.
+Timed, the host to itself and no captures during the game tests, on a guest of 256 MB: 8409
+3DMarks before, 16781 after. How it was checked: the pages flipped each second (game test 4:
+56, 642, 175, 380, 858 and 719 in its ten-second steps), the skip counts (0), and an untimed
+pass on the same build with captures every ten seconds, in which every test draws and the
+benchmark's own time display keeps pace with the host (59.81 of 60 seconds in game test 4,
+49.71 of 50 in game test 3).
+
+What is left on a guest of 256 MB: the fourth game test takes about two minutes to load, and
+the third has a slow half minute. A guess, not measured: paging, because every managed texture
+is in the guest's memory twice, once as the program's copy and once as the working copy here.
+A driver that manages textures itself would hold only the first. 512 MB avoids it.
+
+The fill rate tests came right with it too: in that pass with captures both are the bright
+streaks of the card's captures, with the benchmark's bar at the bottom (one capture of each).
+So their nearly black pictures were the same shortage, textures thrown out while they were
+drawn from; that last part is a guess, the pictures are what was seen.
+
+The shared tests on that build, with the Windows 2000/XP side's five new `d9pixels` cases merged
+in: `d9pixels` 120 of 122 with hardware vertex processing (5 cases new since 117 of 117) and
+118 of 120 with software vertex processing, `d8pixels` 51 of 51, the Direct3D 7 tests as
+before, skips 0. The two that fail are among the new cases and show older faults of this
+driver: `mip_levels_managed` (a managed texture with mipmaps is drawn from its top level only)
+and `stage_without_texture` (fixed-function stages that read a texture that is not set).
+
 
 
 Tests on Windows 98 SE (DirectX 9.0c) on the build with the last fix, with the automatic checks
