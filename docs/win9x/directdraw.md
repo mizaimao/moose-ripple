@@ -1185,14 +1185,15 @@ The first wide Direct3D 9 program on this driver. Getting it onto the guest took
   folder copied onto the Windows 98 disk through a CD image. It starts from any folder and needs
   no registry entries; the free version runs its whole default benchmark.
 
-Three runs, all untimed, with captures every twenty seconds and the skip counters read after
-each (they were at zero before each run):
+Four runs, all untimed, with captures through each and the skip counters read after each (they
+were at zero before each run):
 
 | run | driver | skips | what the captures show |
 |---|---|---:|---|
 | 1 | as before | 12,505 (12,250 draws, 255 shaders) | game tests 1 to 3 right; game test 4 with white water; then the program stops with "Unable to create volume texture" |
 | 2 | declarations kept, L16 | 128 (125 draws, 3 shaders) | all four game tests right, the feature tests run, a score at the end; game test 4 at one frame in five seconds |
 | 3 | and shared declarations | 114 (113 draws, 1 shader) | as run 2, game test 4 at about 116 frames a second |
+| 4 | and `sincos` | 35 (35 draws) | as run 3 |
 
 What the first run's counts led to:
 
@@ -1212,14 +1213,50 @@ What the first run's counts led to:
   the Windows 2000/XP driver has them. `d9pixels` case `l16` (already in the shared test) now
   runs here and passes.
 
-Still open after the third run, so by the rule of the skip counters the run does not pass yet:
-one vertex shader is not translated because it uses `sincos` (reason 2, instruction 0x25), and
-113 draws are refused with "vertices out of range", nearly all of them while a test loads (the
-pages flipped stand still when they happen). No score is quoted for the same reason, and
-because the runs were untimed.
+What the third run's counts led to:
 
-Tests on the last build: `d9pixels` 108 of 108 (1 case new since 107 of 107: `l16`), `d8pixels`
-46 of 46, skips 0 in both.
+- **`sincos`.** One vertex shader was not translated because it uses `sincos` (reason 2,
+  instruction 0x25), and its draws were left out. An ARB vertex program has no sine or cosine,
+  so the instruction is written out the way Direct3D defines it: the sine and cosine of half
+  the angle as polynomials, then the double-angle formulas (`vs_arb.c`; within 0.00003 of the
+  true values from -pi to pi). `d9pixels` case `vs2_sincos` draws four angles as colours: it
+  passes with Microsoft's software vertex processing, drew nothing on the driver before and
+  passes now. In the fourth run no shader was left untranslated.
+
+Still open after the fourth run, so by the rule of the skip counters the run does not pass yet:
+
+- **A vertex short at the end of the runtime's buffer.** The 35 draws left out were all refused
+  with "vertices out of range", and all in the two CPU tests: the count stood at zero through
+  the four game tests and their loading. The message says its numbers since that run, and every
+  draw was one vertex short ("32 from 0 of 31", "440 from 0 of 439"), with the draws ending at
+  the same few addresses. In the CPU tests the runtime runs the vertex shaders itself and packs
+  the transformed vertices of every format into one buffer, each draw behind the last at
+  whatever byte comes next. The driver counts what is left after a draw's first byte in whole
+  vertices from the buffer's start (`stream_from`), so a draw that begins at an odd byte and
+  runs into the buffer's last bytes loses its last vertex to the rounding. A fix that counts
+  from the buffer's bytes is written but not proven: a first test case (pairs of points from
+  user memory in three formats) did not reach that path, so the fix waits for a case that does.
+- The note on the third run said its 113 left-out draws were all refused this way and came
+  while tests loaded. Only the counts were read then, once a second, not the messages. A guess
+  from the two runs, not traced: the ones during loading were draws of the untranslated shader,
+  and the rest were these.
+
+No score is quoted, because of the skips and because the runs were untimed.
+
+Tests on Windows 98 SE after the `windows` branch was merged in (2026-11-27), with the automatic
+checks of the shared tests on (skip counts, and each picture against Microsoft's reference
+rasterizer): `d9pixels` 115 of 116 with hardware vertex processing (6 cases new since 110 of
+110, all from the `windows` branch) and 113 of 114 with software vertex processing; `d8pixels`
+50 of 51 (5 new since 46 of 46); skips 0 in all of them. The two that fail do so only against
+the reference picture, and their samples pass:
+
+- `lit_far_light` (Direct3D 9, a light numbered 1000): the reference rasterizer draws the quad
+  black on Windows 98 and fails the case's samples itself; the driver draws the lit colour.
+- `zbias` (Direct3D 8): the reference rasterizer leaves the biased quad behind the one in the
+  same plane and fails the case's samples itself; the driver puts it in front, as the
+  documentation of `D3DRS_ZBIAS` says.
+
+Why the reference rasterizer differs in the two was not looked into.
 
 ### Vertex processing on the GPU (2026-11-26, `D3D8` = `"2"`)
 
