@@ -2102,8 +2102,20 @@ all six. The miniport makes a cube host texture of six layers, uploads
 each face into its layer, and gives its views all six layers. Pixel
 shaders sample cube maps: shader model 2 by its `dcl_cube` declaration,
 version 1 by the texture bound to the stage at the draw, which selects the
-translated variant. The fixed-function stages do not sample cube maps
-(generating their coordinates is not done); such draws are skipped.
+translated variant.
+
+The fixed-function stages sample cube maps and volumes as well: the stage program takes the
+kind of each stage's texture (the cube and volume masks version 1 shaders use, in the fog
+argument of `rb_stage_translate`) and looks the texture up with the three coordinates of the
+stage's set. The coordinates come from the vertices or from a vertex shader: 3DMark03's first
+game test draws its planes with a vertex shader that passes the reflection vector to a
+fixed-function stage with a cube map, and until this such draws were left out (a quarter of
+that test's draw calls; the planes went missing while their propellers were drawn).
+Generated coordinates (`D3DTSS_TCI_CAMERASPACENORMAL` and the like, without a vertex shader)
+are still not done; those draws are skipped. After a vertex shader the high word of
+`D3DTSS_TEXCOORDINDEX` is ignored: the shader supplies the coordinates. `d9pixels` cases 90
+(`ff_cube`) and 91 (`vs_ff_cube`) draw the six faces through the stage alone and after a
+vertex shader.
 
 On XP SP3 under KVM on the Intel UHD 630 host, two new `d9pixels` cases
 draw six quads that look up a cube map with one colour per face in each of
@@ -2546,9 +2558,10 @@ installed by `nt5inst`, `d9pixels` passes 44 of 44 and `d8pixels` 23 of 23.
 ## Vertex shaders with several streams
 
 With vertex shaders on, Direct3D 8 and 9 programs are offered 8 vertex
-streams (`MaxStreams`; fixed-function draws still read stream 0, as their
-vertex formats only describe one). The display driver keeps each stream's
-buffer and stride. A draw gathers, for every vertex, the data of each stream
+streams (`MaxStreams`; fixed-function draws read stream 0 when an FVF code
+describes their vertices, and any stream through a declaration, see below).
+The display driver keeps each stream's buffer and stride. A draw with a
+vertex shader gathers, for every vertex, the data of each stream
 the shader's declaration names, one after the other, into the record the
 vertex program reads; `rb_vs_translate` gets the word at which each stream
 starts, and a `STREAM` token moves the declaration there. A shader's program
@@ -2562,6 +2575,29 @@ buffer (stream 0) and colours from another (stream 1), starting at vertex 6.
 On XP SP3 under KVM on the second Intel UHD 630 host, with vertex shaders on,
 case 33 passes and `d9pixels` passes 53 of 53. The translations of DirectQ's
 shaders with one and two streams pass Mesa's TGSI parser.
+
+### Fixed-function vertices through a declaration
+
+A fixed-function draw can describe its vertices by a declaration too: on Direct3D 8 a
+"vertex shader" made from a declaration with no code, on Direct3D 9 a vertex declaration
+drawn with no vertex shader. Its fields may lie in several streams and in any order, which
+no FVF code can say. Such draws used to be left out: the Direct3D 8 shader was refused when
+it was made, and the Direct3D 9 declaration counted as unresolved.
+
+`ff_layout` reads the declaration into the fields the fixed-function pipeline takes
+(position or transformed position, normal, the two colours, texture coordinate sets without
+a gap) and the FVF code they make. Fields the pipeline does not read (tangent, binormal, fog
+and the like) are passed over; a declaration with anything else (blend weights, point sizes,
+other types) is left out as before. `ff_gather` then copies the vertices the draw names out
+of their streams into one array in FVF order, in the driver's own memory, and the draw goes
+on as a stream draw of that format (`PRIMS.gathered`: the array is not probed as process
+memory). An indexed draw gathers the vertices from its smallest to its largest index and
+counts the indices from the smallest. The base vertex is taken in stream 0's stride, so a
+draw whose declaration leaves stream 0 without a buffer is left out.
+
+`ff_streams` in `d8pixels` and `d9pixels` (positions in stream 0, colours in stream 1, drawn
+from vertex 6) passes with it. `d9pixels` case 92 (`ff_streams_indexed`) draws through an
+index buffer with a base vertex, the colours four bytes into the second stream's vertices.
 
 ## The Direct3D 9 driver interface
 
@@ -2587,6 +2623,20 @@ After a successful `DrawPrimitives2` the driver must leave `dwErrorOffset` at
 0: a Direct3D 9 runtime reads it as the size of a reply, and anything else
 sends it into a loop of assertions. The driver reports no query types, so the
 runtime issues no queries.
+
+`D3DPMISCCAPS_FOGINFVF` is a promise as well as a requirement. With it the runtime's own
+vertex processing (software vertex processing, which also runs vertex shaders in the
+runtime) no longer packs the fog factor into the specular alpha of the transformed
+vertices it sends. It adds a separate float after the specular colour and marks the vertex
+format with `D3DFVF_FOG` (0x2000, `d3dhal.h`). The driver read the format without that
+bit, took the fog factor from a specular alpha of zero, and drew such draws in the fog
+colour alone: `ps_lit_fog`, `vs2_fog` and `vs2_fog_vb` failed with software vertex
+processing. Both draw paths for transformed vertices now take the float (`fog_alpha` turns
+it into the specular alpha byte on the IEEE bits, as the display driver uses no floating
+point), and `d9_decl_fvf` reads a fog field of a declaration the same way. With it
+`d9pixels` passes 107 of 107 with software vertex processing (XP SP3 under KVM, Intel UHD
+630 host). 3DMark03's CPU Test 2, which runs its vertex shaders in the runtime and comes
+out much brighter than Game Test 3, looks the same with it: that has another cause.
 
 What changes in the command stream:
 
@@ -2720,8 +2770,35 @@ shaders ran on the guest processor in the runtime.
   texture coordinate inputs: `GENERIC[2]` in the fixed-function fragment
   shaders, `GENERIC[2..9]` in the pixel shader and vertex program paths.
 
-Not done: `POINTSCALEENABLE` (sizes by distance) and point sizes in
-fixed-function vertices (`D3DFVF_PSIZE`, whose cap is not reported).
+Sizes scaled by distance (`D3DRS_POINTSCALEENABLE`, object-space vertices) and sizes in
+fixed-function vertices (`D3DFVF_PSIZE`) are worked out by the host vertex shader, because
+the display driver uses no floating point. Such a point draw (`sized_points`) goes through
+the stage program path (`shader_triangles`) whatever its stages, with `RB2K_POINT_SIZED`:
+
+- Each vertex carries its size, its own or `D3DRS_POINTSIZE`, as the first component of one
+  more coordinate set: the draw's last and the second at least, which makes it the last
+  constant of the vertex in both vertex layouts.
+- The miniport sends two more constants after the vertices and lights: (viewport height,
+  smallest size, largest size) and (A, B, C). Their place goes in `CONST[0].w` as an
+  integer. Without scaling the height is 1 and the factors are 1, 0, 0.
+- Five more vertex shaders (handles 117 to 121: transformed, object space, object space with
+  clip planes, lit, lit with clip planes) are the fixed-function ones plus `point_lines`:
+  size x height x sqrt(1 / (A + B d + C d d)), kept within the smallest and largest, to a
+  `PSIZE` output. d is the distance from the eye, which the shaders already have for fog.
+  Transformed vertices are not scaled. The lit one did not fit in the 8192 bytes of text the
+  others have (its draw failed, and with it every later draw to that target), so these
+  texts get 2048 more (`SizedText`). The handles lie below the sampler views at 128, which
+  `ps_handles` checks (see the numbering section below).
+- The Direct3D 9 runtime sends a vertex format with a point size as a declaration, not as
+  its FVF code; `d9_decl_fvf` reads the point size field so that the draw resolves.
+
+The `D3DFVFCAPS_PSIZE` cap is still not reported, so with software vertex processing the
+runtime keeps drawing sized points itself. A vertex shader's own size (`oPts`) is not
+scaled. `d9pixels` cases 79 (`scaled_point`) and 81 (`vertex_point`) pass with it; cases 93
+to 95 cover the lit shader (`lit_scaled_point`), transformed vertices with sizes
+(`rhw_vertex_point`) and a scaled point with a clip plane (`clip_scaled_point`).
+With this and the declaration change above, `d9pixels` passes 107 of 107 with hardware
+vertex processing and `d8pixels` 44 of 44 (XP SP3 under KVM, Intel UHD 630 host).
 `d9pixels` case 75 draws a textured sprite and a plain point of 8 pixels,
 case 76 a point sized by a vertex program.
 
@@ -3007,7 +3084,8 @@ and High Polygon Count as large flat polygons across the screen; tests in a wind
 depth buffer or one that never moves, passed.
 
 The depth view now has the number 2, and a compile-time check keeps the two surface numbers
-below the first shader and state number (`views_apart`).
+below the first shader and state number (`views_apart`). Numbers taken since then: 117 to 121,
+the vertex shaders that work point sizes out (`PsPointShaderBase`).
 
 How it was found: the capture check cannot see it (every garbage frame is a new picture), the
 contact sheets of the captures did. Builds with one part of the path switched off showed that

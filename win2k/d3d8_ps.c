@@ -1662,6 +1662,10 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
     s.t.p = out; s.t.size = size;
     if (size) out[0] = 0;
     if (count > RB_PS2_COORD_SETS) count = RB_PS2_COORD_SETS;   /* a stage has a sampler and a coordinate set */
+    /* The stages whose texture is a cube map or a volume, as for version 1 shaders. */
+    s.cube = (fog >> RB_PS_CUBE_SHIFT) & 255;
+    s.volume = (fog >> RB_PS_VOLUME_SHIFT) & 255;
+    fog &= (1u << RB_PS_CUBE_SHIFT) - 1;
     for (i = 0; i < count && stages[i].colorOp != TopDisable; ++i) {
         const RB_STAGE_STATE *st = &stages[i];
         if ((st->colorArg1 & TaSelect) == TaFactor || (st->colorArg2 & TaSelect) == TaFactor ||
@@ -1760,7 +1764,8 @@ unsigned int rb_stage_translate(const RB_STAGE_STATE *stages, unsigned int count
             }
             tex[0] = 0;
             cat(tex, sizeof(tex), "TEX TEMP[1], "); cat(tex, sizeof(tex), in);
-            cat(tex, sizeof(tex), ", SAMP["); cat_number(tex, sizeof(tex), i); cat(tex, sizeof(tex), "], 2D");
+            cat(tex, sizeof(tex), ", SAMP["); cat_number(tex, sizeof(tex), i);
+            cat(tex, sizeof(tex), (s.cube >> i) & 1 ? "], CUBE" : (s.volume >> i) & 1 ? "], 3D" : "], 2D");
             line(&s, tex, 0, 0, 0, 0, 0, 0);
             if (bump != ~0u && bump + 1 == i && bumpLum) {
                 /* BUMPENVMAPLUMINANCE: times the luminance times the scale plus the offset. */
