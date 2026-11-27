@@ -34,8 +34,12 @@
 #define TNL_ENV_POINT   (TNL_ENV_TEX + 4 * TNL_STAGES)  /* 2, for points scaled by distance: the size
                                                           at distance one in pixels, its minimum and
                                                           maximum, a tiny number; then the scale's
-                                                          A, B, C */
+                                                          A, B, C and the viewport's height */
 #define TNL_ENV_COUNT   (TNL_ENV_POINT + 2)
+
+/* The generic vertex attribute a point's own size comes in: one that stands for none of the
+   conventional arrays the program reads. */
+#define TNL_ATTR_PSIZE  6
 
 /* light kinds, as Direct3D numbers them (0: no light in that place) */
 #define TNL_POINT       1
@@ -79,6 +83,8 @@ typedef struct {
     unsigned char xform[TNL_STAGES];        /* D3DTTFF_COUNTn, | TNL_PROJECTED; 0 none */
     unsigned char point_scale;              /* points: the size scaled by the distance from the eye
                                                (D3DRS_POINTSCALEENABLE), written by the program */
+    unsigned char point_vertex;             /* points: each vertex brings its size (D3DFVF_PSIZE),
+                                               in the generic attribute TNL_ATTR_PSIZE */
 } TNL_KEY;
 
 #define TNL_TEXT_BYTES 12288

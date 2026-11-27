@@ -3175,6 +3175,8 @@ typedef struct {
     long first_vertex;                  /* the vertex of stream 0 that base is at, for the other
                                            streams of the draw; -1: not a whole vertex */
     int pos;                            /* the position's byte offset (0 but for a declaration) */
+    int psize_at;                       /* points: 1 + the byte offset of each vertex's size (D3DFVF_PSIZE,
+                                           untransformed vertices), 0: none */
     BYTE src[12];                       /* the stream each attribute comes from, 0 but for a
                                            declaration: position, normal, diffuse, specular,
                                            texture coordinate sets 0..7 */
@@ -3220,8 +3222,12 @@ static int parse_fvf(DWORD fvf, VERTICES *v)
     } else {
         return 0;
     }
-    if (fvf & D3DFVF_RESERVED1)         /* Direct3D 8's point size */
+    v->psize_at = 0;
+    if (fvf & D3DFVF_RESERVED1) {       /* Direct3D 8's point size */
+        if (v->xyz)
+            v->psize_at = (int)off + 1;
         off += 4;
+    }
     v->diffuse = v->specular = -1;
     if (fvf & D3DFVF_DIFFUSE) { v->diffuse = off; off += 4; }
     if (fvf & D3DFVF_SPECULAR) { v->specular = off; off += 4; }
@@ -3721,6 +3727,7 @@ static void tnl_key(RCTX *c, const VERTICES *v, TNL_KEY *k)
             k->xform[s] = (BYTE)((flags & 7) | (flags & D3DTTFF_PROJECTED ? TNL_PROJECTED : 0));
     }
     k->point_scale = (BYTE)(c->points_now && c->rs[RS_POINTSCALEENABLE]);
+    k->point_vertex = (BYTE)(c->points_now && v->psize_at);
 }
 
 /* The program for k: kept ones by their key (VP_CACHE, the least recently used goes), new ones
@@ -3894,7 +3901,7 @@ static void tnl_load(RCTX *c, const TNL_KEY *k)
     if (c->tnl_dirty & TNL_DIRTY_TEX)
         for (i = 0; i < TNL_STAGES; i++)
             env_columns(gl, TNL_ENV_TEX + 4 * i, c->xf_tex[i]);
-    if (k->point_scale) {               /* each such draw: points are few */
+    if (k->point_scale || k->point_vertex) {    /* each such draw: points are few */
         float lo = *(const float *)&c->rs[RS_POINTSIZE_MIN], hi = *(const float *)&c->rs[RS_POINTSIZE_MAX];
         if (!(hi >= 1.0f) || hi > MAX_POINT_SIZE)
             hi = MAX_POINT_SIZE;
@@ -3905,7 +3912,8 @@ static void tnl_load(RCTX *c, const TNL_KEY *k)
         env4(gl, TNL_ENV_POINT, (float)(c->vp_w ? c->vp_h : c->fb_h) * *(const float *)&c->rs[RS_POINTSIZE],
              lo, hi, 1.0e-12f);
         env4(gl, TNL_ENV_POINT + 1, *(const float *)&c->rs[RS_POINTSCALE_A],
-             *(const float *)&c->rs[RS_POINTSCALE_A + 1], *(const float *)&c->rs[RS_POINTSCALE_A + 2], 0.0f);
+             *(const float *)&c->rs[RS_POINTSCALE_A + 1], *(const float *)&c->rs[RS_POINTSCALE_A + 2],
+             (float)(c->vp_w ? c->vp_h : c->fb_h));
     }
     c->tnl_dirty = 0;
 }
@@ -4329,6 +4337,13 @@ static void tnl_arrays(RCTX *c, const VERTICES *v, DWORD first)
             gl->DisableClientState(GL_SECONDARY_COLOR_ARRAY);
         }
     }
+    if (v->psize_at && c->points_now && gl->VertexAttribPointerARB && gl->EnableVertexAttribArrayARB) {
+        /* each point's size: the generic attribute the program reads it from (tnl_arb.c) */
+        b = stream_at(c, v, first, 0, (DWORD)v->psize_at - 1, &stride);
+        gl->VertexAttribPointerARB(TNL_ATTR_PSIZE, 1, GL_FLOAT, 0, stride, b);
+        gl->EnableVertexAttribArrayARB(TNL_ATTR_PSIZE);
+        c->attribs_on |= 1UL << TNL_ATTR_PSIZE;
+    }
     if (gl->FogCoordPointer)
         gl->DisableClientState(GL_FOG_COORDINATE_ARRAY);
     for (u = 0; u < STAGES; u++) {
@@ -4344,7 +4359,6 @@ static void tnl_arrays(RCTX *c, const VERTICES *v, DWORD first)
     gl->ClientActiveTexture(GL_TEXTURE0);
 }
 
-/* Draw vertices first..first+count (all of them converted), or count indices into them. */
 /* The user clip planes of the next draw (SETCLIPPLANE, D3DRS_CLIPPLANEENABLE). kind 0: none
    (vertices the program transformed itself are not clipped by them, and Direct3D 7 has none
    here); 1: the fixed-function pipeline, whose planes are in world space; 2: a vertex shader,
@@ -4416,6 +4430,7 @@ static void clip_state(RCTX *c, int kind)
     c->clip_gl = want;
 }
 
+/* Draw vertices first..first+count (all of them converted), or count indices into them. */
 static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD count,
                  const WORD *idx, DWORD nidx, DWORD span)
 {
@@ -4480,7 +4495,7 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
             return;
         }
         if (mode == GL_POINTS)
-            point_state(c, c->rs[RS_POINTSCALEENABLE] != 0);
+            point_state(c, c->rs[RS_POINTSCALEENABLE] != 0 || v->psize_at);
         clip_state(c, 1);
         if (trace_on && src_streams(v) > 1)
             tracef("rd3d: declaration draw: position %d, normal %d, diffuse %d (stream %lu), specular %d, "
