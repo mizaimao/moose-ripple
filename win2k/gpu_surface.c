@@ -120,6 +120,45 @@ static VP_STATUS command_error(RB2K_GPU *gpu, const RB2K_GPU_RESULT *result)
     return result->status;
 }
 
+/* Frame pacing (RB2K_PACE_SEGMENT): one present has reached the screen. */
+static void pace(RB2K_GPU *gpu)
+{
+    RB2K_D7_PROFILE *p = &gpu->d7Profile;
+    RB2K_PACE_SEGMENT *s = &p->pace[p->paceSegment];
+    LONGLONG second, now = rb_counter_ticks(&second), dt = now - p->paceLast;
+    ULONG high, bucket = 0, draws = p->paceRecords - p->paceDraws;
+    BOOLEAN light = draws < RB2K_PACE_SCENE_DRAWS;
+    ULONG uploads, shaders;
+    p->paceDraws = p->paceRecords;
+    uploads = p->op[RB2K_D7_UPLOAD].calls - p->paceUploads;
+    shaders = p->shaders - p->paceShaders;
+    p->paceUploads = p->op[RB2K_D7_UPLOAD].calls;
+    p->paceShaders = p->shaders;
+    if (!p->paceLast || dt < 0 || (dt >> RB2K_PACE_GAP_SHIFT)) {
+        /* The first present of a stretch. */
+        if (s->frames && p->paceSegment + 1 < RB2K_PACE_SEGMENTS) s = &p->pace[++p->paceSegment];
+        if (!s->frames) s->start = now;
+    } else if (light || p->paceLight) {
+        ++s->lightFrames;
+        s->lightTotal += dt;
+    } else {
+        for (high = RB2K_PACE_GAP_SHIFT - 1; high >= RB2K_PACE_FIRST_SHIFT && !(dt >> high); --high) {}
+        if (high >= RB2K_PACE_FIRST_SHIFT)
+            bucket = 1 + 2 * (high - RB2K_PACE_FIRST_SHIFT) + (ULONG)((dt >> (high - 1)) & 1);
+        ++s->buckets[bucket < RB2K_PACE_BUCKETS ? bucket : RB2K_PACE_BUCKETS - 1];
+        s->total += dt;
+        if (dt > s->longest) s->longest = dt;
+        if (dt * 10 >= second) {
+            if (uploads) ++s->longUploads;
+            if (shaders) ++s->longShaders;
+            if (!uploads && !shaders) ++s->longOther;
+        }
+    }
+    ++s->frames;
+    p->paceLast = now;
+    p->paceLight = light;
+}
+
 static VP_STATUS present(RB2K_GPU *gpu, const RB2K_IMAGE *image, const RB2K_DD_PRESENT *p)
 {
     RB2K_PRIMARY *primary = &gpu->primary;
@@ -292,6 +331,7 @@ static BOOLEAN draw_one(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *imag
         return FALSE;
     }
     gpu->d7Frame.pending.triangles += d->count/3;
+    ++gpu->d7Profile.paceRecords;
     return TRUE;
 }
 
@@ -370,6 +410,7 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
         return FALSE;
     }
     gpu->d7Frame.pending.triangles += d->count/3;
+    ++gpu->d7Profile.paceRecords;
     return TRUE;
 }
 
@@ -625,7 +666,11 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
     case IOCTL_RB2K_DD_PRESENT:
         if (packet->InputBufferLength != sizeof(RB2K_DD_PRESENT) || packet->OutputBufferLength)
             return ERROR_INVALID_PARAMETER;
-        return present(gpu, image, packet->InputBuffer);
+        {
+            VP_STATUS shown = present(gpu, image, packet->InputBuffer);
+            if (!shown) pace(gpu);
+            return shown;
+        }
     case IOCTL_RB2K_DD_DESTROY:
         if (packet->InputBufferLength != sizeof(id) || packet->OutputBufferLength)
             return ERROR_INVALID_PARAMETER;
@@ -641,6 +686,9 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         if (success) {
             rb_gpu_slot_forget(gpu, image);
             VideoPortZeroMemory(image, sizeof(*image));
+            /* The last image has gone (a program closed its Direct3D device): what is presented next
+             * starts a new stretch of the frame pacing counts. */
+            if (gpu->imageCount == 1) gpu->d7Profile.paceLast = 0;
             if (!--gpu->imageCount && !rb_gpu_held(gpu)) return rb_gpu_stop(gpu);
         }
         break;
@@ -841,6 +889,10 @@ VP_STATUS rb_gpu_surface_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         if (!packet->InputBufferLength && packet->OutputBufferLength == sizeof(gpu->d7Profile)) {
             rb_counter_ticks(&gpu->d7Profile.frequency);
             gpu->d7Profile.codeAt = (ULONG)(ULONG_PTR)rb_gpu_frame_reserve;
+            gpu->d7Profile.memoryPresents = gpu->memoryPresents;
+            gpu->d7Profile.memoryFailures = gpu->memoryFailures;
+            gpu->d7Profile.memoryStale = gpu->memoryStale;
+            gpu->d7Profile.memoryChain = gpu->memoryChain;
             VideoPortMoveMemory(packet->OutputBuffer, &gpu->d7Profile, sizeof(gpu->d7Profile));
             packet->StatusBlock->Information = sizeof(gpu->d7Profile);
             status = NO_ERROR;

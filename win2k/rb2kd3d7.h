@@ -19,6 +19,27 @@ typedef struct {
     LONGLONG ticks, queueTicks, fenceTicks;
     ULONG calls, submits, fences, bytes, failed;
 } RB2K_D7_TIME;
+/* Frame pacing: the time from each present to the next, counted by size, for each stretch of
+ * presents: a new one starts after about two seconds without a present (2^RB2K_PACE_GAP_SHIFT
+ * counter ticks) and when a program closes its Direct3D device, so a test of a benchmark is a
+ * stretch. Only scene frames are counted by size: a frame with fewer than RB2K_PACE_SCENE_DRAWS
+ * draws is a light frame (a menu, a loading screen, drawn hundreds of times a second or held
+ * for the length of the loading), and light frames and the scene frame after one are counted
+ * apart. Times are counter ticks. Bucket 0 holds times under 2^RB2K_PACE_FIRST_SHIFT ticks;
+ * from there on two buckets cover each doubling (from 2^k and from 1.5 times 2^k). */
+#define RB2K_PACE_SEGMENTS 32
+#define RB2K_PACE_BUCKETS 23
+#define RB2K_PACE_FIRST_SHIFT 22
+#define RB2K_PACE_GAP_SHIFT 33
+#define RB2K_PACE_SCENE_DRAWS 16
+typedef struct {
+    LONGLONG start, total, longest;     /* its first present; the scene frames' times summed; the longest */
+    LONGLONG lightTotal;                /* the light frames' times summed */
+    ULONG frames, lightFrames, buckets[RB2K_PACE_BUCKETS];     /* all presents; the light ones; scene frames by time */
+    /* Scene frames of 100 ms and more: those with a texture upload in them, those with a host
+     * shader made in them (a frame may be in both), and those with neither. */
+    ULONG longUploads, longShaders, longOther;
+} RB2K_PACE_SEGMENT;
 typedef struct {
     LONGLONG frequency;
     RB2K_D7_TIME op[RB2K_D7_OPS];
@@ -37,6 +58,16 @@ typedef struct {
     ULONG caches[RB2K_CACHE_KINDS][3];
     ULONG shaders, shaderBytes;
     ULONG codeAt;       /* where rb_gpu_frame_reserve was loaded, to place samples */
+    /* Frame pacing by stretch (the last one takes what comes after it is reached). */
+    LONGLONG paceLast;
+    ULONG paceSegment;
+    /* Draw records so far, their count at the last present, and whether that frame was light. */
+    ULONG paceRecords, paceDraws, paceLight;
+    ULONG paceUploads, paceShaders;     /* texture uploads and host shaders made at the last present */
+    RB2K_PACE_SEGMENT pace[RB2K_PACE_SEGMENTS];
+    /* The desktop in guest memory: frames copied into its pages, copies that failed, the pages
+     * older than their host resources (bit 0, bit 1), and whether a flip chain is live. */
+    ULONG memoryPresents, memoryFailures, memoryStale, memoryChain;
 } RB2K_D7_PROFILE;
 enum { RB2K_D7_SITE_RECORD = 1, RB2K_D7_SITE_PROGRAM, RB2K_D7_SITE_DEPTH, RB2K_D7_SITE_TEXTURE,
        RB2K_D7_SITE_VERTEX, RB2K_D7_SITE_COMMAND, RB2K_D7_SITE_STEP = 16 };   /* STEP + step in the draw */
