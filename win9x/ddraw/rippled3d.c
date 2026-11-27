@@ -4187,7 +4187,8 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
                  const WORD *idx, DWORD nidx, DWORD span)
 {
     GLF *gl = gl_of(c);
-    DWORD n = idx ? span : count;
+    DWORD n = nidx ? span : count;      /* indexed: nidx, not idx, which is 0 for indices that start a
+                                           buffer object (testing idx drew nothing of those) */
 
     if (!v->base || (v->count && first + n > v->count)) {
         dbg("rd3d: vertices out of range\r\n");
@@ -4222,7 +4223,7 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
         if (mode == GL_POINTS)
             point_state(c, vs_find(c, c->fvf8) && vs_find(c, c->fvf8)->info.psize);
         vs_arrays(c, v, first);
-        if (!idx)
+        if (!nidx)
             gl->DrawArrays(mode, 0, count);
         else {
             bind_buffer(c, GL_ELEMENT_ARRAY_BUFFER_ARB, v->ibo);
@@ -4239,7 +4240,7 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
         if (mode == GL_POINTS)
             point_state(c, 0);
         tnl_arrays(c, v, first);
-        if (!idx)
+        if (!nidx)
             gl->DrawArrays(mode, 0, count);
         else {
             bind_buffer(c, GL_ELEMENT_ARRAY_BUFFER_ARB, v->ibo);
@@ -4251,7 +4252,7 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
     tnl_end(c);
     if (mode == GL_POINTS)
         point_state(c, 0);
-    if (!idx) {
+    if (!nidx) {
         if (!convert(c, v, first, count))
             return;
         arrays(c, v, first, count);
