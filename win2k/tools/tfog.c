@@ -2,8 +2,9 @@
  * driver's T&L device. Each case fogs a blue quad toward red at one depth
  * and compares pixels inside it with the fog factor Direct3D's formulas
  * give: transformed vertices with the factor in the specular alpha or with
- * table fog from z, and object-space vertices with vertex fog (linear,
- * exponential, range) or table fog from w under a perspective projection.
+ * table fog from z, object-space vertices with vertex fog (linear,
+ * exponential, range), and table fog from w under a perspective projection
+ * for both kinds (w of a transformed vertex is 1 / rhw).
  * Every vertex of a quad has the same depth, so the quad is one colour. */
 #define COBJMACROS
 #define DIRECTDRAW_VERSION 0x0700
@@ -102,14 +103,14 @@ static void fog_states(D3DFOGMODE table, D3DFOGMODE vertex, BOOL range, float st
     setf(D3DRENDERSTATE_FOGDENSITY, density);
 }
 
-/* A transformed quad covering 16..112 at depth z with the given specular alpha. */
-static void transformed(const char *name, float z, DWORD specular, DWORD want)
+/* A transformed quad covering 16..112 at depth z and 1 / w rhw, with the given specular alpha. */
+static void transformed(const char *name, float z, float rhw, DWORD specular, DWORD want)
 {
     TL_VERTEX v[4];
     int i;
     for (i = 0; i < 4; ++i) {
         v[i].x = i & 1 ? 112.0f : 16.0f; v[i].y = i & 2 ? 112.0f : 16.0f;
-        v[i].z = z; v[i].rhw = 1;
+        v[i].z = z; v[i].rhw = rhw;
         v[i].diffuse = QUAD_COLOR; v[i].specular = specular;
     }
     if (scene(D3DPT_TRIANGLESTRIP, TL_FVF, v, 4)) check(name, want); else ++failed;
@@ -133,13 +134,13 @@ static void cases(void)
 {
     float d;
     fog_states(D3DFOG_NONE, D3DFOG_NONE, FALSE, 0, 1, 1);
-    transformed("alpha", 0.5f, 0x40000000, fogged(0x40 / 255.0f));
+    transformed("alpha", 0.5f, 1, 0x40000000, fogged(0x40 / 255.0f));
     fog_states(D3DFOG_LINEAR, D3DFOG_NONE, FALSE, 0.2f, 0.8f, 1);
-    transformed("table-linear-z", 0.5f, 0, fogged(factor(D3DFOG_LINEAR, 0.5f, 0.2f, 0.8f, 1)));
+    transformed("table-linear-z", 0.5f, 1, 0, fogged(factor(D3DFOG_LINEAR, 0.5f, 0.2f, 0.8f, 1)));
     fog_states(D3DFOG_EXP, D3DFOG_NONE, FALSE, 0, 1, 2);
-    transformed("table-exp-z", 0.5f, 0, fogged(factor(D3DFOG_EXP, 0.5f, 0, 1, 2)));
+    transformed("table-exp-z", 0.5f, 1, 0, fogged(factor(D3DFOG_EXP, 0.5f, 0, 1, 2)));
     fog_states(D3DFOG_EXP2, D3DFOG_NONE, FALSE, 0, 1, 1);
-    transformed("table-exp2-z", 0.5f, 0, fogged(factor(D3DFOG_EXP2, 0.5f, 0, 1, 1)));
+    transformed("table-exp2-z", 0.5f, 1, 0, fogged(factor(D3DFOG_EXP2, 0.5f, 0, 1, 1)));
     /* Object space: camera z 10, corners 48 off the axis under ortho. */
     fog_states(D3DFOG_NONE, D3DFOG_LINEAR, FALSE, 5, 15, 1);
     object("vertex-linear", &ortho, 10, 48, fogged(factor(D3DFOG_LINEAR, 10, 5, 15, 1)));
@@ -158,6 +159,17 @@ static void cases(void)
     if (rasterCaps & D3DPRASTERCAPS_WFOG)
         object("table-linear-w", &perspective, 10, 6, fogged(factor(D3DFOG_LINEAR, 10, 5, 15, 1)));
     else printf("TFOG case=table-linear-w not applicable: no w-based fog\n");
+    /* The same for a transformed quad at z 0.5 and w 10: by w half fogged, by z (a device
+     * without w-based fog, whatever the projection) not at all. */
+    if (call("projection", IDirect3DDevice7_SetTransform(device, D3DTRANSFORMSTATE_PROJECTION, &perspective)))
+        transformed("table-linear-w-transformed", 0.5f, 0.1f, 0,
+                    fogged(factor(D3DFOG_LINEAR, rasterCaps & D3DPRASTERCAPS_WFOG ? 10.0f : 0.5f, 5, 15, 1)));
+    else ++failed;
+    /* and by z again once the projection is no perspective one */
+    if (call("projection", IDirect3DDevice7_SetTransform(device, D3DTRANSFORMSTATE_PROJECTION, &ortho))) {
+        fog_states(D3DFOG_LINEAR, D3DFOG_NONE, FALSE, 0.2f, 0.8f, 1);
+        transformed("table-linear-z-again", 0.5f, 0.1f, 0, fogged(factor(D3DFOG_LINEAR, 0.5f, 0.2f, 0.8f, 1)));
+    } else ++failed;
     set(D3DRENDERSTATE_FOGENABLE, FALSE);
 }
 

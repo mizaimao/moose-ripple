@@ -232,6 +232,11 @@ static void fog(OUT *o, const TNL_KEY *k)
             ins(o, "DP3", "f.x", "p", "p", 0);
             ins(o, "RSQ", "f.y", "f.x", 0, 0);
             ins(o, "MUL", "f.x", "f.x", "f.y", 0);
+        } else if (k->fog_depth == TNL_DEPTH_W) {
+            op_begin(o, "DP4", "f.x");
+            op_env(o, TNL_ENV_MVP + 3, "");
+            op_s(o, "vertex.position");
+            op_end(o);
         } else if (k->fog_depth == TNL_DEPTH_SCREEN) {
             /* Direct3D's z / w: OpenGL's clip z is 2 z - w */
             op_begin(o, "DP4", "f.x");
@@ -374,7 +379,7 @@ unsigned int tnl_text(const TNL_KEY *k, char *out, unsigned int size)
         if (lit_lights || k->local_viewer)
             need_p = 1;
     }
-    if (k->fog && k->fog != TNL_FOG_ALPHA && k->fog_depth != TNL_DEPTH_SCREEN)
+    if (k->fog && k->fog != TNL_FOG_ALPHA && k->fog_depth != TNL_DEPTH_SCREEN && k->fog_depth != TNL_DEPTH_W)
         need_p = 1;
     for (s = 0; s < TNL_STAGES; s++) {
         if (k->tex[s] == TNL_TEX_POSITION || k->tex[s] == TNL_TEX_REFLECTION)

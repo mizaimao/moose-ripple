@@ -1027,7 +1027,57 @@ shared):
 So the 0.0 is a guest of 256 MB short of memory in a frame that needs every texture at once,
 not a drawing fault. Which of a texture's copies in the guest (Direct3D's managed copy, the
 surface the driver uploads from, what OpenGL keeps) could be saved has not been looked into.
-The device stays an option until a few Direct3D 7 games have been looked at through it.
+The device stays an option for now; the first games looked at through it are in the next
+section.
+
+### Three Direct3D 7 era demos, and table fog by w (2026-11-27)
+
+Three demos were looked at for the T&L HAL device's default, each on the default path first and
+then with `D3D7TnL` on (Windows 98 SE, untimed, captures of the same scene each way):
+
+- **Giants: Citizen Kabuto** (Reaper demo). It draws transformed vertices on either device (no
+  vertex program in its trace), so the switch does not touch it: the same pictures of its menu
+  and first mission, about 145 frames a second both ways, no skips.
+- **Operation Flashpoint** (demo 0.36). A Direct3D 8 program (its device list has Glide and
+  Direct3D only). It starts and draws its menu scene, no skips.
+- **Sacrifice** (demo). It picks the T&L HAL device when there is one. On both devices its level
+  came out wrong: every model, tree and hill a flat light blue, the fog colour.
+
+**What Sacrifice asked for.** Linear table fog from 0.04 to 0.5, on vertices whose z is 0.98 to
+1: all fog, if fog goes by z. A probe drew transformed quads with those states on Microsoft's
+own devices. The RGB device (which offers fog by z only) and the reference rasterizer (which
+offers fog by z and by w) fog every one of them completely too while no perspective projection
+is set, and the reference rasterizer goes by w, 1 / rhw, once the projection matrix is a
+perspective one. So the driver drew what Direct3D says for those states. But it offered neither
+`D3DPRASTERCAPS_ZFOG` nor `D3DPRASTERCAPS_WFOG`, only `D3DPRASTERCAPS_FOGTABLE`, and Sacrifice
+then sets values that suit neither depth. With the two flags offered it sets 100 and 1250,
+distances in w, with a perspective projection (w from 0.1 to 2504).
+
+**What the driver does now.**
+
+- It offers both flags to Direct3D 7.
+- Table fog goes by w while the program's projection is a perspective one. The runtime tells
+  the driver the w of that projection's near and far planes (`D3DDP2OP_WINFO`; both are 1 for any
+  other projection, and fog then goes by z). For transformed vertices w is 1 / rhw
+  (`fog_factor`), on the T&L HAL device the clip-space w (`TNL_DEPTH_W` in `tnl_arb.c`). The
+  factor is worked out per vertex, as for table fog by z.
+- Direct3D 8 and 9 are not offered the flags and fog by z as before: their vertex shader path
+  has no fog by w yet.
+- The Windows 2000/XP driver offers the fog flags it offered before; it was not touched.
+
+Sacrifice's first tutorial level now draws with its sky, grass and trees, the far hills fading
+into the fog, the same on both devices: about 190 frames a second on the HAL device and 275 on
+the T&L HAL device (800x600, untimed). The level is in a thunderstorm and its sky flashes white
+now and then: take several captures before calling a white sky a fault.
+
+`tfog` has three new cases: a transformed quad under table fog by w, the object-space one that
+needs the w flag (it did not run before), and fog by z again once the projection is no
+perspective one. HAL device and T&L HAL device 10 of 10 each (3 cases new since 7 of 7),
+Microsoft's RGB device 9 of 9 (2 new since 7 of 7).
+
+With `RIPPLE_D3D_TRACE=1` the trace now also has each draw's fog states ("draw fog"), one
+transformed vertex of it as bits ("draw vertex": position, rhw, colours, its fog factor) and
+the w range the runtime sends ("w range"). Those lines found this.
 
 ### The Direct3D 9 driver interface (2026-11-27, on by default)
 

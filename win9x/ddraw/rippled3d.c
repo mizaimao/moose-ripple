@@ -1513,6 +1513,8 @@ typedef struct {
         struct { DWORD key; GLuint prog; } var[PS_VARIANTS];
     } ps[MAX_PS];
     int fp_fog;                         /* the bound program blends fog: load its constants */
+    int fog_w;                          /* Direct3D 7: table fog goes by w, the projection being a
+                                           perspective one (D3DDP2OP_WINFO; fog_factor) */
     DWORD ps_bound;
     GLuint fp_prog;                     /* bound to GL_FRAGMENT_PROGRAM_ARB */
     int fp_on;                          /* GL_FRAGMENT_PROGRAM_ARB enabled */
@@ -3646,12 +3648,22 @@ static float exp_neg(float x)
 }
 
 /* The fog factor of a vertex, 1 for none: the specular colour's alpha for vertex fog (which
-   Direct3D works out), from the depth for table fog (per vertex here). */
+   Direct3D works out), from the depth for table fog (per vertex here). That depth is z, or, on a
+   device that offers fog by w (D3DPRASTERCAPS_WFOG) while the program's projection is a
+   perspective one, w: 1 / rhw of a transformed vertex. Start, end and density are then in w's
+   units, distances from the eye. A program that finds no fog flag at all may set values that suit
+   neither depth: Sacrifice then asks for linear fog from 0.04 to 0.5, which by z fogs every
+   vertex completely (as Microsoft's reference rasterizer does with the same states). */
 static float fog_factor(RCTX *c, const VERTICES *v, const BYTE *b)
 {
     DWORD mode = c->rs[D3DRENDERSTATE_FOGTABLEMODE];
     float f, z = ((const float *)b)[2];
 
+    if (c->fog_w && !c->dx8 && mode != D3DFOG_NONE) {
+        float rhw = ((const float *)b)[3];
+        if (rhw > 0.0f)
+            z = 1.0f / rhw;
+    }
     if (mode == D3DFOG_NONE) {
         f = v->fog_at ? *(const float *)(b + v->fog_at - 1) :
             v->specular >= 0 ? b[v->specular + 3] / 255.0f : 1.0f;
@@ -4079,8 +4091,9 @@ static void tnl_key(RCTX *c, const VERTICES *v, TNL_KEY *k)
     if (c->rs[D3DRENDERSTATE_FOGENABLE]) {
         DWORD table = c->rs[D3DRENDERSTATE_FOGTABLEMODE], vtx = c->rs[D3DRENDERSTATE_FOGVERTEXMODE];
         if (table >= D3DFOG_EXP && table <= D3DFOG_LINEAR) {
-            k->fog = (BYTE)table;       /* per vertex here, from the depth buffer's z */
-            k->fog_depth = TNL_DEPTH_SCREEN;
+            k->fog = (BYTE)table;       /* per vertex here, from the depth buffer's z or from w
+                                           (fog_factor) */
+            k->fog_depth = c->fog_w && !c->dx8 ? TNL_DEPTH_W : TNL_DEPTH_SCREEN;
         } else if (vtx >= D3DFOG_EXP && vtx <= D3DFOG_LINEAR) {
             k->fog = (BYTE)vtx;
             k->fog_depth = c->rs[D3DRENDERSTATE_RANGEFOGENABLE] ? TNL_DEPTH_RANGE : TNL_DEPTH_VIEW;
@@ -5136,6 +5149,25 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
                c->tss[1][D3DTSS_COLORARG2], c->tss[0][D3DTSS_ALPHAOP], c->rs[D3DRENDERSTATE_LIGHTING],
                c->rs[D3DRENDERSTATE_TEXTUREFACTOR], c->rs[D3DRENDERSTATE_ALPHABLENDENABLE],
                c->rs[D3DRENDERSTATE_SRCBLEND], c->rs[D3DRENDERSTATE_DESTBLEND], n);
+    if (trace_on && c->rs[D3DRENDERSTATE_FOGENABLE])    /* and its fog; start, end and density as bits */
+        tracef("rd3d: draw fog: table %lu, vertex %lu, range %lu, start %08lx, end %08lx, density %08lx, "
+               "colour %08lx, xyz %lu, specular at %ld, stride %lu\r\n", c->rs[D3DRENDERSTATE_FOGTABLEMODE],
+               c->rs[D3DRENDERSTATE_FOGVERTEXMODE], c->rs[D3DRENDERSTATE_RANGEFOGENABLE],
+               c->rs[D3DRENDERSTATE_FOGSTART], c->rs[D3DRENDERSTATE_FOGEND],
+               c->rs[D3DRENDERSTATE_FOGDENSITY], c->rs[D3DRENDERSTATE_FOGCOLOR], (DWORD)v->xyz,
+               (long)v->specular, v->stride);
+    if (trace_on && !v->xyz && !v->vbo) {       /* and a transformed vertex of it, as bits */
+        const BYTE *b = v->base + first * v->stride;
+        const DWORD *p = (const DWORD *)b;
+        float f = c->rs[D3DRENDERSTATE_FOGENABLE] ? fog_factor(c, v, b) : 1.0f;
+        tracef("rd3d: draw vertex: x %08lx, y %08lx, z %08lx, rhw %08lx, diffuse %08lx, specular %08lx, "
+               "fog %lu, by w %lu, factor %08lx, zenable %lu, zwrite %lu, specular on %lu\r\n", p[0], p[1], p[2],
+               p[3], v->diffuse >= 0 ? *(const DWORD *)(b + v->diffuse) : 0,
+               v->specular >= 0 ? *(const DWORD *)(b + v->specular) : 0, c->rs[D3DRENDERSTATE_FOGENABLE],
+               (DWORD)c->fog_w, *(const DWORD *)&f,
+               c->rs[D3DRENDERSTATE_ZENABLE], c->rs[D3DRENDERSTATE_ZWRITEENABLE],
+               c->rs[D3DRENDERSTATE_SPECULARENABLE]);
+    }
     if (c->stages_dirty || textures_changed(c))
         apply_stages(c);
     if (c->dx8) {                       /* a pixel shader, or none */
@@ -6654,6 +6686,14 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
             break;
         }
         case D3DDP2OP_WINFO:
+            /* The w of the near and the far plane of the program's projection matrix; both 1
+               when it is not a perspective one, and table fog then goes by z (fog_factor). */
+            if (n) {
+                const D3DHAL_DP2WINFO *w = (const D3DHAL_DP2WINFO *)data + (n - 1);
+                c->fog_w = !(w->dvWNear == 1.0f && w->dvWFar == 1.0f);
+                tracef("rd3d: w range %08lx to %08lx\r\n", *(const DWORD *)&w->dvWNear,
+                       *(const DWORD *)&w->dvWFar);
+            }
             cmd = data + n * sizeof(D3DHAL_DP2WINFO);
             break;
         case D3DDP2OP_ZRANGE:
@@ -7247,6 +7287,13 @@ static void texture_format(DDSURFACEDESC *d, DWORD bits, DWORD r, DWORD g, DWORD
     d->ddpfPixelFormat.dwRGBAlphaBitMask = a;
 }
 
+#ifndef D3DPRASTERCAPS_WFOG
+#define D3DPRASTERCAPS_WFOG 0x00100000L
+#endif
+#ifndef D3DPRASTERCAPS_ZFOG
+#define D3DPRASTERCAPS_ZFOG 0x00200000L
+#endif
+
 static void prim_caps(D3DPRIMCAPS *p)
 {
     memset(p, 0, sizeof *p);
@@ -7255,6 +7302,7 @@ static void prim_caps(D3DPRIMCAPS *p)
                     D3DPMISCCAPS_MASKZ;
     p->dwRasterCaps = D3DPRASTERCAPS_DITHER | D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_SUBPIXEL |
                       D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_FOGTABLE |
+                      D3DPRASTERCAPS_ZFOG | D3DPRASTERCAPS_WFOG |     /* table fog by z or w: fog_factor */
                       D3DPRASTERCAPS_MIPMAPLODBIAS | D3DPRASTERCAPS_ZBIAS;
     p->dwZCmpCaps = p->dwAlphaCmpCaps = D3DPCMPCAPS_NEVER | D3DPCMPCAPS_LESS | D3DPCMPCAPS_EQUAL |
         D3DPCMPCAPS_LESSEQUAL | D3DPCMPCAPS_GREATER | D3DPCMPCAPS_NOTEQUAL |
@@ -7443,7 +7491,8 @@ static void d8_caps(RB_D3DCAPS8 *c)
     c->devCaps = hw->dwDevCaps & ~D3DDEVCAPS_FLOATTLVERTEX;
     c->primitiveMiscCaps = tri->dwMiscCaps | 0x80 |    /* D3DPMISCCAPS_COLORWRITEENABLE (colour_mask) */
                            0x800;                       /* D3DPMISCCAPS_BLENDOP (apply_blend_op) */
-    c->rasterCaps = tri->dwRasterCaps & ~D3DPRASTERCAPS_SUBPIXEL;
+    /* without the fog flags: fog by w is done for Direct3D 7 only so far (fog_factor) */
+    c->rasterCaps = tri->dwRasterCaps & ~(D3DPRASTERCAPS_SUBPIXEL | D3DPRASTERCAPS_ZFOG | D3DPRASTERCAPS_WFOG);
     c->zCmpCaps = tri->dwZCmpCaps;
     c->srcBlendCaps = tri->dwSrcBlendCaps;
     c->destBlendCaps = tri->dwDestBlendCaps;

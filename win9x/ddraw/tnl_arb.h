@@ -60,6 +60,7 @@
 #define TNL_DEPTH_VIEW  0                   /* the factor from the view-space z */
 #define TNL_DEPTH_RANGE 1                   /* the distance from the eye */
 #define TNL_DEPTH_SCREEN 2                  /* the depth buffer's z (table fog) */
+#define TNL_DEPTH_W     3                   /* the clip-space w (table fog under a perspective projection) */
 
 /* texture coordinate sources: 0 none (0, 0, 0, 1); 1 + n: the vertex's set n */
 #define TNL_TEX_NORMAL     9                /* D3DTSS_TCI_CAMERASPACENORMAL */
