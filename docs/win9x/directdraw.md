@@ -1200,6 +1200,7 @@ failed one of 27. What was wrong, in the order it was fixed:
 | `clip_ff`, `clip_lit`, `clip_ps`, `clip_ps_lit`, `clip_vs` | user clip planes not offered | `SETCLIPPLANE` was skipped | six planes with hardware vertex processing: in world space for the fixed-function pipeline, in clip space under a vertex shader (see "User clip planes" below) |
 | `interval_immediate` | no immediate presentation interval | the runtime takes it from the driver-only bit `D3DCAPS2_PRESENT_INTERVAL_IMMEDIATE` (0x00400000) in `Caps2`, not from the caps' `PresentationIntervals`, where the driver had put it | the bit is set. A program that asks for that interval was refused its device before |
 | `vertex_point` | every point of a draw the size of `D3DRS_POINTSIZE` | the size in the vertex (`D3DFVF_PSIZE`) was skipped | read per point from untransformed vertices, also with `D3DRS_POINTSCALEENABLE` |
+| `rhw_vertex_point` (added 2026-11-27) | the same for transformed vertices | no vertex program runs for transformed vertices, and their sizes (`D3DFVF_XYZRHW` with `D3DFVF_PSIZE`) were not read | each run of points of one size is drawn with that point size |
 
 With those: Direct3D 9 79 pass and 1 fail, Direct3D 8 31 of 31. The totals grew because cases
 that were skipped as not offered run now, and because the tests gained cases on the way:
@@ -1215,9 +1216,8 @@ the next day ("The Direct3D 9 driver interface" above). Linear StretchRect is st
 offered. Also not offered: L16 textures, and bump environment mapping as a
 fixed-function stage operation (`D3DTOP_BUMPENVMAP`; a pixel shader's `texbem` works): the
 fixed-function stages are drawn with OpenGL's combine modes, which have no such operation, so
-it needs a fragment program for the stages. Not done for points: sizes carried in transformed
-vertices. Not read from a declaration without code: blend weights and indices, the point size
-and the tweening inputs.
+it needs a fragment program for the stages. Not read from a declaration without code: blend
+weights and indices and the tweening inputs.
 
 **User clip planes.** OpenGL defines no user clipping for an ARB vertex program's output, and
 both the fixed-function pipeline and vertex shaders are such programs here. Mesa clips a

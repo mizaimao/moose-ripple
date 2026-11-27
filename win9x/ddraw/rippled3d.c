@@ -2182,8 +2182,8 @@ static void colour_mask(RCTX *c, int all)
    maximum the program set, and point sprites, which stretch each stage's texture over the
    point with (0, 0) at its top left (OpenGL's lower left: rows are in Direct3D's order, see
    framebuffer). program_size: the vertex program writes the size itself (a shader's oPts, or
-   the fixed-function program scaling it by distance, tnl_arb.c). Not done: sizes in the
-   vertex; such points get the render state's size. */
+   the fixed-function program scaling it by distance or reading it from the vertex, tnl_arb.c).
+   Transformed vertices with their own sizes: sized_points. */
 static void point_state(RCTX *c, int program_size)
 {
     GLF *gl = gl_of(c);
@@ -3234,8 +3234,8 @@ typedef struct {
     long first_vertex;                  /* the vertex of stream 0 that base is at, for the other
                                            streams of the draw; -1: not a whole vertex */
     int pos;                            /* the position's byte offset (0 but for a declaration) */
-    int psize_at;                       /* points: 1 + the byte offset of each vertex's size (D3DFVF_PSIZE,
-                                           untransformed vertices), 0: none */
+    int psize_at;                       /* points: 1 + the byte offset of each vertex's size (D3DFVF_PSIZE),
+                                           0: none */
     int fog_at;                         /* transformed vertices: 1 + the byte offset of a separate fog
                                            factor (RB_D3DFVF_FOG), 0: fog is the specular's alpha */
     BYTE src[12];                       /* the stream each attribute comes from, 0 but for a
@@ -3284,9 +3284,8 @@ static int parse_fvf(DWORD fvf, VERTICES *v)
         return 0;
     }
     v->psize_at = 0;
-    if (fvf & D3DFVF_RESERVED1) {       /* Direct3D 8's point size */
-        if (v->xyz)
-            v->psize_at = (int)off + 1;
+    if (fvf & D3DFVF_RESERVED1) {       /* Direct3D 8's point size (only draws of points read it) */
+        v->psize_at = (int)off + 1;
         off += 4;
     }
     v->diffuse = v->specular = -1;
@@ -4742,6 +4741,38 @@ static void clip_state(RCTX *c, int kind)
     c->clip_gl = want;
 }
 
+/* Points whose transformed vertices carry their own sizes (D3DFVF_XYZRHW with D3DFVF_PSIZE), in
+   pixels: no vertex program runs for them, so each run of equal sizes is drawn with its own
+   glPointSize, kept between the minimum and maximum the program set. The arrays are set. */
+static void sized_points(RCTX *c, const VERTICES *v, DWORD first, DWORD count)
+{
+    GLF *gl = gl_of(c);
+    const BYTE *b = v->base + first * v->stride + (v->psize_at - 1);
+    float lo = *(const float *)&c->rs[RS_POINTSIZE_MIN], hi = *(const float *)&c->rs[RS_POINTSIZE_MAX];
+    DWORD i = 0;
+
+    if (!gl->PointSize) {
+        gl->DrawArrays(GL_POINTS, 0, count);
+        return;
+    }
+    if (!(hi >= 1.0f) || hi > MAX_POINT_SIZE)
+        hi = MAX_POINT_SIZE;
+    while (i < count) {
+        float size = *(const float *)(b + i * v->stride);
+        DWORD n = 1;
+
+        while (i + n < count && *(const float *)(b + (i + n) * v->stride) == size)
+            n++;
+        if (size < lo) size = lo;
+        if (size > hi) size = hi;
+        if (!(size >= 1.0f)) size = 1.0f;
+        gl->PointSize(size);
+        gl->DrawArrays(GL_POINTS, (GLint)i, (GLsizei)n);
+        i += n;
+    }
+}
+
+
 /* Draw vertices first..first+count (all of them converted), or count indices into them. */
 static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD count,
                  const WORD *idx, DWORD nidx, DWORD span)
@@ -4831,7 +4862,10 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
         if (!convert(c, v, first, count))
             return;
         arrays(c, v, first, count);
-        gl->DrawArrays(mode, 0, count);
+        if (mode == GL_POINTS && v->psize_at)
+            sized_points(c, v, first, count);
+        else
+            gl->DrawArrays(mode, 0, count);
     } else {
         if (!convert(c, v, first, span))
             return;
@@ -6185,6 +6219,8 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
     memset(&v, 0, sizeof v);
     if (!parse_fvf(d->dwVertexType, &v))
         v.stride = d->dwVertexSize ? d->dwVertexSize : 32;
+    if (!c->dx8)
+        v.psize_at = 0;                 /* Direct3D 7's D3DFVF_RESERVED1 is padding, not a size */
     if (d->dwFlags & D3DHALDP2_USERMEMVERTICES)
         v.base = (BYTE *)d->lpVertices + d->dwVertexOffset;
     else if (d->lpDDVertex)
