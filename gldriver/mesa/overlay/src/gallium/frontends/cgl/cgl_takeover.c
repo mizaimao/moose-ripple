@@ -280,8 +280,18 @@ ripple_cgl_take_over(void *gc, struct ripple_cgl_context *ctx, bool cgls_only)
        * there), put ours in front, and leave the first word gc: cgls passes it to GLEngine. */
       void **back = *(void ***)((uint8_t *)gc + GC_BACK_DISPATCH);
       Dl_info dli;
-      if (cgl->rend != gc)
+      if (cgl->rend != gc) {
+         extern FILE *ripple_gld_dbg_file(void);
+         Dl_info fi, ci;
+         bool fo = dladdr(front, &fi), co = dladdr(cgl->rend, &ci);
+         if (ripple_gld_dbg_file())
+            fprintf(ripple_gld_dbg_file(), "RippleGLDriver: takeover -4: gc %p, front %p (%s), "
+                    "word before it %p (%s), CGL magic 0x%x\n", gc, (void *)front,
+                    fo && fi.dli_fname ? fi.dli_fname : "?", cgl->rend,
+                    co && ci.dli_fname ? ci.dli_fname : "?",
+                    *(uint32_t *)((uint8_t *)cgl + CGL_MAGIC_OFFSET));
          return -4;
+      }
       if (!back)
          return -10;
       for (unsigned i = 0; i < GLI_DISPATCH_ENTRIES; i++)

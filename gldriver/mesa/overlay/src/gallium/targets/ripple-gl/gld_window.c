@@ -71,6 +71,27 @@ gld_window_init(void)
             LOOK(NewWindow) && LOOK(SetWindowDepth) && LOOK(BindSurface) &&
             LOOK(LockWindowBits) && LOOK(UnlockWindowBits) &&
             LOOK(FlushSurfaceWithOptions) && LOOK(SetWindowShape) && LOOK(ReleaseWindow);
+   if (!cgs_ok) {
+      /* A PowerPC program under Rosetta (issue 311): try CoreGraphics by name. */
+      void *cg = dlopen("/System/Library/Frameworks/ApplicationServices.framework/Frameworks/"
+                        "CoreGraphics.framework/CoreGraphics", RTLD_LAZY);
+      DBG("window: CoreGraphics by name: %p\n", cg);
+#define LOOK_CG(name) (*(void **)&cgs.name = cg ? dlsym(cg, "CGS" #name) : NULL)
+      if (cg)
+         cgs_ok = LOOK_CG(GetSurfaceBounds) && LOOK_CG(NewRegionWithRect) && LOOK_CG(ReleaseRegion) &&
+                  LOOK_CG(NewWindow) && LOOK_CG(SetWindowDepth) && LOOK_CG(BindSurface) &&
+                  LOOK_CG(LockWindowBits) && LOOK_CG(UnlockWindowBits) &&
+                  LOOK_CG(FlushSurfaceWithOptions) && LOOK_CG(SetWindowShape) && LOOK_CG(ReleaseWindow);
+      DBG("window: CoreGraphics calls by name: %s\n", cgs_ok ? "found" : "not found");
+   }
+   if (!cgs_ok)
+      DBG("window: CoreGraphics calls missing:%s%s%s%s%s%s%s%s%s%s%s\n",
+          cgs.GetSurfaceBounds ? "" : " GetSurfaceBounds", cgs.NewRegionWithRect ? "" : " NewRegionWithRect",
+          cgs.ReleaseRegion ? "" : " ReleaseRegion", cgs.NewWindow ? "" : " NewWindow",
+          cgs.SetWindowDepth ? "" : " SetWindowDepth", cgs.BindSurface ? "" : " BindSurface",
+          cgs.LockWindowBits ? "" : " LockWindowBits", cgs.UnlockWindowBits ? "" : " UnlockWindowBits",
+          cgs.FlushSurfaceWithOptions ? "" : " FlushSurfaceWithOptions",
+          cgs.SetWindowShape ? "" : " SetWindowShape", cgs.ReleaseWindow ? "" : " ReleaseWindow");
    LOOK(SetWindowOpacity);
    LOOK(CopySurfaceColorSpace);
    LOOK(SetWindowColorSpace);
@@ -319,6 +340,8 @@ gld_window_attach(const uint32_t ids[3], struct gld_window *current, bool *chang
    struct gld_window *w;
 
    *changed = false;
+   if (!cgs_ok)
+      DBG("window: no CoreGraphics calls in this process\n");
    if (!cgs_ok || !ids || !ids[0] || !ids[1] || !ids[2])
       return NULL;
    simple_mtx_lock(&windows_lock);
@@ -342,7 +365,9 @@ gld_window_attach(const uint32_t ids[3], struct gld_window *current, bool *chang
          w->sid = ids[2];
          w->refs = 1;
          w->last_use = ++window_clock;
-         if (setup(w, true, changed)) {
+         int why = setup(w, true, changed);
+         if (why) {
+            DBG("window: setup failed (%d)\n", why);
             fprintf(stderr, "RippleGLDriver: attaching window %u failed\n", ids[1]);
             destroy(w);
             w = NULL;
