@@ -162,6 +162,9 @@ VOID DrvCompletePDEV(DHPDEV pdev, HDEV device)
 VOID DrvDisablePDEV(DHPDEV pdev)
 {
     DISPLAY *display = (DISPLAY *)pdev;
+#if RB2K_DEVCHECKS
+    rb_d7_skips_keep(display);   /* what it skipped stays counted through mode changes */
+#endif
     if (display->cursorLock) {
         rb_display_cursor_release(display);
         EngDeleteSemaphore(display->cursorLock);

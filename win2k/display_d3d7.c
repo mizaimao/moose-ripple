@@ -6011,28 +6011,54 @@ ULONG rb_d7_stats(DISPLAY *d, ULONG bytes, PVOID out)
 /* The counts a test or benchmark run fails on (rbskips.h), summed from the draw statistics. A
  * development check: a build with RB2K_DEVCHECKS=0 (release packages) has no such query. */
 #if RB2K_DEVCHECKS
+/* What displays that are gone had skipped. Windows makes a new display record at every mode
+ * change, and a benchmark that changes modes between its tests would otherwise forget what its
+ * earlier tests skipped. */
+static ULONG skipsGone[RB2K_SKIP_KINDS], skippedGone[RB2K_D7_SKIPS], sitesGone[RB2K_D7_VERTEX_SITES];
+
+/* A display's own counts by kind, added to count. */
+static void skips_add(const RB2K_D7_DRAWSTATS *t, ULONG *count)
+{
+    ULONG i;
+    for (i = 0; i < RB2K_D7_SKIPS; ++i)
+        count[i == RB2K_D7_SKIP_CLEAR ? RB2K_SKIP_KIND_CLEARS : RB2K_SKIP_KIND_DRAWS] += t->skipped[i];
+    for (i = 0; i < RB2K_D7_IGNORED; ++i) count[RB2K_SKIP_KIND_STATES] += t->ignored[i];
+    for (i = 0; i < 8; ++i) {
+        count[RB2K_SKIP_KIND_STATES] += t->d9Ignored[i];
+        count[RB2K_SKIP_KIND_SHADERS] += t->psFailed[i] + t->vsFailed[i];
+    }
+    count[RB2K_SKIP_KIND_STATES] += t->lightsBeyond;      /* lights that found no slot */
+    count[RB2K_SKIP_KIND_SHADERS] += t->stageFailed;
+    count[RB2K_SKIP_KIND_FORMATS] += t->d9Unresolved;
+    count[RB2K_SKIP_KIND_SURFACES] += t->surfaceRefusals + t->texBltFailures + t->uploadFailures + t->checkFailures;
+    count[RB2K_SKIP_KIND_CALLS] += t->dp2Failures + t->drawFailures;
+}
+
+/* A display record is going (DrvDisablePDEV): keep its counts, and the reasons and places of its
+ * skipped draws for d7draw.exe (rb_d7_drawstats adds them to the display's own). */
+void rb_d7_skips_keep(DISPLAY *d)
+{
+    skips_add(&d->d7draw, skipsGone);
+    {
+        ULONG i;
+        for (i = 0; i < RB2K_D7_SKIPS; ++i) skippedGone[i] += d->d7draw.skipped[i];
+        for (i = 0; i < RB2K_D7_VERTEX_SITES; ++i) sitesGone[i] += d->d7draw.vertexSites[i];
+    }
+}
+
 ULONG rb_d7_skips(DISPLAY *d, ULONG bytes, PVOID out)
 {
-    const RB2K_D7_DRAWSTATS *t = &d->d7draw;
     RB2K_SKIPS s;
-    ULONG i;
+    ULONG count[RB2K_SKIP_KINDS], i;
     if (!d->ddLock || bytes != sizeof(s) || !out) return 0;
     RtlZeroMemory(&s, sizeof(s));
     s.version = RB2K_SKIPS_VERSION;
     EngAcquireSemaphore(d->ddLock);
-    for (i = 0; i < RB2K_D7_SKIPS; ++i)
-        s.count[i == RB2K_D7_SKIP_CLEAR ? RB2K_SKIP_KIND_CLEARS : RB2K_SKIP_KIND_DRAWS] += t->skipped[i];
-    for (i = 0; i < RB2K_D7_IGNORED; ++i) s.count[RB2K_SKIP_KIND_STATES] += t->ignored[i];
-    for (i = 0; i < 8; ++i) {
-        s.count[RB2K_SKIP_KIND_STATES] += t->d9Ignored[i];
-        s.count[RB2K_SKIP_KIND_SHADERS] += t->psFailed[i] + t->vsFailed[i];
-    }
-    s.count[RB2K_SKIP_KIND_STATES] += t->lightsBeyond;      /* lights that found no slot */
-    s.count[RB2K_SKIP_KIND_SHADERS] += t->stageFailed + hostProgramFails.count;
-    s.count[RB2K_SKIP_KIND_FORMATS] = t->d9Unresolved;
-    s.count[RB2K_SKIP_KIND_SURFACES] = t->surfaceRefusals + t->texBltFailures + t->uploadFailures + t->checkFailures;
-    s.count[RB2K_SKIP_KIND_CALLS] = t->dp2Failures + t->drawFailures;
+    RtlCopyMemory(count, skipsGone, sizeof(count));
+    skips_add(&d->d7draw, count);
+    count[RB2K_SKIP_KIND_SHADERS] += hostProgramFails.count;
     EngReleaseSemaphore(d->ddLock);
+    for (i = 0; i < RB2K_SKIP_KINDS; ++i) s.count[i] = count[i];
     RtlCopyMemory(out, &s, sizeof(s));
     return 1;
 }
@@ -6051,6 +6077,10 @@ ULONG rb_d7_drawstats(DISPLAY *d, ULONG bytes, PVOID out)
     {
         RB2K_D7_DRAWSTATS *o = out;
         ULONG i;
+#if RB2K_DEVCHECKS
+        for (i = 0; i < RB2K_D7_SKIPS; ++i) o->skipped[i] += skippedGone[i];
+        for (i = 0; i < RB2K_D7_VERTEX_SITES; ++i) o->vertexSites[i] += sitesGone[i];
+#endif
         o->hostDraws += hostGone.draws; o->hostBuffers += hostGone.buffers; o->hostSummed += hostGone.summed;
         o->hostUploads += hostGone.uploads; o->hostUploadBytes += hostGone.uploadBytes; o->hostScans += hostGone.scans;
         o->hostScanHits += hostGone.scanHits; o->hostRewrites += hostGone.rewrites; o->hostStreamed += hostGone.streamed;

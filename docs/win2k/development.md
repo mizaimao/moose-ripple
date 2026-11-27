@@ -3203,6 +3203,13 @@ Later finds of the same checks:
 after the program, so the run fails on its own; start from a fresh boot, since the counts are the
 driver's totals. Pictures of a benchmark are not compared with a reference yet.
 
+The counts are the driver's totals since Windows started, through mode changes: Windows makes a
+new display record for every mode, and the record that goes hands its counts on
+(`rb_d7_skips_keep`). The other statistics that `d7draw.exe` prints do not: after a program that
+changes modes they cover only what ran since the last change. That hid 3DMark03's skipped draws
+for a long time; its CPU tests run at 640x480, and the lines printed after a run only spoke of the
+feature tests behind them.
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:
