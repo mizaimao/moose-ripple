@@ -1471,6 +1471,38 @@ static void vertex_shaders(int only)
         IDirect3DDevice9_SetVertexShaderConstantF(device, 0, m, 4);
         vs_run("vs2_transform", colored, vs, ps_color, v, sizeof(v[0]), 8, s, 6);
     }
+    if (!only || only == 110) {
+        /* vs_2_0's sincos: the angle is the vertex colour's red times c4.x plus c4.y (-3 to 3),
+         * the colour drawn is (cos / 2 + 0.5, sin / 2 + 0.5, 0). c5 and c6 are the constants
+         * the instruction takes in vs_2_0 (D3DSINCOSCONST1 and 2).
+         *   mad r1.x, v1.x, c4.x, c4.y;  sincos r0.xy, r1.x, c5, c6;  mad r0.xy, r0, c7.x, c7.x;
+         *   mov r0.zw, c7.yyyz;  mov oD0, r0 */
+        static const DWORD vs[] = { 0xfffe0200, VDCL2(0, 0), VDCL2(10, 1),
+            P2I(ODp4, 3), P2D(VPos, 0, 1), P2SRC(RV, 0), P2SRC(RC, 0),
+            P2I(ODp4, 3), P2D(VPos, 0, 2), P2SRC(RV, 0), P2SRC(RC, 1),
+            P2I(ODp4, 3), P2D(VPos, 0, 4), P2SRC(RV, 0), P2SRC(RC, 2),
+            P2I(ODp4, 3), P2D(VPos, 0, 8), P2SRC(RV, 0), P2SRC(RC, 3),
+            P2I(OMad, 4), P2D(RR, 1, 1), P2S(RV, 1, 0x00, MNone), P2S(RC, 4, 0x00, MNone), P2S(RC, 4, 0x55, MNone),
+            P2I(37, 4), P2D(RR, 0, 3), P2S(RR, 1, 0x00, MNone), P2SRC(RC, 5), P2SRC(RC, 6),
+            P2I(OMad, 4), P2D(RR, 0, 3), P2SRC(RR, 0), P2S(RC, 7, 0x00, MNone), P2S(RC, 7, 0x00, MNone),
+            P2I(OMov, 2), P2D(RR, 0, 12), P2S(RC, 7, 0x95, MNone),
+            P2I(OMov, 2), P2D(VAttr, 0, 15), P2SRC(RR, 0), PSEND };
+        static const float m[16] = { 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2 };
+        static const float k[16] = { 6, -3, 0, 0,
+                                     -1.5500992e-006f, -2.1701389e-005f, 0.0026041667f, 0.00026041668f,
+                                     -0.020833334f, -0.12500000f, 1.0f, 0.50000000f,
+                                     0.5f, 0, 1, 0 };
+        /* red 255: 3 radians; 0: -3; 128: 0.012; 191: 1.494 */
+        static const SAMPLE s[] = { { 48, 48, 0x019100 }, { 80, 48, 0x016e00 }, { 48, 80, 0xff8100 },
+                                    { 80, 80, 0x89ff00 }, { 8, 8, CLEAR_COLOR }, { 120, 120, CLEAR_COLOR } };
+        vs_quad(v, -0.5f, 0.5f, 0, 0, 0xffff0000);
+        vs_quad(v + 6, 0, 0.5f, 0.5f, 0, 0xff000000);
+        vs_quad(v + 12, -0.5f, 0, 0, -0.5f, 0xff800000);
+        vs_quad(v + 18, 0, 0, 0.5f, -0.5f, 0xffbf0000);
+        IDirect3DDevice9_SetVertexShaderConstantF(device, 0, m, 4);
+        IDirect3DDevice9_SetVertexShaderConstantF(device, 4, k, 4);
+        vs_run("vs2_sincos", colored, vs, ps_color, v, sizeof(v[0]), 8, s, 6);
+    }
     if (!only || only == 38) {
         /* def statements before the dcl statements, as a compiled HLSL shader has them:
          * oPos = v0 + c5 (zero), oD0 = v1 * c6 (one). A driver that looks for the dcl statements

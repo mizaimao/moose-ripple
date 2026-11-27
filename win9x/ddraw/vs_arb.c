@@ -318,8 +318,8 @@ static int instruction(VS *s, unsigned int op, const unsigned int *p, const unsi
     const char *t;
 
     s->scratch = 0;
-    if ((op >= 25 && op <= 30) || (op >= OpSincos && op <= 45))
-        return fail(s, VS_ARB_OPCODE, op);     /* flow control, sincos */
+    if ((op >= 25 && op <= 30) || (op >= OpRep && op <= 45))
+        return fail(s, VS_ARB_OPCODE, op);     /* flow control (walk writes it out) */
     switch (op) {
     case OpNop: case OpDcl: case OpDefb: case OpDefi:
         return 1;
@@ -422,6 +422,31 @@ static int instruction(VS *s, unsigned int op, const unsigned int *p, const unsi
         line(s, "DP3", "q2.w", a.s, a.s, 0);
         line(s, "RSQ", "q2.w", "q2.w", 0, 0);
         line(s, "MUL", t, a.s, "q2.w", 0);
+        break;
+    case OpSincos:
+        /* cos x into .x and sin x into .y, for x from -pi to pi. An ARB vertex program has
+           neither: the sine and cosine of half the angle as polynomials (SN, CS; the sum of
+           the terms left out is below 0.00003), then the double-angle formulas. That is how
+           Direct3D spells the instruction out too, and what the two constant operands of
+           vs_2_0's form are for; they are not read here. */
+        if (n < 2 || !source(s, p[1], comp[1], 1, &a))
+            return 0;
+        line(s, "MUL", "q2.x", a.s, "K.z", 0);          /* y = x / 2 */
+        line(s, "MUL", "q2.y", "q2.x", "q2.x", 0);      /* y squared */
+        line(s, "MAD", "s2.x", "q2.y", "SN.w", "SN.z");
+        line(s, "MAD", "s2.x", "s2.x", "q2.y", "SN.y");
+        line(s, "MAD", "s2.x", "s2.x", "q2.y", "SN.x");
+        line(s, "MAD", "s2.x", "s2.x", "q2.y", "K.y");
+        line(s, "MUL", "s2.x", "s2.x", "q2.x", 0);      /* sin y */
+        line(s, "MAD", "s2.y", "q2.y", "CS.w", "CS.z");
+        line(s, "MAD", "s2.y", "s2.y", "q2.y", "CS.y");
+        line(s, "MAD", "s2.y", "s2.y", "q2.y", "CS.x");
+        line(s, "MAD", "s2.y", "s2.y", "q2.y", "K.y");  /* cos y */
+        line(s, "MUL", "q2.zw", "s2.xyxy", "s2.xyxy", 0);
+        line(s, "SUB", "q2.x", "q2.w", "q2.z", 0);      /* cos x = cos2 y - sin2 y */
+        line(s, "MUL", "q2.y", "s2.x", "s2.y", 0);
+        line(s, "ADD", "q2.y", "q2.y", "q2.y", 0);      /* sin x = 2 sin y cos y */
+        line(s, "MOV", t, "q2", 0, 0);
         break;
     case OpSgn:
         if (n < 2 || !source(s, p[1], comp[1], 0, &a))
@@ -814,6 +839,9 @@ unsigned int vs_to_arb(const unsigned int *code, unsigned int codeWords, const u
     emit(&s.o, "!!ARBvp1.0\n");
     emit(&s.o, "PARAM c[256] = { program.env[0..255] };\n");
     emit(&s.o, "PARAM K = { 0, 1, 0.5, 2 };\n");
+    /* sincos: the sine's terms from the cube up and the cosine's from the square up */
+    emit(&s.o, "PARAM SN = { -0.16666667, 0.0083333333, -0.00019841270, 0.0000027557319 };\n");
+    emit(&s.o, "PARAM CS = { -0.5, 0.041666667, -0.0013888889, 0.000024801587 };\n");
     emit(&s.o, "PARAM L = { -1.4426950408889634, 0.25, 0, 0 };\n");
     emit(&s.o, "PARAM H = program.local[0];\n");
     emit(&s.o, "PARAM F = program.local[1];\n");
