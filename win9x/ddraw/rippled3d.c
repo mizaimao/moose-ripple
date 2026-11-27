@@ -6016,7 +6016,9 @@ static void d8_caps(RB_D3DCAPS8 *c)
        blend stages reported, so those are as many as the samplers. */
     if (p && p->d3d_version >= 0x900) {
         c->pixelShaderVersion = 0xFFFF0200UL;
-        c->maxSimultaneousTextures = c->maxTextureBlendStages = RB_PS2_SAMPLERS;
+        c->maxTextureBlendStages = RB_PS2_SAMPLERS;
+        c->maxSimultaneousTextures = FF8_STAGES;    /* what the fixed-function stages really draw
+                                                       (pixel shaders have their samplers anyway) */
     } else {
         c->pixelShaderVersion = 0xFFFF0103UL;
         c->maxSimultaneousTextures = c->maxTextureBlendStages = RB_PS_COORD_SETS;
