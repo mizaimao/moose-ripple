@@ -128,7 +128,7 @@ typedef struct {
      * | bits) and surface count; mipmapped and managed textures registered. */
     ULONG surfaceRefused, refusedCaps, refusedFlags, refusedWidth, refusedHeight, refusedFormat, refusedCount;
     ULONG regMipmaps, regManaged;
-    ULONG lightsBeyond;   /* SETLIGHT records for an index past the 32 kept */
+    ULONG lightsBeyond;   /* SETLIGHT records for a light that found no slot (more than 32 on at once) */
     /* Mipmapped textures registered with a full chain, and why a chain stopped
      * early: no attach list, no attached surface, not a mipmap, size, memory. */
     ULONG mipChains, mipStops[5];

@@ -1478,13 +1478,25 @@ the software vertex path drew about a tenth of the triangles.
 ### Lighting
 
 The T&L device applies Direct3D 7 fixed-function lighting. The display
-driver keeps the material, the lighting render states and up to 32 lights
-by index, and sends the first eight enabled lights with each lit draw; the
+driver keeps the material, the lighting render states and up to 32 lights,
+each under the number the program gave it (`light_slot`), and sends the
+first eight enabled lights with each lit draw; the
 driver offers eight active lights. One generated vertex shader loops over
 the lights in camera space: point, spot and directional lights with range
 and attenuation, global and per-light ambient, emissive, specular with a
 local or distant viewer, normalized normals, and material colours taken
 from the vertex where its format has them.
+
+A program numbers its lights as it likes. The driver used to keep only the
+numbers 0 to 31 and drop the rest without a word in the test reports.
+3DMark 2001 SE counts its lights up through the whole benchmark (84 lights
+made by the end), so by its later tests every light had a number past 31:
+both High Polygon Count tests drew black objects and the Environment Bump
+Mapping figure was nearly black, where a GeForce 9600 GT with the vendor's
+driver shows them lit. A light that finds no slot (more than 32 switched on
+at once) is counted, and that count is one of the skips the pixel tests fail
+on. `d9pixels` case 96 (`lit_far_light`) lights a quad with light number 1000
+while number 2000000 is switched off again; it was black before.
 
 `tlight.exe rgb|tnl` lights a quad facing the camera in fifteen cases and
 compares pixels inside it with Direct3D's lighting equations evaluated for
@@ -2536,7 +2548,7 @@ The stage program already emits shader model 2 programs with eight samplers
 and eight coordinate sets, and the Direct3D 8 draw packet carries eight
 (`RB2K_D8_STAGES`); only the stage check and the caps stopped at four. Once a
 runtime has announced Direct3D 9, the driver now offers eight stages and eight
-textures; Direct3D 8 programs keep four. Texture and bump matrices have
+textures; Direct3D 8 programs kept four at first (see below). Texture and bump matrices have
 constants for the first six stages (`RB_STAGE_TRANSFORMS`), so stages 6 and
 7 refuse them.
 
@@ -2544,6 +2556,26 @@ constants for the first six stages (`RB_STAGE_TRANSFORMS`), so stages 6 and
 texture each and stage 7 modulates with a texture read through coordinate set
 7. On XP SP3 under KVM (UHD 630 host) it passes, and `d9pixels` passes 56 of
 56.
+
+### Direct3D 8 programs get eight stages too
+
+A version 1.4 pixel shader reads six stages, and the Direct3D 8 runtime
+hands the driver no texture for a stage at or past `MaxTextureBlendStages`:
+`SetTexture` succeeds and the stage stays empty. With four blend stages
+offered (and six simultaneous textures), stages 4 and 5 of every version
+1.4 shader read black. The water of 3DMark 2001 SE's Advanced Pixel Shader
+test multiplies its reflection by stage 4, so the lake had no surface: only
+the refracted lake bed showed. A GeForce 9600 GT with the vendor's driver
+draws the reflecting water.
+
+The driver now offers eight blend stages and eight textures to every
+runtime. `d8pixels` covers it with three cases: `ps14_six_stages` (a
+version 1.4 shader adding stages 0, 4 and 5), `ps14_water` (the benchmark's
+water shader token for token: `texcrd` with `_dw`, `bem`, reads through
+registers in the second phase, five stages) and `stages8` (case 58 on the
+Direct3D 8 interface). `ps_empty_stage` in `d8pixels` and `d9pixels` pins
+down what an empty stage reads in a pixel shader: black, as Microsoft's
+reference rasterizer draws it.
 
 ## Direct3D 8 and 9 on Windows 2000
 
@@ -2643,7 +2675,18 @@ What changes in the command stream:
 - A vertex shader arrives as two objects, a declaration and a function, set
   separately. The driver pairs each declaration with each function into the
   Direct3D 8 shaders it already runs on the host, and an FVF code (a handle
-  with bit 0 clear) stands for stream 0 alone.
+  with bit 0 clear) stands for stream 0 alone. The tables of declarations
+  and functions grow as a program makes them (`d9_slot`, doubling from 256
+  records). They had a fixed size at first, and the 257th declaration of a
+  device was dropped without a word: every draw with it was left out.
+  3DMark03's Mother Nature makes a declaration for each of its more than 500
+  meshes, so about 350,000 draws of a run were left out, and its stream and
+  lake were plain white. Because so many declarations share a few
+  layouts, each declaration points at the first one made with the same
+  elements (`same`), and the shader made from a declaration and a function
+  is kept under that first one: one translation and one host program for a
+  layout, however many declarations have it. `d9pixels` case 99 draws with
+  the first, the 300th and the 600th of six hundred declarations.
 - `SETSTREAMSOURCE2` gives each stream a byte offset; the draws add it.
 - `SETRENDERTARGET2` and `SETDEPTHSTENCIL` replace `SETRENDERTARGET`
   (one render target).
@@ -3099,6 +3142,128 @@ matrices, unlit and lit; a replay of one Car Chase draw (its matrices, light, ma
 texture stage), unlit and lit; and `lit_depth_switch`, where the depth buffer goes to a render
 target texture and back between a lit, an unlit and a lit draw. That last one fails before
 the change.
+
+## Automatic checks in the pixel tests
+
+Two checks make a test run fail on its own, without anyone looking at pictures. Both are for
+development: they live in the test tools (`win2k/tools/drvcheck.h`, included by `d8pixels`,
+`d9pixels` and `tpixels`), and the one thing they need from the driver can be built out.
+
+### What the driver skipped
+
+The display driver has long counted what it leaves out. `rbskips.h` puts those counts behind one
+small query, `ExtEscape(dc, RB2K_D3D7_SKIPS_ESCAPE, ...)`, by kind: draws left out (fill mode,
+stencil, texture stages, vertex format, texture, primitive kind), clears left out, states with no
+effect and Direct3D 9 commands passed over, shaders and stage programs not translated, vertex
+declarations not resolved, surfaces refused and texture copies that failed, and driver calls that
+failed. A test reads the counts after each case; a case during which one rose prints
+`case=NAME skips=N kind=N` and fails, and the end line carries `skips=TOTAL`. `-noskips` turns
+the check off. The driver answers the query only when built with `RB2K_DEVCHECKS` (the default of
+`build.py`; `DEVCHECKS=0` leaves it out, and `package.sh` builds releases that way). The same
+tests read the Windows 9x driver's counts through `RippleSkips()` of its `rippledd.dll`.
+
+### The picture of a reference rasterizer
+
+`d9pixels ref` and `d8pixels ref` draw every case on `D3DDEVTYPE_REF`, Microsoft's reference
+rasterizer, and keep each case's 128x128 picture (`refpix9`, `refpix8`). The later runs on the
+hardware device compare their picture of each case with it and print `ref_differ=N`, the number of
+pixels that differ by more than 16 in a colour channel; more than 16 such pixels (1 in 1000) fail
+the case, and a failing case says where it first differs. `-noref` turns the comparison off. The
+reference rasterizer is `d3dref9.dll` and `d3dref8.dll` from a DirectX SDK, put beside the tests on
+the test disk; they are Microsoft's files and never go into this repository. Without them a
+reference device is still made, but it draws nothing: the tests clear it to a colour of their own
+and read that back before they trust it, and say "reference not available" otherwise, which is no
+failure. `tpixels rgb` does the same for Direct3D 7 with the runtime's own software device; that
+one breaks ties on texel borders the other way (182 pixels, one row and one column, in every
+textured case), so `tpixels` allows 2 pixels in 100.
+
+On the first runs (XP SP3 under KVM, Intel UHD 630 host) the reference rasterizer agreed with all
+108 expected results of `d9pixels` and all 44 of `d8pixels`, and 99 of the 107 compared `d9pixels`
+pictures matched it in every pixel. The checks found two things the sampled pixels had not:
+
+- **Clears of part of a target were skipped** (a smaller viewport, clear rectangles; the skip check
+  caught it in `vs2_viewport`). The host's clear always covers a whole target, since virglrenderer
+  switches the scissor test off for it, so `part_clear` draws the part: one rectangle over the
+  target in the clear's colour and depth, cut by the scissor rectangle, depth test always passing,
+  stencil replaced. The Direct3D 9 scissor test now cuts clears as well, as Direct3D has it.
+- **Points sat one column and one row off** (seven cases, 20 to 48 pixels each). Direct3D gives a
+  point's square the pixels whose middles its left and top edges pass through; the host puts a
+  square of even size one pixel further right and down. The host's viewport takes whole pixels
+  only, so the correction is a quarter of a pixel in what the vertex shaders place the picture
+  with: the viewport origin constant of point draws (`origin_bits`, object-space vertices and
+  vertex programs) and the half-pixel constant of the transformed point shader, through which all
+  transformed Direct3D 8 and 9 points now go.
+
+With both fixed every case passes both checks: `d9pixels` 109 of 109 with hardware and 107 of 107
+with software vertex processing, `d8pixels` 44 of 44, `tpixels` 18 of 18, no skips.
+
+Later finds of the same checks:
+
+- **Transformed vertices on a stage that asks for generated coordinates were skipped.** A stage
+  whose `D3DTSS_TEXCOORDINDEX` carries a `D3DTSS_TCI_*` flag made the Direct3D 7 draw path leave
+  the draw out, whatever the vertices were. Direct3D generates coordinates while it transforms
+  vertices: a transformed vertex keeps its own, and a stage that reads no texture needs none.
+  3DMark 2001 SE left three primitives of a whole run out this way (transformed vertices with a
+  colour and no coordinates). `d8pixels` cases `rhw_texgen`, `rhw_texgen_diffuse` and
+  `rhw_texgen_no_coords`; the reference rasterizer draws all three.
+- **The same with a pixel shader.** The draw path of pixel shaders left a draw out when a stage
+  the shader reads asked for generated coordinates or had a texture transform, for transformed
+  vertices as well. Transformed vertices are also what the runtime sends when it runs a vertex
+  shader in software, and a vertex shader takes no notice of either state: 3DMark03's CPU
+  Test 2 lost 28 million primitives of its scene that way and came out too bright. Found by the
+  skip counts once they lasted through mode changes (below). `ps_rhw_texgen` in both tests and
+  `vs_texgen_ignored` in `d9pixels`.
+
+### Benchmark runs
+
+`rbskips.exe NAME` prints the driver's skip counts so far in one line (`RBSKIPS run=NAME draws=0
+... total=0 result=PASS`) and exits with 1 when any is above zero. A benchmark's launcher runs it
+after the program, so the run fails on its own; start from a fresh boot, since the counts are the
+driver's totals.
+
+The counts are the driver's totals since Windows started, through mode changes: Windows makes a
+new display record for every mode, and the record that goes hands its counts on
+(`rb_d7_skips_keep`). The other statistics that `d7draw.exe` prints do not: after a program that
+changes modes they cover only what ran since the last change. That hid 3DMark03's skipped draws
+for a long time; its CPU tests run at 640x480, and the lines printed after a run only spoke of the
+feature tests behind them.
+
+### Benchmark frames against the reference rasterizer
+
+3DMark03's registered edition has an Image Quality tool that renders one chosen frame of a chosen
+test into a picture file, with the display driver or, with its "Use Reference Rasterizer" box
+ticked, with Microsoft's reference rasterizer (`d3dref9.dll` from a DirectX SDK has to be in
+`system32`; it is Microsoft's file and stays out of this repository). `guiclick` drives the tool:
+
+    guiclick 300 -press "@Tip Of#1" -press #9 -pick 4=3 -set 2=600 -set 5=o4
+        -press "@Image Quality#1" -dismiss "Image quality frame saved"
+        -until "Image quality frame saved" 3DMark03.exe
+
+Button 9 of the main window opens the tool. Its fourth combo box is the test (0 to 3 the game
+tests, 4 and 5 the fill rate tests, 6 Vertex Shader, 7 Pixel Shader 2.0, 8 Ragtroll), its second
+edit control the frame, its fifth the file prefix, its first combo box the resolution, and button 1
+is Run. The same line with `-check "Use Reference Rasterizer"` and another prefix gives the
+reference picture. Both land in the program's `iq` folder as 24-bit BMP files named by prefix and
+frame. The tool is greyed out in the free edition; the registered one takes its code in the
+Register dialog (button 16), which `-fill FILE -press @Register#1` fills from a file without the
+code reaching a log.
+
+`win2k/tools/framediff.py OURS REFERENCE [OUT.jpg]` compares the two on the host. It prints the
+share of pixels more than 16 apart in a colour channel, and the same share after both pictures are
+averaged over 8x8 blocks. Edges and texture filtering put a few percent into the first number even
+between two correct pictures; a missing object or a wrong colour moves the second, and the
+comparison fails when that is above 2 percent.
+
+First results (XP SP3 under KVM, Intel UHD 630 host, 1024x768):
+
+| frame | pixels | blocks | result | reference rasterizer took |
+| --- | --- | --- | --- | --- |
+| Wings of Fury, frame 1038 | 1.26% | 0.01% | pass | under a minute |
+| Mother Nature, frame 600 | 8.00% | 3.61% | fail | 24 minutes |
+
+In the Mother Nature frame every differing block lies in the tree canopy against the sky, where
+the driver's picture is a little lighter; the stream, the grass, the rocks and the butterfly
+agree. Not looked into yet.
 
 ## Release package
 

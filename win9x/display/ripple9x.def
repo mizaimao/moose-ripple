@@ -41,6 +41,7 @@ EXPORTS
     SelectBitmap        @29
     BitmapBits          @30
     ReEnable            @31
+    DDIGammaRamp        @32
     Inquire             @101
     SetCursor           @102
     MoveCursor          @103

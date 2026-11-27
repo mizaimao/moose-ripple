@@ -39,6 +39,9 @@ RVD_SCANOUT_QUERY equ   53434F55h       ; EDX with HIRES_ON: ask for scanout dis
 RVD_SIGNATURE2  equ     32445652h       ; "RVD2"
 RVD_MODE        equ     52564400h       ; low byte = bpp, EDX = (width << 16) | height
 RVD_PALETTE     equ     52565000h       ; low byte = palette index, EDX = 00RRGGBBh
+RVD_GAMMA       equ     52564700h       ; low byte = gamma ramp index, EDX = 00RRGGBBh
+RVD_GAMMA_SET   equ     52564800h       ; the ramp collected so is in force from now
+RVD_GAMMA_QUERY equ     52564900h       ; does this mini-VDD take gamma ramps? Answered with "RVD2"
 
 VxD_LOCKED_DATA_SEG
 WindowsVM       dd      0               ; the system VM's handle
@@ -66,7 +69,7 @@ MsgVMEnd        db      'rvd: a VM ends', 13, 10, 0
 VxD_LOCKED_DATA_ENDS
 
 VxD_LOCKED_CODE_SEG
-        extrn   _vgpu_display_mode:near, _vgpu_display_colour:near
+        extrn   _vgpu_display_mode:near, _vgpu_display_colour:near, _vgpu_display_gamma:near
         extrn   _vgpu_leave_windows:near, _vgpu_desktop_tick:near
         extrn   _vgpu_show_dos:near
         extrn   _vgpu_dac_vm:dword
@@ -233,6 +236,12 @@ BeginProc MiniVDD_RegisterDisplayDriver
         je      short rd_mode
         cmp     edx, RVD_PALETTE
         je      short rd_colour
+        cmp     edx, RVD_GAMMA
+        je      rd_gamma
+        cmp     edx, RVD_GAMMA_SET
+        je      rd_gamma_set
+        cmp     edx, RVD_GAMMA_QUERY
+        je      rd_v2
         and     eax, 1
         mov     HiRes, eax
         test    eax, eax
@@ -264,6 +273,19 @@ rd_colour:
         push    [ebp.Client_EDX]
         push    eax
         call    _vgpu_display_colour
+        add     esp, 8
+        popad
+        jmp     short rd_v2
+rd_gamma_set:
+        mov     eax, 256                ; vgpu_display_gamma: the ramp is complete
+        jmp     short rd_gamma_call
+rd_gamma:
+        movzx   eax, al
+rd_gamma_call:
+        pushad
+        push    [ebp.Client_EDX]
+        push    eax
+        call    _vgpu_display_gamma
         add     esp, 8
         popad
 rd_v2:  mov     [ebp.Client_EAX], RVD_SIGNATURE2
