@@ -835,6 +835,12 @@ int main(int argc, char **argv)
     }
     create = lib ? (IDirect3D8 *(WINAPI *)(UINT))GetProcAddress(lib, "Direct3DCreate8") : NULL;
     d3d = create ? create(D3D_SDK_VERSION) : NULL;
+    if (!d3d && create) {
+        /* A DirectX 8.0 runtime (the last for Windows 95) refuses the 8.1 headers' version; its
+         * own is 120, and the interfaces used here are the same. */
+        d3d = create(120);
+        if (d3d) printf("D8PIX runtime=8.0 (SDK version 120)\n");
+    }
     if (!d3d) { printf("D8PIX no Direct3D 8 runtime\nD8PIX end result=FAIL\n"); return 1; }
     {
         D3DADAPTER_IDENTIFIER8 id;
