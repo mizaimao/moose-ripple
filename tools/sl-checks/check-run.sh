@@ -14,12 +14,12 @@ d=/tmp/ripple-checks
 L=/Library/Logs/RippleGL
 mkdir -p $d
 
-# The last skip count of every log: "FILE COUNT" lines.
+# The last skip count of every log: "COUNT<tab>FILE" lines (program names have spaces).
 counts() {
     for f in $L/*.log; do
         [ -f "$f" ] || continue
         n=$(grep "^skips: " "$f" 2>/dev/null | tail -1 | awk '{print $2}')
-        echo "$f ${n:-0}"
+        printf '%s\t%s\n' "${n:-0}" "$f"
     done
 }
 kext_errors() {
@@ -36,7 +36,7 @@ end)
     [ -f $d/$label.start ] || { echo "check-run: no start for $label" >&2; exit 2; }
     counts > $d/$label.skips-end
     # Per log: the count now minus the count at the start (0 for a log that is new).
-    skips=$(awk 'NR == FNR { start[$1] = $2; next } { n = $2 - ($1 in start ? start[$1] : 0); if (n > 0) { total += n; printf "%s %d\n", $1, n > "/dev/stderr" } } END { print total + 0 }' \
+    skips=$(awk -F '\t' 'NR == FNR { start[$2] = $1; next } { n = $1 - ($2 in start ? start[$2] : 0); if (n > 0) { total += n; printf "%d\t%s\n", n, $2 > "/dev/stderr" } } END { print total + 0 }' \
         $d/$label.skips $d/$label.skips-end 2> $d/$label.skips-by-log)
     kext=$(( $(kext_errors) - $(cat $d/$label.kext) ))
     [ $kext -lt 0 ] && kext=0                    # the kernel log wrapped
@@ -44,7 +44,7 @@ end)
     [ "$skips" -gt 0 ] || [ "$kext" -gt 0 ] && verdict=FAIL
     echo "checks $label: driver skips $skips, kext errors $kext: $verdict"
     if [ "$skips" -gt 0 ]; then
-        while read -r f n; do
+        while IFS='	' read -r n f; do
             echo "  $n in $(basename "$f"): $(grep "^skips: " "$f" | tail -1 | cut -c1-300)"
         done < $d/$label.skips-by-log
     fi
