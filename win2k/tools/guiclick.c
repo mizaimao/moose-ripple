@@ -26,6 +26,8 @@
  *   - "-pick N=K" gives the Nth combo box of a dialog its item K (counted from 0), and
  *     "-set N=text" gives the Nth edit control that text, each once, when the dialog has stood
  *     still. Combo boxes are reported with their number and items, edit controls with their number.
+ *   - List boxes, list views, tree views and read-only edit controls are reported with what they
+ *     show, so a program's result lists reach the log.
  * With -debug the program runs under guiclick as its debugger: its
  * exceptions are reported with the module and offset, and for one that
  * ends it, the registers and the code addresses found on its stack.
@@ -36,6 +38,7 @@
  * close. Every line starts with GUICLICK. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <commctrl.h>
 #include <tlhelp32.h>
 #include <stdio.h>
 #include <string.h>
@@ -50,6 +53,7 @@ static DWORD shellPid, selfPid;
 static struct { HWND w; DWORD hash, changed, acted; } seen[MaxWindows];
 static DWORD lastChange;
 static BOOL closeAll, debugging;
+static BOOL forceAct;     /* the last look before the -until close: act whatever the clock says */
 
 static void out(const char *s)
 {
@@ -112,6 +116,111 @@ static void load_fills(const char *path)
         if (fills[fillCount][0]) ++fillCount;
     }
     fclose(f);
+}
+
+/* The rows of a list view or the items of a tree view in another process. Their messages take
+ * pointers, so the item record and its text buffer live in a page of that process. */
+static void remote_items(HWND w, BOOL tree)
+{
+    DWORD pid = 0;
+    HANDLE process;
+    BYTE *page;
+    char text[256], line[400];
+    SIZE_T done;
+    GetWindowThreadProcessId(w, &pid);
+    process = OpenProcess(PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE, FALSE, pid);
+    if (!process) return;
+    page = (BYTE *)VirtualAllocEx(process, NULL, 4096, MEM_COMMIT, PAGE_READWRITE);
+    if (page && !tree) {
+        int count = (int)SendMessageA(w, LVM_GETITEMCOUNT, 0, 0), columns = 1, i, k;
+        HWND header = (HWND)SendMessageA(w, LVM_GETHEADER, 0, 0);
+        if (header) columns = (int)SendMessageA(header, HDM_GETITEMCOUNT, 0, 0);
+        if (columns < 1) columns = 1;
+        if (columns > 6) columns = 6;
+        for (i = 0; i < count && i < 80; ++i) {
+            _snprintf(line, sizeof(line), "GUICLICK     row %d:", i);
+            for (k = 0; k < columns; ++k) {
+                LVITEMA item;
+                size_t at = strlen(line);
+                memset(&item, 0, sizeof(item));
+                item.mask = LVIF_TEXT; item.iItem = i; item.iSubItem = k;
+                item.pszText = (char *)(page + 512); item.cchTextMax = 255;
+                text[0] = 0;
+                if (WriteProcessMemory(process, page, &item, sizeof(item), &done)) {
+                    SendMessageA(w, LVM_GETITEMTEXTA, i, (LPARAM)page);
+                    ReadProcessMemory(process, page + 512, text, 255, &done);
+                    text[255] = 0;
+                }
+                _snprintf(line + at, sizeof(line) - at, " [%s]", text);
+            }
+            line[sizeof(line) - 1] = 0;
+            out(line);
+        }
+    } else if (page) {
+        HTREEITEM item = (HTREEITEM)SendMessageA(w, TVM_GETNEXTITEM, TVGN_ROOT, 0), next;
+        int depth = 0, n = 0;
+        while (item && n++ < 200) {
+            TVITEMA t;
+            memset(&t, 0, sizeof(t));
+            t.mask = TVIF_TEXT | TVIF_HANDLE; t.hItem = item;
+            t.pszText = (char *)(page + 512); t.cchTextMax = 255;
+            text[0] = 0;
+            if (WriteProcessMemory(process, page, &t, sizeof(t), &done)) {
+                SendMessageA(w, TVM_GETITEMA, 0, (LPARAM)page);
+                ReadProcessMemory(process, page + 512, text, 255, &done);
+                text[255] = 0;
+            }
+            _snprintf(line, sizeof(line), "GUICLICK     %*s%s", depth * 2, "", text);
+            line[sizeof(line) - 1] = 0;
+            out(line);
+            next = (HTREEITEM)SendMessageA(w, TVM_GETNEXTITEM, TVGN_CHILD, (LPARAM)item);
+            if (next) { ++depth; item = next; continue; }
+            for (;;) {
+                next = (HTREEITEM)SendMessageA(w, TVM_GETNEXTITEM, TVGN_NEXT, (LPARAM)item);
+                if (next) { item = next; break; }
+                item = (HTREEITEM)SendMessageA(w, TVM_GETNEXTITEM, TVGN_PARENT, (LPARAM)item);
+                if (!item) break;
+                --depth;
+            }
+        }
+    }
+    if (page) VirtualFreeEx(process, page, 0, MEM_RELEASE);
+    CloseHandle(process);
+}
+
+/* What a list shows, for reading a program's results: list boxes, list views, tree views, and
+ * edit controls that are read-only (those hold what the program says, not what somebody typed). */
+static void list_contents(HWND w, const char *name, LONG style)
+{
+    char line[400];
+    if (!lstrcmpiA(name, "ListBox")) {
+        int count = (int)SendMessageA(w, LB_GETCOUNT, 0, 0), i;
+        for (i = 0; i < count && i < 80; ++i) {
+            char item[256];
+            item[0] = 0;
+            if (SendMessageA(w, LB_GETTEXTLEN, i, 0) < (LRESULT)sizeof(item)) SendMessageA(w, LB_GETTEXT, i, (LPARAM)item);
+            _snprintf(line, sizeof(line), "GUICLICK     item %d: %s", i, item);
+            line[sizeof(line) - 1] = 0;
+            out(line);
+        }
+    } else if (!lstrcmpiA(name, "SysListView32")) remote_items(w, FALSE);
+    else if (!lstrcmpiA(name, "SysTreeView32")) remote_items(w, TRUE);
+    else if (!lstrcmpiA(name, "Edit") && (style & ES_READONLY)) {
+        static char all[4000];
+        char *p = all, *end;
+        all[0] = 0;
+        GetWindowTextA(w, all, sizeof(all));
+        while (*p) {
+            for (end = p; *end && *end != 0x0d && *end != 0x0a; ++end) {}
+            if (end > p) {
+                _snprintf(line, sizeof(line), "GUICLICK     text: %.*s", (int)(end - p < 300 ? end - p : 300), p);
+                line[sizeof(line) - 1] = 0;
+                out(line);
+            }
+            p = end;
+            while (*p == 0x0d || *p == 0x0a) ++p;
+        }
+    }
 }
 
 static BOOL CALLBACK child(HWND w, LPARAM arg)
@@ -203,6 +312,7 @@ static BOOL CALLBACK child(HWND w, LPARAM arg)
         }
         line[sizeof(line) - 1] = 0;
         out(line);
+        list_contents(w, name, style);
     }
     if (!lstrcmpiA(name, "Button") && c->count < 48) {
         c->button[c->count] = w;
@@ -365,7 +475,7 @@ static BOOL CALLBACK top(HWND w, LPARAM arg)
     }
     /* Act once the window has stood still for a second, and at most every
      * three seconds while it does not change. */
-    if (now - seen[slot].changed > 1000 && now - seen[slot].acted > 3000) {
+    if (forceAct || (now - seen[slot].changed > 1000 && now - seen[slot].acted > 3000)) {
         seen[slot].acted = now;
         if (pickCount + setCount) {
             CONTROLS e;
@@ -640,6 +750,15 @@ int main(void)
         }
         if (exited && GetTickCount() - lastChange > 10000) { out("GUICLICK done"); break; }
         if (untilSeen && GetTickCount() - untilSeen > 10000) {
+            /* What is still to be pressed gets its chance first, and what that opens is reported:
+             * after a benchmark a guest's clock may run through the ten seconds in one step. */
+            {
+                int look;
+                forceAct = TRUE;
+                EnumWindows(top, 0);
+                forceAct = FALSE;
+                for (look = 0; look < 8; ++look) { Sleep(400); EnumWindows(top, 0); }
+            }
             out("GUICLICK until text seen, closing");
             closeAll = TRUE;
             EnumWindows(top, 0);

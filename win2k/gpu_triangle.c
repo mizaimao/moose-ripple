@@ -730,7 +730,9 @@ static ULONG pipe_wrap(ULONG address)
     return map[address];
 }
 
-/* Create (or replace) one sampler object. The Direct3D mip filter (point 2,
+/* Create (or replace) one sampler object. Bits 20 to 23 of the sampler word hold the address
+ * mode of the third coordinate (a volume texture's w); the Direct3D 7 draws leave them zero
+ * and get the clamp they always had. The Direct3D mip filter (point 2,
  * linear 3) becomes Gallium's nearest (0) or linear (1); anything else
  * samples the top level only (2). */
 static ULONG sampler_words(ULONG *words, ULONG handle, ULONG state, ULONG sampler, ULONG border)
@@ -741,7 +743,7 @@ static ULONG sampler_words(ULONG *words, ULONG handle, ULONG state, ULONG sample
     words[n++] = handle;
     words[n++] = VIRGL_OBJ_SAMPLE_STATE_S0_WRAP_S(pipe_wrap(sampler & 15)) |
                  VIRGL_OBJ_SAMPLE_STATE_S0_WRAP_T(pipe_wrap((sampler >> 4) & 15)) |
-                 VIRGL_OBJ_SAMPLE_STATE_S0_WRAP_R(2) |
+                 VIRGL_OBJ_SAMPLE_STATE_S0_WRAP_R((sampler >> 20) & 15 ? pipe_wrap((sampler >> 20) & 15) : 2) |
                  VIRGL_OBJ_SAMPLE_STATE_S0_MIN_IMG_FILTER(min != 1) |
                  VIRGL_OBJ_SAMPLE_STATE_S0_MIN_MIP_FILTER(mip == 2 ? 0 : mip == 3 ? 1 : 2) |
                  VIRGL_OBJ_SAMPLE_STATE_S0_MAG_IMG_FILTER(mag != 1);
@@ -1327,7 +1329,8 @@ static BOOLEAN sampler_valid(ULONG sampler)
 {
     ULONG addressU = sampler & 15, addressV = (sampler >> 4) & 15;
     ULONG mag = (sampler >> 8) & 15, min = (sampler >> 12) & 15;
-    return !(sampler >> 20) && ((sampler >> 16) & 15) <= 3 && addressU >= 1 && addressU <= 4 &&
+    /* bits 20 to 23: the address mode of the third coordinate, 0 (not said: clamp) to 4 */
+    return !(sampler >> 24) && ((sampler >> 20) & 15) <= 4 && ((sampler >> 16) & 15) <= 3 && addressU >= 1 && addressU <= 4 &&
            addressV >= 1 && addressV <= 4 && mag >= 1 && mag <= 5 && min >= 1 && min <= 3;
 }
 
