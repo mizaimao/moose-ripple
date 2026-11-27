@@ -259,7 +259,7 @@ renderer only where the Intel hosts do. It covers ARB and fixed-function fragmen
 with 2D and rectangle textures, which is what Core Image and WindowServer use; a GLSL
 program that clamps to a border still gets the edge there.
 
-## KI-13: A swap rectangle is ignored for windows the kernel shows
+## KI-13: A swap rectangle was ignored for windows the kernel shows (fixed after 0.6.0)
 
 GitHub issue: [#235](https://github.com/mizaimao/moose-ripple/issues/235). Found on 2026-11-26; release 0.6.0 and
 earlier have it.
@@ -279,6 +279,12 @@ would show the stale part.
 **Workaround.** `RIPPLE_GL_DIRECT=0` in the program's environment shows its window the older
 way (each frame read back into a private window), which applies the rectangle (checked
 2026-11-26: `swaprect-check` then shows what it should); it is slower.
+
+**Fix.** `SURFACE_PRESENT` takes the rectangle (flag `RIPPLE_GPU_PRESENT_RECT`, docs/kext-uapi.md),
+and the kernel copies only that part into the screen and into WindowServer's texture of the
+window; the rest of the screen keeps the earlier picture. Checked on the Proxmox host on
+2026-11-27: `swaprect-check` (started as an app) shows exactly what Apple's software renderer
+shows, and OpenArena runs as before (297.1 frames/s against 298.2, captures all different).
 
 ## KI-14: A GL call could crash after a context was destroyed from another thread (fixed in 0.6.0)
 

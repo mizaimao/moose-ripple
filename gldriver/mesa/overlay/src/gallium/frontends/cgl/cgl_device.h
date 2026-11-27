@@ -30,7 +30,9 @@ bool ripple_cgl_device_surface_info(uint32_t id, struct ripple_gpu_surface_info 
  * region of the screen now, or on an error. `top_first`: the texture's first row is the
  * picture's top row. */
 struct pipe_resource;
-bool ripple_cgl_device_surface_present(uint32_t surface, struct pipe_resource *res, bool top_first);
+/* `rect` (x, y, width, height, top-left origin) or NULL: only that part changes on screen. */
+bool ripple_cgl_device_surface_present(uint32_t surface, struct pipe_resource *res, bool top_first,
+                                       const uint32_t *rect);
 /* For a compositor: `res` becomes the texture of a window's surface whose program presents
  * that way. The kernel keeps it filled with the surface's latest frame, top row first, until
  * the resource is destroyed (`keep`), or fills it now only. True if it holds a frame now. */

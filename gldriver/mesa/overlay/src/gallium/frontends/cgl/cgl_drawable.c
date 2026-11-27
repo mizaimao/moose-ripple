@@ -205,7 +205,20 @@ present_resource(struct st_context *st, struct ripple_cgl_drawable *d,
          d->last_present = now < next ? next : now;
       }
       st_context_flush(st, 0, NULL, NULL, NULL);
-      bool shown = ripple_cgl_device_surface_present(d->present_surface, res, true);
+      /* A swap rectangle: only that part changes on screen (issue 235). It is in window
+       * coordinates from the bottom; the kernel takes it from the top. */
+      uint32_t rect[4], *r = NULL;
+      if (d->swap_rect_on) {
+         int x = MAX2(d->swap_rect[0], 0), y = MAX2(d->swap_rect[1], 0);
+         int x1 = MIN2(d->swap_rect[0] + d->swap_rect[2], (int)w);
+         int y1 = MIN2(d->swap_rect[1] + d->swap_rect[3], (int)h);
+         rect[0] = x1 > x ? x : 0;
+         rect[1] = y1 > y ? (uint32_t)((int)h - y1) : 0;
+         rect[2] = x1 > x ? (uint32_t)(x1 - x) : 0;
+         rect[3] = y1 > y ? (uint32_t)(y1 - y) : 0;
+         r = rect;
+      }
+      bool shown = ripple_cgl_device_surface_present(d->present_surface, res, true, r);
       /* Not shown: the surface is not a plain region of the screen just now (the window is
        * moving, or in Exposé). The kernel has kept the frame for WindowServer, which reads it
        * when it draws the window: tell it there is something new. */
@@ -481,6 +494,16 @@ swap_debug(struct ripple_cgl_context *ctx)
    } else {
       fprintf(ripple_gld_dbg_file(), "RippleGLDriver:   no drawable\n");
    }
+}
+
+void
+ripple_cgl_drawable_set_swap_rect(struct ripple_cgl_drawable *d, bool on, const int rect[4])
+{
+   if (!d)
+      return;
+   d->swap_rect_on = on;
+   if (rect)
+      memcpy(d->swap_rect, rect, sizeof(d->swap_rect));
 }
 
 void
