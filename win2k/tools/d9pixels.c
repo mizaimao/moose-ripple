@@ -1016,6 +1016,21 @@ static void pixel_shaders(int only, BOOL version2)
         quad_samples(s, want);
         ps_run("ps_texture", ps, v, 1, s, 5);
     }
+    if (!only || only == 104) {
+        /* tex t0 with transformed vertices while stage 0 asks for generated coordinates and a
+         * texture transform. Both belong to Direct3D's own vertex processing, which transformed
+         * vertices (a program's, or those the runtime shaded in software) do not go through: the
+         * texture shows as the vertices map it. */
+        static const DWORD ps[] = { PSV(1), OTex, DST(RT, 0), OMov, DST(RR, 0), SRC(RT, 0), PSEND };
+        ps_quad(v, 32, 32, 96, 96, 0xffffffff, 0, 0, 1, 1);
+        for (i = 0; i < 4; ++i) texel(i, want[i]);
+        quad_samples(s, want);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_CAMERASPACEPOSITION);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_COUNT2);
+        ps_run("ps_rhw_texgen", ps, v, 1, s, 5);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXCOORDINDEX, 0);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+    }
     if (!only || only == 3) {   /* def c0; mad r0, v0, c1, c0 with c1 set by the program; the blue sum clamps */
         static const DWORD ps[] = { PSV(1), DEF(0, F025, F05, F075, F1),
             OMad, DST(RR, 0), SRC(RV, 0), SRC(RC, 1), SRC(RC, 0), PSEND };
@@ -3068,6 +3083,73 @@ done:
     for (i = 0; i < Count; ++i) if (decls[i]) IDirect3DVertexDeclaration9_Release(decls[i]);
 }
 
+/* 105: the coordinates a vertex shader writes are final as well: mov oPos, v0; mov oT0, v1 and
+ * tex t0, while stage 0 asks for generated coordinates and a texture transform (state a program
+ * may leave behind; a vertex shader takes no notice). With software vertex processing the driver
+ * gets these vertices already transformed, as 3DMark03's CPU tests send theirs. */
+static void vs_texgen_case(int only, BOOL offered)
+{
+    static const D3DVERTEXELEMENT9 elements[] = {
+        { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+        { 0, 12, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0 }, D3DDECL_END() };
+    static const DWORD vs[] = { 0xfffe0101,
+        0x0000001f, 0x80000000, 0x900f0000,     /* dcl_position v0 */
+        0x0000001f, 0x80000005, 0x900f0001,     /* dcl_texcoord v1 */
+        0x00000001, 0xc00f0000, 0x90e40000,     /* mov oPos, v0 */
+        0x00000001, 0xe00f0000, 0x90e40001,     /* mov oT0, v1 */
+        0x0000ffff };
+    static const DWORD ps[] = { PSV(1), OTex, DST(RT, 0), OMov, DST(RR, 0), SRC(RT, 0), PSEND };
+    static const SAMPLE s[] = { { 48, 48, 0xff0000 }, { 80, 48, 0x00ff00 }, { 48, 80, 0x0000ff }, { 80, 80, 0xffffff },
+                                { 8, 8, CLEAR_COLOR } };
+    struct { float x, y, z, u, v; } v[4];
+    IDirect3DVertexDeclaration9 *decl = NULL;
+    IDirect3DVertexShader9 *shader = NULL;
+    IDirect3DPixelShader9 *pixel = NULL;
+    IDirect3DTexture9 *t = NULL;
+    HRESULT hr;
+    int i;
+    if (only && only != 105) return;
+    if (!offered) { printf("D9PIX vertex shaders 1.1 not offered\n"); return; }
+    t = texture2x2(texels0);
+    hr = t ? IDirect3DDevice9_CreateVertexDeclaration(device, elements, &decl) : E_FAIL;
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice9_CreateVertexShader(device, vs, &shader);
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice9_CreatePixelShader(device, ps, &pixel);
+    if (FAILED(hr)) { fail_hr("vs_texgen_ignored", "create", hr); goto done; }
+    for (i = 0; i < 4; ++i) {
+        v[i].x = i & 1 ? 0.5f : -0.5f;
+        v[i].y = i & 2 ? -0.5f : 0.5f;
+        v[i].z = 0.5f;
+        v[i].u = i & 1 ? 1.0f : 0.0f;
+        v[i].v = i & 2 ? 1.0f : 0.0f;
+    }
+    if (begin("vs_texgen_ignored")) {
+        IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)t);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_CAMERASPACEPOSITION);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_COUNT2);
+        IDirect3DDevice9_SetVertexDeclaration(device, decl);
+        IDirect3DDevice9_SetVertexShader(device, shader);
+        IDirect3DDevice9_SetPixelShader(device, pixel);
+        hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+        IDirect3DDevice9_SetPixelShader(device, NULL);
+        IDirect3DDevice9_SetVertexShader(device, NULL);
+        IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXCOORDINDEX, 0);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        if (FAILED(hr)) { fail_hr("vs_texgen_ignored", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("vs_texgen_ignored", s, 5);
+    }
+done:
+    if (pixel) IDirect3DPixelShader9_Release(pixel);
+    if (shader) IDirect3DVertexShader9_Release(shader);
+    if (decl) IDirect3DVertexDeclaration9_Release(decl);
+    if (t) IDirect3DTexture9_Release(t);
+}
+
 /* 83: a ps_2_0 shader that reads samplers 9 and 15 (shader model 2 has sixteen; 3DMark05's third
  * game test draws its water with a ninth one): texld r0, t0, s9; texld r1, t0, s15;
  * add r0, r0, r1. A green texture on sampler 9 and a blue one on sampler 15 give cyan. */
@@ -3426,6 +3508,7 @@ int main(int argc, char **argv)
     point_case(only);
     program_point_case(only, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1));
     many_declarations_case(only, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1));
+    vs_texgen_case(only, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1) && caps.PixelShaderVersion >= D3DPS_VERSION(1, 1));
     static_indexed_case(only);
     scaled_point_case(only, caps.MaxPointSize >= 16.0f);
     vertex_point_case(only, caps.MaxPointSize >= 16.0f && flags == D3DCREATE_HARDWARE_VERTEXPROCESSING);

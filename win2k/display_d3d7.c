@@ -2868,9 +2868,11 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
             }
         offset += 4 * n;
     }
-    /* Generated coordinates are not applied yet, nor texture transforms with a
-     * pixel shader (the fixed-function program applies them). */
-    for (k = 0; k < RB2K_D8_STAGES; ++k)
+    /* Generated coordinates are not applied yet, nor texture transforms with a pixel shader (the
+     * fixed-function program applies them). Both are part of Direct3D's own vertex processing: a
+     * transformed vertex, the program's or one the runtime shaded in software, keeps the
+     * coordinates it has, whatever the stages still say. */
+    for (k = 0; objectSpace && k < RB2K_D8_STAGES; ++k)
         if ((sh->coords & (1UL << k)) && ((c->stages[k].coordIndex >> 16) || (!fixed && (c->stages[k].transform & 0xff))))
             offset = 0xffffffff;
     if (offset > stride || stride > 256) { skip_vertex(c, p->primitives, 8); return DD_OK; }

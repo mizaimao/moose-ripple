@@ -1126,6 +1126,21 @@ static void pixel_shaders(int only)
         quad_samples(s, want);
         ps_run("ps_texture", ps, v, 1, s, 5);
     }
+    if (!only || only == 104) {
+        /* tex t0 with transformed vertices while stage 0 asks for generated coordinates and a
+         * texture transform. Both belong to Direct3D's own vertex processing, which transformed
+         * vertices (a program's, or those the runtime shaded in software) do not go through: the
+         * texture shows as the vertices map it. */
+        static const DWORD ps[] = { PSV(1), OTex, DST(RT, 0), OMov, DST(RR, 0), SRC(RT, 0), PSEND };
+        ps_quad(v, 32, 32, 96, 96, 0xffffffff, 0, 0, 1, 1);
+        for (i = 0; i < 4; ++i) texel(i, want[i]);
+        quad_samples(s, want);
+        IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_CAMERASPACEPOSITION);
+        IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_COUNT2);
+        ps_run("ps_rhw_texgen", ps, v, 1, s, 5);
+        IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_TEXCOORDINDEX, 0);
+        IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+    }
     if (!only || only == 3) {   /* def c0; mad r0, v0, c1, c0 with c1 set by the program; the blue sum clamps */
         static const DWORD ps[] = { PSV(1), DEF(0, F025, F05, F075, F1),
             OMad, DST(RR, 0), SRC(RV, 0), SRC(RC, 1), SRC(RC, 0), PSEND };

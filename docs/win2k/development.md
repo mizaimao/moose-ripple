@@ -3206,6 +3206,13 @@ Later finds of the same checks:
   3DMark 2001 SE left three primitives of a whole run out this way (transformed vertices with a
   colour and no coordinates). `d8pixels` cases `rhw_texgen`, `rhw_texgen_diffuse` and
   `rhw_texgen_no_coords`; the reference rasterizer draws all three.
+- **The same with a pixel shader.** The draw path of pixel shaders left a draw out when a stage
+  the shader reads asked for generated coordinates or had a texture transform, for transformed
+  vertices as well. Transformed vertices are also what the runtime sends when it runs a vertex
+  shader in software, and a vertex shader takes no notice of either state: 3DMark03's CPU
+  Test 2 lost 28 million primitives of its scene that way and came out too bright. Found by the
+  skip counts once they lasted through mode changes (below). `ps_rhw_texgen` in both tests and
+  `vs_texgen_ignored` in `d9pixels`.
 
 ### Benchmark runs
 
