@@ -2214,6 +2214,142 @@ float_pixels_wanted(void)
    }
    return wanted;
 }
+
+/* ---- Extensions a program can use ------------------------------------------------------- *
+ * A program on 10.6 reaches GL functions through the OpenGL framework, which exports only the
+ * functions of the extensions Apple's own drivers had. Mesa offers many more, and a program
+ * that believes the extension string and looks such a function up by name gets NULL: Google
+ * Chrome 49's GPU process called glFenceSync, glGenVertexArrays and 30 others that way and
+ * crashed at address 0 every time it started, so Chrome drew without the GPU (issue 299). An
+ * extension whose functions the program cannot reach is left out of the string; Mesa keeps it
+ * (the framework's own code does not use these). Each entry names one function the extension
+ * cannot do without. RIPPLE_GL_ALL_EXTENSIONS=1 keeps the whole list, for comparisons. */
+static const struct { const char *ext, *fn; } ext_needs[] = {
+   { "GL_ARB_sync", "glFenceSync" },
+   { "GL_ARB_vertex_array_object", "glGenVertexArrays" },
+   { "GL_ARB_map_buffer_range", "glMapBufferRange" },
+   { "GL_ARB_texture_storage", "glTexStorage2D" },
+   { "GL_EXT_texture_storage", "glTexStorage2DEXT" },
+   { "GL_ARB_texture_storage_multisample", "glTexStorage2DMultisample" },
+   { "GL_ARB_texture_multisample", "glTexImage2DMultisample" },
+   { "GL_ARB_timer_query", "glQueryCounter" },
+   { "GL_EXT_timer_query", "glGetQueryObjecti64vEXT" },
+   { "GL_ARB_get_program_binary", "glGetProgramBinary" },
+   { "GL_ARB_robustness", "glGetGraphicsResetStatusARB" },
+   { "GL_KHR_robustness", "glGetGraphicsResetStatus" },
+   { "GL_EXT_direct_state_access", "glMatrixLoadfEXT" },
+   { "GL_ARB_direct_state_access", "glCreateBuffers" },
+   { "GL_ARB_blend_func_extended", "glBindFragDataLocationIndexed" },
+   { "GL_ARB_shader_image_load_store", "glMemoryBarrier" },
+   { "GL_EXT_shader_image_load_store", "glMemoryBarrierEXT" },
+   { "GL_ARB_program_interface_query", "glGetProgramInterfaceiv" },
+   { "GL_KHR_blend_equation_advanced", "glBlendBarrierKHR" },
+   { "GL_OES_EGL_image", "glEGLImageTargetTexture2DOES" },
+   { "GL_ARB_copy_buffer", "glCopyBufferSubData" },
+   { "GL_ARB_instanced_arrays", "glVertexAttribDivisorARB" },
+   { "GL_ARB_draw_instanced", "glDrawArraysInstancedARB" },
+   { "GL_ARB_sampler_objects", "glGenSamplers" },
+   { "GL_KHR_debug", "glDebugMessageCallback" },
+   { "GL_ARB_debug_output", "glDebugMessageCallbackARB" },
+   { "GL_ARB_invalidate_subdata", "glInvalidateFramebuffer" },
+   { "GL_ARB_uniform_buffer_object", "glGetUniformBlockIndex" },
+   { "GL_ARB_texture_buffer_object", "glTexBufferARB" },
+   { "GL_ARB_separate_shader_objects", "glUseProgramStages" },
+   { "GL_ARB_vertex_attrib_binding", "glBindVertexBuffer" },
+   { "GL_ARB_ES2_compatibility", "glReleaseShaderCompiler" },
+   { "GL_ARB_clear_buffer_object", "glClearBufferData" },
+   { "GL_ARB_clear_texture", "glClearTexImage" },
+   { "GL_ARB_buffer_storage", "glBufferStorage" },
+   { "GL_ARB_copy_image", "glCopyImageSubData" },
+   { "GL_ARB_draw_indirect", "glDrawArraysIndirect" },
+   { "GL_ARB_multi_draw_indirect", "glMultiDrawArraysIndirect" },
+   { "GL_ARB_transform_feedback2", "glBindTransformFeedback" },
+   { "GL_ARB_transform_feedback3", "glDrawTransformFeedbackStream" },
+   { "GL_EXT_transform_feedback", "glBeginTransformFeedbackEXT" },
+   { "GL_ARB_viewport_array", "glViewportArrayv" },
+   { "GL_ARB_base_instance", "glDrawArraysInstancedBaseInstance" },
+   { "GL_ARB_draw_elements_base_vertex", "glDrawElementsBaseVertex" },
+   { "GL_ARB_provoking_vertex", "glProvokingVertex" },
+   { "GL_EXT_provoking_vertex", "glProvokingVertexEXT" },
+   { "GL_ARB_color_buffer_float", "glClampColorARB" },
+   { "GL_EXT_draw_buffers2", "glColorMaskIndexedEXT" },
+   { "GL_ARB_draw_buffers_blend", "glBlendFunciARB" },
+   { "GL_ARB_sample_shading", "glMinSampleShadingARB" },
+   { "GL_ARB_texture_view", "glTextureView" },
+   { "GL_ARB_internalformat_query", "glGetInternalformativ" },
+   { "GL_ARB_framebuffer_no_attachments", "glFramebufferParameteri" },
+   { "GL_ARB_multi_bind", "glBindBuffersBase" },
+   { "GL_ARB_polygon_offset_clamp", "glPolygonOffsetClamp" },
+   { "GL_EXT_polygon_offset_clamp", "glPolygonOffsetClampEXT" },
+   { "GL_ARB_clip_control", "glClipControl" },
+   { "GL_ARB_texture_barrier", "glTextureBarrier" },
+   { "GL_NV_texture_barrier", "glTextureBarrierNV" },
+   { "GL_ARB_tessellation_shader", "glPatchParameteri" },
+   { "GL_ARB_compute_shader", "glDispatchCompute" },
+   { "GL_ARB_shader_atomic_counters", "glGetActiveAtomicCounterBufferiv" },
+   { "GL_ARB_get_texture_sub_image", "glGetTextureSubImage" },
+   { "GL_ARB_indirect_parameters", "glMultiDrawArraysIndirectCountARB" },
+   { "GL_EXT_gpu_shader4", "glBindFragDataLocationEXT" },
+   { "GL_ARB_gpu_shader_fp64", "glUniform1d" },
+   { "GL_ARB_shader_subroutine", "glGetSubroutineIndex" },
+   { "GL_EXT_framebuffer_blit", "glBlitFramebufferEXT" },
+   { "GL_EXT_framebuffer_multisample", "glRenderbufferStorageMultisampleEXT" },
+   { "GL_ARB_framebuffer_object", "glGenerateMipmap" },
+   { "GL_EXT_texture_integer", "glClearColorIiEXT" },
+   { "GL_EXT_draw_instanced", "glDrawArraysInstancedEXT" },
+   { "GL_ARB_occlusion_query", "glGenQueriesARB" },
+   { "GL_ARB_vertex_buffer_object", "glBindBufferARB" },
+};
+
+/* `mesa` without the extensions this program cannot reach, into `out` (as long as `mesa`). */
+static void
+reachable_extensions(const char *mesa, char *out)
+{
+   static int all = -1;
+   if (all < 0) {
+      const char *e = getenv("RIPPLE_GL_ALL_EXTENSIONS");
+      all = e && *e == '1';
+   }
+   /* Looked up in the OpenGL framework, as programs do (our own bundle's symbols are no help). */
+   static void *gl;
+   if (!gl)
+      gl = dlopen("/System/Library/Frameworks/OpenGL.framework/OpenGL", RTLD_LAZY | RTLD_NOLOAD);
+   out[0] = 0;
+   unsigned hidden = 0;
+   char names[512] = "";
+   for (const char *p = mesa; *p;) {
+      while (*p == ' ')
+         p++;
+      size_t n = strcspn(p, " ");
+      if (!n)
+         break;
+      bool keep = true;
+      for (unsigned i = 0; !all && keep && i < sizeof(ext_needs) / sizeof(ext_needs[0]); i++)
+         if (strlen(ext_needs[i].ext) == n && !strncmp(p, ext_needs[i].ext, n) &&
+             gl && !dlsym(gl, ext_needs[i].fn)) {
+            keep = false;
+            hidden++;
+            if (strlen(names) + n + 2 < sizeof(names)) {
+               strcat(names, " ");
+               strncat(names, p, n);
+            }
+         }
+      if (keep) {
+         if (out[0])
+            strcat(out, " ");
+         strncat(out, p, n);
+      }
+      p += n;
+   }
+   extern FILE *ripple_gld_dbg_file(void);
+   static bool logged;
+   if (!logged && hidden && ripple_gld_dbg_file()) {
+      logged = true;
+      fprintf(ripple_gld_dbg_file(), "RippleGLDriver: %u extensions left out (no entry point in "
+              "this program):%s\n", hidden, names);
+   }
+}
+
 const GLubyte *GLAPIENTRY
 ripple_cgl_get_string(void *rend, GLenum name)
 {
@@ -2322,7 +2458,7 @@ ripple_cgl_get_string(void *rend, GLenum name)
       }
    }
    const GLubyte *r = s;
-   for (unsigned i = 0; extra[0] && i < 16; i++) {
+   for (unsigned i = 0; i < 16; i++) {
       if (cache[i].mesa == s) {
          r = (const GLubyte *)cache[i].ext;
          break;
@@ -2331,8 +2467,8 @@ ripple_cgl_get_string(void *rend, GLenum name)
          size_t n = strlen((const char *)s), m = strlen(extra);
          char *e = malloc(n + m + 1);
          if (e) {
-            memcpy(e, s, n);
-            memcpy(e + n, extra, m + 1);
+            reachable_extensions((const char *)s, e);
+            strcat(e, extra);
             cache[i].mesa = s;
             cache[i].ext = e;
             r = (const GLubyte *)e;
