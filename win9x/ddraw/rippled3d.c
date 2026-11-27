@@ -5096,7 +5096,7 @@ static void volume_blt(RCTX *c, const RB_DP2_VOLUME_BLT *b)
     ssh = (const struct shadow *)ss;
     surface_format(ss, &pf);
     f = gl_format(&pf);
-    if (!f.bytes)
+    if (!f.bytes && !f.block)
         return;
     levels = dsh->levels < ssh->levels ? dsh->levels : ssh->levels;
     for (l = 0; l < levels; l++) {
@@ -5118,6 +5118,20 @@ static void volume_blt(RCTX *c, const RB_DP2_VOLUME_BLT *b)
         if (x1 > sg->wWidth || y1 > sg->wHeight || z1 > sd || dx + x1 - x0 > dg->wWidth ||
             dy + y1 - y0 > dg->wHeight || dz + z1 - z0 > dd || !sg->fpVidMem || !dg->fpVidMem)
             break;
+        if (f.block) {
+            /* DXT: whole 4x4 blocks, each slice its rows of blocks (as volume_bind reads them).
+               The Direct3D 9 interface fills its managed volumes this way; without it a
+               compressed volume stayed empty. */
+            DWORD bsp = volume_pitch(sg, &f), srows = (sg->wHeight + 3) / 4, drows = (dg->wHeight + 3) / 4;
+            DWORD bx0 = x0 / 4, bx1 = (x1 + 3) / 4, by0 = y0 / 4, by1 = (y1 + 3) / 4;
+            for (z = z0; z < z1; z++)
+                for (y = by0; y < by1; y++)
+                    memcpy((BYTE *)dg->fpVidMem + (dz + z - z0) * dp * drows + (dy / 4 + y - by0) * dp +
+                           (dx / 4) * f.block,
+                           (const BYTE *)sg->fpVidMem + z * bsp * srows + y * bsp + bx0 * f.block,
+                           (bx1 - bx0) * f.block);
+            continue;
+        }
         for (z = z0; z < z1; z++)
             for (y = y0; y < y1; y++)
                 memcpy((BYTE *)dg->fpVidMem + (dz + z - z0) * dp * dg->wHeight + (dy + y - y0) * dp + dx * f.bytes,
