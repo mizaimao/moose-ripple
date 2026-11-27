@@ -992,17 +992,31 @@ flipped and skip counts read once a second: 214,975 pages, no skips, and again n
 the 64 MB texture test). The game scenes are now 8 to 34 percent faster on the GPU than on the
 guest's processor and the high polygon tests five times as fast.
 
-**Why the texture tests differ.** A command trace of the 64 MB test alone, each way, shows it is
-the program and not the driver's speed: with its own vertex code it draws only the quads in
-view, about 80 a frame, and its managed textures come and go a few at a time; on a T&L HAL
-device it leaves clipping to the hardware and draws all 384 quads in every frame, each with a
-texture of its own. That is three to five times the draws for the same picture, hence the lower
-frame rates of the 8, 16 and 32 MB tests. In the 64 MB test it also means 67 MB of textures in
-use in one frame, more than the 32 MB of surface memory the driver has for a guest of this
-size (and the 8 MB of the card): Direct3D's texture manager creates every texture twice during
-the first frame, and after it the program draws nothing more and reports 0.0 fps. So that test
-needs more surface memory than the driver gives, on this device only. The device stays an
-option until that is settled and a few Direct3D 7 games have been looked at through it.
+**Why the texture tests differ.** Measured the same day, one test at a time (untimed, the host
+shared):
+
+- *More draws for the same picture.* A command trace of the 32 MB test each way: with its own
+  vertex code the program draws only the pieces of the tunnel in view, 43 a frame on average
+  (26 to 58, over 129 traced frames); on the T&L HAL device it draws 124 a frame (88 to 192,
+  over 37 frames), each from a vertex buffer and with a texture of its own. Both ways load the same 192 textures. Nearly three times the draws
+  for the same picture go with a frame rate a little over half (636.8 against 1177.3). The 8
+  and 16 MB tests were not traced.
+- *The 64 MB test and the guest's memory.* Its first frame on the T&L HAL device draws all 384
+  pieces, each with a 256x256 texture and its mipmaps (67 MB in all). On this guest of 256 MB
+  (32 MB of surface memory) 203 of them fit, and the other 181 pass through one surface in
+  turn. Without the trace that one frame takes 29 seconds, and the guest spends them writing to
+  its disk: of 320 samples of its instruction pointer in that time, 261 sit on one `rep outsw`
+  in ring 0, the write loop of the disk driver (guess: Windows paging memory out; which memory
+  was not measured). A texture test lasts about six seconds on either path, by the pages
+  flipped each second in the full runs, so the program ends this one after its single frame
+  and reports 0.0. With the guest at 512 MB (64 MB of surface memory) the same test runs
+  without the pause: 296.6 fps by the program, about 1,580 pages flipped in under six seconds
+  by the driver's count, and the tunnel in a capture.
+
+So the 0.0 is a guest of 256 MB short of memory in a frame that needs every texture at once,
+not a drawing fault. Which of a texture's copies in the guest (Direct3D's managed copy, the
+surface the driver uploads from, what OpenGL keeps) could be saved has not been looked into.
+The device stays an option until a few Direct3D 7 games have been looked at through it.
 
 ### The Direct3D 9 driver interface (2026-11-27, on by default)
 
