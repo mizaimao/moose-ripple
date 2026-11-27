@@ -958,6 +958,25 @@ static int is_volume(LPDDRAWI_DDRAWSURFACE_LCL s)
            ((const struct shadow *)s)->faces == 1;
 }
 
+/* A Direct3D 8 texture's cube faces and mipmap levels below the top have surface handles of
+   their own: a program renders into one by that handle (SETRENDERTARGET), and without an entry
+   the render target stayed what it was (six cube faces all drawn into the first). set: enter
+   the copies' records under those handles; else take out the entries that point into sh. */
+static void sub_handles(DDLOCAL *d, DWORD top, struct shadow *sh, int set)
+{
+    DWORD i, n = sh ? sh[0].faces * sh[0].levels : 0;
+
+    for (i = 1; i < n; i++) {
+        DWORD h = sh[i].m.dwSurfaceHandle;
+        if (!h || h == top)
+            continue;
+        if (set)
+            handle_set(d, h, &sh[i].l);
+        else if (h < d->n && d->surf[h] == &sh[i].l)
+            d->surf[h] = NULL;
+    }
+}
+
 static void shadow_set(DDLOCAL *d, DWORD h, struct shadow *sh)
 {
     if (h >= d->nshadow) {
@@ -974,8 +993,10 @@ static void shadow_set(DDLOCAL *d, DWORD h, struct shadow *sh)
         d->shadow = a;
         d->nshadow = n;
     }
+    sub_handles(d, h, d->shadow[h], 0);
     release(d->shadow[h]);
     d->shadow[h] = sh;
+    sub_handles(d, h, sh, 1);
 }
 
 static void shadows_free(DDLOCAL *d)
@@ -1229,6 +1250,7 @@ typedef struct {
     DWORD w, h, fmt;
     DWORD levels;                       /* mipmap levels uploaded (1: the top level only) */
     FLATPTR lmem[MAX_LEVELS];           /* each level's memory (lmem[0] is mem) */
+    FLATPTR fmem[6];                    /* a cube map: each face's top level (fmem[0] is mem), else 0 */
     DWORD stamp;                        /* DirectDraw's contents stamps then (0: none kept) */
     DWORD gpu_gen;                      /* the render-target picture copied in (texture_from_gpu) */
     DWORD scene;                        /* the scene it was uploaded in */
@@ -1452,7 +1474,8 @@ static void textures_written(FLATPTR mem)
                 continue;
             for (l = 0; l < t->levels && t->lmem[l] != mem; l++)
                 ;
-            if (t->mem == mem || l < t->levels) {
+            if (t->mem == mem || l < t->levels || t->fmem[1] == mem || t->fmem[2] == mem ||
+                t->fmem[3] == mem || t->fmem[4] == mem || t->fmem[5] == mem) {
                 t->dirty = 1;
                 c->stages_dirty = 1;
             }
@@ -1598,10 +1621,14 @@ static void finish_target(RCTX *c)
         c->cur->deferred = 1;
         c->dirty = 0;
     } else if (c->rt && c->cur && (c->rt->ddsCaps.dwCaps & DDSCAPS_TEXTURE) && !c->cur->written &&
-               c->cur->mem == c->rt->lpGbl->fpVidMem && gl_of(c)->CopyTexSubImage2D) {
+               c->cur->mem == c->rt->lpGbl->fpVidMem && gl_of(c)->CopyTexSubImage2D &&
+               cube_face(c->rt) < 0 &&
+               !(c->rt->lpSurfMore && (c->rt->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_MIPMAPSUBLEVEL))) {
         /* A texture rendered into: its picture stays on the GPU and goes into the texture there
            when a draw uses it (texture_from_gpu); memory gets it only when the program locks
-           the surface (d3d_surface_access) or a texture blit reads it (gpu_sync). */
+           the surface (d3d_surface_access) or a texture blit reads it (gpu_sync). A cube map's
+           face is read back instead, and the cube map uploaded again when a draw uses it
+           (textures_written): simple, and enough for reflections drawn once a frame. */
         LPDDRAWI_DDRAWSURFACE_GBL g = c->rt->lpGbl;
         GPUBUF *b = c->cur;
         b->deferred = 1;
@@ -2454,6 +2481,8 @@ static int cube_bind(RCTX *c, DWORD h, int stage, const struct shadow *sh)
         gl->TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_LEVEL, levels - 1);
         gl->TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_SWIZZLE_B, f.bump ? GL_ONE : GL_BLUE);
         t->mem = g0->fpVidMem;
+        for (face = 0; face < 6; face++)   /* a face rendered into marks the cube (textures_written) */
+            t->fmem[face] = sh[face * levels].g.fpVidMem;
         t->w = g0->wWidth;
         t->h = g0->wHeight;
         t->fmt = f.internal;
@@ -2606,6 +2635,7 @@ static int volume_bind(RCTX *c, DWORD h, int stage, const struct shadow *sh)
         gl->PixelStorei(GL_UNPACK_IMAGE_HEIGHT, 0);
         gl->TexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAX_LEVEL, levels - 1);
         t->mem = g0->fpVidMem;
+        memset(t->fmem, 0, sizeof t->fmem);
         t->w = g0->wWidth;
         t->h = g0->wHeight;
         t->fmt = f.internal;
@@ -2684,6 +2714,7 @@ static int texture_from_gpu(RCTX *c, DWORD h, TEXTURE *t, LPDDRAWI_DDRAWSURFACE_
         gl->TexImage2D(GL_TEXTURE_2D, 0, f.internal, w, ht, 0, f.format, f.type, NULL);
         gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
         t->mem = g->fpVidMem;
+        memset(t->fmem, 0, sizeof t->fmem);
         t->w = w;
         t->h = ht;
         t->fmt = fmt;
@@ -2764,6 +2795,7 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
         /* new: storage and contents */
         texture_upload(gl, &f, &pf, lv, levels, 1, keyed);
         t->mem = g->fpVidMem;
+        memset(t->fmem, 0, sizeof t->fmem);
         t->w = g->wWidth;
         t->h = g->wHeight;
         t->fmt = fmt;
