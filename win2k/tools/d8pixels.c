@@ -84,7 +84,7 @@ static void check(const char *name, const SAMPLE *s, int count)
         }
     }
     /* The automatic checks (drvcheck.h), as in d9pixels. */
-    differ = ref_case(name, r.pBits, r.Pitch, Side, &worst);
+    differ = ref_case("D8PIX", name, r.pBits, r.Pitch, Side, &worst, bad);
     IDirect3DSurface8_UnlockRect(back);
     IDirect3DSurface8_Release(back);
     skipped = skips_case("D8PIX", name);
@@ -704,7 +704,7 @@ static void check_covered(const char *name, const SAMPLE *s, int count)
         }
     }
     /* The automatic checks (drvcheck.h), as in d9pixels. */
-    differ = ref_case(name, r.pBits, r.Pitch, Side, &worst);
+    differ = ref_case("D8PIX", name, r.pBits, r.Pitch, Side, &worst, bad);
     IDirect3DSurface8_UnlockRect(back);
     IDirect3DSurface8_Release(back);
     skipped = skips_case("D8PIX", name);
@@ -1701,7 +1701,6 @@ int main(int argc, char **argv)
     HWND window;
     DWORD flags;
     BOOL software = FALSE, reference = FALSE, noref = FALSE;
-    char refText[40];
     int only = 0, a;
     HRESULT hr;
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -1824,12 +1823,7 @@ int main(int argc, char **argv)
     IDirect3DDevice8_Release(device);
     IDirect3D8_Release(d3d);
     DestroyWindow(window);
-    refText[0] = 0;
-    if (refMode == RefCompare) {
-        if (refCompared) sprintf(refText, " ref_compared=%d ref_failed=%d", refCompared, refFailed);
-        else strcpy(refText, " ref=unavailable");
-    }
-    printf("D8PIX end pass=%d fail=%d%s%s result=%s\n", passes, failures, skips_summary(), refText,
+    printf("D8PIX end pass=%d fail=%d%s%s result=%s\n", passes, failures, skips_summary(), ref_summary(),
            reference ? "REFERENCE" : failures ? "FAIL" : "PASS");
     return failures ? 1 : 0;
 }

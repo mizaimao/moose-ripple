@@ -783,7 +783,7 @@ restart:
 | `D3D8` = `"2"` or no value | and vertex processing on the GPU (fixed function, vertex shaders), with vertex and index buffers in the driver's memory |
 | `D3D8Buffers` = `"0"` | with `"2"`: buffers stay in the runtime's system memory (the path before 2026-11-26 13:00) |
 | `D3D9` = `"0"` | with `"2"`: a DirectX 9 runtime stays on the Direct3D 8 interface (the behaviour before 2026-11-27; see "The Direct3D 9 driver interface") |
-| `D3D7TnL` = `"1"` | with `"2"`: Direct3D 7 is offered a T&L HAL device and the driver processes its vertices on the GPU. Off by default: it measured slower (see "Direct3D 7 with vertex processing on the GPU") |
+| `D3D7TnL` = `"0"` | with `"2"`: Direct3D 7 is not offered its T&L HAL device, and the runtime processes Direct3D 7's vertices on the guest's processor (the behaviour before 2026-11-27; see "Direct3D 7 with vertex processing on the GPU", also for a guest of 256 MB) |
 
 Learnt on Windows 98 SE with DirectX 8.1 (UTM):
 
@@ -912,19 +912,21 @@ the stage states before each draw. 3DMark 2001 SE needs Q8W8V8U8 for Nature ("de
 support bump normal maps" with V8U8 alone). `d9pixels`: 49 of 49 on the rig, `ps_texbem`
 included.
 
-### Direct3D 7 with vertex processing on the GPU (2026-11-27, an option: `D3D7TnL` = `"1"`)
+### Direct3D 7 with vertex processing on the GPU (2026-11-27; `D3D7TnL` = `"0"` turns it off)
 
 The vertex programs that process Direct3D 8 and 9 vertices on the GPU (next section) were
 written from Direct3D 7's lighting equations, and the commands that carry transforms, lights,
 the material and clip planes are Direct3D 7's own, so the driver already handled them for
-every context. What was missing was only the offer. With `D3D7TnL` = `"1"` under
-`HKLM\Software\moose-ripple` (and `D3D8` = `"2"`, the default) the HAL reports
+every context. What was missing was only the offer. Unless `D3D7TnL` is `"0"` under
+`HKLM\Software\moose-ripple` (and with `D3D8` = `"2"`, the default) the HAL reports
 `D3DDEVCAPS_HWTRANSFORMANDLIGHT` with eight lights, texture coordinate generation, material
 sources, vertex fog, directional and positional lights, the local viewer and six user clip
 planes; the Direct3D 7 runtime then lists a "Direct3D T&L HAL" device next to the HAL device,
 and a program that chooses it sends untransformed vertices. The HAL device is unchanged: the
-runtime processes its vertices as before. It is off unless asked for, because it measured
-slower (below).
+runtime processes its vertices as before. The device was an option at first (`D3D7TnL` =
+`"1"`), because it measured slower until its vertex buffers became buffer objects; the
+measurements below are in the order they were made, and "On by default" at the end of this
+section is where it stands now.
 
 Checked on Windows 98 SE (Intel host) with the Windows 2000/XP side's Direct3D 7 tests, built
 with Visual C++ 6 and the DirectX 7 SDK:
@@ -939,7 +941,7 @@ with Visual C++ 6 and the DirectX 7 SDK:
 build, the host to itself (Intel UHD 630, 2026-11-27), its default benchmark at 1024x768 in 16
 bits, once each way:
 
-| 3DMark 2000 | vertices on the guest CPU (default) | T&L HAL device (`D3D7TnL` = `"1"`) |
+| 3DMark 2000 | vertices on the guest CPU (the default then) | T&L HAL device (an option then) |
 |---|---:|---:|
 | Score, 3D marks | 26890 | 24336 |
 | Game 1, low / medium / high detail, fps | 451.8 / 325.2 / 178.6 | 444.9 / 316.9 / 170.4 |
@@ -964,7 +966,7 @@ to 17 percent, the texture tests by 20 to 47 percent. The guest's processor is a
 the program's own vertex code is cheap on it, while every draw through the vertex programs costs
 this driver more than a draw of finished vertices does. And the 64 MB texture test ends with
 0.0 fps on the T&L HAL device after standing on its loading screen for 25 seconds: not looked
-into yet. Until both are dealt with the device stays an option.
+into yet. So the device stayed an option at that point.
 
 **Vertex buffers as buffer objects (the same day).** A guest profile of the second game test
 (the guest's instruction pointer sampled through the monitor, 280 samples each way) and a
@@ -1027,13 +1029,69 @@ shared):
 So the 0.0 is a guest of 256 MB short of memory in a frame that needs every texture at once,
 not a drawing fault. Which of a texture's copies in the guest (Direct3D's managed copy, the
 surface the driver uploads from, what OpenGL keeps) could be saved has not been looked into.
-The device stays an option for now; the first games looked at through it are in the next
-section.
+The first games looked at through the device are in the next section.
+
+**On by default (2026-11-27).** With the buffer objects the device is faster than the guest's
+own vertex processing in 3DMark 2000's game scenes and high polygon tests, and Sacrifice, the
+one demo of the three in the next section that picks it, runs at about 275 frames a second on
+it against 190. So the driver now offers it unless `D3D7TnL` is `"0"`. A program decides for
+itself which device it uses: one that asks for the HAL device, or draws transformed vertices,
+is not touched by this.
+
+Timed on the build that made it the default, the host to itself (Intel UHD 630, 2026-11-27),
+3DMark 2000's default benchmark at 1024x768 in 16 bits, once each way:
+
+| 3DMark 2000 | `D3D7TnL` = `"0"` (vertices on the guest CPU) | default (T&L HAL device) |
+|---|---:|---:|
+| Score, 3D marks | 26639 | 30703 |
+| Game 1, low / medium / high detail, fps | 443.1 / 319.5 / 177.0 | 493.8 / 372.1 / 214.1 |
+| Game 2, low / medium / high detail, fps | 639.6 / 388.5 / 252.3 | 757.7 / 429.2 / 291.7 |
+| High polygon count, 1 / 4 / 8 lights, thousand triangles a second | 38956 / 35499 / 32855 | 197571 / 192161 / 176998 |
+| Texture rendering speed, 8 / 16 / 32 / 64 MB, fps | 2293.6 / 1749.0 / 1164.3 / 646.4 | 1864.2 / 1169.8 / 638.9 / 0.0 |
+| Bump mapping (emboss), 3 / 2 / 1 pass, fps | 1355.4 / 1719.3 / 2578.0 | 1085.7 / 2089.5 / 2593.4 |
+| Fill rate, single / multi texturing, million texels a second (the single one is about 27 percent too high both ways, see the clock check) | 3778.2 / 7010.9 | 3794.3 / 6972.0 |
+| CPU speed, CPU 3D marks | 1431 | 1570 |
+
+How the two runs were checked: the screen was captured about every five seconds through each
+(every capture during the tests differs from all earlier ones: 69 in the first run; 61 in the
+second up to the 64 MB texture test, which stands still there, and 8 more after it), the pages
+the driver flipped to were counted once a second (their number follows the program's frame
+rates test by test: Game 1 at low detail, 443.1 and 493.8 fps reported, 13,291 and 14,798 pages
+in its 31 seconds), and the skip counts were read after each run (0 both times).
+
+The guest's clock was checked against the host's under this benchmark as well, because a guest
+that loses time reports frame rates that are too high. Each line of the driver's page counter,
+which the guest writes once a second by its own clock, was stamped with the host's time through
+one more run on the T&L HAL device. Over the six game tests, which are what the score is made
+of, the two clocks agree within 0.1 percent. Over the whole benchmark the guest counts 274.7
+seconds against the host's 277.6, and all of the difference falls in one test: in the
+single-texturing fill rate test a guest second lasts 1.23 to 1.36 host seconds. That test's
+number is therefore about 27 percent too high, in both columns of the table, and is not one to
+quote. Why the guest loses time there is not known. (The guest runs with QEMU's `-rtc
+driftfix=slew`.)
+
+Two numbers of the second run need a word:
+
+- The three-pass bump test reports 1085.7 where the timed run before the last buffer changes
+  had 1640.6. Its page counts show why: it comes straight after the 64 MB texture test, which
+  makes this guest page, and flips nothing for the first two of its six seconds; in the rest
+  it flips 1666 to 1679 pages a second, the rate of the earlier run.
+- Game 1 at high detail is at 214.1, against 240.2 in that earlier run (and 177.0 without the
+  device). A guess: its buffers are rewritten often and are no longer copied since buffers
+  must keep still; a command trace of that test would settle it. It belongs to the per-draw
+  work of #260.
+
+
+What to know with a small guest: on a guest of 256 MB 3DMark 2000's 64 MB texture test reports
+0.0 fps on the device, for the reason measured above (its first frame needs all 384 textures at
+once and the guest pages for 29 seconds). Give the guest 512 MB, or set `D3D7TnL` = `"0"` for
+that test. Its other texture tests are slower on the device than with the guest's vertex code
+(more draws for the same picture, above); the benchmark's score is higher all the same.
 
 ### Three Direct3D 7 era demos, and table fog by w (2026-11-27)
 
-Three demos were looked at for the T&L HAL device's default, each on the default path first and
-then with `D3D7TnL` on (Windows 98 SE, untimed, captures of the same scene each way):
+Three demos were looked at for the T&L HAL device's default, each on the HAL device first and
+then with the T&L HAL device offered (it was an option then) (Windows 98 SE, untimed, captures of the same scene each way):
 
 - **Giants: Citizen Kabuto** (Reaper demo). It draws transformed vertices on either device (no
   vertex program in its trace), so the switch does not touch it: the same pictures of its menu
@@ -1185,15 +1243,16 @@ The first wide Direct3D 9 program on this driver. Getting it onto the guest took
   folder copied onto the Windows 98 disk through a CD image. It starts from any folder and needs
   no registry entries; the free version runs its whole default benchmark.
 
-Four runs, all untimed, with captures through each and the skip counters read after each (they
+Five runs, all untimed, with captures through each and the skip counters read after each (they
 were at zero before each run):
 
 | run | driver | skips | what the captures show |
 |---|---|---:|---|
 | 1 | as before | 12,505 (12,250 draws, 255 shaders) | game tests 1 to 3 right; game test 4 with white water; then the program stops with "Unable to create volume texture" |
 | 2 | declarations kept, L16 | 128 (125 draws, 3 shaders) | all four game tests right, the feature tests run, a score at the end; game test 4 at one frame in five seconds |
-| 3 | and shared declarations | 114 (113 draws, 1 shader) | as run 2, game test 4 at about 116 frames a second |
+| 3 | and shared declarations | 114 (113 draws, 1 shader) | as run 2; game test 4 fast for its first six seconds, then about a frame a second (see the correction below) |
 | 4 | and `sincos` | 35 (35 draws) | as run 3 |
+| 5 | and the count from the buffer's bytes | 0 | as run 3; the two fill rate tests nearly black |
 
 What the first run's counts led to:
 
@@ -1223,7 +1282,7 @@ What the third run's counts led to:
   passes with Microsoft's software vertex processing, drew nothing on the driver before and
   passes now. In the fourth run no shader was left untranslated.
 
-Still open after the fourth run, so by the rule of the skip counters the run does not pass yet:
+What the fourth run's count led to:
 
 - **A vertex short at the end of the runtime's buffer.** The 35 draws left out were all refused
   with "vertices out of range", and all in the two CPU tests: the count stood at zero through
@@ -1232,31 +1291,68 @@ Still open after the fourth run, so by the rule of the skip counters the run doe
   the same few addresses. In the CPU tests the runtime runs the vertex shaders itself and packs
   the transformed vertices of every format into one buffer, each draw behind the last at
   whatever byte comes next. The driver counts what is left after a draw's first byte in whole
-  vertices from the buffer's start (`stream_from`), so a draw that begins at an odd byte and
-  runs into the buffer's last bytes loses its last vertex to the rounding. A fix that counts
-  from the buffer's bytes is written but not proven: a first test case (pairs of points from
-  user memory in three formats) did not reach that path, so the fix waits for a case that does.
+  vertices from the buffer's start (`stream_from`), so a draw that began at an odd byte and
+  ran into the buffer's last bytes lost its last vertex to the rounding. The stream now keeps
+  its size in bytes and the count comes from that. `d9pixels` case `up_buffer_end` runs into
+  it: 28,800 pairs of untransformed points from user memory in four vertex formats, which the
+  runtime's software vertex processing packs into its buffer. On the driver before the fix the
+  `sw` run fails the case with 4 draws refused ("2 from 0 of 1"), the same on a second run; with
+  the fix it passes with no skips (Windows 98 SE, DirectX 9.0c, the second Intel test host). A
+  first version of the case, with transformed vertices, did not reach the path: those come to
+  the driver as user memory of exactly their size.
 - The note on the third run said its 113 left-out draws were all refused this way and came
   while tests loaded. Only the counts were read then, once a second, not the messages. A guess
   from the two runs, not traced: the ones during loading were draws of the untranslated shader,
   and the rest were these.
 
-No score is quoted, because of the skips and because the runs were untimed.
+**Where it stands after the fifth run (2026-11-27).** The skip count is 0 from start to score,
+in the fifth run and in a timed one after it. That is not the same as right or fast, and three
+things are open:
 
-Tests on Windows 98 SE after the `windows` branch was merged in (2026-11-27), with the automatic
-checks of the shared tests on (skip counts, and each picture against Microsoft's reference
-rasterizer): `d9pixels` 115 of 116 with hardware vertex processing (6 cases new since 110 of
-110, all from the `windows` branch) and 113 of 114 with software vertex processing; `d8pixels`
-50 of 51 (5 new since 46 of 46); skips 0 in all of them. The two that fail do so only against
-the reference picture, and their samples pass:
+- **The fill rate tests are nearly black.** Captures of a real card of the time (GeForce 9600
+  GT, Windows XP) show both as bright streaks of white, light blue and yellow over the whole
+  screen; on this driver they are almost black with faint bands, and the benchmark's bar at
+  the bottom is missing in them. Nothing is skipped while they run. Not looked into yet.
+- **Game test 4 crawls.** The pages flipped each second (the driver's own count) show about
+  2,000 pages in its first six seconds and about 80 in the seventy seconds after that, in the
+  timed run and in the third run alike. The third run was first noted here with "about 116
+  frames a second" for this test; that number came from its first seconds and was wrong for
+  the test as a whole.
+- **Game tests 2 and 3 are uneven.** In the timed run game test 2 flips 50 pages or more in
+  only 14 of its seconds and stays under 50 for the rest; game test 3 is under 50 for 36 of
+  its 75 seconds, most of them at its start.
+
+A guess for the slow stretches, not checked: shaders made again and again because more pairs
+of declaration and function are in use than the table of 256 keeps. A count of the pairs given
+up each second during game test 4 would settle it.
+
+The timed run (the host to itself, no captures during the game tests) ended at 8409 3DMarks.
+With game test 4 at a frame a second that number says little, and it is written down only as
+the starting point. The guest's clock was checked against the host's for it: in the fifth
+run's captures, taken exactly twenty seconds apart by the host, the benchmark's own time
+display advances 20.01 seconds in game test 1 and 39.83 of 40 in game test 3.
+
+
+Tests on Windows 98 SE (DirectX 9.0c) on the build with the last fix, with the automatic checks
+of the shared tests on (skip counts, and each picture against Microsoft's reference rasterizer):
+`d9pixels` 117 of 117 with hardware vertex processing (1 case new since 115 of 116:
+`up_buffer_end`) and 115 of 115 with software vertex processing; `d8pixels` 51 of 51 (none new
+since 50 of 51); skips 0 in all of them. These ran on a second test host
+(Intel Iris Xe); the 3DMark runs of this section are on the host with UHD 630, as before.
+
+The two cases that failed before pass now because the reference no longer judges them. In both
+the reference rasterizer fails the case's own samples on Windows 98, so the `ref` run keeps no
+picture for them and they are judged by their samples and the skip counts alone
+(`ref_not_kept=1` in each test's end line; "Automatic checks in the pixel tests" in
+`docs/win2k/development.md`):
 
 - `lit_far_light` (Direct3D 9, a light numbered 1000): the reference rasterizer draws the quad
-  black on Windows 98 and fails the case's samples itself; the driver draws the lit colour.
+  black on Windows 98 (it draws it lit on Windows XP); the driver draws the lit colour.
 - `zbias` (Direct3D 8): the reference rasterizer leaves the biased quad behind the one in the
-  same plane and fails the case's samples itself; the driver puts it in front, as the
-  documentation of `D3DRS_ZBIAS` says.
+  same plane; the driver puts it in front, as the documentation of `D3DRS_ZBIAS` says.
 
-Why the reference rasterizer differs in the two was not looked into.
+Why the reference rasterizer differs in the two on Windows 98 is not known. One guess was checked
+and did not hold: with 512 MB instead of 256 it still fails the far-light case.
 
 ### Vertex processing on the GPU (2026-11-26, `D3D8` = `"2"`)
 
