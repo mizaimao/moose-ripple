@@ -782,6 +782,7 @@ restart:
 | `D3D8` = `"1"` | the Direct3D 8 interface; the runtime processes vertices on the CPU |
 | `D3D8` = `"2"` or no value | and vertex processing on the GPU (fixed function, vertex shaders), with vertex and index buffers in the driver's memory |
 | `D3D8Buffers` = `"0"` | with `"2"`: buffers stay in the runtime's system memory (the path before 2026-11-26 13:00) |
+| `D3D9` = `"0"` | with `"2"`: a DirectX 9 runtime stays on the Direct3D 8 interface (the behaviour before 2026-11-27; see "The Direct3D 9 driver interface") |
 
 Learnt on Windows 98 SE with DirectX 8.1 (UTM):
 
@@ -905,6 +906,79 @@ and luminance scale and offset from c8..c15 (the Windows 2000 translator's layou
 the stage states before each draw. 3DMark 2001 SE needs Q8W8V8U8 for Nature ("device does not
 support bump normal maps" with V8U8 alone). `d9pixels`: 49 of 49 on the rig, `ps_texbem`
 included.
+
+### The Direct3D 9 driver interface (2026-11-27, on by default)
+
+Until now a Direct3D 9 runtime drove this HAL through the Direct3D 8 interface (above). That
+gives pixel and vertex shaders 2.0, but some things exist only in the caps and commands of a
+driver with the Direct3D 9 interface: the scissor test, `D3DDECLTYPE_UBYTE4` vertex data,
+stream offsets, the integer and boolean shader constants (and with them vertex shader flow
+control), and the shader model 2 details of the caps. The driver now has that interface.
+`D3D9` = `"0"` under `HKLM\Software\moose-ripple` keeps a DirectX 9 runtime on the Direct3D 8
+interface as before; it needs `D3D8` = `"2"` (the default).
+
+**How the runtime is told.** A DirectX 9 runtime asks, through GetDriverInfo2, for the
+Direct3D 9 caps (`D3DGDI2_TYPE_GETD3DCAPS9`), the interface version
+(`D3DGDI2_TYPE_GETDDIVERSION`, answered with 4 for a runtime of version 9 or later) and the
+number of query types (0). Left unanswered, as before, it falls back to the Direct3D 8
+interface. Answered, it checks the caps and refuses the device (`GetDeviceCaps` fails with
+`D3DERR_NOTAVAILABLE`) unless they are those of a Direct3D 9 driver. Two of its demands were
+found by being refused:
+
+- for vertex shader version 2.0 a static flow control depth of at least 1 in `VS20Caps`;
+- a separate fog value in the vertex format (`D3DPMISCCAPS_FOGINFVF`).
+
+Set as the Windows 2000/XP driver has them and not tried one by one: the scissor test
+(`D3DPRASTERCAPS_SCISSORTEST`), stream offsets (`D3DDEVCAPS2_STREAMOFFSET`),
+`D3DPTEXTURECAPS_NONPOW2CONDITIONAL` next to `D3DPTEXTURECAPS_POW2`, and the version 2.0
+minimums in `PS20Caps`.
+
+**The separate fog value is not only a caps bit.** With it the runtime's own vertex processing
+(a device made with software vertex processing, which programs may ask for on any card) hands
+over transformed vertices whose format code has `D3DFVF_FOG` (0x2000, a driver-only bit): the
+fog factor is then a float after the diffuse and specular colours, and no longer the specular
+colour's alpha. A driver that sets the bit and reads the vertex the old way draws those
+vertices without fog; with a texture coordinate set after the colours it would also read that
+from the wrong place. `d9pixels sw` showed it (`ps_lit_fog` and `vs2_fog` failed with format
+codes 0x2044 and 0x20c4 in the trace).
+
+**Declarations and shader functions.** On this interface the runtime creates vertex
+declarations (`D3DVERTEXELEMENT9`) and vertex shader functions separately and makes one of each
+current. For a draw the pair becomes a Direct3D 8 vertex shader, which the driver already
+draws: declaration tokens that give each element the input register the function's `dcl`
+statement names for its usage, and the code. That is done in `win2k/d3d9_decl.c`, which the
+Windows 2000/XP driver uses for the same purpose. A declaration without a function is the
+fixed-function pipeline: a vertex format code where the declaration is one, else a Direct3D 8
+declaration without code, read from any stream. Pairs are made on first use and kept (256 a
+context); a context keeps 320 vertex shaders in all.
+
+**Static flow control.** `if`, `rep`, `loop`, `call` and `callnz` of vs_2_0 depend only on the
+boolean and integer constants, and an ARB vertex program has no branches. The translator
+(`vs_arb.c`) writes the program out straight for the values the constants have: a false branch
+is left out, a loop's body is written once a round with its counter `aL` folded into the
+constants' indices, a subroutine is written where it is called. It reports which constants a
+program read, and the driver keeps a program for each set of their values (eight variants a
+shader, together with the fog variants).
+
+**The rest.** Stream offsets are added where the streams are read. The scissor rectangle
+narrows OpenGL's scissor test, which already keeps draws inside a small viewport, and clears
+stay inside it too. The render target and the depth buffer are set by separate commands. BLT,
+SURFACEBLT and COLORFILL (StretchRect, UpdateSurface, ColorFill) are copies in memory, by the
+nearest pixel, with the same rule as texture blits: the newest picture of both surfaces is
+brought into memory first, and the target's GPU copies follow from its memory afterwards. That
+is correct for any pair of surfaces but slow for render targets; a copy on the GPU, and with it
+linear filtering, is still to do. Queries, mipmap generation and instancing are not offered;
+their commands are stepped over.
+
+**Two faults this path showed.** Managed DXT volume textures are filled with VOLUMEBLT on this
+interface, and that command returned at once for a compressed format, so they stayed empty. And
+a declaration without code did not read the point size register.
+
+**Result on Windows 98 SE** (Intel host, DirectX 9.0c): `d9pixels` 83 of 83, the first complete
+pass (3 new since 79 of 80: the scissor test and two flow control cases run now, and
+`vs1_inputs` with its UBYTE4 element passes); with software vertex processing (`d9pixels sw`)
+82 of 82; `d8pixels` 31 of 31, unchanged. With `D3D9` = `"0"` the Direct3D 8 interface gives
+79 of 80 as before. 3DMark 2001 SE (Direct3D 8) draws as before with the interface on.
 
 ### Vertex processing on the GPU (2026-11-26, `D3D8` = `"2"`)
 
@@ -1089,11 +1163,12 @@ that were skipped as not offered run now, and because the tests gained cases on 
 and three clip plane cases in `d8pixels`, and three from the Windows 2000/XP side
 (`vs2_def_first`, `eviction_in_scene`, `rt_small_depth`), which pass here as they came.
 
-Still failing: the `vs1_inputs` declaration. It reads blend indices as `D3DDECLTYPE_UBYTE4`,
-which a Direct3D 9 runtime allows only where the caps' `DeclTypes` name it, and that field
-exists only in the caps of a driver with the Direct3D 9 interface. The same holds for what is
-still not offered to Direct3D 9 programs: the scissor test, linear StretchRect and vertex
-shader flow control. Also not offered: L16 textures, and bump environment mapping as a
+Still failing then: the `vs1_inputs` declaration. It reads blend indices as
+`D3DDECLTYPE_UBYTE4`, which a Direct3D 9 runtime allows only where the caps' `DeclTypes` name
+it, and that field exists only in the caps of a driver with the Direct3D 9 interface. The same
+held for the scissor test and vertex shader flow control: all three came with that interface
+the next day ("The Direct3D 9 driver interface" above). Linear StretchRect is still not
+offered. Also not offered: L16 textures, and bump environment mapping as a
 fixed-function stage operation (`D3DTOP_BUMPENVMAP`; a pixel shader's `texbem` works): the
 fixed-function stages are drawn with OpenGL's combine modes, which have no such operation, so
 it needs a fragment program for the stages. Not done for points: sizes carried in transformed
