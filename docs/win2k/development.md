@@ -2675,7 +2675,18 @@ What changes in the command stream:
 - A vertex shader arrives as two objects, a declaration and a function, set
   separately. The driver pairs each declaration with each function into the
   Direct3D 8 shaders it already runs on the host, and an FVF code (a handle
-  with bit 0 clear) stands for stream 0 alone.
+  with bit 0 clear) stands for stream 0 alone. The tables of declarations
+  and functions grow as a program makes them (`d9_slot`, doubling from 256
+  records). They had a fixed size at first, and the 257th declaration of a
+  device was dropped without a word: every draw with it was left out.
+  3DMark03's Mother Nature makes a declaration for each of its more than 500
+  meshes, so about 350,000 draws of a run were left out, and its stream and
+  lake were plain white. Because so many declarations share a few
+  layouts, each declaration points at the first one made with the same
+  elements (`same`), and the shader made from a declaration and a function
+  is kept under that first one: one translation and one host program for a
+  layout, however many declarations have it. `d9pixels` case 99 draws with
+  the first, the 300th and the 600th of six hundred declarations.
 - `SETSTREAMSOURCE2` gives each stream a byte offset; the draws add it.
 - `SETRENDERTARGET2` and `SETDEPTHSTENCIL` replace `SETRENDERTARGET`
   (one render target).

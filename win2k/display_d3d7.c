@@ -128,7 +128,8 @@ typedef struct {
     struct D9_DECL *decls;
     struct D9_FUNC *funcs;
     struct D9_PAIR *pairs;
-    ULONG pairLast;      /* the pair the last draw used, tried first */
+    ULONG declRoom, funcRoom;            /* the records the two tables hold now */
+    ULONG pairDecl, pairFunc, pairVs;    /* the last draw's declaration and function and the shader made from them, tried first */
     /* The buffer records of the streams and (last) the index buffer, found once and kept while
      * no buffer comes or goes (bufferEpoch). */
     struct D8_BUFFER *bufferCache[RB_VS_STREAMS + 1];
@@ -3170,24 +3171,51 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
  * draws: Direct3D 8 declaration tokens, which map each element to the input
  * register the shader's dcl statement gives its usage, and the code without
  * those statements. */
-enum { MaxDecls = 256, MaxFuncs = 512, MaxPairs = 512, D9PairHandle = 0x40000001 };
-struct D9_DECL { ULONG handle, count; RB_VERTEX_ELEMENT9 *elements; };
+enum { TableStart = 256, TableMost = 1 << 16, MaxPairs = 512, D9PairHandle = 0x40000001 };
+/* same: the handle of the first declaration made with these very elements (its own when it is
+ * that first one). A program makes a declaration for every mesh, hundreds of them with a few
+ * layouts between them; the shaders made from a declaration and a function are kept under the
+ * first, so that they are made once for a layout. */
+struct D9_DECL { ULONG handle, count, same; RB_VERTEX_ELEMENT9 *elements; };
 typedef char rb_d9_element_layout[sizeof(RB_VERTEX_ELEMENT9) == sizeof(RB_D9_ELEMENT) ? 1 : -1];
+typedef char rb_d9_element_words[sizeof(RB_VERTEX_ELEMENT9) == 2 * sizeof(ULONG) ? 1 : -1];
 struct D9_FUNC { ULONG handle, count; ULONG *tokens; };
-struct D9_PAIR { ULONG decl, func, vs; };
+struct D9_PAIR { ULONG decl, func, vs; };   /* decl: a declaration's same */
 
 static BOOL d9_tables(D7_CONTEXT *c)
 {
-    if (!c->decls) c->decls = EngAllocMem(FL_ZERO_MEMORY, MaxDecls * sizeof(*c->decls), 'd9bR');
-    if (!c->funcs) c->funcs = EngAllocMem(FL_ZERO_MEMORY, MaxFuncs * sizeof(*c->funcs), 'f9bR');
     if (!c->pairs) c->pairs = EngAllocMem(FL_ZERO_MEMORY, MaxPairs * sizeof(*c->pairs), 'p9bR');
-    return c->decls && c->funcs && c->pairs;
+    return c->pairs != NULL;
 }
 
-/* Forget the shaders made from a declaration or function handle (0 matches none). */
+/* A free record (its first word, the handle, is 0) of a table that doubles when it is full, from
+ * TableStart records up to TableMost; ~0 without room or memory. Tables of a fixed size were too
+ * small: the 257th declaration of a device was dropped and every draw with it left out, and
+ * 3DMark03's Mother Nature makes more than 500. */
+static ULONG d9_slot(void **table, ULONG *room, ULONG size, ULONG tag)
+{
+    ULONG i, more;
+    void *bigger;
+    for (i = 0; i < *room; ++i) if (!*(const ULONG *)((const BYTE *)*table + i * size)) return i;
+    more = *room ? *room * 2 : TableStart;
+    if (more > TableMost) return ~0UL;
+    bigger = EngAllocMem(FL_ZERO_MEMORY, more * size, tag);
+    if (!bigger) return ~0UL;
+    if (*table) {
+        RtlCopyMemory(bigger, *table, *room * size);
+        EngFreeMem(*table);
+    }
+    *table = bigger;
+    i = *room;
+    *room = more;
+    return i;
+}
+
+/* Forget the shaders made from a declaration (by its same) or function handle (0 matches none). */
 static void d9_forget(D7_CONTEXT *c, ULONG decl, ULONG func)
 {
     ULONG i;
+    c->pairVs = 0;
     for (i = 0; c->pairs && i < MaxPairs; ++i) {
         struct D9_PAIR *q = &c->pairs[i];
         if (!q->vs || ((!decl || q->decl != decl) && (!func || q->func != func))) continue;
@@ -3202,22 +3230,35 @@ static void d9_forget(D7_CONTEXT *c, ULONG decl, ULONG func)
 static struct D9_DECL *d9_decl(D7_CONTEXT *c, ULONG handle)
 {
     ULONG i;
-    for (i = 0; c->decls && handle && i < MaxDecls; ++i) if (c->decls[i].handle == handle) return &c->decls[i];
+    for (i = 0; handle && i < c->declRoom; ++i) if (c->decls[i].handle == handle) return &c->decls[i];
     return NULL;
 }
 
 static struct D9_FUNC *d9_func(D7_CONTEXT *c, ULONG handle)
 {
     ULONG i;
-    for (i = 0; c->funcs && handle && i < MaxFuncs; ++i) if (c->funcs[i].handle == handle) return &c->funcs[i];
+    for (i = 0; handle && i < c->funcRoom; ++i) if (c->funcs[i].handle == handle) return &c->funcs[i];
     return NULL;
 }
 
 static void d9_delete_decl(D7_CONTEXT *c, ULONG handle)
 {
-    struct D9_DECL *e = d9_decl(c, handle);
-    d9_forget(c, handle, 0);
+    struct D9_DECL *e = d9_decl(c, handle), *heir = NULL;
+    ULONG i;
+    c->pairVs = 0;
     if (!e) return;
+    if (e->same == handle) {
+        /* The first of its layout: the next one with it takes over, and the shaders with it. */
+        for (i = 0; i < c->declRoom; ++i) {
+            struct D9_DECL *o = &c->decls[i];
+            if (o == e || !o->handle || o->same != handle) continue;
+            if (!heir) heir = o;
+            o->same = heir->handle;
+        }
+        if (!heir) d9_forget(c, handle, 0);
+        else for (i = 0; c->pairs && i < MaxPairs; ++i)
+            if (c->pairs[i].vs && c->pairs[i].decl == handle) c->pairs[i].decl = heir->handle;
+    }
     if (e->elements) EngFreeMem(e->elements);
     RtlZeroMemory(e, sizeof(*e));
 }
@@ -3234,27 +3275,42 @@ static void d9_delete_func(D7_CONTEXT *c, ULONG handle)
 static void d9_create_decl(D7_CONTEXT *c, ULONG handle, const RB_VERTEX_ELEMENT9 *elements, ULONG count)
 {
     struct D9_DECL *e;
-    ULONG i;
+    void *table;
+    ULONG i, k, w;
     if (!d9_tables(c) || !handle) return;
     d9_delete_decl(c, handle);
-    for (i = 0; i < MaxDecls && c->decls[i].handle; ++i) {}
-    if (i == MaxDecls || !count) return;
+    if (!count) return;
+    table = c->decls;
+    i = d9_slot(&table, &c->declRoom, sizeof(*c->decls), 'd9bR');
+    c->decls = table;
+    if (i == ~0UL) return;
     e = &c->decls[i];
     e->elements = EngAllocMem(0, count * sizeof(*elements), 'e9bR');
     if (!e->elements) return;
     RtlCopyMemory(e->elements, elements, count * sizeof(*elements));
-    e->handle = handle;
     e->count = count;
+    e->same = handle;
+    for (k = 0; k < c->declRoom; ++k) {
+        const struct D9_DECL *o = &c->decls[k];
+        if (!o->handle || o->count != count) continue;
+        for (w = 0; w < 2 * count && ((const ULONG *)o->elements)[w] == ((const ULONG *)elements)[w]; ++w) {}
+        if (w == 2 * count) { e->same = o->same; break; }
+    }
+    e->handle = handle;
 }
 
 static void d9_create_func(D7_CONTEXT *c, ULONG handle, const ULONG *tokens, ULONG bytes)
 {
     struct D9_FUNC *f;
+    void *table;
     ULONG i;
     if (!d9_tables(c) || !handle) return;
     d9_delete_func(c, handle);
-    for (i = 0; i < MaxFuncs && c->funcs[i].handle; ++i) {}
-    if (i == MaxFuncs || bytes < 8 || bytes % 4) return;
+    if (bytes < 8 || bytes % 4) return;
+    table = c->funcs;
+    i = d9_slot(&table, &c->funcRoom, sizeof(*c->funcs), 'f9bR');
+    c->funcs = table;
+    if (i == ~0UL) return;
     f = &c->funcs[i];
     f->tokens = EngAllocMem(0, bytes, 'c9bR');
     if (!f->tokens) return;
@@ -3282,16 +3338,15 @@ static ULONG d9_vshader(D7_CONTEXT *c)
     struct D9_FUNC *fn;
     ULONG i, free = MaxPairs, declWords, codeWords, *buffer;
     /* The pair of the last draw: a pair lives only while its declaration and function do. */
-    if (c->pairs && c->declHandle && c->funcHandle && c->pairs[c->pairLast].vs &&
-        c->pairs[c->pairLast].decl == c->declHandle && c->pairs[c->pairLast].func == c->funcHandle)
-        return c->pairs[c->pairLast].vs;
+    if (c->pairVs && c->pairDecl == c->declHandle && c->pairFunc == c->funcHandle) return c->pairVs;
     dl = d9_decl(c, c->declHandle);
     fn = d9_func(c, c->funcHandle);
     if (!dl || !fn || !d9_tables(c)) return 0;
     for (i = 0; i < MaxPairs; ++i) {
-        if (c->pairs[i].vs && c->pairs[i].decl == dl->handle && c->pairs[i].func == fn->handle) {
-            c->pairLast = i;
-            return c->pairs[i].vs;
+        if (c->pairs[i].vs && c->pairs[i].decl == dl->same && c->pairs[i].func == fn->handle) {
+            c->pairDecl = c->declHandle;
+            c->pairFunc = c->funcHandle;
+            return c->pairVs = c->pairs[i].vs;
         }
         if (!c->pairs[i].vs && free == MaxPairs) free = i;
     }
@@ -3302,9 +3357,12 @@ static ULONG d9_vshader(D7_CONTEXT *c)
         ULONG handle = D9PairHandle + 2 * free;
         create_vshader(c, handle, (const BYTE *)buffer, declWords * 4, codeWords * 4);
         if (find_vshader(c, handle)) {
-            c->pairs[free].decl = dl->handle;
+            c->pairs[free].decl = dl->same;
             c->pairs[free].func = fn->handle;
             c->pairs[free].vs = handle;
+            c->pairDecl = c->declHandle;
+            c->pairFunc = c->funcHandle;
+            c->pairVs = handle;
         }
     }
     EngFreeMem(buffer);
@@ -3408,14 +3466,15 @@ static void d9_fill(D7_CONTEXT *c, const RB_DP2_COLOR_FILL *f)
 static void d9_release(D7_CONTEXT *c)
 {
     ULONG i;
-    for (i = 0; c->decls && i < MaxDecls; ++i) if (c->decls[i].elements) EngFreeMem(c->decls[i].elements);
-    for (i = 0; c->funcs && i < MaxFuncs; ++i) if (c->funcs[i].tokens) EngFreeMem(c->funcs[i].tokens);
+    for (i = 0; i < c->declRoom; ++i) if (c->decls[i].elements) EngFreeMem(c->decls[i].elements);
+    for (i = 0; i < c->funcRoom; ++i) if (c->funcs[i].tokens) EngFreeMem(c->funcs[i].tokens);
     if (c->decls) EngFreeMem(c->decls);
     if (c->funcs) EngFreeMem(c->funcs);
     if (c->pairs) EngFreeMem(c->pairs);
     c->decls = NULL;
     c->funcs = NULL;
     c->pairs = NULL;
+    c->declRoom = c->funcRoom = c->pairVs = 0;
 }
 
 /* ---- Direct3D 8 streams ---- */

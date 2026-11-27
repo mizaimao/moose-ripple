@@ -3004,6 +3004,70 @@ static void ps2_water_case(int only, BOOL version2)
     IDirect3DCubeTexture9_Release(cube);
 }
 
+/* 99: six hundred vertex declarations alive at once, as a program has that makes one for every
+ * mesh (3DMark03's Mother Nature makes more than 500), in two layouts by turns. Three quads through
+ * mov oPos, v0; mov oD0, v1: red with the first declaration, then, after the first is released,
+ * green with the 300th and blue with the 600th. */
+static void many_declarations_case(int only, BOOL offered)
+{
+    enum { Count = 600 };
+    static const D3DVERTEXELEMENT9 plain[] = {
+        { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+        { 0, 12, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 }, D3DDECL_END() };
+    static const D3DVERTEXELEMENT9 wide[] = {
+        { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+        { 0, 12, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 },
+        { 0, 16, D3DDECLTYPE_FLOAT2, 0, D3DDECLUSAGE_TEXCOORD, 0 }, D3DDECL_END() };
+    static const DWORD vs[] = { 0xfffe0101,
+        0x0000001f, 0x80000000, 0x900f0000,     /* dcl_position v0 */
+        0x0000001f, 0x8000000a, 0x900f0001,     /* dcl_color v1 */
+        0x00000001, 0xc00f0000, 0x90e40000,     /* mov oPos, v0 */
+        0x00000001, 0xd00f0000, 0x90e40001,     /* mov oD0, v1 */
+        0x0000ffff };
+    static const SAMPLE s[] = { { 32, 64, 0xff0000 }, { 64, 64, 0x00ff00 }, { 96, 64, 0x0000ff }, { 8, 8, CLEAR_COLOR } };
+    static const DWORD colors[3] = { 0xffff0000, 0xff00ff00, 0xff0000ff };
+    static const int which[3] = { 0, 299, Count - 1 };
+    static IDirect3DVertexDeclaration9 *decls[Count];
+    struct { float x, y, z; DWORD color; float u, v; } v[4];
+    IDirect3DVertexShader9 *shader = NULL;
+    HRESULT hr = D3D_OK;
+    int i, k;
+    if (only && only != 99) return;
+    if (!offered) { printf("D9PIX vertex shaders 1.1 not offered\n"); return; }
+    memset(decls, 0, sizeof(decls));
+    for (i = 0; i < Count && SUCCEEDED(hr); ++i)
+        hr = IDirect3DDevice9_CreateVertexDeclaration(device, i & 1 ? wide : plain, &decls[i]);
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice9_CreateVertexShader(device, vs, &shader);
+    if (FAILED(hr)) { fail_hr("many_declarations", "create", hr); goto done; }
+    if (begin("many_declarations")) {
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        IDirect3DDevice9_SetVertexShader(device, shader);
+        for (k = 0; k < 3 && SUCCEEDED(hr); ++k) {
+            /* a quad 24 pixels wide and 32 high around x = 32, 64, 96 */
+            float x0 = (20.0f + 32 * k) / 64 - 1, x1 = (44.0f + 32 * k) / 64 - 1;
+            memset(v, 0, sizeof(v));
+            for (i = 0; i < 4; ++i) {
+                v[i].x = i & 1 ? x1 : x0;
+                v[i].y = i & 2 ? -0.25f : 0.25f;
+                v[i].z = 0.5f;
+                v[i].color = colors[k];
+            }
+            IDirect3DDevice9_SetVertexDeclaration(device, decls[which[k]]);
+            if (k == 1) { IDirect3DVertexDeclaration9_Release(decls[0]); decls[0] = NULL; }   /* the first of its layout goes */
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+        }
+        IDirect3DDevice9_SetVertexShader(device, NULL);
+        IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+        if (FAILED(hr)) { fail_hr("many_declarations", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("many_declarations", s, 4);
+    }
+done:
+    if (shader) IDirect3DVertexShader9_Release(shader);
+    for (i = 0; i < Count; ++i) if (decls[i]) IDirect3DVertexDeclaration9_Release(decls[i]);
+}
+
 /* 83: a ps_2_0 shader that reads samplers 9 and 15 (shader model 2 has sixteen; 3DMark05's third
  * game test draws its water with a ninth one): texld r0, t0, s9; texld r1, t0, s15;
  * add r0, r0, r1. A green texture on sampler 9 and a blue one on sampler 15 give cyan. */
@@ -3361,6 +3425,7 @@ int main(int argc, char **argv)
     printf("D9PIX max_point_size=%d\n", (int)caps.MaxPointSize);
     point_case(only);
     program_point_case(only, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1));
+    many_declarations_case(only, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1));
     static_indexed_case(only);
     scaled_point_case(only, caps.MaxPointSize >= 16.0f);
     vertex_point_case(only, caps.MaxPointSize >= 16.0f && flags == D3DCREATE_HARDWARE_VERTEXPROCESSING);
