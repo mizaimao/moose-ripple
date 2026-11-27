@@ -559,12 +559,22 @@ static DWORD next_session(void)
 static struct { DWORD pid, session; } known[MAX_KNOWN];
 
 /* DllMain, process attach (begin) or detach (end). A new process may have the id of one that
-   has just ended: what that one left goes. */
+   has just ended: what that one left goes. But a process that DirectDraw's calls brought here
+   before it loads the DLL itself has its session already, in its environment (me): it keeps
+   that and what it owns. A program that reads the development counters is such a process
+   (LoadLibrary, then RippleSkips); forgetting its Direct3D context here left every later lock of
+   its render target with the memory's old contents, because no context was the process's any
+   more to read the picture back from. */
 void d3d_process(int begin)
 {
-    DWORD pid = GetCurrentProcessId();
+    static const char name[] = "RIPPLE_D3D_SESSION";
+    DWORD pid = GetCurrentProcessId(), session = 0;
+    char buf[24];
     int i, free = -1;
 
+    if (begin && GetEnvironmentVariable(name, buf, sizeof buf) == 17 && buf[8] == ':' &&
+        hex8(buf) == pid)
+        session = hex8(buf + 9);
     for (i = 0; i < MAX_KNOWN; i++) {
         if (known[i].pid == pid)
             known[i].pid = 0;
@@ -573,9 +583,12 @@ void d3d_process(int begin)
     }
     if (!begin)
         return;
-    owner_forget(pid);
+    if (!session) {
+        owner_forget(pid);
+        session = next_session();
+    }
     if (free >= 0) {
-        known[free].session = next_session();
+        known[free].session = session;
         known[free].pid = pid;
     }
 }
