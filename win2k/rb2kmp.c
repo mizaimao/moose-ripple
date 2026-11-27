@@ -145,6 +145,7 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
     /* Vertex shaders on the host GPU and the Direct3D 9 interface: on unless set to 0. */
     a->gpu.vertexShaders = TRUE;
     a->gpu.d3d9Ddi = TRUE;
+    a->gpu.hostBuffers = TRUE;   /* and vertex and index buffers kept on the host */
     VideoPortGetRegistryParameters(a, L"RippleDirectDrawGpuSurfaces", FALSE, registry_flag, &a->gpu.plainSurfaces);
     VideoPortGetRegistryParameters(a, L"RippleGpuDesktop", FALSE, registry_flag, &a->gpu.glEnabled);
     VideoPortGetRegistryParameters(a, L"RippleHardwareCursor", FALSE, registry_flag, &a->gpu.cursorEnabled);
@@ -154,6 +155,7 @@ static VP_STATUS find_adapter(PVOID ext, PVOID context, PWSTR args,
     VideoPortGetRegistryParameters(a, L"RippleHostDxt", FALSE, registry_flag, &a->gpu.hostDxt);
     VideoPortGetRegistryParameters(a, L"RippleVertexShaders", FALSE, registry_flag, &a->gpu.vertexShaders);
     VideoPortGetRegistryParameters(a, L"RippleD3D9", FALSE, registry_flag, &a->gpu.d3d9Ddi);
+    VideoPortGetRegistryParameters(a, L"RippleHostBuffers", FALSE, registry_flag, &a->gpu.hostBuffers);
     VideoPortGetRegistryParameters(a, L"RipplePrimaryInMemory", FALSE, registry_flag, &a->gpu.primaryInMemory);
     a->gpu.lock = rb_lock_create();
     /* GDI's drawing on a desktop in memory is sent by a worker a few milliseconds later. */
@@ -630,6 +632,9 @@ static BOOLEAN start_io(PVOID ext, PVIDEO_REQUEST_PACKET r)
     case IOCTL_RB2K_D3D7_TEXTURE_FREE:
     case IOCTL_RB2K_D3D8_PROGRAM:
     case IOCTL_RB2K_D3D8_PROGRAM_FREE:
+    case IOCTL_RB2K_D3D8_VPROGRAM:
+    case IOCTL_RB2K_D8_BUFFER_CREATE:
+    case IOCTL_RB2K_D8_BUFFER_FREE:
     case IOCTL_RB2K_D7_CUBE_SYNC:
     case IOCTL_RB2K_DD_CREATE_Z16:
     case IOCTL_RB2K_DD_CREATE_Z24S8:
