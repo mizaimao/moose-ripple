@@ -1996,6 +1996,22 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p);
 static ULONG cube_stages(D7_CONTEXT *c, ULONG samplers, BOOL volume);
 
 /* Whether the stages fit the two-stage combiner of the Direct3D 7 draws. */
+/* D3DFVF_FOG (d3dhal.h): a transformed vertex that the runtime's own vertex processing made carries
+ * its fog factor as a separate float after the specular colour, when the driver reports
+ * D3DPMISCCAPS_FOGINFVF (a Direct3D 9 driver has to, d9_ddi_caps). The draw paths take that fog from
+ * the specular alpha, so the factor is put there as a byte: 1.0 and more is 255 (no fog), zero and
+ * less is 0. Done on the IEEE bits, as the display driver uses no floating point. */
+enum { FvfFog = 0x2000 };
+static ULONG fog_alpha(ULONG specular, ULONG factor)
+{
+    ULONG e = (factor >> 23) & 0xff, m = (factor & 0x7fffff) | 0x800000, a;
+    if ((factor & 0x80000000UL) || e < 118) a = 0;
+    else if (e >= 127) a = 255;
+    else if (e == 118) a = 1;       /* 1/512 to 1/256: half a step or more */
+    else a = (m * 255 + (1UL << (149 - e))) >> (150 - e);    /* m x 2^(e - 150) x 255, rounded */
+    return (specular & 0x00ffffffUL) | a << 24;
+}
+
 static BOOL d3d7_stages(const D7_CONTEXT *c)
 {
     ULONG color, alpha;
@@ -2015,7 +2031,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     D7_STAGE *st = &c->stages[0], *st1 = &c->stages[1];
     D7_TEXTURE *tex = NULL, *tex1 = NULL;
     ULONG fvf = p->stream ? p->fvf : a->dwVertexType, offset = 16, diffuse = 0, specular = 0, coord = 0, coordFloats = 0, normal = 0;
-    ULONG coord1 = 0, coord1Floats = 0;
+    ULONG coord1 = 0, coord1Floats = 0, fogAt = 0;
     ULONG sets, i, t, low = 0xffffffff, high = 0, address = 0, count = 0, flatSource = 0;
     ULONG limit = 0xffffffff;              /* highest index inside the runtime's window */
     ULONG position;
@@ -2078,6 +2094,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     if (fvf & D3DFVF_RESERVED1) offset += 4;
     if (fvf & D3DFVF_DIFFUSE) { diffuse = offset; offset += 4; }
     if (fvf & D3DFVF_SPECULAR) { specular = offset; offset += 4; }
+    if (!objectSpace && c->dx8 && (fvf & FvfFog)) { fogAt = offset; offset += 4; }   /* see fog_alpha */
     sets = (fvf & D3DFVF_TEXCOUNT_MASK) >> D3DFVF_TEXCOUNT_SHIFT;
     for (i = 0; i < sets; ++i) {
         static const UCHAR floats[] = { 2, 3, 4, 1 };
@@ -2233,6 +2250,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
                 else o->nx = o->ny = o->nz = 0;
                 o->diffuse = diffuse ? *(const ULONG *)(v + diffuse) : 0xffffffff;
                 o->specular = specular ? *(const ULONG *)(v + specular) : 0;
+                if (fogAt) o->specular = fog_alpha(o->specular, *(const ULONG *)(v + fogAt));
                 o->u = coordFloats ? *(const ULONG *)(v + coord) : 0;
                 o->v = coordFloats > 1 ? *(const ULONG *)(v + coord + 4) : 0;
                 o->u1 = coord1Floats ? *(const ULONG *)(v + coord1) : 0;
@@ -2243,6 +2261,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
                 const BYTE *v = base + flat * stride;
                 ULONG fd = diffuse ? *(const ULONG *)(v + diffuse) : 0xffffffff;
                 ULONG fs = specular ? *(const ULONG *)(v + specular) : 0;
+                if (fogAt) fs = fog_alpha(fs, *(const ULONG *)(v + fogAt));
                 for (i = 0; i < per; ++i) { out[i].diffuse = fd; out[i].specular = fs; }
             }
             if (bad) { ++d->d7draw.badPositions; skip_vertex(c, 1, 6); continue; }
@@ -2772,7 +2791,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     DD_SLOT *s, *z;
     ULONG program = 0, fog = 0;
     ULONG fvf = p->fvf, stride = p->streamStride, offset = 16, diffuse = 0, specular = 0, normal = 0, position, sets, i, t, k;
-    ULONG used = 0, words, psize = 0, carrier = 0, rawSize = 0;
+    ULONG used = 0, words, psize = 0, carrier = 0, rawSize = 0, fogAt = 0;
     BOOL sized = FALSE;
     ULONG coordOffset[RB2K_D8_STAGES], coordFloats[RB2K_D8_STAGES];
     ULONG low = 0xffffffff, high = 0, count = 0, flatSource = 0;
@@ -2809,6 +2828,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     if (fvf & D3DFVF_RESERVED1) { psize = offset; offset += 4; }    /* D3DFVF_PSIZE on Direct3D 8 and 9 */
     if (fvf & D3DFVF_DIFFUSE) { diffuse = offset; offset += 4; }
     if (fvf & D3DFVF_SPECULAR) { specular = offset; offset += 4; }
+    if (!objectSpace && c->dx8 && (fvf & FvfFog)) { fogAt = offset; offset += 4; }   /* see fog_alpha */
     for (k = 0; k < RB2K_D8_STAGES; ++k) coordOffset[k] = coordFloats[k] = 0;
     sets = (fvf & D3DFVF_TEXCOUNT_MASK) >> D3DFVF_TEXCOUNT_SHIFT;
     for (i = 0; i < sets; ++i) {
@@ -2918,6 +2938,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
                 else o->nx = o->ny = o->nz = 0;
                 o->diffuse = diffuse ? *(const ULONG *)(v + diffuse) : 0xffffffff;
                 o->specular = specular ? *(const ULONG *)(v + specular) : 0;
+                if (fogAt) o->specular = fog_alpha(o->specular, *(const ULONG *)(v + fogAt));
                 for (k = 0; k < used; ++k)
                     for (j = 0; j < 4; ++j)
                         o->tc[k][j] = j < coordFloats[k] ? *(const ULONG *)(v + coordOffset[k] + 4 * j) :
@@ -2937,7 +2958,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
                 for (i = 0; i < per; ++i) {
                     RB2K_D3D8_VERTEX *o = (RB2K_D3D8_VERTEX *)(out + i * words);
                     o->diffuse = fd;
-                    o->specular = fs;
+                    o->specular = fogAt ? fog_alpha(fs, *(const ULONG *)(v + fogAt)) : fs;
                 }
             }
             if (bad) { ++d->d7draw.badPositions; skip_vertex(c, 1, 10); continue; }
@@ -3345,6 +3366,10 @@ static ULONG d9_decl_fvf(const struct D9_DECL *dl)
         }
         else if (e->usage == 10 && e->usageIndex == 0 && e->type == 4 && stage >= 1 && stage < 3) { fvf |= D3DFVF_DIFFUSE; stage = 3; offset += 4; }
         else if (e->usage == 10 && e->usageIndex == 1 && e->type == 4 && stage >= 1 && stage < 4) { fvf |= D3DFVF_SPECULAR; stage = 4; offset += 4; }
+        /* The separate fog value of a transformed vertex (fog_alpha): after the colours. */
+        else if (e->usage == 11 && !e->usageIndex && e->type == 0 && stage >= 1 && stage < 5 && (fvf & D3DFVF_XYZRHW) && !(fvf & FvfFog)) {
+            fvf |= FvfFog; stage = 4; offset += 4;
+        }
         else if (e->usage == 5 && e->usageIndex == tex && e->type <= 3 && stage >= 1 && tex < 8) {
             fvf |= sizeCode[e->type] << (16 + 2 * tex);
             ++tex;

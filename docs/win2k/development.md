@@ -2624,6 +2624,20 @@ After a successful `DrawPrimitives2` the driver must leave `dwErrorOffset` at
 sends it into a loop of assertions. The driver reports no query types, so the
 runtime issues no queries.
 
+`D3DPMISCCAPS_FOGINFVF` is a promise as well as a requirement. With it the runtime's own
+vertex processing (software vertex processing, which also runs vertex shaders in the
+runtime) no longer packs the fog factor into the specular alpha of the transformed
+vertices it sends. It adds a separate float after the specular colour and marks the vertex
+format with `D3DFVF_FOG` (0x2000, `d3dhal.h`). The driver read the format without that
+bit, took the fog factor from a specular alpha of zero, and drew such draws in the fog
+colour alone: `ps_lit_fog`, `vs2_fog` and `vs2_fog_vb` failed with software vertex
+processing. Both draw paths for transformed vertices now take the float (`fog_alpha` turns
+it into the specular alpha byte on the IEEE bits, as the display driver uses no floating
+point), and `d9_decl_fvf` reads a fog field of a declaration the same way. With it
+`d9pixels` passes 107 of 107 with software vertex processing (XP SP3 under KVM, Intel UHD
+630 host). 3DMark03's CPU Test 2, which runs its vertex shaders in the runtime and comes
+out much brighter than Game Test 3, looks the same with it: that has another cause.
+
 What changes in the command stream:
 
 - A vertex shader arrives as two objects, a declaration and a function, set
