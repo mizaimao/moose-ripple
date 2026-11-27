@@ -39,7 +39,7 @@ typedef char d8_lights_match[RB2K_D7_LIGHTS == 8 ? 1 : -1];
 typedef char material_record[sizeof(D3DNTHAL_DP2SETMATERIAL) == 17 * sizeof(ULONG) ? 1 : -1];
 typedef struct {
     ULONG texture, colorOp, colorArg1, colorArg2, alphaOp, alphaArg1, alphaArg2;
-    ULONG coordIndex, addressU, addressV, magFilter, minFilter, mipFilter, border, transform;
+    ULONG coordIndex, addressU, addressV, addressW, magFilter, minFilter, mipFilter, border, transform;
 } D7_STAGE;
 /* A pixel shader of a context: its handle, its tokens, the stages it
  * samples and reads, and its miniport programs, one per fog setting
@@ -188,6 +188,12 @@ typedef struct {
     BOOL tracked, dirty;
     ULONG host, sum, epoch;
     ULONG used;     /* useClock when a draw last chose it, for least-recently-used eviction */
+    /* A Direct3D 9 runtime makes the video-memory copy of a mipmapped texture it manages as one
+     * surface (DDSCAPS3_LIGHTWEIGHTMIPMAP: lightweight) and leaves the levels below it to the
+     * driver. They are read from the system-memory texture the runtime fills it from (lower: that
+     * texture's handle, zero while there is none and for textures with level surfaces of their own). */
+    BOOL lightweight;
+    ULONG lower;
 } D7_TEXTURE;
 
 /* A Direct3D 8 vertex or index buffer registered through CreateSurfaceEx.
@@ -358,6 +364,16 @@ static BOOL request(DISPLAY *d, ULONG code, PVOID in, ULONG inSize, PVOID out, U
 
 static void release_texture(D7_TEXTURE *t, BOOL host)
 {
+    if (t->handle && t->levels > 1 && textures) {
+        /* Textures that read their lower levels from this one fall back to their own level. */
+        ULONG i;
+        for (i = 0; i < MaxTextures; ++i) {
+            D7_TEXTURE *o = &textures[i];
+            if (o == t || o->lower != t->handle || o->local != t->local || !o->handle) continue;
+            o->lower = 0; o->levels = 1; o->mipmaps = FALSE; o->epoch = 0; o->dirty = TRUE;
+            if (o->host) { request(o->display, IOCTL_RB2K_D3D7_TEXTURE_FREE, &o->host, sizeof(o->host), NULL, 0); o->host = 0; }
+        }
+    }
     if (host && t->host) request(t->display, IOCTL_RB2K_D3D7_TEXTURE_FREE, &t->host, sizeof(t->host), NULL, 0);
     if (t->display) --t->display->d7draw.textures;
     RtlZeroMemory(t, sizeof(*t));
@@ -608,6 +624,7 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
     t->height = g->wHeight;
     t->format = rb_d7_texture_format(&g->ddpfSurface, d->mode.BitsPerPlane);
     t->mipmaps = (l->ddsCaps.dwCaps & DDSCAPS_MIPMAP) != 0;
+    t->lightweight = l->lpSurfMore && (l->lpSurfMore->ddsCapsEx.dwCaps3 & 0x400) != 0;   /* DDSCAPS3_LIGHTWEIGHTMIPMAP */
     t->blocks = (l->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY) && compressed(t->format) ? t->format : 0;
     RtlZeroMemory(t->faceHandles, sizeof(t->faceHandles));
     if (t->mipmaps) ++d->d7draw.regMipmaps;
@@ -923,7 +940,7 @@ static void default_stages(D7_CONTEXT *c)
         s->colorArg1 = s->alphaArg1 = D3DTA_TEXTURE;
         s->colorArg2 = s->alphaArg2 = D3DTA_CURRENT;
         s->coordIndex = stage;
-        s->addressU = s->addressV = D3DTADDRESS_WRAP;
+        s->addressU = s->addressV = s->addressW = D3DTADDRESS_WRAP;
         s->magFilter = D3DTFG_POINT;
         s->minFilter = D3DTFN_POINT;
         s->mipFilter = D3DTFP_NONE;
@@ -1245,6 +1262,7 @@ static void stage_state(D7_STAGE *s, ULONG state, ULONG value)
     case D3DTSS_ADDRESS: s->addressU = s->addressV = value; break;
     case D3DTSS_ADDRESSU: s->addressU = value; break;
     case D3DTSS_ADDRESSV: s->addressV = value; break;
+    case 25: s->addressW = value; break;    /* D3DTSS_ADDRESSW of Direct3D 8 and 9: the third coordinate of a volume */
     case D3DTSS_MAGFILTER: s->magFilter = value; break;
     case D3DTSS_MINFILTER: s->minFilter = value; break;
     case D3DTSS_MIPFILTER: s->mipFilter = value; break;
@@ -2036,6 +2054,8 @@ static ULONG fog_alpha(ULONG specular, ULONG factor)
     return (specular & 0x00ffffffUL) | a << 24;
 }
 
+static BOOL missing_texture_differs(const D7_CONTEXT *c);
+
 static BOOL d3d7_stages(const D7_CONTEXT *c)
 {
     ULONG color, alpha;
@@ -2068,10 +2088,12 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     if (c->fill != D3DFILL_SOLID) { skip(c, RB2K_D7_SKIP_FILL, p->primitives); return DD_OK; }
     /* Direct3D 8 stages beyond these two (a third stage, bump mapping) go to the
      * stage program of the shader path. */
-    /* So do the stages with a cube map or a volume, and the points whose sizes the vertex shader
-     * works out. */
+    /* So do the stages with a cube map or a volume, the points whose sizes the vertex shader
+     * works out, and stages without a texture where Direct3D 8 and 9 draw them differently
+     * from Direct3D 7 (stage_left_out). */
     if (p->stream && !c->pixelShader &&
-        (!d3d7_stages(c) || cube_stages(c, 3, FALSE) || cube_stages(c, 3, TRUE) || sized_points(c, p)))
+        (!d3d7_stages(c) || cube_stages(c, 3, FALSE) || cube_stages(c, 3, TRUE) || sized_points(c, p) ||
+         missing_texture_differs(c)))
         return shader_triangles(c, p);
     /* Two stages are drawn; a third one counts as the stage-one skip. */
     if (st->colorOp != D3DTOP_DISABLE && st1->colorOp != D3DTOP_DISABLE && c->stages[2].colorOp != D3DTOP_DISABLE) {
@@ -2466,6 +2488,30 @@ static BOOL stage_lacks_texture(const D7_CONTEXT *c, ULONG n)
                            (s->alphaOp != D3DTOP_DISABLE && samples_texture(s->alphaOp, a1, a2)));
 }
 
+/* Direct3D 8 and 9 draw a stage without a texture the way their reference rasterizer does
+ * (d9pixels case 116): the stage is left out, with the ones after it, only when its first colour
+ * argument is the texture itself; any other read of the missing texture gives opaque black
+ * (blank_texture). */
+static BOOL stage_left_out(const D7_CONTEXT *c, ULONG n)
+{
+    const D7_STAGE *s = &c->stages[n];
+    return s->colorOp == D3DTOP_DISABLE || (!s->texture && s->colorArg1 == D3DTA_TEXTURE);
+}
+
+/* Whether the two-stage combiner of the Direct3D 7 draws, which ends at any stage that reads a
+ * missing texture (stage_words), would draw stages 0 and 1 differently from that. */
+static BOOL missing_texture_differs(const D7_CONTEXT *c)
+{
+    ULONG n;
+    for (n = 0; n < 2; ++n) {
+        BOOL out = stage_left_out(c, n);
+        BOOL ends = c->stages[n].colorOp == D3DTOP_DISABLE || stage_lacks_texture(c, n);
+        if (out != ends) return TRUE;
+        if (out) break;
+    }
+    return FALSE;
+}
+
 static ULONG stage_program(D7_CONTEXT *c, ULONG fog, D8_SHADER *as, BOOL byStage, BOOL pretransformed)
 {
     RB_STAGE_STATE st[TextureStages];
@@ -2473,7 +2519,7 @@ static ULONG stage_program(D7_CONTEXT *c, ULONG fog, D8_SHADER *as, BOOL byStage
     D8_STAGE_PROGRAM *e;
     RB_PS_INFO info;
     RtlZeroMemory(key, sizeof(key));
-    for (i = 0; i < TextureStages && c->stages[i].colorOp != D3DTOP_DISABLE && !stage_lacks_texture(c, i); ++i) {
+    for (i = 0; i < TextureStages && !stage_left_out(c, i); ++i) {
         const D7_STAGE *s = &c->stages[i];
         st[i].colorOp = s->colorOp; st[i].colorArg1 = s->colorArg1; st[i].colorArg2 = s->colorArg2;
         st[i].alphaOp = s->alphaOp; st[i].alphaArg1 = s->alphaArg1; st[i].alphaArg2 = s->alphaArg2;
@@ -2712,7 +2758,8 @@ static ULONG stage_sampler(const D7_STAGE *st, const D7_TEXTURE *tex)
            (st->magFilter >= 1 && st->magFilter <= 5 ? st->magFilter : 1) << 8 |
            (st->minFilter >= 1 && st->minFilter <= 3 ? st->minFilter : 1) << 12 |
            (tex && tex->levels > 1 && st->mipFilter >= D3DTFP_POINT && st->mipFilter <= D3DTFP_LINEAR ?
-            st->mipFilter : D3DTFP_NONE) << 16;
+            st->mipFilter : D3DTFP_NONE) << 16 |
+           (st->addressW >= 1 && st->addressW <= 4 ? st->addressW : 1) << 20;
 }
 
 /* The pixel shader half of a shader draw: textures, render states, the
@@ -2745,6 +2792,9 @@ static BOOL pixel_states(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, const D8_SHADER *s
             skip(c, RB2K_D7_SKIP_TEXTURE, primitives);
             return FALSE;
         }
+        /* A lightweight mipmap that never got its lower levels is drawn from its top level. */
+        if (tex->lightweight && tex->levels == 1 && st->mipFilter >= D3DTFP_POINT && st->mipFilter <= D3DTFP_LINEAR)
+            c->display->d7draw.ignored[RB2K_D7_IGNORED_MIPMAP] += primitives;
         draw->samplers[k] = stage_sampler(st, tex);
         draw->borders[k] = st->border;
     }
@@ -4385,6 +4435,23 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
     if (left < 0 || top < 0 || (ULONG)right > src->width || (ULONG)bottom > src->height ||
         b->pDest.x < 0 || b->pDest.y < 0 || (ULONG)(b->pDest.x + right - left) > dst->width ||
         (ULONG)(b->pDest.y + bottom - top) > dst->height) { ++d->d7draw.texBltFailures; return; }
+    if (srcFace == ~0UL && dst->lightweight && !src->lightweight && src->levels > 1 &&
+        src->width == dst->width && src->height == dst->height &&
+        (dst->levels == 1 || dst->lower != src->handle)) {
+        /* A lightweight mipmap: the destination takes the source's lower levels, and a host
+         * texture made for other levels goes, so that the next draw makes one for these. They
+         * stay the source's memory: read there, never written (the copy below skips them). */
+        ULONG f, lv;
+        for (f = 0; f < src->faces && f < 6; ++f)
+            for (lv = 1; lv < src->levels && lv < RB2K_D7_LEVELS; ++lv) {
+                dst->levelAddress[f][lv] = src->levelAddress[f][lv];
+                dst->levelPitch[f][lv] = src->levelPitch[f][lv];
+            }
+        dst->levels = src->levels;
+        dst->mipmaps = TRUE;
+        dst->lower = src->handle;
+        if (dst->host) { request(d, IOCTL_RB2K_D3D7_TEXTURE_FREE, &dst->host, sizeof(dst->host), NULL, 0); dst->host = 0; }
+    }
     bpp = rb_d7_texel_bytes(src->format);
     if (compressed(src->format) && (left % 4 || top % 4 || b->pDest.x % 4 || b->pDest.y % 4)) {
         ++d->d7draw.texBltFailures;   /* only whole blocks */
@@ -4403,6 +4470,7 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
             ULONG x1 = max(x0 + 1, (ULONG)right >> level), y1 = max(y0 + 1, (ULONG)bottom >> level);
             const BYTE *from;
             BYTE *to;
+            if (level && dst->lower) continue;     /* read where the source keeps them */
             if (x1 > level_side(src->width, level) || y1 > level_side(src->height, level) ||
                 dx + x1 - x0 > level_side(dst->width, level) || dy + y1 - y0 > level_side(dst->height, level)) break;
             rows = y1 - y0;

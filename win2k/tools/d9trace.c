@@ -123,6 +123,19 @@ static HRESULT WINAPI create_texture(IDirect3DDevice9 *device, UINT width, UINT 
                                      D3DFORMAT format, D3DPOOL pool, IDirect3DTexture9 **texture, HANDLE *shared)
 {
     HRESULT hr = realCreateTexture(device, width, height, levels, usage, format, pool, texture, shared);
+    {
+        /* The first sixty of a device: what was asked for and how many levels came of it (a program
+         * that asks for D3DUSAGE_AUTOGENMIPMAP, 0x400, gets one level where the driver cannot). */
+        static int made;
+        if (SUCCEEDED(hr) && made < 60 && texture && *texture) {
+            char line[200], name[16];
+            ++made;
+            format_name(name, format);
+            wsprintfA(line, "CreateTexture %ux%u levels=%u usage=0x%lx format=%s pool=%d -> levels %lu\r\n", width, height,
+                      levels, usage, name, (int)pool, (DWORD)IDirect3DTexture9_GetLevelCount(*texture));
+            say(line);
+        }
+    }
     if (FAILED(hr)) {
         char line[160], name[16];
         format_name(name, format);

@@ -2422,7 +2422,13 @@ otherwise crash in the unloaded hooks. 3DMark03's refused volume texture and
 `guiclick` drives a program's windows for unattended runs. `-press @Title#N`
 presses the button with control ID N only in a window whose title contains
 Title (3DMark05's owner-drawn buttons share IDs across windows), and nothing
-is pressed in a window a modal dialog has disabled.
+is pressed in a window a modal dialog has disabled. List boxes, list views, tree views and
+read-only edit controls are reported with what they show (a list view's and a tree view's
+items are read out of the program's memory), so a benchmark's result details reach the log:
+3DMark03's per-test results come from `-press "@3DMark Score#4"`, which opens its details
+window. Before the `-until` close the windows are looked at once more and acted on whatever
+the clock says, so a press that was waiting for a window to stand still is not lost.
+
 ## Pixel shader 1.4
 
 A Direct3D 9 runtime offers the programs pixel shader 2.0, which includes
@@ -3024,6 +3030,96 @@ What is left to gain: the sums (283 million chunks in a run, each a kilobyte rea
 the stream arenas of the buffers a program rewrites (3,711 of 8 MB each in a run), and the
 draws whose pixel shader the driver cannot translate yet.
 
+## The third texture coordinate's address mode
+
+A volume texture has an address mode for each of its three coordinates. Direct3D 8 and 9 set the
+third with stage state 25 (`D3DTSS_ADDRESSW`, `D3DSAMP_ADDRESSW`). The driver kept the first two
+only and gave the host a clamp for the third, whatever the program had set. 3DMark03's Pixel
+Shader 2.0 test reads its procedural volume textures at coordinates far outside 0 to 1 and wraps
+them, so its wood and marble came out wrong: in frame 300 at 640x480, 4.42 percent of the 8x8
+blocks differed from the reference rasterizer's picture. With the mode passed on it is 0.00
+percent (see "Benchmark frames against the reference rasterizer").
+
+The sampler word that the display driver hands the miniport holds the mode in bits 20 to 23
+(`stage_sampler` in `display_d3d7.c`; `sampler_valid` and the sampler object in
+`gpu_triangle.c`). Zero there means the clamp of before, which is what the Direct3D 7 draws
+send. `d9pixels` cases 112 (`ps2_volume_wrap_w`) and 113 (`ps2_volume_clamp_w`) draw a volume
+texture one whole volume further along the third coordinate, wrapped and clamped.
+
+## Mipmaps of the textures a Direct3D 9 runtime manages
+
+Most programs keep their textures in the managed pool: the program fills a system-memory
+texture, and the runtime copies it into a video-memory one when it is drawn
+(`D3DDP2OP_TEXBLT`). A Direct3D 9 runtime makes that video-memory copy of a mipmapped texture
+as one surface, marked `DDSCAPS3_LIGHTWEIGHTMIPMAP` (0x400 in `ddsCapsEx.dwCaps3`): a
+lightweight mipmap. It has no `DDSCAPS_MIPMAP` and no surfaces for the levels below the top
+one; holding those is left to the driver. The driver registered such a texture with one level,
+so every managed texture of a Direct3D 9 program was drawn from its top level alone, whatever
+mip filter was set. Distant surfaces shimmered, and fine texture detail seen from afar (leaves
+against the sky) came out too light.
+
+How it was found: the driver's record of the textures one 3DMark03 frame sampled showed every
+one of them with a single level while its samplers asked for a linear mip filter, and `d9trace`
+(which now logs the first 60 `CreateTexture` calls with their levels, usage, format and pool)
+showed the program making them with 10 to 12 levels.
+
+The texture copy now gives a lightweight mipmap its lower levels. When the source is a
+system-memory texture of the same size with more levels, the destination reads the levels below
+its top one from the source's memory (`texture_blt`; `lightweight` and `lower` in
+`D7_TEXTURE`), and its host texture is made anew with all of them. Those levels stay the
+source's memory: the copy reads them there and never writes them through the destination. When
+the source goes away the destination falls back to its one level (`release_texture`). A
+lightweight mipmap that is drawn with a mip filter before it got its levels is counted with the
+states that had no effect (`RB2K_D7_IGNORED_MIPMAP`), so a run fails on it. Managed cube maps
+and volume textures with several levels are not covered yet: the runtime copies a cube map face
+by face, and `volume_blt` copies only the levels both sides have. If the runtime marks them
+lightweight too, which has not been looked at, the count shows them.
+
+`d9pixels` case 114 (`mip_levels_managed`) draws a 64x64 managed texture whose levels have
+different colours on quads of 32 and 16 pixels, with a point filter between levels; case 115
+(`mip_levels_default`) does the same with a texture of the default pool, which always had its
+level surfaces. Without the change case 114 shows the top level's colour on both quads.
+
+Frames of 3DMark03 against the reference rasterizer at 640x480, before and after (share of
+pixels more than 16 apart, share of 8x8 blocks; XP SP3 under KVM, Intel UHD 630 host):
+
+| frame | before | after |
+| --- | --- | --- |
+| Wings of Fury, frame 1038 | 2.07%, 0.00% | 0.34%, 0.00% |
+| Battle of Proxycon, frame 600 | 0.56%, 0.00% | 0.22%, 0.00% |
+| Troll's Lair, frame 600 | 0.25%, 0.06% | 0.08%, 0.00% |
+| Mother Nature, frame 600 | 10.70%, 5.83% (fail) | 2.06%, 0.00% |
+| Vertex Shader, frame 300 | 40.29%, 0.15% | 0.20%, 0.00% |
+| Pixel Shader 2.0, frame 300 | 0.04%, 0.00% | 0.03%, 0.00% |
+| Ragtroll, frame 300 | 11.86%, 3.42% (fail) | 0.43%, 0.00% |
+
+## Stages without a texture under Direct3D 8 and 9
+
+What a fixed-function stage gives when it reads a texture and none is set depends on the
+Direct3D version. The two-stage combiner of the Direct3D 7 draws ends at such a stage and
+passes the current colour on, as the 9x HAL and Microsoft's RGB device do (`stage_words`). The
+Direct3D 9 reference rasterizer does it differently, measured with `d9pixels` case 116
+(`stage_without_texture`, eight quads):
+
+- A stage is left out, with the stages after it, only when its first colour argument is exactly
+  `D3DTA_TEXTURE`. That holds even when the operation does not read that argument
+  (`D3DTOP_SELECTARG2`).
+- Any other read of the missing texture gives opaque black, and the stage is drawn: the second
+  colour argument, an alpha argument, or the first colour argument with a modifier
+  (`D3DTA_TEXTURE | D3DTA_COMPLEMENT` gives white).
+
+Direct3D's default alpha argument of stage 0 is the texture. A program that draws without a
+texture and sets only the colour operation, for example a flat colour from the texture factor,
+had its stage dropped by the driver's rule and got the vertex colour instead. It showed when a
+new test case left the alpha argument at its default and the dot product case after it failed.
+
+The stage program of the Direct3D 8 and 9 path now follows the reference rasterizer
+(`stage_left_out`), and a draw of those versions whose first two stages come out differently
+under the two rules goes to the stage program instead of the combiner
+(`missing_texture_differs`). Direct3D 7 draws keep their rule. The rule was measured with the
+Direct3D 9 reference rasterizer only; Direct3D 8 draws get it too, which is a guess until a
+`d8pixels` case measures it.
+
 ## Checking a benchmark run: pictures, counters, frame pacing
 
 A frame count says nothing about what was drawn. A run of 3DMark05 once counted 30 frames a
@@ -3048,6 +3144,21 @@ failure and its opcode, flips, the flips that copied a frame into the page they 
 newest flip, and the miniport's draws, clears, presents and failures. Once a minute it adds
 the whole report. A call that fails matters more than it looks: the runtime drops the rest of
 that command batch.
+
+**The guest's clock.** A benchmark divides its frames by the guest's time, so a guest clock that
+loses time gives numbers that are too high. Windows XP keeps time by counting timer interrupts.
+A QEMU guest that cannot take them in time, because the host is busy drawing for it, loses them
+for good unless QEMU is started with `-rtc base=localtime,driftfix=slew`. Without the option an
+XP guest ran at 66 to 77 percent of real time through 3DMark03's game tests (a whole run took
+696 s by the host and 553 s by the guest), and the scores it printed were nearly 30 percent too
+high. With it the benchmark's time display moves 20.0 s in 20 s, and a run takes 554 s by the
+host and 553 s by the guest. 3DMark 2001 SE kept time on the same guest without the option.
+So a timed run's launcher writes the guest's time at the start and at the end
+(`echo %TIME%`), the host notes its own time for both, and the two spans must agree before a
+number is used. That checks a whole run, not each test: on a Windows 98 guest one fill rate
+test still ran a quarter slow with the option set while the run as a whole kept time, and the
+same has not been checked test by test on XP. The frame pacing lines below are timed by the
+processor's cycle counter and do not depend on the guest's clock.
 
 **Frame pacing.** The miniport times every present against the one before it and counts the
 times by size (`RB2K_PACE_SEGMENT` in `rb2kd3d7.h`), for each stretch of presents: a new
@@ -3264,16 +3375,15 @@ averaged over 8x8 blocks. Edges and texture filtering put a few percent into the
 between two correct pictures; a missing object or a wrong colour moves the second, and the
 comparison fails when that is above 2 percent.
 
-First results (XP SP3 under KVM, Intel UHD 630 host, 1024x768):
-
-| frame | pixels | blocks | result | reference rasterizer took |
-| --- | --- | --- | --- | --- |
-| Wings of Fury, frame 1038 | 1.26% | 0.01% | pass | under a minute |
-| Mother Nature, frame 600 | 8.00% | 3.61% | fail | 24 minutes |
-
-In the Mother Nature frame every differing block lies in the tree canopy against the sky, where
-the driver's picture is a little lighter; the stream, the grass, the rocks and the butterfly
-agree. Not looked into yet.
+Seven frames are compared at 640x480 (`-pick 1=0`; the reference rasterizer needs many minutes
+for one frame of a game test at 1024x768): frame 1038 of Wings of Fury, frame 600 of the other
+three game tests, and frame 300 of Vertex Shader, Pixel Shader 2.0 and Ragtroll. On XP SP3 under
+KVM (Intel UHD 630 host) all seven pass, none with more than 0.00 percent of its blocks apart;
+the numbers are in "Mipmaps of the textures a Direct3D 9 runtime manages". The first comparison
+had failed three of them, and each failure was a fault of the driver: the tree canopy of Mother
+Nature (5.83 percent of the blocks) and the Ragtroll frame (3.42 percent) were the mipmap levels
+missing from managed textures, and the Pixel Shader 2.0 frame (4.42 percent) the address mode of
+the third texture coordinate.
 
 ## Release package
 

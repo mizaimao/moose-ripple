@@ -134,6 +134,7 @@ def build_programs(work):
         ("cursorqa.exe", ["tools/cursorqa"], ["-lgdi32", "-luser32"]),
         ("rundiag.exe", ["tools/rundiag"], ["-luser32"]),
         ("guiclick.exe", ["tools/guiclick"], ["-luser32"]),
+        ("scap.exe", ["tools/scap"], ["-lgdi32", "-luser32"]),
         ("d9asm.exe", ["tools/d9asm"], []),
     ]
     # Only Microsoft's headers declare the Direct3D 8 interfaces here.
