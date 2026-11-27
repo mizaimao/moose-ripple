@@ -1533,6 +1533,68 @@ done:
     if (last) IDirect3DTexture8_Release(last);
 }
 
+/* 101 to 103: transformed vertices on a stage that asks for generated texture coordinates
+ * (D3DTSS_TCI_CAMERASPACEPOSITION in D3DTSS_TEXCOORDINDEX). Direct3D generates coordinates while
+ * it transforms vertices; a transformed vertex keeps its own.
+ * rhw_texgen: the vertex's own coordinates read a texture red on its left and green on its right.
+ * rhw_texgen_diffuse: the stage reads no texture at all, the vertex has no coordinates.
+ * rhw_texgen_no_coords: the stage reads the texture, the vertex has no coordinates. */
+static void rhw_texgen_cases(int only)
+{
+    typedef struct { float x, y, z, rhw; DWORD diffuse; float u, v; } VT;
+    typedef struct { float x, y, z, rhw; DWORD diffuse; } VD;
+    static const DWORD halves[4] = { 0xffff0000, 0xff00ff00, 0xffff0000, 0xff00ff00 };
+    static const SAMPLE split[] = { { 48, 64, 0xff0000 }, { 80, 64, 0x00ff00 }, { 8, 8, CLEAR_COLOR } };
+    static const SAMPLE plain[] = { { 48, 64, 0x4080c0 }, { 80, 64, 0x4080c0 }, { 8, 8, CLEAR_COLOR } };
+    static const SAMPLE first[] = { { 48, 64, 0xff0000 }, { 80, 64, 0xff0000 }, { 8, 8, CLEAR_COLOR } };
+    static const char *const names[3] = { "rhw_texgen", "rhw_texgen_diffuse", "rhw_texgen_no_coords" };
+    const SAMPLE *const want[3] = { split, plain, first };
+    IDirect3DTexture8 *t;
+    VT vt[4];
+    VD vd[4];
+    HRESULT hr;
+    int i, k;
+    if (only && (only < 101 || only > 103)) return;
+    t = texture2x2(halves);
+    if (!t) { printf("D8PIX case=rhw_texgen texture failed\n"); ++failures; return; }
+    for (i = 0; i < 4; ++i) {
+        vt[i].x = vd[i].x = i & 1 ? 96.0f : 32.0f;
+        vt[i].y = vd[i].y = i & 2 ? 96.0f : 32.0f;
+        vt[i].z = vd[i].z = 0.5f; vt[i].rhw = vd[i].rhw = 1.0f;
+        vt[i].diffuse = vd[i].diffuse = 0xff4080c0;
+        vt[i].u = i & 1 ? 1.0f : 0.0f;
+        vt[i].v = i & 2 ? 1.0f : 0.0f;
+    }
+    IDirect3DDevice8_SetTexture(device, 0, (IDirect3DBaseTexture8 *)t);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_MAGFILTER, D3DTEXF_POINT);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_MINFILTER, D3DTEXF_POINT);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_ALPHAARG1, D3DTA_DIFFUSE);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_CAMERASPACEPOSITION);
+    for (k = 0; k < 3; ++k) {
+        if (only && only != 101 + k) continue;
+        IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLOROP, k == 1 ? D3DTOP_SELECTARG2 : D3DTOP_SELECTARG1);
+        if (!begin(names[k])) continue;
+        if (k == 0) {
+            IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1);
+            hr = IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, vt, sizeof(vt[0]));
+        } else {
+            IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+            hr = IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, vd, sizeof(vd[0]));
+        }
+        if (FAILED(hr)) { fail_hr(names[k], "draw", hr); IDirect3DDevice8_EndScene(device); }
+        else check(names[k], want[k], 3);
+    }
+    IDirect3DDevice8_SetTexture(device, 0, NULL);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_TEXCOORDINDEX, 0);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_MODULATE);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLORARG2, D3DTA_CURRENT);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+    IDirect3DTexture8_Release(t);
+}
+
 int main(int argc, char **argv)
 {
     IDirect3D8 *(WINAPI *create)(UINT);
@@ -1660,6 +1722,7 @@ int main(int argc, char **argv)
     else printf("D8PIX pixel shaders not offered\n");
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 4)) ps14_cases(only);
     stages8_case(only, caps.MaxTextureBlendStages >= 8 && caps.MaxSimultaneousTextures >= 8);
+    rhw_texgen_cases(only);
     IDirect3DDevice8_Release(device);
     IDirect3D8_Release(d3d);
     DestroyWindow(window);

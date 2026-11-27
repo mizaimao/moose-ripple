@@ -3186,6 +3186,16 @@ pictures matched it in every pixel. The checks found two things the sampled pixe
 With both fixed every case passes both checks: `d9pixels` 109 of 109 with hardware and 107 of 107
 with software vertex processing, `d8pixels` 44 of 44, `tpixels` 18 of 18, no skips.
 
+Later finds of the same checks:
+
+- **Transformed vertices on a stage that asks for generated coordinates were skipped.** A stage
+  whose `D3DTSS_TEXCOORDINDEX` carries a `D3DTSS_TCI_*` flag made the Direct3D 7 draw path leave
+  the draw out, whatever the vertices were. Direct3D generates coordinates while it transforms
+  vertices: a transformed vertex keeps its own, and a stage that reads no texture needs none.
+  3DMark 2001 SE left three primitives of a whole run out this way (transformed vertices with a
+  colour and no coordinates). `d8pixels` cases `rhw_texgen`, `rhw_texgen_diffuse` and
+  `rhw_texgen_no_coords`; the reference rasterizer draws all three.
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:

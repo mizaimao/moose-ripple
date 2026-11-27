@@ -2100,8 +2100,11 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         skip_vertex(c, p->primitives, 1);
         return DD_OK;
     }
-    /* Generated texture coordinates (site 18) and texture transforms (19). */
-    if ((st->coordIndex >> 16) || (draw->stage1Color && (st1->coordIndex >> 16))) {
+    /* Generated texture coordinates (site 18) and texture transforms (19). Direct3D generates
+     * coordinates while it transforms vertices: a transformed vertex keeps its own, and a stage
+     * that reads no texture needs none. */
+    if (objectSpace && ((needTexture && (st->coordIndex >> 16)) ||
+                        (draw->stage1Color && needTexture1 && (st1->coordIndex >> 16)))) {
         skip_vertex(c, p->primitives, 18);
         return DD_OK;
     }
