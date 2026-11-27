@@ -509,6 +509,8 @@ static DWORD WINAPI LockExecuteBuffer(LPDDHAL_LOCKDATA d)
         d3d_trace("buffer lock: from, to", d->rArea.left, d->rArea.right);
     if (!(d->dwFlags & DDLOCK_READONLY) && g->dwReserved1 == D3D_BUFFER_MARK)
         d3d_buffer_written(g->fpVidMem);
+    if (g->dwReserved1 == D3D_BUFFER_MARK)
+        d3d_buffer_lock(g->fpVidMem, 1);
     d->lpSurfData = (LPVOID)g->fpVidMem;
     d->ddRVal = DD_OK;
     return DDHAL_DRIVER_HANDLED;
@@ -516,6 +518,9 @@ static DWORD WINAPI LockExecuteBuffer(LPDDHAL_LOCKDATA d)
 
 static DWORD WINAPI UnlockExecuteBuffer(LPDDHAL_UNLOCKDATA d)
 {
+    LPDDRAWI_DDRAWSURFACE_GBL g = d->lpDDSurface->lpGbl;
+    if (g->dwReserved1 == D3D_BUFFER_MARK)
+        d3d_buffer_lock(g->fpVidMem, 0);
     d->ddRVal = DD_OK;
     return DDHAL_DRIVER_HANDLED;
 }

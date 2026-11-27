@@ -709,6 +709,88 @@ static void point_variant_cases(int only, BOOL offered, BOOL planes)
     }
 }
 
+/* 106: depth bias (D3DRS_DEPTHBIAS, a float added to a polygon's depth in units of the depth
+ * range). A red quad; then a green one in the same plane with a bias of -0.0005, which the depth
+ * test LESS would refuse everywhere without it; then a blue one a little nearer without bias,
+ * which must still cover the green: the bias is small beside any real distance. */
+static void depth_bias_case(int only, BOOL offered)
+{
+    static const SAMPLE s[] = { { 96, 64, 0x0000ff }, { 60, 64, 0x00ff00 }, { 28, 64, 0xff0000 }, { 8, 8, CLEAR_COLOR } };
+    IDirect3DSurface9 *depth = NULL, *oldDepth = NULL;
+    TLVERTEX v[6];
+    HRESULT hr;
+    float f;
+    int i;
+    if (only && only != 106) return;
+    if (!offered) { printf("D9PIX depth bias not offered\n"); return; }
+    hr = IDirect3DDevice9_CreateDepthStencilSurface(device, Side, Side, D3DFMT_D16, D3DMULTISAMPLE_NONE, 0, TRUE, &depth, NULL);
+    if (FAILED(hr)) { fail_hr("depth_bias", "create", hr); return; }
+    IDirect3DDevice9_GetDepthStencilSurface(device, &oldDepth);
+    hr = IDirect3DDevice9_SetDepthStencilSurface(device, depth);
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice9_Clear(device, 0, NULL, D3DCLEAR_ZBUFFER, 0, 1.0f, 0);
+    if (FAILED(hr)) fail_hr("depth_bias", "depth", hr);
+    else if (begin("depth_bias")) {
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_ZENABLE, D3DZB_TRUE);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_ZWRITEENABLE, TRUE);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_ZFUNC, D3DCMP_LESS);
+        IDirect3DDevice9_SetFVF(device, TLFVF);
+        quad(v, 16, 16, 112, 112, 0xffff0000);
+        hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+        f = -0.0005f;
+        IDirect3DDevice9_SetRenderState(device, D3DRS_DEPTHBIAS, *(DWORD *)&f);
+        quad(v, 44, 16, 112, 112, 0xff00ff00);
+        if (SUCCEEDED(hr)) hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+        IDirect3DDevice9_SetRenderState(device, D3DRS_DEPTHBIAS, 0);
+        quad(v, 80, 16, 112, 112, 0xff0000ff);
+        for (i = 0; i < 6; ++i) v[i].z = 0.45f;
+        if (SUCCEEDED(hr)) hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+        IDirect3DDevice9_SetRenderState(device, D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_ZENABLE, D3DZB_FALSE);
+        if (FAILED(hr)) { fail_hr("depth_bias", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("depth_bias", s, 4);
+    }
+    IDirect3DDevice9_SetDepthStencilSurface(device, oldDepth);
+    if (oldDepth) IDirect3DSurface9_Release(oldDepth);
+    IDirect3DSurface9_Release(depth);
+}
+
+/* 107: blend operations (D3DRS_BLENDOP): over a quad of (c0, 40, 20) four strips of grey
+ * (80, 80, 80) with both blend factors ONE: source minus destination, destination minus source,
+ * the minimum and the maximum of the two. */
+static void blend_op_case(int only, BOOL offered)
+{
+    static const SAMPLE s[] = { { 28, 64, 0x004060 }, { 52, 64, 0x400000 }, { 76, 64, 0x804020 }, { 100, 64, 0xc08080 },
+                                { 64, 12, 0xc04020 }, { 4, 4, CLEAR_COLOR } };
+    static const DWORD op[4] = { D3DBLENDOP_SUBTRACT, D3DBLENDOP_REVSUBTRACT, D3DBLENDOP_MIN, D3DBLENDOP_MAX };
+    TLVERTEX v[6];
+    HRESULT hr;
+    int i;
+    if (only && only != 107) return;
+    if (!offered) { printf("D9PIX blend operations not offered\n"); return; }
+    if (!begin("blend_op")) return;
+    IDirect3DDevice9_SetTexture(device, 0, NULL);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+    IDirect3DDevice9_SetFVF(device, TLFVF);
+    quad(v, 8, 8, 120, 120, 0xffc04020);
+    hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+    IDirect3DDevice9_SetRenderState(device, D3DRS_ALPHABLENDENABLE, TRUE);
+    IDirect3DDevice9_SetRenderState(device, D3DRS_SRCBLEND, D3DBLEND_ONE);
+    IDirect3DDevice9_SetRenderState(device, D3DRS_DESTBLEND, D3DBLEND_ONE);
+    for (i = 0; i < 4 && SUCCEEDED(hr); ++i) {
+        IDirect3DDevice9_SetRenderState(device, D3DRS_BLENDOP, op[i]);
+        quad(v, 16.0f + 24.0f * i, 24, 40.0f + 24.0f * i, 104, 0xff808080);
+        hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+    }
+    IDirect3DDevice9_SetRenderState(device, D3DRS_BLENDOP, D3DBLENDOP_ADD);
+    IDirect3DDevice9_SetRenderState(device, D3DRS_ALPHABLENDENABLE, FALSE);
+    if (FAILED(hr)) { fail_hr("blend_op", "draw", hr); IDirect3DDevice9_EndScene(device); }
+    else check("blend_op", s, 6);
+}
+
 /* 96: lights with numbers of the program's own choosing (1000, and one at 2000000 that is switched
  * off again): Direct3D lets a program number its lights as it likes, and some count far past the
  * first few. An untransformed quad lit from the material by a white directional light at number
@@ -3515,6 +3597,8 @@ int main(int argc, char **argv)
     point_variant_cases(only, caps.MaxPointSize >= 16.0f, caps.MaxUserClipPlanes >= 1);
     far_light_case(only);
     ff_streams_case(only, flags == D3DCREATE_HARDWARE_VERTEXPROCESSING);
+    depth_bias_case(only, (caps.RasterCaps & D3DPRASTERCAPS_DEPTHBIAS) != 0);
+    blend_op_case(only, (caps.PrimitiveMiscCaps & D3DPMISCCAPS_BLENDOP) != 0);
     l16_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
     colorwrite_case(only);

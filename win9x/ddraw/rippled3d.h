@@ -29,6 +29,7 @@ int d3d_buffers_on(void);
 void *d3d_buffer_new(DWORD size);
 void d3d_buffer_free(FLATPTR mem);
 void d3d_buffer_written(FLATPTR mem);
+void d3d_buffer_lock(FLATPTR mem, int locked);
 
 /* A surface is about to be read or shown (Lock, Flip): rendering still on the GPU for it goes
    into its memory first. */

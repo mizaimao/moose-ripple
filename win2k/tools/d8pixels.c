@@ -1082,6 +1082,87 @@ static void clip_case(BOOL offered, BOOL shaders)
     IDirect3DDevice8_SetTransform(device, D3DTS_PROJECTION, &m);
 }
 
+/* Depth bias (D3DRS_ZBIAS, 0 to 16): of two polygons in one plane the one with the higher value
+ * is in front. A red quad; then a green one in the same plane with ZBIAS 8, which the depth test
+ * LESS would refuse everywhere without the bias; then a blue one a little nearer without bias,
+ * which must still cover the green: the bias is small beside any real distance. */
+static void zbias_case(BOOL offered)
+{
+    static const SAMPLE s[] = { { 96, 64, 0x0000ff }, { 60, 64, 0x00ff00 }, { 28, 64, 0xff0000 }, { 8, 8, CLEAR_COLOR } };
+    IDirect3DSurface8 *back = NULL, *depth = NULL, *oldDepth = NULL;
+    TLVERTEX v[6];
+    HRESULT hr;
+    int i;
+    if (!offered) { printf("D8PIX depth bias not offered\n"); return; }
+    hr = IDirect3DDevice8_CreateDepthStencilSurface(device, Side, Side, D3DFMT_D16, D3DMULTISAMPLE_NONE, &depth);
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice8_GetRenderTarget(device, &back);
+    if (FAILED(hr)) { fail_hr("zbias", "create", hr); goto done; }
+    IDirect3DDevice8_GetDepthStencilSurface(device, &oldDepth);
+    hr = IDirect3DDevice8_SetRenderTarget(device, back, depth);
+    if (SUCCEEDED(hr)) hr = IDirect3DDevice8_Clear(device, 0, NULL, D3DCLEAR_ZBUFFER, 0, 1.0f, 0);
+    if (FAILED(hr)) fail_hr("zbias", "target", hr);
+    else if (begin("zbias")) {
+        IDirect3DDevice8_SetTexture(device, 0, NULL);
+        IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_ZENABLE, D3DZB_TRUE);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_ZWRITEENABLE, TRUE);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_ZFUNC, D3DCMP_LESS);
+        IDirect3DDevice8_SetVertexShader(device, TLFVF);
+        quad(v, 16, 16, 112, 112, 0xffff0000);
+        hr = IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+        IDirect3DDevice8_SetRenderState(device, D3DRS_ZBIAS, 8);
+        quad(v, 44, 16, 112, 112, 0xff00ff00);
+        if (SUCCEEDED(hr)) hr = IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+        IDirect3DDevice8_SetRenderState(device, D3DRS_ZBIAS, 0);
+        quad(v, 80, 16, 112, 112, 0xff0000ff);
+        for (i = 0; i < 6; ++i) v[i].z = 0.45f;
+        if (SUCCEEDED(hr)) hr = IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+        IDirect3DDevice8_SetRenderState(device, D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_ZENABLE, D3DZB_FALSE);
+        if (FAILED(hr)) { fail_hr("zbias", "draw", hr); IDirect3DDevice8_EndScene(device); }
+        else check("zbias", s, 4);
+    }
+    IDirect3DDevice8_SetRenderTarget(device, back, oldDepth);
+done:
+    if (oldDepth) IDirect3DSurface8_Release(oldDepth);
+    if (back) IDirect3DSurface8_Release(back);
+    if (depth) IDirect3DSurface8_Release(depth);
+}
+
+/* Blend operations (D3DRS_BLENDOP): over a quad of (c0, 40, 20) four strips of grey (80, 80, 80)
+ * with both blend factors ONE: source minus destination, destination minus source, the minimum
+ * and the maximum of the two. */
+static void blend_op_case(BOOL offered)
+{
+    static const SAMPLE s[] = { { 28, 64, 0x004060 }, { 52, 64, 0x400000 }, { 76, 64, 0x804020 }, { 100, 64, 0xc08080 },
+                                { 64, 12, 0xc04020 }, { 4, 4, CLEAR_COLOR } };
+    static const DWORD op[4] = { D3DBLENDOP_SUBTRACT, D3DBLENDOP_REVSUBTRACT, D3DBLENDOP_MIN, D3DBLENDOP_MAX };
+    TLVERTEX v[6];
+    HRESULT hr;
+    int i;
+    if (!offered) { printf("D8PIX blend operations not offered\n"); return; }
+    if (!begin("blend_op")) return;
+    IDirect3DDevice8_SetTexture(device, 0, NULL);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+    IDirect3DDevice8_SetVertexShader(device, TLFVF);
+    quad(v, 8, 8, 120, 120, 0xffc04020);
+    hr = IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+    IDirect3DDevice8_SetRenderState(device, D3DRS_ALPHABLENDENABLE, TRUE);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_SRCBLEND, D3DBLEND_ONE);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_DESTBLEND, D3DBLEND_ONE);
+    for (i = 0; i < 4 && SUCCEEDED(hr); ++i) {
+        IDirect3DDevice8_SetRenderState(device, D3DRS_BLENDOP, op[i]);
+        quad(v, 16.0f + 24.0f * i, 24, 40.0f + 24.0f * i, 104, 0xff808080);
+        hr = IDirect3DDevice8_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, v, sizeof(v[0]));
+    }
+    IDirect3DDevice8_SetRenderState(device, D3DRS_BLENDOP, D3DBLENDOP_ADD);
+    IDirect3DDevice8_SetRenderState(device, D3DRS_ALPHABLENDENABLE, FALSE);
+    if (FAILED(hr)) { fail_hr("blend_op", "draw", hr); IDirect3DDevice8_EndScene(device); }
+    else check("blend_op", s, 6);
+}
+
 /* only: run that case alone (numbered from 1), or all when zero. */
 static void pixel_shaders(int only)
 {
@@ -1732,6 +1813,8 @@ int main(int argc, char **argv)
         ff_streams_case(caps.MaxStreams >= 2 && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT));
         if (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT) { lit_grid_case(); lit_variants_case(); lit_perspective_case(); lit_replay_case(); lit_depth_switch_case(); }
         clip_case(caps.MaxUserClipPlanes >= 1, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1) && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT));
+        zbias_case((caps.RasterCaps & D3DPRASTERCAPS_ZBIAS) != 0);
+        blend_op_case((caps.PrimitiveMiscCaps & D3DPMISCCAPS_BLENDOP) != 0);
     }
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 2)) pixel_shaders(only);
     else printf("D8PIX pixel shaders not offered\n");

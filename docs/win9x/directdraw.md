@@ -783,6 +783,7 @@ restart:
 | `D3D8` = `"2"` or no value | and vertex processing on the GPU (fixed function, vertex shaders), with vertex and index buffers in the driver's memory |
 | `D3D8Buffers` = `"0"` | with `"2"`: buffers stay in the runtime's system memory (the path before 2026-11-26 13:00) |
 | `D3D9` = `"0"` | with `"2"`: a DirectX 9 runtime stays on the Direct3D 8 interface (the behaviour before 2026-11-27; see "The Direct3D 9 driver interface") |
+| `D3D7TnL` = `"1"` | with `"2"`: Direct3D 7 is offered a T&L HAL device and the driver processes its vertices on the GPU. Off by default: it measured slower (see "Direct3D 7 with vertex processing on the GPU") |
 
 Learnt on Windows 98 SE with DirectX 8.1 (UTM):
 
@@ -854,8 +855,12 @@ The Direct3D 9 runtime drives this HAL through the same Direct3D 8 interface, as
 2000: it asks for the Direct3D 9 capabilities, gets no answer, and uses the Direct3D 8 ones. It
 announces itself twice, as version 0x902 and then, before asking for those capabilities, as
 0x802, so the HAL keeps the highest version it has been told. For a runtime of version 9 the
-capabilities say pixel shader 2.0 with eight samplers and eight blend stages (the runtime sends
-stage states only for those), and constants c0..c31 go to program.env. Shader model 2 reads up
+capabilities say pixel shader 2.0 and eight blend stages, and constants c0..c31 go to
+program.env. A shader of model 2 has sixteen samplers: the driver keeps sixteen stage records
+(a DirectX 9 runtime sends the textures and sampler states of all sixteen whatever the blend
+stages' count) and binds the units from eight up once a program has put a texture there, as
+many as OpenGL has texture image units. The fixed-function units and the texture coordinate
+sets stay eight. Shader model 2 reads up
 to eight texture coordinate sets, which would collide with the fixed-function fog unit, so under
 a shader the fog values go in as OpenGL's fog coordinate (`fragment.fogcoord`) instead.
 Fixed-function stages stay at four for Direct3D 8 and 9 (before the fog unit) and two for
@@ -906,6 +911,173 @@ and luminance scale and offset from c8..c15 (the Windows 2000 translator's layou
 the stage states before each draw. 3DMark 2001 SE needs Q8W8V8U8 for Nature ("device does not
 support bump normal maps" with V8U8 alone). `d9pixels`: 49 of 49 on the rig, `ps_texbem`
 included.
+
+### Direct3D 7 with vertex processing on the GPU (2026-11-27, an option: `D3D7TnL` = `"1"`)
+
+The vertex programs that process Direct3D 8 and 9 vertices on the GPU (next section) were
+written from Direct3D 7's lighting equations, and the commands that carry transforms, lights,
+the material and clip planes are Direct3D 7's own, so the driver already handled them for
+every context. What was missing was only the offer. With `D3D7TnL` = `"1"` under
+`HKLM\Software\moose-ripple` (and `D3D8` = `"2"`, the default) the HAL reports
+`D3DDEVCAPS_HWTRANSFORMANDLIGHT` with eight lights, texture coordinate generation, material
+sources, vertex fog, directional and positional lights, the local viewer and six user clip
+planes; the Direct3D 7 runtime then lists a "Direct3D T&L HAL" device next to the HAL device,
+and a program that chooses it sends untransformed vertices. The HAL device is unchanged: the
+runtime processes its vertices as before. It is off unless asked for, because it measured
+slower (below).
+
+Checked on Windows 98 SE (Intel host) with the Windows 2000/XP side's Direct3D 7 tests, built
+with Visual C++ 6 and the DirectX 7 SDK:
+
+| Test | T&L HAL device | HAL device |
+|---|---|---|
+| `tlight` (lighting against Direct3D's equations) | 15 of 15 | uses Microsoft's RGB device instead |
+| `tfog` | 7 of 7 | 7 of 7 |
+| `tstage` | 9 of 9 | 9 of 9 |
+
+3DMark 2000 chooses "D3D Hardware T&L" by itself once the device exists. Timed on the same
+build, the host to itself (Intel UHD 630, 2026-11-27), its default benchmark at 1024x768 in 16
+bits, once each way:
+
+| 3DMark 2000 | vertices on the guest CPU (default) | T&L HAL device (`D3D7TnL` = `"1"`) |
+|---|---:|---:|
+| Score, 3D marks | 26890 | 24336 |
+| Game 1, low / medium / high detail, fps | 451.8 / 325.2 / 178.6 | 444.9 / 316.9 / 170.4 |
+| Game 2, low / medium / high detail, fps | 636.7 / 392.2 / 256.3 | 552.9 / 324.9 / 217.9 |
+| High polygon count, 1 / 4 / 8 lights, thousand triangles a second | 39701 / 35783 / 33061 | 42273 / 42020 / 41349 |
+| Texture rendering speed, 8 / 16 / 32 / 64 MB, fps | 2304.8 / 1764.0 / 1177.3 / 647.9 | 1844.3 / 1155.5 / 628.6 / 0.0 |
+| Bump mapping (emboss), 3 / 2 / 1 pass, fps | 1362.6 / 1717.5 / 2566.7 | 1074.6 / 2112.1 / 2595.5 |
+| Fill rate, single / multi texturing, million texels a second | 3805.4 / 7002.9 | 3794.2 / 6971.1 |
+
+How the two runs were checked: the screen was captured every five seconds through each, the
+pages the driver flipped to were counted once a second, and its skip counts read (they stayed at
+zero). In the first run every capture during the tests differs from the one before and none
+shows an earlier picture again. In the second the same holds up to the 64 MB texture test: its
+loading screen stands unchanged for 25 seconds, then one picture of the test for 15, and the
+driver flipped no page in that time, which is the program's 0.0 fps. The flip rate follows the
+program's own frame rates test by test (Game 2 at low detail: 636.7 and 552.9 fps reported,
+450 to 720 and 440 to 610 pages a second flipped in those seconds).
+
+So on this host the GPU wins where the lights cost most (the high polygon tests, up to 25
+percent with eight lights) and loses everywhere draws are many and small: the game scenes by 2
+to 17 percent, the texture tests by 20 to 47 percent. The guest's processor is a fast one and
+the program's own vertex code is cheap on it, while every draw through the vertex programs costs
+this driver more than a draw of finished vertices does. And the 64 MB texture test ends with
+0.0 fps on the T&L HAL device after standing on its loading screen for 25 seconds: not looked
+into yet. Until both are dealt with the device stays an option.
+
+**Vertex buffers as buffer objects (the same day).** A guest profile of the second game test
+(the guest's instruction pointer sampled through the monitor, 280 samples each way) and a
+command trace showed where the T&L HAL device lost: the program keeps every model in a vertex
+buffer of its own and draws each one every frame, and the driver handed each draw's vertices
+to OpenGL as client arrays again, after copying and rebasing its indices (`index_list`, 5.7
+percent of the samples; the driver's share was 14.6 percent against 8.2 on the other path, and
+the copying and OpenGL shares were half as large again). Those buffers are the driver's own
+allocations, with a stamp that changes when the program locks them for writing, so their
+contents now stay in OpenGL buffer objects, uploaded again only after a write, and the indices
+go to OpenGL as they are (`vb7_object`). A buffer that is locked while it is drawn from is left
+to the old path: the runtime appends to its own buffers under one lock.
+
+Two refinements came from the first game and from a trace, the same day. A buffer is copied
+whole, so only one that keeps still is copied: it must be drawn again with the contents it had
+at its last draw, and one whose copy went stale must keep still twice as long the next time (up
+to 256 draws). Sacrifice rewrites one 48 KB buffer for every few vertices it draws; copied at
+each change, that was 1,296 whole-buffer uploads in 1,936 frames of its menu. Such a buffer now
+stays in memory, where a draw sends only the vertices it uses. And the table of buffer objects,
+found by the buffer's address, tries four slots and replaces the one unused longest: with one
+slot each, 46 of the 192 buffers of a 3DMark 2000 texture test shared theirs with another and
+were uploaded again at every turn. A trace of that test had 619 uploads over 4,588 draws; it has
+192 over 4,233 now (184 buffers once, and two that the program rewrites).
+
+| 3DMark 2000, T&L HAL device | before | with buffer objects | vertices on the guest CPU |
+|---|---:|---:|---:|
+| Score, 3D marks | 24336 | 30500 | 26890 |
+| Game 1, low / medium / high detail, fps | 444.9 / 316.9 / 170.4 | 492.9 / 370.6 / 240.2 | 451.8 / 325.2 / 178.6 |
+| Game 2, low / medium / high detail, fps | 552.9 / 324.9 / 217.9 | 726.2 / 424.6 / 287.2 | 636.7 / 392.2 / 256.3 |
+| High polygon count, 1 / 4 / 8 lights, thousand triangles a second | 42273 / 42020 / 41349 | 198662 / 192227 / 176822 | 39701 / 35783 / 33061 |
+| Texture rendering speed, 8 / 16 / 32 / 64 MB, fps | 1844.3 / 1155.5 / 628.6 / 0.0 | 1929.5 / 1206.6 / 636.8 / 0.0 | 2304.8 / 1764.0 / 1177.3 / 647.9 |
+| Bump mapping (emboss), 3 / 2 / 1 pass, fps | 1074.6 / 2112.1 / 2595.5 | 1640.6 / 2090.5 / 2599.7 | 1362.6 / 1717.5 / 2566.7 |
+
+Timed and checked as the two runs above (the host to itself, captures every five seconds, pages
+flipped and skip counts read once a second: 214,975 pages, no skips, and again no page during
+the 64 MB texture test). The game scenes are now 8 to 34 percent faster on the GPU than on the
+guest's processor and the high polygon tests five times as fast.
+
+**Why the texture tests differ.** Measured the same day, one test at a time (untimed, the host
+shared):
+
+- *More draws for the same picture.* A command trace of the 32 MB test each way: with its own
+  vertex code the program draws only the pieces of the tunnel in view, 43 a frame on average
+  (26 to 58, over 129 traced frames); on the T&L HAL device it draws 124 a frame (88 to 192,
+  over 37 frames), each from a vertex buffer and with a texture of its own. Both ways load the same 192 textures. Nearly three times the draws
+  for the same picture go with a frame rate a little over half (636.8 against 1177.3). The 8
+  and 16 MB tests were not traced.
+- *The 64 MB test and the guest's memory.* Its first frame on the T&L HAL device draws all 384
+  pieces, each with a 256x256 texture and its mipmaps (67 MB in all). On this guest of 256 MB
+  (32 MB of surface memory) 203 of them fit, and the other 181 pass through one surface in
+  turn. Without the trace that one frame takes 29 seconds, and the guest spends them writing to
+  its disk: of 320 samples of its instruction pointer in that time, 261 sit on one `rep outsw`
+  in ring 0, the write loop of the disk driver (guess: Windows paging memory out; which memory
+  was not measured). A texture test lasts about six seconds on either path, by the pages
+  flipped each second in the full runs, so the program ends this one after its single frame
+  and reports 0.0. With the guest at 512 MB (64 MB of surface memory) the same test runs
+  without the pause: 296.6 fps by the program, about 1,580 pages flipped in under six seconds
+  by the driver's count, and the tunnel in a capture.
+
+So the 0.0 is a guest of 256 MB short of memory in a frame that needs every texture at once,
+not a drawing fault. Which of a texture's copies in the guest (Direct3D's managed copy, the
+surface the driver uploads from, what OpenGL keeps) could be saved has not been looked into.
+The device stays an option for now; the first games looked at through it are in the next
+section.
+
+### Three Direct3D 7 era demos, and table fog by w (2026-11-27)
+
+Three demos were looked at for the T&L HAL device's default, each on the default path first and
+then with `D3D7TnL` on (Windows 98 SE, untimed, captures of the same scene each way):
+
+- **Giants: Citizen Kabuto** (Reaper demo). It draws transformed vertices on either device (no
+  vertex program in its trace), so the switch does not touch it: the same pictures of its menu
+  and first mission, about 145 frames a second both ways, no skips.
+- **Operation Flashpoint** (demo 0.36). A Direct3D 8 program (its device list has Glide and
+  Direct3D only). It starts and draws its menu scene, no skips.
+- **Sacrifice** (demo). It picks the T&L HAL device when there is one. On both devices its level
+  came out wrong: every model, tree and hill a flat light blue, the fog colour.
+
+**What Sacrifice asked for.** Linear table fog from 0.04 to 0.5, on vertices whose z is 0.98 to
+1: all fog, if fog goes by z. A probe drew transformed quads with those states on Microsoft's
+own devices. The RGB device (which offers fog by z only) and the reference rasterizer (which
+offers fog by z and by w) fog every one of them completely too while no perspective projection
+is set, and the reference rasterizer goes by w, 1 / rhw, once the projection matrix is a
+perspective one. So the driver drew what Direct3D says for those states. But it offered neither
+`D3DPRASTERCAPS_ZFOG` nor `D3DPRASTERCAPS_WFOG`, only `D3DPRASTERCAPS_FOGTABLE`, and Sacrifice
+then sets values that suit neither depth. With the two flags offered it sets 100 and 1250,
+distances in w, with a perspective projection (w from 0.1 to 2504).
+
+**What the driver does now.**
+
+- It offers both flags to Direct3D 7.
+- Table fog goes by w while the program's projection is a perspective one. The runtime tells
+  the driver the w of that projection's near and far planes (`D3DDP2OP_WINFO`; both are 1 for any
+  other projection, and fog then goes by z). For transformed vertices w is 1 / rhw
+  (`fog_factor`), on the T&L HAL device the clip-space w (`TNL_DEPTH_W` in `tnl_arb.c`). The
+  factor is worked out per vertex, as for table fog by z.
+- Direct3D 8 and 9 are not offered the flags and fog by z as before: their vertex shader path
+  has no fog by w yet.
+- The Windows 2000/XP driver offers the fog flags it offered before; it was not touched.
+
+Sacrifice's first tutorial level now draws with its sky, grass and trees, the far hills fading
+into the fog, the same on both devices: about 190 frames a second on the HAL device and 275 on
+the T&L HAL device (800x600, untimed). The level is in a thunderstorm and its sky flashes white
+now and then: take several captures before calling a white sky a fault.
+
+`tfog` has three new cases: a transformed quad under table fog by w, the object-space one that
+needs the w flag (it did not run before), and fog by z again once the projection is no
+perspective one. HAL device and T&L HAL device 10 of 10 each (3 cases new since 7 of 7),
+Microsoft's RGB device 9 of 9 (2 new since 7 of 7).
+
+With `RIPPLE_D3D_TRACE=1` the trace now also has each draw's fog states ("draw fog"), one
+transformed vertex of it as bits ("draw vertex": position, rhw, colours, its fog factor) and
+the w range the runtime sends ("w range"). Those lines found this.
 
 ### The Direct3D 9 driver interface (2026-11-27, on by default)
 
@@ -995,6 +1167,10 @@ and this driver binds eight), 97 of 98 with software vertex processing (`d9pixel
 90 of 93 with `D3D9` = `"0"` (the Direct3D 8 interface as before: the same case, and the two
 UBYTE4 declarations it cannot offer). `d8pixels` 44 of 44 (13 new since 31 of 31). 3DMark
 2001 SE (Direct3D 8) draws as before with the interface on.
+
+With sixteen samplers and transformed points' own sizes (both 2026-11-27, later the same day):
+`d9pixels` 105 of 105 (6 cases new since 98 of 99, from the Windows 2000/XP side) and 103 of
+103 with software vertex processing; `d8pixels` 44 of 44.
 
 ### Vertex processing on the GPU (2026-11-26, `D3D8` = `"2"`)
 
@@ -1172,6 +1348,8 @@ failed one of 27. What was wrong, in the order it was fixed:
 | `clip_ff`, `clip_lit`, `clip_ps`, `clip_ps_lit`, `clip_vs` | user clip planes not offered | `SETCLIPPLANE` was skipped | six planes with hardware vertex processing: in world space for the fixed-function pipeline, in clip space under a vertex shader (see "User clip planes" below) |
 | `interval_immediate` | no immediate presentation interval | the runtime takes it from the driver-only bit `D3DCAPS2_PRESENT_INTERVAL_IMMEDIATE` (0x00400000) in `Caps2`, not from the caps' `PresentationIntervals`, where the driver had put it | the bit is set. A program that asks for that interval was refused its device before |
 | `vertex_point` | every point of a draw the size of `D3DRS_POINTSIZE` | the size in the vertex (`D3DFVF_PSIZE`) was skipped | read per point from untransformed vertices, also with `D3DRS_POINTSCALEENABLE` |
+| `rhw_vertex_point` (added 2026-11-27) | the same for transformed vertices | no vertex program runs for transformed vertices, and their sizes (`D3DFVF_XYZRHW` with `D3DFVF_PSIZE`) were not read | each run of points of one size is drawn with that point size |
+| the seven point cases, against the reference rasterizer (2026-11-27) | points of even sizes one pixel down and right of the reference's | Direct3D gives a point's square the pixels whose middles its left and top edges pass through, OpenGL the right and bottom ones | points are placed a quarter of a pixel up and left of other shapes (`POINT_SHIFT`), which keeps the edges of every whole size clear of the pixel middles |
 
 With those: Direct3D 9 79 pass and 1 fail, Direct3D 8 31 of 31. The totals grew because cases
 that were skipped as not offered run now, and because the tests gained cases on the way:
@@ -1187,9 +1365,8 @@ the next day ("The Direct3D 9 driver interface" above). Linear StretchRect is st
 offered. Also not offered: L16 textures, and bump environment mapping as a
 fixed-function stage operation (`D3DTOP_BUMPENVMAP`; a pixel shader's `texbem` works): the
 fixed-function stages are drawn with OpenGL's combine modes, which have no such operation, so
-it needs a fragment program for the stages. Not done for points: sizes carried in transformed
-vertices. Not read from a declaration without code: blend weights and indices, the point size
-and the tweening inputs.
+it needs a fragment program for the stages. Not read from a declaration without code: blend
+weights and indices and the tweening inputs.
 
 **User clip planes.** OpenGL defines no user clipping for an ARB vertex program's output, and
 both the fixed-function pipeline and vertex shaders are such programs here. Mesa clips a
@@ -1241,6 +1418,81 @@ Once, the multi-texturing fill-rate test made 3DMark quit without a message, on 
 benchmark run in the same process after the game tests; two later fill-rate runs, one of them the
 second in its process, finished. Not explained.
 
+
+## Depth bias and blend operations (2026-11-27)
+
+Two render states the driver passed over, which the skip counters list as "not applied":
+
+- **Depth bias.** Direct3D 7 and 8 have `D3DRS_ZBIAS`, 0 to 16: of two polygons in one plane
+  the one with the higher value is in front (decals, shadows on the ground). Direct3D 9 has
+  `D3DRS_DEPTHBIAS`, a float added to the depth in units of the depth range, and
+  `D3DRS_SLOPESCALEDEPTHBIAS`. All three become OpenGL's polygon offset, whose unit is the
+  smallest step of the depth buffer (24 bits on the GPU whatever the program's z-buffer is).
+  Direct3D leaves the size of a ZBIAS step to the driver: 64 units here, 1/262144 of the depth
+  range. The capabilities say so: `D3DPRASTERCAPS_ZBIAS` for Direct3D 7 and 8,
+  `D3DPRASTERCAPS_DEPTHBIAS` and `D3DPRASTERCAPS_SLOPESCALEDEPTHBIAS` on the Direct3D 9
+  interface.
+- **Blend operations.** `D3DRS_BLENDOP` (Direct3D 8 and 9): source and destination added,
+  subtracted either way, or their minimum or maximum, as OpenGL's blend equation;
+  `D3DPMISCCAPS_BLENDOP` in the capabilities.
+
+Cases `zbias` and `blend_op` in `d8pixels`, `depth_bias` and `blend_op` in `d9pixels`; they
+run where the capabilities offer the states.
+
+## Skip counters (a development check, 2026-11-27)
+
+A test that samples a few pixels passes when the driver quietly leaves something out next to
+the samples, and a benchmark gives a score whatever was drawn. So `rippledd.dll` counts what it
+skips or cannot do, and a run is to fail when a count rose. The counts are by kind, since
+Windows started, one set for all processes (the DLL's data is shared):
+
+| # | Kind | Counted when |
+| - | ---- | ------------ |
+| 0 | draw | a draw is not drawn: a Direct3D 8 or 9 draw the vertex path refuses (the debug port names the reason of a context's first one), vertices outside their buffer, no memory for the indices |
+| 1 | command | a command of a command buffer is not understood, or runs past the buffer |
+| 2 | shader | a vertex or pixel shader is not translated, a vertex declaration cannot be read, or a table of them is full |
+| 3 | program | OpenGL refuses a program the driver wrote |
+| 4 | target | a render target, a depth buffer or the OpenGL context cannot be drawn into |
+| 5 | texture | a texture's format has no upload |
+| 6 | copy | a copy or fill between surfaces or buffers is not done |
+| 7 | state | a fixed-function stage operation without an OpenGL combine mode (drawn as `MODULATE`), a stage argument without a source (specular, the temporary register), more lights on than the driver keeps, a render state the driver does not apply set to a value that asks for something (texture wrapping, vertex blending, two-sided stencil, sRGB writes, separate alpha blending, line patterns, antialiased lines and edges) |
+
+`RippleSkips(DWORD *out, DWORD count)`, exported by name, copies up to `count` of them and
+returns how many it filled in. A program reads them with `LoadLibrary("rippledd.dll")` and
+`GetProcAddress`, before and after what it wants checked.
+
+`RippleFrames(void)`, exported the same way, returns how many pages `Flip` has shown since Windows
+started. A benchmark's own frame rate can be held against it: read it once a second during a run
+and the pages shown in a test's seconds must be the frames the program says it drew.
+
+A program that loads the DLL for these exports is the first to run the DLL's process start-up
+code: DirectDraw calls the HAL from every process without loading it there. That code used to
+forget everything recorded under the process, including a Direct3D context it had already made,
+and every later lock of the render target then returned the memory's old contents. It now keeps
+the session a process already has.
+
+**Pictures against Microsoft's reference rasterizer.** The shared pixel tests (`d8pixels`,
+`d9pixels`) draw every case on the reference device first (`d9pixels ref`, pictures kept in
+`refpix9`) and compare the driver's whole picture with it in the run after. On Windows 98 the
+reference rasterizers come from the DirectX 9.0 SDK Update of October 2004, the last that names
+Windows 98: `d3dref.dll`, `d3dref8.dll` and `d3dref9.dll` from its `Developer Runtime\Win9x`
+folder, copied into `C:\WINDOWS\SYSTEM` of the test guest (Microsoft's files: test guests
+only, never in this repository or a package). First result on Windows 98 SE with DirectX 9.0c
+(2026-11-27): Direct3D 8, 44 of 44 pictures match; Direct3D 9, 97 of 104, the seven others
+being the point cases in the table above. With the points placed as there: 104 of 104, and
+Direct3D 7 (`tpixels`, against Microsoft's RGB rasterizer) 14 of 14 through the HAL device and
+14 of 14 through the T&L HAL device.
+
+Counting and the export are built in unless `DEVCHECKS=0` is set for `win9x/build.sh`.
+`win9x/package.sh` sets it: a release carries neither.
+
+That the counts do rise was checked with a render state from the list set on purpose
+(`D3DRS_WRAP0`) before a draw: the state count went up by one, the test named the case it
+happened in, and a second program read the same count.
+
+Not counted: what the driver passes over without a message of its own, such as a render state
+outside that list or a texture handle whose surface is gone. A count of zero says none of the
+cases in the table happened, not that everything was drawn.
 
 ## Changing a driver in the test VM
 
