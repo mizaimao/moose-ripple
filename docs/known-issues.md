@@ -293,3 +293,42 @@ context of this thread is dropped unfollowed. `tools/gl-feature-check stale` dra
 context on one thread and destroys it from another, a hundred times: Apple's software renderer
 passes, the driver as it was before the fix crashes in the second round, the fixed driver
 passes.
+
+## KI-15: In UTM, a USB webcam shows no picture while its microphone is the sound input
+
+GitHub issue: [#284](https://github.com/mizaimao/moose-ripple/issues/284). Found on 2026-11-26 with a Logitech C930e
+passed through by USB (UTM's USB 2.0 bus; on the USB 3.0 bus 10.6.8 sees no camera at all, as it
+has no driver for that controller).
+
+**Symptom.** Photo Booth shows a black view, and QuickTime Player's "New Movie Recording" says
+"The operation couldn't be completed. (OSStatus error -536870212.)". Both open the default sound
+input next to the camera, which is the webcam's own microphone; opening it fails, and the
+capture then delivers no video either. The camera alone works: `tools/cam-check` gets 25 frames
+a second at 640x480, and `CAM_AUDIO=1 cam-check` reproduces the failure (0 frames).
+
+**Cause.** Not known: the VM's passthrough of the microphone, or 10.6 with this microphone (not
+tried on a real Mac). The OpenGL driver is not involved.
+
+**Workaround.** `sudo kextunload -b com.apple.driver.AppleUSBAudio` before opening the program
+(until the next restart; it also takes away the VM's USB sound output). The guest has no other
+sound input to choose instead.
+
+## KI-16: Photo Booth's live view was black (fixed after 0.6.0)
+
+GitHub issue: [#11](https://github.com/mizaimao/moose-ripple/issues/11). Found and fixed on 2026-11-26; release
+0.6.0 and earlier have it.
+
+**Symptom.** With a working camera (see KI-15 in UTM), Photo Booth's view and its effects grid
+stay black.
+
+**Cause.** Two gaps in the driver. Photo Booth uploads every camera frame as a 4:2:2 YCbCr
+texture (`GL_YCBCR_422_APPLE`), a format Mesa doesn't know, so the texture stayed empty. And
+Core Animation draws the view into an IOSurface in one context and shows that IOSurface from
+another; each context got its own copy of the surface's memory, so the drawing never reached
+the window.
+
+**Fix.** YCbCr uploads are converted to RGBA by the driver (`gl-feature-check ycbcr` agrees
+with Apple's software renderer within one step), and all textures tied to one IOSurface in a
+process share one GPU image (`gl-feature-check iosurface`, the two-context case). Checked in
+UTM: the live view, the nine colour effects, the eight distortions and the backdrop pages all
+draw live.
