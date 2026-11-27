@@ -80,6 +80,22 @@ bool RippleFramebuffer::start(IOService *provider)
     IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider);
     if (!pci)
         return false;
+    // Experiment (issue 314), off by default: ripple_pciid=1 shows a GPU of the time on the
+    // display's entries (Intel HD Graphics 3000, which 10.6 supports), to see whether games that
+    // look the GPU up by PCI ID (Call of Duty 2's Direct3D layer) go on with a known one.
+    int pciid = 0;
+    if (PE_parse_boot_argn("ripple_pciid", &pciid, sizeof(pciid)) && pciid) {
+        static const uint8_t vendor[4] = { 0x86, 0x80, 0, 0 }, device[4] = { 0x26, 0x01, 0, 0 };
+        static const char model[] = "Intel HD Graphics 3000";
+        for (IORegistryEntry *e = pci; e; e = (e == pci) ? (IORegistryEntry *)this : 0) {
+            OSData *v = OSData::withBytes(vendor, 4), *d = OSData::withBytes(device, 4);
+            OSData *m = OSData::withBytes(model, sizeof(model));
+            if (v) { e->setProperty("vendor-id", v); v->release(); }
+            if (d) { e->setProperty("device-id", d); d->release(); }
+            if (m) { e->setProperty("model", m); m->release(); }
+        }
+        LOG("ripple_pciid: showing vendor 0x8086 device 0x0126 (experiment)");
+    }
 
     fDev = VirtioGPUDevice::withPCIDevice(pci);
     if (!fDev) {
