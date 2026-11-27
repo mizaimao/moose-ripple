@@ -1172,6 +1172,55 @@ With sixteen samplers and transformed points' own sizes (both 2026-11-27, later 
 `d9pixels` 105 of 105 (6 cases new since 98 of 99, from the Windows 2000/XP side) and 103 of
 103 with software vertex processing; `d8pixels` 44 of 44.
 
+### 3DMark03 on Windows 98 (2026-11-27)
+
+The first wide Direct3D 9 program on this driver. Getting it onto the guest took a detour:
+
+- 3DMark03 3.6.2 (the 2008 build) installs on Windows 98 SE but does not start: Windows refuses
+  its system information library ("SI3.DLL file expects a newer version of Windows").
+- 3DMark03 3.1.3 (the 2003 build) runs on Windows 98, but its installer does not: it stops at
+  its first file with InstallShield's "Component transfer error" (`<FOLDER_APPLICATIONS>\`, "The
+  specified path is invalid"), from a CD, from the hard disk and after a restart.
+- So 3.1.3 was installed in a Windows XP guest, where its installer works, and the installed
+  folder copied onto the Windows 98 disk through a CD image. It starts from any folder and needs
+  no registry entries; the free version runs its whole default benchmark.
+
+Three runs, all untimed, with captures every twenty seconds and the skip counters read after
+each (they were at zero before each run):
+
+| run | driver | skips | what the captures show |
+|---|---|---:|---|
+| 1 | as before | 12,505 (12,250 draws, 255 shaders) | game tests 1 to 3 right; game test 4 with white water; then the program stops with "Unable to create volume texture" |
+| 2 | declarations kept, L16 | 128 (125 draws, 3 shaders) | all four game tests right, the feature tests run, a score at the end; game test 4 at one frame in five seconds |
+| 3 | and shared declarations | 114 (113 draws, 1 shader) | as run 2, game test 4 at about 116 frames a second |
+
+What the first run's counts led to:
+
+- **Vertex declarations not kept.** The table of Direct3D 9 vertex declarations held 256 and
+  the fourth game test makes more than 500; the driver's log said "a vertex declaration is not
+  kept" 252 times, and every draw with one of those was left out (the water). The tables of
+  declarations and of shader functions now grow when they are full (`d9_grow`).
+- **A shader for every declaration.** With every declaration kept, the same test crawled: a
+  Direct3D 8 style shader was made for each pair of declaration and function, most of the 500
+  declarations say the same few things, and the table of 256 pairs overflowed, so shaders were
+  made again at every draw. Declarations that say the same now share one copy of their elements
+  and the shaders made from it (`d9_create_decl`), and a full table gives up one pair at a
+  time, each in its turn.
+- **L16.** The pixel shader 2.0 feature test keeps its procedural volumes in a 128x128x128 L16
+  volume texture, and the driver did not offer L16 at all. It does now, for textures, cube maps
+  and volumes (OpenGL's 16-bit luminance), and V8U8 and Q8W8V8U8 are offered for volumes too, as
+  the Windows 2000/XP driver has them. `d9pixels` case `l16` (already in the shared test) now
+  runs here and passes.
+
+Still open after the third run, so by the rule of the skip counters the run does not pass yet:
+one vertex shader is not translated because it uses `sincos` (reason 2, instruction 0x25), and
+113 draws are refused with "vertices out of range", nearly all of them while a test loads (the
+pages flipped stand still when they happen). No score is quoted for the same reason, and
+because the runs were untimed.
+
+Tests on the last build: `d9pixels` 108 of 108 (1 case new since 107 of 107: `l16`), `d8pixels`
+46 of 46, skips 0 in both.
+
 ### Vertex processing on the GPU (2026-11-26, `D3D8` = `"2"`)
 
 With the registry value at `"2"` the Direct3D 8 and 9 devices report hardware transform and

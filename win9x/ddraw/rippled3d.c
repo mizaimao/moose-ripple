@@ -1243,6 +1243,7 @@ static PIXFMT gl_format(const DDPIXELFORMAT *pf)
         case 50: f.bytes = 1; f.format = GL_LUMINANCE; f.type = GL_UNSIGNED_BYTE; f.internal = GL_LUMINANCE8; break;
         case 51: f.bytes = 2; f.format = GL_LUMINANCE_ALPHA; f.type = GL_UNSIGNED_BYTE;
                  f.internal = GL_LUMINANCE8_ALPHA8; break;
+        case 81: f.bytes = 2; f.format = GL_LUMINANCE; f.type = GL_UNSIGNED_SHORT; f.internal = GL_LUMINANCE16; break;
         }
         return f;
     }
@@ -1252,6 +1253,9 @@ static PIXFMT gl_format(const DDPIXELFORMAT *pf)
            A8L8 has the luminance in the low byte, so in memory it is L then A, OpenGL's order. */
         if (pf->dwLuminanceBitCount == 8 && !alpha && pf->dwLuminanceBitMask == 0xFF) {
             f.bytes = 1; f.format = GL_LUMINANCE; f.type = GL_UNSIGNED_BYTE; f.internal = GL_LUMINANCE8;
+        } else if (pf->dwLuminanceBitCount == 16 && !alpha && pf->dwLuminanceBitMask == 0xFFFF) {
+            /* L16: sixteen bits of luminance (3DMark03 keeps its procedural volumes in it) */
+            f.bytes = 2; f.format = GL_LUMINANCE; f.type = GL_UNSIGNED_SHORT; f.internal = GL_LUMINANCE16;
         } else if (pf->dwLuminanceBitCount == 16 && alpha && pf->dwLuminanceBitMask == 0xFF &&
                    pf->dwLuminanceAlphaBitMask == 0xFF00) {
             f.bytes = 2; f.format = GL_LUMINANCE_ALPHA; f.type = GL_UNSIGNED_BYTE;
@@ -7524,10 +7528,11 @@ static const ULONG d8_formats[][2] = {
     { RbFmtDxt4, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     { RbFmtDxt5, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     /* bump maps for texbem and texbeml: signed (gl_format) */
-    { RbFmtV8U8, RbFormatTexture | RbFormatCubeTexture | RbFormatBumpMap },
-    { RbFmtQ8W8V8U8, RbFormatTexture | RbFormatCubeTexture | RbFormatBumpMap },
+    { RbFmtV8U8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture | RbFormatBumpMap },
+    { RbFmtQ8W8V8U8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture | RbFormatBumpMap },
     /* luminance and alpha alone (gl_format) */
     { RbFmtL8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtL16, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     { RbFmtA8L8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
     { RbFmtA8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
 };
