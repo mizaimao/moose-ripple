@@ -138,6 +138,13 @@ static BOOL supported(const DISPLAY *d, const DDSURFACEDESC *desc)
            fmt->dwGBitMask == d->mode.GreenMask && fmt->dwBBitMask == d->mode.BlueMask;
 }
 
+/* On a chain without a pixel format of its own (it takes the display mode's): every surface of
+ * the chain has an alpha channel, A8R8G8B8 on an X8R8G8B8 display. A Direct3D 8 or 9 runtime
+ * sets it for a full-screen device whose back buffer format is A8R8G8B8. */
+#ifndef DDSCAPS2_ENABLEALPHACHANNEL
+#define DDSCAPS2_ENABLEALPHACHANNEL 0x20000000L
+#endif
+
 static DWORD APIENTRY can_create(PDD_CANCREATESURFACEDATA data)
 {
     DISPLAY *d = (DISPLAY *)data->lpDD->dhpdev;
@@ -304,7 +311,11 @@ static DWORD APIENTRY create_surface(PDD_CREATESURFACEDATA data)
                 slot->width = g->wWidth;
                 slot->height = g->wHeight;
                 slot->chain = TRUE;
-                slot->alpha = (desc->dwFlags & DDSD_PIXELFORMAT) && (desc->ddpfPixelFormat.dwFlags & DDPF_ALPHAPIXELS);
+                /* The chain keeps alpha when it is made with a format that has it, or told so:
+                 * then the destination alpha of blending is its own, not one. */
+                slot->alpha = ((desc->dwFlags & DDSD_PIXELFORMAT) && (desc->ddpfPixelFormat.dwFlags & DDPF_ALPHAPIXELS)) ||
+                              (data->lplpSList[0]->lpSurfMore &&
+                               (data->lplpSList[0]->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_ENABLEALPHACHANNEL));
             }
             g->lPitch = desc->lPitch = d->mode.ScreenStride;
             desc->dwFlags |= DDSD_PITCH;

@@ -2417,7 +2417,11 @@ that fail and those of cube and volume textures, refused textures, devices
 made, and the caps the program reads, the whole record as hex words. They pin
 themselves, since a program that frees the runtime after probing would
 otherwise crash in the unloaded hooks. 3DMark03's refused volume texture and
-3DMark05's hardware check were found with them.
+3DMark05's hardware check were found with them. `d9trace` also logs each device with the
+presentation settings asked for and given (size, back buffer format, depth format, flags), the
+device type checks, and each new value a device sets for the blend factors, the colour write
+mask and fog: enough to see which test of a benchmark asks for a back buffer with alpha and
+blends by it.
 
 `guiclick` drives a program's windows for unattended runs. `-press @Title#N`
 presses the button with control ID N only in a window whose title contains
@@ -2428,6 +2432,10 @@ items are read out of the program's memory), so a benchmark's result details rea
 3DMark03's per-test results come from `-press "@3DMark Score#4"`, which opens its details
 window. Before the `-until` close the windows are looked at once more and acted on whatever
 the clock says, so a press that was waiting for a window to stand still is not lost.
+`-pick @Title#N=K`, `-set @Title#N=text` and `-check @Title#text` act only in a window whose
+title contains Title, for a run that goes through several dialogs with controls of the same
+kind (3DMark03's Benchmark Settings, button 13 of the main window, whose button 4 is OK, and
+its Image Quality tool both have a resolution box and the same check boxes).
 
 ## Pixel shader 1.4
 
@@ -3119,6 +3127,60 @@ under the two rules goes to the stage program instead of the combiner
 (`missing_texture_differs`). Direct3D 7 draws keep their rule. The rule was measured with the
 Direct3D 9 reference rasterizer only; Direct3D 8 draws get it too, which is a guess until a
 `d8pixels` case measures it.
+
+## A full-screen back buffer with alpha: 3DMark03's CPU Test 2
+
+3DMark03's CPU Test 2 is Troll's Lair at 640x480 with software vertex shaders and version 1.1
+pixel shaders. On this driver it came out far too bright, every surface lit as if no light
+faded with distance, while a graphics card of the time (a GeForce 9600 GT) shows the dark cave
+of the game test.
+
+Version 1.1 has too few instructions to do a light's fall-off and its colour in one pass, so
+the test lights through the destination alpha: one pass writes the fall-off into the back
+buffer's alpha channel (`dp3_sat` of the light vector with itself, complemented), and the
+light's pass is blended with `D3DBLEND_DESTALPHA` as its source factor. For that it asks for an
+A8R8G8B8 back buffer on the X8R8G8B8 display. `d9trace` showed it: of the eleven devices a
+benchmark run makes, CPU Test 2's is the only one that sets a destination alpha blend factor.
+
+A full-screen back buffer is part of the primary surface's flip chain, which has no pixel
+format of its own; it takes the display mode's. Windows says that the chain has an alpha
+channel with a capability bit instead, `DDSCAPS2_ENABLEALPHACHANNEL`. The driver looked only at
+the pixel format, took the chain for one without alpha, and read its destination alpha as one,
+which is Direct3D's rule for a target without an alpha channel. So every light was drawn at
+full strength. The chain's host image had the channel all along; now the bit is read
+(`create_surface` in `display_ddraw.c`) and the blend uses it.
+
+`d9full` checks it on both back buffer formats in full-screen: after a clear with alpha 0x40,
+white blended by the destination alpha comes out as 0x404040 on an A8R8G8B8 back buffer and as
+white on an X8R8G8B8 one. Before the change both were white. The test reads the picture from
+the front buffer once it is shown. Reading the back buffer before that gives an older picture
+(issue 327), which the test prints without counting it.
+
+The Image Quality tool does not reach this path. Its window has check boxes of its own for
+software vertex shaders and for version 1.1 pixel shaders in game tests 2 and 3. With the first
+ticked the device is made with software vertex processing, and Troll's Lair frame 600 is the
+same picture as without and matches the reference rasterizer. With the second ticked the tool
+still made the same shaders and set no destination alpha blend, so that box does not give the
+CPU test's lighting, and the CPU tests themselves are not in the tool's list. CPU Test 2 is
+therefore checked by captures of a benchmark run against captures of the same run on a graphics
+card.
+
+## Plain surfaces on the Direct3D 9 interface
+
+On the Direct3D 9 driver interface the runtime makes an offscreen plain surface only of a
+format whose entry in the driver's format list has the plain surface operation
+(`D3DFORMAT_OP_OFFSCREENPLAIN`, `RbFormatOffscreenPlain`), also when the surface is in system
+memory and the driver has no part in it. No format had it, so `CreateOffscreenPlainSurface`
+failed with `D3DERR_INVALIDCALL` for every format and pool, and with it whatever a program does
+through such a surface: `GetFrontBufferData` for a screenshot, `GetRenderTargetData`, loading a
+picture into a surface. `d9full` had passed when it was written, on the Direct3D 8 interface,
+and was not run again when the Direct3D 9 interface became the default.
+
+X8R8G8B8, A8R8G8B8 and R5G6B5 have the operation now, and a plain surface in system memory can
+be made. One in the default pool, which is video memory, is still refused: the driver makes
+plain surfaces on the host only with `RippleDirectDrawGpuSurfaces` set (`supported` in
+`display_ddraw.c`), so the program gets `D3DERR_OUTOFVIDEOMEMORY`. `d9full` prints that
+(`default_pool_plain`) without counting it.
 
 ## Checking a benchmark run: pictures, counters, frame pacing
 
