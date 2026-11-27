@@ -1301,6 +1301,15 @@ int d3d_surface_format_ok(LPDDSURFACEDESC desc)
 /* ---- Contexts ----------------------------------------------------------------------------------- */
 #define MAX_PS 64                       /* Direct3D 8 pixel shaders a context keeps */
 #define PS_VARIANTS 4                   /* programs a pixel shader keeps (fog, cube map stages) */
+/* Where a point's square falls. Direct3D gives it the pixels whose middles its left and top
+   edges pass through; OpenGL gives a square of even size the right and bottom ones, one column
+   and one row further. Pixel middles are half a pixel in from Direct3D's whole numbers
+   (framebuffer's glOrtho, tnl_load, vs_begin); points go in a quarter of a pixel only, which
+   keeps the edges of every whole size clear of the middles and so settles the tie Direct3D's
+   way. Found by comparing with the reference rasterizer: points of even sizes were one pixel
+   down and right. */
+#define POINT_SHIFT 0.25
+
 #define STAGES 8                        /* texture stages with coordinates: the fixed-function units and
                                            the texture coordinate sets */
 #define SAMPLERS 16                     /* stage records kept: a pixel shader 2.0 samples s0..s15 */
@@ -1482,6 +1491,8 @@ typedef struct {
     int vp_on;                          /* a vertex program draws: OpenGL's viewport is Direct3D's */
     int sprites_on, psize_on;           /* point sprites; a program's point size (point_state) */
     int points_now;                     /* the draw is of points (tnl_key: their scaling) */
+    int xf_points;                      /* the transform constants in program.env place points
+                                           (POINT_SHIFT), not other shapes */
     GLuint vp_bound;
     struct { TNL_KEY key; GLuint prog; DWORD used; } vp[VP_CACHE];
     DWORD vp_clock;
@@ -4035,8 +4046,9 @@ static void tnl_load(RCTX *c, const TNL_KEY *k)
         a[5] = -1.0f;
         a[10] = 2.0f;
         a[14] = -1.0f;
-        a[12] = w > 0.0f ? 1.0f / w : 0.0f;
-        a[13] = h > 0.0f ? 1.0f / h : 0.0f;
+        a[12] = w > 0.0f ? (c->points_now ? 2.0f * (float)POINT_SHIFT : 1.0f) / w : 0.0f;
+        a[13] = h > 0.0f ? (c->points_now ? 2.0f * (float)POINT_SHIFT : 1.0f) / h : 0.0f;
+        c->xf_points = c->points_now;
         mat_mul(wvp, a, m);
         env_columns(gl, TNL_ENV_MVP, m);
         env_columns(gl, TNL_ENV_MV, wv);
@@ -4632,9 +4644,10 @@ static int vs_begin(RCTX *c)
     c->vsc_dirty = 0;
     c->vsc_lo = c->vsc_hi = 0;
     c->vs_loaded = s->handle;
-    /* the half pixel, and table fog's constants (as tnl_load's) */
-    v[0] = 1.0f / (float)(c->vp_w ? c->vp_w : c->fb_w);
-    v[1] = 1.0f / (float)(c->vp_w ? c->vp_h : c->fb_h);
+    /* the half pixel (a quarter for points, POINT_SHIFT), and table fog's constants (as
+       tnl_load's) */
+    v[0] = (c->points_now ? 2.0f * (float)POINT_SHIFT : 1.0f) / (float)(c->vp_w ? c->vp_w : c->fb_w);
+    v[1] = (c->points_now ? 2.0f * (float)POINT_SHIFT : 1.0f) / (float)(c->vp_w ? c->vp_h : c->fb_h);
     v[2] = v[3] = 0.0f;
     gl->ProgramLocalParameter4fvARB(GL_VERTEX_PROGRAM_ARB, 0, v);
     if (key & VS_ARB_FOG) {
@@ -4881,6 +4894,18 @@ static void clip_state(RCTX *c, int kind)
     c->clip_gl = want;
 }
 
+/* The projection of transformed vertices (framebuffer), for points or for other shapes. */
+static void point_ortho(RCTX *c, int points)
+{
+    GLF *gl = gl_of(c);
+    double d = points ? POINT_SHIFT : 0.5;
+
+    gl->MatrixMode(GL_PROJECTION);
+    gl->LoadIdentity();
+    gl->Ortho(-d, (double)c->fb_w - d, -d, (double)c->fb_h - d, 0.0, -1.0);
+    gl->MatrixMode(GL_MODELVIEW);
+}
+
 /* Points whose transformed vertices carry their own sizes (D3DFVF_XYZRHW with D3DFVF_PSIZE), in
    pixels: no vertex program runs for them, so each run of equal sizes is drawn with its own
    glPointSize, kept between the minimum and maximum the program set. The arrays are set. */
@@ -4926,6 +4951,9 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
         dbg("rd3d: vertices out of range\r\n");
         return;
     }
+    c->points_now = mode == GL_POINTS;
+    if (c->points_now != c->xf_points)
+        c->tnl_dirty |= TNL_DIRTY_XF;   /* tnl_load places the picture again (POINT_SHIFT) */
     if (c->cur && c->cur->written)
         rt_upload(c);
     if (trace_on)                       /* what the draw uses: shader, textures, stage 0 and 1 */
@@ -4969,7 +4997,6 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
         return;
     }
     if (v->xyz) {                       /* untransformed: through a vertex program */
-        c->points_now = mode == GL_POINTS;
         if (!tnl_begin(c, v)) {
             skip8(c, "vertex processing");
             return;
@@ -4999,21 +5026,22 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
     if (mode == GL_POINTS)
         point_state(c, 0);
     clip_state(c, 0);
+    if (!convert(c, v, first, n))
+        return;
+    arrays(c, v, first, n);
+    if (mode == GL_POINTS)
+        point_ortho(c, 1);              /* only around the draw itself: nothing returns in between */
     if (!nidx) {
-        if (!convert(c, v, first, count))
-            return;
-        arrays(c, v, first, count);
         if (mode == GL_POINTS && v->psize_at)
             sized_points(c, v, first, count);
         else
             gl->DrawArrays(mode, 0, count);
     } else {
-        if (!convert(c, v, first, span))
-            return;
-        arrays(c, v, first, span);
         bind_buffer(c, GL_ELEMENT_ARRAY_BUFFER_ARB, v->ibo);
         gl->DrawElements(mode, nidx, v->itype ? v->itype : GL_UNSIGNED_SHORT, idx);
     }
+    if (mode == GL_POINTS)
+        point_ortho(c, 0);
     c->dirty = 1;
 }
 

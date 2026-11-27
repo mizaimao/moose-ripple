@@ -1236,6 +1236,7 @@ failed one of 27. What was wrong, in the order it was fixed:
 | `interval_immediate` | no immediate presentation interval | the runtime takes it from the driver-only bit `D3DCAPS2_PRESENT_INTERVAL_IMMEDIATE` (0x00400000) in `Caps2`, not from the caps' `PresentationIntervals`, where the driver had put it | the bit is set. A program that asks for that interval was refused its device before |
 | `vertex_point` | every point of a draw the size of `D3DRS_POINTSIZE` | the size in the vertex (`D3DFVF_PSIZE`) was skipped | read per point from untransformed vertices, also with `D3DRS_POINTSCALEENABLE` |
 | `rhw_vertex_point` (added 2026-11-27) | the same for transformed vertices | no vertex program runs for transformed vertices, and their sizes (`D3DFVF_XYZRHW` with `D3DFVF_PSIZE`) were not read | each run of points of one size is drawn with that point size |
+| the seven point cases, against the reference rasterizer (2026-11-27) | points of even sizes one pixel down and right of the reference's | Direct3D gives a point's square the pixels whose middles its left and top edges pass through, OpenGL the right and bottom ones | points are placed a quarter of a pixel up and left of other shapes (`POINT_SHIFT`), which keeps the edges of every whole size clear of the pixel middles |
 
 With those: Direct3D 9 79 pass and 1 fail, Direct3D 8 31 of 31. The totals grew because cases
 that were skipped as not offered run now, and because the tests gained cases on the way:
@@ -1331,8 +1332,30 @@ returns how many it filled in. A program reads them with `LoadLibrary("rippledd.
 started. A benchmark's own frame rate can be held against it: read it once a second during a run
 and the pages shown in a test's seconds must be the frames the program says it drew.
 
+A program that loads the DLL for these exports is the first to run the DLL's process start-up
+code: DirectDraw calls the HAL from every process without loading it there. That code used to
+forget everything recorded under the process, including a Direct3D context it had already made,
+and every later lock of the render target then returned the memory's old contents. It now keeps
+the session a process already has.
+
+**Pictures against Microsoft's reference rasterizer.** The shared pixel tests (`d8pixels`,
+`d9pixels`) draw every case on the reference device first (`d9pixels ref`, pictures kept in
+`refpix9`) and compare the driver's whole picture with it in the run after. On Windows 98 the
+reference rasterizers come from the DirectX 9.0 SDK Update of October 2004, the last that names
+Windows 98: `d3dref.dll`, `d3dref8.dll` and `d3dref9.dll` from its `Developer Runtime\Win9x`
+folder, copied into `C:\WINDOWS\SYSTEM` of the test guest (Microsoft's files: test guests
+only, never in this repository or a package). First result on Windows 98 SE with DirectX 9.0c
+(2026-11-27): Direct3D 8, 44 of 44 pictures match; Direct3D 9, 97 of 104, the seven others
+being the point cases in the table above. With the points placed as there: 104 of 104, and
+Direct3D 7 (`tpixels`, against Microsoft's RGB rasterizer) 14 of 14 through the HAL device and
+14 of 14 through the T&L HAL device.
+
 Counting and the export are built in unless `DEVCHECKS=0` is set for `win9x/build.sh`.
 `win9x/package.sh` sets it: a release carries neither.
+
+That the counts do rise was checked with a render state from the list set on purpose
+(`D3DRS_WRAP0`) before a draw: the state count went up by one, the test named the case it
+happened in, and a second program read the same count.
 
 Not counted: what the driver passes over without a message of its own, such as a render state
 outside that list or a texture handle whose surface is gone. A count of zero says none of the
