@@ -2989,6 +2989,39 @@ the captures of one colour fall at the changes between tests: no capture of a te
 earlier frame. A shorter run of Game Test 1 on a second host, with the draw calls counted every
 second: 1,736 refused calls and 67 of 269 captures seen earlier before, none of either after.
 
+## One numbering for the host objects of a colour context
+
+The host renderer keeps all the objects a context makes (surfaces, shaders, state objects,
+sampler views) in one table by their number: an object made with a number that is in use
+replaces the one that had it, and destroying a number destroys whatever has it, of any kind
+(`vrend_object.c` in virglrenderer). The miniport gave the depth buffer's view the number 8,
+which was also the lit vertex shader's (`LitShader` in `gpu_triangle.c`).
+
+A depth buffer is attached to one colour context at a time. In a full-screen program the two
+back buffers take turns, so the depth buffer leaves a context every frame, and its view is
+destroyed there: with it went that context's lit vertex shader. The miniport still believed
+the shader was made. Its next "bind shader 8" found a surface under that number and did
+nothing, the vertex shader of the draw before stayed bound, and the lit vertices (five
+constants each) went through a shader that reads four. 3DMark 2001 SE drew Car Chase, Nature
+and High Polygon Count as large flat polygons across the screen; tests in a window, with no
+depth buffer or one that never moves, passed.
+
+The depth view now has the number 2, and a compile-time check keeps the two surface numbers
+below the first shader and state number (`views_apart`).
+
+How it was found: the capture check cannot see it (every garbage frame is a new picture), the
+contact sheets of the captures did. Builds with one part of the path switched off showed that
+only lighting mattered; a recorder kept one real lit draw of the game, which was sound and
+drew right when replayed in a test; reading the numbers of the objects found the clash.
+
+`d8pixels` gained 13 cases on the way: a lit mesh of many vertices, plain and indexed; the lit
+shader with no light, a point light, a spot light, eight lights, and eight with specular,
+normalized normals and a local viewer; the mesh through real world, view and perspective
+matrices, unlit and lit; a replay of one Car Chase draw (its matrices, light, material, fog and
+texture stage), unlit and lit; and `lit_depth_switch`, where the depth buffer goes to a render
+target texture and back between a lit, an unlit and a lit draw. That last one fails before
+the change.
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:

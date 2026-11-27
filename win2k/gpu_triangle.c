@@ -31,6 +31,11 @@ enum { VertexStage = 0, FragmentStage = 1, PipePoints = 0, PipeLines = 1, PipeTr
 /* Gallium's primitive for a packet's RB2K_PRIM_*, and its vertices each. */
 #define PIPE_MODE(primitive) ((primitive) == RB2K_PRIM_POINTS ? PipePoints : (primitive) == RB2K_PRIM_LINES ? PipeLines : PipeTriangles)
 #define PRIM_VERTICES(primitive) ((primitive) == RB2K_PRIM_POINTS ? 1u : (primitive) == RB2K_PRIM_LINES ? 2u : 3u)
+/* One numbering for all the objects of a colour context (see RB2K_D7_COLOR_VIEW): the depth view
+ * once had the lit vertex shader's number, and when the depth buffer went to another target the
+ * shader went with its view. */
+typedef char views_apart[RB2K_D7_COLOR_VIEW < Elements && RB2K_D7_DEPTH_VIEW < Elements &&
+                         RB2K_D7_COLOR_VIEW != RB2K_D7_DEPTH_VIEW ? 1 : -1];
 typedef char sampler_handles_fit[Sampler1Base + RB2K_D7_SAMPLER_KEYS <= ShaderBase &&
                                  SamplerBase + RB2K_D7_SAMPLER_KEYS <= Sampler1Base ? 1 : -1];
 
