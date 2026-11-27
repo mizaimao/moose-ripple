@@ -822,8 +822,26 @@ static void handle_set(DDLOCAL *d, DWORD h, LPDDRAWI_DDRAWSURFACE_LCL s)
    vertices in the runtime's own memory went to the host again with every draw. */
 #define HEAP_SHARED_9X 0x04000000UL     /* Windows 9x: a heap in the shared arena */
 #define BUF_MAGIC 0x46554252UL          /* "RBUF" */
-struct bufhead { DWORD magic, size, writes, pad; };
+/* In front of every buffer the driver allocates. writes: a stamp that changes whenever the
+   buffer is written (and differs from every stamp before it, also another buffer's at the same
+   address). locks: the locks outstanding; a buffer that is drawn from while it is locked is
+   being appended to, and its copy on the GPU can't be trusted (vb7_object). */
+struct bufhead { DWORD magic, size, writes, locks; };
 static HANDLE buf_heap;
+static LONG buf_stamps;
+
+static DWORD buffer_stamp(void)
+{
+    LONG s;
+
+    __asm {
+        mov     eax, 1
+        lock xadd buf_stamps, eax
+        inc     eax
+        mov     s, eax
+    }
+    return (DWORD)s;
+}
 
 int d3d_buffers_on(void)
 {
@@ -842,7 +860,7 @@ void *d3d_buffer_new(DWORD size)
         return NULL;
     h->magic = BUF_MAGIC;
     h->size = size;
-    h->writes = 1;
+    h->writes = buffer_stamp();
     return h + 1;
 }
 
@@ -866,7 +884,19 @@ void d3d_buffer_written(FLATPTR mem)
 {
     struct bufhead *h = buffer_head(mem);
     if (h)
-        h->writes++;
+        h->writes = buffer_stamp();
+}
+
+/* The buffer is locked (1) or unlocked (0). */
+void d3d_buffer_lock(FLATPTR mem, int locked)
+{
+    struct bufhead *h = buffer_head(mem);
+    if (!h)
+        return;
+    if (locked)
+        h->locks++;
+    else if (h->locks)
+        h->locks--;
 }
 
 /* A buffer object to delete when its context is current again (buffer_object). */
@@ -1319,6 +1349,7 @@ int d3d_surface_format_ok(LPDDSURFACEDESC desc)
    way. Found by comparing with the reference rasterizer: points of even sizes were one pixel
    down and right. */
 #define POINT_SHIFT 0.25
+#define VB7_SLOTS 1024                  /* see vb7_object */
 
 #define STAGES 8                        /* texture stages with coordinates: the fixed-function units and
                                            the texture coordinate sets */
@@ -1503,6 +1534,12 @@ typedef struct {
     int points_now;                     /* the draw is of points (tnl_key: their scaling) */
     int xf_points;                      /* the transform constants in program.env place points
                                            (POINT_SHIFT), not other shapes */
+    /* Direct3D 7 vertex buffers with a copy in a buffer object (vb7_object), by address */
+    struct vb7 {
+        FLATPTR mem;
+        GLuint name;
+        DWORD stamp;                    /* the buffer's writes stamp when it was uploaded */
+    } vb7[VB7_SLOTS];
     GLuint vp_bound;
     struct { TNL_KEY key; GLuint prog; DWORD used; } vp[VP_CACHE];
     DWORD vp_clock;
@@ -3451,6 +3488,40 @@ static void bind_buffer(RCTX *c, GLenum target, GLuint name)
         gl->BindBufferARB(target, name);
         *bound = name;
     }
+}
+
+/* Direct3D 7 draws from vertex buffers (DrawPrimitiveVB): a program with hardware transform and
+   lighting keeps each model in a buffer and draws it every frame. Handed to OpenGL as client
+   arrays, every draw copied its vertices to the host again, and its indices were rebased first
+   to keep that copy small (index_list); in 3DMark 2000 that made the GPU's vertex path slower
+   than the program's own vertex code on the guest CPU. A buffer the driver allocated
+   (d3d_buffer_new) has a stamp that changes when it is written, so its copy can stay in a
+   buffer object: this returns the object for the buffer at mem, uploaded again only after a
+   write, or 0 when the buffer is not ours or is locked just now (the runtime's own buffers are
+   appended to under one lock). One object a slot of a small table by address; two buffers
+   that share a slot take turns. */
+static GLuint vb7_object(RCTX *c, FLATPTR mem)
+{
+    GLF *gl = gl_of(c);
+    struct bufhead *head = buffer_head(mem);
+    struct vb7 *e = &c->vb7[(DWORD)(mem >> 4) % VB7_SLOTS];
+
+    if (!head || head->locks || !gl->BufferDataARB || !gl->GenBuffersARB || !gl->BindBufferARB)
+        return 0;
+    if (!e->name) {
+        gl->GenBuffersARB(1, &e->name);
+        if (!e->name)
+            return 0;
+        e->mem = 0;
+    }
+    bind_buffer(c, GL_ARRAY_BUFFER_ARB, e->name);
+    if (e->mem != mem || e->stamp != head->writes) {
+        gl->BufferDataARB(GL_ARRAY_BUFFER_ARB, (int)head->size, (const void *)mem, GL_STATIC_DRAW_ARB);
+        e->mem = mem;
+        e->stamp = head->writes;
+        tracef("rd3d: Direct3D 7 vertex buffer %08lx to the GPU, %lu bytes\r\n", mem, head->size);
+    }
+    return e->name;
 }
 
 /* Where an array of v starts: in its buffer object (an offset) or in memory. */
@@ -6468,6 +6539,13 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
     else if (d->lpDDVertex)
         v.base = (BYTE *)d->lpDDVertex->lpGbl->fpVidMem + d->dwVertexOffset;
     v.count = d->dwVertexLength;
+    /* untransformed vertices in a vertex buffer of ours: from its buffer object (vb7_object) */
+    if (!c->dx8 && v.xyz && d->lpDDVertex && !(d->dwFlags & D3DHALDP2_USERMEMVERTICES)) {
+        FLATPTR mem = d->lpDDVertex->lpGbl->fpVidMem;
+        v.vbo = vb7_object(c, mem);
+        if (v.vbo)
+            v.start = (BYTE *)mem;
+    }
     start = (BYTE *)d->lpDDCommands->lpGbl->fpVidMem + d->dwCommandOffset;
     cmd = start;
     end = start + d->dwCommandLength;
@@ -6660,6 +6738,12 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
             if (k->bCommand != D3DDP2OP_INDEXEDLINELIST && k->bCommand != D3DDP2OP_INDEXEDTRIANGLELIST) {
                 base = ((LPD3DHAL_DP2STARTVERTEX)data)->wVStart;
                 src = (WORD *)(data + sizeof(D3DHAL_DP2STARTVERTEX));
+            }
+            if (v.vbo && step == keep) {
+                /* the vertices are on the GPU already: the indices as they are, no range needed */
+                draw(c, &v, mode, base, 0, src, count * keep, 0);
+                cmd = (BYTE *)src + count * size;
+                break;
             }
             idx = index_list(c, src, count, step, keep, &lo, &span);
             if (idx)

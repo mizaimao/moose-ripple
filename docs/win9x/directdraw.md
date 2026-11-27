@@ -966,6 +966,33 @@ this driver more than a draw of finished vertices does. And the 64 MB texture te
 0.0 fps on the T&L HAL device after standing on its loading screen for 25 seconds: not looked
 into yet. Until both are dealt with the device stays an option.
 
+**Vertex buffers as buffer objects (the same day).** A guest profile of the second game test
+(the guest's instruction pointer sampled through the monitor, 280 samples each way) and a
+command trace showed where the T&L HAL device lost: the program keeps every model in a vertex
+buffer of its own and draws each one every frame, and the driver handed each draw's vertices
+to OpenGL as client arrays again, after copying and rebasing its indices (`index_list`, 5.7
+percent of the samples; the driver's share was 14.6 percent against 8.2 on the other path, and
+the copying and OpenGL shares were half as large again). Those buffers are the driver's own
+allocations, with a stamp that changes when the program locks them for writing, so their
+contents now stay in OpenGL buffer objects, uploaded again only after a write, and the indices
+go to OpenGL as they are (`vb7_object`). A buffer that is locked while it is drawn from is left
+to the old path: the runtime appends to its own buffers under one lock.
+
+| 3DMark 2000, T&L HAL device | before | with buffer objects | vertices on the guest CPU |
+|---|---:|---:|---:|
+| Score, 3D marks | 24336 | 30500 | 26890 |
+| Game 1, low / medium / high detail, fps | 444.9 / 316.9 / 170.4 | 492.9 / 370.6 / 240.2 | 451.8 / 325.2 / 178.6 |
+| Game 2, low / medium / high detail, fps | 552.9 / 324.9 / 217.9 | 726.2 / 424.6 / 287.2 | 636.7 / 392.2 / 256.3 |
+| High polygon count, 1 / 4 / 8 lights, thousand triangles a second | 42273 / 42020 / 41349 | 198662 / 192227 / 176822 | 39701 / 35783 / 33061 |
+| Texture rendering speed, 8 / 16 / 32 / 64 MB, fps | 1844.3 / 1155.5 / 628.6 / 0.0 | 1929.5 / 1206.6 / 636.8 / 0.0 | 2304.8 / 1764.0 / 1177.3 / 647.9 |
+| Bump mapping (emboss), 3 / 2 / 1 pass, fps | 1074.6 / 2112.1 / 2595.5 | 1640.6 / 2090.5 / 2599.7 | 1362.6 / 1717.5 / 2566.7 |
+
+Timed and checked as the two runs above (the host to itself, captures every five seconds, pages
+flipped and skip counts read once a second: 214,975 pages, no skips, and again no page during
+the 64 MB texture test). The game scenes are now 8 to 34 percent faster on the GPU than on the
+guest's processor and the high polygon tests five times as fast. The texture tests are still
+slower and the 64 MB one still stands still, so the device stays an option for now.
+
 ### The Direct3D 9 driver interface (2026-11-27, on by default)
 
 Until now a Direct3D 9 runtime drove this HAL through the Direct3D 8 interface (above). That
