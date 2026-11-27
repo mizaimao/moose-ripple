@@ -222,7 +222,7 @@ static int dest(VS *s, unsigned int t, STR *b, int *sat, unsigned int *mask)
     case RegRastOut:
         if (num == 0) put(b, "oPos");
         else if (num == 1) put(b, "oFog");
-        else if (num == 2) put(b, "result.pointsize");
+        else if (num == 2) { put(b, "result.pointsize"); s->info->psize = 1; }
         else return fail(s, VS_ARB_REGISTER, t);
         break;
     case RegAttrOut:

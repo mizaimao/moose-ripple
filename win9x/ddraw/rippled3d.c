@@ -260,6 +260,11 @@ static RDD_SHARED *shared;
 #define GL_RGBA8_SNORM                  0x8F97
 #define GL_TEXTURE_SWIZZLE_B            0x8E44
 #define GL_FIRST_VERTEX_CONVENTION      0x8E4D
+#define GL_POINT_SPRITE                  0x8861
+#define GL_COORD_REPLACE                 0x8862
+#define GL_POINT_SPRITE_COORD_ORIGIN     0x8CA0
+#define GL_LOWER_LEFT                    0x8CA1
+#define GL_VERTEX_PROGRAM_POINT_SIZE     0x8642
 #define GL_FRAMEBUFFER                  0x8D40
 #define GL_RENDERBUFFER                 0x8D41
 #define GL_COLOR_ATTACHMENT0            0x8CE0
@@ -385,6 +390,9 @@ typedef struct {
     void (APIENTRY *DeleteBuffersARB)(GLsizei, const GLuint *);
     void (APIENTRY *BindBufferARB)(GLenum, GLuint);
     void (APIENTRY *BufferDataARB)(GLenum, int, const GLvoid *, GLenum);
+    /* points larger than a pixel and point sprites (optional, point_state) */
+    void (APIENTRY *PointSize)(GLfloat);
+    void (APIENTRY *PointParameterfv)(GLenum, const GLfloat *);
 } GLF;
 
 #define GL_CORE_COUNT 53            /* entries up to DrvGetProcAddress */
@@ -415,6 +423,7 @@ static const char *const gl_names[] = {
     "glVertexAttribPointerARB", "glEnableVertexAttribArrayARB", "glDisableVertexAttribArrayARB",
     "glCopyTexSubImage2D",
     "glGenBuffersARB", "glDeleteBuffersARB", "glBindBufferARB", "glBufferDataARB",
+    "glPointSize", "glPointParameterfv",
 };
 #define GL_ALL_COUNT (sizeof gl_names / sizeof gl_names[0])
 typedef char c_gl_names[sizeof(GLF) == GL_ALL_COUNT * sizeof(PROC) ? 1 : -1];
@@ -1326,6 +1335,7 @@ typedef struct {
     float zmin, zmax;                   /* the viewport's depth range */
     DWORD tnl_dirty;                    /* TNL_DIRTY_*: program.env to load again */
     int vp_on;                          /* a vertex program draws: OpenGL's viewport is Direct3D's */
+    int sprites_on, psize_on;           /* point sprites; a vertex shader's point size (point_state) */
     GLuint vp_bound;
     struct { TNL_KEY key; GLuint prog; DWORD used; } vp[VP_CACHE];
     DWORD vp_clock;
@@ -1910,6 +1920,8 @@ static void context_free(RCTX *c)
                 gl->DeleteTextures(1, &c->tex[i].name);
         if (c->white)
             gl->DeleteTextures(1, &c->white);
+        if (c->black)
+            gl->DeleteTextures(1, &c->black);
         if (c->fog_tex)
             gl->DeleteTextures(1, &c->fog_tex);
         if (c->read_fbo)
@@ -1920,8 +1932,6 @@ static void context_free(RCTX *c)
             if (c->cb[i].rb)
                 gl->DeleteRenderbuffers(1, &c->cb[i].rb);
         for (i = 0; i < ZBUFFERS; i++)
-        if (c->black)
-            gl->DeleteTextures(1, &c->black);
             if (c->zb[i].rb)
                 gl->DeleteRenderbuffers(1, &c->zb[i].rb);
         let_go(c);
@@ -2047,6 +2057,60 @@ static void apply_stencil(RCTX *c)
     gl->StencilMask(rs[D3DRENDERSTATE_STENCILWRITEMASK]);
 }
 
+#define RS_COLORWRITEENABLE 168         /* Direct3D 8 and 9 */
+#define RS_POINTSIZE 154                /* a float: pixels (Direct3D 8 and 9) */
+#define RS_POINTSIZE_MIN 155
+#define RS_POINTSPRITEENABLE 156
+#define RS_POINTSIZE_MAX 166
+#define MAX_POINT_SIZE 64.0f            /* the largest point offered (D3DCAPS8.MaxPointSize) */
+
+/* The channels a draw writes (D3DRS_COLORWRITEENABLE: red 1, green 2, blue 4, alpha 8). A clear
+   and the HAL's own uploads into the target write all of them (all). */
+static void colour_mask(RCTX *c, int all)
+{
+    DWORD m = all ? 15 : c->rs[RS_COLORWRITEENABLE];
+    gl_of(c)->ColorMask((GLboolean)(m & 1), (GLboolean)((m >> 1) & 1), (GLboolean)((m >> 2) & 1),
+                        (GLboolean)((m >> 3) & 1));
+}
+
+/* Before a draw of points (Direct3D 8 and 9): their size in pixels, kept between the minimum and
+   maximum the program set, and point sprites, which stretch each stage's texture over the
+   point with (0, 0) at its top left (OpenGL's lower left: rows are in Direct3D's order, see
+   framebuffer). program_size: a vertex shader writes the size itself (oPts). Not done: sizes
+   scaled by distance (POINTSCALEENABLE) and sizes in the vertex; such points get the render
+   state's size. */
+static void point_state(RCTX *c, int program_size)
+{
+    GLF *gl = gl_of(c);
+    float size = *(const float *)&c->rs[RS_POINTSIZE];
+    float lo = *(const float *)&c->rs[RS_POINTSIZE_MIN], hi = *(const float *)&c->rs[RS_POINTSIZE_MAX];
+    int sprites = c->rs[RS_POINTSPRITEENABLE] != 0, u;
+
+    if (!gl->PointSize || !gl->PointParameterfv)
+        return;
+    if (!(hi >= 1.0f) || hi > MAX_POINT_SIZE)
+        hi = MAX_POINT_SIZE;
+    if (size < lo) size = lo;
+    if (size > hi) size = hi;
+    if (!(size >= 1.0f)) size = 1.0f;
+    gl->PointSize(size);
+    if (program_size != c->psize_on) {
+        enable(gl, GL_VERTEX_PROGRAM_POINT_SIZE, program_size);
+        c->psize_on = program_size;
+    }
+    if (sprites != c->sprites_on) {
+        GLfloat origin = (GLfloat)GL_LOWER_LEFT;
+        enable(gl, GL_POINT_SPRITE, sprites);
+        gl->PointParameterfv(GL_POINT_SPRITE_COORD_ORIGIN, &origin);
+        for (u = 0; u < STAGES; u++) {
+            gl->ActiveTexture(GL_TEXTURE0 + u);
+            gl->TexEnvi(GL_POINT_SPRITE, GL_COORD_REPLACE, sprites);
+        }
+        gl->ActiveTexture(GL_TEXTURE0);
+        c->sprites_on = sprites;
+    }
+}
+
 static void render_state(RCTX *c, DWORD state, DWORD v)
 {
     GLF *gl = gl_of(c);
@@ -2077,6 +2141,9 @@ static void render_state(RCTX *c, DWORD state, DWORD v)
         break;
     case D3DRENDERSTATE_COLORKEYENABLE:   /* textures are uploaded with or without their key */
         c->stages_dirty = 1;
+        break;
+    case RS_COLORWRITEENABLE:
+        colour_mask(c, 0);
         break;
     case D3DRENDERSTATE_STENCILENABLE:
     case D3DRENDERSTATE_STENCILFAIL:
@@ -2810,6 +2877,23 @@ static void white_texture(RCTX *c)
     gl->BindTexture(GL_TEXTURE_2D, c->white);
 }
 
+/* What a pixel shader reads from a stage without a texture: opaque black (the fixed-function
+   stages read white there). */
+static void black_texture(RCTX *c)
+{
+    GLF *gl = gl_of(c);
+    static const DWORD black = 0xFF000000;
+
+    if (!c->black) {
+        gl->GenTextures(1, &c->black);
+        gl->BindTexture(GL_TEXTURE_2D, c->black);
+        gl->TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_BGRA, GL_UNSIGNED_BYTE, &black);
+        gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    }
+    gl->BindTexture(GL_TEXTURE_2D, c->black);
+}
+
 /* The fog unit (see apply_fog): colour = previous * f + fog colour * (1 - f), with f the ramp
    texture's alpha at the vertex's coordinate; alpha passes through. Off without fog. */
 static void apply_fog_unit(RCTX *c)
@@ -2877,23 +2961,6 @@ static void ff_target(RCTX *c, int unit, int kind)
         gl->Disable(GL_TEXTURE_CUBE_MAP);
     else if (c->ff_kind[unit] == 2)
         gl->Disable(GL_TEXTURE_3D);
-/* What a pixel shader reads from a stage without a texture: opaque black (the fixed-function
-   stages read white there). */
-static void black_texture(RCTX *c)
-{
-    GLF *gl = gl_of(c);
-    static const DWORD black = 0xFF000000;
-
-    if (!c->black) {
-        gl->GenTextures(1, &c->black);
-        gl->BindTexture(GL_TEXTURE_2D, c->black);
-        gl->TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_BGRA, GL_UNSIGNED_BYTE, &black);
-        gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    }
-    gl->BindTexture(GL_TEXTURE_2D, c->black);
-}
-
     if (kind == 1)
         gl->Enable(GL_TEXTURE_CUBE_MAP);
     else if (kind == 2)
@@ -3314,9 +3381,11 @@ static void rt_upload(RCTX *c)
     gl->WindowPos2i(0, 0);              /* row 0 of the memory is the GPU's row 0 (see framebuffer) */
     gl->PixelStorei(GL_UNPACK_ALIGNMENT, 1);
     gl->PixelStorei(GL_UNPACK_ROW_LENGTH, g->lPitch / f.bytes);
+    colour_mask(c, 1);                  /* the memory's picture, every channel */
     gl->DrawPixels(c->fb_w < g->wWidth ? c->fb_w : g->wWidth,
                    c->fb_h < g->wHeight ? c->fb_h : g->wHeight, f.format, f.type,
                    (const GLvoid *)mem);
+    colour_mask(c, 0);
     gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     apply_depth_test(c);
     enable(gl, GL_BLEND, c->rs[D3DRENDERSTATE_ALPHABLENDENABLE]);
@@ -4118,12 +4187,15 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
             skip8(c, "vertex shader");
             return;
         }
+        if (mode == GL_POINTS)
+            point_state(c, vs_find(c, c->fvf8) && vs_find(c, c->fvf8)->info.psize);
         vs_arrays(c, v, first);
         if (!idx)
             gl->DrawArrays(mode, 0, count);
-        else
+        else {
             bind_buffer(c, GL_ELEMENT_ARRAY_BUFFER_ARB, v->ibo);
             gl->DrawElements(mode, nidx, GL_UNSIGNED_SHORT, idx);
+        }
         c->dirty = 1;
         return;
     }
@@ -4132,16 +4204,21 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
             skip8(c, "vertex processing");
             return;
         }
+        if (mode == GL_POINTS)
+            point_state(c, 0);
         tnl_arrays(c, v, first);
         if (!idx)
             gl->DrawArrays(mode, 0, count);
-        else
+        else {
             bind_buffer(c, GL_ELEMENT_ARRAY_BUFFER_ARB, v->ibo);
             gl->DrawElements(mode, nidx, GL_UNSIGNED_SHORT, idx);
+        }
         c->dirty = 1;
         return;
     }
     tnl_end(c);
+    if (mode == GL_POINTS)
+        point_state(c, 0);
     if (!idx) {
         if (!convert(c, v, first, count))
             return;
@@ -4210,6 +4287,7 @@ static void clear(RCTX *c, DWORD flags, DWORD color, float depth, DWORD stencil,
     }
     if (flags & D3DCLEAR_TARGET) {
         mask |= GL_COLOR_BUFFER_BIT;
+        colour_mask(c, 1);              /* Direct3D's Clear writes every channel */
         gl->ClearColor(((color >> 16) & 255) / 255.0f, ((color >> 8) & 255) / 255.0f,
                        (color & 255) / 255.0f, ((color >> 24) & 255) / 255.0f);
         c->dirty = 1;
@@ -4237,6 +4315,8 @@ static void clear(RCTX *c, DWORD flags, DWORD color, float depth, DWORD stencil,
         gl->Clear(mask);
     }
     apply_scissor(c);                   /* the viewport's again */
+    if (flags & D3DCLEAR_TARGET)
+        colour_mask(c, 0);
     gl->DepthMask((GLboolean)(c->rs[D3DRENDERSTATE_ZWRITEENABLE] ? GL_TRUE : GL_FALSE));
     gl->StencilMask(c->rs[D3DRENDERSTATE_STENCILWRITEMASK]);
 }
@@ -4290,6 +4370,7 @@ static void defaults(RCTX *c)
     render_state(c, D3DRENDERSTATE_STENCILFUNC, D3DCMP_ALWAYS);
     render_state(c, D3DRENDERSTATE_STENCILMASK, 0xFFFFFFFF);
     render_state(c, D3DRENDERSTATE_STENCILWRITEMASK, 0xFFFFFFFF);
+    render_state(c, RS_COLORWRITEENABLE, 15);
     for (s = 0; s < STAGES; s++) {
         c->tss[s][D3DTSS_COLOROP] = s ? D3DTOP_DISABLE : D3DTOP_MODULATE;
         c->tss[s][D3DTSS_COLORARG1] = D3DTA_TEXTURE;
@@ -5103,7 +5184,7 @@ static void stream_draw(RCTX *c, LPD3DHAL_DRAWPRIMITIVES2DATA d, DWORD type, lon
            c->stream_user ? " (user)" : "", c->fvf8);
     if (!prims)
         return;
-    if (!mode) {
+    if (!verts) {                       /* (not !mode: GL_POINTS is 0, and point lists were never drawn) */
         skip8(c, "primitive type");
         return;
     }
@@ -5869,7 +5950,7 @@ static void d8_caps(RB_D3DCAPS8 *c)
     c->caps2 = RB_D3DCAPS2_CANRENDERWINDOWED;
     c->presentationIntervals = RB_D3DPRESENT_INTERVAL_IMMEDIATE | RB_D3DPRESENT_INTERVAL_ONE;
     c->devCaps = hw->dwDevCaps & ~D3DDEVCAPS_FLOATTLVERTEX;
-    c->primitiveMiscCaps = tri->dwMiscCaps;
+    c->primitiveMiscCaps = tri->dwMiscCaps | 0x80;     /* D3DPMISCCAPS_COLORWRITEENABLE (colour_mask) */
     c->rasterCaps = tri->dwRasterCaps & ~D3DPRASTERCAPS_SUBPIXEL;
     c->zCmpCaps = tri->dwZCmpCaps;
     c->srcBlendCaps = tri->dwSrcBlendCaps;
@@ -5901,7 +5982,7 @@ static void d8_caps(RB_D3DCAPS8 *c)
     c->textureOpCaps = x.dwTextureOpCaps;
     c->maxTextureBlendStages = x.wMaxTextureBlendStages;
     c->maxSimultaneousTextures = x.wMaxSimultaneousTextures;
-    c->maxPointSize = fbits(1.0f);
+    c->maxPointSize = fbits(MAX_POINT_SIZE);       /* and point sprites (point_state) */
     c->maxPrimitiveCount = 0xFFFF;
     c->maxVertexIndex = 0xFFFF;         /* 16-bit index buffers only */
     c->maxStreams = 1;

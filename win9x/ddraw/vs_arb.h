@@ -37,6 +37,7 @@ typedef struct {
     unsigned char type[VS_ARB_INPUTS];      /* its declaration type */
     unsigned char offset[VS_ARB_INPUTS];    /* its bytes into the vertex */
     unsigned int stride;                    /* the bytes the declaration lays out */
+    unsigned int psize;                     /* it writes the point size (oPts) */
     unsigned int defs;                      /* def constants, loaded over c# when it draws */
     struct { unsigned short reg; float v[4]; } def[VS_ARB_DEFS];
     unsigned int reason, detail;            /* why it was not translated (VS_ARB_*) */
