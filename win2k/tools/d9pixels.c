@@ -3363,6 +3363,75 @@ done:
     if (t) IDirect3DTexture9_Release(t);
 }
 
+/* 114 and 115: the lower levels of a mipmap are used. A 64x64 texture whose levels are red, green,
+ * blue, yellow and white below that, with point filtering between levels: a quad of 32x32 pixels
+ * shows level 1 (green), one of 16x16 level 2 (blue). 114 in the managed pool, which is how
+ * programs keep their textures (the runtime copies it into a video-memory texture that has one
+ * surface only and expects the driver to hold the levels below); 115 in the default pool. */
+static void mip_levels_case(int only)
+{
+    typedef struct { float x, y, z, rhw, u, v; } MV;
+    static const DWORD colors[7] = { 0xffff0000, 0xff00ff00, 0xff0000ff, 0xffffff00, 0xffffffff, 0xffffffff, 0xffffffff };
+    static const SAMPLE s[] = { { 32, 32, 0x00ff00 }, { 88, 88, 0x0000ff }, { 8, 8, CLEAR_COLOR } };
+    static const float boxes[2][4] = { { 16, 16, 48, 48 }, { 80, 80, 96, 96 } };
+    int pass;
+    for (pass = 114; pass <= 115; ++pass) {
+        const char *name = pass == 114 ? "mip_levels_managed" : "mip_levels_default";
+        IDirect3DTexture9 *t = NULL;
+        MV v[8];
+        HRESULT hr;
+        DWORD level;
+        DWORD keep[4];
+        int q, i;
+        if (only && only != pass) continue;
+        hr = IDirect3DDevice9_CreateTexture(device, 64, 64, 0, pass == 114 ? 0 : D3DUSAGE_DYNAMIC, D3DFMT_A8R8G8B8,
+                                            pass == 114 ? D3DPOOL_MANAGED : D3DPOOL_DEFAULT, &t, NULL);
+        if (FAILED(hr)) { printf("D9PIX %s texture not made hr=%08lx\n", name, (unsigned long)hr); continue; }
+        for (level = 0; level < IDirect3DTexture9_GetLevelCount(t) && level < 7; ++level) {
+            D3DLOCKED_RECT r;
+            int side = 64 >> level, x, y;
+            if (FAILED(IDirect3DTexture9_LockRect(t, level, &r, NULL, 0))) continue;
+            for (y = 0; y < side; ++y) for (x = 0; x < side; ++x) ((DWORD *)((BYTE *)r.pBits + y * r.Pitch))[x] = colors[level];
+            IDirect3DTexture9_UnlockRect(t, level);
+        }
+        for (q = 0; q < 2; ++q)
+            for (i = 0; i < 4; ++i) {
+                MV *p = &v[q * 4 + i];
+                p->x = boxes[q][i & 1 ? 2 : 0] - 0.5f;
+                p->y = boxes[q][i & 2 ? 3 : 1] - 0.5f;
+                p->z = 0.5f; p->rhw = 1.0f;
+                p->u = i & 1 ? 1.0f : 0.0f;
+                p->v = i & 2 ? 1.0f : 0.0f;
+            }
+        IDirect3DDevice9_GetTextureStageState(device, 0, D3DTSS_COLOROP, &keep[0]);
+        IDirect3DDevice9_GetTextureStageState(device, 0, D3DTSS_COLORARG1, &keep[1]);
+        IDirect3DDevice9_GetTextureStageState(device, 0, D3DTSS_ALPHAOP, &keep[2]);
+        IDirect3DDevice9_GetTextureStageState(device, 0, D3DTSS_ALPHAARG1, &keep[3]);
+        if (begin(name)) {
+            IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)t);
+            IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+            IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+            IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MIPFILTER, D3DTEXF_POINT);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+            IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_TEX1);
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+            if (SUCCEEDED(hr)) hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v + 4, sizeof(v[0]));
+            IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, keep[0]);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, keep[1]);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_ALPHAOP, keep[2]);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_ALPHAARG1, keep[3]);
+            IDirect3DDevice9_SetTexture(device, 0, NULL);
+            if (FAILED(hr)) { fail_hr(name, "draw", hr); IDirect3DDevice9_EndScene(device); }
+            else check(name, s, 3);
+        }
+        IDirect3DTexture9_Release(t);
+    }
+}
+
 /* 83: a ps_2_0 shader that reads samplers 9 and 15 (shader model 2 has sixteen; 3DMark05's third
  * game test draws its water with a ninth one): texld r0, t0, s9; texld r1, t0, s15;
  * add r0, r0, r1. A green texture on sampler 9 and a blue one on sampler 15 give cyan. */
@@ -3714,6 +3783,7 @@ int main(int argc, char **argv)
     ps2_water_case(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0) && (caps.TextureCaps & D3DPTEXTURECAPS_CUBEMAP));
     scissor_case(only, (caps.RasterCaps & D3DPRASTERCAPS_SCISSORTEST) != 0);
     luminance_case(only);
+    mip_levels_case(only);
     lines_points_case(only);
     index32_case(only, caps.MaxVertexIndex > 0xffff);
     printf("D9PIX max_point_size=%d\n", (int)caps.MaxPointSize);

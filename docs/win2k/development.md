@@ -3040,6 +3040,53 @@ The sampler word that the display driver hands the miniport holds the mode in bi
 send. `d9pixels` cases 112 (`ps2_volume_wrap_w`) and 113 (`ps2_volume_clamp_w`) draw a volume
 texture one whole volume further along the third coordinate, wrapped and clamped.
 
+## Mipmaps of the textures a Direct3D 9 runtime manages
+
+Most programs keep their textures in the managed pool: the program fills a system-memory
+texture, and the runtime copies it into a video-memory one when it is drawn
+(`D3DDP2OP_TEXBLT`). A Direct3D 9 runtime makes that video-memory copy of a mipmapped texture
+as one surface, marked `DDSCAPS3_LIGHTWEIGHTMIPMAP` (0x400 in `ddsCapsEx.dwCaps3`): a
+lightweight mipmap. It has no `DDSCAPS_MIPMAP` and no surfaces for the levels below the top
+one; holding those is left to the driver. The driver registered such a texture with one level,
+so every managed texture of a Direct3D 9 program was drawn from its top level alone, whatever
+mip filter was set. Distant surfaces shimmered, and fine texture detail seen from afar (leaves
+against the sky) came out too light.
+
+How it was found: the driver's record of the textures one 3DMark03 frame sampled showed every
+one of them with a single level while its samplers asked for a linear mip filter, and `d9trace`
+(which now logs the first 60 `CreateTexture` calls with their levels, usage, format and pool)
+showed the program making them with 10 to 12 levels.
+
+The texture copy now gives a lightweight mipmap its lower levels. When the source is a
+system-memory texture of the same size with more levels, the destination reads the levels below
+its top one from the source's memory (`texture_blt`; `lightweight` and `lower` in
+`D7_TEXTURE`), and its host texture is made anew with all of them. Those levels stay the
+source's memory: the copy reads them there and never writes them through the destination. When
+the source goes away the destination falls back to its one level (`release_texture`). A
+lightweight mipmap that is drawn with a mip filter before it got its levels is counted with the
+states that had no effect (`RB2K_D7_IGNORED_MIPMAP`), so a run fails on it. Managed cube maps
+and volume textures with several levels are not covered yet: the runtime copies a cube map face
+by face, and `volume_blt` copies only the levels both sides have. If the runtime marks them
+lightweight too, which has not been looked at, the count shows them.
+
+`d9pixels` case 114 (`mip_levels_managed`) draws a 64x64 managed texture whose levels have
+different colours on quads of 32 and 16 pixels, with a point filter between levels; case 115
+(`mip_levels_default`) does the same with a texture of the default pool, which always had its
+level surfaces. Without the change case 114 shows the top level's colour on both quads.
+
+Frames of 3DMark03 against the reference rasterizer at 640x480, before and after (share of
+pixels more than 16 apart, share of 8x8 blocks; XP SP3 under KVM, Intel UHD 630 host):
+
+| frame | before | after |
+| --- | --- | --- |
+| Wings of Fury, frame 1038 | 2.07%, 0.00% | 0.34%, 0.00% |
+| Battle of Proxycon, frame 600 | 0.56%, 0.00% | 0.22%, 0.00% |
+| Troll's Lair, frame 600 | 0.25%, 0.06% | 0.08%, 0.00% |
+| Mother Nature, frame 600 | 10.70%, 5.83% (fail) | 2.06%, 0.00% |
+| Vertex Shader, frame 300 | 40.29%, 0.15% | 0.20%, 0.00% |
+| Pixel Shader 2.0, frame 300 | 0.04%, 0.00% | 0.03%, 0.00% |
+| Ragtroll, frame 300 | 11.86%, 3.42% (fail) | 0.43%, 0.00% |
+
 ## Checking a benchmark run: pictures, counters, frame pacing
 
 A frame count says nothing about what was drawn. A run of 3DMark05 once counted 30 frames a

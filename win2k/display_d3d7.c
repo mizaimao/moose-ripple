@@ -188,6 +188,12 @@ typedef struct {
     BOOL tracked, dirty;
     ULONG host, sum, epoch;
     ULONG used;     /* useClock when a draw last chose it, for least-recently-used eviction */
+    /* A Direct3D 9 runtime makes the video-memory copy of a mipmapped texture it manages as one
+     * surface (DDSCAPS3_LIGHTWEIGHTMIPMAP: lightweight) and leaves the levels below it to the
+     * driver. They are read from the system-memory texture the runtime fills it from (lower: that
+     * texture's handle, zero while there is none and for textures with level surfaces of their own). */
+    BOOL lightweight;
+    ULONG lower;
 } D7_TEXTURE;
 
 /* A Direct3D 8 vertex or index buffer registered through CreateSurfaceEx.
@@ -358,6 +364,16 @@ static BOOL request(DISPLAY *d, ULONG code, PVOID in, ULONG inSize, PVOID out, U
 
 static void release_texture(D7_TEXTURE *t, BOOL host)
 {
+    if (t->handle && t->levels > 1 && textures) {
+        /* Textures that read their lower levels from this one fall back to their own level. */
+        ULONG i;
+        for (i = 0; i < MaxTextures; ++i) {
+            D7_TEXTURE *o = &textures[i];
+            if (o == t || o->lower != t->handle || o->local != t->local || !o->handle) continue;
+            o->lower = 0; o->levels = 1; o->mipmaps = FALSE; o->epoch = 0; o->dirty = TRUE;
+            if (o->host) { request(o->display, IOCTL_RB2K_D3D7_TEXTURE_FREE, &o->host, sizeof(o->host), NULL, 0); o->host = 0; }
+        }
+    }
     if (host && t->host) request(t->display, IOCTL_RB2K_D3D7_TEXTURE_FREE, &t->host, sizeof(t->host), NULL, 0);
     if (t->display) --t->display->d7draw.textures;
     RtlZeroMemory(t, sizeof(*t));
@@ -608,6 +624,7 @@ static void register_texture(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE
     t->height = g->wHeight;
     t->format = rb_d7_texture_format(&g->ddpfSurface, d->mode.BitsPerPlane);
     t->mipmaps = (l->ddsCaps.dwCaps & DDSCAPS_MIPMAP) != 0;
+    t->lightweight = l->lpSurfMore && (l->lpSurfMore->ddsCapsEx.dwCaps3 & 0x400) != 0;   /* DDSCAPS3_LIGHTWEIGHTMIPMAP */
     t->blocks = (l->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY) && compressed(t->format) ? t->format : 0;
     RtlZeroMemory(t->faceHandles, sizeof(t->faceHandles));
     if (t->mipmaps) ++d->d7draw.regMipmaps;
@@ -2747,6 +2764,9 @@ static BOOL pixel_states(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, const D8_SHADER *s
             skip(c, RB2K_D7_SKIP_TEXTURE, primitives);
             return FALSE;
         }
+        /* A lightweight mipmap that never got its lower levels is drawn from its top level. */
+        if (tex->lightweight && tex->levels == 1 && st->mipFilter >= D3DTFP_POINT && st->mipFilter <= D3DTFP_LINEAR)
+            c->display->d7draw.ignored[RB2K_D7_IGNORED_MIPMAP] += primitives;
         draw->samplers[k] = stage_sampler(st, tex);
         draw->borders[k] = st->border;
     }
@@ -4387,6 +4407,23 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
     if (left < 0 || top < 0 || (ULONG)right > src->width || (ULONG)bottom > src->height ||
         b->pDest.x < 0 || b->pDest.y < 0 || (ULONG)(b->pDest.x + right - left) > dst->width ||
         (ULONG)(b->pDest.y + bottom - top) > dst->height) { ++d->d7draw.texBltFailures; return; }
+    if (srcFace == ~0UL && dst->lightweight && !src->lightweight && src->levels > 1 &&
+        src->width == dst->width && src->height == dst->height &&
+        (dst->levels == 1 || dst->lower != src->handle)) {
+        /* A lightweight mipmap: the destination takes the source's lower levels, and a host
+         * texture made for other levels goes, so that the next draw makes one for these. They
+         * stay the source's memory: read there, never written (the copy below skips them). */
+        ULONG f, lv;
+        for (f = 0; f < src->faces && f < 6; ++f)
+            for (lv = 1; lv < src->levels && lv < RB2K_D7_LEVELS; ++lv) {
+                dst->levelAddress[f][lv] = src->levelAddress[f][lv];
+                dst->levelPitch[f][lv] = src->levelPitch[f][lv];
+            }
+        dst->levels = src->levels;
+        dst->mipmaps = TRUE;
+        dst->lower = src->handle;
+        if (dst->host) { request(d, IOCTL_RB2K_D3D7_TEXTURE_FREE, &dst->host, sizeof(dst->host), NULL, 0); dst->host = 0; }
+    }
     bpp = rb_d7_texel_bytes(src->format);
     if (compressed(src->format) && (left % 4 || top % 4 || b->pDest.x % 4 || b->pDest.y % 4)) {
         ++d->d7draw.texBltFailures;   /* only whole blocks */
@@ -4405,6 +4442,7 @@ static void texture_blt(D7_CONTEXT *c, const D3DNTHAL_DP2TEXBLT *b)
             ULONG x1 = max(x0 + 1, (ULONG)right >> level), y1 = max(y0 + 1, (ULONG)bottom >> level);
             const BYTE *from;
             BYTE *to;
+            if (level && dst->lower) continue;     /* read where the source keeps them */
             if (x1 > level_side(src->width, level) || y1 > level_side(src->height, level) ||
                 dx + x1 - x0 > level_side(dst->width, level) || dy + y1 - y0 > level_side(dst->height, level)) break;
             rows = y1 - y0;
