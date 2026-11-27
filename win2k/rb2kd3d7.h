@@ -54,6 +54,9 @@ typedef struct {
     LONGLONG paceLast;
     ULONG paceSegment;
     RB2K_PACE_SEGMENT pace[RB2K_PACE_SEGMENTS];
+    /* The desktop in guest memory: frames copied into its pages, copies that failed, the pages
+     * older than their host resources (bit 0, bit 1), and whether a flip chain is live. */
+    ULONG memoryPresents, memoryFailures, memoryStale, memoryChain;
 } RB2K_D7_PROFILE;
 enum { RB2K_D7_SITE_RECORD = 1, RB2K_D7_SITE_PROGRAM, RB2K_D7_SITE_DEPTH, RB2K_D7_SITE_TEXTURE,
        RB2K_D7_SITE_VERTEX, RB2K_D7_SITE_COMMAND, RB2K_D7_SITE_STEP = 16 };   /* STEP + step in the draw */

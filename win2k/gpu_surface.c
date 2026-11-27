@@ -871,6 +871,10 @@ VP_STATUS rb_gpu_surface_io(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         if (!packet->InputBufferLength && packet->OutputBufferLength == sizeof(gpu->d7Profile)) {
             rb_counter_ticks(&gpu->d7Profile.frequency);
             gpu->d7Profile.codeAt = (ULONG)(ULONG_PTR)rb_gpu_frame_reserve;
+            gpu->d7Profile.memoryPresents = gpu->memoryPresents;
+            gpu->d7Profile.memoryFailures = gpu->memoryFailures;
+            gpu->d7Profile.memoryStale = gpu->memoryStale;
+            gpu->d7Profile.memoryChain = gpu->memoryChain;
             VideoPortMoveMemory(packet->OutputBuffer, &gpu->d7Profile, sizeof(gpu->d7Profile));
             packet->StatusBlock->Information = sizeof(gpu->d7Profile);
             status = NO_ERROR;
