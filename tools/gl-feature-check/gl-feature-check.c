@@ -2539,6 +2539,65 @@ static void run_fullscreen(const char *name, int want_w, int want_h, int hold)
     printf("%s: released; display %zux%zu again\n", name, CGDisplayPixelsWide(disp),
            CGDisplayPixelsHigh(disp));
 }
+
+/* Where the near plane is (issue 307): full-viewport quads given straight in clip space at
+ * z/w from -0.95 to 0.95 (w = 1), depth test off, each counted. OpenGL keeps -w <= z <= w, so
+ * every one must cover the whole target; a renderer that clips at z = 0 (Direct3D's near plane)
+ * drops the ones in front of it. */
+static void run_nearclip(const char *name, CGLPixelFormatAttribute renderer)
+{
+    rec_begin(__func__, name);
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32, kCGLPFAPBuffer,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated, renderer, 0 };
+    if (!renderer)
+        attrs[4] = 0;
+    CGLPixelFormatObj pf = NULL;
+    GLint npix = 0;
+    CGLContextObj c = NULL;
+    CGLChoosePixelFormat(attrs, &pf, &npix);
+    if (!pf || CGLCreateContext(pf, NULL, &c) != kCGLNoError) {
+        printf("%s: no context\n", name);
+        return;
+    }
+    CGLDestroyPixelFormat(pf);
+    CGLSetCurrentContext(c);
+    GLuint col, fbo;
+    glGenTextures(1, &col);
+    glBindTexture(GL_TEXTURE_2D, col);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glGenFramebuffersEXT(1, &fbo);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+    glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_2D, col, 0);
+    glViewport(0, 0, W, H);
+    glDisable(GL_DEPTH_TEST);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    static const float zs[] = { -0.95f, -0.6f, -0.2f, 0.2f, 0.6f, 0.95f };
+    printf("%s: full-viewport quads at clip z/w (w = 1), pixels covered of %d:", name, W * H);
+    for (unsigned k = 0; k < sizeof(zs) / sizeof(zs[0]); k++) {
+        unsigned char px[W * H * 4];
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glColor4f(0, 1, 0, 1);
+        glBegin(GL_QUADS);
+        glVertex3f(-1, -1, zs[k]);
+        glVertex3f(1, -1, zs[k]);
+        glVertex3f(1, 1, zs[k]);
+        glVertex3f(-1, 1, zs[k]);
+        glEnd();
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        int n = 0;
+        for (int i = 0; i < W * H; i++)
+            n += px[i * 4 + 1] > 128;
+        printf(" %.2f: %d", zs[k], n);
+    }
+    printf("; GL error 0x%x\n", glGetError());
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+}
 /* The iTunes visualizer's first check (breadth pass, 2026-11-27): a proxy rectangle texture of
  * the view's size, RGBA with 8888_REV, then its width read back; the visualizer draws nothing
  * when the answer is 0. A few sizes and formats, ours against Apple's software renderer. */
@@ -2694,6 +2753,11 @@ int main(int argc, char **argv)
         /* gl-feature-check fullscreen [W H [HOLD]] */
         run_fullscreen("ours", argc > 3 ? atoi(argv[2]) : 0, argc > 3 ? atoi(argv[3]) : 0,
                        argc > 4 ? atoi(argv[4]) : 4);
+        return rec_report();
+    }
+    if (argc > 1 && !strcmp(argv[1], "nearclip")) {
+        run_nearclip("ours", 0);
+        run_nearclip("software", (CGLPixelFormatAttribute)0x00020400);
         return rec_report();
     }
     if (argc > 1 && !strcmp(argv[1], "aux")) {
