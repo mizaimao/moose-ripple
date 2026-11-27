@@ -1357,7 +1357,8 @@ typedef struct {
     float zmin, zmax;                   /* the viewport's depth range */
     DWORD tnl_dirty;                    /* TNL_DIRTY_*: program.env to load again */
     int vp_on;                          /* a vertex program draws: OpenGL's viewport is Direct3D's */
-    int sprites_on, psize_on;           /* point sprites; a vertex shader's point size (point_state) */
+    int sprites_on, psize_on;           /* point sprites; a program's point size (point_state) */
+    int points_now;                     /* the draw is of points (tnl_key: their scaling) */
     GLuint vp_bound;
     struct { TNL_KEY key; GLuint prog; DWORD used; } vp[VP_CACHE];
     DWORD vp_clock;
@@ -2088,6 +2089,8 @@ static void apply_stencil(RCTX *c)
 #define RS_POINTSIZE 154                /* a float: pixels (Direct3D 8 and 9) */
 #define RS_POINTSIZE_MIN 155
 #define RS_POINTSPRITEENABLE 156
+#define RS_POINTSCALEENABLE 157         /* sizes scaled by the distance from the eye (tnl_arb.c) */
+#define RS_POINTSCALE_A 158             /* then B and C: floats */
 #define RS_POINTSIZE_MAX 166
 #define MAX_POINT_SIZE 64.0f            /* the largest point offered (D3DCAPS8.MaxPointSize) */
 
@@ -2103,9 +2106,9 @@ static void colour_mask(RCTX *c, int all)
 /* Before a draw of points (Direct3D 8 and 9): their size in pixels, kept between the minimum and
    maximum the program set, and point sprites, which stretch each stage's texture over the
    point with (0, 0) at its top left (OpenGL's lower left: rows are in Direct3D's order, see
-   framebuffer). program_size: a vertex shader writes the size itself (oPts). Not done: sizes
-   scaled by distance (POINTSCALEENABLE) and sizes in the vertex; such points get the render
-   state's size. */
+   framebuffer). program_size: the vertex program writes the size itself (a shader's oPts, or
+   the fixed-function program scaling it by distance, tnl_arb.c). Not done: sizes in the
+   vertex; such points get the render state's size. */
 static void point_state(RCTX *c, int program_size)
 {
     GLF *gl = gl_of(c);
@@ -3643,6 +3646,7 @@ static void tnl_key(RCTX *c, const VERTICES *v, TNL_KEY *k)
         if (k->tex[s] && (flags & 7))
             k->xform[s] = (BYTE)((flags & 7) | (flags & D3DTTFF_PROJECTED ? TNL_PROJECTED : 0));
     }
+    k->point_scale = (BYTE)(c->points_now && c->rs[RS_POINTSCALEENABLE]);
 }
 
 /* The program for k: kept ones by their key (VP_CACHE, the least recently used goes), new ones
@@ -3816,6 +3820,19 @@ static void tnl_load(RCTX *c, const TNL_KEY *k)
     if (c->tnl_dirty & TNL_DIRTY_TEX)
         for (i = 0; i < TNL_STAGES; i++)
             env_columns(gl, TNL_ENV_TEX + 4 * i, c->xf_tex[i]);
+    if (k->point_scale) {               /* each such draw: points are few */
+        float lo = *(const float *)&c->rs[RS_POINTSIZE_MIN], hi = *(const float *)&c->rs[RS_POINTSIZE_MAX];
+        if (!(hi >= 1.0f) || hi > MAX_POINT_SIZE)
+            hi = MAX_POINT_SIZE;
+        if (!(lo >= 1.0f))
+            lo = 1.0f;
+        if (lo > hi)
+            lo = hi;
+        env4(gl, TNL_ENV_POINT, (float)(c->vp_w ? c->vp_h : c->fb_h) * *(const float *)&c->rs[RS_POINTSIZE],
+             lo, hi, 1.0e-12f);
+        env4(gl, TNL_ENV_POINT + 1, *(const float *)&c->rs[RS_POINTSCALE_A],
+             *(const float *)&c->rs[RS_POINTSCALE_A + 1], *(const float *)&c->rs[RS_POINTSCALE_A + 2], 0.0f);
+    }
     c->tnl_dirty = 0;
 }
 
@@ -4233,12 +4250,13 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
         return;
     }
     if (v->xyz) {                       /* untransformed: through a vertex program */
+        c->points_now = mode == GL_POINTS;
         if (!tnl_begin(c, v)) {
             skip8(c, "vertex processing");
             return;
         }
         if (mode == GL_POINTS)
-            point_state(c, 0);
+            point_state(c, c->rs[RS_POINTSCALEENABLE] != 0);
         tnl_arrays(c, v, first);
         if (!nidx)
             gl->DrawArrays(mode, 0, count);

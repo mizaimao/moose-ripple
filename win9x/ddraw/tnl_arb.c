@@ -378,6 +378,8 @@ unsigned int tnl_text(const TNL_KEY *k, char *out, unsigned int size)
         if (k->tex[s] == TNL_TEX_NORMAL || k->tex[s] == TNL_TEX_REFLECTION)
             need_n = 1;
     }
+    if (k->point_scale)
+        need_p = 1;
 
     emit(&o, "!!ARBvp1.0\n");
     emit(&o, "PARAM K = { 0, 1, 0.5, 0.25 };\n");
@@ -400,6 +402,24 @@ unsigned int tnl_text(const TNL_KEY *k, char *out, unsigned int size)
             op_end(&o);
         }
         ins(&o, "MOV", "p.w", "K.y", 0, 0);
+    }
+    if (k->point_scale) {
+        /* Direct3D: size = viewport height x size x sqrt(1 / (A + B d + C d d)), d the distance
+           from the eye, then kept between the minimum and the maximum. w.x: d d, w.y: d. */
+        ins(&o, "DP3", "w.x", "p", "p", 0);
+        op_begin(&o, "MAX", "w.x"); op_s(&o, "w.x"); op_env(&o, TNL_ENV_POINT, ".w"); op_end(&o);
+        ins(&o, "RSQ", "w.y", "w.x", 0, 0);
+        ins(&o, "MUL", "w.y", "w.y", "w.x", 0);
+        op_begin(&o, "MAD", "w.z"); op_env(&o, TNL_ENV_POINT + 1, ".y"); op_s(&o, "w.y");
+        op_env(&o, TNL_ENV_POINT + 1, ".x"); op_end(&o);
+        op_begin(&o, "MAD", "w.z"); op_env(&o, TNL_ENV_POINT + 1, ".z"); op_s(&o, "w.x");
+        op_s(&o, "w.z"); op_end(&o);
+        op_begin(&o, "MAX", "w.z"); op_s(&o, "w.z"); op_env(&o, TNL_ENV_POINT, ".w"); op_end(&o);
+        ins(&o, "RSQ", "w.z", "w.z", 0, 0);
+        op_begin(&o, "MUL", "w.z"); op_s(&o, "w.z"); op_env(&o, TNL_ENV_POINT, ".x"); op_end(&o);
+        op_begin(&o, "MAX", "w.z"); op_s(&o, "w.z"); op_env(&o, TNL_ENV_POINT, ".y"); op_end(&o);
+        op_begin(&o, "MIN", "result.pointsize.x"); op_s(&o, "w.z"); op_env(&o, TNL_ENV_POINT, ".z");
+        op_end(&o);
     }
     if (need_n) {
         if (k->normal) {
