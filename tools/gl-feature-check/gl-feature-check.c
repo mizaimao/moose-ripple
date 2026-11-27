@@ -2252,6 +2252,43 @@ static void run_iosurface_xproc(const char *self, const char *name, CGLPixelForm
     CFRelease(props); CFRelease(nw); CFRelease(nh); CFRelease(nb);
 }
 
+/* The iTunes visualizer's first check (breadth pass, 2026-11-27): a proxy rectangle texture of
+ * the view's size, RGBA with 8888_REV, then its width read back; the visualizer draws nothing
+ * when the answer is 0. A few sizes and formats, ours against Apple's software renderer. */
+static void run_proxy(const char *name, CGLPixelFormatAttribute renderer)
+{
+    CGLContextObj c = xproc_context(renderer);
+    if (!c) {
+        printf("%s: no context\n", name);
+        return;
+    }
+    CGLSetCurrentContext(c);
+    static const struct { GLenum target, ifmt, format, type; int w, h; } cases[] = {
+        { GL_PROXY_TEXTURE_RECTANGLE_ARB, GL_RGBA, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, 1098, 546 },
+        { GL_PROXY_TEXTURE_RECTANGLE_ARB, GL_RGBA, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, 1098, 546 },
+        { GL_PROXY_TEXTURE_RECTANGLE_ARB, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, 1098, 546 },
+        { GL_PROXY_TEXTURE_2D, GL_RGBA, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, 1024, 512 },
+        { GL_PROXY_TEXTURE_RECTANGLE_ARB, GL_RGBA, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, 8192, 8192 },
+    };
+    GLint maxrect = 0;
+    glGetIntegerv(GL_MAX_RECTANGLE_TEXTURE_SIZE_ARB, &maxrect);
+    printf("%s: proxy textures (max rectangle size %d)\n", name, maxrect);
+    for (unsigned k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+        GLint w = -1, h = -1, f = -1;
+        glTexImage2D(cases[k].target, 0, cases[k].ifmt, cases[k].w, cases[k].h, 0, cases[k].format,
+                     cases[k].type, NULL);
+        GLenum err = glGetError();
+        glGetTexLevelParameteriv(cases[k].target, 0, GL_TEXTURE_WIDTH, &w);
+        glGetTexLevelParameteriv(cases[k].target, 0, GL_TEXTURE_HEIGHT, &h);
+        glGetTexLevelParameteriv(cases[k].target, 0, GL_TEXTURE_INTERNAL_FORMAT, &f);
+        printf("  target 0x%x %dx%d ifmt 0x%x format 0x%x type 0x%x: width %d height %d internal 0x%x, "
+               "errors 0x%x 0x%x\n", cases[k].target, cases[k].w, cases[k].h, cases[k].ifmt,
+               cases[k].format, cases[k].type, w, h, f, err, glGetError());
+    }
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+}
+
 /* ---- stale: a context destroyed from another thread ----------------------------------------- *
  * A thread draws with a context and lets go of it; the main thread destroys that context and
  * makes the next one, which the thread then draws with. A garbage-collected program does this
@@ -2364,6 +2401,11 @@ int main(int argc, char **argv)
     if (argc > 4 && !strcmp(argv[1], "iosurface-xproc-child"))
         return run_iosurface_xproc_child(argv[4], (CGLPixelFormatAttribute)strtoul(argv[3], NULL, 0),
                                          (uint32_t)strtoul(argv[2], NULL, 0));
+    if (argc > 1 && !strcmp(argv[1], "proxy")) {
+        run_proxy("ours", 0);
+        run_proxy("software", (CGLPixelFormatAttribute)0x00020400);
+        return 0;
+    }
     if (argc > 1 && !strcmp(argv[1], "iosurface-xproc")) {
         run_iosurface_xproc(argv[0], "ours", 0);
         run_iosurface_xproc(argv[0], "software", (CGLPixelFormatAttribute)0x00020400);
