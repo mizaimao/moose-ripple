@@ -61,6 +61,54 @@ The mini-VDD logs the VDD's calls and Windows' exit on QEMU's debug port. Note: 
 shell32.dll,SHExitWindowsEx 2` does not restart (rundll32 passes a window handle as the flags);
 it shuts down.
 
+## Gamma ramps (2026-11-27)
+
+A game's brightness slider, DirectDraw's gamma control and Quake III's overbright lighting all
+set the display's gamma ramp with `SetDeviceGammaRamp`. On Windows 95/98/Me GDI passes that to the
+16-bit display driver: an entry `DDIGammaRamp(device, set, ramp)` at ordinal 32, called when the
+driver's capabilities have `C1_GAMMA_RAMP` (0x0020 in `dpCaps1`). The ramp is 256 words each of
+red, green and blue. The driver had neither, so every request failed.
+
+The card has no lookup table for a true-colour picture (QEMU applies the VGA palette to 8-bit
+modes only), so the guest applies the ramp itself, in the two places a picture leaves it:
+
+- `ripple9x.drv` keeps the ramp and sends it to the mini-VDD, an entry at a time through the
+  display driver's message to the VDD, 8 bits a value.
+- `ripplevd.vxd` applies it where it copies the desktop's picture to the host (`mirror_row`), and
+  keeps it, with a counter of its changes, for the OpenGL driver (request `RVD_GAMMA`).
+- `ripplegl.dll` copies every picture it presents into the shown image on the host. While a ramp
+  other than the identity is in force that copy is a draw: a fragment shader looks each colour
+  channel up in a 256 x 1 texture of the ramp. It runs in a context of its own, so none of the
+  program's OpenGL state has to be saved. OpenGL programs and Direct3D's full-screen flips both
+  present through this copy.
+
+The capability is announced only when the mini-VDD answers that it takes ramps, so a display
+driver beside an older VxD goes on refusing them. Not covered: 256-colour modes (the palette is
+the program's there), and the desktop while the card still shows it from its VGA memory: the
+ramp reaches it once the display has gone over to the GPU's image.
+
+`win2k/tools/gammatest.c` sets and reads ramps and draws bars of known colours with OpenGL. The
+shown picture cannot be read back inside the guest (the ramp comes after everything a program
+can read), so the check is a capture on the host while the bars are up.
+
+Checked that way on Windows 98 SE (Intel host, 2026-11-27):
+
+- `SetDeviceGammaRamp` succeeds and `GetDeviceGammaRamp` returns the ramp that was set.
+- A full-screen OpenGL window under a ramp that doubles every value: each of the 64 bars (16
+  values of grey, red, green and blue) is shown at exactly twice its value, 255 at most.
+- The desktop, once the display is on the GPU's image: its teal (00, 80, 80) is shown as
+  (00, ff, ff) under that ramp and as itself again under the identity.
+- DirectDraw puts the identity in force while a Direct3D program is full screen and the ramp
+  from before back when it leaves, through the same entry.
+
+One condition comes from how the OpenGL driver presents: it shows a full-screen window from
+the GPU only while the mouse pointer is hidden, as games hide it (with the pointer showing, the
+frames go through GDI into the card's memory, where the software pointer lives). The first
+run of the test left the pointer on and saw no ramp; the test hides it now.
+
+Not checked yet: a Direct3D program that sets a ramp of its own (it goes through the same
+copy, which was seen asking for the ramp during 3DMark 2000), and Quake III.
+
 ## Files
 
 | File | What |

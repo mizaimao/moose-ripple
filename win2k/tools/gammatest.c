@@ -101,6 +101,9 @@ static int bars(int seconds)
         return 1;
     }
     printf("GAMMATEST bars %dx%d renderer=%s\n", w, h, (const char *)glGetString(GL_RENDERER));
+    /* As a game does: the Windows 9x driver presents a full-screen window from the GPU only while
+     * the pointer is hidden (with it showing, frames go through GDI into the card's memory). */
+    ShowCursor(FALSE);
     glEnable(GL_SCISSOR_TEST);
     for (frames = 0; frames < seconds * 10; ++frames) {
         for (k = 0; k < 16; ++k) {
@@ -115,6 +118,7 @@ static int bars(int seconds)
         while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) DispatchMessageA(&msg);
         Sleep(100);
     }
+    ShowCursor(TRUE);
     wglMakeCurrent(NULL, NULL);
     wglDeleteContext(rc);
     ReleaseDC(window, dc);
