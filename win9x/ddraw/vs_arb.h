@@ -1,6 +1,6 @@
 /*
- * Direct3D vertex shaders (vs_1_0 and vs_1_1, and vs_2_0 without flow control) with their Direct3D 8
- * vertex declaration, as an ARB vertex program. MIT licence, see LICENSE.
+ * Direct3D vertex shaders (vs_1_0, vs_1_1 and vs_2_0 with its static flow control) with their
+ * Direct3D 8 vertex declaration, as an ARB vertex program. MIT licence, see LICENSE.
  *
  * The program reads the declared registers v0..v15 from generic attributes (vertex.attrib[n]),
  * c0..c255 from program.env, and from program.local[0] the target's half pixel (x: 1/width,
@@ -42,17 +42,28 @@ typedef struct {
     unsigned int psize;                     /* it writes the point size (oPts) */
     unsigned int defs;                      /* def constants, loaded over c# when it draws */
     struct { unsigned short reg; float v[4]; } def[VS_ARB_DEFS];
+    unsigned int flow_bools, flow_ints;     /* bit n: the program was written for the value bn, in
+                                               had (static flow control): another value needs
+                                               another program */
     unsigned int reason, detail;            /* why it was not translated (VS_ARB_*) */
 } VS_ARB;
+
+/* The boolean and integer constants static flow control reads (b0..b15 as bits; of each i#: a
+   count, aL's first value, its step). */
+typedef struct {
+    unsigned int bools;
+    int ints[16][4];
+} VS_ARB_FLOW;
 
 enum { VS_ARB_OK, VS_ARB_VERSION, VS_ARB_OPCODE, VS_ARB_REGISTER, VS_ARB_DECLARATION,
        VS_ARB_TRUNCATED, VS_ARB_OVERFLOW };
 
 /* The program text into out (size bytes) and the layout into info; the length with the final
-   0, or 0 if the shader can't be translated (info->reason says why). */
+   0, or 0 if the shader can't be translated (info->reason says why). flow: the b# and i# of
+   the moment (NULL: all zero); the program holds for these values of the ones info names. */
 unsigned int vs_to_arb(const unsigned int *code, unsigned int codeWords, const unsigned int *decl,
                        unsigned int declWords, unsigned int key, char *out, unsigned int size,
-                       VS_ARB *info);
+                       VS_ARB *info, const VS_ARB_FLOW *flow);
 
 /* The layout of a declaration that came without code (the fixed-function pipeline through a
    declaration) into info; 0 if it can't be read. */

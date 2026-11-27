@@ -33,6 +33,7 @@
 #include "tgsi_arb.h"     /* that text as an ARB fragment program */
 #include "tnl_arb.h"      /* fixed-function vertex processing as an ARB vertex program */
 #include "vs_arb.h"       /* vertex shaders as ARB vertex programs */
+#include "d3d9_decl.h"    /* Direct3D 9 declarations in Direct3D 8's terms (win2k/), shared with Windows 2000 */
 #include "rippled3d.h"
 
 /* ---- No C run-time: what the compiler expects of it ------------------------------------------ */
@@ -639,6 +640,8 @@ static int gl_load_ext(RPROC *p)
 static int d8_on;                       /* the Direct3D 8 interface is offered (d3d8_enabled) */
 static int tnl_on;                      /* with hardware vertex processing (D3D8 is "2") */
 static int buf_on;                      /* and buffers the driver allocates (unless D3D8Buffers is "0") */
+static int d9_on;                       /* the Direct3D 9 driver interface is offered to a DirectX 9
+                                           runtime (unless D3D9 is "0"; d9_resolve) */
 
 /* ---- Surface handles: DirectX 7 names surfaces in the command stream by handle --------------- */
 typedef struct {
@@ -1234,8 +1237,11 @@ int d3d_surface_format_ok(LPDDSURFACEDESC desc)
 #define FF_STAGES 2                     /* fixed-function stages offered to Direct3D 7 */
 #define FF8_STAGES 4                    /* and drawn for Direct3D 8 and 9, before FOG_UNIT */
 #define FOG_UNIT 4                      /* the OpenGL texture unit that does fixed-function fog */
-#define MAX_VS 64                       /* Direct3D 8 and 9 vertex shaders a context keeps */
-#define VS_VARIANTS 4                   /* programs a vertex shader keeps (fog) */
+#define MAX_VS 320                      /* Direct3D 8 and 9 vertex shaders a context keeps: the
+                                           runtime's, and the pairs of the Direct3D 9 interface
+                                           (D9_PAIRS) */
+#define VS_VARIANTS 8                   /* programs a vertex shader keeps (fog; the values of the
+                                           boolean and integer constants its flow control read) */
 #define MAX_LIGHTS 128                  /* lights kept, by slot (light_slot: Direct3D's indices may be
                                            any number) */
 
@@ -1247,7 +1253,11 @@ struct vs8 {
     int failed;                         /* couldn't be translated: its draws are skipped */
     VS_ARB info;
     DWORD nvar;
-    struct { DWORD key; GLuint prog; } var[VS_VARIANTS];
+    struct {
+        DWORD key;
+        GLuint prog;
+        DWORD bools_read, bools, ints_read, ints[16][3];    /* static flow control: written for these */
+    } var[VS_VARIANTS];
 };
 #define VP_CACHE 16                     /* vertex programs a context keeps */
 #define TNL_DIRTY_XF    1               /* world, view, projection, viewport */
@@ -1306,6 +1316,9 @@ typedef struct {
     GLuint fbo, white, black, fog_tex;
     DWORD fb_w, fb_h;
     FLATPTR fb_z;                       /* the z-buffer whose depth is attached (0: none) */
+    FLATPTR z_mem;                      /* the z-buffer's memory, read when it was set: its record (z)
+                                           is not read again, it may be gone before the command
+                                           that replaces it arrives (the Direct3D 9 interface) */
     GPUBUF cb[TARGETS];                 /* the picture of each render target */
     GPUBUF zb[ZBUFFERS];                /* the depth of each z-buffer */
     GPUBUF *cur;                        /* the attached colour buffer (NULL: none yet) */
@@ -1338,6 +1351,23 @@ typedef struct {
     DWORD fvf8, stream_handle, stream_stride, index_handle, index_stride;
     DWORD sx_handle[VS_ARB_STREAMS], sx_stride[VS_ARB_STREAMS];    /* streams 1 and up: their vertex
                                            buffers (a vertex shader's declaration reads them) */
+    /* The Direct3D 9 driver interface (d9_resolve): the declarations and shader functions the
+       runtime made, the Direct3D 8 shaders made of their pairs, the current declaration (or
+       vertex format code) and function, each stream's byte offset, the scissor rectangle, and
+       the vertex shaders' integer and boolean constants. dx9: this context has had a command of
+       that interface. */
+    struct d9_decl *decls;
+    struct d9_func *funcs;
+    struct d9_pair *pairs;
+    DWORD decl9, func9, pair_last, vs_hit;
+    DWORD rt9, z9;                      /* the render target's and the depth buffer's handles, as
+                                           SETRENDERTARGET2 and SETDEPTHSTENCIL named them */
+    int z9_set;
+    DWORD blt_skipped;
+    DWORD stream_offset, sx_offset[VS_ARB_STREAMS];
+    LONG scissor9[4];
+    DWORD vs_int[16][4], vs_bool;
+    int dx9;
     int stream_user;
     int dx8;                            /* made by the Direct3D 8 or 9 runtime */
     DWORD skipped8;                     /* Direct3D 8 draws not drawn (see stream_draw) */
@@ -1396,6 +1426,7 @@ typedef struct {
 
 static long ps_program(RCTX *c);
 static void attribs_off(RCTX *c);
+static void d9_release(RCTX *c);
 static void ps_apply(RCTX *c, long prog);
 static void skip8(RCTX *c, const char *why);
 
@@ -1749,16 +1780,38 @@ int d3d_present(LPDDRAWI_DDRAWSURFACE_LCL front, LPDDRAWI_DDRAWSURFACE_LCL targe
    smaller than the target needs the scissor, one that covers it needs none. Rows are in
    Direct3D's order (see framebuffer), as in clear. Set when the viewport or the target's size
    changes and after clear and rt_upload, never for each draw. */
+#define RB_D3DFVF_FOG 0x2000UL            /* d3dhal.h's D3DFVF_FOG: a separate fog value in the vertex */
+#define RS_SCISSORTESTENABLE 174          /* Direct3D 9: draws and clears stay inside the scissor
+                                           rectangle (SETSCISSORRECT) */
+
+/* OpenGL's scissor test: a viewport smaller than the target (Direct3D draws nothing outside
+   it), and the Direct3D 9 interface's scissor rectangle inside that. */
 static void apply_scissor(RCTX *c)
 {
     GLF *gl = gl_of(c);
+    LONG x0 = 0, y0 = 0, x1 = (LONG)c->fb_w, y1 = (LONG)c->fb_h;
+    int on = 0;
 
-    if (!c->vp_w || !c->vp_h ||
-        (!c->vp_x && !c->vp_y && c->vp_w >= c->fb_w && c->vp_h >= c->fb_h)) {
+    if (c->vp_w && c->vp_h &&
+        (c->vp_x || c->vp_y || c->vp_w < c->fb_w || c->vp_h < c->fb_h)) {
+        x0 = (LONG)c->vp_x;
+        y0 = (LONG)c->vp_y;
+        x1 = x0 + (LONG)c->vp_w;
+        y1 = y0 + (LONG)c->vp_h;
+        on = 1;
+    }
+    if (c->dx9 && c->rs[RS_SCISSORTESTENABLE]) {
+        if (c->scissor9[0] > x0) x0 = c->scissor9[0];
+        if (c->scissor9[1] > y0) y0 = c->scissor9[1];
+        if (c->scissor9[2] < x1) x1 = c->scissor9[2];
+        if (c->scissor9[3] < y1) y1 = c->scissor9[3];
+        on = 1;
+    }
+    if (!on) {
         gl->Disable(GL_SCISSOR_TEST);
         return;
     }
-    gl->Scissor(c->vp_x, c->vp_y, c->vp_w, c->vp_h);
+    gl->Scissor(x0, y0, x1 > x0 ? x1 - x0 : 0, y1 > y0 ? y1 - y0 : 0);
     gl->Enable(GL_SCISSOR_TEST);
 }
 
@@ -1877,7 +1930,7 @@ static int framebuffer(RCTX *c)
     GLF *gl = gl_of(c);
     DWORD w = c->rt ? c->rt->lpGbl->wWidth : 1, h = c->rt ? c->rt->lpGbl->wHeight : 1;
     FLATPTR mem = c->rt ? c->rt->lpGbl->fpVidMem : 0;
-    FLATPTR zmem = c->z ? c->z->lpGbl->fpVidMem : 0;
+    FLATPTR zmem = c->z ? c->z_mem : 0;
     GPUBUF *cb;
     GLuint depth;
 
@@ -1938,6 +1991,7 @@ static void context_free(RCTX *c)
     GLF *gl = gl_of(c);
     DWORD i;
 
+    d9_release(c);
     for (i = 0; i < MAX_PS; i++)
         release(c->ps[i].code);         /* the programs go with the OpenGL context */
     for (i = 0; i < MAX_VS; i++)
@@ -2190,6 +2244,9 @@ static void render_state(RCTX *c, DWORD state, DWORD v)
         break;
     case D3DRENDERSTATE_COLORKEYENABLE:   /* textures are uploaded with or without their key */
         c->stages_dirty = 1;
+        break;
+    case RS_SCISSORTESTENABLE:
+        apply_scissor(c);
         break;
     case RS_COLORWRITEENABLE:
         colour_mask(c, 0);
@@ -3177,6 +3234,8 @@ typedef struct {
     int pos;                            /* the position's byte offset (0 but for a declaration) */
     int psize_at;                       /* points: 1 + the byte offset of each vertex's size (D3DFVF_PSIZE,
                                            untransformed vertices), 0: none */
+    int fog_at;                         /* transformed vertices: 1 + the byte offset of a separate fog
+                                           factor (RB_D3DFVF_FOG), 0: fog is the specular's alpha */
     BYTE src[12];                       /* the stream each attribute comes from, 0 but for a
                                            declaration: position, normal, diffuse, specular,
                                            texture coordinate sets 0..7 */
@@ -3231,6 +3290,14 @@ static int parse_fvf(DWORD fvf, VERTICES *v)
     v->diffuse = v->specular = -1;
     if (fvf & D3DFVF_DIFFUSE) { v->diffuse = off; off += 4; }
     if (fvf & D3DFVF_SPECULAR) { v->specular = off; off += 4; }
+    /* A separate fog factor, a float after the colours: the Direct3D 9 interface must offer it
+       (D3DPMISCCAPS_FOGINFVF, d9_caps), and the runtime's own vertex processing then puts the
+       fog there and not in the specular colour's alpha. */
+    v->fog_at = 0;
+    if ((fvf & RB_D3DFVF_FOG) && pos == D3DFVF_XYZRHW) {
+        v->fog_at = (int)off + 1;
+        off += 4;
+    }
     n = (fvf & D3DFVF_TEXCOUNT_MASK) >> D3DFVF_TEXCOUNT_SHIFT;
     for (i = 0; i < 8; i++) {
         v->tex[i] = -1;
@@ -3273,7 +3340,8 @@ static float fog_factor(RCTX *c, const VERTICES *v, const BYTE *b)
     float f, z = ((const float *)b)[2];
 
     if (mode == D3DFOG_NONE) {
-        f = v->specular >= 0 ? b[v->specular + 3] / 255.0f : 1.0f;
+        f = v->fog_at ? *(const float *)(b + v->fog_at - 1) :
+            v->specular >= 0 ? b[v->specular + 3] / 255.0f : 1.0f;
     } else if (mode == D3DFOG_LINEAR) {
         float start = *(float *)&c->rs[D3DRENDERSTATE_FOGSTART];
         float end = *(float *)&c->rs[D3DRENDERSTATE_FOGEND];
@@ -3987,10 +4055,14 @@ static void attribs_off(RCTX *c)
 /* ---- Vertex shaders on the GPU (with tnl_on) ---- */
 static struct vs8 *vs_find(RCTX *c, DWORD handle)
 {
-    DWORD i;
+    DWORD i = c->vs_hit;                /* the one found last: a draw asks several times */
+    if (handle && i < MAX_VS && c->vs[i] && c->vs[i]->handle == handle)
+        return c->vs[i];
     for (i = 0; handle && i < MAX_VS; i++)
-        if (c->vs[i] && c->vs[i]->handle == handle)
+        if (c->vs[i] && c->vs[i]->handle == handle) {
+            c->vs_hit = i;
             return c->vs[i];
+        }
     return NULL;
 }
 
@@ -4017,6 +4089,19 @@ static void vs_delete(RCTX *c, DWORD handle)
 }
 
 /* The program for s with fog key key, made when first needed; 0 if it can't be made. */
+/* A program of the shader was written for the values the flow control constants have now. */
+static int vs_flow_same(const RCTX *c, const struct vs8 *s, DWORD i)
+{
+    DWORD k;
+    if ((c->vs_bool & s->var[i].bools_read) != s->var[i].bools)
+        return 0;
+    for (k = 0; s->var[i].ints_read && k < 16; k++)
+        if ((s->var[i].ints_read & (1UL << k)) &&
+            memcmp(c->vs_int[k], s->var[i].ints[k], sizeof s->var[i].ints[k]))
+            return 0;
+    return 1;
+}
+
 static GLuint vs_program(RCTX *c, struct vs8 *s, DWORD key)
 {
     GLF *gl = gl_of(c);
@@ -4024,9 +4109,10 @@ static GLuint vs_program(RCTX *c, struct vs8 *s, DWORD key)
     char *text;
     unsigned int n;
     GLuint prog = 0;
+    VS_ARB_FLOW flow;
 
     for (i = 0; i < s->nvar; i++)
-        if (s->var[i].key == key)
+        if (s->var[i].key == key && vs_flow_same(c, s, i))
             return s->var[i].prog;
     if (s->failed)
         return 0;
@@ -4039,8 +4125,10 @@ static GLuint vs_program(RCTX *c, struct vs8 *s, DWORD key)
         s->nvar--;
     }
     text = (char *)alloc(VS_ARB_TEXT_BYTES);
+    flow.bools = c->vs_bool;
+    memcpy(flow.ints, c->vs_int, sizeof flow.ints);
     n = text ? vs_to_arb((const unsigned int *)s->code, s->ncode, (const unsigned int *)s->decl,
-                         s->ndecl, key, text, VS_ARB_TEXT_BYTES, &s->info) : 0;
+                         s->ndecl, key, text, VS_ARB_TEXT_BYTES, &s->info, &flow) : 0;
     if (!n) {
         tracef("rd3d: vertex shader %lx not translated: reason %lu, detail %lx\r\n", s->handle,
                (DWORD)s->info.reason, (DWORD)s->info.detail);
@@ -4072,6 +4160,11 @@ static GLuint vs_program(RCTX *c, struct vs8 *s, DWORD key)
             i = s->nvar++;
             s->var[i].key = key;
             s->var[i].prog = prog;
+            s->var[i].bools_read = s->info.flow_bools;
+            s->var[i].bools = c->vs_bool & s->info.flow_bools;
+            s->var[i].ints_read = s->info.flow_ints;
+            for (n = 0; n < 16; n++)
+                memcpy(s->var[i].ints[n], c->vs_int[n], sizeof s->var[i].ints[n]);
         }
     }
     release(text);
@@ -4114,6 +4207,224 @@ static void vs_create(RCTX *c, const RB_DP2_CREATE_VERTEX_SHADER *r)
         return;
     }
     vs_program(c, s, 0);                /* now, so a shader that can't be made says so early */
+}
+
+/* ---- The Direct3D 9 driver interface ---------------------------------------------------------
+   A DirectX 9 runtime on this interface (d9_on; D3D9 "0" in the registry keeps it off) creates vertex
+   declarations (D3DVERTEXELEMENT9) and shader functions separately and makes one of each
+   current; a declaration handle has bit 0 set, any other handle is a vertex format code for
+   stream 0. For a draw, the pair becomes a Direct3D 8 vertex shader of the kind the rest of
+   this file draws (win2k/d3d9_decl.c, shared with the Windows 2000/XP driver): declaration
+   tokens that give each element the input register the function's dcl statement names for its
+   usage, and the code. A declaration without a function is a vertex format code where it is
+   one, else a Direct3D 8 declaration without code (decl_vertices). */
+#define D9_DECLS 256
+#define D9_FUNCS 512
+#define D9_PAIRS 256
+#define D9_PAIR_HANDLE 0x40000001UL     /* the shaders made here: odd, as the runtime's are */
+#define D9_DECL_WORDS (4 * 65 + 2 * VS_ARB_STREAMS + 2)
+
+struct d9_decl { DWORD handle, count, fvf; RB_D9_ELEMENT *elements; };
+struct d9_func { DWORD handle, words; DWORD *tokens; };
+struct d9_pair { DWORD decl, func, vs; };
+
+static int d9_tables(RCTX *c)
+{
+    if (!c->decls) c->decls = (struct d9_decl *)alloc(D9_DECLS * sizeof *c->decls);
+    if (!c->funcs) c->funcs = (struct d9_func *)alloc(D9_FUNCS * sizeof *c->funcs);
+    if (!c->pairs) c->pairs = (struct d9_pair *)alloc(D9_PAIRS * sizeof *c->pairs);
+    return c->decls && c->funcs && c->pairs;
+}
+
+/* Forget the shaders made from a declaration or a function handle (0 matches none). */
+static void d9_forget(RCTX *c, DWORD decl, DWORD func)
+{
+    DWORD i;
+    for (i = 0; c->pairs && i < D9_PAIRS; i++) {
+        struct d9_pair *q = &c->pairs[i];
+        if (!q->vs || ((!decl || q->decl != decl) && (!func || q->func != func)))
+            continue;
+        vs_delete(c, q->vs);
+        memset(q, 0, sizeof *q);
+    }
+}
+
+static struct d9_decl *d9_decl(RCTX *c, DWORD handle)
+{
+    DWORD i;
+    for (i = 0; c->decls && handle && i < D9_DECLS; i++)
+        if (c->decls[i].handle == handle)
+            return &c->decls[i];
+    return NULL;
+}
+
+static struct d9_func *d9_func(RCTX *c, DWORD handle)
+{
+    DWORD i;
+    for (i = 0; c->funcs && handle && i < D9_FUNCS; i++)
+        if (c->funcs[i].handle == handle)
+            return &c->funcs[i];
+    return NULL;
+}
+
+static void d9_delete_decl(RCTX *c, DWORD handle)
+{
+    struct d9_decl *e = d9_decl(c, handle);
+    d9_forget(c, handle, 0);
+    if (!e)
+        return;
+    release(e->elements);
+    memset(e, 0, sizeof *e);
+}
+
+static void d9_delete_func(RCTX *c, DWORD handle)
+{
+    struct d9_func *f = d9_func(c, handle);
+    d9_forget(c, 0, handle);
+    if (!f)
+        return;
+    release(f->tokens);
+    memset(f, 0, sizeof *f);
+}
+
+static void d9_create_decl(RCTX *c, DWORD handle, const RB_D9_ELEMENT *elements, DWORD count)
+{
+    struct d9_decl *e;
+    DWORD i;
+
+    if (!d9_tables(c) || !handle)
+        return;
+    d9_delete_decl(c, handle);
+    for (i = 0; i < D9_DECLS && c->decls[i].handle; i++)
+        ;
+    if (i == D9_DECLS || !count || count > 65) {
+        dbg("rd3d: a vertex declaration is not kept\r\n");
+        return;
+    }
+    e = &c->decls[i];
+    e->elements = (RB_D9_ELEMENT *)alloc(count * sizeof *elements);
+    if (!e->elements)
+        return;
+    memcpy(e->elements, elements, count * sizeof *elements);
+    e->handle = handle;
+    e->count = count;
+    e->fvf = rb_d9_decl_fvf(e->elements, count);
+    tracef("rd3d: vertex declaration %lx: %lu elements, vertex format %lx\r\n", handle, count, e->fvf);
+}
+
+static void d9_create_func(RCTX *c, DWORD handle, const DWORD *tokens, DWORD bytes)
+{
+    struct d9_func *f;
+    DWORD i;
+
+    if (!d9_tables(c) || !handle)
+        return;
+    d9_delete_func(c, handle);
+    for (i = 0; i < D9_FUNCS && c->funcs[i].handle; i++)
+        ;
+    if (i == D9_FUNCS || bytes < 8 || bytes % 4) {
+        dbg("rd3d: a vertex shader function is not kept\r\n");
+        return;
+    }
+    f = &c->funcs[i];
+    f->tokens = (DWORD *)alloc(bytes);
+    if (!f->tokens)
+        return;
+    memcpy(f->tokens, tokens, bytes);
+    f->handle = handle;
+    f->words = bytes / 4;
+}
+
+/* The Direct3D 8 vertex shader for a declaration and a function (0: the declaration alone, for
+   the fixed-function pipeline), made on first use. A pair that can't be said keeps a handle
+   without a shader behind it, so that its draws are skipped without trying again each time. */
+static DWORD d9_shader(RCTX *c, DWORD decl, DWORD func)
+{
+    struct d9_decl *dl;
+    struct d9_func *fn = NULL;
+    RB_DP2_CREATE_VERTEX_SHADER *r;
+    unsigned long *out, dw = 0, cw = 0;
+    DWORD i, at = D9_PAIRS, room;
+
+    if (c->pairs && c->pairs[c->pair_last].vs && c->pairs[c->pair_last].decl == decl &&
+        c->pairs[c->pair_last].func == func)
+        return c->pairs[c->pair_last].vs;
+    dl = d9_decl(c, decl);
+    if (func)
+        fn = d9_func(c, func);
+    if (!dl || (func && !fn) || !d9_tables(c))
+        return 0;
+    for (i = 0; i < D9_PAIRS; i++) {
+        if (c->pairs[i].vs && c->pairs[i].decl == decl && c->pairs[i].func == func) {
+            c->pair_last = i;
+            return c->pairs[i].vs;
+        }
+        if (!c->pairs[i].vs && at == D9_PAIRS)
+            at = i;
+    }
+    if (at == D9_PAIRS) {               /* full: the oldest slot's declaration gives up its pairs */
+        d9_forget(c, c->pairs[0].decl, 0);
+        at = 0;
+    }
+    room = D9_DECL_WORDS + (fn ? fn->words : 0);
+    r = (RB_DP2_CREATE_VERTEX_SHADER *)alloc(sizeof *r + room * 4);
+    if (!r)
+        return 0;
+    out = (unsigned long *)(r + 1);
+    r->handle = D9_PAIR_HANDLE + 2 * at;
+    if (fn ? rb_d9_translate(dl->elements, dl->count, (const unsigned long *)fn->tokens, fn->words,
+                             VS_ARB_STREAMS, out, room, &dw, &cw)
+           : (dw = rb_d9_decl_fixed(dl->elements, dl->count, VS_ARB_STREAMS, out, room)) != 0) {
+        r->declBytes = dw * 4;
+        r->codeBytes = cw * 4;
+        vs_create(c, r);
+    } else {
+        dbg("rd3d: a vertex declaration and function can't be drawn\r\n");
+    }
+    tracef("rd3d: declaration %lx with function %lx: shader %lx, %lu declaration words, %lu of code\r\n",
+           decl, func, r->handle, (DWORD)dw, (DWORD)cw);
+    c->pairs[at].decl = decl;
+    c->pairs[at].func = func;
+    c->pairs[at].vs = r->handle;
+    c->pair_last = at;
+    release(r);
+    return c->pairs[at].vs;
+}
+
+/* Before a draw on the Direct3D 9 interface: the vertex format code, or the Direct3D 8 shader
+   of the current declaration and function, as c->fvf8. 0 when there is nothing to draw with. */
+static int d9_resolve(RCTX *c)
+{
+    struct d9_decl *dl;
+
+    if (c->func9) {
+        c->fvf8 = d9_shader(c, c->decl9, c->func9);
+        return c->fvf8 != 0;
+    }
+    if (!(c->decl9 & 1)) {              /* a vertex format code */
+        c->fvf8 = c->decl9;
+        return c->fvf8 != 0;
+    }
+    dl = d9_decl(c, c->decl9);
+    if (!dl)
+        return 0;
+    c->fvf8 = dl->fvf ? dl->fvf : d9_shader(c, c->decl9, 0);
+    return c->fvf8 != 0;
+}
+
+static void d9_release(RCTX *c)
+{
+    DWORD i;
+    for (i = 0; c->decls && i < D9_DECLS; i++)
+        release(c->decls[i].elements);
+    for (i = 0; c->funcs && i < D9_FUNCS; i++)
+        release(c->funcs[i].tokens);
+    release(c->decls);
+    release(c->funcs);
+    release(c->pairs);
+    c->decls = NULL;
+    c->funcs = NULL;
+    c->pairs = NULL;
 }
 
 /* Before a draw through a vertex shader: its program bound and on, c0..c255 and its def
@@ -4219,7 +4530,7 @@ static const BYTE *stream_at(RCTX *c, const VERTICES *v, DWORD first, DWORD st, 
     bind_buffer(c, GL_ARRAY_BUFFER_ARB, vbo);
     tracef("rd3d: stream %lu: buffer %lx stride %lu, object %lu, vertex %ld + %lu, offset %lu\r\n", st,
            c->sx_handle[st], *stride, (DWORD)vbo, v->first_vertex, first, offset);
-    return (vbo ? (const BYTE *)0 : mem) + ((DWORD)v->first_vertex + first) * *stride + offset;
+    return (vbo ? (const BYTE *)0 : mem) + c->sx_offset[st] + ((DWORD)v->first_vertex + first) * *stride + offset;
 }
 
 /* The streams a declaration's fixed-function attributes come from, as bits. */
@@ -4241,7 +4552,7 @@ static int streams_ok(RCTX *c, const VERTICES *v, DWORD first, DWORD count, DWOR
         if (!(streams & (1UL << st)))
             continue;
         if (v->first_vertex < 0 || !c->sx_stride[st] || !buffer_get(c->ddl, c->sx_handle[st], &bytes) ||
-            ((DWORD)v->first_vertex + first + count) * c->sx_stride[st] > bytes)
+            c->sx_offset[st] + ((DWORD)v->first_vertex + first + count) * c->sx_stride[st] > bytes)
             return 0;
     }
     return 1;
@@ -4604,11 +4915,14 @@ static void clear(RCTX *c, DWORD flags, DWORD color, float depth, DWORD stencil,
     GLF *gl = gl_of(c);
     GLbitfield mask = 0;
     DWORD i;
+    int cut = c->dx9 && c->rs[RS_SCISSORTESTENABLE];  /* Direct3D 9: a clear stays inside the
+                                                         scissor rectangle too */
+    RECT whole;
 
     if (c->cur && c->cur->written && (flags & D3DCLEAR_TARGET)) {
         /* a clear of the whole picture makes what the program drew moot (one of the depth
            only leaves that to the next draw or clear) */
-        if ((flags & D3DCLEAR_TARGET) && (!n || (n == 1 && rects[0].left <= 0 &&
+        if ((flags & D3DCLEAR_TARGET) && !cut && (!n || (n == 1 && rects[0].left <= 0 &&
             rects[0].top <= 0 && (DWORD)rects[0].right >= c->fb_w &&
             (DWORD)rects[0].bottom >= c->fb_h)))
             c->cur->written = 0;
@@ -4634,10 +4948,25 @@ static void clear(RCTX *c, DWORD flags, DWORD color, float depth, DWORD stencil,
     }
     if (!mask)
         return;
+    if (!n && cut) {                    /* all of the target, cut below */
+        whole.left = whole.top = 0;
+        whole.right = (LONG)c->fb_w;
+        whole.bottom = (LONG)c->fb_h;
+        rects = &whole;
+        n = 1;
+    }
     gl->Enable(GL_SCISSOR_TEST);
     for (i = 0; i < n; i++) {
-        const RECT *r = &rects[i];
-        gl->Scissor(r->left, r->top, r->right - r->left, r->bottom - r->top);
+        LONG x0 = rects[i].left, y0 = rects[i].top, x1 = rects[i].right, y1 = rects[i].bottom;
+        if (cut) {
+            if (c->scissor9[0] > x0) x0 = c->scissor9[0];
+            if (c->scissor9[1] > y0) y0 = c->scissor9[1];
+            if (c->scissor9[2] < x1) x1 = c->scissor9[2];
+            if (c->scissor9[3] < y1) y1 = c->scissor9[3];
+        }
+        if (x1 <= x0 || y1 <= y0)
+            continue;
+        gl->Scissor(x0, y0, x1 - x0, y1 - y0);
         gl->Clear(mask);
     }
     if (!n) {
@@ -4673,6 +5002,7 @@ static int set_render_target(RCTX *c, LPDDRAWI_DDRAWSURFACE_LCL rt, LPDDRAWI_DDR
            (DWORD)rt->lpGbl->wHeight, z ? z->lpGbl->fpVidMem : 0);
     c->rt = rt;
     c->z = z;
+    c->z_mem = z ? z->lpGbl->fpVidMem : 0;
     if (!framebuffer(c))
         return 0;
     apply_depth_test(c);                /* with or without a z-buffer now */
@@ -4820,6 +5150,7 @@ static DWORD WINAPI ContextCreate(LPD3DHAL_CONTEXTCREATEDATA d)
     }
     c->rt = d->lpDDSLcl;
     c->z = d->lpDDSZLcl;
+    c->z_mem = c->z ? c->z->lpGbl->fpVidMem : 0;
     if (!framebuffer(c)) {
         context_free(c);
         return DDHAL_DRIVER_HANDLED;
@@ -5096,7 +5427,7 @@ static void volume_blt(RCTX *c, const RB_DP2_VOLUME_BLT *b)
     ssh = (const struct shadow *)ss;
     surface_format(ss, &pf);
     f = gl_format(&pf);
-    if (!f.bytes)
+    if (!f.bytes && !f.block)
         return;
     levels = dsh->levels < ssh->levels ? dsh->levels : ssh->levels;
     for (l = 0; l < levels; l++) {
@@ -5118,6 +5449,20 @@ static void volume_blt(RCTX *c, const RB_DP2_VOLUME_BLT *b)
         if (x1 > sg->wWidth || y1 > sg->wHeight || z1 > sd || dx + x1 - x0 > dg->wWidth ||
             dy + y1 - y0 > dg->wHeight || dz + z1 - z0 > dd || !sg->fpVidMem || !dg->fpVidMem)
             break;
+        if (f.block) {
+            /* DXT: whole 4x4 blocks, each slice its rows of blocks (as volume_bind reads them).
+               The Direct3D 9 interface fills its managed volumes this way; without it a
+               compressed volume stayed empty. */
+            DWORD bsp = volume_pitch(sg, &f), srows = (sg->wHeight + 3) / 4, drows = (dg->wHeight + 3) / 4;
+            DWORD bx0 = x0 / 4, bx1 = (x1 + 3) / 4, by0 = y0 / 4, by1 = (y1 + 3) / 4;
+            for (z = z0; z < z1; z++)
+                for (y = by0; y < by1; y++)
+                    memcpy((BYTE *)dg->fpVidMem + (dz + z - z0) * dp * drows + (dy / 4 + y - by0) * dp +
+                           (dx / 4) * f.block,
+                           (const BYTE *)sg->fpVidMem + z * bsp * srows + y * bsp + bx0 * f.block,
+                           (bx1 - bx0) * f.block);
+            continue;
+        }
         for (z = z0; z < z1; z++)
             for (y = y0; y < y1; y++)
                 memcpy((BYTE *)dg->fpVidMem + (dz + z - z0) * dp * dg->wHeight + (dy + y - y0) * dp + dx * f.bytes,
@@ -5421,8 +5766,8 @@ static GLuint buffer_object(RCTX *c, DWORD h, GLenum target)
 /* ---- Direct3D 8 draws ----------------------------------------------------------------------- */
 /* The vertices of a declaration that came without code: the fixed-function pipeline reads them
    through it, each register a fixed attribute (Direct3D 8's D3DVSDE_*: 0 position, 3 normal,
-   5 diffuse, 6 specular, 7 to 14 texture coordinate sets; blend weights and indices, point size
-   and the tweening inputs are not read), each from its own stream. 0 if the position or a type
+   4 a point's size, 5 diffuse, 6 specular, 7 to 14 texture coordinate sets; blend weights and
+   indices and the tweening inputs are not read), each from its own stream. 0 if the position or a type
    is not what the pipeline's program reads. */
 static int decl_vertices(const struct vs8 *s, VERTICES *v)
 {
@@ -5465,6 +5810,8 @@ static int decl_vertices(const struct vs8 *s, VERTICES *v)
             v->texsize[i] = d->type[7 + i] + 1;
             v->src[4 + i] = d->stream[7 + i];
         }
+    if ((d->inputs & (1UL << 4)) && d->type[4] == 0 && !d->stream[4])
+        v->psize_at = (int)d->offset[4] + 1;    /* each point's size: one float, from stream 0 */
     return 1;
 }
 
@@ -5511,6 +5858,12 @@ static int stream_vertices(RCTX *c, LPD3DHAL_DRAWPRIMITIVES2DATA d, VERTICES *v)
         if (v->shader || v->xyz) {      /* drawn by a vertex program: from a buffer object */
             v->vbo = buffer_object(c, c->stream_handle, GL_ARRAY_BUFFER_ARB);
             v->start = data;
+        }
+        if (c->stream_offset) {         /* Direct3D 9: the stream begins inside its buffer */
+            if (c->stream_offset >= bytes)
+                return 0;
+            data += c->stream_offset;
+            bytes -= c->stream_offset;
         }
     }
     v->base = data;
@@ -5567,6 +5920,10 @@ static void stream_draw(RCTX *c, LPD3DHAL_DRAWPRIMITIVES2DATA d, DWORD type, lon
     DWORD verts, lo, span;
     GLenum mode = prim_mode(type, prims, &verts);
 
+    if (c->dx9 && !d9_resolve(c)) {    /* Direct3D 9: the declaration and function as c->fvf8 */
+        skip8(c, "vertex declaration");
+        return;
+    }
     tracef("rd3d: draw type %lu, first byte %ld, %lu primitives%s, stream %lx stride %lu%s, fvf %lx\r\n",
            type, first, prims, indexed ? " indexed" : "", c->stream_handle, c->stream_stride,
            c->stream_user ? " (user)" : "", c->fvf8);
@@ -5652,6 +6009,145 @@ static void buffer_blt(RCTX *c, const RB_DP2_BUFFER_BLT *b)
 
 /* Commands that carry n records of size bytes, each followed by a variable part of the length
    in the record's words w1 (and w2, if not 0): the bytes they take, or 0xFFFFFFFF. */
+/* The depth buffer for the render target of the Direct3D 9 interface, which sets the two with
+   separate commands. Each is kept as the handle its command gave and looked up when the other
+   changes, never as a pointer from before: the runtime may destroy a depth surface (and give
+   its handle to a new surface) before the commands that replace it arrive. A target set after
+   that would keep the dead surface as its depth buffer. (What stood the system still in
+   d9pixels after rt_small_depth released its depth surface was framebuffer reading the dead
+   record at the start of the next command batch: z_mem.) NULL: none, or no longer one. */
+static LPDDRAWI_DDRAWSURFACE_LCL d9_depth(RCTX *c)
+{
+    LPDDRAWI_DDRAWSURFACE_LCL z;
+    if (!c->z9_set)
+        return c->z;                    /* the one the context was made with */
+    z = c->z9 ? handle_get(c->ddl, c->z9) : NULL;
+    return z && z->lpGbl && z->lpGbl->fpVidMem && (z->ddsCaps.dwCaps & DDSCAPS_ZBUFFER) ? z : NULL;
+}
+
+/* A surface of the Direct3D 9 interface's blits and fills: the handle's surface at a mipmap
+   level, its rectangle (an empty one stands for all of it) kept inside it, and its bytes a
+   pixel. 0 for a format without whole bytes a pixel or a rectangle outside the surface. */
+static LPDDRAWI_DDRAWSURFACE_LCL d9_surface(RCTX *c, DWORD handle, DWORD level, const RECTL *in,
+                                            RECTL *r, DWORD *bytes, DDPIXELFORMAT *pf)
+{
+    LPDDRAWI_DDRAWSURFACE_LCL s = handle_get(c->ddl, handle), lv[MAX_LEVELS];
+    PIXFMT f;
+
+    if (!s || !s->lpGbl || !s->lpGbl->fpVidMem)
+        return NULL;
+    if (level) {
+        if (level >= mip_chain(s, lv))
+            return NULL;
+        s = lv[level];
+    }
+    surface_format(s, pf);
+    f = gl_format(pf);
+    *bytes = f.block ? 0 : f.bytes ? f.bytes : pf->dwRGBBitCount / 8;
+    *r = *in;
+    if (r->right <= r->left || r->bottom <= r->top) {
+        r->left = r->top = 0;
+        r->right = s->lpGbl->wWidth;
+        r->bottom = s->lpGbl->wHeight;
+    }
+    if (!*bytes || *bytes > 4 || r->left < 0 || r->top < 0 || r->right > (LONG)s->lpGbl->wWidth ||
+        r->bottom > (LONG)s->lpGbl->wHeight)
+        return NULL;
+    return s;
+}
+
+/* BLT and SURFACEBLT of the Direct3D 9 interface (StretchRect, UpdateSurface): a copy in memory
+   between two surfaces of one format, by the nearest pixel where the rectangles differ in
+   size. As for a texture blit, the newest picture of both must be in memory first, and the
+   target's GPU copies follow from its memory afterwards (d3d_surface_written). Correct for any
+   pair of surfaces; a copy between two render targets on the GPU would be quicker. */
+static void d9_blt(RCTX *c, const RB_DP2_BLT9 *b)
+{
+    DDPIXELFORMAT spf, dpf;
+    RECTL sr, dr;
+    DWORD sb, db;
+    LPDDRAWI_DDRAWSURFACE_LCL ss = d9_surface(c, b->source, b->sourceLevel, &b->sourceRect, &sr, &sb, &spf);
+    LPDDRAWI_DDRAWSURFACE_LCL ds = d9_surface(c, b->dest, b->destLevel, &b->destRect, &dr, &db, &dpf);
+    LONG sw, sh, dw, dh, x, y;
+
+    tracef("rd3d: blit %lx level %lu -> %lx level %lu, flags %lx%s\r\n", b->source, b->sourceLevel,
+           b->dest, b->destLevel, b->flags, ss && ds ? "" : " (not done)");
+    if (!ss || !ds || ss == ds || sb != db || spf.dwRBitMask != dpf.dwRBitMask ||
+        spf.dwFourCC != dpf.dwFourCC) {
+        if (!c->blt_skipped++)
+            dbg("rd3d: a Direct3D 9 blit is not done (surfaces or formats)\r\n");
+        return;
+    }
+    if (!d3d_surface_access(ss) || !d3d_surface_access(ds) || !make_current(c))
+        return;
+    sw = sr.right - sr.left;
+    sh = sr.bottom - sr.top;
+    dw = dr.right - dr.left;
+    dh = dr.bottom - dr.top;
+    for (y = 0; y < dh; y++) {
+        const BYTE *from = (const BYTE *)ss->lpGbl->fpVidMem +
+                           (sr.top + (sh == dh ? y : (LONG)(((DWORD)y * 2 + 1) * (DWORD)sh / ((DWORD)dh * 2)))) *
+                           ss->lpGbl->lPitch + sr.left * (LONG)sb;
+        BYTE *to = (BYTE *)ds->lpGbl->fpVidMem + (dr.top + y) * ds->lpGbl->lPitch + dr.left * (LONG)db;
+        if (sw == dw) {
+            memcpy(to, from, (DWORD)dw * db);
+        } else {
+            for (x = 0; x < dw; x++) {
+                const BYTE *p = from + (LONG)(((DWORD)x * 2 + 1) * (DWORD)sw / ((DWORD)dw * 2)) * (LONG)sb;
+                BYTE *q = to + x * (LONG)db;
+                DWORD k;
+                for (k = 0; k < db; k++)
+                    q[k] = p[k];
+            }
+        }
+    }
+    d3d_surface_written(ds);
+    c->stages_dirty = 1;
+}
+
+/* COLORFILL of the Direct3D 9 interface: a rectangle of a surface filled with a D3DCOLOR, in
+   memory as the blits are. */
+static void d9_fill(RCTX *c, const RB_DP2_COLOR_FILL *f)
+{
+    DDPIXELFORMAT pf;
+    RECTL r;
+    DWORD bytes, v = f->color;
+    LPDDRAWI_DDRAWSURFACE_LCL s = d9_surface(c, f->surface, 0, &f->rect, &r, &bytes, &pf);
+    LONG x, y;
+
+    tracef("rd3d: fill %lx with %08lx%s\r\n", f->surface, f->color, s ? "" : " (not done)");
+    if (!s)
+        return;
+    if (bytes == 2) {                   /* the 16-bit formats, from 8 bits a channel */
+        DWORD a = v >> 24, red = (v >> 16) & 255, g = (v >> 8) & 255, bl = v & 255;
+        if (pf.dwRBitMask == 0xF800)
+            v = (red >> 3) << 11 | (g >> 2) << 5 | bl >> 3;
+        else if (pf.dwRBitMask == 0x7C00)
+            v = (a >> 7) << 15 | (red >> 3) << 10 | (g >> 3) << 5 | bl >> 3;
+        else if (pf.dwRBitMask == 0x0F00)
+            v = (a >> 4) << 12 | (red >> 4) << 8 | (g >> 4) << 4 | bl >> 4;
+        else
+            return;
+    } else if (bytes != 4 && bytes != 3) {
+        return;
+    }
+    if (!d3d_surface_access(s) || !make_current(c))
+        return;
+    for (y = r.top; y < r.bottom; y++) {
+        BYTE *to = (BYTE *)s->lpGbl->fpVidMem + y * s->lpGbl->lPitch + r.left * (LONG)bytes;
+        for (x = r.left; x < r.right; x++, to += bytes) {
+            to[0] = (BYTE)v;
+            to[1] = (BYTE)(v >> 8);
+            if (bytes > 2)
+                to[2] = (BYTE)(v >> 16);
+            if (bytes > 3)
+                to[3] = (BYTE)(v >> 24);
+        }
+    }
+    d3d_surface_written(s);
+    c->stages_dirty = 1;
+}
+
 static DWORD variable_records(const BYTE *p, const BYTE *end, DWORD n, DWORD size, DWORD w1, DWORD w2)
 {
     DWORD used = 0, k, left = (DWORD)(end - p);
@@ -5942,9 +6438,11 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
                     c->stream_user = 0;
                     c->stream_handle = s[i].handle;
                     c->stream_stride = s[i].stride;
+                    c->stream_offset = 0;
                 } else if (s[i].stream < VS_ARB_STREAMS) {
                     c->sx_handle[s[i].stream] = s[i].handle;
                     c->sx_stride[s[i].stream] = s[i].stride;
+                    c->sx_offset[s[i].stream] = 0;
                 }
             cmd = data + n * sizeof *s;
             break;
@@ -5957,6 +6455,7 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
                 if (!s[i].stream) {
                     c->stream_user = 1;
                     c->stream_handle = 0;
+                    c->stream_offset = 0;
                     c->stream_stride = s[i].stride;
                 }
             cmd = data + n * sizeof *s;
@@ -6091,6 +6590,166 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
             cmd = data + n * sizeof *t;
             break;
         }
+        /* ---- the Direct3D 9 interface (d9_resolve) ---- */
+        case RbDp2SetStreamSource2: {
+            const RB_DP2_STREAM_SOURCE2 *s = (const RB_DP2_STREAM_SOURCE2 *)data;
+            if (data + n * sizeof *s > end)
+                goto bad;
+            c->dx9 = 1;
+            for (i = 0; i < n; i++)
+                if (!s[i].stream) {
+                    c->stream_user = 0;
+                    c->stream_handle = s[i].handle;
+                    c->stream_stride = s[i].stride;
+                    c->stream_offset = s[i].offset;
+                } else if (s[i].stream < VS_ARB_STREAMS) {
+                    c->sx_handle[s[i].stream] = s[i].handle;
+                    c->sx_stride[s[i].stream] = s[i].stride;
+                    c->sx_offset[s[i].stream] = s[i].offset;
+                }
+            cmd = data + n * sizeof *s;
+            break;
+        }
+        case RbDp2SetScissorRect:
+            if (data + n * sizeof(RECTL) > end)
+                goto bad;
+            if (n) {
+                memcpy(c->scissor9, data + (n - 1) * sizeof(RECTL), sizeof c->scissor9);
+                apply_scissor(c);
+            }
+            cmd = data + n * sizeof(RECTL);
+            break;
+        case RbDp2CreateVertexShaderDecl:
+        case RbDp2CreateVertexShaderFunc: {
+            DWORD per = k->bCommand == RbDp2CreateVertexShaderDecl ? sizeof(RB_D9_ELEMENT) : 1;
+            BYTE *at = data;
+            c->dx9 = 1;
+            for (i = 0; i < n; i++) {
+                const DWORD *r = (const DWORD *)at;
+                if (at + 8 > end || r[1] > (DWORD)(end - (at + 8)) / per)
+                    goto bad;
+                if (k->bCommand == RbDp2CreateVertexShaderDecl)
+                    d9_create_decl(c, r[0], (const RB_D9_ELEMENT *)(r + 2), r[1]);
+                else
+                    d9_create_func(c, r[0], r + 2, r[1]);
+                at += 8 + r[1] * per;
+            }
+            cmd = at;
+            break;
+        }
+        case RbDp2DeleteVertexShaderDecl:
+        case RbDp2SetVertexShaderDecl:
+        case RbDp2DeleteVertexShaderFunc:
+        case RbDp2SetVertexShaderFunc: {
+            const RB_DP2_HANDLE *h = (const RB_DP2_HANDLE *)data;
+            if (data + n * sizeof *h > end)
+                goto bad;
+            c->dx9 = 1;
+            for (i = 0; i < n; i++)
+                switch (k->bCommand) {
+                case RbDp2DeleteVertexShaderDecl: d9_delete_decl(c, h[i].handle); break;
+                case RbDp2SetVertexShaderDecl: c->decl9 = h[i].handle; break;
+                case RbDp2DeleteVertexShaderFunc: d9_delete_func(c, h[i].handle); break;
+                default: c->func9 = h[i].handle; break;
+                }
+            cmd = data + n * sizeof *h;
+            break;
+        }
+        case RbDp2SetRenderTarget2: {
+            const RB_DP2_RENDER_TARGET2 *t = (const RB_DP2_RENDER_TARGET2 *)data;
+            if (data + n * sizeof *t > end)
+                goto bad;
+            for (i = 0; i < n; i++) {
+                LPDDRAWI_DDRAWSURFACE_LCL rt = t[i].index ? NULL : handle_get(c->ddl, t[i].handle);
+                if (!rt)                    /* one render target: the others are not offered */
+                    continue;
+                c->rt9 = t[i].handle;
+                if (!set_render_target(c, rt, d9_depth(c))) {
+                    d->ddrval = DDERR_GENERIC;
+                    goto done;
+                }
+                /* setting a render target resets the scissor rectangle to all of it */
+                c->scissor9[0] = c->scissor9[1] = 0;
+                c->scissor9[2] = rt->lpGbl->wWidth;
+                c->scissor9[3] = rt->lpGbl->wHeight;
+                apply_scissor(c);
+            }
+            cmd = data + n * sizeof *t;
+            break;
+        }
+        case RbDp2SetDepthStencil: {
+            const DWORD *h = (const DWORD *)data;
+            if (data + n * sizeof *h > end)
+                goto bad;
+            for (i = 0; i < n; i++) {
+                LPDDRAWI_DDRAWSURFACE_LCL rt;
+                c->z9 = h[i];
+                c->z9_set = 1;
+                rt = c->rt9 ? handle_get(c->ddl, c->rt9) : c->rt;
+                if (rt && !set_render_target(c, rt, d9_depth(c))) {
+                    d->ddrval = DDERR_GENERIC;
+                    goto done;
+                }
+            }
+            cmd = data + n * sizeof *h;
+            break;
+        }
+        case RbDp2SetVertexShaderConstI:
+        case RbDp2SetPixelShaderConstI:
+        case RbDp2SetVertexShaderConstB:
+        case RbDp2SetPixelShaderConstB: {
+            /* kept for the vertex shaders' static flow control (vs_program); the pixel shaders'
+               are stepped over */
+            DWORD per = k->bCommand == RbDp2SetVertexShaderConstI ||
+                        k->bCommand == RbDp2SetPixelShaderConstI ? 16 : 4, j;
+            BYTE *at = data;
+            for (i = 0; i < n; i++) {
+                const DWORD *r = (const DWORD *)at;
+                if (at + 8 > end || r[1] > (DWORD)(end - (at + 8)) / per)
+                    goto bad;
+                if (k->bCommand == RbDp2SetVertexShaderConstI) {
+                    for (j = 0; j < r[1] && r[0] + j < 16; j++)
+                        memcpy(c->vs_int[r[0] + j], r + 2 + 4 * j, 16);
+                } else if (k->bCommand == RbDp2SetVertexShaderConstB) {
+                    for (j = 0; j < r[1] && r[0] + j < 16; j++)
+                        c->vs_bool = r[2 + j] ? c->vs_bool | 1UL << (r[0] + j) : c->vs_bool & ~(1UL << (r[0] + j));
+                }
+                at += 8 + r[1] * per;
+            }
+            cmd = at;
+            break;
+        }
+        case RbDp2Blt:
+        case RbDp2SurfaceBlt: {
+            const RB_DP2_BLT9 *b = (const RB_DP2_BLT9 *)data;
+            if (data + n * sizeof *b > end)
+                goto bad;
+            for (i = 0; i < n; i++)
+                d9_blt(c, &b[i]);
+            cmd = data + n * sizeof *b;
+            break;
+        }
+        case RbDp2ColorFill: {
+            const RB_DP2_COLOR_FILL *f = (const RB_DP2_COLOR_FILL *)data;
+            if (data + n * sizeof *f > end)
+                goto bad;
+            for (i = 0; i < n; i++)
+                d9_fill(c, &f[i]);
+            cmd = data + n * sizeof *f;
+            break;
+        }
+        case RbDp2CreateQuery:
+        case RbDp2DeleteQuery:
+        case RbDp2IssueQuery:
+        case RbDp2GenerateMipSubLevels:
+        case RbDp2SetStreamSourceFreq: {
+            /* stepped over: no query types are offered, nor mipmap generation, nor instancing */
+            DWORD size = k->bCommand == RbDp2DeleteQuery ? 4 : 8;
+            if (data + n * size > end)
+                goto bad;
+            cmd = data + n * size;
+            break;
+        }
         case RbDp2AddDirtyRect:
             cmd = data + n * sizeof(RB_DP2_DIRTY_RECT);
             break;
@@ -6153,6 +6812,8 @@ bad:                                    /* a Direct3D 8 command longer than the 
     d->ddrval = D3DERR_COMMAND_UNPARSED;
 done:
     d->dwFlags &= ~(D3DHALDP2_SWAPVERTEXBUFFER | D3DHALDP2_SWAPCOMMANDBUFFER);
+    if (c && c->dx9 && d->ddrval == DD_OK)
+        d->dwErrorOffset = 0;           /* (as the Direct3D 9 interface has it on success) */
     let_go(c);
     return DDHAL_DRIVER_HANDLED;
 }
@@ -6441,11 +7102,49 @@ static void d8_caps(RB_D3DCAPS8 *c)
            c->vertexShaderVersion);
 }
 
+/* D3DCAPS9 for a DirectX 9 runtime on the Direct3D 9 interface: the Direct3D 8 record with what
+   that interface adds (the scissor test, UBYTE4 vertex data), and the DirectX 9 part: stream
+   offsets, which the runtime requires of such a driver, one render target, blits by the
+   nearest pixel, and the shader model 2 details (the minimums of version 2.0, which the
+   translators meet). */
+static void d9_caps(RB_D3DCAPS9 *c)
+{
+    memset(c, 0, sizeof *c);
+    d8_caps(&c->caps8);
+    /* The runtime checks what a driver of this interface reports and refuses the device
+       otherwise (D3DERR_NOTAVAILABLE from GetDeviceCaps): no line patterns, the scissor test,
+       fog as a separate value in the vertex format, and textures that need not be powers of
+       two at least conditionally. */
+    c->caps8.primitiveMiscCaps = (c->caps8.primitiveMiscCaps | RB_D3DPMISCCAPS_FOGINFVF) & ~RB_D3DPMISCCAPS_LINEPATTERNREP;
+    if (c->caps8.textureCaps & D3DPTEXTURECAPS_POW2)
+        c->caps8.textureCaps |= D3DPTEXTURECAPS_NONPOW2CONDITIONAL;
+    c->caps8.rasterCaps = (c->caps8.rasterCaps | RB_D3DPRASTERCAPS_SCISSORTEST) & ~D3DPRASTERCAPS_PAT;
+    c->caps8.caps2 |= RB_D3DCAPS2_DYNAMICTEXTURES;  /* (a texture's picture is its surface's memory) */
+    c->caps8.vertexProcessingCaps &= ~RB_D3DVTXPCAPS_NO_VSDT_UBYTE4;
+    c->devCaps2 = RB_D3DDEVCAPS2_STREAMOFFSET;
+    c->numberOfAdaptersInGroup = 1;
+    c->numSimultaneousRTs = 1;
+    c->stretchRectFilterCaps = RB_D3DPTFILTERCAPS_MINFPOINT | RB_D3DPTFILTERCAPS_MAGFPOINT;
+    if (c->caps8.vertexShaderVersion >= 0xFFFE0200UL) {
+        c->declTypes = RB_D3DDTCAPS_UBYTE4;
+        c->vs20NumTemps = 12;
+        c->vs20StaticFlowControlDepth = 1;  /* version 2.0's minimum: with 0 the runtime refuses
+                                               the device */
+        c->maxVShaderInstructionsExecuted = 65535;
+    }
+    if (c->caps8.pixelShaderVersion >= 0xFFFF0200UL) {
+        c->ps20NumTemps = 12;
+        c->ps20NumInstructionSlots = 96;
+        c->maxPShaderInstructionsExecuted = 96;
+    }
+}
+
 /* The Direct3D 8 and 9 interface, on by default since 0.6.0: vertices processed on the GPU, in
    buffers the driver allocates. The registry value HKLM\Software\moose-ripple, D3D8 chooses
    otherwise: "0" gives the runtime no answer, so it drives the HAL through the Direct3D 7
    interface and processes vertices itself; "1" offers the interface with the runtime's vertex
-   processing; "2" is the default. D3D8Buffers "0" keeps buffers in the runtime's memory. Not an
+   processing; "2" is the default. D3D8Buffers "0" keeps buffers in the runtime's memory. D3D9 "0"
+   keeps a DirectX 9 runtime on the Direct3D 8 interface (d9_caps; the Direct3D 9 one needs "2"). Not an
    environment variable: the runtime asks once per boot, in the first program that uses it, and
    keeps the answer for all others. */
 int d3d8_enabled(void)
@@ -6455,6 +7154,7 @@ int d3d8_enabled(void)
     DWORD n = sizeof v, type;
     char mode = '2';
     int buffers = 1;
+    int d9 = 1;
 
     if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, "Software\\moose-ripple", 0, KEY_READ, &k) == ERROR_SUCCESS) {
         if (RegQueryValueEx(k, "D3D8", NULL, &type, (BYTE *)v, &n) == ERROR_SUCCESS &&
@@ -6464,11 +7164,16 @@ int d3d8_enabled(void)
         if (RegQueryValueEx(k, "D3D8Buffers", NULL, &type, (BYTE *)v, &n) == ERROR_SUCCESS &&
             type == REG_SZ && v[0] == '0')
             buffers = 0;
+        n = sizeof v;
+        if (RegQueryValueEx(k, "D3D9", NULL, &type, (BYTE *)v, &n) == ERROR_SUCCESS &&
+            type == REG_SZ && v[0] == '0')
+            d9 = 0;
         RegCloseKey(k);
     }
     d8_on = mode != '0';
     tnl_on = mode == '2';               /* and vertices processed on the GPU (tnl_begin) */
     buf_on = tnl_on && buffers;         /* in buffers the driver allocates */
+    d9_on = tnl_on && d9;               /* and the Direct3D 9 interface for a DirectX 9 runtime */
     return d8_on;
 }
 
@@ -6509,6 +7214,35 @@ static int d8_info(LPDDHAL_GETDRIVERINFODATA d)
         f->format.dwFourCC = d8_formats[i][0];
         f->format.dwRBitMask = d8_formats[i][1];
         d->dwActualSize = sizeof *f;
+        break;
+    }
+    case RbGdi2DdiVersion: {
+        /* The Direct3D 9 interface for a DirectX 9 runtime, when it is switched on. A runtime
+           that gets no answer here drives the Direct3D 8 interface. */
+        RB_GDI2_DDI_VERSION *v = (RB_GDI2_DDI_VERSION *)h;
+        if (!d9_on || room < sizeof *v)
+            goto unavailable;
+        v->ddiVersion = v->dxVersion >= 9 ? RB_DX9_DDI_VERSION : 0;
+        d->dwActualSize = sizeof *v;
+        break;
+    }
+    case RbGdi2Caps9: {
+        RB_D3DCAPS9 caps;
+        RPROC *p = process();
+        if (!d9_on || !p || p->d3d_version < 0x900)
+            goto unavailable;
+        d9_caps(&caps);
+        memcpy(h, &caps, room < sizeof caps ? room : sizeof caps);
+        d->dwActualSize = sizeof caps;
+        break;
+    }
+    case RbGdi2QueryCount: {
+        /* no query types (the runtime then issues none) */
+        DWORD *count = (DWORD *)(h + 1);
+        if (!d9_on || room < sizeof *h + sizeof(DWORD))
+            goto unavailable;
+        *count = 0;
+        d->dwActualSize = sizeof *h + sizeof(DWORD);
         break;
     }
     case RbGdi2DxVersion: {
