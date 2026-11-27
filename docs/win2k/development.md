@@ -1478,13 +1478,25 @@ the software vertex path drew about a tenth of the triangles.
 ### Lighting
 
 The T&L device applies Direct3D 7 fixed-function lighting. The display
-driver keeps the material, the lighting render states and up to 32 lights
-by index, and sends the first eight enabled lights with each lit draw; the
+driver keeps the material, the lighting render states and up to 32 lights,
+each under the number the program gave it (`light_slot`), and sends the
+first eight enabled lights with each lit draw; the
 driver offers eight active lights. One generated vertex shader loops over
 the lights in camera space: point, spot and directional lights with range
 and attenuation, global and per-light ambient, emissive, specular with a
 local or distant viewer, normalized normals, and material colours taken
 from the vertex where its format has them.
+
+A program numbers its lights as it likes. The driver used to keep only the
+numbers 0 to 31 and drop the rest without a word in the test reports.
+3DMark 2001 SE counts its lights up through the whole benchmark (84 lights
+made by the end), so by its later tests every light had a number past 31:
+both High Polygon Count tests drew black objects and the Environment Bump
+Mapping figure was nearly black, where a GeForce 9600 GT with the vendor's
+driver shows them lit. A light that finds no slot (more than 32 switched on
+at once) is counted, and that count is one of the skips the pixel tests fail
+on. `d9pixels` case 96 (`lit_far_light`) lights a quad with light number 1000
+while number 2000000 is switched off again; it was black before.
 
 `tlight.exe rgb|tnl` lights a quad facing the camera in fifteen cases and
 compares pixels inside it with Direct3D's lighting equations evaluated for

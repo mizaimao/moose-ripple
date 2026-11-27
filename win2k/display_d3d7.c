@@ -107,7 +107,9 @@ typedef struct {
      * equal ends for an affine projection). */
     ULONG fogColor, fogTable, fogVertex, fogStart, fogEnd, fogDensity, rangeFog, wNear, wFar;
     ULONG material[17];
-    ULONG lightOn;
+    /* The lights, in slots: a program numbers its lights as it likes (any 32-bit number), so each
+     * slot in use (lightUsed) remembers its light's number; lightOn: the slots switched on. */
+    ULONG lightOn, lightUsed, lightIndex[MaxLights];
     ULONG lights[MaxLights][26];
     /* Direct3D 8: the vertex format given as the vertex shader (a shader
      * handle has its low bit set), the pixel shader, stream zero (a
@@ -1960,6 +1962,28 @@ static void fog_draw(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, BOOL objectSpace)
  * another type, or past the eighth, is left out and its draw counted. A
  * material source falls back to the material when the vertex lacks that
  * colour, as Direct3D does. */
+/* The slot of the light a program numbered index: the slot that has it; else, when make, a free
+ * slot, or one whose light is switched off (that light's data is forgotten). MaxLights when there
+ * is none: more lights than slots are switched on at once. */
+static ULONG light_slot(D7_CONTEXT *c, ULONG index, BOOL make)
+{
+    ULONG k, off = MaxLights;
+    for (k = 0; k < MaxLights; ++k)
+        if ((c->lightUsed & (1UL << k)) && c->lightIndex[k] == index) return k;
+    if (!make) return MaxLights;
+    for (k = 0; k < MaxLights; ++k) {
+        if (!(c->lightUsed & (1UL << k))) break;
+        if (off == MaxLights && !(c->lightOn & (1UL << k))) off = k;
+    }
+    if (k == MaxLights) k = off;
+    if (k == MaxLights) return MaxLights;
+    c->lightUsed |= 1UL << k;
+    c->lightOn &= ~(1UL << k);
+    c->lightIndex[k] = index;
+    RtlZeroMemory(c->lights[k], sizeof(c->lights[k]));
+    return k;
+}
+
 static void light_draw(D7_CONTEXT *c, RB2K_D3D7_DRAW *draw, BOOL hasDiffuse, BOOL hasSpecular, ULONG primitives)
 {
     ULONG k, flags = 0;
@@ -5022,22 +5046,24 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
         }
         case D3DNTDP2OP_SETLIGHT: {
             /* Enable, disable, or set the D3DLIGHT7 that follows the record.
-             * Lights past MaxLights are not drawn. */
+             * A light is kept by its number in one of MaxLights slots (light_slot); a light that
+             * finds no slot is counted (lightsBeyond) and not drawn. */
             ULONG k;
             used = 0;
             for (k = 0; k < n; ++k) {
                 const D3DNTHAL_DP2SETLIGHT *l = (const D3DNTHAL_DP2SETLIGHT *)(p + used);
-                ULONG index;
+                ULONG index, slot;
                 if (remaining - min(remaining, used) < sizeof(*l)) return DDERR_INVALIDPARAMS;
                 used += sizeof(*l);
                 index = l->dwIndex;
+                slot = light_slot(c, index, l->lightData != SetLightDisable);
                 if (l->lightData == SetLightData) {
                     if (remaining - min(remaining, used) < sizeof(D3DLIGHT7)) return DDERR_INVALIDPARAMS;
-                    if (index < MaxLights) RtlCopyMemory(c->lights[index], p + used, sizeof(c->lights[index]));
+                    if (slot < MaxLights) RtlCopyMemory(c->lights[slot], p + used, sizeof(c->lights[slot]));
                     used += sizeof(D3DLIGHT7);
-                } else if (index < MaxLights && l->lightData == SetLightEnable) c->lightOn |= 1UL << index;
-                else if (index < MaxLights && l->lightData == SetLightDisable) c->lightOn &= ~(1UL << index);
-                if (index >= MaxLights) ++c->display->d7draw.lightsBeyond;
+                } else if (slot < MaxLights && l->lightData == SetLightEnable) c->lightOn |= 1UL << slot;
+                else if (slot < MaxLights && l->lightData == SetLightDisable) c->lightOn &= ~(1UL << slot);
+                if (slot == MaxLights && l->lightData != SetLightDisable) ++c->display->d7draw.lightsBeyond;
             }
             break;
         }
@@ -6003,6 +6029,7 @@ ULONG rb_d7_skips(DISPLAY *d, ULONG bytes, PVOID out)
         s.count[RB2K_SKIP_KIND_STATES] += t->d9Ignored[i];
         s.count[RB2K_SKIP_KIND_SHADERS] += t->psFailed[i] + t->vsFailed[i];
     }
+    s.count[RB2K_SKIP_KIND_STATES] += t->lightsBeyond;      /* lights that found no slot */
     s.count[RB2K_SKIP_KIND_SHADERS] += t->stageFailed + hostProgramFails.count;
     s.count[RB2K_SKIP_KIND_FORMATS] = t->d9Unresolved;
     s.count[RB2K_SKIP_KIND_SURFACES] = t->surfaceRefusals + t->texBltFailures + t->uploadFailures + t->checkFailures;

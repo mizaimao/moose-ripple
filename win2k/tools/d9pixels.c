@@ -709,6 +709,60 @@ static void point_variant_cases(int only, BOOL offered, BOOL planes)
     }
 }
 
+/* 96: lights with numbers of the program's own choosing (1000, and one at 2000000 that is switched
+ * off again): Direct3D lets a program number its lights as it likes, and some count far past the
+ * first few. An untransformed quad lit from the material by a white directional light at number
+ * 1000: half red, a quarter green, full blue. */
+static void far_light_case(int only)
+{
+    static const struct { float x, y, z, nx, ny, nz; } q[6] = {
+        { -0.5f, 0.5f, 0.5f, 0, 0, -1 }, { 0.5f, 0.5f, 0.5f, 0, 0, -1 }, { -0.5f, -0.5f, 0.5f, 0, 0, -1 },
+        { -0.5f, -0.5f, 0.5f, 0, 0, -1 }, { 0.5f, 0.5f, 0.5f, 0, 0, -1 }, { 0.5f, -0.5f, 0.5f, 0, 0, -1 } };
+    SAMPLE s[4];
+    D3DMATERIAL9 m;
+    D3DLIGHT9 l;
+    D3DMATRIX identity;
+    HRESULT hr;
+    int i;
+    if (only && only != 96) return;
+    for (i = 0; i < 3; ++i) { s[i].x = s[i].y = 48 + 16 * i; s[i].rgb = rgb(0.5f, 0.25f, 1.0f); }
+    s[3].x = s[3].y = 8; s[3].rgb = CLEAR_COLOR;
+    memset(&m, 0, sizeof(m));
+    m.Diffuse.r = 0.5f; m.Diffuse.g = 0.25f; m.Diffuse.b = 1.0f; m.Diffuse.a = 1.0f;
+    memset(&l, 0, sizeof(l));
+    l.Type = D3DLIGHT_DIRECTIONAL;
+    l.Diffuse.r = l.Diffuse.g = l.Diffuse.b = l.Diffuse.a = 1.0f;
+    l.Direction.z = 1.0f;
+    memset(&identity, 0, sizeof(identity));
+    identity._11 = identity._22 = identity._33 = identity._44 = 1.0f;
+    IDirect3DDevice9_SetTransform(device, D3DTS_WORLD, &identity);
+    IDirect3DDevice9_SetTransform(device, D3DTS_VIEW, &identity);
+    IDirect3DDevice9_SetTransform(device, D3DTS_PROJECTION, &identity);
+    IDirect3DDevice9_SetMaterial(device, &m);
+    IDirect3DDevice9_LightEnable(device, 0, FALSE);     /* an earlier case leaves light 0 on */
+    IDirect3DDevice9_SetLight(device, 1000, &l);
+    IDirect3DDevice9_LightEnable(device, 1000, TRUE);
+    l.Diffuse.g = l.Diffuse.b = 0.0f;       /* a red one that must not light anything */
+    IDirect3DDevice9_SetLight(device, 2000000, &l);
+    IDirect3DDevice9_LightEnable(device, 2000000, TRUE);
+    IDirect3DDevice9_LightEnable(device, 2000000, FALSE);
+    IDirect3DDevice9_SetRenderState(device, D3DRS_LIGHTING, TRUE);
+    IDirect3DDevice9_SetRenderState(device, D3DRS_AMBIENT, 0);
+    IDirect3DDevice9_SetRenderState(device, D3DRS_COLORVERTEX, FALSE);
+    if (begin("lit_far_light")) {
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        IDirect3DDevice9_SetFVF(device, D3DFVF_XYZ | D3DFVF_NORMAL);
+        hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, q, sizeof(q[0]));
+        if (FAILED(hr)) { fail_hr("lit_far_light", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("lit_far_light", s, 4);
+    }
+    IDirect3DDevice9_LightEnable(device, 1000, FALSE);
+    IDirect3DDevice9_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+    IDirect3DDevice9_SetRenderState(device, D3DRS_COLORVERTEX, TRUE);
+}
+
 /* 80: the fixed-function pipeline through a declaration with two streams (no vertex shader):
  * positions in stream 0, colours in stream 1, six unused vertices first in both, drawn from
  * vertex 6: a red quad on the left and a green one on the right. */
@@ -3198,6 +3252,7 @@ int main(int argc, char **argv)
     scaled_point_case(only, caps.MaxPointSize >= 16.0f);
     vertex_point_case(only, caps.MaxPointSize >= 16.0f && flags == D3DCREATE_HARDWARE_VERTEXPROCESSING);
     point_variant_cases(only, caps.MaxPointSize >= 16.0f, caps.MaxUserClipPlanes >= 1);
+    far_light_case(only);
     ff_streams_case(only, flags == D3DCREATE_HARDWARE_VERTEXPROCESSING);
     l16_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
