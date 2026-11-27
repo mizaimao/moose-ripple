@@ -978,6 +978,17 @@ contents now stay in OpenGL buffer objects, uploaded again only after a write, a
 go to OpenGL as they are (`vb7_object`). A buffer that is locked while it is drawn from is left
 to the old path: the runtime appends to its own buffers under one lock.
 
+Two refinements came from the first game and from a trace, the same day. A buffer is copied
+whole, so only one that keeps still is copied: it must be drawn again with the contents it had
+at its last draw, and one whose copy went stale must keep still twice as long the next time (up
+to 256 draws). Sacrifice rewrites one 48 KB buffer for every few vertices it draws; copied at
+each change, that was 1,296 whole-buffer uploads in 1,936 frames of its menu. Such a buffer now
+stays in memory, where a draw sends only the vertices it uses. And the table of buffer objects,
+found by the buffer's address, tries four slots and replaces the one unused longest: with one
+slot each, 46 of the 192 buffers of a 3DMark 2000 texture test shared theirs with another and
+were uploaded again at every turn. A trace of that test had 619 uploads over 4,588 draws; it has
+192 over 4,233 now (184 buffers once, and two that the program rewrites).
+
 | 3DMark 2000, T&L HAL device | before | with buffer objects | vertices on the guest CPU |
 |---|---:|---:|---:|
 | Score, 3D marks | 24336 | 30500 | 26890 |

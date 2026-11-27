@@ -1350,6 +1350,8 @@ int d3d_surface_format_ok(LPDDSURFACEDESC desc)
    down and right. */
 #define POINT_SHIFT 0.25
 #define VB7_SLOTS 1024                  /* see vb7_object */
+#define VB7_PROBES 4
+#define VB7_NEED_MAX 256
 
 #define STAGES 8                        /* texture stages with coordinates: the fixed-function units and
                                            the texture coordinate sets */
@@ -1538,8 +1540,14 @@ typedef struct {
     struct vb7 {
         FLATPTR mem;
         GLuint name;
-        DWORD stamp;                    /* the buffer's writes stamp when it was uploaded */
+        DWORD stamp;                    /* the buffer's writes stamp when it was uploaded, 0: no copy */
+        DWORD used;                     /* vb7_tick at its last draw; 0: never used */
+        DWORD seen;                     /* the buffer's writes stamp at its last draw */
+        WORD still;                     /* draws since then with the same contents */
+        WORD need;                      /* that many before it is copied (1, doubled whenever a
+                                           copy went stale, up to VB7_NEED_MAX) */
     } vb7[VB7_SLOTS];
+    DWORD vb7_tick;
     GLuint vp_bound;
     struct { TNL_KEY key; GLuint prog; DWORD used; } vp[VP_CACHE];
     DWORD vp_clock;
@@ -3496,31 +3504,65 @@ static void bind_buffer(RCTX *c, GLenum target, GLuint name)
    to keep that copy small (index_list); in 3DMark 2000 that made the GPU's vertex path slower
    than the program's own vertex code on the guest CPU. A buffer the driver allocated
    (d3d_buffer_new) has a stamp that changes when it is written, so its copy can stay in a
-   buffer object: this returns the object for the buffer at mem, uploaded again only after a
-   write, or 0 when the buffer is not ours or is locked just now (the runtime's own buffers are
-   appended to under one lock). One object a slot of a small table by address; two buffers
-   that share a slot take turns. */
+   buffer object: this returns the object for the buffer at mem, or 0 when the draw is to take
+   its vertices from memory as before: the buffer is not ours, is locked just now (the runtime's
+   own buffers are appended to under one lock), or does not keep still. A buffer is copied whole,
+   so only one that is drawn again with the contents it had at its last draw is copied, and one
+   whose copy went stale must keep still twice as long the next time: a program's scratch buffer,
+   rewritten for every few vertices it draws (Sacrifice has one of 48 KB), stays in memory, where
+   a draw sends only the vertices it uses. The objects are in a small table found by the buffer's address:
+   a few slots are tried, and a buffer with none takes the one unused longest. (One slot each
+   was too few: of a 3DMark 2000 texture test's 192 buffers, 46 shared theirs with another and
+   were uploaded again at every turn.) */
 static GLuint vb7_object(RCTX *c, FLATPTR mem)
 {
     GLF *gl = gl_of(c);
     struct bufhead *head = buffer_head(mem);
-    struct vb7 *e = &c->vb7[(DWORD)(mem >> 4) % VB7_SLOTS];
+    DWORD hash = ((DWORD)(mem >> 4) * 2654435761UL) >> 22;
+    struct vb7 *e = NULL;
+    int i;
 
     if (!head || head->locks || !gl->BufferDataARB || !gl->GenBuffersARB || !gl->BindBufferARB)
+        return 0;
+    for (i = 0; i < VB7_PROBES; ++i) {
+        struct vb7 *p = &c->vb7[(hash + i) % VB7_SLOTS];
+        if (p->used && p->mem == mem) {
+            e = p;
+            break;
+        }
+        if (!e || p->used < e->used)
+            e = p;
+    }
+    if (!e->used || e->mem != mem) {    /* the slot is this buffer's from now on */
+        e->mem = mem;
+        e->stamp = e->seen = 0;
+        e->still = 0;
+        e->need = 1;
+    }
+    e->used = ++c->vb7_tick;
+    if (e->stamp && e->stamp == head->writes) {     /* its copy is current */
+        bind_buffer(c, GL_ARRAY_BUFFER_ARB, e->name);
+        return e->name;
+    }
+    if (e->seen != head->writes) {      /* written since its last draw */
+        if (e->stamp && e->need < VB7_NEED_MAX)
+            e->need *= 2;
+        e->stamp = 0;
+        e->seen = head->writes;
+        e->still = 0;
+        return 0;
+    }
+    if (++e->still < e->need)
         return 0;
     if (!e->name) {
         gl->GenBuffersARB(1, &e->name);
         if (!e->name)
             return 0;
-        e->mem = 0;
     }
     bind_buffer(c, GL_ARRAY_BUFFER_ARB, e->name);
-    if (e->mem != mem || e->stamp != head->writes) {
-        gl->BufferDataARB(GL_ARRAY_BUFFER_ARB, (int)head->size, (const void *)mem, GL_STATIC_DRAW_ARB);
-        e->mem = mem;
-        e->stamp = head->writes;
-        tracef("rd3d: Direct3D 7 vertex buffer %08lx to the GPU, %lu bytes\r\n", mem, head->size);
-    }
+    gl->BufferDataARB(GL_ARRAY_BUFFER_ARB, (int)head->size, (const void *)mem, GL_STATIC_DRAW_ARB);
+    e->stamp = head->writes;
+    tracef("rd3d: Direct3D 7 vertex buffer %08lx to the GPU, %lu bytes\r\n", mem, head->size);
     return e->name;
 }
 
