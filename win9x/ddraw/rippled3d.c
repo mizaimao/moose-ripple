@@ -261,6 +261,8 @@ static RDD_SHARED *shared;
 #define GL_TEXTURE_SWIZZLE_B            0x8E44
 #define GL_FIRST_VERTEX_CONVENTION      0x8E4D
 #define GL_POINT_SPRITE                  0x8861
+#define GL_CLIP_PLANE0                   0x3000
+#define CLIP_PLANES 6                   /* user clip planes offered (D3DCAPS8.MaxUserClipPlanes) */
 #define GL_COORD_REPLACE                 0x8862
 #define GL_POINT_SPRITE_COORD_ORIGIN     0x8CA0
 #define GL_LOWER_LEFT                    0x8CA1
@@ -393,6 +395,8 @@ typedef struct {
     /* points larger than a pixel and point sprites (optional, point_state) */
     void (APIENTRY *PointSize)(GLfloat);
     void (APIENTRY *PointParameterfv)(GLenum, const GLfloat *);
+    /* user clip planes (optional, clip_state) */
+    void (APIENTRY *ClipPlane)(GLenum, const GLdouble *);
 } GLF;
 
 #define GL_CORE_COUNT 53            /* entries up to DrvGetProcAddress */
@@ -424,6 +428,7 @@ static const char *const gl_names[] = {
     "glCopyTexSubImage2D",
     "glGenBuffersARB", "glDeleteBuffersARB", "glBindBufferARB", "glBufferDataARB",
     "glPointSize", "glPointParameterfv",
+    "glClipPlane",
 };
 #define GL_ALL_COUNT (sizeof gl_names / sizeof gl_names[0])
 typedef char c_gl_names[sizeof(GLF) == GL_ALL_COUNT * sizeof(PROC) ? 1 : -1];
@@ -1311,6 +1316,10 @@ typedef struct {
     DWORD vp_x, vp_y, vp_w, vp_h;       /* the viewport (0 wide: none given yet) */
     int dirty;                          /* drawn since the last read-back */
     DWORD rs[256];                      /* render states */
+    /* User clip planes (Direct3D 8 and 9 with hardware vertex processing, clip_state): as the
+       program set them, the ones enabled in OpenGL, and the equations loaded there. */
+    float clip_plane[CLIP_PLANES][4], clip_eq[CLIP_PLANES][4];
+    DWORD clip_gl;
     DWORD tss[STAGES][32];              /* texture stage states */
     int stages_dirty;
     DWORD scene;                        /* scenes ended so far */
@@ -2101,6 +2110,7 @@ static void apply_stencil(RCTX *c)
 #define RS_POINTSCALEENABLE 157         /* sizes scaled by the distance from the eye (tnl_arb.c) */
 #define RS_POINTSCALE_A 158             /* then B and C: floats */
 #define RS_POINTSIZE_MAX 166
+#define RS_CLIPPLANEENABLE 152          /* a bit a user clip plane */
 #define MAX_POINT_SIZE 64.0f            /* the largest point offered (D3DCAPS8.MaxPointSize) */
 
 /* The channels a draw writes (D3DRS_COLORWRITEENABLE: red 1, green 2, blue 4, alpha 8). A clear
@@ -3165,6 +3175,8 @@ typedef struct {
     long first_vertex;                  /* the vertex of stream 0 that base is at, for the other
                                            streams of the draw; -1: not a whole vertex */
     int pos;                            /* the position's byte offset (0 but for a declaration) */
+    int psize_at;                       /* points: 1 + the byte offset of each vertex's size (D3DFVF_PSIZE,
+                                           untransformed vertices), 0: none */
     BYTE src[12];                       /* the stream each attribute comes from, 0 but for a
                                            declaration: position, normal, diffuse, specular,
                                            texture coordinate sets 0..7 */
@@ -3210,8 +3222,12 @@ static int parse_fvf(DWORD fvf, VERTICES *v)
     } else {
         return 0;
     }
-    if (fvf & D3DFVF_RESERVED1)         /* Direct3D 8's point size */
+    v->psize_at = 0;
+    if (fvf & D3DFVF_RESERVED1) {       /* Direct3D 8's point size */
+        if (v->xyz)
+            v->psize_at = (int)off + 1;
         off += 4;
+    }
     v->diffuse = v->specular = -1;
     if (fvf & D3DFVF_DIFFUSE) { v->diffuse = off; off += 4; }
     if (fvf & D3DFVF_SPECULAR) { v->specular = off; off += 4; }
@@ -3393,6 +3409,8 @@ static void arrays(RCTX *c, const VERTICES *v, DWORD first, DWORD count)
     gl->ClientActiveTexture(GL_TEXTURE0);
 }
 
+static void clip_state(RCTX *c, int kind);
+
 /* The render target's memory into the GPU's picture: the program drew into the surface
    itself (text with GDI, a locked surface) since the last read-back, and the next 3D draw
    would otherwise be read back over it. A plain copy: no depth test, blending or texturing. */
@@ -3423,6 +3441,7 @@ static void rt_upload(RCTX *c)
     gl->Disable(GL_COLOR_SUM);
     gl->Disable(GL_SCISSOR_TEST);       /* all of the target, not only the viewport */
     gl->Disable(GL_STENCIL_TEST);
+    clip_state(c, 0);                   /* nor behind a user clip plane of the last draw */
     for (u = 0; u <= FOG_UNIT; u++) {
         gl->ActiveTexture(GL_TEXTURE0 + u);
         gl->Disable(GL_TEXTURE_2D);
@@ -3502,6 +3521,51 @@ static void mat_mul(const float *a, const float *b, float *out)
         for (j = 0; j < 4; j++)
             out[i * 4 + j] = a[i * 4] * b[j] + a[i * 4 + 1] * b[4 + j] + a[i * 4 + 2] * b[8 + j] +
                              a[i * 4 + 3] * b[12 + j];
+}
+
+/* out = the inverse of m; 0 if m has none. */
+static int mat_invert(const float *m, float *out)
+{
+    double a[4][8], t, best;
+    int i, j, k, p;
+
+    for (i = 0; i < 4; i++)
+        for (j = 0; j < 4; j++) {
+            a[i][j] = m[i * 4 + j];
+            a[i][j + 4] = i == j ? 1.0 : 0.0;
+        }
+    for (i = 0; i < 4; i++) {           /* Gauss-Jordan, the largest pivot of the column first */
+        p = i;
+        best = a[i][i] < 0.0 ? -a[i][i] : a[i][i];
+        for (k = i + 1; k < 4; k++) {
+            t = a[k][i] < 0.0 ? -a[k][i] : a[k][i];
+            if (t > best) {
+                best = t;
+                p = k;
+            }
+        }
+        if (best < 1e-30)
+            return 0;
+        if (p != i)
+            for (j = 0; j < 8; j++) {
+                t = a[i][j];
+                a[i][j] = a[p][j];
+                a[p][j] = t;
+            }
+        t = 1.0 / a[i][i];
+        for (j = 0; j < 8; j++)
+            a[i][j] *= t;
+        for (k = 0; k < 4; k++)
+            if (k != i && a[k][i] != 0.0) {
+                t = a[k][i];
+                for (j = 0; j < 8; j++)
+                    a[k][j] -= t * a[i][j];
+            }
+    }
+    for (i = 0; i < 4; i++)
+        for (j = 0; j < 4; j++)
+            out[i * 4 + j] = (float)a[i][j + 4];
+    return 1;
 }
 
 static void tnl_reset(RCTX *c)
@@ -3663,6 +3727,7 @@ static void tnl_key(RCTX *c, const VERTICES *v, TNL_KEY *k)
             k->xform[s] = (BYTE)((flags & 7) | (flags & D3DTTFF_PROJECTED ? TNL_PROJECTED : 0));
     }
     k->point_scale = (BYTE)(c->points_now && c->rs[RS_POINTSCALEENABLE]);
+    k->point_vertex = (BYTE)(c->points_now && v->psize_at);
 }
 
 /* The program for k: kept ones by their key (VP_CACHE, the least recently used goes), new ones
@@ -3836,7 +3901,7 @@ static void tnl_load(RCTX *c, const TNL_KEY *k)
     if (c->tnl_dirty & TNL_DIRTY_TEX)
         for (i = 0; i < TNL_STAGES; i++)
             env_columns(gl, TNL_ENV_TEX + 4 * i, c->xf_tex[i]);
-    if (k->point_scale) {               /* each such draw: points are few */
+    if (k->point_scale || k->point_vertex) {    /* each such draw: points are few */
         float lo = *(const float *)&c->rs[RS_POINTSIZE_MIN], hi = *(const float *)&c->rs[RS_POINTSIZE_MAX];
         if (!(hi >= 1.0f) || hi > MAX_POINT_SIZE)
             hi = MAX_POINT_SIZE;
@@ -3847,7 +3912,8 @@ static void tnl_load(RCTX *c, const TNL_KEY *k)
         env4(gl, TNL_ENV_POINT, (float)(c->vp_w ? c->vp_h : c->fb_h) * *(const float *)&c->rs[RS_POINTSIZE],
              lo, hi, 1.0e-12f);
         env4(gl, TNL_ENV_POINT + 1, *(const float *)&c->rs[RS_POINTSCALE_A],
-             *(const float *)&c->rs[RS_POINTSCALE_A + 1], *(const float *)&c->rs[RS_POINTSCALE_A + 2], 0.0f);
+             *(const float *)&c->rs[RS_POINTSCALE_A + 1], *(const float *)&c->rs[RS_POINTSCALE_A + 2],
+             (float)(c->vp_w ? c->vp_h : c->fb_h));
     }
     c->tnl_dirty = 0;
 }
@@ -4271,6 +4337,13 @@ static void tnl_arrays(RCTX *c, const VERTICES *v, DWORD first)
             gl->DisableClientState(GL_SECONDARY_COLOR_ARRAY);
         }
     }
+    if (v->psize_at && c->points_now && gl->VertexAttribPointerARB && gl->EnableVertexAttribArrayARB) {
+        /* each point's size: the generic attribute the program reads it from (tnl_arb.c) */
+        b = stream_at(c, v, first, 0, (DWORD)v->psize_at - 1, &stride);
+        gl->VertexAttribPointerARB(TNL_ATTR_PSIZE, 1, GL_FLOAT, 0, stride, b);
+        gl->EnableVertexAttribArrayARB(TNL_ATTR_PSIZE);
+        c->attribs_on |= 1UL << TNL_ATTR_PSIZE;
+    }
     if (gl->FogCoordPointer)
         gl->DisableClientState(GL_FOG_COORDINATE_ARRAY);
     for (u = 0; u < STAGES; u++) {
@@ -4284,6 +4357,77 @@ static void tnl_arrays(RCTX *c, const VERTICES *v, DWORD first)
         }
     }
     gl->ClientActiveTexture(GL_TEXTURE0);
+}
+
+/* The user clip planes of the next draw (SETCLIPPLANE, D3DRS_CLIPPLANEENABLE). kind 0: none
+   (vertices the program transformed itself are not clipped by them, and Direct3D 7 has none
+   here); 1: the fixed-function pipeline, whose planes are in world space; 2: a vertex shader,
+   whose planes are in Direct3D's clip space.
+
+   OpenGL defines no user clipping for an ARB vertex program's output. Mesa clips its
+   result.position all the same, against each plane taken to clip space: the plane given to
+   glClipPlane times the inverse of the modelview matrix of that moment (the identity here),
+   times the inverse of the projection matrix (framebuffer's glOrtho). So a plane is worked out
+   in the clip space the programs write, which is OpenGL's (tnl_load's adjustments: y up, z from
+   -w, the half pixel), and multiplied by that projection matrix beforehand, so that Mesa's
+   inverse gives it back. The equations depend on the view, the projection, the viewport and
+   the target's size: they are worked out anew for each draw that clips, and loaded when they
+   differ from the ones there. */
+static void clip_state(RCTX *c, int kind)
+{
+    GLF *gl = gl_of(c);
+    DWORD want = kind && c->dx8 && gl->ClipPlane ? c->rs[RS_CLIPPLANEENABLE] & ((1UL << CLIP_PLANES) - 1) : 0;
+    DWORD i, j;
+    float inv[16];
+
+    if (!want && !c->clip_gl)
+        return;
+    if (want) {
+        float a[16], m[16], vp[16];
+        float w = (float)(c->vp_w ? c->vp_w : c->fb_w), h = (float)(c->vp_w ? c->vp_h : c->fb_h);
+        mat_identity(a);
+        a[5] = -1.0f;
+        a[10] = 2.0f;
+        a[14] = -1.0f;
+        a[12] = w > 0.0f ? 1.0f / w : 0.0f;
+        a[13] = h > 0.0f ? 1.0f / h : 0.0f;
+        if (kind == 1) {
+            mat_mul(c->xf_view, c->xf_proj, vp);
+            mat_mul(vp, a, m);
+        } else {
+            memcpy(m, a, sizeof m);
+        }
+        if (!mat_invert(m, inv) || !c->fb_w || !c->fb_h)
+            want = 0;                   /* no way back from clip space: nothing is clipped */
+    }
+    for (i = 0; i < CLIP_PLANES; i++) {
+        DWORD bit = 1UL << i;
+        if (want & bit) {
+            const float *p = c->clip_plane[i];
+            float fw = (float)c->fb_w, fh = (float)c->fb_h, g[4], e[4];
+            /* a point q of clip space is q inv in the plane's space: the plane there is inv p */
+            for (j = 0; j < 4; j++)
+                g[j] = inv[j * 4] * p[0] + inv[j * 4 + 1] * p[1] + inv[j * 4 + 2] * p[2] +
+                       inv[j * 4 + 3] * p[3];
+            /* times glOrtho(-0.5, w - 0.5, -0.5, h - 0.5, 0, -1) */
+            e[0] = g[0] * 2.0f / fw;
+            e[1] = g[1] * 2.0f / fh;
+            e[2] = g[2] * 2.0f;
+            e[3] = g[3] - g[0] * (fw - 1.0f) / fw - g[1] * (fh - 1.0f) / fh - g[2];
+            if (!(c->clip_gl & bit) || memcmp(e, c->clip_eq[i], sizeof e)) {
+                GLdouble d[4];
+                memcpy(c->clip_eq[i], e, sizeof e);
+                for (j = 0; j < 4; j++)
+                    d[j] = e[j];
+                gl->ClipPlane(GL_CLIP_PLANE0 + i, d);
+            }
+            if (!(c->clip_gl & bit))
+                gl->Enable(GL_CLIP_PLANE0 + i);
+        } else if (c->clip_gl & bit) {
+            gl->Disable(GL_CLIP_PLANE0 + i);
+        }
+    }
+    c->clip_gl = want;
 }
 
 /* Draw vertices first..first+count (all of them converted), or count indices into them. */
@@ -4330,6 +4474,7 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
             skip8(c, "vertex stream");
             return;
         }
+        clip_state(c, 2);
         if (!nidx)
             gl->DrawArrays(mode, 0, count);
         else {
@@ -4350,7 +4495,8 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
             return;
         }
         if (mode == GL_POINTS)
-            point_state(c, c->rs[RS_POINTSCALEENABLE] != 0);
+            point_state(c, c->rs[RS_POINTSCALEENABLE] != 0 || v->psize_at);
+        clip_state(c, 1);
         if (trace_on && src_streams(v) > 1)
             tracef("rd3d: declaration draw: position %d, normal %d, diffuse %d (stream %lu), specular %d, "
                    "stream 0 object %lu at %lu, %lu vertices\r\n", v->pos, v->normal, v->diffuse,
@@ -4368,6 +4514,7 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
     tnl_end(c);
     if (mode == GL_POINTS)
         point_state(c, 0);
+    clip_state(c, 0);
     if (!nidx) {
         if (!convert(c, v, first, count))
             return;
@@ -5975,9 +6122,16 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
         case D3DDP2OP_SETTEXLOD:
             cmd = data + n * sizeof(D3DHAL_DP2SETTEXLOD);
             break;
-        case D3DDP2OP_SETCLIPPLANE:
-            cmd = data + n * sizeof(D3DHAL_DP2SETCLIPPLANE);
+        case D3DDP2OP_SETCLIPPLANE: {
+            const D3DHAL_DP2SETCLIPPLANE *p = (const D3DHAL_DP2SETCLIPPLANE *)data;
+            if (data + n * sizeof *p > end)
+                goto bad;
+            for (i = 0; i < n; i++)
+                if (p[i].dwIndex < CLIP_PLANES)     /* (clip_state reads them at the next draw) */
+                    memcpy(c->clip_plane[p[i].dwIndex], p[i].plane, sizeof c->clip_plane[0]);
+            cmd = data + n * sizeof *p;
             break;
+        }
         default: {
             LPVOID next = NULL;
             HRESULT r = parse_unknown ? parse_unknown(cmd, &next) : D3DERR_COMMAND_UNPARSED;
@@ -6198,7 +6352,11 @@ static void d8_caps(RB_D3DCAPS8 *c)
     memset(c, 0, sizeof *c);
     p = process();                      /* the runtime version it announced (RbGdi2DxVersion) */
     c->deviceType = 1;                  /* D3DDEVTYPE_HAL */
-    c->caps2 = RB_D3DCAPS2_CANRENDERWINDOWED;
+    /* 0x00400000: D3DCAPS2_PRESENT_INTERVAL_IMMEDIATE (d3dhal.h, for drivers). A Direct3D 8 or 9
+       runtime takes D3DPRESENT_INTERVAL_IMMEDIATE from this bit, not from presentationIntervals,
+       and without it refuses a device that asks for that interval. No present here waits for
+       the vertical blank. */
+    c->caps2 = RB_D3DCAPS2_CANRENDERWINDOWED | 0x00400000UL;
     c->presentationIntervals = RB_D3DPRESENT_INTERVAL_IMMEDIATE | RB_D3DPRESENT_INTERVAL_ONE;
     c->devCaps = hw->dwDevCaps & ~D3DDEVCAPS_FLOATTLVERTEX;
     c->primitiveMiscCaps = tri->dwMiscCaps | 0x80;     /* D3DPMISCCAPS_COLORWRITEENABLE (colour_mask) */
@@ -6250,7 +6408,7 @@ static void d8_caps(RB_D3DCAPS8 *c)
             c->devCaps |= 0x02000000UL | 0x04000000UL;     /* D3DDEVCAPS_HWVERTEXBUFFER, HWINDEXBUFFER */
         c->maxActiveLights = TNL_LIGHTS;
         c->maxVertexBlendMatrices = 1;      /* the world matrix alone: no vertex blending */
-        c->maxUserClipPlanes = 0;
+        c->maxUserClipPlanes = CLIP_PLANES;     /* (clip_state) */
         /* vertex shaders as ARB vertex programs (vs_arb.c): vs_1_1 for Direct3D 8, vs_2_0
            (without flow control) for a Direct3D 9 runtime */
         c->maxStreams = VS_ARB_STREAMS;     /* a declaration may read several: a vertex shader's

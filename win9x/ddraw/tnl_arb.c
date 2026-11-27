@@ -9,6 +9,10 @@
    colour where N.L > 0 (LIT); the colour starts at emissive + global ambient x ambient. */
 #include "tnl_arb.h"
 
+/* a point's own size: the generic attribute TNL_ATTR_PSIZE */
+#define PSIZE_IN "vertex.attrib[6].x"
+typedef char c_psize_attr[TNL_ATTR_PSIZE == 6 ? 1 : -1];
+
 typedef struct {
     char *p;
     unsigned int n, size;
@@ -416,8 +420,18 @@ unsigned int tnl_text(const TNL_KEY *k, char *out, unsigned int size)
         op_s(&o, "w.z"); op_end(&o);
         op_begin(&o, "MAX", "w.z"); op_s(&o, "w.z"); op_env(&o, TNL_ENV_POINT, ".w"); op_end(&o);
         ins(&o, "RSQ", "w.z", "w.z", 0, 0);
-        op_begin(&o, "MUL", "w.z"); op_s(&o, "w.z"); op_env(&o, TNL_ENV_POINT, ".x"); op_end(&o);
+        if (k->point_vertex) {          /* the vertex's own size times the viewport's height */
+            op_begin(&o, "MUL", "w.z"); op_s(&o, "w.z"); op_env(&o, TNL_ENV_POINT + 1, ".w"); op_end(&o);
+            ins(&o, "MUL", "w.z", "w.z", PSIZE_IN, 0);
+        } else {
+            op_begin(&o, "MUL", "w.z"); op_s(&o, "w.z"); op_env(&o, TNL_ENV_POINT, ".x"); op_end(&o);
+        }
         op_begin(&o, "MAX", "w.z"); op_s(&o, "w.z"); op_env(&o, TNL_ENV_POINT, ".y"); op_end(&o);
+        op_begin(&o, "MIN", "result.pointsize.x"); op_s(&o, "w.z"); op_env(&o, TNL_ENV_POINT, ".z");
+        op_end(&o);
+    } else if (k->point_vertex) {
+        /* each vertex's own size in pixels, kept between the minimum and the maximum */
+        op_begin(&o, "MAX", "w.z"); op_s(&o, PSIZE_IN); op_env(&o, TNL_ENV_POINT, ".y"); op_end(&o);
         op_begin(&o, "MIN", "result.pointsize.x"); op_s(&o, "w.z"); op_env(&o, TNL_ENV_POINT, ".z");
         op_end(&o);
     }

@@ -1079,18 +1079,42 @@ failed one of 27. What was wrong, in the order it was fixed:
 | `vs2_streams`, `ff_streams` | one vertex stream offered | only stream 0 was read | streams 1 to 15 with hardware vertex processing: a vertex shader's inputs, and the fixed-function attributes of a declaration that comes without shader code, each from the vertex buffer of its stream at the same vertex; `MaxStreams` 16 |
 | `index32` | 16-bit indices only | index buffers of 32-bit indices were refused | drawn; turned into 16-bit indices where a draw's range fits them |
 | `ff_streams`, only in a full run | nothing drawn | the runtime gives a freed vertex buffer's handle to the next one, and the heap gives it the freed block: same handle, same address, and after one fill the same count of writes, so the old buffer's contents stayed on the GPU | a buffer announced again under a known handle is uploaded again |
+| `clip_ff`, `clip_lit`, `clip_ps`, `clip_ps_lit`, `clip_vs` | user clip planes not offered | `SETCLIPPLANE` was skipped | six planes with hardware vertex processing: in world space for the fixed-function pipeline, in clip space under a vertex shader (see "User clip planes" below) |
+| `interval_immediate` | no immediate presentation interval | the runtime takes it from the driver-only bit `D3DCAPS2_PRESENT_INTERVAL_IMMEDIATE` (0x00400000) in `Caps2`, not from the caps' `PresentationIntervals`, where the driver had put it | the bit is set. A program that asks for that interval was refused its device before |
+| `vertex_point` | every point of a draw the size of `D3DRS_POINTSIZE` | the size in the vertex (`D3DFVF_PSIZE`) was skipped | read per point from untransformed vertices, also with `D3DRS_POINTSCALEENABLE` |
 
-With those: Direct3D 9 71 pass and 2 fail, Direct3D 8 28 of 28. The totals grew because cases
+With those: Direct3D 9 79 pass and 1 fail, Direct3D 8 31 of 31. The totals grew because cases
 that were skipped as not offered run now, and because the tests gained cases on the way:
-`static_indexed`, `scaled_point` and `ff_streams` in `d9pixels`, `ff_streams` in `d8pixels`,
-and two from the Windows 2000/XP side (`vs2_def_first`, `eviction_in_scene`), which pass here
-as they came.
-Still failing: the caps lack the immediate presentation interval (the runtime
-drops it from what the driver reports; not understood yet), and the `vs1_inputs` declaration.
-Not offered, and next: user clip planes, the scissor test, L16, bump environment mapping in the
-Direct3D 9 caps, vertex shader flow control, linear StretchRect. Not done for points: sizes
-carried in the vertex. Not read from a declaration without code: blend weights and indices,
-the point size and the tweening inputs.
+`static_indexed`, `scaled_point`, `ff_streams` and `vertex_point` in `d9pixels`, `ff_streams`
+and three clip plane cases in `d8pixels`, and three from the Windows 2000/XP side
+(`vs2_def_first`, `eviction_in_scene`, `rt_small_depth`), which pass here as they came.
+
+Still failing: the `vs1_inputs` declaration. It reads blend indices as `D3DDECLTYPE_UBYTE4`,
+which a Direct3D 9 runtime allows only where the caps' `DeclTypes` name it, and that field
+exists only in the caps of a driver with the Direct3D 9 interface. The same holds for what is
+still not offered to Direct3D 9 programs: the scissor test, linear StretchRect and vertex
+shader flow control. Also not offered: L16 textures, and bump environment mapping as a
+fixed-function stage operation (`D3DTOP_BUMPENVMAP`; a pixel shader's `texbem` works): the
+fixed-function stages are drawn with OpenGL's combine modes, which have no such operation, so
+it needs a fragment program for the stages. Not done for points: sizes carried in transformed
+vertices. Not read from a declaration without code: blend weights and indices, the point size
+and the tweening inputs.
+
+**User clip planes.** OpenGL defines no user clipping for an ARB vertex program's output, and
+both the fixed-function pipeline and vertex shaders are such programs here. Mesa clips a
+program's position all the same, against each plane taken to clip space: the plane given to
+`glClipPlane` times the inverse of the modelview matrix of that moment (always the identity
+here) times the inverse of the projection matrix (the `glOrtho` set for the target's size).
+The driver therefore works each plane out in the clip space its programs write, which is
+OpenGL's (y up, z from -w, the half pixel), and multiplies it by that projection matrix before
+`glClipPlane`, so that Mesa's inverse gives it back. For the fixed-function pipeline the plane
+is in world space and goes through the inverse of view times projection; under a vertex
+shader it is in Direct3D's clip space already. This is done for each draw that clips (a 4x4
+inverse and one product a plane), and `glClipPlane` is called only when the result differs
+from what is loaded. Vertices the program transformed itself are not clipped by the planes.
+This leans on Mesa's behaviour, which the driver's own OpenGL library is; `d8pixels` has a
+case with a view and a projection that are not the identity, which a plane taken for the wrong
+space fails.
 
 The last row is a fault no single case shows: `ff_streams` passes when run alone (`d9pixels ps=80`) and
 failed after the cases before it had made and freed their buffers. A case that fails only in

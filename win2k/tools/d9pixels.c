@@ -492,7 +492,7 @@ done:
     if (decl) IDirect3DVertexDeclaration9_Release(decl);
 }
 
-/* 78: an indexed draw of untransformed vertices from a write-only vertex buffer and index buffer,
+/* 82: an indexed draw of untransformed vertices from a write-only vertex buffer and index buffer,
  * the indices from the buffer's start. With hardware vertex processing a driver may keep both on
  * the GPU, where the draw's index "pointer" is the offset zero. */
 static void static_indexed_case(int only)
@@ -507,7 +507,7 @@ static void static_indexed_case(int only)
     D3DMATRIX m;
     BYTE *p;
     HRESULT hr;
-    if (only && only != 78) return;
+    if (only && only != 82) return;
     vb = vertex_buffer(v, sizeof(v), XYZFVF);
     if (!vb) { fail_hr("static_indexed", "create", E_FAIL); return; }
     hr = IDirect3DDevice9_CreateIndexBuffer(device, sizeof(idx), D3DUSAGE_WRITEONLY, D3DFMT_INDEX16,
@@ -580,6 +580,42 @@ static void scaled_point_case(int only, BOOL offered)
         IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALE_C, *(DWORD *)&f);
         if (FAILED(hr)) { fail_hr("scaled_point", "draw", hr); IDirect3DDevice9_EndScene(device); }
         else check("scaled_point", s, 5);
+    }
+}
+
+/* 81: points that bring their own sizes (D3DFVF_PSIZE on untransformed vertices): one of 16
+ * pixels at the centre and one of 4 pixels at 32,32 in a single draw, while D3DRS_POINTSIZE says
+ * 2. The vertex's size wins over the render state's, and each point has its own. */
+static void vertex_point_case(int only, BOOL offered)
+{
+    static const SAMPLE s[] = { { 64, 64, 0xffff00 }, { 58, 58, 0xffff00 }, { 70, 70, 0xffff00 },
+                                { 76, 64, CLEAR_COLOR }, { 64, 52, CLEAR_COLOR },
+                                { 32, 32, 0xffff00 }, { 38, 32, CLEAR_COLOR }, { 32, 38, CLEAR_COLOR } };
+    static const struct { float x, y, z, size; DWORD diffuse; } v[2] = {
+        { 0.0f, 0.0f, 0.5f, 16.0f, 0xffffff00 }, { -0.5f, 0.5f, 0.5f, 4.0f, 0xffffff00 } };
+    D3DMATRIX m;
+    HRESULT hr;
+    float f;
+    if (only && only != 81) return;
+    if (!offered) { printf("D9PIX points with their own sizes not offered\n"); return; }
+    memset(&m, 0, sizeof(m));
+    m._11 = m._22 = m._33 = m._44 = 1.0f;
+    IDirect3DDevice9_SetTransform(device, D3DTS_WORLD, &m);
+    IDirect3DDevice9_SetTransform(device, D3DTS_VIEW, &m);
+    IDirect3DDevice9_SetTransform(device, D3DTS_PROJECTION, &m);
+    IDirect3DDevice9_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+    if (begin("vertex_point")) {
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        f = 2.0f;
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSIZE, *(DWORD *)&f);
+        IDirect3DDevice9_SetFVF(device, D3DFVF_XYZ | D3DFVF_PSIZE | D3DFVF_DIFFUSE);
+        hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_POINTLIST, 2, v, sizeof(v[0]));
+        f = 1.0f;
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSIZE, *(DWORD *)&f);
+        if (FAILED(hr)) { fail_hr("vertex_point", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("vertex_point", s, 8);
     }
 }
 
@@ -2694,6 +2730,7 @@ int main(int argc, char **argv)
     program_point_case(only, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1));
     static_indexed_case(only);
     scaled_point_case(only, caps.MaxPointSize >= 16.0f);
+    vertex_point_case(only, caps.MaxPointSize >= 16.0f && flags == D3DCREATE_HARDWARE_VERTEXPROCESSING);
     ff_streams_case(only);
     l16_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
