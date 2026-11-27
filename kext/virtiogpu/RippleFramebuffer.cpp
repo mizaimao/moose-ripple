@@ -738,10 +738,12 @@ IOReturn RippleFramebuffer::showAction(OSObject *owner, void *idp, void *rectp, 
         (uint64_t)r->y + r->height > md.height)
         return kIOReturnBadArgument;
     const bool changed = fb->fShownRes != id || memcmp(&fb->fShownRect, r, sizeof(*r)) != 0;
+    fb->fShownDrawing = 0;                    // the buffer holds this whole frame now
     if (changed) {                            // a new buffer or place: shown at once
         fb->fLastFlush = mach_absolute_time();
         fb->fFlushHeld = false;
     } else if (!fb->flushDue()) {
+        fb->fHeldIsShow = true;
         return kIOReturnSuccess;              // held: the timer shows it
     }
     if (fb->fGamma.active()) {
@@ -769,7 +771,11 @@ IOReturn RippleFramebuffer::showAction(OSObject *owner, void *idp, void *rectp, 
 // the GPU at every flush, on the thread that also runs the guest's GL commands, so a program
 // that draws 150 frames a second made the host do that 150 times a second. A frame that comes
 // sooner than the gap after the last flush is held: the buffer on the host is current already,
-// and the timer flushes it when the gap is over, so the last frame is always shown. Called on
+// and the timer flushes it when the gap is over, so the last frame is always shown. Unless the
+// frame came from the client's own present and the client has sent drawing commands since
+// (fShownDrawing): then its next present shows the frame, at once, as the gap is over by then.
+// A frame the kernel copied in from a window (flushShown) is whole, and the timer shows it as
+// before (leaving those to the next present cost OpenArena 2%, 26-27 Nov). Called on
 // the work loop.
 bool RippleFramebuffer::flushDue()
 {
@@ -796,6 +802,12 @@ void RippleFramebuffer::flushTimerAction(OSObject *owner, IOTimerEventSource *)
     if (!fb || !fb->fEnabled || !fb->fFlushHeld)
         return;
     fb->fFlushHeld = false;
+    // The client has started its next frame in the same buffer: a flush now would show it half
+    // drawn (Dashboard flipped back to the picture from before a widget was added, as
+    // WindowServer redraws the background first). Its next present is due at once and shows
+    // the whole frame.
+    if (fb->fShownDrawing && fb->fHeldIsShow)
+        return;
     fb->fLastFlush = mach_absolute_time();
     if (!fb->fShownRes || fb->gammaPresent())
         return;
@@ -810,8 +822,10 @@ IOReturn RippleFramebuffer::flushAction(OSObject *owner, void *idp, void *queued
 
     if (!id || fb->fShownRes != id)
         return kIOReturnNotReady;
-    if (!fb->flushDue())
+    if (!fb->flushDue()) {
+        fb->fHeldIsShow = false;              // a frame the kernel copied in whole
         return kIOReturnSuccess;              // held: the timer shows it
+    }
     if (fb->gammaPresent())
         return kIOReturnSuccess;
     bool ok = queued ? fb->fDev->resourceFlushAsync(id, fb->fShownRect)

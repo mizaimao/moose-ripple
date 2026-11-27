@@ -332,3 +332,26 @@ with Apple's software renderer within one step), and all textures tied to one IO
 process share one GPU image (`gl-feature-check iosurface`, the two-context case). Checked in
 UTM: the live view, the nine colour effects, the eight distortions and the backdrop pages all
 draw live.
+
+## KI-17: The screen could flash an older picture while WindowServer animated (fixed after 0.6.0)
+
+Found on 2026-11-26 (reported in testing: adding a Dashboard widget flickered); release 0.6.0
+has it.
+
+**Symptom.** With Quartz Extreme on, an animation drawn by WindowServer itself (Dashboard's
+ripple when a widget is added) flickered on the host's display: for about two seconds the
+screen flipped back to the picture from before the widget was added, a frame at a time. In-guest
+screenshots never show it.
+
+**Cause.** The display flush limit (`ripple_flush_hz`, 66 a second) holds a frame that comes too
+soon and flushes it from a timer when the gap is over. WindowServer draws every frame into the
+same buffer, starting with the background, so a timer flush that came while it was drawing the
+next frame showed that frame half drawn: the background and the old widgets, the new one not
+yet.
+
+**Fix.** The client that shows the buffer marks it at each submit and its present clears the
+mark; the timer leaves a frame from that present alone while the mark is set, and the client's
+next present shows it. Recorded through QEMU's VNC on the Proxmox host while a Calculator was
+added: 7 frames flipped back with 0.6.0's kext and with main's, 0 with the fix (the same as
+with the limit off, `ripple_flush_hz=0`). OpenArena's timedemo on the same host: 305.7 frames/s
+before, 307.5 after.

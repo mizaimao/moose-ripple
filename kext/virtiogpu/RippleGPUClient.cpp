@@ -422,6 +422,8 @@ IOReturn RippleGPUClient::submit(IOExternalMethodArguments *a, uint64_t *fence)
         fCmdNext = (i + 1) % kCmdBuffers;
         ok = fDev->submit3DAsync(s.context, fCmdPA[i], s.cmd_size, fence, &fCmdBusy[i]);
     }
+    if (ok && fShown)
+        fAccel->framebuffer()->shownDrawing(fShown);   // the pacing timer leaves the buffer be
     fSub[0]++;
     fSub[1] += s.num_handles;
     fSub[2] += hadToWait;
