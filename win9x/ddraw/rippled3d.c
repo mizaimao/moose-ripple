@@ -1434,6 +1434,8 @@ typedef struct {
     DWORD gpu_gen;                      /* the render-target picture copied in (texture_from_gpu) */
     DWORD scene;                        /* the scene it was uploaded in */
     int dirty;                          /* written since (Lock, texture blit) */
+    DWORD lower;                        /* a lightweight mipmap: the handle of the system-memory texture
+                                           whose levels below the top it is drawn with (texture_levels) */
 } TEXTURE;
 
 #define TARGETS  16                     /* colour buffers a context keeps (gpu_buffer): a flip chain
@@ -2668,7 +2670,9 @@ static void texture_evict(RCTX *c, DWORD keep)
     if (!oldest)
         return;
     gl_of(c)->DeleteTextures(1, &c->tex[oldest].name);
+    when = c->tex[oldest].lower;        /* (kept: the runtime does not blit again for our sake) */
     memset(&c->tex[oldest], 0, sizeof c->tex[oldest]);
+    c->tex[oldest].lower = when;
     c->ntextures--;
 }
 
@@ -3090,6 +3094,37 @@ static int texture_from_gpu(RCTX *c, DWORD h, TEXTURE *t, LPDDRAWI_DDRAWSURFACE_
     return 1;
 }
 
+/* A texture's levels for uploading. A Direct3D 9 runtime makes the video-memory copy of a
+   mipmapped texture it manages as one surface (DDSCAPS3_LIGHTWEIGHTMIPMAP) and leaves the levels
+   below the top to the driver. They are read from the system-memory texture the runtime fills
+   the copy from, noted at the texture blit (t->lower): the same size and format, or it is not
+   that texture any more. */
+#define RB_DDSCAPS3_LIGHTWEIGHTMIPMAP 0x00000400UL
+
+static DWORD texture_levels(RCTX *c, TEXTURE *t, LPDDRAWI_DDRAWSURFACE_LCL s, LPDDRAWI_DDRAWSURFACE_LCL *lv)
+{
+    DWORD levels = mip_chain(s, lv);
+
+    if (levels == 1 && t->lower) {
+        LPDDRAWI_DDRAWSURFACE_LCL from = handle_get(c->ddl, t->lower), fl[MAX_LEVELS];
+        DWORD n = from && from->lpGbl && from->lpGbl->fpVidMem ? mip_chain(from, fl) : 0, l;
+        DDPIXELFORMAT a, b;
+
+        if (n > 1 && fl[0]->lpGbl->wWidth == s->lpGbl->wWidth && fl[0]->lpGbl->wHeight == s->lpGbl->wHeight) {
+            surface_format(s, &a);
+            surface_format(from, &b);
+            if (a.dwFlags == b.dwFlags && a.dwFourCC == b.dwFourCC && a.dwRGBBitCount == b.dwRGBBitCount &&
+                a.dwRBitMask == b.dwRBitMask && a.dwGBitMask == b.dwGBitMask && a.dwBBitMask == b.dwBBitMask &&
+                a.dwRGBAlphaBitMask == b.dwRGBAlphaBitMask) {
+                for (l = 1; l < n; l++)
+                    lv[l] = fl[l];
+                return n;
+            }
+        }
+    }
+    return levels;
+}
+
 static int texture_bind(RCTX *c, DWORD h, int stage)
 {
     GLF *gl = gl_of(c);
@@ -3134,7 +3169,7 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
         c->ntextures++;
     }
     gl->BindTexture(GL_TEXTURE_2D, t->name);
-    levels = mip_chain(s, lv);
+    levels = texture_levels(c, t, s, lv);
     stamp = chain_stamp(lv, levels);
     /* The colour key, if the program turned it on and the texture has one: the key's colour
        is uploaded as transparent, so a change of either is a new upload (fmt) */
@@ -3452,7 +3487,7 @@ static int textures_changed(RCTX *c)
             continue;
         l = handle_get(c->ddl, h);
         t = &c->tex[h];
-        if (!l || l->lpGbl->fpVidMem != t->mem || mip_chain(l, lv) != t->levels ||
+        if (!l || l->lpGbl->fpVidMem != t->mem || texture_levels(c, t, l, lv) != t->levels ||
             texture_changed(c, t, l, chain_stamp(lv, t->levels)))
             return 1;
     }
@@ -5925,6 +5960,16 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
         d3d_surface_written(dl[l]);     /* a render target too: its GPU picture is older now */
     }
     }                                   /* faces */
+    if (c->dx8) {                       /* a lightweight mipmap takes its lower levels from the source */
+        DWORD caps3 = ds->lpSurfMore ? ds->lpSurfMore->ddsCapsEx.dwCaps3 : 0;
+        tracef("rd3d: texture blit: target caps3 %08lx, source caps3 %08lx\r\n", caps3,
+               ss->lpSurfMore ? ss->lpSurfMore->ddsCapsEx.dwCaps3 : 0);
+        if (caps3 & RB_DDSCAPS3_LIGHTWEIGHTMIPMAP) {
+            TEXTURE *t = texture_slot(c, b->dwDDDestSurface);
+            if (t)
+                t->lower = b->dwDDSrcSurface;
+        }
+    }
     if (b->dwDDDestSurface < c->ntex)
         c->tex[b->dwDDDestSurface].dirty = 1;            /* upload again */
     c->stages_dirty = 1;
