@@ -2051,6 +2051,60 @@ static void cube_cases(int only, BOOL version2)
         }
         IDirect3DPixelShader9_Release(handle);
     }
+    /* 90: the same six quads through the fixed-function stage alone (no pixel shader): the stage
+     * program samples the cube map. 91: the stage after a vertex shader that passes the three
+     * coordinates on, as 3DMark03 draws the reflections on its planes. */
+    for (pass = 90; pass <= 91; ++pass) {
+        static const D3DVERTEXELEMENT9 elements[] = {
+            { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+            { 0, 12, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_TEXCOORD, 0 }, D3DDECL_END() };
+        static const DWORD vs[] = { 0xfffe0200, VDCL2(0, 0), VDCL2(5, 1),
+            P2I(OMov, 2), P2D(VPos, 0, 15), P2SRC(RV, 0), P2I(OMov, 2), P2D(VAttr, 0, 15), P2SRC(RC, 0),
+            P2I(OMov, 2), P2D(VTex, 0, 15), P2SRC(RV, 1), PSEND };
+        static const float white[4] = { 1, 1, 1, 1 };
+        typedef struct { float x, y, z, u, v, w; } VV;
+        const char *name = pass == 90 ? "ff_cube" : "vs_ff_cube";
+        IDirect3DVertexDeclaration9 *decl = NULL;
+        IDirect3DVertexShader9 *vsh = NULL;
+        VV vv[36];
+        HRESULT hr = D3D_OK;
+        if (only && only != pass) continue;
+        if (pass == 91) {
+            if (!version2) continue;
+            for (i = 0; i < 36; ++i) {
+                vv[i].x = v[i].x / 64.0f - 1.0f; vv[i].y = 1.0f - v[i].y / 64.0f; vv[i].z = 0.5f;
+                vv[i].u = v[i].u; vv[i].v = v[i].v; vv[i].w = v[i].w;
+            }
+            hr = IDirect3DDevice9_CreateVertexDeclaration(device, elements, &decl);
+            if (SUCCEEDED(hr)) hr = IDirect3DDevice9_CreateVertexShader(device, vs, &vsh);
+            if (FAILED(hr)) { fail_hr(name, "create", hr); if (decl) IDirect3DVertexDeclaration9_Release(decl); continue; }
+        }
+        if (begin(name)) {
+            IDirect3DDevice9_SetPixelShader(device, NULL);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXCOORDINDEX, 0);
+            if (pass == 90) {
+                IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE3(0));
+                hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 12, v, sizeof(v[0]));
+            } else {
+                DWORD cull = D3DCULL_CCW;
+                IDirect3DDevice9_GetRenderState(device, D3DRS_CULLMODE, &cull);
+                IDirect3DDevice9_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_NONE);
+                IDirect3DDevice9_SetVertexDeclaration(device, decl);
+                IDirect3DDevice9_SetVertexShader(device, vsh);
+                IDirect3DDevice9_SetVertexShaderConstantF(device, 0, white, 1);
+                hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 12, vv, sizeof(vv[0]));
+                IDirect3DDevice9_SetVertexShader(device, NULL);
+                IDirect3DDevice9_SetRenderState(device, D3DRS_CULLMODE, cull);
+            }
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+            if (FAILED(hr)) { fail_hr(name, "draw", hr); IDirect3DDevice9_EndScene(device); }
+            else check(name, s, 7);
+        }
+        if (vsh) IDirect3DVertexShader9_Release(vsh);
+        if (decl) IDirect3DVertexDeclaration9_Release(decl);
+    }
     /* 71: a render target cube map (64x64), each face cleared to its colour as a render target, then
      * sampled the same way (3DMark05 draws its reflections into one). */
     if ((!only || only == 71) && version2) {
