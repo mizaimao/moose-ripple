@@ -1748,7 +1748,11 @@ static void eviction_case(int only)
         s[i].rgb = color;
     }
     if (made < Count || i < Count) fail_hr("eviction", "create", E_OUTOFMEMORY);
-    else for (scene = 0; scene < 2; ++scene) {
+    /* The third scene: the sixteen textures the host still holds (the last sixteen drawn) and then
+     * the first one, which needs the room of the one drawn first in this scene. That one is freed
+     * while its draw has not gone to the host yet; a driver that frees it there too early loses
+     * the draws that follow it. The eight textures not drawn leave the clear colour. */
+    else for (scene = 0; scene < 3; ++scene) {
         HRESULT hr = S_OK;
         if (!begin("eviction")) break;
         IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
@@ -1757,17 +1761,22 @@ static void eviction_case(int only)
         IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
         IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
         IDirect3DDevice9_SetFVF(device, TLTEXFVF);
-        for (i = 0; SUCCEEDED(hr) && i < Count; ++i) {
-            float x0 = 2.0f + 20 * (i % 6), y0 = 2.0f + 20 * (i / 6);
+        for (i = 0; SUCCEEDED(hr) && i < (scene == 2 ? 17 : Count); ++i) {
+            int t = scene == 2 ? (i < 16 ? Count - 16 + i : 0) : i;
+            float x0 = 2.0f + 20 * (t % 6), y0 = 2.0f + 20 * (t / 6);
             TLTEXVERTEX v[4] = {
                 { x0, y0, 0.5f, 1, 0xffffffff, 0, 0 }, { x0 + 14, y0, 0.5f, 1, 0xffffffff, 1, 0 },
                 { x0, y0 + 14, 0.5f, 1, 0xffffffff, 0, 1 }, { x0 + 14, y0 + 14, 0.5f, 1, 0xffffffff, 1, 1 } };
-            IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)tex[i]);
+            IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)tex[t]);
             hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
         }
         IDirect3DDevice9_SetTexture(device, 0, NULL);
         if (FAILED(hr)) { fail_hr("eviction", "draw", hr); IDirect3DDevice9_EndScene(device); break; }
-        check(scene ? "eviction_again" : "eviction", s, Count);
+        if (scene == 2) {
+            SAMPLE in[Count];
+            for (i = 0; i < Count; ++i) { in[i] = s[i]; if (i >= 1 && i < Count - 16) in[i].rgb = CLEAR_COLOR; }
+            check("eviction_in_scene", in, Count);
+        } else check(scene ? "eviction_again" : "eviction", s, Count);
     }
     for (i = 0; i < made; ++i) IDirect3DTexture9_Release(tex[i]);
 }
