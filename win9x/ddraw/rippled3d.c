@@ -3303,8 +3303,8 @@ static void white_texture(RCTX *c)
     gl->BindTexture(GL_TEXTURE_2D, c->white);
 }
 
-/* What a pixel shader reads from a stage without a texture: opaque black (the fixed-function
-   stages read white there). */
+/* What a pixel shader reads from a stage without a texture, and a fixed-function stage of
+   Direct3D 8 and 9 too: opaque black. */
 static void black_texture(RCTX *c)
 {
     GLF *gl = gl_of(c);
@@ -3441,10 +3441,22 @@ static void apply_stages(RCTX *c)
         gl->ActiveTexture(GL_TEXTURE0 + s);
         if (off || cop == D3DTOP_DISABLE) {
             off = 1;
-        } else if (need) {
-            on = texture_bind(c, st[D3DTSS_TEXTUREMAP], s);
-            if (on)
+        } else if (need || (c->dx8 && st[D3DTSS_COLORARG1] == D3DTA_TEXTURE)) {
+            on = st[D3DTSS_TEXTUREMAP] ? texture_bind(c, st[D3DTSS_TEXTUREMAP], s) : 0;
+            if (on) {
                 c->bound[s] = st[D3DTSS_TEXTUREMAP];
+            } else if (c->dx8) {
+                /* Direct3D 8 and 9 draw a stage without its texture the way their reference
+                   rasterizer does: the stage is left out, with the ones after it, when its
+                   first colour argument is the texture itself (even if the operation does not
+                   read it); any other read of the missing texture gives opaque black. */
+                if (st[D3DTSS_COLORARG1] == D3DTA_TEXTURE) {
+                    off = 1;
+                } else {
+                    black_texture(c);
+                    on = 1;
+                }
+            }
         } else {
             white_texture(c);
             on = 1;
