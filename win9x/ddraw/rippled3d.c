@@ -149,6 +149,36 @@ DWORD WINAPI RippleFrames(void)
 {
     return dev_flips;
 }
+
+/* Development check: what the driver has done so far that costs time without showing as a skip:
+   programs compiled, Direct3D 9 shader pairs given up (d9_shader), pictures read back from the
+   GPU, textures and buffers uploaded. One line a second at most, while any of it happens; the
+   lines fall between the frame counter's, which gives the rates. A benchmark that crawls without
+   a skip is doing one of these again and again. */
+enum { DevMadeTnl, DevMadeVs, DevMadePs, DevPairGone, DevReadBack, DevTexUpload, DevBufUpload, DevKinds };
+static DWORD dev_made[DevKinds], dev_buf_kb, dev_said;
+
+static void dev_count(int kind)
+{
+    char line[300];
+    DWORD now;
+
+    dev_made[kind]++;
+    now = GetTickCount();
+    if (now - dev_said < 1000)
+        return;
+    dev_said = now;
+    wsprintf(line, "rd3d: so far: programs made %lu fixed-function vertex, %lu vertex shader, %lu pixel shader; "
+             "%lu shader pairs given up; %lu read-backs; %lu texture uploads; %lu buffer uploads, %lu KB\r\n",
+             dev_made[DevMadeTnl], dev_made[DevMadeVs], dev_made[DevMadePs], dev_made[DevPairGone],
+             dev_made[DevReadBack], dev_made[DevTexUpload], dev_made[DevBufUpload], dev_buf_kb);
+    dbg(line);
+}
+#define DEV_COUNT(kind) dev_count(kind)
+#define DEV_BUFFER_BYTES(n) (dev_buf_kb += (DWORD)(n) >> 10)
+#else
+#define DEV_COUNT(kind)
+#define DEV_BUFFER_BYTES(n)
 #endif
 
 /* Measure presents independently: a GPU flip normally has no read-back to sample. */
@@ -1767,6 +1797,7 @@ static int read_pixels(RCTX *c, GPUBUF *b)
         LARGE_INTEGER t0, t1;
         if (profile_on)
             QueryPerformanceCounter(&t0);
+        DEV_COUNT(DevReadBack);
         gl->ReadPixels(0, 0, w, h, f.format, f.type, (GLvoid *)b->mem);
         if (profile_on) {
             QueryPerformanceCounter(&t1);
@@ -2694,6 +2725,7 @@ static void texture_upload(GLF *gl, const PIXFMT *f, const DDPIXELFORMAT *pf,
 {
     DWORD l;
 
+    DEV_COUNT(DevTexUpload);
     if (f->block) {                     /* DXT: each level's blocks as they are, row after row */
         for (l = 0; l < levels && gl->CompressedTexImage2D; l++) {
             LPDDRAWI_DDRAWSURFACE_GBL g = lv[l]->lpGbl;
@@ -4166,6 +4198,7 @@ static GLuint tnl_program(RCTX *c, const TNL_KEY *k)
         gl->BindProgramARB(GL_VERTEX_PROGRAM_ARB, prog);
         c->vp_bound = prog;
         gl->ProgramStringARB(GL_VERTEX_PROGRAM_ARB, GL_PROGRAM_FORMAT_ASCII_ARB, n - 1, text);
+        DEV_COUNT(DevMadeTnl);
         if (gl->GetError() != GL_NO_ERROR) {
             const char *e = (const char *)gl->GetString(GL_PROGRAM_ERROR_STRING_ARB);
             SKIPPED(SKIP_PROGRAM);
@@ -4484,6 +4517,7 @@ static GLuint vs_program(RCTX *c, struct vs8 *s, DWORD key)
         gl->BindProgramARB(GL_VERTEX_PROGRAM_ARB, prog);
         c->vp_bound = prog;
         gl->ProgramStringARB(GL_VERTEX_PROGRAM_ARB, GL_PROGRAM_FORMAT_ASCII_ARB, n - 1, text);
+        DEV_COUNT(DevMadeVs);
         if (gl->GetError() != GL_NO_ERROR) {
             const char *e = (const char *)gl->GetString(GL_PROGRAM_ERROR_STRING_ARB);
             SKIPPED(SKIP_PROGRAM);
@@ -4763,6 +4797,7 @@ static DWORD d9_shader(RCTX *c, DWORD decl, DWORD func)
     }
     if (at == D9_PAIRS) {               /* full: one pair gives up its shader, each in its turn */
         at = c->pair_next++ % D9_PAIRS;
+        DEV_COUNT(DevPairGone);
         vs_delete(c, c->pairs[at].vs);
         memset(&c->pairs[at], 0, sizeof c->pairs[at]);
     }
@@ -6047,6 +6082,7 @@ static GLuint ps_compile(RCTX *c, struct ps8 *p, DWORD key)
         gl->BindProgramARB(GL_FRAGMENT_PROGRAM_ARB, prog);
         c->fp_prog = prog;
         gl->ProgramStringARB(GL_FRAGMENT_PROGRAM_ARB, GL_PROGRAM_FORMAT_ASCII_ARB, m - 1, arb);
+        DEV_COUNT(DevMadePs);
         if (gl->GetError() != GL_NO_ERROR) {
             const char *e = (const char *)gl->GetString(GL_PROGRAM_ERROR_STRING_ARB);
             SKIPPED(SKIP_PROGRAM);
@@ -6244,6 +6280,8 @@ static GLuint buffer_object(RCTX *c, DWORD h, GLenum target)
     }
     bind_buffer(c, target, b->name);
     if (b->writes != head->writes) {
+        DEV_COUNT(DevBufUpload);
+        DEV_BUFFER_BYTES(b->size);
         gl->BufferDataARB(target, (int)b->size, (const void *)b->mem,
                           b->fixed ? GL_STATIC_DRAW_ARB : GL_DYNAMIC_DRAW_ARB);
         b->writes = head->writes;
