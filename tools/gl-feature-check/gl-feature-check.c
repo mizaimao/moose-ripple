@@ -12,8 +12,11 @@
  *   gl-feature-check generic    RGBA uploaded as GL_COMPRESSED_RGBA (driver picks the format)
  *   gl-feature-check tex3d      a 32x32x32 3D texture with client storage, every slice checked
  *   gl-feature-check yuv        Core Video's 2vuy conversion program, whole and in steps
+ *   gl-feature-check ycbcr      YCbCr 4:2:2 textures (GL_APPLE_ycbcr_422), as Photo Booth's
+ *                               camera frames
  *   gl-feature-check stencil    a drawable with depth and stencil buffers, both used
  *   gl-feature-check iosurface  a texture that is an IOSurface follows the surface's contents
+ *                               and one IOSurface drawn into in one context reads in another
  *   gl-feature-check stale [N]  N contexts in turn, each drawn with on one thread and destroyed
  *                               from another (software first: ours crashed here, issue 240)
  */
@@ -1731,6 +1734,111 @@ static void run_yuv(const char *name, CGLPixelFormatAttribute renderer, bool pbu
     CGLDestroyPixelFormat(pf);
 }
 
+/* Photo Booth's camera frames: 4:2:2 YCbCr uploaded with GL_YCBCR_422_APPLE into a GL_RGB
+ * rectangle texture, rows given in bytes (issue 11), drawn 1:1. Both byte orders, an update
+ * through glTexSubImage2D, and a 2D texture. Prints every texel drawn; the two renderers should
+ * agree to a step or two. (Odd widths are left out: Apple's software renderer gives other values
+ * than ours from the fifth texel of a 7-wide row on.) */
+#ifndef GL_YCBCR_422_APPLE
+#define GL_YCBCR_422_APPLE 0x85B9
+#define GL_UNSIGNED_SHORT_8_8_APPLE 0x85BA
+#define GL_UNSIGNED_SHORT_8_8_REV_APPLE 0x85BB
+#endif
+#ifndef GL_UNPACK_ROW_BYTES_APPLE
+#define GL_UNPACK_ROW_BYTES_APPLE 0x8A16
+#endif
+static void run_ycbcr(const char *name, CGLPixelFormatAttribute renderer)
+{
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32, kCGLPFAPBuffer,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
+                                        renderer, 0 };
+    if (!renderer)
+        attrs[4] = 0;
+    CGLPixelFormatObj pf;
+    GLint npf;
+    CGLContextObj c;
+    if (CGLChoosePixelFormat(attrs, &pf, &npf) || !pf || CGLCreateContext(pf, NULL, &c))
+        return;
+    CGLSetCurrentContext(c);
+    enum { TW = 8, TH = 2, ROW = TW * 2 + 6 };
+    /* Pairs as Cb Y0 Cr Y1: black and white, then red, green, blue, grey and two skin-ish
+     * tones from a camera, and a pair at the ends of the range. */
+    static const uint8_t pairs[TH][TW / 2][4] = {
+        { { 128, 16, 128, 235 }, { 90, 81, 240, 82 }, { 54, 145, 34, 146 }, { 240, 41, 110, 42 } },
+        { { 128, 126, 128, 127 }, { 110, 150, 160, 152 }, { 120, 90, 145, 95 }, { 0, 255, 255, 0 } },
+    };
+    static uint8_t vuy[TH * ROW], yuvs[TH * ROW];
+    for (int y = 0; y < TH; y++)
+        for (int p = 0; p < TW / 2; p++) {
+            const uint8_t *q = pairs[y][p];
+            uint8_t *a = vuy + y * ROW + p * 4, *b = yuvs + y * ROW + p * 4;
+            a[0] = q[0]; a[1] = q[1]; a[2] = q[2]; a[3] = q[3];
+            b[0] = q[1]; b[1] = q[0]; b[2] = q[3]; b[3] = q[2];
+        }
+    GLuint fbo, rb, tex;
+    glGenFramebuffersEXT(1, &fbo);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+    glGenRenderbuffersEXT(1, &rb);
+    glBindRenderbufferEXT(GL_RENDERBUFFER_EXT, rb);
+    glRenderbufferStorageEXT(GL_RENDERBUFFER_EXT, GL_RGBA8, TW, TH);
+    glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT,
+                                 GL_RENDERBUFFER_EXT, rb);
+    glViewport(0, 0, TW, TH);
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, TW, 0, TH, -1, 1);
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    static const struct { const char *what; GLenum target, type; bool sub; int w; } cases[] = {
+        { "rectangle, Cb Y0 Cr Y1 (2vuy)", GL_TEXTURE_RECTANGLE_ARB, GL_UNSIGNED_SHORT_8_8_APPLE, false, TW },
+        { "rectangle, Y0 Cb Y1 Cr (yuvs)", GL_TEXTURE_RECTANGLE_ARB, GL_UNSIGNED_SHORT_8_8_REV_APPLE, false, TW },
+        { "rectangle, 2vuy by glTexSubImage2D", GL_TEXTURE_RECTANGLE_ARB, GL_UNSIGNED_SHORT_8_8_APPLE, true, TW },
+        { "2D, 2vuy", GL_TEXTURE_2D, GL_UNSIGNED_SHORT_8_8_APPLE, false, TW },
+    };
+    printf("%s: YCbCr 4:2:2 textures (GL_APPLE_ycbcr_422), every texel R G B\n", name);
+    for (unsigned k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+        GLenum t = cases[k].target;
+        int w = cases[k].w;
+        const uint8_t *src = cases[k].type == GL_UNSIGNED_SHORT_8_8_APPLE ? vuy : yuvs;
+        glGenTextures(1, &tex);
+        glBindTexture(t, tex);
+        glTexParameteri(t, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(t, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glPixelStorei(GL_UNPACK_ROW_BYTES_APPLE, ROW);
+        if (cases[k].sub) {
+            glTexImage2D(t, 0, GL_RGB, w, TH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+            glTexSubImage2D(t, 0, 0, 0, w, TH, GL_YCBCR_422_APPLE, cases[k].type, src);
+        } else {
+            glTexImage2D(t, 0, GL_RGB, w, TH, 0, GL_YCBCR_422_APPLE, cases[k].type, src);
+        }
+        GLenum err = glGetError();
+        glPixelStorei(GL_UNPACK_ROW_BYTES_APPLE, 0);
+        glClearColor(1, 0, 1, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glEnable(t);
+        float sw = t == GL_TEXTURE_2D ? 1 : w, sh = t == GL_TEXTURE_2D ? 1 : TH;
+        glBegin(GL_QUADS);
+        glTexCoord2f(0, 0); glVertex2f(0, 0);
+        glTexCoord2f(sw, 0); glVertex2f(w, 0);
+        glTexCoord2f(sw, sh); glVertex2f(w, TH);
+        glTexCoord2f(0, sh); glVertex2f(0, TH);
+        glEnd();
+        glDisable(t);
+        unsigned char px[TH][TW][4];
+        memset(px, 0, sizeof(px));
+        glReadPixels(0, 0, TW, TH, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        printf("  %-36s upload error 0x%x\n", cases[k].what, err);
+        for (int y = 0; y < TH; y++) {
+            printf("    row %d:", y);
+            for (int x = 0; x < w; x++)
+                printf(" %3d %3d %3d |", px[y][x][0], px[y][x][1], px[y][x][2]);
+            printf("\n");
+        }
+        glDeleteTextures(1, &tex);
+    }
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+    CGLDestroyPixelFormat(pf);
+}
+
 /* A drawable with a stencil buffer (24-bit depth, 8-bit stencil), as Real Racing 2 and Chess
  * ask for. Our frontend once gave such drawables a depth buffer format the host could not
  * make, and everything the context drew after its first use was lost (2026-11-12). The left
@@ -1907,6 +2015,117 @@ static void run_iosurface(const char *name, CGLPixelFormatAttribute renderer)
     CGLDestroyPixelFormat(pf);
 }
 
+/* One IOSurface in two contexts that share nothing, as Core Animation uses a layer's surface
+ * (issue 11): context A draws into it through a framebuffer object (a red quad over half of a
+ * blue clear), context B draws it; then the surface's memory is written (green) and B binds it
+ * again. B should see what A drew, then the memory. */
+static void ios_draw_quad(float x0, float y0, float x1, float y1, float s1, float t1)
+{
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 0); glVertex2f(x0, y0);
+    glTexCoord2f(s1, 0); glVertex2f(x1, y0);
+    glTexCoord2f(s1, t1); glVertex2f(x1, y1);
+    glTexCoord2f(0, t1); glVertex2f(x0, y1);
+    glEnd();
+}
+
+static void run_iosurface_share(const char *name, CGLPixelFormatAttribute renderer)
+{
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32, kCGLPFAPBuffer,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
+                                        renderer, 0 };
+    if (!renderer)
+        attrs[4] = 0;
+    CGLPixelFormatObj pf;
+    GLint npf;
+    CGLContextObj a, b;
+    enum { SW = 64, SH = 64 };
+    if (CGLChoosePixelFormat(attrs, &pf, &npf) || !pf || CGLCreateContext(pf, NULL, &a) ||
+        CGLCreateContext(pf, NULL, &b)) {
+        printf("%s: no contexts\n", name);
+        return;
+    }
+    int w = SW, h = SH, bpe = 4;
+    CFNumberRef nw = CFNumberCreate(NULL, kCFNumberIntType, &w), nh = CFNumberCreate(NULL, kCFNumberIntType, &h),
+                nb = CFNumberCreate(NULL, kCFNumberIntType, &bpe);
+    const void *keys[] = { kIOSurfaceWidth, kIOSurfaceHeight, kIOSurfaceBytesPerElement };
+    const void *vals[] = { nw, nh, nb };
+    CFDictionaryRef props = CFDictionaryCreate(NULL, keys, vals, 3, &kCFTypeDictionaryKeyCallBacks,
+                                               &kCFTypeDictionaryValueCallBacks);
+    IOSurfaceRef surf = IOSurfaceCreate(props);
+    iosurface_fill(surf, 0xff808080);                   /* grey in memory to start with */
+
+    /* A: the surface as the colour buffer of a framebuffer object. */
+    CGLSetCurrentContext(a);
+    GLuint ta, fbo;
+    glGenTextures(1, &ta);
+    glBindTexture(GL_TEXTURE_RECTANGLE_ARB, ta);
+    CGLError ea = CGLTexImageIOSurface2D(a, GL_TEXTURE_RECTANGLE_ARB, GL_RGBA8, SW, SH, GL_BGRA,
+                                         GL_UNSIGNED_INT_8_8_8_8_REV, surf, 0);
+    glGenFramebuffersEXT(1, &fbo);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+    glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT,
+                              GL_TEXTURE_RECTANGLE_ARB, ta, 0);
+    GLenum status = glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT);
+    glViewport(0, 0, SW, SH);
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, SW, 0, SH, -1, 1);
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    glClearColor(0, 0, 1, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glColor3f(1, 0, 0);
+    ios_draw_quad(0, 0, SW / 2, SH, 1, 1);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+    glFlush();
+
+    /* B: the surface as a texture, drawn into B's own framebuffer object. */
+    CGLSetCurrentContext(b);
+    GLuint tb, fbb, rb;
+    glGenFramebuffersEXT(1, &fbb);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbb);
+    glGenRenderbuffersEXT(1, &rb);
+    glBindRenderbufferEXT(GL_RENDERBUFFER_EXT, rb);
+    glRenderbufferStorageEXT(GL_RENDERBUFFER_EXT, GL_RGBA8, SW, SH);
+    glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_RENDERBUFFER_EXT, rb);
+    glViewport(0, 0, SW, SH);
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, SW, 0, SH, -1, 1);
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    glGenTextures(1, &tb);
+    glBindTexture(GL_TEXTURE_RECTANGLE_ARB, tb);
+    CGLError eb = CGLTexImageIOSurface2D(b, GL_TEXTURE_RECTANGLE_ARB, GL_RGBA, SW, SH, GL_BGRA,
+                                         GL_UNSIGNED_INT_8_8_8_8_REV, surf, 0);
+    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    printf("%s: one IOSurface in two contexts (framebuffer status 0x%x, CGLTexImageIOSurface2D %d %d):\n",
+           name, status, ea, eb);
+    for (int round = 0; round < 2; round++) {
+        if (round) {
+            iosurface_fill(surf, 0xff00ff00);           /* green in memory */
+            glBindTexture(GL_TEXTURE_RECTANGLE_ARB, 0);
+            glBindTexture(GL_TEXTURE_RECTANGLE_ARB, tb);
+        }
+        glClearColor(0.5f, 0.5f, 0.5f, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glEnable(GL_TEXTURE_RECTANGLE_ARB);
+        ios_draw_quad(0, 0, SW, SH, SW, SH);
+        glDisable(GL_TEXTURE_RECTANGLE_ARB);
+        unsigned char px[2][4] = { { 0 } };
+        glReadPixels(SW / 4, SH / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px[0]);
+        glReadPixels(3 * SW / 4, SH / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px[1]);
+        printf("  in B, %s: left %3d %3d %3d %3d, right %3d %3d %3d %3d (want %s)\n",
+               round ? "after the memory changed" : "after A drew", px[0][0], px[0][1], px[0][2],
+               px[0][3], px[1][0], px[1][1], px[1][2], px[1][3],
+               round ? "green, green" : "red, blue");
+    }
+    printf("  GL error 0x%x\n", glGetError());
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(b);
+    CGLDestroyContext(a);
+    CFRelease(surf);
+    CFRelease(props); CFRelease(nw); CFRelease(nh); CFRelease(nb);
+    CGLDestroyPixelFormat(pf);
+}
+
 /* ---- stale: a context destroyed from another thread ----------------------------------------- *
  * A thread draws with a context and lets go of it; the main thread destroys that context and
  * makes the next one, which the thread then draws with. A garbage-collected program does this
@@ -2025,11 +2244,18 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "iosurface")) {
         run_iosurface("ours", 0);
         run_iosurface("software", (CGLPixelFormatAttribute)0x00020400);
+        run_iosurface_share("ours", 0);
+        run_iosurface_share("software", (CGLPixelFormatAttribute)0x00020400);
         return 0;
     }
     if (argc > 1 && !strcmp(argv[1], "stencil")) {
         run_stencil("ours", 0);
         run_stencil("software", (CGLPixelFormatAttribute)0x00020400);
+        return 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "ycbcr")) {
+        run_ycbcr("ours", 0);
+        run_ycbcr("software", (CGLPixelFormatAttribute)0x00020400);
         return 0;
     }
     if (argc > 1 && !strcmp(argv[1], "yuv")) {
