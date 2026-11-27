@@ -3219,7 +3219,7 @@ Later finds of the same checks:
 `rbskips.exe NAME` prints the driver's skip counts so far in one line (`RBSKIPS run=NAME draws=0
 ... total=0 result=PASS`) and exits with 1 when any is above zero. A benchmark's launcher runs it
 after the program, so the run fails on its own; start from a fresh boot, since the counts are the
-driver's totals. Pictures of a benchmark are not compared with a reference yet.
+driver's totals.
 
 The counts are the driver's totals since Windows started, through mode changes: Windows makes a
 new display record for every mode, and the record that goes hands its counts on
@@ -3227,6 +3227,43 @@ new display record for every mode, and the record that goes hands its counts on
 changes modes they cover only what ran since the last change. That hid 3DMark03's skipped draws
 for a long time; its CPU tests run at 640x480, and the lines printed after a run only spoke of the
 feature tests behind them.
+
+### Benchmark frames against the reference rasterizer
+
+3DMark03's registered edition has an Image Quality tool that renders one chosen frame of a chosen
+test into a picture file, with the display driver or, with its "Use Reference Rasterizer" box
+ticked, with Microsoft's reference rasterizer (`d3dref9.dll` from a DirectX SDK has to be in
+`system32`; it is Microsoft's file and stays out of this repository). `guiclick` drives the tool:
+
+    guiclick 300 -press "@Tip Of#1" -press #9 -pick 4=3 -set 2=600 -set 5=o4
+        -press "@Image Quality#1" -dismiss "Image quality frame saved"
+        -until "Image quality frame saved" 3DMark03.exe
+
+Button 9 of the main window opens the tool. Its fourth combo box is the test (0 to 3 the game
+tests, 4 and 5 the fill rate tests, 6 Vertex Shader, 7 Pixel Shader 2.0, 8 Ragtroll), its second
+edit control the frame, its fifth the file prefix, its first combo box the resolution, and button 1
+is Run. The same line with `-check "Use Reference Rasterizer"` and another prefix gives the
+reference picture. Both land in the program's `iq` folder as 24-bit BMP files named by prefix and
+frame. The tool is greyed out in the free edition; the registered one takes its code in the
+Register dialog (button 16), which `-fill FILE -press @Register#1` fills from a file without the
+code reaching a log.
+
+`win2k/tools/framediff.py OURS REFERENCE [OUT.jpg]` compares the two on the host. It prints the
+share of pixels more than 16 apart in a colour channel, and the same share after both pictures are
+averaged over 8x8 blocks. Edges and texture filtering put a few percent into the first number even
+between two correct pictures; a missing object or a wrong colour moves the second, and the
+comparison fails when that is above 2 percent.
+
+First results (XP SP3 under KVM, Intel UHD 630 host, 1024x768):
+
+| frame | pixels | blocks | result | reference rasterizer took |
+| --- | --- | --- | --- | --- |
+| Wings of Fury, frame 1038 | 1.26% | 0.01% | pass | under a minute |
+| Mother Nature, frame 600 | 8.00% | 3.61% | fail | 24 minutes |
+
+In the Mother Nature frame every differing block lies in the tree canopy against the sky, where
+the driver's picture is a little lighter; the stream, the grass, the rocks and the butterfly
+agree. Not looked into yet.
 
 ## Release package
 
