@@ -996,6 +996,18 @@ static void pixel_shaders(int only, BOOL version2)
         quad_samples(s, want);
         ps_run("ps_mov", ps, v, 1, s, 5);
     }
+    if (!only || only == 97) {
+        /* tex t0; mov r0, t0 with no texture on stage 0: a pixel shader reads black from an empty
+         * stage (the reference rasterizers of Direct3D 8 and 9 both say so), not the white of a
+         * fixed-function stage without a texture. */
+        static const DWORD ps[] = { PSV(1), OTex, DST(RT, 0), OMov, DST(RR, 0), SRC(RT, 0), PSEND };
+        ps_quad(v, 32, 32, 96, 96, 0xff4080c0, 0, 0, 1, 1);
+        for (i = 0; i < 4; ++i) want[i][0] = want[i][1] = want[i][2] = 0.0f;
+        quad_samples(s, want);
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        ps_run("ps_empty_stage", ps, v, 1, s, 5);
+        IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)ps_textures[0]);
+    }
     if (!only || only == 2) {   /* tex t0; mul r0, t0, v0 */
         static const DWORD ps[] = { PSV(1), OTex, DST(RT, 0), OMul, DST(RR, 0), SRC(RT, 0), SRC(RV, 0), PSEND };
         ps_quad(v, 32, 32, 96, 96, 0x80808080, 0, 0, 1, 1);

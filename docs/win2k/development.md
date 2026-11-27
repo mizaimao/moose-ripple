@@ -2548,7 +2548,7 @@ The stage program already emits shader model 2 programs with eight samplers
 and eight coordinate sets, and the Direct3D 8 draw packet carries eight
 (`RB2K_D8_STAGES`); only the stage check and the caps stopped at four. Once a
 runtime has announced Direct3D 9, the driver now offers eight stages and eight
-textures; Direct3D 8 programs keep four. Texture and bump matrices have
+textures; Direct3D 8 programs kept four at first (see below). Texture and bump matrices have
 constants for the first six stages (`RB_STAGE_TRANSFORMS`), so stages 6 and
 7 refuse them.
 
@@ -2556,6 +2556,26 @@ constants for the first six stages (`RB_STAGE_TRANSFORMS`), so stages 6 and
 texture each and stage 7 modulates with a texture read through coordinate set
 7. On XP SP3 under KVM (UHD 630 host) it passes, and `d9pixels` passes 56 of
 56.
+
+### Direct3D 8 programs get eight stages too
+
+A version 1.4 pixel shader reads six stages, and the Direct3D 8 runtime
+hands the driver no texture for a stage at or past `MaxTextureBlendStages`:
+`SetTexture` succeeds and the stage stays empty. With four blend stages
+offered (and six simultaneous textures), stages 4 and 5 of every version
+1.4 shader read black. The water of 3DMark 2001 SE's Advanced Pixel Shader
+test multiplies its reflection by stage 4, so the lake had no surface: only
+the refracted lake bed showed. A GeForce 9600 GT with the vendor's driver
+draws the reflecting water.
+
+The driver now offers eight blend stages and eight textures to every
+runtime. `d8pixels` covers it with three cases: `ps14_six_stages` (a
+version 1.4 shader adding stages 0, 4 and 5), `ps14_water` (the benchmark's
+water shader token for token: `texcrd` with `_dw`, `bem`, reads through
+registers in the second phase, five stages) and `stages8` (case 58 on the
+Direct3D 8 interface). `ps_empty_stage` in `d8pixels` and `d9pixels` pins
+down what an empty stage reads in a pixel shader: black, as Microsoft's
+reference rasterizer draws it.
 
 ## Direct3D 8 and 9 on Windows 2000
 
