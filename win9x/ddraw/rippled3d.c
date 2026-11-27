@@ -282,6 +282,7 @@ DWORD WINAPI RippleSkips(DWORD *out, DWORD count)
 #define GL_FRAGMENT_PROGRAM_ARB         0x8804
 #define GL_PROGRAM_FORMAT_ASCII_ARB     0x8875
 #define GL_PROGRAM_ERROR_STRING_ARB     0x8874
+#define GL_MAX_TEXTURE_IMAGE_UNITS_ARB  0x8872
 #define GL_COMPRESSED_RGBA_S3TC_DXT1_EXT 0x83F1
 #define GL_COMPRESSED_RGBA_S3TC_DXT3_EXT 0x83F2
 #define GL_COMPRESSED_RGBA_S3TC_DXT5_EXT 0x83F3
@@ -433,6 +434,8 @@ typedef struct {
     void (APIENTRY *PointParameterfv)(GLenum, const GLfloat *);
     /* user clip planes (optional, clip_state) */
     void (APIENTRY *ClipPlane)(GLenum, const GLdouble *);
+    /* how many texture image units a fragment program has (optional, context creation) */
+    void (APIENTRY *GetIntegerv)(GLenum, GLint *);
 } GLF;
 
 #define GL_CORE_COUNT 53            /* entries up to DrvGetProcAddress */
@@ -465,6 +468,7 @@ static const char *const gl_names[] = {
     "glGenBuffersARB", "glDeleteBuffersARB", "glBindBufferARB", "glBufferDataARB",
     "glPointSize", "glPointParameterfv",
     "glClipPlane",
+    "glGetIntegerv",
 };
 #define GL_ALL_COUNT (sizeof gl_names / sizeof gl_names[0])
 typedef char c_gl_names[sizeof(GLF) == GL_ALL_COUNT * sizeof(PROC) ? 1 : -1];
@@ -1270,7 +1274,10 @@ int d3d_surface_format_ok(LPDDSURFACEDESC desc)
 /* ---- Contexts ----------------------------------------------------------------------------------- */
 #define MAX_PS 64                       /* Direct3D 8 pixel shaders a context keeps */
 #define PS_VARIANTS 4                   /* programs a pixel shader keeps (fog, cube map stages) */
-#define STAGES 8                        /* texture stages kept: pixel shaders sample s0..s7 */
+#define STAGES 8                        /* texture stages with coordinates: the fixed-function units and
+                                           the texture coordinate sets */
+#define SAMPLERS 16                     /* stage records kept: a pixel shader 2.0 samples s0..s15 */
+typedef char c_samplers[RB_PS2_SAMPLERS == SAMPLERS ? 1 : -1];   /* the translator's count (build.sh) */
 #define FF_STAGES 2                     /* fixed-function stages offered to Direct3D 7 */
 #define FF8_STAGES 4                    /* and drawn for Direct3D 8 and 9, before FOG_UNIT */
 #define FOG_UNIT 4                      /* the OpenGL texture unit that does fixed-function fog */
@@ -1370,10 +1377,14 @@ typedef struct {
        program set them, the ones enabled in OpenGL, and the equations loaded there. */
     float clip_plane[CLIP_PLANES][4], clip_eq[CLIP_PLANES][4];
     DWORD clip_gl;
-    DWORD tss[STAGES][32];              /* texture stage states */
+    DWORD tss[SAMPLERS][32];            /* texture stage states */
     int stages_dirty;
     DWORD scene;                        /* scenes ended so far */
-    DWORD bound[STAGES];                /* surface handle of each stage's texture, 0 if none */
+    DWORD bound[SAMPLERS];              /* surface handle of each stage's texture, 0 if none */
+    int samplers;                       /* texture image units OpenGL has for a pixel shader's samplers,
+                                           SAMPLERS at most */
+    int high_samplers;                  /* a stage from STAGES up has had a texture: pixel shader
+                                           draws bind those units too */
     int keyed;                          /* a bound texture is drawn with its colour key */
     BYTE ff_kind[STAGES];               /* each unit's enabled cube (1) or 3D (2) target (ff_target) */
     TEXTURE *tex;                       /* by surface handle */
@@ -2429,9 +2440,9 @@ static void texture_evict(RCTX *c, DWORD keep)
     for (i = 1; i < c->ntex; i++) {
         if (!c->tex[i].name || i == keep || c->tex[i].scene >= when)
             continue;
-        for (s = 0; s < STAGES && c->bound[s] != i; s++)
+        for (s = 0; s < SAMPLERS && c->bound[s] != i; s++)
             ;
-        if (s < STAGES)
+        if (s < SAMPLERS)
             continue;                   /* in use right now */
         oldest = i;
         when = c->tex[i].scene;
@@ -3143,8 +3154,11 @@ static void apply_stages(RCTX *c)
     c->keyed = 0;                       /* texture_bind sets it again */
     if (c->dx8 && ps_program(c) > 0) {
         /* a pixel shader: each stage's texture on its unit, for the program's samplers; the
-           stages' operations don't apply */
-        for (s = 0; s < STAGES; s++) {
+           stages' operations don't apply. The units from STAGES up only once a program has put
+           a texture there (shader model 2 with more than eight samplers). */
+        int units = c->high_samplers ? c->samplers : STAGES;
+
+        for (s = 0; s < units; s++) {
             DWORD map = c->tss[s][D3DTSS_TEXTUREMAP];
             c->bound[s] = 0;
             gl->ActiveTexture(GL_TEXTURE0 + s);
@@ -3158,6 +3172,8 @@ static void apply_stages(RCTX *c)
         c->stages_dirty = 0;
         return;
     }
+    for (s = STAGES; c->high_samplers && s < SAMPLERS; s++)
+        c->bound[s] = 0;                /* only pixel shaders sample those */
     for (s = 0; s < STAGES; s++) {
         DWORD *st = c->tss[s];
         DWORD cop = st[D3DTSS_COLOROP], aop = st[D3DTSS_ALPHAOP];
@@ -3208,7 +3224,7 @@ static int textures_changed(RCTX *c)
     LPDDRAWI_DDRAWSURFACE_LCL lv[MAX_LEVELS];
     int s;
 
-    for (s = 0; s < STAGES; s++) {
+    for (s = 0; s < SAMPLERS; s++) {
         DWORD h = c->bound[s];
         LPDDRAWI_DDRAWSURFACE_LCL l;
         TEXTURE *t;
@@ -3257,8 +3273,10 @@ void d3d_surface_written(LPDDRAWI_DDRAWSURFACE_LCL s)
 
 static void stage_state(RCTX *c, DWORD stage, DWORD state, DWORD v)
 {
-    if (stage < STAGES && state < 32) {
+    if (stage < SAMPLERS && state < 32) {
         c->tss[stage][state] = v;
+        if (stage >= STAGES && state == D3DTSS_TEXTUREMAP && v)
+            c->high_samplers = 1;
         if (state == D3DTSS_ADDRESS)    /* U and V at once (DirectX 6) */
             c->tss[stage][D3DTSS_ADDRESSU] = c->tss[stage][D3DTSS_ADDRESSV] = v;
     }
@@ -5125,7 +5143,7 @@ static void defaults(RCTX *c)
     render_state(c, D3DRENDERSTATE_STENCILMASK, 0xFFFFFFFF);
     render_state(c, D3DRENDERSTATE_STENCILWRITEMASK, 0xFFFFFFFF);
     render_state(c, RS_COLORWRITEENABLE, 15);
-    for (s = 0; s < STAGES; s++) {
+    for (s = 0; s < SAMPLERS; s++) {
         c->tss[s][D3DTSS_COLOROP] = s ? D3DTOP_DISABLE : D3DTOP_MODULATE;
         c->tss[s][D3DTSS_COLORARG1] = D3DTA_TEXTURE;
         c->tss[s][D3DTSS_COLORARG2] = D3DTA_CURRENT;
@@ -5255,6 +5273,13 @@ static DWORD WINAPI ContextCreate(LPD3DHAL_CONTEXTCREATEDATA d)
     contexts[i].c = c;
     if (c->scanout_enabled)
         scanout_requested = 1;
+    {
+        GLint units = STAGES;           /* without the query: the fixed-function units' count */
+
+        if (p->gl.GetIntegerv)
+            p->gl.GetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS_ARB, &units);
+        c->samplers = units < STAGES ? STAGES : units > SAMPLERS ? SAMPLERS : (int)units;
+    }
     dbg("rd3d: context "); dbg_hex((DWORD)c); dbg(" on "); dbg((const char *)p->gl.GetString(GL_RENDERER));
     if (c->dx8) {
         dbg(", Direct3D 8 interface "); dbg_hex(kind);
@@ -7209,7 +7234,7 @@ static void d8_caps(RB_D3DCAPS8 *c)
        blend stages reported, so those are as many as the samplers. */
     if (p && p->d3d_version >= 0x900) {
         c->pixelShaderVersion = 0xFFFF0200UL;
-        c->maxTextureBlendStages = RB_PS2_SAMPLERS;
+        c->maxTextureBlendStages = STAGES;
         c->maxSimultaneousTextures = FF8_STAGES;    /* what the fixed-function stages really draw
                                                        (pixel shaders have their samplers anyway) */
     } else {

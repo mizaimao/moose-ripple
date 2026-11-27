@@ -79,7 +79,7 @@ cd "$D"
 (
     export INCLUDE="$(W "$T/ddkme/ddk/inc/win_me");$(W "$T/vc6/VC98/Include")" LIB="$(W "$T/vc6/VC98/Lib")"
     export WINEPATH="$(W "$T/vc6/VC98/Bin");$(W "$T/vc6/Common/MSDev98/Bin")"
-    wine cl.exe /nologo /c /W3 /WX /O1 /Oy- /Zl /Gs /GF $DEVDEF rippledd.c rippled3d.c tgsi_arb.c tnl_arb.c vs_arb.c d3d8_ps.c d3d9_decl.c
+    wine cl.exe /nologo /c /W3 /WX /O1 /Oy- /Zl /Gs /GF /DRB_PS2_SAMPLERS=16 $DEVDEF rippledd.c rippled3d.c tgsi_arb.c tnl_arb.c vs_arb.c d3d8_ps.c d3d9_decl.c
     wine link.exe /NOLOGO /DLL /NODEFAULTLIB /ENTRY:DllMain /BASE:0xB00B0000 /DEF:rippledd.def $DEVLINK \
         /OUT:rippledd.dll /MAP:rippledd.map rippledd.obj rippled3d.obj tgsi_arb.obj tnl_arb.obj vs_arb.obj d3d8_ps.obj d3d9_decl.obj \
         kernel32.lib user32.lib gdi32.lib advapi32.lib > link.log 2>&1 || { cat link.log; exit 1; }

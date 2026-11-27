@@ -855,8 +855,12 @@ The Direct3D 9 runtime drives this HAL through the same Direct3D 8 interface, as
 2000: it asks for the Direct3D 9 capabilities, gets no answer, and uses the Direct3D 8 ones. It
 announces itself twice, as version 0x902 and then, before asking for those capabilities, as
 0x802, so the HAL keeps the highest version it has been told. For a runtime of version 9 the
-capabilities say pixel shader 2.0 with eight samplers and eight blend stages (the runtime sends
-stage states only for those), and constants c0..c31 go to program.env. Shader model 2 reads up
+capabilities say pixel shader 2.0 and eight blend stages, and constants c0..c31 go to
+program.env. A shader of model 2 has sixteen samplers: the driver keeps sixteen stage records
+(a DirectX 9 runtime sends the textures and sampler states of all sixteen whatever the blend
+stages' count) and binds the units from eight up once a program has put a texture there, as
+many as OpenGL has texture image units. The fixed-function units and the texture coordinate
+sets stay eight. Shader model 2 reads up
 to eight texture coordinate sets, which would collide with the fixed-function fog unit, so under
 a shader the fog values go in as OpenGL's fog coordinate (`fragment.fogcoord`) instead.
 Fixed-function stages stay at four for Direct3D 8 and 9 (before the fog unit) and two for
@@ -1023,6 +1027,10 @@ and this driver binds eight), 97 of 98 with software vertex processing (`d9pixel
 90 of 93 with `D3D9` = `"0"` (the Direct3D 8 interface as before: the same case, and the two
 UBYTE4 declarations it cannot offer). `d8pixels` 44 of 44 (13 new since 31 of 31). 3DMark
 2001 SE (Direct3D 8) draws as before with the interface on.
+
+With sixteen samplers and transformed points' own sizes (both 2026-11-27, later the same day):
+`d9pixels` 105 of 105 (6 cases new since 98 of 99, from the Windows 2000/XP side) and 103 of
+103 with software vertex processing; `d8pixels` 44 of 44.
 
 ### Vertex processing on the GPU (2026-11-26, `D3D8` = `"2"`)
 
