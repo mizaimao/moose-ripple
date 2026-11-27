@@ -492,6 +492,97 @@ done:
     if (decl) IDirect3DVertexDeclaration9_Release(decl);
 }
 
+/* 78: an indexed draw of untransformed vertices from a write-only vertex buffer and index buffer,
+ * the indices from the buffer's start. With hardware vertex processing a driver may keep both on
+ * the GPU, where the draw's index "pointer" is the offset zero. */
+static void static_indexed_case(int only)
+{
+    static const SAMPLE s[] = { { 64, 64, 0x00ffff }, { 40, 88, 0x00ffff }, { 8, 8, CLEAR_COLOR } };
+    static const XYZVERTEX v[4] = {
+        { -0.5f, 0.5f, 0.5f, 0xff00ffff }, { 0.5f, 0.5f, 0.5f, 0xff00ffff },
+        { -0.5f, -0.5f, 0.5f, 0xff00ffff }, { 0.5f, -0.5f, 0.5f, 0xff00ffff } };
+    static const WORD idx[6] = { 0, 1, 2, 2, 1, 3 };
+    IDirect3DVertexBuffer9 *vb;
+    IDirect3DIndexBuffer9 *ib = NULL;
+    D3DMATRIX m;
+    BYTE *p;
+    HRESULT hr;
+    if (only && only != 78) return;
+    vb = vertex_buffer(v, sizeof(v), XYZFVF);
+    if (!vb) { fail_hr("static_indexed", "create", E_FAIL); return; }
+    hr = IDirect3DDevice9_CreateIndexBuffer(device, sizeof(idx), D3DUSAGE_WRITEONLY, D3DFMT_INDEX16,
+                                            D3DPOOL_DEFAULT, &ib, NULL);
+    if (FAILED(hr)) { fail_hr("static_indexed", "index buffer", hr); IDirect3DVertexBuffer9_Release(vb); return; }
+    if (SUCCEEDED(IDirect3DIndexBuffer9_Lock(ib, 0, 0, (void **)&p, 0))) {
+        memcpy(p, idx, sizeof(idx));
+        IDirect3DIndexBuffer9_Unlock(ib);
+    }
+    memset(&m, 0, sizeof(m));
+    m._11 = m._22 = m._33 = m._44 = 1.0f;
+    IDirect3DDevice9_SetTransform(device, D3DTS_WORLD, &m);
+    IDirect3DDevice9_SetTransform(device, D3DTS_VIEW, &m);
+    IDirect3DDevice9_SetTransform(device, D3DTS_PROJECTION, &m);
+    IDirect3DDevice9_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+    if (begin("static_indexed")) {
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        IDirect3DDevice9_SetFVF(device, XYZFVF);
+        IDirect3DDevice9_SetStreamSource(device, 0, vb, 0, sizeof(v[0]));
+        IDirect3DDevice9_SetIndices(device, ib);
+        hr = IDirect3DDevice9_DrawIndexedPrimitive(device, D3DPT_TRIANGLELIST, 0, 0, 4, 0, 2);
+        if (FAILED(hr)) { fail_hr("static_indexed", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("static_indexed", s, 3);
+    }
+    IDirect3DDevice9_SetIndices(device, NULL);
+    IDirect3DDevice9_SetStreamSource(device, 0, NULL, 0, 0);
+    IDirect3DIndexBuffer9_Release(ib);
+    IDirect3DVertexBuffer9_Release(vb);
+}
+
+/* 79: a point scaled by its distance from the eye: D3DRS_POINTSCALEENABLE with A = B = 0 and
+ * C = 1, a size of 0.0625, the point 0.5 from the eye, a viewport 128 pixels high:
+ * 128 x 0.0625 x sqrt(1 / 0.25) = 16 pixels around the centre. */
+static void scaled_point_case(int only, BOOL offered)
+{
+    static const SAMPLE s[] = { { 64, 64, 0xffff00 }, { 58, 58, 0xffff00 }, { 70, 70, 0xffff00 },
+                                { 76, 64, CLEAR_COLOR }, { 64, 52, CLEAR_COLOR } };
+    static const XYZVERTEX v = { 0.0f, 0.0f, 0.5f, 0xffffff00 };
+    D3DMATRIX m;
+    HRESULT hr;
+    float f;
+    if (only && only != 79) return;
+    if (!offered) { printf("D9PIX scaled points not offered\n"); return; }
+    memset(&m, 0, sizeof(m));
+    m._11 = m._22 = m._33 = m._44 = 1.0f;
+    IDirect3DDevice9_SetTransform(device, D3DTS_WORLD, &m);
+    IDirect3DDevice9_SetTransform(device, D3DTS_VIEW, &m);
+    IDirect3DDevice9_SetTransform(device, D3DTS_PROJECTION, &m);
+    IDirect3DDevice9_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+    if (begin("scaled_point")) {
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        f = 0.0625f;
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSIZE, *(DWORD *)&f);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALEENABLE, TRUE);
+        f = 0.0f;
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALE_A, *(DWORD *)&f);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALE_B, *(DWORD *)&f);
+        f = 1.0f;
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALE_C, *(DWORD *)&f);
+        IDirect3DDevice9_SetFVF(device, XYZFVF);
+        hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_POINTLIST, 1, &v, sizeof(v));
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALEENABLE, FALSE);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALE_A, *(DWORD *)&f);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSIZE, *(DWORD *)&f);
+        f = 0.0f;
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALE_C, *(DWORD *)&f);
+        if (FAILED(hr)) { fail_hr("scaled_point", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("scaled_point", s, 5);
+    }
+}
+
 /* 73: a line list (red lines at y 38 to 41 from x 8 to 120) and a point list (a 2x2 block of green
  * points at 95 and 96): pixels on them, and the clear colour beside. Then an indexed line list
  * (blue lines at y 86 to 89, the indices reversed in each line). The counts (8, 4 and 8
@@ -2457,6 +2548,8 @@ int main(int argc, char **argv)
     printf("D9PIX max_point_size=%d\n", (int)caps.MaxPointSize);
     point_case(only);
     program_point_case(only, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1));
+    static_indexed_case(only);
+    scaled_point_case(only, caps.MaxPointSize >= 16.0f);
     l16_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
     colorwrite_case(only);
