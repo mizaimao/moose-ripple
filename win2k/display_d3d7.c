@@ -1024,8 +1024,19 @@ static HRESULT render_surfaces(D7_CONTEXT *c, DD_SLOT **color, DD_SLOT **depth)
 {
     DD_SLOT *s = target(c, c->target, FALSE);
     DD_SLOT *z = c->depth ? target(c, c->depth, FALSE) : NULL;
-    if (!s || s->depth16 || (c->depth && (!z || !z->depth16 ||
-        z->width < s->width || z->height < s->height))) return DDERR_SURFACELOST;
+    ULONG why = !s ? 1 : s->depth16 ? 2 : !c->depth ? 0 : !z ? 3 : !z->depth16 ? 4 :
+                z->width < s->width || z->height < s->height ? 5 : 0;
+    if (why) {
+        RB2K_D7_DRAWSTATS *st = &c->display->d7draw;
+        ++st->surfaceRefusals;
+        st->surfaceRefusal[0] = why;
+        st->surfaceRefusal[1] = s ? s->id : 0;
+        st->surfaceRefusal[2] = s ? s->width << 16 | s->height : 0;
+        st->surfaceRefusal[3] = z ? z->id : 0;
+        st->surfaceRefusal[4] = z ? z->width << 16 | z->height : 0;
+        st->surfaceRefusal[5] = (c->zEnable ? 1 : 0) | (c->zWrite ? 2 : 0) | (c->stencil ? 4 : 0);
+        return DDERR_SURFACELOST;
+    }
     if (s->locked || (z && z->locked)) return DDERR_SURFACEBUSY;
     *color = s;
     *depth = z;

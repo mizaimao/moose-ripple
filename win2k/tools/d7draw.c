@@ -51,6 +51,10 @@ int main(void)
                s.states[i].colorStage, s.states[i].alphaStage, s.states[i].blend, s.states[i].alphaTest,
                s.states[i].depthState, s.states[i].cull, s.states[i].shade, s.states[i].fvf, s.states[i].texFormat,
                s.states[i].transform);
+    printf("D7DRAW surface_refusals=%lu last_why=%lu target=%lx %lux%lu depth=%lx %lux%lu ztest=%lu zwrite=%lu stencil=%lu\n",
+           s.surfaceRefusals, s.surfaceRefusal[0], s.surfaceRefusal[1], s.surfaceRefusal[2] >> 16,
+           s.surfaceRefusal[2] & 0xffff, s.surfaceRefusal[3], s.surfaceRefusal[4] >> 16, s.surfaceRefusal[4] & 0xffff,
+           s.surfaceRefusal[5] & 1, (s.surfaceRefusal[5] >> 1) & 1, (s.surfaceRefusal[5] >> 2) & 1);
     printf("D7DRAW state_overflow=%lu past_window_calls=%lu skipped_triangles=%lu\n", s.stateOverflow, s.beyondCalls,
            s.beyondVertices);
     printf("D7XFORM types");
