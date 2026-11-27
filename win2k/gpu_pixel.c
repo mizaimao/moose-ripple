@@ -850,7 +850,7 @@ BOOLEAN rb_gpu_destroy_image(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, ULONG id)
 void rb_gpu_pixel(RB2K_GPU *gpu, RB2K_GPU_RESULT *result)
 {
     static const char name[] = "rb2k-pixel";
-    const RB2K_IMAGE image = {1, 1, 1, FALSE, FALSE, FALSE, 0};
+    static const RB2K_IMAGE image = {1, 1, 1, FALSE, FALSE, FALSE, 0};   /* static: an image is larger than a page of stack */
     result->expected = 0xffff8000UL;
     if (!rb_gpu_create_image(gpu, result, &image, name, sizeof(name) - 1, FALSE)) return;
     result->observed = ~result->expected;

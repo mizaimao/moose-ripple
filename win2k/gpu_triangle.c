@@ -19,7 +19,10 @@ enum {
     SamplerBase = 48, Sampler1Base = 56, ShaderBase = 64, TextureView = 80, TextureView1 = 81,
     PsVertexShader = 82, PsObjectShader = 83, PsViewBase = 84, PsSamplerBase = 96, PsLitShader = 112,
     ObjectClipShader = 113, LitClipShader = 114, PsObjectClipShader = 115, PsLitClipShader = 116,
-    VsProgramBase = 128, VsProgramKeys = 16, PointRaster = 160
+    PointRaster = 160,
+    /* Vertex and pixel programs: a host shader for each program slot, and boundVertex's value
+     * for one (above the fixed vertex shaders' bits). */
+    ProgramBase = 0x10000, ProgramBound = 0x10000
 };
 enum { PointBound = 0x10000 };   /* boundRaster while the point rasterizer is bound */
 enum { VertexStage = 0, FragmentStage = 1, PipePoints = 0, PipeLines = 1, PipeTriangles = 4, ShaderText = 2400, LitText = 8192 };
@@ -901,6 +904,7 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
         words[n++] = VIRGL_CMD0(VIRGL_CCMD_BIND_SHADER,0,VIRGL_BIND_SHADER_SIZE);
         words[n++] = ShaderBase + slot; words[n++] = FragmentStage;
         s->shader.bound = slot + 1;
+        s->boundProgram = 0;
     }
     if (d->fog || uses(d->colorStage, ArgFactor) || uses(d->alphaStage, ArgFactor) ||
         (d->stage1Color && (uses(d->stage1Color, ArgFactor) || uses(d->stage1Alpha, ArgFactor)))) {
@@ -1285,6 +1289,33 @@ BOOLEAN rb_gpu_d8_valid(const RB2K_D3D8_DRAW *d)
     return TRUE;
 }
 
+/* The host shader of a vertex or pixel program in this colour context, at ProgramBase plus the
+ * program's slot: made at the program's first draw here, after the shader of a program that had
+ * the slot before is destroyed. Every program a run uses keeps its shader; with a table of 16
+ * for each kind, 3DMark05 built host shaders 18,051 times in a run. */
+static BOOLEAN program_shader(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, ULONG kind, ULONG id,
+                              ULONG stage, const char *text, ULONG size)
+{
+    RB2K_D7_STATE *s = &image->d7;
+    ULONG slot = RB2K_D8_PROGRAM_SLOT(id), state = Hit;
+    if (s->programMade[slot] != id) {
+        state = Fresh;
+        if (s->programMade[slot]) {
+            ULONG words[2];
+            words[0] = DESTROY(VIRGL_OBJECT_SHADER); words[1] = ProgramBase + slot;
+            state = Replaced;
+            s->programMade[slot] = 0;
+            if (s->boundVertex == ProgramBound + slot) s->boundVertex = 0;
+            if (s->boundProgram == slot + 1) s->boundProgram = 0;
+            if (!rb_gpu_frame_words(gpu, r, image, words, 2)) return FALSE;
+        }
+        if (!shader(gpu, r, image, ProgramBase + slot, stage, text, size)) return FALSE;
+        s->programMade[slot] = id;
+    }
+    ++gpu->d7Profile.caches[kind][state];
+    return TRUE;
+}
+
 /* program: the TGSI text of the pixel shader; textures: the texture of each
  * stage it samples, NULL for the others. */
 BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, const RB2K_D3D8_DRAW *d,
@@ -1313,21 +1344,14 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
     }
     gpu->d8Step = 2;
     if (shaded) {
-        /* The vertex program, kept per colour context by its id. */
-        key[0] = d->vertexProgram;
-        slot = cache_slot(gpu, RB2K_CACHE_VS_PROGRAM, &s->vsProgram, VsProgramKeys, key, 1, &state);
-        if (state != Hit) {
-            if (state == Replaced) {
-                words[0] = DESTROY(VIRGL_OBJECT_SHADER); words[1] = VsProgramBase + slot;
-                if (!rb_gpu_frame_words(gpu, r, image, words, 2)) return FALSE;
-                if (s->boundVertex == 0x100 + slot) s->boundVertex = 0;
-            }
-            if (!shader(gpu, r, image, VsProgramBase + slot, VertexStage, vertexProgram, vertexBytes)) return FALSE;
-        }
-        if (s->boundVertex != 0x100 + slot) {
-            ULONG bind[] = { VIRGL_CMD0(VIRGL_CCMD_BIND_SHADER,0,VIRGL_BIND_SHADER_SIZE), VsProgramBase + slot, VertexStage };
+        /* The vertex program: this colour context's host shader of it, made at its first draw here. */
+        slot = RB2K_D8_PROGRAM_SLOT(d->vertexProgram);
+        if (!program_shader(gpu, r, image, RB2K_CACHE_VS_PROGRAM, d->vertexProgram, VertexStage, vertexProgram, vertexBytes))
+            return FALSE;
+        if (s->boundVertex != ProgramBound + slot) {
+            ULONG bind[] = { VIRGL_CMD0(VIRGL_CCMD_BIND_SHADER,0,VIRGL_BIND_SHADER_SIZE), ProgramBase + slot, VertexStage };
             if (!rb_gpu_frame_words(gpu,r,image,bind,3)) return FALSE;
-            s->boundVertex = 0x100 + slot;
+            s->boundVertex = ProgramBound + slot;
         }
     } else {
         /* Index 1: the clip variants of the object-space shaders (user clip planes). */
@@ -1355,22 +1379,16 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
     if (!fixed_states(gpu, r, image, d->depthState, d->alphaTest, d->blend, d->cull, d->transform || d->scissorOn, d->stencil,
                       d->stencilRef, d->transform ? d->clipMask : 0,
                       d->primitive, d->pointSize, d->pointFlags, 0xffu << 2)) return FALSE;
-    /* The program shares the fragment shader table; its key cannot be a
-     * fixed-function one, whose colour stage word is never all ones. */
+    /* The pixel program's host shader, like the vertex program's. The fixed-function draws
+     * bind their fragment shaders through s->shader, which this leaves with none bound. */
     gpu->d8Step = 4;
-    key[0] = 0xffffffff; key[1] = d->program; key[2] = key[3] = key[4] = key[5] = 0;
-    slot = cache_slot(gpu, RB2K_CACHE_PS_SHADER, &s->shader, RB2K_D7_SHADER_KEYS, key, 6, &state);
-    if (state != Hit) {
-        if (state == Replaced) {
-            words[0] = DESTROY(VIRGL_OBJECT_SHADER); words[1] = ShaderBase + slot;
-            if (!rb_gpu_frame_words(gpu, r, image, words, 2)) return FALSE;
-        }
-        if (!shader(gpu, r, image, ShaderBase + slot, FragmentStage, program, programBytes)) return FALSE;
-    }
-    if (s->shader.bound != slot + 1) {
+    slot = RB2K_D8_PROGRAM_SLOT(d->program);
+    if (!program_shader(gpu, r, image, RB2K_CACHE_PS_SHADER, d->program, FragmentStage, program, programBytes)) return FALSE;
+    if (s->boundProgram != slot + 1 || s->shader.bound) {
         words[n++] = VIRGL_CMD0(VIRGL_CCMD_BIND_SHADER,0,VIRGL_BIND_SHADER_SIZE);
-        words[n++] = ShaderBase + slot; words[n++] = FragmentStage;
-        s->shader.bound = slot + 1;
+        words[n++] = ProgramBase + slot; words[n++] = FragmentStage;
+        s->boundProgram = slot + 1;
+        s->shader.bound = 0;
     }
     gpu->d8Step = 5;
     /* The program's constants, then for fog its colour and start, end, density. */

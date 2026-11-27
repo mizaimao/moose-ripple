@@ -25,7 +25,7 @@
 #endif
 
 enum { MaxContexts = 16, MaxCommandBytes = 1 << 20, TextureStages = 8, MaxTextures = 1024, MaxLights = 32,
-       MaxBuffers = 1024, MaxShaders = 32, MaxVertexShaders = 32 };
+       MaxBuffers = 1024, MaxShaders = 512, MaxVertexShaders = 512 };
 /* DP2 SETLIGHT operations (D3DHAL_SETLIGHT_*). */
 enum { SetLightEnable, SetLightDisable, SetLightData };
 typedef char light_record[sizeof(D3DLIGHT7) == 26 * sizeof(ULONG) ? 1 : -1];
@@ -60,7 +60,7 @@ typedef struct {
 /* A pixel program made from the texture stage states, for draws with a
  * vertex shader and no pixel shader: the states it was made from (seven
  * words a stage, then specular and fog), its program and what it samples. */
-enum { StagePrograms = 8, StageKey = 8 * 8 + 2 };
+enum { StagePrograms = 32, StageKey = 8 * 8 + 2 };
 typedef struct { ULONG key[StageKey], program, samplers; } D8_STAGE_PROGRAM;
 /* A state block: the state commands recorded between STATESETBEGIN and
  * STATESETEND (or made from the current state by STATESETCREATE), replayed
@@ -114,12 +114,17 @@ typedef struct {
     struct D9_DECL *decls;
     struct D9_FUNC *funcs;
     struct D9_PAIR *pairs;
+    ULONG pairLast;      /* the pair the last draw used, tried first */
     BOOL inScene, queued;
     ULONG minStart, maxEnd;     /* diagnostics for one command buffer */
     RB2K_D3D7_DRAW draw;        /* the batch being filled */
-    D8_SHADER shaders[MaxShaders];
+    /* The pixel and vertex shaders, in tables made with the first of each: the records in use
+     * are below the counts, and the last ones found are tried first. */
+    D8_SHADER *shaders;
+    ULONG shaderCount, shaderLast;
     ULONG psConst[32][4];       /* pixel shader constants c0..c31 */
-    D8_VSHADER vshaders[MaxVertexShaders];
+    D8_VSHADER *vshaders;
+    ULONG vshaderCount, vshaderLast;
     ULONG vsConst[RB_VS_CONSTANTS][4];   /* vertex shader constants */
     D8_STAGE_PROGRAM stagePrograms[StagePrograms];
     ULONG stageNext;
@@ -750,6 +755,7 @@ static DWORD APIENTRY destroy_local(PDD_DESTROYDDLOCALDATA a)
         if (contexts[i].display == d && contexts[i].local == a->pDDLcl) {
             if (FAILED(finish_scene(&contexts[i]))) a->ddRVal = DDERR_SURFACELOST;
             release_shaders(&contexts[i]);
+            d9_release(&contexts[i]);
             RtlZeroMemory(&contexts[i], sizeof(contexts[i]));
         }
     }
@@ -2096,9 +2102,24 @@ static void stencil_state(const D7_CONTEXT *c, const DD_SLOT *z, ULONG *stencil,
 static D8_SHADER *find_shader(D7_CONTEXT *c, ULONG handle)
 {
     ULONG i;
-    for (i = 0; handle && i < MaxShaders; ++i)
-        if (c->shaders[i].handle == handle) return &c->shaders[i];
+    if (!handle || !c->shaders) return NULL;
+    if (c->shaderLast < c->shaderCount && c->shaders[c->shaderLast].handle == handle) return &c->shaders[c->shaderLast];
+    for (i = 0; i < c->shaderCount; ++i)
+        if (c->shaders[i].handle == handle) { c->shaderLast = i; return &c->shaders[i]; }
     return NULL;
+}
+
+/* A free record of the context's pixel shader table, which is made with the first shader;
+ * NULL when the table is full. */
+static D8_SHADER *new_shader(D7_CONTEXT *c)
+{
+    ULONG i;
+    if (!c->shaders) c->shaders = EngAllocMem(FL_ZERO_MEMORY, MaxShaders * sizeof(*c->shaders), 's8bR');
+    if (!c->shaders) return NULL;
+    for (i = 0; i < c->shaderCount && c->shaders[i].handle; ++i) {}
+    if (i == MaxShaders) return NULL;
+    if (i == c->shaderCount) ++c->shaderCount;
+    return &c->shaders[i];
 }
 
 static void release_shader(D7_CONTEXT *c, D8_SHADER *sh)
@@ -2165,16 +2186,35 @@ static void release_vshader(D7_CONTEXT *c, D8_VSHADER *vs)
 static D8_VSHADER *find_vshader(D7_CONTEXT *c, ULONG handle)
 {
     ULONG i;
-    for (i = 0; handle && i < MaxVertexShaders; ++i)
-        if (c->vshaders[i].handle == handle) return &c->vshaders[i];
+    if (!handle || !c->vshaders) return NULL;
+    if (c->vshaderLast < c->vshaderCount && c->vshaders[c->vshaderLast].handle == handle) return &c->vshaders[c->vshaderLast];
+    for (i = 0; i < c->vshaderCount; ++i)
+        if (c->vshaders[i].handle == handle) { c->vshaderLast = i; return &c->vshaders[i]; }
     return NULL;
+}
+
+/* As new_shader, for the vertex shader table. */
+static D8_VSHADER *new_vshader(D7_CONTEXT *c)
+{
+    ULONG i;
+    if (!c->vshaders) c->vshaders = EngAllocMem(FL_ZERO_MEMORY, MaxVertexShaders * sizeof(*c->vshaders), 'V8bR');
+    if (!c->vshaders) return NULL;
+    for (i = 0; i < c->vshaderCount && c->vshaders[i].handle; ++i) {}
+    if (i == MaxVertexShaders) return NULL;
+    if (i == c->vshaderCount) ++c->vshaderCount;
+    return &c->vshaders[i];
 }
 
 static void release_shaders(D7_CONTEXT *c)
 {
     ULONG i;
-    for (i = 0; i < MaxShaders; ++i) if (c->shaders[i].handle) release_shader(c, &c->shaders[i]);
-    for (i = 0; i < MaxVertexShaders; ++i) if (c->vshaders[i].handle) release_vshader(c, &c->vshaders[i]);
+    for (i = 0; i < c->shaderCount; ++i) if (c->shaders[i].handle) release_shader(c, &c->shaders[i]);
+    for (i = 0; i < c->vshaderCount; ++i) if (c->vshaders[i].handle) release_vshader(c, &c->vshaders[i]);
+    if (c->shaders) EngFreeMem(c->shaders);
+    if (c->vshaders) EngFreeMem(c->vshaders);
+    c->shaders = NULL;
+    c->vshaders = NULL;
+    c->shaderCount = c->vshaderCount = 0;
     for (i = 0; i < StagePrograms; ++i)
         if (c->stagePrograms[i].program)
             request(c->display, IOCTL_RB2K_D3D8_PROGRAM_FREE, &c->stagePrograms[i].program, sizeof(ULONG), NULL, 0);
@@ -2259,12 +2299,11 @@ static void create_vshader(D7_CONTEXT *c, ULONG handle, const BYTE *decl, ULONG 
     D8_VSHADER *vs = find_vshader(c, handle);
     ULONG i;
     if (vs) release_vshader(c, vs);
-    for (i = 0; i < MaxVertexShaders && c->vshaders[i].handle; ++i) {}
-    if (!handle || i == MaxVertexShaders || !codeBytes || (declBytes | codeBytes) % 4) {
+    vs = handle && codeBytes && !((declBytes | codeBytes) % 4) ? new_vshader(c) : NULL;
+    if (!vs) {
         ++c->display->d7draw.vsFailed[RbPsReasons];
         return;
     }
-    vs = &c->vshaders[i];
     vs->decl = EngAllocMem(0, declBytes + codeBytes, 'v8bR');
     if (!vs->decl) return;
     RtlCopyMemory(vs->decl, decl, declBytes + codeBytes);
@@ -2331,16 +2370,14 @@ static void create_shader(D7_CONTEXT *c, ULONG handle, const BYTE *code, ULONG b
     RB2K_D7_DRAWSTATS *s = &c->display->d7draw;
     D8_SHADER *sh = find_shader(c, handle);
     RB_PS_INFO info;
-    ULONG i;
     if (sh) release_shader(c, sh);
     if (s->psLogCount < 6) {
         ULONG *log = s->psLog[s->psLogCount++];
         log[0] = handle; log[1] = bytes;
         RtlCopyMemory(log + 2, code, min(bytes, 42UL * 4) & ~3UL);
     }
-    for (i = 0; i < MaxShaders && c->shaders[i].handle; ++i) {}
-    if (!handle || i == MaxShaders) { ++s->psFailed[RbPsReasons]; return; }
-    sh = &c->shaders[i];
+    sh = handle ? new_shader(c) : NULL;
+    if (!sh) { ++s->psFailed[RbPsReasons]; return; }
     sh->handle = handle;
     /* The tokens stay for the fog variants made at draw time. */
     sh->tokenCount = bytes / 4;
@@ -2818,7 +2855,7 @@ static HRESULT program_triangles(D7_CONTEXT *c, const PRIMS *p)
  * draws: Direct3D 8 declaration tokens, which map each element to the input
  * register the shader's dcl statement gives its usage, and the code without
  * those statements. */
-enum { MaxDecls = 64, MaxFuncs = 64, MaxPairs = 32, D9PairHandle = 0x40000001 };
+enum { MaxDecls = 256, MaxFuncs = 512, MaxPairs = 512, D9PairHandle = 0x40000001 };
 struct D9_DECL { ULONG handle, count; RB_VERTEX_ELEMENT9 *elements; };
 struct D9_FUNC { ULONG handle, count; ULONG *tokens; };
 struct D9_PAIR { ULONG decl, func, vs; };
@@ -2974,12 +3011,21 @@ static BOOL d9_translate(const struct D9_DECL *dl, const struct D9_FUNC *fn, ULO
  * use; 0 when they cannot be drawn. */
 static ULONG d9_vshader(D7_CONTEXT *c)
 {
-    struct D9_DECL *dl = d9_decl(c, c->declHandle);
-    struct D9_FUNC *fn = d9_func(c, c->funcHandle);
+    struct D9_DECL *dl;
+    struct D9_FUNC *fn;
     ULONG i, free = MaxPairs, declWords, codeWords, *buffer;
+    /* The pair of the last draw: a pair lives only while its declaration and function do. */
+    if (c->pairs && c->declHandle && c->funcHandle && c->pairs[c->pairLast].vs &&
+        c->pairs[c->pairLast].decl == c->declHandle && c->pairs[c->pairLast].func == c->funcHandle)
+        return c->pairs[c->pairLast].vs;
+    dl = d9_decl(c, c->declHandle);
+    fn = d9_func(c, c->funcHandle);
     if (!dl || !fn || !d9_tables(c)) return 0;
     for (i = 0; i < MaxPairs; ++i) {
-        if (c->pairs[i].vs && c->pairs[i].decl == dl->handle && c->pairs[i].func == fn->handle) return c->pairs[i].vs;
+        if (c->pairs[i].vs && c->pairs[i].decl == dl->handle && c->pairs[i].func == fn->handle) {
+            c->pairLast = i;
+            return c->pairs[i].vs;
+        }
         if (!c->pairs[i].vs && free == MaxPairs) free = i;
     }
     if (free == MaxPairs) { d9_forget(c, c->pairs[0].decl, 0); free = 0; }

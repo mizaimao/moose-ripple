@@ -29,7 +29,11 @@ typedef struct {
     /* Pixel shader draws: the texture in each stage's view, and their samplers. */
     ULONG psViews[RB2K_D8_STAGES];
     RB2K_D7_CACHE psSampler;
-    RB2K_D7_CACHE vsProgram;            /* vertex programs by id */
+    /* Vertex and pixel programs: the id of the program whose host shader this colour context
+     * holds at ProgramBase plus the program's slot (0: none), and the pixel program bound
+     * (its slot plus one; 0 after a fixed-function fragment shader). */
+    ULONG programMade[RB2K_D8_PROGRAMS];
+    ULONG boundProgram;
     ULONG stencilRef;                   /* the reference value sent, plus 0x100 once sent */
 } RB2K_D7_STATE;
 
@@ -165,10 +169,11 @@ typedef struct {
     ULONG imageSamples;                 /* draws that sampled a render target texture */
     RB2K_DMA_SEGMENT rvdStaging[RB2K_RVD_SEGMENTS];
     ULONG rvdContexts;
-    /* Direct3D 8 pixel shader programs as TGSI text; an id is a serial
-     * number and the slot, so a freed id is never reused. */
-    struct { ULONG id, samplers, bytes; char text[RB2K_D8_PROGRAM_BYTES]; } programs[RB2K_D8_PROGRAMS];
-    ULONG programSerial;
+    /* Direct3D 8 and 9 vertex and pixel programs as TGSI text, each in pool memory of its own
+     * size; an id is a serial number and the slot (RB2K_D8_PROGRAM_SLOT), so a freed id is
+     * never reused. programNext: where the search for a free slot starts. */
+    struct { ULONG id, samplers, bytes; char *text; } programs[RB2K_D8_PROGRAMS];
+    ULONG programSerial, programNext;
     ULONG d8Step;       /* the step of a pixel shader draw being queued, for failures */
     /* The 32-bit desktop in guest memory (RipplePrimaryInMemory, gpu_primary.c): pages
      * made once and kept, and the host resource that scanout 0 shows (0 when none).

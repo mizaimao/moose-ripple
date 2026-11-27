@@ -269,3 +269,15 @@ void rb_defer_arm(PVOID defer, ULONG ms)
     due.QuadPart = -(LONGLONG)ms * 10000;
     if (d) KeSetTimer(&d->timer, due, &d->dpc);
 }
+
+/* Paged pool for data that only the miniport's requests read, which run at PASSIVE_LEVEL
+ * (the Windows 2000 video port has no pool call of its own). */
+PVOID rb_pool_alloc(ULONG bytes)
+{
+    return ExAllocatePoolWithTag(PagedPool, bytes, 'pPbR');
+}
+
+void rb_pool_free(PVOID memory)
+{
+    if (memory) ExFreePool(memory);
+}

@@ -76,7 +76,12 @@
  * faces in mask are copied into the host cube texture (made when texture is 0), whose id comes back. */
 #define IOCTL_RB2K_D7_CUBE_SYNC RB2K_DD_IOCTL(0x924)
 typedef struct { ULONG texture, side, mask, images[6]; } RB2K_D7_CUBE_SYNC;
-#define RB2K_D8_PROGRAMS 48
+/* A program id is a serial number above the program's slot plus one (12 bits), so a freed id is
+ * never reused and its slot is read from it. */
+#define RB2K_D8_PROGRAMS 1024
+#define RB2K_D8_PROGRAM_SLOT_BITS 12
+#define RB2K_D8_PROGRAM_SLOT(id) (((id) & ((1UL << RB2K_D8_PROGRAM_SLOT_BITS) - 1)) - 1)
+typedef char rb2k_d8_program_slots_fit[RB2K_D8_PROGRAMS < (1UL << RB2K_D8_PROGRAM_SLOT_BITS) ? 1 : -1];
 #define RB2K_D8_PROGRAM_BYTES 8192
 #define RB2K_D8_STAGES 8            /* samplers, and texture coordinate sets */
 #define RB2K_D8_VERTICES 48

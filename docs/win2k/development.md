@@ -2763,6 +2763,40 @@ a stage with no texture bound, a separate fix. Before quoting a score, read
 output.
 
 
+## Shader tables: every program of a run kept
+
+A 3DMark05 run uses several hundred vertex and pixel shaders, and the tables that hold them
+were sized for the Direct3D 8 tests. A context kept 32 pixel shaders and 32 vertex shaders (a
+pixel shader past that was never drawn); the Direct3D 9 interface 64 declarations, 64 functions
+and 32 pairs of them; the miniport 48 program texts; and each colour context 16 host shaders of
+each kind, so that a seventeenth program replaced another one's host shader. In one 3DMark05 run
+on the second Intel UHD 630 host (timed, host alone) the miniport refused 35,668 program
+registrations, each of which drops that shader's draws, and built host shaders 18,051 times.
+
+Now:
+
+- A context holds 512 pixel shaders and 512 vertex shaders, in tables allocated with the first
+  shader of each kind and searched up to the last record in use, the last one found first; 256
+  declarations, 512 functions and 512 pairs (the pair of the last draw is tried first); 32 stage
+  programs.
+- The miniport holds 1,024 program texts, each in pool memory of its own size
+  (`rb_pool_alloc`) where each took 8 KB of the device extension. A program's id carries its
+  slot (`RB2K_D8_PROGRAM_SLOT`), so a draw finds its programs without a search.
+- A colour context keeps one host shader for each program slot, at handle `ProgramBase` plus the
+  slot, and remembers the program it made it from (`programMade`). A slot given to another
+  program has its old shader destroyed at that program's first draw there.
+
+The same run then registers every program (no registration refused), builds 760 host shaders,
+and makes 65.3 million host draws where it made 61.6 million. It shows 9,600 frames against
+9,792: about as many frames with 6% more draws in them. The dropped draws are fixed; the speed
+is unchanged. The requests that still fail in a run, 1,561 of them, are texture
+uploads that the 64 MB texture budget refuses and the eviction answers (538 before: the shaders
+that are drawn now sample more textures).
+
+`d9pixels` passes 80 of 80 (also on Microsoft's debug runtime), `d8pixels` 27 of 27 and
+`tpixels` 18 of 18.
+
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:
