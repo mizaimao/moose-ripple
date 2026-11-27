@@ -7,12 +7,15 @@
 #include <string.h>
 #include "rb2kd3d7.h"
 
+static int report(void);
+
 /* d7draw -watch FILE SECONDS: once a second, for SECONDS or until FILE.stop exists, one line of
  * the counters that say whether frames are drawn, copied to the screen and shown, appended to
- * FILE. Run it beside a full-screen program whose picture stops changing: the counters of a
- * display mode are gone when the program leaves it. Counts are totals since the mode was set
- * (display driver) or since boot (miniport); flip is the newest page flip: the surface shown
- * before, the one shown after, their images and the result. */
+ * FILE; every fifteenth second the whole report as well. Run it beside a full-screen program
+ * whose picture stops changing: the counters of a display mode are gone when the program
+ * leaves it. Counts are totals since the mode was set (display driver) or since boot
+ * (miniport); flip is the newest page flip: the surface shown before, the one shown after,
+ * their images and the result. */
 static int watch(const char *file, int seconds)
 {
     char stop[MAX_PATH];
@@ -20,39 +23,43 @@ static int watch(const char *file, int seconds)
     int n;
     _snprintf(stop, sizeof(stop) - 1, "%s.stop", file);
     stop[sizeof(stop) - 1] = 0;
+    if (!freopen(file, "a", stdout)) return 1;
     for (n = 0; n < seconds && GetFileAttributesA(stop) == INVALID_FILE_ATTRIBUTES; ++n) {
         static RB2K_D7_DRAWSTATS s;
         static RB2K_D7_PROFILE p;
         HDC dc = CreateDCA("DISPLAY", NULL, NULL, NULL);
-        FILE *out = fopen(file, "a");
-        if (out) {
-            fprintf(out, "D7WATCH ms=%lu", GetTickCount() - start);
-            if (dc && ExtEscape(dc, RB2K_D3D7_DRAW_ESCAPE, 0, NULL, sizeof(s), (LPSTR)&s) > 0 &&
-                s.version == RB2K_D7_DRAWSTATS_VERSION) {
-                const ULONG *l = s.flipLog[(s.flips - 1) & 7];
-                fprintf(out, " dp2=%lu dp2_failed=%lu drawn=%lu skipped=%lu draw_failed=%lu flips=%lu flip_copies=%lu "
-                        "fronts=%lu backs=%lu chain_blts=%lu targets=%lu target_failed=%lu", s.dp2Calls, s.dp2Failures,
-                        s.drawn, s.skippedCalls, s.drawFailures, s.flips, s.flipPresents, s.chainFronts, s.chainBacks,
-                        s.chainBlts, s.targets, s.targetFailures);
-                if (s.flips) fprintf(out, " flip=%lx,%lx,%lx,%lx,%08lx", l[0], l[1], l[2], l[3], l[4]);
-            } else fprintf(out, " display=none");
-            if (dc && ExtEscape(dc, RB2K_D3D7_PROFILE_ESCAPE, 0, NULL, sizeof(p), (LPSTR)&p) > 0)
-                fprintf(out, " mp_draws=%lu mp_draw_submits=%lu mp_clears=%lu mp_presents=%lu mp_present_failed=%lu "
-                        "mp_uploads=%lu refused=%lu requests_failed=%lu commands_failed=%lu page_copies=%lu "
-                        "page_copy_failed=%lu pages_stale=%lu chain=%lu", p.op[RB2K_D7_DRAW].calls,
-                        p.op[RB2K_D7_DRAW].submits, p.op[RB2K_D7_CLEAR].calls, p.op[RB2K_D7_PRESENT].calls,
-                        p.op[RB2K_D7_PRESENT].failed, p.op[RB2K_D7_UPLOAD].calls, p.failCount, p.requestFailures,
-                        p.commandFailures, p.memoryPresents, p.memoryFailures, p.memoryStale, p.memoryChain);
-            fprintf(out, "\n");
-            fclose(out);
-        }
+        printf("D7WATCH ms=%lu", GetTickCount() - start);
+        if (dc && ExtEscape(dc, RB2K_D3D7_DRAW_ESCAPE, 0, NULL, sizeof(s), (LPSTR)&s) > 0 &&
+            s.version == RB2K_D7_DRAWSTATS_VERSION) {
+            const ULONG *l = s.flipLog[(s.flips - 1) & 7];
+            printf(" dp2=%lu dp2_failed=%lu last_failure=%08lx last_op=%lu skipped=%lu draw_failed=%lu flips=%lu "
+                   "flip_copies=%lu targets=%lu target_failed=%lu", s.dp2Calls, s.dp2Failures, s.lastFailure,
+                   s.lastFailureOp, s.skippedCalls, s.drawFailures, s.flips, s.flipPresents, s.targets, s.targetFailures);
+            if (s.flips) printf(" flip=%lx,%lx,%lx,%lx,%08lx", l[0], l[1], l[2], l[3], l[4]);
+        } else printf(" display=none");
+        if (dc && ExtEscape(dc, RB2K_D3D7_PROFILE_ESCAPE, 0, NULL, sizeof(p), (LPSTR)&p) > 0)
+            printf(" mp_draws=%lu mp_draw_submits=%lu mp_clears=%lu mp_presents=%lu mp_present_failed=%lu "
+                   "mp_uploads=%lu refused=%lu requests_failed=%lu commands_failed=%lu page_copies=%lu "
+                   "page_copy_failed=%lu pages_stale=%lu chain=%lu", p.op[RB2K_D7_DRAW].calls,
+                   p.op[RB2K_D7_DRAW].submits, p.op[RB2K_D7_CLEAR].calls, p.op[RB2K_D7_PRESENT].calls,
+                   p.op[RB2K_D7_PRESENT].failed, p.op[RB2K_D7_UPLOAD].calls, p.failCount, p.requestFailures,
+                   p.commandFailures, p.memoryPresents, p.memoryFailures, p.memoryStale, p.memoryChain);
+        printf("\n");
         if (dc) DeleteDC(dc);
+        if (n % 15 == 14) report();
+        fflush(stdout);
         Sleep(1000);
     }
     return 0;
 }
 
 int main(int argc, char **argv)
+{
+    if (argc == 4 && !strcmp(argv[1], "-watch")) return watch(argv[2], atoi(argv[3]));
+    return report();
+}
+
+static int report(void)
 {
     static const char *const skips[RB2K_D7_SKIPS] = {
         "fill", "stencil", "stage1", "vertex", "texture", "combiner", "primitive", "clear"
@@ -61,7 +68,6 @@ int main(int argc, char **argv)
     RB2K_D7_DRAWSTATS s;
     HDC dc = CreateDCA("DISPLAY", NULL, NULL, NULL);
     ULONG i;
-    if (argc == 4 && !strcmp(argv[1], "-watch")) return watch(argv[2], atoi(argv[3]));
     if (!dc || ExtEscape(dc, RB2K_D3D7_DRAW_ESCAPE, 0, NULL, sizeof(s), (LPSTR)&s) <= 0 ||
         s.version != RB2K_D7_DRAWSTATS_VERSION) {
         puts("D7DRAW unavailable");
