@@ -160,8 +160,8 @@ ripple_gld_dbg_file(void)
  * Every place that skips part of what a program asked for, or can't handle it, calls
  * ripple_gl_skip(kind, detail): a GL call we don't implement, a pixel format attribute we
  * don't offer, an IOSurface texture we can't make. Each kind and detail is counted; its first
- * time goes to the debug log as a "SKIP" line, and every count in a "skips:" line when the
- * process exits and with the frame statistics. Test and benchmark scripts fail a run whose
+ * time goes to the debug log as a "SKIP" line followed by a "skips:" line with every count,
+ * and the "skips:" line again with the frame statistics and when the process exits. Test and benchmark scripts fail a run whose
  * processes report any (tools/sl-checks/run-checks.sh). Written only where the debug log is
  * (RIPPLE_GL_DEBUG=1, or /Library/Logs/RippleGL existing), so an installed release says nothing;
  * compiled out with -DRIPPLE_GL_CHECKS=0. */
@@ -196,8 +196,10 @@ ripple_gl_skip(const char *kind, const char *detail)
    else
       skip_lost++;
    simple_mtx_unlock(&skip_lock);
-   if (first)
+   if (first) {
       fprintf(f, "RippleGLDriver: SKIP %s: %s\n", kind, detail ? detail : "");
+      ripple_gl_skips_print(f);        /* counted even if the process never reaches exit() */
+   }
 #endif
 }
 
