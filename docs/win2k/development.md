@@ -3474,6 +3474,52 @@ Nature (5.83 percent of the blocks) and the Ragtroll frame (3.42 percent) were t
 missing from managed textures, and the Pixel Shader 2.0 frame (4.42 percent) the address mode of
 the third texture coordinate.
 
+## Measured against a graphics card of the time
+
+One host has a GeForce 9600 GT that is passed through to a guest, so the same benchmarks can be
+run on NVIDIA's own driver in the same kind of guest. Both columns are Windows XP SP3 at
+1024x768 with one processor, each guest alone on its host, measured on 2026-11-27. This driver's
+runs had no captures and QEMU's clock option (`-rtc base=localtime,driftfix=slew`; a run's span
+was 556 s by the host and by the guest), on the source release 0.4.4 is built from.
+
+| 3DMark03 | this driver, Intel UHD 630 host | GeForce 9600 GT, passed through |
+| --- | --- | --- |
+| 3DMarks | 11009 | 33348 |
+| GT1 Wings of Fury | 187.2 fps | 974.0 |
+| GT2 Battle of Proxycon | 113.4 | 290.6 |
+| GT3 Troll's Lair | 76.4 | 194.9 |
+| GT4 Mother Nature | 47.8 | 163.1 |
+| CPU Test 1 | 64.5 | 462.7 |
+| CPU Test 2 | 10.5 | 101.4 |
+| Fill rate, multi-texturing | 8922.9 MTexels/s | 10643.0 |
+| Vertex Shader | 83.7 fps | 95.8 |
+| Pixel Shader 2.0 | 160.1 | 344.2 |
+| Ragtroll | 72.7 | 103.8 |
+
+3DMark 2001 SE: 7220 on this driver, 53913 on the card.
+
+What differs between the columns besides the driver: the card's host has an Intel Core
+i9-9900K, this driver's an i9-10900K (QEMU 10.0 with KVM, virglrenderer 1.1.0, Mesa 25.0); the
+card's guest had a Penryn processor model and 2 GB of memory with NVIDIA's driver 6.14.13.4052,
+this driver's a Pentium III model and 512 MB; and the card's 3DMark03 run had a small screen
+capture every second running in the guest (`scap`), which costs it a little. During this
+driver's 3DMark03 run another job copied 16 MB to the host for two seconds, in the first game
+test.
+
+What the numbers say. Where the host GPU does the work, in the multi-texturing fill rate and
+the Vertex Shader test, the driver is near the card. The game tests are 2.5 to 5 times behind
+and the CPU tests 7 to 10 times. So the time is probably lost in the guest's draw path and
+not on the host GPU; that is a reading of these numbers, not a profile. The CPU tests use
+software vertex processing, whose draws are sent with their vertices every time (see "Vertex
+and index buffers on the host").
+Two numbers are not in the table. The single-texturing fill rate came out above the card's
+(4990 against 2871 MTexels/s), which is not believable until that one test's guest clock has
+been checked: from captures the benchmark's own time display kept pace in the multi-texturing
+and Vertex Shader tests, ran at about 97 percent in Pixel Shader 2.0, and the single-texturing
+test is too short to tell. And every 3DMark03 score of this driver from before 2026-11-27 was
+measured without the clock option and is about 29 percent too high (see "Checking a benchmark
+run", the guest's clock).
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:
