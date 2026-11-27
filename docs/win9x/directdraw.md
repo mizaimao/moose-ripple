@@ -783,7 +783,7 @@ restart:
 | `D3D8` = `"2"` or no value | and vertex processing on the GPU (fixed function, vertex shaders), with vertex and index buffers in the driver's memory |
 | `D3D8Buffers` = `"0"` | with `"2"`: buffers stay in the runtime's system memory (the path before 2026-11-26 13:00) |
 | `D3D9` = `"0"` | with `"2"`: a DirectX 9 runtime stays on the Direct3D 8 interface (the behaviour before 2026-11-27; see "The Direct3D 9 driver interface") |
-| `D3D7TnL` = `"0"` | with `"2"`: Direct3D 7 has no T&L HAL device, the runtime processes its vertices (the behaviour before 2026-11-27) |
+| `D3D7TnL` = `"1"` | with `"2"`: Direct3D 7 is offered a T&L HAL device and the driver processes its vertices on the GPU. Off by default: it measured slower (see "Direct3D 7 with vertex processing on the GPU") |
 
 Learnt on Windows 98 SE with DirectX 8.1 (UTM):
 
@@ -912,18 +912,19 @@ the stage states before each draw. 3DMark 2001 SE needs Q8W8V8U8 for Nature ("de
 support bump normal maps" with V8U8 alone). `d9pixels`: 49 of 49 on the rig, `ps_texbem`
 included.
 
-### Direct3D 7 with vertex processing on the GPU (2026-11-27, on by default)
+### Direct3D 7 with vertex processing on the GPU (2026-11-27, an option: `D3D7TnL` = `"1"`)
 
 The vertex programs that process Direct3D 8 and 9 vertices on the GPU (next section) were
 written from Direct3D 7's lighting equations, and the commands that carry transforms, lights,
 the material and clip planes are Direct3D 7's own, so the driver already handled them for
-every context. What was missing was only the offer. The HAL now reports
+every context. What was missing was only the offer. With `D3D7TnL` = `"1"` under
+`HKLM\Software\moose-ripple` (and `D3D8` = `"2"`, the default) the HAL reports
 `D3DDEVCAPS_HWTRANSFORMANDLIGHT` with eight lights, texture coordinate generation, material
 sources, vertex fog, directional and positional lights, the local viewer and six user clip
 planes; the Direct3D 7 runtime then lists a "Direct3D T&L HAL" device next to the HAL device,
-and a program that chooses it sends untransformed vertices. `D3D7TnL` = `"0"` under
-`HKLM\Software\moose-ripple` takes the device away again; it needs `D3D8` = `"2"` (the default).
-The HAL device is unchanged: the runtime processes its vertices as before.
+and a program that chooses it sends untransformed vertices. The HAL device is unchanged: the
+runtime processes its vertices as before. It is off unless asked for, because it measured
+slower (below).
 
 Checked on Windows 98 SE (Intel host) with the Windows 2000/XP side's Direct3D 7 tests, built
 with Visual C++ 6 and the DirectX 7 SDK:
@@ -934,10 +935,36 @@ with Visual C++ 6 and the DirectX 7 SDK:
 | `tfog` | 7 of 7 | 7 of 7 |
 | `tstage` | 9 of 9 | 9 of 9 |
 
-3DMark 2000 chooses "D3D Hardware T&L" by itself once the device exists, and its tests draw
-as before (helicopter, adventure, fill rate and texture tests looked at on captures taken
-through a run). A timed comparison with the guest's own vertex processing is still to do: the
-host was shared during these runs.
+3DMark 2000 chooses "D3D Hardware T&L" by itself once the device exists. Timed on the same
+build, the host to itself (Intel UHD 630, 2026-11-27), its default benchmark at 1024x768 in 16
+bits, once each way:
+
+| 3DMark 2000 | vertices on the guest CPU (default) | T&L HAL device (`D3D7TnL` = `"1"`) |
+|---|---:|---:|
+| Score, 3D marks | 26890 | 24336 |
+| Game 1, low / medium / high detail, fps | 451.8 / 325.2 / 178.6 | 444.9 / 316.9 / 170.4 |
+| Game 2, low / medium / high detail, fps | 636.7 / 392.2 / 256.3 | 552.9 / 324.9 / 217.9 |
+| High polygon count, 1 / 4 / 8 lights, thousand triangles a second | 39701 / 35783 / 33061 | 42273 / 42020 / 41349 |
+| Texture rendering speed, 8 / 16 / 32 / 64 MB, fps | 2304.8 / 1764.0 / 1177.3 / 647.9 | 1844.3 / 1155.5 / 628.6 / 0.0 |
+| Bump mapping (emboss), 3 / 2 / 1 pass, fps | 1362.6 / 1717.5 / 2566.7 | 1074.6 / 2112.1 / 2595.5 |
+| Fill rate, single / multi texturing, million texels a second | 3805.4 / 7002.9 | 3794.2 / 6971.1 |
+
+How the two runs were checked: the screen was captured every five seconds through each, the
+pages the driver flipped to were counted once a second, and its skip counts read (they stayed at
+zero). In the first run every capture during the tests differs from the one before and none
+shows an earlier picture again. In the second the same holds up to the 64 MB texture test: its
+loading screen stands unchanged for 25 seconds, then one picture of the test for 15, and the
+driver flipped no page in that time, which is the program's 0.0 fps. The flip rate follows the
+program's own frame rates test by test (Game 2 at low detail: 636.7 and 552.9 fps reported,
+450 to 720 and 440 to 610 pages a second flipped in those seconds).
+
+So on this host the GPU wins where the lights cost most (the high polygon tests, up to 25
+percent with eight lights) and loses everywhere draws are many and small: the game scenes by 2
+to 17 percent, the texture tests by 20 to 47 percent. The guest's processor is a fast one and
+the program's own vertex code is cheap on it, while every draw through the vertex programs costs
+this driver more than a draw of finished vertices does. And the 64 MB texture test ends with
+0.0 fps on the T&L HAL device after standing on its loading screen for 25 seconds: not looked
+into yet. Until both are dealt with the device stays an option.
 
 ### The Direct3D 9 driver interface (2026-11-27, on by default)
 

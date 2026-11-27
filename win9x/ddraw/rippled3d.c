@@ -709,7 +709,7 @@ static int buf_on;                      /* and buffers the driver allocates (unl
 static int d9_on;                       /* the Direct3D 9 driver interface is offered to a DirectX 9
                                            runtime (unless D3D9 is "0"; d9_resolve) */
 static int tnl7_on;                     /* Direct3D 7 is offered vertex processing on the GPU too: its
-                                           T&L HAL device (unless D3D7TnL is "0") */
+                                           T&L HAL device (only when D3D7TnL is "1") */
 
 /* ---- Surface handles: DirectX 7 names surfaces in the command stream by handle --------------- */
 typedef struct {
@@ -7354,8 +7354,9 @@ static void d9_caps(RB_D3DCAPS9 *c)
    interface and processes vertices itself; "1" offers the interface with the runtime's vertex
    processing; "2" is the default. D3D8Buffers "0" keeps buffers in the runtime's memory. D3D9 "0"
    keeps a DirectX 9 runtime on the Direct3D 8 interface (d9_caps; the Direct3D 9 one needs "2"). D3D7TnL
-   "0" keeps Direct3D 7 without its T&L HAL device (the runtime then processes its vertices). Not an
-   environment variable: the runtime asks once per boot, in the first program that uses it, and
+   "1" offers Direct3D 7 its T&L HAL device, whose vertices the driver processes on the GPU; without
+   it the runtime processes Direct3D 7's vertices, which measured faster (docs/win9x/directdraw.md).
+   Not an environment variable: the runtime asks once per boot, in the first program that uses it, and
    keeps the answer for all others. */
 int d3d8_enabled(void)
 {
@@ -7365,7 +7366,7 @@ int d3d8_enabled(void)
     char mode = '2';
     int buffers = 1;
     int d9 = 1;
-    int tnl7 = 1;
+    int tnl7 = 0;
 
     if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, "Software\\moose-ripple", 0, KEY_READ, &k) == ERROR_SUCCESS) {
         if (RegQueryValueEx(k, "D3D8", NULL, &type, (BYTE *)v, &n) == ERROR_SUCCESS &&
@@ -7381,8 +7382,8 @@ int d3d8_enabled(void)
             d9 = 0;
         n = sizeof v;
         if (RegQueryValueEx(k, "D3D7TnL", NULL, &type, (BYTE *)v, &n) == ERROR_SUCCESS &&
-            type == REG_SZ && v[0] == '0')
-            tnl7 = 0;
+            type == REG_SZ && v[0] == '1')
+            tnl7 = 1;
         RegCloseKey(k);
     }
     d8_on = mode != '0';
