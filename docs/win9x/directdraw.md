@@ -990,8 +990,19 @@ to the old path: the runtime appends to its own buffers under one lock.
 Timed and checked as the two runs above (the host to itself, captures every five seconds, pages
 flipped and skip counts read once a second: 214,975 pages, no skips, and again no page during
 the 64 MB texture test). The game scenes are now 8 to 34 percent faster on the GPU than on the
-guest's processor and the high polygon tests five times as fast. The texture tests are still
-slower and the 64 MB one still stands still, so the device stays an option for now.
+guest's processor and the high polygon tests five times as fast.
+
+**Why the texture tests differ.** A command trace of the 64 MB test alone, each way, shows it is
+the program and not the driver's speed: with its own vertex code it draws only the quads in
+view, about 80 a frame, and its managed textures come and go a few at a time; on a T&L HAL
+device it leaves clipping to the hardware and draws all 384 quads in every frame, each with a
+texture of its own. That is three to five times the draws for the same picture, hence the lower
+frame rates of the 8, 16 and 32 MB tests. In the 64 MB test it also means 67 MB of textures in
+use in one frame, more than the 32 MB of surface memory the driver has for a guest of this
+size (and the 8 MB of the card): Direct3D's texture manager creates every texture twice during
+the first frame, and after it the program draws nothing more and reports 0.0 fps. So that test
+needs more surface memory than the driver gives, on this device only. The device stays an
+option until that is settled and a few Direct3D 7 games have been looked at through it.
 
 ### The Direct3D 9 driver interface (2026-11-27, on by default)
 
