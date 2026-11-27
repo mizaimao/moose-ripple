@@ -2,7 +2,7 @@
  * programs in a test machine and for starting benchmarks from a script.
  *
  *   guiclick <seconds> [-press text]... [-check text]... [-dismiss text]... [-close text]... [-until text]
- *            [-debug] <program> [arguments]
+ *            [-fill file] [-pick N=K]... [-set N=text]... [-debug] <program> [arguments]
  *
  * Every visible top-level window other than the shell's is reported when
  * its contents change: its title and class, then each control's class and
@@ -21,6 +21,11 @@
  *     or not; buttons are reported with their IDs and places for this.
  *   - "-press @Title#N" does the same only in a window whose title contains Title.
  *   - Nothing is pressed in a window a modal dialog has disabled.
+ *   - with -fill, each empty edit control met takes the next line of the file as its text (a
+ *     registration name and key, say). The text is never logged, only its length.
+ *   - "-pick N=K" gives the Nth combo box of a dialog its item K (counted from 0), and
+ *     "-set N=text" gives the Nth edit control that text, each once, when the dialog has stood
+ *     still. Combo boxes are reported with their number and items, edit controls with their number.
  * With -debug the program runs under guiclick as its debugger: its
  * exceptions are reported with the module and offset, and for one that
  * ends it, the registers and the code addresses found on its stack.
@@ -85,7 +90,29 @@ static BOOL starts(const char *text, const char *part)
     return !strncmp(a, b, strlen(b));
 }
 
-typedef struct { HWND top, button[48]; char text[48][96]; LONG style[48]; int count; DWORD hash; int report, dismiss, close; } CONTROLS;
+typedef struct { HWND top, button[48]; char text[48][96]; LONG style[48]; int count; DWORD hash; int report, dismiss, close;
+                 int combos, edits, apply, applied; } CONTROLS;
+
+/* -pick and -set: the number of the combo box or edit control in its dialog, and what it gets. */
+static int pickBox[8], pickItem[8], pickDone[8], pickCount;
+static int setBox[8], setDone[8], setCount;
+static const char *setText[8];
+
+/* -fill: the lines of a file, given one each to the empty edit controls met. */
+static char fills[8][128];
+static int fillCount, fillUsed;
+
+static void load_fills(const char *path)
+{
+    FILE *f = path ? fopen(path, "r") : NULL;
+    if (!f) { out("GUICLICK fill file not read"); return; }
+    while (fillCount < 8 && fgets(fills[fillCount], sizeof(fills[0]), f)) {
+        char *end = fills[fillCount] + strlen(fills[fillCount]);
+        while (end > fills[fillCount] && (end[-1] == 0x0a || end[-1] == 0x0d || end[-1] == 0x20)) *--end = 0;
+        if (fills[fillCount][0]) ++fillCount;
+    }
+    fclose(f);
+}
 
 static BOOL CALLBACK child(HWND w, LPARAM arg)
 {
@@ -95,8 +122,46 @@ static BOOL CALLBACK child(HWND w, LPARAM arg)
     LONG style = GetWindowLongA(w, GWL_STYLE);
     if (!IsWindowVisible(w)) return TRUE;
     GetClassNameA(w, name, sizeof(name));
+    if (!lstrcmpiA(name, "ComboBox")) ++c->combos;
+    if (!lstrcmpiA(name, "Edit")) ++c->edits;
+    if (c->apply) {
+        int k;
+        char said[160];
+        if (!IsWindowEnabled(w)) return TRUE;
+        if (!lstrcmpiA(name, "ComboBox"))
+            for (k = 0; k < pickCount; ++k)
+                if (!pickDone[k] && pickBox[k] == c->combos && pickItem[k] < (int)SendMessageA(w, CB_GETCOUNT, 0, 0)) {
+                    pickDone[k] = 1;
+                    SendMessageA(w, CB_SETCURSEL, pickItem[k], 0);
+                    SendMessageA(GetParent(w), WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(w), CBN_SELCHANGE), (LPARAM)w);
+                    _snprintf(said, sizeof(said), "GUICLICK pick box %d item %d", pickBox[k], pickItem[k]);
+                    out(said);
+                    c->applied = 1;
+                }
+        if (!lstrcmpiA(name, "Edit"))
+            for (k = 0; k < setCount; ++k)
+                if (!setDone[k] && setBox[k] == c->edits) {
+                    setDone[k] = 1;
+                    SendMessageA(w, WM_SETTEXT, 0, (LPARAM)setText[k]);
+                    _snprintf(said, sizeof(said), "GUICLICK set field %d to \"%s\"", setBox[k], setText[k]);
+                    said[sizeof(said) - 1] = 0;
+                    out(said);
+                    c->applied = 1;
+                }
+        return TRUE;
+    }
     text[0] = 0;
     if (lstrcmpiA(name, "Edit")) GetWindowTextA(w, text, sizeof(text));
+    else {
+        if (fillUsed < fillCount && IsWindowEnabled(w) && !(style & ES_READONLY) && !GetWindowTextLengthA(w)) {
+            char line2[64];
+            SendMessageA(w, WM_SETTEXT, 0, (LPARAM)fills[fillUsed]);
+            _snprintf(line2, sizeof(line2), "GUICLICK   Edit filled, line %d of the file", fillUsed + 1);
+            ++fillUsed;
+            out(line2);
+        }
+        c->hash = c->hash * 31 + (DWORD)GetWindowTextLengthA(w);   /* a filled field is a change */
+    }
     for (p = name; *p; ++p) c->hash = c->hash * 31 + (unsigned char)*p;
     for (p = text; *p; ++p) c->hash = c->hash * 31 + (unsigned char)*p;
     c->hash = c->hash * 31 + (IsWindowEnabled(w) ? 1 : 0);
@@ -108,7 +173,19 @@ static BOOL CALLBACK child(HWND w, LPARAM arg)
     }
     if (c->report) {
         if (!lstrcmpiA(name, "Edit"))
-            _snprintf(line, sizeof(line), "GUICLICK   Edit (%d characters)", GetWindowTextLengthA(w));
+            _snprintf(line, sizeof(line), "GUICLICK   Edit %d (%d characters)", c->edits, GetWindowTextLengthA(w));
+        else if (!lstrcmpiA(name, "ComboBox")) {
+            int items = (int)SendMessageA(w, CB_GETCOUNT, 0, 0), k;
+            _snprintf(line, sizeof(line), "GUICLICK   ComboBox %d, item %d of %d:", c->combos,
+                      (int)SendMessageA(w, CB_GETCURSEL, 0, 0), items);
+            for (k = 0; k < items && k < 16; ++k) {
+                char item[64];
+                size_t at = strlen(line);
+                item[0] = 0;
+                if (SendMessageA(w, CB_GETLBTEXTLEN, k, 0) < (LRESULT)sizeof(item)) SendMessageA(w, CB_GETLBTEXT, k, (LPARAM)item);
+                _snprintf(line + at, sizeof(line) - at, " [%d] %s", k, item);
+            }
+        }
         else {
             char *q;
             for (q = text; *q; ++q) if (*q == '\r' || *q == '\n') *q = ' ';
@@ -136,6 +213,18 @@ static BOOL CALLBACK child(HWND w, LPARAM arg)
     return TRUE;
 }
 
+/* Controls selected for -check or a licence: clicked once each, since an owner-drawn check box
+ * may not answer BM_GETCHECK and a second click would clear it again. */
+static HWND selected[32];
+static int selectedCount;
+
+static BOOL was_selected(HWND w)
+{
+    int i;
+    for (i = 0; i < selectedCount; ++i) if (selected[i] == w) return TRUE;
+    return FALSE;
+}
+
 static void act(CONTROLS *c)
 {
     char line[160];
@@ -154,7 +243,8 @@ static void act(CONTROLS *c)
         if (box && !want && (contains(c->text[i], "launch") || contains(c->text[i], "readme") ||
                              contains(c->text[i], "view the") || contains(c->text[i], "run ")))
             clear = TRUE;
-        if (want && SendMessageA(c->button[i], BM_GETCHECK, 0, 0) != BST_CHECKED) {
+        if (want && !was_selected(c->button[i]) && SendMessageA(c->button[i], BM_GETCHECK, 0, 0) != BST_CHECKED) {
+            if (selectedCount < 32) selected[selectedCount++] = c->button[i];
             SendMessageA(c->button[i], BM_CLICK, 0, 0);
             _snprintf(line, sizeof(line), "GUICLICK select \"%s\"", c->text[i]);
             line[sizeof(line) - 1] = 0;
@@ -277,6 +367,14 @@ static BOOL CALLBACK top(HWND w, LPARAM arg)
      * three seconds while it does not change. */
     if (now - seen[slot].changed > 1000 && now - seen[slot].acted > 3000) {
         seen[slot].acted = now;
+        if (pickCount + setCount) {
+            CONTROLS e;
+            memset(&e, 0, sizeof(e));
+            e.top = w;
+            e.apply = 1;
+            EnumChildWindows(w, child, (LPARAM)&e);
+            if (e.applied) return TRUE;     /* the dialog changes; act on the next look */
+        }
         act(&c);
     }
     (void)arg;
@@ -487,6 +585,14 @@ int main(void)
         else if (!lstrcmpA(w, "-until")) until = word(&command);
         else if (!lstrcmpA(w, "-dismiss") && dismissCount < MaxNames) dismiss[dismissCount++] = word(&command);
         else if (!lstrcmpA(w, "-close") && closeCount < MaxNames) closes[closeCount++] = word(&command);
+        else if (!lstrcmpA(w, "-fill")) load_fills(word(&command));
+        else if (!lstrcmpA(w, "-pick") && pickCount < 8) {
+            char *v = word(&command);
+            if (v && strchr(v, 0x3d)) { pickBox[pickCount] = atoi(v); pickItem[pickCount] = atoi(strchr(v, 0x3d) + 1); ++pickCount; }
+        } else if (!lstrcmpA(w, "-set") && setCount < 8) {
+            char *v = word(&command);
+            if (v && strchr(v, 0x3d)) { setBox[setCount] = atoi(v); setText[setCount] = strchr(v, 0x3d) + 1; ++setCount; }
+        }
         else if (!lstrcmpA(w, "-debug")) debugging = TRUE;
         else {
             /* The program and its arguments, as given. */
