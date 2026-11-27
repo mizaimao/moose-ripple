@@ -30,8 +30,9 @@ int rb_d9_translate(const RB_D9_ELEMENT *elements, unsigned long count,
                     unsigned long *declWords, unsigned long *codeWords);
 
 /* A declaration that is a plain vertex format: stream 0 only, in the order and sizes of an
- * FVF code (position or transformed position, normal, diffuse, specular, texture coordinate
- * sets). Returns the FVF code, or 0 when it is not one. */
+ * FVF code (position or transformed position, normal, point size, diffuse, specular, the
+ * separate fog value of a transformed vertex as D3DFVF_FOG, texture coordinate sets). Returns the
+ * FVF code, or 0 when it is not one. */
 unsigned long rb_d9_decl_fvf(const RB_D9_ELEMENT *elements, unsigned long count);
 
 /* A declaration for the fixed-function pipeline as Direct3D 8 declaration tokens without code:

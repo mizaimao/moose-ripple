@@ -64,7 +64,7 @@ typedef struct {
 #define RB_PS_FOG_MODE_SHIFT 4
 #define RB_PS_FOG_RANGE 0x100
 #define RB_PS_FOG_W 0x200
-/* Version 1 shaders: the stages whose texture is a cube map, in bits 16-23
+/* Version 1 shaders and stage programs: the stages whose texture is a cube map, in bits 16-23
  * of the fog argument (shader model 2 declares its samplers). */
 #define RB_PS_CUBE_SHIFT 16
 /* and the stages whose texture is a volume, in bits 24-31. */

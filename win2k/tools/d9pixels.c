@@ -619,10 +619,84 @@ static void vertex_point_case(int only, BOOL offered)
     }
 }
 
+/* 93 to 95: the other vertex shaders that work point sizes out. 93: the scaled point of case 79
+ * with lighting on (no lights, a yellow emissive material). 94: transformed vertices with their
+ * own sizes, as case 81 (16 pixels at 64,64 and 4 pixels at 32,32). 95: the scaled point of
+ * case 79 with a user clip plane that cuts nothing. */
+static void point_variant_cases(int only, BOOL offered, BOOL planes)
+{
+    static const SAMPLE s[] = { { 64, 64, 0xffff00 }, { 58, 58, 0xffff00 }, { 70, 70, 0xffff00 },
+                                { 76, 64, CLEAR_COLOR }, { 64, 52, CLEAR_COLOR },
+                                { 32, 32, 0xffff00 }, { 38, 32, CLEAR_COLOR }, { 32, 38, CLEAR_COLOR } };
+    static const struct { float x, y, z, nx, ny, nz; } lit = { 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, -1.0f };
+    static const struct { float x, y, z, rhw, size; DWORD diffuse; } tl[2] = {
+        { 64.0f, 64.0f, 0.5f, 1.0f, 16.0f, 0xffffff00 }, { 32.0f, 32.0f, 0.5f, 1.0f, 4.0f, 0xffffff00 } };
+    static const XYZVERTEX v = { 0.0f, 0.0f, 0.5f, 0xffffff00 };
+    static const float plane[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
+    D3DMATERIAL9 material;
+    D3DMATRIX m;
+    HRESULT hr;
+    float f;
+    int pass;
+    if (only && (only < 93 || only > 95)) return;
+    if (!offered) { printf("D9PIX point size variants not offered\n"); return; }
+    memset(&m, 0, sizeof(m));
+    m._11 = m._22 = m._33 = m._44 = 1.0f;
+    for (pass = 93; pass <= 95; ++pass) {
+        const char *name = pass == 93 ? "lit_scaled_point" : pass == 94 ? "rhw_vertex_point" : "clip_scaled_point";
+        if (only && only != pass) continue;
+        if (pass == 95 && !planes) { printf("D9PIX clip planes for points not offered\n"); continue; }
+        IDirect3DDevice9_SetTransform(device, D3DTS_WORLD, &m);
+        IDirect3DDevice9_SetTransform(device, D3DTS_VIEW, &m);
+        IDirect3DDevice9_SetTransform(device, D3DTS_PROJECTION, &m);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_LIGHTING, pass == 93);
+        if (!begin(name)) continue;
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        f = pass == 94 ? 2.0f : 0.0625f;
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSIZE, *(DWORD *)&f);
+        if (pass != 94) {
+            IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALEENABLE, TRUE);
+            f = 0.0f;
+            IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALE_A, *(DWORD *)&f);
+            IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALE_B, *(DWORD *)&f);
+            f = 1.0f;
+            IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALE_C, *(DWORD *)&f);
+        }
+        if (pass == 93) {
+            memset(&material, 0, sizeof(material));
+            material.Emissive.r = material.Emissive.g = material.Emissive.a = material.Diffuse.a = 1.0f;
+            IDirect3DDevice9_SetMaterial(device, &material);
+            IDirect3DDevice9_SetRenderState(device, D3DRS_AMBIENT, 0);
+            IDirect3DDevice9_SetFVF(device, D3DFVF_XYZ | D3DFVF_NORMAL);
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_POINTLIST, 1, &lit, sizeof(lit));
+        } else if (pass == 94) {
+            IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_PSIZE | D3DFVF_DIFFUSE);
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_POINTLIST, 2, tl, sizeof(tl[0]));
+        } else {
+            IDirect3DDevice9_SetClipPlane(device, 0, plane);
+            IDirect3DDevice9_SetRenderState(device, D3DRS_CLIPPLANEENABLE, 1);
+            IDirect3DDevice9_SetFVF(device, XYZFVF);
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_POINTLIST, 1, &v, sizeof(v));
+            IDirect3DDevice9_SetRenderState(device, D3DRS_CLIPPLANEENABLE, 0);
+        }
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALEENABLE, FALSE);
+        f = 1.0f;
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALE_A, *(DWORD *)&f);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSIZE, *(DWORD *)&f);
+        f = 0.0f;
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALE_C, *(DWORD *)&f);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+        if (FAILED(hr)) { fail_hr(name, "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check(name, s, pass == 94 ? 8 : 5);
+    }
+}
+
 /* 80: the fixed-function pipeline through a declaration with two streams (no vertex shader):
  * positions in stream 0, colours in stream 1, six unused vertices first in both, drawn from
  * vertex 6: a red quad on the left and a green one on the right. */
-static void ff_streams_case(int only)
+static void ff_streams_case(int only, BOOL hardware)
 {
     static const D3DVERTEXELEMENT9 split[] = {
         { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
@@ -639,7 +713,7 @@ static void ff_streams_case(int only)
     D3DMATRIX m;
     HRESULT hr;
     int k, q;
-    if (only && only != 80) return;
+    if (only && only != 80 && only != 92) return;
     IDirect3DDevice9_GetDeviceCaps(device, &dc);
     if (dc.MaxStreams < 2) { printf("D9PIX fixed-function streams not offered (%lu)\n", (unsigned long)dc.MaxStreams); return; }
     for (q = 0; q < 3; ++q) {           /* x0, y0, x1, y1: two triangles each */
@@ -654,7 +728,8 @@ static void ff_streams_case(int only)
     pvb = vertex_buffer(pos, sizeof(pos), 0);
     cvb = vertex_buffer(col, sizeof(col), 0);
     hr = pvb && cvb ? IDirect3DDevice9_CreateVertexDeclaration(device, split, &decl) : E_FAIL;
-    if (FAILED(hr)) fail_hr("ff_streams", "create", hr);
+    if (only == 92) {}
+    else if (FAILED(hr)) fail_hr("ff_streams", "create", hr);
     else {
         memset(&m, 0, sizeof(m));
         m._11 = m._22 = m._33 = m._44 = 1.0f;
@@ -676,6 +751,62 @@ static void ff_streams_case(int only)
             if (FAILED(hr)) { fail_hr("ff_streams", "draw", hr); IDirect3DDevice9_EndScene(device); }
             else check("ff_streams", s, 4);
         }
+    }
+    /* 92: the same through an index buffer, with each colour 4 bytes into the vertices of the
+     * second stream: base vertex 6 and indices 6 to 11 are the green quad alone. Hardware vertex
+     * processing only: with software vertex processing the runtime refuses this draw itself
+     * (D3DERR_INVALIDCALL), which was not looked into. */
+    if (!hardware) printf("D9PIX indexed fixed-function streams not offered\n");
+    else if (!only || only == 92) {
+        static const D3DVERTEXELEMENT9 padded[] = {
+            { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+            { 1, 4, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 }, D3DDECL_END() };
+        static const SAMPLE si[] = { { 80, 64, 0x00ff00 }, { 48, 64, CLEAR_COLOR }, { 8, 8, CLEAR_COLOR },
+                                     { 120, 120, CLEAR_COLOR } };
+        static const WORD idx[6] = { 6, 7, 8, 9, 10, 11 };
+        DWORD wide[18][2];
+        IDirect3DVertexDeclaration9 *padDecl = NULL;
+        IDirect3DVertexBuffer9 *wvb;
+        IDirect3DIndexBuffer9 *ib = NULL;
+        void *to;
+        for (k = 0; k < 18; ++k) { wide[k][0] = 0xff0000ff; wide[k][1] = col[k]; }
+        wvb = vertex_buffer(wide, sizeof(wide), 0);
+        hr = pvb && wvb ? IDirect3DDevice9_CreateVertexDeclaration(device, padded, &padDecl) : E_FAIL;
+        if (SUCCEEDED(hr))
+            hr = IDirect3DDevice9_CreateIndexBuffer(device, sizeof(idx), D3DUSAGE_WRITEONLY, D3DFMT_INDEX16,
+                                                    D3DPOOL_DEFAULT, &ib, NULL);
+        if (SUCCEEDED(hr) && SUCCEEDED(hr = IDirect3DIndexBuffer9_Lock(ib, 0, 0, &to, 0))) {
+            memcpy(to, idx, sizeof(idx));
+            IDirect3DIndexBuffer9_Unlock(ib);
+        }
+        if (FAILED(hr)) fail_hr("ff_streams_indexed", "create", hr);
+        else {
+            memset(&m, 0, sizeof(m));
+            m._11 = m._22 = m._33 = m._44 = 1.0f;
+            IDirect3DDevice9_SetTransform(device, D3DTS_WORLD, &m);
+            IDirect3DDevice9_SetTransform(device, D3DTS_VIEW, &m);
+            IDirect3DDevice9_SetTransform(device, D3DTS_PROJECTION, &m);
+            IDirect3DDevice9_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+            if (begin("ff_streams_indexed")) {
+                IDirect3DDevice9_SetTexture(device, 0, NULL);
+                IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+                IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+                IDirect3DDevice9_SetVertexShader(device, NULL);
+                IDirect3DDevice9_SetVertexDeclaration(device, padDecl);
+                IDirect3DDevice9_SetStreamSource(device, 0, pvb, 0, sizeof(pos[0]));
+                IDirect3DDevice9_SetStreamSource(device, 1, wvb, 0, sizeof(wide[0]));
+                IDirect3DDevice9_SetIndices(device, ib);
+                hr = IDirect3DDevice9_DrawIndexedPrimitive(device, D3DPT_TRIANGLELIST, 6, 6, 6, 0, 2);
+                IDirect3DDevice9_SetStreamSource(device, 0, NULL, 0, 0);
+                IDirect3DDevice9_SetStreamSource(device, 1, NULL, 0, 0);
+                IDirect3DDevice9_SetIndices(device, NULL);
+                if (FAILED(hr)) { fail_hr("ff_streams_indexed", "draw", hr); IDirect3DDevice9_EndScene(device); }
+                else check("ff_streams_indexed", si, 4);
+            }
+        }
+        if (padDecl) IDirect3DVertexDeclaration9_Release(padDecl);
+        if (wvb) IDirect3DVertexBuffer9_Release(wvb);
+        if (ib) IDirect3DIndexBuffer9_Release(ib);
     }
     if (decl) IDirect3DVertexDeclaration9_Release(decl);
     if (pvb) IDirect3DVertexBuffer9_Release(pvb);
@@ -1920,6 +2051,60 @@ static void cube_cases(int only, BOOL version2)
         }
         IDirect3DPixelShader9_Release(handle);
     }
+    /* 90: the same six quads through the fixed-function stage alone (no pixel shader): the stage
+     * program samples the cube map. 91: the stage after a vertex shader that passes the three
+     * coordinates on, as 3DMark03 draws the reflections on its planes. */
+    for (pass = 90; pass <= 91; ++pass) {
+        static const D3DVERTEXELEMENT9 elements[] = {
+            { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+            { 0, 12, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_TEXCOORD, 0 }, D3DDECL_END() };
+        static const DWORD vs[] = { 0xfffe0200, VDCL2(0, 0), VDCL2(5, 1),
+            P2I(OMov, 2), P2D(VPos, 0, 15), P2SRC(RV, 0), P2I(OMov, 2), P2D(VAttr, 0, 15), P2SRC(RC, 0),
+            P2I(OMov, 2), P2D(VTex, 0, 15), P2SRC(RV, 1), PSEND };
+        static const float white[4] = { 1, 1, 1, 1 };
+        typedef struct { float x, y, z, u, v, w; } VV;
+        const char *name = pass == 90 ? "ff_cube" : "vs_ff_cube";
+        IDirect3DVertexDeclaration9 *decl = NULL;
+        IDirect3DVertexShader9 *vsh = NULL;
+        VV vv[36];
+        HRESULT hr = D3D_OK;
+        if (only && only != pass) continue;
+        if (pass == 91) {
+            if (!version2) continue;
+            for (i = 0; i < 36; ++i) {
+                vv[i].x = v[i].x / 64.0f - 1.0f; vv[i].y = 1.0f - v[i].y / 64.0f; vv[i].z = 0.5f;
+                vv[i].u = v[i].u; vv[i].v = v[i].v; vv[i].w = v[i].w;
+            }
+            hr = IDirect3DDevice9_CreateVertexDeclaration(device, elements, &decl);
+            if (SUCCEEDED(hr)) hr = IDirect3DDevice9_CreateVertexShader(device, vs, &vsh);
+            if (FAILED(hr)) { fail_hr(name, "create", hr); if (decl) IDirect3DVertexDeclaration9_Release(decl); continue; }
+        }
+        if (begin(name)) {
+            IDirect3DDevice9_SetPixelShader(device, NULL);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_TEXCOORDINDEX, 0);
+            if (pass == 90) {
+                IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE3(0));
+                hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 12, v, sizeof(v[0]));
+            } else {
+                DWORD cull = D3DCULL_CCW;
+                IDirect3DDevice9_GetRenderState(device, D3DRS_CULLMODE, &cull);
+                IDirect3DDevice9_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_NONE);
+                IDirect3DDevice9_SetVertexDeclaration(device, decl);
+                IDirect3DDevice9_SetVertexShader(device, vsh);
+                IDirect3DDevice9_SetVertexShaderConstantF(device, 0, white, 1);
+                hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 12, vv, sizeof(vv[0]));
+                IDirect3DDevice9_SetVertexShader(device, NULL);
+                IDirect3DDevice9_SetRenderState(device, D3DRS_CULLMODE, cull);
+            }
+            IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+            if (FAILED(hr)) { fail_hr(name, "draw", hr); IDirect3DDevice9_EndScene(device); }
+            else check(name, s, 7);
+        }
+        if (vsh) IDirect3DVertexShader9_Release(vsh);
+        if (decl) IDirect3DVertexDeclaration9_Release(decl);
+    }
     /* 71: a render target cube map (64x64), each face cleared to its colour as a render target, then
      * sampled the same way (3DMark05 draws its reflections into one). */
     if ((!only || only == 71) && version2) {
@@ -2961,7 +3146,8 @@ int main(int argc, char **argv)
     static_indexed_case(only);
     scaled_point_case(only, caps.MaxPointSize >= 16.0f);
     vertex_point_case(only, caps.MaxPointSize >= 16.0f && flags == D3DCREATE_HARDWARE_VERTEXPROCESSING);
-    ff_streams_case(only);
+    point_variant_cases(only, caps.MaxPointSize >= 16.0f, caps.MaxUserClipPlanes >= 1);
+    ff_streams_case(only, flags == D3DCREATE_HARDWARE_VERTEXPROCESSING);
     l16_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
     colorwrite_case(only);
