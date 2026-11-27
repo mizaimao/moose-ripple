@@ -18,6 +18,14 @@ typedef struct {
     VS_ARB *info;
     unsigned int version;               /* 1 or 2 */
     unsigned int scratch;               /* the next of s0..s2 for a source modifier */
+    /* static flow control (walk): the caller's b# and i#, the shader's own (defb, defi), its
+       labels, and the loops, repeats and calls it is inside */
+    const VS_ARB_FLOW *flow;
+    unsigned int defb_mask, defb_val, defi_mask;
+    int defi[16][3];
+    unsigned int label[16];
+    struct { unsigned int kind, at, left; int al, step; } frame[8];
+    unsigned int frames;
 } VS;
 
 static void emit(OUT *o, const char *s)
@@ -78,11 +86,13 @@ static unsigned int reg_type(unsigned int t)
 }
 
 enum { RegTemp = 0, RegInput = 1, RegConst = 2, RegAddr = 3, RegRastOut = 4, RegAttrOut = 5,
-       RegTexOut = 6, RegLoop = 15 };
+       RegTexOut = 6, RegConstInt = 7, RegConstBool = 14, RegLoop = 15, RegLabel = 18 };
 enum { OpNop = 0, OpMov, OpAdd, OpSub, OpMad, OpMul, OpRcp, OpRsq, OpDp3, OpDp4, OpMin, OpMax,
        OpSlt, OpSge, OpExp, OpLog, OpLit, OpDst, OpLrp, OpFrc, OpM4x4, OpM4x3, OpM3x4, OpM3x3,
-       OpM3x2, OpDcl = 31, OpPow = 32, OpCrs = 33, OpSgn = 34, OpAbs = 35, OpNrm = 36,
-       OpSincos = 37, OpMova = 46, OpDefb = 47, OpDefi = 48, OpExpp = 78, OpLogp = 79,
+       OpM3x2, OpCall = 25, OpCallnz = 26, OpLoop = 27, OpRet = 28, OpEndloop = 29, OpLabel = 30,
+       OpDcl = 31, OpPow = 32, OpCrs = 33, OpSgn = 34, OpAbs = 35, OpNrm = 36,
+       OpSincos = 37, OpRep = 38, OpEndrep = 39, OpIf = 40, OpIfc = 41, OpElse = 42, OpEndif = 43,
+       OpMova = 46, OpDefb = 47, OpDefi = 48, OpExpp = 78, OpLogp = 79,
        OpDef = 81, OpComment = 0xFFFE, OpEnd = 0xFFFF };
 
 static const char comps[] = "xyzw";
@@ -128,7 +138,11 @@ static int reg_name(VS *s, unsigned int t, unsigned int k, unsigned int comp, ST
     case RegConst:
         if (num >= VS_ARB_CONSTANTS)
             return fail(s, VS_ARB_REGISTER, t);
-        if (t & 0x2000) {
+        if ((t & 0x2000) && (comp & 0x80000000u)) {     /* relative to aL, whose value is known */
+            num += (unsigned int)(int)(short)(comp & 0xFFFF);
+            if (num >= VS_ARB_CONSTANTS)
+                return fail(s, VS_ARB_REGISTER, t);
+        } else if (t & 0x2000) {
             emit(&s->o, "ARL A0.x, aT.");
             {
                 char c[2];
@@ -456,10 +470,81 @@ static int instruction(VS *s, unsigned int op, const unsigned int *p, const unsi
     return 1;
 }
 
-/* Pass 0: def constants into info; pass 1: instructions. */
+/* ---- Static flow control (vs_2_0: if, else, rep, loop, call, callnz on the boolean and integer
+   constants). An ARB vertex program has no branches, and these only depend on constants, so
+   the program is written out straight for the values they have now: a false branch is left
+   out, a loop's body is written once a round with its counter aL folded into the constants'
+   indices, a subroutine is written where it is called. info says which b# and i# were read,
+   so that the caller keeps one program for each set of their values. ---- */
+#define FLOW_DEPTH 8                    /* loops, repeats and calls inside one another */
+#define FLOW_STEPS 4096                 /* instructions written at most */
+#define AL_FLAG 0x80000000u             /* a relative constant's address is aL: its value follows */
+
+/* The end of the block that i is inside: the index of its closing instruction, or of an else
+   of its own when stop_else; blocks opened inside it by open or open2 are stepped over. */
+static unsigned int block_end(const unsigned int *tok, unsigned int count, unsigned int i,
+                              unsigned int open, unsigned int open2, unsigned int close, int stop_else)
+{
+    unsigned int depth = 0;
+    while (i < count) {
+        unsigned int t = tok[i], op = t & 0xFFFF;
+        if (t == OpEnd)
+            break;
+        if (op == OpComment) {
+            i += 1 + ((t >> 16) & 0x7FFF);
+            continue;
+        }
+        if (op == open || op == open2) {
+            depth++;
+        } else if (op == close) {
+            if (!depth)
+                return i;
+            depth--;
+        } else if (stop_else && op == OpElse && !depth) {
+            return i;
+        }
+        i += 1 + ((t >> 24) & 15);
+    }
+    return count;
+}
+
+/* The value of a boolean constant: the shader's own (defb), else the caller's. */
+static int flow_bool(VS *s, unsigned int t, int *v)
+{
+    unsigned int n = t & 0x7FF;
+    if (reg_type(t) != RegConstBool || n > 15)
+        return fail(s, VS_ARB_REGISTER, t);
+    if (s->defb_mask & (1u << n)) {
+        *v = (s->defb_val >> n) & 1;
+    } else {
+        s->info->flow_bools |= 1u << n;
+        *v = s->flow ? (int)((s->flow->bools >> n) & 1) : 0;
+    }
+    return 1;
+}
+
+/* An integer constant's three numbers (a count, aL's first value, its step). */
+static int flow_int(VS *s, unsigned int t, const int **v)
+{
+    static const int none[3] = { 0, 0, 0 };
+    unsigned int n = t & 0x7FF;
+    if (reg_type(t) != RegConstInt || n > 15)
+        return fail(s, VS_ARB_REGISTER, t);
+    if (s->defi_mask & (1u << n)) {
+        *v = s->defi[n];
+    } else {
+        s->info->flow_ints |= 1u << n;
+        *v = s->flow ? s->flow->ints[n] : none;
+    }
+    return 1;
+}
+
+/* Pass 0: def, defb and defi constants and the labels; pass 1: the instructions, in the order
+   they run. */
 static int walk(VS *s, const unsigned int *tok, unsigned int count, int pass)
 {
-    unsigned int i = 1;
+    unsigned int i = 1, steps = 0;
+    s->frames = 0;
     while (i < count) {
         unsigned int t = tok[i], op = t & 0xFFFF, n, k, m, ops[8], comp[8];
         if (t == OpEnd)
@@ -478,8 +563,8 @@ static int walk(VS *s, const unsigned int *tok, unsigned int count, int pass)
         }
         if (i + 1 + n > count)
             return fail(s, VS_ARB_TRUNCATED, i);
-        if (op == OpDef) {
-            if (pass == 0) {
+        if (pass == 0) {
+            if (op == OpDef) {
                 unsigned int c = tok[i + 1] & 0x7FF, j;
                 VS_ARB *in = s->info;
                 if (n != 5 || reg_type(tok[i + 1]) != RegConst || c >= VS_ARB_CONSTANTS ||
@@ -489,9 +574,115 @@ static int walk(VS *s, const unsigned int *tok, unsigned int count, int pass)
                 for (j = 0; j < 4; j++)
                     in->def[in->defs].v[j] = *(const float *)&tok[i + 2 + j];
                 in->defs++;
+            } else if (op == OpDefb && n == 2 && reg_type(tok[i + 1]) == RegConstBool &&
+                       (tok[i + 1] & 0x7FF) < 16) {
+                unsigned int b = tok[i + 1] & 0x7FF;
+                s->defb_mask |= 1u << b;
+                s->defb_val = tok[i + 2] ? s->defb_val | 1u << b : s->defb_val & ~(1u << b);
+            } else if (op == OpDefi && n == 5 && reg_type(tok[i + 1]) == RegConstInt &&
+                       (tok[i + 1] & 0x7FF) < 16) {
+                unsigned int b = tok[i + 1] & 0x7FF, j;
+                s->defi_mask |= 1u << b;
+                for (j = 0; j < 3; j++)
+                    s->defi[b][j] = (int)tok[i + 2 + j];
+            } else if (op == OpLabel && n == 1 && (tok[i + 1] & 0x7FF) < 16) {
+                s->label[tok[i + 1] & 0x7FF] = i + 2;   /* the subroutine's first instruction */
             }
-        } else if (pass == 1) {
+            i += 1 + n;
+            continue;
+        }
+        if (s->version >= 2 && ((op >= OpCall && op <= OpLabel) || (op >= OpRep && op <= OpEndif))) {
+            int b = 0;
+            const int *v;
+            switch (op) {
+            case OpIf:
+                if (n != 1 || !flow_bool(s, tok[i + 1], &b))
+                    return fail(s, VS_ARB_REGISTER, t);
+                if (b) {
+                    i += 1 + n;
+                } else {                /* to its else, or past its endif */
+                    i = block_end(tok, count, i + 1 + n, OpIf, OpIfc, OpEndif, 1);
+                    if (i < count)
+                        i += 1 + ((tok[i] >> 24) & 15);
+                }
+                continue;
+            case OpElse:                /* met at the end of the branch taken: past the endif */
+                i = block_end(tok, count, i + 1 + n, OpIf, OpIfc, OpEndif, 0);
+                if (i < count)
+                    i += 1 + ((tok[i] >> 24) & 15);
+                continue;
+            case OpEndif:
+                i += 1 + n;
+                continue;
+            case OpRep:
+            case OpLoop:
+                if (n != (op == OpLoop ? 2u : 1u) || !flow_int(s, tok[i + n], &v))
+                    return fail(s, VS_ARB_REGISTER, t);
+                if (v[0] <= 0) {        /* no round: past its end */
+                    i = op == OpLoop ? block_end(tok, count, i + 1 + n, OpLoop, OpLoop, OpEndloop, 0)
+                                     : block_end(tok, count, i + 1 + n, OpRep, OpRep, OpEndrep, 0);
+                    if (i < count)
+                        i += 1 + ((tok[i] >> 24) & 15);
+                    continue;
+                }
+                if (s->frames == FLOW_DEPTH)
+                    return fail(s, VS_ARB_OVERFLOW, t);
+                s->frame[s->frames].kind = op;
+                s->frame[s->frames].at = i + 1 + n;
+                s->frame[s->frames].left = (unsigned int)v[0];
+                s->frame[s->frames].al = op == OpLoop ? v[1] : 0;
+                s->frame[s->frames].step = op == OpLoop ? v[2] : 0;
+                s->frames++;
+                i += 1 + n;
+                continue;
+            case OpEndrep:
+            case OpEndloop:
+                if (!s->frames || s->frame[s->frames - 1].kind != (op == OpEndloop ? (unsigned int)OpLoop : (unsigned int)OpRep))
+                    return fail(s, VS_ARB_OPCODE, t);
+                s->frame[s->frames - 1].al += s->frame[s->frames - 1].step;
+                if (--s->frame[s->frames - 1].left) {
+                    i = s->frame[s->frames - 1].at;
+                } else {
+                    s->frames--;
+                    i += 1 + n;
+                }
+                continue;
+            case OpCallnz:
+                if (n != 2 || !flow_bool(s, tok[i + 2], &b))
+                    return fail(s, VS_ARB_REGISTER, t);
+                if (!b) {
+                    i += 1 + n;
+                    continue;
+                }
+                /* fall through */
+            case OpCall:
+                if (n < 1 || reg_type(tok[i + 1]) != RegLabel || (tok[i + 1] & 0x7FF) > 15 ||
+                    !s->label[tok[i + 1] & 0x7FF] || s->frames == FLOW_DEPTH)
+                    return fail(s, VS_ARB_REGISTER, t);
+                s->frame[s->frames].kind = OpCall;
+                s->frame[s->frames].at = i + 1 + n;
+                s->frame[s->frames].left = 0;
+                s->frame[s->frames].al = s->frame[s->frames].step = 0;
+                s->frames++;
+                i = s->label[tok[i + 1] & 0x7FF];
+                continue;
+            case OpRet:
+            case OpLabel:               /* the main program ends at its ret, or where the
+                                           subroutines begin */
+                while (s->frames && s->frame[s->frames - 1].kind != OpCall)
+                    s->frames--;
+                if (!s->frames)
+                    return 1;
+                i = s->frame[--s->frames].at;
+                continue;
+            default:                    /* ifc: dynamic flow control is not offered */
+                return fail(s, VS_ARB_OPCODE, t);
+            }
+        }
+        if (op != OpDef) {
             /* operands; a vs_2_0 relative source is followed by its address token */
+            if (++steps > FLOW_STEPS)
+                return fail(s, VS_ARB_OVERFLOW, steps);
             for (k = 0, m = 0; k < n && m < 8; k++) {
                 unsigned int o = tok[i + 1 + k], a = 0;
                 if (s->version >= 2 && m > 0 && (o & 0x2000)) {
@@ -499,9 +690,18 @@ static int walk(VS *s, const unsigned int *tok, unsigned int count, int pass)
                     if (k + 1 >= n)
                         return fail(s, VS_ARB_REGISTER, o);
                     at = tok[i + 2 + k];
-                    if (reg_type(at) != RegAddr)
-                        return fail(s, VS_ARB_REGISTER, at);   /* aL: loops */
-                    a = (at >> 16) & 3;
+                    if (reg_type(at) == RegLoop) {      /* aL: the innermost loop's counter */
+                        unsigned int f = s->frames;
+                        while (f && s->frame[f - 1].kind != OpLoop)
+                            f--;
+                        if (!f)
+                            return fail(s, VS_ARB_REGISTER, at);
+                        a = AL_FLAG | ((unsigned int)s->frame[f - 1].al & 0xFFFF);
+                    } else if (reg_type(at) == RegAddr) {
+                        a = (at >> 16) & 3;
+                    } else {
+                        return fail(s, VS_ARB_REGISTER, at);
+                    }
                     k++;
                 }
                 comp[m] = a;
@@ -585,7 +785,7 @@ int vs_declared(const unsigned int *decl, unsigned int declWords, VS_ARB *info)
 
 unsigned int vs_to_arb(const unsigned int *code, unsigned int codeWords, const unsigned int *decl,
                        unsigned int declWords, unsigned int key, char *out, unsigned int size,
-                       VS_ARB *info)
+                       VS_ARB *info, const VS_ARB_FLOW *flow)
 {
     VS s;
     unsigned int k, fog = key & VS_ARB_FOG, table = (key >> VS_ARB_TABLE_SHIFT) & 3;
@@ -600,6 +800,11 @@ unsigned int vs_to_arb(const unsigned int *code, unsigned int codeWords, const u
     s.o.overflow = 0;
     s.info = info;
     s.scratch = 0;
+    s.flow = flow;
+    s.defb_mask = s.defb_val = s.defi_mask = 0;
+    s.frames = 0;
+    for (k = 0; k < 16; k++)
+        s.label[k] = 0;
     if (!codeWords || (code[0] != 0xFFFE0100u && code[0] != 0xFFFE0101u && code[0] != 0xFFFE0200u))
         return fail(&s, VS_ARB_VERSION, codeWords ? code[0] : 0);
     s.version = (code[0] >> 8) & 0xFF;

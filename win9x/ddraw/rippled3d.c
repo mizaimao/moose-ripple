@@ -1240,7 +1240,8 @@ int d3d_surface_format_ok(LPDDSURFACEDESC desc)
 #define MAX_VS 320                      /* Direct3D 8 and 9 vertex shaders a context keeps: the
                                            runtime's, and the pairs of the Direct3D 9 interface
                                            (D9_PAIRS) */
-#define VS_VARIANTS 4                   /* programs a vertex shader keeps (fog) */
+#define VS_VARIANTS 8                   /* programs a vertex shader keeps (fog; the values of the
+                                           boolean and integer constants its flow control read) */
 #define MAX_LIGHTS 128                  /* lights kept, by slot (light_slot: Direct3D's indices may be
                                            any number) */
 
@@ -1252,7 +1253,11 @@ struct vs8 {
     int failed;                         /* couldn't be translated: its draws are skipped */
     VS_ARB info;
     DWORD nvar;
-    struct { DWORD key; GLuint prog; } var[VS_VARIANTS];
+    struct {
+        DWORD key;
+        GLuint prog;
+        DWORD bools_read, bools, ints_read, ints[16][3];    /* static flow control: written for these */
+    } var[VS_VARIANTS];
 };
 #define VP_CACHE 16                     /* vertex programs a context keeps */
 #define TNL_DIRTY_XF    1               /* world, view, projection, viewport */
@@ -4066,6 +4071,19 @@ static void vs_delete(RCTX *c, DWORD handle)
 }
 
 /* The program for s with fog key key, made when first needed; 0 if it can't be made. */
+/* A program of the shader was written for the values the flow control constants have now. */
+static int vs_flow_same(const RCTX *c, const struct vs8 *s, DWORD i)
+{
+    DWORD k;
+    if ((c->vs_bool & s->var[i].bools_read) != s->var[i].bools)
+        return 0;
+    for (k = 0; s->var[i].ints_read && k < 16; k++)
+        if ((s->var[i].ints_read & (1UL << k)) &&
+            memcmp(c->vs_int[k], s->var[i].ints[k], sizeof s->var[i].ints[k]))
+            return 0;
+    return 1;
+}
+
 static GLuint vs_program(RCTX *c, struct vs8 *s, DWORD key)
 {
     GLF *gl = gl_of(c);
@@ -4073,9 +4091,10 @@ static GLuint vs_program(RCTX *c, struct vs8 *s, DWORD key)
     char *text;
     unsigned int n;
     GLuint prog = 0;
+    VS_ARB_FLOW flow;
 
     for (i = 0; i < s->nvar; i++)
-        if (s->var[i].key == key)
+        if (s->var[i].key == key && vs_flow_same(c, s, i))
             return s->var[i].prog;
     if (s->failed)
         return 0;
@@ -4088,8 +4107,10 @@ static GLuint vs_program(RCTX *c, struct vs8 *s, DWORD key)
         s->nvar--;
     }
     text = (char *)alloc(VS_ARB_TEXT_BYTES);
+    flow.bools = c->vs_bool;
+    memcpy(flow.ints, c->vs_int, sizeof flow.ints);
     n = text ? vs_to_arb((const unsigned int *)s->code, s->ncode, (const unsigned int *)s->decl,
-                         s->ndecl, key, text, VS_ARB_TEXT_BYTES, &s->info) : 0;
+                         s->ndecl, key, text, VS_ARB_TEXT_BYTES, &s->info, &flow) : 0;
     if (!n) {
         tracef("rd3d: vertex shader %lx not translated: reason %lu, detail %lx\r\n", s->handle,
                (DWORD)s->info.reason, (DWORD)s->info.detail);
@@ -4121,6 +4142,11 @@ static GLuint vs_program(RCTX *c, struct vs8 *s, DWORD key)
             i = s->nvar++;
             s->var[i].key = key;
             s->var[i].prog = prog;
+            s->var[i].bools_read = s->info.flow_bools;
+            s->var[i].bools = c->vs_bool & s->info.flow_bools;
+            s->var[i].ints_read = s->info.flow_ints;
+            for (n = 0; n < 16; n++)
+                memcpy(s->var[i].ints[n], c->vs_int[n], sizeof s->var[i].ints[n]);
         }
     }
     release(text);
@@ -6630,7 +6656,7 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
         case RbDp2SetPixelShaderConstI:
         case RbDp2SetVertexShaderConstB:
         case RbDp2SetPixelShaderConstB: {
-            /* kept for the vertex shaders (no flow control reads them yet); the pixel shaders'
+            /* kept for the vertex shaders' static flow control (vs_program); the pixel shaders'
                are stepped over */
             DWORD per = k->bCommand == RbDp2SetVertexShaderConstI ||
                         k->bCommand == RbDp2SetPixelShaderConstI ? 16 : 4, j;
@@ -7037,8 +7063,8 @@ static void d8_caps(RB_D3DCAPS8 *c)
 /* D3DCAPS9 for a DirectX 9 runtime on the Direct3D 9 interface: the Direct3D 8 record with what
    that interface adds (the scissor test, UBYTE4 vertex data), and the DirectX 9 part: stream
    offsets, which the runtime requires of such a driver, one render target, blits by the
-   nearest pixel, and the shader model 2 details (the minimums of version 2.0, without flow
-   control in vertex shaders, which the translator lacks). */
+   nearest pixel, and the shader model 2 details (the minimums of version 2.0, which the
+   translators meet). */
 static void d9_caps(RB_D3DCAPS9 *c)
 {
     memset(c, 0, sizeof *c);
@@ -7061,7 +7087,7 @@ static void d9_caps(RB_D3DCAPS9 *c)
         c->declTypes = RB_D3DDTCAPS_UBYTE4;
         c->vs20NumTemps = 12;
         c->vs20StaticFlowControlDepth = 1;  /* version 2.0's minimum: with 0 the runtime refuses
-                                               the device (vs_arb.c has no flow control yet) */
+                                               the device */
         c->maxVShaderInstructionsExecuted = 65535;
     }
     if (c->caps8.pixelShaderVersion >= 0xFFFF0200UL) {
