@@ -2222,6 +2222,7 @@ static void rt_cases(int only)
     static const DWORD ps1[] = { PSV(1), OTex, DST(RT, 0), OMov, DST(RR, 0), SRC(RT, 0), PSEND };
     IDirect3DTexture9 *texture = NULL;
     IDirect3DSurface9 *surface = NULL, *back = NULL;
+    D3DCAPS9 dc;                        /* declared here: Visual C++ 6 (the Windows 9x toolchain) is C89 */
     TLVERTEX half[6];
     TV v[4] = { { 0, 0, 0.5f, 1, 0xffffffff, 0, 0 }, { Side, 0, 0.5f, 1, 0xffffffff, 1, 0 },
                 { 0, Side, 0.5f, 1, 0xffffffff, 0, 1 }, { Side, Side, 0.5f, 1, 0xffffffff, 1, 1 } };
@@ -2314,7 +2315,6 @@ static void rt_cases(int only)
     }
     /* 59: StretchRect of the whole back buffer (red left, green right) into the 64x64 texture with
      * linear filtering, then the texture drawn over the back buffer. */
-    D3DCAPS9 dc;
     if (FAILED(IDirect3DDevice9_GetDeviceCaps(device, &dc)) || (~dc.StretchRectFilterCaps & (D3DPTFILTERCAPS_MINFLINEAR | D3DPTFILTERCAPS_MAGFLINEAR)))
         printf("D9PIX linear StretchRect not offered\n");
     else if (!only || only == 59) {
