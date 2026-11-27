@@ -22,6 +22,11 @@ counts() {
         printf '%s\t%s\n' "${n:-0}" "$f"
     done
 }
+# Mesa's own error lines (GL errors it raised), summed over its logs: a call Apple's GL takes
+# and Mesa refuses shows here first. Reported, not failed on: programs make real GL errors too.
+mesa_errors() {
+    cat /mesa-*.log 2>/dev/null | grep -c "^Mesa: error"
+}
 kext_errors() {
     sudo -n dmesg 2>/dev/null | grep -i "ripple" | grep -i -c "fail\|timed out\|retired\|refused\|error"
 }
@@ -30,6 +35,7 @@ case $what in
 start)
     counts > $d/$label.skips
     kext_errors > $d/$label.kext
+    mesa_errors > $d/$label.mesa
     touch $d/$label.start
     ;;
 end)
@@ -40,9 +46,11 @@ end)
         $d/$label.skips $d/$label.skips-end 2> $d/$label.skips-by-log)
     kext=$(( $(kext_errors) - $(cat $d/$label.kext) ))
     [ $kext -lt 0 ] && kext=0                    # the kernel log wrapped
+    mesa=$(( $(mesa_errors) - $(cat $d/$label.mesa 2>/dev/null || echo 0) ))
+    [ $mesa -lt 0 ] && mesa=0
     verdict=PASS
     [ "$skips" -gt 0 ] || [ "$kext" -gt 0 ] && verdict=FAIL
-    echo "checks $label: driver skips $skips, kext errors $kext: $verdict"
+    echo "checks $label: driver skips $skips, kext errors $kext: $verdict (Mesa GL errors $mesa, not judged)"
     if [ "$skips" -gt 0 ]; then
         while IFS='	' read -r n f; do
             echo "  $n in $(basename "$f"): $(grep "^skips: " "$f" | tail -1 | cut -c1-300)"

@@ -360,10 +360,13 @@ ripple_cgl_trace_pixels(GLsizei w, GLsizei h, GLenum format, GLenum type, const 
  * Hints Apple's GL accepts and Mesa refuses with GL_INVALID_ENUM: client storage, texture
  * storage hints, transform hint. WindowServer sets them on every texture and checks
  * glGetError, so they are taken here as no-ops (Mesa copies texture data anyway); everything
- * else goes on to Mesa. */
+ * else goes on to Mesa. Also GL_NV_multisample_filter_hint's hint, which Apple's GL takes on
+ * every renderer: the iTunes visualizer sets it, finds the error from Mesa's refusal at its next
+ * glGetError and gives up, leaving the view black (issue 304). */
 #define GL_UNPACK_CLIENT_STORAGE_APPLE   0x85B2
 #define GL_TEXTURE_STORAGE_HINT_APPLE    0x85BC
 #define GL_TRANSFORM_HINT_APPLE          0x85B1
+#define GL_MULTISAMPLE_FILTER_HINT_NV    0x8534
 
 void GLAPIENTRY
 ripple_cgl_tex_parameteri(void *rend, GLenum target, GLenum pname, GLint param)
@@ -404,7 +407,7 @@ ripple_cgl_tex_parameterfv(void *rend, GLenum target, GLenum pname, const GLfloa
 void GLAPIENTRY
 ripple_cgl_hint(void *rend, GLenum target, GLenum mode)
 {
-   if (target == GL_TRANSFORM_HINT_APPLE)
+   if (target == GL_TRANSFORM_HINT_APPLE || target == GL_MULTISAMPLE_FILTER_HINT_NV)
       return;
    RIPPLE_CGL_ENTER(rend);
    CALL_Hint(GET_DISPATCH(), (target, mode));
