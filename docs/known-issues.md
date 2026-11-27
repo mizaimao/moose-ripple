@@ -94,6 +94,16 @@ nothing visible breaks. Seen in `/Library/Logs/DiagnosticReports` since VM 210's
 (2026-11-10 12:34) under both Chameleon and OpenCore, so it has nothing to do with our kexts.
 Likely the VM's missing or odd power-source (battery/UPS) information. Not investigated.
 
+**Worse on another host (2026-11-26).** A copy of VM 210's disk on a second Intel host (QEMU
+11.1, virglrenderer 1.3.0, q35, QEMU's user-mode network) had `configd` crash every ten seconds
+for as long as it ran (launchd's messages in `system.log`; the crash reports there were not
+read). What it did: the login waited at the blue screen for about a minute (`loginwindow`
+started at 23:43:25 and reached the desktop at 23:44:20), `loginwindow` itself crashed once on
+the way, the network got its address only after the link was switched off and on from QEMU's
+monitor, and later lost it for good. The rig's copy of the same disk still sees only a few
+crashes per boot. Why that host differs is not known yet; moving the PowerManagement plugin
+aside would be a test, not a fix, and has not been done.
+
 ## KI-4: 9600 GT passthrough VM: occasional hang at boot, host logs `irq 16: nobody cared`
 
 GitHub issue: [#4](https://github.com/mizaimao/moose-ripple/issues/4)
