@@ -1615,3 +1615,41 @@ What a version for the tree needs, which the trial does not have:
 - The upload range goes from Mesa's upload function to the virgl driver through two plain
   functions and a fixed table of 32 buffers. That has to become a proper part of the driver.
 - A way to choose it: by program at first (the environment variable), not for WindowServer.
+
+### Real Racing 2: the slow intro, the logo wait and the sound (2026-11-26, issue 255)
+
+Reported in testing: in UTM the game's intro video plays at about 0.4 frames a second, the
+game then sits on its logo for a long time, and the game makes no sound although the intro
+has sound. Measured with the drivers of release 0.6.0, the second GL thread off and on.
+
+**The intro** is `intro.mp4` in the game, played through QTKit; Apple's H.264 decoder runs in
+the QTKitServer process. In UTM on an M1 Max QTKitServer uses 120 to 150% of the emulated
+processors for the whole video and the 1280x720 frames reach the screen 0.25 to 6 times a
+second; the game itself uses 7 to 20%, and 0.5% of its samples are in our driver. On the
+Proxmox host the video plays at a steady 30 frames a second (the movie's rate) with QTKitServer
+at 30 to 45% of a processor. The second GL thread makes no difference. Not ours: decoding the
+movie on an emulated processor.
+
+**The logo wait** after the intro: 80 s in UTM at the guest's fast speed level (108 to 109 s at
+its slow one), 10 to 12 s on the Proxmox host. The game builds its menus meanwhile: its draw
+thread is in `FrontEnd2::MainMenuManager`, walking its compressed resource archive for every
+menu image (`system_GetDirListingFromResArchive`, `unzGoToNextFile`), then loading the menu's
+3D scene. In UTM 2.6% of those samples were in our driver. On the Proxmox host, in the
+menu-scene part, 19% were: Mesa compressing the game's textures to DXT5 on the guest's
+processor, because the game uploads 49 textures (439 with mipmap levels) as
+`GL_COMPRESSED_RGBA`, which lets the driver choose the format, and Mesa chooses DXT where the
+host has S3TC. Storing them uncompressed instead (branch `sl-generic-compressed`, 97 MB in place
+of 24) was tried and is not kept: on the Proxmox host the menu came after 63.9 and 63.9 s
+before and 64.0 and 64.5 s after (the game's processor time went from 13.2 and 12.9 s to 12.3
+and 12.5 s, so the wait is not bound by that work), and in UTM nothing changes (109 s before,
+108 after: that host has no S3TC, and Mesa stored the textures uncompressed already). Apple's
+software renderer, for comparison, picks DXT3 for the same request.
+
+**The sound.** The game's own audio settings are on (music 6, effects 4). It plays through
+FMOD (`libfmodex.dylib` in its bundle) into CoreAudio, on the same QEMU USB audio device the
+intro's sound uses. A trace of the game's CoreAudio output buffers (`HP_IOProc::Call`, its list
+from `HP_IOProc::RefreshBufferList`), checked first on `say` (sound in 426 of 427 buffers),
+found sound in 874 of 874 buffers at the menu and 861 of 862 in a race, the loudest samples as
+loud as `say`'s or louder. So the guest hands the game's sound to its audio device; where it
+goes after that is UTM's USB audio path, which can't be seen from inside the guest. Our driver
+is not on that path. The Proxmox host's VM has no audio device.
