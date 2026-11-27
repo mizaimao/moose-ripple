@@ -222,7 +222,7 @@ static int dest(VS *s, unsigned int t, STR *b, int *sat, unsigned int *mask)
     case RegRastOut:
         if (num == 0) put(b, "oPos");
         else if (num == 1) put(b, "oFog");
-        else if (num == 2) put(b, "result.pointsize");
+        else if (num == 2) { put(b, "result.pointsize"); s->info->psize = 1; }
         else return fail(s, VS_ARB_REGISTER, t);
         break;
     case RegAttrOut:
@@ -515,24 +515,28 @@ static int walk(VS *s, const unsigned int *tok, unsigned int count, int pass)
     return fail(s, VS_ARB_TRUNCATED, count);
 }
 
-/* The Direct3D 8 declaration: one stream, its registers and skips; constants (CONSTMEM) are
-   the runtime's to load. */
+/* The Direct3D 8 declaration: each stream's registers and skips; constants (CONSTMEM) are the
+   runtime's to load. */
 static int declaration(VS *s, const unsigned int *decl, unsigned int count)
 {
     static const unsigned char bytes[8] = { 4, 8, 12, 16, 4, 4, 4, 8 };
-    unsigned int i, offset = 0, streams = 0;
+    unsigned int i, offset = 0, stream = 0;
     for (i = 0; i < count; i++) {
         unsigned int t = decl[i];
         if (t == 0xFFFFFFFFu) {
-            s->info->stride = offset;
+            if (!stream)
+                s->info->stride = offset;
             return 1;
         }
         switch (t >> 29) {
         case 0:                         /* NOP */
             break;
-        case 1:                         /* STREAM */
-            if (streams++ || (t & 0x0FFFFFFFu))
-                return fail(s, VS_ARB_DECLARATION, t);     /* one stream, stream 0 */
+        case 1:                         /* STREAM: its number; not the tessellator's */
+            if ((t & 0x10000000u) || (t & 0x0FFFFFFFu) >= VS_ARB_STREAMS)
+                return fail(s, VS_ARB_DECLARATION, t);
+            if (!stream)
+                s->info->stride = offset;   /* what stream 0 laid out so far */
+            stream = t & 0x0FFFFFFFu;
             offset = 0;
             break;
         case 2:                         /* STREAMDATA */
@@ -546,6 +550,7 @@ static int declaration(VS *s, const unsigned int *decl, unsigned int count)
                 s->info->inputs |= 1u << reg;
                 s->info->type[reg] = (unsigned char)type;
                 s->info->offset[reg] = (unsigned char)offset;
+                s->info->stream[reg] = (unsigned char)stream;
                 offset += bytes[type];
             }
             break;
@@ -557,6 +562,25 @@ static int declaration(VS *s, const unsigned int *decl, unsigned int count)
         }
     }
     return fail(s, VS_ARB_DECLARATION, count);
+}
+
+/* A declaration that came without code: the fixed-function pipeline reads its vertices through
+   it (Direct3D 8's way to more than one stream). Its layout into info; 0 if it can't be read. */
+int vs_declared(const unsigned int *decl, unsigned int declWords, VS_ARB *info)
+{
+    VS s;
+    unsigned int k;
+    char *z = (char *)info;
+
+    for (k = 0; k < sizeof *info; k++)
+        z[k] = 0;
+    s.o.p = 0;
+    s.o.n = s.o.size = 0;
+    s.o.overflow = 0;
+    s.info = info;
+    s.version = 0;
+    s.scratch = 0;
+    return declaration(&s, decl, declWords);
 }
 
 unsigned int vs_to_arb(const unsigned int *code, unsigned int codeWords, const unsigned int *decl,

@@ -1060,6 +1060,58 @@ the texel size from the format. Since then the boat and jetty are shaded dark gr
 scene and the water shows its ripples; whether their flat look is right needs a reference
 picture.
 
+### What the current pixel tests found (2026-11-26, evening)
+
+`d8pixels` and `d9pixels` had grown many cases on the Windows 2000/XP side since the copies used
+for 0.6.0 were built. Rebuilt for Windows 98 (below) and run on the Intel host's VM 230 with
+0.6.0 plus the flip-chain change, Direct3D 9 passed 57 cases and failed 10, and Direct3D 8
+failed one of 27. What was wrong, in the order it was fixed:
+
+| Case | What the program saw | Cause | Now |
+|---|---|---|---|
+| `luminance` | L8 and A8L8 not offered | no such formats | L8, A8L8 and A8 as OpenGL's luminance and alpha formats, which sample the way Direct3D does |
+| `ps_unbound_stage` (Direct3D 8) | white from a stage without a texture | the fixed-function stand-in (white) was bound under pixel shaders too | opaque black under a pixel shader |
+| `colorwrite` | all channels written | `D3DRS_COLORWRITEENABLE` ignored | `glColorMask` for draws; a clear and the upload of a CPU-written page write every channel |
+| `points`, `lines_points`, `program_point` | no points at all | OpenGL's mode for points is 0, and the draw path took 0 for an unknown primitive type | point lists drawn; `D3DRS_POINTSIZE` between its minimum and maximum, point sprites, a shader's `oPts`, sizes scaled by distance; `MaxPointSize` 64 |
+| `texture2048`, `rt2048` | white, and a refused render target | DirectDraw refuses a video memory surface wider than the display mode unless the driver has `DDCAPS2_WIDESURFACES`; a managed texture then gets no video memory copy and is drawn as if no texture were set | the capability is set (textures live in the linear system heap, which has no width). The same hit a 1024 wide texture at 800x600 |
+| `stages8` | white | the caps said eight simultaneous fixed-function textures with a Direct3D 9 runtime; four are drawn | eight blend stages (pixel shader 2.0 needs their sampler states) and four simultaneous textures, as cards of the time reported |
+| `cube_rt` | the last face's colour on +X, the others black | a cube map's faces and a texture's lower mipmap levels have surface handles of their own; only the top handle was known, so `SETRENDERTARGET` for another face found nothing | the copies of the records are entered under those handles; such a target is read back and its texture uploaded again when used |
+| `vs2_streams`, `ff_streams` | one vertex stream offered | only stream 0 was read | streams 1 to 15 with hardware vertex processing: a vertex shader's inputs, and the fixed-function attributes of a declaration that comes without shader code, each from the vertex buffer of its stream at the same vertex; `MaxStreams` 16 |
+| `index32` | 16-bit indices only | index buffers of 32-bit indices were refused | drawn; turned into 16-bit indices where a draw's range fits them |
+| `ff_streams`, only in a full run | nothing drawn | the runtime gives a freed vertex buffer's handle to the next one, and the heap gives it the freed block: same handle, same address, and after one fill the same count of writes, so the old buffer's contents stayed on the GPU | a buffer announced again under a known handle is uploaded again |
+
+With those: Direct3D 9 71 pass and 2 fail, Direct3D 8 28 of 28. The totals grew because cases
+that were skipped as not offered run now, and because the tests gained cases on the way:
+`static_indexed`, `scaled_point` and `ff_streams` in `d9pixels`, `ff_streams` in `d8pixels`,
+and two from the Windows 2000/XP side (`vs2_def_first`, `eviction_in_scene`), which pass here
+as they came.
+Still failing: the caps lack the immediate presentation interval (the runtime
+drops it from what the driver reports; not understood yet), and the `vs1_inputs` declaration.
+Not offered, and next: user clip planes, the scissor test, L16, bump environment mapping in the
+Direct3D 9 caps, vertex shader flow control, linear StretchRect. Not done for points: sizes
+carried in the vertex. Not read from a declaration without code: blend weights and indices,
+the point size and the tweening inputs.
+
+The last row is a fault no single case shows: `ff_streams` passes when run alone (`d9pixels ps=80`) and
+failed after the cases before it had made and freed their buffers. A case that fails only in
+the full run points at state kept from an earlier case.
+
+**The pixel tests alone are not enough.** One of these commits put braces around the indexed
+branch of each draw path and kept deciding "indexed" by the index pointer. For indices in a GL
+buffer object that pointer is a byte offset, 0 for a draw from the buffer's start; such draws
+had only been made because the unbraced `glDrawElements` ran after every draw. Both pixel tests
+still passed, while 3DMark 2001 SE lost most of its static geometry (Car Chase black but for
+its HUD) and reported a score half as high again: 45745. The captures of that run showed it at
+once. "Indexed" goes by the index count now, `d9pixels` has a case for such a draw
+(`static_indexed`), and a benchmark number without a look at its frames counts for nothing.
+
+**Building and running the tests for Windows 98.** `d8pixels.c` and `d9pixels.c` (in
+`win2k/tools`) build with Visual C++ 6 and the DirectX 8 and 9 headers, `d3d9.dll` loaded at run
+time: `cl /nologo /W3 /O2 /MT d9pixels.c /link /SUBSYSTEM:CONSOLE user32.lib gdi32.lib`. Give
+every run its own output file. DirectDraw's helper process keeps the first redirected output
+file of a boot open (see "The output file held after a test run" below); a later run into the
+same name fails without a word, and reading the file shows the old run's results.
+
 ### 3DMark 2001 SE (2026-11-26, rig VM 230)
 
 Windows 98 SE with DirectX 9.0c, the Direct3D 8 interface on, 1024x768 32-bit, the runtime's

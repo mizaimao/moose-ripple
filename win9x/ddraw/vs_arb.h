@@ -11,6 +11,7 @@
 #define VS_ARB_H
 
 #define VS_ARB_INPUTS 16
+#define VS_ARB_STREAMS 16                    /* vertex streams a declaration may read */
 #define VS_ARB_CONSTANTS 256
 #define VS_ARB_DEFS 64
 #define VS_ARB_TEXT_BYTES 32768
@@ -36,7 +37,9 @@ typedef struct {
     unsigned int inputs;                    /* bit n: vn comes from the stream */
     unsigned char type[VS_ARB_INPUTS];      /* its declaration type */
     unsigned char offset[VS_ARB_INPUTS];    /* its bytes into the vertex */
+    unsigned char stream[VS_ARB_INPUTS];    /* the stream it comes from */
     unsigned int stride;                    /* the bytes the declaration lays out */
+    unsigned int psize;                     /* it writes the point size (oPts) */
     unsigned int defs;                      /* def constants, loaded over c# when it draws */
     struct { unsigned short reg; float v[4]; } def[VS_ARB_DEFS];
     unsigned int reason, detail;            /* why it was not translated (VS_ARB_*) */
@@ -50,5 +53,9 @@ enum { VS_ARB_OK, VS_ARB_VERSION, VS_ARB_OPCODE, VS_ARB_REGISTER, VS_ARB_DECLARA
 unsigned int vs_to_arb(const unsigned int *code, unsigned int codeWords, const unsigned int *decl,
                        unsigned int declWords, unsigned int key, char *out, unsigned int size,
                        VS_ARB *info);
+
+/* The layout of a declaration that came without code (the fixed-function pipeline through a
+   declaration) into info; 0 if it can't be read. */
+int vs_declared(const unsigned int *decl, unsigned int declWords, VS_ARB *info);
 
 #endif

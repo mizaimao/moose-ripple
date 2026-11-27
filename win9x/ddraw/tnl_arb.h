@@ -31,7 +31,11 @@
                                difference) */
 #define TNL_ENV_TEX     (TNL_ENV_LIGHT + TNL_LIGHTS * TNL_LIGHT_SIZE)  /* 4 a stage: its texture
                                                                           matrix, columns */
-#define TNL_ENV_COUNT   (TNL_ENV_TEX + 4 * TNL_STAGES)
+#define TNL_ENV_POINT   (TNL_ENV_TEX + 4 * TNL_STAGES)  /* 2, for points scaled by distance: the size
+                                                          at distance one in pixels, its minimum and
+                                                          maximum, a tiny number; then the scale's
+                                                          A, B, C */
+#define TNL_ENV_COUNT   (TNL_ENV_POINT + 2)
 
 /* light kinds, as Direct3D numbers them (0: no light in that place) */
 #define TNL_POINT       1
@@ -73,6 +77,8 @@ typedef struct {
     unsigned char tex[TNL_STAGES];          /* each output's source, see above */
     unsigned char tex_size[TNL_STAGES];     /* the components of a vertex's set */
     unsigned char xform[TNL_STAGES];        /* D3DTTFF_COUNTn, | TNL_PROJECTED; 0 none */
+    unsigned char point_scale;              /* points: the size scaled by the distance from the eye
+                                               (D3DRS_POINTSCALEENABLE), written by the program */
 } TNL_KEY;
 
 #define TNL_TEXT_BYTES 12288

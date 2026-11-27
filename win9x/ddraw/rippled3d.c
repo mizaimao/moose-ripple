@@ -260,6 +260,11 @@ static RDD_SHARED *shared;
 #define GL_RGBA8_SNORM                  0x8F97
 #define GL_TEXTURE_SWIZZLE_B            0x8E44
 #define GL_FIRST_VERTEX_CONVENTION      0x8E4D
+#define GL_POINT_SPRITE                  0x8861
+#define GL_COORD_REPLACE                 0x8862
+#define GL_POINT_SPRITE_COORD_ORIGIN     0x8CA0
+#define GL_LOWER_LEFT                    0x8CA1
+#define GL_VERTEX_PROGRAM_POINT_SIZE     0x8642
 #define GL_FRAMEBUFFER                  0x8D40
 #define GL_RENDERBUFFER                 0x8D41
 #define GL_COLOR_ATTACHMENT0            0x8CE0
@@ -385,6 +390,9 @@ typedef struct {
     void (APIENTRY *DeleteBuffersARB)(GLsizei, const GLuint *);
     void (APIENTRY *BindBufferARB)(GLenum, GLuint);
     void (APIENTRY *BufferDataARB)(GLenum, int, const GLvoid *, GLenum);
+    /* points larger than a pixel and point sprites (optional, point_state) */
+    void (APIENTRY *PointSize)(GLfloat);
+    void (APIENTRY *PointParameterfv)(GLenum, const GLfloat *);
 } GLF;
 
 #define GL_CORE_COUNT 53            /* entries up to DrvGetProcAddress */
@@ -415,6 +423,7 @@ static const char *const gl_names[] = {
     "glVertexAttribPointerARB", "glEnableVertexAttribArrayARB", "glDisableVertexAttribArrayARB",
     "glCopyTexSubImage2D",
     "glGenBuffersARB", "glDeleteBuffersARB", "glBindBufferARB", "glBufferDataARB",
+    "glPointSize", "glPointParameterfv",
 };
 #define GL_ALL_COUNT (sizeof gl_names / sizeof gl_names[0])
 typedef char c_gl_names[sizeof(GLF) == GL_ALL_COUNT * sizeof(PROC) ? 1 : -1];
@@ -802,8 +811,15 @@ static void buffer_trash(DDLOCAL *d, struct buf8 *b)
    fixed if the program means to write it once. */
 static void buffer_set(DDLOCAL *d, DWORD h, FLATPTR mem, DWORD size, int ours, int fixed)
 {
-    if (h < d->nbuf && d->buf[h].name && d->buf[h].mem != mem)
-        buffer_trash(d, &d->buf[h]);
+    if (h < d->nbuf && d->buf[h].name) {
+        if (d->buf[h].mem != mem)
+            buffer_trash(d, &d->buf[h]);
+        else                            /* The same handle at the same address: it may be a new buffer.
+                                           The runtime gives a freed handle out again without a
+                                           word, and the heap the freed block; with the same count of
+                                           writes the old contents stayed on the GPU. Upload anew. */
+            d->buf[h].writes = 0xFFFFFFFFUL;
+    }
     if (h >= d->nbuf) {
         DWORD n = h + 64 > d->nbuf * 2 ? h + 64 : d->nbuf * 2;
         struct buf8 *a = (struct buf8 *)alloc(n * sizeof(*a));
@@ -949,6 +965,25 @@ static int is_volume(LPDDRAWI_DDRAWSURFACE_LCL s)
            ((const struct shadow *)s)->faces == 1;
 }
 
+/* A Direct3D 8 texture's cube faces and mipmap levels below the top have surface handles of
+   their own: a program renders into one by that handle (SETRENDERTARGET), and without an entry
+   the render target stayed what it was (six cube faces all drawn into the first). set: enter
+   the copies' records under those handles; else take out the entries that point into sh. */
+static void sub_handles(DDLOCAL *d, DWORD top, struct shadow *sh, int set)
+{
+    DWORD i, n = sh ? sh[0].faces * sh[0].levels : 0;
+
+    for (i = 1; i < n; i++) {
+        DWORD h = sh[i].m.dwSurfaceHandle;
+        if (!h || h == top)
+            continue;
+        if (set)
+            handle_set(d, h, &sh[i].l);
+        else if (h < d->n && d->surf[h] == &sh[i].l)
+            d->surf[h] = NULL;
+    }
+}
+
 static void shadow_set(DDLOCAL *d, DWORD h, struct shadow *sh)
 {
     if (h >= d->nshadow) {
@@ -965,8 +1000,10 @@ static void shadow_set(DDLOCAL *d, DWORD h, struct shadow *sh)
         d->shadow = a;
         d->nshadow = n;
     }
+    sub_handles(d, h, d->shadow[h], 0);
     release(d->shadow[h]);
     d->shadow[h] = sh;
+    sub_handles(d, h, sh, 1);
 }
 
 static void shadows_free(DDLOCAL *d)
@@ -1085,6 +1122,31 @@ static PIXFMT gl_format(const DDPIXELFORMAT *pf)
            Q8W8V8U8 textures, which DirectDraw then can't size: CreateSurface does) */
         case 60: f.bytes = 2; f.format = GL_RG; f.type = GL_BYTE; f.internal = GL_RG8_SNORM; f.bump = 1; break;
         case 63: f.bytes = 4; f.format = GL_RGBA; f.type = GL_BYTE; f.internal = GL_RGBA8_SNORM; break;
+        /* and, should it name these the same way: A8, L8, A8L8 (below) */
+        case 28: f.bytes = 1; f.format = GL_ALPHA; f.type = GL_UNSIGNED_BYTE; f.internal = GL_ALPHA8; break;
+        case 50: f.bytes = 1; f.format = GL_LUMINANCE; f.type = GL_UNSIGNED_BYTE; f.internal = GL_LUMINANCE8; break;
+        case 51: f.bytes = 2; f.format = GL_LUMINANCE_ALPHA; f.type = GL_UNSIGNED_BYTE;
+                 f.internal = GL_LUMINANCE8_ALPHA8; break;
+        }
+        return f;
+    }
+    if ((pf->dwFlags & DDPF_LUMINANCE) && d8_on) {
+        /* Direct3D 8 and 9's L8 and A8L8 (lightmaps, fonts, detail textures): Direct3D samples
+           them as (L, L, L, 1) and (L, L, L, A), which is what OpenGL's luminance formats give.
+           A8L8 has the luminance in the low byte, so in memory it is L then A, OpenGL's order. */
+        if (pf->dwLuminanceBitCount == 8 && !alpha && pf->dwLuminanceBitMask == 0xFF) {
+            f.bytes = 1; f.format = GL_LUMINANCE; f.type = GL_UNSIGNED_BYTE; f.internal = GL_LUMINANCE8;
+        } else if (pf->dwLuminanceBitCount == 16 && alpha && pf->dwLuminanceBitMask == 0xFF &&
+                   pf->dwLuminanceAlphaBitMask == 0xFF00) {
+            f.bytes = 2; f.format = GL_LUMINANCE_ALPHA; f.type = GL_UNSIGNED_BYTE;
+            f.internal = GL_LUMINANCE8_ALPHA8;
+        }
+        return f;
+    }
+    if ((pf->dwFlags & DDPF_ALPHA) && d8_on) {
+        /* A8: (0, 0, 0, A) in both */
+        if (pf->dwAlphaBitDepth == 8) {
+            f.bytes = 1; f.format = GL_ALPHA; f.type = GL_UNSIGNED_BYTE; f.internal = GL_ALPHA8;
         }
         return f;
     }
@@ -1195,6 +1257,7 @@ typedef struct {
     DWORD w, h, fmt;
     DWORD levels;                       /* mipmap levels uploaded (1: the top level only) */
     FLATPTR lmem[MAX_LEVELS];           /* each level's memory (lmem[0] is mem) */
+    FLATPTR fmem[6];                    /* a cube map: each face's top level (fmem[0] is mem), else 0 */
     DWORD stamp;                        /* DirectDraw's contents stamps then (0: none kept) */
     DWORD gpu_gen;                      /* the render-target picture copied in (texture_from_gpu) */
     DWORD scene;                        /* the scene it was uploaded in */
@@ -1235,7 +1298,7 @@ typedef struct {
     DWORD rc;                           /* Mesa's handle (DHGLRC) */
     LPDDRAWI_DIRECTDRAW_LCL ddl;
     LPDDRAWI_DDRAWSURFACE_LCL rt, z;
-    GLuint fbo, white, fog_tex;
+    GLuint fbo, white, black, fog_tex;
     DWORD fb_w, fb_h;
     FLATPTR fb_z;                       /* the z-buffer whose depth is attached (0: none) */
     GPUBUF cb[TARGETS];                 /* the picture of each render target */
@@ -1264,6 +1327,8 @@ typedef struct {
     /* Direct3D 8: the vertex format (SETVERTEXSHADER with an FVF code), stream zero (a buffer
        surface's handle, or the command buffer's own vertices) and the index buffer. */
     DWORD fvf8, stream_handle, stream_stride, index_handle, index_stride;
+    DWORD sx_handle[VS_ARB_STREAMS], sx_stride[VS_ARB_STREAMS];    /* streams 1 and up: their vertex
+                                           buffers (a vertex shader's declaration reads them) */
     int stream_user;
     int dx8;                            /* made by the Direct3D 8 or 9 runtime */
     DWORD skipped8;                     /* Direct3D 8 draws not drawn (see stream_draw) */
@@ -1301,6 +1366,8 @@ typedef struct {
     float zmin, zmax;                   /* the viewport's depth range */
     DWORD tnl_dirty;                    /* TNL_DIRTY_*: program.env to load again */
     int vp_on;                          /* a vertex program draws: OpenGL's viewport is Direct3D's */
+    int sprites_on, psize_on;           /* point sprites; a program's point size (point_state) */
+    int points_now;                     /* the draw is of points (tnl_key: their scaling) */
     GLuint vp_bound;
     struct { TNL_KEY key; GLuint prog; DWORD used; } vp[VP_CACHE];
     DWORD vp_clock;
@@ -1417,7 +1484,8 @@ static void textures_written(FLATPTR mem)
                 continue;
             for (l = 0; l < t->levels && t->lmem[l] != mem; l++)
                 ;
-            if (t->mem == mem || l < t->levels) {
+            if (t->mem == mem || l < t->levels || t->fmem[1] == mem || t->fmem[2] == mem ||
+                t->fmem[3] == mem || t->fmem[4] == mem || t->fmem[5] == mem) {
                 t->dirty = 1;
                 c->stages_dirty = 1;
             }
@@ -1563,10 +1631,14 @@ static void finish_target(RCTX *c)
         c->cur->deferred = 1;
         c->dirty = 0;
     } else if (c->rt && c->cur && (c->rt->ddsCaps.dwCaps & DDSCAPS_TEXTURE) && !c->cur->written &&
-               c->cur->mem == c->rt->lpGbl->fpVidMem && gl_of(c)->CopyTexSubImage2D) {
+               c->cur->mem == c->rt->lpGbl->fpVidMem && gl_of(c)->CopyTexSubImage2D &&
+               cube_face(c->rt) < 0 &&
+               !(c->rt->lpSurfMore && (c->rt->lpSurfMore->ddsCapsEx.dwCaps2 & DDSCAPS2_MIPMAPSUBLEVEL))) {
         /* A texture rendered into: its picture stays on the GPU and goes into the texture there
            when a draw uses it (texture_from_gpu); memory gets it only when the program locks
-           the surface (d3d_surface_access) or a texture blit reads it (gpu_sync). */
+           the surface (d3d_surface_access) or a texture blit reads it (gpu_sync). A cube map's
+           face is read back instead, and the cube map uploaded again when a draw uses it
+           (textures_written): simple, and enough for reflections drawn once a frame. */
         LPDDRAWI_DDRAWSURFACE_GBL g = c->rt->lpGbl;
         GPUBUF *b = c->cur;
         b->deferred = 1;
@@ -1885,6 +1957,8 @@ static void context_free(RCTX *c)
                 gl->DeleteTextures(1, &c->tex[i].name);
         if (c->white)
             gl->DeleteTextures(1, &c->white);
+        if (c->black)
+            gl->DeleteTextures(1, &c->black);
         if (c->fog_tex)
             gl->DeleteTextures(1, &c->fog_tex);
         if (c->read_fbo)
@@ -2020,6 +2094,62 @@ static void apply_stencil(RCTX *c)
     gl->StencilMask(rs[D3DRENDERSTATE_STENCILWRITEMASK]);
 }
 
+#define RS_COLORWRITEENABLE 168         /* Direct3D 8 and 9 */
+#define RS_POINTSIZE 154                /* a float: pixels (Direct3D 8 and 9) */
+#define RS_POINTSIZE_MIN 155
+#define RS_POINTSPRITEENABLE 156
+#define RS_POINTSCALEENABLE 157         /* sizes scaled by the distance from the eye (tnl_arb.c) */
+#define RS_POINTSCALE_A 158             /* then B and C: floats */
+#define RS_POINTSIZE_MAX 166
+#define MAX_POINT_SIZE 64.0f            /* the largest point offered (D3DCAPS8.MaxPointSize) */
+
+/* The channels a draw writes (D3DRS_COLORWRITEENABLE: red 1, green 2, blue 4, alpha 8). A clear
+   and the HAL's own uploads into the target write all of them (all). */
+static void colour_mask(RCTX *c, int all)
+{
+    DWORD m = all ? 15 : c->rs[RS_COLORWRITEENABLE];
+    gl_of(c)->ColorMask((GLboolean)(m & 1), (GLboolean)((m >> 1) & 1), (GLboolean)((m >> 2) & 1),
+                        (GLboolean)((m >> 3) & 1));
+}
+
+/* Before a draw of points (Direct3D 8 and 9): their size in pixels, kept between the minimum and
+   maximum the program set, and point sprites, which stretch each stage's texture over the
+   point with (0, 0) at its top left (OpenGL's lower left: rows are in Direct3D's order, see
+   framebuffer). program_size: the vertex program writes the size itself (a shader's oPts, or
+   the fixed-function program scaling it by distance, tnl_arb.c). Not done: sizes in the
+   vertex; such points get the render state's size. */
+static void point_state(RCTX *c, int program_size)
+{
+    GLF *gl = gl_of(c);
+    float size = *(const float *)&c->rs[RS_POINTSIZE];
+    float lo = *(const float *)&c->rs[RS_POINTSIZE_MIN], hi = *(const float *)&c->rs[RS_POINTSIZE_MAX];
+    int sprites = c->rs[RS_POINTSPRITEENABLE] != 0, u;
+
+    if (!gl->PointSize || !gl->PointParameterfv)
+        return;
+    if (!(hi >= 1.0f) || hi > MAX_POINT_SIZE)
+        hi = MAX_POINT_SIZE;
+    if (size < lo) size = lo;
+    if (size > hi) size = hi;
+    if (!(size >= 1.0f)) size = 1.0f;
+    gl->PointSize(size);
+    if (program_size != c->psize_on) {
+        enable(gl, GL_VERTEX_PROGRAM_POINT_SIZE, program_size);
+        c->psize_on = program_size;
+    }
+    if (sprites != c->sprites_on) {
+        GLfloat origin = (GLfloat)GL_LOWER_LEFT;
+        enable(gl, GL_POINT_SPRITE, sprites);
+        gl->PointParameterfv(GL_POINT_SPRITE_COORD_ORIGIN, &origin);
+        for (u = 0; u < STAGES; u++) {
+            gl->ActiveTexture(GL_TEXTURE0 + u);
+            gl->TexEnvi(GL_POINT_SPRITE, GL_COORD_REPLACE, sprites);
+        }
+        gl->ActiveTexture(GL_TEXTURE0);
+        c->sprites_on = sprites;
+    }
+}
+
 static void render_state(RCTX *c, DWORD state, DWORD v)
 {
     GLF *gl = gl_of(c);
@@ -2050,6 +2180,9 @@ static void render_state(RCTX *c, DWORD state, DWORD v)
         break;
     case D3DRENDERSTATE_COLORKEYENABLE:   /* textures are uploaded with or without their key */
         c->stages_dirty = 1;
+        break;
+    case RS_COLORWRITEENABLE:
+        colour_mask(c, 0);
         break;
     case D3DRENDERSTATE_STENCILENABLE:
     case D3DRENDERSTATE_STENCILFAIL:
@@ -2360,6 +2493,8 @@ static int cube_bind(RCTX *c, DWORD h, int stage, const struct shadow *sh)
         gl->TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAX_LEVEL, levels - 1);
         gl->TexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_SWIZZLE_B, f.bump ? GL_ONE : GL_BLUE);
         t->mem = g0->fpVidMem;
+        for (face = 0; face < 6; face++)   /* a face rendered into marks the cube (textures_written) */
+            t->fmem[face] = sh[face * levels].g.fpVidMem;
         t->w = g0->wWidth;
         t->h = g0->wHeight;
         t->fmt = f.internal;
@@ -2512,6 +2647,7 @@ static int volume_bind(RCTX *c, DWORD h, int stage, const struct shadow *sh)
         gl->PixelStorei(GL_UNPACK_IMAGE_HEIGHT, 0);
         gl->TexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAX_LEVEL, levels - 1);
         t->mem = g0->fpVidMem;
+        memset(t->fmem, 0, sizeof t->fmem);
         t->w = g0->wWidth;
         t->h = g0->wHeight;
         t->fmt = f.internal;
@@ -2590,6 +2726,7 @@ static int texture_from_gpu(RCTX *c, DWORD h, TEXTURE *t, LPDDRAWI_DDRAWSURFACE_
         gl->TexImage2D(GL_TEXTURE_2D, 0, f.internal, w, ht, 0, f.format, f.type, NULL);
         gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
         t->mem = g->fpVidMem;
+        memset(t->fmem, 0, sizeof t->fmem);
         t->w = w;
         t->h = ht;
         t->fmt = fmt;
@@ -2670,6 +2807,7 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
         /* new: storage and contents */
         texture_upload(gl, &f, &pf, lv, levels, 1, keyed);
         t->mem = g->fpVidMem;
+        memset(t->fmem, 0, sizeof t->fmem);
         t->w = g->wWidth;
         t->h = g->wHeight;
         t->fmt = fmt;
@@ -2783,6 +2921,23 @@ static void white_texture(RCTX *c)
     gl->BindTexture(GL_TEXTURE_2D, c->white);
 }
 
+/* What a pixel shader reads from a stage without a texture: opaque black (the fixed-function
+   stages read white there). */
+static void black_texture(RCTX *c)
+{
+    GLF *gl = gl_of(c);
+    static const DWORD black = 0xFF000000;
+
+    if (!c->black) {
+        gl->GenTextures(1, &c->black);
+        gl->BindTexture(GL_TEXTURE_2D, c->black);
+        gl->TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_BGRA, GL_UNSIGNED_BYTE, &black);
+        gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    }
+    gl->BindTexture(GL_TEXTURE_2D, c->black);
+}
+
 /* The fog unit (see apply_fog): colour = previous * f + fog colour * (1 - f), with f the ramp
    texture's alpha at the vertex's coordinate; alpha passes through. Off without fog. */
 static void apply_fog_unit(RCTX *c)
@@ -2879,7 +3034,7 @@ static void apply_stages(RCTX *c)
             if (map && texture_bind(c, map, s))
                 c->bound[s] = map;
             else
-                white_texture(c);
+                black_texture(c);
         }
         gl->ActiveTexture(GL_TEXTURE0);
         apply_alpha_test(c);
@@ -3006,6 +3161,13 @@ typedef struct {
     GLuint vbo;                         /* the buffer object holding them (base is in start's copy), or 0 */
     BYTE *start;
     GLuint ibo;                         /* indices: the buffer object holding them, or 0 */
+    GLenum itype;                       /* their type if not 16-bit ones (GL_UNSIGNED_INT), else 0 */
+    long first_vertex;                  /* the vertex of stream 0 that base is at, for the other
+                                           streams of the draw; -1: not a whole vertex */
+    int pos;                            /* the position's byte offset (0 but for a declaration) */
+    BYTE src[12];                       /* the stream each attribute comes from, 0 but for a
+                                           declaration: position, normal, diffuse, specular,
+                                           texture coordinate sets 0..7 */
 } VERTICES;
 
 /* Bind a buffer object (0: none, for arrays and indices in memory) for vertices or indices. */
@@ -3270,9 +3432,11 @@ static void rt_upload(RCTX *c)
     gl->WindowPos2i(0, 0);              /* row 0 of the memory is the GPU's row 0 (see framebuffer) */
     gl->PixelStorei(GL_UNPACK_ALIGNMENT, 1);
     gl->PixelStorei(GL_UNPACK_ROW_LENGTH, g->lPitch / f.bytes);
+    colour_mask(c, 1);                  /* the memory's picture, every channel */
     gl->DrawPixels(c->fb_w < g->wWidth ? c->fb_w : g->wWidth,
                    c->fb_h < g->wHeight ? c->fb_h : g->wHeight, f.format, f.type,
                    (const GLvoid *)mem);
+    colour_mask(c, 0);
     gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     apply_depth_test(c);
     enable(gl, GL_BLEND, c->rs[D3DRENDERSTATE_ALPHABLENDENABLE]);
@@ -3498,6 +3662,7 @@ static void tnl_key(RCTX *c, const VERTICES *v, TNL_KEY *k)
         if (k->tex[s] && (flags & 7))
             k->xform[s] = (BYTE)((flags & 7) | (flags & D3DTTFF_PROJECTED ? TNL_PROJECTED : 0));
     }
+    k->point_scale = (BYTE)(c->points_now && c->rs[RS_POINTSCALEENABLE]);
 }
 
 /* The program for k: kept ones by their key (VP_CACHE, the least recently used goes), new ones
@@ -3671,6 +3836,19 @@ static void tnl_load(RCTX *c, const TNL_KEY *k)
     if (c->tnl_dirty & TNL_DIRTY_TEX)
         for (i = 0; i < TNL_STAGES; i++)
             env_columns(gl, TNL_ENV_TEX + 4 * i, c->xf_tex[i]);
+    if (k->point_scale) {               /* each such draw: points are few */
+        float lo = *(const float *)&c->rs[RS_POINTSIZE_MIN], hi = *(const float *)&c->rs[RS_POINTSIZE_MAX];
+        if (!(hi >= 1.0f) || hi > MAX_POINT_SIZE)
+            hi = MAX_POINT_SIZE;
+        if (!(lo >= 1.0f))
+            lo = 1.0f;
+        if (lo > hi)
+            lo = hi;
+        env4(gl, TNL_ENV_POINT, (float)(c->vp_w ? c->vp_h : c->fb_h) * *(const float *)&c->rs[RS_POINTSIZE],
+             lo, hi, 1.0e-12f);
+        env4(gl, TNL_ENV_POINT + 1, *(const float *)&c->rs[RS_POINTSCALE_A],
+             *(const float *)&c->rs[RS_POINTSCALE_A + 1], *(const float *)&c->rs[RS_POINTSCALE_A + 2], 0.0f);
+    }
     c->tnl_dirty = 0;
 }
 
@@ -3861,6 +4039,14 @@ static void vs_create(RCTX *c, const RB_DP2_CREATE_VERTEX_SHADER *r)
     s->ndecl = r->declBytes / 4;
     s->ncode = r->codeBytes / 4;
     c->vs[i] = s;
+    if (!s->ncode) {                    /* a declaration alone, for the fixed-function pipeline
+                                           (decl_vertices) */
+        if (!vs_declared((const unsigned int *)s->decl, s->ndecl, &s->info)) {
+            s->failed = 1;
+            dbg("rd3d: a vertex declaration can't be read\r\n");
+        }
+        return;
+    }
     vs_program(c, s, 0);                /* now, so a shader that can't be made says so early */
 }
 
@@ -3945,14 +4131,71 @@ static int vs_begin(RCTX *c)
     return 1;
 }
 
+static GLuint buffer_object(RCTX *c, DWORD h, GLenum target);
+
+/* Where one attribute of a draw lies: stream st's data for vertex first, plus offset, with that
+   stream's buffer object bound (or none: its memory). Stream 0 is v's; the others are the
+   vertex buffers set for streams 1 and up, read at the same vertex. *stride: that stream's. */
+static const BYTE *stream_at(RCTX *c, const VERTICES *v, DWORD first, DWORD st, DWORD offset,
+                             DWORD *stride)
+{
+    DWORD bytes;
+    const BYTE *mem;
+    GLuint vbo;
+
+    if (!st) {
+        *stride = v->stride;
+        return vertex_data(c, v, first) + offset;
+    }
+    mem = buffer_get(c->ddl, c->sx_handle[st], &bytes);
+    vbo = buffer_object(c, c->sx_handle[st], GL_ARRAY_BUFFER_ARB);
+    *stride = c->sx_stride[st];
+    bind_buffer(c, GL_ARRAY_BUFFER_ARB, vbo);
+    tracef("rd3d: stream %lu: buffer %lx stride %lu, object %lu, vertex %ld + %lu, offset %lu\r\n", st,
+           c->sx_handle[st], *stride, (DWORD)vbo, v->first_vertex, first, offset);
+    return (vbo ? (const BYTE *)0 : mem) + ((DWORD)v->first_vertex + first) * *stride + offset;
+}
+
+/* The streams a declaration's fixed-function attributes come from, as bits. */
+static DWORD src_streams(const VERTICES *v)
+{
+    DWORD i, streams = 0;
+    for (i = 0; i < sizeof v->src; i++)
+        streams |= 1UL << v->src[i];
+    return streams;
+}
+
+/* The streams a draw reads besides stream 0 (bit n: stream n) have vertex buffers that reach
+   count vertices from first on (count 0: an indexed draw from buffer objects, range unknown). */
+static int streams_ok(RCTX *c, const VERTICES *v, DWORD first, DWORD count, DWORD streams)
+{
+    DWORD st, bytes;
+
+    for (st = 1; st < VS_ARB_STREAMS; st++) {
+        if (!(streams & (1UL << st)))
+            continue;
+        if (v->first_vertex < 0 || !c->sx_stride[st] || !buffer_get(c->ddl, c->sx_handle[st], &bytes) ||
+            ((DWORD)v->first_vertex + first + count) * c->sx_stride[st] > bytes)
+            return 0;
+    }
+    return 1;
+}
+
 /* The shader's inputs as generic attribute arrays from vertex first on; the conventional
-   arrays off. */
-static void vs_arrays(RCTX *c, const VERTICES *v, DWORD first)
+   arrays off. An input may come from another stream than stream 0 (v): that stream's vertex
+   buffer, from its buffer object or its memory, at the same vertex. 0 if such a stream has no
+   buffer or the draw reaches past its end. */
+static int vs_arrays(RCTX *c, const VERTICES *v, DWORD first, DWORD count)
 {
     GLF *gl = gl_of(c);
     struct vs8 *s = vs_find(c, c->fvf8);
-    const BYTE *b = vertex_data(c, v, first);
-    DWORD n, u;
+    DWORD n, u, streams = 0;
+
+    for (n = 0; s && n < VS_ARB_INPUTS; n++)
+        if (s->info.inputs & (1UL << n))
+            streams |= 1UL << s->info.stream[n];
+    if (!streams_ok(c, v, first, count, streams))
+        return 0;
 
     gl->DisableClientState(GL_VERTEX_ARRAY);
     gl->DisableClientState(GL_COLOR_ARRAY);
@@ -3970,17 +4213,17 @@ static void vs_arrays(RCTX *c, const VERTICES *v, DWORD first)
     for (n = 0; n < VS_ARB_INPUTS; n++) {
         DWORD bit = 1UL << n;
         if (s && (s->info.inputs & bit)) {
-            DWORD type = s->info.type[n];
-            const BYTE *at = b + s->info.offset[n];
+            DWORD type = s->info.type[n], stride;
+            const BYTE *at = stream_at(c, v, first, s->info.stream[n], s->info.offset[n], &stride);
             if (type <= VS_ARB_FLOAT4)
-                gl->VertexAttribPointerARB(n, type + 1, GL_FLOAT, GL_FALSE, v->stride, at);
+                gl->VertexAttribPointerARB(n, type + 1, GL_FLOAT, GL_FALSE, stride, at);
             else if (type == VS_ARB_COLOR)
-                gl->VertexAttribPointerARB(n, 4, GL_UNSIGNED_BYTE, GL_TRUE, v->stride, at);
+                gl->VertexAttribPointerARB(n, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, at);
             else if (type == VS_ARB_UBYTE4)
-                gl->VertexAttribPointerARB(n, 4, GL_UNSIGNED_BYTE, GL_FALSE, v->stride, at);
+                gl->VertexAttribPointerARB(n, 4, GL_UNSIGNED_BYTE, GL_FALSE, stride, at);
             else
                 gl->VertexAttribPointerARB(n, type == VS_ARB_SHORT2 ? 2 : 4, GL_SHORT, GL_FALSE,
-                                           v->stride, at);
+                                           stride, at);
             if (!(c->attribs_on & bit)) {
                 gl->EnableVertexAttribArrayARB(n);
                 c->attribs_on |= bit;
@@ -3990,6 +4233,7 @@ static void vs_arrays(RCTX *c, const VERTICES *v, DWORD first)
             c->attribs_on &= ~bit;
         }
     }
+    return 1;
 }
 
 /* The arrays of untransformed vertices first..first+count: as the program reads them, each set
@@ -3997,28 +4241,32 @@ static void vs_arrays(RCTX *c, const VERTICES *v, DWORD first)
 static void tnl_arrays(RCTX *c, const VERTICES *v, DWORD first)
 {
     GLF *gl = gl_of(c);
-    const BYTE *b = vertex_data(c, v, first);
-    DWORD u;
+    const BYTE *b;
+    DWORD u, stride;
 
     attribs_off(c);
     gl->EnableClientState(GL_VERTEX_ARRAY);
-    gl->VertexPointer(3, GL_FLOAT, v->stride, b);
+    b = stream_at(c, v, first, v->src[0], v->pos, &stride);
+    gl->VertexPointer(3, GL_FLOAT, stride, b);
     if (v->normal >= 0) {
         gl->EnableClientState(GL_NORMAL_ARRAY);
-        gl->NormalPointer(GL_FLOAT, v->stride, b + v->normal);
+        b = stream_at(c, v, first, v->src[1], v->normal, &stride);
+        gl->NormalPointer(GL_FLOAT, stride, b);
     } else {
         gl->DisableClientState(GL_NORMAL_ARRAY);
     }
     if (v->diffuse >= 0) {
         gl->EnableClientState(GL_COLOR_ARRAY);
-        gl->ColorPointer(GL_BGRA, GL_UNSIGNED_BYTE, v->stride, b + v->diffuse);
+        b = stream_at(c, v, first, v->src[2], v->diffuse, &stride);
+        gl->ColorPointer(GL_BGRA, GL_UNSIGNED_BYTE, stride, b);
     } else {
         gl->DisableClientState(GL_COLOR_ARRAY);
     }
     if (gl->SecondaryColorPointer) {
         if (v->specular >= 0) {
             gl->EnableClientState(GL_SECONDARY_COLOR_ARRAY);
-            gl->SecondaryColorPointer(GL_BGRA, GL_UNSIGNED_BYTE, v->stride, b + v->specular);
+            b = stream_at(c, v, first, v->src[3], v->specular, &stride);
+            gl->SecondaryColorPointer(GL_BGRA, GL_UNSIGNED_BYTE, stride, b);
         } else {
             gl->DisableClientState(GL_SECONDARY_COLOR_ARRAY);
         }
@@ -4029,7 +4277,8 @@ static void tnl_arrays(RCTX *c, const VERTICES *v, DWORD first)
         gl->ClientActiveTexture(GL_TEXTURE0 + u);
         if (v->tex[u] >= 0) {
             gl->EnableClientState(GL_TEXTURE_COORD_ARRAY);
-            gl->TexCoordPointer(v->texsize[u], GL_FLOAT, v->stride, b + v->tex[u]);
+            b = stream_at(c, v, first, v->src[4 + u], v->tex[u], &stride);
+            gl->TexCoordPointer(v->texsize[u], GL_FLOAT, stride, b);
         } else {
             gl->DisableClientState(GL_TEXTURE_COORD_ARRAY);
         }
@@ -4042,7 +4291,8 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
                  const WORD *idx, DWORD nidx, DWORD span)
 {
     GLF *gl = gl_of(c);
-    DWORD n = idx ? span : count;
+    DWORD n = nidx ? span : count;      /* indexed: nidx, not idx, which is 0 for indices that start a
+                                           buffer object (testing idx drew nothing of those) */
 
     if (!v->base || (v->count && first + n > v->count)) {
         dbg("rd3d: vertices out of range\r\n");
@@ -4074,31 +4324,51 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
             skip8(c, "vertex shader");
             return;
         }
-        vs_arrays(c, v, first);
-        if (!idx)
+        if (mode == GL_POINTS)
+            point_state(c, vs_find(c, c->fvf8) && vs_find(c, c->fvf8)->info.psize);
+        if (!vs_arrays(c, v, first, n)) {
+            skip8(c, "vertex stream");
+            return;
+        }
+        if (!nidx)
             gl->DrawArrays(mode, 0, count);
-        else
+        else {
             bind_buffer(c, GL_ELEMENT_ARRAY_BUFFER_ARB, v->ibo);
-            gl->DrawElements(mode, nidx, GL_UNSIGNED_SHORT, idx);
+            gl->DrawElements(mode, nidx, v->itype ? v->itype : GL_UNSIGNED_SHORT, idx);
+        }
         c->dirty = 1;
         return;
     }
     if (v->xyz) {                       /* untransformed: through a vertex program */
+        c->points_now = mode == GL_POINTS;
         if (!tnl_begin(c, v)) {
             skip8(c, "vertex processing");
             return;
         }
+        if (!streams_ok(c, v, first, n, src_streams(v))) {
+            skip8(c, "vertex stream");
+            return;
+        }
+        if (mode == GL_POINTS)
+            point_state(c, c->rs[RS_POINTSCALEENABLE] != 0);
+        if (trace_on && src_streams(v) > 1)
+            tracef("rd3d: declaration draw: position %d, normal %d, diffuse %d (stream %lu), specular %d, "
+                   "stream 0 object %lu at %lu, %lu vertices\r\n", v->pos, v->normal, v->diffuse,
+                   (DWORD)v->src[2], v->specular, (DWORD)v->vbo, (DWORD)(v->base - v->start), count);
         tnl_arrays(c, v, first);
-        if (!idx)
+        if (!nidx)
             gl->DrawArrays(mode, 0, count);
-        else
+        else {
             bind_buffer(c, GL_ELEMENT_ARRAY_BUFFER_ARB, v->ibo);
-            gl->DrawElements(mode, nidx, GL_UNSIGNED_SHORT, idx);
+            gl->DrawElements(mode, nidx, v->itype ? v->itype : GL_UNSIGNED_SHORT, idx);
+        }
         c->dirty = 1;
         return;
     }
     tnl_end(c);
-    if (!idx) {
+    if (mode == GL_POINTS)
+        point_state(c, 0);
+    if (!nidx) {
         if (!convert(c, v, first, count))
             return;
         arrays(c, v, first, count);
@@ -4108,7 +4378,7 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
             return;
         arrays(c, v, first, span);
         bind_buffer(c, GL_ELEMENT_ARRAY_BUFFER_ARB, v->ibo);
-        gl->DrawElements(mode, nidx, GL_UNSIGNED_SHORT, idx);
+        gl->DrawElements(mode, nidx, v->itype ? v->itype : GL_UNSIGNED_SHORT, idx);
     }
     c->dirty = 1;
 }
@@ -4146,6 +4416,40 @@ static WORD *index_list(RCTX *c, const WORD *src, DWORD n, DWORD step, DWORD kee
     return buf;
 }
 
+/* The same for 32-bit indices (Direct3D 8 and 9's D3DFMT_INDEX32), made relative to their
+   smallest one: as 16-bit indices when they then fit, which a draw's range mostly does, else as
+   32-bit ones (*wide). */
+static void *index_list32(RCTX *c, const DWORD *src, DWORD n, DWORD *lo, DWORD *span, int *wide)
+{
+    DWORD i, mn = 0xFFFFFFFFUL, mx = 0;
+
+    if (!c->ibuf || n * 2 > c->nibuf) {
+        release(c->ibuf);
+        c->nibuf = n * 2 + 1024;
+        c->ibuf = (WORD *)alloc(c->nibuf * sizeof(WORD));
+        if (!c->ibuf) {
+            c->nibuf = 0;
+            return NULL;
+        }
+    }
+    for (i = 0; i < n; i++) {
+        if (src[i] < mn) mn = src[i];
+        if (src[i] > mx) mx = src[i];
+    }
+    *wide = n && mx - mn > 0xFFFFUL;
+    if (*wide) {
+        DWORD *b = (DWORD *)c->ibuf;
+        for (i = 0; i < n; i++)
+            b[i] = src[i] - mn;
+    } else {
+        for (i = 0; i < n; i++)
+            c->ibuf[i] = (WORD)(src[i] - mn);
+    }
+    *lo = n ? mn : 0;
+    *span = n ? mx - mn + 1 : 0;
+    return c->ibuf;
+}
+
 /* ---- Clear ------------------------------------------------------------------------------------ */
 static void clear(RCTX *c, DWORD flags, DWORD color, float depth, DWORD stencil,
                   const RECT *rects, DWORD n)
@@ -4166,6 +4470,7 @@ static void clear(RCTX *c, DWORD flags, DWORD color, float depth, DWORD stencil,
     }
     if (flags & D3DCLEAR_TARGET) {
         mask |= GL_COLOR_BUFFER_BIT;
+        colour_mask(c, 1);              /* Direct3D's Clear writes every channel */
         gl->ClearColor(((color >> 16) & 255) / 255.0f, ((color >> 8) & 255) / 255.0f,
                        (color & 255) / 255.0f, ((color >> 24) & 255) / 255.0f);
         c->dirty = 1;
@@ -4193,6 +4498,8 @@ static void clear(RCTX *c, DWORD flags, DWORD color, float depth, DWORD stencil,
         gl->Clear(mask);
     }
     apply_scissor(c);                   /* the viewport's again */
+    if (flags & D3DCLEAR_TARGET)
+        colour_mask(c, 0);
     gl->DepthMask((GLboolean)(c->rs[D3DRENDERSTATE_ZWRITEENABLE] ? GL_TRUE : GL_FALSE));
     gl->StencilMask(c->rs[D3DRENDERSTATE_STENCILWRITEMASK]);
 }
@@ -4246,6 +4553,7 @@ static void defaults(RCTX *c)
     render_state(c, D3DRENDERSTATE_STENCILFUNC, D3DCMP_ALWAYS);
     render_state(c, D3DRENDERSTATE_STENCILMASK, 0xFFFFFFFF);
     render_state(c, D3DRENDERSTATE_STENCILWRITEMASK, 0xFFFFFFFF);
+    render_state(c, RS_COLORWRITEENABLE, 15);
     for (s = 0; s < STAGES; s++) {
         c->tss[s][D3DTSS_COLOROP] = s ? D3DTOP_DISABLE : D3DTOP_MODULATE;
         c->tss[s][D3DTSS_COLORARG1] = D3DTA_TEXTURE;
@@ -4964,6 +5272,55 @@ static GLuint buffer_object(RCTX *c, DWORD h, GLenum target)
 }
 
 /* ---- Direct3D 8 draws ----------------------------------------------------------------------- */
+/* The vertices of a declaration that came without code: the fixed-function pipeline reads them
+   through it, each register a fixed attribute (Direct3D 8's D3DVSDE_*: 0 position, 3 normal,
+   5 diffuse, 6 specular, 7 to 14 texture coordinate sets; blend weights and indices, point size
+   and the tweening inputs are not read), each from its own stream. 0 if the position or a type
+   is not what the pipeline's program reads. */
+static int decl_vertices(const struct vs8 *s, VERTICES *v)
+{
+    const VS_ARB *d = &s->info;
+    DWORD i;
+
+    if (s->failed || !(d->inputs & 1) || d->type[0] != 2)   /* the position: three floats */
+        return 0;
+    v->xyz = 1;
+    v->pos = d->offset[0];
+    v->src[0] = d->stream[0];
+    v->normal = v->diffuse = v->specular = -1;
+    for (i = 0; i < 8; i++) {
+        v->tex[i] = -1;
+        v->texsize[i] = 0;
+    }
+    if (d->inputs & (1UL << 3)) {
+        if (d->type[3] != 2)
+            return 0;
+        v->normal = d->offset[3];
+        v->src[1] = d->stream[3];
+    }
+    if (d->inputs & (1UL << 5)) {
+        if (d->type[5] != VS_ARB_COLOR)
+            return 0;
+        v->diffuse = d->offset[5];
+        v->src[2] = d->stream[5];
+    }
+    if (d->inputs & (1UL << 6)) {
+        if (d->type[6] != VS_ARB_COLOR)
+            return 0;
+        v->specular = d->offset[6];
+        v->src[3] = d->stream[6];
+    }
+    for (i = 0; i < 8; i++)
+        if (d->inputs & (1UL << (7 + i))) {
+            if (d->type[7 + i] > VS_ARB_FLOAT4)
+                return 0;
+            v->tex[i] = d->offset[7 + i];
+            v->texsize[i] = d->type[7 + i] + 1;
+            v->src[4 + i] = d->stream[7 + i];
+        }
+    return 1;
+}
+
 /* Stream zero's vertices: a buffer surface named by its handle, or, for SETSTREAMSOURCEUM, the
    vertices that came with the command buffer. 0 when there is nothing usable. */
 static int stream_vertices(RCTX *c, LPD3DHAL_DRAWPRIMITIVES2DATA d, VERTICES *v)
@@ -4973,10 +5330,16 @@ static int stream_vertices(RCTX *c, LPD3DHAL_DRAWPRIMITIVES2DATA d, VERTICES *v)
 
     memset(v, 0, sizeof *v);
     if (c->fvf8 & 1) {                  /* a vertex shader's handle: its declaration lays it out */
+        struct vs8 *s = vs_find(c, c->fvf8);
         if (!tnl_on || !c->stream_stride)
             return 0;
-        v->shader = 1;
-        v->diffuse = v->specular = v->normal = -1;
+        if (s && !s->ncode) {           /* no code: the fixed-function pipeline, through it */
+            if (!decl_vertices(s, v))
+                return 0;
+        } else {
+            v->shader = 1;
+            v->diffuse = v->specular = v->normal = -1;
+        }
     } else if (!parse_fvf(c->fvf8, v) || !c->stream_stride || c->stream_stride < v->stride) {
         return 0;
     }
@@ -5041,6 +5404,9 @@ static int stream_from(VERTICES *v, long start)
     v->base += start;
     if (v->count)
         v->count = (bytes - (DWORD)start) / v->stride;
+    /* the same vertex in the draw's other streams (vs_arrays) */
+    v->first_vertex = v->first_vertex >= 0 && v->stride && start % (long)v->stride == 0 ?
+                      v->first_vertex + start / (long)v->stride : -1;
     return 1;
 }
 
@@ -5059,7 +5425,7 @@ static void stream_draw(RCTX *c, LPD3DHAL_DRAWPRIMITIVES2DATA d, DWORD type, lon
            c->stream_user ? " (user)" : "", c->fvf8);
     if (!prims)
         return;
-    if (!mode) {
+    if (!verts) {                       /* (not !mode: GL_POINTS is 0, and point lists were never drawn) */
         skip8(c, "primitive type");
         return;
     }
@@ -5081,11 +5447,13 @@ static void stream_draw(RCTX *c, LPD3DHAL_DRAWPRIMITIVES2DATA d, DWORD type, lon
         DWORD size = 0;
         BYTE *ib = buffer_get(c->ddl, c->index_handle, &size);
         WORD *idx;
-        if (!ib || c->index_stride != 2) {
+        DWORD isz = c->index_stride;    /* 16-bit indices, or 32-bit ones */
+        int wide = 0;
+        if (!ib || (isz != 2 && isz != 4)) {
             skip8(c, "index buffer");
             return;
         }
-        if (index_byte > size || verts > (size - index_byte) / 2) {
+        if (index_byte > size || verts > (size - index_byte) / isz) {
             skip8(c, "index range");
             return;
         }
@@ -5093,12 +5461,17 @@ static void stream_draw(RCTX *c, LPD3DHAL_DRAWPRIMITIVES2DATA d, DWORD type, lon
             /* vertices on the GPU: the indices as they are, from vertex zero on, from their own
                buffer object if they have one (no copy, no scan for their range) */
             v.ibo = buffer_object(c, c->index_handle, GL_ELEMENT_ARRAY_BUFFER_ARB);
+            v.itype = isz == 4 ? GL_UNSIGNED_INT : 0;
             draw(c, &v, mode, 0, 0, v.ibo ? (const WORD *)index_byte : (const WORD *)(ib + index_byte),
                  verts, 0);
             return;
         }
-        idx = index_list(c, (const WORD *)(ib + index_byte), verts, 1, 1,
-                         &lo, &span);
+        if (isz == 4) {
+            idx = (WORD *)index_list32(c, (const DWORD *)(ib + index_byte), verts, &lo, &span, &wide);
+            v.itype = wide ? GL_UNSIGNED_INT : 0;
+        } else {
+            idx = index_list(c, (const WORD *)(ib + index_byte), verts, 1, 1, &lo, &span);
+        }
         if (!idx) {
             dbg("rd3d: no memory for the indices of a draw\r\n");
             return;
@@ -5422,6 +5795,9 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
                     c->stream_user = 0;
                     c->stream_handle = s[i].handle;
                     c->stream_stride = s[i].stride;
+                } else if (s[i].stream < VS_ARB_STREAMS) {
+                    c->sx_handle[s[i].stream] = s[i].handle;
+                    c->sx_stride[s[i].stream] = s[i].stride;
                 }
             cmd = data + n * sizeof *s;
             break;
@@ -5804,6 +6180,10 @@ static const ULONG d8_formats[][2] = {
     /* bump maps for texbem and texbeml: signed (gl_format) */
     { RbFmtV8U8, RbFormatTexture | RbFormatCubeTexture | RbFormatBumpMap },
     { RbFmtQ8W8V8U8, RbFormatTexture | RbFormatCubeTexture | RbFormatBumpMap },
+    /* luminance and alpha alone (gl_format) */
+    { RbFmtL8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtA8L8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtA8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
 };
 #define D8_FORMATS (sizeof d8_formats / sizeof d8_formats[0])
 
@@ -5821,7 +6201,7 @@ static void d8_caps(RB_D3DCAPS8 *c)
     c->caps2 = RB_D3DCAPS2_CANRENDERWINDOWED;
     c->presentationIntervals = RB_D3DPRESENT_INTERVAL_IMMEDIATE | RB_D3DPRESENT_INTERVAL_ONE;
     c->devCaps = hw->dwDevCaps & ~D3DDEVCAPS_FLOATTLVERTEX;
-    c->primitiveMiscCaps = tri->dwMiscCaps;
+    c->primitiveMiscCaps = tri->dwMiscCaps | 0x80;     /* D3DPMISCCAPS_COLORWRITEENABLE (colour_mask) */
     c->rasterCaps = tri->dwRasterCaps & ~D3DPRASTERCAPS_SUBPIXEL;
     c->zCmpCaps = tri->dwZCmpCaps;
     c->srcBlendCaps = tri->dwSrcBlendCaps;
@@ -5853,10 +6233,10 @@ static void d8_caps(RB_D3DCAPS8 *c)
     c->textureOpCaps = x.dwTextureOpCaps;
     c->maxTextureBlendStages = x.wMaxTextureBlendStages;
     c->maxSimultaneousTextures = x.wMaxSimultaneousTextures;
-    c->maxPointSize = fbits(1.0f);
+    c->maxPointSize = fbits(MAX_POINT_SIZE);       /* and point sprites (point_state) */
     c->maxPrimitiveCount = 0xFFFF;
-    c->maxVertexIndex = 0xFFFF;         /* 16-bit index buffers only */
-    c->maxStreams = 1;
+    c->maxVertexIndex = 0xFFFFFF;       /* 32-bit index buffers too (index_list32) */
+    c->maxStreams = 1;                  /* (more with hardware vertex processing, below) */
     c->maxStreamStride = 255;
     c->vertexShaderVersion = 0xFFFE0000UL;  /* none: the runtime runs vertex shaders */
     if (tnl_on) {
@@ -5873,6 +6253,9 @@ static void d8_caps(RB_D3DCAPS8 *c)
         c->maxUserClipPlanes = 0;
         /* vertex shaders as ARB vertex programs (vs_arb.c): vs_1_1 for Direct3D 8, vs_2_0
            (without flow control) for a Direct3D 9 runtime */
+        c->maxStreams = VS_ARB_STREAMS;     /* a declaration may read several: a vertex shader's
+                                               inputs (vs_arrays), the fixed-function attributes of
+                                               one without code (decl_vertices) */
         if (p && p->d3d_version >= 0x900) {
             c->vertexShaderVersion = 0xFFFE0200UL;
             c->maxVertexShaderConst = VS_ARB_CONSTANTS;
@@ -5887,7 +6270,9 @@ static void d8_caps(RB_D3DCAPS8 *c)
        blend stages reported, so those are as many as the samplers. */
     if (p && p->d3d_version >= 0x900) {
         c->pixelShaderVersion = 0xFFFF0200UL;
-        c->maxSimultaneousTextures = c->maxTextureBlendStages = RB_PS2_SAMPLERS;
+        c->maxTextureBlendStages = RB_PS2_SAMPLERS;
+        c->maxSimultaneousTextures = FF8_STAGES;    /* what the fixed-function stages really draw
+                                                       (pixel shaders have their samplers anyway) */
     } else {
         c->pixelShaderVersion = 0xFFFF0103UL;
         c->maxSimultaneousTextures = c->maxTextureBlendStages = RB_PS_COORD_SETS;
