@@ -48,6 +48,11 @@ public:
                   const VirtioGPUDevice::Rect &r);
     // Give up what was made on the host (a mode change; the next draw makes it again).
     void destroy();
+    // A check (`gamma-test probe`): row `row` of the image last drawn, counted from the top,
+    // read back from the host and described in `out` (each byte's mean over the row, eight
+    // texels). A screenshot in the guest never shows the table, and not every host can show
+    // its display to a script (UTM). False if nothing has been drawn or the read failed.
+    bool probe(uint32_t row, char *out, size_t outLen);
 };
 
 #endif

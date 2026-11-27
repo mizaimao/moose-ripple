@@ -330,6 +330,48 @@ uint32_t RippleGamma::draw(uint32_t src, uint32_t srcWidth, uint32_t srcHeight, 
     return fImage;
 }
 
+bool RippleGamma::probe(uint32_t row, char *out, size_t outLen)
+{
+    if (!fDev || !fCtx || !fImage || !fWidth || row >= fHeight || !out || !outLen)
+        return false;
+    const uint32_t bytes = fWidth * 4;
+    IOBufferMemoryDescriptor *md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+        kIODirectionInOut | kIOMemoryPhysicallyContiguous, round_page(bytes), 0xFFFFFFFFFFFFF000ULL);
+    if (!md || md->prepare() != kIOReturnSuccess) {
+        if (md)
+            md->release();
+        return false;
+    }
+    uint8_t *px = (uint8_t *)md->getBytesNoCopy();
+    bzero(px, bytes);
+    // The host counts a read's rows from the top of the picture, whichever way the image is
+    // stored (checked in UTM against the screen's rows). The read lands at the start of the
+    // borrowed memory, which is attached only for it.
+    const uint32_t box[6] = { 0, row, 0, fWidth, 1, 1 };
+    bool ok = fDev->attachBacking(fImage, md, bytes) &&
+              fDev->transfer3D(false, fCtx, fImage, 0, box, bytes, 0, 0, NULL);
+    fDev->detachBacking(fImage);
+    if (ok) {
+        uint64_t sum[4] = { 0, 0, 0, 0 };
+        for (uint32_t x = 0; x < fWidth; x++)
+            for (unsigned c = 0; c < 4; c++)
+                sum[c] += px[x * 4 + c];
+        int n = snprintf(out, outLen, "row %u of %ux%u, format %u, bytes in memory order: mean",
+                         row, fWidth, fHeight, fFormat);
+        for (unsigned c = 0; c < 3 && n > 0 && (size_t)n < outLen; c++)
+            n += snprintf(out + n, outLen - n, " %llu.%llu", sum[c] / fWidth,
+                          sum[c] * 10 / fWidth % 10);
+        for (unsigned i = 0; i < 8 && n > 0 && (size_t)n < outLen; i++) {
+            uint32_t x = i * fWidth / 8 + fWidth / 16;
+            n += snprintf(out + n, outLen - n, "%s x %u: %u %u %u", i ? ";" : "; texels", x,
+                          px[x * 4], px[x * 4 + 1], px[x * 4 + 2]);
+        }
+    }
+    md->complete();
+    md->release();
+    return ok;
+}
+
 void RippleGamma::destroy()
 {
     if (!fCtx)
