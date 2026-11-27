@@ -3,13 +3,14 @@
  *
  *   ddtest [width height bpp [seconds]]        default: 640 480 32, 2 seconds
  *   ddtest restore                            640x480, 16 bits, real switch to desktop and back
- *   ddtest mirror                             640x480, 16 bits, hold a flipped page and a front write
+ *   ddtest mirror [width height bpp]          hold a flipped page and a front write (640 480 16)
  *
  * Prints what the HAL offers (capabilities, video memory), then takes the screen
  * (exclusive, full-screen), sets the mode, makes a primary surface with one back buffer,
  * and flips between them, filling the back buffer with a new colour each frame. It checks
  * that the surfaces are in video memory, that a flip shows the other buffer (the card's
- * display start moves), that the picture on the screen is the one drawn last, and how long
+ * display start moves; where two pages are more than the card's 8 MB the back buffer is in
+ * the driver's system memory and the display start stays), that the picture on the screen is the one drawn last, and how long
  * DirectDraw's emulated vertical blank takes. Output on standard output: ddtest > out.txt.
  * Exit status 0 when every check passed. Built by tools/win9x/build-tools.sh.
  * The restore test launches another windowed process, waits for it, then restores the
@@ -129,15 +130,15 @@ static DWORD read_pixel(LPDIRECTDRAWSURFACE s, int bpp, int x, int y)
     return v;
 }
 
-static void mirror_pages(LPDIRECTDRAWSURFACE front, LPDIRECTDRAWSURFACE back, int w, int h)
+static void mirror_pages(LPDIRECTDRAWSURFACE front, LPDIRECTDRAWSURFACE back, int w, int h, int bpp)
 {
     RECT quarter;
-    DWORD green = colour(16, 1), blue = colour(16, 2);
+    DWORD green = colour(bpp, 1), blue = colour(bpp, 2);
     HRESULT r;
     int i;
 
-    check(fill(front, 16, colour(16, 0), w, h, NULL) == DD_OK, "fill the front page red");
-    check(fill(back, 16, green, w, h, NULL) == DD_OK, "fill the back page green");
+    check(fill(front, bpp, colour(bpp, 0), w, h, NULL) == DD_OK, "fill the front page red");
+    check(fill(back, bpp, green, w, h, NULL) == DD_OK, "fill the back page green");
     if (failures)
         return;
     Sleep(250);
@@ -151,20 +152,20 @@ static void mirror_pages(LPDIRECTDRAWSURFACE front, LPDIRECTDRAWSURFACE back, in
     }
     printf("ddtest mirror: holding final green page\n");
     Sleep(7000);
-    check(read_pixel(front, 16, w / 4, h / 4) == green &&
-          read_pixel(front, 16, w * 3 / 4, h * 3 / 4) == green, "final front page is green");
+    check(read_pixel(front, bpp, w / 4, h / 4) == green &&
+          read_pixel(front, bpp, w * 3 / 4, h * 3 / 4) == green, "final front page is green");
 
     SetRect(&quarter, 0, 0, w / 2, h / 2);
-    r = fill(front, 16, blue, quarter.right, quarter.bottom, &quarter);
+    r = fill(front, bpp, blue, quarter.right, quarter.bottom, &quarter);
     check(r == DD_OK, "write the displayed top-left quarter");
     if (r != DD_OK)
         return;
     printf("ddtest mirror: holding blue quarter on green\n");
     Sleep(7000);
-    check(read_pixel(front, 16, w / 4, h / 4) == blue, "top-left quarter is blue");
-    check(read_pixel(front, 16, w * 3 / 4, h / 4) == green &&
-          read_pixel(front, 16, w / 4, h * 3 / 4) == green &&
-          read_pixel(front, 16, w * 3 / 4, h * 3 / 4) == green, "other three quarters stay green");
+    check(read_pixel(front, bpp, w / 4, h / 4) == blue, "top-left quarter is blue");
+    check(read_pixel(front, bpp, w * 3 / 4, h / 4) == green &&
+          read_pixel(front, bpp, w / 4, h * 3 / 4) == green &&
+          read_pixel(front, bpp, w * 3 / 4, h * 3 / 4) == green, "other three quarters stay green");
 }
 
 static void print_caps(const char *who, DDCAPS *c)
@@ -298,13 +299,19 @@ int main(int argc, char **argv)
     DWORD start, frames = 0, y0, y1, y2, px;
     int i;
     int restore = argc == 2 && !stricmp(argv[1], "restore"), restore_result = 2;
-    int mirror = argc == 2 && !stricmp(argv[1], "mirror");
+    int mirror = argc >= 2 && !stricmp(argv[1], "mirror");
+    int two_pages_fit;
 
     setvbuf(stdout, NULL, _IONBF, 0);       /* everything printed survives a crash */
     if (argc == 2 && !stricmp(argv[1], "restore-helper"))
         return focus_helper();
     if (restore || mirror)
         bpp = 16;
+    if (mirror && argc > 4) {
+        w = atoi(argv[2]); h = atoi(argv[3]); bpp = atoi(argv[4]);
+    }
+    /* the card (virtio-vga) has 8 MB: past that the back buffer is in the driver's system memory */
+    two_pages_fit = 2.0 * w * h * (bpp / 8) <= 8.0 * 1024 * 1024;
     if (DirectDrawCreate(NULL, &dd, NULL) != DD_OK) {
         printf("DirectDrawCreate failed\n");
         return 2;
@@ -349,7 +356,7 @@ int main(int argc, char **argv)
         goto out;
     }
     if (mirror) {
-        mirror_pages(front, back, w, h);
+        mirror_pages(front, back, w, h, bpp);
         goto out;
     }
     memset(&sd, 0, sizeof sd); sd.dwSize = sizeof sd;
@@ -367,7 +374,10 @@ int main(int argc, char **argv)
     y2 = vbe_y_offset();
     printf("display start (line): %lu, after a flip %lu, after another %lu\n", y0, y1, y2);
     check(r == DD_OK, "Flip succeeds");
-    check(y1 != y0 && y2 == y0, "a flip shows the other buffer");
+    if (two_pages_fit)
+        check(y1 != y0 && y2 == y0, "a flip shows the other buffer");
+    else
+        check(y1 == y0 && y2 == y0, "the display start stays (back buffer in system memory)");
     px = read_pixel(front, bpp, w / 2, h / 2);
     printf("pixel on the screen %08lx, drawn last %08lx\n", px, colour(bpp, 1));
     check(px == colour(bpp, 1), "the screen shows what was drawn last");

@@ -1536,15 +1536,14 @@ static void read_back(RCTX *c)
 static int screen_page(LPDDRAWI_DDRAWSURFACE_LCL s)
 {
     LPDDRAWI_DDRAWSURFACE_GBL g = s->lpGbl;
-    DWORD caps = s->ddsCaps.dwCaps, off = g->fpVidMem - shared->lfb;
+    DWORD caps = s->ddsCaps.dwCaps;
     DDPIXELFORMAT pf, screen;
 
     if (!(caps & DDSCAPS_FLIP) || !(caps & DDSCAPS_VIDEOMEMORY) ||
         (caps & (DDSCAPS_TEXTURE | DDSCAPS_OVERLAY | DDSCAPS_SYSTEMMEMORY)) ||
         (shared->bpp != 16 && shared->bpp != 32) || !shared->pitch ||
         g->wWidth != shared->width || g->wHeight != shared->height ||
-        g->lPitch != (LONG)shared->pitch || off % shared->pitch ||
-        off / shared->pitch > RDD_MAX_Y_OFFSET || off / shared->pitch + shared->height > shared->lines)
+        g->lPitch != (LONG)shared->pitch || !rdd_shown_page(g->fpVidMem))
         return 0;
     surface_format(s, &pf);
     display_format(&screen);
@@ -4207,9 +4206,12 @@ static int set_render_target(RCTX *c, LPDDRAWI_DDRAWSURFACE_LCL rt, LPDDRAWI_DDR
 {
     /* A target outside the flip chain ends it (its pages go back into memory), unless it is a
        texture: rendering into a texture between flips (3DMark 2001's Dragothic, ten a frame) is
-       part of the frame, and the chain goes on. */
-    if (rt != c->rt && rt != c->front && rt != c->back && !(rt->ddsCaps.dwCaps & DDSCAPS_TEXTURE) &&
-        !end_chain(c))
+       part of the frame, and the chain goes on. A chain with two back buffers has a third page,
+       neither the front nor the back of the last flip, which the runtime makes the target every
+       frame: it is a page of the chain like the others (taking it for an outsider read every
+       page back each frame, 3.7 of a frame's 6.5 ms in 3DMark 2001 SE's Car Chase). */
+    if (rt != c->rt && rt != c->front && rt != c->back && !screen_page(rt) &&
+        !(rt->ddsCaps.dwCaps & DDSCAPS_TEXTURE) && !end_chain(c))
         return 0;
     finish_target(c);
     tracef("rd3d: render target: caps %08lx, memory %08lx, %lux%lu; z-buffer memory %08lx\r\n",

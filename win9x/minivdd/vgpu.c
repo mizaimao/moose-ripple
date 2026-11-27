@@ -365,8 +365,12 @@ static int is_vga_mode13(void);
 static u32 dac_return_vm, dac_return_token, dac_return_time;
 static u32 dac_focus_serial;
 static u32 display_w, display_h, display_bpp, vram_bytes, display_offset;
+static int display_heap;                        /* display_offset counts from the DirectDraw heap's
+                                                   start, not the card's memory (RVD_DESKTOP_HEAP) */
 static u32 palette[256];
 static u8 *vram;
+/* The DirectDraw heap (RVD_HEAP): made at the first call, kept until Windows ends. */
+static struct rvd_heap heap = { 0 };
 
 int vgpu_has_virgl(void)
 {
@@ -1286,6 +1290,24 @@ static int valid_page(u32 w, u32 h, u32 bpp, u32 offset)
     return offset <= vram_bytes && offset % row == 0 && h <= (vram_bytes - offset) / row;
 }
 
+/* The page the CPU's side of the display is read from: in the card's memory at the start of a
+   line, or, with in_heap, anywhere in the DirectDraw heap: a flip chain's back buffer the card's
+   8 MB had no room for (two pages of 1280x1024 in 32 bits are 10 MB). The card can't show that
+   one, the mirror can. The heap may be paged out; every reader runs where a page fault may
+   block (a request's thread, or the refresh event, which waits for a passive moment). */
+static int valid_source(u32 w, u32 h, u32 bpp, u32 offset, int in_heap)
+{
+    if (!in_heap)
+        return valid_page(w, h, bpp, offset);
+    return valid_page(w, h, bpp, 0) && heap.address && offset < heap.size &&
+           h <= (heap.size - offset) / (w * (bpp / 8));
+}
+
+static const u8 *page_source(u32 offset, int in_heap)
+{
+    return (in_heap ? (const u8 *)heap.address : vram) + offset;
+}
+
 /* One row of VGA pixels into the shadow, compared as it is copied: 1 if it changed, and the
    changed columns widen *lo..*hi. */
 static int mirror_row(u32 *dst, const u8 *src, u32 w, u32 bpp, u32 *lo, u32 *hi)
@@ -1344,12 +1366,11 @@ static int mirror_row(u32 *dst, const u8 *src, u32 w, u32 bpp, u32 *lo, u32 *hi)
 /* The DIB engine, DirectDraw locks and the software cursor all write these same VGA bytes.
    Sample them at a desktop event so writes without any later driver call remain visible.
    Compare the shadow as we copy; *damage gets the changed rectangle. A still desktop generates no
-   device commands. */
-static int mirror_pixels(struct desktop_image *d, u32 bpp, u32 offset, struct gpu_rect *damage,
+   device commands. src: the page (page_source). */
+static int mirror_pixels(struct desktop_image *d, u32 bpp, const u8 *src, struct gpu_rect *damage,
                          int quiet)
 {
     static u32 phase;
-    const u8 *src = vram + offset;
     u32 *dst = (u32 *)d->mem;
     u32 w = d->w, h = d->h, pitch = w * (bpp / 8), y, first = h, last = 0, lo = w, hi = 0;
     if (quiet) {
@@ -1720,7 +1741,7 @@ static int desktop_refresh(int paced)
     u32 w = display_w, h = display_h, bpp = display_bpp, offset = display_offset;
     u32 serial = display_serial, start = vmm_time_ms();
     u32 generation = 0;
-    int text = 0, mode13 = 0, changed;
+    int text = 0, mode13 = 0, changed, in_heap = display_heap;
     struct vga_text v;
     unsigned slot = desktop_slot, previous_mode13_slot, i;
     struct desktop_image *d;
@@ -1765,7 +1786,7 @@ static int desktop_refresh(int paced)
             if (!mode13 || dos_active != vgpu_dac_vm || vmm_rearm_dac(dos_active))
                 dac_focus_serial = 0;
         }
-    } else if (!valid_page(w, h, bpp, offset))
+    } else if (!valid_source(w, h, bpp, offset, in_heap))
         return 0;
     if (!vram) {
         u32 bar = pci_read32(gpu.bdf, 0x10);
@@ -1807,7 +1828,7 @@ static int desktop_refresh(int paced)
     } else {
         /* The host already holds this image's earlier pixels: send only the changed rows. */
         int same = !d->upload && slot == desktop_slot && visible == id;
-        changed = mirror_pixels(d, bpp, offset, &damage, same && !cpu_owner);
+        changed = mirror_pixels(d, bpp, page_source(offset, in_heap), &damage, same && !cpu_owner);
         if (changed && same)
             region = &damage;
     }
@@ -1902,6 +1923,7 @@ void __cdecl vgpu_display_mode(u32 bpp, u32 size, u32 bytes)
     vram_bytes = bytes;
     display_bpp = bpp;
     display_offset = presenter = 0;
+    display_heap = 0;
     drop_gpu_page();
     if (takeover)
         queue_refresh(1);
@@ -2028,7 +2050,7 @@ static u32 present_image(const struct rvd_present *p, u32 process)
         ctx_owner[p->context] != process || !b->scanout ||
         b->width != p->width || b->height != p->height ||
         display_w != p->width || display_h != p->height ||
-        !valid_page(display_w, display_h, display_bpp, display_offset)) {
+        !valid_source(display_w, display_h, display_bpp, display_offset, display_heap)) {
         if (!reported) {
             dbg("rvd: scanout rejected, context "); dbg_hex(p->context);
             dbg(", resource "); dbg_hex(p->buffer);
@@ -2123,7 +2145,7 @@ static u32 present_window(const struct rvd_window *p, u32 in_len, u32 process)
     /* A full-screen image, a DOS session or a game flipping VGA pages owns the display:
        the program shows this frame through GDI instead. */
     if (gpu_page || dos_active || cpu_owner || display_bpp < 16 ||
-        !valid_page(display_w, display_h, display_bpp, display_offset))
+        !valid_source(display_w, display_h, display_bpp, display_offset, display_heap))
         return ERROR_NOT_READY;
     id = MAX_BUFFERS + 1 + desktop_slot;
     if (!takeover || visible != id) {
@@ -2207,9 +2229,6 @@ struct dioc {
 #define DIOC_OPEN   0UL
 #define DIOC_CLOSE  0xFFFFFFFFUL
 
-/* The DirectDraw heap (RVD_HEAP): made at the first call, kept until Windows ends. */
-static struct rvd_heap heap = { 0 };
-
 /* Handles open, by process. A process can hold more than one: the DirectDraw DLL keeps one for
    RVD_HEAP, Mesa's winsys one for OpenGL. Its GPU contexts end when its last one is closed;
    ending them at the first close took OpenGL's context away from a program that released one
@@ -2241,10 +2260,11 @@ static u32 opened(u32 process, int change)
 /* Keep the logical page current on every Flip, including a flip to page zero. Its pixels
    remain in VGA RAM. Only sample them when the display is due. The event also catches
    writes to a held front buffer after the last Flip. GDI and ownership changes are immediate. */
-static u32 show_cpu_page(u32 process, u32 offset, int flip)
+static u32 show_cpu_page(u32 process, u32 offset, int flip, int in_heap)
 {
     u32 previous = display_offset, serial = display_serial, age;
-    if (!valid_page(display_w, display_h, display_bpp, offset) || dos_active)
+    int previous_heap = display_heap;
+    if (!valid_source(display_w, display_h, display_bpp, offset, in_heap) || dos_active)
         return ERROR_INVALID_PARAMETER;
     if (stalled)
         return ERROR_TIMEOUT;
@@ -2255,6 +2275,7 @@ static u32 show_cpu_page(u32 process, u32 offset, int flip)
         age = vmm_time_ms() - last_cpu_sample;
         if (age < DISPLAY_PERIOD_MS && queue_refresh(DISPLAY_PERIOD_MS - age)) {
             display_offset = offset;
+            display_heap = in_heap;
             cpu_flips++;
             return 0;
         }
@@ -2264,9 +2285,11 @@ static u32 show_cpu_page(u32 process, u32 offset, int flip)
     if (flip)
         cpu_owner = process;
     display_offset = offset;
+    display_heap = in_heap;
     if (!desktop_refresh(flip)) {
         if (serial == display_serial) {
             display_offset = previous;
+            display_heap = previous_heap;
             end_cpu_flips();
             if (gpu_page)
                 pending_gpu = gpu_page;
@@ -2300,6 +2323,7 @@ static void presenter_closed(u32 process)
     end_cpu_flips();
     presenter = 0;
     display_offset = 0;
+    display_heap = 0;
     drop_gpu_page();
     if (!display_bpp)
         return;
@@ -2352,8 +2376,13 @@ static u32 dispatch(struct dioc *p)
         if (!p->out || p->out_len < sizeof(u32))
             return ERROR_INVALID_PARAMETER;
         *(u32 *)p->out = takeover;
+        n = sizeof(u32);
+        if (p->out_len >= 2 * sizeof(u32)) {    /* the flags this VxD knows */
+            ((u32 *)p->out)[1] = RVD_DESKTOP_FLIP | RVD_DESKTOP_HEAP;
+            n = 2 * sizeof(u32);
+        }
         if (p->returned)
-            *p->returned = sizeof(u32);
+            *p->returned = n;
         return 0;
     }
     if (p->code == RVD_GET_STATS) {             /* what is held now: no device needed */
@@ -2394,7 +2423,9 @@ static u32 dispatch(struct dioc *p)
     }
     if (!common)
         return ERROR_NOT_SUPPORTED;
-    if (p->code == RVD_DESKTOP && !takeover) {
+    if (p->code == RVD_DESKTOP && !takeover &&
+        !(p->in_len >= sizeof(struct rvd_desktop) &&
+          (((const struct rvd_desktop *)p->in)->flags & RVD_DESKTOP_HEAP))) {
         if (p->in_len < sizeof(u32))
             return ERROR_INVALID_PARAMETER;
         if (p->returned)
@@ -2576,7 +2607,8 @@ static u32 dispatch(struct dioc *p)
         if (p->in_len < sizeof(d->offset))
             return ERROR_INVALID_PARAMETER;
         err = show_cpu_page(p->process, d->offset, p->in_len >= sizeof(*d) &&
-                            (d->flags & RVD_DESKTOP_FLIP));
+                            (d->flags & RVD_DESKTOP_FLIP), p->in_len >= sizeof(*d) &&
+                            (d->flags & RVD_DESKTOP_HEAP));
         if (err)
             return err;
         break;

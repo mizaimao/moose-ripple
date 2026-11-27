@@ -572,6 +572,62 @@ its window 635,018 times and closed it. The default Direct3D scene took the GPU 
 variable set and passed every pixel check, and its held frame looked as before.
 [Desktop before and after the GPU frame, and the scene](img/desktop-copy-rig.webp)
 
+### Flip chains larger than the card's memory (2026-11-26)
+
+The card's VGA memory is 8 MB, and through 0.6.0 a flip chain had to fit in it: the screen's
+page and every back buffer. In 32-bit colour that ends at 1152x864 with one back buffer
+(1280x1024 takes 5 MB a page) and leaves no room for a second back buffer at 1024x768. Past it
+DirectDraw quietly made the chain in its own system memory and emulated the flips, and Direct3D
+refused to draw into such a chain: CreateDevice failed with `D3DERR_SURFACENOTINVIDMEM`
+(887602eb). No Direct3D program started at 1280x960, 1280x1024 or 1600x1200 in 32 bits.
+
+The system memory heap (see "More memory for surfaces" below) now takes a chain's back buffers
+too, in DirectDraw's second pass over the heaps, after the card's memory has refused them
+(`ddsCapsAlt` in `ddraw16.c`). A chain that fits the card stays there, as before. The card can't
+show a page that lies in that heap, so Flip shows it another way:
+
+- from the GPU, when Direct3D drew it. Full-screen GPU presentation (above) goes by surface,
+  wherever its memory lies, and this is the usual case;
+- otherwise through the mini-VDD: `RVD_DESKTOP` with `RVD_DESKTOP_HEAP` names a page counted
+  from the heap's start. The mini-VDD mirrors it into its display image, the same way it shows
+  the desktop after a GPU frame, follows later writes to it (a Lock of the shown page), and
+  takes the display from VGA for it if it had not yet.
+
+The DLL asks the mini-VDD which request flags it knows and only then lets the 16-bit driver
+open the heap to back buffers, so an older mini-VDD keeps the old behaviour.
+
+Checked on the Intel host (VM 230, Windows 98 SE, DirectX 9.0c, 256 MB, untimed) at
+1280x1024 in 32 bits, 0.6.0 against this change:
+
+| | 0.6.0 | Now |
+|---|---|---|
+| `ddtest 1280 1024 32`: the back buffer | system memory, flips emulated (925 a second) | video memory, the HAL's flips (1066 a second) |
+| `d3dtest 1280 1024 32` | CreateDevice fails (887602eb) | every pixel check passes, 2570 frames a second, shown from the GPU |
+| `ddtest mirror 1280 1024 32` (pages shown by the mini-VDD) | | the flipped page, then a write to the shown page, are on the screen (VNC captures) |
+| `d3dtest 1280 1024 32` with `RIPPLE_D3D_SCANOUT=0` | CreateDevice fails | passes; each frame is read back into the heap page and shown by the mini-VDD (VNC capture) |
+| 3DMark 2001 SE, Car Chase | does not start | runs with the right picture (VNC captures) |
+
+At 1600x1200 in 32 bits (7.7 MB a page) `ddtest` and `d3dtest` pass the same way: 646 flips a
+second through the mini-VDD, 1924 frames a second from the GPU. At 1024x768 in 32 bits, where a
+chain with one back buffer fits the card, nothing changed: the display start moves between
+lines 0 and 768 as before, `ddtest` and `d3dtest` pass, `d8pixels` 23 of 23, `d9pixels` 48 of 49
+(the known vertex declaration).
+
+**Two back buffers.** 3DMark 2001 SE's "Triple" frame buffer at 1024x768 in 32 bits needs 9 MB:
+the second back buffer now comes from the heap, and the benchmark runs with the right picture
+(loading screens and Car Chase, VNC captures). It first ran at half speed. With three pages
+the runtime makes the page that was neither front nor back at the last flip the render target
+every frame, the HAL took that for a target outside the chain and read every page back:
+100 read-backs per 100 flips, 3.7 of a frame's 6.5 ms (`RIPPLE_D3D_PROFILE=1`, Car Chase low
+detail, another guest busy on the host). A page of the screen's chain no longer ends the chain:
+0 read-backs per 100 flips and about 3.5 ms a frame on the same scene. The same code
+serves 16-bit chains with two back buffers, which always fitted the card.
+
+Limits: the heap is 32 MB on a guest with 192 to 383 MB of memory and 16 MB below that, and
+textures and z-buffers share it. At 1600x1200 in 32 bits a back buffer and a z-buffer take
+15 MB of it. A frame shown by the mini-VDD is copied once more on its way (5 MB at
+1280x1024), which only matters to programs that draw with DirectDraw alone at such sizes.
+
 ### 3DMark 2000 (2026-11-16)
 
 3DMark 2000 1.1 runs its default benchmark to the end on Windows 98 SE in VM 230 (DirectX 7,
@@ -601,7 +657,8 @@ Now the mini-VDD gives the DirectDraw DLL one block of system memory (`RVD_HEAP`
 384 MB of RAM or more, 32 MB from 192 MB, else 16 MB), which the 16-bit driver offers as a second
 heap for every surface that is never shown (textures, z-buffers, off-screen surfaces). Textures
 and z-buffers go there first and use the card's memory only when it is full; the screen's
-flipping chain stays in the card's memory. Direct3D draws on the GPU and reads back, so
+flipping chain stays in the card's memory, unless it is too large for it (see "Flip chains
+larger than the card's memory" above). Direct3D draws on the GPU and reads back, so
 nothing in that heap needs the card.
 
 **A deadlock.** Two runs out of six stopped the whole system at 3DMark's start (all threads

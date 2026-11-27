@@ -151,6 +151,13 @@ static void fill_halinfo(void)
         v->fpStart = shared.sysheap;
         v->dwWidth = shared.sysheap + shared.sysheap_size - 1;      /* fpEnd: the last byte */
         v->ddsCaps = v->ddsCapsAlt = RDD_DDSCAPS_SHOWN;
+        /* The card has 8 MB: at 1280x1024 in 32 bits one page is 5 MB, and no back buffer fits
+           below the screen (at 1024x768 one fits, not two). DirectDraw then made the chain in
+           its own system memory, which Direct3D refuses to draw into. In DirectDraw's second
+           pass, after the card's memory has refused them, back buffers come here: such a page
+           is shown from the GPU, or by the mini-VDD from this memory (rippledd.c, Flip). */
+        if (shared.sysheap_flip)
+            v->ddsCapsAlt = RDD_DDSCAPS_SHOWN & ~RDD_DDSCAPS_CHAIN;
     }
     /* The card's memory past the lines a flip can show (low resolutions only), for surfaces
        never shown. Off-screen surfaces come here after heap 0 and the system heap; textures

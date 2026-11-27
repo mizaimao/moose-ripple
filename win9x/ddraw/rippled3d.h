@@ -37,6 +37,9 @@ int d3d_present(LPDDRAWI_DDRAWSURFACE_LCL front, LPDDRAWI_DDRAWSURFACE_LCL targe
 int d3d_leave_exclusive(void);
 int rdd_prepare_scanout(void);
 int rdd_desktop(DWORD offset);
+/* The memory is a whole page that can be shown: in the card's memory at a line the display can
+   start at, or a back buffer in the system heap. */
+int rdd_shown_page(FLATPTR mem);
 void d3d_profile_flip(int gpu);
 
 /* A trace line (RIPPLE_D3D_TRACE) with two numbers. */
