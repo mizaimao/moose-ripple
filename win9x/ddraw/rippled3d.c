@@ -642,6 +642,8 @@ static int tnl_on;                      /* with hardware vertex processing (D3D8
 static int buf_on;                      /* and buffers the driver allocates (unless D3D8Buffers is "0") */
 static int d9_on;                       /* the Direct3D 9 driver interface is offered to a DirectX 9
                                            runtime (unless D3D9 is "0"; d9_resolve) */
+static int tnl7_on;                     /* Direct3D 7 is offered vertex processing on the GPU too: its
+                                           T&L HAL device (unless D3D7TnL is "0") */
 
 /* ---- Surface handles: DirectX 7 names surfaces in the command stream by handle --------------- */
 typedef struct {
@@ -4671,8 +4673,7 @@ static void tnl_arrays(RCTX *c, const VERTICES *v, DWORD first)
 }
 
 /* The user clip planes of the next draw (SETCLIPPLANE, D3DRS_CLIPPLANEENABLE). kind 0: none
-   (vertices the program transformed itself are not clipped by them, and Direct3D 7 has none
-   here); 1: the fixed-function pipeline, whose planes are in world space; 2: a vertex shader,
+   (vertices the program transformed itself are not clipped by them); 1: the fixed-function pipeline, whose planes are in world space; 2: a vertex shader,
    whose planes are in Direct3D's clip space.
 
    OpenGL defines no user clipping for an ARB vertex program's output. Mesa clips its
@@ -4687,7 +4688,7 @@ static void tnl_arrays(RCTX *c, const VERTICES *v, DWORD first)
 static void clip_state(RCTX *c, int kind)
 {
     GLF *gl = gl_of(c);
-    DWORD want = kind && c->dx8 && gl->ClipPlane ? c->rs[RS_CLIPPLANEENABLE] & ((1UL << CLIP_PLANES) - 1) : 0;
+    DWORD want = kind && gl->ClipPlane ? c->rs[RS_CLIPPLANEENABLE] & ((1UL << CLIP_PLANES) - 1) : 0;
     DWORD i, j;
     float inv[16];
 
@@ -6894,6 +6895,11 @@ void d3d_init(RDD_SHARED *s, DDCORECAPS *caps)
         D3DDEVCAPS_TEXTURESYSTEMMEMORY | D3DDEVCAPS_DRAWPRIMTLVERTEX |
         D3DDEVCAPS_CANRENDERAFTERFLIP | D3DDEVCAPS_HWRASTERIZATION |
         D3DDEVCAPS_DRAWPRIMITIVES2 | D3DDEVCAPS_DRAWPRIMITIVES2EX;
+    /* Direct3D 7's T&L HAL device: the runtime then offers it next to the HAL device, and a
+       program that chooses it sends untransformed vertices with the transforms, lights and
+       material, which the vertex programs made for Direct3D 8 draw (tnl_begin). */
+    if (tnl7_on)
+        h->dwDevCaps |= D3DDEVCAPS_HWTRANSFORMANDLIGHT;
     prim_caps(&h->dpcTriCaps);
     prim_caps(&h->dpcLineCaps);
     h->dwDeviceRenderBitDepth = DDBD_16 | DDBD_32;
@@ -6957,6 +6963,13 @@ static void extended_caps(D3DHAL_D3DEXTENDEDCAPS *x)
     x->wMaxTextureBlendStages = FF_STAGES;
     x->wMaxSimultaneousTextures = FF_STAGES;
     x->dvMaxVertexW = 1.0e10f;
+    if (tnl7_on) {                      /* what the T&L HAL device does (tnl_arb.c, clip_state) */
+        x->dwMaxActiveLights = TNL_LIGHTS;
+        x->dwVertexProcessingCaps = D3DVTXPCAPS_TEXGEN | D3DVTXPCAPS_MATERIALSOURCE7 |
+                                    D3DVTXPCAPS_VERTEXFOG | D3DVTXPCAPS_DIRECTIONALLIGHTS |
+                                    D3DVTXPCAPS_POSITIONALLIGHTS | D3DVTXPCAPS_LOCALVIEWER;
+        x->wMaxUserClipPlanes = CLIP_PLANES;
+    }
 }
 
 /* ---- Direct3D 8 (GetDriverInfo2) ---------------------------------------------------------------- */
@@ -7144,7 +7157,8 @@ static void d9_caps(RB_D3DCAPS9 *c)
    otherwise: "0" gives the runtime no answer, so it drives the HAL through the Direct3D 7
    interface and processes vertices itself; "1" offers the interface with the runtime's vertex
    processing; "2" is the default. D3D8Buffers "0" keeps buffers in the runtime's memory. D3D9 "0"
-   keeps a DirectX 9 runtime on the Direct3D 8 interface (d9_caps; the Direct3D 9 one needs "2"). Not an
+   keeps a DirectX 9 runtime on the Direct3D 8 interface (d9_caps; the Direct3D 9 one needs "2"). D3D7TnL
+   "0" keeps Direct3D 7 without its T&L HAL device (the runtime then processes its vertices). Not an
    environment variable: the runtime asks once per boot, in the first program that uses it, and
    keeps the answer for all others. */
 int d3d8_enabled(void)
@@ -7155,6 +7169,7 @@ int d3d8_enabled(void)
     char mode = '2';
     int buffers = 1;
     int d9 = 1;
+    int tnl7 = 1;
 
     if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, "Software\\moose-ripple", 0, KEY_READ, &k) == ERROR_SUCCESS) {
         if (RegQueryValueEx(k, "D3D8", NULL, &type, (BYTE *)v, &n) == ERROR_SUCCESS &&
@@ -7168,12 +7183,17 @@ int d3d8_enabled(void)
         if (RegQueryValueEx(k, "D3D9", NULL, &type, (BYTE *)v, &n) == ERROR_SUCCESS &&
             type == REG_SZ && v[0] == '0')
             d9 = 0;
+        n = sizeof v;
+        if (RegQueryValueEx(k, "D3D7TnL", NULL, &type, (BYTE *)v, &n) == ERROR_SUCCESS &&
+            type == REG_SZ && v[0] == '0')
+            tnl7 = 0;
         RegCloseKey(k);
     }
     d8_on = mode != '0';
     tnl_on = mode == '2';               /* and vertices processed on the GPU (tnl_begin) */
     buf_on = tnl_on && buffers;         /* in buffers the driver allocates */
     d9_on = tnl_on && d9;               /* and the Direct3D 9 interface for a DirectX 9 runtime */
+    tnl7_on = tnl_on && tnl7;           /* and Direct3D 7's T&L HAL device */
     return d8_on;
 }
 

@@ -783,6 +783,7 @@ restart:
 | `D3D8` = `"2"` or no value | and vertex processing on the GPU (fixed function, vertex shaders), with vertex and index buffers in the driver's memory |
 | `D3D8Buffers` = `"0"` | with `"2"`: buffers stay in the runtime's system memory (the path before 2026-11-26 13:00) |
 | `D3D9` = `"0"` | with `"2"`: a DirectX 9 runtime stays on the Direct3D 8 interface (the behaviour before 2026-11-27; see "The Direct3D 9 driver interface") |
+| `D3D7TnL` = `"0"` | with `"2"`: Direct3D 7 has no T&L HAL device, the runtime processes its vertices (the behaviour before 2026-11-27) |
 
 Learnt on Windows 98 SE with DirectX 8.1 (UTM):
 
@@ -906,6 +907,33 @@ and luminance scale and offset from c8..c15 (the Windows 2000 translator's layou
 the stage states before each draw. 3DMark 2001 SE needs Q8W8V8U8 for Nature ("device does not
 support bump normal maps" with V8U8 alone). `d9pixels`: 49 of 49 on the rig, `ps_texbem`
 included.
+
+### Direct3D 7 with vertex processing on the GPU (2026-11-27, on by default)
+
+The vertex programs that process Direct3D 8 and 9 vertices on the GPU (next section) were
+written from Direct3D 7's lighting equations, and the commands that carry transforms, lights,
+the material and clip planes are Direct3D 7's own, so the driver already handled them for
+every context. What was missing was only the offer. The HAL now reports
+`D3DDEVCAPS_HWTRANSFORMANDLIGHT` with eight lights, texture coordinate generation, material
+sources, vertex fog, directional and positional lights, the local viewer and six user clip
+planes; the Direct3D 7 runtime then lists a "Direct3D T&L HAL" device next to the HAL device,
+and a program that chooses it sends untransformed vertices. `D3D7TnL` = `"0"` under
+`HKLM\Software\moose-ripple` takes the device away again; it needs `D3D8` = `"2"` (the default).
+The HAL device is unchanged: the runtime processes its vertices as before.
+
+Checked on Windows 98 SE (Intel host) with the Windows 2000/XP side's Direct3D 7 tests, built
+with Visual C++ 6 and the DirectX 7 SDK:
+
+| Test | T&L HAL device | HAL device |
+|---|---|---|
+| `tlight` (lighting against Direct3D's equations) | 15 of 15 | uses Microsoft's RGB device instead |
+| `tfog` | 7 of 7 | 7 of 7 |
+| `tstage` | 9 of 9 | 9 of 9 |
+
+3DMark 2000 chooses "D3D Hardware T&L" by itself once the device exists, and its tests draw
+as before (helicopter, adventure, fill rate and texture tests looked at on captures taken
+through a run). A timed comparison with the guest's own vertex processing is still to do: the
+host was shared during these runs.
 
 ### The Direct3D 9 driver interface (2026-11-27, on by default)
 
