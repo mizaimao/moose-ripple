@@ -1260,7 +1260,7 @@ typedef struct {
     DWORD rc;                           /* Mesa's handle (DHGLRC) */
     LPDDRAWI_DIRECTDRAW_LCL ddl;
     LPDDRAWI_DDRAWSURFACE_LCL rt, z;
-    GLuint fbo, white, fog_tex;
+    GLuint fbo, white, black, fog_tex;
     DWORD fb_w, fb_h;
     FLATPTR fb_z;                       /* the z-buffer whose depth is attached (0: none) */
     GPUBUF cb[TARGETS];                 /* the picture of each render target */
@@ -1920,6 +1920,8 @@ static void context_free(RCTX *c)
             if (c->cb[i].rb)
                 gl->DeleteRenderbuffers(1, &c->cb[i].rb);
         for (i = 0; i < ZBUFFERS; i++)
+        if (c->black)
+            gl->DeleteTextures(1, &c->black);
             if (c->zb[i].rb)
                 gl->DeleteRenderbuffers(1, &c->zb[i].rb);
         let_go(c);
@@ -2875,6 +2877,23 @@ static void ff_target(RCTX *c, int unit, int kind)
         gl->Disable(GL_TEXTURE_CUBE_MAP);
     else if (c->ff_kind[unit] == 2)
         gl->Disable(GL_TEXTURE_3D);
+/* What a pixel shader reads from a stage without a texture: opaque black (the fixed-function
+   stages read white there). */
+static void black_texture(RCTX *c)
+{
+    GLF *gl = gl_of(c);
+    static const DWORD black = 0xFF000000;
+
+    if (!c->black) {
+        gl->GenTextures(1, &c->black);
+        gl->BindTexture(GL_TEXTURE_2D, c->black);
+        gl->TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_BGRA, GL_UNSIGNED_BYTE, &black);
+        gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    }
+    gl->BindTexture(GL_TEXTURE_2D, c->black);
+}
+
     if (kind == 1)
         gl->Enable(GL_TEXTURE_CUBE_MAP);
     else if (kind == 2)
@@ -2904,7 +2923,7 @@ static void apply_stages(RCTX *c)
             if (map && texture_bind(c, map, s))
                 c->bound[s] = map;
             else
-                white_texture(c);
+                black_texture(c);
         }
         gl->ActiveTexture(GL_TEXTURE0);
         apply_alpha_test(c);
