@@ -365,3 +365,32 @@ next present shows it. Recorded through QEMU's VNC on the Proxmox host while a C
 added: 7 frames flipped back with 0.6.0's kext and with main's, 0 with the fix (the same as
 with the limit off, `ripple_flush_hz=0`). OpenArena's timedemo on the same host: 305.7 frames/s
 before, 307.5 after.
+
+## KI-18: Flash in Safari stayed blank, and Chrome 49 composited in software (fixed after 0.6.0)
+
+GitHub issues: [#298](https://github.com/mizaimao/moose-ripple/issues/298) and
+[#299](https://github.com/mizaimao/moose-ripple/issues/299). Found and fixed on 2026-11-27;
+release 0.6.0 and earlier have them.
+
+**Symptom.** A Flash movie in Safari 5.1 showed as a white box (with Apple's software renderer it
+plays). Google Chrome 49, the last for 10.6, started its GPU process, which crashed at once, so
+Chrome drew everything in software.
+
+**Cause.** Both draw in one process and show the picture in another, through IOSurfaces: the
+plug-in host (or Chrome's GPU process) draws into them on the GPU, and Safari (or Chrome's
+browser process) ties the same surfaces to its own textures. Each process got its own copy of
+the surface's memory, and drawing on the GPU never reaches that memory, so the showing process
+saw only the empty surface. Chrome also never got that far: the driver listed extensions
+whose functions 10.6's OpenGL framework doesn't export, and Chrome's GPU process called one
+of them through a null pointer.
+
+**Fix.** An IOSurface's GPU image is now shared between processes: the first process that ties
+the surface to a texture shares its image with the kernel under the surface's ID, and the
+others open that image instead of copying the memory (`BUFFER_SHARE` and `BUFFER_OPEN`,
+[kext-uapi.md](kext-uapi.md)); `RIPPLE_GL_NO_IOSURFACE_SHARING=1` turns it off. And the
+extension string leaves out extensions whose key function a program can't reach
+(`RIPPLE_GL_ALL_EXTENSIONS=1` keeps them all). Checked in UTM: `gl-feature-check
+iosurface-xproc` reads the other process's drawing (grey without sharing); Flash in Safari
+plays (three screenshots a second apart all differ; blank with sharing off); Chrome's
+`chrome://gpu` reports compositing and WebGL hardware accelerated, and a spinning CSS box
+moves.

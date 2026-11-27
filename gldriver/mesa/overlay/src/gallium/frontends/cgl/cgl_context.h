@@ -5,6 +5,7 @@
 #define CGL_CONTEXT_H
 
 #include <stdbool.h>
+#include <stdio.h>
 
 #include "frontend/api.h"
 
@@ -110,5 +111,10 @@ void ripple_cgl_context_set_read_drawable(struct ripple_cgl_context *ctx,
  * the GL plugin (ripple_gl_target.c): the drawable for an accelerator ID, or NULL. */
 struct ripple_cgl_drawable *ripple_gld_pbuffer_lookup(uint32_t id, unsigned *width,
                                                       unsigned *height);
+
+/* What the driver leaves out of what a program asked for, counted for the development checks
+ * (ripple_gl_target.c): `kind` is a string constant, `detail` is copied. */
+void ripple_gl_skip(const char *kind, const char *detail);
+void ripple_gl_skips_print(FILE *f);
 
 #endif

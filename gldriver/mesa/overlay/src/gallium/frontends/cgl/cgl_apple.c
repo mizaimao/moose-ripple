@@ -36,6 +36,7 @@ ripple_cgl_unsupported(const char *name)
       seen[nseen++] = name;
    simple_mtx_unlock(&lock);
    fprintf(stderr, "RippleGLDriver: unsupported GL call %s (ignored)\n", name);
+   ripple_gl_skip("GL call not implemented", name);
 }
 
 void GLAPIENTRY
@@ -359,10 +360,13 @@ ripple_cgl_trace_pixels(GLsizei w, GLsizei h, GLenum format, GLenum type, const 
  * Hints Apple's GL accepts and Mesa refuses with GL_INVALID_ENUM: client storage, texture
  * storage hints, transform hint. WindowServer sets them on every texture and checks
  * glGetError, so they are taken here as no-ops (Mesa copies texture data anyway); everything
- * else goes on to Mesa. */
+ * else goes on to Mesa. Also GL_NV_multisample_filter_hint's hint, which Apple's GL takes on
+ * every renderer: the iTunes visualizer sets it, finds the error from Mesa's refusal at its next
+ * glGetError and gives up, leaving the view black (issue 304). */
 #define GL_UNPACK_CLIENT_STORAGE_APPLE   0x85B2
 #define GL_TEXTURE_STORAGE_HINT_APPLE    0x85BC
 #define GL_TRANSFORM_HINT_APPLE          0x85B1
+#define GL_MULTISAMPLE_FILTER_HINT_NV    0x8534
 
 void GLAPIENTRY
 ripple_cgl_tex_parameteri(void *rend, GLenum target, GLenum pname, GLint param)
@@ -403,7 +407,7 @@ ripple_cgl_tex_parameterfv(void *rend, GLenum target, GLenum pname, const GLfloa
 void GLAPIENTRY
 ripple_cgl_hint(void *rend, GLenum target, GLenum mode)
 {
-   if (target == GL_TRANSFORM_HINT_APPLE)
+   if (target == GL_TRANSFORM_HINT_APPLE || target == GL_MULTISAMPLE_FILTER_HINT_NV)
       return;
    RIPPLE_CGL_ENTER(rend);
    CALL_Hint(GET_DISPATCH(), (target, mode));
@@ -952,6 +956,13 @@ ripple_cgl_get_integerv(void *rend, GLenum pname, GLint *params)
 {
    struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
    RIPPLE_CGL_ENTER(rend);
+   /* GL_AUX_BUFFERS: Mesa dropped auxiliary buffers and refuses the name, leaving the variable
+    * unwritten; Apple's GL answers it, and programs that asked for auxiliary buffers read it
+    * to see what they got (issue 303). None are given. */
+   if (pname == 0x0C00 /* GL_AUX_BUFFERS */ && params) {
+      *params = 0;
+      return;
+   }
    /* GL_UNPACK_CLIENT_STORAGE_APPLE: WindowServer gets no answer, the value stays unwritten as
     * when Mesa refused the name. Answering it (with the tracked value) made WindowServer drop
     * the menu bar (VM 210, 2026-11-10): it saves this value around its own uploads, and what
@@ -993,6 +1004,9 @@ ripple_cgl_read_pixels(void *rend, GLint x, GLint y, GLsizei w, GLsizei h, GLenu
    struct ripple_cgl_context *rctx = ripple_cgl_context_for(rend);
    GET_CURRENT_CONTEXT(gl);
    struct row_bytes_saved rbs = { false };
+   if (rctx && gl && gl->ReadBuffer && gl->ReadBuffer == gl->WinSysReadBuffer &&
+       gl->ReadBuffer->_ColorReadBufferIndex == BUFFER_FRONT_LEFT)
+      ripple_cgl_drawable_fill_front(rctx);
    if (rctx && gl)
       row_bytes_apply(&gl->Pack, rctx->pack_row_bytes, format, type, &rbs);
    CALL_ReadPixels(GET_DISPATCH(), (x, y, w, h, format, type, pixels));
@@ -1933,13 +1947,16 @@ ripple_cgl_tex_image2D(void *rend, GLenum target, GLint level, GLenum internalfo
     * reading back, took 16 bits for its scene, and near surfaces fought (its reference check
     * failed; `gl-feature-check depth` shows the read-back). Where the 32-bit format is not
     * there, Mesa falls back to the 24-bit one as before. Debug: RIPPLE_GL_DEPTH24=1 in the
-    * environment keeps the 24-bit format, to see what a host's read-back does. */
+    * environment keeps the 24-bit format, to see what a host's read-back does.
+    * A 16-bit depth texture is kept in the 32-bit format too, as Apple's software renderer
+    * does: with 16 bits, a depth-peeling pass that draws the same surface again (Cinebench's
+    * glass) passed in about half the pixels it should discard (issue 308). */
    static int keep24 = -1;
    if (keep24 < 0) {
       const char *env = getenv("RIPPLE_GL_DEPTH24");
       keep24 = env && atoi(env);
    }
-   if (internalformat == GL_DEPTH_COMPONENT24 && !keep24)
+   if ((internalformat == GL_DEPTH_COMPONENT24 || internalformat == GL_DEPTH_COMPONENT16) && !keep24)
       internalformat = GL_DEPTH_COMPONENT32;
    tex_image2D_body(ctx, glctx, target, level, internalformat, width, height, border, format,
                     type, pixels);
@@ -2214,6 +2231,142 @@ float_pixels_wanted(void)
    }
    return wanted;
 }
+
+/* ---- Extensions a program can use ------------------------------------------------------- *
+ * A program on 10.6 reaches GL functions through the OpenGL framework, which exports only the
+ * functions of the extensions Apple's own drivers had. Mesa offers many more, and a program
+ * that believes the extension string and looks such a function up by name gets NULL: Google
+ * Chrome 49's GPU process called glFenceSync, glGenVertexArrays and 30 others that way and
+ * crashed at address 0 every time it started, so Chrome drew without the GPU (issue 299). An
+ * extension whose functions the program cannot reach is left out of the string; Mesa keeps it
+ * (the framework's own code does not use these). Each entry names one function the extension
+ * cannot do without. RIPPLE_GL_ALL_EXTENSIONS=1 keeps the whole list, for comparisons. */
+static const struct { const char *ext, *fn; } ext_needs[] = {
+   { "GL_ARB_sync", "glFenceSync" },
+   { "GL_ARB_vertex_array_object", "glGenVertexArrays" },
+   { "GL_ARB_map_buffer_range", "glMapBufferRange" },
+   { "GL_ARB_texture_storage", "glTexStorage2D" },
+   { "GL_EXT_texture_storage", "glTexStorage2DEXT" },
+   { "GL_ARB_texture_storage_multisample", "glTexStorage2DMultisample" },
+   { "GL_ARB_texture_multisample", "glTexImage2DMultisample" },
+   { "GL_ARB_timer_query", "glQueryCounter" },
+   { "GL_EXT_timer_query", "glGetQueryObjecti64vEXT" },
+   { "GL_ARB_get_program_binary", "glGetProgramBinary" },
+   { "GL_ARB_robustness", "glGetGraphicsResetStatusARB" },
+   { "GL_KHR_robustness", "glGetGraphicsResetStatus" },
+   { "GL_EXT_direct_state_access", "glMatrixLoadfEXT" },
+   { "GL_ARB_direct_state_access", "glCreateBuffers" },
+   { "GL_ARB_blend_func_extended", "glBindFragDataLocationIndexed" },
+   { "GL_ARB_shader_image_load_store", "glMemoryBarrier" },
+   { "GL_EXT_shader_image_load_store", "glMemoryBarrierEXT" },
+   { "GL_ARB_program_interface_query", "glGetProgramInterfaceiv" },
+   { "GL_KHR_blend_equation_advanced", "glBlendBarrierKHR" },
+   { "GL_OES_EGL_image", "glEGLImageTargetTexture2DOES" },
+   { "GL_ARB_copy_buffer", "glCopyBufferSubData" },
+   { "GL_ARB_instanced_arrays", "glVertexAttribDivisorARB" },
+   { "GL_ARB_draw_instanced", "glDrawArraysInstancedARB" },
+   { "GL_ARB_sampler_objects", "glGenSamplers" },
+   { "GL_KHR_debug", "glDebugMessageCallback" },
+   { "GL_ARB_debug_output", "glDebugMessageCallbackARB" },
+   { "GL_ARB_invalidate_subdata", "glInvalidateFramebuffer" },
+   { "GL_ARB_uniform_buffer_object", "glGetUniformBlockIndex" },
+   { "GL_ARB_texture_buffer_object", "glTexBufferARB" },
+   { "GL_ARB_separate_shader_objects", "glUseProgramStages" },
+   { "GL_ARB_vertex_attrib_binding", "glBindVertexBuffer" },
+   { "GL_ARB_ES2_compatibility", "glReleaseShaderCompiler" },
+   { "GL_ARB_clear_buffer_object", "glClearBufferData" },
+   { "GL_ARB_clear_texture", "glClearTexImage" },
+   { "GL_ARB_buffer_storage", "glBufferStorage" },
+   { "GL_ARB_copy_image", "glCopyImageSubData" },
+   { "GL_ARB_draw_indirect", "glDrawArraysIndirect" },
+   { "GL_ARB_multi_draw_indirect", "glMultiDrawArraysIndirect" },
+   { "GL_ARB_transform_feedback2", "glBindTransformFeedback" },
+   { "GL_ARB_transform_feedback3", "glDrawTransformFeedbackStream" },
+   { "GL_EXT_transform_feedback", "glBeginTransformFeedbackEXT" },
+   { "GL_ARB_viewport_array", "glViewportArrayv" },
+   { "GL_ARB_base_instance", "glDrawArraysInstancedBaseInstance" },
+   { "GL_ARB_draw_elements_base_vertex", "glDrawElementsBaseVertex" },
+   { "GL_ARB_provoking_vertex", "glProvokingVertex" },
+   { "GL_EXT_provoking_vertex", "glProvokingVertexEXT" },
+   { "GL_ARB_color_buffer_float", "glClampColorARB" },
+   { "GL_EXT_draw_buffers2", "glColorMaskIndexedEXT" },
+   { "GL_ARB_draw_buffers_blend", "glBlendFunciARB" },
+   { "GL_ARB_sample_shading", "glMinSampleShadingARB" },
+   { "GL_ARB_texture_view", "glTextureView" },
+   { "GL_ARB_internalformat_query", "glGetInternalformativ" },
+   { "GL_ARB_framebuffer_no_attachments", "glFramebufferParameteri" },
+   { "GL_ARB_multi_bind", "glBindBuffersBase" },
+   { "GL_ARB_polygon_offset_clamp", "glPolygonOffsetClamp" },
+   { "GL_EXT_polygon_offset_clamp", "glPolygonOffsetClampEXT" },
+   { "GL_ARB_clip_control", "glClipControl" },
+   { "GL_ARB_texture_barrier", "glTextureBarrier" },
+   { "GL_NV_texture_barrier", "glTextureBarrierNV" },
+   { "GL_ARB_tessellation_shader", "glPatchParameteri" },
+   { "GL_ARB_compute_shader", "glDispatchCompute" },
+   { "GL_ARB_shader_atomic_counters", "glGetActiveAtomicCounterBufferiv" },
+   { "GL_ARB_get_texture_sub_image", "glGetTextureSubImage" },
+   { "GL_ARB_indirect_parameters", "glMultiDrawArraysIndirectCountARB" },
+   { "GL_EXT_gpu_shader4", "glBindFragDataLocationEXT" },
+   { "GL_ARB_gpu_shader_fp64", "glUniform1d" },
+   { "GL_ARB_shader_subroutine", "glGetSubroutineIndex" },
+   { "GL_EXT_framebuffer_blit", "glBlitFramebufferEXT" },
+   { "GL_EXT_framebuffer_multisample", "glRenderbufferStorageMultisampleEXT" },
+   { "GL_ARB_framebuffer_object", "glGenerateMipmap" },
+   { "GL_EXT_texture_integer", "glClearColorIiEXT" },
+   { "GL_EXT_draw_instanced", "glDrawArraysInstancedEXT" },
+   { "GL_ARB_occlusion_query", "glGenQueriesARB" },
+   { "GL_ARB_vertex_buffer_object", "glBindBufferARB" },
+};
+
+/* `mesa` without the extensions this program cannot reach, into `out` (as long as `mesa`). */
+static void
+reachable_extensions(const char *mesa, char *out)
+{
+   static int all = -1;
+   if (all < 0) {
+      const char *e = getenv("RIPPLE_GL_ALL_EXTENSIONS");
+      all = e && *e == '1';
+   }
+   /* Looked up in the OpenGL framework, as programs do (our own bundle's symbols are no help). */
+   static void *gl;
+   if (!gl)
+      gl = dlopen("/System/Library/Frameworks/OpenGL.framework/OpenGL", RTLD_LAZY | RTLD_NOLOAD);
+   out[0] = 0;
+   unsigned hidden = 0;
+   char names[512] = "";
+   for (const char *p = mesa; *p;) {
+      while (*p == ' ')
+         p++;
+      size_t n = strcspn(p, " ");
+      if (!n)
+         break;
+      bool keep = true;
+      for (unsigned i = 0; !all && keep && i < sizeof(ext_needs) / sizeof(ext_needs[0]); i++)
+         if (strlen(ext_needs[i].ext) == n && !strncmp(p, ext_needs[i].ext, n) &&
+             gl && !dlsym(gl, ext_needs[i].fn)) {
+            keep = false;
+            hidden++;
+            if (strlen(names) + n + 2 < sizeof(names)) {
+               strcat(names, " ");
+               strncat(names, p, n);
+            }
+         }
+      if (keep) {
+         if (out[0])
+            strcat(out, " ");
+         strncat(out, p, n);
+      }
+      p += n;
+   }
+   extern FILE *ripple_gld_dbg_file(void);
+   static bool logged;
+   if (!logged && hidden && ripple_gld_dbg_file()) {
+      logged = true;
+      fprintf(ripple_gld_dbg_file(), "RippleGLDriver: %u extensions left out (no entry point in "
+              "this program):%s\n", hidden, names);
+   }
+}
+
 const GLubyte *GLAPIENTRY
 ripple_cgl_get_string(void *rend, GLenum name)
 {
@@ -2322,7 +2475,7 @@ ripple_cgl_get_string(void *rend, GLenum name)
       }
    }
    const GLubyte *r = s;
-   for (unsigned i = 0; extra[0] && i < 16; i++) {
+   for (unsigned i = 0; i < 16; i++) {
       if (cache[i].mesa == s) {
          r = (const GLubyte *)cache[i].ext;
          break;
@@ -2331,8 +2484,8 @@ ripple_cgl_get_string(void *rend, GLenum name)
          size_t n = strlen((const char *)s), m = strlen(extra);
          char *e = malloc(n + m + 1);
          if (e) {
-            memcpy(e, s, n);
-            memcpy(e + n, extra, m + 1);
+            reachable_extensions((const char *)s, e);
+            strcat(e, extra);
             cache[i].mesa = s;
             cache[i].ext = e;
             r = (const GLubyte *)e;
@@ -2490,6 +2643,15 @@ GLenum GLAPIENTRY
 ripple_cgl_object_unpurgeable(void *rend, GLenum objectType, GLuint name, GLenum option)
 {
    return GL_RETAINED_APPLE;
+}
+
+/* GL_APPLE_texture_range: where the program would like a range of texture memory kept (the
+ * extension string offers it, as Core Image asks for it). Only a hint, with nothing to do here:
+ * accepted, no effect. It reached the unsupported-call stub, and with the development checks
+ * every WindowServer, Safari and Chrome process reported a skip for it (2026-11-27). */
+void GLAPIENTRY
+ripple_cgl_texture_range(void *rend, GLenum target, GLsizei length, const GLvoid *pointer)
+{
 }
 
 void GLAPIENTRY
@@ -2737,9 +2899,17 @@ ripple_cgl_program_string(void *rend, GLenum target, GLenum format, GLsizei len,
  * (issue 11). So the first texture tied to a surface gets the copy from its memory, the image
  * is remembered (ios_images), and later textures tied to the same surface, size and target
  * share that image as Mesa shares an EGL image; the memory is copied in again only when the
- * surface's seed has moved since the last copy. Not shared: other processes (a drawing on the
- * GPU never reaches the surface's memory), and surfaces with planes. */
+ * surface's seed has moved since the last copy. Surfaces with planes are not shared.
+ *
+ * The same between processes (issue 298): Safari shows a plug-in's drawing, and Chrome its GPU
+ * process's, through surfaces the other process draws into on the GPU, and that drawing never
+ * reaches the surface's memory. So a new image is also shared with the kernel under the
+ * surface's ID (BUFFER_SHARE, docs/kext-uapi.md), and a process that has no image of a surface
+ * yet opens the one another process shared, if target and size fit; only then does it make
+ * its own. An opened image is not copied into from memory (the other process's drawing is
+ * there); a later change of the memory is, as above. */
 #include "main/image.h"
+#include "virgl/ripple/ripple_virgl_public.h"
 #include "main/teximage.h"
 #include "state_tracker/st_cb_eglimage.h"
 #include "frontend/api.h"
@@ -2813,8 +2983,25 @@ ripple_cgl_iosurface_texture(struct ripple_cgl_context *ctx, const uint32_t *v)
       }
       simple_mtx_unlock(&cs_lock);
    }
+   /* Not yet: the image another process shared under the surface's ID, if it fits. */
+   bool opened = false;
+   if (!share && obj && obj->Name && !planar && !getenv("RIPPLE_GL_NO_IOSURFACE_SHARING")) {
+      struct pipe_resource templ;
+      memset(&templ, 0, sizeof(templ));
+      templ.target = gl_target_to_pipe(target);
+      templ.format = PIPE_FORMAT_NONE;           /* the shared image's own */
+      templ.width0 = w;
+      templ.height0 = h;
+      templ.depth0 = 1;
+      templ.array_size = 1;
+      templ.bind = PIPE_BIND_SAMPLER_VIEW | PIPE_BIND_RENDER_TARGET;
+      share = ripple_virgl_resource_open(ctx->st->pipe->screen, id, &templ);
+      opened = share != NULL;
+      share_seed = seed;                         /* its drawing is on the GPU: no copy now */
+   }
    bool shared = share && ios_image_bind(gl, obj, target, ifmt, share);
    pipe_resource_reference(&share, NULL);
+   opened = opened && shared;
    bool copy = !shared || seed != share_seed;
 
    if (copy && ios.lock(s, 1 /* kIOSurfaceLockReadOnly */, NULL) == 0) {
@@ -2840,10 +3027,21 @@ ripple_cgl_iosurface_texture(struct ripple_cgl_context *ctx, const uint32_t *v)
       GLint bpp = _mesa_bytes_per_pixel(format, type);
       unpack.RowLength = bpp > 0 ? (GLint)(ios.row_bytes(s) / bpp) : 0;
    }
-   /* A new image: it must exist on the GPU before another context can share it. */
-   if (ret == 0 && !shared && obj && obj->Name && !planar && !obj->pt) {
-      _mesa_test_texobj_completeness(gl, obj);
-      st_finalize_texture(gl, ctx->st->pipe, obj, 0);
+   /* A new image: it must exist on the GPU before another context can share it, and other
+    * processes get it under the surface's ID, with the copy from memory sent ahead. */
+   bool exported = false;
+   if (ret == 0 && !shared && obj && obj->Name && !planar) {
+      if (!obj->pt) {
+         _mesa_test_texobj_completeness(gl, obj);
+         st_finalize_texture(gl, ctx->st->pipe, obj, 0);
+      }
+      if (obj->pt && obj->pt->target == gl_target_to_pipe(target) &&
+          obj->pt->width0 == (unsigned)w && obj->pt->height0 == (unsigned)h &&
+          !getenv("RIPPLE_GL_NO_IOSURFACE_SHARING")) {
+         exported = ripple_virgl_resource_share(obj->pt, id);
+         if (exported)
+            ctx->st->pipe->flush(ctx->st->pipe, NULL, 0);
+      }
    }
 
    /* Remember the pair (the reference from the lookup is kept with it). */
@@ -2904,9 +3102,16 @@ ripple_cgl_iosurface_texture(struct ripple_cgl_context *ctx, const uint32_t *v)
    extern FILE *ripple_gld_dbg_file(void);
    if (ripple_gld_dbg_file() && logged++ < 20)
       fprintf(ripple_gld_dbg_file(), "RippleGLDriver: IOSurface %u texture: target 0x%x format "
-              "0x%x/0x%x/0x%x %dx%d plane %u: %s%s%s\n", id, target, ifmt, format, type, w, h,
-              plane, ret ? "refused" : shared ? "shares the image" : "copied",
-              shared && copy ? ", copied in again" : "", kept ? ", followed from now on" : "");
+              "0x%x/0x%x/0x%x %dx%d plane %u: %s%s%s%s\n", id, target, ifmt, format, type, w, h,
+              plane, ret ? "refused" : opened ? "opens another process's image" :
+              shared ? "shares the image" : "copied", shared && copy ? ", copied in again" : "",
+              exported ? ", shared with other processes" : "", kept ? ", followed from now on" : "");
+   if (ret) {
+      char detail[48];
+      snprintf(detail, sizeof(detail), "target 0x%x format 0x%x/0x%x plane %u", target, format,
+               type, plane);
+      ripple_gl_skip("IOSurface texture refused", detail);
+   }
    RIPPLE_CGL_DIRECT_END();
    return ret;
 }

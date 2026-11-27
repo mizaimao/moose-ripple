@@ -17,8 +17,15 @@
  *   gl-feature-check stencil    a drawable with depth and stencil buffers, both used
  *   gl-feature-check iosurface  a texture that is an IOSurface follows the surface's contents
  *                               and one IOSurface drawn into in one context reads in another
+ *   gl-feature-check iosurface-xproc   one IOSurface drawn into in this process, read in another
  *   gl-feature-check stale [N]  N contexts in turn, each drawn with on one thread and destroyed
  *                               from another (software first: ours crashed here, issue 240)
+ *   gl-feature-check proxy      proxy textures of the iTunes visualizer's size (issue 304)
+ *   gl-feature-check fullscreen [W H [HOLD]]  a full-screen context as games start one (issue 312)
+ * Every mode ends with "against Apple's software renderer: ... PASS" or FAIL: each pixel read
+ * on ours is compared with the same read on the software renderer (rec_report), and the exit
+ * status is 1 when one differs by more than 3 of 255, apart from the reads listed in rec_known
+ * where Apple's renderer is the wrong one.
  */
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl.h>
@@ -26,6 +33,8 @@
 #include <OpenGL/CGLIOSurface.h>
 #include <IOSurface/IOSurface.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <ApplicationServices/ApplicationServices.h>
+#include <unistd.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +43,178 @@
 
 #define W 64
 #define H 64
+
+/* ---- Every pixel read, set against Apple's software renderer at the end ----------------------
+ * Each case runs on our renderer and on Apple's software renderer (kCGLRendererGenericFloatID).
+ * Every glReadPixels is kept, by case, renderer, the case's call number and the read's number
+ * in it; at the end each of our reads is compared with the software renderer's same read, and
+ * the run fails (exit status 1) when one differs by more than a small tolerance. A few reads
+ * where Apple's renderer itself is wrong are listed in rec_known with the reason; they are
+ * reported, not failed. Switched off with GL_FEATURE_CHECK_NO_COMPARE=1. */
+#include <pthread.h>
+#include <math.h>
+#define REC_TOL_BYTE 3                  /* of 255, per channel */
+#define REC_TOL_FLOAT 0.002f
+struct rec {
+    char key[80];                       /* function#call/read */
+    int sw;                             /* 1: Apple's software renderer */
+    GLenum type;                        /* GL_UNSIGNED_BYTE or GL_FLOAT */
+    size_t n;                           /* elements */
+    void *data;
+};
+static struct rec *recs;
+static size_t rec_count, rec_cap;
+static pthread_mutex_t rec_lock = PTHREAD_MUTEX_INITIALIZER;
+static char rec_case[64];               /* function#call of the case running now */
+static int rec_sw, rec_read;
+static struct { const char *func; int sw, calls; } rec_calls[64];
+
+static const struct { const char *prefix; const char *why; } rec_known[] = {
+    /* Reads where Apple's software renderer is wrong and ours gives the value the case wants
+     * (each case prints its "want"); found 2026-11-27 in UTM. */
+    { "run#0/0", "the software renderer draws nothing from a pbuffer tied with CGLTexImagePBuffer" },
+    { "run#0/1", "the software renderer draws nothing from a pbuffer tied with CGLTexImagePBuffer" },
+    { "run#0/2", "the software renderer draws nothing from a pbuffer tied with CGLTexImagePBuffer" },
+    { "run#0/3", "the software renderer draws nothing from a pbuffer tied with CGLTexImagePBuffer" },
+    { "run#0/4", "the software renderer draws nothing from a pbuffer tied with CGLTexImagePBuffer" },
+    { "run#0/5", "the software renderer draws nothing from a pbuffer tied with CGLTexImagePBuffer" },
+    { "run#0/6", "the software renderer draws nothing from a pbuffer tied with CGLTexImagePBuffer" },
+    { "run_sequence#0/", "the software renderer shows a tied pbuffer's previous frame" },
+    { "run_iosurface#0/2", "the software renderer doesn't follow a change of the IOSurface's memory" },
+    { "run_iosurface#0/3", "the software renderer doesn't follow a change of the IOSurface's memory" },
+    { "run_iosurface_share#0/2", "the software renderer doesn't follow a change of the IOSurface's memory" },
+    { "run_iosurface_share#0/3", "the software renderer doesn't follow a change of the IOSurface's memory" },
+    { "run_tex3d#0/15", "the software renderer keeps a client-storage 3D texture's first upload" },
+    { "run_tex3d#0/16", "the software renderer keeps a client-storage 3D texture's first upload" },
+    { "run_tex3d#0/17", "the software renderer keeps a client-storage 3D texture's first upload" },
+    { "run_tex3d#0/18", "the software renderer keeps a client-storage 3D texture's first upload" },
+    { "run_tex3d#0/19", "the software renderer keeps a client-storage 3D texture's first upload" },
+    /* Not a wrong picture on either side: the peel case's diagnostic read shows the gap between
+     * stored and own depth multiplied by a million; ours has about 3e-8 (blue 8), far under the
+     * case's 1.2e-7 threshold, and both draw the same surface again in 0 pixels (issue 308). */
+    { "run_peel#0/2", "a depth gap of about 3e-8 shown a million times larger, under the case's threshold" },
+    { "run_peel#0/5", "a depth gap of about 3e-8 shown a million times larger, under the case's threshold" },
+    { "run_peel#0/8", "a depth gap of about 3e-8 shown a million times larger, under the case's threshold" },
+    { NULL, NULL }
+};
+
+static void rec_begin(const char *func, const char *name)
+{
+    int sw = strstr(name, "software") || strstr(name, "Apple") ? 1 : 0, calls = 0;
+    pthread_mutex_lock(&rec_lock);
+    for (unsigned i = 0; i < sizeof(rec_calls) / sizeof(rec_calls[0]); i++) {
+        if (!rec_calls[i].func) {
+            rec_calls[i].func = func;
+            rec_calls[i].sw = sw;
+        }
+        if (rec_calls[i].func == func && rec_calls[i].sw == sw) {
+            calls = rec_calls[i].calls++;
+            break;
+        }
+    }
+    snprintf(rec_case, sizeof(rec_case), "%s#%d", func, calls);
+    rec_sw = sw;
+    rec_read = 0;
+    pthread_mutex_unlock(&rec_lock);
+}
+
+static void rec_read_pixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type,
+                            GLvoid *p)
+{
+    glReadPixels(x, y, w, h, format, type, p);
+    size_t comps = format == GL_RGBA || format == GL_BGRA ? 4 : format == GL_RGB ? 3 : 1;
+    size_t size = type == GL_FLOAT ? 4 : type == GL_UNSIGNED_BYTE ? 1 : 0;
+    if (!size || !rec_case[0] || getenv("GL_FEATURE_CHECK_NO_COMPARE"))
+        return;
+    size_t n = comps * (size_t)w * (size_t)h;
+    void *copy = malloc(n * size);
+    if (!copy)
+        return;
+    memcpy(copy, p, n * size);
+    pthread_mutex_lock(&rec_lock);
+    if (rec_count == rec_cap) {
+        rec_cap = rec_cap ? rec_cap * 2 : 256;
+        recs = realloc(recs, rec_cap * sizeof(*recs));
+    }
+    struct rec *r = &recs[rec_count++];
+    snprintf(r->key, sizeof(r->key), "%s/%d", rec_case, rec_read++);
+    r->sw = rec_sw;
+    r->type = type;
+    r->n = n;
+    r->data = copy;
+    pthread_mutex_unlock(&rec_lock);
+}
+#define glReadPixels rec_read_pixels
+
+static const char *rec_known_why(const char *key)
+{
+    for (unsigned i = 0; rec_known[i].prefix; i++)
+        if (!strncmp(key, rec_known[i].prefix, strlen(rec_known[i].prefix)))
+            return rec_known[i].why;
+    return NULL;
+}
+
+/* Our reads against the software renderer's: prints a line per difference and a summary;
+ * returns the exit status (1 when one of ours differs beyond the tolerance). */
+static int rec_report(void)
+{
+    if (getenv("GL_FEATURE_CHECK_NO_COMPARE"))
+        return 0;
+    int compared = 0, differ = 0, known = 0, unpaired = 0;
+    for (size_t i = 0; i < rec_count; i++) {
+        const struct rec *o = &recs[i], *s = NULL;
+        if (o->sw)
+            continue;
+        for (size_t j = 0; j < rec_count && !s; j++)
+            if (recs[j].sw && !strcmp(recs[j].key, o->key))
+                s = &recs[j];
+        if (!s || s->n != o->n || s->type != o->type) {
+            unpaired++;
+            continue;
+        }
+        compared++;
+        size_t bad = o->n;
+        float worst = 0;
+        for (size_t k = 0; k < o->n; k++) {
+            float d = o->type == GL_FLOAT
+                ? fabsf(((const float *)o->data)[k] - ((const float *)s->data)[k])
+                : (float)abs(((const uint8_t *)o->data)[k] - ((const uint8_t *)s->data)[k]);
+            float tol = o->type == GL_FLOAT ? REC_TOL_FLOAT : REC_TOL_BYTE;
+            if (d > tol && d > worst) {
+                worst = d;
+                bad = k;
+            }
+        }
+        if (bad == o->n)
+            continue;
+        const char *why = rec_known_why(o->key);
+        if (why)
+            known++;
+        else
+            differ++;
+        size_t px = bad / 4 * 4;
+        if (o->type == GL_FLOAT)
+            printf("%s %s: element %zu ours %.4f, software %.4f%s%s\n", why ? "KNOWN" : "DIFFERS",
+                   o->key, bad, ((const float *)o->data)[bad], ((const float *)s->data)[bad],
+                   why ? ": " : "", why ? why : "");
+        else if (o->n >= px + 4)
+            printf("%s %s: pixel %zu ours %u %u %u %u, software %u %u %u %u%s%s\n",
+                   why ? "KNOWN" : "DIFFERS", o->key, px / 4,
+                   ((const uint8_t *)o->data)[px], ((const uint8_t *)o->data)[px + 1],
+                   ((const uint8_t *)o->data)[px + 2], ((const uint8_t *)o->data)[px + 3],
+                   ((const uint8_t *)s->data)[px], ((const uint8_t *)s->data)[px + 1],
+                   ((const uint8_t *)s->data)[px + 2], ((const uint8_t *)s->data)[px + 3],
+                   why ? ": " : "", why ? why : "");
+        else
+            printf("%s %s: element %zu ours %u, software %u\n", why ? "KNOWN" : "DIFFERS", o->key,
+                   bad, ((const uint8_t *)o->data)[bad], ((const uint8_t *)s->data)[bad]);
+    }
+    printf("against Apple's software renderer: %d reads compared, %d differ (tolerance %d of 255), "
+           "%d known differences (listed with the reason), %d not paired: %s\n", compared, differ,
+           REC_TOL_BYTE, known, unpaired, differ ? "FAIL" : "PASS");
+    fflush(stdout);
+    return differ ? 1 : 0;
+}
 
 static GLuint shader(GLenum type, const char *src)
 {
@@ -73,6 +254,7 @@ static const char *fs_lut =
 
 static void run(const char *name, CGLPixelFormatAttribute renderer)
 {
+    rec_begin(__func__, name);
     CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32, kCGLPFADoubleBuffer, kCGLPFAPBuffer,
                                         renderer ? kCGLPFARendererID : 0, renderer, 0 };
     if (!renderer)
@@ -376,6 +558,7 @@ static void run(const char *name, CGLPixelFormatAttribute renderer)
  * Variants: tie (as the game) or copy (glCopyTexImage2D in A instead). */
 static void run_sequence(const char *name, CGLPixelFormatAttribute renderer, bool copy)
 {
+    rec_begin(__func__, name);
     CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32, kCGLPFADoubleBuffer, kCGLPFAPBuffer,
                                         renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
                                         renderer, 0 };
@@ -516,6 +699,7 @@ static void run_sequence(const char *name, CGLPixelFormatAttribute renderer, boo
  * read back. */
 static void run_dxt(const char *name, CGLPixelFormatAttribute renderer)
 {
+    rec_begin(__func__, name);
     CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32,
                                         renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
                                         renderer, 0 };
@@ -584,6 +768,7 @@ static void run_dxt(const char *name, CGLPixelFormatAttribute renderer)
  * a 2D texture with a red left half and a green right half. */
 static void run_vbo(const char *name, CGLPixelFormatAttribute renderer)
 {
+    rec_begin(__func__, name);
     CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32,
                                         renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
                                         renderer, 0 };
@@ -675,6 +860,7 @@ static void run_vbo(const char *name, CGLPixelFormatAttribute renderer)
  * Right is "0 255 0" for unit 1 and "0 0 255" for unit 2 in every case. */
 static void run_samplers(const char *name, CGLPixelFormatAttribute renderer)
 {
+    rec_begin(__func__, name);
     CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32,
                                         renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
                                         renderer, 0 };
@@ -802,6 +988,7 @@ static void run_samplers(const char *name, CGLPixelFormatAttribute renderer)
  * again with GL_EQUAL: every pixel must pass (and with GL_LESS none). */
 static void run_samepos(const char *name, CGLPixelFormatAttribute renderer)
 {
+    rec_begin(__func__, name);
     CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32,
                                         renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
                                         renderer, 0 };
@@ -940,6 +1127,7 @@ static void run_samepos(const char *name, CGLPixelFormatAttribute renderer)
  * drawn everywhere. Also prints the stored depth as the program sees it at one pixel. */
 static void run_peel(const char *name, CGLPixelFormatAttribute renderer)
 {
+    rec_begin(__func__, name);
     CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32,
                                         renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
                                         renderer, 0 };
@@ -1079,6 +1267,7 @@ static void run_peel(const char *name, CGLPixelFormatAttribute renderer)
  * with s from -0.5 to 1.5: with the clamp, 0 at the left and 254 at the right. */
 static void run_redlum(const char *name, CGLPixelFormatAttribute renderer)
 {
+    rec_begin(__func__, name);
     CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32,
                                         renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
                                         renderer, 0 };
@@ -1169,6 +1358,7 @@ static void run_redlum(const char *name, CGLPixelFormatAttribute renderer)
  * program with a sampler1D; prints five pixels of each row. */
 static void run_tex1d(const char *name, CGLPixelFormatAttribute renderer)
 {
+    rec_begin(__func__, name);
     CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32,
                                         renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
                                         renderer, 0 };
@@ -1272,6 +1462,7 @@ static void run_tex1d(const char *name, CGLPixelFormatAttribute renderer)
  * values it has. */
 static void run_depth(const char *name, CGLPixelFormatAttribute renderer)
 {
+    rec_begin(__func__, name);
     CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32,
                                         renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
                                         renderer, 0 };
@@ -1409,6 +1600,7 @@ static void run_depth(const char *name, CGLPixelFormatAttribute renderer)
  * picture, red left half, green right half, blue bottom-right quarter; drawn scaled to 64x64. */
 static void run_generic(const char *name, CGLPixelFormatAttribute renderer, int size)
 {
+    rec_begin(__func__, name);
     CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32,
                                         renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
                                         renderer, 0 };
@@ -1532,6 +1724,7 @@ static void tex3d_read(const char *what, int n, int second)
 
 static void run_tex3d(const char *name, CGLPixelFormatAttribute renderer)
 {
+    rec_begin(__func__, name);
     CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32,
                                         renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
                                         renderer, 0 };
@@ -1641,6 +1834,7 @@ static const char *const yuv_programs[][2] = {
 
 static void run_yuv(const char *name, CGLPixelFormatAttribute renderer, bool pbuffer)
 {
+    rec_begin(__func__, name);
     /* Into a framebuffer object, or as Core Video does into a double-buffered context's
      * rectangle RGB pbuffer. */
     CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32, kCGLPFADoubleBuffer, kCGLPFAPBuffer,
@@ -1749,6 +1943,7 @@ static void run_yuv(const char *name, CGLPixelFormatAttribute renderer, bool pbu
 #endif
 static void run_ycbcr(const char *name, CGLPixelFormatAttribute renderer)
 {
+    rec_begin(__func__, name);
     CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32, kCGLPFAPBuffer,
                                         renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
                                         renderer, 0 };
@@ -1847,6 +2042,7 @@ static void run_ycbcr(const char *name, CGLPixelFormatAttribute renderer)
  * colour), and the nearer quad's yellow in the bottom quarter. */
 static void run_stencil(const char *name, CGLPixelFormatAttribute renderer)
 {
+    rec_begin(__func__, name);
     CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32, kCGLPFADepthSize, 24,
                                         kCGLPFAStencilSize, 8, kCGLPFADoubleBuffer, kCGLPFAPBuffer,
                                         renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
@@ -1934,6 +2130,7 @@ static void iosurface_fill(IOSurfaceRef s, uint32_t bgra)
 
 static void run_iosurface(const char *name, CGLPixelFormatAttribute renderer)
 {
+    rec_begin(__func__, name);
     CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32, kCGLPFAPBuffer,
                                         renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
                                         renderer, 0 };
@@ -2031,6 +2228,7 @@ static void ios_draw_quad(float x0, float y0, float x1, float y1, float s1, floa
 
 static void run_iosurface_share(const char *name, CGLPixelFormatAttribute renderer)
 {
+    rec_begin(__func__, name);
     CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32, kCGLPFAPBuffer,
                                         renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
                                         renderer, 0 };
@@ -2126,6 +2324,318 @@ static void run_iosurface_share(const char *name, CGLPixelFormatAttribute render
     CGLDestroyPixelFormat(pf);
 }
 
+/* One IOSurface in two processes, as browsers share a plugin's or a GPU process's picture
+ * (queue item 2, 2026-11-27): this process draws into a global surface through a framebuffer
+ * object (a red half over a blue clear) and a second process, started from here, looks the
+ * surface up by its ID and draws it. Apple's software renderer is the reference. */
+static CGLContextObj xproc_context(CGLPixelFormatAttribute renderer)
+{
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32, kCGLPFAPBuffer,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
+                                        renderer, 0 };
+    if (!renderer)
+        attrs[4] = 0;
+    CGLPixelFormatObj pf;
+    GLint npf;
+    CGLContextObj c = NULL;
+    if (CGLChoosePixelFormat(attrs, &pf, &npf) || !pf || CGLCreateContext(pf, NULL, &c))
+        return NULL;
+    CGLDestroyPixelFormat(pf);
+    return c;
+}
+
+/* The second process: draw surface ID into its own framebuffer object, print two pixels. */
+static int run_iosurface_xproc_child(const char *name, CGLPixelFormatAttribute renderer, uint32_t id)
+{
+    enum { SW = 64, SH = 64 };
+    CGLContextObj b = xproc_context(renderer);
+    IOSurfaceRef surf = IOSurfaceLookup(id);
+    if (!b || !surf) {
+        printf("  %s, second process: %s\n", name, b ? "surface not found" : "no context");
+        return 1;
+    }
+    CGLSetCurrentContext(b);
+    GLuint fbo, rb, tex;
+    glGenFramebuffersEXT(1, &fbo);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+    glGenRenderbuffersEXT(1, &rb);
+    glBindRenderbufferEXT(GL_RENDERBUFFER_EXT, rb);
+    glRenderbufferStorageEXT(GL_RENDERBUFFER_EXT, GL_RGBA8, SW, SH);
+    glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_RENDERBUFFER_EXT, rb);
+    glViewport(0, 0, SW, SH);
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, SW, 0, SH, -1, 1);
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_RECTANGLE_ARB, tex);
+    CGLError e = CGLTexImageIOSurface2D(b, GL_TEXTURE_RECTANGLE_ARB, GL_RGBA, SW, SH, GL_BGRA,
+                                        GL_UNSIGNED_INT_8_8_8_8_REV, surf, 0);
+    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glClearColor(0.5f, 0.5f, 0.5f, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glEnable(GL_TEXTURE_RECTANGLE_ARB);
+    ios_draw_quad(0, 0, SW, SH, SW, SH);
+    glDisable(GL_TEXTURE_RECTANGLE_ARB);
+    unsigned char px[2][4] = { { 0 } };
+    glReadPixels(SW / 4, SH / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px[0]);
+    glReadPixels(3 * SW / 4, SH / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px[1]);
+    printf("  %s, second process (surface %u, CGLTexImageIOSurface2D %d): left %3d %3d %3d %3d, "
+           "right %3d %3d %3d %3d (want red, blue)\n", name, id, e, px[0][0], px[0][1], px[0][2],
+           px[0][3], px[1][0], px[1][1], px[1][2], px[1][3]);
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(b);
+    CFRelease(surf);
+    return 0;
+}
+
+#include <spawn.h>
+#include <sys/wait.h>
+extern char **environ;
+
+static void run_iosurface_xproc(const char *self, const char *name, CGLPixelFormatAttribute renderer)
+{
+    rec_begin(__func__, name);
+    enum { SW = 64, SH = 64 };
+    CGLContextObj a = xproc_context(renderer);
+    int w = SW, h = SH, bpe = 4;
+    CFNumberRef nw = CFNumberCreate(NULL, kCFNumberIntType, &w), nh = CFNumberCreate(NULL, kCFNumberIntType, &h),
+                nb = CFNumberCreate(NULL, kCFNumberIntType, &bpe);
+    const void *keys[] = { kIOSurfaceWidth, kIOSurfaceHeight, kIOSurfaceBytesPerElement, kIOSurfaceIsGlobal };
+    const void *vals[] = { nw, nh, nb, kCFBooleanTrue };
+    CFDictionaryRef props = CFDictionaryCreate(NULL, keys, vals, 4, &kCFTypeDictionaryKeyCallBacks,
+                                               &kCFTypeDictionaryValueCallBacks);
+    IOSurfaceRef surf = IOSurfaceCreate(props);
+    if (!a || !surf) {
+        printf("%s: no context or surface\n", name);
+        return;
+    }
+    iosurface_fill(surf, 0xff808080);                   /* grey in memory to start with */
+    CGLSetCurrentContext(a);
+    GLuint ta, fbo;
+    glGenTextures(1, &ta);
+    glBindTexture(GL_TEXTURE_RECTANGLE_ARB, ta);
+    CGLError ea = CGLTexImageIOSurface2D(a, GL_TEXTURE_RECTANGLE_ARB, GL_RGBA8, SW, SH, GL_BGRA,
+                                         GL_UNSIGNED_INT_8_8_8_8_REV, surf, 0);
+    glGenFramebuffersEXT(1, &fbo);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+    glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT,
+                              GL_TEXTURE_RECTANGLE_ARB, ta, 0);
+    GLenum status = glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT);
+    glViewport(0, 0, SW, SH);
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, SW, 0, SH, -1, 1);
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    glClearColor(0, 0, 1, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glColor3f(1, 0, 0);
+    ios_draw_quad(0, 0, SW / 2, SH, 1, 1);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+    glFinish();
+    printf("%s: one IOSurface in two processes (framebuffer status 0x%x, CGLTexImageIOSurface2D %d):\n",
+           name, status, ea);
+    fflush(stdout);
+    char ids[16], rid[16];
+    snprintf(ids, sizeof(ids), "%u", IOSurfaceGetID(surf));
+    snprintf(rid, sizeof(rid), "%u", (unsigned)renderer);
+    char *args[] = { (char *)self, "iosurface-xproc-child", ids, rid, (char *)name, NULL };
+    pid_t pid;
+    int st = 0;
+    if (posix_spawn(&pid, self, NULL, NULL, args, environ) == 0)
+        waitpid(pid, &st, 0);
+    else
+        printf("  could not start the second process\n");
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(a);
+    CFRelease(surf);
+    CFRelease(props); CFRelease(nw); CFRelease(nh); CFRelease(nb);
+}
+
+
+/* A pixel format with an auxiliary buffer, as Blender 2.49 asks for (issue 303): our driver
+ * doesn't offer one, and says so in its skip counts (tools/sl-checks). */
+static void run_aux(const char *name, CGLPixelFormatAttribute renderer)
+{
+    rec_begin(__func__, name);
+    CGLPixelFormatAttribute attrs[] = { kCGLPFADoubleBuffer, kCGLPFADepthSize, 24, kCGLPFAAuxBuffers, 1,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated, renderer, 0 };
+    if (!renderer)
+        attrs[6] = 0;
+    CGLPixelFormatObj pf = NULL;
+    GLint npix = 0;
+    CGLError e = CGLChoosePixelFormat(attrs, &pf, &npix);
+    GLint aux = -1;
+    if (pf)
+        CGLDescribePixelFormat(pf, 0, kCGLPFAAuxBuffers, &aux);
+    printf("%s: a pixel format with one auxiliary buffer: %s (error %d, %d formats, aux buffers %d)\n",
+           name, pf ? "given" : "none", (int)e, (int)npix, (int)aux);
+    if (pf)
+        CGLDestroyPixelFormat(pf);
+}
+
+/* Full screen as games of the time start (issue 312): capture the main display, switch it to
+ * WxH if asked (Doom 3: 640x480), choose a full-screen pixel format for it, CGLSetFullScreen,
+ * clear to orange and flush, read the centre back, and hold HOLD seconds so the host can look
+ * at the display; then give everything back. Apple's software renderer offers no full screen,
+ * so only ours runs. */
+static void run_fullscreen(const char *name, int want_w, int want_h, int hold)
+{
+    rec_begin(__func__, name);
+    CGDirectDisplayID disp = CGMainDisplayID();
+    CGOpenGLDisplayMask mask = CGDisplayIDToOpenGLDisplayMask(disp);
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAFullScreen, kCGLPFADisplayMask, (CGLPixelFormatAttribute)mask,
+                                        kCGLPFADoubleBuffer, kCGLPFAColorSize, 32, kCGLPFADepthSize, 24,
+                                        kCGLPFAAccelerated, 0 };
+    CGLPixelFormatObj pf = NULL;
+    GLint npix = 0;
+    CGLError e = CGLChoosePixelFormat(attrs, &pf, &npix);
+    if (!pf) {
+        printf("%s: no full-screen pixel format (error %d)\n", name, (int)e);
+        return;
+    }
+    CGLContextObj c = NULL;
+    e = CGLCreateContext(pf, NULL, &c);
+    CGLDestroyPixelFormat(pf);
+    if (!c) {
+        printf("%s: no context (error %d)\n", name, (int)e);
+        return;
+    }
+    if (CGDisplayCapture(disp) != kCGErrorSuccess) {
+        printf("%s: the display could not be captured\n", name);
+        CGLDestroyContext(c);
+        return;
+    }
+    size_t was_w = CGDisplayPixelsWide(disp), was_h = CGDisplayPixelsHigh(disp);
+    if (want_w && want_h) {
+        boolean_t exact = 0;
+        CFDictionaryRef mode = CGDisplayBestModeForParameters(disp, 32, want_w, want_h, &exact);
+        CGError ce = mode ? CGDisplaySwitchToMode(disp, mode) : kCGErrorFailure;
+        printf("%s: display %zux%zu, switch to %dx%d: %s (exact %d)\n", name, was_w, was_h, want_w,
+               want_h, ce == kCGErrorSuccess ? "done" : "failed", (int)exact);
+    }
+    size_t w = CGDisplayPixelsWide(disp), h = CGDisplayPixelsHigh(disp);
+    CGLSetCurrentContext(c);
+    e = CGLSetFullScreen(c);
+    glViewport(0, 0, (GLsizei)w, (GLsizei)h);
+    glClearColor(1.0f, 0.5f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    unsigned char px[4] = { 0 };
+    glReadBuffer(GL_BACK);                  /* the front buffer after a swap is issue 306 */
+    glReadPixels((GLint)w / 2, (GLint)h / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    CGLFlushDrawable(c);
+    printf("%s: CGLSetFullScreen %d on %zux%zu; back buffer centre RGBA %3d %3d %3d %3d (want 255 128 0 255), "
+           "GL error 0x%x\n", name, (int)e, w, h, px[0], px[1], px[2], px[3], glGetError());
+    unsigned char fr[4] = { 0 };
+    glReadBuffer(GL_FRONT);                 /* the picture just swapped (issue 306) */
+    glReadPixels((GLint)w / 2, (GLint)h / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, fr);
+    printf("%s: front buffer after the flush: centre RGBA %3d %3d %3d %3d (want 255 128 0 255)\n",
+           name, fr[0], fr[1], fr[2], fr[3]);
+    fflush(stdout);
+    if (hold > 0)
+        sleep((unsigned)hold);
+    CGLClearDrawable(c);
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+    CGDisplayRelease(disp);                 /* the display mode comes back with the release */
+    printf("%s: released; display %zux%zu again\n", name, CGDisplayPixelsWide(disp),
+           CGDisplayPixelsHigh(disp));
+}
+
+/* Where the near plane is (issue 307): full-viewport quads given straight in clip space at
+ * z/w from -0.95 to 0.95 (w = 1), depth test off, each counted. OpenGL keeps -w <= z <= w, so
+ * every one must cover the whole target; a renderer that clips at z = 0 (Direct3D's near plane)
+ * drops the ones in front of it. */
+static void run_nearclip(const char *name, CGLPixelFormatAttribute renderer)
+{
+    rec_begin(__func__, name);
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32, kCGLPFAPBuffer,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated, renderer, 0 };
+    if (!renderer)
+        attrs[4] = 0;
+    CGLPixelFormatObj pf = NULL;
+    GLint npix = 0;
+    CGLContextObj c = NULL;
+    CGLChoosePixelFormat(attrs, &pf, &npix);
+    if (!pf || CGLCreateContext(pf, NULL, &c) != kCGLNoError) {
+        printf("%s: no context\n", name);
+        return;
+    }
+    CGLDestroyPixelFormat(pf);
+    CGLSetCurrentContext(c);
+    GLuint col, fbo;
+    glGenTextures(1, &col);
+    glBindTexture(GL_TEXTURE_2D, col);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glGenFramebuffersEXT(1, &fbo);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+    glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_2D, col, 0);
+    glViewport(0, 0, W, H);
+    glDisable(GL_DEPTH_TEST);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    static const float zs[] = { -0.95f, -0.6f, -0.2f, 0.2f, 0.6f, 0.95f };
+    printf("%s: full-viewport quads at clip z/w (w = 1), pixels covered of %d:", name, W * H);
+    for (unsigned k = 0; k < sizeof(zs) / sizeof(zs[0]); k++) {
+        unsigned char px[W * H * 4];
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glColor4f(0, 1, 0, 1);
+        glBegin(GL_QUADS);
+        glVertex3f(-1, -1, zs[k]);
+        glVertex3f(1, -1, zs[k]);
+        glVertex3f(1, 1, zs[k]);
+        glVertex3f(-1, 1, zs[k]);
+        glEnd();
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        int n = 0;
+        for (int i = 0; i < W * H; i++)
+            n += px[i * 4 + 1] > 128;
+        printf(" %.2f: %d", zs[k], n);
+    }
+    printf("; GL error 0x%x\n", glGetError());
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+}
+/* The iTunes visualizer's first check (breadth pass, 2026-11-27): a proxy rectangle texture of
+ * the view's size, RGBA with 8888_REV, then its width read back; the visualizer draws nothing
+ * when the answer is 0. A few sizes and formats, ours against Apple's software renderer. */
+static void run_proxy(const char *name, CGLPixelFormatAttribute renderer)
+{
+    rec_begin(__func__, name);
+    CGLContextObj c = xproc_context(renderer);
+    if (!c) {
+        printf("%s: no context\n", name);
+        return;
+    }
+    CGLSetCurrentContext(c);
+    static const struct { GLenum target, ifmt, format, type; int w, h; } cases[] = {
+        { GL_PROXY_TEXTURE_RECTANGLE_ARB, GL_RGBA, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, 1098, 546 },
+        { GL_PROXY_TEXTURE_RECTANGLE_ARB, GL_RGBA, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, 1098, 546 },
+        { GL_PROXY_TEXTURE_RECTANGLE_ARB, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, 1098, 546 },
+        { GL_PROXY_TEXTURE_2D, GL_RGBA, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, 1024, 512 },
+        { GL_PROXY_TEXTURE_RECTANGLE_ARB, GL_RGBA, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, 8192, 8192 },
+    };
+    GLint maxrect = 0;
+    glGetIntegerv(GL_MAX_RECTANGLE_TEXTURE_SIZE_ARB, &maxrect);
+    printf("%s: proxy textures (max rectangle size %d)\n", name, maxrect);
+    for (unsigned k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+        GLint w = -1, h = -1, f = -1;
+        glTexImage2D(cases[k].target, 0, cases[k].ifmt, cases[k].w, cases[k].h, 0, cases[k].format,
+                     cases[k].type, NULL);
+        GLenum err = glGetError();
+        glGetTexLevelParameteriv(cases[k].target, 0, GL_TEXTURE_WIDTH, &w);
+        glGetTexLevelParameteriv(cases[k].target, 0, GL_TEXTURE_HEIGHT, &h);
+        glGetTexLevelParameteriv(cases[k].target, 0, GL_TEXTURE_INTERNAL_FORMAT, &f);
+        printf("  target 0x%x %dx%d ifmt 0x%x format 0x%x type 0x%x: width %d height %d internal 0x%x, "
+               "errors 0x%x 0x%x\n", cases[k].target, cases[k].w, cases[k].h, cases[k].ifmt,
+               cases[k].format, cases[k].type, w, h, f, err, glGetError());
+    }
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+}
+
 /* ---- stale: a context destroyed from another thread ----------------------------------------- *
  * A thread draws with a context and lets go of it; the main thread destroys that context and
  * makes the next one, which the thread then draws with. A garbage-collected program does this
@@ -2189,6 +2699,7 @@ static void *stale_thread(void *arg)
 
 static void run_stale(const char *name, CGLPixelFormatAttribute renderer, int rounds)
 {
+    rec_begin(__func__, name);
     CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32,
                                         renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
                                         renderer, 0 };
@@ -2235,28 +2746,57 @@ static void run_stale(const char *name, CGLPixelFormatAttribute renderer, int ro
 
 int main(int argc, char **argv)
 {
+    if (argc > 4 && !strcmp(argv[1], "iosurface-xproc-child"))
+        return run_iosurface_xproc_child(argv[4], (CGLPixelFormatAttribute)strtoul(argv[3], NULL, 0),
+                                         (uint32_t)strtoul(argv[2], NULL, 0));
+    if (argc > 1 && !strcmp(argv[1], "fullscreen")) {
+        /* gl-feature-check fullscreen [W H [HOLD]] */
+        run_fullscreen("ours", argc > 3 ? atoi(argv[2]) : 0, argc > 3 ? atoi(argv[3]) : 0,
+                       argc > 4 ? atoi(argv[4]) : 4);
+        return rec_report();
+    }
+    if (argc > 1 && !strcmp(argv[1], "nearclip")) {
+        run_nearclip("ours", 0);
+        run_nearclip("software", (CGLPixelFormatAttribute)0x00020400);
+        return rec_report();
+    }
+    if (argc > 1 && !strcmp(argv[1], "aux")) {
+        run_aux("ours", 0);
+        run_aux("software", (CGLPixelFormatAttribute)0x00020400);
+        return rec_report();
+    }
+    if (argc > 1 && !strcmp(argv[1], "proxy")) {
+        run_proxy("ours", 0);
+        run_proxy("software", (CGLPixelFormatAttribute)0x00020400);
+        return rec_report();
+    }
+    if (argc > 1 && !strcmp(argv[1], "iosurface-xproc")) {
+        run_iosurface_xproc(argv[0], "ours", 0);
+        run_iosurface_xproc(argv[0], "software", (CGLPixelFormatAttribute)0x00020400);
+        return rec_report();
+    }
     if (argc > 1 && !strcmp(argv[1], "stale")) {
         int rounds = argc > 2 ? atoi(argv[2]) : 40;
         run_stale("software", (CGLPixelFormatAttribute)0x00020400, rounds);
         run_stale("ours", 0, rounds);
-        return 0;
+        return rec_report();
     }
     if (argc > 1 && !strcmp(argv[1], "iosurface")) {
         run_iosurface("ours", 0);
         run_iosurface("software", (CGLPixelFormatAttribute)0x00020400);
         run_iosurface_share("ours", 0);
         run_iosurface_share("software", (CGLPixelFormatAttribute)0x00020400);
-        return 0;
+        return rec_report();
     }
     if (argc > 1 && !strcmp(argv[1], "stencil")) {
         run_stencil("ours", 0);
         run_stencil("software", (CGLPixelFormatAttribute)0x00020400);
-        return 0;
+        return rec_report();
     }
     if (argc > 1 && !strcmp(argv[1], "ycbcr")) {
         run_ycbcr("ours", 0);
         run_ycbcr("software", (CGLPixelFormatAttribute)0x00020400);
-        return 0;
+        return rec_report();
     }
     if (argc > 1 && !strcmp(argv[1], "yuv")) {
 
@@ -2264,67 +2804,67 @@ int main(int argc, char **argv)
         run_yuv("ours", 0, true);
         run_yuv("software", (CGLPixelFormatAttribute)0x00020400, false);
         run_yuv("software", (CGLPixelFormatAttribute)0x00020400, true);
-        return 0;
+        return rec_report();
     }
     if (argc > 1 && !strcmp(argv[1], "tex3d")) {
 
         run_tex3d("ours", 0);
         run_tex3d("software", (CGLPixelFormatAttribute)0x00020400);
-        return 0;
+        return rec_report();
     }
     if (argc > 1 && !strcmp(argv[1], "samplers")) {
         run_samplers("ours", 0);
         run_samplers("software", (CGLPixelFormatAttribute)0x00020400);
-        return 0;
+        return rec_report();
     }
     if (argc > 1 && !strcmp(argv[1], "samepos")) {
         run_samepos("ours", 0);
         run_samepos("software", (CGLPixelFormatAttribute)0x00020400);
-        return 0;
+        return rec_report();
     }
     if (argc > 1 && !strcmp(argv[1], "peel")) {
         run_peel("ours", 0);
         run_peel("software", (CGLPixelFormatAttribute)0x00020400);
-        return 0;
+        return rec_report();
     }
     if (argc > 1 && !strcmp(argv[1], "redlum")) {
         run_redlum("ours", 0);
         run_redlum("software", (CGLPixelFormatAttribute)0x00020400);
-        return 0;
+        return rec_report();
     }
     if (argc > 1 && !strcmp(argv[1], "tex1d")) {
         run_tex1d("ours", 0);
         run_tex1d("software", (CGLPixelFormatAttribute)0x00020400);
-        return 0;
+        return rec_report();
     }
     if (argc > 1 && !strcmp(argv[1], "depth")) {
         run_depth("ours", 0);
         run_depth("software", (CGLPixelFormatAttribute)0x00020400);
-        return 0;
+        return rec_report();
     }
     if (argc > 1 && !strcmp(argv[1], "generic")) {
         run_generic("ours", 0, 2048);
         run_generic("software", (CGLPixelFormatAttribute)0x00020400, 2048);
-        return 0;
+        return rec_report();
     }
     if (argc > 1 && !strcmp(argv[1], "vbo")) {
         run_vbo("ours", 0);
         run_vbo("software", (CGLPixelFormatAttribute)0x00020400);
-        return 0;
+        return rec_report();
     }
     if (argc > 1 && !strcmp(argv[1], "dxt")) {
         run_dxt("ours", 0);
         run_dxt("software", (CGLPixelFormatAttribute)0x00020400);
-        return 0;
+        return rec_report();
     }
     if (argc > 1 && !strcmp(argv[1], "sequence")) {
         run_sequence("ours", 0, false);
         run_sequence("ours", 0, true);
         run_sequence("software", (CGLPixelFormatAttribute)0x00020400, false);
         run_sequence("software", (CGLPixelFormatAttribute)0x00020400, true);
-        return 0;
+        return rec_report();
     }
     run("ours (accelerated)", 0);
     run("Apple software", (CGLPixelFormatAttribute)0x00020400);   /* kCGLRendererGenericFloatID */
-    return 0;
+    return rec_report();
 }

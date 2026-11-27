@@ -25,7 +25,8 @@ bool RippleAccelerator::start(IOService *provider)
     fDev->retain();
     fSurfacesLock = IOLockAlloc();
     fSurfaces = OSArray::withCapacity(8);
-    if (!fSurfacesLock || !fSurfaces)
+    fSharesLock = IOLockAlloc();
+    if (!fSurfacesLock || !fSurfaces || !fSharesLock)
         return false;
 
     bzero(&fInfo, sizeof(fInfo));
@@ -121,6 +122,11 @@ void RippleAccelerator::stop(IOService *provider)
     if (fSurfacesLock) {
         IOLockFree(fSurfacesLock);
         fSurfacesLock = 0;
+    }
+    // Every connection has closed by now, and with them every share; any left are leaked.
+    if (fSharesLock) {
+        IOLockFree(fSharesLock);
+        fSharesLock = 0;
     }
     if (fGL && fFB) {
         fFB->removeProperty("IOAccelTypes");
@@ -260,4 +266,80 @@ bool RippleAccelerator::describeSurface(uint32_t id, task_t asker, struct ripple
     }
     IOLockUnlock(fSurfacesLock);
     return found;
+}
+
+// ---- Buffers shared between connections (BUFFER_SHARE, BUFFER_OPEN) -------------------------
+
+enum { kMaxShares = 4096 };
+
+RippleShare *RippleAccelerator::addShare(uint64_t key, uint32_t handle, uint32_t uid,
+                                         IOBufferMemoryDescriptor *mem, uint64_t size,
+                                         const struct ripple_virgl_buffer_params &params)
+{
+    RippleShare *s = (RippleShare *)IOMalloc(sizeof(RippleShare));
+    if (!s)
+        return 0;
+    bzero(s, sizeof(*s));
+    s->handle = handle;
+    s->uid = uid;
+    s->holders = 1;
+    s->mem = mem;
+    s->size = size;
+    s->params = params;
+    IOLockLock(fSharesLock);
+    if (fShareCount >= kMaxShares) {
+        IOLockUnlock(fSharesLock);
+        IOFree(s, sizeof(*s));
+        return 0;
+    }
+    for (RippleShare *o = fShares; o; o = o->next)
+        if (o->key == key)
+            o->key = 0;                     // the newer buffer takes the key over
+    s->key = key;
+    s->next = fShares;
+    fShares = s;
+    fShareCount++;
+    IOLockUnlock(fSharesLock);
+    return s;
+}
+
+void RippleAccelerator::rekeyShare(RippleShare *s, uint64_t key)
+{
+    IOLockLock(fSharesLock);
+    for (RippleShare *o = fShares; o; o = o->next)
+        if (o->key == key && o != s)
+            o->key = 0;
+    s->key = key;
+    IOLockUnlock(fSharesLock);
+}
+
+RippleShare *RippleAccelerator::openShare(uint64_t key, uint32_t uid)
+{
+    RippleShare *found = 0;
+    IOLockLock(fSharesLock);
+    for (RippleShare *s = fShares; s && !found; s = s->next)
+        if (key && s->key == key && s->uid == uid) {
+            s->holders++;
+            found = s;
+        }
+    IOLockUnlock(fSharesLock);
+    return found;
+}
+
+bool RippleAccelerator::releaseShare(RippleShare *s)
+{
+    IOLockLock(fSharesLock);
+    bool last = --s->holders == 0;
+    if (last) {
+        for (RippleShare **p = &fShares; *p; p = &(*p)->next)
+            if (*p == s) {
+                *p = s->next;
+                break;
+            }
+        fShareCount--;
+    }
+    IOLockUnlock(fSharesLock);
+    if (last)
+        IOFree(s, sizeof(*s));
+    return last;
 }

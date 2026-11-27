@@ -41,6 +41,8 @@ call's result: the call has returned success, and the refusal is in the kernel l
 | 10 | `SURFACE_INFO` | scalar: accelerator surface id | struct `ripple_gpu_surface_info`: size, row bytes, screen position, screen size, flags (has CPU backing, is a region of the screen, a program presents on it), and the backing's address for the surface's own task |
 | 11 | `SURFACE_PRESENT` | scalars: accelerator surface id, buffer handle, context handle, flags | scalar: 1 the buffer is on the screen now, 0 the surface is not a plain region of the screen at the moment |
 | 12 | `SURFACE_TEXTURE` | scalars: accelerator surface id, buffer handle (one of the caller's; 0 = none), flags | scalar: 1 the buffer holds a frame of the surface now, 0 none has been presented yet |
+| 13 | `BUFFER_SHARE` | scalars: buffer handle, key | |
+| 14 | `BUFFER_OPEN` | scalar: key | scalars: buffer handle, backing size; struct `ripple_gpu_buffer_create`: the buffer's size and params as created |
 
 **Display.** `DISPLAY` (added for M5) puts a GPU buffer on the screen instead of the console
 framebuffer, and each further call with the same buffer presents its current contents. The
@@ -81,6 +83,20 @@ such a surface with `RIPPLE_GPU_SURFACE_FRAMES`. The standard surface client's F
 WindowServer sends when it wants a surface shown where it has just shaped it, is answered the
 same way as a present: the latest frame is copied to the screen if the surface is a plain
 region of it.
+
+**Buffers shared between processes.** `BUFFER_SHARE` and `BUFFER_OPEN` (added 2026-11-27,
+without a version change: an older kext answers `kIOReturnUnsupported`, and the caller goes on
+without sharing) let several connections use one buffer: what one draws into it, the others
+see. The owner names a buffer under a key of its choosing (not 0); another connection of the
+same user opens it by that key and gets the same handle, the backing size and the creation
+params, so it can describe the buffer to its own driver. The buffer then belongs to every
+connection that holds it: `BUFFER_DESTROY` (or closing the connection) lets go of it for that
+connection only, and the buffer goes away with its last holder. A connection that opens a
+buffer it already holds gets the same handle, and destroys it once more. A key names one
+buffer at a time: sharing another under the same key takes the key over, and connections that
+opened the older one keep it. The GL bundle uses IOSurface IDs as keys, so that a texture tied
+to an IOSurface is one GPU buffer in every process (issue 298). Each process orders its own
+work: what one has drawn reaches the others once it has submitted it.
 
 **Surfaces.** `SURFACE_INFO` (added for M5) describes one of the standard IOAccelerator surfaces
 (the type 0 client WindowServer and GL apps open): what a GL driver needs to render for it.

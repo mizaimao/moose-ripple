@@ -16,6 +16,7 @@
 #include "pipe/p_screen.h"
 #include "pipe/p_state.h"
 #include "state_tracker/st_context.h"
+#include "state_tracker/st_manager.h"
 #include "util/u_atomic.h"
 #include "util/box.h"
 #include "util/u_inlines.h"
@@ -33,6 +34,24 @@ static inline struct ripple_cgl_drawable *
 drawable(struct pipe_frontend_drawable *base)
 {
    return (struct ripple_cgl_drawable *)base;
+}
+
+/* The front buffer holds the picture last swapped, as on Apple's GL: a program may read it
+ * (glReadBuffer(GL_FRONT)) or draw on top of it after CGLFlushDrawable. Mesa asks for it only
+ * when a program first uses it, so a new front texture gets the back buffer's picture then,
+ * and a swap that doesn't flip the two copies the back into an existing front (issue 306: a
+ * pbuffer's front read empty, a full-screen front read whatever memory the host gave it). */
+static void
+copy_whole(struct pipe_context *pipe, struct pipe_resource *dst, struct pipe_resource *src)
+{
+   struct pipe_box box;
+
+   if (!pipe || !dst || !src || dst->width0 != src->width0 || dst->height0 != src->height0 ||
+       dst->format != src->format || dst->target != src->target ||
+       dst->nr_samples != src->nr_samples)
+      return;
+   u_box_2d(0, 0, src->width0, src->height0, &box);
+   pipe->resource_copy_region(pipe, dst, 0, 0, 0, 0, src, 0, &box);
 }
 
 static bool
@@ -87,6 +106,10 @@ drawable_validate(struct st_context *st, struct pipe_frontend_drawable *base,
       pipe_resource_reference(&d->textures[a], NULL);
       d->textures[a] = screen->resource_create(screen, &templat);
       pipe_resource_reference(&out[i], d->textures[a]);
+      /* Not filled here: a copy issued in the middle of Mesa's framebuffer validation hung
+       * WindowServer's screen capture (2 runs of 2). Filled before the first read of it. */
+      if (a == ST_ATTACHMENT_FRONT_LEFT)
+         d->front_unfilled = d->textures[ST_ATTACHMENT_BACK_LEFT] != NULL;
    }
    return true;
 }
@@ -118,6 +141,7 @@ present_stats(const char *how, int64_t t0)
       fprintf(f, "stats: %s: %u presents in %.1f s, %.1f frames/s while moving, %.2f ms per "
               "present\n", how, n, (now - start) / 1e9,
               intervals && moving ? intervals * 1e9 / moving : 0.0, busy / 1e6 / n);
+      ripple_gl_skips_print(f);
       start = now;
       n = intervals = 0;
       busy = moving = 0;
@@ -486,12 +510,16 @@ ripple_cgl_context_swap(struct ripple_cgl_context *ctx)
     * screen. Mesa picks up the swapped textures through the stamp. The same for a window the
     * kernel shows: it keeps the frame for WindowServer to read, which must not catch the next
     * one half drawn. */
+   d->front_unfilled = false;           /* the flip or the copy below fills it */
    if ((d->gpu_display || d->present_surface) && d->textures[ST_ATTACHMENT_BACK_LEFT] &&
        d->textures[ST_ATTACHMENT_FRONT_LEFT]) {
       struct pipe_resource *t = d->textures[ST_ATTACHMENT_BACK_LEFT];
       d->textures[ST_ATTACHMENT_BACK_LEFT] = d->textures[ST_ATTACHMENT_FRONT_LEFT];
       d->textures[ST_ATTACHMENT_FRONT_LEFT] = t;
       p_atomic_inc(&d->base.stamp);
+   } else if (d->textures[ST_ATTACHMENT_BACK_LEFT] && d->textures[ST_ATTACHMENT_FRONT_LEFT]) {
+      copy_whole(ctx->st->pipe, d->textures[ST_ATTACHMENT_FRONT_LEFT],
+                 d->textures[ST_ATTACHMENT_BACK_LEFT]);
    }
    RIPPLE_CGL_DIRECT_END();
 }
@@ -513,4 +541,21 @@ ripple_cgl_drawable_set_rect(struct ripple_cgl_drawable *d, bool rect)
       return;
    d->rect = rect;
    p_atomic_inc(&d->base.stamp);     /* Mesa revalidates: buffers of the new kind */
+}
+
+/* Before a read of the front buffer: a front texture made since the last swap gets the back
+ * buffer's picture now, at a safe point (issue 306). */
+void
+ripple_cgl_drawable_fill_front(struct ripple_cgl_context *ctx)
+{
+   struct ripple_cgl_drawable *d = ctx ? ctx->draw : NULL;
+
+   if (!d)
+      return;
+   st_manager_validate_framebuffers(ctx->st);   /* a front asked for just now is made here */
+   if (!d->front_unfilled)
+      return;
+   d->front_unfilled = false;
+   copy_whole(ctx->st->pipe, d->textures[ST_ATTACHMENT_FRONT_LEFT],
+              d->textures[ST_ATTACHMENT_BACK_LEFT]);
 }

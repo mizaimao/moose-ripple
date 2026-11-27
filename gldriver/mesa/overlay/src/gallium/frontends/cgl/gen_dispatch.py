@@ -76,6 +76,8 @@ CUSTOM = {
     'object_purgeable_APPLE': 'ripple_cgl_object_purgeable',
     'object_unpurgeable_APPLE': 'ripple_cgl_object_unpurgeable',
     'get_object_parameteriv_APPLE': 'ripple_cgl_get_object_parameteriv',
+    # GL_APPLE_texture_range: a hint where to keep texture memory; accepted with no effect.
+    'texture_range_APPLE': 'ripple_cgl_texture_range',
     # Shader compile and link: failures logged with their info log (debug log on; M6).
     'compile_shader_ARB': 'ripple_cgl_compile_shader',
     # Debug: text of a shader replaced before Mesa sees it (the shadersub switch, cgl_apple.c).
