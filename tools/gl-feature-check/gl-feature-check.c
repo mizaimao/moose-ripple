@@ -17,6 +17,7 @@
  *   gl-feature-check stencil    a drawable with depth and stencil buffers, both used
  *   gl-feature-check iosurface  a texture that is an IOSurface follows the surface's contents
  *                               and one IOSurface drawn into in one context reads in another
+ *   gl-feature-check iosurface-xproc   one IOSurface drawn into in this process, read in another
  *   gl-feature-check stale [N]  N contexts in turn, each drawn with on one thread and destroyed
  *                               from another (software first: ours crashed here, issue 240)
  */
@@ -2126,6 +2127,168 @@ static void run_iosurface_share(const char *name, CGLPixelFormatAttribute render
     CGLDestroyPixelFormat(pf);
 }
 
+/* One IOSurface in two processes, as browsers share a plugin's or a GPU process's picture
+ * (queue item 2, 2026-11-27): this process draws into a global surface through a framebuffer
+ * object (a red half over a blue clear) and a second process, started from here, looks the
+ * surface up by its ID and draws it. Apple's software renderer is the reference. */
+static CGLContextObj xproc_context(CGLPixelFormatAttribute renderer)
+{
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32, kCGLPFAPBuffer,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
+                                        renderer, 0 };
+    if (!renderer)
+        attrs[4] = 0;
+    CGLPixelFormatObj pf;
+    GLint npf;
+    CGLContextObj c = NULL;
+    if (CGLChoosePixelFormat(attrs, &pf, &npf) || !pf || CGLCreateContext(pf, NULL, &c))
+        return NULL;
+    CGLDestroyPixelFormat(pf);
+    return c;
+}
+
+/* The second process: draw surface ID into its own framebuffer object, print two pixels. */
+static int run_iosurface_xproc_child(const char *name, CGLPixelFormatAttribute renderer, uint32_t id)
+{
+    enum { SW = 64, SH = 64 };
+    CGLContextObj b = xproc_context(renderer);
+    IOSurfaceRef surf = IOSurfaceLookup(id);
+    if (!b || !surf) {
+        printf("  %s, second process: %s\n", name, b ? "surface not found" : "no context");
+        return 1;
+    }
+    CGLSetCurrentContext(b);
+    GLuint fbo, rb, tex;
+    glGenFramebuffersEXT(1, &fbo);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+    glGenRenderbuffersEXT(1, &rb);
+    glBindRenderbufferEXT(GL_RENDERBUFFER_EXT, rb);
+    glRenderbufferStorageEXT(GL_RENDERBUFFER_EXT, GL_RGBA8, SW, SH);
+    glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_RENDERBUFFER_EXT, rb);
+    glViewport(0, 0, SW, SH);
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, SW, 0, SH, -1, 1);
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_RECTANGLE_ARB, tex);
+    CGLError e = CGLTexImageIOSurface2D(b, GL_TEXTURE_RECTANGLE_ARB, GL_RGBA, SW, SH, GL_BGRA,
+                                        GL_UNSIGNED_INT_8_8_8_8_REV, surf, 0);
+    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    glClearColor(0.5f, 0.5f, 0.5f, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glEnable(GL_TEXTURE_RECTANGLE_ARB);
+    ios_draw_quad(0, 0, SW, SH, SW, SH);
+    glDisable(GL_TEXTURE_RECTANGLE_ARB);
+    unsigned char px[2][4] = { { 0 } };
+    glReadPixels(SW / 4, SH / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px[0]);
+    glReadPixels(3 * SW / 4, SH / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px[1]);
+    printf("  %s, second process (surface %u, CGLTexImageIOSurface2D %d): left %3d %3d %3d %3d, "
+           "right %3d %3d %3d %3d (want red, blue)\n", name, id, e, px[0][0], px[0][1], px[0][2],
+           px[0][3], px[1][0], px[1][1], px[1][2], px[1][3]);
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(b);
+    CFRelease(surf);
+    return 0;
+}
+
+#include <spawn.h>
+#include <sys/wait.h>
+extern char **environ;
+
+static void run_iosurface_xproc(const char *self, const char *name, CGLPixelFormatAttribute renderer)
+{
+    enum { SW = 64, SH = 64 };
+    CGLContextObj a = xproc_context(renderer);
+    int w = SW, h = SH, bpe = 4;
+    CFNumberRef nw = CFNumberCreate(NULL, kCFNumberIntType, &w), nh = CFNumberCreate(NULL, kCFNumberIntType, &h),
+                nb = CFNumberCreate(NULL, kCFNumberIntType, &bpe);
+    const void *keys[] = { kIOSurfaceWidth, kIOSurfaceHeight, kIOSurfaceBytesPerElement, kIOSurfaceIsGlobal };
+    const void *vals[] = { nw, nh, nb, kCFBooleanTrue };
+    CFDictionaryRef props = CFDictionaryCreate(NULL, keys, vals, 4, &kCFTypeDictionaryKeyCallBacks,
+                                               &kCFTypeDictionaryValueCallBacks);
+    IOSurfaceRef surf = IOSurfaceCreate(props);
+    if (!a || !surf) {
+        printf("%s: no context or surface\n", name);
+        return;
+    }
+    iosurface_fill(surf, 0xff808080);                   /* grey in memory to start with */
+    CGLSetCurrentContext(a);
+    GLuint ta, fbo;
+    glGenTextures(1, &ta);
+    glBindTexture(GL_TEXTURE_RECTANGLE_ARB, ta);
+    CGLError ea = CGLTexImageIOSurface2D(a, GL_TEXTURE_RECTANGLE_ARB, GL_RGBA8, SW, SH, GL_BGRA,
+                                         GL_UNSIGNED_INT_8_8_8_8_REV, surf, 0);
+    glGenFramebuffersEXT(1, &fbo);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+    glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT,
+                              GL_TEXTURE_RECTANGLE_ARB, ta, 0);
+    GLenum status = glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT);
+    glViewport(0, 0, SW, SH);
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, SW, 0, SH, -1, 1);
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    glClearColor(0, 0, 1, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glColor3f(1, 0, 0);
+    ios_draw_quad(0, 0, SW / 2, SH, 1, 1);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+    glFinish();
+    printf("%s: one IOSurface in two processes (framebuffer status 0x%x, CGLTexImageIOSurface2D %d):\n",
+           name, status, ea);
+    fflush(stdout);
+    char ids[16], rid[16];
+    snprintf(ids, sizeof(ids), "%u", IOSurfaceGetID(surf));
+    snprintf(rid, sizeof(rid), "%u", (unsigned)renderer);
+    char *args[] = { (char *)self, "iosurface-xproc-child", ids, rid, (char *)name, NULL };
+    pid_t pid;
+    int st = 0;
+    if (posix_spawn(&pid, self, NULL, NULL, args, environ) == 0)
+        waitpid(pid, &st, 0);
+    else
+        printf("  could not start the second process\n");
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(a);
+    CFRelease(surf);
+    CFRelease(props); CFRelease(nw); CFRelease(nh); CFRelease(nb);
+}
+
+/* The iTunes visualizer's first check (breadth pass, 2026-11-27): a proxy rectangle texture of
+ * the view's size, RGBA with 8888_REV, then its width read back; the visualizer draws nothing
+ * when the answer is 0. A few sizes and formats, ours against Apple's software renderer. */
+static void run_proxy(const char *name, CGLPixelFormatAttribute renderer)
+{
+    CGLContextObj c = xproc_context(renderer);
+    if (!c) {
+        printf("%s: no context\n", name);
+        return;
+    }
+    CGLSetCurrentContext(c);
+    static const struct { GLenum target, ifmt, format, type; int w, h; } cases[] = {
+        { GL_PROXY_TEXTURE_RECTANGLE_ARB, GL_RGBA, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, 1098, 546 },
+        { GL_PROXY_TEXTURE_RECTANGLE_ARB, GL_RGBA, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, 1098, 546 },
+        { GL_PROXY_TEXTURE_RECTANGLE_ARB, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, 1098, 546 },
+        { GL_PROXY_TEXTURE_2D, GL_RGBA, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, 1024, 512 },
+        { GL_PROXY_TEXTURE_RECTANGLE_ARB, GL_RGBA, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8_REV, 8192, 8192 },
+    };
+    GLint maxrect = 0;
+    glGetIntegerv(GL_MAX_RECTANGLE_TEXTURE_SIZE_ARB, &maxrect);
+    printf("%s: proxy textures (max rectangle size %d)\n", name, maxrect);
+    for (unsigned k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+        GLint w = -1, h = -1, f = -1;
+        glTexImage2D(cases[k].target, 0, cases[k].ifmt, cases[k].w, cases[k].h, 0, cases[k].format,
+                     cases[k].type, NULL);
+        GLenum err = glGetError();
+        glGetTexLevelParameteriv(cases[k].target, 0, GL_TEXTURE_WIDTH, &w);
+        glGetTexLevelParameteriv(cases[k].target, 0, GL_TEXTURE_HEIGHT, &h);
+        glGetTexLevelParameteriv(cases[k].target, 0, GL_TEXTURE_INTERNAL_FORMAT, &f);
+        printf("  target 0x%x %dx%d ifmt 0x%x format 0x%x type 0x%x: width %d height %d internal 0x%x, "
+               "errors 0x%x 0x%x\n", cases[k].target, cases[k].w, cases[k].h, cases[k].ifmt,
+               cases[k].format, cases[k].type, w, h, f, err, glGetError());
+    }
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+}
+
 /* ---- stale: a context destroyed from another thread ----------------------------------------- *
  * A thread draws with a context and lets go of it; the main thread destroys that context and
  * makes the next one, which the thread then draws with. A garbage-collected program does this
@@ -2235,6 +2398,19 @@ static void run_stale(const char *name, CGLPixelFormatAttribute renderer, int ro
 
 int main(int argc, char **argv)
 {
+    if (argc > 4 && !strcmp(argv[1], "iosurface-xproc-child"))
+        return run_iosurface_xproc_child(argv[4], (CGLPixelFormatAttribute)strtoul(argv[3], NULL, 0),
+                                         (uint32_t)strtoul(argv[2], NULL, 0));
+    if (argc > 1 && !strcmp(argv[1], "proxy")) {
+        run_proxy("ours", 0);
+        run_proxy("software", (CGLPixelFormatAttribute)0x00020400);
+        return 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "iosurface-xproc")) {
+        run_iosurface_xproc(argv[0], "ours", 0);
+        run_iosurface_xproc(argv[0], "software", (CGLPixelFormatAttribute)0x00020400);
+        return 0;
+    }
     if (argc > 1 && !strcmp(argv[1], "stale")) {
         int rounds = argc > 2 ? atoi(argv[2]) : 40;
         run_stale("software", (CGLPixelFormatAttribute)0x00020400, rounds);
