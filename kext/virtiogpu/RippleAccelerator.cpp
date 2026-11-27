@@ -209,13 +209,13 @@ void RippleAccelerator::removeSurface(OSObject *s)
 
 bool RippleAccelerator::presentSurfaceFrame(uint32_t id, uint32_t handle, uint32_t context,
                                             uint32_t format, uint32_t width, uint32_t height,
-                                            bool topFirst)
+                                            bool topFirst, const uint32_t *rect)
 {
     // The surface sends host commands for it: not with the list locked.
     RippleSurfaceClient *sc = retainSurface(id);
     if (!sc)
         return false;
-    bool shown = sc->presentFrame(handle, context, format, width, height, topFirst);
+    bool shown = sc->presentFrame(handle, context, format, width, height, topFirst, rect);
     sc->release();
     return shown;
 }

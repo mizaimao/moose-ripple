@@ -573,12 +573,14 @@ IOReturn RippleGPUClient::display(uint32_t handle, uint32_t x, uint32_t y, uint3
 // swap, with no part for WindowServer (docs/re/ioaccelerator-interface.md, trace 3). All of it
 // in RippleSurfaceClient::presentFrame.
 IOReturn RippleGPUClient::surfacePresent(uint32_t surface, uint32_t handle, uint32_t context,
-                                         uint32_t flags, uint64_t *shown)
+                                         uint32_t flags, const uint32_t *rect,
+                                         uint64_t *shown)
 {
     *shown = 0;
     Buffer *b = findBuffer(handle);
     int slot = contextSlot(context);
-    if (!b || slot < 0 || !b->width || !b->height || (flags & ~RIPPLE_GPU_PRESENT_TOP_FIRST))
+    if (!b || slot < 0 || !b->width || !b->height || (flags & ~(RIPPLE_GPU_PRESENT_TOP_FIRST | RIPPLE_GPU_PRESENT_RECT)) ||
+        ((flags & RIPPLE_GPU_PRESENT_RECT) != 0) != (rect != 0))
         return kIOReturnBadArgument;
     // The copies run in the caller's context and read this buffer.
     if (!(b->attached & (1u << slot))) {
@@ -587,7 +589,7 @@ IOReturn RippleGPUClient::surfacePresent(uint32_t surface, uint32_t handle, uint
         b->attached |= 1u << slot;
     }
     if (fAccel->presentSurfaceFrame(surface, b->handle, context, b->format, b->width, b->height,
-                                    (flags & RIPPLE_GPU_PRESENT_TOP_FIRST) != 0))
+                                    (flags & RIPPLE_GPU_PRESENT_TOP_FIRST) != 0, rect))
         *shown = 1;
     return kIOReturnSuccess;
 }
@@ -628,7 +630,7 @@ static const IOExternalMethodDispatch sDispatch[RIPPLE_GPU_METHOD_COUNT] = {
     /* WAIT */            { 0, 2, 0, 1, 0 },
     /* DISPLAY */         { 0, 5, 0, 0, 0 },
     /* SURFACE_INFO */    { 0, 1, 0, 0, sizeof(struct ripple_gpu_surface_info) },
-    /* SURFACE_PRESENT */ { 0, 4, 0, 1, 0 },
+    /* SURFACE_PRESENT */ { 0, kIOUCVariableStructureSize, 0, 1, 0 },   // 4, or 8 with a rectangle
     /* SURFACE_TEXTURE */ { 0, 3, 0, 1, 0 },
     /* BUFFER_SHARE */    { 0, 2, 0, 0, 0 },
     /* BUFFER_OPEN */     { 0, 1, 0, 2, sizeof(struct ripple_gpu_buffer_create) },
@@ -703,11 +705,21 @@ IOReturn RippleGPUClient::sMethod(OSObject *target, void *reference, IOExternalM
                                        (struct ripple_gpu_surface_info *)a->structureOutput)
             ? kIOReturnSuccess : kIOReturnNotFound;
         break;
-    case RIPPLE_GPU_SURFACE_PRESENT:
+    case RIPPLE_GPU_SURFACE_PRESENT: {
+        // Four scalars, or eight with RIPPLE_GPU_PRESENT_RECT: the rectangle to show.
+        uint32_t rect[4];
+        bool withRect = a->scalarInputCount == 8;
+        if (a->scalarInputCount != 4 && !withRect) {
+            r = kIOReturnBadArgument;
+            break;
+        }
+        for (unsigned k = 0; withRect && k < 4; k++)
+            rect[k] = (uint32_t)a->scalarInput[4 + k];
         r = c->surfacePresent((uint32_t)a->scalarInput[0], (uint32_t)a->scalarInput[1],
                               (uint32_t)a->scalarInput[2], (uint32_t)a->scalarInput[3],
-                              &a->scalarOutput[0]);
+                              withRect ? rect : 0, &a->scalarOutput[0]);
         break;
+    }
     case RIPPLE_GPU_SURFACE_TEXTURE:
         r = c->surfaceTexture((uint32_t)a->scalarInput[0], (uint32_t)a->scalarInput[1],
                               (uint32_t)a->scalarInput[2], &a->scalarOutput[0]);

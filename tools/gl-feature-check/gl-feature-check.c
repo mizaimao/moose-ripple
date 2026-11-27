@@ -21,6 +21,7 @@
  *   gl-feature-check stale [N]  N contexts in turn, each drawn with on one thread and destroyed
  *                               from another (software first: ours crashed here, issue 240)
  *   gl-feature-check proxy      proxy textures of the iTunes visualizer's size (issue 304)
+ *   gl-feature-check strings    the renderer's strings and how long the extension list is
  *   gl-feature-check fullscreen [W H [HOLD]]  a full-screen context as games start one (issue 312)
  * Every mode ends with "against Apple's software renderer: ... PASS" or FAIL: each pixel read
  * on ours is compared with the same read on the software renderer (rec_report), and the exit
@@ -2451,12 +2452,19 @@ static void run_iosurface_xproc(const char *self, const char *name, CGLPixelForm
 }
 
 
-/* A pixel format with an auxiliary buffer, as Blender 2.49 asks for (issue 303): our driver
- * doesn't offer one, and says so in its skip counts (tools/sl-checks). */
-static void run_aux(const char *name, CGLPixelFormatAttribute renderer)
+/* An auxiliary buffer, as Blender 2.49, Halo and Call of Duty 2 ask for (issue 303): a pbuffer
+ * drawable with GL_AUX0. The aux buffer is cleared red and the front blue, a green quad goes into
+ * the aux buffer's left half, and its left half is copied to the front as Blender saves and
+ * restores window contents; each step is read back and checked against the colour it should
+ * have (the run fails on a difference). Apple's software renderer can't be the reference here: it
+ * crashes in its first glClear of a pbuffer with an auxiliary buffer (GLRendererFloat,
+ * gldLoadPipelineProgram; 2026-11-27), so it runs only with "aux software". Returns the number
+ * of reads that differ. */
+static int run_aux(const char *name, CGLPixelFormatAttribute renderer)
 {
+    int bad = 0;
     rec_begin(__func__, name);
-    CGLPixelFormatAttribute attrs[] = { kCGLPFADoubleBuffer, kCGLPFADepthSize, 24, kCGLPFAAuxBuffers, 1,
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAPBuffer, kCGLPFAColorSize, 32, kCGLPFAAuxBuffers, 1,
                                         renderer ? kCGLPFARendererID : kCGLPFAAccelerated, renderer, 0 };
     if (!renderer)
         attrs[6] = 0;
@@ -2468,8 +2476,97 @@ static void run_aux(const char *name, CGLPixelFormatAttribute renderer)
         CGLDescribePixelFormat(pf, 0, kCGLPFAAuxBuffers, &aux);
     printf("%s: a pixel format with one auxiliary buffer: %s (error %d, %d formats, aux buffers %d)\n",
            name, pf ? "given" : "none", (int)e, (int)npix, (int)aux);
-    if (pf)
-        CGLDestroyPixelFormat(pf);
+    CGLContextObj c = NULL;
+    CGLPBufferObj pb = NULL;
+    if (!pf || CGLCreateContext(pf, NULL, &c) || !c ||
+        CGLCreatePBuffer(64, 64, GL_TEXTURE_2D, GL_RGBA, 0, &pb) || !pb) {
+        printf("  no context or pbuffer\n");
+        if (c)
+            CGLDestroyContext(c);
+        if (pf)
+            CGLDestroyPixelFormat(pf);
+        return 1;
+    }
+    CGLSetCurrentContext(c);
+    GLint screen = 0;
+    CGLGetVirtualScreen(c, &screen);
+    CGLSetPBuffer(c, pb, 0, 0, screen);
+    glViewport(0, 0, 64, 64);
+    GLint n = -1;
+    glGetIntegerv(GL_AUX_BUFFERS, &n);
+    GLubyte px[4];
+    glDrawBuffer(GL_AUX0);
+    GLenum e1 = glGetError();
+    glClearColor(1, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawBuffer(GL_FRONT);
+    glClearColor(0, 0, 1, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawBuffer(GL_AUX0);
+    glColor4f(0, 1, 0, 1);
+    glBegin(GL_QUADS);
+    glVertex2f(-1, -1); glVertex2f(0, -1); glVertex2f(0, 1); glVertex2f(-1, 1);
+    glEnd();
+    glFinish();
+    printf("  GL_AUX_BUFFERS %d, glDrawBuffer(GL_AUX0) error 0x%x\n", (int)n, e1);
+    static const GLubyte want_rgb[3][3] = { { 0, 255, 0 }, { 255, 0, 0 }, { 0, 0, 255 } };
+    static const struct { GLenum buf; int x; const char *what, *want; int w; } reads[] = {
+        { GL_AUX0, 16, "aux, left", "green", 0 }, { GL_AUX0, 48, "aux, right", "red", 1 },
+        { GL_FRONT, 16, "front, left", "blue", 2 }, { GL_FRONT, 48, "front, right", "blue", 2 },
+    };
+#define AUX_DIFFERS(p, w) (abs((p)[0] - want_rgb[w][0]) > 3 || abs((p)[1] - want_rgb[w][1]) > 3 || \
+                           abs((p)[2] - want_rgb[w][2]) > 3)
+    for (unsigned k = 0; k < 4; k++) {
+        glReadBuffer(reads[k].buf);
+        memset(px, 0, sizeof(px));
+        glReadPixels(reads[k].x, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        bool differs = AUX_DIFFERS(px, reads[k].w);
+        bad += differs;
+        printf("  %-13s %3d %3d %3d %3d (want %s)%s\n", reads[k].what, px[0], px[1], px[2], px[3],
+               reads[k].want, differs ? " DIFFERS" : "");
+    }
+    /* Blender's restore: the aux buffer's left half copied into the front. */
+    glReadBuffer(GL_AUX0);
+    glDrawBuffer(GL_FRONT);
+    glRasterPos2f(-1, -1);
+    glCopyPixels(0, 0, 32, 64, GL_COLOR);
+    glFinish();
+    glReadBuffer(GL_FRONT);
+    for (int x = 16; x < 64; x += 32) {
+        memset(px, 0, sizeof(px));
+        glReadPixels(x, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        bool differs = AUX_DIFFERS(px, x < 32 ? 0 : 2);
+        bad += differs;
+        printf("  front after copy, %s %3d %3d %3d %3d (want %s)%s\n", x < 32 ? "left: " : "right:",
+               px[0], px[1], px[2], px[3], x < 32 ? "green" : "blue", differs ? " DIFFERS" : "");
+    }
+    printf("  GL error at the end 0x%x\n", glGetError());
+    /* What stays refused: a color attachment as the drawable's draw buffer, and GL_AUX0 on a
+     * framebuffer object (both GL_INVALID_OPERATION). */
+    glDrawBuffer(GL_COLOR_ATTACHMENT0_EXT);
+    GLenum e2 = glGetError();
+    GLuint fbo = 0, tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 16, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glGenFramebuffersEXT(1, &fbo);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+    glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_2D, tex, 0);
+    glGetError();
+    glDrawBuffer(GL_AUX0);
+    GLenum e3 = glGetError();
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+    glDeleteFramebuffersEXT(1, &fbo);
+    glDeleteTextures(1, &tex);
+    bad += (e2 != GL_INVALID_OPERATION) + (e3 != GL_INVALID_OPERATION);
+    printf("  refused: GL_COLOR_ATTACHMENT0 on the drawable 0x%x, GL_AUX0 on a framebuffer object "
+           "0x%x (want 0x502 for both)\n", e2, e3);
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+    CGLDestroyPBuffer(pb);
+    CGLDestroyPixelFormat(pf);
+    printf("  %d of 8 checks differ from what they should give\n", bad);
+    return bad;
 }
 
 /* Full screen as games of the time start (issue 312): capture the main display, switch it to
@@ -2601,6 +2698,38 @@ static void run_nearclip(const char *name, CGLPixelFormatAttribute renderer)
 /* The iTunes visualizer's first check (breadth pass, 2026-11-27): a proxy rectangle texture of
  * the view's size, RGBA with 8888_REV, then its width read back; the visualizer draws nothing
  * when the answer is 0. A few sizes and formats, ours against Apple's software renderer. */
+/* The strings a program reads first. Games of the time copy the extension list into a fixed-size
+ * buffer, so its length matters as much as its contents. */
+static void run_strings(const char *name, CGLPixelFormatAttribute renderer)
+{
+    CGLContextObj c = xproc_context(renderer);
+    if (!c) {
+        printf("%s: no context\n", name);
+        return;
+    }
+    CGLSetCurrentContext(c);
+    const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+    int count = 0, longest = 0, run = 0;
+    for (const char *p = ext; p && *p; p++) {
+        if (*p == ' ') {
+            if (run) count++;
+            if (run > longest) longest = run;
+            run = 0;
+        } else {
+            run++;
+        }
+    }
+    if (run) count++;
+    if (run > longest) longest = run;
+    printf("%s: vendor \"%s\", renderer \"%s\", version \"%s\"\n", name,
+           (const char *)glGetString(GL_VENDOR), (const char *)glGetString(GL_RENDERER),
+           (const char *)glGetString(GL_VERSION));
+    printf("  extensions: %d, %lu characters, longest name %d\n", count,
+           (unsigned long)(ext ? strlen(ext) : 0), longest);
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(c);
+}
+
 static void run_proxy(const char *name, CGLPixelFormatAttribute renderer)
 {
     rec_begin(__func__, name);
@@ -2746,6 +2875,7 @@ static void run_stale(const char *name, CGLPixelFormatAttribute renderer, int ro
 
 int main(int argc, char **argv)
 {
+    setvbuf(stdout, NULL, _IOLBF, 0);   /* lines out before a crash in a renderer */
     if (argc > 4 && !strcmp(argv[1], "iosurface-xproc-child"))
         return run_iosurface_xproc_child(argv[4], (CGLPixelFormatAttribute)strtoul(argv[3], NULL, 0),
                                          (uint32_t)strtoul(argv[2], NULL, 0));
@@ -2761,9 +2891,17 @@ int main(int argc, char **argv)
         return rec_report();
     }
     if (argc > 1 && !strcmp(argv[1], "aux")) {
-        run_aux("ours", 0);
-        run_aux("software", (CGLPixelFormatAttribute)0x00020400);
-        return rec_report();
+        /* gl-feature-check aux [software]: ours, checked against the colours each read should
+         * have; "software" runs Apple's renderer instead, which crashes (run_aux). */
+        int bad = argc > 2 && !strcmp(argv[2], "software") ?
+            run_aux("software", (CGLPixelFormatAttribute)0x00020400) : run_aux("ours", 0);
+        printf("aux: %s\n", bad ? "FAIL" : "PASS");
+        return bad ? 1 : 0;
+    }
+    if (argc > 1 && !strcmp(argv[1], "strings")) {
+        run_strings("ours", 0);
+        run_strings("software", (CGLPixelFormatAttribute)0x00020400);
+        return 0;
     }
     if (argc > 1 && !strcmp(argv[1], "proxy")) {
         run_proxy("ours", 0);

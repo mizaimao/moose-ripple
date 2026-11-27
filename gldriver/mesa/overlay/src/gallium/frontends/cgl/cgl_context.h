@@ -20,6 +20,7 @@ struct ripple_cgl_pixel_format {
    unsigned stencil_bits;        /* 0 or 8 */
    unsigned accum_bits;          /* 0 or 64 */
    unsigned samples;             /* 0 = no multisampling */
+   unsigned aux_buffers;         /* 0 to 4: GL_AUX0.. on the context's drawables (issue 303) */
    bool double_buffer;
 };
 

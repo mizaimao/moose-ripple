@@ -158,6 +158,18 @@ ripple_cgl_device_fscreen(void)
        * user set wins. */
       setenv("MESA_GL_VERSION_OVERRIDE", "2.1", 0);
       setenv("MESA_GLSL_VERSION_OVERRIDE", "120", 0);
+      /* Games of the time that copy the extension list into a fixed-size buffer get only the
+       * extensions of their era (Mesa's year limit), so the list is as long as Apple's drivers
+       * gave them. Ours has 179 extensions in 4,496 characters, Apple's software renderer 110
+       * in 2,624; Halo 2.0.4 overwrote its stack with the rest and crashed at its settings
+       * dialog (the list it reads is 3,322 characters with the limit). Programs can't be given
+       * an environment when started from the Finder, hence the table; a value set wins. */
+      static const struct { const char *program, *year; } era[] = {
+         { "Halo", "2009" },
+      };
+      for (unsigned i = 0; i < ARRAY_SIZE(era); i++)
+         if (!strcmp(getprogname(), era[i].program))
+            setenv("MESA_EXTENSION_MAX_YEAR", era[i].year, 0);
       /* Debug runs (the bundle's log directory exists): Mesa's own messages, e.g. "User
        * error: GL_INVALID_VALUE in glTexImage2D(...)", which name the call behind an app's
        * "rendering error 501", go to /Library/Logs/RippleGL/mesa-PROGRAM-PID.log (opened at
@@ -230,11 +242,12 @@ ripple_cgl_device_surface_info(uint32_t id, struct ripple_gpu_surface_info *out)
 }
 
 bool
-ripple_cgl_device_surface_present(uint32_t surface, struct pipe_resource *res, bool top_first)
+ripple_cgl_device_surface_present(uint32_t surface, struct pipe_resource *res, bool top_first,
+                                  const uint32_t *rect)
 {
    struct pipe_frontend_screen *fscreen = ripple_cgl_device_fscreen();
    io_connect_t conn = device_connection();
-   uint64_t in[4] = { surface, 0, 0, top_first ? RIPPLE_GPU_PRESENT_TOP_FIRST : 0 }, out = 0;
+   uint64_t in[8] = { surface, 0, 0, top_first ? RIPPLE_GPU_PRESENT_TOP_FIRST : 0 }, out = 0;
    uint32_t out_cnt = 1;
 
    if (!fscreen || !conn || !res)
@@ -247,6 +260,18 @@ ripple_cgl_device_surface_present(uint32_t surface, struct pipe_resource *res, b
    }
    if (!in[1] || !in[2])
       return false;
+   /* A swap rectangle (issue 235): four more values. A kext from before refuses the longer call;
+    * then the whole frame is shown, as before. */
+   if (rect) {
+      in[3] |= RIPPLE_GPU_PRESENT_RECT;
+      for (unsigned k = 0; k < 4; k++)
+         in[4 + k] = rect[k];
+      if (IOConnectCallScalarMethod(conn, RIPPLE_GPU_SURFACE_PRESENT, in, 8, &out, &out_cnt) ==
+          KERN_SUCCESS)
+         return out == 1;
+      in[3] &= ~(uint64_t)RIPPLE_GPU_PRESENT_RECT;
+      out_cnt = 1;
+   }
    return IOConnectCallScalarMethod(conn, RIPPLE_GPU_SURFACE_PRESENT, in, 4, &out, &out_cnt) ==
           KERN_SUCCESS && out == 1;
 }
