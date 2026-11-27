@@ -297,6 +297,12 @@ DWORD WINAPI RippleSkips(DWORD *out, DWORD count)
 #define GL_PROGRAM_FORMAT_ASCII_ARB     0x8875
 #define GL_PROGRAM_ERROR_STRING_ARB     0x8874
 #define GL_MAX_TEXTURE_IMAGE_UNITS_ARB  0x8872
+#define GL_POLYGON_OFFSET_FILL          0x8037
+#define GL_FUNC_ADD                     0x8006
+#define GL_MIN                          0x8007
+#define GL_MAX                          0x8008
+#define GL_FUNC_SUBTRACT                0x800A
+#define GL_FUNC_REVERSE_SUBTRACT        0x800B
 #define GL_COMPRESSED_RGBA_S3TC_DXT1_EXT 0x83F1
 #define GL_COMPRESSED_RGBA_S3TC_DXT3_EXT 0x83F2
 #define GL_COMPRESSED_RGBA_S3TC_DXT5_EXT 0x83F3
@@ -450,6 +456,9 @@ typedef struct {
     void (APIENTRY *ClipPlane)(GLenum, const GLdouble *);
     /* how many texture image units a fragment program has (optional, context creation) */
     void (APIENTRY *GetIntegerv)(GLenum, GLint *);
+    /* depth bias and blend operations (optional, apply_depth_bias and apply_blend_op) */
+    void (APIENTRY *PolygonOffset)(GLfloat, GLfloat);
+    void (APIENTRY *BlendEquation)(GLenum);
 } GLF;
 
 #define GL_CORE_COUNT 53            /* entries up to DrvGetProcAddress */
@@ -483,6 +492,7 @@ static const char *const gl_names[] = {
     "glPointSize", "glPointParameterfv",
     "glClipPlane",
     "glGetIntegerv",
+    "glPolygonOffset", "glBlendEquation",
 };
 #define GL_ALL_COUNT (sizeof gl_names / sizeof gl_names[0])
 typedef char c_gl_names[sizeof(GLF) == GL_ALL_COUNT * sizeof(PROC) ? 1 : -1];
@@ -2182,6 +2192,50 @@ static void enable(GLF *gl, GLenum cap, DWORD on)
         gl->Disable(cap);
 }
 
+#define RS_ZBIAS 47                     /* Direct3D 7 and 8: 0 to 16 */
+#define RS_BLENDOP 171                  /* Direct3D 8 and 9: D3DBLENDOP_* */
+#define RS_SLOPESCALEDEPTHBIAS 175      /* Direct3D 9: a float */
+#define RS_DEPTHBIAS 195                /* Direct3D 9: a float, in units of the depth range */
+
+/* Direct3D 8 and 9's blend operation: source and destination added (the only one Direct3D 7
+   has), subtracted either way, or their minimum or maximum. */
+static void apply_blend_op(RCTX *c)
+{
+    static const GLenum equation[6] = { GL_FUNC_ADD, GL_FUNC_ADD, GL_FUNC_SUBTRACT,
+                                        GL_FUNC_REVERSE_SUBTRACT, GL_MIN, GL_MAX };
+    GLF *gl = gl_of(c);
+    DWORD op = c->rs[RS_BLENDOP];
+
+    if (gl->BlendEquation)
+        gl->BlendEquation(equation[op < 6 ? op : 1]);
+}
+
+/* Depth bias, as OpenGL's polygon offset; its unit is the smallest step of the depth buffer,
+   which is 24 bits on the GPU whatever the program's z-buffer is (framebuffer). Direct3D 7 and
+   8 have D3DRS_ZBIAS, 0 to 16: of two coplanar polygons the one with the higher value is in
+   front. Direct3D leaves the size of a step to the driver; it is 64 units here (1/262144 of
+   the depth range), enough to settle coplanar polygons after interpolation and small beside
+   any distance a scene uses. Direct3D 9 has D3DRS_DEPTHBIAS, a float added to z in units of
+   the depth range, and D3DRS_SLOPESCALEDEPTHBIAS, a float times the polygon's depth slope:
+   OpenGL's two arguments. The states a runtime does not have stay 0, so they simply add. */
+#define ZBIAS_UNITS 64.0f
+static void apply_depth_bias(RCTX *c)
+{
+    GLF *gl = gl_of(c);
+    DWORD steps = c->rs[RS_ZBIAS] > 16 ? 16 : c->rs[RS_ZBIAS];
+    float slope = *(const float *)&c->rs[RS_SLOPESCALEDEPTHBIAS];
+    float units = *(const float *)&c->rs[RS_DEPTHBIAS] * 16777216.0f - ZBIAS_UNITS * (float)(int)steps;
+
+    if (!gl->PolygonOffset)
+        return;
+    if (units != 0.0f || slope != 0.0f) {
+        gl->Enable(GL_POLYGON_OFFSET_FILL);
+        gl->PolygonOffset(slope, units);
+    } else {
+        gl->Disable(GL_POLYGON_OFFSET_FILL);
+    }
+}
+
 /* The depth test: ZENABLE, and only with a z-buffer. A target without one has no depth buffer
    attached (framebuffer), and Direct3D draws untested then. */
 static void apply_depth_test(RCTX *c)
@@ -2314,17 +2368,13 @@ static void unapplied_state(DWORD state, DWORD v)
         { 10, 0 },                      /* LINEPATTERN */
         { 33, 0 },                      /* STIPPLEDALPHA */
         { 40, 0 },                      /* EDGEANTIALIAS */
-        { 47, 0 },                      /* ZBIAS */
         { 128, 0 }, { 129, 0 }, { 130, 0 }, { 131, 0 },     /* WRAP0 to WRAP7 */
         { 132, 0 }, { 133, 0 }, { 134, 0 }, { 135, 0 },
         { 151, 0 },                     /* VERTEXBLEND */
         { 167, 0 },                     /* INDEXEDVERTEXBLENDENABLE */
-        { 171, 1 },                     /* BLENDOP: D3DBLENDOP_ADD */
-        { 175, 0 },                     /* SLOPESCALEDEPTHBIAS */
         { 176, 0 },                     /* ANTIALIASEDLINEENABLE */
         { 185, 0 },                     /* TWOSIDEDSTENCILMODE */
         { 194, 0 },                     /* SRGBWRITEENABLE */
-        { 195, 0 },                     /* DEPTHBIAS */
         { 206, 0 },                     /* SEPARATEALPHABLENDENABLE */
     };
     int i;
@@ -2363,6 +2413,14 @@ static void render_state(RCTX *c, DWORD state, DWORD v)
     case D3DRENDERSTATE_SRCBLEND:
     case D3DRENDERSTATE_DESTBLEND:
         apply_blend(c);
+        break;
+    case RS_BLENDOP:
+        apply_blend_op(c);
+        break;
+    case RS_ZBIAS:
+    case RS_SLOPESCALEDEPTHBIAS:
+    case RS_DEPTHBIAS:
+        apply_depth_bias(c);
         break;
     case D3DRENDERSTATE_ALPHATESTENABLE:
     case D3DRENDERSTATE_ALPHAREF:
@@ -7071,7 +7129,7 @@ static void prim_caps(D3DPRIMCAPS *p)
                     D3DPMISCCAPS_MASKZ;
     p->dwRasterCaps = D3DPRASTERCAPS_DITHER | D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_SUBPIXEL |
                       D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_FOGTABLE |
-                      D3DPRASTERCAPS_MIPMAPLODBIAS;
+                      D3DPRASTERCAPS_MIPMAPLODBIAS | D3DPRASTERCAPS_ZBIAS;
     p->dwZCmpCaps = p->dwAlphaCmpCaps = D3DPCMPCAPS_NEVER | D3DPCMPCAPS_LESS | D3DPCMPCAPS_EQUAL |
         D3DPCMPCAPS_LESSEQUAL | D3DPCMPCAPS_GREATER | D3DPCMPCAPS_NOTEQUAL |
         D3DPCMPCAPS_GREATEREQUAL | D3DPCMPCAPS_ALWAYS;
@@ -7257,7 +7315,8 @@ static void d8_caps(RB_D3DCAPS8 *c)
     c->caps2 = RB_D3DCAPS2_CANRENDERWINDOWED | 0x00400000UL;
     c->presentationIntervals = RB_D3DPRESENT_INTERVAL_IMMEDIATE | RB_D3DPRESENT_INTERVAL_ONE;
     c->devCaps = hw->dwDevCaps & ~D3DDEVCAPS_FLOATTLVERTEX;
-    c->primitiveMiscCaps = tri->dwMiscCaps | 0x80;     /* D3DPMISCCAPS_COLORWRITEENABLE (colour_mask) */
+    c->primitiveMiscCaps = tri->dwMiscCaps | 0x80 |    /* D3DPMISCCAPS_COLORWRITEENABLE (colour_mask) */
+                           0x800;                       /* D3DPMISCCAPS_BLENDOP (apply_blend_op) */
     c->rasterCaps = tri->dwRasterCaps & ~D3DPRASTERCAPS_SUBPIXEL;
     c->zCmpCaps = tri->dwZCmpCaps;
     c->srcBlendCaps = tri->dwSrcBlendCaps;
@@ -7355,7 +7414,9 @@ static void d9_caps(RB_D3DCAPS9 *c)
     c->caps8.primitiveMiscCaps = (c->caps8.primitiveMiscCaps | RB_D3DPMISCCAPS_FOGINFVF) & ~RB_D3DPMISCCAPS_LINEPATTERNREP;
     if (c->caps8.textureCaps & D3DPTEXTURECAPS_POW2)
         c->caps8.textureCaps |= D3DPTEXTURECAPS_NONPOW2CONDITIONAL;
-    c->caps8.rasterCaps = (c->caps8.rasterCaps | RB_D3DPRASTERCAPS_SCISSORTEST) & ~D3DPRASTERCAPS_PAT;
+    /* Direct3D 9 has no ZBIAS bit: its depth bias and slope scale bits instead (apply_depth_bias) */
+    c->caps8.rasterCaps = ((c->caps8.rasterCaps | RB_D3DPRASTERCAPS_SCISSORTEST | 0x04000000UL | 0x02000000UL) &
+                           ~(D3DPRASTERCAPS_PAT | D3DPRASTERCAPS_ZBIAS));
     c->caps8.caps2 |= RB_D3DCAPS2_DYNAMICTEXTURES;  /* (a texture's picture is its surface's memory) */
     c->caps8.vertexProcessingCaps &= ~RB_D3DVTXPCAPS_NO_VSDT_UBYTE4;
     c->devCaps2 = RB_D3DDEVCAPS2_STREAMOFFSET;

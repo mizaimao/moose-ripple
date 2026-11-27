@@ -1306,6 +1306,26 @@ benchmark run in the same process after the game tests; two later fill-rate runs
 second in its process, finished. Not explained.
 
 
+## Depth bias and blend operations (2026-11-27)
+
+Two render states the driver passed over, which the skip counters list as "not applied":
+
+- **Depth bias.** Direct3D 7 and 8 have `D3DRS_ZBIAS`, 0 to 16: of two polygons in one plane
+  the one with the higher value is in front (decals, shadows on the ground). Direct3D 9 has
+  `D3DRS_DEPTHBIAS`, a float added to the depth in units of the depth range, and
+  `D3DRS_SLOPESCALEDEPTHBIAS`. All three become OpenGL's polygon offset, whose unit is the
+  smallest step of the depth buffer (24 bits on the GPU whatever the program's z-buffer is).
+  Direct3D leaves the size of a ZBIAS step to the driver: 64 units here, 1/262144 of the depth
+  range. The capabilities say so: `D3DPRASTERCAPS_ZBIAS` for Direct3D 7 and 8,
+  `D3DPRASTERCAPS_DEPTHBIAS` and `D3DPRASTERCAPS_SLOPESCALEDEPTHBIAS` on the Direct3D 9
+  interface.
+- **Blend operations.** `D3DRS_BLENDOP` (Direct3D 8 and 9): source and destination added,
+  subtracted either way, or their minimum or maximum, as OpenGL's blend equation;
+  `D3DPMISCCAPS_BLENDOP` in the capabilities.
+
+Cases `zbias` and `blend_op` in `d8pixels`, `depth_bias` and `blend_op` in `d9pixels`; they
+run where the capabilities offer the states.
+
 ## Skip counters (a development check, 2026-11-27)
 
 A test that samples a few pixels passes when the driver quietly leaves something out next to
@@ -1322,7 +1342,7 @@ Windows started, one set for all processes (the DLL's data is shared):
 | 4 | target | a render target, a depth buffer or the OpenGL context cannot be drawn into |
 | 5 | texture | a texture's format has no upload |
 | 6 | copy | a copy or fill between surfaces or buffers is not done |
-| 7 | state | a fixed-function stage operation without an OpenGL combine mode (drawn as `MODULATE`), a stage argument without a source (specular, the temporary register), more lights on than the driver keeps, a render state the driver does not apply set to a value that asks for something (depth bias, the blend operation, texture wrapping, vertex blending, two-sided stencil, sRGB writes, separate alpha blending, line patterns, antialiased lines and edges) |
+| 7 | state | a fixed-function stage operation without an OpenGL combine mode (drawn as `MODULATE`), a stage argument without a source (specular, the temporary register), more lights on than the driver keeps, a render state the driver does not apply set to a value that asks for something (texture wrapping, vertex blending, two-sided stencil, sRGB writes, separate alpha blending, line patterns, antialiased lines and edges) |
 
 `RippleSkips(DWORD *out, DWORD count)`, exported by name, copies up to `count` of them and
 returns how many it filled in. A program reads them with `LoadLibrary("rippledd.dll")` and
