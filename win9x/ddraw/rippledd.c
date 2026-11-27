@@ -565,7 +565,11 @@ static void fill_caps(DDCORECAPS *c)
     c->dwSize = sizeof *c;
     c->dwCaps = DDCAPS_GDI;             /* the screen is GDI's too; blits: DirectDraw's own
                                            software, on video memory */
-    c->dwCaps2 = DDCAPS2_FLIPNOVSYNC;
+    /* WIDESURFACES: surfaces wider than the screen. Without it DirectDraw refuses a video memory
+       texture wider than the current mode (1024 wide at 800x600, 2048 at 1280x720): a managed
+       texture then gets no video memory copy and is drawn as if no texture were set. Textures
+       live in the linear system heap, which has no width. */
+    c->dwCaps2 = DDCAPS2_FLIPNOVSYNC | DDCAPS2_WIDESURFACES;
     c->ddsCaps.dwCaps = DDSCAPS_PRIMARYSURFACE | DDSCAPS_FLIP | DDSCAPS_OFFSCREENPLAIN |
                         DDSCAPS_BACKBUFFER | DDSCAPS_FRONTBUFFER | DDSCAPS_VIDEOMEMORY |
                         DDSCAPS_LOCALVIDMEM;
