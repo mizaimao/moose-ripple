@@ -209,6 +209,18 @@ ripple_cgl_context_create(const struct ripple_cgl_pixel_format *pf,
    }
    ctx->st->frontend_context = ctx;
    ctx->glctx = ctx->st->ctx;
+   /* At most 16 texture image units per stage (32 combined), as Apple's drivers of the time
+    * report (an NVIDIA GeForce 9600M GT: 16 fragment, 16 vertex, 32 combined). Mesa offers 32
+    * per stage here, and programs size their own tables by Mac GPUs: BioShock set up units up to
+    * GL_TEXTURE16 and crashed one past the end of its table, the same way twice. */
+   {
+      struct gl_context *gl = ctx->glctx;
+      for (int s = 0; s < MESA_SHADER_STAGES; s++)
+         gl->Const.Program[s].MaxTextureImageUnits = MIN2(gl->Const.Program[s].MaxTextureImageUnits, 16);
+      gl->Const.MaxCombinedTextureImageUnits = MIN2(gl->Const.MaxCombinedTextureImageUnits, 32);
+      gl->Const.MaxTextureUnits = MIN2(gl->Const.MaxTextureUnits,
+                                       gl->Const.Program[MESA_SHADER_FRAGMENT].MaxTextureImageUnits);
+   }
    live_add(ctx);
    /* The second GL thread (cgl_dispatch.h), where it is wanted and the driver can do it. */
    if (ripple_cgl_device_second_thread()) {
