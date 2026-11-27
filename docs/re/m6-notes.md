@@ -704,3 +704,30 @@ the counts stay as they are (0 of 24 with the larger picture, 1 of 24 and 6 of 6
 usual one). The test is not bit-identical to the host's own border: a twirl and a pinch then
 differ from the software renderer on 0.2 to 0.3% of the pixels (by up to 65 levels) where
 they did not before.
+
+## Games and programs of the time, with the development checks (2026-11-27)
+
+Run with `tools/sl-checks/check-run.sh` around each (driver skips, kext errors, host renderer
+errors) and the picture looked at:
+
+- **Halo 2.0.4** (UTM, it needs a sound device and a real CD drive): first it crashed at its
+  settings dialog. It copies the extension list into a fixed-size buffer; ours had 179
+  extensions in 4,496 characters (Apple's software renderer 110 in 2,624), and the rest
+  overwrote its stack (a pointer of 0x5f657275, "ure_"). Mesa's year limit, set for Halo by
+  program name, gives it 3,322 characters. Then it quit when its game started: its vertex
+  programs alias outputs (`ALIAS oPos = result.position;`), which Apple's parser takes and
+  Mesa's refuses; the ALIAS rewrite now turns `result.*` into `OUTPUT`. A refused ARB
+  program now counts as a skip and its text goes to the debug log. Now it reaches its menu,
+  full screen, with 0 skips.
+- **Auxiliary buffers** (Blender 2.49, Halo, Call of Duty 2 ask for them): given as
+  renderbuffers in a window framebuffer's color attachment slots 0..3, named GL_AUX0..3 (Mesa
+  patch 0017). Apple's software renderer crashes in its first clear of a pbuffer with an
+  auxiliary buffer, so `gl-feature-check aux` checks against the colours each read should have.
+- **Pass:** Neverball 1.5.3, Armagetron 0.2.8.3.3, Stellarium 0.11.2, Hedgewars 0.9.17, VLC
+  1.1.12 (Intel Iris Xe host), Nexuiz 2.5.2 (UTM; on a guest without a sound device it loops
+  asking CoreAudio for one), Blender 2.49b, the BioShock and Quake 4 demos (Proxmox host).
+- **Fails the checks:** Cinebench R11.5 asks for multisampling and for auxiliary buffers with
+  their own depth and stencil (132 skips, issue 325); its own picture check passes (99.38%).
+  On the Iris Xe host (QEMU 11.1.3) it hangs the guest, on main's build too: three processors
+  wait in `mp_rendezvous_action`, one in `mp_kdp_wait`. It doesn't hang on the Proxmox host.
+- **Not ours:** Frets on Fire stops in Python's Objective-C bridge on 10.6 before any GL.

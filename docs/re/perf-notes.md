@@ -1718,3 +1718,12 @@ found sound in 874 of 874 buffers at the menu and 861 of 862 in a race, the loud
 loud as `say`'s or louder. So the guest hands the game's sound to its audio device; where it
 goes after that is UTM's USB audio path, which can't be seen from inside the guest. Our driver
 is not on that path. The Proxmox host's VM has no audio device.
+
+## Re-measured for 0.6.2 (2026-11-27)
+
+OpenArena 0.8.8's timedemo (`demo088-test1`, 1024x768 window) on the Proxmox host alone, host
+GPU clock at 1200 MHz, VM 210, one run per build: main before #323 (kext 808c0509, bundle
+f88beaa7) 297.2 frames/s; with #323 (swap rectangles, auxiliary buffers; kext fcfcd695, bundle
+d5349c73) 299.6. Each run was checked: 12 captures a second apart all different, presents
+counted by the driver (2,473 and 2,501 in 10 s), driver skips 0, host renderer errors 0.
+No slowdown.
