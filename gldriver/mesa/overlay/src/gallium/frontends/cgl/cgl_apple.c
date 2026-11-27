@@ -1934,13 +1934,16 @@ ripple_cgl_tex_image2D(void *rend, GLenum target, GLint level, GLenum internalfo
     * reading back, took 16 bits for its scene, and near surfaces fought (its reference check
     * failed; `gl-feature-check depth` shows the read-back). Where the 32-bit format is not
     * there, Mesa falls back to the 24-bit one as before. Debug: RIPPLE_GL_DEPTH24=1 in the
-    * environment keeps the 24-bit format, to see what a host's read-back does. */
+    * environment keeps the 24-bit format, to see what a host's read-back does.
+    * A 16-bit depth texture is kept in the 32-bit format too, as Apple's software renderer
+    * does: with 16 bits, a depth-peeling pass that draws the same surface again (Cinebench's
+    * glass) passed in about half the pixels it should discard (issue 308). */
    static int keep24 = -1;
    if (keep24 < 0) {
       const char *env = getenv("RIPPLE_GL_DEPTH24");
       keep24 = env && atoi(env);
    }
-   if (internalformat == GL_DEPTH_COMPONENT24 && !keep24)
+   if ((internalformat == GL_DEPTH_COMPONENT24 || internalformat == GL_DEPTH_COMPONENT16) && !keep24)
       internalformat = GL_DEPTH_COMPONENT32;
    tex_image2D_body(ctx, glctx, target, level, internalformat, width, height, border, format,
                     type, pixels);

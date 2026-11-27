@@ -85,6 +85,12 @@ static const struct { const char *prefix; const char *why; } rec_known[] = {
     { "run_tex3d#0/17", "the software renderer keeps a client-storage 3D texture's first upload" },
     { "run_tex3d#0/18", "the software renderer keeps a client-storage 3D texture's first upload" },
     { "run_tex3d#0/19", "the software renderer keeps a client-storage 3D texture's first upload" },
+    /* Not a wrong picture on either side: the peel case's diagnostic read shows the gap between
+     * stored and own depth multiplied by a million; ours has about 3e-8 (blue 8), far under the
+     * case's 1.2e-7 threshold, and both draw the same surface again in 0 pixels (issue 308). */
+    { "run_peel#0/2", "a depth gap of about 3e-8 shown a million times larger, under the case's threshold" },
+    { "run_peel#0/5", "a depth gap of about 3e-8 shown a million times larger, under the case's threshold" },
+    { "run_peel#0/8", "a depth gap of about 3e-8 shown a million times larger, under the case's threshold" },
     { NULL, NULL }
 };
 
@@ -200,7 +206,7 @@ static int rec_report(void)
                    bad, ((const uint8_t *)o->data)[bad], ((const uint8_t *)s->data)[bad]);
     }
     printf("against Apple's software renderer: %d reads compared, %d differ (tolerance %d of 255), "
-           "%d known differences of the software renderer, %d not paired: %s\n", compared, differ,
+           "%d known differences (listed with the reason), %d not paired: %s\n", compared, differ,
            REC_TOL_BYTE, known, unpaired, differ ? "FAIL" : "PASS");
     fflush(stdout);
     return differ ? 1 : 0;
