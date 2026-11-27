@@ -2968,6 +2968,33 @@ static void volume_cases(int only, BOOL version2)
         }
         IDirect3DPixelShader9_Release(handle);
     }
+    /* 112 and 113: the third coordinate has an address mode of its own. The same quads one whole
+     * volume further along w: wrapped they show the four slices again, clamped all the last one.
+     * (A program that reads a noise volume at several scales, like 3DMark03's Pixel Shader 2.0
+     * test, counts on the wrap.) */
+    for (pass = 112; pass <= 113 && version2; ++pass) {
+        IDirect3DPixelShader9 *handle = NULL;
+        const char *name = pass == 112 ? "ps2_volume_wrap_w" : "ps2_volume_clamp_w";
+        SAMPLE beyond[5];
+        VV shifted[24];
+        HRESULT hr;
+        if (only && only != pass) continue;
+        for (i = 0; i < 24; ++i) { shifted[i] = v[i]; shifted[i].w += 1.0f; }
+        for (i = 0; i < 5; ++i) { beyond[i] = s[i]; if (pass == 113 && i < 4) beyond[i].rgb = colors[3] & 0xffffff; }
+        hr = IDirect3DDevice9_CreatePixelShader(device, ps2, &handle);
+        if (FAILED(hr)) { fail_hr(name, "create", hr); continue; }
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_ADDRESSW, pass == 112 ? D3DTADDRESS_WRAP : D3DTADDRESS_CLAMP);
+        if (begin(name)) {
+            IDirect3DDevice9_SetPixelShader(device, handle);
+            IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1 | D3DFVF_TEXCOORDSIZE3(0));
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 8, shifted, sizeof(shifted[0]));
+            IDirect3DDevice9_SetPixelShader(device, NULL);
+            if (FAILED(hr)) { fail_hr(name, "draw", hr); IDirect3DDevice9_EndScene(device); }
+            else check(name, beyond, 5);
+        }
+        IDirect3DPixelShader9_Release(handle);
+    }
+    IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_ADDRESSW, D3DTADDRESS_WRAP);
     IDirect3DDevice9_SetTexture(device, 0, NULL);
     IDirect3DVolumeTexture9_Release(volume);
     /* 49: the same slices in a DXT1 volume, one block each (565 colours, both ends alike). */

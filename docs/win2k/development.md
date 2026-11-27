@@ -3024,6 +3024,22 @@ What is left to gain: the sums (283 million chunks in a run, each a kilobyte rea
 the stream arenas of the buffers a program rewrites (3,711 of 8 MB each in a run), and the
 draws whose pixel shader the driver cannot translate yet.
 
+## The third texture coordinate's address mode
+
+A volume texture has an address mode for each of its three coordinates. Direct3D 8 and 9 set the
+third with stage state 25 (`D3DTSS_ADDRESSW`, `D3DSAMP_ADDRESSW`). The driver kept the first two
+only and gave the host a clamp for the third, whatever the program had set. 3DMark03's Pixel
+Shader 2.0 test reads its procedural volume textures at coordinates far outside 0 to 1 and wraps
+them, so its wood and marble came out wrong: in frame 300 at 640x480, 4.42 percent of the 8x8
+blocks differed from the reference rasterizer's picture. With the mode passed on it is 0.00
+percent (see "Benchmark frames against the reference rasterizer").
+
+The sampler word that the display driver hands the miniport holds the mode in bits 20 to 23
+(`stage_sampler` in `display_d3d7.c`; `sampler_valid` and the sampler object in
+`gpu_triangle.c`). Zero there means the clamp of before, which is what the Direct3D 7 draws
+send. `d9pixels` cases 112 (`ps2_volume_wrap_w`) and 113 (`ps2_volume_clamp_w`) draw a volume
+texture one whole volume further along the third coordinate, wrapped and clamped.
+
 ## Checking a benchmark run: pictures, counters, frame pacing
 
 A frame count says nothing about what was drawn. A run of 3DMark05 once counted 30 frames a

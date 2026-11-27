@@ -39,7 +39,7 @@ typedef char d8_lights_match[RB2K_D7_LIGHTS == 8 ? 1 : -1];
 typedef char material_record[sizeof(D3DNTHAL_DP2SETMATERIAL) == 17 * sizeof(ULONG) ? 1 : -1];
 typedef struct {
     ULONG texture, colorOp, colorArg1, colorArg2, alphaOp, alphaArg1, alphaArg2;
-    ULONG coordIndex, addressU, addressV, magFilter, minFilter, mipFilter, border, transform;
+    ULONG coordIndex, addressU, addressV, addressW, magFilter, minFilter, mipFilter, border, transform;
 } D7_STAGE;
 /* A pixel shader of a context: its handle, its tokens, the stages it
  * samples and reads, and its miniport programs, one per fog setting
@@ -923,7 +923,7 @@ static void default_stages(D7_CONTEXT *c)
         s->colorArg1 = s->alphaArg1 = D3DTA_TEXTURE;
         s->colorArg2 = s->alphaArg2 = D3DTA_CURRENT;
         s->coordIndex = stage;
-        s->addressU = s->addressV = D3DTADDRESS_WRAP;
+        s->addressU = s->addressV = s->addressW = D3DTADDRESS_WRAP;
         s->magFilter = D3DTFG_POINT;
         s->minFilter = D3DTFN_POINT;
         s->mipFilter = D3DTFP_NONE;
@@ -1245,6 +1245,7 @@ static void stage_state(D7_STAGE *s, ULONG state, ULONG value)
     case D3DTSS_ADDRESS: s->addressU = s->addressV = value; break;
     case D3DTSS_ADDRESSU: s->addressU = value; break;
     case D3DTSS_ADDRESSV: s->addressV = value; break;
+    case 25: s->addressW = value; break;    /* D3DTSS_ADDRESSW of Direct3D 8 and 9: the third coordinate of a volume */
     case D3DTSS_MAGFILTER: s->magFilter = value; break;
     case D3DTSS_MINFILTER: s->minFilter = value; break;
     case D3DTSS_MIPFILTER: s->mipFilter = value; break;
@@ -2712,7 +2713,8 @@ static ULONG stage_sampler(const D7_STAGE *st, const D7_TEXTURE *tex)
            (st->magFilter >= 1 && st->magFilter <= 5 ? st->magFilter : 1) << 8 |
            (st->minFilter >= 1 && st->minFilter <= 3 ? st->minFilter : 1) << 12 |
            (tex && tex->levels > 1 && st->mipFilter >= D3DTFP_POINT && st->mipFilter <= D3DTFP_LINEAR ?
-            st->mipFilter : D3DTFP_NONE) << 16;
+            st->mipFilter : D3DTFP_NONE) << 16 |
+           (st->addressW >= 1 && st->addressW <= 4 ? st->addressW : 1) << 20;
 }
 
 /* The pixel shader half of a shader draw: textures, render states, the
