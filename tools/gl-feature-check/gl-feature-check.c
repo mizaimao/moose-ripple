@@ -16,6 +16,7 @@
  *                               camera frames
  *   gl-feature-check stencil    a drawable with depth and stencil buffers, both used
  *   gl-feature-check iosurface  a texture that is an IOSurface follows the surface's contents
+ *                               and one IOSurface drawn into in one context reads in another
  *   gl-feature-check stale [N]  N contexts in turn, each drawn with on one thread and destroyed
  *                               from another (software first: ours crashed here, issue 240)
  */
@@ -2014,6 +2015,117 @@ static void run_iosurface(const char *name, CGLPixelFormatAttribute renderer)
     CGLDestroyPixelFormat(pf);
 }
 
+/* One IOSurface in two contexts that share nothing, as Core Animation uses a layer's surface
+ * (issue 11): context A draws into it through a framebuffer object (a red quad over half of a
+ * blue clear), context B draws it; then the surface's memory is written (green) and B binds it
+ * again. B should see what A drew, then the memory. */
+static void ios_draw_quad(float x0, float y0, float x1, float y1, float s1, float t1)
+{
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 0); glVertex2f(x0, y0);
+    glTexCoord2f(s1, 0); glVertex2f(x1, y0);
+    glTexCoord2f(s1, t1); glVertex2f(x1, y1);
+    glTexCoord2f(0, t1); glVertex2f(x0, y1);
+    glEnd();
+}
+
+static void run_iosurface_share(const char *name, CGLPixelFormatAttribute renderer)
+{
+    CGLPixelFormatAttribute attrs[] = { kCGLPFAColorSize, 32, kCGLPFAPBuffer,
+                                        renderer ? kCGLPFARendererID : kCGLPFAAccelerated,
+                                        renderer, 0 };
+    if (!renderer)
+        attrs[4] = 0;
+    CGLPixelFormatObj pf;
+    GLint npf;
+    CGLContextObj a, b;
+    enum { SW = 64, SH = 64 };
+    if (CGLChoosePixelFormat(attrs, &pf, &npf) || !pf || CGLCreateContext(pf, NULL, &a) ||
+        CGLCreateContext(pf, NULL, &b)) {
+        printf("%s: no contexts\n", name);
+        return;
+    }
+    int w = SW, h = SH, bpe = 4;
+    CFNumberRef nw = CFNumberCreate(NULL, kCFNumberIntType, &w), nh = CFNumberCreate(NULL, kCFNumberIntType, &h),
+                nb = CFNumberCreate(NULL, kCFNumberIntType, &bpe);
+    const void *keys[] = { kIOSurfaceWidth, kIOSurfaceHeight, kIOSurfaceBytesPerElement };
+    const void *vals[] = { nw, nh, nb };
+    CFDictionaryRef props = CFDictionaryCreate(NULL, keys, vals, 3, &kCFTypeDictionaryKeyCallBacks,
+                                               &kCFTypeDictionaryValueCallBacks);
+    IOSurfaceRef surf = IOSurfaceCreate(props);
+    iosurface_fill(surf, 0xff808080);                   /* grey in memory to start with */
+
+    /* A: the surface as the colour buffer of a framebuffer object. */
+    CGLSetCurrentContext(a);
+    GLuint ta, fbo;
+    glGenTextures(1, &ta);
+    glBindTexture(GL_TEXTURE_RECTANGLE_ARB, ta);
+    CGLError ea = CGLTexImageIOSurface2D(a, GL_TEXTURE_RECTANGLE_ARB, GL_RGBA8, SW, SH, GL_BGRA,
+                                         GL_UNSIGNED_INT_8_8_8_8_REV, surf, 0);
+    glGenFramebuffersEXT(1, &fbo);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
+    glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT,
+                              GL_TEXTURE_RECTANGLE_ARB, ta, 0);
+    GLenum status = glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT);
+    glViewport(0, 0, SW, SH);
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, SW, 0, SH, -1, 1);
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    glClearColor(0, 0, 1, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glColor3f(1, 0, 0);
+    ios_draw_quad(0, 0, SW / 2, SH, 1, 1);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+    glFlush();
+
+    /* B: the surface as a texture, drawn into B's own framebuffer object. */
+    CGLSetCurrentContext(b);
+    GLuint tb, fbb, rb;
+    glGenFramebuffersEXT(1, &fbb);
+    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbb);
+    glGenRenderbuffersEXT(1, &rb);
+    glBindRenderbufferEXT(GL_RENDERBUFFER_EXT, rb);
+    glRenderbufferStorageEXT(GL_RENDERBUFFER_EXT, GL_RGBA8, SW, SH);
+    glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_RENDERBUFFER_EXT, rb);
+    glViewport(0, 0, SW, SH);
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, SW, 0, SH, -1, 1);
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    glGenTextures(1, &tb);
+    glBindTexture(GL_TEXTURE_RECTANGLE_ARB, tb);
+    CGLError eb = CGLTexImageIOSurface2D(b, GL_TEXTURE_RECTANGLE_ARB, GL_RGBA, SW, SH, GL_BGRA,
+                                         GL_UNSIGNED_INT_8_8_8_8_REV, surf, 0);
+    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+    printf("%s: one IOSurface in two contexts (framebuffer status 0x%x, CGLTexImageIOSurface2D %d %d):\n",
+           name, status, ea, eb);
+    for (int round = 0; round < 2; round++) {
+        if (round) {
+            iosurface_fill(surf, 0xff00ff00);           /* green in memory */
+            glBindTexture(GL_TEXTURE_RECTANGLE_ARB, 0);
+            glBindTexture(GL_TEXTURE_RECTANGLE_ARB, tb);
+        }
+        glClearColor(0.5f, 0.5f, 0.5f, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glEnable(GL_TEXTURE_RECTANGLE_ARB);
+        ios_draw_quad(0, 0, SW, SH, SW, SH);
+        glDisable(GL_TEXTURE_RECTANGLE_ARB);
+        unsigned char px[2][4] = { { 0 } };
+        glReadPixels(SW / 4, SH / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px[0]);
+        glReadPixels(3 * SW / 4, SH / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px[1]);
+        printf("  in B, %s: left %3d %3d %3d %3d, right %3d %3d %3d %3d (want %s)\n",
+               round ? "after the memory changed" : "after A drew", px[0][0], px[0][1], px[0][2],
+               px[0][3], px[1][0], px[1][1], px[1][2], px[1][3],
+               round ? "green, green" : "red, blue");
+    }
+    printf("  GL error 0x%x\n", glGetError());
+    CGLSetCurrentContext(NULL);
+    CGLDestroyContext(b);
+    CGLDestroyContext(a);
+    CFRelease(surf);
+    CFRelease(props); CFRelease(nw); CFRelease(nh); CFRelease(nb);
+    CGLDestroyPixelFormat(pf);
+}
+
 /* ---- stale: a context destroyed from another thread ----------------------------------------- *
  * A thread draws with a context and lets go of it; the main thread destroys that context and
  * makes the next one, which the thread then draws with. A garbage-collected program does this
@@ -2132,6 +2244,8 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "iosurface")) {
         run_iosurface("ours", 0);
         run_iosurface("software", (CGLPixelFormatAttribute)0x00020400);
+        run_iosurface_share("ours", 0);
+        run_iosurface_share("software", (CGLPixelFormatAttribute)0x00020400);
         return 0;
     }
     if (argc > 1 && !strcmp(argv[1], "stencil")) {
