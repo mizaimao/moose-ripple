@@ -1,0 +1,15 @@
+--- a/src/mesa/main/glthread.c
++++ b/src/mesa/main/glthread.c
+@@ -248,6 +248,12 @@
+    _mesa_glthread_init_call_fence(&glthread->LastProgramChangeBatch);
+    _mesa_glthread_init_call_fence(&glthread->LastDListChangeBatchIndex);
+ 
++   /* moose-ripple: the note of the matrix mode starts as GL's default. It started as 0, and
++    * glGetIntegerv(GL_MATRIX_MODE), which is answered from the note, gave 0 until the
++    * program's first glMatrixMode. Quartz Composer reads the mode of a new context and sets
++    * it again afterwards: GL_INVALID_ENUM, and it rendered nothing. */
++   glthread->MatrixMode = GL_MODELVIEW;
++
+    _mesa_glthread_enable(ctx);
+ 
+    /* Execute the thread initialization function in the thread. */

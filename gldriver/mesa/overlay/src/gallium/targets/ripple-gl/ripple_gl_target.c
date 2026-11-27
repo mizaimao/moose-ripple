@@ -548,6 +548,7 @@ gldDestroyContext(struct gld_context *c)
 {
    if (!c || c->magic != GLD_CONTEXT_MAGIC)
       return 0;
+   ripple_cgl_quiesce(c->mesa);         /* its second GL thread, if any, is done first */
    if (c->shared) {
       simple_mtx_lock(&c->shared->lock);
       for (struct gld_context **p = &c->shared->members; *p; p = &(*p)->next_member) {
@@ -880,6 +881,10 @@ gldAttachDrawable(struct gld_context *c, int type, void *data, void *opts)
    if (!c || c->magic != GLD_CONTEXT_MAGIC)
       return 0;
    try_takeover(c, "gldAttachDrawable");
+   /* What follows changes drawables (their size, which buffers a context draws into): the
+    * second GL thread of this context, and of the one last used on this thread, may still be
+    * drawing into them. */
+   ripple_cgl_quiesce(c->mesa);
    switch (type) {
    case GLD_DRAWABLE_NONE:
       detach(c);

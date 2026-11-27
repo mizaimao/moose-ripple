@@ -908,7 +908,8 @@ ripple_is_format_supported(struct pipe_screen *screen, enum pipe_format format,
 
 struct pipe_screen *ripple_virgl_screen_create(io_connect_t conn,
                                                const struct ripple_gpu_info *info,
-                                               const struct pipe_screen_config *config)
+                                               const struct pipe_screen_config *config,
+                                               bool second_thread)
 {
    struct virgl_winsys *vws = ripple_winsys_create(conn, info);
    struct pipe_screen *screen;
@@ -917,6 +918,10 @@ struct pipe_screen *ripple_virgl_screen_create(io_connect_t conn,
       IOServiceClose(conn);
       return NULL;
    }
+   /* Buffers the second GL thread fills from the program's thread: the driver's part is in
+    * Mesa patch 0015; what it needs of this winsys (a map of a buffer's memory from any
+    * thread, transfer commands in the stream) is there already. */
+   vws->thread_safe_maps = second_thread;
    screen = virgl_create_screen(vws, config);
    if (!screen) {
       vws->destroy(vws);

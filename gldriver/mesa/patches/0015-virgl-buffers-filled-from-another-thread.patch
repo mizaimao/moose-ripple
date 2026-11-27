@@ -1,0 +1,256 @@
+--- a/src/gallium/drivers/virgl/virgl_buffer.c
++++ b/src/gallium/drivers/virgl/virgl_buffer.c
+@@ -21,6 +21,7 @@
+  * USE OR OTHER DEALINGS IN THE SOFTWARE.
+  */
+ 
++#include "util/u_atomic.h"
+ #include "util/u_inlines.h"
+ #include "util/u_memory.h"
+ #include "virgl_context.h"
+@@ -33,6 +34,16 @@
+ {
+    struct virgl_context *vctx = virgl_context(ctx);
+    struct virgl_transfer *trans = virgl_transfer(transfer);
++
++   /* moose-ripple: a map made from any thread (virgl_resource.c, "Buffers filled from
++    * another thread") ends on any thread too. What was written and is not sent yet stays
++    * noted in the buffer and goes out before the next draw that reads it. */
++   if (transfer->usage & PIPE_MAP_THREAD_SAFE) {
++      pipe_resource_reference(&transfer->resource, NULL);
++      FREE(trans);
++      return;
++   }
++
+    bool persistent_coherent = trans->base.usage & (PIPE_MAP_PERSISTENT |
+                                                    PIPE_MAP_COHERENT);
+ 
+@@ -67,6 +78,17 @@
+ {
+    struct virgl_transfer *trans = virgl_transfer(transfer);
+ 
++   /* moose-ripple: the writer of a thread-safe map says how far it has written; only it
++    * stores the mark, the context's thread only reads it. */
++   if (transfer->usage & PIPE_MAP_THREAD_SAFE) {
++      struct virgl_resource *vres = virgl_resource(transfer->resource);
++      uint32_t end = transfer->box.x + box->x + box->width;
++
++      if (end > vres->ts_written)
++         p_atomic_set(&vres->ts_written, end);
++      return;
++   }
++
+    /*
+     * FIXME: This is not optimal.  For example,
+     *
+--- a/src/gallium/drivers/virgl/virgl_context.c
++++ b/src/gallium/drivers/virgl/virgl_context.c
+@@ -1040,6 +1040,17 @@
+       util_primconvert_draw_vbo(vctx->primconvert, dinfo, drawid_offset, indirect, draws, num_draws);
+       return;
+    }
++
++   /* moose-ripple: what the program's thread has written into the buffers this draw reads
++    * (virgl_resource.c, "Buffers filled from another thread") goes to the host first. */
++   if (unlikely(rs->vws->thread_safe_maps)) {
++      for (unsigned i = 0; i < vctx->num_vertex_buffers; i++)
++         if (!vctx->vertex_buffer[i].is_user_buffer && vctx->vertex_buffer[i].buffer.resource)
++            ripple_virgl_send_written(vctx, vctx->vertex_buffer[i].buffer.resource);
++      if (info.index_size && !info.has_user_indices && info.index.resource)
++         ripple_virgl_send_written(vctx, info.index.resource);
++   }
++
+    if (info.index_size) {
+            pipe_resource_reference(&ib.buffer, info.has_user_indices ? NULL : info.index.resource);
+            ib.user_buffer = info.has_user_indices ? info.index.user : NULL;
+@@ -1344,6 +1355,9 @@
+    struct virgl_resource *dres = virgl_resource(dst);
+    struct virgl_resource *sres = virgl_resource(src);
+ 
++   if (unlikely(sres->b.target == PIPE_BUFFER && virgl_screen(ctx->screen)->vws->thread_safe_maps))
++      ripple_virgl_send_written(vctx, src);   /* moose-ripple: as before a draw */
++
+    if (dres->b.target == PIPE_BUFFER)
+       util_range_add(&dres->b, &dres->valid_buffer_range, dstx, dstx + src_box->width);
+    virgl_resource_dirty(dres, dst_level);
+--- a/src/gallium/drivers/virgl/virgl_resource.c
++++ b/src/gallium/drivers/virgl/virgl_resource.c
+@@ -29,6 +29,8 @@
+ #include "virgl_screen.h"
+ #include "virgl_staging_mgr.h"
+ #include "virgl_encode.h" // for declaration of virgl_encode_copy_transfer
++#include "util/box.h"
++#include "util/u_atomic.h"
+ 
+ /* A (soft) limit for the amount of memory we want to allow for queued staging
+  * resources. This is used to decide when we should force a flush, in order to
+@@ -512,6 +514,30 @@
+    /* Multisampled resources require resolve before mapping. */
+    assert(resource->nr_samples <= 1);
+ 
++   /* moose-ripple: buffers filled from another thread. Mesa's second GL thread copies a
++    * program's client vertex arrays and indices, on the program's thread, into a buffer it
++    * keeps mapped for good, while this context draws on the other thread. So this map may
++    * come from any thread and touches nothing of the context: it is the buffer's guest
++    * memory itself. The host only has what it is sent, and nothing is sent at an unmap that
++    * never comes: the writer says how far it has written (virgl_buffer_transfer_flush_region,
++    * called from Mesa's upload function once the bytes are in place), and before a draw
++    * that reads the buffer the new part goes into the command stream ahead of it
++    * (ripple_virgl_send_written). Ranges are handed out in rising order and written once,
++    * so one mark per buffer is enough. */
++   if (usage & PIPE_MAP_THREAD_SAFE) {
++      void *ptr = resource->target == PIPE_BUFFER ? vws->resource_map(vws, vres->hw_res) : NULL;
++
++      trans = ptr ? CALLOC_STRUCT(virgl_transfer) : NULL;
++      if (!trans)
++         return NULL;
++      pipe_resource_reference(&trans->base.resource, resource);
++      trans->base.level = level;
++      trans->base.usage = usage;
++      trans->base.box = *box;
++      *transfer = &trans->base;
++      return (uint8_t *)ptr + box->x;
++   }
++
+    /* If virgl resource was created using persistence and coherency flags,
+     * then its memory mapping can be only made in accordance to these
+     * flags. We record the "usage" flags in struct virgl_transfer and
+@@ -1004,3 +1030,28 @@
+          res->clean_mask &= ~(1 << level);
+    }
+ }
++
++/* moose-ripple: see "Buffers filled from another thread" in virgl_resource_transfer_map.
++ * Called on the context's thread. The transfer command reads the range from the buffer's
++ * guest memory when the host gets to it, which is before the command that follows. */
++void
++ripple_virgl_send_written(struct virgl_context *vctx, struct pipe_resource *res)
++{
++   struct virgl_resource *vres = virgl_resource(res);
++   uint32_t written = vres ? (uint32_t)p_atomic_read(&vres->ts_written) : 0;
++
++   if (likely(!vres || written <= vres->ts_sent))
++      return;
++
++   struct virgl_transfer t;
++   memset(&t, 0, sizeof(t));
++   t.base.resource = res;
++   t.base.usage = PIPE_MAP_WRITE;
++   u_box_1d(vres->ts_sent, written - vres->ts_sent, &t.base.box);
++   t.offset = vres->ts_sent;
++   t.hw_res = vres->hw_res;
++   if (vctx->cbuf->cdw + VIRGL_TRANSFER3D_SIZE + 1 > VIRGL_MAX_CMDBUF_DWORDS)
++      vctx->base.flush(&vctx->base, NULL, 0);
++   virgl_encode_transfer(virgl_screen(vctx->base.screen), vctx->cbuf, &t, VIRGL_TRANSFER_TO_HOST);
++   vres->ts_sent = written;
++}
+--- a/src/gallium/drivers/virgl/virgl_resource.h
++++ b/src/gallium/drivers/virgl/virgl_resource.h
+@@ -71,6 +71,12 @@
+    uint16_t clean_mask;
+    uint16_t use_staging : 1;
+    uint16_t reserved : 15;
++
++   /* moose-ripple, for a buffer mapped with PIPE_MAP_THREAD_SAFE: the end of what has been
++    * written through that map, set by the thread that wrote it (transfer_flush_region), and
++    * the end of what the host has been sent, kept by the context's thread. */
++   uint32_t ts_written;
++   uint32_t ts_sent;
+ };
+ 
+ struct virgl_transfer {
+@@ -217,4 +223,8 @@
+ void virgl_texture_transfer_unmap(struct pipe_context *ctx,
+                                   struct pipe_transfer *transfer);
+ 
++/* moose-ripple: send the host what has been written into `res` through a thread-safe map
++ * since the last time; before a command that reads the buffer. */
++void ripple_virgl_send_written(struct virgl_context *vctx, struct pipe_resource *res);
++
+ #endif
+--- a/src/gallium/drivers/virgl/virgl_screen.c
++++ b/src/gallium/drivers/virgl/virgl_screen.c
+@@ -325,8 +325,13 @@
+    case PIPE_CAP_PCI_BUS:
+    case PIPE_CAP_PCI_DEVICE:
+    case PIPE_CAP_PCI_FUNCTION:
+-   case PIPE_CAP_ALLOW_MAPPED_BUFFERS_DURING_EXECUTION:
+       return 0;
++   /* moose-ripple: the two things Mesa's second GL thread asks of a driver; see
++    * virgl_resource.c, "Buffers filled from another thread". Only when the frontend runs
++    * that thread: the second one also lets a program draw from a buffer it has mapped. */
++   case PIPE_CAP_MAP_UNSYNCHRONIZED_THREAD_SAFE:
++   case PIPE_CAP_ALLOW_MAPPED_BUFFERS_DURING_EXECUTION:
++      return vscreen->vws->thread_safe_maps;
+    case PIPE_CAP_CLIP_HALFZ:
+       return vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_CLIP_HALFZ;
+    case PIPE_CAP_MAX_GS_INVOCATIONS:
+--- a/src/gallium/drivers/virgl/virgl_winsys.h
++++ b/src/gallium/drivers/virgl/virgl_winsys.h
+@@ -50,6 +50,10 @@
+    int supports_fences; /* In/Out fences are supported */
+    int supports_encoded_transfers; /* Encoded transfers are supported */
+    int supports_coherent;          /* Coherent memory is supported */
++   /* moose-ripple: the frontend runs the GL calls on a second thread (Mesa's glthread) and
++    * needs buffers it can map and fill from the program's thread while the context draws
++    * (virgl_resource.c, "Buffers filled from another thread"). */
++   int thread_safe_maps;
+ 
+    void (*destroy)(struct virgl_winsys *vws);
+ 
+--- a/src/mesa/main/glthread_bufferobj.c
++++ b/src/mesa/main/glthread_bufferobj.c
+@@ -106,9 +106,12 @@
+ 
+          ptr += start_offset;
+          *out_offset = start_offset;
+-         if (data)
++         if (data) {
+             memcpy(ptr, data, size);
+-         else
++            /* moose-ripple: tell the driver how far the buffer is written (see below) */
++            _mesa_bufferobj_flush_mapped_range(ctx, start_offset, size, *out_buffer,
++                                               MAP_GLTHREAD);
++         } else
+             *out_ptr = ptr;
+          return;
+       }
+@@ -145,9 +148,15 @@
+    }
+ 
+    /* Upload data. */
+-   if (data)
++   if (data) {
+       memcpy(glthread->upload_ptr + offset, data, size);
+-   else
++      /* moose-ripple: the upload buffer stays mapped for good, so a driver that has to send
++       * what is written (virgl) never sees an unmap. Tell it how far the buffer is written,
++       * once the bytes are in place and before the command that reads them is queued. A
++       * caller that takes the pointer (out_ptr) says so itself when it has written. */
++      _mesa_bufferobj_flush_mapped_range(ctx, offset, size, glthread->upload_buffer,
++                                         MAP_GLTHREAD);
++   } else
+       *out_ptr = glthread->upload_ptr + offset;
+ 
+    glthread->upload_offset = offset + size;
+--- a/src/mesa/main/glthread_draw.c
++++ b/src/mesa/main/glthread_draw.c
+@@ -31,6 +31,7 @@
+ 
+ #include "api_exec_decl.h"
+ #include "main/glthread_marshal.h"
++#include "main/bufferobj.h"
+ #include "main/dispatch.h"
+ #include "main/varray.h"
+ 
+@@ -111,6 +112,10 @@
+       offset += size;
+    }
+ 
++   /* moose-ripple: written through the pointer; tell the driver (see _mesa_glthread_upload) */
++   _mesa_bufferobj_flush_mapped_range(ctx, upload_offset, index_size * total_count,
++                                      upload_buffer, MAP_GLTHREAD);
++
+    return upload_buffer;
+ }
+ 

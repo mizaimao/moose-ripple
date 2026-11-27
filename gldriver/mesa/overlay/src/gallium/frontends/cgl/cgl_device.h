@@ -18,6 +18,10 @@ bool ripple_cgl_device_info(struct ripple_gpu_info *info);
 /* The process's gallium screen, made on first use; NULL if there is no usable GPU. */
 struct pipe_frontend_screen *ripple_cgl_device_fscreen(void);
 
+/* Do this process's contexts get a second GL thread (cgl_dispatch.h)? Decided once, before
+ * the screen is made. */
+bool ripple_cgl_device_second_thread(void);
+
 /* Describe accelerator surface `id` (the kernel's surface clients), for drawables on them. */
 bool ripple_cgl_device_surface_info(uint32_t id, struct ripple_gpu_surface_info *out);
 
