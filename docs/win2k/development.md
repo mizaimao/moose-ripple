@@ -3196,6 +3196,13 @@ Later finds of the same checks:
   colour and no coordinates). `d8pixels` cases `rhw_texgen`, `rhw_texgen_diffuse` and
   `rhw_texgen_no_coords`; the reference rasterizer draws all three.
 
+### Benchmark runs
+
+`rbskips.exe NAME` prints the driver's skip counts so far in one line (`RBSKIPS run=NAME draws=0
+... total=0 result=PASS`) and exits with 1 when any is above zero. A benchmark's launcher runs it
+after the program, so the run fails on its own; start from a fresh boot, since the counts are the
+driver's totals. Pictures of a benchmark are not compared with a reference yet.
+
 ## Release package
 
 `win2k/package.sh` builds the package on the Linux build host:

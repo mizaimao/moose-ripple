@@ -128,6 +128,7 @@ def build_programs(work):
         ("tstage.exe", ["tools/tstage"], ["-lddraw", "-ldxguid", "-luser32"]),
         ("tmip.exe", ["tools/tmip"], ["-lddraw", "-ldxguid", "-luser32"]),
         ("d7draw.exe", ["tools/d7draw"], ["-lgdi32"]),
+        ("rbskips.exe", ["tools/rbskips"], ["-lgdi32", "-luser32"]),
         ("zstore.exe", ["tools/zstore"], ["-lddraw", "-ldxguid", "-lgdi32", "-luser32"]),
         ("glpresent.exe", ["tools/glpresent"], ["-lopengl32", "-lgdi32", "-luser32"]),
         ("cursorqa.exe", ["tools/cursorqa"], ["-lgdi32", "-luser32"]),
