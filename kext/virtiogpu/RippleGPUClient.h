@@ -79,7 +79,7 @@ class RippleGPUClient : public IOUserClient
     IOReturn readInput(IOExternalMethodArguments *a, uint32_t offset, void *dst, uint32_t len);
     bool ensureCommandBuffer(unsigned i);
     IOReturn surfacePresent(uint32_t surface, uint32_t handle, uint32_t context, uint32_t flags,
-                            uint64_t *shown);
+                            const uint32_t *rect, uint64_t *shown);
     IOReturn surfaceTexture(uint32_t surface, uint32_t handle, uint32_t flags, uint64_t *filled);
 
     // Method implementations (called with fLock held).

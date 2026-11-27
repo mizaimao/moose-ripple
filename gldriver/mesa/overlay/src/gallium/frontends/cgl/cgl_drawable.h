@@ -25,7 +25,6 @@ struct ripple_cgl_drawable {
    bool gpu_display;                        /* present by putting the texture on the display */
    bool swap_rect_on;                       /* kCGLCESwapRectangle: a swap shows only swap_rect */
    int swap_rect[4];                        /* x, y (from the bottom), width, height */
-   struct pipe_resource *shown;             /* the picture last shown, kept for swap rectangles */
    bool front_unfilled;                     /* front texture made after a swap, not yet given the
                                              * back buffer's picture (issue 306) */
    bool screen_region;                      /* present into the screen texture at region */

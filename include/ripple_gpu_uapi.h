@@ -105,6 +105,9 @@ struct ripple_gpu_transfer {
 /* SURFACE_PRESENT flags. */
 #define RIPPLE_GPU_PRESENT_TOP_FIRST 0x1    /* the buffer's first row is the picture's top row
                                                (otherwise its bottom row, as OpenGL draws) */
+#define RIPPLE_GPU_PRESENT_RECT     0x2     /* four more scalars follow: x, y, width, height of the
+                                               part of the picture to show (top-left origin);
+                                               the rest of the screen keeps what it showed */
 
 /* SURFACE_TEXTURE flags. */
 #define RIPPLE_GPU_TEXTURE_ONCE     0x1     /* copy the latest frame now, don't keep the buffer */

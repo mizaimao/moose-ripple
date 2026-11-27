@@ -205,7 +205,20 @@ present_resource(struct st_context *st, struct ripple_cgl_drawable *d,
          d->last_present = now < next ? next : now;
       }
       st_context_flush(st, 0, NULL, NULL, NULL);
-      bool shown = ripple_cgl_device_surface_present(d->present_surface, res, true);
+      /* A swap rectangle: only that part changes on screen (issue 235). It is in window
+       * coordinates from the bottom; the kernel takes it from the top. */
+      uint32_t rect[4], *r = NULL;
+      if (d->swap_rect_on) {
+         int x = MAX2(d->swap_rect[0], 0), y = MAX2(d->swap_rect[1], 0);
+         int x1 = MIN2(d->swap_rect[0] + d->swap_rect[2], (int)w);
+         int y1 = MIN2(d->swap_rect[1] + d->swap_rect[3], (int)h);
+         rect[0] = x1 > x ? x : 0;
+         rect[1] = y1 > y ? (uint32_t)((int)h - y1) : 0;
+         rect[2] = x1 > x ? (uint32_t)(x1 - x) : 0;
+         rect[3] = y1 > y ? (uint32_t)(y1 - y) : 0;
+         r = rect;
+      }
+      bool shown = ripple_cgl_device_surface_present(d->present_surface, res, true, r);
       /* Not shown: the surface is not a plain region of the screen just now (the window is
        * moving, or in Exposé). The kernel has kept the frame for WindowServer, which reads it
        * when it draws the window: tell it there is something new. */
@@ -332,7 +345,6 @@ ripple_cgl_drawable_destroy(struct ripple_cgl_drawable *d)
    if (d->gpu_display)
       ripple_cgl_device_display(NULL, 0, 0, 0, 0);
    st_api_destroy_drawable(&d->base);
-   pipe_resource_reference(&d->shown, NULL);
    for (unsigned i = 0; i < ST_ATTACHMENT_COUNT; i++)
       pipe_resource_reference(&d->textures[i], NULL);
    FREE(d->pixels);
@@ -484,48 +496,6 @@ swap_debug(struct ripple_cgl_context *ctx)
    }
 }
 
-/* A swap rectangle on a window the kernel shows (issue 235): only that part of the back buffer
- * changes on screen. The picture shown last is kept in a texture of its own; the rectangle is
- * copied into it from the back buffer, and that texture is shown (the kernel copies the whole
- * of it into the screen). The first swap with a rectangle shows the whole back buffer. No flip:
- * the program goes on drawing into its back buffer. False if it can't be done this way. */
-static bool
-swap_rect_present(struct ripple_cgl_context *ctx, struct ripple_cgl_drawable *d,
-                  struct pipe_resource *back)
-{
-   struct pipe_context *pipe = ctx->st->pipe;
-   struct pipe_screen *screen = pipe->screen;
-   bool fresh = false;
-
-   if (!d->shown || d->shown->width0 != back->width0 || d->shown->height0 != back->height0 ||
-       d->shown->format != back->format || d->shown->target != back->target) {
-      struct pipe_resource templ = *back;
-      templ.bind = PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW;
-      pipe_resource_reference(&d->shown, NULL);
-      d->shown = screen->resource_create(screen, &templ);
-      if (!d->shown)
-         return false;
-      fresh = true;
-   }
-   st_context_flush(ctx->st, 0, NULL, NULL, NULL);
-   if (fresh) {
-      copy_whole(pipe, d->shown, back);
-   } else {
-      /* The rectangle is in window coordinates from the bottom; the buffer's first row is the
-       * window's top row (the kernel shows it top row first). */
-      int x = MAX2(d->swap_rect[0], 0), y = MAX2(d->swap_rect[1], 0);
-      int x1 = MIN2(d->swap_rect[0] + d->swap_rect[2], (int)back->width0);
-      int y1 = MIN2(d->swap_rect[1] + d->swap_rect[3], (int)back->height0);
-      if (x1 > x && y1 > y) {
-         struct pipe_box box;
-         u_box_2d(x, (int)back->height0 - y1, x1 - x, y1 - y, &box);
-         pipe->resource_copy_region(pipe, d->shown, 0, box.x, box.y, 0, back, 0, &box);
-      }
-   }
-   present_resource(ctx->st, d, d->shown);
-   return true;
-}
-
 void
 ripple_cgl_drawable_set_swap_rect(struct ripple_cgl_drawable *d, bool on, const int rect[4])
 {
@@ -556,11 +526,6 @@ ripple_cgl_context_swap(struct ripple_cgl_context *ctx)
    struct pipe_resource *res = d->textures[ST_ATTACHMENT_BACK_LEFT];
    if (!res)
       res = d->textures[ST_ATTACHMENT_FRONT_LEFT];
-   if (res && res == d->textures[ST_ATTACHMENT_BACK_LEFT] && d->present_surface && d->swap_rect_on &&
-       swap_rect_present(ctx, d, res)) {
-      RIPPLE_CGL_DIRECT_END();
-      return;
-   }
    /* Not a second time if the flush has just shown that same front buffer (single-buffered). */
    if (res && !(ctx->presented && res == d->textures[ST_ATTACHMENT_FRONT_LEFT]))
       present_resource(ctx->st, d, res);

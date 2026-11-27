@@ -451,7 +451,7 @@ IOReturn RippleSurfaceClient::externalMethod(uint32_t selector, IOExternalMethod
 // ---- A GPU client's frames --------------------------------------------------------------------
 
 bool RippleSurfaceClient::presentFrame(uint32_t handle, uint32_t context, uint32_t format,
-                                       uint32_t width, uint32_t height, bool topFirst)
+                                       uint32_t width, uint32_t height, bool topFirst, const uint32_t *rect)
 {
     IOLockLock(fLock);
     fFrameHandle = handle;
@@ -460,7 +460,7 @@ bool RippleSurfaceClient::presentFrame(uint32_t handle, uint32_t context, uint32
     fFrameWidth = width;
     fFrameHeight = height;
     fFrameTopFirst = topFirst;
-    bool shown = pushFrame(true, true);
+    bool shown = pushFrame(true, true, rect);
     IOLockUnlock(fLock);
     return shown;
 }
@@ -587,8 +587,16 @@ uint32_t RippleSurfaceClient::blitCommand(uint32_t *c, uint32_t dst, uint32_t ds
 // its next frame meanwhile. Its next present waits until the host has taken this one's
 // copies (fCmdBusy), so a client never gets more than one frame ahead of the host.
 // Returns whether the frame went on the screen. Called with fLock held.
-bool RippleSurfaceClient::pushFrame(bool toTexture, bool toScreen)
+bool RippleSurfaceClient::pushFrame(bool toTexture, bool toScreen, const uint32_t *rect)
 {
+    // A swap rectangle (issue 235): only that part of the frame, clipped to it.
+    uint32_t rx = 0, ry = 0, rx1 = 0xffffffffu, ry1 = 0xffffffffu;
+    if (rect) {
+        rx = rect[0];
+        ry = rect[1];
+        rx1 = rect[0] + rect[2];
+        ry1 = rect[1] + rect[3];
+    }
     if (!fFrameHandle || !fFrameContext || !ensureCommands())
         return false;
     RippleFramebuffer *fb = fAccel->framebuffer();
@@ -601,7 +609,10 @@ bool RippleSurfaceClient::pushFrame(bool toTexture, bool toScreen)
         attachTo(fTexHandle, &fTexContext)) {
         uint32_t w = fFrameWidth < fTexWidth ? fFrameWidth : fTexWidth;
         uint32_t h = fFrameHeight < fTexHeight ? fFrameHeight : fTexHeight;
-        dw += blitCommand(cmd + dw, fTexHandle, fTexFormat, 0, 0, w, h, 0, 0);
+        uint32_t x0 = rx < w ? rx : w, y0 = ry < h ? ry : h;
+        uint32_t x1 = rx1 < w ? rx1 : w, y1 = ry1 < h ? ry1 : h;
+        if (x1 > x0 && y1 > y0)
+            dw += blitCommand(cmd + dw, fTexHandle, fTexFormat, x0, y0, x1 - x0, y1 - y0, x0, y0);
     }
 
     uint32_t screen = 0, screenFormat = 0, sw = 0, sh = 0, shownFrom = dw;
@@ -631,6 +642,14 @@ bool RippleSurfaceClient::pushFrame(bool toTexture, bool toScreen)
             if (y0 < 0) y0 = 0;
             if (x1 > (int32_t)sw) x1 = (int32_t)sw;
             if (y1 > (int32_t)sh) y1 = (int32_t)sh;
+            if (rect) {
+                int32_t qx0 = fOriginX + (int32_t)rx, qy0 = fOriginY + (int32_t)ry;
+                int32_t qx1 = fOriginX + (int32_t)rx1, qy1 = fOriginY + (int32_t)ry1;
+                if (x0 < qx0) x0 = qx0;
+                if (y0 < qy0) y0 = qy0;
+                if (x1 > qx1) x1 = qx1;
+                if (y1 > qy1) y1 = qy1;
+            }
             if (x1 <= x0 || y1 <= y0)
                 continue;
             dw += blitCommand(cmd + dw, screen, screenFormat, x0, y0, x1 - x0, y1 - y0,

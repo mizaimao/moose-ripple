@@ -67,7 +67,8 @@ class RippleSurfaceClient : public IOUserClient
     bool attachTo(uint32_t buffer, uint32_t *attached);
     uint32_t blitCommand(uint32_t *c, uint32_t dst, uint32_t dstFormat, int32_t dx, int32_t dy,
                          int32_t w, int32_t h, int32_t sx, int32_t top);
-    bool pushFrame(bool toTexture, bool toScreen);
+    // `rect` (x, y, width, height in the frame, top-left origin), when given: only that part.
+    bool pushFrame(bool toTexture, bool toScreen, const uint32_t *rect = 0);
     bool copyFrame(uint32_t dst, uint32_t dstFormat, uint32_t dstWidth, uint32_t dstHeight,
                    uint32_t *attached);
     void dropStage();
@@ -109,7 +110,7 @@ public:
     // A GPU client's finished frame for this surface; true if it went on the screen. And its
     // buffer or context going away (0 matches nothing).
     bool presentFrame(uint32_t handle, uint32_t context, uint32_t format, uint32_t width,
-                      uint32_t height, bool topFirst);
+                      uint32_t height, bool topFirst, const uint32_t *rect = 0);
     void forgetFrame(uint32_t handle, uint32_t context);
     // A buffer to keep filled with the latest frame (0 = none), or with `once` to fill now
     // only; true if it holds a frame now.

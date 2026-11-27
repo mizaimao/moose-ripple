@@ -39,7 +39,7 @@ call's result: the call has returned success, and the refusal is in the kernel l
 | 8 | `WAIT` | scalars: fence, timeout (ms) | scalar: 1 signalled, 0 timed out |
 | 9 | `DISPLAY` | scalars: buffer handle, x, y, width, height | (none): shows that region of the buffer on the display instead of the console framebuffer, or presents it again; handle 0 gives the display back |
 | 10 | `SURFACE_INFO` | scalar: accelerator surface id | struct `ripple_gpu_surface_info`: size, row bytes, screen position, screen size, flags (has CPU backing, is a region of the screen, a program presents on it), and the backing's address for the surface's own task |
-| 11 | `SURFACE_PRESENT` | scalars: accelerator surface id, buffer handle, context handle, flags | scalar: 1 the buffer is on the screen now, 0 the surface is not a plain region of the screen at the moment |
+| 11 | `SURFACE_PRESENT` | scalars: accelerator surface id, buffer handle, context handle, flags; with flag `RIPPLE_GPU_PRESENT_RECT` four more: x, y, width, height | scalar: 1 the buffer is on the screen now, 0 the surface is not a plain region of the screen at the moment |
 | 12 | `SURFACE_TEXTURE` | scalars: accelerator surface id, buffer handle (one of the caller's; 0 = none), flags | scalar: 1 the buffer holds a frame of the surface now, 0 none has been presented yet |
 | 13 | `BUFFER_SHARE` | scalars: buffer handle, key | |
 | 14 | `BUFFER_OPEN` | scalar: key | scalars: buffer handle, backing size; struct `ripple_gpu_buffer_create`: the buffer's size and params as created |
@@ -66,7 +66,10 @@ WindowServer creates when a GL driver binds a window's surface as accelerated
 (docs/re/ioaccelerator-interface.md, traces 3 and 4), named by the same ID. The copy runs in
 the given context, after what that context has submitted. Flag `RIPPLE_GPU_PRESENT_TOP_FIRST`
 (1): the buffer's first row is the picture's top row; without it, its bottom row, as OpenGL
-draws. A result of 0 is not an error: the surface is hidden, or WindowServer is drawing the
+draws. Flag `RIPPLE_GPU_PRESENT_RECT` (2, added 2026-11-27): only that rectangle of the picture (in
+the picture, origin top left) changes on the screen and in a compositor's texture of the
+surface, as a program's swap rectangle asks; an older kext refuses the longer call, and the
+caller then shows the whole frame. A result of 0 is not an error: the surface is hidden, or WindowServer is drawing the
 window itself just now (while it moves, for example), and the caller shows the frame another
 way. `TRANSFER` now attaches a buffer to the context itself when no `SUBMIT` has named it
 yet.

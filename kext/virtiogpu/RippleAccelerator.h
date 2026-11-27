@@ -63,7 +63,8 @@ public:
     // if it went on the screen. And a buffer or context of a GPU client going away: no surface
     // may keep using it.
     bool presentSurfaceFrame(uint32_t id, uint32_t handle, uint32_t context, uint32_t format,
-                             uint32_t width, uint32_t height, bool topFirst);
+                             uint32_t width, uint32_t height, bool topFirst,
+                             const uint32_t *rect = 0);
     void forgetSurfaceFrames(uint32_t handle, uint32_t context);
     // A compositor's buffer that surface `id` keeps filled with its frames, or fills once
     // (RippleSurfaceClient::setTexture); false if there is no such surface.
