@@ -29,6 +29,7 @@ call :async d9pixels sw
 call :async d9stencil
 call :async d8pixels
 d9full.exe >>%OUT% 2>&1
+d9plain.exe >>%OUT% 2>&1
 d3d7probe.exe hal > "%TEMP%\rb-c.txt" 2>&1
 type "%TEMP%\rb-c.txt" | find "result=" >>%OUT%
 tpixels.exe tnl > "%TEMP%\rb-t.txt" 2>&1
