@@ -2797,6 +2797,85 @@ that are drawn now sample more textures).
 `tpixels` 18 of 18.
 
 
+## Vertex and index buffers on the host
+
+Until now every draw carried its vertices: the display driver copied them out of the program's
+buffer, three for each triangle whatever the indices shared, into records of at most 48, each
+with all the vertex shader's constants, and the host's vertex program read them back as
+constants. A draw of a few thousand triangles became hundreds of host draws, and the guest's
+processor spent the frame copying vertices.
+
+With `RippleHostBuffers` (on by default, with vertex shaders), a draw with a vertex shader whose
+streams are vertex buffers names host buffers instead (`buffer_draw` in `display_d3d7.c`):
+
+- The vertex shader is translated a second way (`RB_VS_ATTRIBUTES`): its inputs
+  are vertex attributes `IN[k]`, one for each register the declaration feeds, and the translator
+  returns where each is fetched from (stream, byte offset, declaration type). The miniport makes
+  a vertex elements object from that list for each such program: `FLOAT1` to `FLOAT4` as floats,
+  `D3DCOLOR` as four normalized bytes that the program puts in order, `UBYTE4`, `SHORT2` and
+  `SHORT4` as numbers. The host's vertex fetch fills what a short element leaves out with 0, 0,
+  0, 1, as Direct3D does.
+- The draw record holds the states of any shader draw, the shader's constants, and in
+  place of vertices the streams (host buffer, stride, offset of vertex zero), the index buffer
+  (host buffer, index size, offset of the first index) and Direct3D's primitive type and count.
+  Lists, strips and fans are drawn as they are, indexed draws with their indices. A base vertex
+  that is not negative goes into the streams' offsets; a negative one stays an index bias. The
+  host has no first index of its own: virglrenderer reads indices from the index buffer's offset
+  on, as Mesa's virgl driver sends it, so the first index goes into that offset.
+- The Direct3D runtime keeps vertex and index buffers in the program's memory and
+  does not tell the driver when the program writes them. Each buffer a draw reads has a copy on
+  the host, made at its first draw. The draw sums every kilobyte it reads (two 32-bit sums a
+  chunk) and uploads the chunks the host does not hold yet, as upload records in the draw queue
+  before the draw; the miniport turns them into inline writes in the scene packet. An indexed
+  draw's vertex range comes from a scan of its indices, kept for the next draw of the same range
+  while those chunks stay.
+- The host writes uploaded bytes into its buffer at once, not in order
+  with the draws sent before: virglrenderer maps a buffer unsynchronized for such writes, as
+  Mesa's virgl driver expects (it renames or waits on its own side). Bytes that an earlier draw
+  may still read must therefore never be written again. A chunk the host holds that has changed
+  is not uploaded: the buffer counts as rewritten, and for its next draws (64, then twice as
+  many each time it happens again) the bytes each draw reads go to a stream arena instead: an
+  8 MB host buffer of the context that takes each draw's bytes after the last one's and is
+  replaced by a new one when full. After those draws the mirror is made anew, as a new host
+  buffer, and summed again. Buffers a program fills once stay mirrored; buffers it refills
+  every frame are streamed and not summed. The Direct3D 8 runtime's own buffers, which hold
+  the vertices of `DrawPrimitiveUP`, are of the second kind.
+
+Draws left to the old path: fixed-function vertices (no vertex shader), vertices in the
+program's memory with the Direct3D 9 runtime, flat shading, and streams whose stride is not a
+multiple of four. `d7draw` prints `D8HOST` (draws, buffers, chunks summed, uploads, index scans,
+rewrites, streams of draws that were streamed, arenas, and the draws left by reason), the last
+events as `D8HOSTLOG`, and the miniport's `D7BUFFERS`.
+
+`d9pixels` gained fifteen cases for this: every vertex shader case drawn a second time from a
+vertex buffer (`_vb`: the element types, flow control, fog, the stages, a clip plane), and six
+cases with a buffer rewritten between two draws of a scene, vertices appended without
+overwriting, indices rewritten, a positive and a negative base vertex with a first index, a
+strip and a fan, and a stream offset. The first run of the rewritten cases found the host's
+unordered writes: the earlier draw showed the later bytes.
+
+Measured with 3DMark05 on Windows XP at 1024x768, on one host (Intel UHD 630) with the guest
+alone on it and no screen captures; scene frames from the miniport's frame pacing counters, the
+same driver build with `RippleHostBuffers` in it and without:
+
+| 3DMark05 | without | with host buffers |
+| --- | --- | --- |
+| Game Test 1 | 2.3 fps, half of the frames within 435 ms | 22.3 fps, within 54 ms |
+| Game Test 2 | 1.3 fps, within 871 ms | 12.8 fps, within 108 ms |
+| Game Test 3 | 2.5 fps, within 435 ms | 28.8 fps, within 36 ms |
+| CPU Tests 1 and 2 | 2.9 and 3.4 fps | 2.9 and 3.3 fps |
+
+The CPU tests use software vertex processing, which this does not touch. The pictures were
+checked in a run of their own, with a screen capture a second (see "Checking a benchmark run"):
+526 of 576 captures are new pictures, the ones seen earlier are a loading screen and the desktop
+after the last test, and the frames looked at show Game Tests 1 and 2 as they should be.
+Game Test 3 lacks its water and the textures of its cliffs with and without host buffers (its
+pixel shaders read more than eight samplers; see "Sixteen samplers").
+
+What is left to gain: the sums (283 million chunks in a run, each a kilobyte read once more),
+the stream arenas of the buffers a program rewrites (3,711 of 8 MB each in a run), and the
+draws whose pixel shader the driver cannot translate yet.
+
 ## Checking a benchmark run: pictures, counters, frame pacing
 
 A frame count says nothing about what was drawn. A run of 3DMark05 once counted 30 frames a
