@@ -351,7 +351,7 @@ GLD_EXPORT int
 gldChoosePixelFormat(struct gld_pixel_format **out, const uint32_t *attrs)
 {
    uint32_t flags = GLD_FLAG_ACCELERATED | GLD_FLAG_COMPLIANT | GLD_FLAG_ROBUST;
-   uint32_t buffer_mode = 0, depth = 0, stencil = 0, mask = lib_display_mask;
+   uint32_t buffer_mode = 0, depth = 0, stencil = 0, aux = 0, mask = lib_display_mask;
    bool minimum = false, ok = true;
 
    if (ripple_gld_dbg_file()) {
@@ -377,7 +377,11 @@ gldChoosePixelFormat(struct gld_pixel_format **out, const uint32_t *attrs)
       case kCGLPFAAlphaSize:    ok = *++a <= 8; break;
       case kCGLPFADepthSize:    depth = *++a; ok = !minimum || depth <= 24; break;
       case kCGLPFAStencilSize:  stencil = *++a; ok = stencil <= 8; break;
-      case kCGLPFAAuxBuffers:   ok = *++a == 0; break;
+      /* Auxiliary buffers (Blender 2.49, Call of Duty 2): Mesa has none, so none are given,
+       * but the format still matches, and the request counts as a skip below (issue 303).
+       * Refusing it left these programs with no context at all. */
+      case kCGLPFAAuxBuffers:   aux = *++a; break;
+      case kCGLPFAAuxDepthStencil: break;
       case kCGLPFAAccumSize:    ok = *++a == 0; break;
       case kCGLPFASampleBuffers: ok = *++a == 0; break;
       case kCGLPFASamples:      ok = *++a == 0; break;
@@ -386,7 +390,6 @@ gldChoosePixelFormat(struct gld_pixel_format **out, const uint32_t *attrs)
       /* Not offered yet: stereo, float color, multisampling, aux depth. */
       case kCGLPFAStereo: case kCGLPFAColorFloat:
       case kCGLPFAMultisample: case kCGLPFASupersample: case kCGLPFASampleAlpha:
-      case kCGLPFAAuxDepthStencil:
          ok = false;
          break;
       default:
@@ -422,6 +425,9 @@ gldChoosePixelFormat(struct gld_pixel_format **out, const uint32_t *attrs)
    pf->color_mode = kCGLARGB8888Bit;
    pf->depth_mode = !depth ? kCGL0Bit : depth <= 16 ? kCGL16Bit : kCGL24Bit;
    pf->stencil_mode = stencil ? kCGL8Bit : kCGL0Bit;
+   pf->aux_buffers = (uint16_t)aux;     /* as asked, so OpenGL keeps the format */
+   if (aux)
+      ripple_gl_skip("auxiliary buffers asked, none given", "kCGLPFAAuxBuffers");
    pf->display_mask = mask;
    *out = pf;
    return 0;

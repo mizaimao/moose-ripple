@@ -22,8 +22,8 @@ Two checks make a test or benchmark run fail on its own, without anyone looking 
    renderer is the wrong one (`rec_known`, each with its reason).
    First results (2026-11-27, an Intel Iris Xe host): 16 of 19 modes agree; the three that
    differ are issues 306, 307 and 308. `gl-feature-check aux` asks for an auxiliary buffer and
-   reports one skip on purpose until issue 303 is fixed: leave it out of a run whose skip count
-   should be 0. In UTM, depth read-back also differs: the host's renderer there can't read depth
+   reports one skip on purpose: the driver accepts the request but has none to give (issue
+   303); leave it out of a run whose skip count should be 0. In UTM, depth read-back also differs: the host's renderer there can't read depth
    (`host-errors.sh` shows its `glReadPixels failed` lines).
 
 Not covered yet: what Mesa itself leaves out below our code (formats and shader features it

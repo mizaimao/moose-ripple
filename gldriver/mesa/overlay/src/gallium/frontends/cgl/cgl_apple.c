@@ -953,6 +953,13 @@ ripple_cgl_get_integerv(void *rend, GLenum pname, GLint *params)
 {
    struct ripple_cgl_context *ctx = ripple_cgl_context_for(rend);
    RIPPLE_CGL_ENTER(rend);
+   /* GL_AUX_BUFFERS: Mesa dropped auxiliary buffers and refuses the name, leaving the variable
+    * unwritten; Apple's GL answers it, and programs that asked for auxiliary buffers read it
+    * to see what they got (issue 303). None are given. */
+   if (pname == 0x0C00 /* GL_AUX_BUFFERS */ && params) {
+      *params = 0;
+      return;
+   }
    /* GL_UNPACK_CLIENT_STORAGE_APPLE: WindowServer gets no answer, the value stays unwritten as
     * when Mesa refused the name. Answering it (with the tracked value) made WindowServer drop
     * the menu bar (VM 210, 2026-11-10): it saves this value around its own uploads, and what
