@@ -597,8 +597,15 @@ static void sys_heap(RDD_SHARED *s)
         return;
     ms.dwLength = sizeof ms;
     GlobalMemoryStatus(&ms);
-    want = ms.dwTotalPhys >= 384UL << 20 ? 64UL << 20 :
-           ms.dwTotalPhys >= 192UL << 20 ? 32UL << 20 : 16UL << 20;
+    /* About a quarter of the guest's memory. The block is pageable and costs only what the
+       surfaces in it use, but its size is the texture memory Direct3D believes in: a Direct3D
+       8 or 9 runtime keeps the working copies of its managed textures and vertex buffers here
+       and, when they do not all fit, throws them out and loads them again frame after frame.
+       With 32 MB on a guest of 256 MB 3DMark03's fourth game test drew a frame every few
+       seconds; with 64 MB it runs (issue 321). */
+    want = ms.dwTotalPhys >= 384UL << 20 ? 128UL << 20 :
+           ms.dwTotalPhys >= 192UL << 20 ? 64UL << 20 :
+           ms.dwTotalPhys >= 96UL << 20 ? 32UL << 20 : 16UL << 20;
     h = CreateFile(RVD_DEVICE_NAME, 0, 0, NULL, 0, 0, NULL);
     if (h == INVALID_HANDLE_VALUE)
         return;
