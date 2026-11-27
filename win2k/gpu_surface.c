@@ -126,11 +126,16 @@ static void pace(RB2K_GPU *gpu)
     RB2K_D7_PROFILE *p = &gpu->d7Profile;
     RB2K_PACE_SEGMENT *s = &p->pace[p->paceSegment];
     LONGLONG now = rb_counter_ticks(NULL), dt = now - p->paceLast;
-    ULONG high, bucket = 0;
+    ULONG high, bucket = 0, draws = p->paceRecords - p->paceDraws;
+    BOOLEAN light = draws < RB2K_PACE_SCENE_DRAWS;
+    p->paceDraws = p->paceRecords;
     if (!p->paceLast || dt < 0 || (dt >> RB2K_PACE_GAP_SHIFT)) {
         /* The first present of a stretch. */
         if (s->frames && p->paceSegment + 1 < RB2K_PACE_SEGMENTS) s = &p->pace[++p->paceSegment];
         if (!s->frames) s->start = now;
+    } else if (light || p->paceLight) {
+        ++s->lightFrames;
+        s->lightTotal += dt;
     } else {
         for (high = RB2K_PACE_GAP_SHIFT - 1; high >= RB2K_PACE_FIRST_SHIFT && !(dt >> high); --high) {}
         if (high >= RB2K_PACE_FIRST_SHIFT)
@@ -141,6 +146,7 @@ static void pace(RB2K_GPU *gpu)
     }
     ++s->frames;
     p->paceLast = now;
+    p->paceLight = light;
 }
 
 static VP_STATUS present(RB2K_GPU *gpu, const RB2K_IMAGE *image, const RB2K_DD_PRESENT *p)
@@ -315,6 +321,7 @@ static BOOLEAN draw_one(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *imag
         return FALSE;
     }
     gpu->d7Frame.pending.triangles += d->count/3;
+    ++gpu->d7Profile.paceRecords;
     return TRUE;
 }
 
@@ -393,6 +400,7 @@ static BOOLEAN draw_one8(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *ima
         return FALSE;
     }
     gpu->d7Frame.pending.triangles += d->count/3;
+    ++gpu->d7Profile.paceRecords;
     return TRUE;
 }
 

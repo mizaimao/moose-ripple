@@ -11,7 +11,7 @@ static int report(void);
 
 /* d7draw -watch FILE SECONDS: once a second, for SECONDS or until FILE.stop exists, one line of
  * the counters that say whether frames are drawn, copied to the screen and shown, appended to
- * FILE; every fifteenth second the whole report as well. Run it beside a full-screen program
+ * FILE; once a minute the whole report as well. Run it beside a full-screen program
  * whose picture stops changing: the counters of a display mode are gone when the program
  * leaves it. Counts are totals since the mode was set (display driver) or since boot
  * (miniport); flip is the newest page flip: the surface shown before, the one shown after,
@@ -46,7 +46,7 @@ static int watch(const char *file, int seconds)
                    p.commandFailures, p.memoryPresents, p.memoryFailures, p.memoryStale, p.memoryChain);
         printf("\n");
         if (dc) DeleteDC(dc);
-        if (n % 15 == 14) report();
+        if (n % 60 == 59) report();
         fflush(stdout);
         Sleep(1000);
     }
@@ -233,18 +233,20 @@ static int report(void)
                        p.caches[i][2]);
             printf("D7SHADERS made=%lu text_bytes=%lu\n", p.shaders, p.shaderBytes);
             printf("D7CODE miniport_frame_reserve=%08lx\n", p.codeAt);
-            /* Frame pacing: for each stretch of presents that followed one another (a test of a
-             * benchmark), the frames, the average rate, and how long the frames took: half of
-             * them at most median, 95% and 99% at most those times (upper ends of the counting
-             * buckets), the longest, and how many took more than about 33 and 100 ms. */
+            /* Frame pacing: for each stretch of presents (a test of a benchmark), its scene frames,
+             * their average rate, and how long they took: half of them at most median, 95% and 99%
+             * at most those times (upper ends of the counting buckets), the longest, and how many
+             * took more than about 33 and 100 ms. Light frames (menus, loading screens) are only
+             * counted, with the time they took together. */
             if (p.frequency > 0) {
                 ULONG seg, k;
                 for (seg = 0; seg <= p.paceSegment && seg < RB2K_PACE_SEGMENTS; ++seg) {
                     const RB2K_PACE_SEGMENT *s = &p.pace[seg];
-                    ULONG times = s->frames ? s->frames - 1 : 0, sum = 0, over33 = 0, over100 = 0;
+                    ULONG times = 0, sum = 0, over33 = 0, over100 = 0;
                     LONGLONG at[3] = { 0, 0, 0 };
-                    if (times < 20) continue;   /* a loading screen, a menu */
-                    for (k = 0; k < RB2K_PACE_BUCKETS; ++k) {
+                    for (k = 0; k < RB2K_PACE_BUCKETS; ++k) times += s->buckets[k];
+                    if (s->frames < 20) continue;   /* a dialog, a mode change */
+                    for (k = 0; k < RB2K_PACE_BUCKETS && times; ++k) {
                         ULONG h = RB2K_PACE_FIRST_SHIFT + (k ? (k - 1) / 2 : 0), half = k ? (k - 1) & 1 : 0;
                         LONGLONG lower = !k ? 0 : half ? (LONGLONG)3 << (h - 1) : (LONGLONG)1 << h;
                         LONGLONG upper = !k ? (LONGLONG)1 << h : half ? (LONGLONG)2 << h : (LONGLONG)3 << (h - 1);
@@ -256,13 +258,15 @@ static int report(void)
                         if (lowerUs >= 33000) over33 += s->buckets[k];
                         if (lowerUs >= 100000) over100 += s->buckets[k];
                     }
-                    printf("D7PACE stretch=%lu at_s=%I64d frames=%lu seconds=%I64d.%I64d fps_x10=%I64d median_ms<=%I64d "
-                           "p95_ms<=%I64d p99_ms<=%I64d longest_ms=%I64d over_33ms=%lu over_100ms=%lu\n", seg,
-                           (s->start - p.pace[0].start) / p.frequency, s->frames,
+                    printf("D7PACE stretch=%lu at_s=%I64d presents=%lu scene_frames=%lu scene_s=%I64d.%I64d fps_x10=%I64d "
+                           "median_ms<=%I64d p95_ms<=%I64d p99_ms<=%I64d longest_ms=%I64d over_33ms=%lu over_100ms=%lu "
+                           "light_frames=%lu light_s=%I64d.%I64d\n", seg,
+                           (s->start - p.pace[0].start) / p.frequency, s->frames, times,
                            s->total / p.frequency, s->total * 10 / p.frequency % 10,
                            s->total ? (LONGLONG)times * 10 * p.frequency / s->total : 0,
                            at[0] * 1000 / p.frequency, at[1] * 1000 / p.frequency, at[2] * 1000 / p.frequency,
-                           s->longest * 1000 / p.frequency, over33, over100);
+                           s->longest * 1000 / p.frequency, over33, over100, s->lightFrames,
+                           s->lightTotal / p.frequency, s->lightTotal * 10 / p.frequency % 10);
                 }
             }
         }
