@@ -403,6 +403,66 @@ static void vs_case(const char *name, DWORD version, BOOL offered, BOOL buffer)
     IDirect3DDevice8_DeleteVertexShader(device, shader);
 }
 
+/* The fixed-function pipeline through a declaration with two streams and no shader code
+ * (Direct3D 8's way to several streams): positions in stream 0, colours in stream 1, six unused
+ * vertices first in both, drawn from vertex 6: a red quad on the left, a green one on the right. */
+static void ff_streams_case(BOOL offered)
+{
+    static const DWORD decl[] = { D3DVSD_STREAM(0), D3DVSD_REG(D3DVSDE_POSITION, D3DVSDT_FLOAT3),
+                                  D3DVSD_STREAM(1), D3DVSD_REG(D3DVSDE_DIFFUSE, D3DVSDT_D3DCOLOR), D3DVSD_END() };
+    static const SAMPLE s[] = { { 48, 64, 0xff0000 }, { 80, 64, 0x00ff00 }, { 8, 8, CLEAR_COLOR },
+                                { 120, 120, CLEAR_COLOR } };
+    static const float rect[3][4] = { { 1, 1, 1, 1 }, { -0.5f, 0.5f, 0, -0.5f }, { 0, 0.5f, 0.5f, -0.5f } };
+    static const DWORD colour[3] = { 0xff0000ff, 0xffff0000, 0xff00ff00 };
+    static const int cx[6] = { 0, 2, 0, 0, 2, 2 }, cy[6] = { 1, 1, 3, 3, 1, 3 };
+    float pos[18][3];
+    DWORD col[18];
+    IDirect3DVertexBuffer8 *pvb, *cvb;
+    D3DMATRIX m;
+    DWORD shader = 0;
+    HRESULT hr;
+    int k, q;
+    if (!offered) { printf("D8PIX fixed-function streams not offered\n"); return; }
+    for (q = 0; q < 3; ++q)
+        for (k = 0; k < 6; ++k) {
+            pos[q * 6 + k][0] = rect[q][cx[k]];
+            pos[q * 6 + k][1] = rect[q][cy[k]];
+            pos[q * 6 + k][2] = 0.5f;
+            col[q * 6 + k] = colour[q];
+        }
+    pvb = vertex_buffer(pos, sizeof(pos), 0);
+    cvb = vertex_buffer(col, sizeof(col), 0);
+    hr = pvb && cvb ? IDirect3DDevice8_CreateVertexShader(device, decl, NULL, &shader, 0) : E_FAIL;
+    if (FAILED(hr)) fail_hr("ff_streams", "create", hr);
+    else {
+        memset(&m, 0, sizeof(m));
+        m._11 = m._22 = m._33 = m._44 = 1.0f;
+        IDirect3DDevice8_SetTransform(device, D3DTS_WORLD, &m);
+        IDirect3DDevice8_SetTransform(device, D3DTS_VIEW, &m);
+        IDirect3DDevice8_SetTransform(device, D3DTS_PROJECTION, &m);
+        IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+        if (begin("ff_streams")) {
+            IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_NONE);
+            IDirect3DDevice8_SetTexture(device, 0, NULL);
+            IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+            IDirect3DDevice8_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+            IDirect3DDevice8_SetVertexShader(device, shader);
+            IDirect3DDevice8_SetStreamSource(device, 0, pvb, sizeof(pos[0]));
+            IDirect3DDevice8_SetStreamSource(device, 1, cvb, sizeof(col[0]));
+            hr = IDirect3DDevice8_DrawPrimitive(device, D3DPT_TRIANGLELIST, 6, 4);
+            IDirect3DDevice8_SetStreamSource(device, 0, NULL, 0);
+            IDirect3DDevice8_SetStreamSource(device, 1, NULL, 0);
+            if (FAILED(hr)) { fail_hr("ff_streams", "draw", hr); IDirect3DDevice8_EndScene(device); }
+            else check("ff_streams", s, 4);
+            IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_CCW);
+        }
+        IDirect3DDevice8_SetVertexShader(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+        IDirect3DDevice8_DeleteVertexShader(device, shader);
+    }
+    if (pvb) IDirect3DVertexBuffer8_Release(pvb);
+    if (cvb) IDirect3DVertexBuffer8_Release(cvb);
+}
+
 /* only: run that case alone (numbered from 1), or all when zero. */
 static void pixel_shaders(int only)
 {
@@ -755,6 +815,7 @@ int main(int argc, char **argv)
         vs_case("vs11", 0xfffe0101, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1) && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT), FALSE);
         vs_case("vs11_buffer", 0xfffe0101, caps.VertexShaderVersion >= D3DVS_VERSION(1, 1) && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT), TRUE);
         vs_case("vs10", 0xfffe0100, caps.VertexShaderVersion >= D3DVS_VERSION(1, 0) && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT), FALSE);
+        ff_streams_case(caps.MaxStreams >= 2 && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT));
     }
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 2)) pixel_shaders(only);
     else printf("D8PIX pixel shaders not offered\n");
