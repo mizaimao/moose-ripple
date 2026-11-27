@@ -17,8 +17,9 @@
 enum {
     Raster = 9, Elements = 5, VertexShader = 6, ObjectShader = 7, LitShader = 8, DsaBase = 16, BlendBase = 32,
     SamplerBase = 48, Sampler1Base = 56, ShaderBase = 64, TextureView = 80, TextureView1 = 81,
-    PsVertexShader = 82, PsObjectShader = 83, PsViewBase = 84, PsSamplerBase = 96, PsLitShader = 112,
+    PsVertexShader = 82, PsObjectShader = 83, PsSamplerBase = 96, PsLitShader = 112,
     ObjectClipShader = 113, LitClipShader = 114, PsObjectClipShader = 115, PsLitClipShader = 116,
+    PsViewBase = 128,       /* a view for each sampler of a pixel program: 128..143 */
     PointRaster = 160,
     /* Vertex and pixel programs: a host shader for each program slot, and boundVertex's value
      * for one (above the fixed vertex shaders' bits). */
@@ -657,10 +658,12 @@ BOOLEAN rb_gpu_d7_valid(const RB2K_D3D7_DRAW *d)
 }
 
 /* Find or make room for a key. The state is Hit, Fresh (an unused handle)
- * or Replaced (the caller destroys that handle's old object first). */
+ * or Replaced (the caller destroys that handle's old object first). A slot whose bit is set in
+ * busy is not replaced (the objects one draw has already chosen); a draw needs no more slots
+ * than the cache has. */
 enum { Hit, Fresh, Replaced };
-static ULONG cache_slot(RB2K_GPU *gpu, ULONG kind, RB2K_D7_CACHE *c, ULONG limit, const ULONG *key, ULONG words,
-                        ULONG *state)
+static ULONG cache_slot_busy(RB2K_GPU *gpu, ULONG kind, RB2K_D7_CACHE *c, ULONG limit, const ULONG *key, ULONG words,
+                             ULONG *state, ULONG busy)
 {
     ULONG i, j;
     for (i = 0; i < c->used; ++i) {
@@ -669,6 +672,7 @@ static ULONG cache_slot(RB2K_GPU *gpu, ULONG kind, RB2K_D7_CACHE *c, ULONG limit
     }
     if (c->used < limit) { i = c->used++; *state = Fresh; }
     else {
+        for (j = 0; j < limit && ((busy >> c->next) & 1); ++j) c->next = (c->next + 1) % limit;
         i = c->next;
         c->next = (c->next + 1) % limit;
         *state = Replaced;
@@ -677,6 +681,12 @@ static ULONG cache_slot(RB2K_GPU *gpu, ULONG kind, RB2K_D7_CACHE *c, ULONG limit
     ++gpu->d7Profile.caches[kind][*state];
     for (j = 0; j < words; ++j) c->keys[i][j] = key[j];
     return i;
+}
+
+static ULONG cache_slot(RB2K_GPU *gpu, ULONG kind, RB2K_D7_CACHE *c, ULONG limit, const ULONG *key, ULONG words,
+                        ULONG *state)
+{
+    return cache_slot_busy(gpu, kind, c, limit, key, words, state, 0);
 }
 
 static ULONG pipe_blend(ULONG factor, BOOLEAN alpha)
@@ -1110,7 +1120,7 @@ BOOLEAN rb_gpu_d7_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
  * inputs of the translated pixel shader; a set the draw does not carry reads
  * words of the next vertex, which the program does not use. */
 enum { PsVertexConstants = 3 + RB2K_D8_STAGES, PsOutputs = 2 + RB2K_D8_STAGES };
-typedef char ps_handles[PsViewBase + RB2K_D8_STAGES <= PsSamplerBase &&
+typedef char ps_handles[PsViewBase + RB2K_D8_SAMPLERS <= PointRaster && PsViewBase > PsLitClipShader &&
                         PsSamplerBase + RB2K_D8_SAMPLER_KEYS <= PsLitShader && PsOutputs < 11 ? 1 : -1];
 static const char *const ps_transformed_lines[] = {
     "UMAD TEMP[0].x, SV[0].xxxx, CONST[0].zzzz, IMM[1].xxxx",
@@ -1323,7 +1333,7 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
                        RB2K_TEXTURE *const *textures)
 {
     RB2K_D7_STATE *s = &image->d7;
-    ULONG words[192], n = 0, slot, key[6], state, i, k, h[RB2K_D8_STAGES], views[RB2K_D8_STAGES];
+    ULONG words[192], n = 0, slot, key[6], state, i, k, h[RB2K_D8_SAMPLERS], views[RB2K_D8_SAMPLERS], busy = 0;
     BOOLEAN shaded = d->transform == 2;
     ULONG lit = !shaded && d->lighting != 0, lights = lit ? d->lightCount : 0;
     ULONG stages = 0, fill = 0, count = d->count;
@@ -1408,12 +1418,13 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
      * below the last sampled one that the program does not sample repeat a
      * sampled stage's objects. */
     gpu->d8Step = 6;
-    for (k = 0; k < RB2K_D8_STAGES; ++k) {
+    for (k = 0; k < RB2K_D8_SAMPLERS; ++k) {
         if (!textures[k]) continue;
         stages = k + 1;
         fill = k;
         key[0] = d->samplers[k]; key[1] = d->borders[k];
-        slot = cache_slot(gpu, RB2K_CACHE_PS_SAMPLER, &s->psSampler, RB2K_D8_SAMPLER_KEYS, key, 2, &state);
+        slot = cache_slot_busy(gpu, RB2K_CACHE_PS_SAMPLER, &s->psSampler, RB2K_D8_SAMPLER_KEYS, key, 2, &state, busy);
+        busy |= 1UL << slot;
         if (state != Hit) n += sampler_words(words + n, PsSamplerBase + slot, state, d->samplers[k], d->borders[k]);
         h[k] = PsSamplerBase + slot;
         views[k] = PsViewBase + k;

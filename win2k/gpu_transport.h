@@ -27,7 +27,7 @@ typedef struct {
     ULONG boundSampler[2], boundSamplers, boundViews, boundView0;
     RB2K_D7_CACHE dsa, blend, sampler, sampler1, shader;   /* sampler1: texture stage one */
     /* Pixel shader draws: the texture in each stage's view, and their samplers. */
-    ULONG psViews[RB2K_D8_STAGES];
+    ULONG psViews[RB2K_D8_SAMPLERS];
     RB2K_D7_CACHE psSampler;
     /* Vertex and pixel programs: the id of the program whose host shader this colour context
      * holds at ProgramBase plus the program's slot (0: none), and the pixel program bound

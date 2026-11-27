@@ -2460,6 +2460,58 @@ static void rt_small_depth_case(int only)
     IDirect3DTexture9_Release(t);
 }
 
+/* 83: a ps_2_0 shader that reads samplers 9 and 15 (shader model 2 has sixteen; 3DMark05's third
+ * game test draws its water with a ninth one): texld r0, t0, s9; texld r1, t0, s15;
+ * add r0, r0, r1. A green texture on sampler 9 and a blue one on sampler 15 give cyan. */
+static void ps2_sixteen_samplers_case(int only, BOOL version2)
+{
+    typedef struct { float x, y, z, rhw; DWORD diffuse; float u, v; } TV;
+    static const DWORD ps[] = { 0xffff0200, P2DCL_T(0, 3), P2DCL_S(9), P2DCL_S(15),
+        P2I(OTex, 3), P2D(RR, 0, 15), P2SRC(RT, 0), P2SRC(10, 9),
+        P2I(OTex, 3), P2D(RR, 1, 15), P2SRC(RT, 0), P2SRC(10, 15),
+        P2I(OAdd, 3), P2D(RR, 0, 15), P2SRC(RR, 0), P2SRC(RR, 1),
+        P2I(OMov, 2), P2D(8, 0, 15), P2SRC(RR, 0), PSEND };
+    static const DWORD green[4] = { 0xff00ff00, 0xff00ff00, 0xff00ff00, 0xff00ff00 };
+    static const DWORD blue[4] = { 0xff0000ff, 0xff0000ff, 0xff0000ff, 0xff0000ff };
+    static const SAMPLE s[] = { { 16, 16, 0x00ffff }, { 96, 32, 0x00ffff }, { 32, 96, 0x00ffff }, { 112, 112, 0x00ffff } };
+    TV v[4] = { { 0, 0, 0.5f, 1, 0xffffffff, 0, 0 }, { Side, 0, 0.5f, 1, 0xffffffff, 1, 0 },
+                { 0, Side, 0.5f, 1, 0xffffffff, 0, 1 }, { Side, Side, 0.5f, 1, 0xffffffff, 1, 1 } };
+    IDirect3DTexture9 *g, *b;
+    IDirect3DPixelShader9 *handle = NULL;
+    HRESULT hr;
+    int k;
+    if (!version2 || (only && only != 83)) return;
+    g = texture2x2(green);
+    b = texture2x2(blue);
+    if (!g || !b) { fail_hr("ps2_sixteen_samplers", "texture", E_FAIL); if (g) IDirect3DTexture9_Release(g); if (b) IDirect3DTexture9_Release(b); return; }
+    IDirect3DDevice9_SetTexture(device, 9, (IDirect3DBaseTexture9 *)g);
+    IDirect3DDevice9_SetTexture(device, 15, (IDirect3DBaseTexture9 *)b);
+    for (k = 9; k < 16; k += 6) {
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        IDirect3DDevice9_SetSamplerState(device, k, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    }
+    hr = IDirect3DDevice9_CreatePixelShader(device, ps, &handle);
+    if (FAILED(hr)) fail_hr("ps2_sixteen_samplers", "create", hr);
+    else {
+        if (begin("ps2_sixteen_samplers")) {
+            IDirect3DDevice9_SetPixelShader(device, handle);
+            IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_DIFFUSE | D3DFVF_TEX1);
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+            IDirect3DDevice9_SetPixelShader(device, NULL);
+            if (FAILED(hr)) { fail_hr("ps2_sixteen_samplers", "draw", hr); IDirect3DDevice9_EndScene(device); }
+            else check("ps2_sixteen_samplers", s, 4);
+        }
+        IDirect3DPixelShader9_Release(handle);
+    }
+    IDirect3DDevice9_SetTexture(device, 9, NULL);
+    IDirect3DDevice9_SetTexture(device, 15, NULL);
+    IDirect3DTexture9_Release(g);
+    IDirect3DTexture9_Release(b);
+}
+
 /* ---- the scissor test ----
  * 60: a red quad over the whole back buffer with the scissor rectangle 32,32 to 96,96: red
  * inside it, the clear colour outside. */
@@ -2721,6 +2773,7 @@ int main(int argc, char **argv)
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1) && (!only || only >= 43)) rt_cases(only);
     rt2048_case(only);
     rt_small_depth_case(only);
+    ps2_sixteen_samplers_case(only, caps.PixelShaderVersion >= D3DPS_VERSION(2, 0));
     scissor_case(only, (caps.RasterCaps & D3DPRASTERCAPS_SCISSORTEST) != 0);
     luminance_case(only);
     lines_points_case(only);

@@ -83,7 +83,8 @@ typedef struct { ULONG texture, side, mask, images[6]; } RB2K_D7_CUBE_SYNC;
 #define RB2K_D8_PROGRAM_SLOT(id) (((id) & ((1UL << RB2K_D8_PROGRAM_SLOT_BITS) - 1)) - 1)
 typedef char rb2k_d8_program_slots_fit[RB2K_D8_PROGRAMS < (1UL << RB2K_D8_PROGRAM_SLOT_BITS) ? 1 : -1];
 #define RB2K_D8_PROGRAM_BYTES 8192
-#define RB2K_D8_STAGES 8            /* samplers, and texture coordinate sets */
+#define RB2K_D8_STAGES 8            /* texture coordinate sets, and the stages of the fixed-function pipeline */
+#define RB2K_D8_SAMPLERS 16         /* samplers of a pixel program (shader model 2 has s0..s15) */
 #define RB2K_D8_VERTICES 48
 #define RB2K_D8_RECORD 0x80000000UL
 /* samplers: the texture stages the program samples; text: TGSI, zero-terminated. */
@@ -113,7 +114,7 @@ typedef struct {
     ULONG stencil, stencilRef;      /* RB2K_STENCIL_ON etc.; reference, masks */
     ULONG program;
     ULONG coordSets;                /* 0..RB2K_D8_STAGES */
-    ULONG textures[RB2K_D8_STAGES], samplers[RB2K_D8_STAGES], borders[RB2K_D8_STAGES];
+    ULONG textures[RB2K_D8_SAMPLERS], samplers[RB2K_D8_SAMPLERS], borders[RB2K_D8_SAMPLERS];
     ULONG constantCount;            /* 8 for version 1 programs (16 with texbem), 32 for shader model 2 */
     ULONG constants[32][4];
     ULONG fog, fogColor, fogStart, fogEnd, fogDensity;   /* as in RB2K_D3D7_DRAW */

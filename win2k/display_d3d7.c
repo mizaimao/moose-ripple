@@ -26,6 +26,10 @@
 
 enum { MaxContexts = 16, MaxCommandBytes = 1 << 20, TextureStages = 8, MaxTextures = 1024, MaxLights = 32,
        MaxBuffers = 1024, MaxShaders = 512, MaxVertexShaders = 512 };
+/* Shader model 2 has sixteen samplers: textures and sampler states are kept for all of them; the
+ * fixed-function stages are the first TextureStages. */
+enum { SamplerStages = RB2K_D8_SAMPLERS };
+typedef char samplers_match[RB_PS2_SAMPLERS == RB2K_D8_SAMPLERS && SamplerStages >= TextureStages ? 1 : -1];
 /* DP2 SETLIGHT operations (D3DHAL_SETLIGHT_*). */
 enum { SetLightEnable, SetLightDisable, SetLightData };
 typedef char light_record[sizeof(D3DLIGHT7) == 26 * sizeof(ULONG) ? 1 : -1];
@@ -130,11 +134,11 @@ typedef struct {
     ULONG stageNext;
     /* Every render and texture stage state as last set, for state blocks;
      * the block being recorded (its handle) and the blocks. */
-    ULONG rs[RenderStates], rsSet[RenderStates / 32], tss[TextureStages][StageStates], tssSet[TextureStages];
+    ULONG rs[RenderStates], rsSet[RenderStates / 32], tss[SamplerStages][StageStates], tssSet[SamplerStages];
     ULONG recording, replaying;
     D8_STATEBLOCK *blocks;
     RB2K_D3D8_DRAW draw8;       /* the pixel shader batch being filled */
-    D7_STAGE stages[TextureStages];
+    D7_STAGE stages[SamplerStages];
 } D7_CONTEXT;
 /* A system-memory texture registered through CreateSurfaceEx. The address
  * belongs to the owning process, which is current during its callbacks. */
@@ -793,7 +797,7 @@ static DWORD APIENTRY get_driver_state(PDD_GETDRIVERSTATEDATA a)
 static void default_stages(D7_CONTEXT *c)
 {
     ULONG stage;
-    for (stage = 0; stage < TextureStages; ++stage) {
+    for (stage = 0; stage < SamplerStages; ++stage) {
         D7_STAGE *s = &c->stages[stage];
         RtlZeroMemory(s, sizeof(*s));
         s->colorOp = stage ? D3DTOP_DISABLE : D3DTOP_MODULATE;
@@ -2466,7 +2470,7 @@ static BOOL pixel_states(D7_CONTEXT *c, RB2K_D3D8_DRAW *draw, const D8_SHADER *s
 {
     ULONG k;
     scissor_words(c, &draw->scissorOn, draw->scissor);
-    for (k = 0; k < RB2K_D8_STAGES; ++k) {
+    for (k = 0; k < RB2K_D8_SAMPLERS; ++k) {
         D7_STAGE *st = &c->stages[k];
         D7_TEXTURE *tex;
         if (!(sh->samplers & (1UL << k))) continue;
@@ -3693,7 +3697,7 @@ static void create_block(D7_CONTEXT *c, D8_STATEBLOCK *b)
     for (i = 0; i < RenderStates; ++i)
         if ((c->rsSet[i / 32] >> (i % 32)) & 1) { rs[n].RenderState = (D3DRENDERSTATETYPE)i; rs[n].dwState = c->rs[i]; ++n; }
     block_command(b, D3DNTDP2OP_RENDERSTATE, n, rs, n * sizeof(rs[0]));
-    for (k = 0; k < TextureStages; ++k) {
+    for (k = 0; k < SamplerStages; ++k) {
         for (i = 0, n = 0; i < StageStates; ++i)
             if ((c->tssSet[k] >> i) & 1) { ts[n].wStage = (WORD)k; ts[n].TSState = (WORD)i; ts[n].dwValue = c->tss[k][i]; ++n; }
         block_command(b, D3DNTDP2OP_TEXTURESTAGESTATE, n, ts, n * sizeof(ts[0]));
@@ -3753,7 +3757,7 @@ static void capture_block(D7_CONTEXT *c, D8_STATEBLOCK *b)
         case D3DNTDP2OP_TEXTURESTAGESTATE: {
             D3DNTHAL_DP2TEXTURESTAGESTATE *t = (D3DNTHAL_DP2TEXTURESTAGESTATE *)p;
             for (k = 0; k < n; ++k, ++t)
-                if (t->wStage < TextureStages && t->TSState < StageStates) t->dwValue = c->tss[t->wStage][t->TSState];
+                if (t->wStage < SamplerStages && t->TSState < StageStates) t->dwValue = c->tss[t->wStage][t->TSState];
             break;
         }
         case D3DNTDP2OP_SETTRANSFORM: {
@@ -4010,13 +4014,13 @@ static HRESULT commands(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG s
             if (used > remaining) return DDERR_INVALIDPARAMS;
             for (; n; --n, ++st) {
                 ULONG value = st->dwValue;
-                if (st->wStage < TextureStages && st->TSState < StageStates) {
+                if (st->wStage < SamplerStages && st->TSState < StageStates) {
                     c->tss[st->wStage][st->TSState] = value;
                     c->tssSet[st->wStage] |= 1UL << st->TSState;
                 }
-                /* With pixel shader 2.0 the Direct3D 9 runtime also sets samplers
-                 * 8 to 15, which no draw here uses. */
-                if (st->wStage >= TextureStages) continue;
+                /* Above the samplers of shader model 2 are the vertex samplers, which no draw
+                 * here uses. */
+                if (st->wStage >= SamplerStages) continue;
                 /* Direct3D 8 filters: mip NONE, POINT, LINEAR are 0..2 (Direct3D 7
                  * uses 1..3), and magnification ANISOTROPIC is 3. */
                 if (c->dx8 && st->TSState == D3DTSS_MIPFILTER) ++value;

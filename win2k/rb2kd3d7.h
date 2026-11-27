@@ -71,11 +71,11 @@ typedef struct {
 } RB2K_D7_PROFILE;
 enum { RB2K_D7_SITE_RECORD = 1, RB2K_D7_SITE_PROGRAM, RB2K_D7_SITE_DEPTH, RB2K_D7_SITE_TEXTURE,
        RB2K_D7_SITE_VERTEX, RB2K_D7_SITE_COMMAND, RB2K_D7_SITE_STEP = 16 };   /* STEP + step in the draw */
-/* A refused render target texture (site TEXTURE): the detail is 32 + 8*why
+/* A refused render target texture (site TEXTURE): the detail is 32 + 16*why
  * + stage. why: no such image (or the target itself), the image's own frame
  * failed, attaching it to the target failed, submitting its frame failed. */
 enum { RB2K_D7_IMAGE_MISSING, RB2K_D7_IMAGE_FAILED, RB2K_D7_IMAGE_ATTACH, RB2K_D7_IMAGE_FLUSH };
-#define RB2K_D7_REFUSE_IMAGE(why, stage) (32 + 8*(why) + (stage))
+#define RB2K_D7_REFUSE_IMAGE(why, stage) (32 + 16*(why) + (stage))
 #define RB2K_D3D7_FLIGHT_ESCAPE 0x52420022
 typedef struct {
     LONGLONG frequency, throttleTicks, accessTicks;
