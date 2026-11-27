@@ -315,7 +315,9 @@ gldGetRendererInfo(struct gld_renderer_info *rec, uint32_t display_mask)
       return kCGLBadDisplay;
    memset(rec, 0, sizeof(*rec));
    rec->renderer_id = RIPPLE_RENDERER_ID_FULL;
-   rec->flags = GLD_FLAG_WINDOW | GLD_FLAG_OFFSCREEN | GLD_FLAG_BACKING_STORE |
+   /* Full screen too (issue 312): Call of Duty 2 reads kCGLRPFullScreen from each renderer
+    * and quits when none has it, before it asks for a pixel format. */
+   rec->flags = GLD_FLAG_WINDOW | GLD_FLAG_FULLSCREEN | GLD_FLAG_OFFSCREEN | GLD_FLAG_BACKING_STORE |
                 GLD_FLAG_ROBUST | GLD_FLAG_FALLBACK | GLD_FLAG_ACCELERATED |
                 GLD_FLAG_COMPLIANT | GLD_FLAG_GPU_VERTEX | GLD_FLAG_GPU_FRAGMENT;
    if (lib_qe)
