@@ -2325,10 +2325,10 @@ an unfenced packet reports at once. 3DMark 2001 SE went from 5122 to 5446
 Presents still wait 58 s on their fences in a run: the next lead.
 ## Texture eviction
 
-The miniport keeps Direct3D textures on the host within a texel budget
-(`RB2K_D7_TEXEL_BUDGET`, 64 MB) and 1024 slots. Host textures have no guest
-backing; the budget guards the host's memory. Past it, the miniport refuses a
-new texture, and the draws that use it used to be skipped.
+The miniport keeps Direct3D textures on the host within a budget of host memory
+(256 MB, or the megabytes in the registry value `RippleTextureMB`, 16 to 1024) and 1024
+slots. Host textures have no guest backing; the budget guards the host's memory. Past it, the
+miniport refuses a new texture, and the draws that use it used to be skipped.
 
 The display driver now evicts the least recently used texture instead:
 
@@ -2349,6 +2349,14 @@ The refusal reaches the display driver as the miniport's
 GDI; all are accepted. `d7draw` prints `D7EVICT` with the evictions, the new
 textures that needed them and the last refusal's status. A scene that needs
 more than the budget evicts and uploads again every frame: correct, but slow.
+
+The budget was 64 MB at first. 3DMark05's first game test needs more: with 64 MB a run made
+12,092 texture uploads, 4,039 of its requests for a new texture were refused for room, and 53
+of that test's scene frames of 100 ms and more had texture uploads in them (frame pacing
+counters, `D7PACE`). With 256 MB the same run makes 1,282 uploads, none is refused, and 4 such
+frames are left; the frame rates of the three game tests stay as they were (22, 13 and 27
+frames a second on the measuring host). The pixel test of eviction needs `RippleTextureMB` 64
+to evict at all now.
 
 `d9pixels` case 74 draws 24 textures of 1024x1024 (96 MB) in two scenes.
 ## Lines and points
