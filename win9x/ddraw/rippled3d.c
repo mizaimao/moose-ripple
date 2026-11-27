@@ -1085,6 +1085,31 @@ static PIXFMT gl_format(const DDPIXELFORMAT *pf)
            Q8W8V8U8 textures, which DirectDraw then can't size: CreateSurface does) */
         case 60: f.bytes = 2; f.format = GL_RG; f.type = GL_BYTE; f.internal = GL_RG8_SNORM; f.bump = 1; break;
         case 63: f.bytes = 4; f.format = GL_RGBA; f.type = GL_BYTE; f.internal = GL_RGBA8_SNORM; break;
+        /* and, should it name these the same way: A8, L8, A8L8 (below) */
+        case 28: f.bytes = 1; f.format = GL_ALPHA; f.type = GL_UNSIGNED_BYTE; f.internal = GL_ALPHA8; break;
+        case 50: f.bytes = 1; f.format = GL_LUMINANCE; f.type = GL_UNSIGNED_BYTE; f.internal = GL_LUMINANCE8; break;
+        case 51: f.bytes = 2; f.format = GL_LUMINANCE_ALPHA; f.type = GL_UNSIGNED_BYTE;
+                 f.internal = GL_LUMINANCE8_ALPHA8; break;
+        }
+        return f;
+    }
+    if ((pf->dwFlags & DDPF_LUMINANCE) && d8_on) {
+        /* Direct3D 8 and 9's L8 and A8L8 (lightmaps, fonts, detail textures): Direct3D samples
+           them as (L, L, L, 1) and (L, L, L, A), which is what OpenGL's luminance formats give.
+           A8L8 has the luminance in the low byte, so in memory it is L then A, OpenGL's order. */
+        if (pf->dwLuminanceBitCount == 8 && !alpha && pf->dwLuminanceBitMask == 0xFF) {
+            f.bytes = 1; f.format = GL_LUMINANCE; f.type = GL_UNSIGNED_BYTE; f.internal = GL_LUMINANCE8;
+        } else if (pf->dwLuminanceBitCount == 16 && alpha && pf->dwLuminanceBitMask == 0xFF &&
+                   pf->dwLuminanceAlphaBitMask == 0xFF00) {
+            f.bytes = 2; f.format = GL_LUMINANCE_ALPHA; f.type = GL_UNSIGNED_BYTE;
+            f.internal = GL_LUMINANCE8_ALPHA8;
+        }
+        return f;
+    }
+    if ((pf->dwFlags & DDPF_ALPHA) && d8_on) {
+        /* A8: (0, 0, 0, A) in both */
+        if (pf->dwAlphaBitDepth == 8) {
+            f.bytes = 1; f.format = GL_ALPHA; f.type = GL_UNSIGNED_BYTE; f.internal = GL_ALPHA8;
         }
         return f;
     }
@@ -5804,6 +5829,10 @@ static const ULONG d8_formats[][2] = {
     /* bump maps for texbem and texbeml: signed (gl_format) */
     { RbFmtV8U8, RbFormatTexture | RbFormatCubeTexture | RbFormatBumpMap },
     { RbFmtQ8W8V8U8, RbFormatTexture | RbFormatCubeTexture | RbFormatBumpMap },
+    /* luminance and alpha alone (gl_format) */
+    { RbFmtL8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtA8L8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
+    { RbFmtA8, RbFormatTexture | RbFormatCubeTexture | RbFormatVolumeTexture },
 };
 #define D8_FORMATS (sizeof d8_formats / sizeof d8_formats[0])
 
