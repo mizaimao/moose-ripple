@@ -641,7 +641,7 @@ static int d8_on;                       /* the Direct3D 8 interface is offered (
 static int tnl_on;                      /* with hardware vertex processing (D3D8 is "2") */
 static int buf_on;                      /* and buffers the driver allocates (unless D3D8Buffers is "0") */
 static int d9_on;                       /* the Direct3D 9 driver interface is offered to a DirectX 9
-                                           runtime (D3D9 is "1"; d9_resolve) */
+                                           runtime (unless D3D9 is "0"; d9_resolve) */
 
 /* ---- Surface handles: DirectX 7 names surfaces in the command stream by handle --------------- */
 typedef struct {
@@ -1774,6 +1774,7 @@ int d3d_present(LPDDRAWI_DDRAWSURFACE_LCL front, LPDDRAWI_DDRAWSURFACE_LCL targe
    smaller than the target needs the scissor, one that covers it needs none. Rows are in
    Direct3D's order (see framebuffer), as in clear. Set when the viewport or the target's size
    changes and after clear and rt_upload, never for each draw. */
+#define RB_D3DFVF_FOG 0x2000UL            /* d3dhal.h's D3DFVF_FOG: a separate fog value in the vertex */
 #define RS_SCISSORTESTENABLE 174          /* Direct3D 9: draws and clears stay inside the scissor
                                            rectangle (SETSCISSORRECT) */
 
@@ -3227,6 +3228,8 @@ typedef struct {
     int pos;                            /* the position's byte offset (0 but for a declaration) */
     int psize_at;                       /* points: 1 + the byte offset of each vertex's size (D3DFVF_PSIZE,
                                            untransformed vertices), 0: none */
+    int fog_at;                         /* transformed vertices: 1 + the byte offset of a separate fog
+                                           factor (RB_D3DFVF_FOG), 0: fog is the specular's alpha */
     BYTE src[12];                       /* the stream each attribute comes from, 0 but for a
                                            declaration: position, normal, diffuse, specular,
                                            texture coordinate sets 0..7 */
@@ -3281,6 +3284,14 @@ static int parse_fvf(DWORD fvf, VERTICES *v)
     v->diffuse = v->specular = -1;
     if (fvf & D3DFVF_DIFFUSE) { v->diffuse = off; off += 4; }
     if (fvf & D3DFVF_SPECULAR) { v->specular = off; off += 4; }
+    /* A separate fog factor, a float after the colours: the Direct3D 9 interface must offer it
+       (D3DPMISCCAPS_FOGINFVF, d9_caps), and the runtime's own vertex processing then puts the
+       fog there and not in the specular colour's alpha. */
+    v->fog_at = 0;
+    if ((fvf & RB_D3DFVF_FOG) && pos == D3DFVF_XYZRHW) {
+        v->fog_at = (int)off + 1;
+        off += 4;
+    }
     n = (fvf & D3DFVF_TEXCOUNT_MASK) >> D3DFVF_TEXCOUNT_SHIFT;
     for (i = 0; i < 8; i++) {
         v->tex[i] = -1;
@@ -3323,7 +3334,8 @@ static float fog_factor(RCTX *c, const VERTICES *v, const BYTE *b)
     float f, z = ((const float *)b)[2];
 
     if (mode == D3DFOG_NONE) {
-        f = v->specular >= 0 ? b[v->specular + 3] / 255.0f : 1.0f;
+        f = v->fog_at ? *(const float *)(b + v->fog_at - 1) :
+            v->specular >= 0 ? b[v->specular + 3] / 255.0f : 1.0f;
     } else if (mode == D3DFOG_LINEAR) {
         float start = *(float *)&c->rs[D3DRENDERSTATE_FOGSTART];
         float end = *(float *)&c->rs[D3DRENDERSTATE_FOGEND];
@@ -4192,7 +4204,7 @@ static void vs_create(RCTX *c, const RB_DP2_CREATE_VERTEX_SHADER *r)
 }
 
 /* ---- The Direct3D 9 driver interface ---------------------------------------------------------
-   A DirectX 9 runtime on this interface (d9_on, D3D9 in the registry) creates vertex
+   A DirectX 9 runtime on this interface (d9_on; D3D9 "0" in the registry keeps it off) creates vertex
    declarations (D3DVERTEXELEMENT9) and shader functions separately and makes one of each
    current; a declaration handle has bit 0 set, any other handle is a vertex format code for
    stream 0. For a draw, the pair becomes a Direct3D 8 vertex shader of the kind the rest of
@@ -7101,7 +7113,8 @@ static void d9_caps(RB_D3DCAPS9 *c)
    buffers the driver allocates. The registry value HKLM\Software\moose-ripple, D3D8 chooses
    otherwise: "0" gives the runtime no answer, so it drives the HAL through the Direct3D 7
    interface and processes vertices itself; "1" offers the interface with the runtime's vertex
-   processing; "2" is the default. D3D8Buffers "0" keeps buffers in the runtime's memory. Not an
+   processing; "2" is the default. D3D8Buffers "0" keeps buffers in the runtime's memory. D3D9 "0"
+   keeps a DirectX 9 runtime on the Direct3D 8 interface (d9_caps; the Direct3D 9 one needs "2"). Not an
    environment variable: the runtime asks once per boot, in the first program that uses it, and
    keeps the answer for all others. */
 int d3d8_enabled(void)
@@ -7111,7 +7124,7 @@ int d3d8_enabled(void)
     DWORD n = sizeof v, type;
     char mode = '2';
     int buffers = 1;
-    int d9 = 0;
+    int d9 = 1;
 
     if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, "Software\\moose-ripple", 0, KEY_READ, &k) == ERROR_SUCCESS) {
         if (RegQueryValueEx(k, "D3D8", NULL, &type, (BYTE *)v, &n) == ERROR_SUCCESS &&
@@ -7123,8 +7136,8 @@ int d3d8_enabled(void)
             buffers = 0;
         n = sizeof v;
         if (RegQueryValueEx(k, "D3D9", NULL, &type, (BYTE *)v, &n) == ERROR_SUCCESS &&
-            type == REG_SZ && v[0] == '1')
-            d9 = 1;
+            type == REG_SZ && v[0] == '0')
+            d9 = 0;
         RegCloseKey(k);
     }
     d8_on = mode != '0';
