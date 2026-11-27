@@ -35,6 +35,14 @@
  * size per vertex from the vertex program in place of pointSize. */
 #define RB2K_POINT_SPRITE 1
 #define RB2K_POINT_PER_VERTEX 2
+/* Fixed-function points whose sizes the host vertex shader works out (RB2K_D3D8_DRAW only, object
+ * space or transformed, with RB2K_POINT_PER_VERTEX): each vertex brings a size as the first
+ * component of the draw's last coordinate set (coordSets is at least 2), and the result is kept
+ * within pointRange. With RB2K_POINT_SCALED (object space only) the size is first scaled by the
+ * distance d from the eye, as D3DRS_POINTSCALEENABLE asks: viewport height x size x
+ * sqrt(1 / (A + B d + C d d)), pointScale holding A, B and C. */
+#define RB2K_POINT_SIZED 4
+#define RB2K_POINT_SCALED 8
 #define RB2K_POINT_SIZE_MAX 0x42800000UL    /* 64.0 */
 #define RB2K_DD_D3D9_DDI 256        /* the Direct3D 9 driver interface (with vertex shaders) */
 #define RB2K_DD_HOST_BUFFERS 512    /* vertex and index buffers kept on the host (with vertex shaders) */
@@ -132,6 +140,8 @@ typedef struct {
     /* User clip planes (D3DRS_CLIPPLANEENABLE bits, IEEE planes): in clip space for vertex programs
      * (transform 2), in world space for object-space draws; pretransformed draws are not clipped. */
     ULONG clipMask, clipPlanes[6][4];
+    /* RB2K_POINT_SIZED: the smallest and largest size; RB2K_POINT_SCALED: A, B and C (IEEE). */
+    ULONG pointRange[2], pointScale[3];
     /* Lighting as in RB2K_D3D7_DRAW (object space only); specular adds
      * the lit specular colour. */
     ULONG lighting, lightCount, lightFlags, ambient, specular;

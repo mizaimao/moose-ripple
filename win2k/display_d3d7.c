@@ -1737,12 +1737,29 @@ typedef struct {
  * maximum, as sprites when POINTSPRITEENABLE is set; Direct3D 7 points are
  * one pixel. The sizes are compared as IEEE bits, which order positive
  * numbers as their values; a negative or not-a-number size counts as one.
- * Not done: POINTSCALEENABLE and sizes in fixed-function vertices. */
-enum { RsPointSize = 154, RsPointSizeMin, RsPointSpriteEnable, RsPointSizeMax = 166 };
+ * With D3DRS_POINTSCALEENABLE (object-space vertices) or sizes in the vertices (D3DFVF_PSIZE) the
+ * host vertex shader works each size out (sized_points, RB2K_POINT_SIZED); a vertex shader's
+ * own size (oPts) is not scaled. */
+enum { RsPointSize = 154, RsPointSizeMin, RsPointSpriteEnable, RsPointScaleEnable, RsPointScaleA, RsPointScaleB,
+       RsPointScaleC, RsPointSizeMax = 166 };
 static ULONG point_bits(const D7_CONTEXT *c, ULONG state, ULONG otherwise)
 {
     ULONG v = ((c->rsSet[state / 32] >> (state % 32)) & 1) ? c->rs[state] : otherwise;
     return v >= 0x7f800000UL ? otherwise : v;
+}
+
+/* The sizes of a fixed-function point draw are scaled by the distance from the eye. */
+static BOOL scaled_points(const D7_CONTEXT *c, ULONG fvf)
+{
+    return (fvf & D3DFVF_POSITION_MASK) != D3DFVF_XYZRHW &&
+           ((c->rsSet[RsPointScaleEnable / 32] >> (RsPointScaleEnable % 32)) & 1) && c->rs[RsPointScaleEnable];
+}
+
+/* A fixed-function point draw whose sizes the host vertex shader works out: the vertices bring
+ * them (D3DFVF_PSIZE, which Direct3D 7 has as a reserved word), or they are scaled. */
+static BOOL sized_points(const D7_CONTEXT *c, const PRIMS *p)
+{
+    return p->kind == Points && c->dx8 && !(p->fvf & 1) && ((p->fvf & D3DFVF_RESERVED1) || scaled_points(c, p->fvf));
 }
 
 static void point_state(const D7_CONTEXT *c, ULONG per, ULONG *size, ULONG *flags)
@@ -2010,7 +2027,8 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
     if (c->fill != D3DFILL_SOLID) { skip(c, RB2K_D7_SKIP_FILL, p->primitives); return DD_OK; }
     /* Direct3D 8 stages beyond these two (a third stage, bump mapping) go to the
      * stage program of the shader path. */
-    if (p->stream && !c->pixelShader && !d3d7_stages(c)) return shader_triangles(c, p);
+    /* The stage program path also draws the points whose sizes the vertex shader works out. */
+    if (p->stream && !c->pixelShader && (!d3d7_stages(c) || sized_points(c, p))) return shader_triangles(c, p);
     /* Two stages are drawn; a third one counts as the stage-one skip. */
     if (st->colorOp != D3DTOP_DISABLE && st1->colorOp != D3DTOP_DISABLE && c->stages[2].colorOp != D3DTOP_DISABLE) {
         skip(c, RB2K_D7_SKIP_STAGE1, p->primitives);
@@ -2743,7 +2761,8 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     DD_SLOT *s, *z;
     ULONG program = 0, fog = 0;
     ULONG fvf = p->fvf, stride = p->streamStride, offset = 16, diffuse = 0, specular = 0, normal = 0, position, sets, i, t, k;
-    ULONG used = 0, words;
+    ULONG used = 0, words, psize = 0, carrier = 0, rawSize = 0;
+    BOOL sized = FALSE;
     ULONG coordOffset[RB2K_D8_STAGES], coordFloats[RB2K_D8_STAGES];
     ULONG low = 0xffffffff, high = 0, count = 0, flatSource = 0;
     BOOL objectSpace;
@@ -2777,7 +2796,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     }
     if (objectSpace) offset = 12 + (position >= D3DFVF_XYZB1 ? 4 * ((position - D3DFVF_XYZRHW) / 2) : 0);
     if (fvf & D3DFVF_NORMAL) { normal = offset; offset += 12; }
-    if (fvf & D3DFVF_RESERVED1) offset += 4;
+    if (fvf & D3DFVF_RESERVED1) { psize = offset; offset += 4; }    /* D3DFVF_PSIZE on Direct3D 8 and 9 */
     if (fvf & D3DFVF_DIFFUSE) { diffuse = offset; offset += 4; }
     if (fvf & D3DFVF_SPECULAR) { specular = offset; offset += 4; }
     for (k = 0; k < RB2K_D8_STAGES; ++k) coordOffset[k] = coordFloats[k] = 0;
@@ -2803,7 +2822,24 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     point_state(c, per, &draw->pointSize, &draw->pointFlags);
     for (k = 0; k < RB2K_D8_STAGES; ++k) if (sh->coords & (1UL << k)) used = k + 1;
     draw->coordSets = used;
-    words = RB2K_D8_VERTEX_WORDS(used);
+    /* Points whose sizes the vertex shader works out bring each size in one more coordinate set,
+     * the second at least (RB2K_POINT_SIZED): the vertex's own, or D3DRS_POINTSIZE. */
+    if (used < RB2K_D8_STAGES && sized_points(c, p)) {
+        sized = TRUE;
+        carrier = used ? used : 1;
+        draw->coordSets = carrier + 1;
+        rawSize = point_bits(c, RsPointSize, 0x3f800000UL);
+        draw->pointFlags |= RB2K_POINT_PER_VERTEX | RB2K_POINT_SIZED;
+        draw->pointRange[0] = point_bits(c, RsPointSizeMin, 0x3f800000UL);
+        draw->pointRange[1] = min(point_bits(c, RsPointSizeMax, RB2K_POINT_SIZE_MAX), RB2K_POINT_SIZE_MAX);
+        if (scaled_points(c, fvf)) {
+            draw->pointFlags |= RB2K_POINT_SCALED;
+            draw->pointScale[0] = point_bits(c, RsPointScaleA, 0x3f800000UL);
+            draw->pointScale[1] = point_bits(c, RsPointScaleB, 0);
+            draw->pointScale[2] = point_bits(c, RsPointScaleC, 0);
+        }
+    }
+    words = RB2K_D8_VERTEX_WORDS(draw->coordSets);
     if (!pixel_states(c, draw, sh, s, z, program, fog, p->primitives)) return DD_OK;
     if (fixed) {
         draw->constants[0][0] = c->factor;   /* the texture factor, unpacked by the program */
@@ -2878,6 +2914,10 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
                                       /* Direct3D transforms (u, v, 1, 0): a one after the last coordinate. */
                                       (fixed && (c->stages[k].transform & 0xff)) ? (j == coordFloats[k] ? 0x3f800000 : 0) :
                                       j == 3 ? 0x3f800000 : 0;
+                if (sized) {
+                    for (k = used; k <= carrier; ++k) o->tc[k][0] = o->tc[k][1] = o->tc[k][2] = o->tc[k][3] = 0;
+                    o->tc[carrier][0] = psize ? *(const ULONG *)(v + psize) : rawSize;
+                }
                 bad |= bad_position((const RB2K_D3D7_VERTEX *)o);
             }
             if (c->shade == D3DSHADE_FLAT) {
@@ -3291,6 +3331,10 @@ static ULONG d9_decl_fvf(const struct D9_DECL *dl)
         if (e->usage == 0 && !e->usageIndex && e->type == 2 && stage < 1) { fvf |= D3DFVF_XYZ; stage = 1; offset += 12; }
         else if (e->usage == 9 && !e->usageIndex && e->type == 3 && stage < 1) { fvf |= D3DFVF_XYZRHW; stage = 1; offset += 16; }
         else if (e->usage == 3 && !e->usageIndex && e->type == 2 && stage == 1 && (fvf & D3DFVF_XYZ)) { fvf |= D3DFVF_NORMAL; stage = 2; offset += 12; }
+        /* A point size (D3DFVF_PSIZE, here by its Direct3D 7 name): after the normal, before the colours. */
+        else if (e->usage == 4 && !e->usageIndex && e->type == 0 && stage >= 1 && stage < 3 && !(fvf & D3DFVF_RESERVED1)) {
+            fvf |= D3DFVF_RESERVED1; stage = max(stage, 2); offset += 4;
+        }
         else if (e->usage == 10 && e->usageIndex == 0 && e->type == 4 && stage >= 1 && stage < 3) { fvf |= D3DFVF_DIFFUSE; stage = 3; offset += 4; }
         else if (e->usage == 10 && e->usageIndex == 1 && e->type == 4 && stage >= 1 && stage < 4) { fvf |= D3DFVF_SPECULAR; stage = 4; offset += 4; }
         else if (e->usage == 5 && e->usageIndex == tex && e->type <= 3 && stage >= 1 && tex < 8) {

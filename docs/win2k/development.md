@@ -2744,8 +2744,35 @@ shaders ran on the guest processor in the runtime.
   texture coordinate inputs: `GENERIC[2]` in the fixed-function fragment
   shaders, `GENERIC[2..9]` in the pixel shader and vertex program paths.
 
-Not done: `POINTSCALEENABLE` (sizes by distance) and point sizes in
-fixed-function vertices (`D3DFVF_PSIZE`, whose cap is not reported).
+Sizes scaled by distance (`D3DRS_POINTSCALEENABLE`, object-space vertices) and sizes in
+fixed-function vertices (`D3DFVF_PSIZE`) are worked out by the host vertex shader, because
+the display driver uses no floating point. Such a point draw (`sized_points`) goes through
+the stage program path (`shader_triangles`) whatever its stages, with `RB2K_POINT_SIZED`:
+
+- Each vertex carries its size, its own or `D3DRS_POINTSIZE`, as the first component of one
+  more coordinate set: the draw's last and the second at least, which makes it the last
+  constant of the vertex in both vertex layouts.
+- The miniport sends two more constants after the vertices and lights: (viewport height,
+  smallest size, largest size) and (A, B, C). Their place goes in `CONST[0].w` as an
+  integer. Without scaling the height is 1 and the factors are 1, 0, 0.
+- Five more vertex shaders (handles 117 to 121: transformed, object space, object space with
+  clip planes, lit, lit with clip planes) are the fixed-function ones plus `point_lines`:
+  size x height x sqrt(1 / (A + B d + C d d)), kept within the smallest and largest, to a
+  `PSIZE` output. d is the distance from the eye, which the shaders already have for fog.
+  Transformed vertices are not scaled. The lit one did not fit in the 8192 bytes of text the
+  others have (its draw failed, and with it every later draw to that target), so these
+  texts get 2048 more (`SizedText`). The handles lie below the sampler views at 128, which
+  `ps_handles` checks (see the numbering section below).
+- The Direct3D 9 runtime sends a vertex format with a point size as a declaration, not as
+  its FVF code; `d9_decl_fvf` reads the point size field so that the draw resolves.
+
+The `D3DFVFCAPS_PSIZE` cap is still not reported, so with software vertex processing the
+runtime keeps drawing sized points itself. A vertex shader's own size (`oPts`) is not
+scaled. `d9pixels` cases 79 (`scaled_point`) and 81 (`vertex_point`) pass with it; cases 93
+to 95 cover the lit shader (`lit_scaled_point`), transformed vertices with sizes
+(`rhw_vertex_point`) and a scaled point with a clip plane (`clip_scaled_point`).
+With this and the declaration change above, `d9pixels` passes 107 of 107 with hardware
+vertex processing and `d8pixels` 44 of 44 (XP SP3 under KVM, Intel UHD 630 host).
 `d9pixels` case 75 draws a textured sprite and a plain point of 8 pixels,
 case 76 a point sized by a vertex program.
 
@@ -3031,7 +3058,8 @@ and High Polygon Count as large flat polygons across the screen; tests in a wind
 depth buffer or one that never moves, passed.
 
 The depth view now has the number 2, and a compile-time check keeps the two surface numbers
-below the first shader and state number (`views_apart`).
+below the first shader and state number (`views_apart`). Numbers taken since then: 117 to 121,
+the vertex shaders that work point sizes out (`PsPointShaderBase`).
 
 How it was found: the capture check cannot see it (every garbage frame is a new picture), the
 contact sheets of the captures did. Builds with one part of the path switched off showed that

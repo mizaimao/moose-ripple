@@ -619,6 +619,80 @@ static void vertex_point_case(int only, BOOL offered)
     }
 }
 
+/* 93 to 95: the other vertex shaders that work point sizes out. 93: the scaled point of case 79
+ * with lighting on (no lights, a yellow emissive material). 94: transformed vertices with their
+ * own sizes, as case 81 (16 pixels at 64,64 and 4 pixels at 32,32). 95: the scaled point of
+ * case 79 with a user clip plane that cuts nothing. */
+static void point_variant_cases(int only, BOOL offered, BOOL planes)
+{
+    static const SAMPLE s[] = { { 64, 64, 0xffff00 }, { 58, 58, 0xffff00 }, { 70, 70, 0xffff00 },
+                                { 76, 64, CLEAR_COLOR }, { 64, 52, CLEAR_COLOR },
+                                { 32, 32, 0xffff00 }, { 38, 32, CLEAR_COLOR }, { 32, 38, CLEAR_COLOR } };
+    static const struct { float x, y, z, nx, ny, nz; } lit = { 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, -1.0f };
+    static const struct { float x, y, z, rhw, size; DWORD diffuse; } tl[2] = {
+        { 64.0f, 64.0f, 0.5f, 1.0f, 16.0f, 0xffffff00 }, { 32.0f, 32.0f, 0.5f, 1.0f, 4.0f, 0xffffff00 } };
+    static const XYZVERTEX v = { 0.0f, 0.0f, 0.5f, 0xffffff00 };
+    static const float plane[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
+    D3DMATERIAL9 material;
+    D3DMATRIX m;
+    HRESULT hr;
+    float f;
+    int pass;
+    if (only && (only < 93 || only > 95)) return;
+    if (!offered) { printf("D9PIX point size variants not offered\n"); return; }
+    memset(&m, 0, sizeof(m));
+    m._11 = m._22 = m._33 = m._44 = 1.0f;
+    for (pass = 93; pass <= 95; ++pass) {
+        const char *name = pass == 93 ? "lit_scaled_point" : pass == 94 ? "rhw_vertex_point" : "clip_scaled_point";
+        if (only && only != pass) continue;
+        if (pass == 95 && !planes) { printf("D9PIX clip planes for points not offered\n"); continue; }
+        IDirect3DDevice9_SetTransform(device, D3DTS_WORLD, &m);
+        IDirect3DDevice9_SetTransform(device, D3DTS_VIEW, &m);
+        IDirect3DDevice9_SetTransform(device, D3DTS_PROJECTION, &m);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_LIGHTING, pass == 93);
+        if (!begin(name)) continue;
+        IDirect3DDevice9_SetTexture(device, 0, NULL);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+        f = pass == 94 ? 2.0f : 0.0625f;
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSIZE, *(DWORD *)&f);
+        if (pass != 94) {
+            IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALEENABLE, TRUE);
+            f = 0.0f;
+            IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALE_A, *(DWORD *)&f);
+            IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALE_B, *(DWORD *)&f);
+            f = 1.0f;
+            IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALE_C, *(DWORD *)&f);
+        }
+        if (pass == 93) {
+            memset(&material, 0, sizeof(material));
+            material.Emissive.r = material.Emissive.g = material.Emissive.a = material.Diffuse.a = 1.0f;
+            IDirect3DDevice9_SetMaterial(device, &material);
+            IDirect3DDevice9_SetRenderState(device, D3DRS_AMBIENT, 0);
+            IDirect3DDevice9_SetFVF(device, D3DFVF_XYZ | D3DFVF_NORMAL);
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_POINTLIST, 1, &lit, sizeof(lit));
+        } else if (pass == 94) {
+            IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_PSIZE | D3DFVF_DIFFUSE);
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_POINTLIST, 2, tl, sizeof(tl[0]));
+        } else {
+            IDirect3DDevice9_SetClipPlane(device, 0, plane);
+            IDirect3DDevice9_SetRenderState(device, D3DRS_CLIPPLANEENABLE, 1);
+            IDirect3DDevice9_SetFVF(device, XYZFVF);
+            hr = IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_POINTLIST, 1, &v, sizeof(v));
+            IDirect3DDevice9_SetRenderState(device, D3DRS_CLIPPLANEENABLE, 0);
+        }
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALEENABLE, FALSE);
+        f = 1.0f;
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALE_A, *(DWORD *)&f);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSIZE, *(DWORD *)&f);
+        f = 0.0f;
+        IDirect3DDevice9_SetRenderState(device, D3DRS_POINTSCALE_C, *(DWORD *)&f);
+        IDirect3DDevice9_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+        if (FAILED(hr)) { fail_hr(name, "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check(name, s, pass == 94 ? 8 : 5);
+    }
+}
+
 /* 80: the fixed-function pipeline through a declaration with two streams (no vertex shader):
  * positions in stream 0, colours in stream 1, six unused vertices first in both, drawn from
  * vertex 6: a red quad on the left and a green one on the right. */
@@ -3018,6 +3092,7 @@ int main(int argc, char **argv)
     static_indexed_case(only);
     scaled_point_case(only, caps.MaxPointSize >= 16.0f);
     vertex_point_case(only, caps.MaxPointSize >= 16.0f && flags == D3DCREATE_HARDWARE_VERTEXPROCESSING);
+    point_variant_cases(only, caps.MaxPointSize >= 16.0f, caps.MaxUserClipPlanes >= 1);
     ff_streams_case(only, flags == D3DCREATE_HARDWARE_VERTEXPROCESSING);
     l16_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
