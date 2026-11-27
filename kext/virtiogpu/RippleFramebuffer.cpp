@@ -21,6 +21,10 @@ static const struct { uint32_t w, h; } kStandardModes[] = {
     { 1024, 768 }, { 1152, 864 }, { 1280, 720 }, { 1280, 800 }, { 1280, 960 }, { 1280, 1024 },
     { 1366, 768 }, { 1440, 900 }, { 1600, 900 }, { 1600, 1200 }, { 1680, 1050 },
     { 1920, 1080 }, { 1920, 1200 }, { 2048, 1152 }, { 2560, 1440 }, { 2560, 1600 },
+    // 640x480 and 800x600: games of the time switch to them for full screen (Doom 3 asks for
+    // 640x480 and quit with "No suitable display mode available", issue 312). At the end: a
+    // mode's ID is its place in this list, and the IDs of the others stay as they were.
+    { 640, 480 }, { 800, 600 },
 };
 
 static IOByteCount frameBytes(uint32_t w, uint32_t h) { return round_page((IOByteCount)w * h * 4); }

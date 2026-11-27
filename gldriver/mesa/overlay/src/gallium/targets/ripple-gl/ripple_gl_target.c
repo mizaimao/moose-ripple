@@ -14,6 +14,7 @@
 #include <IOKit/IOKitLib.h>
 #include <OpenGL/CGLTypes.h>
 #include <stddef.h>
+#include <dlfcn.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -379,8 +380,9 @@ gldChoosePixelFormat(struct gld_pixel_format **out, const uint32_t *attrs)
       case kCGLPFASampleBuffers: ok = *++a == 0; break;
       case kCGLPFASamples:      ok = *++a == 0; break;
       case kCGLPFADisplayMask:  mask &= *++a; break;
-      /* Not offered yet: stereo, full screen, float color, multisampling, aux depth. */
-      case kCGLPFAStereo: case kCGLPFAFullScreen: case kCGLPFAColorFloat:
+      case kCGLPFAFullScreen:   flags |= GLD_FLAG_FULLSCREEN; break;   /* issue 312 */
+      /* Not offered yet: stereo, float color, multisampling, aux depth. */
+      case kCGLPFAStereo: case kCGLPFAColorFloat:
       case kCGLPFAMultisample: case kCGLPFASupersample: case kCGLPFASampleAlpha:
       case kCGLPFAAuxDepthStencil:
          ok = false;
@@ -392,7 +394,7 @@ gldChoosePixelFormat(struct gld_pixel_format **out, const uint32_t *attrs)
    DBG("gldChoosePixelFormat: %s (mask 0x%x)\n", ok && mask ? "match" : "no match", mask);
    if (!ok && refused) {                /* something asked for that we don't offer */
       char detail[48];
-      bool valued = *refused != kCGLPFAStereo && *refused != kCGLPFAFullScreen &&
+      bool valued = *refused != kCGLPFAStereo &&
                     *refused != kCGLPFAColorFloat && *refused != kCGLPFAMultisample &&
                     *refused != kCGLPFASupersample && *refused != kCGLPFASampleAlpha &&
                     *refused != kCGLPFAAuxDepthStencil;
@@ -498,6 +500,8 @@ struct gld_context {
    int swap_rect[4];                     /* kCGLCPSwapRectangle: x, y, width, height */
    struct gld_surface *cur_surface;      /* accelerator surface drawn into (WindowServer) */
    struct gld_pbuffer *cur_pbuffer;      /* pbuffer drawn into (Core Image in WindowServer) */
+   struct ripple_cgl_drawable *fullscreen;   /* the whole display (CGLSetFullScreen), or NULL */
+   bool on_display;                      /* fullscreen is the one shown on the display now */
 };
 
 /* Pbuffers. CoreGraphics' cgls pbuffers (Core Image's intermediate images in WindowServer) are
@@ -582,9 +586,20 @@ unbind_surface(struct gld_context *c)
    ripple_cgl_context_set_drawable(c->mesa, window_drawable(c));
 }
 
+/* A full-screen context gives the display back (DISPLAY with no buffer): WindowServer's next
+ * frame shows again. Its drawable stays for the next full-screen attach. */
+static void
+leave_fullscreen(struct gld_context *c)
+{
+   if (c->fullscreen && c->on_display)
+      ripple_cgl_drawable_set_gpu_display(c->fullscreen, false);
+   c->on_display = false;
+}
+
 static void
 detach(struct gld_context *c)
 {
+   leave_fullscreen(c);
    unbind_surface(c);
    /* Always: a context that only ever had a pbuffer would stay bound to that drawable, which
     * the pbuffer table frees later. */
@@ -657,6 +672,8 @@ gldDestroyContext(struct gld_context *c)
       simple_mtx_unlock(&c->shared->lock);
    }
    detach(c);
+   if (c->fullscreen)
+      ripple_cgl_drawable_destroy(c->fullscreen);
    ripple_cgl_context_destroy(c->mesa);
    c->magic = 0;
    free(c);
@@ -753,6 +770,7 @@ GLD_EXPORT int gldFinish(struct gld_context *c) { return 0; }
 #define GLD_DRAWABLE_WINDOW   0x50      /* data: u32 {connection, window, surface} */
 #define GLD_DRAWABLE_NO_DRAW  0x5b      /* GLEngine's own: FBOs only */
 #define GLD_DRAWABLE_PROBE    0x5c      /* fallback probe */
+#define GLD_DRAWABLE_FULLSCREEN 0x36    /* CGLSetFullScreen: the whole display */
 #define GLD_ATTACH_CHANGED    2
 #define GLD_ATTACH_DETACHED   1
 
@@ -964,6 +982,76 @@ attach_pbuffer(struct gld_context *c, const uint32_t *w)
    return changed ? GLD_ATTACH_CHANGED : 0;
 }
 
+/* The main display's size, from CoreGraphics (loaded in every program that can go full
+ * screen), looked up at run time so the bundle doesn't link it. */
+static bool
+main_display_size(unsigned *width, unsigned *height)
+{
+   static uint32_t (*main_id)(void);
+   static size_t (*wide)(uint32_t), (*high)(uint32_t);
+   if (!main_id) {
+      main_id = (uint32_t (*)(void))dlsym(RTLD_DEFAULT, "CGMainDisplayID");
+      wide = (size_t (*)(uint32_t))dlsym(RTLD_DEFAULT, "CGDisplayPixelsWide");
+      high = (size_t (*)(uint32_t))dlsym(RTLD_DEFAULT, "CGDisplayPixelsHigh");
+   }
+   if (!main_id || !wide || !high)
+      return false;
+   uint32_t id = main_id();
+   *width = (unsigned)wide(id);
+   *height = (unsigned)high(id);
+   return *width && *height;
+}
+
+/* Full screen (CGLSetFullScreen, after the program has captured the display and usually set
+ * its mode): a drawable of the display's size, shown on the display directly as WindowServer's
+ * screen is (DISPLAY, docs/kext-uapi.md), until the context detaches or attaches something
+ * else (issue 312: UT2004 and Doom 3 start this way). */
+static int
+attach_fullscreen(struct gld_context *c, const uint32_t *data)
+{
+   unsigned width, height, old_w = 0, old_h = 0;
+   static unsigned dumped;
+   if (data && dumped < 2 && ripple_gld_dbg_file()) {
+      dumped++;
+      DBG("  full screen attach data:");
+      for (unsigned i = 0; i < 8; i++)
+         fprintf(ripple_gld_dbg_file(), " %08x", data[i]);
+      fprintf(ripple_gld_dbg_file(), "\n");
+   }
+   if (!main_display_size(&width, &height) || width > 16384 || height > 16384) {
+      DBG("  full screen: no display size\n");
+      ripple_gl_skip("drawable kind refused", "full screen without a display size");
+      return kCGLBadDrawable;
+   }
+   unbind_surface(c);
+   if (c->win) {
+      gld_window_release(c->win);
+      c->win = NULL;
+   }
+   bool changed = false;
+   if (!c->fullscreen) {
+      c->fullscreen = ripple_cgl_drawable_create(c->mesa);
+      if (!c->fullscreen)
+         return kCGLBadAlloc;
+      changed = true;
+   } else {
+      old_w = c->fullscreen->width;
+      old_h = c->fullscreen->height;
+      changed = old_w != width || old_h != height;
+   }
+   ripple_cgl_drawable_set_present(c->fullscreen, NULL, NULL);
+   ripple_cgl_drawable_set_screen_region(c->fullscreen, 0);
+   ripple_cgl_drawable_set_gpu_display(c->fullscreen, true);
+   ripple_cgl_drawable_set_size(c->fullscreen, width, height);
+   c->on_display = true;
+   c->mesa->win_surface = 0;
+   c->mesa->surf_h = 0;                  /* a GL drawable: origin bottom left */
+   c->mesa->attached_surface = 0;
+   ripple_cgl_context_set_drawable(c->mesa, c->fullscreen);
+   DBG("  full screen %ux%u%s\n", width, height, changed ? " (new or resized)" : "");
+   return changed ? GLD_ATTACH_CHANGED : 0;
+}
+
 GLD_EXPORT int
 gldAttachDrawable(struct gld_context *c, int type, void *data, void *opts)
 {
@@ -982,7 +1070,11 @@ gldAttachDrawable(struct gld_context *c, int type, void *data, void *opts)
     * second GL thread of this context, and of the one last used on this thread, may still be
     * drawing into them. */
    ripple_cgl_quiesce(c->mesa);
+   if (type == GLD_DRAWABLE_WINDOW || type == GLD_DRAWABLE_PBUFFER)
+      leave_fullscreen(c);
    switch (type) {
+   case GLD_DRAWABLE_FULLSCREEN:
+      return attach_fullscreen(c, data);
    case GLD_DRAWABLE_NONE:
       detach(c);
       return GLD_ATTACH_DETACHED;
@@ -1031,8 +1123,8 @@ gldAttachDrawable(struct gld_context *c, int type, void *data, void *opts)
    case GLD_DRAWABLE_PBUFFER:
       return data ? attach_pbuffer(c, data) : kCGLBadDrawable;
    default: {
-      /* Off-screen memory, pbuffers, IOSurfaces, full screen: not yet. The first words of the
-       * description, once per kind, to learn their layout. */
+      /* Off-screen memory, IOSurfaces and other kinds: not yet. The first words of the
+       * description, once per kind, to learn their layout; counted for the checks. */
       static uint32_t logged[8];
       unsigned slot = (unsigned)type & 7;
       if (data && logged[slot] != (uint32_t)type + 1 && ripple_gld_dbg_file()) {
@@ -1043,6 +1135,9 @@ gldAttachDrawable(struct gld_context *c, int type, void *data, void *opts)
             fprintf(ripple_gld_dbg_file(), " %08x", w[i]);
          fprintf(ripple_gld_dbg_file(), "\n");
       }
+      char kind[16];
+      snprintf(kind, sizeof(kind), "kind 0x%x", type);
+      ripple_gl_skip("drawable kind refused", kind);
       return kCGLBadDrawable;
    }
    }
