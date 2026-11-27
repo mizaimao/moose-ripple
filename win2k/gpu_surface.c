@@ -668,6 +668,9 @@ static VP_STATUS image_request(RB2K_GPU *gpu, PVIDEO_REQUEST_PACKET packet)
         if (success) {
             rb_gpu_slot_forget(gpu, image);
             VideoPortZeroMemory(image, sizeof(*image));
+            /* The last image has gone (a program closed its Direct3D device): what is presented next
+             * starts a new stretch of the frame pacing counts. */
+            if (gpu->imageCount == 1) gpu->d7Profile.paceLast = 0;
             if (!--gpu->imageCount && !rb_gpu_held(gpu)) return rb_gpu_stop(gpu);
         }
         break;
