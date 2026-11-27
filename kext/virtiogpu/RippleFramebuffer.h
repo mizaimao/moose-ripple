@@ -56,6 +56,10 @@ class RippleFramebuffer : public IOFramebuffer
     uint64_t            fLastFlush;       // mach_absolute_time of the last flush
     uint64_t            fFlushGap;        // least time between two, same units; 0: no limit
     bool                fFlushHeld;       // a frame waits for fFlushTimer
+    // Set by the client that shows fShownRes at each of its submits, cleared at its present: while
+    // set, the buffer may hold a frame half drawn, and the timer leaves it for the next present.
+    volatile UInt32     fShownDrawing;
+    bool                fHeldIsShow;      // the held frame came from showAction (the client's own present)
 
     IOBufferMemoryDescriptor *fShadow;    // last frame sent to the host, for damage tracking
     bool                      fFullRefresh;
@@ -83,6 +87,7 @@ class RippleFramebuffer : public IOFramebuffer
     static IOReturn flushAction(OSObject *owner, void *id, void *queued, void *, void *);
     static IOReturn copyAction(OSObject *owner, void *args, void *, void *, void *);
     static IOReturn gammaAction(OSObject *owner, void *changed, void *, void *, void *);
+    static IOReturn probeAction(OSObject *owner, void *row, void *, void *, void *);
     bool  gammaPresent();        // what is on the display, drawn through the gamma table
     void  showCursor();
     void  publishCapsets();     // host GPU capability sets into the registry (diagnostics)
@@ -107,6 +112,8 @@ public:
     // something was copied into it (the GPU client's SURFACE_PRESENT); fails if another buffer
     // is on the display by then.
     uint32_t shownResource(uint32_t *format) const { *format = fShownFormat; return fShownRes; }
+    // The client showing buffer `id` sent drawing commands (any of them may draw into it).
+    void shownDrawing(uint32_t id) { if (id && id == fShownRes) fShownDrawing = 1; }
     // What the buffer about to be shown is like (before showResource)
     void setShownInfo(uint32_t format, uint32_t width, uint32_t height, bool topFirst)
         { fShownFormat = format; fShownWidth = width; fShownHeight = height; fShownTopFirst = topFirst; }
@@ -148,6 +155,7 @@ public:
     virtual IOReturn setCursorState(SInt32 x, SInt32 y, bool visible);
     virtual IOReturn setGammaTable(UInt32 channelCount, UInt32 dataCount, UInt32 dataWidth,
                                    void *data);
+    virtual IOReturn setProperties(OSObject *properties);   // the gamma check (RippleGammaProbe)
 };
 
 #endif
