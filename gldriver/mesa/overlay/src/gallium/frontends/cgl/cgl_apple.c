@@ -2629,6 +2629,15 @@ ripple_cgl_object_unpurgeable(void *rend, GLenum objectType, GLuint name, GLenum
    return GL_RETAINED_APPLE;
 }
 
+/* GL_APPLE_texture_range: where the program would like a range of texture memory kept (the
+ * extension string offers it, as Core Image asks for it). Only a hint, with nothing to do here:
+ * accepted, no effect. It reached the unsupported-call stub, and with the development checks
+ * every WindowServer, Safari and Chrome process reported a skip for it (2026-11-27). */
+void GLAPIENTRY
+ripple_cgl_texture_range(void *rend, GLenum target, GLsizei length, const GLvoid *pointer)
+{
+}
+
 void GLAPIENTRY
 ripple_cgl_get_object_parameteriv(void *rend, GLenum objectType, GLuint name, GLenum pname,
                                   GLint *params)

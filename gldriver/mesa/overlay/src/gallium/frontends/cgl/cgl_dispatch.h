@@ -130,6 +130,7 @@ void GLAPIENTRY ripple_cgl_get_programiv(void *rend, GLenum target, GLenum pname
 /* GL_APPLE_object_purgeable, answered without Mesa (cgl_apple.c). */
 GLenum GLAPIENTRY ripple_cgl_object_purgeable(void *rend, GLenum objectType, GLuint name, GLenum option);
 GLenum GLAPIENTRY ripple_cgl_object_unpurgeable(void *rend, GLenum objectType, GLuint name, GLenum option);
+void GLAPIENTRY ripple_cgl_texture_range(void *rend, GLenum target, GLsizei length, const GLvoid *pointer);
 void GLAPIENTRY ripple_cgl_get_object_parameteriv(void *rend, GLenum objectType, GLuint name,
                                                   GLenum pname, GLint *params);
 /* Compile and link, with failures written to the debug log (cgl_apple.c). */
