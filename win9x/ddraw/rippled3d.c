@@ -207,6 +207,41 @@ static void release(void *p)
 
 static RDD_SHARED *shared;
 
+/* ---- Development check: what the driver skipped ---------------------------------------------
+   What the driver skipped or could not do, counted by kind since Windows started. A test or a
+   benchmark run reads the counts before and after through the export RippleSkips and fails when
+   one rose (docs/win9x/directdraw.md, "Skip counters"). The DLL's data is shared
+   (rippledd.def), so there is one set of counts for all processes. Built in with
+   RIPPLE_DEV_CHECKS (win9x/build.sh, on unless DEVCHECKS=0); without it nothing is counted
+   and nothing is exported. */
+enum {
+    SKIP_DRAW,                          /* a draw not drawn */
+    SKIP_COMMAND,                       /* a command of a command buffer not understood */
+    SKIP_SHADER,                        /* a shader or vertex declaration not translated or kept */
+    SKIP_PROGRAM,                       /* a program the driver wrote that OpenGL refused */
+    SKIP_TARGET,                        /* a context or target that can't be drawn into */
+    SKIP_TEXTURE,                       /* a texture whose format or kind is not loaded */
+    SKIP_COPY,                          /* a copy or fill between surfaces or buffers not done */
+    SKIP_STATE,                         /* a state the driver has no way to apply */
+    SKIP_KINDS
+};
+#ifdef RIPPLE_DEV_CHECKS
+static DWORD skips[SKIP_KINDS];
+#define SKIPPED(kind) ((void)skips[kind]++)
+
+/* The counts, into out (room for count of them): how many were filled in. */
+DWORD WINAPI RippleSkips(DWORD *out, DWORD count)
+{
+    DWORD i, n = count < SKIP_KINDS ? count : SKIP_KINDS;
+
+    for (i = 0; out && i < n; i++)
+        out[i] = skips[i];
+    return out ? n : 0;
+}
+#else
+#define SKIPPED(kind) ((void)0)
+#endif
+
 /* ---- OpenGL constants beyond 1.1 ------------------------------------------------------------- */
 #define GL_BGRA                         0x80E1
 #define GL_BGR                          0x80E0
@@ -1490,6 +1525,7 @@ static int make_current(RCTX *c)
 
     if (gl_of(c)->RippleMakeCurrent(c->rc))
         return 1;
+    SKIPPED(SKIP_TARGET);
     if (logged++ < 8) {
         dbg("rd3d: context "); dbg_hex(c->rc); dbg(" not made current in thread ");
         dbg_hex(GetCurrentThreadId()); dbg("\r\n");
@@ -1855,6 +1891,8 @@ static GPUBUF *gpu_buffer(RCTX *c, GPUBUF *t, DWORD n, FLATPTR mem, DWORD w, DWO
         {
             GLenum e = gl->GetError();
             static DWORD logged;
+            if (e)
+                SKIPPED(SKIP_TARGET);
             if (e && logged++ < 8) {
                 dbg("rd3d: renderbuffer "); dbg_hex(w); dbg(" x "); dbg_hex(h); dbg(" format ");
                 dbg_hex(format); dbg(": GL error "); dbg_hex(e); dbg("\r\n");
@@ -1881,6 +1919,7 @@ static void framebuffer_failed(RCTX *c, GLenum st, GLuint colour, GLuint depth, 
     GLuint rbs[2];
     int k;
 
+    SKIPPED(SKIP_TARGET);
     if (st == last_st && w == last_w && h == last_h)
         return;
     last_st = st; last_w = w; last_h = h;
@@ -2850,10 +2889,14 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
     }
     surface_format(s, &pf);
     f = gl_format(&pf);
-    if (!f.bytes && !f.block)
+    if (!f.bytes && !f.block) {
+        SKIPPED(SKIP_TEXTURE);
         return 0;
-    if (f.block && !gl->CompressedTexImage2D)
+    }
+    if (f.block && !gl->CompressedTexImage2D) {
+        SKIPPED(SKIP_TEXTURE);
         return 0;
+    }
     if (!t->name) {
         if (c->ntextures >= TEXTURE_BUDGET)
             texture_evict(c, h);
@@ -2915,7 +2958,7 @@ static GLenum combine_source(DWORD arg, int stage)
     case D3DTA_TEXTURE: return GL_TEXTURE;
     case D3DTA_TFACTOR: return GL_CONSTANT;
     }
-    return GL_PRIMARY_COLOR;            /* specular: no better source */
+    return GL_PRIMARY_COLOR;            /* specular: no better source (counted in combine) */
 }
 
 static GLenum combine_operand(DWORD arg, int alpha)
@@ -2951,7 +2994,12 @@ static void combine(GLF *gl, int stage, int alpha, DWORD op, DWORD a1, DWORD a2)
     case D3DTOP_BLENDTEXTUREALPHAPM: mode = GL_INTERPOLATE; src2 = GL_TEXTURE; break;
     case D3DTOP_BLENDCURRENTALPHA: mode = GL_INTERPOLATE; src2 = stage ? GL_PREVIOUS : GL_PRIMARY_COLOR; break;
     case D3DTOP_DOTPRODUCT3: mode = alpha ? GL_MODULATE : GL_DOT3_RGBA; break;
+    default: SKIPPED(SKIP_STATE); break;    /* drawn as MODULATE */
     }
+    if ((first & D3DTA_SELECTMASK) > D3DTA_TFACTOR ||
+        (mode != GL_REPLACE && (second & D3DTA_SELECTMASK) > D3DTA_TFACTOR))
+        SKIPPED(SKIP_STATE);            /* an argument without a source here: specular, the temporary
+                                           register */
     gl->TexEnvi(GL_TEXTURE_ENV, which, mode);
     gl->TexEnvi(GL_TEXTURE_ENV, src, combine_source(first, stage));
     gl->TexEnvi(GL_TEXTURE_ENV, opd, combine_operand(first, alpha));
@@ -3701,6 +3749,7 @@ static int light_slot(RCTX *c, DWORD index, int create)
     if (free < 0)
         free = off;
     if (free < 0) {
+        SKIPPED(SKIP_STATE);
         if (!c->lights_full++)
             dbg("rd3d: more lights on than the HAL keeps\r\n");
         return -1;
@@ -3833,6 +3882,7 @@ static GLuint tnl_program(RCTX *c, const TNL_KEY *k)
         gl->ProgramStringARB(GL_VERTEX_PROGRAM_ARB, GL_PROGRAM_FORMAT_ASCII_ARB, n - 1, text);
         if (gl->GetError() != GL_NO_ERROR) {
             const char *e = (const char *)gl->GetString(GL_PROGRAM_ERROR_STRING_ARB);
+            SKIPPED(SKIP_PROGRAM);
             dbg("rd3d: a vertex program was refused: ");
             dbg(e ? e : "?");
             dbg("\r\n");
@@ -3845,6 +3895,7 @@ static GLuint tnl_program(RCTX *c, const TNL_KEY *k)
                    (DWORD)prog, (DWORD)k->lighting, (DWORD)k->fog, (DWORD)k->tex[0], (DWORD)k->tex[1]);
         }
     } else {
+        SKIPPED(SKIP_PROGRAM);
         dbg("rd3d: a vertex program too long\r\n");
     }
     release(text);
@@ -4133,6 +4184,7 @@ static GLuint vs_program(RCTX *c, struct vs8 *s, DWORD key)
     if (!n) {
         tracef("rd3d: vertex shader %lx not translated: reason %lu, detail %lx\r\n", s->handle,
                (DWORD)s->info.reason, (DWORD)s->info.detail);
+        SKIPPED(SKIP_SHADER);
         dbg("rd3d: a vertex shader was not translated, reason ");
         dbg_hex(s->info.reason);
         dbg(", detail ");
@@ -4147,6 +4199,7 @@ static GLuint vs_program(RCTX *c, struct vs8 *s, DWORD key)
         gl->ProgramStringARB(GL_VERTEX_PROGRAM_ARB, GL_PROGRAM_FORMAT_ASCII_ARB, n - 1, text);
         if (gl->GetError() != GL_NO_ERROR) {
             const char *e = (const char *)gl->GetString(GL_PROGRAM_ERROR_STRING_ARB);
+            SKIPPED(SKIP_PROGRAM);
             dbg("rd3d: a vertex shader's program was refused: ");
             dbg(e ? e : "?");
             dbg("\r\n");
@@ -4182,6 +4235,7 @@ static void vs_create(RCTX *c, const RB_DP2_CREATE_VERTEX_SHADER *r)
     for (i = 0; i < MAX_VS && c->vs[i]; i++)
         ;
     if (i == MAX_VS || !(s = (struct vs8 *)alloc(sizeof *s))) {
+        SKIPPED(SKIP_SHADER);
         dbg("rd3d: too many vertex shaders\r\n");
         return;
     }
@@ -4203,6 +4257,7 @@ static void vs_create(RCTX *c, const RB_DP2_CREATE_VERTEX_SHADER *r)
                                            (decl_vertices) */
         if (!vs_declared((const unsigned int *)s->decl, s->ndecl, &s->info)) {
             s->failed = 1;
+            SKIPPED(SKIP_SHADER);
             dbg("rd3d: a vertex declaration can't be read\r\n");
         }
         return;
@@ -4299,6 +4354,7 @@ static void d9_create_decl(RCTX *c, DWORD handle, const RB_D9_ELEMENT *elements,
     for (i = 0; i < D9_DECLS && c->decls[i].handle; i++)
         ;
     if (i == D9_DECLS || !count || count > 65) {
+        SKIPPED(SKIP_SHADER);
         dbg("rd3d: a vertex declaration is not kept\r\n");
         return;
     }
@@ -4324,6 +4380,7 @@ static void d9_create_func(RCTX *c, DWORD handle, const DWORD *tokens, DWORD byt
     for (i = 0; i < D9_FUNCS && c->funcs[i].handle; i++)
         ;
     if (i == D9_FUNCS || bytes < 8 || bytes % 4) {
+        SKIPPED(SKIP_SHADER);
         dbg("rd3d: a vertex shader function is not kept\r\n");
         return;
     }
@@ -4380,6 +4437,7 @@ static DWORD d9_shader(RCTX *c, DWORD decl, DWORD func)
         r->codeBytes = cw * 4;
         vs_create(c, r);
     } else {
+        SKIPPED(SKIP_SHADER);
         dbg("rd3d: a vertex declaration and function can't be drawn\r\n");
     }
     tracef("rd3d: declaration %lx with function %lx: shader %lx, %lu declaration words, %lu of code\r\n",
@@ -4782,6 +4840,7 @@ static void draw(RCTX *c, const VERTICES *v, GLenum mode, DWORD first, DWORD cou
                                            buffer object (testing idx drew nothing of those) */
 
     if (!v->base || (v->count && first + n > v->count)) {
+        SKIPPED(SKIP_DRAW);
         dbg("rd3d: vertices out of range\r\n");
         return;
     }
@@ -5130,6 +5189,7 @@ static DWORD WINAPI ContextCreate(LPD3DHAL_CONTEXTCREATEDATA d)
     pfd.cDepthBits = 24;
     fmt = c->dc ? ChoosePixelFormat(c->dc, &pfd) : 0;
     if (!fmt || !SetPixelFormat(c->dc, fmt, &pfd) || !(c->rc = p->gl.DrvCreateContext(c->dc))) {
+        SKIPPED(SKIP_TARGET);
         dbg("rd3d: no OpenGL context\r\n");
         context_free(c);
         return DDHAL_DRIVER_HANDLED;
@@ -5587,6 +5647,7 @@ static GLuint ps_compile(RCTX *c, struct ps8 *p, DWORD key)
         !gl->ProgramLocalParameter4fvARB) {
         tracef("rd3d: pixel shader %lx not translated: reason %lu, detail %lx, line %lu\r\n",
                p->handle, (DWORD)info.reason, (DWORD)info.detail, n ? (DWORD)ai.line : 0);
+        SKIPPED(SKIP_SHADER);
         dbg("rd3d: a pixel shader was not translated\r\n");
         p->failed = 1;
     } else {
@@ -5597,6 +5658,7 @@ static GLuint ps_compile(RCTX *c, struct ps8 *p, DWORD key)
         gl->ProgramStringARB(GL_FRAGMENT_PROGRAM_ARB, GL_PROGRAM_FORMAT_ASCII_ARB, m - 1, arb);
         if (gl->GetError() != GL_NO_ERROR) {
             const char *e = (const char *)gl->GetString(GL_PROGRAM_ERROR_STRING_ARB);
+            SKIPPED(SKIP_PROGRAM);
             dbg("rd3d: a pixel shader's program was refused: ");
             dbg(e ? e : "?");
             dbg("\r\n");
@@ -5628,6 +5690,7 @@ static void ps_create(RCTX *c, DWORD handle, const DWORD *code, DWORD bytes)
     ps_delete(c, handle);
     p = ps_find(c, handle, 1);
     if (!p) {
+        SKIPPED(SKIP_SHADER);
         dbg("rd3d: too many pixel shaders\r\n");
         return;
     }
@@ -5923,6 +5986,7 @@ static GLenum prim_mode(DWORD type, DWORD prims, DWORD *verts)
 
 static void skip8(RCTX *c, const char *why)
 {
+    SKIPPED(SKIP_DRAW);
     if (!c->skipped8++) {
         dbg("rd3d: Direct3D 8 draw not drawn: "); dbg(why); dbg("\r\n");
     }
@@ -6012,6 +6076,7 @@ static void stream_draw(RCTX *c, LPD3DHAL_DRAWPRIMITIVES2DATA d, DWORD type, lon
             idx = index_list(c, (const WORD *)(ib + index_byte), verts, 1, 1, &lo, &span);
         }
         if (!idx) {
+            SKIPPED(SKIP_DRAW);
             dbg("rd3d: no memory for the indices of a draw\r\n");
             return;
         }
@@ -6031,6 +6096,7 @@ static void buffer_blt(RCTX *c, const RB_DP2_BUFFER_BLT *b)
     BYTE *dst = buffer_get(c->ddl, b->dest, &dsize), *src = buffer_get(c->ddl, b->source, &ssize);
     if (!dst || !src || offset > ssize || size > ssize - offset || b->offset > dsize ||
         size > dsize - b->offset) {
+        SKIPPED(SKIP_COPY);
         dbg("rd3d: buffer copy out of range\r\n");
         return;
     }
@@ -6109,6 +6175,7 @@ static void d9_blt(RCTX *c, const RB_DP2_BLT9 *b)
            b->dest, b->destLevel, b->flags, ss && ds ? "" : " (not done)");
     if (!ss || !ds || ss == ds || sb != db || spf.dwRBitMask != dpf.dwRBitMask ||
         spf.dwFourCC != dpf.dwFourCC) {
+        SKIPPED(SKIP_COPY);
         if (!c->blt_skipped++)
             dbg("rd3d: a Direct3D 9 blit is not done (surfaces or formats)\r\n");
         return;
@@ -6422,8 +6489,10 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
             idx = index_list(c, src, count, step, keep, &lo, &span);
             if (idx)
                 draw(c, &v, mode, base + lo, 0, idx, count * keep, span);
-            else
+            else {
+                SKIPPED(SKIP_DRAW);
                 dbg("rd3d: no memory for the indices of a command\r\n");
+            }
             cmd = (BYTE *)src + count * size;
             break;
         }
@@ -6832,6 +6901,7 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
             LPVOID next = NULL;
             HRESULT r = parse_unknown ? parse_unknown(cmd, &next) : D3DERR_COMMAND_UNPARSED;
             if (FAILED(r) || !next) {
+                SKIPPED(SKIP_COMMAND);
                 dbg("rd3d: command not understood: "); dbg_hex(k->bCommand); dbg("\r\n");
                 d->dwErrorOffset = cmd - start;
                 d->ddrval = D3DERR_COMMAND_UNPARSED;
@@ -6844,6 +6914,7 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
     }
     goto done;
 bad:                                    /* a Direct3D 8 command longer than the buffer */
+    SKIPPED(SKIP_COMMAND);
     dbg("rd3d: command runs past the buffer: "); dbg_hex(CMD(cmd)->bCommand); dbg("\r\n");
     d->dwErrorOffset = cmd - start;
     d->ddrval = D3DERR_COMMAND_UNPARSED;

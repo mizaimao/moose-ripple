@@ -25,7 +25,8 @@ name=moose-ripple-win9x-$VERSION
 rm -rf "$work" "$out/$name.zip" "$out/$name.iso" "$out/SHA256SUMS.txt"
 mkdir -p "$work/driver" "$work/mesa" "$work/$name"
 
-OUT=$work/driver sh "$here/build.sh"
+# DEVCHECKS=0: a release carries no development checks (the skip counters and their export).
+DEVCHECKS=0 OUT=$work/driver sh "$here/build.sh"
 OUT=$work/mesa TOOLS=$T sh "$here/mesa/build.sh"
 
 pkg=$work/$name

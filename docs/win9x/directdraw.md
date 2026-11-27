@@ -1270,6 +1270,35 @@ benchmark run in the same process after the game tests; two later fill-rate runs
 second in its process, finished. Not explained.
 
 
+## Skip counters (a development check, 2026-11-27)
+
+A test that samples a few pixels passes when the driver quietly leaves something out next to
+the samples, and a benchmark gives a score whatever was drawn. So `rippledd.dll` counts what it
+skips or cannot do, and a run is to fail when a count rose. The counts are by kind, since
+Windows started, one set for all processes (the DLL's data is shared):
+
+| # | Kind | Counted when |
+| - | ---- | ------------ |
+| 0 | draw | a draw is not drawn: a Direct3D 8 or 9 draw the vertex path refuses (the debug port names the reason of a context's first one), vertices outside their buffer, no memory for the indices |
+| 1 | command | a command of a command buffer is not understood, or runs past the buffer |
+| 2 | shader | a vertex or pixel shader is not translated, a vertex declaration cannot be read, or a table of them is full |
+| 3 | program | OpenGL refuses a program the driver wrote |
+| 4 | target | a render target, a depth buffer or the OpenGL context cannot be drawn into |
+| 5 | texture | a texture's format has no upload |
+| 6 | copy | a copy or fill between surfaces or buffers is not done |
+| 7 | state | a fixed-function stage operation without an OpenGL combine mode (drawn as `MODULATE`), a stage argument without a source (specular, the temporary register), more lights on than the driver keeps |
+
+`RippleSkips(DWORD *out, DWORD count)`, exported by name, copies up to `count` of them and
+returns how many it filled in. A program reads them with `LoadLibrary("rippledd.dll")` and
+`GetProcAddress`, before and after what it wants checked.
+
+Counting and the export are built in unless `DEVCHECKS=0` is set for `win9x/build.sh`.
+`win9x/package.sh` sets it: a release carries neither.
+
+Not counted: what the driver passes over without a message of its own, such as a render state it
+has no code for or a texture handle whose surface is gone. A count of zero says none of the
+cases in the table happened, not that everything was drawn.
+
 ## Changing a driver in the test VM
 
 Copying a new `rippledd.dll` or `ripplevd.vxd` over the old one fails while Windows has it

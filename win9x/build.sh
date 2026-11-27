@@ -20,9 +20,12 @@ for f in d16/bin/cl16.exe d16/bin/link16.exe ddk98/ddk/bin/win98/ml.exe ddk98/dd
     [ -e "$T/$f" ] || { echo "build.sh: $T/$f is missing (see docs/win9x/plan.md)" >&2; exit 1; }
 done
 
-CDEF= ADEF=
+CDEF= ADEF= DEVDEF= DEVLINK=
 [ -z "${TRACE:-}" ] || { CDEF=/DTRACE; ADEF=-DTRACE; }
 [ -z "${DDTRACE:-}" ] || CDEF="$CDEF /DDDTRACE"      # DirectDraw's escapes on the debug port
+# Development checks (on unless DEVCHECKS=0, which a release build sets): rippledd.dll counts what
+# it skips and exports the counts (RippleSkips in ddraw/rippled3d.c).
+[ "${DEVCHECKS:-1}" = 0 ] || { DEVDEF=/DRIPPLE_DEV_CHECKS; DEVLINK=/EXPORT:RippleSkips=_RippleSkips@8; }
 B=$OUT/obj-display
 rm -rf "$B" && mkdir -p "$B"
 cp "$here"/display/*.c "$here"/display/*.h "$here"/display/*.asm "$here"/display/*.def "$here"/display/*.rc "$B/"
@@ -76,8 +79,8 @@ cd "$D"
 (
     export INCLUDE="$(W "$T/ddkme/ddk/inc/win_me");$(W "$T/vc6/VC98/Include")" LIB="$(W "$T/vc6/VC98/Lib")"
     export WINEPATH="$(W "$T/vc6/VC98/Bin");$(W "$T/vc6/Common/MSDev98/Bin")"
-    wine cl.exe /nologo /c /W3 /WX /O1 /Oy- /Zl /Gs /GF rippledd.c rippled3d.c tgsi_arb.c tnl_arb.c vs_arb.c d3d8_ps.c d3d9_decl.c
-    wine link.exe /NOLOGO /DLL /NODEFAULTLIB /ENTRY:DllMain /BASE:0xB00B0000 /DEF:rippledd.def \
+    wine cl.exe /nologo /c /W3 /WX /O1 /Oy- /Zl /Gs /GF $DEVDEF rippledd.c rippled3d.c tgsi_arb.c tnl_arb.c vs_arb.c d3d8_ps.c d3d9_decl.c
+    wine link.exe /NOLOGO /DLL /NODEFAULTLIB /ENTRY:DllMain /BASE:0xB00B0000 /DEF:rippledd.def $DEVLINK \
         /OUT:rippledd.dll /MAP:rippledd.map rippledd.obj rippled3d.obj tgsi_arb.obj tnl_arb.obj vs_arb.obj d3d8_ps.obj d3d9_decl.obj \
         kernel32.lib user32.lib gdi32.lib advapi32.lib > link.log 2>&1 || { cat link.log; exit 1; }
 )
