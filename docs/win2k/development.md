@@ -3120,6 +3120,43 @@ under the two rules goes to the stage program instead of the combiner
 Direct3D 9 reference rasterizer only; Direct3D 8 draws get it too, which is a guess until a
 `d8pixels` case measures it.
 
+## A full-screen back buffer with alpha: 3DMark03's CPU Test 2
+
+3DMark03's CPU Test 2 is Troll's Lair at 640x480 with software vertex shaders and version 1.1
+pixel shaders. On this driver it came out far too bright, every surface lit as if no light
+faded with distance, while a graphics card of the time (a GeForce 9600 GT) shows the dark cave
+of the game test.
+
+Version 1.1 has too few instructions to do a light's fall-off and its colour in one pass, so
+the test lights through the destination alpha: one pass writes the fall-off into the back
+buffer's alpha channel (`dp3_sat` of the light vector with itself, complemented), and the
+light's pass is blended with `D3DBLEND_DESTALPHA` as its source factor. For that it asks for an
+A8R8G8B8 back buffer on the X8R8G8B8 display. `d9trace` showed it: of the eleven devices a
+benchmark run makes, CPU Test 2's is the only one that sets a destination alpha blend factor.
+
+A full-screen back buffer is part of the primary surface's flip chain, which has no pixel
+format of its own; it takes the display mode's. Windows says that the chain has an alpha
+channel with a capability bit instead, `DDSCAPS2_ENABLEALPHACHANNEL`. The driver looked only at
+the pixel format, took the chain for one without alpha, and read its destination alpha as one,
+which is Direct3D's rule for a target without an alpha channel. So every light was drawn at
+full strength. The chain's host image had the channel all along; now the bit is read
+(`create_surface` in `display_ddraw.c`) and the blend uses it.
+
+`d9full` checks it on both back buffer formats in full-screen: after a clear with alpha 0x40,
+white blended by the destination alpha comes out as 0x404040 on an A8R8G8B8 back buffer and as
+white on an X8R8G8B8 one. Before the change both were white. The test reads the picture from
+the front buffer once it is shown. Reading the back buffer before that gives an older picture
+(issue 327), which the test prints without counting it.
+
+The Image Quality tool does not reach this path. Its window has check boxes of its own for
+software vertex shaders and for version 1.1 pixel shaders in game tests 2 and 3. With the first
+ticked the device is made with software vertex processing, and Troll's Lair frame 600 is the
+same picture as without and matches the reference rasterizer. With the second ticked the tool
+still made the same shaders and set no destination alpha blend, so that box does not give the
+CPU test's lighting, and the CPU tests themselves are not in the tool's list. CPU Test 2 is
+therefore checked by captures of a benchmark run against captures of the same run on a graphics
+card.
+
 ## Plain surfaces on the Direct3D 9 interface
 
 On the Direct3D 9 driver interface the runtime makes an offscreen plain surface only of a
