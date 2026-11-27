@@ -974,11 +974,27 @@ their commands are stepped over.
 interface, and that command returned at once for a compressed format, so they stayed empty. And
 a declaration without code did not read the point size register.
 
-**Result on Windows 98 SE** (Intel host, DirectX 9.0c): `d9pixels` 83 of 83, the first complete
-pass (3 new since 79 of 80: the scissor test and two flow control cases run now, and
-`vs1_inputs` with its UBYTE4 element passes); with software vertex processing (`d9pixels sw`)
-82 of 82; `d8pixels` 31 of 31, unchanged. With `D3D9` = `"0"` the Direct3D 8 interface gives
-79 of 80 as before. 3DMark 2001 SE (Direct3D 8) draws as before with the interface on.
+**A surface may be gone before the command that replaces it.** The Direct3D 8 interface names the
+render target and the depth buffer in one command, which the runtime sends at once. On this
+interface they are two commands, and they wait in the command buffer with the rest: a program
+that sets another depth buffer and releases the old one has the surface destroyed before the
+driver hears of the new one. The driver rebuilt its framebuffer at the start of every command
+buffer from the surface records it kept, read the dead depth record, and faulted inside the
+call, which stands Windows 98 still (the screen stops, the processor idles in the kernel; no
+message, because the faulting thread holds the system's lock). It showed only in a full
+`d9pixels` run, after `rt_small_depth` released its depth surface and the next case made new
+surfaces in the freed memory. The context now keeps the depth buffer's memory address from the
+moment it is set and does not read its record again; and each of the two commands looks the
+other surface up by its handle, where a handle that now names a surface that is no depth buffer
+counts as none.
+
+**Result on Windows 98 SE** (Intel host, DirectX 9.0c), with the tests as they stood on
+2026-11-27 after the Windows 2000/XP side added cases: `d9pixels` 98 of 99 with the interface
+on (19 new since 79 of 80; the one failure, `ps2_sixteen_samplers`, reads samplers 9 and 15,
+and this driver binds eight), 97 of 98 with software vertex processing (`d9pixels sw`), and
+90 of 93 with `D3D9` = `"0"` (the Direct3D 8 interface as before: the same case, and the two
+UBYTE4 declarations it cannot offer). `d8pixels` 44 of 44 (13 new since 31 of 31). 3DMark
+2001 SE (Direct3D 8) draws as before with the interface on.
 
 ### Vertex processing on the GPU (2026-11-26, `D3D8` = `"2"`)
 

@@ -1316,6 +1316,9 @@ typedef struct {
     GLuint fbo, white, black, fog_tex;
     DWORD fb_w, fb_h;
     FLATPTR fb_z;                       /* the z-buffer whose depth is attached (0: none) */
+    FLATPTR z_mem;                      /* the z-buffer's memory, read when it was set: its record (z)
+                                           is not read again, it may be gone before the command
+                                           that replaces it arrives (the Direct3D 9 interface) */
     GPUBUF cb[TARGETS];                 /* the picture of each render target */
     GPUBUF zb[ZBUFFERS];                /* the depth of each z-buffer */
     GPUBUF *cur;                        /* the attached colour buffer (NULL: none yet) */
@@ -1357,6 +1360,9 @@ typedef struct {
     struct d9_func *funcs;
     struct d9_pair *pairs;
     DWORD decl9, func9, pair_last, vs_hit;
+    DWORD rt9, z9;                      /* the render target's and the depth buffer's handles, as
+                                           SETRENDERTARGET2 and SETDEPTHSTENCIL named them */
+    int z9_set;
     DWORD blt_skipped;
     DWORD stream_offset, sx_offset[VS_ARB_STREAMS];
     LONG scissor9[4];
@@ -1924,7 +1930,7 @@ static int framebuffer(RCTX *c)
     GLF *gl = gl_of(c);
     DWORD w = c->rt ? c->rt->lpGbl->wWidth : 1, h = c->rt ? c->rt->lpGbl->wHeight : 1;
     FLATPTR mem = c->rt ? c->rt->lpGbl->fpVidMem : 0;
-    FLATPTR zmem = c->z ? c->z->lpGbl->fpVidMem : 0;
+    FLATPTR zmem = c->z ? c->z_mem : 0;
     GPUBUF *cb;
     GLuint depth;
 
@@ -4996,6 +5002,7 @@ static int set_render_target(RCTX *c, LPDDRAWI_DDRAWSURFACE_LCL rt, LPDDRAWI_DDR
            (DWORD)rt->lpGbl->wHeight, z ? z->lpGbl->fpVidMem : 0);
     c->rt = rt;
     c->z = z;
+    c->z_mem = z ? z->lpGbl->fpVidMem : 0;
     if (!framebuffer(c))
         return 0;
     apply_depth_test(c);                /* with or without a z-buffer now */
@@ -5143,6 +5150,7 @@ static DWORD WINAPI ContextCreate(LPD3DHAL_CONTEXTCREATEDATA d)
     }
     c->rt = d->lpDDSLcl;
     c->z = d->lpDDSZLcl;
+    c->z_mem = c->z ? c->z->lpGbl->fpVidMem : 0;
     if (!framebuffer(c)) {
         context_free(c);
         return DDHAL_DRIVER_HANDLED;
@@ -6001,6 +6009,22 @@ static void buffer_blt(RCTX *c, const RB_DP2_BUFFER_BLT *b)
 
 /* Commands that carry n records of size bytes, each followed by a variable part of the length
    in the record's words w1 (and w2, if not 0): the bytes they take, or 0xFFFFFFFF. */
+/* The depth buffer for the render target of the Direct3D 9 interface, which sets the two with
+   separate commands. Each is kept as the handle its command gave and looked up when the other
+   changes, never as a pointer from before: the runtime may destroy a depth surface (and give
+   its handle to a new surface) before the commands that replace it arrive. A target set after
+   that would keep the dead surface as its depth buffer. (What stood the system still in
+   d9pixels after rt_small_depth released its depth surface was framebuffer reading the dead
+   record at the start of the next command batch: z_mem.) NULL: none, or no longer one. */
+static LPDDRAWI_DDRAWSURFACE_LCL d9_depth(RCTX *c)
+{
+    LPDDRAWI_DDRAWSURFACE_LCL z;
+    if (!c->z9_set)
+        return c->z;                    /* the one the context was made with */
+    z = c->z9 ? handle_get(c->ddl, c->z9) : NULL;
+    return z && z->lpGbl && z->lpGbl->fpVidMem && (z->ddsCaps.dwCaps & DDSCAPS_ZBUFFER) ? z : NULL;
+}
+
 /* A surface of the Direct3D 9 interface's blits and fills: the handle's surface at a mipmap
    level, its rectangle (an empty one stands for all of it) kept inside it, and its bytes a
    pixel. 0 for a format without whole bytes a pixel or a rectangle outside the surface. */
@@ -6639,7 +6663,8 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
                 LPDDRAWI_DDRAWSURFACE_LCL rt = t[i].index ? NULL : handle_get(c->ddl, t[i].handle);
                 if (!rt)                    /* one render target: the others are not offered */
                     continue;
-                if (!set_render_target(c, rt, c->z)) {
+                c->rt9 = t[i].handle;
+                if (!set_render_target(c, rt, d9_depth(c))) {
                     d->ddrval = DDERR_GENERIC;
                     goto done;
                 }
@@ -6656,11 +6681,16 @@ static DWORD WINAPI DrawPrimitives2(LPD3DHAL_DRAWPRIMITIVES2DATA d)
             const DWORD *h = (const DWORD *)data;
             if (data + n * sizeof *h > end)
                 goto bad;
-            for (i = 0; i < n; i++)
-                if (c->rt && !set_render_target(c, c->rt, h[i] ? handle_get(c->ddl, h[i]) : NULL)) {
+            for (i = 0; i < n; i++) {
+                LPDDRAWI_DDRAWSURFACE_LCL rt;
+                c->z9 = h[i];
+                c->z9_set = 1;
+                rt = c->rt9 ? handle_get(c->ddl, c->rt9) : c->rt;
+                if (rt && !set_render_target(c, rt, d9_depth(c))) {
                     d->ddrval = DDERR_GENERIC;
                     goto done;
                 }
+            }
             cmd = data + n * sizeof *h;
             break;
         }
