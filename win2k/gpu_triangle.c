@@ -22,7 +22,8 @@ enum {
     PointRaster = 160,
     /* Vertex and pixel programs: a host shader for each program slot, and boundVertex's value
      * for one (above the fixed vertex shaders' bits). */
-    ProgramBase = 0x10000, ProgramBound = 0x10000
+    ProgramBase = 0x10000, ProgramBound = 0x10000,
+    ElementsBase = 0x20000      /* the vertex elements of a vertex program for host buffers, by its slot */
 };
 enum { PointBound = 0x10000 };   /* boundRaster while the point rasterizer is bound */
 enum { VertexStage = 0, FragmentStage = 1, PipePoints = 0, PipeLines = 1, PipeTriangles = 4, ShaderText = 2400, LitText = 8192 };
@@ -617,7 +618,7 @@ BOOLEAN rb_gpu_d7_valid(const RB2K_D3D7_DRAW *d)
     if ((d->blend & ~(RB2K_D7_ON | RB2K_BLEND_DEST_ALPHA | RB2K_BLEND_NO_WRITE | 0xffff)) ||
         ((d->blend & RB2K_D7_ON) && (!blend_valid((d->blend >> 8) & 255) || !blend_valid(d->blend & 255)))) return FALSE;
     if (d->cull < CullNone || d->cull > CullCcw || d->specular > 1) return FALSE;
-    if (d->primitive > RB2K_PRIM_POINTS || d->count % PRIM_VERTICES(d->primitive) ||
+    if (d->primitive > RB2K_PRIM_POINTS || (d->transform != 3 && d->count % PRIM_VERTICES(d->primitive)) ||
         d->pointFlags > (RB2K_POINT_SPRITE | RB2K_POINT_PER_VERTEX) || d->pointSize > RB2K_POINT_SIZE_MAX ||
         d->clipMask > 63 || d->scissorOn > 1 || (d->scissorOn && (d->scissor[0] > 8192 || d->scissor[1] > 8192 || d->scissor[2] > 8192 ||
         d->scissor[3] > 8192)) ||
@@ -843,6 +844,8 @@ static BOOLEAN fixed_states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image
     return !n || rb_gpu_frame_words(gpu, r, image, words, n);
 }
 
+static BOOLEAN plain_elements(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image);
+
 /* Emit the state changes of one draw: depth and alpha test, blend, cull,
  * fragment shader, texture factor, sampler and texture view. */
 static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
@@ -854,7 +857,9 @@ static BOOLEAN states(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image,
     if (!s->pipeline) {
         if (!rb_gpu_frame_words(gpu,r,image,pipeline,sizeof(pipeline)/sizeof(*pipeline))) return FALSE;
         s->pipeline = TRUE;
+        s->boundElements = 0;
     }
+    if (!plain_elements(gpu, r, image)) return FALSE;
     {
         /* Index 1: the clip variants, which write the distances of user clip planes. */
         static char litText[2][LitText], objectText[2][LitText];
@@ -1258,13 +1263,14 @@ BOOLEAN rb_gpu_d8_valid(const RB2K_D3D8_DRAW *d)
     if ((d->blend & ~(RB2K_D7_ON | RB2K_BLEND_DEST_ALPHA | RB2K_BLEND_NO_WRITE | 0xffff)) ||
         ((d->blend & RB2K_D7_ON) && (!blend_valid((d->blend >> 8) & 255) || !blend_valid(d->blend & 255)))) return FALSE;
     if (d->cull < CullNone || d->cull > CullCcw || (d->constantCount != 8 && d->constantCount != 16 && d->constantCount != 32)) return FALSE;
+    if (d->transform == 3 && (d->lighting || !d->vertexProgram || d->vertexConstants > RB2K_D8_VS_CONSTANTS)) return FALSE;
     if (d->transform == 2 && (d->lighting || !d->vertexProgram || d->vertexConstants > RB2K_D8_VS_CONSTANTS ||
         !d->vertexWords || d->vertexWords % 4 || d->vertexWords > RB2K_D8_VS_VERTEX_WORDS)) return FALSE;
-    if (d->primitive > RB2K_PRIM_POINTS || d->count % PRIM_VERTICES(d->primitive) ||
+    if (d->primitive > RB2K_PRIM_POINTS || (d->transform != 3 && d->count % PRIM_VERTICES(d->primitive)) ||
         d->pointFlags > (RB2K_POINT_SPRITE | RB2K_POINT_PER_VERTEX) || d->pointSize > RB2K_POINT_SIZE_MAX ||
         d->clipMask > 63 || d->scissorOn > 1 || (d->scissorOn && (d->scissor[0] > 8192 || d->scissor[1] > 8192 || d->scissor[2] > 8192 ||
         d->scissor[3] > 8192)) ||
-        d->transform > 2 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
+        d->transform > 3 || (d->transform && (!d->viewport[2] || !d->viewport[3] ||
         d->viewport[0] > 8192 || d->viewport[1] > 8192 || d->viewport[2] > 8192 || d->viewport[3] > 8192)))
         return FALSE;
     for (k = 0; k < RB2K_D8_STAGES; ++k)
@@ -1301,18 +1307,67 @@ static BOOLEAN program_shader(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *ima
     if (s->programMade[slot] != id) {
         state = Fresh;
         if (s->programMade[slot]) {
-            ULONG words[2];
-            words[0] = DESTROY(VIRGL_OBJECT_SHADER); words[1] = ProgramBase + slot;
+            ULONG words[4], n = 0;
+            words[n++] = DESTROY(VIRGL_OBJECT_SHADER); words[n++] = ProgramBase + slot;
             state = Replaced;
             s->programMade[slot] = 0;
             if (s->boundVertex == ProgramBound + slot) s->boundVertex = 0;
             if (s->boundProgram == slot + 1) s->boundProgram = 0;
-            if (!rb_gpu_frame_words(gpu, r, image, words, 2)) return FALSE;
+            if (s->elementsMade[slot / 32] & (1UL << (slot & 31))) {
+                /* Its vertex elements go with it; the next draw of either kind binds its own. */
+                words[n++] = DESTROY(VIRGL_OBJECT_VERTEX_ELEMENTS); words[n++] = ElementsBase + slot;
+                s->elementsMade[slot / 32] &= ~(1UL << (slot & 31));
+                if (s->boundElements == slot + 1) s->boundElements = ~0UL;
+            }
+            if (!rb_gpu_frame_words(gpu, r, image, words, n)) return FALSE;
         }
         if (!shader(gpu, r, image, ProgramBase + slot, stage, text, size)) return FALSE;
         s->programMade[slot] = id;
     }
     ++gpu->d7Profile.caches[kind][state];
+    return TRUE;
+}
+
+/* The vertex elements of a draw from host buffers: an object for each vertex program, made from
+ * the program's element list at ElementsBase plus its slot, and bound when another is. */
+static BOOLEAN program_elements(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, ULONG slot)
+{
+    /* FLOAT1..FLOAT4, then D3DCOLOR as its four bytes (the program orders them), UBYTE4 and the
+     * SHORTs as numbers. */
+    static const UCHAR formats[8] = {
+        VIRGL_FORMAT_R32_FLOAT, VIRGL_FORMAT_R32G32_FLOAT, VIRGL_FORMAT_R32G32B32_FLOAT, VIRGL_FORMAT_R32G32B32A32_FLOAT,
+        VIRGL_FORMAT_R8G8B8A8_UNORM, VIRGL_FORMAT_R8G8B8A8_USCALED, VIRGL_FORMAT_R16G16_SSCALED,
+        VIRGL_FORMAT_R16G16B16A16_SSCALED
+    };
+    RB2K_D7_STATE *s = &image->d7;
+    ULONG words[4 + 4 * RB2K_D8_ELEMENTS], n = 0, k, count = gpu->programs[slot].elementCount;
+    if (!(s->elementsMade[slot / 32] & (1UL << (slot & 31)))) {
+        words[n++] = CREATE(VIRGL_OBJECT_VERTEX_ELEMENTS, VIRGL_OBJ_VERTEX_ELEMENTS_SIZE(count));
+        words[n++] = ElementsBase + slot;
+        for (k = 0; k < count; ++k) {
+            ULONG e = gpu->programs[slot].elements[k];
+            words[n++] = RB2K_D8_ELEMENT_OFFSET(e);
+            words[n++] = 0;                             /* per vertex */
+            words[n++] = RB2K_D8_ELEMENT_STREAM(e);
+            words[n++] = formats[RB2K_D8_ELEMENT_TYPE(e)];
+        }
+        s->elementsMade[slot / 32] |= 1UL << (slot & 31);
+    }
+    if (s->boundElements != slot + 1) {
+        words[n++] = BIND(VIRGL_OBJECT_VERTEX_ELEMENTS); words[n++] = ElementsBase + slot;
+        s->boundElements = slot + 1;
+    }
+    return !n || rb_gpu_frame_words(gpu, r, image, words, n);
+}
+
+/* The empty elements of the draws that carry their vertices as constants, when a draw from
+ * host buffers has bound its own. */
+static BOOLEAN plain_elements(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image)
+{
+    static const ULONG bind[] = { BIND(VIRGL_OBJECT_VERTEX_ELEMENTS), Elements };
+    if (!image->d7.boundElements) return TRUE;
+    if (!rb_gpu_frame_words(gpu, r, image, bind, 2)) return FALSE;
+    image->d7.boundElements = 0;
     return TRUE;
 }
 
@@ -1324,9 +1379,11 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
 {
     RB2K_D7_STATE *s = &image->d7;
     ULONG words[192], n = 0, slot, key[6], state, i, k, h[RB2K_D8_STAGES], views[RB2K_D8_STAGES];
-    BOOLEAN shaded = d->transform == 2;
+    /* buffered: the vertices are in host buffers named by the RB2K_D8_BUFFER_DRAW after the constants. */
+    BOOLEAN shaded = d->transform >= 2, buffered = d->transform == 3;
+    const RB2K_D8_BUFFER_DRAW *bd = (const RB2K_D8_BUFFER_DRAW *)(d->vertices + 4 * d->vertexConstants);
     ULONG lit = !shaded && d->lighting != 0, lights = lit ? d->lightCount : 0;
-    ULONG stages = 0, fill = 0, count = d->count;
+    ULONG stages = 0, fill = 0, count = buffered ? 0 : d->count, streams = 0;
     /* User clip planes: after the shader's constants (planes), or before the vertices of object-space
      * draws (ffPlanes). */
     ULONG planes = shaded && d->clipMask ? 6 : 0, ffPlanes = !shaded && d->transform && d->clipMask ? 6 : 0;
@@ -1338,9 +1395,21 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
     ULONG width = dimension_bits(image->width), height = dimension_bits(image->height);
     gpu->d8Step = 1;
     if (!rb_gpu_prepare_target(gpu, r, image)) return FALSE;
+    if (buffered) {
+        /* The buffers the draw reads are attached to this colour context before its commands;
+         * then the streams up to the last one given, and the index buffer, join the draw. */
+        for (k = 0; k < RB2K_D8_STREAMS; ++k) {
+            if (!(bd->streams & (1UL << k))) continue;
+            if (!rb_gpu_buffer_attach(gpu, r, rb_gpu_buffer(gpu, bd->stream[k].buffer), image)) return FALSE;
+            streams = k + 1;
+        }
+        if (bd->indexSize && !rb_gpu_buffer_attach(gpu, r, rb_gpu_buffer(gpu, bd->indexBuffer), image)) return FALSE;
+        total += 1 + 3 * streams + (bd->indexSize ? 4 : 0);
+    }
     if (!s->pipeline) {
         if (!rb_gpu_frame_words(gpu,r,image,pipeline,sizeof(pipeline)/sizeof(*pipeline))) return FALSE;
         s->pipeline = TRUE;
+        s->boundElements = 0;
     }
     gpu->d8Step = 2;
     if (shaded) {
@@ -1353,7 +1422,10 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
             if (!rb_gpu_frame_words(gpu,r,image,bind,3)) return FALSE;
             s->boundVertex = ProgramBound + slot;
         }
-    } else {
+        if (buffered && !program_elements(gpu, r, image, slot)) return FALSE;
+    }
+    if (!buffered && !plain_elements(gpu, r, image)) return FALSE;
+    if (!shaded) {
         /* Index 1: the clip variants of the object-space shaders (user clip planes). */
         static char transformedText[LitText], objectText[2][LitText], litText[2][LitText];
         static ULONG transformedSize, objectSize[2], litSize[2];
@@ -1486,6 +1558,7 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
         for (i = 0; i < 4 * (RB2K_D8_VS_CONST_BASE - 3); ++i) *p++ = d->flowConstants[i / 4][i % 4];
         for (i = 0; i < 4 * d->vertexConstants; ++i) *p++ = d->vertices[i];
         for (i = 0; i < 4 * planes; ++i) *p++ = d->clipPlanes[i / 4][i % 4];
+        /* count is zero for a draw from host buffers. */
         for (i = 4 * d->vertexConstants; i < 4 * d->vertexConstants + count * d->vertexWords; ++i) *p++ = d->vertices[i];
     } else if (d->transform) {
         ULONG m, row, col;
@@ -1546,6 +1619,31 @@ BOOLEAN rb_gpu_d8_draw(RB2K_GPU *gpu, RB2K_GPU_RESULT *r, RB2K_IMAGE *image, con
         *p++ = l[19]; *p++ = l[21]; *p++ = l[22]; *p++ = l[23];
         *p++ = l[24]; *p++ = l[25]; *p++ = l[20]; *p++ = 0;
         *p++ = l[0] == 3 ? 0x3f800000 : 0; *p++ = l[0] == 2 ? 0x3f800000 : 0; *p++ = 0; *p++ = 0;
+    }
+    if (buffered) {
+        /* Each stream's buffer with its stride and the offset of vertex zero (a stream not given
+         * has no buffer), the index buffer, and the draw as Direct3D named it. */
+        *p++ = VIRGL_CMD0(VIRGL_CCMD_SET_VERTEX_BUFFERS,0,VIRGL_SET_VERTEX_BUFFERS_SIZE(streams));
+        for (k = 0; k < streams; ++k) {
+            BOOLEAN given = (bd->streams & (1UL << k)) != 0;
+            *p++ = given ? bd->stream[k].stride : 0;
+            *p++ = given ? bd->stream[k].offset : 0;
+            *p++ = given ? rb_gpu_buffer(gpu, bd->stream[k].buffer)->id : 0;
+        }
+        if (bd->indexSize) {
+            *p++ = VIRGL_CMD0(VIRGL_CCMD_SET_INDEX_BUFFER,0,VIRGL_SET_INDEX_BUFFER_SIZE(1));
+            *p++ = rb_gpu_buffer(gpu, bd->indexBuffer)->id; *p++ = bd->indexSize; *p++ = bd->indexOffset;
+        }
+        *p++ = VIRGL_CMD0(VIRGL_CCMD_DRAW_VBO,0,VIRGL_DRAW_VBO_SIZE);
+        *p++ = bd->start; *p++ = bd->count; *p++ = bd->mode; *p++ = bd->indexSize ? 1 : 0; *p++ = 1;
+        *p++ = bd->indexSize ? (ULONG)bd->bias : 0; *p++ = 0;
+        *p++ = 0; *p++ = 0;
+        *p++ = bd->indexSize ? bd->minIndex : bd->start;
+        *p++ = bd->indexSize ? bd->maxIndex : bd->start + bd->count - 1;
+        *p++ = 0;
+        ++gpu->d7Profile.bufferDraws;
+        image->uniform = FALSE;
+        return TRUE;
     }
     *p++ = VIRGL_CMD0(VIRGL_CCMD_DRAW_VBO,0,VIRGL_DRAW_VBO_SIZE);
     *p++ = 0; *p++ = count; *p++ = PIPE_MODE(d->primitive); *p++ = 0; *p++ = 1; *p++ = 0; *p++ = 0;

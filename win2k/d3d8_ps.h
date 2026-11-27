@@ -36,7 +36,17 @@ typedef struct {
     unsigned int detail;        /* the opcode or token behind the reason */
     unsigned int constants;     /* vertex shaders: c0..c(n-1) are read (all for relative reads) */
     unsigned int pointSize;     /* vertex shaders: oPts is written (a PSIZE output) */
+    /* Vertex shaders with RB_VS_ATTRIBUTES: input IN[k] of the program is element k, packed as
+     * RB_VS_ELEMENT(type, stream, offset): the declaration type (0..7: FLOAT1..FLOAT4, D3DCOLOR,
+     * UBYTE4, SHORT2, SHORT4), the stream, and the byte offset in that stream's vertex. */
+    unsigned int elementCount;
+    unsigned int elements[16];
 } RB_PS_INFO;
+#define RB_VS_ELEMENTS 16
+#define RB_VS_ELEMENT(type, stream, offset) ((type) | (stream) << 8 | (offset) << 16)
+#define RB_VS_ELEMENT_TYPE(e) ((e) & 0xff)
+#define RB_VS_ELEMENT_STREAM(e) (((e) >> 8) & 0xff)
+#define RB_VS_ELEMENT_OFFSET(e) ((e) >> 16)
 
 /* Fog applied to the shader's result, encoded as RB2K_D3D7_DRAW.fog: the
  * factor from the specular alpha, from the vertex depths in GENERIC[10]
@@ -79,6 +89,12 @@ unsigned int rb_ps_translate(const unsigned int *tokens, unsigned int count, uns
  * for six user clip planes in clip space, CONST[RB_VS_CONST_BASE + constants + 0..5] (constants as
  * in info->constants), which the rasterizer enables by D3DRS_CLIPPLANEENABLE. */
 #define RB_VS_CLIP 4
+/* RB_VS_ATTRIBUTES: the inputs are vertex attributes read from vertex buffers on the host
+ * instead of words after the constants: IN[k] for the k-th register the declaration feeds
+ * (info->elements, in the declaration's order). No vertices follow the constants, CONST[0].zw
+ * is not used, and streamBases is not read. A D3DCOLOR element is to be given to the host as
+ * four normalized bytes in memory order (b, g, r, a); the program puts them in order. */
+#define RB_VS_ATTRIBUTES 8
 /* The IEEE single bits of a whole number (exact below 2^24 in magnitude). */
 unsigned int rb_float_bits(int v);
 /* A vertex holds the data of each stream the declaration reads, one after the

@@ -25,7 +25,7 @@
 #endif
 
 enum { MaxContexts = 16, MaxCommandBytes = 1 << 20, TextureStages = 8, MaxTextures = 1024, MaxLights = 32,
-       MaxBuffers = 1024, MaxShaders = 512, MaxVertexShaders = 512 };
+       MaxBuffers = 4096, MaxShaders = 512, MaxVertexShaders = 512 };
 /* DP2 SETLIGHT operations (D3DHAL_SETLIGHT_*). */
 enum { SetLightEnable, SetLightDisable, SetLightData };
 typedef char light_record[sizeof(D3DLIGHT7) == 26 * sizeof(ULONG) ? 1 : -1];
@@ -56,6 +56,12 @@ typedef struct {
     ULONG streams;                          /* the streams the declaration reads, one bit each */
     ULONG bases[4][RB_VS_STREAMS];          /* where each program places them (words) */
     BOOL pointSize;     /* it writes oPts */
+    /* For draws from host buffers: the programs that read vertex attributes (RB_VS_ATTRIBUTES), by
+     * the same index; the elements their inputs are fetched from; the streams those name, and for
+     * each the bytes of a vertex they reach. */
+    ULONG hostProgram[4];
+    BOOL hostFailed[4];
+    ULONG elementCount, elements[RB_VS_ELEMENTS], hostStreams, extents[RB_VS_STREAMS];
 } D8_VSHADER;
 /* A pixel program made from the texture stage states, for draws with a
  * vertex shader and no pixel shader: the states it was made from (seven
@@ -115,6 +121,14 @@ typedef struct {
     struct D9_FUNC *funcs;
     struct D9_PAIR *pairs;
     ULONG pairLast;      /* the pair the last draw used, tried first */
+    /* The buffer records of the streams and (last) the index buffer, found once and kept while
+     * no buffer comes or goes (bufferEpoch). */
+    struct D8_BUFFER *bufferCache[RB_VS_STREAMS + 1];
+    ULONG bufferCacheEpoch;
+    /* The context's stream arenas, one for vertices and one for indices (see buffer_draw): the
+     * miniport's buffer and the bytes used. They go with the context, before the transport can
+     * be reset under them. */
+    struct { ULONG host, used; } arenas[RB2K_D8_BUFFER_KINDS];
     BOOL inScene, queued;
     ULONG minStart, maxEnd;     /* diagnostics for one command buffer */
     RB2K_D3D7_DRAW draw;        /* the batch being filled */
@@ -170,15 +184,43 @@ typedef struct {
 /* A Direct3D 8 vertex or index buffer registered through CreateSurfaceEx.
  * The runtime keeps both in the owning process's memory; the address and
  * size are read from the surface at each draw. */
-typedef struct {
+typedef struct D8_BUFFER {
     PDD_DIRECTDRAW_LOCAL local;
     PDD_SURFACE_GLOBAL global;
     DISPLAY *display;
     HANDLE owner;
     ULONG handle;
+    /* Its copy on the host (RippleHostBuffers), made when a draw first reads it as vertices or
+     * as indices: the miniport's buffer, its kind and size, and two sums of each BufferChunk
+     * bytes the host holds (0, 0: nothing yet). The program writes the buffer without telling
+     * the driver, so each draw sums the chunks it reads and uploads those that differ. */
+    ULONG host, hostKind, hostBytes;
+    ULONG *sums;
+    /* An index buffer: the vertices its last scanned range of indices reaches (scanCount 0:
+     * none), good while that range's chunks stay as they were. */
+    ULONG scanAt, scanCount, scanWidth, scanLow, scanHigh;
+    /* The program rewrote bytes the mirror holds: the next rewrittenLeft draws from the buffer are
+     * streamed (rewrittenSpan of them this time, more the next), and the mirror is stale: it is
+     * made anew before it is summed again. */
+    ULONG rewrittenLeft, rewrittenSpan;
+    BOOL stale;
+    /* Within one call of DrawPrimitives2 the program cannot write its buffers (the call is the
+     * runtime flushing draws it gathered), so in a call a chunk is summed once and a range is
+     * streamed once: the chunks summed in call checkedCall (checkedFirst to checkedLast), and
+     * the bytes streamed in call streamedCall with their place in the arena streamedHost. */
+    ULONG checkedCall, checkedFirst, checkedLast;
+    ULONG streamedCall, streamedFrom, streamedBytes, streamedPlace, streamedHost;
 } D8_BUFFER;
+/* Advanced when a buffer record comes or goes, for the contexts' bufferCache. */
+static ULONG bufferEpoch = 1;
+/* Counts the calls of DrawPrimitives2 (never zero), for what holds within one call. */
+static ULONG dp2Call = 1;
+static RB2K_D3D8_VPROGRAM *vprogramScratch;   /* a vertex program for host buffers on its way */
+/* Vertex shaders that could not be made into programs for host buffers (host_program). */
+static struct { ULONG count, reasons[RbPsReasons + 2], detail, elements, bytes, decl[4][24]; } hostProgramFails;
 
 static void release_shaders(D7_CONTEXT *c);
+static void release_arenas(D7_CONTEXT *c);
 static void d9_release(D7_CONTEXT *c);
 static void release_blocks(D7_CONTEXT *c);
 static void stencil_state(const D7_CONTEXT *c, const DD_SLOT *z, ULONG *stencil, ULONG *ref);
@@ -207,6 +249,7 @@ void rb_d7_init(void)
     if (!textures) textures = EngAllocMem(FL_ZERO_MEMORY, MaxTextures * sizeof(*textures), 't7bR');
     if (!buffers) buffers = EngAllocMem(FL_ZERO_MEMORY, MaxBuffers * sizeof(*buffers), 'b8bR');
     if (!programScratch) programScratch = EngAllocMem(0, sizeof(*programScratch), 's8bR');
+    if (!vprogramScratch) vprogramScratch = EngAllocMem(0, sizeof(*vprogramScratch), 'S8bR');
     if (!uploadScratch)
         uploadScratch = EngAllocMem(0, sizeof(RB2K_D3D7_TEXTURE) + RB2K_D7_UPLOAD_BYTES, 'p7bR');
 }
@@ -281,6 +324,11 @@ static ULONG flush_draws(void)
         /* A transport reset releases the host textures: upload them again. */
         for (i = 0; textures && i < MaxTextures; ++i)
             if (textures[i].display == d) textures[i].host = 0;
+        /* and the host buffers: made again, and filled, at their next draws. */
+        for (i = 0; buffers && i < MaxBuffers; ++i)
+            if (buffers[i].display == d) buffers[i].host = 0;
+        for (i = 0; i < MaxContexts; ++i)
+            if (contexts[i].display == d) RtlZeroMemory(contexts[i].arenas, sizeof(contexts[i].arenas));
     }
     return error;
 }
@@ -306,13 +354,67 @@ static void release_texture(D7_TEXTURE *t, BOOL host)
     RtlZeroMemory(t, sizeof(*t));
 }
 
+/* One event of the host buffers into the display's log for d7draw (RB2K_HOST_LOG_*): a buffer
+ * registered (handle, address, bytes, 1 when its host copy stayed), released (handle, host
+ * buffer), a host buffer made (handle, host buffer, bytes, kind), an upload (handle, host
+ * buffer, offset, bytes, target, its first word), a draw (stream 0's handle, host buffer and
+ * offset; the index buffer's host buffer and offset; count; lowest and highest vertex). */
+static void host_log(DISPLAY *d, ULONG kind, ULONG a, ULONG b, ULONG c, ULONG e, ULONG f, ULONG g, ULONG h)
+{
+    ULONG *t = d->d7draw.hostLog[d->d7draw.hostLogCount++ % 48];
+    t[0] = kind; t[1] = a; t[2] = b; t[3] = c; t[4] = e; t[5] = f; t[6] = g; t[7] = h;
+}
+
+/* A context's stream arenas go with it. */
+static void release_arenas(D7_CONTEXT *c)
+{
+    ULONG k;
+    for (k = 0; k < RB2K_D8_BUFFER_KINDS; ++k)
+        if (c->arenas[k].host && c->display)
+            request(c->display, IOCTL_RB2K_D8_BUFFER_FREE, &c->arenas[k].host, sizeof(ULONG), NULL, 0);
+    RtlZeroMemory(c->arenas, sizeof(c->arenas));
+}
+
+/* A buffer record goes, with its copy on the host (host: tell the miniport) and its sums. */
+static void release_buffer(D8_BUFFER *b, BOOL host)
+{
+    if (b->display) host_log(b->display, RB2K_HOST_LOG_RELEASE, b->handle, b->host, host, 0, 0, 0, 0);
+    if (host && b->host && b->display) request(b->display, IOCTL_RB2K_D8_BUFFER_FREE, &b->host, sizeof(b->host), NULL, 0);
+    if (b->sums) EngFreeMem(b->sums);
+    RtlZeroMemory(b, sizeof(*b));
+    ++bufferEpoch;
+}
+
+/* The host buffer counts of displays that are gone: a mode change makes a new display, and a
+ * full-screen program's counts would end with its mode. Reports add them (rb_d7_drawstats). */
+static struct {
+    ULONG draws, left[8], buffers, summed, uploads, uploadBytes, scans, scanHits, rewrites, streamed, arenas;
+    ULONG sumSkips, streamHits;
+} hostGone;
+
+static void host_counts_keep(DISPLAY *d)
+{
+    RB2K_D7_DRAWSTATS *s = &d->d7draw;
+    ULONG i;
+    hostGone.draws += s->hostDraws; hostGone.buffers += s->hostBuffers; hostGone.summed += s->hostSummed;
+    hostGone.uploads += s->hostUploads; hostGone.uploadBytes += s->hostUploadBytes; hostGone.scans += s->hostScans;
+    hostGone.scanHits += s->hostScanHits; hostGone.rewrites += s->hostRewrites; hostGone.streamed += s->hostStreamed;
+    hostGone.arenas += s->hostArenas; hostGone.sumSkips += s->hostSumSkips; hostGone.streamHits += s->hostStreamHits;
+    s->hostSumSkips = s->hostStreamHits = 0;
+    for (i = 0; i < 8; ++i) { hostGone.left[i] += s->hostLeft[i]; s->hostLeft[i] = 0; }
+    s->hostDraws = s->hostBuffers = s->hostSummed = s->hostUploads = s->hostUploadBytes = s->hostScans = 0;
+    s->hostScanHits = s->hostRewrites = s->hostStreamed = s->hostArenas = 0;
+}
+
 void rb_d7_disable(DISPLAY *d)
 {
     ULONG i;
     if (!registry) return;
     EngAcquireSemaphore(registry);
+    host_counts_keep(d);
     for (i = 0; i < MaxContexts; ++i)
         if (contexts[i].display == d) {
+            release_arenas(&contexts[i]);
             release_shaders(&contexts[i]);
             RtlZeroMemory(&contexts[i], sizeof(contexts[i]));
         }
@@ -320,7 +422,7 @@ void rb_d7_disable(DISPLAY *d)
     for (i = 0; textures && i < MaxTextures; ++i)
         if (textures[i].display == d) release_texture(&textures[i], TRUE);
     for (i = 0; buffers && i < MaxBuffers; ++i)
-        if (buffers[i].display == d) RtlZeroMemory(&buffers[i], sizeof(buffers[i]));
+        if (buffers[i].display == d && buffers[i].handle) release_buffer(&buffers[i], TRUE);
     EngReleaseSemaphore(registry);
 }
 
@@ -654,7 +756,15 @@ static void register_buffer(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE_
     D8_BUFFER *b;
     if (!buffers || !handle) return;
     b = find_buffer(local, handle);
-    if (b) RtlZeroMemory(b, sizeof(*b));
+    if (b && l->lpGbl->fpVidMem && b->host && b->display == d && b->hostBytes == l->lpGbl->dwLinearSize) {
+        /* Registered again with memory of the same size: its copy on the host stays, and the
+         * sums find what differs. */
+        b->global = l->lpGbl;
+        b->owner = EngGetCurrentProcessId();
+        host_log(d, RB2K_HOST_LOG_REGISTER, handle, (ULONG)l->lpGbl->fpVidMem, l->lpGbl->dwLinearSize, 1, 0, 0, 0);
+        return;
+    }
+    if (b) release_buffer(b, TRUE);
     if (!l->lpGbl->fpVidMem) return;
     for (i = 0; i < MaxBuffers && buffers[i].handle; ++i) {}
     if (i == MaxBuffers) return;
@@ -664,7 +774,9 @@ static void register_buffer(DISPLAY *d, PDD_DIRECTDRAW_LOCAL local, PDD_SURFACE_
     b->display = d;
     b->owner = EngGetCurrentProcessId();
     b->handle = handle;
+    host_log(d, RB2K_HOST_LOG_REGISTER, handle, (ULONG)l->lpGbl->fpVidMem, l->lpGbl->dwLinearSize, 0, 0, 0, 0);
     ++d->d7draw.d8Buffers;
+    ++bufferEpoch;
 }
 
 static DWORD APIENTRY register_surface(PDD_CREATESURFACEEXDATA a)
@@ -754,6 +866,7 @@ static DWORD APIENTRY destroy_local(PDD_DESTROYDDLOCALDATA a)
     for (i = 0; i < MaxContexts; ++i) {
         if (contexts[i].display == d && contexts[i].local == a->pDDLcl) {
             if (FAILED(finish_scene(&contexts[i]))) a->ddRVal = DDERR_SURFACELOST;
+            release_arenas(&contexts[i]);
             release_shaders(&contexts[i]);
             d9_release(&contexts[i]);
             RtlZeroMemory(&contexts[i], sizeof(contexts[i]));
@@ -766,7 +879,7 @@ static DWORD APIENTRY destroy_local(PDD_DESTROYDDLOCALDATA a)
     for (i = 0; textures && i < MaxTextures; ++i)
         if (textures[i].local == a->pDDLcl) release_texture(&textures[i], TRUE);
     for (i = 0; buffers && i < MaxBuffers; ++i)
-        if (buffers[i].local == a->pDDLcl) RtlZeroMemory(&buffers[i], sizeof(buffers[i]));
+        if (buffers[i].local == a->pDDLcl && buffers[i].handle) release_buffer(&buffers[i], TRUE);
     EngReleaseSemaphore(d->ddLock);
     EngReleaseSemaphore(registry);
     return DDHAL_DRIVER_HANDLED;
@@ -896,6 +1009,7 @@ static DWORD APIENTRY destroy_context(LPD3DNTHAL_CONTEXTDESTROYDATA a)
         DISPLAY *d = c->display;
         EngAcquireSemaphore(d->ddLock);
         a->ddrval = finish_scene(c);
+        release_arenas(c);
         release_shaders(c);
         d9_release(c);
         RtlZeroMemory(c, sizeof(*c));
@@ -2215,6 +2329,8 @@ static void release_vshader(D7_CONTEXT *c, D8_VSHADER *vs)
     ULONG k;
     for (k = 0; k < 4; ++k)
         if (vs->program[k]) request(c->display, IOCTL_RB2K_D3D8_PROGRAM_FREE, &vs->program[k], sizeof(ULONG), NULL, 0);
+    for (k = 0; k < 4; ++k)
+        if (vs->hostProgram[k]) request(c->display, IOCTL_RB2K_D3D8_PROGRAM_FREE, &vs->hostProgram[k], sizeof(ULONG), NULL, 0);
     if (vs->decl) EngFreeMem(vs->decl);
     RtlZeroMemory(vs, sizeof(*vs));
 }
@@ -2397,6 +2513,66 @@ static ULONG vertex_program(D7_CONTEXT *c, D8_VSHADER *vs, ULONG flags, const UL
     vs->program[k] = id;
     return id;
 }
+
+/* The miniport program of a vertex shader for draws from host buffers: its inputs are vertex
+ * attributes (RB_VS_ATTRIBUTES), so it does not depend on where the streams lie. The elements
+ * the inputs read go to the miniport with the text and stay here for the draws' checks. Zero
+ * when it cannot be made. */
+static ULONG host_program(D7_CONTEXT *c, D8_VSHADER *vs, ULONG flags)
+{
+    static const UCHAR size[8] = { 4, 8, 12, 16, 4, 4, 4, 8 };
+    RB2K_D7_DRAWSTATS *st = &c->display->d7draw;
+    ULONG k = (flags & RB_VS_FOG_ALPHA ? 1 : 0) | (flags & RB_VS_CLIP ? 2 : 0), n = 0, id = 0, written, e;
+    RB_PS_INFO info;
+    if (vs->hostProgram[k] || vs->hostFailed[k]) return vs->hostProgram[k];
+    info.reason = RbPsOverflow;
+    info.detail = 0;
+    if (vprogramScratch)
+        n = rb_vs_translate((const unsigned int *)vs->tokens, vs->tokenCount, (const unsigned int *)vs->decl,
+                            vs->declCount, NULL, flags | RB_VS_ATTRIBUTES, vprogramScratch->text,
+                            sizeof(vprogramScratch->text), &info);
+    if (n && info.elementCount && info.elementCount <= RB2K_D8_ELEMENTS) {
+        vprogramScratch->elementCount = info.elementCount;
+        RtlZeroMemory(vprogramScratch->elements, sizeof(vprogramScratch->elements));
+        RtlCopyMemory(vprogramScratch->elements, info.elements, info.elementCount * sizeof(ULONG));
+        if (miniport(c->display, IOCTL_RB2K_D3D8_VPROGRAM, vprogramScratch, FIELD_OFFSET(RB2K_D3D8_VPROGRAM, text) + n,
+                     &id, sizeof(id), &written) || written != sizeof(id)) id = 0;
+    }
+    if (!id) {
+        vs->hostFailed[k] = TRUE;
+        /* Why, for d7draw (kept across mode changes): the translator's reason (the last index:
+         * the miniport refused it, or it has no elements), its detail and what it had found, and
+         * the declarations of the first four. */
+        ++hostProgramFails.reasons[!n ? (info.reason < RbPsReasons ? info.reason : RbPsReasons) : RbPsReasons + 1];
+        hostProgramFails.detail = info.detail;
+        hostProgramFails.elements = info.elementCount;
+        hostProgramFails.bytes = n;
+        if (hostProgramFails.count < 4)
+            RtlCopyMemory(hostProgramFails.decl[hostProgramFails.count], vs->decl, min(vs->declCount, 24UL) * sizeof(ULONG));
+        ++hostProgramFails.count;
+        return 0;
+    }
+    ++st->vsTranslated;
+    vs->constants = info.constants;
+    vs->pointSize = info.pointSize != 0;
+    vs->elementCount = info.elementCount;
+    RtlZeroMemory(vs->elements, sizeof(vs->elements));
+    RtlCopyMemory(vs->elements, info.elements, info.elementCount * sizeof(ULONG));
+    vs->hostStreams = 0;
+    RtlZeroMemory(vs->extents, sizeof(vs->extents));
+    for (e = 0; e < info.elementCount; ++e) {
+        ULONG stream = RB_VS_ELEMENT_STREAM(info.elements[e]);
+        ULONG end = RB_VS_ELEMENT_OFFSET(info.elements[e]) + size[RB_VS_ELEMENT_TYPE(info.elements[e]) & 7];
+        vs->hostStreams |= 1UL << stream;
+        if (end > vs->extents[stream]) vs->extents[stream] = end;
+    }
+    vs->hostProgram[k] = id;
+    return id;
+}
+typedef char host_elements_match[RB_VS_ELEMENTS == RB2K_D8_ELEMENTS && RB_VS_STREAMS == RB2K_D8_STREAMS &&
+                                 RB2K_D8_ELEMENT_TYPE(RB_VS_ELEMENT(5, 3, 7)) == 5 &&
+                                 RB2K_D8_ELEMENT_STREAM(RB_VS_ELEMENT(5, 3, 7)) == 3 &&
+                                 RB2K_D8_ELEMENT_OFFSET(RB_VS_ELEMENT(5, 3, 7)) == 7 ? 1 : -1];
 
 /* Translate a pixel shader and give its text to the miniport. A shader that
  * cannot be translated keeps its handle; draws with it are counted and
@@ -3275,6 +3451,490 @@ static BOOL stream_zero(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, PRIMS *
     return TRUE;
 }
 
+/* ---- Draws from vertex and index buffers kept on the host (RippleHostBuffers) ----
+ *
+ * A draw with a vertex shader whose streams are registered buffers does not carry its vertices:
+ * the host has the buffers' bytes, and the draw names host buffers, the first vertex or index
+ * and the count. The vertex program reads vertex attributes.
+ *
+ * The program writes its buffers without telling the driver, so each draw looks at what it
+ * reads. A buffer has a copy on the host, its mirror: the draw sums every BufferChunk bytes it
+ * reads and uploads the chunks the host does not hold yet. The uploads go into the draw queue
+ * before the draw.
+ *
+ * The host writes uploaded bytes into its buffer at once, not in order with the draws it was
+ * sent before (virglrenderer maps the buffer unsynchronized, as Mesa's own guest driver expects
+ * of it), so bytes that an earlier draw may still read are never written again. A chunk the
+ * host holds that has changed is therefore not uploaded: the buffer counts as rewritten, and
+ * for its next draws (rewrittenLeft of them, twice as many each time it happens) the bytes a
+ * draw reads go to a stream arena instead: a host buffer that takes each draw's bytes after the
+ * last one's and is replaced by a new one when it is full. After those draws the mirror is made
+ * anew and tried again. Buffers a program fills once stay mirrored and cost a sum at each draw;
+ * buffers it keeps refilling are streamed and not summed.
+ *
+ * An indexed draw's vertex range comes from its indices, which are scanned (the range the
+ * program states is not relied on); a mirrored index buffer keeps its last scan while those
+ * chunks do not change. */
+enum { BufferChunk = 1024, UploadBytes = 32768, ArenaBytes = 8 << 20, RewrittenFirst = 64, RewrittenMost = 65536 };
+enum { SyncFailed, SyncMirror, SyncStream };
+
+/* The buffer record of stream n, or with n = RB_VS_STREAMS of the index buffer. */
+static D8_BUFFER *stream_buffer(D7_CONTEXT *c, ULONG n)
+{
+    ULONG handle = n == RB_VS_STREAMS ? c->indexHandle : n ? c->streamHandles[n] : c->streamHandle;
+    D8_BUFFER *b;
+    if (c->bufferCacheEpoch != bufferEpoch) {
+        RtlZeroMemory(c->bufferCache, sizeof(c->bufferCache));
+        c->bufferCacheEpoch = bufferEpoch;
+    }
+    b = c->bufferCache[n];
+    if (!b || b->handle != handle || b->local != c->local) b = c->bufferCache[n] = find_buffer(c->local, handle);
+    return b && b->owner == c->owner && b->global->fpVidMem ? b : NULL;
+}
+
+/* The buffer's mirror on the host, of the kind the draw reads it as: made the first time, and
+ * again when the buffer's size is another, when the transport was reset, or when the program
+ * rewrote bytes the mirror holds and the draws streamed since then are over (pending draws may
+ * still read the old mirror, so it is not written: a new one takes its place). */
+static BOOL host_buffer(D7_CONTEXT *c, D8_BUFFER *b, ULONG kind)
+{
+    RB2K_D8_BUFFER_CREATE create;
+    ULONG bytes = b->global->dwLinearSize, chunks = (bytes + BufferChunk - 1) / BufferChunk, written, id = 0;
+    if (b->host && b->hostKind == kind && b->hostBytes == bytes && (!b->stale || b->rewrittenLeft)) return TRUE;
+    if (!bytes || bytes > RB2K_D8_BUFFER_BYTES) return FALSE;
+    if (b->host) request(c->display, IOCTL_RB2K_D8_BUFFER_FREE, &b->host, sizeof(b->host), NULL, 0);
+    b->host = 0;
+    if (b->sums && b->hostBytes != bytes) { EngFreeMem(b->sums); b->sums = NULL; }
+    if (!b->sums) b->sums = EngAllocMem(0, chunks * 2 * sizeof(ULONG), 'h8bR');
+    if (!b->sums) return FALSE;
+    RtlZeroMemory(b->sums, chunks * 2 * sizeof(ULONG));
+    b->scanCount = 0;
+    b->checkedCall = 0;
+    b->stale = FALSE;
+    create.bytes = bytes;
+    create.kind = kind;
+    if (miniport(c->display, IOCTL_RB2K_D8_BUFFER_CREATE, &create, sizeof(create), &id, sizeof(id), &written) ||
+        written != sizeof(id) || !id) return FALSE;
+    b->host = id;
+    b->hostKind = kind;
+    b->hostBytes = bytes;
+    host_log(c->display, RB2K_HOST_LOG_MADE, b->handle, id, bytes, kind, 0, 0, 0);
+    ++c->display->d7draw.hostBuffers;
+    return TRUE;
+}
+
+/* Two sums of a chunk. The first is never zero, so that (0, 0) says the host holds nothing. */
+static void chunk_sums(const BYTE *p, ULONG bytes, ULONG *sum)
+{
+    const ULONG *w = (const ULONG *)p;
+    ULONG a = 0x811c9dc5, b = bytes, n = bytes / 4, i;
+    for (i = 0; i < n; ++i) {
+        a = (a ^ w[i]) * 0x01000193;
+        b = (((b ^ w[i]) << 13) | ((b ^ w[i]) >> 19)) * 0x9e3779b1;
+    }
+    for (i = n * 4; i < bytes; ++i) {
+        a = (a ^ p[i]) * 0x01000193;
+        b = (((b ^ p[i]) << 13) | ((b ^ p[i]) >> 19)) * 0x9e3779b1;
+    }
+    sum[0] = a ? a : 1;
+    sum[1] = b;
+}
+
+/* An upload record into the draw queue for the draw's target: bytes at data (the program's
+ * memory; the caller guards the read) for byte at of the miniport's buffer host. */
+static BOOL queue_upload(D7_CONTEXT *c, ULONG target, ULONG host, ULONG at, const BYTE *data, ULONG bytes)
+{
+    DISPLAY *d = c->display;
+    RB2K_D8_UPLOAD_HEADER *u;
+    ULONG padded = (bytes + 3) & ~3UL, size = sizeof(*u) + padded;
+    if (!drawQueue) {
+        drawQueue = EngAllocMem(0, sizeof(ULONG) + RB2K_D7_DRAWS_BYTES, 'q7bR');
+        if (!drawQueue) return FALSE;
+    }
+    if (drawQueueBytes && (drawQueueDisplay != d || *(const ULONG *)drawQueue != target ||
+                           drawQueueBytes + sizeof(ULONG) + size > sizeof(ULONG) + RB2K_D7_DRAWS_BYTES) &&
+        flush_draws()) return FALSE;
+    if (!drawQueueBytes) {
+        *(ULONG *)drawQueue = target;
+        drawQueueBytes = sizeof(ULONG);
+        drawQueueDisplay = d;
+    }
+    *(ULONG *)(drawQueue + drawQueueBytes) = size | RB2K_D8_UPLOAD;
+    u = (RB2K_D8_UPLOAD_HEADER *)(drawQueue + drawQueueBytes + sizeof(ULONG));
+    u->target = target;
+    u->buffer = host;
+    u->offset = at;
+    u->bytes = bytes;
+    *(ULONG *)((BYTE *)(u + 1) + padded - sizeof(ULONG)) = 0;
+    RtlCopyMemory(u + 1, data, bytes);
+    drawQueueBytes += sizeof(ULONG) + size;
+    c->queued = TRUE;
+    ++d->d7draw.hostUploads;
+    d->d7draw.hostUploadBytes += bytes;
+    host_log(d, RB2K_HOST_LOG_UPLOAD, host, at, bytes, target, *(const ULONG *)(u + 1), 0, 0);
+    return TRUE;
+}
+
+/* The mirror of bytes lo to hi (not included) of a buffer, for a draw to target that reads them.
+ * SyncMirror: the mirror holds them; chunks it did not hold were uploaded now (changed is set).
+ * SyncStream: the draw's bytes are to be streamed, because the buffer's draws are for now, or
+ * because a chunk the mirror holds has changed, which starts that. SyncFailed: the buffer
+ * cannot be read or the queue failed; the mirror is then made anew before it is used again. */
+static ULONG sync_buffer(D7_CONTEXT *c, ULONG target, D8_BUFFER *b, ULONG lo, ULONG hi, BOOL *changed)
+{
+    const BYTE *data = (const BYTE *)b->global->fpVidMem;
+    ULONG first = lo / BufferChunk, last = (hi - 1) / BufferChunk, k, run = ~0UL, sum[2], result = SyncMirror;
+    if (b->rewrittenLeft) {
+        --b->rewrittenLeft;
+        return SyncStream;
+    }
+    if (b->checkedCall == dp2Call && first >= b->checkedFirst && last <= b->checkedLast) {
+        ++c->display->d7draw.hostSumSkips;      /* summed earlier in this call */
+        return SyncMirror;
+    }
+    __try {
+        EngProbeForRead((PVOID)(data + first * BufferChunk), min((last + 1) * BufferChunk, b->hostBytes) - first * BufferChunk, 1);
+        /* One step past the last chunk closes a run that reaches it. */
+        for (k = first; k <= last + 1 && result == SyncMirror; ++k) {
+            BOOL fresh = FALSE;     /* a changed chunk the host does not hold yet */
+            if (k <= last && !(b->checkedCall == dp2Call && k >= b->checkedFirst && k <= b->checkedLast)) {
+                ULONG at = k * BufferChunk;
+                chunk_sums(data + at, min((ULONG)BufferChunk, b->hostBytes - at), sum);
+                ++c->display->d7draw.hostSummed;
+                if (sum[0] != b->sums[2 * k] || sum[1] != b->sums[2 * k + 1]) {
+                    if (b->sums[2 * k] || b->sums[2 * k + 1]) result = SyncStream;   /* held, and rewritten */
+                    else {
+                        fresh = TRUE;
+                        b->sums[2 * k] = sum[0];
+                        b->sums[2 * k + 1] = sum[1];
+                        if (run == ~0UL) run = k;
+                    }
+                }
+            }
+            if (run != ~0UL && (!fresh || (k + 1 - run) * BufferChunk >= UploadBytes)) {
+                ULONG from = run * BufferChunk, end = min((fresh ? k + 1 : k) * BufferChunk, b->hostBytes);
+                if (!b->host || !queue_upload(c, target, b->host, from, data + from, end - from)) result = SyncFailed;
+                run = ~0UL;
+                *changed = TRUE;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        result = SyncFailed;
+    }
+    if (result != SyncMirror) b->checkedCall = 0;
+    else if (b->checkedCall == dp2Call && first <= b->checkedLast + 1 && last + 1 >= b->checkedFirst) {
+        if (first < b->checkedFirst) b->checkedFirst = first;
+        if (last > b->checkedLast) b->checkedLast = last;
+    } else {
+        b->checkedCall = dp2Call;
+        b->checkedFirst = first;
+        b->checkedLast = last;
+    }
+    if (result == SyncStream) {
+        /* Streamed from this draw on, for twice as many draws each time. */
+        b->rewrittenSpan = b->rewrittenSpan ? min(b->rewrittenSpan * 2, (ULONG)RewrittenMost) : RewrittenFirst;
+        b->rewrittenLeft = b->rewrittenSpan;
+        b->stale = TRUE;
+        b->scanCount = 0;
+        ++c->display->d7draw.hostRewrites;
+        host_log(c->display, RB2K_HOST_LOG_REWRITTEN, b->handle, b->host, lo, hi, b->rewrittenSpan, 0, 0);
+    } else if (result == SyncFailed) {
+        /* Sums may be ahead of what the host got: no chunk of this mirror is trusted again. */
+        b->stale = TRUE;
+        b->scanCount = 0;
+    }
+    return result;
+}
+
+/* Room for need more bytes in the stream arena of a kind: the arena is made, or replaced by a
+ * new one when what is left of it is too little (draws sent before keep reading the old one,
+ * which the miniport frees after them). A draw asks for all its bytes of a kind at once, before
+ * it puts any there. */
+static BOOL arena_room(D7_CONTEXT *c, ULONG kind, ULONG need)
+{
+    DISPLAY *d = c->display;
+    RB2K_D8_BUFFER_CREATE create;
+    ULONG written, id = 0;
+    if (need > ArenaBytes) return FALSE;
+    if (c->arenas[kind].host && need <= ArenaBytes - c->arenas[kind].used) return TRUE;
+    if (c->arenas[kind].host) request(d, IOCTL_RB2K_D8_BUFFER_FREE, &c->arenas[kind].host, sizeof(ULONG), NULL, 0);
+    c->arenas[kind].host = c->arenas[kind].used = 0;
+    create.bytes = ArenaBytes;
+    create.kind = kind;
+    if (miniport(d, IOCTL_RB2K_D8_BUFFER_CREATE, &create, sizeof(create), &id, sizeof(id), &written) ||
+        written != sizeof(id) || !id) return FALSE;
+    c->arenas[kind].host = id;
+    ++d->d7draw.hostArenas;
+    return TRUE;
+}
+
+/* bytes at data (the program's memory) into the stream arena of a kind, after what it holds, at
+ * a multiple of align. Returns where they are, or ~0 when the memory cannot be read or the
+ * queue failed. */
+static ULONG arena_put(D7_CONTEXT *c, ULONG target, ULONG kind, const BYTE *data, ULONG bytes, ULONG align)
+{
+    ULONG at = (c->arenas[kind].used + align - 1) / align * align, done, piece;
+    BOOL ok = c->arenas[kind].host && at <= ArenaBytes && bytes <= ArenaBytes - at;
+    if (!ok) return ~0UL;
+    c->arenas[kind].used = at + bytes;
+    __try {
+        EngProbeForRead((PVOID)data, bytes, 1);
+        for (done = 0; done < bytes && ok; done += piece) {
+            piece = min(bytes - done, (ULONG)UploadBytes);
+            /* A failed flush on the way drops the arena. */
+            ok = c->arenas[kind].host && queue_upload(c, target, c->arenas[kind].host, at + done, data + done, piece);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = FALSE;
+    }
+    return ok && c->arenas[kind].host ? at : ~0UL;
+}
+
+/* bytes from byte from of a rewritten buffer into the context's stream arena, at a multiple of
+ * align, or where they already are: bytes streamed earlier in this call of DrawPrimitives2 (the
+ * same mesh drawn in another pass) are not sent again. ~0 when it fails (see arena_put). */
+static ULONG stream_put(D7_CONTEXT *c, ULONG target, ULONG kind, D8_BUFFER *b, ULONG from, ULONG bytes, ULONG align)
+{
+    ULONG place;
+    if (b->streamedCall == dp2Call && c->arenas[kind].host && b->streamedHost == c->arenas[kind].host &&
+        from >= b->streamedFrom && bytes <= b->streamedBytes && from - b->streamedFrom <= b->streamedBytes - bytes &&
+        !((from - b->streamedFrom) % align)) {
+        ++c->display->d7draw.hostStreamHits;
+        return b->streamedPlace + (from - b->streamedFrom);
+    }
+    place = arena_put(c, target, kind, (const BYTE *)b->global->fpVidMem + from, bytes, align);
+    if (place != ~0UL) {
+        b->streamedCall = dp2Call;
+        b->streamedHost = c->arenas[kind].host;
+        b->streamedFrom = from;
+        b->streamedBytes = bytes;
+        b->streamedPlace = place;
+    }
+    return place;
+}
+
+/* The lowest and highest vertex that count indices of width bytes at byte at of an index buffer
+ * reach. keep: the buffer is mirrored, so the last scan serves the next draw of the same range
+ * while its chunks stay (fresh: they changed just now). FALSE when the buffer cannot be read. */
+static BOOL index_range(D7_CONTEXT *c, D8_BUFFER *b, ULONG at, ULONG count, ULONG width, BOOL fresh, BOOL keep,
+                        ULONG *low, ULONG *high)
+{
+    ULONG lo = 0xffffffff, hi = 0, i;
+    if (keep && !fresh && b->scanCount == count && b->scanAt == at && b->scanWidth == width) {
+        *low = b->scanLow;
+        *high = b->scanHigh;
+        ++c->display->d7draw.hostScanHits;
+        return TRUE;
+    }
+    b->scanCount = 0;
+    __try {
+        const BYTE *from = (const BYTE *)b->global->fpVidMem + at;
+        EngProbeForRead((PVOID)from, count * width, 1);
+        if (width == 2) {
+            const WORD *x = (const WORD *)from;
+            for (i = 0; i < count; ++i) { if (x[i] < lo) lo = x[i]; if (x[i] > hi) hi = x[i]; }
+        } else {
+            const ULONG *x = (const ULONG *)from;
+            for (i = 0; i < count; ++i) { if (x[i] < lo) lo = x[i]; if (x[i] > hi) hi = x[i]; }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return FALSE;
+    }
+    ++c->display->d7draw.hostScans;
+    if (keep) { b->scanAt = at; b->scanCount = count; b->scanWidth = width; b->scanLow = lo; b->scanHigh = hi; }
+    *low = lo;
+    *high = hi;
+    return TRUE;
+}
+
+/* One draw with a vertex shader from host buffers. first, count, indexed and indexByte are
+ * stream_draw's. TRUE when the draw was taken: drawn, or skipped and counted, with its result in
+ * hr. FALSE leaves it to the draws that carry their vertices (reason counted in hostLeft). */
+static BOOL buffer_draw(D7_CONTEXT *c, ULONG type, LONGLONG first, ULONG count, BOOL indexed, ULONG indexByte, HRESULT *hr)
+{
+    DISPLAY *d = c->display;
+    RB2K_D7_DRAWSTATS *st = &d->d7draw;
+    RB2K_D3D8_DRAW *draw = &c->draw8;
+    RB2K_D8_BUFFER_DRAW bd;
+    D8_VSHADER *vs = find_vshader(c, c->fvf);
+    D8_SHADER *sh = find_shader(c, c->pixelShader), stages;
+    D8_BUFFER *vb[RB_VS_STREAMS], *ib = NULL;
+    DD_SLOT *s, *z;
+    ULONG per = type == RbPointList ? 1 : type == RbLineList || type == RbLineStrip ? 2 : 3;
+    ULONG vertices = type == RbTriangleList ? 3 * count : type == RbLineList ? 2 * count : type == RbPointList ? count :
+                     type == RbLineStrip ? count + 1 : count + 2;
+    ULONG program = 0, vprogram, fog = 0, flags = 0, width = c->indexStride, n, low = 0, high = vertices - 1;
+    ULONG stride0 = c->streamStride, strides[RB_VS_STREAMS], how[RB_VS_STREAMS], indexHow = SyncMirror;
+    ULONG from[RB_VS_STREAMS], bytes[RB_VS_STREAMS], place[RB_VS_STREAMS], indexPlace = 0, needVertex = 0, needIndex = 0;
+    /* offsets: where vertex zero of the draw is in each stream's buffer. */
+    LONGLONG offsets[RB_VS_STREAMS], bias, rest, drawBias, lowest;
+    BOOL changed = FALSE, rebase = FALSE;
+    *hr = DD_OK;
+    if (!vs || c->streamUser) { ++st->hostLeft[RB2K_HOST_LEFT_USER]; return FALSE; }
+    /* Flat shading takes its colour from a triangle's first vertex; the host's draws are not set up for that. */
+    if (c->shade == D3DSHADE_FLAT || c->fill != D3DFILL_SOLID || vertices > 0xffffff ||
+        (indexed && width != 2 && width != 4)) { ++st->hostLeft[RB2K_HOST_LEFT_SHADE]; return FALSE; }
+    *hr = render_surfaces(c, &s, &z);
+    if (FAILED(*hr)) return TRUE;
+    if (*hr != DD_OK) { *hr = DD_OK; return TRUE; }      /* left out: see render_surfaces */
+    if (c->fog) {
+        if (c->fogTable >= D3DFOG_EXP && c->fogTable <= D3DFOG_LINEAR)
+            fog = RB2K_D7_FOG_TABLE | c->fogTable << RB2K_D7_FOG_MODE_SHIFT | (c->wNear != c->wFar ? RB2K_D7_FOG_W : 0);
+        else { fog = RB2K_D7_FOG_ALPHA; flags = RB_VS_FOG_ALPHA; }
+    }
+    vprogram = host_program(c, vs, flags | (c->dx9Ddi ? RB_VS_FLOW : 0) | (c->clipPlanes & 63 ? RB_VS_CLIP : 0));
+    if (sh) program = shader_program(c, sh, stage_kinds(c, sh->samplers, fog));
+    else {
+        program = stage_program(c, fog, &stages, FALSE, FALSE);
+        if (program && (cube_stages(c, stages.samplers, FALSE) || cube_stages(c, stages.samplers, TRUE))) program = 0;
+        sh = &stages;
+    }
+    if (!vprogram || !program) { ++st->hostLeft[RB2K_HOST_LEFT_PROGRAM]; return FALSE; }
+    /* Vertex zero of the draw is bias whole vertices and rest bytes into stream zero; the other
+     * streams are read from the same vertex on. A bias that is not negative goes into the
+     * streams' offsets; a negative one (indexed draws only) stays with the draw. */
+    bias = stride0 ? first / (LONGLONG)stride0 : 0;
+    rest = first - bias * stride0;
+    if (rest < 0) { --bias; rest += stride0; }
+    if (bias < 0 && !indexed) { ++st->hostLeft[RB2K_HOST_LEFT_RANGE]; return FALSE; }
+    drawBias = bias < 0 ? bias : 0;
+    for (n = 0; n < RB_VS_STREAMS; ++n) {
+        vb[n] = NULL;
+        if (!(vs->hostStreams & (1UL << n))) continue;
+        strides[n] = n ? c->streamStrides[n] : stride0;
+        vb[n] = stream_buffer(c, n);
+        if (!vb[n] || strides[n] > 255 || strides[n] % 4 || vs->extents[n] > (strides[n] ? strides[n] : 256)) {
+            ++st->hostLeft[RB2K_HOST_LEFT_STREAM];
+            return FALSE;
+        }
+        offsets[n] = (LONGLONG)c->streamOffsets[n] + (n ? 0 : rest) + (bias > 0 ? bias * strides[n] : 0);
+        if (offsets[n] < 0 || offsets[n] > (LONGLONG)vb[n]->global->dwLinearSize) { ++st->hostLeft[RB2K_HOST_LEFT_RANGE]; return FALSE; }
+        if (!host_buffer(c, vb[n], RB2K_D8_BUFFER_VERTEX)) { ++st->hostLeft[RB2K_HOST_LEFT_BUFFER]; return FALSE; }
+    }
+    if (indexed) {
+        ib = stream_buffer(c, RB_VS_STREAMS);
+        if (!ib || indexByte % width || indexByte > ib->global->dwLinearSize ||
+            vertices > (ib->global->dwLinearSize - indexByte) / width) { ++st->hostLeft[RB2K_HOST_LEFT_INDEX]; return FALSE; }
+        if (!host_buffer(c, ib, RB2K_D8_BUFFER_INDEX)) { ++st->hostLeft[RB2K_HOST_LEFT_BUFFER]; return FALSE; }
+    }
+    /* The record's states, as for the draws that carry their vertices (program_triangles). */
+    RtlZeroMemory(draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices));
+    draw->primitive = per == 3 ? RB2K_PRIM_TRIANGLES : per == 2 ? RB2K_PRIM_LINES : RB2K_PRIM_POINTS;
+    point_state(c, per, &draw->pointSize, &draw->pointFlags);
+    if (per == 1 && vs->pointSize) draw->pointFlags |= RB2K_POINT_PER_VERTEX;
+    if (!pixel_states(c, draw, sh, s, z, program, fog, count)) return TRUE;
+    if (sh == &stages) {
+        draw->constants[0][0] = c->factor;
+        bump_constants(c, draw);
+        st->vsStageDraws += count;
+    }
+    draw->transform = 3;
+    draw->vertexProgram = vprogram;
+    draw->vertexConstants = vs->constants;
+    draw->clipMask = c->clipPlanes & 63;
+    if (draw->clipMask) RtlCopyMemory(draw->clipPlanes, c->planes, sizeof(draw->clipPlanes));
+    if (c->dx9Ddi) {
+        ULONG r;
+        for (r = 0; r < 16; ++r) {
+            draw->flowConstants[r][0] = rb_float_bits(c->vsInt[r][0]);
+            draw->flowConstants[r][1] = rb_float_bits(c->vsInt[r][1]);
+            draw->flowConstants[r][2] = rb_float_bits(c->vsInt[r][2]);
+            draw->flowConstants[r][3] = (c->vsBool >> r) & 1 ? 0x3f800000 : 0;
+        }
+    }
+    RtlCopyMemory(draw->viewport, c->viewport, sizeof(c->viewport));
+    draw->viewport[4] = c->zRange[0];
+    draw->viewport[5] = c->zRange[1];
+    RtlCopyMemory(draw->vertices, c->vsConst, vs->constants * 16);
+    /* The indices first: they say which vertices the draw reads. */
+    if (indexed) {
+        indexHow = sync_buffer(c, draw->target, ib, indexByte, indexByte + vertices * width, &changed);
+        if (indexHow == SyncFailed ||
+            !index_range(c, ib, indexByte, vertices, width, changed, indexHow == SyncMirror, &low, &high)) {
+            skip_vertex(c, count, 16);
+            return TRUE;
+        }
+        if (high > 0xffffff || (LONGLONG)low + drawBias < 0) { skip_vertex(c, count, 15); return TRUE; }
+        if (indexHow == SyncStream) needIndex = vertices * width + width;
+    }
+    /* Each stream's bytes from the lowest vertex read to the highest, the last one as far as the
+     * program reads it: in the mirror, or to be streamed. */
+    lowest = (LONGLONG)low + drawBias;
+    for (n = 0; n < RB_VS_STREAMS; ++n) {
+        LONGLONG f, t;
+        if (!vb[n]) continue;
+        f = offsets[n] + lowest * strides[n];
+        t = offsets[n] + ((LONGLONG)high + drawBias) * strides[n] + vs->extents[n];
+        if (f < 0 || t > (LONGLONG)vb[n]->hostBytes) {
+            ++st->beyondCalls;
+            st->beyondVertices += count;
+            skip_vertex(c, count, 12);
+            return TRUE;
+        }
+        from[n] = (ULONG)f;
+        bytes[n] = (ULONG)(t - f);
+        how[n] = sync_buffer(c, draw->target, vb[n], from[n], (ULONG)t, &changed);
+        if (how[n] == SyncFailed) { skip_vertex(c, count, 13); return TRUE; }
+        if (how[n] == SyncStream) needVertex += (bytes[n] + 3) & ~3UL;
+    }
+    /* Room for all the streamed bytes before any are put: a new arena must not take the place of
+     * one this draw already names. */
+    if ((needVertex && !arena_room(c, RB2K_D8_BUFFER_VERTEX, needVertex)) ||
+        (needIndex && !arena_room(c, RB2K_D8_BUFFER_INDEX, needIndex))) { ++st->hostLeft[RB2K_HOST_LEFT_BUFFER]; return FALSE; }
+    if (indexHow == SyncStream) {
+        indexPlace = stream_put(c, draw->target, RB2K_D8_BUFFER_INDEX, ib, indexByte, vertices * width, width);
+        if (indexPlace == ~0UL) { skip_vertex(c, count, 13); return TRUE; }
+    }
+    for (n = 0; n < RB_VS_STREAMS; ++n) {
+        if (!vb[n] || how[n] != SyncStream) continue;
+        place[n] = stream_put(c, draw->target, RB2K_D8_BUFFER_VERTEX, vb[n], from[n], bytes[n], 4);
+        if (place[n] == ~0UL) { skip_vertex(c, count, 13); return TRUE; }
+        /* Streamed bytes start at the lowest vertex read. When they lie too near the arena's start
+         * for vertex zero to be before them, the draw is rebased: its indices count from the
+         * lowest vertex, and every stream's offset is that vertex's. */
+        if ((LONGLONG)place[n] < lowest * strides[n]) rebase = TRUE;
+        ++st->hostStreamed;
+    }
+    RtlZeroMemory(&bd, sizeof(bd));
+    bd.mode = type == RbPointList ? 0 : type == RbLineList ? 1 : type;   /* strips, triangles and fans have Gallium's numbers */
+    bd.count = vertices;
+    for (n = 0; n < RB_VS_STREAMS; ++n) {
+        if (!vb[n]) continue;
+        bd.streams |= 1UL << n;
+        bd.stream[n].stride = strides[n];
+        if (how[n] == SyncStream) {
+            bd.stream[n].buffer = c->arenas[RB2K_D8_BUFFER_VERTEX].host;
+            bd.stream[n].offset = rebase ? place[n] : place[n] - (ULONG)(lowest * strides[n]);
+        } else {
+            bd.stream[n].buffer = vb[n]->host;
+            bd.stream[n].offset = (ULONG)(offsets[n] + (rebase ? lowest * strides[n] : 0));
+        }
+        /* A failed flush on the way reset the transport and dropped the host's buffers: the draw is lost with them. */
+        if (!bd.stream[n].buffer) { skip_vertex(c, count, 13); return TRUE; }
+    }
+    if (indexed) {
+        /* The host starts at the index buffer's offset and has no first index apart from that (as
+         * Mesa's own virgl driver sends it). */
+        bd.indexBuffer = indexHow == SyncStream ? c->arenas[RB2K_D8_BUFFER_INDEX].host : ib->host;
+        bd.indexOffset = indexHow == SyncStream ? indexPlace : indexByte;
+        bd.indexSize = width;
+        bd.bias = rebase ? -(LONG)low : (LONG)drawBias;
+        bd.minIndex = low;
+        bd.maxIndex = high;
+        if (!bd.indexBuffer) { skip_vertex(c, count, 13); return TRUE; }
+    }
+    RtlCopyMemory(draw->vertices + 4 * vs->constants, &bd, sizeof(bd));
+    draw->count = vertices;
+    st->vsDraws += count;
+    ++st->hostDraws;
+    ++st->psDraws;
+    host_log(d, RB2K_HOST_LOG_DRAW, bd.stream[0].buffer, bd.stream[0].offset, bd.indexBuffer, bd.indexOffset, vertices,
+             low | high << 16, (ULONG)bd.bias);
+    *hr = queue_record(c, draw, FIELD_OFFSET(RB2K_D3D8_DRAW, vertices) + sizeof(ULONG) * 4 * vs->constants + sizeof(bd),
+                       RB2K_D8_RECORD, count);
+    return TRUE;
+}
+
 /* One DirectX 8 draw. first is the signed byte offset of vertex zero in
  * stream zero; an indexed draw reads 16-bit indices from indexByte on. */
 static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG type, LONGLONG first,
@@ -3289,6 +3949,11 @@ static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULON
     prims.kind = type == RbPointList ? Points : type == RbLineList ? LineList : type == RbLineStrip ? LineStrip :
                  type == RbTriangleList ? List : type == RbTriangleStrip ? Strip : Fan;
     if (c->dx9Ddi && !d9_resolve(c)) { skip(c, RB2K_D7_SKIP_VERTEX, count); return DD_OK; }
+    /* With a vertex shader and registered buffers the vertices stay on the host. */
+    if ((c->fvf & 1) && c->display->hostBuffers && c->display->vertexShaders) {   /* (it counts the ones it leaves) */
+        HRESULT hr;
+        if (buffer_draw(c, type, first, count, indexed, indexByte, &hr)) return hr;
+    }
     if (((c->fvf & 1) && !c->display->vertexShaders) || !c->streamStride || c->streamStride > 256 ||
         !stream_zero(c, a, &prims) ||
         first < -0x7fffffffLL || first > (LONGLONG)prims.streamBytes) {
@@ -4509,6 +5174,7 @@ static DWORD APIENTRY dp2(LPD3DNTHAL_DRAWPRIMITIVES2DATA a)
     ULONG entryFlags = a->dwFlags, beyond = 0;
     LONGLONG start, end;
     a->dwErrorOffset = 0;
+    if (!++dp2Call) ++dp2Call;
     a->ddrval = DDERR_INVALIDOBJECT;
     start = cycles();
     EngAcquireSemaphore(registry);
@@ -5062,6 +5728,21 @@ ULONG rb_d7_drawstats(DISPLAY *d, ULONG bytes, PVOID out)
     d->d7draw.codeAt = (ULONG)(ULONG_PTR)rb_d7_drawstats;
     RtlCopyMemory(d->d7draw.ddModes, rb_dd_mode_stats, sizeof(rb_dd_mode_stats));
     RtlCopyMemory(out, &d->d7draw, bytes);
+    {
+        RB2K_D7_DRAWSTATS *o = out;
+        ULONG i;
+        o->hostDraws += hostGone.draws; o->hostBuffers += hostGone.buffers; o->hostSummed += hostGone.summed;
+        o->hostUploads += hostGone.uploads; o->hostUploadBytes += hostGone.uploadBytes; o->hostScans += hostGone.scans;
+        o->hostScanHits += hostGone.scanHits; o->hostRewrites += hostGone.rewrites; o->hostStreamed += hostGone.streamed;
+        o->hostArenas += hostGone.arenas; o->hostSumSkips += hostGone.sumSkips; o->hostStreamHits += hostGone.streamHits;
+        for (i = 0; i < 8; ++i) o->hostLeft[i] += hostGone.left[i];
+        o->hostProgramFails = hostProgramFails.count;
+        RtlCopyMemory(o->hostProgramReasons, hostProgramFails.reasons, sizeof(o->hostProgramReasons));
+        o->hostProgramDetail = hostProgramFails.detail;
+        o->hostProgramElements = hostProgramFails.elements;
+        o->hostProgramBytes = hostProgramFails.bytes;
+        RtlCopyMemory(o->hostProgramDecl, hostProgramFails.decl, sizeof(o->hostProgramDecl));
+    }
     EngReleaseSemaphore(d->ddLock);
     EngReleaseSemaphore(registry);
     return 1;

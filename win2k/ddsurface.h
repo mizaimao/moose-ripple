@@ -37,6 +37,7 @@
 #define RB2K_POINT_PER_VERTEX 2
 #define RB2K_POINT_SIZE_MAX 0x42800000UL    /* 64.0 */
 #define RB2K_DD_D3D9_DDI 256        /* the Direct3D 9 driver interface (with vertex shaders) */
+#define RB2K_DD_HOST_BUFFERS 512    /* vertex and index buffers kept on the host (with vertex shaders) */
 #define RB2K_DD_IOCTL(n) CTL_CODE(FILE_DEVICE_VIDEO,n,METHOD_BUFFERED,FILE_ANY_ACCESS)
 #define IOCTL_RB2K_DD_QUERY   RB2K_DD_IOCTL(0x901)
 #define IOCTL_RB2K_DD_CREATE  RB2K_DD_IOCTL(0x902)
@@ -117,7 +118,7 @@ typedef struct {
     ULONG constantCount;            /* 8 for version 1 programs (16 with texbem), 32 for shader model 2 */
     ULONG constants[32][4];
     ULONG fog, fogColor, fogStart, fogEnd, fogDensity;   /* as in RB2K_D3D7_DRAW */
-    ULONG transform;                /* 0 transformed, 1 object space, 2 vertex program */
+    ULONG transform;                /* 0 transformed, 1 object space, 2 vertex program, 3 vertex program on host buffers */
     ULONG matrices[3][16];
     ULONG viewport[6];
     /* The Direct3D 9 scissor test: when scissorOn, only pixels inside the rectangle (left, top,
@@ -139,6 +140,54 @@ typedef struct {
 } RB2K_D3D8_DRAW;
 typedef char rb2k_d8_record_fits[RB2K_D8_VERTICES * RB2K_D8_VERTEX_WORDS(RB2K_D8_STAGES) <= RB2K_D8_RECORD_WORDS &&
     4 * RB2K_D8_VS_CONSTANTS + RB2K_D8_VERTICES * RB2K_D8_VS_VERTEX_WORDS <= RB2K_D8_RECORD_WORDS ? 1 : -1];
+
+/* ---- Vertex and index buffers kept on the host ----
+ * A program's vertex and index buffers as host buffers, so that a draw names its vertices
+ * instead of carrying them. BUFFER_CREATE takes an RB2K_D8_BUFFER_CREATE and returns the
+ * buffer's id (a serial number above its slot plus one); BUFFER_FREE takes the id.
+ *
+ * Bytes reach a buffer through upload records in the draw queue, in order with the draws: a
+ * record whose count word has RB2K_D8_UPLOAD set holds an RB2K_D8_UPLOAD_HEADER and the bytes,
+ * rounded up to whole words.
+ *
+ * A vertex program for such draws reads vertex attributes (RB_VS_ATTRIBUTES in d3d8_ps.h). It is
+ * given with VPROGRAM as an RB2K_D3D8_VPROGRAM: the elements its inputs IN[0..] are fetched from
+ * (RB_VS_ELEMENT words) before the text; the answer and PROGRAM_FREE are as for PROGRAM.
+ *
+ * A draw with transform 3 uses one: after the vertex shader's constants its record holds an
+ * RB2K_D8_BUFFER_DRAW in place of vertices, and its count is that record's count. */
+#define IOCTL_RB2K_D8_BUFFER_CREATE RB2K_DD_IOCTL(0x925)
+#define IOCTL_RB2K_D8_BUFFER_FREE RB2K_DD_IOCTL(0x926)
+#define IOCTL_RB2K_D3D8_VPROGRAM RB2K_DD_IOCTL(0x927)
+#define RB2K_D8_BUFFERS 4096
+#define RB2K_D8_BUFFER_SLOT_BITS 13
+#define RB2K_D8_BUFFER_SLOT(id) (((id) & ((1UL << RB2K_D8_BUFFER_SLOT_BITS) - 1)) - 1)
+typedef char rb2k_d8_buffer_slots_fit[RB2K_D8_BUFFERS < (1UL << RB2K_D8_BUFFER_SLOT_BITS) ? 1 : -1];
+#define RB2K_D8_BUFFER_BYTES (64UL << 20)   /* the largest buffer */
+enum { RB2K_D8_BUFFER_VERTEX, RB2K_D8_BUFFER_INDEX, RB2K_D8_BUFFER_KINDS };
+typedef struct { ULONG bytes, kind; } RB2K_D8_BUFFER_CREATE;
+#define RB2K_D8_UPLOAD 0x40000000UL
+typedef struct { ULONG target, buffer, offset, bytes; } RB2K_D8_UPLOAD_HEADER;
+#define RB2K_D8_ELEMENTS 16
+/* An element word: the declaration type (0..7: FLOAT1..FLOAT4, D3DCOLOR, UBYTE4, SHORT2, SHORT4),
+ * the stream, and the byte offset in the stream's vertex (RB_VS_ELEMENT in d3d8_ps.h). */
+#define RB2K_D8_ELEMENT_TYPE(e) ((e) & 0xff)
+#define RB2K_D8_ELEMENT_STREAM(e) (((e) >> 8) & 0xff)
+#define RB2K_D8_ELEMENT_OFFSET(e) ((e) >> 16)
+#define RB2K_D8_STREAMS 8
+typedef struct { ULONG elementCount, elements[RB2K_D8_ELEMENTS]; char text[RB2K_D8_PROGRAM_BYTES]; } RB2K_D3D8_VPROGRAM;
+typedef struct {
+    ULONG mode;                 /* Gallium's primitive: 0 points, 1 lines, 3 line strip, 4 triangles, 5 strip, 6 fan */
+    ULONG start, count;         /* the first vertex (0 for an indexed draw), and how many vertices or indices */
+    LONG bias;                  /* indexed: added to each index */
+    ULONG minIndex, maxIndex;   /* indexed: the vertices the indices reach, before the bias */
+    /* indexSize 0: not indexed; else 2 or 4 bytes an index, read from indexOffset bytes into
+     * the index buffer on (the host has no first index apart from that). */
+    ULONG indexBuffer, indexSize, indexOffset;
+    ULONG streams;              /* a bit for each stream given */
+    struct { ULONG buffer, stride, offset; } stream[RB2K_D8_STREAMS];
+} RB2K_D8_BUFFER_DRAW;
+#define RB2K_D8_BUFFER_DRAW_WORDS (sizeof(RB2K_D8_BUFFER_DRAW) / sizeof(ULONG))
 typedef struct { ULONG clears, triangles; } RB2K_D3D7_COMPLETED;
 #define RB2K_D3D7_VERTICES 96
 /* IEEE transformed position, packed Direct3D diffuse and specular colours,

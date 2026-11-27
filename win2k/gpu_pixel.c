@@ -17,7 +17,7 @@
 
 enum {
     PixelSurface = 1, CreateWords = 1 + VIRGL_OBJ_SURFACE_SIZE,
-    PipeTexture2D = 2, PipeTexture3D = 3, PipeTextureCube = 4, PipeClearColor0 = 1 << 2
+    PipeBuffer = 0, PipeTexture2D = 2, PipeTexture3D = 3, PipeTextureCube = 4, PipeClearColor0 = 1 << 2
 };
 
 /* Each texture has a private context, so its surface object is always 1. */
@@ -957,6 +957,7 @@ void rb_gpu_slot_forget(RB2K_GPU *gpu, const RB2K_IMAGE *image)
     ULONG slot = image_slot(gpu, image), i, bit = ~(1UL << (slot & 31));
     if (slot == RB2K_DD_SLOTS) return;
     for (i = 0; i < RB2K_D7_TEXTURES; ++i) gpu->textures[i].attached[slot / 32] &= bit;
+    for (i = 0; i < RB2K_D8_BUFFERS; ++i) gpu->buffers[i].attached[slot / 32] &= bit;
     for (i = 0; i < RB2K_DD_SLOTS; ++i) gpu->images[i].sampledBy[slot / 32] &= bit;
 }
 
@@ -1015,4 +1016,75 @@ void rb_gpu_texture_forget(RB2K_GPU *gpu)
 {
     VideoPortZeroMemory(gpu->textures, sizeof(gpu->textures));
     gpu->textureCount = gpu->textureBytes = 0;
+}
+
+/* ---- Direct3D vertex and index buffers: host buffers without a context of their own ---- */
+
+RB2K_BUFFER *rb_gpu_buffer(RB2K_GPU *gpu, ULONG handle)
+{
+    ULONG slot = RB2K_D8_BUFFER_SLOT(handle);
+    return handle && slot < RB2K_D8_BUFFERS && gpu->buffers[slot].handle == handle ? &gpu->buffers[slot] : NULL;
+}
+
+/* A buffer resource of buffer->bytes bytes, bound as vertex or as index data (the renderer
+ * chooses its OpenGL target by the one use). */
+BOOLEAN rb_gpu_buffer_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_BUFFER *buffer)
+{
+    PIXEL_REQUEST request;
+    begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D, 0);
+    request.resource.resource_id = buffer->id;
+    request.resource.target = PipeBuffer;
+    request.resource.format = VIRGL_FORMAT_R8_UNORM;
+    request.resource.bind = buffer->kind == RB2K_D8_BUFFER_INDEX ? VIRGL_BIND_INDEX_BUFFER : VIRGL_BIND_VERTEX_BUFFER;
+    request.resource.width = buffer->bytes;
+    request.resource.height = 1;
+    request.resource.depth = 1;
+    request.resource.array_size = 1;
+    return send_request(gpu, result, &request, sizeof(request.resource), RB2K_STAGE_RESOURCE);
+}
+
+/* A buffer is attached to each colour context that draws from it or writes it. */
+BOOLEAN rb_gpu_buffer_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_BUFFER *buffer, const RB2K_IMAGE *image)
+{
+    return attach_once(gpu, result, buffer->attached, buffer->id, image);
+}
+
+/* New bytes for a buffer, in the image's open frame: the host writes them in order with the
+ * draws before and after them, so earlier draws still read what was there. */
+BOOLEAN rb_gpu_buffer_write(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image, RB2K_BUFFER *buffer,
+                            ULONG offset, ULONG bytes, const UCHAR *data)
+{
+    ULONG count = VIRGL_RESOURCE_IW_DATA_START + (bytes + 3) / 4, *words;
+    if (!rb_gpu_buffer_attach(gpu, result, buffer, image)) return FALSE;
+    words = rb_gpu_frame_reserve(gpu, result, image, count);
+    if (!words) return FALSE;
+    VideoPortZeroMemory(words, VIRGL_RESOURCE_IW_DATA_START * sizeof(*words));
+    words[0] = VIRGL_CMD0(VIRGL_CCMD_RESOURCE_INLINE_WRITE, 0, count - 1);
+    words[VIRGL_RESOURCE_IW_RES_HANDLE] = buffer->id;
+    words[VIRGL_RESOURCE_IW_USAGE] = 2; /* PIPE_MAP_WRITE */
+    words[VIRGL_RESOURCE_IW_X] = offset;
+    words[VIRGL_RESOURCE_IW_W] = bytes;
+    words[VIRGL_RESOURCE_IW_H] = 1;
+    words[VIRGL_RESOURCE_IW_D] = 1;
+    words[count - 1] = 0;
+    VideoPortMoveMemory(words + VIRGL_RESOURCE_IW_DATA_START, (PVOID)data, bytes);
+    return TRUE;
+}
+
+/* Draws of the open frame may name the buffer: they go to the host first, since unreferencing
+ * detaches the resource from every context at once. */
+BOOLEAN rb_gpu_buffer_free(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_BUFFER *buffer, BOOLEAN flush)
+{
+    PIXEL_REQUEST request;
+    BOOLEAN flushed = !flush || rb_gpu_frame_flush(gpu, result);
+    begin_request(&request, VIRTIO_GPU_CMD_RESOURCE_UNREF, 0);
+    request.unref.resource_id = buffer->id;
+    VideoPortZeroMemory(buffer, sizeof(*buffer));
+    return send_request(gpu, result, &request, sizeof(request.unref), RB2K_STAGE_CLEANUP) && flushed;
+}
+
+/* The transport is going away or every context was destroyed. */
+void rb_gpu_buffer_forget(RB2K_GPU *gpu)
+{
+    VideoPortZeroMemory(gpu->buffers, sizeof(gpu->buffers));
 }

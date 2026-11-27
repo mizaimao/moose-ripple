@@ -34,6 +34,10 @@ typedef struct {
      * (its slot plus one; 0 after a fixed-function fragment shader). */
     ULONG programMade[RB2K_D8_PROGRAMS];
     ULONG boundProgram;
+    /* Draws from host buffers: a vertex program's elements are an object of their own at
+     * ElementsBase plus its slot (elementsMade, a bit a slot); boundElements is the slot plus
+     * one of the object bound, 0 for the empty one of the draws that carry their vertices. */
+    ULONG elementsMade[RB2K_D8_PROGRAMS / 32], boundElements;
     ULONG stencilRef;                   /* the reference value sent, plus 0x100 once sent */
 } RB2K_D7_STATE;
 
@@ -63,6 +67,13 @@ typedef struct {
     ULONG attached[RB2K_SLOT_WORDS];    /* the colour contexts it is attached to, a bit per image slot */
 } RB2K_TEXTURE;
 #define RB2K_D7_TEXEL_BUDGET (64UL << 20)
+/* A vertex or index buffer of a Direct3D 8 or 9 program: a host buffer resource, attached like
+ * a texture to each colour context that draws from it. handle is what the display driver
+ * names it by (RB2K_D8_BUFFER_SLOT), id the host resource. */
+typedef struct {
+    ULONG handle, id, bytes, kind;
+    ULONG attached[RB2K_SLOT_WORDS];
+} RB2K_BUFFER;
 typedef struct {
     RB2K_IMAGE image;
     RB2K_RECT gpuPixels, gdiWrites[3];
@@ -130,7 +141,7 @@ typedef struct {
     LONG busy, barrier;
     BOOLEAN owned, ready, enabledMaster, tested;
     ULONG nextId, fence, imageCount, hostFills, readbacks, uploads, hostCopies;
-    BOOLEAN ddGpuSurfaces, nativeD3D7, plainSurfaces, d3d8, vertexShaders, d3d9Ddi;
+    BOOLEAN ddGpuSurfaces, nativeD3D7, plainSurfaces, d3d8, vertexShaders, d3d9Ddi, hostBuffers;
     /* DXT blocks as they are (RippleHostDxt), and the formats the host samples:
      * bit n for upload format n (RB2K_D7_BLOCKS_DXT*, RB2K_D7_TEXELS_*), known after the first ask. */
     BOOLEAN hostDxt, hostBlocksKnown;
@@ -172,7 +183,14 @@ typedef struct {
     /* Direct3D 8 and 9 vertex and pixel programs as TGSI text, each in pool memory of its own
      * size; an id is a serial number and the slot (RB2K_D8_PROGRAM_SLOT), so a freed id is
      * never reused. programNext: where the search for a free slot starts. */
-    struct { ULONG id, samplers, bytes; char *text; } programs[RB2K_D8_PROGRAMS];
+    struct {
+        ULONG id, samplers, bytes;
+        char *text;
+        ULONG elementCount, elements[RB2K_D8_ELEMENTS];   /* a vertex program for host buffers (VPROGRAM) */
+    } programs[RB2K_D8_PROGRAMS];
+    /* Host vertex and index buffers, and counts for d7draw: made, bytes uploaded, draws. */
+    RB2K_BUFFER buffers[RB2K_D8_BUFFERS];
+    ULONG bufferSerial, bufferNext;
     ULONG programSerial, programNext;
     ULONG d8Step;       /* the step of a pixel shader draw being queued, for failures */
     /* The 32-bit desktop in guest memory (RipplePrimaryInMemory, gpu_primary.c): pages
@@ -312,6 +330,13 @@ BOOLEAN rb_gpu_texture_upload(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, const RB2K
 BOOLEAN rb_gpu_texture_free(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_TEXTURE *texture, BOOLEAN flush);
 void rb_gpu_texture_forget(RB2K_GPU *gpu);
 void rb_gpu_slot_forget(RB2K_GPU *gpu, const RB2K_IMAGE *image);
+RB2K_BUFFER *rb_gpu_buffer(RB2K_GPU *gpu, ULONG handle);
+BOOLEAN rb_gpu_buffer_create(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_BUFFER *buffer);
+BOOLEAN rb_gpu_buffer_attach(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_BUFFER *buffer, const RB2K_IMAGE *image);
+BOOLEAN rb_gpu_buffer_free(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_BUFFER *buffer, BOOLEAN flush);
+void rb_gpu_buffer_forget(RB2K_GPU *gpu);
+BOOLEAN rb_gpu_buffer_write(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image, RB2K_BUFFER *buffer,
+                            ULONG offset, ULONG bytes, const UCHAR *data);
 BOOLEAN rb_gpu_prepare_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image);
 BOOLEAN rb_gpu_depth_target(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *color, RB2K_IMAGE *depth);
 BOOLEAN rb_gpu_clear_buffers(RB2K_GPU *gpu, RB2K_GPU_RESULT *result, RB2K_IMAGE *image,
