@@ -94,6 +94,8 @@ void rb_d7_caps(DD_HALINFO *info, BOOL depth);
 BOOL rb_d7_info(PDD_GETDRIVERINFODATA data);
 ULONG rb_d7_stats(DISPLAY *display, ULONG size, PVOID out);
 ULONG rb_d7_drawstats(DISPLAY *display, ULONG size, PVOID out);
+ULONG rb_d7_skips(DISPLAY *display, ULONG size, PVOID out);
+void rb_d7_skips_keep(DISPLAY *display);
 /* Direct3D texture formats, each converted to B8G8R8A8 for the host. */
 /* Texture formats; the DXT ones are stored as 4x4 blocks (DXT2 and DXT4
  * decode as DXT3 and DXT5). */
