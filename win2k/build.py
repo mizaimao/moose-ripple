@@ -140,8 +140,8 @@ def build_programs(work):
     d3d.mkdir()
     for name in ("d3d8.h", "d3d8types.h", "d3d8caps.h", "d3d9.h", "d3d9types.h", "d3d9caps.h"):
         (d3d / name).write_bytes((wdk / "inc/api" / name).read_bytes())
-    targets.append(("d8pixels.exe", ["tools/d8pixels"], ["-I", d3d, "-luser32"]))
-    targets.append(("d9pixels.exe", ["tools/d9pixels"], ["-I", d3d, "-luser32"]))
+    targets.append(("d8pixels.exe", ["tools/d8pixels"], ["-I", d3d, "-luser32", "-lgdi32"]))
+    targets.append(("d9pixels.exe", ["tools/d9pixels"], ["-I", d3d, "-luser32", "-lgdi32"]))
     targets.append(("d9texload.exe", ["tools/d9texload"], ["-I", d3d, "-luser32"]))
     targets.append(("d9stencil.exe", ["tools/d9stencil"], ["-I", d3d, "-luser32"]))
     targets.append(("d9full.exe", ["tools/d9full"], ["-I", d3d, "-luser32"]))
@@ -178,7 +178,10 @@ def main():
                      [ddk_headers, video_headers, public_headers, vc_headers], ["-Di386=1"],
                      ["videoprt.lib", "ntoskrnl.lib", "hal.lib"], ["/driver", "/entry:DriverEntry@8"])
         build_kernel(work, overlay, "rb2kdisp.dll", "display display_ddraw display_palette display_rvd display_gdi display_cursor display_d3d7 d3d8_ps d3d9_decl",
-                     [public_headers, video_headers, vc_headers], ["-DUNICODE", "-D_UNICODE", "-DWINVER=0x0500", "-DRB_PS2_SAMPLERS=16"],
+                     [public_headers, video_headers, vc_headers],
+                     ["-DUNICODE", "-D_UNICODE", "-DWINVER=0x0500", "-DRB_PS2_SAMPLERS=16",
+                      # The skip counts query of the test tools (rbskips.h); DEVCHECKS=0 leaves it out, as release packages do.
+                      "-DRB2K_DEVCHECKS=" + ("0" if os.environ.get("DEVCHECKS") == "0" else "1")],
                      ["win32k.lib", "libcntpr.lib"], ["/dll", "/entry:DrvEnableDriver@12",
                                                       "/export:DrvEnableDriver=_DrvEnableDriver@12"])
         programs = build_programs(work)

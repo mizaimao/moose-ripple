@@ -13,8 +13,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "drvcheck.h"
 
 enum { Side = 128 };
+enum { RefLimit = Side * Side / 1000 };   /* pixels of a case that may differ from the reference picture (as in d9pixels) */
 #define CLEAR_COLOR 0xff000066UL
 typedef struct { float x, y, z, rhw; DWORD diffuse; } TLVERTEX;
 #define TLFVF (D3DFVF_XYZRHW | D3DFVF_DIFFUSE)
@@ -59,7 +61,9 @@ static void check(const char *name, const SAMPLE *s, int count)
     IDirect3DSurface8 *back = NULL;
     D3DLOCKED_RECT r;
     HRESULT hr = IDirect3DDevice8_EndScene(device);
-    int i, bad = 0;
+    int i, bad = 0, worst = 0;
+    long differ;
+    unsigned long skipped;
     if (FAILED(hr)) { fail_hr(name, "end", hr); return; }
     hr = IDirect3DDevice8_GetBackBuffer(device, 0, D3DBACKBUFFER_TYPE_MONO, &back);
     if (FAILED(hr)) { fail_hr(name, "backbuffer", hr); return; }
@@ -79,10 +83,19 @@ static void check(const char *name, const SAMPLE *s, int count)
             ++bad;
         }
     }
+    /* The automatic checks (drvcheck.h), as in d9pixels. */
+    differ = ref_case(name, r.pBits, r.Pitch, Side, &worst);
     IDirect3DSurface8_UnlockRect(back);
     IDirect3DSurface8_Release(back);
-    printf("D8PIX case=%s samples=%d mismatches=%d\n", name, count, bad);
-    if (bad) ++failures; else ++passes;
+    skipped = skips_case("D8PIX", name);
+    if (refMode == RefCompare && differ >= 0) {
+        printf("D8PIX case=%s samples=%d mismatches=%d ref_differ=%ld ref_worst=%d\n", name, count, bad, differ, worst);
+        if (differ > RefLimit) {
+            ++refFailed;
+            printf("D8PIX case=%s differs first at=%d,%d ours=%06lx reference=%06lx\n", name, refAtX, refAtY, refMine, refTheirs);
+        }
+    } else printf("D8PIX case=%s samples=%d mismatches=%d\n", name, count, bad);
+    if (bad || skipped || (refMode == RefCompare && differ > RefLimit)) ++failures; else ++passes;
 }
 
 static void case_clear(void)
@@ -673,7 +686,9 @@ static void check_covered(const char *name, const SAMPLE *s, int count)
     IDirect3DSurface8 *back = NULL;
     D3DLOCKED_RECT r;
     HRESULT hr = IDirect3DDevice8_EndScene(device);
-    int i, bad = 0;
+    int i, bad = 0, worst = 0;
+    long differ;
+    unsigned long skipped;
     if (FAILED(hr)) { fail_hr(name, "end", hr); return; }
     hr = IDirect3DDevice8_GetBackBuffer(device, 0, D3DBACKBUFFER_TYPE_MONO, &back);
     if (FAILED(hr)) { fail_hr(name, "backbuffer", hr); return; }
@@ -688,10 +703,19 @@ static void check_covered(const char *name, const SAMPLE *s, int count)
             ++bad;
         }
     }
+    /* The automatic checks (drvcheck.h), as in d9pixels. */
+    differ = ref_case(name, r.pBits, r.Pitch, Side, &worst);
     IDirect3DSurface8_UnlockRect(back);
     IDirect3DSurface8_Release(back);
-    printf("D8PIX case=%s samples=%d mismatches=%d\n", name, count, bad);
-    if (bad) ++failures; else ++passes;
+    skipped = skips_case("D8PIX", name);
+    if (refMode == RefCompare && differ >= 0) {
+        printf("D8PIX case=%s samples=%d mismatches=%d ref_differ=%ld ref_worst=%d\n", name, count, bad, differ, worst);
+        if (differ > RefLimit) {
+            ++refFailed;
+            printf("D8PIX case=%s differs first at=%d,%d ours=%06lx reference=%06lx\n", name, refAtX, refAtY, refMine, refTheirs);
+        }
+    } else printf("D8PIX case=%s samples=%d mismatches=%d\n", name, count, bad);
+    if (bad || skipped || (refMode == RefCompare && differ > RefLimit)) ++failures; else ++passes;
 }
 
 /* A lit draw as 3DMark 2001 SE's Car Chase makes them, with the matrices, light, material, fog
@@ -1339,13 +1363,18 @@ int main(int argc, char **argv)
     D3DCAPS8 caps;
     HWND window;
     DWORD flags;
-    BOOL software = FALSE;
+    BOOL software = FALSE, reference = FALSE, noref = FALSE;
+    char refText[40];
     int only = 0, a;
     HRESULT hr;
     setvbuf(stdout, NULL, _IONBF, 0);
     /* "sw": software vertex processing; "ps=N": only pixel shader case N. */
     for (a = 1; a < argc; ++a) {
         if (!lstrcmpiA(argv[a], "sw")) software = TRUE;
+        /* "ref", "-noref", "-noskips": the automatic checks, as in d9pixels (drvcheck.h). */
+        else if (!lstrcmpiA(argv[a], "ref")) reference = TRUE;
+        else if (!lstrcmpiA(argv[a], "-noref")) noref = TRUE;
+        else if (!lstrcmpiA(argv[a], "-noskips")) skipsOff = 1;
         else if (!strncmp(argv[a], "ps=", 3)) only = atoi(argv[a] + 3);
     }
     create = lib ? (IDirect3D8 *(WINAPI *)(UINT))GetProcAddress(lib, "Direct3DCreate8") : NULL;
@@ -1397,10 +1426,38 @@ int main(int argc, char **argv)
     pp.Flags = D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
     flags = !software && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT) ?
             D3DCREATE_HARDWARE_VERTEXPROCESSING : D3DCREATE_SOFTWARE_VERTEXPROCESSING;
-    hr = IDirect3D8_CreateDevice(d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, window, flags, &pp, &device);
+    hr = IDirect3D8_CreateDevice(d3d, D3DADAPTER_DEFAULT, reference ? D3DDEVTYPE_REF : D3DDEVTYPE_HAL, window, flags, &pp, &device);
+    if (reference && FAILED(hr)) {
+        printf("D8PIX reference not available hr=%08lx\nD8PIX end result=NOREFERENCE\n", (unsigned long)hr);
+        return 0;
+    }
     printf("D8PIX device hr=%08lx vertex_processing=%s format=%lu\n", (unsigned long)hr,
            flags == D3DCREATE_HARDWARE_VERTEXPROCESSING ? "hardware" : "software", (unsigned long)mode.Format);
     if (FAILED(hr)) { printf("D8PIX end result=UNAVAILABLE\n"); return 2; }
+    if (reference) {
+        /* A runtime without the reference rasterizer still makes the device, and it draws nothing:
+         * clear to a colour of our own and read it back before trusting its pictures. */
+        IDirect3DSurface8 *probe = NULL;
+        D3DLOCKED_RECT lr;
+        DWORD seen = 0;
+        IDirect3DDevice8_Clear(device, 0, NULL, D3DCLEAR_TARGET, 0xff123456UL, 1.0f, 0);
+        if (SUCCEEDED(IDirect3DDevice8_GetBackBuffer(device, 0, D3DBACKBUFFER_TYPE_MONO, &probe))) {
+            if (SUCCEEDED(IDirect3DSurface8_LockRect(probe, &lr, NULL, D3DLOCK_READONLY))) {
+                seen = *(const DWORD *)lr.pBits & 0xffffff;
+                IDirect3DSurface8_UnlockRect(probe);
+            }
+            IDirect3DSurface8_Release(probe);
+        }
+        if (seen != 0x123456) {
+            printf("D8PIX reference not available: its device draws nothing (%06lx)\nD8PIX end result=NOREFERENCE\n", (unsigned long)seen);
+            return 0;
+        }
+        printf("D8PIX reference rasterizer: pictures kept in refpix8\n");
+    }
+    refFolder = "refpix8";
+    refMode = reference ? RefWrite : noref ? RefOff : RefCompare;
+    if (reference) skipsOff = 1;
+    skips_start();
     IDirect3DDevice8_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_NONE);
     IDirect3DDevice8_SetRenderState(device, D3DRS_ZENABLE, D3DZB_FALSE);
     IDirect3DDevice8_SetRenderState(device, D3DRS_LIGHTING, FALSE);
@@ -1425,6 +1482,12 @@ int main(int argc, char **argv)
     IDirect3DDevice8_Release(device);
     IDirect3D8_Release(d3d);
     DestroyWindow(window);
-    printf("D8PIX end pass=%d fail=%d result=%s\n", passes, failures, failures ? "FAIL" : "PASS");
+    refText[0] = 0;
+    if (refMode == RefCompare) {
+        if (refCompared) sprintf(refText, " ref_compared=%d ref_failed=%d", refCompared, refFailed);
+        else strcpy(refText, " ref=unavailable");
+    }
+    printf("D8PIX end pass=%d fail=%d%s%s result=%s\n", passes, failures, skips_summary(), refText,
+           reference ? "REFERENCE" : failures ? "FAIL" : "PASS");
     return failures ? 1 : 0;
 }

@@ -1,6 +1,7 @@
 /* Windows 2000 XDDM framebuffer display driver for the Ripple miniport. */
 #include "display_private.h"
 #include "rb2kd3d7.h"
+#include "rbskips.h"
 #include "rb2krvd.h"
 
 /* Ask the paired miniport for its current mode table on each enumeration. */
@@ -301,7 +302,11 @@ ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
                    *(ULONG *)in == RB2K_GL_PROFILE_ESCAPE || *(ULONG *)in == RB2K_GL_RECT_PRESENT_ESCAPE ||
                    *(ULONG *)in == RB2K_GL_INLINE_PRESENT_ESCAPE || *(ULONG *)in == RB2K_D3D7_STATS_ESCAPE ||
                    *(ULONG *)in == RB2K_D3D7_PROFILE_ESCAPE || *(ULONG *)in == RB2K_D3D7_FLIGHT_ESCAPE ||
-                   *(ULONG *)in == RB2K_D3D7_DRAW_ESCAPE);
+                   *(ULONG *)in == RB2K_D3D7_DRAW_ESCAPE
+#if RB2K_DEVCHECKS
+                   || *(ULONG *)in == RB2K_D3D7_SKIPS_ESCAPE
+#endif
+                   );
     /* opengl32.dll passes a small input buffer of its own with this one. */
     if (code == OPENGL_GETINFO) return opengl_info(outSize, out);
     /* Mesa's winsys on Windows 2000 (display_rvd.c). */
@@ -349,6 +354,9 @@ ULONG DrvEscape(SURFOBJ *surface, ULONG code, ULONG inSize, PVOID in,
                                    NULL, 0, out, outSize, &returned) && returned == outSize;
     if (code == RB2K_D3D7_STATS_ESCAPE) return rb_d7_stats(display, outSize, out);
     if (code == RB2K_D3D7_DRAW_ESCAPE) return rb_d7_drawstats(display, outSize, out);
+#if RB2K_DEVCHECKS
+    if (code == RB2K_D3D7_SKIPS_ESCAPE) return rb_d7_skips(display, outSize, out);
+#endif
     if (code == RB2K_DD_SCANOUT_ESCAPE)
         return outSize == sizeof(RB2K_DD_FLIP_INFO) &&
                !EngDeviceIoControl(display->miniport, IOCTL_RB2K_DD_FLIP_INFO,

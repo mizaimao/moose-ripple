@@ -31,7 +31,8 @@ name=moose-ripple-win2k-$VERSION
 rm -rf "$work" "$out/$name.zip" "$out/SHA256SUMS.txt"
 mkdir -p "$work/driver" "$work/mesa" "$work/$name"
 
-OUT=$work/driver "$PYTHON" "$here/build.py"
+# A release has no use for the test tools' skip counts query (rbskips.h).
+DEVCHECKS=${DEVCHECKS:-0} OUT=$work/driver "$PYTHON" "$here/build.py"
 OUT=$work/mesa TOOLS=$T "$root/win9x/mesa/build.sh"
 if ! "$LLVM_MINGW/bin/llvm-objdump" -p "$work/mesa/ripplegl.dll" | grep -q 'ExtEscape'; then
     echo "package.sh: this ripplegl.dll has no Windows 2000/XP path (no ExtEscape import)" >&2

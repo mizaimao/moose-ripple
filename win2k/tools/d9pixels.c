@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "drvcheck.h"
 
 enum { Side = 128 };
 #define CLEAR_COLOR 0xff000066UL
@@ -31,6 +32,9 @@ typedef struct { int x, y; DWORD rgb; } SAMPLE;
 static IDirect3D9 *d3d;
 static IDirect3DDevice9 *device;
 static int passes, failures;
+/* Pixels of a case that may differ from the reference picture: 1 in 1000. On the first run 99 of 107
+ * cases differed in no pixel at all; a shape that is one pixel off differs in about 30. */
+enum { RefLimit = Side * Side / 1000 };
 
 static void fail_hr(const char *name, const char *what, HRESULT hr)
 {
@@ -63,7 +67,9 @@ static void check(const char *name, const SAMPLE *s, int count)
     IDirect3DSurface9 *back = NULL;
     D3DLOCKED_RECT r;
     HRESULT hr = IDirect3DDevice9_EndScene(device);
-    int i, bad = 0;
+    int i, bad = 0, worst = 0;
+    long differ;
+    unsigned long skipped;
     if (FAILED(hr)) { fail_hr(name, "end", hr); return; }
     hr = IDirect3DDevice9_GetBackBuffer(device, 0, 0, D3DBACKBUFFER_TYPE_MONO, &back);
     if (FAILED(hr)) { fail_hr(name, "backbuffer", hr); return; }
@@ -83,10 +89,20 @@ static void check(const char *name, const SAMPLE *s, int count)
             ++bad;
         }
     }
+    /* The automatic checks (drvcheck.h): the picture against the reference rasterizer's, and what
+     * the driver skipped while the case ran. Either fails the case. */
+    differ = ref_case(name, r.pBits, r.Pitch, Side, &worst);
     IDirect3DSurface9_UnlockRect(back);
     IDirect3DSurface9_Release(back);
-    printf("D9PIX case=%s samples=%d mismatches=%d\n", name, count, bad);
-    if (bad) ++failures; else ++passes;
+    skipped = skips_case("D9PIX", name);
+    if (refMode == RefCompare && differ >= 0) {
+        printf("D9PIX case=%s samples=%d mismatches=%d ref_differ=%ld ref_worst=%d\n", name, count, bad, differ, worst);
+        if (differ > RefLimit) {
+            ++refFailed;
+            printf("D9PIX case=%s differs first at=%d,%d ours=%06lx reference=%06lx\n", name, refAtX, refAtY, refMine, refTheirs);
+        }
+    } else printf("D9PIX case=%s samples=%d mismatches=%d\n", name, count, bad);
+    if (bad || skipped || (refMode == RefCompare && differ > RefLimit)) ++failures; else ++passes;
 }
 
 static void case_clear(void)
@@ -3045,7 +3061,8 @@ int main(int argc, char **argv)
     D3DCAPS9 caps;
     HWND window;
     DWORD flags;
-    BOOL software = FALSE;
+    BOOL software = FALSE, reference = FALSE, noref = FALSE;
+    char refText[40];
     int only = 0, a;
     HRESULT hr;
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -3053,6 +3070,11 @@ int main(int argc, char **argv)
      * cases (pixel shaders below 30, vertex shaders from 30). */
     for (a = 1; a < argc; ++a) {
         if (!lstrcmpiA(argv[a], "sw")) software = TRUE;
+        /* "ref": draw on the reference rasterizer and keep the pictures; "-noref" and "-noskips":
+         * leave the automatic checks out (drvcheck.h). */
+        else if (!lstrcmpiA(argv[a], "ref")) reference = TRUE;
+        else if (!lstrcmpiA(argv[a], "-noref")) noref = TRUE;
+        else if (!lstrcmpiA(argv[a], "-noskips")) skipsOff = 1;
         else if (!strncmp(argv[a], "ps=", 3)) only = atoi(argv[a] + 3);
     }
     create = lib ? (IDirect3D9 *(WINAPI *)(UINT))GetProcAddress(lib, "Direct3DCreate9") : NULL;
@@ -3108,10 +3130,39 @@ int main(int argc, char **argv)
     pp.Flags = D3DPRESENTFLAG_LOCKABLE_BACKBUFFER;
     flags = !software && (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT) ?
             D3DCREATE_HARDWARE_VERTEXPROCESSING : D3DCREATE_SOFTWARE_VERTEXPROCESSING;
-    hr = IDirect3D9_CreateDevice(d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, window, flags, &pp, &device);
+    hr = IDirect3D9_CreateDevice(d3d, D3DADAPTER_DEFAULT, reference ? D3DDEVTYPE_REF : D3DDEVTYPE_HAL, window, flags, &pp, &device);
+    if (reference && FAILED(hr)) {
+        /* Without d3dref9.dll, or on a runtime without it: no reference pictures, and no failure. */
+        printf("D9PIX reference not available hr=%08lx\nD9PIX end result=NOREFERENCE\n", (unsigned long)hr);
+        return 0;
+    }
     printf("D9PIX device hr=%08lx vertex_processing=%s format=%lu\n", (unsigned long)hr,
            flags == D3DCREATE_HARDWARE_VERTEXPROCESSING ? "hardware" : "software", (unsigned long)mode.Format);
     if (FAILED(hr)) { printf("D9PIX end result=UNAVAILABLE\n"); return 2; }
+    if (reference) {
+        /* A runtime without the reference rasterizer still makes the device, and it draws nothing:
+         * clear to a colour of our own and read it back before trusting its pictures. */
+        IDirect3DSurface9 *probe = NULL;
+        D3DLOCKED_RECT lr;
+        DWORD seen = 0;
+        IDirect3DDevice9_Clear(device, 0, NULL, D3DCLEAR_TARGET, 0xff123456UL, 1.0f, 0);
+        if (SUCCEEDED(IDirect3DDevice9_GetBackBuffer(device, 0, 0, D3DBACKBUFFER_TYPE_MONO, &probe))) {
+            if (SUCCEEDED(IDirect3DSurface9_LockRect(probe, &lr, NULL, D3DLOCK_READONLY))) {
+                seen = *(const DWORD *)lr.pBits & 0xffffff;
+                IDirect3DSurface9_UnlockRect(probe);
+            }
+            IDirect3DSurface9_Release(probe);
+        }
+        if (seen != 0x123456) {
+            printf("D9PIX reference not available: its device draws nothing (%06lx)\nD9PIX end result=NOREFERENCE\n", (unsigned long)seen);
+            return 0;
+        }
+        printf("D9PIX reference rasterizer: pictures kept in refpix9\n");
+    }
+    refFolder = "refpix9";
+    refMode = reference ? RefWrite : noref ? RefOff : RefCompare;
+    if (reference) skipsOff = 1;
+    skips_start();
     IDirect3DDevice9_SetRenderState(device, D3DRS_CULLMODE, D3DCULL_NONE);
     IDirect3DDevice9_SetRenderState(device, D3DRS_ZENABLE, D3DZB_FALSE);
     IDirect3DDevice9_SetRenderState(device, D3DRS_LIGHTING, FALSE);
@@ -3179,6 +3230,12 @@ int main(int argc, char **argv)
     IDirect3DDevice9_Release(device);
     IDirect3D9_Release(d3d);
     DestroyWindow(window);
-    printf("D9PIX end pass=%d fail=%d result=%s\n", passes, failures, failures ? "FAIL" : "PASS");
+    refText[0] = 0;
+    if (refMode == RefCompare) {
+        if (refCompared) sprintf(refText, " ref_compared=%d ref_failed=%d", refCompared, refFailed);
+        else strcpy(refText, " ref=unavailable");
+    }
+    printf("D9PIX end pass=%d fail=%d%s%s result=%s\n", passes, failures, skips_summary(), refText,
+           reference ? "REFERENCE" : failures ? "FAIL" : "PASS");
     return failures ? 1 : 0;
 }

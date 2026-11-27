@@ -13,6 +13,7 @@
 #include "display_private.h"
 #include <d3dnthal.h>
 #include "rb2kd3d7.h"
+#include "rbskips.h"
 #include "d3d8ddi.h"
 #include "d3d8_ps.h"
 #include "d3d9_decl.h"
@@ -5906,6 +5907,35 @@ ULONG rb_d7_stats(DISPLAY *d, ULONG bytes, PVOID out)
     RtlCopyMemory(out, &s, bytes);
     return 1;
 }
+
+/* The counts a test or benchmark run fails on (rbskips.h), summed from the draw statistics. A
+ * development check: a build with RB2K_DEVCHECKS=0 (release packages) has no such query. */
+#if RB2K_DEVCHECKS
+ULONG rb_d7_skips(DISPLAY *d, ULONG bytes, PVOID out)
+{
+    const RB2K_D7_DRAWSTATS *t = &d->d7draw;
+    RB2K_SKIPS s;
+    ULONG i;
+    if (!d->ddLock || bytes != sizeof(s) || !out) return 0;
+    RtlZeroMemory(&s, sizeof(s));
+    s.version = RB2K_SKIPS_VERSION;
+    EngAcquireSemaphore(d->ddLock);
+    for (i = 0; i < RB2K_D7_SKIPS; ++i)
+        s.count[i == RB2K_D7_SKIP_CLEAR ? RB2K_SKIP_KIND_CLEARS : RB2K_SKIP_KIND_DRAWS] += t->skipped[i];
+    for (i = 0; i < RB2K_D7_IGNORED; ++i) s.count[RB2K_SKIP_KIND_STATES] += t->ignored[i];
+    for (i = 0; i < 8; ++i) {
+        s.count[RB2K_SKIP_KIND_STATES] += t->d9Ignored[i];
+        s.count[RB2K_SKIP_KIND_SHADERS] += t->psFailed[i] + t->vsFailed[i];
+    }
+    s.count[RB2K_SKIP_KIND_SHADERS] += t->stageFailed + hostProgramFails.count;
+    s.count[RB2K_SKIP_KIND_FORMATS] = t->d9Unresolved;
+    s.count[RB2K_SKIP_KIND_SURFACES] = t->surfaceRefusals + t->texBltFailures + t->uploadFailures + t->checkFailures;
+    s.count[RB2K_SKIP_KIND_CALLS] = t->dp2Failures + t->drawFailures;
+    EngReleaseSemaphore(d->ddLock);
+    RtlCopyMemory(out, &s, sizeof(s));
+    return 1;
+}
+#endif
 
 ULONG rb_d7_drawstats(DISPLAY *d, ULONG bytes, PVOID out)
 {
