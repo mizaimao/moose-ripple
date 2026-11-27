@@ -2546,9 +2546,10 @@ installed by `nt5inst`, `d9pixels` passes 44 of 44 and `d8pixels` 23 of 23.
 ## Vertex shaders with several streams
 
 With vertex shaders on, Direct3D 8 and 9 programs are offered 8 vertex
-streams (`MaxStreams`; fixed-function draws still read stream 0, as their
-vertex formats only describe one). The display driver keeps each stream's
-buffer and stride. A draw gathers, for every vertex, the data of each stream
+streams (`MaxStreams`; fixed-function draws read stream 0 when an FVF code
+describes their vertices, and any stream through a declaration, see below).
+The display driver keeps each stream's buffer and stride. A draw with a
+vertex shader gathers, for every vertex, the data of each stream
 the shader's declaration names, one after the other, into the record the
 vertex program reads; `rb_vs_translate` gets the word at which each stream
 starts, and a `STREAM` token moves the declaration there. A shader's program
@@ -2562,6 +2563,29 @@ buffer (stream 0) and colours from another (stream 1), starting at vertex 6.
 On XP SP3 under KVM on the second Intel UHD 630 host, with vertex shaders on,
 case 33 passes and `d9pixels` passes 53 of 53. The translations of DirectQ's
 shaders with one and two streams pass Mesa's TGSI parser.
+
+### Fixed-function vertices through a declaration
+
+A fixed-function draw can describe its vertices by a declaration too: on Direct3D 8 a
+"vertex shader" made from a declaration with no code, on Direct3D 9 a vertex declaration
+drawn with no vertex shader. Its fields may lie in several streams and in any order, which
+no FVF code can say. Such draws used to be left out: the Direct3D 8 shader was refused when
+it was made, and the Direct3D 9 declaration counted as unresolved.
+
+`ff_layout` reads the declaration into the fields the fixed-function pipeline takes
+(position or transformed position, normal, the two colours, texture coordinate sets without
+a gap) and the FVF code they make. Fields the pipeline does not read (tangent, binormal, fog
+and the like) are passed over; a declaration with anything else (blend weights, point sizes,
+other types) is left out as before. `ff_gather` then copies the vertices the draw names out
+of their streams into one array in FVF order, in the driver's own memory, and the draw goes
+on as a stream draw of that format (`PRIMS.gathered`: the array is not probed as process
+memory). An indexed draw gathers the vertices from its smallest to its largest index and
+counts the indices from the smallest. The base vertex is taken in stream 0's stride, so a
+draw whose declaration leaves stream 0 without a buffer is left out.
+
+`ff_streams` in `d8pixels` and `d9pixels` (positions in stream 0, colours in stream 1, drawn
+from vertex 6) passes with it. `d9pixels` case 92 (`ff_streams_indexed`) draws through an
+index buffer with a base vertex, the colours four bytes into the second stream's vertices.
 
 ## The Direct3D 9 driver interface
 

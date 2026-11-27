@@ -1726,7 +1726,7 @@ typedef struct {
     ULONG indexStride;     /* WORDs per triangle record for INDEXEDTRIANGLELIST */
     /* A DirectX 8 draw from stream zero: its data and size in the process,
      * the signed byte offset of vertex zero, the stride and vertex format. */
-    BOOL stream;
+    BOOL stream, gathered;      /* gathered: streamData is the driver's own array (ff_gather), not the process's memory */
     const BYTE *streamData;
     ULONG streamBytes, streamStride, fvf;
     LONG streamFirst;
@@ -2188,7 +2188,7 @@ static HRESULT triangles(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG 
         base = (const BYTE *)address + a->dwVertexOffset + p->first * stride;
     }
     __try {
-        if (!p->inline_) EngProbeForRead((PVOID)(base + low * stride), (high - low) * stride + offset, 1);
+        if (!p->inline_ && !p->gathered) EngProbeForRead((PVOID)(base + low * stride), (high - low) * stride + offset, 1);
         for (t = 0; t < p->primitives; ++t) {
             RB2K_D3D7_VERTEX *out = draw->vertices + count;
             ULONG flat;
@@ -2455,7 +2455,8 @@ static void create_vshader(D7_CONTEXT *c, ULONG handle, const BYTE *decl, ULONG 
     D8_VSHADER *vs = find_vshader(c, handle);
     ULONG i;
     if (vs) release_vshader(c, vs);
-    vs = handle && codeBytes && !((declBytes | codeBytes) % 4) ? new_vshader(c) : NULL;
+    /* No code: a declaration for fixed-function vertices (ff_layout). */
+    vs = handle && declBytes && !((declBytes | codeBytes) % 4) ? new_vshader(c) : NULL;
     if (!vs) {
         ++c->display->d7draw.vsFailed[RbPsReasons];
         return;
@@ -2482,6 +2483,7 @@ static ULONG vertex_program(D7_CONTEXT *c, D8_VSHADER *vs, ULONG flags, const UL
     RB2K_D7_DRAWSTATS *st = &c->display->d7draw;
     ULONG k = (flags & RB_VS_FOG_ALPHA ? 1 : 0) | (flags & RB_VS_CLIP ? 2 : 0), n = 0, id = 0, written;
     RB_PS_INFO info;
+    if (!vs->tokenCount) return 0;      /* a declaration alone: fixed-function vertices (ff_layout) */
     for (n = 0; n < RB_VS_STREAMS && vs->bases[k][n] == bases[n]; ++n) {}
     if (n < RB_VS_STREAMS) {
         if (vs->program[k]) request(c->display, IOCTL_RB2K_D3D8_PROGRAM_FREE, &vs->program[k], sizeof(ULONG), NULL, 0);
@@ -2855,7 +2857,7 @@ static HRESULT shader_triangles(D7_CONTEXT *c, const PRIMS *p)
     }
     base = p->streamData + p->streamFirst;
     __try {
-        EngProbeForRead((PVOID)(base + low * stride), (high - low) * stride + offset, 1);
+        if (!p->gathered) EngProbeForRead((PVOID)(base + low * stride), (high - low) * stride + offset, 1);
         for (t = 0; t < p->primitives; ++t) {
             ULONG *out = draw->vertices + count * words;
             ULONG flat;
@@ -3941,10 +3943,171 @@ static BOOL buffer_draw(D7_CONTEXT *c, ULONG type, LONGLONG first, ULONG count, 
 
 /* One DirectX 8 draw. first is the signed byte offset of vertex zero in
  * stream zero; an indexed draw reads 16-bit indices from indexByte on. */
+/* ---- fixed-function vertices through a declaration ----
+ * A fixed-function draw whose vertices are described by a declaration instead of an FVF code: a
+ * Direct3D 8 declaration made with no shader code, or a Direct3D 9 declaration that is no FVF
+ * layout, drawn with no vertex shader. Its fields may lie in several streams. They are put
+ * together as one array in FVF order, and the draw goes on as a draw of that format. */
+typedef struct { UCHAR used, stream, type; ULONG offset; } FF_FIELD;    /* type: floats - 1, or 4: a packed colour */
+typedef struct {
+    FF_FIELD position, normal, diffuse, specular, coord[8];
+    ULONG fvf, stride, streams;     /* the format and vertex size the fields make; the streams read */
+} FF_LAYOUT;
+
+/* A field by its Direct3D 9 usage (0 position, 3 normal, 5 texture coordinate, 9 transformed
+ * position, 10 colour) and declaration type (0..3 one to four floats, 4 D3DCOLOR). Fields the
+ * fixed-function pipeline does not read (tangent 6, binormal 7, tessellation factor 8, fog 11,
+ * depth 12, sample 13) are passed over. */
+static BOOL ff_field(FF_LAYOUT *l, ULONG usage, ULONG index, ULONG stream, ULONG offset, ULONG type)
+{
+    FF_FIELD *f;
+    if (stream >= RB_VS_STREAMS || offset > 252) return FALSE;
+    if ((usage >= 6 && usage <= 8) || (usage >= 11 && usage <= 13)) return TRUE;
+    if ((usage == 0 && !index && type == 2) || (usage == 9 && !index && type == 3)) f = &l->position;
+    else if (usage == 3 && !index && type == 2) f = &l->normal;
+    else if (usage == 10 && index < 2 && type == 4) f = index ? &l->specular : &l->diffuse;
+    else if (usage == 5 && index < 8 && type <= 3) f = &l->coord[index];
+    else return FALSE;
+    if (f->used) return FALSE;
+    f->used = 1; f->stream = (UCHAR)stream; f->type = (UCHAR)type; f->offset = offset;
+    l->streams |= 1UL << stream;
+    return TRUE;
+}
+
+/* The format the fields make; FALSE when it is none the fixed-function path draws. */
+static BOOL ff_finish(FF_LAYOUT *l)
+{
+    static const ULONG sizeCode[4] = { 3, 0, 1, 2 };   /* FLOAT1..4 as D3DFVF_TEXCOORDSIZE codes */
+    ULONG k, sets = 0;
+    if (!l->position.used) return FALSE;
+    l->fvf = l->position.type == 3 ? D3DFVF_XYZRHW : D3DFVF_XYZ;
+    l->stride = l->position.type == 3 ? 16 : 12;
+    if (l->normal.used) {
+        if (l->position.type == 3) return FALSE;
+        l->fvf |= D3DFVF_NORMAL; l->stride += 12;
+    }
+    if (l->diffuse.used) { l->fvf |= D3DFVF_DIFFUSE; l->stride += 4; }
+    if (l->specular.used) { l->fvf |= D3DFVF_SPECULAR; l->stride += 4; }
+    while (sets < 8 && l->coord[sets].used) ++sets;
+    for (k = sets; k < 8; ++k) if (l->coord[k].used) return FALSE;      /* a gap in the sets */
+    for (k = 0; k < sets; ++k) {
+        l->fvf |= sizeCode[l->coord[k].type] << (16 + 2 * k);
+        l->stride += 4 * (l->coord[k].type + 1);
+    }
+    l->fvf |= sets << D3DFVF_TEXCOUNT_SHIFT;
+    return TRUE;
+}
+
+/* A Direct3D 8 declaration: stream tokens, then for each field its register (D3DVSDE_POSITION 0,
+ * NORMAL 3, DIFFUSE 5, SPECULAR 6, TEXCOORD0..7 from 7) and type, with skips. */
+static BOOL ff_layout8(const ULONG *decl, ULONG count, FF_LAYOUT *l)
+{
+    static const UCHAR bytes[8] = { 4, 8, 12, 16, 4, 4, 4, 8 };
+    ULONG i, stream = 0, offset = 0;
+    RtlZeroMemory(l, sizeof(*l));
+    for (i = 0; i < count && decl[i] != 0xffffffff; ++i) {
+        ULONG t = decl[i], kind = t >> 29;
+        if (kind == 1) {
+            if (t & 0x10000000) return FALSE;       /* a tessellator stream */
+            stream = t & 0xf; offset = 0;
+        } else if (kind == 2) {
+            if (t & 0x10000000) offset += 4 * ((t >> 16) & 0xf);        /* D3DVSD_SKIP */
+            else {
+                ULONG type = (t >> 16) & 0xf, reg = t & 0x1f;
+                ULONG usage = reg == 0 ? 0 : reg == 3 ? 3 : reg == 5 || reg == 6 ? 10 : reg >= 7 && reg <= 14 ? 5 : 0xff;
+                ULONG index = reg == 6 ? 1 : reg >= 7 && reg <= 14 ? reg - 7 : 0;
+                if (type > 7 || usage == 0xff || !ff_field(l, usage, index, stream, offset, type)) return FALSE;
+                offset += bytes[type];
+            }
+        } else if (kind == 4) i += 4 * ((t >> 25) & 0xf);   /* constants of a declaration: passed over */
+        else if (kind) return FALSE;
+    }
+    return ff_finish(l);
+}
+
+static BOOL ff_layout9(const struct D9_DECL *dl, FF_LAYOUT *l)
+{
+    ULONG k;
+    RtlZeroMemory(l, sizeof(*l));
+    for (k = 0; k < dl->count && dl->elements[k].stream != 0xff; ++k) {
+        const RB_VERTEX_ELEMENT9 *e = &dl->elements[k];
+        if (e->method || !ff_field(l, e->usage, e->usageIndex, e->stream, e->offset, e->type)) return FALSE;
+    }
+    return ff_finish(l);
+}
+
+/* The layout of the declaration a draw is made with, when it is such a draw. */
+static BOOL ff_layout(D7_CONTEXT *c, FF_LAYOUT *l)
+{
+    if (c->dx9Ddi) {
+        struct D9_DECL *dl = !c->funcHandle && (c->declHandle & 1) ? d9_decl(c, c->declHandle) : NULL;
+        return dl && !d9_decl_fvf(dl) && ff_layout9(dl, l);
+    } else {
+        D8_VSHADER *vs = c->fvf & 1 ? find_vshader(c, c->fvf) : NULL;
+        return vs && !vs->tokenCount && ff_layout8(vs->decl, vs->declCount, l);
+    }
+}
+
+/* Vertices lo to hi of a draw, counted from its base vertex, put together from their streams in
+ * the layout's format. NULL when a stream does not hold them; the caller frees the array. */
+static BYTE *ff_gather(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, const FF_LAYOUT *l, LONG base, ULONG lo, ULONG hi)
+{
+    const FF_FIELD *fields[12];
+    ULONG sizes[12], n = 0, k, v, count, strides[RB_VS_STREAMS], reach[RB_VS_STREAMS];
+    const BYTE *data[RB_VS_STREAMS];
+    BYTE *out, *o;
+    if (hi < lo || hi > 0x3fffffff || (LONGLONG)base + lo < 0) return NULL;
+    count = hi - lo + 1;
+    if (count > (16UL << 20) / l->stride) return NULL;
+    fields[n] = &l->position; sizes[n++] = l->position.type == 3 ? 16 : 12;
+    if (l->normal.used) { fields[n] = &l->normal; sizes[n++] = 12; }
+    if (l->diffuse.used) { fields[n] = &l->diffuse; sizes[n++] = 4; }
+    if (l->specular.used) { fields[n] = &l->specular; sizes[n++] = 4; }
+    for (k = 0; k < 8 && l->coord[k].used; ++k) { fields[n] = &l->coord[k]; sizes[n++] = 4 * (l->coord[k].type + 1); }
+    RtlZeroMemory(reach, sizeof(reach));
+    for (k = 0; k < n; ++k) reach[fields[k]->stream] = max(reach[fields[k]->stream], fields[k]->offset + sizes[k]);
+    for (k = 0; k < RB_VS_STREAMS; ++k) {
+        const BYTE *start;
+        ULONG bytes;
+        if (!(l->streams & (1UL << k))) continue;
+        if (!k) {
+            PRIMS zero;
+            if (!stream_zero(c, a, &zero)) return NULL;
+            start = zero.streamData; bytes = zero.streamBytes; strides[k] = c->streamStride;
+        } else {
+            D8_BUFFER *b = c->streamUser ? NULL : find_buffer(c->local, c->streamHandles[k]);
+            if (!b || b->owner != c->owner || !b->global->fpVidMem || c->streamOffsets[k] > b->global->dwLinearSize) return NULL;
+            start = (const BYTE *)b->global->fpVidMem + c->streamOffsets[k];
+            bytes = b->global->dwLinearSize - c->streamOffsets[k];
+            strides[k] = c->streamStrides[k];
+        }
+        if (!strides[k] || strides[k] > 256 || ((LONGLONG)base + hi) * strides[k] + reach[k] > (LONGLONG)bytes) return NULL;
+        data[k] = start + (ULONG)(base + (LONG)lo) * strides[k];
+    }
+    out = EngAllocMem(0, count * l->stride, 'g8bR');
+    if (!out) return NULL;
+    __try {
+        for (k = 0; k < RB_VS_STREAMS; ++k)
+            if (l->streams & (1UL << k)) EngProbeForRead((PVOID)data[k], (count - 1) * strides[k] + reach[k], 1);
+        for (v = 0, o = out; v < count; ++v)
+            for (k = 0; k < n; ++k) {
+                RtlCopyMemory(o, data[fields[k]->stream] + v * strides[fields[k]->stream] + fields[k]->offset, sizes[k]);
+                o += sizes[k];
+            }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        EngFreeMem(out);
+        return NULL;
+    }
+    return out;
+}
+
 static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULONG type, LONGLONG first,
                            ULONG count, BOOL indexed, ULONG indexByte)
 {
     PRIMS prims;
+    FF_LAYOUT layout;
+    BOOL several;
+    ULONG indices, width = c->indexStride;   /* bytes an index: 2, or 4 for 32-bit index buffers */
     RtlZeroMemory(&prims, sizeof(prims));
     prims.primitives = count;
     ++c->display->d7draw.d8StreamDraws;
@@ -3952,27 +4115,36 @@ static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULON
     if (type < RbPointList || type > RbTriangleFan) { skip(c, RB2K_D7_SKIP_PRIMITIVE, count); return DD_OK; }
     prims.kind = type == RbPointList ? Points : type == RbLineList ? LineList : type == RbLineStrip ? LineStrip :
                  type == RbTriangleList ? List : type == RbTriangleStrip ? Strip : Fan;
-    if (c->dx9Ddi && !d9_resolve(c)) { skip(c, RB2K_D7_SKIP_VERTEX, count); return DD_OK; }
-    /* With a vertex shader and registered buffers the vertices stay on the host. */
-    if ((c->fvf & 1) && c->display->hostBuffers && c->display->vertexShaders) {   /* (it counts the ones it leaves) */
-        HRESULT hr;
-        if (buffer_draw(c, type, first, count, indexed, indexByte, &hr)) return hr;
+    /* Fixed-function vertices described by a declaration are put together first (ff_gather). */
+    several = ff_layout(c, &layout);
+    if (several) {
+        if (!c->streamStride || count > 0x100000 || first < -0x7fffffffLL || first > 0x7fffffffLL) {
+            skip_vertex(c, count, 14);
+            return DD_OK;
+        }
+    } else {
+        if (c->dx9Ddi && !d9_resolve(c)) { skip(c, RB2K_D7_SKIP_VERTEX, count); return DD_OK; }
+        /* With a vertex shader and registered buffers the vertices stay on the host. */
+        if ((c->fvf & 1) && c->display->hostBuffers && c->display->vertexShaders) {   /* (it counts the ones it leaves) */
+            HRESULT hr;
+            if (buffer_draw(c, type, first, count, indexed, indexByte, &hr)) return hr;
+        }
+        if (((c->fvf & 1) && !c->display->vertexShaders) || !c->streamStride || c->streamStride > 256 ||
+            !stream_zero(c, a, &prims) ||
+            first < -0x7fffffffLL || first > (LONGLONG)prims.streamBytes) {
+            skip_vertex(c, count, 14);
+            return DD_OK;
+        }
+        prims.stream = TRUE;
+        prims.streamFirst = (LONG)first;
+        prims.streamStride = c->streamStride;
+        prims.fvf = c->fvf;
     }
-    if (((c->fvf & 1) && !c->display->vertexShaders) || !c->streamStride || c->streamStride > 256 ||
-        !stream_zero(c, a, &prims) ||
-        first < -0x7fffffffLL || first > (LONGLONG)prims.streamBytes) {
-        skip_vertex(c, count, 14);
-        return DD_OK;
-    }
-    prims.stream = TRUE;
-    prims.streamFirst = (LONG)first;
-    prims.streamStride = c->streamStride;
-    prims.fvf = c->fvf;
+    indices = type == RbTriangleList ? 3 * count : type == RbLineList ? 2 * count :
+              type == RbPointList ? count : type == RbLineStrip ? count + 1 : count + 2;
     if (indexed) {
         D8_BUFFER *b = find_buffer(c->local, c->indexHandle);
-        ULONG indices = type == RbTriangleList ? 3 * count : type == RbLineList ? 2 * count :
-                        type == RbPointList ? count : type == RbLineStrip ? count + 1 : count + 2, size;
-        ULONG width = c->indexStride;   /* bytes an index: 2, or 4 for 32-bit index buffers */
+        ULONG size;
         if (!b || b->owner != c->owner || (width != 2 && width != 4) || !b->global->fpVidMem || count > 0xffff ||
             indexByte > (size = b->global->dwLinearSize) || indices > (size - indexByte) / width) {
             skip_vertex(c, count, 15);
@@ -3989,6 +4161,32 @@ static HRESULT stream_draw(D7_CONTEXT *c, LPD3DNTHAL_DRAWPRIMITIVES2DATA a, ULON
         }
         if (width == 4) prims.indices32 = (const ULONG *)indexScratch;
         else prims.indices = (const WORD *)indexScratch;
+    }
+    if (several) {
+        ULONG lo = 0, hi = indices - 1, k;
+        BYTE *vertices;
+        HRESULT hr;
+        if (indexed) {      /* the vertices the indices name, and the indices counted from the first of them */
+            lo = 0xffffffff; hi = 0;
+            for (k = 0; k < indices; ++k) {
+                ULONG v = width == 4 ? ((const ULONG *)indexScratch)[k] : ((const WORD *)indexScratch)[k];
+                if (v < lo) lo = v;
+                if (v > hi) hi = v;
+            }
+            for (k = 0; k < indices; ++k)
+                if (width == 4) ((ULONG *)indexScratch)[k] -= lo;
+                else ((WORD *)indexScratch)[k] = (WORD)(((WORD *)indexScratch)[k] - lo);
+        }
+        vertices = ff_gather(c, a, &layout, (LONG)first / (LONG)c->streamStride, lo, hi);
+        if (!vertices) { skip_vertex(c, count, 14); return DD_OK; }
+        prims.stream = prims.gathered = TRUE;
+        prims.streamData = vertices;
+        prims.streamBytes = (hi - lo + 1) * layout.stride;
+        prims.streamStride = layout.stride;
+        prims.fvf = layout.fvf;
+        hr = c->pixelShader ? shader_triangles(c, &prims) : triangles(c, a, prims.streamStride, &prims);
+        EngFreeMem(vertices);
+        return hr;
     }
     if (c->fvf & 1) return program_triangles(c, &prims);
     if (c->pixelShader) return shader_triangles(c, &prims);

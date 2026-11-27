@@ -622,7 +622,7 @@ static void vertex_point_case(int only, BOOL offered)
 /* 80: the fixed-function pipeline through a declaration with two streams (no vertex shader):
  * positions in stream 0, colours in stream 1, six unused vertices first in both, drawn from
  * vertex 6: a red quad on the left and a green one on the right. */
-static void ff_streams_case(int only)
+static void ff_streams_case(int only, BOOL hardware)
 {
     static const D3DVERTEXELEMENT9 split[] = {
         { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
@@ -639,7 +639,7 @@ static void ff_streams_case(int only)
     D3DMATRIX m;
     HRESULT hr;
     int k, q;
-    if (only && only != 80) return;
+    if (only && only != 80 && only != 92) return;
     IDirect3DDevice9_GetDeviceCaps(device, &dc);
     if (dc.MaxStreams < 2) { printf("D9PIX fixed-function streams not offered (%lu)\n", (unsigned long)dc.MaxStreams); return; }
     for (q = 0; q < 3; ++q) {           /* x0, y0, x1, y1: two triangles each */
@@ -654,7 +654,8 @@ static void ff_streams_case(int only)
     pvb = vertex_buffer(pos, sizeof(pos), 0);
     cvb = vertex_buffer(col, sizeof(col), 0);
     hr = pvb && cvb ? IDirect3DDevice9_CreateVertexDeclaration(device, split, &decl) : E_FAIL;
-    if (FAILED(hr)) fail_hr("ff_streams", "create", hr);
+    if (only == 92) {}
+    else if (FAILED(hr)) fail_hr("ff_streams", "create", hr);
     else {
         memset(&m, 0, sizeof(m));
         m._11 = m._22 = m._33 = m._44 = 1.0f;
@@ -676,6 +677,62 @@ static void ff_streams_case(int only)
             if (FAILED(hr)) { fail_hr("ff_streams", "draw", hr); IDirect3DDevice9_EndScene(device); }
             else check("ff_streams", s, 4);
         }
+    }
+    /* 92: the same through an index buffer, with each colour 4 bytes into the vertices of the
+     * second stream: base vertex 6 and indices 6 to 11 are the green quad alone. Hardware vertex
+     * processing only: with software vertex processing the runtime refuses this draw itself
+     * (D3DERR_INVALIDCALL), which was not looked into. */
+    if (!hardware) printf("D9PIX indexed fixed-function streams not offered\n");
+    else if (!only || only == 92) {
+        static const D3DVERTEXELEMENT9 padded[] = {
+            { 0, 0, D3DDECLTYPE_FLOAT3, 0, D3DDECLUSAGE_POSITION, 0 },
+            { 1, 4, D3DDECLTYPE_D3DCOLOR, 0, D3DDECLUSAGE_COLOR, 0 }, D3DDECL_END() };
+        static const SAMPLE si[] = { { 80, 64, 0x00ff00 }, { 48, 64, CLEAR_COLOR }, { 8, 8, CLEAR_COLOR },
+                                     { 120, 120, CLEAR_COLOR } };
+        static const WORD idx[6] = { 6, 7, 8, 9, 10, 11 };
+        DWORD wide[18][2];
+        IDirect3DVertexDeclaration9 *padDecl = NULL;
+        IDirect3DVertexBuffer9 *wvb;
+        IDirect3DIndexBuffer9 *ib = NULL;
+        void *to;
+        for (k = 0; k < 18; ++k) { wide[k][0] = 0xff0000ff; wide[k][1] = col[k]; }
+        wvb = vertex_buffer(wide, sizeof(wide), 0);
+        hr = pvb && wvb ? IDirect3DDevice9_CreateVertexDeclaration(device, padded, &padDecl) : E_FAIL;
+        if (SUCCEEDED(hr))
+            hr = IDirect3DDevice9_CreateIndexBuffer(device, sizeof(idx), D3DUSAGE_WRITEONLY, D3DFMT_INDEX16,
+                                                    D3DPOOL_DEFAULT, &ib, NULL);
+        if (SUCCEEDED(hr) && SUCCEEDED(hr = IDirect3DIndexBuffer9_Lock(ib, 0, 0, &to, 0))) {
+            memcpy(to, idx, sizeof(idx));
+            IDirect3DIndexBuffer9_Unlock(ib);
+        }
+        if (FAILED(hr)) fail_hr("ff_streams_indexed", "create", hr);
+        else {
+            memset(&m, 0, sizeof(m));
+            m._11 = m._22 = m._33 = m._44 = 1.0f;
+            IDirect3DDevice9_SetTransform(device, D3DTS_WORLD, &m);
+            IDirect3DDevice9_SetTransform(device, D3DTS_VIEW, &m);
+            IDirect3DDevice9_SetTransform(device, D3DTS_PROJECTION, &m);
+            IDirect3DDevice9_SetRenderState(device, D3DRS_LIGHTING, FALSE);
+            if (begin("ff_streams_indexed")) {
+                IDirect3DDevice9_SetTexture(device, 0, NULL);
+                IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+                IDirect3DDevice9_SetTextureStageState(device, 0, D3DTSS_COLORARG1, D3DTA_DIFFUSE);
+                IDirect3DDevice9_SetVertexShader(device, NULL);
+                IDirect3DDevice9_SetVertexDeclaration(device, padDecl);
+                IDirect3DDevice9_SetStreamSource(device, 0, pvb, 0, sizeof(pos[0]));
+                IDirect3DDevice9_SetStreamSource(device, 1, wvb, 0, sizeof(wide[0]));
+                IDirect3DDevice9_SetIndices(device, ib);
+                hr = IDirect3DDevice9_DrawIndexedPrimitive(device, D3DPT_TRIANGLELIST, 6, 6, 6, 0, 2);
+                IDirect3DDevice9_SetStreamSource(device, 0, NULL, 0, 0);
+                IDirect3DDevice9_SetStreamSource(device, 1, NULL, 0, 0);
+                IDirect3DDevice9_SetIndices(device, NULL);
+                if (FAILED(hr)) { fail_hr("ff_streams_indexed", "draw", hr); IDirect3DDevice9_EndScene(device); }
+                else check("ff_streams_indexed", si, 4);
+            }
+        }
+        if (padDecl) IDirect3DVertexDeclaration9_Release(padDecl);
+        if (wvb) IDirect3DVertexBuffer9_Release(wvb);
+        if (ib) IDirect3DIndexBuffer9_Release(ib);
     }
     if (decl) IDirect3DVertexDeclaration9_Release(decl);
     if (pvb) IDirect3DVertexBuffer9_Release(pvb);
@@ -2961,7 +3018,7 @@ int main(int argc, char **argv)
     static_indexed_case(only);
     scaled_point_case(only, caps.MaxPointSize >= 16.0f);
     vertex_point_case(only, caps.MaxPointSize >= 16.0f && flags == D3DCREATE_HARDWARE_VERTEXPROCESSING);
-    ff_streams_case(only);
+    ff_streams_case(only, flags == D3DCREATE_HARDWARE_VERTEXPROCESSING);
     l16_case(only);
     if (caps.PixelShaderVersion >= D3DPS_VERSION(1, 1)) bump_case(only);
     colorwrite_case(only);
