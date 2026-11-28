@@ -293,6 +293,38 @@ is one candidate). A second start of the game, 3 minutes of play and quitting ag
 memory 29 MB lower, with the disk cache 29 MB larger: the 14 MB did not grow, and nothing is
 lost from one run to the next.
 
+### Buffers that only wait (2026-11-27)
+
+The memory behind a buffer is locked while the buffer lives, and two kinds of buffer only wait:
+those the unsent commands name (the chunks vertices from user memory are uploaded through, the
+staging buffers of texture uploads; Mesa has let go of them, but they live until the commands
+are sent) and those in the winsys's cache of released buffers. Mesa sends its commands when
+its command buffer is full or a frame ends, so a frame that uploads much held all of it at
+once: 3DMark03's second CPU test, where the runtime hands over every vertex each frame, held
+153 MB locked on a guest of 256 MB, 130 MB of it named by one unsent batch (issue 336).
+
+Two limits since then, both 16 MB and both for Windows 9x only (on Windows 2000 and XP, where
+the same library runs, the memory is not locked this way and nothing changes):
+
+- Patch 0017 lets a winsys say that the unsent commands hold much memory; virgl asks after
+  every draw and after every upload through a staging buffer, and sends the commands then. Our
+  winsys counts the buffers made, or taken from its cache, since the last commands went.
+  Buffers from before do not count (a scene's vertex buffers, used frame after frame), or a
+  scene with many of them would send after every draw. Counting only buffers nothing else
+  holds was tried first and cut the peak to 87 MB only: Mesa's own queue of uploads holds
+  every chunk until the commands go.
+- The cache of released buffers takes no buffer that would bring it over the limit.
+
+Measured with 3DMark03 on Windows 98 SE, guest of 256 MB, host with Intel UHD 630, the peaks
+from the library's log (`RVD_LOG`): 153 MB before, 70 MB with the limits. What is left at that
+peak is 46 MB of the program's own vertex buffers, 16 MB of staging buffers (13 MB of them in
+the cache) and 8 MB of chunks. Timed, the host to itself, frames a second before and with the
+limits: game tests 289.0 and 289.3, 197.9 and 198.8, 176.2 and 176.1, 205.9 and 206.2; CPU
+tests 189.2 and 190.0, 31.7 and 30.3 (the test that held the 130 MB sends its commands more
+often now); 25698 and 25740 3DMarks. Quake III Arena's demo (a timedemo of two
+seconds), the same host: 662 and 670 frames a second with the limits, 641 to 683 in the runs
+before.
+
 ## Things learnt the hard way
 
 - **The virgl driver kept a copy of every shader.** It cloned the shader Mesa hands it, and

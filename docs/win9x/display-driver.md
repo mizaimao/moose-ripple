@@ -285,6 +285,18 @@ nothing to do with our driver and cost time:
   install can be tried again.
 - Shutting down often hangs at the last screen (with any display driver). The test script resets
   the VM instead; `AutoScan=0` in `C:\MSDOS.SYS` keeps ScanDisk from running at every start.
+- 3DMark03 keeps its registration in one registry value, `KeyCode` under
+  `HKEY_LOCAL_MACHINE\Software\Futuremark\3DMark03`. Exported once from a registered guest into a
+  `.reg` file (kept with the private keys, never in this repository), `regedit /s` on that file
+  registers a fresh guest in seconds: without it the free edition has no Details window (the
+  frame rate of each test), no choice of tests and no Image Quality tool. Checked 2026-11-27 on
+  Windows 98 SE: free edition with the value removed, Professional Edition after the import.
+- **Newer host processors (11th-generation Intel, AMD Zen 2 and later) under KVM:** an unpatched
+  Windows 98 loses memory mappings there. It shows as Explorer ending with an illegal operation
+  at start-up, or "The SHELL32.DLL file is linked to missing export", at random. The patcher9x
+  boot floppy cures it (`patch9x -auto c:\windows\system`, which patches `VMM32.VXD` and
+  `NDIS.VXD`). Seen 2026-11-27 on a Core i7-1160G7: the same disk that ran on a Core i9-9900K
+  did not get to its desktop until it was patched.
 
 `tools/win9x/vm.sh` runs the VM headless under plain QEMU on the build host: start, stop,
 screenshots, keys, typed text, a folder shared as drive D:, COM1 and the debug port in files.

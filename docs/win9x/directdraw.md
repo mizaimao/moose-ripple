@@ -1475,7 +1475,8 @@ them waiting in the cache of released buffers, 12 to 35 MB of vertex buffers, a 
 for vertices from user memory. In the second CPU test it reaches 153 MB, 135 MB of it chunks
 for the vertices the runtime hands over each frame, and 130 MB of that named by commands that
 have not been sent yet: a whole frame's uploads wait in one batch. Textures hold 4 KB each.
-Not changed here; it is issue 336.
+Limited since (issue 336, [mesa.md](mesa.md#buffers-that-only-wait-2026-11-27)): the most a whole
+benchmark holds is 70 MB now, the level of the game tests.
 
 Three new `d9pixels` cases go with the change: `update_texture` (117: a texture in system
 memory fills two of the default pool and is painted again without an update; each must keep

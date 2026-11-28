@@ -73,6 +73,19 @@
 
 #define CACHE_TIMEOUT_USEC      1000000
 
+/* The memory behind a buffer is locked in the guest for as long as the buffer lives (the host
+ * reads and writes it), so buffers that only wait must not pile up. Two limits, in bytes, both
+ * for Windows 9x only (issue 336):
+ *  - what the unsent commands name of buffers made, or taken from the cache, since the last
+ *    commands went (the chunks vertices from user memory go through, the staging buffers of
+ *    texture uploads, buffers filled anew): past it Mesa is told to send the commands now
+ *    (rvd_cmd_buf_is_heavy). 3DMark03's second CPU test held 130 MB this way, a whole frame's
+ *    vertices. Buffers from before (a scene's vertex buffers, used frame after frame) do not
+ *    count, or a scene with many of them would send after every draw;
+ *  - what the cache of released buffers holds: past it a released buffer is destroyed. */
+#define RVD_BATCH_LIMIT         (16u << 20)
+#define RVD_CACHE_LIMIT         (16u << 20)
+
 struct rvd_winsys {
    struct virgl_winsys base;
    HANDLE dev;
@@ -92,6 +105,7 @@ struct rvd_winsys {
    uint32_t held[5], held_count;
    uint32_t held_cache, held_batch;    /* of it: waiting in the cache; named by unsent commands */
    uint32_t held_peak;
+   uint32_t epoch;                     /* counts the submits (virgl_hw_res.epoch) */
 
    /* The gamma ramp's lookup pass (copy_through_ramp): a context of its own, made when a ramp
     * is first in force. */
@@ -112,6 +126,7 @@ struct virgl_hw_res {
    uint32_t bind;
    uint32_t size;                      /* as requested */
    uint32_t held;                      /* bytes of guest memory behind it */
+   uint32_t epoch;                     /* the winsys's when it was made or last left the cache */
    uint32_t format;                    /* virgl_formats */
    uint32_t width, height;
    void *ptr;                          /* the buffer's memory */
@@ -132,6 +147,8 @@ struct rvd_cmd_buf {
 
    unsigned nres, cres;
    struct virgl_hw_res **res;
+   uint32_t held;                      /* guest memory behind the listed resources, bytes */
+   uint32_t held_new;                  /* ...of those made or taken from the cache since the last submit */
    char is_added[512];
    unsigned hash_index[512];
 };
@@ -297,8 +314,9 @@ static void rvd_resource_reference(struct virgl_winsys *vws, struct virgl_hw_res
    struct virgl_hw_res *old = *dres;
 
    if (pipe_reference(old ? &old->reference : NULL, sres ? &sres->reference : NULL)) {
-      if (!can_cache_resource(old->bind)) {
-         rvd_hw_res_destroy(ws, old);
+      if (!can_cache_resource(old->bind) ||
+          (!ws->nt && ws->held_cache + old->held > RVD_CACHE_LIMIT)) {
+         rvd_hw_res_destroy(ws, old);   /* (or the cache holds enough locked memory already) */
       } else {
          simple_mtx_lock(&ws->cache_mutex);
          ws->held_cache += old->held;
@@ -361,6 +379,7 @@ rvd_resource_create_new(struct rvd_winsys *ws, struct virgl_resource_params para
    res->bind = params.bind;
    res->size = params.size;
    res->held = ((bc.size + 4095) >> 12) << 12;
+   res->epoch = ws->epoch;
    ws->held[rvd_held_kind(res->bind)] += res->held;
    ws->held_count++;
    rvd_held_peak(ws);
@@ -399,6 +418,7 @@ rvd_resource_create(struct virgl_winsys *vws, enum pipe_texture_target target,
       if (entry) {
          struct virgl_hw_res *res = cache_entry_container_res(entry);
          ws->held_cache -= res->held;
+         res->epoch = ws->epoch;
          pipe_reference_init(&res->reference, 1);
          return res;
       }
@@ -514,6 +534,8 @@ static void rvd_clear_res_list(struct rvd_cmd_buf *cbuf)
       p_atomic_dec(&cbuf->res[i]->num_cs_references);
       rvd_resource_reference(&cbuf->ws->base, &cbuf->res[i], NULL);
    }
+   cbuf->held = cbuf->held_new = 0;
+   cbuf->ws->epoch++;
    cbuf->cres = 0;
    memset(cbuf->is_added, 0, sizeof(cbuf->is_added));
 }
@@ -578,6 +600,9 @@ static void rvd_add_res(struct rvd_cmd_buf *cbuf, struct virgl_hw_res *res)
    res->cs = cbuf;
    res->cs_index = cbuf->cres;
    cbuf->ws->held_batch += res->held;
+   cbuf->held += res->held;
+   if (res->epoch == cbuf->ws->epoch)
+      cbuf->held_new += res->held;
    p_atomic_inc(&res->num_cs_references);
    cbuf->cres++;
 }
@@ -592,6 +617,17 @@ static void rvd_emit_res(struct virgl_winsys *vws, struct virgl_cmd_buf *_cbuf,
       cbuf->base.buf[cbuf->base.cdw++] = res->res_handle;
    if (!listed)
       rvd_add_res(cbuf, res);
+}
+
+/* Mesa asks after a draw and after an upload through a staging buffer (virgl_flush_if_heavy):
+ * should these commands go to the host now? Yes when they name more than RVD_BATCH_LIMIT of
+ * guest memory in buffers made or taken from the cache since the last commands went: those are
+ * the ones that only wait for the commands, and sending lets them go. (Whether anything else
+ * still holds a buffer does not tell: Mesa's own queue of uploads holds every chunk until the
+ * commands go.) */
+static bool rvd_cmd_buf_is_heavy(struct virgl_winsys *vws, struct virgl_cmd_buf *_cbuf)
+{
+   return !rvd_winsys(vws)->nt && rvd_cmd_buf(_cbuf)->held_new > RVD_BATCH_LIMIT;
 }
 
 static bool rvd_res_is_referenced(struct virgl_winsys *vws, struct virgl_cmd_buf *cbuf,
@@ -1214,6 +1250,7 @@ static struct virgl_winsys *rvd_winsys_create(void)
    ws->base.resource_map = rvd_resource_map;
    ws->base.resource_wait = rvd_resource_wait;
    ws->base.resource_is_busy = rvd_resource_is_busy;
+   ws->base.cmd_buf_is_heavy = rvd_cmd_buf_is_heavy;
    ws->base.resource_create_from_handle = rvd_resource_create_from_handle;
    ws->base.resource_set_type = rvd_resource_set_type;
    ws->base.resource_get_handle = rvd_resource_get_handle;

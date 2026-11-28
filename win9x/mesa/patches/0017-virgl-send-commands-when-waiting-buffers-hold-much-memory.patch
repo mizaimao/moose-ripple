@@ -1,0 +1,79 @@
+diff -ruN a/src/gallium/drivers/virgl/virgl_buffer.c b/src/gallium/drivers/virgl/virgl_buffer.c
+--- a/src/gallium/drivers/virgl/virgl_buffer.c
++++ b/src/gallium/drivers/virgl/virgl_buffer.c
+@@ -51,6 +51,7 @@
+       if (trans->copy_src_hw_res && trans->direction == VIRGL_TRANSFER_TO_HOST) {
+          virgl_encode_copy_transfer(vctx, trans);
+          virgl_resource_destroy_transfer(vctx, trans);
++         virgl_flush_if_heavy(vctx);            /* moose-ripple */
+       } else if (trans->copy_src_hw_res && trans->direction == VIRGL_TRANSFER_FROM_HOST) {
+          // if it is readback, then we have already encoded transfer
+          virgl_resource_destroy_transfer(vctx, trans);
+diff -ruN a/src/gallium/drivers/virgl/virgl_context.c b/src/gallium/drivers/virgl/virgl_context.c
+--- a/src/gallium/drivers/virgl/virgl_context.c
++++ b/src/gallium/drivers/virgl/virgl_context.c
+@@ -1048,6 +1048,7 @@
+ 
+    pipe_resource_reference(&ib.buffer, NULL);
+ 
++   virgl_flush_if_heavy(vctx);                  /* moose-ripple */
+ }
+ 
+ static void virgl_submit_cmd(struct virgl_winsys *vws,
+@@ -1066,6 +1067,21 @@
+    }
+ }
+ 
++/* moose-ripple: a buffer the unsent commands name keeps its memory in the guest until they are
++ * sent, also when Mesa itself has let go of it: the chunks vertices from user memory were
++ * uploaded through, the staging buffers of texture uploads. A frame that uploads much holds all
++ * of it at once (3DMark03's second CPU test: 130 MB), and with our winsys that memory is locked.
++ * The winsys says when what only waits has grown past its limit; the commands go then, as they
++ * would when their buffer is full. Asked after a draw and after an upload through a staging
++ * buffer. */
++void virgl_flush_if_heavy(struct virgl_context *ctx)
++{
++   struct virgl_winsys *vws = virgl_screen(ctx->base.screen)->vws;
++
++   if (vws->cmd_buf_is_heavy && vws->cmd_buf_is_heavy(vws, ctx->cbuf))
++      virgl_flush_eq(ctx, ctx, NULL);
++}
++
+ void virgl_flush_eq(struct virgl_context *ctx, void *closure,
+                     struct pipe_fence_handle **fence)
+ {
+diff -ruN a/src/gallium/drivers/virgl/virgl_context.h b/src/gallium/drivers/virgl/virgl_context.h
+--- a/src/gallium/drivers/virgl/virgl_context.h
++++ b/src/gallium/drivers/virgl/virgl_context.h
+@@ -146,5 +146,6 @@
+                       struct pipe_resource *res);
+ 
+ void virgl_flush_eq(struct virgl_context *ctx, void *closure, struct pipe_fence_handle **fence);
++void virgl_flush_if_heavy(struct virgl_context *ctx);     /* moose-ripple */
+ 
+ #endif
+diff -ruN a/src/gallium/drivers/virgl/virgl_texture.c b/src/gallium/drivers/virgl/virgl_texture.c
+--- a/src/gallium/drivers/virgl/virgl_texture.c
++++ b/src/gallium/drivers/virgl/virgl_texture.c
+@@ -298,6 +298,7 @@
+       if (trans->copy_src_hw_res && trans->direction == VIRGL_TRANSFER_TO_HOST) {
+          virgl_encode_copy_transfer(vctx, trans);
+          virgl_resource_destroy_transfer(vctx, trans);
++         virgl_flush_if_heavy(vctx);            /* moose-ripple */
+       } else if (trans->copy_src_hw_res && trans->direction == VIRGL_TRANSFER_FROM_HOST) {
+          // if it is readback, then we have already encoded transfer
+          virgl_resource_destroy_transfer(vctx, trans);
+diff -ruN a/src/gallium/drivers/virgl/virgl_winsys.h b/src/gallium/drivers/virgl/virgl_winsys.h
+--- a/src/gallium/drivers/virgl/virgl_winsys.h
++++ b/src/gallium/drivers/virgl/virgl_winsys.h
+@@ -121,6 +121,10 @@
+                              struct virgl_cmd_buf *buf,
+                              struct virgl_hw_res *res);
+ 
++   /* moose-ripple: optional. Do the buffers that only wait for these commands to be sent hold
++    * so much of the guest's memory that the commands should go now? (virgl_flush_if_heavy) */
++   bool (*cmd_buf_is_heavy)(struct virgl_winsys *vws, struct virgl_cmd_buf *buf);
++
+    int (*get_caps)(struct virgl_winsys *vws, struct virgl_drm_caps *caps);
+ 
+    /* fence */
