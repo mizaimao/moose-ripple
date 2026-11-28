@@ -69,8 +69,37 @@ Full-screen Direct3D games
 By default, 3D rendering runs on the host and the finished frame is
 shown from the GPU for full-screen programs. RIPPLE_D3D_SCANOUT=0 in a
 Windows DOS prompt, before starting the program from that prompt, copies
-each frame to the guest VGA display instead. For DOS games using planar
-VGA or custom display starts, boot Windows fresh.
+each frame to the guest VGA display instead (much slower: every frame
+is read back). For DOS games using planar VGA or custom display starts,
+boot Windows fresh.
+
+What is tested, and what is not
+
+Developed and measured on Windows 98 Second Edition. Tested there:
+3DMark 2000, 3DMark 2001 SE and 3DMark03 (every test runs and draws),
+seven demos of the time through OpenGL and Direct3D 7 (Quake III Arena,
+Unreal Tournament, Half-Life: Uplink, Serious Sam, Expendable, Re-Volt,
+Tomb Raider: The Last Revelation) and the project's own pixel tests,
+which are compared with Microsoft's reference rasterizer.
+
+Not tested: Direct3D 8 and 9 on Windows 95 and Windows Me, and
+Direct3D 8 and 9 games (those paths have run benchmarks and tests
+only). Most games of the time have not been tried.
+
+Speed: 3DMark03 3.1.3 at its defaults on a Windows 98 SE guest with one
+processor and 256 MB, frames a second on a Core i9-9900K with Intel
+UHD 630 (a GeForce 9600 GT in a Windows XP guest in brackets): game
+tests 289.0, 197.9, 176.2, 205.9 (974.0, 290.6, 194.9, 163.1), CPU tests
+189.2 and 31.7 (462.7, 101.4), 25698 3DMarks (33348). The guest's one
+processor is the limit in every scene, not the host's GPU. The display
+is updated about 57 times a second; frames in between are rendered and
+not shown, as with vsync off. docs/win9x/directdraw.md has the whole
+check.
+
+Known gaps: no shader model 3.0; no Windows desktop over 8 MB of video
+memory (1600x1200 at 32 bits is the largest); Direct3D 8 programs
+keep each managed texture twice in guest memory, so give such a guest
+512 MB if it pages.
 
 Source and installation guide
 

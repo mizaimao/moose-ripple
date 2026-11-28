@@ -1513,6 +1513,91 @@ picture for them and they are judged by their samples and the skip counts alone
 Why the reference rasterizer differs in the two on Windows 98 is not known. One guess was checked
 and did not hold: with 512 MB instead of 256 it still fails the far-light case.
 
+#### The result checked from the host (2026-11-27)
+
+A second test host showed a third of the first host's result on the same build, so the result
+was checked from outside the guest on both. (The low result was a run with
+`RIPPLE_D3D_SCANOUT=0` left on from taking pictures; the last table has that mode.)
+
+Both hosts ran the same four driver files (compared byte for byte with one CD image, the head
+of the day), 3DMark03 3.1.3 at its defaults (1024x768, no anti-aliasing, optimal texture
+filtering), a copy of the same guest disk with DMA on, KVM, one processor, 256 MB,
+`virtio-vga-gl`, `-rtc base=localtime,driftfix=slew`. The second host's processor needs the
+guest patched with patcher9x ([display-driver.md](display-driver.md#test-vm-notes)). Skip
+counts 0 after every run. Each scene from the benchmark's Details window, the host to itself:
+
+| Scene | GeForce 9600 GT, Windows XP guest | Core i9-9900K, Intel UHD 630 | Core i7-1160G7, Intel Iris Xe |
+|---|---:|---:|---:|
+| Game test 1, Wings of Fury, fps | 974.0 | 289.0 (30%) | 279.6 (29%) |
+| Game test 2, Battle of Proxycon, fps | 290.6 | 197.9 (68%) | 238.9 (82%) |
+| Game test 3, Troll's Lair, fps | 194.9 | 176.2 (90%) | 163.0 (84%) |
+| Game test 4, Mother Nature, fps | 163.1 | 205.9 (126%) | 181.1 (111%) |
+| CPU test 1 (640x480), fps | 462.7 | 189.2 (41%) | 142.2 (31%) |
+| CPU test 2 (640x480), fps | 101.4 | 31.7 (31%) | 27.1 (27%) |
+| CPU score | | 1743 | 1398 |
+| Fill rate, single / multi texturing, MTexels/s | | 7743.7 / 16274.1 (too high, see below) | 11650.6 / 22828.2 |
+| Vertex shader, fps | | 63.0 | 53.3 |
+| Pixel shader 2.0, fps | | 678.3 (too high, see below) | 797.9 |
+| Ragtroll, fps | | 117.9 | 95.2 |
+| 3DMarks | 33348 | 25698 | 25569 |
+
+Furthest behind the card are CPU test 2, game test 1 and CPU test 1: the scenes with the most
+work for the guest's processor in each frame (many small draws; in the CPU tests the runtime
+runs the vertex shaders itself and hands over every vertex each frame).
+
+Measured on the host through each run: the guest's debug lines stamped with the host's clock
+(the page counter writes one a second by the guest's clock), the GPU time and, on the first
+host, the GPU requests the kernel counts for the QEMU process, the CPU time of each QEMU
+thread, and the GPU's clock. A second pass on each host adds a screenshot every second, from
+which the benchmark's own time and frame counter were read at two points of each scene.
+
+| Scene | Guest clock / host clock, first and second host | Benchmark's frame counter / driver's page flips | vCPU thread, share of one core | First host: GPU busy | Second host: GPU clock of 1100 MHz |
+|---|---|---|---|---:|---:|
+| Game test 1 | 0.999, 1.000 | 1.003, 1.003 | 103%, 104% | 37% | 235 |
+| Game test 2 | 0.993, 0.999 | 1.000, 1.000 | 95%, 94% | 76% | 492 |
+| Game test 3 | 0.995, 0.999 | 1.001, 1.002 | 96%, 96% | 74% | 315 |
+| Game test 4 | 0.997, 1.000 | 1.001, 0.998 | 92%, 96% | 75% | 245 |
+| CPU test 1 | 1.000, 0.999 | 1.002, 1.001 | 105%, 95% | 16% | 80 |
+| CPU test 2 | 0.998, 0.997 | 1.001, 0.997 | 94%, 97% | 13% | 43 |
+
+- **The limit is the guest's one processor.** Its thread is at 92 to 105 percent of a core in
+  every scene on both hosts; QEMU's main thread, which executes the drawing commands, takes 19
+  to 27 percent of another; neither GPU is full. The work to save is on the guest's side of each
+  draw: the Direct3D runtime, this driver and Mesa in the guest.
+- **The frames counted are frames drawn.** The benchmark's frame counter and the driver's page
+  flips agree within 0.3 percent over the same host seconds. The display gets the newest
+  finished frame about 57 times a second (the mini-VDD's 60 Hz timer), one flip in four to
+  seven in the game tests, like a monitor with vsync off. The frames in between are rendered:
+  for every counted frame the kernel sees 3.0 to 6.2 GPU requests completed and 0.8 to 4.8 ms
+  of GPU time, and in frame-copy mode, where every frame's pixels are fetched and so must
+  exist, it is 3.3 to 4.9 requests and 1.2 to 6.0 ms, the difference being the read-back. The
+  scenes the GPU limits are also faster on the second host's faster GPU (fill rate 1.5 and 1.4
+  times, pixel shader 1.18, game test 2 1.21) while the processor-bound ones are slower there.
+  The host has no counter of frames; the count is the benchmark's and the driver's.
+- **Pictures.** 640 screenshots a second apart on each host: every one taken inside a test
+  differs from all others (540 and 512 distinct); the repeats are the desktop before the
+  start, black and loading screens, and the score window.
+- **A fault on the first host:** its guest clock runs slow in the three tests the GPU limits
+  (fill rate single 0.82, multi 0.80, pixel shader 2.0 0.79 of the host's time), so those
+  three numbers are too high there; by those ratios about 6330 and 13020 MTexels/s and
+  536 fps. The second host's clock is right in them. They are not part of the 3DMark score.
+  The same kind of fault as in 3DMark 2000's fill rate test (issue 322).
+- Game test 4 above the card's figure: the checks cover it like the others. A guess, not
+  checked: the card's run was limited by its guest's processor in that scene; the same
+  measurements on a card run would settle it.
+
+With `RIPPLE_D3D_SCANOUT=0` (every frame read back and copied into the guest's frame buffer,
+the mode that lets QEMU's own screenshot see the picture), the same hosts and build:
+
+| Frame-copy mode | Core i9-9900K, Intel UHD 630 | Core i7-1160G7, Intel Iris Xe |
+|---|---:|---:|
+| Game tests 1 to 4, fps | 94.2, 80.4, 72.4, 75.8 | 68.7, 59.8, 53.2, 57.3 |
+| CPU tests 1 and 2, fps | 110.1, 27.4 | 67.9, 21.4 |
+| 3DMarks | 10001 | 7435 |
+
+A result from that mode is not the driver's result: start a timed run from a prompt where the
+variable is not set.
+
 ### Vertex processing on the GPU (2026-11-26, `D3D8` = `"2"`)
 
 With the registry value at `"2"` the Direct3D 8 and 9 devices report hardware transform and
