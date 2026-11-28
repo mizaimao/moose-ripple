@@ -33,6 +33,9 @@
 #include "tgsi_arb.h"     /* that text as an ARB fragment program */
 #include "tnl_arb.h"      /* fixed-function vertex processing as an ARB vertex program */
 #include "vs_arb.h"       /* vertex shaders as ARB vertex programs */
+#ifdef RIPPLE_DEV_CHECKS
+#include "rvd.h"          /* the kernel driver's statistics, for the development line (dev_count) */
+#endif
 #include "d3d9_decl.h"    /* Direct3D 9 declarations in Direct3D 8's terms (win2k/), shared with Windows 2000 */
 #include "rippled3d.h"
 
@@ -156,29 +159,54 @@ DWORD WINAPI RippleFrames(void)
    lines fall between the frame counter's, which gives the rates. A benchmark that crawls without
    a skip is doing one of these again and again. */
 enum { DevMadeTnl, DevMadeVs, DevMadePs, DevPairGone, DevReadBack, DevTexUpload, DevBufUpload, DevKinds };
-static DWORD dev_made[DevKinds], dev_buf_kb, dev_said;
+static DWORD dev_made[DevKinds], dev_buf_kb, dev_direct, dev_direct_kb, dev_said;
+
+/* The guest memory the kernel driver holds for the host's textures and buffers, in KB, and how
+   many of them there are (RVD_GET_STATS). It is locked: what is held here cannot be paged out,
+   so the rest of the guest has that much less. */
+static DWORD dev_locked_kb(DWORD *buffers)
+{
+    struct rvd_stats st;
+    DWORD got = 0, kb = 0;
+    HANDLE h = CreateFile(RVD_DEVICE_NAME, 0, 0, NULL, OPEN_EXISTING, 0, NULL);
+
+    *buffers = 0;
+    if (h == INVALID_HANDLE_VALUE)
+        return 0;
+    if (DeviceIoControl(h, RVD_GET_STATS, NULL, 0, &st, sizeof st, &got, NULL) && got == sizeof st) {
+        kb = st.buffer_pages * 4;
+        *buffers = st.buffers;
+    }
+    CloseHandle(h);
+    return kb;
+}
 
 static void dev_count(int kind)
 {
-    char line[300];
-    DWORD now;
+    char line[520];
+    DWORD now, held, locked;
 
     dev_made[kind]++;
     now = GetTickCount();
     if (now - dev_said < 1000)
         return;
     dev_said = now;
+    locked = dev_locked_kb(&held);
     wsprintf(line, "rd3d: so far: programs made %lu fixed-function vertex, %lu vertex shader, %lu pixel shader; "
-             "%lu shader pairs given up; %lu read-backs; %lu texture uploads; %lu buffer uploads, %lu KB\r\n",
+             "%lu shader pairs given up; %lu read-backs; %lu texture uploads; %lu buffer uploads, %lu KB; "
+             "%lu KB of guest memory locked for %lu host textures and buffers; "
+             "%lu texture blits straight to the GPU, %lu KB\r\n",
              dev_made[DevMadeTnl], dev_made[DevMadeVs], dev_made[DevMadePs], dev_made[DevPairGone],
-             dev_made[DevReadBack], dev_made[DevTexUpload], dev_made[DevBufUpload], dev_buf_kb);
+             dev_made[DevReadBack], dev_made[DevTexUpload], dev_made[DevBufUpload], dev_buf_kb, locked, held, dev_direct, dev_direct_kb);
     dbg(line);
 }
 #define DEV_COUNT(kind) dev_count(kind)
 #define DEV_BUFFER_BYTES(n) (dev_buf_kb += (DWORD)(n) >> 10)
+#define DEV_DIRECT_BYTES(n) (dev_direct++, dev_direct_kb += ((DWORD)(n) + 1023) >> 10)
 #else
 #define DEV_COUNT(kind)
 #define DEV_BUFFER_BYTES(n)
+#define DEV_DIRECT_BYTES(n)
 #endif
 
 /* Measure presents independently: a GPU flip normally has no read-back to sample. */
@@ -1436,6 +1464,9 @@ typedef struct {
     int dirty;                          /* written since (Lock, texture blit) */
     DWORD lower;                        /* a lightweight mipmap: the handle of the system-memory texture
                                            whose levels below the top it is drawn with (texture_levels) */
+    int gpu_only;                       /* its picture went from a system-memory texture straight to the
+                                           GPU and is nowhere in the surface's own memory
+                                           (tex_blt_direct) */
 } TEXTURE;
 
 #define TARGETS  16                     /* colour buffers a context keeps (gpu_buffer): a flip chain
@@ -2658,8 +2689,8 @@ static void texture_evict(RCTX *c, DWORD keep)
     int s;
 
     for (i = 1; i < c->ntex; i++) {
-        if (!c->tex[i].name || i == keep || c->tex[i].scene >= when)
-            continue;
+        if (!c->tex[i].name || i == keep || c->tex[i].gpu_only || c->tex[i].scene >= when)
+            continue;                   /* (gpu_only: it could not be made again) */
         for (s = 0; s < SAMPLERS && c->bound[s] != i; s++)
             ;
         if (s < SAMPLERS)
@@ -3094,6 +3125,13 @@ static int texture_from_gpu(RCTX *c, DWORD h, TEXTURE *t, LPDDRAWI_DDRAWSURFACE_
     return 1;
 }
 
+static int same_format(const DDPIXELFORMAT *a, const DDPIXELFORMAT *b)
+{
+    return a->dwFlags == b->dwFlags && a->dwFourCC == b->dwFourCC && a->dwRGBBitCount == b->dwRGBBitCount &&
+           a->dwRBitMask == b->dwRBitMask && a->dwGBitMask == b->dwGBitMask && a->dwBBitMask == b->dwBBitMask &&
+           a->dwRGBAlphaBitMask == b->dwRGBAlphaBitMask;
+}
+
 /* A texture's levels for uploading. A Direct3D 9 runtime makes the video-memory copy of a
    mipmapped texture it manages as one surface (DDSCAPS3_LIGHTWEIGHTMIPMAP) and leaves the levels
    below the top to the driver. They are read from the system-memory texture the runtime fills
@@ -3113,9 +3151,7 @@ static DWORD texture_levels(RCTX *c, TEXTURE *t, LPDDRAWI_DDRAWSURFACE_LCL s, LP
         if (n > 1 && fl[0]->lpGbl->wWidth == s->lpGbl->wWidth && fl[0]->lpGbl->wHeight == s->lpGbl->wHeight) {
             surface_format(s, &a);
             surface_format(from, &b);
-            if (a.dwFlags == b.dwFlags && a.dwFourCC == b.dwFourCC && a.dwRGBBitCount == b.dwRGBBitCount &&
-                a.dwRBitMask == b.dwRBitMask && a.dwGBitMask == b.dwGBitMask && a.dwBBitMask == b.dwBBitMask &&
-                a.dwRGBAlphaBitMask == b.dwRGBAlphaBitMask) {
+            if (same_format(&a, &b)) {
                 for (l = 1; l < n; l++)
                     lv[l] = fl[l];
                 return n;
@@ -3151,6 +3187,21 @@ static int texture_bind(RCTX *c, DWORD h, int stage)
         GPUBUF *b = gpu_picture(c, g->fpVidMem);     /* rendered into, still on the GPU */
         if (b)
             return texture_from_gpu(c, h, t, s, b, st);
+    }
+    if (t->gpu_only) {                 /* filled on the GPU by the blits themselves (tex_blt_direct) */
+        if (!t->dirty && t->name && t->mem == g->fpVidMem && t->w == g->wWidth && t->h == g->wHeight) {
+            gl->BindTexture(GL_TEXTURE_2D, t->name);
+            t->scene = c->scene;
+            sampler_2d(gl, st, t->levels);
+            return 1;
+        }
+        /* Its memory was written after all (a Lock), where the picture never was: what follows
+           uploads that memory, and the count says the picture may be wrong. */
+        if (t->name && t->mem == g->fpVidMem) {
+            tracef("rd3d: texture %lx: memory written although its picture is on the GPU only\r\n", h);
+            SKIPPED(SKIP_TEXTURE);
+        }
+        t->gpu_only = 0;
     }
     surface_format(s, &pf);
     f = gl_format(&pf);
@@ -3499,6 +3550,8 @@ static int textures_changed(RCTX *c)
             continue;
         l = handle_get(c->ddl, h);
         t = &c->tex[h];
+        if (l && t->gpu_only && !t->dirty && l->lpGbl->fpVidMem == t->mem)
+            continue;                   /* changes reach it by blit only, and those upload at once */
         if (!l || l->lpGbl->fpVidMem != t->mem || texture_levels(c, t, l, lv) != t->levels ||
             texture_changed(c, t, l, chain_stamp(lv, t->levels)))
             return 1;
@@ -3516,14 +3569,17 @@ static void texture_forget(DWORD h)
 
     for (i = 0; i < MAX_CONTEXTS; i++) {
         RCTX *c = mine(&contexts[i].o, &m) ? contexts[i].c : NULL;
-        if (!c || h >= c->ntex || !c->tex[h].name)
+        if (!c || h >= c->ntex)
             continue;
-        make_current(c);
-        gl_of(c)->DeleteTextures(1, &c->tex[h].name);
-        let_go(c);
-        memset(&c->tex[h], 0, sizeof c->tex[h]);
-        c->ntextures--;
-        c->stages_dirty = 1;
+        if (c->tex[h].name) {
+            make_current(c);
+            gl_of(c)->DeleteTextures(1, &c->tex[h].name);
+            let_go(c);
+            c->ntextures--;
+            c->stages_dirty = 1;
+        }
+        memset(&c->tex[h], 0, sizeof c->tex[h]);    /* (also what a texture blit noted for a
+                                                       handle that was never drawn with) */
     }
 }
 
@@ -5889,6 +5945,144 @@ static DWORD WINAPI DestroyDDLocal(LPDDHAL_DESTROYDDLOCALDATA d)
     return DDHAL_DRIVER_HANDLED;
 }
 
+#define RB_DDSCAPS2_NOTUSERLOCKABLE 0x00400000UL
+
+/* One level's rectangle from a surface's memory into the same place of the bound texture's
+   level (the two are the same size). */
+static void texture_upload_rect(GLF *gl, const PIXFMT *f, const DDRAWI_DDRAWSURFACE_GBL *g, DWORD level,
+                                LONG left, LONG top, LONG x, LONG y, LONG w, LONG h)
+{
+    if (f->block) {                     /* DXT: every 4x4 block the rectangle touches, a row of blocks
+                                           at a time */
+        DWORD pitch = ((g->wWidth + 3) / 4) * f->block;
+        LONG bw = (left + w - 1) / 4 - left / 4 + 1, bh = (top + h - 1) / 4 - top / 4 + 1, i;
+        for (i = 0; i < bh; i++) {
+            LONG px = (x / 4) * 4, py = (y / 4 + i) * 4, pw = bw * 4, ph = 4;
+            if (pw > (LONG)g->wWidth - px)      /* (the last block of a level may stick out) */
+                pw = (LONG)g->wWidth - px;
+            if (ph > (LONG)g->wHeight - py)
+                ph = (LONG)g->wHeight - py;
+            gl->CompressedTexSubImage2D(GL_TEXTURE_2D, level, px, py, pw, ph, f->internal, bw * f->block,
+                                        (const GLvoid *)((BYTE *)g->fpVidMem + (top / 4 + i) * pitch +
+                                                         (left / 4) * f->block));
+        }
+        return;
+    }
+    gl->PixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    gl->PixelStorei(GL_UNPACK_ROW_LENGTH, g->lPitch / f->bytes);
+    gl->TexSubImage2D(GL_TEXTURE_2D, level, x, y, w, h, f->format, f->type,
+                      (const GLvoid *)((BYTE *)g->fpVidMem + top * g->lPitch + left * f->bytes));
+    gl->PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+}
+
+/* A Direct3D 9 runtime fills the textures it keeps in video memory itself, by a blit from a
+   texture in system memory: the working copies of the textures it manages, and the default
+   pool's through UpdateTexture. The program cannot lock them (DDSCAPS2_NOTUSERLOCKABLE), so
+   nothing reads their memory but the upload here. For those the picture goes from the source
+   straight to the texture on the GPU, at the moment of the blit as the copy would, and the
+   texture's own memory is never touched: in a guest that memory is one more copy of every
+   texture, in memory that is short already and has to be paged out to make room (issue 329).
+   The first blit must be the whole texture, which is how the runtime begins; later ones may be
+   parts. A Direct3D 8 runtime writes its copies itself; they stay as they were.
+   Returns 0 for the copy in memory. */
+static int tex_blt_direct(RCTX *c, const D3DHAL_DP2TEXBLT *b, LPDDRAWI_DDRAWSURFACE_LCL ds,
+                          LPDDRAWI_DDRAWSURFACE_LCL ss, const DDPIXELFORMAT *pf, const PIXFMT *f,
+                          const RECTL *r)
+{
+    GLF *gl = gl_of(c);
+    LPDDRAWI_DDRAWSURFACE_LCL dl[MAX_LEVELS], sl[MAX_LEVELS];
+    LPDDRAWI_DDRAWSURFACE_GBL dg = ds->lpGbl, sg = ss->lpGbl;
+    DDPIXELFORMAT dpf;
+    DWORD caps2 = ds->lpSurfMore ? ds->lpSurfMore->ddsCapsEx.dwCaps2 : 0;
+    DWORD caps3 = ds->lpSurfMore ? ds->lpSurfMore->ddsCapsEx.dwCaps3 : 0;
+    DWORD dn, sn, levels, l, fmt, moved = 0;
+    TEXTURE *t;
+    int whole, same;
+
+    if (!c->dx8 || !(caps2 & RB_DDSCAPS2_NOTUSERLOCKABLE) || !(ds->ddsCaps.dwCaps & DDSCAPS_TEXTURE) ||
+        (ds->ddsCaps.dwCaps & (DDSCAPS_3DDEVICE | DDSCAPS_ZBUFFER)) ||
+        !(ss->ddsCaps.dwCaps & DDSCAPS_SYSTEMMEMORY) || is_cube(ds) || is_volume(ds) || is_cube(ss) ||
+        is_volume(ss) || dg->wWidth != sg->wWidth || dg->wHeight != sg->wHeight ||
+        (f->block ? !gl->CompressedTexImage2D || !gl->CompressedTexSubImage2D : !f->bytes) ||
+        gpu_picture(c, dg->fpVidMem))
+        return 0;
+    surface_format(ds, &dpf);
+    if (!same_format(&dpf, pf))
+        return 0;
+    dn = mip_chain(ds, dl);
+    sn = mip_chain(ss, sl);
+    /* (a lightweight mipmap is one surface for all its levels: the source says how many) */
+    levels = (caps3 & RB_DDSCAPS3_LIGHTWEIGHTMIPMAP) ? sn : dn;
+    if (!levels || sn < levels || !(t = texture_slot(c, b->dwDDDestSurface)))
+        return 0;
+    fmt = f->internal ^ (f->format << 8) ^ (f->type << 16);
+    same = t->name && t->mem == dg->fpVidMem && t->w == dg->wWidth && t->h == dg->wHeight && t->fmt == fmt &&
+           t->levels == levels;
+    whole = r->left == 0 && r->top == 0 && r->right == (LONG)sg->wWidth && r->bottom == (LONG)sg->wHeight &&
+            b->pDest.x == 0 && b->pDest.y == 0;
+    if (!whole && !(same && t->gpu_only && !t->dirty))
+        return 0;                       /* a part, and the rest is not on the GPU */
+    if (!make_current(c))
+        return 0;
+    if (!t->name) {
+        if (c->ntextures >= TEXTURE_BUDGET)
+            texture_evict(c, b->dwDDDestSurface);
+        gl->GenTextures(1, &t->name);
+        c->ntextures++;
+    }
+    gl->BindTexture(GL_TEXTURE_2D, t->name);    /* on the unit in use: the stages are set again */
+    if (whole) {
+        texture_upload(gl, f, pf, sl, levels, !same, 0);
+        if (!same)
+            gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, levels - 1);
+        t->mem = dg->fpVidMem;
+        t->w = dg->wWidth;
+        t->h = dg->wHeight;
+        t->fmt = fmt;
+        t->levels = levels;
+        memset(t->fmem, 0, sizeof t->fmem);
+        for (l = 0; l < MAX_LEVELS; l++)
+            t->lmem[l] = l < dn ? dl[l]->lpGbl->fpVidMem : 0;
+        for (l = 0; l < levels; l++)
+            moved += f->block ? dxt_bytes(f, sl[l]->lpGbl->wWidth, sl[l]->lpGbl->wHeight)
+                              : (DWORD)sl[l]->lpGbl->wWidth * sl[l]->lpGbl->wHeight * f->bytes;
+    } else {
+        for (l = 0; l < levels; l++) {
+            const DDRAWI_DDRAWSURFACE_GBL *g = sl[l]->lpGbl;
+            LONG left = r->left >> l, top = r->top >> l, x = b->pDest.x >> l, y = b->pDest.y >> l;
+            LONG w = (r->right >> l) - left, h = (r->bottom >> l) - top;
+            if (w < 1)
+                w = 1;
+            if (h < 1)
+                h = 1;
+            if (left < 0 || top < 0 || x < 0 || y < 0 || left >= (LONG)g->wWidth || top >= (LONG)g->wHeight ||
+                x >= (LONG)g->wWidth || y >= (LONG)g->wHeight)
+                break;
+            if (w > (LONG)g->wWidth - left)
+                w = (LONG)g->wWidth - left;
+            if (w > (LONG)g->wWidth - x)
+                w = (LONG)g->wWidth - x;
+            if (h > (LONG)g->wHeight - top)
+                h = (LONG)g->wHeight - top;
+            if (h > (LONG)g->wHeight - y)
+                h = (LONG)g->wHeight - y;
+            texture_upload_rect(gl, f, g, l, left, top, x, y, w, h);
+            moved += f->block ? dxt_bytes(f, w, h) : (DWORD)w * h * f->bytes;
+        }
+        DEV_COUNT(DevTexUpload);
+    }
+    t->stamp = chain_stamp(dl, dn);
+    t->scene = c->scene;
+    t->dirty = 0;
+    t->lower = 0;
+    t->gpu_only = 1;
+    c->stages_dirty = 1;
+    DEV_DIRECT_BYTES(moved);
+    tracef("rd3d: texture blit %lx -> %lx straight to the GPU: %s, %lu levels, %lu bytes\r\n",
+           b->dwDDSrcSurface, b->dwDDDestSurface, whole ? "whole" : "a part", levels, moved);
+    return 1;
+}
+
 /* Copy a rectangle between two surfaces (DirectX 7's texture manager uses this). */
 static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
 {
@@ -5920,6 +6114,13 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
         r.left = r.top = 0;
         r.right = ss->lpGbl->wWidth;
         r.bottom = ss->lpGbl->wHeight;
+    }
+    if (tex_blt_direct(c, b, ds, ss, &pf, &f, &r))
+        return;
+    if (b->dwDDSrcSurface < c->ntex && c->tex[b->dwDDSrcSurface].gpu_only &&
+        c->tex[b->dwDDSrcSurface].mem == ss->lpGbl->fpVidMem) {
+        SKIPPED(SKIP_COPY);             /* the source's picture is on the GPU only (tex_blt_direct) */
+        return;
     }
     /* Mipmapped textures: every level the two have in common, with the rectangle and the
        point scaled to it (the DDK's rule for this command). */
@@ -5974,8 +6175,10 @@ static void tex_blt(RCTX *c, const D3DHAL_DP2TEXBLT *b)
     }                                   /* faces */
     if (c->dx8) {                       /* a lightweight mipmap takes its lower levels from the source */
         DWORD caps3 = ds->lpSurfMore ? ds->lpSurfMore->ddsCapsEx.dwCaps3 : 0;
-        tracef("rd3d: texture blit: target caps3 %08lx, source caps3 %08lx\r\n", caps3,
-               ss->lpSurfMore ? ss->lpSurfMore->ddsCapsEx.dwCaps3 : 0);
+        tracef("rd3d: texture blit: target caps %08lx %08lx %08lx flags %08lx, source caps %08lx %08lx %08lx flags %08lx\r\n",
+               ds->ddsCaps.dwCaps, ds->lpSurfMore ? ds->lpSurfMore->ddsCapsEx.dwCaps2 : 0, caps3, ds->dwFlags,
+               ss->ddsCaps.dwCaps, ss->lpSurfMore ? ss->lpSurfMore->ddsCapsEx.dwCaps2 : 0,
+               ss->lpSurfMore ? ss->lpSurfMore->ddsCapsEx.dwCaps3 : 0, ss->dwFlags);
         if (caps3 & RB_DDSCAPS3_LIGHTWEIGHTMIPMAP) {
             TEXTURE *t = texture_slot(c, b->dwDDDestSurface);
             if (t)
