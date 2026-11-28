@@ -1413,6 +1413,84 @@ result; no slowdown shows). The vertex shader test fell
 into the gap between two series of captures: the driver's log has it running in its own device
 and making its shaders, but its picture was not looked at in this pass.
 
+**The long loads on a small guest: the disk, and textures kept twice (2026-11-27, issue 329).**
+After the surface memory change the fourth game test still loaded for more than two minutes
+on the guest of 256 MB, and the second CPU test for two and a half. Three things were measured.
+
+*The disk.* The host's count of what the guest reads and writes on its disk, taken every ten
+seconds through a run, shows a steady 7 MB written in each ten seconds through both waits,
+about 120 MB at game test 4 and about 130 MB at the CPU test. Windows is paging memory out,
+and 0.7 MB a second is all a Windows 98 disk writes without DMA (the host sees 512 bytes a
+write). Windows 98 leaves DMA off. With it on for the disk (`display-driver.md`, Install; the
+host then sees about 20 KB a write), the same run on the same driver, a capture every ten
+seconds in both:
+
+| 3DMark03, guest of 256 MB | DMA off | DMA on |
+|---|---:|---:|
+| Black screen before game test 4 | about 140 s | under 20 s |
+| Black screen before the second CPU test | about 150 s | under 20 s |
+| From the start to the score | about 870 s | about 580 s |
+| The benchmark's result | 17111 | 24925 |
+
+Timed, the host to itself, no captures: **25277 3DMarks** on the head of `windows` with DMA on.
+The last timed result, 16781, was with DMA off and before the mipmap fix; the two columns
+above are the fair pair. Every number of this section from here on is with DMA on.
+
+*Textures twice in memory.* A Direct3D 9 runtime fills the textures it keeps in video memory
+itself, by a blit from a texture in system memory: the working copies of the textures it
+manages, and the default pool's through `UpdateTexture`. On this driver that video memory is
+guest memory, so every such texture was in the guest twice, and the second copy was written
+once and then only uploaded. The program cannot lock these textures; their surfaces say so
+(`DDSCAPS2_NOTUSERLOCKABLE`, read from a trace: the copies of managed textures and the targets
+of `UpdateTexture` both carry it). For those the blit now uploads from the source straight to
+the texture on the GPU, at the moment of the blit as the copy would, and the texture's own
+memory is never touched (`tex_blt_direct`). The first blit must be the whole texture, later
+ones may be parts; a texture filled this way is never given up for room, since it could not be
+made again. A Direct3D 8 runtime writes its copies itself (no blit reaches the driver), so
+Direct3D 8 programs keep both copies.
+
+| 3DMark03, guest of 256 MB, DMA on, a capture every ten seconds | before | textures straight to the GPU |
+|---|---:|---:|
+| Written to disk by the guest during the run | 369 MB | 162 MB |
+| Read from disk during the run | 750 MB | 580 MB |
+| Captures of a black screen before game test 3, game test 4, the second CPU test | 1, 1, 1 | 0, 0, 0 |
+| The benchmark's result | 24925 | 25424 |
+| Timed, the host to itself, no captures | 25277 | **25721** |
+
+In one benchmark about 2,750 blits carry 2.2 GB of texture data this way. How the runs were
+checked: in both passes with captures every test draws, the vertex shader test included, with
+no capture the same as an earlier one inside a test; the benchmark's own time display advances
+49.5 to 49.8 seconds between captures that the host took 50 seconds apart, in each game test;
+the skip counts are 0 after every run; the pages flipped each second were read through the
+timed runs. One capture of the second timed run fell into the pixel shader test by mistake
+(the result is made of the game tests). The timed run was on the build before the last
+correction, which only changes how a part of a DXT texture counts its blocks when its
+rectangle is not on a block border.
+
+*Memory the OpenGL library locks.* The memory behind Mesa's buffers is locked, because the
+host reads and writes it; what is locked cannot be paged out. A development build now writes
+the amount once a second, and the library logs each new peak with what it is made of (`RVD_LOG`).
+In the game tests it reaches 71 MB: 25 to 33 MB of staging buffers for texture uploads, most of
+them waiting in the cache of released buffers, 12 to 35 MB of vertex buffers, a few MB of chunks
+for vertices from user memory. In the second CPU test it reaches 153 MB, 135 MB of it chunks
+for the vertices the runtime hands over each frame, and 130 MB of that named by commands that
+have not been sent yet: a whole frame's uploads wait in one batch. Textures hold 4 KB each.
+Not changed here; it is issue 336.
+
+Three new `d9pixels` cases go with the change: `update_texture` (117: a texture in system
+memory fills two of the default pool and is painted again without an update; each must keep
+what it was given), `managed_update` (118: a managed texture painted again between draws, a
+part and then all of it) and `managed_update_dxt` (119: the same with DXT1, whose parts travel
+as blocks). All three pass before and after the change and match the reference rasterizer.
+A repaint under `D3DLOCK_NO_DIRTY_UPDATE` was tried in 118 and taken out: a card goes on
+drawing the old picture, the reference rasterizer draws the new one.
+
+The shared tests on the final build (the same host and guest, the automatic checks on):
+`d9pixels` 125 of 125 with hardware vertex processing (3 cases new since 122 of 122) and 123 of
+123 with software vertex processing, `d8pixels` 51 of 51, `tpixels` 18 of 18 cases with 14 of
+14 pictures through the HAL device and the T&L HAL device, `tfog` 10 of 10 on both and 9 of 9
+on the RGB device, `tlight` 15 of 15, `tstage` 9 of 9 on both (none new in these), skips 0.
+
 Tests on Windows 98 SE (DirectX 9.0c) on the build with the last fix, with the automatic checks
 of the shared tests on (skip counts, and each picture against Microsoft's reference rasterizer):
 `d9pixels` 117 of 117 with hardware vertex processing (1 case new since 115 of 116:

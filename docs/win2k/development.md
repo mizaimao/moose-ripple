@@ -3128,6 +3128,14 @@ under the two rules goes to the stage program instead of the combiner
 Direct3D 9 reference rasterizer only; Direct3D 8 draws get it too, which is a guess until a
 `d8pixels` case measures it.
 
+`d9pixels` cases 117 to 119 came from the Windows 9x side (2026-11-27) and have not been run on
+Windows 2000 or XP yet: `update_texture` (a texture in system memory fills two of the default
+pool through `UpdateTexture` and is painted again without an update; each must keep what it was
+given), `managed_update` (a managed texture painted again between draws, a part and then all of
+it) and `managed_update_dxt` (the same with DXT1). They pin down what a texture blit must carry
+before a driver stops keeping a copy of the texture in its own memory
+(`docs/win9x/directdraw.md`, issue 329).
+
 ## A full-screen back buffer with alpha: 3DMark03's CPU Test 2
 
 3DMark03's CPU Test 2 is Troll's Lair at 640x480 with software vertex shaders and version 1.1

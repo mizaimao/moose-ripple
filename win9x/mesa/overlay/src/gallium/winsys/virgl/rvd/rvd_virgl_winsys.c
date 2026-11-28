@@ -86,6 +86,13 @@ struct rvd_winsys {
    struct virgl_resource_cache cache;
    simple_mtx_t cache_mutex;
 
+   /* The guest memory behind the resources, by use (rvd_held_kind). The VxD keeps it locked:
+    * what is held here the rest of the guest cannot use, and cannot page out. For the log's
+    * line on the most that was held (rvd_held_peak). */
+   uint32_t held[5], held_count;
+   uint32_t held_cache, held_batch;    /* of it: waiting in the cache; named by unsent commands */
+   uint32_t held_peak;
+
    /* The gamma ramp's lookup pass (copy_through_ramp): a context of its own, made when a ramp
     * is first in force. */
    simple_mtx_t gamma_mutex;
@@ -104,6 +111,7 @@ struct virgl_hw_res {
    uint32_t res_handle;                /* the RVD buffer handle = virgl resource id */
    uint32_t bind;
    uint32_t size;                      /* as requested */
+   uint32_t held;                      /* bytes of guest memory behind it */
    uint32_t format;                    /* virgl_formats */
    uint32_t width, height;
    void *ptr;                          /* the buffer's memory */
@@ -130,6 +138,16 @@ struct rvd_cmd_buf {
 
 #define cache_entry_container_res(ptr) \
    (struct virgl_hw_res *)((char *)(ptr) - offsetof(struct virgl_hw_res, cache_entry))
+
+static void rvd_held_peak(struct rvd_winsys *ws);
+
+static inline unsigned rvd_held_kind(uint32_t bind)
+{
+   return bind == VIRGL_BIND_VERTEX_BUFFER ? 0 :
+          bind == VIRGL_BIND_INDEX_BUFFER ? 1 :        /* Mesa's chunks for vertices from user memory */
+          bind == VIRGL_BIND_CONSTANT_BUFFER ? 2 :
+          bind == VIRGL_BIND_STAGING ? 3 : 4;          /* 4: textures and render targets */
+}
 
 static inline struct rvd_winsys *rvd_winsys(struct virgl_winsys *vws)
 {
@@ -257,6 +275,8 @@ static void rvd_hw_res_destroy(struct rvd_winsys *ws, struct virgl_hw_res *res)
    rvd_u32 handle = res->res_handle;
 
    RVD_LOG("destroy %u\n", res->res_handle);
+   ws->held[rvd_held_kind(res->bind)] -= res->held;
+   ws->held_count--;
    rvd_call(ws, RVD_BUFFER_DESTROY, &handle, sizeof(handle), NULL, 0);
    FREE(res);
 }
@@ -281,6 +301,7 @@ static void rvd_resource_reference(struct virgl_winsys *vws, struct virgl_hw_res
          rvd_hw_res_destroy(ws, old);
       } else {
          simple_mtx_lock(&ws->cache_mutex);
+         ws->held_cache += old->held;
          virgl_resource_cache_add(&ws->cache, &old->cache_entry);
          simple_mtx_unlock(&ws->cache_mutex);
       }
@@ -339,6 +360,10 @@ rvd_resource_create_new(struct rvd_winsys *ws, struct virgl_resource_params para
    res->ptr = buf.address;
    res->bind = params.bind;
    res->size = params.size;
+   res->held = ((bc.size + 4095) >> 12) << 12;
+   ws->held[rvd_held_kind(res->bind)] += res->held;
+   ws->held_count++;
+   rvd_held_peak(ws);
    res->format = bc.format;
    res->width = params.width;
    res->height = params.height;
@@ -373,6 +398,7 @@ rvd_resource_create(struct virgl_winsys *vws, enum pipe_texture_target target,
       simple_mtx_unlock(&ws->cache_mutex);
       if (entry) {
          struct virgl_hw_res *res = cache_entry_container_res(entry);
+         ws->held_cache -= res->held;
          pipe_reference_init(&res->reference, 1);
          return res;
       }
@@ -484,6 +510,7 @@ static struct virgl_cmd_buf *rvd_cmd_buf_create(struct virgl_winsys *vws, uint32
 static void rvd_clear_res_list(struct rvd_cmd_buf *cbuf)
 {
    for (unsigned i = 0; i < cbuf->cres; i++) {
+      cbuf->ws->held_batch -= cbuf->res[i]->held;
       p_atomic_dec(&cbuf->res[i]->num_cs_references);
       rvd_resource_reference(&cbuf->ws->base, &cbuf->res[i], NULL);
    }
@@ -550,6 +577,7 @@ static void rvd_add_res(struct rvd_cmd_buf *cbuf, struct virgl_hw_res *res)
    cbuf->hash_index[hash] = cbuf->cres;
    res->cs = cbuf;
    res->cs_index = cbuf->cres;
+   cbuf->ws->held_batch += res->held;
    p_atomic_inc(&res->num_cs_references);
    cbuf->cres++;
 }
@@ -588,6 +616,23 @@ static bool rvd_cmd_buf_is_empty(const struct rvd_cmd_buf *cbuf)
       i += (head >> 16) + 1;
    }
    return true;
+}
+
+/* A line in the log each time the guest memory behind the resources passes its highest so far by
+ * 8 MB: how much, for what, and how much of it only waits (in the cache of released buffers, or
+ * for the commands that name it to be sent). */
+static void rvd_held_peak(struct rvd_winsys *ws)
+{
+   uint32_t all = ws->held[0] + ws->held[1] + ws->held[2] + ws->held[3] + ws->held[4];
+
+   if (all < ws->held_peak + (8u << 20))
+      return;
+   ws->held_peak = all;
+   RVD_LOG_ALWAYS("held %u KB for %u: vertex buffers %u KB, chunks for user vertices %u KB, constants %u KB, "
+                  "staging %u KB, textures and targets %u KB; in the cache %u KB, named by unsent "
+                  "commands %u KB\n", all >> 10, ws->held_count, ws->held[0] >> 10, ws->held[1] >> 10,
+                  ws->held[2] >> 10, ws->held[3] >> 10, ws->held[4] >> 10, ws->held_cache >> 10,
+                  ws->held_batch >> 10);
 }
 
 static int rvd_submit_cmd(struct virgl_winsys *vws, struct virgl_cmd_buf *_cbuf,
@@ -1061,6 +1106,9 @@ static bool rvd_cache_entry_is_busy(struct virgl_resource_cache_entry *entry, vo
 
 static void rvd_cache_entry_release(struct virgl_resource_cache_entry *entry, void *user)
 {
+   struct virgl_hw_res *res = cache_entry_container_res(entry);
+
+   ((struct rvd_winsys *)user)->held_cache -= res->held;
    rvd_hw_res_destroy(user, cache_entry_container_res(entry));
 }
 

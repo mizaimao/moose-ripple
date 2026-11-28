@@ -158,6 +158,14 @@ DirectDraw and Direct3D driver; these four `build.sh` makes, in `build/win9x/`) 
 - If Device Manager still lists the old card (with a warning sign), remove that entry: it
   can hold on to the VGA ports, and our adapter then reports "cannot find any free
   Input/Output Range" (Code 12).
+- **Switch DMA on for the guest's hard disk.** Windows 95, 98 and Me leave it off for an IDE
+  disk, and the guest then writes to its disk at about 0.7 MB a second (the host sees one
+  sector at a time). That is felt as soon as a program needs more memory than the guest has
+  and Windows starts paging, which a Direct3D 9 program on a guest of 256 MB does. In Device
+  Manager open Disk drives, the disk's Properties, the Settings tab, tick DMA and restart
+  Windows. Measured with 3DMark03 on a Windows 98 SE guest of 256 MB (2026-11-27,
+  `directdraw.md`): the wait before its fourth game test goes from about 140 seconds to under
+  20, and the timed result from 16781 to 25277.
 
 Then pick a monitor type that allows the sizes you want (Advanced > Monitor): with
 "(Unknown Monitor)" Display Properties offers 640x480 only (programs can still set any mode

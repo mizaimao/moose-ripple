@@ -3493,6 +3493,174 @@ static void stage_without_texture_case(int only)
         for (i = 0; i < 6; ++i) IDirect3DDevice9_SetTextureStageState(device, k, stateIds[i], keep[k][i]);
 }
 
+/* 117 and 118 paint 8x8 textures and draw them on quads of 32x32 pixels, point filtered: the left
+ * half of a quad shows the texture's columns 0 to 3 and the right half its columns 4 to 7. */
+static BOOL paint8(IDirect3DTexture9 *t, int x0, int x1, DWORD color, DWORD flags)
+{
+    D3DLOCKED_RECT r;
+    RECT rc;
+    int x, y;
+    rc.left = x0; rc.top = 0; rc.right = x1; rc.bottom = 8;
+    if (FAILED(IDirect3DTexture9_LockRect(t, 0, &r, &rc, flags))) return FALSE;
+    for (y = 0; y < 8; ++y) for (x = 0; x < x1 - x0; ++x) ((DWORD *)((BYTE *)r.pBits + y * r.Pitch))[x] = color;
+    IDirect3DTexture9_UnlockRect(t, 0);
+    return TRUE;
+}
+
+static HRESULT quad8(IDirect3DTexture9 *t, int n)
+{
+    struct { float x, y, z, rhw, u, v; } v[4];
+    int i;
+    for (i = 0; i < 4; ++i) {
+        v[i].x = n * 32.0f + (i & 1 ? 32.0f : 0.0f) - 0.5f;
+        v[i].y = (i & 2 ? 32.0f : 0.0f) - 0.5f;
+        v[i].z = 0.5f; v[i].rhw = 1.0f;
+        v[i].u = i & 1 ? 1.0f : 0.0f;
+        v[i].v = i & 2 ? 1.0f : 0.0f;
+    }
+    IDirect3DDevice9_SetTexture(device, 0, (IDirect3DBaseTexture9 *)t);
+    return IDirect3DDevice9_DrawPrimitiveUP(device, D3DPT_TRIANGLESTRIP, 2, v, sizeof(v[0]));
+}
+
+static void quad8_states(DWORD *keep, BOOL set)
+{
+    static const DWORD ids[4] = { D3DTSS_COLOROP, D3DTSS_COLORARG1, D3DTSS_ALPHAOP, D3DTSS_ALPHAARG1 };
+    static const DWORD values[4] = { D3DTOP_SELECTARG1, D3DTA_TEXTURE, D3DTOP_SELECTARG1, D3DTA_TEXTURE };
+    int i;
+    for (i = 0; i < 4; ++i) {
+        if (set) IDirect3DDevice9_GetTextureStageState(device, 0, ids[i], &keep[i]);
+        IDirect3DDevice9_SetTextureStageState(device, 0, ids[i], set ? values[i] : keep[i]);
+    }
+    if (set) {
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+        IDirect3DDevice9_SetSamplerState(device, 0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        IDirect3DDevice9_SetFVF(device, D3DFVF_XYZRHW | D3DFVF_TEX1);
+    } else IDirect3DDevice9_SetTexture(device, 0, NULL);
+}
+
+/* 117: UpdateTexture copies what the system-memory texture holds at that moment. One texture in
+ * system memory fills two of the default pool, red into the first and green into the second, and
+ * is then painted blue without another update: the first must still draw red and the second
+ * green. Then its left half is painted white and the first texture updated again, which takes
+ * the whole area painted since the last update: a third quad shows white and blue, and the first
+ * quad, drawn before, stays red. A driver that keeps a note of where a texture's picture came
+ * from instead of the picture draws the later colours. */
+static void update_texture_case(int only)
+{
+    static const SAMPLE s[] = { { 8, 16, 0xff0000 }, { 24, 16, 0xff0000 }, { 40, 16, 0x00ff00 }, { 56, 16, 0x00ff00 },
+                                { 72, 16, 0xffffff }, { 88, 16, 0x0000ff }, { 110, 16, CLEAR_COLOR } };
+    IDirect3DTexture9 *scratch = NULL, *a = NULL, *b = NULL;
+    DWORD keep[4];
+    HRESULT hr;
+    if (only && only != 117) return;
+    if (FAILED(hr = IDirect3DDevice9_CreateTexture(device, 8, 8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM, &scratch, NULL)) ||
+        FAILED(hr = IDirect3DDevice9_CreateTexture(device, 8, 8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &a, NULL)) ||
+        FAILED(hr = IDirect3DDevice9_CreateTexture(device, 8, 8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &b, NULL))) {
+        fail_hr("update_texture", "texture", hr);
+        goto done;
+    }
+    if (!paint8(scratch, 0, 8, 0xffff0000, 0) ||
+        FAILED(hr = IDirect3DDevice9_UpdateTexture(device, (IDirect3DBaseTexture9 *)scratch, (IDirect3DBaseTexture9 *)a)) ||
+        !paint8(scratch, 0, 8, 0xff00ff00, 0) ||
+        FAILED(hr = IDirect3DDevice9_UpdateTexture(device, (IDirect3DBaseTexture9 *)scratch, (IDirect3DBaseTexture9 *)b)) ||
+        !paint8(scratch, 0, 8, 0xff0000ff, 0)) {
+        fail_hr("update_texture", "update", hr);
+        goto done;
+    }
+    if (begin("update_texture")) {
+        quad8_states(keep, TRUE);
+        hr = quad8(a, 0);
+        if (SUCCEEDED(hr)) hr = quad8(b, 1);
+        if (SUCCEEDED(hr) && !paint8(scratch, 0, 4, 0xffffffff, 0)) hr = E_FAIL;
+        if (SUCCEEDED(hr)) hr = IDirect3DDevice9_UpdateTexture(device, (IDirect3DBaseTexture9 *)scratch, (IDirect3DBaseTexture9 *)a);
+        if (SUCCEEDED(hr)) hr = quad8(a, 2);
+        quad8_states(keep, FALSE);
+        if (FAILED(hr)) { fail_hr("update_texture", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("update_texture", s, 7);
+    }
+done:
+    if (b) IDirect3DTexture9_Release(b);
+    if (a) IDirect3DTexture9_Release(a);
+    if (scratch) IDirect3DTexture9_Release(scratch);
+}
+
+/* 118: a managed texture painted again between draws. Red, drawn; its right half painted green,
+ * drawn: red and green; all of it painted blue, drawn: blue. Each quad keeps the colours the
+ * texture had when it was drawn. (A repaint under D3DLOCK_NO_DIRTY_UPDATE is left out: a card
+ * goes on drawing the old picture, the reference rasterizer the new one.) */
+static void managed_update_case(int only)
+{
+    static const SAMPLE s[] = { { 8, 16, 0xff0000 }, { 24, 16, 0xff0000 }, { 40, 16, 0xff0000 }, { 56, 16, 0x00ff00 },
+                                { 72, 16, 0x0000ff }, { 88, 16, 0x0000ff }, { 110, 16, CLEAR_COLOR } };
+    IDirect3DTexture9 *m = NULL;
+    DWORD keep[4];
+    HRESULT hr;
+    if (only && only != 118) return;
+    if (FAILED(hr = IDirect3DDevice9_CreateTexture(device, 8, 8, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &m, NULL))) {
+        fail_hr("managed_update", "texture", hr);
+        return;
+    }
+    if (paint8(m, 0, 8, 0xffff0000, 0) && begin("managed_update")) {
+        quad8_states(keep, TRUE);
+        hr = quad8(m, 0);
+        if (SUCCEEDED(hr) && !paint8(m, 4, 8, 0xff00ff00, 0)) hr = E_FAIL;
+        if (SUCCEEDED(hr)) hr = quad8(m, 1);
+        if (SUCCEEDED(hr) && !paint8(m, 0, 8, 0xff0000ff, 0)) hr = E_FAIL;
+        if (SUCCEEDED(hr)) hr = quad8(m, 2);
+        quad8_states(keep, FALSE);
+        if (FAILED(hr)) { fail_hr("managed_update", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("managed_update", s, 7);
+    }
+    IDirect3DTexture9_Release(m);
+}
+
+/* 119: as 118 with a DXT1 texture, whose pictures travel as blocks of 4x4: two columns of two
+ * blocks, each block one colour. Red, drawn; the right column painted green, drawn; all painted
+ * blue, drawn. */
+static BOOL paint8_dxt1(IDirect3DTexture9 *t, int column0, int column1, WORD color)
+{
+    D3DLOCKED_RECT r;
+    RECT rc;
+    int x, y;
+    rc.left = column0 * 4; rc.top = 0; rc.right = column1 * 4; rc.bottom = 8;
+    if (FAILED(IDirect3DTexture9_LockRect(t, 0, &r, &rc, 0))) return FALSE;
+    for (y = 0; y < 2; ++y)
+        for (x = 0; x < column1 - column0; ++x) {
+            WORD *block = (WORD *)((BYTE *)r.pBits + y * r.Pitch + x * 8);
+            block[0] = block[1] = color;        /* both of the block's colours, and every texel the first */
+            block[2] = block[3] = 0;
+        }
+    IDirect3DTexture9_UnlockRect(t, 0);
+    return TRUE;
+}
+
+static void managed_update_dxt_case(int only)
+{
+    static const SAMPLE s[] = { { 8, 16, 0xff0000 }, { 24, 16, 0xff0000 }, { 40, 16, 0xff0000 }, { 56, 16, 0x00ff00 },
+                                { 72, 16, 0x0000ff }, { 88, 16, 0x0000ff }, { 110, 16, CLEAR_COLOR } };
+    IDirect3DTexture9 *m = NULL;
+    DWORD keep[4];
+    HRESULT hr;
+    if (only && only != 119) return;
+    if (FAILED(hr = IDirect3DDevice9_CreateTexture(device, 8, 8, 1, 0, D3DFMT_DXT1, D3DPOOL_MANAGED, &m, NULL))) {
+        printf("D9PIX managed_update_dxt texture not made hr=%08lx\n", (unsigned long)hr);
+        return;
+    }
+    if (paint8_dxt1(m, 0, 2, 0xf800) && begin("managed_update_dxt")) {
+        quad8_states(keep, TRUE);
+        hr = quad8(m, 0);
+        if (SUCCEEDED(hr) && !paint8_dxt1(m, 1, 2, 0x07e0)) hr = E_FAIL;
+        if (SUCCEEDED(hr)) hr = quad8(m, 1);
+        if (SUCCEEDED(hr) && !paint8_dxt1(m, 0, 2, 0x001f)) hr = E_FAIL;
+        if (SUCCEEDED(hr)) hr = quad8(m, 2);
+        quad8_states(keep, FALSE);
+        if (FAILED(hr)) { fail_hr("managed_update_dxt", "draw", hr); IDirect3DDevice9_EndScene(device); }
+        else check("managed_update_dxt", s, 7);
+    }
+    IDirect3DTexture9_Release(m);
+}
+
 /* 83: a ps_2_0 shader that reads samplers 9 and 15 (shader model 2 has sixteen; 3DMark05's third
  * game test draws its water with a ninth one): texld r0, t0, s9; texld r1, t0, s15;
  * add r0, r0, r1. A green texture on sampler 9 and a blue one on sampler 15 give cyan. */
@@ -3846,6 +4014,9 @@ int main(int argc, char **argv)
     luminance_case(only);
     mip_levels_case(only);
     stage_without_texture_case(only);
+    update_texture_case(only);
+    managed_update_case(only);
+    managed_update_dxt_case(only);
     lines_points_case(only);
     index32_case(only, caps.MaxVertexIndex > 0xffff);
     printf("D9PIX max_point_size=%d\n", (int)caps.MaxPointSize);
