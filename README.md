@@ -183,6 +183,52 @@ OpenGL, drawn by the host GPU. Its releases are tagged `win2k-vX.Y.Z`.
 
 Everything in detail, and how to install it: [docs/win2k/install.md](docs/win2k/install.md).
 
+## Windows 95, 98 and Me guests
+
+This branch also holds a display driver for x86 Windows 95 OSR2.5, Windows 98 Second Edition
+and Windows Me guests on the same kind of virtual GPU: the desktop, DirectDraw, Direct3D 7, 8
+and 9 and OpenGL, drawn by the host GPU. Its releases are tagged `win9x-vX.Y.Z`. Windows 98 SE
+is the guest it is developed and measured on.
+
+- **Works:** OpenGL (Mesa in the guest); Direct3D 7 with transform and lighting on the GPU;
+  Direct3D 8 and 9 with pixel shaders up to 2.0 and vertex shaders on the host GPU. 3DMark
+  2000, 3DMark 2001 SE and 3DMark03 run to the end on Windows 98 SE with every test drawing,
+  and the driver's own pixel tests match Microsoft's reference rasterizer.
+- **Set up:** switch DMA on for the guest's hard disk, one tick box in Device Manager
+  ([install guide](docs/win9x/display-driver.md#install)). Windows 9x leaves it off, and
+  Direct3D 9 programs on a small guest then take minutes to load.
+- **Measured** (3DMark03 3.1.3 at its defaults, 1024x768; Windows 98 SE guest with one
+  processor and 256 MB, 2026-11-27), frames a second for each scene on two hosts, next to a
+  GeForce 9600 GT passed through to a Windows XP guest:
+
+  | 3DMark03 scene | GeForce 9600 GT | Core i9-9900K, Intel UHD 630 | Core i7-1160G7, Intel Iris Xe |
+  |---|---:|---:|---:|
+  | Game test 1 | 974.0 | 289.0 | 279.6 |
+  | Game test 2 | 290.6 | 197.9 | 238.9 |
+  | Game test 3 | 194.9 | 176.2 | 163.0 |
+  | Game test 4 | 163.1 | 205.9 | 181.1 |
+  | CPU test 1 (640x480) | 462.7 | 189.2 | 142.2 |
+  | CPU test 2 (640x480) | 101.4 | 31.7 | 27.1 |
+  | 3DMarks | 33348 | 25698 | 25569 |
+
+  How these were checked, from the host: the guest's clock against the host's (within 1
+  percent in these scenes), the benchmark's frame counter against the driver's page flips
+  (within 0.3 percent), the GPU time the kernel counts for each frame, and a screenshot a
+  second with no repeats inside a test. The display gets the newest frame about 57 times a
+  second; the frames in between are rendered and not shown, as with vsync off.
+  [The whole check](docs/win9x/directdraw.md#the-result-checked-from-the-host-2026-11-27).
+- **Not yet:** speed where the guest's one processor is the limit, which is every scene above
+  (game test 1 and the CPU tests reach 27 to 41 percent of the card); shader model 3.0; a
+  Windows desktop over 8 MB of video memory (1600x1200 at 32 bits is the largest); Direct3D 8
+  and 9 on Windows 95 and Windows Me, which are not tested. Few games have been
+  run: seven demos of the time through OpenGL and Direct3D 7 (Quake III Arena, Unreal
+  Tournament, Half-Life: Uplink, Serious Sam, Expendable, Re-Volt, Tomb Raider: The Last
+  Revelation). Direct3D 8 and 9 have been run with the benchmarks above and the pixel tests
+  only, with no game yet. Most games of the time are untested.
+
+Everything in detail: [docs/win9x/display-driver.md](docs/win9x/display-driver.md) (install)
+and [docs/win9x/directdraw.md](docs/win9x/directdraw.md) (what was tested and measured).
+
 ## Getting started
 
 Mac OS X must come from your own copy; the rest is one download.

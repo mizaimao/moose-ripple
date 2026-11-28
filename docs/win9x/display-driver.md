@@ -173,11 +173,11 @@ the driver has).
 
 ### One package for Windows 95 OSR2.5, Windows 98 SE and Windows Me
 
-Use the [Windows 9x 0.6.0 release](https://github.com/mizaimao/moose-ripple/releases/tag/win9x-v0.6.0)
+Use the [Windows 9x 0.6.1 release](https://github.com/mizaimao/moose-ripple/releases/tag/win9x-v0.6.1)
 for Windows 95 OSR2.5, Windows 98 Second Edition and Windows Me. The ISO and
 ZIP contain one INF and the same four driver files for all three systems.
 Select the **moose-ripple virtio-vga** model. The installer reports version
-`0.6.0.0`. Since 0.6.0, Direct3D 8 and 9 are on by default
+`0.6.1.0`. Since 0.6.0, Direct3D 8 and 9 are on by default
 ([directdraw.md](directdraw.md#direct3d-8-through-its-own-interface-stage-1-2026-11-26-on-by-default-since-060)
 lists the registry values that turn them off). DirectDraw and Direct3D need DirectX 7 or later
 in the guest (below); 9.0c (December 2006) is the last that installs on 98 SE and Me.
