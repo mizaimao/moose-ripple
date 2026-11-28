@@ -55,6 +55,15 @@ memory or page flipping. On Windows 98 SE and Me, install DirectX 9.0c
 Internet Explorer 4 installation included with OSR2.5 also supplies
 MSVCRT.DLL for OpenGL. OpenGL itself needs no DirectX.
 
+Hard disk: switch DMA on
+
+Windows 95, 98 and Me leave DMA off for an IDE hard disk, and the VM
+then writes to its disk at under 1 MB a second. Programs that need more
+memory than the guest has (most Direct3D 9 programs on a guest of
+256 MB) then take minutes to load and stutter. In Control Panel >
+System > Device Manager > Disk drives, open the disk's Properties, tick
+DMA on the Settings tab and restart Windows.
+
 Full-screen Direct3D games
 
 By default, 3D rendering runs on the host and the finished frame is
